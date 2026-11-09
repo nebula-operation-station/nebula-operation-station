@@ -58,12 +58,15 @@ const (
 	maxListedSubjects = 16
 	// completeTimeout bounds one run complete. The store applies a
 	// complete in one transaction, so a complete that runs out of time
-	// applies nothing; the budget is sized for MaxCoveredPerRun subjects
-	// (about 5 s measured for 10000 subjects with one closure each, see
-	// vulnstore TestCompleteLargestRunIsAtomic) with ample headroom for
-	// subjects with many findings and slow disks. The complete is not
-	// cancelled when the client goes away, so a retry finds it saved.
-	completeTimeout = 2 * time.Minute
+	// applies nothing and the run stays open for a retry. The budget is
+	// sized for MaxCoveredPerRun subjects: about 5 s measured for 10000
+	// subjects with one closure each (vulnstore
+	// TestCompleteLargestRunIsAtomic), roughly 0.4 ms per open finding, so
+	// open findings in the order of MaxFindingsPerRun on the covered
+	// subjects fit with headroom for slow disks. The complete is not
+	// cancelled when the client goes away (the server write timeout is
+	// shorter), so a retry finds it saved.
+	completeTimeout = 5 * time.Minute
 )
 
 // VulnStore is the findings store (internal/vulnstore).

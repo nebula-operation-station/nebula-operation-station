@@ -149,6 +149,87 @@ func TestCompleteCancelledPartWayAppliesNothingAndRetryFinishes(t *testing.T) {
 	}
 }
 
+// cutCtx is a context that is cancelled on the cut-th call of Done. The
+// database layer calls Done for every statement, so a cut point picks a
+// place in the sequence of statements of one Complete; cut 0 only counts.
+type cutCtx struct {
+	context.Context
+	mu     sync.Mutex
+	calls  int
+	cut    int
+	done   chan struct{}
+	closed bool
+}
+
+func newCutCtx(cut int) *cutCtx {
+	return &cutCtx{Context: context.Background(), cut: cut, done: make(chan struct{})}
+}
+
+func (c *cutCtx) Done() <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	if c.cut > 0 && c.calls >= c.cut && !c.closed {
+		close(c.done)
+		c.closed = true
+	}
+	return c.done
+}
+
+func (c *cutCtx) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return context.Canceled
+	}
+	return nil
+}
+
+// Cancelled at any point of a Complete, including while closures are being
+// applied, nothing is applied; the retry matches an uninterrupted complete.
+func TestCompleteCancelledAtAnyPointAppliesNothing(t *testing.T) {
+	ref, _, _ := newCancelEnv(t, ClassUnconfirmed)
+	refRun, refKeys := atomicScenario(t, ref)
+	counter := newCutCtx(0)
+	want, err := ref.st.Complete(counter, refRun.ID)
+	if err != nil || want.ClosedUnconfirmed != 15 {
+		t.Fatalf("reference completion = %+v, %v", want, err)
+	}
+	wantStates := states(t, ref, refKeys)
+	total := counter.calls
+	if total < 50 {
+		t.Fatalf("only %d context checks in a complete; the cut points would not spread", total)
+	}
+
+	// Cut points from the start of planning to just before the commit; the
+	// later ones fall into the apply phase.
+	for _, pct := range []int{10, 50, 80, 90, 95, 99} {
+		t.Run(fmt.Sprintf("cut%d", pct), func(t *testing.T) {
+			e, _, _ := newCancelEnv(t, ClassUnconfirmed)
+			r, keys := atomicScenario(t, e)
+			before := states(t, e, keys)
+			_, err := e.st.Complete(newCutCtx(total*pct/100), r.ID)
+			if err == nil {
+				t.Fatalf("complete cut at %d%% of %d succeeded", pct, total)
+			}
+			t.Logf("cut at %d of %d: %v", total*pct/100, total, err)
+			if got := states(t, e, keys); !reflect.DeepEqual(got, before) {
+				t.Fatalf("cut complete changed findings:\n got %v\nwant %v", got, before)
+			}
+			if _, err := e.st.CompletionOf(e.ctx, r.ID, "hermes-vuln"); !errors.Is(err, ErrRunNotRunning) {
+				t.Fatalf("completion after cut: %v, want ErrRunNotRunning", err)
+			}
+			got := e.complete(t, r)
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("retried completion = %+v, want %+v", got, want)
+			}
+			if gotStates := states(t, e, keys); !reflect.DeepEqual(gotStates, wantStates) {
+				t.Fatalf("final states differ:\n got %v\nwant %v", gotStates, wantStates)
+			}
+		})
+	}
+}
+
 func TestCompletionSurvivesARestart(t *testing.T) {
 	e, _, db := newCancelEnv(t, ClassUnconfirmed)
 	r, _ := atomicScenario(t, e)
@@ -192,12 +273,12 @@ func largestRun(t *testing.T, e *env) (Run, []vulnfinding.Key) {
 		subjects[i], items[i] = hostSubj(h), item(t, h, cve(0))
 		keys[i] = items[i].Finding.Key
 	}
+	// The seed run opens the findings; it need not complete.
 	seedRun := e.start(t)
 	for b := 0; b < MaxCoveredPerRun/MaxCoveredPerBatch; b++ {
 		lo, hi := b*MaxCoveredPerBatch, (b+1)*MaxCoveredPerBatch
-		e.submit(t, seedRun, int64(b), subjects[lo:hi], items[lo:hi]...)
+		e.submit(t, seedRun, int64(b), nil, items[lo:hi]...)
 	}
-	e.complete(t, seedRun)
 	r := e.start(t)
 	for b := 0; b < MaxCoveredPerRun/MaxCoveredPerBatch; b++ {
 		lo, hi := b*MaxCoveredPerBatch, (b+1)*MaxCoveredPerBatch
