@@ -314,7 +314,7 @@ func TestGraphAccessorsReturnCopies(t *testing.T) {
 	}
 }
 
-// lab adds a small fixed lab to b in the given order permutation.
+// labInputs returns the nodes and edges of a small fixed lab.
 func labInputs() ([]Node, []Edge) {
 	nodes := []Node{
 		{ID: "host:exec", Kind: NodeHost, Label: "executor"},
@@ -409,13 +409,15 @@ func TestNodeCapTruncatesDeterministically(t *testing.T) {
 			t.Fatalf("node %s dropped; entries and managed hosts must be kept first", id)
 		}
 	}
+	// Kept: 2 entries, 2,505 hosts (odd IDs) and the 2,493 lowest unmanaged
+	// (even IDs n00000..n04984); the cut is exact.
 	for _, n := range g.Nodes() {
-		if n.Kind == NodeHost {
-			continue
+		if n.Kind == NodeUnmanaged && n.ID > "n04984" {
+			t.Fatalf("kept unmanaged %s beyond the cut n04984", n.ID)
 		}
-		if n.Kind == NodeUnmanaged && n.ID > "n05000" {
-			t.Fatalf("kept unmanaged %s although lower IDs exist", n.ID)
-		}
+	}
+	if _, ok := g.Node("n04984"); !ok {
+		t.Fatal("unmanaged n04984 at the cut was dropped")
 	}
 	if len(g.Edges()) != 1 {
 		t.Fatalf("edges = %d, want 1 (edge to dropped node removed)", len(g.Edges()))
