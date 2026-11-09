@@ -876,7 +876,11 @@ func TestImagePackagesObjectWalkAllocsIndependentOfCount(t *testing.T) {
 	}
 	a, b := allocs(small), allocs(large)
 	t.Logf("allocs: 8 results %.0f, 2048 results %.0f", a, b)
-	if b > a {
+	// The once-per-read regexp matches use sync.Pool, which drops items at
+	// random under the race detector, so a run may see a few extra
+	// allocations. Any allocation per object would add at least 2040.
+	const slack = 4
+	if b > a+slack {
 		t.Fatalf("allocations grow with the number of objects: %.0f for 8 results, %.0f for 2048", a, b)
 	}
 }
