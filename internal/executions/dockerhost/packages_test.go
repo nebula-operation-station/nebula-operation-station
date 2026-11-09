@@ -394,12 +394,12 @@ func TestImagePackagesDuplicatesCollapsed(t *testing.T) {
 	o := goodOpts()
 	p := trivyPkg{Name: "golang.org/x/net", Version: "v0.17.0"}
 	o.results = []trivyResult{
-		{Target: "os", Class: "os-pkgs", Type: "debian"},
+		{Target: "os", Class: "os-pkgs", Type: "debian", Packages: []trivyPkg{{Name: "libc6", Version: "2.36"}}},
 		{Target: "a", Class: "lang-pkgs", Type: "gobinary", Packages: []trivyPkg{p}},
 		{Target: "b", Class: "lang-pkgs", Type: "gobinary", Packages: []trivyPkg{p}},
 	}
 	got, _ := ParseImagePackages(pkgDigest, okRun(trivyJSON(t, o)))
-	if !got.Complete || len(got.Packages) != 1 {
+	if !got.Complete || len(got.Packages) != 2 {
 		t.Fatalf("got %+v", got)
 	}
 }
@@ -430,11 +430,13 @@ func TestImagePackagesDetectedOSWithoutOSResultIsPartial(t *testing.T) {
 	}
 }
 
-func TestImagePackagesEmptyOSResultIsComplete(t *testing.T) {
+// An os-pkgs result without any OS package does not show that the package
+// DB was read: known, empty, but never complete.
+func TestImagePackagesEmptyOSResultIsPartial(t *testing.T) {
 	o := goodOpts()
 	o.results = []trivyResult{{Target: "x", Class: "os-pkgs", Type: "debian", Packages: nil}}
 	got, _ := ParseImagePackages(pkgDigest, okRun(trivyJSON(t, o)))
-	if !got.Known || !got.Complete || got.Packages == nil || len(got.Packages) != 0 {
+	if !got.Known || got.Complete || got.Reason != ReasonOSPackagesMissing || got.Packages == nil || len(got.Packages) != 0 {
 		t.Fatalf("got %+v", got)
 	}
 }

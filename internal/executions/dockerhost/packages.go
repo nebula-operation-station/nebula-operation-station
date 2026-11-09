@@ -581,7 +581,9 @@ func (t *trivyDecoder) finishResult(r *resultState) bool {
 		}
 		return false
 	}
-	if isOS {
+	// Only an os-pkgs result with at least one valid package shows the OS
+	// package DB was read: a detected OS with no OS package is not complete.
+	if isOS && len(r.pending) > 0 {
 		t.osTypes[r.typ] = true
 	}
 	if r.dropped {
