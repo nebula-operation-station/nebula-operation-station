@@ -63,6 +63,10 @@
           <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-book-open"></use></svg>
           <span>Runbooks / Modules</span>
         </a>
+        {{if .VulnNav}}<a class="sidebar__item{{if eq .Active "vulnerabilities"}} sidebar__item--active{{end}}" href="/vulnerabilities"{{if .NavCollapsed}} title="Vulnerabilities"{{end}}{{if eq .Active "vulnerabilities"}} aria-current="page"{{end}}>
+          <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-search"></use></svg>
+          <span>Vulnerabilities</span>
+        </a>{{end}}
         <a class="sidebar__item{{if eq .Active "history"}} sidebar__item--active{{end}}" href="/history"{{if .NavCollapsed}} title="History"{{end}}{{if eq .Active "history"}} aria-current="page"{{end}}>
           <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-history"></use></svg>
           <span>History</span>

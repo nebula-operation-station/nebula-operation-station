@@ -205,6 +205,9 @@ type Options struct {
 	// cmd/nebula-server leaves it nil: the server role has no permission
 	// for ListContainerDefinitions (known gap, docs/implementation/m0.md).
 	ContainerDefinitions ContainerDefinitionLister
+	// Vuln serves the vulnerabilities pages (ADR 0011, VU-11; vuln.go).
+	// Nil hides them and the navigation item; the routes answer 404.
+	Vuln VulnFindings
 	// Log receives executor status errors (the page itself only shows
 	// "Executor unavailable"). Nil means slog.Default().
 	Log *slog.Logger
@@ -267,6 +270,9 @@ type Handler struct {
 	// containerDefinitions reads definition metadata; nil shows the
 	// definition status as unknown.
 	containerDefinitions ContainerDefinitionLister
+	// vuln and vulnPending serve the vulnerabilities pages (vuln*.go).
+	vuln        VulnFindings
+	vulnPending *vulnPendingTable
 }
 
 // New parses the embedded templates and builds a Handler.
@@ -354,6 +360,8 @@ func New(o Options) (*Handler, error) {
 		containerBatches:     o.ContainerBatches,
 		containerTagPolicy:   o.ContainerTagPolicy,
 		containerDefinitions: o.ContainerDefinitions,
+		vuln:                 o.Vuln,
+		vulnPending:          newVulnPendingTable(),
 		now:                  o.Now,
 
 		guestPowerProposals: newGuestPowerProposals(),
@@ -448,6 +456,11 @@ var pageFiles = map[string]string{
 	"guest_action":        "guest_action.html",
 	"guest_snapshots":     "guest_snapshots.html",
 	"container_update":    "container_update.html",
+	"vuln":                "vuln.html",
+	"vuln_cve":            "vuln_cve.html",
+	"vuln_subject":        "vuln_subject.html",
+	"vuln_finding":        "vuln_finding.html",
+	"vuln_reset":          "vuln_reset.html",
 }
 
 // pagePartials are extra template files a page uses.
@@ -462,6 +475,12 @@ var pagePartials = map[string][]string{
 	"deploy_wizard":       {"deploy_tabs.html"},
 	"deploy_runs":         {"deploy_tabs.html"},
 	"deploy_run":          {"deploy_tabs.html"},
+	// The vulnerabilities pages share banners, labels and tables.
+	"vuln":         {"vuln_parts.html"},
+	"vuln_cve":     {"vuln_parts.html"},
+	"vuln_subject": {"vuln_parts.html"},
+	"vuln_finding": {"vuln_parts.html"},
+	"vuln_reset":   {"vuln_parts.html"},
 }
 
 // Handler returns the UI's http.Handler without the security middleware
@@ -568,6 +587,14 @@ func (h *Handler) Handler() http.Handler {
 	// Global search (M9-3): read-only, quick actions are links.
 	mux.HandleFunc("GET /search", h.handleSearch)
 	mux.HandleFunc("GET /history", h.handleHistory)
+	// Vulnerabilities (ADR 0011, VU-11; vuln.go, vuln_decide.go).
+	mux.HandleFunc("GET /vulnerabilities", h.handleVulnList)
+	mux.HandleFunc("GET /vulnerabilities/cve/{id}", h.handleVulnCVE)
+	mux.HandleFunc("GET /vulnerabilities/subject/{kind}/{id}", h.handleVulnSubject)
+	mux.HandleFunc("GET /vulnerabilities/f/{key}", h.handleVulnFinding)
+	mux.HandleFunc("GET /vulnerabilities/feeds/{source}/reset", h.handleVulnMarkReset)
+	mux.HandleFunc("POST /vulnerabilities/decide/begin", h.handleVulnDecideBegin)
+	mux.HandleFunc("POST /vulnerabilities/decide/commit", h.handleVulnDecideCommit)
 	mux.HandleFunc("GET /settings", h.handleSettingsPage)
 	mux.HandleFunc("POST /settings/appearance", h.handleSettingsAppearance)
 	mux.HandleFunc("POST /ui/nav", h.handleNav)
@@ -762,6 +789,10 @@ type pageData struct {
 	PVEDetail *pveDetailData
 	// PVENav shows the PVE navigation item (Options.PVE is set).
 	PVENav bool
+	// VulnNav shows the Vulnerabilities navigation item (Options.Vuln).
+	VulnNav bool
+	// Vuln is the data of the vulnerabilities pages.
+	Vuln *vulnPageData
 	// BuiltinTrust is the layout's built-in trust banner (ADR 0007
 	// E17); nil hides it. render fills it from the cached executor
 	// verdict (builtinTrustCache).
@@ -925,6 +956,7 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, data pageData) 
 	}
 	data.NavCollapsed = navStateFromRequest(r) == navCollapsed
 	data.PVENav = h.pve != nil
+	data.VulnNav = h.vuln != nil
 	data.DeployEnabled = h.deploy != nil && h.pve != nil && h.pveRemotes != nil
 	// "Deploy here" (ADR 0008 section 6) on the chart's nodes of active
 	// remotes; read-only and blocked remotes get no shortcut.

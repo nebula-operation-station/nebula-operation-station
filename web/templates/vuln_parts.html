@@ -1,0 +1,77 @@
+{{/* Shared parts of the vulnerabilities pages (ADR 0011, VU-11). Every
+     value from Hermes or a feed is plain text: html/template escapes it,
+     nothing here marks it safe, and the only links are NOS-built paths. */}}
+{{define "vuln_banners"}}
+{{with .Vuln}}
+{{if .Unavailable}}<p class="status status--error vuln-unavailable">Vulnerability data unavailable. Nothing here means "no findings".</p>{{end}}
+{{range .Banners}}
+<div class="trust-banner vuln-banner" role="status">
+  <p class="trust-banner__headline">{{.Text}}</p>
+  {{if .ResetURL}}<p class="trust-banner__detail"><a href="{{.ResetURL}}">Review the high-water mark</a></p>{{end}}
+</div>
+{{end}}
+{{if .Truncated}}<p class="status status--warning vuln-truncated">More findings matched than this page shows; narrow the filter.</p>{{end}}
+{{end}}
+{{end}}
+
+{{define "vuln_labels"}}{{range .}}<span class="badge {{.Class}} vuln-label">{{.Text}}</span> {{end}}{{end}}
+
+{{define "vuln_findings_table"}}
+<div class="table-wrap">
+<table class="inventory vuln-findings" aria-label="Findings">
+  <thead><tr><th>Vulnerability</th><th>Subject</th><th>Component</th><th>Fix</th><th>Tier</th><th>State</th><th>Labels</th></tr></thead>
+  <tbody>
+  {{range .}}
+  <tr class="vuln-finding">
+    <td class="mono"><a href="{{.URL}}">{{.VulnID}}</a>{{if .KEV}} <span class="badge badge--critical">KEV</span>{{end}}</td>
+    <td><a href="{{.SubjectURL}}">{{.SubjectName}}</a> <span class="hint">{{.SubjectKind}}</span></td>
+    <td class="mono">{{.Component}} {{.Version}}</td>
+    <td class="mono">{{.Fix}}</td>
+    <td><span class="badge {{.Tier.Class}}">{{.Tier.Text}}</span></td>
+    <td><span class="badge {{.State.Class}}">{{.State.Text}}</span></td>
+    <td>{{template "vuln_labels" .Labels}}</td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{end}}
+
+{{define "vuln_filters"}}
+{{$f := .Filter}}
+<form class="filters vuln-filters" method="get">
+  {{if eq $f.View "subject"}}<input type="hidden" name="view" value="subject">{{end}}
+  {{if $f.Digest}}<input type="hidden" name="digest" value="{{$f.Digest}}">{{end}}
+  <label>Tier
+    <select name="tier">
+      <option value=""{{if eq $f.Tier ""}} selected{{end}}>any</option>
+      <option value="critical"{{if eq $f.Tier "critical"}} selected{{end}}>critical</option>
+      <option value="high"{{if eq $f.Tier "high"}} selected{{end}}>high</option>
+      <option value="medium"{{if eq $f.Tier "medium"}} selected{{end}}>medium</option>
+      <option value="low"{{if eq $f.Tier "low"}} selected{{end}}>low</option>
+      <option value="unknown"{{if eq $f.Tier "unknown"}} selected{{end}}>unknown</option>
+    </select>
+  </label>
+  <label>State
+    <select name="state">
+      <option value="open"{{if eq $f.State "open"}} selected{{end}}>open</option>
+      <option value="accepted_risk"{{if eq $f.State "accepted_risk"}} selected{{end}}>accepted risk</option>
+      <option value="false_positive"{{if eq $f.State "false_positive"}} selected{{end}}>false positive</option>
+      <option value="fixed"{{if eq $f.State "fixed"}} selected{{end}}>fixed</option>
+      <option value="unconfirmed"{{if eq $f.State "unconfirmed"}} selected{{end}}>closed by Hermes, not confirmed by NOS</option>
+      <option value="all"{{if eq $f.State "all"}} selected{{end}}>all</option>
+    </select>
+  </label>
+  <label>Subject kind
+    <select name="kind">
+      <option value=""{{if eq $f.Kind ""}} selected{{end}}>any</option>
+      <option value="host"{{if eq $f.Kind "host"}} selected{{end}}>host</option>
+      <option value="image"{{if eq $f.Kind "image"}} selected{{end}}>image</option>
+      <option value="device"{{if eq $f.Kind "device"}} selected{{end}}>device</option>
+    </select>
+  </label>
+  <label class="choice"><input type="checkbox" name="kev" value="yes"{{if eq $f.KEV "yes"}} checked{{end}}> KEV only</label>
+  <label class="choice"><input type="checkbox" name="stale" value="stale"{{if eq $f.Stale "stale"}} checked{{end}}> stale, not assessed or feed issue only</label>
+  <button type="submit" class="button button--small">Filter</button>
+</form>
+{{end}}

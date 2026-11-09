@@ -1,0 +1,114 @@
+{{define "content"}}
+<h1>{{.Title}}</h1>
+{{template "vuln_banners" .}}
+{{with .Vuln}}
+{{$maint := .Maintainer}}
+{{with .Finding}}
+{{$f := .}}
+<p><a href="{{.SubjectURL}}">{{.SubjectName}}</a>{{if .VulnURL}} · <a href="{{.VulnURL}}">all subjects with {{.VulnID}}</a>{{end}}</p>
+<section class="panel vuln-finding-detail" aria-label="Finding">
+  <header>
+    <span class="badge {{.State.Class}} vuln-state">{{.State.Text}}</span>
+    <span class="badge {{.Tier.Class}}">tier {{.Tier.Text}}</span>
+    {{template "vuln_labels" .Labels}}
+  </header>
+  <dl class="schedule-meta">
+    <dt>Vulnerability</dt><dd class="mono">{{.VulnID}}{{if .Aliases}} ({{.Aliases}}){{end}}</dd>
+    <dt>Subject</dt><dd>{{.SubjectName}} <span class="hint mono">{{.SubjectKind}} {{.SubjectID}}</span></dd>
+    <dt>Ecosystem</dt><dd class="mono">{{.Ecosystem}}</dd>
+    <dt>Component</dt><dd class="mono">{{.Component}} {{.Version}}</dd>
+    <dt>Fix</dt><dd class="mono">{{.Fix}}</dd>
+    <dt>CVSS</dt><dd class="mono">{{.CVSS}}</dd>
+    <dt>KEV</dt><dd>{{if .KEV}}{{.KEV}}{{else}}not listed{{end}}</dd>
+    <dt>EPSS</dt><dd class="mono">{{if .EPSS}}{{.EPSS}}{{else}}unknown{{end}}</dd>
+    <dt>Basis sources</dt><dd class="mono">{{range .Sources}}{{.}}<br>{{end}}</dd>
+    <dt>Matcher</dt><dd class="mono">{{.Matcher}}</dd>
+    {{if .Human}}<dt>Decision</dt><dd>{{range .Human}}<span class="vuln-human">{{.}}</span><br>{{end}}</dd>{{end}}
+  </dl>
+  <h2>Hermes assessment (LLM, unverified)</h2>
+  {{if .Hints}}<p class="hint">Hints from Hermes, not states: {{range $i, $h := .Hints}}{{if $i}}, {{end}}{{$h}}{{end}}</p>{{end}}
+  {{if .Assessment}}<pre class="vuln-assessment">{{.Assessment}}</pre>{{else}}<p class="hint">No assessment text (none sent, or removed by retention).</p>{{end}}
+</section>
+
+{{with $.Vuln.Holds}}
+<h2>Held closures</h2>
+<div class="table-wrap">
+<table class="inventory vuln-holds" aria-label="Held closures">
+  <thead><tr><th>Run</th><th>Reason</th><th>Held since</th><th>NOS version</th><th>Episode fixed version</th><th></th></tr></thead>
+  <tbody>
+  {{range .}}
+  <tr class="vuln-hold">
+    <td class="mono">{{.RunID}} (#{{.RunSeq}})</td>
+    <td>{{.Reason}}</td>
+    <td>{{.Created}}</td>
+    <td class="mono">{{.NOSVersion}}</td>
+    <td class="mono">{{.Fixed}}</td>
+    <td>{{if .Contradicted}}<span class="badge badge--critical vuln-contradicted">NOS inventory contradicts: still below the fixed version</span>{{end}}</td>
+  </tr>
+  {{if $maint}}
+  <tr><td colspan="6">
+    {{if not .Contradicted}}
+    <form method="post" action="/vulnerabilities/decide/begin" class="form vuln-decision" data-kind="confirm_hold">
+      <input type="hidden" name="key" value="{{$f.Key}}">
+      <input type="hidden" name="run_id" value="{{.RunID}}">
+      <label>Reason for confirming the closure (required, at most 1 KiB)
+        <textarea name="reason" maxlength="1024" required></textarea>
+      </label>
+      <button type="submit" class="button button--small">Confirm closure with security key</button>
+    </form>
+    {{else}}
+    <p class="hint">A contradicted closure can never become fixed: discard the hold, or set false positive or accepted risk below.</p>
+    {{end}}
+    <form method="post" action="/vulnerabilities/decide/begin" class="form vuln-decision" data-kind="discard_hold">
+      <input type="hidden" name="key" value="{{$f.Key}}">
+      <input type="hidden" name="run_id" value="{{.RunID}}">
+      <button type="submit" class="button button--small button--danger">Discard hold with security key</button>
+    </form>
+  </td></tr>
+  {{end}}
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{end}}
+
+{{if and $maint .HumanForms}}
+<h2>Maintainer decision</h2>
+<p class="hint">Each decision needs a fresh touch of your security key. It is bound to this finding and to the version NOS sees now, and is written to the audit log.</p>
+<section class="panel" aria-label="Accept risk">
+  <h3>Accept risk</h3>
+  <form method="post" action="/vulnerabilities/decide/begin" class="form vuln-decision" data-kind="accept_risk">
+    <input type="hidden" name="key" value="{{.Key}}">
+    <label>Approver (required)
+      <input type="text" name="approver" maxlength="128" required pattern="[A-Za-z0-9][A-Za-z0-9@._:\-]{0,127}">
+    </label>
+    <label>Expires (required, at most 365 days)
+      <input type="date" name="expires" value="{{$.Vuln.DefaultExpiry}}" min="{{$.Vuln.MinExpiry}}" max="{{$.Vuln.MaxExpiry}}" required>
+    </label>
+    <label>Reason (required, at most 1 KiB)
+      <textarea name="reason" maxlength="1024" required></textarea>
+    </label>
+    <button type="submit" class="button button--small">Accept risk with security key</button>
+  </form>
+</section>
+<section class="panel" aria-label="False positive">
+  <h3>False positive</h3>
+  <form method="post" action="/vulnerabilities/decide/begin" class="form vuln-decision" data-kind="false_positive">
+    <input type="hidden" name="key" value="{{.Key}}">
+    <label>Category (required)
+      <select name="category" required>
+        {{range $.Vuln.Categories}}<option value="{{.}}">{{.}}</option>{{end}}
+      </select>
+    </label>
+    <label>Reason (required, at most 1 KiB)
+      <textarea name="reason" maxlength="1024" required></textarea>
+    </label>
+    <button type="submit" class="button button--small">Mark false positive with security key</button>
+  </form>
+</section>
+{{end}}
+{{end}}
+{{if .Maintainer}}<p id="message" class="message" role="status" aria-live="polite"></p>
+<noscript><p class="hint">Decisions need JavaScript and a security key.</p></noscript>{{end}}
+{{end}}
+{{end}}

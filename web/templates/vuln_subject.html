@@ -1,0 +1,26 @@
+{{define "content"}}
+<h1>{{.Title}}</h1>
+<p><a href="/vulnerabilities?view=subject">All subjects</a></p>
+{{template "vuln_banners" .}}
+{{with .Vuln}}
+{{if not .Unavailable}}
+{{with .Subject}}
+<section class="panel vuln-subject-summary" aria-label="Assessment">
+  <dl class="schedule-meta">
+    <dt>Subject</dt><dd>{{.Name}} <span class="hint mono">{{.Kind}} {{.ID}}</span></dd>
+    <dt>Status</dt><dd><span class="badge {{.Status.Class}} vuln-status">{{.Status.Text}}</span></dd>
+    <dt>Run age</dt><dd>{{template "vuln_labels" .Labels}}{{if not .Labels}}<span class="badge badge--unknown">see status</span>{{end}}</dd>
+    <dt>Open</dt><dd class="mono">{{.Open}}</dd>
+    <dt>Closed by Hermes, not confirmed by NOS</dt><dd class="mono">{{.Unconfirmed}}</dd>
+  </dl>
+</section>
+{{end}}
+{{template "vuln_filters" .}}
+{{if .Findings}}
+{{template "vuln_findings_table" .Findings}}
+{{else}}
+<p class="hint">No finding of this subject matches the filter.</p>
+{{end}}
+{{end}}
+{{end}}
+{{end}}
