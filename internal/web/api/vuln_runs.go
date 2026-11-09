@@ -85,9 +85,13 @@ func sha256Hex(b []byte) string {
 
 func (h *VulnHandler) startRun(ctx context.Context, w http.ResponseWriter, r *http.Request, t *token) {
 	body, err := readBody(r, maxStartBytes)
-	if err != nil {
-		h.log.Warn("audit", "kind", "vuln_run_rejected", "token", t.name, "reason", "body", "bytes", len(body))
+	if errors.Is(err, errBodyTooLarge) {
+		h.log.Warn("audit", "kind", "vuln_run_rejected", "token", t.name, "reason", "body too large", "bytes", len(body))
 		writeError(w, http.StatusRequestEntityTooLarge, "run start body too large")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "could not read the body")
 		return
 	}
 	var req startJSON

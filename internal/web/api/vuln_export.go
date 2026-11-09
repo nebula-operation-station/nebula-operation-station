@@ -330,7 +330,7 @@ func exportComponent(c VulnComponent) (exportComponentJSON, bool) {
 		if !exportPackageRe.MatchString(b.Name) || !exportVersionRe.MatchString(b.Version) || (b.Arch != "" && !exportArchRe.MatchString(b.Arch)) {
 			return exportComponentJSON{}, false
 		}
-		out.Binaries = append(out.Binaries, exportBinaryJSON{Name: b.Name, Version: b.Version, Arch: b.Arch})
+		out.Binaries = append(out.Binaries, exportBinaryJSON(b))
 	}
 	return out, true
 }
