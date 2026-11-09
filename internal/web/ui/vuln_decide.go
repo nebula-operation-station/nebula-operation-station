@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"regexp"
 	"sync"
@@ -229,7 +230,7 @@ func validateVulnDecision(in vulnDecisionInput, now time.Time) (VulnDecision, er
 // whole (encoding/json would silently replace invalid bytes) and decodes
 // it with unknown fields rejected.
 func readVulnJSON(w http.ResponseWriter, r *http.Request, v any) bool {
-	if r.Header.Get("Content-Type") != "application/json" {
+	if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
 		writeJSONError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
 		return false
 	}

@@ -166,16 +166,21 @@ func vulnPost(t *testing.T, h http.Handler, path, body string) (int, map[string]
 
 func TestVulnPagesHiddenWithoutBackend(t *testing.T) {
 	h := newTestHandler(t, ui.Options{PublicOrigin: leaseOrigin}).Handler()
-	if body := getBody(t, h, "/dashboard"); strings.Contains(body, `href="/vulnerabilities"`) {
-		t.Error("navigation shows Vulnerabilities without a backend")
+	// The navigation links the page; without a backend it says nothing
+	// is assessed, never an empty clean list.
+	body := getBody(t, h, "/vulnerabilities")
+	if !strings.Contains(body, "not set up on this server: nothing is assessed") || strings.Contains(body, "badge--ok") || strings.Contains(body, "No finding matches") {
+		t.Error("page without a backend does not say it is not set up")
 	}
-	for _, p := range []string{"/vulnerabilities", "/vulnerabilities/cve/CVE-2024-0001", "/vulnerabilities/f/" + vulnKey(1).String()} {
+	for _, p := range []string{"/vulnerabilities/cve/CVE-2024-0001", "/vulnerabilities/f/" + vulnKey(1).String(), "/vulnerabilities/subject/host/web1", "/vulnerabilities/feeds/kev/reset"} {
 		if code, _ := vulnGet(t, h, p); code != http.StatusNotFound {
 			t.Errorf("GET %s = %d, want 404", p, code)
 		}
 	}
-	if code, _ := vulnPost(t, h, "/vulnerabilities/decide/begin", `{}`); code != http.StatusNotFound {
-		t.Errorf("POST begin = %d, want 404", code)
+	for _, p := range []string{"/vulnerabilities/decide/begin", "/vulnerabilities/decide/commit"} {
+		if code, _ := vulnPost(t, h, p, `{}`); code != http.StatusNotFound {
+			t.Errorf("POST %s = %d, want 404", p, code)
+		}
 	}
 }
 

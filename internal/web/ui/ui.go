@@ -206,7 +206,8 @@ type Options struct {
 	// for ListContainerDefinitions (known gap, docs/implementation/m0.md).
 	ContainerDefinitions ContainerDefinitionLister
 	// Vuln serves the vulnerabilities pages (ADR 0011, VU-11; vuln.go).
-	// Nil hides them and the navigation item; the routes answer 404.
+	// Nil makes /vulnerabilities say "not set up" and the other
+	// vulnerabilities routes answer 404.
 	Vuln VulnFindings
 	// Log receives executor status errors (the page itself only shows
 	// "Executor unavailable"). Nil means slog.Default().
@@ -789,8 +790,6 @@ type pageData struct {
 	PVEDetail *pveDetailData
 	// PVENav shows the PVE navigation item (Options.PVE is set).
 	PVENav bool
-	// VulnNav shows the Vulnerabilities navigation item (Options.Vuln).
-	VulnNav bool
 	// Vuln is the data of the vulnerabilities pages.
 	Vuln *vulnPageData
 	// BuiltinTrust is the layout's built-in trust banner (ADR 0007
@@ -956,7 +955,6 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, data pageData) 
 	}
 	data.NavCollapsed = navStateFromRequest(r) == navCollapsed
 	data.PVENav = h.pve != nil
-	data.VulnNav = h.vuln != nil
 	data.DeployEnabled = h.deploy != nil && h.pve != nil && h.pveRemotes != nil
 	// "Deploy here" (ADR 0008 section 6) on the chart's nodes of active
 	// remotes; read-only and blocked remotes get no shortcut.

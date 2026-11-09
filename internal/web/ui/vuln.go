@@ -652,6 +652,8 @@ type vulnPageData struct {
 	Reset *vulnResetView
 	// Unavailable: the backend failed; the page says so (never "0").
 	Unavailable bool
+	// NotConfigured: no backend is wired (Options.Vuln is nil).
+	NotConfigured bool
 }
 
 // vulnHoldView is a held closure as the finding page shows it.
@@ -790,7 +792,10 @@ func (h *Handler) renderVuln(w http.ResponseWriter, r *http.Request, title, cont
 
 // handleVulnList serves GET /vulnerabilities.
 func (h *Handler) handleVulnList(w http.ResponseWriter, r *http.Request) {
-	if !h.vulnEnabled(w, r) {
+	if h.vuln == nil {
+		// The navigation always links here; say plainly that nothing is
+		// assessed rather than show an empty (clean-looking) list.
+		h.render(w, r, pageData{Title: "Vulnerabilities", Active: "vulnerabilities", Content: "vuln", Vuln: &vulnPageData{NotConfigured: true}})
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), vulnCallTimeout)
