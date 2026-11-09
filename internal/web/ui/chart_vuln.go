@@ -35,6 +35,8 @@ const (
 	// host-local, partial Trivy observation.
 	observerHermes = "Hermes"
 	observerTrivy  = "host Trivy, partial"
+	// chartListIncomplete marks the image lines of a truncated read.
+	chartListIncomplete = "list incomplete"
 	// chartImageListURL lists every image subject in every state.
 	chartImageListURL = "/vulnerabilities?view=subject&kind=image&state=all"
 )
@@ -188,9 +190,15 @@ func (x *chartVulnIndex) hostLines(hostID string) []chartLine {
 }
 
 // imageLine is the Hermes line of one image subject in the CVE place;
-// display names the image.
+// display names the image. On a truncated read it says the list is
+// incomplete.
 func (x *chartVulnIndex) imageLine(s vulnstore.Subject, display string) chartLine {
 	text, state, title := x.badge(s)
+	if x.truncated && !strings.Contains(text, labelIncomplete) {
+		// The badge already says "at least" for counts; a stale run's
+		// label does not, and either way the read missed findings.
+		text += " · " + chartListIncomplete
+	}
 	return chartLine{Kind: LineCVE, Label: "CVE", Text: observerHermes + " · " + display + " · " + text, Title: title, State: state, URL: vulnSubjectURL(s)}
 }
 
@@ -210,7 +218,10 @@ func (x *chartVulnIndex) freshImage(hostID, digest string) (vulnstore.Subject, b
 // imageLines returns the Hermes lines of the host's image subjects other
 // than exclude (the image shown in the P1-30 place), at most
 // maxChartImageLines plus one line summing up the rest with their worst
-// state.
+// state. On a truncated read the image subjects of the host may be
+// incomplete: each line (imageLine) and the summing line say so, and a
+// host with any Hermes image line here gets the summing line even with
+// nothing hidden.
 func (x *chartVulnIndex) imageLines(hostID, exclude string) []chartLine {
 	if x == nil || x.failed {
 		return nil
@@ -229,8 +240,19 @@ func (x *chartVulnIndex) imageLines(hostID, exclude string) []chartLine {
 		worst = worstState(worst, st)
 		more++
 	}
-	if more > 0 {
-		lines = append(lines, chartLine{Kind: LineCVE, Label: "CVE", Text: observerHermes + " · " + strconv.Itoa(more) + " more images",
+	text := ""
+	switch {
+	case x.truncated && more > 0:
+		text = "at least " + strconv.Itoa(more) + " more images · " + chartListIncomplete
+		worst = worstState(worst, StateUnknown)
+	case x.truncated && len(lines) > 0:
+		text = "image " + chartListIncomplete
+		worst = StateUnknown
+	case more > 0:
+		text = strconv.Itoa(more) + " more images"
+	}
+	if text != "" {
+		lines = append(lines, chartLine{Kind: LineCVE, Label: "CVE", Text: observerHermes + " · " + text,
 			Title: "observer " + observerHermes, State: worst, URL: chartImageListURL})
 	}
 	return lines

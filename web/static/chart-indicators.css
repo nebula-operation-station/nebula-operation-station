@@ -275,11 +275,12 @@
 /*
  * Vulnerability badges (ADR 0011 D8, VU-12): the Hermes line of a host or
  * linked guest box and the Hermes/Trivy CVE line link to the
- * vulnerabilities pages. The link keeps the line colour; the state class
- * above colours the label (unknown/stale grey, never green).
+ * vulnerabilities pages. The link is the line text itself (it also carries
+ * .chart__line-text), so it keeps the text colour and the unknown/stale
+ * grey italic; the state class above colours the label, never green for
+ * unknown or stale.
  */
 .chart__line-link {
-  color: inherit;
   text-decoration: underline dotted;
   text-underline-offset: 2px;
 }

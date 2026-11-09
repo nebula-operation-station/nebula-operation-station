@@ -263,7 +263,7 @@
   {{range .}}
   <span class="chart__line chart__line--{{.Kind}} chart__line--{{.State}}"{{if .Title}} title="{{.Title}}"{{end}}>
     <span class="chart__line-name">{{.Label}}</span>
-    <span class="chart__line-text">{{.Text}}</span>
+    {{if .URL}}<a class="chart__line-text chart__line-link" href="{{.URL}}">{{.Text}}</a>{{else}}<span class="chart__line-text">{{.Text}}</span>{{end}}
     {{if .HasMeter}}<meter class="chart__ind-meter chart__ind-meter--{{.State}}" min="0" max="100" low="70" high="90" optimum="0" value="{{.MeterValue}}">{{.MeterValue}}%</meter>{{end}}
   </span>
   {{end}}
