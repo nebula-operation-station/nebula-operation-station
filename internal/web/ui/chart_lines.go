@@ -55,6 +55,9 @@ type chartLine struct {
 	// HasMeter shows a mini bar with MeterValue (0-100).
 	HasMeter   bool
 	MeterValue int
+	// URL is an optional NOS-built link for the line (the
+	// vulnerabilities page of a Hermes line, VU-12); "" for none.
+	URL string
 }
 
 // chartResults are the stored action results the extra lines read, fetched
@@ -66,12 +69,15 @@ type chartResults struct {
 	stats map[string]executions.LastResultRow
 	vulns map[string]executions.LastResultRow
 	svc   map[string]executions.LastResultRow
+	// hermes is the finding store view (VU-12); nil without a
+	// vulnerabilities backend, which hides the Hermes lines.
+	hermes *chartVulnIndex
 }
 
 // loadChartResults reads the extra-line sources. A nil operations service
 // or a read error leaves the map nil, which hides the lines.
 func (h *Handler) loadChartResults(ctx context.Context) chartResults {
-	var r chartResults
+	r := chartResults{hermes: h.loadChartVulns(ctx)}
 	if h.operations == nil {
 		return r
 	}
@@ -285,14 +291,15 @@ func shortImageRef(ref string) string {
 // is "scan unknown" — never zero CVEs; an old result is "stale". Critical
 // CVEs are critical, high ones a warning. Severity counts alone do not
 // imply exploitability; the details (platform, database age, coverage)
-// are in the title.
-func cveLine(r *executions.LastResultRow, now time.Time, staleAfter time.Duration) []chartLine {
+// are in the title. It also returns the scanned image reference ("" when
+// none), for the Hermes source selection of the CVE place (VU-12).
+func cveLine(r *executions.LastResultRow, now time.Time, staleAfter time.Duration) ([]chartLine, string) {
 	if r == nil || len(r.Result) == 0 {
-		return nil
+		return nil, ""
 	}
 	v, err := dockerhost.ParseImageVulns(r.Result)
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 	l := chartLine{Kind: LineCVE, Label: trivyLocalChartLabel}
 	img := "image"
@@ -340,7 +347,7 @@ func cveLine(r *executions.LastResultRow, now time.Time, staleAfter time.Duratio
 		}
 		l.Title = strings.Join(details, " · ")
 	}
-	return []chartLine{l}
+	return []chartLine{l}, v.Image
 }
 
 // latencyLine builds the service-check line of a host box from its stored
@@ -516,22 +523,26 @@ func worstClass(s IndicatorState) string {
 }
 
 // hostLines builds the extra lines of one managed host box, in display
-// order: GPUs, image CVEs, service check.
+// order: GPUs, image CVEs (P1-30 or Hermes, VU-12), Hermes host findings,
+// service check.
 func hostLines(res chartResults, hostID string, now time.Time) []chartLine {
 	var lines []chartLine
 	lines = append(lines, gpuLines(rowFor(res.pci, hostID), rowFor(res.gpu, hostID), now, indicatorStaleAfter)...)
-	lines = append(lines, cveLine(rowFor(res.vulns, hostID), now, indicatorStaleAfter)...)
+	lines = append(lines, cvePlaceLines(res, hostID, now)...)
+	lines = append(lines, res.hermes.hostLines(hostID)...)
 	lines = append(lines, latencyLine(rowFor(res.svc, hostID), now, indicatorStaleAfter)...)
 	return lines
 }
 
 // guestLines builds the extra lines of one PVE guest box. A guest linked
 // to a managed host (reviewed link) shows that host's GPU lines: the
-// guest's own driver telemetry, matched by its own PCI view.
+// guest's own driver telemetry, matched by its own PCI view, and that
+// host's Hermes findings line (VU-12).
 func guestLines(res chartResults, g pveGuestView, now time.Time) []chartLine {
 	var lines []chartLine
 	if g.HostID != "" {
 		lines = append(lines, gpuLines(rowFor(res.pci, g.HostID), rowFor(res.gpu, g.HostID), now, indicatorStaleAfter)...)
+		lines = append(lines, res.hermes.hostLines(g.HostID)...)
 	}
 	return lines
 }
