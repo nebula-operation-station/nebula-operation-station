@@ -264,7 +264,7 @@ func TestMalformedOutputIsRejected(t *testing.T) {
 		"backspace":       "abc\b\b\bxyz\r\n",
 		"NUL":             "a\x00b\r\n",
 		"invalid UTF-8":   "\xff\xfe\r\n",
-		"bidi override":   "abc‮def\r\n",
+		"bidi override":   "abc" + string(rune(0x202e)) + "def\r\n",
 	} {
 		f := newFakeCBS()
 		f.replies["show version"] = out + synthPrompt
