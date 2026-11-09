@@ -21,6 +21,7 @@ package attackpath
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 )
@@ -36,12 +37,14 @@ const (
 	// MaxInputNodes bounds the distinct nodes a Builder holds before Build
 	// applies MaxNodes; it bounds memory on hostile or runaway input. At
 	// the limit the node kept last is evicted (rank-aware, see Builder).
-	// The builder also remembers up to this many dropped nodes.
 	MaxInputNodes = 4 * MaxNodes
-	// MaxInputEdges bounds the distinct edges a Builder holds before Build
-	// applies MaxEdges, with the same rank-aware eviction. The builder also
-	// remembers up to this many dropped edge keys.
-	MaxInputEdges = 4 * MaxEdges
+	// MaxDroppedNodes bounds how many nodes dropped by the input limit a
+	// Builder remembers (the best-ranked ones) to count each drop once.
+	MaxDroppedNodes = MaxInputNodes
+	// MaxInputEdgesPerKind bounds the distinct edges of one kind a Builder
+	// holds before Build applies MaxEdges, with the same rank-aware
+	// eviction. Edges held beyond what Build keeps are the remembered drops.
+	MaxInputEdgesPerKind = 2 * MaxEdges
 	// MaxIDBytes bounds a node ID.
 	MaxIDBytes = 128
 	// MaxLabelBytes bounds a node label.
@@ -56,12 +59,14 @@ const (
 
 // Sentinel errors returned (wrapped) by the Builder.
 var (
-	// ErrInvalidNode reports a node with a bad ID, kind or label.
+	// ErrInvalidNode reports a node with a bad ID, kind or label, or an ID
+	// outside the namespace of its kind (see NodeKind.IDPrefix).
 	ErrInvalidNode = errors.New("invalid node")
 	// ErrReservedNode reports an attempt to add a synthetic entry node or
 	// to reuse an entry ID.
 	ErrReservedNode = errors.New("reserved node")
-	// ErrConflict reports a node ID already present with other contents.
+	// ErrConflict reports a node ID offered again with another label. The
+	// builder keeps the label that sorts first, whichever came first.
 	ErrConflict = errors.New("conflicting node")
 	// ErrInvalidEdge reports an edge whose kind, endpoints, protocol, port
 	// or escape reason break the rules of its kind.
@@ -138,6 +143,28 @@ var keepRank = [...]uint8{
 	NodeGuest:         4,
 	NodeContainer:     5,
 	NodeUnmanaged:     6,
+}
+
+// idPrefixes binds the node ID namespace to the kind: a node's ID must start
+// with the prefix of its kind. An ID therefore names exactly one kind, and
+// no input, hostile or not, can claim the ID of a node of another kind: an
+// unmanaged endpoint can never take a managed host's ID.
+var idPrefixes = [...]string{
+	NodeHost:          "host:",
+	NodePVENode:       "pve:",
+	NodeGuest:         "guest:",
+	NodeContainer:     "ctr:",
+	NodeNetworkDevice: "dev:",
+	NodeUnmanaged:     "unk:",
+}
+
+// IDPrefix returns the prefix every node ID of kind k must start with, or ""
+// for the entry kinds and invalid kinds, which the Builder does not accept.
+func (k NodeKind) IDPrefix() string {
+	if k.valid() {
+		return idPrefixes[k]
+	}
+	return ""
 }
 
 // Basis says what an edge rests on.
@@ -295,7 +322,8 @@ func (r EscapeReason) names() []string {
 // Node is one vertex of the graph.
 type Node struct {
 	// ID is stable and unique within a graph, e.g. "host:<uuid>". Printable
-	// ASCII without spaces, at most MaxIDBytes.
+	// ASCII without spaces, at most MaxIDBytes, starting with
+	// Kind.IDPrefix() and longer than it.
 	ID string
 	// Kind classifies the node.
 	Kind NodeKind
@@ -382,6 +410,9 @@ func validateNode(n Node) error {
 	}
 	if !n.Kind.valid() {
 		return fmt.Errorf("node %s kind: %w", n.ID, ErrInvalidNode)
+	}
+	if p := n.Kind.IDPrefix(); !strings.HasPrefix(n.ID, p) || len(n.ID) == len(p) {
+		return fmt.Errorf("node %s id namespace of kind %s: %w", n.ID, n.Kind, ErrInvalidNode)
 	}
 	if !validLabel(n.Label) {
 		return fmt.Errorf("node %s label: %w", n.ID, ErrInvalidNode)
