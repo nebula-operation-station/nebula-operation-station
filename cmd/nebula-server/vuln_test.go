@@ -5,12 +5,16 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -20,6 +24,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/auditlog"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executorclient"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
@@ -28,6 +33,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnnotify"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
 
@@ -104,6 +110,7 @@ func (i vtInventory) VulnSnapshot(_ context.Context, id string) (api.VulnSnapsho
 }
 
 type vtEnv struct {
+	db    *sql.DB
 	svc   *vulnService
 	sink  *vtSink
 	clk   *vtClock
@@ -134,7 +141,7 @@ func newVTEnv(t *testing.T) *vtEnv {
 	}
 	// Mounted like run does: the vuln prefix goes to the agent API.
 	readOnly := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "read-only api", http.StatusTeapot) })
-	return &vtEnv{svc: svc, sink: sink, clk: clk, api: api.Mount(readOnly, vh), audit: auditlog.New(db, false)}
+	return &vtEnv{db: db, svc: svc, sink: sink, clk: clk, api: api.Mount(readOnly, vh), audit: auditlog.New(db, false)}
 }
 
 func (e *vtEnv) do(t *testing.T, method, path, tok, remote string, body any) *httptest.ResponseRecorder {
@@ -408,13 +415,44 @@ func TestVulnSweepAbortsExpiredRun(t *testing.T) {
 	}
 }
 
+// reasons returns the reasons of the delivered events of kind.
+func (s *vtSink) reasons(kind string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []string
+	for _, e := range s.events {
+		if e.Kind == kind {
+			out = append(out, e.Reason)
+		}
+	}
+	return out
+}
+
+// TestVulnNotifyNeverSeenSourcesRaiseNothing: an install where no run ever
+// named a source (vulnerability management unused) gets no feed_stale,
+// however often the tick runs.
+func TestVulnNotifyNeverSeenSourcesRaiseNothing(t *testing.T) {
+	e := newVTEnv(t)
+	for range 3 {
+		e.svc.notifyTick(context.Background())
+		e.clk.Add(30 * 24 * time.Hour)
+	}
+	if got := e.sink.reasons(vulnnotify.KindFeedStale); len(got) != 0 || e.svc.notifier.Pending() != 0 {
+		t.Fatalf("never-seen sources raised %v (pending %d)", got, e.svc.notifier.Pending())
+	}
+}
+
 func TestVulnNotifyTickRaisesFeedStaleAndShutdownFlushRetries(t *testing.T) {
 	e := newVTEnv(t)
-	// No run named any source: every listed source is undated, so stale.
+	// The run names debian-tracker, kev and osv (dated one hour ago); past
+	// their 72 h maximum age those three are stale, the six sources no run
+	// named are not yet seen.
+	e.startAndSubmit(t, vtRecord("CVE-2026-0001", false))
+	e.clk.Add(72 * time.Hour)
 	e.sink.setFailing(true)
 	e.svc.notifyTick(context.Background())
-	if e.svc.notifier.Pending() == 0 {
-		t.Fatal("undelivered feed_stale alerts were not queued")
+	if n := e.svc.notifier.Pending(); n != 3 {
+		t.Fatalf("%d undelivered feed_stale alerts queued, want 3", n)
 	}
 	e.sink.setFailing(false)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -422,12 +460,183 @@ func TestVulnNotifyTickRaisesFeedStaleAndShutdownFlushRetries(t *testing.T) {
 	go func() { e.svc.runNotify(ctx, time.Hour); close(done) }()
 	cancel()
 	<-done
-	ev := e.sink.waitKind(t, vulnnotify.KindFeedStale)
-	if !strings.Contains(ev.Reason, "undated") {
-		t.Fatalf("feed_stale reason = %q", ev.Reason)
+	got := e.sink.reasons(vulnnotify.KindFeedStale)
+	if len(got) != 3 {
+		t.Fatalf("feed_stale after the shutdown flush = %v, want debian-tracker, kev and osv", got)
+	}
+	for _, r := range got {
+		if !strings.Contains(r, "since ") || strings.Contains(r, "nvd") {
+			t.Fatalf("feed_stale reason = %q", r)
+		}
 	}
 	if n := e.svc.notifier.Pending(); n != 0 {
 		t.Fatalf("after the shutdown flush %d alerts still pending", n)
+	}
+}
+
+// TestVulnNotifyStateSurvivesRestart: a restarted service (same database,
+// same state file) does not repeat the feed_stale alerts of episodes still
+// running, but alerts a source that turned stale while it was down.
+func TestVulnNotifyStateSurvivesRestart(t *testing.T) {
+	e := newVTEnv(t)
+	e.svc.statePath = filepath.Join(t.TempDir(), vulnNotifyStateFile)
+	e.startAndSubmit(t, vtRecord("CVE-2026-0001", false))
+	e.clk.Add(72 * time.Hour)
+	e.svc.notifyTick(context.Background())
+	if got := e.sink.reasons(vulnnotify.KindFeedStale); len(got) != 3 {
+		t.Fatalf("first process sent %v, want 3 feed_stale", got)
+	}
+	if fi, err := os.Stat(e.svc.statePath); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("state file: %v, %v; want mode 0600", fi, err)
+	}
+
+	restart := func() (*vulnService, *vtSink) {
+		t.Helper()
+		sink := newVTSink()
+		svc, err := newVulnService(e.db, sink, slog.New(slog.NewTextHandler(io.Discard, nil)), e.clk.Now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		svc.statePath = e.svc.statePath
+		svc.loadNotifyState(context.Background())
+		return svc, sink
+	}
+	svc, sink := restart()
+	svc.notifyTick(context.Background())
+	if got := sink.reasons(vulnnotify.KindFeedStale); len(got) != 0 {
+		t.Fatalf("restart repeated %v", got)
+	}
+
+	// A malformed or oversized state file is ignored: alerts may repeat,
+	// nothing fails.
+	for _, bad := range [][]byte{[]byte("{not json"), bytes.Repeat([]byte(" "), maxVulnNotifyState+1)} {
+		if err := os.WriteFile(e.svc.statePath, bad, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		svc, sink = restart()
+		svc.notifyTick(context.Background())
+		if got := sink.reasons(vulnnotify.KindFeedStale); len(got) != 3 {
+			t.Fatalf("with a bad state file sent %v, want the 3 alerts again", got)
+		}
+	}
+}
+
+func TestVulnExportRefusalIsAudited(t *testing.T) {
+	e := newVTEnv(t)
+	if rec := e.export(t, false, "json"); rec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin export = %d, want 403", rec.Code)
+	}
+	es, err := e.audit.List(context.Background(), 0, 10, vulnAuditExportRefused)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(es) != 1 || es[0].Attrs["reason"] != "not_admin" || es[0].Attrs["format"] != "json" {
+		t.Fatalf("refused export audit = %+v, want one not_admin entry", es)
+	}
+}
+
+// vtExecutor is a fake executor served over gRPC: unlocked, and the
+// privileged session it opens (and reports) ends at expiry.
+type vtExecutor struct {
+	pb.UnimplementedExecutorServiceServer
+	expiry int64
+}
+
+func (x vtExecutor) GetStatus(context.Context, *pb.GetStatusRequest) (*pb.GetStatusResponse, error) {
+	return &pb.GetStatusResponse{Unlocked: true, PrivilegedSessionActive: true, PrivilegedSessionExpiryUnix: x.expiry}, nil
+}
+
+func (x vtExecutor) CheckCredential(context.Context, *pb.CheckCredentialRequest) (*pb.CheckCredentialResponse, error) {
+	return &pb.CheckCredentialResponse{Registered: true}, nil
+}
+
+func (x vtExecutor) CompletePrivilegedSession(context.Context, *pb.CompletePrivilegedSessionRequest) (*pb.CompletePrivilegedSessionResponse, error) {
+	return &pb.CompletePrivilegedSessionResponse{SessionExpiryUnix: x.expiry}, nil
+}
+
+// serveVTExecutor serves a vtExecutor on a Unix socket in a temporary
+// directory and returns the socket path.
+func serveVTExecutor(t *testing.T) string {
+	t.Helper()
+	// Short path: Unix socket paths are limited to about 100 bytes.
+	dir, err := os.MkdirTemp("", "nos-vx-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sock := filepath.Join(dir, "e.sock")
+	lis, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := grpc.NewServer()
+	pb.RegisterExecutorServiceServer(srv, vtExecutor{expiry: time.Now().Add(time.Hour).Unix()})
+	go srv.Serve(lis) //nolint:errcheck
+	t.Cleanup(srv.Stop)
+	return sock
+}
+
+// TestVulnAdminGrantsTheHolderOfThePrivilegedSession: through the real
+// login chain and executor client, vulnAdmin grants the web session that
+// opened the executor's privileged session, and refuses another signed-in
+// user and the holder before it opened the session.
+func TestVulnAdminGrantsTheHolderOfThePrivilegedSession(t *testing.T) {
+	u, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := executorclient.New(context.Background(), executorclient.Options{SocketPath: serveVTExecutor(t), ExecutorUser: u.Username})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	sessions := auth.NewStore(db, nil)
+	login, err := auth.New(auth.Options{Executor: c, Sessions: sessions, Log: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	isAdmin := vulnAdmin(c)
+	probe := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isAdmin(r.Context()) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+	})
+	h := login.Wrap(probe)
+	alice, _, err := sessions.Create(context.Background(), "cred-alice", "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob, _, err := sessions.Create(context.Background(), "cred-bob", "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	do := func(method, path, token, body string) int {
+		t.Helper()
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.AddCookie(&http.Cookie{Name: auth.CookieName, Value: token})
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if got := do(http.MethodGet, "/probe", alice, ""); got != http.StatusForbidden {
+		t.Fatalf("before the privileged session: %d, want 403", got)
+	}
+	if got := do(http.MethodPost, "/privileged/finish", alice, `{"assertion":{"id":"k"}}`); got != http.StatusOK {
+		t.Fatalf("privileged finish: %d", got)
+	}
+	if got := do(http.MethodGet, "/probe", alice, ""); got != http.StatusNoContent {
+		t.Fatalf("holder of the privileged session: %d, want granted (204)", got)
+	}
+	if got := do(http.MethodGet, "/probe", bob, ""); got != http.StatusForbidden {
+		t.Fatalf("other signed-in user: %d, want 403", got)
 	}
 }
 

@@ -9,15 +9,21 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
@@ -62,6 +68,13 @@ const (
 	vulnExportTimeout = 30 * time.Second
 	// vulnStatusTimeout bounds the executor status read of the admin check.
 	vulnStatusTimeout = 5 * time.Second
+	// vulnNotifyStateFile (in the data directory) keeps the delivered
+	// staleness alerts across restarts, so a restart does not repeat them.
+	vulnNotifyStateFile = "vuln-notify-state.json"
+	// maxVulnNotifyState bounds reading that file.
+	maxVulnNotifyState = 64 << 10
+	// vulnAuditExportRefused is the audit kind of a refused export.
+	vulnAuditExportRefused = "vuln.export_refused"
 )
 
 // vulnSources is NOS's fixed feed source list (ADR 0011 D4, D5): it ships
@@ -158,8 +171,20 @@ type vulnService struct {
 	notifier *vulnnotify.Notifier
 	log      *slog.Logger
 	events   chan func(context.Context)
+	// statePath is the file keeping the delivered staleness alerts
+	// (vulnNotifyStateFile); empty keeps them in memory only.
+	statePath string
+	// savedState is the last state written to statePath (runNotify only).
+	savedState []byte
+	// alertMu guards alertQueued: the runs with a run-alert read queued,
+	// so a run's batches queue one read, not one per batch.
+	alertMu     sync.Mutex
+	alertQueued map[string]bool
 	// swept, when set (tests only), is called after every sweep.
 	swept func(vulnstore.PruneResult, error)
+	// ticked, when set (tests only), is called after every notification
+	// tick.
+	ticked func()
 }
 
 // newVulnService opens the findings store on db (server.db) and the
@@ -176,16 +201,25 @@ func newVulnService(db *sql.DB, sink vulnnotify.Sink, log *slog.Logger, now func
 	if err != nil {
 		return nil, fmt.Errorf("vulnerability notifications: %w", err)
 	}
-	return &vulnService{store: st, notifier: n, log: log, events: make(chan func(context.Context), vulnEventQueue)}, nil
+	return &vulnService{store: st, notifier: n, log: log, events: make(chan func(context.Context), vulnEventQueue),
+		alertQueued: map[string]bool{}}, nil
 }
 
 // enqueue hands a notification event to runEvents without blocking the
 // API request that produced it.
 func (v *vulnService) enqueue(kind string, f func(context.Context)) {
+	v.enqueueOr(kind, f, nil)
+}
+
+// enqueueOr is enqueue that calls dropped (when set) if the queue is full.
+func (v *vulnService) enqueueOr(kind string, f func(context.Context), dropped func()) {
 	select {
 	case v.events <- f:
 	default:
 		v.log.Warn("vulnerability notification queue full, event dropped", "event", kind)
+		if dropped != nil {
+			dropped()
+		}
 	}
 }
 
@@ -205,14 +239,49 @@ func (v *vulnService) runEvents(ctx context.Context) {
 }
 
 // runAlerts raises vuln.kev_new and vuln.critical_new for the open KEV or
-// critical findings the run wrote.
+// critical findings the run wrote, read maxVulnAlertScan at a time in key
+// order so none past the first page is missed (a run holds at most
+// vulnstore.MaxListFindings findings; the notifier de-duplicates and
+// rate-limits).
 func (v *vulnService) runAlerts(ctx context.Context, runID string) {
-	fs, err := v.store.RunAlertFindings(ctx, runID, maxVulnAlertScan)
-	if err != nil {
-		v.log.Error("vulnerability alerts: read run findings", "error", err)
+	var after *vulnfinding.Key
+	for read := 0; read < vulnstore.MaxListFindings; {
+		fs, err := v.store.RunAlertFindingsAfter(ctx, runID, after, maxVulnAlertScan)
+		if err != nil {
+			v.log.Error("vulnerability alerts: read run findings", "error", err)
+			return
+		}
+		v.notifier.Findings(ctx, fs)
+		if len(fs) < maxVulnAlertScan {
+			return
+		}
+		read += len(fs)
+		k := fs[len(fs)-1].Key
+		after = &k
+	}
+}
+
+// queueRunAlerts queues one runAlerts read for the run unless one is
+// already queued: the queued read runs after the batch that asked for it
+// committed, so it sees that batch's findings too.
+func (v *vulnService) queueRunAlerts(runID string) {
+	v.alertMu.Lock()
+	if v.alertQueued[runID] {
+		v.alertMu.Unlock()
 		return
 	}
-	v.notifier.Findings(ctx, fs)
+	v.alertQueued[runID] = true
+	v.alertMu.Unlock()
+	v.enqueueOr("batch", func(ctx context.Context) {
+		v.alertMu.Lock()
+		delete(v.alertQueued, runID)
+		v.alertMu.Unlock()
+		v.runAlerts(ctx, runID)
+	}, func() {
+		v.alertMu.Lock()
+		delete(v.alertQueued, runID)
+		v.alertMu.Unlock()
+	})
 }
 
 // checkHermes raises vuln.hermes_stale when no run completed within the
@@ -226,35 +295,142 @@ func (v *vulnService) checkHermes(ctx context.Context) {
 	v.notifier.Hermes(ctx, last)
 }
 
-// checkFeeds raises vuln.feed_stale for listed sources past their maximum
+// feedStatuses is the notifier's view of the listed sources. A source no
+// run ever named has never reported: it is "not yet seen" (the pages say
+// so), not a feed that stopped, so it raises no vuln.feed_stale. An
+// install that never uses vulnerability management therefore gets none.
+func (v *vulnService) feedStatuses(ctx context.Context) ([]vulnnotify.FeedStatus, error) {
+	st, err := v.store.FeedStatuses(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]vulnnotify.FeedStatus, len(st))
+	for i, s := range st {
+		out[i] = vulnnotify.FeedStatus{SourceID: s.SourceID, Stale: s.Stale && s.Seen, Since: s.StaleSince}
+	}
+	return out, nil
+}
+
+// checkFeeds raises vuln.feed_stale for seen sources past their maximum
 // age (and ends the episode of sources fresh again).
 func (v *vulnService) checkFeeds(ctx context.Context) {
-	st, err := v.store.FeedStatuses(ctx)
+	in, err := v.feedStatuses(ctx)
 	if err != nil {
 		v.log.Error("vulnerability notifications: feed status", "error", err)
 		return
-	}
-	in := make([]vulnnotify.FeedStatus, len(st))
-	for i, s := range st {
-		in[i] = vulnnotify.FeedStatus{SourceID: s.SourceID, Stale: s.Stale, Since: s.StaleSince}
 	}
 	v.notifier.Feeds(ctx, in)
 }
 
 // notifyTick is one bounded notification round: feed and Hermes
-// staleness, then Flush (digest and retries, at most MaxPerHour messages).
+// staleness, then Flush (digest and retries, at most MaxPerHour messages),
+// then the delivered staleness state is saved.
 func (v *vulnService) notifyTick(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(ctx, vulnNotifyTimeout)
 	defer cancel()
 	v.checkFeeds(ctx)
 	v.checkHermes(ctx)
 	v.notifier.Flush(ctx)
+	v.saveNotifyState()
 }
 
-// runNotify runs notifyTick every interval and a last Flush on shutdown,
-// with its own short deadline, so the digest and queued retries are tried
-// once more.
+// vulnNotifyState is the on-disk form of vulnnotify.Delivered.
+type vulnNotifyState struct {
+	FeedStale  map[string]time.Time `json:"feed_stale"`
+	HermesMark time.Time            `json:"hermes_mark"`
+}
+
+// loadNotifyState hands the delivered staleness state of the previous
+// process to the notifier. A missing file is a first start; a file that is
+// too large or malformed is ignored (logged): at worst an alert repeats.
+func (v *vulnService) loadNotifyState(ctx context.Context) {
+	if v.statePath == "" {
+		return
+	}
+	f, err := os.Open(v.statePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	if err != nil {
+		v.log.Error("vulnerability notifications: read state", "error", err)
+		return
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxVulnNotifyState+1))
+	f.Close()
+	if err != nil || len(data) > maxVulnNotifyState {
+		v.log.Error("vulnerability notifications: state unreadable or too large, ignored", "error", err, "bytes", len(data))
+		return
+	}
+	var st vulnNotifyState
+	if err := json.Unmarshal(data, &st); err != nil {
+		v.log.Error("vulnerability notifications: state malformed, ignored", "error", err)
+		return
+	}
+	cur, err := v.feedStatuses(ctx)
+	if err != nil {
+		v.log.Error("vulnerability notifications: feed status", "error", err)
+		return
+	}
+	v.notifier.Restore(vulnnotify.Delivered{FeedStale: st.FeedStale, HermesMark: st.HermesMark}, cur)
+	v.savedState = data
+}
+
+// saveNotifyState writes the delivered staleness state when it changed,
+// through a temporary file and a rename (0600, the data directory is the
+// server's own).
+func (v *vulnService) saveNotifyState() {
+	if v.statePath == "" {
+		return
+	}
+	d := v.notifier.Delivered()
+	data, err := json.Marshal(vulnNotifyState{FeedStale: d.FeedStale, HermesMark: d.HermesMark})
+	if err != nil {
+		v.log.Error("vulnerability notifications: encode state", "error", err)
+		return
+	}
+	if bytes.Equal(data, v.savedState) {
+		return
+	}
+	if err := writeFileAtomic(v.statePath, data); err != nil {
+		v.log.Error("vulnerability notifications: save state", "error", err)
+		return
+	}
+	v.savedState = data
+}
+
+// writeFileAtomic replaces path with data (mode 0600) through a temporary
+// file in the same directory.
+func writeFileAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
+	if err != nil {
+		return fmt.Errorf("create temporary file: %w", err)
+	}
+	name := tmp.Name()
+	defer os.Remove(name) // after a successful rename it no longer exists
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write %s: %w", name, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync %s: %w", name, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close %s: %w", name, err)
+	}
+	if err := os.Rename(name, path); err != nil {
+		return fmt.Errorf("rename to %s: %w", path, err)
+	}
+	return nil
+}
+
+// runNotify restores the delivered staleness state, runs notifyTick every
+// interval and a last Flush on shutdown, with its own short deadline, so
+// the digest and queued retries are tried once more.
 func (v *vulnService) runNotify(ctx context.Context, interval time.Duration) {
+	lctx, cancel := context.WithTimeout(ctx, vulnNotifyTimeout)
+	v.loadNotifyState(lctx)
+	cancel()
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -263,9 +439,13 @@ func (v *vulnService) runNotify(ctx context.Context, interval time.Duration) {
 			fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), vulnShutdownFlushTimeout)
 			v.notifier.Flush(fctx)
 			cancel()
+			v.saveNotifyState()
 			return
 		case <-t.C:
 			v.notifyTick(ctx)
+			if v.ticked != nil {
+				v.ticked()
+			}
 		}
 	}
 }
@@ -322,7 +502,7 @@ func (s vulnAPIStore) StartRun(ctx context.Context, req vulnstore.StartRequest) 
 func (s vulnAPIStore) SubmitBatch(ctx context.Context, runID string, b vulnstore.Batch) (vulnstore.BatchResult, error) {
 	res, err := s.v.store.SubmitBatch(ctx, runID, b)
 	if err == nil && !res.Duplicate {
-		s.v.enqueue("batch", func(ctx context.Context) { s.v.runAlerts(ctx, runID) })
+		s.v.queueRunAlerts(runID)
 	}
 	return res, err
 }
@@ -449,12 +629,14 @@ func (p vulnPages) VulnFindings(ctx context.Context, q ui.VulnQuery) (ui.VulnPag
 		subjects = append(subjects, s)
 	}
 	sort.Slice(subjects, func(i, j int) bool { return subjects[i].String() < subjects[j].String() })
+	// One batched read (rows are bounded by ui.MaxVulnRows, below
+	// vulnstore.MaxSubjectStatuses, plus the queried subject).
+	sts, err := p.v.store.SubjectStatuses(ctx, subjects)
+	if err != nil {
+		return ui.VulnPage{}, err
+	}
 	for _, s := range subjects {
-		st, err := p.subject(ctx, s)
-		if err != nil {
-			return ui.VulnPage{}, err
-		}
-		page.Subjects = append(page.Subjects, st)
+		page.Subjects = append(page.Subjects, ui.VulnSubjectStatus{Subject: s, LastComplete: sts[s].LastComplete})
 	}
 	if page.Feeds, err = p.feeds(ctx); err != nil {
 		return ui.VulnPage{}, err
@@ -518,8 +700,11 @@ const vulnExportPath = "/vulnerabilities/export"
 
 // vulnExport serves GET /vulnerabilities/export?format=csv|json: admin
 // only, audited (vulnnotify.Export writes the audit entry before the
-// first byte), streamed row by row, CSV cells formula-prefixed and no
-// assessment text.
+// first byte; a refused export is audited as vulnAuditExportRefused), CSV
+// cells formula-prefixed and no assessment text. The findings are read
+// into memory first, at most vulnnotify.MaxExportFindings (the audit entry
+// names their count), and then written out row by row; a larger store is
+// refused rather than exported in part.
 type vulnExport struct {
 	v     *vulnService
 	admin func(ctx context.Context) bool
@@ -560,7 +745,7 @@ func (e vulnExport) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !e.admin(r.Context()) {
-		e.log.Warn("audit", "kind", "vuln_export_refused", "user", user, "reason", "not_admin")
+		e.refused(r.Context(), user, format, "not_admin")
 		http.Error(w, "only an admin with an open privileged session can export findings", http.StatusForbidden)
 		return
 	}
@@ -573,7 +758,7 @@ func (e vulnExport) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if trunc {
-		e.log.Warn("audit", "kind", "vuln_export_refused", "user", user, "reason", "too_many_findings")
+		e.refused(r.Context(), user, format, "too_many_findings")
 		http.Error(w, "more findings than one export may hold", http.StatusRequestEntityTooLarge)
 		return
 	}
@@ -587,6 +772,16 @@ func (e vulnExport) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !lw.started {
 			http.Error(w, "export failed", http.StatusInternalServerError)
 		}
+	}
+}
+
+// refused writes a refused export to the audit log (and the log, also
+// when the audit write fails). user comes from the session, format is one
+// of the two known formats, reason is fixed text.
+func (e vulnExport) refused(ctx context.Context, user, format, reason string) {
+	e.log.Warn("vulnerability export refused", "user", user, "format", format, "reason", reason)
+	if err := e.audit.Append(ctx, vulnAuditExportRefused, map[string]string{"user": user, "format": format, "reason": reason}); err != nil {
+		e.log.Error("vulnerability export refused: audit", "error", err)
 	}
 }
 

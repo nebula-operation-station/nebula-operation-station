@@ -43,6 +43,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/version"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnnotify"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
@@ -117,6 +118,23 @@ func main() {
 // It returns the configuration error before opening anything else, and
 // nil after a clean shutdown.
 func run(ctx context.Context, args []string, stderr io.Writer) error {
+	return runServer(ctx, args, stderr, vulnHooks{})
+}
+
+// vulnHooks lets tests observe and speed up the vulnerability wiring of
+// runServer; the zero value is production.
+type vulnHooks struct {
+	// sweepInterval and notifyInterval replace vulnSweepInterval and
+	// vulnNotifyInterval when positive.
+	sweepInterval, notifyInterval time.Duration
+	// sink replaces the notify providers when set.
+	sink vulnnotify.Sink
+	// started is called with the service before its loops start.
+	started func(v *vulnService, notifying bool)
+}
+
+// runServer is run with the vulnerability test hooks.
+func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHooks) error {
 	fs := flag.NewFlagSet("nebula-server", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	var (
@@ -401,17 +419,39 @@ func run(ctx context.Context, args []string, stderr io.Writer) error {
 	bg.Go(func() { imports.run(connCtx) })
 
 	// Vulnerability management (ADR 0011, ticket vu14w): the findings
-	// store on server.db, its sweeps (ResumeCompleting at startup, then
-	// Prune periodically) and the D9 notifications through the notify
-	// providers (run events, staleness ticks, Flush, last Flush on
-	// shutdown).
-	vuln, err := newVulnService(db, notifier, log, nil)
+	// store on server.db and its sweeps (ResumeCompleting at startup, then
+	// Prune periodically) always, so stored findings keep their retention.
+	// The D9 notifications through the notify providers (run events,
+	// staleness ticks, Flush, last Flush on shutdown) run only when
+	// vulnerability management is in use (the API enabled with a vuln
+	// token): an install without Hermes gets no vulnerability alerts. The
+	// delivered staleness alerts survive restarts in the data directory.
+	var vulnSink vulnnotify.Sink = notifier
+	if vh.sink != nil {
+		vulnSink = vh.sink
+	}
+	vuln, err := newVulnService(db, vulnSink, log, nil)
 	if err != nil {
 		return err
 	}
-	bg.Go(func() { vuln.runSweeps(connCtx, vulnSweepInterval) })
-	bg.Go(func() { vuln.runEvents(connCtx) })
-	bg.Go(func() { vuln.runNotify(connCtx, vulnNotifyInterval) })
+	vuln.statePath = filepath.Join(cfg.DataDir, vulnNotifyStateFile)
+	_, hasVulnToken := cfg.API.VulnToken()
+	vulnNotifying := cfg.API.Enabled && hasVulnToken
+	sweepEvery, notifyEvery := vulnSweepInterval, vulnNotifyInterval
+	if vh.sweepInterval > 0 {
+		sweepEvery = vh.sweepInterval
+	}
+	if vh.notifyInterval > 0 {
+		notifyEvery = vh.notifyInterval
+	}
+	if vh.started != nil {
+		vh.started(vuln, vulnNotifying)
+	}
+	bg.Go(func() { vuln.runSweeps(connCtx, sweepEvery) })
+	if vulnNotifying {
+		bg.Go(func() { vuln.runEvents(connCtx) })
+		bg.Go(func() { vuln.runNotify(connCtx, notifyEvery) })
+	}
 	isAdmin := vulnAdmin(exec)
 
 	h, err := ui.New(withBatchPlanner(ui.Options{
