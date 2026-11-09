@@ -334,7 +334,7 @@ func TestImagePackagesInvalidEntriesDropped(t *testing.T) {
 		{Name: "x", Version: "1", Epoch: maxImagePkgEpoch + 1},
 		{Name: "x", Version: "1", SrcName: "s", SrcVersion: "1", SrcEpoch: -3},
 		{Name: "x", Version: "1", Release: "bad release"},
-		{Name: "x", Version: "1", SrcVersion: "1"},                // source version without source name
+		{Name: "x", Version: "1", SrcVersion: "1"},               // source version without source name
 		{Name: "x", Version: "1", SrcName: "s", SrcRelease: "1"}, // source release without source version
 	}
 	for i, p := range bad {
