@@ -468,6 +468,11 @@ var Builtin = []Action{
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 10 * time.Minute, ReadOnly: true, Script: imageVulns, Params: imageParam, Retry: RetrySafe,
 	},
 	{
+		ID: "image.packages", Version: "1.0.0", Title: "Image packages",
+		Description: "Optional package list of one local image by digest via the host's own Trivy (offline, no vulnerability scanner; no install, pull or database refresh). Only ecosystem, name, version and source package per entry, the image OS and its digest references leave the host. Without Trivy the packages are unknown, never empty. Read-only.",
+		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 10 * time.Minute, ReadOnly: true, Script: imagePackages, Params: imageParam, Retry: RetrySafe,
+	},
+	{
 		ID: "docker.compose_update", Version: "2.0.0", Title: "Update Compose project",
 		Description: "Batch member only, as a durable job: recreates exactly the frozen update binding of one Compose project. Prechecks the bound containers, configuration and source digests, the NOS override and the applied configuration; resolves each new tag against the bound digests; pulls by digest only (no registry login); keeps the old image as nos-retained; then up -d --no-deps for the frozen services, with a baseline and an after-snapshot. Needs root, python3 and curl, and docker.update_prepare once per host.",
 		Risk:        pb.RiskClass_RISK_CLASS_MEDIUM, Durable: true, Timeout: 30 * time.Minute, Script: dockerComposeUpdate, Retry: RetryReconcileFirst,
