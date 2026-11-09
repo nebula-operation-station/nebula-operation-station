@@ -251,24 +251,99 @@ func TestChartCVEPlaceSelectsHermesWhenFresh(t *testing.T) {
 
 func TestChartCVEPlaceFallsBackToTrivyLabelled(t *testing.T) {
 	img := imageSubject("box")
-	cases := map[string]ui.VulnPage{
-		"no Hermes image subject": {Subjects: []ui.VulnSubjectStatus{chartFreshHost()}, Feeds: []ui.VulnFeedStatus{okFeed("debian-tracker")}},
-		"stale Hermes image run": {
-			Subjects: []ui.VulnSubjectStatus{chartFreshHost(), {Subject: img, LastComplete: chartTime(vulnstore.StaleAfter + time.Hour)}},
-			Feeds:    []ui.VulnFeedStatus{okFeed("debian-tracker")},
+	imgHref := "/vulnerabilities/subject/image/box?digest=sha256%3A" + strings.Repeat("0123456789abcdef", 4)
+	cases := []struct {
+		name string
+		page ui.VulnPage
+		// hermes is the rendered Hermes line of the scanned image next to
+		// the Trivy line (a regexp), "" when Hermes does not know it.
+		hermes string
+	}{
+		{
+			name: "no Hermes image subject",
+			page: ui.VulnPage{Subjects: []ui.VulnSubjectStatus{chartFreshHost()}, Feeds: []ui.VulnFeedStatus{okFeed("debian-tracker")}},
 		},
-		"image not assessed": {Subjects: []ui.VulnSubjectStatus{chartFreshHost(), {Subject: img}}},
+		{
+			name: "stale Hermes image run",
+			page: ui.VulnPage{
+				Subjects: []ui.VulnSubjectStatus{chartFreshHost(), {Subject: img, LastComplete: chartTime(vulnstore.StaleAfter + time.Hour)}},
+				Feeds:    []ui.VulnFeedStatus{okFeed("debian-tracker")},
+			},
+			hermes: `chart__line--cve chart__line--stale"[^>]*>\s*<span class="chart__line-name">CVE</span>\s*` +
+				regexp.QuoteMeta(lineLink(imgHref, "Hermes · nginx@0123456789ab · stale since ")),
+		},
+		{
+			name: "image not assessed",
+			page: ui.VulnPage{Subjects: []ui.VulnSubjectStatus{chartFreshHost(), {Subject: img}}},
+			hermes: `chart__line--cve chart__line--unknown"[^>]*>\s*<span class="chart__line-name">CVE</span>\s*` +
+				regexp.QuoteMeta(lineLink(imgHref, "Hermes · nginx@0123456789ab · not assessed<")),
+		},
 	}
-	for name, page := range cases {
-		t.Run(name, func(t *testing.T) {
-			body := chartVulnBody(t, &fakeVuln{page: page}, map[string]map[string]executions.LastResultRow{
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := chartVulnBody(t, &fakeVuln{page: tc.page}, map[string]map[string]executions.LastResultRow{
 				"image.vulnerabilities": {"box": row(vulnsDoc(t, "ok", sevCounts(2, 5, 10, 3)), time.Hour)},
 			})
 			if !strings.Contains(body, "nginx@0123456789ab · 2 critical · 5 high · 10 medium · 3 low · host Trivy, partial") {
 				t.Error("P1-30 counts not shown with their observer label")
 			}
-			if strings.Contains(body, "Hermes · nginx@") {
-				t.Error("Hermes image line shown without a fresh complete run")
+			if tc.hermes == "" {
+				if strings.Contains(body, "Hermes · nginx@") {
+					t.Error("Hermes image line shown for an image Hermes does not know")
+				}
+				return
+			}
+			if !regexp.MustCompile(tc.hermes).MatchString(body) {
+				t.Error("Hermes line of the scanned image hidden behind the Trivy line")
+			}
+			if strings.Contains(body, "Hermes · sha256:0123456789ab") {
+				t.Error("scanned image shown twice")
+			}
+			if strings.Contains(body, "chart__line--cve chart__line--ok") {
+				t.Error("stale or unassessed image rendered green")
+			}
+		})
+	}
+}
+
+// TestChartCVEPlaceKeepsStaleHermesCritical: a critical open finding on
+// the scanned image whose Hermes run is stale (or not assessed) reaches
+// the rendered page next to the Trivy counts and makes the box border
+// critical, although the Trivy line alone would leave it neutral.
+func TestChartCVEPlaceKeepsStaleHermesCritical(t *testing.T) {
+	img := imageSubject("box")
+	imgHref := "/vulnerabilities/subject/image/box?digest=sha256%3A" + strings.Repeat("0123456789abcdef", 4)
+	cases := []struct {
+		name   string
+		status ui.VulnSubjectStatus
+		want   string
+	}{
+		{"stale run", ui.VulnSubjectStatus{Subject: img, LastComplete: chartTime(vulnstore.StaleAfter + time.Hour)},
+			"Hermes · nginx@0123456789ab · stale since "},
+		{"not assessed", ui.VulnSubjectStatus{Subject: img}, "Hermes · nginx@0123456789ab · "},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			page := ui.VulnPage{
+				Subjects: []ui.VulnSubjectStatus{chartFreshHost(), tc.status},
+				Feeds:    []ui.VulnFeedStatus{okFeed("debian-tracker")},
+				Rows:     []ui.VulnRow{vulnRow(1, img, "CVE-2024-0009", vulnstore.StateOpen, vulnstore.TierCritical, "debian-tracker")},
+			}
+			// Trivy reports one medium only: its line is ok and never
+			// raises the border by itself.
+			body := chartVulnBody(t, &fakeVuln{page: page}, map[string]map[string]executions.LastResultRow{
+				"image.vulnerabilities": {"box": row(vulnsDoc(t, "ok", sevCounts(0, 0, 1, 0)), time.Hour)},
+			})
+			if !strings.Contains(body, "nginx@0123456789ab · 0 critical · 0 high · 1 medium · 0 low · host Trivy, partial") {
+				t.Error("P1-30 counts not shown with their observer label")
+			}
+			re := regexp.MustCompile(`chart__line--cve chart__line--crit"[^>]*>\s*<span class="chart__line-name">CVE</span>\s*` +
+				regexp.QuoteMeta(lineLink(imgHref, tc.want)) + `[^<]*1 open[^<]*top critical<`)
+			if !re.MatchString(body) {
+				t.Error("critical finding of the scanned image not rendered as a crit Hermes line")
+			}
+			if !hostNodeHas(body, "chart__node--critical") {
+				t.Error("critical finding on the scanned image should make the box border critical")
 			}
 		})
 	}

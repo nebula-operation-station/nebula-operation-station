@@ -215,6 +215,21 @@ func (x *chartVulnIndex) freshImage(hostID, digest string) (vulnstore.Subject, b
 	return s, true
 }
 
+// knownImage returns the host's image subject with the given digest when
+// the Hermes read lists it (in any run state: fresh, stale or not
+// assessed).
+func (x *chartVulnIndex) knownImage(hostID, digest string) (vulnstore.Subject, bool) {
+	if x == nil || x.failed || digest == "" {
+		return vulnstore.Subject{}, false
+	}
+	for _, s := range x.images[hostID] {
+		if s.ImageDigest == digest {
+			return s, true
+		}
+	}
+	return vulnstore.Subject{}, false
+}
+
 // imageLines returns the Hermes lines of the host's image subjects other
 // than exclude (the image shown in the P1-30 place), at most
 // maxChartImageLines plus one line summing up the rest with their worst
@@ -269,7 +284,10 @@ func shortDigest(d string) string {
 // cvePlaceLines fills the P1-30 CVE place of a host box (D2): the Hermes
 // findings of the scanned image when a fresh complete Hermes run covers
 // it, otherwise the P1-30 counts labelled "host Trivy, partial"; then the
-// host's other Hermes image subjects.
+// host's other Hermes image subjects. When Hermes knows the scanned image
+// but its run is stale or not assessed, the Hermes line of that image
+// stays next to the Trivy line, labelled by its badge: a known critical
+// finding is never hidden behind the Trivy counts.
 func cvePlaceLines(res chartResults, hostID string, now time.Time) []chartLine {
 	trivy, ref := cveLine(rowFor(res.vulns, hostID), now, indicatorStaleAfter)
 	digest := digestOfImageRef(ref)
@@ -281,6 +299,9 @@ func cvePlaceLines(res chartResults, hostID string, now time.Time) []chartLine {
 		for _, l := range trivy {
 			l.Text += " · " + observerTrivy
 			lines = append(lines, l)
+		}
+		if k, ok := res.hermes.knownImage(hostID, digest); ok {
+			lines = append(lines, res.hermes.imageLine(k, shortImageRef(ref)))
 		}
 	default:
 		digest = "" // no P1-30 line: every Hermes image shows below
