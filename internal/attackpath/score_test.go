@@ -115,6 +115,10 @@ func TestStepValueHandComputed(t *testing.T) {
 	}
 }
 
+// rlo is U+202E RIGHT-TO-LEFT OVERRIDE, spelled as a rune so the source
+// holds no bidi control.
+var rlo = string(rune(0x202e))
+
 func TestValidateFindingRejects(t *testing.T) {
 	good := Finding{Node: "host:a", Key: "CVE-2024-0001", State: FindingOpen, EPSS: 0.1, EPSSKnown: true,
 		Ports: []Port{{ProtoTCP, 443}}}
@@ -141,7 +145,7 @@ func TestValidateFindingRejects(t *testing.T) {
 		"port no proto":    func(f *Finding) { f.Ports = []Port{{0, 80}} },
 		"too many ports":   func(f *Finding) { f.Ports = many },
 		"port bad proto":   func(f *Finding) { f.Ports = []Port{{ProtoUDP + 1, 80}} },
-		"bidi in node id":  func(f *Finding) { f.Node = "host:‮" },
+		"bidi in node id":  func(f *Finding) { f.Node = "host:" + rlo },
 		"node over bounds": func(f *Finding) { f.Node = "host:" + strings.Repeat("a", MaxIDBytes) },
 	}
 	for name, mut := range cases {
@@ -152,7 +156,7 @@ func TestValidateFindingRejects(t *testing.T) {
 			t.Errorf("%s: err = %v, want ErrInvalidFinding", name, err)
 			continue
 		}
-		if strings.Contains(err.Error(), "\n") || strings.Contains(err.Error(), "‮") {
+		if strings.Contains(err.Error(), "\n") || strings.Contains(err.Error(), rlo) {
 			t.Errorf("%s: error echoes the rejected value: %q", name, err)
 		}
 	}

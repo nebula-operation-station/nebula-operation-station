@@ -4,8 +4,16 @@
 // edge kinds, a builder that validates and bounds its input, and an
 // immutable graph with a canonical snapshot and snapshot hash. The package
 // is pure: no store, no I/O, no clock. Data adapters (flows, firewall rules,
-// placements, Docker, executor credentials) live elsewhere (VU-22); scoring
-// and path search come later (VU-21).
+// placements, Docker, executor credentials) live elsewhere (VU-22).
+//
+// Compute scores paths with formula ap-v1 (score.go), finds the top
+// PathsPerTarget paths per crown-jewel target with Yen's algorithm at most
+// MaxDepth steps deep (search.go) and ranks choke points (compute.go). The
+// attacker's state on a node is "reached" (a network step) or "owned" (a
+// local privilege escalation, or a control, credential or escape step);
+// control, credential and escape steps start from an owned node. Every
+// number comes from NOS data through a versioned formula, never from an
+// LLM.
 //
 // Edges keep their basis. Policy edges (firewall allow and NAT), observed
 // edges (traffic map flows) and assumed edges (L2 adjacency, all ports) are
