@@ -54,9 +54,14 @@
 -- Every value from Hermes is untrusted; internal/vulnfinding and
 -- internal/vulnstore validate it before it reaches these tables.
 
+-- vuln_store_state: one row; the next run_seq, the highest inventory
+-- generation any run started with (a run start with a lower one is
+-- rejected, D5), and a counter every write transaction bumps first so it
+-- holds the write lock before it reads.
 CREATE TABLE vuln_store_state (
     id            INTEGER PRIMARY KEY CHECK (id = 1),
     next_run_seq  INTEGER NOT NULL CHECK (next_run_seq > 0),
+    max_inventory_generation INTEGER NOT NULL DEFAULT 0 CHECK (max_inventory_generation >= 0),
     lock_counter  INTEGER NOT NULL DEFAULT 0
 );
 INSERT INTO vuln_store_state (id, next_run_seq) VALUES (1, 1);
@@ -136,6 +141,8 @@ CREATE TABLE vuln_findings (
     closed_by              TEXT CHECK (closed_by IS NULL OR closed_by IN ('nos_inventory', 'subject_removed', 'hermes_unconfirmed', 'admin_confirmed')),
     closed_note            TEXT NOT NULL DEFAULT '' CHECK (length(closed_note) <= 200),
     closed_at              INTEGER,
+    closed_admin           TEXT CHECK (closed_admin IS NULL OR length(closed_admin) BETWEEN 1 AND 128),
+    closed_reason          TEXT CHECK (closed_reason IS NULL OR length(CAST(closed_reason AS BLOB)) <= 1024),
     state_run_seq          INTEGER NOT NULL CHECK (state_run_seq > 0),
     rev                    INTEGER NOT NULL DEFAULT 1 CHECK (rev > 0),
     episode                INTEGER NOT NULL DEFAULT 1 CHECK (episode > 0),
