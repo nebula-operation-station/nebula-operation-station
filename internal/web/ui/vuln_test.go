@@ -204,7 +204,7 @@ const (
 func TestVulnHostileTextRenderedAsText(t *testing.T) {
 	s := hostSubject("web1")
 	row := vulnRow(1, s, "CVE-2024-0001", vulnstore.StateOpen, vulnstore.TierHigh, "debian-tracker")
-	row.Finding.Record.Assessment.Text = "line1\n" + hostileScript + "‮gnp.exe"
+	row.Finding.Record.Assessment.Text = "line1\n" + hostileScript + "\u202egnp.exe"
 	row.Finding.Record.Component.SourcePackage = hostileImg
 	row.Finding.Record.Component.SourceVersion = hostileScript
 	row.Finding.Record.Vuln.Aliases = []string{hostileImg}
@@ -226,7 +226,7 @@ func TestVulnHostileTextRenderedAsText(t *testing.T) {
 		if code != http.StatusOK {
 			t.Fatalf("GET %s = %d", p, code)
 		}
-		for _, bad := range []string{"<script>alert", "<img src=x", `"><img`, "‮"} {
+		for _, bad := range []string{"<script>alert", "<img src=x", `"><img`, "\u202e"} {
 			if strings.Contains(body, bad) {
 				t.Errorf("GET %s renders %q unescaped", p, bad)
 			}
