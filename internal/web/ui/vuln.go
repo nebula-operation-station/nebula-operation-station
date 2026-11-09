@@ -391,6 +391,9 @@ type vulnFindingView struct {
 	// HumanForms: the finding is open or in a human state the maintainer
 	// can set again (accept risk, false positive).
 	HumanForms bool
+	// FixWith is the "fix with" entry (D8, VU-13; vuln_fix.go); nil for
+	// a fixed finding or when none applies.
+	FixWith *vulnFixView
 }
 
 // vulnContext indexes subjects and feeds for building views.
@@ -1038,11 +1041,14 @@ func (h *Handler) handleVulnCVE(w http.ResponseWriter, r *http.Request) {
 	c := newVulnContext(now, page.Subjects, page.Feeds)
 	d.Truncated = page.Truncated
 	d.Banners = feedBanners(page.Feeds, page.LastComplete, now, d.Maintainer)
+	fix := h.newVulnFixResolver()
 	for _, row := range page.Rows {
 		if row.Finding.Record.Vuln.ID != id {
 			continue
 		}
-		d.Findings = append(d.Findings, c.view(row))
+		v := c.view(row)
+		v.FixWith = fix.fixWith(ctx, row.Finding)
+		d.Findings = append(d.Findings, v)
 	}
 	h.renderVuln(w, r, id, "vuln_cve", d)
 }
@@ -1105,8 +1111,10 @@ func (h *Handler) handleVulnSubject(w http.ResponseWriter, r *http.Request) {
 	if len(groups) == 1 {
 		d.Subject = &groups[0]
 	}
+	fix := h.newVulnFixResolver()
 	for i, row := range rows {
 		if d.Filter.match(views[i], row) {
+			views[i].FixWith = fix.fixWith(ctx, row.Finding)
 			d.Findings = append(d.Findings, views[i])
 		}
 	}
@@ -1144,6 +1152,7 @@ func (h *Handler) handleVulnFinding(w http.ResponseWriter, r *http.Request) {
 	c := newVulnContext(now, []VulnSubjectStatus{det.Subject}, det.Feeds)
 	d.Banners = feedBanners(det.Feeds, det.LastComplete, now, d.Maintainer)
 	v := c.view(det.Row)
+	v.FixWith = h.newVulnFixResolver().fixWith(ctx, det.Row.Finding)
 	d.Finding = &v
 	for _, ho := range det.Holds {
 		hv := vulnHoldView{
