@@ -13,9 +13,12 @@
 //
 // Delivery: a message counts as sent only when at least one provider
 // accepted it. De-duplication state is set only after that delivery. A
-// message no provider accepts stays queued (at most MaxPending) and is
-// retried by the next call, including Flush; a queued alert whose episode
-// ends before delivery is dropped. When the queue overflows, the oldest
+// message no provider accepts gives its rate slot back, stays queued (at
+// most MaxPending) and is retried only by Flush, inside the hourly limit;
+// when delivered messages use up the limit, the rest of the queue is
+// folded into the digest. A queued alert whose episode ends before
+// delivery is dropped. A caller is never held beyond its context: once it
+// is done, no further message is attempted. When the queue overflows, the oldest
 // alert is dropped and reported as undelivered in the next digest. A digest
 // that fails keeps its counts for the next attempt. Messages held by the
 // rate limit are accounted for by the digest, so their de-duplication
@@ -87,8 +90,8 @@ const (
 	undeliveredSuffix = " undelivered"
 )
 
-// Sink sends one notification and returns how many providers accepted it;
-// *notify.Notifier implements it.
+// Sink sends one notification and returns how many providers accepted it.
+// It must return once ctx is done; *notify.Notifier implements it.
 type Sink interface {
 	Notify(ctx context.Context, e notify.Event) int
 }
@@ -137,6 +140,9 @@ type outMsg struct {
 	// digest holds the counts of a digest message, restored when it fails.
 	digest      map[string]int
 	digestSince time.Time
+	// slot is the reserved MaxPerHour slot, released when the message is
+	// not delivered. Zero for a digest.
+	slot time.Time
 }
 
 // Notifier decides which vulnerability events to send. It is safe for
@@ -258,7 +264,7 @@ func findingMessage(kind string, f vulnstore.Finding, at time.Time) notify.Event
 func (n *Notifier) Findings(ctx context.Context, fs []vulnstore.Finding) int {
 	now := n.now()
 	n.mu.Lock()
-	out := n.retries()
+	var out []outMsg
 	for _, f := range fs {
 		if f.State != vulnstore.StateOpen {
 			continue
@@ -317,7 +323,7 @@ func (n *Notifier) markNotified(fe findingEvent, ep int64) {
 func (n *Notifier) Hermes(ctx context.Context, lastComplete time.Time) int {
 	now := n.now()
 	n.mu.Lock()
-	out := n.retries()
+	var out []outMsg
 	if !lastComplete.IsZero() {
 		k := alertKey{kind: KindHermesStale}
 		mark := lastComplete.UnixNano()
@@ -350,7 +356,7 @@ type FeedStatus struct {
 func (n *Notifier) Feeds(ctx context.Context, st []FeedStatus) int {
 	now := n.now()
 	n.mu.Lock()
-	out := n.retries()
+	var out []outMsg
 	for _, s := range st {
 		if !n.sources[s.SourceID] {
 			continue
@@ -386,7 +392,7 @@ func (n *Notifier) Feeds(ctx context.Context, st []FeedStatus) int {
 func (n *Notifier) Run(ctx context.Context, r vulnstore.Run) int {
 	now := n.now()
 	n.mu.Lock()
-	out := n.retries()
+	var out []outMsg
 	for _, v := range r.Sources {
 		if !n.sources[v.ID] {
 			continue
@@ -421,23 +427,29 @@ func (n *Notifier) MarkReset(ctx context.Context, m vulnstore.MarkReset) int {
 	reason := "high-water mark of feed " + plain(m.SourceID, maxText) + " reset by " + plain(m.Admin, maxText) +
 		" from " + m.OldDate.UTC().Format(time.RFC3339) + " to " + m.NewDate.UTC().Format(time.RFC3339)
 	n.mu.Lock()
-	out := n.retries()
+	var out []outMsg
 	out = append(out, n.admit(outMsg{ev: notify.Event{Kind: KindFeedMarkReset, State: "reset", Reason: reason, Time: now}}, 0, now)...)
 	n.mu.Unlock()
 	return n.send(ctx, out)
 }
 
-// Flush retries the queued undelivered messages and sends the pending
-// digest when a full RateWindow has passed since the first held message.
-// Call it periodically (e.g. every few minutes); every other method also
-// retries and flushes when due. It returns how many messages were
+// Flush sends the pending digest when a full RateWindow has passed since
+// the first held message and retries queued undelivered messages inside the
+// hourly limit. When the limit is used up by delivered messages, the rest
+// of the queue is folded into the digest. Only Flush retries; call it
+// periodically (e.g. every few minutes). Other methods send only their own
+// new messages and a due digest. It returns how many messages were
 // delivered.
 func (n *Notifier) Flush(ctx context.Context) int {
 	now := n.now()
 	n.mu.Lock()
-	out := append(n.retries(), n.digestDue(now)...)
+	out := append(n.digestDue(now), n.retries(now)...)
 	n.mu.Unlock()
-	return n.send(ctx, out)
+	sent := n.send(ctx, out)
+	n.mu.Lock()
+	n.foldIfFull(n.now())
+	n.mu.Unlock()
+	return sent
 }
 
 // Pending returns how many undelivered messages wait for another attempt.
@@ -447,12 +459,74 @@ func (n *Notifier) Pending() int {
 	return len(n.pending)
 }
 
-// retries takes the queued messages for another attempt. Their keys stay
-// in n.inflight, so no copy is queued meanwhile. Caller holds n.mu.
-func (n *Notifier) retries() []outMsg {
-	out := n.pending
-	n.pending = nil
+// retries takes as many queued messages as the hourly limit has free slots
+// (oldest first) and reserves a slot for each; their keys stay in
+// n.inflight, so no copy is queued meanwhile. When no slot is free the
+// queue is folded into the digest. Caller holds n.mu.
+func (n *Notifier) retries(now time.Time) []outMsg {
+	if n.foldIfFull(now) {
+		return nil
+	}
+	c := min(MaxPerHour-len(n.sent), len(n.pending))
+	out := make([]outMsg, c)
+	copy(out, n.pending[:c])
+	clear(n.pending[:c])
+	n.pending = n.pending[c:]
+	for i := range out {
+		out[i].slot = n.reserve(now)
+	}
 	return out
+}
+
+// foldIfFull folds the queued messages into the digest when the hourly
+// limit has no free slot. A folded alert is accounted for by the digest,
+// like one held by admit, so its de-duplication state is set now. Failed
+// attempts release their slot, so during an outage the limit stays free
+// and the queue keeps waiting for delivery. Caller holds n.mu.
+func (n *Notifier) foldIfFull(now time.Time) bool {
+	n.prune(now)
+	if len(n.sent) < MaxPerHour {
+		return false
+	}
+	for i, m := range n.pending {
+		if m.keyed {
+			delete(n.inflight, m.key)
+		}
+		n.hold(m.ev.Kind, 1, now)
+		if m.commit != nil {
+			m.commit()
+		}
+		n.pending[i] = outMsg{}
+	}
+	n.pending = n.pending[:0]
+	return true
+}
+
+// prune drops send times older than RateWindow. Caller holds n.mu.
+func (n *Notifier) prune(now time.Time) {
+	cut := 0
+	for cut < len(n.sent) && now.Sub(n.sent[cut]) >= RateWindow {
+		cut++
+	}
+	n.sent = n.sent[cut:]
+}
+
+// reserve takes one slot of the hourly limit and returns its time; the
+// caller has checked that one is free. Caller holds n.mu.
+func (n *Notifier) reserve(now time.Time) time.Time {
+	n.sent = append(n.sent, now)
+	return now
+}
+
+// release returns the slot reserved at t after a failed or skipped
+// attempt. Caller holds n.mu.
+func (n *Notifier) release(t time.Time) {
+	for i := len(n.sent) - 1; i >= 0; i-- {
+		if n.sent[i].Equal(t) {
+			n.sent = append(n.sent[:i], n.sent[i+1:]...)
+			return
+		}
+	}
 }
 
 // cancel drops the queued or in-flight alert k: it is not retried and its
@@ -473,18 +547,15 @@ func (n *Notifier) cancel(k alertKey) {
 }
 
 // admit applies the rate limit to m: it returns the messages to send now
-// (a due digest, then m if it is inside the limit) and counts m into the
+// (a due digest, then m if it is inside the limit, with a reserved slot
+// that send releases if no provider accepts m) and counts m into the
 // digest otherwise. A held message is accounted for by the digest, so its
 // de-duplication state is set now. Caller holds n.mu.
 func (n *Notifier) admit(m outMsg, episode int64, now time.Time) []outMsg {
 	out := n.digestDue(now)
-	cut := 0
-	for cut < len(n.sent) && now.Sub(n.sent[cut]) >= RateWindow {
-		cut++
-	}
-	n.sent = n.sent[cut:]
+	n.prune(now)
 	if len(n.sent) < MaxPerHour {
-		n.sent = append(n.sent, now)
+		m.slot = n.reserve(now)
 		if m.keyed {
 			n.seq++
 			m.token = n.seq
@@ -533,10 +604,11 @@ func (n *Notifier) digestDue(now time.Time) []outMsg {
 	return []outMsg{m}
 }
 
-// send hands the messages to the sink and returns how many at least one
-// provider accepted. Delivered alerts set their de-duplication state;
-// undelivered ones are queued again (bounded), a failed digest returns its
-// counts.
+// send hands the messages to the sink, one after another, and returns how
+// many at least one provider accepted. Once ctx is done the remaining
+// messages are not attempted; they count as undelivered. Delivered alerts
+// set their de-duplication state; undelivered ones release their rate slot
+// and are queued again (bounded), a failed digest returns its counts.
 func (n *Notifier) send(ctx context.Context, ms []outMsg) int {
 	if len(ms) == 0 {
 		return 0
@@ -544,6 +616,9 @@ func (n *Notifier) send(ctx context.Context, ms []outMsg) int {
 	ok := make([]bool, len(ms))
 	sent := 0
 	for i, m := range ms {
+		if ctx.Err() != nil {
+			break
+		}
 		ok[i] = n.sink.Notify(ctx, m.ev) > 0
 		if ok[i] {
 			sent++
@@ -553,6 +628,10 @@ func (n *Notifier) send(ctx context.Context, ms []outMsg) int {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	for i, m := range ms {
+		if !ok[i] && !m.slot.IsZero() {
+			n.release(m.slot)
+			m.slot = time.Time{}
+		}
 		live := true
 		if m.keyed {
 			ref, found := n.inflight[m.key]
