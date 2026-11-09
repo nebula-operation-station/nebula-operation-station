@@ -2,13 +2,16 @@
 package ui_test
 
 import (
+	"context"
 	"errors"
+	"net/url"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
@@ -213,13 +216,32 @@ func TestChartVulnLineTitleNamesObserverAndFormula(t *testing.T) {
 	}
 }
 
+// TestChartVulnLineEscapesSubjectText: a hostile host ID reaches the
+// rendered page as escaped text in the box and path-escaped in the href
+// of its Hermes line, never as markup or as a different path.
 func TestChartVulnLineEscapesSubjectText(t *testing.T) {
-	host := hostSubject("box")
+	const id = `x"><script>x</script>/../admin?y=1#z`
+	host := hostSubject(id)
 	r := vulnRow(1, host, "CVE-2024-0001", vulnstore.StateOpen, vulnstore.TierHigh, "<script>x</script>")
 	page := ui.VulnPage{Subjects: []ui.VulnSubjectStatus{{Subject: host, Name: "<b>evil</b>", LastComplete: chartTime(time.Hour)}}, Rows: []ui.VulnRow{r}}
-	body := chartVulnBody(t, &fakeVuln{page: page}, nil)
+	o := linesOptions(t, nil)
+	o.Vuln = &fakeVuln{page: page}
+	o.Hosts = func(context.Context) ([]inventory.Host, error) {
+		return []inventory.Host{{ID: id, DisplayName: id, Environment: inventory.EnvProd, Criticality: inventory.CriticalityMedium}}, nil
+	}
+	body := getBody(t, newTestHandler(t, o).Handler(), "/inventory/chart")
 	if strings.Contains(body, "<script>x</script>") || strings.Contains(body, "<b>evil</b>") {
 		t.Error("untrusted text rendered as HTML")
+	}
+	if !strings.Contains(body, "&lt;script&gt;x&lt;/script&gt;") {
+		t.Error("hostile host ID not rendered as escaped text")
+	}
+	href := "/vulnerabilities/subject/host/" + url.PathEscape(id)
+	if strings.ContainsAny(url.PathEscape(id), `"<>/?#`) {
+		t.Fatalf("PathEscape left a delimiter in %q", url.PathEscape(id))
+	}
+	if want := lineLink(href, "Hermes · 1 open · top high"); !strings.Contains(body, want) {
+		t.Errorf("chart body missing path-escaped host line link %q", want)
 	}
 }
 

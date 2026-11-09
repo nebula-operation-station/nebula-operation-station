@@ -2,6 +2,7 @@
 package ui_test
 
 import (
+	"context"
 	"errors"
 	"regexp"
 	"strings"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
@@ -83,6 +85,37 @@ func TestChartHermesImageInCVEPlaceRendersLink(t *testing.T) {
 	href := "/vulnerabilities/subject/image/box?digest=sha256%3A" + strings.Repeat("0123456789abcdef", 4)
 	if want := lineLink(href, "Hermes · nginx@0123456789ab · no open findings"); !strings.Contains(body, want) {
 		t.Errorf("chart body missing CVE place link %q", want)
+	}
+}
+
+// TestChartVulnGuestBoxRendersHostLink: a PVE guest linked to the managed
+// host "box" renders that host's Hermes line with its subject link on
+// /inventory/chart (beside the host box's own line); an unlinked guest
+// renders none.
+func TestChartVulnGuestBoxRendersHostLink(t *testing.T) {
+	tree := pveinventory.Tree{Roots: []pveinventory.Box{{
+		Kind: pveinventory.KindPVENode, Name: "pve1", RemoteID: "lab",
+		State: pveinventory.StateOK, Worst: pveinventory.StateOK,
+		Children: []pveinventory.Box{
+			{Kind: pveinventory.KindGuest, Name: "linked", VMID: 101, Generation: 1, HostID: "box", State: pveinventory.StateOK, Worst: pveinventory.StateOK},
+			{Kind: pveinventory.KindGuest, Name: "plain", VMID: 102, Generation: 1, State: pveinventory.StateOK, Worst: pveinventory.StateOK},
+		},
+	}}}
+	page := ui.VulnPage{
+		Subjects: []ui.VulnSubjectStatus{chartFreshHost()},
+		Feeds:    []ui.VulnFeedStatus{okFeed("debian-tracker")},
+		Rows:     []ui.VulnRow{vulnRow(1, hostSubject("box"), "CVE-2024-0001", vulnstore.StateOpen, vulnstore.TierCritical, "debian-tracker")},
+	}
+	o := linesOptions(t, nil)
+	o.Vuln = &fakeVuln{page: page}
+	o.PVEChart = func(context.Context) (pveinventory.Tree, error) { return tree, nil }
+	body := getBody(t, newTestHandler(t, o).Handler(), "/inventory/chart")
+	want := lineLink("/vulnerabilities/subject/host/box", "Hermes · 1 open, critical")
+	if got := strings.Count(body, want); got != 2 {
+		t.Errorf("host line links %q = %d, want 2 (host box and linked guest)", want, got)
+	}
+	if got := strings.Count(body, "chart__line--vuln chart__line--crit"); got != 2 {
+		t.Errorf("crit vuln lines = %d, want 2 (unlinked guest has none)", got)
 	}
 }
 
