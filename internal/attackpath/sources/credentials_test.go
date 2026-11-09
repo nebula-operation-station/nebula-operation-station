@@ -24,7 +24,7 @@ func labHosts() fakeHosts {
 	return fakeHosts{hosts: []inventory.Host{
 		{ID: "exec", DisplayName: "executor"},
 		{ID: "nas", DisplayName: "nas"},
-		{ID: "web", DisplayName: "web‮"}, // bidi control: label dropped
+		{ID: "web", DisplayName: "web" + string(rune(0x202e))}, // bidi control: label dropped
 	}}
 }
 

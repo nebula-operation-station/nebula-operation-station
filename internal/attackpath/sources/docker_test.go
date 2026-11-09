@@ -107,7 +107,7 @@ func TestDockerRejectsBadIDsAndNames(t *testing.T) {
 		{HostID: "web", Complete: true, Containers: []dockerhost.Inspect{
 			{Phase: "done", ID: "AAAAAAAAAAAA"},
 			{Phase: "done", ID: "../etc"},
-			{Phase: "done", ID: "dddddddddddd", Name: "/x⁦y"},
+			{Phase: "done", ID: "dddddddddddd", Name: "/x" + string(rune(0x2066)) + "y"},
 		}},
 	}}
 	r, err := Docker(context.Background(), f)
