@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -443,7 +444,12 @@ func (p vulnPages) VulnFindings(ctx context.Context, q ui.VulnQuery) (ui.VulnPag
 			seen[f.Subject] = false
 		}
 	}
+	subjects := make([]vulnstore.Subject, 0, len(seen))
 	for s := range seen {
+		subjects = append(subjects, s)
+	}
+	sort.Slice(subjects, func(i, j int) bool { return subjects[i].String() < subjects[j].String() })
+	for _, s := range subjects {
 		st, err := p.subject(ctx, s)
 		if err != nil {
 			return ui.VulnPage{}, err

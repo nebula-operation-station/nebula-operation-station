@@ -28,6 +28,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnnotify"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
 
 const (
@@ -427,5 +428,39 @@ func TestVulnNotifyTickRaisesFeedStaleAndShutdownFlushRetries(t *testing.T) {
 	}
 	if n := e.svc.notifier.Pending(); n != 0 {
 		t.Fatalf("after the shutdown flush %d alerts still pending", n)
+	}
+}
+
+func TestVulnPagesReadTheRealStoreAndRefuseDecisions(t *testing.T) {
+	e := newVTEnv(t)
+	e.startAndSubmit(t, vtRecord("CVE-2026-0001", true), vtRecord("CVE-2026-0002", false))
+	p := vulnPages{v: e.svc, admin: func(context.Context) bool { return false }}
+	ctx := context.Background()
+	page, err := p.VulnFindings(ctx, ui.VulnQuery{Limit: ui.MaxVulnRows})
+	if err != nil || len(page.Rows) != 2 || page.Truncated {
+		t.Fatalf("VulnFindings = %d rows (truncated %v), %v; want 2", len(page.Rows), page.Truncated, err)
+	}
+	if len(page.Subjects) != 1 || page.Subjects[0].Subject.ID != "web01" || !page.Subjects[0].LastComplete.IsZero() {
+		t.Fatalf("subjects = %+v, want web01 not assessed", page.Subjects)
+	}
+	if len(page.Feeds) != len(vulnSources) {
+		t.Fatalf("feeds = %d, want the %d listed sources", len(page.Feeds), len(vulnSources))
+	}
+	one, err := p.VulnFindings(ctx, ui.VulnQuery{VulnID: "CVE-2026-0001", Limit: 1})
+	if err != nil || len(one.Rows) != 1 || one.Rows[0].Tier != vulnstore.TierCritical {
+		t.Fatalf("by CVE = %+v, %v; want the KEV finding in the critical tier", one.Rows, err)
+	}
+	d, err := p.VulnFinding(ctx, one.Rows[0].Finding.Key)
+	if err != nil || d.Row.Finding.Key != one.Rows[0].Finding.Key {
+		t.Fatalf("VulnFinding = %+v, %v", d, err)
+	}
+	if ok, _ := p.VulnMaintainer(ctx, "alice"); ok {
+		t.Fatal("maintainer without the admin rule")
+	}
+	if _, err := p.BeginVulnDecision(ctx, "alice", ui.VulnDecision{}); !errors.Is(err, errVulnDecisionsUnavailable) {
+		t.Fatalf("begin decision err = %v", err)
+	}
+	if err := p.CommitVulnDecision(ctx, "alice", "c", ui.VulnDecision{}, nil); !errors.Is(err, errVulnDecisionsUnavailable) {
+		t.Fatalf("commit decision err = %v", err)
 	}
 }
