@@ -479,7 +479,7 @@ var pagePartials = map[string][]string{
 	// The vulnerabilities pages share banners, labels and tables.
 	"vuln":         {"vuln_parts.html"},
 	"vuln_cve":     {"vuln_parts.html"},
-	"vuln_subject": {"vuln_parts.html"},
+	"vuln_subject": {"vuln_parts.html", "vuln_trivy.html"},
 	"vuln_finding": {"vuln_parts.html"},
 	"vuln_reset":   {"vuln_parts.html"},
 }
