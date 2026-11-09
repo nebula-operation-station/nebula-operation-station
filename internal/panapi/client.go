@@ -19,6 +19,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevcontract"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvetransport"
 )
 
@@ -36,17 +37,16 @@ const (
 	maxServerNameLength = 253
 )
 
-// XML limits for PAN-OS responses (ADR 0010 D3 "Parse limits"). ND-04 owns
-// these values; they are repeated here as named constants until the
-// netdevcontract package exists and must stay equal to it.
+// XML limits for PAN-OS responses (ADR 0010 D3 "Parse limits"), owned by
+// internal/netdevcontract (ND-04).
 const (
 	// MaxXMLDepth is the maximum element nesting depth.
-	MaxXMLDepth = 64
+	MaxXMLDepth = netdevcontract.MaxXMLDepth
 	// MaxXMLElements is the maximum number of elements per response.
-	MaxXMLElements = 500_000
+	MaxXMLElements = netdevcontract.MaxXMLElements
 	// MaxXMLTextBytes is the maximum text length of one element or
 	// attribute value.
-	MaxXMLTextBytes = 4 << 10
+	MaxXMLTextBytes = netdevcontract.MaxXMLTextBytes
 	// maxAPICodeLength bounds the numeric code kept from an error response.
 	maxAPICodeLength = 6
 )
