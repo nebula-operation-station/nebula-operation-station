@@ -13,10 +13,12 @@
 //     that (otherwise the write is dropped and counted as superseded);
 //   - closures: only a completed run requests run closures, per subject it
 //     fully covered, re-checking each subject's coverage watermark and
-//     each finding's state_run_seq; planning, closures, the completed
-//     state and the saved completion commit in one transaction, so a
-//     complete that stops part-way applies nothing and a retry after a
-//     restart reads the saved completion (CompletionOf);
+//     each finding's state_run_seq; closures are planned on a read
+//     snapshot and applied in short write transactions that save a
+//     durable completing state, so other writers of server.db never wait
+//     long, a complete that stops part-way is resumed by the retry with
+//     the same result, and a retry after a restart reads the saved
+//     completion (CompletionOf) or resumes (ResumeComplete);
 //   - feed sources: judged one by one against NOS's fixed source list and
 //     per-source high-water marks; a record resting on a source that is not
 //     accepted, undated or on probation after an admin mark reset only
@@ -215,6 +217,10 @@ type Store struct {
 	classify Classifier
 	now      func() time.Time
 	mu       sync.Mutex
+	// completeMu serializes Complete in process; it is held across the
+	// planning and all apply transactions of one complete, s.mu only for
+	// each transaction.
+	completeMu sync.Mutex
 }
 
 // sourceIDRe is the D5 source ID pattern (64 bytes at most).
