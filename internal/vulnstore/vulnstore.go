@@ -12,8 +12,11 @@
 //     wrote it, and a run writes a finding only if its run_seq is at least
 //     that (otherwise the write is dropped and counted as superseded);
 //   - closures: only a completed run requests run closures, per subject it
-//     fully covered, in one transaction per subject that re-checks the
-//     subject's coverage watermark and each finding's state_run_seq;
+//     fully covered, re-checking each subject's coverage watermark and
+//     each finding's state_run_seq; planning, closures, the completed
+//     state and the saved completion commit in one transaction, so a
+//     complete that stops part-way applies nothing and a retry after a
+//     restart reads the saved completion (CompletionOf);
 //   - feed sources: judged one by one against NOS's fixed source list and
 //     per-source high-water marks; a record resting on a source that is not
 //     accepted, undated or on probation after an admin mark reset only

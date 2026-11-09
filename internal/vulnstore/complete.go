@@ -73,102 +73,111 @@ type subjectPlan struct {
 
 // Complete completes a run. Only a completed run requests run closures:
 // for each subject it fully covered, open findings it omitted or reported
-// not_affected. Closures are planned, the guards are checked, and then
-// applied in one transaction per subject that re-checks the subject's
-// coverage watermark and each finding's state_run_seq and revision.
+// not_affected. Closures are planned, the guards are checked, the closures
+// are applied (re-checking each subject's coverage watermark and each
+// finding's state_run_seq and revision), the run is marked completed and
+// the completion is saved, all in one transaction. A context ending
+// part-way therefore rolls everything back: the run stays running and a
+// retry plans again from the same state. Once Complete has returned,
+// CompletionOf returns the saved completion.
 func (s *Store) Complete(ctx context.Context, runID string) (Completion, error) {
 	now := s.now().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	run, err := s.finishRun(ctx, runID, now)
+	tx, err := s.writeTx(ctx)
 	if err != nil {
+		return Completion{}, fmt.Errorf("vulnstore: complete: %w", err)
+	}
+	defer tx.Rollback()
+	run, err := loadRun(ctx, tx, runID)
+	if err != nil {
+		return Completion{}, fmt.Errorf("vulnstore: complete: %w", err)
+	}
+	if err := s.checkRunning(ctx, tx, run, now); err != nil {
+		if errors.Is(err, ErrRunExpired) {
+			if cerr := tx.Commit(); cerr != nil {
+				return Completion{}, fmt.Errorf("vulnstore: complete: commit abort: %w", cerr)
+			}
+		}
 		return Completion{}, fmt.Errorf("vulnstore: complete: %w", err)
 	}
 	comp := Completion{Held: map[HoldReason]int{}, BatchRejected: run.rejected}
 	if !run.rejected {
-		plans, err := s.planClosures(ctx, run, now, &comp)
+		plans, err := s.planClosures(ctx, tx, run, now, &comp)
 		if err != nil {
 			return Completion{}, fmt.Errorf("vulnstore: complete: %w", err)
 		}
 		applyGuards(plans, &comp)
 		for _, p := range plans {
-			if err := s.applySubject(ctx, run, p, now, &comp); err != nil {
+			if err := applySubject(ctx, tx, run, p, now, &comp); err != nil {
 				return Completion{}, fmt.Errorf("vulnstore: complete: %w", err)
 			}
 		}
 	}
-	if err := s.saveCompletion(ctx, run.id, comp); err != nil {
+	if err := saveCompletion(ctx, tx, run, comp, now); err != nil {
 		return Completion{}, fmt.Errorf("vulnstore: complete: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Completion{}, fmt.Errorf("vulnstore: complete: commit: %w", err)
 	}
 	return comp, nil
 }
 
-// finishRun marks the run completed, or aborted when past its time limit.
-func (s *Store) finishRun(ctx context.Context, runID string, now time.Time) (runRow, error) {
-	tx, err := s.writeTx(ctx)
+// CompletionOf returns the saved completion of a completed run that
+// tokenID started, so that a retried complete gets the same answer after
+// the caller lost its own record of it (restart, eviction). A run of
+// another token is ErrRunNotFound; a run that is running, aborted or has
+// no saved completion is ErrRunNotRunning.
+func (s *Store) CompletionOf(ctx context.Context, runID, tokenID string) (Completion, error) {
+	run, err := loadRun(ctx, s.db, runID)
 	if err != nil {
-		return runRow{}, err
+		return Completion{}, fmt.Errorf("vulnstore: completion: %w", err)
 	}
-	defer tx.Rollback()
-	r, err := loadRun(ctx, tx, runID)
-	if err != nil {
-		return runRow{}, err
+	if run.tokenID != tokenID {
+		return Completion{}, fmt.Errorf("vulnstore: completion: %w", ErrRunNotFound)
 	}
-	if err := s.checkRunning(ctx, tx, r, now); err != nil {
-		if errors.Is(err, ErrRunExpired) {
-			if cerr := tx.Commit(); cerr != nil {
-				return runRow{}, fmt.Errorf("commit abort: %w", cerr)
-			}
-		}
-		return runRow{}, err
+	rep := parseReport(run.reportRaw)
+	if run.state != "completed" || rep.Completion == nil {
+		return Completion{}, fmt.Errorf("vulnstore: completion: %w", ErrRunNotRunning)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE vuln_runs SET state = 'completed', ended_at = ? WHERE id = ?`, unix(now), runID); err != nil {
-		return runRow{}, fmt.Errorf("mark completed: %w", err)
+	c := *rep.Completion
+	if c.Held == nil {
+		c.Held = map[HoldReason]int{}
 	}
-	if err := tx.Commit(); err != nil {
-		return runRow{}, fmt.Errorf("commit: %w", err)
-	}
-	r.state = "completed"
-	return r, nil
+	return c, nil
 }
 
-func (s *Store) saveCompletion(ctx context.Context, runID string, comp Completion) error {
-	tx, err := s.writeTx(ctx)
-	if err != nil {
-		return err
+// saveCompletion marks the run completed and saves the completion in its
+// report, inside the caller's transaction.
+func saveCompletion(ctx context.Context, tx *sql.Tx, run runRow, comp Completion, now time.Time) error {
+	if _, err := tx.ExecContext(ctx, `UPDATE vuln_runs SET state = 'completed', ended_at = ?, superseded = superseded + ? WHERE id = ?`,
+		unix(now), comp.Superseded, run.id); err != nil {
+		return fmt.Errorf("mark completed: %w", err)
 	}
-	defer tx.Rollback()
-	r, err := loadRun(ctx, tx, runID)
-	if err != nil {
-		return err
-	}
-	rep := parseReport(r.reportRaw)
+	rep := parseReport(run.reportRaw)
 	rep.Completion = &comp
-	if err := saveReport(ctx, tx, runID, rep); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE vuln_runs SET superseded = superseded + ? WHERE id = ?`, comp.Superseded, runID); err != nil {
-		return fmt.Errorf("save superseded: %w", err)
-	}
-	return tx.Commit()
+	return saveReport(ctx, tx, run.id, rep)
 }
 
 // planClosures reads, per covered subject at or above its watermark, the
 // requested closures and classifies them. It writes nothing.
-func (s *Store) planClosures(ctx context.Context, run runRow, now time.Time, comp *Completion) ([]*subjectPlan, error) {
-	sources, err := loadRunSources(ctx, s.db, run.id)
+func (s *Store) planClosures(ctx context.Context, tx *sql.Tx, run runRow, now time.Time, comp *Completion) ([]*subjectPlan, error) {
+	sources, err := loadRunSources(ctx, tx, run.id)
 	if err != nil {
 		return nil, err
 	}
-	subjects, err := stringColumn(ctx, s.db, `SELECT subject FROM vuln_run_subjects WHERE run_id = ? ORDER BY subject`, run.id)
+	subjects, err := stringColumn(ctx, tx, `SELECT subject FROM vuln_run_subjects WHERE run_id = ? ORDER BY subject`, run.id)
 	if err != nil {
 		return nil, fmt.Errorf("covered subjects: %w", err)
 	}
 	winStart := unix(now.Add(-WindowGuardSpan))
 	var plans []*subjectPlan
 	for _, subj := range subjects {
-		wm, err := watermark(ctx, s.db, subj)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		wm, err := watermark(ctx, tx, subj)
 		if err != nil {
 			return nil, err
 		}
@@ -177,23 +186,23 @@ func (s *Store) planClosures(ctx context.Context, run runRow, now time.Time, com
 			continue
 		}
 		p := &subjectPlan{subject: subj}
-		if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM vuln_findings WHERE subject = ? AND state = 'open'
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM vuln_findings WHERE subject = ? AND state = 'open'
 			AND state_run_seq <= ? AND episode_opened_at <= ? AND episode_opened_run_seq <> ?`,
 			subj, run.seq, unix(run.started), run.seq).Scan(&p.scope); err != nil {
 			return nil, fmt.Errorf("run guard scope: %w", err)
 		}
-		win, err := loadWindow(ctx, s.db, subj, winStart)
+		win, err := loadWindow(ctx, tx, subj, winStart)
 		if err != nil {
 			return nil, err
 		}
 		p.base, p.applied = win.base, len(win.applied)
-		open, err := queryFindings(ctx, s.db, `SELECT `+findingColumns+` FROM vuln_findings
+		open, err := queryFindings(ctx, tx, `SELECT `+findingColumns+` FROM vuln_findings
 			WHERE subject = ? AND state = 'open' AND state_run_seq <= ? ORDER BY finding_key`, subj, run.seq)
 		if err != nil {
 			return nil, err
 		}
 		for _, f := range open {
-			c, ok, err := s.planOne(ctx, run, sources, f, comp)
+			c, ok, err := s.planOne(ctx, tx, run, sources, f, comp)
 			if err != nil {
 				return nil, err
 			}
@@ -211,9 +220,9 @@ func (s *Store) planClosures(ctx context.Context, run runRow, now time.Time, com
 
 // planOne decides whether the run requests the closure of f and how it is
 // classified (D5 closure classes and paths 4 and 5).
-func (s *Store) planOne(ctx context.Context, run runRow, sources map[string]runSourceInfo, f Finding, comp *Completion) (candidate, bool, error) {
+func (s *Store) planOne(ctx context.Context, tx *sql.Tx, run runRow, sources map[string]runSourceInfo, f Finding, comp *Completion) (candidate, bool, error) {
 	var notAffected int
-	err := s.db.QueryRowContext(ctx, `SELECT not_affected FROM vuln_run_reported WHERE run_id = ? AND finding_key = ?`, run.id, f.Key[:]).Scan(&notAffected)
+	err := tx.QueryRowContext(ctx, `SELECT not_affected FROM vuln_run_reported WHERE run_id = ? AND finding_key = ?`, run.id, f.Key[:]).Scan(&notAffected)
 	switch {
 	case err == nil && notAffected == 0:
 		return candidate{}, false, nil // reported again: no closure
@@ -222,7 +231,7 @@ func (s *Store) planOne(ctx context.Context, run runRow, sources map[string]runS
 	}
 	// Omitted, or reported not_affected: a closure request.
 	var rejected int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM vuln_run_rejected WHERE run_id = ? AND finding_key = ?`, run.id, f.Key[:]).Scan(&rejected); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM vuln_run_rejected WHERE run_id = ? AND finding_key = ?`, run.id, f.Key[:]).Scan(&rejected); err != nil {
 		return candidate{}, false, fmt.Errorf("rejected: %w", err)
 	}
 	if rejected > 0 {
@@ -336,23 +345,18 @@ func trips(count, base, floor int) bool {
 	return count >= floor && 2*count > base
 }
 
-// applySubject applies one subject's plan in one transaction: it re-checks
-// the watermark, moves it to the run, drops holds of older runs on the
-// subject (superseded, path 7), then closes or holds each candidate if the
-// finding is unchanged since planning.
-func (s *Store) applySubject(ctx context.Context, run runRow, p *subjectPlan, now time.Time, comp *Completion) error {
-	tx, err := s.writeTx(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
+// applySubject applies one subject's plan inside the caller's transaction:
+// it re-checks the watermark, moves it to the run, drops holds of older
+// runs on the subject (superseded, path 7), then closes or holds each
+// candidate if the finding is unchanged since planning.
+func applySubject(ctx context.Context, tx *sql.Tx, run runRow, p *subjectPlan, now time.Time, comp *Completion) error {
 	wm, err := watermark(ctx, tx, p.subject)
 	if err != nil {
 		return err
 	}
 	if wm > run.seq {
 		comp.SubjectsBelowWatermark++
-		return tx.Commit()
+		return nil
 	}
 	n := unix(now)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO vuln_subject_watermarks (subject, run_seq, completed_at) VALUES (?, ?, ?)
@@ -407,7 +411,7 @@ func (s *Store) applySubject(ctx context.Context, run runRow, p *subjectPlan, no
 			comp.ClosedUnconfirmed++
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 func watermark(ctx context.Context, q queryer, subject string) (int64, error) {
