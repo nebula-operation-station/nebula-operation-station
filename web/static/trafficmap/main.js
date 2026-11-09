@@ -13,6 +13,7 @@ import { createCamera, resizeCamera, fitCamera, zoomAt, panBy, centreOn, pick, c
 import { createWebGL2Backend } from "./webgl2.js";
 import { createCanvas2DBackend } from "./canvas2d.js";
 import { drawOverlay } from "./overlay.js";
+import { drawPaths } from "./paths.js";
 import { PAINTERS } from "./symbols.js";
 
 /** Upper bound of the device pixel ratio used for the backing stores. */
@@ -91,6 +92,8 @@ function cover(el) {
  * startTrafficMap renders the map into root and returns { stop }.
  * opts.symbols selects the node symbol painter (default "star-core");
  * opts.preferWebGL = false forces the Canvas 2D backend.
+ * opts.paths is the validated attack-path overlay (paths.js readPaths); it
+ * is set only by the admin-only overlay document, never by boot.js.
  */
 export function startTrafficMap(root, opts = {}) {
   const win = root.ownerDocument.defaultView;
@@ -113,6 +116,10 @@ export function startTrafficMap(root, opts = {}) {
   // newer model fails, the old scene keeps rendering and must not be
   // paired with the newer model's nodes.
   let sceneNodeById = new Map();
+  // sceneLayout is the layout of the installed scene; the attack-path
+  // overlay places its beams by it, as the overlay uses sceneNodeById.
+  let sceneLayout = null;
+  const paths = opts.paths || null;
   let icons = new Map();
   let cam = null;
   let focus = null;
@@ -390,6 +397,7 @@ export function startTrafficMap(root, opts = {}) {
           backend.setScene(next);
           scene = next;
           sceneNodeById = nodeById;
+          sceneLayout = layout;
         } catch (err) {
           // The deadline is set only here, by an attempt that failed, so
           // backed-off frames cannot push it further out.
@@ -416,6 +424,7 @@ export function startTrafficMap(root, opts = {}) {
         const complete = backend.render(cam, dpr, time);
         if (complete) {
           drawOverlay(octx, scene, cam, dpr, time, painter, icons, sceneNodeById);
+          if (paths !== null && sceneLayout !== null) drawPaths(octx, cam, paths, sceneLayout.nodes);
           redraw = false;
         } else {
           // Empty base: clear the overlay too, so no labels of an earlier

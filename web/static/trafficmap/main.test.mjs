@@ -186,7 +186,7 @@ function flakyBuild(broken) {
 // setup starts the map against a fake window. prepare may arm failures
 // before startTrafficMap runs; build replaces buildScene and reducedMotion
 // makes prefers-reduced-motion match.
-function setup({ webgl = true, prepare = () => {}, build = undefined, reducedMotion = false } = {}) {
+function setup({ webgl = true, prepare = () => {}, build = undefined, reducedMotion = false, paths = undefined } = {}) {
   const env = { webgl, fail: {}, canvases: [] };
   prepare(env);
   const sent = [];
@@ -210,7 +210,9 @@ function setup({ webgl = true, prepare = () => {}, build = undefined, reducedMot
     },
   };
   const root = new FakeElement(doc, "div");
-  const map = startTrafficMap(root, build ? { buildScene: build } : {});
+  const opts = build ? { buildScene: build } : {};
+  if (paths !== undefined) opts.paths = paths;
+  const map = startTrafficMap(root, opts);
   let now = 0;
   const post = (data) => win.dispatch("message", { source: win.parent, origin: ORIGIN, data });
   return {
@@ -732,4 +734,49 @@ test("Canvas2DCullsOffscreenBeams", () => {
   assert.ok(!segmentVisible(-50, -50, -10, -10, 100, 100, 5));
   assert.ok(!segmentVisible(120, 0, 200, 100, 100, 100, 5));
   assert.ok(segmentVisible(103, 0, 200, 100, 100, 100, 5), "the margin counts");
+});
+
+// pathsSpy is an overlay whose beams getter counts the draws that read it.
+function pathsSpy() {
+  const spy = { reads: 0 };
+  spy.paths = {
+    rejected: false,
+    truncated: false,
+    marks: [],
+    get beams() {
+      spy.reads++;
+      return [];
+    },
+  };
+  return spy;
+}
+
+test("AttackPathOverlayIsDrawnOnlyWhenGiven", () => {
+  const spy = pathsSpy();
+  const h = setup({ webgl: false, paths: spy.paths });
+  h.tick(2);
+  assert.equal(spy.reads, 0, "nothing is drawn before a model arrives");
+  h.sendModel();
+  h.tick(3);
+  assert.ok(spy.reads >= 1, "the overlay is drawn with the scene");
+  assert.equal(h.errorMessages().length, 0);
+  h.map.stop();
+});
+
+test("AttackPathOverlayFailureIsAFrameFailure", () => {
+  const h = setup({
+    webgl: false,
+    paths: {
+      rejected: false,
+      truncated: false,
+      marks: [],
+      get beams() {
+        throw new Error("overlay failure");
+      },
+    },
+  });
+  h.sendModel();
+  h.tick(1);
+  assert.equal(h.status(), STATUS.frameError, "a throwing overlay is caught by the frame loop");
+  h.map.stop();
 });
