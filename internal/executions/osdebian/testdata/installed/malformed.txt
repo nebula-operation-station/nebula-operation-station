@@ -1,0 +1,13 @@
+nos-installed-v1
+P	installed	good-pkg	amd64	1.0-1	good-src	1.0-1		.
+P	installed	Bad_Name	amd64	1.0-1	bad	1.0-1		.
+P	installed	short-fields	amd64	1.0-1
+P	installed	extra-fields	amd64	1.0-1	extra	1.0-1		x	.
+P	weird-status	odd-status	amd64	1.0-1	odd	1.0-1		.
+P	installed	bad-version	amd64	1.0 1	bad	1.0-1		.
+P	installed	good-pkg	amd64	1.0-1	good-src	1.0-1		.
+P	installed	no-terminator	amd64	1.0-1	nt	1.0-1		x
+Q	unknown record type
+P	installed	other-good	all	2.0-1	other	2.0-1		.
+K	6.1.0-26-amd64	#1 SMP PREEMPT_DYNAMIC Debian 6.1.112-1 (2024-09-30)
+END	9
