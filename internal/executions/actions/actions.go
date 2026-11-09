@@ -200,6 +200,13 @@ var fsList []byte
 //go:embed scripts/package_list_updates.sh
 var packageListUpdates []byte
 
+// packageListInstalled is package.list_installed 1.0.0 (ADR 0011 D3): the
+// installed packages with source package and version plus the running
+// kernel, in osdebian.InstalledFormat for osdebian.ParseInstalled.
+//
+//go:embed scripts/package_list_installed.sh
+var packageListInstalled []byte
+
 //go:embed scripts/package_refresh.sh
 var packageRefresh []byte
 
@@ -372,6 +379,11 @@ var Builtin = []Action{
 		ID: "package.list_updates", Version: "1.0.0", Title: "Check updates",
 		Description: "Lists pending package updates (security, other, kernel) and whether a reboot is required, from the host's current package lists. Read-only (apt simulation, no root).",
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 2 * time.Minute, ReadOnly: true, Script: packageListUpdates, Retry: RetrySafe,
+	},
+	{
+		ID: "package.list_installed", Version: "1.0.0", Title: "List installed packages",
+		Description: "Installed packages with architecture, version, source package and source version from the dpkg database (dpkg-query -W), Built-Using for kernel images only, and the running kernel (uname -r, uname -v). No root, no apt, no network. Read-only.",
+		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 2 * time.Minute, ReadOnly: true, Script: packageListInstalled, Retry: RetrySafe,
 	},
 	{
 		ID: "package.refresh", Version: "1.0.0", Title: "Refresh package lists",
