@@ -294,9 +294,10 @@ func TestAssessmentTextLimits(t *testing.T) {
 		"carriage return":   "a\rb",
 		"DEL":               "a\x7fb",
 		"C1 control":        "a\u0085b",
-		"bidi override":     "a‮b",
-		"bidi isolate":      "a⁦b",
-		"replacement char":  "a�b",
+		"bidi override":     "a" + string(rune(0x202e)) + "b",
+		"bidi isolate":      "a" + string(rune(0x2066)) + "b",
+		"bidi mark":         "a" + string(rune(0x061c)) + "b",
+		"replacement char":  "a" + string(rune(0xfffd)) + "b",
 		"invalid utf8":      "a\xffb",
 	}
 	for name, text := range bad {

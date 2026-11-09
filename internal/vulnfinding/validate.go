@@ -425,6 +425,8 @@ func validateAssessmentText(s string) error {
 }
 
 func isBidiControl(r rune) bool {
-	return r == '؜' || r == '‎' || r == '‏' ||
-		(r >= '‪' && r <= '‮') || (r >= '⁦' && r <= '⁩')
+	// U+061C ALM, U+200E LRM, U+200F RLM, U+202A-U+202E embeddings and
+	// overrides, U+2066-U+2069 isolates.
+	return r == 0x061c || r == 0x200e || r == 0x200f ||
+		(r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069)
 }
