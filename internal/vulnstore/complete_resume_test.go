@@ -377,14 +377,6 @@ func TestServerFinishesCompletingRun(t *testing.T) {
 // uninterrupted complete. This is the bound the caller relies on: a
 // deadline on the sweep's context limits how long it holds the store.
 func TestSweepDeadlineLeavesCompletingRunResumable(t *testing.T) {
-	ref, _, _ := newPathEnv(t, ClassEvidenced)
-	refRun, refKeys := resumeScenario(t, ref)
-	want, err := ref.st.Complete(ref.ctx, refRun.ID)
-	if err != nil {
-		t.Fatalf("reference complete: %v", err)
-	}
-	wantStates := states(t, ref, refKeys)
-
 	e, _, _ := newPathEnv(t, ClassEvidenced)
 	r, keys := resumeScenario(t, e)
 	cut := func() context.Context {
@@ -412,16 +404,21 @@ func TestSweepDeadlineLeavesCompletingRunResumable(t *testing.T) {
 	if err != nil || run.state != "running" || !completing(t, e, r.ID) {
 		t.Fatalf("run after a cut sweep: %q, %v; want running and completing", run.state, err)
 	}
-	// The next sweep finishes it.
+	// The next sweep finishes it with every closure (the uninterrupted
+	// result of this scenario, see
+	// TestCompleteCancelledDuringApplyResumesToTheSameResult).
 	res, err = e.st.Prune(e.ctx)
 	if err != nil || res.ResumedRuns != 1 {
 		t.Fatalf("second sweep = %+v, %v; want 1 resumed run", res, err)
 	}
-	if got := states(t, e, keys); !reflect.DeepEqual(got, wantStates) {
-		t.Fatal("final states differ from an uninterrupted complete")
+	if run, err := loadRun(e.ctx, e.st.db, r.ID); err != nil || run.state != "completed" {
+		t.Fatalf("run after the second sweep: %q, %v; want completed", run.state, err)
 	}
 	got, err := e.st.CompletionOf(e.ctx, r.ID, "hermes-vuln")
-	if err != nil || !reflect.DeepEqual(got, want) {
-		t.Fatalf("saved completion = %+v, %v; want %+v", got, err, want)
+	if err != nil || got.ClosedEvidenced != 30+resumeBig {
+		t.Fatalf("saved completion = %+v, %v; want %d closed", got, err, 30+resumeBig)
+	}
+	for _, k := range keys {
+		e.wantState(t, k, StateFixed, ClosedByNOSInventory)
 	}
 }
