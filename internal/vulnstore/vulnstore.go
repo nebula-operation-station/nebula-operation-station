@@ -18,9 +18,10 @@
 //     durable completing state, so other writers of server.db never wait
 //     long, a complete that stops part-way is resumed by the retry with
 //     the same result, a retry after a restart reads the saved completion
-//     (CompletionOf) or resumes (ResumeComplete), and the server itself
-//     finishes a run its client left completing (ResumeCompleting at
-//     startup and in the sweep of expired runs);
+//     (CompletionOf) or resumes (ResumeComplete); for a run its client
+//     left completing for good the store offers ResumeCompleting (for
+//     startup) and Prune (the periodic sweep), which the server must call
+//     (wired in ticket vu14w; the store has no timer of its own);
 //   - feed sources: judged one by one against NOS's fixed source list and
 //     per-source high-water marks; a record resting on a source that is not
 //     accepted, undated or on probation after an admin mark reset only

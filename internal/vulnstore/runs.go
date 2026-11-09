@@ -380,6 +380,12 @@ func (s *Store) checkRunning(ctx context.Context, tx *sql.Tx, r runRow, now time
 // checkRunning): it finishes it instead (ResumeCompleting), so no run
 // stays half applied when its client does not come back. A failure to
 // finish a run does not stop the aborts; it is returned with the count.
+//
+// The store does not call it by itself: a batch, rejection or complete
+// for an expired run aborts that one run (checkRunning), and Prune, the
+// periodic sweep that the server wiring (ticket vu14w) is to call, runs
+// the same steps. It is for callers that want the aborts without the retention.
+// The caller contract is that of Prune.
 func (s *Store) AbortExpiredRuns(ctx context.Context) (int, error) {
 	_, rerr := s.ResumeCompleting(ctx)
 	n, err := s.abortExpiredRuns(ctx)
@@ -388,13 +394,27 @@ func (s *Store) AbortExpiredRuns(ctx context.Context) (int, error) {
 
 // ResumeCompleting finishes every run that a Complete left completing
 // (cancelled, out of time, or interrupted by a restart after part of its
-// closures committed) and returns how many it finished. The server calls
-// it at startup and, through AbortExpiredRuns and Prune, periodically, so
-// a run is finished even if its client never retries; the result is the
+// closures committed) and returns how many it finished. The result is the
 // one an uninterrupted complete would have made, and the client's late
 // retry reads it (CompletionOf). A run that its client or another process
 // finishes meanwhile is skipped. It goes on after a run fails to finish
 // and returns the joined errors.
+//
+// It is the startup entry point. The store does not call it by itself and
+// has no timer: until the server wiring (ticket vu14w) calls it once after
+// opening the store, and Prune (which calls it first) periodically, a run
+// whose client never retries stays completing. The caller must:
+//
+//   - call it once after Open, before or while serving the vuln API (a
+//     concurrent client Complete is safe: completes are serialized and a
+//     run finished by its client is skipped);
+//   - pass a context with a deadline: it resumes completing runs one after
+//     another, each in paced write transactions, and holds the store's
+//     complete lock meanwhile, so a client Complete for another run waits
+//     behind it; a context that ends stops it between apply transactions
+//     and leaves the run completing for the next call;
+//   - treat an error as "retry later" (log it, keep serving): the count
+//     is valid with it, and nothing it leaves is half applied.
 func (s *Store) ResumeCompleting(ctx context.Context) (int, error) {
 	ids, err := stringColumn(ctx, s.db, `SELECT id FROM vuln_runs WHERE state = 'running'
 		AND json_extract(report, '$.completing') IS NOT NULL ORDER BY run_seq`)

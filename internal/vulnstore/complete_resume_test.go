@@ -176,7 +176,7 @@ func TestCompleteCancelledDuringApplyResumesToTheSameResult(t *testing.T) {
 						}
 						// Past the time limit the completing run is not aborted
 						// by a batch or a retry; the retry still finishes it.
-						// (The server's own sweep finishes it too, see
+						// (ResumeCompleting and Prune finish it too, see
 						// TestServerFinishesCompletingRun.)
 						e.clk.Add(MaxRunDuration + time.Minute)
 						if _, err := e.st.SubmitBatch(e.ctx, r.ID, batchOf(2, []Subject{hostSubj("h00")})); !errors.Is(err, ErrRunNotRunning) {
@@ -273,8 +273,9 @@ func TestCompleteRefusesStaleProgress(t *testing.T) {
 }
 
 // A run whose client never comes back after a complete stopped part-way is
-// finished by the server: by the sweep of expired runs (AbortExpiredRuns,
-// also run by Prune), and by ResumeCompleting at startup on a fresh store.
+// finished by the store's server-side entry points (which the server wiring
+// calls, ticket vu14w): AbortExpiredRuns, Prune (the periodic sweep), and
+// ResumeCompleting at startup on a fresh store.
 // It ends completed (not aborted) with the closures and the completion of
 // an uninterrupted complete, and the client's late retry reads them.
 func TestServerFinishesCompletingRun(t *testing.T) {
@@ -367,5 +368,60 @@ func TestServerFinishesCompletingRun(t *testing.T) {
 				t.Fatalf("second resume = %d, %v; want 0", n, err)
 			}
 		})
+	}
+}
+
+// A sweep (Prune) whose context ends while it resumes a completing run
+// returns the context error and leaves the run completing, not aborted and
+// not half applied; the next sweep finishes it with the result of an
+// uninterrupted complete. This is the bound the caller relies on: a
+// deadline on the sweep's context limits how long it holds the store.
+func TestSweepDeadlineLeavesCompletingRunResumable(t *testing.T) {
+	ref, _, _ := newPathEnv(t, ClassEvidenced)
+	refRun, refKeys := resumeScenario(t, ref)
+	want, err := ref.st.Complete(ref.ctx, refRun.ID)
+	if err != nil {
+		t.Fatalf("reference complete: %v", err)
+	}
+	wantStates := states(t, ref, refKeys)
+
+	e, _, _ := newPathEnv(t, ClassEvidenced)
+	r, keys := resumeScenario(t, e)
+	cut := func() context.Context {
+		ctx, cancel := context.WithCancel(e.ctx)
+		t.Cleanup(cancel)
+		e.st.chunkDone = func(int) { cancel() }
+		return ctx
+	}
+	// The client's complete stops after its first apply transaction.
+	if _, err := e.st.Complete(cut(), r.ID); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cut complete: %v, want context.Canceled", err)
+	}
+	e.clk.Add(MaxRunDuration + time.Minute)
+	// The sweep's context ends after the resume's first apply transaction
+	// (the scenario has three).
+	res, err := e.st.Prune(cut())
+	e.st.chunkDone = nil
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cut sweep: %+v, %v; want context.Canceled", res, err)
+	}
+	if res.ResumedRuns != 0 {
+		t.Fatalf("cut sweep resumed %d runs, want 0", res.ResumedRuns)
+	}
+	run, err := loadRun(e.ctx, e.st.db, r.ID)
+	if err != nil || run.state != "running" || !completing(t, e, r.ID) {
+		t.Fatalf("run after a cut sweep: %q, %v; want running and completing", run.state, err)
+	}
+	// The next sweep finishes it.
+	res, err = e.st.Prune(e.ctx)
+	if err != nil || res.ResumedRuns != 1 {
+		t.Fatalf("second sweep = %+v, %v; want 1 resumed run", res, err)
+	}
+	if got := states(t, e, keys); !reflect.DeepEqual(got, wantStates) {
+		t.Fatal("final states differ from an uninterrupted complete")
+	}
+	got, err := e.st.CompletionOf(e.ctx, r.ID, "hermes-vuln")
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("saved completion = %+v, %v; want %+v", got, err, want)
 	}
 }

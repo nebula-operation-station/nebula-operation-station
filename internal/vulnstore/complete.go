@@ -82,7 +82,8 @@ type Completion struct {
 // pauses add about 8 s; MaxFindingsPerRun dropped holds take about 200
 // transactions, under two minutes. The largest conceivable complete
 // (about 600000 rows) may outlast the API's complete budget; it is then
-// resumed by the retry or by the server (ResumeCompleting), with the same
+// resumed by the retry or by ResumeCompleting (to be called by the server
+// at startup and through Prune, wired in ticket vu14w), with the same
 // result.
 const (
 	maxApplyRows = 1024
@@ -159,7 +160,7 @@ func (p *completeProgress) sameCursor(q *completeProgress) bool {
 // fits one apply transaction is therefore all or nothing. A larger
 // complete that stops later leaves the run completing: it takes no more
 // batches and is not aborted at its time limit, and the next Complete (or
-// ResumeComplete, or the server's ResumeCompleting) resumes after the
+// ResumeComplete, or ResumeCompleting and Prune) resumes after the
 // last committed transaction with the saved guard decision, time and
 // counts, so it ends with the closures and the completion an
 // uninterrupted complete would have made. Once Complete has returned,

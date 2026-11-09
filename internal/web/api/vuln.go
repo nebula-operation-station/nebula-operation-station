@@ -60,8 +60,10 @@ const (
 	// on a read snapshot and applies it in short, paced write
 	// transactions with a durable completing state, so a complete that
 	// runs out of time either applied nothing (the run stays open) or is
-	// resumed by the retry, or by the store's own sweep
-	// (vulnstore.ResumeCompleting) if the client does not come back. The
+	// resumed by the retry. If the client does not come back, only
+	// vulnstore.ResumeCompleting (startup) and vulnstore.Prune (periodic
+	// sweep) finish it; this handler calls neither, the server wiring
+	// must (ticket vu14w), and until it does the run stays completing. The
 	// apply phase is paced by rows: MaxFindingsPerRun superseded holds
 	// took about 90 s in vulnstore's
 	// TestCompleteDropsSupersededHoldsInRowBoundedTransactions, most of it
