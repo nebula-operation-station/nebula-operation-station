@@ -1,0 +1,44 @@
+{{define "content"}}
+{{with .Paths}}
+<div class="toolbar">
+  <h1>Attack path {{.Rank}} to {{.Target}}</h1>
+  <a class="button button--small button--secondary" href="{{.ListHref}}">All attack paths</a>
+  <a class="button button--small button--secondary" href="{{.MapHref}}">Show on the traffic map</a>
+</div>
+<p class="hint">From {{.Entry}} to {{.Target}} ({{.TargetNode}}), crown-jewel impact {{.Impact}}. Path {{.Hash}}, formula {{.Formula}}.</p>
+{{if not .Known}}<p class="status status--warning">The formula {{.Formula}} is not known to this page: the inputs are shown, the explanation is not.</p>{{end}}
+{{if .Incomplete}}<p class="status status--warning">The time budget stopped the search for this crown jewel; this path may not be among the top ones.</p>{{end}}
+{{if .Possible}}<p class="status status--warning">At least one step is only possible: the port of the affected service is unknown.</p>{{end}}
+{{if .Assumed}}<p class="status status--warning">At least one step follows an assumed edge (same VLAN, all ports), so its value is halved.</p>{{end}}
+
+<section class="panel" aria-label="Steps">
+  <h2>Steps</h2>
+  <ol>
+  {{range .Steps}}
+  <li>
+    <h3>{{.What}}</h3>
+    <ul>
+      <li>From {{.From}} to {{.To}}{{if .Edge}} over {{.Edge}}{{end}}{{if .Basis}}: {{.Basis}}{{end}}.</li>
+      {{if .VulnID}}<li>Finding: {{.VulnID}}{{if .Pkg}} in {{.Pkg}}{{end}}{{if .Vector}} ({{.Vector}}){{end}}{{if .Stale}} <span class="status status--warning">stale: rests on an old run or feed</span>{{end}}</li>{{end}}
+      {{range .Terms}}<li>{{.}}</li>{{end}}
+      <li>{{.Formula}}{{if .Assumed}} {{.Assumed}}{{end}}</li>
+      {{if .Mismatch}}<li class="status status--error">The stored value e = {{.E}} differs from this recomputation; trust neither until the computation is rerun.</li>{{end}}
+      {{if .Possible}}<li class="status status--warning">Possible step: port mapping unknown, so it may not be usable.</li>{{end}}
+      <li>Impact of this step: {{.Grants}}.</li>
+      <li>Fix: {{template "fix" .Fix}}</li>
+    </ul>
+  </li>
+  {{end}}
+  </ol>
+</section>
+
+<section class="panel" aria-label="Totals">
+  <h2>Totals</h2>
+  <p>{{.LFormula}}</p>
+  <p>{{.RFormula}}</p>
+  <p class="hint">Steps are treated as independent, an approximation (ADR 0011 D10). Control, credential and escape steps need no vulnerability and count as e = 1. KEV counts 0.9, EPSS its probability, the CVSS term 0.3 × exploitability / 3.9 is a weak prior; e is the largest of these.</p>
+</section>
+{{end}}
+{{end}}
+
+{{define "fix"}}{{if .Href}}<a class="button button--small" href="{{.Href}}">{{.Text}}</a> <span class="hint">{{if .Verified}}fix verified{{else}}fix not verified{{end}}{{if .Note}}; {{.Note}}{{end}}</span>{{else}}<span class="hint">{{.None}}</span>{{end}}{{end}}
