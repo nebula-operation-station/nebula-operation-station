@@ -273,9 +273,10 @@ func TestCompleteRefusesStaleProgress(t *testing.T) {
 }
 
 // A run whose client never comes back after a complete stopped part-way is
-// finished by the store's server-side entry points (which the server wiring
-// calls, ticket vu14w): AbortExpiredRuns, Prune (the periodic sweep), and
-// ResumeCompleting at startup on a fresh store.
+// finished by the store's server-side entry points (cmd/nebula-server
+// calls ResumeCompleting at startup and Prune periodically):
+// AbortExpiredRuns, Prune (the periodic sweep), and ResumeCompleting at
+// startup on a fresh store.
 // It ends completed (not aborted) with the closures and the completion of
 // an uninterrupted complete, and the client's late retry reads them.
 func TestServerFinishesCompletingRun(t *testing.T) {

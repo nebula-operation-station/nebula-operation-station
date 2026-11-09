@@ -20,8 +20,9 @@
 //     the same result, a retry after a restart reads the saved completion
 //     (CompletionOf) or resumes (ResumeComplete); for a run its client
 //     left completing for good the store offers ResumeCompleting (for
-//     startup) and Prune (the periodic sweep), which the server must call
-//     (wired in ticket vu14w; the store has no timer of its own);
+//     startup) and Prune (the periodic sweep); the store has no timer of
+//     its own, cmd/nebula-server calls ResumeCompleting once at startup
+//     and Prune every 15 minutes, each with a 10 minute deadline;
 //   - feed sources: judged one by one against NOS's fixed source list and
 //     per-source high-water marks; a record resting on a source that is not
 //     accepted, undated or on probation after an admin mark reset only

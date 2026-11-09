@@ -82,9 +82,8 @@ type Completion struct {
 // pauses add about 8 s; MaxFindingsPerRun dropped holds take about 200
 // transactions, under two minutes. The largest conceivable complete
 // (about 600000 rows) may outlast the API's complete budget; it is then
-// resumed by the retry or by ResumeCompleting (to be called by the server
-// at startup and through Prune, wired in ticket vu14w), with the same
-// result.
+// resumed by the retry or by ResumeCompleting (cmd/nebula-server calls it
+// at startup and through Prune every 15 minutes), with the same result.
 const (
 	maxApplyRows = 1024
 	applyPause   = 250 * time.Millisecond

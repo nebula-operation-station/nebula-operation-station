@@ -383,8 +383,8 @@ func (s *Store) checkRunning(ctx context.Context, tx *sql.Tx, r runRow, now time
 //
 // The store does not call it by itself: a batch, rejection or complete
 // for an expired run aborts that one run (checkRunning), and Prune, the
-// periodic sweep that the server wiring (ticket vu14w) is to call, runs
-// the same steps. It is for callers that want the aborts without the retention.
+// periodic sweep cmd/nebula-server calls every 15 minutes, runs the same
+// steps. It is for callers that want the aborts without the retention.
 // The caller contract is that of Prune.
 func (s *Store) AbortExpiredRuns(ctx context.Context) (int, error) {
 	_, rerr := s.ResumeCompleting(ctx)
@@ -401,9 +401,11 @@ func (s *Store) AbortExpiredRuns(ctx context.Context) (int, error) {
 // and returns the joined errors.
 //
 // It is the startup entry point. The store does not call it by itself and
-// has no timer: until the server wiring (ticket vu14w) calls it once after
-// opening the store, and Prune (which calls it first) periodically, a run
-// whose client never retries stays completing. The caller must:
+// has no timer: cmd/nebula-server calls it once in the background right
+// after opening the store (10 minute deadline, while the vuln API already
+// serves), and Prune, which calls it first, every 15 minutes, so a run
+// whose client never retries is finished within one interval. The caller
+// must:
 //
 //   - call it once after Open, before or while serving the vuln API (a
 //     concurrent client Complete is safe: completes are serialized and a
