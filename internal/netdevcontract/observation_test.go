@@ -225,11 +225,13 @@ func TestDecodeObservationRejectsUnknownFields(t *testing.T) {
 		"case duplicate device_id":  strings.Replace(string(good), `"device_id"`, `"DEVICE_ID":"other","device_id"`, 1),
 		"case duplicate trailing":   strings.Replace(string(good), `"device_id":"`, `"DEVICE_ID":"other","device_id":"`, 1),
 		"upper-case only key":       strings.Replace(string(good), `"device_id"`, `"Device_ID"`, 1),
-		"case duplicate facts":      strings.Replace(string(good), `"facts"`, `"Facts":{"state":"unavailable","reason":"not_supported"},"facts"`, 1),
+		"case duplicate facts":      strings.Replace(string(good), `"facts"`, `"Facts":{"state":"unavailable","reason":"unsupported"},"facts"`, 1),
 		"case duplicate generation": strings.Replace(string(good), `"trust_generation"`, `"Trust_Generation":2,"trust_generation"`, 1),
-		"case dataset state":        strings.Replace(string(good), `"state"`, `"STATE"`, 1),
-		"long s folds to s":         strings.Replace(string(good), `"state"`, `"`+string(rune(0x017F))+`tate"`, 1),
-		"case duplicate rule":       strings.Replace(string(pgood), `"action"`, `"ACTION":"deny","action"`, 1),
+		// struct fields, not dataset keys: Dataset.UnmarshalJSON has its own
+		// exact key check, so only these exercise the document walk
+		"case port field":     strings.Replace(string(good), `"oper_state"`, `"OPER_STATE"`, 1),
+		"long s folds to s":   strings.Replace(string(good), `"oper_state"`, `"oper_`+string(rune(0x017F))+`tate"`, 1),
+		"case duplicate rule": strings.Replace(string(pgood), `"action"`, `"ACTION":"deny","action"`, 1),
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -363,6 +365,43 @@ func TestObservationRejectsMalformedValues(t *testing.T) {
 			mutate(&o)
 			mustInvalid(t, o)
 		})
+	}
+}
+
+func TestLongTimeStringGivesShortError(t *testing.T) {
+	good, err := MarshalObservation(baseCBSObservation())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamp, err := json.Marshal(observedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	long := `"` + strings.Repeat("9", MaxJSONStringBytes) + `"`
+	raw := strings.Replace(string(good), `"observed_at":`+string(stamp), `"observed_at":`+long, 1)
+	if raw == string(good) {
+		t.Fatal("test case did not modify the document")
+	}
+	_, err = DecodeObservation([]byte(raw))
+	if !errors.Is(err, ErrInvalid) {
+		t.Fatalf("got %.200v, want ErrInvalid", err)
+	}
+	if n := len(err.Error()); n > maxErrorBytes {
+		t.Fatalf("error is %d bytes, want at most %d", n, maxErrorBytes)
+	}
+}
+
+func TestFQDNAddressMustBeASCII(t *testing.T) {
+	for v, want := range map[string]bool{
+		"dns.example.org": true,
+		"DNS.Example.ORG": true,
+		// KELVIN SIGN lowers to ASCII k under strings.ToLower
+		string(rune(0x212A)) + "example.com": false,
+		"bücher.example":                     false,
+	} {
+		if got := validAddressValue(AddressFQDN, v); got != want {
+			t.Errorf("validAddressValue(fqdn, %q) = %v, want %v", v, got, want)
+		}
 	}
 }
 

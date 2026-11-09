@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Availability is the state of one dataset in an observation.
@@ -1085,9 +1086,21 @@ func validAddressValue(t AddressType, v string) bool {
 		addr, mask, ok := strings.Cut(v, "/")
 		return ok && validIP(addr) && validIP(mask)
 	case AddressFQDN:
-		return validDNSName(strings.ToLower(v))
+		// lower ASCII only: strings.ToLower maps non-ASCII lookalikes
+		// such as KELVIN SIGN to ASCII letters
+		return isASCII(v) && validDNSName(strings.ToLower(v))
 	}
 	return false
+}
+
+// isASCII reports whether every byte of s is ASCII.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= utf8.RuneSelf {
+			return false
+		}
+	}
+	return true
 }
 
 func validateHitCounts(p *problems, hs []HitCount) {
