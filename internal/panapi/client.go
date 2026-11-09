@@ -387,6 +387,7 @@ func errorClass(err error) string {
 		{ErrHTTPStatus, "http_status"},
 		{ErrAPIStatus, "api_error"},
 		{ErrInvalidKey, "invalid_key"},
+		{ErrKeyUnavailable, "key_unavailable"},
 		{context.DeadlineExceeded, "timeout"},
 		{context.Canceled, "canceled"},
 	} {

@@ -549,14 +549,19 @@ func TestInvalidKeyNeverSent(t *testing.T) {
 func TestKeySourceFailureSendsNothing(t *testing.T) {
 	ts := newTestServer(t, nil, replyXML(okBody))
 	locked := errors.New("vault locked")
+	var buf bytes.Buffer
 	c := newTestClient(t, Options{
 		Endpoint: ts.endpoint(t),
 		Trust:    ts.leafPin(),
 		Key:      func(context.Context) (string, error) { return "", locked },
+		Logger:   slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})),
 	})
 	_, err := c.Do(context.Background(), SystemInfoRequest())
 	if !errors.Is(err, ErrKeyUnavailable) || !errors.Is(err, locked) {
 		t.Fatalf("err = %v", err)
+	}
+	if !strings.Contains(buf.String(), "error=key_unavailable") {
+		t.Fatalf("log lacks error class: %s", buf.String())
 	}
 	if ts.hits.Load() != 0 {
 		t.Fatal("request sent without a key")
