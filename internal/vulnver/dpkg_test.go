@@ -121,16 +121,16 @@ func TestCompareDpkgPolicyVectors(t *testing.T) {
 
 func TestParseDpkgSplitsEpochUpstreamRevision(t *testing.T) {
 	cases := []struct {
-		in                  string
-		epoch               uint32
-		upstream, revision  string
-		hasEpoch, hasRevNum bool
+		in                 string
+		epoch              uint32
+		upstream, revision string
 	}{
-		{"1.0", 0, "1.0", "", false, false},
-		{"1:1.0", 1, "1.0", "", true, false},
-		{"1:1.0-1-2", 1, "1.0-1", "2", true, true},
-		{"3.0.15-1~deb12u1", 0, "3.0.15", "1~deb12u1", false, true},
-		{"2147483647:1", 2147483647, "1", "", true, false},
+		{"1.0", 0, "1.0", ""},
+		{"1:1.0", 1, "1.0", ""},
+		{"1:1.0-1-2", 1, "1.0-1", "2"},
+		{"3.0.15-1~deb12u1", 0, "3.0.15", "1~deb12u1"},
+		{"2147483647:1", 2147483647, "1", ""},
+		{"007:1.0", 7, "1.0", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {

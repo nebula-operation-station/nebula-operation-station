@@ -19,24 +19,11 @@ type DpkgVersion struct {
 	// Revision is the Debian revision; empty when absent.
 	Revision string
 
-	hasEpoch    bool
-	hasRevision bool
+	raw string
 }
 
-// String returns the version in its original form.
-func (v DpkgVersion) String() string {
-	var b strings.Builder
-	if v.hasEpoch {
-		b.WriteString(strconv.FormatUint(uint64(v.Epoch), 10))
-		b.WriteByte(':')
-	}
-	b.WriteString(v.Upstream)
-	if v.hasRevision {
-		b.WriteByte('-')
-		b.WriteString(v.Revision)
-	}
-	return b.String()
-}
+// String returns the version exactly as parsed.
+func (v DpkgVersion) String() string { return v.raw }
 
 // ParseDpkg parses a Debian version strictly:
 //
@@ -53,57 +40,56 @@ func (v DpkgVersion) String() string {
 func ParseDpkg(s string) (DpkgVersion, error) {
 	var v DpkgVersion
 	if len(s) == 0 {
-		return v, fmt.Errorf("dpkg version: empty: %w", ErrInvalidVersion)
+		return DpkgVersion{}, fmt.Errorf("dpkg version: empty: %w", ErrInvalidVersion)
 	}
 	if len(s) > MaxVersionLen {
-		return v, fmt.Errorf("dpkg version: %d bytes exceeds %d: %w", len(s), MaxVersionLen, ErrInvalidVersion)
+		return DpkgVersion{}, fmt.Errorf("dpkg version: %d bytes exceeds %d: %w", len(s), MaxVersionLen, ErrInvalidVersion)
 	}
 	rest := s
 	if i := strings.IndexByte(rest, ':'); i >= 0 {
 		ep := rest[:i]
 		if ep == "" {
-			return v, fmt.Errorf("dpkg version %s: empty epoch: %w", quote(s), ErrInvalidVersion)
+			return DpkgVersion{}, fmt.Errorf("dpkg version %s: empty epoch: %w", quote(s), ErrInvalidVersion)
 		}
 		for j := 0; j < len(ep); j++ {
 			if !isDigit(ep[j]) {
-				return v, fmt.Errorf("dpkg version %s: epoch is not a number: %w", quote(s), ErrInvalidVersion)
+				return DpkgVersion{}, fmt.Errorf("dpkg version %s: epoch is not a number: %w", quote(s), ErrInvalidVersion)
 			}
 		}
 		n, err := strconv.ParseUint(ep, 10, 32)
 		if err != nil || n > math.MaxInt32 {
-			return v, fmt.Errorf("dpkg version %s: epoch out of range: %w", quote(s), ErrInvalidVersion)
+			return DpkgVersion{}, fmt.Errorf("dpkg version %s: epoch out of range: %w", quote(s), ErrInvalidVersion)
 		}
 		v.Epoch = uint32(n)
-		v.hasEpoch = true
 		rest = rest[i+1:]
 	}
 	if i := strings.LastIndexByte(rest, '-'); i >= 0 {
 		v.Revision = rest[i+1:]
-		v.hasRevision = true
 		rest = rest[:i]
 		if v.Revision == "" {
-			return v, fmt.Errorf("dpkg version %s: empty revision: %w", quote(s), ErrInvalidVersion)
+			return DpkgVersion{}, fmt.Errorf("dpkg version %s: empty revision: %w", quote(s), ErrInvalidVersion)
 		}
 		for j := 0; j < len(v.Revision); j++ {
 			c := v.Revision[j]
 			if !isAlnum(c) && c != '.' && c != '+' && c != '~' {
-				return v, fmt.Errorf("dpkg version %s: invalid character in revision: %w", quote(s), ErrInvalidVersion)
+				return DpkgVersion{}, fmt.Errorf("dpkg version %s: invalid character in revision: %w", quote(s), ErrInvalidVersion)
 			}
 		}
 	}
 	v.Upstream = rest
 	if v.Upstream == "" {
-		return v, fmt.Errorf("dpkg version %s: empty upstream version: %w", quote(s), ErrInvalidVersion)
+		return DpkgVersion{}, fmt.Errorf("dpkg version %s: empty upstream version: %w", quote(s), ErrInvalidVersion)
 	}
 	if !isDigit(v.Upstream[0]) {
-		return v, fmt.Errorf("dpkg version %s: upstream version does not start with a digit: %w", quote(s), ErrInvalidVersion)
+		return DpkgVersion{}, fmt.Errorf("dpkg version %s: upstream version does not start with a digit: %w", quote(s), ErrInvalidVersion)
 	}
 	for j := 0; j < len(v.Upstream); j++ {
 		c := v.Upstream[j]
 		if !isAlnum(c) && c != '.' && c != '+' && c != '~' && c != '-' {
-			return v, fmt.Errorf("dpkg version %s: invalid character in upstream version: %w", quote(s), ErrInvalidVersion)
+			return DpkgVersion{}, fmt.Errorf("dpkg version %s: invalid character in upstream version: %w", quote(s), ErrInvalidVersion)
 		}
 	}
+	v.raw = s
 	return v, nil
 }
 
