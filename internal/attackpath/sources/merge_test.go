@@ -393,3 +393,68 @@ func TestMergeAliasConflictAcrossResults(t *testing.T) {
 		t.Fatalf("conflicting alias applied: %+v", rep)
 	}
 }
+
+func TestMergeOverBuildNodeCapIsNeverComplete(t *testing.T) {
+	// More nodes than attackpath.MaxNodes but fewer than its input cap:
+	// the Builder holds them all and drops the excess only in Build, so
+	// no input limit fires. The report must still not read complete.
+	r := Result{Source: SourceCredentials, Status: StatusComplete}
+	for i := range attackpath.MaxNodes + 1 {
+		r.Nodes = append(r.Nodes, attackpath.Node{ID: fmt.Sprintf("host:h%06d", i), Kind: attackpath.NodeHost})
+	}
+	rs := append(completeStubs(SourceDocker, SourceFirewall, SourceFlows, SourcePlacements, SourceVLAN), r)
+	b := attackpath.NewBuilder()
+	rep, err := Merge(b, rs...)
+	if err != nil || rep.Rejected != 0 || rep.InputLimited != 0 {
+		t.Fatalf("merge: %v rejected %d input_limited %d", err, rep.Rejected, rep.InputLimited)
+	}
+	if !b.Build().Truncated() {
+		t.Fatal("fixture does not truncate the built graph")
+	}
+	if rep.Complete() || !rep.GraphTruncated {
+		t.Fatalf("truncated graph: complete=%v graph_truncated=%v", rep.Complete(), rep.GraphTruncated)
+	}
+	if !slices.Contains(rep.Uncertain, Uncertainty{Source: SourceGraph, Kind: UncertainTruncated}) {
+		t.Fatalf("truncation not named in %v", rep.Uncertain)
+	}
+}
+
+func TestMergeOverBuildEdgeCapIsNeverComplete(t *testing.T) {
+	// More edges than attackpath.MaxEdges, within one kind's input cap.
+	const hosts = 300 // 300*299 possible credential edges > MaxEdges
+	r := Result{Source: SourceCredentials, Status: StatusComplete}
+	for i := range hosts {
+		r.Nodes = append(r.Nodes, attackpath.Node{ID: fmt.Sprintf("host:h%03d", i), Kind: attackpath.NodeHost})
+	}
+	for i := range hosts {
+		for j := range hosts {
+			if i != j && len(r.Edges) <= attackpath.MaxEdges {
+				r.Edges = append(r.Edges, attackpath.Edge{From: r.Nodes[i].ID, To: r.Nodes[j].ID, Kind: attackpath.EdgeCredential})
+			}
+		}
+	}
+	rs := append(completeStubs(SourceDocker, SourceFirewall, SourceFlows, SourcePlacements, SourceVLAN), r)
+	b := attackpath.NewBuilder()
+	rep, err := Merge(b, rs...)
+	if err != nil || rep.Rejected != 0 || rep.InputLimited != 0 {
+		t.Fatalf("merge: %v rejected %d input_limited %d", err, rep.Rejected, rep.InputLimited)
+	}
+	if !b.Build().Truncated() {
+		t.Fatal("fixture does not truncate the built graph")
+	}
+	if rep.Complete() || !rep.GraphTruncated {
+		t.Fatalf("truncated graph: complete=%v graph_truncated=%v", rep.Complete(), rep.GraphTruncated)
+	}
+}
+
+func TestMergeUntruncatedGraphStaysComplete(t *testing.T) {
+	r := Result{Source: SourceCredentials, Status: StatusComplete}
+	for i := range attackpath.MaxNodes - 2 { // plus the two entry nodes
+		r.Nodes = append(r.Nodes, attackpath.Node{ID: fmt.Sprintf("host:h%06d", i), Kind: attackpath.NodeHost})
+	}
+	rs := append(completeStubs(SourceDocker, SourceFirewall, SourceFlows, SourcePlacements, SourceVLAN), r)
+	rep, err := Merge(attackpath.NewBuilder(), rs...)
+	if err != nil || !rep.Complete() || rep.GraphTruncated {
+		t.Fatalf("graph at the cap: %v complete=%v graph_truncated=%v", err, rep.Complete(), rep.GraphTruncated)
+	}
+}

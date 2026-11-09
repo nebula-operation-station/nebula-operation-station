@@ -66,6 +66,9 @@ const (
 	SourceCredentials = "credentials"
 	SourceFirewall    = "firewall"
 	SourceVLAN        = "vlan"
+	// SourceGraph names the uncertainty Merge records about the built
+	// graph itself, not about one data source; it is no required source.
+	SourceGraph = "graph"
 )
 
 // requiredSources are the data sources ADR 0011 D10 builds the graph from,
@@ -405,6 +408,11 @@ type Report struct {
 	// input caps, and edges lost with them; the graph is then marked
 	// truncated.
 	InputLimited int
+	// GraphTruncated is set when the built graph is truncated: Build drops
+	// nodes beyond attackpath.MaxNodes and edges beyond attackpath.MaxEdges
+	// even when every input was accepted. It is also an UncertainTruncated
+	// record of SourceGraph.
+	GraphTruncated bool
 }
 
 // Coverage returns the overall coverage figure: the sum of all sources'
@@ -425,11 +433,12 @@ func (r Report) Coverage() Coverage {
 }
 
 // Complete reports whether every required source was merged and read
-// completely, nothing is uncertain and the Builder neither rejected nor
-// dropped any input. Only then may "no path found" read as "no path".
+// completely, nothing is uncertain, the Builder neither rejected nor
+// dropped any input and the built graph is not truncated. Only then may
+// "no path found" read as "no path".
 func (r Report) Complete() bool {
 	if len(r.Missing) > 0 || len(r.Uncertain) > 0 || r.Overflow > 0 ||
-		r.Rejected > 0 || r.InputLimited > 0 || len(r.Sources) == 0 {
+		r.Rejected > 0 || r.InputLimited > 0 || r.GraphTruncated || len(r.Sources) == 0 {
 		return false
 	}
 	for _, s := range r.Sources {
@@ -446,6 +455,9 @@ func (r Report) Complete() bool {
 // reported as UncertainAliasConflict. Builder conflicts (same ID, other
 // label) are resolved by the Builder and not counted; invalid inputs are
 // counted in Rejected and input-limit drops and evictions in InputLimited.
+// When the graph b then builds is truncated (by its MaxNodes and MaxEdges
+// caps or an input limit), GraphTruncated is set and an UncertainTruncated
+// record of SourceGraph is added.
 // A required source without a result is listed in Missing and reported as
 // UncertainSourceMissing.
 //
@@ -574,6 +586,12 @@ func Merge(b *attackpath.Builder, results ...Result) (Report, error) {
 				rep.Rejected++
 			}
 		}
+	}
+	// Build applies MaxNodes and MaxEdges after the input caps: a graph cut
+	// there is incomplete although every input was accepted.
+	if b.Build().Truncated() {
+		rep.GraphTruncated = true
+		addU(Uncertainty{Source: SourceGraph, Kind: UncertainTruncated})
 	}
 	slices.SortFunc(rep.Sources, func(x, y SourceReport) int { return cmp.Compare(x.Source, y.Source) })
 	slices.SortFunc(rep.Uncertain, compareUncertainty)
