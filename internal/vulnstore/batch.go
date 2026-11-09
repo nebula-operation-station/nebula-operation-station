@@ -99,7 +99,7 @@ func (s *Store) RejectBatch(ctx context.Context, runID string, seq int64, bodySH
 // write-ordering rule; not_affected records become closure requests for
 // complete. Batches are idempotent by (run, Seq) and body hash.
 func (s *Store) SubmitBatch(ctx context.Context, runID string, b Batch) (BatchResult, error) {
-	if len(b.Items)+len(b.Rejected) > MaxFindingsPerBatch || b.Seq < 0 {
+	if len(b.Items)+len(b.Rejected) > MaxFindingsPerBatch || len(b.Covered) > MaxCoveredPerBatch || b.Seq < 0 {
 		return BatchResult{}, fmt.Errorf("vulnstore: submit batch: %w", ErrBatchTooLarge)
 	}
 	for _, c := range b.Covered {
@@ -172,6 +172,17 @@ func (s *Store) SubmitBatch(ctx context.Context, runID string, b Batch) (BatchRe
 	for _, c := range b.Covered {
 		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO vuln_run_subjects (run_id, subject) VALUES (?, ?)`, runID, c.String()); err != nil {
 			return BatchResult{}, fmt.Errorf("vulnstore: submit batch: covered: %w", err)
+		}
+	}
+	// Counted after the inserts so a subject the run already covers does
+	// not count twice; over the limit the whole batch rolls back.
+	if len(b.Covered) > 0 {
+		var covered int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM vuln_run_subjects WHERE run_id = ?`, runID).Scan(&covered); err != nil {
+			return BatchResult{}, fmt.Errorf("vulnstore: submit batch: covered: %w", err)
+		}
+		if covered > MaxCoveredPerRun {
+			return BatchResult{}, fmt.Errorf("vulnstore: submit batch: covered: %w", ErrBatchTooLarge)
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE vuln_runs SET finding_count = finding_count + ?, superseded = superseded + ? WHERE id = ?`,

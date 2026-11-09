@@ -54,6 +54,12 @@ const (
 	// MaxFindingsPerBatch and MaxFindingsPerRun are the D5 limits.
 	MaxFindingsPerBatch = 1000
 	MaxFindingsPerRun   = 200000
+	// MaxCoveredPerBatch and MaxCoveredPerRun bound the subjects a run
+	// claims to cover (D3 last_part). Each covered subject becomes a
+	// closure plan, a write transaction at complete and a watermark row,
+	// so a hostile batch must not name an unbounded number of them.
+	MaxCoveredPerBatch = MaxFindingsPerBatch
+	MaxCoveredPerRun   = 10000
 	// MaxRunningPerToken: two concurrent runs per token (D5).
 	MaxRunningPerToken = 2
 	// MaxUnknownSourcesShown: unknown source IDs listed in a run report;
@@ -111,8 +117,9 @@ var (
 	ErrRunExpired = errors.New("run exceeded its time limit and was aborted")
 	// ErrBatchConflict: a batch_seq repeated with a different body hash.
 	ErrBatchConflict = errors.New("batch repeated with a different body")
-	// ErrBatchTooLarge: more than MaxFindingsPerBatch records, or the run
-	// would exceed MaxFindingsPerRun.
+	// ErrBatchTooLarge: more than MaxFindingsPerBatch records or
+	// MaxCoveredPerBatch covered subjects, or the run would exceed
+	// MaxFindingsPerRun or MaxCoveredPerRun.
 	ErrBatchTooLarge = errors.New("batch exceeds finding limits")
 	// ErrInvalidInput: a caller-supplied value fails its bound.
 	ErrInvalidInput = errors.New("invalid input")

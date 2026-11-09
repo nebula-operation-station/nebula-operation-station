@@ -4,6 +4,7 @@ package vulnstore
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
@@ -69,6 +70,60 @@ func TestRejectedKeysCountAgainstRunLimit(t *testing.T) {
 	b.Rejected = b.Rejected[:1]
 	if _, err := e.st.SubmitBatch(e.ctx, r.ID, b); err != nil {
 		t.Fatalf("rejected-only batch at the limit: %v", err)
+	}
+}
+
+func coveredSubjects(n int) []Subject {
+	out := make([]Subject, n)
+	for i := range out {
+		out[i] = hostSubj(fmt.Sprintf("h%05d", i))
+	}
+	return out
+}
+
+func runSubjectCount(t *testing.T, e *env, runID string) int {
+	t.Helper()
+	var n int
+	if err := e.st.db.QueryRow(`SELECT COUNT(*) FROM vuln_run_subjects WHERE run_id = ?`, runID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+func TestCoveredSubjectsPerBatchBounded(t *testing.T) {
+	e := newEnv(t)
+	r := e.start(t)
+	if _, err := e.st.SubmitBatch(e.ctx, r.ID, batchOf(0, coveredSubjects(MaxCoveredPerBatch+1))); !errors.Is(err, ErrBatchTooLarge) {
+		t.Fatalf("batch over the covered limit: %v, want ErrBatchTooLarge", err)
+	}
+	if n := runSubjectCount(t, e, r.ID); n != 0 {
+		t.Fatalf("refused batch stored %d covered subjects", n)
+	}
+	if _, err := e.st.SubmitBatch(e.ctx, r.ID, batchOf(0, coveredSubjects(MaxCoveredPerBatch))); err != nil {
+		t.Fatalf("batch at the covered limit: %v", err)
+	}
+}
+
+func TestCoveredSubjectsPerRunBounded(t *testing.T) {
+	e := newEnv(t)
+	r := e.start(t)
+	// Fill the run up to one below the limit with distinct subjects.
+	if _, err := e.st.db.Exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+		INSERT INTO vuln_run_subjects (run_id, subject) SELECT ?, 'host/fill' || i FROM n`, MaxCoveredPerRun-1, r.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.st.SubmitBatch(e.ctx, r.ID, batchOf(0, coveredSubjects(2))); !errors.Is(err, ErrBatchTooLarge) {
+		t.Fatalf("batch past the run's covered limit: %v, want ErrBatchTooLarge", err)
+	}
+	if n := runSubjectCount(t, e, r.ID); n != MaxCoveredPerRun-1 {
+		t.Fatalf("refused batch changed covered subjects to %d", n)
+	}
+	// A subject named twice (here and in a repeat) counts once.
+	if _, err := e.st.SubmitBatch(e.ctx, r.ID, batchOf(0, coveredSubjects(1))); err != nil {
+		t.Fatalf("batch at the run's covered limit: %v", err)
+	}
+	if _, err := e.st.SubmitBatch(e.ctx, r.ID, batchOf(1, coveredSubjects(1))); err != nil {
+		t.Fatalf("subject already covered by the run: %v", err)
 	}
 }
 
