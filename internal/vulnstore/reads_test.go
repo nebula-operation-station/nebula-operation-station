@@ -4,8 +4,11 @@ package vulnstore
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 	"time"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
 )
 
 func TestListBoundsAndReportsTruncation(t *testing.T) {
@@ -69,6 +72,81 @@ func TestRunAlertFindingsReturnsOpenKEVOrCriticalOfThatRun(t *testing.T) {
 	}
 }
 
+// TestRunAlertFindingsAfterPagesThroughEveryCandidate: paging by key
+// returns every KEV or critical finding of the run exactly once, also past
+// the first page.
+func TestRunAlertFindingsAfterPagesThroughEveryCandidate(t *testing.T) {
+	e := newEnv(t)
+	r := e.start(t)
+	var items []Item
+	for i := range 7 {
+		items = append(items, item(t, "h1", cve(i), withKEV("2026-11-01")))
+	}
+	items = append(items, item(t, "h1", cve(50)))
+	e.submit(t, r, 0, nil, items...)
+	seen := map[vulnfinding.Key]bool{}
+	var after *vulnfinding.Key
+	for pages := 0; ; pages++ {
+		if pages > 10 {
+			t.Fatal("paging did not end")
+		}
+		got, err := e.st.RunAlertFindingsAfter(e.ctx, r.ID, after, 3)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range got {
+			if seen[f.Key] {
+				t.Fatalf("finding %s returned twice", f.Key)
+			}
+			seen[f.Key] = true
+		}
+		if len(got) < 3 {
+			break
+		}
+		k := got[len(got)-1].Key
+		after = &k
+	}
+	if len(seen) != 7 || seen[items[7].Finding.Key] {
+		t.Fatalf("paged %d candidates, want the 7 KEV findings only", len(seen))
+	}
+	if _, err := e.st.RunAlertFindingsAfter(e.ctx, r.ID, nil, 0); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("limit 0 err = %v, want ErrInvalidInput", err)
+	}
+}
+
+// TestSubjectStatusesMatchSubjectStatus: the batched read gives every
+// requested subject the same status as SubjectStatus, and is bounded.
+func TestSubjectStatusesMatchSubjectStatus(t *testing.T) {
+	e := newEnv(t)
+	e.seed(t, "h1", 1)
+	subjects := []Subject{hostSubj("h1"), hostSubj("h2")}
+	for i := range subjectStatusChunk + 3 {
+		subjects = append(subjects, hostSubj(fmt.Sprintf("x%d", i)))
+	}
+	got, err := e.st.SubjectStatuses(e.ctx, subjects)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(subjects) {
+		t.Fatalf("SubjectStatuses = %d entries, want %d", len(got), len(subjects))
+	}
+	for _, s := range []Subject{hostSubj("h1"), hostSubj("h2"), hostSubj("x0")} {
+		want, err := e.st.SubjectStatus(e.ctx, s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got[s] != want {
+			t.Fatalf("subject %s = %+v, want %+v", s, got[s], want)
+		}
+	}
+	if got[hostSubj("h1")].Assessment != Fresh || got[hostSubj("h2")].Assessment != NotAssessed {
+		t.Fatalf("h1 = %+v, h2 = %+v; want fresh and not assessed", got[hostSubj("h1")], got[hostSubj("h2")])
+	}
+	if _, err := e.st.SubjectStatuses(e.ctx, make([]Subject, MaxSubjectStatuses+1)); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("too many subjects err = %v, want ErrInvalidInput", err)
+	}
+}
+
 func TestFeedStatusesFollowSourceListAndMaxAge(t *testing.T) {
 	e := newEnv(t)
 	e.start(t) // osv and kev accepted, content date one hour ago
@@ -89,8 +167,11 @@ func TestFeedStatusesFollowSourceListAndMaxAge(t *testing.T) {
 	if by["osv"].Stale || by["osv"].ContentDate.IsZero() || by["osv"].LastVerdict != SourceAccepted {
 		t.Fatalf("osv = %+v, want fresh, dated, accepted", by["osv"])
 	}
-	if !by["nvd"].Stale || !by["nvd"].ContentDate.IsZero() {
-		t.Fatalf("nvd never named = %+v, want stale and undated", by["nvd"])
+	if !by["nvd"].Stale || !by["nvd"].ContentDate.IsZero() || by["nvd"].Seen {
+		t.Fatalf("nvd never named = %+v, want stale, undated and not seen", by["nvd"])
+	}
+	if !by["osv"].Seen || !by["kev"].Seen {
+		t.Fatalf("named sources = %+v, %+v; want seen", by["osv"], by["kev"])
 	}
 	e.clk.Add(72 * time.Hour)
 	st, _ = e.st.FeedStatuses(e.ctx)
