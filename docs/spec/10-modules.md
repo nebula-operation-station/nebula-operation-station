@@ -66,7 +66,7 @@ ui:
 
 <a id="v24-10-01"></a>
 <!-- Spec revision (ADR 0011, VU-02): v24-10-01 -->
-**Vulnerability inventory reads (ADR 0011 D3).** Two further LOW read-only contracts feed the vulnerability inventory export. Both are added to the read-only contract allowlist above (previously: not on it) with a cost limit of at most one run every 6 h per host, inside the ordinary read budgets of [07-execution-model.md](07-execution-model.md#v24-07-01). Neither installs, pulls, refreshes or changes anything on the host.
+**Vulnerability inventory reads (ADR 0011 D3).** Two further LOW read-only contracts feed the vulnerability inventory export. Both are added to the read-only contract allowlist above (previously: not on it) and run inside the ordinary read budgets of [07-execution-model.md](07-execution-model.md#v24-07-01). `package.list_installed` has its own cost limit of at most one run every 6 h per host; ADR 0011 sets no action-specific cost limit for `image.packages` (previously: the 6 h per-host limit stated for both). Neither installs, pulls, refreshes or changes anything on the host.
 
 | Action | Read-only scope |
 | --- | --- |

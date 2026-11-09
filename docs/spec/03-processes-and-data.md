@@ -50,13 +50,13 @@ The server and collector cannot read the executor database or key files. The exe
 
 <a id="v24-03-02"></a>
 <!-- Spec revision (ADR 0011, VU-02): v24-03-02 -->
-**Vulnerability tables and retention (ADR 0011 D5, D6, D10; Q3, decided 2026-11-09).** `nebula.db` (owner `nebula-server`) adds the findings store (`vuln_findings`, `vuln_finding_history`, `vuln_held_closures`, `vuln_subject_watermarks`), run records (`vuln_runs`, `vuln_run_sources`, `vuln_run_batches`, `vuln_run_subjects`, `vuln_run_reported`, `vuln_run_rejected`), per-source high-water marks and their resets (`vuln_source_marks`, `vuln_mark_resets`), `vuln_store_state`, and the crown jewels (`crown_jewels`, `crown_jewel_history`). `executor.db` gains nothing. Feed data is never stored in NOS; only per-finding scores, basis sources and snapshot IDs (Hermes assertions kept for audit, not a trust anchor). Retention defaults, as proposed and decided (previously: open):
+**Vulnerability tables and retention (ADR 0011 D5, D6, D10; Q3, decided 2026-11-09).** `nebula.db` (owner `nebula-server`) adds the findings store (`vuln_findings`, `vuln_finding_history`, `vuln_held_closures`, `vuln_subject_watermarks`), run records (`vuln_runs`, `vuln_run_sources`, `vuln_run_batches`, `vuln_run_subjects`, `vuln_run_reported`, `vuln_run_rejected`), per-source high-water marks and their resets (`vuln_source_marks`, `vuln_mark_resets`), `vuln_store_state`, and the crown jewels (`crown_jewels`, `crown_jewel_history`). `executor.db` gains nothing. Feed data is never stored in NOS; only per-finding scores, basis sources and snapshot IDs (Hermes assertions kept for audit, not a trust anchor). Retention defaults: the rows with basis Q3 are decided as proposed (previously: open); rows marked *implementation choice* are not ADR 0011 decisions and record what the merged code does (previously: all rows listed as decided):
 
-| Data | Kept |
-| --- | --- |
-| Open, `accepted_risk` and `false_positive` findings | While the subject exists |
-| `fixed` findings | 365 days after closing |
-| Finding history entries | 365 days |
-| Run records | 90 days after the run ended |
-| Assessment text of closed findings | 90 days |
-| Crown-jewel history | Kept; bounded by admin actions |
+| Data | Kept | Basis |
+| --- | --- | --- |
+| Open, `accepted_risk` and `false_positive` findings | While the subject exists | ADR 0011 D6 |
+| `fixed` findings | 365 days after closing | Q3 |
+| Finding history entries | 365 days | Implementation choice (`internal/vulnstore` Prune applies the `fixed` retention) |
+| Run records | 90 days after the run ended | Q3 |
+| Assessment text of closed findings | 90 days | Q3 |
+| Crown-jewel history | Kept; bounded by admin actions | Implementation choice (`internal/attackpath/jewels`) |
