@@ -23,11 +23,14 @@ import (
 // (trivyScan), never materialised or buffered: skipped values are stepped
 // over, and a string, key or number is decoded only when the parser keeps
 // it and only after its raw length was checked against the field limit.
-// Package entries are reduced one at a time and every walked array and
-// object is capped. Allocation of one read is therefore bounded by small
-// fixed amounts (maxImagePkgEntries entries of bounded fields, the kept
-// packages) whatever a single value of the output holds; it never grows
-// with the size of one value or per element of hostile output.
+// Keys are decoded into reused buffers and compared as bytes; entry fields
+// are validated on reused buffers and turned into (shared) strings only for
+// a valid entry. Package entries are reduced one at a time and every walked
+// array and object is capped. Allocation of one read is therefore bounded
+// by small fixed amounts (the kept packages, and the distinct valid entries
+// of a result whose Class or Type follows its Packages) whatever a single
+// value of the output holds; it never grows with the size of one value or
+// per object, key or dropped or duplicate entry of hostile output.
 
 const (
 	// MaxImagePackages is the per-image package limit (ADR 0011 D3). A read
@@ -98,10 +101,9 @@ const (
 var ErrImagePackagesDigest = errors.New("dockerhost: invalid image packages digest")
 
 var (
-	imageEcosystemRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
-	imageOSFamilyRe  = regexp.MustCompile(`^[a-z][a-z0-9._-]*( [a-z0-9._-]+)*$`)
-	imageOSNameRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+~/-]*$`)
-	imagePkgClasses  = map[string]bool{"os-pkgs": true, "lang-pkgs": true}
+	imageOSFamilyRe = regexp.MustCompile(`^[a-z][a-z0-9._-]*( [a-z0-9._-]+)*$`)
+	imageOSNameRe   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+~/-]*$`)
+	imagePkgClasses = map[string]bool{"os-pkgs": true, "lang-pkgs": true}
 	// trivyOSFamilies are Trivy OS result types. A lang-pkgs result must not
 	// use one: it would place language packages under an OS ecosystem.
 	trivyOSFamilies = map[string]bool{
@@ -154,15 +156,17 @@ type ImagePackages struct {
 	Reason   string // comma-separated Reason* codes, "" when complete
 }
 
-// trivyPkgDoc holds the fields of one package entry (trivyPkgFields).
+// trivyPkgDoc holds the fields of one package entry (trivyPkgFields). The
+// byte fields are reused buffers, bounded by the field limits; strings are
+// only built once the whole entry is valid.
 type trivyPkgDoc struct {
-	Name       string
-	Version    string
-	Release    string
+	Name       []byte
+	Version    []byte
+	Release    []byte
 	Epoch      int
-	SrcName    string
-	SrcVersion string
-	SrcRelease string
+	SrcName    []byte
+	SrcVersion []byte
+	SrcRelease []byte
 	SrcEpoch   int
 }
 
@@ -283,16 +287,46 @@ type trivyDecoder struct {
 	results     int
 	pkgDoc      trivyPkgDoc // reused for every entry
 	p           partialSet
+
+	// keyBuf and keyEnds hold the decoded keys of the objects being walked
+	// (a stack: an object truncates them back when it ends), for the
+	// duplicate key check. Objects nest at most two deep (document, then
+	// Metadata or a result), so they stay within
+	// 2*maxTrivyObjectKeys*maxTrivyKey bytes and are reused by every object.
+	keyBuf  []byte
+	keyEnds []int
+	// res is the result being decoded; results do not nest, so its
+	// buffers are reused by every result.
+	res resultState
+	// verBuf holds the composed version and source version of an entry.
+	verBuf [2][]byte
+	// strs interns the strings of valid entries: equal names and versions
+	// (duplicate entries) share one allocation. It holds at most the
+	// strings of maxImagePkgEntries valid entries.
+	strs map[string]string
+	// pendSeen collects the distinct pending packages of the current
+	// result (Class and Type after Packages); cleared per result.
+	pendSeen map[ImagePackage]struct{}
 }
 
-// resultState collects one result object; Class and Type may follow
-// Packages, so the entries wait in pending until the object ends.
+// resultState collects one result object. Class and Type usually precede
+// Packages, so each valid entry is kept at once (or skipped when the
+// result is invalid). When Class or Type follow Packages, the distinct
+// valid entries wait in pending until the object ends.
 type resultState struct {
-	class, typ string
+	class, typ []byte // reused buffers, at most maxImageEcosystem bytes
+	hasClass   bool
+	hasType    bool
 	bad        bool // Class or Type of the wrong JSON type
 	entries    int
 	dropped    bool
+	valid      int // valid entries (pending or kept directly)
 	pending    []ImagePackage
+}
+
+// reset clears r for the next result and keeps its buffers.
+func (r *resultState) reset() {
+	*r = resultState{class: r.class[:0], typ: r.typ[:0], pending: r.pending[:0]}
 }
 
 // decodeTrivy stream-decodes a bounded, valid UTF-8 Trivy JSON v2
@@ -300,9 +334,11 @@ type resultState struct {
 // are discarded: they can quote host bytes.
 func decodeTrivy(digest string, b []byte) (*trivyDecoder, bool) {
 	t := &trivyDecoder{
-		ref:     refJSON{suffix: []byte(digest[strings.LastIndex(digest, "@"):])},
-		osTypes: make(map[string]bool),
-		seen:    make(map[keptPkg]bool),
+		ref:      refJSON{suffix: []byte(digest[strings.LastIndex(digest, "@"):])},
+		osTypes:  make(map[string]bool),
+		seen:     make(map[keptPkg]bool),
+		strs:     make(map[string]string),
+		pendSeen: make(map[ImagePackage]struct{}),
 	}
 	// json.Valid allocates nothing per value; after it the raw bytes are
 	// walked in place.
@@ -325,8 +361,8 @@ func decodeTrivy(digest string, b []byte) (*trivyDecoder, bool) {
 }
 
 func (t *trivyDecoder) document() error {
-	return t.object(func(key string) error {
-		switch key {
+	return t.object(func(key []byte) error {
+		switch string(key) {
 		case "SchemaVersion":
 			v, ok, err := t.intValue()
 			if err != nil {
@@ -349,26 +385,34 @@ func (t *trivyDecoder) document() error {
 }
 
 // object walks the object at the cursor key by key. Keys are capped in
-// number and length and must be unique; field must consume the value.
-func (t *trivyDecoder) object(field func(key string) error) error {
-	var keys []string
-	return t.s.members(func(raw []byte) error {
-		if len(keys) >= maxTrivyObjectKeys || len(raw) > maxJSONEscapeRatio*maxTrivyKey {
+// number and length and must be unique; field must consume the value. The
+// key passed to field is valid only until field returns. Keys are kept in
+// the reused key stack (keyBuf, keyEnds) and compared as bytes, so walking
+// an object allocates nothing per object or per key.
+func (t *trivyDecoder) object(field func(key []byte) error) error {
+	start, bufStart := len(t.keyEnds), len(t.keyBuf)
+	err := t.s.members(func(raw []byte) error {
+		if len(t.keyEnds)-start >= maxTrivyObjectKeys || len(raw) > maxJSONEscapeRatio*maxTrivyKey {
 			return errTrivyShape
 		}
 		k, ok := t.unescape(raw, maxTrivyKey)
 		if !ok {
 			return errTrivyShape
 		}
-		for _, seen := range keys {
-			if seen == string(k) {
+		prev := bufStart
+		for _, end := range t.keyEnds[start:] {
+			if bytes.Equal(t.keyBuf[prev:end], k) {
 				return errTrivyShape // duplicate key: which value counts is ambiguous
 			}
+			prev = end
 		}
-		key := string(k)
-		keys = append(keys, key)
-		return field(key)
+		t.keyBuf = append(t.keyBuf, k...)
+		t.keyEnds = append(t.keyEnds, len(t.keyBuf))
+		return field(t.keyBuf[prev:len(t.keyBuf):len(t.keyBuf)])
 	})
+	// Nested objects have already truncated back to this object's keys.
+	t.keyEnds, t.keyBuf = t.keyEnds[:start], t.keyBuf[:bufStart]
+	return err
 }
 
 // skip consumes one value of a key the parser does not use, without
@@ -408,6 +452,29 @@ func (t *trivyDecoder) stringValue(limit int) (string, bool, error) {
 		return "", true, t.s.skip()
 	}
 	return "", false, t.s.skip()
+}
+
+// bytesValue consumes the value at the cursor like stringValue, but copies
+// the decoded string into the reused buffer *dst (null empties it) instead
+// of allocating a string.
+func (t *trivyDecoder) bytesValue(dst *[]byte, limit int) (bool, error) {
+	*dst = (*dst)[:0]
+	switch t.s.peek() {
+	case '"':
+		raw, err := t.s.str()
+		if err != nil {
+			return false, err
+		}
+		v, ok := t.unescape(raw, limit)
+		if !ok {
+			return false, nil
+		}
+		*dst = append(*dst, v...)
+		return true, nil
+	case 'n':
+		return true, t.s.skip()
+	}
+	return false, t.s.skip()
 }
 
 // intValue consumes the value at the cursor. A small integer is returned;
@@ -474,8 +541,8 @@ func (t *trivyDecoder) metadata() error {
 	if err != nil || !ok {
 		return err
 	}
-	return t.object(func(key string) error {
-		switch key {
+	return t.object(func(key []byte) error {
+		switch string(key) {
 		case "OS":
 			return t.osValue()
 		case "RepoDigests":
@@ -559,15 +626,19 @@ func (t *trivyDecoder) resultList() error {
 
 // result decodes the result object at the cursor.
 func (t *trivyDecoder) result() error {
-	var r resultState
-	err := t.object(func(key string) error {
-		switch key {
+	r := &t.res
+	r.reset()
+	clear(t.pendSeen)
+	err := t.object(func(key []byte) error {
+		switch string(key) {
 		case "Class":
+			r.hasClass = true
 			return t.resultString(&r.class, &r.bad)
 		case "Type":
+			r.hasType = true
 			return t.resultString(&r.typ, &r.bad)
 		case "Packages":
-			return t.packages(&r)
+			return t.packages(r)
 		}
 		return t.skip()
 	})
@@ -576,29 +647,50 @@ func (t *trivyDecoder) result() error {
 	}
 	// At a cap the entries read so far still count if Class and Type are
 	// already known.
-	if t.finishResult(&r) {
+	if t.finishResult(r) {
 		return errTrivyStop
 	}
 	return err
 }
 
-// resultString reads Class or Type; a value of the wrong JSON type or
-// longer than any valid one marks the result bad.
-func (t *trivyDecoder) resultString(dst *string, bad *bool) error {
-	v, ok, err := t.stringValue(maxImageEcosystem)
+// resultString reads Class or Type into a reused buffer; a value of the
+// wrong JSON type or longer than any valid one marks the result bad.
+func (t *trivyDecoder) resultString(dst *[]byte, bad *bool) error {
+	ok, err := t.bytesValue(dst, maxImageEcosystem)
 	if !ok {
 		*bad = true
 	}
-	*dst = v
 	return err
 }
 
+// resultValid reports whether a result's Class and Type are valid and
+// whether it is an os-pkgs result. It allocates nothing.
+func resultValid(r *resultState) (valid, isOS bool) {
+	isOS = string(r.class) == "os-pkgs"
+	valid = !r.bad && imagePkgClasses[string(r.class)] &&
+		imageTokenBytes(r.typ, maxImageEcosystem) && imageEcosystem(r.typ) &&
+		(isOS || !trivyOSFamilies[string(r.typ)])
+	return valid, isOS
+}
+
 // packages decodes the entries of one result one at a time; an entry of the
-// wrong JSON type is dropped, the rest of the result is still read.
+// wrong JSON type is dropped, the rest of the result is still read. With
+// Class and Type already read, valid entries are kept at once and the
+// entries of an invalid result are only skipped; otherwise the distinct
+// valid entries wait in r.pending.
 func (t *trivyDecoder) packages(r *resultState) error {
 	ok, err := t.s.open('[')
 	if err != nil || !ok {
 		return err
+	}
+	known := r.hasClass && r.hasType // duplicate keys are rejected: final
+	var valid, isOS bool
+	var eco string
+	if known {
+		valid, isOS = resultValid(r)
+		if valid {
+			eco = t.str(r.typ)
+		}
 	}
 	return t.s.elements(func() error {
 		if t.entries >= maxImagePkgEntries {
@@ -606,25 +698,65 @@ func (t *trivyDecoder) packages(r *resultState) error {
 		}
 		t.entries++
 		r.entries++
+		if known && !valid {
+			return t.skip() // finishResult marks the result's entries dropped
+		}
 		if t.s.peek() != '{' {
 			r.dropped = true // null or wrong type
 			return t.skip()
 		}
-		valid, err := t.entry()
+		ok, err := t.entry()
 		if err != nil {
 			return err
 		}
 		var pkg ImagePackage
-		if valid {
-			pkg, valid = imagePackage(&t.pkgDoc)
+		if ok {
+			pkg, ok = t.imagePackage()
 		}
-		if !valid {
+		if !ok {
 			r.dropped = true
 			return nil
 		}
-		r.pending = append(r.pending, pkg)
+		r.valid++
+		if known {
+			if t.keep(pkg, eco, isOS) {
+				return errTrivyStop
+			}
+			return nil
+		}
+		if _, dup := t.pendSeen[pkg]; !dup {
+			t.pendSeen[pkg] = struct{}{}
+			r.pending = append(r.pending, pkg)
+		}
 		return nil
 	})
+}
+
+// keep adds a validated package of ecosystem eco unless it was kept
+// before. It reports true when a new package would exceed
+// MaxImagePackages: decoding stops.
+func (t *trivyDecoder) keep(pkg ImagePackage, eco string, isOS bool) bool {
+	pkg.Ecosystem = eco
+	k := keptPkg{pkg: pkg, os: isOS}
+	if t.seen[k] {
+		return false
+	}
+	if len(t.kept) >= MaxImagePackages {
+		return true
+	}
+	t.seen[k] = true
+	t.kept = append(t.kept, k)
+	return false
+}
+
+// str returns b as a string, sharing one allocation for equal values.
+func (t *trivyDecoder) str(b []byte) string {
+	if s, ok := t.strs[string(b)]; ok {
+		return s
+	}
+	s := string(b)
+	t.strs[s] = s
+	return s
 }
 
 // trivyPkgFields are the entry keys the parser reads; matching is exact.
@@ -635,7 +767,10 @@ var trivyPkgFields = []string{"Name", "Version", "Release", "Epoch", "SrcName", 
 // field; after that, the remaining values are only skipped.
 func (t *trivyDecoder) entry() (bool, error) {
 	d := &t.pkgDoc
-	*d = trivyPkgDoc{}
+	*d = trivyPkgDoc{
+		Name: d.Name[:0], Version: d.Version[:0], Release: d.Release[:0],
+		SrcName: d.SrcName[:0], SrcVersion: d.SrcVersion[:0], SrcRelease: d.SrcRelease[:0],
+	}
 	var seen [8]bool
 	valid := true
 	err := t.s.members(func(raw []byte) error {
@@ -652,19 +787,19 @@ func (t *trivyDecoder) entry() (bool, error) {
 		var err error
 		switch f {
 		case 0:
-			d.Name, ok, err = t.stringValue(maxImagePkgName)
+			ok, err = t.bytesValue(&d.Name, maxImagePkgName)
 		case 1:
-			d.Version, ok, err = t.stringValue(maxImagePkgVersion)
+			ok, err = t.bytesValue(&d.Version, maxImagePkgVersion)
 		case 2:
-			d.Release, ok, err = t.stringValue(maxImagePkgVersion)
+			ok, err = t.bytesValue(&d.Release, maxImagePkgVersion)
 		case 3:
 			d.Epoch, ok, err = t.intValue()
 		case 4:
-			d.SrcName, ok, err = t.stringValue(maxImagePkgName)
+			ok, err = t.bytesValue(&d.SrcName, maxImagePkgName)
 		case 5:
-			d.SrcVersion, ok, err = t.stringValue(maxImagePkgVersion)
+			ok, err = t.bytesValue(&d.SrcVersion, maxImagePkgVersion)
 		case 6:
-			d.SrcRelease, ok, err = t.stringValue(maxImagePkgVersion)
+			ok, err = t.bytesValue(&d.SrcRelease, maxImagePkgVersion)
 		default:
 			d.SrcEpoch, ok, err = t.intValue()
 		}
@@ -677,35 +812,26 @@ func (t *trivyDecoder) entry() (bool, error) {
 // finishResult validates a result's class and type and keeps its packages.
 // It reports true when MaxImagePackages is reached and decoding stops.
 func (t *trivyDecoder) finishResult(r *resultState) bool {
-	isOS := r.class == "os-pkgs"
-	valid := !r.bad && imagePkgClasses[r.class] &&
-		imageToken(r.typ, maxImageEcosystem) && imageEcosystemRe.MatchString(r.typ) &&
-		(isOS || !trivyOSFamilies[r.typ])
+	valid, isOS := resultValid(r)
 	if !valid {
 		if r.entries > 0 {
 			t.p.dropped = true // results of other classes (secrets, config) carry no packages
 		}
 		return false
 	}
+	eco := t.str(r.typ)
 	// Only an os-pkgs result with at least one valid package shows the OS
 	// package DB was read: a detected OS with no OS package is not complete.
-	if isOS && len(r.pending) > 0 {
-		t.osTypes[r.typ] = true
+	if isOS && r.valid > 0 {
+		t.osTypes[eco] = true
 	}
 	if r.dropped {
 		t.p.dropped = true
 	}
 	for _, pkg := range r.pending {
-		pkg.Ecosystem = r.typ
-		k := keptPkg{pkg: pkg, os: isOS}
-		if t.seen[k] {
-			continue
-		}
-		if len(t.kept) >= MaxImagePackages {
+		if t.keep(pkg, eco, isOS) {
 			return true
 		}
-		t.seen[k] = true
-		t.kept = append(t.kept, k)
 	}
 	return len(t.kept) >= MaxImagePackages
 }
@@ -722,61 +848,68 @@ func trivyOS(family, name string) (ImageOS, bool) {
 	return ImageOS{Family: family, Name: name}, true
 }
 
-// imagePackage validates and reduces one Trivy package entry. The ecosystem
-// is set once the result's type is known.
-func imagePackage(d *trivyPkgDoc) (ImagePackage, bool) {
-	if !imageToken(d.Name, maxImagePkgName) {
+// imagePackage validates and reduces the package entry in t.pkgDoc. Every
+// field is validated on the reused buffers first; strings are built (and
+// shared between equal values) only for a valid entry. The ecosystem is
+// set once the result's type is known.
+func (t *trivyDecoder) imagePackage() (ImagePackage, bool) {
+	d := &t.pkgDoc
+	if !imageTokenBytes(d.Name, maxImagePkgName) {
 		return ImagePackage{}, false
 	}
-	version, ok := imageVersion(d.Version, d.Release, d.Epoch)
+	version, ok := imageVersion(t.verBuf[0][:0], d.Version, d.Release, d.Epoch)
+	t.verBuf[0] = version
 	if !ok {
 		return ImagePackage{}, false
 	}
-	pkg := ImagePackage{Name: d.Name, Version: version}
-	if d.SrcName == "" {
-		if d.SrcVersion != "" || d.SrcRelease != "" || d.SrcEpoch != 0 {
+	var src []byte
+	switch {
+	case len(d.SrcName) == 0:
+		if len(d.SrcVersion) != 0 || len(d.SrcRelease) != 0 || d.SrcEpoch != 0 {
 			return ImagePackage{}, false // source version without a source package
 		}
-		return pkg, true
-	}
-	if !imageToken(d.SrcName, maxImagePkgName) {
+	case !imageTokenBytes(d.SrcName, maxImagePkgName):
 		return ImagePackage{}, false
-	}
-	pkg.SrcName = d.SrcName
-	if d.SrcVersion == "" {
-		if d.SrcRelease != "" || d.SrcEpoch != 0 {
+	case len(d.SrcVersion) == 0:
+		if len(d.SrcRelease) != 0 || d.SrcEpoch != 0 {
 			return ImagePackage{}, false
 		}
-		return pkg, true
+	default:
+		src, ok = imageVersion(t.verBuf[1][:0], d.SrcVersion, d.SrcRelease, d.SrcEpoch)
+		t.verBuf[1] = src
+		if !ok {
+			return ImagePackage{}, false
+		}
 	}
-	src, ok := imageVersion(d.SrcVersion, d.SrcRelease, d.SrcEpoch)
-	if !ok {
-		return ImagePackage{}, false
+	pkg := ImagePackage{Name: t.str(d.Name), Version: t.str(version)}
+	if len(d.SrcName) != 0 {
+		pkg.SrcName = t.str(d.SrcName)
 	}
-	pkg.SrcVersion = src
+	if len(src) != 0 {
+		pkg.SrcVersion = t.str(src)
+	}
 	return pkg, true
 }
 
-// imageVersion composes [epoch:]version[-release] from Trivy's split
-// version fields and bounds the result.
-func imageVersion(version, release string, epoch int) (string, bool) {
-	if epoch < 0 || epoch > maxImagePkgEpoch || !imageToken(version, maxImagePkgVersion) {
-		return "", false
+// imageVersion appends [epoch:]version[-release], composed from Trivy's
+// split version fields, to dst and bounds the result.
+func imageVersion(dst, version, release []byte, epoch int) ([]byte, bool) {
+	if epoch < 0 || epoch > maxImagePkgEpoch || !imageTokenBytes(version, maxImagePkgVersion) {
+		return dst, false
 	}
-	v := version
-	if release != "" {
-		if !imageToken(release, maxImagePkgVersion) {
-			return "", false
-		}
-		v += "-" + release
+	if len(release) != 0 && !imageTokenBytes(release, maxImagePkgVersion) {
+		return dst, false
 	}
 	if epoch > 0 {
-		v = strconv.Itoa(epoch) + ":" + v
+		dst = strconv.AppendInt(dst, int64(epoch), 10)
+		dst = append(dst, ':')
 	}
-	if len(v) > maxImagePkgVersion {
-		return "", false
+	dst = append(dst, version...)
+	if len(release) != 0 {
+		dst = append(dst, '-')
+		dst = append(dst, release...)
 	}
-	return v, true
+	return dst, len(dst) <= maxImagePkgVersion
 }
 
 // imageToken is a non-empty, bounded, valid UTF-8 value without unsafe
@@ -786,4 +919,34 @@ func imageToken(s string, limit int) bool {
 		return false
 	}
 	return strings.IndexFunc(s, unicode.IsSpace) < 0
+}
+
+// imageEcosystem reports whether b matches ^[a-z0-9][a-z0-9._-]*$. It is
+// checked by hand, not with a regexp, because it runs once per result and
+// a regexp match may allocate.
+func imageEcosystem(b []byte) bool {
+	for i, c := range b {
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+		case i > 0 && (c == '.' || c == '_' || c == '-'):
+		default:
+			return false
+		}
+	}
+	return len(b) > 0
+}
+
+// imageTokenBytes is imageToken on bytes, without allocating.
+func imageTokenBytes(b []byte, limit int) bool {
+	if len(b) == 0 || len(b) > limit || !utf8.Valid(b) {
+		return false
+	}
+	for i := 0; i < len(b); {
+		r, n := utf8.DecodeRune(b[i:])
+		if unsafeRune(r) || unicode.IsSpace(r) {
+			return false
+		}
+		i += n
+	}
+	return true
 }

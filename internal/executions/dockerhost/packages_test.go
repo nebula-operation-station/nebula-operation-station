@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -623,6 +624,15 @@ func TestImagePackagesHugeSingleValueBounded(t *testing.T) {
 			`","Packages":[` + musl + `]}]}`, partial(ReasonEntryDropped, 0)},
 		"result class": {pre + osMeta + `,"Results":[{"Type":"alpine","Class":"`, "c",
 			`","Packages":[` + musl + `]}]}`, partial(ReasonEntryDropped, 0)},
+		"escaped result type": {pre + osMeta + `,"Results":[{"Class":"os-pkgs","Type":"`, escA,
+			`","Packages":[` + musl + `]}]}`, partial(ReasonEntryDropped, 0)},
+		"escaped result class": {pre + osMeta + `,"Results":[{"Packages":[` + musl + `],"Type":"alpine","Class":"`, escA,
+			`"}]}`, partial(ReasonEntryDropped, 0)},
+		"escaped os name": {pre + `"Metadata":{"OS":{"Family":"alpine","Name":"`, escA, `"}},` + results, partial(ReasonOSUndetected, 1)},
+		"repo digest": {pre + `"Metadata":{"OS":{"Family":"alpine","Name":"3.19.1"},"RepoDigests":["`, "a",
+			`"]},` + results, complete},
+		"escaped repo digest": {`{"SchemaVersion":2,"Metadata":{"OS":{"Family":"alpine","Name":"3.19.1"},"RepoDigests":["`, escA,
+			`"]},` + results, partial(ReasonDigestMismatch, 1)},
 		"result key": {pre + osMeta + `,"Results":[{"`, "k",
 			`":0,"Class":"os-pkgs","Type":"alpine","Packages":[` + musl + `]}]}`, unparseable},
 		"escaped result key": {pre + osMeta + `,"Results":[{"`, escA,
@@ -788,6 +798,159 @@ func TestImagePackagesOSTypeMismatchUndetected(t *testing.T) {
 				t.Fatalf("got %+v", got)
 			}
 		})
+	}
+}
+
+// trivyKey is a distinct key of exactly maxTrivyKey bytes for object o and
+// member k.
+func trivyKey(o, k int) string {
+	s := fmt.Sprintf("k%05d-%02d-", o, k)
+	return s + strings.Repeat("x", maxTrivyKey-len(s))
+}
+
+// Many objects that each carry the maximum number of distinct maximum-length
+// keys must not make one read allocate per key: the key bookkeeping is
+// reused, so the allocation stays within a small fixed amount whatever the
+// output size.
+func TestImagePackagesManyObjectsManyKeysBounded(t *testing.T) {
+	var sb strings.Builder
+	sb.Grow(20 << 20)
+	sb.WriteString(`{"SchemaVersion":2,"ArtifactName":"` + pkgDigest + `","Metadata":{"OS":{"Family":"alpine","Name":"3.19.1"}`)
+	for k := 0; k < maxTrivyObjectKeys-1; k++ {
+		fmt.Fprintf(&sb, `,"%s":0`, trivyKey(-1, k))
+	}
+	sb.WriteString(`},"Results":[`)
+	for o := 0; o < maxTrivyResults; o++ {
+		if o > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteByte('{')
+		for k := 0; k < maxTrivyObjectKeys; k++ {
+			if k > 0 {
+				sb.WriteByte(',')
+			}
+			fmt.Fprintf(&sb, `"%s":0`, trivyKey(o, k))
+		}
+		sb.WriteByte('}')
+	}
+	sb.WriteString(`]}`)
+	b := []byte(sb.String())
+	sb.Reset()
+	if len(b) < 16<<20 || len(b) > MaxImagePackagesOutput {
+		t.Fatalf("output size %d", len(b))
+	}
+	var got ImagePackages
+	alloc := allocatedBytes(func() { got, _ = ParseImagePackages(pkgDigest, okRun(b)) })
+	// Results without Class carry no packages; the document is still
+	// parseable, so the read is known and partial (no os-pkgs result).
+	if !got.Known || got.Complete || got.Reason != ReasonOSPackagesMissing {
+		t.Fatalf("got known=%v complete=%v reason=%q", got.Known, got.Complete, got.Reason)
+	}
+	t.Logf("one read of %d bytes allocated %d bytes", len(b), alloc)
+	const budget = 256 << 10
+	if alloc > budget {
+		t.Fatalf("one read allocated %d bytes, budget %d", alloc, budget)
+	}
+}
+
+// Walking objects allocates nothing per object or per key: two documents
+// that differ only in the number of results allocate the same number of
+// times.
+func TestImagePackagesObjectWalkAllocsIndependentOfCount(t *testing.T) {
+	doc := func(n int) []byte {
+		var sb strings.Builder
+		sb.WriteString(`{"SchemaVersion":2,"ArtifactName":"` + pkgDigest + `","Results":[`)
+		for o := 0; o < n; o++ {
+			if o > 0 {
+				sb.WriteByte(',')
+			}
+			fmt.Fprintf(&sb, `{"Target":"t","%s":0,"%s":{"a":1},"Class":"lang-pkgs","Type":"gobinary","Packages":[]}`,
+				trivyKey(o, 0), trivyKey(o, 1))
+		}
+		sb.WriteString(`]}`)
+		return []byte(sb.String())
+	}
+	small, large := doc(8), doc(2048)
+	allocs := func(b []byte) float64 {
+		return testing.AllocsPerRun(5, func() { _, _ = ParseImagePackages(pkgDigest, okRun(b)) })
+	}
+	a, b := allocs(small), allocs(large)
+	t.Logf("allocs: 8 results %.0f, 2048 results %.0f", a, b)
+	// The once-per-read regexp matches use sync.Pool, which drops items at
+	// random under the race detector, so a run may see a few extra
+	// allocations. Any allocation per object would add at least 2040.
+	const slack = 4
+	if b > a+slack {
+		t.Fatalf("allocations grow with the number of objects: %.0f for 8 results, %.0f for 2048", a, b)
+	}
+}
+
+// Entries that are dropped or duplicate, even with every field at its
+// maximum length, allocate nothing per entry: fields are validated before
+// any string is built, and equal strings are shared.
+func TestImagePackagesMaxFieldEntriesBounded(t *testing.T) {
+	name := strings.Repeat("n", maxImagePkgName)
+	src := strings.Repeat("s", maxImagePkgName)
+	// "1:" + half + "-" + half stays within maxImagePkgVersion.
+	half := strings.Repeat("1", maxImagePkgVersion/2-2)
+	full := strings.Repeat("1", maxImagePkgVersion)
+	valid := fmt.Sprintf(`{"Name":"%s","Version":"%s","Release":"%s","Epoch":1,"SrcName":"%s","SrcVersion":"%s","SrcRelease":"%s","SrcEpoch":1}`,
+		name, half, half, src, half, half)
+	// Every field at maximum length; the source epoch makes it invalid.
+	dropped := fmt.Sprintf(`{"Name":"%s","Version":"%s","Release":"%s","SrcName":"%s","SrcVersion":"%s","SrcRelease":"%s","SrcEpoch":-1}`,
+		name, full, full, src, full, full)
+	meta := `{"SchemaVersion":2,"ArtifactName":"` + pkgDigest + `","Metadata":{"OS":{"Family":"alpine","Name":"3.19.1"}},"Results":[{`
+	classFirst := meta + `"Class":"os-pkgs","Type":"alpine","Packages":[`
+	classLast := meta + `"Packages":[`
+	const classTail = `],"Class":"os-pkgs","Type":"alpine"}]}`
+	cases := map[string]struct {
+		head, unit, tail string
+		reason           string
+		pkgs             int
+	}{
+		"dropped":                {classFirst, dropped, `]}]}`, ReasonEntryDropped + "," + ReasonOSPackagesMissing, 0},
+		"dropped, class last":    {classLast, dropped, classTail, ReasonEntryDropped + "," + ReasonOSPackagesMissing, 0},
+		"duplicate":              {classFirst, valid, `]}]}`, "", 1},
+		"duplicate, class last":  {classLast, valid, classTail, "", 1},
+		"dropped, invalid class": {meta + `"Class":"x","Type":"alpine","Packages":[`, valid, `]}]}`, ReasonEntryDropped + "," + ReasonOSPackagesMissing, 0},
+	}
+	for cname, c := range cases {
+		t.Run(cname, func(t *testing.T) {
+			var sb strings.Builder
+			sb.WriteString(c.head)
+			for i := 0; i < maxImagePkgEntries; i++ {
+				if i > 0 {
+					sb.WriteByte(',')
+				}
+				sb.WriteString(c.unit)
+			}
+			sb.WriteString(c.tail)
+			b := []byte(sb.String())
+			sb.Reset()
+			var got ImagePackages
+			alloc := allocatedBytes(func() { got, _ = ParseImagePackages(pkgDigest, okRun(b)) })
+			if !got.Known || got.Reason != c.reason || len(got.Packages) != c.pkgs {
+				t.Fatalf("got known=%v reason=%q packages=%d", got.Known, got.Reason, len(got.Packages))
+			}
+			t.Logf("one read of %d bytes allocated %d bytes", len(b), alloc)
+			const budget = 256 << 10
+			if alloc > budget {
+				t.Fatalf("one read allocated %d bytes, budget %d", alloc, budget)
+			}
+		})
+	}
+}
+
+// imageEcosystem is the hand-written form of ^[a-z0-9][a-z0-9._-]*$.
+func TestImageEcosystemMatchesPattern(t *testing.T) {
+	re := regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
+	for _, s := range []string{
+		"", "a", "0", "debian", "opensuse.leap", "go-mod", "a_b", "1.2-3_x",
+		".a", "-a", "_a", "A", "aB", "a b", "a/b", "a\x00", "é", "a\n", "a:b",
+	} {
+		if got, want := imageEcosystem([]byte(s)), re.MatchString(s); got != want {
+			t.Errorf("imageEcosystem(%q) = %v, want %v", s, got, want)
+		}
 	}
 }
 
