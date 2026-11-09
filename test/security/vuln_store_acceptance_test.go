@@ -768,3 +768,241 @@ func TestVulnKEVFlagDroppedThenOmittedIsStillHeld(t *testing.T) {
 	}
 	e.wantOpen(subjWeb01, cve)
 }
+
+// --- feed trust (V7, V12) ---
+
+// A finding whose basis source is stale, or which the run does not name,
+// is not closed by that run's omission (path 5d); a finding on a fresh
+// source in the same run closes, so only the stale or omitted source is
+// frozen.
+func TestVulnStaleOrOmittedSourceClosesNothing(t *testing.T) {
+	for name, stale := range map[string]bool{"stale source": true, "omitted source": false} {
+		t.Run(name, func(t *testing.T) {
+			e := newVulnEnv(t, nil)
+			d := e.clk.Now().Add(-time.Hour)
+			onTracker, onOSV := cveN(1), cveN(4)
+			e.run(e.fresh(nil), host(), vulnRecord(onTracker), vulnRecord(onOSV, basis("osv")))
+
+			specs := e.fresh([]string{"debian-tracker"})
+			if stale {
+				// The same snapshot (at its mark, not regressed), past
+				// its maximum age of 72 h.
+				e.clk.Add(80 * time.Hour)
+				specs = e.fresh([]string{"debian-tracker"}, srcSpec{id: "debian-tracker", at: d})
+			}
+			s, _, c := e.run(specs, host())
+			if stale {
+				if v := s.verdict("debian-tracker"); v.Status != "accepted" || !v.Stale {
+					t.Fatalf("verdict %+v, want accepted and stale", v)
+				}
+			}
+			if c.NotRequested != 1 || len(c.Held) != 0 || c.ClosedUnconfirmed != 1 {
+				t.Fatalf("completion %+v", c)
+			}
+			e.wantOpen(subjWeb01, onTracker)
+			e.wantClosedUnconfirmed(subjWeb01, onOSV)
+		})
+	}
+}
+
+// raiseOnlyCase is one way a source is raise-only for a run.
+type raiseOnlyCase struct {
+	source string
+	// prep runs between the opening run and the run under test.
+	prep func(e *vulnEnv, d time.Time)
+	// spec is how the run under test names the source.
+	spec          func(d time.Time) srcSpec
+	wantStatus    string // verdict; "unknown" means reported as unknown
+	wantProbation bool
+	markKept      bool
+}
+
+func regressedDSA(d time.Time) srcSpec { return srcSpec{id: "dsa", at: d.Add(-48 * time.Hour)} }
+
+// A source that is not accepted for a run (a replayed older content date,
+// also when it comes back after a run that omitted it; an ID not on NOS's
+// list; an undated snapshot) or that is on probation after a mark reset is
+// raise-only for that run: nothing resting on it closes, a new KEV finding
+// on it still opens, and no existing finding's current fixed version, KEV
+// flag, CVSS score, tier or text is lowered, also for a record resting on
+// it and on a fresh source. A finding on a fresh source in the same run
+// closes, so only that source is frozen; a regressed or undated source
+// keeps its high-water mark.
+func TestVulnRaiseOnlySourceClosesNothingAndLowersNothing(t *testing.T) {
+	for name, tc := range map[string]raiseOnlyCase{
+		"replayed older content date": {source: "dsa", spec: regressedDSA, wantStatus: "regressed", markKept: true},
+		"replayed after an omitting run": {source: "dsa", spec: regressedDSA, wantStatus: "regressed", markKept: true,
+			prep: func(e *vulnEnv, _ time.Time) {
+				_, _, c := e.run(e.fresh([]string{"dsa"}), host(), vulnRecord(cveN(4), basis("osv")))
+				if c.ClosedUnconfirmed != 0 || c.NotRequested != 3 {
+					e.t.Fatalf("omitting run: %+v", c)
+				}
+			}},
+		"unknown source ID": {source: "dsa-mirror", spec: func(d time.Time) srcSpec { return srcSpec{id: "dsa-mirror", at: d} },
+			wantStatus: "unknown"},
+		"undated source": {source: "dsa", spec: func(time.Time) srcSpec { return srcSpec{id: "dsa", undated: true} },
+			wantStatus: "undated", markKept: true},
+		"on probation after a mark reset": {source: "dsa", wantStatus: "accepted", wantProbation: true,
+			prep: func(e *vulnEnv, d time.Time) {
+				s, _, _ := e.run(e.fresh([]string{"dsa"}, regressedDSA(d)), nil)
+				if _, err := e.st.ResetMark(e.t.Context(), vulnstore.MarkResetRequest{SourceID: "dsa", RunID: s.RunID,
+					ContentDate: d.Add(-48 * time.Hour), Admin: "admin", Reason: "feed rebuilt from an older mirror"}); err != nil {
+					e.t.Fatalf("admin reset: %v", err)
+				}
+			},
+			// Past the reset value, not past the pre-reset mark d.
+			spec: func(d time.Time) srcSpec { return srcSpec{id: "dsa", at: d.Add(-24 * time.Hour)} }},
+	} {
+		t.Run(name, func(t *testing.T) { testRaiseOnly(t, tc) })
+	}
+}
+
+func testRaiseOnly(t *testing.T, tc raiseOnlyCase) {
+	e := newVulnEnv(t, nil)
+	d := e.clk.Now().Add(-time.Hour)
+	S := tc.source
+	var extra []srcSpec
+	skip := []string{S}
+	if tc.wantStatus == "unknown" {
+		// A run names at most as many sources as the list holds, so the
+		// unknown ID takes the place of a listed source no record uses.
+		extra = append(extra, srcSpec{id: S, at: d})
+		skip = append(skip, "paloalto-csaf")
+	}
+	omitted, lowered, newKEV, onFresh, mixed := cveN(1), cveN(2), cveN(3), cveN(4), cveN(5)
+	high := []recOpt{fixedIn(opensslFixedHigh), withKEV(), withCVSS(9.8), withText("original assessment")}
+	low := []recOpt{fixedIn(opensslFixed), withCVSS(2.0), withText("replayed assessment")}
+	hi := vulnTierOf(subjWeb01, recordOf(t, vulnRecord(lowered, high...)))
+	if lo := vulnTierOf(subjWeb01, recordOf(t, vulnRecord(lowered, low...))); hi <= lo {
+		t.Fatalf("fixture: tier %d does not fall to %d", hi, lo)
+	}
+	e.run(e.fresh(skip[1:], extra...), host(),
+		vulnRecord(omitted, basis(S)),
+		vulnRecord(lowered, append([]recOpt{basis(S)}, high...)...),
+		vulnRecord(onFresh, basis("osv")),
+		vulnRecord(mixed, append([]recOpt{basis(S, "nvd")}, high...)...))
+	before := map[string]vulnstore.Finding{lowered: e.finding(lowered, subjWeb01), mixed: e.finding(mixed, subjWeb01)}
+	if tc.prep != nil {
+		tc.prep(e, d)
+		e.wantOpen(subjWeb01, omitted, lowered, onFresh, mixed)
+	}
+
+	s := e.start(e.fresh(skip, tc.spec(d)))
+	if tc.wantStatus == "unknown" {
+		if s.UnknownCount != 1 || len(s.UnknownSources) != 1 || s.UnknownSources[0] != S {
+			t.Fatalf("unknown sources %v (%d)", s.UnknownSources, s.UnknownCount)
+		}
+	} else if v := s.verdict(S); v.Status != tc.wantStatus || v.Probation != tc.wantProbation {
+		t.Fatalf("verdict %+v, want %s probation %v", v, tc.wantStatus, tc.wantProbation)
+	}
+	b := e.batch(s.RunID, host(),
+		vulnRecord(lowered, append([]recOpt{basis(S)}, low...)...),
+		vulnRecord(mixed, append([]recOpt{basis(S, "nvd")}, low...)...),
+		vulnRecord(newKEV, basis(S), withKEV()))
+	if b.Opened != 1 || b.Ignored < 2 {
+		t.Fatalf("batch %+v: want the KEV finding opened and the lowering changes ignored", b)
+	}
+	c := e.complete(s.RunID)
+	if c.ClosedUnconfirmed != 1 {
+		t.Fatalf("completion %+v: want only the finding on the fresh source closed", c)
+	}
+	if tc.wantProbation {
+		if c.Held[vulnstore.HoldProbation] != 1 {
+			t.Fatalf("completion %+v: want the closure on the probation source held", c)
+		}
+	} else if c.NotRequested != 1 || len(c.Held) != 0 {
+		t.Fatalf("completion %+v: want the closure on the frozen source not requested", c)
+	}
+	e.wantOpen(subjWeb01, omitted, lowered, mixed, newKEV)
+	e.wantClosedUnconfirmed(subjWeb01, onFresh)
+
+	if f := e.finding(newKEV, subjWeb01); f.Record.Scores.KEV == nil || !f.EpisodeKEV() {
+		t.Errorf("new KEV finding: KEV %v, episode KEV %v", f.Record.Scores.KEV, f.EpisodeKEV())
+	}
+	for cve, was := range before {
+		f := e.finding(cve, subjWeb01)
+		r := f.Record
+		if r.Fix.State != vulnfinding.FixFixed || r.Fix.Version != opensslFixedHigh {
+			t.Errorf("%s: fix %+v lowered", cve, r.Fix)
+		}
+		if r.Scores.KEV == nil {
+			t.Errorf("%s: KEV flag dropped", cve)
+		}
+		if r.Scores.CVSS == nil || r.Scores.CVSS.BaseScore != 9.8 {
+			t.Errorf("%s: CVSS %+v lowered", cve, r.Scores.CVSS)
+		}
+		if r.Assessment.Text != "original assessment" {
+			t.Errorf("%s: text replaced", cve)
+		}
+		if got, want := vulnTierOf(f.Subject, r), vulnTierOf(was.Subject, was.Record); got != want {
+			t.Errorf("%s: tier %d, was %d", cve, got, want)
+		}
+		if f.EpisodeFixedVersion != was.EpisodeFixedVersion || f.EpisodeKEVDate != was.EpisodeKEVDate || f.EpisodePeakTier != was.EpisodePeakTier {
+			t.Errorf("%s: episode marks changed: %q %q %d, were %q %q %d", cve, f.EpisodeFixedVersion, f.EpisodeKEVDate,
+				f.EpisodePeakTier, was.EpisodeFixedVersion, was.EpisodeKEVDate, was.EpisodePeakTier)
+		}
+	}
+	if tc.markKept {
+		if got := e.markDate(S); !got.Equal(d) {
+			t.Errorf("mark of %s %v, want %v", S, got, d)
+		}
+	}
+	if tc.wantStatus == "unknown" {
+		e.wantNoMark(S)
+	}
+}
+
+// recordOf parses a test record the way the API does.
+func recordOf(t *testing.T, r map[string]any) vulnfinding.Record {
+	t.Helper()
+	f, err := vulnfinding.ParseRecord(mustMarshal(t, r))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f.Record
+}
+
+// wantNoMark checks that no high-water mark row exists for id.
+func (e *vulnEnv) wantNoMark(id string) {
+	e.t.Helper()
+	var n int
+	if err := e.db.QueryRowContext(e.t.Context(), `SELECT COUNT(*) FROM vuln_source_marks WHERE source_id = ?`, id).Scan(&n); err != nil {
+		e.t.Fatal(err)
+	}
+	if n != 0 {
+		e.t.Errorf("source %s has a high-water mark", id)
+	}
+}
+
+// Rolled-back data relabelled under a new source ID: the new ID is not on
+// NOS's list, so it gets no mark, lowers nothing and closes nothing, and
+// the real source's mark stays where it was.
+func TestVulnRolledBackDataUnderNewSourceIDClosesNothing(t *testing.T) {
+	e := newVulnEnv(t, nil)
+	d := e.clk.Now().Add(-time.Hour)
+	omitted, lowered := cveN(1), cveN(2)
+	e.run(e.fresh(nil), host(), vulnRecord(omitted, basis("dsa")),
+		vulnRecord(lowered, basis("dsa"), fixedIn(opensslFixedHigh), withText("original assessment")))
+
+	relabelled := srcSpec{id: "dsa-rebuilt", at: d.Add(-30 * 24 * time.Hour)}
+	s, b, c := e.run(e.fresh([]string{"dsa"}, relabelled), host(),
+		vulnRecord(lowered, basis("dsa-rebuilt"), withText("rolled back")))
+	if s.UnknownCount != 1 || s.UnknownSources[0] != "dsa-rebuilt" {
+		t.Fatalf("unknown sources %v", s.UnknownSources)
+	}
+	if b.Ignored < 1 || c.ClosedUnconfirmed != 0 || len(c.Held) != 0 {
+		t.Fatalf("relabelled run: batch %+v completion %+v", b, c)
+	}
+	// A second relabelled run omits both: still nothing closes.
+	if _, _, c = e.run(e.fresh([]string{"dsa"}, relabelled), host()); c.ClosedUnconfirmed != 0 || len(c.Held) != 0 {
+		t.Fatalf("second relabelled run: %+v", c)
+	}
+	e.wantOpen(subjWeb01, omitted, lowered)
+	if f := e.finding(lowered, subjWeb01); f.Record.Fix.Version != opensslFixedHigh || f.Record.Assessment.Text != "original assessment" {
+		t.Errorf("relabelled data lowered the finding: %+v %q", f.Record.Fix, f.Record.Assessment.Text)
+	}
+	if got := e.markDate("dsa"); !got.Equal(d) {
+		t.Errorf("mark of dsa %v, want %v", got, d)
+	}
+	e.wantNoMark("dsa-rebuilt")
+}
