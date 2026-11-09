@@ -10,6 +10,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnver"
 )
 
 // InstalledFormat is the first line of a package.list_installed result.
@@ -32,16 +34,20 @@ import (
 // truncated or failed read.
 const InstalledFormat = "nos-installed-v1"
 
-// Limits for package.list_installed results.
+// Limits for package.list_installed results. The kernel and Built-Using
+// bounds are the vulnver ones (spec 09), so that a value vulnver accepts
+// never makes the read partial.
 const (
 	// MaxInstalledOutput bounds the bytes read from a result; anything
 	// beyond is ignored and the read is partial.
 	MaxInstalledOutput = 8 << 20
-	maxInstalledLine   = 4096
 	maxFieldLen        = 128
-	maxBuiltUsingLen   = 1024
-	maxReleaseLen      = 64
-	maxBuildLen        = 256
+	maxBuiltUsingLen   = vulnver.MaxBuiltUsingLen
+	maxReleaseLen      = vulnver.MaxKernelReleaseLen
+	maxBuildLen        = vulnver.MaxKernelBuildLen
+	// maxInstalledLine leaves room for a full Built-Using field next to
+	// the other, much shorter fields.
+	maxInstalledLine = maxBuiltUsingLen + 1024
 )
 
 // Reasons for a partial read. Reason strings name the line number at most,
@@ -56,6 +62,21 @@ const (
 	ReasonCountMismatch = "record count mismatch"
 	ReasonNoKernel      = "kernel record missing"
 	ReasonNoPackages    = "no installed packages"
+	// ReasonUnfinished: a package is half-installed or half-configured
+	// (failed or interrupted dpkg run), so its files may not match its
+	// source version.
+	ReasonUnfinished = "package in an unfinished dpkg state"
+)
+
+// Reasons the running kernel has no version basis. Like the partial-read
+// reasons they never carry host content.
+const (
+	// KernelReasonUnmapped: vulnver.RunningKernel found no basis (no or
+	// several images for the release, no unsigned kernel source, build
+	// string empty, unrecognised or not matching).
+	KernelReasonUnmapped = "running kernel not mappable to a kernel source version"
+	// KernelReasonDistro: the host's distribution is not Debian or Ubuntu.
+	KernelReasonDistro = "distribution not supported for kernel mapping"
 )
 
 // KernelState says whether the running kernel maps to a version basis.
@@ -117,8 +138,9 @@ type InstalledKernel struct {
 
 // InstalledInventory is a parsed package.list_installed result. Complete
 // is true only for a read that exited successfully, was not truncated,
-// parsed every line, and stayed below MaxPackages; a partial read can add
-// inventory but never prove a removal.
+// parsed every line, had no package in an unfinished dpkg state, and
+// stayed below MaxPackages; a partial read can add inventory but never
+// prove a removal.
 type InstalledInventory struct {
 	Packages         []InstalledPackage
 	RunningKernel    RunningKernel
@@ -132,11 +154,8 @@ var (
 	debNameRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9+.\-]{1,127}$`)
 	debArchRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9\-]{0,31}$`)
 	debVersionRe = regexp.MustCompile(`^(?:[0-9]{1,10}:)?[0-9A-Za-z][0-9A-Za-z.+~\-]{0,127}$`)
-	releaseRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+~\-]{0,63}$`)
-	builtUsingRe = regexp.MustCompile(`^([a-z0-9][a-z0-9+.\-]{1,127}) \(= ((?:[0-9]{1,10}:)?[0-9A-Za-z][0-9A-Za-z.+~\-]{0,127})\)$`)
-	debBuildRe   = regexp.MustCompile(`\bDebian ([0-9][0-9A-Za-z.+~:\-]*)`)
-	ubuBuildRe   = regexp.MustCompile(`^#([0-9]+)(?:~[0-9A-Za-z.+]+)?-Ubuntu\b`)
-	imageRe      = regexp.MustCompile(`^linux-image-(?:unsigned-)?([0-9][A-Za-z0-9._+~\-]*?)(?:-unsigned)?$`)
+	releaseRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+~\-]{0,127}$`)
+	endCountRe   = regexp.MustCompile(`^(?:0|[1-9][0-9]{0,8})$`)
 )
 
 // dpkg db:Status-Status values. included: the package's files are on disk.
@@ -149,6 +168,14 @@ var dpkgStatus = map[string]bool{
 	"triggers-pending": true,
 	"config-files":     false,
 	"not-installed":    false,
+}
+
+// unfinishedStatus are included states left by a failed or interrupted
+// dpkg run: files of the old and the new version may both be on disk, so
+// the source version is not a sure basis and the read is partial.
+var unfinishedStatus = map[string]bool{
+	"half-installed":  true,
+	"half-configured": true,
 }
 
 type installedParser struct {
@@ -172,9 +199,12 @@ func (p *installedParser) malformed(n int) {
 	p.partial(fmt.Sprintf("%s %d", ReasonMalformed, n))
 }
 
-// ParseInstalled reads a package.list_installed result (InstalledFormat).
-// It never fails: whatever cannot be used makes the inventory partial.
-func ParseInstalled(out []byte, rs ReadStatus) InstalledInventory {
+// ParseInstalled reads a package.list_installed result (InstalledFormat)
+// from a host of distribution distro (from os.detect). It never fails:
+// whatever cannot be used makes the inventory partial. The running kernel
+// is mapped by vulnver.RunningKernel only, so the parser and the matcher
+// cannot reach different kernel verdicts for the same host.
+func ParseInstalled(out []byte, rs ReadStatus, distro vulnver.Distro) InstalledInventory {
 	p := &installedParser{seen: map[string]bool{}}
 	p.inv.Complete = true
 	p.inv.RunningKernel = RunningKernel{State: KernelVersionUnknown, Reason: ReasonNoKernel}
@@ -222,7 +252,7 @@ func ParseInstalled(out []byte, rs ReadStatus) InstalledInventory {
 		// An empty inventory would read as "every package removed".
 		p.partial(ReasonNoPackages)
 	}
-	p.mapKernels()
+	p.mapKernels(distro)
 	return p.inv
 }
 
@@ -260,12 +290,11 @@ func (p *installedParser) line(n int, line []byte) {
 		p.kernelRecord(n, f)
 	case "END":
 		p.endSeen = true
-		c, err := strconv.Atoi(f[len(f)-1])
-		if len(f) != 2 || err != nil || c < 0 {
+		if len(f) != 2 || !endCountRe.MatchString(f[1]) {
 			p.malformed(n)
 			return
 		}
-		if c != p.pLines {
+		if c, err := strconv.Atoi(f[1]); err != nil || c != p.pLines {
 			p.partial(ReasonCountMismatch)
 		}
 	default:
@@ -299,6 +328,11 @@ func (p *installedParser) pkg(n int, f []string) {
 		p.inv.Dropped++
 		p.partial(ReasonLimit)
 		return
+	}
+	if unfinishedStatus[status] {
+		// The files are on disk, so the package stays inventory, but the
+		// read can no longer prove a fix or a removal.
+		p.partial(fmt.Sprintf("%s %d", ReasonUnfinished, n))
 	}
 	p.seen[key] = true
 	p.inv.Packages = append(p.inv.Packages, InstalledPackage{
@@ -342,6 +376,8 @@ func (p *installedParser) kernelRecord(n int, f []string) {
 		p.malformed(n)
 		return
 	}
+	// An empty or unrecognised build string is a well-formed record; it is
+	// vulnver.RunningKernel that turns it into "kernel version unknown".
 	p.inv.RunningKernel = RunningKernel{Release: f[1], Build: f[2], State: KernelVersionUnknown}
 }
 
@@ -357,125 +393,67 @@ func validText(s string, max int) bool {
 	return true
 }
 
-// kernelSourceRe is the allowlist of unsigned kernel sources the trackers
-// key on: Debian linux and linux-<x.y> (LTS kernels), Ubuntu linux,
-// linux-hwe-<x.y> and the flavour sources below, optionally with -hwe
-// and/or a -<x.y> series suffix. Verify the list per release (ADR 0011 D4);
-// anything else, including signed, meta, restricted-modules and unknown
-// linux-* sources, is not a kernel version basis.
-var kernelSourceRe = regexp.MustCompile(`^linux(?:-[0-9]{1,2}\.[0-9]{1,3}|-hwe-[0-9]{1,2}\.[0-9]{1,3}|-(?:aws|azure|gcp|gke|gkeop|ibm|kvm|lowlatency|nvidia|oem|oracle|raspi|realtime)(?:-hwe)?(?:-[0-9]{1,2}\.[0-9]{1,3})?)?$`)
-
-// isKernelSource reports whether a source package is an unsigned kernel
-// source the trackers key on (kernelSourceRe). Signed and meta sources
-// carry version lines that never compare with tracker fixed versions.
-func isKernelSource(src string) bool {
-	return kernelSourceRe.MatchString(src)
-}
-
-// mapImage returns the unsigned kernel source and version of a kernel
-// image binary, or a reason it cannot be mapped.
-func mapImage(pkg InstalledPackage) (src, ver, reason string) {
-	if isKernelSource(pkg.Source) {
-		return pkg.Source, pkg.SourceVersion, ""
-	}
-	if !strings.HasPrefix(pkg.Source, "linux-signed") {
-		return "", "", "kernel image not built from a kernel source"
-	}
-	if pkg.BuiltUsing == "" {
-		return "", "", "signed kernel image without Built-Using"
-	}
-	found := 0
-	for _, e := range strings.Split(pkg.BuiltUsing, ",") {
-		m := builtUsingRe.FindStringSubmatch(strings.TrimSpace(e))
-		if m == nil {
-			return "", "", "unparseable Built-Using"
-		}
-		name := m[1]
-		switch {
-		case isKernelSource(name):
-			src, ver = name, m[2]
-			found++
-		case strings.HasPrefix(name, "linux-signed"), strings.HasPrefix(name, "linux-meta"):
-			return "", "", "Built-Using names a signed or meta source"
-		}
-	}
-	if found != 1 {
-		return "", "", "Built-Using without exactly one kernel source"
-	}
-	return src, ver, ""
-}
-
-// imageRelease returns the kernel release of a linux-image-<release>
-// binary (also linux-image-unsigned-<release> and
-// linux-image-<release>-unsigned), or "" for meta and debug packages.
-func imageRelease(name string) string {
-	if strings.HasSuffix(name, "-dbg") || strings.HasSuffix(name, "-dbgsym") {
+// kernelImageRelease returns the release of a linux-image-<release>
+// binary, or "" for meta (linux-image-amd64, linux-image-generic) and debug
+// packages. It only selects what is listed as an installed kernel; the
+// running kernel's image is chosen by vulnver.RunningKernel.
+func kernelImageRelease(name string) string {
+	rel, ok := strings.CutPrefix(name, "linux-image-")
+	if !ok || rel == "" || rel[0] < '0' || rel[0] > '9' ||
+		strings.HasSuffix(rel, "-dbg") || strings.HasSuffix(rel, "-dbgsym") {
 		return ""
 	}
-	m := imageRe.FindStringSubmatch(name)
-	if m == nil {
-		return ""
-	}
-	return m[1]
+	return rel
 }
 
-// ubuntuUpload returns the ABI upload number of an Ubuntu kernel version
-// (6.8.0-45.45 and 6.8.0-45.45~22.04.1 -> 45).
-func ubuntuUpload(ver string) string {
-	if i := strings.IndexByte(ver, '~'); i >= 0 {
-		ver = ver[:i]
+// binaries converts the inventory for vulnver.
+func binaries(pkgs []InstalledPackage) []vulnver.Binary {
+	out := make([]vulnver.Binary, len(pkgs))
+	for i, pkg := range pkgs {
+		out[i] = vulnver.Binary{
+			Name: pkg.Name, Version: pkg.Version,
+			SourceName: pkg.Source, SourceVersion: pkg.SourceVersion,
+			BuiltUsing: pkg.BuiltUsing,
+		}
 	}
-	if i := strings.LastIndexByte(ver, '.'); i >= 0 {
-		return ver[i+1:]
-	}
-	return ""
+	return out
 }
 
-func (p *installedParser) mapKernels() {
+// mapKernels sets the running kernel's basis with vulnver.RunningKernel and
+// lists installed kernel images with vulnver.ImageBasis. There is no local
+// kernel rule.
+func (p *installedParser) mapKernels(distro vulnver.Distro) {
 	rk := &p.inv.RunningKernel
 	running := ""
 	if rk.Release != "" {
-		running = rk.Release
-		rk.Reason = "no installed kernel image for the running release"
+		running = "linux-image-" + rk.Release
 	}
-	var src, ver, image string
-	candidates, failed := 0, false
-	for _, pkg := range p.inv.Packages {
-		rel := imageRelease(pkg.Name)
+	bins := binaries(p.inv.Packages)
+	for _, b := range bins {
+		rel := kernelImageRelease(b.Name)
 		if rel == "" {
 			continue
 		}
-		s, v, why := mapImage(pkg)
-		k := InstalledKernel{Package: pkg.Name, Version: pkg.Version, Release: rel, Running: rel == running}
-		if why == "" {
-			k.Source, k.SourceVersion, k.Mapped = s, v, true
+		k := InstalledKernel{Package: b.Name, Version: b.Version, Release: rel, Running: b.Name == running}
+		if kb, err := vulnver.ImageBasis(b); err == nil {
+			k.Source, k.SourceVersion, k.Mapped = kb.SourceName, kb.Version, true
 		}
 		p.inv.InstalledKernels = append(p.inv.InstalledKernels, k)
-		if !k.Running {
-			continue
-		}
-		candidates++
-		switch {
-		case why != "":
-			failed = true
-			rk.Reason = why
-		case candidates == 1:
-			src, ver, image = s, v, pkg.Name
-		case s != src || v != ver:
-			failed = true
-			rk.Reason = "installed images of the running release disagree"
-		}
 	}
-	if running == "" || candidates == 0 || failed {
+	if running == "" {
+		return // no usable kernel record; Reason is already set
+	}
+	if distro != vulnver.DistroDebian && distro != vulnver.DistroUbuntu {
+		rk.Reason = KernelReasonDistro
 		return
 	}
-	if m := debBuildRe.FindStringSubmatch(rk.Build); m != nil && m[1] != ver {
-		rk.Reason = "build string does not match the kernel version"
+	kb, err := vulnver.RunningKernel(vulnver.KernelFacts{
+		Distro: distro, Release: rk.Release, BuildVersion: rk.Build, Installed: bins,
+	})
+	if err != nil {
+		// vulnver errors quote host content; the reason stays fixed text.
+		rk.Reason = KernelReasonUnmapped
 		return
 	}
-	if m := ubuBuildRe.FindStringSubmatch(rk.Build); m != nil && m[1] != ubuntuUpload(ver) {
-		rk.Reason = "build string does not match the kernel upload"
-		return
-	}
-	rk.State, rk.Reason, rk.ImagePackage, rk.Source, rk.Version = KernelMapped, "", image, src, ver
+	rk.State, rk.Reason, rk.ImagePackage, rk.Source, rk.Version = KernelMapped, "", kb.ImageBinary, kb.SourceName, kb.Version
 }
