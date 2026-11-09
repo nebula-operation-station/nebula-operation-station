@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -53,24 +54,45 @@ type trivyDocOpts struct {
 	results     []trivyResult
 }
 
+// trivyTestOS, trivyTestMeta and trivyTestDoc keep Trivy's field order
+// (SchemaVersion first, Metadata before Results).
+type trivyTestOS struct {
+	Family string `json:"Family"`
+	Name   string `json:"Name"`
+}
+
+type trivyTestMeta struct {
+	OS          *trivyTestOS   `json:"OS,omitempty"`
+	ImageID     string         `json:"ImageID"`
+	RepoDigests []string       `json:"RepoDigests"`
+	ImageConfig map[string]any `json:"ImageConfig"`
+}
+
+type trivyTestDoc struct {
+	SchemaVersion int           `json:"SchemaVersion"`
+	ArtifactName  string        `json:"ArtifactName"`
+	ArtifactType  string        `json:"ArtifactType"`
+	Metadata      trivyTestMeta `json:"Metadata"`
+	Results       []trivyResult `json:"Results"`
+}
+
 func trivyJSON(t testing.TB, o trivyDocOpts) []byte {
 	t.Helper()
-	doc := map[string]any{
-		"SchemaVersion": 2,
-		"ArtifactName":  o.artifact,
-		"ArtifactType":  "container_image",
-		"Results":       o.results,
-	}
-	meta := map[string]any{
-		"ImageID":     "sha256:" + pkgOtherHex,
-		"RepoDigests": o.repoDigests,
-		// Fields the parser must ignore and never keep.
-		"ImageConfig": map[string]any{"config": map[string]any{"Env": []string{"SECRET_TOKEN=do-not-keep"}}},
+	doc := trivyTestDoc{
+		SchemaVersion: 2,
+		ArtifactName:  o.artifact,
+		ArtifactType:  "container_image",
+		Metadata: trivyTestMeta{
+			ImageID:     "sha256:" + pkgOtherHex,
+			RepoDigests: o.repoDigests,
+			// Fields the parser must ignore and never keep.
+			ImageConfig: map[string]any{"config": map[string]any{"Env": []string{"SECRET_TOKEN=do-not-keep"}}},
+		},
+		Results: o.results,
 	}
 	if !o.noOS {
-		meta["OS"] = map[string]any{"Family": o.family, "Name": o.osName}
+		doc.Metadata.OS = &trivyTestOS{Family: o.family, Name: o.osName}
 	}
-	doc["Metadata"] = meta
 	b, err := json.Marshal(doc)
 	if err != nil {
 		t.Fatal(err)
@@ -372,6 +394,7 @@ func TestImagePackagesDuplicatesCollapsed(t *testing.T) {
 	o := goodOpts()
 	p := trivyPkg{Name: "golang.org/x/net", Version: "v0.17.0"}
 	o.results = []trivyResult{
+		{Target: "os", Class: "os-pkgs", Type: "debian"},
 		{Target: "a", Class: "lang-pkgs", Type: "gobinary", Packages: []trivyPkg{p}},
 		{Target: "b", Class: "lang-pkgs", Type: "gobinary", Packages: []trivyPkg{p}},
 	}
@@ -381,13 +404,260 @@ func TestImagePackagesDuplicatesCollapsed(t *testing.T) {
 	}
 }
 
-func TestImagePackagesEmptyListingWithOSIsComplete(t *testing.T) {
+// An image with a detected OS but no os-pkgs result (unreadable package DB,
+// library-only scan) must never prove that every OS package was removed.
+func TestImagePackagesDetectedOSWithoutOSResultIsPartial(t *testing.T) {
+	langOnly := goodOpts()
+	langOnly.results = langOnly.results[1:]
+	otherFamily := goodOpts()
+	otherFamily.results[0].Type = "alpine" // os-pkgs result for another OS than detected
+	for name, o := range map[string]trivyDocOpts{
+		"no results":         func() trivyDocOpts { o := goodOpts(); o.results = nil; return o }(),
+		"lang-pkgs only":     langOnly,
+		"os type not family": otherFamily,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, _ := ParseImagePackages(pkgDigest, okRun(trivyJSON(t, o)))
+			if !got.Known || got.Complete || !hasReason(got.Reason, ReasonOSPackagesMissing) {
+				t.Fatalf("detected OS without os-pkgs result must be partial: %+v", got)
+			}
+			for _, p := range got.Packages {
+				if p.Ecosystem == "alpine" {
+					t.Fatalf("os-pkgs of another family kept: %+v", p)
+				}
+			}
+		})
+	}
+}
+
+func TestImagePackagesEmptyOSResultIsComplete(t *testing.T) {
 	o := goodOpts()
-	o.results = nil
+	o.results = []trivyResult{{Target: "x", Class: "os-pkgs", Type: "debian", Packages: nil}}
 	got, _ := ParseImagePackages(pkgDigest, okRun(trivyJSON(t, o)))
 	if !got.Known || !got.Complete || got.Packages == nil || len(got.Packages) != 0 {
 		t.Fatalf("got %+v", got)
 	}
+}
+
+// A language result must not place packages under an OS ecosystem.
+func TestImagePackagesLangResultWithOSTypeDropped(t *testing.T) {
+	for _, typ := range []string{"debian", "alpine", "ubuntu"} {
+		t.Run(typ, func(t *testing.T) {
+			o := goodOpts()
+			o.results[1].Type = typ
+			got, _ := ParseImagePackages(pkgDigest, okRun(trivyJSON(t, o)))
+			if got.Complete || !hasReason(got.Reason, ReasonEntryDropped) || len(got.Packages) != 4 {
+				t.Fatalf("got %+v", got)
+			}
+			for _, p := range got.Packages {
+				if p.Name == "golang.org/x/net" {
+					t.Fatalf("lang package kept under OS type: %+v", p)
+				}
+			}
+		})
+	}
+}
+
+// A type mismatch in one entry drops that entry only; the rest of the
+// document is still read.
+func TestImagePackagesEntryTypeMismatchDropsEntry(t *testing.T) {
+	for name, entry := range map[string]string{
+		"string epoch":       `{"Name":"x","Version":"1","Epoch":"1"}`,
+		"epoch beyond int":   `{"Name":"x","Version":"1","Epoch":1e400}`,
+		"fractional epoch":   `{"Name":"x","Version":"1","SrcEpoch":1.5}`,
+		"numeric name":       `{"Name":7,"Version":"1"}`,
+		"array version":      `{"Name":"x","Version":["1"]}`,
+		"entry is a number":  `5`,
+		"entry is a string":  `"musl"`,
+		"entry is an array":  `[{"Name":"x","Version":"1"}]`,
+		"object source name": `{"Name":"x","Version":"1","SrcName":{"a":1}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := []byte(`{"SchemaVersion":2,"ArtifactName":"` + pkgDigest + `","Metadata":{"OS":{"Family":"alpine","Name":"3.19.1"}},` +
+				`"Results":[{"Target":"t","Class":"os-pkgs","Type":"alpine","Packages":[` + entry + `,{"Name":"musl","Version":"1.2.4-r2"}]}]}`)
+			got, _ := ParseImagePackages(pkgDigest, okRun(b))
+			if !got.Known || got.Complete || got.Reason != ReasonEntryDropped {
+				t.Fatalf("type mismatch must drop the entry: %+v", got)
+			}
+			if len(got.Packages) != 1 || got.Packages[0].Name != "musl" {
+				t.Fatalf("packages %+v", got.Packages)
+			}
+		})
+	}
+}
+
+// Hostile output of many tiny entries must stop at the entry cap and keep
+// the allocation of one read small, independent of the output size.
+func TestImagePackagesEntryFloodBounded(t *testing.T) {
+	head := `{"SchemaVersion":2,"ArtifactName":"` + pkgDigest + `","Metadata":{"OS":{"Family":"alpine","Name":"3.19.1"}},` +
+		`"Results":[{"Class":"os-pkgs","Type":"alpine","Packages":[`
+	for name, unit := range map[string]string{"empty objects": "{},", "nulls": "null,", "numbers": "0,"} {
+		t.Run(name, func(t *testing.T) {
+			var sb strings.Builder
+			sb.Grow(MaxImagePackagesOutput)
+			sb.WriteString(head)
+			for sb.Len()+len(unit)+len("{}]}]}") <= MaxImagePackagesOutput {
+				sb.WriteString(unit)
+			}
+			sb.WriteString("{}]}]}")
+			b := []byte(sb.String())
+			sb.Reset()
+			if len(b) > MaxImagePackagesOutput || len(b) < MaxImagePackagesOutput-16 {
+				t.Fatalf("stream size %d", len(b))
+			}
+			var got ImagePackages
+			alloc := allocatedBytes(func() { got, _ = ParseImagePackages(pkgDigest, okRun(b)) })
+			if !got.Known || got.Complete || !hasReason(got.Reason, ReasonLimitReached) || !hasReason(got.Reason, ReasonEntryDropped) {
+				t.Fatalf("flood must stop at the cap: %+v", got)
+			}
+			if len(got.Packages) != 0 {
+				t.Fatalf("packages %d", len(got.Packages))
+			}
+			t.Logf("one read allocated %d bytes", alloc)
+			const budget = 4 << 20
+			if alloc > budget {
+				t.Fatalf("one read allocated %d bytes, budget %d", alloc, budget)
+			}
+		})
+	}
+}
+
+// Every array and object the parser streams is capped, so large arrays
+// outside Packages cannot make one read allocate per element either.
+func TestImagePackagesOtherFloodsBounded(t *testing.T) {
+	pre := `{"SchemaVersion":2,"ArtifactName":"` + pkgDigest + `",`
+	osMeta := `"OS":{"Family":"alpine","Name":"3.19.1"}`
+	const small = 4 << 20
+	cases := map[string]struct {
+		head, unit, tail string
+		budget           uint64
+	}{
+		"repo digests": {pre + `"Metadata":{` + osMeta + `,"RepoDigests":[`, `"a",`, `"a"]},"Results":[]}`, small},
+		"results":      {pre + `"Metadata":{` + osMeta + `},"Results":[`, `{},`, `{}]}`, small},
+		"null results": {pre + `"Metadata":{` + osMeta + `},"Results":[`, `null,`, `null]}`, small},
+		"keys":         {pre + `"Metadata":{` + osMeta + `,`, `"k":0,`, `"k":0},"Results":[]}`, small},
+		"result keys":  {pre + `"Metadata":{` + osMeta + `},"Results":[{`, `"k":0,`, `"k":0}]}`, small},
+		// One skipped value is buffered whole by the decoder (once, not per
+		// element): bounded by the output limit, not by the element count.
+		"skipped tree": {pre + `"Metadata":{` + osMeta + `,"ImageConfig":[`, `"aa",`, `"a"]},"Results":[]}`, 2*MaxImagePackagesOutput + small},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			var sb strings.Builder
+			sb.Grow(MaxImagePackagesOutput)
+			sb.WriteString(c.head)
+			for sb.Len()+len(c.unit)+len(c.tail) <= MaxImagePackagesOutput {
+				sb.WriteString(c.unit)
+			}
+			sb.WriteString(c.tail)
+			b := []byte(sb.String())
+			sb.Reset()
+			var got ImagePackages
+			alloc := allocatedBytes(func() { got, _ = ParseImagePackages(pkgDigest, okRun(b)) })
+			if got.Complete {
+				t.Fatalf("flood must not be complete: %+v", got)
+			}
+			t.Logf("one read allocated %d bytes", alloc)
+			if alloc > c.budget {
+				t.Fatalf("one read allocated %d bytes, budget %d", alloc, c.budget)
+			}
+		})
+	}
+}
+
+// Decoding stops at a cap; when that happens before SchemaVersion was read
+// (Trivy writes it first), the output is unparseable, never complete.
+func TestImagePackagesCapBeforeSchemaUnparseable(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString(`{"Results":[{"Class":"os-pkgs","Type":"alpine","Packages":[`)
+	for i := 0; i <= maxImagePkgEntries; i++ {
+		fmt.Fprintf(&sb, `{"Name":"p%d","Version":"1"},`, i)
+	}
+	sb.WriteString(`{}]}],"SchemaVersion":2}`)
+	got, _ := ParseImagePackages(pkgDigest, okRun([]byte(sb.String())))
+	if got.Known || got.Complete || got.Reason != ReasonUnparseable {
+		t.Fatalf("got known=%v complete=%v reason=%q", got.Known, got.Complete, got.Reason)
+	}
+}
+
+func TestImagePackagesDuplicateKeysUnparseable(t *testing.T) {
+	meta := `"Metadata":{"OS":{"Family":"alpine","Name":"3.19.1"}}`
+	res := `"Results":[{"Class":"os-pkgs","Type":"alpine","Packages":[{"Name":"musl","Version":"1"}]}]`
+	for name, b := range map[string]string{
+		"schema":   `{"SchemaVersion":2,"SchemaVersion":2,"ArtifactName":"` + pkgDigest + `",` + meta + `,` + res + `}`,
+		"artifact": `{"SchemaVersion":2,"ArtifactName":"` + pkgDigest + `","ArtifactName":"x",` + meta + `,` + res + `}`,
+		"metadata": `{"SchemaVersion":2,"ArtifactName":"` + pkgDigest + `",` + meta + `,` + meta + `,` + res + `}`,
+		"os":       `{"SchemaVersion":2,"ArtifactName":"` + pkgDigest + `","Metadata":{"OS":null,"OS":{"Family":"alpine","Name":"3.19.1"}},` + res + `}`,
+		"class":    `{"SchemaVersion":2,"ArtifactName":"` + pkgDigest + `",` + meta + `,"Results":[{"Class":"os-pkgs","Class":"lang-pkgs","Type":"alpine","Packages":[]}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, _ := ParseImagePackages(pkgDigest, okRun([]byte(b)))
+			if got.Known || got.Complete || got.Reason != ReasonUnparseable {
+				t.Fatalf("got %+v", got)
+			}
+		})
+	}
+}
+
+// Results may name Class and Type after Packages; the order of keys does
+// not change the outcome.
+func TestImagePackagesResultKeyOrder(t *testing.T) {
+	b := []byte(`{"Results":[{"Packages":[{"Name":"musl","Version":"1.2.4-r2"}],"Type":"alpine","Class":"os-pkgs"}],` +
+		`"Metadata":{"RepoDigests":["alpine@sha256:` + pkgDigestHex + `"],"OS":{"Name":"3.19.1","Family":"alpine"}},"SchemaVersion":2}`)
+	got, _ := ParseImagePackages(pkgDigest, okRun(b))
+	if !got.Complete || len(got.Packages) != 1 || got.Packages[0].Ecosystem != "alpine" {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestImagePackagesStructuralErrorsUnparseable(t *testing.T) {
+	meta := `"Metadata":{"OS":{"Family":"alpine","Name":"3.19.1"}}`
+	for name, b := range map[string]string{
+		"no schema":        `{"ArtifactName":"` + pkgDigest + `",` + meta + `,"Results":[]}`,
+		"schema string":    `{"SchemaVersion":"2",` + meta + `}`,
+		"results object":   `{"SchemaVersion":2,` + meta + `,"Results":{}}`,
+		"result scalar":    `{"SchemaVersion":2,` + meta + `,"Results":[1]}`,
+		"packages object":  `{"SchemaVersion":2,` + meta + `,"Results":[{"Class":"os-pkgs","Type":"alpine","Packages":{}}]}`,
+		"metadata array":   `{"SchemaVersion":2,"Metadata":[]}`,
+		"truncated":        `{"SchemaVersion":2,` + meta + `,"Results":[{"Class":"os-pkgs","Type":"alpine","Packages":[{"Name":"a"`,
+		"syntax in entry":  `{"SchemaVersion":2,` + meta + `,"Results":[{"Class":"os-pkgs","Type":"alpine","Packages":[{"Name":"a",}]}]}`,
+		"trailing garbage": `{"SchemaVersion":2,` + meta + `,"Results":[]} x`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, _ := ParseImagePackages(pkgDigest, okRun([]byte(b)))
+			if got.Known || got.Complete || got.Packages != nil || got.Reason != ReasonUnparseable {
+				t.Fatalf("got %+v", got)
+			}
+		})
+	}
+}
+
+// An OS value of the wrong JSON type leaves the OS undetected; the rest of
+// the document is still read.
+func TestImagePackagesOSTypeMismatchUndetected(t *testing.T) {
+	for name, osv := range map[string]string{
+		"scalar":         `"alpine"`,
+		"numeric family": `{"Family":1,"Name":"3.19.1"}`,
+		"array":          `[]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := []byte(`{"SchemaVersion":2,"ArtifactName":"` + pkgDigest + `","Metadata":{"OS":` + osv + `},` +
+				`"Results":[{"Class":"os-pkgs","Type":"alpine","Packages":[{"Name":"musl","Version":"1"}]}]}`)
+			got, _ := ParseImagePackages(pkgDigest, okRun(b))
+			if !got.Known || got.Complete || got.Reason != ReasonOSUndetected || len(got.Packages) != 1 {
+				t.Fatalf("got %+v", got)
+			}
+		})
+	}
+}
+
+func allocatedBytes(f func()) uint64 {
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	f()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
 }
 
 func TestImagePackagesRejectsBadRequestedDigest(t *testing.T) {
