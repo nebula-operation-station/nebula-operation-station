@@ -111,6 +111,124 @@ func TestInstalledBuiltUsingKeptOnlyForKernelImages(t *testing.T) {
 	}
 }
 
+// Go and Rust packages such as docker.io carry Built-Using lists far beyond
+// the field and line limits; for non-kernel binaries the field is dropped
+// before any limit applies, so such hosts still get a complete read.
+func TestInstalledLongNonKernelBuiltUsingDroppedBeforeLimits(t *testing.T) {
+	var entries []string
+	for i := 0; len(strings.Join(entries, ", ")) <= 2*maxInstalledLine; i++ {
+		entries = append(entries, fmt.Sprintf("golang-github-example-module%d (= 0.0~git20240101.%d-1)", i, i))
+	}
+	long := strings.Join(entries, ", ")
+	doc := installedDoc("K\t6.1.0-26-amd64\t#1 SMP",
+		pLine("installed", "docker.io", "amd64", "20.10.24+dfsg1-1+b3", "docker.io", "20.10.24+dfsg1-1", long),
+		pLine("installed", "base-files", "amd64", "12.4", "base-files", "12.4", ""),
+	)
+	inv := ParseInstalled([]byte(doc), okRead)
+	if !inv.Complete || inv.Dropped != 0 {
+		t.Fatalf("complete=%v dropped=%d reason=%q, want complete", inv.Complete, inv.Dropped, inv.Reason)
+	}
+	p := findPkg(t, inv, "docker.io", "amd64")
+	if p.BuiltUsing != "" || p.SourceVersion != "20.10.24+dfsg1-1" {
+		t.Errorf("docker.io = %+v, want no Built-Using and source version 20.10.24+dfsg1-1", p)
+	}
+	// The same list on a kernel image is still over the limit.
+	doc = installedDoc("K\t6.1.0-26-amd64\t#1 SMP",
+		pLine("installed", "linux-image-6.1.0-26-amd64", "amd64", "6.1.112-1", "linux-signed-amd64", "6.1.112+1", long),
+	)
+	if inv := ParseInstalled([]byte(doc), okRead); inv.Complete || !strings.HasPrefix(inv.Reason, ReasonMalformed) {
+		t.Errorf("kernel image with overlong Built-Using: complete=%v reason=%q", inv.Complete, inv.Reason)
+	}
+}
+
+func TestIsKernelSourceIsAnAllowlist(t *testing.T) {
+	cases := map[string]bool{
+		"linux":                    true,
+		"linux-5.10":               true, // Debian LTS kernel source
+		"linux-hwe-6.8":            true,
+		"linux-aws":                true,
+		"linux-aws-6.8":            true,
+		"linux-azure":              true,
+		"linux-gcp":                true,
+		"linux-oracle":             true,
+		"linux-lowlatency":         true,
+		"linux-lowlatency-hwe-6.8": true,
+		"linux-oem-6.8":            true,
+		"linux-raspi":              true,
+		"linux-ibm":                true,
+		"linux-kvm":                true,
+		"linux-nvidia":             true,
+		"linux-signed":             false,
+		"linux-signed-amd64":       false,
+		"linux-signed-hwe-6.8":     false,
+		"linux-meta":               false,
+		"linux-meta-hwe-6.8":       false,
+		"linux-restricted-modules": false,
+		"linux-firmware":           false,
+		"linux-base":               false,
+		"linux-latest":             false,
+		"linux-x":                  false,
+		"linux-hwe":                false,
+		"linux-aws-x":              false,
+		"linuxx":                   false,
+		"":                         false,
+		"custom-kernel":            false,
+		"proxmox-kernel-signed":    false,
+	}
+	for src, want := range cases {
+		if got := isKernelSource(src); got != want {
+			t.Errorf("isKernelSource(%q) = %v, want %v", src, got, want)
+		}
+		if got := oracleKernelSource(src); got != want {
+			t.Errorf("fuzz oracle(%q) = %v, want %v", src, got, want)
+		}
+	}
+}
+
+func TestInstalledRecordOrderEnforced(t *testing.T) {
+	good := pLine("installed", "base-files", "amd64", "12.4", "base-files", "12.4", "")
+	other := pLine("installed", "openssl", "amd64", "3.0.13-1", "openssl", "3.0.13-1", "")
+	kern := "K\t6.1.0-26-amd64\t#1 SMP"
+	cases := []struct {
+		name string
+		doc  string
+		pkgs int
+	}{
+		{"K before P lines", InstalledFormat + "\n" + kern + "\n" + good + "\n" + other + "\nEND\t2\n", 0},
+		{"K between P lines", InstalledFormat + "\n" + good + "\n" + kern + "\n" + other + "\nEND\t2\n", 1},
+		{"END before K", InstalledFormat + "\n" + good + "\n" + other + "\nEND\t2\n" + kern + "\n", 2},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			inv := ParseInstalled([]byte(c.doc), okRead)
+			if inv.Complete || !strings.HasPrefix(inv.Reason, ReasonMalformed) {
+				t.Fatalf("complete=%v reason=%q, want malformed", inv.Complete, inv.Reason)
+			}
+			if len(inv.Packages) != c.pkgs {
+				t.Errorf("packages = %d, want %d", len(inv.Packages), c.pkgs)
+			}
+		})
+	}
+}
+
+// A read that lists no installed package can never prove that every
+// package was removed.
+func TestInstalledReadWithoutPackagesIsPartial(t *testing.T) {
+	kern := "K\t6.1.0-26-amd64\t#1 SMP"
+	cases := map[string]string{
+		"no P lines":        installedDoc(kern),
+		"only config-files": installedDoc(kern, pLine("config-files", "oldpkg", "amd64", "1.0-1", "oldpkg", "1.0-1", "")),
+	}
+	for name, doc := range cases {
+		t.Run(name, func(t *testing.T) {
+			inv := ParseInstalled([]byte(doc), okRead)
+			if inv.Complete || inv.Reason != ReasonNoPackages {
+				t.Fatalf("complete=%v reason=%q, want %q", inv.Complete, inv.Reason, ReasonNoPackages)
+			}
+		})
+	}
+}
+
 // dpkg-query always fills source:Package and source:Version (falling back
 // to the binary name and version itself), so an empty field is anomalous
 // input: the line is malformed and the read partial, never filled in from

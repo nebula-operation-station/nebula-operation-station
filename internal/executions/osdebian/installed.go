@@ -55,6 +55,7 @@ const (
 	ReasonNoEnd         = "end record missing"
 	ReasonCountMismatch = "record count mismatch"
 	ReasonNoKernel      = "kernel record missing"
+	ReasonNoPackages    = "no installed packages"
 )
 
 // KernelState says whether the running kernel maps to a version basis.
@@ -217,21 +218,43 @@ func ParseInstalled(out []byte, rs ReadStatus) InstalledInventory {
 	if len(p.inv.Packages) >= MaxPackages {
 		p.partial(ReasonLimit)
 	}
+	if len(p.inv.Packages) == 0 {
+		// An empty inventory would read as "every package removed".
+		p.partial(ReasonNoPackages)
+	}
 	p.mapKernels()
 	return p.inv
 }
 
 func (p *installedParser) line(n int, line []byte) {
-	if bytes.HasPrefix(line, []byte("P\t")) {
+	isP := bytes.HasPrefix(line, []byte("P\t"))
+	if isP {
 		p.pLines++
 	}
-	if p.endSeen || len(line) > maxInstalledLine || !utf8.Valid(line) {
+	if p.endSeen {
 		p.malformed(n)
 		return
 	}
 	f := strings.Split(string(line), "\t")
+	size := len(line)
+	if isP && len(f) == 9 && !strings.HasPrefix(f[2], "linux-image-") {
+		// Built-Using is used for kernel images only; drop it for every
+		// other binary before the limits apply (Go and Rust packages carry
+		// long lists).
+		size -= len(f[7])
+		f[7] = ""
+	}
+	if size > maxInstalledLine || !validUTF8(f) {
+		p.malformed(n)
+		return
+	}
 	switch f[0] {
 	case "P":
+		if p.kernels > 0 {
+			// Record order is P lines, then K, then END.
+			p.malformed(n)
+			return
+		}
 		p.pkg(n, f)
 	case "K":
 		p.kernelRecord(n, f)
@@ -278,13 +301,19 @@ func (p *installedParser) pkg(n int, f []string) {
 		return
 	}
 	p.seen[key] = true
-	if !strings.HasPrefix(name, "linux-image-") {
-		bu = ""
-	}
 	p.inv.Packages = append(p.inv.Packages, InstalledPackage{
 		Name: name, Arch: arch, Version: ver, Source: src, SourceVersion: srcVer,
 		Status: status, BuiltUsing: bu,
 	})
+}
+
+func validUTF8(f []string) bool {
+	for _, s := range f {
+		if !utf8.ValidString(s) {
+			return false
+		}
+	}
+	return true
 }
 
 func validBuiltUsing(s string) bool {
@@ -328,23 +357,19 @@ func validText(s string, max int) bool {
 	return true
 }
 
+// kernelSourceRe is the allowlist of unsigned kernel sources the trackers
+// key on: Debian linux and linux-<x.y> (LTS kernels), Ubuntu linux,
+// linux-hwe-<x.y> and the flavour sources below, optionally with -hwe
+// and/or a -<x.y> series suffix. Verify the list per release (ADR 0011 D4);
+// anything else, including signed, meta, restricted-modules and unknown
+// linux-* sources, is not a kernel version basis.
+var kernelSourceRe = regexp.MustCompile(`^linux(?:-[0-9]{1,2}\.[0-9]{1,3}|-hwe-[0-9]{1,2}\.[0-9]{1,3}|-(?:aws|azure|gcp|gke|gkeop|ibm|kvm|lowlatency|nvidia|oem|oracle|raspi|realtime)(?:-hwe)?(?:-[0-9]{1,2}\.[0-9]{1,3})?)?$`)
+
 // isKernelSource reports whether a source package is an unsigned kernel
-// source the trackers key on (Debian linux, Ubuntu linux and its flavour
-// sources such as linux-hwe-6.8 or linux-aws). Signed and meta sources
+// source the trackers key on (kernelSourceRe). Signed and meta sources
 // carry version lines that never compare with tracker fixed versions.
 func isKernelSource(src string) bool {
-	if src == "linux" {
-		return true
-	}
-	if !strings.HasPrefix(src, "linux-") {
-		return false
-	}
-	for _, x := range []string{"linux-signed", "linux-meta", "linux-restricted-", "linux-firmware", "linux-base"} {
-		if strings.HasPrefix(src, x) {
-			return false
-		}
-	}
-	return true
+	return kernelSourceRe.MatchString(src)
 }
 
 // mapImage returns the unsigned kernel source and version of a kernel
