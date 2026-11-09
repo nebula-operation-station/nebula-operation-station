@@ -17,8 +17,12 @@
 //     snapshot and applied in short write transactions that save a
 //     durable completing state, so other writers of server.db never wait
 //     long, a complete that stops part-way is resumed by the retry with
-//     the same result, and a retry after a restart reads the saved
-//     completion (CompletionOf) or resumes (ResumeComplete);
+//     the same result, a retry after a restart reads the saved completion
+//     (CompletionOf) or resumes (ResumeComplete); for a run its client
+//     left completing for good the store offers ResumeCompleting (for
+//     startup) and Prune (the periodic sweep); the store has no timer of
+//     its own, cmd/nebula-server calls ResumeCompleting once at startup
+//     and Prune every 15 minutes, each with a 10 minute deadline;
 //   - feed sources: judged one by one against NOS's fixed source list and
 //     per-source high-water marks; a record resting on a source that is not
 //     accepted, undated or on probation after an admin mark reset only
@@ -213,6 +217,7 @@ type Config struct {
 type Store struct {
 	db       *sql.DB
 	sources  map[string]Source
+	order    []string // source IDs in list order
 	tier     TierFunc
 	classify Classifier
 	now      func() time.Time
@@ -224,6 +229,14 @@ type Store struct {
 	// chunkDone, when set (tests only), is called after the n-th apply
 	// transaction of a complete committed and more are to come.
 	chunkDone func(n int)
+	// applyDone, when set (tests only), is called after every apply
+	// transaction committed with the rows it changed and how long it held
+	// the write lock.
+	applyDone func(rows int64, held time.Duration)
+	// applyRows, when positive (tests only), replaces maxApplyRows, so
+	// that the resume tests need fewer findings for several apply
+	// transactions; it never raises the bound in production.
+	applyRows int
 }
 
 // sourceIDRe is the D5 source ID pattern (64 bytes at most).
@@ -235,6 +248,7 @@ func New(db *sql.DB, cfg Config) (*Store, error) {
 		return nil, fmt.Errorf("vulnstore: new: db, sources, tier and classifier are required: %w", ErrInvalidInput)
 	}
 	src := make(map[string]Source, len(cfg.Sources))
+	order := make([]string, 0, len(cfg.Sources))
 	for _, s := range cfg.Sources {
 		if !sourceIDRe.MatchString(s.ID) || s.MaxAge <= 0 {
 			return nil, fmt.Errorf("vulnstore: new: source list entry: %w", ErrInvalidInput)
@@ -243,12 +257,13 @@ func New(db *sql.DB, cfg Config) (*Store, error) {
 			return nil, fmt.Errorf("vulnstore: new: duplicate source %s: %w", s.ID, ErrInvalidInput)
 		}
 		src[s.ID] = s
+		order = append(order, s.ID)
 	}
 	now := cfg.Now
 	if now == nil {
 		now = time.Now
 	}
-	return &Store{db: db, sources: src, tier: cfg.Tier, classify: cfg.Classifier, now: now}, nil
+	return &Store{db: db, sources: src, order: order, tier: cfg.Tier, classify: cfg.Classifier, now: now}, nil
 }
 
 // Subject identifies the subject of a finding.

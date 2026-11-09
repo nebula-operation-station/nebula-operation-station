@@ -161,8 +161,12 @@ type Reopened struct {
 
 // ReviewHumanStates re-opens accepted_risk findings that expired or became
 // KEV-listed, and every accepted_risk or false_positive finding whose
-// version basis changed or became unknown (D6). This is NOS's own sweep,
-// never part of a run.
+// version basis changed or became unknown (D6). It is a NOS-side review,
+// never part of a run; the store does not call it by itself. The server
+// does not call it yet: it needs NOS's version basis from the package
+// inventory, which the server does not store yet, and no human state can
+// be set before the decision assertion exists (see cmd/nebula-server
+// vuln.go). It is to be called periodically once both exist.
 func (s *Store) ReviewHumanStates(ctx context.Context, basis BasisFunc) ([]Reopened, error) {
 	now := s.now().UTC()
 	s.mu.Lock()

@@ -1,0 +1,212 @@
+{
+  "version": "attackpath-graph-v1",
+  "nodes": [
+    {
+      "id": "ctr:nas/cccccccccccc",
+      "kind": "container",
+      "label": "db"
+    },
+    {
+      "id": "ctr:web/aaaaaaaaaaaa",
+      "kind": "container",
+      "label": "proxy"
+    },
+    {
+      "id": "ctr:web/bbbbbbbbbbbb",
+      "kind": "container",
+      "label": "app"
+    },
+    {
+      "id": "guest:lab/100",
+      "kind": "guest",
+      "label": "web"
+    },
+    {
+      "id": "guest:lab/101",
+      "kind": "guest",
+      "label": "nas"
+    },
+    {
+      "id": "guest:lab/102",
+      "kind": "guest",
+      "label": "orphan"
+    },
+    {
+      "id": "host:exec",
+      "kind": "host",
+      "label": "executor"
+    },
+    {
+      "id": "host:nas",
+      "kind": "host",
+      "label": "nas"
+    },
+    {
+      "id": "host:quiet",
+      "kind": "host",
+      "label": "quiet"
+    },
+    {
+      "id": "internet",
+      "kind": "internet",
+      "label": "Internet"
+    },
+    {
+      "id": "netbird",
+      "kind": "netbird",
+      "label": "NetBird peers"
+    },
+    {
+      "id": "pve:lab/pve1",
+      "kind": "pve_node",
+      "label": "pve1"
+    },
+    {
+      "id": "pve:lab/pve2",
+      "kind": "pve_node",
+      "label": "pve2"
+    },
+    {
+      "id": "unk:100.64.0.7",
+      "kind": "unmanaged",
+      "label": "unmanaged 100.64.0.7"
+    },
+    {
+      "id": "unk:192.168.5.5",
+      "kind": "unmanaged",
+      "label": "unmanaged 192.168.5.5"
+    }
+  ],
+  "edges": [
+    {
+      "from": "ctr:web/aaaaaaaaaaaa",
+      "to": "guest:lab/100",
+      "kind": "escape",
+      "basis": "inventory",
+      "assumed": false,
+      "escape": [
+        "docker_socket"
+      ]
+    },
+    {
+      "from": "guest:lab/100",
+      "to": "ctr:web/aaaaaaaaaaaa",
+      "kind": "control",
+      "basis": "inventory",
+      "assumed": false
+    },
+    {
+      "from": "guest:lab/100",
+      "to": "ctr:web/bbbbbbbbbbbb",
+      "kind": "control",
+      "basis": "inventory",
+      "assumed": false
+    },
+    {
+      "from": "guest:lab/100",
+      "to": "host:nas",
+      "kind": "network_observed",
+      "basis": "observed",
+      "assumed": false,
+      "proto": "tcp",
+      "port": 445
+    },
+    {
+      "from": "host:exec",
+      "to": "guest:lab/100",
+      "kind": "network_observed",
+      "basis": "observed",
+      "assumed": false,
+      "proto": "tcp",
+      "port": 22
+    },
+    {
+      "from": "host:exec",
+      "to": "guest:lab/100",
+      "kind": "credential",
+      "basis": "inventory",
+      "assumed": false
+    },
+    {
+      "from": "host:exec",
+      "to": "host:nas",
+      "kind": "credential",
+      "basis": "inventory",
+      "assumed": false
+    },
+    {
+      "from": "host:exec",
+      "to": "host:quiet",
+      "kind": "credential",
+      "basis": "inventory",
+      "assumed": false
+    },
+    {
+      "from": "host:exec",
+      "to": "pve:lab/pve1",
+      "kind": "credential",
+      "basis": "inventory",
+      "assumed": false
+    },
+    {
+      "from": "host:nas",
+      "to": "ctr:nas/cccccccccccc",
+      "kind": "control",
+      "basis": "inventory",
+      "assumed": false
+    },
+    {
+      "from": "internet",
+      "to": "guest:lab/100",
+      "kind": "network_observed",
+      "basis": "observed",
+      "assumed": false,
+      "proto": "tcp",
+      "port": 443
+    },
+    {
+      "from": "netbird",
+      "to": "host:exec",
+      "kind": "network_observed",
+      "basis": "observed",
+      "assumed": false,
+      "proto": "tcp",
+      "port": 22
+    },
+    {
+      "from": "pve:lab/pve1",
+      "to": "guest:lab/100",
+      "kind": "control",
+      "basis": "inventory",
+      "assumed": false
+    },
+    {
+      "from": "pve:lab/pve2",
+      "to": "guest:lab/101",
+      "kind": "control",
+      "basis": "inventory",
+      "assumed": false
+    },
+    {
+      "from": "unk:100.64.0.7",
+      "to": "host:nas",
+      "kind": "network_observed",
+      "basis": "observed",
+      "assumed": false,
+      "proto": "tcp",
+      "port": 2049
+    },
+    {
+      "from": "unk:192.168.5.5",
+      "to": "host:nas",
+      "kind": "network_observed",
+      "basis": "observed",
+      "assumed": false,
+      "proto": "udp",
+      "port": 53
+    }
+  ],
+  "truncated": false,
+  "dropped_nodes": 0,
+  "dropped_edges": 0
+}

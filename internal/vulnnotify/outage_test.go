@@ -281,7 +281,7 @@ func TestStaleDeliverySetsNoState(t *testing.T) {
 		}
 		h.hook = func() { n.Feeds(ctx, []FeedStatus{{SourceID: "osv"}}) }
 		n.Feeds(ctx, []FeedStatus{{SourceID: "osv", Stale: true}})
-		if n.feedStale["osv"] {
+		if _, delivered := n.feedStale["osv"]; delivered {
 			t.Fatal("ended episode set feed stale state")
 		}
 		if got := n.Feeds(ctx, []FeedStatus{{SourceID: "osv", Stale: true}}); got != 1 {

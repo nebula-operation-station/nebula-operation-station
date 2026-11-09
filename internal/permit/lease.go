@@ -91,6 +91,29 @@ var ReadOnlyAllowlist = []string{
 	// net.facts (ADR 0009 D1): fixed read-only network snapshot without
 	// process names (no `ss -p`, no sudo).
 	"net.facts",
+	// package.list_installed (ADR 0011 D3): dpkg-query and uname only, no
+	// root, no apt, no network. Its own cost limit is
+	// PackageListInstalledMinInterval.
+	"package.list_installed",
+	// image.packages (ADR 0011 D3): optional package list of one local
+	// image digest via the operator-installed host Trivy; no install, no
+	// pull, no database refresh. The digest is pinned by the grant's
+	// parameters hash; no own floor beyond the grant's interval.
+	"image.packages",
+}
+
+// PackageListInstalledMinInterval is package.list_installed's own cost
+// limit (ADR 0011 D3): at most one run per host every 6 hours, across all
+// grants and triggers, whatever interval a grant approves.
+const PackageListInstalledMinInterval = 6 * time.Hour
+
+// ReadActionMinInterval returns an action's own per-host interval floor
+// above the grant's min_interval_s, or 0 if it has none.
+func ReadActionMinInterval(actionID string) time.Duration {
+	if actionID == "package.list_installed" {
+		return PackageListInstalledMinInterval
+	}
+	return 0
 }
 
 // InReadOnlyAllowlist reports whether actionID is part of the approved
@@ -700,6 +723,7 @@ func (a *Authority) AuthorizeReadRun(grantID, executionID, trigger string, run R
 	if doc.RateProfile == schedgrant.TelemetryReadProfile && trigger == TriggerScheduled {
 		interval = max(interval, schedgrant.TelemetryHistoryInterval)
 	}
+	interval = max(interval, ReadActionMinInterval(run.ActionID))
 	reserved, err := a.leases.ReserveReadRun(grantID, run.ActionID, run.HostID, a.now(), int(doc.RunBudget), interval)
 	if errors.Is(err, ErrReadGrantInactive) {
 		return Grant{}, fail(CodeLeaseInactive, "the read grant was revoked or has expired")

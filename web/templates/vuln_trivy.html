@@ -1,0 +1,45 @@
+{{/* SPDX-License-Identifier: AGPL-3.0-or-later */}}
+{{/* trivy-local observation beside the Hermes findings (ADR 0011 D2, VU-09).
+     Rendered with the vulnPageData as dot. Every host value is text. */}}
+{{define "vuln_trivy"}}{{with .TrivyLocal}}
+<section class="panel vuln-image-badge" aria-label="Image badge">
+  <p>Image badge: <span class="badge {{.Badge.Status.Class}} vuln-status">{{.Badge.Status.Text}}</span>
+  {{if .Badge.Observer}}<span class="hint">observer: {{.Badge.Observer}}</span>{{else}}<span class="hint">no observer has this image</span>{{end}}</p>
+  <p class="hint">The badge shows Hermes findings when a fresh complete Hermes run covers the image, otherwise the host Trivy observation (partial). Both are shown below side by side; a difference is shown, never merged.</p>
+</section>
+{{with .Trivy}}
+<section class="panel vuln-trivy-local" data-observer="{{.Observer}}" aria-label="Host Trivy observation ({{.Observer}}, partial)">
+  <h2>Host Trivy observation <span class="badge badge--unknown">partial</span> <span class="hint mono">observer {{.Observer}}</span></h2>
+  <p class="hint">{{.Label}}. Kept outside the Hermes finding store: it never opens, closes or re-opens a Hermes finding, and a Hermes run never opens, updates or closes it. Neither counts as evidence for the other.</p>
+  <dl class="schedule-meta">
+    <dt>Status</dt><dd><span class="badge {{.Status.Class}} vuln-status">{{.Status.Text}}</span></dd>
+    {{if .Observed}}
+    <dt>Image</dt><dd class="mono">{{.Image}}</dd>
+    <dt>Platform</dt><dd class="mono">{{if .Platform}}{{.Platform}}{{else}}unknown{{end}}</dd>
+    <dt>Scanner</dt><dd class="mono">Trivy {{if .Scanner}}{{.Scanner}}{{else}}unknown{{end}}{{if .Cached}} (cached){{end}}</dd>
+    <dt>Host database age</dt><dd class="mono">{{if .DBAge}}{{.DBAge}}{{else}}unknown{{end}}</dd>
+    <dt>Observed</dt><dd class="mono">{{if .ObservedAt}}{{.ObservedAt}}{{else}}unknown{{end}}</dd>
+    {{end}}
+  </dl>
+  <p class="hint">{{.Partial}}</p>
+  {{if .Counted}}
+  <table class="table vuln-trivy-counts">
+    <thead><tr><th>Severity (host Trivy)</th><th>Count</th></tr></thead>
+    <tbody>{{range .Counts}}<tr><td>{{.Severity}}</td><td class="mono">{{.Count}}</td></tr>{{end}}</tbody>
+  </table>
+  <p class="hint mono">{{.Total}} total · {{.Targets}} targets · top {{len .Top}} of {{.Total}}</p>
+  {{if .Top}}
+  <table class="table vuln-trivy-top">
+    <thead><tr><th>ID</th><th>Severity (host Trivy)</th><th>Fixed (host Trivy)</th><th>Hermes finding store</th></tr></thead>
+    <tbody>{{range .Top}}<tr>
+      <td class="mono">{{.ID}}</td>
+      <td>{{.Severity}}</td>
+      <td class="mono">{{if .Fixed}}{{.Fixed}}{{else}}unknown{{end}}</td>
+      <td><span class="badge {{.Hermes.Class}}">{{.Hermes.Text}}</span></td>
+    </tr>{{end}}</tbody>
+  </table>
+  {{end}}
+  {{end}}
+</section>
+{{end}}
+{{end}}{{end}}

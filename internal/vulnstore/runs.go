@@ -376,9 +376,77 @@ func (s *Store) checkRunning(ctx context.Context, tx *sql.Tx, r runRow, now time
 }
 
 // AbortExpiredRuns aborts every run past MaxRunDuration (no closures) and
-// returns how many it aborted. A completing run is left for the complete
-// to finish (see checkRunning).
+// returns how many it aborted. A completing run is never aborted (see
+// checkRunning): it finishes it instead (ResumeCompleting), so no run
+// stays half applied when its client does not come back. A failure to
+// finish a run does not stop the aborts; it is returned with the count.
+//
+// The store does not call it by itself: a batch, rejection or complete
+// for an expired run aborts that one run (checkRunning), and Prune, the
+// periodic sweep cmd/nebula-server calls every 15 minutes, runs the same
+// steps. It is for callers that want the aborts without the retention.
+// The caller contract is that of Prune.
 func (s *Store) AbortExpiredRuns(ctx context.Context) (int, error) {
+	_, rerr := s.ResumeCompleting(ctx)
+	n, err := s.abortExpiredRuns(ctx)
+	return n, errors.Join(err, rerr)
+}
+
+// ResumeCompleting finishes every run that a Complete left completing
+// (cancelled, out of time, or interrupted by a restart after part of its
+// closures committed) and returns how many it finished. The result is the
+// one an uninterrupted complete would have made, and the client's late
+// retry reads it (CompletionOf). A run that its client or another process
+// finishes meanwhile is skipped. It goes on after a run fails to finish
+// and returns the joined errors.
+//
+// It is the startup entry point. The store does not call it by itself and
+// has no timer: cmd/nebula-server calls it once in the background right
+// after opening the store (10 minute deadline, while the vuln API already
+// serves), and Prune, which calls it first, every 15 minutes, so a run
+// whose client never retries is finished within one interval. The caller
+// must:
+//
+//   - call it once after Open, before or while serving the vuln API (a
+//     concurrent client Complete is safe: completes are serialized and a
+//     run finished by its client is skipped);
+//   - pass a context with a deadline: it resumes completing runs one after
+//     another, each in paced write transactions, and holds the store's
+//     complete lock meanwhile, so a client Complete for another run waits
+//     behind it; a context that ends stops it between apply transactions
+//     and leaves the run completing for the next call;
+//   - treat an error as "retry later" (log it, keep serving): the count
+//     is valid with it, and nothing it leaves is half applied.
+func (s *Store) ResumeCompleting(ctx context.Context) (int, error) {
+	ids, err := stringColumn(ctx, s.db, `SELECT id FROM vuln_runs WHERE state = 'running'
+		AND json_extract(report, '$.completing') IS NOT NULL ORDER BY run_seq`)
+	if err != nil {
+		return 0, fmt.Errorf("vulnstore: resume completing runs: %w", err)
+	}
+	n := 0
+	var errs []error
+	for _, id := range ids {
+		// A completing run only ever becomes completed, so Complete here
+		// resumes it and never starts a complete the client did not ask
+		// for.
+		_, err := s.Complete(ctx, id)
+		switch {
+		case err == nil:
+			n++
+		case errors.Is(err, ErrRunNotRunning):
+			// Finished meanwhile by its client or another process.
+		case ctx.Err() != nil:
+			return n, fmt.Errorf("vulnstore: resume completing run %s: %w", id, err)
+		default:
+			errs = append(errs, fmt.Errorf("vulnstore: resume completing run %s: %w", id, err))
+		}
+	}
+	return n, errors.Join(errs...)
+}
+
+// abortExpiredRuns aborts every run past MaxRunDuration that is not
+// completing and returns how many it aborted.
+func (s *Store) abortExpiredRuns(ctx context.Context) (int, error) {
 	now := s.now().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
