@@ -17,8 +17,10 @@
 //     snapshot and applied in short write transactions that save a
 //     durable completing state, so other writers of server.db never wait
 //     long, a complete that stops part-way is resumed by the retry with
-//     the same result, and a retry after a restart reads the saved
-//     completion (CompletionOf) or resumes (ResumeComplete);
+//     the same result, a retry after a restart reads the saved completion
+//     (CompletionOf) or resumes (ResumeComplete), and the server itself
+//     finishes a run its client left completing (ResumeCompleting at
+//     startup and in the sweep of expired runs);
 //   - feed sources: judged one by one against NOS's fixed source list and
 //     per-source high-water marks; a record resting on a source that is not
 //     accepted, undated or on probation after an admin mark reset only
@@ -224,6 +226,14 @@ type Store struct {
 	// chunkDone, when set (tests only), is called after the n-th apply
 	// transaction of a complete committed and more are to come.
 	chunkDone func(n int)
+	// applyDone, when set (tests only), is called after every apply
+	// transaction committed with the rows it changed and how long it held
+	// the write lock.
+	applyDone func(rows int64, held time.Duration)
+	// applyRows, when positive (tests only), replaces maxApplyRows, so
+	// that the resume tests need fewer findings for several apply
+	// transactions; it never raises the bound in production.
+	applyRows int
 }
 
 // sourceIDRe is the D5 source ID pattern (64 bytes at most).

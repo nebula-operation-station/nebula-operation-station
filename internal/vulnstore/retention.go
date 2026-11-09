@@ -12,6 +12,8 @@ import (
 
 // PruneResult counts what Prune removed.
 type PruneResult struct {
+	// ResumedRuns: runs left completing that Prune finished.
+	ResumedRuns       int
 	AbortedRuns       int
 	DeletedFindings   int
 	ClearedAssessment int
@@ -24,15 +26,25 @@ type PruneResult struct {
 // 90 days, and run records (with their sources, batches, coverage and
 // holds) are deleted 90 days after they ended. Open, accepted_risk and
 // false_positive findings are kept while the subject exists; they leave
-// only through closure path 3 and then the fixed retention. Runs past their
-// time limit are aborted first.
+// only through closure path 3 and then the fixed retention. Runs left
+// completing are finished and runs past their time limit are aborted
+// first (AbortExpiredRuns); a run that fails to finish does not stop the
+// retention, its error is returned with the result.
 func (s *Store) Prune(ctx context.Context) (PruneResult, error) {
 	var res PruneResult
-	n, err := s.AbortExpiredRuns(ctx)
+	resumed, rerr := s.ResumeCompleting(ctx)
+	res.ResumedRuns = resumed
+	n, err := s.abortExpiredRuns(ctx)
 	if err != nil {
-		return res, err
+		return res, errors.Join(err, rerr)
 	}
 	res.AbortedRuns = n
+	res, err = s.prune(ctx, res)
+	return res, errors.Join(err, rerr)
+}
+
+// prune applies the retention steps of Prune in one write transaction.
+func (s *Store) prune(ctx context.Context, res PruneResult) (PruneResult, error) {
 	now := s.now().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()

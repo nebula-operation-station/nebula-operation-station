@@ -60,14 +60,15 @@ const (
 	// on a read snapshot and applies it in short, paced write
 	// transactions with a durable completing state, so a complete that
 	// runs out of time either applied nothing (the run stays open) or is
-	// resumed by the retry. The budget is sized for MaxCoveredPerRun
-	// subjects: about 11 s measured for 10000 subjects with one closure
-	// each (vulnstore TestCompleteLargestRunIsAtomic, most of it the
-	// pauses that let other server.db writers in), so open findings in
-	// the order of MaxFindingsPerRun on the covered subjects fit with
-	// headroom for slow disks. The complete is not cancelled when the
-	// client goes away (the server write timeout is shorter), so a retry
-	// finds it saved.
+	// resumed by the retry, or by the store's own sweep
+	// (vulnstore.ResumeCompleting) if the client does not come back. The
+	// apply phase is paced by rows: MaxFindingsPerRun superseded holds
+	// took about 50 s in vulnstore's
+	// TestCompleteDropsSupersededHoldsInRowBoundedTransactions, most of it
+	// the pauses that let other server.db writers in, so the largest runs
+	// fit with headroom for slow disks. The complete is not cancelled when
+	// the client goes away (the server write timeout is shorter), so a
+	// retry finds it saved.
 	completeTimeout = 5 * time.Minute
 )
 
