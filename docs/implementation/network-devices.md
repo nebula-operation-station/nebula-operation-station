@@ -8,7 +8,7 @@ answers and every *verify*, and feeds corrections back into the ADR. ND-04
 to ND-09 are pure libraries in new packages and may start now that the ADR
 is accepted, before the spec revision ND-02 is merged, as in ADR 0009.
 Phase 2a waits for the phase-2 decision after phase 1 has run (Q3); phase
-2b (ND-40) is not planned (Q6).
+2b (ND-40) is not planned (Q6, most restrictive fallback, maintainer may revisit).
 
 It turns [ADR 0010](../adr/0010-network-devices.md) into PR-sized steps, in
 the style of [container-updates.md](container-updates.md).
@@ -116,13 +116,13 @@ starts and no change credential is provisioned.
 
 ### Phase 2b and later (each needs its own decision)
 
-ND-40 is **not planned** (Q6, decided 2026-11-09: CRITICAL changes are
+ND-40 is **not planned** (Q6, most restrictive fallback 2026-11-09, maintainer may revisit: CRITICAL changes are
 refused for good; previously: planned after Q6). Its row stays as the record
-of the rejected option.
+of the option not taken, the starting point if the maintainer revisits Q6.
 
 | Ticket | Scope | P | After | Acceptance |
 | --- | --- | --- | --- | --- |
-| ND-40 | **Not planned** (Q6, decided 2026-11-09). Was: CRITICAL with CBS `reload in` and PAN-OS executor dead-man | yes | — (previously: Q6, phase 2a) | Not applicable. Previously: Spec exception recorded; CBS: refused unless one fresh read shows running == startup (keyed digests) and running == bound pre-change digest, timer confirmed pending and both configs re-read unchanged before any change line, startup digest re-read at least every 60 s in the window, no later than 60 s before the deadline and before `reload cancel` (changed → reload cancelled at once, `unknown`, notification); unconfirmed cancel → `unknown`; persist approval and rollback refused while a reload timer is pending; timer fired → `rolled_back` only if running equals the pre-change digest, else `unknown`; PAN-OS, **one lock rule** (ADR 0010 D6, "Lock rule for the dead-man"): the config and commit locks taken in step 2 are held without a gap for the whole window (step 7 does not release them for CRITICAL), the automatic inverse is sent only if at expiry `nos-change` still holds both locks (read from the device), running version and digest are still NOS's and no foreign candidate change is pending, otherwise nothing written, `unknown`, locks released without revert; the dead-man **never takes fresh locks**, also not after an executor restart (tests: lock removed in the window → no write, `unknown`; restart with locks still held → expiry check runs; restart with a lock gone → no write, no fresh lock request sent); fresh locks only for later admin-approved writes; deadline stored in the durable intent before the commit, executor restart in the window resumes the expiry check from it, confirmation after the deadline refused; vault locked in the window or at expiry → no write, `unknown` with "dead-man not executed", notification; no confirmation → device reload / bound inverse; confirm window bounded; **CRITICAL rollbacks** (risk re-derived per ND-34) get the same protection, tested separately: CBS rollback runs steps 1 to 5 and arms the reload only when running equals the verified post-change digest and startup equals running (CRITICAL rollback of a non-persisted change refused until persisted), unconfirmed → reload into the post-change state, rollback `rolled_back`, original change stays; PAN-OS rollback keeps the locks and the dead-man, unconfirmed → the rollback's bound inverse (the original change) applied under the dead-man preconditions; "load version N" never offered for a CRITICAL rollback |
+| ND-40 | **Not planned** (Q6, most restrictive fallback 2026-11-09, maintainer may revisit). Was: CRITICAL with CBS `reload in` and PAN-OS executor dead-man | yes | — (previously: Q6, phase 2a) | Not applicable. Previously: Spec exception recorded; CBS: refused unless one fresh read shows running == startup (keyed digests) and running == bound pre-change digest, timer confirmed pending and both configs re-read unchanged before any change line, startup digest re-read at least every 60 s in the window, no later than 60 s before the deadline and before `reload cancel` (changed → reload cancelled at once, `unknown`, notification); unconfirmed cancel → `unknown`; persist approval and rollback refused while a reload timer is pending; timer fired → `rolled_back` only if running equals the pre-change digest, else `unknown`; PAN-OS, **one lock rule** (ADR 0010 D6, "Lock rule for the dead-man"): the config and commit locks taken in step 2 are held without a gap for the whole window (step 7 does not release them for CRITICAL), the automatic inverse is sent only if at expiry `nos-change` still holds both locks (read from the device), running version and digest are still NOS's and no foreign candidate change is pending, otherwise nothing written, `unknown`, locks released without revert; the dead-man **never takes fresh locks**, also not after an executor restart (tests: lock removed in the window → no write, `unknown`; restart with locks still held → expiry check runs; restart with a lock gone → no write, no fresh lock request sent); fresh locks only for later admin-approved writes; deadline stored in the durable intent before the commit, executor restart in the window resumes the expiry check from it, confirmation after the deadline refused; vault locked in the window or at expiry → no write, `unknown` with "dead-man not executed", notification; no confirmation → device reload / bound inverse; confirm window bounded; **CRITICAL rollbacks** (risk re-derived per ND-34) get the same protection, tested separately: CBS rollback runs steps 1 to 5 and arms the reload only when running equals the verified post-change digest and startup equals running (CRITICAL rollback of a non-persisted change refused until persisted), unconfirmed → reload into the post-change state, rollback `rolled_back`, original change stays; PAN-OS rollback keeps the locks and the dead-man, unconfirmed → the rollback's bound inverse (the original change) applied under the dead-man preconditions; "load version N" never offered for a CRITICAL rollback |
 | ND-50 | pfSense CE read path: read-only config backup over SSH; community REST API not acceptable (Q7, decided 2026-11-09; previously: pfSense read path, Q7 open) | depends | Future: when pfSense CE replaces the current firewall (previously: Q7) | Separate ADR amendment first |
 
 ## Order and release
@@ -135,7 +135,7 @@ CBS comes before PAN-OS inside phase 1 (ND-05/06 before ND-08/09), because
 switch data feeds IPAM and the traffic map. Phase 2a starts only after
 phase 1 has run in the lab and the maintainer then decides to start it (Q3,
 decided 2026-11-09; previously: "and Q3 is answered"). Phase 2b is not
-planned (Q6).
+planned (Q6, most restrictive fallback, maintainer may revisit).
 
 ## Risk classes (summary of ADR 0010 D5)
 
@@ -159,9 +159,9 @@ through the executor CLI.
 | Add / edit unreferenced address object/group (also not via nested or dynamic groups) | MEDIUM | **HIGH by default** (firewall criticality); MEDIUM only if the admin lowered the firewall's criticality |
 | Referenced object edit | HIGH | CRITICAL when any referencing rule (direct, nested, dynamic group), with the old or new value, overlaps the NOS path; unevaluable objects (FQDN, EDL) count as overlapping |
 | Rule delete / object delete (only as the bound inverse of an add; object delete only while unreferenced) | HIGH / MEDIUM | as rule add / unreferenced object; deleting a rule that allows NOS-path traffic is CRITICAL |
-| Rollback (bound inverse) | max(original effective risk, risk re-derived at rollback time) | CRITICAL rollbacks are refused like every CRITICAL change (Q6, decided 2026-11-09; previously: refused in 2a; reload timer / dead-man and confirm window in 2b) |
+| Rollback (bound inverse) | max(original effective risk, risk re-derived at rollback time) | CRITICAL rollbacks are refused like every CRITICAL change (Q6, most restrictive fallback 2026-11-09, maintainer may revisit; previously: refused in 2a; reload timer / dead-man and confirm window in 2b) |
 | Rule add / disable / enable / move | HIGH | CRITICAL on NOS path overlap, when disabling or deleting a rule that allows NOS-path traffic, or when a deny/drop is added, moved or enabled above a rule that allows NOS-path traffic (previously: any deny above allow) |
-| Anything on NOS's own management path, or path data stale | CRITICAL | refused for good (Q6, decided 2026-11-09; previously: refused in phase 2a) |
+| Anything on NOS's own management path, or path data stale | CRITICAL | refused for good (Q6, most restrictive fallback 2026-11-09, maintainer may revisit; previously: refused in phase 2a) |
 | Flat lab network (Q4, decided 2026-11-09): any port, VLAN or uplink change on a switch that carries the NOS path | CRITICAL | refused for good, until an ADR amendment records a management VLAN |
 
 ## Non-goals

@@ -597,7 +597,7 @@ timer (CBS) or executor dead-man (PAN-OS) and confirm window (D6).
   firewall's criticality (executor-owned and changed like host
   criticality, never by the server).
   The plan's risk summary repeats exactly these classes.
-- **CRITICAL is refused for good** (Q6, decided 2026-11-09; previously:
+- **CRITICAL is refused for good** (Q6, most restrictive fallback 2026-11-09, maintainer may revisit; previously:
   refused in phase 2a, with a phase 2b that might allow CRITICAL with the
   dead-man rollback below after the maintainer decides Q6), as ADR 0006
   does for containers. Phase 2b and ND-40 are not planned.
@@ -611,11 +611,13 @@ admin out, or that need secrets.
 
 ### D6: Apply, verify and rollback per family
 
-**Decided 2026-11-09 (Q6):** CRITICAL changes are refused for good, so the
+**Q6 (most restrictive fallback 2026-11-09, maintainer may revisit):** CRITICAL changes are refused for good, so the
 CRITICAL-only parts of this section (CBS reload timer and confirm window,
 PAN-OS executor dead-man and its lock rule, CRITICAL rollbacks) are **not
-implemented**; they stay here as the record of the option the maintainer
-rejected (previously: planned for phase 2b). A CRITICAL change or rollback
+implemented**; they stay here as the record of the option not taken; the
+maintainer gave no answer on Q6, so the most restrictive option applies and
+this section is what a revisit would start from (previously: planned for
+phase 2b). A CRITICAL change or rollback
 is refused at proposal. The non-CRITICAL steps apply if phase 2 is decided
 (Q3).
 
@@ -858,8 +860,9 @@ while the executor runs with an unlocked vault. Its rules:
 
 This is an automatic rollback and an explicit,
 bounded exception to ADR 0007 ("no automatic rollback"), so it needs the
-maintainer's decision Q6 and the spec revision. Q6 decided 2026-11-09
-(previously open): the exception is **not** granted; ADR 0007's "no
+maintainer's decision Q6 and the spec revision. Q6 settled 2026-11-09 by the
+most restrictive fallback (previously open; maintainer may revisit): the
+exception is **not** granted; ADR 0007's "no
 automatic rollback" stands unchanged.
 
 **What "uncertain" means.** A change is `unknown` when the executor cannot
@@ -886,7 +889,7 @@ other endpoint is tried for a mutation.
 | --- | --- |
 | New credential class (switch passwords/keys, firewall API keys) leaking | Executor vault only, per device and purpose, read and change credentials separate, local CLI entry, header-only API key, no secret in results/logs/events/spool, rotation and revocation as for PVE tokens |
 | Config backups containing hashes, PSKs, communities, private keys | Redaction in the executor before anything leaves it: PAN-OS element allowlist, CBS keyword list (limit stated, Q13), fail-closed keyword rule, unparseable or over-limit configs not stored; config digests and value fingerprints are HMAC-SHA-256 under per-device executor keys, so the server cannot confirm guessed secrets; admin-only pages, age-encrypted instance backups; raw configs never stored in phase 1 |
-| Lock-out of NOS's (or the admin's) management path | Read-only first; out-of-scope list in D5; executor-owned port roles and path floor, tightened for the flat lab network (D5, Q4); CRITICAL refused for good (Q6, decided 2026-11-09; previously: refused in phase 2a, device-side reload timer (CBS) or executor dead-man (PAN-OS) only in phase 2b); startup config untouched until a separate approval |
+| Lock-out of NOS's (or the admin's) management path | Read-only first; out-of-scope list in D5; executor-owned port roles and path floor, tightened for the flat lab network (D5, Q4); CRITICAL refused for good (Q6, most restrictive fallback 2026-11-09, maintainer may revisit; previously: refused in phase 2a, device-side reload timer (CBS) or executor dead-man (PAN-OS) only in phase 2b); startup config untouched until a separate approval |
 | Compromised or spoofed device feeding the UI (names, descriptions, LLDP, rule comments, banners) | Spec 09: bounded, UTF-8, printable text only, rendered as escaped text; LLDP labelled by source; device data never creates assets, roles, placements or permits |
 | Man in the middle on the management path | Pinned SSH host key / TLS certificate, hard stop on mismatch, explicit re-pin |
 | CLI or XML injection through parameters (newline in a port description, quote in a rule name) | Typed parameters with strict character sets and length limits, interface names only from the device's own enumerated list, XML built with escaping into fixed xpath templates, no caller-supplied commands or xpaths |
@@ -906,7 +909,7 @@ a compromised firewall); the vendor firmware itself.
 - **Phase 2a:** typed changes up to HIGH (D5, D6), CRITICAL refused; started
   only if the maintainer decides so after phase 1 has run (Q3, decided
   2026-11-09; previously open).
-- **Phase 2b:** not planned (Q6, decided 2026-11-09: CRITICAL refused for
+- **Phase 2b:** not planned (Q6, most restrictive fallback 2026-11-09, maintainer may revisit: CRITICAL refused for
   good; previously: CRITICAL with the dead-man rollback, only after Q6).
 - **Later:** pfSense CE (D9, Q7), Catalyst successors, Panorama,
   shadowed-rule analysis, segmentation hints.
@@ -1046,8 +1049,10 @@ All answered on 2026-11-09 (previously open); see "Decisions 2026-11-09".
   verified in ND-03.
 - **Q6: CRITICAL changes.** Refuse them for good, or allow phase 2b with a
   CBS reload timer and a PAN-OS executor dead-man (an exception to ADR
-  0007's "no automatic rollback")? **Answered 2026-11-09** (previously
-  open): refused for good; ND-40 not planned.
+  0007's "no automatic rollback")? **Settled 2026-11-09 by the most
+  restrictive fallback, no recommendation and no maintainer answer**
+  (previously open; maintainer may revisit): refused for good; ND-40 not
+  planned.
 - **Q7: pfSense.** CE or Plus? Is a read-only config backup over SSH enough,
   and is the community REST API acceptable at all (recommended: no)?
   **Answered 2026-11-09** (previously open): CE, later, as a possible
