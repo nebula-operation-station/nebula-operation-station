@@ -165,6 +165,9 @@ const (
 	// whose server end only the client guessed (no server report); it may
 	// be inbound, so it is no proof of "outbound only".
 	UncertainDirectionUnverified
+	// UncertainDockerUnread: a managed host whose Docker inventory was not
+	// read; its containers and escape edges are unknown, not absent.
+	UncertainDockerUnread
 )
 
 var uncertaintyNames = [...]string{
@@ -183,11 +186,12 @@ var uncertaintyNames = [...]string{
 	UncertainAliasConflict:       "alias_conflict",
 	UncertainPVEHostUnknown:      "pve_host_unknown",
 	UncertainDirectionUnverified: "direction_unverified",
+	UncertainDockerUnread:        "docker_unread",
 }
 
 // String returns the stable name of k, or "invalid".
 func (k UncertaintyKind) String() string {
-	if k >= UncertainSourceUnavailable && k <= UncertainDirectionUnverified {
+	if k >= UncertainSourceUnavailable && k <= UncertainDockerUnread {
 		return uncertaintyNames[k]
 	}
 	return "invalid"

@@ -47,7 +47,7 @@ func labResults(t *testing.T) []Result {
 	if err != nil {
 		t.Fatal(err)
 	}
-	docker, err := Docker(ctx, labDocker())
+	docker, err := Docker(ctx, DockerConfig{Reader: labDocker(), Hosts: hosts})
 	if err != nil {
 		t.Fatal(err)
 	}

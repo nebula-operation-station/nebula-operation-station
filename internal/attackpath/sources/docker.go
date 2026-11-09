@@ -40,6 +40,15 @@ type DockerReader interface {
 	DockerHosts(ctx context.Context) ([]DockerHost, error)
 }
 
+// DockerConfig configures the Docker adapter.
+type DockerConfig struct {
+	// Reader reads the stored Docker inventory.
+	Reader DockerReader
+	// Hosts reads the managed hosts: each is expected to have a Docker
+	// inventory, and one without is UncertainDockerUnread.
+	Hosts HostLister
+}
+
 // Docker returns the container edges of ADR 0011 D10: Docker host →
 // container control edges (owning the host owns its containers) and
 // container → host escape edges where docker.inspect proves one, i.e. a
@@ -50,18 +59,30 @@ type DockerReader interface {
 // a container without a proven escape is UncertainEscapeUnverified: its
 // escape is not excluded, only not proven. An incomplete host read and a
 // precheck-only inspect are UncertainPartialData. The coverage unit is a
-// Docker host: covered when its read was complete and every container was
-// fully inspected.
+// Docker host, and every managed host of cfg.Hosts is one: covered when
+// its read was complete and every container was fully inspected. A managed
+// host without a Docker inventory entry (never read, or cut by
+// MaxDockerHosts) is UncertainDockerUnread and uncovered, so the source is
+// never complete while a managed host's containers are unknown.
 //
-// A read error yields StatusUnknown and an error wrapping
+// A read error of either store yields StatusUnknown and an error wrapping
 // ErrSourceUnavailable; the Result is still meant to be merged.
-func Docker(ctx context.Context, r DockerReader) (Result, error) {
+func Docker(ctx context.Context, cfg DockerConfig) (Result, error) {
 	c := newCollector(SourceDocker)
-	if r == nil {
+	if cfg.Reader == nil {
 		c.unavailable()
 		return c.result(), fmt.Errorf("docker source: no reader: %w", ErrSourceUnavailable)
 	}
-	hosts, err := r.DockerHosts(ctx)
+	if cfg.Hosts == nil {
+		c.unavailable()
+		return c.result(), fmt.Errorf("docker source: no host lister: %w", ErrSourceUnavailable)
+	}
+	managed, err := cfg.Hosts.List(ctx)
+	if err != nil {
+		c.unavailable()
+		return c.result(), fmt.Errorf("docker source: list hosts: %w: %w", ErrSourceUnavailable, err)
+	}
+	hosts, err := cfg.Reader.DockerHosts(ctx)
 	if err != nil {
 		c.unavailable()
 		return c.result(), fmt.Errorf("docker source: read inventory: %w: %w", ErrSourceUnavailable, err)
@@ -70,6 +91,7 @@ func Docker(ctx context.Context, r DockerReader) (Result, error) {
 		hosts = hosts[:MaxDockerHosts]
 		c.truncated = true
 	}
+	read := make(map[string]bool, len(hosts))
 	for _, h := range hosts {
 		c.r.Coverage.Total++
 		if dockerHost(c, h) {
@@ -77,6 +99,28 @@ func Docker(ctx context.Context, r DockerReader) (Result, error) {
 		} else {
 			c.partial()
 		}
+		if id, ok := nodeID("host:", h.HostID); ok {
+			read[id] = true
+		}
+	}
+	if len(managed) > MaxResultNodes {
+		managed = managed[:MaxResultNodes]
+		c.truncated = true
+	}
+	for _, h := range managed {
+		id, ok := nodeID("host:", h.ID)
+		if !ok {
+			c.uncertain(UncertainInvalidRecord, "")
+			c.partial()
+			continue
+		}
+		if read[id] {
+			continue
+		}
+		read[id] = true // count a duplicate inventory entry once
+		c.r.Coverage.Total++
+		c.uncertain(UncertainDockerUnread, id)
+		c.partial()
 	}
 	return c.result(), nil
 }

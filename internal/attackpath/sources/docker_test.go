@@ -11,6 +11,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/attackpath"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/dockerhost"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 )
 
 // fakeDocker is a fixture Docker inventory.
@@ -42,7 +43,7 @@ func labDocker() fakeDocker {
 }
 
 func TestDockerControlAndProvenEscapeEdges(t *testing.T) {
-	r, err := Docker(context.Background(), labDocker())
+	r, err := Docker(context.Background(), dockerConfig(labDocker(), "web", "nas"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,7 +111,7 @@ func TestDockerRejectsBadIDsAndNames(t *testing.T) {
 			{Phase: "done", ID: "dddddddddddd", Name: "/x" + string(rune(0x2066)) + "y"},
 		}},
 	}}
-	r, err := Docker(context.Background(), f)
+	r, err := Docker(context.Background(), dockerConfig(f, "web"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,12 +129,64 @@ func TestDockerRejectsBadIDsAndNames(t *testing.T) {
 }
 
 func TestDockerReadErrorIsUnknown(t *testing.T) {
-	r, err := Docker(context.Background(), fakeDocker{err: errors.New("x")})
+	r, err := Docker(context.Background(), dockerConfig(fakeDocker{err: errors.New("x")}, "web"))
 	if !errors.Is(err, ErrSourceUnavailable) || r.Status != StatusUnknown || len(r.Nodes) != 0 {
 		t.Fatalf("err %v result %+v", err, r)
 	}
-	if _, err := Docker(context.Background(), nil); !errors.Is(err, ErrSourceUnavailable) {
+	if _, err := Docker(context.Background(), DockerConfig{Hosts: fakeHosts{}}); !errors.Is(err, ErrSourceUnavailable) {
 		t.Fatal(err)
+	}
+}
+
+// dockerConfig returns a Docker config over f whose inventory holds the
+// managed hosts ids.
+func dockerConfig(f fakeDocker, ids ...string) DockerConfig {
+	var hs []inventory.Host
+	for _, id := range ids {
+		hs = append(hs, inventory.Host{ID: id})
+	}
+	return DockerConfig{Reader: f, Hosts: fakeHosts{hosts: hs}}
+}
+
+func TestDockerUnreadManagedHostIsUncertain(t *testing.T) {
+	// "quiet" is managed but the Docker inventory has no entry for it:
+	// its containers and escape edges are unknown, not absent.
+	cfg := dockerConfig(fakeDocker{hosts: []DockerHost{{HostID: "web", Complete: true}}}, "web", "quiet")
+	r, err := Docker(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(r.Uncertain, Uncertainty{SourceDocker, UncertainDockerUnread, "host:quiet"}) {
+		t.Fatalf("unread host not named in %v", r.Uncertain)
+	}
+	if hasUncertainty(r.Uncertain, UncertainDockerUnread, "host:web") {
+		t.Fatal("read host flagged unread")
+	}
+	if r.Status == StatusComplete || r.Coverage != (Coverage{Covered: 1, Total: 2}) {
+		t.Fatalf("status %s coverage %+v", r.Status, r.Coverage)
+	}
+
+	// An empty Docker inventory with managed hosts is never complete.
+	r, err = Docker(context.Background(), dockerConfig(fakeDocker{}, "a", "b"))
+	if err != nil || r.Status == StatusComplete || r.Coverage != (Coverage{Covered: 0, Total: 2}) {
+		t.Fatalf("empty inventory: %v status %s coverage %+v", err, r.Status, r.Coverage)
+	}
+
+	// Every managed host read completely is complete.
+	r, err = Docker(context.Background(), dockerConfig(fakeDocker{hosts: []DockerHost{{HostID: "web", Complete: true}}}, "web"))
+	if err != nil || r.Status != StatusComplete || len(r.Uncertain) != 0 || r.Coverage != (Coverage{Covered: 1, Total: 1}) {
+		t.Fatalf("all read: %v status %s uncertain %v coverage %+v", err, r.Status, r.Uncertain, r.Coverage)
+	}
+}
+
+func TestDockerHostListErrorIsUnknown(t *testing.T) {
+	cfg := DockerConfig{Reader: labDocker(), Hosts: fakeHosts{err: errors.New("db")}}
+	r, err := Docker(context.Background(), cfg)
+	if !errors.Is(err, ErrSourceUnavailable) || r.Status != StatusUnknown || len(r.Nodes) != 0 {
+		t.Fatalf("err %v result %+v", err, r)
+	}
+	if _, err := Docker(context.Background(), DockerConfig{Reader: labDocker()}); !errors.Is(err, ErrSourceUnavailable) {
+		t.Fatalf("no host lister: %v", err)
 	}
 }
 
@@ -143,7 +196,7 @@ func TestDockerCapsContainersPerHost(t *testing.T) {
 		id := strings.Repeat("0", 8) + hex4(i)
 		h.Containers = append(h.Containers, dockerhost.Inspect{Phase: "done", ID: id})
 	}
-	r, err := Docker(context.Background(), fakeDocker{hosts: []DockerHost{h}})
+	r, err := Docker(context.Background(), dockerConfig(fakeDocker{hosts: []DockerHost{h}}, "big"))
 	if err != nil {
 		t.Fatal(err)
 	}
