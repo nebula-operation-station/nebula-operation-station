@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"reflect"
-	"sync"
 	"testing"
 	"time"
 
@@ -41,65 +40,28 @@ func completing(t *testing.T, e *env, runID string) bool {
 	return parseReport(run.reportRaw).Completing != nil
 }
 
-// While the largest allowed run completes, another writer of server.db
-// (its own pool, default busy timeout, outside the store's mutex) gets
-// every write through: complete never holds the write lock for long.
+// While the largest allowed run completes, several other writers of
+// server.db (each its own pool, default busy timeout, outside the store's
+// mutex) get every write through, and every apply transaction stays inside
+// the row budget: complete never holds the write lock for long. A
+// single-transaction complete fails the row and transaction count checks.
 func TestConcurrentWriterDuringLargestCompleteSucceeds(t *testing.T) {
 	e, _, path := newPathEnv(t, ClassEvidenced)
 	r, keys := largestRun(t, e)
 
-	other, err := serverdb.OpenWithOptions(path, serverdb.Options{BusyTimeout: serverdb.DefaultBusyTimeout})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer other.Close()
-	if _, err := other.Exec(`CREATE TABLE other_writer (n INTEGER NOT NULL, at INTEGER NOT NULL)`); err != nil {
-		t.Fatal(err)
-	}
-
-	done := make(chan struct{})
-	var wg sync.WaitGroup
-	var writes int
-	var slowest time.Duration
-	var werr error
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for {
-			select {
-			case <-done:
-				return
-			default:
-			}
-			begin := time.Now()
-			_, err := other.Exec(`INSERT INTO other_writer (n, at) VALUES (?, ?)`, writes, begin.UnixNano())
-			if err != nil {
-				werr = err
-				return
-			}
-			writes++
-			slowest = max(slowest, time.Since(begin))
-			time.Sleep(2 * time.Millisecond)
-		}
-	}()
+	stats := recordApplyTx(e.st)
+	stop := startWriters(t, path, 4)
 	begin := time.Now()
 	c, cerr := e.st.Complete(e.ctx, r.ID)
 	took := time.Since(begin)
-	close(done)
-	wg.Wait()
+	checkWriters(t, stop())
 	if cerr != nil {
 		t.Fatalf("complete: %v", cerr)
 	}
-	t.Logf("complete of %d subjects took %v; other writer: %d writes, slowest %v", MaxCoveredPerRun, took, writes, slowest)
-	if werr != nil {
-		t.Fatalf("other writer failed during complete after %d writes: %v", writes, werr)
-	}
-	if writes == 0 {
-		t.Fatal("other writer wrote nothing during complete")
-	}
-	if slowest >= serverdb.DefaultBusyTimeout {
-		t.Fatalf("other writer waited %v, busy timeout %v", slowest, serverdb.DefaultBusyTimeout)
-	}
+	t.Logf("complete of %d subjects took %v", MaxCoveredPerRun, took)
+	// Each subject moves its watermark and closes one finding with its
+	// history row: at least 3 rows per subject.
+	checkApplyTx(t, stats(), 3*MaxCoveredPerRun/(rowBudget+applyTxOverhead))
 	if c.ClosedEvidenced != MaxCoveredPerRun {
 		t.Fatalf("completion = %+v", c)
 	}
@@ -110,13 +72,20 @@ func TestConcurrentWriterDuringLargestCompleteSucceeds(t *testing.T) {
 
 // resumeBig is the number of findings of the big host in resumeScenario:
 // more closures than one apply transaction takes.
-const resumeBig = maxApplyWrites + 100
+const resumeBig = resumeRows + 100
+
+// resumeRows is the row budget of the stores in resumeScenario, fixed so
+// that the scenario's size does not follow maxApplyRows; resuming does
+// not depend on the budget (the startup case of
+// TestServerFinishesCompletingRun resumes with the default one).
+const resumeRows = 1024
 
 // resumeScenario: 30 hosts with one finding each and one host with
 // resumeBig, none reported by a run that covers all of them. The big host
 // needs several apply transactions of its own.
 func resumeScenario(t *testing.T, e *env) (Run, []vulnfinding.Key) {
 	t.Helper()
+	e.st.applyRows = resumeRows
 	var keys []vulnfinding.Key
 	var covered []Subject
 	for i := 0; i < 30; i++ {
@@ -205,14 +174,16 @@ func TestCompleteCancelledDuringApplyResumesToTheSameResult(t *testing.T) {
 						if _, err := e.st.SubmitBatch(e.ctx, r.ID, batchOf(1, []Subject{hostSubj("h00")})); !errors.Is(err, ErrRunNotRunning) {
 							t.Fatalf("batch to a completing run: %v, want ErrRunNotRunning", err)
 						}
-						// Past the time limit the completing run is not aborted;
-						// the retry still finishes it.
+						// Past the time limit the completing run is not aborted
+						// by a batch or a retry; the retry still finishes it.
+						// (ResumeCompleting and Prune finish it too, see
+						// TestServerFinishesCompletingRun.)
 						e.clk.Add(MaxRunDuration + time.Minute)
-						if _, err := e.st.AbortExpiredRuns(e.ctx); err != nil {
-							t.Fatalf("abort expired runs: %v", err)
+						if _, err := e.st.SubmitBatch(e.ctx, r.ID, batchOf(2, []Subject{hostSubj("h00")})); !errors.Is(err, ErrRunNotRunning) {
+							t.Fatalf("batch to an expired completing run: %v, want ErrRunNotRunning", err)
 						}
 						if run, err := loadRun(e.ctx, e.st.db, r.ID); err != nil || run.state != "running" {
-							t.Fatalf("completing run after abort of expired runs: %q, %v; want running", run.state, err)
+							t.Fatalf("expired completing run: %q, %v; want running", run.state, err)
 						}
 					} else if got := states(t, e, keys); !reflect.DeepEqual(got, before) {
 						t.Fatalf("cut complete without completing state changed findings")
@@ -296,6 +267,157 @@ func TestCompleteRefusesStaleProgress(t *testing.T) {
 		t.Fatalf("stale progress check: %v, want ErrRunNotRunning", err)
 	}
 	tx.Rollback()
+	for _, k := range keys {
+		e.wantState(t, k, StateFixed, ClosedByNOSInventory)
+	}
+}
+
+// A run whose client never comes back after a complete stopped part-way is
+// finished by the store's server-side entry points (which the server wiring
+// calls, ticket vu14w): AbortExpiredRuns, Prune (the periodic sweep), and
+// ResumeCompleting at startup on a fresh store.
+// It ends completed (not aborted) with the closures and the completion of
+// an uninterrupted complete, and the client's late retry reads them.
+func TestServerFinishesCompletingRun(t *testing.T) {
+	ref, _, _ := newPathEnv(t, ClassEvidenced)
+	refRun, refKeys := resumeScenario(t, ref)
+	want, err := ref.st.Complete(ref.ctx, refRun.ID)
+	if err != nil {
+		t.Fatalf("reference complete: %v", err)
+	}
+	wantStates := states(t, ref, refKeys)
+
+	for _, tc := range []struct {
+		name string
+		// finish runs the server side; it returns the completing runs it
+		// finished (-1: not reported) and the expired runs it aborted.
+		finish func(t *testing.T, e *env, path string) (finished, aborted int)
+	}{
+		{"abort sweep", func(t *testing.T, e *env, _ string) (int, int) {
+			n, err := e.st.AbortExpiredRuns(e.ctx)
+			if err != nil {
+				t.Fatalf("abort expired runs: %v", err)
+			}
+			return -1, n
+		}},
+		{"prune", func(t *testing.T, e *env, _ string) (int, int) {
+			res, err := e.st.Prune(e.ctx)
+			if err != nil {
+				t.Fatalf("prune: %v", err)
+			}
+			return res.ResumedRuns, res.AbortedRuns
+		}},
+		{"startup", func(t *testing.T, e *env, path string) (int, int) {
+			// A restart: a new store on the same database.
+			db2, err := serverdb.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { db2.Close() })
+			st2 := openStore(t, db2, e.clk, &cancelClassifier{class: ClassEvidenced})
+			n, err := st2.ResumeCompleting(e.ctx)
+			if err != nil {
+				t.Fatalf("resume completing: %v", err)
+			}
+			return n, 0
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, _, path := newPathEnv(t, ClassEvidenced)
+			// The scenario's seed run stays running: the sweep aborts it.
+			r, keys := resumeScenario(t, e)
+			ctx, cancel := context.WithCancel(e.ctx)
+			defer cancel()
+			e.st.chunkDone = func(int) { cancel() }
+			if _, err := e.st.Complete(ctx, r.ID); !errors.Is(err, context.Canceled) {
+				t.Fatalf("cut complete: %v, want context.Canceled", err)
+			}
+			e.st.chunkDone = nil
+			if !completing(t, e, r.ID) {
+				t.Fatal("no completing state after the first apply transaction")
+			}
+			e.clk.Add(MaxRunDuration + time.Minute)
+
+			finished, aborted := tc.finish(t, e, path)
+			if finished != -1 && finished != 1 {
+				t.Fatalf("finished %d completing runs, want 1", finished)
+			}
+			if tc.name != "startup" && aborted != 1 {
+				t.Fatalf("aborted %d runs, want 1", aborted)
+			}
+			run, err := loadRun(e.ctx, e.st.db, r.ID)
+			if err != nil || run.state != "completed" || completing(t, e, r.ID) {
+				t.Fatalf("completing run after the server finished it: %q, %v", run.state, err)
+			}
+			if got := states(t, e, keys); !reflect.DeepEqual(got, wantStates) {
+				t.Fatal("final states differ from an uninterrupted complete")
+			}
+			// The client's late retry reads the saved completion.
+			if _, err := e.st.Complete(e.ctx, r.ID); !errors.Is(err, ErrRunNotRunning) {
+				t.Fatalf("late complete: %v, want ErrRunNotRunning", err)
+			}
+			if _, err := e.st.ResumeComplete(e.ctx, r.ID, "hermes-vuln"); !errors.Is(err, ErrRunNotRunning) {
+				t.Fatalf("late resume: %v, want ErrRunNotRunning", err)
+			}
+			got, err := e.st.CompletionOf(e.ctx, r.ID, "hermes-vuln")
+			if err != nil || !reflect.DeepEqual(got, want) {
+				t.Fatalf("saved completion = %+v, %v; want %+v", got, err, want)
+			}
+			// Nothing is left to finish.
+			if n, err := e.st.ResumeCompleting(e.ctx); err != nil || n != 0 {
+				t.Fatalf("second resume = %d, %v; want 0", n, err)
+			}
+		})
+	}
+}
+
+// A sweep (Prune) whose context ends while it resumes a completing run
+// returns the context error and leaves the run completing, not aborted and
+// not half applied; the next sweep finishes it with the result of an
+// uninterrupted complete. This is the bound the caller relies on: a
+// deadline on the sweep's context limits how long it holds the store.
+func TestSweepDeadlineLeavesCompletingRunResumable(t *testing.T) {
+	e, _, _ := newPathEnv(t, ClassEvidenced)
+	r, keys := resumeScenario(t, e)
+	cut := func() context.Context {
+		ctx, cancel := context.WithCancel(e.ctx)
+		t.Cleanup(cancel)
+		e.st.chunkDone = func(int) { cancel() }
+		return ctx
+	}
+	// The client's complete stops after its first apply transaction.
+	if _, err := e.st.Complete(cut(), r.ID); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cut complete: %v, want context.Canceled", err)
+	}
+	e.clk.Add(MaxRunDuration + time.Minute)
+	// The sweep's context ends after the resume's first apply transaction
+	// (the scenario has three).
+	res, err := e.st.Prune(cut())
+	e.st.chunkDone = nil
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cut sweep: %+v, %v; want context.Canceled", res, err)
+	}
+	if res.ResumedRuns != 0 {
+		t.Fatalf("cut sweep resumed %d runs, want 0", res.ResumedRuns)
+	}
+	run, err := loadRun(e.ctx, e.st.db, r.ID)
+	if err != nil || run.state != "running" || !completing(t, e, r.ID) {
+		t.Fatalf("run after a cut sweep: %q, %v; want running and completing", run.state, err)
+	}
+	// The next sweep finishes it with every closure (the uninterrupted
+	// result of this scenario, see
+	// TestCompleteCancelledDuringApplyResumesToTheSameResult).
+	res, err = e.st.Prune(e.ctx)
+	if err != nil || res.ResumedRuns != 1 {
+		t.Fatalf("second sweep = %+v, %v; want 1 resumed run", res, err)
+	}
+	if run, err := loadRun(e.ctx, e.st.db, r.ID); err != nil || run.state != "completed" {
+		t.Fatalf("run after the second sweep: %q, %v; want completed", run.state, err)
+	}
+	got, err := e.st.CompletionOf(e.ctx, r.ID, "hermes-vuln")
+	if err != nil || got.ClosedEvidenced != 30+resumeBig {
+		t.Fatalf("saved completion = %+v, %v; want %d closed", got, err, 30+resumeBig)
+	}
 	for _, k := range keys {
 		e.wantState(t, k, StateFixed, ClosedByNOSInventory)
 	}
