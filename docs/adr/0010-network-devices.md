@@ -1,10 +1,13 @@
 # ADR 0010: Network devices: switch configuration and firewall
 
-Status: proposed (draft by Claude for maintainer review), 2026-11-08. Awaiting
-the maintainer's answers to the open questions at the end. Before
-acceptance only the lab verification ND-03 may run; no code is written.
-Revised after review round 1 (keyed config digests, PAN-OS allowlist, CBS
-reload precondition, object edits under the path rule, parse limits).
+Status: **Accepted, 2026-11-09** (previously: proposed, draft by Claude for
+maintainer review, 2026-11-08, awaiting the maintainer's answers to the open
+questions). The maintainer answered Q1–Q13 in chat on 2026-11-09,
+00:07–01:10 UTC+1; the answers are recorded in "Decisions 2026-11-09" below
+and at each question. Every *verify* still has to pass the lab verification
+ND-03 before code depends on it. Revised after review round 1 (keyed config
+digests, PAN-OS allowlist, CBS reload precondition, object edits under the
+path rule, parse limits).
 
 ## Context
 
@@ -63,7 +66,7 @@ claim that fails the check changes the design here first, not the code.
 | Family | Documents to check (exact version recorded in ND-03) |
 | --- | --- |
 | CBS | Cisco *Cisco Business 350 Series Managed Switches CLI Guide* (firmware 3.x); Cisco *Cisco Business 250 Series Smart Switches CLI Guide* (firmware 3.x); Cisco *Cisco Business 220 Series Smart Switches Administration Guide*; the CBS release notes for the installed firmware |
-| PAN-OS | Palo Alto Networks *PAN-OS and Panorama API Usage Guide* (XML API and REST API chapters) and *PAN-OS Administrator's Guide* (admin roles, commit, config versions, certificate management) for the installed release (10.2 or 11.x, see Q2) |
+| PAN-OS | Palo Alto Networks *PAN-OS and Panorama API Usage Guide* (XML API and REST API chapters) and *PAN-OS Administrator's Guide* (admin roles, commit, config versions, certificate management) for the installed PAN-OS 11.1 release (Q2, decided 2026-11-09; exact release in the private lab notes; previously: 10.2 or 11.x, open) |
 | pfSense | Netgate *pfSense Documentation* (backup and restore, configuration history, user privileges) for CE 2.7.x and Plus 24.x/25.x; the Netgate product pages on the Plus REST API; the community `pfSense-pkg-RESTAPI` project |
 
 ## Decisions
@@ -105,7 +108,9 @@ claim that fails the check changes the design here first, not the code.
   multicast and unspecified addresses (previously: a public address was
   refused once at registration only). Changing an endpoint is an explicit
   admin CLI operation handled like a re-pin (below).
-  Which address the management interface has is open question Q5.
+  The management interface has an internal address only and is not
+  reachable from the WAN side (Q5, decided 2026-11-09, verify in ND-03;
+  previously open). The address itself is kept out of this repository.
 - Discovery (`internal/discovery`) and IPAM never add dial targets for
   devices; they can only suggest that an IPAM asset of kind `switch` or
   `firewall` be registered by the admin.
@@ -125,7 +130,10 @@ handled exactly like PVE tokens (spec 06 v23-06-02, v23-06-05, v23-06-06):
   configuration;
 - separate credentials per device and per purpose: a **read credential**
   (phase 1) and an optional **change credential** (phase 2, only if the
-  maintainer allows one at all, Q3). The change credential is never used
+  maintainer allows one at all, Q3). Q3 decided 2026-11-09 (previously
+  open): phase 1 holds the read credential only (CBS user below privilege
+  level 15, PAN-OS read-only key); whether a change credential exists at all
+  is decided after phase 1 has run. The change credential is never used
   for reads, the read credential never for changes;
 - lock wipes them with the rest of the vault and pauses device reads;
   rotation validates the new credential against the pinned transport first,
@@ -166,8 +174,10 @@ executor.
   `ssh-rsa` (SHA-1) signatures or small RSA keys (*verify*); spec 08 and
   `internal/sshtransport` accept RSA only as `rsa-sha2-512` with a minimum
   size. If the lab switches cannot meet that, the switch is **unsupported**
-  until a reviewed decision (open question Q1b); no silent algorithm
-  downgrade is added for devices.
+  until a reviewed decision (Q1b, decided 2026-11-09, previously open: the
+  key types and `rsa-sha2-512` are verified in ND-03; the default stays "no
+  algorithm exception", a switch that cannot meet spec 08 is unsupported);
+  no silent algorithm downgrade is added for devices.
 - **Model support.** CBS350 (managed) has a full CLI over SSH. CBS250 (smart)
   has a CLI over SSH in recent firmware (*verify*). CBS220 (smart) is managed
   through the web UI only and has no SSH CLI (*verify*); a CBS220 is
@@ -216,6 +226,10 @@ executor.
   fixed xpath templates. No caller can supply an xpath, a `cmd` string or a
   URL.
 - Panorama, multi-vsys and HA pairs are out of scope until asked (Q2).
+  Q2 decided 2026-11-09 (previously open): the lab has a single PA-400-series
+  firewall on PAN-OS 11.1, no HA pair and no Panorama (assumed, verify in
+  ND-03). The maintainer did not state the vsys layout; NOS supports a single
+  vsys only and refuses a device that shows more than one (verify in ND-03).
 
 **Parse limits (both families).** Every parser enforces named limits next to
 its code (ND-04 defines the constants); the values below are upper bounds
@@ -259,9 +273,9 @@ Unix user and peercred role, no credentials, no database, no network
 listener and no device access. It schedules typed reads over the executor
 socket; the executor alone talks to devices, parses, validates and redacts
 the results and returns sanitized records; the collector writes them to its
-spool; `nebula-server` imports them. Whether this is a separate binary or a
-second role of the PVE collector is open question Q9 (recommended: separate
-binary, shared spool library).
+spool; `nebula-server` imports them. It is a **separate binary** with a
+shared spool library (Q9, decided 2026-11-09; previously open, with a
+second role of the PVE collector as the alternative).
 
 **Data and cadence (defaults).**
 
@@ -358,9 +372,11 @@ digest of any candidate text.
 - **Stated limit for CBS.** CBS redaction stays a keyword denylist plus the
   keyword rule: a secret in a positional field of a command whose keyword is
   not listed and does not match the pattern would pass. ND-03 records the
-  full command vocabulary of the lab configs so the list can be reviewed;
-  whether CBS should also switch to an allowlist of command keywords is open
-  question Q13.
+  full command vocabulary of the lab configs so the list can be reviewed.
+  CBS switches to an **allowlist of command keywords** (unlisted lines
+  dropped with a marker) once ND-03 has recorded that vocabulary; until then
+  the limit stands as stated here (Q13, decided 2026-11-09 per the ADR
+  recommendation; previously open).
 - Redaction replaces values with `<redacted:FP>`, where FP is the first
   8 hex characters of **HMAC-SHA-256** under the device's fingerprint key
   over the field identity and the value (previously: a salted SHA-256).
@@ -394,9 +410,11 @@ digest of any candidate text.
   shows the executor's verdict.
 - Retention: every distinct version for 400 days, at most 1,000 versions
   per device; the approved baseline and the versions bound to changes in the
-  last 400 days are never pruned. Unredacted backups are **not** stored in
-  phase 1; whether the executor should keep age-encrypted raw backups for
-  disaster recovery (ADR 0004 identity) is open question Q8.
+  last 400 days are never pruned (Q11, decided 2026-11-09 as proposed;
+  previously open). Unredacted backups are **not** stored, in any phase:
+  NOS keeps redacted versions only and the devices keep their own config
+  (Q8, decided 2026-11-09; previously open, with age-encrypted raw backups
+  in the executor as the alternative).
 
 **Integration points.**
 
@@ -430,7 +448,10 @@ never exported in clear text.
 ### D5: Phase 2, changes
 
 Phase 2 starts only after the maintainer's answer to Q3 and an accepted spec
-revision. Rules for every change:
+revision. Q3 was answered on 2026-11-09 (previously open): phase 2 is
+decided only after phase 1 has run in the lab; until that decision no
+change credential is provisioned and nothing in this section is
+implemented. Rules for every change:
 
 - **Typed operations only.** No free-form CLI line, no xpath, no XML snippet
   and no config file upload. The executor builds the exact device commands
@@ -521,6 +542,35 @@ timer (CBS) or executor dead-man (PAN-OS) and confirm window (D6).
   above an allow that does not carry NOS-path traffic is not raised by this
   rule. If the MAC table, LLDP data or firewall policy needed to decide is
   stale, incomplete or missing, the floor is CRITICAL.
+- **Flat network: the path rule tightens (Q4, decided 2026-11-09;
+  previously open).** The lab is currently **one flat network without a
+  management VLAN**; the maintainer plans segmentation. Until a management
+  VLAN exists and is recorded by an amendment of this ADR, the executor
+  applies these rules unconditionally (they are not an executor setting and
+  the server cannot switch them off):
+  - A switch **carries the NOS path** if its MAC table or LLDP data shows,
+    learned in the last 24 h, the MAC of the NOS machine, of its default
+    gateway, or of **any managed device** (managed host, PVE node, managed
+    switch or firewall), or if that data is stale, incomplete or missing
+    (fail closed). On such a switch **every port, VLAN and uplink change is
+    CRITICAL** (and so refused, Q6), whatever the port role, the MAC age of
+    the individual port or the operation base; this includes port
+    descriptions, access VLAN, shut/no shut, trunk allowed VLANs and
+    persisting to startup of such a change. In the lab today this is every
+    switch that is not proven off the path.
+  - The single VLAN that carries the lab is the management VLAN for every
+    CBS rule above (previously: a separate management VLAN was assumed).
+  - The management networks of the devices are the whole flat lab network
+    `<lab-net>`, so every firewall rule change whose source or destination
+    overlaps `<lab-net>` (including `any`) overlaps the NOS path and is
+    CRITICAL; this follows from the NOS-path definition above.
+  - The PAN-OS management interface sits on the flat network, not on a
+    separate management segment, so a switch change can cut NOS's path to
+    the firewall too; it is covered by the switch rule above.
+  - The rule ends only with an ADR amendment that records the management
+    VLAN, the switches and ports that carry it, and the uplinks, after the
+    segmentation exists; ND-31 implements the flat-network rule as the
+    default until then.
 - **Object edits go through the rules that use them** (previously: a
   referenced object edit was fixed at HIGH). An address object or address
   group changes the effective match of every rule that references it.
@@ -545,9 +595,10 @@ timer (CBS) or executor dead-man (PAN-OS) and confirm window (D6).
   firewall's criticality (executor-owned and changed like host
   criticality, never by the server).
   The plan's risk summary repeats exactly these classes.
-- **CRITICAL in phase 2a is refused**, as ADR 0006 does for containers. Phase
-  2b may allow CRITICAL only with the dead-man rollback below and only after
-  the maintainer decides Q6.
+- **CRITICAL is refused for good** (Q6, decided 2026-11-09; previously:
+  refused in phase 2a, with a phase 2b that might allow CRITICAL with the
+  dead-man rollback below after the maintainer decides Q6), as ADR 0006
+  does for containers. Phase 2b and ND-40 are not planned.
 
 **Out of scope for every phase (non-goals for changes):** AAA, users, SSH
 server, HTTPS server, SNMP, management IP or management interface settings,
@@ -557,6 +608,14 @@ factory reset and reboot. These are exactly the changes that lock NOS or the
 admin out, or that need secrets.
 
 ### D6: Apply, verify and rollback per family
+
+**Decided 2026-11-09 (Q6):** CRITICAL changes are refused for good, so the
+CRITICAL-only parts of this section (CBS reload timer and confirm window,
+PAN-OS executor dead-man and its lock rule, CRITICAL rollbacks) are **not
+implemented**; they stay here as the record of the option the maintainer
+rejected (previously: planned for phase 2b). A CRITICAL change or rollback
+is refused at proposal. The non-CRITICAL steps apply if phase 2 is decided
+(Q3).
 
 **CBS.**
 
@@ -797,7 +856,9 @@ while the executor runs with an unlocked vault. Its rules:
 
 This is an automatic rollback and an explicit,
 bounded exception to ADR 0007 ("no automatic rollback"), so it needs the
-maintainer's decision Q6 and the spec revision.
+maintainer's decision Q6 and the spec revision. Q6 decided 2026-11-09
+(previously open): the exception is **not** granted; ADR 0007's "no
+automatic rollback" stands unchanged.
 
 **What "uncertain" means.** A change is `unknown` when the executor cannot
 prove whether it was applied: the session or HTTPS response was lost after
@@ -823,7 +884,7 @@ other endpoint is tried for a mutation.
 | --- | --- |
 | New credential class (switch passwords/keys, firewall API keys) leaking | Executor vault only, per device and purpose, read and change credentials separate, local CLI entry, header-only API key, no secret in results/logs/events/spool, rotation and revocation as for PVE tokens |
 | Config backups containing hashes, PSKs, communities, private keys | Redaction in the executor before anything leaves it: PAN-OS element allowlist, CBS keyword list (limit stated, Q13), fail-closed keyword rule, unparseable or over-limit configs not stored; config digests and value fingerprints are HMAC-SHA-256 under per-device executor keys, so the server cannot confirm guessed secrets; admin-only pages, age-encrypted instance backups; raw configs never stored in phase 1 |
-| Lock-out of NOS's (or the admin's) management path | Read-only first; out-of-scope list in D5; executor-owned port roles and path floor; CRITICAL refused in phase 2a; device-side reload timer (CBS) or executor dead-man (PAN-OS) only in phase 2b; startup config untouched until a separate approval |
+| Lock-out of NOS's (or the admin's) management path | Read-only first; out-of-scope list in D5; executor-owned port roles and path floor, tightened for the flat lab network (D5, Q4); CRITICAL refused for good (Q6, decided 2026-11-09; previously: refused in phase 2a, device-side reload timer (CBS) or executor dead-man (PAN-OS) only in phase 2b); startup config untouched until a separate approval |
 | Compromised or spoofed device feeding the UI (names, descriptions, LLDP, rule comments, banners) | Spec 09: bounded, UTF-8, printable text only, rendered as escaped text; LLDP labelled by source; device data never creates assets, roles, placements or permits |
 | Man in the middle on the management path | Pinned SSH host key / TLS certificate, hard stop on mismatch, explicit re-pin |
 | CLI or XML injection through parameters (newline in a port description, quote in a rule name) | Typed parameters with strict character sets and length limits, interface names only from the device's own enumerated list, XML built with escaping into fixed xpath templates, no caller-supplied commands or xpaths |
@@ -838,11 +899,15 @@ a compromised firewall); the vendor firmware itself.
 ### D8: Phase plan
 
 - **Phase 1:** CBS and PAN-OS read only (D3, D4), drift and IPAM/traffic-map
-  integration, firewall view with hit counts.
-- **Phase 2a:** typed changes up to HIGH (D5, D6), CRITICAL refused.
-- **Phase 2b:** CRITICAL with the dead-man rollback, only after Q6.
-- **Later:** pfSense (D9), Catalyst successors, Panorama, shadowed-rule
-  analysis, segmentation hints.
+  integration, firewall view with hit counts. Order (Q10, decided
+  2026-11-09; previously open): CBS read path first, then PAN-OS read.
+- **Phase 2a:** typed changes up to HIGH (D5, D6), CRITICAL refused; started
+  only if the maintainer decides so after phase 1 has run (Q3, decided
+  2026-11-09; previously open).
+- **Phase 2b:** not planned (Q6, decided 2026-11-09: CRITICAL refused for
+  good; previously: CRITICAL with the dead-man rollback, only after Q6).
+- **Later:** pfSense CE (D9, Q7), Catalyst successors, Panorama,
+  shadowed-rule analysis, segmentation hints.
 
 ### D9: pfSense stays later
 
@@ -862,8 +927,13 @@ a compromised firewall); the vendor firmware itself.
 - **Writes** on CE would need PHP execution (`pfSsh.php`) or the community
   API; both are effectively arbitrary code and are a non-goal until decided.
 
-Open decision Q7: CE or Plus, and whether a read-only config backup over
-SSH is enough for pfSense.
+Q7 decided 2026-11-09 (previously open: CE or Plus, and whether a
+read-only config backup over SSH is enough): **pfSense CE** ("Standard"),
+later, as a possible replacement when the current firewall leaves vendor
+support. NOS would take a **read-only config backup over SSH**; the
+community REST API (`pfSense-pkg-RESTAPI`) is **not acceptable**, and
+writes stay a non-goal. ND-50 stays future work and needs its own ADR
+amendment first.
 
 ## Non-goals
 
@@ -905,47 +975,104 @@ SSH is enough for pfSense.
 
 Tickets: [docs/implementation/network-devices.md](../implementation/network-devices.md).
 
+## Decisions 2026-11-09
+
+The maintainer answered every open question in chat on 2026-11-09,
+00:07–01:10 UTC+1, and accepted this ADR. Each answer is also recorded at
+the question below and in the section it changes. Lab facts that identify
+the lab (exact models, firmware and PAN-OS releases, serial numbers,
+addresses, host names) stay in the maintainer's private lab notes, not in
+this repository. Every lab fact below is still checked in ND-03.
+
+| Question | Decision 2026-11-09 | Was |
+| --- | --- | --- |
+| Q1 CBS models and firmware | The lab has Cisco **CBS350** switches (two reachable from the management side) and several small **CBS250** switches (not seen with an address in the lab scan; their management address is confirmed in ND-03). Exact models and firmware stay in the private lab notes. No CBS220 was named | open |
+| Q1b SSH key types | Host-key and user-key types and `rsa-sha2-512` support are verified in ND-03; the default stays **no algorithm exception** (a switch that cannot meet spec 08 is unsupported, ND-05b only through a separate decision) | open |
+| Q2 PAN-OS | A single **Palo Alto PA-400-series** firewall on **PAN-OS 11.1** (exact release private); no HA pair and no Panorama assumed, verified in ND-03. The vsys layout was not stated: NOS supports a single vsys only (D3), verified in ND-03 | open |
+| Q3 Write-capable credentials | Recommendation accepted: phase 1 holds a **read-only key/user only** (CBS privilege level below 15, PAN-OS read-only role); phase 2 is decided after phase 1 has run | open |
+| Q4 Management layout | The lab is currently **one flat network without a management VLAN**; the maintainer plans segmentation. Until a management VLAN exists, **every port, VLAN and uplink change on a switch that carries the path between the NOS machine and any managed device is CRITICAL** and therefore refused (Q6). D5 "Flat network" states how the path rule tightens | open |
+| Q5 Firewall management address | Management is on an **internal address only** (the address is not in this repository); WAN-side management is not reachable, verified in ND-03 | open |
+| Q6 CRITICAL changes | Recommendation accepted: CRITICAL changes are **refused for good**; phase 2b and ND-40 are not planned; no exception to ADR 0007's "no automatic rollback" | open |
+| Q7 pfSense | **pfSense CE** ("Standard") later, as a possible replacement when the current firewall leaves vendor support; **read-only config backup over SSH**; the community REST API is **not acceptable**. ND-50 stays future work | open |
+| Q8 Raw backups | **Redacted backups only**; no unredacted device configs in NOS, in any phase | open |
+| Q9 Collector | **Separate `nebula-netdev-collector`** with a shared spool library | open |
+| Q10 Order | **CBS read path first**, then PAN-OS read, then changes (the latter only after Q3's phase-2 decision) | open |
+| Q11 Retention | **As proposed**: config versions 400 days / 1,000 versions per device (approved baseline and change-bound versions never pruned); MAC/LLDP history 21 days; hourly hit-count samples 90 days | open |
+| Q12 Protected paths | **Yes**: `internal/netdevredact/` and `internal/netdevchange/` are added to `.github/protected-paths.txt` in ND-02 | open |
+| Q13 CBS redaction model | Per the ADR recommendation: CBS switches to an **allowlist of command keywords** (unlisted lines dropped with a marker) once ND-03 has recorded the command vocabulary of the lab configs; until then the D4 limit stands | open |
+
+Q13 was answered with "per the ADR recommendation, else the most
+restrictive option". Every question in this ADR carried a recommendation or
+was answered with a fact, so no fallback to the most restrictive option was
+needed here.
+
 ## Open questions for the maintainer
+
+All answered on 2026-11-09 (previously open); see "Decisions 2026-11-09".
 
 - **Q1: CBS models and firmware.** Which exact models (CBS250, CBS350,
   CBS220?) and firmware versions are in the lab? **Q1b:** which SSH host-key
   and user-key types do they offer; is `rsa-sha2-512` available, or would
   NOS need an algorithm exception (recommended: no exception, unsupported)?
+  **Answered 2026-11-09** (previously open): CBS350 (two reachable from the
+  management side) and several CBS250 (management address confirmed in
+  ND-03); exact models and firmware private. Q1b verified in ND-03; default
+  no algorithm exception.
 - **Q2: PAN-OS.** Model, PAN-OS version, single vsys, HA pair or not,
-  Panorama or not.
+  Panorama or not. **Answered 2026-11-09** (previously open): one
+  PA-400-series on PAN-OS 11.1 (exact release private), no HA, no Panorama
+  assumed; verified in ND-03; single vsys only.
 - **Q3: Write-capable firewall key.** May NOS hold a PAN-OS API key that can
   commit at all? Recommended: phase 1 read-only key only; decide phase 2
   after phase 1 runs. Same question for the CBS level-15 user.
+  **Answered 2026-11-09** (previously open): recommendation accepted, phase 1
+  read-only key/user only (CBS below level 15); phase 2 decided after phase 1
+  runs.
 - **Q4: Management layout.** Which VLAN and subnet is management, where do
   the NOS machine and its gateway sit, which switch ports are uplinks, and
   is the PAN-OS management port really out of band? This defines the
-  CRITICAL path rule.
+  CRITICAL path rule. **Answered 2026-11-09** (previously open): one flat
+  network, no management VLAN yet, segmentation planned; until then every
+  port/VLAN/uplink change on a switch carrying the NOS path is CRITICAL and
+  refused (D5 "Flat network").
 - **Q5: Firewall management address.** The internal address of the PAN-OS
   management interface; confirm management is not reachable on the WAN side
   of `<public-name>`. (Answer privately; the ADR records only that the
-  address is internal.)
+  address is internal.) **Answered 2026-11-09** (previously open): internal
+  address only (not recorded here); WAN-side management not reachable,
+  verified in ND-03.
 - **Q6: CRITICAL changes.** Refuse them for good, or allow phase 2b with a
   CBS reload timer and a PAN-OS executor dead-man (an exception to ADR
-  0007's "no automatic rollback")?
+  0007's "no automatic rollback")? **Answered 2026-11-09** (previously
+  open): refused for good; ND-40 not planned.
 - **Q7: pfSense.** CE or Plus? Is a read-only config backup over SSH enough,
   and is the community REST API acceptable at all (recommended: no)?
+  **Answered 2026-11-09** (previously open): CE, later, as a possible
+  replacement when the current firewall leaves vendor support; read-only
+  config backup over SSH; community REST API not acceptable; ND-50 future.
 - **Q8: Raw backups.** Should the executor keep age-encrypted unredacted
   config backups for disaster recovery, or only redacted versions
   (recommended: redacted only; devices keep their own config)?
+  **Answered 2026-11-09** (previously open): redacted only.
 - **Q9: Collector.** Separate `nebula-netdev-collector` (recommended) or a
-  second role in the PVE collector?
+  second role in the PVE collector? **Answered 2026-11-09** (previously
+  open): separate collector.
 - **Q10: Order.** Switch first or firewall first? Recommended: CBS read path
   first (feeds IPAM and the traffic map), then PAN-OS read, then changes.
+  **Answered 2026-11-09** (previously open): as recommended.
 - **Q11: Retention.** 400 days / 1,000 versions per device for config
   versions; 21 days for MAC/LLDP history (as ADR 0009); 90 days of hourly
-  hit-count samples. Acceptable?
+  hit-count samples. Acceptable? **Answered 2026-11-09** (previously open):
+  as proposed.
 - **Q12: Protected paths.** Should the new redaction and device-change
   packages (`internal/netdevredact/`, `internal/netdevchange/`) be added to
   `.github/protected-paths.txt`? Recommended: yes, in ND-02.
+  **Answered 2026-11-09** (previously open): yes, in ND-02.
 - **Q13: CBS redaction model.** PAN-OS output passes an element allowlist;
   CBS output passes a keyword denylist plus the fail-closed keyword rule,
   which cannot catch a secret in a positional field of an unlisted command.
   Should CBS also switch to an allowlist of command keywords (unlisted lines
   dropped with a marker)? Recommended: yes, once ND-03 has recorded the
   command vocabulary of the lab configs; until then the limit stands as
-  stated in D4.
+  stated in D4. **Answered 2026-11-09** (previously open): per the
+  recommendation.
