@@ -16,7 +16,8 @@
 //     subject's coverage watermark and each finding's state_run_seq;
 //   - feed sources: judged one by one against NOS's fixed source list and
 //     per-source high-water marks; a record resting on a source that is not
-//     accepted or undated only raises current values;
+//     accepted, undated or on probation after an admin mark reset only
+//     raises current values;
 //   - episode high-water marks (fixed version, KEV, peak tier) that only
 //     rise until the finding closes;
 //   - human states (accepted_risk, false_positive), which no run changes.
@@ -127,6 +128,10 @@ var (
 	// ErrContradicted: NOS's inventory contradicts the closure; it can never
 	// become fixed (closure path 6).
 	ErrContradicted = errors.New("closure contradicted by NOS inventory")
+	// ErrResetRefused: a high-water mark reset that the D5 rules refuse
+	// (source not listed, value not reported by the latest regressed run,
+	// not below the mark, or beyond NOS's clock plus MaxFutureSkew).
+	ErrResetRefused = errors.New("high-water mark reset refused")
 )
 
 // Tier is a D7 priority tier. The zero value is unknown.

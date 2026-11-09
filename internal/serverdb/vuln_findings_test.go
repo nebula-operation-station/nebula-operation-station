@@ -14,6 +14,7 @@ func TestVulnTablesExistAfterMigration(t *testing.T) {
 		"vuln_store_state", "vuln_runs", "vuln_run_sources", "vuln_source_marks",
 		"vuln_run_batches", "vuln_run_subjects", "vuln_run_reported", "vuln_run_rejected",
 		"vuln_findings", "vuln_subject_watermarks", "vuln_held_closures",
+		"vuln_finding_history", "vuln_mark_resets",
 	} {
 		if !tableExists(t, db, name) {
 			t.Errorf("table %s missing", name)

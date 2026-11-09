@@ -73,6 +73,9 @@ type SourceVerdict struct {
 	Status SourceStatus
 	// Stale: past the source's maximum snapshot age, or undated.
 	Stale bool
+	// Probation: accepted, but on probation after a mark reset (D5):
+	// raise-only, and unevidenced closures resting on it are held.
+	Probation bool
 }
 
 // Run is a started run.
@@ -211,8 +214,9 @@ func (s *Store) StartRun(ctx context.Context, req StartRequest) (Run, error) {
 		if src.Sequence != nil {
 			sq = *src.Sequence
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO vuln_run_sources (run_id, source_id, snapshot_id, integrity, date_kind, content_date, sequence, status, stale)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, src.ID, src.SnapshotID, string(src.Integrity), src.DateKind, cd, sq, string(v.Status), boolInt(v.Stale)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO vuln_run_sources (run_id, source_id, snapshot_id, integrity, date_kind, content_date, sequence, status, stale, probation)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, id, src.ID, src.SnapshotID, string(src.Integrity), src.DateKind, cd, sq, string(v.Status), boolInt(v.Stale),
+			boolInt(v.Probation)); err != nil {
 			return Run{}, fmt.Errorf("vulnstore: start run: insert source: %w", err)
 		}
 	}
@@ -239,14 +243,26 @@ func (s *Store) judgeSource(ctx context.Context, tx *sql.Tx, src RunSource, now 
 	if src.ContentDate.After(now.Add(MaxFutureSkew)) {
 		return SourceVerdict{ID: src.ID, Status: SourceInvalid, Stale: true}, nil
 	}
-	var markDate, markSeq sql.NullInt64
-	err := tx.QueryRowContext(ctx, `SELECT content_date, sequence FROM vuln_source_marks WHERE source_id = ?`, src.ID).Scan(&markDate, &markSeq)
+	var markDate, markSeq, preDate, preSeq sql.NullInt64
+	var probation int
+	err := tx.QueryRowContext(ctx, `SELECT content_date, sequence, probation, pre_reset_date, pre_reset_sequence FROM vuln_source_marks WHERE source_id = ?`,
+		src.ID).Scan(&markDate, &markSeq, &probation, &preDate, &preSeq)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return SourceVerdict{}, fmt.Errorf("read mark %s: %w", src.ID, err)
 	}
 	cd := unix(src.ContentDate)
 	if markDate.Valid && cd < markDate.Int64 || markSeq.Valid && (src.Sequence == nil || *src.Sequence < markSeq.Int64) {
 		return SourceVerdict{ID: src.ID, Status: SourceRegressed, Stale: true}, nil
+	}
+	// After a mark reset the source stays on probation until a run names
+	// it strictly above the pre-reset mark, in every component that mark
+	// has (D5); meanwhile it is accepted but raise-only and its unevidenced
+	// closures are held.
+	onProbation := false
+	if probation == 1 {
+		passed := (!preDate.Valid || cd > preDate.Int64) &&
+			(!preSeq.Valid || src.Sequence != nil && *src.Sequence > preSeq.Int64)
+		onProbation = !passed
 	}
 	newDate := cd
 	if markDate.Valid && markDate.Int64 > newDate {
@@ -262,18 +278,25 @@ func (s *Store) judgeSource(ctx context.Context, tx *sql.Tx, src RunSource, now 
 		src.ID, newDate, newSeq, unix(now)); err != nil {
 		return SourceVerdict{}, fmt.Errorf("update mark %s: %w", src.ID, err)
 	}
+	if probation == 1 && !onProbation {
+		if _, err := tx.ExecContext(ctx, `UPDATE vuln_source_marks SET probation = 0, pre_reset_date = NULL, pre_reset_sequence = NULL
+			WHERE source_id = ?`, src.ID); err != nil {
+			return SourceVerdict{}, fmt.Errorf("end probation %s: %w", src.ID, err)
+		}
+	}
 	stale := now.Sub(src.ContentDate) > spec.MaxAge
-	return SourceVerdict{ID: src.ID, Status: SourceAccepted, Stale: stale}, nil
+	return SourceVerdict{ID: src.ID, Status: SourceAccepted, Stale: stale, Probation: onProbation}, nil
 }
 
 // runSourceInfo is a run's view of one named source.
 type runSourceInfo struct {
-	status SourceStatus
-	stale  bool
+	status    SourceStatus
+	stale     bool
+	probation bool
 }
 
 func loadRunSources(ctx context.Context, q queryer, runID string) (map[string]runSourceInfo, error) {
-	rows, err := q.QueryContext(ctx, `SELECT source_id, status, stale FROM vuln_run_sources WHERE run_id = ?`, runID)
+	rows, err := q.QueryContext(ctx, `SELECT source_id, status, stale, probation FROM vuln_run_sources WHERE run_id = ?`, runID)
 	if err != nil {
 		return nil, fmt.Errorf("load run sources: %w", err)
 	}
@@ -281,11 +304,11 @@ func loadRunSources(ctx context.Context, q queryer, runID string) (map[string]ru
 	out := make(map[string]runSourceInfo)
 	for rows.Next() {
 		var id, status string
-		var stale int
-		if err := rows.Scan(&id, &status, &stale); err != nil {
+		var stale, probation int
+		if err := rows.Scan(&id, &status, &stale, &probation); err != nil {
 			return nil, fmt.Errorf("load run sources: %w", err)
 		}
-		out[id] = runSourceInfo{status: SourceStatus(status), stale: stale == 1}
+		out[id] = runSourceInfo{status: SourceStatus(status), stale: stale == 1, probation: probation == 1}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("load run sources: %w", err)

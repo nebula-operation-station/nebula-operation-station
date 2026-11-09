@@ -23,6 +23,8 @@ const (
 	HoldRunGuard       HoldReason = "run_guard"
 	HoldWindowGuard    HoldReason = "window_guard"
 	HoldClassifyFailed HoldReason = "classify_failed"
+	// HoldProbation: a basis source is on probation after a mark reset.
+	HoldProbation HoldReason = "probation"
 )
 
 // Completion reports what completing a run did. It holds counts only.
@@ -248,7 +250,21 @@ func (s *Store) planOne(ctx context.Context, run runRow, sources map[string]runS
 	default:
 		c.hold = HoldClassifyFailed
 	}
+	if c.hold == "" && onProbation(f.Record, sources) {
+		c.hold = HoldProbation // precondition 5g: held whatever the guards say
+	}
 	return c, true, nil
+}
+
+// onProbation: a basis source of the finding is on probation after a mark
+// reset in this run.
+func onProbation(r vulnfinding.Record, sources map[string]runSourceInfo) bool {
+	for _, bs := range r.Evidence.BasisSources {
+		if sources[bs.SourceID].probation {
+			return true
+		}
+	}
+	return false
 }
 
 // basisCovered: every basis source of the finding is named by the run,

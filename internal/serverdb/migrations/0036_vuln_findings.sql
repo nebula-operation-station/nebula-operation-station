@@ -22,6 +22,9 @@
 -- vuln_source_marks: per listed source the newest content date and the
 -- highest bundle sequence ever accepted at a run start. Rows are created
 -- by NOS for listed IDs only, so their number is bounded by the list.
+-- Only an audited admin reset lowers a mark; the source then stays on
+-- probation (raise-only, unevidenced closures held) until a run names it
+-- strictly above the pre-reset mark kept here.
 --
 -- vuln_run_batches: idempotency of batches by (run_id, batch_seq) with the
 -- SHA-256 of the accepted body. vuln_run_subjects: subjects the run fully
@@ -93,6 +96,8 @@ CREATE TABLE vuln_run_sources (
     sequence     INTEGER CHECK (sequence IS NULL OR sequence >= 0),
     status       TEXT NOT NULL CHECK (status IN ('accepted', 'undated', 'regressed', 'invalid', 'unknown')),
     stale        INTEGER NOT NULL CHECK (stale IN (0, 1)),
+    probation    INTEGER NOT NULL DEFAULT 0 CHECK (probation IN (0, 1)),
+    CHECK (probation = 0 OR status = 'accepted'),
     PRIMARY KEY (run_id, source_id)
 );
 
@@ -100,7 +105,30 @@ CREATE TABLE vuln_source_marks (
     source_id    TEXT PRIMARY KEY CHECK (length(source_id) BETWEEN 1 AND 64),
     content_date INTEGER,
     sequence     INTEGER CHECK (sequence IS NULL OR sequence >= 0),
-    updated_at   INTEGER NOT NULL
+    updated_at   INTEGER NOT NULL,
+    probation    INTEGER NOT NULL DEFAULT 0 CHECK (probation IN (0, 1)),
+    pre_reset_date     INTEGER,
+    pre_reset_sequence INTEGER CHECK (pre_reset_sequence IS NULL OR pre_reset_sequence >= 0),
+    CHECK (probation = 1 OR (pre_reset_date IS NULL AND pre_reset_sequence IS NULL))
+);
+
+-- vuln_mark_resets: every admin reset of a per-source high-water mark (D5):
+-- admin, source, old and new mark, the regressed run whose reported value
+-- became the mark, the reason and the pre-reset mark that probation must
+-- pass. The caller also writes it to the audit log.
+CREATE TABLE vuln_mark_resets (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id          TEXT NOT NULL CHECK (length(source_id) BETWEEN 1 AND 64),
+    run_id             TEXT NOT NULL CHECK (length(run_id) BETWEEN 1 AND 64),
+    admin              TEXT NOT NULL CHECK (length(admin) BETWEEN 1 AND 128),
+    reason             TEXT NOT NULL CHECK (length(CAST(reason AS BLOB)) BETWEEN 1 AND 1024),
+    old_date           INTEGER,
+    old_sequence       INTEGER,
+    new_date           INTEGER,
+    new_sequence       INTEGER,
+    pre_reset_date     INTEGER,
+    pre_reset_sequence INTEGER,
+    at                 INTEGER NOT NULL
 );
 
 CREATE TABLE vuln_run_batches (
@@ -181,7 +209,7 @@ CREATE TABLE vuln_held_closures (
     finding_key BLOB NOT NULL REFERENCES vuln_findings (finding_key) ON DELETE CASCADE,
     run_seq     INTEGER NOT NULL CHECK (run_seq > 0),
     subject     TEXT NOT NULL CHECK (length(subject) BETWEEN 1 AND 200),
-    reason      TEXT NOT NULL CHECK (reason IN ('contradicted', 'kev_or_critical', 'run_guard', 'window_guard', 'classify_failed')),
+    reason      TEXT NOT NULL CHECK (reason IN ('contradicted', 'kev_or_critical', 'run_guard', 'window_guard', 'classify_failed', 'probation')),
     finding_rev INTEGER NOT NULL CHECK (finding_rev > 0),
     created_at  INTEGER NOT NULL,
     PRIMARY KEY (run_id, finding_key)

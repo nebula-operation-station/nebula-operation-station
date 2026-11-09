@@ -241,15 +241,16 @@ func markReported(ctx context.Context, tx *sql.Tx, runID string, k vulnfinding.K
 }
 
 // raiseOnly reports whether a record must only raise values: any basis
-// source not accepted (regressed, invalid, unknown) or undated (D5).
-// ok is false when a basis source was not named by the run at all.
+// source not accepted (regressed, invalid, unknown), undated or on
+// probation after a mark reset (D5). ok is false when a basis source was
+// not named by the run at all.
 func raiseOnly(rec vulnfinding.Record, sources map[string]runSourceInfo) (raise, ok bool) {
 	for _, bs := range rec.Evidence.BasisSources {
 		info, named := sources[bs.SourceID]
 		if !named {
 			return false, false
 		}
-		if info.status != SourceAccepted {
+		if info.status != SourceAccepted || info.probation {
 			raise = true
 		}
 	}
