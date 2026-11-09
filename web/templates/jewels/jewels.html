@@ -1,0 +1,140 @@
+{{define "content"}}
+{{with .Jewels}}
+<div class="toolbar">
+  <h1>Crown jewels and entry classes</h1>
+</div>
+{{if .Notice}}<p class="status status--ok" role="status">{{.Notice}}</p>{{end}}
+{{if .Error}}<p class="status status--error" role="alert">{{.Error}}</p>{{end}}
+
+<section class="panel" aria-label="Crown jewels">
+  <h2>Crown jewels</h2>
+  <p class="hint">Attack-path targets with an impact weight from 1 to 10 (ADR 0011). At most {{.Max}} jewels. Every change is recorded in the audit log.</p>
+  {{if .Rows}}
+  <div class="table-wrap">
+  <table class="inventory">
+    <thead><tr>
+      <th scope="col">Subject</th>
+      <th scope="col">Role</th>
+      <th scope="col">Impact</th>
+      <th scope="col">Suggested for role</th>
+      <th scope="col">Marked by</th>
+      <th scope="col">Updated</th>
+      <th scope="col">Actions</th>
+    </tr></thead>
+    <tbody>
+    {{range .Rows}}
+    <tr>
+      <td>{{.Label}} <span class="hint">{{.Node}}</span>{{if .Missing}} <span class="status status--warning">not in inventory</span>{{end}}</td>
+      <td>{{.Role}}</td>
+      <td>{{.Impact}}</td>
+      <td>{{if .Suggested}}{{.Suggested}}{{else}}<span class="hint">none</span>{{end}}</td>
+      <td>{{.MarkedBy}}</td>
+      <td>{{.Updated}}</td>
+      <td>
+        <a class="button button--secondary" href="{{.EditHref}}">Change</a>
+        <form method="post" action="/vuln/jewels/unmark" class="inline-form">
+          <input type="hidden" name="node" value="{{.Node}}">
+          <label>Reason <input type="text" name="reason" maxlength="{{$.Jewels.MaxReason}}"></label>
+          <button type="submit" class="button button--danger">Unmark</button>
+        </form>
+      </td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <p>No crown jewels marked. Attack paths have no targets until an admin marks one.</p>
+  {{end}}
+</section>
+
+{{with .Confirm}}
+<section class="panel" aria-label="Confirm crown jewel">
+  <h2>Confirm crown jewel</h2>
+  <p>Subject: {{.Label}} <span class="hint">{{.Node}}</span></p>
+  <p>Role: {{.RoleLabel}}</p>
+  {{if .Current}}<p>Current impact weight: {{.Current}}</p>{{end}}
+  {{if .Suggested}}
+  <p class="hint">Suggested default weight for this role: {{.Suggested}}. It is only a suggestion: confirm it or enter another weight.</p>
+  {{else}}
+  <p class="hint">This role has no suggested weight; enter one.</p>
+  {{end}}
+  <form method="post" action="/vuln/jewels/mark">
+    <input type="hidden" name="node" value="{{.Node}}">
+    <input type="hidden" name="role" value="{{.Role}}">
+    <label>Impact weight (1–10) <input type="number" name="impact" min="1" max="10" step="1" required{{if .Prefill}} value="{{.Prefill}}"{{end}}></label>
+    <label>Reason <input type="text" name="reason" maxlength="{{$.Jewels.MaxReason}}"></label>
+    <button type="submit" class="button">Confirm and save</button>
+    <a class="button button--secondary" href="/vuln/jewels">Cancel</a>
+  </form>
+</section>
+{{else}}
+<section class="panel" aria-label="Mark a crown jewel">
+  <h2>Mark a crown jewel</h2>
+  {{if .Subjects}}
+  <form method="get" action="/vuln/jewels">
+    <label>Subject
+      <select name="node" required>
+        {{range .Subjects}}<option value="{{.Node}}">{{.Label}} ({{.Node}})</option>{{end}}
+      </select>
+    </label>
+    <label>Role
+      <select name="role" required>
+        {{range .Roles}}<option value="{{.Value}}">{{.Label}}{{if .Suggested}} (suggested weight {{.Suggested}}){{end}}</option>{{end}}
+      </select>
+    </label>
+    <button type="submit" class="button">Next: confirm weight</button>
+  </form>
+  {{if .SubjectsCut}}<p class="hint">Only the first {{.MaxSubjects}} subjects are listed.</p>{{end}}
+  {{else}}
+  <p>No subjects in the inventory.</p>
+  {{end}}
+</section>
+{{end}}
+
+<section class="panel" aria-label="Entry classes">
+  <h2>Entry classes</h2>
+  <p class="hint">Where an attacker starts. NetBird peers are a class of their own. Unknown means NOS has no data, not that nothing is exposed.</p>
+  <div class="table-wrap">
+  <table class="inventory">
+    <thead><tr><th scope="col">Class</th><th scope="col">Coverage</th><th scope="col">Exposed subjects</th><th scope="col">Note</th></tr></thead>
+    <tbody>
+    {{range .Entries}}
+    <tr>
+      <td>{{.Label}}</td>
+      <td>{{.Coverage}}</td>
+      <td>{{if .Known}}{{.Exposed}}{{if .Truncated}} <span class="hint">(cut off)</span>{{end}}{{else}}<span class="hint">unknown</span>{{end}}</td>
+      <td>{{.Reason}}{{if .Dropped}} <span class="hint">{{.Dropped}} invalid entries ignored</span>{{end}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section class="panel" aria-label="Recent changes">
+  <h2>Recent changes</h2>
+  {{if .History}}
+  <div class="table-wrap">
+  <table class="inventory">
+    <thead><tr><th scope="col">When</th><th scope="col">Admin</th><th scope="col">Action</th><th scope="col">Subject</th><th scope="col">Weight</th><th scope="col">Reason</th></tr></thead>
+    <tbody>
+    {{range .History}}
+    <tr>
+      <td>{{.At}}</td>
+      <td>{{.Admin}}</td>
+      <td>{{.Action}}</td>
+      <td>{{.Node}}</td>
+      <td>{{.Weight}}</td>
+      <td>{{.Reason}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <p>No changes recorded.</p>
+  {{end}}
+</section>
+{{end}}
+{{end}}
