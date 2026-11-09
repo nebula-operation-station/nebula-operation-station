@@ -357,11 +357,13 @@ func loadRun(ctx context.Context, q queryer, id string) (runRow, error) {
 	return r, nil
 }
 
-// checkRunning returns ErrRunNotRunning or, for a run past MaxRunDuration,
-// aborts it and returns ErrRunExpired. The abort is committed by the
-// caller's transaction.
+// checkRunning returns ErrRunNotRunning for a run that is not running or
+// is completing or, for a run past MaxRunDuration, aborts it and returns
+// ErrRunExpired. The abort is committed by the caller's transaction. A
+// completing run is never aborted: its closures are partly applied and
+// only finishing the complete makes them whole.
 func (s *Store) checkRunning(ctx context.Context, tx *sql.Tx, r runRow, now time.Time) error {
-	if r.state != "running" {
+	if r.state != "running" || parseReport(r.reportRaw).Completing != nil {
 		return ErrRunNotRunning
 	}
 	if now.Sub(r.started) > MaxRunDuration {
@@ -374,7 +376,8 @@ func (s *Store) checkRunning(ctx context.Context, tx *sql.Tx, r runRow, now time
 }
 
 // AbortExpiredRuns aborts every run past MaxRunDuration (no closures) and
-// returns how many it aborted.
+// returns how many it aborted. A completing run is left for the complete
+// to finish (see checkRunning).
 func (s *Store) AbortExpiredRuns(ctx context.Context) (int, error) {
 	now := s.now().UTC()
 	s.mu.Lock()
@@ -384,7 +387,8 @@ func (s *Store) AbortExpiredRuns(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("vulnstore: abort expired runs: %w", err)
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `UPDATE vuln_runs SET state = 'aborted', ended_at = ? WHERE state = 'running' AND started_at < ?`,
+	res, err := tx.ExecContext(ctx, `UPDATE vuln_runs SET state = 'aborted', ended_at = ? WHERE state = 'running' AND started_at < ?
+		AND json_extract(report, '$.completing') IS NULL`,
 		unix(now), unix(now.Add(-MaxRunDuration)))
 	if err != nil {
 		return 0, fmt.Errorf("vulnstore: abort expired runs: %w", err)
@@ -412,6 +416,9 @@ type runReport struct {
 	IgnoredCount   int             `json:"ignored_count,omitempty"`
 	Downgrades     int             `json:"downgrades,omitempty"`
 	Completion     *Completion     `json:"completion,omitempty"`
+	// Completing is set while a complete is being applied in several
+	// transactions (see Complete); the run takes no batches meanwhile.
+	Completing *completeProgress `json:"completing,omitempty"`
 }
 
 func parseReport(raw string) runReport {

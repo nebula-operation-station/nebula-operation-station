@@ -12,6 +12,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -373,12 +374,25 @@ func (t TrafficConfig) EffectiveRetentionDays() int {
 	return DefaultTrafficRetentionDays
 }
 
-// API scopes (spec 13).
+// API scopes (spec 13; the vuln scopes from ADR 0011 D3 and D5).
 const (
 	ScopeInventoryRead     = "inventory.read"
 	ScopeOperationsRead    = "operations.read"
 	ScopeExecutionLogsRead = "execution_logs.read"
+	// ScopeVulnInventoryRead reads the vuln-inventory-v1 export (D3).
+	ScopeVulnInventoryRead = "vuln.inventory.read"
+	// ScopeVulnFindingsWrite writes Hermes runs and findings (D5); the
+	// only write scope of /api/v1, and it writes only into the findings
+	// store.
+	ScopeVulnFindingsWrite = "vuln.findings.write"
 )
+
+// DefaultVulnTokenName is the default name of the one dedicated agent
+// token that may hold the vuln scopes (ADR 0011 D3).
+const DefaultVulnTokenName = "hermes-vuln"
+
+// MaxSourceAddresses bounds the source-address allowlist of the vuln token.
+const MaxSourceAddresses = 16
 
 // APIConfig configures the read-only API under /api/v1 (spec 13). It is
 // disabled by default; when enabled, every request needs a token.
@@ -395,12 +409,61 @@ type APIToken struct {
 	// SHA256 is the lowercase hex SHA-256 of the token string.
 	SHA256 string   `json:"sha256"`
 	Scopes []string `json:"scopes"`
+	// SourceAddresses optionally restricts the vuln token to these client
+	// addresses (IP addresses or prefixes, ADR 0011 D3; set it to the
+	// address of hermes). Allowed only on the vuln token: the read-only
+	// API does not check it, so on another token it would mislead.
+	SourceAddresses []string `json:"source_addresses,omitempty"`
+}
+
+// IsVulnScope reports whether s is one of the ADR 0011 vuln scopes.
+func IsVulnScope(s string) bool { return s == ScopeVulnInventoryRead || s == ScopeVulnFindingsWrite }
+
+// HasVulnScope reports whether the token holds a vuln scope.
+func (t APIToken) HasVulnScope() bool {
+	for _, s := range t.Scopes {
+		if IsVulnScope(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// SourcePrefixes parses SourceAddresses; a single address becomes a full
+// length prefix. A prefix with host bits set is an error.
+func (t APIToken) SourcePrefixes() ([]netip.Prefix, error) {
+	out := make([]netip.Prefix, 0, len(t.SourceAddresses))
+	for i, a := range t.SourceAddresses {
+		if addr, err := netip.ParseAddr(a); err == nil && addr.Zone() == "" {
+			addr = addr.Unmap()
+			out = append(out, netip.PrefixFrom(addr, addr.BitLen()))
+			continue
+		}
+		p, err := netip.ParsePrefix(a)
+		if err != nil || p != p.Masked() {
+			return nil, fmt.Errorf("source_addresses[%d]: not an IP address or prefix", i)
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// VulnToken returns the one token holding a vuln scope, if any. Problems
+// guarantees there is at most one.
+func (a APIConfig) VulnToken() (APIToken, bool) {
+	for _, t := range a.Tokens {
+		if t.HasVulnScope() {
+			return t, true
+		}
+	}
+	return APIToken{}, false
 }
 
 var (
 	apiTokenNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 	apiHashRe      = regexp.MustCompile(`^[0-9a-f]{64}$`)
-	apiScopes      = map[string]bool{ScopeInventoryRead: true, ScopeOperationsRead: true, ScopeExecutionLogsRead: true}
+	apiScopes      = map[string]bool{ScopeInventoryRead: true, ScopeOperationsRead: true, ScopeExecutionLogsRead: true,
+		ScopeVulnInventoryRead: true, ScopeVulnFindingsWrite: true}
 )
 
 // ValidAPIScope reports whether s is a known API scope.
@@ -413,6 +476,7 @@ func (a APIConfig) Problems() []string {
 		out = append(out, "api: enabled needs at least one token")
 	}
 	names, hashes := map[string]bool{}, map[string]bool{}
+	vulnTokens := 0
 	for i, t := range a.Tokens {
 		if !apiTokenNameRe.MatchString(t.Name) {
 			out = append(out, fmt.Sprintf("api.tokens[%d].name: %q must match %s", i, t.Name, apiTokenNameRe))
@@ -438,6 +502,36 @@ func (a APIConfig) Problems() []string {
 			}
 			seen[s] = true
 		}
+		out = append(out, vulnTokenProblems(i, t, &vulnTokens)...)
+	}
+	return out
+}
+
+// vulnTokenProblems checks the ADR 0011 D3/D5 rules: the vuln scopes are
+// held by one dedicated token that carries no other scope (never
+// operations.read or execution_logs.read), and only that token may carry
+// a source-address allowlist.
+func vulnTokenProblems(i int, t APIToken, vulnTokens *int) []string {
+	var out []string
+	if !t.HasVulnScope() {
+		if len(t.SourceAddresses) > 0 {
+			out = append(out, fmt.Sprintf("api.tokens[%d].source_addresses: allowed only on the vuln token", i))
+		}
+		return out
+	}
+	*vulnTokens++
+	if *vulnTokens > 1 {
+		out = append(out, fmt.Sprintf("api.tokens[%d].scopes: only one token may hold the vuln scopes", i))
+	}
+	for _, s := range t.Scopes {
+		if apiScopes[s] && !IsVulnScope(s) {
+			out = append(out, fmt.Sprintf("api.tokens[%d].scopes: a token with a vuln scope carries no other scope (%q)", i, s))
+		}
+	}
+	if len(t.SourceAddresses) > MaxSourceAddresses {
+		out = append(out, fmt.Sprintf("api.tokens[%d].source_addresses: at most %d", i, MaxSourceAddresses))
+	} else if _, err := t.SourcePrefixes(); err != nil {
+		out = append(out, fmt.Sprintf("api.tokens[%d].%v", i, err))
 	}
 	return out
 }

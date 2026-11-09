@@ -1,0 +1,33 @@
+{{define "content"}}
+<h1>{{.Title}}</h1>
+<p><a href="/vulnerabilities">All vulnerabilities</a></p>
+{{template "vuln_banners" .}}
+{{with .Vuln}}
+{{with .Reset}}
+<section class="panel vuln-reset" aria-label="High-water mark">
+  <dl class="schedule-meta">
+    <dt>Feed source</dt><dd class="mono">{{.SourceID}}</dd>
+    <dt>Current mark</dt><dd class="mono vuln-reset-mark">{{.Mark}}</dd>
+    <dt>Reported by the latest run</dt><dd class="mono vuln-reset-reported">{{if .Possible}}{{.Reported}} (run {{.RunID}}){{else}}the latest run naming this source did not regress it{{end}}</dd>
+    <dt>Last accepted snapshot</dt><dd class="mono">{{.LastAccepted}}</dd>
+    <dt>Probation</dt><dd>{{if .Probation}}<span class="badge badge--warning vuln-probation">on probation until a run names it above the pre-reset mark: {{.PreReset}}</span>{{else}}no{{end}}</dd>
+  </dl>
+  {{if .Possible}}
+  <p class="hint">A reset accepts a rollback NOS cannot tell from a replay. The mark goes down to exactly the value above, the source stays on probation until a run passes the pre-reset mark, and the reset is written to the audit log.</p>
+  <form method="post" action="/vulnerabilities/decide/begin" class="form vuln-decision" data-kind="mark_reset">
+    <input type="hidden" name="source_id" value="{{.SourceID}}">
+    <input type="hidden" name="run_id" value="{{.RunID}}">
+    <label>Reason (required, at most 1 KiB)
+      <textarea name="reason" maxlength="1024" required></textarea>
+    </label>
+    <button type="submit" class="button button--small button--danger">Reset the mark with security key</button>
+  </form>
+  {{else}}
+  <p class="hint">Nothing to reset to.</p>
+  {{end}}
+</section>
+{{end}}
+<p id="message" class="message" role="status" aria-live="polite"></p>
+<noscript><p class="hint">The reset needs JavaScript and a security key.</p></noscript>
+{{end}}
+{{end}}

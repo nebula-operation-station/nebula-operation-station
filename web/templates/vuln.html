@@ -1,0 +1,61 @@
+{{define "content"}}
+<h1>Vulnerabilities</h1>
+<p class="hint">Findings from Hermes, prioritised by NOS. Advisory only: nothing here proposes, approves or runs a change.</p>
+{{if .Vuln.NotConfigured}}
+<p class="status status--unknown vuln-not-configured">Vulnerability management is not set up on this server: nothing is assessed.</p>
+{{else}}
+{{template "vuln_banners" .}}
+{{with .Vuln}}
+<nav class="tabs" aria-label="Vulnerabilities view">
+  <a class="tab{{if ne .Filter.View "subject"}} tab--active{{end}}" href="/vulnerabilities">By CVE</a>
+  <a class="tab{{if eq .Filter.View "subject"}} tab--active{{end}}" href="/vulnerabilities?view=subject">By subject</a>
+</nav>
+{{template "vuln_filters" .}}
+{{if not .Unavailable}}
+{{if eq .Filter.View "subject"}}
+{{if .Subjects}}
+<div class="table-wrap">
+<table class="inventory vuln-subjects" aria-label="Subjects">
+  <thead><tr><th>Subject</th><th>Kind</th><th>Status</th><th>Run age</th><th>Matching findings</th></tr></thead>
+  <tbody>
+  {{range .Subjects}}
+  <tr class="vuln-subject">
+    <td><a href="{{.URL}}">{{.Name}}</a> <span class="hint mono">{{.ID}}</span></td>
+    <td>{{.Kind}}</td>
+    <td><span class="badge {{.Status.Class}} vuln-status">{{.Status.Text}}</span></td>
+    <td>{{template "vuln_labels" .Labels}}</td>
+    <td class="mono">{{.Shown}}</td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{else}}
+<p class="hint">No subject in scope is known to NOS's vulnerability store.</p>
+{{end}}
+{{else}}
+{{if .CVEs}}
+<div class="table-wrap">
+<table class="inventory vuln-cves" aria-label="Vulnerabilities">
+  <thead><tr><th>Vulnerability</th><th>Highest tier</th><th>Subjects</th><th>States</th><th>Notes</th></tr></thead>
+  <tbody>
+  {{range .CVEs}}
+  <tr class="vuln-cve">
+    <td class="mono">{{if .URL}}<a href="{{.URL}}">{{.VulnID}}</a>{{else}}{{.VulnID}}{{end}}{{if .KEV}} <span class="badge badge--critical">KEV</span>{{end}}</td>
+    <td><span class="badge {{.Tier.Class}}">{{.Tier.Text}}</span></td>
+    <td class="mono">{{.Subjects}}</td>
+    <td>{{template "vuln_labels" .States}}</td>
+    <td>{{if .Stale}}<span class="badge badge--warning vuln-label">stale, not assessed or feed issue</span>{{end}}</td>
+  </tr>
+  {{end}}
+  </tbody>
+</table>
+</div>
+{{else}}
+<p class="hint">No finding matches this filter. This says nothing about subjects that are stale or not assessed; see "By subject".</p>
+{{end}}
+{{end}}
+{{end}}
+{{end}}
+{{end}}
+{{end}}
