@@ -95,6 +95,11 @@ var ReadOnlyAllowlist = []string{
 	// root, no apt, no network. Its own cost limit is
 	// PackageListInstalledMinInterval.
 	"package.list_installed",
+	// image.packages (ADR 0011 D3): optional package list of one local
+	// image digest via the operator-installed host Trivy; no install, no
+	// pull, no database refresh. The digest is pinned by the grant's
+	// parameters hash; no own floor beyond the grant's interval.
+	"image.packages",
 }
 
 // PackageListInstalledMinInterval is package.list_installed's own cost
