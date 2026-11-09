@@ -16,6 +16,14 @@ const (
 	pkgDigest    = "docker.io/library/nginx@sha256:" + pkgDigestHex
 )
 
+// Unsafe runes used by the tests, spelled as code points so the source
+// stays free of invisible characters.
+var (
+	runeRLO     = string(rune(0x202e)) // right-to-left override
+	runeRLM     = string(rune(0x200f)) // right-to-left mark
+	runeLineSep = string(rune(0x2028)) // line separator
+)
+
 // trivyPkg is a test-side Trivy package entry.
 type trivyPkg struct {
 	Name       string `json:"Name"`
@@ -222,7 +230,7 @@ func TestImagePackagesPartialConditions(t *testing.T) {
 		}, ReasonOSUndetected, true, 5, false},
 		{"os invalid", func(t *testing.T) TrivyPackagesRun {
 			o := goodOpts()
-			o.osName = "12‮5"
+			o.osName = "12" + runeRLO + "5"
 			return okRun(trivyJSON(t, o))
 		}, ReasonOSUndetected, true, 5, false},
 	}
@@ -317,15 +325,17 @@ func TestImagePackagesInvalidEntriesDropped(t *testing.T) {
 		{Name: "x", Version: ""},
 		{Name: long, Version: "1"},
 		{Name: "x", Version: strings.Repeat("1", maxImagePkgVersion+1)},
-		{Name: "x‏", Version: "1"},
+		{Name: "x", Version: "1", Release: strings.Repeat("1", maxImagePkgVersion)}, // composed version too long
+		{Name: "x" + runeRLM, Version: "1"},
 		{Name: "x", Version: "1\t2"},
 		{Name: "x", Version: "1", SrcName: "s\x00"},
-		{Name: "x", Version: "1", SrcName: "s", SrcVersion: "v "},
+		{Name: "x", Version: "1", SrcName: "s", SrcVersion: "v" + runeLineSep},
 		{Name: "x", Version: "1", Epoch: -1},
 		{Name: "x", Version: "1", Epoch: maxImagePkgEpoch + 1},
 		{Name: "x", Version: "1", SrcName: "s", SrcVersion: "1", SrcEpoch: -3},
 		{Name: "x", Version: "1", Release: "bad release"},
-		{Name: "x", Version: "1", SrcVersion: "1"}, // source version without source name
+		{Name: "x", Version: "1", SrcVersion: "1"},                // source version without source name
+		{Name: "x", Version: "1", SrcName: "s", SrcRelease: "1"}, // source release without source version
 	}
 	for i, p := range bad {
 		t.Run(fmt.Sprint(i), func(t *testing.T) {
@@ -342,12 +352,19 @@ func TestImagePackagesInvalidEntriesDropped(t *testing.T) {
 	}
 }
 
-func TestImagePackagesNullPackageEntryDropped(t *testing.T) {
-	b := []byte(`{"SchemaVersion":2,"ArtifactName":"` + pkgDigest + `","Metadata":{"OS":{"Family":"alpine","Name":"3.19.1"}},` +
-		`"Results":[{"Target":"t","Class":"os-pkgs","Type":"alpine","Packages":[null,{"Name":"musl","Version":"1.2.4-r2"}]}]}`)
-	got, _ := ParseImagePackages(pkgDigest, okRun(b))
-	if got.Complete || got.Reason != ReasonEntryDropped || len(got.Packages) != 1 {
-		t.Fatalf("got %+v", got)
+func TestImagePackagesNullEntriesDropped(t *testing.T) {
+	for name, results := range map[string]string{
+		"null package": `[{"Target":"t","Class":"os-pkgs","Type":"alpine","Packages":[null,{"Name":"musl","Version":"1.2.4-r2"}]}]`,
+		"null result":  `[null,{"Target":"t","Class":"os-pkgs","Type":"alpine","Packages":[{"Name":"musl","Version":"1.2.4-r2"}]}]`,
+		"bad class":    `[{"Target":"t","Class":"secret","Type":"alpine","Packages":[{"Name":"a","Version":"1"}]},{"Target":"t","Class":"os-pkgs","Type":"alpine","Packages":[{"Name":"musl","Version":"1.2.4-r2"}]}]`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := []byte(`{"SchemaVersion":2,"ArtifactName":"` + pkgDigest + `","Metadata":{"OS":{"Family":"alpine","Name":"3.19.1"}},"Results":` + results + `}`)
+			got, _ := ParseImagePackages(pkgDigest, okRun(b))
+			if got.Complete || got.Reason != ReasonEntryDropped || len(got.Packages) != 1 {
+				t.Fatalf("got %+v", got)
+			}
+		})
 	}
 }
 
@@ -368,7 +385,7 @@ func TestImagePackagesEmptyListingWithOSIsComplete(t *testing.T) {
 	o := goodOpts()
 	o.results = nil
 	got, _ := ParseImagePackages(pkgDigest, okRun(trivyJSON(t, o)))
-	if !got.Known || !got.Complete || len(got.Packages) != 0 {
+	if !got.Known || !got.Complete || got.Packages == nil || len(got.Packages) != 0 {
 		t.Fatalf("got %+v", got)
 	}
 }
