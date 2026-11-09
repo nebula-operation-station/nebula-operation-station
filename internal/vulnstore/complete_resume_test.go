@@ -167,22 +167,41 @@ func TestCompleteCancelledDuringApplyResumesToTheSameResult(t *testing.T) {
 			wantStates := states(t, ref, refKeys)
 			total := counter.calls
 
-			partial := false
-			// Planning makes most of the statements; the last cut points
-			// fall into the apply transactions after the first.
-			for _, cut := range []int{total / 5, total / 2, total * 9 / 10, total * 99 / 100, total - 100, total - 40} {
-				t.Run(fmt.Sprintf("cut%d", cut), func(t *testing.T) {
+			// Cut points: by statement count (planning makes most of the
+			// statements, so these fall into planning or the first apply
+			// transaction), and after the n-th apply transaction committed.
+			type cutPoint struct{ calls, chunk int }
+			cuts := []cutPoint{{calls: total / 5}, {calls: total / 2}, {calls: total * 9 / 10}, {chunk: 1}}
+			if tc.class == ClassEvidenced {
+				cuts = append(cuts, cutPoint{chunk: 2}) // three apply transactions
+			}
+			for _, cut := range cuts {
+				t.Run(fmt.Sprintf("calls%d-chunk%d", cut.calls, cut.chunk), func(t *testing.T) {
 					e, _, _ := newPathEnv(t, tc.class)
 					r, keys := resumeScenario(t, e)
 					before := states(t, e, keys)
-					if _, err := e.st.Complete(newCutCtx(cut), r.ID); err == nil {
-						t.Fatalf("complete cut at %d of %d succeeded", cut, total)
+					var ctx context.Context = newCutCtx(cut.calls)
+					if cut.chunk > 0 {
+						cctx, cancel := context.WithCancel(e.ctx)
+						defer cancel()
+						e.st.chunkDone = func(n int) {
+							if n == cut.chunk {
+								cancel()
+							}
+						}
+						ctx = cctx
+					}
+					if _, err := e.st.Complete(ctx, r.ID); err == nil {
+						t.Fatalf("complete cut at %+v of %d calls succeeded", cut, total)
+					}
+					e.st.chunkDone = nil
+					if cut.chunk > 0 && !completing(t, e, r.ID) {
+						t.Fatalf("no completing state after apply transaction %d", cut.chunk)
 					}
 					if _, err := e.st.CompletionOf(e.ctx, r.ID, "hermes-vuln"); !errors.Is(err, ErrRunNotRunning) {
 						t.Fatalf("completion after cut: %v, want ErrRunNotRunning", err)
 					}
 					if completing(t, e, r.ID) {
-						partial = true
 						if _, err := e.st.SubmitBatch(e.ctx, r.ID, batchOf(1, []Subject{hostSubj("h00")})); !errors.Is(err, ErrRunNotRunning) {
 							t.Fatalf("batch to a completing run: %v, want ErrRunNotRunning", err)
 						}
@@ -197,8 +216,22 @@ func TestCompleteCancelledDuringApplyResumesToTheSameResult(t *testing.T) {
 						}
 					} else if got := states(t, e, keys); !reflect.DeepEqual(got, before) {
 						t.Fatalf("cut complete without completing state changed findings")
+					} else if _, err := e.st.ResumeComplete(e.ctx, r.ID, "hermes-vuln"); !errors.Is(err, ErrRunNotRunning) {
+						t.Fatalf("resume of a run that is not completing: %v, want ErrRunNotRunning", err)
 					}
-					got := e.complete(t, r)
+					var got Completion
+					if completing(t, e, r.ID) {
+						// After a restart the caller only has the run ID: it
+						// resumes, and only for the run's own token.
+						if _, err := e.st.ResumeComplete(e.ctx, r.ID, "other-token"); !errors.Is(err, ErrRunNotFound) {
+							t.Fatalf("resume for another token: %v, want ErrRunNotFound", err)
+						}
+						if got, err = e.st.ResumeComplete(e.ctx, r.ID, "hermes-vuln"); err != nil {
+							t.Fatalf("resume: %v", err)
+						}
+					} else {
+						got = e.complete(t, r)
+					}
 					if !reflect.DeepEqual(got, want) {
 						t.Fatalf("resumed completion = %+v, want %+v", got, want)
 					}
@@ -217,9 +250,6 @@ func TestCompleteCancelledDuringApplyResumesToTheSameResult(t *testing.T) {
 					}
 				})
 			}
-			if !partial {
-				t.Fatal("no cut point left a partly applied complete; the run fits one write transaction")
-			}
 		})
 	}
 }
@@ -230,20 +260,15 @@ func TestCompleteCancelledDuringApplyResumesToTheSameResult(t *testing.T) {
 func TestCompleteRefusesStaleProgress(t *testing.T) {
 	e, _, path := newPathEnv(t, ClassEvidenced)
 	r, keys := resumeScenario(t, e)
-	counter := newCutCtx(0)
-	ref, _, _ := newPathEnv(t, ClassEvidenced)
-	refRun, _ := resumeScenario(t, ref)
-	if _, err := ref.st.Complete(counter, refRun.ID); err != nil {
-		t.Fatal(err)
+	ctx, cancel := context.WithCancel(e.ctx)
+	defer cancel()
+	e.st.chunkDone = func(int) { cancel() }
+	if _, err := e.st.Complete(ctx, r.ID); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cut complete: %v, want context.Canceled", err)
 	}
-	// Planning makes most of the statements; cut late, in the apply phase.
-	for pct := 85; !completing(t, e, r.ID); pct++ {
-		if pct == 100 {
-			t.Fatal("no cut point left a completing state")
-		}
-		if _, err := e.st.Complete(newCutCtx(counter.calls*pct/100), r.ID); err == nil {
-			t.Fatalf("complete cut at %d%% succeeded", pct)
-		}
+	e.st.chunkDone = nil
+	if !completing(t, e, r.ID) {
+		t.Fatal("no completing state after the first apply transaction")
 	}
 	run, err := loadRun(e.ctx, e.st.db, r.ID)
 	if err != nil {

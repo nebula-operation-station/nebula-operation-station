@@ -221,6 +221,9 @@ type Store struct {
 	// planning and all apply transactions of one complete, s.mu only for
 	// each transaction.
 	completeMu sync.Mutex
+	// chunkDone, when set (tests only), is called after the n-th apply
+	// transaction of a complete committed and more are to come.
+	chunkDone func(n int)
 }
 
 // sourceIDRe is the D5 source ID pattern (64 bytes at most).

@@ -281,13 +281,16 @@ func (s *Store) applyComplete(ctx context.Context, run runRow, plans []*subjectP
 	}
 	holdGuarded(plans, cur.Completion)
 	var pos applyPos
-	for {
+	for n := 1; ; n++ {
 		next, nextPos, done, err := s.applyChunk(ctx, run, plans, pos, prev, cur)
 		if err != nil {
 			return Completion{}, err
 		}
 		if done {
 			return next.Completion, nil
+		}
+		if s.chunkDone != nil {
+			s.chunkDone(n)
 		}
 		prev, cur, pos = next, next, nextPos
 		t := time.NewTimer(applyPause)

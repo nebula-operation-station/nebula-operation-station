@@ -5,6 +5,7 @@ package api_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -116,6 +117,91 @@ func TestVulnCompleteRunsUnderItsOwnBudgetDetachedFromTheClient(t *testing.T) {
 	if _, err := e.st.CompletionOf(context.Background(), run, serverconfig.DefaultVulnTokenName); err != nil {
 		t.Fatalf("completion not saved: %v", err)
 	}
+}
+
+// resumingStore stands for a store whose first complete stopped after
+// part of its closures committed: that Complete fails, and ResumeComplete
+// finishes the run as the store does for a completing run.
+type resumingStore struct {
+	*vulnstore.Store
+	mu       sync.Mutex
+	failed   bool
+	resumes  int
+	resumeOf string
+}
+
+func (s *resumingStore) Complete(ctx context.Context, runID string) (vulnstore.Completion, error) {
+	s.mu.Lock()
+	first := !s.failed
+	s.failed = true
+	s.mu.Unlock()
+	if first {
+		return vulnstore.Completion{}, context.DeadlineExceeded
+	}
+	return s.Store.Complete(ctx, runID)
+}
+
+func (s *resumingStore) ResumeComplete(ctx context.Context, runID, tokenID string) (vulnstore.Completion, error) {
+	s.mu.Lock()
+	s.resumes++
+	s.resumeOf = tokenID
+	s.mu.Unlock()
+	return s.Store.Complete(ctx, runID)
+}
+
+// After a restart a retried complete of a run left completing resumes it
+// in the store and answers with its completion, not 409.
+func TestVulnCompleteRetryAfterRestartResumesACompletingRun(t *testing.T) {
+	e := newVulnEnv(t)
+	rs := &resumingStore{Store: e.st}
+	e.restart(t, rs)
+	run := e.start(t)
+	if r := e.batch(t, run, batchBody(t, 0, []subj{web01(1, true)}, record("CVE-2025-0001"))); r.code != http.StatusOK {
+		t.Fatalf("batch: %d %s", r.code, r.body)
+	}
+	if r := e.complete(t, run); r.code != http.StatusServiceUnavailable {
+		t.Fatalf("interrupted complete: %d %s", r.code, r.body)
+	}
+
+	e.restart(t, rs)
+	r := e.complete(t, run)
+	if r.code != http.StatusOK {
+		t.Fatalf("complete after restart: %d %s", r.code, r.body)
+	}
+	saved, err := e.st.CompletionOf(context.Background(), run, serverconfig.DefaultVulnTokenName)
+	if err != nil {
+		t.Fatalf("completion not saved: %v", err)
+	}
+	if got, want := completion(t, r), completionMap(t, saved); !reflect.DeepEqual(got, want) {
+		t.Fatalf("resumed completion = %v, want %v", got, want)
+	}
+	rs.mu.Lock()
+	resumes, of := rs.resumes, rs.resumeOf
+	rs.mu.Unlock()
+	if resumes != 1 || of != serverconfig.DefaultVulnTokenName {
+		t.Fatalf("ResumeComplete calls = %d for %q, want 1 for the run's token", resumes, of)
+	}
+	if !bytes.Contains(e.log.Bytes(), []byte(`"kind":"vuln_run_completed"`)) || !bytes.Contains(e.log.Bytes(), []byte(`"resumed":true`)) {
+		t.Fatalf("no audit record of the resumed completion: %s", e.log.String())
+	}
+	// The next retry gets the saved completion.
+	if again := e.complete(t, run); again.code != http.StatusOK || again.json(t)["repeat"] != true {
+		t.Fatalf("retry after resume: %d %s", again.code, again.body)
+	}
+}
+
+// completionMap is c as the API encodes it.
+func completionMap(t *testing.T, c vulnstore.Completion) map[string]any {
+	t.Helper()
+	b, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	return m
 }
 
 type failingBody struct{}

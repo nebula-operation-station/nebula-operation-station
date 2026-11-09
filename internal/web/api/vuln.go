@@ -56,16 +56,18 @@ const (
 	maxRunStates = 32
 	// maxListedSubjects bounds subject refs listed in an error response.
 	maxListedSubjects = 16
-	// completeTimeout bounds one run complete. The store applies a
-	// complete in one transaction, so a complete that runs out of time
-	// applies nothing and the run stays open for a retry. The budget is
-	// sized for MaxCoveredPerRun subjects: about 5 s measured for 10000
-	// subjects with one closure each (vulnstore
-	// TestCompleteLargestRunIsAtomic), roughly 0.4 ms per open finding, so
-	// open findings in the order of MaxFindingsPerRun on the covered
-	// subjects fit with headroom for slow disks. The complete is not
-	// cancelled when the client goes away (the server write timeout is
-	// shorter), so a retry finds it saved.
+	// completeTimeout bounds one run complete. The store plans a complete
+	// on a read snapshot and applies it in short, paced write
+	// transactions with a durable completing state, so a complete that
+	// runs out of time either applied nothing (the run stays open) or is
+	// resumed by the retry. The budget is sized for MaxCoveredPerRun
+	// subjects: about 11 s measured for 10000 subjects with one closure
+	// each (vulnstore TestCompleteLargestRunIsAtomic, most of it the
+	// pauses that let other server.db writers in), so open findings in
+	// the order of MaxFindingsPerRun on the covered subjects fit with
+	// headroom for slow disks. The complete is not cancelled when the
+	// client goes away (the server write timeout is shorter), so a retry
+	// finds it saved.
 	completeTimeout = 5 * time.Minute
 )
 
@@ -76,6 +78,7 @@ type VulnStore interface {
 	RejectBatch(ctx context.Context, runID string, seq int64, bodySHA256 [32]byte) error
 	Complete(ctx context.Context, runID string) (vulnstore.Completion, error)
 	CompletionOf(ctx context.Context, runID, tokenID string) (vulnstore.Completion, error)
+	ResumeComplete(ctx context.Context, runID, tokenID string) (vulnstore.Completion, error)
 }
 
 // VulnOptions configure the vulnerability agent API.
