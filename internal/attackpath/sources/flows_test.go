@@ -55,7 +55,7 @@ func flow(client, server string, proto flowagg.Proto, port uint16) flowagg.FlowT
 }
 
 func owner(addr, id string, kind attackpath.NodeKind) AddressOwner {
-	return AddressOwner{Addr: netip.MustParseAddr(addr), NodeID: id, Kind: kind, Label: id}
+	return AddressOwner{Addr: netip.MustParseAddr(addr), NodeID: id, Kind: kind}
 }
 
 func labFlowConfig(r FlowReader) FlowConfig {

@@ -480,6 +480,7 @@ func Merge(b *attackpath.Builder, results ...Result) (Report, error) {
 	for _, r := range results {
 		rep.Sources = append(rep.Sources, SourceReport{Source: r.Source, Status: r.Status, Coverage: r.Coverage})
 		for _, u := range r.Uncertain {
+			u.Subject = resolve(u.Subject)
 			addU(u)
 		}
 		rep.Overflow += r.Overflow
