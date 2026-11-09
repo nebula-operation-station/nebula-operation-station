@@ -230,6 +230,8 @@ executor.
   firewall on PAN-OS 11.1, no HA pair and no Panorama (assumed, verify in
   ND-03). The maintainer did not state the vsys layout; NOS supports a single
   vsys only and refuses a device that shows more than one (verify in ND-03).
+  This is the most restrictive fallback, not a maintainer decision; the
+  maintainer may revisit it.
 
 **Parse limits (both families).** Every parser enforces named limits next to
 its code (ND-04 defines the constants); the values below are upper bounds
@@ -988,11 +990,11 @@ this repository. Every lab fact below is still checked in ND-03.
 | --- | --- | --- |
 | Q1 CBS models and firmware | The lab has Cisco **CBS350** switches (two reachable from the management side) and several small **CBS250** switches (not seen with an address in the lab scan; their management address is confirmed in ND-03). Exact models and firmware stay in the private lab notes. No CBS220 was named | open |
 | Q1b SSH key types | Host-key and user-key types and `rsa-sha2-512` support are verified in ND-03; the default stays **no algorithm exception** (a switch that cannot meet spec 08 is unsupported, ND-05b only through a separate decision) | open |
-| Q2 PAN-OS | A single **Palo Alto PA-400-series** firewall on **PAN-OS 11.1** (exact release private); no HA pair and no Panorama assumed, verified in ND-03. The vsys layout was not stated: NOS supports a single vsys only (D3), verified in ND-03 | open |
+| Q2 PAN-OS | A single **Palo Alto PA-400-series** firewall on **PAN-OS 11.1** (exact release private); no HA pair and no Panorama assumed, verified in ND-03. The vsys layout was not stated: NOS supports a single vsys only (D3), verified in ND-03 — most restrictive fallback, maintainer may revisit | open |
 | Q3 Write-capable credentials | Recommendation accepted: phase 1 holds a **read-only key/user only** (CBS privilege level below 15, PAN-OS read-only role); phase 2 is decided after phase 1 has run | open |
 | Q4 Management layout | The lab is currently **one flat network without a management VLAN**; the maintainer plans segmentation. Until a management VLAN exists, **every port, VLAN and uplink change on a switch that carries the path between the NOS machine and any managed device is CRITICAL** and therefore refused (Q6). D5 "Flat network" states how the path rule tightens | open |
 | Q5 Firewall management address | Management is on an **internal address only** (the address is not in this repository); WAN-side management is not reachable, verified in ND-03 | open |
-| Q6 CRITICAL changes | Recommendation accepted: CRITICAL changes are **refused for good**; phase 2b and ND-40 are not planned; no exception to ADR 0007's "no automatic rollback" | open |
+| Q6 CRITICAL changes | No recommendation was given, so the most restrictive option applies (maintainer may revisit): CRITICAL changes are **refused for good**; phase 2b and ND-40 are not planned; no exception to ADR 0007's "no automatic rollback" | open |
 | Q7 pfSense | **pfSense CE** ("Standard") later, as a possible replacement when the current firewall leaves vendor support; **read-only config backup over SSH**; the community REST API is **not acceptable**. ND-50 stays future work | open |
 | Q8 Raw backups | **Redacted backups only**; no unredacted device configs in NOS, in any phase | open |
 | Q9 Collector | **Separate `nebula-netdev-collector`** with a shared spool library | open |
@@ -1002,9 +1004,10 @@ this repository. Every lab fact below is still checked in ND-03.
 | Q13 CBS redaction model | Per the ADR recommendation: CBS switches to an **allowlist of command keywords** (unlisted lines dropped with a marker) once ND-03 has recorded the command vocabulary of the lab configs; until then the D4 limit stands | open |
 
 Q13 was answered with "per the ADR recommendation, else the most
-restrictive option". Every question in this ADR carried a recommendation or
-was answered with a fact, so no fallback to the most restrictive option was
-needed here.
+restrictive option". Two points had neither a recommendation nor a stated
+fact and were settled by the most restrictive option, each marked "maintainer
+may revisit": Q6 (CRITICAL changes refused for good) and the Q2 vsys layout
+(single vsys only).
 
 ## Open questions for the maintainer
 
