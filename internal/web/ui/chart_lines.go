@@ -294,7 +294,7 @@ func cveLine(r *executions.LastResultRow, now time.Time, staleAfter time.Duratio
 	if err != nil {
 		return nil
 	}
-	l := chartLine{Kind: LineCVE, Label: "CVE"}
+	l := chartLine{Kind: LineCVE, Label: trivyLocalChartLabel}
 	img := "image"
 	if v.Image != "" {
 		img = shortImageRef(v.Image)
