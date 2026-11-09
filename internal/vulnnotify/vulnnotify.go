@@ -155,7 +155,7 @@ type Notifier struct {
 	mu         sync.Mutex
 	notified   map[findingEvent]int64 // episode last delivered
 	order      []findingEvent         // insertion order for eviction
-	feedStale  map[string]bool        // source in a delivered stale episode
+	feedStale  map[string]time.Time   // source in a delivered stale episode -> its Since
 	feedRegr   map[string]bool        // source in a delivered regression episode
 	hermesMark time.Time              // last complete run of the delivered offline episode
 	inflight   map[alertKey]pendingRef
@@ -173,7 +173,7 @@ func New(cfg Config) (*Notifier, error) {
 	}
 	n := &Notifier{sink: cfg.Sink, now: cfg.Now, hermesMax: cfg.HermesStaleAfter,
 		sources: map[string]bool{}, notified: map[findingEvent]int64{},
-		feedStale: map[string]bool{}, feedRegr: map[string]bool{}, held: map[string]int{},
+		feedStale: map[string]time.Time{}, feedRegr: map[string]bool{}, held: map[string]int{},
 		inflight: map[alertKey]pendingRef{}}
 	if n.now == nil {
 		n.now = time.Now
@@ -367,7 +367,10 @@ func (n *Notifier) Feeds(ctx context.Context, st []FeedStatus) int {
 			n.cancel(k)
 			continue
 		}
-		if _, queued := n.inflight[k]; n.feedStale[s.SourceID] || queued {
+		if _, delivered := n.feedStale[s.SourceID]; delivered {
+			continue
+		}
+		if _, queued := n.inflight[k]; queued {
 			continue
 		}
 		reason := "feed " + plain(s.SourceID, maxText) + " stale"
@@ -376,12 +379,56 @@ func (n *Notifier) Feeds(ctx context.Context, st []FeedStatus) int {
 		} else {
 			reason += " (undated)"
 		}
-		src := s.SourceID
+		src, since := s.SourceID, s.Since
 		out = append(out, n.admit(outMsg{ev: notify.Event{Kind: KindFeedStale, State: "stale", Reason: reason, Time: now},
-			keyed: true, key: k, commit: func() { n.feedStale[src] = true }}, 0, now)...)
+			keyed: true, key: k, commit: func() { n.feedStale[src] = since }}, 0, now)...)
 	}
 	n.mu.Unlock()
 	return n.send(ctx, out)
+}
+
+// Delivered is the de-duplication state of the staleness alerts that a
+// restarted notifier needs so it does not send them again. Notifier keeps
+// it in memory only; the caller persists it (Delivered) and hands it back
+// on start (Restore).
+type Delivered struct {
+	// FeedStale maps each listed source in a delivered vuln.feed_stale
+	// episode to that episode's Since (zero for an undated source).
+	FeedStale map[string]time.Time
+	// HermesMark is the last complete run of the delivered
+	// vuln.hermes_stale episode; zero for none.
+	HermesMark time.Time
+}
+
+// Delivered returns a copy of the delivered staleness state.
+func (n *Notifier) Delivered() Delivered {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	d := Delivered{FeedStale: make(map[string]time.Time, len(n.feedStale)), HermesMark: n.hermesMark}
+	for src, since := range n.feedStale {
+		d.FeedStale[src] = since
+	}
+	return d
+}
+
+// Restore takes back the delivered staleness state of an earlier process.
+// A feed episode is restored only when current reports the source still
+// stale with the same Since, so an episode that ended (and maybe began
+// again) while NOS was down is alerted; unknown sources are ignored. Call
+// it before the first Feeds or Hermes.
+func (n *Notifier) Restore(d Delivered, current []FeedStatus) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for _, s := range current {
+		since, ok := d.FeedStale[s.SourceID]
+		if !ok || !n.sources[s.SourceID] || !s.Stale || !since.Equal(s.Since) {
+			continue
+		}
+		n.feedStale[s.SourceID] = s.Since
+	}
+	if !d.HermesMark.IsZero() {
+		n.hermesMark = d.HermesMark
+	}
 }
 
 // Run raises vuln.feed_regressed for the listed sources a started run named

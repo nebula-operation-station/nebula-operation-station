@@ -62,8 +62,8 @@ const (
 	// runs out of time either applied nothing (the run stays open) or is
 	// resumed by the retry. If the client does not come back, only
 	// vulnstore.ResumeCompleting (startup) and vulnstore.Prune (periodic
-	// sweep) finish it; this handler calls neither, the server wiring
-	// must (ticket vu14w), and until it does the run stays completing. The
+	// sweep) finish it; this handler calls neither, cmd/nebula-server
+	// calls ResumeCompleting at startup and Prune every 15 minutes. The
 	// apply phase is paced by rows: MaxFindingsPerRun superseded holds
 	// took about 90 s in vulnstore's
 	// TestCompleteDropsSupersededHoldsInRowBoundedTransactions, most of it

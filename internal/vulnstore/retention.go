@@ -32,9 +32,9 @@ type PruneResult struct {
 // retention, its error is returned with the result.
 //
 // Prune is the periodic sweep, one call for all of it. The store does not
-// call it by itself and has no timer; the server wiring (ticket vu14w) is
-// to call it periodically, and until then no run is finished, aborted or
-// pruned without a client request. The caller must:
+// call it by itself and has no timer; cmd/nebula-server calls it every 15
+// minutes with a 10 minute deadline and logs an error with the counts.
+// The caller must:
 //
 //   - call it at a fixed interval well below MaxRunDuration (an hour or
 //     less), so a run its client left completing is finished within one
