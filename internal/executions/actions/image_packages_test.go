@@ -396,17 +396,19 @@ func TestImagePackagesReductionKeepsInvalidEntries(t *testing.T) {
 		})
 	}
 	for name, entry := range map[string]string{
-		"number name":       `{"Name":42,"Version":"1.0"}`,
-		"float epoch":       `{"Name":"zlib1g","Version":"1.2.13","Epoch":1.0}`,
-		"exponent epoch":    `{"Name":"zlib1g","Version":"1.2.13","Epoch":1e0}`,
-		"huge epoch":        `{"Name":"zlib1g","Version":"1.2.13","Epoch":123456789012345678901234567890}`,
-		"repeated field":    `{"Name":"zlib1g","Version":"1.2.13","Name":"zlib"}`,
-		"null entry":        `null`,
-		"string entry":      `"zlib1g"`,
-		"nested name":       `{"Name":{"x":"zlib1g"},"Version":"1.2.13"}`,
-		"escaped bad rune":  `{"Name":"zlib‮1g","Version":"1.2.13"}`,
-		"missing version":   `{"Name":"zlib1g"}`,
-		"escaped name key":  `{"Name":"zlib1g","Version":"1.2.13","Name":"zlib"}`,
+		"number name":      `{"Name":42,"Version":"1.0"}`,
+		"float epoch":      `{"Name":"zlib1g","Version":"1.2.13","Epoch":1.0}`,
+		"exponent epoch":   `{"Name":"zlib1g","Version":"1.2.13","Epoch":1e0}`,
+		"huge epoch":       `{"Name":"zlib1g","Version":"1.2.13","Epoch":123456789012345678901234567890}`,
+		"repeated field":   `{"Name":"zlib1g","Version":"1.2.13","Name":"zlib"}`,
+		"null entry":       `null`,
+		"string entry":     `"zlib1g"`,
+		"nested name":      `{"Name":{"x":"zlib1g"},"Version":"1.2.13"}`,
+		"escaped bad rune": "{\"Name\":\"zlib\\u202e1g\",\"Version\":\"1.2.13\"}",
+		"raw bad rune":     `{"Name":"zlib` + string(rune(0x202e)) + `1g","Version":"1.2.13"}`,
+		"missing version":  `{"Name":"zlib1g"}`,
+		// The second key is "Name" spelled with a JSON escape for the "a".
+		"escaped name key":  `{"Name":"zlib1g","Version":"1.2.13","N` + `\` + `u0061me":"zlib"}`,
 		"whitespace in ver": `{"Name":"zlib1g","Version":"1.2 13"}`,
 	} {
 		t.Run(name, func(t *testing.T) {
