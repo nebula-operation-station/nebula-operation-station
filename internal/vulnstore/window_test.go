@@ -87,6 +87,59 @@ func TestWindowGuardNotLaunderedByReopenAndReclose(t *testing.T) {
 	}
 }
 
+// TestWindowGuardReopenDoesNotUncountAppliedClosure: closing X, having X
+// re-reported (and left open), then closing another set Y must still count
+// the applied closure of X in the window. Counting only findings that are
+// fixed right now would see Y alone and let Y through.
+func TestWindowGuardReopenDoesNotUncountAppliedClosure(t *testing.T) {
+	e := newEnv(t)
+	items, all := windowLab(t, e, 5)
+	e.clk.Add(25 * time.Hour)
+
+	x := map[vulnfinding.Key]bool{}
+	for i, it := range items {
+		if i%5 < 2 {
+			x[it.Finding.Key] = true // 40 of 100, 2 per host
+		}
+	}
+	// Run 1 closes X.
+	r1 := e.start(t)
+	e.submit(t, r1, 0, all, except(items, x)...)
+	if c := e.complete(t, r1); c.ClosedUnconfirmed != 40 || c.WindowGuard || c.RunGuard {
+		t.Fatalf("run 1 = %+v", c)
+	}
+	// Run 2 re-reports everything: X re-opens inside the window and stays
+	// open from here on.
+	e.clk.Add(time.Hour)
+	r2 := e.start(t)
+	if res := e.submit(t, r2, 0, all, items...); res.Reopened != 40 {
+		t.Fatalf("run 2 = %+v", res)
+	}
+	e.complete(t, r2)
+	// Run 3 keeps reporting X and closes 29 of the other 60: 29 of 100
+	// open passes the run guard, but the applied 40 plus 29 of the window
+	// baseline of 100 must trip the window guard.
+	e.clk.Add(time.Hour)
+	y := map[vulnfinding.Key]bool{}
+	for _, it := range items {
+		if !x[it.Finding.Key] && len(y) < 29 {
+			y[it.Finding.Key] = true
+		}
+	}
+	r3 := e.start(t)
+	e.submit(t, r3, 0, all, except(items, y)...)
+	c := e.complete(t, r3)
+	if c.RunGuard || !c.WindowGuard || c.Held[HoldWindowGuard] != 29 || c.ClosedUnconfirmed != 0 {
+		t.Fatalf("run 3 = %+v", c)
+	}
+	for k := range x {
+		e.wantState(t, k, StateOpen, "")
+	}
+	for k := range y {
+		e.wantState(t, k, StateOpen, "")
+	}
+}
+
 // TestWindowGuardBaselineCountsOnlyOpenFindings: accepted_risk and
 // false_positive findings at window start are not in the baseline.
 func TestWindowGuardBaselineCountsOnlyOpenFindings(t *testing.T) {
