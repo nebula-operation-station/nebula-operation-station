@@ -133,7 +133,7 @@ type Device struct {
 }
 
 var (
-	deviceIDRe    = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$`)
+	deviceIDRe    = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$`) // length: MaxDeviceIDBytes
 	fingerprintRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	dnsLabelRe    = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
 )

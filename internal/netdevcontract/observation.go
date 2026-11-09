@@ -463,10 +463,11 @@ type Observation struct {
 	HitCounts      *Dataset[[]HitCount]     `json:"hit_counts,omitempty"`
 }
 
+// Name lengths are checked against the named constants, not in the regexes.
 var (
 	macRe           = regexp.MustCompile(`^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$`)
-	interfaceNameRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9/._:-]{0,63}$`)
-	panosNameRe     = regexp.MustCompile(`^[A-Za-z0-9_.\- ]{1,63}$`)
+	interfaceNameRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9/._:-]*$`)
+	panosNameRe     = regexp.MustCompile(`^[A-Za-z0-9_.\- ]+$`)
 	uuidRe          = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	hexDigestRe     = fingerprintRe
 	portSpecRe      = regexp.MustCompile(`^[0-9]{1,5}(?:-[0-9]{1,5})?(?:,[0-9]{1,5}(?:-[0-9]{1,5})?)*$`)
@@ -479,8 +480,11 @@ func ValidInterfaceName(s string) bool {
 }
 
 // ValidPANOSName reports whether s satisfies the PAN-OS name rule of
-// ADR 0010 D3: 1 to 63 letters, digits, '_', '.', '-' and space.
-func ValidPANOSName(s string) bool { return panosNameRe.MatchString(s) }
+// ADR 0010 D3: 1 to MaxPANOSNameBytes (63) letters, digits, '_', '.', '-'
+// and space.
+func ValidPANOSName(s string) bool {
+	return len(s) <= MaxPANOSNameBytes && panosNameRe.MatchString(s)
+}
 
 // ValidMAC reports whether s is a lowercase colon-separated MAC address.
 func ValidMAC(s string) bool { return macRe.MatchString(s) }

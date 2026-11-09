@@ -563,6 +563,33 @@ func limitCases() []limitCase {
 // TestParseLimitsAtLimitAndOver checks every count limit enforced by the
 // observation contract with exactly limit entries (accepted) and limit+1
 // (rejected with ErrOverLimit).
+// TestNameLengthLimitsFollowConstants ties each name rule to its named
+// constant at the limit and one byte over.
+func TestNameLengthLimitsFollowConstants(t *testing.T) {
+	cases := []struct {
+		name  string
+		valid func(string) bool
+		at    string
+	}{
+		{"PAN-OS name", ValidPANOSName, strings.Repeat("r", MaxPANOSNameBytes)},
+		{"interface name", ValidInterfaceName, "e" + strings.Repeat("1", MaxInterfaceNameBytes-1)},
+		{"device id", ValidDeviceID, strings.Repeat("d", MaxDeviceIDBytes)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if !c.valid(c.at) {
+				t.Fatalf("%d bytes rejected", len(c.at))
+			}
+			if c.valid(c.at + c.at[len(c.at)-1:]) {
+				t.Fatalf("%d bytes accepted", len(c.at)+1)
+			}
+		})
+	}
+	if ValidPANOSName("") {
+		t.Fatal("empty PAN-OS name accepted")
+	}
+}
+
 func TestParseLimitsAtLimitAndOver(t *testing.T) {
 	for _, c := range limitCases() {
 		t.Run(c.name, func(t *testing.T) {
