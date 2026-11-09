@@ -111,28 +111,41 @@ func TestInstalledBuiltUsingKeptOnlyForKernelImages(t *testing.T) {
 	}
 }
 
-func TestInstalledSourceDefaultsOnlyWhenDpkgReportsNone(t *testing.T) {
-	doc := installedDoc("K\t6.1.0-26-amd64\t#1 SMP",
-		pLine("installed", "nosrc", "amd64", "1.0-1+b2", "", "", ""),
-		pLine("installed", "srconly", "amd64", "1.0-1+b2", "upstream", "", ""),
-		pLine("installed", "veronly", "amd64", "1.0-1+b2", "", "1.0-1", ""),
-		pLine("installed", "both", "amd64", "1.0-1+b2", "upstream", "1.0-1", ""),
-	)
-	inv := ParseInstalled([]byte(doc), okRead)
-	if !inv.Complete {
-		t.Fatalf("incomplete: %s", inv.Reason)
-	}
-	cases := []struct{ name, src, srcVer string }{
-		{"nosrc", "nosrc", "1.0-1+b2"},
-		{"srconly", "upstream", "1.0-1+b2"},
-		{"veronly", "veronly", "1.0-1"},
-		{"both", "upstream", "1.0-1"},
+// dpkg-query always fills source:Package and source:Version (falling back
+// to the binary name and version itself), so an empty field is anomalous
+// input: the line is malformed and the read partial, never filled in from
+// the binary fields.
+func TestInstalledEmptySourceFieldMakesLineMalformed(t *testing.T) {
+	both := pLine("installed", "both", "amd64", "1.0-1+b2", "upstream", "1.0-1", "")
+	cases := []struct {
+		name, src, srcVer string
+	}{
+		{"empty source:Version", "upstream", ""},
+		{"empty source:Package", "", "1.0-1"},
+		{"both empty", "", ""},
 	}
 	for _, c := range cases {
-		p := findPkg(t, inv, c.name, "amd64")
-		if p.Source != c.src || p.SourceVersion != c.srcVer {
-			t.Errorf("%s: source=(%s, %s), want (%s, %s)", c.name, p.Source, p.SourceVersion, c.src, c.srcVer)
-		}
+		t.Run(c.name, func(t *testing.T) {
+			bad := pLine("installed", "anomalous", "amd64", "1.0-1+b2", c.src, c.srcVer, "")
+			inv := ParseInstalled([]byte(installedDoc("K\t6.1.0-26-amd64\t#1 SMP", both, bad)), okRead)
+			if inv.Complete {
+				t.Fatal("read with an empty source field claims complete")
+			}
+			if inv.Reason != ReasonMalformed+" 3" {
+				t.Errorf("reason = %q, want %q", inv.Reason, ReasonMalformed+" 3")
+			}
+			if inv.Dropped != 1 {
+				t.Errorf("dropped = %d, want 1", inv.Dropped)
+			}
+			if hasPkg(inv, "anomalous") {
+				t.Error("line with an empty source field is in the inventory")
+			}
+			// The well-formed line keeps dpkg's source version, not the
+			// binNMU binary version.
+			if p := findPkg(t, inv, "both", "amd64"); p.Source != "upstream" || p.SourceVersion != "1.0-1" {
+				t.Errorf("both: source=(%s, %s), want (upstream, 1.0-1)", p.Source, p.SourceVersion)
+			}
+		})
 	}
 }
 

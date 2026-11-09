@@ -259,8 +259,7 @@ func (p *installedParser) pkg(n int, f []string) {
 	include, known := dpkgStatus[status]
 	if !known || !debNameRe.MatchString(name) || !debArchRe.MatchString(arch) ||
 		!debVersionRe.MatchString(ver) ||
-		(src != "" && !debNameRe.MatchString(src)) ||
-		(srcVer != "" && !debVersionRe.MatchString(srcVer)) ||
+		!debNameRe.MatchString(src) || !debVersionRe.MatchString(srcVer) ||
 		!validBuiltUsing(bu) {
 		p.malformed(n)
 		return
@@ -279,14 +278,6 @@ func (p *installedParser) pkg(n int, f []string) {
 		return
 	}
 	p.seen[key] = true
-	// dpkg-query already falls back to the binary name and version when a
-	// package has no Source field; fill in only what it left empty.
-	if src == "" {
-		src = name
-	}
-	if srcVer == "" {
-		srcVer = ver
-	}
 	if !strings.HasPrefix(name, "linux-image-") {
 		bu = ""
 	}
