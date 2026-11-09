@@ -129,6 +129,10 @@ const (
 	MaxTagsPerObject = 64
 	// MaxLLDPCapabilities bounds capabilities of one LLDP neighbor.
 	MaxLLDPCapabilities = 16
+	// MaxVLANID is the highest valid 802.1Q VLAN ID; the lowest is 1.
+	MaxVLANID = 4094
+	// MaxSpeedMbps bounds a reported port speed (1 Tbit/s).
+	MaxSpeedMbps = 1000000
 	// MaxTrustGeneration bounds a trust generation counter.
 	MaxTrustGeneration = uint64(1) << 48
 	// MinObservedYear is the earliest accepted UTC year of a timestamp.
