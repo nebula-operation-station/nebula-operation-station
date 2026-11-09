@@ -3,9 +3,21 @@
 // Package attackpath holds the attack-path graph of ADR 0011 D10: node and
 // edge kinds, a builder that validates and bounds its input, and an
 // immutable graph with a canonical snapshot and snapshot hash. The package
-// is pure: no store, no I/O, no clock. Data adapters (flows, firewall rules,
-// placements, Docker, executor credentials) live elsewhere (VU-22); scoring
-// and path search come later (VU-21).
+// is pure: no store, no I/O; the only clock is the one of the wall-clock
+// budget (Options.Now). Data adapters (flows, firewall rules, placements,
+// Docker, executor credentials) live elsewhere (VU-22).
+//
+// Compute scores paths with formula ap-v1 (score.go), finds the top
+// PathsPerTarget paths per crown-jewel target with Yen's algorithm at most
+// MaxDepth steps deep (search.go) and ranks choke points (compute.go). The
+// attacker's state on a node is "owned" after a network step whose finding
+// may grant code execution (CVSS integrity impact low or high), a local
+// privilege escalation, or a control, credential or escape step; a network
+// step whose finding cannot (integrity impact none) only "reaches" it.
+// Control, credential and escape steps need no finding but start from an
+// owned node (ADR 0011 D10: owning the parent owns the child). Every
+// number comes from NOS data through a versioned formula, never from an
+// LLM.
 //
 // Edges keep their basis. Policy edges (firewall allow and NAT), observed
 // edges (traffic map flows) and assumed edges (L2 adjacency, all ports) are
