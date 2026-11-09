@@ -21,7 +21,11 @@ Principles:
 
 <a id="v23-01-02"></a>
 <!-- Spec v2.3 (ADR 0006, ADR 0007): v23-01-02 -->
-Not a goal for V1: Windows, a persistent agent, event-triggered or scheduled mutations, automatic patching, reboots, Docker updates or rollbacks, Kubernetes, general storage management, general vulnerability scanning or monitoring dashboards, DNS or DHCP management, OIDC, enterprise RBAC, a full Ansible replacement, third-party server plugins, a self-updater. The bounded inventory telemetry and optional local-image CVE observations below are the only monitoring/scanning exceptions introduced here; no InfluxDB endpoint is added.
+Not a goal for V1: Windows, a persistent agent, event-triggered or scheduled mutations, automatic patching, reboots, Docker updates or rollbacks, Kubernetes, general storage management, general vulnerability scanning or monitoring dashboards, DNS or DHCP management, OIDC, enterprise RBAC, a full Ansible replacement, third-party server plugins, a self-updater. The bounded inventory telemetry and optional local-image CVE observations below are the only monitoring/scanning exceptions introduced here; no InfluxDB endpoint is added. ADR 0011 adds advisory vulnerability management below; it scans nothing itself (previously: the two exceptions above only).
+
+<a id="v24-01-01"></a>
+<!-- Spec revision (ADR 0011, VU-02): v24-01-01 -->
+**Vulnerability management (ADR 0011, accepted 2026-11-09).** NOS records which known vulnerabilities apply to its hosts, images and network devices, prioritises them and shows attack paths to the maintainer's crown jewels. The Hermes agent on its own VM fetches the CVE feeds, matches and writes an assessment; NOS exports a bounded package inventory to it, stores and re-checks its findings and computes priorities and paths itself. Findings are **advisory**: no finding, score, path or assessment ever patches, updates, proposes, schedules or approves anything, so this does not change "Operator-driven" above. Still not goals: automatic patching from findings, feed fetching, matching or an LLM inside NOS, an agent on managed hosts, active vulnerability probing or exploitation, matching distro packages on upstream versions, compliance reporting, device firmware updates.
 
 <a id="v23-01-03"></a>
 <!-- Spec v2.3 (ADR 0006, ADR 0007): v23-01-03 -->
