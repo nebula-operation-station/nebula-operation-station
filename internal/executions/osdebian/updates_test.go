@@ -145,6 +145,12 @@ func TestCandidateSourceMissingOrBrokenStaysUnknown(t *testing.T) {
 		"field order":    docWithCandidates(t, sim, "Version: 3.0.11-1~deb12u2\nSource: openssl\n"),
 		"duplicate field": docWithCandidates(t, sim,
 			"Package: openssl\nVersion: 3.0.11-1~deb12u2\nSource: openssl (1.0-1)\nSource: openssl (9.0-1)\n"),
+		// The script caps the section by lines: a stanza cut before its
+		// Source line (no closing blank line) would wrongly claim the
+		// binary version as the source version, so it is dropped.
+		"truncated stanza": docWithCandidates(t, sim, "Package: openssl\nVersion: 3.0.11-1~deb12u2\n"),
+		"stanza without blank line before next": docWithCandidates(t, sim,
+			"Package: openssl\nVersion: 3.0.11-1~deb12u2\nPackage: other\nVersion: 1\n\n"),
 	}
 	for name, in := range tests {
 		t.Run(name, func(t *testing.T) {

@@ -232,8 +232,11 @@ func (s candidateStanza) resolve() (candidateKey, candidateSource, bool) {
 }
 
 // parseCandidateStanzas reads the stanzas. A stanza starts with a Package
-// line and ends at a blank line or the next Package line; lines outside a
-// stanza and other fields are ignored, an unusable stanza is dropped, and
+// line and counts only once a blank line closes it, as apt-cache prints
+// it. A stanza cut short (by the next Package line or the end of the
+// section, e.g. by the script's line cap) is dropped, so a lost Source line
+// never turns the binary version into a claimed source version. Lines
+// outside a stanza and other fields are ignored, an unusable stanza is dropped, and
 // stanzas of one binary version that disagree mark it as a conflict. ok
 // is false for a broken section.
 func parseCandidateStanzas(raw []byte) (map[candidateKey]candidateSource, bool) {
@@ -271,7 +274,7 @@ func parseCandidateStanzas(raw []byte) (map[candidateKey]candidateSource, bool) 
 		}
 		value = strings.TrimSpace(value)
 		if field == "Package" {
-			finish()
+			cur = nil // an unclosed stanza is incomplete: dropped
 			if stanzas++; stanzas > MaxCandidateStanzas {
 				return nil, false
 			}
@@ -293,6 +296,6 @@ func parseCandidateStanzas(raw []byte) (map[candidateKey]candidateSource, bool) 
 	if sc.Err() != nil {
 		return nil, false
 	}
-	finish()
+	// An unclosed last stanza may be truncated: dropped, not finished.
 	return out, true
 }
