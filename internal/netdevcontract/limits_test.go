@@ -257,6 +257,10 @@ func TestJSONDocumentLimits(t *testing.T) {
 	}
 }
 
+// wrap returns r between two ASCII letters. Code points are spelled as hex
+// so no invisible or bidi characters appear in the source.
+func wrap(r rune) string { return "a" + string(r) + "b" }
+
 func TestValidTextRejectsControlAndReplacement(t *testing.T) {
 	cases := []struct {
 		s  string
@@ -268,6 +272,24 @@ func TestValidTextRejectsControlAndReplacement(t *testing.T) {
 		{"a\x1bb", false},
 		{"a\u0085b", false},
 		{"a�b", false},
+		// spec 09: every rune must pass unicode.IsPrint
+		{wrap(0x202E), false},  // RIGHT-TO-LEFT OVERRIDE (Cf)
+		{wrap(0x202A), false},  // LEFT-TO-RIGHT EMBEDDING (Cf)
+		{wrap(0x2066), false},  // LEFT-TO-RIGHT ISOLATE (Cf)
+		{wrap(0x2067), false},  // RIGHT-TO-LEFT ISOLATE (Cf)
+		{wrap(0x2068), false},  // FIRST STRONG ISOLATE (Cf)
+		{wrap(0x2069), false},  // POP DIRECTIONAL ISOLATE (Cf)
+		{wrap(0x200B), false},  // ZERO WIDTH SPACE (Cf)
+		{wrap(0x200D), false},  // ZERO WIDTH JOINER (Cf)
+		{wrap(0xFEFF), false},  // BYTE ORDER MARK (Cf)
+		{wrap(0x00AD), false},  // SOFT HYPHEN (Cf)
+		{wrap(0x2028), false},  // LINE SEPARATOR (Zl)
+		{wrap(0x2029), false},  // PARAGRAPH SEPARATOR (Zp)
+		{wrap(0x00A0), false},  // NO-BREAK SPACE (Zs, not ASCII space)
+		{wrap(0xE000), false},  // private use (Co)
+		{wrap(0xF0000), false}, // supplementary private use (Co)
+		{wrap(0x0378), false},  // unassigned (Cn)
+		{"a b", true},
 		{"\xff", false},
 		{strings.Repeat("a", MaxLabelBytes), true},
 		{strings.Repeat("a", MaxLabelBytes+1), false},
@@ -279,5 +301,50 @@ func TestValidTextRejectsControlAndReplacement(t *testing.T) {
 	}
 	if !validLine("a\tb") || validLine("a\rb") {
 		t.Error("validLine must allow tab and reject CR")
+	}
+	for _, r := range []rune{0x202E, 0x2066, 0x200B, 0x2028, 0x2029, 0xE000, 0x00A0, 0xFFFD} {
+		if s := wrap(r); validLine(s) {
+			t.Errorf("validLine(%q) = true, want false", s)
+		}
+	}
+}
+
+func TestJSONKeysMustBeExactLowercaseNames(t *testing.T) {
+	type doc struct {
+		DeviceID string `json:"device_id"`
+		Kind     string `json:"kind"`
+		Source   string `json:"source"`
+	}
+	cases := map[string]string{
+		"upper duplicate": `{"device_id":"a","DEVICE_ID":"b"}`,
+		"upper only":      `{"DEVICE_ID":"b"}`,
+		"mixed case":      `{"Device_Id":"b"}`,
+		"kelvin sign":     `{"kind":"a","` + string(rune(0x212A)) + `ind":"b"}`,
+		"long s":          `{"source":"a","` + string(rune(0x017F)) + `ource":"b"}`,
+		"nested upper":    `[{"device_id":"a"},{"DEVICE_ID":"b"}]`,
+		"empty key":       `{"":"b"}`,
+		"key with space":  `{"device id":"b"}`,
+		"key with hyphen": `{"device-id":"b"}`,
+		"key limit+1":     `{"` + strings.Repeat("k", MaxJSONKeyBytes+1) + `":"b"}`,
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			var v any
+			if err := decodeStrict([]byte(raw), &v); err == nil {
+				t.Fatalf("accepted %q", raw)
+			}
+			var d doc
+			if err := decodeStrict([]byte(raw), &d); err == nil {
+				t.Fatalf("accepted %q into struct, device_id=%q", raw, d.DeviceID)
+			}
+		})
+	}
+	var d doc
+	if err := decodeStrict([]byte(`{"device_id":"a"}`), &d); err != nil || d.DeviceID != "a" {
+		t.Fatalf("exact lowercase key rejected: %v", err)
+	}
+	var v any
+	if err := decodeStrict([]byte(`{"`+strings.Repeat("k", MaxJSONKeyBytes)+`":1}`), &v); err != nil {
+		t.Fatalf("key at limit rejected: %v", err)
 	}
 }

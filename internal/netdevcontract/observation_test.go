@@ -220,6 +220,16 @@ func TestDecodeObservationRejectsUnknownFields(t *testing.T) {
 		"hit count":      strings.Replace(string(pgood), `"hits":42`, `"hits":42,"x":1`, 1),
 		"policy":         strings.Replace(string(pgood), `"security_rules"`, `"mgt_config":[],"security_rules"`, 1),
 		"family dataset": strings.Replace(string(good), `"device_id"`, `"hit_counts":{"state":"available","value":[]},"device_id"`, 1),
+		// encoding/json matches field names case-insensitively; keys that
+		// differ only in case must not smuggle a second value
+		"case duplicate device_id":  strings.Replace(string(good), `"device_id"`, `"DEVICE_ID":"other","device_id"`, 1),
+		"case duplicate trailing":   strings.Replace(string(good), `"device_id":"`, `"DEVICE_ID":"other","device_id":"`, 1),
+		"upper-case only key":       strings.Replace(string(good), `"device_id"`, `"Device_ID"`, 1),
+		"case duplicate facts":      strings.Replace(string(good), `"facts"`, `"Facts":{"state":"unavailable","reason":"not_supported"},"facts"`, 1),
+		"case duplicate generation": strings.Replace(string(good), `"trust_generation"`, `"Trust_Generation":2,"trust_generation"`, 1),
+		"case dataset state":        strings.Replace(string(good), `"state"`, `"STATE"`, 1),
+		"long s folds to s":         strings.Replace(string(good), `"state"`, `"`+string(rune(0x017F))+`tate"`, 1),
+		"case duplicate rule":       strings.Replace(string(pgood), `"action"`, `"ACTION":"deny","action"`, 1),
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {

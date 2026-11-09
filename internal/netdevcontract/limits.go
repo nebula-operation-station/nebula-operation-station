@@ -292,29 +292,62 @@ func CheckXML(data []byte, maxBytes int) error {
 	return nil
 }
 
-// validText reports whether s is valid UTF-8 of at most limit bytes
-// without control characters or replacement characters. Untrusted device
-// text is always checked with it.
+// printable is the spec 09 rule for untrusted text: the rune must be
+// accepted by unicode.IsPrint and must not be the replacement character.
+// IsPrint rejects controls (Cc), format characters (Cf, including the bidi
+// overrides and isolates and zero-width characters), the line and
+// paragraph separators U+2028 and U+2029, private use (Co), surrogates,
+// unassigned code points and every space except U+0020.
+func printable(r rune) bool {
+	return r != utf8.RuneError && unicode.IsPrint(r)
+}
+
+// validText reports whether s is valid UTF-8 of at most limit bytes in
+// which every rune is printable. Untrusted device text is always checked
+// with it.
 func validText(s string, limit int) bool {
 	if len(s) > limit || !utf8.ValidString(s) {
 		return false
 	}
 	for _, r := range s {
-		if unicode.IsControl(r) || r == utf8.RuneError {
+		if !printable(r) {
 			return false
 		}
 	}
 	return true
 }
 
-// validLine is validText for one configuration line, which may contain
-// tabs.
+// validLine is validText for one configuration line, which may also
+// contain tabs.
 func validLine(s string) bool {
 	if len(s) > MaxLineBytes || !utf8.ValidString(s) {
 		return false
 	}
 	for _, r := range s {
-		if (unicode.IsControl(r) && r != '\t') || r == utf8.RuneError {
+		if r != '\t' && !printable(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// MaxJSONKeyBytes bounds an object key. The longest field name in the
+// contract is far shorter.
+const MaxJSONKeyBytes = 64
+
+// validKey reports whether key is a contract field name: 1 to
+// MaxJSONKeyBytes lowercase ASCII letters, digits and underscores. Every
+// JSON tag in this package has that form. encoding/json matches field
+// names case-insensitively (including the Unicode folds of 'k' and 's'),
+// so allowing only this alphabet makes the match exact and keeps
+// "device_id" and "DEVICE_ID" from both reaching one field.
+func validKey(key string) bool {
+	if key == "" || len(key) > MaxJSONKeyBytes {
+		return false
+	}
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' {
 			return false
 		}
 	}
@@ -341,9 +374,9 @@ func decodeStrict(raw []byte, v any) error {
 	return nil
 }
 
-// walkDocument enforces nesting depth, duplicate keys, null values,
-// per-string length and the object count, and that raw holds exactly one
-// JSON value.
+// walkDocument enforces nesting depth, the key alphabet, duplicate keys,
+// null values, per-string length and the object count, and that raw holds
+// exactly one JSON value.
 func walkDocument(raw []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
@@ -388,6 +421,10 @@ func walkValue(dec *json.Decoder, depth int, objects *int) error {
 				key, ok := ktok.(string)
 				if !ok {
 					return errors.New("object key is not a string")
+				}
+				if !validKey(key) {
+					// not echoed: the key is untrusted device input
+					return errors.New("object key is not a lowercase field name")
 				}
 				if _, dup := seen[key]; dup {
 					return fmt.Errorf("duplicate key %q", key)
