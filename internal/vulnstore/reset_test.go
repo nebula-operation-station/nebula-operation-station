@@ -64,6 +64,24 @@ func TestMarkResetRefusals(t *testing.T) {
 	e.complete(t, r3)
 	good := MarkResetRequest{SourceID: "osv", RunID: r3.ID, ContentDate: d.Add(-90 * time.Minute), Admin: "admin", Reason: "why"}
 
+	// Regressed, then a later run named the source and was accepted, with
+	// no regression since: the regressed run is no longer the latest run
+	// naming the source, so its value is refused (it would lower the mark
+	// below data NOS accepted later) and the view offers nothing.
+	t.Run("regressed then accepted", func(t *testing.T) {
+		e2 := newEnv(t)
+		_, d2, old := regressOSV(t, e2, 1, e2.clk.Now().Add(-4*time.Hour))
+		e2.complete(t, e2.start(t, e2.srcAt("osv", d2.Add(time.Minute))))
+		_, err := e2.reset(old, d2.Add(-3*time.Hour))
+		if !errors.Is(err, ErrResetRefused) {
+			t.Fatalf("reset to a regressed run older than an accepted one: %v, want ErrResetRefused", err)
+		}
+		view, err := e2.st.MarkResetCandidate(e2.ctx, "osv")
+		if err != nil || view.RunID != "" || !view.MarkDate.Equal(d2.Add(time.Minute)) {
+			t.Fatalf("view = %+v, %v; want no reset run and the accepted mark", view, err)
+		}
+	})
+
 	cases := []struct {
 		name string
 		mod  func(*MarkResetRequest)

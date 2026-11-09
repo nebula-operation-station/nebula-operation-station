@@ -258,6 +258,13 @@ func (s *Store) judgeSource(ctx context.Context, tx *sql.Tx, src RunSource, now 
 	// it strictly above the pre-reset mark, in every component that mark
 	// has (D5); meanwhile it is accepted but raise-only and its unevidenced
 	// closures are held.
+	//
+	// Reading of the ADR wording "content date or sequence" (deliberate,
+	// stricter): a run passes only if it is strictly above the pre-reset
+	// mark in every component that mark has, so for a source with both a
+	// date and a sequence the run must pass both. Passing only one would
+	// let a replay that advances the date alone (or the sequence alone)
+	// end probation without passing data NOS had already accepted.
 	onProbation := false
 	if probation == 1 {
 		passed := (!preDate.Valid || cd > preDate.Int64) &&

@@ -17,8 +17,9 @@ type MarkResetView struct {
 	SourceID string
 	MarkDate time.Time
 	MarkSeq  *int64
-	// RunID is the latest run whose verdict on the source was regressed;
-	// empty when there is none (nothing to reset to).
+	// RunID is the latest run that named the source, if its verdict on it
+	// was regressed; empty when no run named the source or the latest one
+	// did not regress it (nothing to reset to).
 	RunID        string
 	ReportedDate time.Time
 	ReportedSeq  *int64
@@ -81,18 +82,22 @@ func loadMark(ctx context.Context, q queryer, sourceID string) (markRow, bool, e
 	return m, true, nil
 }
 
-// latestRegressed returns the latest run (by run_seq) whose verdict on the
-// source was regressed, with the values it reported.
-func latestRegressed(ctx context.Context, q queryer, sourceID string) (runID string, date, seq sql.NullInt64, found bool, err error) {
-	err = q.QueryRowContext(ctx, `SELECT s.run_id, s.content_date, s.sequence FROM vuln_run_sources s JOIN vuln_runs r ON r.id = s.run_id
-		WHERE s.source_id = ? AND s.status = 'regressed' ORDER BY r.run_seq DESC LIMIT 1`, sourceID).Scan(&runID, &date, &seq)
+// latestNaming returns the latest run (by run_seq) that named the source,
+// whatever its verdict, with that verdict and the values it reported. D5
+// lets an admin reset only to what this run reported and only if it
+// regressed the source: an older regressed run's value could lower the
+// mark below data NOS accepted from a later run.
+func latestNaming(ctx context.Context, q queryer, sourceID string) (runID string, status SourceStatus, date, seq sql.NullInt64, found bool, err error) {
+	var st string
+	err = q.QueryRowContext(ctx, `SELECT s.run_id, s.status, s.content_date, s.sequence FROM vuln_run_sources s JOIN vuln_runs r ON r.id = s.run_id
+		WHERE s.source_id = ? ORDER BY r.run_seq DESC LIMIT 1`, sourceID).Scan(&runID, &st, &date, &seq)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", date, seq, false, nil
+		return "", "", date, seq, false, nil
 	}
 	if err != nil {
-		return "", date, seq, false, fmt.Errorf("latest regressed run: %w", err)
+		return "", "", date, seq, false, fmt.Errorf("latest run naming source: %w", err)
 	}
-	return runID, date, seq, true, nil
+	return runID, SourceStatus(st), date, seq, true, nil
 }
 
 func timeOf(v sql.NullInt64) time.Time {
@@ -131,11 +136,11 @@ func (s *Store) MarkResetCandidate(ctx context.Context, sourceID string) (MarkRe
 		v.MarkDate, v.MarkSeq = timeOf(m.date), ptrOf(m.seq)
 		v.Probation, v.PreResetDate, v.PreResetSeq = m.probation, timeOf(m.preDate), ptrOf(m.preSeq)
 	}
-	runID, date, seq, found, err := latestRegressed(ctx, s.db, sourceID)
+	runID, status, date, seq, found, err := latestNaming(ctx, s.db, sourceID)
 	if err != nil {
 		return MarkResetView{}, fmt.Errorf("vulnstore: mark reset view %s: %w", sourceID, err)
 	}
-	if found {
+	if found && status == SourceRegressed {
 		v.RunID, v.ReportedDate, v.ReportedSeq = runID, timeOf(date), ptrOf(seq)
 	}
 	err = s.db.QueryRowContext(ctx, `SELECT s.snapshot_id FROM vuln_run_sources s JOIN vuln_runs r ON r.id = s.run_id
@@ -148,7 +153,9 @@ func (s *Store) MarkResetCandidate(ctx context.Context, sourceID string) (MarkRe
 
 // ResetMark applies the D5 admin reset of a per-source high-water mark. It
 // is refused (ErrResetRefused) unless the source is listed and has a mark,
-// RunID is the latest run whose verdict on the source was regressed, the
+// RunID is the latest run that named the source and regressed it (a later
+// run naming it with any other verdict, accepted included, leaves nothing
+// to reset to until a newer run regresses it), the
 // requested value equals exactly what that run reported, the value is
 // below the mark in at least one component and above it in none, and its
 // date is not beyond NOS's clock plus MaxFutureSkew. The source then stays
@@ -181,12 +188,15 @@ func (s *Store) ResetMark(ctx context.Context, req MarkResetRequest) (MarkReset,
 	if !ok || !m.date.Valid {
 		return MarkReset{}, fmt.Errorf("vulnstore: mark reset %s: no mark: %w", req.SourceID, ErrResetRefused)
 	}
-	runID, repDate, repSeq, found, err := latestRegressed(ctx, tx, req.SourceID)
+	runID, status, repDate, repSeq, found, err := latestNaming(ctx, tx, req.SourceID)
 	if err != nil {
 		return MarkReset{}, fmt.Errorf("vulnstore: mark reset %s: %w", req.SourceID, err)
 	}
 	if !found || runID != req.RunID {
-		return MarkReset{}, fmt.Errorf("vulnstore: mark reset %s: not the latest regressed run: %w", req.SourceID, ErrResetRefused)
+		return MarkReset{}, fmt.Errorf("vulnstore: mark reset %s: not the latest run naming the source: %w", req.SourceID, ErrResetRefused)
+	}
+	if status != SourceRegressed {
+		return MarkReset{}, fmt.Errorf("vulnstore: mark reset %s: latest run naming the source did not regress it: %w", req.SourceID, ErrResetRefused)
 	}
 	reqSeq := nullOf(req.Sequence)
 	if req.ContentDate.IsZero() || !repDate.Valid || unix(req.ContentDate) != repDate.Int64 || reqSeq != repSeq {
