@@ -331,6 +331,9 @@ func TestVulnSubjectWithoutFindingsNotGreenOnFeedIssue(t *testing.T) {
 		{"future", ui.VulnFeedStatus{SourceID: "cisco-csaf", Listed: true, LastVerdict: vulnstore.SourceInvalid}},
 		{"undated", ui.VulnFeedStatus{SourceID: "osv", Listed: true, LastVerdict: vulnstore.SourceUndated}},
 		{"unlisted", ui.VulnFeedStatus{SourceID: "mystery", LastVerdict: vulnstore.SourceAccepted}},
+		{"probation", ui.VulnFeedStatus{SourceID: "osv", Listed: true, LastVerdict: vulnstore.SourceAccepted, Probation: true}},
+		{"unknown verdict", ui.VulnFeedStatus{SourceID: "osv", Listed: true, LastVerdict: vulnstore.SourceUnknown}},
+		{"unexpected verdict", ui.VulnFeedStatus{SourceID: "osv", Listed: true, LastVerdict: vulnstore.SourceStatus("bogus")}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -349,7 +352,61 @@ func TestVulnSubjectWithoutFindingsNotGreenOnFeedIssue(t *testing.T) {
 			if strings.Contains(body, "badge--ok") {
 				t.Errorf("subject tab under a %s feed shows green", tc.name)
 			}
+			// The page-level feed issue alone keeps the subject in the
+			// stale/feed issue filter.
+			_, body = vulnGet(t, h, "/vulnerabilities?view=subject&stale=stale")
+			if _, ok := subjectRows(body)["quiet"]; !ok {
+				t.Errorf("stale filter drops a subject with a page-level %s feed issue", tc.name)
+			}
 		})
+	}
+}
+
+func TestVulnUnexpectedFeedVerdictLabelledOnFinding(t *testing.T) {
+	s := hostSubject("web1")
+	row := vulnRow(9, s, "CVE-2024-0009", vulnstore.StateOpen, vulnstore.TierLow, "osv")
+	f := &fakeVuln{page: ui.VulnPage{
+		Rows:         []ui.VulnRow{row},
+		Subjects:     []ui.VulnSubjectStatus{freshSubject(s)},
+		Feeds:        []ui.VulnFeedStatus{{SourceID: "osv", Listed: true, LastVerdict: vulnstore.SourceStatus("bogus")}},
+		LastComplete: vulnNow,
+	}}
+	h := vulnHandler(t, f)
+	_, body := vulnGet(t, h, "/vulnerabilities/subject/host/web1")
+	if !strings.Contains(body, "feed osv verdict unknown") {
+		t.Error("finding on a feed with an unexpected verdict lacks the feed label")
+	}
+	_, body = vulnGet(t, h, "/vulnerabilities")
+	if !strings.Contains(body, "Feed osv has no usable verdict") {
+		t.Error("list page lacks a banner for a feed with an unexpected verdict")
+	}
+}
+
+func TestVulnStaleFilterBySubjectKeepsEveryNonGreenUnknown(t *testing.T) {
+	clean := hostSubject("clean")
+	busy := hostSubject("busy")
+	f := &fakeVuln{page: ui.VulnPage{
+		Rows:         []ui.VulnRow{vulnRow(8, busy, "CVE-2024-0008", vulnstore.StateOpen, vulnstore.TierLow, "kev")},
+		Subjects:     []ui.VulnSubjectStatus{freshSubject(clean), freshSubject(busy)},
+		Feeds:        []ui.VulnFeedStatus{okFeed("kev")},
+		LastComplete: vulnNow,
+	}}
+	h := vulnHandler(t, f)
+	// Complete page, healthy feeds: neither subject is stale or unknown.
+	_, body := vulnGet(t, h, "/vulnerabilities?view=subject&stale=stale")
+	if rows := subjectRows(body); len(rows) != 0 {
+		t.Errorf("stale filter on a complete, healthy page keeps %d subjects, want 0", len(rows))
+	}
+	// Truncated page: every subject is "unknown: list incomplete" or a
+	// lower bound, so none may drop out of the filter.
+	f.page.Truncated = true
+	_, body = vulnGet(t, h, "/vulnerabilities?view=subject&stale=stale")
+	rows := subjectRows(body)
+	if got, ok := rows["clean"]; !ok || !strings.Contains(got, "incomplete") {
+		t.Errorf("stale filter on a truncated page: clean row = %q (present %v), want incomplete", got, ok)
+	}
+	if _, ok := rows["busy"]; !ok {
+		t.Error("stale filter on a truncated page drops the subject with a lower-bound count")
 	}
 }
 

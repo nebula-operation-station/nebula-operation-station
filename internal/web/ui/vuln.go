@@ -262,8 +262,16 @@ func subjectLabel(s VulnSubjectStatus, now time.Time) (vulnLabel, bool) {
 	return vulnLabel{"assessed " + vulnTime(s.LastComplete), ""}, false
 }
 
-// feedLabels returns the feed labels of one source; empty when the source
-// is fine.
+// feedVerdictUsable reports whether a verdict lets a source count as
+// healthy: only accepted or no verdict (no run named it). Fail closed:
+// SourceUnknown and any unexpected value are issues.
+func feedVerdictUsable(v vulnstore.SourceStatus) bool {
+	return v == vulnstore.SourceAccepted || v == ""
+}
+
+// feedLabels returns the feed labels of one source; empty only when the
+// source is listed, not stale, not on probation and its verdict is
+// accepted or absent.
 func feedLabels(f VulnFeedStatus) []vulnLabel {
 	id := vulnText(f.SourceID, false)
 	var out []vulnLabel
@@ -277,6 +285,10 @@ func feedLabels(f VulnFeedStatus) []vulnLabel {
 		out = append(out, vulnLabel{"feed " + id + " dated in the future", classWarning})
 	case vulnstore.SourceUndated:
 		out = append(out, vulnLabel{"feed " + id + " undated", classWarning})
+	default:
+		if !feedVerdictUsable(f.LastVerdict) {
+			out = append(out, vulnLabel{"feed " + id + " verdict unknown", classWarning})
+		}
 	}
 	if f.Stale {
 		out = append(out, vulnLabel{"feed " + id + " stale", classWarning})
@@ -752,6 +764,10 @@ func feedBanners(feeds []VulnFeedStatus, lastComplete, now time.Time, maintainer
 			out = append(out, vulnBanner{Text: "Feed " + id + " dated in the future in the latest run. Findings resting on it are not closed by that run."})
 		case vulnstore.SourceUndated:
 			out = append(out, vulnBanner{Text: "Feed " + id + " undated: treated as stale."})
+		default:
+			if !feedVerdictUsable(f.LastVerdict) {
+				out = append(out, vulnBanner{Text: "Feed " + id + " has no usable verdict in the latest run. Findings resting on it are not closed by that run."})
+			}
 		}
 		if f.Probation {
 			out = append(out, vulnBanner{Text: "Feed " + id + " on probation after a mark reset until a run names it above the pre-reset mark (" + vulnMark(f.PreResetDate, f.PreResetSeq) + ")."})
@@ -898,18 +914,13 @@ func subjectStatus(g vulnSubjectGroup, st VulnSubjectStatus, feedIssue, pageFeed
 	return vulnLabel{"no open findings", classOK}
 }
 
-// feedHasIssue reports whether a source is stale, undated, behind its
-// mark, dated in the future or not on NOS's source list: a run cannot be
-// trusted to have found everything that rests on it.
+// feedHasIssue reports whether a source has any feed label (not listed,
+// stale, on probation, or a verdict other than accepted or none): a run
+// cannot be trusted to have found everything that rests on it. It shares
+// feedLabels so the subject status, page banners and finding labels never
+// disagree on what counts as healthy.
 func feedHasIssue(f VulnFeedStatus) bool {
-	if !f.Listed || f.Stale {
-		return true
-	}
-	switch f.LastVerdict {
-	case vulnstore.SourceRegressed, vulnstore.SourceInvalid, vulnstore.SourceUndated:
-		return true
-	}
-	return false
+	return len(feedLabels(f)) > 0
 }
 
 // groupBySubject builds the list by subject: every subject in scope, also
@@ -983,7 +994,11 @@ func groupBySubject(c vulnContext, page VulnPage, views []vulnFindingView, fl vu
 			a.g.Labels = append(a.g.Labels, l)
 		}
 		if fl.Stale == vulnFilterStale {
-			if _, stale := subjectLabel(a.st, c.now); !stale && !a.feedIssue {
+			// Keep every subject whose result cannot be trusted: stale or
+			// not assessed, a feed issue on its findings or on the page,
+			// or a truncated read (status unknown or a lower bound).
+			_, stale := subjectLabel(a.st, c.now)
+			if !stale && !a.feedIssue && !pageFeedIssue && !page.Truncated {
 				continue
 			}
 		}
