@@ -157,6 +157,11 @@ const (
 	MaxJSONObjects = 200000
 	// MaxJSONStringBytes bounds any decoded JSON string.
 	MaxJSONStringBytes = MaxLineBytes
+	// MaxJSONNumberBytes bounds the literal of any JSON number. Every
+	// number in the contract is an integer of at most 20 digits (uint64);
+	// the bound also keeps encoding/json from copying a huge literal into
+	// a type error.
+	MaxJSONNumberBytes = 32
 )
 
 // overLimit returns an error matching ErrOverLimit.
@@ -402,6 +407,11 @@ func walkValue(dec *json.Decoder, depth int, objects *int) error {
 		if len(v) > MaxJSONStringBytes {
 			return overLimit("string bytes", len(v), MaxJSONStringBytes)
 		}
+	case json.Number:
+		if len(v) > MaxJSONNumberBytes {
+			// not echoed: the literal is untrusted and may be megabytes long
+			return overLimit("number bytes", len(v), MaxJSONNumberBytes)
+		}
 	case json.Delim:
 		if depth >= MaxJSONNesting {
 			return overLimit("JSON nesting", depth+1, MaxJSONNesting)
@@ -447,7 +457,7 @@ func walkValue(dec *json.Decoder, depth int, objects *int) error {
 			return fmt.Errorf("malformed JSON: %w", err)
 		}
 	default:
-		// numbers and booleans are range-checked by the typed fields
+		// booleans; number values are range-checked by the typed fields
 	}
 	return nil
 }

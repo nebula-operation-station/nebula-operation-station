@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"unicode/utf8"
 )
 
 // ErrInvalid marks documents that fail strict decoding or validation.
@@ -40,6 +41,28 @@ func (e *ValidationError) Is(target error) bool {
 // problems are counted in one final entry.
 const MaxProblems = 32
 
+// MaxProblemBytes bounds the text of one problem. Longer texts (for example
+// a decoder error quoting a time string) are cut and marked, so that with
+// MaxProblems no error can grow beyond a small fixed size.
+const MaxProblemBytes = 256
+
+// truncatedMark ends a problem text cut to MaxProblemBytes.
+const truncatedMark = " [truncated]"
+
+// shortProblem returns s cut to at most MaxProblemBytes bytes of valid
+// UTF-8. A cut text ends with truncatedMark; invalid UTF-8 is replaced.
+func shortProblem(s string) string {
+	s = strings.ToValidUTF8(s, "�")
+	if len(s) <= MaxProblemBytes {
+		return s
+	}
+	cut := MaxProblemBytes - len(truncatedMark)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + truncatedMark
+}
+
 // problems collects validation problems.
 type problems struct {
 	list      []string
@@ -50,7 +73,7 @@ type problems struct {
 func (p *problems) add(format string, args ...any) {
 	p.total++
 	if len(p.list) < MaxProblems {
-		p.list = append(p.list, fmt.Sprintf(format, args...))
+		p.list = append(p.list, shortProblem(fmt.Sprintf(format, args...)))
 	}
 }
 
@@ -74,9 +97,10 @@ func (p *problems) err() error {
 }
 
 // decodeError wraps a strict decoding failure so that it matches ErrInvalid
-// (and ErrOverLimit when a document limit was hit).
+// (and ErrOverLimit when a document limit was hit). The problem text is cut
+// to MaxProblemBytes because decoder errors may quote document content.
 func decodeError(err error) error {
-	return &ValidationError{Problems: []string{err.Error()}, overLimit: errors.Is(err, ErrOverLimit)}
+	return &ValidationError{Problems: []string{shortProblem(err.Error())}, overLimit: errors.Is(err, ErrOverLimit)}
 }
 
 // Family is the device family.

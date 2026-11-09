@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 const validPin = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -258,6 +259,95 @@ func TestOverlongListsAreNotWalkedWhenProblemsAreCapped(t *testing.T) {
 	// only the count problem is added; the empty rules are not walked
 	if got := ve.Problems[len(ve.Problems)-1]; got != "and 1 more problems" {
 		t.Fatalf("last entry %q: the overlong rule list was walked", got)
+	}
+}
+
+// maxErrorBytes is the largest Error() a ValidationError from decodeError
+// may have: the package prefix plus one shortened problem.
+const maxErrorBytes = len("netdevcontract: ") + MaxProblemBytes
+
+func TestMultiMegabyteNumberLiteralGivesShortError(t *testing.T) {
+	huge := strings.Repeat("9", 4<<20)
+	good, err := MarshalDevice(baseCBSDevice())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ogood, err := MarshalObservation(baseCBSObservation())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]struct {
+		raw    string
+		decode func([]byte) error
+	}{
+		"device uint64 generation": {strings.Replace(string(good), `"trust_generation":1`, `"trust_generation":`+huge, 1), decodeDev},
+		"device uint16 port":       {strings.Replace(string(good), `"port":22`, `"port":`+huge, 1), decodeDev},
+		"device negative port":     {strings.Replace(string(good), `"port":22`, `"port":-`+huge, 1), decodeDev},
+		"device string field":      {strings.Replace(string(good), `"name":"Core switch"`, `"name":`+huge, 1), decodeDev},
+		"observation generation":   {strings.Replace(string(ogood), `"trust_generation":1`, `"trust_generation":`+huge, 1), decodeObs},
+		"observation nested speed": {strings.Replace(string(ogood), `"speed_mbps":1000`, `"speed_mbps":`+huge, 1), decodeObs},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			if !strings.Contains(c.raw, huge) {
+				t.Fatal("test case did not insert the number")
+			}
+			err := c.decode([]byte(c.raw))
+			if !errors.Is(err, ErrInvalid) || !errors.Is(err, ErrOverLimit) {
+				t.Fatalf("got %.200v, want ErrInvalid and ErrOverLimit", err)
+			}
+			if n := len(err.Error()); n > maxErrorBytes {
+				t.Fatalf("error is %d bytes, want at most %d", n, maxErrorBytes)
+			}
+			if strings.Contains(err.Error(), strings.Repeat("9", MaxJSONNumberBytes+1)) {
+				t.Fatalf("error echoes the number literal: %.200v", err)
+			}
+		})
+	}
+}
+
+func decodeDev(raw []byte) error { _, err := DecodeDevice(raw); return err }
+func decodeObs(raw []byte) error { _, err := DecodeObservation(raw); return err }
+
+func TestDecodeErrorProblemIsBounded(t *testing.T) {
+	cases := map[string]error{
+		"ascii":          errors.New(strings.Repeat("x", 1<<20)),
+		"multibyte cut":  errors.New(strings.Repeat("ä", 1<<19)),
+		"over limit":     fmt.Errorf("%w: %s", ErrOverLimit, strings.Repeat("y", 1<<20)),
+		"short":          errors.New("decode: short"),
+		"invalid utf8":   errors.New(strings.Repeat("\xff", 1<<10)),
+		"exactly at cap": errors.New(strings.Repeat("z", MaxProblemBytes)),
+	}
+	for name, in := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := decodeError(in)
+			var ve *ValidationError
+			if !errors.As(err, &ve) || len(ve.Problems) != 1 {
+				t.Fatalf("got %v, want one problem", err)
+			}
+			p := ve.Problems[0]
+			if len(p) > MaxProblemBytes {
+				t.Fatalf("problem is %d bytes, want at most %d", len(p), MaxProblemBytes)
+			}
+			if !utf8.ValidString(p) {
+				t.Fatal("shortened problem is not valid UTF-8")
+			}
+			if len(in.Error()) <= MaxProblemBytes && utf8.ValidString(in.Error()) && p != in.Error() {
+				t.Fatalf("short problem changed: %q", p)
+			}
+			if errors.Is(in, ErrOverLimit) != errors.Is(err, ErrOverLimit) {
+				t.Fatal("ErrOverLimit marker lost")
+			}
+		})
+	}
+}
+
+func TestProblemsAreShortened(t *testing.T) {
+	var p problems
+	p.add("%s", strings.Repeat("x", 1<<20))
+	var ve *ValidationError
+	if !errors.As(p.err(), &ve) || len(ve.Problems[0]) > MaxProblemBytes {
+		t.Fatalf("problem not shortened to %d bytes", MaxProblemBytes)
 	}
 }
 
