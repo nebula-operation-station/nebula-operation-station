@@ -227,6 +227,13 @@ func TestDockerSkipsUnmanagedInventoryHosts(t *testing.T) {
 	if !slices.Equal(r.Covered, []string{"host:web"}) {
 		t.Fatalf("covered %v", r.Covered)
 	}
+	// A stale alias of the unmanaged host does not make it cover a guest.
+	cfg.Managed = []string{"guest:r/1"}
+	cfg.Aliases = map[string]string{"host:old": "guest:r/1"}
+	r, err = Docker(context.Background(), cfg)
+	if err != nil || slices.Contains(r.Covered, "guest:r/1") || !hasUncertainty(r.Uncertain, UncertainDockerUnread, "guest:r/1") {
+		t.Fatalf("stale alias: %v covered %v uncertain %v", err, r.Covered, r.Uncertain)
+	}
 }
 
 func TestDockerHostListErrorIsUnknown(t *testing.T) {

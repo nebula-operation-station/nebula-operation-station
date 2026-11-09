@@ -110,6 +110,10 @@ func Docker(ctx context.Context, cfg DockerConfig) (Result, error) {
 	for _, id := range expected {
 		want[id] = true
 	}
+	isManaged := make(map[string]bool, len(managed))
+	for _, h := range managed {
+		isManaged[h.ID] = true
+	}
 	// read maps an expected node to whether every inventory entry of it
 	// was covered.
 	read := make(map[string]bool, len(hosts))
@@ -122,7 +126,7 @@ func Docker(ctx context.Context, cfg DockerConfig) (Result, error) {
 			continue
 		}
 		target := resolveAlias(cfg.Aliases, id)
-		if !want[target] {
+		if !isManaged[h.HostID] || !want[target] {
 			continue // not a managed host
 		}
 		covered := dockerHost(c, h)
