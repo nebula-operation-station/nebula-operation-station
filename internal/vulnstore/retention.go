@@ -12,6 +12,8 @@ import (
 
 // PruneResult counts what Prune removed.
 type PruneResult struct {
+	// ResumedRuns: runs left completing that Prune finished.
+	ResumedRuns       int
 	AbortedRuns       int
 	DeletedFindings   int
 	ClearedAssessment int
@@ -24,15 +26,44 @@ type PruneResult struct {
 // 90 days, and run records (with their sources, batches, coverage and
 // holds) are deleted 90 days after they ended. Open, accepted_risk and
 // false_positive findings are kept while the subject exists; they leave
-// only through closure path 3 and then the fixed retention. Runs past their
-// time limit are aborted first.
+// only through closure path 3 and then the fixed retention. Runs left
+// completing are finished (ResumeCompleting) and runs past their time
+// limit are aborted first; a run that fails to finish does not stop the
+// retention, its error is returned with the result.
+//
+// Prune is the periodic sweep, one call for all of it. The store does not
+// call it by itself and has no timer; the server wiring (ticket vu14w) is
+// to call it periodically, and until then no run is finished, aborted or
+// pruned without a client request. The caller must:
+//
+//   - call it at a fixed interval well below MaxRunDuration (an hour or
+//     less), so a run its client left completing is finished within one
+//     interval, and a forgotten run is aborted within one interval after
+//     its time limit;
+//   - not overlap calls on purpose (concurrent calls are safe: the second
+//     waits for the first and then finds little left to do);
+//   - pass a context with a deadline: resuming completing runs can take
+//     minutes and holds the store's complete lock, so a client Complete
+//     for another run waits behind it; a context that ends stops the
+//     sweep between apply transactions and leaves the run completing for
+//     the next call (TestSweepDeadlineLeavesCompletingRunResumable);
+//   - treat an error as "retry at the next interval" (log it with the
+//     counts of the result, which are valid with it).
 func (s *Store) Prune(ctx context.Context) (PruneResult, error) {
 	var res PruneResult
-	n, err := s.AbortExpiredRuns(ctx)
+	resumed, rerr := s.ResumeCompleting(ctx)
+	res.ResumedRuns = resumed
+	n, err := s.abortExpiredRuns(ctx)
 	if err != nil {
-		return res, err
+		return res, errors.Join(err, rerr)
 	}
 	res.AbortedRuns = n
+	res, err = s.prune(ctx, res)
+	return res, errors.Join(err, rerr)
+}
+
+// prune applies the retention steps of Prune in one write transaction.
+func (s *Store) prune(ctx context.Context, res PruneResult) (PruneResult, error) {
 	now := s.now().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
