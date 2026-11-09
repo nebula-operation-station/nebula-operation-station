@@ -63,7 +63,7 @@ const (
 	// resumed by the retry, or by the store's own sweep
 	// (vulnstore.ResumeCompleting) if the client does not come back. The
 	// apply phase is paced by rows: MaxFindingsPerRun superseded holds
-	// took about 50 s in vulnstore's
+	// took about 90 s in vulnstore's
 	// TestCompleteDropsSupersededHoldsInRowBoundedTransactions, most of it
 	// the pauses that let other server.db writers in, so the largest runs
 	// fit with headroom for slow disks. The complete is not cancelled when

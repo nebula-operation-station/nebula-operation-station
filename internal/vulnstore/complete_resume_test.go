@@ -74,10 +74,10 @@ func TestConcurrentWriterDuringLargestCompleteSucceeds(t *testing.T) {
 // more closures than one apply transaction takes.
 const resumeBig = resumeRows + 100
 
-// resumeRows is the row budget of the stores in resumeScenario: smaller
-// than maxApplyRows to keep the scenario small; resuming does not depend
-// on the budget (the startup case of TestServerFinishesCompletingRun
-// resumes with the default one).
+// resumeRows is the row budget of the stores in resumeScenario, fixed so
+// that the scenario's size does not follow maxApplyRows; resuming does
+// not depend on the budget (the startup case of
+// TestServerFinishesCompletingRun resumes with the default one).
 const resumeRows = 1024
 
 // resumeScenario: 30 hosts with one finding each and one host with

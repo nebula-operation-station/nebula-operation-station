@@ -23,7 +23,7 @@ const applyTxOverhead = 4
 // rowBudget is the row budget the tests hold an apply transaction to,
 // fixed here so that raising maxApplyRows (up to one transaction for the
 // whole complete) fails them instead of loosening them.
-const rowBudget = 2048
+const rowBudget = 1024
 
 // applyTxStat is one committed apply transaction: the rows it changed
 // (SQLite's own count, independent of the store's budget) and how long it

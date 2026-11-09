@@ -66,8 +66,9 @@ type Completion struct {
 //   - an apply transaction is bounded by the rows it writes, not by its
 //     statements: at most maxApplyRows rows (a statement that writes
 //     nothing counts as one; the superseded-holds DELETE runs in chunks
-//     of the rows left), plus the run report, which keeps it well under a
-//     second even on a slow disk;
+//     of the rows left), plus the run report: about 100 ms measured, and
+//     under about 1.5 s even under the race detector on a loaded machine
+//     (2048 rows took up to 2.9 s there);
 //   - the next one starts only after a pause of at least applyPause and
 //     at least as long as the previous transaction took, so the lock is
 //     free at least half of the time and every pause spans at least two
@@ -77,13 +78,14 @@ type Completion struct {
 //     at least eight pauses, so several concurrent writers all get
 //     through instead of only the first one per pause.
 //
-// For the largest run (10000 covered subjects, about 40000 rows) the
-// pauses add about 5 s; with MaxFindingsPerRun closures or dropped holds
-// (up to about 600000 rows) about 75 s, inside the API's complete budget,
-// and a complete that runs out of it is resumed (by the retry or the
-// server, see ResumeCompleting).
+// For the largest run (10000 covered subjects, about 30000 rows) the
+// pauses add about 8 s; MaxFindingsPerRun dropped holds take about 200
+// transactions, under two minutes. The largest conceivable complete
+// (about 600000 rows) may outlast the API's complete budget; it is then
+// resumed by the retry or by the server (ResumeCompleting), with the same
+// result.
 const (
-	maxApplyRows = 2048
+	maxApplyRows = 1024
 	applyPause   = 250 * time.Millisecond
 )
 
