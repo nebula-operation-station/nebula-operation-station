@@ -4,7 +4,7 @@
 
 Modules extend what Nebula can do on hosts but never run code on the Nebula machine and never bypass the executor.
 
-**OS adapters.** OS-specific commands live only in adapters; the core never calls `apt`, `dnf`, `zypper` or `apk`. V1 ships `os-debian` for Debian and Ubuntu with the capabilities `os.detect`, `os.facts`, `package.refresh`, `package.list_updates`, `package.install_security`, `package.install_all`, `system.reboot_required`, `system.reboot`, `service.list`, `service.status`, `service.restart`. Each capability has a versioned result contract such as `package.list_updates@1`.
+**OS adapters.** OS-specific commands live only in adapters; the core never calls `apt`, `dnf`, `zypper` or `apk`. V1 ships `os-debian` for Debian and Ubuntu with the capabilities `os.detect`, `os.facts`, `package.refresh`, `package.list_updates`, `package.list_installed` (read-only, ADR 0011; previously: not listed), `package.install_security`, `package.install_all`, `system.reboot_required`, `system.reboot`, `service.list`, `service.status`, `service.restart`. Each capability has a versioned result contract such as `package.list_updates@1`.
 
 **Script contract.** stdout carries exactly one JSON document that matches the contract; stderr carries human-readable diagnostics and goes to the execution log.
 
@@ -48,7 +48,7 @@ ui:
 
 <a id="v23-10-01"></a>
 <!-- Spec v2.3 (ADR 0006, ADR 0007): v23-10-01 -->
-**Read-only contract allowlist.** Standing grants initially cover `core.facts`, `package.list_updates`, `docker.list`, `docker.inspect`, `docker.check_updates`, `service.list`, `service.status` and `net.facts` (the built-in traffic-map snapshot read, ADR 0009 D1; see [07-execution-model.md](07-execution-model.md) and [09-untrusted-host-data.md](09-untrusted-host-data.md)), only at effective LOW risk with an explicitly approved read-only contract. Bind exact container incarnation/unit parameters for inspection/status; enumeration does not authorize arbitrary follow-ups. Exclude `package.refresh` because it writes package metadata even if declared LOW, and exclude `docker.logs` and all secret-bearing actions. Neither declared LOW nor a clean scanner result proves harmlessness. Typed PVE readers are built-in provider methods, never generic HTTP proxies or server plugins.
+**Read-only contract allowlist.** Standing grants initially cover `core.facts`, `package.list_updates`, `docker.list`, `docker.inspect`, `docker.check_updates`, `service.list`, `service.status`, `net.facts` (the built-in traffic-map snapshot read, ADR 0009 D1; see [07-execution-model.md](07-execution-model.md) and [09-untrusted-host-data.md](09-untrusted-host-data.md)), `package.list_installed` and `image.packages` (vulnerability inventory reads, ADR 0011 D3, [below](#v24-10-01); previously: not listed), only at effective LOW risk with an explicitly approved read-only contract. Bind exact container incarnation/unit parameters for inspection/status; enumeration does not authorize arbitrary follow-ups. Exclude `package.refresh` because it writes package metadata even if declared LOW, and exclude `docker.logs` and all secret-bearing actions. Neither declared LOW nor a clean scanner result proves harmlessness. Typed PVE readers are built-in provider methods, never generic HTTP proxies or server plugins.
 
 <a id="v23-10-02"></a>
 <!-- Spec v2.3 (ADR 0006, ADR 0007): v23-10-02 -->
@@ -63,6 +63,17 @@ ui:
 | `docker.stats` | One bounded non-streaming CPU/RAM snapshot keyed by full container ID; validated list/inspect hints for Compose grouping |
 | `service.check` | Bounded HTTP/TCP health/latency from an enrolled host, exact approved destination/port, no redirects, generic URLs or response bodies; unknown if unconfigured |
 | `image.vulnerabilities` (optional) | Sanitized unique CVE counts/severity, immutable local image identity and scanner/database age from operator-installed host-local Trivy; no installation, image pull or database refresh |
+
+<a id="v24-10-01"></a>
+<!-- Spec revision (ADR 0011, VU-02): v24-10-01 -->
+**Vulnerability inventory reads (ADR 0011 D3).** Two further LOW read-only contracts feed the vulnerability inventory export. Both are added to the read-only contract allowlist above (previously: not on it) with a cost limit of at most one run every 6 h per host, inside the ordinary read budgets of [07-execution-model.md](07-execution-model.md#v24-07-01). Neither installs, pulls, refreshes or changes anything on the host.
+
+| Action | Read-only scope |
+| --- | --- |
+| `package.list_installed` (`os-debian`) | `dpkg-query -W` per installed binary: name, version, `source:Package`, `source:Version`, architecture and status, plus `Built-Using` for `linux-image-*` binaries only (kernel mapping); the running kernel release and build string (`uname -r`, `uname -v`) where existing facts do not already carry them. At most 20,000 packages. Parsed with the `osdebian` strict-line pattern |
+| `image.packages` (optional, `dockerhost`) | Package list of an already-local image by platform digest from the same operator-installed host-local Trivy as `image.vulnerabilities`, reduced on the host to `(ecosystem, name, version, source name, source version)`; Trivy's vulnerability database is not used, and there is no installation, image pull or database refresh. At most 5,000 packages. Missing Trivy yields "image packages unknown", never an empty list; no raw scanner output leaves the host |
+
+Each result carries a **completeness flag**. `package.list_installed` is complete only when the command exited successfully, every line parsed and the 20,000 limit was not reached. `image.packages` is complete only when Trivy exited successfully, the whole output parsed with no package entry dropped by validation, the 5,000 limit was not reached, the scanned image is the requested platform digest and Trivy detected the image's OS family and release. Anything else is stored as a **partial** read: it may add inventory but never proves that a component was removed or fixed (closure paths in [12-inventory.md](12-inventory.md#v24-12-02)).
 
 <a id="v23-10-04"></a>
 <!-- Spec v2.3 (ADR 0006, ADR 0007): v23-10-04 -->
