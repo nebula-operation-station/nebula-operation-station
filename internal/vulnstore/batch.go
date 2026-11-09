@@ -104,6 +104,9 @@ func (s *Store) SubmitBatch(ctx context.Context, runID string, b Batch) (BatchRe
 			return BatchResult{}, fmt.Errorf("vulnstore: submit batch: covered: %w", err)
 		}
 	}
+	if err := checkItemKeys(b.Items); err != nil {
+		return BatchResult{}, fmt.Errorf("vulnstore: submit batch: %w", err)
+	}
 	now := s.now().UTC()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -136,7 +139,10 @@ func (s *Store) SubmitBatch(ctx context.Context, runID string, b Batch) (BatchRe
 	case !errors.Is(err, sql.ErrNoRows):
 		return BatchResult{}, fmt.Errorf("vulnstore: submit batch: %w", err)
 	}
-	if r.findings+len(b.Items) > MaxFindingsPerRun {
+	// Rejected keys count against the run limit too, so a run cannot grow
+	// its rejected and batch rows without bound.
+	records := len(b.Items) + len(b.Rejected)
+	if r.findings+records > MaxFindingsPerRun {
 		return BatchResult{}, fmt.Errorf("vulnstore: submit batch: %w", ErrBatchTooLarge)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO vuln_run_batches (run_id, batch_seq, body_sha256, rejected) VALUES (?, ?, ?, 0)`,
@@ -166,7 +172,7 @@ func (s *Store) SubmitBatch(ctx context.Context, runID string, b Batch) (BatchRe
 		}
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE vuln_runs SET finding_count = finding_count + ?, superseded = superseded + ? WHERE id = ?`,
-		len(b.Items), res.Superseded, runID); err != nil {
+		records, res.Superseded, runID); err != nil {
 		return BatchResult{}, fmt.Errorf("vulnstore: submit batch: %w", err)
 	}
 	if len(res.Ignored) > 0 || res.Downgrades > 0 {
@@ -186,6 +192,35 @@ func (s *Store) SubmitBatch(ctx context.Context, runID string, b Batch) (BatchRe
 		return BatchResult{}, fmt.Errorf("vulnstore: submit batch: commit: %w", err)
 	}
 	return res, nil
+}
+
+// checkItemKeys re-validates every record and refuses the batch when the
+// caller-supplied key is not the NOS-computed key of its record, so a
+// caller bug can never write one finding's values under another's key.
+func checkItemKeys(items []Item) error {
+	for i, it := range items {
+		f, err := vulnfinding.Validate(it.Finding.Record)
+		if err != nil {
+			return fmt.Errorf("items[%d]: record: %w", i, ErrInvalidInput)
+		}
+		if f.Key != it.Finding.Key {
+			return fmt.Errorf("items[%d]: key does not match record: %w", i, ErrInvalidInput)
+		}
+	}
+	return nil
+}
+
+// checkStoredSubject refuses a record whose subject differs from the
+// stored row's subject column (closures and guards work per subject).
+func checkStoredSubject(ctx context.Context, tx *sql.Tx, k vulnfinding.Key, subj Subject) error {
+	var stored string
+	if err := tx.QueryRowContext(ctx, `SELECT subject FROM vuln_findings WHERE finding_key = ?`, k[:]).Scan(&stored); err != nil {
+		return fmt.Errorf("stored subject: %w", err)
+	}
+	if stored != subj.String() {
+		return fmt.Errorf("record subject differs from stored subject: %w", ErrInvalidInput)
+	}
+	return nil
 }
 
 func markRejected(ctx context.Context, tx *sql.Tx, runID string, k vulnfinding.Key) error {
@@ -234,6 +269,13 @@ func (s *Store) applyItem(ctx context.Context, tx *sql.Tx, run runRow, sources m
 		return markRejected(ctx, tx, run.id, f.Key)
 	}
 	if rec.Fix.State == vulnfinding.FixNotAffected {
+		if raise {
+			// A raise-only source cannot lower a finding, so its
+			// not_affected is no closure request (D5). The record still
+			// reports the key, so the finding is not omitted either.
+			res.Ignored = append(res.Ignored, IgnoredChange{Key: f.Key.String(), Field: "fix"})
+			return markReported(ctx, tx, run.id, f.Key, false)
+		}
 		res.ClosureRequests++
 		return markReported(ctx, tx, run.id, f.Key, true)
 	}
@@ -241,16 +283,22 @@ func (s *Store) applyItem(ctx context.Context, tx *sql.Tx, run runRow, sources m
 		res.Rejected++
 		return markRejected(ctx, tx, run.id, f.Key)
 	}
-	if err := markReported(ctx, tx, run.id, f.Key, false); err != nil {
-		return err
-	}
 
 	cur, err := loadFinding(ctx, tx, f.Key)
 	if errors.Is(err, ErrFindingNotFound) {
+		if err := markReported(ctx, tx, run.id, f.Key, false); err != nil {
+			return err
+		}
 		res.Opened++
 		return s.insertFinding(ctx, tx, run, subj, it, now)
 	}
 	if err != nil {
+		return err
+	}
+	if err := checkStoredSubject(ctx, tx, f.Key, subj); err != nil {
+		return err
+	}
+	if err := markReported(ctx, tx, run.id, f.Key, false); err != nil {
 		return err
 	}
 	if cur.StateRunSeq > run.seq {
