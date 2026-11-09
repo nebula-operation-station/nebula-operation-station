@@ -437,3 +437,37 @@ func TestKernelStateString(t *testing.T) {
 		}
 	}
 }
+
+// ImageBasis is the per-image rule RunningKernel and KernelStatus use; the
+// osdebian parser lists installed kernels with it so that there is one
+// kernel mapping rule only.
+func TestImageBasisUsesTheRunningKernelRule(t *testing.T) {
+	cases := []struct {
+		name    string
+		b       Binary
+		src     string
+		ver     string
+		unknown bool
+	}{
+		{"unsigned source", Binary{Name: "linux-image-6.1.0-26-cloud-amd64", SourceName: "linux", SourceVersion: "6.1.112-1"}, "linux", "6.1.112-1", false},
+		{"signed via Built-Using", Binary{Name: "linux-image-6.1.0-26-amd64", SourceName: "linux-signed-amd64", SourceVersion: "6.1.112+1", BuiltUsing: "linux (= 6.1.112-1)"}, "linux", "6.1.112-1", false},
+		{"signed without Built-Using", Binary{Name: "linux-image-6.1.0-26-amd64", SourceName: "linux-signed-amd64", SourceVersion: "6.1.112+1"}, "", "", true},
+		{"two kernel sources", Binary{Name: "linux-image-6.1.0-26-amd64", SourceName: "linux-signed-amd64", SourceVersion: "6.1.112+1", BuiltUsing: "linux (= 6.1.112-1), linux-hwe-6.1 (= 6.1.112-1)"}, "", "", true},
+		{"meta source", Binary{Name: "linux-image-generic", SourceName: "linux-meta", SourceVersion: "6.8.0.45.45"}, "", "", true},
+		{"unrelated source", Binary{Name: "linux-image-x", SourceName: "custom-kernel", SourceVersion: "1"}, "", "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			kb, err := ImageBasis(c.b)
+			if c.unknown {
+				if err == nil || kb != (KernelBasis{}) {
+					t.Fatalf("ImageBasis = %+v, %v; want no basis", kb, err)
+				}
+				return
+			}
+			if err != nil || kb.SourceName != c.src || kb.Version != c.ver || kb.ImageBinary != c.b.Name {
+				t.Fatalf("ImageBasis = %+v, %v; want %s %s", kb, err, c.src, c.ver)
+			}
+		})
+	}
+}
