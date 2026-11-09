@@ -1,0 +1,11 @@
+{
+  "version": "attackpath-graph-v1",
+  "nodes": [
+    {"id": "internet", "kind": "internet", "label": "Internet"},
+    {"id": "netbird", "kind": "netbird", "label": "NetBird peers"}
+  ],
+  "edges": [],
+  "truncated": false,
+  "dropped_nodes": 0,
+  "dropped_edges": 0
+}

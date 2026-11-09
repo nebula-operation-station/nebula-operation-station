@@ -1,0 +1,33 @@
+{
+  "version": "attackpath-graph-v1",
+  "nodes": [
+    {"id": "ctr:web", "kind": "container", "label": "web"},
+    {"id": "dev:fw", "kind": "network_device", "label": "firewall"},
+    {"id": "guest:101", "kind": "guest", "label": "nas"},
+    {"id": "guest:102", "kind": "guest", "label": "docker"},
+    {"id": "host:exec", "kind": "host", "label": "executor"},
+    {"id": "internet", "kind": "internet", "label": "Internet"},
+    {"id": "netbird", "kind": "netbird", "label": "NetBird peers"},
+    {"id": "pve:n1", "kind": "pve_node", "label": "pve-1"},
+    {"id": "unk:10.0.0.9", "kind": "unmanaged", "label": ""}
+  ],
+  "edges": [
+    {"from": "ctr:web", "to": "guest:102", "kind": "escape", "basis": "inventory", "assumed": false, "escape": ["privileged", "docker_socket"]},
+    {"from": "guest:101", "to": "guest:102", "kind": "l2_adjacency", "basis": "assumed", "assumed": true},
+    {"from": "guest:102", "to": "ctr:web", "kind": "control", "basis": "inventory", "assumed": false},
+    {"from": "guest:102", "to": "guest:101", "kind": "network_observed", "basis": "observed", "assumed": false, "proto": "udp", "port": 2049},
+    {"from": "guest:102", "to": "guest:101", "kind": "l2_adjacency", "basis": "assumed", "assumed": true},
+    {"from": "host:exec", "to": "guest:101", "kind": "credential", "basis": "inventory", "assumed": false},
+    {"from": "host:exec", "to": "guest:102", "kind": "credential", "basis": "inventory", "assumed": false},
+    {"from": "host:exec", "to": "pve:n1", "kind": "credential", "basis": "inventory", "assumed": false},
+    {"from": "internet", "to": "ctr:web", "kind": "network_policy", "basis": "policy", "assumed": false, "proto": "tcp", "port": 8443},
+    {"from": "internet", "to": "dev:fw", "kind": "network_policy", "basis": "policy", "assumed": false, "proto": "tcp", "port": 443},
+    {"from": "netbird", "to": "pve:n1", "kind": "network_policy", "basis": "policy", "assumed": false, "proto": "tcp", "port": 8006},
+    {"from": "pve:n1", "to": "guest:101", "kind": "control", "basis": "inventory", "assumed": false},
+    {"from": "pve:n1", "to": "guest:102", "kind": "control", "basis": "inventory", "assumed": false},
+    {"from": "unk:10.0.0.9", "to": "guest:101", "kind": "network_observed", "basis": "observed", "assumed": false, "proto": "tcp", "port": 445}
+  ],
+  "truncated": false,
+  "dropped_nodes": 0,
+  "dropped_edges": 0
+}
