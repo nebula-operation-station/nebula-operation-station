@@ -497,10 +497,12 @@ func TestInputLimitsBoundBuilderMemory(t *testing.T) {
 	if i+2 != MaxInputNodes {
 		t.Fatalf("input limit hit after %d nodes (+2 entries), want %d", i, MaxInputNodes)
 	}
-	// Re-adding a known node is still fine; a new edge budget applies.
+	// Re-adding a known node is still fine; a new edge budget applies. The
+	// edges come in keep order, so the first one past the limit ranks last
+	// and is dropped (an edge ranking earlier would evict instead).
 	mustNode(t, b, Node{ID: "u000000", Kind: NodeUnmanaged})
 	for i = 0; i < MaxInputEdges+5; i++ {
-		if err = b.AddEdge(Edge{From: fmt.Sprintf("u%06d", i%1000), To: fmt.Sprintf("u%06d", 1000+i/1000), Kind: EdgeL2Adjacency}); err != nil {
+		if err = b.AddEdge(Edge{From: fmt.Sprintf("u%06d", i/1000), To: fmt.Sprintf("u%06d", 1000+i%1000), Kind: EdgeL2Adjacency}); err != nil {
 			break
 		}
 	}

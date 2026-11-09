@@ -33,11 +33,14 @@ const (
 	// MaxEdges is the edge cap of one graph. Edges beyond it are dropped and
 	// the graph is marked truncated.
 	MaxEdges = 50000
-	// MaxInputNodes bounds the distinct nodes a Builder stores before Build
-	// applies MaxNodes; it bounds memory on hostile or runaway input.
+	// MaxInputNodes bounds the distinct nodes a Builder holds before Build
+	// applies MaxNodes; it bounds memory on hostile or runaway input. At
+	// the limit the node kept last is evicted (rank-aware, see Builder).
+	// The builder also remembers up to this many dropped nodes.
 	MaxInputNodes = 4 * MaxNodes
-	// MaxInputEdges bounds the distinct edges a Builder stores before Build
-	// applies MaxEdges.
+	// MaxInputEdges bounds the distinct edges a Builder holds before Build
+	// applies MaxEdges, with the same rank-aware eviction. The builder also
+	// remembers up to this many dropped edge keys.
 	MaxInputEdges = 4 * MaxEdges
 	// MaxIDBytes bounds a node ID.
 	MaxIDBytes = 128
@@ -65,8 +68,9 @@ var (
 	ErrInvalidEdge = errors.New("invalid edge")
 	// ErrUnknownNode reports an edge endpoint that was not added first.
 	ErrUnknownNode = errors.New("unknown node")
-	// ErrInputLimit reports that the builder's input bound is reached; the
-	// input is dropped and the graph will be marked truncated.
+	// ErrInputLimit reports that the builder's input bound is reached and
+	// the input ranks after everything held; the input is dropped and the
+	// graph will be marked truncated.
 	ErrInputLimit = errors.New("attack-path input limit reached")
 )
 
