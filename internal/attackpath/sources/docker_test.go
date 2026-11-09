@@ -179,6 +179,56 @@ func TestDockerUnreadManagedHostIsUncertain(t *testing.T) {
 	}
 }
 
+func TestDockerUnlinkedGuestIsUnread(t *testing.T) {
+	// Guest 100 is host web, PVE node pve1 is host hv1; guest 101 is no
+	// managed host, so no Docker inventory can exist for it.
+	cfg := dockerConfig(fakeDocker{hosts: []DockerHost{{HostID: "web", Complete: true}, {HostID: "hv1", Complete: true}}}, "web", "hv1")
+	cfg.Managed = []string{"guest:lab/100", "guest:lab/101", "pve:lab/pve1"}
+	cfg.Aliases = map[string]string{"host:web": "guest:lab/100", "host:hv1": "pve:lab/pve1"}
+	r, err := Docker(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(r.Uncertain, []Uncertainty{{SourceDocker, UncertainDockerUnread, "guest:lab/101"}}) {
+		t.Fatalf("uncertain %v", r.Uncertain)
+	}
+	if r.Status != StatusPartial || r.Coverage != (Coverage{Covered: 2, Total: 3}) {
+		t.Fatalf("status %s coverage %+v", r.Status, r.Coverage)
+	}
+	if want := []string{"guest:lab/100", "pve:lab/pve1"}; !slices.Equal(r.Covered, want) {
+		t.Fatalf("covered %v, want %v", r.Covered, want)
+	}
+	// Invalid managed IDs are reported, not expected.
+	cfg.Managed = []string{"guest:a b"}
+	r, err = Docker(context.Background(), cfg)
+	if err != nil || !hasUncertainty(r.Uncertain, UncertainInvalidRecord, "") || r.Status != StatusPartial {
+		t.Fatalf("invalid managed id: %v %+v", err, r)
+	}
+}
+
+func TestDockerSkipsUnmanagedInventoryHosts(t *testing.T) {
+	// "old" has a stored Docker inventory but is no longer managed.
+	cfg := dockerConfig(fakeDocker{hosts: []DockerHost{
+		{HostID: "old", Complete: true, Containers: []dockerhost.Inspect{ctr("aaaaaaaaaaaa", "x")}},
+		{HostID: "web", Complete: true},
+	}}, "web")
+	r, err := Docker(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Coverage != (Coverage{Covered: 1, Total: 1}) || r.Status != StatusComplete {
+		t.Fatalf("status %s coverage %+v", r.Status, r.Coverage)
+	}
+	for _, n := range r.Nodes {
+		if strings.Contains(n.ID, "old") {
+			t.Fatalf("unmanaged host node %s added", n.ID)
+		}
+	}
+	if !slices.Equal(r.Covered, []string{"host:web"}) {
+		t.Fatalf("covered %v", r.Covered)
+	}
+}
+
 func TestDockerHostListErrorIsUnknown(t *testing.T) {
 	cfg := DockerConfig{Reader: labDocker(), Hosts: fakeHosts{err: errors.New("db")}}
 	r, err := Docker(context.Background(), cfg)

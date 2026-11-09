@@ -14,8 +14,10 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/attackpath"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/flowagg"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
 )
@@ -49,7 +51,7 @@ func labResults(t *testing.T) []Result {
 	if err != nil {
 		t.Fatal(err)
 	}
-	docker, err := Docker(ctx, DockerConfig{Reader: labDocker(), Hosts: hosts})
+	docker, err := Docker(ctx, DockerConfig{Reader: labDocker(), Hosts: hosts, Managed: ManagedNodes(place), Aliases: place.Aliases})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +245,7 @@ func TestMergeUnknownSourceIsNeverComplete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	others := completeStubs(SourceDocker, SourceFlows, SourcePlacements, SourceVLAN)
+	others := append(coveringStubs([]string{"host:a", "host:b"}, SourceDocker, SourceFlows), completeStubs(SourcePlacements, SourceVLAN)...)
 	rep, err := Merge(attackpath.NewBuilder(), append(others, creds, FirewallPolicy())...)
 	if err != nil || rep.Complete() || rep.Coverage() != (Coverage{Covered: 2, Total: 3}) {
 		t.Fatalf("with unknown firewall: %v complete=%v coverage %+v", err, rep.Complete(), rep.Coverage())
@@ -451,12 +453,178 @@ func TestMergeOverBuildEdgeCapIsNeverComplete(t *testing.T) {
 
 func TestMergeUntruncatedGraphStaysComplete(t *testing.T) {
 	r := Result{Source: SourceCredentials, Status: StatusComplete}
+	var ids []string
 	for i := range attackpath.MaxNodes - 2 { // plus the two entry nodes
-		r.Nodes = append(r.Nodes, attackpath.Node{ID: fmt.Sprintf("host:h%06d", i), Kind: attackpath.NodeHost})
+		id := fmt.Sprintf("host:h%06d", i)
+		ids = append(ids, id)
+		r.Nodes = append(r.Nodes, attackpath.Node{ID: id, Kind: attackpath.NodeHost})
 	}
-	rs := append(completeStubs(SourceDocker, SourceFirewall, SourceFlows, SourcePlacements, SourceVLAN), r)
+	// Docker and flows cover every managed host of the graph.
+	rs := append(coveringStubs(ids, SourceDocker, SourceFlows), r)
+	rs = append(rs, completeStubs(SourceFirewall, SourcePlacements, SourceVLAN)...)
 	rep, err := Merge(attackpath.NewBuilder(), rs...)
 	if err != nil || !rep.Complete() || rep.GraphTruncated {
-		t.Fatalf("graph at the cap: %v complete=%v graph_truncated=%v", err, rep.Complete(), rep.GraphTruncated)
+		t.Fatalf("graph at the cap: %v complete=%v graph_truncated=%v uncertain %d", err, rep.Complete(), rep.GraphTruncated, len(rep.Uncertain))
+	}
+	if c := rep.Coverage(); c.Covered != c.Total {
+		t.Fatalf("coverage %+v", c)
+	}
+	// The same graph with empty Docker and flow results is not complete.
+	rs = append(completeStubs(SourceDocker, SourceFirewall, SourceFlows, SourcePlacements, SourceVLAN), r)
+	rep, err = Merge(attackpath.NewBuilder(), rs...)
+	if err != nil || rep.Complete() {
+		t.Fatalf("empty Docker and flows over %d hosts: %v complete=%v", len(ids), err, rep.Complete())
+	}
+}
+
+// coveringStubs returns per source a completely read Result that covers
+// the managed nodes ids.
+func coveringStubs(ids []string, names ...string) []Result {
+	var rs []Result
+	for _, n := range names {
+		rs = append(rs, Result{Source: n, Status: StatusComplete, Covered: slices.Clone(ids)})
+	}
+	return rs
+}
+
+// credsFor returns a complete credentials Result over the hosts ids, the
+// first being the executor.
+func credsFor(t *testing.T, ids ...string) Result {
+	t.Helper()
+	r, err := Credentials(context.Background(), CredentialConfig{Hosts: inventoryOf(ids...), ExecutorHostID: ids[0]})
+	if err != nil || r.Status != StatusComplete {
+		t.Fatalf("credentials: %v %s", err, r.Status)
+	}
+	return r
+}
+
+func TestMergeEmptyCompleteStubsAreIncomplete(t *testing.T) {
+	// Docker and flows claim "complete" but cover none of the managed
+	// hosts the credentials source put into the graph.
+	rs := append(completeStubs(SourceDocker, SourceFirewall, SourceFlows, SourcePlacements, SourceVLAN), credsFor(t, "a", "b"))
+	rep, err := Merge(attackpath.NewBuilder(), rs...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Complete() {
+		t.Fatal("empty Docker and flow results read complete")
+	}
+	for _, u := range []Uncertainty{
+		{SourceDocker, UncertainDockerUnread, "host:a"},
+		{SourceDocker, UncertainDockerUnread, "host:b"},
+		{SourceFlows, UncertainNoFlows, "host:a"},
+		{SourceFlows, UncertainNoFlows, "host:b"},
+	} {
+		if !slices.Contains(rep.Uncertain, u) {
+			t.Errorf("missing %s in %v", u, rep.Uncertain)
+		}
+	}
+	if rep.Uncovered != 4 {
+		t.Errorf("uncovered %d, want 4", rep.Uncovered)
+	}
+	if c := rep.Coverage(); c != (Coverage{Covered: 2, Total: 6}) {
+		t.Errorf("coverage %+v", c)
+	}
+}
+
+func TestMergeNilHostsAdaptersAreIncomplete(t *testing.T) {
+	// Docker and flows were wired with an empty host list: each reads
+	// "complete" over nothing, while the graph holds managed hosts a, b,
+	// a guest and a PVE node.
+	ctx := context.Background()
+	docker, err := Docker(ctx, DockerConfig{
+		Reader: fakeDocker{hosts: []DockerHost{{HostID: "a", Complete: true}, {HostID: "b", Complete: true}}},
+		Hosts:  fakeHosts{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	flows, err := Flows(ctx, FlowConfig{Reader: &fakeFlows{}, Hosts: fakeHosts{}, Now: func() time.Time { return fixedNow }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	place := Result{Source: SourcePlacements, Status: StatusComplete, Nodes: []attackpath.Node{
+		{ID: "guest:r/1", Kind: attackpath.NodeGuest},
+		{ID: "pve:r/n1", Kind: attackpath.NodePVENode},
+	}}
+	rs := append(completeStubs(SourceFirewall, SourceVLAN), credsFor(t, "a", "b"), docker, flows, place)
+	rep, err := Merge(attackpath.NewBuilder(), rs...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Complete() {
+		t.Fatalf("nil-host adapters read complete: %v", rep.Uncertain)
+	}
+	for _, id := range []string{"host:a", "host:b", "guest:r/1", "pve:r/n1"} {
+		if !hasUncertainty(rep.Uncertain, UncertainDockerUnread, id) {
+			t.Errorf("docker_unread %s missing in %v", id, rep.Uncertain)
+		}
+		if !hasUncertainty(rep.Uncertain, UncertainNoFlows, id) {
+			t.Errorf("no_flows_observed %s missing in %v", id, rep.Uncertain)
+		}
+	}
+	if c := rep.Coverage(); c.Covered == c.Total {
+		t.Fatalf("coverage %+v", c)
+	}
+
+	// A partial Managed list: flows know host a only.
+	out := flow("10.0.0.1", "203.0.113.9", flowagg.TCP, 443)
+	out.ServerReported = true
+	flows, err = Flows(ctx, FlowConfig{
+		Reader: &fakeFlows{flows: []flowagg.FlowTotal{out}},
+		Hosts:  inventoryOf("a"),
+		Owners: []AddressOwner{owner("10.0.0.1", "host:a", attackpath.NodeHost)},
+		Now:    func() time.Time { return fixedNow },
+	})
+	if err != nil || flows.Status != StatusComplete {
+		t.Fatalf("flows over a: %v %s %v", err, flows.Status, flows.Uncertain)
+	}
+	rs = append(completeStubs(SourceFirewall, SourcePlacements, SourceVLAN), credsFor(t, "a", "b"), flows,
+		coveringStubs([]string{"host:a", "host:b"}, SourceDocker)[0])
+	rep, err = Merge(attackpath.NewBuilder(), rs...)
+	if err != nil || rep.Complete() || !slices.Equal(rep.Uncertain, []Uncertainty{{SourceFlows, UncertainNoFlows, "host:b"}}) {
+		t.Fatalf("partial managed list: %v complete=%v uncertain %v", err, rep.Complete(), rep.Uncertain)
+	}
+}
+
+func TestMergeFullCoverageIsComplete(t *testing.T) {
+	ctx := context.Background()
+	hosts := inventoryOf("a", "b")
+	docker, err := Docker(ctx, DockerConfig{
+		Reader: fakeDocker{hosts: []DockerHost{{HostID: "a", Complete: true}, {HostID: "b", Complete: true}}},
+		Hosts:  hosts,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := flow("10.0.0.1", "10.0.0.2", flowagg.TCP, 22)
+	f.ServerReported = true
+	flows, err := Flows(ctx, FlowConfig{
+		Reader: &fakeFlows{flows: []flowagg.FlowTotal{f}},
+		Hosts:  hosts,
+		Owners: []AddressOwner{owner("10.0.0.1", "host:a", attackpath.NodeHost), owner("10.0.0.2", "host:b", attackpath.NodeHost)},
+		Now:    func() time.Time { return fixedNow },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rs := append(completeStubs(SourceFirewall, SourcePlacements, SourceVLAN), credsFor(t, "a", "b"), docker, flows)
+	rep, err := Merge(attackpath.NewBuilder(), rs...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := rep.Coverage(); !rep.Complete() || c.Covered != c.Total || rep.Uncovered != 0 {
+		t.Fatalf("full coverage: complete=%v coverage %+v uncertain %v", rep.Complete(), c, rep.Uncertain)
+	}
+}
+
+func TestCompleteRequiresFullCoverage(t *testing.T) {
+	rep := Report{Sources: []SourceReport{{Source: SourceCredentials, Status: StatusComplete, Coverage: Coverage{Covered: 1, Total: 2}}}}
+	if rep.Complete() {
+		t.Fatal("coverage 1/2 reads complete")
+	}
+	rep = Report{Sources: []SourceReport{{Source: SourceCredentials, Status: StatusComplete}}, Uncovered: 1}
+	if rep.Complete() {
+		t.Fatal("uncovered graph node reads complete")
 	}
 }

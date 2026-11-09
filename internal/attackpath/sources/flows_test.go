@@ -326,6 +326,51 @@ func TestFlowsEveryManagedNodeCoveredIsComplete(t *testing.T) {
 	}
 }
 
+func TestFlowsCutListWithInvalidRecordsStaysIncomplete(t *testing.T) {
+	// The store returned the top 3 flows of 10.0.0.10; one is invalid. The
+	// list was still cut, so flows below it are unknown.
+	cfg := FlowConfig{
+		Reader: &fakeFlows{flows: []flowagg.FlowTotal{
+			flow("10.0.0.11", "10.0.0.10", flowagg.TCP, 22),
+			flow("10.0.0.12", "10.0.0.10", flowagg.TCP, 22),
+			flow("10.0.0.13", "10.0.0.10", flowagg.Proto(1), 1),
+		}},
+		Hosts:  inventoryOf("a"),
+		Owners: []AddressOwner{owner("10.0.0.10", "host:a", attackpath.NodeHost)},
+		Now:    func() time.Time { return fixedNow },
+		TopN:   3,
+	}
+	r, err := Flows(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasUncertainty(r.Uncertain, UncertainFlowsIncomplete, "host:a") || r.Coverage != (Coverage{Covered: 0, Total: 1}) || len(r.Covered) != 0 {
+		t.Fatalf("uncertain %v coverage %+v covered %v", r.Uncertain, r.Coverage, r.Covered)
+	}
+}
+
+func TestFlowsCoveredListsNodesWithEveryAddressCovered(t *testing.T) {
+	cfg := FlowConfig{
+		Reader: &fakeFlows{flows: []flowagg.FlowTotal{
+			flow("10.0.0.10", "10.0.0.20", flowagg.TCP, 22),
+		}},
+		Hosts: inventoryOf("a", "b"),
+		Owners: []AddressOwner{
+			owner("10.0.0.10", "host:a", attackpath.NodeHost),
+			owner("10.0.0.20", "host:b", attackpath.NodeHost),
+			owner("10.0.0.21", "host:b", attackpath.NodeHost), // no flows
+		},
+		Now: func() time.Time { return fixedNow },
+	}
+	r, err := Flows(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(r.Covered, []string{"host:a"}) {
+		t.Fatalf("covered %v", r.Covered)
+	}
+}
+
 func TestFlowsRejectInvalidManagedNodes(t *testing.T) {
 	for _, id := range []string{"unk:x", "ctr:a/bbbbbbbbbbbb", "guest:a b", "pve:", "internet", ""} {
 		cfg := FlowConfig{Reader: &fakeFlows{}, Hosts: fakeHosts{}, Managed: []string{id}, Now: func() time.Time { return fixedNow }}

@@ -154,6 +154,14 @@ func Flows(ctx context.Context, cfg FlowConfig) (Result, error) {
 	seen := map[netip.Addr]int{}
 	for _, f := range flows {
 		k := f.Key
+		// Count every returned record against the top-N cut before any
+		// validity check: a skipped record still filled a place in the
+		// cut list.
+		for _, a := range []netip.Addr{k.A.Unmap().WithZone(""), k.B.Unmap().WithZone("")} {
+			if _, ok := book[a]; ok {
+				seen[a]++
+			}
+		}
 		var proto attackpath.Proto
 		switch k.Proto {
 		case flowagg.TCP:
@@ -175,11 +183,6 @@ func Flows(ctx context.Context, cfg FlowConfig) (Result, error) {
 			server, client = k.B, k.A
 		}
 		server, client = server.Unmap().WithZone(""), client.Unmap().WithZone("")
-		for _, a := range []netip.Addr{server, client} {
-			if _, ok := book[a]; ok {
-				seen[a]++
-			}
-		}
 		to, toEntry, ok := flowEnd(c, book, netbird, server)
 		if !ok {
 			continue
@@ -201,8 +204,12 @@ func Flows(ctx context.Context, cfg FlowConfig) (Result, error) {
 		c.edge(attackpath.Edge{From: from, To: to, Kind: attackpath.EdgeNetworkObserved, Proto: proto, Port: k.ServerPort})
 	}
 
+	// nodeCovered maps a managed owner node (after aliasing) to whether
+	// every one of its queried addresses was covered.
+	nodeCovered := map[string]bool{}
 	for _, a := range addrs {
 		o := book[a]
+		ok := false
 		switch cnt := seen[a]; {
 		case cnt == 0:
 			c.uncertain(UncertainNoFlows, o.NodeID)
@@ -210,6 +217,19 @@ func Flows(ctx context.Context, cfg FlowConfig) (Result, error) {
 			c.uncertain(UncertainFlowsIncomplete, o.NodeID)
 		default:
 			c.r.Coverage.Covered++
+			ok = true
+		}
+		if o.Kind.Managed() {
+			id := resolveAlias(cfg.Aliases, o.NodeID)
+			if prev, had := nodeCovered[id]; had {
+				ok = ok && prev
+			}
+			nodeCovered[id] = ok
+		}
+	}
+	for id, ok := range nodeCovered {
+		if ok {
+			c.r.Covered = append(c.r.Covered, id)
 		}
 	}
 	queried := make(map[string]bool, len(addrs))

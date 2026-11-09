@@ -47,6 +47,15 @@ type DockerConfig struct {
 	// Hosts reads the managed hosts: each is expected to have a Docker
 	// inventory, and one without is UncertainDockerUnread.
 	Hosts HostLister
+	// Managed are the IDs of the other managed nodes, the guests and PVE
+	// nodes (ManagedNodes of the Placements result). Each is expected to be
+	// a managed host with a Docker inventory, like the hosts; a guest that
+	// is no managed host is UncertainDockerUnread.
+	Managed []string
+	// Aliases maps a managed host node ID to the node of the same machine
+	// (the Placements result's Aliases), so a host and its guest or PVE
+	// node are one expected node.
+	Aliases map[string]string
 }
 
 // Docker returns the container edges of ADR 0011 D10: Docker host →
@@ -59,11 +68,16 @@ type DockerConfig struct {
 // a container without a proven escape is UncertainEscapeUnverified: its
 // escape is not excluded, only not proven. An incomplete host read and a
 // precheck-only inspect are UncertainPartialData. The coverage unit is a
-// Docker host, and every managed host of cfg.Hosts is one: covered when
-// its read was complete and every container was fully inspected. A managed
-// host without a Docker inventory entry (never read, or cut by
-// MaxDockerHosts) is UncertainDockerUnread and uncovered, so the source is
-// never complete while a managed host's containers are unknown.
+// managed node: every managed host of cfg.Hosts and every guest and PVE
+// node of cfg.Managed, after cfg.Aliases. A node is covered (and listed in
+// Result.Covered) when the Docker inventory of the host it is was read
+// completely and every container was fully inspected. A node without a
+// Docker inventory entry (never read, cut by MaxDockerHosts, or a guest
+// that is no managed host) is UncertainDockerUnread and uncovered, so the
+// source is never complete while a managed node's containers are unknown.
+// An inventory entry that fails validation is one more uncovered unit; an
+// entry of a host that is not managed (removed or stale) is skipped and
+// adds no node.
 //
 // A read error of either store yields StatusUnknown and an error wrapping
 // ErrSourceUnavailable; the Result is still meant to be merged.
@@ -91,36 +105,45 @@ func Docker(ctx context.Context, cfg DockerConfig) (Result, error) {
 		hosts = hosts[:MaxDockerHosts]
 		c.truncated = true
 	}
+	expected := expectedNodes(c, managed, cfg.Managed, cfg.Aliases)
+	want := make(map[string]bool, len(expected))
+	for _, id := range expected {
+		want[id] = true
+	}
+	// read maps an expected node to whether every inventory entry of it
+	// was covered.
 	read := make(map[string]bool, len(hosts))
 	for _, h := range hosts {
-		c.r.Coverage.Total++
-		if dockerHost(c, h) {
-			c.r.Coverage.Covered++
-		} else {
-			c.partial()
-		}
-		if id, ok := nodeID("host:", h.HostID); ok {
-			read[id] = true
-		}
-	}
-	if len(managed) > MaxResultNodes {
-		managed = managed[:MaxResultNodes]
-		c.truncated = true
-	}
-	for _, h := range managed {
-		id, ok := nodeID("host:", h.ID)
+		id, ok := nodeID("host:", h.HostID)
 		if !ok {
 			c.uncertain(UncertainInvalidRecord, "")
+			c.r.Coverage.Total++
 			c.partial()
 			continue
 		}
-		if read[id] {
-			continue
+		target := resolveAlias(cfg.Aliases, id)
+		if !want[target] {
+			continue // not a managed host
 		}
-		read[id] = true // count a duplicate inventory entry once
+		covered := dockerHost(c, h)
+		if prev, seen := read[target]; seen {
+			covered = covered && prev
+		}
+		read[target] = covered
+	}
+	for _, id := range expected {
 		c.r.Coverage.Total++
-		c.uncertain(UncertainDockerUnread, id)
-		c.partial()
+		covered, seen := read[id]
+		switch {
+		case !seen:
+			c.uncertain(UncertainDockerUnread, id)
+			c.partial()
+		case covered:
+			c.r.Coverage.Covered++
+			c.r.Covered = append(c.r.Covered, id)
+		default:
+			c.partial()
+		}
 	}
 	return c.result(), nil
 }

@@ -245,7 +245,24 @@ type Result struct {
 	Overflow  int
 	// Coverage is the adapter's coverage figure.
 	Coverage Coverage
+	// Covered lists the managed node IDs (hosts, guests, PVE nodes) this
+	// source read completely, sorted. Merge checks the covering sources
+	// (CoveringSources) against every managed node of the merged graph: a
+	// node not listed here is uncovered, whatever Status says.
+	Covered []string
 }
+
+// coveringSources maps the sources that must cover every managed node of
+// the merged graph to the uncertainty kind of an uncovered node.
+var coveringSources = map[string]UncertaintyKind{
+	SourceDocker: UncertainDockerUnread,
+	SourceFlows:  UncertainNoFlows,
+}
+
+// CoveringSources returns the names of the sources whose Result.Covered
+// must list every managed node of the merged graph for a complete report,
+// sorted.
+func CoveringSources() []string { return slices.Sorted(maps.Keys(coveringSources)) }
 
 // collector accumulates one adapter's Result within the caps.
 type collector struct {
@@ -316,7 +333,7 @@ func (c *collector) partial() {
 // half-read source must not look like a smaller complete one.
 func (c *collector) unavailable() {
 	c.r.Status = StatusUnknown
-	c.r.Nodes, c.r.Edges, c.r.Aliases = nil, nil, nil
+	c.r.Nodes, c.r.Edges, c.r.Aliases, c.r.Covered = nil, nil, nil, nil
 	c.r.Coverage.Covered = 0
 	c.uncertain(UncertainSourceUnavailable, "")
 }
@@ -332,6 +349,8 @@ func (c *collector) result() Result {
 	slices.SortFunc(c.r.Nodes, func(x, y attackpath.Node) int { return cmp.Compare(x.ID, y.ID) })
 	slices.SortFunc(c.r.Edges, compareEdge)
 	slices.SortFunc(c.r.Uncertain, compareUncertainty)
+	slices.Sort(c.r.Covered)
+	c.r.Covered = slices.Compact(c.r.Covered)
 	return c.r
 }
 
@@ -417,14 +436,19 @@ type Report struct {
 	// even when every input was accepted. It is also an UncertainTruncated
 	// record of SourceGraph.
 	GraphTruncated bool
+	// Uncovered counts, per covering source (CoveringSources), the managed
+	// nodes of the merged graph the source neither listed in Covered nor
+	// named in an uncertainty of its own; each is one uncovered unit of
+	// Coverage and an uncertainty record of that source.
+	Uncovered int
 }
 
 // Coverage returns the overall coverage figure: the sum of all sources'
-// covered and total units, where a source with StatusUnknown and no units
-// and a missing required source each count as one uncovered unit, so a
-// missing source always lowers it.
+// covered and total units, where a source with StatusUnknown and no units,
+// a missing required source and each Uncovered graph node count as one
+// uncovered unit, so a missing source or node always lowers it.
 func (r Report) Coverage() Coverage {
-	c := Coverage{Total: len(r.Missing)}
+	c := Coverage{Total: len(r.Missing) + r.Uncovered}
 	for _, s := range r.Sources {
 		if s.Status == StatusUnknown && s.Coverage.Total == 0 {
 			c.Total++
@@ -437,12 +461,17 @@ func (r Report) Coverage() Coverage {
 }
 
 // Complete reports whether every required source was merged and read
-// completely, nothing is uncertain, the Builder neither rejected nor
-// dropped any input and the built graph is not truncated. Only then may
-// "no path found" read as "no path".
+// completely, the covering sources (Docker, flows) cover every managed
+// host, guest and PVE node of the merged graph, the coverage figure is
+// full (Covered == Total), nothing is uncertain, the Builder neither
+// rejected nor dropped any input and the built graph is not truncated.
+// Only then may "no path found" read as "no path".
 func (r Report) Complete() bool {
-	if len(r.Missing) > 0 || len(r.Uncertain) > 0 || r.Overflow > 0 ||
+	if len(r.Missing) > 0 || len(r.Uncertain) > 0 || r.Overflow > 0 || r.Uncovered > 0 ||
 		r.Rejected > 0 || r.InputLimited > 0 || r.GraphTruncated || len(r.Sources) == 0 {
+		return false
+	}
+	if c := r.Coverage(); c.Covered != c.Total {
 		return false
 	}
 	for _, s := range r.Sources {
@@ -464,6 +493,14 @@ func (r Report) Complete() bool {
 // record of SourceGraph is added.
 // A required source without a result is listed in Missing and reported as
 // UncertainSourceMissing.
+//
+// Every managed node (host, guest, PVE node) the Builder accepted is
+// expected to be covered by each covering source (CoveringSources) that
+// was merged: listed, after aliasing, in its Result.Covered. A node that is
+// not, and that the source did not already name in an uncertainty, becomes
+// that source's UncertainDockerUnread or UncertainNoFlows record and is
+// counted in Uncovered. An empty or partial adapter result therefore never
+// reads complete, whatever its Status.
 //
 // b must be fresh from attackpath.NewBuilder: Merge counts the nodes the
 // Builder evicts at its input cap from what it offered, which is exact only
@@ -597,12 +634,59 @@ func Merge(b *attackpath.Builder, results ...Result) (Report, error) {
 		rep.GraphTruncated = true
 		addU(Uncertainty{Source: SourceGraph, Kind: UncertainTruncated})
 	}
+	// Per-node coverage records come last so they cannot push the graph
+	// record above out of MaxUncertainties; beyond it they still count in
+	// Overflow and Uncovered.
+	rep.Uncovered = checkCoverage(results, nodes, valid, present, resolve, addU)
 	slices.SortFunc(rep.Sources, func(x, y SourceReport) int { return cmp.Compare(x.Source, y.Source) })
 	slices.SortFunc(rep.Uncertain, compareUncertainty)
 	if rep.Rejected > 0 {
 		return rep, fmt.Errorf("merge attack-path sources: %d inputs: %w", rep.Rejected, ErrRejectedInput)
 	}
 	return rep, nil
+}
+
+// checkCoverage compares each merged covering source's Covered list with
+// the valid managed nodes of the merged graph. It records an uncertainty
+// for every node a source neither covered nor named and returns how many
+// it recorded.
+func checkCoverage(results []Result, nodes map[string]attackpath.Node, valid, present map[string]bool,
+	resolve func(string) string, addU func(Uncertainty)) int {
+	var expected []string
+	for id, n := range nodes {
+		if valid[id] && n.Kind.Managed() {
+			expected = append(expected, id)
+		}
+	}
+	slices.Sort(expected)
+	uncovered := 0
+	for _, src := range CoveringSources() {
+		if !present[src] {
+			continue // listed in Missing
+		}
+		covered, named := map[string]bool{}, map[string]bool{}
+		for _, r := range results {
+			if r.Source != src {
+				continue
+			}
+			for _, id := range r.Covered {
+				covered[resolve(id)] = true
+			}
+			for _, u := range r.Uncertain {
+				if u.Subject != "" {
+					named[resolve(u.Subject)] = true
+				}
+			}
+		}
+		for _, id := range expected {
+			if covered[id] || named[id] {
+				continue
+			}
+			uncovered++
+			addU(Uncertainty{Source: src, Kind: coveringSources[src], Subject: id})
+		}
+	}
+	return uncovered
 }
 
 // entryIDs are the synthetic entry nodes every Builder holds from the start.
