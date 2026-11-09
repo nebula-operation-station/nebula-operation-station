@@ -1,0 +1,10 @@
+nos-installed-v1
+P	installed	base-files	amd64	13ubuntu10.1	base-files	13ubuntu10.1		.
+P	installed	linux-image-6.8.0-40-generic	amd64	6.8.0-40.40	linux-signed	6.8.0-40.40	linux (= 6.8.0-40.40)	.
+P	installed	linux-image-6.8.0-45-generic	amd64	6.8.0-45.45	linux-signed	6.8.0-45.45	linux (= 6.8.0-45.45)	.
+P	installed	linux-modules-6.8.0-45-generic	amd64	6.8.0-45.45	linux	6.8.0-45.45		.
+P	installed	linux-image-generic	amd64	6.8.0.45.45	linux-meta	6.8.0.45.45		.
+P	installed	linux-generic	amd64	6.8.0.45.45	linux-meta	6.8.0.45.45		.
+P	installed	openssl	amd64	3.0.13-0ubuntu3.4	openssl	3.0.13-0ubuntu3.4		.
+K	6.8.0-45-generic	#45-Ubuntu SMP PREEMPT_DYNAMIC Fri Aug 30 12:02:04 UTC 2024
+END	7

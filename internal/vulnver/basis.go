@@ -277,6 +277,15 @@ func RunningKernel(f KernelFacts) (KernelBasis, error) {
 	return basis, nil
 }
 
+// ImageBasis resolves one installed linux-image-* binary to its kernel
+// basis with the same rule RunningKernel applies to the running image
+// (unsigned source, or the single kernel source entry of a signed image's
+// Built-Using). It does no build-string cross-check, so it is context for
+// installed kernels only, never the running kernel's basis.
+func ImageBasis(b Binary) (KernelBasis, error) {
+	return kernelBasisOf(b)
+}
+
 // kernelBasisOf resolves one linux-image-* binary to its kernel basis.
 func kernelBasisOf(b Binary) (KernelBasis, error) {
 	switch {
