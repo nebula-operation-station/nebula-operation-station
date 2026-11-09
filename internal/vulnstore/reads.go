@@ -170,14 +170,22 @@ type FeedState struct {
 }
 
 // FeedStatuses returns the state of every listed source, in source list
-// order. The list is NOS's own, so the result is bounded by it.
+// order. The list is NOS's own, so the result is bounded by it. All of it
+// is read in one read transaction (one snapshot): a run start committing
+// meanwhile must not show a source as named but without its mark (a false
+// "stale, undated").
 func (s *Store) FeedStatuses(ctx context.Context) ([]FeedState, error) {
 	now := s.now().UTC()
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("vulnstore: feed status: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // read-only; nothing to keep
 	out := make([]FeedState, 0, len(s.order))
 	for _, id := range s.order {
 		src := s.sources[id]
 		fs := FeedState{SourceID: id, MaxAge: src.MaxAge}
-		m, found, err := loadMark(ctx, s.db, id)
+		m, found, err := loadMark(ctx, tx, id)
 		if err != nil {
 			return nil, fmt.Errorf("vulnstore: feed status %s: %w", id, err)
 		}
@@ -194,7 +202,7 @@ func (s *Store) FeedStatuses(ctx context.Context) ([]FeedState, error) {
 				fs.PreResetSeq = &v
 			}
 		}
-		_, st, _, _, named, err := latestNaming(ctx, s.db, id)
+		_, st, _, _, named, err := latestNaming(ctx, tx, id)
 		if err != nil {
 			return nil, fmt.Errorf("vulnstore: feed status %s: %w", id, err)
 		}
