@@ -6,30 +6,28 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevcontract"
 )
 
 // ErrNotAllowed marks a command that is not on the phase-1 allowlist or an
 // argument that fails validation. Nothing is sent to the device.
 var ErrNotAllowed = errors.New("cbscli: command not allowed")
 
-// Limits of ADR 0010 D3. They mirror internal/netdevcontract (ND-04), which
-// is not yet on main; TestLimitsMirrorTheND04Contract pins the values.
-// Replace them with the netdevcontract constants once ND-04 is merged.
+// Limits of ADR 0010 D3, owned by internal/netdevcontract (ND-04).
 const (
-	// MaxLineBytes bounds one line of CBS output (netdevcontract.MaxLineBytes).
-	MaxLineBytes = 4 << 10
+	// MaxLineBytes bounds one line of CBS output.
+	MaxLineBytes = netdevcontract.MaxLineBytes
 	// MaxConfigLines bounds the lines of show running-config and show
-	// startup-config (netdevcontract.MaxConfigLines).
-	MaxConfigLines = 100000
+	// startup-config.
+	MaxConfigLines = netdevcontract.MaxConfigLines
 	// MaxConfigOutputBytes caps the output of show running-config and show
-	// startup-config (netdevcontract.MaxCBSConfigOutputBytes).
-	MaxConfigOutputBytes = 4 << 20
-	// MaxCommandOutputBytes caps the output of every other command
-	// (netdevcontract.MaxCBSCommandOutputBytes).
-	MaxCommandOutputBytes = 1 << 20
-	// MaxInterfaceNameBytes bounds an interface name argument
-	// (netdevcontract.MaxInterfaceNameBytes).
-	MaxInterfaceNameBytes = 64
+	// startup-config.
+	MaxConfigOutputBytes = netdevcontract.MaxCBSConfigOutputBytes
+	// MaxCommandOutputBytes caps the output of every other command.
+	MaxCommandOutputBytes = netdevcontract.MaxCBSCommandOutputBytes
+	// MaxInterfaceNameBytes bounds an interface name argument.
+	MaxInterfaceNameBytes = netdevcontract.MaxInterfaceNameBytes
 )
 
 // Command is one read command from the phase-1 allowlist of ADR 0010 D3.

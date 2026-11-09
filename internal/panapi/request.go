@@ -7,21 +7,23 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevcontract"
 )
 
-// Response size caps (ADR 0010 D3, "PAN-OS (XML API over HTTPS)"). The body
-// is capped before it is parsed; a response over its cap is refused.
+// Response size caps (ADR 0010 D3, "PAN-OS (XML API over HTTPS)"), owned by
+// internal/netdevcontract (ND-04). The body is capped before it is parsed;
+// a response over its cap is refused.
 const (
 	// MaxConfigResponseBytes caps a configuration subtree response.
-	MaxConfigResponseBytes = int64(8 << 20)
+	MaxConfigResponseBytes = int64(netdevcontract.MaxPANOSConfigResponseBytes)
 	// MaxOtherResponseBytes caps every other response (operational
 	// commands, single configuration entries).
-	MaxOtherResponseBytes = int64(1 << 20)
+	MaxOtherResponseBytes = int64(netdevcontract.MaxPANOSResponseBytes)
 )
 
-// MaxNameLength is the PAN-OS name limit for rules and objects (ADR 0010
-// D3: 63 characters; *verify* in ND-03).
-const MaxNameLength = 63
+// MaxNameLength is the PAN-OS name limit for rules and objects.
+const MaxNameLength = netdevcontract.MaxPANOSNameBytes
 
 // Sentinel errors for request construction.
 var (
