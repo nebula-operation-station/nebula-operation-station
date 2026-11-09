@@ -216,6 +216,7 @@ type Config struct {
 type Store struct {
 	db       *sql.DB
 	sources  map[string]Source
+	order    []string // source IDs in list order
 	tier     TierFunc
 	classify Classifier
 	now      func() time.Time
@@ -246,6 +247,7 @@ func New(db *sql.DB, cfg Config) (*Store, error) {
 		return nil, fmt.Errorf("vulnstore: new: db, sources, tier and classifier are required: %w", ErrInvalidInput)
 	}
 	src := make(map[string]Source, len(cfg.Sources))
+	order := make([]string, 0, len(cfg.Sources))
 	for _, s := range cfg.Sources {
 		if !sourceIDRe.MatchString(s.ID) || s.MaxAge <= 0 {
 			return nil, fmt.Errorf("vulnstore: new: source list entry: %w", ErrInvalidInput)
@@ -254,12 +256,13 @@ func New(db *sql.DB, cfg Config) (*Store, error) {
 			return nil, fmt.Errorf("vulnstore: new: duplicate source %s: %w", s.ID, ErrInvalidInput)
 		}
 		src[s.ID] = s
+		order = append(order, s.ID)
 	}
 	now := cfg.Now
 	if now == nil {
 		now = time.Now
 	}
-	return &Store{db: db, sources: src, tier: cfg.Tier, classify: cfg.Classifier, now: now}, nil
+	return &Store{db: db, sources: src, order: order, tier: cfg.Tier, classify: cfg.Classifier, now: now}, nil
 }
 
 // Subject identifies the subject of a finding.
