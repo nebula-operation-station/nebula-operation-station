@@ -653,6 +653,8 @@ type vulnPageData struct {
 	CVE string
 	// Subject page.
 	Subject *vulnSubjectGroup
+	// TrivyLocal: the image subject's P1-30 observation (vuln_trivy.go).
+	TrivyLocal *trivyLocalPanel
 	// Finding page.
 	Finding *vulnFindingView
 	Holds   []vulnHoldView
@@ -1079,6 +1081,9 @@ func (h *Handler) handleVulnSubject(w http.ResponseWriter, r *http.Request) {
 	d.Filter.View = ""
 	d.Filter.Digest = s.ImageDigest
 	title := "Vulnerabilities of " + s.ID
+	if s.Kind == vulnfinding.SubjectImage {
+		d.TrivyLocal = h.trivyLocalFor(ctx, s)
+	}
 	page, err := h.vuln.VulnFindings(ctx, VulnQuery{Subject: &s, Limit: MaxVulnRows})
 	if err != nil {
 		h.log.Error("vulnerabilities: subject", "error", err)
@@ -1105,6 +1110,7 @@ func (h *Handler) handleVulnSubject(w http.ResponseWriter, r *http.Request) {
 	if len(groups) == 1 {
 		d.Subject = &groups[0]
 	}
+	d.TrivyLocal.besideHermes(rows, c.subject(s), d.Subject, now)
 	for i, row := range rows {
 		if d.Filter.match(views[i], row) {
 			d.Findings = append(d.Findings, views[i])
