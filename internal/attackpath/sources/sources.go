@@ -9,7 +9,8 @@
 //
 //   - Flows: observed network edges from the traffic map (ADR 0009,
 //     internal/trafficstore, read-only).
-//   - Placements: PVE node → guest control edges (ADR 0006).
+//   - Placements: PVE node → guest control edges (ADR 0006); a PVE node is
+//     tied to the managed host it runs as.
 //   - Docker: Docker host → container control edges and container → host
 //     escape edges proven by docker.inspect.
 //   - Credentials: executor host → every managed host.
@@ -153,6 +154,10 @@ const (
 	UncertainTruncated
 	// UncertainAliasConflict: a managed host is linked to several guests.
 	UncertainAliasConflict
+	// UncertainPVEHostUnknown: a PVE node whose managed host is not known;
+	// the executor's credential edge to it, and so to its guests, cannot be
+	// placed.
+	UncertainPVEHostUnknown
 )
 
 var uncertaintyNames = [...]string{
@@ -169,11 +174,12 @@ var uncertaintyNames = [...]string{
 	UncertainInvalidRecord:      "invalid_record",
 	UncertainTruncated:          "truncated",
 	UncertainAliasConflict:      "alias_conflict",
+	UncertainPVEHostUnknown:     "pve_host_unknown",
 }
 
 // String returns the stable name of k, or "invalid".
 func (k UncertaintyKind) String() string {
-	if k >= UncertainSourceUnavailable && k <= UncertainAliasConflict {
+	if k >= UncertainSourceUnavailable && k <= UncertainPVEHostUnknown {
 		return uncertaintyNames[k]
 	}
 	return "invalid"
@@ -218,8 +224,8 @@ type Result struct {
 	Nodes []attackpath.Node
 	Edges []attackpath.Edge
 	// Aliases maps a managed host node ID ("host:<id>") to the node that
-	// represents the same machine (a linked PVE guest), so one machine is
-	// one node across all sources.
+	// represents the same machine (a linked PVE guest, or the PVE node the
+	// host is), so one machine is one node across all sources.
 	Aliases map[string]string
 	// Uncertain lists what the adapter could not see, sorted, at most
 	// MaxUncertainties; Overflow counts the records beyond.

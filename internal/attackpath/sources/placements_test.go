@@ -62,8 +62,61 @@ func labPVE() *fakePVE {
 	}
 }
 
+// labPlacementConfig reads f with PVE node lab/pve1 running on managed host
+// "hv1"; lab/pve2 has no known host.
+func labPlacementConfig(f *fakePVE) PlacementConfig {
+	return PlacementConfig{Reader: f, NodeHosts: map[string]string{"pve:lab/pve1": "hv1"}}
+}
+
+func TestPlacementsLinkPVENodeToManagedHost(t *testing.T) {
+	r, err := Placements(context.Background(), labPlacementConfig(labPVE()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Aliases["host:hv1"] != "pve:lab/pve1" {
+		t.Fatalf("PVE node not tied to its managed host: %v", r.Aliases)
+	}
+	if !slices.Contains(r.Uncertain, Uncertainty{SourcePlacements, UncertainPVEHostUnknown, "pve:lab/pve2"}) {
+		t.Fatalf("unmapped PVE node without uncertainty: %v", r.Uncertain)
+	}
+	if slices.Contains(r.Uncertain, Uncertainty{SourcePlacements, UncertainPVEHostUnknown, "pve:lab/pve1"}) {
+		t.Fatal("mapped PVE node reported unknown")
+	}
+}
+
+func TestPlacementsUnmappedPVENodeIsNotCovered(t *testing.T) {
+	f := labPVE()
+	f.nodes["lab"][1].State = avail
+	f.guests["lab"] = f.guests["lab"][:2]
+	r, err := Placements(context.Background(), PlacementConfig{Reader: f})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Status != StatusPartial || r.Coverage != (Coverage{0, 1}) {
+		t.Fatalf("status %s coverage %+v", r.Status, r.Coverage)
+	}
+	for _, id := range []string{"pve:lab/pve1", "pve:lab/pve2"} {
+		if !hasUncertainty(r.Uncertain, UncertainPVEHostUnknown, id) {
+			t.Errorf("no pve_host_unknown for %s: %v", id, r.Uncertain)
+		}
+	}
+}
+
+func TestPlacementsPVENodeHostConflictDropsAlias(t *testing.T) {
+	// One managed host claimed as both a PVE node and a linked guest.
+	cfg := labPlacementConfig(labPVE())
+	cfg.NodeHosts["pve:lab/pve1"] = "web"
+	r, err := Placements(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := r.Aliases["host:web"]; ok || !hasUncertainty(r.Uncertain, UncertainAliasConflict, "host:web") {
+		t.Fatalf("aliases %v uncertain %v", r.Aliases, r.Uncertain)
+	}
+}
+
 func TestPlacementsControlEdgesAndAliases(t *testing.T) {
-	r, err := Placements(context.Background(), labPVE())
+	r, err := Placements(context.Background(), labPlacementConfig(labPVE()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +127,7 @@ func TestPlacementsControlEdgesAndAliases(t *testing.T) {
 	if !slices.Equal(r.Edges, want) {
 		t.Fatalf("edges %v", r.Edges)
 	}
-	if len(r.Aliases) != 1 || r.Aliases["host:web"] != "guest:lab/100" {
+	if len(r.Aliases) != 2 || r.Aliases["host:web"] != "guest:lab/100" {
 		t.Fatalf("aliases %v", r.Aliases)
 	}
 	for _, u := range []Uncertainty{
@@ -99,7 +152,9 @@ func TestPlacementsCompleteRemoteIsCovered(t *testing.T) {
 	f := labPVE()
 	f.nodes["lab"][1].State = avail
 	f.guests["lab"] = f.guests["lab"][:2]
-	r, err := Placements(context.Background(), f)
+	cfg := labPlacementConfig(f)
+	cfg.NodeHosts["pve:lab/pve2"] = "hv2"
+	r, err := Placements(context.Background(), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,12 +168,12 @@ func TestPlacementsReadErrorIsUnknown(t *testing.T) {
 		"remotes": {err: errors.New("x")},
 		"links":   {remotes: []pveinventory.Remote{{RemoteID: "broken"}}},
 	} {
-		r, err := Placements(context.Background(), f)
+		r, err := Placements(context.Background(), PlacementConfig{Reader: f})
 		if !errors.Is(err, ErrSourceUnavailable) || r.Status != StatusUnknown || len(r.Nodes) != 0 || r.Aliases != nil {
 			t.Fatalf("%s: err %v result %+v", name, err, r)
 		}
 	}
-	if _, err := Placements(context.Background(), nil); !errors.Is(err, ErrSourceUnavailable) {
+	if _, err := Placements(context.Background(), PlacementConfig{}); !errors.Is(err, ErrSourceUnavailable) {
 		t.Fatal(err)
 	}
 }
@@ -135,7 +190,7 @@ func TestPlacementsHostileNamesAreRejected(t *testing.T) {
 		}},
 		links: map[string][]pveinventory.Link{"lab": {{VMID: 100, Generation: 1, HostID: "a b"}}},
 	}
-	r, err := Placements(context.Background(), f)
+	r, err := Placements(context.Background(), PlacementConfig{Reader: f, NodeHosts: map[string]string{"pve:lab/pve2": "bad host"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +210,7 @@ func TestPlacementsAliasConflictDropsAlias(t *testing.T) {
 		{VMID: 100, Generation: 1, HostID: "web"},
 		{VMID: 101, Generation: 2, HostID: "web"},
 	}
-	r, err := Placements(context.Background(), f)
+	r, err := Placements(context.Background(), PlacementConfig{Reader: f})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -17,6 +17,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/attackpath"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
 )
 
 var update = flag.Bool("update", false, "rewrite the golden files in testdata")
@@ -29,6 +30,7 @@ func labResults(t *testing.T) []Result {
 	ctx := context.Background()
 	hosts := fakeHosts{hosts: []inventory.Host{
 		{ID: "exec", DisplayName: "executor"},
+		{ID: "hv1", DisplayName: "hypervisor"},
 		{ID: "nas", DisplayName: "nas"},
 		{ID: "quiet", DisplayName: "quiet"},
 		{ID: "web", DisplayName: "web"},
@@ -41,7 +43,7 @@ func labResults(t *testing.T) []Result {
 	if err != nil {
 		t.Fatal(err)
 	}
-	place, err := Placements(ctx, labPVE())
+	place, err := Placements(ctx, labPlacementConfig(labPVE()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,6 +149,7 @@ func TestMergeAliasesLinkedHostToGuest(t *testing.T) {
 		kind     attackpath.EdgeKind
 	}{
 		{"host:exec", "guest:lab/100", attackpath.EdgeCredential},
+		{"host:exec", "pve:lab/pve1", attackpath.EdgeCredential},
 		{"internet", "guest:lab/100", attackpath.EdgeNetworkObserved},
 		{"pve:lab/pve1", "guest:lab/100", attackpath.EdgeControl},
 		{"guest:lab/100", "ctr:web/aaaaaaaaaaaa", attackpath.EdgeControl},
@@ -158,6 +161,75 @@ func TestMergeAliasesLinkedHostToGuest(t *testing.T) {
 	}
 	if n, _ := g.Node("host:nas"); n.Label != "nas" {
 		t.Fatalf("label of host:nas = %q, want inventory label", n.Label)
+	}
+}
+
+// reachable reports whether to can be reached from from over any edges.
+func reachable(g *attackpath.Graph, from, to string) bool {
+	seen := map[string]bool{from: true}
+	queue := []string{from}
+	for len(queue) > 0 {
+		id := queue[0]
+		queue = queue[1:]
+		if id == to {
+			return true
+		}
+		for _, e := range g.Out(id) {
+			if !seen[e.To] {
+				seen[e.To] = true
+				queue = append(queue, e.To)
+			}
+		}
+	}
+	return false
+}
+
+func TestGuestUnderPVEIsReachableFromExecutor(t *testing.T) {
+	ctx := context.Background()
+	creds, err := Credentials(ctx, CredentialConfig{
+		Hosts:          fakeHosts{hosts: []inventory.Host{{ID: "exec"}, {ID: "hv1"}}},
+		ExecutorHostID: "exec",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pve := &fakePVE{
+		remotes: []pveinventory.Remote{{RemoteID: "lab"}},
+		nodes:   map[string][]pveinventory.Node{"lab": {{Node: "pve1", State: avail}}},
+		// Guest 200 is no managed host: only its PVE node leads to it.
+		guests: map[string][]pveinventory.Guest{"lab": {{VMID: 200, Generation: 1, Node: "pve1", State: avail}}},
+	}
+	for name, c := range map[string]struct {
+		nodeHosts map[string]string
+		reach     bool
+	}{
+		"mapped":   {map[string]string{"pve:lab/pve1": "hv1"}, true},
+		"unmapped": {nil, false},
+	} {
+		place, err := Placements(ctx, PlacementConfig{Reader: pve, NodeHosts: c.nodeHosts})
+		if err != nil {
+			t.Fatal(err)
+		}
+		b := attackpath.NewBuilder()
+		rep, err := Merge(b, creds, place)
+		if err != nil {
+			t.Fatal(err)
+		}
+		g := b.Build()
+		if got := reachable(g, "host:exec", "guest:lab/200"); got != c.reach {
+			t.Fatalf("%s: guest reachable from executor = %v, want %v", name, got, c.reach)
+		}
+		if got := reachable(g, "host:exec", "pve:lab/pve1"); got != c.reach {
+			t.Fatalf("%s: PVE node reachable from executor = %v, want %v", name, got, c.reach)
+		}
+		if !c.reach && !hasUncertainty(rep.Uncertain, UncertainPVEHostUnknown, "pve:lab/pve1") {
+			t.Fatalf("%s: unreachable PVE node without uncertainty: %v", name, rep.Uncertain)
+		}
+		if c.reach {
+			if _, ok := g.Node("host:hv1"); ok {
+				t.Fatalf("%s: managed host and PVE node are two nodes", name)
+			}
+		}
 	}
 }
 

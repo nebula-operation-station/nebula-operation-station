@@ -142,6 +142,13 @@
       "assumed": false
     },
     {
+      "from": "host:exec",
+      "to": "pve:lab/pve1",
+      "kind": "credential",
+      "basis": "inventory",
+      "assumed": false
+    },
+    {
       "from": "host:nas",
       "to": "ctr:nas/cccccccccccc",
       "kind": "control",

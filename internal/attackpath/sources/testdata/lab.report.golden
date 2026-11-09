@@ -1,10 +1,10 @@
-source credentials complete 4/4
+source credentials complete 5/5
 source docker partial 1/2
 source firewall unknown 0/0
 source flows partial 1/4
 source placements partial 0/1
 source vlan unknown 0/0
-coverage 6/13 complete=false rejected=0 input_limited=0 overflow=0
+coverage 7/14 complete=false rejected=0 input_limited=0 overflow=0
 uncertain docker partial_data ctr:nas/cccccccccccc
 uncertain docker partial_data host:nas
 uncertain docker escape_unverified ctr:nas/cccccccccccc
@@ -18,4 +18,5 @@ uncertain flows flows_incomplete host:nas
 uncertain flows invalid_record
 uncertain placements partial_data pve:lab/pve2
 uncertain placements placement_unknown guest:lab/102
+uncertain placements pve_host_unknown pve:lab/pve2
 uncertain vlan source_missing
