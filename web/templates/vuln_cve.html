@@ -1,0 +1,17 @@
+{{define "content"}}
+{{with .Vuln}}
+<h1 class="mono">{{.CVE}}</h1>
+<p><a href="/vulnerabilities">All vulnerabilities</a></p>
+{{end}}
+{{template "vuln_banners" .}}
+{{with .Vuln}}
+{{if not .Unavailable}}
+<h2>Affected subjects</h2>
+{{if .Findings}}
+{{template "vuln_findings_table" .Findings}}
+{{else}}
+<p class="hint">NOS's vulnerability store holds no finding with this ID.</p>
+{{end}}
+{{end}}
+{{end}}
+{{end}}
