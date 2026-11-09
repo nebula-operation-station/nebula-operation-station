@@ -23,6 +23,8 @@ const (
 	CategoryOther             = "other"
 )
 
+// Admin names and version bases are bounded to 128 bytes by their patterns
+// (and by the table checks).
 var (
 	actorRe        = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9@._:-]{0,127}$`)
 	basisVersionRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+~:_-]{0,127}$`)

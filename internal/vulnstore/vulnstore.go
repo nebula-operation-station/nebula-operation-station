@@ -78,10 +78,6 @@ const (
 	// DefaultAcceptExpiry and MaxAcceptExpiry bound accepted_risk (Q4).
 	DefaultAcceptExpiry = 90 * 24 * time.Hour
 	MaxAcceptExpiry     = 365 * 24 * time.Hour
-	// maxActorLen bounds token IDs and admin names.
-	maxActorLen = 128
-	// maxBasisVersionLen bounds the stored version basis of a human state.
-	maxBasisVersionLen = 128
 
 	// Guard thresholds (D5): more than half of the scope and at least
 	// guardMinTotal closures overall, or more than half of one subject's
