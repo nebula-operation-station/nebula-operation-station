@@ -31,14 +31,41 @@ func rawInsertNetDevice(db *DB, id, family, pinKind, pin string) error {
 	return err
 }
 
-func TestNetdevMigrationIsNewest(t *testing.T) {
+// TestNetdevMigrationShippedInOrder checks that 0024 is shipped exactly
+// once, at version 24, directly after 0023; it keeps passing when later
+// migrations are added.
+func TestNetdevMigrationShippedInOrder(t *testing.T) {
 	ms := mustMigrations(t)
-	last := ms[len(ms)-1]
-	if last.name != netdevMigration {
-		t.Fatalf("newest migration is %s, want %s", last.name, netdevMigration)
+	idx := -1
+	for i, m := range ms {
+		if m.name == netdevMigration {
+			if idx != -1 {
+				t.Fatal("netdev migration shipped twice")
+			}
+			idx = i
+		}
 	}
-	if prev := ms[len(ms)-2]; prev.version != last.version-1 {
-		t.Fatalf("netdev migration %d does not directly follow %d", last.version, prev.version)
+	if idx < 1 {
+		t.Fatal("netdev migration not shipped")
+	}
+	if ms[idx].version != 24 {
+		t.Fatalf("netdev migration has version %d, want 24", ms[idx].version)
+	}
+	if prev := ms[idx-1]; prev.version != 23 {
+		t.Fatalf("netdev migration follows version %d, want 23", prev.version)
+	}
+	for i := 1; i < len(ms); i++ {
+		if ms[i].version != ms[i-1].version+1 {
+			t.Fatalf("migration %s does not directly follow %s", ms[i].name, ms[i-1].name)
+		}
+	}
+	db := ndDB(t)
+	var n int
+	if err := db.sql.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version = 24`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatal("netdev migration not applied")
 	}
 }
 
@@ -82,6 +109,9 @@ func assertNetdevSchema(t *testing.T, db *DB) {
 		"netdev_devices", "netdev_tombstones", "netdev_devices_trust_identity_idx",
 		"netdev_devices_no_tombstoned_id", "netdev_devices_tombstone_frozen", "netdev_devices_no_delete",
 		"netdev_tombstones_no_update", "netdev_tombstones_no_delete",
+		"netdev_devices_credential_ref_idx", "netdev_devices_digest_key_ref_idx", "netdev_devices_fingerprint_key_ref_idx",
+		"netdev_devices_vault_ref_insert", "netdev_devices_vault_ref_update",
+		"netdev_devices_id_immutable", "netdev_tombstones_id_immutable",
 	} {
 		var n int
 		if err := db.sql.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE name = ?`, obj).Scan(&n); err != nil {
@@ -326,6 +356,14 @@ func TestNetDeviceTombstonedIDNeverReused(t *testing.T) {
 	if ts.TombstonedAt == nil || !ts.TombstonedAt.Equal(ndT0) {
 		t.Fatalf("tombstone time: %+v", ts)
 	}
+	// The id is reserved in netdev_tombstones, not only on the device row.
+	var tombAt int64
+	if err := db.sql.QueryRow(`SELECT tombstoned_at FROM netdev_tombstones WHERE id = 'sw-a'`).Scan(&tombAt); err != nil {
+		t.Fatalf("no netdev_tombstones row after TombstoneNetDevice: %v", err)
+	}
+	if tombAt != ndT0.Unix() {
+		t.Fatalf("netdev_tombstones time = %d, want %d", tombAt, ndT0.Unix())
+	}
 	// Same id, same or a different pin: always refused.
 	for _, pin := range []string{pinOf("a"), pinOf("new")} {
 		if _, err := db.InsertNetDevice(cbsDevice("sw-a", pin)); !errors.Is(err, ErrNetDeviceTombstoned) {
@@ -542,5 +580,215 @@ func TestNetDeviceStoresNoSecrets(t *testing.T) {
 	}
 	if n == 0 {
 		t.Fatal("netdev_devices has no columns")
+	}
+}
+
+// --- vault references, id immutability, constraint mapping -----------------
+
+// TestNetDeviceVaultRefsUniqueAcrossDevices checks that no vault reference
+// is shared between devices, in any role, and that a tombstoned device's
+// references are never reused.
+func TestNetDeviceVaultRefsUniqueAcrossDevices(t *testing.T) {
+	db := ndDB(t)
+	insertND(t, db, cbsDevice("sw-a", pinOf("a")))
+	insertND(t, db, panosDevice("fw-t", pinOf("t")))
+	if _, err := db.TombstoneNetDevice("fw-t"); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]func(d *NetDevice){
+		"same digest ref":                  func(d *NetDevice) { d.DigestKeyRef = "nd-sw-a-digest" },
+		"same fingerprint ref":             func(d *NetDevice) { d.FingerprintKeyRef = "nd-sw-a-fp" },
+		"same credential ref":              func(d *NetDevice) { d.CredentialRef = "nd-sw-a-read" },
+		"digest ref is other's fp ref":     func(d *NetDevice) { d.DigestKeyRef = "nd-sw-a-fp" },
+		"fp ref is other's digest ref":     func(d *NetDevice) { d.FingerprintKeyRef = "nd-sw-a-digest" },
+		"credential is other's digest ref": func(d *NetDevice) { d.CredentialRef = "nd-sw-a-digest" },
+		"digest ref is other's credential": func(d *NetDevice) { d.DigestKeyRef = "nd-sw-a-read" },
+		"tombstoned digest ref":            func(d *NetDevice) { d.DigestKeyRef = "nd-fw-t-digest" },
+		"tombstoned fingerprint ref":       func(d *NetDevice) { d.FingerprintKeyRef = "nd-fw-t-fp" },
+	}
+	for name, mutate := range cases {
+		d := cbsDevice("sw-b", pinOf("b"))
+		mutate(&d)
+		if _, err := db.InsertNetDevice(d); !errors.Is(err, ErrNetVaultRefInUse) {
+			t.Errorf("%s: err = %v, want ErrNetVaultRefInUse", name, err)
+		}
+	}
+	list, err := db.ListNetDevices()
+	if err != nil || len(list) != 1 {
+		t.Fatalf("refused inserts changed the registry: %v %v", list, err)
+	}
+	// A device with fresh references is still accepted.
+	insertND(t, db, cbsDevice("sw-b", pinOf("b")))
+}
+
+// TestNetDeviceVaultRefsDistinctPerDevice checks that one device never uses
+// the same vault entry in two roles.
+func TestNetDeviceVaultRefsDistinctPerDevice(t *testing.T) {
+	db := ndDB(t)
+	cases := map[string]func(d *NetDevice){
+		"digest = fingerprint": func(d *NetDevice) { d.FingerprintKeyRef = d.DigestKeyRef },
+		"credential = digest":  func(d *NetDevice) { d.CredentialRef = d.DigestKeyRef },
+		"credential = fp":      func(d *NetDevice) { d.CredentialRef = d.FingerprintKeyRef },
+	}
+	for name, mutate := range cases {
+		d := cbsDevice("sw-a", pinOf("a"))
+		mutate(&d)
+		if _, err := db.InsertNetDevice(d); !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s: err = %v, want ErrInvalid", name, err)
+		}
+	}
+	// The same rules hold at the database level.
+	raw := map[string][3]any{
+		"digest = fingerprint": {nil, "k", "k"},
+		"credential = digest":  {"k", "k", "f"},
+		"credential = fp":      {"k", "d", "k"},
+	}
+	for name, refs := range raw {
+		if err := rawInsertNetDeviceRefs(db, "x", pinOf("x"), refs[0], refs[1].(string), refs[2].(string)); err == nil {
+			t.Errorf("%s: accepted at the database level", name)
+		}
+	}
+}
+
+// rawInsertNetDeviceRefs writes a device row with explicit vault references.
+func rawInsertNetDeviceRefs(db *DB, id, pin string, cred any, digest, fp string) error {
+	_, err := db.sql.Exec(`INSERT INTO netdev_devices (id, family, endpoint_ip, port, pin_kind, pin_value,
+		credential_ref, digest_key_ref, fingerprint_key_ref, created_at, updated_at)
+		VALUES (?, 'cbs', '10.0.0.1', 22, 'ssh-host-key', ?, ?, ?, ?, 0, 0)`, id, pin, cred, digest, fp)
+	return err
+}
+
+// TestNetdevSchemaVaultRefGuards checks the database-level uniqueness of
+// vault references, independent of the Go store, including tombstoned rows
+// and updates of the reference columns.
+func TestNetdevSchemaVaultRefGuards(t *testing.T) {
+	db := ndDB(t)
+	if err := rawInsertNetDeviceRefs(db, "sw-a", pinOf("a"), "c-a", "d-a", "f-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := rawInsertNetDeviceRefs(db, "sw-n", pinOf("n"), nil, "d-n", "f-n"); err != nil {
+		t.Fatal(err)
+	}
+	// Two devices without a credential are fine: NULL is not a reference.
+	if err := rawInsertNetDeviceRefs(db, "sw-m", pinOf("m"), nil, "d-m", "f-m"); err != nil {
+		t.Fatalf("second device without credential refused: %v", err)
+	}
+	refused := map[string]func() error{
+		"insert same digest":       func() error { return rawInsertNetDeviceRefs(db, "x", pinOf("x"), nil, "d-a", "f-x") },
+		"insert same fp":           func() error { return rawInsertNetDeviceRefs(db, "x", pinOf("x"), nil, "d-x", "f-a") },
+		"insert same credential":   func() error { return rawInsertNetDeviceRefs(db, "x", pinOf("x"), "c-a", "d-x", "f-x") },
+		"insert cross-role digest": func() error { return rawInsertNetDeviceRefs(db, "x", pinOf("x"), nil, "f-a", "f-x") },
+		"insert cross-role cred":   func() error { return rawInsertNetDeviceRefs(db, "x", pinOf("x"), "d-a", "d-x", "f-x") },
+		"update to other's digest": func() error {
+			_, err := db.sql.Exec(`UPDATE netdev_devices SET digest_key_ref = 'd-a' WHERE id = 'sw-n'`)
+			return err
+		},
+		"update to other's fp as digest": func() error {
+			_, err := db.sql.Exec(`UPDATE netdev_devices SET digest_key_ref = 'f-a' WHERE id = 'sw-n'`)
+			return err
+		},
+		"update credential to other's": func() error {
+			_, err := db.sql.Exec(`UPDATE netdev_devices SET credential_ref = 'c-a' WHERE id = 'sw-n'`)
+			return err
+		},
+	}
+	for name, do := range refused {
+		if err := do(); err == nil {
+			t.Errorf("%s: accepted at the database level", name)
+		}
+	}
+	// Tombstone sw-a; its references stay reserved.
+	if _, err := db.sql.Exec(`UPDATE netdev_devices SET tombstoned_at = 1 WHERE id = 'sw-a'`); err != nil {
+		t.Fatal(err)
+	}
+	for name, do := range map[string]func() error{
+		"reuse tombstoned digest":     func() error { return rawInsertNetDeviceRefs(db, "y", pinOf("y"), nil, "d-a", "f-y") },
+		"reuse tombstoned fp":         func() error { return rawInsertNetDeviceRefs(db, "y", pinOf("y"), nil, "d-y", "f-a") },
+		"reuse tombstoned credential": func() error { return rawInsertNetDeviceRefs(db, "y", pinOf("y"), "c-a", "d-y", "f-y") },
+	} {
+		if err := do(); err == nil {
+			t.Errorf("%s: accepted at the database level", name)
+		}
+	}
+}
+
+// TestNetdevSchemaIDImmutable checks that a raw UPDATE can never change a
+// device id or a tombstone id.
+func TestNetdevSchemaIDImmutable(t *testing.T) {
+	db := ndDB(t)
+	insertND(t, db, cbsDevice("sw-a", pinOf("a")))
+	insertND(t, db, cbsDevice("sw-t", pinOf("t")))
+	if _, err := db.TombstoneNetDevice("sw-t"); err != nil {
+		t.Fatal(err)
+	}
+	for name, q := range map[string]string{
+		"rename live device":               `UPDATE netdev_devices SET id = 'sw-b' WHERE id = 'sw-a'`,
+		"rename live device to tombstoned": `UPDATE netdev_devices SET id = 'sw-t' WHERE id = 'sw-a'`,
+		"rename tombstone":                 `UPDATE netdev_tombstones SET id = 'sw-z' WHERE id = 'sw-t'`,
+	} {
+		if _, err := db.sql.Exec(q); err == nil {
+			t.Errorf("%s: accepted at the database level", name)
+		}
+	}
+	if _, ok, err := db.GetNetDevice("sw-a"); err != nil || !ok {
+		t.Fatalf("device lost: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := db.GetNetDevice("sw-b"); err != nil || ok {
+		t.Fatalf("device renamed: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestNetConstraintErrorsMapped provokes each database constraint with a
+// direct insert, as a concurrent writer that passed the Go pre-checks
+// would, and checks the error maps to the typed error callers branch on.
+func TestNetConstraintErrorsMapped(t *testing.T) {
+	db := ndDB(t)
+	if err := rawInsertNetDeviceRefs(db, "sw-a", pinOf("a"), "c-a", "d-a", "f-a"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.sql.Exec(`INSERT INTO netdev_tombstones (id, tombstoned_at) VALUES ('sw-gone', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	insertTomb := func() error {
+		_, err := db.sql.Exec(`INSERT INTO netdev_tombstones (id, tombstoned_at) VALUES ('sw-gone', 2)`)
+		return err
+	}
+	cases := []struct {
+		name string
+		do   func() error
+		want error
+	}{
+		{"duplicate id", func() error { return rawInsertNetDeviceRefs(db, "sw-a", pinOf("x"), nil, "d-x", "f-x") }, ErrNetDeviceExists},
+		{"tombstoned id", func() error { return rawInsertNetDeviceRefs(db, "sw-gone", pinOf("x"), nil, "d-x", "f-x") }, ErrNetDeviceTombstoned},
+		{"duplicate tombstone", insertTomb, ErrNetDeviceTombstoned},
+		{"duplicate trust identity", func() error { return rawInsertNetDeviceRefs(db, "sw-b", pinOf("a"), nil, "d-x", "f-x") }, ErrNetTrustIdentityInUse},
+		{"duplicate digest ref", func() error { return rawInsertNetDeviceRefs(db, "sw-b", pinOf("x"), nil, "d-a", "f-x") }, ErrNetVaultRefInUse},
+		{"duplicate fingerprint ref", func() error { return rawInsertNetDeviceRefs(db, "sw-b", pinOf("x"), nil, "d-x", "f-a") }, ErrNetVaultRefInUse},
+		{"duplicate credential ref", func() error { return rawInsertNetDeviceRefs(db, "sw-b", pinOf("x"), "c-a", "d-x", "f-x") }, ErrNetVaultRefInUse},
+		{"cross-role ref", func() error { return rawInsertNetDeviceRefs(db, "sw-b", pinOf("x"), nil, "c-a", "f-x") }, ErrNetVaultRefInUse},
+	}
+	for _, c := range cases {
+		raw := c.do()
+		if raw == nil {
+			t.Errorf("%s: not refused", c.name)
+			continue
+		}
+		if got := mapNetConstraintErr(raw); !errors.Is(got, c.want) {
+			t.Errorf("%s: mapped %v to %v, want %v", c.name, raw, got, c.want)
+		}
+	}
+	// Errors that are not registry uniqueness constraints are not mapped.
+	other := errors.New("disk on fire")
+	if got := mapNetConstraintErr(other); got != other {
+		t.Fatalf("unrelated error rewritten: %v", got)
+	}
+	chk := rawInsertNetDeviceRefs(db, "BAD", pinOf("y"), nil, "d-y", "f-y")
+	if chk == nil {
+		t.Fatal("bad id accepted")
+	}
+	for _, typed := range []error{ErrNetDeviceExists, ErrNetDeviceTombstoned, ErrNetTrustIdentityInUse, ErrNetVaultRefInUse} {
+		if errors.Is(mapNetConstraintErr(chk), typed) {
+			t.Fatalf("CHECK failure mapped to %v", typed)
+		}
 	}
 }

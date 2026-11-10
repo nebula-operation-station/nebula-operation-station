@@ -7,7 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
+
+	"modernc.org/sqlite"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevcontract"
 )
@@ -33,7 +36,46 @@ var (
 	// ErrNetTrustIdentityInUse is returned when the trust identity (family,
 	// pin kind, pin) belongs to another live device.
 	ErrNetTrustIdentityInUse = errors.New("executordb: the trust identity is already registered for another network device")
+	// ErrNetVaultRefInUse is returned when a vault reference is already
+	// used by another device, live or tombstoned, in any role: a reference
+	// belongs to one device for ever (ADR 0010 D2).
+	ErrNetVaultRefInUse = errors.New("executordb: the vault reference is already used by another network device")
 )
+
+// sqliteConstraint is the primary SQLite result code of every constraint
+// violation (UNIQUE, PRIMARY KEY, CHECK, trigger RAISE).
+const sqliteConstraint = 19
+
+// mapNetConstraintErr maps a SQLite uniqueness or trigger violation of the
+// netdev registry to the typed error callers branch on, so a writer that
+// lost a race after passing the Go pre-checks still sees ErrNetDeviceExists,
+// ErrNetDeviceTombstoned, ErrNetTrustIdentityInUse or ErrNetVaultRefInUse.
+// Any other error is returned unchanged.
+func mapNetConstraintErr(err error) error {
+	var se *sqlite.Error
+	if !errors.As(err, &se) || se.Code()&0xff != sqliteConstraint {
+		return err
+	}
+	msg := se.Error()
+	var typed error
+	switch {
+	case strings.Contains(msg, "netdev vault reference in use"),
+		strings.Contains(msg, "UNIQUE constraint failed: netdev_devices.credential_ref"),
+		strings.Contains(msg, "UNIQUE constraint failed: netdev_devices.digest_key_ref"),
+		strings.Contains(msg, "UNIQUE constraint failed: netdev_devices.fingerprint_key_ref"):
+		typed = ErrNetVaultRefInUse
+	case strings.Contains(msg, "UNIQUE constraint failed: netdev_devices.family, netdev_devices.pin_kind, netdev_devices.pin_value"):
+		typed = ErrNetTrustIdentityInUse
+	case strings.Contains(msg, "netdev device id is tombstoned"),
+		strings.Contains(msg, "UNIQUE constraint failed: netdev_tombstones.id"):
+		typed = ErrNetDeviceTombstoned
+	case strings.Contains(msg, "UNIQUE constraint failed: netdev_devices.id"):
+		typed = ErrNetDeviceExists
+	default:
+		return err
+	}
+	return fmt.Errorf("%w: %w", typed, err)
+}
 
 const (
 	// maxNetDeviceLabel bounds a device label (CHECK in 0024).
@@ -126,6 +168,9 @@ func validateNetDevice(d NetDevice) error {
 	if d.DigestKeyRef == d.FingerprintKeyRef {
 		return fmt.Errorf("executordb: %w: network device %s digest and fingerprint keys must be distinct vault entries", ErrInvalid, d.ID)
 	}
+	if d.CredentialRef != "" && (d.CredentialRef == d.DigestKeyRef || d.CredentialRef == d.FingerprintKeyRef) {
+		return fmt.Errorf("executordb: %w: network device %s credential must be a vault entry distinct from its keys", ErrInvalid, d.ID)
+	}
 	return nil
 }
 
@@ -174,19 +219,22 @@ func (db *DB) InsertNetDevice(d NetDevice) (NetDevice, error) {
 	if err := netTrustIdentityFree(tx, d.ID, d.Family, d.PinKind, d.PinValue); err != nil {
 		return NetDevice{}, err
 	}
-
-	now := db.now().Truncate(time.Second).Unix()
 	var credRef any
 	if d.CredentialRef != "" {
 		credRef = d.CredentialRef
 	}
+	if err := netVaultRefsFree(tx, credRef, d.DigestKeyRef, d.FingerprintKeyRef); err != nil {
+		return NetDevice{}, err
+	}
+
+	now := db.now().Truncate(time.Second).Unix()
 	if _, err := tx.Exec(`INSERT INTO netdev_devices (id, family, label, endpoint_ip, port, pin_kind, pin_value,
 		trust_generation, blocked, block_reason, credential_ref, digest_key_ref, fingerprint_key_ref,
 		created_at, updated_at, tombstoned_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, 1, 0, NULL, ?, ?, ?, ?, ?, NULL)`,
 		d.ID, string(d.Family), d.Label, d.EndpointIP, int64(d.Port), string(d.PinKind), d.PinValue,
 		credRef, d.DigestKeyRef, d.FingerprintKeyRef, now, now); err != nil {
-		return NetDevice{}, fmt.Errorf("executordb: insert network device %s: %w", d.ID, err)
+		return NetDevice{}, fmt.Errorf("executordb: insert network device %s: %w", d.ID, mapNetConstraintErr(err))
 	}
 	out, err := loadNetDevice(tx, d.ID)
 	if err != nil {
@@ -317,7 +365,7 @@ func (db *DB) UnblockNetDevice(id string) (NetDevice, error) {
 func (db *DB) TombstoneNetDevice(id string) (NetDevice, error) {
 	return db.mutateNetDevice("tombstone", id, func(tx *sql.Tx, _ NetDevice, now int64) error {
 		if _, err := tx.Exec(`INSERT INTO netdev_tombstones (id, tombstoned_at) VALUES (?, ?)`, id, now); err != nil {
-			return fmt.Errorf("executordb: tombstone network device %s: %w", id, err)
+			return fmt.Errorf("executordb: tombstone network device %s: %w", id, mapNetConstraintErr(err))
 		}
 		return execOne(tx, `UPDATE netdev_devices SET tombstoned_at = ?, updated_at = ?
 			WHERE id = ? AND tombstoned_at IS NULL`, now, now, id)
@@ -357,7 +405,7 @@ func (db *DB) mutateNetDevice(op, id string, change func(tx *sql.Tx, cur NetDevi
 func execOne(tx *sql.Tx, query string, args ...any) error {
 	res, err := tx.Exec(query, args...)
 	if err != nil {
-		return fmt.Errorf("executordb: update network device: %w", err)
+		return fmt.Errorf("executordb: update network device: %w", mapNetConstraintErr(err))
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
@@ -381,6 +429,25 @@ func netTrustIdentityFree(tx *sql.Tx, id string, family netdevcontract.Family, k
 		return fmt.Errorf("%w: held by %s", ErrNetTrustIdentityInUse, other)
 	case !errors.Is(err, sql.ErrNoRows):
 		return fmt.Errorf("executordb: network device trust identity: %w", err)
+	}
+	return nil
+}
+
+// netVaultRefsFree returns ErrNetVaultRefInUse if any of the given vault
+// references (credRef may be nil) is used by any device, live or
+// tombstoned, in any role.
+func netVaultRefsFree(tx *sql.Tx, credRef any, digestRef, fingerprintRef string) error {
+	var other string
+	err := tx.QueryRow(`SELECT id FROM netdev_devices
+		WHERE digest_key_ref IN (?1, ?2, ?3)
+		   OR fingerprint_key_ref IN (?1, ?2, ?3)
+		   OR credential_ref IN (?1, ?2, ?3)
+		ORDER BY id LIMIT 1`, credRef, digestRef, fingerprintRef).Scan(&other)
+	switch {
+	case err == nil:
+		return fmt.Errorf("%w: held by %s", ErrNetVaultRefInUse, other)
+	case !errors.Is(err, sql.ErrNoRows):
+		return fmt.Errorf("executordb: network device vault references: %w", err)
 	}
 	return nil
 }

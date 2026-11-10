@@ -13,7 +13,8 @@
 -- A removed device keeps its row with tombstoned_at set and its id is
 -- recorded in netdev_tombstones; triggers below make both permanent, so a
 -- tombstoned id can never be reused. The trust identity (family, pin_kind,
--- pin_value) is unique among live devices.
+-- pin_value) is unique among live devices; every vault reference is unique
+-- across all rows, live and tombstoned, and device ids are immutable.
 CREATE TABLE netdev_devices (
     id                  TEXT PRIMARY KEY CHECK (
                             length(id) BETWEEN 1 AND 64
@@ -54,9 +55,56 @@ CREATE TABLE netdev_devices (
         OR (family = 'panos' AND pin_kind IN ('tls-leaf', 'tls-ca'))),
     -- A block always carries its reason; an unblocked device has none.
     CHECK ((blocked = 1) = (block_reason IS NOT NULL)),
-    -- The two per-device keys are independent vault entries.
-    CHECK (digest_key_ref <> fingerprint_key_ref)
+    -- The two per-device keys are independent vault entries, and the
+    -- credential is neither of them.
+    CHECK (digest_key_ref <> fingerprint_key_ref),
+    CHECK (credential_ref IS NULL
+        OR (credential_ref <> digest_key_ref AND credential_ref <> fingerprint_key_ref))
 );
+
+-- A device id never changes.
+CREATE TRIGGER netdev_devices_id_immutable
+BEFORE UPDATE OF id ON netdev_devices
+WHEN NEW.id IS NOT OLD.id
+BEGIN
+    SELECT RAISE(ABORT, 'netdev device id is immutable');
+END;
+
+-- Every vault reference belongs to exactly one device, in exactly one role,
+-- for ever: the indexes and triggers cover tombstoned rows too, so the
+-- references of a removed device (kept for vault cleanup) are never reused
+-- and deleting their vault entries can never break a live device
+-- (ADR 0010 D2).
+CREATE UNIQUE INDEX netdev_devices_credential_ref_idx
+    ON netdev_devices (credential_ref)
+    WHERE credential_ref IS NOT NULL;
+CREATE UNIQUE INDEX netdev_devices_digest_key_ref_idx
+    ON netdev_devices (digest_key_ref);
+CREATE UNIQUE INDEX netdev_devices_fingerprint_key_ref_idx
+    ON netdev_devices (fingerprint_key_ref);
+
+-- The indexes are per column; these triggers also refuse a reference that
+-- another device uses in a different role.
+CREATE TRIGGER netdev_devices_vault_ref_insert
+BEFORE INSERT ON netdev_devices
+WHEN EXISTS (SELECT 1 FROM netdev_devices
+    WHERE digest_key_ref IN (NEW.digest_key_ref, NEW.fingerprint_key_ref, NEW.credential_ref)
+       OR fingerprint_key_ref IN (NEW.digest_key_ref, NEW.fingerprint_key_ref, NEW.credential_ref)
+       OR credential_ref IN (NEW.digest_key_ref, NEW.fingerprint_key_ref, NEW.credential_ref))
+BEGIN
+    SELECT RAISE(ABORT, 'netdev vault reference in use');
+END;
+
+CREATE TRIGGER netdev_devices_vault_ref_update
+BEFORE UPDATE OF credential_ref, digest_key_ref, fingerprint_key_ref ON netdev_devices
+WHEN EXISTS (SELECT 1 FROM netdev_devices
+    WHERE id <> OLD.id
+      AND (digest_key_ref IN (NEW.digest_key_ref, NEW.fingerprint_key_ref, NEW.credential_ref)
+        OR fingerprint_key_ref IN (NEW.digest_key_ref, NEW.fingerprint_key_ref, NEW.credential_ref)
+        OR credential_ref IN (NEW.digest_key_ref, NEW.fingerprint_key_ref, NEW.credential_ref)))
+BEGIN
+    SELECT RAISE(ABORT, 'netdev vault reference in use');
+END;
 
 -- The trust identity of every live device is unique.
 CREATE UNIQUE INDEX netdev_devices_trust_identity_idx
@@ -90,6 +138,14 @@ CREATE TRIGGER netdev_devices_no_delete
 BEFORE DELETE ON netdev_devices
 BEGIN
     SELECT RAISE(ABORT, 'netdev devices are tombstoned, never deleted');
+END;
+
+-- A tombstone id never changes (netdev_tombstones_no_update also refuses it).
+CREATE TRIGGER netdev_tombstones_id_immutable
+BEFORE UPDATE OF id ON netdev_tombstones
+WHEN NEW.id IS NOT OLD.id
+BEGIN
+    SELECT RAISE(ABORT, 'netdev tombstone id is immutable');
 END;
 
 -- Tombstones are permanent.
