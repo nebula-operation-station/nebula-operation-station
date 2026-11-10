@@ -11,11 +11,16 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevcontract"
 )
 
+type testHelper interface {
+	Helper()
+	Fatalf(format string, args ...any)
+}
+
 // The fixtures in testdata are SYNTHETIC: placeholder serials
 // (PSZ0000000x), fictional 3.x firmware releases and no real addresses.
 // They are not captured from lab devices; ND-03 records the real lab
 // fixtures before any of them is relied on.
-func syntheticFixture(t *testing.T, name string) []byte {
+func syntheticFixture(t testHelper, name string) []byte {
 	t.Helper()
 	in, err := os.ReadFile("testdata/" + name)
 	if err != nil {
@@ -33,6 +38,8 @@ func TestParseVersion(t *testing.T) {
 		in      []byte
 		want    Version
 		wantErr error // if non-nil, the error must match it via errors.Is
+		// wantErrAny requires an error without checking which one.
+		wantErrAny bool
 	}{
 		{
 			name: "cbs250 synthetic fixture",
@@ -96,16 +103,19 @@ func TestParseVersion(t *testing.T) {
 			wantErr: netdevcontract.ErrOverLimit,
 		},
 		{
-			name: "invalid UTF-8 is refused",
-			in:   []byte("Model : CBS250-8T\xff\xfe\n"),
+			name:       "invalid UTF-8 is refused",
+			in:         []byte("Model : CBS250-8T\xff\xfe\n"),
+			wantErrAny: true,
 		},
 		{
-			name: "control character in a line is refused",
-			in:   []byte("Model : CBS250-8T\nSerial Number : PSZ00000000\x07\n"),
+			name:       "control character in a line is refused",
+			in:         []byte("Model : CBS250-8T\nSerial Number : PSZ00000000\x07\n"),
+			wantErrAny: true,
 		},
 		{
-			name: "embedded carriage return is refused",
-			in:   []byte("Model : CB\rS250-8T\n"),
+			name:       "embedded carriage return is refused",
+			in:         []byte("Model : CB\rS250-8T\n"),
+			wantErrAny: true,
 		},
 	}
 
@@ -115,6 +125,12 @@ func TestParseVersion(t *testing.T) {
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
 					t.Fatalf("ParseVersion error = %v, want errors.Is %v", err, tt.wantErr)
+				}
+				return
+			}
+			if tt.wantErrAny {
+				if err == nil {
+					t.Fatalf("ParseVersion error = nil, want an error")
 				}
 				return
 			}
