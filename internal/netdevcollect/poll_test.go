@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math"
 	"math/rand/v2"
@@ -771,24 +772,140 @@ func TestListErrorsAreReported(t *testing.T) {
 	}
 }
 
+// schedCount counts the schedule entries of device.
+func schedCount(p *Poller, device string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	n := 0
+	for k := range p.sched {
+		if k.device == device {
+			n++
+		}
+	}
+	return n
+}
+
 func TestRemovedDevicesArePruned(t *testing.T) {
+	// A removed device's schedule survives the grace period (absent for
+	// up to the backoff cap), then it is dropped; its slot goes at once.
 	clock := newClock()
 	c := newFakeClient(clock, cbsDevice("core-sw-01"), cbsDevice("old-sw"))
 	p := newTestPoller(c, &fakeSpool{}, clock, constRand(0.5))
 	cycle(t, p)
+	reads := len(familyReads["cbs"])
 	c.mu.Lock()
 	c.devices = c.devices[:1]
 	c.mu.Unlock()
 	cycle(t, p)
+	if n := schedCount(p, "old-sw"); n != reads {
+		t.Fatalf("removed device has %d schedules right after removal, want %d kept", n, reads)
+	}
+	p.mu.Lock()
+	_, slot := p.slots["old-sw"]
+	p.mu.Unlock()
+	if slot {
+		t.Fatal("device slot of a removed device was kept")
+	}
+	clock.Advance(DefaultMaxBackoff)
+	cycle(t, p)
+	if n := schedCount(p, "old-sw"); n != reads {
+		t.Fatalf("removed device has %d schedules at the end of the grace period, want %d", n, reads)
+	}
+	clock.Advance(time.Nanosecond)
+	cycle(t, p)
+	if n := schedCount(p, "old-sw"); n != 0 {
+		t.Fatalf("schedule of a removed device was kept after the grace period: %d entries", n)
+	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	for k := range p.sched {
-		if k.device == "old-sw" {
-			t.Fatal("schedule of a removed device was kept")
-		}
+	if _, ok := p.absent["old-sw"]; ok {
+		t.Fatal("absence record of a pruned device was kept")
 	}
-	if _, ok := p.slots["old-sw"]; ok {
-		t.Fatal("device slot of a removed device was kept")
+}
+
+func TestUnlistedThenRelistedDeviceKeepsSchedule(t *testing.T) {
+	// A device missing from one device list (partial list, or removed
+	// and re-added) must keep its 15 min floor and its running backoff.
+	clock := newClock()
+	d := cbsDevice("core-sw-01")
+	c := newFakeClient(clock, d)
+	c.setReadErr(cbsVLANs, status.Error(codes.Unavailable, "down"))
+	p := newTestPoller(c, &fakeSpool{}, clock, constRand(0.5))
+	cycle(t, p)                     // failure 1, retry in 15m
+	clock.Advance(15 * time.Minute) // due again
+	cycle(t, p)                     // failure 2, retry in 30m
+	before := stateOf(t, p, "core-sw-01", cbsVLANs)
+	if before.failures != 2 {
+		t.Fatalf("setup: failures=%d, want 2", before.failures)
+	}
+	calls := c.callCount()
+
+	setDevices := func(ds ...*pb.NetDeviceInfo) {
+		c.mu.Lock()
+		c.devices = ds
+		c.mu.Unlock()
+	}
+	setDevices()
+	clock.Advance(time.Minute)
+	cycle(t, p)
+	setDevices(d)
+	clock.Advance(time.Minute)
+	if rep := cycle(t, p); rep.Dispatched != 0 {
+		t.Fatalf("relisted device was read %d times before its floor or backoff", rep.Dispatched)
+	}
+	if c.callCount() != calls {
+		t.Fatalf("relisted device got %d reads before its schedule", c.callCount()-calls)
+	}
+	after := stateOf(t, p, "core-sw-01", cbsVLANs)
+	if after != before {
+		t.Fatalf("schedule changed across the unlisted cycle: %+v, want %+v", after, before)
+	}
+	// The backoff keeps growing from where it was.
+	clock.Advance(before.next.Sub(clock.Now()))
+	start := clock.Now()
+	cycle(t, p)
+	st := stateOf(t, p, "core-sw-01", cbsVLANs)
+	if st.failures != 3 || st.next.Sub(start) != time.Hour {
+		t.Fatalf("after relist: failures=%d delay=%v, want 3, 1h", st.failures, st.next.Sub(start))
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.absent) != 0 {
+		t.Fatalf("relisted device still recorded as absent: %v", p.absent)
+	}
+}
+
+func TestAbsentDeviceStateIsBounded(t *testing.T) {
+	// Schedules of unlisted devices are kept for the grace period, but
+	// never for more than maxAbsentDevices devices; the longest absent go
+	// first.
+	clock := newClock()
+	c := newFakeClient(clock, cbsDevice("core-sw-01"))
+	p := newTestPoller(c, &fakeSpool{}, clock, constRand(0.5))
+	cycle(t, p)
+	far := clock.Now().Add(24 * time.Hour)
+	p.mu.Lock()
+	p.sched[schedKey{device: "oldest", read: cbsVLANs}] = &schedState{next: far}
+	p.absent["oldest"] = clock.Now().Add(-time.Minute)
+	for i := range maxAbsentDevices {
+		p.sched[schedKey{device: fmt.Sprintf("gone-%04d", i), read: cbsVLANs}] = &schedState{next: far}
+	}
+	p.mu.Unlock()
+	clock.Advance(time.Minute)
+	cycle(t, p)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.absent) != maxAbsentDevices {
+		t.Fatalf("%d absent devices tracked, want %d", len(p.absent), maxAbsentDevices)
+	}
+	if _, ok := p.sched[schedKey{device: "oldest", read: cbsVLANs}]; ok {
+		t.Fatal("longest absent device was not evicted over the bound")
+	}
+	if _, ok := p.absent["oldest"]; ok {
+		t.Fatal("absence record of the evicted device was kept")
+	}
+	if len(p.sched) != maxAbsentDevices+len(familyReads["cbs"]) {
+		t.Fatalf("%d schedules, want %d", len(p.sched), maxAbsentDevices+len(familyReads["cbs"]))
 	}
 }
 

@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,6 +46,9 @@ const (
 	// maxTrackedFailures bounds the failure counter; the backoff is capped
 	// long before.
 	maxTrackedFailures = 64
+	// maxAbsentDevices bounds how many unlisted devices keep their
+	// schedule during the grace period; the longest absent go first.
+	maxAbsentDevices = MaxDevices
 )
 
 // Sentinel errors of the poll loop.
@@ -161,6 +166,9 @@ type Poller struct {
 
 	mu    sync.Mutex
 	sched map[schedKey]*schedState
+	// absent records since when a device with schedule state has been
+	// missing from the device list.
+	absent map[string]time.Time
 	// slots holds one mutex per device; a device worker holds it for its
 	// whole run, so at most one request per device is in flight.
 	slots map[string]*sync.Mutex
@@ -200,6 +208,7 @@ func (p *Poller) init() {
 		return
 	}
 	p.sched = map[schedKey]*schedState{}
+	p.absent = map[string]time.Time{}
 	p.slots = map[string]*sync.Mutex{}
 	n := p.MaxConcurrentDevices
 	if n <= 0 {
@@ -305,7 +314,7 @@ func (p *Poller) Cycle(ctx context.Context) (CycleReport, error) {
 		p.wg.Add(1)
 		go p.runDevice(ctx, slot, dev, due)
 	}
-	p.prune(listed)
+	p.prune(listed, now)
 	return rep, nil
 }
 
@@ -335,13 +344,60 @@ func (p *Poller) dueReads(dev device, now time.Time) []pb.NetDeviceRead {
 	return due
 }
 
-// prune drops the state of devices the executor no longer lists. A slot
+// prune drops the state of devices the executor no longer lists. The
+// schedule of an unlisted device is kept until the device has been absent
+// for longer than the backoff cap and the read is due, so a device that
+// drops out of one list (a partial list, or removed and re-added) keeps
+// its floor and any running backoff. At most maxAbsentDevices unlisted
+// devices keep state; beyond that the longest absent are dropped. A slot
 // is only dropped while no worker holds it, so a device never gets two.
 // Callers hold p.mu.
-func (p *Poller) prune(listed map[string]bool) {
-	for k := range p.sched {
-		if !listed[k.device] {
-			delete(p.sched, k)
+func (p *Poller) prune(listed map[string]bool, now time.Time) {
+	for id := range listed {
+		delete(p.absent, id)
+	}
+	grace := p.maxBackoff()
+	kept := map[string]bool{}
+	for k, st := range p.sched {
+		if listed[k.device] {
+			continue
+		}
+		since, ok := p.absent[k.device]
+		if !ok {
+			since = now
+			p.absent[k.device] = now
+		}
+		if now.Sub(since) <= grace || now.Before(st.next) {
+			kept[k.device] = true
+			continue
+		}
+		delete(p.sched, k)
+	}
+	for id := range p.absent {
+		if !kept[id] {
+			delete(p.absent, id)
+		}
+	}
+	if over := len(p.absent) - maxAbsentDevices; over > 0 {
+		ids := make([]string, 0, len(p.absent))
+		for id := range p.absent {
+			ids = append(ids, id)
+		}
+		slices.SortFunc(ids, func(a, b string) int {
+			if c := p.absent[a].Compare(p.absent[b]); c != 0 {
+				return c
+			}
+			return strings.Compare(a, b)
+		})
+		evict := make(map[string]bool, over)
+		for _, id := range ids[:over] {
+			evict[id] = true
+			delete(p.absent, id)
+		}
+		for k := range p.sched {
+			if evict[k.device] {
+				delete(p.sched, k)
+			}
 		}
 	}
 	for id, slot := range p.slots {
@@ -487,11 +543,7 @@ func payloadFor(resp *pb.ReadNetDeviceResponse, read pb.NetDeviceRead) proto.Mes
 // below MinReadInterval; a backoff never exceeds MaxBackoff. Callers hold
 // p.mu or own p exclusively.
 func (p *Poller) nextDelay(cadence time.Duration, failures int) time.Duration {
-	maxBackoff := p.MaxBackoff
-	if maxBackoff <= 0 {
-		maxBackoff = DefaultMaxBackoff
-	}
-	maxBackoff = max(maxBackoff, MinReadInterval)
+	maxBackoff := p.maxBackoff()
 	base := max(cadence, MinReadInterval)
 	if failures > 0 {
 		b := MinReadInterval
@@ -510,6 +562,16 @@ func (p *Poller) nextDelay(cadence time.Duration, failures int) time.Duration {
 		d = min(d, maxBackoff)
 	}
 	return d
+}
+
+// maxBackoff is the effective backoff cap: MaxBackoff or its default,
+// never below MinReadInterval.
+func (p *Poller) maxBackoff() time.Duration {
+	b := p.MaxBackoff
+	if b <= 0 {
+		b = DefaultMaxBackoff
+	}
+	return max(b, MinReadInterval)
 }
 
 // errClass names the kind of a failure for the log: a stable executor
