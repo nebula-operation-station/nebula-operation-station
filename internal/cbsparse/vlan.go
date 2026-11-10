@@ -25,6 +25,16 @@ const (
 	// million port names. The bound is 64 full-size port lists, e.g. 16
 	// trunk ports that carry every VLAN.
 	vlanMaxMemberships = 64 * netdevcontract.MaxInterfacesPerDevice
+	// vlanNameMinPad is the number of spaces a name needs between its end
+	// and the end of the Name column when any cell after the Name column
+	// holds text. A name with an inner space run that overflows the column
+	// prints exactly like a shorter name plus a value in the next cells;
+	// with fewer than vlanNameMinPad spaces at the boundary (the name
+	// filling its column, or one or two runes short of it) the row is
+	// therefore ambiguous and dropped. A name with a longer inner space
+	// run that lands exactly on a column start cannot be told apart from
+	// the table at all; this bound only closes the boundary cases.
+	vlanNameMinPad = 3
 )
 
 // VLAN is one row of "show vlan" on a CBS switch.
@@ -91,10 +101,11 @@ const (
 // continues). A row that cannot be read exactly is dropped and incomplete
 // is true: text crossing a column gap, a tab, an ID outside 1 to
 // MaxVLANID or not in canonical decimal, a name that violates the text
-// rule or MaxLabelBytes, a name that fills its column up to the gap when
-// Name is not the last column (a longer name with an inner space would
-// overflow into the next cell undetected, so such a name is ambiguous),
-// an unknown port name or malformed port list, a port both tagged and
+// rule or MaxLabelBytes, a name that may overflow its column when Name is
+// not the last column (it fills the column up to the gap, or it ends
+// fewer than vlanNameMinPad runes before the gap and a later cell holds
+// text: a longer name with an inner space run would print exactly like
+// it, so such a name is ambiguous), an unknown port name or malformed port list, a port both tagged and
 // untagged, a continuation line that fills the name or type column, or
 // more than vlanMaxContinuationLines continuation lines. A continuation
 // line without a row before it is dropped the same way, and so is a title
@@ -175,8 +186,7 @@ func groupVLANRows(rows []tableRow, idx []int) (groups []*vlanGroup, orphans boo
 				typ:      cell(r.cells, idx[vlanFieldType]),
 				tagged:   r.cells[idx[vlanFieldTagged]],
 				untagged: r.cells[idx[vlanFieldUntagged]],
-				// filled is always false for the last column.
-				bad: r.filled[idx[vlanFieldName]],
+				bad:      nameMayOverflow(r, idx[vlanFieldName]),
 			}
 			groups = append(groups, cur)
 			continue
@@ -199,6 +209,27 @@ func groupVLANRows(rows []tableRow, idx []int) (groups []*vlanGroup, orphans boo
 		}
 	}
 	return groups, orphans
+}
+
+// nameMayOverflow reports whether the Name cell in column col of row r
+// may be the visible part of a longer name that runs on into the
+// following cells: the name ends fewer than vlanNameMinPad runes before
+// the end of its column and some cell after it holds text. A name that
+// fills its column up to the gap is always ambiguous (it may also be cut
+// off). A name in the last column cannot overflow.
+func nameMayOverflow(r tableRow, col int) bool {
+	if col == len(r.cells)-1 || r.cells[col] == "" || r.pad[col] >= vlanNameMinPad {
+		return false
+	}
+	if r.pad[col] == 0 {
+		return true
+	}
+	for _, c := range r.cells[col+1:] {
+		if c != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // joinWrapped appends the continuation of a wrapped port-list cell. A

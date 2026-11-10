@@ -48,12 +48,14 @@ type span struct{ start, end int }
 type tableRow struct {
 	line  int      // 1-based line number in the output
 	cells []string // one trimmed cell per column
-	// filled[i] is true when column i is not the last column and its text
-	// reaches the last rune before the gap. Such a cell may be the start
-	// of a value with an inner space that overflows into the next column
-	// (the gap check cannot see a space), so a free-text cell that is
-	// filled is ambiguous.
-	filled []bool
+	// pad[i] is the number of spaces between the end of the text of
+	// column i and the end of the column (the column width for an empty
+	// cell); it is 0 when the text reaches the last rune before the gap.
+	// The gap check cannot see a space, so a free-text cell with a small
+	// pad may be the start of a value with an inner space run that
+	// overflows into the following columns. pad is 0 for the last column,
+	// which extends to the end of the line.
+	pad []int
 	// ok is false when the line contains a tab or has text in a gap
 	// between two columns; its cells are then not trustworthy and the
 	// parsers drop it and mark the result incomplete.
@@ -163,8 +165,8 @@ func splitTables(out []byte, what string) ([]tableBlock, error) {
 			if strings.TrimSpace(lines[i]) == "" {
 				continue
 			}
-			cells, filled, ok := splitCells(lines[i], cols[k])
-			rows = append(rows, tableRow{line: i + 1, cells: cells, filled: filled, ok: ok, lead: leadText(lines[i], cols[k][0])})
+			cells, pad, ok := splitCells(lines[i], cols[k])
+			rows = append(rows, tableRow{line: i + 1, cells: cells, pad: pad, ok: ok, lead: leadText(lines[i], cols[k][0])})
 		}
 		blocks[k] = tableBlock{titles: titles, rows: rows, lostRows: lostRows}
 	}
@@ -215,16 +217,17 @@ func dashColumns(line string) ([]span, bool) {
 // non-space rune in a gap between columns (text that crosses a column
 // boundary, which would otherwise be silently split between two fields).
 // Text left of the first column cannot occur: dash lines start at offset
-// zero. The last column extends to the end of the line. filled reports
-// for every column but the last whether its last rune is not a space (see
-// tableRow.filled).
-func splitCells(line string, cols []span) (cells []string, filled []bool, ok bool) {
+// zero. The last column extends to the end of the line. pad reports for
+// every column but the last the spaces after its text up to the column
+// end, counting runes past the end of the line as spaces (see
+// tableRow.pad).
+func splitCells(line string, cols []span) (cells []string, pad []int, ok bool) {
 	if strings.ContainsRune(line, '\t') {
 		return nil, nil, false
 	}
 	r := []rune(line)
 	cells = make([]string, len(cols))
-	filled = make([]bool, len(cols))
+	pad = make([]int, len(cols))
 	for i, c := range cols {
 		if i > 0 {
 			for p := cols[i-1].end; p < c.start && p < len(r); p++ {
@@ -236,13 +239,15 @@ func splitCells(line string, cols []span) (cells []string, filled []bool, ok boo
 		end := c.end
 		if i == len(cols)-1 {
 			end = len(r)
-		} else {
-			filled[i] = c.end <= len(r) && r[c.end-1] != ' '
 		}
 		lo, hi := min(c.start, len(r)), min(end, len(r))
-		cells[i] = strings.TrimSpace(string(r[lo:hi]))
+		raw := string(r[lo:hi])
+		cells[i] = strings.TrimSpace(raw)
+		if i < len(cols)-1 {
+			pad[i] = c.end - c.start - len([]rune(strings.TrimRight(raw, " ")))
+		}
 	}
-	return cells, filled, true
+	return cells, pad, true
 }
 
 // leadText returns the trimmed text of the first column of line, cut at

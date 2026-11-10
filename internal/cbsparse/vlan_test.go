@@ -204,6 +204,10 @@ func TestParseVLANsDropsMalformedRows(t *testing.T) {
 		// indistinguishable from a name plus a tagged port.
 		{name: "name overflowing into the tagged column", rows: [][]string{{" 10", "abcdefghijklmnopq", "gi1", "gi2", "S"}}},
 		{name: "name filling its column", rows: [][]string{{" 10", "abcdefghijklmnopq", "", "gi2", "S"}}},
+		{name: "name filling its column, nothing after it", rows: [][]string{{" 10", "abcdefghijklmnopq", "", "", ""}}},
+		{name: "name one short of its column", rows: [][]string{{" 10", "abcdefghijklmnop", "gi1", "gi2", "S"}}},
+		{name: "name two short of its column", rows: [][]string{{" 10", "abcdefghijklmno", "gi1", "gi2", "S"}}},
+		{name: "name near the gap before a type only", rows: [][]string{{" 10", "abcdefghijklmno", "", "", "S"}}},
 		{name: "tab in row", extra: " 10\tten\n"},
 		{name: "continuation fills name", rows: [][]string{{" 10", "ten", "", "gi2,", "S"}, {"", "more", "", "gi3", ""}}},
 		{name: "continuation without comma", rows: [][]string{{" 10", "ten", "", "gi2", "S"}, {"", "", "", "gi3", ""}}},
@@ -228,28 +232,76 @@ func TestParseVLANsDropsMalformedRows(t *testing.T) {
 	}
 }
 
+// cbs350VLANHeader is the title and dash line of the cbs350 fixture: the
+// Name column is 17 runes wide (offsets 5 to 21), the gap is offset 22
+// and Tagged Ports starts at offset 23.
+const cbs350VLANHeader = "Vlan Name              Tagged Ports       UnTagged Ports     Created by\n" +
+	"---- ----------------- ------------------ ------------------ ----------------\n" +
+	" 1   default                              gi1/0/1            DV\n"
+
 func TestParseVLANsOverflowingNameAtCBS350Widths(t *testing.T) {
-	// The column widths of the cbs350 fixture; the name with an inner space
-	// runs past the Name column into the empty Tagged Ports cell.
-	in := "Vlan Name              Tagged Ports       UnTagged Ports     Created by\n" +
-		"---- ----------------- ------------------ ------------------ ----------------\n" +
-		" 1   default                              gi1/0/1            DV\n" +
-		" 10  abcdefghijklmnopq gi1/0/2                               S\n"
-	got, incomplete, err := ParseVLANs([]byte(in))
-	if err != nil || !incomplete {
-		t.Fatalf("incomplete %v, err %v", incomplete, err)
+	// A name with an inner space run that runs past the Name column into
+	// the empty Tagged Ports cell. With one, two or three spaces at the
+	// column boundary the row is byte for byte a shorter name plus a tagged
+	// port, so it is ambiguous and dropped.
+	tests := []struct{ name, row string }{
+		{"single space", " 10  abcdefghijklmnopq gi1/0/2                               S\n"},
+		{"double space", " 10  abcdefghijklmnop  gi1/0/2                               S\n"},
+		{"triple space", " 10  abcdefghijklmno   gi1/0/2                               S\n"},
+		{"inner space in the visible name", " 10  abc defghijklmn   gi1/0/2                               S\n"},
+		{"overflow into the untagged column", " 10  abcdefghijklmnop                     gi1/0/2            S\n"},
+		{"overflow without a type", " 10  abcdefghijklmnop  gi1/0/2\n"},
 	}
-	want := []VLAN{{ID: 1, Name: "default", Untagged: []string{"gi1/0/1"}, Type: "DV"}}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("got %+v, want only VLAN 1", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, incomplete, err := ParseVLANs([]byte(cbs350VLANHeader + tt.row))
+			if err != nil || !incomplete {
+				t.Fatalf("got %+v, incomplete %v, err %v", got, incomplete, err)
+			}
+			want := []VLAN{{ID: 1, Name: "default", Untagged: []string{"gi1/0/1"}, Type: "DV"}}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("got %+v, want only VLAN 1", got)
+			}
+		})
 	}
 }
 
-func TestParseVLANsNameOneShortOfItsColumnIsKept(t *testing.T) {
-	name := strings.Repeat("n", vlanWidths[vlanFieldName]-1)
-	got, incomplete, err := ParseVLANs(vlanTable([]string{" 10", name, "gi1", "gi2", "S"}))
-	if err != nil || incomplete || len(got) != 1 || got[0].Name != name || !reflect.DeepEqual(got[0].Tagged, []string{"gi1"}) {
-		t.Fatalf("got %+v, incomplete %v, err %v", got, incomplete, err)
+func TestParseVLANsNameClearOfTheGapIsKept(t *testing.T) {
+	// Controls for TestParseVLANsOverflowingNameAtCBS350Widths: a name that
+	// ends vlanNameMinPad runes before the gap, or a name near the gap with
+	// nothing after it on the line, is read as printed.
+	tests := []struct {
+		name, row string
+		want      VLAN
+	}{
+		{
+			name: "name with an inner space well before the gap",
+			row:  " 10  mgmt lab          gi1/0/2                               S\n",
+			want: VLAN{ID: 10, Name: "mgmt lab", Tagged: []string{"gi1/0/2"}, Type: "S"},
+		},
+		{
+			name: "name ending vlanNameMinPad runes before the gap",
+			row:  " 10  abcdefghijklmn    gi1/0/2                               S\n",
+			want: VLAN{ID: 10, Name: "abcdefghijklmn", Tagged: []string{"gi1/0/2"}, Type: "S"},
+		},
+		{
+			name: "inner space, vlanNameMinPad runes before the gap",
+			row:  " 10  abc defghijklm    gi1/0/2                               S\n",
+			want: VLAN{ID: 10, Name: "abc defghijklm", Tagged: []string{"gi1/0/2"}, Type: "S"},
+		},
+		{
+			name: "name one short of its column, nothing after it",
+			row:  " 10  abc defghijklmno\n",
+			want: VLAN{ID: 10, Name: "abc defghijklmno"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, incomplete, err := ParseVLANs([]byte(cbs350VLANHeader + tt.row))
+			if err != nil || incomplete || len(got) != 2 || !reflect.DeepEqual(got[1], tt.want) {
+				t.Fatalf("got %+v, incomplete %v, err %v", got, incomplete, err)
+			}
+		})
 	}
 }
 
