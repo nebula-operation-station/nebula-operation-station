@@ -149,6 +149,7 @@ const (
 	ExecutorService_UnblockNetDevice_FullMethodName                = "/nebula.executor.v1.ExecutorService/UnblockNetDevice"
 	ExecutorService_RemoveNetDevice_FullMethodName                 = "/nebula.executor.v1.ExecutorService/RemoveNetDevice"
 	ExecutorService_ListNetDevices_FullMethodName                  = "/nebula.executor.v1.ExecutorService/ListNetDevices"
+	ExecutorService_ReadNetDevice_FullMethodName                   = "/nebula.executor.v1.ExecutorService/ReadNetDevice"
 )
 
 // ExecutorServiceClient is the client API for ExecutorService service.
@@ -634,7 +635,19 @@ type ExecutorServiceClient interface {
 	RemoveNetDevice(ctx context.Context, in *RemoveNetDeviceRequest, opts ...grpc.CallOption) (*RemoveNetDeviceResponse, error)
 	// Metadata of every live device: ids, endpoint, pin, trust generation,
 	// block state and credential version. Never a vault reference.
+	// Role: admin, netdev-collector (ND-12; the collector needs the device
+	// ids and trust generations to schedule its typed reads).
 	ListNetDevices(ctx context.Context, in *ListNetDevicesRequest, opts ...grpc.CallOption) (*ListNetDevicesResponse, error)
+	// Network device typed reads (ADR 0010 D4, ND-12). Role: admin,
+	// netdev-collector. The server never calls this: like ReadPVE, the
+	// collector schedules the reads and spools the results. One read from a
+	// closed enum against one registered device; there is no free-form
+	// command, XPath or URL, no raw device text and no method that reveals a
+	// credential or changes the device. The executor validates device_id
+	// and the read, refuses blocked and removed devices and (ND-13/ND-14)
+	// requires a device read lease. Until then every valid read answers
+	// Unimplemented.
+	ReadNetDevice(ctx context.Context, in *ReadNetDeviceRequest, opts ...grpc.CallOption) (*ReadNetDeviceResponse, error)
 }
 
 type executorServiceClient struct {
@@ -1925,6 +1938,16 @@ func (c *executorServiceClient) ListNetDevices(ctx context.Context, in *ListNetD
 	return out, nil
 }
 
+func (c *executorServiceClient) ReadNetDevice(ctx context.Context, in *ReadNetDeviceRequest, opts ...grpc.CallOption) (*ReadNetDeviceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReadNetDeviceResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ReadNetDevice_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExecutorServiceServer is the server API for ExecutorService service.
 // All implementations must embed UnimplementedExecutorServiceServer
 // for forward compatibility.
@@ -2408,7 +2431,19 @@ type ExecutorServiceServer interface {
 	RemoveNetDevice(context.Context, *RemoveNetDeviceRequest) (*RemoveNetDeviceResponse, error)
 	// Metadata of every live device: ids, endpoint, pin, trust generation,
 	// block state and credential version. Never a vault reference.
+	// Role: admin, netdev-collector (ND-12; the collector needs the device
+	// ids and trust generations to schedule its typed reads).
 	ListNetDevices(context.Context, *ListNetDevicesRequest) (*ListNetDevicesResponse, error)
+	// Network device typed reads (ADR 0010 D4, ND-12). Role: admin,
+	// netdev-collector. The server never calls this: like ReadPVE, the
+	// collector schedules the reads and spools the results. One read from a
+	// closed enum against one registered device; there is no free-form
+	// command, XPath or URL, no raw device text and no method that reveals a
+	// credential or changes the device. The executor validates device_id
+	// and the read, refuses blocked and removed devices and (ND-13/ND-14)
+	// requires a device read lease. Until then every valid read answers
+	// Unimplemented.
+	ReadNetDevice(context.Context, *ReadNetDeviceRequest) (*ReadNetDeviceResponse, error)
 	mustEmbedUnimplementedExecutorServiceServer()
 }
 
@@ -2802,6 +2837,9 @@ func (UnimplementedExecutorServiceServer) RemoveNetDevice(context.Context, *Remo
 }
 func (UnimplementedExecutorServiceServer) ListNetDevices(context.Context, *ListNetDevicesRequest) (*ListNetDevicesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListNetDevices not implemented")
+}
+func (UnimplementedExecutorServiceServer) ReadNetDevice(context.Context, *ReadNetDeviceRequest) (*ReadNetDeviceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReadNetDevice not implemented")
 }
 func (UnimplementedExecutorServiceServer) mustEmbedUnimplementedExecutorServiceServer() {}
 func (UnimplementedExecutorServiceServer) testEmbeddedByValue()                         {}
@@ -5128,6 +5166,24 @@ func _ExecutorService_ListNetDevices_Handler(srv interface{}, ctx context.Contex
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_ReadNetDevice_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReadNetDeviceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ReadNetDevice(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ReadNetDevice_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ReadNetDevice(ctx, req.(*ReadNetDeviceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ExecutorService_ServiceDesc is the grpc.ServiceDesc for ExecutorService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -5646,6 +5702,10 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListNetDevices",
 			Handler:    _ExecutorService_ListNetDevices_Handler,
+		},
+		{
+			MethodName: "ReadNetDevice",
+			Handler:    _ExecutorService_ReadNetDevice_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

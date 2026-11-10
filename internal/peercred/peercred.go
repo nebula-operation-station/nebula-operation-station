@@ -41,6 +41,13 @@ const (
 	// read surface. It never runs execution, never manages keys or remotes,
 	// and never sees credentials — the executor alone talks to PVE.
 	RolePVECollector Role = "pve-collector"
+	// RoleNetDevCollector is the UID of the netdev-collector process (ADR
+	// 0010 D4, Q9: a separate collector binary; ND-12). It mirrors the
+	// pve-collector: its own dedicated UID, and it may call ONLY
+	// ListNetDevices (metadata) and ReadNetDevice (closed set of typed
+	// reads). No reveal, no generic command or XPath, no change or admin
+	// method, no credentials.
+	RoleNetDevCollector Role = "netdev-collector"
 )
 
 // AuthInfo carries the peer's credentials as reported by the kernel at
