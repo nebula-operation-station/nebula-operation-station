@@ -35,6 +35,7 @@ func newSpool(t *testing.T) *Spool {
 	if err := os.Chmod(dir, spoolDirMode); err != nil {
 		t.Fatal(err)
 	}
+	expectDirOwnership(t, dir)
 	now := testTime
 	var mu sync.Mutex
 	return &Spool{Dir: dir, Now: func() time.Time {
