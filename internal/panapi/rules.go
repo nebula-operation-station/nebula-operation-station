@@ -643,7 +643,7 @@ const (
 	// at most 16,777,216 object values of 88 (address) or 104 (service)
 	// bytes, about 1.4 to 1.7 GiB if a caller keeps every result; their
 	// strings are shared with Objects. A caller that keeps one rule at a
-	// time holds at most three fields of MaxAddressObjects or
+	// time holds at most two fields of MaxAddressObjects and one of
 	// MaxServiceObjects objects.
 	MaxResolveResultLeaves = 1 << 24
 )
