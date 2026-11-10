@@ -208,7 +208,7 @@ func TestParseNATRulesRejectsInvalidContent(t *testing.T) {
 		{"dst bad address", natBody(minimalNAT("n", `<destination-translation><translated-address>a&amp;b</translated-address></destination-translation>`))},
 		{"static and dynamic dst", natBody(minimalNAT("n", `<destination-translation><translated-address>a</translated-address></destination-translation>`+
 			`<dynamic-destination-translation><translated-address>a</translated-address></dynamic-destination-translation>`))},
-		{"hostile description", natBody(minimalNAT("n", "<description>a‮b</description>"))},
+		{"hostile description", natBody(minimalNAT("n", "<description>a"+string(rune(0x202e))+"b</description>"))},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

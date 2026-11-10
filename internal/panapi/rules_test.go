@@ -315,12 +315,12 @@ func TestParseSecurityRulesHostileDescription(t *testing.T) {
 
 	// text that could mislead a reader or a terminal is refused
 	for name, desc := range map[string]string{
-		"bidi override":  "allow ‮yna‬",
-		"zero width":     "al​low",
+		"bidi override":  "allow " + string(rune(0x202e)) + "yna" + string(rune(0x202c)),
+		"zero width":     "al" + string(rune(0x200b)) + "low",
 		"newline":        "line one&#xA;line two",
 		"escape":         "a\x1b[31mred",
-		"replacement":    "a�b",
-		"line separator": "a b",
+		"replacement":    "a" + string(rune(0xfffd)) + "b",
+		"line separator": "a" + string(rune(0x2028)) + "b",
 		"oversize":       strings.Repeat("x", netdevcontract.MaxDescriptionBytes+1),
 	} {
 		_, err := ParseSecurityRules(rulesBody(minimalRule("r", "<description>"+desc+"</description>")))
