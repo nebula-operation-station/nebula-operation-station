@@ -601,7 +601,20 @@ service ExecutorService {
   rpc RemoveNetDevice(RemoveNetDeviceRequest) returns (RemoveNetDeviceResponse);
   // Metadata of every live device: ids, endpoint, pin, trust generation,
   // block state and credential version. Never a vault reference.
+  // Role: admin, netdev-collector (ND-12; the collector needs the device
+  // ids and trust generations to schedule its typed reads).
   rpc ListNetDevices(ListNetDevicesRequest) returns (ListNetDevicesResponse);
+
+  // Network device typed reads (ADR 0010 D4, ND-12). Role: admin,
+  // netdev-collector. The server never calls this: like ReadPVE, the
+  // collector schedules the reads and spools the results. One read from a
+  // closed enum against one registered device; there is no free-form
+  // command, XPath or URL, no raw device text and no method that reveals a
+  // credential or changes the device. The executor validates device_id
+  // and the read, refuses blocked and removed devices and (ND-13/ND-14)
+  // requires a device read lease. Until then every valid read answers
+  // Unimplemented.
+  rpc ReadNetDevice(ReadNetDeviceRequest) returns (ReadNetDeviceResponse);
 }
 
 enum RiskClass {
@@ -3492,4 +3505,296 @@ message ListNetDevicesRequest {}
 
 message ListNetDevicesResponse {
   repeated NetDeviceInfo devices = 1;
+}
+
+// NetDeviceRead is the closed set of typed network device reads (ADR 0010
+// D4, ND-12). Each value maps to one fixed executor-side command or API
+// request; the caller never supplies command text, an XPath or a URL. A
+// CBS read on a PAN-OS device (and the reverse) is refused.
+enum NetDeviceRead {
+  NET_DEVICE_READ_UNSPECIFIED = 0;
+  // CBS (SSH CLI, internal/cbsparse).
+  NET_DEVICE_READ_CBS_VERSION = 1;
+  NET_DEVICE_READ_CBS_VLANS = 2;
+  NET_DEVICE_READ_CBS_INTERFACES = 3;
+  NET_DEVICE_READ_CBS_MAC_TABLE = 4;
+  NET_DEVICE_READ_CBS_LLDP = 5;
+  // PAN-OS (XML API, internal/panapi).
+  NET_DEVICE_READ_PANOS_ZONES = 6;
+  NET_DEVICE_READ_PANOS_OBJECTS = 7;
+  NET_DEVICE_READ_PANOS_SECURITY_RULES = 8;
+  NET_DEVICE_READ_PANOS_NAT_RULES = 9;
+  NET_DEVICE_READ_PANOS_RULE_HIT_COUNTS = 10;
+}
+
+// ReadNetDeviceRequest is one typed read of one device. It deliberately
+// has no free-form field: no command, XPath, URL, filter or raw bytes.
+message ReadNetDeviceRequest {
+  string device_id = 1;
+  NetDeviceRead read = 2;
+}
+
+// ReadNetDeviceResponse is one sanitized, typed observation of one
+// device. Exactly one payload is set, matching the requested read. Every
+// string is untrusted device output, validated against netdevcontract and
+// rendered as text only; there is no raw text and no bytes field.
+message ReadNetDeviceResponse {
+  string device_id = 1;
+  // trust_generation is the device trust generation the read ran under.
+  uint64 trust_generation = 2;
+  int64 observed_at_unix = 3;
+  // incomplete is set when the device output hit a limit or lacked a
+  // field: the payload holds what was read and must not be treated as
+  // complete (no silent deletion downstream).
+  bool incomplete = 4;
+  oneof payload {
+    NetDevCBSVersion cbs_version = 5;
+    NetDevVLANs cbs_vlans = 6;
+    NetDevPorts cbs_interfaces = 7;
+    NetDevMACTable cbs_mac_table = 8;
+    NetDevLLDPNeighbors cbs_lldp = 9;
+    NetDevZones panos_zones = 10;
+    NetDevObjects panos_objects = 11;
+    NetDevSecurityRules panos_security_rules = 12;
+    NetDevNATRules panos_nat_rules = 13;
+    NetDevRuleHitCounts panos_rule_hit_counts = 14;
+  }
+}
+
+// NetDevCBSVersion mirrors cbsparse.Version ("show version").
+message NetDevCBSVersion {
+  string model = 1;
+  string firmware = 2;
+  string serial = 3;
+}
+
+// NetDevVLAN mirrors netdevcontract.VLAN.
+message NetDevVLAN {
+  uint32 id = 1;
+  string name = 2;
+}
+
+message NetDevVLANs {
+  repeated NetDevVLAN vlans = 1;
+}
+
+// NetDevLinkState mirrors netdevcontract.LinkState.
+enum NetDevLinkState {
+  NET_DEV_LINK_STATE_UNSPECIFIED = 0;
+  NET_DEV_LINK_STATE_UP = 1;
+  NET_DEV_LINK_STATE_DOWN = 2;
+  NET_DEV_LINK_STATE_UNKNOWN = 3;
+}
+
+// NetDevPortMode mirrors netdevcontract.PortMode.
+enum NetDevPortMode {
+  NET_DEV_PORT_MODE_UNSPECIFIED = 0;
+  NET_DEV_PORT_MODE_ACCESS = 1;
+  NET_DEV_PORT_MODE_TRUNK = 2;
+  NET_DEV_PORT_MODE_GENERAL = 3;
+  NET_DEV_PORT_MODE_UNKNOWN = 4;
+}
+
+// NetDevPort mirrors netdevcontract.Port.
+message NetDevPort {
+  string name = 1;
+  NetDevLinkState admin_state = 2;
+  NetDevLinkState oper_state = 3;
+  optional uint64 speed_mbps = 4;
+  NetDevPortMode mode = 5;
+  optional uint32 access_vlan = 6;
+  optional uint32 native_vlan = 7;
+  repeated uint32 allowed_vlans = 8;
+  string description = 9;
+}
+
+message NetDevPorts {
+  repeated NetDevPort ports = 1;
+}
+
+// NetDevMACType mirrors netdevcontract.MACType.
+enum NetDevMACType {
+  NET_DEV_MAC_TYPE_UNSPECIFIED = 0;
+  NET_DEV_MAC_TYPE_DYNAMIC = 1;
+  NET_DEV_MAC_TYPE_STATIC = 2;
+  NET_DEV_MAC_TYPE_OTHER = 3;
+}
+
+// NetDevMACEntry mirrors netdevcontract.MACEntry.
+message NetDevMACEntry {
+  uint32 vlan = 1;
+  // mac is lowercase colon-separated (netdevcontract.ValidMAC).
+  string mac = 2;
+  string port = 3;
+  NetDevMACType type = 4;
+}
+
+message NetDevMACTable {
+  repeated NetDevMACEntry entries = 1;
+}
+
+// NetDevLLDPCapability mirrors netdevcontract.LLDPCapability.
+enum NetDevLLDPCapability {
+  NET_DEV_LLDP_CAPABILITY_UNSPECIFIED = 0;
+  NET_DEV_LLDP_CAPABILITY_OTHER = 1;
+  NET_DEV_LLDP_CAPABILITY_REPEATER = 2;
+  NET_DEV_LLDP_CAPABILITY_BRIDGE = 3;
+  NET_DEV_LLDP_CAPABILITY_WLAN_ACCESS_POINT = 4;
+  NET_DEV_LLDP_CAPABILITY_ROUTER = 5;
+  NET_DEV_LLDP_CAPABILITY_TELEPHONE = 6;
+  NET_DEV_LLDP_CAPABILITY_DOCSIS_CABLE_DEVICE = 7;
+  NET_DEV_LLDP_CAPABILITY_STATION_ONLY = 8;
+}
+
+// NetDevLLDPNeighbor mirrors netdevcontract.LLDPNeighbor.
+message NetDevLLDPNeighbor {
+  string local_port = 1;
+  string chassis_id = 2;
+  string port_id = 3;
+  string system_name = 4;
+  string management_address = 5;
+  repeated NetDevLLDPCapability capabilities = 6;
+}
+
+message NetDevLLDPNeighbors {
+  repeated NetDevLLDPNeighbor neighbors = 1;
+}
+
+// NetDevZoneType mirrors panapi.ZoneType; UNSPECIFIED is a zone whose
+// network type is outside the allowlist (no interfaces then).
+enum NetDevZoneType {
+  NET_DEV_ZONE_TYPE_UNSPECIFIED = 0;
+  NET_DEV_ZONE_TYPE_LAYER3 = 1;
+  NET_DEV_ZONE_TYPE_LAYER2 = 2;
+  NET_DEV_ZONE_TYPE_VIRTUAL_WIRE = 3;
+  NET_DEV_ZONE_TYPE_TAP = 4;
+}
+
+// NetDevZone mirrors panapi.Zone.
+message NetDevZone {
+  string name = 1;
+  NetDevZoneType type = 2;
+  repeated string interfaces = 3;
+}
+
+message NetDevZones {
+  repeated NetDevZone zones = 1;
+}
+
+// NetDevAddressType mirrors netdevcontract.AddressType.
+enum NetDevAddressType {
+  NET_DEV_ADDRESS_TYPE_UNSPECIFIED = 0;
+  NET_DEV_ADDRESS_TYPE_IP_NETMASK = 1;
+  NET_DEV_ADDRESS_TYPE_IP_RANGE = 2;
+  NET_DEV_ADDRESS_TYPE_IP_WILDCARD = 3;
+  NET_DEV_ADDRESS_TYPE_FQDN = 4;
+}
+
+// NetDevAddressObject mirrors netdevcontract.AddressObject.
+message NetDevAddressObject {
+  string name = 1;
+  NetDevAddressType type = 2;
+  string value = 3;
+  string description = 4;
+  repeated string tags = 5;
+}
+
+// NetDevServiceObject mirrors netdevcontract.ServiceObject.
+message NetDevServiceObject {
+  string name = 1;
+  string protocol = 2;
+  string port = 3;
+  string source_port = 4;
+  string description = 5;
+  repeated string tags = 6;
+}
+
+// NetDevGroup mirrors netdevcontract.Group (address or service group).
+message NetDevGroup {
+  string name = 1;
+  repeated string static_members = 2;
+  // dynamic_filter is the device's tag filter as text, display only.
+  string dynamic_filter = 3;
+  string description = 4;
+  repeated string tags = 5;
+}
+
+// NetDevObjects mirrors panapi.Objects.
+message NetDevObjects {
+  repeated NetDevAddressObject addresses = 1;
+  repeated NetDevGroup address_groups = 2;
+  repeated NetDevServiceObject services = 3;
+  repeated NetDevGroup service_groups = 4;
+  repeated string tags = 5;
+  // Groups that could not be evaluated (cycle, depth, unresolved member).
+  repeated string invalid_address_groups = 6;
+  repeated string invalid_service_groups = 7;
+}
+
+// NetDevRuleAction mirrors netdevcontract.RuleAction.
+enum NetDevRuleAction {
+  NET_DEV_RULE_ACTION_UNSPECIFIED = 0;
+  NET_DEV_RULE_ACTION_ALLOW = 1;
+  NET_DEV_RULE_ACTION_DENY = 2;
+  NET_DEV_RULE_ACTION_DROP = 3;
+  NET_DEV_RULE_ACTION_RESET_CLIENT = 4;
+  NET_DEV_RULE_ACTION_RESET_SERVER = 5;
+  NET_DEV_RULE_ACTION_RESET_BOTH = 6;
+}
+
+// NetDevSecurityRule mirrors netdevcontract.SecurityRule.
+message NetDevSecurityRule {
+  string name = 1;
+  string uuid = 2;
+  repeated string from_zones = 3;
+  repeated string to_zones = 4;
+  repeated string source = 5;
+  repeated string destination = 6;
+  repeated string source_user = 7;
+  repeated string application = 8;
+  repeated string service = 9;
+  repeated string category = 10;
+  NetDevRuleAction action = 11;
+  bool disabled = 12;
+  string description = 13;
+  repeated string tags = 14;
+}
+
+// NetDevSecurityRules holds the security rules in device order.
+message NetDevSecurityRules {
+  repeated NetDevSecurityRule rules = 1;
+}
+
+// NetDevNATRule mirrors netdevcontract.NATRule.
+message NetDevNATRule {
+  string name = 1;
+  string uuid = 2;
+  repeated string from_zones = 3;
+  repeated string to_zones = 4;
+  repeated string source = 5;
+  repeated string destination = 6;
+  string service = 7;
+  string source_translation = 8;
+  string destination_translation = 9;
+  bool disabled = 10;
+  string description = 11;
+  repeated string tags = 12;
+}
+
+// NetDevNATRules holds the NAT rules in device order.
+message NetDevNATRules {
+  repeated NetDevNATRule rules = 1;
+}
+
+// NetDevRuleHitCount mirrors netdevcontract.HitCount.
+message NetDevRuleHitCount {
+  string rule_name = 1;
+  uint64 hits = 2;
+  optional int64 first_hit_unix = 3;
+  optional int64 last_hit_unix = 4;
+  optional int64 reset_at_unix = 5;
+}
+
+message NetDevRuleHitCounts {
+  repeated NetDevRuleHitCount entries = 1;
 }
