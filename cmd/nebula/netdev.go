@@ -154,15 +154,28 @@ func netdevOpenSecretFD(fd int) (io.ReadCloser, error) {
 	default:
 		return nil, fmt.Errorf("--secret-fd %d: %w", fd, errNetdevSecretFD)
 	}
-	// Anonymous inodes (epoll, eventfd, ...) can report a regular mode.
-	if link, err := os.Readlink("/proc/self/fd/" + strconv.Itoa(fd)); err == nil && strings.HasPrefix(link, "anon_inode:") {
-		return nil, fmt.Errorf("--secret-fd %d: %w", fd, errNetdevSecretFD)
+	if err := netdevCheckFDLink(fd, os.Readlink); err != nil {
+		return nil, err
 	}
 	f := os.NewFile(uintptr(fd), "secret-fd")
 	if f == nil {
 		return nil, fmt.Errorf("--secret-fd %d: not an open descriptor: %w", fd, errNetdevSecretFD)
 	}
 	return f, nil
+}
+
+// netdevCheckFDLink refuses an anonymous inode (epoll, eventfd, ...), which
+// can report a regular mode. It fails closed: when the /proc link cannot
+// be read, the descriptor cannot be classified and is refused.
+func netdevCheckFDLink(fd int, readlink func(string) (string, error)) error {
+	link, err := readlink("/proc/self/fd/" + strconv.Itoa(fd))
+	if err != nil {
+		return fmt.Errorf("--secret-fd %d: cannot inspect descriptor: %w", fd, errNetdevSecretFD)
+	}
+	if strings.HasPrefix(link, "anon_inode:") {
+		return fmt.Errorf("--secret-fd %d: %w", fd, errNetdevSecretFD)
+	}
+	return nil
 }
 
 // defaultNetdevEnv is the environment of the real command.
@@ -474,6 +487,9 @@ func netdevAdd(args []string, env netdevEnv) error {
 	req, err := t.request()
 	if err != nil {
 		return err
+	}
+	if *noCred && *src.fd != -1 {
+		return errors.New("--no-credential and --secret-fd exclude each other")
 	}
 	// Refuse a missing terminal or a bad --secret-fd before contacting
 	// anything.

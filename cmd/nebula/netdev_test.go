@@ -732,6 +732,53 @@ func TestNetdevSecretFDSocketAndClosedRefusedBeforeDial(t *testing.T) {
 	}
 }
 
+// TestNetdevSecretFDLinkCheckFailsClosed pins the LOW findings of the
+// second PR #433 review: an anonymous inode is refused by the readlink
+// check on its own (independent of the file-type switch), and a descriptor
+// whose /proc link cannot be read is refused instead of accepted.
+func TestNetdevSecretFDLinkCheckFailsClosed(t *testing.T) {
+	cases := []struct {
+		name   string
+		link   string
+		err    error
+		refuse bool
+	}{
+		{"anon eventfd", "anon_inode:[eventfd]", nil, true},
+		{"anon epoll", "anon_inode:[eventpoll]", nil, true},
+		{"proc unreadable", "", os.ErrNotExist, true},
+		{"pipe", "pipe:[12345]", nil, false},
+		{"file", "/tmp/secret", nil, false},
+	}
+	for _, tc := range cases {
+		var asked string
+		err := netdevCheckFDLink(7, func(p string) (string, error) { asked = p; return tc.link, tc.err })
+		if asked != "/proc/self/fd/7" {
+			t.Fatalf("%s: read link %q", tc.name, asked)
+		}
+		if tc.refuse != errors.Is(err, errNetdevSecretFD) {
+			t.Fatalf("%s: err = %v, refuse = %v", tc.name, err, tc.refuse)
+		}
+		if !tc.refuse && err != nil {
+			t.Fatalf("%s: err = %v", tc.name, err)
+		}
+	}
+}
+
+// TestNetdevAddNoCredentialWithSecretFDRefused pins an INFO finding of the
+// second PR #433 review: --no-credential with --secret-fd is refused
+// before anything is opened or dialled, instead of ignoring the descriptor.
+func TestNetdevAddNoCredentialWithSecretFDRefused(t *testing.T) {
+	h := newNetdevHarness(t, "yes\n", true)
+	h.fds[5] = &netdevFakeFD{r: strings.NewReader(netdevTestSecret)}
+	err := netdevCmd([]string{"add", "sw-1", "--family", "cbs", "--endpoint", "sw1.example", "--no-credential", "--secret-fd", "5"}, h.env)
+	if err == nil || !strings.Contains(err.Error(), "exclude each other") {
+		t.Fatalf("err = %v", err)
+	}
+	if len(h.fake.log) != 0 {
+		t.Fatalf("opened or contacted something: %v", h.fake.log)
+	}
+}
+
 // TestNetdevSecretFDRealPipeAndFile runs the real validator on the two
 // accepted kinds and checks the descriptor is consumed and closed.
 func TestNetdevSecretFDRealPipeAndFile(t *testing.T) {
