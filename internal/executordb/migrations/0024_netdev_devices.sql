@@ -30,7 +30,7 @@ CREATE TABLE netdev_devices (
     pin_value           TEXT NOT NULL CHECK (
                             length(pin_value) = 64
                             AND pin_value NOT GLOB '*[^0-9a-f]*'),
-    trust_generation    INTEGER NOT NULL DEFAULT 1 CHECK (trust_generation BETWEEN 1 AND 281474976710655),
+    trust_generation    INTEGER NOT NULL DEFAULT 1 CHECK (trust_generation BETWEEN 1 AND 281474976710656),
     blocked             INTEGER NOT NULL DEFAULT 0 CHECK (blocked IN (0, 1)),
     block_reason        TEXT CHECK (length(block_reason) BETWEEN 1 AND 512),
     credential_ref      TEXT CHECK (
