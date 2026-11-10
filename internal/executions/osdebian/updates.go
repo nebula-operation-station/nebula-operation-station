@@ -61,6 +61,11 @@ type Updates struct {
 	ListsUpdated   time.Time // zero if unknown
 	Proxmox        bool
 	Mode           string
+	// CandidatesTruncated is true when the script cut the candidates
+	// section to its byte budget (or the flag is not a plain false): the
+	// candidates past the cut have no stanza, so their source stays
+	// unknown and never counts as a verified fix.
+	CandidatesTruncated bool
 }
 
 // ErrFormat is returned for a result that is not package.list_updates@1.
@@ -91,6 +96,9 @@ func ParseUpdates(result []byte) (Updates, error) {
 		ListsMtime     int64  `json:"lists_mtime"`
 		Proxmox        bool   `json:"proxmox"`
 		Candidates     string `json:"candidates"`
+		// Truncated is kept raw: a malformed flag must not reject the
+		// whole update list.
+		Truncated json.RawMessage `json:"candidates_truncated"`
 	}
 	if err := json.Unmarshal(result, &doc); err != nil || doc.Format != "apt-simulate-v1" {
 		return Updates{}, ErrFormat
@@ -144,6 +152,9 @@ func ParseUpdates(result []byte) (Updates, error) {
 		return Updates{}, ErrFormat
 	}
 	addCandidateSources(u.Packages, doc.Candidates)
+	if t := string(bytes.TrimSpace(doc.Truncated)); t != "" && t != "false" && t != "null" {
+		u.CandidatesTruncated = true
+	}
 	if pk, err := base64.StdEncoding.DecodeString(doc.RebootPkgs); err == nil && utf8.Valid(pk) {
 		for _, l := range strings.Split(string(pk), "\n") {
 			l = strings.TrimSpace(l)

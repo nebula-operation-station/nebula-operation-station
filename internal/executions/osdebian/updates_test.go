@@ -168,6 +168,48 @@ func TestCandidateSourceMissingOrBrokenStaysUnknown(t *testing.T) {
 	}
 }
 
+// TestTruncatedCandidatesKeepUpdateList: the script cuts the candidates
+// section to its byte budget and marks it truncated; the update list stays
+// complete, closed stanzas still count and a candidate past the cut stays
+// unknown (never verified).
+func TestTruncatedCandidatesKeepUpdateList(t *testing.T) {
+	sim := "Inst openssl [3.0.11-1~deb12u1] (3.0.11-1~deb12u2 Debian-Security:12/stable-security [amd64])\n" +
+		"Inst libfoo1 [1.2-3] (1.2-3+b1 Debian:12/stable [amd64])"
+	withFlag := func(flag string) []byte {
+		b := docWithCandidates(t, sim, "Package: openssl\nVersion: 3.0.11-1~deb12u2\nSource: openssl\n\n")
+		if flag == "" {
+			return b
+		}
+		return []byte(strings.Replace(string(b), `{`, `{"candidates_truncated":`+flag+`,`, 1))
+	}
+	tests := map[string]struct {
+		flag      string
+		truncated bool
+	}{
+		"absent (older script)": {"", false},
+		"false":                 {"false", false},
+		"true":                  {"true", true},
+		"malformed":             {`"yes"`, true},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			u, err := ParseUpdates(withFlag(tc.flag))
+			if err != nil {
+				t.Fatalf("update list rejected: %v", err)
+			}
+			if u.CandidatesTruncated != tc.truncated || len(u.Packages) != 2 {
+				t.Fatalf("truncated %v, packages %+v", u.CandidatesTruncated, u.Packages)
+			}
+			if p := u.Packages[0]; p.SourceName != "openssl" || p.SourceVersion != "3.0.11-1~deb12u2" {
+				t.Fatalf("closed stanza lost: %+v", p)
+			}
+			if p := u.Packages[1]; p.SourceName != "" || p.SourceVersion != "" {
+				t.Fatalf("candidate past the cut known: %+v", p)
+			}
+		})
+	}
+}
+
 func TestCandidateStanzaLimit(t *testing.T) {
 	sim := "Inst openssl [3.0.11-1~deb12u1] (3.0.11-1~deb12u2 Debian-Security:12/stable-security [amd64])"
 	var b strings.Builder
