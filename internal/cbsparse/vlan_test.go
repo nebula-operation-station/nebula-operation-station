@@ -155,7 +155,7 @@ func TestParseVLANsRefusesHostileText(t *testing.T) {
 		"NUL":           "\x00",
 		"invalid UTF-8": "\xff\xfe",
 		"bell":          "\a",
-		"bidi override": "‮",
+		"bidi override": string(rune(0x202e)),
 	} {
 		t.Run(name, func(t *testing.T) {
 			in := base + fixedRow(vlanWidths, " 2", "x"+bad+"y", "", "gi2", "S")

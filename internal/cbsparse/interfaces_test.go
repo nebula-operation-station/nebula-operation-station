@@ -321,7 +321,7 @@ func TestParseInterfaceDescriptionsHostile(t *testing.T) {
 			"NUL":           "a\x00b",
 			"invalid UTF-8": "a\xc3\x28b",
 			"DEL":           "a\x7fb",
-			"bidi isolate":  "a⁦b",
+			"bidi isolate":  "a" + string(rune(0x2066)) + "b",
 			"4 KiB":         strings.Repeat("d", 4<<10),
 		} {
 			t.Run(name, func(t *testing.T) {
