@@ -1,0 +1,10 @@
+Created by: D-Default, S-Static, G-GVRP, R-Radius Assigned VLAN, V-Voice VLAN
+
+Vlan Name              Tagged Ports       UnTagged Ports     Created by
+---- ----------------- ------------------ ------------------ ----------------
+ 1   1                                    gi1/0/9-24,        DV
+                                          te1/0/3-4,Po2-8
+ 10  servers-a         te1/0/1-2,Po1      gi1/0/1-4          S
+ 20  storage-b         te1/0/1-2,Po1      gi1/0/5-8          S
+ 30  mgmt lab          te1/0/1-2,Po1                         S
+ 99  guest             Po1                                   S
