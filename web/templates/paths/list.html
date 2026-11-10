@@ -1,0 +1,114 @@
+{{define "coverage"}}
+<section class="panel" aria-label="Coverage">
+  <h2>Coverage and limits</h2>
+  {{if .Known}}
+  <p>Coverage: {{.Covered}} of {{.Total}} units{{if .Complete}}, complete{{else}}, <span class="status status--warning">incomplete</span>{{end}}.</p>
+  {{if .Missing}}<p class="status status--warning">Missing sources: {{range $i, $m := .Missing}}{{if $i}}, {{end}}{{$m}}{{end}}.</p>{{end}}
+  {{if .Uncertain}}<p class="status status--warning">{{.Uncertain}} uncertainties (unknown flows, unmanaged hosts, unavailable data).</p>{{end}}
+  {{if .GraphTruncated}}<p class="status status--warning">The graph was truncated by its input limits.</p>{{end}}
+  {{else}}
+  <p class="status status--warning">Coverage unknown: no data-source report is available, so every "no path found" reads unknown.</p>
+  {{end}}
+  {{if .UnscoredFindings}}<p class="status status--warning">{{.UnscoredFindings}} findings without a CVSS v3 vector are not scored; they are uncertainty, not absence of risk.</p>{{end}}
+  {{if .Unattached}}<p class="status status--warning">{{.Unattached}} findings are on subjects outside the graph.</p>{{end}}
+  {{if .Truncated}}<p class="status status--warning">The computation was truncated by: {{range $i, $l := .Limits}}{{if $i}}, {{end}}{{$l}}{{end}}.</p>{{end}}
+</section>
+{{end}}
+
+{{define "content"}}
+{{with .Paths}}
+<div class="toolbar">
+  <h1>Attack paths</h1>
+  <a class="button button--small button--secondary" href="{{.MapHref}}">Show on the traffic map</a>
+</div>
+<p class="hint">Paths from the internet or NetBird peers to each crown jewel, computed by NOS from its own data (ADR 0011). L is the path likelihood, the product of the step values e, with steps treated as independent (an approximation); R = L × the crown jewel's impact weight. At most {{.PathsPerTarget}} paths per crown jewel and {{.MaxDepth}} steps per path. Open a path to see every input of every number. Nothing here starts an action; fix links open the existing flows, prefilled.</p>
+
+{{if not .Computed}}
+<p class="status status--warning" role="status">Attack paths not computed yet: the exposure of every crown jewel is unknown.</p>
+{{else}}
+<p class="hint">Computed {{if .ComputedAt}}{{.ComputedAt}}{{else}}at an unknown time{{end}} with formula {{.Formula}}; graph {{.GraphHash}}.</p>
+{{end}}
+
+{{template "coverage" .Coverage}}
+
+{{if .Computed}}
+{{range .Missing}}<p class="status status--warning">Unknown: crown jewel {{.}} is not in the graph, so its paths cannot be computed.</p>{{end}}
+
+{{range .Targets}}
+<section class="panel" aria-label="Paths to {{.Label}}">
+  <h2>{{.Label}} <span class="hint">{{.Node}} · impact {{.Impact}}</span></h2>
+  {{if .Incomplete}}<p class="status status--warning">The time budget stopped the search for this crown jewel; the paths shown may not be the top ones.</p>{{end}}
+  {{if .Paths}}
+  <p class="actions"><a class="button button--small button--secondary" href="{{.MapHref}}">Show these paths on the map</a></p>
+  <div class="table-wrap">
+  <table class="inventory">
+    <thead><tr>
+      <th scope="col">#</th>
+      <th scope="col">Entry</th>
+      <th scope="col">Route</th>
+      <th scope="col">Steps</th>
+      <th scope="col">L</th>
+      <th scope="col">R</th>
+      <th scope="col">Flags</th>
+      <th scope="col">Details</th>
+    </tr></thead>
+    <tbody>
+    {{range .Paths}}
+    <tr>
+      <td>{{.Rank}}</td>
+      <td>{{.Entry}}</td>
+      <td>{{.Route}}</td>
+      <td>{{.Steps}}</td>
+      <td>{{.L}}</td>
+      <td>{{.R}}</td>
+      <td>{{if .Assumed}}<span class="status status--warning">assumed edge</span> {{end}}{{if .Possible}}<span class="status status--warning">possible: port mapping unknown</span>{{end}}</td>
+      <td><a href="{{.Href}}">Explain</a> · <a href="{{.MapHref}}">Map</a></td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <p class="{{if .Unknown}}status status--warning{{else}}hint{{end}}">{{.NoPath}}</p>
+  {{end}}
+</section>
+{{end}}
+
+<section class="panel" aria-label="Choke points">
+  <h2>Choke points</h2>
+  <p class="hint">Fixes ranked by the risk R they remove from the top paths (sum over the paths they cut).</p>
+  {{if .Chokes}}
+  <div class="table-wrap">
+  <table class="inventory">
+    <thead><tr>
+      <th scope="col">Fix</th>
+      <th scope="col">Risk removed</th>
+      <th scope="col">Paths cut</th>
+      <th scope="col">Fix with</th>
+    </tr></thead>
+    <tbody>
+    {{range .Chokes}}
+    <tr>
+      {{if .Rule}}
+      <td>Remove {{.EdgeProto}} from {{.EdgeFrom}} to {{.EdgeTo}} <span class="hint">({{.EdgeBs}})</span></td>
+      {{else}}
+      <td>Fix {{.VulnID}}{{if .Package}} in {{.Package}}{{end}} on {{.Where}}{{if .Stale}} <span class="status status--warning">stale</span>{{end}}</td>
+      {{end}}
+      <td>{{.Risk}}</td>
+      <td>{{.Paths}}</td>
+      <td>{{if .Rule}}<span class="hint">firewall rule change; NOS has no action for it</span>{{else}}{{template "fix" .Fix}}{{end}}</td>
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{if .ChokesCut}}<p class="hint">{{.ChokesCut}} more choke points are not shown.</p>{{end}}
+  {{else}}
+  <p class="hint">No choke points: there are no paths to cut.</p>
+  {{end}}
+</section>
+{{end}}
+{{end}}
+{{end}}
+
+{{define "fix"}}{{if .Href}}<a class="button button--small" href="{{.Href}}">{{.Text}}</a> <span class="hint">{{if .Verified}}fix verified{{else}}fix not verified{{end}}{{if .Note}}; {{.Note}}{{end}}</span>{{else}}<span class="hint">{{.None}}</span>{{end}}{{end}}

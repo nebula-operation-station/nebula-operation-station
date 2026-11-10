@@ -1,0 +1,27 @@
+{{define "content"}}
+{{with .Paths}}
+<div id="trafficmap-page" data-window="{{.Window}}" data-focus="">
+<div class="toolbar">
+  <h1>Attack paths on the traffic map</h1>
+  <a class="button button--small button--secondary" href="{{.ListHref}}">List view with every number</a>
+</div>
+<p class="hint">{{.Selected}}. Highlighted beams are attack-path steps between nodes on the map; rank 1 is brightest, dashed beams are assumed or only possible. The list view has the same data as text.</p>
+{{if .NoData}}<p class="status status--warning" role="status">Attack paths not computed yet: unknown.</p>{{end}}
+{{if .Unmapped}}<p class="hint">{{.Unmapped}}</p>{{end}}
+{{if .Truncated}}<p class="status status--warning">The overlay was truncated by its beam or node limit.</p>{{end}}
+<p class="hint" id="trafficmap-status" role="status" aria-live="polite">Loading the traffic map …</p>
+<p class="hint" id="trafficmap-summary" hidden></p>
+<p class="hint" id="trafficmap-unmapped" hidden></p>
+<p class="message message--error" id="trafficmap-truncated" role="status" hidden></p>
+<iframe id="trafficmap-frame" src="{{.FrameSrc}}" sandbox="allow-scripts" referrerpolicy="no-referrer" title="Traffic map with attack-path overlay" width="100%" height="640"></iframe>
+<section id="trafficmap-selection" aria-label="Selected node" aria-live="polite" hidden>
+  <h2 id="trafficmap-selection-label"></h2>
+  <p class="hint" id="trafficmap-selection-kind"></p>
+  <p class="actions">
+    <a class="button button--small" id="trafficmap-selection-open" hidden>Open</a>
+    <a class="button button--small button--secondary" id="trafficmap-selection-focus" hidden>Show its top connections</a>
+  </p>
+</section>
+</div>
+{{end}}
+{{end}}

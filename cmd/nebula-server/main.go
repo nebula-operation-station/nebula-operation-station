@@ -545,6 +545,10 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	connPages.Register(pages)
 	// Findings export (ADR 0011 D9): admin only, audited, streamed.
 	pages.Handle("GET "+vulnExportPath, vulnExport{v: vuln, admin: isAdmin, audit: audit, log: log})
+	// Attack-path pages (ADR 0011 D10): admin only by the export's rule.
+	if err := mountAttackPaths(pages, cfg.PublicOrigin, isAdmin, log); err != nil {
+		return err
+	}
 
 	var apiHandler http.Handler
 	if cfg.API.Enabled {
