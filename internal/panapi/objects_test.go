@@ -148,7 +148,7 @@ func TestParseObjectsRejectsInvalidContent(t *testing.T) {
 		"address fqdn empty":           `<address><entry name="a"><fqdn></fqdn></entry></address>`,
 		"address name invalid":         `<address><entry name="a/b"><ip-netmask>192.0.2.1</ip-netmask></entry></address>`,
 		"address duplicate":            `<address><entry name="a"><ip-netmask>192.0.2.1</ip-netmask></entry><entry name="a"><ip-netmask>192.0.2.2</ip-netmask></entry></address>`,
-		"address description control":  "<address><entry name=\"a\"><ip-netmask>192.0.2.1</ip-netmask><description>x‮y</description></entry></address>",
+		"address description control":  "<address><entry name=\"a\"><ip-netmask>192.0.2.1</ip-netmask><description>x\xe2\x80\xaey</description></entry></address>",
 		"address description too long": `<address><entry name="a"><ip-netmask>192.0.2.1</ip-netmask><description>` + strings.Repeat("d", netdevcontract.MaxDescriptionBytes+1) + `</description></entry></address>`,
 		"address tag invalid":          `<address><entry name="a"><ip-netmask>192.0.2.1</ip-netmask><tag><member>x&amp;y</member></tag></entry></address>`,
 		"address tag duplicated":       `<address><entry name="a"><ip-netmask>192.0.2.1</ip-netmask><tag><member>t</member><member>t</member></tag></entry></address>`,
