@@ -15,7 +15,9 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-24.04
+    # Self-hosted on nos-ci (runner nos-ci, label nos; lint/vuln on nos-ci-2/-3, label nos-light).
+    # Fork PRs need maintainer approval before any workflow runs (repo setting).
+    runs-on: [self-hosted, linux, nos]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -39,7 +41,7 @@ jobs:
         run: sudo -E env "PATH=$PATH" make test-privileged
 
   lint:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, linux, nos-light]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -57,7 +59,7 @@ jobs:
           make generate-check
 
   vuln:
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, linux, nos-light]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
