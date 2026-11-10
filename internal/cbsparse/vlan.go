@@ -118,19 +118,17 @@ const (
 // incomplete is false.
 func ParseVLANs(out []byte) (vlans []VLAN, incomplete bool, err error) {
 	const what = "show vlan"
-	blocks, err := splitTables(out, what)
+	blocks, err := splitTables(out, what, func(titles []string) ([]int, error) {
+		return columnIndex(titles, vlanTitles, numVLANFields,
+			vlanFieldID, vlanFieldName, vlanFieldTagged, vlanFieldUntagged)
+	})
 	if err != nil {
 		return nil, false, err
 	}
 	seen := map[uint16]int{}
 	budget := vlanMaxMemberships
 	for _, b := range blocks {
-		idx, err := columnIndex(b.titles, vlanTitles, numVLANFields,
-			vlanFieldID, vlanFieldName, vlanFieldTagged, vlanFieldUntagged)
-		if err != nil {
-			return nil, false, fmt.Errorf("cbsparse: %s: %w", what, err)
-		}
-		groups, orphans := groupVLANRows(b.rows, idx)
+		groups, orphans := groupVLANRows(b.rows, b.idx)
 		if orphans || b.lostRows {
 			incomplete = true
 		}

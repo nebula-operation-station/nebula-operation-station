@@ -240,7 +240,7 @@ func TestParseInterfacesDropsMisalignedRows(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			in := good + tt.line
-			blocks, err := splitTables([]byte(in), "test")
+			blocks, err := splitTables([]byte(in), "test", nil)
 			if err != nil || len(blocks) != 1 || len(blocks[0].rows) != 2 {
 				t.Fatalf("lexer: %+v, err %v", blocks, err)
 			}

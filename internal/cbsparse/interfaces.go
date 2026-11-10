@@ -97,16 +97,15 @@ var descriptionTitles = map[string]int{
 // is nil and incomplete is false.
 func ParseInterfaces(out []byte) (ifaces []Interface, incomplete bool, err error) {
 	const what = "show interfaces status"
-	blocks, err := splitTables(out, what)
+	blocks, err := splitTables(out, what, func(titles []string) ([]int, error) {
+		return columnIndex(titles, interfaceTitles, numIfFields, ifFieldName, ifFieldStatus)
+	})
 	if err != nil {
 		return nil, false, err
 	}
 	seen := map[string]int{}
 	for _, b := range blocks {
-		idx, err := columnIndex(b.titles, interfaceTitles, numIfFields, ifFieldName, ifFieldStatus)
-		if err != nil {
-			return nil, false, fmt.Errorf("cbsparse: %s: %w", what, err)
-		}
+		idx := b.idx
 		if b.lostRows {
 			incomplete = true
 		}
@@ -230,17 +229,16 @@ func parseSpeed(s string) (uint64, bool) {
 // is nil and incomplete is false.
 func ParseInterfaceDescriptions(out []byte) (descs map[string]string, incomplete bool, err error) {
 	const what = "show interfaces description"
-	blocks, err := splitTables(out, what)
+	blocks, err := splitTables(out, what, func(titles []string) ([]int, error) {
+		return columnIndex(titles, descriptionTitles, numIfFields, ifFieldName, ifFieldDescription)
+	})
 	if err != nil {
 		return nil, false, err
 	}
 	descs = map[string]string{}
 	lines := map[string]int{}
 	for _, b := range blocks {
-		idx, err := columnIndex(b.titles, descriptionTitles, numIfFields, ifFieldName, ifFieldDescription)
-		if err != nil {
-			return nil, false, fmt.Errorf("cbsparse: %s: %w", what, err)
-		}
+		idx := b.idx
 		if b.lostRows {
 			incomplete = true
 		}

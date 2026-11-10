@@ -25,6 +25,12 @@ const (
 	// tableMinFirstDashes is the minimum length of the first dash run of a
 	// dash line, so that a short "--" is never taken for a table rule.
 	tableMinFirstDashes = 3
+	// tableMaxColumns bounds the columns of one dash line. The widest CBS
+	// table ("show interfaces status") has about a dozen columns. Every
+	// row is split into one cell per column, so without this bound a dash
+	// line of about 2000 one-rune columns (the most MaxLineBytes allows)
+	// above 20000 short rows costs rows x columns allocations.
+	tableMaxColumns = 32
 )
 
 var (
@@ -71,7 +77,10 @@ type tableRow struct {
 // to the header of the next table (or the end of the output).
 type tableBlock struct {
 	titles []string
-	rows   []tableRow
+	// idx is the result of the index function passed to splitTables (nil
+	// without one).
+	idx  []int
+	rows []tableRow
 	// lostRows is true when a title line of this table does not look like
 	// a title (see titleLike) and directly follows the rows of the
 	// previous table: it may be a row of that table that was taken for a
@@ -92,8 +101,16 @@ type tableBlock struct {
 //
 // Invalid UTF-8 or a control character anywhere refuses the whole output,
 // as in ParseVersion. A missing table is ErrNoTable; a table without
-// titles or with a title crossing a column gap is ErrUnrecognizedTable.
-func splitTables(out []byte, what string) ([]tableBlock, error) {
+// titles, with a title crossing a column gap or with more than
+// tableMaxColumns columns (also netdevcontract.ErrOverLimit) is
+// ErrUnrecognizedTable.
+//
+// index, when not nil, maps the titles of every table to field indexes
+// (see columnIndex); its result is stored in tableBlock.idx and an error
+// from it refuses the whole output. All tables are checked this way
+// before any row is split into cells, so that an unrecognized table costs
+// no work per row.
+func splitTables(out []byte, what string, index func(titles []string) ([]int, error)) ([]tableBlock, error) {
 	if err := netdevcontract.CheckLines(out, netdevcontract.MaxCBSCommandOutputBytes, tableMaxLines); err != nil {
 		return nil, fmt.Errorf("cbsparse: %s: %w", what, err)
 	}
@@ -105,7 +122,11 @@ func splitTables(out []byte, what string) ([]tableBlock, error) {
 		if err := checkLineText(lines[i]); err != nil {
 			return nil, fmt.Errorf("cbsparse: %s line %d: %w", what, i+1, err)
 		}
-		if c, ok := dashColumns(lines[i]); ok {
+		c, ok, err := dashColumns(lines[i])
+		if err != nil {
+			return nil, fmt.Errorf("cbsparse: %s line %d: %w: %w", what, i+1, ErrUnrecognizedTable, err)
+		}
+		if ok {
 			dashLines = append(dashLines, i)
 			cols = append(cols, c)
 		}
@@ -156,6 +177,16 @@ func splitTables(out []byte, what string) ([]tableBlock, error) {
 		for i := range titles {
 			titles[i] = strings.ToLower(strings.Join(strings.Fields(titles[i]), " "))
 		}
+		blocks[k] = tableBlock{titles: titles, lostRows: lostRows}
+		if index != nil {
+			idx, err := index(titles)
+			if err != nil {
+				return nil, fmt.Errorf("cbsparse: %s line %d: %w", what, d+1, err)
+			}
+			blocks[k].idx = idx
+		}
+	}
+	for k, d := range dashLines {
 		end := len(lines)
 		if k+1 < len(dashLines) {
 			end = headerStart[k+1]
@@ -168,7 +199,7 @@ func splitTables(out []byte, what string) ([]tableBlock, error) {
 			cells, pad, ok := splitCells(lines[i], cols[k])
 			rows = append(rows, tableRow{line: i + 1, cells: cells, pad: pad, ok: ok, lead: leadText(lines[i], cols[k][0])})
 		}
-		blocks[k] = tableBlock{titles: titles, rows: rows, lostRows: lostRows}
+		blocks[k].rows = rows
 	}
 	return blocks, nil
 }
@@ -187,29 +218,32 @@ func titleLike(line string) bool {
 }
 
 // dashColumns reports whether line is a table rule and returns its
-// columns.
-func dashColumns(line string) ([]span, bool) {
+// columns. A table rule with more than tableMaxColumns columns is an error
+// matching netdevcontract.ErrOverLimit; the scan stops at the first column
+// over the limit, so at most tableMaxColumns spans are kept.
+func dashColumns(line string) ([]span, bool, error) {
 	line = strings.TrimRight(line, " ")
-	if !strings.HasPrefix(line, strings.Repeat("-", tableMinFirstDashes)) {
-		return nil, false
+	// A line with any other rune is no table rule, however many dash runs
+	// it has; only ASCII remains, so byte offsets are rune offsets.
+	if !strings.HasPrefix(line, strings.Repeat("-", tableMinFirstDashes)) || strings.Trim(line, "- ") != "" {
+		return nil, false, nil
 	}
 	var cols []span
 	start := -1
-	for i, r := range []rune(line) {
+	for i := 0; i < len(line); i++ {
 		switch {
-		case r == '-' && start < 0:
+		case line[i] == '-' && start < 0:
+			if err := netdevcontract.CheckCount("table columns", len(cols)+1, tableMaxColumns); err != nil {
+				return nil, false, err
+			}
 			start = i
-		case r == '-':
-		case r == ' ' && start >= 0:
+		case line[i] == ' ' && start >= 0:
 			cols = append(cols, span{start, i})
 			start = -1
-		case r == ' ':
-		default:
-			return nil, false
 		}
 	}
-	cols = append(cols, span{start, len([]rune(line))})
-	return cols, true
+	cols = append(cols, span{start, len(line)})
+	return cols, true, nil
 }
 
 // splitCells cuts line into one trimmed cell per column. ok is false when
