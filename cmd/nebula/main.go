@@ -120,6 +120,15 @@ commands:
   pve remote repin <id>
                       re-pin the trust identity after a certificate change
   pve remote list     metadata only (never secrets)
+  netdev probe --family cbs|panos --endpoint <ip-or-name>
+                      show a network device's trust fingerprint (no credential sent)
+  netdev add <device-id> --family cbs|panos --endpoint <ip-or-name>
+                      probe, type "yes" to register, then enter the read credential (no echo)
+  netdev credential set|rotate <device-id> [--secret-fd N]
+                      store or replace the read credential (terminal or --secret-fd; never an argument)
+  netdev repin|block|unblock|remove <device-id>
+                      re-pin after a key change, block or unblock dials, remove the device
+  netdev list         metadata only (never secrets)
   container definition put HOST CONTAINER [FILE|-]
                       store a standalone container's definition (JSON from FILE or stdin; never an argument)
   container definition remove [--version N] HOST CONTAINER
@@ -167,6 +176,8 @@ func run(cmd string, args []string) error {
 	case "pve":
 		// PVE administration authenticates the local admin through peer credentials.
 		return pveCmd(args, os.Stdin, ttyPrompter, os.Stdout)
+	case "netdev":
+		return netdevCmd(args, defaultNetdevEnv())
 	}
 	conn, err := dialExecutor()
 	if err != nil {
