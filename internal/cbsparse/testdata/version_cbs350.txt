@@ -1,0 +1,15 @@
+Cisco IOS Software, C350 Software (C350-ADVENTERPRISEK9-M), Version 3.2.1.5, RELEASE SOFTWARE (synthetic)
+Technical Support: https://www.cisco.com/techsupport
+This product contains cryptographic features and is subject to United
+States and local country laws governing import, export, manufacture and
+use. Installation, use, or redistribution of this software constitutes
+acceptance of those laws.
+
+System uptime is 3 weeks, 5 days, 6 hours, 7 minutes
+System image file is "flash:/c350-universalk9-m.SPA.3.2.1.5/c350-universalk9-m.SPA.3.2.1.5.bin"
+
+Cisco CBS350-24T-4G (MPC8548) processor with 524288K/32768K bytes of memory.
+MPC8548 processor at 800Mhz, Revision 2.3
+Model : CBS350-24T-4G
+Serial Number : PSZ00000001
+Firmware Version : 3.2.1.5
