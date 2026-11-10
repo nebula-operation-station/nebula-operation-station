@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic fixture (ND-09 part 3): shape of the reply to
+     <show><rule-hit-count><vsys><vsys-name><entry name='vsys1'><rule-base>
+     <entry name='security'><rules><all/></rules></entry></rule-base></entry>
+     </vsys-name></vsys></rule-hit-count></show>. Field names and the Unix
+     epoch encoding are assumptions to be checked against the lab firewall
+     (ND-03); this file is replaced by a lab fixture then. Example names
+     only, no real device data. Elements outside the allowlist (latest,
+     rule-state, secret-hint) must be ignored by the parser. -->
+<response status="success">
+  <result>
+    <rule-hit-count>
+      <vsys>
+        <entry name="vsys1">
+          <rule-base>
+            <entry name="security">
+              <rules>
+                <entry name="zz-allow-mgmt">
+                  <latest>yes</latest>
+                  <hit-count>18446744073709551615</hit-count>
+                  <last-hit-timestamp>1767225600</last-hit-timestamp>
+                  <last-reset-timestamp>1764547200</last-reset-timestamp>
+                  <first-hit-timestamp>1764547260</first-hit-timestamp>
+                  <rule-creation-timestamp>1735689600</rule-creation-timestamp>
+                  <rule-modification-timestamp>1740000000</rule-modification-timestamp>
+                  <rule-state>Used</rule-state>
+                </entry>
+                <entry name="never hit">
+                  <latest>yes</latest>
+                  <hit-count>0</hit-count>
+                  <last-hit-timestamp>0</last-hit-timestamp>
+                  <last-reset-timestamp>0</last-reset-timestamp>
+                  <first-hit-timestamp>0</first-hit-timestamp>
+                  <rule-creation-timestamp>1735689600</rule-creation-timestamp>
+                  <rule-modification-timestamp>1735689600</rule-modification-timestamp>
+                  <secret-hint>must-not-leak</secret-hint>
+                </entry>
+                <entry name="no-reset-field">
+                  <hit-count>7</hit-count>
+                  <last-hit-timestamp>1767225600</last-hit-timestamp>
+                  <first-hit-timestamp>1735689700</first-hit-timestamp>
+                  <rule-creation-timestamp>1735689600</rule-creation-timestamp>
+                  <rule-modification-timestamp>1735689600</rule-modification-timestamp>
+                </entry>
+              </rules>
+            </entry>
+          </rule-base>
+        </entry>
+      </vsys>
+    </rule-hit-count>
+  </result>
+</response>

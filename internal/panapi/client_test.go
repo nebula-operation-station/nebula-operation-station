@@ -370,6 +370,9 @@ func TestResponseCaps(t *testing.T) {
 		{"other over limit", SystemInfoRequest(), MaxOtherResponseBytes + 1, false},
 		{"config at limit", cfg, MaxConfigResponseBytes, true},
 		{"config over limit", cfg, MaxConfigResponseBytes + 1, false},
+		{"hit counts over other limit", RuleHitCountRequest(), MaxOtherResponseBytes + 1, true},
+		{"hit counts at limit", RuleHitCountRequest(), MaxHitCountResponseBytes, true},
+		{"hit counts over limit", RuleHitCountRequest(), MaxHitCountResponseBytes + 1, false},
 	} {
 		t.Run(tc.desc, func(t *testing.T) {
 			ts := newTestServer(t, nil, replyXML(sizedBody(t, tc.size)))
@@ -409,6 +412,8 @@ func TestCheckResponseXMLLimits(t *testing.T) {
 		{"elements over limit", elems(MaxXMLElements + 1), ErrXMLLimit},
 		{"text at limit", `<response status="success"><t>` + strings.Repeat("x", MaxXMLTextBytes) + `</t></response>`, nil},
 		{"text over limit", `<response status="success"><t>` + strings.Repeat("x", MaxXMLTextBytes+1) + `</t></response>`, ErrXMLLimit},
+		{"indentation between elements is not text", `<response status="success">` + strings.Repeat("\n  <t/>", MaxXMLTextBytes) + "\n</response>", nil},
+		{"text over limit between indented elements", `<response status="success">` + strings.Repeat("\n  <t/>", MaxXMLTextBytes) + strings.Repeat("x", MaxXMLTextBytes+1) + `</response>`, ErrXMLLimit},
 		{"split text over limit", `<response status="success"><t>` + strings.Repeat("x", MaxXMLTextBytes) + `<![CDATA[y]]></t></response>`, ErrXMLLimit},
 		{"attribute at limit", `<response status="success"><t a="` + strings.Repeat("x", MaxXMLTextBytes) + `"/></response>`, nil},
 		{"attribute over limit", `<response status="success"><t a="` + strings.Repeat("x", MaxXMLTextBytes+1) + `"/></response>`, ErrXMLLimit},

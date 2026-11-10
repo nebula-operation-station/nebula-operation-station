@@ -213,11 +213,94 @@ func CheckLines(text []byte, maxBytes, maxLines int) error {
 	return nil
 }
 
+// xmlElementText is the text state of one open element.
+type xmlElementText struct {
+	n         int  // counted text bytes
+	pending   int  // whitespace since the last tag, not yet counted
+	sinceText bool // real text seen since the last child tag
+}
+
+// XMLTextCounter enforces MaxXMLTextBytes on the character data of the
+// open elements of one XML token stream. Callers report every start tag,
+// end tag and character data run in document order; comments and
+// processing instructions are not reported.
+//
+// Whitespace-only character data between tags (the indentation of a
+// pretty-printed reply) is not element text and does not count; it stays
+// bounded by the caller's document byte cap. Whitespace joined to real
+// text, only separated from it by comments or processing instructions,
+// counts like the text. The zero value is ready to use.
+type XMLTextCounter struct {
+	open []xmlElementText
+}
+
+// Start records a start tag.
+func (c *XMLTextCounter) Start() {
+	if len(c.open) > 0 {
+		c.open[len(c.open)-1].pending = 0
+		c.open[len(c.open)-1].sinceText = false
+	}
+	c.open = append(c.open, xmlElementText{})
+}
+
+// End records an end tag.
+func (c *XMLTextCounter) End() error {
+	if len(c.open) == 0 {
+		return errors.New("netdevcontract: unbalanced XML end element")
+	}
+	c.open = c.open[:len(c.open)-1]
+	if len(c.open) > 0 {
+		c.open[len(c.open)-1].pending = 0
+		c.open[len(c.open)-1].sinceText = false
+	}
+	return nil
+}
+
+// CharData records one character data run of the innermost open element
+// and returns an error matching ErrOverLimit when that element's text
+// exceeds MaxXMLTextBytes.
+func (c *XMLTextCounter) CharData(b []byte) error {
+	if len(c.open) == 0 {
+		return errors.New("netdevcontract: XML text outside an element")
+	}
+	e := &c.open[len(c.open)-1]
+	ws := xmlSpace(b)
+	switch {
+	case ws && !e.sinceText:
+		// whitespace after a tag; counts only if real text follows
+		// before the next tag
+		e.pending += len(b)
+		return nil
+	case ws:
+		e.n += len(b)
+	default:
+		e.n += e.pending + len(b)
+		e.pending = 0
+		e.sinceText = true
+	}
+	if e.n > MaxXMLTextBytes {
+		return overLimit("XML text bytes", e.n, MaxXMLTextBytes)
+	}
+	return nil
+}
+
+// xmlSpace reports whether b consists of XML whitespace only (space, tab,
+// carriage return, line feed). Other Unicode spaces are text.
+func xmlSpace(b []byte) bool {
+	for _, c := range b {
+		if c != ' ' && c != '\t' && c != '\r' && c != '\n' {
+			return false
+		}
+	}
+	return true
+}
+
 // CheckXML enforces the PAN-OS XML limits on one response before it is
 // parsed: at most maxBytes bytes (MaxPANOSResponseBytes or
 // MaxPANOSConfigResponseBytes), well-formed UTF-8 XML, no DTD or other
 // directive, at most MaxXMLDepth nesting, MaxXMLElements elements and
-// MaxXMLTextBytes per element text or attribute value.
+// MaxXMLTextBytes per element text or attribute value. Whitespace between
+// elements is not element text (see XMLTextCounter).
 func CheckXML(data []byte, maxBytes int) error {
 	if len(data) > maxBytes {
 		return overLimit("response bytes", len(data), maxBytes)
@@ -232,7 +315,7 @@ func CheckXML(data []byte, maxBytes int) error {
 	}
 	var (
 		depth, elements int
-		text            []int // text bytes per open element
+		text            XMLTextCounter
 		root            bool
 	)
 	for {
@@ -264,13 +347,12 @@ func CheckXML(data []byte, maxBytes int) error {
 					return overLimit("XML attribute bytes", len(a.Value), MaxXMLTextBytes)
 				}
 			}
-			text = append(text, 0)
+			text.Start()
 		case xml.EndElement:
-			if depth == 0 {
-				return errors.New("netdevcontract: unbalanced XML end element")
+			if err := text.End(); err != nil {
+				return err
 			}
 			depth--
-			text = text[:len(text)-1]
 		case xml.CharData:
 			if depth == 0 {
 				if len(bytes.TrimSpace(t)) > 0 {
@@ -278,9 +360,8 @@ func CheckXML(data []byte, maxBytes int) error {
 				}
 				continue
 			}
-			text[len(text)-1] += len(t)
-			if text[len(text)-1] > MaxXMLTextBytes {
-				return overLimit("XML text bytes", text[len(text)-1], MaxXMLTextBytes)
+			if err := text.CharData(t); err != nil {
+				return err
 			}
 		case xml.Directive:
 			return errors.New("netdevcontract: XML directives (DTD) are refused")
