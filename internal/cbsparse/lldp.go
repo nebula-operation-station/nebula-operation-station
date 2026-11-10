@@ -18,13 +18,20 @@ const (
 	// the neighbor limit is still read up to the limit and marked
 	// incomplete, while a line flood is refused before any row is split.
 	lldpMaxLines = 4 * netdevcontract.MaxLLDPNeighborsPerDevice
+	// lldpDetailMaxBlocks bounds the neighbor blocks of one "show lldp
+	// neighbors <if>" output that are read: four times
+	// MaxLLDPNeighborsPerPort, so that malformed and duplicate blocks
+	// still leave room for the per-port limit. Further blocks are not
+	// allocated and make the result incomplete.
+	lldpDetailMaxBlocks = 4 * netdevcontract.MaxLLDPNeighborsPerPort
+	// lldpDetailLinesPerBlock is the line budget of one neighbor block.
+	// The CBS detail form prints about a dozen lines per neighbor, and
+	// LLDP-MED and 802.3 sections add a few dozen at most.
+	lldpDetailLinesPerBlock = 64
 	// lldpDetailMaxLines bounds the lines of one "show lldp neighbors
-	// <if>" output. The detail parser does constant work per line and
-	// keeps at most one neighbor per two lines, so the bound is the
-	// transport cap itself: any neighbor can send frames, and a port
-	// flooded with neighbors must end as incomplete at the per-port limit,
-	// not as a refused output.
-	lldpDetailMaxLines = netdevcontract.MaxCBSCommandOutputBytes
+	// <if>" output: lldpDetailMaxBlocks full blocks. A longer output is
+	// refused before it is split into lines.
+	lldpDetailMaxLines = lldpDetailMaxBlocks * lldpDetailLinesPerBlock
 	// lldpMaxKeyBytes bounds the key of one "Key: value" detail line; the
 	// longest CBS key is about 30 bytes.
 	lldpMaxKeyBytes = 48
@@ -109,9 +116,12 @@ var lldpCapWords = map[string]netdevcontract.LLDPCapability{
 // Duplicates and the per-port and per-device limits are applied as in
 // CapLLDPNeighbors. On error the result is nil and incomplete is false.
 //
-// A hostile value with an inner space run can spill into the following
-// cells of its own row; those cells (capabilities) are sent by the same
-// neighbor, so this cannot attribute data to another port or neighbor.
+// A hostile value with an inner space run can shift text into any later
+// cell of its own row: a run in the Device ID cell can move text into
+// Port ID, System Name and Capabilities, a run in Port ID into System
+// Name and Capabilities. Every such cell was sent by the same neighbor,
+// and the Port cell comes first and is never shifted, so this cannot
+// attribute data to another port or another neighbor's row.
 func ParseLLDPNeighbors(out []byte) (neighbors []netdevcontract.LLDPNeighbor, incomplete bool, err error) {
 	const what = "show lldp neighbors"
 	blocks, err := splitTables(out, what, lldpMaxLines, func(titles []string) ([]int, error) {
@@ -265,12 +275,55 @@ const (
 	lldpKeyLocalPort  = "local port"
 )
 
+// lldpKeptBit maps the kept detail keys (except the chassis ID, which
+// starts a block) to their bit in lldpBlock.seen.
+var lldpKeptBit = map[string]uint8{
+	lldpKeyPortID:     1 << 0,
+	lldpKeySystemName: 1 << 1,
+	lldpKeyCaps:       1 << 2,
+	lldpKeyMgmtAddr:   1 << 3,
+	lldpKeyLocalPort:  1 << 4,
+}
+
+// lldpIgnoredKeys are the detail keys known from the CBS detail form that
+// are not kept. Directly after a kept value, any key outside the kept and
+// ignored sets is read as the wrapped rest of that value (see
+// ParseLLDPNeighborDetail).
+var lldpIgnoredKeys = map[string]bool{
+	"chassis id subtype":                       true,
+	"port id subtype":                          true,
+	"system description":                       true,
+	"port description":                         true,
+	"time to live":                             true,
+	"ttl":                                      true,
+	"port vlan id":                             true,
+	"auto-negotiation support":                 true,
+	"auto-negotiation status":                  true,
+	"auto-negotiation advertised capabilities": true,
+	"operational mau type":                     true,
+	"802.3 maximum frame size":                 true,
+	"802.3 power via mdi":                      true,
+	"802.3 link aggregation":                   true,
+	"lldp-med capabilities":                    true,
+	"device type":                              true,
+	"network policy":                           true,
+	"location":                                 true,
+	"extended poe":                             true,
+	"hardware revision":                        true,
+	"firmware revision":                        true,
+	"software revision":                        true,
+	"serial number":                            true,
+	"manufacturer name":                        true,
+	"model name":                               true,
+	"asset id":                                 true,
+}
+
 // lldpBlock is one neighbor of the detail form while it is read.
 type lldpBlock struct {
 	n        netdevcontract.LLDPNeighbor
-	seen     map[string]bool // kept keys already set
-	bad      bool            // the neighbor is dropped
-	lostAddr bool            // a management address was dropped
+	seen     uint8 // lldpKeptBit of the kept keys already given
+	bad      bool  // the neighbor is dropped
+	lostAddr bool  // a management address was dropped
 }
 
 // ParseLLDPNeighborDetail parses the output of "show lldp neighbors
@@ -292,20 +345,28 @@ type lldpBlock struct {
 // true: a missing chassis or port ID, a kept key given twice, a remote
 // string that violates the text rule or MaxLabelBytes, an unknown or
 // repeated capability, a "Local port" other than localPort, a kept key
-// before the first neighbor, or a line without a key directly after a
-// kept key (a wrapped value that would otherwise be cut silently). A
-// management address that does not parse as an IP address without a zone
+// before the first neighbor, or, directly after a kept key, a line that
+// is not a kept or a known ignored key (lldpIgnoredKeys): such a line may
+// be the wrapped rest of the kept value, even if it contains a colon, and
+// keeping the neighbor would cut that value silently. A management
+// address that does not parse as an IP address without a zone
 // (net/netip) is dropped, the neighbor is kept without it and incomplete
-// is true; the first valid address is kept in canonical form and further
-// valid ones are ignored (the contract carries one).
+// is true; a valid address is kept in canonical form. A second
+// "Management address" line drops every address of the neighbor (the
+// contract carries one, and one of the lines may be forged), which keeps
+// the neighbor without an address and makes the result incomplete.
 //
 // A hostile description wrapped by the CLI can start a line with a kept
 // key and so fake a value or a neighbor; any such line still belongs to
 // the same local port, and a neighbor can claim that much by sending
-// frames anyway. A faked repeat of a kept key drops the neighbor.
+// frames anyway. A faked repeat of a kept key drops the neighbor, a faked
+// management address drops the address.
 //
-// Duplicates and the per-port limit are applied as in CapLLDPNeighbors.
-// On error the result is nil and incomplete is false.
+// Output limits include lldpDetailMaxLines. Only the first
+// lldpDetailMaxBlocks neighbor blocks are read; any further block makes
+// the result incomplete. Duplicates among the blocks read and the
+// per-port limit are applied as in CapLLDPNeighbors. On error the result
+// is nil and incomplete is false.
 func ParseLLDPNeighborDetail(localPort string, out []byte) (neighbors []netdevcontract.LLDPNeighbor, incomplete bool, err error) {
 	const what = "show lldp neighbors <if>"
 	if !validPortName(localPort) {
@@ -316,6 +377,7 @@ func ParseLLDPNeighborDetail(localPort string, out []byte) (neighbors []netdevco
 	}
 	var blocks []*lldpBlock
 	var cur *lldpBlock
+	overflow := &lldpBlock{bad: true} // receives the blocks beyond lldpDetailMaxBlocks
 	afterKept := false // the previous line set a kept key
 	for i, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSuffix(line, "\r")
@@ -327,19 +389,29 @@ func ParseLLDPNeighborDetail(localPort string, out []byte) (neighbors []netdevco
 			continue
 		}
 		key, value, isKey := detailKeyValue(line)
+		_, kept := lldpKeptBit[key]
+		known := isKey && (kept || lldpIgnoredKeys[key] || key == lldpKeyChassisID || key == lldpKeyChassisAlt)
+		if !known && afterKept && cur != nil {
+			// Possibly the wrapped rest of the kept value just read.
+			cur.bad = true
+		}
 		if !isKey {
-			if afterKept && cur != nil {
-				cur.bad = true
-			}
+			// afterKept stays: the next line may continue the value too.
 			continue
 		}
 		afterKept = false
-		switch key {
-		case lldpKeyChassisID, lldpKeyChassisAlt:
-			cur = &lldpBlock{n: netdevcontract.LLDPNeighbor{LocalPort: localPort, ChassisID: value}, seen: map[string]bool{lldpKeyChassisID: true}}
+		switch {
+		case key == lldpKeyChassisID || key == lldpKeyChassisAlt:
+			if len(blocks) == lldpDetailMaxBlocks {
+				// Not read; its lines go to a block that is never kept.
+				incomplete = true
+				cur = overflow
+				continue
+			}
+			cur = &lldpBlock{n: netdevcontract.LLDPNeighbor{LocalPort: localPort, ChassisID: value}}
 			blocks = append(blocks, cur)
 			afterKept = true
-		case lldpKeyPortID, lldpKeySystemName, lldpKeyCaps, lldpKeyMgmtAddr, lldpKeyLocalPort:
+		case kept:
 			if cur == nil {
 				incomplete = true
 				continue
@@ -368,21 +440,27 @@ func ParseLLDPNeighborDetail(localPort string, out []byte) (neighbors []netdevco
 
 // set stores one kept key of the block.
 func (b *lldpBlock) set(key, value, localPort string) {
+	bit := lldpKeptBit[key]
+	repeated := b.seen&bit != 0
+	b.seen |= bit
 	if key == lldpKeyMgmtAddr {
 		a, err := netip.ParseAddr(value)
 		switch {
+		case repeated:
+			// Which line is real cannot be told: keep neither.
+			b.n.ManagementAddress = ""
+			b.lostAddr = true
 		case err != nil || a.Zone() != "":
 			b.lostAddr = true
-		case b.n.ManagementAddress == "":
+		default:
 			b.n.ManagementAddress = a.String()
 		}
 		return
 	}
-	if b.seen[key] {
+	if repeated {
 		b.bad = true
 		return
 	}
-	b.seen[key] = true
 	switch key {
 	case lldpKeyPortID:
 		b.n.PortID = value

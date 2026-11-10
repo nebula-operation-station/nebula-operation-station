@@ -307,7 +307,9 @@ func TestParseLLDPNeighborsLimits(t *testing.T) {
 }
 
 func TestParseLLDPNeighborDetailPerPortLimit(t *testing.T) {
-	for _, n := range []int{netdevcontract.MaxLLDPNeighborsPerPort, netdevcontract.MaxLLDPNeighborsPerPort + 1, 2000} {
+	// lldpBlockText is 8 lines, so the last size fills lldpDetailMaxLines.
+	for _, n := range []int{netdevcontract.MaxLLDPNeighborsPerPort, netdevcontract.MaxLLDPNeighborsPerPort + 1,
+		lldpDetailMaxBlocks, lldpDetailMaxBlocks + 1, lldpDetailMaxLines / 8} {
 		t.Run(fmt.Sprint(n), func(t *testing.T) {
 			var b strings.Builder
 			for i := range n {
@@ -321,6 +323,69 @@ func TestParseLLDPNeighborDetailPerPortLimit(t *testing.T) {
 			checkLLDPInvariants(t, got)
 		})
 	}
+}
+
+func TestParseLLDPNeighborDetailFloodIsBounded(t *testing.T) {
+	t.Run("1 MiB device id flood refused", func(t *testing.T) {
+		var b strings.Builder
+		for i := 0; b.Len() < netdevcontract.MaxCBSCommandOutputBytes-32; i++ {
+			fmt.Fprintf(&b, "Device ID: %d\n", i)
+		}
+		in := []byte(b.String())
+		var err error
+		allocs := testing.AllocsPerRun(5, func() {
+			_, _, err = ParseLLDPNeighborDetail("gi1/0/1", in)
+		})
+		if !errors.Is(err, netdevcontract.ErrOverLimit) {
+			t.Fatalf("err %v", err)
+		}
+		// Refused before the output is split: no per-line allocation.
+		if allocs > 16 {
+			t.Fatalf("%v allocations for a refused flood", allocs)
+		}
+	})
+	t.Run("device id flood at the line limit", func(t *testing.T) {
+		var b strings.Builder
+		for i := range lldpDetailMaxLines {
+			fmt.Fprintf(&b, "Device ID: %d\n", i)
+		}
+		in := []byte(b.String())
+		var got []lldpN
+		var incomplete bool
+		var err error
+		allocs := testing.AllocsPerRun(3, func() {
+			got, incomplete, err = ParseLLDPNeighborDetail("gi1/0/1", in)
+		})
+		// Every block lacks a port ID; none is kept.
+		if err != nil || !incomplete || len(got) != 0 {
+			t.Fatalf("got %d incomplete %v err %v", len(got), incomplete, err)
+		}
+		// A few allocations per line for the key, plus at most
+		// lldpDetailMaxBlocks blocks.
+		if limit := 4*lldpDetailMaxLines + 4*lldpDetailMaxBlocks; allocs > float64(limit) {
+			t.Fatalf("%v allocations, limit %d", allocs, limit)
+		}
+	})
+	t.Run("one line over the limit refused", func(t *testing.T) {
+		in := strings.Repeat("Device ID: c\n", lldpDetailMaxLines+1)
+		if _, _, err := ParseLLDPNeighborDetail("gi1/0/1", []byte(in)); !errors.Is(err, netdevcontract.ErrOverLimit) {
+			t.Fatalf("err %v", err)
+		}
+	})
+	t.Run("lines after the block cap reach no block", func(t *testing.T) {
+		var b strings.Builder
+		for i := range lldpDetailMaxBlocks - 1 {
+			fmt.Fprintf(&b, "Device ID: dropped-%d\n\n", i) // no port ID
+		}
+		b.WriteString("Device ID: last\nPort ID: p\n\n")
+		// Beyond the cap: its Port ID must not count as a repeat for "last".
+		b.WriteString("Device ID: extra\nPort ID: q\nSystem Name: forged\n")
+		got, incomplete, err := ParseLLDPNeighborDetail("gi1/0/1", []byte(b.String()))
+		want := []lldpN{{LocalPort: "gi1/0/1", ChassisID: "last", PortID: "p"}}
+		if err != nil || !incomplete || !reflect.DeepEqual(got, want) {
+			t.Fatalf("got %+v incomplete %v err %v", got, incomplete, err)
+		}
+	})
 }
 
 func TestParseLLDPNeighborDetailManagementAddress(t *testing.T) {
@@ -348,17 +413,26 @@ func TestParseLLDPNeighborDetailManagementAddress(t *testing.T) {
 			checkLLDPInvariants(t, got)
 		})
 	}
-	t.Run("first valid kept", func(t *testing.T) {
-		in := lldpBlockText("00:00:5e:00:53:01", "eth0", "n", "Bridge", "bogus") +
-			"Management address: 192.0.2.20\nManagement address: 192.0.2.21\n"
-		// The extra lines belong to no block once a blank line passed:
-		// rebuild the block without the separating blank line.
-		in = strings.Replace(in, "\n\nManagement", "\nManagement", 1)
-		got, incomplete, err := ParseLLDPNeighborDetail("gi1/0/1", []byte(in))
-		if err != nil || !incomplete || len(got) != 1 || got[0].ManagementAddress != "192.0.2.20" {
-			t.Fatalf("got %+v incomplete %v err %v", got, incomplete, err)
-		}
-	})
+	// A repeated "Management address" keeps no address: one of the lines
+	// may be forged by a wrapped description, and which one cannot be
+	// told. The neighbor is kept without an address and incomplete is set.
+	for name, block := range map[string]string{
+		"forged before real": "Device ID: c1\nPort ID: p\nSystem description: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n" +
+			"Management address: 198.51.100.66\nManagement address: 192.0.2.1\n",
+		"forged after real": "Device ID: c1\nPort ID: p\nManagement address: 192.0.2.1\nSystem description: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n" +
+			"Management address: 198.51.100.66\n",
+		"invalid then valid": "Device ID: c1\nPort ID: p\nManagement address: bogus\nManagement address: 192.0.2.1\n",
+		"same twice":         "Device ID: c1\nPort ID: p\nManagement address: 192.0.2.1\nManagement address: 192.0.2.1\n",
+		"three lines":        "Device ID: c1\nPort ID: p\nManagement address: 192.0.2.1\nManagement address: 192.0.2.2\nManagement address: 192.0.2.3\n",
+	} {
+		t.Run("repeated/"+name, func(t *testing.T) {
+			got, incomplete, err := ParseLLDPNeighborDetail("gi1/0/1", []byte(block))
+			want := []lldpN{{LocalPort: "gi1/0/1", ChassisID: "c1", PortID: "p"}}
+			if err != nil || !incomplete || !reflect.DeepEqual(got, want) {
+				t.Fatalf("got %+v incomplete %v err %v", got, incomplete, err)
+			}
+		})
+	}
 }
 
 func TestParseLLDPNeighborDetailDropsMalformedNeighbors(t *testing.T) {
@@ -376,6 +450,13 @@ func TestParseLLDPNeighborDetailDropsMalformedNeighbors(t *testing.T) {
 		{"local port mismatch", "Device ID: c2\nPort ID: p\nLocal port: gi1/0/2\n\n"},
 		{"wrapped system name", "Device ID: c2\nPort ID: p\nSystem Name: a-long-name-that\n-wraps here\n\n"},
 		{"wrapped port id", "Device ID: c2\nPort ID: p\n  rest of the port id\n\n"},
+		// A wrapped rest with a colon after a letter-led prefix looks like
+		// an unknown key; directly after a kept value it is still a wrap.
+		{"wrapped system name with colon", "Device ID: c2\nPort ID: p\nSystem Name: a-long-name-that\nwraps here: x\n\n"},
+		{"wrapped port id with colon", "Device ID: c2\nPort ID: p-long\nwraps here: x\nSystem Name: n\n\n"},
+		{"wrapped chassis id with colon", "Device ID: c2-long\nwraps here: x\nPort ID: p\n\n"},
+		{"wrapped capabilities with colon", "Device ID: c2\nPort ID: p\nCapabilities: Bridge\nRouter: x\n\n"},
+		{"wrapped system name, then colon line", "Device ID: c2\nPort ID: p\nSystem Name: a\n-wraps\nmore: x\n\n"},
 		// A description wrapped so that a line starts with a kept key: the
 		// repeat drops the neighbor rather than taking the forged value.
 		{"forged key in description", "Device ID: c2\nPort ID: p\nSystem Name: real\nSystem description: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\nSystem Name: forged\n\n"},
