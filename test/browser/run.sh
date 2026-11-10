@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Browser tests of the web login, the traffic map and the vulnerabilities
-# pages (make test-browser).
+# Browser tests of the web login, the traffic map, the vulnerabilities and
+# the attack-path pages (make test-browser).
 # Needs Node.js and Playwright with Chromium; set PLAYWRIGHT_MODULE to the
 # playwright package path if it is not resolvable as "playwright". Every
 # spec gets a fresh harness (each registers its own first security key).
@@ -44,3 +44,4 @@ run_spec() {
 run_spec login.spec.js
 run_spec trafficmap.spec.js
 run_spec vuln.spec.js
+run_spec attackpath.spec.js
