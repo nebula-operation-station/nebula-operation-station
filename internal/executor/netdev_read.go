@@ -16,10 +16,11 @@ import (
 // Network device typed reads (ADR 0010 D4; ND-12 part 1).
 //
 // ReadNetDevice is callable by the netdev-collector and the admin only
-// (MethodRoles). Part 1 is the skeleton: it validates the request, refuses
-// unknown reads, unknown, removed and blocked devices and a read of the
-// other device family, then answers Unimplemented. Device I/O, the device
-// read lease (ND-13) and the collector schedule (ND-14) come later.
+// (MethodRoles). It validates the request, refuses unknown reads, unknown,
+// removed and blocked devices and a read of the other device family, then
+// requires an approved device read lease and spends it
+// (checkNetDeviceGrant, ND-13), then answers Unimplemented. Device I/O and
+// the collector schedule (ND-14) come later.
 
 // netDeviceReadFamilies maps every typed read to the one device family it
 // applies to. A value missing here is not a read and is refused.
@@ -60,15 +61,16 @@ func ValidateReadNetDeviceRequest(req *pb.ReadNetDeviceRequest) error {
 	return nil
 }
 
-// ReadNetDevice runs one typed read against one registered device. Part 1
-// refuses every request it cannot serve and answers Unimplemented for the
-// rest; it never dials a device and never touches a credential.
+// ReadNetDevice runs one typed read against one registered device. It
+// refuses every request it cannot serve or that no device read lease
+// authorizes, and answers Unimplemented for the rest after recording the
+// spend; it never dials a device and never opens a credential.
 //
 // TODO(ND-13/ND-14): ReadNetDeviceResponse bounds none of its repeated or
 // string fields, so the per-read entry and byte limits of ADR 0010 D4
 // (e.g. the 8,192 MAC-entry cap) must be enforced here, as named
 // constants, when device I/O lands.
-func (s *Service) ReadNetDevice(_ context.Context, in *pb.ReadNetDeviceRequest) (*pb.ReadNetDeviceResponse, error) {
+func (s *Service) ReadNetDevice(ctx context.Context, in *pb.ReadNetDeviceRequest) (*pb.ReadNetDeviceResponse, error) {
 	if err := ValidateReadNetDeviceRequest(in); err != nil {
 		return nil, err
 	}
@@ -88,7 +90,16 @@ func (s *Service) ReadNetDevice(_ context.Context, in *pb.ReadNetDeviceRequest) 
 	if fam, _ := netDeviceReadFamily(in.Read); fam != dev.Family {
 		return nil, status.Error(codes.InvalidArgument, "read network device: read does not apply to the device family")
 	}
-	return nil, status.Error(codes.Unimplemented, "read network device: device reads are not implemented yet (ND-13/ND-14)")
+	if _, err := s.checkNetDeviceGrant(ctx, in.DeviceId, in.Read, s.clock()); err != nil {
+		st := netDeviceGrantStatus(err)
+		if status.Code(st) == codes.Internal {
+			return nil, s.netDevReadFailed(err)
+		}
+		return nil, st
+	}
+	// The read is authorized and its spend is recorded; device I/O comes
+	// with ND-14.
+	return nil, status.Error(codes.Unimplemented, "read network device: device reads are not implemented yet (ND-14)")
 }
 
 // netDevReadFailed logs an internal read failure and returns the fixed

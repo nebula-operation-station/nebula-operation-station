@@ -196,4 +196,65 @@ func (db *DB) ReserveReadRun(grantID, actionID, hostID string, now time.Time, bu
 	return true, nil
 }
 
+// ReadActionLastRun returns the durable time of the last reservation of
+// actionID on hostID in the shared interval counter of ReserveReadRun, and
+// false if none is kept. It reads only and never reserves; callers use it
+// to explain a refusal (interval versus budget), never to authorize.
+func (db *DB) ReadActionLastRun(actionID, hostID string) (time.Time, bool, error) {
+	var last int64
+	err := db.sql.QueryRow(`SELECT last_run FROM read_action_last WHERE action_id = ? AND host_id = ?`, actionID, hostID).Scan(&last)
+	if errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("executordb: read action last run: %w", err)
+	}
+	return time.Unix(last, 0), true, nil
+}
+
+// ReleaseReadRun undoes the reservation ReserveReadRun just made for
+// grantID, actionID and hostID when the caller refuses the run before any
+// I/O. In one transaction it removes one budget row of that grant and host
+// stamped at the reservation's interval time and sets the interval row back
+// to prev (deleting it when hadPrev is false), but only while the interval
+// row still holds that reservation. It returns false when there is nothing
+// to release.
+func (db *DB) ReleaseReadRun(grantID, actionID, hostID string, prev time.Time, hadPrev bool) (bool, error) {
+	tx, err := db.sql.Begin()
+	if err != nil {
+		return false, fmt.Errorf("executordb: release read run: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }() // a no-op after Commit
+	var at int64
+	err = tx.QueryRow(`SELECT last_run FROM read_action_last WHERE action_id = ? AND host_id = ?`, actionID, hostID).Scan(&at)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && hadPrev && at <= prev.Unix()) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("executordb: release read run: %w", err)
+	}
+	res, err := tx.Exec(`DELETE FROM read_run_log WHERE rowid = (SELECT rowid FROM read_run_log WHERE grant_id = ? AND host_id = ? AND at = ? LIMIT 1)`,
+		grantID, hostID, at)
+	if err != nil {
+		return false, fmt.Errorf("executordb: release read run: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return false, fmt.Errorf("executordb: release read run: %w", err)
+	} else if n != 1 {
+		return false, nil
+	}
+	if hadPrev {
+		_, err = tx.Exec(`UPDATE read_action_last SET last_run = ? WHERE action_id = ? AND host_id = ? AND last_run = ?`, prev.Unix(), actionID, hostID, at)
+	} else {
+		_, err = tx.Exec(`DELETE FROM read_action_last WHERE action_id = ? AND host_id = ? AND last_run = ?`, actionID, hostID, at)
+	}
+	if err != nil {
+		return false, fmt.Errorf("executordb: release read run: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("executordb: release read run: %w", err)
+	}
+	return true, nil
+}
+
 var _ permit.ReadGrantStore = (*DB)(nil)
