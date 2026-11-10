@@ -1353,7 +1353,8 @@ HMAC-SHA256 using the secret. An ntfy topic is 1 to 64 characters
 `A-Za-z0-9_-`. You are notified about: a changed host key, an Ops State
 change (worse or recovered), an operation that finished with failed
 hosts, and the executor found locked after a restart. Messages never
-contain host output.
+contain host output. Vulnerability events use the same providers once
+vulnerability management is set up (section 10.4).
 
 ### 10.2 Read-only API (Home Assistant, status pages)
 
@@ -1374,8 +1375,11 @@ the token's SHA-256) and restart `nebula-server`. Clients send
 | `operations.read` | `GET /api/v1/operations`, `GET /api/v1/operations/{id}`: action, state, result classes |
 | `execution_logs.read` | adds host output (result, log) to `/operations/{id}`; give it only where needed |
 
-The API cannot change anything. To revoke a token, remove its entry and
-restart. Token names are lowercase letters, digits, `_` and `-`.
+These scopes cannot change anything. The only write scope,
+`vuln.findings.write`, belongs to the one vulnerability agent token and
+writes only into the findings store (section 10.4). To revoke a token,
+remove its entry and restart. Token names are lowercase letters, digits,
+`_` and `-`.
 
 **Home Assistant example** (`configuration.yaml`, one host; repeat the
 block per host or use `/api/v1/hosts` with a template over the list):
@@ -1429,6 +1433,369 @@ Set `"audit_hash_chain": true` in `server.json` to chain them; the page
 then shows the chain's head hash, which you can note elsewhere to detect
 a rewrite from the start. Audit lines cannot be updated or deleted in
 place.
+
+### 10.4 Vulnerability management (Hermes)
+
+Nebula stores and shows vulnerability findings (ADR 0011). It does not
+fetch CVE feeds, match packages or run an LLM itself. That is done by
+**Hermes**, an agent on its own VM outside this repository. Hermes reads
+an inventory export from Nebula and posts its findings back. Findings
+are **advisory only**: no finding, score or assessment ever proposes,
+schedules or approves a change. Every fix goes through the normal
+proposal and approval flow (section 9.1).
+
+**What works in this release, and what is planned.** Read this first.
+The rest of this section describes the parts that exist.
+
+- The agent API (inventory export and run protocol), the findings store,
+  the *Vulnerabilities* pages, the notifications and the export are in
+  place.
+- **The inventory export is still empty.** The read actions
+  `package.list_installed` and `image.packages` exist and can be leased
+  (section 9.4). `nebula-server` does not yet feed their results into the
+  export, so every snapshot has the ID `nos-empty-<unix time>` and no
+  subjects. As a result, Nebula rejects every finding record with
+  "subject not in the run's inventory snapshot". Hermes can start and
+  complete runs, but **nothing is stored and nothing is closed** until
+  the export carries the inventory (planned).
+- **Closing based on NOS's own data is not wired yet.** Nebula cannot yet
+  compare a finding against its own package inventory. When a run asks to
+  close a finding, the closure is held for an admin instead of being
+  applied. It is never closed on Hermes' word alone.
+- **Maintainer decisions are refused for now.** The forms for accepting a
+  risk, marking a false positive, confirming or discarding a held closure
+  and resetting a feed mark are shown to the maintainer. Submitting one
+  fails with "vulnerability decisions need an executor-verified security
+  key assertion, which this executor does not offer": the executor has no
+  call yet that binds a security key assertion to such a decision
+  (planned).
+- **Priority uses defaults.** Exposure and host criticality are not
+  connected yet. The tier is computed as `vu-prio-v1` with exposure
+  "unknown" (0.7) and criticality "unset" (counted as HIGH).
+- Device findings (network devices, VU-15) and Hermes narratives for
+  attack paths are not available. Narratives are not planned at all (see
+  *Privacy*).
+
+#### Setting up the agent token
+
+Hermes uses one dedicated API token. Create it on the Nebula machine:
+
+```
+nebula-server -api-token hermes-vuln:vuln.inventory.read,vuln.findings.write
+```
+
+The usage message of `-api-token` lists only the read-only scopes, but
+the two vulnerability scopes are accepted. Add the printed entry to
+`server.json` as in section 10.2 (`"api": {"enabled": true, ...}`). Then
+add the Hermes VM's address by hand and restart `nebula-server`:
+
+```json
+{"name": "hermes-vuln", "sha256": "<printed hash>",
+ "scopes": ["vuln.inventory.read", "vuln.findings.write"],
+ "source_addresses": ["<address or prefix of the Hermes VM>"]}
+```
+
+| Scope | Allows |
+| --- | --- |
+| `vuln.inventory.read` | `GET /api/v1/vuln/inventory`: the inventory export |
+| `vuln.findings.write` | `POST /api/v1/vuln/runs`, `.../runs/{id}/findings`, `.../runs/{id}/complete`: writes only into the findings store |
+
+`nebula-server` refuses to start when any of these rules is broken:
+
+- Only **one** token may hold the vulnerability scopes.
+- That token carries **no other scope**, so it can never read
+  operations or host output.
+- `source_addresses` is allowed only on that token. It takes at most 16
+  IP addresses or prefixes. A prefix must have no host bits set.
+
+The token gives no SSH, vault or host access.
+
+`source_addresses` is optional, but set it. Nebula checks only the
+address of the TCP connection and ignores forwarding headers. If Hermes
+reaches Nebula through the reverse proxy (section 4), that address is the
+proxy's. Listing the proxy then admits everyone who can reach the proxy.
+Let Hermes connect to `nebula-server` directly if you want the allowlist
+to mean something. A wrong token answers `401`. A wrong address, or a
+scope the token does not hold, answers `403`. Every refusal is logged
+as an `audit` line in the server log.
+
+To revoke the token, remove the entry and restart. Without a token that
+holds a vulnerability scope, `/api/v1/vuln/` does not exist and no
+vulnerability notifications are sent.
+
+#### The Hermes contract
+
+Hermes works through the endpoints below. All request bodies are JSON
+(`Content-Type: application/json`) and parsed strictly. Nebula rejects:
+
+- unknown fields;
+- duplicate keys, and keys not written in lower case;
+- invalid UTF-8;
+- nesting deeper than 10 levels;
+- trailing data.
+
+Hermes never sends a `finding_key`. Nebula computes it from the record,
+and a key sent by Hermes is rejected as an unknown field. The record
+format is ADR 0011 D2.
+
+1. **Read the inventory.** `GET /api/v1/vuln/inventory` returns page 1
+   of the current snapshot (`vuln-inventory-v1`). Each page carries:
+   - `snapshot_id`, `generation`, `taken_at`, `page` and `pages`;
+   - the subjects, each with `part`, `last_part` and `complete`;
+   - `next_cursor`, for the next page.
+
+   Fetch further pages with `?cursor=<next_cursor>`; that is the only
+   query parameter. Answer `410` means the snapshot is gone: start again
+   without a cursor. The limits per page and per subject are listed
+   below. A subject that does not fit on a page continues on the next
+   page as its next part.
+2. **Start a run.** `POST /api/v1/vuln/runs` with
+   `inventory_snapshot_id`, `matcher_version` and `sources`. Each source
+   carries:
+   - `source_id` and `snapshot_id`;
+   - `integrity`;
+   - `date_kind`: `data`, `proxy:<companion>` or `none`;
+   - `content_date` (RFC 3339) and `sequence`, where the source has
+     them.
+
+   The answer (`201`) gives:
+   - `run_id` and `run_seq`;
+   - a verdict per source: `status`, `stale` and `probation`;
+   - `unknown_sources` and `omitted_sources`.
+
+   Nebula refuses the start when:
+   - the snapshot is older than 24 hours (`409`);
+   - the snapshot's generation is lower than that of an earlier run
+     (`409`);
+   - two runs of the token are already running (`429`).
+3. **Send findings in batches.** `POST /api/v1/vuln/runs/{run_id}/findings`
+   with `batch_seq`, `findings` and `subjects`. `subjects` lists the
+   subject parts this batch covers (`subject_kind`, `subject_ref`,
+   `part`, `last_part`), in export order. A subject counts as covered
+   only with its `last_part`. The answer lists, among others:
+   - `opened`, `updated`, `reopened`, `superseded`;
+   - `rejections`: index, key and reason of each record Nebula rejected
+     when it re-checked the record against the snapshot.
+4. **Complete.** `POST /api/v1/vuln/runs/{run_id}/complete` with an
+   empty body or `{}`. Nebula answers `422` if the run named a subject
+   without all its parts. On success the answer reports what was closed
+   and held, and whether a closure guard tripped.
+
+**Idempotency and retries.**
+
+- A batch is identified by `(run_id, batch_seq)`; Nebula stores the
+  SHA-256 of its body. Sending the same body again changes nothing
+  (`"duplicate": true`). A different body under the same `batch_seq` is
+  refused with `409` and audited.
+- A retried complete returns the saved result (`"repeat": true`). A
+  complete that a restart interrupted is finished by the retry, or by
+  Nebula itself at startup and in the 15-minute sweep.
+- A run that is not completed within 6 hours is aborted and closes
+  nothing.
+- Nebula keeps the state of an open run in memory. After a
+  `nebula-server` restart, a run that had not completed answers `409`
+  ("run state not held by this server; start a new run"). Start a new
+  run then; the old one times out without closing anything.
+
+**A batch rejected as a whole makes the run close nothing.** That
+happens when the batch is:
+
+- malformed;
+- over its limits;
+- naming a subject that is not in the snapshot, or parts out of order;
+- carrying a record that does not validate.
+
+**Limits.** Above a limit Nebula answers `413` or `429` (with
+`Retry-After`) and applies nothing of the request.
+
+| Limit | Value |
+| --- | --- |
+| Inventory export | 60 requests per hour; at most 1,000 subject parts and 4 MiB per page; 20,000 packages per host, 5,000 per image |
+| Write requests (start, batches, complete together) | 60 per minute |
+| Batch | 1 MiB body, 1,000 findings, 1,000 subject parts |
+| Run | 200,000 findings, 10,000 covered subjects, 2 running per token, 6 hours |
+| Record | 128 KiB, 16 aliases, 16 basis sources, 4 KiB assessment text |
+
+**Feed sources** are a fixed list that ships with Nebula. Hermes cannot
+add, rename or drop one.
+
+| Source ID | Maximum snapshot age |
+| --- | --- |
+| `debian-tracker`, `dsa`, `dla`, `osv`, `nvd`, `kev`, `epss` | 72 hours |
+| `cisco-csaf`, `paloalto-csaf` | 30 days |
+
+**How Nebula judges each source in a run.**
+
+- **Unknown:** an ID not on the list. It is reported in the run and
+  audited, and nothing that rests on it closes.
+- **Malformed:** an ID that fails the pattern, an ID named twice, or more
+  sources than the list holds. The run start is rejected. A
+  pattern-failing ID is audited only by its length and hash.
+- **Regressed:** the source is older than the newest snapshot Nebula has
+  accepted for it, its high-water mark.
+- **Invalid:** the source is dated more than 10 minutes in the future.
+
+A regressed or invalid source is not accepted for that run. Findings
+resting on it can still open and rise, but cannot be lowered or closed by
+the run.
+
+#### Finding states and who may set them
+
+| State | Set by | Notes |
+| --- | --- | --- |
+| `open` | A Hermes run (new or re-opened) | Default filter of the list |
+| `fixed` | Only through the closure rules of ADR 0011 D5 | Shown by who closed it: "fixed (confirmed by NOS inventory)", "fixed (subject removed)", "fixed (confirmed by admin)" or **"closed by Hermes, not confirmed by NOS"**, which has its own filter and never shows as clean |
+| `accepted_risk` | Maintainer only | Reason (at most 1 KiB) and approver. Expiry defaults to 90 days, at most **365 days**. Re-opens on expiry, when the finding becomes KEV-listed, or when the installed version it was decided for changes or becomes unknown |
+| `false_positive` | Maintainer only | Category (`backport_fixed`, `not_affected_config`, `component_not_used`, `vendor_disputed`, `other`) and reason. Re-opens when the installed version changes or becomes unknown |
+
+**Who may decide.** Only the maintainer, with an open privileged session
+(section 5), sees the decision forms:
+
+- accept a risk;
+- mark a false positive;
+- confirm or discard a held closure;
+- reset a feed's high-water mark.
+
+Each submission needs a **fresh security key assertion**, bound to that
+one decision. Hermes can never set a human state. Its "likely false
+positive" flag only sorts and annotates. As listed at the top of this
+section, this release refuses every such submission; the rules above are
+what the forms already check.
+
+**Held closures.** Nebula holds a closure for an admin instead of
+applying it when:
+
+- it is contradicted by NOS's own data;
+- the finding was KEV-listed or critical during this episode;
+- it rests on a feed on probation;
+- it would close too many findings at once (the run and 24-hour window
+  guards).
+
+Held findings stay `open`.
+
+#### Staleness and feed ages
+
+- A subject whose last complete run is older than **48 hours** is
+  labelled "stale since …". A subject without any complete run is "not
+  assessed". Neither is ever shown as "0 findings" or green.
+- No complete run for 48 hours raises `vuln.hermes_stale`, once per
+  offline period.
+- A feed past its maximum snapshot age (table above), or one without a
+  content date (`none`), is **stale**. Findings resting on it are
+  labelled "feed `<source>` stale", and runs do not close them.
+- Other feed labels have the same effect on closures:
+  - "behind its high-water mark";
+  - "dated in the future";
+  - "on probation after a mark reset".
+
+  Banners on the *Vulnerabilities* page name the affected feed.
+- A feed that no run has named yet is "not yet seen". It is not reported
+  as stale.
+
+#### Pages
+
+*Vulnerabilities* in the navigation is open to every logged-in user.
+
+| Page | Shows |
+| --- | --- |
+| `/vulnerabilities` | Findings by CVE or by subject. Filters: tier, KEV, state, subject kind, stale. At most 5,000 rows per page; a larger result is marked as truncated |
+| `/vulnerabilities/cve/{id}` | The subjects one CVE affects |
+| `/vulnerabilities/subject/{kind}/{id}` | One subject's findings |
+| `/vulnerabilities/f/{key}` | One finding with its held closures and the Hermes assessment, labelled "Hermes assessment (LLM, unverified)" |
+
+Everything from Hermes and the feeds is rendered as plain text. The only
+links are ones Nebula builds itself.
+
+"Fix with" links open an existing flow, prefilled, and never submit
+anything:
+
+- **Host packages** link to the OS package update. The link counts as a
+  fix only if the candidate's *source* version is at or above the fixed
+  version. Otherwise it reads "update available, fix not verified".
+- **Images** link to the container update, labelled "fix not verified
+  until the new image is scanned".
+- **Kernel** findings also say that a reboot is required.
+
+The org chart's image badge shows the Hermes status when a fresh
+complete run covers the image. Otherwise it shows the result of the
+`image.vulnerabilities` read, which uses a Trivy that the operator
+installed on the host, labelled "host Trivy, partial". The two are never
+merged, and neither opens or closes the other.
+
+#### Notifications
+
+The events below go through the providers of section 10.1. They are sent
+only when the API is enabled with a vulnerability token.
+
+| Event | When |
+| --- | --- |
+| `vuln.kev_new` | An open finding is KEV-listed (new, or newly listed) |
+| `vuln.critical_new` | An open finding reaches the critical tier |
+| `vuln.hermes_stale` | No complete run for 48 hours |
+| `vuln.feed_stale` | A listed feed passed its maximum age; once per feed and stale period |
+| `vuln.feed_regressed` | A run named a listed feed below its mark or dated in the future; once per feed until a run accepts it again |
+| `vuln.feed_mark_reset` | A feed mark was reset (not possible yet, see above) |
+
+**How often you are notified.**
+
+- Each finding notifies once per event type and episode. Closing and
+  re-opening a finding starts a new episode.
+- The de-duplication is kept in memory, so after a restart an open KEV or
+  critical finding may notify once more.
+- At most 10 messages leave per hour; the rest are summed up in one
+  hourly digest (`vuln.digest`).
+- Which staleness alerts were already delivered is kept in
+  `vuln-notify-state.json` in the data directory, so a restart does not
+  repeat them.
+
+**What a message contains.** CVE ID, subject kind and ID, tier and KEV
+flag, as plain text. Never the LLM assessment, an admin reason or a host
+label.
+
+#### Export
+
+`/vulnerabilities/export?format=csv` (default) or `?format=json`
+downloads all findings. It is for an admin with an open privileged
+session only.
+
+- **Audit.** Nebula writes the audit entry (`vuln.export`) before the
+  first byte. If that write fails, nothing is exported. A refused export
+  is audited as `vuln.export_refused`.
+- **Size.** More than 200,000 findings are refused, never exported in
+  part.
+- **Columns.** Key, subject kind and ID, image digest, state,
+  `closed_by` and its label, vulnerability ID and aliases, ecosystem,
+  component, installed and fixed version, tier, CVSS score, KEV, first
+  and last seen, the fix flow, and an advisory link built by Nebula.
+- **Left out.** No assessment text, admin reasons, host labels or
+  addresses.
+- **CSV safety.** A CSV cell starting with `=`, `+`, `-`, `@`, a tab or a
+  carriage return gets a leading `'`.
+
+#### Privacy
+
+- **The inventory export.** It carries opaque subject IDs, the OS
+  release, the running kernel and the package lists, nothing else:
+  - no IP addresses;
+  - no host names;
+  - **no host labels**;
+  - no secrets, environment, logs or topology.
+
+  A subject whose ID looks like an IP address is left out.
+- **No attack paths for Hermes.** Hermes cannot read attack paths or
+  topology. The attack-path pages are admin web pages, not part of
+  `/api/v1`. Hermes narratives for paths are **not planned**; the
+  maintainer may revisit this decision.
+- **Where the assessment text appears.** Only on the finding page, as
+  text. Never in notifications, exports or the audit log.
+- **Retention.**
+  - Fixed findings: 365 days.
+  - Run records: 90 days.
+  - Assessment text of closed findings: 90 days.
+  - Open, accepted and false-positive findings: while the subject exists.
+
+  The sweep runs every 15 minutes. Feed data itself is never stored in
+  Nebula.
 
 ## 11. Operating securely
 
