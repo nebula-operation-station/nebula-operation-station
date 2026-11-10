@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevcontract"
@@ -799,12 +800,166 @@ func TestRuleResolverExpandsSharedDeepGroupOnce(t *testing.T) {
 	}
 }
 
+// sharedParentObjects builds the amplification shape of a shared parent:
+// one group "big" that lists nAddr address objects, nMid groups m<i> that
+// each hold "big" and one own address, and a diamond-shaped layer above
+// them: h<j> holds m<j> and m<j+1>, t<k> holds h<k> and h<k+1>, so every
+// m and h group is reached through two parents.
+func sharedParentObjects(nAddr, nMid int) Objects {
+	var o Objects
+	for i := range nAddr + nMid {
+		o.Addresses = append(o.Addresses, netdevcontract.AddressObject{
+			Name: fmt.Sprintf("a%d", i), Type: netdevcontract.AddressNetmask, Value: "192.0.2.1"})
+	}
+	var big []string
+	for i := range nAddr {
+		big = append(big, fmt.Sprintf("a%d", i))
+	}
+	o.AddressGroups = append(o.AddressGroups, netdevcontract.Group{Name: "big", Static: big})
+	for i := range nMid {
+		o.AddressGroups = append(o.AddressGroups, netdevcontract.Group{
+			Name: fmt.Sprintf("m%d", i), Static: []string{"big", fmt.Sprintf("a%d", nAddr+i)}})
+	}
+	for j := range nMid - 1 {
+		o.AddressGroups = append(o.AddressGroups, netdevcontract.Group{
+			Name: fmt.Sprintf("h%d", j), Static: []string{fmt.Sprintf("m%d", j), fmt.Sprintf("m%d", j+1)}})
+	}
+	for k := range nMid - 2 {
+		o.AddressGroups = append(o.AddressGroups, netdevcontract.Group{
+			Name: fmt.Sprintf("t%d", k), Static: []string{fmt.Sprintf("h%d", k), fmt.Sprintf("h%d", k+1)}})
+	}
+	return o
+}
+
+func TestRuleResolverGroupWalkIsBoundedAcrossRules(t *testing.T) {
+	// re-walking the groups per rule iterates the 2,500 members of "big"
+	// for every rule field (5*10^6 iterations for 1,000 rules); the memo
+	// table walks each group once, so all rules together iterate at most
+	// the total number of group members
+	const nAddr, nMid, nRules = 2500, 150, 1000
+	o := sharedParentObjects(nAddr, nMid)
+	totalMembers := 0
+	for _, g := range o.AddressGroups {
+		totalMembers += len(g.Static)
+	}
+	want := map[string][]string{}
+	expect := func(name string) []string {
+		if w, ok := want[name]; ok {
+			return w
+		}
+		objs, err := o.ResolveGroup(name)
+		if err != nil {
+			t.Fatalf("ResolveGroup(%s): %v", name, err)
+		}
+		want[name] = addrNames(objs)
+		return want[name]
+	}
+
+	rr := NewRuleResolver(o)
+	for i := range nRules {
+		top := fmt.Sprintf("t%d", i%(nMid-2))
+		mid := fmt.Sprintf("m%d", (i*7)%nMid)
+		h := fmt.Sprintf("h%d", (i*13)%(nMid-1))
+		got := rr.Resolve(Rule{Source: []string{top}, Destination: []string{mid, h}, Service: []string{"any"}})
+		if len(got.Unresolved) != 0 {
+			t.Fatalf("rule %d: unresolved %+v", i, got.Unresolved)
+		}
+		if !reflect.DeepEqual(addrNames(got.Source.Objects), expect(top)) {
+			t.Fatalf("rule %d: source differs from ResolveGroup", i)
+		}
+		// first-seen order over the destination members
+		var wantDst []string
+		seen := map[string]bool{}
+		for _, n := range append(append([]string{}, expect(mid)...), expect(h)...) {
+			if !seen[n] {
+				seen[n] = true
+				wantDst = append(wantDst, n)
+			}
+		}
+		if !reflect.DeepEqual(addrNames(got.Destination.Objects), wantDst) {
+			t.Fatalf("rule %d: destination differs from ResolveGroup", i)
+		}
+	}
+	if rr.memberIters > totalMembers {
+		t.Fatalf("%d rules iterated %d group members, want at most the %d members of all groups", nRules, rr.memberIters, totalMembers)
+	}
+	if rr.groupChecks > len(o.AddressGroups) {
+		t.Fatalf("groups entered %d times, want at most %d", rr.groupChecks, len(o.AddressGroups))
+	}
+	if n := rr.groupVisits.Load(); n != 3*nRules {
+		t.Fatalf("memo lookups = %d, want one per direct group member (%d)", n, 3*nRules)
+	}
+}
+
+func TestRuleResolverMemoizesFailures(t *testing.T) {
+	// a failing group is walked once; later rules reuse the memoized error
+	// and never iterate its members again
+	o, err := ParseObjects(objectsBody(`<address><entry name="h"><ip-netmask>192.0.2.1</ip-netmask></entry></address>` +
+		`<address-group><entry name="x"><static><member>h</member><member>y</member></static></entry>` +
+		`<entry name="y"><static><member>x</member></static></entry>` +
+		`<entry name="miss"><static><member>h</member><member>nothere</member></static></entry>` +
+		`<entry name="dyn"><dynamic><filter>'t'</filter></dynamic></entry></address-group>`))
+	if err != nil {
+		t.Fatalf("ParseObjects: %v", err)
+	}
+	rr := NewRuleResolver(o)
+	r := Rule{Source: []string{"x", "y", "miss", "dyn"}, Destination: []string{"y"}}
+	first := rr.Resolve(r)
+	checks, iters := rr.groupChecks, rr.memberIters
+	if checks != len(o.AddressGroups) {
+		t.Fatalf("groups entered %d times, want %d", checks, len(o.AddressGroups))
+	}
+	for range 100 {
+		if got := rr.Resolve(r); !reflect.DeepEqual(got, first) {
+			t.Fatalf("result changed: %+v, want %+v", got, first)
+		}
+	}
+	if rr.groupChecks != checks || rr.memberIters != iters {
+		t.Fatalf("repeated rules walked groups again: entered %d (was %d), members %d (was %d)", rr.groupChecks, checks, rr.memberIters, iters)
+	}
+	wantReasons := []error{ErrGroupCycle, ErrGroupCycle, ErrUnresolvedMember, ErrDynamicGroup, ErrGroupCycle}
+	if len(first.Unresolved) != len(wantReasons) {
+		t.Fatalf("unresolved = %+v", first.Unresolved)
+	}
+	for i, w := range wantReasons {
+		if !errors.Is(first.Unresolved[i].Reason, w) {
+			t.Fatalf("unresolved %d = %v, want %v", i, first.Unresolved[i].Reason, w)
+		}
+	}
+}
+
+func TestRuleResolverConcurrentUse(t *testing.T) {
+	// the lazily filled memo table is shared by concurrent Resolve calls
+	o := sharedParentObjects(200, 20)
+	want := ResolveRule(Rule{Source: []string{"t0", "m5"}, Destination: []string{"h3"}, Service: []string{"any"}}, o)
+	rr := NewRuleResolver(o)
+	var wg sync.WaitGroup
+	errs := make(chan string, 8)
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 20 {
+				if got := rr.Resolve(Rule{Source: []string{"t0", "m5"}, Destination: []string{"h3"}, Service: []string{"any"}}); !reflect.DeepEqual(got, want) {
+					errs <- "concurrent result differs"
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		t.Fatal(e)
+	}
+}
+
 func TestRuleResolverAgreesWithResolveGroup(t *testing.T) {
 	// every group of a graph with cycles, too deep chains, dynamic, empty
 	// and unresolved members: Resolve fails a member exactly when
 	// ResolveGroup fails it, with the same reason when the group has a
 	// single defect, and expands it to the same objects otherwise
-	o, err := ParseObjects(objectsBody(`<address><entry name="h1"><ip-netmask>192.0.2.1</ip-netmask></entry>` +
+	complete, err := ParseObjects(objectsBody(`<address><entry name="h1"><ip-netmask>192.0.2.1</ip-netmask></entry>` +
 		`<entry name="h2"><ip-netmask>192.0.2.2</ip-netmask></entry></address>` +
 		`<address-group>` +
 		`<entry name="x"><static><member>h1</member><member>y</member></static></entry>` +
@@ -828,25 +983,63 @@ func TestRuleResolverAgreesWithResolveGroup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseObjects: %v", err)
 	}
-	rr := NewRuleResolver(o)
-	for _, g := range o.AddressGroups {
-		want, wantErr := o.ResolveGroup(g.Name)
-		for range 2 {
-			got := rr.Resolve(Rule{Source: []string{g.Name}})
-			if wantErr != nil {
-				if len(got.Unresolved) != 1 || got.Unresolved[0].Name != g.Name || len(got.Source.Objects) != 0 {
-					t.Fatalf("group %s: unresolved %+v, objects %d, want failure %v", g.Name, got.Unresolved, len(got.Source.Objects), wantErr)
-				}
-				for _, s := range []error{ErrGroupCycle, ErrGroupDepth, ErrDynamicGroup, ErrUnresolvedMember} {
-					if errors.Is(wantErr, s) != errors.Is(got.Unresolved[0].Reason, s) {
-						t.Fatalf("group %s: reason %v, want %v", g.Name, got.Unresolved[0].Reason, wantErr)
+	// incomplete object data: an empty group (ErrGroupUnresolvable, and it
+	// marks the objects incomplete), unknown members (ErrGroupIncomplete)
+	// and a group cut at MaxGroupMembers (ErrGroupIncomplete)
+	var long strings.Builder
+	for i := range netdevcontract.MaxGroupMembers + 1 {
+		fmt.Fprintf(&long, "<member>m%d</member>", i)
+	}
+	incomplete, err := ParseObjects(objectsBody(`<address><entry name="h1"><ip-netmask>192.0.2.1</ip-netmask></entry>` +
+		`<entry name="h2"><ip-netmask>192.0.2.2</ip-netmask></entry></address>` +
+		`<address-group>` +
+		`<entry name="empty"><static/></entry>` +
+		`<entry name="emptyParent"><static><member>h1</member><member>empty</member></static></entry>` +
+		`<entry name="miss"><static><member>h1</member><member>nothere</member></static></entry>` +
+		`<entry name="missParent"><static><member>h2</member><member>miss</member></static></entry>` +
+		`<entry name="cut"><static>` + long.String() + `</static></entry>` +
+		`<entry name="cutParent"><static><member>cut</member></static></entry>` +
+		`<entry name="ok"><static><member>h1</member><member>h2</member></static></entry>` +
+		`<entry name="okParent"><static><member>ok</member><member>h1</member></static></entry>` +
+		`</address-group>`))
+	if err != nil {
+		t.Fatalf("ParseObjects: %v", err)
+	}
+	if !incomplete.Incomplete {
+		t.Fatal("fixture objects are complete, want incomplete")
+	}
+
+	sentinels := []error{ErrGroupCycle, ErrGroupDepth, ErrDynamicGroup, ErrUnresolvedMember, ErrGroupIncomplete, ErrGroupUnresolvable}
+	covered := map[error]bool{}
+	for _, o := range []Objects{complete, incomplete} {
+		rr := NewRuleResolver(o)
+		for _, g := range o.AddressGroups {
+			want, wantErr := o.ResolveGroup(g.Name)
+			for range 2 {
+				got := rr.Resolve(Rule{Source: []string{g.Name}})
+				if wantErr != nil {
+					if len(got.Unresolved) != 1 || got.Unresolved[0].Name != g.Name || len(got.Source.Objects) != 0 {
+						t.Fatalf("group %s: unresolved %+v, objects %d, want failure %v", g.Name, got.Unresolved, len(got.Source.Objects), wantErr)
 					}
+					for _, s := range sentinels {
+						if errors.Is(wantErr, s) != errors.Is(got.Unresolved[0].Reason, s) {
+							t.Fatalf("group %s: reason %v, want %v", g.Name, got.Unresolved[0].Reason, wantErr)
+						}
+						if errors.Is(wantErr, s) {
+							covered[s] = true
+						}
+					}
+					continue
 				}
-				continue
+				if len(got.Unresolved) != 0 || !reflect.DeepEqual(got.Source.Objects, want) {
+					t.Fatalf("group %s: unresolved %+v, objects %v, want %v", g.Name, got.Unresolved, addrNames(got.Source.Objects), addrNames(want))
+				}
 			}
-			if len(got.Unresolved) != 0 || !reflect.DeepEqual(got.Source.Objects, want) {
-				t.Fatalf("group %s: unresolved %+v, objects %v, want %v", g.Name, got.Unresolved, addrNames(got.Source.Objects), addrNames(want))
-			}
+		}
+	}
+	for _, s := range sentinels {
+		if !covered[s] {
+			t.Errorf("fixtures never fail a group with %v", s)
 		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevcontract"
@@ -612,49 +613,80 @@ func ResolveRule(rule Rule, objects Objects) ResolvedRule {
 
 // RuleResolver resolves rules against one Objects value.
 //
-// Construction indexes the objects and checks every group exactly once
-// (cycle, depth, dynamic, empty, truncated and unknown members), with work
-// linear in the number of objects, groups and group members. The result of
-// that check is shared by every member of every rule: a group fails a
-// member exactly when ResolveGroup or ResolveServiceGroup fails it (with the
-// same reason when the group reaches a single defect; with several, the
-// reason may name another of them). Resolve
-// then expands a rule field by visiting each group reachable from its
-// members at most once, so one rule costs work linear in its members plus
-// the groups and group members reachable from them, however many members
-// or groups share a subgroup. It never re-expands a group per member.
+// It keeps a memo table with one entry per group: the expansion of the
+// group (its leaf objects, by position, unique and in first-seen order) or
+// the error it fails with. An entry is filled lazily, the first time a rule
+// member reaches the group, by an iterative depth-first walk that also
+// fills the entries of every group below it; a filled entry, failure
+// included, is never computed again. Each group is therefore walked at most
+// once and each member of its Static list is iterated at most once over the
+// lifetime of the RuleResolver: the total group-walk work for any number of
+// rules is O(groups + group members). Building the memoized leaf lists adds
+// the cost of copying them, at most the number of address or service
+// objects per group; a group whose leaves are exactly those of its first
+// member group shares that group's list instead of copying it.
 //
-// A RuleResolver is read-only after construction (apart from an atomic
-// visit counter) and safe for concurrent use.
+// Resolve never iterates a Static list. Per rule it costs O(direct members
+// + the sizes of the memoized expansions of its direct group members): it
+// looks up each direct member once and merges the expansion of each group
+// member into the field's result, skipping an expansion it merged already.
+// When the direct group members of a field reach disjoint objects this is
+// O(direct members + output size); overlapping groups are merged in full,
+// so a rule field costs at most MaxRuleMembers times the number of objects.
+//
+// A group fails a member exactly when ResolveGroup or ResolveServiceGroup
+// fails it, with the same reason when the group reaches a single defect;
+// with several, the reason may name another of them.
+//
+// A RuleResolver is safe for concurrent use; the memo table is guarded by
+// a mutex and its entries are immutable once filled.
 type RuleResolver struct {
 	objects Objects
-	addrs   groupIndex
-	svcs    groupIndex
-	// groupChecks counts the group checks of construction; each group is
-	// checked once.
+
+	mu    sync.Mutex
+	addrs groupIndex
+	svcs  groupIndex
+	// groupChecks counts the groups entered by the walk (guarded by mu);
+	// each group is entered at most once.
 	groupChecks int
-	// groupVisits counts the group visits of all Resolve calls.
+	// memberIters counts the Static-member iterations of the walk (guarded
+	// by mu); it never exceeds the total number of group members.
+	memberIters int
+	// groupVisits counts the memo lookups of all Resolve calls, one per
+	// direct group member of a rule.
 	groupVisits atomic.Int64
 }
 
-// groupIndex is the name index of one object kind (addresses or services)
-// and its groups, with the check result of every group.
-type groupIndex struct {
-	leaves    map[string]int
-	groups    []netdevcontract.Group
-	index     map[string]int
-	truncated map[string]bool
-	// failed holds the check result of each group (by position): nil for
-	// a group that expands, otherwise the sentinel ResolveGroup returns.
-	failed []error
+// expansion is the memoized result of one group: its leaf objects (by
+// position, unique, first-seen order; shared, never modified) or the error
+// sentinel ResolveGroup returns for it.
+type expansion struct {
+	leaves []int
+	err    error
 }
 
-// NewRuleResolver indexes objects and checks every group once for Resolve.
+// groupIndex is the name index of one object kind (addresses or services)
+// and its groups, with the memo table of the group walk.
+type groupIndex struct {
+	leaves     map[string]int
+	groups     []netdevcontract.Group
+	index      map[string]int
+	truncated  map[string]bool
+	incomplete bool
+	// state, height and memo are by group position and guarded by the
+	// RuleResolver mutex. memo[gi] is final once state[gi] is walkDone.
+	state  []uint8
+	height []int
+	memo   []expansion
+}
+
+// NewRuleResolver indexes objects for Resolve. Groups are walked lazily,
+// on first use.
 func NewRuleResolver(objects Objects) *RuleResolver {
 	rr := &RuleResolver{
 		objects: objects,
-		addrs:   newGroupIndex(len(objects.Addresses), objects.AddressGroups, objects.truncatedAddr),
-		svcs:    newGroupIndex(len(objects.Services), objects.ServiceGroups, objects.truncatedSvc),
+		addrs:   newGroupIndex(len(objects.Addresses), objects.AddressGroups, objects.truncatedAddr, objects.Incomplete),
+		svcs:    newGroupIndex(len(objects.Services), objects.ServiceGroups, objects.truncatedSvc, objects.Incomplete),
 	}
 	for i, a := range objects.Addresses {
 		rr.addrs.leaves[a.Name] = i
@@ -662,19 +694,21 @@ func NewRuleResolver(objects Objects) *RuleResolver {
 	for i, s := range objects.Services {
 		rr.svcs.leaves[s.Name] = i
 	}
-	rr.groupChecks = rr.addrs.check(objects.Incomplete) + rr.svcs.check(objects.Incomplete)
 	return rr
 }
 
 // newGroupIndex indexes groups by name; the leaves map is filled by the
 // caller.
-func newGroupIndex(leaves int, groups []netdevcontract.Group, truncated map[string]bool) groupIndex {
+func newGroupIndex(leaves int, groups []netdevcontract.Group, truncated map[string]bool, incomplete bool) groupIndex {
 	gx := groupIndex{
-		leaves:    make(map[string]int, leaves),
-		groups:    groups,
-		index:     make(map[string]int, len(groups)),
-		truncated: truncated,
-		failed:    make([]error, len(groups)),
+		leaves:     make(map[string]int, leaves),
+		groups:     groups,
+		index:      make(map[string]int, len(groups)),
+		truncated:  truncated,
+		incomplete: incomplete,
+		state:      make([]uint8, len(groups)),
+		height:     make([]int, len(groups)),
+		memo:       make([]expansion, len(groups)),
 	}
 	for i, g := range groups {
 		gx.index[g.Name] = i
@@ -682,136 +716,238 @@ func newGroupIndex(leaves int, groups []netdevcontract.Group, truncated map[stri
 	return gx
 }
 
-// Group check states.
+// Group walk states: white (not entered), grey (on the current path),
+// black (memo entry final).
 const (
-	checkNew = iota
-	checkVisiting
-	checkDone
+	walkNew = iota
+	walkVisiting
+	walkDone
 )
 
-// checkFrame is one group on the path of the iterative check.
-type checkFrame struct {
+// walkFrame is one group on the path of the iterative walk with the leaves
+// collected so far. While only the first member group contributed, alias
+// holds that group's memoized leaves and nothing is copied; the first
+// further leaf copies them into leaves and seen.
+type walkFrame struct {
 	gi     int
 	next   int
 	height int
+	alias  []int
+	leaves []int
+	seen   map[int]struct{}
 }
 
-// check sets failed for every group and returns the number of groups
-// checked. It is a depth-first walk with an explicit stack (the group
-// graph may be a chain of thousands of groups) that visits every group and
-// every group member once. A group fails with the first defect in member
+// addLeaf adds leaf li to the frame.
+func (f *walkFrame) addLeaf(li int) {
+	f.materialize()
+	if _, dup := f.seen[li]; !dup {
+		f.seen[li] = struct{}{}
+		f.leaves = append(f.leaves, li)
+	}
+}
+
+// addGroup adds the memoized leaves ls of a member group to the frame.
+func (f *walkFrame) addGroup(ls []int) {
+	if f.seen == nil {
+		if f.alias == nil {
+			f.alias = ls
+			return
+		}
+		if sameLeaves(f.alias, ls) {
+			return
+		}
+	}
+	f.materialize()
+	for _, li := range ls {
+		f.addLeaf(li)
+	}
+}
+
+// materialize turns an aliased frame into one with its own leaf list.
+func (f *walkFrame) materialize() {
+	if f.seen != nil {
+		return
+	}
+	f.seen = make(map[int]struct{}, len(f.alias)+1)
+	f.leaves = make([]int, 0, len(f.alias)+1)
+	for _, li := range f.alias {
+		f.seen[li] = struct{}{}
+		f.leaves = append(f.leaves, li)
+	}
+	f.alias = nil
+}
+
+// result returns the frame's leaves, capped so that no later append can
+// write into a shared list.
+func (f *walkFrame) result() []int {
+	if f.seen == nil {
+		return f.alias
+	}
+	return f.leaves[:len(f.leaves):len(f.leaves)]
+}
+
+// sameLeaves reports whether b is a prefix view of the same memoized list
+// as a (so every leaf of b is in a). Memoized lists are never modified.
+func sameLeaves(a, b []int) bool {
+	return len(a) > 0 && len(b) > 0 && len(b) <= len(a) && &a[0] == &b[0]
+}
+
+// expand returns the memo entry of group gi, walking gi and every group
+// below it that has no entry yet. The caller holds the RuleResolver mutex;
+// counts receives the groups entered and the Static members iterated.
+//
+// The walk is depth-first with an explicit stack (the group graph may be a
+// chain of thousands of groups); it enters every group at most once and
+// iterates every group member at most once, so over all calls its work is
+// O(groups + group members). A group fails with the first defect in member
 // order: ErrGroupUnresolvable (empty), ErrDynamicGroup, ErrGroupIncomplete
 // (truncated, or an unknown member while the objects are incomplete),
 // ErrUnresolvedMember, ErrGroupCycle (a member on the current path),
 // ErrGroupDepth (height over MaxGroupResolveDepth) or the failure of a
-// member group. Every group on the path to a cycle reaches that cycle, so
-// marking the whole path failed is exact. Heights do not depend on where
-// the walk started, so the depth result is the one of ResolveGroup.
-func (gx *groupIndex) check(incomplete bool) int {
-	state := make([]uint8, len(gx.groups))
-	height := make([]int, len(gx.groups))
-	var stack []checkFrame
-	checked := 0
+// member group. Every group on the path reaches the defect, so marking the
+// whole path failed is exact. Heights do not depend on where the walk
+// started, so the depth result is the one of ResolveGroup.
+func (gx *groupIndex) expand(gi int, rr *RuleResolver) expansion {
+	if gx.state[gi] == walkDone {
+		return gx.memo[gi]
+	}
+	var stack []walkFrame
 
-	// enter starts the check of gi; it reports false when gi failed on
-	// its own and was not pushed.
-	enter := func(gi int) bool {
-		checked++
-		g := gx.groups[gi]
+	// enter starts the walk of g; it reports false when g failed on its
+	// own and was not pushed.
+	enter := func(g int) bool {
+		rr.groupChecks++
+		grp := gx.groups[g]
 		var err error
 		switch {
-		case emptyGroup(g):
+		case emptyGroup(grp):
 			err = ErrGroupUnresolvable
-		case g.DynamicFilter != "":
+		case grp.DynamicFilter != "":
 			err = ErrDynamicGroup
-		case gx.truncated[g.Name]:
+		case gx.truncated[grp.Name]:
 			err = ErrGroupIncomplete
 		}
 		if err != nil {
-			gx.failed[gi], state[gi] = err, checkDone
+			gx.memo[g], gx.state[g] = expansion{err: err}, walkDone
 			return false
 		}
-		state[gi] = checkVisiting
-		stack = append(stack, checkFrame{gi: gi, height: 1})
+		gx.state[g] = walkVisiting
+		stack = append(stack, walkFrame{gi: g, height: 1})
 		return true
 	}
-	// fail ends the top group and every group below it on the path with err.
+	// fail ends every group on the path with err.
 	fail := func(err error) {
 		for _, f := range stack {
-			gx.failed[f.gi], state[f.gi] = err, checkDone
+			gx.memo[f.gi], gx.state[f.gi] = expansion{err: err}, walkDone
 		}
 		stack = stack[:0]
 	}
 
-	for root := range gx.groups {
-		if state[root] != checkNew || !enter(root) {
+	if !enter(gi) {
+		return gx.memo[gi]
+	}
+	for len(stack) > 0 {
+		f := &stack[len(stack)-1]
+		members := gx.groups[f.gi].Static
+		if f.next == len(members) {
+			// the group expands; its parent takes its leaves and grows by
+			// its height
+			ls, h := f.result(), f.height
+			gx.memo[f.gi], gx.state[f.gi], gx.height[f.gi] = expansion{leaves: ls}, walkDone, h
+			stack = stack[:len(stack)-1]
+			if len(stack) > 0 {
+				p := &stack[len(stack)-1]
+				if p.height = max(p.height, h+1); p.height > MaxGroupResolveDepth {
+					fail(ErrGroupDepth)
+					continue
+				}
+				p.addGroup(ls)
+			}
 			continue
 		}
-		for len(stack) > 0 {
-			f := &stack[len(stack)-1]
-			members := gx.groups[f.gi].Static
-			if f.next == len(members) {
-				// the group expands; its parent grows by its height
-				state[f.gi], height[f.gi] = checkDone, f.height
-				h := f.height
-				stack = stack[:len(stack)-1]
-				if len(stack) > 0 {
-					p := &stack[len(stack)-1]
-					if p.height = max(p.height, h+1); p.height > MaxGroupResolveDepth {
-						fail(ErrGroupDepth)
-					}
-				}
-				continue
+		m := members[f.next]
+		f.next++
+		rr.memberIters++
+		if li, ok := gx.leaves[m]; ok {
+			f.addLeaf(li)
+			continue
+		}
+		sub, ok := gx.index[m]
+		if !ok {
+			if gx.incomplete {
+				// the member may be one of the entries cut at a limit
+				fail(ErrGroupIncomplete)
+			} else {
+				fail(ErrUnresolvedMember)
 			}
-			m := members[f.next]
-			f.next++
-			if _, ok := gx.leaves[m]; ok {
-				continue
+			continue
+		}
+		switch gx.state[sub] {
+		case walkVisiting:
+			fail(ErrGroupCycle)
+		case walkDone:
+			if err := gx.memo[sub].err; err != nil {
+				fail(err)
+			} else if f.height = max(f.height, gx.height[sub]+1); f.height > MaxGroupResolveDepth {
+				fail(ErrGroupDepth)
+			} else {
+				f.addGroup(gx.memo[sub].leaves)
 			}
-			sub, ok := gx.index[m]
-			if !ok {
-				if incomplete {
-					// the member may be one of the entries cut at a limit
-					fail(ErrGroupIncomplete)
-				} else {
-					fail(ErrUnresolvedMember)
-				}
-				continue
-			}
-			switch state[sub] {
-			case checkVisiting:
-				fail(ErrGroupCycle)
-			case checkDone:
-				if err := gx.failed[sub]; err != nil {
-					fail(err)
-				} else if f.height = max(f.height, height[sub]+1); f.height > MaxGroupResolveDepth {
-					fail(ErrGroupDepth)
-				}
-			default:
-				if !enter(sub) {
-					fail(gx.failed[sub])
-				}
+		default:
+			if !enter(sub) {
+				fail(gx.memo[sub].err)
 			}
 		}
 	}
-	return checked
+	return gx.memo[gi]
 }
 
-// collect adds the leaves reachable from the checked, expanding group gi
-// in first-seen order, skipping groups already in visited. The recursion
-// depth is bounded by MaxGroupResolveDepth because gi passed check.
-func (gx *groupIndex) collect(gi int, visited map[int]struct{}, add func(int), visits *atomic.Int64) {
-	if _, ok := visited[gi]; ok {
+// expandAddr returns the memo entry of address group gi.
+func (rr *RuleResolver) expandAddr(gi int) expansion {
+	rr.mu.Lock()
+	defer rr.mu.Unlock()
+	return rr.addrs.expand(gi, rr)
+}
+
+// expandSvc returns the memo entry of service group gi.
+func (rr *RuleResolver) expandSvc(gi int) expansion {
+	rr.mu.Lock()
+	defer rr.mu.Unlock()
+	return rr.svcs.expand(gi, rr)
+}
+
+// leafUnion collects the leaves of one rule field in first-seen order
+// without duplicates.
+type leafUnion struct {
+	seen   map[int]struct{}
+	merged map[*int]int
+	add    func(int)
+}
+
+func newLeafUnion(add func(int)) *leafUnion {
+	return &leafUnion{seen: map[int]struct{}{}, merged: map[*int]int{}, add: add}
+}
+
+// leaf adds one leaf.
+func (u *leafUnion) leaf(li int) {
+	if _, dup := u.seen[li]; !dup {
+		u.seen[li] = struct{}{}
+		u.add(li)
+	}
+}
+
+// group adds a memoized expansion; one that is a prefix view of a list
+// merged already (groups sharing an expansion) is skipped.
+func (u *leafUnion) group(ls []int) {
+	if len(ls) == 0 {
 		return
 	}
-	visited[gi] = struct{}{}
-	visits.Add(1)
-	for _, m := range gx.groups[gi].Static {
-		if li, ok := gx.leaves[m]; ok {
-			add(li)
-			continue
-		}
-		gx.collect(gx.index[m], visited, add, visits)
+	if n, ok := u.merged[&ls[0]]; ok && n >= len(ls) {
+		return
+	}
+	u.merged[&ls[0]] = max(u.merged[&ls[0]], len(ls))
+	for _, li := range ls {
+		u.leaf(li)
 	}
 }
 
@@ -829,32 +965,25 @@ func (rr *RuleResolver) Resolve(rule Rule) ResolvedRule {
 	}
 
 	resolveAddrs := func(field RuleField, members []string, out *ResolvedAddresses) {
-		seen := map[int]struct{}{}
-		visited := map[int]struct{}{}
-		add := func(i int) {
-			if _, dup := seen[i]; !dup {
-				seen[i] = struct{}{}
-				out.Objects = append(out.Objects, objects.Addresses[i])
-			}
-		}
+		u := newLeafUnion(func(i int) { out.Objects = append(out.Objects, objects.Addresses[i]) })
 		for _, m := range members {
 			if m == "any" {
 				out.Any = true
 				continue
 			}
 			if i, ok := rr.addrs.leaves[m]; ok {
-				add(i)
+				u.leaf(i)
 				continue
 			}
 			if gi, ok := rr.addrs.index[m]; ok {
-				if err := rr.addrs.failed[gi]; err != nil {
+				rr.groupVisits.Add(1)
+				ex := rr.expandAddr(gi)
+				if ex.err != nil {
 					res.Unresolved = append(res.Unresolved, UnresolvedMember{Field: field, Name: m,
-						Reason: fmt.Errorf("resolve address group: %w", err)})
+						Reason: fmt.Errorf("resolve address group: %w", ex.err)})
 					continue
 				}
-				// a group visited for an earlier member added all its
-				// leaves already, so skipping it keeps first-seen order
-				rr.addrs.collect(gi, visited, add, &rr.groupVisits)
+				u.group(ex.leaves)
 				continue
 			}
 			if lit, ok := addressLiteral(m); ok {
@@ -867,14 +996,7 @@ func (rr *RuleResolver) Resolve(rule Rule) ResolvedRule {
 	resolveAddrs(FieldSource, rule.Source, &res.Source)
 	resolveAddrs(FieldDestination, rule.Destination, &res.Destination)
 
-	seen := map[int]struct{}{}
-	visited := map[int]struct{}{}
-	add := func(i int) {
-		if _, dup := seen[i]; !dup {
-			seen[i] = struct{}{}
-			res.Service.Objects = append(res.Service.Objects, objects.Services[i])
-		}
-	}
+	u := newLeafUnion(func(i int) { res.Service.Objects = append(res.Service.Objects, objects.Services[i]) })
 	for _, m := range rule.Service {
 		switch m {
 		case "any":
@@ -885,16 +1007,18 @@ func (rr *RuleResolver) Resolve(rule Rule) ResolvedRule {
 			continue
 		}
 		if i, ok := rr.svcs.leaves[m]; ok {
-			add(i)
+			u.leaf(i)
 			continue
 		}
 		if gi, ok := rr.svcs.index[m]; ok {
-			if err := rr.svcs.failed[gi]; err != nil {
+			rr.groupVisits.Add(1)
+			ex := rr.expandSvc(gi)
+			if ex.err != nil {
 				res.Unresolved = append(res.Unresolved, UnresolvedMember{Field: FieldService, Name: m,
-					Reason: fmt.Errorf("resolve service group: %w", err)})
+					Reason: fmt.Errorf("resolve service group: %w", ex.err)})
 				continue
 			}
-			rr.svcs.collect(gi, visited, add, &rr.groupVisits)
+			u.group(ex.leaves)
 			continue
 		}
 		unknown(FieldService, m)
