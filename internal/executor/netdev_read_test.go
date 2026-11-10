@@ -11,7 +11,9 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevcontract"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/schedgrant"
 )
 
 // cbsReads and panosReads are the typed reads of each family.
@@ -91,19 +93,18 @@ func TestReadNetDeviceRefusesMalformedRequest(t *testing.T) {
 // TestReadNetDeviceRefusesBlockedAndRemovedDevices: a blocked device is
 // FailedPrecondition, a removed (tombstoned) or unknown device NotFound, a
 // read of the other family InvalidArgument; a live device with a matching
-// read answers Unimplemented (device I/O comes with ND-13/ND-14). No reply
-// is returned in any case and no error repeats a vault reference.
+// read under an approved device read lease answers Unimplemented (device
+// I/O comes with ND-14). No reply is returned in any case and no error
+// repeats a vault reference.
 func TestReadNetDeviceRefusesBlockedAndRemovedDevices(t *testing.T) {
-	e := newNetDevTestEnv(t)
+	ge := newNetDevGrantEnv(t)
+	e := &netDevTestEnv{db: ge.db, vault: ge.svc.vault, reg: &NetDeviceRegistry{Store: ge.db, Vault: ge.svc.vault}}
 	ctx := context.Background()
-	if _, err := e.reg.RegisterNetDevice(ctx, cbsReq("core-sw", "10.20.0.2")); err != nil {
-		t.Fatal(err)
-	}
-	fwReq := cbsReq("edge-fw", "10.20.0.1")
-	fwReq.Family, fwReq.PinKind, fwReq.Pin, fwReq.Port = netdevcontract.FamilyPANOS, netdevcontract.PinTLSLeaf, testNetDevPin2, 443
-	if _, err := e.reg.RegisterNetDevice(ctx, fwReq); err != nil {
-		t.Fatal(err)
-	}
+	ge.grant(schedgrant.NetDeviceDefaultRunBudget, 900, permit.DefaultReadGrantLifetime,
+		ge.target("core-sw", schedgrant.NetDeviceReadCBSVersion, schedgrant.NetDeviceReadCBSVLANs,
+			schedgrant.NetDeviceReadCBSInterfaces, schedgrant.NetDeviceReadCBSMACTable, schedgrant.NetDeviceReadCBSLLDP),
+		ge.target("edge-fw", schedgrant.NetDeviceReadPANOSZones, schedgrant.NetDeviceReadPANOSObjects,
+			schedgrant.NetDeviceReadPANOSSecurityRules, schedgrant.NetDeviceReadPANOSNATRules, schedgrant.NetDeviceReadPANOSRuleHitCounts))
 	blockedReq := cbsReq("blocked-sw", "10.20.0.3")
 	blockedReq.Pin = strings.Repeat("ab", 32)
 	if _, err := e.reg.RegisterNetDevice(ctx, blockedReq); err != nil {
@@ -122,7 +123,7 @@ func TestReadNetDeviceRefusesBlockedAndRemovedDevices(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	svc := &Service{db: e.db}
+	svc := ge.svc
 	type tc struct {
 		id   string
 		read pb.NetDeviceRead
