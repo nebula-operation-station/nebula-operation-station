@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -578,7 +579,234 @@ func FuzzParseSecurityRules(f *testing.F) {
 			}
 			// resolution against no objects must not panic and must keep
 			// every non-any, non-literal member as unresolved
-			_ = ResolveRule(r, Objects{})
+			checkResolvedAgainstNoObjects(t, i, r, ResolveRule(r, Objects{}))
 		}
 	})
+}
+
+// checkResolvedAgainstNoObjects asserts that, with no objects, every
+// source and destination member is "any", a literal or listed in
+// Unresolved, and every service member is "any", "application-default"
+// or listed in Unresolved, in field and member order.
+func checkResolvedAgainstNoObjects(t *testing.T, i int, r Rule, got ResolvedRule) {
+	t.Helper()
+	var want []UnresolvedMember
+	literals := map[RuleField]int{}
+	for _, f := range []struct {
+		field   RuleField
+		members []string
+	}{{FieldSource, r.Source}, {FieldDestination, r.Destination}} {
+		for _, m := range f.members {
+			if m == "any" {
+				continue
+			}
+			if _, ok := addressLiteral(m); ok {
+				literals[f.field]++
+				continue
+			}
+			want = append(want, UnresolvedMember{Field: f.field, Name: m})
+		}
+	}
+	for _, m := range r.Service {
+		if m != "any" && m != "application-default" {
+			want = append(want, UnresolvedMember{Field: FieldService, Name: m})
+		}
+	}
+	if len(got.Unresolved) != len(want) {
+		t.Fatalf("rule %d: %d unresolved, want %d", i, len(got.Unresolved), len(want))
+	}
+	for j, u := range got.Unresolved {
+		if u.Field != want[j].Field || u.Name != want[j].Name || !errors.Is(u.Reason, ErrUnresolvedMember) {
+			t.Fatalf("rule %d: unresolved %d = %+v, want %+v", i, j, u, want[j])
+		}
+	}
+	if len(got.Source.Literals) != literals[FieldSource] || len(got.Destination.Literals) != literals[FieldDestination] {
+		t.Fatalf("rule %d: literal count mismatch", i)
+	}
+	if len(got.Source.Objects)+len(got.Destination.Objects)+len(got.Service.Objects) != 0 {
+		t.Fatalf("rule %d: objects resolved from no objects", i)
+	}
+}
+
+// manyGroupObjects builds objects with nAddr address and service objects
+// and nGroups address and service groups; group gI holds the objects
+// a(2I), a(2I+1) and, for I > 0, the group g(I-1) (a shared nested chain
+// is cut every 4 groups to stay under the depth limit).
+func manyGroupObjects(nAddr, nGroups int) Objects {
+	var o Objects
+	for i := range nAddr {
+		o.Addresses = append(o.Addresses, netdevcontract.AddressObject{
+			Name: fmt.Sprintf("a%d", i), Type: netdevcontract.AddressNetmask, Value: "192.0.2.1"})
+		o.Services = append(o.Services, netdevcontract.ServiceObject{
+			Name: fmt.Sprintf("s%d", i), Protocol: "tcp", Port: "443"})
+	}
+	for i := range nGroups {
+		ag := netdevcontract.Group{Name: fmt.Sprintf("g%d", i),
+			Static: []string{fmt.Sprintf("a%d", (2*i)%nAddr), fmt.Sprintf("a%d", (2*i+1)%nAddr)}}
+		sg := netdevcontract.Group{Name: fmt.Sprintf("sg%d", i),
+			Static: []string{fmt.Sprintf("s%d", (2*i)%nAddr), fmt.Sprintf("s%d", (2*i+1)%nAddr)}}
+		if i%4 != 0 {
+			ag.Static = append(ag.Static, fmt.Sprintf("g%d", i-1))
+			sg.Static = append(sg.Static, fmt.Sprintf("sg%d", i-1))
+		}
+		o.AddressGroups = append(o.AddressGroups, ag)
+		o.ServiceGroups = append(o.ServiceGroups, sg)
+	}
+	return o
+}
+
+// manyGroupRule names every group of manyGroupObjects in source,
+// destination and service.
+func manyGroupRule(nGroups int) Rule {
+	var r Rule
+	for i := range nGroups {
+		r.Source = append(r.Source, fmt.Sprintf("g%d", i))
+		r.Service = append(r.Service, fmt.Sprintf("sg%d", i))
+	}
+	r.Destination = r.Source
+	return r
+}
+
+// countIndexBuilds installs the index build hook for the test.
+func countIndexBuilds(t *testing.T) *int {
+	t.Helper()
+	n := new(int)
+	resolveIndexHook = func() { *n++ }
+	t.Cleanup(func() { resolveIndexHook = nil })
+	return n
+}
+
+func TestResolveRuleBuildsObjectIndexOnce(t *testing.T) {
+	const nAddr, nGroups = 4000, 1000
+	o := manyGroupObjects(nAddr, nGroups)
+	r := manyGroupRule(nGroups)
+	builds := countIndexBuilds(t)
+
+	got := ResolveRule(r, o)
+	if *builds != 1 {
+		t.Fatalf("object index built %d times for one rule, want 1", *builds)
+	}
+	if len(got.Unresolved) != 0 || got.Incomplete {
+		t.Fatalf("unexpected unresolved: %d", len(got.Unresolved))
+	}
+	// same result as expanding every member on its own, in first-seen order
+	var wantAddr, wantSvc []string
+	seenA, seenS := map[string]bool{}, map[string]bool{}
+	for i := range nGroups {
+		as, err := o.ResolveGroup(fmt.Sprintf("g%d", i))
+		if err != nil {
+			t.Fatalf("ResolveGroup: %v", err)
+		}
+		for _, n := range addrNames(as) {
+			if !seenA[n] {
+				seenA[n] = true
+				wantAddr = append(wantAddr, n)
+			}
+		}
+		ss, err := o.ResolveServiceGroup(fmt.Sprintf("sg%d", i))
+		if err != nil {
+			t.Fatalf("ResolveServiceGroup: %v", err)
+		}
+		for _, n := range svcNames(ss) {
+			if !seenS[n] {
+				seenS[n] = true
+				wantSvc = append(wantSvc, n)
+			}
+		}
+	}
+	if !reflect.DeepEqual(addrNames(got.Source.Objects), wantAddr) || !reflect.DeepEqual(addrNames(got.Destination.Objects), wantAddr) {
+		t.Fatalf("address expansion differs from ResolveGroup")
+	}
+	if !reflect.DeepEqual(svcNames(got.Service.Objects), wantSvc) {
+		t.Fatalf("service expansion differs from ResolveServiceGroup")
+	}
+
+	// a RuleResolver builds the index once for any number of rules
+	*builds = 0
+	rr := NewRuleResolver(o)
+	for range 5 {
+		if again := rr.Resolve(r); !reflect.DeepEqual(again, got) {
+			t.Fatal("RuleResolver result differs from ResolveRule")
+		}
+	}
+	if *builds != 1 {
+		t.Fatalf("object index built %d times for one RuleResolver, want 1", *builds)
+	}
+}
+
+func TestResolveRuleWorkDoesNotScaleWithMembersTimesObjects(t *testing.T) {
+	// a rebuilt object index per group member (MaxRuleMembers members over
+	// 20000 objects, three fields) allocates gigabytes; one index for the
+	// rule stays at a few megabytes
+	o := manyGroupObjects(20000, MaxRuleMembers)
+	r := manyGroupRule(MaxRuleMembers)
+	const limit = 64 << 20
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	got := ResolveRule(r, o)
+	runtime.ReadMemStats(&after)
+	if len(got.Unresolved) != 0 || len(got.Source.Objects) != 2*MaxRuleMembers {
+		t.Fatalf("unexpected result: %d unresolved, %d source objects", len(got.Unresolved), len(got.Source.Objects))
+	}
+	if n := after.TotalAlloc - before.TotalAlloc; n > limit {
+		t.Fatalf("ResolveRule allocated %d bytes, limit %d", n, limit)
+	}
+}
+
+func TestRuleResolverKeepsFailureSemantics(t *testing.T) {
+	// the shared index must not leak state between members: a failing
+	// group (cycle) next to a good one is unresolved, the good one resolves
+	o, err := ParseObjects(objectsBody(`<address><entry name="h"><ip-netmask>192.0.2.1</ip-netmask></entry></address>` +
+		`<address-group><entry name="x"><static><member>y</member></static></entry>` +
+		`<entry name="y"><static><member>x</member></static></entry>` +
+		`<entry name="ok"><static><member>h</member></static></entry></address-group>`))
+	if err != nil {
+		t.Fatalf("ParseObjects: %v", err)
+	}
+	rr := NewRuleResolver(o)
+	for range 2 {
+		got := rr.Resolve(Rule{Source: []string{"x", "ok", "y"}, Destination: []string{"ok"}})
+		if len(got.Unresolved) != 2 || !errors.Is(got.Unresolved[0].Reason, ErrGroupCycle) || got.Unresolved[0].Name != "x" ||
+			!errors.Is(got.Unresolved[1].Reason, ErrGroupCycle) || got.Unresolved[1].Name != "y" {
+			t.Fatalf("unresolved = %+v", got.Unresolved)
+		}
+		if !reflect.DeepEqual(addrNames(got.Source.Objects), []string{"h"}) || !reflect.DeepEqual(addrNames(got.Destination.Objects), []string{"h"}) {
+			t.Fatalf("source %+v destination %+v", got.Source, got.Destination)
+		}
+	}
+}
+
+func TestRuleKeepsNameShapedLiteralsAsConfigured(t *testing.T) {
+	// members that pass ValidateName are stored as configured, even when
+	// they look like addresses; ResolveRule reads a valid one as literal
+	// and reports an invalid one (descending range) as unresolved
+	desc := "10.0.0.9-10.0.0.1"
+	got, err := ParseSecurityRules(rulesBody(`<entry name="r"><from><member>any</member></from><to><member>any</member></to>` +
+		`<source><member>10.0.0.1</member><member>` + desc + `</member></source>` +
+		`<destination><member>any</member></destination><application><member>any</member></application>` +
+		`<service><member>any</member></service><action>allow</action></entry>`))
+	if err != nil {
+		t.Fatalf("ParseSecurityRules: %v", err)
+	}
+	r := got.Rules[0]
+	if !reflect.DeepEqual(r.Source, []string{"10.0.0.1", desc}) {
+		t.Fatalf("source = %q", r.Source)
+	}
+	res := ResolveRule(r, Objects{})
+	if !reflect.DeepEqual(res.Source.Literals, []string{"10.0.0.1"}) {
+		t.Fatalf("literals = %q", res.Source.Literals)
+	}
+	if len(res.Unresolved) != 1 || res.Unresolved[0].Name != desc || !errors.Is(res.Unresolved[0].Reason, ErrUnresolvedMember) {
+		t.Fatalf("unresolved = %+v", res.Unresolved)
+	}
+}
+
+func BenchmarkResolveRuleManyGroups(b *testing.B) {
+	o := manyGroupObjects(20000, MaxRuleMembers)
+	r := manyGroupRule(MaxRuleMembers)
+	b.ResetTimer()
+	for b.Loop() {
+		_ = ResolveRule(r, o)
+	}
 }

@@ -28,12 +28,18 @@ const (
 // literals) in device order; dynamic-ip-and-port uses either them or
 // Interface with an optional InterfaceIP; static-ip has exactly one
 // translated address and may be BiDirectional.
+//
+// Partial is set when the translation holds content NOS does not read: a
+// dynamic-ip <fallback> pool or an interface-address <floating-ip>. The
+// read fields are then only part of the translation, and the rule set is
+// marked incomplete as for SourceUnknown.
 type SourceTranslation struct {
 	Type                SourceTranslationType
 	TranslatedAddresses []string
 	Interface           string
 	InterfaceIP         string
 	BiDirectional       bool
+	Partial             bool
 }
 
 // DestinationTranslation is the destination translation of a NAT rule.
@@ -69,7 +75,8 @@ type NATRule struct {
 
 // NATRuleSet is the parsed NAT rulebase of the supported vsys in rule
 // order. Incomplete has the meaning of RuleSet.Incomplete and is also set
-// when a source translation of unknown type was seen.
+// when a source translation of unknown type or a partial one (see
+// SourceTranslation.Partial) was seen.
 type NATRuleSet struct {
 	Rules      []NATRule
 	Incomplete bool
@@ -95,16 +102,20 @@ type xmlNATRule struct {
 }
 
 // xmlSourceTranslation holds the allowlisted source translation types.
+// FloatingIP and Fallback are not read; their presence only marks the
+// translation partial, so their content is decoded into empty structs.
 type xmlSourceTranslation struct {
 	DynamicIPAndPort []struct {
 		TranslatedAddress []xmlMembers `xml:"translated-address"`
 		InterfaceAddress  []struct {
-			Interface []string `xml:"interface"`
-			IP        []string `xml:"ip"`
+			Interface  []string   `xml:"interface"`
+			IP         []string   `xml:"ip"`
+			FloatingIP []struct{} `xml:"floating-ip"`
 		} `xml:"interface-address"`
 	} `xml:"dynamic-ip-and-port"`
 	DynamicIP []struct {
 		TranslatedAddress []xmlMembers `xml:"translated-address"`
+		Fallback          []struct{}   `xml:"fallback"`
 	} `xml:"dynamic-ip"`
 	StaticIP []struct {
 		TranslatedAddress []string `xml:"translated-address"`
@@ -196,7 +207,7 @@ func parseNATRule(e xmlNATRule) (NATRule, bool, error) {
 		return NATRule{}, false, err
 	}
 	r.SourceTranslation = st
-	partial = partial || cut || st.Type == SourceUnknown
+	partial = partial || cut || st.Type == SourceUnknown || st.Partial
 
 	if r.DestinationTranslation, err = destinationTranslation(e.DestinationTranslation, e.DynamicDestinationTranslation); err != nil {
 		return NATRule{}, false, err
@@ -283,6 +294,7 @@ func sourceTranslation(xs []xmlSourceTranslation) (st SourceTranslation, truncat
 				return SourceTranslation{}, false, fmt.Errorf("%w: interface missing or invalid", ErrInvalidConfig)
 			}
 			st.Interface = itf
+			st.Partial = len(ia.FloatingIP) > 0
 			if len(ia.IP) > 0 {
 				if st.InterfaceIP, err = singleAddress(ia.IP, "ip"); err != nil {
 					return SourceTranslation{}, false, err
@@ -295,6 +307,7 @@ func sourceTranslation(xs []xmlSourceTranslation) (st SourceTranslation, truncat
 		}
 	case len(x.DynamicIP) == 1:
 		st.Type = SourceDynamicIP
+		st.Partial = len(x.DynamicIP[0].Fallback) > 0
 		if st.TranslatedAddresses, truncated, err = translated(x.DynamicIP[0].TranslatedAddress); err != nil {
 			return SourceTranslation{}, false, err
 		}

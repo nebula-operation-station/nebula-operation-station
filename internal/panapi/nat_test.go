@@ -163,6 +163,53 @@ func TestParseNATRulesUnknownSourceTranslationIsIncomplete(t *testing.T) {
 	}
 }
 
+func TestParseNATRulesUnreadSourceTranslationPartsAreIncomplete(t *testing.T) {
+	// content of an allowlisted type that NOS does not read must not let
+	// the translation read as complete
+	for _, tc := range []struct {
+		name, st string
+		want     SourceTranslation
+	}{
+		{
+			name: "dynamic-ip fallback",
+			st: `<dynamic-ip><translated-address><member>pool-obj</member></translated-address>` +
+				`<fallback><translated-address><member>203.0.113.99</member></translated-address></fallback></dynamic-ip>`,
+			want: SourceTranslation{Type: SourceDynamicIP, TranslatedAddresses: []string{"pool-obj"}, Partial: true},
+		},
+		{
+			name: "empty dynamic-ip fallback",
+			st:   `<dynamic-ip><translated-address><member>pool-obj</member></translated-address><fallback/></dynamic-ip>`,
+			want: SourceTranslation{Type: SourceDynamicIP, TranslatedAddresses: []string{"pool-obj"}, Partial: true},
+		},
+		{
+			name: "interface-address floating-ip",
+			st: `<dynamic-ip-and-port><interface-address><interface>ethernet1/1</interface>` +
+				`<floating-ip>203.0.113.5</floating-ip></interface-address></dynamic-ip-and-port>`,
+			want: SourceTranslation{Type: SourceDynamicIPAndPort, Interface: "ethernet1/1", Partial: true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ParseNATRules(natBody(minimalNAT("n", `<source-translation>`+tc.st+`</source-translation>`)))
+			if err != nil {
+				t.Fatalf("ParseNATRules: %v", err)
+			}
+			if !got.Incomplete {
+				t.Fatal("rule set not marked incomplete")
+			}
+			if !reflect.DeepEqual(got.Rules[0].SourceTranslation, tc.want) {
+				t.Fatalf("source translation = %+v, want %+v", got.Rules[0].SourceTranslation, tc.want)
+			}
+		})
+	}
+
+	// the read parts alone stay complete
+	got, err := ParseNATRules(natBody(minimalNAT("n", `<source-translation><dynamic-ip-and-port><interface-address>`+
+		`<interface>ethernet1/1</interface><ip>203.0.113.1/24</ip></interface-address></dynamic-ip-and-port></source-translation>`)))
+	if err != nil || got.Incomplete || got.Rules[0].SourceTranslation.Partial {
+		t.Fatalf("interface-address with ip: %+v, %v", got, err)
+	}
+}
+
 func TestParseNATRulesDynamicDestination(t *testing.T) {
 	got, err := ParseNATRules(natBody(minimalNAT("n", `<dynamic-destination-translation><translated-address>web-servers</translated-address>`+
 		`<translated-port>8080</translated-port><distribution>round-robin</distribution></dynamic-destination-translation>`)))

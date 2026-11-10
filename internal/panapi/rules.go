@@ -40,10 +40,14 @@ const (
 // the evaluation order of the firewall and is never re-sorted. Disabled
 // rules are kept in place with Disabled set. Every member list holds the
 // members exactly as configured, in device order: names are validated
-// (ValidateName), source and destination members may also be IP, prefix or
-// range literals (canonical form), source users are printable text. A
-// member that names no known object is kept here and reported by
-// ResolveRule, never dropped.
+// (ValidateName), source users are printable text. A source or destination
+// member that is no valid name must be an IP, prefix or ascending range
+// literal and is stored in canonical form; a member that is a valid name is
+// stored as configured even when it looks like an address (for example
+// "10.0.0.1" or a descending range). ResolveRule reads such a member as a
+// literal only if it names no object and is a valid literal; otherwise it
+// is reported as unresolved. A member that names no known object is kept
+// here and reported by ResolveRule, never dropped.
 //
 // NegateSource and NegateDestination invert the address match: a reader
 // that ignores them inverts the meaning of the rule.
@@ -592,29 +596,99 @@ type ResolvedRule struct {
 
 // ResolveRule expands the source, destination and service members of rule
 // against objects: address and service objects by name, address and
-// service groups through ResolveGroup and ResolveServiceGroup (with their
-// cycle check and MaxGroupResolveDepth limit). Negation is not applied: the
-// rule's NegateSource and NegateDestination still hold. Applications,
-// zones, users and categories are not resolved. It performs no I/O and
-// never fails; what cannot be expanded is listed in Unresolved.
+// service groups with the semantics and errors of ResolveGroup and
+// ResolveServiceGroup (cycle check, MaxGroupResolveDepth, dynamic, empty
+// and truncated groups). A member that names no object or group but is a
+// valid IP, prefix or ascending range literal is returned in Literals.
+// Negation is not applied: the rule's NegateSource and NegateDestination
+// still hold. Applications, zones, users and categories are not resolved.
+// It performs no I/O and never fails; what cannot be expanded is listed in
+// Unresolved. Resolving many rules against the same objects is cheaper
+// through one RuleResolver.
 func ResolveRule(rule Rule, objects Objects) ResolvedRule {
-	res := ResolvedRule{Incomplete: objects.Incomplete}
-	addrs := make(map[string]int, len(objects.Addresses))
+	return NewRuleResolver(objects).Resolve(rule)
+}
+
+// RuleResolver resolves rules against one Objects value. It indexes the
+// objects and groups once, so a rule costs work linear in its members and
+// the groups they reach, independent of the number of objects. A
+// RuleResolver is read-only after construction and safe for concurrent
+// use.
+type RuleResolver struct {
+	objects Objects
+	addrs   groupIndex
+	svcs    groupIndex
+}
+
+// groupIndex is the name index of one object kind (addresses or services)
+// and its groups.
+type groupIndex struct {
+	leaves    map[string]int
+	groups    []netdevcontract.Group
+	index     map[string]int
+	truncated map[string]bool
+}
+
+// resolveIndexHook, when set, is called once per index build. Tests use it
+// to pin that the object index is not rebuilt per rule member.
+var resolveIndexHook func()
+
+// NewRuleResolver indexes objects for Resolve.
+func NewRuleResolver(objects Objects) *RuleResolver {
+	if resolveIndexHook != nil {
+		resolveIndexHook()
+	}
+	rr := &RuleResolver{
+		objects: objects,
+		addrs:   newGroupIndex(len(objects.Addresses), objects.AddressGroups, objects.truncatedAddr),
+		svcs:    newGroupIndex(len(objects.Services), objects.ServiceGroups, objects.truncatedSvc),
+	}
 	for i, a := range objects.Addresses {
-		addrs[a.Name] = i
+		rr.addrs.leaves[a.Name] = i
 	}
-	addrGroups := make(map[string]struct{}, len(objects.AddressGroups))
-	for _, g := range objects.AddressGroups {
-		addrGroups[g.Name] = struct{}{}
-	}
-	svcs := make(map[string]int, len(objects.Services))
 	for i, s := range objects.Services {
-		svcs[s.Name] = i
+		rr.svcs.leaves[s.Name] = i
 	}
-	svcGroups := make(map[string]struct{}, len(objects.ServiceGroups))
-	for _, g := range objects.ServiceGroups {
-		svcGroups[g.Name] = struct{}{}
+	return rr
+}
+
+// newGroupIndex indexes groups by name; the leaves map is filled by the
+// caller.
+func newGroupIndex(leaves int, groups []netdevcontract.Group, truncated map[string]bool) groupIndex {
+	gx := groupIndex{
+		leaves:    make(map[string]int, leaves),
+		groups:    groups,
+		index:     make(map[string]int, len(groups)),
+		truncated: truncated,
 	}
+	for i, g := range groups {
+		gx.index[g.Name] = i
+	}
+	return gx
+}
+
+// expand returns the leaf indexes reachable from the group at gi with the
+// resolver of ResolveGroup; only the per-resolution state is fresh.
+func (gx *groupIndex) expand(gi int, incomplete bool) ([]int, error) {
+	r := resolver{
+		incomplete: incomplete,
+		truncated:  gx.truncated,
+		leaves:     gx.leaves,
+		groups:     gx.groups,
+		index:      gx.index,
+		height:     make(map[int]int),
+		seen:       make(map[int]struct{}),
+	}
+	if _, err := r.visit(gi, 1); err != nil {
+		return nil, err
+	}
+	return r.out, nil
+}
+
+// Resolve expands rule as ResolveRule does.
+func (rr *RuleResolver) Resolve(rule Rule) ResolvedRule {
+	objects := rr.objects
+	res := ResolvedRule{Incomplete: objects.Incomplete}
 	unknown := func(field RuleField, m string) {
 		reason := ErrUnresolvedMember
 		if objects.Incomplete {
@@ -625,11 +699,11 @@ func ResolveRule(rule Rule, objects Objects) ResolvedRule {
 	}
 
 	resolveAddrs := func(field RuleField, members []string, out *ResolvedAddresses) {
-		seen := map[string]struct{}{}
-		add := func(a netdevcontract.AddressObject) {
-			if _, dup := seen[a.Name]; !dup {
-				seen[a.Name] = struct{}{}
-				out.Objects = append(out.Objects, a)
+		seen := map[int]struct{}{}
+		add := func(i int) {
+			if _, dup := seen[i]; !dup {
+				seen[i] = struct{}{}
+				out.Objects = append(out.Objects, objects.Addresses[i])
 			}
 		}
 		for _, m := range members {
@@ -637,18 +711,19 @@ func ResolveRule(rule Rule, objects Objects) ResolvedRule {
 				out.Any = true
 				continue
 			}
-			if i, ok := addrs[m]; ok {
-				add(objects.Addresses[i])
+			if i, ok := rr.addrs.leaves[m]; ok {
+				add(i)
 				continue
 			}
-			if _, ok := addrGroups[m]; ok {
-				as, err := objects.ResolveGroup(m)
+			if gi, ok := rr.addrs.index[m]; ok {
+				is, err := rr.addrs.expand(gi, objects.Incomplete)
 				if err != nil {
-					res.Unresolved = append(res.Unresolved, UnresolvedMember{Field: field, Name: m, Reason: err})
+					res.Unresolved = append(res.Unresolved, UnresolvedMember{Field: field, Name: m,
+						Reason: fmt.Errorf("resolve address group: %w", err)})
 					continue
 				}
-				for _, a := range as {
-					add(a)
+				for _, i := range is {
+					add(i)
 				}
 				continue
 			}
@@ -662,11 +737,11 @@ func ResolveRule(rule Rule, objects Objects) ResolvedRule {
 	resolveAddrs(FieldSource, rule.Source, &res.Source)
 	resolveAddrs(FieldDestination, rule.Destination, &res.Destination)
 
-	seen := map[string]struct{}{}
-	add := func(s netdevcontract.ServiceObject) {
-		if _, dup := seen[s.Name]; !dup {
-			seen[s.Name] = struct{}{}
-			res.Service.Objects = append(res.Service.Objects, s)
+	seen := map[int]struct{}{}
+	add := func(i int) {
+		if _, dup := seen[i]; !dup {
+			seen[i] = struct{}{}
+			res.Service.Objects = append(res.Service.Objects, objects.Services[i])
 		}
 	}
 	for _, m := range rule.Service {
@@ -678,18 +753,19 @@ func ResolveRule(rule Rule, objects Objects) ResolvedRule {
 			res.Service.ApplicationDefault = true
 			continue
 		}
-		if i, ok := svcs[m]; ok {
-			add(objects.Services[i])
+		if i, ok := rr.svcs.leaves[m]; ok {
+			add(i)
 			continue
 		}
-		if _, ok := svcGroups[m]; ok {
-			ss, err := objects.ResolveServiceGroup(m)
+		if gi, ok := rr.svcs.index[m]; ok {
+			is, err := rr.svcs.expand(gi, objects.Incomplete)
 			if err != nil {
-				res.Unresolved = append(res.Unresolved, UnresolvedMember{Field: FieldService, Name: m, Reason: err})
+				res.Unresolved = append(res.Unresolved, UnresolvedMember{Field: FieldService, Name: m,
+					Reason: fmt.Errorf("resolve service group: %w", err)})
 				continue
 			}
-			for _, s := range ss {
-				add(s)
+			for _, i := range is {
+				add(i)
 			}
 			continue
 		}
