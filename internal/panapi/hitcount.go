@@ -42,12 +42,15 @@ var ErrInvalidHitCount = errors.New("panapi: invalid rule hit-count content")
 // the hits since LastReset (since rule creation if the counter was never
 // reset). Every time is UTC with second precision; the zero time means
 // "never" or "not reported" (PAN-OS reports 0 for a rule that never
-// matched or a counter that was never reset).
+// matched or a counter that was never reset). ResetKnown tells a counter
+// that was never reset (the reply carried last-reset-timestamp 0) from a
+// reply without a reset time (element absent, ResetKnown false).
 type RuleHitCount struct {
 	HitCount         uint64
 	LastHit          time.Time
 	FirstHit         time.Time
 	LastReset        time.Time
+	ResetKnown       bool
 	RuleCreation     time.Time
 	RuleModification time.Time
 }
@@ -132,7 +135,7 @@ func ParseRuleHitCounts(data []byte) (HitCountSet, error) {
 // decodeHitCounts checks and decodes the response and returns the rule
 // entries of vsys1/security in document order.
 func decodeHitCounts(data []byte) ([]xmlHitCountEntry, error) {
-	if err := netdevcontract.CheckXML(data, MaxParseResponseBytes); err != nil {
+	if err := netdevcontract.CheckXML(data, int(MaxHitCountResponseBytes)); err != nil {
 		if errors.Is(err, netdevcontract.ErrOverLimit) {
 			return nil, fmt.Errorf("%w: %w", ErrXMLLimit, err)
 		}
@@ -225,6 +228,7 @@ func parseHitCountEntry(e xmlHitCountEntry) (RuleHitCount, error) {
 			return RuleHitCount{}, fmt.Errorf("%w: %s: %w", ErrInvalidHitCount, f.what, err)
 		}
 	}
+	h.ResetKnown = len(e.LastReset) == 1
 	// the netdevcontract HitCount rules: no hit times without hits, last
 	// hit not before first hit
 	if h.HitCount == 0 && (!h.FirstHit.IsZero() || !h.LastHit.IsZero()) {
@@ -284,38 +288,62 @@ func parseEpoch(vs []string) (time.Time, error) {
 	return time.Unix(int64(n), 0).UTC(), nil
 }
 
-// UnusedRules returns the rules of rules, in rule order, that have no
-// hits since the later of their counter reset time and since (ADR 0010,
-// firewall view "unused-rule hint"; consumer ND-20). Per rule:
+// ObservedSince returns the start of the time a rule's counter has
+// observed: the later of rule creation and counter reset (ADR 0010,
+// firewall view "unused-rule hint"). It reports false, fail safe, when
+// the start is unknown: the creation time is missing or zero, or the
+// reply carried no reset time (ResetKnown false). A reset time of zero
+// with ResetKnown means the counter was never reset; creation is then the
+// start.
+func ObservedSince(h RuleHitCount) (time.Time, bool) {
+	if h.RuleCreation.IsZero() || !h.ResetKnown {
+		return time.Time{}, false
+	}
+	if h.LastReset.After(h.RuleCreation) {
+		return h.LastReset, true
+	}
+	return h.RuleCreation, true
+}
+
+// UnusedRule is a rule reported by UnusedRules. WindowStart is the start
+// of its observed zero-hit time (ObservedSince), at or before the since
+// passed to UnusedRules.
+type UnusedRule struct {
+	Rule        Rule
+	WindowStart time.Time
+}
+
+// UnusedRules returns the rules of rules, in rule order, that had zero
+// hits since the later of their creation and counter reset, where that
+// start is at or before since (ADR 0010: "zero hits since the later of
+// rule creation and counter reset, and at least 30 days observed"; consumer
+// ND-20). The caller passes since = now minus the required observation
+// window (at least 30 days), so every reported rule was observed for at
+// least that long. Per rule:
 //
 //   - a rule without an entry in hits has no known count and is never
 //     reported (no data is no hint);
-//   - with a zero count it is reported: the counter covers the time since
-//     its reset (or since creation), which includes the window;
-//   - if the reset is at or after since, any counted hit makes it used;
-//   - otherwise it is reported only if its last hit is known and before
-//     since; a non-zero count without a last-hit time is not reported.
+//   - a rule with a non-zero count is used;
+//   - a rule whose window start is unknown (ObservedSince false) is never
+//     reported (fail safe);
+//   - a rule whose window starts after since (created or reset inside the
+//     requested window) is not reported: its zero count does not cover
+//     the window.
 //
-// The result is a hint, never a proposal to delete. The caller checks the
-// observation window (at least 30 days) and rule creation; UnusedRules
-// does not.
-func UnusedRules(rules []Rule, hits map[string]RuleHitCount, since time.Time) []Rule {
-	var out []Rule
+// The result is a hint, never a proposal to delete. A zero since reports
+// nothing.
+func UnusedRules(rules []Rule, hits map[string]RuleHitCount, since time.Time) []UnusedRule {
+	var out []UnusedRule
 	for _, r := range rules {
 		h, ok := hits[r.Name]
-		if !ok {
+		if !ok || h.HitCount != 0 {
 			continue
 		}
-		if h.HitCount == 0 {
-			out = append(out, r)
+		start, ok := ObservedSince(h)
+		if !ok || start.After(since) {
 			continue
 		}
-		if !h.LastReset.Before(since) {
-			continue
-		}
-		if !h.LastHit.IsZero() && h.LastHit.Before(since) {
-			out = append(out, r)
-		}
+		out = append(out, UnusedRule{Rule: r, WindowStart: start})
 	}
 	return out
 }

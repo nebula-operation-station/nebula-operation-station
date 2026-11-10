@@ -370,6 +370,9 @@ func TestResponseCaps(t *testing.T) {
 		{"other over limit", SystemInfoRequest(), MaxOtherResponseBytes + 1, false},
 		{"config at limit", cfg, MaxConfigResponseBytes, true},
 		{"config over limit", cfg, MaxConfigResponseBytes + 1, false},
+		{"hit counts over other limit", RuleHitCountRequest(), MaxOtherResponseBytes + 1, true},
+		{"hit counts at limit", RuleHitCountRequest(), MaxHitCountResponseBytes, true},
+		{"hit counts over limit", RuleHitCountRequest(), MaxHitCountResponseBytes + 1, false},
 	} {
 		t.Run(tc.desc, func(t *testing.T) {
 			ts := newTestServer(t, nil, replyXML(sizedBody(t, tc.size)))

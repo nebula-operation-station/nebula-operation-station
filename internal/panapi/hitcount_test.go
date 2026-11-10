@@ -39,10 +39,12 @@ func TestParseRuleHitCountsFixture(t *testing.T) {
 			LastHit:          unix(1767225600),
 			FirstHit:         unix(1764547260),
 			LastReset:        unix(1764547200),
+			ResetKnown:       true,
 			RuleCreation:     unix(1735689600),
 			RuleModification: unix(1740000000),
 		},
 		"never hit": {
+			ResetKnown:       true,
 			RuleCreation:     unix(1735689600),
 			RuleModification: unix(1735689600),
 		},
@@ -67,19 +69,25 @@ func TestParseRuleHitCountsKeepsResetTime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseRuleHitCounts: %v", err)
 	}
-	if r := got.Rules["r"]; !r.LastReset.Equal(unix(1764547200)) || r.LastReset.Location() != time.UTC {
+	if r := got.Rules["r"]; !r.LastReset.Equal(unix(1764547200)) || r.LastReset.Location() != time.UTC || !r.ResetKnown {
 		t.Fatalf("LastReset = %v, want %v UTC", r.LastReset, unix(1764547200))
 	}
 }
 
 func TestParseRuleHitCountsMissingResetTimeIsZero(t *testing.T) {
-	for _, extra := range []string{``, `<last-reset-timestamp>0</last-reset-timestamp>`} {
-		got, err := ParseRuleHitCounts(hcBody(hcEntry("r", "3", extra)))
+	for _, tt := range []struct {
+		extra string
+		known bool
+	}{
+		{``, false},
+		{`<last-reset-timestamp>0</last-reset-timestamp>`, true},
+	} {
+		got, err := ParseRuleHitCounts(hcBody(hcEntry("r", "3", tt.extra)))
 		if err != nil {
-			t.Fatalf("ParseRuleHitCounts(%q): %v", extra, err)
+			t.Fatalf("ParseRuleHitCounts(%q): %v", tt.extra, err)
 		}
-		if r, ok := got.Rules["r"]; !ok || !r.LastReset.IsZero() || r.HitCount != 3 {
-			t.Fatalf("ParseRuleHitCounts(%q) = %+v, want zero LastReset and 3 hits", extra, got)
+		if r, ok := got.Rules["r"]; !ok || !r.LastReset.IsZero() || r.HitCount != 3 || r.ResetKnown != tt.known {
+			t.Fatalf("ParseRuleHitCounts(%q) = %+v, want zero LastReset, 3 hits, ResetKnown %v", tt.extra, got, tt.known)
 		}
 	}
 }
@@ -253,10 +261,39 @@ func TestParseRuleHitCountsOverLimitIsIncomplete(t *testing.T) {
 	}
 }
 
+func TestObservedSince(t *testing.T) {
+	created := unix(1735689600) // 2025-01-01
+	reset := unix(1764547200)   // 2025-12-01
+	tests := []struct {
+		name string
+		h    RuleHitCount
+		want time.Time
+		ok   bool
+	}{
+		{"reset after creation", RuleHitCount{RuleCreation: created, LastReset: reset, ResetKnown: true}, reset, true},
+		{"creation after reset", RuleHitCount{RuleCreation: reset, LastReset: created, ResetKnown: true}, reset, true},
+		{"never reset", RuleHitCount{RuleCreation: created, ResetKnown: true}, created, true},
+		{"reset equals creation", RuleHitCount{RuleCreation: created, LastReset: created, ResetKnown: true}, created, true},
+		{"reset not reported", RuleHitCount{RuleCreation: created}, time.Time{}, false},
+		{"reset time without report flag", RuleHitCount{RuleCreation: created, LastReset: reset}, time.Time{}, false},
+		{"creation unknown", RuleHitCount{LastReset: reset, ResetKnown: true}, time.Time{}, false},
+		{"nothing known", RuleHitCount{}, time.Time{}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := ObservedSince(tt.h)
+			if ok != tt.ok || !got.Equal(tt.want) {
+				t.Fatalf("ObservedSince = %v, %v; want %v, %v", got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
 func TestUnusedRules(t *testing.T) {
-	reset := unix(1764547200) // 2025-12-01
-	since := unix(1765000000) // after reset
-	early := unix(1760000000) // before reset
+	created := unix(1735689600) // 2025-01-01
+	reset := unix(1764547200)   // 2025-12-01
+	since := unix(1765000000)   // after reset
+	early := unix(1760000000)   // before reset, after creation
 	rules := []Rule{
 		{Index: 0, Name: "never-hit"},
 		{Index: 1, Name: "hit-after-since"},
@@ -265,54 +302,161 @@ func TestUnusedRules(t *testing.T) {
 		{Index: 4, Name: "hit-at-since"},
 		{Index: 5, Name: "hits-without-last-hit"},
 		{Index: 6, Name: "hit-before-reset-zero-now"},
+		{Index: 7, Name: "never-reset-zero"},
+		{Index: 8, Name: "reset-unknown-zero"},
+		{Index: 9, Name: "creation-unknown-zero"},
+		{Index: 10, Name: "created-after-early-zero"},
 	}
 	hits := map[string]RuleHitCount{
-		"never-hit":                 {LastReset: reset},
-		"hit-after-since":           {HitCount: 4, LastHit: since.Add(time.Hour), LastReset: reset},
-		"hit-before-since":          {HitCount: 4, FirstHit: reset.Add(time.Hour), LastHit: since.Add(-time.Second), LastReset: reset},
-		"hit-at-since":              {HitCount: 1, LastHit: since},
-		"hits-without-last-hit":     {HitCount: 9},
-		"hit-before-reset-zero-now": {LastReset: reset},
-		"not-in-rulebase":           {},
+		"never-hit":                 {LastReset: reset, ResetKnown: true, RuleCreation: created},
+		"hit-after-since":           {HitCount: 4, LastHit: since.Add(time.Hour), LastReset: reset, ResetKnown: true, RuleCreation: created},
+		"hit-before-since":          {HitCount: 4, FirstHit: reset.Add(time.Hour), LastHit: since.Add(-time.Second), LastReset: reset, ResetKnown: true, RuleCreation: created},
+		"hit-at-since":              {HitCount: 1, LastHit: since, ResetKnown: true, RuleCreation: created},
+		"hits-without-last-hit":     {HitCount: 9, ResetKnown: true, RuleCreation: created},
+		"hit-before-reset-zero-now": {LastReset: reset, ResetKnown: true, RuleCreation: created},
+		"never-reset-zero":          {ResetKnown: true, RuleCreation: created},
+		"reset-unknown-zero":        {RuleCreation: created},
+		"creation-unknown-zero":     {ResetKnown: true},
+		"created-after-early-zero":  {ResetKnown: true, RuleCreation: early.Add(time.Second)},
+		"not-in-rulebase":           {ResetKnown: true, RuleCreation: created},
 	}
 
-	names := func(rs []Rule) []string {
-		out := []string{}
-		for _, r := range rs {
-			out = append(out, r.Name)
+	type res struct {
+		Name  string
+		Start time.Time
+	}
+	flat := func(us []UnusedRule) []res {
+		out := []res{}
+		for _, u := range us {
+			out = append(out, res{u.Rule.Name, u.WindowStart})
 		}
 		return out
 	}
 
-	// since is later than the reset: hits before since do not count
-	got := names(UnusedRules(rules, hits, since))
-	want := []string{"never-hit", "hit-before-since", "hit-before-reset-zero-now"}
+	// reset and creation both before since: zero-hit rules are reported
+	// with the later of the two as window start; a rule with hits is used
+	// even if its last hit is before since (the ADR hint is "zero hits");
+	// an unknown reset or creation time is never reported (fail safe)
+	got := flat(UnusedRules(rules, hits, since))
+	want := []res{
+		{"never-hit", reset},
+		{"hit-before-reset-zero-now", reset},
+		{"never-reset-zero", created},
+		{"created-after-early-zero", early.Add(time.Second)},
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("UnusedRules(since after reset) = %v, want %v", got, want)
 	}
 
-	// since is earlier than the reset: the counter covers only the time
-	// after the reset, so the reset is the effective start and any
-	// counted hit makes the rule used
-	got = names(UnusedRules(rules, hits, early))
-	want = []string{"never-hit", "hit-before-reset-zero-now"}
+	// reset after since: the counter has not observed the requested
+	// window, so a zero count is no hint; created after since: likewise
+	got = flat(UnusedRules(rules, hits, early))
+	want = []res{{"never-reset-zero", created}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("UnusedRules(since before reset) = %v, want %v", got, want)
 	}
 
-	// a reset later than since overrides since for that rule
-	late := map[string]RuleHitCount{
-		"r": {HitCount: 2, FirstHit: unix(1767225000), LastHit: unix(1767225600), LastReset: unix(1767220000)},
+	// a window start equal to since counts as observed, one second later
+	// does not
+	got = flat(UnusedRules(rules, hits, reset))
+	want = []res{
+		{"never-hit", reset},
+		{"hit-before-reset-zero-now", reset},
+		{"never-reset-zero", created},
+		{"created-after-early-zero", early.Add(time.Second)},
 	}
-	if got := UnusedRules([]Rule{{Name: "r"}}, late, since); len(got) != 0 {
-		t.Fatalf("rule hit after a reset later than since reported unused: %v", names(got))
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("UnusedRules(since at reset) = %v, want %v", got, want)
+	}
+	got = flat(UnusedRules(rules, hits, early.Add(time.Second)))
+	want = []res{{"never-reset-zero", created}, {"created-after-early-zero", early.Add(time.Second)}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("UnusedRules(since at creation) = %v, want %v", got, want)
+	}
+	got = flat(UnusedRules(rules, hits, reset.Add(-time.Second)))
+	want = []res{{"never-reset-zero", created}, {"created-after-early-zero", early.Add(time.Second)}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("UnusedRules(one second before reset) = %v, want %v", got, want)
 	}
 
 	if got := UnusedRules(nil, hits, since); len(got) != 0 {
-		t.Fatalf("UnusedRules(nil) = %v", got)
+		t.Fatalf("UnusedRules(nil) = %v", flat(got))
 	}
 	if got := UnusedRules(rules, nil, since); len(got) != 0 {
-		t.Fatalf("UnusedRules without hit counts = %v, want none (no data is no hint)", names(got))
+		t.Fatalf("UnusedRules without hit counts = %v, want none (no data is no hint)", flat(got))
+	}
+	if got := UnusedRules(rules, hits, time.Time{}); len(got) != 0 {
+		t.Fatalf("UnusedRules(zero since) = %v, want none", flat(got))
+	}
+}
+
+// bigHitCountEntry is a worst-case rule entry: a name of maximum length,
+// a 20-digit counter, every timestamp at full width and the
+// non-allowlisted elements PAN-OS adds. With indent it is laid out as an
+// indented reply; without, compact.
+func bigHitCountEntry(i int, indent bool) string {
+	name := fmt.Sprintf("%0*d", MaxNameLength, i)
+	const ts = "1767225600"
+	in, out := "", ""
+	if indent {
+		in, out = "\n                  ", "\n                "
+	}
+	return out + "<entry name=\"" + name + "\">" +
+		in + "<latest>yes</latest>" +
+		in + "<hit-count>18446744073709551615</hit-count>" +
+		in + "<last-hit-timestamp>" + ts + "</last-hit-timestamp>" +
+		in + "<last-reset-timestamp>" + ts + "</last-reset-timestamp>" +
+		in + "<first-hit-timestamp>" + ts + "</first-hit-timestamp>" +
+		in + "<rule-creation-timestamp>" + ts + "</rule-creation-timestamp>" +
+		in + "<rule-modification-timestamp>" + ts + "</rule-modification-timestamp>" +
+		in + "<rule-state>Used</rule-state>" +
+		in + "<all-connected>yes</all-connected>" +
+		out + "</entry>"
+}
+
+func TestHitCountCapFitsLargeRulebase(t *testing.T) {
+	var indented, compact strings.Builder
+	for i := 0; i <= MaxHitCountEntries; i++ {
+		indented.WriteString(bigHitCountEntry(i, true))
+		compact.WriteString(bigHitCountEntry(i, false))
+	}
+	// the indented reply bounds the size the transport cap must admit
+	if n := int64(len(hcBody(indented.String()))); n > MaxHitCountResponseBytes {
+		t.Fatalf("%d indented worst-case entries take %d bytes, over the %d byte cap", MaxHitCountEntries+1, n, MaxHitCountResponseBytes)
+	}
+	// the compact form is parsed: CheckXML counts inter-element whitespace
+	// as element text (MaxXMLTextBytes), which an indented list of this
+	// length exceeds
+	body := hcBody(compact.String())
+	if int64(len(body)) <= MaxOtherResponseBytes {
+		t.Fatalf("test body of %d bytes does not exceed the generic cap", len(body))
+	}
+	if got := RuleHitCountRequest().maxBytes; got != MaxHitCountResponseBytes {
+		t.Fatalf("RuleHitCountRequest cap = %d, want MaxHitCountResponseBytes", got)
+	}
+	got, err := ParseRuleHitCounts(body)
+	if err != nil {
+		t.Fatalf("ParseRuleHitCounts: %v", err)
+	}
+	if !got.Incomplete || len(got.Rules) != MaxHitCountEntries {
+		t.Fatalf("Incomplete = %v, %d rules; want incomplete with %d", got.Incomplete, len(got.Rules), MaxHitCountEntries)
+	}
+}
+
+func TestParseRuleHitCountsByteCap(t *testing.T) {
+	pad := func(n int64) []byte {
+		b := hcBody("")
+		return append(b, strings.Repeat(" ", int(n)-len(b))...)
+	}
+	if _, err := ParseRuleHitCounts(pad(MaxHitCountResponseBytes)); err != nil {
+		t.Fatalf("at cap: %v", err)
+	}
+	got, err := ParseRuleHitCounts(pad(MaxHitCountResponseBytes + 1))
+	if !errors.Is(err, ErrXMLLimit) {
+		t.Fatalf("over cap: err = %v, want ErrXMLLimit", err)
+	}
+	if got.Rules != nil || got.Incomplete {
+		t.Fatalf("non-zero result with error: %+v", got)
 	}
 }
 

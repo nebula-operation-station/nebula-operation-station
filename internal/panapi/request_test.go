@@ -77,7 +77,7 @@ func TestReadRequestsUseFixedForms(t *testing.T) {
 		{"system info", SystemInfoRequest(), url.Values{"type": {"op"}, "cmd": {"<show><system><info/></system></show>"}}, MaxOtherResponseBytes},
 		{"pending changes", PendingChangesRequest(), url.Values{"type": {"op"}, "cmd": {"<show><config><list><changes/></list></config></show>"}}, MaxOtherResponseBytes},
 		{"config audit", ConfigAuditRequest(), url.Values{"type": {"op"}, "cmd": {"<show><config><audit><info/></audit></config></show>"}}, MaxOtherResponseBytes},
-		{"hit counts", RuleHitCountRequest(), url.Values{"type": {"op"}, "cmd": {"<show><rule-hit-count><vsys><vsys-name><entry name='vsys1'><rule-base><entry name='security'><rules><all/></rules></entry></rule-base></entry></vsys-name></vsys></rule-hit-count></show>"}}, MaxOtherResponseBytes},
+		{"hit counts", RuleHitCountRequest(), url.Values{"type": {"op"}, "cmd": {"<show><rule-hit-count><vsys><vsys-name><entry name='vsys1'><rule-base><entry name='security'><rules><all/></rules></entry></rule-base></entry></vsys-name></vsys></rule-hit-count></show>"}}, MaxHitCountResponseBytes},
 		{"running vsys", mustReq(t)(RunningConfigRequest(SubtreeVsys)), url.Values{"type": {"config"}, "action": {"show"}, "xpath": {dev + "/vsys"}}, MaxConfigResponseBytes},
 		{"running shared", mustReq(t)(RunningConfigRequest(SubtreeShared)), url.Values{"type": {"config"}, "action": {"show"}, "xpath": {"/config/shared"}}, MaxConfigResponseBytes},
 		{"running security", mustReq(t)(RunningConfigRequest(SubtreeSecurityRules)), url.Values{"type": {"config"}, "action": {"show"}, "xpath": {vsys + "/rulebase/security/rules"}}, MaxConfigResponseBytes},
