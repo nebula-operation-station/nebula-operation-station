@@ -1,0 +1,20 @@
+
+Device ID: 00:00:5e:00:53:b1
+Port ID: gi1/0/24
+Capabilities: Bridge, Router
+System Name: core-sw-1
+System description: Synthetic switch firmware 1.0 for documentation, with a
+long description that wraps onto a second line
+Port description: uplink to rack b
+Management address: 192.0.2.11
+Auto-negotiation support: Supported
+Time To Live: 120
+
+Device ID: 00:00:5e:00:53:b2
+Port ID: gi1/0/23
+Capabilities: Bridge
+System Name: core-sw-2
+System description: Synthetic switch firmware 1.0
+Port description:
+Management address: 2001:db8::b2
+Time To Live: 120
