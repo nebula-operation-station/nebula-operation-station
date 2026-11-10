@@ -428,7 +428,7 @@ func TestAttackPathsNotReachableWithAgentOrReadOnlyToken(t *testing.T) {
 func TestAttackPathPagesEnforceAdminRole(t *testing.T) {
 	s := newAPServer(t)
 	for _, p := range s.apAttackPathPages() {
-		code, _, body := s.do(t, http.MethodGet, p, "", s.admin)
+		code, _, _ := s.do(t, http.MethodGet, p, "", s.admin)
 		if code != http.StatusOK {
 			t.Errorf("admin: GET %s: status %d", p, code)
 		}
@@ -484,8 +484,8 @@ func TestAttackPathHostileLabelsAreStoredVerbatimOrRefused(t *testing.T) {
 		}
 	}
 	refused := map[string]string{
-		"host:rlo":  "web‮" + apMarker,
-		"host:fsi":  "web⁨" + apMarker,
+		"host:rlo":  "web" + string(rune(0x202e)) + apMarker, // RIGHT-TO-LEFT OVERRIDE
+		"host:fsi":  "web" + string(rune(0x2068)) + apMarker, // FIRST STRONG ISOLATE
 		"host:nul":  "web\x00" + apMarker,
 		"host:esc":  "web\x1b[31m" + apMarker,
 		"host:nl":   "web\n<script>" + apMarker,
