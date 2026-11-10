@@ -1247,8 +1247,12 @@ func TestBlockUnblockNetDevice(t *testing.T) {
 	if cur, _, _ := e.db.GetNetDevice(dev.ID); func() error { _, err := DialAddr(cur); return err }() == nil {
 		t.Fatal("blocked device still dialable")
 	}
-	if _, err := svc.BlockNetDevice(ctx, &pb.BlockNetDeviceRequest{DeviceId: dev.ID, Reason: reason}); status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("second block: %v", err)
+	// A second block is the revocation retry: it keeps the block and its
+	// first reason (TestNetDevFailedRevocationKeepsDeviceBlocked covers
+	// the retried revocation).
+	again, err := svc.BlockNetDevice(ctx, &pb.BlockNetDeviceRequest{DeviceId: dev.ID, Reason: "another reason"})
+	if err != nil || !again.GetDevice().GetBlocked() || again.GetDevice().GetBlockReason() != reason {
+		t.Fatalf("second block: %v %v, want still blocked with the first reason", again.GetDevice(), err)
 	}
 	for _, confirm := range []string{"", "no", "YES"} {
 		if _, err := svc.UnblockNetDevice(ctx, &pb.UnblockNetDeviceRequest{DeviceId: dev.ID, Confirm: confirm}); status.Code(err) != codes.InvalidArgument {
@@ -1261,6 +1265,9 @@ func TestBlockUnblockNetDevice(t *testing.T) {
 	un, err := svc.UnblockNetDevice(ctx, &pb.UnblockNetDeviceRequest{DeviceId: dev.ID, Confirm: "yes"})
 	if err != nil || un.GetDevice().GetBlocked() {
 		t.Fatalf("unblock: %v %v", un, err)
+	}
+	if _, err := svc.UnblockNetDevice(ctx, &pb.UnblockNetDeviceRequest{DeviceId: dev.ID, Confirm: "yes"}); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("unblock of an unblocked device: %v, want FailedPrecondition", err)
 	}
 	if strings.Contains(logs.String(), reason) {
 		t.Fatal("event or log carries the block reason")
@@ -1570,4 +1577,397 @@ func TestNetDevCredentialEnvelope(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
+}
+
+// requireUnblockRefused checks that Unblock retries the revocation, is
+// refused with ErrNetDevRevoke while it fails, and leaves the device
+// blocked with reason.
+func requireUnblockRefused(t *testing.T, e *netDevTestEnv, a *NetDevAdmin, rev *netDevRevokes, id, reason string) {
+	t.Helper()
+	before := rev.count()
+	if _, err := a.Unblock(context.Background(), id, "yes"); !errors.Is(err, ErrNetDevRevoke) {
+		t.Fatalf("unblock with a pending revocation: %v, want ErrNetDevRevoke", err)
+	}
+	if rev.count() != before+1 {
+		t.Fatal("unblock did not retry the revocation")
+	}
+	if cur, _, _ := e.db.GetNetDevice(id); !cur.Blocked || cur.BlockReason != reason {
+		t.Fatalf("after refused unblock: blocked %v reason %q, want blocked with %q", cur.Blocked, cur.BlockReason, reason)
+	}
+}
+
+// setFail switches the injected revocation failure.
+func (r *netDevRevokes) setFail(err error) {
+	r.mu.Lock()
+	r.fail = err
+	r.mu.Unlock()
+}
+
+// TestNetDevFailedRevocationKeepsDeviceBlocked: a failed revocation on
+// Block, Repin or a rotation of an already-blocked device leaves the
+// device blocked; Unblock retries the revocation and is refused (the
+// block stays) while it fails; Block on the blocked device retries the
+// revocation, and once a revocation succeeded Unblock lifts the block.
+func TestNetDevFailedRevocationKeepsDeviceBlocked(t *testing.T) {
+	ctx := context.Background()
+	down := errors.New("grant store down")
+
+	t.Run("block", func(t *testing.T) {
+		e := newNetDevTestEnv(t)
+		dev := registerTestNetDev(t, e, "core-sw", "10.20.0.2", testNetDevPin)
+		rev := &netDevRevokes{fail: down}
+		a := &NetDevAdmin{Store: e.store, Vault: e.vault, Revoke: rev.revoke}
+		if _, err := a.Block(ctx, dev.ID, "maintenance"); !errors.Is(err, ErrNetDevRevoke) {
+			t.Fatalf("block with failing revocation: %v, want ErrNetDevRevoke", err)
+		}
+		requireUnblockRefused(t, e, a, rev, dev.ID, "maintenance")
+		if _, err := a.Block(ctx, dev.ID, "retry"); !errors.Is(err, ErrNetDevRevoke) {
+			t.Fatalf("block retry with failing revocation: %v, want ErrNetDevRevoke", err)
+		}
+		requireUnblockRefused(t, e, a, rev, dev.ID, "maintenance")
+
+		rev.setFail(nil)
+		n := rev.count()
+		got, err := a.Block(ctx, dev.ID, "retry")
+		if err != nil || !got.Blocked || got.BlockReason != "maintenance" || rev.count() != n+1 {
+			t.Fatalf("block retry: %+v %v revokes %d, want blocked, first reason, one more revocation", got, err, rev.count()-n)
+		}
+		un, err := a.Unblock(ctx, dev.ID, "yes")
+		if err != nil || un.Blocked {
+			t.Fatalf("unblock after successful retry: %+v %v", un, err)
+		}
+	})
+
+	t.Run("repin", func(t *testing.T) {
+		e := newNetDevTestEnv(t)
+		srvA, srvB := startNetDevSSHServer(t), startNetDevSSHServer(t)
+		dev := registerTestNetDev(t, e, "core-sw", "10.20.0.2", sshPinOf(srvA.key))
+		d := &netDevDialer{target: srvB.addr}
+		rev := &netDevRevokes{fail: down}
+		a := &NetDevAdmin{Store: e.store, Vault: e.vault, Dial: d.dial, Revoke: rev.revoke,
+			AuthorizeRepin: func(context.Context, NetDevRepinBinding, string) error { return nil }}
+		newPin := sshPinOf(srvB.key)
+		if _, err := a.Repin(ctx, dev.ID, sshPinOf(srvA.key), newPin, "digest"); !errors.Is(err, ErrNetDevRevoke) {
+			t.Fatalf("re-pin with failing revocation: %v, want ErrNetDevRevoke", err)
+		}
+		srvB.waitConns(t, 1)
+		cur, _, _ := e.db.GetNetDevice(dev.ID)
+		if !cur.Blocked || cur.BlockReason != netDevRevokePendingReason || cur.PinValue != newPin || cur.TrustGeneration != 2 {
+			t.Fatalf("after re-pin with failed revocation: %+v, want re-pinned and blocked as revocation pending", cur)
+		}
+		requireUnblockRefused(t, e, a, rev, dev.ID, netDevRevokePendingReason)
+
+		rev.setFail(nil)
+		n := rev.count()
+		if got, err := a.Block(ctx, dev.ID, "retry"); err != nil || !got.Blocked || rev.count() != n+1 {
+			t.Fatalf("block retry: %+v %v", got, err)
+		}
+		if un, err := a.Unblock(ctx, dev.ID, "yes"); err != nil || un.Blocked {
+			t.Fatalf("unblock after successful retry: %+v %v", un, err)
+		}
+	})
+
+	t.Run("rotation of a blocked device", func(t *testing.T) {
+		e := newNetDevTestEnv(t)
+		dev := registerTestNetDev(t, e, "core-sw", "10.20.0.2", testNetDevPin)
+		rev := &netDevRevokes{}
+		a := &NetDevAdmin{Store: e.store, Vault: e.vault, Revoke: rev.revoke}
+		if _, _, err := a.SetCredential(ctx, NetDevCredential{By: "admin", DeviceID: dev.ID, Secret: []byte("v1-secret")}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.db.BlockNetDevice(dev.ID, "pin mismatch"); err != nil {
+			t.Fatal(err)
+		}
+		rev.setFail(down)
+		if _, _, err := a.RotateCredential(ctx, NetDevCredential{By: "admin", DeviceID: dev.ID, Secret: []byte("v2-secret"), ExpectedVersion: 1}); !errors.Is(err, ErrNetDevRevoke) {
+			t.Fatalf("rotation with failing revocation: %v, want ErrNetDevRevoke", err)
+		}
+		// The earlier reason stays; the block itself is the pending state.
+		requireUnblockRefused(t, e, a, rev, dev.ID, "pin mismatch")
+		rev.setFail(nil)
+		n := rev.count()
+		if un, err := a.Unblock(ctx, dev.ID, "yes"); err != nil || un.Blocked || rev.count() != n+1 {
+			t.Fatalf("unblock once revocation works: %+v %v revokes %d", un, err, rev.count()-n)
+		}
+	})
+
+	t.Run("rpc", func(t *testing.T) {
+		svc, logs := newNetDevService(newNetDevTestEnv(t), &netDevDialer{})
+		err := svc.netDevRPCError("unblock", fmt.Errorf("%w: %w", ErrNetDevRevoke, errors.Join(down, executordb.ErrNetDeviceState)))
+		if status.Code(err) != codes.Internal || !strings.Contains(status.Convert(err).Message(), "the device is blocked") {
+			t.Fatalf("revocation failure maps to %v", err)
+		}
+		if !strings.Contains(logs.String(), "unblock failed") {
+			t.Fatal("revocation failure not logged")
+		}
+	})
+}
+
+// netDevBumpRaceStore runs race right before the store's trust bump.
+type netDevBumpRaceStore struct {
+	*netDevFaultStore
+	race func(id string)
+}
+
+func (s *netDevBumpRaceStore) BumpTrustGeneration(id, newPin string) (executordb.NetDevice, error) {
+	if s.race != nil {
+		s.race(id)
+	}
+	return s.netDevFaultStore.BumpTrustGeneration(id, newPin)
+}
+
+// TestNetDevRepinConcurrentTrustChangeFailsClosed: the commit compares the
+// stored trust state with the permit-bound generation and old pin right
+// before the bump (a change is refused without a bump), and a bump that
+// does not land exactly one generation after the bound one (another
+// writer bumped in between) blocks the device and revokes its authority.
+func TestNetDevRepinConcurrentTrustChangeFailsClosed(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("change before the bump", func(t *testing.T) {
+		e := newNetDevTestEnv(t)
+		srvA, srvB := startNetDevSSHServer(t), startNetDevSSHServer(t)
+		dev := registerTestNetDev(t, e, "core-sw", "10.20.0.2", sshPinOf(srvA.key))
+		d := &netDevDialer{target: srvB.addr}
+		rev := &netDevRevokes{}
+		a := &NetDevAdmin{Store: e.store, Vault: e.vault, Dial: d.dial, Revoke: rev.revoke,
+			AuthorizeRepin: func(context.Context, NetDevRepinBinding, string) error {
+				_, err := e.db.BumpTrustGeneration(dev.ID, testNetDevPin2)
+				return err
+			}}
+		if _, err := a.Repin(ctx, dev.ID, sshPinOf(srvA.key), sshPinOf(srvB.key), "digest"); !errors.Is(err, ErrNetDevConcurrentChange) {
+			t.Fatalf("re-pin over a concurrent change: %v, want ErrNetDevConcurrentChange", err)
+		}
+		srvB.waitConns(t, 1)
+		if cur, _, _ := e.db.GetNetDevice(dev.ID); cur.PinValue != testNetDevPin2 || cur.TrustGeneration != 2 || rev.count() != 0 {
+			t.Fatalf("refused re-pin changed state: %+v revokes %d", cur, rev.count())
+		}
+	})
+
+	t.Run("change during the bump", func(t *testing.T) {
+		e := newNetDevTestEnv(t)
+		srvA, srvB := startNetDevSSHServer(t), startNetDevSSHServer(t)
+		dev := registerTestNetDev(t, e, "core-sw", "10.20.0.2", sshPinOf(srvA.key))
+		d := &netDevDialer{target: srvB.addr}
+		rev := &netDevRevokes{}
+		store := &netDevBumpRaceStore{netDevFaultStore: e.store, race: func(id string) {
+			if _, err := e.db.BumpTrustGeneration(id, testNetDevPin2); err != nil {
+				t.Errorf("concurrent bump: %v", err)
+			}
+		}}
+		a := &NetDevAdmin{Store: store, Vault: e.vault, Dial: d.dial, Revoke: rev.revoke,
+			AuthorizeRepin: func(context.Context, NetDevRepinBinding, string) error { return nil }}
+		_, err := a.Repin(ctx, dev.ID, sshPinOf(srvA.key), sshPinOf(srvB.key), "digest")
+		if !errors.Is(err, ErrNetDevConcurrentChange) {
+			t.Fatalf("re-pin racing a bump: %v, want ErrNetDevConcurrentChange", err)
+		}
+		srvB.waitConns(t, 1)
+		cur, _, _ := e.db.GetNetDevice(dev.ID)
+		if !cur.Blocked || cur.TrustGeneration != 3 || !slices.Equal(rev.ids, []string{dev.ID}) {
+			t.Fatalf("raced re-pin: %+v revocations %v, want blocked and revoked", cur, rev.ids)
+		}
+		svc, _ := newNetDevService(e, d)
+		if c := status.Code(svc.netDevRPCError("commit re-pin", err)); c != codes.Aborted {
+			t.Fatalf("raced re-pin maps to %v, want Aborted", c)
+		}
+	})
+}
+
+// TestNetDevListFailedMasksVaultRefs: a list failure is logged with the
+// same vault reference masking as every other lifecycle failure.
+func TestNetDevListFailedMasksVaultRefs(t *testing.T) {
+	svc, logs := newNetDevService(newNetDevTestEnv(t), &netDevDialer{})
+	err := svc.netDevListFailed(fmt.Errorf("credential versions: read netdev-core-sw-rc: %w", errors.New("disk I/O error")))
+	if status.Code(err) != codes.Internal || status.Convert(err).Message() != netDevRPCFailed {
+		t.Fatalf("list failure maps to %v", err)
+	}
+	out := logs.String()
+	if strings.Contains(out, "netdev-core-sw") || !strings.Contains(out, "<vault-ref>") || !strings.Contains(out, "disk I/O error") {
+		t.Fatalf("list failure log not masked: %s", out)
+	}
+}
+
+// netDevTestCert creates a certificate for cn, signed by parent (self-signed
+// if parent is nil) with signer (its own key if signer is nil).
+func netDevTestCert(t *testing.T, cn string, isCA bool, parent *x509.Certificate, signer *ecdsa.PrivateKey) (*x509.Certificate, *ecdsa.PrivateKey) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serial, err := rand.Int(rand.Reader, big.NewInt(1<<62))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: serial, Subject: pkix.Name{CommonName: cn},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(24 * time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	if isCA {
+		tmpl.IsCA, tmpl.BasicConstraintsValid = true, true
+		tmpl.KeyUsage = x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature
+		tmpl.ExtKeyUsage = nil
+	}
+	if parent == nil {
+		parent = tmpl
+	}
+	if signer == nil {
+		signer = key
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, parent, &key.PublicKey, signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c, key
+}
+
+// serveNetDevTLSChain serves chain with the leaf key on loopback and
+// returns the address.
+func serveNetDevTLSChain(t *testing.T, key *ecdsa.PrivateKey, chain ...*x509.Certificate) string {
+	t.Helper()
+	var raw [][]byte
+	for _, c := range chain {
+		raw = append(raw, c.Raw)
+	}
+	cfg := &tls.Config{Certificates: []tls.Certificate{{Certificate: raw, PrivateKey: key}}}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+				_ = tls.Server(c, cfg).Handshake()
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// TestNetDevProbeCAPinAnchorsLeaf: the CA pin offered by a probe is the
+// self-signed certificate that actually signs the chain down to the leaf;
+// an unrelated self-signed certificate the endpoint appends, or one whose
+// self-signature does not verify, is never offered, and a tls-ca
+// registration of its fingerprint is refused.
+func TestNetDevProbeCAPinAnchorsLeaf(t *testing.T) {
+	root, rootKey := netDevTestCert(t, "Lab Root CA", true, nil, nil)
+	inter, interKey := netDevTestCert(t, "Lab Intermediate CA", true, root, rootKey)
+	leaf, leafKey := netDevTestCert(t, "fw.lab.test", false, root, rootKey)
+	deepLeaf, _ := netDevTestCert(t, "fw2.lab.test", false, inter, interKey)
+	unrelated, _ := netDevTestCert(t, "Unrelated Root CA", true, nil, nil)
+	selfLeaf, _ := netDevTestCert(t, "self.lab.test", false, nil, nil)
+	_, otherKey := netDevTestCert(t, "other", false, nil, nil)
+	forged, _ := netDevTestCert(t, "Forged Root CA", true, nil, otherKey)
+	notCA, notCAKey := netDevTestCert(t, "Not A CA", false, nil, nil)
+	underNotCA, _ := netDevTestCert(t, "fw3.lab.test", false, notCA, notCAKey)
+
+	for name, tc := range map[string]struct {
+		chain []*x509.Certificate
+		want  *x509.Certificate
+	}{
+		"leaf and root":                   {[]*x509.Certificate{leaf, root}, root},
+		"leaf, intermediate, root":        {[]*x509.Certificate{deepLeaf, inter, root}, root},
+		"root then unrelated appended":    {[]*x509.Certificate{leaf, root, unrelated}, root},
+		"only an unrelated self-signed":   {[]*x509.Certificate{leaf, unrelated}, nil},
+		"intermediate without its root":   {[]*x509.Certificate{deepLeaf, inter, unrelated}, nil},
+		"self-signed leaf":                {[]*x509.Certificate{selfLeaf}, selfLeaf},
+		"self-signed leaf plus unrelated": {[]*x509.Certificate{selfLeaf, unrelated}, selfLeaf},
+		"forged self-signature":           {[]*x509.Certificate{forged}, nil},
+		"issuer is not a CA":              {[]*x509.Certificate{underNotCA, notCA}, nil},
+	} {
+		if got := netDevChainCA(tc.chain); got != tc.want {
+			gotCN, wantCN := "<nil>", "<nil>"
+			if got != nil {
+				gotCN = got.Subject.CommonName
+			}
+			if tc.want != nil {
+				wantCN = tc.want.Subject.CommonName
+			}
+			t.Errorf("%s: CA %s, want %s", name, gotCN, wantCN)
+		}
+	}
+
+	// End to end: the endpoint presents its leaf plus an unrelated
+	// self-signed certificate.
+	e := newNetDevTestEnv(t)
+	d := &netDevDialer{target: serveNetDevTLSChain(t, leafKey, leaf, unrelated)}
+	a := &NetDevAdmin{Store: e.store, Vault: e.vault, Dial: d.dial}
+	ctx := context.Background()
+	p, err := a.Probe(ctx, netdevcontract.FamilyPANOS, "10.20.0.1", 443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.CAPin != "" || p.Facts.GetTlsCaFingerprint() != "" {
+		t.Fatalf("probe offered CA pin %q for an unrelated self-signed certificate", p.CAPin)
+	}
+	if _, err := a.Register(ctx, NetDevRegister{DeviceID: "fw1", Family: netdevcontract.FamilyPANOS, Label: "fw1", Endpoint: "10.20.0.1", Port: 443,
+		PinKind: netdevcontract.PinTLSCA, ConfirmedPin: certPinOf(unrelated), Confirm: "yes", By: "admin"}); !errors.Is(err, ErrNetDevPinMismatch) {
+		t.Fatalf("tls-ca registration of an unrelated certificate: %v, want ErrNetDevPinMismatch", err)
+	}
+
+	d.setTarget(serveNetDevTLSChain(t, leafKey, leaf, root, unrelated))
+	p, err = a.Probe(ctx, netdevcontract.FamilyPANOS, "10.20.0.1", 443)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.CAPin != certPinOf(root) {
+		t.Fatalf("probe CA pin %q, want the root that signs the leaf", p.CAPin)
+	}
+}
+
+// TestRegisterNetDeviceProbesWithoutLifecycleLock: name resolution and the
+// probe run without the lifecycle lock, which the RPC wiring sets as
+// CommitLock; the store step takes it and re-checks the id, so an id taken
+// while the probe ran is refused and the earlier device is untouched.
+func TestRegisterNetDeviceProbesWithoutLifecycleLock(t *testing.T) {
+	e := newNetDevTestEnv(t)
+	srv := startNetDevTLSServer(t)
+	svc, _ := newNetDevService(e, &netDevDialer{})
+	if svc.netDevAdmin().CommitLock != &netDevAdminMu {
+		t.Fatal("RPC lifecycle does not register under the lifecycle lock")
+	}
+
+	var lockFree []bool
+	took := false
+	d := &netDevDialer{target: srv.addr}
+	svc.transport = sshtransport.Config{DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		free := netDevAdminMu.TryLock()
+		if free {
+			netDevAdminMu.Unlock()
+		}
+		lockFree = append(lockFree, free)
+		if !took {
+			// Another admin takes the id while the probe runs.
+			took = true
+			registerTestNetDev(t, e, "fw1", "10.20.0.8", testNetDevPin)
+		}
+		return d.dial(ctx, network, addr)
+	}}
+	_, err := svc.RegisterNetDevice(context.Background(), &pb.RegisterNetDeviceRequest{DeviceId: "fw1", Family: string(netdevcontract.FamilyPANOS),
+		Endpoint: "10.20.0.9", Port: 443, PinKind: string(netdevcontract.PinTLSLeaf), ConfirmedPin: certPinOf(srv.cert), Confirm: "yes"})
+	if status.Code(err) != codes.AlreadyExists {
+		t.Fatalf("register of an id taken during the probe: %v, want AlreadyExists", err)
+	}
+	if !slices.Equal(lockFree, []bool{true}) {
+		t.Fatalf("lifecycle lock free during probe dials: %v, want [true]", lockFree)
+	}
+	if cur, _, _ := e.db.GetNetDevice("fw1"); cur.Family != netdevcontract.FamilyCBS || cur.EndpointIP != "10.20.0.8" {
+		t.Fatalf("earlier device changed: %+v", cur)
+	}
+	if !netDevAdminMu.TryLock() {
+		t.Fatal("register left the lifecycle lock held")
+	}
+	netDevAdminMu.Unlock()
 }

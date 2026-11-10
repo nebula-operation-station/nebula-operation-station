@@ -132,6 +132,9 @@ var (
 	// ErrNetDevRevoke is returned when dependent authority could not be
 	// revoked; the device is then blocked.
 	ErrNetDevRevoke = errors.New("executor: network device authority could not be revoked")
+	// ErrNetDevConcurrentChange is returned when the device's trust state
+	// changed between the approved re-pin binding and its commit.
+	ErrNetDevConcurrentChange = errors.New("executor: network device trust state changed concurrently")
 	// ErrNetDevNoStore is returned when the service has no executor
 	// database or vault.
 	ErrNetDevNoStore = errors.New("executor: network device registry has no store")
@@ -181,6 +184,10 @@ type NetDevAdmin struct {
 	AuthorizeRepin func(ctx context.Context, b NetDevRepinBinding, digest string) error
 	// Log receives non-secret audit events. Default: discarded.
 	Log *slog.Logger
+	// CommitLock, if set, is held by Register for its store step only; the
+	// RPC handlers hold it around every other lifecycle operation. Register
+	// is then called without holding it.
+	CommitLock sync.Locker
 }
 
 func (a *NetDevAdmin) log() *slog.Logger {
@@ -232,8 +239,22 @@ func (a *NetDevAdmin) dial() NetDevDialFunc {
 	return d.DialContext
 }
 
+// netDevRevokePendingReason is the block reason recorded when a revocation
+// failed on an unblocked device (a rotation or a re-pin), so the admin
+// sees why the device is blocked.
+//
+// The durable "revocation pending" state is the block itself: the store
+// never rewrites the reason of a blocked device, so a device that was
+// already blocked when its revocation failed keeps its earlier reason.
+// Hence Block on a blocked device retries the revocation, and Unblock
+// never lifts any block without a successful revocation in the same call:
+// a failed revocation can never be undone by Unblock, whichever reason the
+// block carries.
+const netDevRevokePendingReason = "authority revocation failed; revocation pending"
+
 // revoke revokes the device's dependent authority. If that fails the
-// device is blocked (fail closed) and the error wraps ErrNetDevRevoke.
+// device is blocked (fail closed; with netDevRevokePendingReason if it was
+// not blocked yet) and the error wraps ErrNetDevRevoke.
 func (a *NetDevAdmin) revoke(id, reason string) error {
 	if a.Revoke == nil {
 		return nil
@@ -243,7 +264,7 @@ func (a *NetDevAdmin) revoke(id, reason string) error {
 		return nil
 	}
 	cause := fmt.Errorf("%w: %w", ErrNetDevRevoke, err)
-	if _, berr := a.Store.BlockNetDevice(id, "authority revocation failed"); berr != nil && !errors.Is(berr, executordb.ErrNetDeviceState) {
+	if _, berr := a.Store.BlockNetDevice(id, netDevRevokePendingReason); berr != nil && !errors.Is(berr, executordb.ErrNetDeviceState) {
 		return errors.Join(cause, fmt.Errorf("block network device %s: %w", id, berr))
 	}
 	a.event("revoke_failed_blocked", id)
@@ -429,16 +450,39 @@ func (a *NetDevAdmin) probeTLS(ctx context.Context, ap netip.AddrPort) (NetDevPr
 		}
 		facts.TlsDnsNames = append(facts.TlsDnsNames, netDevFact(n))
 	}
-	for i := len(chain) - 1; i >= 0; i-- {
-		if string(chain[i].RawIssuer) == string(chain[i].RawSubject) {
-			ca := sha256.Sum256(chain[i].Raw)
-			out.CAPin = hex.EncodeToString(ca[:])
-			facts.TlsCaFingerprint = out.CAPin
-			break
-		}
+	if ca := netDevChainCA(chain); ca != nil {
+		sum := sha256.Sum256(ca.Raw)
+		out.CAPin = hex.EncodeToString(sum[:])
+		facts.TlsCaFingerprint = out.CAPin
 	}
 	out.Facts = facts
 	return out, nil
+}
+
+// netDevChainCA returns the self-signed certificate of the presented chain
+// that anchors the leaf, or nil. A candidate (outermost first) must carry
+// a valid self-signature, and every element from the leaf up to it must be
+// signed by the next one (CheckSignatureFrom: the signer must be a CA), so
+// an unrelated self-signed certificate appended by the endpoint is never
+// offered as the CA pin. A self-signed leaf alone is its own anchor.
+func netDevChainCA(chain []*x509.Certificate) *x509.Certificate {
+	for i := len(chain) - 1; i >= 0; i-- {
+		c := chain[i]
+		if string(c.RawIssuer) != string(c.RawSubject) || c.CheckSignature(c.SignatureAlgorithm, c.RawTBSCertificate, c.Signature) != nil {
+			continue
+		}
+		linked := true
+		for j := 0; j < i; j++ {
+			if chain[j].CheckSignatureFrom(chain[j+1]) != nil {
+				linked = false
+				break
+			}
+		}
+		if linked {
+			return c
+		}
+	}
+	return nil
 }
 
 // netDevFact renders an untrusted device string as bounded printable
@@ -477,6 +521,10 @@ type NetDevRegister struct {
 // Register stores a device after the typed confirmation, only if the
 // endpoint presents exactly the confirmed pin now. Nothing is stored and
 // no vault entry remains on any failure.
+//
+// Name resolution and the probe (up to netDevProbeTimeout) run without
+// CommitLock; it is taken only for the re-checked store step, so a slow
+// endpoint never stalls the other lifecycle operations.
 func (a *NetDevAdmin) Register(ctx context.Context, in NetDevRegister) (executordb.NetDevice, error) {
 	if in.Confirm != netDevConfirmWord {
 		return executordb.NetDevice{}, ErrNetDevConfirm
@@ -490,10 +538,8 @@ func (a *NetDevAdmin) Register(ctx context.Context, in NetDevRegister) (executor
 	if !netdevcontract.ValidTrustPin(in.ConfirmedPin) {
 		return executordb.NetDevice{}, fmt.Errorf("%w: trust pin is not a lowercase hex SHA-256", ErrNetDeviceRequest)
 	}
-	if _, ok, err := a.Store.GetNetDevice(in.DeviceID); err != nil {
-		return executordb.NetDevice{}, fmt.Errorf("register network device %s: %w", in.DeviceID, err)
-	} else if ok {
-		return executordb.NetDevice{}, fmt.Errorf("register network device %s: %w", in.DeviceID, executordb.ErrNetDeviceExists)
+	if err := a.registerFree(in.DeviceID); err != nil {
+		return executordb.NetDevice{}, err
 	}
 	ap, name, err := a.resolveEndpoint(ctx, in.Family, in.Endpoint, in.Port)
 	if err != nil {
@@ -513,6 +559,18 @@ func (a *NetDevAdmin) Register(ctx context.Context, in NetDevRegister) (executor
 	if pin, ok := probe.pinFor(in.PinKind); !ok || pin != in.ConfirmedPin {
 		return executordb.NetDevice{}, fmt.Errorf("register network device %s: %w", in.DeviceID, ErrNetDevPinMismatch)
 	}
+	if a.CommitLock != nil {
+		a.CommitLock.Lock()
+		defer a.CommitLock.Unlock()
+	}
+	// Re-check under the lock: the vault may have been locked and the id
+	// taken while the probe ran.
+	if err := a.checkVault(); err != nil {
+		return executordb.NetDevice{}, err
+	}
+	if err := a.registerFree(in.DeviceID); err != nil {
+		return executordb.NetDevice{}, err
+	}
 	dev, err := a.registry().RegisterNetDevice(ctx, NetDeviceRegistration{
 		DeviceID: in.DeviceID, Family: in.Family, Label: label, Endpoint: ap.Addr().String(),
 		Port: ap.Port(), PinKind: in.PinKind, Pin: in.ConfirmedPin, By: in.By,
@@ -522,6 +580,16 @@ func (a *NetDevAdmin) Register(ctx context.Context, in NetDevRegister) (executor
 	}
 	a.event("registered", dev.ID)
 	return dev, nil
+}
+
+// registerFree refuses an id that is live or tombstoned.
+func (a *NetDevAdmin) registerFree(id string) error {
+	if _, ok, err := a.Store.GetNetDevice(id); err != nil {
+		return fmt.Errorf("register network device %s: %w", id, err)
+	} else if ok {
+		return fmt.Errorf("register network device %s: %w", id, executordb.ErrNetDeviceExists)
+	}
+	return nil
 }
 
 // --- credentials ---
@@ -668,7 +736,11 @@ func (a *NetDevAdmin) putCredential(ctx context.Context, in NetDevCredential, ac
 
 // --- block, unblock, remove ---
 
-// Block blocks every dial to a live device and revokes its grants.
+// Block blocks every dial to a live device and revokes its grants. On a
+// device that is already blocked it keeps the block and its reason and
+// retries the revocation: any block may stand for a revocation that failed
+// (its own, or one of a rotation or re-pin on the blocked device), so Block
+// is the admin's retry and never refuses one.
 func (a *NetDevAdmin) Block(_ context.Context, id, reason string) (executordb.NetDevice, error) {
 	if err := a.checkStore(); err != nil {
 		return executordb.NetDevice{}, err
@@ -676,8 +748,16 @@ func (a *NetDevAdmin) Block(_ context.Context, id, reason string) (executordb.Ne
 	if !validNetDevText(reason, maxNetDevBlockReason) {
 		return executordb.NetDevice{}, fmt.Errorf("%w: block reason must be printable UTF-8 of 1..%d bytes", ErrNetDeviceRequest, maxNetDevBlockReason)
 	}
-	if _, err := a.liveDevice(id); err != nil {
+	cur, err := a.liveDevice(id)
+	if err != nil {
 		return executordb.NetDevice{}, err
+	}
+	if cur.Blocked {
+		if err := a.revoke(id, "network device blocked: retrying revocation"); err != nil {
+			return executordb.NetDevice{}, err
+		}
+		a.event("revocation_retried", id)
+		return cur, nil
 	}
 	dev, err := a.Store.BlockNetDevice(id, reason)
 	if err != nil {
@@ -690,7 +770,11 @@ func (a *NetDevAdmin) Block(_ context.Context, id, reason string) (executordb.Ne
 	return dev, nil
 }
 
-// Unblock lifts a block after the typed confirmation.
+// Unblock lifts a block after the typed confirmation. It first revokes
+// the device's dependent authority and refuses (the device stays blocked)
+// if that fails: a block may stand for a revocation that failed (see
+// netDevRevokePendingReason), and lifting it must never make grants that
+// were not revoked usable again.
 func (a *NetDevAdmin) Unblock(_ context.Context, id, confirm string) (executordb.NetDevice, error) {
 	if confirm != netDevConfirmWord {
 		return executordb.NetDevice{}, ErrNetDevConfirm
@@ -698,7 +782,14 @@ func (a *NetDevAdmin) Unblock(_ context.Context, id, confirm string) (executordb
 	if err := a.checkStore(); err != nil {
 		return executordb.NetDevice{}, err
 	}
-	if _, err := a.liveDevice(id); err != nil {
+	cur, err := a.liveDevice(id)
+	if err != nil {
+		return executordb.NetDevice{}, err
+	}
+	if !cur.Blocked {
+		return executordb.NetDevice{}, fmt.Errorf("unblock network device %s: %w", id, executordb.ErrNetDeviceState)
+	}
+	if err := a.revoke(id, "network device unblocked: revoking authority issued before or during the block"); err != nil {
 		return executordb.NetDevice{}, err
 	}
 	dev, err := a.Store.UnblockNetDevice(id)
@@ -837,9 +928,34 @@ func (a *NetDevAdmin) Repin(ctx context.Context, id, oldPin, newPin, digest stri
 	if err := a.AuthorizeRepin(ctx, b, digest); err != nil {
 		return executordb.NetDevice{}, fmt.Errorf("re-pin network device %s: %w", id, ErrNetDevRepinApproval)
 	}
+	// The permit binds the trust generation and the old pin. The store's
+	// bump compares the generation it loads itself, not the bound one, so
+	// the bound state is compared here right before the bump, and the
+	// bump's result is checked to be exactly one generation on from it. A
+	// change in between (another writer than this process's lifecycle
+	// lock covers) is caught after the fact and fails closed: the device
+	// is blocked and its authority revoked.
+	cur, err := a.liveDevice(id)
+	if err != nil {
+		return executordb.NetDevice{}, err
+	}
+	if !repinBindingCurrent(b, cur) {
+		return executordb.NetDevice{}, fmt.Errorf("re-pin network device %s: %w", id, ErrNetDevConcurrentChange)
+	}
 	dev, err := a.Store.BumpTrustGeneration(id, newPin)
 	if err != nil {
 		return executordb.NetDevice{}, fmt.Errorf("re-pin network device %s: %w", id, err)
+	}
+	if dev.TrustGeneration != b.TrustGeneration+1 || dev.PinValue != newPin || dev.PinKind != b.PinKind {
+		cause := fmt.Errorf("re-pin network device %s: %w", id, ErrNetDevConcurrentChange)
+		a.event("repin_raced_blocked", id)
+		if _, berr := a.Store.BlockNetDevice(id, "concurrent trust change during re-pin"); berr != nil && !errors.Is(berr, executordb.ErrNetDeviceState) {
+			cause = errors.Join(cause, fmt.Errorf("block network device %s: %w", id, berr))
+		}
+		if rerr := a.revoke(id, "network device re-pin raced a concurrent trust change"); rerr != nil {
+			return executordb.NetDevice{}, errors.Join(cause, rerr)
+		}
+		return executordb.NetDevice{}, cause
 	}
 	a.event("repinned", id)
 	if err := a.revoke(id, "network device re-pinned"); err != nil {
@@ -848,12 +964,19 @@ func (a *NetDevAdmin) Repin(ctx context.Context, id, oldPin, newPin, digest stri
 	return dev, nil
 }
 
+// repinBindingCurrent reports whether the stored device is still exactly
+// in the trust state the re-pin permit binds.
+func repinBindingCurrent(b NetDevRepinBinding, d executordb.NetDevice) bool {
+	return d.ID == b.DeviceID && d.Family == b.Family && d.EndpointIP == b.EndpointIP && d.Port == b.Port &&
+		d.PinKind == b.PinKind && d.PinValue == b.OldPin && d.TrustGeneration == b.TrustGeneration
+}
+
 // --- RPC wiring ---
 
 // netDevAdmin builds the lifecycle over the service's database, vault,
 // permit authority and transport dialer.
 func (s *Service) netDevAdmin() *NetDevAdmin {
-	a := &NetDevAdmin{Resolve: DefaultNetDeviceResolver, Dial: s.transport.DialContext, Log: s.log}
+	a := &NetDevAdmin{Resolve: DefaultNetDeviceResolver, Dial: s.transport.DialContext, Log: s.log, CommitLock: &netDevAdminMu}
 	if s.db != nil {
 		a.Store = s.db
 	}
@@ -896,6 +1019,12 @@ var netDevRefRe = regexp.MustCompile(`netdev-[a-z0-9_-]+`)
 func (s *Service) netDevRPCError(method string, err error) error {
 	code, msg := codes.Internal, netDevRPCFailed
 	switch {
+	case errors.Is(err, ErrNetDevRevoke):
+		// First: whatever else the error wraps, the admin must learn that
+		// authority is not revoked and the device stays blocked.
+		code, msg = codes.Internal, "network device authority could not be revoked; the device is blocked"
+	case errors.Is(err, ErrNetDevConcurrentChange):
+		code, msg = codes.Aborted, "network device trust state changed concurrently; the device is blocked if the change was committed"
 	case errors.Is(err, ErrNetDevConfirm):
 		code, msg = codes.InvalidArgument, "confirmation must be exactly \"yes\""
 	case errors.Is(err, ErrNetDevCredentialRequest):
@@ -928,13 +1057,17 @@ func (s *Service) netDevRPCError(method string, err error) error {
 		code, msg = codes.Aborted, "network device credential is not at the expected version"
 	case errors.Is(err, executordb.ErrNetDeviceState):
 		code, msg = codes.FailedPrecondition, "network device is not in the required block state"
-	case errors.Is(err, ErrNetDevRevoke):
-		code, msg = codes.Internal, "network device authority could not be revoked; the device is blocked"
 	}
-	if s.log != nil && code == codes.Internal {
-		s.log.Error("netdev: "+method+" failed", "error", netDevRefRe.ReplaceAllString(err.Error(), "<vault-ref>"))
+	if s.log != nil && (code == codes.Internal || code == codes.Aborted) {
+		s.log.Error("netdev: "+method+" failed", "error", maskNetDevRefs(err))
 	}
 	return status.Error(code, msg)
+}
+
+// maskNetDevRefs renders err for a log line with every vault reference
+// replaced.
+func maskNetDevRefs(err error) string {
+	return netDevRefRe.ReplaceAllString(err.Error(), "<vault-ref>")
 }
 
 func (s *Service) netDevInfo(a *NetDevAdmin, d executordb.NetDevice) *pb.NetDeviceInfo {
@@ -957,8 +1090,8 @@ func (s *Service) ProbeNetDevice(ctx context.Context, in *pb.ProbeNetDeviceReque
 // RegisterNetDevice registers a probed device in the ND-10 registry after
 // the typed "yes", only if the endpoint presents the confirmed pin.
 func (s *Service) RegisterNetDevice(ctx context.Context, in *pb.RegisterNetDeviceRequest) (*pb.RegisterNetDeviceResponse, error) {
-	netDevAdminMu.Lock()
-	defer netDevAdminMu.Unlock()
+	// Not locked here: Register probes first and holds CommitLock
+	// (netDevAdminMu) only for its re-checked store step.
 	a := s.netDevAdmin()
 	d, err := a.Register(ctx, NetDevRegister{DeviceID: in.GetDeviceId(), Family: netdevcontract.Family(in.GetFamily()), Label: in.GetLabel(),
 		Endpoint: in.GetEndpoint(), Port: in.GetPort(), PinKind: netdevcontract.PinKind(in.GetPinKind()),
@@ -1110,7 +1243,7 @@ func (s *Service) ListNetDevices(ctx context.Context, _ *pb.ListNetDevicesReques
 
 func (s *Service) netDevListFailed(err error) error {
 	if s.log != nil {
-		s.log.Error("netdev: list failed", "error", err.Error())
+		s.log.Error("netdev: list failed", "error", maskNetDevRefs(err))
 	}
 	return status.Error(codes.Internal, netDevRPCFailed)
 }
