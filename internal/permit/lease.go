@@ -962,6 +962,25 @@ func (a *Authority) ReadDispatchGuard() func(Grant, func() error) error {
 	}
 }
 
+// ReadDispatchEpoch exposes the read pause to reads the executor reserves
+// itself (network device leases, ADR 0010 D4). It fails with
+// CodeLeaseInactive while read dispatch is paused (lock, recovery login,
+// restart until local credential unlock) or recovery is pending, exactly
+// like AuthorizeProviderRead; otherwise it returns the current read lock
+// generation. A caller captures it before reserving and calls it again
+// afterwards; a different generation means a lock happened in between.
+func (a *Authority) ReadDispatchEpoch() (uint64, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.readPaused {
+		return 0, fail(CodeLeaseInactive, "reads are paused until local credential unlock")
+	}
+	if err := a.checkReadRecovery(); err != nil {
+		return 0, err
+	}
+	return a.readEpoch, nil
+}
+
 // DispatchReadRun rechecks a reserved read at the dispatch boundary without
 // spending again. The callback is serialized with lock and both revocation
 // APIs; it must not reenter Authority. An attached run holds this boundary

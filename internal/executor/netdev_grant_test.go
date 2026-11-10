@@ -21,6 +21,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/schedgrant"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/totp"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnverify"
 )
 
@@ -291,9 +292,15 @@ func TestCheckNetDeviceGrantErrorClasses(t *testing.T) {
 				e.t.Fatal(err)
 			}
 		}, ErrNetDevReadGone, codes.NotFound},
-		{"vault locked", func(e *netDevGrantEnv) {
+		{"executor locked", func(e *netDevGrantEnv) {
 			e.defaultGrant()
-			e.svc.vault.Lock()
+			e.svc.auth.Lock("test")
+		}, ErrNetDevReadPaused, codes.FailedPrecondition},
+		{"recovery pending", func(e *netDevGrantEnv) {
+			e.defaultGrant()
+			if err := e.db.SetRecoveryPending(); err != nil {
+				e.t.Fatal(err)
+			}
 		}, ErrNetDevReadPaused, codes.FailedPrecondition},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -304,6 +311,13 @@ func TestCheckNetDeviceGrantErrorClasses(t *testing.T) {
 			}
 			if got := status.Code(netDeviceGrantStatus(tc.want)); got != tc.code {
 				t.Fatalf("status %v, want %v", got, tc.code)
+			}
+			if got := status.Code(e.read(netDevGrantDevice, cbsVersion)); got != tc.code {
+				t.Fatalf("ReadNetDevice status %v, want %v", got, tc.code)
+			}
+			// The spend probe below reserves, which recovery refuses.
+			if err := e.db.ClearRecoveryPending(); err != nil {
+				t.Fatal(err)
 			}
 			if _, ok := e.activeGrant(); ok && e.spent(netDevGrantDevice) != 0 {
 				t.Fatal("a refused check spent")
@@ -393,6 +407,176 @@ func TestNetDeviceGrantPausedByLock(t *testing.T) {
 	}
 	if _, err := e.check(netDevGrantDevice, pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION); !errors.Is(err, ErrNetDevReadPaused) {
 		t.Fatalf("vault unlocked, keys locked: %v", err)
+	}
+	e.localUnlock()
+	if _, err := e.check(netDevGrantDevice, pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION); err != nil {
+		t.Fatalf("after local credential unlock: %v", err)
+	}
+}
+
+// localUnlock is the local credential unlock (keys scope) that resumes
+// read dispatch for SSH, provider and device reads alike.
+func (e *netDevGrantEnv) localUnlock() {
+	e.t.Helper()
+	resp, err := e.svc.Unlock(context.Background(), &pb.UnlockRequest{Passphrase: []byte(testPassphrase), Scope: pb.UnlockScope_UNLOCK_SCOPE_KEYS})
+	if err != nil || !resp.GetKeysUnlocked() {
+		e.t.Fatalf("local unlock: %v %v", resp, err)
+	}
+}
+
+// TestNetDeviceGrantPausedAfterRecoveryUntilUnlock: a recovery login
+// pauses device reads like every other read; finishing the recovery does
+// not resume them, only the local credential unlock does.
+func TestNetDeviceGrantPausedAfterRecoveryUntilUnlock(t *testing.T) {
+	e := newNetDevGrantEnv(t)
+	e.usePrivateKeyring()
+	e.defaultGrant()
+	v := pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION
+	secret := []byte(strings.Repeat("r", 20))
+	if err := e.db.SetTOTP(secret, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.db.UseTOTPStep(1); err != nil { // activates the secret
+		t.Fatal(err)
+	}
+	if _, err := e.svc.RecoveryLogin(context.Background(), &pb.RecoveryLoginRequest{Code: totp.Code(secret, time.Now())}); err != nil {
+		t.Fatalf("recovery login: %v", err)
+	}
+	if _, err := e.check(netDevGrantDevice, v); !errors.Is(err, ErrNetDevReadPaused) {
+		t.Fatalf("recovery pending: %v, want ErrNetDevReadPaused", err)
+	}
+	// FinishRecovery's state change: the recovery is no longer pending.
+	if err := e.db.ClearRecoveryPending(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.check(netDevGrantDevice, v); !errors.Is(err, ErrNetDevReadPaused) {
+		t.Fatalf("recovery finished, not unlocked: %v, want ErrNetDevReadPaused", err)
+	}
+	if err := e.read(netDevGrantDevice, v); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("recovery finished, not unlocked: %v, want FailedPrecondition", err)
+	}
+	e.localUnlock()
+	if _, err := e.check(netDevGrantDevice, v); err != nil {
+		t.Fatalf("after local credential unlock: %v", err)
+	}
+}
+
+// TestNetDeviceGrantRecheckAfterReserveReleases: a lock, re-pin, credential
+// rotation or block between the reservation and the return refuses the
+// read and gives the reservation back (budget and interval).
+func TestNetDeviceGrantRecheckAfterReserveReleases(t *testing.T) {
+	v := pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION
+	for _, tc := range []struct {
+		name  string
+		act   func(e *netDevGrantEnv)
+		want  error
+		after func(e *netDevGrantEnv) // restores a state a new check may pass
+	}{
+		{"lock", func(e *netDevGrantEnv) { e.svc.auth.Lock("test") }, ErrNetDevReadPaused,
+			func(e *netDevGrantEnv) { e.localUnlock() }},
+		{"repin", func(e *netDevGrantEnv) {
+			if _, err := e.db.BumpTrustGeneration(netDevGrantDevice, testNetDevPin2); err != nil {
+				e.t.Fatal(err)
+			}
+		}, ErrGrantStale, func(e *netDevGrantEnv) { e.defaultGrant() }},
+		{"rotation", func(e *netDevGrantEnv) {
+			if _, _, err := e.svc.netDevAdmin().RotateCredential(context.Background(), NetDevCredential{
+				DeviceID: netDevGrantDevice, Username: "nos", Secret: []byte("rotated-secret"), ExpectedVersion: 1, By: "admin"}); err != nil {
+				e.t.Fatal(err)
+			}
+		}, ErrGrantStale, func(e *netDevGrantEnv) { e.defaultGrant() }},
+		{"block", func(e *netDevGrantEnv) {
+			if _, err := e.db.BlockNetDevice(netDevGrantDevice, "test"); err != nil {
+				e.t.Fatal(err)
+			}
+		}, ErrNetDevReadBlocked, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newNetDevGrantEnv(t)
+			e.usePrivateKeyring()
+			e.defaultGrant()
+			calls := 0
+			hook := func() { calls++; tc.act(e) }
+			netDevAfterReserve.Store(&hook)
+			t.Cleanup(func() { netDevAfterReserve.Store(nil) })
+			if _, err := e.check(netDevGrantDevice, v); !errors.Is(err, tc.want) {
+				t.Fatalf("check: %v, want %v", err, tc.want)
+			}
+			netDevAfterReserve.Store(nil)
+			if calls != 1 {
+				t.Fatalf("hook ran %d times, want 1", calls)
+			}
+			if _, ok, err := e.db.ReadActionLastRun(netDevActionKey(schedgrant.NetDeviceReadCBSVersion), netDevBudgetKey(netDevGrantDevice)); err != nil || ok {
+				t.Fatalf("interval still reserved: %v %v", ok, err)
+			}
+			if recs := e.logs.find("netdev_read_authorized", ""); len(recs) != 0 {
+				t.Fatalf("refused read audited as authorized: %v", recs)
+			}
+			if tc.after != nil {
+				tc.after(e)
+				// The interval was released, so the same read runs at once.
+				if _, err := e.check(netDevGrantDevice, v); err != nil {
+					t.Fatalf("after release: %v", err)
+				}
+				return
+			}
+			if n := e.spent(netDevGrantDevice); n != 0 {
+				t.Fatalf("spent %d after release, want 0", n)
+			}
+		})
+	}
+}
+
+// TestNetDeviceGrantTooSoonAfterRestart: the interval refusal is told from
+// the budget refusal by the durable counters, so a restarted executor (new
+// authority and handler on the same store) still reports ErrTooSoon.
+func TestNetDeviceGrantTooSoonAfterRestart(t *testing.T) {
+	e := newNetDevGrantEnv(t)
+	e.defaultGrant()
+	v := pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION
+	if _, err := e.check(netDevGrantDevice, v); err != nil {
+		t.Fatal(err)
+	}
+	risk, err := riskpolicy.New(e.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier, err := webauthnverify.New(webauthnverify.Config{RPID: "reconcile.test", Origins: []string{"https://reconcile.test"}, Counters: e.db}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	auth, err := permit.New(permit.Options{Verifier: verifier, Store: e.db, RiskPolicy: risk, Leases: e.db, Now: e.clock.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewService(auth, e.svc.keys, e.db, e.svc.reg, e.svc.log)
+	restarted.Now = e.clock.Now
+	if _, err := restarted.checkNetDeviceGrant(context.Background(), netDevGrantDevice, v, e.clock.Now()); !errors.Is(err, ErrNetDevReadPaused) {
+		t.Fatalf("restart before unlock: %v, want ErrNetDevReadPaused", err)
+	}
+	if err := auth.ResumeReadDispatch(); err != nil { // local credential unlock
+		t.Fatal(err)
+	}
+	e.clock.Add(schedgrant.NetDeviceMinInterval - time.Second)
+	if _, err := restarted.checkNetDeviceGrant(context.Background(), netDevGrantDevice, v, e.clock.Now()); !errors.Is(err, ErrTooSoon) {
+		t.Fatalf("within floor after restart: %v, want ErrTooSoon", err)
+	}
+	e.clock.Add(time.Second)
+	if _, err := restarted.checkNetDeviceGrant(context.Background(), netDevGrantDevice, v, e.clock.Now()); err != nil {
+		t.Fatalf("after floor: %v", err)
+	}
+}
+
+// TestNetDeviceGrantBudgetNotTooSoon: an exhausted budget with no recent
+// run of the read is ErrBudget, never ErrTooSoon.
+func TestNetDeviceGrantBudgetNotTooSoon(t *testing.T) {
+	e := newNetDevGrantEnv(t)
+	e.grant(1, 900, permit.DefaultReadGrantLifetime, e.target(netDevGrantDevice, schedgrant.NetDeviceReadCBSVersion, schedgrant.NetDeviceReadCBSVLANs))
+	if _, err := e.check(netDevGrantDevice, pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.check(netDevGrantDevice, pb.NetDeviceRead_NET_DEVICE_READ_CBS_VLANS); !errors.Is(err, ErrBudget) {
+		t.Fatalf("other read, budget spent: %v, want ErrBudget", err)
 	}
 }
 

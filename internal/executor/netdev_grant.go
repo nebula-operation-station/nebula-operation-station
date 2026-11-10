@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -19,7 +19,6 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/schedgrant"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/vault"
 )
 
 // Device read lease enforcement (ADR 0010 D4; ND-13 part 2).
@@ -31,16 +30,20 @@ import (
 // Nothing re-binds: a re-pin, a credential rotation or a removal leaves
 // every older lease stale (ErrGrantStale) until a new one is approved.
 //
-// Reads are paused while the executor is locked: after Lock or restart no
-// read is authorized until local credential unlock (keyring and vault),
-// mirroring the permit authority's read pause, and never during recovery.
+// Reads obey the permit authority's read pause and nothing else
+// (permit.Authority.ReadDispatchEpoch), exactly like SSH and provider
+// reads: after Lock, a recovery login or restart no read is authorized
+// until local credential unlock resumes read dispatch, and none while
+// recovery is pending.
 //
 // The spend is reserved durably in the executor's shared read-grant
 // counters (executordb ReserveReadRun) before any device I/O: one unit of
 // the per-device rolling-hour budget and the per-read interval, at least
 // schedgrant.NetDeviceMinInterval (15 minutes). The counters are shared by
 // every grant, so overlapping leases cannot multiply either limit, and
-// they are atomic, so concurrent calls cannot overspend.
+// they are atomic, so concurrent calls cannot overspend. When the re-check
+// after the reservation refuses (lock, re-pin, rotation, block), the
+// reservation is released again: no device I/O happened.
 
 // Sentinel errors of checkNetDeviceGrant. Callers branch with errors.Is;
 // netDeviceGrantStatus maps them to gRPC codes.
@@ -58,8 +61,9 @@ var (
 	ErrBudget = errors.New("executor: the network device's rolling-hour read budget is exhausted")
 	// ErrTooSoon: the same read of the device ran within its interval.
 	ErrTooSoon = errors.New("executor: the same read of the network device ran less than its minimum interval ago")
-	// ErrNetDevReadPaused: the executor is locked, restarted without local
-	// credential unlock, or in recovery.
+	// ErrNetDevReadPaused: the permit authority's read pause holds (lock,
+	// recovery login or restart without local credential unlock, or
+	// pending recovery).
 	ErrNetDevReadPaused = errors.New("executor: network device reads are paused until local credential unlock")
 	// ErrNetDevReadBlocked: the device is blocked.
 	ErrNetDevReadBlocked = errors.New("executor: the network device is blocked")
@@ -105,54 +109,42 @@ func netDevBudgetKey(deviceID string) string { return netDevGrantKeyPrefix + dev
 // budget key it is per device and read.
 func netDevActionKey(read string) string { return netDevGrantKeyPrefix + read }
 
-// netDevTooSoonHints remembers the last successful reservation per store,
-// device and read in this process. It only chooses between ErrTooSoon and
-// ErrBudget after the durable counters refused; it never authorizes.
-var netDevTooSoonHints struct {
-	mu   sync.Mutex
-	last map[netDevHintKey]time.Time
-}
+// netDevAfterReserve, when a test sets it, runs between a successful
+// reservation and the re-check that follows it.
+var netDevAfterReserve atomic.Pointer[func()]
 
-type netDevHintKey struct {
-	db           *executordb.DB
-	device, read string
-}
-
-func netDevHintRecord(k netDevHintKey, at time.Time) {
-	netDevTooSoonHints.mu.Lock()
-	defer netDevTooSoonHints.mu.Unlock()
-	if netDevTooSoonHints.last == nil {
-		netDevTooSoonHints.last = map[netDevHintKey]time.Time{}
+// netDevReadEpoch returns the permit authority's read lock generation; a
+// read pause or pending recovery is ErrNetDevReadPaused. It adds no pause
+// condition of its own.
+func (s *Service) netDevReadEpoch() (uint64, error) {
+	if s.auth == nil {
+		return 0, ErrNetDevReadPaused
 	}
-	netDevTooSoonHints.last[k] = at
-}
-
-func netDevHintTooSoon(k netDevHintKey, now time.Time, interval time.Duration) bool {
-	netDevTooSoonHints.mu.Lock()
-	defer netDevTooSoonHints.mu.Unlock()
-	last, ok := netDevTooSoonHints.last[k]
-	return ok && now.Sub(last) < interval
-}
-
-// netDevReadsPaused reports whether device reads are paused: no unlocked
-// keyring (lock, restart until local credential unlock), no unlocked vault,
-// no permit authority, or pending recovery.
-func (s *Service) netDevReadsPaused() (bool, error) {
-	if s.auth == nil || s.keys == nil || !s.keys.Unlocked() || s.vault == nil {
-		return true, nil
+	epoch, err := s.auth.ReadDispatchEpoch()
+	if err == nil {
+		return epoch, nil
 	}
-	st, err := s.vault.State()
+	switch permit.CodeOf(err) {
+	case permit.CodeLeaseInactive, permit.CodeLeaseUnavailable:
+		return 0, ErrNetDevReadPaused
+	}
+	return 0, fmt.Errorf("read pause: %w", err)
+}
+
+// netDevTooSoon reports, from the durable interval counter, whether the
+// read of the device last ran less than interval before the read clock.
+// It only tells ErrTooSoon from ErrBudget after the counters refused; it
+// never authorizes.
+func (s *Service) netDevTooSoon(deviceID, read string, now time.Time, interval time.Duration) (bool, error) {
+	effective, err := s.db.ReadGrantClock(now)
 	if err != nil {
-		return true, fmt.Errorf("vault state: %w", err)
+		return false, fmt.Errorf("read grant clock: %w", err)
 	}
-	if st != vault.StateUnlocked {
-		return true, nil
-	}
-	_, pending, err := s.db.RecoveryPending()
+	last, ok, err := s.db.ReadActionLastRun(netDevActionKey(read), netDevBudgetKey(deviceID))
 	if err != nil {
-		return true, fmt.Errorf("recovery state: %w", err)
+		return false, fmt.Errorf("device read interval: %w", err)
 	}
-	return pending, nil
+	return ok && last.Unix() > effective.Unix()-int64(interval/time.Second), nil
 }
 
 // netDevCurrentCredentialVersion returns the vault version of the
@@ -231,13 +223,36 @@ func netDevLeaseDoc(g permit.StoredReadGrant) (permit.ReadGrantDoc, bool, error)
 	return doc, true, nil
 }
 
+// netDevRecheck re-verifies a reserved read: the read pause still allows
+// reads in the same lock generation, and the device is still live with
+// exactly the identity the paying lease froze.
+func (s *Service) netDevRecheck(epoch uint64, deviceID string, target permit.NetDeviceTarget) error {
+	cur, err := s.netDevReadEpoch()
+	if err != nil {
+		return err
+	}
+	if cur != epoch {
+		return ErrNetDevReadPaused
+	}
+	dev, credVersion, err := s.netDevLiveIdentity(deviceID)
+	if err != nil {
+		return err
+	}
+	if !netDevTargetMatches(target, dev, credVersion) {
+		return ErrGrantStale
+	}
+	return nil
+}
+
 // checkNetDeviceGrant authorizes one typed read of deviceID at now and
 // durably spends it. It refuses, in this order: paused reads
 // (ErrNetDevReadPaused); an unknown, removed or blocked device or one
 // without read credential, before any lease lookup; then, over the
 // device read leases naming the device, ErrGrantStale, ErrReadNotGranted,
 // ErrGrantExpired or ErrNoGrant; and when the shared counters refuse,
-// ErrTooSoon or ErrBudget. Other errors are internal and carry no secret.
+// ErrTooSoon or ErrBudget, told apart by the durable interval counter.
+// A refusal of the re-check after the reservation releases it. Other
+// errors are internal and carry no secret.
 func (s *Service) checkNetDeviceGrant(ctx context.Context, deviceID string, r pb.NetDeviceRead, now time.Time) (netDeviceGrant, error) {
 	if err := ctx.Err(); err != nil {
 		return netDeviceGrant{}, err
@@ -249,14 +264,10 @@ func (s *Service) checkNetDeviceGrant(ctx context.Context, deviceID string, r pb
 	if s.db == nil {
 		return netDeviceGrant{}, ErrNetDevNoStore
 	}
-	paused, err := s.netDevReadsPaused()
+	epoch, err := s.netDevReadEpoch()
 	if err != nil {
 		return netDeviceGrant{}, err
 	}
-	if paused {
-		return netDeviceGrant{}, ErrNetDevReadPaused
-	}
-	vaultGen := s.vault.LockGeneration()
 	dev, credVersion, err := s.netDevLiveIdentity(deviceID)
 	if err != nil {
 		return netDeviceGrant{}, err
@@ -313,13 +324,17 @@ func (s *Service) checkNetDeviceGrant(ctx context.Context, deviceID string, r pb
 		return netDeviceGrant{}, ErrNoGrant
 	}
 
-	hint := netDevHintKey{db: s.db, device: deviceID, read: read}
+	actionKey, budgetKey := netDevActionKey(read), netDevBudgetKey(deviceID)
 	denied := false
 	var deniedInterval time.Duration
 	for _, c := range candidates {
 		interval := max(time.Duration(c.doc.MinIntervalS)*time.Second, schedgrant.NetDeviceMinInterval)
 		budget := min(int(c.doc.RunBudget), schedgrant.NetDeviceMaxRunBudget)
-		reserved, err := s.db.ReserveReadRun(c.id, netDevActionKey(read), netDevBudgetKey(deviceID), now, budget, interval)
+		prev, hadPrev, err := s.db.ReadActionLastRun(actionKey, budgetKey)
+		if err != nil {
+			return netDeviceGrant{}, fmt.Errorf("device read interval: %w", err)
+		}
+		reserved, err := s.db.ReserveReadRun(c.id, actionKey, budgetKey, now, budget, interval)
 		if errors.Is(err, permit.ErrReadGrantInactive) {
 			// Revoked, expired or recovery started since the lookup.
 			sawExpired = true
@@ -332,18 +347,15 @@ func (s *Service) checkNetDeviceGrant(ctx context.Context, deviceID string, r pb
 			denied, deniedInterval = true, max(deniedInterval, interval)
 			continue
 		}
-		netDevHintRecord(hint, now)
-		// The spend stands; the read is discarded if the device or the
-		// lock state changed while it was reserved.
-		if paused, err := s.netDevReadsPaused(); err != nil || paused || s.vault.LockGeneration() != vaultGen {
-			return netDeviceGrant{}, ErrNetDevReadPaused
+		if hook := netDevAfterReserve.Load(); hook != nil {
+			(*hook)()
 		}
-		cur, curVersion, err := s.netDevLiveIdentity(deviceID)
-		if err != nil {
+		if err := s.netDevRecheck(epoch, deviceID, c.target); err != nil {
+			// No device I/O happened: give the spend back.
+			if _, rerr := s.db.ReleaseReadRun(c.id, actionKey, budgetKey, prev, hadPrev); rerr != nil && s.log != nil {
+				s.log.Error("netdev: release device read reservation", "device", deviceID, "grant", c.id, "error", rerr.Error())
+			}
 			return netDeviceGrant{}, err
-		}
-		if !netDevTargetMatches(c.target, cur, curVersion) {
-			return netDeviceGrant{}, ErrGrantStale
 		}
 		if s.log != nil {
 			s.log.Info("audit", "kind", "netdev_read_authorized", "device", deviceID, "read", read, "grant", c.id)
@@ -351,9 +363,14 @@ func (s *Service) checkNetDeviceGrant(ctx context.Context, deviceID string, r pb
 		return netDeviceGrant{GrantID: c.id, Read: read, Target: c.target}, nil
 	}
 	switch {
-	case denied && netDevHintTooSoon(hint, now, deniedInterval):
-		return netDeviceGrant{}, ErrTooSoon
 	case denied:
+		tooSoon, err := s.netDevTooSoon(deviceID, read, now, deniedInterval)
+		if err != nil {
+			return netDeviceGrant{}, err
+		}
+		if tooSoon {
+			return netDeviceGrant{}, ErrTooSoon
+		}
 		return netDeviceGrant{}, ErrBudget
 	case sawExpired:
 		return netDeviceGrant{}, ErrGrantExpired
