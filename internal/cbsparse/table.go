@@ -88,7 +88,8 @@ type tableBlock struct {
 	lostRows bool
 }
 
-// splitTables checks out against the CBS output limits and the text rule
+// splitTables checks out against the CBS output limits (at most maxLines
+// lines, tableMaxLines for the short tables) and the text rule
 // and splits it into fixed-width tables. A table starts at a dash line (a
 // line that begins with at least tableMinFirstDashes dashes and contains
 // only dash runs separated by spaces); the dash runs define the columns.
@@ -110,8 +111,8 @@ type tableBlock struct {
 // from it refuses the whole output. All tables are checked this way
 // before any row is split into cells, so that an unrecognized table costs
 // no work per row.
-func splitTables(out []byte, what string, index func(titles []string) ([]int, error)) ([]tableBlock, error) {
-	if err := netdevcontract.CheckLines(out, netdevcontract.MaxCBSCommandOutputBytes, tableMaxLines); err != nil {
+func splitTables(out []byte, what string, maxLines int, index func(titles []string) ([]int, error)) ([]tableBlock, error) {
+	if err := netdevcontract.CheckLines(out, netdevcontract.MaxCBSCommandOutputBytes, maxLines); err != nil {
 		return nil, fmt.Errorf("cbsparse: %s: %w", what, err)
 	}
 	lines := strings.Split(string(out), "\n")
