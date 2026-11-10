@@ -1,0 +1,12 @@
+Port      Description
+--------- ------------------------------------------
+gi1       synthetic office port 1
+gi2       synthetic office port 2
+gi3       synthetic office port 3
+gi4       synthetic office port 4
+gi5
+gi6
+gi7
+gi8
+gi9
+gi10
