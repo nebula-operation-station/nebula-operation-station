@@ -118,22 +118,32 @@ func coverageOf(s Snapshot) coverageView {
 		c.Unattached = r.UnattachedFindings
 		c.Truncated = r.Truncated
 		if r.Limits.Graph {
-			c.Limits = append(c.Limits, "graph node or edge cap (5,000 nodes, 50,000 edges)")
+			c.Limits = append(c.Limits, "graph node or edge cap ("+grouped(attackpath.MaxNodes)+" nodes, "+
+				grouped(attackpath.MaxEdges)+" edges)")
 		}
 		if r.Limits.Findings {
-			c.Limits = append(c.Limits, "findings cap")
+			c.Limits = append(c.Limits, "findings cap ("+grouped(attackpath.MaxFindings)+" findings)")
 		}
 		if r.Limits.Targets {
-			c.Limits = append(c.Limits, "crown-jewel target cap (50)")
+			c.Limits = append(c.Limits, "crown-jewel target cap ("+grouped(attackpath.MaxTargets)+")")
 		}
 		if r.Limits.ChokePoints {
-			c.Limits = append(c.Limits, "choke-point cap (500)")
+			c.Limits = append(c.Limits, "choke-point cap ("+grouped(attackpath.MaxChokePoints)+")")
 		}
 		if r.Limits.Budget {
 			c.Limits = append(c.Limits, "time budget")
 		}
 	}
 	return c
+}
+
+// grouped formats a non-negative count with thousands separators: 50,000.
+func grouped(n int) string {
+	s := strconv.Itoa(n)
+	for i := len(s) - 3; i > 0 && s[i-1] != '-'; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	return s
 }
 
 // trusted reports whether "no path found" may be stated without "unknown".
@@ -393,8 +403,15 @@ func explainStep(s Snapshot, lb labeler, n int, st attackpath.Step, known bool) 
 	}
 	if st.Finding == "" {
 		sv.NoFinding = true
-		sv.Formula = "e = 1: no vulnerability needed for a " + sv.Kind + " step"
 		sv.Fix = fixView{None: "no vulnerability needed; this step is cut only by removing the relationship itself"}
+		// The stored e is what L uses; show it, and flag it when it is not
+		// the 1 a step without a finding has.
+		if st.Terms.E == 1 {
+			sv.Formula = "e = 1: no vulnerability needed for a " + sv.Kind + " step"
+		} else {
+			sv.Formula = "stored e = " + fe(st.Terms.E) + "; a " + sv.Kind + " step without a finding has e = 1"
+			sv.Mismatch = known
+		}
 		return sv
 	}
 	sv.VulnID, sv.Pkg, sv.Stale = findingName(s, st.To, st.Finding)
@@ -566,9 +583,10 @@ func selectedPaths(res *attackpath.Result, sel selection) ([]rankedPath, bool) {
 	return out, true
 }
 
-// buildOverlay maps the selected paths onto traffic map IDs. Steps with an
-// end that is not on the map are counted, not drawn.
-func (h *Handler) buildOverlay(res *attackpath.Result, sel selection, ps []rankedPath) (overlayData, int) {
+// buildOverlay maps the selected paths onto traffic map IDs, within the
+// beam, mark and byte limits (fitOverlay). Steps with an end that is not on
+// the map are counted, not drawn.
+func (h *Handler) buildOverlay(res *attackpath.Result, sel selection, ps []rankedPath) (overlayData, int, error) {
 	o := overlayData{Version: overlayVersion, Beams: []beam{}, Marks: []mark{}}
 	mapID := func(id string) (string, bool) {
 		m, ok := h.o.MapNode(id)
@@ -640,7 +658,11 @@ func (h *Handler) buildOverlay(res *attackpath.Result, sel selection, ps []ranke
 		}
 		o.Marks = append(o.Marks, mark{ID: id, Role: role[id]})
 	}
-	return o, unmapped
+	o, err := fitOverlay(o)
+	if err != nil {
+		return overlayData{}, 0, err
+	}
+	return o, unmapped, nil
 }
 
 type mapView struct {
@@ -670,7 +692,11 @@ func (h *Handler) serveMap(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Path or target not found.", http.StatusNotFound)
 		return
 	}
-	o, unmapped := h.buildOverlay(s.Result, sel, ps)
+	o, unmapped, err := h.buildOverlay(s.Result, sel, ps)
+	if err != nil {
+		h.fail(w, r, "overlay", err)
+		return
+	}
 	lb := labeler{s.Labels}
 	v := &mapView{Window: h.o.Window, ListHref: ListPath, NoData: s.Result == nil, Truncated: o.Truncated, Paths: len(ps)}
 	v.FrameSrc = FramePath
@@ -717,7 +743,11 @@ func (h *Handler) serveFrame(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Path or target not found.", http.StatusNotFound)
 		return
 	}
-	o, _ := h.buildOverlay(s.Result, sel, ps)
+	o, _, err := h.buildOverlay(s.Result, sel, ps)
+	if err != nil {
+		h.fail(w, r, "overlay", err)
+		return
+	}
 	data, err := overlayJSON(o)
 	if err != nil {
 		h.fail(w, r, "overlay", err)

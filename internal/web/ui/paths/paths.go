@@ -87,6 +87,10 @@ const (
 	// MaxMarks bounds the marked nodes of one overlay; it equals
 	// LIMITS.marks in paths.js.
 	MaxMarks = 1000
+	// MaxOverlayBytes bounds the encoded overlay; it equals
+	// PATHS_LIMITS.bytes in paths.js, which rejects a larger overlay whole.
+	// The overlay is ASCII JSON, so bytes equal the renderer's string length.
+	MaxOverlayBytes = 262144
 	// MaxFixHrefBytes bounds a fix link.
 	MaxFixHrefBytes = 1024
 	// maxRawQuery bounds a query string.
@@ -516,11 +520,79 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, t *template.Tem
 	_, _ = w.Write(b.Bytes())
 }
 
-// overlayJSON is the overlay data embedded into the frame document.
+// overlayJSON is the overlay data embedded into the frame document; o must
+// come from fitOverlay.
 func overlayJSON(o overlayData) (string, error) {
 	b, err := json.Marshal(o)
 	if err != nil {
 		return "", fmt.Errorf("encode overlay: %w", err)
 	}
+	if len(b) > MaxOverlayBytes {
+		return "", fmt.Errorf("encode overlay: %d bytes exceed the limit %d", len(b), MaxOverlayBytes)
+	}
 	return string(b), nil
+}
+
+// fitOverlay bounds the encoded overlay by MaxOverlayBytes: beams are
+// dropped from the end first (the lowest ranked and last targets), then
+// marks, and the overlay is flagged truncated. The renderer would reject a
+// larger overlay as a whole.
+func fitOverlay(o overlayData) (overlayData, error) {
+	beamSize, err := itemSizes(o.Beams)
+	if err != nil {
+		return o, err
+	}
+	markSize, err := itemSizes(o.Marks)
+	if err != nil {
+		return o, err
+	}
+	// The envelope with empty lists and truncated:true, the longest form.
+	env, err := json.Marshal(overlayData{Version: o.Version, Beams: []beam{}, Marks: []mark{}, Truncated: true})
+	if err != nil {
+		return o, fmt.Errorf("encode overlay: %w", err)
+	}
+	total := len(env) + listSize(beamSize) + listSize(markSize)
+	nb, nm := len(beamSize), len(markSize)
+	for total > MaxOverlayBytes && nb > 0 {
+		nb--
+		total -= beamSize[nb] + sep(nb)
+	}
+	for total > MaxOverlayBytes && nm > 0 {
+		nm--
+		total -= markSize[nm] + sep(nm)
+	}
+	if nb < len(o.Beams) || nm < len(o.Marks) {
+		o.Beams, o.Marks, o.Truncated = o.Beams[:nb], o.Marks[:nm], true
+	}
+	return o, nil
+}
+
+// itemSizes returns the encoded size of every element.
+func itemSizes[T any](items []T) ([]int, error) {
+	out := make([]int, len(items))
+	for i, it := range items {
+		b, err := json.Marshal(it)
+		if err != nil {
+			return nil, fmt.Errorf("encode overlay: %w", err)
+		}
+		out[i] = len(b)
+	}
+	return out, nil
+}
+
+// listSize is the size of the elements of a JSON list with their commas.
+func listSize(sizes []int) int {
+	n := 0
+	for i, s := range sizes {
+		n += s + sep(i)
+	}
+	return n
+}
+
+// sep is the size of the comma before element i.
+func sep(i int) int {
+	if i == 0 {
+		return 0
+	}
+	return 1
 }

@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html"
 	"net/http"
 	"net/http/httptest"
@@ -322,6 +323,90 @@ func TestStoredValueMismatchIsFlagged(t *testing.T) {
 	txt = text(mustOK(t, newEnv(t, fixture()).get(t, "/vuln/paths/p/"+hashA)))
 	if strings.Contains(txt, "differs from this recomputation") {
 		t.Error("consistent values flagged as mismatch")
+	}
+}
+
+func TestStepWithoutFindingShowsStoredValue(t *testing.T) {
+	s := fixture()
+	s.Result.Targets[0].Paths[0].Steps[1].Terms.E = 0.7
+	txt := text(mustOK(t, newEnv(t, s).get(t, "/vuln/paths/p/"+hashA)))
+	if !strings.Contains(txt, "stored e = 0.700") || !strings.Contains(txt, "The stored value e = 0.700 differs from this recomputation") {
+		t.Errorf("stored e of a step without a finding is not shown and flagged:\n%s", txt)
+	}
+	if strings.Contains(txt, "e = 1: no vulnerability needed") {
+		t.Error("step without a finding still claims e = 1")
+	}
+	// Consistent: e = 1, no flag.
+	txt = text(mustOK(t, newEnv(t, fixture()).get(t, "/vuln/paths/p/"+hashA)))
+	if !strings.Contains(txt, "e = 1: no vulnerability needed") || strings.Contains(txt, "differs from this recomputation") {
+		t.Errorf("consistent credential step:\n%s", txt)
+	}
+}
+
+func TestCoverageLimitTextsUseTheComputationCaps(t *testing.T) {
+	s := fixture()
+	s.Result.Truncated = true
+	s.Result.Limits = attackpath.Limits{Graph: true, Findings: true, Targets: true, ChokePoints: true}
+	txt := text(mustOK(t, newEnv(t, s).get(t, "/vuln/paths")))
+	for _, want := range []string{
+		"5,000 nodes", "50,000 edges", "100,000 findings", "crown-jewel target cap (50)", "choke-point cap (500)",
+	} {
+		if !strings.Contains(txt, want) {
+			t.Errorf("limits lack %q:\n%s", want, txt)
+		}
+	}
+}
+
+// TestOverlayIsBoundedByTheRendererByteLimit: an overlay at the beam and
+// mark caps with the longest map IDs exceeds the renderer's byte limit; it
+// is truncated to fit and flagged, never sent too large (the renderer would
+// reject it whole).
+func TestOverlayIsBoundedByTheRendererByteLimit(t *testing.T) {
+	var targets []attackpath.TargetPaths
+	for i := range paths.MaxBeams + 10 {
+		from, to := fmt.Sprintf("host:a%d", i), fmt.Sprintf("host:b%d", i)
+		h := fmt.Sprintf("%064x", i+1)
+		targets = append(targets, attackpath.TargetPaths{Node: to, Impact: 5, Complete: true, Paths: []attackpath.Path{{
+			Hash: h, Entry: from, Likelihood: 1, Risk: 5,
+			Steps: []attackpath.Step{{Kind: attackpath.StepCredential, From: from, To: to, Owns: true, Terms: attackpath.Terms{E: 1},
+				Edge: attackpath.Edge{From: from, To: to, Kind: attackpath.EdgeCredential}}},
+		}}})
+	}
+	snap := paths.Snapshot{Result: &attackpath.Result{FormulaVersion: attackpath.FormulaVersion, Targets: targets}}
+	src := &fakeSource{snap: snap}
+	h, err := paths.New(paths.Options{
+		Source: src, Authorize: func(*http.Request) bool { return true }, PublicOrigin: origin,
+		MapNode: func(id string) (string, bool) {
+			id = strings.TrimPrefix(id, "host:")
+			return id + strings.Repeat("x", 128-len(id)), true
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	h.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/vuln/paths/map/frame", nil))
+	body := mustOK(t, rec)
+	m := regexp.MustCompile(`data-paths="([^"]*)"`).FindStringSubmatch(body)
+	if m == nil {
+		t.Fatal("frame lacks data-paths")
+	}
+	raw := html.UnescapeString(m[1])
+	if len(raw) > paths.MaxOverlayBytes {
+		t.Fatalf("overlay is %d bytes, renderer limit %d", len(raw), paths.MaxOverlayBytes)
+	}
+	var o struct {
+		overlay
+		Truncated bool `json:"truncated"`
+	}
+	if err := json.Unmarshal([]byte(raw), &o); err != nil {
+		t.Fatalf("overlay JSON: %v", err)
+	}
+	if !o.Truncated || len(o.Beams) == 0 || len(o.Marks) == 0 {
+		t.Errorf("truncated %v, %d beams, %d marks", o.Truncated, len(o.Beams), len(o.Marks))
+	}
+	if len(raw) < paths.MaxOverlayBytes/2 {
+		t.Errorf("overlay cut far below the limit: %d bytes", len(raw))
 	}
 }
 

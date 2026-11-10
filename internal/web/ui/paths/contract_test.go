@@ -24,7 +24,8 @@ func TestOverlayLimitsMatchRenderer(t *testing.T) {
 	if block == nil {
 		t.Fatal("PATHS_LIMITS not found")
 	}
-	want := map[string]int{"beams": paths.MaxBeams, "marks": paths.MaxMarks, "rank": attackpath.PathsPerTarget, "idLength": 128}
+	want := map[string]int{"bytes": paths.MaxOverlayBytes, "beams": paths.MaxBeams, "marks": paths.MaxMarks,
+		"rank": attackpath.PathsPerTarget, "idLength": 128}
 	for k, v := range want {
 		m := regexp.MustCompile(`\b` + k + `: (\d+),`).FindSubmatch(block[1])
 		if m == nil {
