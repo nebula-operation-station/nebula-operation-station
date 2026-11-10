@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic fixture (ND-09 part 3): shape of the reply to
+     <show><jobs><id>42</id></jobs></show> for a finished commit job.
+     Element names and values are assumptions to be checked against the
+     lab firewall (ND-03); this file is replaced by a lab fixture then.
+     Elements outside the allowlist (tenq, user, description, warnings,
+     secret-hint) must be ignored by the parser. -->
+<response status="success">
+  <result>
+    <job>
+      <tenq>2026/01/01 00:00:00</tenq>
+      <tdeq>00:00:01</tdeq>
+      <id>42</id>
+      <user>nos-change</user>
+      <type>Commit</type>
+      <status>FIN</status>
+      <queued>NO</queued>
+      <stoppable>no</stoppable>
+      <result>OK</result>
+      <tfin>2026/01/01 00:00:30</tfin>
+      <description>nos permit example</description>
+      <positionInQ>0</positionInQ>
+      <progress>100</progress>
+      <details>
+        <line>Configuration committed successfully</line>
+        <line>
+          Partial changes to commit: changes to configuration by administrators: nos-change
+        </line>
+      </details>
+      <warnings/>
+      <secret-hint>must-not-leak</secret-hint>
+    </job>
+  </result>
+</response>

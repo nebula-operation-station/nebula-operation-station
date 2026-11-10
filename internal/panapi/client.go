@@ -466,7 +466,7 @@ func checkResponse(data []byte) error {
 	var (
 		depth    int
 		elements int
-		text     []int // text bytes per open element
+		text     netdevcontract.XMLTextCounter // whitespace between elements is not text
 		rootSeen bool
 		rootDone bool
 		status   string
@@ -505,7 +505,7 @@ func checkResponse(data []byte) error {
 					return fmt.Errorf("%w: attribute longer than %d bytes", ErrXMLLimit, MaxXMLTextBytes)
 				}
 			}
-			text = append(text, 0)
+			text.Start()
 			if !rootSeen {
 				rootSeen = true
 				if t.Name.Local != "response" || t.Name.Space != "" {
@@ -522,7 +522,9 @@ func checkResponse(data []byte) error {
 			}
 		case xml.EndElement:
 			depth--
-			text = text[:len(text)-1]
+			if err := text.End(); err != nil {
+				return fmt.Errorf("%w: unbalanced end element", ErrMalformedResponse)
+			}
 			if depth == 0 {
 				rootDone = true
 			}
@@ -533,8 +535,7 @@ func checkResponse(data []byte) error {
 				}
 				continue
 			}
-			text[len(text)-1] += len(t)
-			if text[len(text)-1] > MaxXMLTextBytes {
+			if err := text.CharData(t); err != nil {
 				return fmt.Errorf("%w: element text longer than %d bytes", ErrXMLLimit, MaxXMLTextBytes)
 			}
 		case xml.Directive:
