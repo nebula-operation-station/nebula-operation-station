@@ -120,6 +120,15 @@ commands:
   pve remote repin <id>
                       re-pin the trust identity after a certificate change
   pve remote list     metadata only (never secrets)
+  netdev probe --family cbs|panos --endpoint <ip-or-name>
+                      show a network device's trust fingerprint (no credential sent)
+  netdev add <device-id> --family cbs|panos --endpoint <ip-or-name>
+                      probe, type "yes" to register, then enter the read credential (no echo)
+  netdev credential set|rotate <device-id> [--secret-fd N]
+                      store or replace the read credential (terminal or --secret-fd; never an argument)
+  netdev repin|block|unblock|remove <device-id>
+                      re-pin after a key change, block or unblock dials, remove the device
+  netdev list         metadata only (never secrets)
   container definition put HOST CONTAINER [FILE|-]
                       store a standalone container's definition (JSON from FILE or stdin; never an argument)
   container definition remove [--version N] HOST CONTAINER
@@ -167,6 +176,8 @@ func run(cmd string, args []string) error {
 	case "pve":
 		// PVE administration authenticates the local admin through peer credentials.
 		return pveCmd(args, os.Stdin, ttyPrompter, os.Stdout)
+	case "netdev":
+		return netdevCmd(args, defaultNetdevEnv())
 	}
 	conn, err := dialExecutor()
 	if err != nil {
@@ -290,6 +301,13 @@ func pending(ctx context.Context, c pb.ExecutorServiceClient) error {
 }
 
 func approve(ctx context.Context, c pb.ExecutorServiceClient, prefix string, in io.Reader, out io.Writer) error {
+	return approvePhased(ctx, func() (context.Context, context.CancelFunc) { return ctx, func() {} }, c, prefix, in, out)
+}
+
+// approvePhased is approve with the ApproveCLI budget separated from the
+// lookup: approveCtx is called only after the person has typed the
+// approval, so reading the permit never consumes the time of that call.
+func approvePhased(ctx context.Context, approveCtx func() (context.Context, context.CancelFunc), c pb.ExecutorServiceClient, prefix string, in io.Reader, out io.Writer) error {
 	if len(prefix) < 8 {
 		return errors.New("give at least 8 characters of the digest")
 	}
@@ -358,7 +376,9 @@ func approve(ctx context.Context, c pb.ExecutorServiceClient, prefix string, in 
 			return errors.New("not approved")
 		}
 	}
-	if _, err := c.ApproveCLI(ctx, &pb.ApproveCLIRequest{ExecutionDigest: match.GetExecutionDigest(), TypedTargetCount: uint32(typed)}); err != nil {
+	actx, acancel := approveCtx()
+	defer acancel()
+	if _, err := c.ApproveCLI(actx, &pb.ApproveCLIRequest{ExecutionDigest: match.GetExecutionDigest(), TypedTargetCount: uint32(typed)}); err != nil {
 		return err
 	}
 	fmt.Fprintln(out, "approved")
