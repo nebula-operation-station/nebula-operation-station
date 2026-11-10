@@ -20,6 +20,14 @@ const (
 	// MaxOtherResponseBytes caps every other response (operational
 	// commands, single configuration entries).
 	MaxOtherResponseBytes = int64(netdevcontract.MaxPANOSResponseBytes)
+	// MaxHitCountResponseBytes caps the rule hit-count response, at
+	// transport and in ParseRuleHitCounts alike. It is sized so that a
+	// reply with one entry more than MaxHitCountEntries, each with a
+	// maximum-length name, every timestamp and the elements PAN-OS adds
+	// around them (about 800 bytes per entry), still fits; such a rule
+	// base then reaches the Incomplete path instead of failing at
+	// transport. It equals the configuration response cap.
+	MaxHitCountResponseBytes = int64(netdevcontract.MaxPANOSConfigResponseBytes)
 )
 
 // MaxNameLength is the PAN-OS name limit for rules and objects.
@@ -155,7 +163,7 @@ func ConfigAuditRequest() Request {
 
 // RuleHitCountRequest reads the hit counts of all vsys1 security rules.
 func RuleHitCountRequest() Request {
-	return Request{label: "rule-hit-count", typ: "op", cmd: cmdRuleHitCount, maxBytes: MaxOtherResponseBytes}
+	return Request{label: "rule-hit-count", typ: "op", cmd: cmdRuleHitCount, maxBytes: MaxHitCountResponseBytes}
 }
 
 // RunningConfigRequest reads one subtree of the running configuration

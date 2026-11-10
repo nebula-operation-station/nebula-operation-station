@@ -197,6 +197,58 @@ func TestXMLLimits(t *testing.T) {
 	}
 }
 
+// TestXMLWhitespaceBetweenElementsIsNotText checks that the indentation of
+// a pretty-printed reply does not count toward MaxXMLTextBytes of the
+// parent element, while real text (and whitespace joined to it) does.
+func TestXMLWhitespaceBetweenElementsIsNotText(t *testing.T) {
+	// 2000 indented children: 6,000 bytes of whitespace in <r>
+	indented := strings.Repeat("\n  <e/>", 2000) + "\n"
+	x := func(n int) string { return strings.Repeat("x", n) }
+	cases := []struct {
+		name string
+		doc  string
+		over bool
+	}{
+		{"indented children", "<r>" + indented + "</r>", false},
+		{"nested indented children", "<a>\n <r>" + indented + " </r>\n</a>\n", false},
+		{"indentation around comments", "<r>" + indented + "<!-- c -->" + indented + "</r>", false},
+		{"whitespace-only leaf", "<r>" + strings.Repeat(" ", 2*MaxXMLTextBytes) + "</r>", false},
+		{"text at limit between indented children", "<r>" + indented + "<e/>" + x(MaxXMLTextBytes) + "<e/>" + indented + "</r>", false},
+		{"text limit+1 between indented children", "<r>" + indented + "<e/>" + x(MaxXMLTextBytes+1) + "<e/>" + indented + "</r>", true},
+		{"text with joined whitespace limit+1", "<r>" + indented + "<e/>" + x(MaxXMLTextBytes) + " <e/></r>", true},
+		{"whitespace after comment joined to text", "<r>" + x(MaxXMLTextBytes) + "<!-- c --> </r>", true},
+		{"whitespace before comment joined to text", "<r> <!-- c -->" + x(MaxXMLTextBytes) + "</r>", true},
+		{"non-XML spaces are text", "<r>" + strings.Repeat(" ", MaxXMLTextBytes/2+1) + "</r>", true},
+		{"text split by comment over limit", "<r>" + x(MaxXMLTextBytes/2) + "<!-- c -->" + strings.Repeat(" ", MaxXMLTextBytes) + "<!-- c -->" + x(1) + "</r>", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := CheckXML([]byte(c.doc), MaxPANOSResponseBytes)
+			if c.over != (err != nil) {
+				t.Fatalf("over=%v, err=%v", c.over, err)
+			}
+			if c.over && !errors.Is(err, ErrOverLimit) {
+				t.Fatalf("err %v does not match ErrOverLimit", err)
+			}
+		})
+	}
+	// whitespace stays bounded by the response cap
+	big := []byte("<r>" + strings.Repeat(" ", MaxPANOSResponseBytes) + "</r>")
+	if err := CheckXML(big, MaxPANOSResponseBytes); !errors.Is(err, ErrOverLimit) {
+		t.Fatalf("whitespace over response cap: err = %v, want ErrOverLimit", err)
+	}
+}
+
+func TestXMLTextCounterMisuse(t *testing.T) {
+	var c XMLTextCounter
+	if err := c.CharData([]byte("x")); err == nil {
+		t.Fatal("CharData outside an element accepted")
+	}
+	if err := c.End(); err == nil {
+		t.Fatal("End without Start accepted")
+	}
+}
+
 func TestXMLMalformedRejected(t *testing.T) {
 	cases := map[string]string{
 		"empty":            "",
