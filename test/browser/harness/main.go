@@ -409,6 +409,7 @@ func newHarness(preview bool, port, dir string) http.Handler {
 	must(err)
 	pages.Handle("/", u.Handler())
 	mountTrafficMap(pages, preview, origin, uiLog)
+	mountAttackPaths(pages, preview, origin, uiLog)
 	if preview {
 		seedPreviewDeployment(context.Background(), pages, pveStore, uiLog)
 	}
@@ -419,6 +420,9 @@ func newHarness(preview bool, port, dir string) http.Handler {
 		must(err)
 		fmt.Fprint(w, c.GetCode())
 	})
+	// Test hook: make the signed-in user an admin of the attack-path pages
+	// or not (attackpath.spec.js).
+	mux.HandleFunc("/__paths/admin", pathsAdminHook)
 	// Test hooks: set up TOTP recovery like `nebula totp setup`, and give
 	// the code for the next step (the current one is used by the setup).
 	var totpSecret []byte
