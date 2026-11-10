@@ -376,6 +376,8 @@ func newHarness(preview bool, port, dir string) http.Handler {
 	audit := auditlog.New(sdb, true)
 	uiLog := slog.New(auditlog.NewHandler(base, audit))
 	opts := ui.Options{PublicOrigin: origin, Events: direct{svc}, Audit: audit, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Pins: inv, Schedules: ops, Runbooks: rb, Trust: direct{svc}, Modules: mods, LastResult: ops.LastResult, Network: ipamStore, Discovery: disc, Repin: direct{svc}, Enroll: direct{svc}, SecurityKeys: securityKeys, TOTPStatus: totpStatus, Log: uiLog}
+	// Vulnerabilities pages with hostile data (vuln.go, vuln.spec.js).
+	opts.Vuln = harnessVuln{}
 	pages := http.NewServeMux()
 	var pveStore *pveinventory.Store
 	if preview {
