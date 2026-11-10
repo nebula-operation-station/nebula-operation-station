@@ -217,28 +217,82 @@ func TestListShowsPathsPerTargetAndChokePoints(t *testing.T) {
 	}
 }
 
+// panelText returns the text of the list page's panel for the target with
+// the given label, so an assertion cannot be satisfied by another panel.
+func panelText(t *testing.T, body, label string) string {
+	t.Helper()
+	open := `<section class="panel" aria-label="Paths to ` + label + `">`
+	if strings.Count(body, open) != 1 {
+		t.Fatalf("want exactly one panel for %q", label)
+	}
+	rest := body[strings.Index(body, open):]
+	end := strings.Index(rest, "</section>")
+	if end < 0 {
+		t.Fatalf("panel for %q is not closed", label)
+	}
+	return text(rest[:end])
+}
+
+// completeReport is a data-source report with every required source complete.
+func completeReport(t *testing.T) *sources.Report {
+	t.Helper()
+	var srcs []sources.SourceReport
+	for _, name := range sources.RequiredSources() {
+		srcs = append(srcs, sources.SourceReport{Source: name, Status: sources.StatusComplete, Coverage: sources.Coverage{Covered: 1, Total: 1}})
+	}
+	r := &sources.Report{Sources: srcs}
+	if !r.Complete() {
+		t.Fatal("fixture report is not complete")
+	}
+	return r
+}
+
 func TestNoPathIsNeverShownAsSafe(t *testing.T) {
-	cases := map[string]func(s *paths.Snapshot){
-		"coverage unknown": func(s *paths.Snapshot) { s.Report = nil },
-		"coverage partial": func(s *paths.Snapshot) {
+	cases := map[string]func(t *testing.T, s *paths.Snapshot){
+		"coverage unknown": func(_ *testing.T, s *paths.Snapshot) { s.Report = nil },
+		"coverage partial": func(_ *testing.T, s *paths.Snapshot) {
 			s.Report = &sources.Report{Missing: []string{sources.SourceFirewall}}
 		},
-		"search incomplete": func(s *paths.Snapshot) {
-			s.Report = &sources.Report{}
+		"search incomplete": func(t *testing.T, s *paths.Snapshot) {
+			s.Report = completeReport(t)
+			s.Result.UnscoredFindings = 0
 			s.Result.Targets[1].Complete = false
+		},
+		"computation truncated": func(t *testing.T, s *paths.Snapshot) {
+			s.Report = completeReport(t)
+			s.Result.UnscoredFindings = 0
+			s.Result.Truncated = true
+			s.Result.Limits.Budget = true
+		},
+		"unscored findings": func(t *testing.T, s *paths.Snapshot) {
+			s.Report = completeReport(t)
+		},
+		"unattached findings": func(t *testing.T, s *paths.Snapshot) {
+			s.Report = completeReport(t)
+			s.Result.UnscoredFindings = 0
+			s.Result.UnattachedFindings = 1
 		},
 	}
 	for name, mod := range cases {
 		t.Run(name, func(t *testing.T) {
 			s := fixture()
-			mod(&s)
-			txt := strings.ToLower(text(mustOK(t, newEnv(t, s).get(t, "/vuln/paths"))))
-			if !strings.Contains(txt, "unknown") {
-				t.Error("target without paths is not shown as unknown")
+			mod(t, &s)
+			// Only the host:nas panel: path B ("port mapping unknown") and
+			// the coverage panel also say "unknown" elsewhere on the page.
+			nas := panelText(t, mustOK(t, newEnv(t, s).get(t, "/vuln/paths")), "nas")
+			if !strings.Contains(nas, "Unknown:") {
+				t.Errorf("target without paths is not labelled unknown in its panel: %q", nas)
+			}
+			lower := strings.ToLower(nas)
+			if strings.Contains(lower, "no path found") && !strings.Contains(lower, "unknown") {
+				t.Errorf("panel says no path found without unknown: %q", nas)
+			}
+			if strings.Contains(lower, "no path found within the limits") {
+				t.Errorf("panel uses the complete-coverage wording: %q", nas)
 			}
 			for _, bad := range []string{"safe", "no risk", "secure", "clean"} {
-				if strings.Contains(txt, bad) {
-					t.Errorf("page says %q", bad)
+				if strings.Contains(lower, bad) {
+					t.Errorf("panel says %q", bad)
 				}
 			}
 		})
@@ -248,20 +302,13 @@ func TestNoPathIsNeverShownAsSafe(t *testing.T) {
 func TestNoPathWithCompleteCoverageIsNoGuarantee(t *testing.T) {
 	s := fixture()
 	s.Result.UnscoredFindings = 0
-	var srcs []sources.SourceReport
-	for _, name := range sources.RequiredSources() {
-		srcs = append(srcs, sources.SourceReport{Source: name, Status: sources.StatusComplete, Coverage: sources.Coverage{Covered: 1, Total: 1}})
+	s.Report = completeReport(t)
+	nas := strings.ToLower(panelText(t, mustOK(t, newEnv(t, s).get(t, "/vuln/paths")), "nas"))
+	if !strings.Contains(nas, "no path found within the limits") || !strings.Contains(nas, "not a guarantee") {
+		t.Errorf("complete coverage wording: %s", nas)
 	}
-	s.Report = &sources.Report{Sources: srcs}
-	if !s.Report.Complete() {
-		t.Fatal("fixture report is not complete")
-	}
-	txt := strings.ToLower(text(mustOK(t, newEnv(t, s).get(t, "/vuln/paths"))))
-	if !strings.Contains(txt, "no path found within the limits") || !strings.Contains(txt, "not a guarantee") {
-		t.Errorf("complete coverage wording: %s", txt)
-	}
-	if strings.Contains(txt, "safe") {
-		t.Error("page says safe")
+	if strings.Contains(nas, "safe") {
+		t.Error("panel says safe")
 	}
 }
 
