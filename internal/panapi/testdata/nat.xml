@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic fixture (ND-09 part 2): shape of a type=config&action=show
+     reply for the vsys1 NAT rulebase (xpath .../rulebase/nat/rules). Only
+     documentation addresses and example names; no real device data.
+     Elements outside the allowlist (nat-type, to-interface details,
+     secret-hint) must be dropped by the parser. Rule order is deliberately
+     not alphabetical. -->
+<response status="success">
+  <result total-count="4" count="4">
+    <rules>
+      <entry name="outbound-pat" uuid="00000000-0000-4000-8000-0000000000b1">
+        <from><member>trust</member></from>
+        <to><member>untrust</member></to>
+        <source><member>lab-net</member></source>
+        <destination><member>any</member></destination>
+        <service>any</service>
+        <nat-type>ipv4</nat-type>
+        <source-translation>
+          <dynamic-ip-and-port>
+            <interface-address>
+              <interface>ethernet1/1</interface>
+              <ip>203.0.113.1/24</ip>
+            </interface-address>
+          </dynamic-ip-and-port>
+        </source-translation>
+      </entry>
+      <entry name="web-dnat">
+        <from><member>untrust</member></from>
+        <to><member>untrust</member></to>
+        <source><member>any</member></source>
+        <destination><member>203.0.113.10</member></destination>
+        <service>svc-http-alt</service>
+        <destination-translation>
+          <translated-address>web-1</translated-address>
+          <translated-port>80</translated-port>
+        </destination-translation>
+        <description>publish the example web server</description>
+      </entry>
+      <entry name="static-bidir">
+        <from><member>dmz</member></from>
+        <to><member>untrust</member></to>
+        <source><member>web-2</member></source>
+        <destination><member>any</member></destination>
+        <service>any</service>
+        <source-translation>
+          <static-ip>
+            <translated-address>203.0.113.11</translated-address>
+            <bi-directional>yes</bi-directional>
+          </static-ip>
+        </source-translation>
+        <secret-hint>should-be-dropped</secret-hint>
+      </entry>
+      <entry name="a-disabled-pool">
+        <from><member>trust</member></from>
+        <to><member>untrust</member></to>
+        <source><member>ghost-net</member></source>
+        <destination><member>any</member></destination>
+        <service>any</service>
+        <source-translation>
+          <dynamic-ip>
+            <translated-address>
+              <member>203.0.113.20-203.0.113.29</member>
+              <member>pool-obj</member>
+            </translated-address>
+          </dynamic-ip>
+        </source-translation>
+        <disabled>yes</disabled>
+        <tag><member>legacy</member></tag>
+      </entry>
+    </rules>
+  </result>
+</response>
