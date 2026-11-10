@@ -24,6 +24,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
@@ -45,12 +46,15 @@ Unlock the executor vault with nebula unlock first.
 probe and add contact the device without any credential and show the
 family, the endpoint and the presented trust fingerprint (SSH host key
 for cbs, TLS certificate for panos). Compare the fingerprint out of band;
-add registers the device only after you type "yes".
+add registers the device only after you type "yes". add, repin, unblock
+and remove read that "yes" from a terminal on stdin only; a piped "yes"
+is refused.
 
 The read credential (CBS password, PAN-OS API key) is asked without echo
 on the terminal. It is never accepted as an argument or from the
-environment. When stdin is not a terminal, pass --secret-fd N to read it
-once from an already open file descriptor N (3 or higher); the
+environment. Alternatively pass --secret-fd N to read it once from an
+already open file descriptor N (3 or higher) that is a regular file or a
+pipe; anything else is refused before the executor is contacted. The
 descriptor is closed after reading.
 
 Examples:
@@ -80,9 +84,31 @@ const (
 	netdevDefaultPortPANOS = 443
 )
 
+// RPC budgets. Each one starts after the human steps that precede it, so
+// reading a fingerprint, typing "yes", entering the credential or
+// approving the permit never consumes the time of the next call.
+const (
+	// netdevDeviceTimeout bounds one call during which the executor
+	// contacts the device (probe, register, credential validation, re-pin).
+	netdevDeviceTimeout = 2 * time.Minute
+	// netdevRegistryTimeout bounds one registry-only call.
+	netdevRegistryTimeout = 30 * time.Second
+	// netdevApprovalTimeout bounds the HIGH permit approval of a re-pin,
+	// which includes the typed approval.
+	netdevApprovalTimeout = 10 * time.Minute
+)
+
 // errNetdevNoTerminal is returned when a credential is needed, stdin is
 // not a terminal and no --secret-fd was given.
 var errNetdevNoTerminal = errors.New("stdin is not a terminal: the credential is asked without echo on a terminal, or pass --secret-fd N")
+
+// errNetdevConfirmNoTerminal is returned when a command needs a typed
+// "yes" and stdin is not a terminal: a piped "yes" is never a confirmation.
+var errNetdevConfirmNoTerminal = errors.New("stdin is not a terminal: the typed 'yes' must come from a person at a terminal")
+
+// errNetdevSecretFD is returned when --secret-fd does not name an open
+// regular file or pipe.
+var errNetdevSecretFD = errors.New("--secret-fd must name an open regular file or pipe")
 
 // netdevEnv is everything a netdev command touches outside the process.
 type netdevEnv struct {
@@ -92,13 +118,52 @@ type netdevEnv struct {
 	stdinIsTerminal bool
 	// ask reads a secret without echo.
 	ask prompter
-	// openFD opens a descriptor named by --secret-fd.
+	// openFD validates the descriptor named by --secret-fd and takes it
+	// over; it runs before the executor is dialled.
 	openFD func(fd int) (io.ReadCloser, error)
 	// out receives results; prompts go to promptOut.
 	out       io.Writer
 	promptOut io.Writer
 	// dial connects to the executor; the returned func closes it.
 	dial func() (pb.ExecutorServiceClient, func(), error)
+	// now is the clock the RPC deadlines are computed from.
+	now func() time.Time
+}
+
+// rpcContext returns a context for one RPC phase, with its deadline taken
+// from the injected clock at the moment the phase starts.
+func (e netdevEnv) rpcContext(d time.Duration) (context.Context, context.CancelFunc) {
+	now := time.Now
+	if e.now != nil {
+		now = e.now
+	}
+	return context.WithDeadline(context.Background(), now().Add(d))
+}
+
+// netdevOpenSecretFD validates fd before anything else is opened by this
+// command and takes it over. Only a regular file or a pipe is accepted: a
+// socket, a closed descriptor or a runtime-internal descriptor (epoll,
+// eventfd) is refused, so a number the caller did not redirect can never
+// resolve to the executor connection or the netpoller.
+func netdevOpenSecretFD(fd int) (io.ReadCloser, error) {
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return nil, fmt.Errorf("--secret-fd %d: not an open descriptor: %w", fd, errNetdevSecretFD)
+	}
+	switch st.Mode & unix.S_IFMT {
+	case unix.S_IFREG, unix.S_IFIFO:
+	default:
+		return nil, fmt.Errorf("--secret-fd %d: %w", fd, errNetdevSecretFD)
+	}
+	// Anonymous inodes (epoll, eventfd, ...) can report a regular mode.
+	if link, err := os.Readlink("/proc/self/fd/" + strconv.Itoa(fd)); err == nil && strings.HasPrefix(link, "anon_inode:") {
+		return nil, fmt.Errorf("--secret-fd %d: %w", fd, errNetdevSecretFD)
+	}
+	f := os.NewFile(uintptr(fd), "secret-fd")
+	if f == nil {
+		return nil, fmt.Errorf("--secret-fd %d: not an open descriptor: %w", fd, errNetdevSecretFD)
+	}
+	return f, nil
 }
 
 // defaultNetdevEnv is the environment of the real command.
@@ -107,15 +172,10 @@ func defaultNetdevEnv() netdevEnv {
 		in:              bufio.NewReader(os.Stdin),
 		stdinIsTerminal: term.IsTerminal(int(os.Stdin.Fd())),
 		ask:             ttyPrompter,
-		openFD: func(fd int) (io.ReadCloser, error) {
-			f := os.NewFile(uintptr(fd), "secret-fd")
-			if f == nil {
-				return nil, fmt.Errorf("--secret-fd %d: not an open descriptor", fd)
-			}
-			return f, nil
-		},
-		out:       os.Stdout,
-		promptOut: os.Stderr,
+		openFD:          netdevOpenSecretFD,
+		now:             time.Now,
+		out:             os.Stdout,
+		promptOut:       os.Stderr,
 		dial: func() (pb.ExecutorServiceClient, func(), error) {
 			conn, err := dialExecutor()
 			if err != nil {
@@ -224,14 +284,18 @@ func (t netdevTarget) request() (*pb.ProbeNetDeviceRequest, error) {
 // else from the non-echoing terminal prompter; never from a pipe on stdin.
 type netdevSecretSource struct {
 	fd *int
+	// r is the descriptor taken over by check, before any dial.
+	r io.ReadCloser
 }
 
-func netdevSecretFlag(fs *flag.FlagSet) netdevSecretSource {
-	return netdevSecretSource{fd: fs.Int("secret-fd", -1, "read the credential once from this open descriptor (3 or higher)")}
+func netdevSecretFlag(fs *flag.FlagSet) *netdevSecretSource {
+	return &netdevSecretSource{fd: fs.Int("secret-fd", -1, "read the credential once from this open descriptor (3 or higher)")}
 }
 
-// check validates the source before anything is sent to the executor.
-func (s netdevSecretSource) check(env netdevEnv) error {
+// check validates the source and, for --secret-fd, takes the descriptor
+// over. It must run before the executor is dialled, so that the number
+// can only name what the caller redirected. The caller defers close.
+func (s *netdevSecretSource) check(env netdevEnv) error {
 	if *s.fd == -1 {
 		if !env.stdinIsTerminal {
 			return errNetdevNoTerminal
@@ -241,15 +305,31 @@ func (s netdevSecretSource) check(env netdevEnv) error {
 	if *s.fd < minNetdevSecretFD {
 		return fmt.Errorf("--secret-fd must be %d or higher (0 carries the confirmations)", minNetdevSecretFD)
 	}
+	if s.r != nil {
+		return nil
+	}
+	r, err := env.openFD(*s.fd)
+	if err != nil {
+		return err
+	}
+	s.r = r
 	return nil
 }
 
-// read returns the credential; the caller clears it.
-func (s netdevSecretSource) read(env netdevEnv, prompt string) ([]byte, error) {
-	if err := s.check(env); err != nil {
-		return nil, err
+// close releases a descriptor that was taken over but not read.
+func (s *netdevSecretSource) close() {
+	if s.r != nil {
+		_ = s.r.Close()
+		s.r = nil
 	}
+}
+
+// read returns the credential; the caller clears it.
+func (s *netdevSecretSource) read(env netdevEnv, prompt string) ([]byte, error) {
 	if *s.fd == -1 {
+		if !env.stdinIsTerminal {
+			return nil, errNetdevNoTerminal
+		}
 		b, err := env.ask(prompt)
 		if err != nil {
 			clear(b)
@@ -260,10 +340,11 @@ func (s netdevSecretSource) read(env netdevEnv, prompt string) ([]byte, error) {
 		}
 		return b, nil
 	}
-	r, err := env.openFD(*s.fd)
-	if err != nil {
-		return nil, err
+	r := s.r
+	if r == nil {
+		return nil, fmt.Errorf("--secret-fd %d: not validated before use", *s.fd)
 	}
+	s.r = nil
 	raw, err := io.ReadAll(io.LimitReader(r, maxNetdevSecretBytes+3))
 	cerr := r.Close()
 	if err != nil {
@@ -292,8 +373,11 @@ func (s netdevSecretSource) read(env netdevEnv, prompt string) ([]byte, error) {
 }
 
 // netdevAskYes asks for a typed "yes"; anything else (also "y" or "YES")
-// is a refusal.
+// is a refusal. It is read only from a terminal on stdin.
 func netdevAskYes(env netdevEnv, prompt string) (bool, error) {
+	if !env.stdinIsTerminal {
+		return false, errNetdevConfirmNoTerminal
+	}
 	fmt.Fprint(env.promptOut, prompt)
 	raw, err := env.in.ReadSlice('\n')
 	if len(raw) > maxNetdevConfirmationBytes+1 || (err != nil && !errors.Is(err, io.EOF)) {
@@ -306,10 +390,14 @@ func netdevAskYes(env netdevEnv, prompt string) (bool, error) {
 	return line == "yes", nil
 }
 
+// netdevSafe renders one untrusted or executor-returned field for the
+// terminal.
+func netdevSafe(v string) string { return displaySafe([]byte(v), maxNetdevFactBytes) }
+
 // netdevShowProbe prints what the device presented. All facts are
 // untrusted device output and go through displaySafe.
 func netdevShowProbe(w io.Writer, family string, res *pb.ProbeNetDeviceResponse) {
-	s := func(v string) string { return displaySafe([]byte(v), maxNetdevFactBytes) }
+	s := netdevSafe
 	fmt.Fprintln(w, "probe (no credential sent; compare the fingerprint out of band):")
 	fmt.Fprintf(w, "  family       %s\n", s(family))
 	if res.GetResolvedFrom() != "" {
@@ -360,7 +448,7 @@ func netdevProbe(args []string, env netdevEnv) error {
 		return err
 	}
 	defer done()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := env.rpcContext(netdevDeviceTimeout)
 	defer cancel()
 	res, err := c.ProbeNetDevice(ctx, req)
 	if err != nil {
@@ -388,22 +476,27 @@ func netdevAdd(args []string, env netdevEnv) error {
 	if err != nil {
 		return err
 	}
+	// Refuse a missing terminal or a bad --secret-fd before contacting
+	// anything.
+	if !env.stdinIsTerminal {
+		return errNetdevConfirmNoTerminal
+	}
 	if !*noCred {
-		// Refuse a missing terminal before contacting anything.
 		if err := src.check(env); err != nil {
 			return err
 		}
+		defer src.close()
 	}
 	c, done, err := env.dial()
 	if err != nil {
 		return err
 	}
 	defer done()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
 
 	// 1. Probe without credentials and show what was presented.
-	res, err := c.ProbeNetDevice(ctx, req)
+	pctx, pcancel := env.rpcContext(netdevDeviceTimeout)
+	res, err := c.ProbeNetDevice(pctx, req)
+	pcancel()
 	if err != nil {
 		return fmt.Errorf("probe: %w", err)
 	}
@@ -425,8 +518,11 @@ func netdevAdd(args []string, env netdevEnv) error {
 		}
 		defer clear(secret)
 	}
-	// 4. Register with the pin the admin confirmed.
-	reg, err := c.RegisterNetDevice(ctx, &pb.RegisterNetDeviceRequest{
+	// 4. Register with the pin the admin confirmed. The budget starts
+	// only now, after the human steps.
+	rctx, rcancel := env.rpcContext(netdevDeviceTimeout)
+	defer rcancel()
+	reg, err := c.RegisterNetDevice(rctx, &pb.RegisterNetDeviceRequest{
 		DeviceId: id, Family: req.Family, Label: *label, Endpoint: req.Endpoint, Port: req.Port,
 		PinKind: res.GetPinKind(), ConfirmedPin: res.GetObservedPin(), Confirm: "yes",
 	})
@@ -435,17 +531,20 @@ func netdevAdd(args []string, env netdevEnv) error {
 	}
 	d := reg.GetDevice()
 	fmt.Fprintf(env.out, "device %s registered: %s %s:%d, pin generation %d\n",
-		d.GetDeviceId(), d.GetFamily(), d.GetEndpointIp(), d.GetPort(), d.GetTrustGeneration())
+		netdevSafe(d.GetDeviceId()), netdevSafe(d.GetFamily()), netdevSafe(d.GetEndpointIp()), d.GetPort(), d.GetTrustGeneration())
 	if *noCred {
-		fmt.Fprintf(env.out, "no credential stored; run nebula netdev credential set %s\n", d.GetDeviceId())
+		fmt.Fprintf(env.out, "no credential stored; run nebula netdev credential set %s\n", netdevSafe(d.GetDeviceId()))
 		return nil
 	}
-	// 5. Store the credential (the executor validates it first).
-	cr, err := c.SetNetDeviceCredential(ctx, &pb.SetNetDeviceCredentialRequest{DeviceId: id, Username: *username, Secret: secret})
+	// 5. Store the credential (the executor validates it against the
+	// device first), with its own budget.
+	cctx, ccancel := env.rpcContext(netdevDeviceTimeout)
+	defer ccancel()
+	cr, err := c.SetNetDeviceCredential(cctx, &pb.SetNetDeviceCredentialRequest{DeviceId: id, Username: *username, Secret: secret})
 	if err != nil {
 		return fmt.Errorf("device registered, credential not stored: %w", err)
 	}
-	fmt.Fprintf(env.out, "device %s: read credential stored, version %d\n", cr.GetDevice().GetDeviceId(), cr.GetDevice().GetCredentialVersion())
+	fmt.Fprintf(env.out, "device %s: read credential stored, version %d\n", netdevSafe(cr.GetDevice().GetDeviceId()), cr.GetDevice().GetCredentialVersion())
 	return nil
 }
 
@@ -475,16 +574,17 @@ func netdevCredential(args []string, env netdevEnv, rotate bool) error {
 	if err := src.check(env); err != nil {
 		return err
 	}
+	defer src.close()
 	c, done, err := env.dial()
 	if err != nil {
 		return err
 	}
 	defer done()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
 	var expected int64
 	if rotate {
-		d, err := netdevFind(ctx, c, id)
+		lctx, lcancel := env.rpcContext(netdevRegistryTimeout)
+		d, err := netdevFind(lctx, c, id)
+		lcancel()
 		if err != nil {
 			return err
 		}
@@ -495,6 +595,9 @@ func netdevCredential(args []string, env netdevEnv, rotate bool) error {
 		return err
 	}
 	defer clear(secret)
+	// The budget starts after the credential was entered.
+	ctx, cancel := env.rpcContext(netdevDeviceTimeout)
+	defer cancel()
 	if rotate {
 		res, err := c.RotateNetDeviceCredential(ctx, &pb.RotateNetDeviceCredentialRequest{
 			DeviceId: id, ExpectedCredentialVersion: expected, Username: *username, Secret: secret,
@@ -503,7 +606,7 @@ func netdevCredential(args []string, env netdevEnv, rotate bool) error {
 			return fmt.Errorf("rotate credential: %w", err)
 		}
 		d := res.GetDevice()
-		fmt.Fprintf(env.out, "device %s: read credential rotated from version %d to %d\n", d.GetDeviceId(), expected, d.GetCredentialVersion())
+		fmt.Fprintf(env.out, "device %s: read credential rotated from version %d to %d\n", netdevSafe(d.GetDeviceId()), expected, d.GetCredentialVersion())
 		return nil
 	}
 	res, err := c.SetNetDeviceCredential(ctx, &pb.SetNetDeviceCredentialRequest{DeviceId: id, Username: *username, Secret: secret})
@@ -511,7 +614,7 @@ func netdevCredential(args []string, env netdevEnv, rotate bool) error {
 		return fmt.Errorf("set credential: %w", err)
 	}
 	d := res.GetDevice()
-	fmt.Fprintf(env.out, "device %s: read credential stored, version %d\n", d.GetDeviceId(), d.GetCredentialVersion())
+	fmt.Fprintf(env.out, "device %s: read credential stored, version %d\n", netdevSafe(d.GetDeviceId()), d.GetCredentialVersion())
 	return nil
 }
 
@@ -524,18 +627,22 @@ func netdevRepin(args []string, env netdevEnv) error {
 	if err != nil {
 		return err
 	}
+	if !env.stdinIsTerminal {
+		return errNetdevConfirmNoTerminal
+	}
 	c, done, err := env.dial()
 	if err != nil {
 		return err
 	}
 	defer done()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-	stored, err := netdevFind(ctx, c, id)
+	lctx, lcancel := env.rpcContext(netdevDeviceTimeout)
+	stored, err := netdevFind(lctx, c, id)
 	if err != nil {
+		lcancel()
 		return err
 	}
-	res, err := c.ProbeNetDevice(ctx, &pb.ProbeNetDeviceRequest{Family: stored.GetFamily(), Endpoint: stored.GetEndpointIp(), Port: stored.GetPort()})
+	res, err := c.ProbeNetDevice(lctx, &pb.ProbeNetDeviceRequest{Family: stored.GetFamily(), Endpoint: stored.GetEndpointIp(), Port: stored.GetPort()})
+	lcancel()
 	if err != nil {
 		return fmt.Errorf("probe: %w", err)
 	}
@@ -552,20 +659,28 @@ func netdevRepin(args []string, env netdevEnv) error {
 		return errors.New("not confirmed; pin unchanged")
 	}
 	oldPin, newPin := stored.GetTrustPin(), res.GetObservedPin()
-	proposed, err := c.ProposeNetDeviceRepin(ctx, &pb.ProposeNetDeviceRepinRequest{DeviceId: id, OldPin: oldPin, ConfirmedNewPin: newPin})
+	// Each phase gets its own budget, started after the human step before it.
+	pctx, pcancel := env.rpcContext(netdevDeviceTimeout)
+	proposed, err := c.ProposeNetDeviceRepin(pctx, &pb.ProposeNetDeviceRepinRequest{DeviceId: id, OldPin: oldPin, ConfirmedNewPin: newPin})
+	pcancel()
 	if err != nil {
 		return fmt.Errorf("propose re-pin: %w", err)
 	}
 	digest := proposed.GetPermit().GetExecutionDigest()
-	if err := approve(ctx, c, digest, env.in, env.out); err != nil {
+	actx, acancel := env.rpcContext(netdevApprovalTimeout)
+	err = approve(actx, c, digest, env.in, env.out)
+	acancel()
+	if err != nil {
 		return err
 	}
-	committed, err := c.CommitNetDeviceRepin(ctx, &pb.CommitNetDeviceRepinRequest{DeviceId: id, OldPin: oldPin, ConfirmedNewPin: newPin, ExecutionDigest: digest})
+	cctx, ccancel := env.rpcContext(netdevDeviceTimeout)
+	defer ccancel()
+	committed, err := c.CommitNetDeviceRepin(cctx, &pb.CommitNetDeviceRepinRequest{DeviceId: id, OldPin: oldPin, ConfirmedNewPin: newPin, ExecutionDigest: digest})
 	if err != nil {
 		return fmt.Errorf("commit re-pin: %w", err)
 	}
 	d := committed.GetDevice()
-	fmt.Fprintf(env.out, "device %s re-pinned to generation %d (new pin %s)\n", d.GetDeviceId(), d.GetTrustGeneration(), prefix64(d.GetTrustPin()))
+	fmt.Fprintf(env.out, "device %s re-pinned to generation %d (new pin %s)\n", netdevSafe(d.GetDeviceId()), d.GetTrustGeneration(), prefix64(netdevSafe(d.GetTrustPin())))
 	return nil
 }
 
@@ -582,13 +697,13 @@ func netdevBlock(args []string, env netdevEnv) error {
 		return err
 	}
 	defer done()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := env.rpcContext(netdevRegistryTimeout)
 	defer cancel()
 	res, err := c.BlockNetDevice(ctx, &pb.BlockNetDeviceRequest{DeviceId: id, Reason: *reason})
 	if err != nil {
 		return fmt.Errorf("block: %w", err)
 	}
-	fmt.Fprintf(env.out, "device %s blocked\n", res.GetDevice().GetDeviceId())
+	fmt.Fprintf(env.out, "device %s blocked\n", netdevSafe(res.GetDevice().GetDeviceId()))
 	return nil
 }
 
@@ -599,6 +714,9 @@ func netdevConfirmed(args []string, env netdevEnv, op string) error {
 	id, err := netdevParse(fs, args, true)
 	if err != nil {
 		return err
+	}
+	if !env.stdinIsTerminal {
+		return errNetdevConfirmNoTerminal
 	}
 	c, done, err := env.dial()
 	if err != nil {
@@ -616,21 +734,21 @@ func netdevConfirmed(args []string, env netdevEnv, op string) error {
 	if !ok {
 		return fmt.Errorf("not confirmed; device %s unchanged", id)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := env.rpcContext(netdevRegistryTimeout)
 	defer cancel()
 	if op == "remove" {
 		res, err := c.RemoveNetDevice(ctx, &pb.RemoveNetDeviceRequest{DeviceId: id, Confirm: "yes"})
 		if err != nil {
 			return fmt.Errorf("remove: %w", err)
 		}
-		fmt.Fprintf(env.out, "device %s removed\n", res.GetDevice().GetDeviceId())
+		fmt.Fprintf(env.out, "device %s removed\n", netdevSafe(res.GetDevice().GetDeviceId()))
 		return nil
 	}
 	res, err := c.UnblockNetDevice(ctx, &pb.UnblockNetDeviceRequest{DeviceId: id, Confirm: "yes"})
 	if err != nil {
 		return fmt.Errorf("unblock: %w", err)
 	}
-	fmt.Fprintf(env.out, "device %s unblocked\n", res.GetDevice().GetDeviceId())
+	fmt.Fprintf(env.out, "device %s unblocked\n", netdevSafe(res.GetDevice().GetDeviceId()))
 	return nil
 }
 
@@ -645,7 +763,7 @@ func netdevList(args []string, env netdevEnv) error {
 		return err
 	}
 	defer done()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := env.rpcContext(netdevRegistryTimeout)
 	defer cancel()
 	res, err := c.ListNetDevices(ctx, &pb.ListNetDevicesRequest{})
 	if err != nil {
