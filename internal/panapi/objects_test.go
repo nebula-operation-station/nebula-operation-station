@@ -387,6 +387,82 @@ func TestResolveGroupUnresolvedMember(t *testing.T) {
 	}
 }
 
+func TestEmptyGroupIsInvalidAndUnresolvable(t *testing.T) {
+	cases := map[string]struct {
+		inner string
+		svc   bool
+	}{
+		"address group without content": {`<address-group><entry name="g"/></address-group>`, false},
+		"address group empty static":    {`<address-group><entry name="g"><static/></entry></address-group>`, false},
+		"service group without content": {`<service-group><entry name="g"/></service-group>`, true},
+		"service group empty members":   {`<service-group><entry name="g"><members/></entry></service-group>`, true},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			o, err := ParseObjects(objectsBody(c.inner))
+			if err != nil {
+				t.Fatalf("ParseObjects: %v", err)
+			}
+			if !o.Incomplete {
+				t.Fatal("Incomplete = false, want true for an empty group")
+			}
+			groups, invalid := o.AddressGroups, o.InvalidAddressGroups
+			if c.svc {
+				groups, invalid = o.ServiceGroups, o.InvalidServiceGroups
+			}
+			if len(groups) != 1 || groups[0].Name != "g" {
+				t.Fatalf("group not kept: %+v", groups)
+			}
+			if !reflect.DeepEqual(invalid, []string{"g"}) {
+				t.Fatalf("invalid groups = %v, want [g]", invalid)
+			}
+			if c.svc {
+				_, err = o.ResolveServiceGroup("g")
+			} else {
+				_, err = o.ResolveGroup("g")
+			}
+			if !errors.Is(err, ErrGroupUnresolvable) {
+				t.Fatalf("resolve err = %v, want ErrGroupUnresolvable", err)
+			}
+		})
+	}
+}
+
+func TestNestedEmptyGroupIsUnresolvable(t *testing.T) {
+	o, err := ParseObjects(objectsBody(`<address><entry name="a"><ip-netmask>192.0.2.1</ip-netmask></entry></address>` +
+		`<address-group><entry name="p"><static><member>a</member><member>g</member></static></entry><entry name="g"><static/></entry></address-group>` +
+		`<service><entry name="s"><protocol><tcp><port>1</port></tcp></protocol></entry></service>` +
+		`<service-group><entry name="sp"><members><member>s</member><member>sg</member></members></entry><entry name="sg"/></service-group>`))
+	if err != nil {
+		t.Fatalf("ParseObjects: %v", err)
+	}
+	if r, err := o.ResolveGroup("p"); !errors.Is(err, ErrGroupUnresolvable) {
+		t.Fatalf("ResolveGroup(p) = %v, %v; want ErrGroupUnresolvable", r, err)
+	}
+	if r, err := o.ResolveServiceGroup("sp"); !errors.Is(err, ErrGroupUnresolvable) {
+		t.Fatalf("ResolveServiceGroup(sp) = %v, %v; want ErrGroupUnresolvable", r, err)
+	}
+}
+
+func TestResolveErrorsNeverEchoGroupName(t *testing.T) {
+	const marker = "SECRETMARKER"
+	o, err := ParseObjects(objectsBody(`<address-group><entry name="` + marker + `"><static><member>x</member></static></entry></address-group>` +
+		`<service-group><entry name="` + marker + `s"><members><member>x</member></members></entry></service-group>`))
+	if err != nil {
+		t.Fatalf("ParseObjects: %v", err)
+	}
+	for _, name := range []string{marker, marker + "-missing"} {
+		if _, err := o.ResolveGroup(name); err == nil || strings.Contains(err.Error(), marker) {
+			t.Fatalf("ResolveGroup err = %v, want an error without the name", err)
+		}
+	}
+	for _, name := range []string{marker + "s", marker + "-missing"} {
+		if _, err := o.ResolveServiceGroup(name); err == nil || strings.Contains(err.Error(), marker) {
+			t.Fatalf("ResolveServiceGroup err = %v, want an error without the name", err)
+		}
+	}
+}
+
 func TestResolveGroupWideDiamondIsBounded(t *testing.T) {
 	// Every group of level i contains every group of level i+1. Without
 	// memoization the expansion would visit width^levels groups.

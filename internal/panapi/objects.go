@@ -43,6 +43,11 @@ var (
 	// object nor a group of this vsys (for example a shared or predefined
 	// object).
 	ErrUnresolvedMember = errors.New("panapi: group member unresolved")
+	// ErrGroupUnresolvable is returned when resolution reaches a group with
+	// neither static members nor a dynamic filter (InvalidAddressGroups,
+	// InvalidServiceGroups): its content cannot be evaluated. It never
+	// means "matches nothing".
+	ErrGroupUnresolvable = errors.New("panapi: group cannot be evaluated")
 )
 
 // Objects is the parsed object configuration of the supported vsys. All
@@ -52,7 +57,8 @@ var (
 //
 // Incomplete is set when any list (objects, groups, members, tags) exceeded
 // its netdevcontract limit; the lists then hold the entries up to the limit
-// and must not be treated as complete or as deletions.
+// and must not be treated as complete or as deletions. Incomplete is also
+// set when a group is invalid (InvalidAddressGroups, InvalidServiceGroups).
 type Objects struct {
 	Addresses     []netdevcontract.AddressObject
 	AddressGroups []netdevcontract.Group
@@ -61,6 +67,13 @@ type Objects struct {
 	// Tags are the names of the tag objects.
 	Tags       []string
 	Incomplete bool
+	// InvalidAddressGroups and InvalidServiceGroups name the groups that
+	// have neither static members nor a dynamic filter. They stay in
+	// AddressGroups and ServiceGroups, but resolving them (directly or as
+	// a nested member) fails with ErrGroupUnresolvable: an empty group is
+	// "cannot evaluate", never "matches nothing".
+	InvalidAddressGroups []string
+	InvalidServiceGroups []string
 
 	// truncatedAddr and truncatedSvc hold the address and service groups
 	// whose member list was cut (two namespaces, two sets).
@@ -158,6 +171,10 @@ func (p *objectParser) parse(sec xmlSection) error {
 		if err := claim(p.addrNS, g.Name, "address group", i); err != nil {
 			return err
 		}
+		if emptyGroup(g) {
+			p.o.Incomplete = true
+			p.o.InvalidAddressGroups = append(p.o.InvalidAddressGroups, g.Name)
+		}
 		p.o.AddressGroups = append(p.o.AddressGroups, g)
 	}
 	for i, e := range entries(p, sec.Service, "services", netdevcontract.MaxServiceObjects) {
@@ -178,9 +195,19 @@ func (p *objectParser) parse(sec xmlSection) error {
 		if err := claim(p.svcNS, g.Name, "service group", i); err != nil {
 			return err
 		}
+		if emptyGroup(g) {
+			p.o.Incomplete = true
+			p.o.InvalidServiceGroups = append(p.o.InvalidServiceGroups, g.Name)
+		}
 		p.o.ServiceGroups = append(p.o.ServiceGroups, g)
 	}
 	return nil
+}
+
+// emptyGroup reports whether g has neither static members nor a dynamic
+// filter. Such a group cannot be evaluated (ErrGroupUnresolvable).
+func emptyGroup(g netdevcontract.Group) bool {
+	return len(g.Static) == 0 && g.DynamicFilter == ""
 }
 
 // commonFields validates description and tags of an object or group.
@@ -441,7 +468,9 @@ func portNumber(s string) (int, bool) {
 // contains, through nested static groups, in first-seen order without
 // duplicates. It fails with ErrGroupNotFound, ErrGroupCycle,
 // ErrGroupDepth (nesting deeper than MaxGroupResolveDepth),
-// ErrDynamicGroup, ErrGroupIncomplete or ErrUnresolvedMember. Each group is
+// ErrDynamicGroup, ErrGroupIncomplete, ErrGroupUnresolvable or
+// ErrUnresolvedMember; the error never contains the group name, which is
+// device text. Each group is
 // expanded at most once per call, so the work is linear in the total
 // member count.
 func (o Objects) ResolveGroup(name string) ([]netdevcontract.AddressObject, error) {
@@ -451,7 +480,7 @@ func (o Objects) ResolveGroup(name string) ([]netdevcontract.AddressObject, erro
 	}
 	names, err := o.resolve(name, leaves, o.AddressGroups, o.truncatedAddr)
 	if err != nil {
-		return nil, fmt.Errorf("resolve address group %q: %w", name, err)
+		return nil, fmt.Errorf("resolve address group: %w", err)
 	}
 	out := make([]netdevcontract.AddressObject, 0, len(names))
 	for _, i := range names {
@@ -471,7 +500,7 @@ func (o Objects) ResolveServiceGroup(name string) ([]netdevcontract.ServiceObjec
 	}
 	names, err := o.resolve(name, leaves, o.ServiceGroups, o.truncatedSvc)
 	if err != nil {
-		return nil, fmt.Errorf("resolve service group %q: %w", name, err)
+		return nil, fmt.Errorf("resolve service group: %w", err)
 	}
 	out := make([]netdevcontract.ServiceObject, 0, len(names))
 	for _, i := range names {
@@ -533,6 +562,9 @@ func (r *resolver) visit(gi, level int) (int, error) {
 		return h, nil
 	}
 	g := r.groups[gi]
+	if emptyGroup(g) {
+		return 0, ErrGroupUnresolvable
+	}
 	if g.DynamicFilter != "" {
 		return 0, ErrDynamicGroup
 	}
