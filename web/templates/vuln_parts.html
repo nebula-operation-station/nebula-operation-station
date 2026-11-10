@@ -14,6 +14,11 @@
 {{end}}
 {{end}}
 
+{{/* "Fix with" (ADR 0011 D8, VU-13): a plain GET link that opens an
+     existing proposal flow (ou02 operation form, cu04 containers page)
+     prefilled, or a vendor advisory; it never submits anything. */}}
+{{define "vuln_fix_with"}}{{with .}}<span class="vuln-fix">{{if .Class}}<span class="badge {{.Class}}">{{.Text}}</span>{{else}}{{.Text}}{{end}}{{if .Detail}} <span class="hint mono">{{.Detail}}</span>{{end}}{{if .URL}} · <a class="vuln-fix-link" href="{{.URL}}"{{if .External}} rel="noopener noreferrer external"{{end}}>{{.LinkText}}</a>{{end}}{{range .Notes}} <span class="hint">{{.}}</span>{{end}}</span>{{end}}{{end}}
+
 {{define "vuln_labels"}}{{range .}}<span class="badge {{.Class}} vuln-label">{{.Text}}</span> {{end}}{{end}}
 
 {{define "vuln_findings_table"}}
@@ -26,7 +31,7 @@
     <td class="mono"><a href="{{.URL}}">{{.VulnID}}</a>{{if .KEV}} <span class="badge badge--critical">KEV</span>{{end}}</td>
     <td><a href="{{.SubjectURL}}">{{.SubjectName}}</a> <span class="hint">{{.SubjectKind}}</span></td>
     <td class="mono">{{.Component}} {{.Version}}</td>
-    <td class="mono">{{.Fix}}</td>
+    <td><span class="mono">{{.Fix}}</span>{{with .FixWith}}<br>{{template "vuln_fix_with" .}}{{end}}</td>
     <td><span class="badge {{.Tier.Class}}">{{.Tier.Text}}</span></td>
     <td><span class="badge {{.State.Class}}">{{.State.Text}}</span></td>
     <td>{{template "vuln_labels" .Labels}}</td>
