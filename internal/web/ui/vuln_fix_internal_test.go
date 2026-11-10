@@ -362,10 +362,11 @@ func TestFixResolverUnreadableResultsNeverClaimAFix(t *testing.T) {
 		return nil, errors.New("db down")
 	}}
 	v := r.fixWith(context.Background(), hostFinding("debian:bookworm", "openssl", "3.0.11-1~deb12u2", "openssl"))
-	if v == nil || v.Verified || v.URL != "" || !strings.Contains(v.Text, "unknown") {
+	if v == nil || v.Verified || v.URL != "" || v.Text != fixTextListsUnread {
 		t.Fatalf("got %+v", v)
 	}
-	if v := (&vulnFixResolver{}).fixWith(context.Background(), hostFinding("debian:bookworm", "openssl", "1-1", "openssl")); v == nil || v.Verified {
+	if v := (&vulnFixResolver{}).fixWith(context.Background(), hostFinding("debian:bookworm", "openssl", "1-1", "openssl")); v == nil || v.Verified ||
+		v.URL != "" || v.Text != fixTextOpsOff {
 		t.Fatalf("operations off: %+v", v)
 	}
 }

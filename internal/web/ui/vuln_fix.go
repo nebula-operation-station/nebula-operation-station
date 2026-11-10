@@ -55,6 +55,8 @@ const (
 	fixTextBelowFixed    = "No fix available yet: the candidate's source version is below the fixed version"
 	fixTextNoCandidate   = "No fix in the configured repositories"
 	fixTextNoList        = "Update candidates unknown: no package update list for this host yet"
+	fixTextListsUnread   = "Update candidates unknown: the update lists could not be read"
+	fixTextOpsOff        = "Update candidates unknown: operations are off"
 	fixTextNoFixYet      = "No fix available yet"
 	fixTextWontFix       = "No fix: the distribution will not fix this"
 	fixTextNoFixed       = "Fix not verified: the fixed version cannot be compared"
@@ -508,8 +510,10 @@ func (r *vulnFixResolver) fixWith(ctx context.Context, f vulnstore.Finding) *vul
 		if !known {
 			if fv, done := fixStateView(f.Record.Fix.State); done {
 				v = fv
+			} else if r.lastResults == nil {
+				v = vulnFixView{Text: fixTextOpsOff, Class: classUnknown}
 			} else {
-				v = vulnFixView{Text: "Update candidates unknown: the update lists could not be read", Class: classUnknown}
+				v = vulnFixView{Text: fixTextListsUnread, Class: classUnknown}
 			}
 			break
 		}
