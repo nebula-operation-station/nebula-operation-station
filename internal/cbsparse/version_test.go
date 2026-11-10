@@ -150,7 +150,7 @@ func TestParseVersion(t *testing.T) {
 // recognised when it is the complete key of the line, never as a prefix of
 // a longer key.
 func TestParseVersionKeyMatching(t *testing.T) {
-	const realKeys ="Model : CBS250-8T\nSerial Number : PSZ00000000\nFirmware Version : 3.1.0.10\n"
+	const realKeys = "Model : CBS250-8T\nSerial Number : PSZ00000000\nFirmware Version : 3.1.0.10\n"
 	want := Version{Model: "CBS250-8T", Firmware: "3.1.0.10", Serial: "PSZ00000000"}
 	tests := []struct {
 		name string
