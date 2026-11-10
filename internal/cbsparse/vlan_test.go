@@ -305,6 +305,29 @@ func TestParseVLANsNameClearOfTheGapIsKept(t *testing.T) {
 	}
 }
 
+func TestParseVLANsKnownGapOverflowOnColumnStart(t *testing.T) {
+	// Pins the documented known gap (docs/implementation/m0.md): the
+	// name "abcdefghijklmn    gi1/0/2" (an inner run of four spaces, at
+	// least vlanNameMinPad) in a VLAN without ports or type runs past the
+	// Name column so that its second word starts exactly at Tagged Ports.
+	// The line is byte for byte a 14-rune name plus a tagged port, so it is
+	// read that way and the dataset is not marked incomplete. If this test
+	// fails, the gap was closed: update m0.md.
+	const realName = "abcdefghijklmn    gi1/0/2"
+	row := " 10  " + realName + "\n"
+	if strings.Index(row, "gi1/0/2") != 23 {
+		t.Fatalf("test row misaligned: %q", row)
+	}
+	got, incomplete, err := ParseVLANs([]byte(cbs350VLANHeader + row))
+	if err != nil || incomplete || len(got) != 2 {
+		t.Fatalf("got %+v, incomplete %v, err %v", got, incomplete, err)
+	}
+	misread := VLAN{ID: 10, Name: "abcdefghijklmn", Tagged: []string{"gi1/0/2"}}
+	if !reflect.DeepEqual(got[1], misread) || got[1].Name == realName {
+		t.Fatalf("got %+v, want the documented misreading %+v", got[1], misread)
+	}
+}
+
 // membershipTable builds a "show vlan" output with n rows whose tagged and
 // untagged lists each expand to MaxInterfacesPerDevice ports.
 func membershipTable(n int) []byte {
