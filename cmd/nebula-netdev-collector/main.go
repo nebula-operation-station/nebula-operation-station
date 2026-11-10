@@ -41,6 +41,14 @@ const (
 	// delay reads.
 	minInterval = time.Second
 	maxInterval = netdevcollect.MinReadInterval
+	// readTimeout bounds one device read including its spool write; it is
+	// the poller's ReadTimeout.
+	readTimeout = netdevcollect.DefaultReadTimeout
+	// callTimeout is the executor client's per-call timeout. It must not
+	// be below readTimeout: the client default (DefaultCallTimeout, 10 s)
+	// would cut every device read short of the executor's connect plus
+	// request budget, so slow reads would always fail and back off.
+	callTimeout = readTimeout
 )
 
 // errRunAsRoot means the collector was started as root; it must run as
@@ -138,19 +146,24 @@ func run(ctx context.Context, o options, log *slog.Logger, d deps) error {
 	if d.geteuid() == 0 {
 		return errRunAsRoot
 	}
-	client, err := d.newClient(ctx, executorclient.Options{SocketPath: o.socket, ExecutorUser: o.executorUser})
+	client, err := d.newClient(ctx, executorclient.Options{
+		SocketPath:     o.socket,
+		ExecutorUser:   o.executorUser,
+		DefaultTimeout: callTimeout,
+	})
 	if err != nil {
 		return fmt.Errorf("connect to executor: %w", err)
 	}
 	defer client.Close()
 
 	p := &netdevcollect.Poller{
-		Client:   client,
-		Spool:    d.newSpool(o.spoolDir),
-		Now:      d.now,
-		Rand:     d.rand,
-		Log:      log,
-		Interval: o.interval,
+		Client:      client,
+		Spool:       d.newSpool(o.spoolDir),
+		Now:         d.now,
+		Rand:        d.rand,
+		Log:         log,
+		Interval:    o.interval,
+		ReadTimeout: readTimeout,
 	}
 	log.Info("nebula-netdev-collector: starting", "socket", o.socket, "spool", o.spoolDir, "interval", o.interval.String())
 	if err := p.Run(ctx); err != nil {

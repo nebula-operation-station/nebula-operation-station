@@ -152,6 +152,27 @@ func TestRunReportsClientError(t *testing.T) {
 	}
 }
 
+func TestExecutorClientTimeoutCoversReadBudget(t *testing.T) {
+	var got executorclient.Options
+	d := testDeps(newFakeClient(), &memSpool{}, 1000)
+	d.newClient = func(_ context.Context, o executorclient.Options) (collectorClient, error) {
+		got = o
+		return nil, errors.New("stop after capturing the options")
+	}
+	if err := run(context.Background(), validOptions(), slog.New(slog.DiscardHandler), d); err == nil {
+		t.Fatal("run returned nil with a failing client")
+	}
+	if got.DefaultTimeout <= 0 {
+		t.Fatalf("DefaultTimeout = %v: the client would fall back to %v", got.DefaultTimeout, executorclient.DefaultCallTimeout)
+	}
+	if got.DefaultTimeout < netdevcollect.DefaultReadTimeout {
+		t.Fatalf("DefaultTimeout = %v, below the device read budget %v", got.DefaultTimeout, netdevcollect.DefaultReadTimeout)
+	}
+	if got.DefaultTimeout < readTimeout {
+		t.Fatalf("DefaultTimeout = %v, below the poller ReadTimeout %v", got.DefaultTimeout, readTimeout)
+	}
+}
+
 func TestRunShutdownDrainsAndClosesClient(t *testing.T) {
 	c := newFakeClient()
 	s := &memSpool{}
