@@ -200,6 +200,46 @@ func TestFeedStaleOncePerSourceAndEpisode(t *testing.T) {
 	}
 }
 
+// TestRestoredStalenessIsNotSentAgain: a notifier restored from the
+// delivered state of an earlier one does not repeat the feed and Hermes
+// staleness alerts of episodes still running, but alerts an episode that
+// changed meanwhile.
+func TestRestoredStalenessIsNotSentAgain(t *testing.T) {
+	ctx := context.Background()
+	n, _, c := newTest(t)
+	last := t0.Add(-49 * time.Hour)
+	stale := []FeedStatus{{SourceID: "osv", Stale: true, Since: t0}, {SourceID: "kev", Stale: true}, {SourceID: "debian-tracker", Stale: true, Since: t0}}
+	if got := n.Feeds(ctx, stale) + n.Hermes(ctx, last); got != 4 {
+		t.Fatalf("first process sent %d, want 4", got)
+	}
+	d := n.Delivered()
+	if len(d.FeedStale) != 3 || !d.HermesMark.Equal(last) {
+		t.Fatalf("delivered = %+v", d)
+	}
+	// Restart: the same episodes for osv and kev, debian-tracker's ended
+	// and began again (another Since), and an unknown source sneaks in.
+	d.FeedStale["unknown"] = t0
+	n2, s2, _ := newTest(t)
+	c.Add(time.Hour)
+	now := []FeedStatus{stale[0], stale[1], {SourceID: "debian-tracker", Stale: true, Since: t0.Add(time.Hour)}, {SourceID: "unknown", Stale: true, Since: t0}}
+	n2.Restore(d, now)
+	n2.Feeds(ctx, now)
+	n2.Hermes(ctx, last)
+	if len(s2.es) != 1 || !strings.Contains(s2.es[0].Reason, "debian-tracker") {
+		t.Fatalf("after restore sent %v, want only debian-tracker's new episode", s2.kinds())
+	}
+	if _, ok := n2.Delivered().FeedStale["unknown"]; ok {
+		t.Fatal("restore created state for an unknown source")
+	}
+	// A source fresh at restart is not restored.
+	n3, s3, _ := newTest(t)
+	n3.Restore(d, []FeedStatus{{SourceID: "osv"}})
+	n3.Feeds(ctx, stale[:1])
+	if len(s3.es) != 1 {
+		t.Fatalf("source fresh at restart: sent %d, want 1", len(s3.es))
+	}
+}
+
 func TestUnknownSourcesRaiseNothing(t *testing.T) {
 	ctx := context.Background()
 	n, s, _ := newTest(t)

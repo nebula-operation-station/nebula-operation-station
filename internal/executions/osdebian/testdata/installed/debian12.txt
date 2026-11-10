@@ -1,0 +1,14 @@
+nos-installed-v1
+P	installed	base-files	amd64	12.4+deb12u7	base-files	12.4+deb12u7		.
+P	installed	libjansson4	amd64	2.14-2+b1	jansson	2.14-2		.
+P	installed	libgcc-s1	amd64	12.2.0-14	gcc-12	12.2.0-14		.
+P	installed	cpp	amd64	4:12.2.0-3	gcc-defaults	1.203		.
+P	installed	libc6	amd64	2.36-9+deb12u8	glibc	2.36-9+deb12u8		.
+P	installed	libc6	i386	2.36-9+deb12u8	glibc	2.36-9+deb12u8		.
+P	config-files	oldpkg	amd64	1.0-1	oldpkg	1.0-1		.
+P	installed	linux-image-6.1.0-25-amd64	amd64	6.1.106-3	linux-signed-amd64	6.1.106+3	linux (= 6.1.106-3)	.
+P	installed	linux-image-6.1.0-26-amd64	amd64	6.1.112-1	linux-signed-amd64	6.1.112+1	linux (= 6.1.112-1)	.
+P	installed	linux-image-amd64	amd64	6.1.112-1	linux-signed-amd64	6.1.112+1		.
+P	installed	linux-headers-6.1.0-26-amd64	amd64	6.1.112-1	linux	6.1.112-1		.
+K	6.1.0-26-amd64	#1 SMP PREEMPT_DYNAMIC Debian 6.1.112-1 (2024-09-30)
+END	11

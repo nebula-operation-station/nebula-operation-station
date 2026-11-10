@@ -3,6 +3,7 @@
 <p><a href="/vulnerabilities?view=subject">All subjects</a></p>
 {{template "vuln_banners" .}}
 {{with .Vuln}}
+{{template "vuln_trivy" .}}
 {{if not .Unavailable}}
 {{with .Subject}}
 <section class="panel vuln-subject-summary" aria-label="Assessment">

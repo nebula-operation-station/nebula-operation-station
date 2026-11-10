@@ -656,6 +656,8 @@ type vulnPageData struct {
 	CVE string
 	// Subject page.
 	Subject *vulnSubjectGroup
+	// TrivyLocal: the image subject's P1-30 observation (vuln_trivy.go).
+	TrivyLocal *trivyLocalPanel
 	// Finding page.
 	Finding *vulnFindingView
 	Holds   []vulnHoldView
@@ -926,18 +928,28 @@ func feedHasIssue(f VulnFeedStatus) bool {
 	return len(feedLabels(f)) > 0
 }
 
-// groupBySubject builds the list by subject: every subject in scope, also
-// those without findings (they show their run age, never "0 findings").
-func groupBySubject(c vulnContext, page VulnPage, views []vulnFindingView, fl vulnFilter) []vulnSubjectGroup {
-	type acc struct {
-		g         vulnSubjectGroup
-		st        VulnSubjectStatus
-		feedIssue bool
-		critical  bool
-	}
-	m := map[string]*acc{}
+// subjectSummary is the per-subject aggregate behind the list by subject
+// and the org-chart badges (VU-12): one computation, so the two never
+// disagree on what counts as clean.
+type subjectSummary struct {
+	subject   vulnstore.Subject
+	g         vulnSubjectGroup
+	st        VulnSubjectStatus
+	feedIssue bool
+	critical  bool
+	// top is the highest D7 tier of the subject's open findings;
+	// TierUnknown without one.
+	top vulnstore.Tier
+}
+
+// summarizeSubjects aggregates every subject in scope (also those without
+// findings) and reports whether any feed on the page has an issue. order
+// keeps first-seen order. Subjects of another kind than fl.Kind are left
+// out.
+func summarizeSubjects(c vulnContext, page VulnPage, views []vulnFindingView, fl vulnFilter) (map[string]*subjectSummary, []string, bool) {
+	m := map[string]*subjectSummary{}
 	var order []string
-	add := func(s vulnstore.Subject) *acc {
+	add := func(s vulnstore.Subject) *subjectSummary {
 		k := s.String()
 		if a, ok := m[k]; ok {
 			return a
@@ -947,7 +959,7 @@ func groupBySubject(c vulnContext, page VulnPage, views []vulnFindingView, fl vu
 		if name == "" {
 			name = vulnText(s.ID, false)
 		}
-		a := &acc{st: st, g: vulnSubjectGroup{Kind: vulnText(string(s.Kind), false), ID: vulnText(s.ID, false), Name: name, URL: vulnSubjectURL(s)}}
+		a := &subjectSummary{subject: s, st: st, g: vulnSubjectGroup{Kind: vulnText(string(s.Kind), false), ID: vulnText(s.ID, false), Name: name, URL: vulnSubjectURL(s)}}
 		m[k] = a
 		order = append(order, k)
 		return a
@@ -970,6 +982,9 @@ func groupBySubject(c vulnContext, page VulnPage, views []vulnFindingView, fl vu
 			if row.Tier == vulnstore.TierCritical {
 				a.critical = true
 			}
+			if row.Tier > a.top {
+				a.top = row.Tier
+			}
 		}
 		if v.Unconfirmed {
 			a.g.Unconfirmed++
@@ -989,6 +1004,13 @@ func groupBySubject(c vulnContext, page VulnPage, views []vulnFindingView, fl vu
 	for _, f := range c.feeds {
 		pageFeedIssue = pageFeedIssue || feedHasIssue(f)
 	}
+	return m, order, pageFeedIssue
+}
+
+// groupBySubject builds the list by subject: every subject in scope, also
+// those without findings (they show their run age, never "0 findings").
+func groupBySubject(c vulnContext, page VulnPage, views []vulnFindingView, fl vulnFilter) []vulnSubjectGroup {
+	m, order, pageFeedIssue := summarizeSubjects(c, page, views, fl)
 	out := make([]vulnSubjectGroup, 0, len(order))
 	for _, k := range order {
 		a := m[k]
@@ -1085,6 +1107,9 @@ func (h *Handler) handleVulnSubject(w http.ResponseWriter, r *http.Request) {
 	d.Filter.View = ""
 	d.Filter.Digest = s.ImageDigest
 	title := "Vulnerabilities of " + s.ID
+	if s.Kind == vulnfinding.SubjectImage {
+		d.TrivyLocal = h.trivyLocalFor(ctx, s)
+	}
 	page, err := h.vuln.VulnFindings(ctx, VulnQuery{Subject: &s, Limit: MaxVulnRows})
 	if err != nil {
 		h.log.Error("vulnerabilities: subject", "error", err)
@@ -1111,6 +1136,7 @@ func (h *Handler) handleVulnSubject(w http.ResponseWriter, r *http.Request) {
 	if len(groups) == 1 {
 		d.Subject = &groups[0]
 	}
+	d.TrivyLocal.besideHermes(rows, c.subject(s), d.Subject, now)
 	fix := h.newVulnFixResolver()
 	for i, row := range rows {
 		if d.Filter.match(views[i], row) {

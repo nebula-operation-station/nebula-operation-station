@@ -59,17 +59,34 @@ type Completion struct {
 // the server.db write lock, which every other writer of the shared
 // database waits for up to its busy timeout (serverdb.DefaultBusyTimeout,
 // 5 s). A waiting writer does not queue: SQLite's busy handler retries
-// the lock after growing sleeps, from 228 ms on every 100 ms. So an apply
-// transaction is kept short (maxApplyWrites statements: well under a
-// second even on a slow disk) and the next one starts only after
-// applyPause, longer than one retry interval, so that every waiting
-// writer retries while the lock is free. For the largest run (10000
-// covered subjects, about 50000 statements) the pauses add about 6 s;
-// with open findings on the order of MaxFindingsPerRun about a minute,
-// well inside the API's complete budget.
+// the lock after growing sleeps (1, 2, 5, ... ms), from 228 ms on every
+// 100 ms, while the next apply transaction, starting fresh, retries
+// within milliseconds. So:
+//
+//   - an apply transaction is bounded by the rows it writes, not by its
+//     statements: at most maxApplyRows rows (a statement that writes
+//     nothing counts as one; the superseded-holds DELETE runs in chunks
+//     of the rows left), plus the run report: about 100 ms measured, and
+//     under about 1.5 s even under the race detector on a loaded machine
+//     (2048 rows took up to 2.9 s there);
+//   - the next one starts only after a pause of at least applyPause and
+//     at least as long as the previous transaction took, so the lock is
+//     free at least half of the time and every pause spans at least two
+//     retries of every waiting writer, whatever its backoff stage. A
+//     waiter misses a pause only if each of its retries in it hits
+//     another writer's own transaction; over its 5 s busy timeout it sees
+//     at least eight pauses, so several concurrent writers all get
+//     through instead of only the first one per pause.
+//
+// For the largest run (10000 covered subjects, about 30000 rows) the
+// pauses add about 8 s; MaxFindingsPerRun dropped holds take about 200
+// transactions, under two minutes. The largest conceivable complete
+// (about 600000 rows) may outlast the API's complete budget; it is then
+// resumed by the retry or by ResumeCompleting (cmd/nebula-server calls it
+// at startup and through Prune every 15 minutes), with the same result.
 const (
-	maxApplyWrites = 1024
-	applyPause     = 120 * time.Millisecond
+	maxApplyRows = 1024
+	applyPause   = 250 * time.Millisecond
 )
 
 // candidate is one requested run closure.
@@ -130,11 +147,11 @@ func (p *completeProgress) sameCursor(q *completeProgress) bool {
 //
 // The closures are planned and classified on a read snapshot, which holds
 // no write lock, and the guards are checked on the whole plan. The plan is
-// then applied in write transactions of at most maxApplyWrites statements,
-// applyPause apart (re-checking each subject's coverage watermark and
-// each finding's state_run_seq and revision), so other writers of
-// server.db never wait long for the write lock. Each apply transaction saves the run's
-// completing state with what it applied; the last one marks the run
+// then applied in write transactions of at most maxApplyRows rows, paced
+// by applyPause (re-checking each subject's coverage watermark and each
+// finding's state_run_seq and revision), so other writers of server.db
+// never wait long for the write lock. Each apply transaction saves the
+// run's completing state with what it applied; the last one marks the run
 // completed and saves the completion instead.
 //
 // A context ending before the first apply transaction commits changes
@@ -142,10 +159,11 @@ func (p *completeProgress) sameCursor(q *completeProgress) bool {
 // fits one apply transaction is therefore all or nothing. A larger
 // complete that stops later leaves the run completing: it takes no more
 // batches and is not aborted at its time limit, and the next Complete (or
-// ResumeComplete) resumes after the last committed transaction with the
-// saved guard decision, time and counts, so it ends with the closures and
-// the completion an uninterrupted complete would have made. Once Complete
-// has returned, CompletionOf returns the saved completion.
+// ResumeComplete, or ResumeCompleting and Prune) resumes after the
+// last committed transaction with the saved guard decision, time and
+// counts, so it ends with the closures and the completion an
+// uninterrupted complete would have made. Once Complete has returned,
+// CompletionOf returns the saved completion.
 func (s *Store) Complete(ctx context.Context, runID string) (Completion, error) {
 	s.completeMu.Lock()
 	defer s.completeMu.Unlock()
@@ -265,10 +283,12 @@ func (s *Store) abortIfExpired(ctx context.Context, runID string, now time.Time)
 }
 
 // applyPos is a position in the plans: plan i, whether its head is
-// applied, and its next candidate j.
+// applied, whether its superseded holds are all dropped, and its next
+// candidate j.
 type applyPos struct {
-	i, j int
-	head bool
+	i, j    int
+	head    bool
+	dropped bool
 }
 
 // applyComplete applies the plans in bounded write transactions. prev is
@@ -282,6 +302,7 @@ func (s *Store) applyComplete(ctx context.Context, run runRow, plans []*subjectP
 	holdGuarded(plans, cur.Completion)
 	var pos applyPos
 	for n := 1; ; n++ {
+		begin := time.Now()
 		next, nextPos, done, err := s.applyChunk(ctx, run, plans, pos, prev, cur)
 		if err != nil {
 			return Completion{}, err
@@ -293,7 +314,9 @@ func (s *Store) applyComplete(ctx context.Context, run runRow, plans []*subjectP
 			s.chunkDone(n)
 		}
 		prev, cur, pos = next, next, nextPos
-		t := time.NewTimer(applyPause)
+		// The lock stays free at least as long as it was held (see
+		// applyPause).
+		t := time.NewTimer(max(applyPause, time.Since(begin)))
 		select {
 		case <-ctx.Done():
 			t.Stop()
@@ -319,9 +342,9 @@ func checkProgress(ctx context.Context, tx *sql.Tx, runID string, want *complete
 }
 
 // applyChunk applies the plans from pos in one write transaction of at
-// most about maxApplyWrites statements and saves the completing state
-// with it, or marks the run completed when it applied the last plan. It
-// returns the saved state and the next position.
+// most about maxApplyRows rows and saves the completing state with it, or
+// marks the run completed when it applied the last plan. It returns the
+// saved state and the next position.
 func (s *Store) applyChunk(ctx context.Context, run runRow, plans []*subjectPlan, pos applyPos, prev, cur *completeProgress) (*completeProgress, applyPos, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -330,6 +353,13 @@ func (s *Store) applyChunk(ctx context.Context, run runRow, plans []*subjectPlan
 		return nil, pos, false, err
 	}
 	defer tx.Rollback()
+	locked := time.Now()
+	var changesBefore int64
+	if s.applyDone != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT total_changes()`).Scan(&changesBefore); err != nil {
+			return nil, pos, false, fmt.Errorf("count changes: %w", err)
+		}
+	}
 	stored, err := checkProgress(ctx, tx, run.id, prev)
 	if err != nil {
 		return nil, pos, false, err
@@ -340,8 +370,12 @@ func (s *Store) applyChunk(ctx context.Context, run runRow, plans []*subjectPlan
 	if comp.Held == nil {
 		comp.Held = map[HoldReason]int{}
 	}
+	budget := maxApplyRows
+	if s.applyRows > 0 {
+		budget = s.applyRows
+	}
 	writes := 0
-	for pos.i < len(plans) && writes < maxApplyWrites {
+	for pos.i < len(plans) && writes < budget {
 		p := plans[pos.i]
 		if !pos.head && !p.resumed {
 			n, live, err := applyHead(ctx, tx, run, p, at, &comp)
@@ -368,7 +402,23 @@ func (s *Store) applyChunk(ctx context.Context, run runRow, plans []*subjectPlan
 			}
 		}
 		pos.head = true
-		for pos.j < len(p.cands) && writes < maxApplyWrites {
+		if !pos.dropped {
+			// Holds of older runs on the subject are superseded (path 7);
+			// there can be about MaxFindingsPerRun of them, so they are
+			// dropped in chunks of the rows left in this transaction. A
+			// resumed subject repeats the drop: our own holds carry
+			// run.seq and are never matched.
+			n, more, err := dropSuperseded(ctx, tx, p.subject, run.seq, max(1, budget-writes))
+			writes += max(1, n)
+			if err != nil {
+				return nil, pos, false, err
+			}
+			if more {
+				continue // the budget is spent: the next transaction goes on
+			}
+			pos.dropped = true
+		}
+		for pos.j < len(p.cands) && writes < budget {
 			n, err := applyCandidate(ctx, tx, run, p.subject, p.cands[pos.j], at, &comp)
 			writes += n
 			if err != nil {
@@ -407,10 +457,35 @@ func (s *Store) applyChunk(ctx context.Context, run runRow, plans []*subjectPlan
 	if err := saveReport(ctx, tx, run.id, rep); err != nil {
 		return nil, pos, false, err
 	}
+	var changes int64
+	if s.applyDone != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT total_changes()`).Scan(&changes); err != nil {
+			return nil, pos, false, fmt.Errorf("count changes: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, pos, false, fmt.Errorf("commit: %w", err)
 	}
+	if s.applyDone != nil {
+		s.applyDone(changes-changesBefore, time.Since(locked))
+	}
 	return next, pos, done, nil
+}
+
+// dropSuperseded deletes at most limit holds of runs older than seq on
+// subject inside the caller's transaction. It returns how many it deleted
+// and whether more may be left.
+func dropSuperseded(ctx context.Context, tx *sql.Tx, subject string, seq int64, limit int) (int, bool, error) {
+	res, err := tx.ExecContext(ctx, `DELETE FROM vuln_held_closures WHERE rowid IN
+		(SELECT rowid FROM vuln_held_closures WHERE subject = ? AND run_seq < ? LIMIT ?)`, subject, seq, limit)
+	if err != nil {
+		return 0, false, fmt.Errorf("drop superseded holds: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, false, fmt.Errorf("drop superseded holds: %w", err)
+	}
+	return int(n), int(n) >= limit, nil
 }
 
 // planClosures reads, per covered subject at or above its watermark, the
@@ -626,10 +701,11 @@ func trips(count, base, floor int) bool {
 }
 
 // applyHead applies the head of one subject's plan inside the caller's
-// transaction: it re-checks the watermark, moves it to the run, drops
-// holds of older runs on the subject (superseded, path 7) and counts the
-// subject's planning results. live is false when the subject is below its
-// watermark and nothing more is applied there. n is the statement count.
+// transaction: it re-checks the watermark, moves it to the run and counts
+// the subject's planning results; the caller then drops the holds of
+// older runs on the subject (dropSuperseded). live is false when the
+// subject is below its watermark and nothing more is applied there. n is
+// the row count (a statement that writes nothing counts as one).
 func applyHead(ctx context.Context, tx *sql.Tx, run runRow, p *subjectPlan, at time.Time, comp *Completion) (n int, live bool, err error) {
 	if p.below {
 		comp.SubjectsBelowWatermark++
@@ -648,17 +724,14 @@ func applyHead(ctx context.Context, tx *sql.Tx, run runRow, p *subjectPlan, at t
 		ON CONFLICT (subject) DO UPDATE SET run_seq = excluded.run_seq, completed_at = excluded.completed_at`, p.subject, run.seq, t); err != nil {
 		return 2, false, fmt.Errorf("watermark: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM vuln_held_closures WHERE subject = ? AND run_seq < ?`, p.subject, run.seq); err != nil {
-		return 3, false, fmt.Errorf("drop superseded holds: %w", err)
-	}
 	comp.NotRequested += p.notRequested
 	comp.BlockedRejected += p.blockedRejected
-	return 3, true, nil
+	return 2, true, nil
 }
 
 // applyCandidate closes or holds one candidate inside the caller's
-// transaction if the finding is unchanged since planning. n is the
-// statement count.
+// transaction if the finding is unchanged since planning. n is the row
+// count (a statement that writes nothing counts as one).
 func applyCandidate(ctx context.Context, tx *sql.Tx, run runRow, subject string, c candidate, at time.Time, comp *Completion) (int, error) {
 	t := unix(at)
 	if c.hold != "" {

@@ -25,3 +25,9 @@ The first usable release (0.1) is safe patching of Debian/Ubuntu hosts; inventor
 10. **Hardening. Release 0.9 beta.** Executor-signed events, optional audit hash chain, backup and restore, APT repository, container images, fuzzing, documentation, threat model, all pre-1.0 security tests.
 
 After 1.0: Proxmox provider, managed-host backup module, OpenMetrics endpoint (target 1.1).
+
+<a id="v24-16-01"></a>
+<!-- Spec revision (ADR 0011, VU-02): v24-16-01 -->
+**Vulnerability management (ADR 0011).** Placed **after ADR 0010** (network devices; Q9, decided 2026-11-09; previously: open). Phase A: decisions and this spec revision. Phase B: NOS findings (version comparison, finding model, the two inventory reads, findings store, agent API, prioritisation, UI, badges, "fix with" links, notifications and export, security and browser tests); device findings wait for the ADR 0010 phase-1 device inventory. Phase C (after findings exist): attack paths, crown jewels, paths UI; no Hermes path narratives (Q6). The Hermes skill `nos-vuln-assessor` is a separate deliverable outside this repository. Tickets: [vulnerability-management.md](../implementation/vulnerability-management.md).
+
+- Accept (from the ADR 0011 plan rules V1, V7, V11, V12): no finding, score, path or assessment creates, submits or approves a proposal, permit, lease or schedule; the agent token cannot read beyond the export or write beyond the findings store; a contradicted, KEV or critical closure is held; a stale, regressed or undated feed source closes nothing; unknown or stale is never shown as clean.

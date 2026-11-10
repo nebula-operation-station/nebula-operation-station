@@ -200,6 +200,13 @@ var fsList []byte
 //go:embed scripts/package_list_updates.sh
 var packageListUpdates []byte
 
+// packageListInstalled is package.list_installed 1.0.0 (ADR 0011 D3): the
+// installed packages with source package and version plus the running
+// kernel, in osdebian.InstalledFormat for osdebian.ParseInstalled.
+//
+//go:embed scripts/package_list_installed.sh
+var packageListInstalled []byte
+
 //go:embed scripts/package_refresh.sh
 var packageRefresh []byte
 
@@ -374,6 +381,11 @@ var Builtin = []Action{
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 2 * time.Minute, ReadOnly: true, Script: packageListUpdates, Retry: RetrySafe,
 	},
 	{
+		ID: "package.list_installed", Version: "1.0.0", Title: "List installed packages",
+		Description: "Installed packages with architecture, version, source package and source version from the dpkg database (dpkg-query -W), Built-Using for kernel images only, and the running kernel (uname -r, uname -v). No root, no apt, no network. Read-only.",
+		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 2 * time.Minute, ReadOnly: true, Script: packageListInstalled, Retry: RetrySafe,
+	},
+	{
 		ID: "package.refresh", Version: "1.0.0", Title: "Refresh package lists",
 		Description: "Runs apt-get update (with sudo). Changes only the package lists; waits up to 8 minutes for the apt lock.",
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 10 * time.Minute, Script: packageRefresh, Retry: RetrySafe,
@@ -454,6 +466,11 @@ var Builtin = []Action{
 		ID: "image.vulnerabilities", Version: "1.0.0", Title: "Image CVE observations",
 		Description: "Optional CVE observation of one local image by digest via the host's own Trivy (offline scan; no install, pull or database refresh). Unique CVE counts by severity, top CVEs with fixed versions, scan and database age, coverage. Absent, stale, busy or failed scans stay unknown, never zero. Read-only.",
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 10 * time.Minute, ReadOnly: true, Script: imageVulns, Params: imageParam, Retry: RetrySafe,
+	},
+	{
+		ID: "image.packages", Version: "1.0.0", Title: "Image packages",
+		Description: "Optional package list of one local image by digest via the host's own Trivy (offline, no vulnerability scanner; no install, pull or database refresh). Only ecosystem, name, version and source package per entry, the image OS and its digest references leave the host. Without Trivy the packages are unknown, never empty. Read-only.",
+		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 10 * time.Minute, ReadOnly: true, Script: imagePackages, Params: imageParam, Retry: RetrySafe,
 	},
 	{
 		ID: "docker.compose_update", Version: "2.0.0", Title: "Update Compose project",
