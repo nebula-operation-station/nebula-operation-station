@@ -667,25 +667,12 @@ func manyGroupRule(nGroups int) Rule {
 	return r
 }
 
-// countIndexBuilds installs the index build hook for the test.
-func countIndexBuilds(t *testing.T) *int {
-	t.Helper()
-	n := new(int)
-	resolveIndexHook = func() { *n++ }
-	t.Cleanup(func() { resolveIndexHook = nil })
-	return n
-}
-
-func TestResolveRuleBuildsObjectIndexOnce(t *testing.T) {
+func TestResolveRuleChecksEveryGroupOnce(t *testing.T) {
 	const nAddr, nGroups = 4000, 1000
 	o := manyGroupObjects(nAddr, nGroups)
 	r := manyGroupRule(nGroups)
-	builds := countIndexBuilds(t)
 
 	got := ResolveRule(r, o)
-	if *builds != 1 {
-		t.Fatalf("object index built %d times for one rule, want 1", *builds)
-	}
 	if len(got.Unresolved) != 0 || got.Incomplete {
 		t.Fatalf("unexpected unresolved: %d", len(got.Unresolved))
 	}
@@ -721,16 +708,146 @@ func TestResolveRuleBuildsObjectIndexOnce(t *testing.T) {
 		t.Fatalf("service expansion differs from ResolveServiceGroup")
 	}
 
-	// a RuleResolver builds the index once for any number of rules
-	*builds = 0
+	// a RuleResolver checks every group once for any number of rules and
+	// visits each group at most once per rule field
 	rr := NewRuleResolver(o)
 	for range 5 {
+		before := rr.groupVisits.Load()
 		if again := rr.Resolve(r); !reflect.DeepEqual(again, got) {
 			t.Fatal("RuleResolver result differs from ResolveRule")
 		}
+		if n := rr.groupVisits.Load() - before; n > 3*nGroups {
+			t.Fatalf("one rule visited groups %d times, want at most %d", n, 3*nGroups)
+		}
 	}
-	if *builds != 1 {
-		t.Fatalf("object index built %d times for one RuleResolver, want 1", *builds)
+	if rr.groupChecks != 2*nGroups {
+		t.Fatalf("groups checked %d times, want %d", rr.groupChecks, 2*nGroups)
+	}
+}
+
+// sharedDeepGroupObjects builds the hostile shape of a shared group: a
+// group "shared" that reaches nLeaves address objects through three
+// nesting levels, and nParents groups p<i> that each hold only "shared".
+func sharedDeepGroupObjects(nLeaves, nParents int) Objects {
+	var o Objects
+	for i := range nLeaves {
+		o.Addresses = append(o.Addresses, netdevcontract.AddressObject{
+			Name: fmt.Sprintf("a%d", i), Type: netdevcontract.AddressNetmask, Value: "192.0.2.1"})
+	}
+	var leafGroups []string
+	for i := 0; i < nLeaves; i += netdevcontract.MaxGroupMembers {
+		g := netdevcontract.Group{Name: fmt.Sprintf("leaf%d", len(leafGroups))}
+		for j := i; j < min(i+netdevcontract.MaxGroupMembers, nLeaves); j++ {
+			g.Static = append(g.Static, fmt.Sprintf("a%d", j))
+		}
+		o.AddressGroups = append(o.AddressGroups, g)
+		leafGroups = append(leafGroups, g.Name)
+	}
+	o.AddressGroups = append(o.AddressGroups,
+		netdevcontract.Group{Name: "d2", Static: leafGroups},
+		netdevcontract.Group{Name: "d1", Static: []string{"d2"}},
+		netdevcontract.Group{Name: "shared", Static: []string{"d1"}})
+	for i := range nParents {
+		o.AddressGroups = append(o.AddressGroups, netdevcontract.Group{
+			Name: fmt.Sprintf("p%d", i), Static: []string{"shared"}})
+	}
+	return o
+}
+
+func TestRuleResolverExpandsSharedDeepGroupOnce(t *testing.T) {
+	// every parent re-expanding the shared subtree costs nParents x
+	// nLeaves leaf visits per rule field (10^10 over the hostile rulebase);
+	// a resolver checks each group once and visits the shared subtree once
+	// per field
+	const nLeaves, nParents, nRules = 20000, MaxRuleMembers, 10
+	o := sharedDeepGroupObjects(nLeaves, nParents)
+	nGroups := len(o.AddressGroups)
+	var members []string
+	for i := range nParents {
+		members = append(members, fmt.Sprintf("p%d", i))
+	}
+	r := Rule{Source: members, Destination: members, Service: []string{"any"}}
+
+	want, err := o.ResolveGroup("p0")
+	if err != nil || len(want) != nLeaves {
+		t.Fatalf("ResolveGroup: %d objects, %v", len(want), err)
+	}
+	// the output (two fields of nLeaves objects and their dedup sets) is
+	// about 20 MiB per rule; expanding the shared group per parent
+	// allocates over 1 MiB per member, gigabytes per rule
+	const limit = nRules * (32 << 20)
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	rr := NewRuleResolver(o)
+	for i := range nRules {
+		visits := rr.groupVisits.Load()
+		got := rr.Resolve(r)
+		if n := rr.groupVisits.Load() - visits; n > 2*int64(nGroups) {
+			t.Fatalf("rule %d visited groups %d times, want at most %d", i, n, 2*nGroups)
+		}
+		if len(got.Unresolved) != 0 || !reflect.DeepEqual(got.Source.Objects, want) || !reflect.DeepEqual(got.Destination.Objects, want) {
+			t.Fatalf("rule %d: %d unresolved, %d source objects", i, len(got.Unresolved), len(got.Source.Objects))
+		}
+	}
+	runtime.ReadMemStats(&after)
+	if rr.groupChecks != nGroups {
+		t.Fatalf("groups checked %d times, want %d", rr.groupChecks, nGroups)
+	}
+	if n := after.TotalAlloc - before.TotalAlloc; n > limit {
+		t.Fatalf("resolving %d rules allocated %d bytes, limit %d", nRules, n, limit)
+	}
+}
+
+func TestRuleResolverAgreesWithResolveGroup(t *testing.T) {
+	// every group of a graph with cycles, too deep chains, dynamic, empty
+	// and unresolved members: Resolve fails a member exactly when
+	// ResolveGroup fails it, with the same reason when the group has a
+	// single defect, and expands it to the same objects otherwise
+	o, err := ParseObjects(objectsBody(`<address><entry name="h1"><ip-netmask>192.0.2.1</ip-netmask></entry>` +
+		`<entry name="h2"><ip-netmask>192.0.2.2</ip-netmask></entry></address>` +
+		`<address-group>` +
+		`<entry name="x"><static><member>h1</member><member>y</member></static></entry>` +
+		`<entry name="y"><static><member>x</member></static></entry>` +
+		`<entry name="nextToCycle"><static><member>h2</member><member>x</member></static></entry>` +
+		`<entry name="ok"><static><member>h1</member><member>h2</member></static></entry>` +
+		`<entry name="okParent"><static><member>ok</member><member>c1</member></static></entry>` +
+		`<entry name="dyn"><dynamic><filter>'t'</filter></dynamic></entry>` +
+		`<entry name="dynParent"><static><member>h1</member><member>dyn</member></static></entry>` +
+		`<entry name="miss"><static><member>h1</member><member>nothere</member></static></entry>` +
+		`<entry name="c1"><static><member>c2</member></static></entry>` +
+		`<entry name="c2"><static><member>c3</member></static></entry>` +
+		`<entry name="c3"><static><member>c4</member></static></entry>` +
+		`<entry name="c4"><static><member>c5</member></static></entry>` +
+		`<entry name="c5"><static><member>c6</member></static></entry>` +
+		`<entry name="c6"><static><member>h2</member></static></entry>` +
+		`<entry name="deep"><static><member>d1</member></static></entry>` +
+		`<entry name="d1"><static><member>d2</member></static></entry>` +
+		`<entry name="d2"><static><member>okParent</member></static></entry>` +
+		`</address-group>`))
+	if err != nil {
+		t.Fatalf("ParseObjects: %v", err)
+	}
+	rr := NewRuleResolver(o)
+	for _, g := range o.AddressGroups {
+		want, wantErr := o.ResolveGroup(g.Name)
+		for range 2 {
+			got := rr.Resolve(Rule{Source: []string{g.Name}})
+			if wantErr != nil {
+				if len(got.Unresolved) != 1 || got.Unresolved[0].Name != g.Name || len(got.Source.Objects) != 0 {
+					t.Fatalf("group %s: unresolved %+v, objects %d, want failure %v", g.Name, got.Unresolved, len(got.Source.Objects), wantErr)
+				}
+				for _, s := range []error{ErrGroupCycle, ErrGroupDepth, ErrDynamicGroup, ErrUnresolvedMember} {
+					if errors.Is(wantErr, s) != errors.Is(got.Unresolved[0].Reason, s) {
+						t.Fatalf("group %s: reason %v, want %v", g.Name, got.Unresolved[0].Reason, wantErr)
+					}
+				}
+				continue
+			}
+			if len(got.Unresolved) != 0 || !reflect.DeepEqual(got.Source.Objects, want) {
+				t.Fatalf("group %s: unresolved %+v, objects %v, want %v", g.Name, got.Unresolved, addrNames(got.Source.Objects), addrNames(want))
+			}
+		}
 	}
 }
 

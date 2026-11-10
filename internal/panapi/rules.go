@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevcontract"
 )
@@ -609,35 +610,47 @@ func ResolveRule(rule Rule, objects Objects) ResolvedRule {
 	return NewRuleResolver(objects).Resolve(rule)
 }
 
-// RuleResolver resolves rules against one Objects value. It indexes the
-// objects and groups once, so a rule costs work linear in its members and
-// the groups they reach, independent of the number of objects. A
-// RuleResolver is read-only after construction and safe for concurrent
-// use.
+// RuleResolver resolves rules against one Objects value.
+//
+// Construction indexes the objects and checks every group exactly once
+// (cycle, depth, dynamic, empty, truncated and unknown members), with work
+// linear in the number of objects, groups and group members. The result of
+// that check is shared by every member of every rule: a group fails a
+// member exactly when ResolveGroup or ResolveServiceGroup fails it (with the
+// same reason when the group reaches a single defect; with several, the
+// reason may name another of them). Resolve
+// then expands a rule field by visiting each group reachable from its
+// members at most once, so one rule costs work linear in its members plus
+// the groups and group members reachable from them, however many members
+// or groups share a subgroup. It never re-expands a group per member.
+//
+// A RuleResolver is read-only after construction (apart from an atomic
+// visit counter) and safe for concurrent use.
 type RuleResolver struct {
 	objects Objects
 	addrs   groupIndex
 	svcs    groupIndex
+	// groupChecks counts the group checks of construction; each group is
+	// checked once.
+	groupChecks int
+	// groupVisits counts the group visits of all Resolve calls.
+	groupVisits atomic.Int64
 }
 
 // groupIndex is the name index of one object kind (addresses or services)
-// and its groups.
+// and its groups, with the check result of every group.
 type groupIndex struct {
 	leaves    map[string]int
 	groups    []netdevcontract.Group
 	index     map[string]int
 	truncated map[string]bool
+	// failed holds the check result of each group (by position): nil for
+	// a group that expands, otherwise the sentinel ResolveGroup returns.
+	failed []error
 }
 
-// resolveIndexHook, when set, is called once per index build. Tests use it
-// to pin that the object index is not rebuilt per rule member.
-var resolveIndexHook func()
-
-// NewRuleResolver indexes objects for Resolve.
+// NewRuleResolver indexes objects and checks every group once for Resolve.
 func NewRuleResolver(objects Objects) *RuleResolver {
-	if resolveIndexHook != nil {
-		resolveIndexHook()
-	}
 	rr := &RuleResolver{
 		objects: objects,
 		addrs:   newGroupIndex(len(objects.Addresses), objects.AddressGroups, objects.truncatedAddr),
@@ -649,6 +662,7 @@ func NewRuleResolver(objects Objects) *RuleResolver {
 	for i, s := range objects.Services {
 		rr.svcs.leaves[s.Name] = i
 	}
+	rr.groupChecks = rr.addrs.check(objects.Incomplete) + rr.svcs.check(objects.Incomplete)
 	return rr
 }
 
@@ -660,6 +674,7 @@ func newGroupIndex(leaves int, groups []netdevcontract.Group, truncated map[stri
 		groups:    groups,
 		index:     make(map[string]int, len(groups)),
 		truncated: truncated,
+		failed:    make([]error, len(groups)),
 	}
 	for i, g := range groups {
 		gx.index[g.Name] = i
@@ -667,22 +682,137 @@ func newGroupIndex(leaves int, groups []netdevcontract.Group, truncated map[stri
 	return gx
 }
 
-// expand returns the leaf indexes reachable from the group at gi with the
-// resolver of ResolveGroup; only the per-resolution state is fresh.
-func (gx *groupIndex) expand(gi int, incomplete bool) ([]int, error) {
-	r := resolver{
-		incomplete: incomplete,
-		truncated:  gx.truncated,
-		leaves:     gx.leaves,
-		groups:     gx.groups,
-		index:      gx.index,
-		height:     make(map[int]int),
-		seen:       make(map[int]struct{}),
+// Group check states.
+const (
+	checkNew = iota
+	checkVisiting
+	checkDone
+)
+
+// checkFrame is one group on the path of the iterative check.
+type checkFrame struct {
+	gi     int
+	next   int
+	height int
+}
+
+// check sets failed for every group and returns the number of groups
+// checked. It is a depth-first walk with an explicit stack (the group
+// graph may be a chain of thousands of groups) that visits every group and
+// every group member once. A group fails with the first defect in member
+// order: ErrGroupUnresolvable (empty), ErrDynamicGroup, ErrGroupIncomplete
+// (truncated, or an unknown member while the objects are incomplete),
+// ErrUnresolvedMember, ErrGroupCycle (a member on the current path),
+// ErrGroupDepth (height over MaxGroupResolveDepth) or the failure of a
+// member group. Every group on the path to a cycle reaches that cycle, so
+// marking the whole path failed is exact. Heights do not depend on where
+// the walk started, so the depth result is the one of ResolveGroup.
+func (gx *groupIndex) check(incomplete bool) int {
+	state := make([]uint8, len(gx.groups))
+	height := make([]int, len(gx.groups))
+	var stack []checkFrame
+	checked := 0
+
+	// enter starts the check of gi; it reports false when gi failed on
+	// its own and was not pushed.
+	enter := func(gi int) bool {
+		checked++
+		g := gx.groups[gi]
+		var err error
+		switch {
+		case emptyGroup(g):
+			err = ErrGroupUnresolvable
+		case g.DynamicFilter != "":
+			err = ErrDynamicGroup
+		case gx.truncated[g.Name]:
+			err = ErrGroupIncomplete
+		}
+		if err != nil {
+			gx.failed[gi], state[gi] = err, checkDone
+			return false
+		}
+		state[gi] = checkVisiting
+		stack = append(stack, checkFrame{gi: gi, height: 1})
+		return true
 	}
-	if _, err := r.visit(gi, 1); err != nil {
-		return nil, err
+	// fail ends the top group and every group below it on the path with err.
+	fail := func(err error) {
+		for _, f := range stack {
+			gx.failed[f.gi], state[f.gi] = err, checkDone
+		}
+		stack = stack[:0]
 	}
-	return r.out, nil
+
+	for root := range gx.groups {
+		if state[root] != checkNew || !enter(root) {
+			continue
+		}
+		for len(stack) > 0 {
+			f := &stack[len(stack)-1]
+			members := gx.groups[f.gi].Static
+			if f.next == len(members) {
+				// the group expands; its parent grows by its height
+				state[f.gi], height[f.gi] = checkDone, f.height
+				h := f.height
+				stack = stack[:len(stack)-1]
+				if len(stack) > 0 {
+					p := &stack[len(stack)-1]
+					if p.height = max(p.height, h+1); p.height > MaxGroupResolveDepth {
+						fail(ErrGroupDepth)
+					}
+				}
+				continue
+			}
+			m := members[f.next]
+			f.next++
+			if _, ok := gx.leaves[m]; ok {
+				continue
+			}
+			sub, ok := gx.index[m]
+			if !ok {
+				if incomplete {
+					// the member may be one of the entries cut at a limit
+					fail(ErrGroupIncomplete)
+				} else {
+					fail(ErrUnresolvedMember)
+				}
+				continue
+			}
+			switch state[sub] {
+			case checkVisiting:
+				fail(ErrGroupCycle)
+			case checkDone:
+				if err := gx.failed[sub]; err != nil {
+					fail(err)
+				} else if f.height = max(f.height, height[sub]+1); f.height > MaxGroupResolveDepth {
+					fail(ErrGroupDepth)
+				}
+			default:
+				if !enter(sub) {
+					fail(gx.failed[sub])
+				}
+			}
+		}
+	}
+	return checked
+}
+
+// collect adds the leaves reachable from the checked, expanding group gi
+// in first-seen order, skipping groups already in visited. The recursion
+// depth is bounded by MaxGroupResolveDepth because gi passed check.
+func (gx *groupIndex) collect(gi int, visited map[int]struct{}, add func(int), visits *atomic.Int64) {
+	if _, ok := visited[gi]; ok {
+		return
+	}
+	visited[gi] = struct{}{}
+	visits.Add(1)
+	for _, m := range gx.groups[gi].Static {
+		if li, ok := gx.leaves[m]; ok {
+			add(li)
+			continue
+		}
+		gx.collect(gx.index[m], visited, add, visits)
+	}
 }
 
 // Resolve expands rule as ResolveRule does.
@@ -700,6 +830,7 @@ func (rr *RuleResolver) Resolve(rule Rule) ResolvedRule {
 
 	resolveAddrs := func(field RuleField, members []string, out *ResolvedAddresses) {
 		seen := map[int]struct{}{}
+		visited := map[int]struct{}{}
 		add := func(i int) {
 			if _, dup := seen[i]; !dup {
 				seen[i] = struct{}{}
@@ -716,15 +847,14 @@ func (rr *RuleResolver) Resolve(rule Rule) ResolvedRule {
 				continue
 			}
 			if gi, ok := rr.addrs.index[m]; ok {
-				is, err := rr.addrs.expand(gi, objects.Incomplete)
-				if err != nil {
+				if err := rr.addrs.failed[gi]; err != nil {
 					res.Unresolved = append(res.Unresolved, UnresolvedMember{Field: field, Name: m,
 						Reason: fmt.Errorf("resolve address group: %w", err)})
 					continue
 				}
-				for _, i := range is {
-					add(i)
-				}
+				// a group visited for an earlier member added all its
+				// leaves already, so skipping it keeps first-seen order
+				rr.addrs.collect(gi, visited, add, &rr.groupVisits)
 				continue
 			}
 			if lit, ok := addressLiteral(m); ok {
@@ -738,6 +868,7 @@ func (rr *RuleResolver) Resolve(rule Rule) ResolvedRule {
 	resolveAddrs(FieldDestination, rule.Destination, &res.Destination)
 
 	seen := map[int]struct{}{}
+	visited := map[int]struct{}{}
 	add := func(i int) {
 		if _, dup := seen[i]; !dup {
 			seen[i] = struct{}{}
@@ -758,15 +889,12 @@ func (rr *RuleResolver) Resolve(rule Rule) ResolvedRule {
 			continue
 		}
 		if gi, ok := rr.svcs.index[m]; ok {
-			is, err := rr.svcs.expand(gi, objects.Incomplete)
-			if err != nil {
+			if err := rr.svcs.failed[gi]; err != nil {
 				res.Unresolved = append(res.Unresolved, UnresolvedMember{Field: FieldService, Name: m,
 					Reason: fmt.Errorf("resolve service group: %w", err)})
 				continue
 			}
-			for _, i := range is {
-				add(i)
-			}
+			rr.svcs.collect(gi, visited, add, &rr.groupVisits)
 			continue
 		}
 		unknown(FieldService, m)
