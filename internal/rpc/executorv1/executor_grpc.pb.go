@@ -139,6 +139,15 @@ const (
 	ExecutorService_SetContainerRecoveryPlan_FullMethodName        = "/nebula.executor.v1.ExecutorService/SetContainerRecoveryPlan"
 	ExecutorService_ClearContainerRecoveryPlan_FullMethodName      = "/nebula.executor.v1.ExecutorService/ClearContainerRecoveryPlan"
 	ExecutorService_ResolveContainerRecreation_FullMethodName      = "/nebula.executor.v1.ExecutorService/ResolveContainerRecreation"
+	ExecutorService_ProbeNetDevice_FullMethodName                  = "/nebula.executor.v1.ExecutorService/ProbeNetDevice"
+	ExecutorService_RegisterNetDevice_FullMethodName               = "/nebula.executor.v1.ExecutorService/RegisterNetDevice"
+	ExecutorService_SetNetDeviceCredential_FullMethodName          = "/nebula.executor.v1.ExecutorService/SetNetDeviceCredential"
+	ExecutorService_RotateNetDeviceCredential_FullMethodName       = "/nebula.executor.v1.ExecutorService/RotateNetDeviceCredential"
+	ExecutorService_RepinNetDevice_FullMethodName                  = "/nebula.executor.v1.ExecutorService/RepinNetDevice"
+	ExecutorService_BlockNetDevice_FullMethodName                  = "/nebula.executor.v1.ExecutorService/BlockNetDevice"
+	ExecutorService_UnblockNetDevice_FullMethodName                = "/nebula.executor.v1.ExecutorService/UnblockNetDevice"
+	ExecutorService_RemoveNetDevice_FullMethodName                 = "/nebula.executor.v1.ExecutorService/RemoveNetDevice"
+	ExecutorService_ListNetDevices_FullMethodName                  = "/nebula.executor.v1.ExecutorService/ListNetDevices"
 )
 
 // ExecutorServiceClient is the client API for ExecutorService service.
@@ -582,6 +591,41 @@ type ExecutorServiceClient interface {
 	// not_recreated or partial, never recreated. Nothing runs on the host and
 	// the rollback window is not extended.
 	ResolveContainerRecreation(ctx context.Context, in *ResolveContainerRecreationRequest, opts ...grpc.CallOption) (*ResolveContainerRecreationResponse, error)
+	// Local network device administration (ADR 0010 D1, D2; ND-11). Role:
+	// admin only, exactly like the local PVE credential administration. The
+	// executor owns endpoints, pins, trust generation and credentials;
+	// nothing here is reachable by the server or a collector.
+	//
+	// Secrets enter only through the request fields marked SECRET (and
+	// debug_redact) and never leave the executor: no response carries a
+	// credential, a user name, a vault reference or key material, and no
+	// log line, event or error repeats a secret.
+	//
+	// Probes the endpoint WITHOUT any credential and returns the presented
+	// trust identity (SSH host key or TLS certificate fingerprint) and
+	// credential-free device facts for the admin to confirm.
+	ProbeNetDevice(ctx context.Context, in *ProbeNetDeviceRequest, opts ...grpc.CallOption) (*ProbeNetDeviceResponse, error)
+	// Registers a device in the executor registry (ND-10) with the pin the
+	// admin confirmed from the probe; requires confirm = "yes".
+	RegisterNetDevice(ctx context.Context, in *RegisterNetDeviceRequest, opts ...grpc.CallOption) (*RegisterNetDeviceResponse, error)
+	// Stores the device's first read credential (phase 1 holds the read
+	// credential only, ADR 0010 Q3).
+	SetNetDeviceCredential(ctx context.Context, in *SetNetDeviceCredentialRequest, opts ...grpc.CallOption) (*SetNetDeviceCredentialResponse, error)
+	// Replaces the read credential after validating the new one against the
+	// pinned transport; revokes authority bound to the old version.
+	RotateNetDeviceCredential(ctx context.Context, in *RotateNetDeviceCredentialRequest, opts ...grpc.CallOption) (*RotateNetDeviceCredentialResponse, error)
+	// Replaces the trust pin, increments the trust generation and revokes
+	// every lease and permit for the device.
+	RepinNetDevice(ctx context.Context, in *RepinNetDeviceRequest, opts ...grpc.CallOption) (*RepinNetDeviceResponse, error)
+	// Blocks or unblocks every dial to the device.
+	BlockNetDevice(ctx context.Context, in *BlockNetDeviceRequest, opts ...grpc.CallOption) (*BlockNetDeviceResponse, error)
+	UnblockNetDevice(ctx context.Context, in *UnblockNetDeviceRequest, opts ...grpc.CallOption) (*UnblockNetDeviceResponse, error)
+	// Disables the device, revokes its authority, removes its vault entries
+	// and tombstones the id.
+	RemoveNetDevice(ctx context.Context, in *RemoveNetDeviceRequest, opts ...grpc.CallOption) (*RemoveNetDeviceResponse, error)
+	// Metadata of every live device: ids, endpoint, pin, trust generation,
+	// block state and credential version. Never a vault reference.
+	ListNetDevices(ctx context.Context, in *ListNetDevicesRequest, opts ...grpc.CallOption) (*ListNetDevicesResponse, error)
 }
 
 type executorServiceClient struct {
@@ -1772,6 +1816,96 @@ func (c *executorServiceClient) ResolveContainerRecreation(ctx context.Context, 
 	return out, nil
 }
 
+func (c *executorServiceClient) ProbeNetDevice(ctx context.Context, in *ProbeNetDeviceRequest, opts ...grpc.CallOption) (*ProbeNetDeviceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProbeNetDeviceResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ProbeNetDevice_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) RegisterNetDevice(ctx context.Context, in *RegisterNetDeviceRequest, opts ...grpc.CallOption) (*RegisterNetDeviceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RegisterNetDeviceResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_RegisterNetDevice_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) SetNetDeviceCredential(ctx context.Context, in *SetNetDeviceCredentialRequest, opts ...grpc.CallOption) (*SetNetDeviceCredentialResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SetNetDeviceCredentialResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_SetNetDeviceCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) RotateNetDeviceCredential(ctx context.Context, in *RotateNetDeviceCredentialRequest, opts ...grpc.CallOption) (*RotateNetDeviceCredentialResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RotateNetDeviceCredentialResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_RotateNetDeviceCredential_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) RepinNetDevice(ctx context.Context, in *RepinNetDeviceRequest, opts ...grpc.CallOption) (*RepinNetDeviceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RepinNetDeviceResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_RepinNetDevice_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) BlockNetDevice(ctx context.Context, in *BlockNetDeviceRequest, opts ...grpc.CallOption) (*BlockNetDeviceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BlockNetDeviceResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_BlockNetDevice_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) UnblockNetDevice(ctx context.Context, in *UnblockNetDeviceRequest, opts ...grpc.CallOption) (*UnblockNetDeviceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UnblockNetDeviceResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_UnblockNetDevice_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) RemoveNetDevice(ctx context.Context, in *RemoveNetDeviceRequest, opts ...grpc.CallOption) (*RemoveNetDeviceResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RemoveNetDeviceResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_RemoveNetDevice_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ListNetDevices(ctx context.Context, in *ListNetDevicesRequest, opts ...grpc.CallOption) (*ListNetDevicesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListNetDevicesResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ListNetDevices_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExecutorServiceServer is the server API for ExecutorService service.
 // All implementations must embed UnimplementedExecutorServiceServer
 // for forward compatibility.
@@ -2213,6 +2347,41 @@ type ExecutorServiceServer interface {
 	// not_recreated or partial, never recreated. Nothing runs on the host and
 	// the rollback window is not extended.
 	ResolveContainerRecreation(context.Context, *ResolveContainerRecreationRequest) (*ResolveContainerRecreationResponse, error)
+	// Local network device administration (ADR 0010 D1, D2; ND-11). Role:
+	// admin only, exactly like the local PVE credential administration. The
+	// executor owns endpoints, pins, trust generation and credentials;
+	// nothing here is reachable by the server or a collector.
+	//
+	// Secrets enter only through the request fields marked SECRET (and
+	// debug_redact) and never leave the executor: no response carries a
+	// credential, a user name, a vault reference or key material, and no
+	// log line, event or error repeats a secret.
+	//
+	// Probes the endpoint WITHOUT any credential and returns the presented
+	// trust identity (SSH host key or TLS certificate fingerprint) and
+	// credential-free device facts for the admin to confirm.
+	ProbeNetDevice(context.Context, *ProbeNetDeviceRequest) (*ProbeNetDeviceResponse, error)
+	// Registers a device in the executor registry (ND-10) with the pin the
+	// admin confirmed from the probe; requires confirm = "yes".
+	RegisterNetDevice(context.Context, *RegisterNetDeviceRequest) (*RegisterNetDeviceResponse, error)
+	// Stores the device's first read credential (phase 1 holds the read
+	// credential only, ADR 0010 Q3).
+	SetNetDeviceCredential(context.Context, *SetNetDeviceCredentialRequest) (*SetNetDeviceCredentialResponse, error)
+	// Replaces the read credential after validating the new one against the
+	// pinned transport; revokes authority bound to the old version.
+	RotateNetDeviceCredential(context.Context, *RotateNetDeviceCredentialRequest) (*RotateNetDeviceCredentialResponse, error)
+	// Replaces the trust pin, increments the trust generation and revokes
+	// every lease and permit for the device.
+	RepinNetDevice(context.Context, *RepinNetDeviceRequest) (*RepinNetDeviceResponse, error)
+	// Blocks or unblocks every dial to the device.
+	BlockNetDevice(context.Context, *BlockNetDeviceRequest) (*BlockNetDeviceResponse, error)
+	UnblockNetDevice(context.Context, *UnblockNetDeviceRequest) (*UnblockNetDeviceResponse, error)
+	// Disables the device, revokes its authority, removes its vault entries
+	// and tombstones the id.
+	RemoveNetDevice(context.Context, *RemoveNetDeviceRequest) (*RemoveNetDeviceResponse, error)
+	// Metadata of every live device: ids, endpoint, pin, trust generation,
+	// block state and credential version. Never a vault reference.
+	ListNetDevices(context.Context, *ListNetDevicesRequest) (*ListNetDevicesResponse, error)
 	mustEmbedUnimplementedExecutorServiceServer()
 }
 
@@ -2576,6 +2745,33 @@ func (UnimplementedExecutorServiceServer) ClearContainerRecoveryPlan(context.Con
 }
 func (UnimplementedExecutorServiceServer) ResolveContainerRecreation(context.Context, *ResolveContainerRecreationRequest) (*ResolveContainerRecreationResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ResolveContainerRecreation not implemented")
+}
+func (UnimplementedExecutorServiceServer) ProbeNetDevice(context.Context, *ProbeNetDeviceRequest) (*ProbeNetDeviceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ProbeNetDevice not implemented")
+}
+func (UnimplementedExecutorServiceServer) RegisterNetDevice(context.Context, *RegisterNetDeviceRequest) (*RegisterNetDeviceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RegisterNetDevice not implemented")
+}
+func (UnimplementedExecutorServiceServer) SetNetDeviceCredential(context.Context, *SetNetDeviceCredentialRequest) (*SetNetDeviceCredentialResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SetNetDeviceCredential not implemented")
+}
+func (UnimplementedExecutorServiceServer) RotateNetDeviceCredential(context.Context, *RotateNetDeviceCredentialRequest) (*RotateNetDeviceCredentialResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RotateNetDeviceCredential not implemented")
+}
+func (UnimplementedExecutorServiceServer) RepinNetDevice(context.Context, *RepinNetDeviceRequest) (*RepinNetDeviceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RepinNetDevice not implemented")
+}
+func (UnimplementedExecutorServiceServer) BlockNetDevice(context.Context, *BlockNetDeviceRequest) (*BlockNetDeviceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BlockNetDevice not implemented")
+}
+func (UnimplementedExecutorServiceServer) UnblockNetDevice(context.Context, *UnblockNetDeviceRequest) (*UnblockNetDeviceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UnblockNetDevice not implemented")
+}
+func (UnimplementedExecutorServiceServer) RemoveNetDevice(context.Context, *RemoveNetDeviceRequest) (*RemoveNetDeviceResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RemoveNetDevice not implemented")
+}
+func (UnimplementedExecutorServiceServer) ListNetDevices(context.Context, *ListNetDevicesRequest) (*ListNetDevicesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListNetDevices not implemented")
 }
 func (UnimplementedExecutorServiceServer) mustEmbedUnimplementedExecutorServiceServer() {}
 func (UnimplementedExecutorServiceServer) testEmbeddedByValue()                         {}
@@ -4722,6 +4918,168 @@ func _ExecutorService_ResolveContainerRecreation_Handler(srv interface{}, ctx co
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_ProbeNetDevice_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProbeNetDeviceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ProbeNetDevice(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ProbeNetDevice_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ProbeNetDevice(ctx, req.(*ProbeNetDeviceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_RegisterNetDevice_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RegisterNetDeviceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).RegisterNetDevice(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_RegisterNetDevice_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).RegisterNetDevice(ctx, req.(*RegisterNetDeviceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_SetNetDeviceCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SetNetDeviceCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).SetNetDeviceCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_SetNetDeviceCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).SetNetDeviceCredential(ctx, req.(*SetNetDeviceCredentialRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_RotateNetDeviceCredential_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RotateNetDeviceCredentialRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).RotateNetDeviceCredential(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_RotateNetDeviceCredential_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).RotateNetDeviceCredential(ctx, req.(*RotateNetDeviceCredentialRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_RepinNetDevice_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RepinNetDeviceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).RepinNetDevice(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_RepinNetDevice_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).RepinNetDevice(ctx, req.(*RepinNetDeviceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_BlockNetDevice_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BlockNetDeviceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).BlockNetDevice(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_BlockNetDevice_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).BlockNetDevice(ctx, req.(*BlockNetDeviceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_UnblockNetDevice_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UnblockNetDeviceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).UnblockNetDevice(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_UnblockNetDevice_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).UnblockNetDevice(ctx, req.(*UnblockNetDeviceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_RemoveNetDevice_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemoveNetDeviceRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).RemoveNetDevice(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_RemoveNetDevice_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).RemoveNetDevice(ctx, req.(*RemoveNetDeviceRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ListNetDevices_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListNetDevicesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ListNetDevices(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ListNetDevices_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ListNetDevices(ctx, req.(*ListNetDevicesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ExecutorService_ServiceDesc is the grpc.ServiceDesc for ExecutorService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -5200,6 +5558,42 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ResolveContainerRecreation",
 			Handler:    _ExecutorService_ResolveContainerRecreation_Handler,
+		},
+		{
+			MethodName: "ProbeNetDevice",
+			Handler:    _ExecutorService_ProbeNetDevice_Handler,
+		},
+		{
+			MethodName: "RegisterNetDevice",
+			Handler:    _ExecutorService_RegisterNetDevice_Handler,
+		},
+		{
+			MethodName: "SetNetDeviceCredential",
+			Handler:    _ExecutorService_SetNetDeviceCredential_Handler,
+		},
+		{
+			MethodName: "RotateNetDeviceCredential",
+			Handler:    _ExecutorService_RotateNetDeviceCredential_Handler,
+		},
+		{
+			MethodName: "RepinNetDevice",
+			Handler:    _ExecutorService_RepinNetDevice_Handler,
+		},
+		{
+			MethodName: "BlockNetDevice",
+			Handler:    _ExecutorService_BlockNetDevice_Handler,
+		},
+		{
+			MethodName: "UnblockNetDevice",
+			Handler:    _ExecutorService_UnblockNetDevice_Handler,
+		},
+		{
+			MethodName: "RemoveNetDevice",
+			Handler:    _ExecutorService_RemoveNetDevice_Handler,
+		},
+		{
+			MethodName: "ListNetDevices",
+			Handler:    _ExecutorService_ListNetDevices_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
