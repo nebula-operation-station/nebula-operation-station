@@ -371,6 +371,40 @@ func TestChartCVEPlaceKeepsStaleHermesCritical(t *testing.T) {
 	}
 }
 
+// TestChartCVEPlaceTruncatedReadKeepsTrivyCritical: a fresh Hermes run on
+// the scanned image does not replace the Trivy counts when the findings
+// read was truncated. The Trivy line with its known critical count stays,
+// the Hermes line of the image sits next to it saying the list is
+// incomplete, and the critical Trivy line keeps the box border critical.
+func TestChartCVEPlaceTruncatedReadKeepsTrivyCritical(t *testing.T) {
+	img := imageSubject("box")
+	imgHref := "/vulnerabilities/subject/image/box?digest=sha256%3A" + strings.Repeat("0123456789abcdef", 4)
+	page := ui.VulnPage{
+		Subjects:  []ui.VulnSubjectStatus{chartFreshHost(), {Subject: img, LastComplete: chartTime(time.Hour)}},
+		Feeds:     []ui.VulnFeedStatus{okFeed("debian-tracker")},
+		Truncated: true,
+	}
+	body := chartVulnBody(t, &fakeVuln{page: page}, map[string]map[string]executions.LastResultRow{
+		"image.vulnerabilities": {"box": row(vulnsDoc(t, "ok", sevCounts(2, 5, 10, 3)), time.Hour)},
+	})
+	trivy := regexp.MustCompile(`chart__line--cve chart__line--crit"[^>]*>\s*<span class="chart__line-name">[^<]*</span>\s*` +
+		`<span class="chart__line-text">` + regexp.QuoteMeta("nginx@0123456789ab · 2 critical · 5 high · 10 medium · 3 low · host Trivy, partial<"))
+	if !trivy.MatchString(body) {
+		t.Error("Trivy line with known critical counts hidden or not crit on a truncated Hermes read")
+	}
+	hermes := regexp.MustCompile(`chart__line--cve chart__line--unknown"[^>]*>\s*<span class="chart__line-name">CVE</span>\s*` +
+		regexp.QuoteMeta(lineLink(imgHref, "Hermes · nginx@0123456789ab · unknown: list incomplete")))
+	if !hermes.MatchString(body) {
+		t.Error("Hermes line of the scanned image not shown as incomplete next to the Trivy line")
+	}
+	if !hostNodeHas(body, "chart__node--critical") {
+		t.Error("known Trivy critical counts should keep the box border critical on a truncated read")
+	}
+	if strings.Contains(body, "Hermes · sha256:0123456789ab") {
+		t.Error("scanned image shown twice")
+	}
+}
+
 func TestChartTrivyLineLabelledWithoutBackend(t *testing.T) {
 	body := chartVulnBody(t, nil, map[string]map[string]executions.LastResultRow{
 		"image.vulnerabilities": {"box": row(vulnsDoc(t, "ok", sevCounts(0, 0, 1, 0)), time.Hour)},
