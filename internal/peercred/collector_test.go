@@ -69,12 +69,12 @@ func TestAssignCollectorUserMapsOwnUID(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			roles := map[uint32][]Role{1001: {RoleServer}, 1002: {RoleAdmin}}
-			if ok, err := AssignCollectorUser(roles, lookup, self, RolePVECollector, "nebula-pve-collector"); err != nil || !ok {
-				t.Fatalf("pve-collector: ok=%v err=%v", ok, err)
+			if got, err := AssignCollectorUser(roles, lookup, self, RolePVECollector, "nebula-pve-collector"); err != nil || got != CollectorAssigned {
+				t.Fatalf("pve-collector: got=%v err=%v", got, err)
 			}
-			ok, err := AssignCollectorUser(roles, lookup, self, RoleNetDevCollector, tc.user)
-			if err != nil || !ok {
-				t.Fatalf("ok=%v err=%v", ok, err)
+			got, err := AssignCollectorUser(roles, lookup, self, RoleNetDevCollector, tc.user)
+			if err != nil || got != CollectorAssigned {
+				t.Fatalf("got=%v err=%v", got, err)
 			}
 			if !slices.Equal(roles[tc.wantUID], []Role{RoleNetDevCollector}) {
 				t.Fatalf("uid %d roles %v, want only netdev-collector", tc.wantUID, roles[tc.wantUID])
@@ -108,18 +108,18 @@ func TestAssignCollectorUserRefusesSharedUID(t *testing.T) {
 		user string
 		want error
 	}{
-		{"root", ErrCollectorUIDRoot},
-		{"nebula-executor", ErrCollectorUIDExecutor},
-		{"nebula-server", ErrCollectorUIDShared},
-		{"alice", ErrCollectorUIDShared},
-		{"nebula-pve-collector", ErrCollectorUIDShared},
+		{"root", ErrRoleUserRoot},
+		{"nebula-executor", ErrRoleUserExecutor},
+		{"nebula-server", ErrRoleUserShared},
+		{"alice", ErrRoleUserShared},
+		{"nebula-pve-collector", ErrRoleUserShared},
 	} {
 		t.Run(tc.user, func(t *testing.T) {
 			roles := map[uint32][]Role{1001: {RoleServer}, 1002: {RoleAdmin}, 1003: {RolePVECollector}}
 			before := fmt.Sprint(roles)
-			ok, err := AssignCollectorUser(roles, lookup, self, RoleNetDevCollector, tc.user)
-			if ok || !errors.Is(err, tc.want) {
-				t.Fatalf("ok=%v err=%v, want %v", ok, err, tc.want)
+			got, err := AssignCollectorUser(roles, lookup, self, RoleNetDevCollector, tc.user)
+			if got != CollectorNotAssigned || !errors.Is(err, tc.want) {
+				t.Fatalf("got=%v err=%v, want %v", got, err, tc.want)
 			}
 			if fmt.Sprint(roles) != before {
 				t.Fatalf("roles changed on refusal: %v", roles)
@@ -129,32 +129,40 @@ func TestAssignCollectorUserRefusesSharedUID(t *testing.T) {
 	// The same refusal holds in the other direction: a pve-collector
 	// configured with the netdev-collector's UID.
 	roles := map[uint32][]Role{1003: {RoleNetDevCollector}}
-	if ok, err := AssignCollectorUser(roles, lookup, self, RolePVECollector, "nebula-pve-collector"); ok || !errors.Is(err, ErrCollectorUIDShared) {
-		t.Fatalf("pve-collector on netdev-collector uid: ok=%v err=%v", ok, err)
+	if got, err := AssignCollectorUser(roles, lookup, self, RolePVECollector, "nebula-pve-collector"); got != CollectorNotAssigned || !errors.Is(err, ErrRoleUserShared) {
+		t.Fatalf("pve-collector on netdev-collector uid: got=%v err=%v", got, err)
 	}
 }
 
 // TestAssignCollectorUserMissingUser: an empty name disables the role; a
-// missing default user leaves it unassigned; a missing explicitly
-// configured user or any other lookup failure stops the start.
+// missing default user leaves it unassigned and says so in the result (the
+// caller logs a warning); a missing explicitly configured user or any
+// other lookup failure stops the start. Both collector roles behave alike.
 func TestAssignCollectorUserMissingUser(t *testing.T) {
 	lookup := fakeLookup(map[string]uint32{})
 	for _, tc := range []struct {
+		role    Role
 		user    string
+		want    CollectorAssignment
 		wantErr error
 		anyErr  bool
 	}{
-		{"", nil, false},
-		{"   ", nil, false},
-		{"nebula-netdev-collector", nil, false},
-		{"custom-nd", ErrCollectorUserMissing, true},
-		{"broken", nil, true},
+		{RoleNetDevCollector, "", CollectorDisabled, nil, false},
+		{RoleNetDevCollector, "   ", CollectorDisabled, nil, false},
+		{RoleNetDevCollector, "nebula-netdev-collector", CollectorDefaultUserMissing, nil, false},
+		{RoleNetDevCollector, " nebula-netdev-collector ", CollectorDefaultUserMissing, nil, false},
+		{RoleNetDevCollector, "custom-nd", CollectorNotAssigned, ErrCollectorUserMissing, true},
+		{RoleNetDevCollector, "broken", CollectorNotAssigned, nil, true},
+		{RolePVECollector, "", CollectorDisabled, nil, false},
+		{RolePVECollector, "nebula-pve-collector", CollectorDefaultUserMissing, nil, false},
+		{RolePVECollector, "nebula-netdev-collector", CollectorNotAssigned, ErrCollectorUserMissing, true},
+		{RolePVECollector, "broken", CollectorNotAssigned, nil, true},
 	} {
-		t.Run(tc.user, func(t *testing.T) {
+		t.Run(string(tc.role)+"/"+tc.user, func(t *testing.T) {
 			roles := map[uint32][]Role{}
-			ok, err := AssignCollectorUser(roles, lookup, 900, RoleNetDevCollector, tc.user)
-			if ok || len(roles) != 0 {
-				t.Fatalf("role assigned: ok=%v roles=%v", ok, roles)
+			got, err := AssignCollectorUser(roles, lookup, 900, tc.role, tc.user)
+			if got != tc.want || len(roles) != 0 {
+				t.Fatalf("got=%v roles=%v, want %v and no role", got, roles, tc.want)
 			}
 			if (err != nil) != tc.anyErr || (tc.wantErr != nil && !errors.Is(err, tc.wantErr)) {
 				t.Fatalf("err = %v, want error=%v (%v)", err, tc.anyErr, tc.wantErr)
@@ -169,8 +177,8 @@ func TestAssignCollectorUserRefusesNonCollectorRole(t *testing.T) {
 	lookup := fakeLookup(map[string]uint32{"x": 1500})
 	for _, r := range []Role{RoleServer, RoleAdmin, Role("discovery")} {
 		roles := map[uint32][]Role{}
-		if ok, err := AssignCollectorUser(roles, lookup, 900, r, "x"); ok || !errors.Is(err, ErrNotCollectorRole) || len(roles) != 0 {
-			t.Errorf("role %q: ok=%v err=%v roles=%v", r, ok, err, roles)
+		if got, err := AssignCollectorUser(roles, lookup, 900, r, "x"); got != CollectorNotAssigned || !errors.Is(err, ErrNotCollectorRole) || len(roles) != 0 {
+			t.Errorf("role %q: got=%v err=%v roles=%v", r, got, err, roles)
 		}
 	}
 }
