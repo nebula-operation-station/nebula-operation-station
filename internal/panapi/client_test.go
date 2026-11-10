@@ -412,6 +412,8 @@ func TestCheckResponseXMLLimits(t *testing.T) {
 		{"elements over limit", elems(MaxXMLElements + 1), ErrXMLLimit},
 		{"text at limit", `<response status="success"><t>` + strings.Repeat("x", MaxXMLTextBytes) + `</t></response>`, nil},
 		{"text over limit", `<response status="success"><t>` + strings.Repeat("x", MaxXMLTextBytes+1) + `</t></response>`, ErrXMLLimit},
+		{"indentation between elements is not text", `<response status="success">` + strings.Repeat("\n  <t/>", MaxXMLTextBytes) + "\n</response>", nil},
+		{"text over limit between indented elements", `<response status="success">` + strings.Repeat("\n  <t/>", MaxXMLTextBytes) + strings.Repeat("x", MaxXMLTextBytes+1) + `</response>`, ErrXMLLimit},
 		{"split text over limit", `<response status="success"><t>` + strings.Repeat("x", MaxXMLTextBytes) + `<![CDATA[y]]></t></response>`, ErrXMLLimit},
 		{"attribute at limit", `<response status="success"><t a="` + strings.Repeat("x", MaxXMLTextBytes) + `"/></response>`, nil},
 		{"attribute over limit", `<response status="success"><t a="` + strings.Repeat("x", MaxXMLTextBytes+1) + `"/></response>`, ErrXMLLimit},

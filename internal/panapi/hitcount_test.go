@@ -414,20 +414,22 @@ func bigHitCountEntry(i int, indent bool) string {
 		out + "</entry>"
 }
 
-func TestHitCountCapFitsLargeRulebase(t *testing.T) {
-	var indented, compact strings.Builder
-	for i := 0; i <= MaxHitCountEntries; i++ {
-		indented.WriteString(bigHitCountEntry(i, true))
-		compact.WriteString(bigHitCountEntry(i, false))
+// indentedHitCounts returns an indented worst-case reply with n entries.
+func indentedHitCounts(n int) []byte {
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		b.WriteString(bigHitCountEntry(i, true))
 	}
-	// the indented reply bounds the size the transport cap must admit
-	if n := int64(len(hcBody(indented.String()))); n > MaxHitCountResponseBytes {
+	return hcBody(b.String() + "\n              ")
+}
+
+func TestHitCountCapFitsLargeRulebase(t *testing.T) {
+	// the indented worst-case reply one entry past the limit must fit the
+	// transport cap and parse as an incomplete set
+	body := indentedHitCounts(MaxHitCountEntries + 1)
+	if n := int64(len(body)); n > MaxHitCountResponseBytes {
 		t.Fatalf("%d indented worst-case entries take %d bytes, over the %d byte cap", MaxHitCountEntries+1, n, MaxHitCountResponseBytes)
 	}
-	// the compact form is parsed: CheckXML counts inter-element whitespace
-	// as element text (MaxXMLTextBytes), which an indented list of this
-	// length exceeds
-	body := hcBody(compact.String())
 	if int64(len(body)) <= MaxOtherResponseBytes {
 		t.Fatalf("test body of %d bytes does not exceed the generic cap", len(body))
 	}
@@ -440,6 +442,29 @@ func TestHitCountCapFitsLargeRulebase(t *testing.T) {
 	}
 	if !got.Incomplete || len(got.Rules) != MaxHitCountEntries {
 		t.Fatalf("Incomplete = %v, %d rules; want incomplete with %d", got.Incomplete, len(got.Rules), MaxHitCountEntries)
+	}
+}
+
+// TestIndentedHitCountRepliesParse covers the layout of the hitcount.xml
+// fixture: the indentation between entries (about 17 bytes per entry)
+// must not count toward the XML text limit of <rules>, which a list of
+// more than about 240 entries would otherwise exceed.
+func TestIndentedHitCountRepliesParse(t *testing.T) {
+	for _, n := range []int{241, 1000, MaxHitCountEntries} {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
+			got, err := ParseRuleHitCounts(indentedHitCounts(n))
+			if err != nil {
+				t.Fatalf("ParseRuleHitCounts: %v", err)
+			}
+			if got.Incomplete || len(got.Rules) != n {
+				t.Fatalf("Incomplete = %v, %d rules; want complete with %d", got.Incomplete, len(got.Rules), n)
+			}
+		})
+	}
+	// real text between entries still has the limit
+	body := hcBody(bigHitCountEntry(0, true) + strings.Repeat("x", netdevcontract.MaxXMLTextBytes+1))
+	if _, err := ParseRuleHitCounts(body); !errors.Is(err, ErrXMLLimit) {
+		t.Fatalf("text between entries: err = %v, want ErrXMLLimit", err)
 	}
 }
 
