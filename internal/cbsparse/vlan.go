@@ -3,6 +3,7 @@
 package cbsparse
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -17,6 +18,13 @@ const (
 	// vlanTypeMaxBytes bounds the "Created by" (type) cell, a few legend
 	// letters such as "DV" on real output.
 	vlanTypeMaxBytes = 16
+	// vlanMaxMemberships bounds the port memberships (tagged plus
+	// untagged ports, summed over all rows) that one "show vlan" parse
+	// expands. Port lists are ranges, so without it MaxVLANsPerDevice rows
+	// with two full lists each expand about 1 MiB of output into 8.4
+	// million port names. The bound is 64 full-size port lists, e.g. 16
+	// trunk ports that carry every VLAN.
+	vlanMaxMemberships = 64 * netdevcontract.MaxInterfacesPerDevice
 )
 
 // VLAN is one row of "show vlan" on a CBS switch.
@@ -62,6 +70,15 @@ type vlanGroup struct {
 	bad              bool
 }
 
+// vlanRowStatus is the outcome of buildVLAN.
+type vlanRowStatus int
+
+const (
+	vlanRowOK  vlanRowStatus = iota
+	vlanRowBad               // the row is dropped
+	vlanRowCap               // vlanMaxMemberships reached; parsing stops
+)
+
 // ParseVLANs parses the output of "show vlan" on a CBS switch.
 //
 // The input is untrusted device text (spec 09). Output limits, invalid
@@ -74,15 +91,20 @@ type vlanGroup struct {
 // continues). A row that cannot be read exactly is dropped and incomplete
 // is true: text crossing a column gap, a tab, an ID outside 1 to
 // MaxVLANID or not in canonical decimal, a name that violates the text
-// rule or MaxLabelBytes, an unknown port name or malformed port list, a
-// port both tagged and untagged, a continuation line that fills the name
-// or type column, or more than vlanMaxContinuationLines continuation
-// lines. A continuation line without a row before it is dropped the same
-// way. Two valid rows with the same ID are ErrDuplicate.
+// rule or MaxLabelBytes, a name that fills its column up to the gap when
+// Name is not the last column (a longer name with an inner space would
+// overflow into the next cell undetected, so such a name is ambiguous),
+// an unknown port name or malformed port list, a port both tagged and
+// untagged, a continuation line that fills the name or type column, or
+// more than vlanMaxContinuationLines continuation lines. A continuation
+// line without a row before it is dropped the same way, and so is a title
+// line of a later table that may be a row (see splitTables). Two valid
+// rows with the same ID are ErrDuplicate.
 //
-// At most netdevcontract.MaxVLANsPerDevice VLANs are returned; further
-// rows are not read and incomplete is true. On error the result is nil
-// and incomplete is false.
+// At most netdevcontract.MaxVLANsPerDevice VLANs and vlanMaxMemberships
+// expanded port memberships are returned; at either limit further rows
+// are not read and incomplete is true. On error the result is nil and
+// incomplete is false.
 func ParseVLANs(out []byte) (vlans []VLAN, incomplete bool, err error) {
 	const what = "show vlan"
 	blocks, err := splitTables(out, what)
@@ -90,6 +112,7 @@ func ParseVLANs(out []byte) (vlans []VLAN, incomplete bool, err error) {
 		return nil, false, err
 	}
 	seen := map[uint16]int{}
+	budget := vlanMaxMemberships
 	for _, b := range blocks {
 		idx, err := columnIndex(b.titles, vlanTitles, numVLANFields,
 			vlanFieldID, vlanFieldName, vlanFieldTagged, vlanFieldUntagged)
@@ -97,15 +120,18 @@ func ParseVLANs(out []byte) (vlans []VLAN, incomplete bool, err error) {
 			return nil, false, fmt.Errorf("cbsparse: %s: %w", what, err)
 		}
 		groups, orphans := groupVLANRows(b.rows, idx)
-		if orphans {
+		if orphans || b.lostRows {
 			incomplete = true
 		}
 		for _, g := range groups {
 			if netdevcontract.CheckCount("vlans", len(vlans)+1, netdevcontract.MaxVLANsPerDevice) != nil {
 				return vlans, true, nil
 			}
-			v, ok := buildVLAN(g)
-			if !ok {
+			v, status := buildVLAN(g, &budget)
+			if status == vlanRowCap {
+				return vlans, true, nil
+			}
+			if status != vlanRowOK {
 				incomplete = true
 				continue
 			}
@@ -149,6 +175,8 @@ func groupVLANRows(rows []tableRow, idx []int) (groups []*vlanGroup, orphans boo
 				typ:      cell(r.cells, idx[vlanFieldType]),
 				tagged:   r.cells[idx[vlanFieldTagged]],
 				untagged: r.cells[idx[vlanFieldUntagged]],
+				// filled is always false for the last column.
+				bad: r.filled[idx[vlanFieldName]],
 			}
 			groups = append(groups, cur)
 			continue
@@ -186,28 +214,30 @@ func joinWrapped(prev, next string) (string, bool) {
 	return prev + next, true
 }
 
-// buildVLAN validates one grouped row.
-func buildVLAN(g *vlanGroup) (VLAN, bool) {
+// buildVLAN validates one grouped row. The expanded ports are charged
+// against budget (see parsePortList); vlanRowCap reports that the budget
+// does not cover the row.
+func buildVLAN(g *vlanGroup, budget *int) (VLAN, vlanRowStatus) {
 	if g.bad {
-		return VLAN{}, false
+		return VLAN{}, vlanRowBad
 	}
 	id, ok := parseDecimal(g.id, 4)
 	if !ok || id < 1 || id > netdevcontract.MaxVLANID {
-		return VLAN{}, false
+		return VLAN{}, vlanRowBad
 	}
 	if !validLabel(g.name) {
-		return VLAN{}, false
+		return VLAN{}, vlanRowBad
 	}
 	if netdevcontract.CheckCount("vlan type bytes", len(g.typ), vlanTypeMaxBytes) != nil || !validValueText(g.typ) {
-		return VLAN{}, false
+		return VLAN{}, vlanRowBad
 	}
-	tagged, ok := parsePortList(g.tagged)
-	if !ok {
-		return VLAN{}, false
+	tagged, err := parsePortList(g.tagged, budget)
+	if err != nil {
+		return VLAN{}, portListStatus(err)
 	}
-	untagged, ok := parsePortList(g.untagged)
-	if !ok {
-		return VLAN{}, false
+	untagged, err := parsePortList(g.untagged, budget)
+	if err != nil {
+		return VLAN{}, portListStatus(err)
 	}
 	inTagged := make(map[string]struct{}, len(tagged))
 	for _, p := range tagged {
@@ -215,8 +245,16 @@ func buildVLAN(g *vlanGroup) (VLAN, bool) {
 	}
 	for _, p := range untagged {
 		if _, both := inTagged[p]; both {
-			return VLAN{}, false
+			return VLAN{}, vlanRowBad
 		}
 	}
-	return VLAN{ID: uint16(id), Name: g.name, Tagged: tagged, Untagged: untagged, Type: g.typ}, true
+	return VLAN{ID: uint16(id), Name: g.name, Tagged: tagged, Untagged: untagged, Type: g.typ}, vlanRowOK
+}
+
+// portListStatus maps a parsePortList error to a row status.
+func portListStatus(err error) vlanRowStatus {
+	if errors.Is(err, errMembershipCap) {
+		return vlanRowCap
+	}
+	return vlanRowBad
 }

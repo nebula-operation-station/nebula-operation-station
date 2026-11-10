@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevcontract"
 )
@@ -47,6 +48,12 @@ type span struct{ start, end int }
 type tableRow struct {
 	line  int      // 1-based line number in the output
 	cells []string // one trimmed cell per column
+	// filled[i] is true when column i is not the last column and its text
+	// reaches the last rune before the gap. Such a cell may be the start
+	// of a value with an inner space that overflows into the next column
+	// (the gap check cannot see a space), so a free-text cell that is
+	// filled is ambiguous.
+	filled []bool
 	// ok is false when the line contains a tab or has text in a gap
 	// between two columns; its cells are then not trustworthy and the
 	// parsers drop it and mark the result incomplete.
@@ -63,6 +70,11 @@ type tableRow struct {
 type tableBlock struct {
 	titles []string
 	rows   []tableRow
+	// lostRows is true when a title line of this table does not look like
+	// a title (see titleLike) and directly follows the rows of the
+	// previous table: it may be a row of that table that was taken for a
+	// title. The parsers mark the result incomplete.
+	lostRows bool
 }
 
 // splitTables checks out against the CBS output limits and the text rule
@@ -73,7 +85,8 @@ type tableBlock struct {
 // above the dash line, read column by column and joined top to bottom.
 // Lines before the first table are ignored. Every non-blank line after a
 // dash line up to the title lines of the next table is a row of that
-// table.
+// table. A title line of a later table that is not titleLike may be a row
+// of the table before it; the table is then marked lostRows.
 //
 // Invalid UTF-8 or a control character anywhere refuses the whole output,
 // as in ParseVersion. A missing table is ErrNoTable; a table without
@@ -119,10 +132,14 @@ func splitTables(out []byte, what string) ([]tableBlock, error) {
 	blocks := make([]tableBlock, len(dashLines))
 	for k, d := range dashLines {
 		titles := make([]string, len(cols[k]))
+		lostRows := false
 		for h := headerStart[k]; h < d; h++ {
-			cells, ok := splitCells(lines[h], cols[k])
+			cells, _, ok := splitCells(lines[h], cols[k])
 			if !ok {
 				return nil, fmt.Errorf("cbsparse: %s line %d: misaligned title: %w", what, h+1, ErrUnrecognizedTable)
+			}
+			if k > 0 && !titleLike(lines[h]) {
+				lostRows = true
 			}
 			for i, c := range cells {
 				if c == "" {
@@ -146,12 +163,25 @@ func splitTables(out []byte, what string) ([]tableBlock, error) {
 			if strings.TrimSpace(lines[i]) == "" {
 				continue
 			}
-			cells, ok := splitCells(lines[i], cols[k])
-			rows = append(rows, tableRow{line: i + 1, cells: cells, ok: ok, lead: leadText(lines[i], cols[k][0])})
+			cells, filled, ok := splitCells(lines[i], cols[k])
+			rows = append(rows, tableRow{line: i + 1, cells: cells, filled: filled, ok: ok, lead: leadText(lines[i], cols[k][0])})
 		}
-		blocks[k] = tableBlock{titles: titles, rows: rows}
+		blocks[k] = tableBlock{titles: titles, rows: rows, lostRows: lostRows}
 	}
 	return blocks, nil
+}
+
+// titleLike reports whether line looks like a column title line: letters
+// and spaces only. Rows of the CBS tables carry port names, VLAN IDs,
+// numbers or "--" markers, so a title line with any other rune may be a
+// row of the table above it.
+func titleLike(line string) bool {
+	for _, r := range line {
+		if r != ' ' && !unicode.IsLetter(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // dashColumns reports whether line is a table rule and returns its
@@ -185,29 +215,34 @@ func dashColumns(line string) ([]span, bool) {
 // non-space rune in a gap between columns (text that crosses a column
 // boundary, which would otherwise be silently split between two fields).
 // Text left of the first column cannot occur: dash lines start at offset
-// zero. The last column extends to the end of the line.
-func splitCells(line string, cols []span) (cells []string, ok bool) {
+// zero. The last column extends to the end of the line. filled reports
+// for every column but the last whether its last rune is not a space (see
+// tableRow.filled).
+func splitCells(line string, cols []span) (cells []string, filled []bool, ok bool) {
 	if strings.ContainsRune(line, '\t') {
-		return nil, false
+		return nil, nil, false
 	}
 	r := []rune(line)
 	cells = make([]string, len(cols))
+	filled = make([]bool, len(cols))
 	for i, c := range cols {
 		if i > 0 {
 			for p := cols[i-1].end; p < c.start && p < len(r); p++ {
 				if r[p] != ' ' {
-					return nil, false
+					return nil, nil, false
 				}
 			}
 		}
 		end := c.end
 		if i == len(cols)-1 {
 			end = len(r)
+		} else {
+			filled[i] = c.end <= len(r) && r[c.end-1] != ' '
 		}
 		lo, hi := min(c.start, len(r)), min(end, len(r))
 		cells[i] = strings.TrimSpace(string(r[lo:hi]))
 	}
-	return cells, true
+	return cells, filled, true
 }
 
 // leadText returns the trimmed text of the first column of line, cut at

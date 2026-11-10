@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -198,6 +199,11 @@ func TestParseVLANsDropsMalformedRows(t *testing.T) {
 		{name: "name over MaxLabelBytes", extra: " 10" + strings.Repeat(" ", 2) + strings.Repeat("n", netdevcontract.MaxLabelBytes+1) + "\n"},
 		{name: "type over its limit", rows: [][]string{{" 10", "ten", "", "gi2", strings.Repeat("S", vlanTypeMaxBytes+1)}}},
 		{name: "name crossing a column gap", extra: " 10  name-that-is-much-too-long  gi2\n"},
+		// "abcdefghijklmnopq gi1" overflows the 17-wide Name column: the
+		// overflow lands in the empty Tagged Ports cell and is
+		// indistinguishable from a name plus a tagged port.
+		{name: "name overflowing into the tagged column", rows: [][]string{{" 10", "abcdefghijklmnopq", "gi1", "gi2", "S"}}},
+		{name: "name filling its column", rows: [][]string{{" 10", "abcdefghijklmnopq", "", "gi2", "S"}}},
 		{name: "tab in row", extra: " 10\tten\n"},
 		{name: "continuation fills name", rows: [][]string{{" 10", "ten", "", "gi2,", "S"}, {"", "more", "", "gi3", ""}}},
 		{name: "continuation without comma", rows: [][]string{{" 10", "ten", "", "gi2", "S"}, {"", "", "", "gi3", ""}}},
@@ -219,6 +225,100 @@ func TestParseVLANsDropsMalformedRows(t *testing.T) {
 				t.Fatalf("got %+v, want only the valid row", got)
 			}
 		})
+	}
+}
+
+func TestParseVLANsOverflowingNameAtCBS350Widths(t *testing.T) {
+	// The column widths of the cbs350 fixture; the name with an inner space
+	// runs past the Name column into the empty Tagged Ports cell.
+	in := "Vlan Name              Tagged Ports       UnTagged Ports     Created by\n" +
+		"---- ----------------- ------------------ ------------------ ----------------\n" +
+		" 1   default                              gi1/0/1            DV\n" +
+		" 10  abcdefghijklmnopq gi1/0/2                               S\n"
+	got, incomplete, err := ParseVLANs([]byte(in))
+	if err != nil || !incomplete {
+		t.Fatalf("incomplete %v, err %v", incomplete, err)
+	}
+	want := []VLAN{{ID: 1, Name: "default", Untagged: []string{"gi1/0/1"}, Type: "DV"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v, want only VLAN 1", got)
+	}
+}
+
+func TestParseVLANsNameOneShortOfItsColumnIsKept(t *testing.T) {
+	name := strings.Repeat("n", vlanWidths[vlanFieldName]-1)
+	got, incomplete, err := ParseVLANs(vlanTable([]string{" 10", name, "gi1", "gi2", "S"}))
+	if err != nil || incomplete || len(got) != 1 || got[0].Name != name || !reflect.DeepEqual(got[0].Tagged, []string{"gi1"}) {
+		t.Fatalf("got %+v, incomplete %v, err %v", got, incomplete, err)
+	}
+}
+
+// membershipTable builds a "show vlan" output with n rows whose tagged and
+// untagged lists each expand to MaxInterfacesPerDevice ports.
+func membershipTable(n int) []byte {
+	const tagged, untagged = "gi1/0/1-999,gi1/1/1-25", "gi2/0/1-999,gi2/1/1-25"
+	w := []int{4, 4, len(tagged), len(untagged), 4}
+	var b strings.Builder
+	b.WriteString(fixedRow(w, "Vlan", "Name", "Tagged Ports", "UnTagged Ports", "Type"))
+	b.WriteString(dashRule(w))
+	for id := 1; id <= n; id++ {
+		b.WriteString(fixedRow(w, fmt.Sprint(id), "v", tagged, untagged, "S"))
+	}
+	return []byte(b.String())
+}
+
+func TestParseVLANsMembershipCap(t *testing.T) {
+	perRow := 2 * netdevcontract.MaxInterfacesPerDevice
+	if vlanMaxMemberships%perRow != 0 {
+		t.Fatalf("test assumes vlanMaxMemberships is a multiple of %d", perRow)
+	}
+	atCap := vlanMaxMemberships / perRow
+	t.Run("at the cap", func(t *testing.T) {
+		got, incomplete, err := ParseVLANs(membershipTable(atCap))
+		if err != nil || incomplete || len(got) != atCap {
+			t.Fatalf("got %d, incomplete %v, err %v", len(got), incomplete, err)
+		}
+		for _, v := range got {
+			if len(v.Tagged)+len(v.Untagged) != perRow {
+				t.Fatalf("VLAN %d: %d ports", v.ID, len(v.Tagged)+len(v.Untagged))
+			}
+		}
+	})
+	t.Run("one row over the cap", func(t *testing.T) {
+		got, incomplete, err := ParseVLANs(membershipTable(atCap + 1))
+		if err != nil || !incomplete || len(got) != atCap {
+			t.Fatalf("got %d, incomplete %v, err %v", len(got), incomplete, err)
+		}
+	})
+	t.Run("empty rows after the cap are still read", func(t *testing.T) {
+		in := string(membershipTable(atCap)) + fmt.Sprintf("%-4d v\n", atCap+1)
+		got, incomplete, err := ParseVLANs([]byte(in))
+		if err != nil || incomplete || len(got) != atCap+1 {
+			t.Fatalf("got %d, incomplete %v, err %v", len(got), incomplete, err)
+		}
+	})
+}
+
+func TestParseVLANsMembershipFloodAllocationIsBounded(t *testing.T) {
+	// Every VLAN with full tagged and untagged lists: without a device-wide
+	// cap this expands to about 8.4 million port names.
+	in := membershipTable(netdevcontract.MaxVLANsPerDevice)
+	if len(in) > netdevcontract.MaxCBSCommandOutputBytes {
+		t.Fatalf("input of %d bytes is over the output cap", len(in))
+	}
+	// The bound is generous for the capped parse (a few MiB) and far below
+	// the hundreds of MiB an uncapped expansion allocates.
+	const maxAlloc = 64 << 20
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	got, incomplete, err := ParseVLANs(in)
+	runtime.ReadMemStats(&after)
+	if err != nil || !incomplete || len(got) != vlanMaxMemberships/(2*netdevcontract.MaxInterfacesPerDevice) {
+		t.Fatalf("got %d, incomplete %v, err %v", len(got), incomplete, err)
+	}
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > maxAlloc {
+		t.Fatalf("parse allocated %d bytes, want at most %d", alloc, maxAlloc)
 	}
 }
 
@@ -323,7 +423,12 @@ func checkVLANInvariants(t *testing.T, got []VLAN) {
 		t.Fatalf("%d VLANs over the limit", len(got))
 	}
 	ids := map[uint16]bool{}
+	memberships := 0
 	for _, v := range got {
+		memberships += len(v.Tagged) + len(v.Untagged)
+		if memberships > vlanMaxMemberships {
+			t.Fatalf("%d memberships over the cap", memberships)
+		}
 		if v.ID < 1 || v.ID > netdevcontract.MaxVLANID || ids[v.ID] {
 			t.Fatalf("bad or duplicate ID %d", v.ID)
 		}

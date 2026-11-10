@@ -214,15 +214,84 @@ func TestParseInterfacesDropsUnknownPorts(t *testing.T) {
 
 func TestParseInterfacesDropsMisalignedRows(t *testing.T) {
 	good := string(statusTable([]string{"gi1", "1G-Copper", "Full", "1000", "1", "Up"}))
-	for name, line := range map[string]string{
-		"type crossing a gap": "gi2      1G-Copper-Long-Type Full 1000 1 Up\n",
-		"tab in row":          "gi2\t1G-Copper Full 1000 1 Up\n",
-		"no port name":        "         1G-Copper\n",
-	} {
-		t.Run(name, func(t *testing.T) {
-			got, incomplete, err := ParseInterfaces([]byte(good + line))
-			if err != nil || !incomplete || len(got) != 1 {
+	typeWidth := statusWidths[1]
+	tests := []struct {
+		name string
+		line string
+		// rowOK and port are what the lexer must make of line, so that the
+		// case reaches the path its name describes.
+		rowOK bool
+		port  string
+	}{
+		{
+			// The port fits its column; the type runs one rune past the
+			// Type column into the Type/Duplex gap.
+			name: "type crossing a gap",
+			line: fixedRow(statusWidths, "gi2", strings.Repeat("T", typeWidth+1), "Full", "1000", "1", "Up"),
+		},
+		{name: "tab in row", line: "gi2\t1G-Copper Full 1000 1 Up\n"},
+		{
+			// An aligned row whose Port cell is empty.
+			name:  "no port name",
+			line:  fixedRow(statusWidths, "", "1G-Copper", "Full", "1000", "1", "Up"),
+			rowOK: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			in := good + tt.line
+			blocks, err := splitTables([]byte(in), "test")
+			if err != nil || len(blocks) != 1 || len(blocks[0].rows) != 2 {
+				t.Fatalf("lexer: %+v, err %v", blocks, err)
+			}
+			if r := blocks[0].rows[1]; r.ok != tt.rowOK || (r.ok && r.cells[0] != tt.port) {
+				t.Fatalf("lexer row %+v, want ok %v port %q", r, tt.rowOK, tt.port)
+			}
+			got, incomplete, err := ParseInterfaces([]byte(in))
+			if err != nil || !incomplete || len(got) != 1 || got[0].Name != "gi1" {
 				t.Fatalf("got %+v, incomplete %v, err %v", got, incomplete, err)
+			}
+		})
+	}
+}
+
+func TestParseInterfacesTypeFillingItsColumnIsKept(t *testing.T) {
+	// Control for "type crossing a gap": one rune shorter is a valid row.
+	typ := strings.Repeat("T", statusWidths[1])
+	got, incomplete, err := ParseInterfaces(statusTable([]string{"gi2", typ, "Full", "1000", "1", "Up"}))
+	if err != nil || incomplete || len(got) != 1 || got[0].Type != typ {
+		t.Fatalf("got %+v, incomplete %v, err %v", got, incomplete, err)
+	}
+}
+
+func TestParseInterfacesRowAboveNextHeaderIsIncomplete(t *testing.T) {
+	// A port-channel table with an ignored Neg column follows the port
+	// table without a blank line. A stray line just above its two title
+	// lines is taken as a third title line; its text falls into the
+	// ignored column, so it only vanishes from the port table.
+	chWidths := []int{10, 8, 11}
+	second := fixedRow(chWidths, "", "", "Link") +
+		fixedRow(chWidths, "Ch", "Neg", "State") +
+		dashRule(chWidths) +
+		fixedRow(chWidths, "Po1", "Enabled", "Up")
+	first := string(statusTable([]string{"gi1", "1G-Copper", "Full", "1000", "1", "Up"}))
+	want := []Interface{
+		{Name: "gi1", Type: "1G-Copper", Status: netdevcontract.LinkUp, VLAN: 1, Duplex: DuplexFull, SpeedMbps: 1000},
+		{Name: "Po1", Status: netdevcontract.LinkUp},
+	}
+	tests := []struct {
+		name           string
+		between        string
+		wantIncomplete bool
+	}{
+		{"blank line between the tables", "\n", false},
+		{"orphan row above the header", fixedRow(chWidths, "", "gi1/0/9", ""), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, incomplete, err := ParseInterfaces([]byte(first + tt.between + second))
+			if err != nil || incomplete != tt.wantIncomplete || !reflect.DeepEqual(got, want) {
+				t.Fatalf("got %+v, incomplete %v (want %v), err %v", got, incomplete, tt.wantIncomplete, err)
 			}
 		})
 	}
@@ -409,13 +478,47 @@ func TestParsePortList(t *testing.T) {
 		{strings.Repeat("gi1,", portListMaxTokens) + "gi2", nil, false},
 	}
 	for _, tt := range tests {
-		got, ok := parsePortList(tt.in)
-		if ok != tt.ok {
+		budget := vlanMaxMemberships
+		got, err := parsePortList(tt.in, &budget)
+		if ok := err == nil; ok != tt.ok {
 			t.Fatalf("parsePortList(%.40q) ok = %v, want %v", tt.in, ok, tt.ok)
 		}
 		if tt.want != nil && !reflect.DeepEqual(got, tt.want) {
 			t.Fatalf("parsePortList(%q) = %v, want %v", tt.in, got, tt.want)
 		}
+	}
+}
+
+func TestParsePortListMembershipBudget(t *testing.T) {
+	tests := []struct {
+		name       string
+		in         string
+		budget     int
+		wantErr    error
+		wantBudget int
+	}{
+		{"exactly the budget", "gi1-4", 4, nil, 0},
+		{"under the budget", "gi1-2,Po1", 10, nil, 7},
+		{"empty list with no budget left", "", 0, nil, 0},
+		{"range over the budget", "gi1-4", 3, errMembershipCap, 3},
+		{"second entry over the budget", "gi1-3,gi4", 3, errMembershipCap, 0},
+		{"malformed list is not a cap", "gi4-2", 0, errPortList, 0},
+		{"per-list limit before the budget", "gi1/0/1-999,gi1/1/1-26", 1000, errPortList, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			budget := tt.budget
+			got, err := parsePortList(tt.in, &budget)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tt.wantErr)
+			}
+			if err != nil && got != nil {
+				t.Fatalf("error with ports %v", got)
+			}
+			if budget != tt.wantBudget {
+				t.Fatalf("budget left %d, want %d", budget, tt.wantBudget)
+			}
+		})
 	}
 }
 

@@ -3,6 +3,7 @@
 package cbsparse
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 
@@ -66,20 +67,34 @@ func validPortName(s string) bool {
 	return ok
 }
 
+var (
+	// errPortList reports a malformed port list.
+	errPortList = errors.New("malformed port list")
+	// errMembershipCap reports that expanding a port list would exceed the
+	// membership budget of the parse.
+	errMembershipCap = errors.New("port membership cap reached")
+)
+
 // parsePortList expands a CBS port list such as "gi1/0/1-4,te1/0/1,Po1-2"
 // into port names in list order. A range varies the last number of the
 // port name ("gi1/0/1-4" is gi1/0/1 to gi1/0/4). An empty list is valid
-// and has no ports. ok is false for an empty entry, an unknown port name,
-// a reversed range, a port listed twice, or more than
-// MaxInterfacesPerDevice ports; the range size is checked before the
-// range is expanded.
-func parsePortList(s string) ([]string, bool) {
+// and has no ports.
+//
+// The error is errPortList for an empty entry, an unknown port name, a
+// reversed range, a port listed twice, or more than
+// MaxInterfacesPerDevice ports. budget is the number of ports the caller
+// may still expand: every entry is charged against it before it is
+// expanded, and an entry larger than what is left is errMembershipCap.
+// The per-list limit is checked first, so an over-long list is always
+// errPortList. On error the ports are nil; the budget keeps the charges
+// of the entries already expanded.
+func parsePortList(s string, budget *int) ([]string, error) {
 	if s == "" {
-		return nil, true
+		return nil, nil
 	}
 	tokens := strings.Split(s, ",")
 	if netdevcontract.CheckCount("port list entries", len(tokens), portListMaxTokens) != nil {
-		return nil, false
+		return nil, errPortList
 	}
 	var ports []string
 	seen := map[string]struct{}{}
@@ -87,25 +102,30 @@ func parsePortList(s string) ([]string, bool) {
 		base, hiText, isRange := strings.Cut(tok, "-")
 		prefix, lo, ok := parsePortName(base)
 		if !ok {
-			return nil, false
+			return nil, errPortList
 		}
 		hi := lo
 		if isRange {
 			if hi, ok = parseDecimal(hiText, portMaxDigits); !ok || hi < lo {
-				return nil, false
+				return nil, errPortList
 			}
 		}
-		if netdevcontract.CheckCount("port list ports", len(ports)+hi-lo+1, netdevcontract.MaxInterfacesPerDevice) != nil {
-			return nil, false
+		n := hi - lo + 1
+		if netdevcontract.CheckCount("port list ports", len(ports)+n, netdevcontract.MaxInterfacesPerDevice) != nil {
+			return nil, errPortList
 		}
-		for n := lo; n <= hi; n++ {
-			name := prefix + strconv.Itoa(n)
+		if n > *budget {
+			return nil, errMembershipCap
+		}
+		*budget -= n
+		for p := lo; p <= hi; p++ {
+			name := prefix + strconv.Itoa(p)
 			if _, dup := seen[name]; dup {
-				return nil, false
+				return nil, errPortList
 			}
 			seen[name] = struct{}{}
 			ports = append(ports, name)
 		}
 	}
-	return ports, true
+	return ports, nil
 }

@@ -88,7 +88,9 @@ var descriptionTitles = map[string]int{
 // stored as unknown (empty type, LinkUnknown, DuplexUnknown, speed 0,
 // VLAN 0) and incomplete is true; "--", an empty cell and the status "Not
 // Present" are recognised unknowns and do not set incomplete. Two valid
-// rows for the same port are ErrDuplicate.
+// rows for the same port are ErrDuplicate. A title line of the second
+// table that may be a row of the first one (see splitTables) sets
+// incomplete.
 //
 // At most netdevcontract.MaxInterfacesPerDevice interfaces are returned;
 // further rows are not read and incomplete is true. On error the result
@@ -104,6 +106,9 @@ func ParseInterfaces(out []byte) (ifaces []Interface, incomplete bool, err error
 		idx, err := columnIndex(b.titles, interfaceTitles, numIfFields, ifFieldName, ifFieldStatus)
 		if err != nil {
 			return nil, false, fmt.Errorf("cbsparse: %s: %w", what, err)
+		}
+		if b.lostRows {
+			incomplete = true
 		}
 		for _, r := range b.rows {
 			if netdevcontract.CheckCount("interfaces", len(ifaces)+1, netdevcontract.MaxInterfacesPerDevice) != nil {
@@ -235,6 +240,9 @@ func ParseInterfaceDescriptions(out []byte) (descs map[string]string, incomplete
 		idx, err := columnIndex(b.titles, descriptionTitles, numIfFields, ifFieldName, ifFieldDescription)
 		if err != nil {
 			return nil, false, fmt.Errorf("cbsparse: %s: %w", what, err)
+		}
+		if b.lostRows {
+			incomplete = true
 		}
 		for _, r := range b.rows {
 			if netdevcontract.CheckCount("interfaces", len(descs)+1, netdevcontract.MaxInterfacesPerDevice) != nil {
