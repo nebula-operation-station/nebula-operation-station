@@ -73,7 +73,7 @@ func (s *Service) ReadNetDevice(_ context.Context, in *pb.ReadNetDeviceRequest) 
 		return nil, err
 	}
 	if s.db == nil {
-		return nil, s.netDevReadFailed(errNetDevNoStore)
+		return nil, s.netDevReadFailed(ErrNetDevNoStore)
 	}
 	dev, ok, err := s.db.GetNetDevice(in.DeviceId)
 	if err != nil {
