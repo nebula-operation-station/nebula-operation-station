@@ -5,6 +5,11 @@ package executor
 import (
 	"bytes"
 	"context"
+	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -223,8 +228,9 @@ func TestListNetDevicesReturnsRegistryRowsWithoutKeyRefs(t *testing.T) {
 	}
 }
 
-// TestListNetDevicesFailsClosed: a store error or a credential reference
-// without its vault entry returns no devices and a fixed message.
+// TestListNetDevicesFailsClosed: a missing store, a registry read error
+// or a vault version read error returns no devices and a fixed message
+// that does not repeat the store error.
 func TestListNetDevicesFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	got, err := (&Service{}).ListNetDevices(ctx, &pb.ListNetDevicesRequest{})
@@ -233,16 +239,255 @@ func TestListNetDevicesFailsClosed(t *testing.T) {
 	}
 
 	e := newNetDevTestEnv(t)
-	if _, err := e.db.InsertNetDevice(executordb.NetDevice{
+	if _, err := e.reg.RegisterNetDevice(ctx, cbsReq("core-sw", "10.20.0.2")); err != nil {
+		t.Fatal(err)
+	}
+	for name, store := range map[string]*netDevListHookStore{
+		"registry": {DB: e.db, failDevices: errors.New("registry read failed: netdev-core-sw-cred")},
+		"vault":    {DB: e.db, failSecrets: errors.New("vault read failed: netdev-core-sw-cred")},
+	} {
+		svc := &Service{}
+		got, err := listNetDevices(ctx, store)
+		if got != nil || err == nil {
+			t.Fatalf("%s: reply %v error %v, want an error", name, got, err)
+		}
+		if st := svc.netDevListFailed(err); status.Code(st) != codes.Internal || status.Convert(st).Message() != "network device operation failed" {
+			t.Fatalf("%s: reply error %v", name, st)
+		}
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if got, err := listNetDevices(cancelled, e.db); got != nil || err == nil {
+		t.Fatalf("cancelled: reply %v error %v, want an error", got, err)
+	}
+}
+
+// netDevListHookStore wraps the real store for the list path. It can fail
+// either read and runs between after the registry read and before the
+// vault read, which is where a concurrent remove or rotate lands.
+type netDevListHookStore struct {
+	*executordb.DB
+	failDevices, failSecrets error
+	between                  func() error
+}
+
+func (s *netDevListHookStore) ListNetDevices() ([]executordb.NetDevice, error) {
+	if s.failDevices != nil {
+		return nil, s.failDevices
+	}
+	rows, err := s.DB.ListNetDevices()
+	if err == nil && s.between != nil {
+		err = s.between()
+	}
+	return rows, err
+}
+
+func (s *netDevListHookStore) ListSecrets() ([]executordb.VaultSecret, error) {
+	if s.failSecrets != nil {
+		return nil, s.failSecrets
+	}
+	return s.DB.ListSecrets()
+}
+
+// insertNetDevWithCredential stores a device whose read credential is at
+// vault version len(values).
+func insertNetDevWithCredential(t *testing.T, e *netDevTestEnv, id, ip string, pin string, values ...string) executordb.NetDevice {
+	t.Helper()
+	ref := "netdev-" + id + "-cred"
+	for _, v := range values {
+		if _, err := e.vault.Put(ref, []byte(v), "admin"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d, err := e.db.InsertNetDevice(executordb.NetDevice{
+		ID: id, Family: netdevcontract.FamilyCBS, Label: id, EndpointIP: ip, Port: 22,
+		PinKind: netdevcontract.PinSSHHostKey, PinValue: pin, TrustGeneration: 1,
+		CredentialRef: ref, DigestKeyRef: "netdev-" + id + "-dk", FingerprintKeyRef: "netdev-" + id + "-fk",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return d
+}
+
+// TestListNetDevicesFlagsMissingCredential: a device whose credential
+// vault entry is missing is listed with credential_missing and version 0;
+// the other devices are listed normally and no vault reference leaks.
+func TestListNetDevicesFlagsMissingCredential(t *testing.T) {
+	ctx := context.Background()
+	e := newNetDevTestEnv(t)
+	orphan, err := e.db.InsertNetDevice(executordb.NetDevice{
 		ID: "orphan-sw", Family: netdevcontract.FamilyCBS, Label: "orphan", EndpointIP: "10.20.0.4", Port: 22,
 		PinKind: netdevcontract.PinSSHHostKey, PinValue: testNetDevPin, TrustGeneration: 1,
 		CredentialRef: "netdev-orphan-cred", DigestKeyRef: "netdev-orphan-dk", FingerprintKeyRef: "netdev-orphan-fk",
-	}); err != nil {
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok := insertNetDevWithCredential(t, e, "acc-sw", "10.20.0.3", testNetDevPin2, "first-read-secret")
+	got, err := (&Service{db: e.db}).ListNetDevices(ctx, &pb.ListNetDevicesRequest{})
+	if err != nil {
+		t.Fatalf("list with a missing credential entry: %v", err)
+	}
+	if len(got.GetDevices()) != 2 {
+		t.Fatalf("devices %v, want acc-sw and orphan-sw", got.GetDevices())
+	}
+	acc, orph := got.Devices[0], got.Devices[1]
+	if acc.GetDeviceId() != ok.ID || acc.GetCredentialMissing() || acc.GetCredentialVersion() != 1 {
+		t.Errorf("healthy device: %v", acc)
+	}
+	if orph.GetDeviceId() != orphan.ID || !orph.GetCredentialMissing() || orph.GetCredentialVersion() != 0 {
+		t.Errorf("orphan device: %v, want credential_missing and version 0", orph)
+	}
+	text := prototext.Format(got)
+	for _, s := range []string{"netdev-", "read-secret"} {
+		if strings.Contains(text, s) {
+			t.Errorf("reply carries %q", s)
+		}
+	}
+	// A device without any credential reference is not "missing".
+	swReq := cbsReq("core-sw", "10.20.0.2")
+	swReq.Pin = strings.Repeat("cd", 32)
+	sw, err := e.reg.RegisterNetDevice(ctx, swReq)
+	if err != nil {
 		t.Fatal(err)
 	}
 	got, err = (&Service{db: e.db}).ListNetDevices(ctx, &pb.ListNetDevicesRequest{})
-	if got != nil || status.Code(err) != codes.Internal || status.Convert(err).Message() != "network device operation failed" {
-		t.Fatalf("missing credential entry: reply %v error %v", got, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range got.GetDevices() {
+		if d.GetDeviceId() == sw.ID && (d.GetCredentialMissing() || d.GetCredentialVersion() != 0) {
+			t.Errorf("device without credential: %v", d)
+		}
+	}
+}
+
+// TestListNetDevicesToleratesConcurrentCredentialChange: a credential
+// removed or rotated after the registry read and before the version read
+// shows as missing or at its new version; the list never fails.
+func TestListNetDevicesToleratesConcurrentCredentialChange(t *testing.T) {
+	ctx := context.Background()
+	e := newNetDevTestEnv(t)
+	rm := insertNetDevWithCredential(t, e, "rm-sw", "10.20.0.5", testNetDevPin, "v1")
+	rot := insertNetDevWithCredential(t, e, "rot-sw", "10.20.0.6", testNetDevPin2, "v1")
+	store := &netDevListHookStore{DB: e.db, between: func() error {
+		if _, err := e.db.DeleteSecret(rm.CredentialRef); err != nil {
+			return err
+		}
+		_, err := e.vault.Put(rot.CredentialRef, []byte("v2"), "admin")
+		return err
+	}}
+	got, err := listNetDevices(ctx, store)
+	if err != nil {
+		t.Fatalf("list across a concurrent remove and rotate: %v", err)
+	}
+	if len(got.GetDevices()) != 2 {
+		t.Fatalf("devices %v", got.GetDevices())
+	}
+	if d := got.Devices[0]; d.GetDeviceId() != rm.ID || !d.GetCredentialMissing() || d.GetCredentialVersion() != 0 {
+		t.Errorf("removed credential: %v, want credential_missing", d)
+	}
+	if d := got.Devices[1]; d.GetDeviceId() != rot.ID || d.GetCredentialMissing() || d.GetCredentialVersion() != 2 {
+		t.Errorf("rotated credential: %v, want version 2", d)
+	}
+}
+
+// TestListNetDevicesConcurrentRemoveNeverInternal runs lists against a
+// writer that keeps removing and re-adding a device credential; no list
+// may fail and every row is either at a real version or flagged missing.
+func TestListNetDevicesConcurrentRemoveNeverInternal(t *testing.T) {
+	ctx := context.Background()
+	e := newNetDevTestEnv(t)
+	d := insertNetDevWithCredential(t, e, "flap-sw", "10.20.0.7", testNetDevPin, "v1")
+	svc := &Service{db: e.db}
+	done := make(chan struct{})
+	writerErr := make(chan error, 1)
+	go func() {
+		defer close(writerErr)
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			if _, err := e.db.DeleteSecret(d.CredentialRef); err != nil {
+				writerErr <- err
+				return
+			}
+			if _, err := e.vault.Put(d.CredentialRef, []byte("again"), "admin"); err != nil {
+				writerErr <- err
+				return
+			}
+		}
+	}()
+	for i := 0; i < 50; i++ {
+		got, err := svc.ListNetDevices(ctx, &pb.ListNetDevicesRequest{})
+		if err != nil {
+			close(done)
+			t.Fatalf("list %d during concurrent remove: %v", i, err)
+		}
+		if len(got.GetDevices()) != 1 {
+			close(done)
+			t.Fatalf("list %d: devices %v", i, got.GetDevices())
+		}
+		row := got.Devices[0]
+		if row.GetCredentialMissing() == (row.GetCredentialVersion() != 0) {
+			close(done)
+			t.Fatalf("list %d: inconsistent row %v", i, row)
+		}
+	}
+	close(done)
+	if err := <-writerErr; err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestListNetDevicesLoadsNoSecretBlobs: the list path reads credential
+// versions only through the blob-free ListSecrets. The store it is given
+// is the narrow netDevListStore (no GetSecret), and the source of the
+// list path never names GetSecret.
+func TestListNetDevicesLoadsNoSecretBlobs(t *testing.T) {
+	var _ netDevListStore = (*executordb.DB)(nil)
+	if _, ok := reflect.TypeFor[netDevListStore]().MethodByName("GetSecret"); ok {
+		t.Fatal("netDevListStore exposes GetSecret")
+	}
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "netdev_admin.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The list path's functions (the credential handlers' protobuf
+	// in.GetSecret() getters are a different thing and are excluded).
+	listPath := map[string]bool{"ListNetDevices": true, "listNetDevices": true, "netDevListFailed": true, "netDeviceInfo": true}
+	seen := 0
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || !listPath[fn.Name.Name] {
+			continue
+		}
+		seen++
+		ast.Inspect(fn, func(n ast.Node) bool {
+			if sel, ok := n.(*ast.SelectorExpr); ok && (sel.Sel.Name == "GetSecret" || sel.Sel.Name == "WrappedDEK" || sel.Sel.Name == "Sealed") {
+				t.Errorf("%s: list path names %s", fset.Position(sel.Pos()), sel.Sel.Name)
+			}
+			return true
+		})
+	}
+	if seen != len(listPath) {
+		t.Fatalf("found %d of %d list path functions in netdev_admin.go", seen, len(listPath))
+	}
+
+	e := newNetDevTestEnv(t)
+	insertNetDevWithCredential(t, e, "acc-sw", "10.20.0.3", testNetDevPin, "read-secret")
+	secrets, err := e.db.ListSecrets()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range secrets {
+		if s.WrappedDEK != nil || s.Sealed != nil {
+			t.Fatalf("ListSecrets returned blobs for %s", s.ID)
+		}
 	}
 }
 

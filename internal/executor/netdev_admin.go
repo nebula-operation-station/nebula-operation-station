@@ -94,41 +94,72 @@ func (s *Service) RemoveNetDevice(context.Context, *pb.RemoveNetDeviceRequest) (
 }
 
 // ListNetDevices returns the metadata of every live registry device,
-// ordered by id. It fails closed: any store error, invalid row or missing
-// credential vault entry returns no devices.
+// ordered by id. A store error or an invalid registry row returns no
+// devices. A device whose credential vault entry is missing (also one
+// removed concurrently with the list) is still listed, flagged
+// credential_missing, so the admin can see and remove it.
 func (s *Service) ListNetDevices(ctx context.Context, _ *pb.ListNetDevicesRequest) (*pb.ListNetDevicesResponse, error) {
-	out, err := s.listNetDevices(ctx)
+	if s.db == nil {
+		return nil, s.netDevListFailed(errNetDevNoStore)
+	}
+	out, err := listNetDevices(ctx, s.db)
 	if err != nil {
-		if s.log != nil {
-			s.log.Error("netdev: list failed", "error", err.Error())
-		}
-		return nil, status.Error(codes.Internal, netDevRPCFailed)
+		return nil, s.netDevListFailed(err)
 	}
 	return out, nil
 }
 
-func (s *Service) listNetDevices(ctx context.Context) (*pb.ListNetDevicesResponse, error) {
-	if s.db == nil {
-		return nil, errNetDevNoStore
+func (s *Service) netDevListFailed(err error) error {
+	if s.log != nil {
+		s.log.Error("netdev: list failed", "error", err.Error())
+	}
+	return status.Error(codes.Internal, netDevRPCFailed)
+}
+
+// netDevListStore is everything the list path may read. It deliberately
+// has no GetSecret: credential versions come from the blob-free
+// ListSecrets, so no wrapped data key or sealed value is ever loaded to
+// answer a list.
+type netDevListStore interface {
+	ListNetDevices() ([]executordb.NetDevice, error)
+	ListSecrets() ([]executordb.VaultSecret, error)
+}
+
+// listNetDevices reads the registry rows first and the vault versions
+// second, each in one statement. A credential removed or rotated between
+// the two reads therefore shows as missing or at its newer version; it
+// never fails the list. The registry rows stay authoritative: a vault
+// entry without a live device is not listed.
+func listNetDevices(ctx context.Context, store netDevListStore) (*pb.ListNetDevicesResponse, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	rows, err := store.ListNetDevices()
+	if err != nil {
+		return nil, err
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.ListNetDevices()
+	secrets, err := store.ListSecrets()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("credential versions of network devices: %w", err)
+	}
+	versions := make(map[string]int64, len(secrets))
+	for _, sec := range secrets {
+		versions[sec.ID] = sec.Version
 	}
 	out := &pb.ListNetDevicesResponse{}
 	for _, d := range rows {
 		var version int64
+		missing := false
 		if d.CredentialRef != "" {
-			sec, err := s.db.GetSecret(d.CredentialRef)
-			if err != nil {
-				return nil, fmt.Errorf("credential version of network device %s: %w", d.ID, err)
-			}
-			version = sec.Version
+			v, ok := versions[d.CredentialRef]
+			version, missing = v, !ok
 		}
-		out.Devices = append(out.Devices, netDeviceInfo(d, version))
+		info := netDeviceInfo(d, version)
+		info.CredentialMissing = missing
+		out.Devices = append(out.Devices, info)
 	}
 	return out, nil
 }
