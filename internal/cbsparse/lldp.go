@@ -290,15 +290,15 @@ var lldpKeptBit = map[string]uint8{
 // ignored sets is read as the wrapped rest of that value (see
 // ParseLLDPNeighborDetail).
 var lldpIgnoredKeys = map[string]bool{
-	"chassis id subtype":                       true,
-	"port id subtype":                          true,
-	"system description":                       true,
-	"port description":                         true,
-	"time to live":                             true,
-	"ttl":                                      true,
-	"port vlan id":                             true,
-	"auto-negotiation support":                 true,
-	"auto-negotiation status":                  true,
+	"chassis id subtype":       true,
+	"port id subtype":          true,
+	"system description":       true,
+	"port description":         true,
+	"time to live":             true,
+	"ttl":                      true,
+	"port vlan id":             true,
+	"auto-negotiation support": true,
+	"auto-negotiation status":  true,
 	"auto-negotiation advertised capabilities": true,
 	"operational mau type":                     true,
 	"802.3 maximum frame size":                 true,
@@ -378,7 +378,7 @@ func ParseLLDPNeighborDetail(localPort string, out []byte) (neighbors []netdevco
 	var blocks []*lldpBlock
 	var cur *lldpBlock
 	overflow := &lldpBlock{bad: true} // receives the blocks beyond lldpDetailMaxBlocks
-	afterKept := false // the previous line set a kept key
+	afterKept := false                // the previous line set a kept key
 	for i, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSuffix(line, "\r")
 		if err := checkLineText(line); err != nil {
