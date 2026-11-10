@@ -1,0 +1,7 @@
+Created by: D-Default, S-Static, G-GVRP, R-Radius Assigned VLAN, V-Voice VLAN
+
+Vlan Name              Tagged Ports       UnTagged Ports     Created by
+---- ----------------- ------------------ ------------------ ----------------
+ 1   1                                    gi5-8              DV
+ 10  office            gi9-10             gi1-4              S
+ 20  lab               gi9-10                                S
