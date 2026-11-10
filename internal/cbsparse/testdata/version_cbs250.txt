@@ -1,0 +1,15 @@
+Cisco IOS Software, C250 Software (C250-ADVENTERPRISEK9-M), Version 3.1.0.10, RELEASE SOFTWARE (synthetic)
+Technical Support: https://www.cisco.com/techsupport
+This product contains cryptographic features and is subject to United
+States and local country laws governing import, export, manufacture and
+use. Installation, use, or redistribution of this software constitutes
+acceptance of those laws.
+
+System uptime is 1 week, 2 days, 3 hours, 4 minutes
+System image file is "flash:/c250-universalk9-m.SPA.3.1.0.10/c250-universalk9-m.SPA.3.1.0.10.bin"
+
+Cisco CBS250-8T (MPC8548) processor with 262144K/16384K bytes of memory.
+MPC8548 processor at 800Mhz, Revision 2.2
+Model : CBS250-8T
+Serial Number : PSZ00000000
+Firmware Version : 3.1.0.10
