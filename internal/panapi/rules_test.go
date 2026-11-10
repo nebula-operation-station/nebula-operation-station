@@ -5,8 +5,10 @@ package panapi
 import (
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"reflect"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -905,17 +907,21 @@ func TestRuleResolverMemoizesFailures(t *testing.T) {
 	rr := NewRuleResolver(o)
 	r := Rule{Source: []string{"x", "y", "miss", "dyn"}, Destination: []string{"y"}}
 	first := rr.Resolve(r)
-	checks, iters := rr.groupChecks, rr.memberIters
+	checks, iters, passes := rr.groupChecks, rr.memberIters, rr.reasonPasses
 	if checks != len(o.AddressGroups) {
 		t.Fatalf("groups entered %d times, want %d", checks, len(o.AddressGroups))
+	}
+	if passes != 4 {
+		t.Fatalf("%d reason passes, want one per failing group (4)", passes)
 	}
 	for range 100 {
 		if got := rr.Resolve(r); !reflect.DeepEqual(got, first) {
 			t.Fatalf("result changed: %+v, want %+v", got, first)
 		}
 	}
-	if rr.groupChecks != checks || rr.memberIters != iters {
-		t.Fatalf("repeated rules walked groups again: entered %d (was %d), members %d (was %d)", rr.groupChecks, checks, rr.memberIters, iters)
+	if rr.groupChecks != checks || rr.memberIters != iters || rr.reasonPasses != passes {
+		t.Fatalf("repeated rules walked groups again: entered %d (was %d), members %d (was %d), reason passes %d (was %d)",
+			rr.groupChecks, checks, rr.memberIters, iters, rr.reasonPasses, passes)
 	}
 	wantReasons := []error{ErrGroupCycle, ErrGroupCycle, ErrUnresolvedMember, ErrDynamicGroup, ErrGroupCycle}
 	if len(first.Unresolved) != len(wantReasons) {
@@ -979,6 +985,33 @@ func TestRuleResolverAgreesWithResolveGroup(t *testing.T) {
 		`<entry name="deep"><static><member>d1</member></static></entry>` +
 		`<entry name="d1"><static><member>d2</member></static></entry>` +
 		`<entry name="d2"><static><member>okParent</member></static></entry>` +
+		// a cycle below a chain of MaxGroupResolveDepth groups: ResolveGroup
+		// counts levels from the root and fails lc1..lc3 with ErrGroupDepth
+		// before it reaches the cycle, lc4..lc8 with ErrGroupCycle
+		`<entry name="lc1"><static><member>lc2</member></static></entry>` +
+		`<entry name="lc2"><static><member>lc3</member></static></entry>` +
+		`<entry name="lc3"><static><member>lc4</member></static></entry>` +
+		`<entry name="lc4"><static><member>lc5</member></static></entry>` +
+		`<entry name="lc5"><static><member>lc6</member></static></entry>` +
+		`<entry name="lc6"><static><member>lc7</member></static></entry>` +
+		`<entry name="lc7"><static><member>lc8</member></static></entry>` +
+		`<entry name="lc8"><static><member>lx</member></static></entry>` +
+		`<entry name="lx"><static><member>h1</member><member>ly</member></static></entry>` +
+		`<entry name="ly"><static><member>lx</member></static></entry>` +
+		// a group that expands (s, height 3) reached deep through a chain
+		// k1..k6 whose end also holds an unknown member: from k1 ResolveGroup
+		// enters s3 at level 9 (ErrGroupDepth); from r, which expanded s at
+		// level 2 first, it skips s and reports the unknown member
+		`<entry name="s"><static><member>s2</member></static></entry>` +
+		`<entry name="s2"><static><member>s3</member></static></entry>` +
+		`<entry name="s3"><static><member>h1</member></static></entry>` +
+		`<entry name="k1"><static><member>k2</member></static></entry>` +
+		`<entry name="k2"><static><member>k3</member></static></entry>` +
+		`<entry name="k3"><static><member>k4</member></static></entry>` +
+		`<entry name="k4"><static><member>k5</member></static></entry>` +
+		`<entry name="k5"><static><member>k6</member></static></entry>` +
+		`<entry name="k6"><static><member>s</member><member>nothere</member></static></entry>` +
+		`<entry name="r"><static><member>s</member><member>k1</member></static></entry>` +
 		`</address-group>`))
 	if err != nil {
 		t.Fatalf("ParseObjects: %v", err)
@@ -1041,6 +1074,515 @@ func TestRuleResolverAgreesWithResolveGroup(t *testing.T) {
 		if !covered[s] {
 			t.Errorf("fixtures never fail a group with %v", s)
 		}
+	}
+	// the reasons that depend on where ResolveGroup starts, pinned so the
+	// fixtures keep exercising them; a fresh resolver per group and one
+	// shared resolver whose memo was filled from other roots agree
+	shared := NewRuleResolver(complete)
+	for _, name := range []string{"k6", "s", "lc8", "lc4", "r", "k1", "lc1", "lc3"} {
+		_ = shared.Resolve(Rule{Source: []string{name}})
+	}
+	for name, want := range map[string]error{
+		"lc1": ErrGroupDepth, "lc3": ErrGroupDepth, "lc4": ErrGroupCycle, "lx": ErrGroupCycle,
+		"k1": ErrGroupDepth, "k2": ErrUnresolvedMember, "r": ErrUnresolvedMember,
+	} {
+		if _, err := complete.ResolveGroup(name); !errors.Is(err, want) {
+			t.Fatalf("fixture %s: ResolveGroup = %v, want %v", name, err, want)
+		}
+		for _, rr := range []*RuleResolver{NewRuleResolver(complete), shared} {
+			got := rr.Resolve(Rule{Source: []string{name}})
+			if len(got.Unresolved) != 1 || !errors.Is(got.Unresolved[0].Reason, want) {
+				t.Fatalf("group %s: unresolved %+v, want %v", name, got.Unresolved, want)
+			}
+		}
+	}
+}
+
+// randomGroupObjects builds a small random group graph over two address
+// objects: members are objects, other groups (forward edges mostly, back
+// edges for cycles) or unknown names; some groups are empty or dynamic.
+func randomGroupObjects(rng *rand.Rand, nGroups int) Objects {
+	o := Objects{Addresses: []netdevcontract.AddressObject{
+		{Name: "h1", Type: netdevcontract.AddressNetmask, Value: "192.0.2.1"},
+		{Name: "h2", Type: netdevcontract.AddressNetmask, Value: "192.0.2.2"},
+	}}
+	for i := range nGroups {
+		g := netdevcontract.Group{Name: fmt.Sprintf("g%d", i)}
+		switch rng.IntN(20) {
+		case 0:
+			o.AddressGroups = append(o.AddressGroups, g)
+			continue
+		case 1:
+			g.DynamicFilter = "'t'"
+			o.AddressGroups = append(o.AddressGroups, g)
+			continue
+		}
+		for range 1 + rng.IntN(3) {
+			switch r := rng.IntN(100); {
+			case r < 30:
+				g.Static = append(g.Static, fmt.Sprintf("h%d", 1+rng.IntN(2)))
+			case r < 33:
+				g.Static = append(g.Static, "nothere")
+			case r < 38:
+				g.Static = append(g.Static, fmt.Sprintf("g%d", rng.IntN(nGroups)))
+			default:
+				if i+1 < nGroups {
+					g.Static = append(g.Static, fmt.Sprintf("g%d", i+1+rng.IntN(min(3, nGroups-i-1))))
+				}
+			}
+		}
+		o.AddressGroups = append(o.AddressGroups, g)
+	}
+	return o
+}
+
+func TestRuleResolverReasonMatchesResolveGroupOnRandomGraphs(t *testing.T) {
+	// differential check of the reason pass: for every group of many random
+	// graphs (cycles, chains over MaxGroupResolveDepth, shared subgroups,
+	// unknown, empty and dynamic members), with a memo filled from random
+	// roots first, Resolve reports exactly the reason of ResolveGroup
+	rng := rand.New(rand.NewPCG(1, 2))
+	for iter := range 400 {
+		o := randomGroupObjects(rng, 6+rng.IntN(20))
+		o.Incomplete = iter%5 == 0
+		rr := NewRuleResolver(o)
+		for range rng.IntN(4) {
+			_ = rr.Resolve(Rule{Source: []string{o.AddressGroups[rng.IntN(len(o.AddressGroups))].Name}})
+		}
+		for _, g := range o.AddressGroups {
+			want, wantErr := o.ResolveGroup(g.Name)
+			got := rr.Resolve(Rule{Source: []string{g.Name}})
+			if wantErr != nil {
+				if len(got.Unresolved) != 1 || errors.Unwrap(got.Unresolved[0].Reason) != errors.Unwrap(wantErr) {
+					t.Fatalf("graph %d group %s: unresolved %+v, want %v", iter, g.Name, got.Unresolved, wantErr)
+				}
+				continue
+			}
+			if len(got.Unresolved) != 0 || !reflect.DeepEqual(got.Source.Objects, want) {
+				t.Fatalf("graph %d group %s: unresolved %+v, objects %v, want %v", iter, g.Name, got.Unresolved, addrNames(got.Source.Objects), addrNames(want))
+			}
+		}
+	}
+}
+
+// addrObjects returns n address objects named <prefix>0 .. <prefix>(n-1).
+func addrObjects(prefix string, n int) []netdevcontract.AddressObject {
+	out := make([]netdevcontract.AddressObject, 0, n)
+	for i := range n {
+		out = append(out, netdevcontract.AddressObject{
+			Name: fmt.Sprintf("%s%d", prefix, i), Type: netdevcontract.AddressNetmask, Value: "192.0.2.1"})
+	}
+	return out
+}
+
+// sharedWithOwnObjects builds the amplifying shape of the round-3 review:
+// a group "shared" that reaches nShared address objects through leaf
+// groups of MaxGroupMembers, and nGroups groups p<k> = {shared, o<k>}, each
+// with its own object, so no two expansions are the same list.
+func sharedWithOwnObjects(nShared, nGroups int) Objects {
+	o := Objects{Addresses: append(addrObjects("a", nShared), addrObjects("o", nGroups)...)}
+	var leafGroups []string
+	for i := 0; i < nShared; i += netdevcontract.MaxGroupMembers {
+		g := netdevcontract.Group{Name: fmt.Sprintf("leaf%d", len(leafGroups))}
+		for j := i; j < min(i+netdevcontract.MaxGroupMembers, nShared); j++ {
+			g.Static = append(g.Static, fmt.Sprintf("a%d", j))
+		}
+		o.AddressGroups = append(o.AddressGroups, g)
+		leafGroups = append(leafGroups, g.Name)
+	}
+	o.AddressGroups = append(o.AddressGroups, netdevcontract.Group{Name: "shared", Static: leafGroups})
+	for k := range nGroups {
+		o.AddressGroups = append(o.AddressGroups, netdevcontract.Group{
+			Name: fmt.Sprintf("p%d", k), Static: []string{"shared", fmt.Sprintf("o%d", k)}})
+	}
+	return o
+}
+
+// groupMembers is the total member count of groups.
+func groupMembers(groups []netdevcontract.Group) int {
+	n := 0
+	for _, g := range groups {
+		n += len(g.Static)
+	}
+	return n
+}
+
+func TestRuleResolverSharedGroupWithOwnMemberIsLinear(t *testing.T) {
+	// round-3 HIGH: fields of MaxRuleMembers groups {shared 17,500-object
+	// group, own object}. Merging every group's flattened expansion costs
+	// about 4*10^7 leaf operations per field (10^12 over a rulebase); the
+	// field merge enters "shared" once, so a rule costs O(groups + members)
+	// and resolves completely
+	const nShared, nGroups, nRules = 17500, MaxRuleMembers, 3
+	o := sharedWithOwnObjects(nShared, nGroups)
+	members := make([]string, 0, nGroups)
+	for k := range nGroups {
+		members = append(members, fmt.Sprintf("p%d", k))
+	}
+	r := Rule{Source: members, Destination: members, Service: []string{"any"}}
+	var want []string
+	for _, a := range o.Addresses {
+		want = append(want, a.Name) // a0..a17499 through p0, then o0, o1, ...
+	}
+	total := groupMembers(o.AddressGroups)
+
+	const allocLimit = 128 << 20
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	rr := NewRuleResolver(o)
+	for i := range nRules {
+		ops := rr.leafOps.Load()
+		got := rr.Resolve(r)
+		if got.Incomplete || len(got.Unresolved) != 0 {
+			t.Fatalf("rule %d: incomplete %v, unresolved %d", i, got.Incomplete, len(got.Unresolved))
+		}
+		if !reflect.DeepEqual(addrNames(got.Source.Objects), want) || !reflect.DeepEqual(addrNames(got.Destination.Objects), want) {
+			t.Fatalf("rule %d: expansion differs from the first-seen order of ResolveGroup", i)
+		}
+		// a field iterates each reachable group's members once; the first
+		// rule also walks every group once
+		bound := int64(2 * total)
+		if i == 0 {
+			bound += int64(total)
+		}
+		if n := rr.leafOps.Load() - ops; n > bound {
+			t.Fatalf("rule %d: %d leaf operations, want at most %d", i, n, bound)
+		}
+	}
+	runtime.ReadMemStats(&after)
+	if n := after.TotalAlloc - before.TotalAlloc; n > allocLimit {
+		t.Fatalf("resolving %d rules allocated %d bytes, limit %d", nRules, n, allocLimit)
+	}
+	if n := rr.resultLeaves.Load(); n != int64(nRules*2*len(want)) {
+		t.Fatalf("result leaves charged %d, want %d", n, nRules*2*len(want))
+	}
+	if rr.memberIters != total {
+		t.Fatalf("walk iterated %d members, want each of the %d once", rr.memberIters, total)
+	}
+	if objs, err := o.ResolveGroup("p1"); err != nil || len(objs) != nShared+1 || objs[nShared].Name != "o1" {
+		t.Fatalf("ResolveGroup(p1): %d objects, %v", len(objs), err)
+	}
+}
+
+func TestRuleResolverManySharingGroupsKeepNoLeafCopies(t *testing.T) {
+	// round-3 MEDIUM: 4,990 groups {shared 15,000-object group, own object}
+	// kept a flattened copy each (7.5*10^7 leaves, about 600 MB); the memo
+	// keeps only the resolved member lists, as many entries as members
+	const nShared, nGroups = 15000, 4990
+	o := sharedWithOwnObjects(nShared, nGroups)
+	var src, dst []string
+	for k := range nGroups {
+		if k%2 == 0 {
+			src = append(src, fmt.Sprintf("p%d", k))
+		} else {
+			dst = append(dst, fmt.Sprintf("p%d", k))
+		}
+	}
+	total := groupMembers(o.AddressGroups)
+
+	const allocLimit = 128 << 20
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	rr := NewRuleResolver(o)
+	got := rr.Resolve(Rule{Source: src, Destination: dst, Service: []string{"any"}})
+	runtime.ReadMemStats(&after)
+	if got.Incomplete || len(got.Unresolved) != 0 || len(got.Source.Objects) != nShared+len(src) || len(got.Destination.Objects) != nShared+len(dst) {
+		t.Fatalf("incomplete %v, unresolved %d, objects %d/%d", got.Incomplete, len(got.Unresolved), len(got.Source.Objects), len(got.Destination.Objects))
+	}
+	if n := after.TotalAlloc - before.TotalAlloc; n > allocLimit {
+		t.Fatalf("resolving allocated %d bytes, limit %d", n, allocLimit)
+	}
+	memo := 0
+	for _, cs := range rr.addrs.codes {
+		memo += len(cs)
+	}
+	if memo > total || rr.memberIters > total {
+		t.Fatalf("memo holds %d entries after %d member iterations, want at most the %d group members", memo, rr.memberIters, total)
+	}
+	if n := rr.leafOps.Load(); n > int64(3*total) {
+		t.Fatalf("%d leaf operations, want at most %d (walk plus two field merges)", n, 3*total)
+	}
+}
+
+// duplicateGroupObjects builds nGroups groups that each list the same
+// nAddr address objects: no nesting to share, so every field naming many
+// of them iterates nGroups x nAddr members.
+func duplicateGroupObjects(nAddr, nGroups int) Objects {
+	o := Objects{Addresses: addrObjects("a", nAddr)}
+	static := make([]string, 0, nAddr)
+	for i := range nAddr {
+		static = append(static, fmt.Sprintf("a%d", i))
+	}
+	for k := range nGroups {
+		o.AddressGroups = append(o.AddressGroups, netdevcontract.Group{Name: fmt.Sprintf("g%d", k), Static: static})
+	}
+	return o
+}
+
+func TestRuleResolverLeafOpBudgetStopsAmplifyingRulebase(t *testing.T) {
+	// fields of 2,000 groups that each list the same 2,000 objects cost
+	// 4*10^6 operations per field, 8*10^10 over a 10,000-rule rulebase;
+	// MaxResolveLeafOps stops the resolver after a few rules: every later
+	// group member is ErrResolveBudget, the rules are Incomplete, and the
+	// work done never exceeds the budget
+	const nAddr, nGroups, nRules = 2000, 2000, 50
+	o := duplicateGroupObjects(nAddr, nGroups)
+	var members []string
+	for k := range nGroups {
+		members = append(members, fmt.Sprintf("g%d", k))
+	}
+	r := Rule{Source: members, Destination: members, Service: []string{"any"}}
+
+	const allocLimit = 128 << 20
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	rr := NewRuleResolver(o)
+	complete, exhausted := 0, false
+	for i := range nRules {
+		got := rr.Resolve(r)
+		if !got.Incomplete {
+			if exhausted || len(got.Unresolved) != 0 || len(got.Source.Objects) != nAddr {
+				t.Fatalf("rule %d: complete after exhaustion or wrong result", i)
+			}
+			complete++
+			continue
+		}
+		exhausted = true
+		if len(got.Unresolved) == 0 {
+			t.Fatalf("rule %d: incomplete without unresolved members", i)
+		}
+		for _, u := range got.Unresolved {
+			if !errors.Is(u.Reason, ErrResolveBudget) {
+				t.Fatalf("rule %d: unresolved %+v, want ErrResolveBudget", i, u)
+			}
+		}
+	}
+	runtime.ReadMemStats(&after)
+	if !exhausted {
+		t.Fatalf("%d amplifying rules resolved without exhausting MaxResolveLeafOps", nRules)
+	}
+	// the walk (nGroups x nAddr) plus complete fields of nGroups x nAddr
+	// each fit in the budget; one rule more does not
+	perField := nGroups * nAddr
+	if want := (MaxResolveLeafOps - perField) / (2 * perField); complete != want {
+		t.Fatalf("%d rules resolved completely, want %d", complete, want)
+	}
+	// every charge is made before its work, so the work done is the charged
+	// total minus the refused charges, each at most one group list
+	if n := rr.leafOps.Load(); n <= MaxResolveLeafOps {
+		t.Fatalf("leaf operations %d never exceeded the budget", n)
+	}
+	if n := after.TotalAlloc - before.TotalAlloc; n > allocLimit {
+		t.Fatalf("resolving %d rules allocated %d bytes, limit %d", nRules, n, allocLimit)
+	}
+}
+
+func TestRuleResolverBudgetsAreChargedBeforeWork(t *testing.T) {
+	o := sharedWithOwnObjects(10, 3)
+	o.Services = []netdevcontract.ServiceObject{{Name: "s0", Protocol: "tcp", Port: "443"}}
+
+	// result budget: three objects left, the group reaches eleven; the
+	// field keeps the first three, the member is ErrResolveBudget, and every
+	// later object member fails too
+	rr := NewRuleResolver(o)
+	rr.resultLeaves.Store(MaxResolveResultLeaves - 3)
+	got := rr.Resolve(Rule{Source: []string{"p0", "a0"}, Destination: []string{"o2"}, Service: []string{"s0"}})
+	if !got.Incomplete || !reflect.DeepEqual(addrNames(got.Source.Objects), []string{"a0", "a1", "a2"}) {
+		t.Fatalf("incomplete %v, source %v", got.Incomplete, addrNames(got.Source.Objects))
+	}
+	wantNames := []string{"p0", "o2", "s0"} // a0 is a duplicate and costs no result
+	if len(got.Unresolved) != len(wantNames) {
+		t.Fatalf("unresolved %+v", got.Unresolved)
+	}
+	for i, u := range got.Unresolved {
+		if u.Name != wantNames[i] || !errors.Is(u.Reason, ErrResolveBudget) {
+			t.Fatalf("unresolved %d = %+v, want %s with ErrResolveBudget", i, u, wantNames[i])
+		}
+	}
+
+	// a group entered before the stop ("shared", through p0) is not taken as
+	// merged when a later member names it
+	rr = NewRuleResolver(o)
+	rr.resultLeaves.Store(MaxResolveResultLeaves - 3)
+	got = rr.Resolve(Rule{Source: []string{"p0", "shared"}})
+	if !got.Incomplete || len(got.Unresolved) != 2 || got.Unresolved[1].Name != "shared" || !errors.Is(got.Unresolved[1].Reason, ErrResolveBudget) {
+		t.Fatalf("incomplete %v, unresolved %+v", got.Incomplete, got.Unresolved)
+	}
+
+	// operation budget exhausted inside the walk: the walk stops, nothing
+	// is memoized as a group failure, and the member is ErrResolveBudget
+	rr = NewRuleResolver(o)
+	rr.leafOps.Store(MaxResolveLeafOps - 2) // p0 (2 members) fits, shared does not
+	got = rr.Resolve(Rule{Source: []string{"p0"}})
+	if !got.Incomplete || len(got.Unresolved) != 1 || !errors.Is(got.Unresolved[0].Reason, ErrResolveBudget) {
+		t.Fatalf("incomplete %v, unresolved %+v", got.Incomplete, got.Unresolved)
+	}
+	for gi, st := range rr.addrs.state {
+		if st == walkVisiting || rr.addrs.err[gi] != nil {
+			t.Fatalf("group %s left in state %d with error %v", o.AddressGroups[gi].Name, st, rr.addrs.err[gi])
+		}
+	}
+	if len(rr.addrs.reason) != 0 {
+		t.Fatalf("reasons memoized after a budget stop: %v", rr.addrs.reason)
+	}
+	// the budget stays exhausted
+	if again := rr.Resolve(Rule{Source: []string{"a0"}}); !again.Incomplete || len(again.Source.Objects) != 0 {
+		t.Fatalf("resolved after exhaustion: %+v", again)
+	}
+
+	// operation budget exhausted inside the reason pass of a failing group
+	bad := sharedWithOwnObjects(10, 1)
+	bad.AddressGroups = append(bad.AddressGroups, netdevcontract.Group{Name: "x", Static: []string{"p0", "nothere"}})
+	rr = NewRuleResolver(bad)
+	if err := rr.lookup(&rr.addrs, len(bad.AddressGroups)-1); !errors.Is(err, ErrUnresolvedMember) {
+		t.Fatalf("lookup = %v", err)
+	}
+	rr = NewRuleResolver(bad)
+	rr.mu.Lock()
+	if err := rr.addrs.expand(len(bad.AddressGroups)-1, rr); !errors.Is(err, ErrUnresolvedMember) {
+		t.Fatalf("expand = %v", err)
+	}
+	rr.mu.Unlock()
+	rr.leafOps.Store(MaxResolveLeafOps)
+	got = rr.Resolve(Rule{Source: []string{"x"}})
+	if !got.Incomplete || len(got.Unresolved) != 1 || !errors.Is(got.Unresolved[0].Reason, ErrResolveBudget) || len(rr.addrs.reason) != 0 {
+		t.Fatalf("incomplete %v, unresolved %+v, reasons %v", got.Incomplete, got.Unresolved, rr.addrs.reason)
+	}
+}
+
+// mediumConfig builds a realistic medium configuration: 8,000 addresses,
+// 1,500 address groups in three nesting levels with 20 widely shared
+// groups of 400 objects, 300 services in 100 service groups, and 3,000
+// rules with 1 to 8 source and destination members and 1 to 4 services.
+func mediumConfig(rng *rand.Rand) (Objects, []Rule) {
+	o := Objects{Addresses: addrObjects("a", 8000)}
+	for i := range 300 {
+		o.Services = append(o.Services, netdevcontract.ServiceObject{Name: fmt.Sprintf("s%d", i), Protocol: "tcp", Port: "443"})
+	}
+	pick := func(prefix string, n, from, to int) []string {
+		seen := map[string]bool{}
+		var out []string
+		for range n {
+			name := fmt.Sprintf("%s%d", prefix, from+rng.IntN(to-from))
+			if !seen[name] {
+				seen[name] = true
+				out = append(out, name)
+			}
+		}
+		return out
+	}
+	for i := range 1500 {
+		g := netdevcontract.Group{Name: fmt.Sprintf("g%d", i)}
+		switch {
+		case i < 20:
+			g.Static = pick("a", 400, 0, 8000)
+		case i < 500:
+			g.Static = pick("a", 2+rng.IntN(19), 0, 8000)
+		case i < 1200:
+			g.Static = append(pick("g", 1+rng.IntN(4), 20, 500), pick("a", rng.IntN(11), 0, 8000)...)
+			if rng.IntN(10) < 3 {
+				g.Static = append(g.Static, fmt.Sprintf("g%d", rng.IntN(20)))
+			}
+		default:
+			g.Static = append(pick("g", 1+rng.IntN(3), 500, 1200), pick("a", rng.IntN(6), 0, 8000)...)
+		}
+		o.AddressGroups = append(o.AddressGroups, g)
+	}
+	for i := range 100 {
+		g := netdevcontract.Group{Name: fmt.Sprintf("sg%d", i), Static: pick("s", 2+rng.IntN(9), 0, 300)}
+		if i >= 50 {
+			g.Static = append(g.Static, pick("sg", 1+rng.IntN(2), 0, 50)...)
+		}
+		o.ServiceGroups = append(o.ServiceGroups, g)
+	}
+	addrMembers := func() []string {
+		var out []string
+		for range 1 + rng.IntN(8) {
+			switch r := rng.IntN(10); {
+			case r < 4:
+				out = append(out, fmt.Sprintf("a%d", rng.IntN(8000)))
+			case r < 9:
+				out = append(out, fmt.Sprintf("g%d", rng.IntN(1500)))
+			default:
+				out = append(out, fmt.Sprintf("10.%d.0.0/16", rng.IntN(256)))
+			}
+		}
+		return out
+	}
+	var rules []Rule
+	for range 3000 {
+		r := Rule{Source: addrMembers(), Destination: addrMembers()}
+		for range 1 + rng.IntN(4) {
+			if rng.IntN(2) == 0 {
+				r.Service = append(r.Service, fmt.Sprintf("s%d", rng.IntN(300)))
+			} else {
+				r.Service = append(r.Service, fmt.Sprintf("sg%d", rng.IntN(100)))
+			}
+		}
+		rules = append(rules, r)
+	}
+	return o, rules
+}
+
+// expectAddrs is the reference expansion of address members: ResolveGroup
+// per group member, merged in first-seen order.
+func expectAddrs(t *testing.T, o Objects, members []string) []string {
+	t.Helper()
+	var out []string
+	seen := map[string]bool{}
+	add := func(n string) {
+		if !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	for _, m := range members {
+		if strings.HasPrefix(m, "a") {
+			add(m)
+			continue
+		}
+		if !strings.HasPrefix(m, "g") {
+			continue
+		}
+		objs, err := o.ResolveGroup(m)
+		if err != nil {
+			t.Fatalf("ResolveGroup(%s): %v", m, err)
+		}
+		for _, a := range objs {
+			add(a.Name)
+		}
+	}
+	return out
+}
+
+func TestRuleResolverResolvesRealisticConfigCompletely(t *testing.T) {
+	// a realistic medium configuration resolves completely and uses a small
+	// part of both budgets
+	o, rules := mediumConfig(rand.New(rand.NewPCG(7, 11)))
+	rr := NewRuleResolver(o)
+	for i, r := range rules {
+		got := rr.Resolve(r)
+		if got.Incomplete || len(got.Unresolved) != 0 {
+			t.Fatalf("rule %d: incomplete %v, unresolved %+v", i, got.Incomplete, got.Unresolved)
+		}
+		if i%60 == 0 {
+			for _, f := range []struct {
+				members []string
+				objs    []netdevcontract.AddressObject
+			}{{r.Source, got.Source.Objects}, {r.Destination, got.Destination.Objects}} {
+				if g, w := addrNames(f.objs), expectAddrs(t, o, f.members); !slices.Equal(g, w) {
+					t.Fatalf("rule %d: members %q expand to %d objects %q, ResolveGroup to %d %q", i, f.members, len(g), g, len(w), w)
+				}
+			}
+		}
+	}
+	ops, results := rr.leafOps.Load(), rr.resultLeaves.Load()
+	t.Logf("%d rules: %d leaf operations, %d result objects", len(rules), ops, results)
+	if ops > MaxResolveLeafOps/8 || results > MaxResolveResultLeaves/8 {
+		t.Fatalf("realistic config used %d of %d operations and %d of %d result objects, want under an eighth", ops, MaxResolveLeafOps, results, MaxResolveResultLeaves)
 	}
 }
 

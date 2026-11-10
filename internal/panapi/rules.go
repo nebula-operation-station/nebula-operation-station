@@ -621,12 +621,14 @@ func ResolveRule(rule Rule, objects Objects) ResolvedRule {
 // lifetime of the RuleResolver, and every member that would need it is
 // reported with ErrResolveBudget in a result marked Incomplete.
 //
-// A real PAN-OS configuration stays far below both: the walk of all groups
-// is bounded by the group members of one 8 MiB response (under 500,000),
-// and a rulebase of 10,000 rules whose fields reach on average 50 objects
-// through groups of moderate overlap needs about 1.5 million operations
-// and result objects. 1,000 rules whose three fields each reach a group of
-// 2,500 objects need 7.5 million of each, still within both.
+// A real PAN-OS configuration stays well below both: the walk of all
+// groups is bounded by the group members of one 8 MiB response (under
+// 500,000). The medium configuration of the tests (8,000 addresses, 1,500
+// groups in three levels, 20 groups of 400 objects shared by a third of
+// the others, 3,000 rules) needs about 2 million operations and result
+// objects; 10,000 such rules need about 7 million, under half of
+// MaxResolveResultLeaves. 1,000 rules whose three fields each reach a
+// group of 2,500 objects need 7.5 million.
 const (
 	// MaxResolveLeafOps bounds the leaf operations of one RuleResolver: every
 	// group member iterated by the memo walk or the failure-reason pass,
@@ -638,9 +640,12 @@ const (
 	// results: each distinct object of a rule field counts once per field and
 	// rule. The memo table holds no leaf lists, so this is the bound of the
 	// leaf memory a RuleResolver produces beyond its index of the objects:
-	// at most 8,388,608 object values of 88 (address) or 104 (service)
-	// bytes plus their strings, which are shared with Objects.
-	MaxResolveResultLeaves = 1 << 23
+	// at most 16,777,216 object values of 88 (address) or 104 (service)
+	// bytes, about 1.4 to 1.7 GiB if a caller keeps every result; their
+	// strings are shared with Objects. A caller that keeps one rule at a
+	// time holds at most three fields of MaxAddressObjects or
+	// MaxServiceObjects objects.
+	MaxResolveResultLeaves = 1 << 24
 )
 
 // ErrResolveBudget is the reason of a rule member that was not expanded
@@ -743,8 +748,8 @@ type groupIndex struct {
 	state  []uint8
 	height []int
 	err    []error
-	codes  [][]int
-	kids   [][]int
+	codes  [][]int32
+	kids   [][]int32
 	// reason memoizes the ResolveGroup error of failing groups.
 	reason map[int]error
 }
@@ -778,8 +783,8 @@ func newGroupIndex(leaves int, groups []netdevcontract.Group, truncated map[stri
 		state:      make([]uint8, len(groups)),
 		height:     make([]int, len(groups)),
 		err:        make([]error, len(groups)),
-		codes:      make([][]int, len(groups)),
-		kids:       make([][]int, len(groups)),
+		codes:      make([][]int32, len(groups)),
+		kids:       make([][]int32, len(groups)),
 		reason:     map[int]error{},
 	}
 	for i, g := range groups {
@@ -858,7 +863,7 @@ func (gx *groupIndex) expand(gi int, rr *RuleResolver) error {
 			return ErrResolveBudget
 		}
 		gx.state[g] = walkVisiting
-		gx.codes[g] = make([]int, 0, len(grp.Static))
+		gx.codes[g] = make([]int32, 0, len(grp.Static))
 		stack = append(stack, walkFrame{gi: g, height: 1})
 		return nil
 	}
@@ -895,7 +900,7 @@ func (gx *groupIndex) expand(gi int, rr *RuleResolver) error {
 		f.next++
 		rr.memberIters++
 		if li, ok := gx.leaves[m]; ok {
-			gx.codes[g] = append(gx.codes[g], li)
+			gx.codes[g] = append(gx.codes[g], int32(li))
 			continue
 		}
 		sub, ok := gx.index[m]
@@ -924,8 +929,8 @@ func (gx *groupIndex) expand(gi int, rr *RuleResolver) error {
 		}
 		// the edge is recorded before sub is walked; if sub fails, so
 		// does g and its codes are dropped
-		gx.codes[g] = append(gx.codes[g], ^sub)
-		gx.kids[g] = append(gx.kids[g], sub)
+		gx.codes[g] = append(gx.codes[g], ^int32(sub))
+		gx.kids[g] = append(gx.kids[g], int32(sub))
 		if gx.state[sub] == walkNew {
 			if err := enter(sub); errors.Is(err, ErrResolveBudget) {
 				for _, fr := range stack {
@@ -1046,9 +1051,9 @@ func (p *reasonPass) finishSubtree(g int) bool {
 			return false
 		}
 		for _, c := range gx.kids[k] {
-			if _, done := p.height[c]; !done {
-				p.height[c] = gx.height[c]
-				stack = append(stack, c)
+			if _, done := p.height[int(c)]; !done {
+				p.height[int(c)] = gx.height[c]
+				stack = append(stack, int(c))
 			}
 		}
 	}
@@ -1068,13 +1073,17 @@ func (rr *RuleResolver) lookup(gx *groupIndex, gi int) error {
 }
 
 // leafUnion collects the leaves of one rule field in first-seen order
-// without duplicates; groups holds the groups merged into the field.
+// without duplicates; groups holds the groups entered by the field merge.
+// failed is set when a group merge stopped on a budget; every later group
+// merge of the field then fails, since a group entered before the stop may
+// be merged only in part.
 type leafUnion struct {
 	rr     *RuleResolver
 	gx     *groupIndex
 	seen   map[int]struct{}
 	groups map[int]struct{}
 	add    func(int)
+	failed bool
 }
 
 func newLeafUnion(rr *RuleResolver, gx *groupIndex, add func(int)) *leafUnion {
@@ -1095,6 +1104,12 @@ func (u *leafUnion) leaf(li int) bool {
 	return true
 }
 
+// done reports whether group gi was merged into the field already.
+func (u *leafUnion) done(gi int) bool {
+	_, ok := u.groups[gi]
+	return ok
+}
+
 // group merges expanding group gi: a depth-first walk of the memoized
 // Static lists in member order (the first-seen order of ResolveGroup) that
 // enters every group at most once per field. A group merged already
@@ -1113,10 +1128,15 @@ func (u *leafUnion) group(gi int) bool {
 		stack = append(stack, pos{g: g})
 		return true
 	}
-	if _, done := u.groups[gi]; done {
+	if u.failed {
+		// a group entered before the stop may be merged only in part
+		return false
+	}
+	if u.done(gi) {
 		return true
 	}
 	if !enter(gi) {
+		u.failed = true
 		return false
 	}
 	for len(stack) > 0 {
@@ -1129,12 +1149,14 @@ func (u *leafUnion) group(gi int) bool {
 		c := cs[top.next]
 		top.next++
 		if c >= 0 {
-			if !u.leaf(c) {
+			if !u.leaf(int(c)) {
+				u.failed = true
 				return false
 			}
 			continue
 		}
-		if _, done := u.groups[^c]; !done && !enter(^c) {
+		if sub := int(^c); !u.done(sub) && !enter(sub) {
+			u.failed = true
 			return false
 		}
 	}
