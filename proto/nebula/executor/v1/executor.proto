@@ -558,6 +558,50 @@ service ExecutorService {
   // not_recreated or partial, never recreated. Nothing runs on the host and
   // the rollback window is not extended.
   rpc ResolveContainerRecreation(ResolveContainerRecreationRequest) returns (ResolveContainerRecreationResponse);
+
+  // Local network device administration (ADR 0010 D1, D2; ND-11). Role:
+  // admin only, exactly like the local PVE credential administration. The
+  // executor owns endpoints, pins, trust generation and credentials;
+  // nothing here is reachable by the server or a collector.
+  //
+  // Secrets enter only through the request fields marked SECRET (and
+  // debug_redact) and never leave the executor: no response carries a
+  // credential, a user name, a vault reference or key material, and no
+  // log line, event or error repeats a secret.
+  //
+  // Probes the endpoint WITHOUT any credential and returns the presented
+  // trust identity (SSH host key or TLS certificate fingerprint) and
+  // credential-free device facts for the admin to confirm.
+  rpc ProbeNetDevice(ProbeNetDeviceRequest) returns (ProbeNetDeviceResponse);
+  // Registers a device in the executor registry (ND-10) with the pin the
+  // admin confirmed from the probe; requires confirm = "yes".
+  rpc RegisterNetDevice(RegisterNetDeviceRequest) returns (RegisterNetDeviceResponse);
+  // Stores the device's first read credential (phase 1 holds the read
+  // credential only, ADR 0010 Q3).
+  rpc SetNetDeviceCredential(SetNetDeviceCredentialRequest) returns (SetNetDeviceCredentialResponse);
+  // Replaces the read credential after validating the new one against the
+  // pinned transport; revokes authority bound to the old version.
+  rpc RotateNetDeviceCredential(RotateNetDeviceCredentialRequest) returns (RotateNetDeviceCredentialResponse);
+  // Re-pin (ADR 0010 D1: HIGH with user verification), the same
+  // propose/commit pair as ProposePVERepin/CommitPVERepin. Propose shows
+  // old and new fingerprints and returns a HIGH permit whose
+  // execution_digest binds the device id, its trust generation, the old
+  // and the confirmed new pin. Commit replaces the pin only with that
+  // permit approved and unexpired and the digest matching the request;
+  // it refuses a digest mismatch, a missing, unapproved, expired or
+  // consumed permit, and a stale old pin. It increments the trust
+  // generation and revokes every lease and permit for the device.
+  rpc ProposeNetDeviceRepin(ProposeNetDeviceRepinRequest) returns (ProposeNetDeviceRepinResponse);
+  rpc CommitNetDeviceRepin(CommitNetDeviceRepinRequest) returns (CommitNetDeviceRepinResponse);
+  // Blocks or unblocks every dial to the device.
+  rpc BlockNetDevice(BlockNetDeviceRequest) returns (BlockNetDeviceResponse);
+  rpc UnblockNetDevice(UnblockNetDeviceRequest) returns (UnblockNetDeviceResponse);
+  // Disables the device, revokes its authority, removes its vault entries
+  // and tombstones the id.
+  rpc RemoveNetDevice(RemoveNetDeviceRequest) returns (RemoveNetDeviceResponse);
+  // Metadata of every live device: ids, endpoint, pin, trust generation,
+  // block state and credential version. Never a vault reference.
+  rpc ListNetDevices(ListNetDevicesRequest) returns (ListNetDevicesResponse);
 }
 
 enum RiskClass {
@@ -3263,4 +3307,189 @@ message ResolveContainerRecreationRequest {
 
 message ResolveContainerRecreationResponse {
   ContainerRecreationInfo recreation = 1;
+}
+
+// NetDeviceInfo is registry metadata of one network device (ADR 0010 D1).
+// It never carries a credential, a credential user name, a vault
+// reference or a digest or fingerprint key. The trust pin is a SHA-256
+// fingerprint: a trust identifier, not a secret.
+message NetDeviceInfo {
+  string device_id = 1;
+  // family is "cbs" or "panos".
+  string family = 2;
+  // label is a display name only; it never authenticates the device.
+  string label = 3;
+  // endpoint_ip is the stored private IP literal the device is dialled at.
+  string endpoint_ip = 4;
+  uint32 port = 5;
+  // pin_kind is "ssh-host-key", "tls-leaf" or "tls-ca".
+  string pin_kind = 6;
+  // trust_pin is the lowercase hex SHA-256 the device must present.
+  string trust_pin = 7;
+  uint64 trust_generation = 8;
+  bool blocked = 9;
+  string block_reason = 10;
+  // credential_version is the vault version of the read credential, 0
+  // while none is enrolled.
+  int64 credential_version = 11;
+  int64 created_at_unix = 12;
+  int64 updated_at_unix = 13;
+  // credential_missing is set when the device references a read
+  // credential whose vault entry does not exist (credential_version is
+  // then 0). The device is listed so the admin can see and remove it.
+  bool credential_missing = 14;
+}
+
+// NetDeviceProbeFacts are what the endpoint presented to a credential-free
+// probe. Every field is untrusted device output, bounded and rendered as
+// text only.
+message NetDeviceProbeFacts {
+  // ssh_server_version is the SSH identification string (cbs).
+  string ssh_server_version = 1;
+  // ssh_host_key_type is the presented host key algorithm (cbs).
+  string ssh_host_key_type = 2;
+  // tls_subject is the leaf certificate subject (panos).
+  string tls_subject = 3;
+  // tls_dns_names are the leaf certificate DNS SANs (panos).
+  repeated string tls_dns_names = 4;
+  // tls_not_after_unix is the leaf certificate expiry (panos).
+  int64 tls_not_after_unix = 5;
+  // tls_ca_fingerprint is the hex SHA-256 of a self-signed issuer the
+  // endpoint presented, empty if none (panos).
+  string tls_ca_fingerprint = 6;
+}
+
+message ProbeNetDeviceRequest {
+  // family is "cbs" or "panos".
+  string family = 1;
+  // endpoint is a private IP literal or a host name resolved once.
+  string endpoint = 2;
+  uint32 port = 3;
+}
+
+message ProbeNetDeviceResponse {
+  // endpoint_ip is the private IP literal that was probed.
+  string endpoint_ip = 1;
+  uint32 port = 2;
+  // resolved_from is the host name the endpoint was resolved from, empty
+  // for an IP literal endpoint.
+  string resolved_from = 3;
+  string pin_kind = 4;
+  // observed_pin is the lowercase hex SHA-256 of the presented trust
+  // identity, to be confirmed by the admin and passed to
+  // RegisterNetDevice.
+  string observed_pin = 5;
+  NetDeviceProbeFacts facts = 6;
+}
+
+message RegisterNetDeviceRequest {
+  string device_id = 1;
+  string family = 2;
+  string label = 3;
+  // endpoint: see ProbeNetDeviceRequest.endpoint.
+  string endpoint = 4;
+  uint32 port = 5;
+  string pin_kind = 6;
+  // confirmed_pin is the observed_pin of the probe as confirmed by the
+  // admin; the executor stores it only if the endpoint presents it.
+  string confirmed_pin = 7;
+  // confirm must be exactly "yes" (typed by the admin).
+  string confirm = 8;
+}
+
+message RegisterNetDeviceResponse {
+  NetDeviceInfo device = 1;
+}
+
+message SetNetDeviceCredentialRequest {
+  string device_id = 1;
+  // username is the device account (CBS user, PAN-OS administrator for
+  // the record); empty for a credential that has none. Never returned.
+  string username = 2;
+  // SECRET: the read credential (CBS password or key, PAN-OS API key).
+  // Stored only envelope-encrypted in the executor vault; never logged,
+  // returned or echoed in an error. The executor wipes the buffer.
+  bytes secret = 3 [debug_redact = true];
+}
+
+message SetNetDeviceCredentialResponse {
+  NetDeviceInfo device = 1;
+}
+
+message RotateNetDeviceCredentialRequest {
+  string device_id = 1;
+  // expected_credential_version is the version being replaced; a
+  // concurrent change is refused.
+  int64 expected_credential_version = 2;
+  // username: see SetNetDeviceCredentialRequest.username.
+  string username = 3;
+  // SECRET: see SetNetDeviceCredentialRequest.secret.
+  bytes secret = 4 [debug_redact = true];
+}
+
+message RotateNetDeviceCredentialResponse {
+  NetDeviceInfo device = 1;
+}
+
+message ProposeNetDeviceRepinRequest {
+  string device_id = 1;
+  // old_pin must equal the stored pin.
+  string old_pin = 2;
+  // confirmed_new_pin is the newly presented pin the admin confirmed.
+  string confirmed_new_pin = 3;
+}
+
+message ProposeNetDeviceRepinResponse {
+  // permit is the HIGH permit for exactly this re-pin; it needs user
+  // verification before CommitNetDeviceRepin accepts it.
+  ProposeExecutionResponse permit = 1;
+}
+
+message CommitNetDeviceRepinRequest {
+  string device_id = 1;
+  // old_pin and confirmed_new_pin must be the values of the proposal.
+  string old_pin = 2;
+  string confirmed_new_pin = 3;
+  // execution_digest is the digest of the approved proposal permit.
+  string execution_digest = 4;
+}
+
+message CommitNetDeviceRepinResponse {
+  NetDeviceInfo device = 1;
+}
+
+message BlockNetDeviceRequest {
+  string device_id = 1;
+  // reason is a short admin note without secrets.
+  string reason = 2;
+}
+
+message BlockNetDeviceResponse {
+  NetDeviceInfo device = 1;
+}
+
+message UnblockNetDeviceRequest {
+  string device_id = 1;
+  // confirm must be exactly "yes" (typed by the admin).
+  string confirm = 2;
+}
+
+message UnblockNetDeviceResponse {
+  NetDeviceInfo device = 1;
+}
+
+message RemoveNetDeviceRequest {
+  string device_id = 1;
+  // confirm must be exactly "yes" (typed by the admin).
+  string confirm = 2;
+}
+
+message RemoveNetDeviceResponse {
+  NetDeviceInfo device = 1;
+}
+
+message ListNetDevicesRequest {}
+
+message ListNetDevicesResponse {
+  repeated NetDeviceInfo devices = 1;
 }

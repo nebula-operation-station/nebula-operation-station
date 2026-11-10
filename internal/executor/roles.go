@@ -146,6 +146,20 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_SetPVERemoteSite_FullMethodName:    {admin},
 		pb.ExecutorService_ProposePVERepin_FullMethodName:     {admin},
 		pb.ExecutorService_CommitPVERepin_FullMethodName:      {admin},
+		// Local network device administration (ADR 0010 D1, D2; ND-11):
+		// admin only, exactly like the PVE admin methods above. Neither
+		// the server nor any collector may probe, register, enter or
+		// rotate a credential, re-pin, block, remove or list devices here.
+		pb.ExecutorService_ProbeNetDevice_FullMethodName:            {admin},
+		pb.ExecutorService_RegisterNetDevice_FullMethodName:         {admin},
+		pb.ExecutorService_SetNetDeviceCredential_FullMethodName:    {admin},
+		pb.ExecutorService_RotateNetDeviceCredential_FullMethodName: {admin},
+		pb.ExecutorService_ProposeNetDeviceRepin_FullMethodName:     {admin},
+		pb.ExecutorService_CommitNetDeviceRepin_FullMethodName:      {admin},
+		pb.ExecutorService_BlockNetDevice_FullMethodName:            {admin},
+		pb.ExecutorService_UnblockNetDevice_FullMethodName:          {admin},
+		pb.ExecutorService_RemoveNetDevice_FullMethodName:           {admin},
+		pb.ExecutorService_ListNetDevices_FullMethodName:            {admin},
 		// Typed guest power actions (ADR 0006 P2-01): server and admin
 		// may propose (the executor binds the exact guest and sets the
 		// risk). Server and admin may commit (decision WA-05 variant (a),
