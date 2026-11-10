@@ -203,9 +203,11 @@ func (x *chartVulnIndex) imageLine(s vulnstore.Subject, display string) chartLin
 }
 
 // freshImage returns the host's image subject with the given digest when
-// a fresh complete Hermes run covers it (D2 badge source selection).
+// a fresh Hermes run covers it and the findings read is complete (D2 badge
+// source selection). A truncated read may miss the image's findings, so it
+// never replaces the Trivy counts: a known critical count stays visible.
 func (x *chartVulnIndex) freshImage(hostID, digest string) (vulnstore.Subject, bool) {
-	if x == nil || x.failed || digest == "" {
+	if x == nil || x.failed || x.truncated || digest == "" {
 		return vulnstore.Subject{}, false
 	}
 	s := vulnstore.Subject{Kind: vulnfinding.SubjectImage, ID: hostID, ImageDigest: digest}
@@ -282,12 +284,14 @@ func shortDigest(d string) string {
 }
 
 // cvePlaceLines fills the P1-30 CVE place of a host box (D2): the Hermes
-// findings of the scanned image when a fresh complete Hermes run covers
-// it, otherwise the P1-30 counts labelled "host Trivy, partial"; then the
-// host's other Hermes image subjects. When Hermes knows the scanned image
-// but its run is stale or not assessed, the Hermes line of that image
-// stays next to the Trivy line, labelled by its badge: a known critical
-// finding is never hidden behind the Trivy counts.
+// findings of the scanned image when a fresh Hermes run covers it and the
+// findings read is complete (freshImage), otherwise the P1-30 counts
+// labelled "host Trivy, partial"; then the host's other Hermes image
+// subjects. When Hermes knows the scanned image but its run is stale or
+// not assessed, or the read was truncated, the Hermes line of that image
+// stays next to the Trivy line, labelled by its badge, and the worst line
+// state drives the box border: neither a known critical Hermes finding
+// nor a known critical Trivy count is hidden behind the other.
 func cvePlaceLines(res chartResults, hostID string, now time.Time) []chartLine {
 	trivy, ref := cveLine(rowFor(res.vulns, hostID), now, indicatorStaleAfter)
 	digest := digestOfImageRef(ref)
