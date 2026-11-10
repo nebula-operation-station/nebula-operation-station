@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic fixture (ND-09): shape of a type=config&action=show reply for
+     the vsys1 zone subtree. Names and addresses are documentation examples. -->
+<response status="success" code="19">
+  <result total-count="1" count="1">
+    <zone admin="example-admin" dirtyId="3" time="2026/01/01 00:00:00">
+      <entry name="trust">
+        <network>
+          <layer3>
+            <member>ethernet1/2</member>
+            <member>ethernet1/3.10</member>
+          </layer3>
+          <zone-protection-profile>example-zpp</zone-protection-profile>
+          <log-setting>example-log</log-setting>
+        </network>
+        <enable-user-identification>yes</enable-user-identification>
+        <user-acl>
+          <include-list>
+            <member>192.0.2.0/24</member>
+          </include-list>
+        </user-acl>
+      </entry>
+      <entry name="untrust">
+        <network>
+          <layer3>
+            <member>ethernet1/1</member>
+          </layer3>
+        </network>
+      </entry>
+      <entry name="lab-l2">
+        <network>
+          <layer2>
+            <member>ethernet1/4</member>
+          </layer2>
+        </network>
+      </entry>
+      <entry name="vwire.zone">
+        <network>
+          <virtual-wire>
+            <member>ethernet1/5</member>
+            <member>ethernet1/6</member>
+          </virtual-wire>
+        </network>
+      </entry>
+      <entry name="tap zone">
+        <network>
+          <tap>
+            <member>ethernet1/7</member>
+          </tap>
+        </network>
+      </entry>
+      <entry name="empty_zone">
+        <network>
+          <layer3/>
+        </network>
+      </entry>
+    </zone>
+  </result>
+</response>

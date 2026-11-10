@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic fixture (ND-09): shape of a type=config&action=show reply for
+     the whole vsys subtree. Only documentation addresses (192.0.2.0/24,
+     198.51.100.0/24, 2001:db8::/32) and example names; no real device data.
+     Elements outside the allowlist (rulebase, profiles, future-feature,
+     the secret-looking ones) must be dropped by the parser. -->
+<response status="success">
+  <result total-count="1" count="1">
+    <vsys>
+      <entry name="vsys1">
+        <import>
+          <network>
+            <interface>
+              <member>ethernet1/1</member>
+            </interface>
+          </network>
+        </import>
+        <tag>
+          <entry name="prod">
+            <color>color1</color>
+            <comments>example tag</comments>
+          </entry>
+          <entry name="web"/>
+        </tag>
+        <address>
+          <entry name="web-1" uuid="00000000-0000-4000-8000-000000000001">
+            <ip-netmask>192.0.2.10</ip-netmask>
+            <description>example web server</description>
+            <tag>
+              <member>web</member>
+              <member>prod</member>
+            </tag>
+          </entry>
+          <entry name="web-2">
+            <ip-netmask>192.0.2.11/32</ip-netmask>
+            <tag>
+              <member>web</member>
+            </tag>
+          </entry>
+          <entry name="lab-net">
+            <ip-netmask>198.51.100.0/24</ip-netmask>
+          </entry>
+          <entry name="v6-net">
+            <ip-netmask>2001:DB8::/32</ip-netmask>
+          </entry>
+          <entry name="dhcp-pool">
+            <ip-range>192.0.2.100-192.0.2.150</ip-range>
+          </entry>
+          <entry name="wild">
+            <ip-wildcard>198.51.100.0/0.0.0.255</ip-wildcard>
+          </entry>
+          <entry name="updates.example.com">
+            <fqdn>updates.example.com</fqdn>
+            <secret-hint>should-be-dropped</secret-hint>
+          </entry>
+        </address>
+        <address-group>
+          <entry name="web-servers">
+            <static>
+              <member>web-1</member>
+              <member>web-2</member>
+            </static>
+            <description>both web servers</description>
+          </entry>
+          <entry name="all-internal">
+            <static>
+              <member>web-servers</member>
+              <member>lab-net</member>
+              <member>web-1</member>
+            </static>
+            <tag>
+              <member>prod</member>
+            </tag>
+          </entry>
+          <entry name="dyn-prod-web">
+            <dynamic>
+              <filter>'prod' and 'web'</filter>
+            </dynamic>
+          </entry>
+          <entry name="with-dynamic">
+            <static>
+              <member>dyn-prod-web</member>
+            </static>
+          </entry>
+        </address-group>
+        <service>
+          <entry name="svc-http-alt">
+            <protocol>
+              <tcp>
+                <port>8080,8443</port>
+                <override>
+                  <no/>
+                </override>
+              </tcp>
+            </protocol>
+          </entry>
+          <entry name="svc-dns">
+            <protocol>
+              <udp>
+                <port>53</port>
+                <source-port>1024-65535</source-port>
+              </udp>
+            </protocol>
+            <description>example dns</description>
+          </entry>
+          <entry name="svc-sctp">
+            <protocol>
+              <sctp>
+                <port>2905</port>
+              </sctp>
+            </protocol>
+          </entry>
+        </service>
+        <service-group>
+          <entry name="web-services">
+            <members>
+              <member>svc-http-alt</member>
+            </members>
+          </entry>
+          <entry name="all-services">
+            <members>
+              <member>web-services</member>
+              <member>svc-dns</member>
+              <member>svc-sctp</member>
+            </members>
+          </entry>
+        </service-group>
+        <zone>
+          <entry name="trust">
+            <network>
+              <layer3>
+                <member>ethernet1/2</member>
+              </layer3>
+            </network>
+          </entry>
+        </zone>
+        <rulebase>
+          <security>
+            <rules>
+              <entry name="allow-web">
+                <action>allow</action>
+              </entry>
+            </rules>
+          </security>
+        </rulebase>
+        <profiles>
+          <virus>
+            <entry name="example-av"/>
+          </virus>
+        </profiles>
+        <future-feature>
+          <private-key>-----not a real key-----</private-key>
+        </future-feature>
+      </entry>
+    </vsys>
+  </result>
+</response>
