@@ -216,9 +216,8 @@ type netdevHarness struct {
 	askErr    error
 }
 
-// netdevHumanStep is longer than every RPC budget except the approval
-// window: a phase that reuses a context created before a human step
-// fails on the harness clock.
+// netdevHumanStep is longer than every RPC budget: a phase that reuses a
+// context created before a human step fails on the harness clock.
 const netdevHumanStep = 3 * time.Minute
 
 // netdevLineReader hands out one line per Read, advancing the harness
@@ -788,8 +787,7 @@ func TestNetdevSecretFDRealPipeAndFile(t *testing.T) {
 
 // TestNetdevTimeoutsStartAfterHumanSteps pins finding 2 of the PR #433
 // review. Every confirmation line and every credential entry takes
-// netdevHumanStep on the harness clock, longer than any RPC budget but the
-// approval window; each RPC still succeeds because its context is created
+// netdevHumanStep on the harness clock, longer than any RPC budget; each RPC still succeeds because its context is created
 // after the human step.
 func TestNetdevTimeoutsStartAfterHumanSteps(t *testing.T) {
 	// Control: the fake does fail a call whose budget was used up by a
@@ -831,6 +829,33 @@ func TestNetdevTimeoutsStartAfterHumanSteps(t *testing.T) {
 				t.Fatal("no human step was simulated")
 			}
 		})
+	}
+}
+
+// TestNetdevRepinSlowApprovalStillSucceeds pins the MEDIUM finding of the
+// second PR #433 review: the person reading the permit and typing "yes"
+// for the HIGH approval may take longer than any RPC budget, and the
+// ApproveCLI call still succeeds because its context is created after the
+// typed approval, not before ListPending.
+func TestNetdevRepinSlowApprovalStillSucceeds(t *testing.T) {
+	h := newNetdevHarness(t, "yes\nyes\n", true)
+	// Longer than every RPC budget in netdev.go, the approval one included.
+	h.humanStep = time.Hour
+	h.fake.devices = []*pb.NetDeviceInfo{{DeviceId: "sw-1", Family: "cbs", EndpointIp: "192.0.2.10", Port: 22, TrustPin: netdevTestPin, TrustGeneration: 1}}
+	h.fake.probe.ObservedPin = netdevTestNewPin
+	start := h.clock
+	if err := netdevCmd([]string{"repin", "sw-1"}, h.env); err != nil {
+		t.Fatalf("repin: %v (log %v)", err, h.fake.log)
+	}
+	want := "Dial,List,Probe,ProposeRepin,ListPending,ApproveCLI,CommitRepin"
+	if got := strings.Join(h.fake.calls(), ","); got != want {
+		t.Fatalf("calls = %s, want %s", got, want)
+	}
+	if h.clock.Sub(start) < 2*time.Hour {
+		t.Fatal("the two slow human steps were not simulated")
+	}
+	if !strings.Contains(h.out.String(), "approved") {
+		t.Fatalf("approval not reported:\n%s", h.out.String())
 	}
 }
 

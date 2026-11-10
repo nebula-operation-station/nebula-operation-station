@@ -92,10 +92,9 @@ const (
 	// contacts the device (probe, register, credential validation, re-pin).
 	netdevDeviceTimeout = 2 * time.Minute
 	// netdevRegistryTimeout bounds one registry-only call.
+	// It also bounds the permit lookup and, separately, the ApproveCLI
+	// call of a re-pin.
 	netdevRegistryTimeout = 30 * time.Second
-	// netdevApprovalTimeout bounds the HIGH permit approval of a re-pin,
-	// which includes the typed approval.
-	netdevApprovalTimeout = 10 * time.Minute
 )
 
 // errNetdevNoTerminal is returned when a credential is needed, stdin is
@@ -667,9 +666,13 @@ func netdevRepin(args []string, env netdevEnv) error {
 		return fmt.Errorf("propose re-pin: %w", err)
 	}
 	digest := proposed.GetPermit().GetExecutionDigest()
-	actx, acancel := env.rpcContext(netdevApprovalTimeout)
-	err = approve(actx, c, digest, env.in, env.out)
-	acancel()
+	// The permit lookup and the ApproveCLI call get separate registry
+	// budgets; the second starts only after the typed approval.
+	lpctx, lpcancel := env.rpcContext(netdevRegistryTimeout)
+	err = approvePhased(lpctx, func() (context.Context, context.CancelFunc) {
+		return env.rpcContext(netdevRegistryTimeout)
+	}, c, digest, env.in, env.out)
+	lpcancel()
 	if err != nil {
 		return err
 	}

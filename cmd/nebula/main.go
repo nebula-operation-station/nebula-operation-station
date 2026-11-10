@@ -301,6 +301,13 @@ func pending(ctx context.Context, c pb.ExecutorServiceClient) error {
 }
 
 func approve(ctx context.Context, c pb.ExecutorServiceClient, prefix string, in io.Reader, out io.Writer) error {
+	return approvePhased(ctx, func() (context.Context, context.CancelFunc) { return ctx, func() {} }, c, prefix, in, out)
+}
+
+// approvePhased is approve with the ApproveCLI budget separated from the
+// lookup: approveCtx is called only after the person has typed the
+// approval, so reading the permit never consumes the time of that call.
+func approvePhased(ctx context.Context, approveCtx func() (context.Context, context.CancelFunc), c pb.ExecutorServiceClient, prefix string, in io.Reader, out io.Writer) error {
 	if len(prefix) < 8 {
 		return errors.New("give at least 8 characters of the digest")
 	}
@@ -369,7 +376,9 @@ func approve(ctx context.Context, c pb.ExecutorServiceClient, prefix string, in 
 			return errors.New("not approved")
 		}
 	}
-	if _, err := c.ApproveCLI(ctx, &pb.ApproveCLIRequest{ExecutionDigest: match.GetExecutionDigest(), TypedTargetCount: uint32(typed)}); err != nil {
+	actx, acancel := approveCtx()
+	defer acancel()
+	if _, err := c.ApproveCLI(actx, &pb.ApproveCLIRequest{ExecutionDigest: match.GetExecutionDigest(), TypedTargetCount: uint32(typed)}); err != nil {
 		return err
 	}
 	fmt.Fprintln(out, "approved")
