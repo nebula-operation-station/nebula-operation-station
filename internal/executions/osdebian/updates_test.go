@@ -63,6 +63,169 @@ func TestParseUpdatesRejectsOtherDocuments(t *testing.T) {
 	}
 }
 
+// docWithCandidates adds the optional "candidates" field (apt-cache show
+// Package/Version/Source lines of the candidate versions).
+func docWithCandidates(t *testing.T, sim, candidates string) []byte {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal(doc(t, sim, "", false), &m); err != nil {
+		t.Fatal(err)
+	}
+	m["candidates"] = base64.StdEncoding.EncodeToString([]byte(candidates))
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func TestCandidateSourceVersion(t *testing.T) {
+	sim := strings.Join([]string{
+		"Inst openssl [3.0.11-1~deb12u1] (3.0.11-1~deb12u2 Debian-Security:12/stable-security [amd64])",
+		"Inst libssl3:i386 [3.0.11-1~deb12u1] (3.0.11-1~deb12u2 Debian-Security:12/stable-security [i386])",
+		"Inst libfoo1 [1.2-3] (1.2-3+b1 Debian:12/stable [amd64])",
+		"Inst bar [1.0-1] (1.0-2 Debian:12/stable [amd64])",
+		"Inst baz [1.0-1] (1.0-2 Debian:12/stable [amd64])",
+		"Inst qux [1.0-1] (1.0-2 Debian:12/stable [amd64])",
+		"Inst evil [1.0-1] (1.0-2 Debian:12/stable [amd64])",
+		"Inst nostanza [1.0-1] (1.0-2 Debian:12/stable [amd64])",
+	}, "\n")
+	cands := strings.Join([]string{
+		// Source without version: the source version is the binary version.
+		"Package: openssl", "Version: 3.0.11-1~deb12u2", "Source: openssl", "",
+		"Package: libssl3", "Version: 3.0.11-1~deb12u2", "Source: openssl", "",
+		// binNMU: the binary version carries +b1, Source names the real one.
+		"Package: libfoo1", "Version: 1.2-3+b1", "Source: foo (1.2-3)", "",
+		// No Source field: source name and version equal the binary's.
+		"Package: bar", "Version: 1.0-2", "",
+		// A stanza for another version is not the candidate.
+		"Package: baz", "Version: 9.9-9", "Source: baz", "",
+		// Two stanzas of the candidate disagreeing: unknown.
+		"Package: qux", "Version: 1.0-2", "Source: qux (1.0-2)", "",
+		"Package: qux", "Version: 1.0-2", "Source: other (1.0-2)", "",
+		// Malformed source version: unknown.
+		"Package: evil", "Version: 1.0-2", "Source: evil (<script>)", "",
+	}, "\n")
+	u, err := ParseUpdates(docWithCandidates(t, sim, cands))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][2]string{
+		"openssl":      {"openssl", "3.0.11-1~deb12u2"},
+		"libssl3:i386": {"openssl", "3.0.11-1~deb12u2"},
+		"libfoo1":      {"foo", "1.2-3"},
+		"bar":          {"bar", "1.0-2"},
+		"baz":          {"", ""},
+		"qux":          {"", ""},
+		"evil":         {"", ""},
+		"nostanza":     {"", ""},
+	}
+	if len(u.Packages) != len(want) {
+		t.Fatalf("got %d packages", len(u.Packages))
+	}
+	for _, p := range u.Packages {
+		w := want[p.Name]
+		if p.SourceName != w[0] || p.SourceVersion != w[1] {
+			t.Errorf("%s: source %q %q, want %q %q", p.Name, p.SourceName, p.SourceVersion, w[0], w[1])
+		}
+	}
+}
+
+func TestCandidateSourceMissingOrBrokenStaysUnknown(t *testing.T) {
+	sim := "Inst openssl [3.0.11-1~deb12u1] (3.0.11-1~deb12u2 Debian-Security:12/stable-security [amd64])"
+	tests := map[string][]byte{
+		"no field (older script)": doc(t, sim, "", false),
+		"not base64": func() []byte {
+			b := docWithCandidates(t, sim, "")
+			return []byte(strings.Replace(string(b), `"candidates":""`, `"candidates":"%%%"`, 1))
+		}(),
+		"invalid utf-8":  docWithCandidates(t, sim, "Package: openssl\nVersion: 3.0.11-1~deb12u2\nSource: openssl \xff\n"),
+		"over-long line": docWithCandidates(t, sim, "Package: openssl\nVersion: 3.0.11-1~deb12u2\nSource: "+strings.Repeat("a", 3000)+"\n"),
+		"bad name":       docWithCandidates(t, sim, "Package: openssl\nVersion: 3.0.11-1~deb12u2\nSource: Open_SSL (3.0.11-1~deb12u2)\n"),
+		"field order":    docWithCandidates(t, sim, "Version: 3.0.11-1~deb12u2\nSource: openssl\n"),
+		"duplicate field": docWithCandidates(t, sim,
+			"Package: openssl\nVersion: 3.0.11-1~deb12u2\nSource: openssl (1.0-1)\nSource: openssl (9.0-1)\n"),
+		// The script caps the section by lines: a stanza cut before its
+		// Source line (no closing blank line) would wrongly claim the
+		// binary version as the source version, so it is dropped.
+		"truncated stanza": docWithCandidates(t, sim, "Package: openssl\nVersion: 3.0.11-1~deb12u2\n"),
+		"stanza without blank line before next": docWithCandidates(t, sim,
+			"Package: openssl\nVersion: 3.0.11-1~deb12u2\nPackage: other\nVersion: 1\n\n"),
+	}
+	for name, in := range tests {
+		t.Run(name, func(t *testing.T) {
+			u, err := ParseUpdates(in)
+			if err != nil {
+				t.Fatalf("update list rejected: %v", err)
+			}
+			if len(u.Packages) != 1 {
+				t.Fatalf("packages %+v", u.Packages)
+			}
+			if p := u.Packages[0]; p.SourceName != "" || p.SourceVersion != "" {
+				t.Fatalf("source known from bad input: %+v", p)
+			}
+		})
+	}
+}
+
+// TestTruncatedCandidatesKeepUpdateList: the script cuts the candidates
+// section to its byte budget and marks it truncated; the update list stays
+// complete, closed stanzas still count and a candidate past the cut stays
+// unknown (never verified).
+func TestTruncatedCandidatesKeepUpdateList(t *testing.T) {
+	sim := "Inst openssl [3.0.11-1~deb12u1] (3.0.11-1~deb12u2 Debian-Security:12/stable-security [amd64])\n" +
+		"Inst libfoo1 [1.2-3] (1.2-3+b1 Debian:12/stable [amd64])"
+	withFlag := func(flag string) []byte {
+		b := docWithCandidates(t, sim, "Package: openssl\nVersion: 3.0.11-1~deb12u2\nSource: openssl\n\n")
+		if flag == "" {
+			return b
+		}
+		return []byte(strings.Replace(string(b), `{`, `{"candidates_truncated":`+flag+`,`, 1))
+	}
+	tests := map[string]struct {
+		flag      string
+		truncated bool
+	}{
+		"absent (older script)": {"", false},
+		"false":                 {"false", false},
+		"true":                  {"true", true},
+		"malformed":             {`"yes"`, true},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			u, err := ParseUpdates(withFlag(tc.flag))
+			if err != nil {
+				t.Fatalf("update list rejected: %v", err)
+			}
+			if u.CandidatesTruncated != tc.truncated || len(u.Packages) != 2 {
+				t.Fatalf("truncated %v, packages %+v", u.CandidatesTruncated, u.Packages)
+			}
+			if p := u.Packages[0]; p.SourceName != "openssl" || p.SourceVersion != "3.0.11-1~deb12u2" {
+				t.Fatalf("closed stanza lost: %+v", p)
+			}
+			if p := u.Packages[1]; p.SourceName != "" || p.SourceVersion != "" {
+				t.Fatalf("candidate past the cut known: %+v", p)
+			}
+		})
+	}
+}
+
+func TestCandidateStanzaLimit(t *testing.T) {
+	sim := "Inst openssl [3.0.11-1~deb12u1] (3.0.11-1~deb12u2 Debian-Security:12/stable-security [amd64])"
+	var b strings.Builder
+	for i := 0; i <= MaxCandidateStanzas; i++ {
+		b.WriteString("Package: x\nVersion: 1\n\n")
+	}
+	b.WriteString("Package: openssl\nVersion: 3.0.11-1~deb12u2\nSource: openssl\n")
+	u, err := ParseUpdates(docWithCandidates(t, sim, b.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p := u.Packages[0]; p.SourceVersion != "" {
+		t.Fatalf("source read past the stanza limit: %+v", p)
+	}
+}
+
 func TestParseInstall(t *testing.T) {
 	enc := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 	in := `{"format":"apt-install-v1","phase":"done","mode":"install_security","apt_exit":0,"packages":"` + enc("openssl\nlibssl3\n<x>\n") +
