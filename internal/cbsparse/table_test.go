@@ -62,12 +62,12 @@ func TestSplitTablesColumnLimit(t *testing.T) {
 	}
 	t.Run("lexer", func(t *testing.T) {
 		at := "x\n---" + strings.Repeat(" -", tableMaxColumns-1) + "\n"
-		blocks, err := splitTables([]byte(at), "test", nil)
+		blocks, err := splitTables([]byte(at), "test", tableMaxLines, nil)
 		if err != nil || len(blocks) != 1 || len(blocks[0].titles) != tableMaxColumns {
 			t.Fatalf("at the limit: %+v, err %v", blocks, err)
 		}
 		over := "x\n---" + strings.Repeat(" -", tableMaxColumns) + "\n"
-		if _, err := splitTables([]byte(over), "test", nil); !errors.Is(err, ErrUnrecognizedTable) {
+		if _, err := splitTables([]byte(over), "test", tableMaxLines, nil); !errors.Is(err, ErrUnrecognizedTable) {
 			t.Fatalf("over the limit: err %v", err)
 		}
 	})

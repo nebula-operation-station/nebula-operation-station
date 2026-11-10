@@ -1,0 +1,11 @@
+Aging time is 300 sec
+
+    Vlan        Mac Address         Port       Type
+-------- --------------------- ---------- ----------
+   1      00:00:5e:00:53:01         0         self
+   1      00:00:5e:00:53:0a      gi1/0/1     dynamic
+   1      00:00:5E:00:53:0B      gi1/0/2     dynamic
+   10     00:00:5e:00:53:10      te1/0/1     dynamic
+   10     00:00:5e:00:53:11      te1/0/1     dynamic
+   20     00:00:5e:00:53:20        Po1       static
+   99     00:00:5e:00:53:0a      gi1/0/24    dynamic

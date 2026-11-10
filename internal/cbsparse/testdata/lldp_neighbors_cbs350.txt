@@ -1,0 +1,10 @@
+
+System capability supported: R - Router, B - Bridge, T - Telephone, C - DOCSIS Cable Device, W - WLAN Access Point, r - Repeater, S - Station, O - Other
+
+  Port        Device ID          Port ID          System Name      Capabilities  TTL
+--------- ----------------- ----------------- ------------------- ------------- -----
+gi1/0/1   00:00:5e:00:53:a1 eth0              pve-node-a          S             101
+gi1/0/2   00:00:5e:00:53:a2 eno1              pve-node-b          B, S          98
+te1/0/1   00:00:5e:00:53:b1 gi1/0/24          core-sw-1           B, R          120
+te1/0/1   00:00:5e:00:53:b2 gi1/0/23          core-sw-2           B             120
+gi1/0/9   00:00:5e:00:53:c1 00:00:5e:00:53:c1                     T             180

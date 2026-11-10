@@ -48,3 +48,77 @@ type ReadCredential struct {
 	// CredentialVersion is the exact SSH public-key SHA-256 fingerprint.
 	CredentialVersion string `json:"credential_version"`
 }
+
+// NetDeviceReadProfile is the read-grant-v2 rate profile of a device read
+// lease (ADR 0010 D4, ND-13): typed reads of exact network devices under
+// the ADR 0007 read-grant mechanism. It binds no SSH actions, hosts or
+// provider remotes, and it never authorizes a change.
+const NetDeviceReadProfile = "netdevice"
+
+// Device read lease limits (ADR 0010 D4): the ADR 0007 ordinary floor and
+// budgets apply unchanged. The budget counts reads per device per rolling
+// hour across all reads.
+const (
+	// NetDeviceMinInterval is the 15-minute floor between two reads of one
+	// typed read on one device.
+	NetDeviceMinInterval = MinInterval
+	// NetDeviceDefaultRunBudget is the default per-device rolling-hour budget.
+	NetDeviceDefaultRunBudget = 24
+	// NetDeviceMaxRunBudget bounds the per-device rolling-hour budget.
+	NetDeviceMaxRunBudget = 240
+)
+
+// Typed network device reads (ADR 0010 D4). The names are the lowercase
+// suffixes of the executor's NetDeviceRead enum (ND-12), one to one; the
+// prefix names the device family. The set is closed and read-only: no
+// name here maps to a configuration change, commit or save.
+const (
+	NetDeviceReadCBSVersion         = "cbs_version"
+	NetDeviceReadCBSVLANs           = "cbs_vlans"
+	NetDeviceReadCBSInterfaces      = "cbs_interfaces"
+	NetDeviceReadCBSMACTable        = "cbs_mac_table"
+	NetDeviceReadCBSLLDP            = "cbs_lldp"
+	NetDeviceReadPANOSZones         = "panos_zones"
+	NetDeviceReadPANOSObjects       = "panos_objects"
+	NetDeviceReadPANOSSecurityRules = "panos_security_rules"
+	NetDeviceReadPANOSNATRules      = "panos_nat_rules"
+	NetDeviceReadPANOSRuleHitCounts = "panos_rule_hit_counts"
+	netDeviceFamilyCBS              = "cbs"
+	netDeviceFamilyPANOS            = "panos"
+)
+
+var netDeviceReads = []struct{ name, family string }{
+	{NetDeviceReadCBSVersion, netDeviceFamilyCBS},
+	{NetDeviceReadCBSVLANs, netDeviceFamilyCBS},
+	{NetDeviceReadCBSInterfaces, netDeviceFamilyCBS},
+	{NetDeviceReadCBSMACTable, netDeviceFamilyCBS},
+	{NetDeviceReadCBSLLDP, netDeviceFamilyCBS},
+	{NetDeviceReadPANOSZones, netDeviceFamilyPANOS},
+	{NetDeviceReadPANOSObjects, netDeviceFamilyPANOS},
+	{NetDeviceReadPANOSSecurityRules, netDeviceFamilyPANOS},
+	{NetDeviceReadPANOSNATRules, netDeviceFamilyPANOS},
+	{NetDeviceReadPANOSRuleHitCounts, netDeviceFamilyPANOS},
+}
+
+// NetDeviceReads returns a copy of the closed list of typed device reads.
+func NetDeviceReads() []string {
+	out := make([]string, 0, len(netDeviceReads))
+	for _, r := range netDeviceReads {
+		out = append(out, r.name)
+	}
+	return out
+}
+
+// IsNetDeviceRead reports whether name is one of the typed device reads.
+func IsNetDeviceRead(name string) bool { return NetDeviceReadFamily(name) != "" }
+
+// NetDeviceReadFamily returns the device family ("cbs" or "panos") of a
+// typed device read, or "" if name is not one.
+func NetDeviceReadFamily(name string) string {
+	for _, r := range netDeviceReads {
+		if r.name == name {
+			return r.family
+		}
+	}
+	return ""
+}
