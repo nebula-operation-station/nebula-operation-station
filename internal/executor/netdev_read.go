@@ -63,6 +63,11 @@ func ValidateReadNetDeviceRequest(req *pb.ReadNetDeviceRequest) error {
 // ReadNetDevice runs one typed read against one registered device. Part 1
 // refuses every request it cannot serve and answers Unimplemented for the
 // rest; it never dials a device and never touches a credential.
+//
+// TODO(ND-13/ND-14): ReadNetDeviceResponse bounds none of its repeated or
+// string fields, so the per-read entry and byte limits of ADR 0010 D4
+// (e.g. the 8,192 MAC-entry cap) must be enforced here, as named
+// constants, when device I/O lands.
 func (s *Service) ReadNetDevice(_ context.Context, in *pb.ReadNetDeviceRequest) (*pb.ReadNetDeviceResponse, error) {
 	if err := ValidateReadNetDeviceRequest(in); err != nil {
 		return nil, err
