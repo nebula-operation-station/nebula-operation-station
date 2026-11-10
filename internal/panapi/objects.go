@@ -98,11 +98,11 @@ func (o Objects) Policy() netdevcontract.FirewallPolicy {
 // checked and decoded by decodeConfig; every element outside the allowlist
 // is dropped. Dynamic address groups keep their filter text unresolved.
 func ParseObjects(data []byte) (Objects, error) {
-	sec, err := decodeConfig(data)
+	sec, incomplete, err := decodeConfig(data)
 	if err != nil {
 		return Objects{}, fmt.Errorf("parse objects: %w", err)
 	}
-	p := objectParser{o: Objects{truncatedAddr: map[string]bool{}, truncatedSvc: map[string]bool{}}}
+	p := objectParser{o: Objects{Incomplete: incomplete, truncatedAddr: map[string]bool{}, truncatedSvc: map[string]bool{}}}
 	if err := p.parse(sec); err != nil {
 		return Objects{}, fmt.Errorf("parse objects: %w", err)
 	}

@@ -32,36 +32,131 @@ const supportedVsys = "vsys1"
 // here: every other element is dropped together with its subtree and every
 // attribute other than name and uuid is ignored. No field uses ",any",
 // ",innerxml" or a catch-all, so unknown content cannot reach a caller.
+// Single-valued elements are slices, or are decoded by UnmarshalXML with a
+// duplicate check, so that a repeated element is refused instead of being
+// merged into the first one.
 
 // xmlResponse is the <response> root.
 type xmlResponse struct {
-	XMLName xml.Name   `xml:"response"`
-	Status  string     `xml:"status,attr"`
-	Result  *xmlResult `xml:"result"`
+	XMLName xml.Name    `xml:"response"`
+	Status  string      `xml:"status,attr"`
+	Result  []xmlResult `xml:"result"`
 }
 
 // xmlResult is <result>: either one <vsys> holding <entry name="vsys1">
 // (a read of the whole vsys subtree) or the requested subtree containers
-// directly (a read of one subtree).
+// directly (a read of one subtree). foreign counts child elements outside
+// the allowlist, which are skipped.
 type xmlResult struct {
-	Vsys *xmlList[xmlVsysEntry] `xml:"vsys"`
+	Vsys *xmlList[xmlVsysEntry]
 	xmlSection
+	foreign int
+}
+
+// UnmarshalXML decodes <result>, refusing a repeated <vsys> or subtree
+// container.
+func (r *xmlResult) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	return decodeChildren(d, func(se xml.StartElement) error {
+		if se.Name.Local == "vsys" {
+			if r.Vsys != nil {
+				return errRepeated("vsys")
+			}
+			r.Vsys = new(xmlList[xmlVsysEntry])
+			return d.DecodeElement(r.Vsys, &se)
+		}
+		known, err := r.decodeChild(d, se)
+		if err == nil && !known {
+			r.foreign++
+		}
+		return err
+	})
 }
 
 // xmlVsysEntry is one <vsys><entry>.
 type xmlVsysEntry struct {
-	Name string `xml:"name,attr"`
+	Name string
 	xmlSection
 }
 
-// xmlSection holds the allowlisted subtrees of one vsys.
+// UnmarshalXML decodes one vsys entry, refusing a repeated subtree
+// container.
+func (e *xmlVsysEntry) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
+	for _, a := range start.Attr {
+		if a.Name.Space == "" && a.Name.Local == "name" {
+			e.Name = a.Value
+		}
+	}
+	return decodeChildren(d, func(se xml.StartElement) error {
+		_, err := e.decodeChild(d, se)
+		return err
+	})
+}
+
+// decodeChildren calls child for every direct child element of the element
+// being decoded until its end element. child must consume the whole child
+// element (DecodeElement or Skip).
+func decodeChildren(d *xml.Decoder, child func(xml.StartElement) error) error {
+	for {
+		tok, err := d.Token()
+		if err != nil {
+			return err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if err := child(t); err != nil {
+				return err
+			}
+		case xml.EndElement:
+			return nil
+		}
+	}
+}
+
+// errRepeated is the error for a repeated single-valued container; what is
+// a fixed element name of the allowlist, never device text.
+func errRepeated(what string) error {
+	return fmt.Errorf("%w: %s repeated", ErrInvalidConfig, what)
+}
+
+// decodeChild decodes se into the matching subtree container of s. It
+// returns false (after skipping se) for an element outside the allowlist
+// and an error for a container that is already set.
+func (s *xmlSection) decodeChild(d *xml.Decoder, se xml.StartElement) (bool, error) {
+	switch se.Name.Local {
+	case "zone":
+		return true, decodeOnce(d, se, &s.Zone)
+	case "address":
+		return true, decodeOnce(d, se, &s.Address)
+	case "address-group":
+		return true, decodeOnce(d, se, &s.AddressGroup)
+	case "service":
+		return true, decodeOnce(d, se, &s.Service)
+	case "service-group":
+		return true, decodeOnce(d, se, &s.ServiceGroup)
+	case "tag":
+		return true, decodeOnce(d, se, &s.Tag)
+	}
+	return false, d.Skip()
+}
+
+// decodeOnce decodes se into a new *dst, or fails if *dst is already set.
+func decodeOnce[T any](d *xml.Decoder, se xml.StartElement, dst **T) error {
+	if *dst != nil {
+		return errRepeated(se.Name.Local)
+	}
+	*dst = new(T)
+	return d.DecodeElement(*dst, &se)
+}
+
+// xmlSection holds the allowlisted subtrees of one vsys; it is filled by
+// decodeChild.
 type xmlSection struct {
-	Zone         *xmlList[xmlZone]         `xml:"zone"`
-	Address      *xmlList[xmlAddress]      `xml:"address"`
-	AddressGroup *xmlList[xmlAddressGroup] `xml:"address-group"`
-	Service      *xmlList[xmlService]      `xml:"service"`
-	ServiceGroup *xmlList[xmlServiceGroup] `xml:"service-group"`
-	Tag          *xmlList[xmlTag]          `xml:"tag"`
+	Zone         *xmlList[xmlZone]
+	Address      *xmlList[xmlAddress]
+	AddressGroup *xmlList[xmlAddressGroup]
+	Service      *xmlList[xmlService]
+	ServiceGroup *xmlList[xmlServiceGroup]
+	Tag          *xmlList[xmlTag]
 }
 
 // empty reports whether no allowlisted subtree is present.
@@ -84,10 +179,10 @@ type xmlMembers struct {
 type xmlZone struct {
 	Name    string `xml:"name,attr"`
 	Network []struct {
-		Layer3      *xmlMembers `xml:"layer3"`
-		Layer2      *xmlMembers `xml:"layer2"`
-		VirtualWire *xmlMembers `xml:"virtual-wire"`
-		Tap         *xmlMembers `xml:"tap"`
+		Layer3      []xmlMembers `xml:"layer3"`
+		Layer2      []xmlMembers `xml:"layer2"`
+		VirtualWire []xmlMembers `xml:"virtual-wire"`
+		Tap         []xmlMembers `xml:"tap"`
 	} `xml:"network"`
 }
 
@@ -154,19 +249,26 @@ type xmlTag struct {
 //  3. decodes the allowlisted elements with a strict encoding/xml decoder
 //     that knows no entities beyond the five XML ones and no charset other
 //     than UTF-8;
-//  4. selects the content of the single supported vsys.
+//  4. refuses a repeated <result>, <vsys> or subtree container;
+//  5. selects the content of the single supported vsys.
+//
+// incomplete is true when the response cannot be told apart from a
+// configuration with missing data: a <vsys> without any entry, or a
+// <result> whose child elements are all outside the allowlist. The section
+// is then empty and must not be read as "no objects configured". An empty
+// <result/> is a complete, empty configuration.
 //
 // Errors never contain response text.
-func decodeConfig(data []byte) (xmlSection, error) {
+func decodeConfig(data []byte) (sec xmlSection, incomplete bool, err error) {
 	if err := netdevcontract.CheckXML(data, MaxParseResponseBytes); err != nil {
 		if errors.Is(err, netdevcontract.ErrOverLimit) {
 			// the limit error carries numbers only
-			return xmlSection{}, fmt.Errorf("%w: %w", ErrXMLLimit, err)
+			return xmlSection{}, false, fmt.Errorf("%w: %w", ErrXMLLimit, err)
 		}
-		return xmlSection{}, fmt.Errorf("%w: XML check failed", ErrMalformedResponse)
+		return xmlSection{}, false, fmt.Errorf("%w: XML check failed", ErrMalformedResponse)
 	}
 	if err := checkResponse(data); err != nil {
-		return xmlSection{}, err
+		return xmlSection{}, false, err
 	}
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	dec.Strict = true
@@ -174,33 +276,41 @@ func decodeConfig(data []byte) (xmlSection, error) {
 	// entities and UTF-8 are accepted.
 	var resp xmlResponse
 	if err := dec.Decode(&resp); err != nil {
-		return xmlSection{}, fmt.Errorf("%w: decode failed", ErrMalformedResponse)
+		if errors.Is(err, ErrInvalidConfig) {
+			// a repeated container; the message holds fixed names only
+			return xmlSection{}, false, err
+		}
+		return xmlSection{}, false, fmt.Errorf("%w: decode failed", ErrMalformedResponse)
 	}
 	if resp.Status != "success" {
 		// checkResponse already enforced this; kept as defence in depth
-		return xmlSection{}, fmt.Errorf("%w: status is not success", ErrMalformedResponse)
+		return xmlSection{}, false, fmt.Errorf("%w: status is not success", ErrMalformedResponse)
 	}
-	if resp.Result == nil {
-		return xmlSection{}, fmt.Errorf("%w: no result element", ErrMalformedResponse)
+	switch len(resp.Result) {
+	case 0:
+		return xmlSection{}, false, fmt.Errorf("%w: no result element", ErrMalformedResponse)
+	case 1:
+	default:
+		return xmlSection{}, false, errRepeated("result")
 	}
-	r := resp.Result
+	r := resp.Result[0]
 	if r.Vsys == nil {
-		return r.xmlSection, nil
+		return r.xmlSection, r.xmlSection.empty() && r.foreign > 0, nil
 	}
 	if !r.xmlSection.empty() {
-		return xmlSection{}, fmt.Errorf("%w: result mixes a vsys and subtree content", ErrInvalidConfig)
+		return xmlSection{}, false, fmt.Errorf("%w: result mixes a vsys and subtree content", ErrInvalidConfig)
 	}
 	switch len(r.Vsys.Entries) {
 	case 0:
-		return xmlSection{}, nil
+		return xmlSection{}, true, nil
 	case 1:
 	default:
-		return xmlSection{}, fmt.Errorf("%w: more than one vsys", ErrInvalidConfig)
+		return xmlSection{}, false, fmt.Errorf("%w: more than one vsys", ErrInvalidConfig)
 	}
 	if r.Vsys.Entries[0].Name != supportedVsys {
-		return xmlSection{}, fmt.Errorf("%w: unsupported vsys", ErrInvalidConfig)
+		return xmlSection{}, false, fmt.Errorf("%w: unsupported vsys", ErrInvalidConfig)
 	}
-	return r.Vsys.Entries[0].xmlSection, nil
+	return r.Vsys.Entries[0].xmlSection, false, nil
 }
 
 // atMostOne returns the single value of an optional element. More than

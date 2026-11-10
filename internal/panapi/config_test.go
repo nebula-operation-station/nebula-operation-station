@@ -29,7 +29,7 @@ func wrapResult(body string) []byte {
 
 func TestDecodeConfigRefusesStatusError(t *testing.T) {
 	data := readFixture(t, "status-error.xml")
-	_, err := decodeConfig(data)
+	_, _, err := decodeConfig(data)
 	if !errors.Is(err, ErrAPIStatus) {
 		t.Fatalf("err = %v, want ErrAPIStatus", err)
 	}
@@ -74,7 +74,7 @@ func TestDecodeConfigRefusesMalformedInput(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := decodeConfig([]byte(tc.data))
+			_, _, err := decodeConfig([]byte(tc.data))
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
 			}
@@ -84,7 +84,7 @@ func TestDecodeConfigRefusesMalformedInput(t *testing.T) {
 
 func TestDecodeConfigRefusesOversizeResponse(t *testing.T) {
 	pad := strings.Repeat(" ", netdevcontract.MaxPANOSConfigResponseBytes)
-	_, err := decodeConfig([]byte(`<response status="success"><result/></response>` + pad))
+	_, _, err := decodeConfig([]byte(`<response status="success"><result/></response>` + pad))
 	if !errors.Is(err, ErrXMLLimit) || !errors.Is(err, netdevcontract.ErrOverLimit) {
 		t.Fatalf("err = %v, want ErrXMLLimit wrapping ErrOverLimit", err)
 	}
@@ -97,7 +97,7 @@ func TestDecodeConfigRefusesTooManyElements(t *testing.T) {
 		b.WriteString(`<x/>`)
 	}
 	b.WriteString(`</tag></result></response>`)
-	_, err := decodeConfig([]byte(b.String()))
+	_, _, err := decodeConfig([]byte(b.String()))
 	if !errors.Is(err, ErrXMLLimit) {
 		t.Fatalf("err = %v, want ErrXMLLimit", err)
 	}
@@ -112,7 +112,7 @@ func TestDecodeConfigErrorsNeverEchoBody(t *testing.T) {
 		`<response status="success"><result><tag><entry name="` + marker + `/"/></tag></result></response>`,
 	}
 	for _, in := range inputs[:3] {
-		_, err := decodeConfig([]byte(in))
+		_, _, err := decodeConfig([]byte(in))
 		if err == nil {
 			t.Fatalf("decodeConfig(%q) succeeded", in)
 		}
@@ -128,19 +128,66 @@ func TestDecodeConfigErrorsNeverEchoBody(t *testing.T) {
 }
 
 func TestDecodeConfigAcceptsDirectAndVsysForms(t *testing.T) {
-	direct, err := decodeConfig(wrapResult(`<tag><entry name="a"/></tag>`))
-	if err != nil {
-		t.Fatalf("direct form: %v", err)
+	direct, incomplete, err := decodeConfig(wrapResult(`<tag><entry name="a"/></tag>`))
+	if err != nil || incomplete {
+		t.Fatalf("direct form: incomplete %v, %v", incomplete, err)
 	}
-	wrapped, err := decodeConfig(wrapResult(`<vsys><entry name="vsys1"><tag><entry name="a"/></tag></entry></vsys>`))
-	if err != nil {
-		t.Fatalf("vsys form: %v", err)
+	wrapped, incomplete, err := decodeConfig(wrapResult(`<vsys><entry name="vsys1"><tag><entry name="a"/></tag></entry></vsys>`))
+	if err != nil || incomplete {
+		t.Fatalf("vsys form: incomplete %v, %v", incomplete, err)
 	}
 	if direct.Tag == nil || wrapped.Tag == nil || len(direct.Tag.Entries) != 1 || len(wrapped.Tag.Entries) != 1 {
 		t.Fatalf("tags not decoded: direct %+v, wrapped %+v", direct.Tag, wrapped.Tag)
 	}
-	empty, err := decodeConfig(wrapResult(``))
-	if err != nil || empty.Zone != nil || empty.Address != nil {
-		t.Fatalf("empty result: %+v, %v", empty, err)
+	empty, incomplete, err := decodeConfig(wrapResult(``))
+	if err != nil || incomplete || empty.Zone != nil || empty.Address != nil {
+		t.Fatalf("empty result: %+v, incomplete %v, %v", empty, incomplete, err)
+	}
+}
+
+func TestDecodeConfigMissingVsysOrForeignContentIsIncomplete(t *testing.T) {
+	cases := map[string]string{
+		"vsys without entry":       `<vsys/>`,
+		"vsys with only text":      `<vsys> </vsys>`,
+		"only non-allowlisted":     `<rulebase><security/></rulebase>`,
+		"non-allowlisted and text": `x<profiles/>`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			sec, incomplete, err := decodeConfig(wrapResult(body))
+			if err != nil || !incomplete || !sec.empty() {
+				t.Fatalf("decodeConfig = %+v, incomplete %v, %v; want empty and incomplete", sec, incomplete, err)
+			}
+			z, err := ParseZones(wrapResult(body))
+			if err != nil || !z.Incomplete || len(z.List) != 0 {
+				t.Fatalf("ParseZones = %+v, %v; want empty and incomplete", z, err)
+			}
+			o, err := ParseObjects(wrapResult(body))
+			if err != nil || !o.Incomplete || len(o.Addresses) != 0 {
+				t.Fatalf("ParseObjects = %+v, %v; want empty and incomplete", o, err)
+			}
+		})
+	}
+	// an allowlisted container next to dropped content stays complete
+	if _, incomplete, err := decodeConfig(wrapResult(`<zone/><rulebase/>`)); err != nil || incomplete {
+		t.Fatalf("zone with dropped sibling: incomplete %v, %v", incomplete, err)
+	}
+}
+
+func TestDecodeConfigRefusesRepeatedContainers(t *testing.T) {
+	cases := map[string]string{
+		"second result":            `<response status="success"><result><zone/></result><result><address/></result></response>`,
+		"second vsys":              `<response status="success"><result><vsys><entry name="vsys1"/></vsys><vsys><entry name="vsys1"/></vsys></result></response>`,
+		"repeated direct subtree":  `<response status="success"><result><address/><address/></result></response>`,
+		"repeated vsys subtree":    `<response status="success"><result><vsys><entry name="vsys1"><zone/><zone/></entry></vsys></result></response>`,
+		"repeated service subtree": `<response status="success"><result><service-group/><tag/><service-group/></result></response>`,
+	}
+	for name, data := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := decodeConfig([]byte(data))
+			if !errors.Is(err, ErrInvalidConfig) {
+				t.Fatalf("err = %v, want ErrInvalidConfig", err)
+			}
+		})
 	}
 }

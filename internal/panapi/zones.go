@@ -55,15 +55,15 @@ func (s ZoneSet) Contract() []netdevcontract.Zone {
 // netdevcontract.ValidInterfaceName, and an interface may belong to one
 // zone only.
 func ParseZones(data []byte) (ZoneSet, error) {
-	sec, err := decodeConfig(data)
+	sec, incomplete, err := decodeConfig(data)
 	if err != nil {
 		return ZoneSet{}, fmt.Errorf("parse zones: %w", err)
 	}
 	if sec.Zone == nil {
-		return ZoneSet{}, nil
+		return ZoneSet{Incomplete: incomplete}, nil
 	}
 	entries := sec.Zone.Entries
-	var set ZoneSet
+	set := ZoneSet{Incomplete: incomplete}
 	if netdevcontract.CheckCount("zones", len(entries), netdevcontract.MaxZones) != nil {
 		entries, set.Incomplete = entries[:netdevcontract.MaxZones], true
 	}
@@ -107,15 +107,18 @@ func parseZone(e xmlZone) (Zone, bool, error) {
 	var members *xmlMembers
 	for _, c := range []struct {
 		t ZoneType
-		m *xmlMembers
+		m []xmlMembers
 	}{{ZoneLayer3, n.Layer3}, {ZoneLayer2, n.Layer2}, {ZoneVirtualWire, n.VirtualWire}, {ZoneTap, n.Tap}} {
-		if c.m == nil {
+		if len(c.m) == 0 {
 			continue
 		}
 		if members != nil {
 			return Zone{}, false, fmt.Errorf("%w: more than one network type", ErrInvalidConfig)
 		}
-		z.Type, members = c.t, c.m
+		if len(c.m) > 1 {
+			return Zone{}, false, fmt.Errorf("%w: %s repeated", ErrInvalidConfig, c.t)
+		}
+		z.Type, members = c.t, &c.m[0]
 	}
 	if members == nil {
 		return z, false, nil
