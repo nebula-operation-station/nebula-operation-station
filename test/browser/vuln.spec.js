@@ -30,7 +30,7 @@ const hostile = {
   assessment: "<script>window.__pwned='assessment'</script>\nSecond line: <b>bold?</b>\n\t<a href=\"https://evil.example/a\">evil link</a>",
   markdown: "[click me](javascript:window.__pwned='markdown') and https://evil.example/plain and <a href=\"javascript:window.__pwned='a'\">a</a>",
   // Escape and bidi override are shown as U+FFFD (internal/web/ui vulnText).
-  control: "<iframe srcdoc=\"<script>parent.__pwned='iframe'</script>\"></iframe> esc�[31m bidi�evil",
+  control: "<iframe srcdoc=\"<script>parent.__pwned='iframe'</script>\"></iframe> esc" + String.fromCharCode(0xfffd) + "[31m bidi" + String.fromCharCode(0xfffd) + "evil",
   id: '<svg onload="window.__pwned=\'id\'">',
   pkg: 'openssl<img src=x onerror="window.__pwned=\'pkg\'">',
   alias: '<b onmouseover="window.__pwned=\'alias\'">DSA</b>',
@@ -216,7 +216,7 @@ async function subjectStatus(page) {
     await inert(page, 'finding ' + key('33'));
     const ctrl = await page.evaluate(() => document.querySelector('pre.vuln-assessment').textContent);
     check(ctrl === hostile.control, 'control and bidi characters are shown as U+FFFD, the iframe markup as text');
-    check(!ctrl.includes('‮') && !ctrl.includes('\x1b'), 'no bidi override or escape reaches the page');
+    check(!ctrl.includes(String.fromCharCode(0x202e)) && !ctrl.includes('\x1b'), 'no bidi override or escape reaches the page');
     check(text.includes('not assessed'), 'the finding of the never assessed subject says "not assessed"');
 
     text = await open(page, base, '/vulnerabilities/f/' + key('44'));

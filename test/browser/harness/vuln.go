@@ -26,7 +26,7 @@ const (
 	vulnTwoName        = `</script><script>window.__pwned='two'</script>`
 	vulnAssessment     = "<script>window.__pwned='assessment'</script>\nSecond line: <b>bold?</b>\n\t<a href=\"https://evil.example/a\">evil link</a>"
 	vulnMarkdownText   = "[click me](javascript:window.__pwned='markdown') and https://evil.example/plain and <a href=\"javascript:window.__pwned='a'\">a</a>"
-	vulnControlText    = "<iframe srcdoc=\"<script>parent.__pwned='iframe'</script>\"></iframe> esc\x1b[31m bidi‮evil"
+	vulnControlText    = "<iframe srcdoc=\"<script>parent.__pwned='iframe'</script>\"></iframe> esc\x1b[31m bidi\xe2\x80\xaeevil" // \xe2\x80\xae: U+202E
 	vulnHostileID      = `<svg onload="window.__pwned='id'">`
 	vulnHostilePackage = `openssl<img src=x onerror="window.__pwned='pkg'">`
 	vulnHostileAlias   = `<b onmouseover="window.__pwned='alias'">DSA</b>`

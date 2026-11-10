@@ -30,7 +30,7 @@ var vulnSpecPages = []struct {
 	{path: "/vulnerabilities/subject/host/e2e-unknown", status: `^not assessed$`},
 	{path: "/vulnerabilities/f/" + vulnKeyCritical.String(), shows: []string{vulnAssessment, vulnHostileAlias, vulnHostileRun, vulnHostileVersion}},
 	{path: "/vulnerabilities/f/" + vulnKeyHostile.String(), shows: []string{vulnMarkdownText, vulnHostileID}},
-	{path: "/vulnerabilities/f/" + vulnKeyNotRun.String(), shows: []string{"esc�[31m bidi�evil", "not assessed"}},
+	{path: "/vulnerabilities/f/" + vulnKeyNotRun.String(), shows: []string{"esc\xef\xbf\xbd[31m bidi\xef\xbf\xbdevil" /* U+FFFD */, "not assessed"}},
 	{path: "/vulnerabilities/f/" + vulnKeyStale.String(), shows: []string{vulnHostileSource}},
 	{path: "/vulnerabilities/f/" + vulnKeyUnconf.String(), shows: []string{"closed by Hermes, not confirmed by NOS"}},
 }
@@ -48,7 +48,7 @@ var (
 func TestHarnessVulnPagesShowHostileValuesAsText(t *testing.T) {
 	h := newHarness(true, "8080", t.TempDir())
 	raw := []string{vulnHostName, vulnTwoName, vulnAssessment, vulnMarkdownText, vulnHostileID, vulnHostilePackage,
-		vulnHostileAlias, vulnHostileSource, vulnHostileRun, vulnHostileVersion, "<iframe", "\x1b", "‮"}
+		vulnHostileAlias, vulnHostileSource, vulnHostileRun, vulnHostileVersion, "<iframe", "\x1b", "\xe2\x80\xae"}
 	for _, p := range vulnSpecPages {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p.path, nil))
