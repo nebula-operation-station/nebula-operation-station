@@ -46,11 +46,21 @@ func (c *Client) RotateNetDeviceCredential(ctx context.Context, in *pb.RotateNet
 	return resp, mapCallError(ctx, err)
 }
 
-// RepinNetDevice replaces a device trust pin (admin role).
-func (c *Client) RepinNetDevice(ctx context.Context, in *pb.RepinNetDeviceRequest, opts ...grpc.CallOption) (*pb.RepinNetDeviceResponse, error) {
+// ProposeNetDeviceRepin proposes a device re-pin and returns its HIGH
+// permit (admin role).
+func (c *Client) ProposeNetDeviceRepin(ctx context.Context, in *pb.ProposeNetDeviceRepinRequest, opts ...grpc.CallOption) (*pb.ProposeNetDeviceRepinResponse, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
 	defer cancel()
-	resp, err := c.rpc.RepinNetDevice(ctx, in, opts...)
+	resp, err := c.rpc.ProposeNetDeviceRepin(ctx, in, opts...)
+	return resp, mapCallError(ctx, err)
+}
+
+// CommitNetDeviceRepin replaces a device trust pin under an approved
+// re-pin permit (admin role).
+func (c *Client) CommitNetDeviceRepin(ctx context.Context, in *pb.CommitNetDeviceRepinRequest, opts ...grpc.CallOption) (*pb.CommitNetDeviceRepinResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.CommitNetDeviceRepin(ctx, in, opts...)
 	return resp, mapCallError(ctx, err)
 }
 

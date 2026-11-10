@@ -143,7 +143,8 @@ const (
 	ExecutorService_RegisterNetDevice_FullMethodName               = "/nebula.executor.v1.ExecutorService/RegisterNetDevice"
 	ExecutorService_SetNetDeviceCredential_FullMethodName          = "/nebula.executor.v1.ExecutorService/SetNetDeviceCredential"
 	ExecutorService_RotateNetDeviceCredential_FullMethodName       = "/nebula.executor.v1.ExecutorService/RotateNetDeviceCredential"
-	ExecutorService_RepinNetDevice_FullMethodName                  = "/nebula.executor.v1.ExecutorService/RepinNetDevice"
+	ExecutorService_ProposeNetDeviceRepin_FullMethodName           = "/nebula.executor.v1.ExecutorService/ProposeNetDeviceRepin"
+	ExecutorService_CommitNetDeviceRepin_FullMethodName            = "/nebula.executor.v1.ExecutorService/CommitNetDeviceRepin"
 	ExecutorService_BlockNetDevice_FullMethodName                  = "/nebula.executor.v1.ExecutorService/BlockNetDevice"
 	ExecutorService_UnblockNetDevice_FullMethodName                = "/nebula.executor.v1.ExecutorService/UnblockNetDevice"
 	ExecutorService_RemoveNetDevice_FullMethodName                 = "/nebula.executor.v1.ExecutorService/RemoveNetDevice"
@@ -614,9 +615,17 @@ type ExecutorServiceClient interface {
 	// Replaces the read credential after validating the new one against the
 	// pinned transport; revokes authority bound to the old version.
 	RotateNetDeviceCredential(ctx context.Context, in *RotateNetDeviceCredentialRequest, opts ...grpc.CallOption) (*RotateNetDeviceCredentialResponse, error)
-	// Replaces the trust pin, increments the trust generation and revokes
-	// every lease and permit for the device.
-	RepinNetDevice(ctx context.Context, in *RepinNetDeviceRequest, opts ...grpc.CallOption) (*RepinNetDeviceResponse, error)
+	// Re-pin (ADR 0010 D1: HIGH with user verification), the same
+	// propose/commit pair as ProposePVERepin/CommitPVERepin. Propose shows
+	// old and new fingerprints and returns a HIGH permit whose
+	// execution_digest binds the device id, its trust generation, the old
+	// and the confirmed new pin. Commit replaces the pin only with that
+	// permit approved and unexpired and the digest matching the request;
+	// it refuses a digest mismatch, a missing, unapproved, expired or
+	// consumed permit, and a stale old pin. It increments the trust
+	// generation and revokes every lease and permit for the device.
+	ProposeNetDeviceRepin(ctx context.Context, in *ProposeNetDeviceRepinRequest, opts ...grpc.CallOption) (*ProposeNetDeviceRepinResponse, error)
+	CommitNetDeviceRepin(ctx context.Context, in *CommitNetDeviceRepinRequest, opts ...grpc.CallOption) (*CommitNetDeviceRepinResponse, error)
 	// Blocks or unblocks every dial to the device.
 	BlockNetDevice(ctx context.Context, in *BlockNetDeviceRequest, opts ...grpc.CallOption) (*BlockNetDeviceResponse, error)
 	UnblockNetDevice(ctx context.Context, in *UnblockNetDeviceRequest, opts ...grpc.CallOption) (*UnblockNetDeviceResponse, error)
@@ -1856,10 +1865,20 @@ func (c *executorServiceClient) RotateNetDeviceCredential(ctx context.Context, i
 	return out, nil
 }
 
-func (c *executorServiceClient) RepinNetDevice(ctx context.Context, in *RepinNetDeviceRequest, opts ...grpc.CallOption) (*RepinNetDeviceResponse, error) {
+func (c *executorServiceClient) ProposeNetDeviceRepin(ctx context.Context, in *ProposeNetDeviceRepinRequest, opts ...grpc.CallOption) (*ProposeNetDeviceRepinResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(RepinNetDeviceResponse)
-	err := c.cc.Invoke(ctx, ExecutorService_RepinNetDevice_FullMethodName, in, out, cOpts...)
+	out := new(ProposeNetDeviceRepinResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ProposeNetDeviceRepin_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) CommitNetDeviceRepin(ctx context.Context, in *CommitNetDeviceRepinRequest, opts ...grpc.CallOption) (*CommitNetDeviceRepinResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommitNetDeviceRepinResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_CommitNetDeviceRepin_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2370,9 +2389,17 @@ type ExecutorServiceServer interface {
 	// Replaces the read credential after validating the new one against the
 	// pinned transport; revokes authority bound to the old version.
 	RotateNetDeviceCredential(context.Context, *RotateNetDeviceCredentialRequest) (*RotateNetDeviceCredentialResponse, error)
-	// Replaces the trust pin, increments the trust generation and revokes
-	// every lease and permit for the device.
-	RepinNetDevice(context.Context, *RepinNetDeviceRequest) (*RepinNetDeviceResponse, error)
+	// Re-pin (ADR 0010 D1: HIGH with user verification), the same
+	// propose/commit pair as ProposePVERepin/CommitPVERepin. Propose shows
+	// old and new fingerprints and returns a HIGH permit whose
+	// execution_digest binds the device id, its trust generation, the old
+	// and the confirmed new pin. Commit replaces the pin only with that
+	// permit approved and unexpired and the digest matching the request;
+	// it refuses a digest mismatch, a missing, unapproved, expired or
+	// consumed permit, and a stale old pin. It increments the trust
+	// generation and revokes every lease and permit for the device.
+	ProposeNetDeviceRepin(context.Context, *ProposeNetDeviceRepinRequest) (*ProposeNetDeviceRepinResponse, error)
+	CommitNetDeviceRepin(context.Context, *CommitNetDeviceRepinRequest) (*CommitNetDeviceRepinResponse, error)
 	// Blocks or unblocks every dial to the device.
 	BlockNetDevice(context.Context, *BlockNetDeviceRequest) (*BlockNetDeviceResponse, error)
 	UnblockNetDevice(context.Context, *UnblockNetDeviceRequest) (*UnblockNetDeviceResponse, error)
@@ -2758,8 +2785,11 @@ func (UnimplementedExecutorServiceServer) SetNetDeviceCredential(context.Context
 func (UnimplementedExecutorServiceServer) RotateNetDeviceCredential(context.Context, *RotateNetDeviceCredentialRequest) (*RotateNetDeviceCredentialResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RotateNetDeviceCredential not implemented")
 }
-func (UnimplementedExecutorServiceServer) RepinNetDevice(context.Context, *RepinNetDeviceRequest) (*RepinNetDeviceResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method RepinNetDevice not implemented")
+func (UnimplementedExecutorServiceServer) ProposeNetDeviceRepin(context.Context, *ProposeNetDeviceRepinRequest) (*ProposeNetDeviceRepinResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ProposeNetDeviceRepin not implemented")
+}
+func (UnimplementedExecutorServiceServer) CommitNetDeviceRepin(context.Context, *CommitNetDeviceRepinRequest) (*CommitNetDeviceRepinResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CommitNetDeviceRepin not implemented")
 }
 func (UnimplementedExecutorServiceServer) BlockNetDevice(context.Context, *BlockNetDeviceRequest) (*BlockNetDeviceResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method BlockNetDevice not implemented")
@@ -4990,20 +5020,38 @@ func _ExecutorService_RotateNetDeviceCredential_Handler(srv interface{}, ctx con
 	return interceptor(ctx, in, info, handler)
 }
 
-func _ExecutorService_RepinNetDevice_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(RepinNetDeviceRequest)
+func _ExecutorService_ProposeNetDeviceRepin_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProposeNetDeviceRepinRequest)
 	if err := dec(in); err != nil {
 		return nil, err
 	}
 	if interceptor == nil {
-		return srv.(ExecutorServiceServer).RepinNetDevice(ctx, in)
+		return srv.(ExecutorServiceServer).ProposeNetDeviceRepin(ctx, in)
 	}
 	info := &grpc.UnaryServerInfo{
 		Server:     srv,
-		FullMethod: ExecutorService_RepinNetDevice_FullMethodName,
+		FullMethod: ExecutorService_ProposeNetDeviceRepin_FullMethodName,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ExecutorServiceServer).RepinNetDevice(ctx, req.(*RepinNetDeviceRequest))
+		return srv.(ExecutorServiceServer).ProposeNetDeviceRepin(ctx, req.(*ProposeNetDeviceRepinRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_CommitNetDeviceRepin_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CommitNetDeviceRepinRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).CommitNetDeviceRepin(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_CommitNetDeviceRepin_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).CommitNetDeviceRepin(ctx, req.(*CommitNetDeviceRepinRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -5576,8 +5624,12 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _ExecutorService_RotateNetDeviceCredential_Handler,
 		},
 		{
-			MethodName: "RepinNetDevice",
-			Handler:    _ExecutorService_RepinNetDevice_Handler,
+			MethodName: "ProposeNetDeviceRepin",
+			Handler:    _ExecutorService_ProposeNetDeviceRepin_Handler,
+		},
+		{
+			MethodName: "CommitNetDeviceRepin",
+			Handler:    _ExecutorService_CommitNetDeviceRepin_Handler,
 		},
 		{
 			MethodName: "BlockNetDevice",

@@ -30,7 +30,8 @@ var netDevAdminMethods = []string{
 	pb.ExecutorService_RegisterNetDevice_FullMethodName,
 	pb.ExecutorService_SetNetDeviceCredential_FullMethodName,
 	pb.ExecutorService_RotateNetDeviceCredential_FullMethodName,
-	pb.ExecutorService_RepinNetDevice_FullMethodName,
+	pb.ExecutorService_ProposeNetDeviceRepin_FullMethodName,
+	pb.ExecutorService_CommitNetDeviceRepin_FullMethodName,
 	pb.ExecutorService_BlockNetDevice_FullMethodName,
 	pb.ExecutorService_UnblockNetDevice_FullMethodName,
 	pb.ExecutorService_RemoveNetDevice_FullMethodName,
@@ -101,8 +102,11 @@ func TestNetDevAdminUnimplementedExceptList(t *testing.T) {
 		"RotateNetDeviceCredential": func() (proto.Message, error) {
 			return svc.RotateNetDeviceCredential(ctx, &pb.RotateNetDeviceCredentialRequest{DeviceId: "sw1", ExpectedCredentialVersion: 1, Secret: rotSecret})
 		},
-		"RepinNetDevice": func() (proto.Message, error) {
-			return svc.RepinNetDevice(ctx, &pb.RepinNetDeviceRequest{DeviceId: "sw1", Confirm: "yes"})
+		"ProposeNetDeviceRepin": func() (proto.Message, error) {
+			return svc.ProposeNetDeviceRepin(ctx, &pb.ProposeNetDeviceRepinRequest{DeviceId: "sw1", OldPin: testNetDevPin, ConfirmedNewPin: testNetDevPin2})
+		},
+		"CommitNetDeviceRepin": func() (proto.Message, error) {
+			return svc.CommitNetDeviceRepin(ctx, &pb.CommitNetDeviceRepinRequest{DeviceId: "sw1", OldPin: testNetDevPin, ConfirmedNewPin: testNetDevPin2, ExecutionDigest: strings.Repeat("0", 64)})
 		},
 		"BlockNetDevice": func() (proto.Message, error) {
 			return svc.BlockNetDevice(ctx, &pb.BlockNetDeviceRequest{DeviceId: "sw1", Reason: "test"})
@@ -267,7 +271,11 @@ func TestNetDevAdminProtoCarriesNoSecrets(t *testing.T) {
 				secretFields++
 			}
 		})
-		walkFields(m.Output(), map[protoreflect.FullName]bool{}, func(f protoreflect.FieldDescriptor) {
+		// The re-pin proposal returns the shared permit reply; its bytes
+		// fields (canonical request, WebAuthn challenge and options) are
+		// approval material, not secrets. It is skipped by marking it seen;
+		// TestNetDevRepinMirrorsPVERepinContract pins that reply type.
+		walkFields(m.Output(), map[protoreflect.FullName]bool{"nebula.executor.v1.ProposeExecutionResponse": true}, func(f protoreflect.FieldDescriptor) {
 			n := string(f.Name())
 			if f.Kind() == protoreflect.BytesKind || f.Options().(*descriptorpb.FieldOptions).GetDebugRedact() ||
 				strings.Contains(n, "secret") || strings.Contains(n, "user") || strings.Contains(n, "password") ||

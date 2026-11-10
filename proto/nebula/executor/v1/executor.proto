@@ -582,9 +582,17 @@ service ExecutorService {
   // Replaces the read credential after validating the new one against the
   // pinned transport; revokes authority bound to the old version.
   rpc RotateNetDeviceCredential(RotateNetDeviceCredentialRequest) returns (RotateNetDeviceCredentialResponse);
-  // Replaces the trust pin, increments the trust generation and revokes
-  // every lease and permit for the device.
-  rpc RepinNetDevice(RepinNetDeviceRequest) returns (RepinNetDeviceResponse);
+  // Re-pin (ADR 0010 D1: HIGH with user verification), the same
+  // propose/commit pair as ProposePVERepin/CommitPVERepin. Propose shows
+  // old and new fingerprints and returns a HIGH permit whose
+  // execution_digest binds the device id, its trust generation, the old
+  // and the confirmed new pin. Commit replaces the pin only with that
+  // permit approved and unexpired and the digest matching the request;
+  // it refuses a digest mismatch, a missing, unapproved, expired or
+  // consumed permit, and a stale old pin. It increments the trust
+  // generation and revokes every lease and permit for the device.
+  rpc ProposeNetDeviceRepin(ProposeNetDeviceRepinRequest) returns (ProposeNetDeviceRepinResponse);
+  rpc CommitNetDeviceRepin(CommitNetDeviceRepinRequest) returns (CommitNetDeviceRepinResponse);
   // Blocks or unblocks every dial to the device.
   rpc BlockNetDevice(BlockNetDeviceRequest) returns (BlockNetDeviceResponse);
   rpc UnblockNetDevice(UnblockNetDeviceRequest) returns (UnblockNetDeviceResponse);
@@ -3326,6 +3334,10 @@ message NetDeviceInfo {
   int64 credential_version = 11;
   int64 created_at_unix = 12;
   int64 updated_at_unix = 13;
+  // credential_missing is set when the device references a read
+  // credential whose vault entry does not exist (credential_version is
+  // then 0). The device is listed so the admin can see and remove it.
+  bool credential_missing = 14;
 }
 
 // NetDeviceProbeFacts are what the endpoint presented to a credential-free
@@ -3419,17 +3431,30 @@ message RotateNetDeviceCredentialResponse {
   NetDeviceInfo device = 1;
 }
 
-message RepinNetDeviceRequest {
+message ProposeNetDeviceRepinRequest {
   string device_id = 1;
   // old_pin must equal the stored pin.
   string old_pin = 2;
   // confirmed_new_pin is the newly presented pin the admin confirmed.
   string confirmed_new_pin = 3;
-  // confirm must be exactly "yes" (typed by the admin).
-  string confirm = 4;
 }
 
-message RepinNetDeviceResponse {
+message ProposeNetDeviceRepinResponse {
+  // permit is the HIGH permit for exactly this re-pin; it needs user
+  // verification before CommitNetDeviceRepin accepts it.
+  ProposeExecutionResponse permit = 1;
+}
+
+message CommitNetDeviceRepinRequest {
+  string device_id = 1;
+  // old_pin and confirmed_new_pin must be the values of the proposal.
+  string old_pin = 2;
+  string confirmed_new_pin = 3;
+  // execution_digest is the digest of the approved proposal permit.
+  string execution_digest = 4;
+}
+
+message CommitNetDeviceRepinResponse {
   NetDeviceInfo device = 1;
 }
 

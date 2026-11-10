@@ -64,9 +64,18 @@ func (s *Service) RotateNetDeviceCredential(_ context.Context, in *pb.RotateNetD
 	return nil, netDevUnimplemented("RotateNetDeviceCredential")
 }
 
-// RepinNetDevice will replace a device trust pin.
-func (s *Service) RepinNetDevice(context.Context, *pb.RepinNetDeviceRequest) (*pb.RepinNetDeviceResponse, error) {
-	return nil, netDevUnimplemented("RepinNetDevice")
+// ProposeNetDeviceRepin will propose a re-pin and return a HIGH permit
+// bound to the device, its trust generation and both pins (ADR 0010 D1,
+// mirroring ProposePVERepin).
+func (s *Service) ProposeNetDeviceRepin(context.Context, *pb.ProposeNetDeviceRepinRequest) (*pb.ProposeNetDeviceRepinResponse, error) {
+	return nil, netDevUnimplemented("ProposeNetDeviceRepin")
+}
+
+// CommitNetDeviceRepin will replace a device trust pin only under the
+// approved, unexpired permit of a matching proposal (mirroring
+// CommitPVERepin).
+func (s *Service) CommitNetDeviceRepin(context.Context, *pb.CommitNetDeviceRepinRequest) (*pb.CommitNetDeviceRepinResponse, error) {
+	return nil, netDevUnimplemented("CommitNetDeviceRepin")
 }
 
 // BlockNetDevice will block every dial to a device.
