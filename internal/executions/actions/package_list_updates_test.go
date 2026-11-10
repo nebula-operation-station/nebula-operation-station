@@ -5,11 +5,14 @@ package actions
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/osdebian"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
 )
 
 // listUpdatesHost is a fake host for package.list_updates: apt-get prints
@@ -115,5 +118,83 @@ func TestListUpdatesWithoutAptCacheLeavesSourcesUnknown(t *testing.T) {
 		if p.SourceName != "" || p.SourceVersion != "" {
 			t.Errorf("%s: source known without apt-cache: %+v", p.Name, p)
 		}
+	}
+}
+
+// manyUpdatesHost is a fake host with n pending updates whose apt-cache
+// prints copies stanzas per candidate: far more candidate bytes than fit
+// next to the simulation in hostrun.MaxResult.
+func manyUpdatesHost(t *testing.T, n, copies int) *fakeHost {
+	t.Helper()
+	d := t.TempDir()
+	f := &fakeHost{dir: d, bin: filepath.Join(d, "bin"), calls: filepath.Join(d, "calls")}
+	if err := os.Mkdir(f.bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	f.write(t, "apt-get", `awk -v n=`+strconv.Itoa(n)+` 'BEGIN { for (i = 1; i <= n; i++) printf "Inst libexample-component-%05d [1.0-1] (1.0-1+b1 Debian:12/stable, Debian-Security:12/stable-security [amd64])\n", i }'`)
+	f.write(t, "apt-cache", `for a in "$@"; do [ "$a" = show ] || echo "$a"; done | awk -F= -v c=`+strconv.Itoa(copies)+` '{ for (j = 0; j < c; j++) printf "Package: %s\nVersion: %s\nSource: example-source-%s (1.0-1)\n\n", $1, $2, substr($1, length($1) - 4) }'`)
+	return f
+}
+
+func TestListUpdatesCandidatesStayWithinMaxResult(t *testing.T) {
+	const n = 5000
+	f := manyUpdatesHost(t, n, 8)
+	p := filepath.Join(f.dir, "action.sh")
+	if err := os.WriteFile(p, packageListUpdates, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/sh", p)
+	cmd.Dir = f.dir
+	cmd.Env = []string{"PATH=" + f.bin + ":/usr/bin:/bin"}
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) > hostrun.MaxResult {
+		t.Fatalf("result is %d bytes, over hostrun.MaxResult %d", len(out), hostrun.MaxResult)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc["candidates_truncated"] != true {
+		t.Fatalf("candidates_truncated = %v, want true", doc["candidates_truncated"])
+	}
+	c := b64(t, doc, "candidates")
+	if c == "" || !strings.HasSuffix(c, "\n\n") {
+		t.Fatalf("truncated candidates must end with a closed stanza, got tail %q", c[max(0, len(c)-80):])
+	}
+	u, err := osdebian.ParseUpdates(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(u.Packages) != n || u.Security != n || !u.CandidatesTruncated {
+		t.Fatalf("simulation not intact: %d packages, %d security, truncated %v", len(u.Packages), u.Security, u.CandidatesTruncated)
+	}
+	known := 0
+	for _, pkg := range u.Packages {
+		if pkg.SourceVersion == "" {
+			continue
+		}
+		known++
+		if want := "example-source-" + pkg.Name[len(pkg.Name)-5:]; pkg.SourceName != want || pkg.SourceVersion != "1.0-1" {
+			t.Fatalf("%s: source %q %q", pkg.Name, pkg.SourceName, pkg.SourceVersion)
+		}
+	}
+	if known == 0 || known == n {
+		t.Fatalf("%d of %d sources known, want a truncated part", known, n)
+	}
+}
+
+func TestListUpdatesSmallCandidatesAreNotTruncated(t *testing.T) {
+	code, doc := listUpdatesHost(t, true).run(t, packageListUpdates)
+	if code != 0 || doc["candidates_truncated"] != false {
+		t.Fatalf("%d %v", code, doc)
+	}
+}
+
+func TestListUpdatesBudgetMatchesMaxResult(t *testing.T) {
+	if !strings.Contains(string(packageListUpdates), "max_result="+strconv.Itoa(hostrun.MaxResult)+"\n") {
+		t.Fatalf("package_list_updates.sh must budget against hostrun.MaxResult (%d)", hostrun.MaxResult)
 	}
 }
