@@ -432,7 +432,7 @@ func TestAttackPathPagesEnforceAdminRole(t *testing.T) {
 		if code != http.StatusOK {
 			t.Errorf("admin: GET %s: status %d", p, code)
 		}
-		code, _, body = s.do(t, http.MethodGet, p, "", s.user)
+		code, _, body := s.do(t, http.MethodGet, p, "", s.user)
 		if code != http.StatusForbidden {
 			t.Errorf("non-admin: GET %s: status %d, want 403", p, code)
 		}
