@@ -329,6 +329,39 @@ func TestParseVLANsOrphanContinuationIsIncomplete(t *testing.T) {
 	}
 }
 
+func TestParseVLANsRowAboveNextHeaderIsIncomplete(t *testing.T) {
+	// A second VLAN table with an ignored Neg column follows the first one
+	// without a blank line. A stray line just above its title line is taken
+	// as a third title line; its text falls into the ignored column, so it
+	// only vanishes from the first table.
+	w2 := append(append([]int{}, vlanWidths...), 8)
+	second := fixedRow(w2, "", "", "", "", "Created", "") +
+		fixedRow(w2, "Vlan", "Name", "Tagged Ports", "UnTagged Ports", "by", "Neg") +
+		dashRule(w2) +
+		fixedRow(w2, " 20", "twenty", "", "gi3", "S", "x")
+	first := string(vlanTable([]string{" 10", "ten", "", "gi2", "S"}))
+	want := []VLAN{
+		{ID: 10, Name: "ten", Untagged: []string{"gi2"}, Type: "S"},
+		{ID: 20, Name: "twenty", Untagged: []string{"gi3"}, Type: "S"},
+	}
+	tests := []struct {
+		name           string
+		between        string
+		wantIncomplete bool
+	}{
+		{"blank line between the tables", "\n", false},
+		{"orphan row above the header", fixedRow(w2, "", "", "", "", "", "gi1/0/9"), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, incomplete, err := ParseVLANs([]byte(first + tt.between + second))
+			if err != nil || incomplete != tt.wantIncomplete || !reflect.DeepEqual(got, want) {
+				t.Fatalf("got %+v, incomplete %v (want %v), err %v", got, incomplete, tt.wantIncomplete, err)
+			}
+		})
+	}
+}
+
 func TestParseVLANsMalformedRowAfterContinuationDropsRow(t *testing.T) {
 	// A misaligned line after a row may continue it, so the row is dropped.
 	in := string(vlanTable([]string{" 5", "five", "", "gi3,", ""})) + "     x  y  z  w  v  u  t  s  r  q  p\n"

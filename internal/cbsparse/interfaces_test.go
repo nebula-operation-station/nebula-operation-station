@@ -297,6 +297,36 @@ func TestParseInterfacesRowAboveNextHeaderIsIncomplete(t *testing.T) {
 	}
 }
 
+func TestParseInterfaceDescriptionsRowAboveNextHeaderIsIncomplete(t *testing.T) {
+	// As in ParseInterfaces: a stray line directly above the two title
+	// lines of the port-channel table is taken as a third title line; its
+	// text falls into the ignored LACP Neg column and only vanishes from
+	// the port table.
+	chWidths := []int{9, 8, 30}
+	second := fixedRow(chWidths, "", "LACP", "") +
+		fixedRow(chWidths, "Ch", "Neg", "Description") +
+		dashRule(chWidths) +
+		fixedRow(chWidths, "Po1", "Enabled", "lag to core")
+	first := string(descTable([]string{"gi1", "uplink"}))
+	want := map[string]string{"gi1": "uplink", "Po1": "lag to core"}
+	tests := []struct {
+		name           string
+		between        string
+		wantIncomplete bool
+	}{
+		{"blank line between the tables", "\n", false},
+		{"orphan row above the header", fixedRow(chWidths, "", "gi1/0/9", ""), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, incomplete, err := ParseInterfaceDescriptions([]byte(first + tt.between + second))
+			if err != nil || incomplete != tt.wantIncomplete || !maps.Equal(got, want) {
+				t.Fatalf("got %q, incomplete %v (want %v), err %v", got, incomplete, tt.wantIncomplete, err)
+			}
+		})
+	}
+}
+
 func TestParseInterfacesUnrecognizedValuesAreIncomplete(t *testing.T) {
 	tests := []struct {
 		name string
