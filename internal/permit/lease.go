@@ -24,6 +24,7 @@ import (
 	"github.com/gowebpki/jcs"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevcontract"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/schedgrant"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnverify"
 )
@@ -164,6 +165,89 @@ type ReadGrantDoc struct {
 	// ProviderTargets binds the exact PVE remotes of a provider grant
 	// (rate_profile "provider", ADR 0007 E08). Empty for SSH profiles.
 	ProviderTargets []ProviderTarget `json:"provider_targets,omitempty"`
+	// NetDeviceTargets binds the exact network devices of a device read
+	// lease (rate_profile "netdevice", ADR 0010 D4). Empty for every other
+	// profile.
+	NetDeviceTargets []NetDeviceTarget `json:"netdevice_targets,omitempty"`
+}
+
+// Device read lease limits (ADR 0010 D4) beyond the schedgrant profile.
+const (
+	// MaxNetDeviceTargets bounds the devices one device read lease names.
+	MaxNetDeviceTargets = 32
+	// maxNetDeviceCredentialVersion keeps versions exact in JSON numbers.
+	maxNetDeviceCredentialVersion = int64(1)<<53 - 1
+)
+
+// NetDeviceTarget is one device in a device read lease's frozen scope
+// (ADR 0010 D4). Any change of trust pin, trust generation or read
+// credential version leaves the lease without effect for that device; a
+// new lease is required. Reads is a subset of schedgrant.NetDeviceReads,
+// all of one device family; no change is representable.
+type NetDeviceTarget struct {
+	DeviceID          string   `json:"device_id"`
+	TrustPin          string   `json:"trust_pin"`
+	TrustGeneration   uint64   `json:"trust_generation"`
+	CredentialVersion int64    `json:"credential_version"`
+	Reads             []string `json:"reads"`
+}
+
+// NetDeviceTarget returns the frozen device target for deviceID.
+func (d ReadGrantDoc) NetDeviceTarget(deviceID string) (NetDeviceTarget, bool) {
+	for _, t := range d.NetDeviceTargets {
+		if t.DeviceID == deviceID {
+			return t, true
+		}
+	}
+	return NetDeviceTarget{}, false
+}
+
+// AllowsRead reports whether the target binds the typed read.
+func (t NetDeviceTarget) AllowsRead(read string) bool { return slices.Contains(t.Reads, read) }
+
+// validateNetDeviceGrant checks a v2 grant whose rate profile is
+// schedgrant.NetDeviceReadProfile.
+func validateNetDeviceGrant(d ReadGrantDoc) error {
+	maxInterval := int64(schedgrant.MaxInterval / time.Second)
+	switch {
+	case len(d.Actions) != 0 || len(d.Targets) != 0 || len(d.Credentials) != 0 || len(d.ProviderTargets) != 0:
+		return errors.New("a device read lease binds no SSH actions, hosts, credentials or provider remotes")
+	case d.MinIntervalS < int64(schedgrant.NetDeviceMinInterval/time.Second) || d.MinIntervalS > maxInterval:
+		return fmt.Errorf("min_interval_s must be %d to %d", int64(schedgrant.NetDeviceMinInterval/time.Second), maxInterval)
+	case d.RunBudget < 1 || d.RunBudget > schedgrant.NetDeviceMaxRunBudget:
+		return fmt.Errorf("run_budget must be 1 to %d", schedgrant.NetDeviceMaxRunBudget)
+	case len(d.NetDeviceTargets) == 0 || len(d.NetDeviceTargets) > MaxNetDeviceTargets:
+		return fmt.Errorf("a device read lease has 1 to %d devices", MaxNetDeviceTargets)
+	}
+	maxReads := len(schedgrant.NetDeviceReads())
+	seen := map[string]bool{}
+	for _, t := range d.NetDeviceTargets {
+		switch {
+		case !netdevcontract.ValidDeviceID(t.DeviceID) || !netdevcontract.ValidTrustPin(t.TrustPin):
+			return errors.New("a device identity or trust pin is malformed")
+		case seen[t.DeviceID]:
+			return fmt.Errorf("device %s listed twice", t.DeviceID)
+		case t.TrustGeneration < 1 || t.TrustGeneration > netdevcontract.MaxTrustGeneration:
+			return fmt.Errorf("device %s: trust_generation out of range", t.DeviceID)
+		case t.CredentialVersion < 1 || t.CredentialVersion > maxNetDeviceCredentialVersion:
+			return fmt.Errorf("device %s: credential_version out of range", t.DeviceID)
+		case len(t.Reads) == 0 || len(t.Reads) > maxReads:
+			return fmt.Errorf("device %s: 1 to %d reads", t.DeviceID, maxReads)
+		}
+		seen[t.DeviceID] = true
+		reads := map[string]bool{}
+		family := schedgrant.NetDeviceReadFamily(t.Reads[0])
+		for _, r := range t.Reads {
+			if !schedgrant.IsNetDeviceRead(r) || reads[r] {
+				return fmt.Errorf("device %s: read is unknown or listed twice", t.DeviceID)
+			}
+			if schedgrant.NetDeviceReadFamily(r) != family {
+				return fmt.Errorf("device %s: reads of one device belong to one family", t.DeviceID)
+			}
+			reads[r] = true
+		}
+	}
+	return nil
 }
 
 // Action returns the entry for actionID@version.
@@ -254,6 +338,15 @@ func parseReadGrant(raw []byte, now time.Time, stored bool) (ReadGrantDoc, []byt
 	default:
 		return fail("trigger must be %q, %q or %q", TriggerScheduled, TriggerOnDemand, TriggerBoth)
 	}
+	if d.Grant == ReadGrantFormat && d.RateProfile == schedgrant.NetDeviceReadProfile {
+		if err := validateNetDeviceGrant(d); err != nil {
+			return fail("%v", err)
+		}
+		return d, canon, digest, nil
+	}
+	if len(d.NetDeviceTargets) != 0 {
+		return fail("only device read leases bind network devices")
+	}
 	if d.Grant == ReadGrantFormat && d.RateProfile == ProviderReadProfile {
 		if err := validateProviderGrant(d); err != nil {
 			return fail("%v", err)
@@ -312,7 +405,7 @@ func parseReadGrant(raw []byte, now time.Time, stored bool) (ReadGrantDoc, []byt
 	}
 	if d.Grant == ReadGrantFormat {
 		if d.RateProfile != schedgrant.OrdinaryReadProfile && d.RateProfile != schedgrant.TelemetryReadProfile {
-			return fail("rate_profile must be ordinary, telemetry, provider or provider_telemetry")
+			return fail("rate_profile must be ordinary, telemetry, provider, provider_telemetry or netdevice")
 		}
 		if len(d.Credentials) != len(d.Targets) {
 			return fail("each frozen target needs one credential binding")
@@ -568,8 +661,8 @@ func (a *Authority) ProposeReadGrant(raw []byte) (PendingReadGrant, error) {
 		}
 	}
 	a.readGrants[digest] = pg
-	a.emit(Event{Kind: "read_grant_proposed", Digest: digest, Detail: fmt.Sprintf("%s: %d actions, %d hosts, %d provider remotes, %d runs/hour/target, until %s",
-		doc.ID, len(doc.Actions), len(doc.Targets), len(doc.ProviderTargets), doc.RunBudget, time.Unix(doc.ExpiryUnix, 0).UTC().Format(time.RFC3339))})
+	a.emit(Event{Kind: "read_grant_proposed", Digest: digest, Detail: fmt.Sprintf("%s: %d actions, %d hosts, %d provider remotes, %d network devices, %d runs/hour/target, until %s",
+		doc.ID, len(doc.Actions), len(doc.Targets), len(doc.ProviderTargets), len(doc.NetDeviceTargets), doc.RunBudget, time.Unix(doc.ExpiryUnix, 0).UTC().Format(time.RFC3339))})
 	return PendingReadGrant{Digest: digest, Canonical: slices.Clone(canon), Requirement: req, Challenge: slices.Clone(pg.challenge),
 		Expiry: pg.expiry, Doc: cloneReadGrantDoc(doc)}, nil
 }
@@ -582,6 +675,10 @@ func cloneReadGrantDoc(doc ReadGrantDoc) ReadGrantDoc {
 	for i := range doc.ProviderTargets {
 		doc.ProviderTargets[i].Methods = slices.Clone(doc.ProviderTargets[i].Methods)
 		doc.ProviderTargets[i].MetricsTargets = slices.Clone(doc.ProviderTargets[i].MetricsTargets)
+	}
+	doc.NetDeviceTargets = slices.Clone(doc.NetDeviceTargets)
+	for i := range doc.NetDeviceTargets {
+		doc.NetDeviceTargets[i].Reads = slices.Clone(doc.NetDeviceTargets[i].Reads)
 	}
 	return doc
 }
