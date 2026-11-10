@@ -424,3 +424,60 @@ func TestResolveGroupWideDiamondIsBounded(t *testing.T) {
 		t.Fatalf("ResolveGroup = %d objects, %v; want %d", len(got), err, width)
 	}
 }
+
+func FuzzParseObjects(f *testing.F) {
+	f.Add(readFixture(f, "objects.xml"))
+	f.Add(readFixture(f, "zones.xml"))
+	f.Add(readFixture(f, "status-error.xml"))
+	f.Add(objectsBody(groupChain(3)))
+	f.Add(objectsBody(`<address-group><entry name="a"><static><member>a</member></static></entry></address-group>`))
+	f.Add(objectsBody(`<service><entry name="s"><protocol><tcp><port>1-2,3</port></tcp></protocol></entry></service>`))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		o, err := ParseObjects(data)
+		if _, zerr := ParseZones(data); zerr == nil && err != nil && !errors.Is(err, ErrInvalidConfig) {
+			// both share decodeConfig: only content checks may differ
+			t.Fatalf("ParseZones accepted a response ParseObjects refused at decode: %v", err)
+		}
+		if err != nil {
+			return
+		}
+		for _, c := range []struct {
+			what     string
+			n, limit int
+		}{
+			{"addresses", len(o.Addresses), netdevcontract.MaxAddressObjects},
+			{"address groups", len(o.AddressGroups), netdevcontract.MaxAddressGroups},
+			{"services", len(o.Services), netdevcontract.MaxServiceObjects},
+			{"service groups", len(o.ServiceGroups), netdevcontract.MaxServiceGroups},
+		} {
+			if c.n > c.limit {
+				t.Fatalf("%s: %d over limit %d", c.what, c.n, c.limit)
+			}
+		}
+		for _, a := range o.Addresses {
+			if ValidateName(a.Name) != nil {
+				t.Fatal("invalid address name accepted")
+			}
+			if v, ok := addressValue(a.Type, a.Value); !ok || v != a.Value {
+				t.Fatalf("address value not canonical or invalid: %q %q", a.Type, a.Value)
+			}
+		}
+		for _, s := range o.Services {
+			if ValidateName(s.Name) != nil || !validPortSpec(s.Port) {
+				t.Fatal("invalid service accepted")
+			}
+		}
+		for _, g := range o.AddressGroups {
+			if ValidateName(g.Name) != nil || len(g.Static) > netdevcontract.MaxGroupMembers {
+				t.Fatal("invalid address group accepted")
+			}
+			_, _ = o.ResolveGroup(g.Name)
+		}
+		for _, g := range o.ServiceGroups {
+			if ValidateName(g.Name) != nil || len(g.Static) > netdevcontract.MaxGroupMembers {
+				t.Fatal("invalid service group accepted")
+			}
+			_, _ = o.ResolveServiceGroup(g.Name)
+		}
+	})
+}
