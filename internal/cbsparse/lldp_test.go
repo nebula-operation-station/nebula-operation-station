@@ -92,10 +92,10 @@ func TestParseLLDPNeighborDetailFixture(t *testing.T) {
 var hostileRefused = map[string]string{
 	"ansi escape":    "evil\x1b[2J\x1b]0;owned\x07",
 	"bell":           "evil\x07",
-	"bidi override":  "evil‮gnp.exe",
-	"bidi isolate":   "evil⁦x⁩",
-	"zero width":     "ev​il",
-	"line separator": "evil System Name: good",
+	"bidi override":  "evil" + string(rune(0x202E)) + "gnp.exe",
+	"bidi isolate":   "evil" + string(rune(0x2066)) + "x" + string(rune(0x2069)),
+	"zero width":     "ev" + string(rune(0x200B)) + "il",
+	"line separator": "evil" + string(rune(0x2028)) + "System Name: good",
 	"nul":            "evil\x00",
 	"del":            "evil\x7f",
 }
