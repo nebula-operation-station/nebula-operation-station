@@ -45,14 +45,17 @@ var netDevAdminMethods = []string{
 
 // TestNetDevAdminMethodsRefuseNonAdmin: through the real interceptor and
 // role table, only the admin reaches a network device admin handler;
-// server, pve-collector, any other role and an unknown UID are refused
-// before the handler runs. The roles equal the PVE admin methods'.
+// server, pve-collector, netdev-collector, any other role and an unknown
+// UID are refused before the handler runs. The roles equal the PVE admin
+// methods'. The one exception is ListNetDevices, which the
+// netdev-collector may also call for device metadata (ND-12).
 func TestNetDevAdminMethodsRefuseNonAdmin(t *testing.T) {
 	const (
 		serverUID uint32 = 31001
 		adminUID  uint32 = 31002
 		collUID   uint32 = 31003
 		discUID   uint32 = 31004
+		ndUID     uint32 = 31005
 		otherUID  uint32 = 31999
 	)
 	policy := peercred.NewPolicy(map[uint32][]peercred.Role{
@@ -60,14 +63,20 @@ func TestNetDevAdminMethodsRefuseNonAdmin(t *testing.T) {
 		adminUID:  {peercred.RoleAdmin},
 		collUID:   {peercred.RolePVECollector},
 		discUID:   {peercred.Role("discovery")},
+		ndUID:     {peercred.RoleNetDevCollector},
 	}, MethodRoles())
 	roles := MethodRoles()
 	pveAdmin := roles[pb.ExecutorService_ListPVEAdminRemotes_FullMethodName]
 	for _, method := range netDevAdminMethods {
-		if !slices.Equal(roles[method], pveAdmin) {
-			t.Errorf("%s roles %v, want the PVE admin roles %v", method, roles[method], pveAdmin)
+		wantRoles := pveAdmin
+		listForCollector := method == pb.ExecutorService_ListNetDevices_FullMethodName
+		if listForCollector {
+			wantRoles = append(slices.Clone(pveAdmin), peercred.RoleNetDevCollector)
 		}
-		for _, uid := range []uint32{serverUID, adminUID, collUID, discUID, otherUID} {
+		if !slices.Equal(roles[method], wantRoles) {
+			t.Errorf("%s roles %v, want %v", method, roles[method], wantRoles)
+		}
+		for _, uid := range []uint32{serverUID, adminUID, collUID, discUID, ndUID, otherUID} {
 			ctx := peer.NewContext(context.Background(), &peer.Peer{AuthInfo: peercred.AuthInfo{UID: uid}})
 			reached := false
 			_, err := policy.UnaryInterceptor(nil)(ctx, nil, &grpc.UnaryServerInfo{FullMethod: method},
@@ -75,7 +84,7 @@ func TestNetDevAdminMethodsRefuseNonAdmin(t *testing.T) {
 					reached = true
 					return nil, nil
 				})
-			if uid == adminUID {
+			if uid == adminUID || (uid == ndUID && listForCollector) {
 				if err != nil || !reached {
 					t.Errorf("%s admin: err %v reached %v, want allowed", method, err, reached)
 				}
