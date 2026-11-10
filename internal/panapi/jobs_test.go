@@ -147,7 +147,7 @@ func TestParseJobRefusesBadFields(t *testing.T) {
 		{"type with tab", ok("42", "Com\tmit", "10", ""), 42},
 		{"type too long", ok("42", strings.Repeat("A", maxJobTypeBytes+1), "10", ""), 42},
 		{"type markup chars", ok("42", "Commit&lt;x&gt;", "10", ""), 42},
-		{"details line with bidi override", ok("42", "Commit", "10", "<details><line>bad‮line</line></details>"), 42},
+		{"details line with bidi override", ok("42", "Commit", "10", "<details><line>bad"+string(rune(0x202e))+"line</line></details>"), 42},
 		{"details line with inner tab", ok("42", "Commit", "10", "<details><line>bad\tline</line></details>"), 42},
 		{"details repeated", ok("42", "Commit", "10", "<details/><details/>"), 42},
 		{"id repeated", jobBody(`<id>42</id>` + jobElems("42", "Commit", "ACT", "PEND", "10", "")), 42},
