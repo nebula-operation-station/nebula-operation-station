@@ -1,0 +1,186 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic fixture (ND-09 part 2): shape of a type=config&action=show
+     reply for the whole vsys subtree with a security rulebase. Only
+     documentation addresses (192.0.2.0/24, 198.51.100.0/24, 2001:db8::/32)
+     and example names; no real device data. The object part matches
+     objects.xml in miniature so ResolveRule can be tested on one document.
+     Elements outside the allowlist (profile-setting, schedule-like options,
+     secret-hint) must be dropped by the parser. Rule order is deliberately
+     not alphabetical. -->
+<response status="success">
+  <result total-count="1" count="1">
+    <vsys>
+      <entry name="vsys1">
+        <address>
+          <entry name="web-1"><ip-netmask>192.0.2.10</ip-netmask></entry>
+          <entry name="web-2"><ip-netmask>192.0.2.11/32</ip-netmask></entry>
+          <entry name="lab-net"><ip-netmask>198.51.100.0/24</ip-netmask></entry>
+          <entry name="nos-host"><ip-netmask>198.51.100.5</ip-netmask></entry>
+        </address>
+        <address-group>
+          <entry name="web-servers"><static><member>web-1</member><member>web-2</member></static></entry>
+          <entry name="all-internal"><static><member>web-servers</member><member>lab-net</member></static></entry>
+          <entry name="dyn-prod"><dynamic><filter>'prod'</filter></dynamic></entry>
+        </address-group>
+        <service>
+          <entry name="svc-http-alt"><protocol><tcp><port>8080</port></tcp></protocol></entry>
+          <entry name="svc-dns"><protocol><udp><port>53</port></udp></protocol></entry>
+        </service>
+        <service-group>
+          <entry name="web-services"><members><member>svc-http-alt</member></members></entry>
+        </service-group>
+        <rulebase>
+          <security>
+            <rules>
+              <entry name="zz-allow-mgmt" uuid="00000000-0000-4000-8000-0000000000a1">
+                <from><member>trust</member></from>
+                <to><member>mgmt</member></to>
+                <source><member>nos-host</member></source>
+                <destination><member>any</member></destination>
+                <source-user><member>any</member></source-user>
+                <category><member>any</member></category>
+                <application><member>ssh</member><member>web-browsing</member></application>
+                <service><member>application-default</member></service>
+                <action>allow</action>
+                <log-start>yes</log-start>
+                <description>management from the NOS host</description>
+                <tag><member>nos</member></tag>
+                <profile-setting><group><member>default</member></group></profile-setting>
+              </entry>
+              <entry name="allow-web" uuid="00000000-0000-4000-8000-0000000000A2">
+                <from><member>untrust</member></from>
+                <to><member>dmz</member></to>
+                <source><member>any</member></source>
+                <destination><member>web-servers</member></destination>
+                <application><member>web-browsing</member></application>
+                <service><member>web-services</member></service>
+                <action>allow</action>
+              </entry>
+              <entry name="old-ftp">
+                <from><member>untrust</member></from>
+                <to><member>dmz</member></to>
+                <source><member>any</member></source>
+                <destination><member>web-1</member></destination>
+                <application><member>ftp</member></application>
+                <service><member>application-default</member></service>
+                <action>allow</action>
+                <disabled>yes</disabled>
+                <description>disabled but must stay in place</description>
+              </entry>
+              <entry name="any-any-deny">
+                <from><member>any</member></from>
+                <to><member>any</member></to>
+                <source><member>any</member></source>
+                <destination><member>any</member></destination>
+                <application><member>any</member></application>
+                <service><member>any</member></service>
+                <action>deny</action>
+                <log-end>no</log-end>
+                <disabled>no</disabled>
+              </entry>
+              <entry name="internal-dns">
+                <from><member>trust</member></from>
+                <to><member>untrust</member></to>
+                <source><member>all-internal</member></source>
+                <destination><member>192.0.2.53</member><member>2001:db8::53</member></destination>
+                <application><member>dns</member></application>
+                <service><member>svc-dns</member></service>
+                <action>allow</action>
+              </entry>
+              <entry name="unknown-ref">
+                <from><member>trust</member></from>
+                <to><member>dmz</member></to>
+                <source><member>ghost-host</member><member>web-1</member></source>
+                <destination><member>198.51.100.0/25</member></destination>
+                <application><member>any</member></application>
+                <service><member>service-http</member></service>
+                <action>allow</action>
+              </entry>
+              <entry name="dynamic-ref">
+                <from><member>trust</member></from>
+                <to><member>dmz</member></to>
+                <source><member>dyn-prod</member></source>
+                <destination><member>192.0.2.100-192.0.2.150</member></destination>
+                <application><member>any</member></application>
+                <service><member>any</member></service>
+                <action>drop</action>
+              </entry>
+              <entry name="negated-src">
+                <from><member>trust</member></from>
+                <to><member>untrust</member></to>
+                <source><member>lab-net</member></source>
+                <destination><member>any</member></destination>
+                <negate-source>yes</negate-source>
+                <application><member>any</member></application>
+                <service><member>any</member></service>
+                <action>reset-client</action>
+              </entry>
+              <entry name="intrazone-dmz">
+                <rule-type>intrazone</rule-type>
+                <from><member>dmz</member></from>
+                <to><member>dmz</member></to>
+                <source><member>any</member></source>
+                <destination><member>any</member></destination>
+                <application><member>any</member></application>
+                <service><member>any</member></service>
+                <action>reset-server</action>
+              </entry>
+              <entry name="Allow Users">
+                <from><member>trust</member></from>
+                <to><member>untrust</member></to>
+                <source><member>lab-net</member></source>
+                <destination><member>any</member></destination>
+                <source-user><member>example\alice</member><member>cn=bob,dc=example,dc=org</member></source-user>
+                <application><member>any</member></application>
+                <service><member>application-default</member></service>
+                <action>allow</action>
+              </entry>
+              <entry name="disabled-deny">
+                <from><member>any</member></from>
+                <to><member>mgmt</member></to>
+                <source><member>any</member></source>
+                <destination><member>any</member></destination>
+                <application><member>any</member></application>
+                <service><member>any</member></service>
+                <action>reset-both</action>
+                <disabled>yes</disabled>
+              </entry>
+              <entry name="hostile-text">
+                <from><member>trust</member></from>
+                <to><member>dmz</member></to>
+                <source><member>any</member></source>
+                <destination><member>any</member></destination>
+                <application><member>any</member></application>
+                <service><member>any</member></service>
+                <action>deny</action>
+                <description>&lt;script&gt;alert(1)&lt;/script&gt; &amp; '"; DROP TABLE rules; --</description>
+                <secret-hint>should-be-dropped</secret-hint>
+              </entry>
+              <entry name="a-last">
+                <from><member>any</member></from>
+                <to><member>any</member></to>
+                <source><member>any</member></source>
+                <destination><member>any</member></destination>
+                <application><member>any</member></application>
+                <service><member>any</member></service>
+                <action>deny</action>
+                <tag><member>cleanup</member><member>nos</member></tag>
+              </entry>
+            </rules>
+          </security>
+          <nat>
+            <rules>
+              <entry name="nat-not-read-here">
+                <from><member>trust</member></from>
+                <to><member>untrust</member></to>
+                <source><member>any</member></source>
+                <destination><member>any</member></destination>
+                <service>any</service>
+              </entry>
+            </rules>
+          </nat>
+        </rulebase>
+      </entry>
+    </vsys>
+  </result>
+</response>
