@@ -1,0 +1,13 @@
+                                            Flow Link        Back     Mdix
+Port     Type         Duplex Speed Neg      ctrl State       Pressure Mode
+-------- ------------ ------ ----- -------- ---- ----------- -------- -------
+gi1      1G-Copper    Full   1000  Enabled  Off  Up          Disabled On
+gi2      1G-Copper    Full   1000  Enabled  Off  Up          Disabled On
+gi3      1G-Copper    Full   1000  Enabled  Off  Up          Disabled On
+gi4      1G-Copper    Full   1000  Enabled  Off  Up          Disabled On
+gi5      1G-Copper    Full   1000  Enabled  Off  Up          Disabled On
+gi6      1G-Copper    Half   100   Enabled  Off  Up          Disabled Off
+gi7      1G-Copper    --     --    --       --   Down        --       --
+gi8      1G-Copper    --     --    --       --   Down        --       --
+gi9      1G-Fiber     Full   1000  Disabled Off  Up          Disabled --
+gi10     1G-Fiber     --     --    --       --   Down        --       --
