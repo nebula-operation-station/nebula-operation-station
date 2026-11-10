@@ -97,7 +97,7 @@ var descriptionTitles = map[string]int{
 // is nil and incomplete is false.
 func ParseInterfaces(out []byte) (ifaces []Interface, incomplete bool, err error) {
 	const what = "show interfaces status"
-	blocks, err := splitTables(out, what, func(titles []string) ([]int, error) {
+	blocks, err := splitTables(out, what, tableMaxLines, func(titles []string) ([]int, error) {
 		return columnIndex(titles, interfaceTitles, numIfFields, ifFieldName, ifFieldStatus)
 	})
 	if err != nil {
@@ -229,7 +229,7 @@ func parseSpeed(s string) (uint64, bool) {
 // is nil and incomplete is false.
 func ParseInterfaceDescriptions(out []byte) (descs map[string]string, incomplete bool, err error) {
 	const what = "show interfaces description"
-	blocks, err := splitTables(out, what, func(titles []string) ([]int, error) {
+	blocks, err := splitTables(out, what, tableMaxLines, func(titles []string) ([]int, error) {
 		return columnIndex(titles, descriptionTitles, numIfFields, ifFieldName, ifFieldDescription)
 	})
 	if err != nil {

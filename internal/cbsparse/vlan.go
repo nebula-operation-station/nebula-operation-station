@@ -118,7 +118,7 @@ const (
 // incomplete is false.
 func ParseVLANs(out []byte) (vlans []VLAN, incomplete bool, err error) {
 	const what = "show vlan"
-	blocks, err := splitTables(out, what, func(titles []string) ([]int, error) {
+	blocks, err := splitTables(out, what, tableMaxLines, func(titles []string) ([]int, error) {
 		return columnIndex(titles, vlanTitles, numVLANFields,
 			vlanFieldID, vlanFieldName, vlanFieldTagged, vlanFieldUntagged)
 	})
