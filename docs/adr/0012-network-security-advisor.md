@@ -158,6 +158,19 @@ evaluation semantics creates `nr-v2`.
    on a firewall interface", never `denied`. The default interzone rule
    applies only between zones the data proves; the firewall may not be on
    that path at all.
+   The entry class **`netbird`** is placed on a firewall zone only when the
+   data proves that every NetBird path to the destination crosses a
+   firewall interface (the destination has no NetBird interface in its
+   ADR 0009 `net.facts`, and the overlay range reaches it only through a
+   routing peer or route behind a firewall zone). A destination that is a
+   NetBird peer itself, or is reached through a routing peer whose path to
+   it does not cross the firewall, is reached over the overlay directly:
+   verdict **`not_filtered`** with the reason "overlay path bypasses the
+   firewall". Anything not proven (no `net.facts` for the host, an
+   observed endpoint without host data, unknown routing peers or overlay
+   routes) → **`unknown`** "NetBird path not proven". An overlay path that
+   bypasses the firewall never gets a firewall `denied` (previously: the
+   placement of `netbird` was unspecified).
 2. **Crossing test.** Source and destination in the **same L2 segment**
    (same VLAN or same IPAM subnet, and no firewall interface between them
    per the data) → verdict **`not_filtered`**: traffic does not cross the
@@ -167,6 +180,25 @@ evaluation semantics creates `nr-v2`.
    pre-NAT packet (PAN-OS semantics: security rules match the **pre-NAT
    address** and the **post-NAT zone**, *verify* in NS-03); the matched NAT
    rule is part of the chain.
+   **Reverse-NAT lookup.** A query whose destination is a host's internal
+   address does not stop at that address: the model also looks up every
+   destination NAT rule whose translated (post-NAT) address and port cover
+   the host's address and the queried port, and evaluates the query once
+   more per such rule on its **pre-NAT** packet (the rule's original
+   destination address, zone and service, for example the public WAN
+   address of a port forward). NAT stays evaluated on the pre-NAT packet;
+   the lookup only adds the pre-NAT destinations to try. The verdict for
+   the source is the most reachable one over the internal address and all
+   pre-NAT destinations, in the order `allowed`, `conditional`,
+   `not_filtered`, `unknown`, `denied`; it is `denied` only if every one of
+   them is `denied`. A port-forwarded service queried from `internet` is
+   therefore `allowed` through the NAT rule and its allow rule, never
+   `denied` by the default interzone rule toward the internal address. A
+   NAT rule whose translated or original address or port cannot be
+   evaluated (FQDN, dynamic or region object, port range the model cannot
+   expand within its limits) makes the verdict `unknown`, never `denied`.
+   The chain lists every pre-NAT destination tried (previously: only the
+   internal address was queried, so a port forward could look `denied`).
 4. **Security rules.** In order, first match wins; disabled rules are
    skipped and listed in the chain as "skipped (disabled)". A rule matches
    when zones, addresses (with negation), and service match. A rule is
@@ -203,8 +235,8 @@ evaluation semantics creates `nr-v2`.
 | `allowed` | An allow rule matches unconditionally; chain names rule and NAT |
 | `conditional` | A conditional allow decides, or a conditional deny (App-ID, user, URL category, schedule, service `application-default`) is followed by an allow; counts as reachable for every security use (fail closed) |
 | `denied` | An unconditional deny/drop/reset rule or the default interzone rule matches, with no earlier conditional allow (a conditional deny counts only if its fall-through denies too) |
-| `not_filtered` | Same L2 segment; the firewall is not on the path |
-| `unknown` | Any input missing, stale (ADR 0010: three missed intervals) or `incomplete` (D3 limits); an object that cannot be evaluated (FQDN, EDL, dynamic group whose members are unknown, region objects); more than one vsys; route ambiguity; a private or special-range address outside known subnets; a known subnet on no firewall interface. The reason is listed |
+| `not_filtered` | Same L2 segment, or a NetBird overlay path that bypasses the firewall; the firewall is not on the path |
+| `unknown` | Any input missing, stale (ADR 0010: three missed intervals) or `incomplete` (D3 limits); an object that cannot be evaluated (FQDN, EDL, dynamic group whose members are unknown, region objects), also in a NAT rule found by the reverse-NAT lookup; more than one vsys; route ambiguity; a private or special-range address outside known subnets; a known subnet on no firewall interface; a NetBird path not proven to cross the firewall. The reason is listed |
 
 **Explanation chain.** Every verdict carries the ordered list of steps
 with the data that decided each step: segment and zone mapping with their
@@ -250,7 +282,9 @@ It changes priority only; it never changes a finding's state.
 **Mitigation record per finding.** For each open finding whose affected
 service is mapped to a listening port (ADR 0011 D10 mapping; unmapped →
 no mitigation, flagged "port unknown"), NOS queries the model from every
-entry class and every zone, plus the finding host's own segment, and stores:
+entry class and every zone, plus the finding host's own segment, with the
+D2 reverse-NAT lookup (a port forward to the host makes the source
+`allowed`, never `denied`, and is never counted as mitigated), and stores:
 
 - per source: verdict, deciding rule (name and UUID), NAT rule, chain hash;
 - the snapshot hash, model version and computation time;
@@ -314,7 +348,11 @@ whose tier rises because a mitigation is voided raises
 computed from the reachability model instead of raw allow/NAT rules:
 `allowed` and `conditional` → policy edge; `not_filtered` → L2 edge, still
 flagged "assumed" in `ap-v1` (host firewalls not modelled); `denied` → no
-edge; `unknown` → edge flagged "assumed" (fail closed). Choke-point
+edge only when the verdict rests on a snapshot with the Q11 elements
+(negation flags and default rules collected, not "default assumed") and
+fresh inputs; a `denied` from a snapshot without them keeps the edge,
+flagged "assumed" (unproven, previously: every `denied` removed the edge);
+`unknown` → edge flagged "assumed" (fail closed). Choke-point
 candidates "one edge removed by a rule change" are what-if results (D4).
 `ap-v1` stays; using the model as edge source is a data-source change,
 recorded with the graph snapshot hash.
@@ -324,8 +362,17 @@ recorded with the graph snapshot hash.
 **Advisor findings** are a separate store from ADR 0011 findings (different
 kind, not subject to ADR 0011 D5). NOS computes them deterministically from
 a snapshot, so NOS also resolves them: a check that no longer fires on a
-fresh complete snapshot marks its finding `resolved`; a check that cannot be
-evaluated leaves it as it was and shows "not evaluated since …". The admin
+fresh complete snapshot marks its finding `resolved`. A snapshot is
+**complete** for a check only when every input is fresh and not
+`incomplete`, the Q11 elements (negation flags, default rules, not
+"default assumed") are collected, and every element the check needs is
+present (for example profile names for `allow-without-profile`); a
+verdict the check relies on that is `unknown` or labelled "negation and
+default rules not collected" does not count (previously: "complete" was
+not defined). A check that cannot be evaluated, answers "cannot decide"
+or "data not collected", or runs on a snapshot that is not complete for
+it **never resolves an existing finding**: the finding stays as it was
+and shows "not evaluated since …". The admin
 may `acknowledge` a finding with reason and expiry (proposed default 90
 days, maximum 365, Q9), bound to the check ID and version, the rule UUID and a
 **rule-scoped digest** (not the policy-wide `redacted_digest`, which
@@ -353,7 +400,7 @@ evidence.
 
 | Check | Fires when | Evidence shown |
 | --- | --- | --- |
-| `shadowed-rule` | An enabled rule can never match because earlier rules together cover its full match space (zones, addresses incl. negation, service, application, user, schedule). Partial overlap is a separate, lower `overlap` hint. Objects that cannot be evaluated → "cannot decide", no finding | Covering rule(s), the shadowed rule, why |
+| `shadowed-rule` | An enabled rule can never match because earlier rules together cover its full match space (zones, addresses incl. negation, service, application, user, schedule). Partial overlap is a separate, lower `overlap` hint. Objects that cannot be evaluated, or negation flags not collected (Q11) → "cannot decide": no new finding, and an existing finding is never resolved by it (stays, "not evaluated since …") | Covering rule(s), the shadowed rule, why |
 | `any-any` | An allow rule with source **and** destination address `any`, or source **or** destination zone `any`, or service and application both `any` | Rule, which fields are `any` |
 | `allow-without-profile` | An allow rule toward or from a zone of trust class `untrusted` or `guest` with no security profile or profile group (needs NS-04) | Rule, zones |
 | `zero-hits` | Enabled rule with zero hits since the later of rule creation and counter reset, with **≥ 30 days observed**; the reset time and observed window are shown (same rule as ADR 0010 ND-20); never a delete proposal | Hit count, first/last hit, reset time, window |
