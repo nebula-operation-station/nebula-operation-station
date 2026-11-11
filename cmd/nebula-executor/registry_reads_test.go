@@ -4,6 +4,9 @@ package main
 
 import (
 	"crypto/ed25519"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"strings"
 	"testing"
 
@@ -53,6 +56,84 @@ func TestWireServedServiceWiresRegistryReads(t *testing.T) {
 	dir := t.TempDir()
 	wireServedService(rec, &executor.PveGuestPowerBindings{}, pub, dir, dir)
 	checkLeaseAuthorizer(t, e, rec)
+}
+
+// TestRunCallsWireServedService: run() itself calls wireServedService on
+// the service it builds (svc := executor.NewService(...)) and later serves
+// (executor.NewGRPCServer(svc, ...)), as a statement of run's own body, in
+// that order. It parses main.go, so a commented-out call, one in a nested
+// or dead block, or one on another value fails, and with
+// TestWireServedServiceWiresRegistryReads the served executor is proven
+// to use the lease-backed authorizer, not the fail-closed default.
+func TestRunCallsWireServedService(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var run *ast.FuncDecl
+	for _, d := range file.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil && fd.Name.Name == "run" {
+			run = fd
+		}
+	}
+	if run == nil || run.Body == nil {
+		t.Fatal("main.go has no func run")
+	}
+	isCall := func(e ast.Expr, pkg, name string) (*ast.CallExpr, bool) {
+		c, ok := e.(*ast.CallExpr)
+		if !ok {
+			return nil, false
+		}
+		switch f := c.Fun.(type) {
+		case *ast.Ident:
+			return c, pkg == "" && f.Name == name
+		case *ast.SelectorExpr:
+			x, ok := f.X.(*ast.Ident)
+			return c, ok && x.Name == pkg && f.Sel.Name == name
+		}
+		return nil, false
+	}
+	firstArgIsSvc := func(c *ast.CallExpr) bool {
+		if len(c.Args) == 0 {
+			return false
+		}
+		id, ok := c.Args[0].(*ast.Ident)
+		return ok && id.Name == "svc"
+	}
+	built, wired, served := -1, -1, -1
+	for i, st := range run.Body.List {
+		switch s := st.(type) {
+		case *ast.AssignStmt:
+			if len(s.Lhs) == 1 && len(s.Rhs) == 1 {
+				if id, ok := s.Lhs[0].(*ast.Ident); ok && id.Name == "svc" {
+					if _, ok := isCall(s.Rhs[0], "executor", "NewService"); ok && built < 0 {
+						built = i
+					}
+				}
+				if c, ok := isCall(s.Rhs[0], "executor", "NewGRPCServer"); ok && firstArgIsSvc(c) && served < 0 {
+					served = i
+				}
+			}
+		case *ast.ExprStmt:
+			if c, ok := isCall(s.X, "", "wireServedService"); ok && firstArgIsSvc(c) && wired < 0 {
+				wired = i
+			}
+		}
+	}
+	if built < 0 || wired < 0 || served < 0 || built >= wired || wired >= served {
+		t.Fatalf("run() must build svc, call wireServedService(svc, ...) and then serve svc, as statements of its body; positions built=%d wired=%d served=%d", built, wired, served)
+	}
+	// svc is not reassigned between wiring and serving.
+	for _, st := range run.Body.List[wired+1 : served] {
+		if s, ok := st.(*ast.AssignStmt); ok {
+			for _, l := range s.Lhs {
+				if id, ok := l.(*ast.Ident); ok && id.Name == "svc" {
+					t.Fatal("run() reassigns svc after wiring it")
+				}
+			}
+		}
+	}
 }
 
 // checkLeaseAuthorizer checks that rec.wired is the production lease
