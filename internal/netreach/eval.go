@@ -548,7 +548,7 @@ func zonesExclude(r *SecurityRule, src, dst string) string {
 	return ""
 }
 
-// ruleMatch matches an evaluable rule, with its merged address fields a,
+// ruleMatch matches an evaluable rule, with its merged fields a,
 // against a packet. It returns the field that does not match, or "" and
 // the fields that match only in part (conditions).
 func ruleMatch(v *RuleView, a *ruleAddrs, p *packet) (string, []string) {
@@ -573,7 +573,7 @@ func ruleMatch(v *RuleView, a *ruleAddrs, p *packet) (string, []string) {
 	}
 	if !v.Service.ApplicationDefault {
 		// application-default is a condition already (RuleView.Conditions).
-		switch matchService(v.Service, p.proto, p.ports) {
+		switch a.svc.match(p.proto, p.ports) {
 		case matchNone:
 			return "service", nil
 		case matchPartial:
@@ -715,19 +715,38 @@ func overlapsAddr(m, x []AddrRange) bool {
 // portSpan is an inclusive port range of the query protocol.
 type portSpan struct{ from, to int }
 
-// matchService matches a service field against the packet ports of one
-// protocol. A field with application-default is handled by the caller.
-func matchService(s ServiceSet, proto string, x []portSpan) match {
+// mergedService is a service field ready for matching: any, or its port
+// spans per protocol, sorted and merged. The Index builds one per rule
+// (ruleAddrs.svc, natAddrs.svc), so a query never sorts or copies a rule's
+// ports.
+type mergedService struct {
+	any   bool
+	ports map[string][]portSpan
+}
+
+// mergeService groups the ports of s by protocol and merges each group.
+func mergeService(s ServiceSet) mergedService {
 	if s.Any {
+		return mergedService{any: true}
+	}
+	by := map[string][]portSpan{}
+	for _, p := range s.Ports {
+		by[p.Protocol] = append(by[p.Protocol], portSpan{int(p.From), int(p.To)})
+	}
+	for k, m := range by {
+		by[k] = mergePorts(m)
+	}
+	return mergedService{ports: by}
+}
+
+// match matches the field against the packet ports x of protocol proto.
+// A field with application-default is handled by the caller. The cost is
+// O(len(x) · log m) and it does not allocate.
+func (s mergedService) match(proto string, x []portSpan) match {
+	if s.any {
 		return matchFull
 	}
-	var m []portSpan
-	for _, p := range s.Ports {
-		if p.Protocol == proto {
-			m = append(m, portSpan{int(p.From), int(p.To)})
-		}
-	}
-	m = mergePorts(m)
+	m := s.ports[proto]
 	cov, ov := true, false
 	for _, r := range x {
 		i := sort.Search(len(m), func(i int) bool { return m[i].to >= r.from })

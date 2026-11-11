@@ -169,22 +169,25 @@ type Index struct {
 	nat       []NATRuleView
 	intrazone RuleView
 	interzone RuleView
-	// ruleAddrs and natAddrs hold the address fields of rules and nat,
-	// index by index, merged once at build time.
+	// ruleAddrs and natAddrs hold the address and service fields of rules
+	// and nat, index by index, merged once at build time.
 	ruleAddrs []ruleAddrs
 	natAddrs  []natAddrs
 	// natZone is the post-NAT zone of each NAT rule (postNATZones).
 	natZone []postZone
 }
 
-// ruleAddrs are the merged address fields of one security rule.
+// ruleAddrs are the merged address and service fields of one security
+// rule.
 type ruleAddrs struct {
 	src, dst mergedAddrs
+	svc      mergedService
 }
 
-// natAddrs are the merged address fields of one NAT rule.
+// natAddrs are the merged address and service fields of one NAT rule.
 type natAddrs struct {
 	src, dst, translated mergedAddrs
+	svc                  mergedService
 }
 
 // NewIndex checks the snapshot limits, validates name uniqueness and
@@ -243,12 +246,15 @@ func buildIndex(s *Snapshot, lim workLimits, place placeFunc, maxPlacements int)
 	x.ruleAddrs = make([]ruleAddrs, len(x.rules))
 	for i := range x.rules {
 		v := &x.rules[i]
-		x.ruleAddrs[i] = ruleAddrs{src: mergeSet(v.Source), dst: mergeSet(v.Destination)}
+		x.ruleAddrs[i] = ruleAddrs{src: mergeSet(v.Source), dst: mergeSet(v.Destination), svc: mergeService(v.Service)}
 	}
 	x.natAddrs = make([]natAddrs, len(x.nat))
 	for i := range x.nat {
 		v := &x.nat[i]
-		x.natAddrs[i] = natAddrs{src: mergeSet(v.Source), dst: mergeSet(v.Destination), translated: mergeSet(v.TranslatedAddress)}
+		x.natAddrs[i] = natAddrs{
+			src: mergeSet(v.Source), dst: mergeSet(v.Destination), translated: mergeSet(v.TranslatedAddress),
+			svc: mergeService(v.Service),
+		}
 	}
 	x.natZone = postNATZones(x.nat, place, maxPlacements)
 	return x, nil

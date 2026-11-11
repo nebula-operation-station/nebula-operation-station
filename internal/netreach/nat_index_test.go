@@ -5,6 +5,7 @@ package netreach
 import (
 	"fmt"
 	"net/netip"
+	"slices"
 	"testing"
 )
 
@@ -137,6 +138,59 @@ func TestPostNATZoneNotInSnapshotNamesCause(t *testing.T) {
 		}
 	}
 	t.Fatalf("chain lacks the NAT step naming the cause\n%s", r.Text())
+}
+
+// TestServicePortsMergedAtBuild: the service field of every security and
+// NAT rule is held per protocol, sorted and merged, when the Index is
+// built; matching a query against it neither sorts nor allocates, however
+// many port spans the field has.
+func TestServicePortsMergedAtBuild(t *testing.T) {
+	s := labSnapshot()
+	// A wide service field given in reverse order with touching spans.
+	const n = MaxPortRangesPerField/2 - 1 // two spans each, plus svc-dns
+	var members []string
+	for i := range n {
+		p := 60000 - 4*i
+		s.Services = append(s.Services, ServiceObject{
+			Name: fmt.Sprintf("w%d", i), Protocol: "tcp", Ports: fmt.Sprintf("%d-%d,%d", p, p+1, p+2), SourcePorts: Collected(""),
+		})
+		members = append(members, fmt.Sprintf("w%d", i))
+	}
+	s.ServiceGroups = append(s.ServiceGroups, Group{Name: "wide", Static: append(members, "svc-dns")})
+	s.SecurityRules[1].Service = list("wide")
+	s.NATRules[0].Service = Collected("wide")
+	x := mustIndex(t, s)
+	if !x.rules[1].Evaluable() || !x.nat[0].Evaluable() {
+		t.Fatalf("wide service unevaluable: %v / %v", x.rules[1].Reason(), x.nat[0].Reason())
+	}
+	byFrom := func(a, b portSpan) int { return a.from - b.from }
+	for name, svc := range map[string]mergedService{"rule": x.ruleAddrs[1].svc, "nat": x.natAddrs[0].svc} {
+		tcp := svc.ports["tcp"]
+		if len(tcp) != n || !slices.IsSortedFunc(tcp, byFrom) {
+			t.Fatalf("%s: %d tcp spans, sorted %v; want %d sorted", name, len(tcp), slices.IsSortedFunc(tcp, byFrom), n)
+		}
+		if tcp[0] != (portSpan{60000 - 4*(n-1), 60002 - 4*(n-1)}) {
+			t.Fatalf("%s: first span %v, want touching spans merged", name, tcp[0])
+		}
+		if u := svc.ports["udp"]; len(u) != 1 || u[0] != (portSpan{53, 53}) {
+			t.Fatalf("%s: udp spans %v", name, u)
+		}
+	}
+	// The exported view is unchanged.
+	if got := len(x.rules[1].Service.Ports); got != 2*n+1 {
+		t.Fatalf("exported view has %d ports, want %d", got, 2*n+1)
+	}
+	svc := x.ruleAddrs[1].svc
+	x1 := []portSpan{{60001, 60001}}
+	if svc.match("tcp", x1) != matchFull || svc.match("tcp", []portSpan{{60003, 60003}}) != matchNone {
+		t.Fatal("merged service decides wrongly")
+	}
+	if n := testing.AllocsPerRun(100, func() { svc.match("tcp", x1) }); n != 0 {
+		t.Fatalf("matching a merged service allocates %.0f times per call", n)
+	}
+	// One query through both rules: the rule match uses the merged field.
+	r := x.Evaluate(addrQuery(lanHost, "192.168.99.1", 60001))
+	wantVerdict(t, r, VerdictDenied, "deny-lan-mgmt")
 }
 
 // TestRuleAddressSetsMergedAtBuild: every address field of the Index is
