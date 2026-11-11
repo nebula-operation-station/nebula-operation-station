@@ -49,7 +49,11 @@ type RegistryReads interface {
 	RegistryLeases(ctx context.Context) ([]registrymeta.LeaseView, error)
 	// ResolveImageUpdates fills executor-read digests into a
 	// docker.check_updates result (dockerhost.ResolvePrivateDigestsWith);
-	// on any failure it returns u unchanged.
+	// on any failure it returns u unchanged. ctx may carry
+	// registrymeta.WithCacheOnly (page renders: answer from memory, read
+	// in the background) and registrymeta.WithReadHost (the host the
+	// result came from, for the per-host caps); the server's
+	// registrymeta.DigestReader honours both.
 	ResolveImageUpdates(ctx context.Context, u dockerhost.ImageUpdates) dockerhost.ImageUpdates
 }
 
