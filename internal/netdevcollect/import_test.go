@@ -420,3 +420,284 @@ func TestImporterRequiresConfiguration(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// okStore accepts every dataset without a database and counts the calls.
+type okStore struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (s *okStore) ReplaceDataset(context.Context, string, netdevinventory.Read, uint64, time.Time, bool,
+	netdevinventory.Rows) (netdevinventory.ReplaceResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.calls++
+	return netdevinventory.ReplaceResult{}, nil
+}
+
+// spoolOf lists the spool files of one device and read, oldest first.
+func spoolOf(t *testing.T, s *Spool, device, read string) []string {
+	t.Helper()
+	names, err := s.List(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, n := range names {
+		if p, err := parseSpoolName(n); err == nil && p.device == device && p.read == read {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// TestImportSpoolStaysBoundedDuringStoreOutage: while the store keeps
+// failing, every read of the device keeps at most MaxPendingPerRead files
+// (the newest valid one and those after it); after recovery only those are
+// replayed and the newest read is stored.
+func TestImportSpoolStaysBoundedDuringStoreOutage(t *testing.T) {
+	e := newImportEnv(t)
+	fs := &failingStore{inner: e.store, fail: true}
+	e.imp.Store = fs
+	vlans := func(id int) string { return fmt.Sprintf(`{"vlans":[{"id":%d}]}`, id) }
+	macs := `{"entries":[{"vlan":1,"mac":"aa:bb:cc:dd:ee:ff","port":"gi1","type":"NET_DEV_MAC_TYPE_DYNAMIC"}]}`
+	e.write(t, importCBS, ReadCBSVLANs, importGen, false, vlans(1))
+	if rep := e.run(t); rep.Retry != 1 {
+		t.Fatalf("first pass = %+v", rep)
+	}
+	var newest string
+	for pass := range 5 {
+		for i := range 4 {
+			newest = e.write(t, importCBS, ReadCBSVLANs, importGen, false, vlans(2+pass*4+i))
+			e.write(t, importCBS, ReadCBSMACTable, importGen, false, macs)
+		}
+		// Every second pass is due and fails again; the others back off.
+		if pass%2 == 1 {
+			*e.now = e.now.Add(importRetryMax)
+		}
+		rep := e.run(t)
+		if rep.Pruned == 0 {
+			t.Fatalf("pass %d = %+v, want pruned files", pass, rep)
+		}
+		for _, read := range []string{ReadCBSVLANs, ReadCBSMACTable} {
+			if got := spoolOf(t, e.spool, importCBS, read); len(got) > MaxPendingPerRead {
+				t.Fatalf("pass %d: %s keeps %d files, want at most %d", pass, read, len(got), MaxPendingPerRead)
+			}
+		}
+	}
+	if got := spoolOf(t, e.spool, importCBS, ReadCBSVLANs); got[len(got)-1] != newest {
+		t.Fatalf("newest file %s not kept: %v", newest, got)
+	}
+	// A newer invalid file is rejected; the valid ones before it count.
+	bad := e.write(t, importCBS, ReadCBSVLANs, importGen, false, `{"vlans":[],"evil":1}`)
+	rep := e.run(t)
+	if rep.Kept != 1 {
+		t.Fatalf("pass with invalid newest = %+v", rep)
+	}
+	if got := spoolOf(t, e.spool, importCBS, ReadCBSVLANs); slices.Contains(got, bad) || len(got) > MaxPendingPerRead {
+		t.Fatalf("spool after invalid newest = %v", got)
+	}
+
+	fs.mu.Lock()
+	fs.fail = false
+	fs.calls = nil
+	fs.mu.Unlock()
+	*e.now = e.now.Add(importRetryMax)
+	rep = e.run(t)
+	if rep.Retry != 0 || rep.Imported == 0 || rep.Imported > 2*MaxPendingPerRead {
+		t.Fatalf("pass after recovery = %+v", rep)
+	}
+	if left := spoolFiles(t, e.spool); len(left) != 0 {
+		t.Fatalf("spool = %v, want empty", left)
+	}
+	if len(fs.calls) > 2*MaxPendingPerRead {
+		t.Fatalf("%d store calls after recovery, want at most %d", len(fs.calls), 2*MaxPendingPerRead)
+	}
+	ds, err := e.store.GetDataset(context.Background(), importCBS, netdevinventory.ReadVLANs)
+	if p, _ := parseSpoolName(newest); err != nil || ds.ObservedAt.UnixMicro() != p.nanos/1000 {
+		t.Fatalf("dataset = %+v, %v; want the newest read", ds, err)
+	}
+}
+
+// TestImportKeepsOlderFilesUntilANewerOneIsValid: files of a failing
+// device beyond the bound stay while no newer file was judged valid.
+func TestImportKeepsOlderFilesUntilANewerOneIsValid(t *testing.T) {
+	e := newImportEnv(t)
+	fs := &failingStore{inner: e.store, fail: true}
+	e.imp.Store = fs
+	first := e.write(t, importCBS, ReadCBSVLANs, importGen, false, `{"vlans":[{"id":1}]}`)
+	if rep := e.run(t); rep.Retry != 1 {
+		t.Fatalf("first pass = %+v", rep)
+	}
+	// One newer valid file, then newer invalid ones: a pass judges at most
+	// MaxPendingPerRead of them (all invalid, so rejected) and finds no
+	// newer valid file, so the older ones stay.
+	second := e.write(t, importCBS, ReadCBSVLANs, importGen, false, `{"vlans":[{"id":2}]}`)
+	for range MaxPendingPerRead {
+		e.write(t, importCBS, ReadCBSVLANs, importGen, false, `{"vlans":[],"evil":1}`)
+	}
+	rep := e.run(t)
+	if rep.Pruned != 0 || rep.Kept != MaxPendingPerRead {
+		t.Fatalf("report = %+v, want %d kept and nothing pruned", rep, MaxPendingPerRead)
+	}
+	if got := spoolOf(t, e.spool, importCBS, ReadCBSVLANs); !slices.Equal(got, []string{first, second}) {
+		t.Fatalf("spool = %v, want %s and %s", got, first, second)
+	}
+}
+
+// TestImportOlderPolicyPartAfterNewerPartIsStored: a policy part observed
+// before another part that was stored first (a clock step, or a read that
+// failed transiently) is stored, not dropped as superseded; an older read
+// of the same part still is.
+func TestImportOlderPolicyPartAfterNewerPartIsStored(t *testing.T) {
+	e := newImportEnv(t)
+	payload := map[string]string{}
+	for _, rp := range readPayloads {
+		payload[rp.read] = rp.payload
+	}
+	e.spool.Now = fixedNow(testTime.Add(2 * time.Minute))
+	e.write(t, importPANOS, ReadPANOSSecurityRules, importGen, false, payload[ReadPANOSSecurityRules])
+	if rep := e.run(t); rep.Imported != 1 {
+		t.Fatalf("rules pass = %+v", rep)
+	}
+	// Clock stepped back: zones observed before the stored rules.
+	e.spool.Now = fixedNow(testTime.Add(time.Minute))
+	e.write(t, importPANOS, ReadPANOSZones, importGen, false, payload[ReadPANOSZones])
+	if rep := e.run(t); rep.Imported != 1 || rep.Replayed != 0 {
+		t.Fatalf("zones pass = %+v, want imported", rep)
+	}
+	// A transiently unreadable NAT read is retried after the others went in.
+	e.spool.Now = fixedNow(testTime.Add(90 * time.Second))
+	nat := e.write(t, importPANOS, ReadPANOSNATRules, importGen, false, payload[ReadPANOSNATRules])
+	e.spool.Now = fixedNow(testTime.Add(3 * time.Minute))
+	e.write(t, importPANOS, ReadPANOSObjects, importGen, false, payload[ReadPANOSObjects])
+	// The NAT file is moved aside for one pass: to the importer it is a
+	// read that is not there yet (as after a transient read failure).
+	natPath := filepath.Join(e.spool.Dir, nat)
+	aside := filepath.Join(t.TempDir(), nat)
+	if err := os.Rename(natPath, aside); err != nil {
+		t.Fatal(err)
+	}
+	if rep := e.run(t); rep.Imported != 1 {
+		t.Fatalf("objects pass = %+v", rep)
+	}
+	if err := os.Rename(aside, natPath); err != nil {
+		t.Fatal(err)
+	}
+	if rep := e.run(t); rep.Imported != 1 || rep.Replayed != 0 {
+		t.Fatalf("NAT retry pass = %+v, want imported", rep)
+	}
+	ds, err := e.store.GetDataset(context.Background(), importPANOS, netdevinventory.ReadFirewallPolicy)
+	if err != nil || ds.State != netdevinventory.StateFresh {
+		t.Fatalf("dataset = %+v, %v", ds, err)
+	}
+	// An older read of a part already stored is still superseded.
+	e.spool.Now = fixedNow(testTime.Add(30 * time.Second))
+	e.write(t, importPANOS, ReadPANOSZones, importGen, false, `{"zones":[]}`)
+	if rep := e.run(t); rep.Replayed != 1 || rep.Imported != 0 {
+		t.Fatalf("older zones pass = %+v, want superseded", rep)
+	}
+}
+
+// TestImportUnmovedRecordOnlyRetriesRemoval: a rejected record that can
+// neither be kept nor removed is never imported again; later passes only
+// retry its removal.
+func TestImportUnmovedRecordOnlyRetriesRemoval(t *testing.T) {
+	e := newImportEnv(t)
+	fs := &failingStore{inner: e.store}
+	e.imp.Store = fs
+	if err := os.WriteFile(filepath.Join(e.spool.Dir, KeptDirName), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	discardErr := errors.New("remove failed")
+	spoolDiscard = func(*Spool, context.Context, string) error { return discardErr }
+	t.Cleanup(func() { spoolDiscard = (*Spool).Discard })
+
+	name := e.write(t, "ghost-sw", ReadCBSVLANs, importGen, false, `{"vlans":[]}`)
+	for pass := range 2 {
+		rep := e.run(t)
+		if rep.Failed != 1 || rep.Kept != 0 || !slices.Contains(rep.Errors, name+": keep_failed") {
+			t.Fatalf("pass %d = %+v", pass, rep)
+		}
+		if left := spoolFiles(t, e.spool); !slices.Equal(left, []string{name}) {
+			t.Fatalf("pass %d: spool = %v", pass, left)
+		}
+	}
+	spoolDiscard = (*Spool).Discard
+	rep := e.run(t)
+	if rep.Kept != 1 || rep.Failed != 0 {
+		t.Fatalf("pass after removal works = %+v", rep)
+	}
+	if left := spoolFiles(t, e.spool); len(left) != 0 {
+		t.Fatalf("spool = %v, want empty", left)
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if len(fs.calls) != 1 {
+		t.Fatalf("store called %d times, want once (no import retry)", len(fs.calls))
+	}
+}
+
+func TestMoveToKeptRefusesWhenFull(t *testing.T) {
+	e := newImportEnv(t)
+	keptDir := filepath.Join(e.spool.Dir, KeptDirName)
+	if err := os.Mkdir(keptDir, keptDirMode); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 2 * MaxKeptFiles {
+		if err := os.WriteFile(filepath.Join(keptDir, fmt.Sprintf("f%05d", i)), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	name := e.write(t, importCBS, ReadCBSVLANs, importGen, false, `{"vlans":[]}`)
+	if err := e.spool.moveToKept(context.Background(), name, ReasonInvalidPayload); !errors.Is(err, ErrKeptFull) {
+		t.Fatalf("err = %v, want ErrKeptFull", err)
+	}
+	if left := spoolFiles(t, e.spool); !slices.Equal(left, []string{name}) {
+		t.Fatalf("spool = %v, want the record left in place", left)
+	}
+}
+
+// TestKeptReasonFileIsReplaced: a reason file left by an interrupted
+// earlier attempt is overwritten with the current reason.
+func TestKeptReasonFileIsReplaced(t *testing.T) {
+	e := newImportEnv(t)
+	name := e.write(t, importCBS, ReadCBSVLANs, importGen, false, `{"vlans":[],"evil":1}`)
+	keptDir := filepath.Join(e.spool.Dir, KeptDirName)
+	if err := os.Mkdir(keptDir, keptDirMode); err != nil {
+		t.Fatal(err)
+	}
+	reasonPath := filepath.Join(keptDir, name+keptReasonSuffix)
+	if err := os.WriteFile(reasonPath, []byte("reason: "+ReasonUnknownDevice+"\n"), keptReasonMode); err != nil {
+		t.Fatal(err)
+	}
+	if rep := e.run(t); rep.Kept != 1 {
+		t.Fatalf("report = %+v", rep)
+	}
+	got, err := os.ReadFile(reasonPath)
+	if err != nil || string(got) != "reason: "+ReasonInvalidPayload+"\n" {
+		t.Fatalf("reason file = %q, %v; want %s", got, err, ReasonInvalidPayload)
+	}
+}
+
+// TestImportDefersBeyondMaxRecordsPerRun: one pass stores at most
+// MaxRecordsPerRun records; the rest wait for the next pass.
+func TestImportDefersBeyondMaxRecordsPerRun(t *testing.T) {
+	e := newImportEnv(t)
+	st := &okStore{}
+	e.imp.Store = st
+	for range MaxRecordsPerRun + 2 {
+		e.write(t, importCBS, ReadCBSVLANs, importGen, false, `{"vlans":[{"id":1}]}`)
+	}
+	rep := e.run(t)
+	if rep.Imported != MaxRecordsPerRun || rep.Deferred != 2 {
+		t.Fatalf("first pass = %+v", rep)
+	}
+	rep = e.run(t)
+	if rep.Imported != 2 || rep.Deferred != 0 {
+		t.Fatalf("second pass = %+v", rep)
+	}
+	if st.calls != MaxRecordsPerRun+2 {
+		t.Fatalf("store calls = %d", st.calls)
+	}
+}
