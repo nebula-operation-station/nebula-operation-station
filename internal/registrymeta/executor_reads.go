@@ -208,20 +208,27 @@ type PrivateDigest struct {
 // in neither. An error is returned only when the registries cannot be
 // listed. It reads every time; DigestReader caches answers across renders.
 func PrivateDigests(ctx context.Context, exec ExecutorRegistry, images []string) (map[string]PrivateDigest, map[string]error, error) {
-	return privateDigests(ctx, exec, images, nil)
-}
-
-func privateDigests(ctx context.Context, exec ExecutorRegistry, images []string, r *DigestReader) (map[string]PrivateDigest, map[string]error, error) {
-	if len(images) > MaxPrivateDigestImages {
-		images = images[:MaxPrivateDigestImages]
-	}
 	regs, err := ListPrivateIdentities(ctx, exec)
 	if err != nil {
 		return nil, nil, err
 	}
+	out, errs := resolveImages(images, regs, func(_ string, pi privateRef) (PrivateDigest, error) {
+		return readPrivateDigest(ctx, exec, pi)
+	})
+	return out, errs, nil
+}
+
+// resolveImages maps the first MaxPrivateDigestImages images onto regs and
+// calls read once per distinct registry, repository and tag (with the
+// first image naming it); images on no private registry appear in neither
+// result.
+func resolveImages(images []string, regs []PrivateIdentity, read func(image string, pi privateRef) (PrivateDigest, error)) (map[string]PrivateDigest, map[string]error) {
+	if len(images) > MaxPrivateDigestImages {
+		images = images[:MaxPrivateDigestImages]
+	}
 	out, errs := map[string]PrivateDigest{}, map[string]error{}
 	if len(regs) == 0 {
-		return out, errs, nil
+		return out, errs
 	}
 	type key struct{ reg, repo, tag string }
 	type answer struct {
@@ -241,11 +248,7 @@ func privateDigests(ctx context.Context, exec ExecutorRegistry, images []string,
 		k := key{pi.registry.ID, pi.repository, pi.tag}
 		a, ok := done[k]
 		if !ok {
-			if r != nil {
-				a.d, a.err = r.read(ctx, exec, pi)
-			} else {
-				a.d, a.err = readPrivateDigest(ctx, exec, pi)
-			}
+			a.d, a.err = read(img, pi)
 			done[k] = a
 		}
 		if a.err != nil {
@@ -254,7 +257,7 @@ func privateDigests(ctx context.Context, exec ExecutorRegistry, images []string,
 		}
 		out[img] = a.d
 	}
-	return out, errs, nil
+	return out, errs
 }
 
 // readPrivateDigest asks the executor for one tag_digest read and checks

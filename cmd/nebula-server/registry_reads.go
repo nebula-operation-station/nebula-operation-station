@@ -93,6 +93,23 @@ func (s *serverRegistryReads) RegistryLeases(ctx context.Context) ([]registrymet
 	return registrymeta.ListRegistryLeases(ctx, s.exec, s.now())
 }
 
+// Close stops the digest reader's background reads on shutdown: the batch
+// in flight is cancelled and Close waits for the worker until ctx ends.
+func (s *serverRegistryReads) Close(ctx context.Context) error {
+	return s.reader.Close(ctx)
+}
+
+// closeRegistryReads waits until life ends (the server shuts down), then
+// closes s, waiting at most timeout for its background worker.
+func closeRegistryReads(life context.Context, s *serverRegistryReads, timeout time.Duration, log *slog.Logger) {
+	<-life.Done()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := s.Close(ctx); err != nil {
+		log.Error("stop private registry reads", "error", err.Error())
+	}
+}
+
 // ResolveImageUpdates fills the executor-read digests of private images
 // into u; when the registries cannot be listed u is returned unchanged.
 func (s *serverRegistryReads) ResolveImageUpdates(ctx context.Context, u dockerhost.ImageUpdates) dockerhost.ImageUpdates {
