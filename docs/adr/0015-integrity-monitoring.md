@@ -549,9 +549,18 @@ parser is strict, bounded and fuzzed before the beta.
   classifies, from its own data" and the D5 `AuthorizedKeysFile` paths
   and keeps only that derived path set; the content itself is never
   persisted, logged or forwarded (the files' content hashes are keyed
-  like all of `/etc`). The executor checks that every path of this array
-  has a file record in the same run whose hashed content matches it; a
-  missing, oversized or inconsistent array makes the run partial.
+  like all of `/etc`). The script sends this array and hashes every file
+  in it in **every** run, incremental runs included (the files are
+  small), so every complete run, full or incremental, supplies a derived
+  set. The executor checks that every path of this array has a file
+  record in the same run whose hashed content matches it, and that every
+  file an `Include` names or matches is in the array: an `Include` whose
+  path or glob reaches outside the profile roots (no file record can
+  exist there) or matches a recorded file that the array leaves out
+  makes the array inconsistent. A missing, oversized or inconsistent
+  array makes the run partial; a partial run supplies no derived set and
+  replaces no retained records, so D7 keeps classifying with the latest
+  complete run and the approved baseline.
 - **Limits (new named constants, implementation choices to be fixed in
   IG-05).** 300,000 records per host and run, **128 MiB** raw document per
   run (above the 1 MiB `result.json` default of spec 09, so spec 09 needs
@@ -752,21 +761,56 @@ roles never mix:
      an entry non-critical. The executor uses only (a) the fixed D9 path
      patterns of the approved profile, (b) the old record (approved
      baseline) and new record (its own retained run) of the entry, for the
-     setuid/setgid rule, (c) its own retained records of `/usr/bin` and
+     setuid/setgid rule, (c) the command names in `/usr/bin` and
      `/usr/sbin`, for the shadowing rule, and (d) the set of
      `sshd_config` includes and `AuthorizedKeysFile` targets that it
-     derives itself from the D6 "SSH configuration" records of the same
-     complete run: it parses `Include` and `AuthorizedKeysFile`
-     directives (including those inside `Match` blocks) and turns the
-     `%h`, `%u` and `%U` tokens into patterns that match any single path
-     component, so `/etc/ssh/authorized_keys/%u` covers every file in that
-     directory. When the executor cannot classify an entry with certainty
-     (no complete run with SSH configuration records, a parse failure, a
-     limit hit, a directive or token it does not understand), it treats
-     the entry as critical-class, and if it lacks a usable derived set
-     for a host it treats **every** entry that a proposed digest of that
-     host adds, changes or removes as critical-class (each needing its
-     own CLI approval) until a complete run provides one.
+     derives itself from D6 "SSH configuration" records. Item (a)
+     includes, independent of any `sshd_config`, every file whose name
+     begins with `authorized_keys` anywhere in the scanned paths (D5,
+     including `/root/.ssh` and `/home/*/.ssh`) and every path ending in `/.ssh/authorized_keys` or
+     `/.ssh/authorized_keys2`, so every real `authorized_keys` file is
+     critical-class whatever `AuthorizedKeysFile` says.
+     - **Derived sets only grow until a change is approved.** The sets
+       for (c) and (d) are each the **union** of the set derived from the
+       approved baseline and the set derived from the latest complete
+       run. For (c), these are the `/usr/bin` and `/usr/sbin` names in the
+       approved list (digest-checked, below) and in the executor's
+       retained run. For (d), the executor never keeps SSH configuration
+       content (D6), so it stores, next to the approved baseline digest,
+       the derived path set of the run from which the approved baseline's
+       current `sshd_config` and include entries were taken, and replaces
+       it only when a baseline approval makes the run's SSH configuration
+       entries the approved ones (a critical-class CLI approval). A
+       pending `sshd_config` change or a removed `/usr/bin` command
+       therefore never makes an entry non-critical; the smaller set takes
+       effect only after the admin approved that change in the CLI. Before
+       the first approved baseline, the run's set alone is used.
+     - **`AuthorizedKeysFile` expansion.** The executor parses `Include`
+       and `AuthorizedKeysFile` directives (including those inside `Match`
+       blocks); without an `AuthorizedKeysFile` directive it uses the
+       OpenSSH default `.ssh/authorized_keys .ssh/authorized_keys2`.
+       `%h` expands to a whole home directory, and a value that does not
+       start with `/` or `%h` is relative to the home directory. Because
+       the host's passwd entries are untrusted and homes may lie anywhere
+       (`/root`, `/home/alice`, service homes under `/var`), the executor
+       does not resolve homes: it matches `%h` and the implied home
+       prefix of a relative value against **any** sequence of one or more
+       path components (`/root` included), and `%u` and `%U` against any
+       single path component; `%%` is a literal `%`. So `%h/.config/keys`
+       covers `/root/.config/keys` and `/var/lib/svc/.config/keys`, and
+       `/etc/ssh/authorized_keys/%u` covers every file in that directory.
+       Over-matching only makes more entries critical-class, never fewer.
+     - **Unclassifiable means critical.** When the executor cannot
+       classify an entry with certainty (no usable derived set, a parse
+       failure, a limit hit, a directive, value or token it does not
+       understand, an `AuthorizedKeysFile` value it cannot expand as
+       above, an `Include` that names or matches a file outside the
+       profile roots or a file that is not in the run's SSH configuration
+       array, D6), it treats the entry as critical-class. If it lacks a
+       usable derived set for a host from the latest complete run, it
+       treats **every** entry that a proposed digest of that host adds,
+       changes or removes as critical-class (each needing its own CLI
+       approval) until a complete run provides one.
    - **The executor alone decides what goes into a baseline.** The
      digest the admin approves is computed by the executor, never taken
      from the server:
@@ -968,8 +1012,9 @@ the change is classed **"changed during NOS job, unverified"**:
 Consequently, before Q6 every package file changed by a NOS apt job is an
 unverified finding the admin must review.
 
-**Critical-class paths.** These are: `authorized_keys*` files (D5 "SSH
-access"), `/etc/sudoers` and `/etc/sudoers.d/`, PAM configuration
+**Critical-class paths.** These are: `authorized_keys*` files and every
+`AuthorizedKeysFile` target (D5 "SSH access", expanded as in D7 "The
+executor classifies, from its own data"), `/etc/sudoers` and `/etc/sudoers.d/`, PAM configuration
 (`/etc/pam.d/`, `/etc/security/`) and PAM modules (`pam_*.so`),
 `/etc/ssh/sshd_config` and its includes, `/etc/ld.so.preload`, systemd
 units, drop-ins and timers under the D5 unit roots, crontabs and the
