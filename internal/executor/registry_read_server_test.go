@@ -79,11 +79,12 @@ func TestServerBuiltRegistryLeaseEndToEnd(t *testing.T) {
 	srv := &serverSide{svc: e.svc}
 	ctx := context.Background()
 	host := strings.TrimPrefix(e.reg.srv.URL, "https://")
-	app, db, other := host+"/team/app:1.0.0", host+"/team/db:2", host+"/team/other:1"
+	app, db, other, app2 := host+"/team/app:1.0.0", host+"/team/db:2", host+"/team/other:1", host+"/team/app:2.0.0"
 	hostResult := dockerhost.ImageUpdates{Phase: "done", Images: []dockerhost.ImageUpdate{
 		{Image: app, Status: "unknown", Note: "authentication required"},
 		{Image: db, Status: "unknown", Note: "authentication required"},
 		{Image: other, Status: "unknown", Note: "authentication required"},
+		{Image: app2, Status: "unknown", Note: "authentication required"},
 	}}
 
 	// Fail closed until a lease exists.
@@ -112,12 +113,18 @@ func TestServerBuiltRegistryLeaseEndToEnd(t *testing.T) {
 		t.Fatalf("approve: %v", err)
 	}
 
-	got, err := dockerhost.ResolvePrivateDigests(ctx, hostResult, srv)
+	// The server's long-lived reader, as cmd/nebula-server wires it.
+	reader := registrymeta.NewDigestReader(srv, e.clock.Now)
+	got, err := dockerhost.ResolvePrivateDigestsWith(ctx, hostResult, reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if im := got.Images[0]; im.Remote != regDigest || !im.Private || im.Status != "unknown" {
 		t.Fatalf("leased image = %+v", im)
+	}
+	// A second tag of the same repository is its own read, not rate limited.
+	if im := got.Images[3]; im.Remote != regDigest || !im.Private {
+		t.Fatalf("second tag of the leased repository = %+v", im)
 	}
 	if im := got.Images[1]; im.Remote != "" || !im.Private || !strings.Contains(im.Note, "no approved registry read lease") {
 		t.Fatalf("unleased repository = %+v", im)
@@ -125,8 +132,29 @@ func TestServerBuiltRegistryLeaseEndToEnd(t *testing.T) {
 	if im := got.Images[2]; im.Remote != "" || !strings.Contains(im.Note, "outside the registry's approved scope") {
 		t.Fatalf("out-of-scope repository = %+v", im)
 	}
-	if reqs := e.reg.requests(); len(reqs) != 1 || reqs[0] != "HEAD /v2/team/app/manifests/1.0.0" {
-		t.Fatalf("registry requests = %q (only the leased manifest HEAD)", reqs)
+	wantReqs := []string{"HEAD /v2/team/app/manifests/1.0.0", "HEAD /v2/team/app/manifests/2.0.0"}
+	if reqs := e.reg.requests(); strings.Join(reqs, "|") != strings.Join(wantReqs, "|") {
+		t.Fatalf("registry requests = %q, want %q (only the leased manifest HEADs)", reqs, wantReqs)
+	}
+	// A re-render without moving the clock shows the same digests (no
+	// ResourceExhausted, no new registry request).
+	rerender, err := dockerhost.ResolvePrivateDigestsWith(ctx, hostResult, reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, i := range []int{0, 3} {
+		if im := rerender.Images[i]; im.Remote != regDigest || strings.Contains(im.Note, "rate limited") {
+			t.Fatalf("re-render image %d = %+v", i, im)
+		}
+	}
+	if n := len(e.reg.requests()); n != 2 {
+		t.Fatalf("re-render contacted the registry: %d requests", n)
+	}
+	// Without the cache the executor itself refuses the repeat read as
+	// rate limited, with its own note.
+	direct, _ := dockerhost.ResolvePrivateDigests(ctx, hostResult, srv)
+	if im := direct.Images[0]; im.Remote != "" || !strings.Contains(im.Note, "rate limited") {
+		t.Fatalf("uncached repeat read = %+v", im)
 	}
 
 	// The credential stays in the executor.

@@ -90,11 +90,26 @@ func ParseImageUpdates(result []byte) (ImageUpdates, error) {
 // Notes of images ResolvePrivateDigests handled. Fixed text: neither the
 // executor's nor the registry's words reach the page.
 const (
-	privateNoteRead     = "registry digest read by the executor (private registry); the local digest is not compared"
-	privateNoteRefused  = "private registry: no approved registry read lease covers this read, or reads are paused"
-	privateNoteOutScope = "private registry: the repository is outside the registry's approved scope"
-	privateNoteFailed   = "private registry: the executor could not read the digest"
+	privateNoteRead        = "registry digest read by the executor (private registry); the local digest is not compared"
+	privateNoteRefused     = "private registry: no approved registry read lease covers this read, or reads are paused"
+	privateNoteRateLimited = "private registry: rate limited (the lease's hourly budget or 15-minute interval is used up), retry later"
+	privateNoteOutScope    = "private registry: the repository is outside the registry's approved scope"
+	privateNoteFailed      = "private registry: the executor could not read the digest"
 )
+
+// PrivateDigestSource resolves private image digests through the executor;
+// *registrymeta.DigestReader (the server's long-lived, cached reader)
+// implements it.
+type PrivateDigestSource interface {
+	PrivateDigests(ctx context.Context, images []string) (map[string]registrymeta.PrivateDigest, map[string]error, error)
+}
+
+// uncachedSource reads every time (registrymeta.PrivateDigests).
+type uncachedSource struct{ exec registrymeta.ExecutorRegistry }
+
+func (u uncachedSource) PrivateDigests(ctx context.Context, images []string) (map[string]registrymeta.PrivateDigest, map[string]error, error) {
+	return registrymeta.PrivateDigests(ctx, u.exec, images)
+}
 
 // ResolvePrivateDigests is the server caller of private registry reads for
 // docker.check_updates (cu06 part 1, G13): every image the host reported
@@ -105,7 +120,14 @@ const (
 // and the server see only the digest. Status stays "unknown", because the
 // result carries no local digest to compare with. An error is returned only
 // when the executor's registries cannot be listed; u is then unchanged.
+// It reads every time; the server uses ResolvePrivateDigestsWith and one
+// long-lived registrymeta.DigestReader so a re-render is not rate limited.
 func ResolvePrivateDigests(ctx context.Context, u ImageUpdates, exec registrymeta.ExecutorRegistry) (ImageUpdates, error) {
+	return ResolvePrivateDigestsWith(ctx, u, uncachedSource{exec: exec})
+}
+
+// ResolvePrivateDigestsWith is ResolvePrivateDigests over src.
+func ResolvePrivateDigestsWith(ctx context.Context, u ImageUpdates, src PrivateDigestSource) (ImageUpdates, error) {
 	var ask []string
 	for _, im := range u.Images {
 		if im.Status == "unknown" && !slices.Contains(ask, im.Image) {
@@ -115,7 +137,7 @@ func ResolvePrivateDigests(ctx context.Context, u ImageUpdates, exec registrymet
 	if len(ask) == 0 {
 		return u, nil
 	}
-	got, errs, err := registrymeta.PrivateDigests(ctx, exec, ask)
+	got, errs, err := src.PrivateDigests(ctx, ask)
 	if err != nil {
 		return u, err
 	}
@@ -137,6 +159,8 @@ func ResolvePrivateDigests(ctx context.Context, u ImageUpdates, exec registrymet
 		switch {
 		case errors.Is(e, registrymeta.ErrPrivateReadRefused):
 			out.Images[i].Note = privateNoteRefused
+		case errors.Is(e, registrymeta.ErrPrivateReadRateLimited):
+			out.Images[i].Note = privateNoteRateLimited
 		case errors.Is(e, registrymeta.ErrOutOfScope):
 			out.Images[i].Note = privateNoteOutScope
 		default:

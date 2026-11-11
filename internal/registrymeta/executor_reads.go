@@ -33,9 +33,12 @@ var (
 	// registry; the host's anonymous read is the only source.
 	ErrNotPrivate = errors.New("registrymeta: the image is not on an executor private registry")
 	// ErrPrivateReadRefused: the executor refused the read (no covering
-	// lease, lease stale or expired, budget, interval, read pause, locked
-	// vault, credential rejected).
+	// lease, lease stale or expired, read pause, locked vault, credential
+	// rejected).
 	ErrPrivateReadRefused = errors.New("registrymeta: the executor refused the private registry read")
+	// ErrPrivateReadRateLimited: a lease covers the read, but its rolling-
+	// hour budget or the read's minimum interval is used up; retry later.
+	ErrPrivateReadRateLimited = errors.New("registrymeta: the private registry read is rate limited; retry later")
 	// ErrPrivateReadFailed: the executor or registry could not answer, or
 	// the answer did not validate.
 	ErrPrivateReadFailed = errors.New("registrymeta: the private registry read failed")
@@ -200,10 +203,15 @@ type PrivateDigest struct {
 // them) through the executor, one ReadPrivateRegistry tag_digest read per
 // distinct repository and tag. The map holds the images that resolved;
 // errs holds, per image on a private registry that did not resolve, the
-// reason (ErrOutOfScope, ErrPrivateReadRefused, ErrPrivateReadFailed or
-// ErrBadRef). Images on no private registry appear in neither. An error is
-// returned only when the registries cannot be listed.
+// reason (ErrOutOfScope, ErrPrivateReadRefused, ErrPrivateReadRateLimited,
+// ErrPrivateReadFailed or ErrBadRef). Images on no private registry appear
+// in neither. An error is returned only when the registries cannot be
+// listed. It reads every time; DigestReader caches answers across renders.
 func PrivateDigests(ctx context.Context, exec ExecutorRegistry, images []string) (map[string]PrivateDigest, map[string]error, error) {
+	return privateDigests(ctx, exec, images, nil)
+}
+
+func privateDigests(ctx context.Context, exec ExecutorRegistry, images []string, r *DigestReader) (map[string]PrivateDigest, map[string]error, error) {
 	if len(images) > MaxPrivateDigestImages {
 		images = images[:MaxPrivateDigestImages]
 	}
@@ -233,7 +241,11 @@ func PrivateDigests(ctx context.Context, exec ExecutorRegistry, images []string)
 		k := key{pi.registry.ID, pi.repository, pi.tag}
 		a, ok := done[k]
 		if !ok {
-			a.d, a.err = readPrivateDigest(ctx, exec, pi)
+			if r != nil {
+				a.d, a.err = r.read(ctx, exec, pi)
+			} else {
+				a.d, a.err = readPrivateDigest(ctx, exec, pi)
+			}
 			done[k] = a
 		}
 		if a.err != nil {
@@ -254,7 +266,9 @@ func readPrivateDigest(ctx context.Context, exec ExecutorRegistry, pi privateRef
 	})
 	if err != nil {
 		switch status.Code(err) {
-		case codes.PermissionDenied, codes.FailedPrecondition, codes.ResourceExhausted, codes.Unauthenticated:
+		case codes.ResourceExhausted:
+			return PrivateDigest{}, ErrPrivateReadRateLimited
+		case codes.PermissionDenied, codes.FailedPrecondition, codes.Unauthenticated:
 			return PrivateDigest{}, ErrPrivateReadRefused
 		}
 		return PrivateDigest{}, ErrPrivateReadFailed

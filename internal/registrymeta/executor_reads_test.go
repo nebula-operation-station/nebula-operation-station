@@ -49,6 +49,29 @@ type fakeExecutor struct {
 	readErr   error
 	tamper    func(*pb.ProposeReadGrantResponse)
 	proposals int
+	// canon holds each proposal's canonical document by digest; grants
+	// and listGrantsErr answer ListReadGrants.
+	canon         map[string][]byte
+	grants        []*pb.ReadGrant
+	listGrantsErr error
+}
+
+// canonical returns the canonical document of a proposed digest.
+func (f *fakeExecutor) canonical(digest string) ([]byte, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c, ok := f.canon[digest]
+	return c, ok
+}
+
+func (f *fakeExecutor) ListReadGrants(_ context.Context, in *pb.ListReadGrantsRequest, _ ...grpc.CallOption) (*pb.ListReadGrantsResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.record(in)
+	if f.listGrantsErr != nil {
+		return nil, f.listGrantsErr
+	}
+	return &pb.ListReadGrantsResponse{Grants: f.grants}, nil
 }
 
 func newFakeExecutor(now time.Time) *fakeExecutor {
@@ -83,6 +106,10 @@ func (f *fakeExecutor) ProposeReadGrant(_ context.Context, in *pb.ProposeReadGra
 		return nil, status.Error(codes.InvalidArgument, "read grant: invalid document")
 	}
 	f.proposed[digest] = doc
+	if f.canon == nil {
+		f.canon = map[string][]byte{}
+	}
+	f.canon[digest] = canon
 	out := &pb.ProposeReadGrantResponse{GrantDigest: digest, CanonicalGrant: canon,
 		ApprovalRequirement: pb.ApprovalRequirement_APPROVAL_REQUIREMENT_ASSERTION_VERIFIED,
 		RequestOptionsJson:  []byte(`{"challenge":"x"}`), ChallengeExpiryUnix: f.now.Add(5 * time.Minute).Unix()}
@@ -242,7 +269,7 @@ func TestPrivateDigestHidesExecutorText(t *testing.T) {
 		want error
 	}{
 		{status.Error(codes.PermissionDenied, "leak "+fakeSecret), ErrPrivateReadRefused},
-		{status.Error(codes.ResourceExhausted, "leak"), ErrPrivateReadRefused},
+		{status.Error(codes.ResourceExhausted, "leak"), ErrPrivateReadRateLimited},
 		{status.Error(codes.FailedPrecondition, "leak"), ErrPrivateReadRefused},
 		{status.Error(codes.Unavailable, "leak "+fakeSecret), ErrPrivateReadFailed},
 		{errors.New("leak"), ErrPrivateReadFailed},

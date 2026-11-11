@@ -7,11 +7,13 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/registrymeta"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
@@ -87,6 +89,51 @@ func TestResolvePrivateDigestsFillsOnlyPrivateUnknownImages(t *testing.T) {
 		if strings.Contains(im.Note, privSecret) {
 			t.Fatalf("executor text leaked: %q", im.Note)
 		}
+	}
+}
+
+// limitedExecutor answers every read with ResourceExhausted (budget or
+// interval used up).
+type limitedExecutor struct{ privExecutor }
+
+func (l *limitedExecutor) ReadPrivateRegistry(_ context.Context, in *pb.ReadPrivateRegistryRequest, _ ...grpc.CallOption) (*pb.ReadPrivateRegistryResponse, error) {
+	l.reads = append(l.reads, in)
+	return nil, status.Error(codes.ResourceExhausted, "read private registry: budget "+privSecret)
+}
+
+// TestResolvePrivateDigestsRateLimitedNote: a rate-limited read has its own
+// note ("rate limited, retry later"), not the no-lease note.
+func TestResolvePrivateDigestsRateLimitedNote(t *testing.T) {
+	in := ImageUpdates{Phase: "done", Images: []ImageUpdate{{Image: "registry.corp.example/team/app:1.0", Status: "unknown"}}}
+	out, err := ResolvePrivateDigests(context.Background(), in, &limitedExecutor{})
+	if err != nil || out.Images[0].Note != privateNoteRateLimited || !out.Images[0].Private || out.Images[0].Remote != "" {
+		t.Fatalf("out=%+v err=%v", out.Images[0], err)
+	}
+	if !strings.Contains(privateNoteRateLimited, "rate limited") || !strings.Contains(privateNoteRateLimited, "retry later") ||
+		privateNoteRateLimited == privateNoteRefused {
+		t.Fatalf("note = %q", privateNoteRateLimited)
+	}
+}
+
+// TestResolvePrivateDigestsWithReaderReRender: the server's long-lived
+// reader answers a re-render without moving the clock from its cache, so
+// the second render shows the digest again with no new executor read.
+func TestResolvePrivateDigestsWithReaderReRender(t *testing.T) {
+	in := ImageUpdates{Phase: "done", Images: []ImageUpdate{
+		{Image: "registry.corp.example/team/app:1.0", Status: "unknown"},
+		{Image: "registry.corp.example/team/app:2.0", Status: "unknown"},
+	}}
+	exec := &privExecutor{}
+	now := time.Unix(1_800_000_000, 0)
+	r := registrymeta.NewDigestReader(exec, func() time.Time { return now })
+	for i := range 2 {
+		out, err := ResolvePrivateDigestsWith(context.Background(), in, r)
+		if err != nil || out.Images[0].Remote != privDigest || out.Images[1].Remote != privDigest {
+			t.Fatalf("render %d: %+v %v", i, out.Images, err)
+		}
+	}
+	if len(exec.reads) != 2 {
+		t.Fatalf("reads = %d, want one per tag", len(exec.reads))
 	}
 }
 
