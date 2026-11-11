@@ -325,6 +325,28 @@ func TestCommitReportsPruneFailure(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(objectPath(dir, f.Name, stuck), "x"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// Orphans on both sides of the stuck entry in sort order: removal must
+	// go on after a failure, not stop at it.
+	orphans := []string{strings.Repeat("00", 32), strings.Repeat("ff", 32)}
+	writeOrphans := func(feed string) {
+		t.Helper()
+		for _, o := range orphans {
+			if err := os.WriteFile(objectPath(dir, feed, o), []byte("orphan"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	checkCollected := func(feed string) {
+		t.Helper()
+		objs := feedObjectFiles(t, dir)[feed]
+		for _, o := range orphans {
+			if _, ok := objs[o]; ok {
+				t.Fatalf("%s orphan %.8s kept after a failed removal", feed, o)
+			}
+		}
+	}
+	writeOrphans(f.Name)
+	m1 := sha256Hex("v1")
 	m, err := commitBytes(t, s, f, "v2", Accept{ContentDate: day2})
 	if !errors.Is(err, ErrPruneFailed) {
 		t.Fatalf("commit %v, want ErrPruneFailed", err)
@@ -334,9 +356,28 @@ func TestCommitReportsPruneFailure(t *testing.T) {
 	if lerr != nil || cur.SHA256 != sha256Hex("v2") || m.SHA256 != cur.SHA256 {
 		t.Fatalf("committed manifest %+v, loaded %+v %v", m, cur, lerr)
 	}
+	checkCollected(f.Name)
+	objs := feedObjectFiles(t, dir)[f.Name]
+	for _, keep := range []string{m.SHA256, m1, stuck} {
+		if _, ok := objs[keep]; !ok {
+			t.Fatalf("object %.8s removed", keep)
+		}
+	}
+
+	// Prune: the failing feed sorts first ("test-feed" < "zz-feed"); its
+	// failure must not stop the orphans of the other feed being collected.
+	other := testFeed(DateKindDated)
+	other.Name = "zz-feed"
+	if _, err := commitBytes(t, s, other, "z1", Accept{ContentDate: day1}); err != nil {
+		t.Fatal(err)
+	}
+	writeOrphans(f.Name)
+	writeOrphans(other.Name)
 	if err := s.Prune(); !errors.Is(err, ErrPruneFailed) {
 		t.Fatalf("prune %v, want ErrPruneFailed", err)
 	}
+	checkCollected(f.Name)
+	checkCollected(other.Name)
 }
 
 func TestSyncReportsPruneFailure(t *testing.T) {
