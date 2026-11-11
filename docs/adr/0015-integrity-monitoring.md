@@ -1,8 +1,10 @@
 # ADR 0015: Integrity monitoring for NOS itself and for managed hosts
 
-Status: **proposed, 2026-11-11**. Awaiting the maintainer's answers to the
-open questions below. Nothing here is implemented; every path, unit name and
-package below is to be *verified* in the ticket that implements it.
+Status: **Accepted, 2026-11-11** (previously: proposed, awaiting the
+maintainer's answers to the open questions). The maintainer accepted the
+recommendations to Q1–Q6; see "Maintainer decisions 2026-11-11". Nothing
+here is implemented; every path, unit name and package below is to be
+*verified* in the ticket that implements it.
 
 ## Context
 
@@ -97,10 +99,27 @@ named in the handbook next to every "no unexpected change" result:
   corruption, and the audit log only what it records.
 - **Unwatched host paths.** Everything outside the D5 roots: `/var`
   (except the crontab spool), `/srv`, `/home` and `/root` except
-  `authorized_keys*` (so shell start files such as `~/.bashrc`,
+  `authorized_keys*` and the other SSH login files of D9 (so shell start files such as `~/.bashrc`,
   `~/.profile` and per-user systemd units under `~/.config/systemd/`),
-  `authorized_keys` of service accounts whose home is under `/var`,
-  `/srv` or `/opt` outside the scanned `/opt` tree, `at` job spools,
+  `authorized_keys` and other SSH login files (D9 "SSH login files") of
+  service accounts whose home is under `/var`, `/srv` or `/opt` outside
+  the scanned `/opt` tree, SSH login files that the SSH configuration
+  names by an absolute path outside the D5 roots, or by a
+  `TrustedUserCAKeys` or `RevokedKeys` value that sshd resolves
+  daemon-wide to such a path (D7) (not scanned, but each
+  such directive opens an "SSH login file outside the scanned roots"
+  finding, D9), files that an `AuthorizedKeysCommand` or
+  `AuthorizedPrincipalsCommand` program reads or runs (only the program
+  itself is critical-class), `at` job spools,
+  and the files that sshd follows a symlink to outside the scanned roots
+  or into unrecorded, excluded or skipped parts of them (each symlink at or above an SSH position is critical-class and
+  opens the same finding, D9), the configuration and login files that
+  sshd's command line names with `-f` or `-o` (the sources of that
+  command line, `/etc/default/ssh` and the sshd units and drop-ins in
+  every scanned systemd unit search path, are critical-class, but the
+  executor does not parse them, D9), sshd units and drop-ins in the
+  systemd search paths under `/run` (runtime, transient and generated
+  units),
   `/tmp`, `/dev/shm`, `/run`, `/etc/pve` (excluded by design, D5; Q1),
   container images and
   volumes. Under `/usr`, only the D5 roots are watched: **`/usr/share`
@@ -109,6 +128,26 @@ named in the handbook next to every "no unexpected change" result:
   packages' helper scripts; nor are `/usr/local/share`,
   `/usr/local/etc`, `/usr/local/include`, `/usr/include`, `/usr/src` and
   `/usr/games`. Persistence placed there is not seen by I2.
+- **Login-relevant files that are not critical-class.** D9 "SSH login
+  files" makes every file that sshd reads to grant a login
+  critical-class, plus PAM, the account files, `/etc/nsswitch.conf`,
+  `/etc/krb5.keytab` and `/etc/krb5.conf` (critical-class, previously
+  listed here as non-critical; sshd's GSSAPI code reads it directly).
+  Files that `/etc/krb5.conf` includes (`include`, `includedir`) and
+  files that the PAM or NSS modules themselves read
+  are not derived and stay ordinary `/etc` or `/usr/lib` entries (high
+  findings, approvable in the browser): for example `/etc/sssd/`, LDAP
+  client configuration, the `libnss_*` modules and any
+  data file a module reads outside `/etc/pam.d/` and `/etc/security/`
+  (both critical-class). A changed NSS source named in
+  `/etc/nsswitch.conf` is critical; a change inside that source's own
+  configuration is not. Likewise, hostbased trust (`/etc/hosts.equiv`,
+  `shosts.equiv`, `.shosts`, `.rhosts`, all critical-class) names hosts,
+  and sshd maps the client's address to a host name through
+  `/etc/hosts`, `/etc/host.conf`, `/etc/resolv.conf` and DNS; these
+  name-resolution sources are not critical-class, so on a host with
+  `HostbasedAuthentication yes` a browser-approved `/etc/hosts` change
+  can make another address count as a trusted host.
 - **Default exclusions that affect what runs.** D5 excludes Python
   `__pycache__` bytecode at any depth under `/usr/lib/python3*` and
   `/usr/local/lib/python3*`, which the interpreter executes instead of
@@ -128,9 +167,13 @@ named in the handbook next to every "no unexpected change" result:
   and opens a finding; it is never silently treated as covered. The
   mount list comes from the host, so a root attacker can hide a mount
   (threat model). On vfat, owner and mode come from mount options, so
-  under a vfat `/boot/efi` root only content, size, type and presence
-  are compared (D5); owner and mode changes there, including those from
-  changed mount options, open no finding.
+  under a vfat `/boot/efi` root owner and permission-bit changes,
+  including those from changed mount options, open no finding (D5);
+  content, size, type, presence and the setuid, setgid and sticky bits
+  are still compared. The file-system type is reported by the host: a
+  host that already reported `vfat` at its first approved scan keeps
+  the relaxation, and a later change of the reported type is a critical
+  finding (D5).
 - **Between scans.** A change that is reverted before the next scan is
   missed (threat model). Incremental runs hash only files whose `ctime`
   or `mtime` falls in the look-back window, and files larger than
@@ -476,17 +519,17 @@ following symlinks; final list is Q1):
 | Executables and libraries | `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/libexec` (with `/bin`, `/sbin`, `/lib` recorded as the usrmerge symlinks they should be) |
 | Local software | `/usr/local/bin`, `/usr/local/sbin`, `/usr/local/lib`, `/opt` (none of these is package-owned, so they are always compared against the baseline; `/usr/local/{bin,sbin}` come before `/usr/{bin,sbin}` in the default `PATH`, so a new file there that shadows a system command name is critical, D9) |
 | systemd units | `/usr/lib/systemd/system`, `/etc/systemd/system`, user units under `/etc/systemd/user` |
-| SSH access | `/root/.ssh/authorized_keys*`, `/home/*/.ssh/authorized_keys*`, plus any path named by an `AuthorizedKeysFile` directive found in `/etc/ssh/sshd_config` and its includes, limited to the roots above and `/home/*/` |
+| SSH access | `/root/.ssh/authorized_keys*`, `/home/*/.ssh/authorized_keys*`, the home-relative fixed SSH login files of D9 (`.shosts`, `.rhosts`, `.k5login`, `.ssh/known_hosts`, `.ssh/known_hosts2`) under `/root/` and `/home/*/`, every symlink among the home directories and their `.ssh` directories (recorded, never followed), plus every path that a login-granting directive (D9 "SSH login files": `AuthorizedKeysFile`, `AuthorizedPrincipalsFile`, `TrustedUserCAKeys`, `RevokedKeys`, the program of `AuthorizedKeysCommand` and `AuthorizedPrincipalsCommand`) found in `/etc/ssh/sshd_config` and its includes names, limited to the roots above and `/home/*/`. A target that can lie outside these roots is not scanned; the executor reports it as "SSH login file outside the scanned roots" (D7, D9) and names it in "Honest limits" |
 | Scheduled jobs | `/etc/crontab`, `/etc/cron.*/`, `/var/spool/cron/crontabs/`, systemd timers (covered by the unit roots) |
-| EFI system partition | `/boot/efi` as its **own root** when it is a mount point (UEFI hosts); otherwise it is ordinary `/boot` content. On vfat, owner, mode and `ctime` come from mount options, so every file under it is hashed in every run, incremental too (the partition is small), and for entries under a `/boot/efi` root whose type in the D6 mounts array is `vfat` only type, size, content hash, symlink target and presence are compared; owner and mode are recorded as context and never open a finding (D9) |
+| EFI system partition | `/boot/efi` as its **own root** when it is a mount point (UEFI hosts); otherwise it is ordinary `/boot` content. On vfat, owner, mode and `ctime` come from mount options, so every file under it is hashed in every run, incremental too (the partition is small), and for entries under a `/boot/efi` root whose type in the D6 mounts array is `vfat` only type, size, content hash, symlink target, presence and the setuid, setgid and sticky bits are compared; owner and the permission bits (`0777`) are recorded as context and never open a finding (D9). **Precedence:** this relaxation never covers the setuid, setgid and sticky bits: vfat cannot store them, so a reported setuid or setgid bit under `/boot/efi` is a new setuid/setgid bit and always critical (D9). **The type is host-reported and untrusted:** the relaxation applies only when `/boot/efi` is a covered root (D5 "Separate mounts below a root") and both the approved baseline and the run report `vfat` for it; the reported type is recorded in the baseline as part of the `/boot/efi` root, and a change of it (for example `ext4` to `vfat`) is a change of a critical-class path, in which run the relaxation is not applied |
 
 **Optional roots.** Each root in the approved profile carries a fixed
 `optional` flag (part of the profile, never taken from the host). In
 `fim-default-v1` exactly these roots are optional: `/boot/efi` (BIOS
 hosts), `/opt`, `/usr/libexec`, `/etc/systemd/user` and
 `/var/spool/cron/crontabs`; the `authorized_keys*` globs under
-`/root/.ssh` and `/home/*/.ssh` and the `AuthorizedKeysFile` targets
-may match nothing. A missing optional root is recorded as **absent**
+`/root/.ssh` and `/home/*/.ssh`, the other home-relative SSH login
+files and the `AuthorizedKeysFile` targets may match nothing. A missing optional root is recorded as **absent**
 in the run summary and does not make the run partial; if the approved
 baseline holds entries under it, they are reported as removed like any
 other absent path. A missing root that is not optional makes the run
@@ -553,8 +596,8 @@ parser is strict, bounded and fuzzed before the beta.
   each with its `path` (same rules as a record path), at most 64 files
   and 256 KiB decoded in total per run. The executor parses it in
   memory to derive the critical-class set of D7 "The executor
-  classifies, from its own data" and the D5 `AuthorizedKeysFile` paths
-  and keeps only that derived path set; the content itself is never
+  classifies, from its own data" and the D5 SSH login file paths (D9
+  "SSH login files") and keeps only that derived path set; the content itself is never
   persisted, logged or forwarded (the files' content hashes are keyed
   like all of `/etc`). The script sends this array and hashes every file
   in it in **every** run, incremental runs included (the files are
@@ -564,7 +607,17 @@ parser is strict, bounded and fuzzed before the beta.
   file an `Include` names or matches is in the array: an `Include` whose
   path or glob reaches outside the profile roots (no file record can
   exist there) or matches a recorded file that the array leaves out
-  makes the array inconsistent. A missing, oversized or inconsistent
+  makes the array inconsistent. Both checks resolve paths component by
+  component against the run's records (D9 "Symlinks at or above SSH
+  positions"), never lexically: a symlink record at or above
+  `/etc/ssh/sshd_config` or at or above any path an `Include` names or
+  matches (for example `/etc/ssh/sshd_config.d` replaced by a symlink) is
+  followed, and the files below its resolved target are what the
+  `Include` matches. A symlink there that cannot be resolved within the
+  run's records (a target outside the scanned roots, a loop, the link
+  limit, a missing record) makes the array inconsistent **even when no
+  record lies below it**, because the files sshd reads behind it are not
+  in the run, and opens the D9 finding. A missing, oversized or inconsistent
   array makes the run partial; a partial run supplies no derived set and
   replaces no retained records, so D7 keeps classifying with the latest
   complete run and the approved baseline.
@@ -724,7 +777,8 @@ roles never mix:
      archive references are they checked against the archive
      independently of the first scan.
    - **Approval.** The admin approves a baseline (initial or updated) by
-     digest, with the same assertion as D3 (challenge domain
+     digest (the initial one only in the executor-local CLI, below), with
+     the same assertion as D3 (challenge domain
      `nebula-fim-baseline-v1`). The signed challenge binds the host ID,
      the currently approved digest the proposal was built on and the new
      executor-computed digest, so an approval cannot be applied to
@@ -749,17 +803,70 @@ roles never mix:
      builds it as the approved list plus exactly one added, changed or
      removed entry, and `approve` rejects a digest whose difference from
      the approved baseline has more than one entry when any of them is
-     critical-class. `pending` only lists proposed digests and approves
-     nothing. `approve` itself, whatever the source of the digest the
-     admin passes (typed, pasted from `pending` or from the browser),
-     renders **every** entry in which that digest differs from the
-     approved baseline (which for such a digest is that one entry) from
-     the executor's own retained records (old and new values, escaped as
-     in D6 "Display", so no host byte reaches the terminal as a control
-     sequence) and then asks for an interactive confirmation on the
-     terminal; it approves only after that confirmation, has no flag
-     that skips it, and refuses when stdin is not a terminal. So the CLI
-     never approves an entry it did not show. The executor rejects a browser
+     critical-class (the initial baseline is the one exception, below).
+     **The executor keeps every proposal it computes.** For each
+     proposed digest it stores, in executor-owned storage, the previous
+     approved digest the proposal was built on, the run ID of the
+     retained records it took the values from, and every entry in which
+     the proposal differs from that previous baseline with its old and
+     new values (the old values from the digest-checked approved list,
+     the new values copied from the retained run when the proposal was
+     built), and the derived set (d) of that run (below). A newer run that replaces the retained records does not
+     change a stored proposal. **The proposal store is bounded** (new
+     named constants, fixed in IG-05): at most **16** stored proposals
+     per host, of which at most **one** initial proposal (a new initial
+     proposal replaces the stored one); a stored proposal expires
+     **7 days** after the executor built it (executor clock); and when a
+     baseline approval stores a new approved digest, the executor deletes
+     every stored proposal of that host whose previous digest is no
+     longer the approved digest (they could never be approved). The store
+     is also bounded **in bytes**, measured as the stored encoding of the
+     difference entries (path, old and new values) plus the stored derived
+     set: one non-initial proposal at most **16 MiB**
+     (`maxProposalBytes`), the initial proposal at most **128 MiB**
+     (`maxInitialProposalBytes`, the D6 per-run document limit, since it
+     holds exactly one run), and all stored proposals of one host
+     together at most **256 MiB** (`maxProposalStoreBytesPerHost`), and
+     all stored proposals of all hosts together, initial ones included,
+     at most **2 GiB** (`maxProposalStoreBytes`), so a compromised server
+     cannot fill executor storage with hosts × 256 MiB or with an initial
+     proposal for every host without a baseline. The
+     executor refuses to build a proposal that would exceed its own limit
+     (the admin approves the change in smaller batches; an initial run
+     over the limit cannot be proposed and the admin is told so). When the
+     per-host count or byte cap would be exceeded, a new proposal evicts
+     the oldest non-initial ones of that host until it fits; when the
+     executor-wide cap would be exceeded, it evicts the oldest non-initial
+     proposals of any host until it fits, and if it still does not fit
+     (initial proposals are never evicted by another host's request) it
+     refuses the request and the admin is told so; an evicted or expired
+     proposal is refused by `approve` like an unknown digest, and the
+     admin requests a new one. **Proposal requests are rate-limited**:
+     the executor builds at most **30** new proposals per host per hour
+     (`maxProposalsPerHostHour`, sliding window, executor clock) and
+     refuses further requests without evicting anything. A compromised
+     server can therefore make the executor discard pending proposals, at
+     most at that rate, but never store more than the caps, never make it
+     recompute digests faster than that, and never approve anything. `pending` only lists stored proposed
+     digests and approves nothing. `approve` itself, whatever the source
+     of the digest the admin passes (typed, pasted from `pending` or from
+     the browser), refuses a digest for which it holds no stored
+     proposal, refuses when the executor's current approved digest is not
+     the proposal's previous digest (the baseline changed meanwhile; the
+     admin needs a new proposal), and otherwise renders **every** entry
+     of that stored proposal's difference (which for such a digest is
+     that one entry), with its old and new values, from the stored
+     proposal itself and never from the current retained records
+     (escaped as in D6 "Display", so no host byte reaches the terminal as
+     a control sequence), together with the host ID and both digests. It
+     then asks for an interactive confirmation on the terminal; it
+     approves only after that confirmation, has no flag that skips it,
+     and refuses when stdin is not a terminal. On confirmation it checks
+     the previous digest again and, in one step, stores exactly the
+     digest of the list it rendered (the approved list plus that stored
+     difference) as the new approved digest. So the CLI never approves an
+     entry it did not show, and never shows values other than the ones
+     the digest approves. The executor rejects a browser
      assertion for a digest whose difference from the approved baseline
      adds, changes or removes a critical-class entry; unchanged
      critical-class entries carried over from the approved baseline (for
@@ -767,6 +874,27 @@ roles never mix:
      browser approval. Recovery mode cannot approve either way. Browser
      approval remains for entries that are not critical-class, with the
      limit named in "Honest limits".
+     - **Initial baseline.** While the executor holds no approved digest
+       for a host, the "one entry" rule cannot apply: the first complete
+       run holds thousands of critical-class entries (all of `/boot`,
+       every systemd unit, every setuid file). The initial proposal is
+       therefore the executor's whole retained complete run and nothing
+       else: the server names no paths for it and cannot add, drop or
+       change an entry, and its stored previous digest is "none". It is
+       approved only with `nebula integrity approve --initial <host>
+       <digest>` in the executor-local CLI, never in the browser (it
+       always contains critical-class entries). `--initial` is refused
+       when the executor already holds an approved digest for the host,
+       and a digest without `--initial` is refused while it holds none.
+       The CLI first shows the "trust on first scan" warning, the host
+       ID, the run ID, the digest and the number of entries per D9 class,
+       then **every critical-class entry** (escaped as above, paged on
+       the terminal), and asks the admin to confirm by typing the host ID;
+       it has no flag that skips the listing or the confirmation and
+       refuses when stdin is not a terminal. Entries that are not
+       critical-class are counted, not listed. The approval stores the
+       digest and, since the whole SSH configuration then comes from one
+       run, that run's derived set (d) (below).
    - **The executor classifies, from its own data.** Whether an entry is
      critical-class is decided by the executor, never by the server: a
      server-supplied class or label is at most compared and never makes
@@ -775,13 +903,21 @@ roles never mix:
      baseline) and new record (its own retained run) of the entry, for the
      setuid/setgid rule, (c) the command names in `/usr/bin` and
      `/usr/sbin`, for the shadowing rule, and (d) the set of
-     `sshd_config` includes and `AuthorizedKeysFile` targets that it
-     derives itself from D6 "SSH configuration" records. Item (a)
+     `sshd_config` includes and SSH login file targets (D9 "SSH login
+     files": `AuthorizedKeysFile`, `AuthorizedPrincipalsFile`,
+     `TrustedUserCAKeys`, `RevokedKeys` and the `AuthorizedKeysCommand`
+     and `AuthorizedPrincipalsCommand` programs) that it derives itself
+     from D6 "SSH configuration" records. Item (a)
      includes, independent of any `sshd_config`, every file whose name
      begins with `authorized_keys` anywhere in the scanned paths (D5,
      including `/root/.ssh` and `/home/*/.ssh`) and every path ending in `/.ssh/authorized_keys` or
      `/.ssh/authorized_keys2`, so every real `authorized_keys` file is
-     critical-class whatever `AuthorizedKeysFile` says.
+     critical-class whatever `AuthorizedKeysFile` says, and likewise the
+     fixed SSH login files of D9 (hostbased trust, `known_hosts`,
+     `.k5login`, `/etc/krb5.keytab`, `/etc/krb5.conf` and the account
+     files), whatever
+     `HostbasedAuthentication` or `GSSAPIAuthentication` say, and the
+     sshd command-line configuration sources of D9.
      - **Derived sets only grow until a change is approved.** The sets
        for (c) and (d) are each the **union** of the set derived from the
        approved baseline and the set derived from the latest complete
@@ -789,20 +925,75 @@ roles never mix:
        approved list (digest-checked, below) and in the executor's
        retained run. For (d), the executor never keeps SSH configuration
        content (D6), so it stores, next to the approved baseline digest,
-       the derived path set of the run from which the approved baseline's
-       current `sshd_config` and include entries were taken, and replaces
-       it only when a baseline approval makes the run's SSH configuration
-       entries the approved ones (a critical-class CLI approval). A
-       pending `sshd_config` change or a removed `/usr/bin` command
-       therefore never makes an entry non-critical; the smaller set takes
-       effect only after the admin approved that change in the CLI. Before
-       the first approved baseline, the run's set alone is used.
+       an approved derived set S and changes it only on a baseline
+       approval, by this rule. Let R be the complete run the approved
+       proposal was built from (its run ID and derived set are stored
+       with the proposal, above). R's SSH configuration array (D6) holds
+       `/etc/ssh/sshd_config` and every file it includes, checked for
+       consistency. A derived set holds the `Include` values (paths and
+       globs, as written, resolved against `/etc/ssh` like sshd does) as
+       well as the files they matched and the SSH login file targets.
+       The **SSH configuration entries** of a baseline are its entries for
+       `/etc/ssh/sshd_config` and for every path that an `Include` value
+       in S or in R's derived set names or matches. S is **replaced** by
+       R's derived set only when all three conditions hold:
+
+       1. the approval is an executor-local CLI approval
+          (`nebula integrity approve`, including `--initial`); a browser
+          approval never replaces S, it only unites S with R's set;
+       2. for **every** path in R's SSH configuration array, the newly
+          approved baseline holds an entry equal to R's record of that
+          path (type and content hash); and
+       3. the reverse: the newly approved baseline holds **no** SSH
+          configuration entry whose path is not in R's array. So an
+          approved include that R no longer has (for example
+          `sshd_config.d/z.conf`, deleted on the host but its removal not
+          yet approved) blocks the replacement.
+
+       Then the approved SSH configuration is exactly R's, file for file
+       in both directions, so R's derived set is exactly the set of the
+       approved configuration. In every other case, in particular a
+       browser approval, an approval that takes `sshd_config` but not a
+       changed include from R (or the reverse, one CLI approval at a
+       time), an approval while an include R names is still missing from
+       the baseline or while the baseline still holds an include R does
+       not have, and a baseline whose SSH configuration entries were taken
+       from another run with different content, S becomes the **union** of
+       S and R's derived set and never shrinks. So the set shrinks only
+       when the approved baseline holds the whole SSH configuration of one
+       run and nothing else; after one-entry CLI approvals of a
+       multi-file change (adding, changing and removing includes), that is
+       the last of them, provided the entries approved earlier still equal
+       that run's records. If a newer run changed one of them in between,
+       the condition fails and S stays the larger union until the admin
+       has approved the whole configuration of one run in the CLI, which
+       only over-classifies. Classification keeps using the union of S and
+       the latest complete run's set, as stated above. A pending
+       `sshd_config` change, a deleted include or a removed `/usr/bin`
+       command therefore never makes an entry non-critical; the smaller
+       set takes effect only after the admin approved the whole change in
+       the CLI. Before the first approved baseline, the run's set alone is
+       used; the initial approval (above) sets S to the initial run's
+       derived set.
+     - **Derived-set limit.** S, and the derived set of any one run, holds
+       at most **4,096** values (`Include` values, matched files and SSH
+       login file targets together; new named constant, fixed in IG-05).
+       A run whose derived set would exceed it supplies no usable derived
+       set (below). When a union would make S exceed it, the executor
+       marks S **overflowed** instead of dropping values: while S is
+       overflowed, every entry that a proposed digest of that host adds,
+       changes or removes is unclassifiable and therefore critical-class
+       (each needing its own CLI approval). Only a replacement under the
+       three conditions above clears the mark.
      - **`AuthorizedKeysFile` expansion.** The executor parses `Include`
-       and `AuthorizedKeysFile` directives (including those inside `Match`
-       blocks); without an `AuthorizedKeysFile` directive it uses the
+       and every SSH login file directive of D9 (including those inside
+       `Match` blocks). It expands the **per-user** values
+       `AuthorizedKeysFile` and `AuthorizedPrincipalsFile` as follows;
+       without an `AuthorizedKeysFile` directive it uses the
        OpenSSH default `.ssh/authorized_keys .ssh/authorized_keys2`.
-       `%h` expands to a whole home directory, and a value that does not
-       start with `/` or `%h` is relative to the home directory. Because
+       `%h` expands to a whole home directory, a leading `~` or `~name`
+       is a home directory like `%h`, and any other value that does not
+       start with `/` is relative to the home directory. Because
        the host's passwd entries are untrusted and homes may lie anywhere
        (`/root`, `/home/alice`, service homes under `/var`), the executor
        does not resolve homes: it matches `%h` and the implied home
@@ -812,13 +1003,31 @@ roles never mix:
        covers `/root/.config/keys` and `/var/lib/svc/.config/keys`, and
        `/etc/ssh/authorized_keys/%u` covers every file in that directory.
        Over-matching only makes more entries critical-class, never fewer.
+     - **`TrustedUserCAKeys` and `RevokedKeys` are daemon-wide.** sshd
+       reads these two values as daemon paths, not per user, and the
+       executor resolves them exactly like sshd, **not** like
+       `AuthorizedKeysFile`: no `%` token is expanded (a `%` is a literal
+       character); a leading `~` or `~/` is root's home `/root` (sshd runs
+       as root), and a `~name` form, which sshd resolves through the
+       host's untrusted passwd data, is unclassifiable (below); a value
+       that does not start with `/` is relative to sshd's working
+       directory, which is `/`, so the executor prefixes `/` to it. So
+       `TrustedUserCAKeys etc/ssh/ca.pub` names `/etc/ssh/ca.pub`, which
+       is then classified as an SSH login file (critical-class) and, like
+       any absolute value, checked against the scanned roots (D9 "SSH
+       login file outside the scanned roots"); it never names a file
+       below a home.
      - **Unclassifiable means critical.** When the executor cannot
        classify an entry with certainty (no usable derived set, a parse
        failure, a limit hit, a directive, value or token it does not
-       understand, an `AuthorizedKeysFile` value it cannot expand as
-       above, an `Include` that names or matches a file outside the
-       profile roots or a file that is not in the run's SSH configuration
-       array, D6), it treats the entry as critical-class. If it lacks a
+       understand, an SSH login file value it cannot expand as
+       above, a command program path that is not absolute, contains a
+       `%` token or is quoted or escaped (D9 "SSH login files"), a symlink
+       at or above an SSH position it cannot resolve (D9), an
+       overflowed or oversized derived set (above), an `Include` that
+       names or matches a file outside the profile roots or a file that
+       is not in the run's SSH configuration array, D6), it treats the
+       entry as critical-class. If it lacks a
        usable derived set for a host from the latest complete run, it
        treats **every** entry that a proposed digest of that host adds,
        changes or removes as critical-class (each needing its own CLI
@@ -1040,19 +1249,203 @@ Consequently, before Q6 every package file changed by a NOS apt job is an
 unverified finding the admin must review.
 
 **Critical-class paths.** These are: `authorized_keys*` files and every
-`AuthorizedKeysFile` target (D5 "SSH access", expanded as in D7 "The
-executor classifies, from its own data"), `/etc/sudoers` and `/etc/sudoers.d/`, PAM configuration
-(`/etc/pam.d/`, `/etc/security/`) and PAM modules (`pam_*.so`),
-`/etc/ssh/sshd_config` and its includes, `/etc/ld.so.preload`, systemd
+SSH login file (below, including hostbased trust files, `known_hosts`,
+`.k5login`, `/etc/krb5.keytab`, `/etc/krb5.conf`, `/etc/passwd`,
+`/etc/shadow`,
+`/etc/group`, `/etc/gshadow`, `/etc/nsswitch.conf` and symlinks at or
+above SSH positions), `/etc/sudoers` and `/etc/sudoers.d/`, PAM
+configuration (`/etc/pam.d/`, `/etc/security/`) and PAM modules
+(`pam_*.so`), `/etc/ssh/sshd_config` and its includes, the sshd
+command-line configuration sources (below), `/etc/ld.so.preload`, systemd
 units, drop-ins and timers under the D5 unit roots, crontabs and the
 crontab spool, every file under `/boot` (under a vfat `/boot/efi` root,
-D5, only its type, size, content, symlink target and presence are
-compared, so owner and mode changes there never open a finding), the
+D5, owner and permission-bit changes never open a finding; the setuid,
+setgid and sticky bits and the reported file-system type are still
+compared, D5), the
 SSH daemon and its helpers
 (`/usr/sbin/sshd`, `/usr/lib/openssh/`), `sudo` and `su`, the dynamic
 loader (`ld-linux*`), every file in `/usr/local/bin` or `/usr/local/sbin`
 whose name shadows a command in `/usr/bin` or `/usr/sbin`, and every file
-that has a setuid or setgid bit before or after the change. For them:
+that has a setuid or setgid bit before or after the change.
+
+**SSH login files.** Every file that sshd reads or runs to decide whether
+a login is granted is critical-class, so none of them can be approved in
+the browser. These are the targets of these directives in
+`/etc/ssh/sshd_config` and its includes, including inside `Match`
+blocks, expanded as in D7 "`AuthorizedKeysFile` expansion" (per-user
+values) and D7 "`TrustedUserCAKeys` and `RevokedKeys` are daemon-wide":
+
+- `AuthorizedKeysFile` (default `.ssh/authorized_keys
+  .ssh/authorized_keys2`): adds keys;
+- `AuthorizedPrincipalsFile`: names the certificate principals that may
+  log in as a user;
+- `TrustedUserCAKeys`: a CA key there makes every certificate it signs a
+  valid login key, for any user whose principals it names;
+- `RevokedKeys`: removing a key from it re-enables that key;
+- `AuthorizedKeysCommand` and `AuthorizedPrincipalsCommand`: the program
+  (the first word of the value, which sshd requires to be an absolute
+  path) decides which keys or principals are accepted.
+
+In addition, these files are SSH login files by fixed path pattern (D7
+item (a)), whatever the SSH configuration says, because sshd, its PAM
+stack or its authentication methods read them to grant a login:
+
+- hostbased and rhosts trust: `/etc/hosts.equiv`,
+  `/etc/ssh/shosts.equiv`, and every path ending in `/.shosts` or
+  `/.rhosts`;
+- host keys trusted for hostbased login: `/etc/ssh/ssh_known_hosts`,
+  `/etc/ssh/ssh_known_hosts2`, and every path ending in
+  `/.ssh/known_hosts` or `/.ssh/known_hosts2`;
+- GSSAPI/Kerberos: every path ending in `/.k5login` (principal
+  mapping), `/etc/krb5.keytab` (the host service key sshd accepts
+  tickets with; whoever replaces it can forge tickets that log in through
+  `.k5login` or the default principal mapping) and `/etc/krb5.conf`,
+  which sshd's GSSAPI code reads directly (its `auth_to_local` rules map
+  principals to accounts, `default_keytab_name` can point away from
+  `/etc/krb5.keytab`). Files that `/etc/krb5.conf` pulls in with
+  `include` or `includedir` are not derived, a named limit ("Honest
+  limits");
+- account and name-service data: `/etc/passwd`, `/etc/shadow`,
+  `/etc/group`, `/etc/gshadow` and `/etc/nsswitch.conf` (a new UID-0
+  account, a changed password hash, shell or home, or a changed
+  name-service source can each grant a login).
+
+The home-relative files are scanned under `/root` and `/home/*/` (D5);
+the `/etc` files are under the `/etc` root.
+
+**sshd command-line configuration sources.** sshd's command line can
+replace or extend `/etc/ssh/sshd_config` (`-f <file>`, `-o
+<directive>=<value>`, for example `-o AuthorizedKeysFile=/srv/k/%u`).
+On the supported distributions that command line comes from
+`/etc/default/ssh` (`SSHD_OPTS`) and from the units that start sshd
+(`ssh.service`, `ssh@.service`, `ssh.socket`, `sshd.service` and their
+drop-ins). `/etc/default/ssh` is critical-class by fixed path (D7
+item (a)). The sshd units are critical-class by fixed pattern too (D7
+item (a)), **in every systemd system unit search path, independent of
+the D5 unit roots**: in `/etc/systemd/system`,
+`/etc/systemd/system.control`, `/etc/systemd/system.attached`,
+`/usr/local/lib/systemd/system`, `/usr/lib/systemd/system` and
+`/lib/systemd/system` (the usrmerge path, D5), every entry named
+`ssh.service`, `ssh@.service`, `ssh.socket`, `sshd.service`,
+`sshd@.service` or `sshd.socket` (including enablement and alias links
+of those names in `*.wants/` and `*.requires/` directories), and every
+entry in a drop-in directory that applies to one of them
+(`<unit>.d/` for each of these names, `ssh@<instance>.service.d/`,
+`sshd@<instance>.service.d/`, and the type-wide `service.d/` and
+`socket.d/`). So a drop-in such as
+`/usr/local/lib/systemd/system/ssh.service.d/opts.conf`, which systemd
+loads although `/usr/local/lib/systemd/system` is scanned only as part
+of the `/usr/local/lib` root, is critical. The search paths under `/run`
+(`/run/systemd/system`, `/run/systemd/transient`, the generator
+directories and their `.control` and `.attached` variants) are not
+scanned (D5 excludes `/run`), a named limit ("Honest limits"). The
+executor does **not** parse `SSHD_OPTS` or
+`ExecStart` lines, so `-f` and `-o` targets are not derived: a change
+that adds such an option is critical and needs its own CLI approval,
+but the files it names are classified only by the fixed patterns, a
+named limit ("Honest limits").
+
+A value of `none` names no file. The executor takes the program of an
+`AuthorizedKeysCommand` or `AuthorizedPrincipalsCommand` value only when
+the value contains no quote character (`"` or `'`) and no backslash, so
+that a split at the first space or tab is exactly what sshd runs; a
+value with a quote or a backslash anywhere (sshd's quoting and escape
+rules could make the program path differ from the naive first word), a
+program path that is not absolute or contains a `%` token, and any other
+value the executor cannot expand, is unclassifiable and handled as in D7
+"Unclassifiable means critical".
+
+**Symlinks at or above SSH positions.** The scan never follows
+symlinks (D5), so the file sshd actually reads may sit behind one. One
+general rule covers this: **any symlink at or above a position that
+sshd reads configuration or login data from is critical-class, and
+opens an "SSH login file outside the scanned roots" finding if it
+leaves the scanned roots.** An **SSH position** is:
+
+- a **configuration position**: `/etc/ssh/sshd_config`, every path that
+  an `Include` value (in S or in the run's derived set, D7) names or
+  matches, and every sshd command-line configuration source (above);
+- a **login file position**: every path that an SSH login file pattern
+  (fixed or derived) matches;
+
+and every directory **at or above** such a path, whether the pattern
+names it literally or matches it with a token or glob (for example
+`/etc`, `/etc/ssh` and `/etc/ssh/sshd_config.d` for `Include
+/etc/ssh/sshd_config.d/*.conf`; `/etc/ssh/ak` and every `/etc/ssh/ak/<x>`
+directory for `AuthorizedKeysFile /etc/ssh/ak/%u/keys`, since `%u`
+matches any single component; `/root`, `/home`, `/home/<name>`, every
+directory that `%h` or the implied home prefix matches, and the `.ssh`
+directory below it, for the home-relative patterns). Matching uses D7
+"`AuthorizedKeysFile` expansion" for the per-user values and the D7
+daemon-wide rule for `TrustedUserCAKeys` and `RevokedKeys` (so
+`TrustedUserCAKeys etc/ssh/ca.pub` makes `/`, `/etc`, `/etc/ssh` and
+`/etc/ssh/ca.pub` SSH positions), so it over-matches rather than
+under-matches. Whenever the old or new record at an SSH position is a
+symlink (or, for a file position, any type other than `file`):
+
+- the symlink entry itself is critical-class; and
+- the executor resolves it as the kernel does and classifies the
+  resolved path, and for a directory position every entry below the
+  resolved directory that the rest of the pattern matches, as SSH login
+  files or SSH configuration files, so they are critical-class too.
+
+**Resolution is component by component, never lexical.** The executor
+walks the path from `/` one component at a time against one record set:
+a **new** record (latest run) is resolved against that run's records,
+an **old** record (approved baseline) against the digest-checked
+approved baseline list (D7), each on its own; if either resolution
+fails, the entry is handled as below. A `.` is dropped; a `..` moves to
+the parent of the directory reached **so far**, that is, after every
+symlink before it has been followed (so `/etc/ssh/l/../x`, with `l` a
+symlink to `/srv/a/b`, resolves via `/srv/a/x`, not `/etc/ssh/x`), and
+a `..` at `/` stays at `/`; a component whose record is a symlink is
+replaced by its target (an absolute target restarts at `/`, a relative
+one continues from the link's directory) before the next component is
+taken. As in the kernel, resolution **fails** when a component that is
+followed by another component, or by a trailing slash, is neither a
+directory nor a symlink to one (ENOTDIR), when a symlink target is
+empty (ENOENT), when the path still to be resolved, target included,
+grows beyond 4,096 bytes (ENAMETOOLONG; the D6 record path limit), or
+when a path ends in a trailing slash but resolves to something other
+than a directory.
+At most **40** symlinks are followed per resolution (the Linux limit;
+new named constant `maxSymlinkFollows`, fixed in IG-05).
+
+If it cannot resolve the path within the record set (a component
+outside the profile roots or `/home/*/`, a loop, the link limit, a
+missing record, a failure as above), the symlink entry is
+unclassifiable and therefore critical-class (D7 "Unclassifiable means
+critical"), and a target outside the scanned roots, a loop, the link
+limit or a **missing record** (for example a symlink into a part of a
+home where only the fixed patterns are recorded, such as
+`/home/alice/.ssh` -> `/home/alice/dotfiles/ssh`, or into an excluded or
+skipped subtree) opens the "SSH login file outside the scanned roots"
+finding below (critical for a
+configuration position, high otherwise; naming the symlink and its
+escaped target, kept open while the approved baseline or the latest run
+holds that symlink), since the files sshd reads there are not scanned.
+At a configuration position this also makes the run's SSH configuration
+array inconsistent (D6), so the run is partial and supplies no derived
+set; a symlinked include directory therefore never lets the script leave
+included files out of the array.
+
+Files that an `AuthorizedKeysCommand` or `AuthorizedPrincipalsCommand`
+program itself reads or runs are not derived (named in "Honest
+limits"). An absolute target outside the D5 roots and
+`/home/*/` (for example `TrustedUserCAKeys /srv/ca.pub`, also
+`RevokedKeys srv/revoked`, which D7 resolves daemon-wide to
+`/srv/revoked`, or
+`AuthorizedKeysFile /var/lib/keys/%u`) is not scanned; the executor
+opens an "SSH login file outside the scanned roots" finding (high)
+naming the directive and its escaped value, kept open while the
+approved or the latest complete run's SSH configuration names it. A
+`%h`-based, `~`-based or relative **per-user** value
+(`AuthorizedKeysFile`, `AuthorizedPrincipalsFile`) does not open this
+finding, because it matches homes anywhere: such files in homes outside `/root` and
+`/home` (service accounts under `/var`, `/srv`, `/opt`) are not
+scanned, a named limit ("Honest limits").
+
+For all critical-class paths:
 
 - **Severity precedence.** When a change matches several classes of the
   table below, the highest severity wins, so a new setuid or setgid file
@@ -1122,7 +1515,7 @@ matching severity wins, see "Critical-class paths"):
 | Class | Severity |
 | --- | --- |
 | Package file differs from signed reference; NOS binary/unit mismatch (I1); any new, changed or removed critical-class path (above) that is not a verified expected change, including one changed during a NOS job without a verified reference; new setuid/setgid file or bit; missing NOS own key or extra key in root's `authorized_keys` | critical |
-| Other changed or new file in `/etc` or a watched `/usr` root (D5); owner/mode change; I2 baseline digest mismatch; change of a path that is not critical-class during a NOS job without a verified reference ("changed during NOS job, unverified"); package file content changed without a version change, even if it matches a reference (D7); package downgraded outside NOS (lower reported version), even with a matching signed reference; unexpected (skipped) mount below a profile root (D5), critical when it covers a critical-class path; reference conflict (`integrity.reference_conflict`, D8) | high |
+| Other changed or new file in `/etc` or a watched `/usr` root (D5); owner/mode change; I2 baseline digest mismatch; change of a path that is not critical-class during a NOS job without a verified reference ("changed during NOS job, unverified"); package file content changed without a version change, even if it matches a reference (D7); package downgraded outside NOS (lower reported version), even with a matching signed reference; unexpected (skipped) mount below a profile root (D5), critical when it covers a critical-class path; SSH login file outside the scanned roots (D9 "SSH login files"); reference conflict (`integrity.reference_conflict`, D8) | high |
 | Package updated outside NOS (strictly higher reported version) with matching reference; partial or stale scan | medium |
 | Verified expected change from a NOS job (`expected_pending` until approved by D7; a critical-class path still needs its own executor-local CLI approval) | info (record only) |
 
@@ -1137,7 +1530,7 @@ rules. Dedupe per `(subject, class, path)`, at most 10 messages per hour,
 then an hourly digest.
 
 **Reaction stays advisory.** By default an I2 finding does not block
-jobs on the host (Q3 asks whether it should). It never triggers a
+jobs on the host (Q3 decision: only the opt-in per-host block). It never triggers a
 restore, reinstall or any other mutation.
 
 ### D10: I3, later: measured boot and IMA attestation (outline only)
@@ -1170,7 +1563,7 @@ the direction.
 
 - A persistent agent, inotify/fanotify watcher, auditd configuration or
   eBPF sensor on managed hosts.
-- Automatic restore, reinstall, rollback or quarantine actions. Q3 asks
+- Automatic restore, reinstall, rollback or quarantine actions. Q3 decides
   only about *withholding* NOS authority.
 - Proving the absence of a rootkit with I1 or I2.
 - Integrity of databases, logs and spools (covered elsewhere).
@@ -1178,7 +1571,13 @@ the direction.
   own host); Docker image layers.
 - Windows, network devices (ADR 0010).
 
-## Open questions for the maintainer
+## Maintainer decisions 2026-11-11
+
+(Previously "Open questions for the maintainer".) The maintainer accepted
+the recommendation to each question on 2026-11-11; each recommendation is
+now the decision. The questions are kept for context. Where the text
+above says "before Q6" or "until Q6 is answered", it now means until the
+Q6 decision is implemented (IG-09).
 
 - **Q1: Scope of paths and exceptions.** Is `fim-default-v1` (D5) the
   right default? Include `/etc/pve` (cluster-wide, changes on every node
@@ -1186,45 +1585,52 @@ the direction.
   and the keyed hash for everything else (D6) acceptable? May admins add
   per-host roots or excludes, and must such a profile change be approved
   like a grant?
-  **Recommendation:** ship `fim-default-v1` as listed; `/etc/pve` out of
-  scope in I2 (it is better watched once per PVE cluster later);
-  keyed hash outside the plain-hash allowlist (D6, recommended over the
-  earlier metadata-only idea because it still detects content changes);
-  per-host excludes allowed only as an
-  approved profile variant (grant digest covers it), additional roots
-  only from a fixed list.
+  **Decision** (the recommendation): ship `fim-default-v1` as listed
+  (so no `/var/lib/docker` root); `/etc/pve` out of scope in I2 (it is
+  better watched once per PVE cluster later); keyed hash outside the
+  plain-hash allowlist (D6, chosen over the earlier metadata-only idea
+  because it still detects content changes); per-host excludes allowed
+  only as an approved profile variant (grant digest covers it),
+  additional roots only from a fixed list.
 - **Q2: Intervals.** I1 every 60 minutes plus start/upgrade? I2
-  incremental hourly, full weekly? **Recommendation:** I1 at start, after
-  upgrade and every 60 minutes; I2 incremental every 6 hours and full
-  weekly by default (hourly incremental on hosts the admin marks as crown
-  jewels, ADR 0011 D10), all within the ADR 0007 ordinary read budget.
+  incremental hourly, full weekly?
+  **Decision** (the recommendation): I1 at start, after upgrade and
+  every 60 minutes; I2 incremental every 6 hours and full weekly by
+  default (hourly incremental on hosts the admin marks as crown jewels,
+  ADR 0011 D10), all within the ADR 0007 ordinary read budget.
 - **Q3: Reaction on an I2 finding.** Only alarm, or also a host
   quarantine that blocks new NOS jobs (except reads and the job that
-  investigates) until the admin acknowledges it? **Recommendation:**
-  alarm only by default; an opt-in per host "block mutations on open
-  critical integrity finding" that withholds new permits (never cancels a
-  running job, never touches the host). A block that an untrusted host
-  can trigger must not stop the admin from fixing it, so admin override
-  with a fresh assertion is always possible. Also: in standard mode, may
-  the *verified* expected changes of one job (except critical-class
+  investigates) until the admin acknowledges it? Also: in standard mode,
+  may the *verified* expected changes of one job (except critical-class
   paths, D9) be approved in one bulk D7 assertion offered right after the
-  job (recommended), or must they be reviewed in smaller batches? In
-  every mode they enter the baseline only through an executor-computed
-  digest (D7, D9), never through the job approval; unverified changes and
-  critical-class paths follow D9 and are not part of this question.
+  job, or must they be reviewed in smaller batches?
+  **Decision** (the recommendation): alarm only by default; an opt-in
+  per host "block mutations on open critical integrity finding" that
+  withholds new permits (never cancels a running job, never touches the
+  host). A block that an untrusted host can trigger must not stop the
+  admin from fixing it, so admin override with a fresh assertion is
+  always possible. In standard mode the verified expected changes of one
+  job (except critical-class paths) may be approved in one bulk D7
+  assertion offered right after the job. In every mode they enter the
+  baseline only through an executor-computed digest (D7, D9), never
+  through the job approval; unverified changes and critical-class paths
+  follow D9 and are not part of this decision.
 - **Q4: I1 lock on mismatch.** Should the executor refuse unlock and all
   dispatch on a binary/unit/module mismatch (D4)? On a configuration
-  mismatch? **Recommendation:** yes for binaries, units, built-in modules
-  and root keys (cleared only by local CLI); no lock for configuration
-  (alarm and baseline approval); web assets are refused individually
-  rather than locking the whole system.
+  mismatch?
+  **Decision** (the recommendation): yes for binaries, units, built-in
+  modules and root keys (cleared only by local CLI); no lock for
+  configuration (alarm and baseline approval); web assets are refused
+  individually rather than locking the whole system.
 - **Q5: I3 yes or no.** Plan measured boot/IMA attestation, including a
-  new TPM library dependency? **Recommendation:** yes as a later,
-  separate ADR after I2 is in use, starting with physical hosts with a
-  TPM and the NOS machine itself; vTPM guests only with the stated limit.
+  new TPM library dependency?
+  **Decision** (the recommendation): yes, as a later, separate ADR after
+  I2 is in use, starting with physical hosts with a TPM and the NOS
+  machine itself; vTPM guests only with the stated limit.
 - **Q6: Package reference builder and dependencies.** Where does it run,
-  and which modules may it use (D8)? **Recommendation:** on the
-  `nebula-vuln-agent` host, extending the ADR 0011 A1.6 approval of
+  and which modules may it use (D8)?
+  **Decision** (the recommendation): on the `nebula-vuln-agent` host,
+  extending the ADR 0011 A1.6 approval of
   `github.com/ProtonMail/go-crypto` to `InRelease` verification and
   approving one xz and one zstd decompression module for that binary
   only; until then, package files use the baseline mode.
@@ -1233,11 +1639,14 @@ the direction.
 
 - Spec 01: integrity monitoring as a bounded monitoring exception next to
   ADR 0011; restate that findings are advisory.
-- Spec 05/06: I1 unlock refusal and `nebula integrity ack` (if Q4 is
-  accepted); baseline approval challenge domains and what they bind
+- Spec 05/06: I1 unlock refusal and `nebula integrity ack` (Q4
+  decision); baseline approval challenge domains and what they bind
   (host ID, previous and new digest); `nebula integrity pending` and
-  `nebula integrity approve` as the only approval path for
-  critical-class entries.
+  `nebula integrity approve` (rendering and approving exactly the
+  executor-stored proposal bound to the digest, with the previous-digest
+  check) as the only approval path for critical-class entries, and
+  `nebula integrity approve --initial` for the first baseline (D7); the
+  rule by which an approval replaces the stored derived SSH set (D7).
 - Spec 07: `fim.scan` in the read-lease allowlist with its intervals and
   budgets.
 - Spec 09: `fim-scan-v1` schema, the action-specific limits of D6, path
@@ -1260,7 +1669,7 @@ the direction.
 
 | Ticket | Content | Depends on |
 | --- | --- | --- |
-| IG-01 | Spec revision listed above | maintainer answers Q1–Q4 |
+| IG-01 | Spec revision listed above | maintainer decisions Q1–Q4 (2026-11-11) |
 | IG-02 | `installed-files.json` in release tooling and `docs/admin/release-signing.md`; publication of manifest, signature and list as GitHub release assets; parser and verifier with fuzz tests; executor admission next to `trust-builtins` | IG-01 |
 | IG-03 | I1 checks in all NOS processes, executor cross-check, server check of executor; `integrity_findings` store | IG-02 |
 | IG-04 | I1 reaction (unlock refusal per Q4), `nebula integrity ack` and `verify --offline`, `nebula verify` from an admin machine (D2), configuration baseline approval | IG-03 |

@@ -162,11 +162,8 @@ type privateRef struct {
 // is not a private tag reference. A repository outside the record's
 // approved scope is ErrOutOfScope (no read is attempted).
 func matchPrivateImage(image string, regs []PrivateIdentity) (privateRef, error) {
-	if image == "" || len(image) > MaxImageLen || strings.Contains(image, "://") || strings.Contains(image, "@") {
-		return privateRef{}, ErrNotPrivate
-	}
-	host, rest, ok := strings.Cut(image, "/")
-	if !ok || !privateRefHostRe.MatchString(host) || (!strings.ContainsAny(host, ".:") && host != "localhost") {
+	host, rest, ok := registryHostOf(image)
+	if !ok {
 		return privateRef{}, ErrNotPrivate
 	}
 	origin := "https://" + strings.ToLower(host)
@@ -185,6 +182,21 @@ func matchPrivateImage(image string, regs []PrivateIdentity) (privateRef, error)
 		return privateRef{}, ErrOutOfScope
 	}
 	return privateRef{registry: regs[k], repository: rest, tag: tag}, nil
+}
+
+// registryHostOf splits a tag reference that names a registry host
+// ("host[:port]/repository[:tag]") into host and the rest. Only such a
+// reference can be on a private registry: one without a registry host,
+// with a scheme, pinned by digest or over MaxImageLen reports false.
+func registryHostOf(image string) (host, rest string, ok bool) {
+	if image == "" || len(image) > MaxImageLen || strings.Contains(image, "://") || strings.Contains(image, "@") {
+		return "", "", false
+	}
+	host, rest, ok = strings.Cut(image, "/")
+	if !ok || !privateRefHostRe.MatchString(host) || (!strings.ContainsAny(host, ".:") && host != "localhost") {
+		return "", "", false
+	}
+	return host, rest, true
 }
 
 // PrivateDigest is the registry's current manifest digest of one private
