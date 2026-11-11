@@ -158,7 +158,10 @@ type osvEventJSON struct {
 }
 
 // osvPaths are the per-record limits checkJSON enforces on an OSV record
-// while it walks, before json.Unmarshal builds any slice or string.
+// while it walks, before json.Unmarshal builds any slice or string. The
+// count checks after Unmarshal (aliases, affected, ranges, events) repeat
+// these caps as defence in depth; they cannot fire while osvPaths holds
+// them.
 var osvPaths = jsonLimits{
 	"id":                             {Bytes: 64},
 	"modified":                       {Bytes: maxTimeBytes},

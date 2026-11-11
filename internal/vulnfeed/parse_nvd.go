@@ -158,7 +158,10 @@ type nvdItemJSON struct {
 }
 
 // nvdPaths are the per-record limits checkJSON enforces on one NVD item
-// while it walks, before json.Unmarshal builds any slice or string.
+// while it walks, before json.Unmarshal builds any slice or string. The
+// count checks after Unmarshal (descriptions, metrics, weaknesses,
+// references, tags) repeat these caps as defence in depth; they cannot
+// fire while nvdPaths holds them.
 var nvdPaths = jsonLimits{
 	"cve.id":                                 {Bytes: 32},
 	"cve.published":                          {Bytes: maxTimeBytes},

@@ -122,7 +122,8 @@ const maxDebianReleaseValueBytes = 1024
 // debianIssuePaths are the per-issue limits checkJSON enforces while it
 // walks, so the releases map never holds more than
 // MaxDebianReleasesPerIssue entries and no release value is copied
-// beyond its cap.
+// beyond its cap. The releases count check in parseIssue repeats the cap
+// as defence in depth; it cannot fire while debianIssuePaths holds it.
 var debianIssuePaths = jsonLimits{
 	"releases": {Members: MaxDebianReleasesPerIssue},
 	// Every direct member of every release object.
