@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,23 +14,49 @@ import (
 	"time"
 )
 
-// objectFiles lists committed (non-temporary) object names.
+// objectPath is where the store keeps feed's object with digest sum.
+func objectPath(dir, feed, sum string) string {
+	return filepath.Join(dir, objectsDir, feed, sum)
+}
+
+// objectFiles lists committed (non-temporary) object names over all feeds.
 func objectFiles(t *testing.T, dir string) map[string]int64 {
 	t.Helper()
-	ents, err := os.ReadDir(filepath.Join(dir, objectsDir))
+	out := map[string]int64{}
+	for _, objs := range feedObjectFiles(t, dir) {
+		maps.Copy(out, objs)
+	}
+	return out
+}
+
+// feedObjectFiles lists committed (non-temporary) object names per feed.
+func feedObjectFiles(t *testing.T, dir string) map[string]map[string]int64 {
+	t.Helper()
+	feeds, err := os.ReadDir(filepath.Join(dir, objectsDir))
 	if err != nil {
 		t.Fatal(err)
 	}
-	out := map[string]int64{}
-	for _, e := range ents {
-		if strings.HasPrefix(e.Name(), tmpPrefix) {
+	out := map[string]map[string]int64{}
+	for _, fd := range feeds {
+		if !fd.IsDir() {
 			continue
 		}
-		fi, err := e.Info()
+		ents, err := os.ReadDir(filepath.Join(dir, objectsDir, fd.Name()))
 		if err != nil {
 			t.Fatal(err)
 		}
-		out[e.Name()] = fi.Size()
+		objs := map[string]int64{}
+		for _, e := range ents {
+			if strings.HasPrefix(e.Name(), tmpPrefix) {
+				continue
+			}
+			fi, err := e.Info()
+			if err != nil {
+				t.Fatal(err)
+			}
+			objs[e.Name()] = fi.Size()
+		}
+		out[fd.Name()] = objs
 	}
 	return out
 }
@@ -111,27 +138,37 @@ func TestPruneKeepsObjectsOfEveryFeed(t *testing.T) {
 	}
 }
 
-func TestSameContentOnTwoFeedsSharesObject(t *testing.T) {
+func TestSameContentOnTwoFeedsSurvivesOtherFeedsPrune(t *testing.T) {
 	s, _, dir := newTestStore(t)
 	a := testFeed(DateKindDated)
 	a.Name = "feed-a"
 	b := testFeed(DateKindDated)
 	b.Name = "feed-b"
-	if _, err := commitBytes(t, s, a, "same", Accept{ContentDate: day1}); err != nil {
+	ma, err := commitBytes(t, s, a, "same", Accept{ContentDate: day1})
+	if err != nil {
 		t.Fatal(err)
 	}
 	mb, err := commitBytes(t, s, b, "same", Accept{ContentDate: day1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// b moves on; the shared object is still referenced by a.
+	if ma.SHA256 != mb.SHA256 {
+		t.Fatal("same bytes, different digest")
+	}
+	// b moves on and prunes its copy; a's snapshot of the same bytes stays.
 	for i := range SnapshotRetention + 1 {
 		if _, err := commitBytes(t, s, b, fmt.Sprintf("b-%d", i), Accept{ContentDate: day2.Add(time.Duration(i) * time.Minute)}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, ok := objectFiles(t, dir)[mb.SHA256]; !ok {
-		t.Fatal("object shared with feed-a removed")
+	if _, ok := feedObjectFiles(t, dir)[a.Name][ma.SHA256]; !ok {
+		t.Fatal("feed-a object removed by feed-b's prune")
+	}
+	if err := s.Verify(ma); err != nil {
+		t.Fatalf("feed-a snapshot: %v", err)
+	}
+	if _, ok := feedObjectFiles(t, dir)[b.Name][mb.SHA256]; ok {
+		t.Fatal("feed-b's expired copy kept")
 	}
 }
 
@@ -152,38 +189,156 @@ func TestRecommitOfSameBytesDoesNotDuplicateHistory(t *testing.T) {
 	}
 }
 
-func TestPruneWithCorruptManifestRemovesNothing(t *testing.T) {
+func TestPruneWithCorruptManifestSkipsOnlyThatFeed(t *testing.T) {
+	s, _, dir := newTestStore(t)
+	a := testFeed(DateKindDated)
+	a.Name = "feed-a"
+	b := testFeed(DateKindDated)
+	b.Name = "feed-b"
+	ma, err := commitBytes(t, s, a, "a-1", Accept{ContentDate: day1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mb, err := commitBytes(t, s, b, "b-1", Accept{ContentDate: day1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Unreferenced objects in both feeds (e.g. left by a crash between
+	// object rename and manifest write), and feed-b's manifest is corrupt:
+	// feed-b's references are unknown, so none of its objects may go, but
+	// feed-a is collected as usual.
+	orphanA := strings.Repeat("ab", 32)
+	orphanB := strings.Repeat("cd", 32)
+	if err := os.WriteFile(objectPath(dir, a.Name, orphanA), []byte("orphan"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(objectPath(dir, b.Name, orphanB), []byte("orphan"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, manifestsDir, b.Name+".json"), []byte(`{"feed":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err = s.Prune()
+	if !errors.Is(err, ErrCorruptManifest) || !errors.Is(err, ErrPruneFailed) {
+		t.Fatalf("prune %v, want ErrPruneFailed and ErrCorruptManifest", err)
+	}
+	objs := feedObjectFiles(t, dir)
+	if _, ok := objs[a.Name][orphanA]; ok {
+		t.Fatal("feed-a orphan kept: a corrupt feed-b manifest blocked feed-a")
+	}
+	if _, ok := objs[a.Name][ma.SHA256]; !ok {
+		t.Fatal("feed-a current object removed")
+	}
+	if _, ok := objs[b.Name][orphanB]; !ok {
+		t.Fatal("feed-b object removed although its manifest is unreadable")
+	}
+	if _, ok := objs[b.Name][mb.SHA256]; !ok {
+		t.Fatal("feed-b object removed although its manifest is unreadable")
+	}
+	// Commits of feed-a keep succeeding without a prune error.
+	if _, err := commitBytes(t, s, a, "a-2", Accept{ContentDate: day2}); err != nil {
+		t.Fatalf("feed-a commit with corrupt feed-b manifest: %v", err)
+	}
+	// Once the manifest is gone, feed-b's objects are orphans and collected.
+	if err := os.Remove(filepath.Join(dir, manifestsDir, b.Name+".json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Prune(); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(feedObjectFiles(t, dir)[b.Name]); n != 0 {
+		t.Fatalf("feed-b: %d orphan objects kept", n)
+	}
+}
+
+func TestPruneIgnoresStrayFiles(t *testing.T) {
 	s, _, dir := newTestStore(t)
 	a := testFeed(DateKindDated)
 	a.Name = "feed-a"
 	if _, err := commitBytes(t, s, a, "a-1", Accept{ContentDate: day1}); err != nil {
 		t.Fatal(err)
 	}
-	// An unreferenced object (e.g. left by a crash between object rename and
-	// manifest write) plus a corrupt manifest for another feed: its
-	// references are unknown, so nothing may be removed.
-	orphan := strings.Repeat("ab", 32)
-	if err := os.WriteFile(filepath.Join(dir, objectsDir, orphan), []byte("orphan"), 0o600); err != nil {
+	orphan := strings.Repeat("ef", 32)
+	if err := os.WriteFile(objectPath(dir, a.Name, orphan), []byte("orphan"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, manifestsDir, "feed-b.json"), []byte(`{"feed":`), 0o600); err != nil {
-		t.Fatal(err)
+	strays := []string{
+		filepath.Join(dir, manifestsDir, ".feed-a.json.swp"),
+		filepath.Join(dir, manifestsDir, "feed-a.json.bak"),
+		filepath.Join(dir, manifestsDir, "README"),
+		filepath.Join(dir, objectsDir, "notes.txt"),
+		filepath.Join(dir, objectsDir, a.Name, "keep.bak"),
 	}
-	if err := s.Prune(); !errors.Is(err, ErrCorruptManifest) {
-		t.Fatalf("prune %v, want ErrCorruptManifest", err)
+	for _, p := range strays {
+		if err := os.WriteFile(p, []byte("stray"), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if _, ok := objectFiles(t, dir)[orphan]; !ok {
-		t.Fatal("object removed although a manifest is unreadable")
-	}
-	// Once the manifest is gone, the orphan is collected.
-	if err := os.Remove(filepath.Join(dir, manifestsDir, "feed-b.json")); err != nil {
+	if err := os.Mkdir(filepath.Join(dir, objectsDir, "Not_A_Feed"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Prune(); err != nil {
+		t.Fatalf("prune with stray files: %v", err)
+	}
+	if _, ok := feedObjectFiles(t, dir)[a.Name][orphan]; ok {
+		t.Fatal("orphan kept: stray files blocked GC")
+	}
+	for _, p := range strays {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatalf("stray file touched: %v", err)
+		}
+	}
+	// A commit also prunes, without error.
+	if _, err := commitBytes(t, s, a, "a-2", Accept{ContentDate: day2}); err != nil {
+		t.Fatalf("commit with stray files: %v", err)
+	}
+}
+
+func TestCommitReportsPruneFailure(t *testing.T) {
+	s, _, dir := newTestStore(t)
+	f := testFeed(DateKindDated)
+	if _, err := commitBytes(t, s, f, "v1", Accept{ContentDate: day1}); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := objectFiles(t, dir)[orphan]; ok {
-		t.Fatal("orphan object kept")
+	// An unremovable entry with an object name: a non-empty directory
+	// (os.Remove fails even as root).
+	stuck := strings.Repeat("0f", 32)
+	if err := os.MkdirAll(filepath.Join(objectPath(dir, f.Name, stuck), "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	m, err := commitBytes(t, s, f, "v2", Accept{ContentDate: day2})
+	if !errors.Is(err, ErrPruneFailed) {
+		t.Fatalf("commit %v, want ErrPruneFailed", err)
+	}
+	// The commit itself is durable and the manifest is returned.
+	cur, lerr := s.Load(f.Name)
+	if lerr != nil || cur.SHA256 != sha256Hex("v2") || m.SHA256 != cur.SHA256 {
+		t.Fatalf("committed manifest %+v, loaded %+v %v", m, cur, lerr)
+	}
+	if err := s.Prune(); !errors.Is(err, ErrPruneFailed) {
+		t.Fatalf("prune %v, want ErrPruneFailed", err)
+	}
+}
+
+func TestSyncReportsPruneFailure(t *testing.T) {
+	e := newSyncEnv(t)
+	f := e.feed("kev", "/kev.json", DateKindDated)
+	e.fs.set("/kev.json", dated(day1, "v1"))
+	if _, err := e.syncer.Sync(context.Background(), f, SyncOptions{ContentDate: firstLineDate}); err != nil {
+		t.Fatal(err)
+	}
+	stuck := strings.Repeat("0f", 32)
+	if err := os.MkdirAll(filepath.Join(objectPath(e.dir, f.Name, stuck), "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := dated(day2, "v2")
+	e.fs.set("/kev.json", body)
+	res, err := e.syncer.Sync(context.Background(), f, SyncOptions{ContentDate: firstLineDate})
+	if !errors.Is(err, ErrPruneFailed) {
+		t.Fatalf("sync %v, want ErrPruneFailed", err)
+	}
+	if res.Manifest.SHA256 != sha256Hex(body) {
+		t.Fatalf("committed manifest not returned with the prune error: %+v", res.Manifest)
 	}
 }
 
@@ -198,7 +353,7 @@ func TestCrashBeforeManifestCommitKeepsOldSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	orphan := sha256Hex("v2-crashed")
-	if err := os.WriteFile(filepath.Join(dir, objectsDir, orphan), []byte("v2-crashed"), 0o600); err != nil {
+	if err := os.WriteFile(objectPath(dir, f.Name, orphan), []byte("v2-crashed"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	s2, err := OpenStore(dir, clk.Now)

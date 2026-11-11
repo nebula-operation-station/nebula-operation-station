@@ -35,6 +35,10 @@ type SyncResult struct {
 	Manifest Manifest
 	// NotModified: the origin answered 304; Manifest is unchanged.
 	NotModified bool
+	// PreviousInvalid: the previous snapshot's object was missing or did
+	// not verify, so the feed was fetched without validators (never
+	// accepting a 304 over a broken object).
+	PreviousInvalid bool
 }
 
 // Syncer fetches feeds into the snapshot store.
@@ -56,7 +60,9 @@ func NewSyncer(f *Fetcher, s *Store) (*Syncer, error) {
 // Sync fetches feed, checks its integrity and content date, and commits it
 // as the feed's new snapshot. On any failure the previous snapshot stays
 // in use and nothing partial is kept. A proxy-dated feed's companions must
-// be synced first; its date is their newest content date.
+// be synced first; its date is their newest content date. An error
+// wrapping ErrPruneFailed means the new snapshot was committed (the
+// result is valid) but removing expired objects failed.
 func (s *Syncer) Sync(ctx context.Context, feed Feed, opt SyncOptions) (SyncResult, error) {
 	if err := feed.validate(); err != nil {
 		return SyncResult{}, err
@@ -85,12 +91,21 @@ func (s *Syncer) Sync(ctx context.Context, feed Feed, opt SyncOptions) (SyncResu
 		return SyncResult{}, fmt.Errorf("sync %s: %w", feed.Name, err)
 	}
 
+	// A 304 is only accepted for bytes we still hold intact: if the
+	// previous object is missing or tampered with, fetch unconditionally.
+	validators := prev.Validators
+	var prevInvalid bool
+	if validators != (Validators{}) {
+		if err := s.store.Verify(prev); err != nil {
+			validators, prevInvalid = Validators{}, true
+		}
+	}
 	st, err := s.store.Stage(feed)
 	if err != nil {
 		return SyncResult{}, fmt.Errorf("sync %s: %w", feed.Name, err)
 	}
 	defer st.Abort() // no-op after Commit
-	res, err := s.fetcher.Fetch(ctx, feed.URL, feed.MaxBytes, prev.Validators, st)
+	res, err := s.fetcher.Fetch(ctx, feed.URL, feed.MaxBytes, validators, st)
 	if err != nil {
 		return SyncResult{}, fmt.Errorf("sync %s: %w", feed.Name, err)
 	}
@@ -127,8 +142,11 @@ func (s *Syncer) Sync(ctx context.Context, feed Feed, opt SyncOptions) (SyncResu
 		acc.ContentDate = proxyDate
 	}
 	m, err := s.store.Commit(feed, st, acc)
+	if errors.Is(err, ErrPruneFailed) {
+		return SyncResult{Manifest: m, PreviousInvalid: prevInvalid}, fmt.Errorf("sync %s: %w", feed.Name, err)
+	}
 	if err != nil {
 		return SyncResult{}, fmt.Errorf("sync %s: %w", feed.Name, err)
 	}
-	return SyncResult{Manifest: m}, nil
+	return SyncResult{Manifest: m, PreviousInvalid: prevInvalid}, nil
 }

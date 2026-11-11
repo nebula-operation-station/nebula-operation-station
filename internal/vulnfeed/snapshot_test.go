@@ -63,8 +63,18 @@ func commitBytes(t *testing.T, s *Store, f Feed, b string, a Accept) (Manifest, 
 func tmpFiles(t *testing.T, dir string) []string {
 	t.Helper()
 	var out []string
-	for _, sub := range []string{objectsDir, manifestsDir} {
-		ents, err := os.ReadDir(filepath.Join(dir, sub))
+	dirs := []string{filepath.Join(dir, objectsDir), filepath.Join(dir, manifestsDir)}
+	feeds, err := os.ReadDir(filepath.Join(dir, objectsDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range feeds {
+		if e.IsDir() {
+			dirs = append(dirs, filepath.Join(dir, objectsDir, e.Name()))
+		}
+	}
+	for _, d := range dirs {
+		ents, err := os.ReadDir(d)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -89,7 +99,7 @@ func TestCommitIsContentAddressed(t *testing.T) {
 	if m.SHA256 != want || m.Size != int64(len("feed bytes")) || m.SnapshotID() != "sha256:"+want {
 		t.Fatalf("manifest %+v", m)
 	}
-	got, err := os.ReadFile(filepath.Join(dir, objectsDir, want))
+	got, err := os.ReadFile(objectPath(dir, f.Name, want))
 	if err != nil || string(got) != "feed bytes" {
 		t.Fatalf("object %q %v", got, err)
 	}
@@ -281,7 +291,7 @@ func TestVerifyDetectsTamperedObject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, objectsDir, m.SHA256), []byte("evil"), 0o600); err != nil {
+	if err := os.WriteFile(objectPath(dir, m.Feed, m.SHA256), []byte("evil"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Verify(m); !errors.Is(err, ErrCorruptSnapshot) {

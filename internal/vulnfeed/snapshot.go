@@ -25,7 +25,10 @@ import (
 
 // Store layout and limits.
 const (
-	// objectsDir holds snapshot files named by their SHA-256.
+	// objectsDir holds one directory per feed, "<feed>/", with that feed's
+	// snapshot files named by their SHA-256. Keeping objects per feed lets
+	// each feed be garbage-collected from its own manifest alone, so an
+	// unreadable manifest only holds back its own feed's objects.
 	objectsDir = "objects"
 	// manifestsDir holds one manifest per feed, "<feed>.json".
 	manifestsDir = "manifests"
@@ -64,6 +67,11 @@ var (
 	ErrCorruptSnapshot = errors.New("vulnfeed: corrupt snapshot")
 	// ErrStageClosed: the staged file was already committed or aborted.
 	ErrStageClosed = errors.New("vulnfeed: staged file closed")
+	// ErrPruneFailed: unreferenced objects could not be removed, so disk
+	// use is no longer bounded by SnapshotRetention. From Commit (and Sync)
+	// it means the snapshot itself was committed and the returned manifest
+	// is valid; only the clean-up failed.
+	ErrPruneFailed = errors.New("vulnfeed: snapshot prune failed")
 )
 
 // sha256HexRe is a lower-case SHA-256 hex digest.
@@ -136,23 +144,63 @@ func OpenStore(dir string, now func() time.Time) (*Store, error) {
 		now = time.Now
 	}
 	for _, sub := range []string{objectsDir, manifestsDir} {
-		p := filepath.Join(dir, sub)
-		if err := os.MkdirAll(p, 0o700); err != nil {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0o700); err != nil {
 			return nil, fmt.Errorf("open snapshot store: %w", err)
 		}
-		ents, err := os.ReadDir(p)
-		if err != nil {
+	}
+	s := &Store{dir: dir, now: now}
+	feeds, err := s.feedObjectDirs()
+	if err != nil {
+		return nil, fmt.Errorf("open snapshot store: %w", err)
+	}
+	clean := []string{filepath.Join(dir, objectsDir), filepath.Join(dir, manifestsDir)}
+	for _, feed := range feeds {
+		clean = append(clean, s.objectDir(feed))
+	}
+	for _, p := range clean {
+		if err := removeTemps(p); err != nil {
 			return nil, fmt.Errorf("open snapshot store: %w", err)
 		}
-		for _, e := range ents {
-			if strings.HasPrefix(e.Name(), tmpPrefix) {
-				if err := os.Remove(filepath.Join(p, e.Name())); err != nil && !errors.Is(err, fs.ErrNotExist) {
-					return nil, fmt.Errorf("open snapshot store: remove leftover: %w", err)
-				}
+	}
+	return s, nil
+}
+
+// removeTemps removes the temporary files directly under dir.
+func removeTemps(dir string) error {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("list %s: %w", filepath.Base(dir), err)
+	}
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), tmpPrefix) {
+			if err := os.Remove(filepath.Join(dir, e.Name())); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return fmt.Errorf("remove leftover: %w", err)
 			}
 		}
 	}
-	return &Store{dir: dir, now: now}, nil
+	return nil
+}
+
+// objectDir is the directory of feed's objects.
+func (s *Store) objectDir(feed string) string {
+	return filepath.Join(s.dir, objectsDir, feed)
+}
+
+// feedObjectDirs lists the feed names that have an object directory.
+// Entries that are not directories or not valid feed names are strays and
+// are skipped, never an error.
+func (s *Store) feedObjectDirs() ([]string, error) {
+	ents, err := os.ReadDir(filepath.Join(s.dir, objectsDir))
+	if err != nil {
+		return nil, fmt.Errorf("list objects: %w", err)
+	}
+	var out []string
+	for _, e := range ents {
+		if e.IsDir() && feedNameRe.MatchString(e.Name()) {
+			out = append(out, e.Name())
+		}
+	}
+	return out, nil
 }
 
 // Staged is a snapshot being written. It hashes while writing and refuses
@@ -171,7 +219,11 @@ func (s *Store) Stage(feed Feed) (*Staged, error) {
 	if err := feed.validate(); err != nil {
 		return nil, err
 	}
-	f, err := os.CreateTemp(filepath.Join(s.dir, objectsDir), tmpPrefix+"*")
+	objDir := s.objectDir(feed.Name)
+	if err := os.MkdirAll(objDir, 0o700); err != nil {
+		return nil, fmt.Errorf("stage %s: %w", feed.Name, err)
+	}
+	f, err := os.CreateTemp(objDir, tmpPrefix+"*")
 	if err != nil {
 		return nil, fmt.Errorf("stage %s: %w", feed.Name, err)
 	}
@@ -245,10 +297,11 @@ func (st *Staged) Abort() {
 // an undated feed must have none; a date beyond MaxFutureSkew is invalid.
 // The object is fsynced and renamed into place before the manifest is
 // replaced atomically, so a crash leaves either the old or the new state.
-// Only after the new manifest is durable are objects that no kept
-// snapshot references removed (see Prune); a crash before that leaves
+// Only after the new manifest is durable are the feed's objects that no
+// kept snapshot references removed (see Prune); a crash before that leaves
 // garbage that the next commit or Prune collects, never a manifest that
-// points at a missing object.
+// points at a missing object. If that removal fails, Commit returns the
+// committed manifest together with an error wrapping ErrPruneFailed.
 func (s *Store) Commit(feed Feed, st *Staged, a Accept) (Manifest, error) {
 	if st == nil || st.closed {
 		return Manifest{}, ErrStageClosed
@@ -271,22 +324,26 @@ func (s *Store) Commit(feed Feed, st *Staged, a Accept) (Manifest, error) {
 		return Manifest{}, fmt.Errorf("commit %s: close: %w", feed.Name, err)
 	}
 	st.closed = true
-	objDir := filepath.Join(s.dir, objectsDir)
+	objDir := s.objectDir(feed.Name)
 	if err := os.Rename(st.f.Name(), filepath.Join(objDir, m.SHA256)); err != nil {
 		_ = os.Remove(st.f.Name())
 		return Manifest{}, fmt.Errorf("commit %s: rename: %w", feed.Name, err)
 	}
-	if err := syncDir(objDir); err != nil {
+	// The feed's directory may be new (Stage created it): make its entry
+	// durable too.
+	if err := errors.Join(syncDir(objDir), syncDir(filepath.Join(s.dir, objectsDir))); err != nil {
 		return Manifest{}, fmt.Errorf("commit %s: %w", feed.Name, err)
 	}
 	m.Previous = retainedPrevious(prev, m.SHA256)
 	if err := s.writeManifest(m); err != nil {
 		return Manifest{}, fmt.Errorf("commit %s: %w", feed.Name, err)
 	}
-	// The commit is durable. A failed prune (e.g. another feed's manifest
-	// is corrupt) removes nothing and is retried on the next commit, so it
-	// does not fail this one; Prune reports the error to callers that ask.
-	_ = s.pruneLocked()
+	// The commit is durable; a prune failure is returned with the manifest
+	// so the caller can surface it. Only this feed is pruned: other feeds'
+	// manifests (corrupt or not) play no part.
+	if err := s.pruneFeedLocked(feed.Name, m); err != nil {
+		return m, fmt.Errorf("commit %s: snapshot committed: %w", feed.Name, err)
+	}
 	return m, nil
 }
 
@@ -311,44 +368,56 @@ func retainedPrevious(prev Manifest, cur string) []SnapshotRef {
 	return out
 }
 
-// Prune removes every object that no feed's current or retained snapshot
-// references. Temporary (in-flight) files are left alone. If any manifest
-// cannot be read, its references are unknown and nothing is removed.
+// Prune removes, feed by feed, every object that the feed's current or
+// retained snapshots do not reference; a feed without a manifest has none
+// left. Each feed is pruned from its own manifest only: if that manifest
+// cannot be read, its references are unknown and that feed's objects are
+// all kept, while every other feed is still pruned. Temporary (in-flight)
+// files and stray entries (names that are not feeds or SHA-256 digests,
+// such as editor or backup files) are left alone and are not errors. The
+// returned error joins one error per failed feed, each wrapping
+// ErrPruneFailed (and ErrCorruptManifest for an unreadable manifest).
 func (s *Store) Prune() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.pruneLocked()
-}
-
-// pruneLocked is Prune with s.mu held.
-func (s *Store) pruneLocked() error {
-	ents, err := os.ReadDir(filepath.Join(s.dir, manifestsDir))
+	feeds, err := s.feedObjectDirs()
 	if err != nil {
-		return fmt.Errorf("prune: %w", err)
+		return fmt.Errorf("prune: %w: %w", ErrPruneFailed, err)
 	}
-	keep := map[string]bool{}
-	for _, e := range ents {
-		name := e.Name()
-		if strings.HasPrefix(name, tmpPrefix) {
+	var errs []error
+	for _, feed := range feeds {
+		m, err := s.Load(feed)
+		switch {
+		case errors.Is(err, ErrNoSnapshot):
+			m = Manifest{}
+		case err != nil:
+			errs = append(errs, fmt.Errorf("prune %s: %w: %w", feed, ErrPruneFailed, err))
 			continue
 		}
-		feed, ok := strings.CutSuffix(name, ".json")
-		if !ok || !feedNameRe.MatchString(feed) {
-			return fmt.Errorf("prune: unexpected manifest file: %w", ErrCorruptManifest)
-		}
-		m, err := s.Load(feed)
-		if err != nil {
-			return fmt.Errorf("prune: %w", err)
-		}
-		keep[m.SHA256] = true
-		for _, r := range m.Previous {
-			keep[r.SHA256] = true
+		if err := s.pruneFeedLocked(feed, m); err != nil {
+			errs = append(errs, err)
 		}
 	}
-	objDir := filepath.Join(s.dir, objectsDir)
+	return errors.Join(errs...)
+}
+
+// pruneFeedLocked removes the objects of feed that m (its current
+// manifest, zero if it has none) does not reference. s.mu must be held.
+func (s *Store) pruneFeedLocked(feed string, m Manifest) error {
+	keep := map[string]bool{}
+	if m.SHA256 != "" {
+		keep[m.SHA256] = true
+	}
+	for _, r := range m.Previous {
+		keep[r.SHA256] = true
+	}
+	objDir := s.objectDir(feed)
 	objs, err := os.ReadDir(objDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
 	if err != nil {
-		return fmt.Errorf("prune: %w", err)
+		return fmt.Errorf("prune %s: %w: %w", feed, ErrPruneFailed, err)
 	}
 	var errs []error
 	for _, e := range objs {
@@ -361,7 +430,7 @@ func (s *Store) pruneLocked() error {
 		}
 	}
 	if err := errors.Join(errs...); err != nil {
-		return fmt.Errorf("prune: %w", err)
+		return fmt.Errorf("prune %s: %w: %w", feed, ErrPruneFailed, err)
 	}
 	return nil
 }
@@ -495,10 +564,10 @@ func (s *Store) Load(feedName string) (Manifest, error) {
 
 // Verify re-hashes the snapshot file of m.
 func (s *Store) Verify(m Manifest) error {
-	if !sha256HexRe.MatchString(m.SHA256) {
+	if !feedNameRe.MatchString(m.Feed) || !sha256HexRe.MatchString(m.SHA256) {
 		return fmt.Errorf("verify snapshot: %w", ErrCorruptSnapshot)
 	}
-	f, err := os.Open(filepath.Join(s.dir, objectsDir, m.SHA256))
+	f, err := os.Open(filepath.Join(s.objectDir(m.Feed), m.SHA256))
 	if err != nil {
 		return fmt.Errorf("verify snapshot %s: %w", m.Feed, err)
 	}

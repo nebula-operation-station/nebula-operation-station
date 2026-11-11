@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"os"
 	"testing"
 	"time"
 
@@ -158,5 +159,48 @@ func TestRedateProxyRules(t *testing.T) {
 	m, err := s.RedateProxy(tracker, day3)
 	if err != nil || !m.ContentDate.Equal(day3) || !m.HighWater.ContentDate.Equal(day3) || m.SHA256 != cur.SHA256 {
 		t.Fatalf("%+v %v", m, err)
+	}
+}
+
+// TestSyncRefetchesWhenCachedObjectInvalid: when the previous snapshot's
+// object is missing or no longer verifies, the stored validators must not
+// be sent, so the origin cannot answer 304 and leave a broken snapshot in
+// use; the feed is fetched again and the object restored.
+func TestSyncRefetchesWhenCachedObjectInvalid(t *testing.T) {
+	for name, damage := range map[string]func(path string) error{
+		"missing":  os.Remove,
+		"tampered": func(p string) error { return os.WriteFile(p, []byte("evil"), 0o600) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newSyncEnv(t)
+			f := e.feed("kev", "/kev.json", DateKindDated)
+			body := dated(day1, "x")
+			e.fs.set("/kev.json", body)
+			first, err := e.syncer.Sync(context.Background(), f, SyncOptions{ContentDate: firstLineDate})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := damage(objectPath(e.dir, f.Name, first.Manifest.SHA256)); err != nil {
+				t.Fatal(err)
+			}
+			res, err := e.syncer.Sync(context.Background(), f, SyncOptions{ContentDate: firstLineDate})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.NotModified || !res.PreviousInvalid {
+				t.Fatalf("304 accepted over an invalid object: %+v", res)
+			}
+			if res.Manifest.SHA256 != sha256Hex(body) {
+				t.Fatalf("manifest %+v", res.Manifest)
+			}
+			if err := e.store.Verify(res.Manifest); err != nil {
+				t.Fatalf("object not restored: %v", err)
+			}
+			// With the object intact again, the next sync is a plain 304.
+			res, err = e.syncer.Sync(context.Background(), f, SyncOptions{ContentDate: firstLineDate})
+			if err != nil || !res.NotModified || res.PreviousInvalid {
+				t.Fatalf("%+v %v", res, err)
+			}
+		})
 	}
 }
