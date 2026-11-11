@@ -222,6 +222,55 @@ func TestCrossingTest(t *testing.T) {
 	}
 }
 
+// TestCrossingVLANNeedsSameOwningInterface: equal VLAN tags give
+// not_filtered only when the same firewall interface owns both segments
+// or no firewall interface owns either. Tag 20 on ethernet1/2.20 (dmz)
+// and on ethernet1/3.20 (mgmt) are two segments with a firewall
+// interface between them.
+func TestCrossingVLANNeedsSameOwningInterface(t *testing.T) {
+	s := labSnapshot()
+	s.Interfaces = append(s.Interfaces,
+		Interface{Name: "ethernet1/3.20", Zone: "mgmt", VLAN: Collected(uint16(20)), Prefixes: []netip.Prefix{pfx("10.30.0.0/24")}},
+		Interface{Name: "ethernet1/6", Zone: "lan", Prefixes: []netip.Prefix{pfx("10.60.0.0/24")}},
+		Interface{Name: "ethernet1/7", Zone: "lan", Prefixes: []netip.Prefix{pfx("10.60.0.0/24")}},
+	)
+	s.Subnets = append(s.Subnets,
+		Subnet{ID: "off-fw-a", Prefix: pfx("172.31.1.0/24"), VLAN: Collected(uint16(40))},
+		Subnet{ID: "off-fw-b", Prefix: pfx("172.31.2.0/24"), VLAN: Collected(uint16(40))},
+		Subnet{ID: "on-fw-40", Prefix: pfx("10.0.40.0/24"), VLAN: Collected(uint16(40))},
+		Subnet{ID: "amb-a", Prefix: pfx("10.60.0.0/25"), VLAN: Collected(uint16(60))},
+		Subnet{ID: "amb-b", Prefix: pfx("10.60.0.128/25"), VLAN: Collected(uint16(60))},
+	)
+	p := mustPlacer(t, s)
+	tests := []struct {
+		name     string
+		src, dst string
+		want     bool
+		reason   string
+	}{
+		{"same tag on different subinterfaces", "10.20.0.10", "10.30.0.5", false, ""},
+		{"same tag on different subinterfaces reversed", "10.30.0.5", "10.20.0.10", false, ""},
+		{"same tag same owning interface", "10.0.2.5", "10.0.3.5", true, ReasonSameVLAN},
+		{"same tag no firewall interface owns either", "172.31.1.5", "172.31.2.5", true, ReasonSameVLAN},
+		{"same tag one owned one not", "10.0.40.5", "172.31.1.5", false, ""},
+		{"same tag owner ambiguous", "10.60.0.5", "10.60.0.200", false, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := CrossingTest(p.Place(addr(tc.src)), p.Place(addr(tc.dst)))
+			if got.NotFiltered != tc.want || got.Reason != tc.reason {
+				t.Fatalf("got %+v, want notFiltered=%v %q", got, tc.want, tc.reason)
+			}
+		})
+	}
+	// A segment without owner information never shares a VLAN.
+	a := Placement{Segment: &Segment{Prefix: pfx("10.1.0.0/24"), VLAN: Collected(uint16(5))}}
+	b := Placement{Segment: &Segment{Prefix: pfx("10.2.0.0/24"), VLAN: Collected(uint16(5))}}
+	if got := CrossingTest(a, b); got.NotFiltered {
+		t.Fatalf("segments without owner: %+v", got)
+	}
+}
+
 // TestSameL2NotFilteredInFlatNetwork is the NS-05 flat-network fixture:
 // one subnet, no firewall interface owns it, no IPAM VLAN.
 func TestSameL2NotFilteredInFlatNetwork(t *testing.T) {
@@ -247,8 +296,14 @@ func TestIsSpecialAddress(t *testing.T) {
 		"198.51.100.1", "203.0.113.1", "224.0.0.1", "240.0.0.1", "255.255.255.255",
 		"::", "::1", "fc00::1", "fdff::1", "fe80::1", "ff02::1", "2001:db8::1", "2001::1",
 		"2002::1", "3fff::1", "64:ff9b::1", "::ffff:10.0.0.1",
+		// IANA special-purpose registries (AS112, AMT, SRv6 SIDs)
+		"192.31.196.1", "192.52.193.1", "192.175.48.1", "2620:4f:8000::1", "5f00::1",
+		"192.0.0.9", "192.0.0.170", "100::1", "64:ff9b:1::1", "2001:1::1", "2001:20::1",
 	}
-	public := []string{"8.8.8.8", "1.1.1.1", "100.63.255.255", "100.128.0.0", "172.32.0.1", "2a00:1450::1", "2606:4700::1111", "::ffff:8.8.8.8"}
+	public := []string{
+		"8.8.8.8", "1.1.1.1", "100.63.255.255", "100.128.0.0", "172.32.0.1", "2a00:1450::1", "2606:4700::1111", "::ffff:8.8.8.8",
+		"192.31.195.255", "192.31.197.0", "192.52.192.255", "192.175.49.0", "2620:4f:8001::1",
+	}
 	for _, s := range special {
 		if !IsSpecialAddress(addr(s)) {
 			t.Errorf("%s: not special", s)

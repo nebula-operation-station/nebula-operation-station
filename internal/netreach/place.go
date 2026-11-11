@@ -25,10 +25,17 @@ const (
 // Segment is the L2 segment an address lies in: an IPAM subnet (SubnetID
 // set) or, without one, the connected network of a firewall interface.
 // VLAN is set only when IPAM or the owning interface records it.
+//
+// OwnerKnown is set when placement determined which firewall interface
+// owns the segment; Owner is then that interface's name, or "" when the
+// data proves that no firewall interface owns it. An ambiguous owner
+// leaves OwnerKnown false.
 type Segment struct {
-	Prefix   netip.Prefix
-	SubnetID string
-	VLAN     Field[uint16]
+	Prefix     netip.Prefix
+	SubnetID   string
+	VLAN       Field[uint16]
+	Owner      string
+	OwnerKnown bool
 }
 
 // Placement is the result of placing one address (ADR 0012 D2 step 1).
@@ -119,6 +126,14 @@ func (p *Placer) Place(addr netip.Addr) Placement {
 	if seg != nil {
 		pl.Segment = seg
 		in, reason := p.owner(seg.Prefix)
+		switch reason {
+		case "":
+			seg.Owner, seg.OwnerKnown = in.Name, true
+		case ReasonSubnetNoInterface:
+			seg.Owner, seg.OwnerKnown = "", true
+		case ReasonInterfaceNoZone:
+			seg.Owner, seg.OwnerKnown = in.Name, true
+		}
 		if reason != "" {
 			return unknown(pl, reason)
 		}
@@ -223,7 +238,8 @@ func (p *Placer) owner(seg netip.Prefix) (Interface, string) {
 	case len(found) > 1:
 		return Interface{}, ReasonInterfaceAmbiguous
 	case found[0].Zone == "":
-		return Interface{}, ReasonInterfaceNoZone
+		// The owner is known, its zone is not.
+		return found[0], ReasonInterfaceNoZone
 	}
 	return found[0], ""
 }
@@ -283,10 +299,14 @@ type Crossing struct {
 	Reason      string
 }
 
-// CrossingTest compares two placements: the same segment (same prefix
-// and subnet ID), or two segments whose collected VLANs are equal, give
-// not_filtered. Host firewalls are not modelled in nr-v1. An address
-// without a segment never shares one.
+// CrossingTest compares two placements. The same segment (same prefix
+// and subnet ID) gives not_filtered. Two segments whose collected VLANs
+// are equal give not_filtered only when no firewall interface lies
+// between them: both are owned by the same firewall interface, or the
+// data proves that no firewall interface owns either. Equal tags on
+// different interfaces (ethernet1/2.20 and ethernet1/3.20) are different
+// segments, and an unknown owner decides nothing. Host firewalls are not
+// modelled in nr-v1. An address without a segment never shares one.
 func CrossingTest(src, dst Placement) Crossing {
 	a, b := src.Segment, dst.Segment
 	if a == nil || b == nil {
@@ -295,15 +315,21 @@ func CrossingTest(src, dst Placement) Crossing {
 	if a.Prefix == b.Prefix && a.SubnetID == b.SubnetID {
 		return Crossing{NotFiltered: true, Reason: ReasonSameSegment}
 	}
-	if a.VLAN.Collected && b.VLAN.Collected && a.VLAN.Value == b.VLAN.Value {
+	if a.VLAN.Collected && b.VLAN.Collected && a.VLAN.Value == b.VLAN.Value &&
+		a.OwnerKnown && b.OwnerKnown && a.Owner == b.Owner {
 		return Crossing{NotFiltered: true, Reason: ReasonSameVLAN}
 	}
 	return Crossing{}
 }
 
 // specialPrefixes are the private and special-purpose ranges of ADR 0012
-// D2 (RFC 6890 and successors). An IPv6 address outside 2000::/3 is
-// special as well (see IsSpecialAddress).
+// D2: every entry of the IANA IPv4 and IPv6 Special-Purpose Address
+// Registries (RFC 6890 and successors) plus multicast. Registry entries
+// inside a listed prefix (192.0.0.0/29, 192.0.0.170/32, 2001::/32,
+// 2001:20::/28, ...) are covered by it. An IPv6 address outside 2000::/3
+// is special as well (see IsSpecialAddress); that covers ::/128, ::1/128,
+// ::ffff:0:0/96, 64:ff9b::/96, 64:ff9b:1::/48, 100::/64, 5f00::/16
+// (SRv6 SIDs), fc00::/7 and fe80::/10.
 var specialPrefixes = mustPrefixes(
 	// IPv4
 	"0.0.0.0/8",       // this network, unspecified
@@ -314,18 +340,22 @@ var specialPrefixes = mustPrefixes(
 	"172.16.0.0/12",   // RFC 1918
 	"192.0.0.0/24",    // IETF protocol assignments
 	"192.0.2.0/24",    // documentation
+	"192.31.196.0/24", // AS112-v4 (RFC 7535)
+	"192.52.193.0/24", // AMT (RFC 7450)
 	"192.88.99.0/24",  // 6to4 relay anycast (deprecated)
 	"192.168.0.0/16",  // RFC 1918
+	"192.175.48.0/24", // direct delegation AS112 service (RFC 7534)
 	"198.18.0.0/15",   // benchmarking
 	"198.51.100.0/24", // documentation
 	"203.0.113.0/24",  // documentation
 	"224.0.0.0/4",     // multicast
-	"240.0.0.0/4",     // reserved, broadcast
+	"240.0.0.0/4",     // reserved, limited broadcast
 	// IPv6 inside 2000::/3
-	"2001::/23",     // IETF protocol assignments (Teredo, ORCHID, ...)
-	"2001:db8::/32", // documentation
-	"2002::/16",     // 6to4
-	"3fff::/20",     // documentation (RFC 9637)
+	"2001::/23",         // IETF protocol assignments (Teredo, ORCHID, ...)
+	"2001:db8::/32",     // documentation
+	"2002::/16",         // 6to4
+	"2620:4f:8000::/48", // direct delegation AS112 service (RFC 7534)
+	"3fff::/20",         // documentation (RFC 9637)
 )
 
 var globalUnicast6 = netip.MustParsePrefix("2000::/3")
