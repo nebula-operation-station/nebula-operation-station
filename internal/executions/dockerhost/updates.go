@@ -92,9 +92,10 @@ func ParseImageUpdates(result []byte) (ImageUpdates, error) {
 const (
 	privateNoteRead        = "registry digest read by the executor (private registry); the local digest is not compared"
 	privateNoteRefused     = "private registry: no approved registry read lease covers this read, or reads are paused"
-	privateNoteRateLimited = "private registry: rate limited (the lease's hourly budget or 15-minute interval is used up), retry later"
+	privateNoteRateLimited = "private registry: rate limited (lease hourly budget, 15-minute interval, or hourly cap on distinct tags per repository or per host used up), retry later"
 	privateNoteOutScope    = "private registry: the repository is outside the registry's approved scope"
 	privateNoteFailed      = "private registry: the executor could not read the digest"
+	privateNotePending     = "private registry: the executor read is queued; reload shortly"
 )
 
 // PrivateDigestSource resolves private image digests through the executor;
@@ -157,6 +158,8 @@ func ResolvePrivateDigestsWith(ctx context.Context, u ImageUpdates, src PrivateD
 		}
 		out.Images[i].Private, out.Images[i].Remote = true, ""
 		switch {
+		case errors.Is(e, registrymeta.ErrPrivateReadPending):
+			out.Images[i].Note = privateNotePending
 		case errors.Is(e, registrymeta.ErrPrivateReadRefused):
 			out.Images[i].Note = privateNoteRefused
 		case errors.Is(e, registrymeta.ErrPrivateReadRateLimited):
