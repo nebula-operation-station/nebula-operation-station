@@ -34,6 +34,11 @@ History:
   and defines its units: every simple command after splitting at
   operators and unwrapping `sudo`, `env`, `docker run`/`exec`,
   `docker compose exec`/`run` and `sh -c` (previously undefined).
+- 2026-11-11 (as00h, follow-up to PR #465): the canary test also runs
+  host-shaped forms and fails when an argument rejects every form
+  (previously a rejected canary passed); the `number` canary is
+  `47000 + m` and fits `uint16` (previously a 10-digit sentinel above
+  2^32).
 
 ## Context
 
@@ -377,7 +382,7 @@ does NOS connect **from** (`--from`)?
   | --- | --- |
   | `text`, `in-path`, `out-path`, `trust-path` | `c<n>.canary.invalid` (for the path kinds also `/tmp/c<n>.canary.invalid`) |
   | `id` | `c<n>-canary` (dot-free; a single-label name that a resolver can still complete through search domains or `/etc/hosts`) |
-  | `number` | the sentinel `7357` followed by `<n>` zero-padded to 6 digits, 10 digits in all (a 10-digit number is also a valid `inet_aton` IPv4) |
+  | `number` | `47000 + m`, where `m` = 1, 2, … counts the `number` runs of the whole test (the test fails if `m` would exceed 999). The value fits `uint16` (≤ 65535), so `int`, `uint`, `ParseUint(…, 16)`/`(…, 32)` parsers accept it and a conversion to a 16-bit or wider integer (`uint32(*stage)`, `int32(*limit)`, `uint16(port)`) leaves it unchanged, so the "integer field equals the sentinel" check still sees it; the test fails if a fixture value or a flag default of that command lies in `47001`–`47999` (previously `7357` + 6 digits = 10 digits, above 2^32: rejected by `uint16`/`uint32` parsers, changed by truncation, and contrary to the earlier claim not a valid `inet_aton` IPv4). An argument whose parser has a smaller maximum `N` (today `events --limit`, 1 to 1000) carries the catalog annotation `canary-max: N` with a reason; its run uses the value `N`, the test also checks that `N+1` is rejected before anything is sent, and for that run the integer-field check is replaced by "no string field, dial address, URL or header equals the decimal `N` or its `inet_aton` dotted form" |
   | `duration` | `7` followed by `<n>` zero-padded to 5 digits, then `s` (6 digits, within the kind's shape) |
   | fixed-shape kinds (AS-05 review, e.g. `MODULE@VERSION`) | a value of that shape built from `c<n>-canary` (e.g. `c<n>-canary@1.0.0`), defined next to the kind |
   | `enum`, `bool` | no run: their values are fixed catalog literals; the catalog test fails when an `enum` value is host-like (V4c) |
@@ -385,7 +390,9 @@ does NOS connect **from** (`--from`)?
   A kind added to the catalog without a canary rule makes the test fail.
   The command runs against an in-process fake executor and with a
   recording dialer and HTTP transport injected into the code under test
-  (no network). Because the executor is faked, nothing is dialed for
+  (no network), in a fresh temporary working directory (so an `out-path`
+  form such as `https://c<n>.canary.invalid:8006` creates nothing
+  outside it). Because the executor is faked, nothing is dialed for
   most commands, so the test inspects **every outgoing request in full**
   rather than a list of destination field names (previously: only
   fields named `endpoint`, `address`, `host`, … as whole words and
@@ -417,9 +424,40 @@ does NOS connect **from** (`--from`)?
      `host`, `endpoint`, `address`, `URL`, `URI`, `IP` or `CIDR` (word
      match).
 
-  A run in which the command rejects the canary before sending anything
-  passes only if the fake executor, dialer and transport recorded no
-  request at all. A further property test checks that every kind except
+  **No vacuous passes: host-shaped forms** (previously: "a run in which
+  the command rejects the canary before sending anything passes", so an
+  argument whose CLI parser needs a host shape the kind canary lacks,
+  such as `pve remote add --endpoint` through `parsePveEndpoint` in
+  `cmd/nebula/pve.go`, which needs `host:port`, passed without testing
+  anything if it was misclassified as `id` or `text`). Every argument
+  with a canary run is run once per **form**, each with fresh recorders
+  and the same conditions 1–3:
+
+  | Form | Value for run `<n>` |
+  | --- | --- |
+  | kind canary | the table above |
+  | `host:port` | `c<n>-canary:8006` |
+  | URL | `https://c<n>.canary.invalid:8006` |
+  | userinfo | `user@c<n>-canary` |
+  | IP literal with port | `192.0.2.1:8006` (TEST-NET-1; no fixture may use `192.0.2.0/24`, the test fails otherwise) |
+
+  The host-shaped forms test the binary, not the validator: V4 would not
+  admit most of them for a non-host kind, but they show what the
+  argument **does** with a host value. A form is **rejected** when the
+  command returns an error and the fake executor, dialer and transport
+  recorded nothing; a rejected form passes on its own. The **argument
+  fails** when every form is rejected, unless its catalog entry carries
+  the reviewed annotation `canary-rejects: <reason>` (for example an
+  argument that must name an open file descriptor, such as
+  `netdev … --secret-fd`, whose `47000 + m` descriptor is not open in
+  the test); the test fails when an argument with that annotation
+  accepts any form (the annotation is stale), so the list cannot hide an
+  argument that sends what it accepts. Fixed-shape kinds (e.g. a digest
+  checked by `canonical.ParseDigest`) define a canary that their own
+  parser accepts, so they never need the annotation. An argument that
+  accepts no canary form and has no annotation is therefore either a
+  catalog error or a host-sending argument with a stricter host parser,
+  and both fail the build. A further property test checks that every kind except
   `host`, `host-port`, `host-list`, `text`, `in-path`, `out-path` and
   `trust-path` rejects `c1.canary.invalid`, `1.2.3.4`, `[::1]`, `::1`,
   `fe80::1` and `2001:db8::1`, that the placeholder class `version`
