@@ -265,6 +265,11 @@ func (s *AgentConfigStore) Get(ctx context.Context) (AgentConfig, error) {
 	return readAgentConfig(ctx, s.db)
 }
 
+// AgentConfig is Get; it lets the store serve the agent API directly.
+func (s *AgentConfigStore) AgentConfig(ctx context.Context) (AgentConfig, error) {
+	return s.Get(ctx)
+}
+
 // Change validates and stores ch, and writes the AuditAgentLLMChanged
 // entry with the old and new values inside the write transaction: when
 // the audit write fails, nothing is stored. It returns the old and the new
