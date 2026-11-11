@@ -218,7 +218,7 @@ func TestCreateOfferRejectsInvalidInput(t *testing.T) {
 		{"control in host", func(n *NewOffer) { n.HostID = "web\n01" }},
 		{"empty user", func(n *NewOffer) { n.SSHUser = "" }},
 		{"long user", func(n *NewOffer) { n.SSHUser = strings.Repeat("u", maxOfferSSHUserLen+1) }},
-		{"bidi in user", func(n *NewOffer) { n.SSHUser = "root‮" }},
+		{"bidi in user", func(n *NewOffer) { n.SSHUser = "root" + string(rune(0x202e)) }},
 		{"invalid UTF-8 credential", func(n *NewOffer) { n.CredentialRef = "\xff" }},
 		{"empty credential", func(n *NewOffer) { n.CredentialRef = "" }},
 		{"long credential", func(n *NewOffer) { n.CredentialRef = strings.Repeat("c", maxOfferCredRefLen+1) }},
