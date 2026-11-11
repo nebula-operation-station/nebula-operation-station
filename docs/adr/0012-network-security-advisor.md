@@ -1,9 +1,11 @@
 # ADR 0012: Network security advisor: reachability, rules, segmentation, firewall logs and IP reputation
 
-Status: **Proposed, 2026-11-11** (draft by Claude for the maintainer's
-request of 2026-11-11). Not accepted; awaiting the maintainer's answers to
-Q1–Q11 below (previously Q1–Q10). Do not start tickets after NS-03 before
-acceptance (see `docs/implementation/network-security.md`).
+Status: **Accepted 2026-11-11 (previously Proposed)**. The maintainer
+(Axel) answered Q1–Q10 on 2026-11-11 09:18 by accepting every
+recommendation; the answers are recorded in "Decisions 2026-11-11" below
+and in the D-sections. Q11 (ND-07 allowlist additions) stays open; until
+it is answered the D2 fail-safe rule applies and NS-04 does not start.
+Tickets: `docs/implementation/network-security.md`.
 
 History:
 
@@ -30,6 +32,12 @@ History:
   mitigation voided on `raw_digest` change too; mitigation queried over
   every host address; reputation hits from `incomplete` hours never
   denied-only; NS-05 test duties for these four points.
+- 2026-11-11: maintainer decisions Q1–Q10 recorded (ticket ns00g),
+  status Accepted (previously Proposed); feed-driven EDL rule sets and
+  Q4b removed (previously open as Q4b); syslog receiver dropped
+  (previously NS-13b if Q1 chose syslog); the D2 fail-safe rule covers
+  NAT rules too (previously security rules and the default-rule step
+  only).
 
 ## Context
 
@@ -81,12 +89,12 @@ Constraints carried over unchanged:
 
 - **Advisory only.** Nothing in this ADR changes a device, creates a
   proposal, permit or approval, or blocks traffic on its own. The optional
-  EDL (D7) would be the one exception: a list the firewall enforces, with
+  EDL (D7) is the one exception: a list the firewall enforces, with
   only entries an operator approved, pulled by the firewall itself, but
   **outside the ADR 0010 permit path and its phase-2a write gate** (ADR
-  0010 Q3). Whether an advisory-only ADR may add any such
-  firewall-enforced effect at all is **not decided here**; it is put to
-  the maintainer in Q4, and without an explicit yes D7 is not built.
+  0010 Q3). The maintainer allowed this one firewall-enforced effect, with
+  manually approved entries only (Q4, 2026-11-11; previously not decided,
+  D7 not built without an explicit yes).
 - Everything from devices, hosts, logs and feeds is untrusted input
   (spec 09): bounded, UTF-8-checked, printable text only, rendered as text.
 - Credentials stay in the executor (ADR 0010 D2); the server and collectors
@@ -101,10 +109,10 @@ Constraints carried over unchanged:
 | Component | Does | Never does |
 | --- | --- | --- |
 | `nebula-server` | Computes the reachability model, advisor findings, segmentation proposals, what-if results, mitigation signals for ADR 0011 and reputation matches in pure packages; stores log aggregates and reputation snapshots; serves the optional EDL | Fetch reputation feeds, contact feed providers or reputation APIs, send observed addresses anywhere, change a device, create proposals or permits from any result |
-| `nebula-executor` | Reads PAN-OS logs under a device read lease (new typed methods, D5), minimises and aggregates before anything leaves it | Accept caller-supplied queries, filters or xpaths; return raw log records |
+| `nebula-executor` | Reads PAN-OS logs under a device read lease (new typed methods, D5) with a separate read-only log role and key (Q1), minimises and aggregates before anything leaves it | Accept caller-supplied queries, filters or xpaths; return raw log records |
 | `nebula-netdev-collector` | Schedules the typed log reads, spools the results (unchanged ADR 0010 role) | Hold credentials, listen on the network |
-| `nebula-vuln-agent` (ADR 0011 amendment 1) | Fetches reputation feeds from allowlisted origins, verifies, normalises and uploads prefix lists to NOS (D6) | Receive observed addresses, flows, topology or findings; do per-address lookups at any provider |
-| Firewall (PAN-OS) | Pulls the EDL if Q4 allows it and the operator configured it (D7) | Receive anything pushed by NOS |
+| `nebula-vuln-agent` (ADR 0011 amendment 1) | Fetches reputation feeds from allowlisted origins, verifies, normalises and uploads prefix lists to NOS with the added scope `netsec.reputation.write` on its existing identity (D6, Q3) | Receive observed addresses, flows, topology or findings; do per-address lookups at any provider |
+| Firewall (PAN-OS) | Pulls the EDL if the operator configured it (D7; allowed by Q4) | Receive anything pushed by NOS |
 | Operator (admin) | Assigns zone trust classes and management targets, adds EDL entries one by one, applies any suggested rule change outside NOS (later perhaps through ND-30+) | — |
 
 **All results are advisory.** Reachability verdicts, advisor findings,
@@ -392,7 +400,16 @@ expo = 1.0  if reachable(internet)
 is not on the path, so nothing filters the traffic. In the flat lab network
 the host's own segment holds guest and IoT devices, so reachability from
 the own segment is internal reachability and keeps the v1 level 0.4; there
-is no level below 0.4 for a listening service. `vu-prio-v2` can therefore
+is no level below 0.4 for a listening service.
+
+**Own segment (Q7, decided 2026-11-11).** "Reachable only from the own
+segment" counts as **no mitigation** while that segment contains a zone
+of trust class `untrusted` or `unknown` (D4; unknown counts as
+untrusted, Q9), which in the flat lab network is always the case. There
+is **no 0.3 level** in `vu-prio-v2` (previously, in the first draft,
+1.0/0.7/0.4/0.3/0.2 with 0.3 for "own segment only"): such a service
+keeps 0.4. Introducing a level below 0.4 for a segmented network would
+be a new formula version and a new decision. `vu-prio-v2` can therefore
 only lower exposure from 1.0 or 0.7 to 0.4 through `denied` verdicts on the
 internet and NetBird paths, never below what v1 gives an internal-only
 service. A `not_filtered` source never appears as "mitigated" in the
@@ -400,8 +417,9 @@ summary; it is listed as "not filtered (firewall not on path)".
 
 All other terms, the tier thresholds and the **KEV floor (never below
 high)** are unchanged. Weights are named constants; the record names the
-formula version. `vu-prio-v1` values stay stored for comparison; the UI
-shows both until the maintainer retires v1.
+formula version. `vu-prio-v2` is accepted (Q7); `vu-prio-v1` values stay
+stored for comparison and the UI shows v1 beside v2 until the maintainer
+retires v1.
 
 **Fail closed.** The mitigation record is valid only while all of these
 hold; otherwise the finding uses its `vu-prio-v1` exposure (unmitigated)
@@ -461,8 +479,8 @@ verdict the check relies on that is `unknown` does not count (previously:
 or "data not collected", or runs on a snapshot that is not complete for
 it **never resolves an existing finding**: the finding stays as it was
 and shows "not evaluated since …". The admin
-may `acknowledge` a finding with reason and expiry (proposed default 90
-days, maximum 365, Q9), bound to the check ID and version, the rule UUID and a
+may `acknowledge` a finding with reason and expiry (default 90 days,
+maximum 365, Q9 decided 2026-11-11), bound to the check ID and version, the rule UUID and a
 **rule-scoped digest** (not the policy-wide `redacted_digest`, which
 changes with every unrelated edit). The rule-scoped digest is computed
 over the canonical redacted encoding of exactly what the check's evidence
@@ -476,8 +494,8 @@ depends on:
 - for `shadowed-rule` and `overlap`, the same for every covering rule;
 - for checks without a single rule (`dns-bypass`, `mgmt-from-untrusted`,
   `model-contradiction`), the deciding rules of the verdict chain, the
-  zone trust classes and management targets or designated resolvers
-  involved.
+  zone trust classes and management targets or the designated resolver
+  (the firewall, Q9) involved.
 
 A change to any of these, a new check version or the expiry re-opens the
 acknowledgement; a change elsewhere in the policy does not. Every finding
@@ -492,14 +510,14 @@ evidence.
 | `any-any` | An allow rule with source **and** destination address `any`, or source **or** destination zone `any`, or service and application both `any` | Rule, which fields are `any` |
 | `allow-without-profile` | An allow rule toward or from a zone of trust class `untrusted` or `guest` with no security profile or profile group (needs NS-04) | Rule, zones |
 | `zero-hits` | Enabled rule with zero hits since the later of rule creation and counter reset, with **≥ 30 days observed**; the reset time and observed window are shown (same rule as ADR 0010 ND-20); never a delete proposal | Hit count, first/last hit, reset time, window |
-| `dns-bypass` | Observed DNS (udp/tcp 53, tcp 853) from internal endpoints to destinations other than the operator-designated resolvers (DNS proxy or internal resolver addresses set in NOS), from flows or log aggregates, or an allow rule that permits DNS from an internal zone to an external zone without restricting the destination | Endpoints, destinations (aggregated), rule |
+| `dns-bypass` | Observed DNS (udp/tcp 53, tcp 853) from internal endpoints to destinations other than the designated resolver, which is **the firewall only** (its interface addresses from ND-16; Q9, previously operator-set DNS proxy or internal resolver addresses), from flows or log aggregates, or an allow rule that permits DNS from an internal zone to an external zone without restricting the destination | Endpoints, destinations (aggregated), rule |
 | `mgmt-from-untrusted` | Reachability (`allowed`, `conditional`, `not_filtered`, `unknown`) from a zone of trust class `untrusted`, `guest` or `iot`, or from `internet`/`netbird`, to a management target on its management ports | Source zone, target, port, verdict chain |
 | `model-contradiction` | Observed allowed traffic where the model says `denied` (D3) | Flow, rule chain |
 
 **Zone trust classes and management targets** are operator data in NOS:
 each zone gets one of `untrusted`, `guest`, `iot`, `internal`,
 `management` (default `unknown`, which counts as `untrusted` for the
-checks above); management targets default to the ADR 0010 devices, PVE
+checks above and for D3, Q9 decided 2026-11-11); management targets default to the ADR 0010 devices, PVE
 nodes (8006/tcp), managed hosts' SSH port, the NOS server and executor
 host, and IPMI/BMC assets if IPAM knows them; the operator can add or
 remove targets. Setting both is an audited admin action.
@@ -532,7 +550,7 @@ and shows:
   tier before and after) and which attack paths would be cut (D10 choke
   point arithmetic);
 - which observed flows of the last 21 days (traffic map) and 30 days (log
-  aggregates, if Q2 keeps 30) would be **broken**, with endpoints and
+  aggregates, Q2) would be **broken**, with endpoints and
   volumes;
 - whether ADR 0010 D5 would classify the rule as CRITICAL (NOS-path
   overlap; with the flat lab network every deny overlapping `<lab-net>` or
@@ -555,19 +573,25 @@ here.
 | --- | --- | --- |
 | New network listener | Yes (UDP/TCP 514 or TLS 6514); the collector has none today (ADR 0010 D4), so a new process and port | No; reuses the pinned HTTPS client of ND-08 |
 | Authenticity | UDP/TCP syslog unauthenticated and spoofable by any host on the flat network; TLS syslog with a firewall client certificate fixes this (*verify* PAN-OS client-cert support for syslog over SSL) | Pinned TLS to the registered device (ADR 0010 D1/D3) |
-| Credential | None in NOS | Read key needs log query permission in the read-only admin role (*verify* in NS-03; separate role/key if it must be wider) |
+| Credential | None in NOS | Separate read-only log role and key in the executor (Q1; log query permission *verify* in NS-03) |
 | Completeness | Near real time; drops under load (UDP) are silent | Pull by time window; per-query cap (`nlogs`, *verify*: max 5,000) and async job; an hour over the cap is marked `incomplete`, never silently partial |
 | Load on device | Firewall pushes, low cost | Queries on a weak CPU; one request per device at a time (ADR 0010 D4) |
 | Where data is first minimised | Receiver (new code outside the executor) | Executor, before anything leaves it (same place as redaction) |
 | Fits existing model | New role, new systemd unit, new spool | New typed read methods under the device read lease |
 
-**Recommendation: XML API log query through the executor**, hourly, for
-`traffic` and `threat` logs. It adds no listener, inherits pinning, leases,
-budgets and the collector spool, and minimises in the executor. If NS-03
-shows the cap cannot cover a lab hour, the next option is a firewall-side
-aggregate (PAN-OS custom report via the API, *verify*) before considering
-syslog; TLS syslog with client certificates would need its own ADR
-amendment (Q1).
+**Decision (Q1, 2026-11-11): XML API log query through the executor**,
+hourly, for `traffic` and `threat` logs, read-only (previously the
+recommendation). It adds no listener, inherits pinning, leases, budgets
+and the collector spool, and minimises in the executor. **No syslog
+receiver** is built. The log queries use a **separate read-only PAN-OS
+admin role and API key for logs**, not the phase-1 config read role of
+ADR 0010; that key is held by the executor like the other device
+credentials (ADR 0010 D2) and is used only by the two log methods below
+(previously: the phase-1 read role with log permission, or a second key
+if needed). If NS-03 shows the cap cannot cover a lab hour, the next
+option is a firewall-side aggregate (PAN-OS custom report via the API,
+*verify*) through the same read path; any syslog receiver would need a
+new decision and ADR amendment.
 
 **Typed methods.** `panos.log.traffic_hourly` and `panos.log.threat_hourly`,
 parameters only `(device_id, hour)`; the executor builds the fixed query
@@ -593,13 +617,12 @@ sessions kept, the hour marked `incomplete` with the dropped count.
 
 **Retention and personal data.** Addresses in firewall logs are personal
 data (internal addresses identify household members' and guests' devices;
-external addresses reveal who talks to whom). Proposed defaults, decided
-in Q2:
+external addresses reveal who talks to whom). Decided in Q2 on
+2026-11-11 (previously proposed defaults):
 
 - hourly aggregates **30 days**, pruned hourly (longer than ADR 0009's 21
   days; ADR 0009 D3 says a longer retention for flows needs a new decision,
-  and this is that decision for this separate dataset only — or align to
-  21 days);
+  and Q2 is that decision for this separate dataset only);
 - **external addresses without a reputation hit** are kept in full for
   **7 days** (allows matching against a feed that lists them later), then
   reduced to their /24 (IPv4) or /48 (IPv6) prefix inside the aggregate;
@@ -611,10 +634,10 @@ in Q2:
   source is pruned the hit keeps, until day 90, only the external address,
   feed IDs and categories, first and last seen, direction, total sessions
   and bytes split by allowed vs denied, and the **number** of internal
-  endpoints involved; no internal address, endpoint ID or label. Whether
-  the internal side should also be kept 90 days is part of Q2;
-- admin-only pages, no export, no read-only API scope; excluded from the
-  age-encrypted instance backup unless Q2 decides otherwise;
+  endpoints involved; no internal address, endpoint ID or label (the
+  proposed split, accepted with Q2);
+- admin-only pages, no export, no read-only API scope; log aggregates are
+  **excluded** from the age-encrypted instance backup (Q2);
 - **the same rules cover evidence derived from logs or flows** in other
   stores (advisor findings, D4; reputation hits, D6): such evidence is
   stored as a reference to the aggregate, flow or endpoint, not as a copy,
@@ -632,16 +655,20 @@ in Q2:
 amendment 1, A1.5 egress; D4 feed rules: origin allowlist, verified TLS,
 no cross-origin redirects, size and decompression limits, content dates,
 maximum snapshot age, plausibility gate, bulk downloads only). The NOS
-server never fetches feeds and gains no egress. Candidate feeds (Q3):
+server never fetches feeds and gains no egress. Feeds (Q3, decided
+2026-11-11; previously candidate feeds): the four keyless feeds below
+are on by default; **no API keys** are used.
 
 | Feed | Kind | Key | Note |
 | --- | --- | --- | --- |
-| abuse.ch Feodo Tracker IP blocklist | botnet C2 | none | *verify* format, update interval, terms |
-| abuse.ch SSLBL IP blacklist | botnet C2 | none | *verify* the list is still published |
-| Spamhaus DROP (and EDROP) | hijacked/criminal netblocks | none | *verify* whether EDROP is still separate or merged into DROP; terms of use |
-| FireHOL level1 | aggregate | none | contains bogon and private ranges; those are removed on ingest (below) |
-| AbuseIPDB blacklist (optional) | reported abusers | API key | bulk blacklist endpoint only; key on the agent host only |
-| CrowdSec blocklists (optional) | community signals | API key/enrolment | bulk lists only; key on the agent host only |
+| abuse.ch Feodo Tracker IP blocklist | botnet C2 | none | default; *verify* format, update interval, terms |
+| abuse.ch SSLBL IP blacklist | botnet C2 | none | default; *verify* the list is still published |
+| Spamhaus DROP (and EDROP) | hijacked/criminal netblocks | none | default; *verify* whether EDROP is still separate or merged into DROP; terms of use |
+| FireHOL level1 | aggregate | none | default; contains bogon and private ranges; those are removed on ingest (below) |
+
+AbuseIPDB and CrowdSec (keyed bulk lists; previously optional rows in
+this table) come **later**: not in this ADR's tickets; adding them needs
+a new decision on keys on the agent host.
 
 **No per-address lookups.** No component sends an observed address to any
 provider (no AbuseIPDB "check", no CrowdSec CTI per IP). This keeps the
@@ -651,18 +678,19 @@ personal data inside NOS.
 **Upload to NOS.** The agent normalises each feed to a **reputation
 snapshot**: feed ID (from a fixed NOS-side list, as ADR 0011 D5 source
 IDs), content date, entry count, entries `(CIDR, category)`. It uploads it
-through a new API scope `netsec.reputation.write` on `/api/v1`, on a token
-separate from the `vuln.*` token (or the same agent identity with the
-added scope, Q3). The agent **never** gains a read scope for flows, logs,
-endpoints or findings.
+through a new API scope `netsec.reputation.write` on `/api/v1`. The
+**existing vulnerability agent identity** gets this scope **in addition**
+to its `vuln.*` scopes; **no new token** is issued (Q3; previously a
+separate token or the added scope). The agent **never** gains a read
+scope for flows, logs, endpoints or findings.
 
 **Validation in NOS (fail closed per feed).** Every snapshot is untrusted:
 
 - CIDR syntax, IPv4/IPv6 only; entries in private, loopback, link-local,
   CGNAT, multicast, documentation, reserved or unspecified ranges, or
   overlapping any IPAM network or the NOS path, are **dropped** and counted;
-- prefixes shorter than a named minimum (proposed **/16 IPv4, /32 IPv6**;
-  previously /8 and /24) are dropped and counted, and the dropped entries
+- prefixes shorter than a named minimum (**/16 IPv4, /32 IPv6**, accepted
+  with Q3; previously /8 and /24) are dropped and counted, and the dropped entries
   are listed for the admin. Why: the minimum bounds the damage one
   poisoned or erroneous entry can do. A /8 would mark 16.7 million
   addresses, enough to turn ordinary traffic to a large provider into mass
@@ -671,8 +699,8 @@ endpoints or findings.
   operator. Botnet C2 lists are single addresses; netblock lists
   (Spamhaus DROP) may contain shorter legitimate entries, so NS-03 checks
   the shortest prefix in each candidate feed (*verify*), and a per-feed
-  value shorter than the default is a maintainer decision (Q3), never set
-  by the feed;
+  value shorter than the default is a separate maintainer decision after
+  NS-03 (not taken with Q3), never set by the feed;
 - per-feed and total entry caps (named constants); an over-cap snapshot is
   refused, the previous one stays with "feed stale";
 - content date not older than the stored one and not in the future (as ADR
@@ -702,21 +730,30 @@ allow (or an observed flow, which implies allow) to or from a listed
 address, or a hit marked "allowed traffic unknown (incomplete hour)".
 Dedupe per `(external address, internal endpoint, feed)` episode;
 the ADR 0011 D9 rate limit and hourly digest apply (10 per hour). Messages
-carry structured fields only (feed, category, internal endpoint label,
-direction, allowed sessions), no external address in third-party channels
-unless the operator enables it (Q8). The internal endpoint label in
-third-party channels is, as proposed, the label of a managed host or IPAM
-asset only, otherwise "internal endpoint in zone X"; observed device names
-(which can name a person) are not sent (Q8). Denied-only hits do not
-notify (proposed, Q8); they appear in a daily count. Event
+to webhook, ntfy and Telegram carry **structured fields only** (feed,
+category, internal endpoint label, direction, allowed sessions) and
+**never the external address**; the address is shown only inside NOS
+(Q8, decided 2026-11-11; previously: omitted unless the operator enabled
+it). The internal endpoint label in third-party channels is the label of
+a managed host or IPAM asset only, otherwise "internal endpoint in zone
+X"; observed device names (which can name a person) are not sent (Q8).
+Denied-only hits do not notify (Q8); they appear in a daily count. Event
 `netsec.feed_stale` per feed and episode.
+
+**Threat log notifications (Q8).** Event `netsec.threat_critical`: a
+threat log aggregate (D5) with action `allow` or `alert` and severity
+`critical`. Same rules as above: structured fields only (threat ID,
+threat name as escaped vendor text, severity, action, direction,
+internal endpoint label per the label rule), never the external address;
+dedupe per `(threat ID, internal endpoint, external address)` episode;
+the ADR 0011 D9 rate limit and hourly digest apply.
 
 ### D7: EDL export (E)
 
-**Optional, off by default, and only if Q4 explicitly allows a
-firewall-enforced effect outside the ADR 0010 permit path.** This section
-describes how D7 would look if the answer is yes; it does not decide that
-it may exist. NOS can publish one or more curated
+**Allowed by Q4 (2026-11-11), optional and off by default**, with
+**manually operator-approved entries only** (previously: built only if
+Q4 explicitly allowed a firewall-enforced effect outside the ADR 0010
+permit path). NOS can publish one or more curated
 **External Dynamic Lists** (IP lists) that the firewall pulls on its own
 schedule; the operator references them in deny rules they write. NOS gains
 no write access to the firewall.
@@ -729,7 +766,7 @@ no write access to the firewall.
 - **Authentication.** HTTP basic credentials generated by NOS (random, at
   least 32 bytes, shown once, stored as a hash, rotatable) or mTLS with a
   client certificate on the firewall, whichever PAN-OS supports for EDL
-  pulls (*verify* in NS-03). **No token in the URL** (URLs end up in logs).
+  pulls (*verify* in NS-03; accepted with Q4). **No token in the URL** (URLs end up in logs).
   **Required** source-address allowlist set to the firewall's registered
   address (ADR 0010 D1); a pull from any other address is refused before
   the credential is checked and audited (previously optional).
@@ -739,24 +776,23 @@ no write access to the firewall.
   add from a reputation hit (the form is prefilled), but every entry needs
   its own add with assertion. **No automatic adds from feeds.** Feed data
   is untrusted (D6); a list fed from it and referenced in a deny rule would
-  be an auto-block, which this ADR excludes (non-goals). Feed-driven
-  **rule sets** are therefore not part of this ADR; whether they are ever
-  wanted is a maintainer question (Q4b) and would need an amendment of this
-  ADR that revises the non-goal.
+  be an auto-block, which this ADR excludes (non-goals). **No automatic
+  rule sets from feeds** (Q4; previously left open as Q4b).
 - **Refusals (checked on every add and every publish).** Entries
   overlapping private, reserved and special ranges, any IPAM network, the
   NOS path, the firewall's own addresses, configured protected destinations
   (DNS upstreams, update mirrors, the feed origins, NetBird management,
   operator-listed) are refused; a list over its size cap (named constant,
-  default 10,000 entries, below the model's EDL capacity, *verify*) is not
+  default 10,000 entries, below the model's EDL capacity, *verify*;
+  accepted with Q4) is not
   published and the previous version stays.
 - **Audit.** Every add, removal, publish (version number,
   entry count, digest) and every pull (time, source address, result) is
   audited. The UI shows when the firewall last pulled.
 
 **Stated risk.** The EDL is an effect on the firewall that does not pass
-the ADR 0010 permit path or its phase-2a write gate; this is why Q4 asks
-the maintainer whether it may exist at all. A compromised server could serve a list that
+the ADR 0010 permit path or its phase-2a write gate; the maintainer
+accepted it with the bounds below (Q4). A compromised server could serve a list that
 blocks external addresses (availability) or empty it (removes blocks).
 Bounds: off by default; every entry is a manual admin add with assertion,
 so feed data and the agent token cannot reach the list; the refusals
@@ -771,8 +807,14 @@ policy, NAT or management of the firewall.
 ### D8: Where it runs, data access and limits
 
 - Model, advisor, proposals, what-if, matcher and EDL generation run in
-  `nebula-server` as pure packages plus thin jobs (recommended; Q5). The
+  `nebula-server` as pure packages plus thin jobs (Q5, decided
+  2026-11-11; previously recommended). It needs no internet egress. The
   agent host would need topology and flows, which ADR 0011 Q6 withholds.
+- **UI (Q6, decided 2026-11-11).** One admin page **"Network security"**
+  gives the overview and links into the existing views: the firewall view
+  (ADR 0010 ND-20) for rule findings and what-if, the traffic-map overlay
+  (ADR 0009 TM18 renderer) for reachability and reputation hits, and the
+  vulnerability page (ADR 0011 VU-11) for mitigation.
 - All pages are **admin-only** (as the ADR 0010 firewall view and ADR 0011
   attack paths); nothing is in the read-only API; exports of advisor
   findings are admin-only, audited, CSV-injection-safe (ADR 0011 D9), and
@@ -781,8 +823,8 @@ policy, NAT or management of the firewall.
   flow-derived evidence. Endpoint addresses and labels, destinations and
   flows from log aggregates or the traffic map (`dns-bypass`,
   `model-contradiction`, segmentation proposals, what-if broken flows,
-  reputation hits) are never exported (D5 "no export"). Allowing a
-  redacted export of such evidence would be a maintainer decision (Q2).
+  reputation hits) are never exported (D5 "no export"; unchanged by Q2).
+  Allowing a redacted export of such evidence would need a new decision.
 - Every job has a named wall-clock budget and output caps; truncation is
   stated, never silent.
 - UI rendering follows ADR 0009 D4 isolation for any map overlay and the
@@ -791,9 +833,9 @@ policy, NAT or management of the firewall.
 ## Non-goals
 
 - No device change of any kind, no auto-block, no automatic rule, object,
-  EDL or NAT change; the EDL exists only if Q4 allows it and then contains
-  only entries an admin added one by one with assertion. No feed-driven EDL rule sets (open as Q4b; they
-  would need an amendment that revises this non-goal).
+  EDL or NAT change; the EDL (allowed by Q4) contains only entries an
+  admin added one by one with assertion. No automatic EDL rule sets from
+  feeds (Q4; previously open as Q4b).
 - No change to ADR 0011 closure paths, states or retention; mitigation
   never closes a finding.
 - No per-address reputation lookups at any provider; no feed egress from
@@ -810,13 +852,13 @@ policy, NAT or management of the firewall.
 | --- | --- |
 | Model error makes a reachable service look mitigated | Fail closed: unknown, conditional and stale count as reachable; any policy change voids mitigations; contradiction with observed traffic voids and reports; KEV floor unchanged; mitigation never closes |
 | Hostile device text (rule names, descriptions, threat names) | Spec 09 bounds, escaped text, no links from device text |
-| Spoofed or flooded logs | API pull over pinned TLS (recommended); per-hour key caps with `incomplete` marking; syslog only with TLS client certs and a separate decision |
+| Spoofed or flooded logs | API pull over pinned TLS with a separate read-only log key (Q1); no syslog receiver; per-hour key caps with `incomplete` marking |
 | Poisoned reputation feed (false hits, hidden hits, internal ranges) | Feed rules of ADR 0011 D4 on the agent host; NOS-side validation (special/internal ranges dropped, prefix minimum, caps, high-water marks, plausibility hold); hits are advisory; no feed data reaches the EDL (manual entries only, D7) |
-| Leak of observed addresses to third parties | No per-address lookups; agent has no read scope for flows, logs or endpoints; notifications omit external addresses and personal endpoint labels by default (Q8) |
-| Compromised agent token | Can upload false snapshots within caps and validation: false or hidden reputation hits and notifications (misleading the operator, who may then add or skip EDL entries by hand); cannot read anything; separate scope, rotatable, source-bound. **Residual if Q4b ever allows feed-driven EDL rule sets:** false entries would flow into a list the firewall enforces and block legitimate external destinations (availability impact), bounded only by that amendment's hard limits (minimum prefix, per-rule-set cap, per-source opt-in, refusals); this is why D7 has no rule sets |
+| Leak of observed addresses to third parties | No per-address lookups; agent has no read scope for flows, logs or endpoints; notifications never carry external addresses and omit personal endpoint labels (Q8) |
+| Compromised agent token | Can upload false snapshots within caps and validation: false or hidden reputation hits and notifications (misleading the operator, who may then add or skip EDL entries by hand); cannot read anything; separate scope on the existing agent identity (Q3), rotatable, source-bound; no feed data reaches the EDL (no feed-driven rule sets, Q4) |
 | EDL abused to block or unblock | Off by default, manual entries with assertion, refusals, caps, audit, operator guide limits EDL to WAN deny rules; residual stated in D7 |
 | EDL credential leak | Basic credential hashed in NOS, rotatable, source allowlist; mTLS if supported; the list content is low sensitivity but reveals what the operator blocks |
-| Personal data in logs | Minimisation in the executor, aggregates only, short retention, prefix reduction, admin-only, no export (also not inside advisor finding exports: counts only), derived evidence follows the source's retention, excluded from backups by default |
+| Personal data in logs | Minimisation in the executor, aggregates only, short retention, prefix reduction, admin-only, no export (also not inside advisor finding exports: counts only), derived evidence follows the source's retention, excluded from the instance backup (Q2) |
 | Advisor as a map for an attacker | Admin-only, not in the read-only API, exports audited |
 
 `docs/threat-model.md` is protected and receives these items in NS-02.
@@ -826,12 +868,13 @@ policy, NAT or management of the firewall.
 - NOS can explain reachability, including "not filtered" in the flat lab
   network, and turns firewall rules into explainable risk reduction in
   vulnerability priority without weakening any ADR 0011 rule.
-- The executor gains two typed log read methods and more XML parsing of
-  hostile input (bounded, fuzzed, minimised at the source).
-- The agent host gains reputation feed origins in its egress allowlist and a
-  new upload scope; the server gains a new API scope, stores for log
-  aggregates, reputation snapshots, hits and advisor findings, and
-  optionally the EDL endpoint.
+- The executor gains two typed log read methods, a separate read-only
+  PAN-OS log key (Q1) and more XML parsing of hostile input (bounded,
+  fuzzed, minimised at the source).
+- The agent host gains reputation feed origins in its egress allowlist and
+  its existing identity an added upload scope (Q3); the server gains a new
+  API scope, stores for log aggregates, reputation snapshots, hits and
+  advisor findings, and the EDL endpoint (off by default, Q4).
 - If Q11 allows it, the ND-07 PAN-OS redaction allowlist grows by a few
   non-secret elements (protected change to an accepted ADR, reviewed);
   otherwise the checks that need them stay "data not collected".
@@ -851,91 +894,56 @@ policy, NAT or management of the firewall.
 - `docs/spec/12-inventory.md`: zone trust classes, management targets,
   advisor findings, reputation hits.
 - `docs/spec/13-notifications.md`: scope `netsec.reputation.write`, events
-  `netsec.reputation_allowed`, `netsec.feed_stale`.
+  `netsec.reputation_allowed`, `netsec.threat_critical` (Q8),
+  `netsec.feed_stale`.
 - `docs/spec/01-product.md`, `16-milestones.md`, `04-revision-history.md`;
   `docs/threat-model.md`.
 
 Tickets: [docs/implementation/network-security.md](../implementation/network-security.md).
 
+## Decisions 2026-11-11
+
+The maintainer (Axel) accepted every recommendation of this ADR on
+2026-11-11 at 09:18. The questions Q1–Q10 below were open in the
+Proposed draft (previously the section "Open questions for the
+maintainer"); each answer is recorded as decided and carried into the
+D-section named.
+
+| # | Question | Decision | Where |
+| --- | --- | --- | --- |
+| Q1 | Log source; log permission on the phase-1 read role or a second key | **XML API log query through the executor**, read-only. A **separate PAN-OS read role and key for logs**, not the phase-1 config read role. **No syslog receiver.** | D1, D5 |
+| Q2 | Retention, internal side of hits, backup | Log aggregates **30 days**. Full external addresses **7 days**, then truncated to **/24 (IPv4)** and **/48 (IPv6)**. Reputation hits **90 days**; the internal side follows the source retention as proposed. Log aggregates **excluded** from the instance backup. | D5 |
+| Q3 | Feeds, keys, token, prefix minimum | **Feodo, SSLBL, Spamhaus DROP/EDROP, FireHOL level1** on by default, **no API keys**; AbuseIPDB and CrowdSec **later**. The **existing vulnerability agent identity** gets the **additional scope `netsec.reputation.write`**; no new token. Minimum prefix /16 IPv4, /32 IPv6 as proposed. | D1, D6 |
+| Q4 | Firewall-enforced effect outside the ADR 0010 permit path (EDL) | **Yes** (option b), **manual operator-approved entries only**. **No automatic rule sets from feeds** (Q4b and the rule-set text removed). Authentication and size cap as drafted in D7. | Context, D7, Non-goals |
+| Q5 | Where the advisor runs | On the **NOS server**; no internet egress needed. | D8 |
+| Q6 | UI placement | One **"Network security"** overview page that links into the firewall view (rule findings, what-if), the traffic-map overlay (reachability, hits) and the vulnerability page (mitigation). | D8 |
+| Q7 | Priority formula | **`vu-prio-v2` accepted**; v1 shown beside v2 until retired. "Reachable only from own segment" counts as **no mitigation** while that segment contains untrusted or unknown zones (flat network); no 0.3 level, such a service keeps 0.4. | D3 |
+| Q8 | Notifications | **No external address** in webhook, ntfy or Telegram text: structured fields only, the address only inside NOS. Internal endpoint label and denied-only handling as proposed. **Notify on threat logs with action allow/alert at severity critical** (`netsec.threat_critical`). | D6 |
+| Q9 | Zone trust classes, DNS resolvers, acknowledgements | **Unknown zones count as untrusted.** Designated DNS resolver = **the firewall only**. Acknowledgement default 90 days, maximum 365 as proposed. | D3, D4 |
+| Q10 | Release placement | **After ADR 0010 phase 1 (ND-16, ND-20)**; the reputation part **after the vulnerability agent (va01–va08)**. | Ticket plan |
+
+Points the questions raised but the decision does not answer, kept open
+(no recommendation in the draft, so nothing to accept):
+
+- **Earlier minimisation of internal addresses** in log aggregates (Q2):
+  not decided; internal addresses are kept for the 30-day aggregate
+  retention until a later decision.
+- **Shorter per-feed prefix minimum** (Q3, for example Spamhaus DROP):
+  needs a separate decision after NS-03.
+
+## Follow-up items (not phase 1)
+
+- **NetBird VPS auth-failure logs as an additional source (open).** The
+  IONOS VPS that hosts NetBird runs Fail2Ban and Caddy; their
+  authentication-failure logs could serve as an optional, operator-provided
+  reputation and attack source. They would be read through the host's
+  normal NOS read path once the VPS is enrolled as a managed host, never
+  through a new listener or the feed path, and would be untrusted input
+  like every host output. Not part of any ticket in this ADR; it needs its
+  own decision on data, retention and matching.
+
 ## Open questions for the maintainer
 
-- **Q1: Log source.** XML API log query through the executor
-  (recommended, D5) or a syslog receiver (then only TLS with client
-  certificates, as a separate process and ADR amendment)? May the
-  phase-1 read-only PAN-OS role get log query permission, or is a second
-  read key for logs required?
-- **Q2: Retention.** Log aggregates 30 days (proposed) or 21 days like the
-  traffic map? Full external addresses 7 days, then /24 and /48? Reputation
-  hits 90 days, with the internal side (endpoints, per-endpoint sessions
-  and bytes) following the 30-day aggregate retention (proposed, D5), or
-  the whole hit 90 days? Log aggregates excluded from the instance backup
-  (proposed)? **Internal addresses** (household members', guests' and IoT
-  devices) are kept in full for the whole aggregate retention in this
-  draft: should they also be minimised earlier, for example after 7 days
-  replaced by the linked endpoint or asset ID where one exists and by the
-  zone and subnet otherwise, at least for zones of trust class `guest`
-  and `iot`? (Cost: older segmentation proposals and what-if broken-flow
-  lists lose per-device detail.) Is a redacted export of log- or
-  flow-derived evidence ever wanted (D8 excludes it)?
-- **Q3: Reputation feeds and keys.** Which of Feodo, SSLBL, Spamhaus DROP
-  (EDROP), FireHOL level1 by default? AbuseIPDB and/or CrowdSec with keys on
-  the agent host, or none? Separate token for `netsec.reputation.write` or
-  the existing agent identity with an added scope? Minimum feed prefix
-  /16 IPv4 and /32 IPv6 (proposed), and may a single feed (for example
-  Spamhaus DROP, after NS-03) get a shorter per-feed minimum?
-- **Q4: EDL and firewall-enforced effects.** This ADR is advisory only,
-  yet the EDL (D7) is a list the firewall enforces in deny rules, and it
-  does **not** pass the ADR 0010 permit path, its approval flow or the
-  phase-2a write gate (ADR 0010 Q3, which keeps all writes behind a
-  separate maintainer decision). **May this advisory-only ADR add any
-  firewall-enforced effect outside the ADR 0010 permit path and its
-  phase-2a write gate, even one the firewall pulls and the operator wires
-  into rules by hand?** Options: (a) no: D7 is dropped, and any blocklist
-  waits for ADR 0010 phase 2a and goes through its permit path; (b) yes,
-  as D7 is drafted (manual entries with assertion, refusals, required
-  source allowlist, off by default); (c) yes, but only after ADR 0010
-  phase 2a is decided. This draft makes no recommendation and does not
-  build D7 without an explicit (b) or (c). If yes: basic credentials or
-  mTLS (subject to NS-03) and the default size cap.
-  - **Q4b: Feed-driven rule sets.** Should NOS ever add EDL entries
-    automatically from reputation feeds? This draft does not: it would be an
-    auto-block from untrusted feed data and conflicts with the non-goal.
-    If the maintainer wants it, it needs an amendment of this ADR that
-    revises the non-goal and states the residual risk (a compromised agent
-    token or poisoned feed blocks legitimate destinations), and at least
-    these hard limits, each a named constant the operator cannot exceed:
-    a **minimum prefix length** for rule-set entries (single addresses,
-    /32 IPv4 and /128 IPv6, unless the maintainer names a shorter one), a
-    **per-rule-set entry cap** far below the list size cap, an **explicit
-    operator opt-in per entry source** (per feed ID and category, with
-    assertion; no "all feeds" option), entries expiring when the source
-    delists them or goes stale, and the D7 refusals on every add and
-    publish.
-- **Q5: Where the advisor runs.** NOS server (recommended) or the agent
-  host?
-- **Q6: UI placement.** Firewall view (ADR 0010 ND-20) for rule findings
-  and what-if; traffic-map overlay (reachability and hits, ADR 0009 TM18
-  renderer); vulnerability page for mitigation (ADR 0011 VU-11); or one
-  "Network security" page that links into those?
-- **Q7: Priority formula.** Accept `vu-prio-v2` exposure levels (1.0 / 0.7
-  / 0.4 / 0.2; no level below v1's internal 0.4 for a listening service,
-  `not_filtered` never mitigates), and show v1 beside v2 until retired?
-- **Q8: Notifications.** Include the external address in
-  `netsec.reputation_allowed` messages to webhook/ntfy/Telegram, or
-  structured fields without it (proposed)? The **internal endpoint label**
-  can be a personal device name (for example a phone named after its
-  owner): send it to third-party channels, or only the label of a managed
-  host or IPAM asset and otherwise "internal endpoint in zone X"
-  (proposed)? Hits with only denied traffic do **not** notify and appear
-  only in a daily count (proposed default), or should they notify too?
-  Notify on threat logs with action allow/alert at severity critical?
-- **Q9: Zone trust classes, management targets and acknowledgements.**
-  Defaults as in D4 (unknown zones count as untrusted)? Which resolvers
-  are the designated DNS resolvers for `dns-bypass`? Advisor
-  acknowledgement expiry **default 90 days, maximum 365** (proposed
-  defaults), or other values?
-- **Q10: Release placement.** After ADR 0010 phase 1 (ND-16 and ND-20) and
-  ADR 0011 VU-10/VU-22; reputation after the agent (va01–va08)?
 - **Q11: ND-07 redaction allowlist additions.** May the allowlist of the
   accepted ADR 0010 (ND-07, protected `internal/netdevredact/`) grow by
   the D2 elements (`rulebase/default-security-rules`, `negate-source`,
@@ -945,4 +953,5 @@ Tickets: [docs/implementation/network-security.md](../implementation/network-sec
   rule unchanged? Does that need an amendment note in ADR 0010 itself?
   Without them, `allow-without-profile` stays "data not collected" and
   every rule is unevaluable, so no verdict is `denied` or `allowed` and
-  nothing counts as mitigating (D2 fail-safe, D3).
+  nothing counts as mitigating (D2 fail-safe, D3). Not answered on
+  2026-11-11.
