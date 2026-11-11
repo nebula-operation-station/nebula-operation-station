@@ -172,8 +172,9 @@ nfpms:
         dst: /lib/systemd/system/nebula-discovery.timer
       - src: deploy/systemd/nebula-pve-collector.service
         dst: /lib/systemd/system/nebula-pve-collector.service
-      # Shipped, never enabled by the package: the admin enables it once
-      # network devices are registered (install.sh, ND-15).
+      # Shipped, never enabled by the package: nothing removes its spool
+      # before the server import (ND-16), so the admin enables it only once
+      # that import is installed (install.sh, ND-15).
       - src: deploy/systemd/nebula-netdev-collector.service
         dst: /lib/systemd/system/nebula-netdev-collector.service
       - src: deploy/install.sh

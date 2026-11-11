@@ -423,9 +423,12 @@ done
 # the unit gives it no capabilities and no network
 # (nebula-netdev-collector.service). Its spool is one flat directory that the
 # collector owns and writes, and that the server group (nebula-rpc) lists,
-# reads and, once imported, unlinks: 2770, setgid so a file written by the
-# collector inherits the shared group (internal/netdevcollect/spool.go). The
-# collector unit (RestrictSUIDSGID=yes) cannot set the setgid bit itself.
+# reads and unlinks: 2770, setgid so a file written by the collector inherits
+# the shared group (internal/netdevcollect/spool.go). The collector unit
+# (RestrictSUIDSGID=yes) cannot set the setgid bit itself. The server drop-in
+# below opens the spool to the server already, so the import (ND-16) needs no
+# deploy change; until it is installed nothing removes the files, which is
+# why the collector stays off (see the unit and the next steps below).
 # The spool's parent is root-owned, so nothing but root can swap a link in
 # after the guard; install -d re-applies mode, owner and group on every run.
 # begin: netdev collector provisioning
@@ -570,8 +573,10 @@ done
 # package enables: the installable subset (no nebula-discovery.service).
 #
 # nebula-netdev-collector.service (ADR 0010, ND-15) is installed but never
-# enabled by this script, in either mode: network devices are registered in
-# the executor after the install, so the admin enables the collector then
+# enabled or started by this script, in either mode: nothing imports or
+# removes its spool before the server import (ND-16) is installed, so an
+# enabled collector would fill the disk. The admin enables it once that
+# import is installed and the network devices are registered
 # (systemctl enable --now nebula-netdev-collector). It is therefore in
 # tarball_units only, and the enable loop skips it.
 tarball_units=(
@@ -850,9 +855,10 @@ rm -f "${tmp_drop_in}"
 
 # --- Server drop-in (rewritten on every run) -----------------------------
 # The server unit uses ProtectSystem=strict; it may write the discovery
-# job spool, the PVE live want-list (pve/requests) and the two directories
-# it consumes (pve/results, pve/guestnet), and nothing else outside its
-# state directory. The pve root and pve/live stay read-only.
+# job spool, the PVE live want-list (pve/requests), the two directories
+# it consumes (pve/results, pve/guestnet) and the network device spool
+# (netdev, consumed by the ND-16 import), and nothing else outside its state
+# directory. The pve root and pve/live stay read-only.
 server_drop_in_dir="${systemd_dir}/nebula-server.service.d"
 server_drop_in="${server_drop_in_dir}/20-discovery.conf"
 server_drop_in_changed=1
@@ -870,6 +876,10 @@ ReadWritePaths=${var_lib}/pve/requests
 # (ADR 0006 P1-10); without this the spool only grows.
 ReadWritePaths=${var_lib}/pve/results
 ReadWritePaths=${var_lib}/pve/guestnet
+# nebula-server reads and unlinks the network device spool once its import
+# (ADR 0010 ND-16) is installed. "-": the spool is optional, its absence
+# must not stop the server.
+ReadWritePaths=-${var_lib}/netdev
 EOF
 if [[ -f "${server_drop_in}" ]] && cmp -s "${tmp_server_drop_in}" "${server_drop_in}"; then
   server_drop_in_changed=0
@@ -935,8 +945,8 @@ for name in "${enable_units[@]}"; do
   if [[ "${name}" == "nebula-discovery.service" ]]; then
     continue
   fi
-  # nebula-netdev-collector.service is enabled by the admin once network
-  # devices are registered (see tarball_units above); an install never
+  # nebula-netdev-collector.service is enabled by the admin once the server
+  # import (ND-16) is installed (see tarball_units above); an install never
   # enables or starts it, and never disables it either.
   if [[ "${name}" == "nebula-netdev-collector.service" ]]; then
     continue
@@ -1126,8 +1136,11 @@ Next steps:
   6. Check the status:
        nebula status
 
-  7. Only with network devices (switches, firewalls): once they are
-     registered in the executor, enable the network device collector:
+  7. The network device collector (switches, firewalls) is installed
+     but off. Leave it off until the server import of its spool (ND-16)
+     is installed: before that nothing removes what it writes to
+     ${var_lib}/netdev, and the spool fills the disk. Then register
+     the devices in the executor and enable it:
        systemctl enable --now nebula-netdev-collector
 
 Further changes to the executor flags go into a separate drop-in

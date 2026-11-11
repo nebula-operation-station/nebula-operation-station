@@ -250,12 +250,13 @@ else
   echo "ok   install.sh runs no root install -d on a pve spool path"
   pass=$((pass + 1))
 fi
-# The server drop-in grants exactly the discovery jobs, pve/requests and the
-# two directories the importers unlink in; the server unit itself grants no
-# write path.
+# The server drop-in grants exactly the discovery jobs, pve/requests, the
+# two pve directories the importers unlink in and the netdev spool (optional,
+# "-": the netdev import, ND-16, unlinks there); the server unit itself
+# grants no write path.
 rw=$(grep '^ReadWritePaths=' "$install_sh" | tr '\n' ' ')
-if [[ "$rw" == 'ReadWritePaths=${var_lib}/discovery/jobs ReadWritePaths=${var_lib}/pve/requests ReadWritePaths=${var_lib}/pve/results ReadWritePaths=${var_lib}/pve/guestnet ' ]]; then
-  echo "ok   server drop-in may write only discovery/jobs, pve/requests, pve/results and pve/guestnet"
+if [[ "$rw" == 'ReadWritePaths=${var_lib}/discovery/jobs ReadWritePaths=${var_lib}/pve/requests ReadWritePaths=${var_lib}/pve/results ReadWritePaths=${var_lib}/pve/guestnet ReadWritePaths=-${var_lib}/netdev ' ]]; then
+  echo "ok   server drop-in may write only discovery/jobs, pve/requests, pve/results, pve/guestnet and netdev"
   pass=$((pass + 1))
 else
   echo "FAIL server drop-in ReadWritePaths: ${rw:-none}"
@@ -280,6 +281,17 @@ if [[ $(grep -cxF '      - pve-results:/var/lib/nebula/pve/results' "$compose_ya
   pass=$((pass + 1))
 else
   echo "FAIL compose PVE spool mounts differ from server and collector sharing, or the collector has a network"
+  fail=$((fail + 1))
+fi
+# The server shares the netdev spool volume writable (the ND-16 import
+# unlinks there), like pve/results, so that import needs no compose change.
+server_compose=$(awk '/^  server:$/{f=1;next} f&&/^  [a-z]/{exit} f{print}' "$compose_yaml")
+if printf '%s\n' "$server_compose" | grep -qxF '      - netdev-spool:/var/lib/nebula/netdev' &&
+   [[ $(grep -cxF '      - netdev-spool:/var/lib/nebula/netdev' "$compose_yaml") == 2 ]]; then
+  echo "ok   compose mounts the netdev spool writable in the server and the collector"
+  pass=$((pass + 1))
+else
+  echo "FAIL compose netdev spool is not shared writable by the server and the collector"
   fail=$((fail + 1))
 fi
 
@@ -2184,7 +2196,20 @@ else
     echo "FAIL netdev unit: spool path or user no longer match cmd/nebula-netdev-collector or internal/peercred"
     fail=$((fail + 1))
   fi
+  # Nothing imports the spool before ND-16: the unit must not claim the
+  # server imports it, and must say to enable it only once that import is in.
+  if ! grep -qi 'server imports' "$netdev_unit" &&
+     grep -qF '# Off by default' "$netdev_unit" &&
+     grep -qF '# shares with the executor database. Enable it only once the server import' "$netdev_unit"; then
+    echo "ok   netdev unit: off by default, enable only once the server import (ND-16) is installed"
+    pass=$((pass + 1))
+  else
+    echo "FAIL netdev unit: must say it is off by default until the server import (ND-16), and not claim an import"
+    fail=$((fail + 1))
+  fi
 fi
+check_line "install.sh: next steps keep the netdev collector off until ND-16" "$install_sh" \
+  '     but off. Leave it off until the server import of its spool (ND-16)'
 # The provisioned spool state is what the collector's spool code checks.
 if grep -qF 'spoolDirMode = os.FileMode(0o770) | os.ModeSetgid' "$netdev_spool_go" &&
    grep -qF 'const spoolGroupName = "nebula-rpc"' "$netdev_spool_go"; then

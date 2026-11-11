@@ -2,8 +2,8 @@
 # Reference unit for nebula-netdev-collector (ADR 0010, ND-15). The collector
 # polls the executor over the shared Unix socket for the registered network
 # devices (ListNetDevices) and their typed reads (ReadNetDevice), and writes
-# the sanitized results to the spool under /var/lib/nebula/netdev, which the
-# server imports. It never talks to a device itself: the executor does.
+# the sanitized results to the spool under /var/lib/nebula/netdev. It never
+# talks to a device itself: the executor does.
 #
 # It runs as its own system user (nebula-netdev-collector) with the
 # netdev-collector peercred role, and is locked down like the PVE collector:
@@ -12,8 +12,14 @@
 # the spool is its only writable path, and it only gets what the
 # netdev-collector role allows.
 #
-# install.sh installs this unit but does not enable it: network devices are
-# registered in the executor after the install. Enable it once they are:
+# Off by default: install.sh and the package install this unit but never
+# enable or start it. Nothing in this release imports or removes the spool
+# files yet; the server import comes with ND-16 (ADR 0010). Until then an
+# enabled collector writes a new file of up to 1 MiB per device and read on
+# every interval, and the spool grows without bound on the filesystem it
+# shares with the executor database. Enable it only once the server import
+# (ND-16) is installed and the network devices are registered in the
+# executor:
 #   systemctl enable --now nebula-netdev-collector
 [Unit]
 Description=Nebula Operation Station network device collector

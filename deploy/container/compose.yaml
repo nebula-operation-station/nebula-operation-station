@@ -64,6 +64,10 @@ services:
       # generation state, and never reads Proxmox itself.
       - pve-results:/var/lib/nebula/pve/results
       - pve-guestnet:/var/lib/nebula/pve/guestnet
+      # Network device spool (ADR 0010): writable because the server import
+      # (ND-16) unlinks what it imported; mounted now so that import needs
+      # no compose change.
+      - netdev-spool:/var/lib/nebula/netdev
       - ./server.json:/etc/nebula/server.json:ro
 
   discovery:
@@ -105,9 +109,12 @@ services:
       - pve-results:/var/lib/nebula/pve/results
       - pve-guestnet:/var/lib/nebula/pve/guestnet
 
-  # Network device collector (ADR 0010, ND-15). Like the systemd unit it is
-  # not started by default: register the network devices in the executor
-  # first, then start it with
+  # Network device collector (ADR 0010, ND-15). Off by default, like the
+  # systemd unit: `docker compose up` does not start it. Nothing imports or
+  # removes its spool files before the server import (ND-16) is in the
+  # image, so until then an enabled collector fills the disk. Once the image
+  # has that import and the network devices are registered in the executor,
+  # start it with
   #   NEBULA_RP_ID=nebula.example.org docker compose --profile netdev up -d
   netdev-collector:
     <<: *hardening

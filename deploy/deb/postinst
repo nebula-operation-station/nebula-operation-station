@@ -28,6 +28,10 @@ ReadWritePaths=${var_lib}/pve/requests
 # (ADR 0006 P1-10); without this the spool only grows.
 ReadWritePaths=${var_lib}/pve/results
 ReadWritePaths=${var_lib}/pve/guestnet
+# nebula-server reads and unlinks the network device spool once its import
+# (ADR 0010 ND-16) is installed. "-": the spool is optional, its absence
+# must not stop the server.
+ReadWritePaths=-${var_lib}/netdev
 EOF
 }
 
