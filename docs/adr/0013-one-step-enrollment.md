@@ -72,16 +72,44 @@ Constraints that shape every decision below:
    privileged session (ADR 0007) is required.
 2. **Offer.** The server calls the executor (`CreateEnrollOffer`). The
    executor creates the offer: offer ID (D2), salt, expiry **15 minutes**,
-   bound to the host ID, SSH user, credential reference, the web session that
-   created it and, with D6, a fresh NetBird setup key. The executor renders
-   the script (D5) and stores its SHA-256. Audit `enroll_offer_created`.
-3. **Command.** The UI shows one command block, for example:
+   bound to the host ID, SSH user, credential reference and the web session
+   that created it. Without NetBird the executor renders the script (D5) at
+   once and stores its SHA-256. Audit `enroll_offer_created`.
+   - **With NetBird** the offer starts in `awaiting_approval` and has no
+     setup key and no script yet. The executor proposes a **NetBird offer
+     permit** (HIGH, user verification; binds offer ID hash, host ID, SSH
+     user, credential reference, managed group, ephemeral flag and setup-key
+     expiry). Only after the operator approves it with the security key does
+     the executor create the one-off setup key (D6), render the script and
+     store its hash. A compromised server with an open privileged session
+     can therefore create offers, but cannot obtain a single setup key
+     without a security-key touch (D6, "Why a stolen setup key is bounded").
+     NetBird offers also have their own lower limits (D2).
+3. **Command.** The UI shows one command block for the operator's POSIX
+   shell (bash, dash, zsh), for example:
 
    ```
-   curl --proto '=https' --tlsv1.2 -fsS -o nos-enroll.sh \
-     https://nos.example.lan/enroll/<offer-id>
-   echo '<sha256>  nos-enroll.sh' | sha256sum -c - && sudo sh nos-enroll.sh
+   ( umask 077 && d=$(mktemp -d) || exit 1
+     trap 'rm -rf "$d"' EXIT; trap 'exit 130' HUP INT TERM
+     cd "$d" &&
+     curl --proto '=https' --tlsv1.2 -fsS -o nos-enroll.sh \
+       https://nos.example.lan/enroll/<offer-id> &&
+     echo '<sha256>  nos-enroll.sh' | sha256sum -c - &&
+     sudo sh nos-enroll.sh )
    ```
+
+   The subshell sets `umask 077`, downloads into a fresh `mktemp -d`
+   directory (mode `0700`, file mode `0600`) and removes that directory from
+   a `trap` on exit, hang-up, interrupt or termination. So the script, which
+   may contain the NetBird setup key, is never readable by other local users
+   and is not left behind when the download, the hash check or the script
+   fails or the operator presses Ctrl-C. Only `SIGKILL` or a power loss can
+   leave the file in the temporary directory (`0700`, root or the operator
+   only); the setup key is then still one-off, at most 1 hour valid and
+   revoked when the offer becomes final (D6). The UI shows a second variant
+   for a root login without `sudo` (common on minimal Debian and VPS
+   images): identical except that the last line is `sh nos-enroll.sh )`.
+   Users of non-POSIX shells (fish) start `sh` first.
 
    Download, hash check, then run; never `curl | sh` (D7). A "Show script"
    link shows the same bytes for review; reading it does not consume the
@@ -103,6 +131,26 @@ Constraints that shape every decision below:
    (`SubmitPairingCode`). The executor probes the endpoint (no credential
    sent), takes the presented **ed25519** host key, computes the code from it
    and the offer salt, and compares in constant time.
+   - The probe offers **only** `ssh-ed25519` as host key algorithm, so the
+     server cannot negotiate ECDSA or RSA instead; a server without an
+     ed25519 host key fails the probe ("no ed25519 key", not a mismatch).
+     Every later connection to the host restricts `HostKeyAlgorithms` to the
+     pinned key's type, as `internal/sshtransport` already does for pinned
+     keys, so a host that later presents only another key type fails the
+     connection instead of being accepted under a different algorithm.
+   - **Endpoint not yet in the inventory.** If the operator types or picks an
+     address that is not one of the host's inventory endpoints, the paired
+     enrollment permit binds it as "endpoint to add", and the approval page
+     and `nebula approve` show "will be added to the inventory host". The
+     endpoint is validated exactly like a manually entered inventory
+     endpoint (spec 09, spec 12). It is added to the host's endpoint list
+     (appended last) only after a successful commit, in the same step as the
+     pin, audited as `inventory_endpoint_added` with source `paired`; a
+     failed, expired or revoked offer adds nothing. This is the same
+     privileged-session edit an operator could make by hand, now covered by
+     the HIGH approval as well; it never replaces or reorders existing
+     endpoints, and every endpoint must still present the pinned key
+     (spec 08).
    - Match: the executor proposes a paired enrollment permit (D4). The UI
      shows host, endpoint, SSH user, credential, full SHA-256 fingerprint and
      "matches the pairing code from the host"; the operator approves with the
@@ -126,8 +174,9 @@ the other direction). The only channel host → NOS is the operator.
   only its SHA-256, never the ID itself, and logs only the first 8 hex
   characters of that hash.
 - **States:** `open` → `downloaded` → `pairing_proposed` → `enrolled`;
-  from any non-final state → `expired`, `revoked` or `failed`. Final states
-  never return to `open`.
+  NetBird offers start in `awaiting_approval` and move to `open` only after
+  the NetBird offer permit is approved (D1 step 2); from any non-final state
+  → `expired`, `revoked` or `failed`. Final states never return to `open`.
 - **Expiry:** 15 minutes from creation for the download and the code
   submission (Q2). An approval started before expiry may finish within the
   permit's own lifetime; a commit after the permit expired fails.
@@ -140,17 +189,26 @@ the other direction). The only channel host → NOS is the operator.
   privileged session does not resurrect it.
 - **Revocation:** the operator can revoke an open offer in the UI; the
   executor-local CLI can list and revoke offers (`nebula host offers`,
-  `nebula host offer-revoke`). Revoking also revokes the NetBird setup key if
-  it is unused (D6).
+  `nebula host offer-revoke`). Revoking also revokes the NetBird setup key
+  (D6), unconditionally: there is no "is it used?" check first, so there is
+  no check-then-revoke race, and revoking a consumed one-off key is
+  harmless.
 - **Limits** (named constants in the implementation): at most 10 non-final
   offers per executor, at most 30 offers created per hour, at most 5 probes
   per offer, at most 3 rejected (malformed) code submissions per offer.
+  NetBird offers have separate, lower limits on top: at most 2 non-final
+  NetBird offers and at most 5 setup keys created per hour (each one also
+  needs its own security-key approval, D1 step 2).
 - **Audit** (executor and server, no secret values): `enroll_offer_created`,
-  `enroll_script_downloaded` (with the client address the server saw),
+  `enroll_offer_approved` (NetBird offers),
+  `enroll_script_downloaded` (with the client address determined as in D7
+  "Client address", and the direct peer address),
   `enroll_code_rejected` (malformed), `enroll_code_mismatch`,
   `enroll_paired_proposed`, `host_enrolled`, `enroll_offer_expired`,
-  `enroll_offer_revoked`, `netbird_setup_key_created`,
-  `netbird_setup_key_revoked`, `netbird_peer_joined`.
+  `enroll_offer_revoked`, `inventory_endpoint_added`,
+  `netbird_setup_key_created`, `netbird_setup_key_revoked`,
+  `netbird_peer_joined`, `netbird_peer_orphaned`, `netbird_peer_deleted`,
+  `netbird_peer_kept`.
 - **Retention:** final offers are kept as audit records without salt, script
   and setup key reference; salt, script bytes and setup key are wiped when the
   offer becomes final.
