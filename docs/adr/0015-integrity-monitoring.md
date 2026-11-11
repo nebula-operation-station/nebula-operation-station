@@ -65,7 +65,7 @@ What follows from that, per stage:
 | Root attacker who runs a rootkit or patches the checker, `sha256sum`, the kernel or the NOS binary that performs the check | **Not reliably detected**: a replaced binary can skip its own check, and all NOS processes on one machine fall to the same root | **Not reliably detected**: the host lies | Detected for everything measured **before** or **at load** by the TPM-backed log, within the IMA policy; see I3 limits |
 | Attacker who restores the original file before the next scan | Missed between scans | Missed between scans (incremental runs use `ctime`, which ordinary tools cannot set; root can still fake it) | IMA records every measured load, including short-lived ones |
 | Compromised `nebula-server` | Executor detects server-binary changes (different UID, server cannot write executor storage); a compromised server can still suppress the *display* of I2 findings | Server can hide findings from the UI; it cannot silently rewrite an approved baseline (D7) | Quotes are verified by the executor, not the server |
-| Compromised `nebula-server` or D8 reference builder supplying false package references | n/a (I1 uses the YubiKey-signed list, D2) | **Not detected as such**: it can make an attacker's file match a "verified" reference, so the change is labelled expected (info) or "package updated outside NOS" (medium) instead of critical; it cannot put the file into a baseline without the admin's executor-bound assertion (D7, D9), but an admin who approves trusts the label (see "Honest limits") | IMA entries are compared against the same references (D10); same limit |
+| Compromised `nebula-server` or D8 reference builder supplying false package references | n/a (I1 uses the YubiKey-signed list, D2) | **Not detected as such**: it can make an attacker's file match a "verified" reference, so the change is labelled expected (info) or, outside critical-class paths (D9), "package updated outside NOS" (medium) instead of critical; it cannot put the file into a baseline without the admin's executor-bound assertion (D7, D9), but an admin who approves trusts the label (see "Honest limits") | IMA entries are compared against the same references (D10); same limit |
 
 Consequences stated plainly:
 
@@ -150,8 +150,8 @@ named in the handbook next to every "no unexpected change" result:
   through the server; the executor cannot re-derive them (D8). A
   compromised builder or server can make an attacker's file match a
   "verified" reference, so the change is shown as an expected change
-  (info) or "package updated outside NOS" (medium) rather than as a
-  critical mismatch. It cannot put the file into a baseline: every
+  (info) or, for a path that is not critical-class, as "package updated
+  outside NOS" (medium) rather than as a critical mismatch. It cannot put the file into a baseline: every
   baseline entry, expected or not, needs the admin's assertion over an
   executor-computed digest (D7, D9), and critical-class paths need one
   assertion each (D9). An admin who approves an entry labelled
@@ -671,7 +671,8 @@ the builder is compromised as well. Both limits are listed in "Honest
 limits". Package updates done on the host outside NOS (for example
 unattended-upgrades) whose new records match the verified archive
 reference in every field listed above are medium-severity findings
-("package updated outside NOS"), not alarms.
+("package updated outside NOS"), not alarms, unless the path is
+critical-class (precedence above).
 
 **Findings.** A new store `integrity_findings` (not the ADR 0011 store,
 whose observer is always Hermes): subject (NOS machine or host ID), path
