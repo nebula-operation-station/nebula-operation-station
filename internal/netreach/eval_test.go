@@ -217,6 +217,20 @@ func TestConditionalRules(t *testing.T) {
 				{"conditional deny then deny rule", withRules(cDeny("lan", "dmz"), rule("d", ActionDeny, "lan", "dmz")), inter, VerdictDenied, "denied by rule d"},
 				{"conditional deny then default interzone deny", withRules(cDeny("lan", "dmz")), inter, VerdictDenied, "interzone-default"},
 				{"conditional deny then unevaluable rule", withRules(cDeny("lan", "dmz"), rule("bad", ActionAllow, "lan", "dmz", func(r *SecurityRule) { r.Destination = list("cloud") })), inter, VerdictUnknown, "rule bad unevaluable"},
+				// ADR 0012 D2 step 4: a recorded conditional allow is an
+				// allow among the matches, so the verdict is conditional
+				// whatever follows; never denied.
+				{"conditional allow then unevaluable rule", withRules(cAllow("lan", "dmz"), rule("bad", ActionDeny, "lan", "dmz", func(r *SecurityRule) { r.Destination = list("cloud") })), inter, VerdictConditional, "(rules c-allow); otherwise rule bad unevaluable: "},
+				{"conditional allow then default rules not collected", func() *Snapshot {
+					s := withRules(cAllow("lan", "dmz"))
+					s.DefaultRules = Field[DefaultRules]{}
+					return s
+				}(), inter, VerdictConditional, "(rules c-allow); otherwise rule interzone-default unevaluable: "},
+				{"conditional deny then default rules not collected", func() *Snapshot {
+					s := withRules(cDeny("lan", "dmz"))
+					s.DefaultRules = Field[DefaultRules]{}
+					return s
+				}(), inter, VerdictUnknown, "rule interzone-default unevaluable"},
 			}
 			for _, c := range cases {
 				t.Run(c.name, func(t *testing.T) {

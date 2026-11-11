@@ -430,7 +430,8 @@ func isAllow(a Action) bool { return a == ActionAllow }
 // match wins, disabled rules are skipped and listed, conditional matches
 // are recorded and evaluation continues to the next unconditional match or
 // the default rule. An unevaluable rule that is reached ends the path with
-// unknown.
+// unknown, or conditional when a conditional allow was recorded before it
+// (see undecided).
 func (e *evaluator) securityPath(p packet) outcome {
 	var conds []condMatch
 	for i := range e.x.rules {
@@ -449,7 +450,7 @@ func (e *evaluator) securityPath(p packet) outcome {
 			}
 			st.Outcome, st.Detail = OutcomeUnevaluable, v.Reason()
 			e.chain.add(st)
-			return unknownOut(v.Reason())
+			return undecided(conds, v.Reason())
 		}
 		why, extra := ruleMatch(v, &p)
 		if why != "" {
@@ -474,11 +475,29 @@ func (e *evaluator) securityPath(p packet) outcome {
 	if !d.Evaluable() {
 		st.Outcome, st.Detail = OutcomeUnevaluable, d.Reason()
 		e.chain.add(st)
-		return unknownOut(d.Reason())
+		return undecided(conds, d.Reason())
 	}
 	st.Outcome, st.Detail = OutcomeMatch, string(d.Action)
 	e.chain.add(st)
 	return decide(conds, d.Name, d.Action, p.conds)
+}
+
+// undecided is the outcome of a path whose final decision cannot be
+// determined (an unevaluable rule or default rule is reached). ADR 0012
+// D2 step 4: an allow among the recorded conditional matches makes it
+// conditional (allowed whenever its conditions hold, whatever follows);
+// otherwise it is unknown. It is never denied.
+func undecided(conds []condMatch, reason string) outcome {
+	var by []string
+	for _, c := range conds {
+		if c.allow {
+			by = append(by, sanitizeText(c.rule))
+		}
+	}
+	if len(by) == 0 {
+		return unknownOut(reason)
+	}
+	return outcome{VerdictConditional, "conditional: allowed under conditions (rules " + strings.Join(by, ", ") + "); otherwise " + reason}
 }
 
 // decide combines the conditional matches and the final unconditional
