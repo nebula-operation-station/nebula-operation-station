@@ -102,14 +102,30 @@ named in the handbook next to every "no unexpected change" result:
   `authorized_keys` of service accounts whose home is under `/var`,
   `/srv` or `/opt` outside the scanned `/opt` tree, `at` job spools,
   `/tmp`, `/dev/shm`, `/run`, `/etc/pve` (Q1), container images and
-  volumes. Persistence placed there is not seen by I2.
+  volumes. Under `/usr`, only the D5 roots are watched: **`/usr/share`
+  is not**, although it holds executable code, including
+  `/usr/share/perl5` with the whole Proxmox VE Perl codebase and many
+  packages' helper scripts; nor are `/usr/local/share`,
+  `/usr/local/etc`, `/usr/local/include`, `/usr/include`, `/usr/src` and
+  `/usr/games`. Persistence placed there is not seen by I2.
+- **Default exclusions that affect what runs.** D5 excludes Python
+  `__pycache__` bytecode under `/usr/lib/python3*` and
+  `/usr/local/lib/python3*`, which the interpreter executes instead of
+  the watched source when its header matches; `/etc/ld.so.cache`, which
+  decides where the dynamic loader finds libraries; the
+  `/usr/lib/modules/*/modules.*` index files, which decide which module
+  file is loaded for an alias; and the other generated caches the profile
+  names. A change there is a persistence place I2 cannot see.
 - **Other file systems.** `find -xdev` does not descend into a separate
   mount below a root, for example the `/boot/efi` vfat partition with
   the shim and GRUB EFI binaries. Until IG-05 adds such mounts as explicit
   roots, a skipped mount below a root is reported and makes the run
   partial; it is never silently treated as covered.
 - **Between scans.** A change that is reverted before the next scan is
-  missed (threat model).
+  missed (threat model). Incremental runs hash only files whose `ctime`
+  or `mtime` falls in the look-back window, and files larger than
+  512 MiB only in full runs (D5, D9); a content change with faked
+  timestamps is seen only by the next full run.
 - **The checker's own references on the NOS machine.** Root on the NOS
   machine can rewrite the executor's admitted list and baseline digest
   and the approved configuration baseline with ordinary tools, so the
@@ -151,7 +167,7 @@ named in the handbook next to every "no unexpected change" result:
 | Stage | Scope | Trust anchor | Status in this ADR |
 | --- | --- | --- | --- |
 | **I1** | NOS's own binaries, systemd units, built-in module files, web assets and configuration on the NOS machine | YubiKey-signed release manifest (code) and an admin-approved baseline (configuration) | Proposed for implementation |
-| **I2** | Selected paths on managed Debian, Ubuntu and PVE hosts, read agentlessly over SSH | Signed distribution archive indices (package files) and a NOS-held, admin-approved baseline (everything else) | Proposed for implementation |
+| **I2** | Selected paths on managed Debian, Ubuntu and PVE hosts, read agentlessly over SSH | Signed distribution archive indices via the D8 builder (package files, once Q6 is answered) and a NOS-held, admin-approved baseline (everything else, and package files until then) | Proposed for implementation |
 | **I3** | Measured boot and IMA with TPM remote attestation for hosts that have a TPM | Host TPM endorsement and attestation keys enrolled in NOS | Optional, later; separate ADR before implementation (Q5) |
 
 All three produce **integrity findings**: advisory records that open,
@@ -451,8 +467,11 @@ the host:
    storage.
    - **Initial baseline.** The first complete scan becomes a *proposed*
      baseline. It is labelled "trust on first scan": NOS cannot know
-     whether the host was already compromised; the admin is told so and
-     package files are still checked against the archive from day one.
+     whether the host was already compromised, and the admin is told so.
+     Until Q6 is answered, package files too are compared only against
+     this trust-on-first-scan baseline (D8, D9); only once D8 builds
+     archive references are they checked against the archive
+     independently of the first scan.
    - **Approval.** The admin approves a baseline (initial or updated) by
      digest, with the same assertion as D3 (challenge domain
      `nebula-fim-baseline-v1`). Bulk approval per host and per finding
@@ -466,12 +485,18 @@ the host:
        own SSH session (D5) and keeps the validated records of the latest
        complete run per host in executor-owned storage until the next
        complete run replaces them or a baseline is approved from them.
+       The records are written with content hashes already keyed (D6),
+       except on the plain-hash allowlist; the plain hash of a keyed path
+       is never written to disk.
      - A proposed baseline is built by the executor as: the currently
        approved list (fetched from the server and accepted only if its
        digest equals the executor-stored digest; otherwise an
        `integrity.baseline_tamper` finding and no approval) plus, for
        the paths the admin selects, the record values from the executor's
-       own retained run. The server only names paths to include; it
+       own retained run, or removal of the entry where that run shows the
+       path absent. A path whose content the retained run did not hash
+       (an incremental run, D9) cannot be selected until a full run has
+       hashed it. The server only names paths to include or remove; it
        cannot supply record values, a list or a digest that the executor
        would approve.
      - The approval screen is rendered from the executor's data, and the
@@ -486,7 +511,8 @@ the host:
      baseline or hide findings; it cannot make the executor's stored
      digest match a rewritten list. On every scan and after any NOS
      restore, the executor recomputes the digest of the server's list and
-     opens an I1 finding on mismatch.
+     opens an I2 baseline digest mismatch finding
+     (`integrity.baseline_tamper`, D9) on mismatch.
 
 ### D8: Package reference builder
 
