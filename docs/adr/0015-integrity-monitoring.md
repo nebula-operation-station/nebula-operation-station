@@ -65,6 +65,7 @@ What follows from that, per stage:
 | Root attacker who runs a rootkit or patches the checker, `sha256sum`, the kernel or the NOS binary that performs the check | **Not reliably detected**: a replaced binary can skip its own check, and all NOS processes on one machine fall to the same root | **Not reliably detected**: the host lies | Detected for everything measured **before** or **at load** by the TPM-backed log, within the IMA policy; see I3 limits |
 | Attacker who restores the original file before the next scan | Missed between scans | Missed between scans (incremental runs use `ctime`, which ordinary tools cannot set; root can still fake it) | IMA records every measured load, including short-lived ones |
 | Compromised `nebula-server` | Executor detects server-binary changes (different UID, server cannot write executor storage); a compromised server can still suppress the *display* of I2 findings | Server can hide findings from the UI; it cannot silently rewrite an approved baseline (D7) | Quotes are verified by the executor, not the server |
+| Compromised `nebula-server` or D8 reference builder supplying false package references | n/a (I1 uses the YubiKey-signed list, D2) | **Not detected as such**: it can make an attacker's file match a "verified" reference, so the change is labelled expected (info) or "package updated outside NOS" (medium) instead of critical; it cannot put the file into a baseline without the admin's executor-bound assertion (D7, D9), but an admin who approves trusts the label (see "Honest limits") | IMA entries are compared against the same references (D10); same limit |
 
 Consequences stated plainly:
 
@@ -115,6 +116,20 @@ named in the handbook next to every "no unexpected change" result:
   threat-table row "root attacker with ordinary tools" assumes the
   attacker does not also edit those; only the offline check (D4) is
   independent of the NOS machine.
+- **Trust on first scan.** The first complete scan of a host becomes its
+  proposed baseline (D7); a host that was already compromised then is
+  baselined as compromised.
+- **Trust in the reference builder and the server for "verified".**
+  Package references are built on the D8 builder host and reach NOS
+  through the server; the executor cannot re-derive them (D8). A
+  compromised builder or server can make an attacker's file match a
+  "verified" reference, so the change is shown as an expected change
+  (info) or "package updated outside NOS" (medium) rather than as a
+  critical mismatch. It cannot put the file into a baseline: every
+  baseline entry, expected or not, needs the admin's assertion over an
+  executor-computed digest (D7, D9), and critical-class paths need one
+  assertion each (D9). An admin who approves an entry labelled
+  "verified" still trusts the builder and the server for that label.
 - **Anything not a file.** Running processes, loaded kernel modules,
   memory-only implants, firmware and BIOS/UEFI settings (only I3 sees
   part of this).
@@ -552,10 +567,21 @@ Consequently, before Q6 every package file changed by a NOS apt job is an
 unverified finding the admin must review; this is the deliberate price of
 keeping the next sentence true.
 
-Expected changes update the baseline as **pending** and are shown as
-"changed by NOS job <id>"; they still need the admin's baseline approval
-(D7) in hardened mode and are approved together with the job in standard
-mode (Q3). Anything else changed in the same window, and every unverified
+**"Expected" is a label, never an approval.** An expected change is
+recorded as `expected_pending` and shown as "changed by NOS job <id>,
+matches verified reference". It enters the baseline **only through a D7
+baseline approval, in every mode**: the executor builds the proposed
+entries from its own retained post-job scan (D7 "The executor alone
+decides"), computes the digest, and the admin approves exactly that
+digest with the `nebula-fim-baseline-v1` assertion. The job approval
+never covers baseline entries: it is given before the job and cannot bind
+a scan result, and the "verified" label rests on a D8 reference that
+reaches NOS through the server and that the executor cannot re-derive
+(D8). A compromised server or builder can therefore make an attacker's
+file *look* expected (and lower its severity to info), but it cannot put
+that file into a baseline without the admin's executor-bound assertion;
+the approval screen says that the "verified" label comes from the
+reference builder (see "Honest limits"). Anything else changed in the same window, and every unverified
 change, is a finding: an attacker cannot hide behind a running apt job,
 because a replaced `/usr/sbin/sshd` during an approved `openssh-server`
 upgrade either fails the verified reference or has none, and both are
@@ -657,10 +683,13 @@ the direction.
   critical integrity finding" that withholds new permits (never cancels a
   running job, never touches the host). A block that an untrusted host
   can trigger must not stop the admin from fixing it, so admin override
-  with a fresh assertion is always possible. Also: should *verified*
-  expected changes in standard mode be approved together with the job
-  (recommended) or separately? Unverified changes (D9) are always
-  approved separately; that is not part of this question.
+  with a fresh assertion is always possible. Also: in standard mode, may
+  the *verified* expected changes of one job (except critical-class
+  paths, D9) be approved in one bulk D7 assertion offered right after the
+  job (recommended), or must they be reviewed in smaller batches? In
+  every mode they enter the baseline only through an executor-computed
+  digest (D7, D9), never through the job approval; unverified changes and
+  critical-class paths follow D9 and are not part of this question.
 - **Q4: I1 lock on mismatch.** Should the executor refuse unlock and all
   dispatch on a binary/unit/module mismatch (D4)? On a configuration
   mismatch? **Recommendation:** yes for binaries, units, built-in modules
