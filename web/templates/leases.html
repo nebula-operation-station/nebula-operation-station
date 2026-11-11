@@ -53,6 +53,23 @@
   </div>
   {{end}}
   {{end}}
+  {{else if $l.Registry}}
+  <dl class="schedule-meta">
+    <dt>Rate profile</dt><dd>{{$l.RateProfile}}</dd>
+  </dl>
+  <h2>{{len $l.Registries}} private registries</h2>
+  <p class="hint">Each registry is frozen with its record and credential identity: a rotated credential or a changed record is no
+     longer covered and needs a new lease. The lease holds no credential.</p>
+  <div class="table-wrap">
+  <table class="inventory" aria-label="Private registries">
+    <thead><tr><th>Registry</th><th>Record version</th><th>Credential version</th><th>Repositories</th><th>Reads</th></tr></thead>
+    <tbody>
+      {{range $l.Registries}}
+      <tr class="lease-registry"><td class="mono">{{.ID}}</td><td class="mono">{{.ConfigVersion}}</td><td class="mono">{{.CredentialVersion}}</td><td class="mono">{{.Repositories}}</td><td class="mono">{{.Methods}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
   {{else if $l.Hosts}}
   <details{{if $l.HostsOpen}} open{{end}}>
     <summary>{{len $l.Hosts}} hosts</summary>
@@ -104,6 +121,9 @@
         {{if .Provider}}
         <td>{{.MethodCount}} methods</td>
         <td>{{.RemoteCount}} remotes</td>
+        {{else if .Registry}}
+        <td>{{.MethodCount}} registry reads</td>
+        <td>{{.RegistryCount}} registries</td>
         {{else}}
         <td>{{.ActionCount}}</td>
         <td>{{.HostCount}}</td>

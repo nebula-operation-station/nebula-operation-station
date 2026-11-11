@@ -501,7 +501,12 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		TOTPStatus:   totpStatus,
 		// Findings pages over the real store.
 		Vuln: vulnPages{v: vuln, admin: isAdmin},
-		Log:  log,
+		// Private registry reads (ADR 0006, cu06 part 1, G13): registry
+		// read leases on the lease pages and executor-read digests of
+		// private images in docker.check_updates results. The credential
+		// stays in the executor.
+		RegistryReads: newServerRegistryReads(exec, time.Now, log),
+		Log:           log,
 	}, batches))
 	if err != nil {
 		return err
