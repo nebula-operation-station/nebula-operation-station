@@ -35,7 +35,8 @@ import (
 // device-reported addresses, and are plain links that open without opener
 // and referrer; nothing is embedded or framed. The pages use the layout and
 // static assets only, so the strict CSP of internal/web/middleware applies
-// unchanged.
+// unchanged. The admin-confirmed device ↔ asset link (ND-18 part 2) is in
+// netdev_link.go.
 
 // netdevCallTimeout bounds the store and registry reads made while
 // rendering a network device page.
@@ -136,6 +137,9 @@ type NetDevOptions struct {
 	// IsAdmin is the admin role check. Required: without it the pages
 	// would have no access check of their own.
 	IsAdmin NetDevAdminFunc
+	// Links is the device ↔ asset link store (ND-18 part 2). Nil hides
+	// the link section and answers the link routes 404.
+	Links NetDevLinkStore
 }
 
 // NetDevPages serves GET /netdev and GET /netdev/{id}.
@@ -172,11 +176,14 @@ func (h *Handler) NetDevPages(o NetDevOptions) (*NetDevPages, error) {
 }
 
 // Register adds the network device routes to mux. The routes take every
-// method so that a non-GET request is answered 405 here instead of
-// falling through to a catch-all pattern.
+// method so that a request with another method is answered 405 here
+// instead of falling through to a catch-all pattern. The asset link
+// routes serve POST only.
 func (p *NetDevPages) Register(mux *http.ServeMux) {
 	mux.HandleFunc("/netdev", p.handleList)
 	mux.HandleFunc("/netdev/{id}", p.handleDetail)
+	mux.HandleFunc("/netdev/{id}/asset-link", p.handleLinkConfirm)
+	mux.HandleFunc("/netdev/{id}/asset-link/remove", p.handleLinkRemove)
 }
 
 // netdevPageData is the layout data plus the netdev page data. The
@@ -311,6 +318,10 @@ type netdevDetailData struct {
 	Zones       []netdevZoneRow
 	FwIfaces    []netdevFwIfaceRow
 	Unavailable []string
+
+	// AssetLink is the device ↔ asset link section, nil without a link
+	// store.
+	AssetLink *netdevAssetLinkView
 }
 
 // netdevReads lists the reads of a family in display order.
@@ -639,6 +650,7 @@ func (p *NetDevPages) handleDetail(w http.ResponseWriter, r *http.Request) {
 		Stale:           d.State == netdevinventory.DeviceStale,
 		Link:            netdevDeepLink(e, d.Family),
 		Datasets:        p.datasets(ctx, d, now),
+		AssetLink:       p.assetLink(ctx, d),
 	}
 	// rowErr records a failing read: "not read yet" is normal, anything
 	// else is logged and listed as unavailable.
