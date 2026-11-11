@@ -58,6 +58,18 @@ History:
   unsigned 16-bit and 32-bit-or-wider conversions (previously "16-bit
   or wider"); the absolute path-kind canary lies inside the working
   directory (previously `/tmp/c<n>.canary.invalid`).
+- 2026-11-11 (as00hf2, second review of PR #471): `number` arguments
+  with a small parser range get a reviewed `canary-range: MIN..MAX`
+  annotation (initially `batch stage N` 2..20 and `events --limit`
+  1..1000) and a positive plus differential check over runs with `MAX`,
+  `MAX` and `MAX − 1` (previously `canary-max: N` named only `events
+  --limit`, so `batch stage N` failed on today's tree). The needle
+  search also matches binary forms of the IP literal and of the
+  `number` address (raw 4/16-byte, hex IPv4-mapped text, packed `uint32`
+  in both byte orders; previously text only). Run-time values are fixed
+  or checked by the harness, and a digit needle hit is confirmed by a
+  rerun with `48000 + m` (previously only fixtures were needle-free, so
+  temp paths, ports or timestamps could fail a correct argument).
 
 ## Context
 
@@ -420,7 +432,7 @@ does NOS connect **from** (`--from`)?
   | --- | --- |
   | `text`, `in-path`, `out-path`, `trust-path` | `c<n>.canary.invalid` (for the path kinds, a second run uses the absolute path of `c<n>.canary.invalid` **inside the fresh working directory**; never an absolute path outside it such as `/tmp/c<n>.canary.invalid`, which an `out-path` run would write outside the test directory (previously `/tmp/c<n>.canary.invalid`)) |
   | `id` | `c<n>-canary` (dot-free; a single-label name that a resolver can still complete through search domains or `/etc/hosts`) |
-  | `number` | `47000 + m`, where `m` = 1, 2, … counts the `number` runs of the whole test (the test fails if `m` would exceed 999). The value fits `uint16` (≤ 65535), so `int`, `uint`, `ParseUint(…, 16)`/`(…, 32)` parsers accept it and a conversion to an unsigned 16-bit or any 32-bit-or-wider integer type (`uint32(*stage)`, `int32(*limit)`, `uint16(port)`) leaves it unchanged, so the "integer field equals the sentinel" check still sees it (a signed 16-bit conversion is not covered: `int16(47001)` wraps to a negative value; previously "a 16-bit or wider integer"); because the value is also a valid single-number `inet_aton` IPv4 address (`47001` = `0.0.183.153`), **every** `number` run additionally fails when its `inet_aton` dotted form appears as a substring in a dial address, TLS server name, HTTP URL or header, or any string or bytes field of an outgoing request (previously only `canary-max` runs checked the dotted form, so a `number` argument formatted as an IPv4 string and sent escaped both the substring and the integer-field check); the test fails if a fixture value or a flag default of that command lies in `47001`–`47999` (previously `7357` + 6 digits = 10 digits, above 2^32: rejected by `uint16`/`uint32` parsers, changed by truncation, and contrary to the earlier claim not a valid `inet_aton` IPv4). An argument whose parser has a smaller maximum `N` (today `events --limit`, 1 to 1000) carries the catalog annotation `canary-max: N` with a reason; its run uses the value `N`, the test also checks that `N+1` is rejected before anything is sent, and for that run the integer-field check is replaced by "no string field, dial address, URL or header equals the decimal `N` or its `inet_aton` dotted form" (the dotted-form substring check above applies to it as to every `number` run) |
+  | `number` | `47000 + m`, where `m` = 1, 2, … counts the `number` runs of the whole test (the test fails if `m` would exceed 999). The value fits `uint16` (≤ 65535), so `int`, `uint`, `ParseUint(…, 16)`/`(…, 32)` parsers accept it and a conversion to an unsigned 16-bit or any 32-bit-or-wider integer type (`uint32(*stage)`, `int32(*limit)`, `uint16(port)`) leaves it unchanged, so the "integer field equals the sentinel" check still sees it (a signed 16-bit conversion is not covered: `int16(47001)` wraps to a negative value; previously "a 16-bit or wider integer"); because the value is also a valid single-number `inet_aton` IPv4 address (`47001` = `0.0.183.153`), **every** `number` run additionally fails when its `inet_aton` dotted form appears as a substring in a dial address, TLS server name, HTTP URL or header, or any string or bytes field of an outgoing request (previously only `canary-max` runs checked the dotted form, so a `number` argument formatted as an IPv4 string and sent escaped both the substring and the integer-field check); the test fails if a fixture value or a flag default of that command lies in `47001`–`48999` (the range of the run canaries and of the confirmation canaries `48000 + m`, see "Run-time values" below; previously `47001`–`47999`) (previously `7357` + 6 digits = 10 digits, above 2^32: rejected by `uint16`/`uint32` parsers, changed by truncation, and contrary to the earlier claim not a valid `inet_aton` IPv4). An argument whose parser accepts only a smaller range (today `batch stage N` and `events --limit`) uses the **bounded-number** rule below instead (previously a `canary-max: N` annotation naming only `events --limit`, so `batch stage N`, 2 to 20, rejected every form and failed on today's tree) |
   | `duration` | `7` followed by `<n>` zero-padded to 5 digits, then `s` (6 digits, within the kind's shape) |
   | fixed-shape kinds (AS-05 review, e.g. `MODULE@VERSION`) | a value of that shape built from `c<n>-canary` (e.g. `c<n>-canary@1.0.0`), defined next to the kind |
   | `enum`, `bool` | no run: their values are fixed catalog literals; the catalog test fails when an `enum` value is host-like (V4c) |
@@ -432,6 +444,97 @@ does NOS connect **from** (`--from`)?
   form such as `https://c<n>.canary.invalid:8006` creates nothing
   outside it; every path-kind value, relative or absolute, resolves
   inside this directory).
+
+  **Bounded numbers** (previously a `canary-max: N` annotation that
+  named only `events --limit`; `nebula batch stage N` parses with
+  `strconv.ParseUint(…, 10, 32)` and rejects anything outside 2 to
+  `canonical.MaxBatchStages` = 20 (`cmd/nebula/batch.go`), so the kind
+  canary `47000 + m` and every host-shaped form were rejected and the
+  test failed on today's tree; and a lone small value such as `20` or
+  `1000` is not distinctive, so a substring or equality check on it
+  either matches by chance or proves nothing). A `number` argument whose
+  parser accepts only `MIN` to `MAX` with `MAX` below the kind canary
+  carries the reviewed catalog annotation `canary-range: MIN..MAX` with
+  a reason. Initial list, checked 2026-11-11 against every number parser
+  in `cmd/nebula/` (`flag` `Int`/`Int64`/`Uint` and `strconv` calls on
+  arguments):
+
+  | Argument | Range | Parser | Expected field |
+  | --- | --- | --- | --- |
+  | `batch stage` positional `N` | `2..20` (`canonical.MaxBatchStages`) | `cmd/nebula/batch.go` | `Gate.stage` |
+  | `events --limit` | `1..1000` (`eventsPage`) | `cmd/nebula/events.go` | `ListEventsRequest.limit` |
+
+  The other `number` arguments of today's tree accept the kind canary
+  and need no entry: `approve --stage` (`fs.Uint`, no CLI bound; sent as
+  `Gate.stage`), `events --after` (`int64`), `netdev probe`/`add --port`
+  (up to 65535) and `container definition remove --version` (`uint64`,
+  above 0); `netdev … --secret-fd` keeps `canary-rejects`. For an
+  annotated argument the kind-canary run is replaced by three accepted
+  runs with the values `MAX`, `MAX` again and `MAX − 1` (the catalog
+  test fails when `MAX − 1 < MIN`), each with fresh recorders, and by
+  rejection checks: `MAX + 1`, `47000 + m` and, when `MIN > 0`,
+  `MIN − 1` must each be rejected (error, nothing recorded). The
+  host-shaped forms and condition 3 apply as for every argument. Instead
+  of the needle search of conditions 1 and 2, which a small value cannot
+  pass reliably, the runs get a **distinctive check**:
+  - *positive*: every expected field holds exactly the run's value
+    (`20`, `20`, `19` for `batch stage`), so the value demonstrably
+    reaches the reviewed place;
+  - *differential*: the test compares the complete recorded traffic of
+    the runs field by field (every gRPC request field at any depth,
+    every repeated element and map entry, the metadata, every dial
+    address, TLS server name, HTTP URL, header and body). Fields that
+    differ between the two `MAX` runs are run-time noise; the test
+    fails when a noise field is an expected field, a destination field
+    (condition 2), a dial address, TLS server name, URL or header, and
+    otherwise lists the noise fields in its output. Every field that
+    differs between the `MAX` run and the `MAX − 1` run must be an
+    expected field or a noise field, otherwise the argument fails: its
+    value went somewhere unreviewed, in whatever encoding (decimal text,
+    dotted or binary IPv4 form, a derived value such as `MAX * 2`).
+  The annotation is **stale**, and the test fails, when the argument
+  accepts `MAX + 1` or `47000 + m`, or rejects `MAX` or `MAX − 1`; so
+  the range is pinned to the parser. On today's tree both entries are
+  green: in both commands the parsed value goes only into the expected
+  field (`Gate{Kind: OPEN_STAGE, Stage: uint32(n)}`,
+  `ListEventsRequest{Limit: int32(*limit)}`), nothing else in the
+  recorded traffic depends on it, and `21`/`47001` and `1001`/`47001`
+  are rejected before anything is sent (`2..20`, `1..1000` checks).
+
+  **Run-time values** (previously only fixtures and canary file content
+  were kept free of needles, so a digit needle such as `47012` could
+  match by chance inside a random `t.TempDir` path component, a process
+  ID, an ephemeral port, a nonce or a timestamp and fail a correct
+  argument). The harness fixes every value it controls and checks every
+  value it cannot:
+  - the fake executor answers only with fixed fixture values (IDs,
+    digests, nonces, challenges, sequence numbers, timestamps), checked
+    against the needles like every fixture;
+  - the recording dialer and HTTP transport use in-memory connections
+    with fixed loopback addresses and port `1`; no listening socket, so
+    no ephemeral port exists;
+  - the environment of the run is fixed (`HOME`, `XDG_*` and `TMPDIR`
+    point into the working directory, `LANG=C`, `TZ=UTC`);
+  - the absolute path of the fresh working directory (whose `t.TempDir`
+    component is random and appears in requests through absolute
+    path-kind values) is checked against every needle of the run before
+    the run; on a hit the test takes a new directory, at most three
+    times, and otherwise fails naming the harness collision, never the
+    argument;
+  - values the test cannot fix without a production change, because
+    AS-05 adds a test file only (today the wall clock: `time.Now` in
+    `cmd/nebula/backup.go`, `batch.go` and `pve.go`), are handled by a
+    **confirmation run**: when condition 1 or 2 finds a `number` or
+    `duration` needle, the test repeats the same run once with the
+    confirmation canary (`48000 + m` for `number`, the duration canary
+    with the leading `7` replaced by `8`) and its needles. The argument
+    fails when the confirmation needle appears at the same place (same
+    field path, dial address, TLS server name, URL or header, text or
+    binary form); otherwise the hit followed no argument value, was a
+    chance match with a run-time value and is listed in the output. A
+    confirmation run never applies to the `c<n>-canary`,
+    `c<n>.canary.invalid` and `192.0.2.1` needles, which no run-time
+    value can contain by chance; any hit of those fails at once.
 
   **Canary files for path kinds** (previously: every path-kind form
   named a file that did not exist, so file-reading arguments such as
@@ -551,9 +654,22 @@ does NOS connect **from** (`--from`)?
   form; for `number` the decimal value and its `inet_aton` dotted form;
   for `duration` the whole value and its digits. A request field
   `c3-canary` (hostname without port) or `192.0.2.1` (IP without port)
-  therefore counts, as does the whole value. Fixtures and the canary
-  file content must not contain any needle of the run (the test fails
-  otherwise), so a match always comes from the argument under test.
+  therefore counts, as does the whole value. **Binary forms**
+  (previously only text was matched, so an IP literal or `number` sent
+  as a binary address passed): for the IP literal needle `192.0.2.1` and
+  for the `inet_aton` address of a `number` canary (`47001` =
+  `0.0.183.153`) the test also searches every bytes field for the raw
+  4-byte network-order form (`c0 00 02 01`; `00 00 b7 99`) and the
+  16-byte IPv4-mapped form (ten `00` bytes, `ff ff`, then the four
+  bytes), as a byte subsequence; every string field also for the
+  hexadecimal IPv4-mapped text `::ffff:c000:201` (`::ffff:0:b799`); and
+  every integer field of 32 bits or more, signed or unsigned, for the
+  packed value in network order (`3221225985` for `192.0.2.1`; for a
+  `number` it equals the canary, already covered) and in little-endian
+  order (`16908480`; `2578907136` for `47001`). Fixtures and the canary
+  file content must not contain any needle of the run, text or binary
+  (the test fails otherwise), and run-time values are fixed or checked
+  (above), so a match always comes from the argument under test.
 
   The host-shaped forms test the binary, not the validator: V4 would not
   admit most of them for a non-host kind, but they show what the
