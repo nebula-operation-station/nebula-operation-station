@@ -53,6 +53,13 @@ type DigestReader struct {
 	queued  map[pendingRead]bool
 	running bool
 	idle    chan struct{} // closed when the running worker stops
+	closed  bool          // Close was called: nothing is queued any more
+
+	// life is the background worker's context; Close cancels it, so a
+	// shutdown stops the batch in flight instead of letting it run out
+	// its timeout.
+	life context.Context
+	stop context.CancelFunc
 }
 
 // Limits of DigestReader.
@@ -182,8 +189,10 @@ func NewDigestReader(exec ExecutorRegistry, now func() time.Time) *DigestReader 
 		now = time.Now
 	}
 	lister, _ := exec.(ReadGrantLister)
+	life, stop := context.WithCancel(context.Background())
 	return &DigestReader{exec: exec, leases: lister, now: now, cache: map[digestKey]cachedDigest{},
-		failed: map[failKey]heldFailure{}, spent: map[hostRegistry][]hostRead{}, queued: map[pendingRead]bool{}}
+		failed: map[failKey]heldFailure{}, spent: map[hostRegistry][]hostRead{}, queued: map[pendingRead]bool{},
+		life: life, stop: stop}
 }
 
 // PrivateDigests is PrivateDigests over the reader's executor, answering
@@ -204,17 +213,20 @@ func (r *DigestReader) PrivateDigests(ctx context.Context, images []string) (map
 		return nil, nil, err
 	}
 	out, errs := resolveImages(images, snap.regs, func(_ string, pi privateRef) (PrivateDigest, error) {
-		if d, ok := r.cached(snap, pi, now); ok {
+		// Each read is stamped when it is made, not when the call began:
+		// earlier reads of the call may have taken their full timeout.
+		at := r.now()
+		if d, ok := r.cached(snap, pi, at); ok {
 			return d, nil
 		}
-		if err := r.charge(host, pi, now); err != nil {
+		if err := r.charge(host, pi, at); err != nil {
 			return PrivateDigest{}, err
 		}
 		d, err := readPrivateDigest(ctx, r.exec, pi)
 		if err != nil {
 			return PrivateDigest{}, err
 		}
-		r.store(keyOf(pi), d, now)
+		r.store(keyOf(pi), d, at)
 		return d, nil
 	})
 	return out, errs, nil
@@ -428,7 +440,7 @@ func (r *DigestReader) enqueue(host, image string) {
 	p := pendingRead{host: host, image: image}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.queued[p] || len(r.queue) >= maxPendingReads {
+	if r.closed || r.queued[p] || len(r.queue) >= maxPendingReads {
 		return
 	}
 	r.queued[p] = true
@@ -440,8 +452,22 @@ func (r *DigestReader) enqueue(host, image string) {
 	}
 }
 
-// Drain blocks until the background worker is idle or ctx ends. The
-// server does not need it; tests and an orderly shutdown do.
+// Close stops the background worker for a shutdown: nothing is queued any
+// more, queued reads are dropped, the batch in flight is cancelled, and
+// Close waits (Drain) until the worker has stopped or ctx ends. Cache-only
+// calls still answer from memory afterwards; calls without WithCacheOnly
+// still read synchronously under their own context.
+func (r *DigestReader) Close(ctx context.Context) error {
+	r.mu.Lock()
+	r.closed = true
+	r.queue = nil
+	r.mu.Unlock()
+	r.stop()
+	return r.Drain(ctx)
+}
+
+// Drain blocks until the background worker is idle or ctx ends. Close
+// uses it on shutdown; tests use it to wait for queued reads.
 func (r *DigestReader) Drain(ctx context.Context) error {
 	for {
 		r.mu.Lock()
@@ -481,12 +507,14 @@ func (r *DigestReader) work(idle chan struct{}) {
 }
 
 // runBatch lists once, then reads each queued private image serially, each
-// under its own timeout and the host's caps, inside one batch deadline.
+// under its own timeout and the host's caps, inside one batch deadline
+// that Close cancels. Every check, charge and cache entry is stamped at
+// its own read and every held failure when its read failed, not at the
+// start of the batch, which may be up to backgroundBatchTimeout earlier.
 func (r *DigestReader) runBatch(batch []pendingRead) {
-	ctx, cancel := context.WithTimeout(context.Background(), backgroundBatchTimeout)
+	ctx, cancel := context.WithTimeout(r.life, backgroundBatchTimeout)
 	defer cancel()
-	now := r.now()
-	snap, err := r.refresh(ctx, now)
+	snap, err := r.refresh(ctx, r.now())
 	if err != nil {
 		return
 	}
@@ -498,23 +526,27 @@ func (r *DigestReader) runBatch(batch []pendingRead) {
 		if err != nil {
 			continue // not private, or answered without I/O on render
 		}
-		if _, ok := r.cached(snap, pi, now); ok {
+		at := r.now()
+		if _, ok := r.cached(snap, pi, at); ok {
 			continue
 		}
-		if _, ok := r.heldFailure(p.host, keyOf(pi), now); ok {
+		if _, ok := r.heldFailure(p.host, keyOf(pi), at); ok {
 			continue
 		}
-		if err := r.charge(p.host, pi, now); err != nil {
-			r.hold(p.host, keyOf(pi), err, now)
+		if err := r.charge(p.host, pi, at); err != nil {
+			r.hold(p.host, keyOf(pi), err, at)
 			continue
 		}
 		rctx, rcancel := context.WithTimeout(ctx, backgroundReadTimeout)
 		d, err := readPrivateDigest(rctx, r.exec, pi)
 		rcancel()
 		if err != nil {
-			r.hold(p.host, keyOf(pi), err, now)
+			if r.life.Err() != nil {
+				return // shut down: not a registry failure to hold
+			}
+			r.hold(p.host, keyOf(pi), err, r.now())
 			continue
 		}
-		r.store(keyOf(pi), d, now)
+		r.store(keyOf(pi), d, at)
 	}
 }
