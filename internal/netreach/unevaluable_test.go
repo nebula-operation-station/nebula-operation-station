@@ -636,7 +636,8 @@ func TestCauseTextIsSanitized(t *testing.T) {
 		t.Errorf("got %+v", got)
 	}
 	var c2 causes
-	c2.add("a‮b\u0085c⁧d")
+	// RLO, NEL (C1) and RLI, built from code points.
+	c2.add("a" + string(rune(0x202e)) + "b" + string(rune(0x85)) + "c" + string(rune(0x2067)) + "d")
 	if c2[0].Field != "a�b�c�d" {
 		t.Errorf("bidi/C1 not sanitized: %q", c2[0].Field)
 	}
