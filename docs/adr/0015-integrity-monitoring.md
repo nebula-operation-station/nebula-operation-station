@@ -101,7 +101,8 @@ named in the handbook next to every "no unexpected change" result:
   `~/.profile` and per-user systemd units under `~/.config/systemd/`),
   `authorized_keys` of service accounts whose home is under `/var`,
   `/srv` or `/opt` outside the scanned `/opt` tree, `at` job spools,
-  `/tmp`, `/dev/shm`, `/run`, `/etc/pve` (Q1), container images and
+  `/tmp`, `/dev/shm`, `/run`, `/etc/pve` (excluded by design, D5; Q1),
+  container images and
   volumes. Under `/usr`, only the D5 roots are watched: **`/usr/share`
   is not**, although it holds executable code, including
   `/usr/share/perl5` with the whole Proxmox VE Perl codebase and many
@@ -109,7 +110,7 @@ named in the handbook next to every "no unexpected change" result:
   `/usr/local/etc`, `/usr/local/include`, `/usr/include`, `/usr/src` and
   `/usr/games`. Persistence placed there is not seen by I2.
 - **Default exclusions that affect what runs.** D5 excludes Python
-  `__pycache__` bytecode under `/usr/lib/python3*` and
+  `__pycache__` bytecode at any depth under `/usr/lib/python3*` and
   `/usr/local/lib/python3*`, which the interpreter executes instead of
   the watched source when its header matches; `/etc/ld.so.cache`, which
   decides where the dynamic loader finds libraries; the
@@ -117,10 +118,17 @@ named in the handbook next to every "no unexpected change" result:
   file is loaded for an alias; and the other generated caches the profile
   names. A change there is a persistence place I2 cannot see.
 - **Other file systems.** `find -xdev` does not descend into a separate
-  mount below a root, for example the `/boot/efi` vfat partition with
-  the shim and GRUB EFI binaries. Until IG-05 adds such mounts as explicit
-  roots, a skipped mount below a root is reported and makes the run
-  partial; it is never silently treated as covered.
+  mount below a root (D5 "Separate mounts below a root"). Mounts that
+  are themselves profile roots, such as `/boot` and the `/boot/efi`
+  vfat partition with the shim and GRUB EFI binaries, are scanned. A
+  mount **excluded by design** (in `fim-default-v1` only `/etc/pve` of
+  type `fuse`) is not scanned and does not make a run partial: changes
+  there, including the PVE cluster configuration, are not seen by I2.
+  Any other mount below a root is **skipped**: it makes the run partial
+  and opens a finding; it is never silently treated as covered. The
+  mount list comes from the host, so a root attacker can hide a mount
+  (threat model). On vfat, owner and mode come from mount options, so
+  only content and presence changes are meaningful there.
 - **Between scans.** A change that is reverted before the next scan is
   missed (threat model). Incremental runs hash only files whose `ctime`
   or `mtime` falls in the look-back window, and files larger than
@@ -349,13 +357,40 @@ following symlinks; final list is Q1):
 | systemd units | `/usr/lib/systemd/system`, `/etc/systemd/system`, user units under `/etc/systemd/user` |
 | SSH access | `/root/.ssh/authorized_keys*`, `/home/*/.ssh/authorized_keys*`, plus any path named by an `AuthorizedKeysFile` directive found in `/etc/ssh/sshd_config` and its includes, limited to the roots above and `/home/*/` |
 | Scheduled jobs | `/etc/crontab`, `/etc/cron.*/`, `/var/spool/cron/crontabs/`, systemd timers (covered by the unit roots) |
+| EFI system partition | `/boot/efi` as its **own root** when it is a mount point (UEFI hosts); otherwise it is ordinary `/boot` content. On vfat, owner, mode and `ctime` come from mount options, so every file under it is hashed in every run, incremental too (the partition is small) |
 
-Excluded by default: `/etc/pve` (pmxcfs cluster file system, a separate
-mount skipped by `-xdev`; Q1), `/usr/lib/python3*/__pycache__`,
+Excluded by default: `/etc/pve` (Q1), `/usr/lib/python3*/**/__pycache__`,
 `/usr/local/lib/python3*/**/__pycache__`,
 `/etc/ld.so.cache`, `/usr/lib/modules/*/modules.*` index files and other
 generated caches named in the profile; `/run`, `/proc`, `/sys`, `/tmp`,
 `/var` except the crontab spool.
+
+**Separate mounts below a root.** `find -xdev` does not descend into
+another file system. The script therefore also reports every mount point
+it finds below a profile root (path and file-system type, from
+`/proc/self/mountinfo`; untrusted like every other record), and the
+executor sorts each one into exactly one of three cases:
+
+- **Covered.** The mount point is itself a profile root (for example
+  `/boot` on its own partition, `/boot/efi` above, `/opt` or the crontab
+  spool). It is scanned as that root; nothing is skipped.
+- **Excluded by design.** The mount point path *and* its file-system
+  type match an entry of the profile's fixed `excluded_mounts` list. In
+  `fim-default-v1` that list has one entry: `/etc/pve` with type
+  `fuse` (pmxcfs, Q1). An approved profile variant may add entries (Q1).
+  Such a mount is not scanned, is listed as "excluded by design" in the
+  run summary and in "Honest limits", and **does not make the run
+  partial**: it is outside the profile, like `/var`.
+- **Skipped.** Any other mount below a root, including an excluded path
+  with an unexpected type (for example a `tmpfs` or bind mount over
+  `/etc/pve` or over `/etc/ssh`). It makes the run **partial** (D6) and
+  opens an "unexpected mount below a profile root" finding (high;
+  critical when it covers a critical-class path, D9). The admin resolves
+  it by removing the mount or by approving a profile variant that adds it
+  as a root or as an excluded mount.
+
+So a standard PVE host (`/etc/pve`) or UEFI host (`/boot/efi`) has
+complete runs, and a partial run always means something unexpected.
 
 ### D6: I2 output format and spec 09 rules
 
@@ -375,6 +410,11 @@ parser is strict, bounded and fuzzed before the beta.
   `mtime`, `ctime` (integers in range), `sha256` (64 lowercase hex, files
   only, absent when not hashed) and `link` (symlink target, base64, at
   most 4,096 decoded bytes, never followed).
+- **Mounts.** A separate array of mount points below the profile roots
+  (D5 "Separate mounts below a root"): `path` (same encoding and rules as
+  a record path) and `fstype` (at most 64 bytes of `[a-z0-9._-]`), at
+  most 256 entries per run. The executor, not the host, classifies each
+  one as covered, excluded by design or skipped.
 - **Limits (new named constants, implementation choices to be fixed in
   IG-05).** 300,000 records per host and run, **128 MiB** raw document per
   run (above the 1 MiB `result.json` default of spec 09, so spec 09 needs
@@ -402,9 +442,13 @@ parser is strict, bounded and fuzzed before the beta.
     before the beta, so that a normal full scan can complete and close
     findings.
 
-  A run cut at any limit, a non-zero exit, a skipped root, an unreadable
-  file or an invalid record is **partial**: it may open findings but never
-  closes one and never proves that a file is unchanged or absent.
+  A run cut at any limit, a non-zero exit, a skipped root, a skipped
+  mount (D5), an unreadable file or an invalid record is **partial**: it
+  may open findings but never closes one and never proves that a file is
+  unchanged or absent. A mount that is excluded by design (D5) does not
+  make a run partial; a profile root that the host does not have and the
+  profile marks optional (for example `/boot/efi` on a BIOS host) is
+  absent, not skipped.
 - **Display.** Paths are shown as escaped text: valid printable UTF-8 as
   is, everything else as `\xNN`; bidi controls and other format
   characters are always escaped. No host-supplied path ever becomes a
@@ -557,6 +601,10 @@ roles never mix:
        own SSH session (D5) and keeps the validated records of the latest
        complete run per host in executor-owned storage until the next
        complete run replaces them or a baseline is approved from them.
+       A complete incremental run replaces a retained content hash only
+       for paths it hashed; for a path it did not hash, the hash from the
+       last complete full run is kept while the metadata is unchanged
+       and dropped when the metadata changed (D9).
        The records are written with content hashes already keyed (D6),
        except on the plain-hash allowlist; the plain hash of a keyed path
        is never written to disk.
@@ -566,8 +614,9 @@ roles never mix:
        `integrity.baseline_tamper` finding and no approval) plus, for
        the paths the admin selects, the record values from the executor's
        own retained run, or removal of the entry where that run shows the
-       path absent. A path whose content the retained run did not hash
-       (an incremental run, D9) cannot be selected until a full run has
+       path absent. A path for which the retained records hold no
+       current content hash (changed metadata seen only by an
+       incremental run, D9) cannot be selected until a full run has
        hashed it. The server only names paths to include or remove; it
        cannot supply record values, a list or a digest that the executor
        would approve.
@@ -663,7 +712,10 @@ of `InRelease` and decompression of `data.tar.xz` (Debian) and
   full run inside the existing lease budget. `ctime` cannot be set by
   ordinary tools, but root can fake it (threat model).
 - **Full** (default weekly, Q2): hash every regular file in the profile.
-  Only a complete full run can close a finding.
+  Only a complete full run can close a finding. "Complete" is the D6
+  definition: a mount excluded by design (D5, for example `/etc/pve` on
+  PVE) does not prevent it, so findings on standard PVE and UEFI hosts
+  can close; a skipped mount does.
 
 **Expected changes are attributed automatically, never by time window
 alone.** A change is *expected* only when all of these hold:
@@ -789,7 +841,7 @@ matching severity wins, see "Critical-class paths"):
 | Class | Severity |
 | --- | --- |
 | Package file differs from signed reference; NOS binary/unit mismatch (I1); any new, changed or removed critical-class path (above) that is not a verified expected change, including one changed during a NOS job without a verified reference; new setuid/setgid file or bit; missing NOS own key or extra key in root's `authorized_keys` | critical |
-| Other changed or new file in `/etc` or a watched `/usr` root (D5); owner/mode change; I2 baseline digest mismatch; change of a path that is not critical-class during a NOS job without a verified reference ("changed during NOS job, unverified"); package file content changed without a version change, even if it matches a reference (D7) | high |
+| Other changed or new file in `/etc` or a watched `/usr` root (D5); owner/mode change; I2 baseline digest mismatch; change of a path that is not critical-class during a NOS job without a verified reference ("changed during NOS job, unverified"); package file content changed without a version change, even if it matches a reference (D7); unexpected (skipped) mount below a profile root (D5), critical when it covers a critical-class path | high |
 | Package updated outside NOS with matching reference; partial or stale scan | medium |
 | Verified expected change from a NOS job (`expected_pending` until approved by D7; a critical-class path still needs its own executor-local CLI approval) | info (record only) |
 
