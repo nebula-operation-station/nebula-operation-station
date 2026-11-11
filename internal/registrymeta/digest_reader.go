@@ -24,8 +24,10 @@ import (
 // the executor again. A cached digest is served only while the reader's
 // latest list of the executor's registry read leases shows an active,
 // unexpired lease covering that identity and repository; a refresh that
-// no longer shows one drops the entries, so a revoked or expired lease
-// stops answering within snapshotTTL instead of the whole interval.
+// no longer shows one drops the entries. An expired lease stops answering
+// at once; a revoked one at the next listing, which a render with a
+// snapshot older than snapshotTTL starts in the background (stale while
+// revalidate, see cachedDigests), never later than the digest's interval.
 // Failures are never served as digests. It holds no credential.
 //
 // Fairness: the reader asks the executor for at most
@@ -233,21 +235,37 @@ func (r *DigestReader) PrivateDigests(ctx context.Context, images []string) (map
 }
 
 // cachedDigests answers images from memory only and queues the misses.
-// Without a fresh snapshot nothing is known to be private: every image is
+// Without any snapshot nothing is known to be private: every image is
 // queued, and the background worker lists before it reads.
+//
+// A snapshot older than snapshotTTL is still served (stale while
+// revalidate): private images keep their Private flag and pending note and
+// digests still within their interval and covered by the snapshot's
+// leases (expiry checked against now) are shown, and every image is queued
+// so the background worker lists again before it reads. That refresh drops
+// the digests of leases revoked meanwhile, so a revocation the reader has
+// not listed yet is shown on renders until the next background listing,
+// never longer than the digest's own interval (RegistryMinInterval); no
+// executor read is made for it.
 func (r *DigestReader) cachedDigests(host string, images []string) (map[string]PrivateDigest, map[string]error) {
 	if len(images) > MaxPrivateDigestImages {
 		images = images[:MaxPrivateDigestImages]
 	}
 	now := r.now()
 	r.mu.Lock()
-	snap, fresh := r.snap, r.hasSnap && !now.Before(r.snap.at) && now.Sub(r.snap.at) < snapshotTTL
+	snap, has := r.snap, r.hasSnap
 	r.mu.Unlock()
-	if !fresh {
+	if !has {
 		for _, img := range images {
 			r.enqueue(host, img)
 		}
 		return map[string]PrivateDigest{}, map[string]error{}
+	}
+	if now.Before(snap.at) || now.Sub(snap.at) >= snapshotTTL {
+		// Stale: revalidate in the background, answer from the snapshot.
+		for _, img := range images {
+			r.enqueue(host, img)
+		}
 	}
 	return resolveImages(images, snap.regs, func(img string, pi privateRef) (PrivateDigest, error) {
 		if d, ok := r.cached(snap, pi, now); ok {

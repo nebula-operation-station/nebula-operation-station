@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -238,12 +239,28 @@ func TestDigestReaderRevokedLeaseDropsCache(t *testing.T) {
 		f.revoke(fakeLeaseID, *clock)
 		*clock = clock.Add(snapshotTTL)
 		ctx := WithCacheOnly(context.Background())
-		if got, _, _ := r.PrivateDigests(ctx, []string{privateImage}); len(got) != 0 {
-			t.Fatalf("stale snapshot served a digest: %v", got)
+		// The stale render cannot know of the revocation without an
+		// executor call (stale while revalidate); it queues the listing
+		// that drops the digest.
+		readsBefore := f.readCount()
+		r.PrivateDigests(ctx, []string{privateImage})
+		drain(t, r)
+		r.mu.Lock()
+		n, at := len(r.cache), r.snap.at
+		r.mu.Unlock()
+		if n != 0 || !at.Equal(*clock) {
+			t.Fatalf("stale render did not revalidate: %d cache entries, snapshot at %v", n, at)
+		}
+		got, errs, _ := r.PrivateDigests(ctx, []string{privateImage})
+		if len(got) != 0 {
+			t.Fatalf("revoked lease still served from cache: %v", got)
+		}
+		if _, ok := errs[privateImage]; !ok {
+			t.Fatal("private image lost its Private flag after the revocation")
 		}
 		drain(t, r)
-		if got, _, _ := r.PrivateDigests(ctx, []string{privateImage}); len(got) != 0 {
-			t.Fatalf("revoked lease still served from cache: %v", got)
+		if f.readCount() == readsBefore {
+			t.Fatal("no background read was attempted after the revocation")
 		}
 	})
 	t.Run("expired", func(t *testing.T) {
@@ -292,6 +309,124 @@ func TestDigestReaderWithoutLeaseListNeverServesCache(t *testing.T) {
 	if n := f.readCount(); n != 2 {
 		t.Fatalf("reads = %d, want 2 (no cache without the lease list)", n)
 	}
+}
+
+// switchGate is a fake executor whose calls block while block is set, so a
+// test can prepare the reader with real reads and then prove a later call
+// never waited on the executor.
+type switchGate struct {
+	*fakeExecutor
+	mu    sync.Mutex
+	block chan struct{} // nil: calls pass
+	calls atomic.Int32
+}
+
+func (s *switchGate) wait() {
+	s.calls.Add(1)
+	s.mu.Lock()
+	ch := s.block
+	s.mu.Unlock()
+	if ch != nil {
+		<-ch
+	}
+}
+
+func (s *switchGate) setBlock(ch chan struct{}) { s.mu.Lock(); s.block = ch; s.mu.Unlock() }
+
+func (s *switchGate) ListPrivateRegistries(ctx context.Context, in *pb.ListPrivateRegistriesRequest, o ...grpc.CallOption) (*pb.ListPrivateRegistriesResponse, error) {
+	s.wait()
+	return s.fakeExecutor.ListPrivateRegistries(ctx, in, o...)
+}
+
+func (s *switchGate) ReadPrivateRegistry(ctx context.Context, in *pb.ReadPrivateRegistryRequest, o ...grpc.CallOption) (*pb.ReadPrivateRegistryResponse, error) {
+	s.wait()
+	return s.fakeExecutor.ReadPrivateRegistry(ctx, in, o...)
+}
+
+func (s *switchGate) ListReadGrants(ctx context.Context, in *pb.ListReadGrantsRequest, o ...grpc.CallOption) (*pb.ListReadGrantsResponse, error) {
+	s.wait()
+	return s.fakeExecutor.ListReadGrants(ctx, in, o...)
+}
+
+// TestDigestReaderStaleSnapshotServesWhileRevalidating: a cache-only render
+// whose snapshot is older than snapshotTTL still marks private images
+// (cached digest for one, pending note for the other) and shows the digest
+// cached within its interval, without waiting on the executor; it queues a
+// background listing, after which the snapshot is fresh and the pending
+// tag is read.
+func TestDigestReaderStaleSnapshotServesWhileRevalidating(t *testing.T) {
+	f, _, clock := leasedReader(t)
+	s := &switchGate{fakeExecutor: f}
+	r := NewDigestReader(s, func() time.Time { return *clock })
+	const pendingImage = "registry.corp.example/team/app:2.0.0"
+	const publicImage = "docker.io/library/nginx:1"
+	if got, errs, err := r.PrivateDigests(context.Background(), []string{privateImage}); err != nil || len(errs) != 0 || len(got) != 1 {
+		t.Fatalf("setup read: got=%v errs=%v err=%v", got, errs, err)
+	}
+	readsBefore := f.readCount()
+
+	gate := make(chan struct{})
+	s.setBlock(gate)
+	callsBefore := s.calls.Load()
+	*clock = clock.Add(snapshotTTL + time.Second) // stale, digest still in its interval
+	if snapshotTTL+time.Second >= schedgrant.RegistryMinInterval {
+		t.Fatal("test assumes snapshotTTL is shorter than the digest interval")
+	}
+	ctx := WithReadHost(WithCacheOnly(context.Background()), "web-1")
+	done := make(chan struct{})
+	var got map[string]PrivateDigest
+	var errs map[string]error
+	var err error
+	go func() {
+		defer close(done)
+		got, errs, err = r.PrivateDigests(ctx, []string{privateImage, pendingImage, publicImage})
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		close(gate)
+		t.Fatal("a cache-only render with a stale snapshot waited on the executor")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got[privateImage].Digest != fakeDigest {
+		t.Fatalf("validly cached digest lost on a stale snapshot: got=%v errs=%v", got, errs)
+	}
+	if !errors.Is(errs[pendingImage], ErrPrivateReadPending) {
+		t.Fatalf("private image lost its pending note on a stale snapshot: got=%v errs=%v", got, errs)
+	}
+	if _, ok := got[publicImage]; ok {
+		t.Fatal("public image answered as private")
+	}
+	if _, ok := errs[publicImage]; ok {
+		t.Fatal("public image answered as private")
+	}
+	if n := f.readCount(); n != readsBefore {
+		t.Fatalf("stale cache-only render made %d executor reads", n-readsBefore)
+	}
+
+	// The render queued a background refresh; it lists and reads the
+	// pending tag once the executor answers.
+	close(gate)
+	drain(t, r)
+	if s.calls.Load() == callsBefore {
+		t.Fatal("stale snapshot started no background refresh")
+	}
+	r.mu.Lock()
+	at := r.snap.at
+	r.mu.Unlock()
+	if !at.Equal(*clock) {
+		t.Fatalf("snapshot taken at %v, want the refresh at %v", at, *clock)
+	}
+	if n := f.readCount(); n != readsBefore+1 {
+		t.Fatalf("background reads = %d, want 1 (only the pending tag)", n-readsBefore)
+	}
+	got, errs, _ = r.PrivateDigests(ctx, []string{privateImage, pendingImage})
+	if len(got) != 2 || len(errs) != 0 {
+		t.Fatalf("render after the refresh: got=%v errs=%v", got, errs)
+	}
+	drain(t, r)
 }
 
 // TestDigestReaderQueueAndHostBounded: the background queue and the host
