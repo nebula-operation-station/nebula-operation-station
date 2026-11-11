@@ -209,6 +209,11 @@ type Options struct {
 	// Nil makes /vulnerabilities say "not set up" and the other
 	// vulnerabilities routes answer 404.
 	Vuln VulnFindings
+	// RegistryReads is the server's caller of executor private registry
+	// reads (cu06 part 1, G13; leases_registry.go): the registry scope of
+	// the lease form, registry leases on the lease pages and executor-read
+	// digests in docker.check_updates results. Nil hides all three.
+	RegistryReads RegistryReads
 	// Log receives executor status errors (the page itself only shows
 	// "Executor unavailable"). Nil means slog.Default().
 	Log *slog.Logger
@@ -274,6 +279,9 @@ type Handler struct {
 	// vuln and vulnPending serve the vulnerabilities pages (vuln*.go).
 	vuln        VulnFindings
 	vulnPending *vulnPendingTable
+	// registryReads serves private registry leases and digests; nil hides
+	// them.
+	registryReads RegistryReads
 }
 
 // New parses the embedded templates and builds a Handler.
@@ -351,6 +359,7 @@ func New(o Options) (*Handler, error) {
 		pveChart:             o.PVEChart,
 		pve:                  o.PVE,
 		pveRemotes:           o.PVERemotes,
+		registryReads:        o.RegistryReads,
 		guestPower:           o.GuestPower,
 		guestSnapshot:        o.GuestSnapshot,
 		deploy:               o.Deploy,
