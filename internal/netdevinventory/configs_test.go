@@ -700,6 +700,67 @@ func TestProtectedOverCapAreKeptOnWrite(t *testing.T) {
 	}
 }
 
+// TestWriteCapKeepsOldProtectedOverNewerUnprotected makes the write-path
+// cap choose: the baseline, a fresh change binding and the newest version
+// of the other config are older than every unprotected filler, so a cap
+// without any one protection clause deletes them first. An expired change
+// binding is as old and unprotected, so the cap deletes it. Both configs
+// are written in turn, so each half of `id IN (?, ?)` is exercised.
+func TestWriteCapKeepsOldProtectedOverNewerUnprotected(t *testing.T) {
+	for _, tc := range []struct{ written, other ConfigKind }{
+		{ConfigRunning, ConfigStartup},
+		{ConfigStartup, ConfigRunning},
+	} {
+		t.Run(string(tc.written), func(t *testing.T) {
+			s, db, now := newTestStore(t)
+			addDevice(t, s, cbsDevice())
+			start := testBase.Add(-60 * 24 * time.Hour)
+			base := record(t, s, "sw-core", tc.other, start, snap('1', "v1"))
+			fresh := record(t, s, "sw-core", tc.other, start.Add(time.Minute), snap('2', "v2"))
+			expired := record(t, s, "sw-core", tc.other, start.Add(2*time.Minute), snap('3', "v3"))
+			plain := record(t, s, "sw-core", tc.other, start.Add(3*time.Minute), snap('4', "v4"))
+			otherNewest := record(t, s, "sw-core", tc.other, start.Add(4*time.Minute), snap('5', "v5"))
+			markProtected(t, db, base.VersionID, true, nil)
+			recent := now.Add(-24 * time.Hour)
+			markProtected(t, db, fresh.VersionID, false, &recent)
+			old := now.Add(-ConfigVersionRetention - time.Hour)
+			markProtected(t, db, expired.VersionID, false, &old)
+
+			// Unprotected fillers of the written config, all newer than the
+			// versions above (the oldest about 42 days before testBase).
+			firstFiller := configMaxID(t, db) + 1
+			fillVersions(t, db, "sw-core", tc.written, testBase.Add(-time.Hour), MaxConfigVersionsPerDevice, 1<<20)
+			w := record(t, s, "sw-core", tc.written, testBase, snap('e', "new"))
+
+			// 5 + 1000 + 1 versions, 4 protected: the 6 oldest unprotected go,
+			// which are expired, plain and the 4 oldest fillers.
+			ids := configIDs(t, db)
+			if len(ids) != MaxConfigVersionsPerDevice {
+				t.Fatalf("kept %d versions, want %d", len(ids), MaxConfigVersionsPerDevice)
+			}
+			for name, c := range map[string]struct {
+				id   int64
+				kept bool
+			}{
+				"baseline":                {base.VersionID, true},
+				"fresh change binding":    {fresh.VersionID, true},
+				"newest of other config":  {otherNewest.VersionID, true},
+				"new version":             {w.VersionID, true},
+				"expired change binding":  {expired.VersionID, false},
+				"unprotected other":       {plain.VersionID, false},
+				"newest deleted filler":   {firstFiller + MaxConfigVersionsPerDevice - 4, false},
+				"oldest kept filler":      {firstFiller + MaxConfigVersionsPerDevice - 5, true},
+				"newest filler":           {firstFiller, true},
+				"oldest filler (deleted)": {firstFiller + MaxConfigVersionsPerDevice - 1, false},
+			} {
+				if ids[c.id] != c.kept {
+					t.Errorf("%s (version %d) kept = %v, want %v", name, c.id, ids[c.id], c.kept)
+				}
+			}
+		})
+	}
+}
+
 func TestListKeepsBaselineAndChangeBoundBeyondLimit(t *testing.T) {
 	s, db, now := newTestStore(t)
 	addDevice(t, s, cbsDevice())
