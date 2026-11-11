@@ -11,12 +11,14 @@ package ui_test
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -29,17 +31,46 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
 
-// fakeFirewallStore adds stored hit counts to fakeNetDevStore.
+// fakeFirewallStore adds stored hit counts, config drift and injected
+// store errors to fakeNetDevStore.
 type fakeFirewallStore struct {
 	*fakeNetDevStore
 	hits map[string][]netdevcontract.HitCount
+	// drift is the ConfigChangedNotDisplayed answer per device.
+	drift map[string]bool
+	// The *Err fields, when set, are returned by the matching method.
+	hitsErr, driftErr, policyErr, datasetErr error
 }
 
 func (f *fakeFirewallStore) HitCounts(_ context.Context, id string) ([]netdevcontract.HitCount, error) {
+	if f.hitsErr != nil {
+		return nil, f.hitsErr
+	}
 	if v, ok := f.hits[id]; ok {
 		return v, nil
 	}
 	return nil, netdevinventory.ErrDatasetNotFound
+}
+
+func (f *fakeFirewallStore) ConfigChangedNotDisplayed(_ context.Context, id string) (bool, error) {
+	if f.driftErr != nil {
+		return false, f.driftErr
+	}
+	return f.drift[id], nil
+}
+
+func (f *fakeFirewallStore) FirewallPolicy(ctx context.Context, id string) (netdevcontract.FirewallPolicy, error) {
+	if f.policyErr != nil {
+		return netdevcontract.FirewallPolicy{}, f.policyErr
+	}
+	return f.fakeNetDevStore.FirewallPolicy(ctx, id)
+}
+
+func (f *fakeFirewallStore) GetDataset(ctx context.Context, id string, read netdevinventory.Read) (netdevinventory.Dataset, error) {
+	if f.datasetErr != nil {
+		return netdevinventory.Dataset{}, f.datasetErr
+	}
+	return f.fakeNetDevStore.GetDataset(ctx, id, read)
 }
 
 // firewallEnv is a netdevEnv with the detail pages and the firewall view
@@ -47,6 +78,8 @@ func (f *fakeFirewallStore) HitCounts(_ context.Context, id string) ([]netdevcon
 type firewallEnv struct {
 	*netdevEnv
 	fw *fakeFirewallStore
+	// adminErr, when set, is returned by the admin check.
+	adminErr error
 }
 
 func newFirewallEnv(t *testing.T) *firewallEnv {
@@ -57,13 +90,20 @@ func newFirewallEnv(t *testing.T) *firewallEnv {
 	}
 	t.Cleanup(func() { db.Close() })
 	e := &netdevEnv{t: t, store: newFakeNetDevStore(), admins: map[string]bool{"alice": true}}
-	fw := &fakeFirewallStore{fakeNetDevStore: e.store, hits: map[string][]netdevcontract.HitCount{}}
+	fw := &fakeFirewallStore{fakeNetDevStore: e.store, hits: map[string][]netdevcontract.HitCount{}, drift: map[string]bool{}}
+	fe := &firewallEnv{netdevEnv: e, fw: fw}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	u, err := ui.New(ui.Options{PublicOrigin: pveOrigin, Log: log, Now: func() time.Time { return netdevNow }})
 	if err != nil {
 		t.Fatalf("ui.New: %v", err)
 	}
-	isAdmin := func(_ context.Context, user string) (bool, error) { return e.admins[user], nil }
+	isAdmin := func(_ context.Context, user string) (bool, error) {
+		if fe.adminErr != nil {
+			// A failing check still says "admin" to prove the error wins.
+			return true, fe.adminErr
+		}
+		return e.admins[user], nil
+	}
 	registry := func(context.Context) ([]ui.NetDevRegistryEntry, error) { return e.registry, e.regErr }
 	pages, err := u.NetDevPages(ui.NetDevOptions{Store: e.store, Registry: registry, IsAdmin: isAdmin})
 	if err != nil {
@@ -85,7 +125,7 @@ func newFirewallEnv(t *testing.T) *firewallEnv {
 	e.srv = httptest.NewServer(middleware.Handler(middleware.Options{PublicOrigin: pveOrigin}, a.Wrap(mux)))
 	t.Cleanup(e.srv.Close)
 	e.cookie = e.session("cred-alice", "alice")
-	return &firewallEnv{netdevEnv: e, fw: fw}
+	return fe
 }
 
 // hitsObservedAt is when addPANOS stores the hit-count dataset.
@@ -229,9 +269,24 @@ func TestNetDevFirewallNeedsAdmin(t *testing.T) {
 func TestNetDevFirewallAdminCheckErrorFailsClosed(t *testing.T) {
 	e := newFirewallEnv(t)
 	e.addPANOS("fw1", "Edge")
-	e.admins = nil
-	res, _ := e.getAs(e.cookie, "/netdev/fw1/firewall")
+	e.store.policy["fw1"] = netdevcontract.FirewallPolicy{SecurityRules: []netdevcontract.SecurityRule{{Name: "secret-rule", Action: netdevcontract.ActionAllow}}}
+	e.adminErr = errors.New("role lookup failed: db=/var/lib/nebula/secret.db")
+	res, body := e.getAs(e.cookie, "/netdev/fw1/firewall")
 	if res.StatusCode != http.StatusForbidden {
+		t.Errorf("GET firewall with failing admin check = %d, want 403", res.StatusCode)
+	}
+	for _, leak := range []string{"secret-rule", "Edge", "role lookup failed", "secret.db"} {
+		if strings.Contains(body, leak) {
+			t.Errorf("failing admin check leaks %q", leak)
+		}
+	}
+	if got := res.Header.Get("Content-Security-Policy"); got != netdevCSP {
+		t.Errorf("failing admin check: CSP = %q", got)
+	}
+	// Without an error, a user without the role is refused too.
+	e.adminErr = nil
+	e.admins = nil
+	if res, _ := e.getAs(e.cookie, "/netdev/fw1/firewall"); res.StatusCode != http.StatusForbidden {
 		t.Errorf("GET firewall without admin role = %d, want 403", res.StatusCode)
 	}
 }
@@ -405,23 +460,168 @@ func objectRow(t *testing.T, body, name string) string {
 	return ""
 }
 
-func TestNetDevFirewallIncompleteShowsElementsNotDisplayed(t *testing.T) {
+const (
+	notDisplayedNote   = "Policy changed in elements not displayed"
+	readIncompleteNote = "Read incomplete"
+)
+
+func TestNetDevFirewallIncompleteReadShowsReadIncomplete(t *testing.T) {
+	cases := []struct {
+		name       string
+		incomplete bool
+		state      netdevinventory.DatasetState
+	}{
+		{"incomplete flag", true, netdevinventory.StateFresh},
+		{"partial state", false, netdevinventory.StatePartial},
+		{"both", true, netdevinventory.StatePartial},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newFirewallEnv(t)
+			e.addPANOS("fw1", "Edge")
+			e.store.policy["fw1"] = hintPolicy()
+			_, body := e.get("/netdev/fw1/firewall")
+			if strings.Contains(body, readIncompleteNote) || strings.Contains(body, notDisplayedNote) {
+				t.Fatal("complete policy without drift shows a note")
+			}
+			ds := e.store.datasets["fw1"][netdevinventory.ReadFirewallPolicy]
+			ds.Incomplete, ds.State = c.incomplete, c.state
+			e.store.datasets["fw1"][netdevinventory.ReadFirewallPolicy] = ds
+			_, body = e.get("/netdev/fw1/firewall")
+			if !strings.Contains(body, readIncompleteNote) {
+				t.Error("partial policy read is not shown as read incomplete")
+			}
+			// A truncated read is not a policy change.
+			if strings.Contains(body, notDisplayedNote) {
+				t.Error("partial policy read is shown as a change in elements not displayed")
+			}
+		})
+	}
+}
+
+func TestNetDevFirewallRawOnlyDriftShowsElementsNotDisplayed(t *testing.T) {
 	e := newFirewallEnv(t)
 	e.addPANOS("fw1", "Edge")
+	e.addPANOS("fw2", "Branch")
 	e.store.policy["fw1"] = hintPolicy()
+	e.store.policy["fw2"] = hintPolicy()
+	// fw1: raw_digest changed while the redacted text did not.
+	e.fw.drift["fw1"] = true
 	_, body := e.get("/netdev/fw1/firewall")
-	if strings.Contains(body, "changed in elements not displayed") {
-		t.Error("complete policy shows the not-displayed note")
+	if !strings.Contains(body, notDisplayedNote) {
+		t.Error("drift outside the allowlist is not shown")
 	}
+	if strings.Contains(body, readIncompleteNote) {
+		t.Error("drift on a complete read is shown as read incomplete")
+	}
+	// The stored policy is still shown next to the note.
+	if !strings.Contains(body, ">r-45d<") {
+		t.Error("drift note hides the stored rules")
+	}
+	_, body = e.get("/netdev/fw2/firewall")
+	if strings.Contains(body, notDisplayedNote) {
+		t.Error("device without drift shows the not-displayed note")
+	}
+	// Drift and a partial read are two separate notes.
 	ds := e.store.datasets["fw1"][netdevinventory.ReadFirewallPolicy]
 	ds.Incomplete, ds.State = true, netdevinventory.StatePartial
 	e.store.datasets["fw1"][netdevinventory.ReadFirewallPolicy] = ds
 	_, body = e.get("/netdev/fw1/firewall")
-	if !strings.Contains(body, "changed in elements not displayed") {
-		t.Error("incomplete policy hides that elements are not displayed")
+	if !strings.Contains(body, notDisplayedNote) || !strings.Contains(body, readIncompleteNote) {
+		t.Error("drift with a partial read does not show both notes")
 	}
-	if !strings.Contains(body, "partial") {
-		t.Error("partial dataset badge missing")
+}
+
+func TestNetDevFirewallGroupReachedShallowerIsExpanded(t *testing.T) {
+	e := newFirewallEnv(t)
+	e.addPANOS("fw1", "Edge")
+	// A chain c1 -> c2 -> ... -> c8 -> late reaches "late" at the nesting
+	// limit, where it is not expanded. The rule also names "late"
+	// directly; that shallower path must expand it to its member "leaf".
+	var groups []netdevcontract.Group
+	for i := 1; i <= netdevcontract.MaxGroupNestingDepth; i++ {
+		next := "c" + strconv.Itoa(i+1)
+		if i == netdevcontract.MaxGroupNestingDepth {
+			next = "late"
+		}
+		groups = append(groups, netdevcontract.Group{Name: "c" + strconv.Itoa(i), Static: []string{next}})
+	}
+	groups = append(groups, netdevcontract.Group{Name: "late", Static: []string{"leaf"}})
+	e.store.policy["fw1"] = netdevcontract.FirewallPolicy{
+		// The stack is LIFO: the chain (named last) is walked first.
+		SecurityRules: []netdevcontract.SecurityRule{{Name: "r1", Source: []string{"late", "c1"}, Action: netdevcontract.ActionAllow}},
+		Addresses:     []netdevcontract.AddressObject{{Name: "leaf", Type: netdevcontract.AddressNetmask, Value: "10.0.0.9/32"}},
+		AddressGroups: groups,
+	}
+	code, body := e.get("/netdev/fw1/firewall")
+	if code != http.StatusOK {
+		t.Fatalf("GET firewall = %d", code)
+	}
+	if row := objectRow(t, body, "leaf"); !strings.Contains(row, "used by 1 rule<") {
+		t.Errorf("member of a group reached again at a shallower depth is not counted: %s", row)
+	}
+	if row := objectRow(t, body, "late"); !strings.Contains(row, "used by 1 rule<") {
+		t.Errorf("group late counted wrongly: %s", row)
+	}
+}
+
+// usagePolicy has rules rules that each name one address group of
+// MaxGroupMembers members, so counting usage takes rules *
+// (MaxGroupMembers+1) steps.
+func usagePolicy(rules int) netdevcontract.FirewallPolicy {
+	members := make([]string, netdevcontract.MaxGroupMembers)
+	for i := range members {
+		members[i] = "m" + strconv.Itoa(i)
+	}
+	pol := netdevcontract.FirewallPolicy{
+		Addresses:     []netdevcontract.AddressObject{{Name: "m0", Type: netdevcontract.AddressNetmask, Value: "10.0.0.1/32"}},
+		AddressGroups: []netdevcontract.Group{{Name: "big", Static: members}},
+	}
+	for i := range rules {
+		pol.SecurityRules = append(pol.SecurityRules, netdevcontract.SecurityRule{Name: "r" + strconv.Itoa(i),
+			Source: []string{"big"}, Action: netdevcontract.ActionAllow})
+	}
+	return pol
+}
+
+func TestNetDevFirewallUsageWorkLimit(t *testing.T) {
+	// netdevUsageMaxSteps is 2,000,000; one rule costs 2,501 steps.
+	const perRule = netdevcontract.MaxGroupMembers + 1
+	under := 2_000_000 / perRule // 799 rules: 1,998,399 steps
+	cases := []struct {
+		name    string
+		rules   int
+		skipped bool
+	}{
+		{"just under the limit", under, false},
+		{"just over the limit", under + 1, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newFirewallEnv(t)
+			e.addPANOS("fw1", "Edge")
+			e.store.policy["fw1"] = usagePolicy(c.rules)
+			code, body := e.get("/netdev/fw1/firewall")
+			if code != http.StatusOK {
+				t.Fatalf("GET firewall = %d", code)
+			}
+			skipped := strings.Contains(body, "Rule usage not computed")
+			if skipped != c.skipped {
+				t.Fatalf("usage skipped = %v, want %v", skipped, c.skipped)
+			}
+			row := objectRow(t, body, "m0")
+			if c.skipped {
+				if strings.Contains(row, "used by") {
+					t.Errorf("usage shown although not computed: %s", row)
+				}
+				// The rules themselves are still listed.
+				if !strings.Contains(body, ">r"+strconv.Itoa(c.rules-1)+"<") {
+					t.Error("last rule missing when usage is skipped")
+				}
+			} else if want := "used by " + strconv.Itoa(c.rules) + " rules<"; !strings.Contains(row, want) {
+				t.Errorf("want %q in %s", want, row)
+			}
+		})
 	}
 }
 
@@ -438,7 +638,7 @@ func TestNetDevFirewallStaleBadges(t *testing.T) {
 	}
 }
 
-func TestNetDevFirewallStoreErrorsDoNotLeak(t *testing.T) {
+func TestNetDevFirewallMissingPolicyIsStated(t *testing.T) {
 	e := newFirewallEnv(t)
 	e.addPANOS("fw1", "Edge")
 	code, body := e.get("/netdev/fw1/firewall")
@@ -447,6 +647,55 @@ func TestNetDevFirewallStoreErrorsDoNotLeak(t *testing.T) {
 	}
 	if !strings.Contains(body, "No firewall policy read yet.") {
 		t.Error("missing policy is not stated")
+	}
+	if strings.Contains(body, "Stored data unavailable") {
+		t.Error("a missing dataset is reported as a store error")
+	}
+}
+
+func TestNetDevFirewallStoreErrorsDoNotLeak(t *testing.T) {
+	// secretErr carries text that must never reach the page.
+	secretErr := errors.New("sqlite: disk I/O error at /var/lib/nebula/server.db token=hunter2")
+	cases := []struct {
+		name   string
+		inject func(f *fakeFirewallStore)
+		want   []string
+	}{
+		{"policy", func(f *fakeFirewallStore) { f.policyErr = secretErr }, []string{"Stored data unavailable: firewall policy<"}},
+		{"hit counts", func(f *fakeFirewallStore) { f.hitsErr = secretErr }, []string{"Stored data unavailable: hit counts<"}},
+		{"config versions", func(f *fakeFirewallStore) { f.driftErr = secretErr }, []string{"Stored data unavailable: config versions<"}},
+		{"dataset states", func(f *fakeFirewallStore) { f.datasetErr = secretErr },
+			[]string{"Stored data unavailable: firewall policy state, hit count state<"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newFirewallEnv(t)
+			e.addPANOS("fw1", "Edge")
+			e.store.policy["fw1"] = hintPolicy()
+			e.fw.hits["fw1"] = []netdevcontract.HitCount{{RuleName: "r-45d", ResetAt: ptrTime(hitsObservedAt.Add(-days(45)))}}
+			c.inject(e.fw)
+			code, body := e.get("/netdev/fw1/firewall")
+			if code != http.StatusOK {
+				t.Fatalf("GET firewall = %d", code)
+			}
+			if !strings.Contains(body, "Stored data unavailable") {
+				t.Fatal("store error is not reported as unavailable")
+			}
+			for _, w := range c.want {
+				if !strings.Contains(body, w) {
+					t.Errorf("unavailable note lacks %q", w)
+				}
+			}
+			for _, leak := range []string{"sqlite", "disk I/O", "server.db", "hunter2"} {
+				if strings.Contains(body, leak) {
+					t.Errorf("page leaks store error text %q", leak)
+				}
+			}
+			// A failed drift check must not claim drift.
+			if strings.Contains(body, notDisplayedNote) {
+				t.Error("store error shown as a change in elements not displayed")
+			}
+		})
 	}
 }
 

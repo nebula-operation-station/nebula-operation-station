@@ -57,11 +57,17 @@ const (
 // NetDevFirewallStore is the read-only store of the firewall view: the
 // network device store plus the stored rule hit counts. HitCounts returns
 // an error matching netdevinventory.ErrDatasetNotFound when none are
-// stored. Every returned string is untrusted device text.
+// stored. ConfigChangedNotDisplayed reports drift outside the allowlist:
+// the raw_digest of the running config changed while its redacted text
+// did not (ADR 0010 D4). Every returned string is untrusted device text.
 type NetDevFirewallStore interface {
 	NetDevStore
 	// HitCounts returns the current rule hit counts (PAN-OS).
 	HitCounts(ctx context.Context, deviceID string) ([]netdevcontract.HitCount, error)
+	// ConfigChangedNotDisplayed reports whether the newest running config
+	// version differs from the one before it only outside the redacted
+	// text.
+	ConfigChangedNotDisplayed(ctx context.Context, deviceID string) (bool, error)
 }
 
 // NetDevFirewallOptions configure the firewall view.
@@ -153,12 +159,16 @@ type netdevFirewallData struct {
 	Datasets  []netdevDatasetRow
 
 	HasPolicy bool
-	// NotDisplayed is set when the stored policy is partial: elements were
-	// cut or dropped and are not shown.
+	// NotDisplayed is set on drift outside the allowlist: the running
+	// config's raw_digest changed while its redacted text did not, so the
+	// change is in elements this view does not display.
 	NotDisplayed bool
-	Rules        []netdevFwRuleRow
-	NAT          []netdevFwNATRow
-	Objects      []netdevFwObjectRow
+	// ReadIncomplete is set when the stored policy read is partial:
+	// elements were cut or dropped and are missing from this view.
+	ReadIncomplete bool
+	Rules          []netdevFwRuleRow
+	NAT            []netdevFwNATRow
+	Objects        []netdevFwObjectRow
 	// UsageSkipped is set when the policy was too large to count usage.
 	UsageSkipped bool
 	// DynamicGroups is set when an address group has a dynamic filter,
@@ -214,11 +224,17 @@ func (p *NetDevFirewallPage) handle(w http.ResponseWriter, r *http.Request) {
 			v.Unavailable = append(v.Unavailable, what)
 		}
 	}
+	// Drift outside the allowlist: raw_digest changed, redacted text not.
+	if changed, err := p.store.ConfigChangedNotDisplayed(ctx, id); err != nil {
+		rowErr("config versions", err)
+	} else {
+		v.NotDisplayed = changed
+	}
 	// Dataset states: a partial policy read means elements are missing.
 	if ds, err := p.store.GetDataset(ctx, id, netdevinventory.ReadFirewallPolicy); err != nil {
 		rowErr("firewall policy state", err)
 	} else {
-		v.NotDisplayed = ds.Incomplete || ds.State == netdevinventory.StatePartial
+		v.ReadIncomplete = ds.Incomplete || ds.State == netdevinventory.StatePartial
 	}
 	var hitsDS netdevinventory.Dataset
 	hitsDSOK := false
@@ -363,8 +379,11 @@ func netdevUnusedHint(hc netdevcontract.HitCount, hitsAt time.Time) string {
 // netdevObjectUsage counts, per address and per service object or group
 // name, the security and NAT rules that use it directly or through
 // (nested) static groups. Each rule counts at most once per name. Group
-// expansion stops at netdevcontract.MaxGroupNestingDepth and on cycles;
-// dynamic address group members are not resolved. ok is false when the
+// expansion stops at netdevcontract.MaxGroupNestingDepth and on cycles: a
+// name is expanded again only when reached at a shallower depth than
+// before, so a group first met at the depth limit is still expanded when
+// the rule also reaches it closer to the top. Dynamic address group
+// members are not resolved. ok is false when the
 // work exceeded netdevUsageMaxSteps.
 func netdevObjectUsage(pol netdevcontract.FirewallPolicy) (addr, svc map[string]int, ok bool) {
 	addrGroups := make(map[string][]string, len(pol.AddressGroups))
@@ -386,7 +405,8 @@ func netdevObjectUsage(pol netdevcontract.FirewallPolicy) (addr, svc map[string]
 			name  string
 			depth int
 		}
-		seen := map[string]bool{}
+		// best is the shallowest depth each name was reached at.
+		best := map[string]int{}
 		var stack []item
 		for _, l := range lists {
 			for _, n := range l {
@@ -399,17 +419,17 @@ func netdevObjectUsage(pol netdevcontract.FirewallPolicy) (addr, svc map[string]
 			}
 			it := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
-			if seen[it.name] {
+			if d, seen := best[it.name]; seen && d <= it.depth {
 				continue
 			}
-			seen[it.name] = true
+			best[it.name] = it.depth
 			if members, isGroup := groups[it.name]; isGroup && it.depth < netdevcontract.MaxGroupNestingDepth {
 				for _, mb := range members {
 					stack = append(stack, item{mb, it.depth + 1})
 				}
 			}
 		}
-		for n := range seen {
+		for n := range best {
 			m[n]++
 		}
 		return true
