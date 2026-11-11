@@ -425,7 +425,7 @@ the NOS origin reachable for this purpose is not part of this ADR.
 | Precomputed key grinding against a known host key | Salt per offer; code computed over salt and key | None beyond the row above |
 | Forged code shown to the operator | Code is read in the operator's own session or console | Equal to the operator's trust in that session (TOFU on a fresh VPS) |
 | Leaked or guessed offer ID | ≥ 128 bits, single use, 15 min, uniform 404, rate limit, hashed at rest | A leaked ID before the download lets someone take the script; the real download then fails and the operator sees the download address |
-| Script tampered in transit | TLS to the NOS origin, SHA-256 check before running, no `curl | sh` | — |
+| Script tampered in transit | TLS to the NOS origin, SHA-256 check before running, no `curl \| sh` | — |
 | Compromised server | Executor decides code match, builds the permit, holds token and setup keys; `nebula approve` independent view | Can serve a malicious script (root on the new host) and deceive the approval page, as today |
 | Leaked NetBird setup key | One use, ≤ 1 h, auto-group only `nos-managed`, one-way policy, executor peer cross-check and revocation | One rogue peer in `nos-managed` for a short time, reachable only from NOS |
 | NetBird token misuse | Executor vault, typed calls only, audit, dedicated service user | Role may be broader than needed (Q3) |
