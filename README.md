@@ -2,7 +2,7 @@
 
 A self-hosted operations control plane for Linux homelabs (about 5 to 100 hosts). It keeps an inventory of your hosts, Proxmox VE clusters, VMs and containers, patches and operates them over SSH, rolls changes out in stages and records every privileged action in a signed audit trail. Credentials live in a separate executor that checks every action on its own, so a compromised web server does not hand out your keys.
 
-> **Status: alpha, 0.9 Beta in preparation.** The code for Release 0.9 (inventory, patching, services, Docker, staged rollouts, runbooks, signed modules, IPAM, discovery, signed events, backup and restore, Debian packages and containers) is complete and passes the test suite; the lab run on real hosts is still pending. Since then the Proxmox VE integration has grown from a read-only view into day-to-day operations, and guest provisioning and batch approval are merged. Next up is the [traffic map](#coming-next-traffic-map). Try it in a lab, not in production.
+> **Status: alpha, 0.9 Beta in preparation.** The code for Release 0.9 (inventory, patching, services, Docker, staged rollouts, runbooks, signed modules, IPAM, discovery, signed events, backup and restore, Debian packages and containers) is complete and passes the test suite; the lab run on real hosts is still pending. Since then the Proxmox VE integration has grown into day-to-day operations, guest provisioning and batch approval are merged, the server side of vulnerability management is merged, and read-only support for network devices (Cisco CBS switches, Palo Alto firewalls) is being built. Try it in a lab, not in production.
 
 ## What it does
 
@@ -11,26 +11,31 @@ A self-hosted operations control plane for Linux homelabs (about 5 to 100 hosts)
 - **Staged rollouts.** Plans run stage by stage with failure thresholds, postchecks and gates. A whole plan (for example twelve updates and three restarts) is approved once with a security key, and the executor still checks every member.
 - **Proxmox VE.** Clusters and standalone hosts are added once with a least-privilege API token and a pinned TLS certificate; the executor reads them through bounded, approved read grants. From the chart you can propose guest shutdown, reboot, stop and reset, snapshots (create, delete, rollback), a backup now, a migration within the cluster, a node reboot and OS updates; each is approved like any other change, with risk classes from MEDIUM to CRITICAL. See the [Proxmox operator guide](docs/operator/proxmox.md).
 - **Guest provisioning.** Versioned deploy profiles with presets, a signed image catalog, cloud-init provisioning through a deploy wizard and enrollment of the new guest ([ADR 0008](docs/adr/0008-guest-provisioning.md)).
-- **Network.** IPAM, discovery scans and device lists.
+- **Network.** IPAM, discovery scans and device lists. Network devices (Cisco CBS switches, Palo Alto PAN-OS firewalls) are read with a dedicated read-only account through the executor: VLANs, ports, LLDP neighbours, zones, rules and hit counts, with a device inventory in the UI and a firewall view in progress ([ADR 0010](docs/adr/0010-network-devices.md)).
+- **Vulnerability management.** CVE findings per host, container image and network device, prioritised by NOS (KEV, EPSS, CVSS, criticality) with attack paths; feeds are fetched and matched by a separate, minimal agent with fixed tools, never by the server ([ADR 0011](docs/adr/0011-vulnerability-management.md)). Advisory only: nothing here proposes or runs a change.
 - **Audit and recovery.** Signed events, backup and restore with `age`, and release manifests signed with an offline hardware key ([release signing](docs/admin/release-signing.md)).
 
 ## Screenshots
 
-Taken from the test harness's preview mode with demo data (`go run ./test/browser/harness -preview PORT /absolute/empty/dir`, then open `http://localhost:PORT`).
+Taken from the test harness's preview mode with demo data (`go run ./test/browser/harness -preview PORT /absolute/empty/dir`, then open `http://localhost:PORT`), dark theme.
 
-| Dashboard | Inventory (dark theme) |
+| Dashboard | Inventory |
 | --- | --- |
-| ![Dashboard with host-key alerts and host overview tiles](docs/screenshots/dashboard-light.png) | ![Inventory with status, updates, containers and pinned key per host](docs/screenshots/inventory-dark.png) |
+| ![Dashboard with a host-key mismatch alert, host overview tiles and executor state](docs/screenshots/dashboard-dark.png) | ![Inventory with status, updates, containers and pinned key per host](docs/screenshots/inventory-dark.png) |
 | **Host: containers** | **Host: pending updates** |
-| ![Host page, containers tab with update status per image](docs/screenshots/host-containers-light.png) | ![Host page, updates tab](docs/screenshots/host-updates-light.png) |
+| ![Host page, containers tab with update status per image](docs/screenshots/host-containers-dark.png) | ![Host page, updates tab](docs/screenshots/host-updates-dark.png) |
+| **Operations** | **Proxmox VE remotes** |
+| ![Operations with an approval waiting, running and finished operations and read refreshes](docs/screenshots/operations-dark.png) | ![Proxmox remotes: a cluster and a standalone node with pinned TLS trust and collector state](docs/screenshots/pve-remotes-dark.png) |
 
-Org chart: a Proxmox host with its details panel (configuration, updates with actions to propose security or all updates, snapshots, backups) and a Compose stack with running, health, same-tag and stable-version status:
+Org chart: a Proxmox node with its guests (backup state, vulnerability summary, actions to propose security or all updates) and its datastore with fill level; below it the staged OS update across DEV, QA and PROD:
 
-![Org chart with details panel and container boxes](docs/screenshots/chart-light.png)
+![Org chart with guests, datastore and staged OS update](docs/screenshots/chart-dark.png)
 
-Network, quick mode (scan, devices, usage):
+Network, quick mode (scan, devices, usage), and the deploy runs of guest provisioning:
 
-![Network page in quick mode](docs/screenshots/network-quick-light.png)
+| Network | Deploy runs |
+| --- | --- |
+| ![Network page in quick mode](docs/screenshots/network-dark.png) | ![Deployment runs with target node, VMID, risk and state](docs/screenshots/deploy-dark.png) |
 
 On a phone: [inventory](docs/screenshots/inventory-phone-light.png). Light, dark or system theme under Settings → Appearance; the sidebar collapses to icons.
 
@@ -55,6 +60,11 @@ A zoomable map of who talks to whom ([ADR 0009](https://github.com/nebula-operat
 | Proxmox VE, phase 2 (guest and node actions, updates from the chart) | guest power, snapshots, backup now, migration, node reboot and OS updates from the chart merged; follow-ups in progress |
 | Approval ergonomics (read grants, batch approval, sessions) | merged ([ADR 0007](docs/adr/0007-approval-ergonomics.md)) |
 | Guest provisioning (deploy profiles, image catalog, cloud-init, enrollment) | merged; preset host keys in progress ([ADR 0008](docs/adr/0008-guest-provisioning.md)) |
+| Network devices, phase 1 (CBS and PAN-OS read path, collector, inventory, device pages) | collector, deployment, store and device pages merged; ingest, firewall view and IPAM/traffic-map integration in progress ([ADR 0010](docs/adr/0010-network-devices.md)) |
+| Vulnerability management (findings, priority, attack paths, notifications) | server side merged; in-repo vulnerability agent in progress ([ADR 0011](docs/adr/0011-vulnerability-management.md)) |
+| Network security advisor (reachability, rule and segmentation advice, firewall logs, IP reputation) | proposed (ADR 0012) |
+| One-step host enrollment (pairing code, optional NetBird join) | proposed (ADR 0013) |
+| Handbook, FAQ and in-app help | planned |
 | Traffic map (communication map, observed endpoints, software symbols) | proposed; libraries, store, catalog, icon pipeline and renderer merged; API, page and connections tab in progress ([ADR 0009](https://github.com/nebula-operation-station/nebula-operation-station/pull/232)) |
 
 ## Repository layout
