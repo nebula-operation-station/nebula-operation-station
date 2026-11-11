@@ -5,6 +5,7 @@ Nebula Operation Station and covers everything an operator needs
 afterwards: configuration, backups, upgrades, troubleshooting and
 removal. Developers building from source start with
 [`docs/dev/getting-started.md`](../dev/getting-started.md) instead.
+Task-oriented how-tos and a FAQ are in the [operator handbook](../handbook/README.md).
 
 Contents:
 
