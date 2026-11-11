@@ -44,7 +44,7 @@ count-bounded, must be valid UTF-8, and is rendered as text only.
 | Capability | Status | Where |
 | --- | --- | --- |
 | Probe, register, re-pin, block, unblock, remove, list | Available | `nebula netdev` on the executor host |
-| Store and rotate the read credential | Available | `nebula netdev credential set|rotate` |
+| Store and rotate the read credential | Available | `nebula netdev credential set`, `nebula netdev credential rotate` |
 | Device read leases (enforcement in the executor) | Available in the executor; no page or CLI command proposes one yet | none |
 | Device reads (CBS CLI, PAN-OS XML API) | **Not available:** the executor authorizes the read and records its spend, then answers `device reads are not implemented yet (ND-14)` | none |
 | Collector | **Not available:** the binary, the `nebula-netdev-collector` user and its spool are installed, but the unit stays disabled | `nebula-netdev-collector.service` |
@@ -103,12 +103,13 @@ manual login check needs the private key file, so do not change this order.
 
 No `nebula` command generates device keys. Create the key on the executor
 host as the admin, in a private directory, and keep the shell open (or note
-the directory) until step 5:
+the directory) until step 5. `mktemp -d` creates the directory with mode
+0700; `umask 077` runs in a subshell so it does not change the mode of
+files you create later in the same shell:
 
 ```sh
-umask 077
 d=$(mktemp -d)
-ssh-keygen -t rsa -b 3072 -N '' -C 'nos-read <device-id>' -f "$d/nos-read"
+(umask 077 && ssh-keygen -t rsa -b 3072 -N '' -C 'nos-read <device-id>' -f "$d/nos-read")
 cat "$d/nos-read.pub"
 ```
 
@@ -217,11 +218,29 @@ refuses a device that shows more than one vsys.
    management network (ADR 0010 D2). Keep the password out of argv and the
    shell history, and verify the management certificate instead of using
    `-k` (for a self-signed certificate export it once and pass it with
-   `--cacert`; compare it with the fingerprint `nebula netdev probe` shows):
+   `--cacert`; compare it with the fingerprint `nebula netdev probe` shows).
+   Run the snippet in **bash**: `read -s` and the `<(...)` process
+   substitution do not exist in a POSIX `sh` or `dash`.
 
-   ```sh
+   ```bash
    read -rs -p 'nos-read password: ' PANPW; echo
    curl -s --cacert <mgmt-cert.pem> -X POST "https://<firewall-mgmt-ip>/api/" \
+     --data-urlencode type=keygen --data-urlencode user=nos-read \
+     --data-urlencode "password@<(printf %s "$PANPW")"
+   unset PANPW
+   ```
+
+   curl also checks the URL's host against the certificate's subject
+   alternative names. A self-signed management certificate often lists
+   only a name, not the IP address, and curl then refuses it. In that case
+   address the firewall by a DNS name the certificate lists (the probe
+   shows them as `tls dns`) and map that name to the management IP with
+   `--resolve`, so no DNS lookup is involved:
+
+   ```bash
+   read -rs -p 'nos-read password: ' PANPW; echo
+   curl -s --cacert <mgmt-cert.pem> --resolve <cert-name>:443:<firewall-mgmt-ip> \
+     -X POST "https://<cert-name>/api/" \
      --data-urlencode type=keygen --data-urlencode user=nos-read \
      --data-urlencode "password@<(printf %s "$PANPW")"
    unset PANPW
@@ -265,7 +284,7 @@ nebula netdev list
 | `--family` | `cbs` (SSH host key pin) or `panos` (TLS certificate pin). Required for `probe` and `add`. |
 | `--endpoint` | Private IP literal or host name of the management interface. Required. |
 | `--port` | Default 22 for `cbs`, 443 for `panos`. |
-| `--label` | Display name only; names never authenticate a device. |
+| `--label` | Display name only; names never authenticate a device. At most 255 bytes of printable UTF-8. **Required** for an IP literal `--endpoint`. For a host name `--endpoint` the label is always the normalized host name (lower case, no trailing dot): omit `--label` or pass exactly that name; any other label is refused with `invalid network device request`. |
 | `--username` | Device account name, for example `nos-read`. Not a secret. |
 | `--no-credential` | Register only; store the credential later with `credential set`. |
 | `--secret-fd N` | Read the credential once from open descriptor N (3 or higher). Required in practice for a `cbs` key (see [Storing the read credential](#storing-the-read-credential)). |
@@ -273,10 +292,18 @@ nebula netdev list
 
 ### Endpoint rules
 
-The executor stores and dials endpoints as **IP literals**. A host name is
-resolved once at `probe`/`add`; the probe shows `(resolved from <name>)`,
-the literal is stored and the name is never resolved again, so a later DNS
-change cannot redirect a credentialed connection. Only private addresses
+The executor stores and dials endpoints as **IP literals**. During `add`
+the executor resolves a host name twice: once for the probe (which shows
+`(resolved from <name>)`) and once more for the registration. The
+registration probes the address it resolved again and stores it only if
+the device there presents the fingerprint you confirmed; if the name now
+points elsewhere, `add` fails with `network device trust identity does not
+match` and registers nothing. The name must resolve to **exactly one**
+address: a name with several A/AAAA records, or none, is refused with
+`network device name did not resolve to exactly one address`. After
+registration only the IP literal is stored and the name is never resolved
+again, so a later DNS change cannot redirect a credentialed connection.
+The host name becomes the device's label. Only private addresses
 are accepted; public, loopback, link-local, multicast and unspecified
 addresses are refused at registration and again at every dial. Use the
 internal management address, never a public name or a WAN address.
@@ -330,7 +357,14 @@ store only its first line, and the remaining lines would reach your shell
 `--secret-fd`:
 
 ```sh
-nebula netdev add <device-id> --family cbs --endpoint <switch-ip> \
+nebula netdev add <device-id> --family cbs --endpoint <switch-ip> --label <label> \
+  --username nos-read --secret-fd 3 3< "$d/nos-read"
+```
+
+With a host name endpoint, leave out `--label` (the label is the name):
+
+```sh
+nebula netdev add <device-id> --family cbs --endpoint <switch-name> \
   --username nos-read --secret-fd 3 3< "$d/nos-read"
 ```
 
@@ -597,6 +631,9 @@ over its count limit is marked incomplete, never silently truncated.
 | Symptom | Likely cause / action |
 | --- | --- |
 | `--family must be cbs or panos` / `--endpoint is required` | Fix the flags; `probe` and `add` need both. |
+| `network device name did not resolve to exactly one address` | The host name has no address, or more than one (several A/AAAA records, round-robin DNS), as seen from the executor host. Use the management IP literal with `--label`, or a name with exactly one record. |
+| `register: … invalid network device request` at `add` | An IP literal `--endpoint` without `--label`, a `--label` that differs from the host name given as `--endpoint`, or a label that is not printable UTF-8. Nothing was registered; fix the flags and re-run. |
+| `register: … network device trust identity does not match` at `add` | The device answering at registration presented another fingerprint than the one you confirmed, for example because the host name now resolves to another address. Nothing was registered; probe again and compare out of band. |
 | Endpoint refused at `probe` or `add` | The address is public, loopback, link-local, multicast or unspecified, or the name resolved to such an address. Use the internal management address. |
 | `stdin is not a terminal: the typed 'yes' must come from a person at a terminal` | `add`, `repin`, `unblock` and `remove` need an interactive terminal; run them in a terminal, not from a pipe or script. |
 | `stdin is not a terminal: the credential is asked without echo on a terminal, or pass --secret-fd N` | Run in a terminal or pass `--secret-fd N` with `N< file`. |
