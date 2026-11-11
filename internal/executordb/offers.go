@@ -147,6 +147,9 @@ type Offer struct {
 	CodeSubmittedAt time.Time // zero until a well-formed code was submitted
 	Probes          int
 	RejectedCodes   int
+	// SetupKey is the NetBird setup-key record (status none for offers
+	// without NetBird and for NetBird offers before approval).
+	SetupKey SetupKeyRecord
 }
 
 var zeroHash [offerHashLen]byte
@@ -249,10 +252,16 @@ func (db *DB) insertOffer(n NewOffer, now int64, state OfferState, script any) (
 
 const offerColumns = `id_hash, salt, host_id, ssh_user, credential_ref, session_hash, netbird, created_at,
 	expires_at, state, state_changed_at, script_sha256, downloaded_at, client_addr, peer_addr,
-	code_submitted_at, probes, rejected_codes`
+	code_submitted_at, probes, rejected_codes, ` + setupKeyColumns
 
 // Offer returns the offer with this ID hash, or ErrOfferNotFound.
 func (db *DB) Offer(idHash [offerHashLen]byte) (Offer, error) {
+	return scanOffer(db.sql.QueryRow(`SELECT `+offerColumns+` FROM enroll_offers WHERE id_hash = ?`, idHash[:]), idHash)
+}
+
+// scanOffer reads one offer row selected with offerColumns. idHash names
+// the offer in errors until the row's own ID hash is read.
+func scanOffer(sc rowScanner, idHash [offerHashLen]byte) (Offer, error) {
 	var (
 		o                         Offer
 		id, salt, session, script []byte
@@ -262,16 +271,20 @@ func (db *DB) Offer(idHash [offerHashLen]byte) (Offer, error) {
 		downloaded, submitted     sql.NullInt64
 		client, peer              sql.NullString
 		probes, rejected          int64
+		sk                        setupKeyScan
 	)
-	err := db.sql.QueryRow(`SELECT `+offerColumns+` FROM enroll_offers WHERE id_hash = ?`, idHash[:]).Scan(
-		&id, &salt, &o.HostID, &o.SSHUser, &o.CredentialRef, &session, &netbird, &created,
+	dest := []any{&id, &salt, &o.HostID, &o.SSHUser, &o.CredentialRef, &session, &netbird, &created,
 		&expires, &state, &changed, &script, &downloaded, &client, &peer,
-		&submitted, &probes, &rejected)
+		&submitted, &probes, &rejected}
+	err := sc.Scan(append(dest, sk.dest()...)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Offer{}, fmt.Errorf("executordb: offer %s: %w", offerLogID(idHash), ErrOfferNotFound)
 	}
 	if err != nil {
 		return Offer{}, fmt.Errorf("executordb: offer %s: %w", offerLogID(idHash), err)
+	}
+	if len(id) == offerHashLen {
+		idHash = [offerHashLen]byte(id)
 	}
 	if len(id) != offerHashLen || len(session) != offerHashLen ||
 		(salt != nil && len(salt) != offerSaltLen) || (script != nil && len(script) != offerHashLen) {
@@ -294,21 +307,10 @@ func (db *DB) Offer(idHash [offerHashLen]byte) (Offer, error) {
 	}
 	o.ClientAddr, o.PeerAddr = client.String, peer.String
 	o.Probes, o.RejectedCodes = int(probes), int(rejected)
-	return o, nil
-}
-
-// OpenOffer moves a NetBird offer from awaiting_approval to open and
-// records the SHA-256 of its full render, in one compare-and-set. It fails
-// with ErrOfferExpired once the offer's lifetime is over.
-func (db *DB) OpenOffer(idHash, scriptSHA256 [offerHashLen]byte) error {
-	if scriptSHA256 == zeroHash {
-		return fmt.Errorf("executordb: %w: offer script hash is required", ErrInvalid)
+	if o.SetupKey, err = sk.record(); err != nil {
+		return Offer{}, fmt.Errorf("executordb: offer %s: %w", offerLogID(idHash), err)
 	}
-	now := db.now().Unix()
-	return db.offerCAS(idHash, "open offer", now, true, OfferAwaitingApproval, nil, `UPDATE enroll_offers
-		SET state = 'open', state_changed_at = ?, script_sha256 = ?
-		WHERE id_hash = ? AND state = 'awaiting_approval' AND expires_at > ?`,
-		now, scriptSHA256[:], idHash[:], now)
+	return o, nil
 }
 
 // ClaimOfferDownload is the single-use download claim: it moves the offer
@@ -408,7 +410,7 @@ func (db *DB) CompleteOffer(idHash [offerHashLen]byte) error {
 	now := db.now().Unix()
 	cutoff := now - proposedGraceSeconds
 	if err := db.offerCAS(idHash, "complete offer", cutoff, true, OfferPairingProposed, nil, `UPDATE enroll_offers
-		SET state = 'enrolled', state_changed_at = ?, salt = NULL
+		SET state = 'enrolled', state_changed_at = ?, salt = NULL, setup_key_vault_ref = NULL
 		WHERE id_hash = ? AND state = 'pairing_proposed' AND expires_at > ?`,
 		now, idHash[:], cutoff); err != nil {
 		return err
@@ -431,7 +433,7 @@ func (db *DB) EndOffer(idHash [offerHashLen]byte, from, to OfferState) error {
 	}
 	now := db.now().Unix()
 	if err := db.offerCAS(idHash, "end offer", now, false, from, nil, `UPDATE enroll_offers
-		SET state = ?, state_changed_at = ?, salt = NULL
+		SET state = ?, state_changed_at = ?, salt = NULL, setup_key_vault_ref = NULL
 		WHERE id_hash = ? AND state = ?`,
 		string(to), now, idHash[:], string(from)); err != nil {
 		return err
@@ -461,7 +463,7 @@ func (db *DB) ExpireOffers() ([][offerHashLen]byte, error) {
 		return nil, fmt.Errorf("executordb: expire offers: %w", err)
 	}
 	rows, err := tx.Query(`UPDATE enroll_offers
-		SET state = 'expired', state_changed_at = ?, salt = NULL
+		SET state = 'expired', state_changed_at = ?, salt = NULL, setup_key_vault_ref = NULL
 		WHERE id_hash IN (SELECT id_hash FROM enroll_offers
 			WHERE (state IN ('awaiting_approval', 'open', 'downloaded') AND expires_at <= ?)
 			   OR (state = 'pairing_proposed' AND expires_at <= ?)
