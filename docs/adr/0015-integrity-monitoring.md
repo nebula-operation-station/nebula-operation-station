@@ -115,8 +115,11 @@ named in the handbook next to every "no unexpected change" result:
   (each symlink at or above an SSH position is critical-class and
   opens the same finding, D9), the configuration and login files that
   sshd's command line names with `-f` or `-o` (the sources of that
-  command line, `/etc/default/ssh` and the sshd units, are
-  critical-class, but the executor does not parse them, D9),
+  command line, `/etc/default/ssh` and the sshd units and drop-ins in
+  every scanned systemd unit search path, are critical-class, but the
+  executor does not parse them, D9), sshd units and drop-ins in the
+  systemd search paths under `/run` (runtime, transient and generated
+  units),
   `/tmp`, `/dev/shm`, `/run`, `/etc/pve` (excluded by design, D5; Q1),
   container images and
   volumes. Under `/usr`, only the D5 roots are watched: **`/usr/share`
@@ -1299,8 +1302,26 @@ On the supported distributions that command line comes from
 `/etc/default/ssh` (`SSHD_OPTS`) and from the units that start sshd
 (`ssh.service`, `ssh@.service`, `ssh.socket`, `sshd.service` and their
 drop-ins). `/etc/default/ssh` is critical-class by fixed path (D7
-item (a)); the units and drop-ins already are as systemd units under the
-D5 unit roots. The executor does **not** parse `SSHD_OPTS` or
+item (a)). The sshd units are critical-class by fixed pattern too (D7
+item (a)), **in every systemd system unit search path, independent of
+the D5 unit roots**: in `/etc/systemd/system`,
+`/etc/systemd/system.control`, `/etc/systemd/system.attached`,
+`/usr/local/lib/systemd/system`, `/usr/lib/systemd/system` and
+`/lib/systemd/system` (the usrmerge path, D5), every entry named
+`ssh.service`, `ssh@.service`, `ssh.socket`, `sshd.service`,
+`sshd@.service` or `sshd.socket` (including enablement and alias links
+of those names in `*.wants/` and `*.requires/` directories), and every
+entry in a drop-in directory that applies to one of them
+(`<unit>.d/` for each of these names, `ssh@<instance>.service.d/`,
+`sshd@<instance>.service.d/`, and the type-wide `service.d/` and
+`socket.d/`). So a drop-in such as
+`/usr/local/lib/systemd/system/ssh.service.d/opts.conf`, which systemd
+loads although `/usr/local/lib/systemd/system` is scanned only as part
+of the `/usr/local/lib` root, is critical. The search paths under `/run`
+(`/run/systemd/system`, `/run/systemd/transient`, the generator
+directories and their `.control` and `.attached` variants) are not
+scanned (D5 excludes `/run`), a named limit ("Honest limits"). The
+executor does **not** parse `SSHD_OPTS` or
 `ExecStart` lines, so `-f` and `-o` targets are not derived: a change
 that adds such an option is critical and needs its own CLI approval,
 but the files it names are classified only by the fixed patterns, a
