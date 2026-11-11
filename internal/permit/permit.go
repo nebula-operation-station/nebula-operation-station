@@ -303,6 +303,13 @@ type Authority struct {
 	claimSeq uint64
 	// trusts holds browser trust requests until their assertion (M7-4).
 	trusts map[string]*PendingTrust
+	// paired holds live paired enrollment permits (paired.go);
+	// pairedOffers maps every offer ID hash that ever had one to its
+	// digest and pairedSpent records consumed or discarded digests, both
+	// for the lifetime of the process (replay protection).
+	paired       map[canonical.Digest]*PairedPermit
+	pairedOffers map[string]canonical.Digest
+	pairedSpent  map[canonical.Digest]struct{}
 
 	mu          sync.Mutex
 	permits     map[canonical.Digest]*Permit
@@ -360,6 +367,10 @@ func New(o Options) (*Authority, error) {
 		readPaused: true,
 		scans:      map[string]scanResult{},
 		trusts:     map[string]*PendingTrust{},
+
+		paired:       map[canonical.Digest]*PairedPermit{},
+		pairedOffers: map[string]canonical.Digest{},
+		pairedSpent:  map[canonical.Digest]struct{}{},
 	}, nil
 }
 
@@ -914,6 +925,9 @@ func (a *Authority) Lock(who string) {
 	a.grants = map[string]*pendingGrant{}
 	a.readGrants = map[string]*pendingReadGrant{}
 	a.trusts = map[string]*PendingTrust{}
+	// Paired enrollment permits go too; their offers stay spent.
+	n += len(a.paired)
+	a.paired = map[canonical.Digest]*PairedPermit{}
 	// Execution IDs stay reserved so a revoked request cannot be re-bound to
 	// different content under the same ID.
 	a.emit(Event{Kind: "locked", Detail: fmt.Sprintf("by %s, %d permits revoked", who, n)})

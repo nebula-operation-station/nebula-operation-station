@@ -1,0 +1,54 @@
+{
+  "resultsPerPage": 2,
+  "startIndex": 0,
+  "totalResults": 2,
+  "format": "NVD_CVE",
+  "version": "2.0",
+  "timestamp": "2024-11-02T03:00:01.2345678",
+  "vulnerabilities": [
+    {
+      "cve": {
+        "id": "CVE-2024-0001",
+        "sourceIdentifier": "cna@example.org",
+        "published": "2024-10-21T13:15:02.413",
+        "lastModified": "2024-11-01T20:00:00.000",
+        "vulnStatus": "Analyzed",
+        "cveTags": [],
+        "descriptions": [
+          {"lang": "es", "value": "Una falla."},
+          {"lang": "en", "value": "A flaw in example allows remote code execution.\nSee <script>alert(1)</script> for details."}
+        ],
+        "metrics": {
+          "cvssMetricV40": [
+            {"source": "cna@example.org", "type": "Secondary", "cvssData": {"version": "4.0", "vectorString": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:N/SI:N/SA:N", "baseScore": 9.3, "baseSeverity": "CRITICAL"}}
+          ],
+          "cvssMetricV31": [
+            {"source": "nvd@nist.gov", "type": "Primary", "cvssData": {"version": "3.1", "vectorString": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H", "baseScore": 9.8, "baseSeverity": "CRITICAL", "attackVector": "NETWORK"}, "exploitabilityScore": 3.9, "impactScore": 5.9}
+          ],
+          "cvssMetricV2": [
+            {"source": "nvd@nist.gov", "type": "Primary", "cvssData": {"version": "2.0", "vectorString": "AV:N/AC:L/Au:N/C:P/I:P/A:P", "baseScore": 7.5}}
+          ]
+        },
+        "weaknesses": [
+          {"source": "nvd@nist.gov", "type": "Primary", "description": [{"lang": "en", "value": "CWE-787"}, {"lang": "en", "value": "NVD-CWE-Other"}]},
+          {"source": "cna@example.org", "type": "Secondary", "description": [{"lang": "en", "value": "CWE-787"}, {"lang": "en", "value": "CWE-20"}]}
+        ],
+        "configurations": [{"nodes": [{"operator": "OR", "negate": false, "cpeMatch": [{"vulnerable": true, "criteria": "cpe:2.3:a:example:example:*:*:*:*:*:*:*:*", "versionEndExcluding": "1.2.4", "matchCriteriaId": "00000000-0000-0000-0000-000000000000"}]}]}],
+        "references": [
+          {"url": "https://example.org/advisory?id=1&x=\"y\"", "source": "cna@example.org", "tags": ["Vendor Advisory", "Patch"]},
+          {"url": "javascript:alert(1)"}
+        ]
+      }
+    },
+    {
+      "cve": {
+        "id": "CVE-1999-0001",
+        "published": "1999-12-30T05:00:00.000",
+        "lastModified": "2024-10-30T10:00:00.000",
+        "vulnStatus": "Modified",
+        "descriptions": [{"lang": "en", "value": "Old issue."}],
+        "metrics": {}
+      }
+    }
+  ]
+}
