@@ -185,9 +185,19 @@ func TestSpacedHistoryReachesAndHoldsCapExactly(t *testing.T) {
 				t.Fatalf("window %s not a multiple of spacing %s", ret, sp)
 			}
 			start := now.Add(-ret)
-			steps := int(ret / sp) // writes at start .. *now inclusive
-			for i := 0; i <= steps; i++ {
+			steps := int(ret / sp) // datasets at start .. *now inclusive
+			// Seed the older part of the window as history in one
+			// transaction (thousands of single writes are too slow under
+			// -race), spaced at exactly MinHistorySpacing; the newest
+			// written steps go through ReplaceDataset, so the write path
+			// itself reaches the cap.
+			const written = 50
+			seedHistory(t, db, dev, c.read, start, sp, steps-written+1, *now)
+			for i := steps - written + 1; i <= steps; i++ {
 				mustReplace(t, s, dev, c.read, start.Add(time.Duration(i)*sp), false, c.rows(i))
+				if got := historyCount(t, db, dev, c.read); got > capN {
+					t.Fatalf("after write %d: history = %d > cap %d", i, got, capN)
+				}
 			}
 			// One more within the future skew supersedes the dataset at *now.
 			mustReplace(t, s, dev, c.read, now.Add(time.Minute), false, c.rows(steps+1))
@@ -226,6 +236,28 @@ func TestSpacedHistoryReachesAndHoldsCapExactly(t *testing.T) {
 			}
 			assertCurrent(t, s, db, dev, c.read, last)
 		})
+	}
+}
+
+// seedHistory inserts n superseded datasets of (dev, read) observed at
+// start, start+sp, ... in one transaction.
+func seedHistory(t *testing.T, db *sql.DB, dev string, read Read, start time.Time, sp time.Duration, n int, now time.Time) {
+	t.Helper()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for i := range n {
+		if _, err := tx.Exec(`INSERT INTO netdev_datasets
+			(device_id, read, observed_at, stored_at, state, incomplete, payload_sha256, row_count, current)
+			VALUES (?, ?, ?, ?, 'fresh', 0, ?, 0, 0)`,
+			dev, string(read), micros(start.Add(time.Duration(i)*sp)), micros(now), strings.Repeat("0", 64)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
 	}
 }
 
