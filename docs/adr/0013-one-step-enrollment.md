@@ -556,7 +556,11 @@ named there.
 **Creation order.** A setup key is never created without a durable record
 that lets the executor find and revoke it:
 
-1. On approval of the NetBird offer permit the executor, in one atomic
+1. On approval of the NetBird offer permit the executor first checks the
+   offer's stored script template version against its own; on a
+   difference it creates no key, fails the offer and audits
+   `enroll_script_template_changed` (amended 2026-11-11; previously checked
+   only at render, after the key existed). Otherwise it, in one atomic
    compare-and-set, moves the offer's setup-key record from `none` to
    `pending` and persists the key name (`nos-offer-<prefix>`), the offer
    ID hash, the managed group and the creation time window (the time of
