@@ -15,7 +15,9 @@ import (
 //
 // It needs the NS-04 profile-setting data (ADR 0012 Q11). Without it every
 // rule is StateDataNotCollected, never StateOK, and so is a relevant rule
-// whose entry is missing; a <dropped:…> marker gives StateCannotDecide.
+// whose entry is missing; a <dropped:…> marker gives StateCannotDecide. A
+// rule with a rule-level marker (SecurityRule.Dropped or
+// OutsideAllowlist) is never StateOK.
 type ProfileCheck struct{}
 
 // ID returns CheckAllowWithoutProfile.
@@ -41,7 +43,13 @@ func (ProfileCheck) Run(in *Input) Report {
 func profileRule(in *Input, i int) Finding {
 	r := &in.Snapshot.SecurityRules[i]
 	f := newFinding(CheckAllowWithoutProfile, i, r)
+	marker := ""
 	set := func(st State, why string) Finding {
+		if st == StateOK && marker != "" {
+			// A rule-level marker: the dropped or unlisted field may
+			// be the one that decides, so ok is never certain.
+			st, why = StateCannotDecide, "cannot decide: "+marker
+		}
 		f.State, f.Reason = st, clean(why)
 		return f
 	}
@@ -51,6 +59,7 @@ func profileRule(in *Input, i int) Finding {
 	case r.Disabled.Value:
 		return set(StateOK, "rule disabled")
 	}
+	marker = ruleMarker(r)
 	switch r.Action {
 	case netreach.ActionAllow:
 	case netreach.ActionDeny, netreach.ActionDrop, netreach.ActionResetClient, netreach.ActionResetServer, netreach.ActionResetBoth:

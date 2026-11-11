@@ -18,8 +18,10 @@ const (
 	// VariantServiceAny: service and application both "any".
 	VariantServiceAny = "service-and-application-any"
 	// VariantFromUntrusted: from an untrusted, guest or unknown zone into
-	// another zone with destination "any" or service and application
-	// "any".
+	// a zone that is not untrusted-like (internal, management or iot)
+	// with destination "any" or
+	// service and application "any". A rule between untrusted-like zones
+	// only is not this variant.
 	VariantFromUntrusted = "broad-from-untrusted"
 	// VariantToUntrusted: from a trusted zone into an untrusted, guest or
 	// unknown zone with destination "any" and service and application
@@ -35,8 +37,10 @@ const (
 //
 // The check reads the rule fields literally; it does not need the rule to
 // be evaluable for reachability. A field it needs that was not collected
-// gives StateDataNotCollected, a field with a <dropped:…> marker or an
+// gives StateDataNotCollected, a field with a <dropped:…> marker, a
+// rule-level marker (SecurityRule.Dropped or OutsideAllowlist) or an
 // unknown action StateCannotDecide, unless another variant already fires.
+// A rule with a rule-level marker is never StateOK.
 type AnyAnyCheck struct{}
 
 // ID returns CheckAnyAny.
@@ -145,9 +149,15 @@ func anyAnyRule(in *Input, i int) Finding {
 	case r.Disabled.Value:
 		return set(StateOK, "rule disabled")
 	}
+	// A rule-level marker makes every answer short of a finding unknown:
+	// the dropped or unlisted field may be the one that decides.
+	marker := ruleMarker(r)
 	switch r.Action {
 	case netreach.ActionAllow:
 	case netreach.ActionDeny, netreach.ActionDrop, netreach.ActionResetClient, netreach.ActionResetServer, netreach.ActionResetBoth:
+		if marker != "" {
+			return set(StateCannotDecide, "cannot decide: "+marker)
+		}
 		return set(StateOK, "not an allow rule")
 	default:
 		return set(StateCannotDecide, "cannot decide: unknown action")
@@ -170,6 +180,9 @@ func anyAnyRule(in *Input, i int) Finding {
 	}
 	var fired, open []string
 	allNC := true
+	if marker != "" {
+		open, allNC = append(open, marker), false
+	}
 	for _, v := range variants {
 		switch v.t.v {
 		case triYes:

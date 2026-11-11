@@ -282,6 +282,19 @@ func (in *Input) resolveZones(field string, f netreach.Field[[]string]) zoneList
 
 func hasMarker(s string) bool { return strings.HasPrefix(s, "<dropped:") }
 
+// ruleMarker returns why a rule is unevaluable at rule level: a
+// <dropped:…> marker the redaction left on it or a field outside the
+// collected allowlist (ADR 0012 D2). It returns "" for neither.
+func ruleMarker(r *netreach.SecurityRule) string {
+	switch {
+	case len(r.Dropped) > 0:
+		return "rule has " + r.Dropped[0]
+	case len(r.OutsideAllowlist) > 0:
+		return "rule has a field outside the collected allowlist: " + r.OutsideAllowlist[0]
+	}
+	return ""
+}
+
 // clean makes device text safe to carry: invalid UTF-8 and control or
 // format characters become U+FFFD, and the text is cut at MaxTextBytes.
 func clean(s string) string {
