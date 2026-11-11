@@ -14,7 +14,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -319,9 +318,13 @@ func fakeServer(t *testing.T, h http.Handler) Config {
 		Sleep: func(ctx context.Context, _ time.Duration) error { return ctx.Err() }}
 }
 
-func mustContain(t *testing.T, s, sub string) {
+func readAll(t *testing.T, r *http.Request) []byte {
 	t.Helper()
-	if !strings.Contains(s, sub) {
-		t.Fatalf("%q does not contain %q", s, sub)
+	b, err := io.ReadAll(r.Body)
+	if err != nil {
+		t.Error(err)
 	}
+	return b
 }
+
+func bodyOf(b []byte) io.ReadCloser { return io.NopCloser(bytes.NewReader(b)) }
