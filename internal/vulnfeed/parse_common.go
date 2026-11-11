@@ -538,16 +538,42 @@ func more(dec *json.Decoder, br *boundedReader) bool {
 	return ok
 }
 
-// expectDelim reads one token and requires it to be delimiter d.
-func expectDelim(dec *json.Decoder, d json.Delim) error {
+// expectDelim reads one token and requires it to be delimiter d. The read
+// (the whitespace, a ':' after a key, and the delimiter) is bounded by
+// recordWindowSlack, like more, so a run of whitespace outside a record
+// cannot grow the decoder's buffer; a longer run fails with ErrFeedLimit.
+// Errors are mapped by br.fail.
+func expectDelim(dec *json.Decoder, br *boundedReader, what string, d json.Delim) error {
+	br.startWindow(dec.InputOffset(), recordWindowSlack)
 	tok, err := dec.Token()
+	br.endWindow()
 	if err != nil {
-		return err
+		return br.fail(what, err)
 	}
 	if got, ok := tok.(json.Delim); !ok || got != d {
-		return fmt.Errorf("expected %q: %w", d, ErrFeedMalformed)
+		return fmt.Errorf("%s: expected %q: %w", what, d, ErrFeedMalformed)
 	}
 	return nil
+}
+
+// expectEOF requires that only whitespace follows the top-level value. The
+// whitespace it reads is bounded by recordWindowSlack, like more; a longer
+// run fails with ErrFeedLimit and other data with ErrFeedMalformed.
+func expectEOF(dec *json.Decoder, br *boundedReader, what string) error {
+	br.startWindow(dec.InputOffset(), recordWindowSlack)
+	_, err := dec.Token()
+	br.endWindow()
+	switch {
+	case errors.Is(err, io.EOF):
+		if br.exceeded {
+			return fmt.Errorf("%s: %w", what, ErrFeedLimit)
+		}
+		return nil
+	case err != nil:
+		return br.fail(what, err)
+	default:
+		return fmt.Errorf("%s: %w", what, ErrFeedMalformed)
+	}
 }
 
 // checkText validates free text from a feed that is shown as text only:
