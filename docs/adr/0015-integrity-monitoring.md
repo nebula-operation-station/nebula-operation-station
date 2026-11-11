@@ -65,7 +65,7 @@ What follows from that, per stage:
 | Root attacker who runs a rootkit or patches the checker, `sha256sum`, the kernel or the NOS binary that performs the check | **Not reliably detected**: a replaced binary can skip its own check, and all NOS processes on one machine fall to the same root | **Not reliably detected**: the host lies | Detected for everything measured **before** or **at load** by the TPM-backed log, within the IMA policy; see I3 limits |
 | Attacker who restores the original file before the next scan | Missed between scans | Missed between scans (incremental runs use `ctime`, which ordinary tools cannot set; root can still fake it) | IMA records every measured load, including short-lived ones |
 | Compromised `nebula-server` | Executor detects server-binary changes (different UID, server cannot write executor storage); a compromised server can still suppress the *display* of I2 findings | Server can hide findings from the UI; it cannot silently rewrite an approved baseline (D7). It can misrepresent in the browser which paths an approval covers; critical-class entries are therefore approved only in the executor-local CLI (D7), other entries carry this limit (see "Honest limits") | Quotes are verified by the executor, not the server |
-| Compromised `nebula-server` or D8 reference builder supplying false package references | n/a (I1 uses the YubiKey-signed list, D2) | **Not detected as such**: it can make an attacker's file match a "verified" reference, so the change is labelled expected (info) or, outside critical-class paths (D9), "package updated outside NOS" (medium) instead of critical; it cannot put the file into a baseline without the admin's executor-bound assertion (D7, D9), but an admin who approves trusts the label (see "Honest limits") | IMA entries are compared against the same references (D10); same limit |
+| Compromised D8 reference builder or its signing key supplying false package references (a compromised server alone cannot: the executor verifies the pinned builder key, D8) | n/a (I1 uses the YubiKey-signed list, D2) | **Not detected as such**: it can make an attacker's file match a "verified" reference, so a change with a version change is labelled expected (info) during a NOS job or, outside a NOS job and outside critical-class paths, "package updated outside NOS" (medium); a same-version change stays high or critical (D7). The change stays an open finding and cannot enter a baseline without the admin's executor-bound approval (D7, D9), but an admin who approves trusts the label (see "Honest limits") | IMA entries are compared against the same references (D10); same limit |
 
 Consequences stated plainly:
 
@@ -154,17 +154,33 @@ named in the handbook next to every "no unexpected change" result:
   `/usr/sbin/sshd` is only as good as the admin's own comparison with a
   `.deb` they verified themselves. The same holds after Q6 for versions
   that have no reference (D8 "Old versions").
-- **Trust in the reference builder and the server for "verified".**
-  Package references are built on the D8 builder host and reach NOS
-  through the server; the executor cannot re-derive them (D8). A
-  compromised builder or server can make an attacker's file match a
-  "verified" reference, so the change is shown as an expected change
-  (info) or, for a path that is not critical-class, as "package updated
-  outside NOS" (medium) rather than as a critical mismatch. It cannot put the file into a baseline: every
-  baseline entry, expected or not, needs the admin's assertion over an
-  executor-computed digest (D7, D9), and critical-class paths need one
-  assertion each (D9). An admin who approves an entry labelled
-  "verified" still trusts the builder and the server for that label.
+- **Trust in the reference builder for "verified" (after Q6).** Package
+  references are built on the D8 builder host; the executor verifies
+  them against the pinned builder key but cannot re-derive them (D8).
+  The server relays them and cannot forge one. A compromised builder or
+  builder key can sign a reference that matches an attacker's file. Its
+  effect is exactly this (D7, D9):
+  - during a NOS job that brings the package to the executor-requested
+    version, the change is shown as a verified expected change (info,
+    `expected_pending`), for critical-class paths too;
+  - outside a NOS job, with a reported version change, it is "package
+    updated outside NOS" (medium) for a path that is not critical-class;
+    a critical-class path stays critical;
+  - without a version change it lowers nothing: the finding stays high,
+    or critical for a critical-class path (D7 "Same version, changed
+    content"), and a reference already admitted for an installed
+    version cannot be replaced;
+  - a file that was already replaced at the first scan and matches the
+    forged reference raises no "differs from signed reference" finding,
+    so only trust on first scan remains for it.
+
+  In every case the change stays an open finding until a baseline
+  approval covers it: a reference never closes, suppresses or approves a
+  difference from the approved baseline (D7), every baseline entry needs
+  the admin's approval of an executor-computed digest, and critical-class
+  entries need one executor-local CLI approval each (D7, D9). An admin
+  who approves an entry labelled "verified" still trusts the builder for
+  that label.
 - **Anything not a file.** Running processes, loaded kernel modules,
   memory-only implants, firmware and BIOS/UEFI settings (only I3 sees
   part of this).
@@ -440,8 +456,30 @@ parser is strict, bounded and fuzzed before the beta.
 
 ### D7: I2 references: never only on the host
 
-A file is compared against exactly one reference, chosen by NOS, not by
-the host:
+Every file is compared against the **approved NOS-held baseline**
+(item 2); for package files, NOS additionally checks a **signed archive
+reference** (item 1). Both are chosen by NOS, not by the host. The two
+roles never mix:
+
+- Every difference from the approved baseline is a finding until a D7
+  baseline approval covers it. A matching archive reference never
+  closes, suppresses or approves such a difference; it only selects the
+  class and severity (D9). A reference therefore never acts as a
+  baseline.
+- A package file that differs from its verified archive reference is a
+  critical finding even when it equals the approved baseline (for
+  example a trust-on-first-scan baseline taken after the file was
+  replaced), unless the admin accepted that local modification
+  explicitly (state `accepted`, D9).
+- **Same version, changed content.** If the content of a package file
+  changes while the package version the host reports stays the same,
+  no package update explains it. The finding is **high**, or
+  **critical** for a critical-class path or when the new content differs
+  from a verified reference; a match with a reference is shown as
+  context only and never lowers the severity below high. NOS keeps the
+  first admitted reference per `(package, version, arch, deb SHA-256)`
+  and rejects a later, different reference for the same key (D8), so a
+  forged reference cannot be swapped in for an installed version.
 
 1. **Package files against the signed distribution archive.** For a
    path that belongs to an installed package from a configured Debian,
@@ -468,10 +506,12 @@ the host:
      and files that maintainer scripts generate (initramfs, alternatives,
      diversions) are compared against the NOS baseline (2.), with the
      package default shown as context.
-2. **Everything else against a NOS-held baseline.** Non-package files,
-   files from unconfigured archives or local `.deb`s, conffiles and all
-   metadata (mode, owner, symlink target, presence) are compared against a
-   per-host baseline that **exists only on NOS**: the full record list in
+2. **Every file against a NOS-held baseline.** Every file, including
+   package files (above), and all metadata (mode, owner, symlink target,
+   presence) are compared against a per-host baseline. For non-package
+   files, files from unconfigured archives or local `.deb`s and conffiles
+   it is the only reference. The baseline **exists only on NOS**: the
+   full record list in
    the server database and, as tamper evidence, its digest in executor
    storage.
    - **Initial baseline.** The first complete scan becomes a *proposed*
@@ -566,13 +606,33 @@ of `InRelease` and decompression of `data.tar.xz` (Debian) and
   `(archive, suite, component, package, version, arch, deb SHA-256)`.
 - **What NOS receives.** Per `(package, version, arch, deb SHA-256)` a
   bounded list `(path, type, size, mode, uid, gid, sha256, link)` taken
-  from the `data.tar.*` headers and contents, posted through a
+  from the `data.tar.*` headers and contents, as an RFC 8785 JCS
+  document (`format` `nebula-fim-reference-v1`), posted through a
   new write scope on `/api/v1`. This is **untrusted input** under spec 09
   (strict schema, limits: 20,000 files and 4 MiB per package, path rules as
   D6). NOS cannot re-derive these hashes itself: the reference is as
-  trustworthy as the builder host plus the archive signatures. A
-  compromised builder could whitelist a modified file; it cannot change a
-  host and cannot authorize anything.
+  trustworthy as the builder host plus the archive signatures.
+- **The executor verifies every reference against a pinned builder
+  key.** The server only relays the document; it is not trusted for it.
+  The builder signs each reference document with its own Ed25519 key
+  (`crypto/ed25519`, in the existing `internal/sshsig` envelope with
+  namespace `nebula-fim-reference`; whether `internal/sshsig` needs a
+  signing function is verified in IG-09). The builder's public key is
+  pinned in executor-owned storage by the admin with an executor-local
+  CLI command (`nebula integrity trust-builder <public key file>`, admin
+  UID, audited, both modes; replacing it is the same command and is
+  audited with old and new key). The executor admits a reference only if
+  the signature verifies against the pinned key, the document passes the
+  strict schema and no different reference for the same
+  `(package, version, arch, deb SHA-256)` was admitted before (the first
+  admitted one stays; a different one is rejected and audited). A
+  reference that fails any check counts as "no reference" (D9), never as
+  verified. Only references admitted this way are "verified" in D7 and
+  D9. A compromised server therefore cannot forge a reference; a
+  compromised builder (or its key) can, with exactly the effects listed
+  in "Honest limits". The builder key is file-based on the builder host:
+  root on that host can sign with it. It cannot change a host and cannot
+  authorize anything.
 - **Old versions.** Debian versions that left the mirror are fetched from
   `snapshot.debian.org` if the operator allows that origin; Ubuntu and
   PVE versions that are no longer published become "no reference" and
@@ -691,13 +751,14 @@ decides"), computes the digest, and the admin approves exactly that
 digest with the `nebula-fim-baseline-v1` assertion (with the
 executor-local CLI for a critical-class entry). The job approval
 never covers baseline entries: it is given before the job and cannot bind
-a scan result, and the "verified" label rests on a D8 reference that
-reaches NOS through the server and that the executor cannot re-derive
-(D8). A compromised server or builder can therefore make an attacker's
-file *look* expected (and lower its severity to info), but it cannot put
-that file into a baseline without the admin's executor-bound assertion;
-the approval screen says that the "verified" label comes from the
-reference builder (see "Honest limits").
+a scan result, and the "verified" label rests on a D8 reference that the
+executor verifies against the pinned builder key but cannot re-derive
+(D8). A compromised builder can therefore make an attacker's file *look*
+expected (and lower its severity to info), but it cannot put that file
+into a baseline without the admin's executor-bound approval; the
+approval screen says that the "verified" label comes from the reference
+builder (see "Honest limits"). A compromised server alone cannot forge
+the label.
 
 Anything else changed in the same window, and every unverified change,
 is a finding the admin sees separately from the job. This makes hiding
@@ -706,13 +767,16 @@ replaced `/usr/sbin/sshd` during an approved `openssh-server` upgrade is
 a critical, individually approved entry, but NOS cannot tell it from the
 genuine new binary; the admin can only compare its plain hash (D6
 allowlist) with the file from a `.deb` they verified themselves. After
-Q6 the replaced binary fails the verified reference unless the server or
-the builder is compromised as well. Both limits are listed in "Honest
+Q6 the replaced binary fails the verified reference unless the builder
+or its signing key is compromised as well (the server alone cannot
+forge a reference, D8). Both limits are listed in "Honest
 limits". Package updates done on the host outside NOS (for example
-unattended-upgrades) whose new records match the verified archive
-reference in every field listed above are medium-severity findings
-("package updated outside NOS"), not alarms, unless the path is
-critical-class (precedence above).
+unattended-upgrades) that change the reported package version and whose
+new records match the verified archive reference for the new version in
+every field listed above are medium-severity findings ("package updated
+outside NOS"), not alarms, unless the path is critical-class
+(precedence above). A content change without a version change is never
+"package updated outside NOS" (D7 "Same version, changed content").
 
 **Findings.** A new store `integrity_findings` (not the ADR 0011 store,
 whose observer is always Hermes): subject (NOS machine or host ID), path
@@ -725,7 +789,7 @@ matching severity wins, see "Critical-class paths"):
 | Class | Severity |
 | --- | --- |
 | Package file differs from signed reference; NOS binary/unit mismatch (I1); any new, changed or removed critical-class path (above) that is not a verified expected change, including one changed during a NOS job without a verified reference; new setuid/setgid file or bit; missing NOS own key or extra key in root's `authorized_keys` | critical |
-| Other changed or new file in `/etc` or a watched `/usr` root (D5); owner/mode change; I2 baseline digest mismatch; change of a path that is not critical-class during a NOS job without a verified reference ("changed during NOS job, unverified") | high |
+| Other changed or new file in `/etc` or a watched `/usr` root (D5); owner/mode change; I2 baseline digest mismatch; change of a path that is not critical-class during a NOS job without a verified reference ("changed during NOS job, unverified"); package file content changed without a version change, even if it matches a reference (D7) | high |
 | Package updated outside NOS with matching reference; partial or stale scan | medium |
 | Verified expected change from a NOS job (`expected_pending` until approved by D7; a critical-class path still needs its own executor-local CLI approval) | info (record only) |
 
@@ -844,7 +908,11 @@ the direction.
 - Spec 07: `fim.scan` in the read-lease allowlist with its intervals and
   budgets.
 - Spec 09: `fim-scan-v1` schema, the action-specific limits of D6, path
-  encoding and display rules, reference-builder input limits (D8).
+  encoding and display rules, reference-builder input limits and the
+  `nebula-fim-reference-v1` schema (D8).
+- Spec 10 or 06: the pinned builder key, `nebula integrity
+  trust-builder` and the `nebula-fim-reference` signature namespace
+  (D8).
 - Spec 10: mandatory `installed-files.json` artifact and its schema; the
   `fim.scan` read-only action contract.
 - Spec 13: `integrity.*` notification events.
@@ -863,7 +931,7 @@ the direction.
 | IG-06 | Host baseline store, executor-held digest, baseline approval UI, `nebula integrity pending`/`approve` for critical-class entries | IG-05 |
 | IG-07 | Incremental/full logic and expected-change attribution from NOS jobs | IG-06 |
 | IG-08 | Findings UI and `integrity.*` notifications | IG-03, IG-06 |
-| IG-09 | Package reference builder and archive comparison | Q6 |
+| IG-09 | Package reference builder, reference signing, executor admission against the pinned builder key, archive comparison | Q6 |
 | IG-10 | I3 ADR | Q5 |
 
 ## Consequences
