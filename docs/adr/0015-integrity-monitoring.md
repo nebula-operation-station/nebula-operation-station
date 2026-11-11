@@ -97,7 +97,7 @@ named in the handbook next to every "no unexpected change" result:
   corruption, and the audit log only what it records.
 - **Unwatched host paths.** Everything outside the D5 roots: `/var`
   (except the crontab spool), `/srv`, `/home` and `/root` except
-  `authorized_keys*` (so shell start files such as `~/.bashrc`,
+  `authorized_keys*` and the other SSH login files of D9 (so shell start files such as `~/.bashrc`,
   `~/.profile` and per-user systemd units under `~/.config/systemd/`),
   `authorized_keys` and other SSH login files (D9 "SSH login files") of
   service accounts whose home is under `/var`, `/srv` or `/opt` outside
@@ -107,6 +107,9 @@ named in the handbook next to every "no unexpected change" result:
   finding, D9), files that an `AuthorizedKeysCommand` or
   `AuthorizedPrincipalsCommand` program reads or runs (only the program
   itself is critical-class), `at` job spools,
+  and the files that sshd follows a symlink to outside the scanned roots
+  (each such symlink at an SSH login file position is critical-class and
+  opens the same finding, D9),
   `/tmp`, `/dev/shm`, `/run`, `/etc/pve` (excluded by design, D5; Q1),
   container images and
   volumes. Under `/usr`, only the D5 roots are watched: **`/usr/share`
@@ -115,6 +118,16 @@ named in the handbook next to every "no unexpected change" result:
   packages' helper scripts; nor are `/usr/local/share`,
   `/usr/local/etc`, `/usr/local/include`, `/usr/include`, `/usr/src` and
   `/usr/games`. Persistence placed there is not seen by I2.
+- **Login-relevant files that are not critical-class.** D9 "SSH login
+  files" makes every file that sshd reads to grant a login
+  critical-class, plus PAM, the account files and `/etc/nsswitch.conf`.
+  Files that the PAM or NSS modules themselves read are not derived and
+  stay ordinary `/etc` or `/usr/lib` entries (high findings, approvable
+  in the browser): for example `/etc/sssd/`, LDAP client configuration,
+  `/etc/krb5.conf`, the `libnss_*` modules and any data file a module
+  reads outside `/etc/pam.d/` and `/etc/security/` (both
+  critical-class). A changed NSS source named in `/etc/nsswitch.conf` is
+  critical; a change inside that source's own configuration is not.
 - **Default exclusions that affect what runs.** D5 excludes Python
   `__pycache__` bytecode at any depth under `/usr/lib/python3*` and
   `/usr/local/lib/python3*`, which the interpreter executes instead of
@@ -486,7 +499,7 @@ following symlinks; final list is Q1):
 | Executables and libraries | `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/libexec` (with `/bin`, `/sbin`, `/lib` recorded as the usrmerge symlinks they should be) |
 | Local software | `/usr/local/bin`, `/usr/local/sbin`, `/usr/local/lib`, `/opt` (none of these is package-owned, so they are always compared against the baseline; `/usr/local/{bin,sbin}` come before `/usr/{bin,sbin}` in the default `PATH`, so a new file there that shadows a system command name is critical, D9) |
 | systemd units | `/usr/lib/systemd/system`, `/etc/systemd/system`, user units under `/etc/systemd/user` |
-| SSH access | `/root/.ssh/authorized_keys*`, `/home/*/.ssh/authorized_keys*`, plus every path that a login-granting directive (D9 "SSH login files": `AuthorizedKeysFile`, `AuthorizedPrincipalsFile`, `TrustedUserCAKeys`, `RevokedKeys`, the program of `AuthorizedKeysCommand` and `AuthorizedPrincipalsCommand`) found in `/etc/ssh/sshd_config` and its includes names, limited to the roots above and `/home/*/`. A target that can lie outside these roots is not scanned; the executor reports it as "SSH login file outside the scanned roots" (D7, D9) and names it in "Honest limits" |
+| SSH access | `/root/.ssh/authorized_keys*`, `/home/*/.ssh/authorized_keys*`, the home-relative fixed SSH login files of D9 (`.shosts`, `.rhosts`, `.k5login`, `.ssh/known_hosts`, `.ssh/known_hosts2`) under `/root/` and `/home/*/`, every symlink among the home directories and their `.ssh` directories (recorded, never followed), plus every path that a login-granting directive (D9 "SSH login files": `AuthorizedKeysFile`, `AuthorizedPrincipalsFile`, `TrustedUserCAKeys`, `RevokedKeys`, the program of `AuthorizedKeysCommand` and `AuthorizedPrincipalsCommand`) found in `/etc/ssh/sshd_config` and its includes names, limited to the roots above and `/home/*/`. A target that can lie outside these roots is not scanned; the executor reports it as "SSH login file outside the scanned roots" (D7, D9) and names it in "Honest limits" |
 | Scheduled jobs | `/etc/crontab`, `/etc/cron.*/`, `/var/spool/cron/crontabs/`, systemd timers (covered by the unit roots) |
 | EFI system partition | `/boot/efi` as its **own root** when it is a mount point (UEFI hosts); otherwise it is ordinary `/boot` content. On vfat, owner, mode and `ctime` come from mount options, so every file under it is hashed in every run, incremental too (the partition is small), and for entries under a `/boot/efi` root whose type in the D6 mounts array is `vfat` only type, size, content hash, symlink target, presence and the setuid, setgid and sticky bits are compared; owner and the permission bits (`0777`) are recorded as context and never open a finding (D9). **Precedence:** this relaxation never covers the setuid, setgid and sticky bits: vfat cannot store them, so a reported setuid or setgid bit under `/boot/efi` is a new setuid/setgid bit and always critical (D9). **The type is host-reported and untrusted:** the relaxation applies only when `/boot/efi` is a covered root (D5 "Separate mounts below a root") and both the approved baseline and the run report `vfat` for it; the reported type is recorded in the baseline as part of the `/boot/efi` root, and a change of it (for example `ext4` to `vfat`) is a change of a critical-class path, in which run the relaxation is not applied |
 
@@ -495,8 +508,8 @@ following symlinks; final list is Q1):
 `fim-default-v1` exactly these roots are optional: `/boot/efi` (BIOS
 hosts), `/opt`, `/usr/libexec`, `/etc/systemd/user` and
 `/var/spool/cron/crontabs`; the `authorized_keys*` globs under
-`/root/.ssh` and `/home/*/.ssh` and the `AuthorizedKeysFile` targets
-may match nothing. A missing optional root is recorded as **absent**
+`/root/.ssh` and `/home/*/.ssh`, the other home-relative SSH login
+files and the `AuthorizedKeysFile` targets may match nothing. A missing optional root is recorded as **absent**
 in the run summary and does not make the run partial; if the approved
 baseline holds entries under it, they are reported as removed like any
 other absent path. A missing root that is not optional makes the run
@@ -846,7 +859,10 @@ roles never mix:
      begins with `authorized_keys` anywhere in the scanned paths (D5,
      including `/root/.ssh` and `/home/*/.ssh`) and every path ending in `/.ssh/authorized_keys` or
      `/.ssh/authorized_keys2`, so every real `authorized_keys` file is
-     critical-class whatever `AuthorizedKeysFile` says.
+     critical-class whatever `AuthorizedKeysFile` says, and likewise the
+     fixed SSH login files of D9 (hostbased trust, `known_hosts`,
+     `.k5login` and the account files), whatever `HostbasedAuthentication`
+     or `GSSAPIAuthentication` say.
      - **Derived sets only grow until a change is approved.** The sets
        for (c) and (d) are each the **union** of the set derived from the
        approved baseline and the set derived from the latest complete
@@ -935,9 +951,13 @@ roles never mix:
        classify an entry with certainty (no usable derived set, a parse
        failure, a limit hit, a directive, value or token it does not
        understand, an SSH login file value it cannot expand as
-       above or a command program path that is not absolute, an `Include` that names or matches a file outside the
-       profile roots or a file that is not in the run's SSH configuration
-       array, D6), it treats the entry as critical-class. If it lacks a
+       above, a command program path that is not absolute, contains a
+       `%` token or is quoted or escaped (D9 "SSH login files"), a symlink
+       at an SSH login file position it cannot resolve (D9), an
+       overflowed or oversized derived set (above), an `Include` that
+       names or matches a file outside the profile roots or a file that
+       is not in the run's SSH configuration array, D6), it treats the
+       entry as critical-class. If it lacks a
        usable derived set for a host from the latest complete run, it
        treats **every** entry that a proposed digest of that host adds,
        changes or removes as critical-class (each needing its own CLI
@@ -1159,7 +1179,10 @@ Consequently, before Q6 every package file changed by a NOS apt job is an
 unverified finding the admin must review.
 
 **Critical-class paths.** These are: `authorized_keys*` files and every
-SSH login file (below), `/etc/sudoers` and `/etc/sudoers.d/`, PAM configuration
+SSH login file (below, including hostbased trust files, `known_hosts`,
+`.k5login`, `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/gshadow`,
+`/etc/nsswitch.conf` and symlinks at SSH login file positions),
+`/etc/sudoers` and `/etc/sudoers.d/`, PAM configuration
 (`/etc/pam.d/`, `/etc/security/`) and PAM modules (`pam_*.so`),
 `/etc/ssh/sshd_config` and its includes, `/etc/ld.so.preload`, systemd
 units, drop-ins and timers under the D5 unit roots, crontabs and the
@@ -1190,11 +1213,67 @@ blocks, expanded as in D7 "`AuthorizedKeysFile` expansion":
   (the first word of the value, which sshd requires to be an absolute
   path) decides which keys or principals are accepted.
 
-A value of `none` names no file. A program path that is not absolute or
-contains a `%` token, and any other value the executor cannot expand,
-is unclassifiable and handled as in D7 "Unclassifiable means critical".
-Files that such a program itself reads or runs are not derived (named in
-"Honest limits"). An absolute target outside the D5 roots and
+In addition, these files are SSH login files by fixed path pattern (D7
+item (a)), whatever the SSH configuration says, because sshd, its PAM
+stack or its authentication methods read them to grant a login:
+
+- hostbased and rhosts trust: `/etc/hosts.equiv`,
+  `/etc/ssh/shosts.equiv`, and every path ending in `/.shosts` or
+  `/.rhosts`;
+- host keys trusted for hostbased login: `/etc/ssh/ssh_known_hosts`,
+  `/etc/ssh/ssh_known_hosts2`, and every path ending in
+  `/.ssh/known_hosts` or `/.ssh/known_hosts2`;
+- GSSAPI/Kerberos principal mapping: every path ending in `/.k5login`;
+- account and name-service data: `/etc/passwd`, `/etc/shadow`,
+  `/etc/group`, `/etc/gshadow` and `/etc/nsswitch.conf` (a new UID-0
+  account, a changed password hash, shell or home, or a changed
+  name-service source can each grant a login).
+
+The home-relative files are scanned under `/root` and `/home/*/` (D5);
+the `/etc` files are under the `/etc` root.
+
+A value of `none` names no file. The executor takes the program of an
+`AuthorizedKeysCommand` or `AuthorizedPrincipalsCommand` value only when
+the value contains no quote character (`"` or `'`) and no backslash, so
+that a split at the first space or tab is exactly what sshd runs; a
+value with a quote or a backslash anywhere (sshd's quoting and escape
+rules could make the program path differ from the naive first word), a
+program path that is not absolute or contains a `%` token, and any other
+value the executor cannot expand, is unclassifiable and handled as in D7
+"Unclassifiable means critical".
+
+**Symlinks at SSH login file positions.** The scan never follows
+symlinks (D5), so the file sshd actually reads may sit behind one. A
+**login file position** is a path that an SSH login file pattern (fixed
+or derived) matches, and every directory along such a pattern that the
+pattern names literally (for example `/etc`, `/etc/ssh` and
+`/etc/ssh/ak` in `AuthorizedKeysFile /etc/ssh/ak/%u`; `/root`, `/home`,
+`/home/<name>` and the `.ssh` directory below a home for the
+home-relative patterns). Whenever the old or new record at a login file
+position is a symlink (or, for a file position, any type other than
+`file`):
+
+- the symlink entry itself is critical-class; and
+- the executor resolves the target lexically against the same run's
+  records (relative targets against the link's directory, at most 40
+  links followed, the Linux limit; new named constant) and classifies
+  the resolved path, and for a directory position every entry below the
+  resolved directory that the rest of the pattern matches, as SSH login
+  files, so they are critical-class too.
+
+If it cannot resolve the target within the run's records (a target
+outside the profile roots or `/home/*/`, a loop, the link limit, a
+missing record), the symlink entry is unclassifiable and therefore
+critical-class (D7 "Unclassifiable means critical"), and a target
+outside the scanned roots, a loop or the link limit opens the "SSH login
+file outside the scanned roots" finding below (naming the symlink and
+its escaped target, kept open while the approved baseline or the latest
+complete run holds that symlink), since the files sshd reads there are
+not scanned.
+
+Files that an `AuthorizedKeysCommand` or `AuthorizedPrincipalsCommand`
+program itself reads or runs are not derived (named in "Honest
+limits"). An absolute target outside the D5 roots and
 `/home/*/` (for example `TrustedUserCAKeys /srv/ca.pub` or
 `AuthorizedKeysFile /var/lib/keys/%u`) is not scanned; the executor
 opens an "SSH login file outside the scanned roots" finding (high)
