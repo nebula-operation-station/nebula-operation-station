@@ -1,0 +1,134 @@
+{{define "content"}}
+{{$d := .NetDevDetail}}
+<section class="panel" aria-label="Network device">
+  <h2><a href="/netdev">{{$d.Label}}</a></h2>
+  <p>
+    <span class="badge badge--env">{{$d.Family}}</span>
+    {{if $d.Stale}}<span class="badge badge--warning">stale</span>{{end}}
+    {{if $d.Link}}<a href="{{$d.Link}}" target="_blank" rel="noopener noreferrer">Open device UI</a>{{end}}
+  </p>
+  <table class="inventory">
+    <tr><th>Device ID</th><td class="mono">{{$d.DeviceID}}</td></tr>
+    <tr><th>Endpoint</th><td class="mono">{{$d.Endpoint}}</td></tr>
+    <tr><th>Trust generation</th><td>{{$d.TrustGeneration}}{{if $d.TrustNote}} <span class="badge badge--warning">{{$d.TrustNote}}</span>{{end}}</td></tr>
+    <tr><th>Last seen</th><td>{{timeTag $d.LastSeen}}{{if $d.Age}} ({{$d.Age}}){{else}}never{{end}}</td></tr>
+  </table>
+
+  <h3>Datasets</h3>
+  <table class="inventory">
+    <thead><tr><th>Dataset</th><th>State</th><th>Observed</th><th>Rows</th></tr></thead>
+    <tbody>
+      {{range $d.Datasets}}
+      <tr>
+        <td>{{.Read}}</td>
+        <td><span class="badge badge--{{.Badge.Class}}">{{.Badge.State}}</span></td>
+        <td>{{timeTag .ObservedAt}}{{if .Age}} ({{.Age}}){{end}}</td>
+        <td>{{if not .ObservedAt.IsZero}}{{.Rows}}{{end}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{if $d.Unavailable}}<p class="status status--error">Stored data unavailable: {{range $i, $u := $d.Unavailable}}{{if $i}}, {{end}}{{$u}}{{end}}</p>{{end}}
+
+  <h3>Version</h3>
+  {{if $d.HasFacts}}
+  <table class="inventory">
+    <tr><th>Model</th><td>{{$d.Model}}</td></tr>
+    <tr><th>Version</th><td>{{$d.Version}}</td></tr>
+    <tr><th>Serial</th><td class="mono">{{$d.Serial}}</td></tr>
+    <tr><th>Host name</th><td>{{$d.Hostname}}</td></tr>
+    <tr><th>Management addresses</th><td class="mono">{{$d.ManagementAddresses}}</td></tr>
+  </table>
+  {{else}}
+  <p class="status">No facts read yet.</p>
+  {{end}}
+
+  {{if $d.IsCBS}}
+  <h3>VLANs</h3>
+  {{if $d.VLANs}}
+  <table class="inventory">
+    <thead><tr><th>VLAN</th><th>Name</th></tr></thead>
+    <tbody>
+      {{range $d.VLANs}}<tr><td>{{.ID}}</td><td>{{.Name}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}<p class="status">No VLANs stored.</p>{{end}}
+
+  <h3>Interfaces</h3>
+  {{if $d.Ports}}
+  <table class="inventory">
+    <thead><tr><th>Port</th><th>Admin</th><th>Oper</th><th>Speed</th><th>Mode</th><th>VLANs</th><th>Description</th></tr></thead>
+    <tbody>
+      {{range $d.Ports}}<tr><td class="mono">{{.Name}}</td><td>{{.Admin}}</td><td>{{.Oper}}</td><td>{{.Speed}}</td><td>{{.Mode}}</td><td>{{.VLANs}}</td><td>{{.Description}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}<p class="status">No ports stored.</p>{{end}}
+
+  <h3 id="mac">MAC table</h3>
+  {{if $d.MACs}}
+  <table class="inventory">
+    <thead><tr><th>VLAN</th><th>MAC</th><th>Port</th><th>Type</th></tr></thead>
+    <tbody>
+      {{range $d.MACs}}<tr><td>{{.VLAN}}</td><td class="mono">{{.MAC}}</td><td class="mono">{{.Port}}</td><td>{{.Type}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}<p class="status">No MAC table entries stored.</p>{{end}}
+  {{if $d.MACPage.Pages}}
+  <p class="hint">{{$d.MACPage.Total}} entries, page {{$d.MACPage.Page}} of {{$d.MACPage.Pages}}
+    {{if $d.MACPage.PrevURL}}<a href="{{$d.MACPage.PrevURL}}">Previous</a>{{end}}
+    {{if $d.MACPage.NextURL}}<a href="{{$d.MACPage.NextURL}}">Next</a>{{end}}</p>
+  {{end}}
+
+  <h3>LLDP neighbors</h3>
+  <p class="hint">Sent by whatever device is on the wire: a hint, never an identity.</p>
+  {{if $d.LLDP}}
+  <table class="inventory">
+    <thead><tr><th>Local port</th><th>System name</th><th>Chassis ID</th><th>Port ID</th><th>Management address</th><th>Capabilities</th></tr></thead>
+    <tbody>
+      {{range $d.LLDP}}<tr><td class="mono">{{.LocalPort}}</td><td>{{.SystemName}}</td><td class="mono">{{.ChassisID}}</td><td class="mono">{{.PortID}}</td><td class="mono">{{.ManagementAddress}}</td><td>{{.Capabilities}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}<p class="status">No LLDP neighbors stored.</p>{{end}}
+  {{end}}
+
+  {{if $d.IsPANOS}}
+  <h3>Firewall policy</h3>
+  {{if $d.HasPolicy}}
+  <table class="inventory">
+    <tr><th>Security rules</th><td>{{$d.Policy.SecurityRules}}</td></tr>
+    <tr><th>NAT rules</th><td>{{$d.Policy.NATRules}}</td></tr>
+    <tr><th>Objects</th><td>{{$d.Policy.Objects}}</td></tr>
+  </table>
+  <p class="hint">Firewall view: not available yet.</p>
+
+  <h3>Zones</h3>
+  {{if $d.Zones}}
+  <table class="inventory">
+    <thead><tr><th>Zone</th><th>Interfaces</th></tr></thead>
+    <tbody>
+      {{range $d.Zones}}<tr><td>{{.Name}}</td><td class="mono">{{.Interfaces}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}<p class="status">No zones stored.</p>{{end}}
+
+  <h3>Interfaces</h3>
+  {{if $d.FwIfaces}}
+  <table class="inventory">
+    <thead><tr><th>Interface</th><th>VLAN tag</th><th>Addresses</th><th>Zone</th></tr></thead>
+    <tbody>
+      {{range $d.FwIfaces}}<tr><td class="mono">{{.Name}}</td><td>{{.VLAN}}</td><td class="mono">{{.Addresses}}</td><td>{{.Zone}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}<p class="status">No interfaces stored.</p>{{end}}
+  {{else}}
+  <p class="status">No firewall policy read yet.</p>
+  {{end}}
+  {{end}}
+</section>
+{{end}}
