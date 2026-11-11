@@ -66,11 +66,13 @@ Constraints that shape every decision below:
 
 ### D1: Flow
 
-1. **Web UI, "Add host (one step)".** The operator enters or picks the
-   inventory host, or creates it in the same dialog (Q4), SSH user (default `nebula`), credential
-   reference (default `nebula-default`), sudo yes/no, and whether to join
-   NetBird (D6, only offered when a NetBird token is configured). An open
-   privileged session (ADR 0007) is required.
+1. **Web UI, "Add host (one step)".** The operator picks the inventory
+   host or creates it in the same dialog (Q4: a normal inventory entry shown
+   "not enrolled" until the pin; if the offer fails it is deleted only when
+   the operator chooses so), and enters SSH user (default `nebula`),
+   credential reference (default `nebula-default`), sudo yes/no, and
+   whether to join NetBird (D6, only offered when a NetBird token is
+   configured). An open privileged session (ADR 0007) is required.
 2. **Offer.** The server calls the executor (`CreateEnrollOffer`). The
    executor creates the offer: offer ID (D2), salt, expiry **15 minutes**,
    bound to the host ID, SSH user, credential reference and the web session
@@ -457,11 +459,16 @@ mitigation.
   the command in D1 step 3, which removes it by `trap` on every exit path
   (success, failure, hang-up, interrupt, termination). The script sets
   `umask 077` itself as well, writes the setup key only to a `0600` file
-  under its own `mktemp -d` directory removed by its own `trap` on `EXIT`,
-  `HUP`, `INT` and `TERM`, and passes it to the NetBird client without
-  putting it on a command line where the client allows that (verified per
-  supported client version in EN-12; otherwise documented as a residual risk
-  of a short `/proc` exposure on the host itself). If the operator runs the
+  under its own `mktemp -d` directory (created in `/dev/shm` or
+  `$XDG_RUNTIME_DIR` by the same rule as the command, D1 step 3; the
+  disk-backed fallback is the named residual there) removed by its own
+  `trap` on `EXIT`, `HUP`, `INT` and `TERM`, and passes the key to the
+  NetBird client **only** through an environment variable or that key file,
+  never as a command-line argument: an argument can be persisted to disk
+  logs by auditd `execve` rules, process accounting or the client's own log.
+  EN-12 verifies per supported client version which of the two the client
+  accepts; for a client version that accepts neither, the NetBird option is
+  not offered and the script stops before the join. If the operator runs the
   script outside the documented command, it still removes its own key file,
   and when it contained a setup key it deletes itself from its `trap`.
 - Size limit of the rendered script: 64 KiB; the executor refuses larger.
@@ -471,13 +478,16 @@ mitigation.
 **Precondition.** A NetBird management API token is stored in the executor
 vault (`nebula netbird token set`, non-echoing input, like PVE tokens; never
 in argv, environment, server configuration or browser). The token belongs to
-a dedicated NetBird **service user**; the executor uses it only for typed
+a dedicated NetBird **service user** (accepted in the executor vault, Q3);
+the executor uses it only for typed
 calls (create/revoke setup key, read peers, read the NOS peer, delete a
 peer after operator confirmation, read policies), with no
 generic HTTP proxy. Management URL and TLS trust are executor-local
 configuration (public CA for NetBird Cloud; pinned CA or leaf for
-self-hosted management). Without a token, the NetBird option is hidden and
-the script works exactly without NetBird.
+self-hosted management). Whether the reference lab uses self-hosted
+management or NetBird Cloud is established in the lab test before EN-12
+(Q3); both settings are supported. Without a token, the NetBird option is
+hidden and the script works exactly without NetBird.
 
 **Per-offer setup key.** For each offer with NetBird the executor creates
 one setup key, and only after the operator approved the NetBird offer permit
@@ -496,8 +506,45 @@ creation without that approval nor receive more than one key per approval:
 The executor stores the setup key only encrypted in the vault; the offer
 row holds the vault reference and NetBird's key ID (an identifier, not a
 secret, needed for the revoke call). The key never exists in plaintext at
-rest: not in the offer store, not as rendered script bytes (D2
-"Retention"), not in a temporary file.
+rest on the executor or the server: not in the offer store, not as rendered
+script bytes (D2 "Retention"), not in a temporary file. On the target host
+it is kept off disk as far as D1 step 3 and D5 describe, with the residuals
+named there.
+
+**Creation order.** A setup key is never created without a durable record
+that lets the executor find and revoke it:
+
+1. On approval of the NetBird offer permit the executor, in one atomic
+   compare-and-set, moves the offer's setup-key record from `none` to
+   `pending` and persists the key name (`nos-offer-<prefix>`) and the offer
+   ID hash, **only if** the offer is still `awaiting_approval` and not
+   expired; otherwise no key is created (audit
+   `netbird_setup_key_pending` only on success).
+2. Only then does it call create.
+3. On a success answer it stores the key in the vault and, in one atomic
+   compare-and-set, moves the record `pending` → `created` (key ID, vault
+   reference) and the offer `awaiting_approval` → `open`. If that
+   compare-and-set fails because the offer became final meanwhile (revoke
+   or expiry raced the create call), or the key cannot be stored (vault
+   locked), the executor moves the offer to `failed` if it is not final
+   yet, revokes the new key at once and handles it like any final-state
+   key below.
+4. Revoke and expiry of an offer whose record is `pending` move the offer to
+   its final state as usual and leave the record `pending` for the
+   reconcile below; they never treat "no key ID yet" as "no key".
+5. **Reconcile.** After an executor restart, after a create call that timed
+   out or failed without a clear "not created" answer, and for every
+   record still `pending` on a final offer, the executor moves a non-final
+   offer with a `pending` record to `failed` (the operator re-offers) and
+   lists setup keys by the stored name. A found key is recorded
+   (`netbird_setup_key_reconciled`, key ID) and revoked like any
+   final-state key; if no key with that name exists once the key's maximum
+   lifetime has passed, the record is closed. A `pending` record is
+   retried with the same backoff as a failed revoke and listed in
+   `nebula host offers` until it is closed.
+
+So "always revoked or recorded" holds across crashes, a locked vault at
+create time, timeouts and races between create and a final transition.
 
 **Revocation at the final state.** Whenever the offer becomes final
 (`enrolled`, `expired`, `revoked`, `failed`), the executor, in this order:
@@ -518,9 +565,12 @@ rest: not in the offer store, not as rendered script bytes (D2
    revoke, it audits `netbird_setup_key_expired_unrevoked` and wipes the key
    ID; the key is then dead on NetBird's side anyway.
 
+A `pending` setup-key record (see "Creation order") is part of this rule:
+the final transition never skips it.
+
 So a live key always has either a successful revoke or an open, audited and
-visible retry record; the reference is never wiped while the key may still
-be valid.
+visible retry or reconcile record; the reference is never wiped while the
+key may still be valid.
 
 **Peers from offers that did not enrol.** When an offer whose setup key was
 used becomes `failed`, `expired` or `revoked`, the peer that joined with it
@@ -563,20 +613,23 @@ code still decides the pin; the NetBird check only protects the endpoint
 suggestion.
 
 Whether the NetBird management API can say **which peer joined with a given
-setup key** is not yet verified (open question Q8). The setup-key object
-reports usage (used count, last use); whether a peer records the setup key
-it was registered with must be checked against the API documentation and a
-real management server before EN-12 starts. If the API cannot attribute a
-peer to a key, the fallback is weaker and must be accepted explicitly:
-"exactly one new peer in the managed group whose registration time lies
-between the offer's approval and the key's recorded use, and the key's use
-count is 1"; with any other result no NetBird endpoint is suggested and no
-peer is offered for deletion. The rogue-peer detection and the orphan-peer
-cleanup above depend on the same answer.
+setup key** is not yet verified. The setup-key object reports usage (used
+count, last use); whether a peer records the setup key it was registered
+with is checked against the API documentation and a real management server
+before EN-12 starts, and the result is recorded in this ADR (Q8). If the API
+can attribute a peer to a key, that attribution is used. If it cannot, the
+weaker time-window fallback is accepted (Q8): "exactly one new peer in the
+managed group whose registration time lies between the offer's approval and
+the key's recorded use, and the key's use count is 1"; with any other result
+no NetBird endpoint is suggested and no peer is offered for deletion. The
+rogue-peer detection and the orphan-peer cleanup above use the same
+attribution, and a delete based on the fallback needs the NetBird peer
+delete permit.
 
 **Policy (operator-set, documented, not created by NOS).**
 
-- Groups: `nos` (the NOS machine only) and `nos-managed` (enrolled hosts).
+- Groups: `nos` (the NOS machine only) and `nos-managed` (enrolled hosts)
+  (names decided, Q3; the managed group stays configurable, EN-06).
 - One policy rule, **one direction**: source `nos` → destination
   `nos-managed`, TCP 22 (plus the hosts' SSH port if different). NetBird
   rules can be bidirectional; this one must not be.
@@ -594,7 +647,8 @@ cleanup above depend on the same answer.
   when any enabled rule has `All` as source or destination together with a
   group that contains `nos` or `nos-managed` peers, when a rule is
   bidirectional, or when a rule lets `nos-managed` reach `nos` or other
-  groups (read-only check, Q3). While the warning stands, the NetBird option
+  groups (read-only check, Q3: NOS only reads policies and warns, it never
+  changes them). While the warning stands, the NetBird option
   in the one-step dialog shows it next to the checkbox.
 
 **Why a stolen setup key is bounded.** If the setup key leaks (offer page,
@@ -624,8 +678,8 @@ create setup keys; a service user with the admin role can also change
 policies and groups. That is a real widening of executor authority (the
 executor already holds root on all managed hosts, so the marginal risk is
 the NetBird network itself). The executor code uses only the calls listed
-above. Q3 asks whether this is acceptable or whether NetBird stays a manual
-step until a narrower role exists.
+above. The maintainer accepted this service user in the executor vault
+(Q3).
 
 ### D7: Download security
 
@@ -647,11 +701,30 @@ step until a narrower role exists.
   proxy without a usable forwarded header) is the same
   `404` body with the same headers. The server does not log the path; the
   guide tells operators to exclude `/enroll/` from proxy access logs.
+- **Reverse proxy.** A script with a setup key passes through the reverse
+  proxy, whose default buffering (nginx) spills responses larger than its
+  memory buffers to `proxy_temp_path` on disk; the 64 KiB script limit
+  allows that. The shipped reverse-proxy configuration and the guide
+  therefore require for `/enroll/` (and the UI's "Download in browser" and
+  "Show script" routes): `proxy_buffering off`,
+  `proxy_max_temp_file_size 0`, no proxy cache, and the access-log
+  exclusion above. The server additionally sends `X-Accel-Buffering: no`
+  on these responses. A proxy configured otherwise is an operator error the
+  guide warns about; the NetBird option's key is then still one-off,
+  short-lived and revoked at the final state.
 - **Client address behind the reverse proxy.** The server sits behind the
   reverse proxy, so the TCP peer (`r.RemoteAddr`) is usually the proxy. A
-  new server setting, **trusted proxies** (list of IP addresses or CIDRs,
-  default empty, validated at startup), decides whose forwarded headers
-  count:
+  new server setting, **trusted proxies** (list of IP addresses, default
+  empty, validated at startup), decides whose forwarded headers count:
+  - **Only proxies, never clients.** Any address in the list can name any
+    client address in `X-Forwarded-For`, so a list entry that also covers
+    clients (for example the LAN or the NetBird range) would let such a
+    client drain another operator's bucket. Entries are therefore single
+    addresses (bare, `/32` or `/128`); a network prefix is accepted only in
+    the separate setting **trusted proxy networks**, documented as "networks
+    that contain reverse proxies and no clients" (for example a container
+    network used only by the proxy), and logged at startup with that
+    statement. Any other prefix fails startup.
   - **Normalisation.** Every address is normalised before it is compared
     or used, the same way for the TCP peer, every `X-Forwarded-For` entry
     and every configured trusted-proxy entry (`net/netip`): a port is
@@ -660,7 +733,8 @@ step until a narrower role exists.
     address (`::ffff:10.0.0.1`) is unmapped to its IPv4 form. So a
     dual-stack listener that sees the proxy as `[::ffff:10.0.0.5]:41234`
     still matches a trusted proxy configured as `10.0.0.5`. A trusted-proxy
-    entry that does not parse fails startup.
+    entry that does not parse fails startup. "Trusted proxy" below means an
+    address in either setting.
   - If the TCP peer is not a trusted proxy, `X-Forwarded-For` and
     `Forwarded` are ignored and the peer address is the client address.
   - If the TCP peer is a trusted proxy, the server reads only
@@ -688,6 +762,15 @@ step until a narrower role exists.
     `enroll_script_downloaded` audit record use this client address; the
     audit record also carries the peer address and whether the forwarded
     header was used.
+  - **Bounded rate-limit table.** The buckets (one per IPv4 address, one
+    per IPv6 /64) live in a table with a fixed maximum size (named
+    constant, default 4096 buckets). When it is full, the least recently
+    used bucket is evicted (LRU) to make room; a request is never refused
+    because the table is full. Eviction fails open for the evicted client
+    (its counters restart), which is acceptable because the limit is
+    defence in depth: offer IDs are ≥ 128 bits and single use. A client
+    with a large IPv6 allocation can therefore reset buckets but neither
+    grow memory without bound nor lock other operators out.
   - The shipped reverse proxy configuration should set (overwrite, not
     append) `X-Forwarded-For` to the address it saw; with an appending proxy
     the rules above still hold. If the endpoint is enabled and no trusted
@@ -726,8 +809,9 @@ step until a narrower role exists.
   already show a manipulated script today when the operator copies from the
   web UI; with the CLI path the script comes from the executor host. For
   high-assurance hosts the guide recommends `nebula host enroll-script` or
-  comparing the hash with `nebula host offers` on the executor host
-  (Q6).
+  comparing the hash with `nebula host offers` on the executor host. The
+  maintainer accepted this residual risk with the documented CLI
+  alternative (Q6); the CLI hash display is not mandatory per offer.
 
 ### D8: Hosts that cannot reach NOS
 
@@ -751,9 +835,10 @@ not show the button for such offers. A remote host that cannot reach the
 NOS origin joins NetBird by hand first (today's step 4, with a setup key the
 operator creates in NetBird), and then gets an offer without the NetBird
 option, through the browser download or, once the NOS origin is reachable,
-the normal command. A variant in which a keyless downloaded script asks for
-the setup key at run time is possible later (Q9); it is not part of this
-decision. Making the NOS origin reachable for this purpose is not part of
+the normal command. The maintainer accepted this manual NetBird step for
+such hosts for now (Q9); a variant in which a keyless downloaded script
+asks for the setup key at run time would need a later ADR and is not part
+of this decision. Making the NOS origin reachable for this purpose is not part of
 this ADR either.
 
 ### D9: Compatibility
@@ -765,7 +850,8 @@ this ADR either.
   one-step enrollment is for hosts NOS did not provision.
 - Hosts enrolled either way are indistinguishable afterwards except for the
   audit record (`source` `paired` versus `probe`/`known_hosts`).
-- Windows and BSD hosts are out of scope (Q5), as are hosts whose `sh` lacks
+- Windows and BSD hosts are out of scope (Q5; Proxmox VE nodes are Debian
+  and included), as are hosts whose `sh` lacks
   64-bit arithmetic or that lack coreutils `sha256sum`/`base64` (the script
   stops with a message pointing to §7.2).
 
@@ -773,24 +859,25 @@ this ADR either.
 
 | Threat | Mitigation | Residual |
 | --- | --- | --- |
-| Machine in the path between executor and host at probe time | Pin only a key whose salted code matches the operator-carried code; re-probe at commit; mismatch fails the offer and notifies | Grinding success ≤ 2^-10 for a 10^12 keys/s attacker who also knows the salt (D3) |
+| Machine in the path between executor and host at probe time | Pin only a key whose salted 120-bit code matches the operator-carried code; re-probe at commit; one mismatch fails the offer and notifies | Grinding success ≈ 2^-70 in 15 minutes (≈ 2^-68 in 60) for a 10^12 keys/s attacker who also knows the salt (D3) |
 | Precomputed key grinding against a known host key | Salt per offer; code computed over salt and key | None beyond the row above |
 | Forged code shown to the operator | Code is read in the operator's own session or console | Equal to the operator's trust in that session (TOFU on a fresh VPS) |
 | Leaked or guessed offer ID | ≥ 128 bits, single use, 15 min, uniform 404, per-client rate limit with trusted-proxy client address, hashed at rest | A leaked ID before the download lets someone take the script; the real download then fails and the operator sees the real download address |
-| Other local users on the target host (shared or multi-user host) | Offer ID passed to `curl`/`wget` on standard input from the `printf` builtin, never in argv; download directory `0700` and files `0600` under `umask 077`; setup key passed to the NetBird client outside argv where the client allows it (D5) | The ID stays in the operator's own shell history (`0600`) but is single-use and consumed seconds later; a user with root or the operator's UID is out of scope (they own the session); short `/proc` exposure of the setup key if the NetBird client only takes it in argv (EN-12) |
-| Setup key left on the host's disk | `umask 077`, `mktemp -d` (`0700`), `trap` cleanup on exit, hang-up, interrupt and termination, in the command and in the script; no browser download for NetBird offers (D8) | `SIGKILL`/power loss leaves a `0700` file; key one-off, ≤ 1 h, revoked when the offer is final |
-| Setup key at rest on executor or server | Key only encrypted in the vault; scripts rendered on demand and checked against the stored hash, never stored, cached or logged; "Show script" renders a placeholder instead of the key | Plaintext in executor and server memory while a response is rendered and streamed |
+| Other local users on the target host (shared or multi-user host) | Offer ID passed to `curl`/`wget` on standard input from the `printf` builtin, never in argv; download directory `0700` and files `0600` under `umask 077`; setup key passed to the NetBird client only by environment variable or key file, never in argv; NetBird option not offered for a client version that accepts neither (D5) | The ID stays in the operator's own shell history (`0600`) but is single-use and consumed seconds later; a user with root or the operator's UID is out of scope (they own the session) |
+| Setup key left on the host's disk | Download directory and key file in RAM-backed `/dev/shm` or `$XDG_RUNTIME_DIR`; `umask 077`, `mktemp -d` (`0700`), `trap` cleanup on exit, hang-up, interrupt and termination, in the command and in the script; no browser download for NetBird offers (D8) | `SIGKILL`/power loss leaves a `0700` file; without `/dev/shm` and `$XDG_RUNTIME_DIR` the fallback `$TMPDIR`/`/tmp` is disk-backed and freed blocks can keep the key; `tmpfs` pages can reach swap; key one-off, ≤ 1 h, revoked when the offer is final |
+| Setup key at rest on executor, server or reverse proxy | Key only encrypted in the vault; scripts rendered on demand and checked against the stored hash, never stored, cached or logged; "Show script" renders a placeholder instead of the key; reverse proxy required to run `/enroll/` with `proxy_buffering off`, `proxy_max_temp_file_size 0`, no cache, no access log | Plaintext in executor, server and proxy memory while a response is rendered and streamed; a proxy configured against the guide may spill it to disk |
+| Setup key created but not recorded (crash, timeout, locked vault, race with revoke or expiry) | Persisted `pending` record with key name before the create call; atomic compare-and-set to `created`; a key created for an offer that became final meanwhile is revoked at once; reconcile by key name after restart or timeout | Key live until reconcile reaches NetBird, at most until its ≤ 1 h expiry |
 | Setup key still valid after the offer ended | Secret wiped from the vault at the final state; key ID kept until revoke succeeds, `netbird_setup_key_revoke_failed` audited, retried, shown on the dashboard and in `nebula host offers` until revoked or expired | Valid until NetBird is reachable again, at most until its ≤ 1 h expiry |
 | Wrong NetBird peer deleted | Never automatic; peers attributed only by the time-window fallback need a NetBird peer delete permit with the security key | Operator approves a wrong peer despite the shown peer name and IP |
 | Downgrade of the probed key type | Probe offers only `ssh-ed25519`; later connections restrict `HostKeyAlgorithms` to the pinned type | — |
 | Script tampered in transit | TLS to the NOS origin, SHA-256 check before running, no `curl \| sh` | — |
 | Compromised server | Executor decides code match, builds the permit, holds token and setup keys; `nebula approve` independent view | Can serve a malicious script (root on the new host) and deceive the approval page, as today |
-| Leaked NetBird setup key | One use, ≤ 1 h, auto-group only `nos-managed`, one-way policy with the default `All` policy disabled, executor peer cross-check, unconditional revocation, orphan-peer cleanup | One rogue peer in `nos-managed` for a short time, reachable only from NOS; attribution depends on Q8 |
+| Leaked NetBird setup key | One use, ≤ 1 h, auto-group only `nos-managed`, one-way policy with the default `All` policy disabled, executor peer cross-check, unconditional revocation, orphan-peer cleanup | One rogue peer in `nos-managed` for a short time, reachable only from NOS; attribution by the API or, failing that, the time-window fallback (Q8) |
 | Compromised server minting setup keys | Setup key created only after a NetBird offer permit approved with the security key; 2 open NetBird offers, 5 keys per hour | One key per tricked approval, visible in `nebula approve` |
-| NetBird token misuse | Executor vault, typed calls only, audit, dedicated service user | Role may be broader than needed (Q3) |
+| NetBird token misuse | Executor vault, typed calls only, audit, dedicated service user | Role may be broader than needed; accepted (Q3) |
 | Hostile host output (addresses) | Addresses are hints the operator retypes; endpoint syntax validated; text-only rendering | — |
 | Offer flooding | Limits per executor and hour; offers require a privileged session | — |
-| Shared rate-limit bucket starved through the reverse proxy | Addresses normalised (port, zone ID, IPv4-mapped IPv6) before the trusted-proxy match; a trusted proxy's request with a missing, oversized or malformed `X-Forwarded-For` is refused without charging any bucket; startup warning for loopback, private and wildcard listeners without trusted proxies | An attacker behind the same client address (or /64) as the operator shares the operator's bucket |
+| Shared rate-limit bucket starved through the reverse proxy | Addresses normalised (port, zone ID, IPv4-mapped IPv6) before the trusted-proxy match; trusted proxies only as single addresses or as proxy-only networks, any other prefix fails startup; a trusted proxy's request with a missing, oversized or malformed `X-Forwarded-For` is refused without charging any bucket; bounded bucket table with LRU eviction, never "table full → refuse"; startup warning for loopback, private and wildcard listeners without trusted proxies | An attacker behind the same client address (or /64) as the operator shares the operator's bucket; an attacker with many /64s can evict buckets and so reset limits (fail open) |
 | Audit records naming only the proxy | The same client-address rule for every request of the enrollment flow; records carry client and peer address | Other routes unchanged until a separate decision |
 
 ## Non-goals
@@ -802,56 +889,51 @@ this ADR either.
 - No change to how existing pins, blocks and re-pins work.
 - Windows, BSD and network devices (ADR 0010).
 
-## Open questions for the maintainer
+## Decisions of the maintainer (2026-11-11)
 
-- **Q1: Code length and format.** 12 Crockford base32 characters (60 bits)
-  plus one check character, shown as `XXXX-XXXX-XXXX-C` (recommended), or 16
-  characters (80 bits)? Case-insensitive input, `O`/`0` and `I`/`L`/`1`
-  folded as Crockford defines. Crockford's mod-37 check symbol adds five
-  extra characters (`*~$=U`); a decimal or Luhn-style check digit is the
-  alternative if those are awkward to type.
-- **Q2: Offer lifetime.** 15 minutes for download and code (recommended), or
-  longer for slow remote installs (the NetBird client install can take a few
-  minutes)? Should the code submission get its own window after the download
-  (for example 15 minutes from download, at most 60 from creation)? The
-  grinding bound of D3 assumes at most 15 minutes from the moment the salt
-  is known (offer creation) to the last probe. At 60 minutes a 60-bit code
-  gives a 10^12 keys/s attacker about 2^-8 instead of 2^-10. Recommendation:
-  any window longer than 15 minutes in total is allowed only together with
-  the 80-bit code of Q1 (≈ 2^-28 at 60 minutes); with 60 bits the total
-  stays at 15 minutes.
-- **Q3: NetBird token scope and group names.** Is a service user with the
-  NetBird role needed for setup-key creation acceptable in the executor
-  vault, or does NetBird stay a manual step until a narrower role exists?
-  Group names `nos` and `nos-managed`? Should NOS read and warn on policies
-  (recommended), or not touch policies at all? Self-hosted management or
-  NetBird Cloud in the reference lab (decides the TLS trust setting)?
-- **Q4: Inventory entry in the same step.** May the one-step dialog create
-  the inventory host (recommended: yes, as a normal inventory entry shown
-  "not enrolled" until the pin; deleted again if the offer fails and the
-  operator chooses so), or must the host exist first?
-- **Q5: Platforms.** Windows and BSD stay out of scope (recommended)?
-  Proxmox VE nodes are Debian and included.
-- **Q6: Script authenticity against a compromised server.** Accept the
-  residual risk of D7 with the documented CLI alternative (recommended), or
-  require the executor-local CLI to display the hash for every one-step
-  offer?
-- **Q7: Mismatch handling.** One well-formed mismatch fails the offer
-  (recommended, with the check character catching typos), or allow a second
-  code submission?
-- **Q8: Peer attribution in NetBird.** Can the NetBird management API (the
-  version in the reference lab and NetBird Cloud) tell which peer joined
-  with a given setup key? To be checked against the API and a real
-  management server before EN-12. If not, is the weaker time-window
-  fallback of D6 acceptable, or does the NetBird endpoint suggestion,
-  rogue-peer detection and orphan cleanup stay manual?
-- **Q9: NetBird for hosts that cannot reach NOS.** D8 excludes NetBird
-  offers from the browser download, so such a host joins NetBird by hand.
-  Is that acceptable (recommended for now), or should a later ADR add a
-  keyless downloaded script that reads the setup key at run time from the
-  terminal (non-echoing), with the key revealed once on the offer page by a
-  consuming, `no-store` action? That variant keeps the key off every disk
-  but puts it on screen and possibly in a clipboard manager.
+The open questions Q1–Q9 of the proposed ADR were decided on 2026-11-11 as
+follows; D1–D9 above already reflect these decisions.
+
+- **Q1: Code length and format.** 25 characters: 24 Crockford base32 data
+  characters (120 bits) plus 1 Crockford check character (mod 37, symbols
+  `0-9A-Z` without `I L O U`, plus `*~$=U`), shown as
+  `XXXXX-XXXXX-XXXXX-XXXXX-XXXXC` in groups of five. Input is
+  case-insensitive with Crockford folding (`O` → `0`, `I`/`L` → `1`);
+  hyphens and spaces are ignored. The script computes the code as two
+  60-bit halves in POSIX shell arithmetic and the check value as
+  `((hi mod 37) · (2^60 mod 37) + lo mod 37) mod 37` without a 120-bit
+  number (D3). (Previously recommended: 60 bits, 12 characters + check,
+  `XXXX-XXXX-XXXX-C`.)
+- **Q2: Offer lifetime.** 15 minutes in total for download and code
+  submission is the default (D2). Note: with the 120-bit code a later
+  extension of the total window up to 60 minutes is admissible (grinding
+  chance ≈ 2^-68 at 10^12 keys/s, D3); it needs only a change of the named
+  constant, not a new ADR. No separate window after the download.
+- **Q3: NetBird token scope and group names.** A NetBird service user in
+  the executor vault is accepted. Group names `nos` and `nos-managed`. NOS
+  only reads policies and warns; it never creates or changes them. Whether
+  the reference lab uses self-hosted management or NetBird Cloud (TLS trust
+  setting) is established in the lab test before EN-12.
+- **Q4: Inventory entry in the same step.** Yes: the one-step dialog may
+  create the inventory host as a normal inventory entry shown "not
+  enrolled" until the pin; if the offer fails it is deleted again only when
+  the operator chooses so.
+- **Q5: Platforms.** Windows and BSD are out of scope. Proxmox VE nodes are
+  Debian and included.
+- **Q6: Script authenticity against a compromised server.** The residual
+  risk of D7 is accepted with the documented CLI alternative
+  (`nebula host enroll-script`, hash comparison with `nebula host offers`);
+  a CLI hash display is not required for every offer.
+- **Q7: Mismatch handling.** One well-formed mismatch ends the offer
+  (`failed`); the check character catches typos. No second submission.
+- **Q8: Peer attribution in NetBird.** Whether the management API can
+  attribute a peer to the setup key it joined with is checked against the
+  real API (reference-lab version) before EN-12 and recorded here. If it
+  cannot, the time-window fallback of D6 is accepted, with the NetBird peer
+  delete permit for deletes based on it.
+- **Q9: NetBird for hosts that cannot reach NOS.** For now such a host
+  joins NetBird by hand (D8). A keyless downloaded script that reads the
+  setup key at run time would need a later ADR.
 
 ## Required specification changes
 
@@ -861,15 +943,19 @@ this ADR either.
   restrict `HostKeyAlgorithms` to the pinned type, re-probe at commit,
   mismatch handling.
 - `docs/spec/06-credentials.md`: NetBird management token custody, per-offer
-  setup keys in the vault created only after approval, no plaintext script
-  at rest (render on demand), unconditional revocation at the final state
-  with retry and audit on failure, orphan peers.
+  setup keys in the vault created only after approval and under a persisted
+  `pending` record with reconcile by key name, no plaintext script at rest
+  (render on demand), unconditional revocation at the final state with
+  retry and audit on failure, orphan peers.
 - `docs/spec/05-authentication.md`: paired enrollment permit, NetBird
   offer permit and NetBird peer delete permit (all HIGH, UV), session
   binding of offers.
 - `docs/spec/02-architecture.md`, `03-processes-and-data.md`: the
   unauthenticated download endpoint and its headers (including CSP), the
-  trusted-proxies setting and client-address rule, the offer table
+  reverse-proxy requirements for `/enroll/` (no buffering to disk, no
+  cache, no access log), the trusted-proxies settings (single addresses,
+  proxy-only networks), the client-address rule and the bounded rate-limit
+  table, the offer table
   (executor), executor egress to the NetBird management URL.
 - `docs/spec/09-untrusted-host-data.md`: script-printed addresses are
   operator hints; endpoint validation; forwarded headers are untrusted
