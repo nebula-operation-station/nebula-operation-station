@@ -29,7 +29,7 @@ History:
   `denied`); `rule-type` and `source-hip`/`destination-hip` added to Q11;
   mitigation voided on `raw_digest` change too; mitigation queried over
   every host address; reputation hits from `incomplete` hours never
-  denied-only.
+  denied-only; NS-05 test duties for these four points.
 
 ## Context
 
@@ -312,6 +312,26 @@ Consequences, all fail-safe:
   it, so it never resolves a `mgmt-from-untrusted`, `shadowed-rule` or
   other advisor finding.
 
+**Required tests (NS-05).** One test at least per item, with fixtures the
+consuming tickets (NS-07, NS-08, NS-10, NS-16) reuse:
+
+1. Fail-safe: a deny rule with `rule-type` intrazone, with a
+   `source-hip`/`destination-hip`, with a `<dropped:…>` marker, with
+   another field outside the allowlist, and a snapshot without negation
+   flags or default rules each give `unknown` (never `denied` or
+   `allowed`), no mitigation, no removed attack-path edge, and leave an
+   existing `mgmt-from-untrusted` and `shadowed-rule` finding open.
+2. Mitigation voiding: a policy version that differs only in `raw_digest`
+   voids the record with "mitigation unknown: policy changed outside
+   collected elements"; a `redacted_digest` change voids it too.
+3. Host addresses: a host with two addresses (IPv4 and global IPv6, or two
+   NICs) of which one is `denied` and one `allowed` from `internet` is not
+   mitigated and keeps expo 1.0; mitigated only when every address is
+   `denied`.
+4. Incomplete hours: a reputation hit whose only evidence is denied keys
+   from an `incomplete` hour is marked "allowed traffic unknown
+   (incomplete hour)", is not counted as denied-only and notifies.
+
 ### D3: Exposure-aware vulnerability priority (B)
 
 The reachability model feeds ADR 0011 as a **compensating-control signal**.
@@ -322,10 +342,20 @@ service is mapped to a listening port (ADR 0011 D10 mapping; unmapped →
 no mitigation, flagged "port unknown"), NOS queries the model from every
 entry class and every zone, plus the finding host's own segment, with the
 D2 reverse-NAT lookup (a port forward to the host makes the source
-`allowed`, never `denied`, and is never counted as mitigated), and stores:
+`allowed`, never `denied`, and is never counted as mitigated), and stores
+the results below. The destination is **every address of the finding
+host**: every IPv4 address and every global IPv6 address on every NIC
+(ADR 0009 `net.facts`, IPAM). A source counts as `denied` only if the
+verdict is `denied` for every one of these addresses; otherwise the most
+reachable verdict over the addresses applies (D2 order). If the host's
+address set is not known from fresh data, the record is not valid
+("mitigation unknown: host addresses unknown") (previously: "the finding
+host" without saying which addresses).
 
-- per source: verdict, deciding rule (name and UUID), NAT rule, chain hash;
-- the snapshot hash, model version and computation time;
+- per source and address: verdict, deciding rule (name and UUID), NAT
+  rule, chain hash;
+- the snapshot hash, the policy version's `redacted_digest` and
+  `raw_digest`, model version and computation time;
 - a summary: "mitigated by rule X from zones Y; still reachable from Z".
 
 **Formula `vu-prio-v2`.** Identical to `vu-prio-v1` (ADR 0011 D7) except
@@ -362,9 +392,13 @@ and shows "mitigation unknown: <reason>":
 
 - every input dataset of the snapshot is fresh (not stale, not
   `incomplete`);
-- the policy version (`redacted_digest`) and every referenced object are
-  unchanged since the computation (**a rule or object change voids every
-  mitigation at once**, before recomputation);
+- the policy version and every referenced object are unchanged since the
+  computation (**a rule or object change voids every mitigation at once**,
+  before recomputation). A change of the `redacted_digest` **or** of the
+  `raw_digest` voids; a change of the `raw_digest` alone means a change in
+  elements NOS does not collect and gives "mitigation unknown: policy
+  changed outside collected elements" (previously: only the
+  `redacted_digest`; the snapshot hash still excludes `raw_digest`, D2);
 - no verdict on a path that the record counts as mitigating is `unknown`
   (which includes every path through an unevaluable rule or an
   uncollected default rule, D2 "Unevaluable rules (fail-safe)");
@@ -639,9 +673,17 @@ to the traffic-map focus view), and the feed snapshot it rests on. A later
 snapshot that delists the address ends the hit episode; the record stays
 for its retention.
 
+**Hits from `incomplete` hours.** Over the D5 key cap only the top keys by
+sessions are kept, so an allowed low-volume key can be missing. A hit whose
+evidence includes a log hour marked `incomplete` is marked **"allowed
+traffic unknown (incomplete hour)"**: it never counts as denied-only, and
+it notifies as `netsec.reputation_allowed` with that marker (previously:
+such a hit could appear denied-only and not notify).
+
 **Notifications.** Event `netsec.reputation_allowed`: traffic with action
 allow (or an observed flow, which implies allow) to or from a listed
-address. Dedupe per `(external address, internal endpoint, feed)` episode;
+address, or a hit marked "allowed traffic unknown (incomplete hour)".
+Dedupe per `(external address, internal endpoint, feed)` episode;
 the ADR 0011 D9 rate limit and hourly digest apply (10 per hour). Messages
 carry structured fields only (feed, category, internal endpoint label,
 direction, allowed sessions), no external address in third-party channels
