@@ -34,6 +34,9 @@ func (c *offerClock) Add(d time.Duration) {
 	c.t = c.t.Add(d)
 }
 
+// openOfferDB opens a DB for the state-machine tests, which create more
+// offers than the per-executor limits allow; TestCreateOfferEnforces*
+// open with the real limits.
 func openOfferDB(t *testing.T, dir string, clk *offerClock) *DB {
 	t.Helper()
 	db, err := open(dir, clk.Now)
@@ -41,7 +44,82 @@ func openOfferDB(t *testing.T, dir string, clk *offerClock) *DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
+	db.offerLimits = offerLimits{live: 1 << 20, liveNetBird: 1 << 20, perHour: 1 << 20}
 	return db
+}
+
+// limitDB opens a DB with the real per-executor offer limits.
+func limitDB(t *testing.T) (*DB, *offerClock) {
+	t.Helper()
+	clk := &offerClock{t: t0}
+	db, err := open(privateDir(t), clk.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	return db, clk
+}
+
+func TestCreateOfferEnforcesLiveLimit(t *testing.T) {
+	db, _ := limitDB(t)
+	var live []NewOffer
+	for i := 0; i < OfferMaxLive; i++ {
+		live = append(live, mustCreateOffer(t, db, false))
+	}
+	over := newOffer(t, false)
+	if _, err := db.CreateOffer(over); !errors.Is(err, ErrOfferLimit) {
+		t.Fatalf("offer %d: %v, want ErrOfferLimit", OfferMaxLive+1, err)
+	}
+	if _, err := db.Offer(over.IDHash); !errors.Is(err, ErrOfferNotFound) {
+		t.Fatalf("refused offer was stored: %v", err)
+	}
+	// A final offer no longer counts.
+	if err := db.EndOffer(live[0].IDHash, OfferOpen, OfferRevoked); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateOffer(over); err != nil {
+		t.Fatalf("offer after one ended: %v", err)
+	}
+}
+
+func TestCreateOfferEnforcesNetBirdLimit(t *testing.T) {
+	db, _ := limitDB(t)
+	var nb []NewOffer
+	for i := 0; i < OfferMaxLiveNetBird; i++ {
+		nb = append(nb, mustCreateOffer(t, db, true))
+	}
+	if _, err := db.CreateOffer(newOffer(t, true)); !errors.Is(err, ErrOfferLimit) {
+		t.Fatalf("NetBird offer %d: %v, want ErrOfferLimit", OfferMaxLiveNetBird+1, err)
+	}
+	// The NetBird limit does not stop other offers.
+	mustCreateOffer(t, db, false)
+	if err := db.EndOffer(nb[0].IDHash, OfferAwaitingApproval, OfferRevoked); err != nil {
+		t.Fatal(err)
+	}
+	mustCreateOffer(t, db, true)
+}
+
+func TestCreateOfferEnforcesHourlyLimit(t *testing.T) {
+	db, clk := limitDB(t)
+	for i := 0; i < OfferMaxPerHour; i++ {
+		n := mustCreateOffer(t, db, false)
+		// End each one, so only the hourly limit applies.
+		if err := db.EndOffer(n.IDHash, OfferOpen, OfferRevoked); err != nil {
+			t.Fatal(err)
+		}
+		clk.Add(time.Minute)
+	}
+	// t0+30m: all 30 within the last hour.
+	if _, err := db.CreateOffer(newOffer(t, false)); !errors.Is(err, ErrOfferLimit) {
+		t.Fatalf("offer %d within an hour: %v, want ErrOfferLimit", OfferMaxPerHour+1, err)
+	}
+	// At t0+1h the first one (created at t0) is an hour old and no longer
+	// counts.
+	clk.Add(30 * time.Minute)
+	mustCreateOffer(t, db, false)
+	if _, err := db.CreateOffer(newOffer(t, false)); !errors.Is(err, ErrOfferLimit) {
+		t.Fatalf("second offer at t0+1h: %v, want ErrOfferLimit", err)
+	}
 }
 
 func offerDB(t *testing.T) (*DB, *offerClock) {

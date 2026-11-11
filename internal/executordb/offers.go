@@ -67,6 +67,17 @@ const (
 	// after this grace.
 	OfferProposedGrace = canonical.MaxPermitLifetime
 
+	// OfferMaxLive is the number of non-final offers per executor.
+	OfferMaxLive = 10
+	// OfferMaxLiveNetBird is the number of non-final NetBird offers per
+	// executor, on top of OfferMaxLive.
+	OfferMaxLiveNetBird = 2
+	// OfferMaxPerHour is the number of offers created in any hour
+	// (created_at within the last OfferRateWindow).
+	OfferMaxPerHour = 30
+	// OfferRateWindow is the window of OfferMaxPerHour.
+	OfferRateWindow = time.Hour
+
 	proposedGraceSeconds = int64(OfferProposedGrace / time.Second)
 
 	offerHashLen       = 32
@@ -142,7 +153,10 @@ var zeroHash [offerHashLen]byte
 
 // CreateOffer stores a new offer, created now and expiring after
 // OfferLifetime. A NetBird offer starts in awaiting_approval, every other
-// offer in open.
+// offer in open. It enforces the per-executor limits of ADR 0013 D2
+// (OfferMaxLive, OfferMaxLiveNetBird, OfferMaxPerHour) with ErrOfferLimit;
+// the NetBird setup-key limit belongs to the setup-key store (EN-05 part
+// 2).
 func (db *DB) CreateOffer(n NewOffer) (Offer, error) {
 	if n.IDHash == zeroHash {
 		return Offer{}, fmt.Errorf("executordb: %w: offer ID hash is required", ErrInvalid)
@@ -173,20 +187,64 @@ func (db *DB) CreateOffer(n NewOffer) (Offer, error) {
 		return Offer{}, fmt.Errorf("executordb: %w: offer script hash is required", ErrInvalid)
 	}
 	now := db.now().Unix()
-	res, err := db.sql.Exec(`INSERT INTO enroll_offers (id_hash, salt, host_id, ssh_user, credential_ref,
+	if err := db.insertOffer(n, now, state, script); err != nil {
+		return Offer{}, fmt.Errorf("executordb: create offer %s: %w", offerLogID(n.IDHash), err)
+	}
+	return db.Offer(n.IDHash)
+}
+
+// offerLimits are the per-executor offer limits CreateOffer enforces.
+type offerLimits struct {
+	live, liveNetBird, perHour int
+}
+
+var defaultOfferLimits = offerLimits{live: OfferMaxLive, liveNetBird: OfferMaxLiveNetBird, perHour: OfferMaxPerHour}
+
+// insertOffer checks the per-executor limits and inserts the offer in one
+// transaction. Every offer that is not final counts as live, also one
+// whose lifetime is over but which the sweep has not ended yet: the caller
+// runs ExpireOffers first (it audits what that ends).
+func (db *DB) insertOffer(n NewOffer, now int64, state OfferState, script any) (err error) {
+	tx, err := db.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			tx.Rollback()
+		}
+	}()
+	var live, liveNetBird, recent int
+	if err := tx.QueryRow(`SELECT
+			count(*) FILTER (WHERE state IN ('awaiting_approval', 'open', 'downloaded', 'pairing_proposed')),
+			count(*) FILTER (WHERE netbird = 1 AND state IN ('awaiting_approval', 'open', 'downloaded', 'pairing_proposed')),
+			count(*) FILTER (WHERE created_at > ?)
+		FROM enroll_offers`, now-int64(OfferRateWindow/time.Second)).Scan(&live, &liveNetBird, &recent); err != nil {
+		return err
+	}
+	l := db.offerLimits
+	switch {
+	case live >= l.live:
+		return fmt.Errorf("%d non-final offers: %w", live, ErrOfferLimit)
+	case n.NetBird && liveNetBird >= l.liveNetBird:
+		return fmt.Errorf("%d non-final NetBird offers: %w", liveNetBird, ErrOfferLimit)
+	case recent >= l.perHour:
+		return fmt.Errorf("%d offers created in the last hour: %w", recent, ErrOfferLimit)
+	}
+	res, err := tx.Exec(`INSERT INTO enroll_offers (id_hash, salt, host_id, ssh_user, credential_ref,
 			session_hash, netbird, created_at, expires_at, state, state_changed_at, script_sha256)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id_hash) DO NOTHING`,
 		n.IDHash[:], n.Salt[:], n.HostID, n.SSHUser, n.CredentialRef, n.SessionHash[:], boolInt(n.NetBird),
 		now, now+int64(OfferLifetime/time.Second), string(state), now, script)
 	if err != nil {
-		return Offer{}, fmt.Errorf("executordb: create offer %s: %w", offerLogID(n.IDHash), err)
+		return err
 	}
 	if k, err := res.RowsAffected(); err != nil {
-		return Offer{}, fmt.Errorf("executordb: create offer %s: %w", offerLogID(n.IDHash), err)
+		return err
 	} else if k == 0 {
-		return Offer{}, fmt.Errorf("executordb: create offer %s: %w", offerLogID(n.IDHash), ErrOfferExists)
+		return ErrOfferExists
 	}
-	return db.Offer(n.IDHash)
+	return tx.Commit()
 }
 
 const offerColumns = `id_hash, salt, host_id, ssh_user, credential_ref, session_hash, netbird, created_at,

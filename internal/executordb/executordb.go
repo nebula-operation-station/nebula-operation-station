@@ -70,12 +70,15 @@ var migrationFS embed.FS
 
 // DB is the executor database. It is safe for concurrent use.
 type DB struct {
-	sql       *sql.DB
-	dirLock   *os.File // flock(LOCK_EX) on the data directory
-	created   bool
-	now       func() time.Time
-	closeOnce sync.Once
-	closeErr  error
+	sql     *sql.DB
+	dirLock *os.File // flock(LOCK_EX) on the data directory
+	created bool
+	now     func() time.Time
+	// offerLimits are the per-executor enrollment offer limits; always
+	// defaultOfferLimits outside this package's tests.
+	offerLimits offerLimits
+	closeOnce   sync.Once
+	closeErr    error
 }
 
 // Open opens (and if needed creates) executor.db in dataDir. dataDir must
@@ -188,7 +191,7 @@ func open(dataDir string, now func() time.Time) (_ *DB, err error) {
 		sdb.Close()
 		return nil, fmt.Errorf("executordb: %w", err)
 	}
-	return &DB{sql: sdb, dirLock: dirLock, created: created, now: now}, nil
+	return &DB{sql: sdb, dirLock: dirLock, created: created, now: now, offerLimits: defaultOfferLimits}, nil
 }
 
 // checkpointTruncate copies every WAL frame into the main file, syncs it
