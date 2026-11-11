@@ -155,28 +155,52 @@ func TestParseInstalledFilesRejectsMalformedLists(t *testing.T) {
 			}}
 			return nil
 		}),
-		"entry not an object":   mutate(func(_ map[string]any, files []any) map[string]any { files[0] = "x"; return nil }),
-		"unknown entry field":   mutate(setEntry(2, "uid", 0)),
-		"missing mode":          mutate(setEntry(2, "mode", nil)),
-		"missing owner":         mutate(setEntry(2, "owner", nil)),
-		"regular with target":   mutate(setEntry(2, "target", "/usr/bin/x")),
-		"symlink with sha256":   mutate(setEntry(4, "sha256", hexSum(nil))),
-		"symlink with mode":     mutate(setEntry(4, "mode", "0777")),
-		"symlink no target":     mutate(setEntry(4, "target", nil)),
-		"empty target":          mutate(setEntry(4, "target", "")),
-		"target bad char":       mutate(setEntry(4, "target", "a b")),
-		"target too long":       mutate(setEntry(4, "target", strings.Repeat("a", MaxInstalledPath+1))),
-		"unknown type":          mutate(setEntry(2, "type", "dir")),
-		"type not a string":     mutate(setEntry(2, "type", 1)),
-		"relative path":         mutate(setEntry(2, "path", "usr/bin/nebula")),
-		"dot dot path":          mutate(setEntry(2, "path", "/usr/bin/../bin/nebula")),
-		"dot component":         mutate(setEntry(2, "path", "/usr/share/nebula/./x")),
-		"double slash":          mutate(setEntry(2, "path", "/usr/bin//nebula")),
-		"trailing slash":        mutate(setEntry(2, "path", "/usr/share/nebula/x/")),
-		"space in path":         mutate(setEntry(2, "path", "/usr/bin/nebula x")),
-		"non-ASCII path":        mutate(setEntry(2, "path", "/usr/bin/nebulä")),
-		"newline in path":       mutate(setEntry(2, "path", "/usr/bin/nebula\n")),
-		"path too long":         mutate(setEntry(5, "path", "/usr/share/nebula/"+strings.Repeat("a", MaxInstalledPath-17))),
+		"entry not an object":     mutate(func(_ map[string]any, files []any) map[string]any { files[0] = "x"; return nil }),
+		"unknown entry field":     mutate(setEntry(2, "uid", 0)),
+		"missing mode":            mutate(setEntry(2, "mode", nil)),
+		"missing owner":           mutate(setEntry(2, "owner", nil)),
+		"regular with target":     mutate(setEntry(2, "target", "/usr/bin/x")),
+		"symlink with sha256":     mutate(setEntry(4, "sha256", hexSum(nil))),
+		"symlink with mode":       mutate(setEntry(4, "mode", "0777")),
+		"symlink no target":       mutate(setEntry(4, "target", nil)),
+		"empty target":            mutate(setEntry(4, "target", "")),
+		"target bad char":         mutate(setEntry(4, "target", "a b")),
+		"target too long":         mutate(setEntry(4, "target", strings.Repeat("a", MaxInstalledPath+1))),
+		"unknown type":            mutate(setEntry(2, "type", "dir")),
+		"type not a string":       mutate(setEntry(2, "type", 1)),
+		"relative path":           mutate(setEntry(2, "path", "usr/bin/nebula")),
+		"dot dot path":            mutate(setEntry(2, "path", "/usr/bin/../bin/nebula")),
+		"dot component":           mutate(setEntry(2, "path", "/usr/share/nebula/./x")),
+		"double slash":            mutate(setEntry(2, "path", "/usr/bin//nebula")),
+		"trailing slash":          mutate(setEntry(2, "path", "/usr/share/nebula/x/")),
+		"space in path":           mutate(setEntry(2, "path", "/usr/bin/nebula x")),
+		"non-ASCII path":          mutate(setEntry(2, "path", "/usr/bin/nebulä")),
+		"newline in path":         mutate(setEntry(2, "path", "/usr/bin/nebula\n")),
+		"path too long":           mutate(setEntry(5, "path", pathOverLimit)),
+		"deb unit in tarball dir": mutate(setEntry(0, "path", "/etc/systemd/system/nebula-executor.service")),
+		"deb local drop-in":       mutate(setEntry(1, "path", "/etc/systemd/system/nebula-server.service.d/20-x.conf")),
+		"deb drop-in not .conf":   mutate(setEntry(1, "path", "/lib/systemd/system/nebula-server.service.d/20-x")),
+		"iconfetch nftables":      mutate(setEntry(6, "path", "/etc/nebula/nebula-iconfetch.nft")),
+		"tarball local drop-in": mutate(func(m map[string]any, _ []any) map[string]any {
+			m["flavours"].(map[string]any)["tarball:arm64"] = []any{
+				regEntry("/etc/systemd/system/nebula-executor.service.d/10-local.conf", []byte("[Service]\n"), "0644"),
+				regEntry("/usr/bin/nebula", []byte("n"), "0755"),
+			}
+			return nil
+		}),
+		"tarball unit in deb dir": mutate(func(m map[string]any, _ []any) map[string]any {
+			m["flavours"].(map[string]any)["tarball:arm64"] = []any{
+				regEntry("/lib/systemd/system/nebula-server.service", []byte("u"), "0644"),
+				regEntry("/usr/bin/nebula", []byte("n"), "0755"),
+			}
+			return nil
+		}),
+		"container unit": mutate(func(m map[string]any, _ []any) map[string]any {
+			m["flavours"].(map[string]any)["container:amd64"] = []any{
+				regEntry("/etc/systemd/system/nebula-server.service", []byte("u"), "0644"),
+			}
+			return nil
+		}),
 		"config path":           mutate(setEntry(6, "path", "/var/lib/nebula/x")),
 		"etc nebula config":     mutate(setEntry(5, "path", "/usr/share/nebula/../../../etc/nebula/server.json")),
 		"server.json":           mutate(setEntry(6, "path", "/var/nebula/server.json")),
@@ -247,7 +271,7 @@ func TestInstalledFilesMarshalRejectsInvalidList(t *testing.T) {
 
 // signedRelease returns a manifest that lists list as installed-files.json,
 // signed by k.
-func signedRelease(t *testing.T, k *testSK, list []byte, edit func(man map[string]any)) (manifest, sig []byte) {
+func signedRelease(t testing.TB, k *testSK, list []byte, edit func(man map[string]any)) (manifest, sig []byte) {
 	t.Helper()
 	man, _ := defaultRelease(t)
 	arts := man["artifacts"].([]any)
@@ -277,7 +301,7 @@ func TestVerifyInstalledFilesAcceptsListCoveredBySignedManifest(t *testing.T) {
 }
 
 // testState returns a bootstrap root state trusting only k as root-1.
-func testState(t *testing.T, k *testSK) RootState {
+func testState(t testing.TB, k *testSK) RootState {
 	t.Helper()
 	s, err := Bootstrap([]Anchor{{ID: "root-1", Key: k.pub}})
 	if err != nil {
@@ -444,11 +468,14 @@ func testBuildDir(t *testing.T) string {
 	writeFile(t, deb, "usr/bin/nebula", []byte("nebula-binary"), 0o755)
 	writeFile(t, deb, "usr/bin/nebula-executor", []byte("executor-binary"), 0o755)
 	writeFile(t, deb, "lib/systemd/system/nebula-server.service", []byte("[Unit]\n"), 0o644)
+	writeFile(t, deb, "lib/systemd/system/nebula-server.service.d/50-pkg.conf", []byte("[Service]\n"), 0o644)
 	writeFile(t, deb, "usr/share/nebula/web/empty.css", nil, 0o644)
 	if err := os.Symlink("../../nebula/web/empty.css", filepath.Join(deb, "usr/share/nebula/web/link.css")); err != nil {
 		t.Fatal(err)
 	}
-	writeFile(t, filepath.Join(dir, "tarball:arm64"), "usr/bin/nebula", []byte("arm"), 0o750)
+	tb := filepath.Join(dir, "tarball:arm64")
+	writeFile(t, tb, "usr/bin/nebula", []byte("arm"), 0o750)
+	writeFile(t, tb, "etc/systemd/system/nebula-server.service", []byte("[Unit]\n"), 0o644)
 	return dir
 }
 
@@ -468,6 +495,7 @@ func TestGenerateInstalledFilesFromBuildDirectory(t *testing.T) {
 	deb, _ := l.Flavour("deb:amd64")
 	want := []InstalledFile{
 		{Path: "/lib/systemd/system/nebula-server.service", Type: FileRegular, Size: 7, SHA256: hexSum([]byte("[Unit]\n")), Mode: 0o644, Owner: "root:root"},
+		{Path: "/lib/systemd/system/nebula-server.service.d/50-pkg.conf", Type: FileRegular, Size: 10, SHA256: hexSum([]byte("[Service]\n")), Mode: 0o644, Owner: "root:root"},
 		{Path: "/usr/bin/nebula", Type: FileRegular, Size: 13, SHA256: hexSum([]byte("nebula-binary")), Mode: 0o755, Owner: "root:root"},
 		{Path: "/usr/bin/nebula-executor", Type: FileRegular, Size: 15, SHA256: hexSum([]byte("executor-binary")), Mode: 0o755, Owner: "root:root"},
 		{Path: "/usr/share/nebula/web/empty.css", Type: FileRegular, Size: 0, SHA256: hexSum(nil), Mode: 0o644, Owner: "root:root"},
@@ -477,7 +505,8 @@ func TestGenerateInstalledFilesFromBuildDirectory(t *testing.T) {
 		t.Fatalf("deb files\n got %+v\nwant %+v", deb.Files, want)
 	}
 	tb, _ := l.Flavour("tarball:arm64")
-	if len(tb.Files) != 1 || tb.Files[0].Mode != 0o750 || tb.Files[0].SHA256 != hexSum([]byte("arm")) {
+	if len(tb.Files) != 2 || tb.Files[0].Path != "/etc/systemd/system/nebula-server.service" ||
+		tb.Files[1].Mode != 0o750 || tb.Files[1].SHA256 != hexSum([]byte("arm")) {
 		t.Fatalf("tarball files %+v", tb.Files)
 	}
 	// Deterministic output.
@@ -491,6 +520,24 @@ func TestGenerateInstalledFilesRejectsBadBuildDirectories(t *testing.T) {
 	cases := map[string]func(t *testing.T, dir string){
 		"configuration staged": func(t *testing.T, dir string) {
 			writeFile(t, filepath.Join(dir, "deb:amd64"), "etc/nebula/server.json", []byte("{}"), 0o640)
+		},
+		"iconfetch nftables staged": func(t *testing.T, dir string) {
+			writeFile(t, filepath.Join(dir, "deb:amd64"), "etc/nebula/nebula-iconfetch.nft", []byte("table inet x {}\n"), 0o644)
+		},
+		"tarball local drop-in staged": func(t *testing.T, dir string) {
+			writeFile(t, filepath.Join(dir, "tarball:arm64"), "etc/systemd/system/nebula-executor.service.d/10-local.conf", []byte("[Service]\n"), 0o644)
+		},
+		"deb local drop-in staged": func(t *testing.T, dir string) {
+			writeFile(t, filepath.Join(dir, "deb:amd64"), "etc/systemd/system/nebula-server.service.d/20-discovery.conf", []byte("[Service]\n"), 0o644)
+		},
+		"deb unit in tarball dir": func(t *testing.T, dir string) {
+			writeFile(t, filepath.Join(dir, "deb:amd64"), "etc/systemd/system/nebula-server.service", []byte("[Unit]\n"), 0o644)
+		},
+		"tarball unit in deb dir": func(t *testing.T, dir string) {
+			writeFile(t, filepath.Join(dir, "tarball:arm64"), "lib/systemd/system/nebula-server.service", []byte("[Unit]\n"), 0o644)
+		},
+		"container unit": func(t *testing.T, dir string) {
+			writeFile(t, filepath.Join(dir, "container:amd64"), "usr/lib/systemd/system/nebula-server.service", []byte("[Unit]\n"), 0o644)
 		},
 		"data staged": func(t *testing.T, dir string) {
 			writeFile(t, filepath.Join(dir, "deb:amd64"), "var/lib/nebula/server/db.sqlite", []byte("x"), 0o600)
@@ -545,27 +592,85 @@ func TestGenerateInstalledFilesRejectsBadBuildDirectories(t *testing.T) {
 	}
 }
 
-func TestValidInstalledPath(t *testing.T) {
-	for _, p := range []string{
-		"/usr/bin/nebula", "/usr/bin/nebula-server", "/lib/systemd/system/nebula-executor.service",
-		"/usr/lib/systemd/system/nebula-server.service", "/etc/systemd/system/nebula-server.service",
-		"/lib/systemd/system/nebula-server.service.d/20-discovery.conf", "/usr/share/nebula/release/builtins.tar",
+// Exactly MaxInstalledPath and one byte more ("/usr/share/nebula/" is 18
+// bytes).
+var (
+	pathAtLimit   = "/usr/share/nebula/" + strings.Repeat("a", MaxInstalledPath-18)
+	pathOverLimit = pathAtLimit + "a"
+)
+
+func TestValidInstalledPathAcceptsCoveredPathsPerFlavour(t *testing.T) {
+	everywhere := []string{
+		"/usr/bin/nebula", "/usr/bin/nebula-server", "/usr/share/nebula/release/builtins.tar",
 		"/usr/share/nebula/modules/docker/1.2.0/actions/restart.sh", "/usr/lib/nebula/web/static/app.js",
-		"/usr/share/doc/nebula-operation-station/guide.md",
-	} {
-		if !ValidInstalledPath(p) {
-			t.Errorf("%s rejected", p)
+		"/usr/share/doc/nebula-operation-station/guide.md", pathAtLimit,
+	}
+	cases := map[string][]string{
+		"deb:amd64": append([]string{
+			"/lib/systemd/system/nebula-executor.service", "/usr/lib/systemd/system/nebula-server.service",
+			// A drop-in the package ships in the vendor unit directory.
+			"/lib/systemd/system/nebula-server.service.d/20-discovery.conf",
+			"/usr/lib/systemd/system/nebula-executor.service.d/50-hardening.conf",
+		}, everywhere...),
+		"tarball:arm64":   append([]string{"/etc/systemd/system/nebula-server.service", "/etc/systemd/system/nebula-discovery.timer"}, everywhere...),
+		"container:amd64": everywhere,
+	}
+	if len(pathAtLimit) != MaxInstalledPath {
+		t.Fatalf("pathAtLimit has %d bytes", len(pathAtLimit))
+	}
+	for flavour, paths := range cases {
+		for _, p := range paths {
+			if !ValidInstalledPath(flavour, p) {
+				t.Errorf("%s: %s rejected", flavour, p)
+			}
 		}
 	}
-	for _, p := range []string{
-		"", "/", "/usr/bin/", "/usr/bin/sshd", "/usr/sbin/nebula", "/etc/nebula/server.json", "/etc/nebula/nebula-iconfetch.nft",
+}
+
+func TestValidInstalledPathRejectsConfigurationDataAndForeignUnitDirs(t *testing.T) {
+	everywhere := []string{
+		"", "/", "/usr/bin/", "/usr/bin/sshd", "/usr/sbin/nebula", "/etc/nebula/server.json",
+		// The iconfetch nftables file is configuration (ADR 0015 D3).
+		"/etc/nebula/nebula-iconfetch.nft",
 		"/var/lib/nebula/executor/keys/nebula-default.key", "/run/nebula/x", "/usr/share/nebula", "/usr/share/nebula/",
-		"/etc/systemd/system/ssh.service", "/etc/systemd/system/nebula-x.service.d", "/lib/systemd/system/nebula-x.service.d/",
 		"/usr/share/nebula/../../../etc/shadow", "/usr/share/nebula/a/./b", "/usr/share/nebula/a//b", "/usr/bin/nebula.d/x",
-		"/usr/share/nebula/" + strings.Repeat("a", MaxInstalledPath-17), "/usr/share/nebula/a\x00",
-	} {
-		if ValidInstalledPath(p) {
-			t.Errorf("%q accepted", p)
+		pathOverLimit, "/usr/share/nebula/a\x00",
+		// Local drop-ins generated by deploy/install.sh and the deb
+		// postinst, and any other drop-in under /etc/systemd/system.
+		"/etc/systemd/system/nebula-executor.service.d/10-local.conf",
+		"/etc/systemd/system/nebula-executor.service.d/20-local.conf",
+		"/etc/systemd/system/nebula-server.service.d/20-discovery.conf",
+		"/etc/systemd/system/ssh.service", "/etc/systemd/system/nebula-x.service.d",
+		"/lib/systemd/system/ssh.service", "/lib/systemd/system/nebula-x.service.d", "/lib/systemd/system/nebula-x.service.d/",
+		"/lib/systemd/system/nebula-x.service.d/a/b.conf",
+		// systemd reads only *.conf drop-ins.
+		"/lib/systemd/system/nebula-x.service.d/README", "/lib/systemd/system/nebula-x.service.d/.conf",
+		"/lib/systemd/system/nebula-.d/x.conf", "/lib/systemd/system/nebula-x.service/x.conf",
+	}
+	cases := map[string][]string{
+		"deb:amd64": append([]string{
+			// The tarball's unit directory is not the package's.
+			"/etc/systemd/system/nebula-server.service",
+		}, everywhere...),
+		"tarball:arm64": append([]string{
+			// The package's unit directories are not the tarball's.
+			"/lib/systemd/system/nebula-server.service", "/usr/lib/systemd/system/nebula-server.service",
+			"/lib/systemd/system/nebula-server.service.d/20-discovery.conf",
+		}, everywhere...),
+		"container:amd64": append([]string{
+			"/lib/systemd/system/nebula-server.service", "/usr/lib/systemd/system/nebula-server.service",
+			"/etc/systemd/system/nebula-server.service",
+		}, everywhere...),
+		// An invalid flavour name admits nothing.
+		"rpm:amd64": {"/usr/bin/nebula", "/lib/systemd/system/nebula-server.service"},
+		"deb":       {"/usr/bin/nebula"},
+		"":          {"/usr/bin/nebula"},
+	}
+	for flavour, paths := range cases {
+		for _, p := range paths {
+			if ValidInstalledPath(flavour, p) {
+				t.Errorf("%s: %q accepted", flavour, p)
+			}
 		}
 	}
 }
@@ -600,7 +705,7 @@ func FuzzParseInstalledFiles(f *testing.F) {
 				t.Fatalf("entry limit not enforced")
 			}
 			for i, e := range fl.Files {
-				if !ValidInstalledPath(e.Path) || (i > 0 && fl.Files[i-1].Path >= e.Path) {
+				if !ValidInstalledPath(fl.Name, e.Path) || (i > 0 && fl.Files[i-1].Path >= e.Path) {
 					t.Fatalf("invalid or unsorted path %q", e.Path)
 				}
 			}

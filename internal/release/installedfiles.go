@@ -81,28 +81,59 @@ var installedTrees = []string{
 	"/usr/share/doc/nebula-operation-station/",
 }
 
-// unitDirs hold the NOS systemd units: deb packages use /lib (and the
-// merged /usr/lib), the tarball install /etc/systemd/system.
-var unitDirs = []string{
-	"/lib/systemd/system/",
-	"/usr/lib/systemd/system/",
-	"/etc/systemd/system/",
+// Systemd unit directories. Packages (deb) install units into the vendor
+// directory, /lib/systemd/system or its merged /usr/lib twin, and may ship
+// drop-ins beside them. The tarball install (deploy/install.sh) copies its
+// units into /etc/systemd/system; every drop-in there
+// (nebula-*.service.d/*, such as the generated 10-local.conf and
+// 20-discovery.conf) is local configuration (ADR 0015 D3) and never
+// release code. Containers install no units.
+const (
+	libUnitDir    = "/lib/systemd/system/"
+	usrLibUnitDir = "/usr/lib/systemd/system/"
+	etcUnitDir    = "/etc/systemd/system/"
+)
+
+// allUnitDirs are the unit directories of every flavour; a path under one
+// that its flavour does not own is never valid.
+var allUnitDirs = []string{libUnitDir, usrLibUnitDir, etcUnitDir}
+
+// unitDirsFor returns the unit directories flavour kind (deb, tarball,
+// container) installs units into, and whether shipped drop-ins are
+// allowed there.
+func unitDirsFor(kind string) (dirs []string, dropIns bool) {
+	switch kind {
+	case "deb":
+		return []string{libUnitDir, usrLibUnitDir}, true
+	case "tarball":
+		return []string{etcUnitDir}, false
+	default:
+		return nil, false
+	}
 }
 
-// ValidInstalledPath reports whether p may appear in installed-files.json:
-// an absolute path of at most MaxInstalledPath bytes of [A-Za-z0-9/._+-],
+// ValidInstalledPath reports whether p may appear in installed-files.json
+// under the flavour called flavour ("<deb|tarball|container>:<arch>"): an
+// absolute path of at most MaxInstalledPath bytes of [A-Za-z0-9/._+-],
 // without empty, "." or ".." components, under a documented NOS prefix:
 //
 //   - /usr/bin/nebula*
-//   - <unit dir>/nebula-<unit> and <unit dir>/nebula-<unit>.d/<drop-in>,
-//     for unit dir /lib/systemd/system, /usr/lib/systemd/system or
-//     /etc/systemd/system
+//   - deb: /lib/systemd/system/nebula-<unit> and
+//     /usr/lib/systemd/system/nebula-<unit>, and package-shipped drop-ins
+//     <that dir>/nebula-<unit>.d/<name>.conf
+//   - tarball: /etc/systemd/system/nebula-<unit>, never a drop-in: drop-ins
+//     there are local configuration (ADR 0015 D3)
+//   - container: no unit directory
 //   - anything under /usr/share/nebula/, /usr/lib/nebula/ or
 //     /usr/share/doc/nebula-operation-station/
 //
-// Configuration (/etc/nebula) and data (/var/lib/nebula, /run, caches) are
+// Configuration (/etc/nebula, including /etc/nebula/nebula-iconfetch.nft,
+// and local unit drop-ins) and data (/var/lib/nebula, /run, caches) are
 // never valid: they change by design and are not release code.
-func ValidInstalledPath(p string) bool {
+func ValidInstalledPath(flavour, p string) bool {
+	if !flavourRe.MatchString(flavour) {
+		return false
+	}
 	if len(p) == 0 || len(p) > MaxInstalledPath || !installedPathRe.MatchString(p) {
 		return false
 	}
@@ -114,16 +145,19 @@ func ValidInstalledPath(p string) bool {
 	if rest, ok := strings.CutPrefix(p, "/usr/bin/"); ok {
 		return strings.HasPrefix(rest, "nebula") && !strings.Contains(rest, "/")
 	}
-	for _, d := range unitDirs {
+	for _, d := range allUnitDirs {
 		rest, ok := strings.CutPrefix(p, d)
 		if !ok {
 			continue
 		}
-		parts := strings.Split(rest, "/")
-		if !strings.HasPrefix(parts[0], "nebula-") {
-			return false
+		kind, _, _ := strings.Cut(flavour, ":")
+		dirs, dropIns := unitDirsFor(kind)
+		for _, own := range dirs {
+			if own == d {
+				return validUnitPath(rest, dropIns)
+			}
 		}
-		return (len(parts) == 1 && !strings.HasSuffix(parts[0], ".d")) || (len(parts) == 2 && strings.HasSuffix(parts[0], ".d") && len(parts[0]) > len("nebula-.d"))
+		return false
 	}
 	for _, d := range installedTrees {
 		if strings.HasPrefix(p, d) {
@@ -131,6 +165,25 @@ func ValidInstalledPath(p string) bool {
 		}
 	}
 	return false
+}
+
+// validUnitPath checks rest, a path relative to a unit directory: a
+// nebula-<unit> file, or with dropIns a nebula-<unit>.d/<name>.conf
+// drop-in (systemd reads only *.conf drop-ins).
+func validUnitPath(rest string, dropIns bool) bool {
+	parts := strings.Split(rest, "/")
+	if !strings.HasPrefix(parts[0], "nebula-") {
+		return false
+	}
+	switch len(parts) {
+	case 1:
+		return !strings.HasSuffix(parts[0], ".d")
+	case 2:
+		return dropIns && strings.HasSuffix(parts[0], ".d") && len(parts[0]) > len("nebula-.d") &&
+			strings.HasSuffix(parts[1], ".conf") && len(parts[1]) > len(".conf")
+	default:
+		return false
+	}
 }
 
 // InstalledFile is one installed file of a flavour.
@@ -237,7 +290,7 @@ func parseInstalledFiles(doc map[string]any) (InstalledFiles, error) {
 		f := Flavour{Name: name, Files: make([]InstalledFile, 0, len(entries))}
 		paths := make(map[string]bool, len(entries))
 		for i, v := range entries {
-			e, err := parseInstalledFile(v)
+			e, err := parseInstalledFile(name, v)
 			if err != nil {
 				return InstalledFiles{}, fmt.Errorf("flavour %s: files[%d]: %v", name, i, err)
 			}
@@ -265,7 +318,7 @@ func parseInstalledFiles(doc map[string]any) (InstalledFiles, error) {
 	return l, nil
 }
 
-func parseInstalledFile(v any) (InstalledFile, error) {
+func parseInstalledFile(flavour string, v any) (InstalledFile, error) {
 	m, ok := v.(map[string]any)
 	if !ok {
 		return InstalledFile{}, errors.New("expected an object")
@@ -302,8 +355,8 @@ func parseInstalledFile(v any) (InstalledFile, error) {
 	default:
 		return InstalledFile{}, fmt.Errorf(`field "type" must be %q or %q`, FileRegular, FileSymlink)
 	}
-	if e.Path, err = str(m, "path"); err != nil || !ValidInstalledPath(e.Path) {
-		return InstalledFile{}, errors.New(`field "path" is not a covered NOS path`)
+	if e.Path, err = str(m, "path"); err != nil || !ValidInstalledPath(flavour, e.Path) {
+		return InstalledFile{}, errors.New(`field "path" is not a covered NOS path for this flavour`)
 	}
 	if e.Owner, err = str(m, "owner"); err != nil || !ownerRe.MatchString(e.Owner) {
 		return InstalledFile{}, errors.New(`field "owner" must be user:group`)
@@ -496,8 +549,8 @@ func generateFlavour(top *os.Root, name string) ([]InstalledFile, error) {
 			return nil
 		}
 		abs := "/" + p
-		if !ValidInstalledPath(abs) {
-			return fmt.Errorf("%w: %q is not a covered NOS path", ErrFormat, abs)
+		if !ValidInstalledPath(name, abs) {
+			return fmt.Errorf("%w: %q is not a covered NOS path for this flavour", ErrFormat, abs)
 		}
 		if len(files) == MaxInstalledEntries {
 			return fmt.Errorf("%w: more than %d files", ErrFormat, MaxInstalledEntries)
