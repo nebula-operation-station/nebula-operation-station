@@ -52,6 +52,12 @@ func (s *serverSide) ReadPrivateRegistry(ctx context.Context, in *pb.ReadPrivate
 	return out, err
 }
 
+func (s *serverSide) ListReadGrants(ctx context.Context, in *pb.ListReadGrantsRequest, _ ...grpc.CallOption) (*pb.ListReadGrantsResponse, error) {
+	out, err := s.svc.ListReadGrants(ctx, in)
+	s.rec(in, out)
+	return out, err
+}
+
 func (s *serverSide) ProposeReadGrant(ctx context.Context, in *pb.ProposeReadGrantRequest, _ ...grpc.CallOption) (*pb.ProposeReadGrantResponse, error) {
 	out, err := s.svc.ProposeReadGrant(ctx, in)
 	s.rec(in, out)
@@ -202,9 +208,68 @@ func TestServerRoleCoversRegistryLeaseFlow(t *testing.T) {
 		pb.ExecutorService_ReadPrivateRegistry_FullMethodName,
 		pb.ExecutorService_ProposeReadGrant_FullMethodName,
 		pb.ExecutorService_CommitReadGrant_FullMethodName,
+		pb.ExecutorService_ListReadGrants_FullMethodName,
 	} {
 		if _, ok := policy.Allowed(10002, m); !ok {
 			t.Fatalf("server role denied %s", m)
 		}
+	}
+}
+
+// TestServerCacheOnlyRenderEndToEnd: with the real executor, a cache-only
+// render (the inventory chart) shows nothing until the reader's background
+// worker has read, then the executor-read digest from memory; after the
+// lease is revoked, the next listing drops the cached digest.
+func TestServerCacheOnlyRenderEndToEnd(t *testing.T) {
+	e := newRegistryLeaseEnv(t)
+	e.addRepos(t, "team/app")
+	srv := &serverSide{svc: e.svc}
+	host := strings.TrimPrefix(e.reg.srv.URL, "https://")
+	result := dockerhost.ImageUpdates{Phase: "done", Images: []dockerhost.ImageUpdate{{Image: host + "/team/app:1.0.0", Status: "unknown"}}}
+	req := registrymeta.LeaseRequest{ID: "00000000-0000-4000-8000-0000000c06c0", Days: 7,
+		Registries: []registrymeta.LeaseSelection{{RegistryID: "corp"}}}
+	p, err := registrymeta.ProposeRegistryReadLease(context.Background(), srv, req, e.clock.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.auth.ApproveReadGrantCLI(p.Digest, "test"); err != nil {
+		t.Fatal(err)
+	}
+	reader := registrymeta.NewDigestReader(srv, e.clock.Now)
+	render := func() dockerhost.ImageUpdate {
+		t.Helper()
+		ctx := registrymeta.WithReadHost(registrymeta.WithCacheOnly(context.Background()), "web-1")
+		out, err := dockerhost.ResolvePrivateDigestsWith(ctx, result, reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out.Images[0]
+	}
+	settle := func() {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := reader.Drain(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if im := render(); im.Remote != "" {
+		t.Fatalf("first render before any read: %+v", im)
+	}
+	settle()
+	if im := render(); im.Remote != regDigest || !im.Private {
+		t.Fatalf("render after the background read: %+v", im)
+	}
+	if n := len(e.reg.requests()); n != 1 {
+		t.Fatalf("registry requests = %d, want 1", n)
+	}
+	if err := e.svc.auth.RevokeReadGrant(req.ID, "test"); err != nil {
+		t.Fatal(err)
+	}
+	e.clock.Add(time.Minute) // past the reader's listing TTL
+	render()
+	settle()
+	if im := render(); im.Remote != "" {
+		t.Fatalf("revoked lease still answered from the cache: %+v", im)
 	}
 }

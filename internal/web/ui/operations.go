@@ -22,6 +22,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/dockerhost"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/osdebian"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/registrymeta"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/scanner"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
@@ -501,6 +502,13 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 	if v.Pending && len(e.Options) > 0 && json.Valid(e.Options) {
 		v.Options = string(e.Options)
 	}
+	// Private registry digests (G13), as on the chart: one deadline for
+	// the whole page and cache only, so the render never waits on executor
+	// reads; misses are read in the background, each charged to the host
+	// whose docker.check_updates result named the image.
+	regCtx, regCancel := context.WithTimeout(ctx, chartRegistryDeadline)
+	defer regCancel()
+	regCtx = registrymeta.WithCacheOnly(regCtx)
 	for _, x := range e.Hosts {
 		hv := execHostView{ID: x.HostID, State: x.State, Class: x.Class, Detail: x.Detail, OK: x.Class == "success", LogTrunc: x.LogTruncated, Stage: x.Stage}
 		if x.State == "finished" && x.ExitCode >= 0 {
@@ -540,8 +548,11 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 		case "docker.check_updates":
 			if u, err := dockerhost.ParseImageUpdates(x.Result); err == nil && len(x.Result) > 0 {
 				// Images on an executor private registry get the digest
-				// the executor read under a registry read lease (G13).
-				u = h.resolveImageUpdates(ctx, u)
+				// the executor read under a registry read lease (G13);
+				// none after the page deadline.
+				if regCtx.Err() == nil {
+					u = h.resolveImageUpdates(registrymeta.WithReadHost(regCtx, x.HostID), u)
+				}
 				hv.DockerUpdates = &u
 			}
 		case "docker.start", "docker.stop", "docker.restart":
