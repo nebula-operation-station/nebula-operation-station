@@ -540,7 +540,9 @@ func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins m
 		// result; registry metadata per image for the stable version.
 		var ups dockerhost.ImageUpdates
 		if upRow, ok := b.dockerUp[host.ID]; ok {
-			ups, _ = dockerhost.ParseImageUpdates(upRow.Result)
+			if u, err := dockerhost.ParseImageUpdates(upRow.Result); err == nil {
+				ups = h.resolveImageUpdates(ctx, u)
+			}
 		}
 		upByImage := map[string]dockerhost.ImageUpdate{}
 		for _, iu := range ups.Images {

@@ -3086,6 +3086,14 @@ message PrivateRegistryInfo {
   int64 config_version = 9;
   int64 credential_version = 10;
   int64 credential_expires_unix = 11;
+  // Lowercase hex SHA-256 of the stored registry record, which includes
+  // the record's random nonce, so a removed and re-added registry differs.
+  // A registry read lease binds it (cu06, G13). Not secret.
+  string config_digest = 12;
+  // Random identity (32 lowercase hex) of the stored credential, new on
+  // every add or rotation. A registry read lease binds it. It is neither
+  // the user name, the secret nor a token, and derives from none of them.
+  string credential_id = 13;
 }
 
 message ReadPrivateRegistryRequest {

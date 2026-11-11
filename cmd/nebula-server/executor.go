@@ -468,6 +468,24 @@ func (l *lazyExecutor) RevokeReadGrant(ctx context.Context, in *pb.RevokeReadGra
 	return nil, errNotConnected
 }
 
+// ListPrivateRegistries and ReadPrivateRegistry back the private registry
+// reads (ADR 0006, cu06 part 1, G13; registry_reads.go): metadata without
+// credentials and typed reads the executor authorizes against a registry
+// read lease. Both are server-role methods.
+func (l *lazyExecutor) ListPrivateRegistries(ctx context.Context, in *pb.ListPrivateRegistriesRequest, opts ...grpc.CallOption) (*pb.ListPrivateRegistriesResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ListPrivateRegistries(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
+func (l *lazyExecutor) ReadPrivateRegistry(ctx context.Context, in *pb.ReadPrivateRegistryRequest, opts ...grpc.CallOption) (*pb.ReadPrivateRegistryResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.ReadPrivateRegistry(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
 // ProposeReadGrant and CommitReadGrant back the lease forms (ADR 0007 E06).
 // executions.Service reaches them through a type assertion, like the two
 // methods above.
