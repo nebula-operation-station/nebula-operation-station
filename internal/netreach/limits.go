@@ -70,6 +70,15 @@ const (
 	// MaxInputs bounds the entries of Snapshot.Inputs. Only the
 	// RequiredInputs are read; the bound keeps a hostile map small.
 	MaxInputs = 64
+
+	// MaxPathsPerQuery bounds the paths one query evaluates against the
+	// security rules: the direct path, every NAT branch, every pre-NAT
+	// destination of the reverse-NAT lookup and every NetBird routing
+	// peer. A query needing more gives unknown "limit reached".
+	MaxPathsPerQuery = 64
+	// MaxChainSteps bounds the steps of one explanation chain. A query
+	// whose chain would be longer gives unknown "limit reached".
+	MaxChainSteps = 1 << 16
 )
 
 // ErrLimitReached is wrapped by every error caused by a limit. The caller

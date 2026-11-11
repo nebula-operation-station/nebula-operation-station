@@ -330,7 +330,13 @@ type offerOp struct {
 func offerOps() []offerOp {
 	script := sha256.Sum256([]byte("netbird script"))
 	ops := []offerOp{
-		{"open", OfferAwaitingApproval, OfferOpen, func(db *DB, id [32]byte) error { return db.OpenOffer(id, script) }},
+		{"open", OfferAwaitingApproval, OfferOpen, func(db *DB, id [32]byte) error {
+			// A NetBird offer opens only with its created setup key.
+			if _, err := db.MarkSetupKeyPending(id, "nos-managed"); err != nil {
+				return err
+			}
+			return db.OpenNetBirdOffer(id, "abc", fixedSetupKeySecret(id), script)
+		}},
 		{"download", OfferOpen, OfferDownloaded, func(db *DB, id [32]byte) error {
 			return db.ClaimOfferDownload(id, "192.0.2.10", "127.0.0.1")
 		}},
@@ -960,10 +966,17 @@ func TestOfferClaimsRefusedAfterExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	proposed := offerIn(t, db, OfferPairingProposed)
+	awaitingPending := offerIn(t, db, OfferAwaitingApproval)
+	if _, err := db.MarkSetupKeyPending(awaitingPending.IDHash, "nos-managed"); err != nil {
+		t.Fatal(err)
+	}
 	clk.Add(OfferLifetime)
 
+	_, pendingErr := db.MarkSetupKeyPending(awaiting.IDHash, "nos-managed")
 	for name, err := range map[string]error{
-		"open":       db.OpenOffer(awaiting.IDHash, sha256.Sum256([]byte("s"))),
+		"setup-key pending": pendingErr,
+		"open": db.OpenNetBirdOffer(awaitingPending.IDHash, "abc", fixedSetupKeySecret(awaitingPending.IDHash),
+			sha256.Sum256([]byte("s"))),
 		"download":   db.ClaimOfferDownload(open.IDHash, "192.0.2.10", "127.0.0.1"),
 		"submission": db.ClaimOfferSubmission(downloaded.IDHash),
 		"propose":    db.ProposeOfferPairing(submitted.IDHash),
