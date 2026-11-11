@@ -515,6 +515,17 @@ parser is strict, bounded and fuzzed before the beta.
   a record path) and `fstype` (at most 64 bytes of `[a-z0-9._-]`), at
   most 256 entries per run. The executor, not the host, classifies each
   one as covered, excluded by design or skipped.
+- **SSH configuration.** A separate array with the raw content
+  (base64) of `/etc/ssh/sshd_config` and of every file it includes,
+  each with its `path` (same rules as a record path), at most 64 files
+  and 256 KiB decoded in total per run. The executor parses it in
+  memory to derive the critical-class set of D7 "The executor
+  classifies, from its own data" and the D5 `AuthorizedKeysFile` paths
+  and keeps only that derived path set; the content itself is never
+  persisted, logged or forwarded (the files' content hashes are keyed
+  like all of `/etc`). The executor checks that every path of this array
+  has a file record in the same run whose hashed content matches it; a
+  missing, oversized or inconsistent array makes the run partial.
 - **Limits (new named constants, implementation choices to be fixed in
   IG-05).** 300,000 records per host and run, **128 MiB** raw document per
   run (above the 1 MiB `result.json` default of spec 09, so spec 09 needs
@@ -686,14 +697,45 @@ roles never mix:
      `nebula integrity approve <host> <digest>` on the NOS machine, run
      as the admin UID, audited, in every mode (the same independent
      executor view as `nebula approve` for hardened HIGH/CRITICAL
-     batches, ADR 0007). `pending` renders the entry from the executor's
-     own retained records (old and new values, escaped as in D6
-     "Display", so no host byte reaches the terminal as a control
-     sequence); `approve` accepts exactly one critical-class entry per
-     digest. The executor rejects a browser assertion for a digest that
-     contains a critical-class entry, and recovery mode cannot approve
-     either way. Browser approval remains for entries that are not
-     critical-class, with the limit named in "Honest limits".
+     batches, ADR 0007). A proposed baseline that changes a
+     critical-class entry changes **only that entry**: the executor
+     builds it as the approved list plus exactly one added, changed or
+     removed entry, and `approve` rejects a digest whose difference from
+     the approved baseline has more than one entry when any of them is
+     critical-class. `pending` renders **every** entry in which the
+     proposed digest differs from the approved baseline (which for such a
+     digest is that one entry) from the executor's own retained records
+     (old and new values, escaped as in D6 "Display", so no host byte
+     reaches the terminal as a control sequence), so the CLI never
+     approves an entry it did not show. The executor rejects a browser
+     assertion for a digest whose difference from the approved baseline
+     adds, changes or removes a critical-class entry; unchanged
+     critical-class entries carried over from the approved baseline (for
+     example `/etc/sudoers` in every full baseline) do not prevent a
+     browser approval. Recovery mode cannot approve either way. Browser
+     approval remains for entries that are not critical-class, with the
+     limit named in "Honest limits".
+   - **The executor classifies, from its own data.** Whether an entry is
+     critical-class is decided by the executor, never by the server: a
+     server-supplied class or label is at most compared and never makes
+     an entry non-critical. The executor uses only (a) the fixed D9 path
+     patterns of the approved profile, (b) the old record (approved
+     baseline) and new record (its own retained run) of the entry, for the
+     setuid/setgid rule, (c) its own retained records of `/usr/bin` and
+     `/usr/sbin`, for the shadowing rule, and (d) the set of
+     `sshd_config` includes and `AuthorizedKeysFile` targets that it
+     derives itself from the D6 "SSH configuration" records of the same
+     complete run: it parses `Include` and `AuthorizedKeysFile`
+     directives (including those inside `Match` blocks) and turns the
+     `%h`, `%u` and `%U` tokens into patterns that match any single path
+     component, so `/etc/ssh/authorized_keys/%u` covers every file in that
+     directory. When the executor cannot classify an entry with certainty
+     (no complete run with SSH configuration records, a parse failure, a
+     limit hit, a directive or token it does not understand), it treats
+     the entry as critical-class, and if it lacks a usable derived set
+     for a host it treats **every** entry that a proposed digest of that
+     host adds, changes or removes as critical-class (each needing its
+     own CLI approval) until a complete run provides one.
    - **The executor alone decides what goes into a baseline.** The
      digest the admin approves is computed by the executor, never taken
      from the server:
