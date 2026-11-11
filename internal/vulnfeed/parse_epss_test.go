@@ -63,15 +63,6 @@ func TestParseEPSSRejectsMalformed(t *testing.T) {
 		{"repeated meta key", "#model_version:v1,score_date:2024-10-21,score_date:2030-01-01\ncve,epss,percentile\n", ErrFeedMalformed},
 		{"meta with space", "#model_version:v 1,score_date:2024-10-21\ncve,epss,percentile\n", ErrFeedMalformed},
 		{"wrong header", meta + "cve,percentile,epss\n", ErrFeedMalformed},
-		{"two fields", head + "CVE-2024-1234,0.1\n", ErrFeedMalformed},
-		{"four fields", head + "CVE-2024-1234,0.1,0.2,0.3\n", ErrFeedMalformed},
-		{"quoted", head + "\"CVE-2024-1234\",0.1,0.2\n", ErrFeedMalformed},
-		{"bad cve", head + "CVE-24-1,0.1,0.2\n", ErrFeedMalformed},
-		{"above one", head + "CVE-2024-1234,1.5,0.2\n", ErrFeedMalformed},
-		{"negative", head + "CVE-2024-1234,-0.1,0.2\n", ErrFeedMalformed},
-		{"nan", head + "CVE-2024-1234,NaN,0.2\n", ErrFeedMalformed},
-		{"inf", head + "CVE-2024-1234,0.1,Inf\n", ErrFeedMalformed},
-		{"hex float", head + "CVE-2024-1234,0x1p-2,0.2\n", ErrFeedMalformed},
 		{"duplicate cve", head + "CVE-2024-1234,0.1,0.2\nCVE-2024-1234,0.3,0.4\n", ErrFeedMalformed},
 		{"long line", head + "CVE-2024-1234,0." + strings.Repeat("1", MaxEPSSLineBytes) + ",0.2\n", ErrFeedLimit},
 	}
@@ -82,6 +73,48 @@ func TestParseEPSSRejectsMalformed(t *testing.T) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestParseEPSSSkipsMalformedRow(t *testing.T) {
+	const head = "#model_version:v2023.03.01,score_date:2024-10-21T00:00:00+0000\ncve,epss,percentile\nCVE-2024-0001,0.1,0.2\n"
+	bad := map[string]string{
+		"two fields":  "CVE-2024-1234,0.1",
+		"four fields": "CVE-2024-1234,0.1,0.2,0.3",
+		"quoted":      "\"CVE-2024-1234\",0.1,0.2",
+		"bad cve":     "CVE-24-1,0.1,0.2",
+		"above one":   "CVE-2024-1234,1.5,0.2",
+		"negative":    "CVE-2024-1234,-0.1,0.2",
+		"nan":         "CVE-2024-1234,NaN,0.2",
+		"inf":         "CVE-2024-1234,0.1,Inf",
+		"hex float":   "CVE-2024-1234,0x1p-2,0.2",
+		"control":     "CVE-2024-1234,0.1,0.2\x1b",
+	}
+	for name, b := range bad {
+		t.Run(name, func(t *testing.T) {
+			got, err := ParseEPSS(context.Background(), strings.NewReader(head+b+"\nCVE-2024-0002,0.3,0.4\n"))
+			if err != nil {
+				t.Fatalf("err = %v, want the row skipped", err)
+			}
+			want := []EPSSScore{{"CVE-2024-0001", 0.1, 0.2}, {"CVE-2024-0002", 0.3, 0.4}}
+			if got.Skipped != 1 || !reflect.DeepEqual(got.Scores, want) {
+				t.Fatalf("got %+v", got)
+			}
+		})
+	}
+}
+
+func TestParseEPSSRowLimit(t *testing.T) {
+	in := "#model_version:v1,score_date:2024-10-21\ncve,epss,percentile\nCVE-2024-0001,0.1,0.2\nbad\nCVE-2024-0002,0.1,0.2\n"
+	if got, err := parseEPSS(context.Background(), strings.NewReader(in), 3); err != nil || len(got.Scores) != 2 || got.Skipped != 1 {
+		t.Fatalf("at the limit: %+v, %v", got, err)
+	}
+	// Skipped rows count towards the limit.
+	if _, err := parseEPSS(context.Background(), strings.NewReader(in), 2); !errors.Is(err, ErrFeedLimit) {
+		t.Fatalf("over the limit: %v", err)
+	}
+	if MaxEPSSRows != 2_000_000 {
+		t.Fatalf("MaxEPSSRows = %d", MaxEPSSRows)
 	}
 }
 

@@ -39,8 +39,17 @@ const (
 	// MaxJSONDepth bounds the nesting of any JSON value a parser accepts,
 	// counted from the record (or document) it decodes.
 	MaxJSONDepth = 32
+	// MaxJSONMembers bounds the members of any single JSON array or object
+	// inside a record; checkJSON enforces it while it walks, before a
+	// value is unmarshalled, so a run of tiny elements cannot expand into
+	// a large allocation.
+	MaxJSONMembers = 65_536
 	// maxJSONKeyBytes bounds a single object key.
 	maxJSONKeyBytes = 256
+	// recordWindowSlack is the room a record window leaves beyond the
+	// record limit for the separator and whitespace before the record;
+	// the exact record size is checked separately.
+	recordWindowSlack = 64 << 10
 	// maxTimeBytes bounds a timestamp string before it is parsed.
 	maxTimeBytes = 64
 	// minFeedYear and maxFeedYear bound every parsed date; the snapshot
@@ -58,45 +67,65 @@ var (
 	feedVersionRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+~:_*-]{0,127}$`)
 )
 
-// boundedReader caps the total bytes read from a feed and, between calls
-// to resetWindow, the bytes read for one record. Once a cap is exceeded
-// every further read fails with ErrFeedLimit.
+// boundedReader caps the total bytes read from a feed and, while a window
+// is open, the bytes of one record. Once a cap is exceeded every further
+// read fails with ErrFeedLimit.
+//
+// A window is anchored at the record's start offset in the stream (the
+// json.Decoder's InputOffset), not at the bytes read so far: bytes the
+// decoder read ahead before the record started count for that record,
+// and reads stop at the window end, so read-ahead is never charged to a
+// record it does not belong to. Only a read the decoder needs beyond the
+// window end fails.
 type boundedReader struct {
 	r         io.Reader
 	total     int64
 	maxTotal  int64
-	window    int64
-	maxWindow int64
+	windowed  bool
+	windowEnd int64
 	exceeded  bool
 	ioErr     error
 }
 
 func newBoundedReader(r io.Reader, maxTotal int64) *boundedReader {
-	return &boundedReader{r: r, maxTotal: maxTotal, maxWindow: maxTotal}
+	return &boundedReader{r: r, maxTotal: maxTotal}
 }
 
-// resetWindow starts a new per-record window of at most max bytes.
-func (b *boundedReader) resetWindow(max int64) {
-	b.window = 0
-	b.maxWindow = max
+// startWindow limits the stream to max bytes from offset start on, until
+// endWindow is called.
+func (b *boundedReader) startWindow(start, max int64) {
+	b.windowed = true
+	b.windowEnd = start + max
 }
+
+// endWindow lifts the record window; the total cap stays.
+func (b *boundedReader) endWindow() { b.windowed = false }
 
 // Read implements io.Reader.
 func (b *boundedReader) Read(p []byte) (int, error) {
 	if b.exceeded {
 		return 0, ErrFeedLimit
 	}
-	budget := min(b.maxTotal-b.total, b.maxWindow-b.window) + 1
-	if budget <= 0 {
-		budget = 1
+	if len(p) == 0 {
+		return 0, nil
+	}
+	// One byte past the total cap is read to tell "exactly at the cap"
+	// from "more data".
+	budget := b.maxTotal - b.total + 1
+	if b.windowed {
+		w := b.windowEnd - b.total
+		if w <= 0 {
+			b.exceeded = true
+			return 0, ErrFeedLimit
+		}
+		budget = min(budget, w)
 	}
 	if int64(len(p)) > budget {
 		p = p[:budget]
 	}
 	n, err := b.r.Read(p)
 	b.total += int64(n)
-	b.window += int64(n)
-	if b.total > b.maxTotal || b.window > b.maxWindow {
+	if b.total > b.maxTotal {
 		b.exceeded = true
 		return n, ErrFeedLimit
 	}
@@ -165,9 +194,10 @@ func (g *gzipBounded) Read(p []byte) (int, error) {
 func (g *gzipBounded) Close() error { return g.zr.Close() }
 
 // checkJSON walks a single JSON value once and enforces the shape rules
-// shared by every parser: valid UTF-8, nesting depth at most maxDepth,
-// object keys of printable ASCII, at most maxJSONKeyBytes, unique per object
-// under ASCII case folding, and nothing after the value.
+// shared by every parser: valid UTF-8, nesting depth at most maxDepth, at
+// most MaxJSONMembers members per array or object, object keys of
+// printable ASCII, at most maxJSONKeyBytes, unique per object under ASCII
+// case folding, and nothing after the value.
 func checkJSON(data []byte, maxDepth int) error {
 	if !utf8.Valid(data) {
 		return fmt.Errorf("invalid UTF-8: %w", ErrFeedMalformed)
@@ -177,7 +207,18 @@ func checkJSON(data []byte, maxDepth int) error {
 	type frame struct {
 		object    bool
 		expectKey bool
+		members   int
 		keys      map[string]struct{}
+	}
+	// member counts one more member of the innermost container.
+	member := func(f *frame) error {
+		if f == nil {
+			return nil
+		}
+		if f.members++; f.members > MaxJSONMembers {
+			return fmt.Errorf("JSON container with more than %d members: %w", MaxJSONMembers, ErrFeedLimit)
+		}
+		return nil
 	}
 	var stack []*frame
 	seen := false
@@ -208,6 +249,9 @@ func checkJSON(data []byte, maxDepth int) error {
 			continue
 		}
 		if top != nil && top.object && top.expectKey {
+			if err := member(top); err != nil {
+				return err
+			}
 			k, _ := tok.(string)
 			if err := checkJSONKey(k); err != nil {
 				return err
@@ -219,6 +263,11 @@ func checkJSON(data []byte, maxDepth int) error {
 			top.keys[folded] = struct{}{}
 			top.expectKey = false
 			continue
+		}
+		if top != nil && !top.object {
+			if err := member(top); err != nil {
+				return err
+			}
 		}
 		if d, ok := tok.(json.Delim); ok { // '{' or '['
 			if len(stack) >= maxDepth {
@@ -260,6 +309,100 @@ func decodeChecked(data []byte, v any) error {
 	}
 	if err := json.Unmarshal(data, v); err != nil {
 		return fmt.Errorf("JSON types: %w", ErrFeedMalformed)
+	}
+	return nil
+}
+
+// recordSkippable reports whether err rejects a single record only: the
+// record breaks a field or shape rule (ErrFeedMalformed) but no size,
+// depth or count limit. Such a record is skipped and counted; every other
+// error (limits, a broken stream, I/O, cancellation, duplicates the
+// parser reports as fatal) aborts the feed.
+func recordSkippable(err error) bool {
+	return errors.Is(err, ErrFeedMalformed) && !errors.Is(err, ErrFeedLimit)
+}
+
+// decodeRecord decodes the next JSON value of dec as raw bytes, reading
+// at most max bytes (plus recordWindowSlack for the separator) from the
+// value's start. A value longer than max fails with ErrFeedLimit; other
+// failures are mapped by br.fail.
+func decodeRecord(dec *json.Decoder, br *boundedReader, what string, max int64) (json.RawMessage, error) {
+	br.startWindow(dec.InputOffset(), max+recordWindowSlack)
+	var raw json.RawMessage
+	err := dec.Decode(&raw)
+	br.endWindow()
+	if err != nil {
+		return nil, br.fail(what, err)
+	}
+	if int64(len(raw)) > max {
+		return nil, fmt.Errorf("%s: more than %d bytes: %w", what, max, ErrFeedLimit)
+	}
+	return raw, nil
+}
+
+// nextKey reads the next object key of dec within a small window. A key
+// that is not a string fails with ErrFeedMalformed; the key's content is
+// not checked here.
+func nextKey(dec *json.Decoder, br *boundedReader, what string) (string, error) {
+	br.startWindow(dec.InputOffset(), maxJSONKeyBytes+recordWindowSlack)
+	tok, err := dec.Token()
+	br.endWindow()
+	if err != nil {
+		return "", br.fail(what, err)
+	}
+	k, ok := tok.(string)
+	if !ok {
+		return "", fmt.Errorf("%s: %w", what, ErrFeedMalformed)
+	}
+	return k, nil
+}
+
+// skipValueRest consumes the rest of a value whose first token first has
+// already been read, at most MaxJSONDepth deep. The caller bounds the
+// bytes with a window.
+func skipValueRest(dec *json.Decoder, first json.Token) error {
+	depth := 0
+	tok := first
+	for {
+		if d, ok := tok.(json.Delim); ok {
+			switch d {
+			case '{', '[':
+				if depth++; depth > MaxJSONDepth {
+					return fmt.Errorf("JSON nested deeper than %d: %w", MaxJSONDepth, ErrFeedLimit)
+				}
+			default:
+				depth--
+			}
+		}
+		if depth == 0 {
+			return nil
+		}
+		var err error
+		if tok, err = dec.Token(); err != nil {
+			return err
+		}
+	}
+}
+
+// more reports whether the current array or object of dec has another
+// member. The whitespace it skips is bounded by recordWindowSlack, so a
+// run of whitespace cannot grow the decoder's buffer; a longer run makes
+// the next token fail with ErrFeedLimit.
+func more(dec *json.Decoder, br *boundedReader) bool {
+	br.startWindow(dec.InputOffset(), recordWindowSlack)
+	ok := dec.More()
+	br.endWindow()
+	return ok
+}
+
+// expectDelim reads one token and requires it to be delimiter d.
+func expectDelim(dec *json.Decoder, d json.Delim) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	if got, ok := tok.(json.Delim); !ok || got != d {
+		return fmt.Errorf("expected %q: %w", d, ErrFeedMalformed)
 	}
 	return nil
 }

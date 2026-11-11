@@ -93,6 +93,9 @@ type DebianTrackerSummary struct {
 	// Packages, Issues and Entries count source packages, (package,
 	// issue) pairs and delivered entries.
 	Packages, Issues, Entries int
+	// Skipped counts the packages, issues and release entries left out
+	// because they broke a field rule.
+	Skipped int
 }
 
 // debianReleaseJSON is the per-release object of the tracker JSON.
@@ -114,117 +117,200 @@ type debianIssueJSON struct {
 // ParseDebianTracker streams the Debian Security Tracker JSON export
 // (an object of source packages, each an object of issues with a
 // "releases" object) and calls visit once per (package, issue, release)
-// in package order of the input and sorted issue and release order.
+// in package and issue order of the input and sorted release order.
+// Packages and issues are decoded one at a time; every count limit is
+// checked before the next package, issue or entry is decoded.
+//
+// A package, issue or release entry that breaks a field rule is skipped
+// and counted in DebianTrackerSummary.Skipped (a skipped package or issue
+// counts once, not per entry inside it). A size, depth or count limit, a
+// duplicate package or issue, or a broken stream fails the whole export.
 //
 // The export is undated: its content date is the proxy date of the DSA
 // and DLA lists (ParseDebianAdvisoryList), never a fetch time. On any
 // error the entries already visited must be discarded by the caller.
 func ParseDebianTracker(ctx context.Context, r io.Reader, visit func(DebianEntry) error) (DebianTrackerSummary, error) {
-	var sum DebianTrackerSummary
+	return parseDebianTracker(ctx, r, MaxDebianEntries, visit)
+}
+
+// debianParse is the state of one ParseDebianTracker call.
+type debianParse struct {
+	ctx        context.Context
+	dec        *json.Decoder
+	br         *boundedReader
+	visit      func(DebianEntry) error
+	maxEntries int
+	// entries counts every release entry read, skipped ones included.
+	entries int
+	sum     DebianTrackerSummary
+}
+
+// parseDebianTracker is ParseDebianTracker with the entry limit as a
+// parameter, so tests can reach it with a small export.
+func parseDebianTracker(ctx context.Context, r io.Reader, maxEntries int, visit func(DebianEntry) error) (DebianTrackerSummary, error) {
 	br := newBoundedReader(r, MaxDebianTrackerBytes)
-	dec := json.NewDecoder(br)
+	p := &debianParse{ctx: ctx, dec: json.NewDecoder(br), br: br, visit: visit, maxEntries: maxEntries}
+	err := p.run()
+	return p.sum, err
+}
+
+func (p *debianParse) run() error {
+	dec, br := p.dec, p.br
 	tok, err := dec.Token()
 	if err != nil {
-		return sum, br.fail("debian tracker", err)
+		return br.fail("debian tracker", err)
 	}
 	if d, ok := tok.(json.Delim); !ok || d != '{' {
-		return sum, fmt.Errorf("debian tracker: top level is not an object: %w", ErrFeedMalformed)
+		return fmt.Errorf("debian tracker: top level is not an object: %w", ErrFeedMalformed)
 	}
 	seen := make(map[string]struct{})
-	for dec.More() {
-		if err := ctx.Err(); err != nil {
-			return sum, fmt.Errorf("debian tracker: %w", err)
+	packages := 0
+	for more(dec, br) {
+		if err := p.ctx.Err(); err != nil {
+			return fmt.Errorf("debian tracker: %w", err)
 		}
-		tok, err := dec.Token()
+		if packages >= MaxDebianPackages {
+			return fmt.Errorf("debian tracker: more than %d packages: %w", MaxDebianPackages, ErrFeedLimit)
+		}
+		packages++
+		pkg, err := nextKey(dec, br, "debian tracker package name")
 		if err != nil {
-			return sum, br.fail("debian tracker package name", err)
+			return err
 		}
-		pkg, _ := tok.(string)
-		if !debianPackageRe.MatchString(pkg) {
-			return sum, fmt.Errorf("debian tracker package %d: name: %w", sum.Packages, ErrFeedMalformed)
+		valid := debianPackageRe.MatchString(pkg)
+		if valid {
+			if _, dup := seen[pkg]; dup {
+				return fmt.Errorf("debian tracker package %s: duplicate: %w", pkg, ErrFeedMalformed)
+			}
+			seen[pkg] = struct{}{}
 		}
-		if _, dup := seen[pkg]; dup {
-			return sum, fmt.Errorf("debian tracker package %s: duplicate: %w", pkg, ErrFeedMalformed)
-		}
-		seen[pkg] = struct{}{}
-		if sum.Packages++; sum.Packages > MaxDebianPackages {
-			return sum, fmt.Errorf("debian tracker: more than %d packages: %w", MaxDebianPackages, ErrFeedLimit)
-		}
-		br.resetWindow(MaxDebianPackageBytes)
-		var raw json.RawMessage
-		if err := dec.Decode(&raw); err != nil {
-			return sum, br.fail("debian tracker package "+pkg, err)
-		}
-		br.resetWindow(MaxDebianTrackerBytes)
-		if len(raw) > MaxDebianPackageBytes {
-			return sum, fmt.Errorf("debian tracker package %s: %w", pkg, ErrFeedLimit)
-		}
-		if err := parseDebianPackage(pkg, raw, &sum, visit); err != nil {
-			return sum, err
+		if err := p.parsePackage(pkg, valid); err != nil {
+			return err
 		}
 	}
 	tok, err = dec.Token()
 	if err != nil {
-		return sum, br.fail("debian tracker end", err)
+		return br.fail("debian tracker end", err)
 	}
 	if d, ok := tok.(json.Delim); !ok || d != '}' {
-		return sum, fmt.Errorf("debian tracker end: %w", ErrFeedMalformed)
+		return fmt.Errorf("debian tracker end: %w", ErrFeedMalformed)
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return sum, br.fail("debian tracker: data after the export", err)
+		return br.fail("debian tracker: data after the export", err)
 	}
 	if br.exceeded {
-		return sum, fmt.Errorf("debian tracker: %w", ErrFeedLimit)
+		return fmt.Errorf("debian tracker: %w", ErrFeedLimit)
 	}
-	return sum, nil
+	return nil
 }
 
-// parseDebianPackage decodes and visits the issues of one source package.
-func parseDebianPackage(pkg string, raw []byte, sum *DebianTrackerSummary, visit func(DebianEntry) error) error {
-	var issues map[string]debianIssueJSON
-	if err := decodeChecked(raw, &issues); err != nil {
-		return fmt.Errorf("debian tracker package %s: %w", pkg, err)
+// parsePackage streams the issues of one source package within a window
+// of MaxDebianPackageBytes. A package with an invalid name (valid false)
+// or a value that is not an object is consumed and skipped.
+func (p *debianParse) parsePackage(pkg string, valid bool) error {
+	dec, br := p.dec, p.br
+	where := "debian tracker package"
+	if valid {
+		where += " " + pkg
 	}
-	if issues == nil {
-		return fmt.Errorf("debian tracker package %s: not an object: %w", pkg, ErrFeedMalformed)
+	br.startWindow(dec.InputOffset(), MaxDebianPackageBytes+recordWindowSlack)
+	defer br.endWindow()
+	tok, err := dec.Token()
+	if err != nil {
+		return br.fail(where, err)
 	}
-	if len(issues) > MaxDebianIssuesPerPackage {
-		return fmt.Errorf("debian tracker package %s: more than %d issues: %w", pkg, MaxDebianIssuesPerPackage, ErrFeedLimit)
+	start := dec.InputOffset() - 1 // the opening brace, if tok is one
+	if d, ok := tok.(json.Delim); !valid || !ok || d != '{' {
+		if err := skipValueRest(dec, tok); err != nil {
+			return br.fail(where, err)
+		}
+		if dec.InputOffset()-start > MaxDebianPackageBytes {
+			return fmt.Errorf("%s: more than %d bytes: %w", where, MaxDebianPackageBytes, ErrFeedLimit)
+		}
+		p.sum.Skipped++
+		return nil
 	}
-	ids := make([]string, 0, len(issues))
-	for id := range issues {
+	seen := make(map[string]struct{})
+	issues := 0
+	for dec.More() {
+		if issues >= MaxDebianIssuesPerPackage {
+			return fmt.Errorf("%s: more than %d issues: %w", where, MaxDebianIssuesPerPackage, ErrFeedLimit)
+		}
+		issues++
+		tok, err := dec.Token()
+		if err != nil {
+			return br.fail(where+" issue ID", err)
+		}
+		id, _ := tok.(string)
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return br.fail(where+" issue", err)
+		}
 		if !feedVulnIDRe.MatchString(id) {
-			return fmt.Errorf("debian tracker package %s: issue ID: %w", pkg, ErrFeedMalformed)
+			p.sum.Skipped++
+			continue
 		}
-		ids = append(ids, id)
+		folded := strings.ToLower(id)
+		if _, dup := seen[folded]; dup {
+			return fmt.Errorf("%s %s: duplicate issue: %w", where, id, ErrFeedMalformed)
+		}
+		seen[folded] = struct{}{}
+		if err := p.parseIssue(pkg, id, raw); err != nil {
+			return err
+		}
 	}
-	slices.Sort(ids)
-	for _, id := range ids {
-		sum.Issues++
-		rels := issues[id].Releases
-		if len(rels) > MaxDebianReleasesPerIssue {
-			return fmt.Errorf("debian tracker %s %s: more than %d releases: %w", pkg, id, MaxDebianReleasesPerIssue, ErrFeedLimit)
+	if err := expectDelim(dec, '}'); err != nil {
+		return br.fail(where+" end", err)
+	}
+	if dec.InputOffset()-start > MaxDebianPackageBytes {
+		return fmt.Errorf("%s: more than %d bytes: %w", where, MaxDebianPackageBytes, ErrFeedLimit)
+	}
+	p.sum.Packages++
+	return nil
+}
+
+// parseIssue decodes one issue and visits its release entries in sorted
+// release order.
+func (p *debianParse) parseIssue(pkg, id string, raw []byte) error {
+	var issue debianIssueJSON
+	if err := decodeChecked(raw, &issue); err != nil {
+		if recordSkippable(err) {
+			p.sum.Skipped++
+			return nil
 		}
-		names := make([]string, 0, len(rels))
-		for name := range rels {
-			if !debianReleaseRe.MatchString(name) {
-				return fmt.Errorf("debian tracker %s %s: release name: %w", pkg, id, ErrFeedMalformed)
-			}
-			names = append(names, name)
+		return fmt.Errorf("debian tracker %s %s: %w", pkg, id, err)
+	}
+	rels := issue.Releases
+	if len(rels) > MaxDebianReleasesPerIssue {
+		return fmt.Errorf("debian tracker %s %s: more than %d releases: %w", pkg, id, MaxDebianReleasesPerIssue, ErrFeedLimit)
+	}
+	p.sum.Issues++
+	names := make([]string, 0, len(rels))
+	for name := range rels {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		if p.entries >= p.maxEntries {
+			return fmt.Errorf("debian tracker: more than %d entries: %w", p.maxEntries, ErrFeedLimit)
 		}
-		slices.Sort(names)
-		for _, name := range names {
-			e, err := debianEntry(pkg, id, name, rels[name])
-			if err != nil {
-				return err
-			}
-			if sum.Entries++; sum.Entries > MaxDebianEntries {
-				return fmt.Errorf("debian tracker: more than %d entries: %w", MaxDebianEntries, ErrFeedLimit)
-			}
-			if err := visit(e); err != nil {
-				return fmt.Errorf("debian tracker %s %s %s: %w", pkg, id, name, err)
-			}
+		p.entries++
+		if !debianReleaseRe.MatchString(name) {
+			p.sum.Skipped++
+			continue
 		}
+		e, err := debianEntry(pkg, id, name, rels[name])
+		if err != nil {
+			if recordSkippable(err) {
+				p.sum.Skipped++
+				continue
+			}
+			return err
+		}
+		if err := p.visit(e); err != nil {
+			return fmt.Errorf("debian tracker %s %s %s: %w", pkg, id, name, err)
+		}
+		p.sum.Entries++
 	}
 	return nil
 }
@@ -303,13 +389,18 @@ type DebianAdvisoryList struct {
 	// Newest is the newest advisory date in the list: the content date
 	// of the list and the proxy date of the tracker JSON (D4, Q5).
 	Newest time.Time
+	// Skipped counts lines left out because they broke the list format
+	// (an unparsable entry line, a continuation line with control
+	// characters).
+	Skipped int
 }
 
 // ParseDebianAdvisoryList parses a Debian DSA or DLA list
 // (data/DSA/list, data/DLA/list of the security tracker repository).
 // Each entry starts with a line "[DD Mon YYYY] DSA-NNNN-N ..."; indented
-// continuation lines are skipped. Any other non-empty line is rejected.
-// A list without entries fails with ErrNoContentDate.
+// continuation lines are skipped. Any other line is skipped and counted.
+// A list mixing DSA and DLA entries, a too long line or too many entries
+// fail the list; a list without entries fails with ErrNoContentDate.
 func ParseDebianAdvisoryList(ctx context.Context, r io.Reader) (DebianAdvisoryList, error) {
 	var out DebianAdvisoryList
 	br := newBoundedReader(r, MaxDebianListBytes)
@@ -326,22 +417,30 @@ func ParseDebianAdvisoryList(ctx context.Context, r io.Reader) (DebianAdvisoryLi
 		s := strings.TrimSuffix(sc.Text(), "\r")
 		if s == "" || s[0] == '\t' || s[0] == ' ' {
 			if err := checkText(s, MaxDebianListLineBytes); err != nil {
-				return DebianAdvisoryList{}, fmt.Errorf("debian advisory list line %d: %w", line, err)
+				if !recordSkippable(err) {
+					return DebianAdvisoryList{}, fmt.Errorf("debian advisory list line %d: %w", line, err)
+				}
+				out.Skipped++
 			}
 			continue
 		}
 		m := debianListHeadRe.FindStringSubmatch(s)
 		if m == nil {
-			return DebianAdvisoryList{}, fmt.Errorf("debian advisory list line %d: %w", line, ErrFeedMalformed)
+			out.Skipped++
+			continue
+		}
+		d, err := parseFeedTime(m[1], "02 Jan 2006")
+		if err != nil {
+			if !recordSkippable(err) {
+				return DebianAdvisoryList{}, fmt.Errorf("debian advisory list line %d: %w", line, err)
+			}
+			out.Skipped++
+			continue
 		}
 		if out.Kind == "" {
 			out.Kind = m[2]
 		} else if out.Kind != m[2] {
 			return DebianAdvisoryList{}, fmt.Errorf("debian advisory list line %d: mixed DSA and DLA: %w", line, ErrFeedMalformed)
-		}
-		d, err := parseFeedTime(m[1], "02 Jan 2006")
-		if err != nil {
-			return DebianAdvisoryList{}, fmt.Errorf("debian advisory list line %d: %w", line, err)
 		}
 		if out.Entries++; out.Entries > MaxDebianListEntries {
 			return DebianAdvisoryList{}, fmt.Errorf("debian advisory list: more than %d entries: %w", MaxDebianListEntries, ErrFeedLimit)

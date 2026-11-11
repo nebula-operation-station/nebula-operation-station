@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -34,35 +35,42 @@ func TestParseKEVFlagsWithDates(t *testing.T) {
 	}
 }
 
+func kevDoc(count, entries string) string {
+	return `{"catalogVersion":"2024.10.21","dateReleased":"2024-10-21T15:00:15Z","count":` + count + `,"vulnerabilities":[` + entries + `]}`
+}
+
+func kevEntry(fields string) string {
+	return `{"cveID":"CVE-2024-0001","vendorProject":"V","product":"P","vulnerabilityName":"N","dateAdded":"2024-10-21"` + fields + `}`
+}
+
 func TestParseKEVRejectsMalformed(t *testing.T) {
-	doc := func(count, entries string) string {
-		return `{"catalogVersion":"2024.10.21","dateReleased":"2024-10-21T15:00:15Z","count":` + count + `,"vulnerabilities":[` + entries + `]}`
-	}
-	entry := func(fields string) string {
-		return `{"cveID":"CVE-2024-0001","vendorProject":"V","product":"P","vulnerabilityName":"N","dateAdded":"2024-10-21"` + fields + `}`
-	}
+	doc, entry := kevDoc, kevEntry
 	tests := []struct {
 		name string
 		in   string
 		want error
 	}{
 		{"not json", `x`, ErrFeedMalformed},
+		{"top level array", `[]`, ErrFeedMalformed},
 		{"trailing data", doc("0", ``) + `{}`, ErrFeedMalformed},
 		{"missing version", `{"dateReleased":"2024-10-21T15:00:15Z","count":0,"vulnerabilities":[]}`, ErrFeedMalformed},
 		{"missing released", `{"catalogVersion":"1","count":0,"vulnerabilities":[]}`, ErrFeedMalformed},
 		{"date only released", `{"catalogVersion":"1","dateReleased":"2024-10-21","count":0,"vulnerabilities":[]}`, ErrFeedMalformed},
 		{"missing count", `{"catalogVersion":"1","dateReleased":"2024-10-21T15:00:15Z","vulnerabilities":[]}`, ErrFeedMalformed},
+		{"missing vulnerabilities", `{"catalogVersion":"1","dateReleased":"2024-10-21T15:00:15Z","count":0}`, ErrFeedMalformed},
+		{"vulnerabilities not array", `{"catalogVersion":"1","dateReleased":"2024-10-21T15:00:15Z","count":0,"vulnerabilities":{}}`, ErrFeedMalformed},
 		{"count mismatch", doc("2", entry(``)), ErrFeedMalformed},
 		{"count wrong type", doc(`"1"`, entry(``)), ErrFeedMalformed},
-		{"lower-case cve", doc("1", strings.Replace(entry(``), "CVE-2024", "cve-2024", 1)), ErrFeedMalformed},
 		{"duplicate cve", doc("2", entry(``)+","+entry(``)), ErrFeedMalformed},
-		{"case shadow cveID", doc("1", entry(`,"CVEID":"CVE-2024-9999"`)), ErrFeedMalformed},
-		{"bad dateAdded", doc("1", strings.Replace(entry(``), "2024-10-21", "21.10.2024", 1)), ErrFeedMalformed},
-		{"bad dueDate", doc("1", entry(`,"dueDate":"soon"`)), ErrFeedMalformed},
-		{"bad ransomware", doc("1", entry(`,"knownRansomwareCampaignUse":"Maybe"`)), ErrFeedMalformed},
-		{"control in name", doc("1", strings.Replace(entry(``), `"product":"P"`, `"product":"P\u001b]8;;x"`, 1)), ErrFeedMalformed},
+		{"duplicate top key", `{"count":0,` + doc("0", ``)[1:], ErrFeedMalformed},
+		{"case shadow top key", `{"Count":5,` + doc("0", ``)[1:], ErrFeedMalformed},
+		{"case top key", strings.Replace(doc("0", ``), `"vulnerabilities"`, `"Vulnerabilities"`, 1), ErrFeedMalformed},
+		{"truncated entry", `{"catalogVersion":"1","dateReleased":"2024-10-21T15:00:15Z","count":1,"vulnerabilities":[{"cveID":`, ErrFeedMalformed},
 		{"long name", doc("1", strings.Replace(entry(``), `"product":"P"`, `"product":"`+strings.Repeat("p", MaxKEVNameBytes+1)+`"`, 1)), ErrFeedLimit},
-		{"too large", `{"x":"` + strings.Repeat("a", MaxKEVBytes) + `"}`, ErrFeedLimit},
+		{"entry too deep", doc("1", entry(`,"x":`+strings.Repeat("[", MaxJSONDepth)+strings.Repeat("]", MaxJSONDepth))), ErrFeedLimit},
+		{"entry too large", doc("1", entry(`,"notes":"`+strings.Repeat("a", MaxKEVEntryBytes)+`"`)), ErrFeedLimit},
+		{"header value too large", `{"x":"` + strings.Repeat("a", MaxKEVHeaderValueBytes) + `",` + doc("0", ``)[1:], ErrFeedLimit},
+		{"too large", doc("600", strings.TrimSuffix(strings.Repeat(`{"x":"`+strings.Repeat("a", 60_000)+`"},`, 600), ",")), ErrFeedLimit},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -72,6 +80,64 @@ func TestParseKEVRejectsMalformed(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseKEVSkipsMalformedEntry(t *testing.T) {
+	entry := kevEntry
+	good := strings.Replace(entry(``), "CVE-2024-0001", "CVE-2024-0002", 1)
+	bad := map[string]string{
+		"lower-case cve":    strings.Replace(entry(``), "CVE-2024", "cve-2024", 1),
+		"missing cve":       `{}`,
+		"case shadow cveID": entry(`,"CVEID":"CVE-2024-9999"`),
+		"bad dateAdded":     strings.Replace(entry(``), "2024-10-21", "21.10.2024", 1),
+		"bad dueDate":       entry(`,"dueDate":"soon"`),
+		"bad ransomware":    entry(`,"knownRansomwareCampaignUse":"Maybe"`),
+		"control in name":   strings.Replace(entry(``), `"product":"P"`, `"product":"P\u001b]8;;x"`, 1),
+		"name wrong type":   strings.Replace(entry(``), `"product":"P"`, `"product":7`, 1),
+		"entry not object":  `"CVE-2024-0001"`,
+		"non-ASCII key":     entry(`,"nötes":"x"`),
+	}
+	for name, b := range bad {
+		t.Run(name, func(t *testing.T) {
+			cat, err := ParseKEV(context.Background(), strings.NewReader(kevDoc("3", good+","+b+","+strings.Replace(good, "0002", "0003", 1))))
+			if err != nil {
+				t.Fatalf("err = %v, want the entry skipped", err)
+			}
+			if cat.Skipped != 1 || len(cat.Entries) != 2 || cat.Entries[0].CVE != "CVE-2024-0002" || cat.Entries[1].CVE != "CVE-2024-0003" {
+				t.Fatalf("skipped %d, entries %+v", cat.Skipped, cat.Entries)
+			}
+		})
+	}
+}
+
+// kevBody is a catalog of n empty entries, each of which is skipped.
+func kevBody(n int) []byte {
+	return []byte(kevDoc(strconv.Itoa(n), strings.TrimSuffix(strings.Repeat("{},", n), ",")))
+}
+
+func TestParseKEVEntryLimit(t *testing.T) {
+	cat, err := ParseKEV(context.Background(), bytes.NewReader(kevBody(MaxKEVEntries)))
+	if err != nil || cat.Skipped != MaxKEVEntries {
+		t.Fatalf("at the limit: skipped %d, %v", cat.Skipped, err)
+	}
+	if _, err := ParseKEV(context.Background(), bytes.NewReader(kevBody(MaxKEVEntries+1))); !errors.Is(err, ErrFeedLimit) {
+		t.Fatalf("over the limit: %v", err)
+	}
+}
+
+func TestParseKEVEntryLimitFiresBeforeTheRestIsDecoded(t *testing.T) {
+	// A body just over the limit and one ten times longer must cost the
+	// same: the limit fires while streaming, not after unmarshalling.
+	shortIn, longIn := kevBody(MaxKEVEntries+1), kevBody(10*(MaxKEVEntries+1))
+	short := measureAllocs(t, func() error {
+		_, err := ParseKEV(context.Background(), bytes.NewReader(shortIn))
+		return err
+	})
+	long := measureAllocs(t, func() error {
+		_, err := ParseKEV(context.Background(), bytes.NewReader(longIn))
+		return err
+	})
+	short.assertCovers(t, long)
 }
 
 func FuzzParseKEV(f *testing.F) {

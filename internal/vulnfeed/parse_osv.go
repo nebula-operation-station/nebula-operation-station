@@ -4,7 +4,11 @@ package vulnfeed
 
 import (
 	"archive/zip"
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -272,35 +276,50 @@ func osvEvent(typ OSVRangeType, ev map[string]string) (OSVEvent, error) {
 type OSVArchiveSummary struct {
 	// Records counts the records delivered.
 	Records int
+	// Skipped counts the files left out because their record broke a
+	// field rule.
+	Skipped int
 	// Newest is the newest record "modified" date: the content date of
 	// the archive (D4). Zero when the archive has no records.
 	Newest time.Time
 }
 
 // ParseOSVArchive parses an OSV bulk export (all.zip): every file must be
-// a top-level "<name>.json" OSV record. visit is called per record in
-// archive order; on error the caller must discard what it has seen.
-// Sizes declared in the zip directory are checked before a file is read
-// and enforced again while it is decompressed.
+// a top-level "<name>.json" OSV record. visit is called per valid record
+// in archive order.
+//
+// The central directory is counted before archive/zip builds it, and the
+// names and declared sizes of all files are checked before the first
+// file is read; sizes are enforced again while a file is decompressed. A
+// record that breaks a field rule is skipped and counted in
+// OSVArchiveSummary.Skipped; a size, depth or count limit, a bad file
+// name, a duplicate name or ID, or corrupt compressed data fails the
+// archive. On error the caller must discard what it has seen.
 func ParseOSVArchive(ctx context.Context, ra io.ReaderAt, size int64, visit func(OSVRecord) error) (OSVArchiveSummary, error) {
+	return parseOSVArchive(ctx, ra, size, MaxOSVArchiveFiles, visit)
+}
+
+// parseOSVArchive is ParseOSVArchive with the file limit as a parameter,
+// so tests can reach it with a small archive.
+func parseOSVArchive(ctx context.Context, ra io.ReaderAt, size int64, maxFiles int, visit func(OSVRecord) error) (OSVArchiveSummary, error) {
 	var sum OSVArchiveSummary
 	if size <= 0 || size > MaxFeedBytesDefault {
 		return sum, fmt.Errorf("osv archive: size: %w", ErrFeedLimit)
+	}
+	files, err := countZipDirectory(ctx, ra, size, maxFiles)
+	if err != nil {
+		return sum, fmt.Errorf("osv archive: %w", err)
 	}
 	zr, err := zip.NewReader(ra, size)
 	if err != nil {
 		return sum, fmt.Errorf("osv archive: %w", ErrFeedMalformed)
 	}
-	if len(zr.File) > MaxOSVArchiveFiles {
-		return sum, fmt.Errorf("osv archive: more than %d files: %w", MaxOSVArchiveFiles, ErrFeedLimit)
+	if len(zr.File) != files {
+		return sum, fmt.Errorf("osv archive: directory count mismatch: %w", ErrFeedMalformed)
 	}
 	var total int64
 	names := make(map[string]struct{}, len(zr.File))
-	ids := make(map[string]struct{}, len(zr.File))
 	for i, f := range zr.File {
-		if err := ctx.Err(); err != nil {
-			return sum, fmt.Errorf("osv archive: %w", err)
-		}
 		if err := checkOSVArchiveName(f.Name); err != nil {
 			return sum, fmt.Errorf("osv archive file %d: %w", i, err)
 		}
@@ -315,12 +334,22 @@ func ParseOSVArchive(ctx context.Context, ra io.ReaderAt, size int64, visit func
 		if total > MaxOSVArchiveBytes {
 			return sum, fmt.Errorf("osv archive: more than %d bytes: %w", MaxOSVArchiveBytes, ErrFeedLimit)
 		}
+	}
+	ids := make(map[string]struct{}, len(zr.File))
+	for i, f := range zr.File {
+		if err := ctx.Err(); err != nil {
+			return sum, fmt.Errorf("osv archive: %w", err)
+		}
 		data, err := readOSVArchiveFile(f)
 		if err != nil {
 			return sum, fmt.Errorf("osv archive file %d: %w", i, err)
 		}
 		rec, err := ParseOSV(data)
 		if err != nil {
+			if recordSkippable(err) {
+				sum.Skipped++
+				continue
+			}
 			return sum, fmt.Errorf("osv archive file %d: %w", i, err)
 		}
 		if _, dup := ids[rec.ID]; dup {
@@ -336,6 +365,159 @@ func ParseOSVArchive(ctx context.Context, ra io.ReaderAt, size int64, visit func
 		}
 	}
 	return sum, nil
+}
+
+// Zip structures read by countZipDirectory (PKWARE APPNOTE 4.3).
+const (
+	zipEOCDLen      = 22
+	zipEOCDSig      = "PK\x05\x06"
+	zip64LocatorLen = 20
+	zip64LocatorSig = "PK\x06\x07"
+	zip64EOCDLen    = 56
+	zip64EOCDSig    = "PK\x06\x06"
+	zipDirHeaderLen = 46
+	zipDirHeaderSig = "PK\x01\x02"
+	// zipEOCDSearchBytes is the archive tail searched for the end record,
+	// the same tail archive/zip searches.
+	zipEOCDSearchBytes = 65 * 1024
+)
+
+// countZipDirectory counts the central directory records of a zip
+// archive without building them, so the file limit fires before
+// zip.NewReader allocates one *zip.File per record. archive/zip trusts
+// neither the declared count (it compares only its low 16 bits) nor the
+// declared directory size: it reads record headers from the directory
+// offset until one does not parse. So this function
+//
+//   - reads the end-of-central-directory record (the zip64 one when the
+//     record is marked and a zip64 locator is present), as archive/zip
+//     does, and fails with ErrFeedLimit when it declares more than
+//     maxFiles records;
+//   - requires the directory to end exactly where the end record starts
+//     (no data before the archive, the layout zip.Writer and the OSV
+//     export produce), so archive/zip starts at the same offset;
+//   - walks the record headers inside the declared directory, failing
+//     with ErrFeedLimit after maxFiles of them, and requires them to fill
+//     the directory exactly and to match the declared count.
+//
+// The bytes after the directory are the end record, whose signature is
+// not a header signature, so archive/zip stops at the same record.
+func countZipDirectory(ctx context.Context, ra io.ReaderAt, size int64, maxFiles int) (int, error) {
+	tail := make([]byte, min(size, zipEOCDSearchBytes))
+	tailOff := size - int64(len(tail))
+	if err := readAtFull(ra, tail, tailOff); err != nil {
+		return 0, err
+	}
+	if len(tail) < zipEOCDLen {
+		return 0, fmt.Errorf("no end of central directory: %w", ErrFeedMalformed)
+	}
+	i := bytes.LastIndex(tail[:len(tail)-zipEOCDLen+len(zipEOCDSig)], []byte(zipEOCDSig))
+	if i < 0 {
+		return 0, fmt.Errorf("no end of central directory: %w", ErrFeedMalformed)
+	}
+	eocd := tail[i : i+zipEOCDLen]
+	if i+zipEOCDLen+int(binary.LittleEndian.Uint16(eocd[20:])) > len(tail) {
+		return 0, fmt.Errorf("end of central directory comment: %w", ErrFeedMalformed)
+	}
+	records := uint64(binary.LittleEndian.Uint16(eocd[10:]))
+	dirSize := uint64(binary.LittleEndian.Uint32(eocd[12:]))
+	dirOff := uint64(binary.LittleEndian.Uint32(eocd[16:]))
+	endOff := tailOff + int64(i)
+	if records == 0xffff || dirSize == 0xffff || dirSize == 0xffffffff || dirOff == 0xffffffff {
+		p, ok, err := findZip64End(ra, endOff)
+		if err != nil {
+			return 0, err
+		}
+		if ok {
+			rec := make([]byte, zip64EOCDLen)
+			if size < zip64EOCDLen || p > uint64(size-zip64EOCDLen) {
+				return 0, fmt.Errorf("zip64 end record offset: %w", ErrFeedMalformed)
+			}
+			if err := readAtFull(ra, rec, int64(p)); err != nil {
+				return 0, err
+			}
+			if string(rec[:4]) != zip64EOCDSig {
+				return 0, fmt.Errorf("zip64 end record: %w", ErrFeedMalformed)
+			}
+			records = binary.LittleEndian.Uint64(rec[32:])
+			dirSize = binary.LittleEndian.Uint64(rec[40:])
+			dirOff = binary.LittleEndian.Uint64(rec[48:])
+			endOff = int64(p)
+		}
+	}
+	if records > uint64(maxFiles) {
+		return 0, fmt.Errorf("more than %d files: %w", maxFiles, ErrFeedLimit)
+	}
+	if dirOff > uint64(endOff) || dirSize != uint64(endOff)-dirOff {
+		return 0, fmt.Errorf("central directory does not end at the end record: %w", ErrFeedMalformed)
+	}
+	r := bufio.NewReaderSize(io.NewSectionReader(ra, int64(dirOff), int64(dirSize)), 64<<10)
+	var hdr [zipDirHeaderLen]byte
+	count := 0
+	for left := dirSize; left > 0; {
+		if count%65536 == 0 {
+			if err := ctx.Err(); err != nil {
+				return 0, err
+			}
+		}
+		if count >= maxFiles {
+			return 0, fmt.Errorf("more than %d files: %w", maxFiles, ErrFeedLimit)
+		}
+		if left < zipDirHeaderLen {
+			return 0, fmt.Errorf("central directory: %w", ErrFeedMalformed)
+		}
+		if _, err := io.ReadFull(r, hdr[:]); err != nil {
+			return 0, fmt.Errorf("central directory: %w", ErrFeedMalformed)
+		}
+		if string(hdr[:4]) != zipDirHeaderSig {
+			return 0, fmt.Errorf("central directory header: %w", ErrFeedMalformed)
+		}
+		vars := uint64(binary.LittleEndian.Uint16(hdr[28:])) + uint64(binary.LittleEndian.Uint16(hdr[30:])) +
+			uint64(binary.LittleEndian.Uint16(hdr[32:]))
+		if vars > left-zipDirHeaderLen {
+			return 0, fmt.Errorf("central directory header: %w", ErrFeedMalformed)
+		}
+		if _, err := r.Discard(int(vars)); err != nil {
+			return 0, fmt.Errorf("central directory: %w", ErrFeedMalformed)
+		}
+		left -= zipDirHeaderLen + vars
+		count++
+	}
+	if uint64(count) != records {
+		return 0, fmt.Errorf("central directory count mismatch: %w", ErrFeedMalformed)
+	}
+	return count, nil
+}
+
+// findZip64End reads the zip64 end locator just before the end record at
+// endOff. ok is false when there is none, as archive/zip treats it: the
+// 32-bit values then stand.
+func findZip64End(ra io.ReaderAt, endOff int64) (uint64, bool, error) {
+	locOff := endOff - zip64LocatorLen
+	if locOff < 0 {
+		return 0, false, nil
+	}
+	loc := make([]byte, zip64LocatorLen)
+	if err := readAtFull(ra, loc, locOff); err != nil {
+		return 0, false, err
+	}
+	if string(loc[:4]) != zip64LocatorSig || binary.LittleEndian.Uint32(loc[4:]) != 0 ||
+		binary.LittleEndian.Uint32(loc[16:]) != 1 {
+		return 0, false, nil
+	}
+	return binary.LittleEndian.Uint64(loc[8:]), true, nil
+}
+
+// readAtFull fills b from ra at off; a short read is malformed data.
+func readAtFull(ra io.ReaderAt, b []byte, off int64) error {
+	n, err := ra.ReadAt(b, off)
+	if n == len(b) {
+		return nil
+	}
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("read archive: %w", err)
+	}
+	return fmt.Errorf("archive truncated: %w", ErrFeedMalformed)
 }
 
 // checkOSVArchiveName allows only a flat "<name>.json" entry.

@@ -6,6 +6,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"testing"
@@ -54,9 +56,36 @@ func TestParseDebianTrackerMapsEveryState(t *testing.T) {
 	}
 }
 
+// debianGoodPackage is a package with one valid entry.
+const debianGoodPackage = `"zlib":{"CVE-2024-1111":{"releases":{"bookworm":{"status":"open"}}}}`
+
+// debianGoodEntry is the entry of debianGoodPackage.
+var debianGoodEntry = DebianEntry{Package: "zlib", IssueID: "CVE-2024-1111", Release: "bookworm", State: vulnfinding.TrackerUnfixed}
+
+// debianIssues is a package object with n distinct issues of body.
+func debianIssues(n int, body string) string {
+	var b strings.Builder
+	b.WriteString("{")
+	for i := range n {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, `"CVE-2024-%d":%s`, 10000+i, body)
+	}
+	b.WriteString("}")
+	return b.String()
+}
+
 func TestParseDebianTrackerRejectsMalformed(t *testing.T) {
-	rel := func(body string) string {
-		return `{"openssl":{"CVE-2024-0001":{"releases":{"bookworm":` + body + `}}}}`
+	releases := func(n int) string {
+		var b strings.Builder
+		for i := range n {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			fmt.Fprintf(&b, `"r%c%c":{"status":"open"}`, 'a'+i/26, 'a'+i%26)
+		}
+		return b.String()
 	}
 	tests := []struct {
 		name string
@@ -65,26 +94,16 @@ func TestParseDebianTrackerRejectsMalformed(t *testing.T) {
 	}{
 		{"top level array", `[]`, ErrFeedMalformed},
 		{"truncated", `{"openssl":{`, ErrFeedMalformed},
+		{"truncated issue", `{"openssl":{"CVE-2024-1":{"releases":`, ErrFeedMalformed},
 		{"trailing data", `{} {}`, ErrFeedMalformed},
 		{"trailing garbage", `{}x`, ErrFeedMalformed},
 		{"duplicate package", `{"zlib":{},"zlib":{}}`, ErrFeedMalformed},
-		{"bad package name", `{"Bad Name":{}}`, ErrFeedMalformed},
-		{"package not object", `{"zlib":[]}`, ErrFeedMalformed},
-		{"package null", `{"zlib":null}`, ErrFeedMalformed},
-		{"bad issue id", `{"zlib":{"../x":{"releases":{}}}}`, ErrFeedMalformed},
 		{"duplicate issue", `{"zlib":{"CVE-2024-1":{},"CVE-2024-1":{}}}`, ErrFeedMalformed},
-		{"bad release name", `{"zlib":{"CVE-2024-1111":{"releases":{"Book worm":{"status":"open"}}}}}`, ErrFeedMalformed},
-		{"releases wrong type", `{"zlib":{"CVE-2024-1111":{"releases":"x"}}}`, ErrFeedMalformed},
-		{"unknown status", rel(`{"status":"maybe"}`), ErrFeedMalformed},
-		{"missing status", rel(`{"urgency":"low"}`), ErrFeedMalformed},
-		{"status wrong type", rel(`{"status":1}`), ErrFeedMalformed},
-		{"resolved without version", rel(`{"status":"resolved"}`), ErrFeedMalformed},
-		{"bad fixed version", rel(`{"status":"resolved","fixed_version":"1.0 ; rm"}`), ErrFeedMalformed},
-		{"unknown nodsa reason", rel(`{"status":"open","nodsa":"x","nodsa_reason":"later"}`), ErrFeedMalformed},
-		{"bad urgency", rel(`{"status":"open","urgency":"HIGH!"}`), ErrFeedMalformed},
-		{"case shadow key", rel(`{"status":"open","Status":"resolved"}`), ErrFeedMalformed},
+		{"case duplicate issue", `{"zlib":{"CVE-2024-1":{},"cve-2024-1":{}}}`, ErrFeedMalformed},
 		{"too deep", `{"zlib":{"CVE-2024-1111":{"x":` + strings.Repeat("[", MaxJSONDepth) + strings.Repeat("]", MaxJSONDepth) + `}}}`, ErrFeedLimit},
-		{"invalid utf8", "{\"zlib\":{\"CVE-2024-1111\":{\"description\":\"\xff\"}}}", ErrFeedMalformed},
+		{"skipped package too deep", `{"Bad Name":` + strings.Repeat("[", MaxJSONDepth+1) + strings.Repeat("]", MaxJSONDepth+1) + `}`, ErrFeedLimit},
+		{"too many releases", `{"zlib":{"CVE-2024-1":{"releases":{` + releases(MaxDebianReleasesPerIssue+1) + `}}}}`, ErrFeedLimit},
+		{"whitespace run", `{"zlib":{}` + strings.Repeat(" ", recordWindowSlack+1) + `,"aa":{}}`, ErrFeedLimit},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -94,6 +113,131 @@ func TestParseDebianTrackerRejectsMalformed(t *testing.T) {
 			}
 		})
 	}
+	// At the limits the export is accepted.
+	at := `{"zlib":{"CVE-2024-1":{"releases":{` + releases(MaxDebianReleasesPerIssue) + `}}},"aa":` + debianIssues(MaxDebianIssuesPerPackage, "{}") + `}`
+	if _, sum, err := collectDebian(t, []byte(at)); err != nil || sum.Entries != MaxDebianReleasesPerIssue || sum.Issues != 1+MaxDebianIssuesPerPackage {
+		t.Fatalf("at the limits: %+v, %v", sum, err)
+	}
+}
+
+func TestParseDebianTrackerSkipsMalformedRecords(t *testing.T) {
+	// Each case adds one bad package, issue or release entry next to a
+	// good one; only the bad record is left out and counted.
+	pkg := func(p string) string { return `{` + p + `,` + debianGoodPackage + `}` }
+	issue := func(i string) string {
+		return `{"zlib":{` + i + `,"CVE-2024-1111":{"releases":{"bookworm":{"status":"open"}}}}}`
+	}
+	rel := func(r string) string {
+		return `{"zlib":{"CVE-2024-1111":{"releases":{"bookworm":{"status":"open"}}},"CVE-2024-2222":{"releases":{"sid":` + r + `}}}}`
+	}
+	tests := []struct {
+		name string
+		in   string
+	}{
+		{"bad package name", pkg(`"Bad Name":{"CVE-2024-1":{"releases":{"sid":{"status":"open"}}}}`)},
+		{"non-ASCII package name", pkg(`"zlïb":{}`)},
+		{"package not object", pkg(`"aa":[1,{"x":[2]}]`)},
+		{"package null", pkg(`"aa":null`)},
+		{"package string", pkg(`"aa":"x"`)},
+		{"bad issue id", issue(`"../x":{"releases":{"sid":{"status":"open"}}}`)},
+		{"releases wrong type", issue(`"CVE-2024-2222":{"releases":"x"}`)},
+		{"case shadow key", issue(`"CVE-2024-2222":{"releases":{"sid":{"status":"open","Status":"resolved"}}}`)},
+		{"invalid utf8", issue("\"CVE-2024-2222\":{\"description\":\"\xff\"}")},
+		{"issue not object", issue(`"CVE-2024-2222":[]`)},
+		{"bad release name", `{"zlib":{"CVE-2024-1111":{"releases":{"Book worm":{"status":"open"},"bookworm":{"status":"open"}}}}}`},
+		{"unknown status", rel(`{"status":"maybe"}`)},
+		{"missing status", rel(`{"urgency":"low"}`)},
+		{"status wrong type", rel(`{"status":1}`)},
+		{"resolved without version", rel(`{"status":"resolved"}`)},
+		{"bad fixed version", rel(`{"status":"resolved","fixed_version":"1.0 ; rm"}`)},
+		{"unknown nodsa reason", rel(`{"status":"open","nodsa":"x","nodsa_reason":"later"}`)},
+		{"bad urgency", rel(`{"status":"open","urgency":"HIGH!"}`)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, sum, err := collectDebian(t, []byte(tc.in))
+			if err != nil {
+				t.Fatalf("err = %v, want the record skipped", err)
+			}
+			if sum.Skipped != 1 || !slices.Equal(got, []DebianEntry{debianGoodEntry}) {
+				t.Fatalf("summary %+v, entries %+v", sum, got)
+			}
+		})
+	}
+}
+
+func TestParseDebianTrackerPackageLimit(t *testing.T) {
+	export := func(n int) []byte {
+		var b strings.Builder
+		b.WriteString("{")
+		for i := range n {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			fmt.Fprintf(&b, `"p%d":{}`, i)
+		}
+		b.WriteString("}")
+		return []byte(b.String())
+	}
+	if _, sum, err := collectDebian(t, export(MaxDebianPackages)); err != nil || sum.Packages != MaxDebianPackages {
+		t.Fatalf("at the limit: %+v, %v", sum, err)
+	}
+	if _, _, err := collectDebian(t, export(MaxDebianPackages+1)); !errors.Is(err, ErrFeedLimit) {
+		t.Fatalf("over the limit: %v", err)
+	}
+}
+
+func TestParseDebianTrackerPackageByteLimit(t *testing.T) {
+	// 65 issues of 1 MiB each: more than MaxDebianPackageBytes in one
+	// package, streamed without building the export in memory.
+	pad := strings.Repeat("a", 1<<20)
+	readers := []io.Reader{strings.NewReader(`{"zlib":{`)}
+	for i := range MaxDebianPackageBytes>>20 + 1 {
+		sep := ","
+		if i == 0 {
+			sep = ""
+		}
+		readers = append(readers, strings.NewReader(fmt.Sprintf(`%s"CVE-2024-%d":{"x":"`, sep, 10000+i)), strings.NewReader(pad), strings.NewReader(`"}`))
+	}
+	readers = append(readers, strings.NewReader(`}}`))
+	_, err := ParseDebianTracker(context.Background(), io.MultiReader(readers...), func(DebianEntry) error { return nil })
+	if !errors.Is(err, ErrFeedLimit) {
+		t.Fatalf("err = %v, want ErrFeedLimit", err)
+	}
+}
+
+func TestParseDebianTrackerEntryLimit(t *testing.T) {
+	in := []byte(`{"zlib":{"CVE-2024-1":{"releases":{"bookworm":{"status":"open"},"sid":{"status":"open"}}},"CVE-2024-2":{"releases":{"sid":{"status":"bad"}}}}}`)
+	visit := func(DebianEntry) error { return nil }
+	if sum, err := parseDebianTracker(context.Background(), bytes.NewReader(in), 3, visit); err != nil || sum.Entries != 2 || sum.Skipped != 1 {
+		t.Fatalf("at the limit: %+v, %v", sum, err)
+	}
+	// Skipped entries count towards the limit.
+	if _, err := parseDebianTracker(context.Background(), bytes.NewReader(in), 2, visit); !errors.Is(err, ErrFeedLimit) {
+		t.Fatalf("over the limit: %v", err)
+	}
+	// The exported parser uses the named limit.
+	if MaxDebianEntries != 20_000_000 {
+		t.Fatalf("MaxDebianEntries = %d", MaxDebianEntries)
+	}
+}
+
+func TestParseDebianTrackerIssueLimitFiresBeforeTheRestIsDecoded(t *testing.T) {
+	// One package just over the issue limit (rejected, see
+	// measureAllocs) and one ten times longer must cost the same: issues
+	// are decoded one at a time.
+	shortIn := []byte(`{"zlib":` + debianIssues(MaxDebianIssuesPerPackage+1, "{}") + `}`)
+	longIn := []byte(`{"zlib":` + debianIssues(10*(MaxDebianIssuesPerPackage+1), "{}") + `}`)
+	visit := func(DebianEntry) error { return nil }
+	short := measureAllocs(t, func() error {
+		_, err := ParseDebianTracker(context.Background(), bytes.NewReader(shortIn), visit)
+		return err
+	})
+	long := measureAllocs(t, func() error {
+		_, err := ParseDebianTracker(context.Background(), bytes.NewReader(longIn), visit)
+		return err
+	})
+	short.assertCovers(t, long)
 }
 
 func TestParseDebianTrackerIgnoresUnknownFields(t *testing.T) {
@@ -157,21 +301,41 @@ func TestParseDebianAdvisoryListRejectsMalformed(t *testing.T) {
 	}{
 		{"empty", "", ErrNoContentDate},
 		{"only continuation", "\t{CVE-2024-1}\n", ErrNoContentDate},
-		{"garbage line", "[01 Feb 2024] DSA-1-1 x\nhello\n", ErrFeedMalformed},
-		{"bad date", "[31 Feb 2024] DSA-1-1 x\n", ErrFeedMalformed},
-		{"bad month", "[01 Foo 2024] DSA-1-1 x\n", ErrFeedMalformed},
-		{"year out of range", "[01 Feb 1969] DSA-1-1 x\n", ErrFeedMalformed},
-		{"bad id", "[01 Feb 2024] DSX-1-1 x\n", ErrFeedMalformed},
-		{"id glued", "[01 Feb 2024] DSA-1-1x\n", ErrFeedMalformed},
+		{"only garbage", "<html>\n<body>\n", ErrNoContentDate},
 		{"mixed kinds", "[01 Feb 2024] DSA-1-1 x\n[01 Feb 2024] DLA-1-1 x\n", ErrFeedMalformed},
-		{"control char", "[01 Feb 2024] DSA-1-1 x\n\t\x1b[31m\n", ErrFeedMalformed},
 		{"long line", "[01 Feb 2024] DSA-1-1 x\n\t" + strings.Repeat("a", MaxDebianListLineBytes) + "\n", ErrFeedLimit},
+		{"too many entries", strings.Repeat("[01 Feb 2024] DSA-1-1 x\n", MaxDebianListEntries+1), ErrFeedLimit},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := ParseDebianAdvisoryList(context.Background(), strings.NewReader(tc.in))
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseDebianAdvisoryListSkipsMalformedLines(t *testing.T) {
+	const good = "[01 Feb 2024] DSA-1-1 x\n\t{CVE-2024-1}\n"
+	bad := map[string]string{
+		"garbage line":      "hello\n",
+		"bad date":          "[31 Feb 2024] DSA-2-1 x\n",
+		"bad month":         "[01 Foo 2024] DSA-2-1 x\n",
+		"year out of range": "[01 Feb 1969] DSA-2-1 x\n",
+		"bad id":            "[01 Feb 2024] DSX-2-1 x\n",
+		"id glued":          "[01 Feb 2024] DSA-2-1x\n",
+		"late date in bad":  "[01 Feb 2999x DSA-2-1 x\n",
+		"control char":      "\t\x1b[31m\n",
+	}
+	for name, b := range bad {
+		t.Run(name, func(t *testing.T) {
+			got, err := ParseDebianAdvisoryList(context.Background(), strings.NewReader(good+b))
+			if err != nil {
+				t.Fatalf("err = %v, want the line skipped", err)
+			}
+			if got.Kind != "DSA" || got.Entries != 1 || got.Skipped != 1 || !got.Newest.Equal(day(2024, 2, 1)) {
+				t.Fatalf("got %+v", got)
 			}
 		})
 	}

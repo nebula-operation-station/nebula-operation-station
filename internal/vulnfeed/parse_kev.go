@@ -4,9 +4,12 @@ package vulnfeed
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"regexp"
+	"strings"
 	"time"
 )
 
@@ -16,6 +19,12 @@ const (
 	MaxKEVBytes = 32 << 20
 	// MaxKEVEntries caps the catalog entries.
 	MaxKEVEntries = 100_000
+	// MaxKEVEntryBytes caps the JSON of one catalog entry (about 1 KiB
+	// in 2024).
+	MaxKEVEntryBytes = 64 << 10
+	// MaxKEVHeaderValueBytes caps each top-level value besides the
+	// vulnerabilities array.
+	MaxKEVHeaderValueBytes = 64 << 10
 	// MaxKEVNameBytes caps vendor, product and vulnerability name.
 	MaxKEVNameBytes = 512
 )
@@ -51,87 +60,207 @@ type KEVCatalog struct {
 	Released time.Time
 	// Entries are the catalog entries in input order.
 	Entries []KEVEntry
+	// Skipped counts the entries left out because they broke a field
+	// rule.
+	Skipped int
 }
 
-type kevJSON struct {
-	CatalogVersion  string `json:"catalogVersion"`
-	DateReleased    string `json:"dateReleased"`
-	Count           *int   `json:"count"`
-	Vulnerabilities []struct {
-		CVEID             string `json:"cveID"`
-		VendorProject     string `json:"vendorProject"`
-		Product           string `json:"product"`
-		VulnerabilityName string `json:"vulnerabilityName"`
-		DateAdded         string `json:"dateAdded"`
-		DueDate           string `json:"dueDate"`
-		Ransomware        string `json:"knownRansomwareCampaignUse"`
-	} `json:"vulnerabilities"`
+// kevEntryJSON is one catalog entry; descriptions, required actions,
+// notes and CWEs are skipped.
+type kevEntryJSON struct {
+	CVEID             string `json:"cveID"`
+	VendorProject     string `json:"vendorProject"`
+	Product           string `json:"product"`
+	VulnerabilityName string `json:"vulnerabilityName"`
+	DateAdded         string `json:"dateAdded"`
+	DueDate           string `json:"dueDate"`
+	Ransomware        string `json:"knownRansomwareCampaignUse"`
 }
+
+// KEV top-level keys the parser reads.
+const (
+	kevKeyVersion  = "catalogVersion"
+	kevKeyReleased = "dateReleased"
+	kevKeyCount    = "count"
+	kevKeyVulns    = "vulnerabilities"
+)
 
 // kevDateLayout is the KEV per-entry date form.
 const kevDateLayout = "2006-01-02"
 
 // ParseKEV parses the CISA Known Exploited Vulnerabilities catalog. The
-// count field must equal the number of entries and every CVE may appear
-// once. Descriptions, required actions and notes are skipped.
+// catalog is streamed: entries are decoded one at a time and the entry
+// limit is checked before each one. The count field must equal the
+// number of entries, skipped ones included, and every CVE may appear
+// once. An entry that breaks a field rule is skipped and counted in
+// KEVCatalog.Skipped; a size, depth or count limit, a duplicate CVE or a
+// bad top level fails the catalog.
 func ParseKEV(ctx context.Context, r io.Reader) (KEVCatalog, error) {
-	data, err := readAllBounded(r, MaxKEVBytes)
+	cat, err := parseKEV(ctx, r)
 	if err != nil {
 		return KEVCatalog{}, fmt.Errorf("kev catalog: %w", err)
 	}
+	return cat, nil
+}
+
+func parseKEV(ctx context.Context, r io.Reader) (KEVCatalog, error) {
+	var cat KEVCatalog
 	if err := ctx.Err(); err != nil {
-		return KEVCatalog{}, fmt.Errorf("kev catalog: %w", err)
+		return cat, err
 	}
-	var j kevJSON
-	if err := decodeChecked(data, &j); err != nil {
-		return KEVCatalog{}, fmt.Errorf("kev catalog: %w", err)
+	br := newBoundedReader(r, MaxKEVBytes)
+	dec := json.NewDecoder(br)
+	if err := expectDelim(dec, '{'); err != nil {
+		return cat, br.fail("top level", err)
 	}
-	if !kevVersionRe.MatchString(j.CatalogVersion) {
-		return KEVCatalog{}, fmt.Errorf("kev catalog: catalogVersion: %w", ErrFeedMalformed)
-	}
-	cat := KEVCatalog{Version: j.CatalogVersion}
-	if cat.Released, err = parseFeedTime(j.DateReleased, time.RFC3339Nano); err != nil {
-		return KEVCatalog{}, fmt.Errorf("kev catalog: dateReleased: %w", err)
-	}
-	if len(j.Vulnerabilities) > MaxKEVEntries {
-		return KEVCatalog{}, fmt.Errorf("kev catalog: more than %d entries: %w", MaxKEVEntries, ErrFeedLimit)
-	}
-	if j.Count == nil || *j.Count != len(j.Vulnerabilities) {
-		return KEVCatalog{}, fmt.Errorf("kev catalog: count does not match entries: %w", ErrFeedMalformed)
-	}
-	seen := make(map[string]struct{}, len(j.Vulnerabilities))
-	cat.Entries = make([]KEVEntry, 0, len(j.Vulnerabilities))
-	for i, v := range j.Vulnerabilities {
-		if !cveIDRe.MatchString(v.CVEID) {
-			return KEVCatalog{}, fmt.Errorf("kev entry %d: cveID: %w", i, ErrFeedMalformed)
+	keys := make(map[string]struct{})
+	var released string
+	var count *int
+	read := 0
+	sawVulns := false
+	for more(dec, br) {
+		key, err := nextKey(dec, br, "key")
+		if err != nil {
+			return cat, err
 		}
-		where := "kev " + v.CVEID
-		if _, dup := seen[v.CVEID]; dup {
-			return KEVCatalog{}, fmt.Errorf("%s: duplicate: %w", where, ErrFeedMalformed)
+		if err := checkJSONKey(key); err != nil {
+			return cat, err
 		}
-		seen[v.CVEID] = struct{}{}
-		e := KEVEntry{CVE: v.CVEID, VendorProject: v.VendorProject, Product: v.Product, Name: v.VulnerabilityName}
-		for _, s := range []string{e.VendorProject, e.Product, e.Name} {
-			if err := checkText(s, MaxKEVNameBytes); err != nil {
-				return KEVCatalog{}, fmt.Errorf("%s: name: %w", where, err)
+		folded := strings.ToLower(key)
+		if _, dup := keys[folded]; dup {
+			return cat, fmt.Errorf("duplicate top-level key: %w", ErrFeedMalformed)
+		}
+		keys[folded] = struct{}{}
+		for _, known := range []string{kevKeyVersion, kevKeyReleased, kevKeyCount, kevKeyVulns} {
+			if folded == strings.ToLower(known) && key != known {
+				return cat, fmt.Errorf("key spelling: %w", ErrFeedMalformed)
 			}
 		}
-		if e.DateAdded, err = parseFeedTime(v.DateAdded, kevDateLayout); err != nil {
-			return KEVCatalog{}, fmt.Errorf("%s: dateAdded: %w", where, err)
-		}
-		if v.DueDate != "" {
-			if e.DueDate, err = parseFeedTime(v.DueDate, kevDateLayout); err != nil {
-				return KEVCatalog{}, fmt.Errorf("%s: dueDate: %w", where, err)
+		if key == kevKeyVulns {
+			sawVulns = true
+			if read, err = parseKEVEntries(ctx, dec, br, &cat); err != nil {
+				return cat, err
 			}
+			continue
 		}
-		switch v.Ransomware {
-		case kevRansomwareKnown:
-			e.KnownRansomware = true
-		case kevRansomwareUnknown, "":
+		raw, err := decodeRecord(dec, br, "header", MaxKEVHeaderValueBytes)
+		if err != nil {
+			return cat, err
+		}
+		if err := checkJSON(raw, MaxJSONDepth); err != nil {
+			return cat, fmt.Errorf("%s: %w", key, err)
+		}
+		var target any
+		switch key {
+		case kevKeyVersion:
+			target = &cat.Version
+		case kevKeyReleased:
+			target = &released
+		case kevKeyCount:
+			target = &count
 		default:
-			return KEVCatalog{}, fmt.Errorf("%s: knownRansomwareCampaignUse: %w", where, ErrFeedMalformed)
+			continue // unknown or unused top-level field
 		}
-		cat.Entries = append(cat.Entries, e)
+		if err := json.Unmarshal(raw, target); err != nil {
+			return cat, fmt.Errorf("%s: %w", key, ErrFeedMalformed)
+		}
+	}
+	if err := expectDelim(dec, '}'); err != nil {
+		return cat, br.fail("end", err)
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return cat, br.fail("data after the catalog", err)
+	}
+	if br.exceeded {
+		return cat, ErrFeedLimit
+	}
+	if !kevVersionRe.MatchString(cat.Version) {
+		return cat, fmt.Errorf("catalogVersion: %w", ErrFeedMalformed)
+	}
+	var err error
+	if cat.Released, err = parseFeedTime(released, time.RFC3339Nano); err != nil {
+		return cat, fmt.Errorf("dateReleased: %w", err)
+	}
+	if !sawVulns || count == nil || *count != read {
+		return cat, fmt.Errorf("count does not match entries: %w", ErrFeedMalformed)
 	}
 	return cat, nil
+}
+
+// parseKEVEntries streams the vulnerabilities array into cat and returns
+// the number of entries read, skipped ones included.
+func parseKEVEntries(ctx context.Context, dec *json.Decoder, br *boundedReader, cat *KEVCatalog) (int, error) {
+	if err := expectDelim(dec, '['); err != nil {
+		return 0, br.fail("vulnerabilities", err)
+	}
+	seen := make(map[string]struct{})
+	read := 0
+	for more(dec, br) {
+		if read%1024 == 0 {
+			if err := ctx.Err(); err != nil {
+				return read, err
+			}
+		}
+		if read >= MaxKEVEntries {
+			return read, fmt.Errorf("more than %d entries: %w", MaxKEVEntries, ErrFeedLimit)
+		}
+		i := read
+		read++
+		raw, err := decodeRecord(dec, br, "entry", MaxKEVEntryBytes)
+		if err != nil {
+			return read, fmt.Errorf("entry %d: %w", i, err)
+		}
+		e, err := parseKEVEntry(raw)
+		if err != nil {
+			if recordSkippable(err) {
+				cat.Skipped++
+				continue
+			}
+			return read, fmt.Errorf("entry %d: %w", i, err)
+		}
+		if _, dup := seen[e.CVE]; dup {
+			return read, fmt.Errorf("%s: duplicate: %w", e.CVE, ErrFeedMalformed)
+		}
+		seen[e.CVE] = struct{}{}
+		cat.Entries = append(cat.Entries, e)
+	}
+	if err := expectDelim(dec, ']'); err != nil {
+		return read, br.fail("vulnerabilities end", err)
+	}
+	return read, nil
+}
+
+// parseKEVEntry validates one catalog entry.
+func parseKEVEntry(raw []byte) (KEVEntry, error) {
+	var v kevEntryJSON
+	if err := decodeChecked(raw, &v); err != nil {
+		return KEVEntry{}, err
+	}
+	if !cveIDRe.MatchString(v.CVEID) {
+		return KEVEntry{}, fmt.Errorf("cveID: %w", ErrFeedMalformed)
+	}
+	where := v.CVEID
+	e := KEVEntry{CVE: v.CVEID, VendorProject: v.VendorProject, Product: v.Product, Name: v.VulnerabilityName}
+	for _, s := range []string{e.VendorProject, e.Product, e.Name} {
+		if err := checkText(s, MaxKEVNameBytes); err != nil {
+			return KEVEntry{}, fmt.Errorf("%s: name: %w", where, err)
+		}
+	}
+	var err error
+	if e.DateAdded, err = parseFeedTime(v.DateAdded, kevDateLayout); err != nil {
+		return KEVEntry{}, fmt.Errorf("%s: dateAdded: %w", where, err)
+	}
+	if v.DueDate != "" {
+		if e.DueDate, err = parseFeedTime(v.DueDate, kevDateLayout); err != nil {
+			return KEVEntry{}, fmt.Errorf("%s: dueDate: %w", where, err)
+		}
+	}
+	switch v.Ransomware {
+	case kevRansomwareKnown:
+		e.KnownRansomware = true
+	case kevRansomwareUnknown, "":
+	default:
+		return KEVEntry{}, fmt.Errorf("%s: knownRansomwareCampaignUse: %w", where, ErrFeedMalformed)
+	}
+	return e, nil
 }

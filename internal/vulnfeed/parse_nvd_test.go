@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -54,14 +55,24 @@ func TestParseNVDScoresCWEsAndReferences(t *testing.T) {
 	}
 }
 
+const nvdHead = `"format":"NVD_CVE","version":"2.0","timestamp":"2024-11-02T03:00:01.000",`
+
+func nvdFeed(items string) string { return `{` + nvdHead + `"vulnerabilities":[` + items + `]}` }
+
+// nvdItem is a valid item for cve with extra fields appended to "cve".
+func nvdItem(cve, extra string) string {
+	return `{"cve":{"id":"` + cve + `","published":"2024-10-21T13:15:02.413","lastModified":"2024-11-01T20:00:00.000"` + extra + `}}`
+}
+
+// nvdRepeat joins n copies of s with commas.
+func nvdRepeat(s string, n int) string { return strings.TrimSuffix(strings.Repeat(s+",", n), ",") }
+
 func TestParseNVDRejectsMalformed(t *testing.T) {
-	head := `"format":"NVD_CVE","version":"2.0","timestamp":"2024-11-02T03:00:01.000",`
-	feed := func(items string) string { return `{` + head + `"vulnerabilities":[` + items + `]}` }
-	item := func(cve string) string {
-		return `{"cve":{"id":"CVE-2024-0001","published":"2024-10-21T13:15:02.413","lastModified":"2024-11-01T20:00:00.000"` + cve + `}}`
-	}
-	metric := func(list, data string) string {
-		return item(`,"metrics":{"` + list + `":[{"source":"nvd@nist.gov","type":"Primary","cvssData":` + data + `}]}`)
+	head, feed := nvdHead, nvdFeed
+	item := func(cve string) string { return nvdItem("CVE-2024-0001", cve) }
+	metric := `{"source":"nvd@nist.gov","type":"Primary","cvssData":{"version":"3.1","vectorString":"CVSS:3.1/AV:N","baseScore":5.0,"baseSeverity":"MEDIUM"}}`
+	weakness := func(n int) string {
+		return `{"description":[` + nvdRepeat(`{"lang":"en","value":"NVD-CWE-Other"}`, n) + `]}`
 	}
 	tests := []struct {
 		name string
@@ -80,28 +91,29 @@ func TestParseNVDRejectsMalformed(t *testing.T) {
 		{"case shadow format", `{"Format":"x",` + head + `"vulnerabilities":[]}`, ErrFeedMalformed},
 		{"trailing data", feed(``) + `{}`, ErrFeedMalformed},
 		{"truncated", `{` + head + `"vulnerabilities":[` + item(``), ErrFeedMalformed},
+		{"item syntax", feed(`{"cve":{"id" "x"}}`), ErrFeedMalformed},
 		{"huge header value", `{"x":"` + strings.Repeat("a", MaxNVDHeaderValueBytes+10) + `",` + head + `"vulnerabilities":[]}`, ErrFeedLimit},
-		{"missing cve", feed(`{}`), ErrFeedMalformed},
-		{"bad cve id", feed(`{"cve":{"id":"cve-2024-1","published":"2024-10-21T13:15:02","lastModified":"2024-10-21T13:15:02"}}`), ErrFeedMalformed},
+		{"whitespace run", `{` + head + `"vulnerabilities":[` + item(``) + strings.Repeat(" ", recordWindowSlack+1) + `]}`, ErrFeedLimit},
 		{"duplicate cve", feed(item(``) + `,` + item(``)), ErrFeedMalformed},
-		{"bad lastModified", feed(`{"cve":{"id":"CVE-2024-0001","published":"2024-10-21T13:15:02","lastModified":"x"}}`), ErrFeedMalformed},
-		{"bad status", feed(item(`,"vulnStatus":"<b>"`)), ErrFeedMalformed},
-		{"control in description", feed(item(`,"descriptions":[{"lang":"en","value":"a\u001b[31m"}]`)), ErrFeedMalformed},
-		{"bidi in description", feed(item(`,"descriptions":[{"lang":"en","value":"a` + `\` + `u202eb"}]`)), ErrFeedMalformed},
-		{"version mismatch", feed(metric("cvssMetricV31", `{"version":"3.0","vectorString":"CVSS:3.1/AV:N","baseScore":5.0,"baseSeverity":"MEDIUM"}`)), ErrFeedMalformed},
-		{"vector prefix", feed(metric("cvssMetricV31", `{"version":"3.1","vectorString":"CVSS:4.0/AV:N","baseScore":5.0,"baseSeverity":"MEDIUM"}`)), ErrFeedMalformed},
-		{"score above 10", feed(metric("cvssMetricV40", `{"version":"4.0","vectorString":"CVSS:4.0/AV:N","baseScore":10.1,"baseSeverity":"CRITICAL"}`)), ErrFeedMalformed},
-		{"score negative", feed(metric("cvssMetricV40", `{"version":"4.0","vectorString":"CVSS:4.0/AV:N","baseScore":-1,"baseSeverity":"NONE"}`)), ErrFeedMalformed},
-		{"score two decimals", feed(metric("cvssMetricV31", `{"version":"3.1","vectorString":"CVSS:3.1/AV:N","baseScore":5.55,"baseSeverity":"MEDIUM"}`)), ErrFeedMalformed},
-		{"score missing", feed(metric("cvssMetricV31", `{"version":"3.1","vectorString":"CVSS:3.1/AV:N","baseSeverity":"MEDIUM"}`)), ErrFeedMalformed},
-		{"score string", feed(metric("cvssMetricV31", `{"version":"3.1","vectorString":"CVSS:3.1/AV:N","baseScore":"9.8","baseSeverity":"MEDIUM"}`)), ErrFeedMalformed},
-		{"score overflow", feed(metric("cvssMetricV31", `{"version":"3.1","vectorString":"CVSS:3.1/AV:N","baseScore":1e999,"baseSeverity":"MEDIUM"}`)), ErrFeedMalformed},
-		{"bad severity", feed(metric("cvssMetricV31", `{"version":"3.1","vectorString":"CVSS:3.1/AV:N","baseScore":5.0,"baseSeverity":"medium"}`)), ErrFeedMalformed},
-		{"bad cwe", feed(item(`,"weaknesses":[{"description":[{"lang":"en","value":"CWE-79; drop"}]}]`)), ErrFeedMalformed},
-		{"url with space", feed(item(`,"references":[{"url":"https://a b"}]`)), ErrFeedMalformed},
+		{"long description", feed(item(`,"descriptions":[{"lang":"en","value":"` + strings.Repeat("a", MaxNVDDescriptionBytes+1) + `"}]`)), ErrFeedLimit},
 		{"url too long", feed(item(`,"references":[{"url":"https://` + strings.Repeat("a", MaxNVDReferenceURLBytes) + `"}]`)), ErrFeedLimit},
-		{"bad tag", feed(item(`,"references":[{"url":"https://a","tags":["<x>"]}]`)), ErrFeedMalformed},
-		{"too many references", feed(item(`,"references":[` + strings.TrimSuffix(strings.Repeat(`{"url":"u"},`, MaxNVDReferences+1), ",") + `]`)), ErrFeedLimit},
+		{"too many references", feed(item(`,"references":[` + nvdRepeat(`{"url":"u"}`, MaxNVDReferences+1) + `]`)), ErrFeedLimit},
+		{"too many descriptions", feed(item(`,"descriptions":[` + nvdRepeat(`{"lang":"de","value":"x"}`, MaxNVDDescriptions+1) + `]`)), ErrFeedLimit},
+		{"too many metrics", feed(item(`,"metrics":{"cvssMetricV31":[` + nvdRepeat(metric, MaxNVDMetrics+1) + `]}`)), ErrFeedLimit},
+		{"too many weaknesses", feed(item(`,"weaknesses":[` + nvdRepeat(weakness(1), MaxNVDWeaknesses+1) + `]`)), ErrFeedLimit},
+		{"too many weakness entries", feed(item(`,"weaknesses":[` + weakness(MaxNVDWeaknesses+1) + `]`)), ErrFeedLimit},
+		{"too many CWEs", feed(item(`,"weaknesses":[{"description":[` + func() string {
+			var b strings.Builder
+			for i := range MaxNVDWeaknesses + 1 {
+				if i > 0 {
+					b.WriteString(",")
+				}
+				fmt.Fprintf(&b, `{"lang":"en","value":"CWE-%d"}`, i)
+			}
+			return b.String()
+		}() + `]}]`)), ErrFeedLimit},
+		{"too many tags", feed(item(`,"references":[{"url":"https://a","tags":[` + nvdRepeat(`"Patch"`, MaxNVDReferenceTags+1) + `]}]`)), ErrFeedLimit},
+		{"too many members", feed(item(`,"x":[` + nvdRepeat("0", MaxJSONMembers+1) + `]`)), ErrFeedLimit},
 		{"too deep", feed(item(`,"configurations":` + strings.Repeat("[", MaxJSONDepth) + strings.Repeat("]", MaxJSONDepth))), ErrFeedLimit},
 		{"record too large", feed(item(`,"x":"` + strings.Repeat("a", MaxNVDRecordBytes) + `"`)), ErrFeedLimit},
 	}
@@ -112,6 +124,104 @@ func TestParseNVDRejectsMalformed(t *testing.T) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
 			}
 		})
+	}
+	// At the limits the item is accepted.
+	at := nvdItem("CVE-2024-0001", `,"metrics":{"cvssMetricV31":[`+nvdRepeat(metric, MaxNVDMetrics)+`]},"weaknesses":[`+
+		nvdRepeat(weakness(MaxNVDWeaknesses), MaxNVDWeaknesses)+`],"references":[{"url":"https://a","tags":[`+nvdRepeat(`"Patch"`, MaxNVDReferenceTags)+`]}]`)
+	if got, _, err := collectNVD([]byte(feed(at))); err != nil || len(got) != 1 || len(got[0].CVSS) != MaxNVDMetrics || len(got[0].References[0].Tags) != MaxNVDReferenceTags {
+		t.Fatalf("at the limits: %v", err)
+	}
+}
+
+func TestParseNVDSkipsMalformedItem(t *testing.T) {
+	item := func(extra string) string { return nvdItem("CVE-2024-0002", extra) }
+	metric := func(list, data string) string {
+		return item(`,"metrics":{"` + list + `":[{"source":"nvd@nist.gov","type":"Primary","cvssData":` + data + `}]}`)
+	}
+	bad := map[string]string{
+		"missing cve":            `{}`,
+		"item not object":        `"CVE-2024-0002"`,
+		"cve wrong type":         `{"cve":[]}`,
+		"bad cve id":             `{"cve":{"id":"cve-2024-1","published":"2024-10-21T13:15:02","lastModified":"2024-10-21T13:15:02"}}`,
+		"bad lastModified":       `{"cve":{"id":"CVE-2024-0002","published":"2024-10-21T13:15:02","lastModified":"x"}}`,
+		"bad status":             item(`,"vulnStatus":"<b>"`),
+		"control in description": item(`,"descriptions":[{"lang":"en","value":"a\u001b[31m"}]`),
+		"bidi in description":    item(`,"descriptions":[{"lang":"en","value":"a` + `\` + `u202eb"}]`),
+		"case shadow key":        item(`,"ID":"CVE-2024-9999"`),
+		"non-ASCII key":          item(`,"ünknown":1`),
+		"version mismatch":       metric("cvssMetricV31", `{"version":"3.0","vectorString":"CVSS:3.1/AV:N","baseScore":5.0,"baseSeverity":"MEDIUM"}`),
+		"vector prefix":          metric("cvssMetricV31", `{"version":"3.1","vectorString":"CVSS:4.0/AV:N","baseScore":5.0,"baseSeverity":"MEDIUM"}`),
+		"score above 10":         metric("cvssMetricV40", `{"version":"4.0","vectorString":"CVSS:4.0/AV:N","baseScore":10.1,"baseSeverity":"CRITICAL"}`),
+		"score negative":         metric("cvssMetricV40", `{"version":"4.0","vectorString":"CVSS:4.0/AV:N","baseScore":-1,"baseSeverity":"NONE"}`),
+		"score two decimals":     metric("cvssMetricV31", `{"version":"3.1","vectorString":"CVSS:3.1/AV:N","baseScore":5.55,"baseSeverity":"MEDIUM"}`),
+		"score missing":          metric("cvssMetricV31", `{"version":"3.1","vectorString":"CVSS:3.1/AV:N","baseSeverity":"MEDIUM"}`),
+		"score string":           metric("cvssMetricV31", `{"version":"3.1","vectorString":"CVSS:3.1/AV:N","baseScore":"9.8","baseSeverity":"MEDIUM"}`),
+		"score overflow":         metric("cvssMetricV31", `{"version":"3.1","vectorString":"CVSS:3.1/AV:N","baseScore":1e999,"baseSeverity":"MEDIUM"}`),
+		"bad severity":           metric("cvssMetricV31", `{"version":"3.1","vectorString":"CVSS:3.1/AV:N","baseScore":5.0,"baseSeverity":"medium"}`),
+		"bad cwe":                item(`,"weaknesses":[{"description":[{"lang":"en","value":"CWE-79; drop"}]}]`),
+		"url with space":         item(`,"references":[{"url":"https://a b"}]`),
+		"bad tag":                item(`,"references":[{"url":"https://a","tags":["<x>"]}]`),
+	}
+	for name, b := range bad {
+		t.Run(name, func(t *testing.T) {
+			in := nvdFeed(nvdItem("CVE-2024-0001", ``) + "," + b + "," + nvdItem("CVE-2024-0003", ``))
+			got, sum, err := collectNVD([]byte(in))
+			if err != nil {
+				t.Fatalf("err = %v, want the item skipped", err)
+			}
+			if sum.Skipped != 1 || sum.Records != 2 || len(got) != 2 || got[0].ID != "CVE-2024-0001" || got[1].ID != "CVE-2024-0003" {
+				t.Fatalf("summary %+v, records %+v", sum, got)
+			}
+		})
+	}
+}
+
+func TestParseNVDRecordLimit(t *testing.T) {
+	in := []byte(nvdFeed(nvdItem("CVE-2024-0001", ``) + `,{},` + nvdItem("CVE-2024-0002", ``)))
+	visit := func(NVDRecord) error { return nil }
+	if sum, err := parseNVD(context.Background(), bytes.NewReader(in), 3, visit); err != nil || sum.Records != 2 || sum.Skipped != 1 {
+		t.Fatalf("at the limit: %+v, %v", sum, err)
+	}
+	// Skipped items count towards the limit.
+	if _, err := parseNVD(context.Background(), bytes.NewReader(in), 2, visit); !errors.Is(err, ErrFeedLimit) {
+		t.Fatalf("over the limit: %v", err)
+	}
+	if MaxNVDRecords != 2_000_000 {
+		t.Fatalf("MaxNVDRecords = %d", MaxNVDRecords)
+	}
+}
+
+func TestParseNVDWindowIgnoresReadAhead(t *testing.T) {
+	// Items just below MaxNVDRecordBytes, read through a reader that
+	// returns large chunks: the decoder's read-ahead into the next item
+	// while it finishes one must not count against either item.
+	pad := strings.Repeat("a", MaxNVDRecordBytes-200)
+	var items []string
+	for i := range 4 {
+		items = append(items, nvdItem(fmt.Sprintf("CVE-2024-%04d", i+1), `,"x":"`+pad+`"`))
+	}
+	got, sum, err := collectNVD([]byte(nvdFeed(strings.Join(items, ","))))
+	if err != nil || sum.Records != 4 || len(got) != 4 {
+		t.Fatalf("summary %+v, err %v", sum, err)
+	}
+	// Over the limit by one byte still fails.
+	over := nvdItem("CVE-2024-0001", `,"x":"`+pad+`"`)
+	over = nvdItem("CVE-2024-0001", `,"x":"`+pad+strings.Repeat("a", MaxNVDRecordBytes-len(over)+1)+`"`)
+	if _, _, err := collectNVD([]byte(nvdFeed(over))); !errors.Is(err, ErrFeedLimit) {
+		t.Fatalf("one byte over: %v", err)
+	}
+}
+
+func TestParseNVDLateBadFormatAfterDeliveredItems(t *testing.T) {
+	// The header may follow the items: they are delivered first and the
+	// late bad format fails the feed, so the caller must discard them.
+	in := `{"vulnerabilities":[` + nvdItem("CVE-2024-0001", ``) + `],"format":"wrong","version":"2.0","timestamp":"2024-11-02T03:00:01"}`
+	got, _, err := collectNVD([]byte(in))
+	if !errors.Is(err, ErrFeedMalformed) {
+		t.Fatalf("err = %v, want ErrFeedMalformed", err)
+	}
+	if len(got) != 1 || got[0].ID != "CVE-2024-0001" {
+		t.Fatalf("delivered %+v before the error", got)
 	}
 }
 

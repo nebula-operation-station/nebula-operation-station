@@ -54,6 +54,8 @@ type EPSSScores struct {
 	Date time.Time
 	// Scores are the rows in input order.
 	Scores []EPSSScore
+	// Skipped counts the rows left out because they broke a field rule.
+	Skipped int
 }
 
 // epssDateLayouts are the score_date forms seen in EPSS files.
@@ -61,10 +63,21 @@ var epssDateLayouts = []string{"2006-01-02T15:04:05-0700", time.RFC3339Nano, "20
 
 // ParseEPSS parses a decompressed EPSS CSV: a metadata line
 // "#model_version:<v>,score_date:<date>", the header "cve,epss,percentile"
-// and one row per CVE. Rows must have exactly three fields, values in
-// [0, 1] and unique CVEs. Use DecompressGzip for the .csv.gz download.
+// and one row per CVE. Rows must have exactly three fields and values in
+// [0, 1]; a row that breaks this is skipped and counted in
+// EPSSScores.Skipped. A bad metadata line or header, a duplicate CVE, a
+// too long line or too many rows fail the file. Use DecompressGzip for
+// the .csv.gz download.
 func ParseEPSS(ctx context.Context, r io.Reader) (EPSSScores, error) {
+	return parseEPSS(ctx, r, MaxEPSSRows)
+}
+
+// parseEPSS is ParseEPSS with the row limit as a parameter, so tests can
+// reach it with a small file. maxRows counts every row, skipped ones
+// included.
+func parseEPSS(ctx context.Context, r io.Reader, maxRows int) (EPSSScores, error) {
 	var out EPSSScores
+	rows := 0
 	br := newBoundedReader(r, MaxEPSSBytes)
 	sc := bufio.NewScanner(br)
 	sc.Buffer(make([]byte, 0, MaxEPSSLineBytes), MaxEPSSLineBytes)
@@ -92,17 +105,22 @@ func ParseEPSS(ctx context.Context, r io.Reader) (EPSSScores, error) {
 				return EPSSScores{}, fmt.Errorf("epss: %w", err)
 			}
 		}
+		if rows >= maxRows {
+			return EPSSScores{}, fmt.Errorf("epss: more than %d rows: %w", maxRows, ErrFeedLimit)
+		}
+		rows++
 		row, err := parseEPSSRow(s)
 		if err != nil {
+			if recordSkippable(err) {
+				out.Skipped++
+				continue
+			}
 			return EPSSScores{}, fmt.Errorf("epss line %d: %w", line, err)
 		}
 		if _, dup := seen[row.CVE]; dup {
 			return EPSSScores{}, fmt.Errorf("epss %s: duplicate: %w", row.CVE, ErrFeedMalformed)
 		}
 		seen[row.CVE] = struct{}{}
-		if len(out.Scores) >= MaxEPSSRows {
-			return EPSSScores{}, fmt.Errorf("epss: more than %d rows: %w", MaxEPSSRows, ErrFeedLimit)
-		}
 		out.Scores = append(out.Scores, row)
 	}
 	if err := sc.Err(); err != nil {

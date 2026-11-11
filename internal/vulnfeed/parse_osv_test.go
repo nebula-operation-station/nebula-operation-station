@@ -6,7 +6,9 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -84,6 +86,9 @@ func TestParseOSVRejectsMalformed(t *testing.T) {
 		{"bad alias", `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","aliases":["a b"]}`, ErrFeedMalformed},
 		{"alias wrong type", `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","aliases":"CVE-2024-1234"}`, ErrFeedMalformed},
 		{"too many aliases", `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","aliases":[` + strings.TrimSuffix(strings.Repeat(`"CVE-2024-1234",`, MaxOSVAliases+1), ",") + `]}`, ErrFeedLimit},
+		{"too many affected", base(strings.TrimSuffix(strings.Repeat(`{},`, MaxOSVAffected+1), ",")), ErrFeedLimit},
+		{"too many ranges", base(`{` + pkg + `,"ranges":[` + strings.TrimSuffix(strings.Repeat(`{"type":"GIT","events":[]},`, MaxOSVRanges+1), ",") + `]}`), ErrFeedLimit},
+		{"too many events", rng("ECOSYSTEM", strings.TrimSuffix(strings.Repeat(`{"introduced":"0"},`, MaxOSVEvents+1), ",")), ErrFeedLimit},
 		{"case shadow id", `{"id":"OSV-1","ID":"OSV-2","modified":"2024-01-01T00:00:00Z"}`, ErrFeedMalformed},
 		{"bad ecosystem", base(`{"package":{"ecosystem":"","name":"zlib"}}`), ErrFeedMalformed},
 		{"bad package", base(`{"package":{"ecosystem":"Go","name":"a b"}}`), ErrFeedMalformed},
@@ -179,7 +184,11 @@ func TestParseOSVArchiveRejectsBadArchives(t *testing.T) {
 		{"not json name", makeZip(t, zipFile{"GO-1.txt", rec}), ErrFeedMalformed},
 		{"duplicate name", makeZip(t, zipFile{"a.json", rec}, zipFile{"a.json", rec}), ErrFeedMalformed},
 		{"duplicate id", makeZip(t, zipFile{"a.json", rec}, zipFile{"b.json", rec}), ErrFeedMalformed},
-		{"bad record", makeZip(t, zipFile{"a.json", []byte("{}")}), ErrFeedMalformed},
+		{"record over a limit", makeZip(t, zipFile{"a.json", []byte(`{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","aliases":[` +
+			strings.TrimSuffix(strings.Repeat(`"CVE-2024-1234",`, MaxOSVAliases+1), ",") + `]}`)}), ErrFeedLimit},
+		{"bad name after good file", makeZip(t, zipFile{"a.json", rec}, zipFile{"b/c.json", rec}), ErrFeedMalformed},
+		{"data before archive", append([]byte("prefix"), makeZip(t, zipFile{"a.json", rec})...), ErrFeedMalformed},
+		{"truncated", makeZip(t, zipFile{"a.json", rec})[:30], ErrFeedMalformed},
 		{"record too large", makeZip(t, zipFile{"a.json", bytes.Repeat([]byte(" "), MaxOSVRecordBytes+1)}), ErrFeedLimit},
 	}
 	for _, tc := range tests {
@@ -192,6 +201,139 @@ func TestParseOSVArchiveRejectsBadArchives(t *testing.T) {
 	}
 	if _, err := ParseOSVArchive(context.Background(), bytes.NewReader(nil), 0, func(OSVRecord) error { return nil }); !errors.Is(err, ErrFeedLimit) {
 		t.Fatalf("zero size: %v", err)
+	}
+}
+
+func TestParseOSVArchiveSkipsMalformedRecord(t *testing.T) {
+	good := zipFile{"GO-2024-3000.json", readFixture(t, "parse_osv", "go.json")}
+	good2 := zipFile{"DSA-5793-1.json", readFixture(t, "parse_osv", "dsa.json")}
+	bad := map[string]string{
+		"empty object":            `{}`,
+		"not json":                `nope`,
+		"bad modified":            `{"id":"OSV-1","modified":"yesterday"}`,
+		"non-ASCII key":           `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","database_specific":{"ünïcode":1}}`,
+		"case duplicate key":      `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","database_specific":{"a":1,"A":2}}`,
+		"version outside pattern": `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","affected":[{"package":{"ecosystem":"Debian:12","name":"zlib"},"ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"1.0 beta"}]}]}]}`,
+	}
+	for name, b := range bad {
+		t.Run(name, func(t *testing.T) {
+			got, sum, err := parseZip(makeZip(t, good, zipFile{"OSV-1.json", []byte(b)}, good2))
+			if err != nil {
+				t.Fatalf("err = %v, want the record skipped", err)
+			}
+			if sum.Records != 2 || sum.Skipped != 1 || len(got) != 2 || got[0].ID != "GO-2024-3000" || got[1].ID != "DSA-5793-1" {
+				t.Fatalf("summary %+v, records %d", sum, len(got))
+			}
+		})
+	}
+}
+
+// setEOCDCount overwrites the record counts of the (non-zip64) end of
+// central directory record of data.
+func setEOCDCount(t *testing.T, data []byte, n uint16) {
+	t.Helper()
+	i := bytes.LastIndex(data, []byte("PK\x05\x06"))
+	if i < 0 {
+		t.Fatal("no end record")
+	}
+	binary.LittleEndian.PutUint16(data[i+8:], n)
+	binary.LittleEndian.PutUint16(data[i+10:], n)
+}
+
+func TestParseOSVArchiveFileLimit(t *testing.T) {
+	rec := readFixture(t, "parse_osv", "go.json")
+	files := []zipFile{{"a.json", rec}, {"b.json", rec}, {"c.json", rec}}
+	visit := func(OSVRecord) error { return nil }
+	parse := func(data []byte, max int) (OSVArchiveSummary, error) {
+		return parseOSVArchive(context.Background(), bytes.NewReader(data), int64(len(data)), max, visit)
+	}
+	data := makeZip(t, files...)
+	// Same ID three times: at the limit the duplicate stops the parse
+	// only after the file count passed.
+	if _, err := parse(data, 3); !errors.Is(err, ErrFeedMalformed) {
+		t.Fatalf("at the limit: %v", err)
+	}
+	if _, err := parse(data, 2); !errors.Is(err, ErrFeedLimit) {
+		t.Fatalf("declared count over the limit: %v", err)
+	}
+	// A directory that declares fewer records than it holds: the walk
+	// stops at the limit, before zip.NewReader builds the entries.
+	lying := slices.Clone(data)
+	setEOCDCount(t, lying, 1)
+	if _, err := parse(lying, 2); !errors.Is(err, ErrFeedLimit) {
+		t.Fatalf("walked count over the limit: %v", err)
+	}
+	if _, err := parse(lying, 3); !errors.Is(err, ErrFeedMalformed) {
+		t.Fatalf("count mismatch: %v", err)
+	}
+	if MaxOSVArchiveFiles != 1_000_000 {
+		t.Fatalf("MaxOSVArchiveFiles = %d", MaxOSVArchiveFiles)
+	}
+}
+
+func TestParseOSVArchiveZip64DeclaredCountOverLimit(t *testing.T) {
+	// A zip64 end record declaring MaxOSVArchiveFiles+1 records with an
+	// empty directory: the exported parser rejects it from the end record
+	// alone.
+	var b []byte
+	rec := make([]byte, 56)
+	copy(rec, "PK\x06\x06")
+	binary.LittleEndian.PutUint64(rec[4:], 44)
+	binary.LittleEndian.PutUint64(rec[24:], MaxOSVArchiveFiles+1)
+	binary.LittleEndian.PutUint64(rec[32:], MaxOSVArchiveFiles+1)
+	b = append(b, rec...)
+	loc := make([]byte, 20)
+	copy(loc, "PK\x06\x07")
+	binary.LittleEndian.PutUint64(loc[8:], 0)
+	binary.LittleEndian.PutUint32(loc[16:], 1)
+	b = append(b, loc...)
+	end := make([]byte, 22)
+	copy(end, "PK\x05\x06")
+	binary.LittleEndian.PutUint16(end[8:], 0xffff)
+	binary.LittleEndian.PutUint16(end[10:], 0xffff)
+	binary.LittleEndian.PutUint32(end[12:], 0xffffffff)
+	binary.LittleEndian.PutUint32(end[16:], 0xffffffff)
+	b = append(b, end...)
+	if _, _, err := parseZip(b); !errors.Is(err, ErrFeedLimit) {
+		t.Fatalf("err = %v, want ErrFeedLimit", err)
+	}
+	// The same end record declaring zero records is an empty archive.
+	binary.LittleEndian.PutUint64(b[24:], 0)
+	binary.LittleEndian.PutUint64(b[32:], 0)
+	if _, sum, err := parseZip(b); err != nil || sum.Records != 0 {
+		t.Fatalf("empty zip64: %+v, %v", sum, err)
+	}
+}
+
+func TestParseOSVArchiveByteLimit(t *testing.T) {
+	// Files whose declared sizes add up to more than MaxOSVArchiveBytes
+	// are rejected before any of them is read.
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	n := int(MaxOSVArchiveBytes/MaxOSVRecordBytes) + 1
+	for i := range n {
+		w, err := zw.CreateRaw(&zip.FileHeader{
+			Name: fmt.Sprintf("OSV-%d.json", i), Method: zip.Deflate,
+			CompressedSize64: 1, UncompressedSize64: MaxOSVRecordBytes,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte{0}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	visited := 0
+	data := buf.Bytes()
+	_, err := ParseOSVArchive(context.Background(), bytes.NewReader(data), int64(len(data)), func(OSVRecord) error {
+		visited++
+		return nil
+	})
+	if !errors.Is(err, ErrFeedLimit) || visited != 0 {
+		t.Fatalf("err = %v after %d records, want ErrFeedLimit before any", err, visited)
 	}
 }
 

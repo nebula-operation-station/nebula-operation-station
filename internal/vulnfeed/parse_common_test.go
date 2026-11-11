@@ -5,10 +5,13 @@ package vulnfeed
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -42,10 +45,10 @@ func TestBoundedReaderStopsAtTotalLimit(t *testing.T) {
 
 func TestBoundedReaderWindowLimitsOneRecord(t *testing.T) {
 	br := newBoundedReader(strings.NewReader(strings.Repeat("a", 100)), 1000)
-	br.resetWindow(10)
+	br.startWindow(0, 10)
 	buf := make([]byte, 64)
 	n, err := br.Read(buf)
-	if n > 11 {
+	if n > 10 {
 		t.Fatalf("read %d bytes in a 10-byte window", n)
 	}
 	for err == nil {
@@ -54,10 +57,82 @@ func TestBoundedReaderWindowLimitsOneRecord(t *testing.T) {
 	if !errors.Is(err, ErrFeedLimit) {
 		t.Fatalf("err = %v, want ErrFeedLimit", err)
 	}
-	// Sticky: later reads fail too, even after a reset.
-	br.resetWindow(1000)
+	// Sticky: later reads fail too, even after the window is lifted.
+	br.endWindow()
 	if _, err := br.Read(buf); !errors.Is(err, ErrFeedLimit) {
 		t.Fatalf("after exceed: %v", err)
+	}
+}
+
+func TestBoundedReaderWindowCountsFromRecordStart(t *testing.T) {
+	// 30 bytes were read ahead before the record at offset 20 started:
+	// the 10 bytes past the record start count for its window, so only
+	// 5 more fit into a 15-byte window, and reads never pass its end.
+	br := newBoundedReader(strings.NewReader(strings.Repeat("a", 100)), 1000)
+	buf := make([]byte, 30)
+	if n, err := br.Read(buf); n != 30 || err != nil {
+		t.Fatalf("read ahead: %d, %v", n, err)
+	}
+	br.startWindow(20, 15)
+	n, err := br.Read(make([]byte, 64))
+	if n != 5 || err != nil {
+		t.Fatalf("read %d bytes (%v), want the 5 left in the window", n, err)
+	}
+	if _, err := br.Read(buf); !errors.Is(err, ErrFeedLimit) {
+		t.Fatalf("read past the window: %v", err)
+	}
+}
+
+func TestCheckJSONCountsMembersWhileWalking(t *testing.T) {
+	list := func(n int, elem string) string {
+		return strings.TrimSuffix(strings.Repeat(elem+",", n), ",")
+	}
+	obj := func(n int) string {
+		var b strings.Builder
+		b.WriteString("{")
+		for i := range n {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			fmt.Fprintf(&b, `"k%d":0`, i)
+		}
+		b.WriteString("}")
+		return b.String()
+	}
+	tests := []struct {
+		name string
+		in   string
+		want error
+	}{
+		{"array at limit", "[" + list(MaxJSONMembers, "{}") + "]", nil},
+		{"array over limit", "[" + list(MaxJSONMembers+1, "{}") + "]", ErrFeedLimit},
+		{"nested array over limit", `{"a":[` + list(MaxJSONMembers+1, "0") + "]}", ErrFeedLimit},
+		{"object at limit", obj(MaxJSONMembers), nil},
+		{"object over limit", obj(MaxJSONMembers + 1), ErrFeedLimit},
+		{"limit is per container", "[" + list(2, "["+list(MaxJSONMembers, "0")+"]") + "]", nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkJSON([]byte(tc.in), MaxJSONDepth)
+			if tc.want == nil && err != nil || tc.want != nil && !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestRecordSkippableOnlyForMalformedRecords(t *testing.T) {
+	cases := map[error]bool{
+		fmt.Errorf("x: %w", ErrFeedMalformed):       true,
+		fmt.Errorf("x: %w", ErrFeedLimit):           false,
+		errors.Join(ErrFeedMalformed, ErrFeedLimit): false,
+		context.Canceled:                            false,
+		errors.New("visit failed"):                  false,
+	}
+	for err, want := range cases {
+		if got := recordSkippable(err); got != want {
+			t.Errorf("recordSkippable(%v) = %v, want %v", err, got, want)
+		}
 	}
 }
 
@@ -68,6 +143,34 @@ func TestBoundedReaderKeepsIOError(t *testing.T) {
 	got := br.fail("x", err)
 	if !errors.Is(got, ioErr) || errors.Is(got, ErrFeedMalformed) {
 		t.Fatalf("fail = %v, want the I/O error", got)
+	}
+}
+
+// allocStats is what one parser call allocated.
+type allocStats struct{ mallocs, bytes uint64 }
+
+// measureAllocs runs f once, requires it to fail with ErrFeedLimit and
+// returns what it allocated.
+func measureAllocs(t *testing.T, f func() error) allocStats {
+	t.Helper()
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	err := f()
+	runtime.ReadMemStats(&after)
+	if !errors.Is(err, ErrFeedLimit) {
+		t.Fatalf("err = %v, want ErrFeedLimit", err)
+	}
+	return allocStats{after.Mallocs - before.Mallocs, after.TotalAlloc - before.TotalAlloc}
+}
+
+// assertCovers fails when other allocated clearly more than s: an input
+// with a much longer tail after the limit must cost no more than the
+// input just over the limit (25 % plus a constant for noise).
+func (s allocStats) assertCovers(t *testing.T, other allocStats) {
+	t.Helper()
+	if other.mallocs > s.mallocs+s.mallocs/4+1000 || other.bytes > s.bytes+s.bytes/4+1<<20 {
+		t.Fatalf("allocation grows with the input past the limit: just over %+v, longer %+v", s, other)
 	}
 }
 
