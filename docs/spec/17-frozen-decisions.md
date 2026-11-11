@@ -266,7 +266,7 @@ The following can be chosen during implementation without reopening the architec
 | Download rate | 10/min, 60/h per client address, IPv6 per /64 | [03 v25-03-06](03-processes-and-data.md#v25-03-06) | D7 |
 | Rate-limit table | 4096 buckets, LRU, never refuse because full | [03 v25-03-06](03-processes-and-data.md#v25-03-06) | D7 |
 | Forwarded header | 1 KiB combined, 16 entries | [03 v25-03-06](03-processes-and-data.md#v25-03-06), [09 v25-09-01](09-untrusted-host-data.md#v25-09-01) | D7 |
-| NetBird API response limits | named constants set by EN-11 (not ADR numbers) | [09 v25-09-01](09-untrusted-host-data.md#v25-09-01) | — |
+| NetBird API response limits | setup-key list: `NetBirdKeyListMaxKeys` = 10 000, `NetBirdKeyListMaxBytes` = 16 MiB, `NetBirdKeyListMaxPages` = 1; setup-key get by key ID: `NetBirdKeyGetMaxBytes` = 64 KiB; every other NetBird call: named constants set by EN-11 (not ADR numbers) (amended 2026-11-11; previously: all "named constants set by EN-11") | [03 v25-03-04](03-processes-and-data.md#v25-03-04), [09 v25-09-01](09-untrusted-host-data.md#v25-09-01) | — |
 
 <a id="v25-17-05"></a>
 <!-- Spec revision (ADR 0013, EN-02): v25-17-05 -->
