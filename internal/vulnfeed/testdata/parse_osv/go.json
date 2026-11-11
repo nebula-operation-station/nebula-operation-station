@@ -1,0 +1,16 @@
+{
+  "id": "GO-2024-3000",
+  "modified": "2024-11-01T12:00:00Z",
+  "published": "2024-08-01T12:00:00Z",
+  "aliases": ["CVE-2024-45678", "GHSA-abcd-efgh-ijkl"],
+  "affected": [
+    {
+      "package": {"ecosystem": "Go", "name": "github.com/example/mod"},
+      "ranges": [
+        {"type": "SEMVER", "events": [{"introduced": "0"}, {"fixed": "1.2.4"}, {"introduced": "2.0.0-rc.1"}, {"last_affected": "2.0.1+build.5"}]},
+        {"type": "GIT", "events": [{"introduced": "0"}]},
+        {"type": "FUTURE_TYPE", "events": [{"whatever": "x"}]}
+      ]
+    }
+  ]
+}

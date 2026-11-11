@@ -1,0 +1,9 @@
+[03 Nov 2024] DSA-5804-1 webkit2gtk - security update
+	{CVE-2024-44244 CVE-2024-44296}
+	[bookworm] - webkit2gtk 2.46.3-1~deb12u1
+[21 Oct 2024] DSA-5793-1 chromium - security update
+	{CVE-2024-10229 CVE-2024-10230}
+	[bookworm] - chromium 130.0.6723.69-1~deb12u1
+	NOTE: example note
+[29 Dec 2005] DSA-938-1 koffice - buffer overflow
+	{CVE-2005-3193}
