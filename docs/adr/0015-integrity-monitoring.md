@@ -425,7 +425,10 @@ the host:
      host claims a different real version whose file matches, NOS sees a
      consistent but possibly downgraded package; this is cross-checked
      against NOS's own inventory history and ADR 0011 findings and shown
-     as "version changed outside NOS" when no NOS job explains it.
+     as "version changed outside NOS" when no NOS job explains it. A job
+     explains a version only under the D9 rule: the version the executor
+     requested, never a lower or equal one, so a downgrade is never an
+     expected change.
    - **Conffiles and generated files.** Package conffiles under `/etc`
      and files that maintainer scripts generate (initramfs, alternatives,
      diversions) are compared against the NOS baseline (2.), with the
@@ -489,7 +492,8 @@ of `InRelease` and decompression of `data.tar.xz` (Debian) and
   rate limited, with cache keys
   `(archive, suite, component, package, version, arch, deb SHA-256)`.
 - **What NOS receives.** Per `(package, version, arch, deb SHA-256)` a
-  bounded list `(path, type, size, mode, sha256, link)`, posted through a
+  bounded list `(path, type, size, mode, uid, gid, sha256, link)` taken
+  from the `data.tar.*` headers and contents, posted through a
   new write scope on `/api/v1`. This is **untrusted input** under spec 09
   (strict schema, limits: 20,000 files and 4 MiB per package, path rules as
   D6). NOS cannot re-derive these hashes itself: the reference is as
@@ -534,12 +538,25 @@ alone.** A change is *expected* only when all of these hold:
 - it falls between the start and end of a NOS job on that host that the
   executor authorized (apt install/upgrade, a module action that declares
   the paths it writes, an ADR 0007 batch member), and
-- for a package file: the package and new version are in the job's
-  result **and** the new hash equals a **verified** archive reference for
-  that version (D7 item 1, built by D8), and
+- for a package file: the package is one the executor authorized the job
+  to change, **and** the version the host reports afterwards is the one
+  the executor requested: the exact target version frozen in the job's
+  parameters or, for a job without a pinned version (for example
+  `apt upgrade`), a version strictly higher in dpkg ordering than the one
+  in NOS's last complete inventory before the job. The host-reported
+  result only confirms this; a lower or equal version is never expected,
+  so a signed downgrade or a reinstall of an older build is a finding
+  (D7 item 1 "Which version?"); **and** the new record equals a
+  **verified** archive reference for that version (D7 item 1, built by
+  D8) in every field the reference carries: content hash, type, size,
+  mode including the setuid, setgid and sticky bits, owner and symlink
+  target. A new setuid or setgid bit, a mode or owner change or a type
+  change that the reference does not carry is never expected, and
 - for a non-package file: the job's action contract declares the path
-  **and** the new hash equals content the executor itself knows: the bytes
-  it sent or the artifact it deployed.
+  **and** the new hash equals content the executor itself knows (the bytes
+  it sent or the artifact it deployed) **and** type, mode and owner equal
+  those the action sets or, where it sets none, the previous baseline
+  values.
 
 **Without a verified reference a change is never expected.** If no
 verified per-file reference exists for the package version (always the
