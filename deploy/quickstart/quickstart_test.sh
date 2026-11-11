@@ -38,19 +38,19 @@ else
   bad "release bundle provisioning and packaging"
 fi
 
-expected=(nebula nebula-server nebula-executor nebula-discovery nebula-pve-collector)
+expected=(nebula nebula-server nebula-executor nebula-discovery nebula-pve-collector nebula-netdev-collector)
 
 # The same parser the scripts use (one copy, sourced here and there).
 # shellcheck source=binaries_lib.sh
 . "$script_dir/binaries_lib.sh"
 
-# --- 1. The list file names exactly the five binaries ----------------------
+# --- 1. The list file names exactly the six binaries ----------------------
 if [[ -f "$list_file" ]]; then
   mapfile -t got < <(read_binaries "$list_file")
   if [[ "${got[*]}" == "${expected[*]}" ]]; then
-    ok "binaries.txt lists exactly the five binaries"
+    ok "binaries.txt lists exactly the six binaries"
   else
-    bad "binaries.txt lists exactly the five binaries (got: ${got[*]})"
+    bad "binaries.txt lists exactly the six binaries (got: ${got[*]})"
   fi
 else
   bad "binaries.txt exists"
@@ -190,9 +190,9 @@ else
   bad "case 3 guard catches all twelve hardcoded variants (got: ${hits@Q})"
 fi
 
-# --- 4. Functional: the copy block of setup-nebula.sh copies all five -------
+# --- 4. Functional: the copy block of setup-nebula.sh copies all six -------
 # Extract the real copy block from the script (between the begin/end
-# markers) and run it against a sandbox checkout: bin/ holds the five
+# markers) and run it against a sandbox checkout: bin/ holds the six
 # built binaries, and the block must copy all of them next to deploy/.
 sandbox=$(mktemp -d)
 trap 'rm -rf "$sandbox" "$libtmp"' EXIT
@@ -211,12 +211,12 @@ if [[ ${#copy_block[@]} -gt 0 ]] && eval "$(printf '%s\n' "${copy_block[@]}")"; 
     [[ -f "$sandbox/$b" ]] || missing+=("$b")
   done
   if [[ ${#missing[@]} -eq 0 ]]; then
-    ok "setup-nebula.sh copy block copies all five binaries next to deploy/"
+    ok "setup-nebula.sh copy block copies all six binaries next to deploy/"
   else
-    bad "setup-nebula.sh copy block copies all five binaries next to deploy/ (missing: ${missing[*]})"
+    bad "setup-nebula.sh copy block copies all six binaries next to deploy/ (missing: ${missing[*]})"
   fi
 else
-  bad "setup-nebula.sh copy block copies all five binaries next to deploy/ (block missing or failed)"
+  bad "setup-nebula.sh copy block copies all six binaries next to deploy/ (block missing or failed)"
 fi
 # A comments-only list is not a list: the block must stop instead of
 # copying nothing (install.sh would then fail on a list it cannot see).
@@ -235,7 +235,7 @@ else
 fi
 cp "$list_file" "$sandbox/deploy/quickstart/binaries.txt"
 
-# --- 5. Functional: the load block of install.sh yields the five names ------
+# --- 5. Functional: the load block of install.sh yields the six names ------
 # Same idea for install.sh: run its real load block with a sandbox
 # script_dir and check the array it produces.
 mkdir -p "$sandbox/deploy/quickstart"
@@ -245,15 +245,15 @@ if [[ ${#load_block[@]} -gt 0 ]]; then
   eval "$(printf '%s\n' "${load_block[@]}")"
   # shellcheck disable=SC2154 # assigned inside the eval'd block
   if [[ "${binaries[*]}" == "${expected[*]}" ]]; then
-    ok "install.sh load block yields exactly the five binaries"
+    ok "install.sh load block yields exactly the six binaries"
   else
-    bad "install.sh load block yields exactly the five binaries (got: ${binaries[*]})"
+    bad "install.sh load block yields exactly the six binaries (got: ${binaries[*]})"
   fi
 else
-  bad "install.sh load block yields exactly the five binaries (block missing)"
+  bad "install.sh load block yields exactly the six binaries (block missing)"
 fi
 
-# --- 6. Functional: the remove block of uninstall.sh removes all five -------
+# --- 6. Functional: the remove block of uninstall.sh removes all six -------
 # The remove block must remove every binary from the array the CHECK block
 # produces (not a list the test fills itself): the check block is the real
 # code path from the list file to the remove loop, so a truncation inside it
@@ -278,16 +278,16 @@ if [[ ${#remove_block[@]} -gt 0 ]] && ( eval "$(printf '%s\n' "${remove_block[@]
     [[ -e "$sandbox/usrbin/$b" ]] && left+=("$b")
   done
   if [[ ${#left[@]} -eq 0 ]]; then
-    ok "uninstall.sh remove block removes all five binaries"
+    ok "uninstall.sh remove block removes all six binaries"
   else
-    bad "uninstall.sh remove block removes all five binaries (left: ${left[*]})"
+    bad "uninstall.sh remove block removes all six binaries (left: ${left[*]})"
   fi
 else
-  bad "uninstall.sh remove block removes all five binaries (block missing or failed)"
+  bad "uninstall.sh remove block removes all six binaries (block missing or failed)"
 fi
 
 # --- 6b. Functional: the list check of uninstall.sh runs before removal -----
-# The check must yield exactly the five names on the valid list (the
+# The check must yield exactly the six names on the valid list (the
 # end-to-end link from the list file to the remove block), fail on a
 # missing, comments-only or invalid list, and it must be placed before the
 # first removal in the script: a missing list must not leave the system half
@@ -296,9 +296,9 @@ mapfile -t ucheck_block < <(sed -n '/^# begin: check binary list/,/^# end: check
 script_dir="$sandbox/deploy"
 ucheck_out=$(ucheck_yield 2>/dev/null)
 if [[ "$ucheck_out" == "$(printf '%s\n' "${expected[@]}")" ]]; then
-  ok "uninstall.sh list check yields exactly the five binaries"
+  ok "uninstall.sh list check yields exactly the six binaries"
 else
-  bad "uninstall.sh list check yields exactly the five binaries (got: ${ucheck_out@Q})"
+  bad "uninstall.sh list check yields exactly the six binaries (got: ${ucheck_out@Q})"
 fi
 mv "$sandbox/deploy/quickstart/binaries.txt" "$sandbox/blist.bak"
 if ( eval "$(printf '%s\n' "${ucheck_block[@]}")" ); then
@@ -401,8 +401,8 @@ done
 rm -rf "$order_sandbox"
 
 # --- 7. Functional: the layout check of install.sh (both paths) -------------
-# from-package: the five binaries must exist in bin_dir; a missing one must
-# stop the script. tarball: the five binaries must exist at tarball_root.
+# from-package: the six binaries must exist in bin_dir; a missing one must
+# stop the script. tarball: the six binaries must exist at tarball_root.
 mkdir -p "$sandbox/pkgbin" "$sandbox/deploy/systemd" "$sandbox/tarball"
 for b in "${expected[@]}"; do
   printf '#!/bin/sh\n' > "$sandbox/pkgbin/$b"
@@ -416,9 +416,9 @@ systemd_dir="$sandbox/etc/systemd/system"
 script_dir="$sandbox/deploy"
 mapfile -t check_block < <(sed -n '/^# begin: check layout/,/^# end: check layout/p' "$install_sh" | grep -v '^# \(begin\|end\): check layout$')
 if [[ ${#check_block[@]} -gt 0 ]] && ( eval "$(printf '%s\n' "${check_block[@]}")" ); then
-  ok "install.sh layout check passes with all five binaries (from-package)"
+  ok "install.sh layout check passes with all six binaries (from-package)"
 else
-  bad "install.sh layout check passes with all five binaries (from-package)"
+  bad "install.sh layout check passes with all six binaries (from-package)"
 fi
 mv "$sandbox/pkgbin/nebula-pve-collector" "$sandbox/gone"
 if ( eval "$(printf '%s\n' "${check_block[@]}")" ); then
@@ -430,13 +430,13 @@ mv "$sandbox/gone" "$sandbox/pkgbin/nebula-pve-collector"
 from_package=0
 tarball_root="$sandbox/tarball"
 if ( eval "$(printf '%s\n' "${check_block[@]}")" ); then
-  ok "install.sh layout check passes with all five binaries (tarball)"
+  ok "install.sh layout check passes with all six binaries (tarball)"
 else
-  bad "install.sh layout check passes with all five binaries (tarball)"
+  bad "install.sh layout check passes with all six binaries (tarball)"
 fi
 # Negative: a tarball missing one binary must fail the layout check. This is
 # the case a truncated list (the original four-of-five bug) or a disabled
-# check would pass and stay green: the check must see all five, not a subset.
+# check would pass and stay green: the check must see all six, not a subset.
 mv "$sandbox/tarball/nebula-pve-collector" "$sandbox/gone-tarball"
 if ( eval "$(printf '%s\n' "${check_block[@]}")" ); then
   bad "install.sh layout check fails when a binary is missing (tarball)"
@@ -444,9 +444,27 @@ else
   ok "install.sh layout check fails when a binary is missing (tarball)"
 fi
 mv "$sandbox/gone-tarball" "$sandbox/tarball/nebula-pve-collector"
+# The netdev collector (ND-15) is part of the list as well: a tarball or a
+# package without it fails the layout check too.
+mv "$sandbox/tarball/nebula-netdev-collector" "$sandbox/gone-tarball"
+if ( eval "$(printf '%s\n' "${check_block[@]}")" ); then
+  bad "install.sh layout check fails without nebula-netdev-collector (tarball)"
+else
+  ok "install.sh layout check fails without nebula-netdev-collector (tarball)"
+fi
+mv "$sandbox/gone-tarball" "$sandbox/tarball/nebula-netdev-collector"
+from_package=1
+mv "$sandbox/pkgbin/nebula-netdev-collector" "$sandbox/gone"
+if ( eval "$(printf '%s\n' "${check_block[@]}")" ); then
+  bad "install.sh layout check fails without nebula-netdev-collector (from-package)"
+else
+  ok "install.sh layout check fails without nebula-netdev-collector (from-package)"
+fi
+mv "$sandbox/gone" "$sandbox/pkgbin/nebula-netdev-collector"
+from_package=0
 
 # --- 8. Functional: the binary install loop of install.sh -------------------
-# Runs the real loop with a fake `install` (no root): all five binaries
+# Runs the real loop with a fake `install` (no root): all six binaries
 # must land in bin_dir and the change must be detected.
 mkdir -p "$sandbox/fakebin" "$sandbox/usrbin"
 cat > "$sandbox/fakebin/install" <<'FAKE'
@@ -480,9 +498,9 @@ out=$( (
   fi
 ) 2>&1 )
 if [[ "$out" == ok ]]; then
-  ok "install.sh install loop installs all five binaries"
+  ok "install.sh install loop installs all six binaries"
 else
-  bad "install.sh install loop installs all five binaries ($out)"
+  bad "install.sh install loop installs all six binaries ($out)"
 fi
 
 # --- 9. The .deb and the image ship exactly the list ------------------------
@@ -666,12 +684,12 @@ else
   bad "read_binaries ignores blank, whitespace-only and comment lines (got: ${out@Q})"
 fi
 # A valid list still parses, with or without a trailing newline.
-printf 'nebula\nnebula-server\nnebula-executor\nnebula-discovery\nnebula-pve-collector' > "$libtmp/valid.txt"
+printf 'nebula\nnebula-server\nnebula-executor\nnebula-discovery\nnebula-pve-collector\nnebula-netdev-collector' > "$libtmp/valid.txt"
 out=$(read_binaries "$libtmp/valid.txt")
 if [[ "$out" == "$(printf '%s\n' "${expected[@]}")" ]]; then
-  ok "read_binaries parses a valid five-name list"
+  ok "read_binaries parses a valid six-name list"
 else
-  bad "read_binaries parses a valid five-name list (got: ${out@Q})"
+  bad "read_binaries parses a valid six-name list (got: ${out@Q})"
 fi
 
 echo

@@ -78,7 +78,8 @@ func TestDeploymentsProvisionSpoolModes(t *testing.T) {
 	}
 }
 
-// Exactly the directories the importers consume, plus the want-list, are
+// Exactly the directories the importers consume, plus the want-list and the
+// optional network device spool (ADR 0010 ND-16 import, "-" prefix), are
 // writable for the server: not the root with the generation state, not the
 // live samples.
 func TestServerDropInGrantsOnlyWhatSpoolNeeds(t *testing.T) {
@@ -88,7 +89,7 @@ func TestServerDropInGrantsOnlyWhatSpoolNeeds(t *testing.T) {
 			got = append(got, path)
 		}
 	}
-	want := []string{"${var_lib}/discovery/jobs", "${var_lib}/pve/requests"}
+	want := []string{"${var_lib}/discovery/jobs", "${var_lib}/pve/requests", "-${var_lib}/netdev"}
 	for _, d := range consumedDirs() {
 		want = append(want, "${var_lib}/pve/"+d)
 	}

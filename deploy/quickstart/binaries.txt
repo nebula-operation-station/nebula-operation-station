@@ -9,3 +9,4 @@ nebula-server
 nebula-executor
 nebula-discovery
 nebula-pve-collector
+nebula-netdev-collector
