@@ -466,9 +466,8 @@ func TestExpansionStepsPerFieldLimit(t *testing.T) {
 	s := labSnapshot()
 	s.AddressGroups = append(s.AddressGroups, Group{Name: "leaf", Static: []string{"web-server"}})
 	var mid []string
-	for i := range MaxGroupMembers {
+	for range MaxGroupMembers {
 		mid = append(mid, "leaf")
-		_ = i
 	}
 	s.AddressGroups = append(s.AddressGroups, Group{Name: "mid", Static: mid})
 	var top []string
