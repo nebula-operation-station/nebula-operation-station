@@ -186,7 +186,7 @@ for user in "${raw_users[@]}"; do
     exit 1
   fi
   case "$user" in
-    root|nebula-server|nebula-executor|nebula-discovery|nebula-pve-collector)
+    root|nebula-server|nebula-executor|nebula-discovery|nebula-pve-collector|nebula-netdev-collector)
       echo "install.sh: $user cannot be an admin user; use a personal account" >&2
       exit 1
       ;;
@@ -418,6 +418,31 @@ for entry in results:2770 guestnet:2770 requests:2770 live:2750; do
     install -d -m "$pve_mode" "$pve_dir"
 done
 
+# Network device collector (ADR 0010, ND-15): its own system user with the
+# netdev-collector peercred role, in nebula-rpc to reach the executor socket;
+# the unit gives it no capabilities and no network
+# (nebula-netdev-collector.service). Its spool is one flat directory that the
+# collector owns and writes, and that the server group (nebula-rpc) lists,
+# reads and, once imported, unlinks: 2770, setgid so a file written by the
+# collector inherits the shared group (internal/netdevcollect/spool.go). The
+# collector unit (RestrictSUIDSGID=yes) cannot set the setgid bit itself.
+# The spool's parent is root-owned, so nothing but root can swap a link in
+# after the guard; install -d re-applies mode, owner and group on every run.
+# begin: netdev collector provisioning
+if ! getent passwd nebula-netdev-collector >/dev/null; then
+  useradd --system --home-dir "${var_lib}/netdev" --shell /usr/sbin/nologin -G "${group_name}" nebula-netdev-collector
+fi
+# install -d follows a symlink and would hand its target to the collector,
+# and a file is not a directory the spool can use: refuse both.
+netdev_path="${var_lib}/netdev"
+if [[ -L "$netdev_path" ]] || { [[ -e "$netdev_path" ]] && [[ ! -d "$netdev_path" ]]; }; then
+  echo "install.sh: ${netdev_path} is a file or a symlink, not a directory; refusing to follow it" >&2
+  echo "install.sh: inspect it (ls -ld ${netdev_path}), remove it if it is not yours, and run install.sh again" >&2
+  exit 1
+fi
+install -d -m 2770 -o nebula-netdev-collector -g nebula-rpc "${var_lib}/netdev"
+# end: netdev collector provisioning
+
 # --- Pre-upgrade backup (spec 15) --------------------------------------------
 # Before an existing install is replaced, the new CLI makes a backup (as
 # the admin who ran sudo, to ~/nebula-backups). Without a backup the
@@ -454,10 +479,13 @@ units_pending="${var_lib}/units.pending"
 # restart_units are the units that new binaries make due for a restart. The
 # order here does not matter: the start step restarts them in the order of its
 # server, executor and collector blocks, the executor before the collector.
+# The netdev collector is restarted with try-restart in the loop after those
+# blocks, so only when the admin runs it.
 restart_units=(
   nebula-server.service
   nebula-executor.service
   nebula-pve-collector.service
+  nebula-netdev-collector.service
 )
 
 # record_restart NAME puts the restart of NAME on the pending record, so that
@@ -540,10 +568,17 @@ done
 # includes nebula-discovery.service, which has no [Install] section and is
 # therefore installed but never enabled. package_units is the set the
 # package enables: the installable subset (no nebula-discovery.service).
+#
+# nebula-netdev-collector.service (ADR 0010, ND-15) is installed but never
+# enabled by this script, in either mode: network devices are registered in
+# the executor after the install, so the admin enables the collector then
+# (systemctl enable --now nebula-netdev-collector). It is therefore in
+# tarball_units only, and the enable loop skips it.
 tarball_units=(
   nebula-server.service
   nebula-executor.service
   nebula-pve-collector.service
+  nebula-netdev-collector.service
   nebula-discovery.path
   nebula-discovery.service
   nebula-discovery.timer
@@ -891,6 +926,12 @@ for name in "${enable_units[@]}"; do
   if [[ "${name}" == "nebula-discovery.service" ]]; then
     continue
   fi
+  # nebula-netdev-collector.service is enabled by the admin once network
+  # devices are registered (see tarball_units above); an install never
+  # enables or starts it, and never disables it either.
+  if [[ "${name}" == "nebula-netdev-collector.service" ]]; then
+    continue
+  fi
   if unit_masked "${name}"; then
     echo "install.sh: warning: ${name} is masked; not enabling or starting it (undo: systemctl unmask ${name})" >&2
     continue
@@ -1013,7 +1054,10 @@ fi
 # server, the executor and the collector were handled above.
 # nebula-discovery.service is a oneshot: its next run uses the new unit, and a
 # restart would kill a scan. The install itself is done by now, so a failure
-# here warns.
+# here warns. nebula-netdev-collector.service goes through try-restart here
+# (new binaries or unit), so it restarts only if the admin runs it; it does
+# not wait for the executor like the PVE collector block above, and relies on
+# its unit's Restart=on-failure with RestartSec=5s while the executor starts.
 for name in "${refreshed_units[@]}"; do
   case "${name}" in
     nebula-server.service|nebula-executor.service|nebula-pve-collector.service|nebula-discovery.service) ;;
@@ -1072,6 +1116,10 @@ Next steps:
 
   6. Check the status:
        nebula status
+
+  7. Only with network devices (switches, firewalls): once they are
+     registered in the executor, enable the network device collector:
+       systemctl enable --now nebula-netdev-collector
 
 Further changes to the executor flags go into a separate drop-in
 ${drop_in_dir}/20-local.conf, because ${drop_in} is rewritten by
