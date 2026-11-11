@@ -734,7 +734,8 @@ roles never mix:
      archive references are they checked against the archive
      independently of the first scan.
    - **Approval.** The admin approves a baseline (initial or updated) by
-     digest, with the same assertion as D3 (challenge domain
+     digest (the initial one only in the executor-local CLI, below), with
+     the same assertion as D3 (challenge domain
      `nebula-fim-baseline-v1`). The signed challenge binds the host ID,
      the currently approved digest the proposal was built on and the new
      executor-computed digest, so an approval cannot be applied to
@@ -759,17 +760,35 @@ roles never mix:
      builds it as the approved list plus exactly one added, changed or
      removed entry, and `approve` rejects a digest whose difference from
      the approved baseline has more than one entry when any of them is
-     critical-class. `pending` only lists proposed digests and approves
-     nothing. `approve` itself, whatever the source of the digest the
-     admin passes (typed, pasted from `pending` or from the browser),
-     renders **every** entry in which that digest differs from the
-     approved baseline (which for such a digest is that one entry) from
-     the executor's own retained records (old and new values, escaped as
-     in D6 "Display", so no host byte reaches the terminal as a control
-     sequence) and then asks for an interactive confirmation on the
-     terminal; it approves only after that confirmation, has no flag
-     that skips it, and refuses when stdin is not a terminal. So the CLI
-     never approves an entry it did not show. The executor rejects a browser
+     critical-class (the initial baseline is the one exception, below).
+     **The executor keeps every proposal it computes.** For each
+     proposed digest it stores, in executor-owned storage, the previous
+     approved digest the proposal was built on, the run ID of the
+     retained records it took the values from, and every entry in which
+     the proposal differs from that previous baseline with its old and
+     new values (the old values from the digest-checked approved list,
+     the new values copied from the retained run when the proposal was
+     built), and the derived set (d) of that run (below). A newer run that replaces the retained records does not
+     change a stored proposal. `pending` only lists stored proposed
+     digests and approves nothing. `approve` itself, whatever the source
+     of the digest the admin passes (typed, pasted from `pending` or from
+     the browser), refuses a digest for which it holds no stored
+     proposal, refuses when the executor's current approved digest is not
+     the proposal's previous digest (the baseline changed meanwhile; the
+     admin needs a new proposal), and otherwise renders **every** entry
+     of that stored proposal's difference (which for such a digest is
+     that one entry), with its old and new values, from the stored
+     proposal itself and never from the current retained records
+     (escaped as in D6 "Display", so no host byte reaches the terminal as
+     a control sequence), together with the host ID and both digests. It
+     then asks for an interactive confirmation on the terminal; it
+     approves only after that confirmation, has no flag that skips it,
+     and refuses when stdin is not a terminal. On confirmation it checks
+     the previous digest again and, in one step, stores exactly the
+     digest of the list it rendered (the approved list plus that stored
+     difference) as the new approved digest. So the CLI never approves an
+     entry it did not show, and never shows values other than the ones
+     the digest approves. The executor rejects a browser
      assertion for a digest whose difference from the approved baseline
      adds, changes or removes a critical-class entry; unchanged
      critical-class entries carried over from the approved baseline (for
@@ -777,6 +796,27 @@ roles never mix:
      browser approval. Recovery mode cannot approve either way. Browser
      approval remains for entries that are not critical-class, with the
      limit named in "Honest limits".
+     - **Initial baseline.** While the executor holds no approved digest
+       for a host, the "one entry" rule cannot apply: the first complete
+       run holds thousands of critical-class entries (all of `/boot`,
+       every systemd unit, every setuid file). The initial proposal is
+       therefore the executor's whole retained complete run and nothing
+       else: the server names no paths for it and cannot add, drop or
+       change an entry, and its stored previous digest is "none". It is
+       approved only with `nebula integrity approve --initial <host>
+       <digest>` in the executor-local CLI, never in the browser (it
+       always contains critical-class entries). `--initial` is refused
+       when the executor already holds an approved digest for the host,
+       and a digest without `--initial` is refused while it holds none.
+       The CLI first shows the "trust on first scan" warning, the host
+       ID, the run ID, the digest and the number of entries per D9 class,
+       then **every critical-class entry** (escaped as above, paged on
+       the terminal), and asks the admin to confirm by typing the host ID;
+       it has no flag that skips the listing or the confirmation and
+       refuses when stdin is not a terminal. Entries that are not
+       critical-class are counted, not listed. The approval stores the
+       digest and, since the whole SSH configuration then comes from one
+       run, that run's derived set (d) (below).
    - **The executor classifies, from its own data.** Whether an entry is
      critical-class is decided by the executor, never by the server: a
      server-supplied class or label is at most compared and never makes
