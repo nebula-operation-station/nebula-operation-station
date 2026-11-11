@@ -47,6 +47,17 @@ History:
   admitted for any ID). `host-list` arguments marked `cidr-ok`
   (`enroll-script --from`) accept CIDR elements from the question or the
   NOS source addresses (previously every CIDR was red).
+- 2026-11-11 (as00hf, review of PR #471): the canary test searches for
+  the host core of each value (`c<n>-canary`, `c<n>.canary.invalid`,
+  `192.0.2.1`; previously the needle was undefined), creates the canary
+  files for `in-path`/`trust-path` runs inside the fresh working
+  directory with minimal valid content (previously every path form
+  named a missing file, so file-reading arguments were never
+  exercised), and checks the `inet_aton` dotted form for every `number`
+  run (previously only `canary-max` runs). The `number` canary survives
+  unsigned 16-bit and 32-bit-or-wider conversions (previously "16-bit
+  or wider"); the absolute path-kind canary lies inside the working
+  directory (previously `/tmp/c<n>.canary.invalid`).
 
 ## Context
 
@@ -407,9 +418,9 @@ does NOS connect **from** (`--from`)?
 
   | Kind | Canary for run `<n>` |
   | --- | --- |
-  | `text`, `in-path`, `out-path`, `trust-path` | `c<n>.canary.invalid` (for the path kinds also `/tmp/c<n>.canary.invalid`) |
+  | `text`, `in-path`, `out-path`, `trust-path` | `c<n>.canary.invalid` (for the path kinds, a second run uses the absolute path of `c<n>.canary.invalid` **inside the fresh working directory**; never an absolute path outside it such as `/tmp/c<n>.canary.invalid`, which an `out-path` run would write outside the test directory (previously `/tmp/c<n>.canary.invalid`)) |
   | `id` | `c<n>-canary` (dot-free; a single-label name that a resolver can still complete through search domains or `/etc/hosts`) |
-  | `number` | `47000 + m`, where `m` = 1, 2, … counts the `number` runs of the whole test (the test fails if `m` would exceed 999). The value fits `uint16` (≤ 65535), so `int`, `uint`, `ParseUint(…, 16)`/`(…, 32)` parsers accept it and a conversion to a 16-bit or wider integer (`uint32(*stage)`, `int32(*limit)`, `uint16(port)`) leaves it unchanged, so the "integer field equals the sentinel" check still sees it; the test fails if a fixture value or a flag default of that command lies in `47001`–`47999` (previously `7357` + 6 digits = 10 digits, above 2^32: rejected by `uint16`/`uint32` parsers, changed by truncation, and contrary to the earlier claim not a valid `inet_aton` IPv4). An argument whose parser has a smaller maximum `N` (today `events --limit`, 1 to 1000) carries the catalog annotation `canary-max: N` with a reason; its run uses the value `N`, the test also checks that `N+1` is rejected before anything is sent, and for that run the integer-field check is replaced by "no string field, dial address, URL or header equals the decimal `N` or its `inet_aton` dotted form" |
+  | `number` | `47000 + m`, where `m` = 1, 2, … counts the `number` runs of the whole test (the test fails if `m` would exceed 999). The value fits `uint16` (≤ 65535), so `int`, `uint`, `ParseUint(…, 16)`/`(…, 32)` parsers accept it and a conversion to an unsigned 16-bit or any 32-bit-or-wider integer type (`uint32(*stage)`, `int32(*limit)`, `uint16(port)`) leaves it unchanged, so the "integer field equals the sentinel" check still sees it (a signed 16-bit conversion is not covered: `int16(47001)` wraps to a negative value; previously "a 16-bit or wider integer"); because the value is also a valid single-number `inet_aton` IPv4 address (`47001` = `0.0.183.153`), **every** `number` run additionally fails when its `inet_aton` dotted form appears as a substring in a dial address, TLS server name, HTTP URL or header, or any string or bytes field of an outgoing request (previously only `canary-max` runs checked the dotted form, so a `number` argument formatted as an IPv4 string and sent escaped both the substring and the integer-field check); the test fails if a fixture value or a flag default of that command lies in `47001`–`47999` (previously `7357` + 6 digits = 10 digits, above 2^32: rejected by `uint16`/`uint32` parsers, changed by truncation, and contrary to the earlier claim not a valid `inet_aton` IPv4). An argument whose parser has a smaller maximum `N` (today `events --limit`, 1 to 1000) carries the catalog annotation `canary-max: N` with a reason; its run uses the value `N`, the test also checks that `N+1` is rejected before anything is sent, and for that run the integer-field check is replaced by "no string field, dial address, URL or header equals the decimal `N` or its `inet_aton` dotted form" (the dotted-form substring check above applies to it as to every `number` run) |
   | `duration` | `7` followed by `<n>` zero-padded to 5 digits, then `s` (6 digits, within the kind's shape) |
   | fixed-shape kinds (AS-05 review, e.g. `MODULE@VERSION`) | a value of that shape built from `c<n>-canary` (e.g. `c<n>-canary@1.0.0`), defined next to the kind |
   | `enum`, `bool` | no run: their values are fixed catalog literals; the catalog test fails when an `enum` value is host-like (V4c) |
@@ -419,7 +430,33 @@ does NOS connect **from** (`--from`)?
   recording dialer and HTTP transport injected into the code under test
   (no network), in a fresh temporary working directory (so an `out-path`
   form such as `https://c<n>.canary.invalid:8006` creates nothing
-  outside it). Because the executor is faked, nothing is dialed for
+  outside it; every path-kind value, relative or absolute, resolves
+  inside this directory).
+
+  **Canary files for path kinds** (previously: every path-kind form
+  named a file that did not exist, so file-reading arguments such as
+  `host pin --known-hosts` (`readLimited` in `cmd/nebula/hostkeys.go`),
+  `pve remote add`/`repin --ca-file` (`readPveCAFile`) and the restore
+  inputs rejected every form and were either failing or annotated
+  `canary-rejects` without being exercised). Before each run of an
+  `in-path` or `trust-path` argument, the test creates the file named by
+  that run's value (kind canary or host-shaped form, resolved against
+  the fresh working directory, parent directories created, so
+  `https://c<n>.canary.invalid:8006` becomes the file
+  `https:/c<n>.canary.invalid:8006` below it). Where the argument's
+  parser needs content, the file holds the minimal valid content defined
+  next to the argument's expected-fields entry (for example one
+  `known_hosts` line for `--known-hosts`, one self-signed PEM CA
+  certificate for `--ca-file`, a minimal valid input for the restore
+  arguments); that content contains no canary needle (below), and an
+  argument whose parser needs content but has none defined fails the
+  test. For an `out-path` run the test creates only the parent
+  directories, so the command writes the file itself. A file-reading
+  argument therefore reaches the code that sends what it read, and
+  `canary-rejects` stays for arguments that cannot accept any form even
+  with the file present (such as `--secret-fd`).
+
+  Because the executor is faked, nothing is dialed for
   most commands, so the test inspects **every outgoing request in full**
   rather than a list of destination field names (previously: only
   fields named `endpoint`, `address`, `host`, … as whole words and
@@ -503,6 +540,20 @@ does NOS connect **from** (`--from`)?
   | URL | `https://c<n>.canary.invalid:8006` |
   | userinfo | `user@c<n>-canary` |
   | IP literal with port | `192.0.2.1:8006` (TEST-NET-1; no fixture may use `192.0.2.0/24`, the test fails otherwise) |
+
+  **Search needle** (previously undefined, so a test that searched for
+  the whole value missed an argument that parses the form and sends only
+  its host part). Conditions 1 and 2 search for the **host core** of the
+  run's value, not the whole value: `c<n>-canary` for the `id` canary,
+  the fixed-shape canaries, `host:port` and userinfo;
+  `c<n>.canary.invalid` for the `text` and path-kind canaries (also in
+  their absolute form) and the URL form; `192.0.2.1` for the IP literal
+  form; for `number` the decimal value and its `inet_aton` dotted form;
+  for `duration` the whole value and its digits. A request field
+  `c3-canary` (hostname without port) or `192.0.2.1` (IP without port)
+  therefore counts, as does the whole value. Fixtures and the canary
+  file content must not contain any needle of the run (the test fails
+  otherwise), so a match always comes from the argument under test.
 
   The host-shaped forms test the binary, not the validator: V4 would not
   admit most of them for a non-host kind, but they show what the
