@@ -152,7 +152,10 @@ Constraints that shape every decision below:
    value replaced by the fixed placeholder `<netbird-setup-key-withheld>`,
    so "Show script" never returns the setup key, however often it is called.
    Apart from that line the bytes are those of the download; the page says
-   so, and the hash on the page is the hash of the downloaded script. The
+   so, and the hash on the page is the hash of the downloaded script. For a
+   NetBird offer still in `awaiting_approval` there is no setup key and no
+   stored hash yet; "Show script" then shows the placeholder render without
+   a hash and says so (amended 2026-11-11, see "Amendments"). The
    server serves the view as its own `text/plain` response with the same
    headers as the download (`Cache-Control: no-store`,
    `X-Content-Type-Options: nosniff`,
@@ -260,18 +263,37 @@ the other direction). The only channel host → NOS is the operator.
   `enroll_paired_proposed`, `host_enrolled`, `enroll_offer_expired`,
   `enroll_offer_revoked`, `inventory_endpoint_added`,
   `netbird_setup_key_pending`, `netbird_setup_key_created`,
-  `netbird_setup_key_reconciled`, `netbird_setup_key_revoked`,
+  `netbird_setup_key_invalid`, `netbird_setup_key_reconciled`, `netbird_setup_key_revoked`,
   `netbird_setup_key_revoke_failed`, `netbird_setup_key_expired_unrevoked`,
   `netbird_peer_joined`, `netbird_peer_orphaned`, `netbird_peer_deleted`,
   `netbird_peer_kept`.
-- **Retention:** the offer store never holds script bytes. The executor
-  renders the script on demand (download, "Show script") from the offer
-  parameters, the salt and, for NetBird offers, the setup key read from the
-  vault; it checks the rendered bytes against the stored SHA-256 (a
-  difference refuses the download with the uniform `404`, moves the offer
-  to `failed` and audits `enroll_script_hash_mismatch`), hands them to the RPC response and overwrites its
-  buffer afterwards. No rendered script is written to the offer store, a
-  temporary file, a cache or a log on the executor or the server (the server
+- **Retention:** the offer store never holds script bytes. It holds every
+  render input, fixed when the offer is created (script options, NetBird
+  choice and ephemeral flag, managed group, `from=` addresses, validated
+  NOS NetBird address, setup-key expiry, Nebula's key line, and for NetBird
+  offers the management URL and the key-passing mode per client version),
+  so a render never reads live executor configuration. The stored SHA-256
+  covers the full render: computed at creation for an offer without
+  NetBird, and for a NetBird offer in the step that records the validated
+  setup key (D6 "Creation order"). The executor renders the script on
+  demand in two variants:
+  - **Download** (`FetchEnrollScript`, `DownloadEnrollScript`): the full
+    script from the stored render inputs, the salt and, for NetBird
+    offers, the setup key read from the vault; it checks the rendered bytes
+    against the stored SHA-256 (a difference refuses the download with the
+    uniform `404`, moves the offer to `failed` and audits
+    `enroll_script_hash_mismatch`), hands them to the RPC response and
+    overwrites its buffer afterwards.
+  - **"Show script"** (`ShowEnrollScript`): the placeholder variant
+    directly, with `<netbird-setup-key-withheld>` in the setup-key line; it
+    never reads the setup key from the vault, is **not** hash-checked (the
+    placeholder bytes cannot match the stored hash), never changes the
+    offer's state and can never move it to `failed`; a render error refuses
+    only that request. In `awaiting_approval` it shows no hash (D1).
+    (Previously: "Show script" was rendered with the setup key from the
+    vault and hash-checked like the download; amended 2026-11-11.)
+
+  No rendered script is written to the offer store, a temporary file, a cache or a log on the executor or the server (the server
   streams the RPC response to the client without buffering it to disk; the
   reverse proxy in front of it must not buffer it to disk either, D7
   "Reverse proxy").
@@ -521,9 +543,18 @@ that lets the executor find and revoke it:
    expired; otherwise no key is created (audit
    `netbird_setup_key_pending` only on success).
 2. Only then does it call create.
-3. On a success answer it stores the key in the vault and, in one atomic
-   compare-and-set, moves the record `pending` → `created` (key ID, vault
-   reference) and the offer `awaiting_approval` → `open`. If that
+3. On a success answer it first validates the response as untrusted
+   provider data (amended 2026-11-11): the setup key must be exactly 36
+   characters in uppercase hex UUID form (8-4-4-4-12), the key ID 1–64
+   characters `0-9a-z`, the key name the requested one; limits are named
+   constants (spec 09). A failing response is never stored or rendered:
+   the offer moves to `failed`, `netbird_setup_key_invalid` is audited
+   (failed check, no raw value) and the key is revoked by a valid key ID or
+   found and revoked by the reconcile below. A valid key is stored in the
+   vault and, in one atomic compare-and-set, the record moves `pending` →
+   `created` (key ID, vault reference), the SHA-256 of the full render is
+   stored and the offer moves `awaiting_approval` → `open`. The key is
+   rendered into the script only as a single-quoted shell literal. If that
    compare-and-set fails because the offer became final meanwhile (revoke
    or expiry raced the create call), or the key cannot be stored (vault
    locked), the executor moves the offer to `failed` if it is not final
@@ -934,6 +965,26 @@ follows; D1–D9 above already reflect these decisions.
 - **Q9: NetBird for hosts that cannot reach NOS.** For now such a host
   joins NetBird by hand (D8). A keyless downloaded script that reads the
   setup key at run time would need a later ADR.
+
+## Amendments
+
+- **2026-11-11, EN-02 spec review (spec text in `docs/spec/03`, `05`, `06`,
+  `09`, `17`).**
+  - D2 "Retention": "Show script" renders the placeholder variant directly,
+    never reads the setup key from the vault, is not hash-checked and never
+    moves an offer to `failed` (previously: rendered with the setup key and
+    hash-checked like the download). The offer store holds every render
+    input, including the NetBird management URL and the key-passing mode,
+    fixed at creation (previously: "offer parameters", unspecified).
+  - D1 step 3 and D2: a NetBird offer in `awaiting_approval` has no stored
+    hash; "Show script" shows the placeholder render without a hash
+    (previously: unspecified).
+  - D6 "Creation order" step 3: the setup key, key ID and key name from the
+    create response are validated as untrusted input before they are stored
+    or rendered; a failing response fails the offer with
+    `netbird_setup_key_invalid` (previously: not validated). EN-12 records
+    the exact key ID length and confirms the setup-key form for the
+    reference-lab NetBird version.
 
 ## Required specification changes
 
