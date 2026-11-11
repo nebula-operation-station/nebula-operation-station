@@ -169,6 +169,22 @@ type Index struct {
 	nat       []NATRuleView
 	intrazone RuleView
 	interzone RuleView
+	// ruleAddrs and natAddrs hold the address fields of rules and nat,
+	// index by index, merged once at build time.
+	ruleAddrs []ruleAddrs
+	natAddrs  []natAddrs
+	// natZone is the post-NAT zone of each NAT rule (postNATZones).
+	natZone []postZone
+}
+
+// ruleAddrs are the merged address fields of one security rule.
+type ruleAddrs struct {
+	src, dst mergedAddrs
+}
+
+// natAddrs are the merged address fields of one NAT rule.
+type natAddrs struct {
+	src, dst, translated mergedAddrs
 }
 
 // NewIndex checks the snapshot limits, validates name uniqueness and
@@ -191,9 +207,18 @@ func defaultWorkLimits() workLimits {
 }
 
 func newIndex(s *Snapshot, lim workLimits) (*Index, error) {
+	return buildIndex(s, lim, nil, MaxNATPlacementsPerSnapshot)
+}
+
+// buildIndex builds the Index. place places the translated NAT addresses
+// (nil: the snapshot's Placer); maxPlacements bounds its calls.
+func buildIndex(s *Snapshot, lim workLimits, place placeFunc, maxPlacements int) (*Index, error) {
 	pl, err := NewPlacer(s)
 	if err != nil {
 		return nil, fmt.Errorf("new index: %w", err)
+	}
+	if place == nil {
+		place = pl.Place
 	}
 	x := &Index{snap: s, placer: pl, zones: make(map[string]bool, len(s.Zones))}
 	for _, z := range s.Zones {
@@ -215,6 +240,17 @@ func newIndex(s *Snapshot, lim workLimits) (*Index, error) {
 		x.nat[i] = x.classifyNAT(ex, i, &s.NATRules[i])
 	}
 	x.intrazone, x.interzone = classifyDefaults(s.DefaultRules)
+	x.ruleAddrs = make([]ruleAddrs, len(x.rules))
+	for i := range x.rules {
+		v := &x.rules[i]
+		x.ruleAddrs[i] = ruleAddrs{src: mergeSet(v.Source), dst: mergeSet(v.Destination)}
+	}
+	x.natAddrs = make([]natAddrs, len(x.nat))
+	for i := range x.nat {
+		v := &x.nat[i]
+		x.natAddrs[i] = natAddrs{src: mergeSet(v.Source), dst: mergeSet(v.Destination), translated: mergeSet(v.TranslatedAddress)}
+	}
+	x.natZone = postNATZones(x.nat, place, maxPlacements)
 	return x, nil
 }
 

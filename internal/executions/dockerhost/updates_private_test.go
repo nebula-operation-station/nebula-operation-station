@@ -13,6 +13,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/registrymeta"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
@@ -27,6 +28,35 @@ const (
 type privExecutor struct {
 	reads   []*pb.ReadPrivateRegistryRequest
 	listErr error
+	// grants are the approved leases ListReadGrants answers.
+	grants []*pb.ReadGrant
+}
+
+// ProposeReadGrant canonicalizes a lease like the executor does.
+func (p *privExecutor) ProposeReadGrant(_ context.Context, in *pb.ProposeReadGrantRequest, _ ...grpc.CallOption) (*pb.ProposeReadGrantResponse, error) {
+	doc, canon, digest, err := permit.ParseReadGrant(in.GetGrantJson(), time.Unix(1_800_000_000, 0))
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, "invalid document")
+	}
+	// The test approves every proposal at once.
+	p.grants = append(p.grants, &pb.ReadGrant{GrantId: doc.ID, GrantDigest: digest, CanonicalGrant: canon,
+		ApprovedBy: "cli:root", CreatedUnix: doc.CreatedUnix, ExpiryUnix: doc.ExpiryUnix})
+	return &pb.ProposeReadGrantResponse{GrantDigest: digest, CanonicalGrant: canon,
+		ApprovalRequirement: pb.ApprovalRequirement_APPROVAL_REQUIREMENT_CLI_ONLY}, nil
+}
+
+func (p *privExecutor) ListReadGrants(context.Context, *pb.ListReadGrantsRequest, ...grpc.CallOption) (*pb.ListReadGrantsResponse, error) {
+	return &pb.ListReadGrantsResponse{Grants: p.grants}, nil
+}
+
+// lease approves a registry read lease over the whole "corp" scope.
+func (p *privExecutor) lease(t *testing.T, now time.Time) {
+	t.Helper()
+	req := registrymeta.LeaseRequest{ID: "00000000-0000-4000-8000-00000000d0c4", Days: 7,
+		Registries: []registrymeta.LeaseSelection{{RegistryID: "corp"}}}
+	if _, err := registrymeta.ProposeRegistryReadLease(context.Background(), p, req, now); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (p *privExecutor) ListPrivateRegistries(context.Context, *pb.ListPrivateRegistriesRequest, ...grpc.CallOption) (*pb.ListPrivateRegistriesResponse, error) {
@@ -113,6 +143,39 @@ func TestResolvePrivateDigestsRateLimitedNote(t *testing.T) {
 		privateNoteRateLimited == privateNoteRefused {
 		t.Fatalf("note = %q", privateNoteRateLimited)
 	}
+	// The executor's per-repository and the server's per-host distinct-tag
+	// caps refuse as rate limits too; the note names them.
+	for _, want := range []string{"distinct tags", "per repository", "per host"} {
+		if !strings.Contains(privateNoteRateLimited, want) {
+			t.Fatalf("note %q does not name %q", privateNoteRateLimited, want)
+		}
+	}
+	if len(privateNoteRateLimited) > 200 {
+		t.Fatalf("note is %d bytes, over the 200-byte note bound", len(privateNoteRateLimited))
+	}
+}
+
+// pendingSource answers like a cache-only DigestReader render before the
+// background read finished.
+type pendingSource struct{}
+
+func (pendingSource) PrivateDigests(_ context.Context, images []string) (map[string]registrymeta.PrivateDigest, map[string]error, error) {
+	errs := map[string]error{}
+	for _, im := range images {
+		errs[im] = registrymeta.ErrPrivateReadPending
+	}
+	return nil, errs, nil
+}
+
+// TestResolvePrivateDigestsPendingNote: a queued background read has its
+// own note, not the failure note.
+func TestResolvePrivateDigestsPendingNote(t *testing.T) {
+	in := ImageUpdates{Phase: "done", Images: []ImageUpdate{{Image: "registry.corp.example/team/app:1.0", Status: "unknown"}}}
+	out, err := ResolvePrivateDigestsWith(context.Background(), in, pendingSource{})
+	if err != nil || out.Images[0].Note != privateNotePending || !out.Images[0].Private || out.Images[0].Remote != "" ||
+		out.Images[0].Status != "unknown" {
+		t.Fatalf("out=%+v err=%v", out.Images[0], err)
+	}
 }
 
 // TestResolvePrivateDigestsWithReaderReRender: the server's long-lived
@@ -125,6 +188,7 @@ func TestResolvePrivateDigestsWithReaderReRender(t *testing.T) {
 	}}
 	exec := &privExecutor{}
 	now := time.Unix(1_800_000_000, 0)
+	exec.lease(t, now)
 	r := registrymeta.NewDigestReader(exec, func() time.Time { return now })
 	for i := range 2 {
 		out, err := ResolvePrivateDigestsWith(context.Background(), in, r)
