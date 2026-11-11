@@ -1,0 +1,101 @@
+{{define "content"}}
+{{$d := .NetDevFirewall}}
+<section class="panel" aria-label="Firewall view">
+  <h2><a href="{{$d.DetailURL}}">{{$d.Label}}</a>: firewall</h2>
+  <p>
+    <span class="badge badge--env">PAN-OS</span>
+    {{if $d.Stale}}<span class="badge badge--warning">stale</span>{{end}}
+  </p>
+  <p class="hint">Read-only view of the stored policy. Shadowed rules are not analysed.</p>
+
+  <h3>Datasets</h3>
+  <table class="inventory">
+    <thead><tr><th>Dataset</th><th>State</th><th>Observed</th><th>Rows</th></tr></thead>
+    <tbody>
+      {{range $d.Datasets}}
+      <tr>
+        <td>{{.Read}}</td>
+        <td><span class="badge badge--{{.Badge.Class}}">{{.Badge.State}}</span></td>
+        <td>{{timeTag .ObservedAt}}{{if .Age}} ({{.Age}}){{end}}</td>
+        <td>{{if not .ObservedAt.IsZero}}{{.Rows}}{{end}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{if $d.Unavailable}}<p class="status status--error">Stored data unavailable: {{range $i, $u := $d.Unavailable}}{{if $i}}, {{end}}{{$u}}{{end}}</p>{{end}}
+  {{if $d.NotDisplayed}}<p class="status status--error">Policy changed in elements not displayed: the stored read is partial, so rules or objects may be missing from this view.</p>{{end}}
+
+  {{if $d.HasPolicy}}
+  <h3 id="rules">Security rules</h3>
+  {{if $d.HasHitCounts}}
+  <p class="hint">Hit counts observed {{timeTag $d.HitsObservedAt}}; each count is since counter reset at the time shown in its row. Profile attachment is not part of the stored read.
+    {{if $d.HitsIncomplete}}The stored hit counts are partial: a rule without a count has no known count.{{end}}</p>
+  {{else}}<p class="status">No hit counts read yet.</p>{{end}}
+  {{if $d.Rules}}
+  <table class="inventory">
+    <thead><tr><th>#</th><th>Name</th><th>From</th><th>To</th><th>Source</th><th>Destination</th><th>Application</th><th>Service</th><th>Action</th><th>Profiles</th><th>State</th><th>Hits</th><th>Last hit</th><th>Since counter reset at</th><th>Note</th></tr></thead>
+    <tbody>
+      {{range $d.Rules}}<tr id="rule-{{.Pos}}">
+        <td>{{.Pos}}</td>
+        <td>{{.Name}}</td>
+        <td>{{.From}}</td>
+        <td>{{.To}}</td>
+        <td class="mono">{{.Source}}</td>
+        <td class="mono">{{.Destination}}</td>
+        <td>{{.Application}}</td>
+        <td>{{.Service}}</td>
+        <td>{{.Action}}</td>
+        <td>not read</td>
+        <td>{{if .Disabled}}<span class="badge badge--warning">disabled</span>{{else}}enabled{{end}}</td>
+        <td>{{if .HasCount}}{{.Hits}}{{else}}—{{end}}</td>
+        <td>{{if .HasCount}}{{if .LastHit.IsZero}}never{{else}}{{timeTag .LastHit}}{{end}}{{end}}</td>
+        <td>{{if .HasCount}}{{if .ResetAt.IsZero}}not reported{{else}}{{timeTag .ResetAt}}{{end}}{{end}}</td>
+        <td>{{if .Unused}}<span class="badge badge--unknown">{{.Unused}}</span> since counter reset at {{timeTag .ResetAt}}{{end}}{{if .Description}} {{.Description}}{{end}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  <p class="hint">"No hits in N days" is an observation over the window since the counter reset (at least 30 days), not a change proposal. Rule creation time is not read, so a rule added after the reset was observed for less.</p>
+  {{else}}<p class="status">No security rules stored.</p>{{end}}
+
+  <h3 id="nat">NAT rules</h3>
+  {{if $d.NAT}}
+  <table class="inventory">
+    <thead><tr><th>#</th><th>Name</th><th>From</th><th>To</th><th>Source</th><th>Destination</th><th>Service</th><th>Source translation</th><th>Destination translation</th><th>State</th><th>Description</th></tr></thead>
+    <tbody>
+      {{range $d.NAT}}<tr id="nat-{{.Pos}}">
+        <td>{{.Pos}}</td>
+        <td>{{.Name}}</td>
+        <td>{{.From}}</td>
+        <td>{{.To}}</td>
+        <td class="mono">{{.Source}}</td>
+        <td class="mono">{{.Destination}}</td>
+        <td>{{.Service}}</td>
+        <td class="mono">{{.SourceTranslation}}</td>
+        <td class="mono">{{.DestinationTranslation}}</td>
+        <td>{{if .Disabled}}<span class="badge badge--warning">disabled</span>{{else}}enabled{{end}}</td>
+        <td>{{.Description}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{else}}<p class="status">No NAT rules stored.</p>{{end}}
+
+  <h3 id="objects">Objects</h3>
+  {{if $d.UsageSkipped}}<p class="status">Rule usage not computed: the policy is too large.</p>{{end}}
+  {{if $d.DynamicGroups}}<p class="hint">Members of dynamic address groups are not resolved: an object matched by tag may be used by more rules than shown.</p>{{end}}
+  {{if $d.Objects}}
+  <table class="inventory">
+    <thead><tr><th>Kind</th><th>Name</th><th>Value</th><th>Usage</th><th>Description</th></tr></thead>
+    <tbody>
+      {{range $d.Objects}}<tr class="object"><td>{{.Kind}}</td><td>{{.Name}}</td><td class="mono">{{.Value}}</td><td>{{.Used}}</td><td>{{.Description}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  <p class="hint">Usage counts security and NAT rules that name the object directly or through static groups.</p>
+  {{else}}<p class="status">No objects stored.</p>{{end}}
+  {{else}}
+  <p class="status">No firewall policy read yet.</p>
+  {{end}}
+</section>
+{{end}}
