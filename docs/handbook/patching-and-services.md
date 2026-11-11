@@ -177,9 +177,7 @@ the lease.
    `docker.list`) and 7 or 30 days.
 3. Approve with your security key. Hardened mode:
    `nebula read-grant pending`, then `nebula read-grant approve <digest>`
-   with the **full** 64-hex digest. (The proposal page may print
-   `nebula lease approve`; that command does not exist, use
-   `nebula read-grant approve`.)
+   with the **full** 64-hex digest.
 
 **Expected result:** results appear as operations created by "schedule".
 Each host runs at most 24 times per rolling hour by default.

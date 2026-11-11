@@ -123,12 +123,6 @@ not what the web server claims. Use it when the web server may be exposed to
 more people than you. See admin guide
 [11](../admin/guide.md#11-operating-securely).
 
-## The proposal page says `nebula lease approve`, but that command does not exist
-
-Correct; the page prints the wrong name. Use
-`nebula read-grant approve <digest>` with the same full digest
-(`nebula read-grant pending` lists it).
-
 ## What happens if I lose my YubiKey?
 
 If you registered a second key: log in with it, then remove the lost one

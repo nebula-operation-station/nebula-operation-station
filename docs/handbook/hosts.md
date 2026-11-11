@@ -46,7 +46,7 @@ decides how strong an approval must be is set on the executor (see
    `environment`, `criticality`, `tags` and `endpoint1` … `endpoint16`.
 3. Check the preview: every row with an error is shown with its problems and
    is not imported.
-4. **Import selected rows** (or **Import all importable**).
+4. **Import selected rows**.
 
 **Limits:** at most 5 MiB, 10,000 data rows, 64 columns, 1 KiB per cell and
 16 endpoints per host. A larger file is refused, never truncated.
@@ -257,8 +257,9 @@ list.
 
 1. On the host, remove the `nebula` user's key line from
    `~nebula/.ssh/authorized_keys` (or the user: `userdel -r nebula`),
-   `/etc/sudoers.d/nebula`, `/etc/tmpfiles.d/nebula.conf` and
-   `/var/lib/nebula/jobs`.
+   `/etc/sudoers.d/nebula`, `/etc/tmpfiles.d/nebula.conf`,
+   `/var/lib/nebula/jobs` and, if the enrollment added it,
+   `/etc/ssh/sshd_config.d/10-nebula.conf` (then reload sshd).
 2. On the Nebula machine:
 
    ```
