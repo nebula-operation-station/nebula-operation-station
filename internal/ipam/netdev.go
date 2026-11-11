@@ -23,7 +23,7 @@ import (
 // created or changed, and a device is never linked to an asset by its
 // MAC. The readers below have no write methods. The explicit, admin
 // confirmed device ↔ asset link with the MAC as a suggestion (ADR 0010
-// D4) is not part of this file; it is an open follow-up of ND-18.
+// D4, ND-18 part 2) lives in netdevlink.go.
 
 // SourceMACTable labels data taken from a CBS MAC address table.
 const SourceMACTable = "cbs-mac-table"
