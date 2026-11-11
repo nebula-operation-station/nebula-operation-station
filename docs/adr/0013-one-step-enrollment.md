@@ -494,6 +494,15 @@ mitigation.
   not offered and the script stops before the join. If the operator runs the
   script outside the documented command, it still removes its own key file,
   and when it contained a setup key it deletes itself from its `trap`.
+- Every stored render input that reaches the script has a format rule and
+  is placed only inside one single-quoted shell literal whose format
+  excludes `'`, or only selects fixed template text (booleans, the
+  key-passing mode); this includes the NetBird management URL (`https`
+  only, at most 256 bytes ASCII, no userinfo, query, fragment, quote or
+  shell metacharacter) and the key-passing mode table (client versions
+  `MAJOR.MINOR.PATCH`, mode `env` or `file`). Values are checked at
+  creation and at every render (spec 03 "Render-input format"; amended
+  2026-11-11, previously only the setup key and `from=` had a rule).
 - Size limit of the rendered script: 64 KiB; the executor refuses larger.
 
 ### D6: Optional NetBird join
