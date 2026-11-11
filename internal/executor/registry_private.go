@@ -97,6 +97,10 @@ type RegistryRead struct {
 	// every add or rotation, so a version number reused after a removal
 	// never matches an old grant.
 	CredentialID string
+	// Reference is the tag (or digest) of a tag_digest read and empty for
+	// list_tags; it is part of the read's interval key, so two tags of one
+	// repository are two reads.
+	Reference string
 }
 
 // RegistryReadClaim is one reserved read. Check re-verifies it (lock,
@@ -281,7 +285,10 @@ func (s *Service) registryInfo(l *loadedRegistry) *pb.PrivateRegistryInfo {
 	return &pb.PrivateRegistryInfo{RegistryId: l.rec.ID, RegistryOrigin: l.rec.Registry, AuthMode: registryModeProto(l.rec.Mode),
 		Realm: l.rec.Realm, Service: l.rec.Service, Repositories: slices.Clone(l.rec.Repositories),
 		AllowPrivateNetwork: l.rec.AllowPrivateNetwork, CustomCa: l.rec.CAPEM != "", ConfigVersion: l.configVersion,
-		CredentialVersion: l.credVersion, CredentialExpiresUnix: l.cred.ExpiresUnix}
+		CredentialVersion: l.credVersion, CredentialExpiresUnix: l.cred.ExpiresUnix,
+		// The lease identity (cu06, G13): a hash of the record and a random
+		// credential identity. Neither is or derives from the credential.
+		ConfigDigest: l.configDigest, CredentialId: l.cred.ID}
 }
 
 func registryModeProto(m string) pb.PrivateRegistryAuthMode {
@@ -613,6 +620,12 @@ func (s *Service) ReadPrivateRegistry(ctx context.Context, in *pb.ReadPrivateReg
 	}
 	read := RegistryRead{RegistryID: l.rec.ID, Method: method, Repository: in.GetRepository(), ConfigDigest: l.configDigest,
 		ConfigVersion: l.configVersion, CredentialVersion: l.credVersion, CredentialID: l.cred.ID}
+	if method == RegistryMethodTagDigest {
+		read.Reference = in.GetTag()
+		if read.Reference == "" {
+			read.Reference = in.GetDigest()
+		}
+	}
 	claim, err := s.registryAuthorizer().AuthorizeRegistryRead(read)
 	if err != nil {
 		return nil, registryGrantStatus(err)

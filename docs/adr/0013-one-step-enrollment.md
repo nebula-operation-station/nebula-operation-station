@@ -80,7 +80,10 @@ Constraints that shape every decision below:
    once in memory and stores only its SHA-256, never the bytes (D2
    "Retention"). Audit `enroll_offer_created`.
    - **With NetBird** the offer starts in `awaiting_approval` and has no
-     setup key and no script yet. The executor proposes a **NetBird offer
+     setup key, no stored download hash and cannot be downloaded yet; its
+     render inputs are fixed and "Show script" already renders the
+     placeholder variant (step 3, D2; amended 2026-11-11, previously "no
+     setup key and no script yet"). The executor proposes a **NetBird offer
      permit** (HIGH, user verification; binds offer ID hash, host ID, SSH
      user, credential reference, managed group, ephemeral flag and setup-key
      expiry). Only after the operator approves it with the security key does
@@ -151,7 +154,8 @@ Constraints that shape every decision below:
    for the session that created the offer, D2 "Binding") with the setup-key
    value replaced by the fixed placeholder `<netbird-setup-key-withheld>`,
    so "Show script" never returns the setup key, however often it is called.
-   Apart from that line the bytes are those of the download; the page says
+   Apart from that line the bytes are those of the download (checked via
+   the placeholder hash stored at creation, D2 "Retention"); the page says
    so, and the hash on the page is the hash of the downloaded script. For a
    NetBird offer still in `awaiting_approval` there is no setup key and no
    stored hash yet; "Show script" then shows the placeholder render without
@@ -263,7 +267,8 @@ the other direction). The only channel host → NOS is the operator.
   `enroll_paired_proposed`, `host_enrolled`, `enroll_offer_expired`,
   `enroll_offer_revoked`, `inventory_endpoint_added`,
   `netbird_setup_key_pending`, `netbird_setup_key_created`,
-  `netbird_setup_key_invalid`, `netbird_setup_key_reconciled`, `netbird_setup_key_revoked`,
+  `netbird_setup_key_invalid`, `netbird_setup_key_reconciled`,
+  `netbird_setup_key_unresolved`, `netbird_setup_key_revoked`,
   `netbird_setup_key_revoke_failed`, `netbird_setup_key_expired_unrevoked`,
   `netbird_peer_joined`, `netbird_peer_orphaned`, `netbird_peer_deleted`,
   `netbird_peer_kept`.
@@ -271,8 +276,13 @@ the other direction). The only channel host → NOS is the operator.
   render input, fixed when the offer is created (script options, NetBird
   choice and ephemeral flag, managed group, `from=` addresses, validated
   NOS NetBird address, setup-key expiry, Nebula's key line, and for NetBird
-  offers the management URL and the key-passing mode per client version),
-  so a render never reads live executor configuration. The stored SHA-256
+  offers the management URL and the key-passing mode per client version,
+  and the script template version), so a render never reads live executor
+  configuration. At creation it also stores the SHA-256 of the placeholder
+  variant, for every offer; an executor whose template version differs
+  from the stored one refuses to render the offer and fails it with
+  `enroll_script_template_changed` instead of a hash mismatch (amended
+  2026-11-11). The stored SHA-256
   covers the full render: computed at creation for an offer without
   NetBird, and for a NetBird offer in the step that records the validated
   setup key (D6 "Creation order"). The executor renders the script on
@@ -286,8 +296,9 @@ the other direction). The only channel host → NOS is the operator.
     overwrites its buffer afterwards.
   - **"Show script"** (`ShowEnrollScript`): the placeholder variant
     directly, with `<netbird-setup-key-withheld>` in the setup-key line; it
-    never reads the setup key from the vault, is **not** hash-checked (the
-    placeholder bytes cannot match the stored hash), never changes the
+    never reads the setup key from the vault, is checked against the
+    stored placeholder hash, not the download hash (amended 2026-11-11;
+    previously not hash-checked), never changes the
     offer's state and can never move it to `failed`; a render error refuses
     only that request. In `awaiting_approval` it shows no hash (D1).
     (Previously: "Show script" was rendered with the setup key from the
@@ -493,6 +504,15 @@ mitigation.
   not offered and the script stops before the join. If the operator runs the
   script outside the documented command, it still removes its own key file,
   and when it contained a setup key it deletes itself from its `trap`.
+- Every stored render input that reaches the script has a format rule and
+  is placed only inside one single-quoted shell literal whose format
+  excludes `'`, or only selects fixed template text (booleans, the
+  key-passing mode); this includes the NetBird management URL (`https`
+  only, at most 256 bytes ASCII, no userinfo, query, fragment, quote or
+  shell metacharacter) and the key-passing mode table (client versions
+  `MAJOR.MINOR.PATCH`, mode `env` or `file`). Values are checked at
+  creation and at every render (spec 03 "Render-input format"; amended
+  2026-11-11, previously only the setup key and `from=` had a rule).
 - Size limit of the rendered script: 64 KiB; the executor refuses larger.
 
 ### D6: Optional NetBird join
@@ -536,13 +556,22 @@ named there.
 **Creation order.** A setup key is never created without a durable record
 that lets the executor find and revoke it:
 
-1. On approval of the NetBird offer permit the executor, in one atomic
+1. On approval of the NetBird offer permit the executor first checks the
+   offer's stored script template version against its own; on a
+   difference it creates no key, fails the offer and audits
+   `enroll_script_template_changed` (amended 2026-11-11; previously checked
+   only at render, after the key existed). Otherwise it, in one atomic
    compare-and-set, moves the offer's setup-key record from `none` to
-   `pending` and persists the key name (`nos-offer-<prefix>`) and the offer
-   ID hash, **only if** the offer is still `awaiting_approval` and not
-   expired; otherwise no key is created (audit
-   `netbird_setup_key_pending` only on success).
-2. Only then does it call create.
+   `pending` and persists the key name (`nos-offer-<prefix>`), the offer
+   ID hash, the managed group and the creation time window (the time of
+   this write widened by the create-call bound and the clock skew; spec 09)
+   as the record's reconcile record, **only if** the offer is still
+   `awaiting_approval` and not expired; otherwise no key is created (audit
+   `netbird_setup_key_pending` only on success). (Amended 2026-11-11:
+   previously key name and offer ID hash only, so a record whose create
+   response was lost could be reconciled by name only.)
+2. Only then does it call create, once and bounded by the create-call
+   bound; it is never called again for a record that is already `pending`.
 3. On a success answer it first validates the response as untrusted
    provider data (amended 2026-11-11): the setup key must be exactly 36
    characters in uppercase hex UUID form (8-4-4-4-12), the key ID 1–64
@@ -550,27 +579,60 @@ that lets the executor find and revoke it:
    constants (spec 09). A failing response is never stored or rendered:
    the offer moves to `failed`, `netbird_setup_key_invalid` is audited
    (failed check, no raw value) and the key is revoked by a valid key ID or
-   found and revoked by the reconcile below. A valid key is stored in the
+   found and revoked by the reconcile below. The checks apply to the
+   decoded JSON string values, untrimmed and unnormalised. Before any
+   revoke attempt, in one atomic write with the move to `failed`, the
+   executor stores the key ID when it passed its check (record `pending` →
+   `created`, no vault reference, unverified, keeping the step-1 reconcile
+   record), otherwise the record stays `pending` with its step-1 reconcile
+   record; so a failed revoke always leaves a retry or reconcile record
+   (amended 2026-11-11; previously the key ID was used for the revoke
+   without being stored). An unverified key ID (key name or setup key
+   failed) is revoked only after a get by ID returns that key with every
+   reconcile candidate property (step 5); a `404`, a revoked key or a
+   failing property sends the record to reconcile instead of closing it. A valid key is stored in the
    vault and, in one atomic compare-and-set, the record moves `pending` →
    `created` (key ID, vault reference), the SHA-256 of the full render is
    stored and the offer moves `awaiting_approval` → `open`. The key is
    rendered into the script only as a single-quoted shell literal. If that
    compare-and-set fails because the offer became final meanwhile (revoke
-   or expiry raced the create call), or the key cannot be stored (vault
-   locked), the executor moves the offer to `failed` if it is not final
-   yet, revokes the new key at once and handles it like any final-state
-   key below.
+   or expiry raced the create call), the key cannot be stored (vault
+   locked) or the placeholder-hash check fails (D2 "Retention"), the
+   executor first stores the key ID (record `pending` → `created`, no vault
+   reference) in one atomic write with the move to `failed` if the offer
+   is not final yet, then revokes the new key and handles it like any
+   final-state key below (amended 2026-11-11; previously revoked at once
+   without storing the key ID). If that write fails, the record stays
+   `pending` for the reconcile below.
 4. Revoke and expiry of an offer whose record is `pending` move the offer to
    its final state as usual and leave the record `pending` for the
    reconcile below; they never treat "no key ID yet" as "no key".
 5. **Reconcile.** After an executor restart, after a create call that timed
    out or failed without a clear "not created" answer, and for every
    record still `pending` on a final offer, the executor moves a non-final
-   offer with a `pending` record to `failed` (the operator re-offers) and
-   lists setup keys by the stored name. A found key is recorded
-   (`netbird_setup_key_reconciled`, key ID) and revoked like any
-   final-state key; if no key with that name exists once the key's maximum
-   lifetime has passed, the record is closed. A `pending` record is
+   offer with a `pending` record to `failed` (the operator re-offers) and,
+   once the record's window has ended, lists setup keys. Only keys with a
+   valid key ID, the NOS name prefix, `usage_limit` 1, expiry ≤ 1 h after
+   creation, exactly the managed group, creation time inside the stored
+   window and not revoked are candidates; keys whose ID or name any other
+   offer's record holds (`pending`, mid-create, `created`) are excluded.
+   Every `pending` or unverified `created` record is matched by its key
+   name; only a record whose create answered with a mismatched key name
+   is matched by window if no name matches, and a window match counts
+   only if no other unresolved record (`pending` or unverified
+   `created`) with the same group has an overlapping window. A record
+   whose create never answered is matched by name only, so a key no
+   local record knows is never revoked automatically (amended
+   2026-11-11, fix round 2; previously: window match for every record,
+   ambiguity counted only `pending` records). Exactly one match is
+   recorded (`netbird_setup_key_reconciled`, key ID) and revoked like any
+   final-state key; zero or several matches revoke nothing, and the
+   operator is asked to revoke by hand (`netbird_setup_key_unresolved`).
+   A revoked key, an operator's key or the absence of a key never resolves
+   a record; an open record is closed only after the window end plus the
+   key's maximum lifetime, with `netbird_setup_key_expired_unrevoked`
+   (spec 06; amended 2026-11-11, previously by name only and closed
+   silently when no key had the name). A `pending` record is
    retried with the same backoff as a failed revoke and listed in
    `nebula host offers` until it is closed.
 
@@ -897,7 +959,7 @@ this ADR either.
 | Other local users on the target host (shared or multi-user host) | Offer ID passed to `curl`/`wget` on standard input from the `printf` builtin, never in argv; download directory `0700` and files `0600` under `umask 077`; setup key passed to the NetBird client only by environment variable or key file, never in argv; NetBird option not offered for a client version that accepts neither (D5) | The ID stays in the operator's own shell history (`0600`) but is single-use and consumed seconds later; a user with root or the operator's UID is out of scope (they own the session) |
 | Setup key left on the host's disk | Download directory and key file in RAM-backed `/dev/shm` or `$XDG_RUNTIME_DIR`; `umask 077`, `mktemp -d` (`0700`), `trap` cleanup on exit, hang-up, interrupt and termination, in the command and in the script; no browser download for NetBird offers (D8) | `SIGKILL`/power loss leaves a `0700` file; without `/dev/shm` and `$XDG_RUNTIME_DIR` the fallback `$TMPDIR`/`/tmp` is disk-backed and freed blocks can keep the key; `tmpfs` pages can reach swap; key one-off, ≤ 1 h, revoked when the offer is final |
 | Setup key at rest on executor, server or reverse proxy | Key only encrypted in the vault; scripts rendered on demand and checked against the stored hash, never stored, cached or logged; "Show script" renders a placeholder instead of the key; reverse proxy required to run `/enroll/` with `proxy_buffering off`, `proxy_max_temp_file_size 0`, no cache, no access log | Plaintext in executor, server and proxy memory while a response is rendered and streamed; a proxy configured against the guide may spill it to disk |
-| Setup key created but not recorded (crash, timeout, locked vault, race with revoke or expiry) | Persisted `pending` record with key name before the create call; atomic compare-and-set to `created`; a key created for an offer that became final meanwhile is revoked at once; reconcile by key name after restart or timeout | Key live until reconcile reaches NetBird, at most until its ≤ 1 h expiry |
+| Setup key created but not recorded (crash, timeout, locked vault, race with revoke or expiry) | Persisted `pending` record with key name, managed group and creation time window before the create call; atomic compare-and-set to `created`; a key created for an offer that became final meanwhile is revoked at once; reconcile by key name after restart or timeout, by window and group only after a create answered with a mismatched key name and no other unresolved record's window overlaps; zero or several matches alert and never revoke; a key no local record knows is never revoked automatically | Key live until reconcile reaches NetBird or the operator revokes it by hand, at most until its ≤ 1 h expiry; a 32-bit key-name collision with a foreign key in the same group and window (about 2⁻³²) revokes that one-off key |
 | Setup key still valid after the offer ended | Secret wiped from the vault at the final state; key ID kept until revoke succeeds, `netbird_setup_key_revoke_failed` audited, retried, shown on the dashboard and in `nebula host offers` until revoked or expired | Valid until NetBird is reachable again, at most until its ≤ 1 h expiry |
 | Wrong NetBird peer deleted | Never automatic; peers attributed only by the time-window fallback need a NetBird peer delete permit with the security key | Operator approves a wrong peer despite the shown peer name and IP |
 | Downgrade of the probed key type | Probe offers only `ssh-ed25519`; later connections restrict `HostKeyAlgorithms` to the pinned type | — |
@@ -985,6 +1047,53 @@ follows; D1–D9 above already reflect these decisions.
     `netbird_setup_key_invalid` (previously: not validated). EN-12 records
     the exact key ID length and confirms the setup-key form for the
     reference-lab NetBird version.
+- **2026-11-11, EN-02 follow-up review (spec text in `docs/spec/03`, `06`,
+  `09`).**
+  - D6 "Creation order" steps 3 and 5: before any revoke of a key from an
+    invalid create response, or of a valid key that could not be stored,
+    the executor stores the key ID (unverified when the key name or setup
+    key failed, then revoked only after a get by ID confirms the key) or
+    keeps the record `pending` (previously: revoked by key ID without
+    storing it).
+  - D6 "Creation order" steps 1 and 5 (fix round 1): the reconcile record
+    (offer ID hash, requested key name, creation time window, managed
+    group) is written in step 1, before the create call, for every
+    `pending` record. Reconcile matches every `pending` record by name,
+    else by window and group; candidates must have the NOS name prefix,
+    `usage_limit` 1, expiry ≤ 1 h, exactly the managed group and must not
+    be revoked; keys any other offer's record holds by ID or name are
+    excluded, and overlapping windows of two unresolved records make a
+    window match ambiguous. Zero or several matches alert
+    (`netbird_setup_key_unresolved`) and never revoke (previously: by name
+    only, window match only after an invalid response, exclusion only by
+    key ID). The checks apply to
+    the decoded JSON string values, untrimmed and unnormalised (previously:
+    "the raw response bytes, before any decoding").
+  - D6 "Creation order" steps 3 and 5 (fix round 2): the window match
+    applies only to a record whose create answered with a mismatched key
+    name (marked in the step-3 write); a record whose create never
+    answered is matched by name only, and a key no local record knows is
+    never revoked automatically. Window ambiguity counts every unresolved
+    record, `pending` or unverified `created`. The executor's typed
+    NetBird calls are create, revoke, get by key ID and list without a
+    name filter (previously: create, revoke and list by name). The 32-bit
+    key-name collision is named as a residual (spec 06).
+  - D5: every stored render input that reaches the script has a format and
+    a quoting rule, including the NetBird management URL and the
+    key-passing mode table (previously: only the setup key and `from=`).
+  - D2 "Retention": the placeholder-variant hash and the script template
+    version are stored at creation; "Show script" is checked against the
+    placeholder hash (this replaces "is not hash-checked" in the entry
+    above), and a template change fails the offer with
+    `enroll_script_template_changed` instead of
+    `enroll_script_hash_mismatch`.
+  - D1 step 2: a NetBird offer in `awaiting_approval` has fixed render
+    inputs and a placeholder render, only no setup key and no download
+    hash (previously: "no setup key and no script yet").
+  - The "Show script" row of `docs/spec/17-frozen-decisions.md` is aligned
+    with the placeholder-hash check (previously: "no hash check", noted
+    here as not yet aligned). A "Show script" mismatch is audited at most
+    once per offer and counted after that (spec 03).
 
 ## Required specification changes
 
@@ -995,7 +1104,8 @@ follows; D1–D9 above already reflect these decisions.
   mismatch handling.
 - `docs/spec/06-credentials.md`: NetBird management token custody, per-offer
   setup keys in the vault created only after approval and under a persisted
-  `pending` record with reconcile by key name, no plaintext script at rest
+  `pending` record with reconcile by key name, else by stored time window
+  and managed group, no plaintext script at rest
   (render on demand), unconditional revocation at the final state with
   retry and audit on failure, orphan peers.
 - `docs/spec/05-authentication.md`: paired enrollment permit, NetBird
