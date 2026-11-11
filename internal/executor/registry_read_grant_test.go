@@ -436,3 +436,77 @@ func TestRegistryLeaseUnverifiableStoredLeaseIsSkipped(t *testing.T) {
 		t.Fatalf("skipped lease not logged: %s", allLogText(e.logs))
 	}
 }
+
+// registryReadFor returns a tag_digest read of repo and tag bound to the
+// executor's current "corp" record and credential.
+func (e *registryLeaseEnv) registryReadFor(t *testing.T, repo, tag string) RegistryRead {
+	t.Helper()
+	l, err := e.svc.loadRegistry("corp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.wipe()
+	return RegistryRead{RegistryID: "corp", Method: schedgrant.RegistryReadTagDigest, Repository: repo, Reference: tag,
+		ConfigDigest: l.configDigest, ConfigVersion: l.configVersion, CredentialID: l.cred.ID, CredentialVersion: l.credVersion}
+}
+
+// TestRegistryLeaseDistinctTagCapProtectsBudget: a caller naming many tags
+// of one repository (a compromised host's check_updates result) gets at
+// most registryMaxTagsPerRepository distinct tags per rolling hour; the
+// refused reads charge nothing, so the registry budget still serves other
+// repositories, and re-reading an already counted tag is not a new tag.
+func TestRegistryLeaseDistinctTagCapProtectsBudget(t *testing.T) {
+	e := newRegistryLeaseEnv(t)
+	e.addRepos(t, "team/app", "team/worker")
+	// Budget: the cap, one re-read and one read of the other repository.
+	e.lease(t, registryMaxTagsPerRepository+2, 7*24*time.Hour,
+		e.target(t, []string{schedgrant.RegistryReadTagDigest}, "team/app", "team/worker"))
+	ctx := context.Background()
+	now := e.clock.Now()
+	for i := range registryMaxTagsPerRepository {
+		if _, err := e.svc.checkRegistryLease(ctx, e.registryReadFor(t, "team/app", fmt.Sprintf("t%d", i)), now); err != nil {
+			t.Fatalf("tag %d: %v", i, err)
+		}
+	}
+	for i := registryMaxTagsPerRepository; i < 50; i++ {
+		if _, err := e.svc.checkRegistryLease(ctx, e.registryReadFor(t, "team/app", fmt.Sprintf("t%d", i)), now); !errors.Is(err, ErrRegistryTagLimit) {
+			t.Fatalf("tag %d over the cap: %v", i, err)
+		}
+	}
+	if st := registryLeaseStatus(ErrRegistryTagLimit); status.Code(st) != codes.ResourceExhausted {
+		t.Fatalf("tag cap status: %v", st)
+	}
+	// The other repository still has budget: the refusals spent none.
+	if _, err := e.svc.checkRegistryLease(ctx, e.registryReadFor(t, "team/worker", "1.0.0"), now); err != nil {
+		t.Fatalf("other repository starved: %v", err)
+	}
+	// An already counted tag after its interval is not a new tag.
+	later := now.Add(schedgrant.RegistryMinInterval)
+	if _, err := e.svc.checkRegistryLease(ctx, e.registryReadFor(t, "team/app", "t0"), later); err != nil {
+		t.Fatalf("re-read of a counted tag: %v", err)
+	}
+	// A refused tag left no interval row: once the hour rolls, it reads.
+	afterHour := now.Add(permit.RollingHour + time.Second)
+	if _, err := e.svc.checkRegistryLease(ctx, e.registryReadFor(t, "team/app", "t9"), afterHour); err != nil {
+		t.Fatalf("new tag after the hour: %v", err)
+	}
+}
+
+// TestRegistryLeaseTagCapRefusalOverRPC: the RPC maps the cap to
+// ResourceExhausted before any registry I/O.
+func TestRegistryLeaseTagCapRefusalOverRPC(t *testing.T) {
+	e := newRegistryLeaseEnv(t)
+	e.addRepos(t, "team/app")
+	e.defaultLease(t)
+	ctx := context.Background()
+	for i := range registryMaxTagsPerRepository {
+		if _, err := e.svc.checkRegistryLease(ctx, e.registryReadFor(t, "team/app", fmt.Sprintf("x%d", i)), e.clock.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := e.svc.ReadPrivateRegistry(ctx, digestRead())
+	wantRegistryCode(t, err, codes.ResourceExhausted, "distinct tags")
+	if got := e.reg.requests(); len(got) != 0 {
+		t.Fatalf("registry contacted over the tag cap: %v", got)
+	}
+}

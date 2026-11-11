@@ -35,8 +35,13 @@ import (
 // shared read-grant counters before any registry I/O: one unit of the
 // per-registry rolling-hour budget and the interval (at least
 // schedgrant.RegistryMinInterval) of the read itself: one method on one
-// repository and one tag (or digest). A refusal of the
-// re-check right after the reservation releases it again.
+// repository and one tag (or digest). Before the budget is charged, a read
+// of a reference not read in the last rolling hour also takes one of the
+// repository's registryMaxTagsPerRepository distinct-tag slots, so a caller
+// naming many tags of one repository (a compromised host's check_updates
+// result lists up to 50) cannot spend the whole per-registry budget on it;
+// a refused slot charges nothing. A refusal of the re-check right after the
+// reservation releases every spend again.
 //
 // The lease never names or carries a credential value: the credential
 // stays in the executor vault, and ReadPrivateRegistry returns sanitized
@@ -57,6 +62,10 @@ var (
 	ErrRegistryReadNotLeased = errors.New("executor: the registry read lease does not cover this repository or method")
 	// ErrRegistryBudget: the per-registry rolling-hour budget is exhausted.
 	ErrRegistryBudget = errors.New("executor: the private registry's rolling-hour read budget is exhausted")
+	// ErrRegistryTagLimit: the repository already had
+	// registryMaxTagsPerRepository distinct references read in the rolling
+	// hour.
+	ErrRegistryTagLimit = errors.New("executor: too many distinct tags of the repository were read in the last hour")
 	// ErrRegistryTooSoon: the same read ran within its interval.
 	ErrRegistryTooSoon = errors.New("executor: the same private registry read ran less than its minimum interval ago")
 	// ErrRegistryReadPaused: the permit authority's read pause holds.
@@ -69,8 +78,23 @@ var (
 // provider ("pve:") and device ("netdev:") keys in the shared counters.
 const registryGrantKeyPrefix = "registry:"
 
+// registryMaxTagsPerRepository bounds the distinct references (tags or
+// digests of tag_digest reads, and the tag list) of one repository read
+// per rolling hour, across all leases and callers. The executor sees no
+// managed host, so the cap is per repository; the server additionally caps
+// each host (registrymeta.MaxHostTagsPerRepository). It is a third of the
+// default per-registry budget, so one repository never takes all of it.
+const registryMaxTagsPerRepository = schedgrant.RegistryDefaultRunBudget / 3
+
 // registryBudgetKey is the rolling-hour budget key of a registry.
 func registryBudgetKey(registryID string) string { return registryGrantKeyPrefix + registryID }
+
+// registryRepoKey is the distinct-tag counter key of one repository. It
+// holds a second ':' (registry IDs have none), so it never equals a budget
+// key, and repositories contain no ':', so two keys never collide.
+func registryRepoKey(registryID, repository string) string {
+	return registryGrantKeyPrefix + registryID + ":" + repository
+}
 
 // registryActionKey is the interval key of one method on one repository
 // and reference (the tag or digest of a tag_digest read, empty for
@@ -268,7 +292,8 @@ func (s *Service) checkRegistryLease(ctx context.Context, r RegistryRead, now ti
 	}
 
 	actionKey, budgetKey := registryActionKey(r.Method, r.Repository, r.Reference), registryBudgetKey(r.RegistryID)
-	denied := false
+	repoKey := registryRepoKey(r.RegistryID, r.Repository)
+	denied, tagLimited := false, false
 	var deniedInterval time.Duration
 	for _, c := range candidates {
 		interval := max(time.Duration(c.doc.MinIntervalS)*time.Second, schedgrant.RegistryMinInterval)
@@ -277,24 +302,62 @@ func (s *Service) checkRegistryLease(ctx context.Context, r RegistryRead, now ti
 		if err != nil {
 			return nil, fmt.Errorf("registry read interval: %w", err)
 		}
+		// A reference read within the rolling hour already holds its slot.
+		newRef := !hadPrev || prev.Unix() <= effective.Unix()-int64(permit.RollingHour/time.Second)
+		var slotPrev time.Time
+		var slotHadPrev bool
+		if newRef {
+			slotPrev, slotHadPrev, err = s.db.ReadActionLastRun(actionKey, repoKey)
+			if err != nil {
+				return nil, fmt.Errorf("registry read tag slot: %w", err)
+			}
+			got, err := s.db.ReserveReadRun(c.id, actionKey, repoKey, now, registryMaxTagsPerRepository, 0)
+			if errors.Is(err, permit.ErrReadGrantInactive) {
+				sawExpired = true
+				continue
+			}
+			if err != nil {
+				return nil, fmt.Errorf("reserve registry tag slot on lease %s: %w", c.id, err)
+			}
+			if !got {
+				// The slots are shared across leases: no other lease helps,
+				// and nothing was charged.
+				tagLimited = true
+				break
+			}
+		}
+		// release gives back the slot and, with main, the budget spend.
+		release := func(main bool) {
+			if main {
+				if _, rerr := s.db.ReleaseReadRun(c.id, actionKey, budgetKey, prev, hadPrev); rerr != nil && s.log != nil {
+					s.log.Error("release registry read reservation", "registry", r.RegistryID, "grant", c.id, "error", rerr.Error())
+				}
+			}
+			if newRef {
+				if _, rerr := s.db.ReleaseReadRun(c.id, actionKey, repoKey, slotPrev, slotHadPrev); rerr != nil && s.log != nil {
+					s.log.Error("release registry tag slot", "registry", r.RegistryID, "grant", c.id, "error", rerr.Error())
+				}
+			}
+		}
 		reserved, err := s.db.ReserveReadRun(c.id, actionKey, budgetKey, now, budget, interval)
 		if errors.Is(err, permit.ErrReadGrantInactive) {
+			release(false)
 			sawExpired = true
 			continue
 		}
 		if err != nil {
+			release(false)
 			return nil, fmt.Errorf("reserve registry read on lease %s: %w", c.id, err)
 		}
 		if !reserved {
+			release(false)
 			denied, deniedInterval = true, max(deniedInterval, interval)
 			continue
 		}
 		claim := &registryLeaseClaim{s: s, grantID: c.id, epoch: epoch}
 		if err := s.registryLeaseRecheck(epoch, c.id); err != nil {
 			// No registry I/O happened: give the spend back.
-			if _, rerr := s.db.ReleaseReadRun(c.id, actionKey, budgetKey, prev, hadPrev); rerr != nil && s.log != nil {
-				s.log.Error("release registry read reservation", "registry", r.RegistryID, "grant", c.id, "error", rerr.Error())
-			}
+			release(true)
 			return nil, err
 		}
 		if s.log != nil {
@@ -304,6 +367,8 @@ func (s *Service) checkRegistryLease(ctx context.Context, r RegistryRead, now ti
 		return claim, nil
 	}
 	switch {
+	case tagLimited:
+		return nil, ErrRegistryTagLimit
 	case denied:
 		last, ok, err := s.db.ReadActionLastRun(actionKey, budgetKey)
 		if err != nil {
@@ -323,7 +388,7 @@ func (s *Service) checkRegistryLease(ctx context.Context, r RegistryRead, now ti
 // an internal failure worth an error log line).
 func isRegistryLeaseRefusal(err error) bool {
 	for _, e := range []error{ErrRegistryNoLease, ErrRegistryLeaseExpired, ErrRegistryLeaseStale, ErrRegistryReadNotLeased,
-		ErrRegistryBudget, ErrRegistryTooSoon, ErrRegistryReadPaused, context.Canceled, context.DeadlineExceeded} {
+		ErrRegistryBudget, ErrRegistryTagLimit, ErrRegistryTooSoon, ErrRegistryReadPaused, context.Canceled, context.DeadlineExceeded} {
 		if errors.Is(err, e) {
 			return true
 		}
@@ -349,6 +414,8 @@ func registryLeaseStatus(err error) error {
 		return status.Error(codes.PermissionDenied, "read private registry: the registry read lease does not cover this repository or method")
 	case errors.Is(err, ErrRegistryTooSoon):
 		return status.Error(codes.ResourceExhausted, "read private registry: the same read ran less than its minimum interval ago")
+	case errors.Is(err, ErrRegistryTagLimit):
+		return status.Error(codes.ResourceExhausted, "read private registry: too many distinct tags of this repository were read in the last hour")
 	case errors.Is(err, ErrRegistryBudget):
 		return status.Error(codes.ResourceExhausted, "read private registry: the registry's rolling-hour read budget is exhausted")
 	case errors.Is(err, ErrRegistryReadPaused):
