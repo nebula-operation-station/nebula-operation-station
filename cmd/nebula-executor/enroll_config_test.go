@@ -209,6 +209,49 @@ func TestNetBirdManagementURLInvalidFailLoad(t *testing.T) {
 	}
 }
 
+// TestNetBirdManagementURLPathOutsideSetFailsLoad backs spec 03
+// "Render-input format": the path holds only A-Za-z0-9-._~/; ':' (allowed
+// in the host part for IPv6 and the port) and every other byte are
+// refused there.
+func TestNetBirdManagementURLPathOutsideSetFailsLoad(t *testing.T) {
+	tests := []struct{ name, url string }{
+		{"colon", "https://netbird.example.org/a:b"},
+		{"colon after port", "https://netbird.example.org:443/a:b"},
+		{"colon after IPv6 host", "https://[2001:db8::5]/mgmt:1"},
+		{"leading colon segment", "https://netbird.example.org/:"},
+		{"at", "https://netbird.example.org/a@b"},
+		{"percent", "https://netbird.example.org/a%41"},
+		{"semicolon", "https://netbird.example.org/a;b"},
+		{"exclamation", "https://netbird.example.org/a!b"},
+		{"bracket", "https://netbird.example.org/a[b]"},
+		{"plus", "https://netbird.example.org/a+b"},
+		{"comma", "https://netbird.example.org/a,b"},
+		{"equals", "https://netbird.example.org/a=b"},
+		{"asterisk", "https://netbird.example.org/a*b"},
+		{"ampersand", "https://netbird.example.org/a&b"},
+		{"parenthesis", "https://netbird.example.org/a(b)"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := parseEnroll(t, "-netbird-management-url", tc.url)
+			if !errors.Is(err, errInvalidEnrollConfig) {
+				t.Fatalf("load %q: err = %v, want errInvalidEnrollConfig", tc.url, err)
+			}
+			if !strings.Contains(err.Error(), "-netbird-management-url") {
+				t.Errorf("error %q does not name the flag", err)
+			}
+			if err := validNetBirdMgmtURL(tc.url); err == nil {
+				t.Errorf("validNetBirdMgmtURL(%q) accepted", tc.url)
+			}
+		})
+	}
+	// Every byte of the path set is accepted.
+	u := "https://netbird.example.org/AZaz09-._~/x"
+	if err := validNetBirdMgmtURL(u); err != nil {
+		t.Errorf("validNetBirdMgmtURL(%q): %v", u, err)
+	}
+}
+
 func TestNetBirdManagementURLAtLimit(t *testing.T) {
 	prefix := "https://netbird.example.org/"
 	u := prefix + strings.Repeat("a", netBirdMgmtURLMaxLen-len(prefix))

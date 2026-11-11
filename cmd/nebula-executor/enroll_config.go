@@ -229,6 +229,16 @@ func urlByteAllowed(c byte) bool {
 	return strings.IndexByte("-._~/:[]", c) >= 0
 }
 
+// urlPathByteAllowed reports whether c may appear in the path of a
+// management URL: A-Za-z0-9-._~/ only (spec 03 "Render-input format").
+func urlPathByteAllowed(c byte) bool {
+	switch {
+	case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9':
+		return true
+	}
+	return strings.IndexByte("-._~/", c) >= 0
+}
+
 // validNetBirdMgmtURL checks the NetBird management URL against spec 03
 // "Render-input format": at most netBirdMgmtURLMaxLen bytes of ASCII,
 // scheme exactly https, host a DNS name of LDH labels or an IP literal
@@ -267,6 +277,13 @@ func validNetBirdMgmtURL(raw string) error {
 	}
 	if err := validURLHost(u); err != nil {
 		return err
+	}
+	// urlByteAllowed admits ':', '[' and ']' for the host and port only;
+	// the path is held to its own, narrower set.
+	for i := 0; i < len(u.Path); i++ {
+		if !urlPathByteAllowed(u.Path[i]) {
+			return fmt.Errorf("character %q is not allowed in the path", u.Path[i])
+		}
 	}
 	for _, seg := range strings.Split(u.Path, "/") {
 		if seg == "." || seg == ".." {
