@@ -281,7 +281,10 @@ func (s *Service) registryInfo(l *loadedRegistry) *pb.PrivateRegistryInfo {
 	return &pb.PrivateRegistryInfo{RegistryId: l.rec.ID, RegistryOrigin: l.rec.Registry, AuthMode: registryModeProto(l.rec.Mode),
 		Realm: l.rec.Realm, Service: l.rec.Service, Repositories: slices.Clone(l.rec.Repositories),
 		AllowPrivateNetwork: l.rec.AllowPrivateNetwork, CustomCa: l.rec.CAPEM != "", ConfigVersion: l.configVersion,
-		CredentialVersion: l.credVersion, CredentialExpiresUnix: l.cred.ExpiresUnix}
+		CredentialVersion: l.credVersion, CredentialExpiresUnix: l.cred.ExpiresUnix,
+		// The lease identity (cu06, G13): a hash of the record and a random
+		// credential identity. Neither is or derives from the credential.
+		ConfigDigest: l.configDigest, CredentialId: l.cred.ID}
 }
 
 func registryModeProto(m string) pb.PrivateRegistryAuthMode {
