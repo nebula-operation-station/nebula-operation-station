@@ -6,6 +6,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
+	"flag"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +18,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/enrollscript"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
@@ -83,6 +87,91 @@ func TestEnrollScript(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "sudoers") || !strings.Contains(out.String(), "user='ops'") {
 		t.Fatalf("no-sudo script: %s", out.String())
+	}
+}
+
+// updateEnrollGolden rewrites the golden scripts. They were generated with
+// the enrollScript code from before the extraction into
+// internal/enrollscript (EN-04); regenerate only for an intended change of
+// the script.
+var updateEnrollGolden = flag.Bool("update-enroll-golden", false, "rewrite the enroll-script golden files")
+
+// enrollGoldenDir holds the golden scripts, shared with the
+// internal/enrollscript golden test.
+const enrollGoldenDir = "../../internal/enrollscript/testdata"
+
+// goldenKeyLine is a fixed ed25519 key (seed 0x01..0x20) so the golden
+// scripts are reproducible.
+func goldenKeyLine(t *testing.T) string {
+	t.Helper()
+	seed := make([]byte, ed25519.SeedSize)
+	for i := range seed {
+		seed[i] = byte(i + 1)
+	}
+	k, err := ssh.NewPublicKey(ed25519.NewKeyFromSeed(seed).Public())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.TrimSpace(string(ssh.MarshalAuthorizedKey(k)))
+}
+
+// enrollGoldenCases maps a golden file name to CLI arguments. The same
+// names and options are in internal/enrollscript/golden_test.go.
+var enrollGoldenCases = []struct {
+	name string
+	args []string
+}{
+	{"default", []string{"--from", "192.168.0.10, 10.8.0.0/24"}},
+	{"no-sudo-user-ops", []string{"--from", "10.0.0.1", "--no-sudo", "--user", "ops"}},
+	{"ipv6-custom-key", []string{"--from", "2001:db8::10,fd00:1:2::/64", "--key", "lab_key-2"}},
+	{"mixed-many", []string{"--from", "10.0.0.1,10.0.0.2/32,172.16.0.0/12,::1,fe80::/10,192.0.2.255", "--user", "_svc-nos_1"}},
+	{"max-lengths-no-sudo", []string{
+		"--from", "203.0.113.7",
+		"--user", "a" + strings.Repeat("b", 31),
+		"--key", "k" + strings.Repeat("0", 63),
+		"--no-sudo",
+	}},
+}
+
+// TestEnrollScriptGolden: the CLI output is byte-identical to the golden
+// scripts generated before the extraction (EN-04).
+func TestEnrollScriptGolden(t *testing.T) {
+	f := &fakeKey{line: goldenKeyLine(t)}
+	for _, tc := range enrollGoldenCases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out strings.Builder
+			if err := hostEnrollScript(context.Background(), f, tc.args, &out); err != nil {
+				t.Fatal(err)
+			}
+			p := filepath.Join(enrollGoldenDir, tc.name+".golden")
+			if *updateEnrollGolden {
+				if err := os.WriteFile(p, []byte(out.String()), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want, err := os.ReadFile(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out.String() != string(want) {
+				t.Fatalf("script differs from %s:\n%s", p, out.String())
+			}
+		})
+	}
+}
+
+// TestEnrollScriptOverLimitWritesNothing: a script over the 64 KiB limit
+// (thousands of --from entries) is refused and nothing is printed.
+func TestEnrollScriptOverLimitWritesNothing(t *testing.T) {
+	f := &fakeKey{line: goldenKeyLine(t)}
+	var addrs []string
+	for i := 1; i <= 2000; i++ {
+		addrs = append(addrs, fmt.Sprintf("2001:db8:%x::/64", i))
+	}
+	var out strings.Builder
+	err := hostEnrollScript(context.Background(), f, []string{"--from", strings.Join(addrs, ",")}, &out)
+	if !errors.Is(err, enrollscript.ErrTooLarge) || out.Len() != 0 {
+		t.Fatalf("err %v, %d bytes written; want ErrTooLarge and no output", err, out.Len())
 	}
 }
 
