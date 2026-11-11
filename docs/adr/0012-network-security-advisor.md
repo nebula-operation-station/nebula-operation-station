@@ -23,6 +23,13 @@ History:
   ND-07 allowlist additions moved to Q11 (previously decided in D2);
   retention of the internal side of reputation hits; EDL source allowlist
   required; acknowledgement and notification defaults offered in Q8/Q9.
+- 2026-11-11: review fix round 3 (ticket ns00f4): one fail-safe rule for
+  unevaluable rules in D2 (previously per-field labels such as "default
+  assumed" and "negation and default rules not collected" with a shown
+  `denied`); `rule-type` and `source-hip`/`destination-hip` added to Q11;
+  mitigation voided on `raw_digest` change too; mitigation queried over
+  every host address; reputation hits from `incomplete` hours never
+  denied-only.
 
 ## Context
 
@@ -122,7 +129,7 @@ devices directly:
 | Security rules in order, incl. `disabled`, negation flags, application, service, source-user, schedule | ND-16 (fields beyond the ND-07 allowlist need NS-04, see below) |
 | NAT rules in order | ND-16 |
 | Address/service objects and groups (static, nested, dynamic) | ND-16 |
-| Default security rules (intrazone allow, interzone deny, and their overrides) | ND-16 after NS-04; until then the vendor defaults, labelled "default assumed" (*verify* per release in NS-03) |
+| Default security rules (intrazone allow, interzone deny, and their overrides) | ND-16 after NS-04; until then not collected, so a decision by a default rule is `unknown` ("Unevaluable rules (fail-safe)" below; previously the vendor defaults labelled "default assumed") |
 | CBS ports, VLAN membership, LLDP | ND-16 (ADR 0010 D4) |
 | IPAM networks with VLAN | `internal/ipam` |
 | Host-side VLAN and route data, guest NIC bridge/VLAN | ADR 0009 `net.facts`, `internal/trafficstore/guestnics.go` |
@@ -201,7 +208,9 @@ evaluation semantics creates `nr-v2`.
    internal address was queried, so a port forward could look `denied`).
 4. **Security rules.** In order, first match wins; disabled rules are
    skipped and listed in the chain as "skipped (disabled)". A rule matches
-   when zones, addresses (with negation), and service match. A rule is
+   when zones, addresses (with negation), and service match. An enabled
+   rule that is **unevaluable** (see "Unevaluable rules (fail-safe)"
+   below) ends the evaluation with `unknown` when it is reached. A rule is
    **conditional** when its match depends on data the model does not have:
    an application other than `any`, a `source-user`, a URL category, a
    schedule, or the service `application-default` (the ports then depend
@@ -226,7 +235,9 @@ evaluation semantics creates `nr-v2`.
    denies as well (previously: "conditional" was defined for allow rules
    only).
 5. **Default rules.** No match → the default intrazone or interzone rule
-   (from the data, else the vendor default labelled "assumed").
+   from the data; if the default rules were not collected (Q11) the
+   verdict is `unknown` (previously: the vendor default labelled
+   "assumed").
 
 **Verdicts.**
 
@@ -234,9 +245,9 @@ evaluation semantics creates `nr-v2`.
 | --- | --- |
 | `allowed` | An allow rule matches unconditionally; chain names rule and NAT |
 | `conditional` | A conditional allow decides, or a conditional deny (App-ID, user, URL category, schedule, service `application-default`) is followed by an allow; counts as reachable for every security use (fail closed) |
-| `denied` | An unconditional deny/drop/reset rule or the default interzone rule matches, with no earlier conditional allow (a conditional deny counts only if its fall-through denies too) |
+| `denied` | An unconditional deny/drop/reset rule or the collected default interzone rule matches, with no earlier conditional allow and no earlier unevaluable rule (a conditional deny counts only if its fall-through denies too) |
 | `not_filtered` | Same L2 segment, or a NetBird overlay path that bypasses the firewall; the firewall is not on the path |
-| `unknown` | Any input missing, stale (ADR 0010: three missed intervals) or `incomplete` (D3 limits); an object that cannot be evaluated (FQDN, EDL, dynamic group whose members are unknown, region objects), also in a NAT rule found by the reverse-NAT lookup; more than one vsys; route ambiguity; a private or special-range address outside known subnets; a known subnet on no firewall interface; a NetBird path not proven to cross the firewall. The reason is listed |
+| `unknown` | Any input missing, stale (ADR 0010: three missed intervals) or `incomplete` (D3 limits); an object that cannot be evaluated (FQDN, EDL, dynamic group whose members are unknown, region objects), also in a NAT rule found by the reverse-NAT lookup; more than one vsys; route ambiguity; a private or special-range address outside known subnets; a known subnet on no firewall interface; a NetBird path not proven to cross the firewall; an unevaluable rule reached in rule order (match field outside the collected allowlist, a `<dropped:…>` marker, Q11 rule fields not collected); default rules not collected (Q11). The reason is listed |
 
 **Explanation chain.** Every verdict carries the ordered list of steps
 with the data that decided each step: segment and zone mapping with their
@@ -261,8 +272,9 @@ Q6) and the result must be reproducible.
 0010 ND-07 allowlist, protected; open as Q11).** `nr-v1` and D4 would use
 PAN-OS elements that the ND-07 allowlist does not pass today:
 `rulebase/default-security-rules`, the rule fields `negate-source`,
-`negate-destination`, `schedule`, `profile-setting` (profile and group
-**names** only) and `log-setting` name, and
+`negate-destination`, `rule-type` (universal/intrazone/interzone),
+`source-hip`, `destination-hip`, `schedule`, `profile-setting` (profile
+and group **names** only) and `log-setting` name, and
 `zone/<name>/network/zone-protection-profile` name (*verify* exact paths in
 NS-03). They carry no secrets as far as this draft can tell. Whether the
 accepted ADR 0010 allowlist may grow by these elements is a maintainer
@@ -270,9 +282,35 @@ decision (Q11), not settled here (previously: "NS-04 adds them"). If Q11
 says yes, NS-04 adds them through the reviewed allowlist process with the
 fail-closed keyword rule unchanged. Until then, and for good if Q11 says
 no, checks that need them report "data not collected", never "ok", and
-`nr-v1` labels every verdict "negation and default rules not collected";
-a `denied` from such a snapshot is shown but never counts as mitigating in
-D3 (fail closed).
+the rules and default rules concerned are unevaluable (below; previously:
+every verdict labelled "negation and default rules not collected", a
+`denied` shown but not counted as mitigating).
+
+**Unevaluable rules (fail-safe).** One rule covers every rule field the
+model cannot evaluate, instead of a label per field. A security rule (or
+the default-rule step) is **unevaluable** when any of these holds:
+
+- it carries a field that can change what the rule matches and that is
+  outside the collected allowlist (ND-07, plus the Q11 elements once
+  collected);
+- it, or an object or group it references, carries a `<dropped:…>`
+  marker from the ADR 0010 D4 redaction;
+- its Q11 elements were not collected: `negate-source`,
+  `negate-destination`, `rule-type`, `source-hip`, `destination-hip` for
+  every rule, and `rulebase/default-security-rules` for the default-rule
+  step.
+
+Consequences, all fail-safe:
+
+- the reachability verdict of every query that reaches such a rule in
+  rule order, or ends at an uncollected default rule, is **`unknown`**
+  with the reason "rule <name> unevaluable: <field or marker>", never
+  `denied` and never `allowed`; the chain lists the rule;
+- it never counts as mitigating in `vu-prio-v2` (D3);
+- it removes no attack-path edge (ADR 0011 D10; D3);
+- a snapshot is **not complete** (D4) for any path or check that touches
+  it, so it never resolves a `mgmt-from-untrusted`, `shadowed-rule` or
+  other advisor finding.
 
 ### D3: Exposure-aware vulnerability priority (B)
 
@@ -327,9 +365,9 @@ and shows "mitigation unknown: <reason>":
 - the policy version (`redacted_digest`) and every referenced object are
   unchanged since the computation (**a rule or object change voids every
   mitigation at once**, before recomputation);
-- no verdict on a path that the record counts as mitigating is `unknown`,
-  and none rests on a snapshot without the Q11 elements (negation flags,
-  default rules);
+- no verdict on a path that the record counts as mitigating is `unknown`
+  (which includes every path through an unevaluable rule or an
+  uncollected default rule, D2 "Unevaluable rules (fail-safe)");
 - **no contradiction**: no observed flow (ADR 0009 flows, D5 log
   aggregates with action allow) in the last 24 h from a source the record
   calls `denied` to the finding's host and port. A contradiction voids the
@@ -348,11 +386,11 @@ whose tier rises because a mitigation is voided raises
 computed from the reachability model instead of raw allow/NAT rules:
 `allowed` and `conditional` → policy edge; `not_filtered` → L2 edge, still
 flagged "assumed" in `ap-v1` (host firewalls not modelled); `denied` → no
-edge only when the verdict rests on a snapshot with the Q11 elements
-(negation flags and default rules collected, not "default assumed") and
-fresh inputs; a `denied` from a snapshot without them keeps the edge,
-flagged "assumed" (unproven, previously: every `denied` removed the edge);
-`unknown` → edge flagged "assumed" (fail closed). Choke-point
+edge, and only from fresh inputs (a `denied` cannot pass an unevaluable
+rule or an uncollected default rule, D2 "Unevaluable rules (fail-safe)";
+previously: a `denied` from a snapshot without the Q11 elements kept the
+edge flagged "assumed"); `unknown` → edge flagged "assumed" (fail
+closed). Choke-point
 candidates "one edge removed by a rule change" are what-if results (D4).
 `ap-v1` stays; using the model as edge source is a data-source change,
 recorded with the graph snapshot hash.
@@ -364,12 +402,11 @@ kind, not subject to ADR 0011 D5). NOS computes them deterministically from
 a snapshot, so NOS also resolves them: a check that no longer fires on a
 fresh complete snapshot marks its finding `resolved`. A snapshot is
 **complete** for a check only when every input is fresh and not
-`incomplete`, the Q11 elements (negation flags, default rules, not
-"default assumed") are collected, and every element the check needs is
-present (for example profile names for `allow-without-profile`); a
-verdict the check relies on that is `unknown` or labelled "negation and
-default rules not collected" does not count (previously: "complete" was
-not defined). A check that cannot be evaluated, answers "cannot decide"
+`incomplete`, no rule or default rule the check touches is unevaluable
+(D2 "Unevaluable rules (fail-safe)"), and every element the check needs
+is present (for example profile names for `allow-without-profile`); a
+verdict the check relies on that is `unknown` does not count (previously:
+"complete" was not defined). A check that cannot be evaluated, answers "cannot decide"
 or "data not collected", or runs on a snapshot that is not complete for
 it **never resolves an existing finding**: the finding stays as it was
 and shows "not evaluated since …". The admin
@@ -400,7 +437,7 @@ evidence.
 
 | Check | Fires when | Evidence shown |
 | --- | --- | --- |
-| `shadowed-rule` | An enabled rule can never match because earlier rules together cover its full match space (zones, addresses incl. negation, service, application, user, schedule). Partial overlap is a separate, lower `overlap` hint. Objects that cannot be evaluated, or negation flags not collected (Q11) → "cannot decide": no new finding, and an existing finding is never resolved by it (stays, "not evaluated since …") | Covering rule(s), the shadowed rule, why |
+| `shadowed-rule` | An enabled rule can never match because earlier rules together cover its full match space (zones, addresses incl. negation, service, application, user, schedule). Partial overlap is a separate, lower `overlap` hint. Objects that cannot be evaluated, or an unevaluable shadowed or covering rule (D2 fail-safe) → "cannot decide": no new finding, and an existing finding is never resolved by it (stays, "not evaluated since …") | Covering rule(s), the shadowed rule, why |
 | `any-any` | An allow rule with source **and** destination address `any`, or source **or** destination zone `any`, or service and application both `any` | Rule, which fields are `any` |
 | `allow-without-profile` | An allow rule toward or from a zone of trust class `untrusted` or `guest` with no security profile or profile group (needs NS-04) | Rule, zones |
 | `zero-hits` | Enabled rule with zero hits since the later of rule creation and counter reset, with **≥ 30 days observed**; the reset time and observed window are shown (same rule as ADR 0010 ND-20); never a delete proposal | Hit count, first/last hit, reset time, window |
@@ -843,8 +880,10 @@ Tickets: [docs/implementation/network-security.md](../implementation/network-sec
 - **Q11: ND-07 redaction allowlist additions.** May the allowlist of the
   accepted ADR 0010 (ND-07, protected `internal/netdevredact/`) grow by
   the D2 elements (`rulebase/default-security-rules`, `negate-source`,
-  `negate-destination`, `schedule`, `profile-setting` names, `log-setting`
-  name, zone protection profile name), through NS-04 with the fail-closed
-  keyword rule unchanged? Does that need an amendment note in ADR 0010
-  itself? Without them, `allow-without-profile` stays "data not
-  collected" and no `denied` counts as mitigating (D2, D3).
+  `negate-destination`, `rule-type`, `source-hip`, `destination-hip`,
+  `schedule`, `profile-setting` names, `log-setting` name, zone
+  protection profile name), through NS-04 with the fail-closed keyword
+  rule unchanged? Does that need an amendment note in ADR 0010 itself?
+  Without them, `allow-without-profile` stays "data not collected" and
+  every rule is unevaluable, so no verdict is `denied` or `allowed` and
+  nothing counts as mitigating (D2 fail-safe, D3).
