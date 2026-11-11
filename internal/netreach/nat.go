@@ -38,11 +38,15 @@ func (e *evaluator) forward(srcZone string, src []AddrRange, dst Placement) []ou
 		proto: e.q.Protocol, ports: []portSpan{port},
 	}
 	if !e.newPath() {
-		return []outcome{unknownOut(ErrLimitReached.Error())}
+		return []outcome{e.stopped()}
 	}
 	var outs []outcome
 	var conds []string
 	for i := range e.x.nat {
+		// Stops once the chain is full, the budget is spent or ctx is done.
+		if !e.step(e.natCost(i, &base)) {
+			return append(outs, e.stopped())
+		}
 		v := &e.x.nat[i]
 		st := Step{Path: path, Kind: StepNAT, Name: v.Name}
 		if v.Disabled {
@@ -101,7 +105,7 @@ func (e *evaluator) forward(srcZone string, src []AddrRange, dst Placement) []ou
 // Index (postNATZones). Unknown results add a NAT step naming the cause.
 func (e *evaluator) translated(v *NATRuleView, z postZone, p packet) outcome {
 	if !e.newPath() {
-		return unknownOut(ErrLimitReached.Error())
+		return e.stopped()
 	}
 	r := z.reason
 	if r == "" && !e.x.zones[z.zone] {
@@ -207,6 +211,28 @@ func translatedZone(rs []AddrRange, zoneOf func(AddrRange) (postZone, bool)) pos
 	return postZone{zone: zone}
 }
 
+// natCost bounds the work of NAT rule i in forward on packet p: the step,
+// the zone list and the field matches of natMatch.
+func (e *evaluator) natCost(i int, p *packet) int {
+	v, a := &e.x.nat[i], &e.x.natAddrs[i]
+	if v.Disabled || !v.Evaluable() {
+		return 1
+	}
+	return 1 + len(v.From) + a.dst.cost(p.dst) + a.svc.cost(p.proto, p.ports) + a.src.cost(p.src)
+}
+
+// reverseNATCost bounds the work of NAT rule i in reverseNAT for the
+// source set src: the step, the translated address, the service (once
+// in preNATPorts), the zone list and the source match.
+func (e *evaluator) reverseNATCost(i int, src []AddrRange) int {
+	v, a := &e.x.nat[i], &e.x.natAddrs[i]
+	if v.Disabled || !v.Evaluable() {
+		return 1
+	}
+	return 1 + searchCost(1, len(a.translated.m)) + searchCost(1, len(a.svc.ports[e.q.Protocol])) +
+		len(v.From) + a.src.cost(src) + len(e.x.snap.NATRules[i].Destination.Value)
+}
+
 // natMatch matches an evaluable NAT rule, with its merged address fields
 // a, against the pre-NAT packet: from zone, to zone (the zone of the
 // pre-NAT destination), source, destination and service. It returns
@@ -240,6 +266,10 @@ func (e *evaluator) reverseNAT(srcZone string, src []AddrRange, dst Placement) [
 	d := dst.Addr
 	var outs []outcome
 	for i := range e.x.nat {
+		// Stops once the chain is full, the budget is spent or ctx is done.
+		if !e.step(e.reverseNATCost(i, src)) {
+			return append(outs, e.stopped())
+		}
 		v := &e.x.nat[i]
 		st := Step{Kind: StepReverseNAT, Name: v.Name}
 		if v.Disabled {
@@ -272,7 +302,7 @@ func (e *evaluator) reverseNAT(srcZone string, src []AddrRange, dst Placement) [
 			continue
 		}
 		if !e.newPath() {
-			return append(outs, unknownOut(ErrLimitReached.Error()))
+			return append(outs, e.stopped())
 		}
 		r := &e.x.snap.NATRules[i]
 		st.Outcome = OutcomeTried

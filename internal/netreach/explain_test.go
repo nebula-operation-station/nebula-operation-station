@@ -95,7 +95,7 @@ func TestDeterminism(t *testing.T) {
 	}
 	a, b := mustIndex(t, labSnapshot()), mustIndex(t, labSnapshot())
 	for _, q := range queries {
-		r1, r2, r3 := a.Evaluate(q), a.Evaluate(q), b.Evaluate(q)
+		r1, r2, r3 := a.Evaluate(t.Context(), q), a.Evaluate(t.Context(), q), b.Evaluate(t.Context(), q)
 		if !reflect.DeepEqual(r1, r2) || !reflect.DeepEqual(r1, r3) {
 			t.Fatalf("not deterministic for %+v", q)
 		}
@@ -173,13 +173,16 @@ func TestPathsPerQueryLimit(t *testing.T) {
 func TestChainStepsLimit(t *testing.T) {
 	x := mustIndex(t, labSnapshot())
 	q := internetQuery(dmzHost, 8443)
-	full := x.evaluate(q, evalLimits{paths: MaxPathsPerQuery, steps: MaxChainSteps})
+	lim := defaultEvalLimits()
+	full := x.evaluate(t.Context(), q, lim)
 	n := len(full.Chain) - 1 // the verdict step is always appended
-	at := x.evaluate(q, evalLimits{paths: MaxPathsPerQuery, steps: n})
+	lim.steps = n
+	at := x.evaluate(t.Context(), q, lim)
 	if at.Verdict != VerdictAllowed || !reflect.DeepEqual(at, full) {
 		t.Fatalf("at limit: %s", at.Text())
 	}
-	over := x.evaluate(q, evalLimits{paths: MaxPathsPerQuery, steps: n - 1})
+	lim.steps = n - 1
+	over := x.evaluate(t.Context(), q, lim)
 	wantVerdict(t, over, VerdictUnknown, "limit reached")
 	if len(over.Chain) != n {
 		t.Fatalf("chain has %d steps, want %d", len(over.Chain), n)
@@ -191,17 +194,20 @@ func TestFullChainStopsEvaluation(t *testing.T) {
 	s.NATRules = forwards(MaxPathsPerQuery - 1)
 	x := mustIndex(t, s)
 	q := internetQuery(dmzHost, 8443)
-	e := &evaluator{x: x, q: q, lim: evalLimits{paths: MaxPathsPerQuery, steps: 1}, chain: chain{max: 1}}
+	lim := defaultEvalLimits()
+	lim.steps = 1
+	e := x.newEvaluator(t.Context(), q, lim)
 	if out := e.run(); out.verdict == VerdictDenied {
 		t.Fatalf("full chain gave %s %q", out.verdict, out.reason)
 	}
 	if !e.chain.full || e.paths != 0 {
 		t.Fatalf("full chain: full %v, %d paths evaluated, want none", e.chain.full, e.paths)
 	}
-	r := x.evaluate(q, evalLimits{paths: MaxPathsPerQuery, steps: 1})
+	r := x.evaluate(t.Context(), q, lim)
 	wantVerdict(t, r, VerdictUnknown, "limit reached")
 	// Inside a path: a full chain ends the rule loop with limit reached.
-	e = &evaluator{x: x, q: q, chain: chain{max: 0, full: true}}
+	e = x.newEvaluator(t.Context(), q, defaultEvalLimits())
+	e.chain = chain{max: 0, full: true}
 	if out := e.securityPath(packet{srcZone: "wan", dstZone: "dmz"}); out.verdict != VerdictUnknown || out.reason != ErrLimitReached.Error() {
 		t.Fatalf("securityPath on full chain: %s %q", out.verdict, out.reason)
 	}
@@ -332,8 +338,8 @@ func FuzzEvaluate(f *testing.F) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		r := x.Evaluate(q)
-		if !reflect.DeepEqual(r, x.Evaluate(q)) {
+		r := x.Evaluate(t.Context(), q)
+		if !reflect.DeepEqual(r, x.Evaluate(t.Context(), q)) {
 			t.Fatal("not deterministic")
 		}
 		switch r.Verdict {

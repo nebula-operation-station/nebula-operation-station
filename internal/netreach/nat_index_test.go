@@ -64,14 +64,14 @@ func TestPostNATZonePlacedOncePerIndex(t *testing.T) {
 	}
 	for range 20 {
 		for _, q := range queries {
-			x.Evaluate(q)
+			x.Evaluate(t.Context(), q)
 		}
 	}
 	if c.total != built {
 		t.Fatalf("queries placed translated addresses %d more times", c.total-built)
 	}
 	// The cached zone still decides: the forward to the DMZ is allowed.
-	wantVerdict(t, x.Evaluate(internetQuery(wanAddr, 443)), VerdictAllowed, "allow-web")
+	wantVerdict(t, x.Evaluate(t.Context(), internetQuery(wanAddr, 443)), VerdictAllowed, "allow-web")
 }
 
 // TestPostNATZonePlacementBudget: a hostile snapshot with more distinct
@@ -113,7 +113,7 @@ func TestPostNATZonePlacementBudget(t *testing.T) {
 		s.NATRules = append(s.NATRules, r)
 	}
 	x, _ := countingIndex(t, s, max)
-	r := x.Evaluate(internetQuery(wanAddr, 443))
+	r := x.Evaluate(t.Context(), internetQuery(wanAddr, 443))
 	wantVerdict(t, r, VerdictUnknown, "NAT rule fwd-3: post-NAT zone: limit reached")
 	wantStep(t, r, StepNAT, "fwd-3", OutcomeUnknown, "post-NAT zone: limit reached")
 	if d := MaxNATPlacementsPerSnapshot; d <= 0 {
@@ -189,7 +189,7 @@ func TestServicePortsMergedAtBuild(t *testing.T) {
 		t.Fatalf("matching a merged service allocates %.0f times per call", n)
 	}
 	// One query through both rules: the rule match uses the merged field.
-	r := x.Evaluate(addrQuery(lanHost, "192.168.99.1", 60001))
+	r := x.Evaluate(t.Context(), addrQuery(lanHost, "192.168.99.1", 60001))
 	wantVerdict(t, r, VerdictDenied, "deny-lan-mgmt")
 }
 
