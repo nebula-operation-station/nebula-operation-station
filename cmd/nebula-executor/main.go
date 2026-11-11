@@ -181,6 +181,9 @@ func run() error {
 	svc.SetPveGuestPowerBindings(powerBindings)
 	svc.SetEventKey(chain.PublicKey())
 	svc.SetBackupDirs(*dataDir, keysDir)
+	// Private registry reads (ADR 0006, cu06 part 1, G13): bounded
+	// registry read leases authorize ReadPrivateRegistry.
+	setupRegistryReads(svc)
 	// Built-in trust (ADR 0007 E16): commits record exact artifact trust
 	// in executor.db, the same entries the risk policy reads.
 	setupBuiltinTrust(svc, *dataDir, *trustDir, *bundleDir, db, log)
