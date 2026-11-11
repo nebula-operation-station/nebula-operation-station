@@ -673,6 +673,38 @@ func TestNetdevHelpUsesPlaceholdersOnly(t *testing.T) {
 	}
 }
 
+// TestNetdevHelpMatchesOperatorGuide pins the help text to
+// docs/operator/network-devices.md: --reason is required for block, the
+// CBS credential is the OpenSSH private key passed via --secret-fd, the
+// PAN-OS credential is the API key, and the --label rules.
+func TestNetdevHelpMatchesOperatorGuide(t *testing.T) {
+	flat := strings.Join(strings.Fields(netdevUsage), " ")
+	for _, want := range []string{
+		"nebula netdev block <device-id> --reason TEXT",
+		"CBS: the OpenSSH private key of the read account, always via --secret-fd",
+		"PAN-OS: the API key",
+		"--label is required for an IP literal --endpoint",
+		"omit --label or pass exactly that name",
+		"block requires --reason",
+	} {
+		if !strings.Contains(flat, want) {
+			t.Errorf("netdev help lacks %q", want)
+		}
+	}
+	for _, stale := range []string{"[--reason TEXT]", "CBS password"} {
+		if strings.Contains(flat, stale) {
+			t.Errorf("netdev help still says %q", stale)
+		}
+	}
+}
+
+// TestNetdevBlockReasonFlagHelpSaysRequired pins the --reason flag help.
+func TestNetdevBlockReasonFlagHelpSaysRequired(t *testing.T) {
+	if !strings.HasPrefix(netdevReasonFlagHelp, "required") {
+		t.Fatalf("--reason help does not say required: %q", netdevReasonFlagHelp)
+	}
+}
+
 // netdevClosedFD returns a descriptor number that is not open.
 func netdevClosedFD(t *testing.T) int {
 	t.Helper()
