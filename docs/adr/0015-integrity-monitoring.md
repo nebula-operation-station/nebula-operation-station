@@ -83,6 +83,41 @@ Consequences stated plainly:
   D7). A baseline on the target would be rewritten by the same attacker
   who changed the files.
 
+### Honest limits: what I1 and I2 do not cover
+
+Beyond the root-attacker limit above, these are outside I1/I2 and are
+named in the handbook next to every "no unexpected change" result:
+
+- **Server-writable NOS state.** Databases, logs, spools, runtime
+  directories and caches on the NOS machine (excluded by D2). A
+  well-formed, deliberate edit there by the `nebula-server` UID is not an
+  integrity finding; `PRAGMA integrity_check` and backups only catch
+  corruption, and the audit log only what it records.
+- **Unwatched host paths.** Everything outside the D5 roots: `/var`
+  (except the crontab spool), `/srv`, `/home` and `/root` except
+  `authorized_keys*` (so shell start files such as `~/.bashrc`,
+  `~/.profile` and per-user systemd units under `~/.config/systemd/`),
+  `authorized_keys` of service accounts whose home is under `/var`,
+  `/srv` or `/opt` outside the scanned `/opt` tree, `at` job spools,
+  `/tmp`, `/dev/shm`, `/run`, `/etc/pve` (Q1), container images and
+  volumes. Persistence placed there is not seen by I2.
+- **Other file systems.** `find -xdev` does not descend into a separate
+  mount below a root, for example the `/boot/efi` vfat partition with
+  the shim and GRUB EFI binaries. Until IG-05 adds such mounts as explicit
+  roots, a skipped mount below a root is reported and makes the run
+  partial; it is never silently treated as covered.
+- **Between scans.** A change that is reverted before the next scan is
+  missed (threat model).
+- **The checker's own references on the NOS machine.** Root on the NOS
+  machine can rewrite the executor's admitted list and baseline digest
+  and the approved configuration baseline with ordinary tools, so the
+  threat-table row "root attacker with ordinary tools" assumes the
+  attacker does not also edit those; only the offline check (D4) is
+  independent of the NOS machine.
+- **Anything not a file.** Running processes, loaded kernel modules,
+  memory-only implants, firmware and BIOS/UEFI settings (only I3 sees
+  part of this).
+
 ## Decisions
 
 ### D1: Three stages
@@ -242,13 +277,15 @@ following symlinks; final list is Q1):
 | --- | --- |
 | System configuration | `/etc` (complete), including `/etc/sudoers`, `/etc/sudoers.d/`, `/etc/ssh/`, `/etc/pam.d/`, `/etc/ld.so.preload`, `/etc/systemd/`, `/etc/cron*`, `/etc/apt/` |
 | Boot | `/boot` |
-| Executables and libraries | `/usr/bin`, `/usr/sbin`, `/usr/lib` (with `/bin`, `/sbin`, `/lib` recorded as the usrmerge symlinks they should be) |
+| Executables and libraries | `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/libexec` (with `/bin`, `/sbin`, `/lib` recorded as the usrmerge symlinks they should be) |
+| Local software | `/usr/local/bin`, `/usr/local/sbin`, `/usr/local/lib`, `/opt` (none of these is package-owned, so they are always compared against the baseline; `/usr/local/{bin,sbin}` come before `/usr/{bin,sbin}` in the default `PATH`, so a new file there that shadows a system command name is critical, D9) |
 | systemd units | `/usr/lib/systemd/system`, `/etc/systemd/system`, user units under `/etc/systemd/user` |
 | SSH access | `/root/.ssh/authorized_keys*`, `/home/*/.ssh/authorized_keys*`, plus any path named by an `AuthorizedKeysFile` directive found in `/etc/ssh/sshd_config` and its includes, limited to the roots above and `/home/*/` |
 | Scheduled jobs | `/etc/crontab`, `/etc/cron.*/`, `/var/spool/cron/crontabs/`, systemd timers (covered by the unit roots) |
 
 Excluded by default: `/etc/pve` (pmxcfs cluster file system, a separate
 mount skipped by `-xdev`; Q1), `/usr/lib/python3*/__pycache__`,
+`/usr/local/lib/python3*/**/__pycache__`,
 `/etc/ld.so.cache`, `/usr/lib/modules/*/modules.*` index files and other
 generated caches named in the profile; `/run`, `/proc`, `/sys`, `/tmp`,
 `/var` except the crontab spool.
@@ -535,7 +572,7 @@ dedupe follow ADR 0011 D6/D9 patterns. Severity by class:
 
 | Class | Severity |
 | --- | --- |
-| Package file differs from signed reference; NOS binary/unit mismatch (I1); new or changed `authorized_keys`, `sudoers`, PAM, `sshd_config`, `ld.so.preload`, systemd unit or timer, crontab, `/boot` file; new setuid/setgid file; missing NOS own key or extra key in root's `authorized_keys` | critical |
+| Package file differs from signed reference; NOS binary/unit mismatch (I1); new or changed `authorized_keys`, `sudoers`, PAM, `sshd_config`, `ld.so.preload`, systemd unit or timer, crontab, `/boot` file; new setuid/setgid file; new file in `/usr/local/bin` or `/usr/local/sbin` whose name shadows a command in `/usr/bin` or `/usr/sbin`; missing NOS own key or extra key in root's `authorized_keys` | critical |
 | Other changed or new file in `/etc`, `/usr`; owner/mode change; I2 baseline digest mismatch; change during a NOS job without a verified reference ("changed during NOS job, unverified") | high |
 | Package updated outside NOS with matching reference; partial or stale scan | medium |
 | Expected change from a NOS job | info (record only) |
