@@ -226,7 +226,7 @@ refuses a device that shows more than one vsys.
    read -rs -p 'nos-read password: ' PANPW; echo
    curl -s --cacert <mgmt-cert.pem> -X POST "https://<firewall-mgmt-ip>/api/" \
      --data-urlencode type=keygen --data-urlencode user=nos-read \
-     --data-urlencode "password@<(printf %s "$PANPW")"
+     --data-urlencode password@<(printf %s "$PANPW")
    unset PANPW
    ```
 
@@ -242,7 +242,7 @@ refuses a device that shows more than one vsys.
    curl -s --cacert <mgmt-cert.pem> --resolve <cert-name>:443:<firewall-mgmt-ip> \
      -X POST "https://<cert-name>/api/" \
      --data-urlencode type=keygen --data-urlencode user=nos-read \
-     --data-urlencode "password@<(printf %s "$PANPW")"
+     --data-urlencode password@<(printf %s "$PANPW")
    unset PANPW
    ```
 
