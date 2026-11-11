@@ -43,7 +43,9 @@ const netdevUsageMaxSteps = 2_000_000
 
 // The netdevFw*Max limits cap the rows of each list of the firewall view
 // at the contract limits, so a store that returned more could not blow up
-// the page.
+// the page. A list cut at its cap marks the view incomplete
+// (ReadIncomplete, or HitsIncomplete for the hit counts), so the cut is
+// visible.
 const (
 	netdevFwRulesMax     = netdevcontract.MaxSecurityRules
 	netdevFwNATMax       = netdevcontract.MaxNATRules
@@ -59,15 +61,16 @@ const (
 // an error matching netdevinventory.ErrDatasetNotFound when none are
 // stored. ConfigChangedNotDisplayed reports drift outside the allowlist:
 // the raw_digest of the running config changed while its redacted text
-// did not (ADR 0010 D4). Every returned string is untrusted device text.
+// did not (ADR 0010 D4), and when that change was seen. Every returned
+// string is untrusted device text.
 type NetDevFirewallStore interface {
 	NetDevStore
 	// HitCounts returns the current rule hit counts (PAN-OS).
 	HitCounts(ctx context.Context, deviceID string) ([]netdevcontract.HitCount, error)
 	// ConfigChangedNotDisplayed reports whether the newest running config
-	// version differs from the one before it only outside the redacted
-	// text.
-	ConfigChangedNotDisplayed(ctx context.Context, deviceID string) (bool, error)
+	// version (by last_seen) differs from the one before it only outside
+	// the redacted text, and when the change was seen.
+	ConfigChangedNotDisplayed(ctx context.Context, deviceID string) (netdevinventory.ConfigDrift, error)
 }
 
 // NetDevFirewallOptions configure the firewall view.
@@ -163,8 +166,13 @@ type netdevFirewallData struct {
 	// config's raw_digest changed while its redacted text did not, so the
 	// change is in elements this view does not display.
 	NotDisplayed bool
-	// ReadIncomplete is set when the stored policy read is partial:
-	// elements were cut or dropped and are missing from this view.
+	// ChangedAfter is the read after which the not-displayed change
+	// happened; ChangeSeenAt is the first read that showed it, zero when
+	// not known (a return to an earlier version).
+	ChangedAfter, ChangeSeenAt time.Time
+	// ReadIncomplete is set when the stored policy read is partial or a
+	// list was cut at its display cap: elements are missing from this
+	// view.
 	ReadIncomplete bool
 	Rules          []netdevFwRuleRow
 	NAT            []netdevFwNATRow
@@ -176,7 +184,8 @@ type netdevFirewallData struct {
 	DynamicGroups bool
 
 	HasHitCounts bool
-	// HitsIncomplete is set when the stored hit counts are partial.
+	// HitsIncomplete is set when the stored hit counts are partial or were
+	// cut at netdevFwHitCountsMax.
 	HitsIncomplete bool
 	HitsObservedAt time.Time
 
@@ -225,10 +234,11 @@ func (p *NetDevFirewallPage) handle(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// Drift outside the allowlist: raw_digest changed, redacted text not.
-	if changed, err := p.store.ConfigChangedNotDisplayed(ctx, id); err != nil {
+	if drift, err := p.store.ConfigChangedNotDisplayed(ctx, id); err != nil {
 		rowErr("config versions", err)
-	} else {
-		v.NotDisplayed = changed
+	} else if drift.NotDisplayed {
+		v.NotDisplayed = true
+		v.ChangedAfter, v.ChangeSeenAt = drift.ChangedAfter, drift.SeenAt
 	}
 	// Dataset states: a partial policy read means elements are missing.
 	if ds, err := p.store.GetDataset(ctx, id, netdevinventory.ReadFirewallPolicy); err != nil {
@@ -250,6 +260,9 @@ func (p *NetDevFirewallPage) handle(w http.ResponseWriter, r *http.Request) {
 		rowErr("hit counts", err)
 	} else if hitsDSOK {
 		v.HasHitCounts = true
+		if len(hs) > netdevFwHitCountsMax {
+			v.HitsIncomplete = true
+		}
 		hits = make(map[string]netdevcontract.HitCount, len(hs))
 		for _, hc := range hs[:min(len(hs), netdevFwHitCountsMax)] {
 			if _, dup := hits[hc.RuleName]; !dup {
@@ -271,8 +284,14 @@ func (p *NetDevFirewallPage) handle(w http.ResponseWriter, r *http.Request) {
 }
 
 // netdevFirewallFill fills the rule, NAT and object rows from a stored
-// policy and the hit counts observed at hitsAt.
+// policy and the hit counts observed at hitsAt. A list longer than its
+// display cap is cut and marks the view ReadIncomplete.
 func netdevFirewallFill(v *netdevFirewallData, pol netdevcontract.FirewallPolicy, hits map[string]netdevcontract.HitCount, hitsAt time.Time) {
+	if len(pol.SecurityRules) > netdevFwRulesMax || len(pol.NATRules) > netdevFwNATMax ||
+		len(pol.Addresses) > netdevFwAddrsMax || len(pol.AddressGroups) > netdevFwAddrGrpMax ||
+		len(pol.Services) > netdevFwSvcsMax || len(pol.ServiceGroups) > netdevFwSvcGrpMax {
+		v.ReadIncomplete = true
+	}
 	for i, r := range pol.SecurityRules[:min(len(pol.SecurityRules), netdevFwRulesMax)] {
 		row := netdevFwRuleRow{
 			Pos:         i + 1,

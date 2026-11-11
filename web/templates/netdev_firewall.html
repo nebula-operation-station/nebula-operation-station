@@ -23,8 +23,8 @@
     </tbody>
   </table>
   {{if $d.Unavailable}}<p class="status status--error">Stored data unavailable: {{range $i, $u := $d.Unavailable}}{{if $i}}, {{end}}{{$u}}{{end}}</p>{{end}}
-  {{if $d.NotDisplayed}}<p class="status status--error">Policy changed in elements not displayed: the running configuration changed outside the elements this view shows, while the displayed text stayed the same.</p>{{end}}
-  {{if $d.ReadIncomplete}}<p class="status status--error">Read incomplete: the stored policy read is partial, so rules or objects may be missing from this view.</p>{{end}}
+  {{if $d.NotDisplayed}}<p class="status status--error" id="not-displayed">Configuration changed in elements not displayed: the running configuration changed after the read at {{timeTag $d.ChangedAfter}}{{if not $d.ChangeSeenAt.IsZero}}, first seen at {{timeTag $d.ChangeSeenAt}}{{else}} (it returned to an earlier version; the first read showing it is not stored){{end}}, outside the elements this view shows, while the displayed text stayed the same.</p>{{end}}
+  {{if $d.ReadIncomplete}}<p class="status status--error">Read incomplete: the stored policy read is partial or longer than this view shows, so rules or objects may be missing from this view.</p>{{end}}
 
   {{if $d.HasPolicy}}
   <h3 id="rules">Security rules</h3>

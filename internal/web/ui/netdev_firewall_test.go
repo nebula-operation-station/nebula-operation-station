@@ -37,7 +37,7 @@ type fakeFirewallStore struct {
 	*fakeNetDevStore
 	hits map[string][]netdevcontract.HitCount
 	// drift is the ConfigChangedNotDisplayed answer per device.
-	drift map[string]bool
+	drift map[string]netdevinventory.ConfigDrift
 	// The *Err fields, when set, are returned by the matching method.
 	hitsErr, driftErr, policyErr, datasetErr error
 }
@@ -52,9 +52,9 @@ func (f *fakeFirewallStore) HitCounts(_ context.Context, id string) ([]netdevcon
 	return nil, netdevinventory.ErrDatasetNotFound
 }
 
-func (f *fakeFirewallStore) ConfigChangedNotDisplayed(_ context.Context, id string) (bool, error) {
+func (f *fakeFirewallStore) ConfigChangedNotDisplayed(_ context.Context, id string) (netdevinventory.ConfigDrift, error) {
 	if f.driftErr != nil {
-		return false, f.driftErr
+		return netdevinventory.ConfigDrift{}, f.driftErr
 	}
 	return f.drift[id], nil
 }
@@ -90,7 +90,7 @@ func newFirewallEnv(t *testing.T) *firewallEnv {
 	}
 	t.Cleanup(func() { db.Close() })
 	e := &netdevEnv{t: t, store: newFakeNetDevStore(), admins: map[string]bool{"alice": true}}
-	fw := &fakeFirewallStore{fakeNetDevStore: e.store, hits: map[string][]netdevcontract.HitCount{}, drift: map[string]bool{}}
+	fw := &fakeFirewallStore{fakeNetDevStore: e.store, hits: map[string][]netdevcontract.HitCount{}, drift: map[string]netdevinventory.ConfigDrift{}}
 	fe := &firewallEnv{netdevEnv: e, fw: fw}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	u, err := ui.New(ui.Options{PublicOrigin: pveOrigin, Log: log, Now: func() time.Time { return netdevNow }})
@@ -304,8 +304,13 @@ func TestNetDevFirewallOnlyForPANOS(t *testing.T) {
 			t.Errorf("GET %s leaks device data", path)
 		}
 	}
-	if code, _ := e.get("/netdev/fw1/firewall"); code != http.StatusOK {
-		t.Errorf("GET PAN-OS firewall view = %d, want 200", code)
+	res, _ := e.getAs(e.cookie, "/netdev/fw1/firewall")
+	if res.StatusCode != http.StatusOK {
+		t.Errorf("GET PAN-OS firewall view = %d, want 200", res.StatusCode)
+	}
+	// The 200 page carries the same strict CSP as every other answer.
+	if got := res.Header.Get("Content-Security-Policy"); got != netdevCSP {
+		t.Errorf("GET PAN-OS firewall view: CSP = %q, want %q", got, netdevCSP)
 	}
 }
 
@@ -461,7 +466,7 @@ func objectRow(t *testing.T, body, name string) string {
 }
 
 const (
-	notDisplayedNote   = "Policy changed in elements not displayed"
+	notDisplayedNote   = "Configuration changed in elements not displayed"
 	readIncompleteNote = "Read incomplete"
 )
 
@@ -506,10 +511,30 @@ func TestNetDevFirewallRawOnlyDriftShowsElementsNotDisplayed(t *testing.T) {
 	e.store.policy["fw1"] = hintPolicy()
 	e.store.policy["fw2"] = hintPolicy()
 	// fw1: raw_digest changed while the redacted text did not.
-	e.fw.drift["fw1"] = true
+	changedAfter := netdevNow.Add(-3 * time.Hour)
+	seenAt := netdevNow.Add(-2 * time.Hour)
+	e.fw.drift["fw1"] = netdevinventory.ConfigDrift{NotDisplayed: true, ChangedAfter: changedAfter,
+		SeenAt: seenAt, LastSeen: netdevNow.Add(-10 * time.Minute)}
 	_, body := e.get("/netdev/fw1/firewall")
-	if !strings.Contains(body, notDisplayedNote) {
-		t.Error("drift outside the allowlist is not shown")
+	note := notDisplayedBanner(t, body)
+	// The banner dates the change: after which read, first seen when.
+	for _, want := range []string{
+		`after the read at <time datetime="` + changedAfter.UTC().Format(time.RFC3339) + `">`,
+		`first seen at <time datetime="` + seenAt.UTC().Format(time.RFC3339) + `">`,
+	} {
+		if !strings.Contains(note, want) {
+			t.Errorf("banner lacks %q: %s", want, note)
+		}
+	}
+	// A return to an earlier version: the first read is not known and the
+	// banner says so instead of showing the old first_seen.
+	e.fw.drift["fw1"] = netdevinventory.ConfigDrift{NotDisplayed: true, ChangedAfter: changedAfter,
+		LastSeen: netdevNow.Add(-10 * time.Minute)}
+	_, body = e.get("/netdev/fw1/firewall")
+	if note := notDisplayedBanner(t, body); !strings.Contains(note, "first read showing it is not stored") ||
+		strings.Contains(note, "first seen at") ||
+		!strings.Contains(note, `<time datetime="`+changedAfter.UTC().Format(time.RFC3339)+`">`) {
+		t.Errorf("banner for a return to an earlier version: %s", note)
 	}
 	if strings.Contains(body, readIncompleteNote) {
 		t.Error("drift on a complete read is shown as read incomplete")
@@ -529,6 +554,131 @@ func TestNetDevFirewallRawOnlyDriftShowsElementsNotDisplayed(t *testing.T) {
 	_, body = e.get("/netdev/fw1/firewall")
 	if !strings.Contains(body, notDisplayedNote) || !strings.Contains(body, readIncompleteNote) {
 		t.Error("drift with a partial read does not show both notes")
+	}
+}
+
+// notDisplayedBanner returns the "changed in elements not displayed"
+// banner of a page.
+func notDisplayedBanner(t *testing.T, body string) string {
+	t.Helper()
+	m := regexp.MustCompile(`(?s)<p [^>]*id="not-displayed">.*?</p>`).FindString(body)
+	if m == "" || !strings.Contains(m, notDisplayedNote) {
+		t.Fatalf("drift outside the allowlist is not shown")
+	}
+	return m
+}
+
+func TestNetDevFirewallPartialHitCountsAreStated(t *testing.T) {
+	const partialNote = "The stored hit counts are partial"
+	cases := []struct {
+		name       string
+		incomplete bool
+		state      netdevinventory.DatasetState
+		want       bool
+	}{
+		{"complete", false, netdevinventory.StateFresh, false},
+		{"incomplete flag", true, netdevinventory.StateFresh, true},
+		{"partial state", false, netdevinventory.StatePartial, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newFirewallEnv(t)
+			e.addPANOS("fw1", "Edge")
+			e.store.policy["fw1"] = hintPolicy()
+			e.fw.hits["fw1"] = []netdevcontract.HitCount{{RuleName: "r-hit", Hits: 7}}
+			ds := e.store.datasets["fw1"][netdevinventory.ReadHitCounts]
+			ds.Incomplete, ds.State = c.incomplete, c.state
+			e.store.datasets["fw1"][netdevinventory.ReadHitCounts] = ds
+			code, body := e.get("/netdev/fw1/firewall")
+			if code != http.StatusOK {
+				t.Fatalf("GET firewall = %d", code)
+			}
+			if got := strings.Contains(body, partialNote); got != c.want {
+				t.Errorf("partial hit count note shown = %v, want %v", got, c.want)
+			}
+			// Partial hit counts are not a partial policy read.
+			if strings.Contains(body, readIncompleteNote) {
+				t.Error("partial hit counts are shown as read incomplete")
+			}
+		})
+	}
+}
+
+func TestNetDevFirewallHitCountsOverCapAreStatedPartial(t *testing.T) {
+	e := newFirewallEnv(t)
+	e.addPANOS("fw1", "Edge")
+	e.store.policy["fw1"] = hintPolicy()
+	hs := make([]netdevcontract.HitCount, netdevcontract.MaxHitCountEntries+1)
+	for i := range hs {
+		hs[i] = netdevcontract.HitCount{RuleName: "h" + strconv.Itoa(i), Hits: 1}
+	}
+	e.fw.hits["fw1"] = hs
+	_, body := e.get("/netdev/fw1/firewall")
+	if !strings.Contains(body, "The stored hit counts are partial") {
+		t.Error("hit counts cut at the display cap are not stated partial")
+	}
+	e.fw.hits["fw1"] = hs[:netdevcontract.MaxHitCountEntries]
+	_, body = e.get("/netdev/fw1/firewall")
+	if strings.Contains(body, "The stored hit counts are partial") {
+		t.Error("hit counts at the cap are stated partial")
+	}
+}
+
+func TestNetDevFirewallListsOverCapShowReadIncomplete(t *testing.T) {
+	addr := netdevcontract.AddressObject{Name: "a", Type: netdevcontract.AddressNetmask, Value: "10.0.0.1/32"}
+	svc := netdevcontract.ServiceObject{Name: "s", Protocol: "tcp", Port: "443"}
+	cases := []struct {
+		name string
+		fill func(p *netdevcontract.FirewallPolicy, n func(limit int) int)
+		max  int
+	}{
+		{"security rules", func(p *netdevcontract.FirewallPolicy, n func(int) int) {
+			p.SecurityRules = make([]netdevcontract.SecurityRule, n(netdevcontract.MaxSecurityRules))
+		}, netdevcontract.MaxSecurityRules},
+		{"NAT rules", func(p *netdevcontract.FirewallPolicy, n func(int) int) {
+			p.NATRules = make([]netdevcontract.NATRule, n(netdevcontract.MaxNATRules))
+		}, netdevcontract.MaxNATRules},
+		{"address objects", func(p *netdevcontract.FirewallPolicy, n func(int) int) {
+			p.Addresses = make([]netdevcontract.AddressObject, n(netdevcontract.MaxAddressObjects))
+			for i := range p.Addresses {
+				p.Addresses[i] = addr
+			}
+		}, netdevcontract.MaxAddressObjects},
+		{"address groups", func(p *netdevcontract.FirewallPolicy, n func(int) int) {
+			p.AddressGroups = make([]netdevcontract.Group, n(netdevcontract.MaxAddressGroups))
+		}, netdevcontract.MaxAddressGroups},
+		{"service objects", func(p *netdevcontract.FirewallPolicy, n func(int) int) {
+			p.Services = make([]netdevcontract.ServiceObject, n(netdevcontract.MaxServiceObjects))
+			for i := range p.Services {
+				p.Services[i] = svc
+			}
+		}, netdevcontract.MaxServiceObjects},
+		{"service groups", func(p *netdevcontract.FirewallPolicy, n func(int) int) {
+			p.ServiceGroups = make([]netdevcontract.Group, n(netdevcontract.MaxServiceGroups))
+		}, netdevcontract.MaxServiceGroups},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newFirewallEnv(t)
+			e.addPANOS("fw1", "Edge")
+			for _, over := range []bool{false, true} {
+				var pol netdevcontract.FirewallPolicy
+				c.fill(&pol, func(limit int) int {
+					if over {
+						return limit + 1
+					}
+					return limit
+				})
+				e.store.policy["fw1"] = pol
+				code, body := e.get("/netdev/fw1/firewall")
+				if code != http.StatusOK {
+					t.Fatalf("GET firewall = %d", code)
+				}
+				if got := strings.Contains(body, readIncompleteNote); got != over {
+					t.Errorf("%s, cap %d, over cap %v: read incomplete shown = %v", c.name, c.max, over, got)
+				}
+			}
+		})
 	}
 }
 
