@@ -469,8 +469,18 @@ endpoints or findings.
 - CIDR syntax, IPv4/IPv6 only; entries in private, loopback, link-local,
   CGNAT, multicast, documentation, reserved or unspecified ranges, or
   overlapping any IPAM network or the NOS path, are **dropped** and counted;
-- prefixes shorter than a named minimum (proposed /8 IPv4, /24 IPv6) are
-  dropped and counted;
+- prefixes shorter than a named minimum (proposed **/16 IPv4, /32 IPv6**;
+  previously /8 and /24) are dropped and counted, and the dropped entries
+  are listed for the admin. Why: the minimum bounds the damage one
+  poisoned or erroneous entry can do. A /8 would mark 16.7 million
+  addresses, enough to turn ordinary traffic to a large provider into mass
+  false hits and notifications; a /16 limits one entry to 65,536
+  addresses, and /32 is the usual allocation to a single IPv6 network
+  operator. Botnet C2 lists are single addresses; netblock lists
+  (Spamhaus DROP) may contain shorter legitimate entries, so NS-03 checks
+  the shortest prefix in each candidate feed (*verify*), and a per-feed
+  value shorter than the default is a maintainer decision (Q3), never set
+  by the feed;
 - per-feed and total entry caps (named constants); an over-cap snapshot is
   refused, the previous one stays with "feed stale";
 - content date not older than the stored one and not in the future (as ADR
@@ -494,7 +504,10 @@ address. Dedupe per `(external address, internal endpoint, feed)` episode;
 the ADR 0011 D9 rate limit and hourly digest apply (10 per hour). Messages
 carry structured fields only (feed, category, internal endpoint label,
 direction, allowed sessions), no external address in third-party channels
-unless the operator enables it (Q8). Denied-only hits do not notify; they
+unless the operator enables it (Q8). The internal endpoint label in
+third-party channels is, as proposed, the label of a managed host or IPAM
+asset only, otherwise "internal endpoint in zone X"; observed device names
+(which can name a person) are not sent (Q8). Denied-only hits do not notify; they
 appear in a daily count. Event `netsec.feed_stale` per feed and episode.
 
 ### D7: EDL export (E)
@@ -646,11 +659,20 @@ Tickets: [docs/implementation/network-security.md](../implementation/network-sec
 - **Q2: Retention.** Log aggregates 30 days (proposed) or 21 days like the
   traffic map? Full external addresses 7 days, then /24 and /48? Reputation
   hits 90 days? Log aggregates excluded from the instance backup
-  (proposed)?
+  (proposed)? **Internal addresses** (household members', guests' and IoT
+  devices) are kept in full for the whole aggregate retention in this
+  draft: should they also be minimised earlier, for example after 7 days
+  replaced by the linked endpoint or asset ID where one exists and by the
+  zone and subnet otherwise, at least for zones of trust class `guest`
+  and `iot`? (Cost: older segmentation proposals and what-if broken-flow
+  lists lose per-device detail.) Is a redacted export of log- or
+  flow-derived evidence ever wanted (D8 excludes it)?
 - **Q3: Reputation feeds and keys.** Which of Feodo, SSLBL, Spamhaus DROP
   (EDROP), FireHOL level1 by default? AbuseIPDB and/or CrowdSec with keys on
   the agent host, or none? Separate token for `netsec.reputation.write` or
-  the existing agent identity with an added scope?
+  the existing agent identity with an added scope? Minimum feed prefix
+  /16 IPv4 and /32 IPv6 (proposed), and may a single feed (for example
+  Spamhaus DROP, after NS-03) get a shorter per-feed minimum?
 - **Q4: EDL.** Build D7 at all? If yes: basic credentials or mTLS (subject
   to NS-03) and the default size cap. D7 as drafted has manual entries
   only.
@@ -679,8 +701,12 @@ Tickets: [docs/implementation/network-security.md](../implementation/network-sec
   `not_filtered` never mitigates), and show v1 beside v2 until retired?
 - **Q8: Notifications.** Include the external address in
   `netsec.reputation_allowed` messages to webhook/ntfy/Telegram, or
-  structured fields without it (proposed)? Notify on threat logs with
-  action allow/alert at severity critical?
+  structured fields without it (proposed)? The **internal endpoint label**
+  can be a personal device name (for example a phone named after its
+  owner): send it to third-party channels, or only the label of a managed
+  host or IPAM asset and otherwise "internal endpoint in zone X"
+  (proposed)? Notify on threat logs with action allow/alert at severity
+  critical?
 - **Q9: Zone trust classes and management targets.** Defaults as in D4
   (unknown zones count as untrusted)? Which resolvers are the designated
   DNS resolvers for `dns-bypass`?
