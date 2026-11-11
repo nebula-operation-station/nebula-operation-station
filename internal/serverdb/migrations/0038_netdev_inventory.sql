@@ -33,6 +33,9 @@
 -- Rows missing from a read are therefore never silently dropped; they stay
 -- visible as absent until their retention window has passed.
 --
+-- row_key is bounded by its widest form, the JSON-encoded LLDP triple
+-- (local port, chassis ID, port ID) with escaping, under 2,048 bytes.
+--
 -- Times are INTEGER microseconds since the Unix epoch (UTC). List columns
 -- (members, tags, VLAN lists, addresses, capabilities) are JSON arrays.
 
@@ -67,7 +70,7 @@ CREATE INDEX idx_netdev_datasets_history ON netdev_datasets (device_id, read, ob
 
 CREATE TABLE netdev_facts (
     dataset_id           INTEGER NOT NULL REFERENCES netdev_datasets (id) ON DELETE CASCADE,
-    row_key              TEXT NOT NULL CHECK (length(CAST(row_key AS BLOB)) BETWEEN 1 AND 1024),
+    row_key              TEXT NOT NULL CHECK (length(CAST(row_key AS BLOB)) BETWEEN 1 AND 2048),
     seq                  INTEGER CHECK (seq IS NULL OR seq >= 0),
     seen_at              INTEGER,
     absent               INTEGER NOT NULL DEFAULT 0 CHECK (absent IN (0, 1)),
@@ -84,7 +87,7 @@ CREATE TABLE netdev_facts (
 
 CREATE TABLE netdev_vlans (
     dataset_id INTEGER NOT NULL REFERENCES netdev_datasets (id) ON DELETE CASCADE,
-    row_key    TEXT NOT NULL CHECK (length(CAST(row_key AS BLOB)) BETWEEN 1 AND 1024),
+    row_key    TEXT NOT NULL CHECK (length(CAST(row_key AS BLOB)) BETWEEN 1 AND 2048),
     seq        INTEGER CHECK (seq IS NULL OR seq >= 0),
     seen_at    INTEGER,
     absent     INTEGER NOT NULL DEFAULT 0 CHECK (absent IN (0, 1)),
@@ -99,7 +102,7 @@ CREATE TABLE netdev_vlans (
 -- PAN-OS interfaces (kind 'firewall', read 'firewall_policy').
 CREATE TABLE netdev_interfaces (
     dataset_id    INTEGER NOT NULL REFERENCES netdev_datasets (id) ON DELETE CASCADE,
-    row_key       TEXT NOT NULL CHECK (length(CAST(row_key AS BLOB)) BETWEEN 1 AND 1024),
+    row_key       TEXT NOT NULL CHECK (length(CAST(row_key AS BLOB)) BETWEEN 1 AND 2048),
     seq           INTEGER CHECK (seq IS NULL OR seq >= 0),
     seen_at       INTEGER,
     absent        INTEGER NOT NULL DEFAULT 0 CHECK (absent IN (0, 1)),
@@ -124,7 +127,7 @@ CREATE TABLE netdev_interfaces (
 
 CREATE TABLE netdev_mac_entries (
     dataset_id INTEGER NOT NULL REFERENCES netdev_datasets (id) ON DELETE CASCADE,
-    row_key    TEXT NOT NULL CHECK (length(CAST(row_key AS BLOB)) BETWEEN 1 AND 1024),
+    row_key    TEXT NOT NULL CHECK (length(CAST(row_key AS BLOB)) BETWEEN 1 AND 2048),
     seq        INTEGER CHECK (seq IS NULL OR seq >= 0),
     seen_at    INTEGER,
     absent     INTEGER NOT NULL DEFAULT 0 CHECK (absent IN (0, 1)),
@@ -139,7 +142,7 @@ CREATE TABLE netdev_mac_entries (
 
 CREATE TABLE netdev_lldp_neighbors (
     dataset_id         INTEGER NOT NULL REFERENCES netdev_datasets (id) ON DELETE CASCADE,
-    row_key            TEXT NOT NULL CHECK (length(CAST(row_key AS BLOB)) BETWEEN 1 AND 1024),
+    row_key            TEXT NOT NULL CHECK (length(CAST(row_key AS BLOB)) BETWEEN 1 AND 2048),
     seq                INTEGER CHECK (seq IS NULL OR seq >= 0),
     seen_at            INTEGER,
     absent             INTEGER NOT NULL DEFAULT 0 CHECK (absent IN (0, 1)),
@@ -156,7 +159,7 @@ CREATE TABLE netdev_lldp_neighbors (
 
 CREATE TABLE netdev_fw_rules (
     dataset_id   INTEGER NOT NULL REFERENCES netdev_datasets (id) ON DELETE CASCADE,
-    row_key      TEXT NOT NULL CHECK (length(CAST(row_key AS BLOB)) BETWEEN 1 AND 1024),
+    row_key      TEXT NOT NULL CHECK (length(CAST(row_key AS BLOB)) BETWEEN 1 AND 2048),
     seq          INTEGER CHECK (seq IS NULL OR seq >= 0),
     seen_at      INTEGER,
     absent       INTEGER NOT NULL DEFAULT 0 CHECK (absent IN (0, 1)),
@@ -181,7 +184,7 @@ CREATE TABLE netdev_fw_rules (
 
 CREATE TABLE netdev_nat_rules (
     dataset_id              INTEGER NOT NULL REFERENCES netdev_datasets (id) ON DELETE CASCADE,
-    row_key                 TEXT NOT NULL CHECK (length(CAST(row_key AS BLOB)) BETWEEN 1 AND 1024),
+    row_key                 TEXT NOT NULL CHECK (length(CAST(row_key AS BLOB)) BETWEEN 1 AND 2048),
     seq                     INTEGER CHECK (seq IS NULL OR seq >= 0),
     seen_at                 INTEGER,
     absent                  INTEGER NOT NULL DEFAULT 0 CHECK (absent IN (0, 1)),
@@ -206,7 +209,7 @@ CREATE TABLE netdev_nat_rules (
 -- service groups and zones of a firewall_policy dataset.
 CREATE TABLE netdev_objects (
     dataset_id     INTEGER NOT NULL REFERENCES netdev_datasets (id) ON DELETE CASCADE,
-    row_key        TEXT NOT NULL CHECK (length(CAST(row_key AS BLOB)) BETWEEN 1 AND 1024),
+    row_key        TEXT NOT NULL CHECK (length(CAST(row_key AS BLOB)) BETWEEN 1 AND 2048),
     seq            INTEGER CHECK (seq IS NULL OR seq >= 0),
     seen_at        INTEGER,
     absent         INTEGER NOT NULL DEFAULT 0 CHECK (absent IN (0, 1)),
@@ -230,7 +233,7 @@ CREATE TABLE netdev_objects (
 
 CREATE TABLE netdev_rule_hits (
     dataset_id INTEGER NOT NULL REFERENCES netdev_datasets (id) ON DELETE CASCADE,
-    row_key    TEXT NOT NULL CHECK (length(CAST(row_key AS BLOB)) BETWEEN 1 AND 1024),
+    row_key    TEXT NOT NULL CHECK (length(CAST(row_key AS BLOB)) BETWEEN 1 AND 2048),
     seq        INTEGER CHECK (seq IS NULL OR seq >= 0),
     seen_at    INTEGER,
     absent     INTEGER NOT NULL DEFAULT 0 CHECK (absent IN (0, 1)),
