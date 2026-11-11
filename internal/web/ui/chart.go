@@ -14,6 +14,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/hostmetrics"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/registrymeta"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
@@ -435,6 +436,25 @@ func addPVEUpdates(nodes []pveNodeView, hosts []inventory.Host, pins map[string]
 	}
 }
 
+// chartRegistryDeadline bounds all private registry digest lookups of one
+// chart render together (they are cache-only, so this only guards against
+// a slow caller).
+const chartRegistryDeadline = 2 * time.Second
+
+// chartDigestLen is how much of a digest the chart shows ("sha256:" and
+// 12 hex digits).
+const chartDigestLen = len("sha256:") + 12
+
+// privateDigestNote is the chart note of an image update: for a private
+// image the executor read, the note names the digest it read (validated
+// by dockerhost.ResolvePrivateDigestsWith; rendered as text).
+func privateDigestNote(iu dockerhost.ImageUpdate) string {
+	if !iu.Private || len(iu.Remote) < chartDigestLen {
+		return iu.Note
+	}
+	return iu.Note + "; registry digest " + iu.Remote[:chartDigestLen]
+}
+
 // chartHosts builds the org chart columns from the batch reads.
 func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins map[string]*pb.HostKeyPin, pinsUnavailable bool, b batchData, res chartResults) []chartHost {
 	now := h.clockNow()
@@ -453,6 +473,13 @@ func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins m
 	if h.operations != nil {
 		registryTags, _ = h.operations.LastResults(ctx, "registry.tags")
 	}
+	// Private registry digests (G13): one deadline for the whole page and
+	// cache only, so a render never waits on (or fans out) executor reads;
+	// the reader queues misses in the background. Each host is named for
+	// the reader's per-host caps.
+	regCtx, regCancel := context.WithTimeout(ctx, chartRegistryDeadline)
+	defer regCancel()
+	regCtx = registrymeta.WithCacheOnly(regCtx)
 	out := make([]chartHost, 0, len(hosts))
 	for _, host := range hosts {
 		v := viewHost(host, pins, pinsUnavailable, b, now)
@@ -541,7 +568,10 @@ func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins m
 		var ups dockerhost.ImageUpdates
 		if upRow, ok := b.dockerUp[host.ID]; ok {
 			if u, err := dockerhost.ParseImageUpdates(upRow.Result); err == nil {
-				ups = h.resolveImageUpdates(ctx, u)
+				ups = u
+				if regCtx.Err() == nil {
+					ups = h.resolveImageUpdates(registrymeta.WithReadHost(regCtx, host.ID), u)
+				}
 			}
 		}
 		upByImage := map[string]dockerhost.ImageUpdate{}
@@ -561,7 +591,7 @@ func (h *Handler) chartHosts(ctx context.Context, hosts []inventory.Host, pins m
 				var standalone []chartContainer
 				for _, c := range list.Containers {
 					iu := upByImage[c.Image]
-					cu := newContainerUpdateView(imageTag(c.Image), iu.Status, iu.Note, regByImage[c.Image])
+					cu := newContainerUpdateView(imageTag(c.Image), iu.Status, privateDigestNote(iu), regByImage[c.Image])
 					cv := chartContainer{Name: c.Name, Image: c.Image, State: c.State,
 						StateClass: containerStateClass(c.State), Health: c.Health,
 						HealthClass: containerHealthClass(c.Health), Project: c.Project,

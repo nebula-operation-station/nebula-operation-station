@@ -1,0 +1,5 @@
+[05 Nov 2024] DLA-3940-1 python-urllib3 - security update
+	{CVE-2024-37891}
+	[bullseye] - python-urllib3 1.26.5-1~exp1+deb11u1
+[22 Oct 2024] DLA-3933-1 openssl - security update
+	{CVE-2024-0001}
