@@ -181,6 +181,7 @@ func runNetBirdPart(t *testing.T, shell string, r nbRun) nbResult {
 			t.Fatal(err)
 		}
 	}
+	started := time.Now()
 	select {
 	case err = <-done:
 	case <-time.After(60 * time.Second):
@@ -188,7 +189,9 @@ func runNetBirdPart(t *testing.T, shell string, r nbRun) nbResult {
 		<-done
 		t.Fatalf("%s timed out; stderr %s", shell, stderr.String())
 	}
-	if errors.Is(err, exec.ErrWaitDelay) {
+	// A client left running keeps the output pipe open, so Wait returns
+	// only after WaitDelay (with ErrWaitDelay only for exit status 0).
+	if errors.Is(err, exec.ErrWaitDelay) || time.Since(started) >= cmd.WaitDelay {
 		t.Fatalf("the NetBird client outlived the script (output pipe still open)")
 	}
 	res.code = cmd.ProcessState.ExitCode()
