@@ -36,7 +36,7 @@ func render(t *testing.T, src string) mdsafe.Result {
 var tagRE = regexp.MustCompile(`<(/?)([a-zA-Z0-9]+)([^>]*)>`)
 
 var allowedTags = map[string]*regexp.Regexp{
-	"h1": regexp.MustCompile(`^( id="[\pL\pN_-]+")?$`),"h2": regexp.MustCompile(`^( id="[\pL\pN_-]+")?$`),
+	"h1": regexp.MustCompile(`^( id="[\pL\pN_-]+")?$`), "h2": regexp.MustCompile(`^( id="[\pL\pN_-]+")?$`),
 	"h3": regexp.MustCompile(`^( id="[\pL\pN_-]+")?$`), "h4": regexp.MustCompile(`^( id="[\pL\pN_-]+")?$`),
 	"h5": regexp.MustCompile(`^( id="[\pL\pN_-]+")?$`), "h6": regexp.MustCompile(`^( id="[\pL\pN_-]+")?$`),
 	"p": regexp.MustCompile(`^$`), "ul": regexp.MustCompile(`^$`), "ol": regexp.MustCompile(`^$`),
@@ -188,7 +188,7 @@ func TestSupportedSubset(t *testing.T) {
 
 func TestSlug(t *testing.T) {
 	for in, want := range map[string]string{
-		"3.3 In containers":                    "33-in-containers",
+		"3.3 In containers": "33-in-containers",
 		"Enroll a host reachable over a VPN (NetBird, WireGuard, Tailscale)": "enroll-a-host-reachable-over-a-vpn-netbird-wireguard-tailscale",
 		"Run read-only checks on a schedule (read lease)":                    "run-read-only-checks-on-a-schedule-read-lease",
 		"Übergabe `nebula` **jetzt**":                                        "übergabe-nebula-jetzt",
