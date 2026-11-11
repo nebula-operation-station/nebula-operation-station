@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevcontract"
 )
 
 // agedHistory counts superseded datasets of (dev, read) observed before
@@ -60,17 +62,18 @@ func TestIdenticalPayloadsDropAgedHistoryWithoutPrune(t *testing.T) {
 			addDevice(t, s, c.dev)
 			dev := c.dev.DeviceID
 			poll := PollInterval(c.read)
-			mustReplace(t, s, dev, c.read, testBase, false, c.rows(0))
+			mustReplace(t, s, dev, c.read, testBase, false, carryRows(c, 0))
 			*now = testBase.Add(poll)
-			cur := mustReplace(t, s, dev, c.read, *now, false, c.rows(1))
+			cur := mustReplace(t, s, dev, c.read, *now, false, carryRows(c, 1))
 			if got := historyCount(t, db, dev, c.read); got != 1 {
 				t.Fatalf("history = %d after one change, want 1", got)
 			}
 			carried := carriedCount(t, db, dev, c.read)
+			assertCarries(t, c.read, carried)
 
 			// Identical payloads inside the window keep the history.
 			*now = testBase.Add(2 * poll)
-			if res := mustReplace(t, s, dev, c.read, *now, false, c.rows(1)); !res.Unchanged || res.DatasetID != cur.DatasetID {
+			if res := mustReplace(t, s, dev, c.read, *now, false, carryRows(c, 1)); !res.Unchanged || res.DatasetID != cur.DatasetID {
 				t.Fatalf("identical write = %+v, want unchanged %d", res, cur.DatasetID)
 			}
 			if got := historyCount(t, db, dev, c.read); got != 1 {
@@ -83,7 +86,7 @@ func TestIdenticalPayloadsDropAgedHistoryWithoutPrune(t *testing.T) {
 			// Only identical payloads from here on, past the window.
 			for i := 1; i <= 3; i++ {
 				*now = testBase.Add(HistoryRetention(c.read) + time.Duration(i)*poll)
-				res := mustReplace(t, s, dev, c.read, *now, false, c.rows(1))
+				res := mustReplace(t, s, dev, c.read, *now, false, carryRows(c, 1))
 				if !res.Unchanged || res.DatasetID != cur.DatasetID {
 					t.Fatalf("identical write %d = %+v, want unchanged %d", i, res, cur.DatasetID)
 				}
@@ -113,7 +116,7 @@ func TestIdenticalPayloadsDropAgedHistoryWithoutPrune(t *testing.T) {
 	}
 }
 
-// The same dataset delivered again is a no-op for the dataset, but the
+// The same dataset delivered again does not rewrite the dataset, but the
 // window still holds for the history behind it.
 func TestRedeliveredDatasetDropsAgedHistory(t *testing.T) {
 	for _, c := range boundCases() {
@@ -122,13 +125,14 @@ func TestRedeliveredDatasetDropsAgedHistory(t *testing.T) {
 			addDevice(t, s, c.dev)
 			dev := c.dev.DeviceID
 			ret := HistoryRetention(c.read)
-			mustReplace(t, s, dev, c.read, testBase, false, c.rows(0))
+			mustReplace(t, s, dev, c.read, testBase, false, carryRows(c, 0))
 			at := testBase.Add(ret - time.Hour)
 			*now = at
-			cur := mustReplace(t, s, dev, c.read, at, false, c.rows(1))
+			cur := mustReplace(t, s, dev, c.read, at, false, carryRows(c, 1))
+			assertCarries(t, c.read, carriedCount(t, db, dev, c.read))
 
 			*now = testBase.Add(ret + time.Minute)
-			res := mustReplace(t, s, dev, c.read, at, false, c.rows(1))
+			res := mustReplace(t, s, dev, c.read, at, false, carryRows(c, 1))
 			if !res.Unchanged || res.DatasetID != cur.DatasetID {
 				t.Fatalf("redelivery = %+v, want unchanged %d", res, cur.DatasetID)
 			}
@@ -141,6 +145,156 @@ func TestRedeliveredDatasetDropsAgedHistory(t *testing.T) {
 			assertCurrent(t, s, db, dev, c.read, cur)
 		})
 	}
+}
+
+// keyedRows returns rows of read with one row per key, so payloads can
+// differ in which rows they contain and rows missing from a later read are
+// carried. Facts are a single row with a fixed key and can never carry;
+// keyedRows returns nil for them.
+func keyedRows(read Read, keys ...int) Rows {
+	name := func(k int) string { return "rule-" + string(rune('a'+k)) }
+	switch read {
+	case ReadMACTable:
+		var r MACRows
+		for _, k := range keys {
+			r = append(r, mac(byte(k)))
+		}
+		return r
+	case ReadLLDPNeighbors:
+		var r LLDPRows
+		for _, k := range keys {
+			r = append(r, netdevcontract.LLDPNeighbor{LocalPort: "gi1/0/1", ChassisID: "c", PortID: string(rune('a' + k))})
+		}
+		return r
+	case ReadVLANs:
+		var r VLANRows
+		for _, k := range keys {
+			r = append(r, netdevcontract.VLAN{ID: uint16(k + 1)})
+		}
+		return r
+	case ReadFirewallPolicy:
+		var names []string
+		for _, k := range keys {
+			names = append(names, name(k))
+		}
+		return policy(names...)
+	case ReadHitCounts:
+		var r HitCountRows
+		for _, k := range keys {
+			r = append(r, netdevcontract.HitCount{RuleName: name(k), Hits: 1, LastHit: &testBase})
+		}
+		return r
+	}
+	return nil
+}
+
+// carryRows returns payload i of a two-step sequence whose second step
+// drops a row of the first, so the change carries it. Facts cannot carry
+// and fall back to c.rows.
+func carryRows(c boundCase, i int) Rows {
+	keys := []int{0, 1}
+	if i > 0 {
+		keys = []int{0}
+	}
+	if r := keyedRows(c.read, keys...); r != nil {
+		return r
+	}
+	return c.rows(i)
+}
+
+// assertCarries fails unless a read that can carry rows did carry some, so
+// the carried-row delete is really exercised. Facts are one row with a
+// fixed key and never carry.
+func assertCarries(t *testing.T, read Read, carried int) {
+	t.Helper()
+	if read == ReadFacts {
+		if carried != 0 {
+			t.Fatalf("facts carried %d rows, want 0 (single fixed-key row)", carried)
+		}
+		return
+	}
+	if carried == 0 {
+		t.Fatalf("%s carried no rows before the window passed; the carried-row delete is not exercised", read)
+	}
+}
+
+// A superseded dataset that is still kept (observed inside the window) can
+// hold carried rows whose seen_at already left it. An identical write and
+// a changed write must both remove those rows from every kept dataset of
+// the (device, read), not only from the current one, without Prune.
+func TestKeptSupersededDatasetLosesExpiredCarriedRows(t *testing.T) {
+	for _, c := range boundCases() {
+		if keyedRows(c.read, 0) == nil {
+			continue // facts never carry
+		}
+		for _, changed := range []bool{false, true} {
+			name := string(c.read) + "/identical"
+			if changed {
+				name = string(c.read) + "/changed"
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Parallel() // each subtest has its own database
+				s, db, now := newTestStore(t)
+				addDevice(t, s, c.dev)
+				dev := c.dev.DeviceID
+				ret, poll := HistoryRetention(c.read), PollInterval(c.read)
+
+				// d0 {0,1}; d1 {0} carries 1 (seen at testBase); d2 {0,2}
+				// carries 1 again. d1 stays history inside the window.
+				*now = testBase
+				mustReplace(t, s, dev, c.read, *now, false, keyedRows(c.read, 0, 1))
+				*now = testBase.Add(poll)
+				d1 := mustReplace(t, s, dev, c.read, *now, false, keyedRows(c.read, 0))
+				*now = testBase.Add(ret - poll)
+				d2 := mustReplace(t, s, dev, c.read, *now, false, keyedRows(c.read, 0, 2))
+				if n := carriedRowsOf(t, db, c.read, d1.DatasetID); n == 0 {
+					t.Fatalf("superseded dataset %d carries no rows; setup is wrong", d1.DatasetID)
+				}
+				if n := carriedRowsOf(t, db, c.read, d2.DatasetID); n == 0 {
+					t.Fatalf("current dataset %d carries no rows; setup is wrong", d2.DatasetID)
+				}
+
+				// Past testBase + ret the row last seen at testBase has left
+				// the window; d1 (observed testBase + poll) has not.
+				*now = testBase.Add(ret + poll/2)
+				if n := expiredCarried(t, db, dev, c.read, *now); n == 0 {
+					t.Fatal("no expired carried rows before the write; setup is wrong")
+				}
+				var res ReplaceResult
+				if changed {
+					res = mustReplace(t, s, dev, c.read, *now, false, keyedRows(c.read, 0, 3))
+					if res.Unchanged || res.DatasetID == d2.DatasetID {
+						t.Fatalf("changed write = %+v, want a new dataset", res)
+					}
+				} else {
+					res = mustReplace(t, s, dev, c.read, *now, false, keyedRows(c.read, 0, 2))
+					if !res.Unchanged || res.DatasetID != d2.DatasetID {
+						t.Fatalf("identical write = %+v, want unchanged %d", res, d2.DatasetID)
+					}
+				}
+				if !slices.Contains(datasetIDs(t, db, c.read), d1.DatasetID) {
+					t.Fatalf("superseded dataset %d inside the window was removed", d1.DatasetID)
+				}
+				if n := expiredCarried(t, db, dev, c.read, *now); n != 0 {
+					t.Fatalf("%d expired carried rows kept in kept datasets", n)
+				}
+				if n := len(rowsOf(t, db, readTables(c.read)[0].name, d1.DatasetID)); n == 0 {
+					t.Fatalf("kept dataset %d lost its present rows", d1.DatasetID)
+				}
+				assertCurrent(t, s, db, dev, c.read, res)
+			})
+		}
+	}
+}
+
+// carriedRowsOf counts the carried rows of one dataset of read.
+func carriedRowsOf(t *testing.T, db *sql.DB, read Read, datasetID int64) int {
+	t.Helper()
+	n := 0
+	for _, tb := range readTables(read) {
+		n += countRows(t, db, `SELECT count(*) FROM `+tb.name+` WHERE dataset_id = ? AND seen_at IS NOT NULL`, datasetID)
+	}
+	return n
 }
 
 // A changed dataset observed well before the server clock does not carry
