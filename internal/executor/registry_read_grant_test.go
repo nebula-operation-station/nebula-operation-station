@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -489,6 +490,61 @@ func TestRegistryLeaseDistinctTagCapProtectsBudget(t *testing.T) {
 	afterHour := now.Add(permit.RollingHour + time.Second)
 	if _, err := e.svc.checkRegistryLease(ctx, e.registryReadFor(t, "team/app", "t9"), afterHour); err != nil {
 		t.Fatalf("new tag after the hour: %v", err)
+	}
+}
+
+// TestRegistryLeaseConcurrentFirstReadsTakeOneTagSlot: concurrent first
+// reads of one reference are decided by the reservation itself: exactly
+// one is authorized and only it takes a distinct-tag slot, so the
+// remaining slots still serve as many other tags.
+func TestRegistryLeaseConcurrentFirstReadsTakeOneTagSlot(t *testing.T) {
+	e := newRegistryLeaseEnv(t)
+	e.addRepos(t, "team/app")
+	e.lease(t, registryMaxTagsPerRepository+2, 7*24*time.Hour,
+		e.target(t, []string{schedgrant.RegistryReadTagDigest}, "team/app"))
+	ctx := context.Background()
+	now := e.clock.Now()
+	r := e.registryReadFor(t, "team/app", "same")
+	const callers = 16
+	var (
+		start     = make(chan struct{})
+		wg        sync.WaitGroup
+		mu        sync.Mutex
+		ok, other int
+		refusals  []error
+	)
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := e.svc.checkRegistryLease(ctx, r, now)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				ok++
+			case errors.Is(err, ErrRegistryTooSoon):
+				refusals = append(refusals, err)
+			default:
+				other++
+				refusals = append(refusals, err)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	if ok != 1 || other != 0 {
+		t.Fatalf("concurrent reads of one reference: %d authorized, %d unexpected refusals %v", ok, other, refusals)
+	}
+	// Exactly one slot was taken: every other slot still reads a new tag.
+	for i := range registryMaxTagsPerRepository - 1 {
+		if _, err := e.svc.checkRegistryLease(ctx, e.registryReadFor(t, "team/app", fmt.Sprintf("n%d", i)), now); err != nil {
+			t.Fatalf("new tag %d after concurrent reads: %v", i, err)
+		}
+	}
+	if _, err := e.svc.checkRegistryLease(ctx, e.registryReadFor(t, "team/app", "over"), now); !errors.Is(err, ErrRegistryTagLimit) {
+		t.Fatalf("tag over the cap: %v", err)
 	}
 }
 

@@ -217,7 +217,9 @@ func registryTargetMatches(t permit.RegistryTarget, r RegistryRead) bool {
 // spends it. It refuses, in this order: paused reads; then, over the
 // registry read leases naming the registry, a stale binding, an uncovered
 // repository or method, an expired lease or no lease; and when the shared
-// counters refuse, ErrRegistryTooSoon or ErrRegistryBudget.
+// counters refuse, ErrRegistryTooSoon or ErrRegistryBudget, or, once the
+// budget is reserved, ErrRegistryTagLimit for a new reference over the
+// distinct-tag cap (the reservation is then given back).
 func (s *Service) checkRegistryLease(ctx context.Context, r RegistryRead, now time.Time) (*registryLeaseClaim, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -302,62 +304,72 @@ func (s *Service) checkRegistryLease(ctx context.Context, r RegistryRead, now ti
 		if err != nil {
 			return nil, fmt.Errorf("registry read interval: %w", err)
 		}
+		// The budget reservation comes first: its transaction checks this
+		// reference's interval row, which any other reservation of the
+		// reference since prev was read would have moved within the
+		// interval. So a successful reservation proves prev is still the
+		// reference's last run, and the new-reference decision below is
+		// made by the reservation itself: of concurrent first reads of one
+		// reference only the one that reserved takes a distinct-tag slot.
+		reserved, err := s.db.ReserveReadRun(c.id, actionKey, budgetKey, now, budget, interval)
+		if errors.Is(err, permit.ErrReadGrantInactive) {
+			sawExpired = true
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("reserve registry read on lease %s: %w", c.id, err)
+		}
+		if !reserved {
+			denied, deniedInterval = true, max(deniedInterval, interval)
+			continue
+		}
 		// A reference read within the rolling hour already holds its slot.
 		newRef := !hadPrev || prev.Unix() <= effective.Unix()-int64(permit.RollingHour/time.Second)
+		releaseMain := func() {
+			if _, rerr := s.db.ReleaseReadRun(c.id, actionKey, budgetKey, prev, hadPrev); rerr != nil && s.log != nil {
+				s.log.Error("release registry read reservation", "registry", r.RegistryID, "grant", c.id, "error", rerr.Error())
+			}
+		}
 		var slotPrev time.Time
 		var slotHadPrev bool
 		if newRef {
 			slotPrev, slotHadPrev, err = s.db.ReadActionLastRun(actionKey, repoKey)
 			if err != nil {
+				releaseMain()
 				return nil, fmt.Errorf("registry read tag slot: %w", err)
 			}
 			got, err := s.db.ReserveReadRun(c.id, actionKey, repoKey, now, registryMaxTagsPerRepository, 0)
 			if errors.Is(err, permit.ErrReadGrantInactive) {
+				releaseMain()
 				sawExpired = true
 				continue
 			}
 			if err != nil {
+				releaseMain()
 				return nil, fmt.Errorf("reserve registry tag slot on lease %s: %w", c.id, err)
 			}
 			if !got {
-				// The slots are shared across leases: no other lease helps,
-				// and nothing was charged.
+				// The slots are shared across leases: no other lease helps.
+				// The budget spend is given back, so the refusal charges
+				// nothing.
+				releaseMain()
 				tagLimited = true
 				break
 			}
 		}
-		// release gives back the slot and, with main, the budget spend.
-		release := func(main bool) {
-			if main {
-				if _, rerr := s.db.ReleaseReadRun(c.id, actionKey, budgetKey, prev, hadPrev); rerr != nil && s.log != nil {
-					s.log.Error("release registry read reservation", "registry", r.RegistryID, "grant", c.id, "error", rerr.Error())
-				}
-			}
+		// release gives back the budget spend and the slot.
+		release := func() {
+			releaseMain()
 			if newRef {
 				if _, rerr := s.db.ReleaseReadRun(c.id, actionKey, repoKey, slotPrev, slotHadPrev); rerr != nil && s.log != nil {
 					s.log.Error("release registry tag slot", "registry", r.RegistryID, "grant", c.id, "error", rerr.Error())
 				}
 			}
 		}
-		reserved, err := s.db.ReserveReadRun(c.id, actionKey, budgetKey, now, budget, interval)
-		if errors.Is(err, permit.ErrReadGrantInactive) {
-			release(false)
-			sawExpired = true
-			continue
-		}
-		if err != nil {
-			release(false)
-			return nil, fmt.Errorf("reserve registry read on lease %s: %w", c.id, err)
-		}
-		if !reserved {
-			release(false)
-			denied, deniedInterval = true, max(deniedInterval, interval)
-			continue
-		}
 		claim := &registryLeaseClaim{s: s, grantID: c.id, epoch: epoch}
 		if err := s.registryLeaseRecheck(epoch, c.id); err != nil {
 			// No registry I/O happened: give the spend back.
-			release(true)
+			release()
 			return nil, err
 		}
 		if s.log != nil {
