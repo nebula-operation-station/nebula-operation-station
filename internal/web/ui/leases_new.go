@@ -75,6 +75,9 @@ type leaseProposal struct {
 	preview   executions.ReadGrantPreview
 	expires   time.Time
 	committed bool
+	// registries are the frozen targets of a private registry lease
+	// (leases_registry.go); empty for every other lease.
+	registries []leaseRegistryRow
 }
 
 // leaseProposals keeps the preview throttle and the previewed proposals.
@@ -113,6 +116,11 @@ func (p *leaseProposals) allow(user string, now time.Time) bool {
 // put stores a proposal, dropping expired ones and, when full, the one
 // that expires first.
 func (p *leaseProposals) put(user string, v executions.ReadGrantPreview, now time.Time) {
+	p.putWith(user, v, nil, now)
+}
+
+// putWith is put for a registry lease with its frozen registries.
+func (p *leaseProposals) putWith(user string, v executions.ReadGrantPreview, regs []leaseRegistryRow, now time.Time) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	for d, x := range p.props {
@@ -129,7 +137,7 @@ func (p *leaseProposals) put(user string, v executions.ReadGrantPreview, now tim
 		}
 		delete(p.props, oldest)
 	}
-	p.props[v.Digest] = &leaseProposal{user: user, preview: v, expires: now.Add(leaseProposalTTL)}
+	p.props[v.Digest] = &leaseProposal{user: user, preview: v, expires: now.Add(leaseProposalTTL), registries: regs}
 }
 
 // get returns a copy of user's unexpired proposal with this digest.
@@ -189,6 +197,15 @@ type leaseNewData struct {
 	// (live values); TargetCount counts its metrics targets.
 	Telemetry   bool
 	TargetCount int
+	// Private registry scope (leases_registry.go): offered only when the
+	// registry reads are wired and the executor lists its registries.
+	RegistryOffered   bool
+	PrivateRegistries []leaseRegistryOption
+	RegistryMethods   []leaseMethodOption
+	// Registry is set on the proposal page of a registry read lease with
+	// its frozen registries.
+	Registry        bool
+	RegistryTargets []leaseRegistryRow
 }
 
 // leaseRefreshURL is the form URL pre-filled with a grant's scope, or ""
@@ -302,6 +319,7 @@ func (h *Handler) handleLeaseNew(w http.ResponseWriter, r *http.Request) {
 	d := leaseFormFromQuery(q)
 	d.ScopeOptions = h.leaseScopeOptions(ctx)
 	h.providerLeaseForm(ctx, d, q)
+	h.registryLeaseForm(ctx, d, q)
 	h.render(w, r, pageData{Title: "New read lease", Active: "operations", Content: "lease_new", LeaseNew: d,
 		Scripts: []string{"formpost.js"}})
 }
@@ -327,6 +345,9 @@ func (h *Handler) handleLeasePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	case pveLiveScope:
 		h.handlePVELivePreview(w, r)
+		return
+	case ScopeRegistry:
+		h.handleRegistryLeasePreview(w, r)
 		return
 	}
 	days, err := strconv.Atoi(r.PostFormValue("days"))
@@ -398,7 +419,8 @@ func (h *Handler) handleLeaseProposal(w http.ResponseWriter, r *http.Request) {
 	d := &leaseNewData{Preview: &v, HostCount: len(v.Targets), ActionCount: len(v.Actions),
 		MinInterval: formatScheduleInterval(v.MinInterval),
 		Provider:    v.ScopeKind == executions.ScopeProvider || len(v.Providers) > 0, RemoteCount: len(v.Providers),
-		Telemetry: v.RateProfile == permit.ProviderTelemetryProfile}
+		Telemetry: v.RateProfile == permit.ProviderTelemetryProfile,
+		Registry:  len(p.registries) > 0, RegistryTargets: p.registries}
 	for _, p := range v.Providers {
 		d.TargetCount += len(p.MetricsTargets)
 	}

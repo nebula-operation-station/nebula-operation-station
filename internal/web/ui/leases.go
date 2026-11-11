@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/registrymeta"
 )
 
 // Read lease pages (ADR 0007 E06, part 2): the list and detail of the
@@ -37,6 +38,10 @@ type leaseRow struct {
 	// methods instead of hosts and actions.
 	Provider                 bool
 	RemoteCount, MethodCount int
+	// Registry marks a private registry read lease: the row counts
+	// registries and methods.
+	Registry      bool
+	RegistryCount int
 }
 
 // leaseDetail is the data of one lease detail page.
@@ -56,6 +61,10 @@ type leaseDetail struct {
 	Provider    bool
 	Providers   []leaseProviderRow
 	RateProfile string
+	// Registry marks a private registry read lease with its frozen
+	// registries.
+	Registry   bool
+	Registries []leaseRegistryRow
 }
 
 // leasesData is the data of the lease list page.
@@ -117,6 +126,9 @@ func leaseScope(v executions.ReadGrantView) string {
 	if v.ScopeKind == executions.ScopeProvider {
 		return "Proxmox remotes: " + strings.Join(v.Remotes, ", ")
 	}
+	if v.ScopeKind == ScopeRegistry {
+		return "Private registries: " + v.ScopeValue
+	}
 	if v.ScopeValue != "" {
 		return v.ScopeKind + ": " + v.ScopeValue
 	}
@@ -143,7 +155,15 @@ func (h *Handler) handleLeases(w http.ResponseWriter, r *http.Request) {
 		h.log.Error("list read grants", "error", err)
 		ld.Unavailable = true
 	}
+	var regs map[string]registrymeta.LeaseView
+	if err == nil {
+		regs = h.registryLeaseViews(ctx)
+	}
 	for _, v := range list {
+		rl, isRegistry := regs[v.ID]
+		if isRegistry {
+			applyRegistryLease(&v, rl)
+		}
 		row := leaseRow{
 			ID: v.ID, Short: leaseShort(v.ID), State: v.State,
 			StateClass: leaseStateClass(v.State), Scope: leaseScope(v),
@@ -155,23 +175,34 @@ func (h *Handler) handleLeases(w http.ResponseWriter, r *http.Request) {
 		if !v.Expiry.IsZero() {
 			row.ExpirySet = true
 		}
+		if isRegistry {
+			row.Registry, row.RegistryCount, row.MethodCount = true, len(rl.Registries), registryMethodCount(rl)
+			row.RefreshURL = registryRefreshURL(rl)
+		}
 		ld.Rows = append(ld.Rows, row)
 	}
 	h.render(w, r, pageData{Title: "Read leases", Active: "operations", Content: "leases", Leases: ld})
 }
 
-// findLease returns the grant with the given id from the current list.
-func (h *Handler) findLease(ctx context.Context, id string) (*executions.ReadGrantView, error) {
+// findLease returns the grant with the given id from the current list. A
+// private registry read lease (which the executions service shows as
+// "invalid") comes back with its verified state, and its registry view.
+func (h *Handler) findLease(ctx context.Context, id string) (*executions.ReadGrantView, *registrymeta.LeaseView, error) {
 	list, err := h.leases.ReadGrants(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	for i := range list {
 		if list[i].ID == id {
-			return &list[i], nil
+			v := list[i] // a copy: the overlay never writes into the caller's list
+			if rl, ok := h.registryLeaseViews(ctx)[id]; ok {
+				applyRegistryLease(&v, rl)
+				return &v, &rl, nil
+			}
+			return &v, nil, nil
 		}
 	}
-	return nil, nil
+	return nil, nil, nil
 }
 
 func (h *Handler) handleLease(w http.ResponseWriter, r *http.Request) {
@@ -180,7 +211,7 @@ func (h *Handler) handleLease(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
 	defer cancel()
-	v, err := h.findLease(ctx, r.PathValue("id"))
+	v, rl, err := h.findLease(ctx, r.PathValue("id"))
 	if err != nil {
 		h.log.Error("list read grants", "error", err)
 		http.Error(w, "the read leases could not be listed", http.StatusBadGateway)
@@ -199,6 +230,9 @@ func (h *Handler) handleLease(w http.ResponseWriter, r *http.Request) {
 		Revocable: leaseRevocable(v.State), RefreshURL: leaseRefreshURL(*v),
 		Provider: v.ScopeKind == executions.ScopeProvider, Providers: leaseProviderRows(*v),
 		RateProfile: v.RateProfile,
+	}
+	if rl != nil {
+		d.Registry, d.Registries, d.RefreshURL = true, registryRows(rl.Registries), registryRefreshURL(*rl)
 	}
 	if !v.Created.IsZero() {
 		d.Created, d.CreatedSet = v.Created.UTC(), true
@@ -238,7 +272,7 @@ func (h *Handler) handleLeaseRevoke(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
 	defer cancel()
-	v, err := h.findLease(ctx, id)
+	v, _, err := h.findLease(ctx, id)
 	if err != nil {
 		h.log.Error("find read grant", "grant", id, "error", err)
 		http.Error(w, "the read lease could not be found", http.StatusBadGateway)
