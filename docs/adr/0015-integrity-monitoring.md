@@ -201,6 +201,13 @@ named in the handbook next to every "no unexpected change" result:
     content"), and a reference already admitted for an installed
     `(package, version, arch)` can neither be replaced nor joined by a
     second one, whatever deb SHA-256 the builder names (D8);
+  - a compromised key can pre-sign forged references for future
+    versions; the first one admitted for a triple is the one used when
+    that version is installed and blocks the correct reference for it.
+    The correct reference then raises an `integrity.reference_conflict`
+    finding (D8 "Reference conflict alert", D9), but until the admin
+    replaces the key the forged reference keeps its effects listed here
+    for that version;
   - a file that was already replaced at the first scan and matches the
     forged reference raises no "differs from signed reference" finding,
     so only trust on first scan remains for it.
@@ -899,8 +906,20 @@ of `InRelease` and decompression of `data.tar.xz` (Debian) and
   deb SHA-256 is part of the signed document but not of this key: the
   first admitted reference for a triple is the only one the executor
   ever uses for it; a later one that differs in any byte, including a
-  different deb SHA-256, is rejected, audited and shown to the admin as
-  a reference conflict, and never replaces or joins the first. (Two
+  different deb SHA-256, is rejected, audited and never replaces or
+  joins the first. **Reference conflict alert.** Each such rejection
+  opens an `integrity.reference_conflict` finding (high, D9) that names
+  the triple and both deb SHA-256 values and is notified like other
+  integrity events. It tells the admin that either two configured
+  archives publish different builds (below) or the builder or its key
+  signed a reference that is not the archive's, and that the second case
+  is resolved only by replacing the builder key ("Builder key
+  replacement" below). A compromised key can also **pre-sign**
+  references for versions that are not yet installed or published;
+  under the first-admitted rule such a forged reference is the one used
+  when that version arrives and blocks the correct one, which then
+  raises this conflict alert, until the key is replaced (named in
+  "Honest limits"). (Two
   configured archives that publish different builds under the same
   triple are therefore not both verifiable: hosts with the other build
   show "differs from signed reference" until the admin accepts it or
@@ -914,10 +933,13 @@ of `InRelease` and decompression of `data.tar.xz` (Debian) and
 - **Builder key replacement revokes the old references.** Replacing the
   pinned key (`trust-builder` with a new key, for example after a
   builder compromise) drops every reference admitted under the old key:
-  from then on they count as "no reference", and open `expected_pending`
-  findings whose "verified" label rested on them become "changed during
-  NOS job, unverified" (high, or critical for a critical-class path,
-  D9). The builder re-fetches and re-signs references with the new key,
+  from then on they count as "no reference", and every open finding
+  whose class or severity rested on one of them is re-rated as if no
+  reference existed: `expected_pending` findings with a "verified" label
+  become "changed during NOS job, unverified" (high, or critical for a
+  critical-class path, D9), and open "package updated outside NOS"
+  (medium) findings become "other changed file" (high, or critical for
+  a critical-class path, D9). The builder re-fetches and re-signs references with the new key,
   and the executor admits them again under the first-admitted rule, now
   per new key, so a forged reference from the compromised key cannot
   block the correct one. The next complete full run compares every
@@ -1100,14 +1122,14 @@ matching severity wins, see "Critical-class paths"):
 | Class | Severity |
 | --- | --- |
 | Package file differs from signed reference; NOS binary/unit mismatch (I1); any new, changed or removed critical-class path (above) that is not a verified expected change, including one changed during a NOS job without a verified reference; new setuid/setgid file or bit; missing NOS own key or extra key in root's `authorized_keys` | critical |
-| Other changed or new file in `/etc` or a watched `/usr` root (D5); owner/mode change; I2 baseline digest mismatch; change of a path that is not critical-class during a NOS job without a verified reference ("changed during NOS job, unverified"); package file content changed without a version change, even if it matches a reference (D7); package downgraded outside NOS (lower reported version), even with a matching signed reference; unexpected (skipped) mount below a profile root (D5), critical when it covers a critical-class path | high |
+| Other changed or new file in `/etc` or a watched `/usr` root (D5); owner/mode change; I2 baseline digest mismatch; change of a path that is not critical-class during a NOS job without a verified reference ("changed during NOS job, unverified"); package file content changed without a version change, even if it matches a reference (D7); package downgraded outside NOS (lower reported version), even with a matching signed reference; unexpected (skipped) mount below a profile root (D5), critical when it covers a critical-class path; reference conflict (`integrity.reference_conflict`, D8) | high |
 | Package updated outside NOS (strictly higher reported version) with matching reference; partial or stale scan | medium |
 | Verified expected change from a NOS job (`expected_pending` until approved by D7; a critical-class path still needs its own executor-local CLI approval) | info (record only) |
 
 **Notifications** go through the existing webhook, ntfy and Telegram
 senders (ADR 0011 D9 pattern): events `integrity.nos_mismatch`,
 `integrity.host_change`, `integrity.scan_incomplete`,
-`integrity.baseline_tamper`. Messages carry **structured fields only**:
+`integrity.baseline_tamper`, `integrity.reference_conflict`. Messages carry **structured fields only**:
 host label, class, severity, count and a NOS link. **No host-supplied path
 or content is put into a notification**, because chat clients render
 Markdown and links; the path is shown only in the NOS UI under spec 09
