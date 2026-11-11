@@ -109,10 +109,17 @@ func Render(o Options) ([]byte, error) {
 	return []byte(s), nil
 }
 
-// render writes the script for validated options. Every interpolated value
-// is validated (user name, IPs/CIDRs, key reference) or re-encoded (key),
-// so none can break out of its quoting.
+// render writes the classic script for validated options.
 func render(o Options) string {
+	return renderWith(o, "")
+}
+
+// renderWith writes the script for validated options with early, fixed or
+// validated template text, inserted right after `set -eu` before any
+// change to the host. Every interpolated value is validated (user name,
+// IPs/CIDRs, key reference) or re-encoded (key), so none can break out of
+// its quoting.
+func renderWith(o Options, early string) string {
 	keyLine := strings.TrimSpace(string(ssh.MarshalAuthorizedKey(o.Key))) + " nebula-" + o.KeyRef
 	keyFP := ssh.FingerprintSHA256(o.Key)
 	var b strings.Builder
@@ -121,7 +128,7 @@ func render(o Options) string {
 # Nebula Operation Station: enroll this host (spec 08).
 # Review, then run as root on the host. Key: %s
 set -eu
-
+%s
 user='%s'
 key_line='%s %s'
 
@@ -144,7 +151,7 @@ if ! grep -qxF "$key_line" "$home/.ssh/authorized_keys"; then
 fi
 chown "$user:$user" "$home/.ssh/authorized_keys"
 chmod 0600 "$home/.ssh/authorized_keys"
-`, keyFP, o.User, opts, keyLine)
+`, keyFP, early, o.User, opts, keyLine)
 	if o.Sudo {
 		fmt.Fprintf(&b, `
 # NOPASSWD sudo: effectively root on this host (spec 08).
