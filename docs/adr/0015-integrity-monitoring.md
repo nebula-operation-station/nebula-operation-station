@@ -128,7 +128,9 @@ named in the handbook next to every "no unexpected change" result:
   and opens a finding; it is never silently treated as covered. The
   mount list comes from the host, so a root attacker can hide a mount
   (threat model). On vfat, owner and mode come from mount options, so
-  only content and presence changes are meaningful there.
+  under a vfat `/boot/efi` root only content, size, type and presence
+  are compared (D5); owner and mode changes there, including those from
+  changed mount options, open no finding.
 - **Between scans.** A change that is reverted before the next scan is
   missed (threat model). Incremental runs hash only files whose `ctime`
   or `mtime` falls in the look-back window, and files larger than
@@ -162,7 +164,8 @@ named in the handbook next to every "no unexpected change" result:
   the executor digest of other paths it named; the record values still
   come from the executor's own scan. Critical-class entries are approved
   only in the executor-local CLI (D7, D9), and in hardened mode D3
-  baselines too; the CLI view is only as trustworthy as the NOS machine
+  baselines too (the executor rejects a browser assertion for them,
+  D3); the CLI view is only as trustworthy as the NOS machine
   (previous item).
 - **Trust on first scan.** The first complete scan of a host becomes its
   proposed baseline (D7); a host that was already compromised then is
@@ -185,10 +188,14 @@ named in the handbook next to every "no unexpected change" result:
   effect is exactly this (D7, D9):
   - during a NOS job that brings the package to the executor-requested
     version, the change is shown as a verified expected change (info,
-    `expected_pending`), for critical-class paths too;
-  - outside a NOS job, with a reported version change, it is "package
-    updated outside NOS" (medium) for a path that is not critical-class;
-    a critical-class path stays critical;
+    `expected_pending`), for critical-class paths too, except a new
+    setuid/setgid file or bit, which stays critical even when the forged
+    reference carries the bit (D9, highest severity wins);
+  - outside a NOS job, with a reported version upgrade (strictly higher
+    in dpkg ordering), it is "package updated outside NOS" (medium) for a
+    path that is not critical-class; a critical-class path stays
+    critical; a lower reported version is "package downgraded outside
+    NOS" (high, D9), even with a matching signed reference;
   - without a version change it lowers nothing: the finding stays high,
     or critical for a critical-class path (D7 "Same version, changed
     content"), and a reference already admitted for an installed
@@ -354,11 +361,12 @@ locally edited) changes legitimately and has no release reference.
 
 - The baseline is a list of `(path, type, size, mode, owner, SHA-256)`.
 - It is **approved like a read grant** (ADR 0007): the executor shows the
-  full list with old and new values, the admin approves its digest with a
-  fresh user-verified assertion in its own challenge domain
-  (`nebula-integrity-baseline-v1`, nonce, five-minute expiry, single use),
-  or with the executor-local CLI in hardened mode. Recovery mode cannot
-  approve a baseline.
+  full list with old and new values. In standard mode the admin approves
+  its digest with a fresh user-verified assertion in its own challenge
+  domain (`nebula-integrity-baseline-v1`, nonce, five-minute expiry,
+  single use). In hardened mode it is approved **only** with the
+  executor-local CLI; the executor rejects a browser assertion for a D3
+  baseline there. Recovery mode cannot approve a baseline.
 - The executor stores the approved baseline and its digest in
   executor-owned storage. The server may display it but cannot change it.
 - Content hashes of configuration files are **keyed** with the same
@@ -463,7 +471,19 @@ following symlinks; final list is Q1):
 | systemd units | `/usr/lib/systemd/system`, `/etc/systemd/system`, user units under `/etc/systemd/user` |
 | SSH access | `/root/.ssh/authorized_keys*`, `/home/*/.ssh/authorized_keys*`, plus any path named by an `AuthorizedKeysFile` directive found in `/etc/ssh/sshd_config` and its includes, limited to the roots above and `/home/*/` |
 | Scheduled jobs | `/etc/crontab`, `/etc/cron.*/`, `/var/spool/cron/crontabs/`, systemd timers (covered by the unit roots) |
-| EFI system partition | `/boot/efi` as its **own root** when it is a mount point (UEFI hosts); otherwise it is ordinary `/boot` content. On vfat, owner, mode and `ctime` come from mount options, so every file under it is hashed in every run, incremental too (the partition is small) |
+| EFI system partition | `/boot/efi` as its **own root** when it is a mount point (UEFI hosts); otherwise it is ordinary `/boot` content. On vfat, owner, mode and `ctime` come from mount options, so every file under it is hashed in every run, incremental too (the partition is small), and for entries under a `/boot/efi` root whose type in the D6 mounts array is `vfat` only type, size, content hash, symlink target and presence are compared; owner and mode are recorded as context and never open a finding (D9) |
+
+**Optional roots.** Each root in the approved profile carries a fixed
+`optional` flag (part of the profile, never taken from the host). In
+`fim-default-v1` exactly these roots are optional: `/boot/efi` (BIOS
+hosts), `/opt`, `/usr/libexec`, `/etc/systemd/user` and
+`/var/spool/cron/crontabs`; the `authorized_keys*` globs under
+`/root/.ssh` and `/home/*/.ssh` and the `AuthorizedKeysFile` targets
+may match nothing. A missing optional root is recorded as **absent**
+in the run summary and does not make the run partial; if the approved
+baseline holds entries under it, they are reported as removed like any
+other absent path. A missing root that is not optional makes the run
+partial (D6). An approved profile variant may change the flags (Q1).
 
 Excluded by default: `/etc/pve` (Q1), `/usr/lib/python3*/**/__pycache__`,
 `/usr/local/lib/python3*/**/__pycache__`,
@@ -564,8 +584,9 @@ parser is strict, bounded and fuzzed before the beta.
   may open findings but never closes one and never proves that a file is
   unchanged or absent. A mount that is excluded by design (D5) does not
   make a run partial; a profile root that the host does not have and the
-  profile marks optional (for example `/boot/efi` on a BIOS host) is
-  absent, not skipped.
+  profile marks `optional` (D5 "Optional roots", for example `/boot/efi`
+  on a BIOS host) is absent, not skipped. A missing root without that
+  flag is skipped and makes the run partial.
 - **Display.** Paths are shown as escaped text: valid printable UTF-8 as
   is, everything else as `\xNN`; bidi controls and other format
   characters are always escaped. No host-supplied path ever becomes a
@@ -662,7 +683,8 @@ roles never mix:
      host claims a different real version whose file matches, NOS sees a
      consistent but possibly downgraded package; this is cross-checked
      against NOS's own inventory history and ADR 0011 findings and shown
-     as "version changed outside NOS" when no NOS job explains it. A job
+     as "package updated outside NOS" or, for a lower version, "package
+     downgraded outside NOS" (D9) when no NOS job explains it. A job
      explains a version only under the D9 rule: the version the executor
      requested, never a lower or equal one, so a downgrade is never an
      expected change.
@@ -951,14 +973,18 @@ access"), `/etc/sudoers` and `/etc/sudoers.d/`, PAM configuration
 (`/etc/pam.d/`, `/etc/security/`) and PAM modules (`pam_*.so`),
 `/etc/ssh/sshd_config` and its includes, `/etc/ld.so.preload`, systemd
 units, drop-ins and timers under the D5 unit roots, crontabs and the
-crontab spool, every file under `/boot`, the SSH daemon and its helpers
+crontab spool, every file under `/boot` (under a vfat `/boot/efi` root,
+D5, only its type, size, content, symlink target and presence are
+compared, so owner and mode changes there never open a finding), the
+SSH daemon and its helpers
 (`/usr/sbin/sshd`, `/usr/lib/openssh/`), `sudo` and `su`, the dynamic
 loader (`ld-linux*`), every file in `/usr/local/bin` or `/usr/local/sbin`
 whose name shadows a command in `/usr/bin` or `/usr/sbin`, and every file
 that has a setuid or setgid bit before or after the change. For them:
 
 - **Severity precedence.** When a change matches several classes of the
-  table below, the highest severity wins. A critical-class path stays
+  table below, the highest severity wins, so a new setuid or setgid file
+  or bit stays critical even when it is a verified expected change. A critical-class path stays
   **critical** when it changes during a NOS job without a verified
   reference; it is labelled "changed during NOS job, unverified" in
   addition, never downgraded to high.
@@ -1000,12 +1026,18 @@ Q6 the replaced binary fails the verified reference unless the builder
 or its signing key is compromised as well (the server alone cannot
 forge a reference, D8). Both limits are listed in "Honest
 limits". Package updates done on the host outside NOS (for example
-unattended-upgrades) that change the reported package version and whose
+unattended-upgrades) that raise the reported package version (strictly
+higher in dpkg ordering than in NOS's last complete inventory) and whose
 new records match the verified archive reference for the new version in
 every field listed above are medium-severity findings ("package updated
 outside NOS"), not alarms, unless the path is critical-class
-(precedence above). A content change without a version change is never
-"package updated outside NOS" (D7 "Same version, changed content").
+(precedence above). A **lower** reported version made outside NOS is
+"package downgraded outside NOS", severity high (critical for a
+critical-class path), even when its records match a signed reference
+for that older version: a validly signed old build can reintroduce a
+fixed vulnerability, and unattended upgrades never downgrade. A content
+change without a version change is never "package updated outside NOS"
+(D7 "Same version, changed content").
 
 **Findings.** A new store `integrity_findings` (not the ADR 0011 store,
 whose observer is always Hermes): subject (NOS machine or host ID), path
@@ -1018,8 +1050,8 @@ matching severity wins, see "Critical-class paths"):
 | Class | Severity |
 | --- | --- |
 | Package file differs from signed reference; NOS binary/unit mismatch (I1); any new, changed or removed critical-class path (above) that is not a verified expected change, including one changed during a NOS job without a verified reference; new setuid/setgid file or bit; missing NOS own key or extra key in root's `authorized_keys` | critical |
-| Other changed or new file in `/etc` or a watched `/usr` root (D5); owner/mode change; I2 baseline digest mismatch; change of a path that is not critical-class during a NOS job without a verified reference ("changed during NOS job, unverified"); package file content changed without a version change, even if it matches a reference (D7); unexpected (skipped) mount below a profile root (D5), critical when it covers a critical-class path | high |
-| Package updated outside NOS with matching reference; partial or stale scan | medium |
+| Other changed or new file in `/etc` or a watched `/usr` root (D5); owner/mode change; I2 baseline digest mismatch; change of a path that is not critical-class during a NOS job without a verified reference ("changed during NOS job, unverified"); package file content changed without a version change, even if it matches a reference (D7); package downgraded outside NOS (lower reported version), even with a matching signed reference; unexpected (skipped) mount below a profile root (D5), critical when it covers a critical-class path | high |
+| Package updated outside NOS (strictly higher reported version) with matching reference; partial or stale scan | medium |
 | Verified expected change from a NOS job (`expected_pending` until approved by D7; a critical-class path still needs its own executor-local CLI approval) | info (record only) |
 
 **Notifications** go through the existing webhook, ntfy and Telegram
