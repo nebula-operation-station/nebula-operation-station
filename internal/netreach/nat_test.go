@@ -3,6 +3,7 @@
 package netreach
 
 import (
+	"net/netip"
 	"strings"
 	"testing"
 )
@@ -108,6 +109,67 @@ func TestTranslatedAddressWithoutZoneIsUnknown(t *testing.T) {
 	s := labSnapshot()
 	s.Addresses[1].Value = "172.30.0.5" // web-server in a subnet no firewall interface owns
 	wantVerdict(t, evalQ(t, s, internetQuery(wanAddr, 443)), VerdictUnknown, ReasonSubnetNoInterface)
+}
+
+// translatedTo points fwd-https at the address object or group name.
+func translatedTo(s *Snapshot, name string) {
+	s.NATRules[0].DestinationTranslation.Value.Address = name
+}
+
+func TestTranslatedRangeIntoNestedSegmentOfOtherZoneIsUnknown(t *testing.T) {
+	// 10.0.4.10 lies in the lan interface network 10.0.0.0/16; the range
+	// reaches into 10.0.5.0/24, a dmz segment nested in it. allow-web
+	// allows wan → dmz, so a post-NAT zone lan (interzone deny) would be a
+	// wrong-zone denied.
+	s := labSnapshot()
+	s.Interfaces = append(s.Interfaces, Interface{Name: "ethernet1/4", Zone: "dmz", Prefixes: []netip.Prefix{pfx("10.0.5.0/24")}})
+	s.Addresses = append(s.Addresses, AddressObject{Name: "into-dmz", Type: AddressRange, Value: "10.0.4.10-10.0.5.20"})
+	translatedTo(s, "into-dmz")
+	r := evalQ(t, s, internetQuery(wanAddr, 443))
+	wantVerdict(t, r, VerdictUnknown, "post-NAT zone: translated address lies in a split segment")
+	wantStep(t, r, StepNAT, "fwd-https", OutcomeUnknown, "split segment")
+}
+
+func TestTranslatedRangeFailSafe(t *testing.T) {
+	cases := []struct {
+		name   string
+		snap   func(s *Snapshot)
+		reason string
+	}{
+		{"range in a split segment", func(s *Snapshot) {
+			// 10.0.0.0/16 holds the IPAM subnets lan-a, lan-b, lan-b2.
+			s.Addresses = append(s.Addresses, AddressObject{Name: "t", Type: AddressRange, Value: "10.0.0.5-10.0.0.9"})
+		}, "translated address lies in a split segment"},
+		{"range spanning two segments", func(s *Snapshot) {
+			s.Addresses = append(s.Addresses, AddressObject{Name: "t", Type: AddressRange, Value: "10.20.0.250-10.20.1.5"})
+		}, "translated address spans more than one segment"},
+		{"range placed by route", func(s *Snapshot) {
+			s.Addresses = append(s.Addresses, AddressObject{Name: "t", Type: AddressRange, Value: "198.51.100.1-198.51.100.9"})
+		}, "translated address spans more than one segment"},
+		{"group spanning two zones", func(s *Snapshot) {
+			s.AddressGroups = append(s.AddressGroups, Group{Name: "t", Static: []string{"web-server", "pool"}})
+		}, "translated address spans more than one zone"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := labSnapshot()
+			c.snap(s)
+			translatedTo(s, "t")
+			r := evalQ(t, s, internetQuery(wanAddr, 443))
+			wantVerdict(t, r, VerdictUnknown, c.reason)
+			wantStep(t, r, StepNAT, "fwd-https", OutcomeUnknown, c.reason)
+		})
+	}
+}
+
+func TestTranslatedRangeInUnsplitSegmentIsPlaced(t *testing.T) {
+	// pool lies in IPAM subnet lan-a, which holds no other segment.
+	s := labSnapshot()
+	translatedTo(s, "pool")
+	wantVerdict(t, evalQ(t, s, internetQuery(wanAddr, 443)), VerdictDenied, "interzone-default")
+	// The same range with allow-web towards lan is allowed.
+	s.SecurityRules[0].To = list("lan")
+	wantVerdict(t, evalQ(t, s, internetQuery(wanAddr, 443)), VerdictAllowed, "allow-web")
 }
 
 // failSafeNATRules are the unevaluable NAT rules of ADR 0012 D2,

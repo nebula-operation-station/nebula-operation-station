@@ -115,8 +115,10 @@ func (e *evaluator) translated(v *NATRuleView, p packet) outcome {
 }
 
 // translatedZone places the translated address of a NAT rule. Every range
-// must lie in one placed segment, or be a single address placed by route,
-// and all ranges must give the same zone.
+// must be a single address, or lie in one placed segment that is Unsplit
+// (as placeSubnet requires: a split segment may hold a nested segment of
+// another zone); all ranges must give the same zone. Anything else leaves
+// the post-NAT zone unknown.
 func (e *evaluator) translatedZone(v *NATRuleView) (string, string) {
 	zone := ""
 	for _, r := range v.TranslatedAddress.Ranges {
@@ -124,9 +126,13 @@ func (e *evaluator) translatedZone(v *NATRuleView) (string, string) {
 		if pl.Unknown {
 			return "", pl.Reason
 		}
-		inOne := r.From == r.To || pl.Segment != nil && pl.Segment.Prefix.Contains(r.To)
-		if !inOne {
-			return "", "translated address spans more than one segment"
+		if r.From != r.To {
+			if pl.Segment == nil || !pl.Segment.Prefix.Contains(r.To) {
+				return "", "translated address spans more than one segment"
+			}
+			if !pl.Segment.Unsplit {
+				return "", "translated address lies in a split segment"
+			}
 		}
 		if zone != "" && pl.Zone != zone {
 			return "", "translated address spans more than one zone"
