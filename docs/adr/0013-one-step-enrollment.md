@@ -615,10 +615,14 @@ that lets the executor find and revoke it:
    offer with a `pending` record to `failed` (the operator re-offers) and,
    once the record's window has ended, lists setup keys. Each pass takes
    the key list first and only then the snapshot of all records, so every
-   listed NOS key's `pending` record is in the snapshot; the list is read
-   within named key, byte and page limits, and a truncated list matches
-   nothing and raises the unresolved alert (spec 03, 06; amended
-   2026-11-11, fix round 3). Only keys with a
+   listed NOS key's `pending` record is in the snapshot. NetBird's
+   setup-key list (`GET /api/setup-keys`) is not paginated, so a pass
+   sends one request; the list is complete only for status `200` and a
+   bare JSON array of at most 10 000 keys in at most 16 MiB, every entry
+   valid and no pagination sign. Anything else is truncated: it matches
+   nothing, revokes nothing and raises the unresolved alert (spec 03,
+   06; amended 2026-11-11; previously: page by page with an unnamed
+   last-page indication and limits "set by EN-11"). Only keys with a
    valid key ID, the NOS name prefix, `usage_limit` 1, expiry ≤ 1 h after
    creation, exactly the managed group, creation time inside the stored
    window and not revoked are candidates; keys whose ID or name any other
@@ -1095,10 +1099,19 @@ follows; D1–D9 above already reflect these decisions.
     removed and such a record raises the unresolved alert (previously:
     window match when no other unresolved window overlapped). Reconcile
     takes the key list before the record snapshot; the list is bounded
-    by named key, byte and page limits and a truncated list alerts
-    instead of meaning "no candidate". The foreign-key revocation
-    residuals R1–R3 and the late-create residual are named in spec 06
-    and the threat model. "Show script" writes only the mismatch-audited
+    and a truncated list alerts instead of meaning "no candidate". The
+    complete-list condition is defined for NetBird's list endpoint as it
+    is: unpaginated, one request, status `200`, a bare JSON array within
+    `NetBirdKeyListMaxKeys` = 10 000 and `NetBirdKeyListMaxBytes` =
+    16 MiB, no pagination sign (`NetBirdKeyListMaxPages` = 1); every
+    other result is truncated and never leads to a revoke (amended
+    2026-11-11; previously: page by page, an unnamed last-page
+    indication and limit values "set by EN-11"). The foreign-key
+    revocation residuals R1–R3 and the late-create residual are named
+    in spec 06 and in this ADR's "Threat model additions" (previously
+    claimed: "in spec 06 and the threat model"; `docs/threat-model.md`
+    covers Release 0.9, does not describe enrollment yet and takes
+    these residuals over when the feature ships). "Show script" writes only the mismatch-audited
     flag and the mismatch counter, which no state transition reads.
   - D5: every stored render input that reaches the script has a format and
     a quoting rule, including the NetBird management URL and the
