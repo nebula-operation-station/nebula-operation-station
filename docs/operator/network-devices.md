@@ -210,7 +210,7 @@ nebula netdev add <device-id> --family cbs|panos --endpoint <ip-or-name> [--port
 nebula netdev credential set <device-id> [--username NAME] [--secret-fd N]
 nebula netdev credential rotate <device-id> [--username NAME] [--secret-fd N]
 nebula netdev repin <device-id>
-nebula netdev block <device-id> [--reason TEXT]
+nebula netdev block <device-id> --reason TEXT
 nebula netdev unblock <device-id>
 nebula netdev remove <device-id>
 nebula netdev list
@@ -225,7 +225,8 @@ nebula netdev list
 | `--label` | Display name only; names never authenticate a device. |
 | `--username` | Device account name, for example `nos-read`. Not a secret. |
 | `--no-credential` | Register only; store the credential later with `credential set`. |
-| `--secret-fd N` | Read the credential once from open descriptor N (3 or higher). |
+| `--secret-fd N` | Read the credential once from open descriptor N (3 or higher). Required in practice for a `cbs` key (see [Storing the read credential](#storing-the-read-credential)). |
+| `--reason` | Required for `block`: a short admin note of 1 to 512 bytes of printable UTF-8, no secrets. The executor refuses an empty reason. |
 
 ### Endpoint rules
 
@@ -337,7 +338,9 @@ device <device-id>: read credential rotated from version 1 to 2
 Rotation **revokes every grant of the device**: every read lease bound to
 the old credential version stops covering it, and a new lease is needed.
 If the revocation fails, the device is blocked (fail closed) and the error
-says so; `nebula netdev block <device-id>` retries the revocation.
+says so; `nebula netdev block <device-id> --reason '<note>'` retries the
+revocation (on a device that is already blocked it keeps the existing block
+and its reason and only retries the revocation).
 
 Order of steps:
 
@@ -380,7 +383,7 @@ On the NOS side:
 
 | Command | Effect |
 | --- | --- |
-| `nebula netdev block <device-id> [--reason TEXT]` | Blocks every dial to the device and revokes its grants at once. Credential and pin stay. No `yes` needed. The reason is a short admin note: no secrets. |
+| `nebula netdev block <device-id> --reason TEXT` | Blocks every dial to the device and revokes its grants at once. Credential and pin stay. No `yes` needed. `--reason` is required: a short admin note of 1 to 512 bytes of printable UTF-8, no secrets. On a device that is already blocked it keeps the block and its reason and retries the revocation. |
 | `nebula netdev unblock <device-id>` | Allows dials again after a typed `yes`. Revoked leases stay revoked. |
 | `nebula netdev remove <device-id>` | After a typed `yes`, in this order: blocks the device, revokes its grants, deletes its vault entries (read credential, digest key, fingerprint key) and tombstones the ID. A failed step leaves the device blocked; running `remove` again resumes. |
 
@@ -548,7 +551,9 @@ over its count limit is marked incomplete, never silently truncated.
 | `device registered, credential not stored: …` | Registration worked, storing the credential failed. Fix the cause and run `nebula netdev credential set <device-id>`. |
 | `add`/`credential`/`remove` refuse with a locked vault | Run `nebula unlock` on the executor host first. |
 | `the device presents the stored pin; nothing to re-pin` | Nothing changed; no re-pin needed. |
-| Device `blocked` in `list` after a rotation, re-pin or removal | Revoking the device's grants failed and the device was blocked to fail closed. Run `nebula netdev block <device-id>` to retry the revocation, then `unblock`. |
+| Device `blocked` in `list` after a rotation or re-pin | Revoking the device's grants failed and the device was blocked to fail closed. Run `nebula netdev block <device-id> --reason '<note>'` to retry the revocation, then `unblock` if the device should be read again. |
+| Device `blocked` in `list` after a failed `remove` | A removal step failed; the device stays blocked on purpose. Fix the cause (for example `nebula unlock`) and run `nebula netdev remove <device-id>` again; it resumes where it stopped. Do not `unblock` a half-removed device. |
+| `block` refuses with an invalid-request error | `--reason` is missing, empty, too long or contains control characters. Pass a short printable note. |
 | Reads fail with `device reads are not implemented yet (ND-14)` | Expected today; see [What you can use today](#what-you-can-use-today). |
 | No SSH login to a CBS switch for several minutes | A session was aborted hard; see [Known quirks](#known-quirks). Wait about 10 minutes or use the console. |
 | CBS clock wrong, NTP never syncs | No default gateway on the management interface; see [Known quirks](#known-quirks). |
