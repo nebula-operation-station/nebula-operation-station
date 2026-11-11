@@ -180,9 +180,11 @@ func TestDialRefusesRedirectWhenRedirectCheckBypassed(t *testing.T) {
 }
 
 // TestDialRefusesRewrittenDialAddress: a URL whose host is an allowlisted
-// name but whose dial address is rewritten at the transport (here via a
-// proxy setting, standing in for a resolver or configuration trick) to
-// another host:port is refused at dial.
+// name but whose dial address the transport rewrites to another host:port
+// (here via a proxy setting) is refused at dial. It covers only such a
+// rewrite of the dial host:port. It does not cover DNS: as the Allowlist
+// doc says, an allowlisted name that resolves to a loopback or private
+// address is still dialled, and no test here claims otherwise.
 func TestDialRefusesRewrittenDialAddress(t *testing.T) {
 	var hits atomic.Int32
 	other, _ := tlsServer(t, func(w http.ResponseWriter, r *http.Request) { hits.Add(1) })
