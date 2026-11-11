@@ -1,0 +1,34 @@
+{{define "content"}}
+{{with .Help}}
+<section class="panel" aria-label="Search the handbook">
+  <form action="/help" method="get" role="search" class="form">
+    <label>Search the handbook and FAQ (page and section titles)
+      <input type="search" name="q" maxlength="100" value="{{.Query}}" autocomplete="off"></label>
+    <div class="actions"><button type="submit" class="button">Search</button></div>
+  </form>
+  {{if .Invalid}}<p class="status--error">The search text is too long or not valid text.</p>{{end}}
+</section>
+{{if and .Searched (not .Invalid)}}
+<section class="panel" aria-label="Search results">
+  {{if .Results}}
+  <ul>
+    {{range .Results}}<li><a href="{{.URL}}">{{.Section}}</a> <span class="hint">({{.Page}})</span></li>
+    {{end}}
+  </ul>
+  {{if .Truncated}}<p class="hint">Only the first 50 matches are shown. Search more precisely.</p>{{end}}
+  {{else}}
+  <p>Nothing found for “{{.Query}}”.</p>
+  {{end}}
+</section>
+{{end}}
+<nav class="panel" aria-label="Handbook chapters">
+  <ul>
+    {{range .Chapters}}<li><a href="{{.URL}}"{{if .Current}} aria-current="page"{{end}}>{{.Title}}</a></li>
+    {{end}}
+  </ul>
+</nav>
+<article class="panel">
+{{.Body}}
+</article>
+{{end}}
+{{end}}
