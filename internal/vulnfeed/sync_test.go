@@ -11,6 +11,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -191,7 +192,7 @@ func TestSyncNotModifiedKeepsManifest(t *testing.T) {
 	}
 	e.clk.t = e.clk.t.Add(time.Hour)
 	res, err := e.syncer.Sync(context.Background(), f, SyncOptions{ContentDate: firstLineDate})
-	if err != nil || !res.NotModified || res.Manifest != first.Manifest {
+	if err != nil || !res.NotModified || !reflect.DeepEqual(res.Manifest, first.Manifest) {
 		t.Fatalf("%+v %v", res, err)
 	}
 	if len(tmpFiles(t, e.dir)) != 0 {

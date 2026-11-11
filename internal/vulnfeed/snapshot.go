@@ -37,6 +37,11 @@ const (
 	// MaxFutureSkew: a content date later than the clock plus this skew is
 	// invalid (D4).
 	MaxFutureSkew = 10 * time.Minute
+	// SnapshotRetention is the number of newest snapshots kept per feed:
+	// the current one plus SnapshotRetention-1 predecessors listed in its
+	// manifest. Objects that no kept snapshot references are removed, so
+	// disk use per feed stays below SnapshotRetention times its size cap.
+	SnapshotRetention = 3
 )
 
 // Snapshot store errors.
@@ -87,6 +92,19 @@ type Manifest struct {
 	Sequence    uint64     `json:"sequence,omitempty"`
 	Validators  Validators `json:"validators,omitzero"`
 	HighWater   HighWater  `json:"high_water,omitzero"`
+	// Previous lists the retained earlier snapshots of the feed, newest
+	// first, at most SnapshotRetention-1. Their objects are kept so that
+	// findings computed from them can still be checked.
+	Previous []SnapshotRef `json:"previous,omitempty"`
+}
+
+// SnapshotRef identifies a retained earlier snapshot of a feed.
+type SnapshotRef struct {
+	SHA256      string    `json:"sha256"`
+	Size        int64     `json:"size"`
+	FetchedAt   time.Time `json:"fetched_at,omitzero"`
+	ContentDate time.Time `json:"content_date,omitzero"`
+	Sequence    uint64    `json:"sequence,omitempty"`
 }
 
 // SnapshotID is the content-addressed snapshot ID ("sha256:<hex>", 71
@@ -227,13 +245,17 @@ func (st *Staged) Abort() {
 // an undated feed must have none; a date beyond MaxFutureSkew is invalid.
 // The object is fsynced and renamed into place before the manifest is
 // replaced atomically, so a crash leaves either the old or the new state.
+// Only after the new manifest is durable are objects that no kept
+// snapshot references removed (see Prune); a crash before that leaves
+// garbage that the next commit or Prune collects, never a manifest that
+// points at a missing object.
 func (s *Store) Commit(feed Feed, st *Staged, a Accept) (Manifest, error) {
 	if st == nil || st.closed {
 		return Manifest{}, ErrStageClosed
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	m, err := s.checkAccept(feed, a)
+	m, prev, err := s.checkAccept(feed, a)
 	if err != nil {
 		st.Abort()
 		return Manifest{}, err
@@ -257,45 +279,127 @@ func (s *Store) Commit(feed Feed, st *Staged, a Accept) (Manifest, error) {
 	if err := syncDir(objDir); err != nil {
 		return Manifest{}, fmt.Errorf("commit %s: %w", feed.Name, err)
 	}
+	m.Previous = retainedPrevious(prev, m.SHA256)
 	if err := s.writeManifest(m); err != nil {
 		return Manifest{}, fmt.Errorf("commit %s: %w", feed.Name, err)
 	}
+	// The commit is durable. A failed prune (e.g. another feed's manifest
+	// is corrupt) removes nothing and is retried on the next commit, so it
+	// does not fail this one; Prune reports the error to callers that ask.
+	_ = s.pruneLocked()
 	return m, nil
 }
 
+// retainedPrevious returns the predecessors to keep once prev is replaced
+// by a snapshot with digest cur: prev itself, then prev's own list, newest
+// first, without cur or duplicates, at most SnapshotRetention-1 entries.
+func retainedPrevious(prev Manifest, cur string) []SnapshotRef {
+	var out []SnapshotRef
+	seen := map[string]bool{cur: true}
+	add := func(r SnapshotRef) {
+		if len(out) >= SnapshotRetention-1 || r.SHA256 == "" || seen[r.SHA256] {
+			return
+		}
+		seen[r.SHA256] = true
+		out = append(out, r)
+	}
+	add(SnapshotRef{SHA256: prev.SHA256, Size: prev.Size, FetchedAt: prev.FetchedAt,
+		ContentDate: prev.ContentDate, Sequence: prev.Sequence})
+	for _, r := range prev.Previous {
+		add(r)
+	}
+	return out
+}
+
+// Prune removes every object that no feed's current or retained snapshot
+// references. Temporary (in-flight) files are left alone. If any manifest
+// cannot be read, its references are unknown and nothing is removed.
+func (s *Store) Prune() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.pruneLocked()
+}
+
+// pruneLocked is Prune with s.mu held.
+func (s *Store) pruneLocked() error {
+	ents, err := os.ReadDir(filepath.Join(s.dir, manifestsDir))
+	if err != nil {
+		return fmt.Errorf("prune: %w", err)
+	}
+	keep := map[string]bool{}
+	for _, e := range ents {
+		name := e.Name()
+		if strings.HasPrefix(name, tmpPrefix) {
+			continue
+		}
+		feed, ok := strings.CutSuffix(name, ".json")
+		if !ok || !feedNameRe.MatchString(feed) {
+			return fmt.Errorf("prune: unexpected manifest file: %w", ErrCorruptManifest)
+		}
+		m, err := s.Load(feed)
+		if err != nil {
+			return fmt.Errorf("prune: %w", err)
+		}
+		keep[m.SHA256] = true
+		for _, r := range m.Previous {
+			keep[r.SHA256] = true
+		}
+	}
+	objDir := filepath.Join(s.dir, objectsDir)
+	objs, err := os.ReadDir(objDir)
+	if err != nil {
+		return fmt.Errorf("prune: %w", err)
+	}
+	var errs []error
+	for _, e := range objs {
+		name := e.Name()
+		if !sha256HexRe.MatchString(name) || keep[name] {
+			continue
+		}
+		if err := os.Remove(filepath.Join(objDir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, err)
+		}
+	}
+	if err := errors.Join(errs...); err != nil {
+		return fmt.Errorf("prune: %w", err)
+	}
+	return nil
+}
+
 // checkAccept applies the date and sequence rules and returns the new
-// manifest without its content fields.
-func (s *Store) checkAccept(feed Feed, a Accept) (Manifest, error) {
+// manifest without its content fields, plus the previous manifest (zero
+// if there is none).
+func (s *Store) checkAccept(feed Feed, a Accept) (Manifest, Manifest, error) {
 	if err := feed.validate(); err != nil {
-		return Manifest{}, err
+		return Manifest{}, Manifest{}, err
 	}
 	prev, err := s.Load(feed.Name)
 	switch {
 	case errors.Is(err, ErrNoSnapshot):
 		prev = Manifest{}
 	case err != nil:
-		return Manifest{}, fmt.Errorf("commit %s: %w", feed.Name, err)
+		return Manifest{}, Manifest{}, fmt.Errorf("commit %s: %w", feed.Name, err)
 	}
 	now := s.now().UTC()
 	switch feed.DateKind {
 	case DateKindDated, DateKindProxy:
 		if a.ContentDate.IsZero() {
-			return Manifest{}, fmt.Errorf("commit %s: %w", feed.Name, ErrNoContentDate)
+			return Manifest{}, Manifest{}, fmt.Errorf("commit %s: %w", feed.Name, ErrNoContentDate)
 		}
 		if a.ContentDate.After(now.Add(MaxFutureSkew)) {
-			return Manifest{}, fmt.Errorf("commit %s: %w", feed.Name, ErrFutureContentDate)
+			return Manifest{}, Manifest{}, fmt.Errorf("commit %s: %w", feed.Name, ErrFutureContentDate)
 		}
 		if a.ContentDate.Before(prev.HighWater.ContentDate) {
-			return Manifest{}, fmt.Errorf("commit %s: content date %s before %s: %w", feed.Name,
+			return Manifest{}, Manifest{}, fmt.Errorf("commit %s: content date %s before %s: %w", feed.Name,
 				a.ContentDate.UTC().Format(time.RFC3339), prev.HighWater.ContentDate.UTC().Format(time.RFC3339), ErrRollback)
 		}
 	case DateKindUndated:
 		if !a.ContentDate.IsZero() {
-			return Manifest{}, fmt.Errorf("commit %s: undated feed with a date: %w", feed.Name, ErrInvalidContentDate)
+			return Manifest{}, Manifest{}, fmt.Errorf("commit %s: undated feed with a date: %w", feed.Name, ErrInvalidContentDate)
 		}
 	}
 	if (a.Sequence != 0 || prev.HighWater.Sequence != 0) && a.Sequence <= prev.HighWater.Sequence {
-		return Manifest{}, fmt.Errorf("commit %s: sequence %d not above %d: %w", feed.Name, a.Sequence, prev.HighWater.Sequence, ErrRollback)
+		return Manifest{}, Manifest{}, fmt.Errorf("commit %s: sequence %d not above %d: %w", feed.Name, a.Sequence, prev.HighWater.Sequence, ErrRollback)
 	}
 	m := Manifest{
 		Feed: feed.Name, SourceID: feed.SourceID, Integrity: feed.Integrity, DateKind: feed.DateKind,
@@ -309,7 +413,7 @@ func (s *Store) checkAccept(feed Feed, a Accept) (Manifest, error) {
 	if m.Sequence > m.HighWater.Sequence {
 		m.HighWater.Sequence = m.Sequence
 	}
-	return m, nil
+	return m, prev, nil
 }
 
 // writeManifest replaces the feed's manifest atomically.
@@ -377,6 +481,14 @@ func (s *Store) Load(feedName string) (Manifest, error) {
 	case DateKindDated, DateKindProxy, DateKindUndated:
 	default:
 		return Manifest{}, fmt.Errorf("load manifest %s: date kind: %w", feedName, ErrCorruptManifest)
+	}
+	if len(m.Previous) > SnapshotRetention-1 {
+		return Manifest{}, fmt.Errorf("load manifest %s: previous: %w", feedName, ErrCorruptManifest)
+	}
+	for _, r := range m.Previous {
+		if !sha256HexRe.MatchString(r.SHA256) || r.Size < 0 {
+			return Manifest{}, fmt.Errorf("load manifest %s: previous: %w", feedName, ErrCorruptManifest)
+		}
 	}
 	return m, nil
 }
