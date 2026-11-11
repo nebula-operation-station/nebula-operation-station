@@ -71,27 +71,33 @@ type RoutingPeer struct {
 
 // Evaluate answers one query against the snapshot (ADR 0012 D2 steps 1–5)
 // and returns its verdict, reason and explanation chain. It never fails:
-// whatever cannot be evaluated gives unknown with a reason. A query that
-// would exceed MaxWorkPerQuery, MaxPathsPerQuery or MaxChainSteps gives
-// unknown "limit reached"; when ctx is done before the query is answered
-// it stops and gives unknown "deadline" (ReasonDeadline) or "canceled"
-// (ReasonCanceled). Callers bound ctx with the job budget (JobBudget).
-// Apart from ctx it is pure and deterministic: the same index and query
-// give the same result.
+// whatever cannot be evaluated gives unknown with a reason. Every budget
+// stop gives unknown with the reason "limit reached" (ADR 0012 limits):
+// the work budget (MaxWorkPerQuery), the path limit (MaxPathsPerQuery),
+// the chain limit (MaxChainSteps) and the wall-clock budget. Evaluate
+// bounds ctx with JobBudget itself, so a caller that passes
+// context.Background() still stops at the deadline; an earlier caller
+// deadline or cancel stops it as well. The verdict step of the chain
+// names the limit that was hit. Apart from ctx and the wall clock it is
+// pure and deterministic: the same index and query give the same result.
 func (x *Index) Evaluate(ctx context.Context, q Query) Result {
 	return x.evaluate(ctx, q, defaultEvalLimits())
 }
 
 // JobBudget is the ADR 0012 wall-clock budget of one advisor job (default
-// 30 s). A job bounds the context it passes to Evaluate with it:
-//
-//	ctx, cancel := context.WithTimeout(ctx, netreach.JobBudget)
+// 30 s). Evaluate applies it to every query (context.WithTimeout on the
+// caller's ctx); a job that runs several queries bounds its own context
+// with it as well, so the whole job ends within the budget.
 const JobBudget = 30 * time.Second
 
-// Reasons of a query stopped by its context.
+// Limits named in the verdict step of a query stopped with "limit
+// reached". The reason is always ErrLimitReached; these say which limit.
 const (
-	ReasonDeadline = "deadline"
-	ReasonCanceled = "canceled"
+	limitWork     = "work budget per query"
+	limitPaths    = "paths per query"
+	limitChain    = "explanation chain steps"
+	limitDeadline = "wall-clock budget: deadline exceeded"
+	limitCanceled = "wall-clock budget: job canceled"
 )
 
 // MaxWorkPerQuery is the operation budget of one query. One unit is one
@@ -112,13 +118,14 @@ const MaxWorkPerQuery = 1 << 26
 // evalLimits are the per-query limits. They are a value so tests can check
 // the limit logic at small sizes.
 type evalLimits struct {
-	paths int // MaxPathsPerQuery
-	steps int // MaxChainSteps
-	work  int // MaxWorkPerQuery
+	paths  int           // MaxPathsPerQuery
+	steps  int           // MaxChainSteps
+	work   int           // MaxWorkPerQuery
+	budget time.Duration // JobBudget
 }
 
 func defaultEvalLimits() evalLimits {
-	return evalLimits{paths: MaxPathsPerQuery, steps: MaxChainSteps, work: MaxWorkPerQuery}
+	return evalLimits{paths: MaxPathsPerQuery, steps: MaxChainSteps, work: MaxWorkPerQuery, budget: JobBudget}
 }
 
 // searchCost bounds the comparisons of matching nx packet ranges against
@@ -168,16 +175,20 @@ func mostReachable(outs []outcome) outcome {
 }
 
 type evaluator struct {
+	// ctx is the caller's context; job is ctx bounded with lim.budget
+	// while result runs.
 	ctx   context.Context
+	job   context.Context
 	x     *Index
 	q     Query
 	lim   evalLimits
 	chain chain
 	paths int
 	work  int
-	// stop is why the evaluation stopped early ("limit reached",
-	// "deadline", "canceled"); it is then the reason of the verdict.
-	stop string
+	// stop is why the evaluation stopped early (always "limit reached");
+	// it is then the reason of the verdict. limit names the limit.
+	stop  string
+	limit string
 }
 
 func (x *Index) newEvaluator(ctx context.Context, q Query, lim evalLimits) *evaluator {
@@ -188,17 +199,26 @@ func (x *Index) evaluate(ctx context.Context, q Query, lim evalLimits) Result {
 	return x.newEvaluator(ctx, q, lim).result()
 }
 
-// result runs the evaluation and returns its result.
+// result runs the evaluation within the wall-clock budget lim.budget and
+// returns its result.
 func (e *evaluator) result() Result {
+	job, cancel := context.WithTimeout(e.ctx, e.lim.budget)
+	defer cancel()
+	e.job = job
 	out := e.run()
 	switch {
 	case e.stop != "":
 		out = unknownOut(e.stop)
 	case e.chain.full:
+		e.limit = limitChain
 		out = unknownOut(ErrLimitReached.Error())
 	}
 	out.reason = sanitizeText(out.reason)
-	e.chain.final(Step{Kind: StepVerdict, Outcome: string(out.verdict), Detail: out.reason})
+	detail := out.reason
+	if e.limit != "" {
+		detail += " (" + e.limit + ")"
+	}
+	e.chain.final(Step{Kind: StepVerdict, Outcome: string(out.verdict), Detail: detail})
 	return Result{
 		Verdict:      out.verdict,
 		Reason:       out.reason,
@@ -210,31 +230,46 @@ func (e *evaluator) result() Result {
 
 // step charges cost work units for the next step of the evaluation. It
 // returns false when the evaluation must stop: the chain is full
-// (MaxChainSteps, the verdict is already unknown "limit reached"), ctx is
-// done, or the step would exceed the work budget (MaxWorkPerQuery). e.stop
-// then holds the reason. Every loop over rules, NAT rules and paths calls
-// it once per iteration before doing the iteration's work.
+// (MaxChainSteps), the wall-clock budget is spent (job deadline, caller
+// deadline or cancel), or the step would exceed the work budget
+// (MaxWorkPerQuery). e.stop then holds "limit reached" and e.limit the
+// limit. Every loop over rules, NAT rules and paths calls it once per
+// iteration before doing the iteration's work.
 func (e *evaluator) step(cost int) bool {
 	if e.stop != "" {
 		return false
 	}
-	if e.chain.full {
-		e.stop = ErrLimitReached.Error()
-		return false
-	}
-	switch err := e.ctx.Err(); {
+	switch err := e.ctxErr(); {
+	case e.chain.full:
+		e.halt(limitChain)
+	case errors.Is(err, context.DeadlineExceeded):
+		e.halt(limitDeadline)
 	case err != nil:
-		e.stop = ReasonCanceled
-		if errors.Is(err, context.DeadlineExceeded) {
-			e.stop = ReasonDeadline
-		}
+		e.halt(limitCanceled)
 	case cost > e.lim.work-e.work:
-		e.stop = ErrLimitReached.Error()
+		e.halt(limitWork)
 	default:
 		e.work += cost
 		return true
 	}
 	return false
+}
+
+// ctxErr is the error of the job context. The caller's context is checked
+// directly as well: the cancel of a caller context of a type the context
+// package does not know reaches job only later, through a goroutine.
+func (e *evaluator) ctxErr() error {
+	if e.job != nil {
+		if err := e.job.Err(); err != nil {
+			return err
+		}
+	}
+	return e.ctx.Err()
+}
+
+// halt stops the evaluation with "limit reached" at limit.
+func (e *evaluator) halt(limit string) {
+	e.stop, e.limit = ErrLimitReached.Error(), limit
 }
 
 // stopped is the outcome of a path that step stopped.
@@ -244,7 +279,7 @@ func (e *evaluator) stopped() outcome { return unknownOut(e.stop) }
 // step stopped the evaluation, so no further path is evaluated.
 func (e *evaluator) newPath() bool {
 	if e.paths >= e.lim.paths && e.stop == "" {
-		e.stop = ErrLimitReached.Error()
+		e.halt(limitPaths)
 	}
 	if !e.step(1) {
 		return false

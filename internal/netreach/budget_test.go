@@ -83,33 +83,88 @@ func TestHostileQueryEndsWithinWorkBudget(t *testing.T) {
 		if e.work > MaxWorkPerQuery || e.work < MaxWorkPerQuery-perRule {
 			t.Fatalf("work %d, want the budget %d spent and not exceeded", e.work, MaxWorkPerQuery)
 		}
-		if last := r.Chain[len(r.Chain)-1]; last.Kind != StepVerdict {
-			t.Fatalf("chain ends with %+v", last)
-		}
+		wantLimitStep(t, r, limitWork)
 		if took > JobBudget {
 			t.Fatalf("query took %v, job budget %v", took, JobBudget)
 		}
 		t.Logf("work %d of %d (unbounded about %d) in %v", e.work, MaxWorkPerQuery, unbounded, took)
 	})
 
+	// With the work budget lifted, the wall-clock budget stops the query:
+	// a caller deadline, and the job budget Evaluate applies itself on a
+	// context.Background() caller. Both are "limit reached" (ADR 0012).
 	t.Run("deadline", func(t *testing.T) {
 		lim := defaultEvalLimits()
 		lim.work = math.MaxInt
 		ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
 		defer cancel()
-		start := time.Now()
+		wantWallClockStop(t, x, ctx, q, lim)
+	})
+	t.Run("job budget on context.Background", func(t *testing.T) {
+		lim := defaultEvalLimits()
+		lim.work = math.MaxInt
+		lim.budget = 50 * time.Millisecond
+		wantWallClockStop(t, x, context.Background(), q, lim)
+	})
+}
+
+// wantWallClockStop runs a query whose work budget is lifted and checks
+// that the 50 ms wall-clock budget stops it with unknown "limit reached".
+func wantWallClockStop(t *testing.T, x *Index, ctx context.Context, q Query, lim evalLimits) {
+	t.Helper()
+	start := time.Now()
+	e := x.newEvaluator(ctx, q, lim)
+	r := e.result()
+	took := time.Since(start)
+	if r.Verdict != VerdictUnknown || r.Reason != ErrLimitReached.Error() || e.limit != limitDeadline {
+		t.Fatalf("verdict %s %q, limit %q; want unknown %q at the deadline", r.Verdict, r.Reason, e.limit, ErrLimitReached)
+	}
+	wantLimitStep(t, r, limitDeadline)
+	// One rule step is the largest unit between two deadline checks.
+	if took > 10*time.Second {
+		t.Fatalf("query stopped %v after start, deadline 50ms", took)
+	}
+}
+
+// wantLimitStep checks that the chain ends with the verdict step naming
+// the limit that stopped the query.
+func wantLimitStep(t *testing.T, r Result, limit string) {
+	t.Helper()
+	last := r.Chain[len(r.Chain)-1]
+	want := ErrLimitReached.Error() + " (" + limit + ")"
+	if last.Kind != StepVerdict || last.Outcome != string(VerdictUnknown) || last.Detail != want {
+		t.Fatalf("chain ends with %+v, want verdict step %q", last, want)
+	}
+}
+
+// TestEvaluateAppliesJobBudget: Evaluate bounds every query with
+// JobBudget, whatever the caller's context; a caller deadline later than
+// the budget does not lift it.
+func TestEvaluateAppliesJobBudget(t *testing.T) {
+	if got := defaultEvalLimits().budget; got != JobBudget || JobBudget != 30*time.Second {
+		t.Fatalf("Evaluate budget %v, JobBudget %v; ADR 0012 default is 30s", got, JobBudget)
+	}
+	s := labSnapshot()
+	s.NATRules = forwards(20)
+	x := mustIndex(t, s)
+	q := internetQuery(dmzHost, 8443)
+	// Within the budget, context.Background() answers normally.
+	wantVerdict(t, x.Evaluate(context.Background(), q), VerdictAllowed, "allow-web")
+
+	later, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+	for name, ctx := range map[string]context.Context{"background": context.Background(), "later deadline": later} {
+		lim := defaultEvalLimits()
+		lim.budget = 0 // spent before the first step
 		e := x.newEvaluator(ctx, q, lim)
 		r := e.result()
-		took := time.Since(start)
-		wantVerdict(t, r, VerdictUnknown, ReasonDeadline)
-		if r.Reason != ReasonDeadline {
-			t.Fatalf("reason %q", r.Reason)
+		if r.Verdict != VerdictUnknown || r.Reason != ErrLimitReached.Error() || e.limit != limitDeadline {
+			t.Fatalf("%s: %s %q (%s), want unknown %q at the job deadline", name, r.Verdict, r.Reason, e.limit, ErrLimitReached)
 		}
-		// One rule step is the largest unit between two deadline checks.
-		if took > 10*time.Second {
-			t.Fatalf("query stopped %v after start, deadline 50ms", took)
+		if len(r.Chain) != 1 {
+			t.Fatalf("%s: work done after the deadline:\n%s", name, r.Text())
 		}
-	})
+	}
 }
 
 // TestWorkBudgetBoundary: a query that needs exactly the budget gives the
@@ -233,8 +288,9 @@ func (c *countdownCtx) Err() error {
 }
 
 // TestEvaluateStopsAtDeadline: a context that is done before or during
-// the query stops it with unknown "deadline" or "canceled"; the chain still
-// ends with the verdict.
+// the query stops it with unknown "limit reached" (the wall-clock budget,
+// ADR 0012); the chain still ends with the verdict, which names the
+// deadline or the cancel.
 func TestEvaluateStopsAtDeadline(t *testing.T) {
 	s := labSnapshot()
 	s.NATRules = forwards(20)
@@ -245,16 +301,18 @@ func TestEvaluateStopsAtDeadline(t *testing.T) {
 	expired, cancel := context.WithDeadline(t.Context(), time.Unix(0, 0))
 	defer cancel()
 	r := x.Evaluate(expired, q)
-	wantVerdict(t, r, VerdictUnknown, ReasonDeadline)
-	if r.Reason != ReasonDeadline || len(r.Chain) != 1 || r.Chain[0].Kind != StepVerdict {
+	if r.Verdict != VerdictUnknown || r.Reason != ErrLimitReached.Error() || len(r.Chain) != 1 {
 		t.Fatalf("expired context:\n%s", r.Text())
 	}
+	wantLimitStep(t, r, limitDeadline)
 
 	canceled, cancel2 := context.WithCancel(t.Context())
 	cancel2()
-	if r := x.Evaluate(canceled, q); r.Verdict != VerdictUnknown || r.Reason != ReasonCanceled {
+	r = x.Evaluate(canceled, q)
+	if r.Verdict != VerdictUnknown || r.Reason != ErrLimitReached.Error() {
 		t.Fatalf("canceled context: %s %q", r.Verdict, r.Reason)
 	}
+	wantLimitStep(t, r, limitCanceled)
 
 	// Count the checks of a full run, then let the deadline pass halfway.
 	count := &countdownCtx{Context: t.Context(), n: math.MaxInt}
@@ -265,13 +323,10 @@ func TestEvaluateStopsAtDeadline(t *testing.T) {
 	}
 	e := x.newEvaluator(&countdownCtx{Context: t.Context(), n: checks / 2}, q, defaultEvalLimits())
 	r = e.result()
-	wantVerdict(t, r, VerdictUnknown, ReasonDeadline)
-	if r.Reason != ReasonDeadline || e.stop != ReasonDeadline {
-		t.Fatalf("mid-query deadline: reason %q, stop %q", r.Reason, e.stop)
+	if r.Verdict != VerdictUnknown || r.Reason != ErrLimitReached.Error() || e.limit != limitDeadline {
+		t.Fatalf("mid-query deadline: %s %q, limit %q", r.Verdict, r.Reason, e.limit)
 	}
-	if last := r.Chain[len(r.Chain)-1]; last.Kind != StepVerdict || last.Detail != ReasonDeadline {
-		t.Fatalf("chain ends with %+v", last)
-	}
+	wantLimitStep(t, r, limitDeadline)
 	if e.paths == 0 || e.paths >= 21 {
 		t.Fatalf("stopped after %d paths, want part of the 21", e.paths)
 	}
