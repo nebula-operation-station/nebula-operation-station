@@ -119,6 +119,16 @@ named in the handbook next to every "no unexpected change" result:
 - **Trust on first scan.** The first complete scan of a host becomes its
   proposed baseline (D7); a host that was already compromised then is
   baselined as compromised.
+- **Package files before Q6.** Until Q6 is answered there are no archive
+  references (D8): package files are compared only against the
+  trust-on-first-scan baseline, and every package file a NOS apt job
+  changes is "changed during NOS job, unverified" (D9). NOS cannot tell
+  a file an attacker replaced during the job from the genuine upgrade.
+  Critical-class paths are never batch-approved and stay critical (D9),
+  but the admin's individual review of, for example, a new
+  `/usr/sbin/sshd` is only as good as the admin's own comparison with a
+  `.deb` they verified themselves. The same holds after Q6 for versions
+  that have no reference (D8 "Old versions").
 - **Trust in the reference builder and the server for "verified".**
   Package references are built on the D8 builder host and reach NOS
   through the server; the executor cannot re-derive them (D8). A
@@ -446,8 +456,9 @@ the host:
    - **Approval.** The admin approves a baseline (initial or updated) by
      digest, with the same assertion as D3 (challenge domain
      `nebula-fim-baseline-v1`). Bulk approval per host and per finding
-     batch is allowed; every approved entry is audited with old and new
-     values.
+     batch is allowed except for critical-class paths, which are always
+     approved one entry per assertion (D9); every approved entry is
+     audited with old and new values.
    - **The executor alone decides what goes into a baseline.** The
      digest the admin approves is computed by the executor, never taken
      from the server:
@@ -565,15 +576,16 @@ archive, D8 "Old versions"), or if a declared non-package path was
 rewritten by a command whose resulting content the executor does not know,
 the change is classed **"changed during NOS job, unverified"**:
 
-- it is an open finding of severity **high** (D9 table), never
-  info-level and never `expected_pending`;
+- it is an open finding of severity **high**, or **critical** for a
+  critical-class path (precedence below), never info-level and never
+  `expected_pending`;
 - it is **never approved together with the job**, in any mode (Q3 does
   not apply to it); the admin approves it only through a separate
   baseline approval (D7) whose screen labels every such entry
   "unverified: NOS cannot tell this change from an attacker's change made
   during the job". Batch approval of the unverified entries of one job is
-  allowed, but the batch is its own assertion and never part of the job
-  approval;
+  allowed for entries that are not critical-class paths, but the batch is
+  its own assertion and never part of the job approval;
 - host-side evidence does **not** make it verified:
   `/var/lib/dpkg/info/*.md5sums`, `debsums` and `dpkg --verify` are
   controlled by the same root that could have replaced the file, and
@@ -581,8 +593,29 @@ the change is classed **"changed during NOS job, unverified"**:
   a verified reference.
 
 Consequently, before Q6 every package file changed by a NOS apt job is an
-unverified finding the admin must review; this is the deliberate price of
-keeping the next sentence true.
+unverified finding the admin must review.
+
+**Critical-class paths.** These are: `authorized_keys*` files (D5 "SSH
+access"), `/etc/sudoers` and `/etc/sudoers.d/`, PAM configuration
+(`/etc/pam.d/`, `/etc/security/`) and PAM modules (`pam_*.so`),
+`/etc/ssh/sshd_config` and its includes, `/etc/ld.so.preload`, systemd
+units, drop-ins and timers under the D5 unit roots, crontabs and the
+crontab spool, every file under `/boot`, the SSH daemon and its helpers
+(`/usr/sbin/sshd`, `/usr/lib/openssh/`), `sudo` and `su`, the dynamic
+loader (`ld-linux*`), every file in `/usr/local/bin` or `/usr/local/sbin`
+whose name shadows a command in `/usr/bin` or `/usr/sbin`, and every file
+that has a setuid or setgid bit before or after the change. For them:
+
+- **Severity precedence.** When a change matches several classes of the
+  table below, the highest severity wins. A critical-class path stays
+  **critical** when it changes during a NOS job without a verified
+  reference; it is labelled "changed during NOS job, unverified" in
+  addition, never downgraded to high.
+- **Never batch-approvable.** In any mode, before and after Q6, verified
+  or not, each critical-class entry is approved with its own D7 assertion
+  that covers that one entry. It is never part of a bulk, per-job or
+  per-finding-batch approval, and never part of the Q3 standard-mode bulk
+  approval of verified expected changes.
 
 **"Expected" is a label, never an approval.** An expected change is
 recorded as `expected_pending` and shown as "changed by NOS job <id>,
@@ -598,28 +631,36 @@ reaches NOS through the server and that the executor cannot re-derive
 file *look* expected (and lower its severity to info), but it cannot put
 that file into a baseline without the admin's executor-bound assertion;
 the approval screen says that the "verified" label comes from the
-reference builder (see "Honest limits"). Anything else changed in the same window, and every unverified
-change, is a finding: an attacker cannot hide behind a running apt job,
-because a replaced `/usr/sbin/sshd` during an approved `openssh-server`
-upgrade either fails the verified reference or has none, and both are
-findings the admin sees separately from the job. Package updates done on the
-host outside NOS (for example unattended-upgrades) whose new hashes match
-the signed archive reference are low-severity findings ("package updated
-outside NOS"), not alarms.
+reference builder (see "Honest limits").
+
+Anything else changed in the same window, and every unverified change,
+is a finding the admin sees separately from the job. This makes hiding
+behind a running NOS job harder, **not impossible**. Before Q6, a
+replaced `/usr/sbin/sshd` during an approved `openssh-server` upgrade is
+a critical, individually approved entry, but NOS cannot tell it from the
+genuine new binary; the admin can only compare its plain hash (D6
+allowlist) with the file from a `.deb` they verified themselves. After
+Q6 the replaced binary fails the verified reference unless the server or
+the builder is compromised as well. Both limits are listed in "Honest
+limits". Package updates done on the host outside NOS (for example
+unattended-upgrades) whose new records match the verified archive
+reference in every field listed above are medium-severity findings
+("package updated outside NOS"), not alarms.
 
 **Findings.** A new store `integrity_findings` (not the ADR 0011 store,
 whose observer is always Hermes): subject (NOS machine or host ID), path
 (raw bytes plus escaped display form), class, old and new record, first
 and last seen, state (`open`, `expected_pending`, `accepted`,
 `resolved`), and the run IDs that opened and closed it. Retention and
-dedupe follow ADR 0011 D6/D9 patterns. Severity by class:
+dedupe follow ADR 0011 D6/D9 patterns. Severity by class (the highest
+matching severity wins, see "Critical-class paths"):
 
 | Class | Severity |
 | --- | --- |
-| Package file differs from signed reference; NOS binary/unit mismatch (I1); new or changed `authorized_keys`, `sudoers`, PAM, `sshd_config`, `ld.so.preload`, systemd unit or timer, crontab, `/boot` file; new setuid/setgid file; new file in `/usr/local/bin` or `/usr/local/sbin` whose name shadows a command in `/usr/bin` or `/usr/sbin`; missing NOS own key or extra key in root's `authorized_keys` | critical |
-| Other changed or new file in `/etc`, `/usr`; owner/mode change; I2 baseline digest mismatch; change during a NOS job without a verified reference ("changed during NOS job, unverified") | high |
+| Package file differs from signed reference; NOS binary/unit mismatch (I1); any new, changed or removed critical-class path (above) that is not a verified expected change, including one changed during a NOS job without a verified reference; new setuid/setgid file or bit; missing NOS own key or extra key in root's `authorized_keys` | critical |
+| Other changed or new file in `/etc` or a watched `/usr` root (D5); owner/mode change; I2 baseline digest mismatch; change of a path that is not critical-class during a NOS job without a verified reference ("changed during NOS job, unverified") | high |
 | Package updated outside NOS with matching reference; partial or stale scan | medium |
-| Expected change from a NOS job | info (record only) |
+| Verified expected change from a NOS job (`expected_pending` until approved by D7; a critical-class path still needs its own assertion) | info (record only) |
 
 **Notifications** go through the existing webhook, ntfy and Telegram
 senders (ADR 0011 D9 pattern): events `integrity.nos_mismatch`,
