@@ -457,9 +457,16 @@ func (db *DB) ExpireOffers() ([][offerHashLen]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("executordb: expire offers: %w", err)
 	}
-	out, err := scanOfferIDs(rows)
+	out, err := scanExpiredOffers(rows)
 	if err != nil {
-		return nil, fmt.Errorf("executordb: expire offers: %w", err)
+		// The UPDATE may have committed wipes before the read failed;
+		// purge them anyway (rows is closed, so the single connection is
+		// free for the checkpoint).
+		err = fmt.Errorf("executordb: expire offers: %w", err)
+		if perr := db.purgeWipedSalt("expire offers"); perr != nil {
+			return nil, errors.Join(err, perr)
+		}
+		return nil, err
 	}
 	if len(out) > 0 {
 		// rows is closed, so the single connection is free for the
@@ -470,6 +477,10 @@ func (db *DB) ExpireOffers() ([][offerHashLen]byte, error) {
 	}
 	return out, nil
 }
+
+// scanExpiredOffers reads the expiry sweep's RETURNING rows; tests replace
+// it to fail after the rows were read.
+var scanExpiredOffers = scanOfferIDs
 
 // scanOfferIDs reads rows of ID hashes and closes rows.
 func scanOfferIDs(rows *sql.Rows) ([][offerHashLen]byte, error) {
