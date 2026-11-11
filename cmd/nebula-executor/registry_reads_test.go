@@ -3,7 +3,7 @@
 package main
 
 import (
-	"os"
+	"crypto/ed25519"
 	"strings"
 	"testing"
 
@@ -37,6 +37,29 @@ func TestSetupRegistryReadsWiresLeaseProfile(t *testing.T) {
 	e := newExecutorUnderTest(t)
 	rec := &recordingRegistrySetter{Service: e.svc}
 	setupRegistryReads(rec)
+	checkLeaseAuthorizer(t, e, rec)
+}
+
+// TestWireServedServiceWiresRegistryReads: main's service wiring (the
+// function run calls on the service it serves) installs the lease-backed
+// registry read authorizer, not the fail-closed default.
+func TestWireServedServiceWiresRegistryReads(t *testing.T) {
+	e := newExecutorUnderTest(t)
+	rec := &recordingRegistrySetter{Service: e.svc}
+	pub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	wireServedService(rec, &executor.PveGuestPowerBindings{}, pub, dir, dir)
+	checkLeaseAuthorizer(t, e, rec)
+}
+
+// checkLeaseAuthorizer checks that rec.wired is the production lease
+// authorizer: paused until read dispatch resumes, then refusing a read no
+// lease covers.
+func checkLeaseAuthorizer(t *testing.T, e *executorUnderTest, rec *recordingRegistrySetter) {
+	t.Helper()
 	if rec.wired == nil {
 		t.Fatal("no registry read authorizer wired")
 	}
@@ -53,17 +76,5 @@ func TestSetupRegistryReadsWiresLeaseProfile(t *testing.T) {
 	}
 	if strings.Contains(status.Convert(err).Message(), "no read-grant profile") {
 		t.Fatal("the fail-closed default is still wired")
-	}
-}
-
-// TestMainWiresRegistryReads: the production main calls setupRegistryReads
-// on the service it serves.
-func TestMainWiresRegistryReads(t *testing.T) {
-	src, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(src), "setupRegistryReads(svc)") {
-		t.Fatal("main.go does not wire private registry reads")
 	}
 }

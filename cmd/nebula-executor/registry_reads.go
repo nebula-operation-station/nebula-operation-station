@@ -2,7 +2,31 @@
 
 package main
 
-import "github.com/nebula-operation-station/nebula-operation-station/internal/executor"
+import (
+	"crypto/ed25519"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
+)
+
+// servedService is the part of *executor.Service that main wires right
+// after construction.
+type servedService interface {
+	registryReadSetter
+	SetPveGuestPowerBindings(*executor.PveGuestPowerBindings)
+	SetEventKey(ed25519.PublicKey)
+	SetBackupDirs(dataDir, keysDir string)
+}
+
+// wireServedService is main's wiring of the service it serves: the guest
+// power bindings shared with the risk policy, the event chain key, the
+// backup directories and, through setupRegistryReads, the lease-backed
+// private registry read authorizer (ADR 0006, cu06 part 1, G13).
+func wireServedService(svc servedService, power *executor.PveGuestPowerBindings, eventKey ed25519.PublicKey, dataDir, keysDir string) {
+	svc.SetPveGuestPowerBindings(power)
+	svc.SetEventKey(eventKey)
+	svc.SetBackupDirs(dataDir, keysDir)
+	setupRegistryReads(svc)
+}
 
 // registryReadSetter is the part of *executor.Service that wires private
 // registry read authorization.
