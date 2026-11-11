@@ -310,6 +310,10 @@ type Authority struct {
 	paired       map[canonical.Digest]*PairedPermit
 	pairedOffers map[string]canonical.Digest
 	pairedSpent  map[canonical.Digest]struct{}
+	// netbirdOffers and netbirdPeerDeletes hold the NetBird offer and
+	// NetBird peer delete permits (netbird.go).
+	netbirdOffers      *boundStore[canonical.NetBirdOffer]
+	netbirdPeerDeletes *boundStore[canonical.NetBirdPeerDelete]
 
 	mu          sync.Mutex
 	permits     map[canonical.Digest]*Permit
@@ -371,6 +375,9 @@ func New(o Options) (*Authority, error) {
 		paired:       map[canonical.Digest]*PairedPermit{},
 		pairedOffers: map[string]canonical.Digest{},
 		pairedSpent:  map[canonical.Digest]struct{}{},
+
+		netbirdOffers:      newBoundStore(netbirdOfferKind),
+		netbirdPeerDeletes: newBoundStore(netbirdPeerDeleteKind),
 	}, nil
 }
 
@@ -928,6 +935,9 @@ func (a *Authority) Lock(who string) {
 	// Paired enrollment permits go too; their offers stay spent.
 	n += len(a.paired)
 	a.paired = map[canonical.Digest]*PairedPermit{}
+	// NetBird offer and peer delete permits too; their subjects stay spent.
+	n += a.netbirdOffers.revokeLocked()
+	n += a.netbirdPeerDeletes.revokeLocked()
 	// Execution IDs stay reserved so a revoked request cannot be re-bound to
 	// different content under the same ID.
 	a.emit(Event{Kind: "locked", Detail: fmt.Sprintf("by %s, %d permits revoked", who, n)})
