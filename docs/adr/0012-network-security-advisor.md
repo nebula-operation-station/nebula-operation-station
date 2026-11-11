@@ -278,9 +278,27 @@ a snapshot, so NOS also resolves them: a check that no longer fires on a
 fresh complete snapshot marks its finding `resolved`; a check that cannot be
 evaluated leaves it as it was and shows "not evaluated since …". The admin
 may `acknowledge` a finding with reason and expiry (default 90 days, maximum
-365), bound to the rule UUID and the policy `redacted_digest`; a policy
-change touching the rule re-opens it. Every finding names its check ID and
-check version (`na-v1`), the snapshot hash and the evidence.
+365), bound to the check ID and version, the rule UUID and a
+**rule-scoped digest** (not the policy-wide `redacted_digest`, which
+changes with every unrelated edit). The rule-scoped digest is computed
+over the canonical redacted encoding of exactly what the check's evidence
+depends on:
+
+- the rule itself (all matched fields, action, `disabled`, profile and
+  log setting names) and its position relative to the other rules in the
+  digest;
+- every address, service and application object and group the rule
+  references, expanded transitively, and the zones it names;
+- for `shadowed-rule` and `overlap`, the same for every covering rule;
+- for checks without a single rule (`dns-bypass`, `mgmt-from-untrusted`,
+  `model-contradiction`), the deciding rules of the verdict chain, the
+  zone trust classes and management targets or designated resolvers
+  involved.
+
+A change to any of these, a new check version or the expiry re-opens the
+acknowledgement; a change elsewhere in the policy does not. Every finding
+names its check ID and check version (`na-v1`), the snapshot hash and the
+evidence.
 
 **Checks (`na-v1`).**
 
@@ -405,6 +423,14 @@ in Q2:
   security record;
 - admin-only pages, no export, no read-only API scope; excluded from the
   age-encrypted instance backup unless Q2 decides otherwise;
+- **the same rules cover evidence derived from logs or flows** in other
+  stores (advisor findings, D4; reputation hits, D6): such evidence is
+  stored as a reference to the aggregate, flow or endpoint, not as a copy,
+  so pruning and prefix reduction of the source apply to what the finding
+  shows; where a finding must keep a value (for example a resolved
+  finding's last evidence), it keeps it no longer and no more precisely
+  than the source would. **No export contains log- or flow-derived
+  evidence** (D8);
 - the operator guide states what is collected and that the operator is
   responsible for informing household members and guests.
 
@@ -529,7 +555,14 @@ policy, NAT or management of the firewall.
   agent host would need topology and flows, which ADR 0011 Q6 withholds.
 - All pages are **admin-only** (as the ADR 0010 firewall view and ADR 0011
   attack paths); nothing is in the read-only API; exports of advisor
-  findings are admin-only, audited, CSV-injection-safe (ADR 0011 D9).
+  findings are admin-only, audited, CSV-injection-safe (ADR 0011 D9), and
+  carry only policy-derived evidence (check ID and version, rule names and
+  UUIDs, zones, verdicts, snapshot hash) plus **counts** for log- or
+  flow-derived evidence. Endpoint addresses and labels, destinations and
+  flows from log aggregates or the traffic map (`dns-bypass`,
+  `model-contradiction`, segmentation proposals, what-if broken flows,
+  reputation hits) are never exported (D5 "no export"). Allowing a
+  redacted export of such evidence would be a maintainer decision (Q2).
 - Every job has a named wall-clock budget and output caps; truncation is
   stated, never silent.
 - UI rendering follows ADR 0009 D4 isolation for any map overlay and the
@@ -563,7 +596,7 @@ policy, NAT or management of the firewall.
 | Compromised agent token | Can upload false snapshots within caps and validation: false or hidden reputation hits and notifications (misleading the operator, who may then add or skip EDL entries by hand); cannot read anything; separate scope, rotatable, source-bound. **Residual if Q4b ever allows feed-driven EDL rule sets:** false entries would flow into a list the firewall enforces and block legitimate external destinations (availability impact), bounded only by that amendment's hard limits (minimum prefix, per-rule-set cap, per-source opt-in, refusals); this is why D7 has no rule sets |
 | EDL abused to block or unblock | Off by default, manual entries with assertion, refusals, caps, audit, operator guide limits EDL to WAN deny rules; residual stated in D7 |
 | EDL credential leak | Basic credential hashed in NOS, rotatable, source allowlist; mTLS if supported; the list content is low sensitivity but reveals what the operator blocks |
-| Personal data in logs | Minimisation in the executor, aggregates only, short retention, prefix reduction, admin-only, no export, excluded from backups by default |
+| Personal data in logs | Minimisation in the executor, aggregates only, short retention, prefix reduction, admin-only, no export (also not inside advisor finding exports: counts only), derived evidence follows the source's retention, excluded from backups by default |
 | Advisor as a map for an attacker | Admin-only, not in the read-only API, exports audited |
 
 `docs/threat-model.md` is protected and receives these items in NS-02.
