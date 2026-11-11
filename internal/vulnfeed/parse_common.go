@@ -151,16 +151,6 @@ func (b *boundedReader) fail(what string, err error) error {
 	}
 }
 
-// readAllBounded reads r completely, failing with ErrFeedLimit above max.
-func readAllBounded(r io.Reader, max int64) ([]byte, error) {
-	br := newBoundedReader(r, max)
-	data, err := io.ReadAll(br)
-	if err != nil {
-		return nil, br.fail("read feed", err)
-	}
-	return data, nil
-}
-
 // DecompressGzip returns a reader of the gzip-compressed stream r that
 // fails with ErrFeedLimit once more than maxOut decompressed bytes are
 // read (ADR 0011 D4 decompression limit). Close releases the decompressor;
