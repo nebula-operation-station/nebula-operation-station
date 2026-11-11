@@ -331,11 +331,10 @@ func netdevReads(f netdevcontract.Family) []netdevinventory.Read {
 // rune boundary and ends in "…". HTML escaping is left to html/template.
 func netdevText(s string) string {
 	var b strings.Builder
-	for i, r := range s {
+	for _, r := range s {
 		if b.Len() >= netdevTextMaxBytes {
-			if i < len(s) {
-				b.WriteString("…")
-			}
+			// More runes follow: mark the cut.
+			b.WriteString("…")
 			break
 		}
 		if r == utf8.RuneError || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) ||

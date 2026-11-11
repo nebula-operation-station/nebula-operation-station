@@ -236,8 +236,6 @@ func (e *netdevEnv) get(path string) (int, string) {
 	return res.StatusCode, body
 }
 
-func netdevPin(c byte) string { return strings.Repeat(string(rune('a'+c)), 64) }
-
 // addCBS adds a fresh CBS switch with every dataset fresh.
 func (e *netdevEnv) addCBS(id, label string) {
 	e.store.devices = append(e.store.devices, netdevinventory.Device{DeviceID: id, Family: netdevcontract.FamilyCBS,
@@ -257,19 +255,26 @@ func (e *netdevEnv) addPANOS(id, label string) {
 	}
 }
 
+// rlo is U+202E RIGHT-TO-LEFT OVERRIDE and replacement U+FFFD, built
+// from code points so that the source itself holds no bidi control.
+var (
+	rlo         = string(rune(0x202e))
+	replacement = string(rune(0xfffd))
+)
+
 // hostileStrings are device-supplied texts that must render as inert text.
 var hostileStrings = []string{
 	`<script>alert(1)</script>`,
 	`"><img src=x onerror=alert(2)>`,
 	`' onmouseover='alert(3)`,
-	"evil‮gnp.exe",
+	"evil" + rlo + "gnp.exe",
 	`javascript:alert(4)`,
 }
 
 func assertNoHostileMarkup(t *testing.T, body string) {
 	t.Helper()
 	// The texts may appear escaped (as inert text); never as markup.
-	for _, bad := range []string{"<script>alert", "<img","' onmouseover='", "‮", `href="javascript:`} {
+	for _, bad := range []string{"<script>alert", "<img", "' onmouseover='", rlo, `href="javascript:`} {
 		if strings.Contains(body, bad) {
 			t.Errorf("page contains unescaped hostile text %q", bad)
 		}
@@ -317,7 +322,7 @@ func TestNetDevHostileDeviceTextIsEscaped(t *testing.T) {
 	if !strings.Contains(body, "&lt;script&gt;alert(1)&lt;/script&gt;") {
 		t.Error("list does not show the hostile label as escaped text")
 	}
-	if !strings.Contains(body, "evil�gnp.exe") {
+	if !strings.Contains(body, "evil"+replacement+"gnp.exe") {
 		t.Error("bidi override not replaced by a visible U+FFFD")
 	}
 	for _, id := range []string{"sw0", "sw1", "sw2", "sw3", "sw4", "fw1"} {
