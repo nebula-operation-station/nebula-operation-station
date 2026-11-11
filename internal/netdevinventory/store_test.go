@@ -66,9 +66,23 @@ func addDevice(t *testing.T, s *Store, d netdevcontract.Device) {
 	}
 }
 
+// testGen is the trust generation the test devices are registered with.
+func testGen(dev string) uint64 {
+	if dev == cbsDevice().DeviceID {
+		return cbsDevice().TrustGeneration
+	}
+	return panosDevice().TrustGeneration
+}
+
+// mustReplace stores a dataset observed under the device's current trust
+// generation.
 func mustReplace(t *testing.T, s *Store, dev string, read Read, at time.Time, incomplete bool, rows Rows) ReplaceResult {
 	t.Helper()
-	res, err := s.ReplaceDataset(context.Background(), dev, read, at, incomplete, rows)
+	d, err := s.GetDevice(context.Background(), dev)
+	if err != nil {
+		t.Fatalf("GetDevice %s: %v", dev, err)
+	}
+	res, err := s.ReplaceDataset(context.Background(), dev, read, d.TrustGeneration, at, incomplete, rows)
 	if err != nil {
 		t.Fatalf("ReplaceDataset %s at %s: %v", read, at, err)
 	}
@@ -180,7 +194,7 @@ func TestReplaceFailureMidwayKeepsOldDataset(t *testing.T) {
 				}
 				return nil
 			}
-			_, err := s.ReplaceDataset(context.Background(), "fw-edge", ReadFirewallPolicy, testBase, false, policy("deny-all"))
+			_, err := s.ReplaceDataset(context.Background(), "fw-edge", ReadFirewallPolicy, 1, testBase, false, policy("deny-all"))
 			if !errors.Is(err, boom) {
 				t.Fatalf("err = %v, want injected failure", err)
 			}
@@ -250,7 +264,7 @@ func TestReplaceRefusesOutOfOrder(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := s.ReplaceDataset(context.Background(), "sw-core", ReadVLANs, c.at, false, c.rows)
+			_, err := s.ReplaceDataset(context.Background(), "sw-core", ReadVLANs, 2, c.at, false, c.rows)
 			if !errors.Is(err, ErrOutOfOrder) {
 				t.Fatalf("err = %v, want ErrOutOfOrder", err)
 			}
@@ -265,12 +279,12 @@ func TestReplaceRefusesOutOfOrder(t *testing.T) {
 	}
 
 	// The same dataset delivered again (spool replay) is an idempotent no-op.
-	res, err := s.ReplaceDataset(context.Background(), "sw-core", ReadVLANs, at, false, VLANRows{{ID: 1}})
+	res, err := s.ReplaceDataset(context.Background(), "sw-core", ReadVLANs, 2, at, false, VLANRows{{ID: 1}})
 	if err != nil || !res.Unchanged || res.DatasetID != first.DatasetID {
 		t.Fatalf("replay = %+v, %v", res, err)
 	}
 	// A same-content replay that differs only in completeness is refused.
-	if _, err := s.ReplaceDataset(context.Background(), "sw-core", ReadVLANs, at, true, VLANRows{{ID: 1}}); !errors.Is(err, ErrOutOfOrder) {
+	if _, err := s.ReplaceDataset(context.Background(), "sw-core", ReadVLANs, 2, at, true, VLANRows{{ID: 1}}); !errors.Is(err, ErrOutOfOrder) {
 		t.Fatalf("partial replay err = %v", err)
 	}
 }
@@ -278,7 +292,7 @@ func TestReplaceRefusesOutOfOrder(t *testing.T) {
 func TestReplaceRefusesFutureObservation(t *testing.T) {
 	s, _, _ := newTestStore(t)
 	addDevice(t, s, cbsDevice())
-	if _, err := s.ReplaceDataset(context.Background(), "sw-core", ReadVLANs, testBase.Add(MaxFutureSkew+time.Second), false, VLANRows{{ID: 1}}); !errors.Is(err, ErrFutureObservation) {
+	if _, err := s.ReplaceDataset(context.Background(), "sw-core", ReadVLANs, 2, testBase.Add(MaxFutureSkew+time.Second), false, VLANRows{{ID: 1}}); !errors.Is(err, ErrFutureObservation) {
 		t.Fatalf("err = %v, want ErrFutureObservation", err)
 	}
 	mustReplace(t, s, "sw-core", ReadVLANs, testBase.Add(MaxFutureSkew), false, VLANRows{{ID: 1}})
@@ -477,7 +491,7 @@ func TestReplaceRejectsBadInput(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			_, err := s.ReplaceDataset(context.Background(), c.dev, c.read, testBase, c.inc, c.rows)
+			_, err := s.ReplaceDataset(context.Background(), c.dev, c.read, testGen(c.dev), testBase, c.inc, c.rows)
 			if !errors.Is(err, c.want) {
 				t.Fatalf("err = %v, want %v", err, c.want)
 			}
@@ -534,11 +548,11 @@ func TestHostileStringsStoredVerbatimWithinLimits(t *testing.T) {
 	}
 	for i, h := range refused {
 		t.Run(fmt.Sprintf("refused-%d", i), func(t *testing.T) {
-			_, err := s.ReplaceDataset(context.Background(), "sw-core", ReadVLANs, testBase, false, VLANRows{{ID: 7, Name: h}})
+			_, err := s.ReplaceDataset(context.Background(), "sw-core", ReadVLANs, 2, testBase, false, VLANRows{{ID: 7, Name: h}})
 			if !errors.Is(err, ErrInvalidRows) {
 				t.Fatalf("err = %v, want ErrInvalidRows", err)
 			}
-			_, err = s.ReplaceDataset(context.Background(), "sw-core", ReadLLDPNeighbors, testBase, false, LLDPRows{{
+			_, err = s.ReplaceDataset(context.Background(), "sw-core", ReadLLDPNeighbors, 2, testBase, false, LLDPRows{{
 				LocalPort: "gi1/0/1", ChassisID: "c", PortID: "p", SystemName: h}})
 			if !errors.Is(err, ErrInvalidRows) {
 				t.Fatalf("lldp err = %v, want ErrInvalidRows", err)

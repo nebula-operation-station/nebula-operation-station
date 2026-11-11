@@ -138,6 +138,78 @@ func TestAbsentRowsNotCarriedPastWindow(t *testing.T) {
 	}
 }
 
+// A replaying or buggy writer that delivers changed datasets far more
+// often than the poll interval must not grow MAC, LLDP or hit-count
+// history beyond window/MinHistorySpacing datasets: too dense datasets
+// collapse into their successor, whose carried rows keep what they saw.
+func TestDenseDatasetsCollapseHistory(t *testing.T) {
+	cases := []struct {
+		read Read
+		dev  netdevcontract.Device
+		rows func(i int) Rows
+	}{
+		{ReadMACTable, cbsDevice(), func(i int) Rows { return MACRows{mac(byte(i % 10))} }},
+		{ReadLLDPNeighbors, cbsDevice(), func(i int) Rows {
+			return LLDPRows{{LocalPort: "gi1/0/1", ChassisID: "c", PortID: string(rune('a' + i%10))}}
+		}},
+		{ReadHitCounts, panosDevice(), func(i int) Rows {
+			return HitCountRows{{RuleName: "rule-" + string(rune('a'+i%10)), Hits: uint64(i + 1), LastHit: &testBase}}
+		}},
+	}
+	for _, c := range cases {
+		t.Run(string(c.read), func(t *testing.T) {
+			spacing := MinHistorySpacing(c.read)
+			if spacing <= 0 || spacing > PollInterval(c.read) {
+				t.Fatalf("MinHistorySpacing = %v", spacing)
+			}
+			s, db, _ := newTestStore(t)
+			addDevice(t, s, c.dev)
+			// Replay: a changed dataset five times per MinHistorySpacing.
+			const n = 60
+			step := spacing / 5
+			total := time.Duration(n) * step
+			start := testBase.Add(-total)
+			var last ReplaceResult
+			for i := 0; i < n; i++ {
+				last = mustReplace(t, s, c.dev.DeviceID, c.read, start.Add(time.Duration(i)*step), false, c.rows(i))
+			}
+			got := countRows(t, db, `SELECT count(*) FROM netdev_datasets WHERE read = ?`, string(c.read))
+			bound := int(total/spacing) + 2 // history within the span plus the current dataset
+			if got > bound {
+				t.Fatalf("datasets = %d after %d dense writes, bound %d", got, n, bound)
+			}
+			if got < 2 {
+				t.Fatalf("datasets = %d: history spaced by %v must be kept", got, spacing)
+			}
+			// Superseded datasets are spaced at least MinHistorySpacing apart.
+			rs, err := db.Query(`SELECT observed_at FROM netdev_datasets WHERE read = ? AND current = 0
+				ORDER BY observed_at`, string(c.read))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var obs []int64
+			for rs.Next() {
+				var o int64
+				if err := rs.Scan(&o); err != nil {
+					t.Fatal(err)
+				}
+				obs = append(obs, o)
+			}
+			rs.Close()
+			for i := 1; i < len(obs); i++ {
+				if gap := obs[i] - obs[i-1]; gap < spacing.Microseconds() {
+					t.Fatalf("history gap %dµs < %v", gap, spacing)
+				}
+			}
+			// Rows of collapsed datasets are not lost: the current dataset
+			// carries all ten keys.
+			if got := len(rowsOf(t, db, readTables(c.read)[0].name, last.DatasetID)); got != 10 {
+				t.Fatalf("current dataset has %d rows, want 10 (present plus carried)", got)
+			}
+		})
+	}
+}
+
 func TestCarryOverIsCapped(t *testing.T) {
 	s, db, _ := newTestStore(t)
 	addDevice(t, s, cbsDevice())

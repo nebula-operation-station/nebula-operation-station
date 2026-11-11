@@ -42,9 +42,23 @@ func HistoryRetention(r Read) time.Duration {
 }
 
 // countCapped reports whether the superseded datasets of read are also
-// bounded by MaxSnapshotsPerRead. The time windows of MAC, LLDP and hit
-// counts already bound them by the poll interval.
+// bounded by MaxSnapshotsPerRead. MAC, LLDP and hit-count history is
+// bounded by its time window and MinHistorySpacing instead.
 func countCapped(r Read) bool { return HistoryRetention(r) == SnapshotRetention }
+
+// MinHistorySpacing returns the minimum distance in observed_at between two
+// superseded datasets of read that ReplaceDataset keeps, or 0 for reads
+// bounded by MaxSnapshotsPerRead. It is half the poll interval, so normal
+// polling keeps every dataset, while a replaying or misbehaving writer
+// cannot grow MAC, LLDP or hit-count history beyond
+// HistoryRetention/MinHistorySpacing + 1 superseded datasets per (device,
+// read), whatever its rate.
+func MinHistorySpacing(r Read) time.Duration {
+	if countCapped(r) || PollInterval(r) == 0 {
+		return 0
+	}
+	return PollInterval(r) / 2
+}
 
 // PruneReport counts what Prune removed.
 type PruneReport struct {

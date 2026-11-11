@@ -17,8 +17,12 @@
 //     partial; rows it did not cover are carried over, never dropped;
 //   - rows a complete read no longer contains are carried over as absent
 //     with the time they were last seen; nothing is silently deleted;
+//   - a dataset observed under another trust generation than the device's
+//     current one is refused inside the write transaction;
 //   - superseded datasets stay as history until retention (Q11) removes
-//     them; the newest dataset per (device, read) is never removed;
+//     them; the newest dataset per (device, read) is never removed; MAC,
+//     LLDP and hit-count history closer than MinHistorySpacing collapses
+//     into the next dataset, so its size does not depend on the write rate;
 //   - a device or dataset not refreshed for StaleAfterIntervals poll
 //     intervals is marked stale, never deleted.
 //
@@ -127,6 +131,12 @@ var (
 	// ErrTrustGenerationRegressed is returned when a device update carries
 	// a lower trust generation than the stored one.
 	ErrTrustGenerationRegressed = errors.New("netdevinventory: trust generation regressed")
+	// ErrTrustGenerationChanged is returned when a dataset was observed
+	// under another trust generation than the device's current one (ADR
+	// 0010: a re-pin bumps the generation). It is checked inside the write
+	// transaction; nothing is written. The dataset must be dropped, not
+	// retried.
+	ErrTrustGenerationChanged = errors.New("netdevinventory: dataset observed under another trust generation")
 	// ErrFamilyChanged is returned when a device update changes the
 	// immutable family.
 	ErrFamilyChanged = errors.New("netdevinventory: device family changed")
@@ -232,6 +242,9 @@ type Dataset struct {
 	Current  bool
 }
 
+// lockWriteSQL takes the database write lock without changing a row.
+const lockWriteSQL = `UPDATE netdev_devices_seen SET device_id = device_id WHERE 0`
+
 // withTx runs fn in one transaction that takes the database write lock
 // with its first statement (see pveinventory.withTx: SQLite fails a
 // read-to-write upgrade at once while another connection writes).
@@ -240,7 +253,7 @@ func (s *Store) withTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
 	if err != nil {
 		return fmt.Errorf("netdevinventory: begin: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE netdev_devices_seen SET device_id = device_id WHERE 0`); err != nil {
+	if _, err := tx.ExecContext(ctx, lockWriteSQL); err != nil {
 		_ = tx.Rollback()
 		return fmt.Errorf("netdevinventory: take write lock: %w", err)
 	}
@@ -380,16 +393,24 @@ type ReplaceResult struct {
 }
 
 // ReplaceDataset stores rows as the new current dataset of (deviceID,
-// read), observed at observedAt. incomplete marks a list cut at its parse
-// limit (state partial). The rows are validated with the netdevcontract
-// limits; the whole replacement is one transaction.
+// read), observed at observedAt under trustGeneration. incomplete marks a
+// list cut at its parse limit (state partial). The rows are validated with
+// the netdevcontract limits; the whole replacement is one transaction.
+//
+// A trustGeneration other than the device's current one is refused with
+// ErrTrustGenerationChanged inside that transaction, before anything is
+// written: a concurrent re-pin either commits first (and the dataset is
+// refused) or waits until the dataset is stored.
 //
 // A dataset older than the current one is refused with ErrOutOfOrder; the
 // same dataset delivered again is a no-op. An identical payload only
 // advances observed_at. Otherwise the previous dataset becomes history and
 // its rows missing from the new read are carried over: as absent after a
-// complete read, unchanged after a partial one.
-func (s *Store) ReplaceDataset(ctx context.Context, deviceID string, read Read, observedAt time.Time, incomplete bool, rows Rows) (ReplaceResult, error) {
+// complete read, unchanged after a partial one. For reads with a
+// MinHistorySpacing, a previous dataset closer than that to the newest
+// history entry is not kept as history: it collapses into the new dataset,
+// which carries its rows.
+func (s *Store) ReplaceDataset(ctx context.Context, deviceID string, read Read, trustGeneration uint64, observedAt time.Time, incomplete bool, rows Rows) (ReplaceResult, error) {
 	if PollInterval(read) == 0 {
 		return ReplaceResult{}, ErrUnknownRead
 	}
@@ -405,7 +426,7 @@ func (s *Store) ReplaceDataset(ctx context.Context, deviceID string, read Read, 
 	}
 	var res ReplaceResult
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
-		r, err := s.replace(ctx, tx, deviceID, read, observedAt, incomplete, rows, now)
+		r, err := s.replace(ctx, tx, deviceID, read, trustGeneration, observedAt, incomplete, rows, now)
 		res = r
 		return err
 	})
@@ -415,8 +436,8 @@ func (s *Store) ReplaceDataset(ctx context.Context, deviceID string, read Read, 
 	return res, nil
 }
 
-func (s *Store) replace(ctx context.Context, tx *sql.Tx, deviceID string, read Read, observedAt time.Time,
-	incomplete bool, rows Rows, now time.Time) (ReplaceResult, error) {
+func (s *Store) replace(ctx context.Context, tx *sql.Tx, deviceID string, read Read, trustGeneration uint64,
+	observedAt time.Time, incomplete bool, rows Rows, now time.Time) (ReplaceResult, error) {
 	var family string
 	var gen int64
 	err := tx.QueryRowContext(ctx, `SELECT family, trust_generation FROM netdev_devices_seen WHERE device_id = ?`,
@@ -427,11 +448,17 @@ func (s *Store) replace(ctx context.Context, tx *sql.Tx, deviceID string, read R
 	if err != nil {
 		return ReplaceResult{}, fmt.Errorf("netdevinventory: load device %s: %w", deviceID, err)
 	}
+	// The stored generation is never negative (CHECK >= 1); compare in
+	// int64 space so a huge observed value cannot wrap onto it.
+	if trustGeneration > uint64(1<<63-1) || int64(trustGeneration) != gen {
+		return ReplaceResult{}, fmt.Errorf("netdevinventory: device %s read %s: observed generation %d, current %d: %w",
+			deviceID, read, trustGeneration, gen, ErrTrustGenerationChanged)
+	}
 	fam := netdevcontract.Family(family)
 	if !readAllowed(read, fam) {
 		return ReplaceResult{}, fmt.Errorf("netdevinventory: device %s read %s: %w", deviceID, read, ErrWrongFamily)
 	}
-	if err := validateRows(deviceID, fam, uint64(gen), observedAt, incomplete, rows); err != nil {
+	if err := validateRows(deviceID, fam, trustGeneration, observedAt, incomplete, rows); err != nil {
 		return ReplaceResult{}, err
 	}
 	sets, err := rows.tableRows()
@@ -481,6 +508,15 @@ func (s *Store) replace(ctx context.Context, tx *sql.Tx, deviceID string, read R
 		return ReplaceResult{DatasetID: prevID, Unchanged: true}, s.runHook("commit")
 	}
 
+	keepPrev := true
+	if hasPrev && MinHistorySpacing(read) > 0 {
+		var lastHist sql.NullInt64
+		if err := tx.QueryRowContext(ctx, `SELECT MAX(observed_at) FROM netdev_datasets
+			WHERE device_id = ? AND read = ? AND current = 0`, deviceID, string(read)).Scan(&lastHist); err != nil {
+			return ReplaceResult{}, fmt.Errorf("netdevinventory: load newest history: %w", err)
+		}
+		keepPrev = !lastHist.Valid || prevObs-lastHist.Int64 >= MinHistorySpacing(read).Microseconds()
+	}
 	if hasPrev {
 		if _, err := tx.ExecContext(ctx, `UPDATE netdev_datasets SET current = 0 WHERE id = ?`, prevID); err != nil {
 			return ReplaceResult{}, fmt.Errorf("netdevinventory: supersede dataset: %w", err)
@@ -525,6 +561,13 @@ func (s *Store) replace(ctx context.Context, tx *sql.Tx, deviceID string, read R
 				return ReplaceResult{}, err
 			}
 			res.Carried += n
+		}
+		if !keepPrev {
+			// Too dense to keep as history: its rows live on as the carried
+			// rows of the new dataset; the cascade removes its own rows.
+			if _, err := tx.ExecContext(ctx, `DELETE FROM netdev_datasets WHERE id = ?`, prevID); err != nil {
+				return ReplaceResult{}, fmt.Errorf("netdevinventory: collapse dataset: %w", err)
+			}
 		}
 	}
 	if err := s.runHook("commit"); err != nil {
