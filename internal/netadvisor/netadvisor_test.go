@@ -53,7 +53,7 @@ func TestNewInputRejects(t *testing.T) {
 }
 
 func TestCleanText(t *testing.T) {
-	if got := clean("a\x1b[31mb‮c\xff"); got != "a�[31mb�c�" {
+	if got := clean("a\x1b[31mb" + string(rune(0x202e)) + "c\xff"); got != "a�[31mb�c�" {
 		t.Errorf("clean = %q", got)
 	}
 	long := clean(strings.Repeat("é", MaxTextBytes))
