@@ -114,6 +114,21 @@ type debianIssueJSON struct {
 	Releases map[string]debianReleaseJSON `json:"releases"`
 }
 
+// maxDebianReleaseValueBytes caps each string value of a release object
+// (status, fixed_version, urgency, nodsa, nodsa_reason, ...); the field
+// rules in debianEntry are stricter.
+const maxDebianReleaseValueBytes = 1024
+
+// debianIssuePaths are the per-issue limits checkJSON enforces while it
+// walks, so the releases map never holds more than
+// MaxDebianReleasesPerIssue entries and no release value is copied
+// beyond its cap.
+var debianIssuePaths = jsonLimits{
+	"releases": {Members: MaxDebianReleasesPerIssue},
+	// Every direct member of every release object.
+	"releases.*.*": {Bytes: maxDebianReleaseValueBytes},
+}.compile()
+
 // ParseDebianTracker streams the Debian Security Tracker JSON export
 // (an object of source packages, each an object of issues with a
 // "releases" object) and calls visit once per (package, issue, release)
@@ -121,10 +136,13 @@ type debianIssueJSON struct {
 // Packages and issues are decoded one at a time; every count limit is
 // checked before the next package, issue or entry is decoded.
 //
-// A package, issue or release entry that breaks a field rule is skipped
-// and counted in DebianTrackerSummary.Skipped (a skipped package or issue
-// counts once, not per entry inside it). A size, depth or count limit, a
-// duplicate package or issue, or a broken stream fails the whole export.
+// A package, issue or release entry that breaks a field rule, and an
+// issue that breaks a per-issue field length or count limit
+// (ErrRecordLimit, e.g. more than MaxDebianReleasesPerIssue releases), is
+// skipped and counted in DebianTrackerSummary.Skipped (a skipped package
+// or issue counts once, not per entry inside it). An export size, package
+// size, package, issue-per-package or entry count limit, the depth limit,
+// a duplicate package or issue, or a broken stream fails the whole export.
 //
 // The export is undated: its content date is the proxy date of the DSA
 // and DLA lists (ParseDebianAdvisoryList), never a fetch time. On any
@@ -273,7 +291,7 @@ func (p *debianParse) parsePackage(pkg string, valid bool) error {
 // release order.
 func (p *debianParse) parseIssue(pkg, id string, raw []byte) error {
 	var issue debianIssueJSON
-	if err := decodeChecked(raw, &issue); err != nil {
+	if err := decodeChecked(raw, &issue, debianIssuePaths); err != nil {
 		if recordSkippable(err) {
 			p.sum.Skipped++
 			return nil
@@ -281,8 +299,9 @@ func (p *debianParse) parseIssue(pkg, id string, raw []byte) error {
 		return fmt.Errorf("debian tracker %s %s: %w", pkg, id, err)
 	}
 	rels := issue.Releases
-	if len(rels) > MaxDebianReleasesPerIssue {
-		return fmt.Errorf("debian tracker %s %s: more than %d releases: %w", pkg, id, MaxDebianReleasesPerIssue, ErrFeedLimit)
+	if len(rels) > MaxDebianReleasesPerIssue { // checked during the walk already
+		p.sum.Skipped++
+		return nil
 	}
 	p.sum.Issues++
 	names := make([]string, 0, len(rels))

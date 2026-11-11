@@ -95,25 +95,6 @@ func TestParseNVDRejectsMalformed(t *testing.T) {
 		{"huge header value", `{"x":"` + strings.Repeat("a", MaxNVDHeaderValueBytes+10) + `",` + head + `"vulnerabilities":[]}`, ErrFeedLimit},
 		{"whitespace run", `{` + head + `"vulnerabilities":[` + item(``) + strings.Repeat(" ", recordWindowSlack+1) + `]}`, ErrFeedLimit},
 		{"duplicate cve", feed(item(``) + `,` + item(``)), ErrFeedMalformed},
-		{"long description", feed(item(`,"descriptions":[{"lang":"en","value":"` + strings.Repeat("a", MaxNVDDescriptionBytes+1) + `"}]`)), ErrFeedLimit},
-		{"url too long", feed(item(`,"references":[{"url":"https://` + strings.Repeat("a", MaxNVDReferenceURLBytes) + `"}]`)), ErrFeedLimit},
-		{"too many references", feed(item(`,"references":[` + nvdRepeat(`{"url":"u"}`, MaxNVDReferences+1) + `]`)), ErrFeedLimit},
-		{"too many descriptions", feed(item(`,"descriptions":[` + nvdRepeat(`{"lang":"de","value":"x"}`, MaxNVDDescriptions+1) + `]`)), ErrFeedLimit},
-		{"too many metrics", feed(item(`,"metrics":{"cvssMetricV31":[` + nvdRepeat(metric, MaxNVDMetrics+1) + `]}`)), ErrFeedLimit},
-		{"too many weaknesses", feed(item(`,"weaknesses":[` + nvdRepeat(weakness(1), MaxNVDWeaknesses+1) + `]`)), ErrFeedLimit},
-		{"too many weakness entries", feed(item(`,"weaknesses":[` + weakness(MaxNVDWeaknesses+1) + `]`)), ErrFeedLimit},
-		{"too many CWEs", feed(item(`,"weaknesses":[{"description":[` + func() string {
-			var b strings.Builder
-			for i := range MaxNVDWeaknesses + 1 {
-				if i > 0 {
-					b.WriteString(",")
-				}
-				fmt.Fprintf(&b, `{"lang":"en","value":"CWE-%d"}`, i)
-			}
-			return b.String()
-		}() + `]}]`)), ErrFeedLimit},
-		{"too many tags", feed(item(`,"references":[{"url":"https://a","tags":[` + nvdRepeat(`"Patch"`, MaxNVDReferenceTags+1) + `]}]`)), ErrFeedLimit},
-		{"too many members", feed(item(`,"x":[` + nvdRepeat("0", MaxJSONMembers+1) + `]`)), ErrFeedLimit},
 		{"too deep", feed(item(`,"configurations":` + strings.Repeat("[", MaxJSONDepth) + strings.Repeat("]", MaxJSONDepth))), ErrFeedLimit},
 		{"record too large", feed(item(`,"x":"` + strings.Repeat("a", MaxNVDRecordBytes) + `"`)), ErrFeedLimit},
 	}
@@ -130,6 +111,83 @@ func TestParseNVDRejectsMalformed(t *testing.T) {
 		nvdRepeat(weakness(MaxNVDWeaknesses), MaxNVDWeaknesses)+`],"references":[{"url":"https://a","tags":[`+nvdRepeat(`"Patch"`, MaxNVDReferenceTags)+`]}]`)
 	if got, _, err := collectNVD([]byte(feed(at))); err != nil || len(got) != 1 || len(got[0].CVSS) != MaxNVDMetrics || len(got[0].References[0].Tags) != MaxNVDReferenceTags {
 		t.Fatalf("at the limits: %v", err)
+	}
+}
+
+func TestParseNVDSkipsItemOverPerRecordLimit(t *testing.T) {
+	item := func(extra string) string { return nvdItem("CVE-2024-0002", extra) }
+	metric := `{"source":"nvd@nist.gov","type":"Primary","cvssData":{"version":"3.1","vectorString":"CVSS:3.1/AV:N","baseScore":5.0,"baseSeverity":"MEDIUM"}}`
+	weakness := func(n int) string {
+		return `{"description":[` + nvdRepeat(`{"lang":"en","value":"NVD-CWE-Other"}`, n) + `]}`
+	}
+	cwes := func(n int) string {
+		var b strings.Builder
+		for i := range n {
+			if i > 0 {
+				b.WriteString(",")
+			}
+			fmt.Fprintf(&b, `{"lang":"en","value":"CWE-%d"}`, i)
+		}
+		return b.String()
+	}
+	over := map[string]string{
+		"long description":          item(`,"descriptions":[{"lang":"en","value":"` + strings.Repeat("a", MaxNVDDescriptionBytes+1) + `"}]`),
+		"long other description":    item(`,"descriptions":[{"lang":"de","value":"` + strings.Repeat("a", MaxNVDDescriptionBytes+1) + `"}]`),
+		"url too long":              item(`,"references":[{"url":"https://` + strings.Repeat("a", MaxNVDReferenceURLBytes) + `"}]`),
+		"long status":               item(`,"vulnStatus":"` + strings.Repeat("A", 1000) + `"`),
+		"too many references":       item(`,"references":[` + nvdRepeat(`{"url":"u"}`, MaxNVDReferences+1) + `]`),
+		"too many descriptions":     item(`,"descriptions":[` + nvdRepeat(`{"lang":"de","value":"x"}`, MaxNVDDescriptions+1) + `]`),
+		"too many metrics":          item(`,"metrics":{"cvssMetricV31":[` + nvdRepeat(metric, MaxNVDMetrics+1) + `]}`),
+		"too many v4 metrics":       item(`,"metrics":{"cvssMetricV40":[` + nvdRepeat(`{}`, MaxNVDMetrics+1) + `]}`),
+		"too many weaknesses":       item(`,"weaknesses":[` + nvdRepeat(weakness(1), MaxNVDWeaknesses+1) + `]`),
+		"too many weakness entries": item(`,"weaknesses":[` + weakness(MaxNVDWeaknesses+1) + `]`),
+		"empty weakness entries":    item(`,"weaknesses":[{"description":[` + nvdRepeat(`{}`, MaxNVDWeaknesses+1) + `]}]`),
+		"too many CWEs":             item(`,"weaknesses":[{"description":[` + cwes(MaxNVDWeaknesses+1) + `]}]`),
+		"too many tags":             item(`,"references":[{"url":"https://a","tags":[` + nvdRepeat(`"Patch"`, MaxNVDReferenceTags+1) + `]}]`),
+		"too many members":          item(`,"x":[` + nvdRepeat("0", MaxJSONMembers+1) + `]`),
+	}
+	for name, b := range over {
+		t.Run(name, func(t *testing.T) {
+			in := nvdFeed(nvdItem("CVE-2024-0001", ``) + "," + b + "," + nvdItem("CVE-2024-0003", ``))
+			got, sum, err := collectNVD([]byte(in))
+			if err != nil {
+				t.Fatalf("err = %v, want the item skipped", err)
+			}
+			if sum.Skipped != 1 || sum.Records != 2 || len(got) != 2 || got[0].ID != "CVE-2024-0001" || got[1].ID != "CVE-2024-0003" {
+				t.Fatalf("summary %+v, records %+v", sum, got)
+			}
+			// The single-item error is a record limit, never a feed limit.
+			_, err = parseNVDItem([]byte(b))
+			if !errors.Is(err, ErrRecordLimit) || errors.Is(err, ErrFeedLimit) {
+				t.Fatalf("parseNVDItem err = %v, want ErrRecordLimit", err)
+			}
+		})
+	}
+}
+
+// TestParseNVDItemDecodeStaysWithinFieldCaps: a 4 MiB item whose capped
+// arrays hold far more tiny elements than allowed is rejected during the
+// walk, before json.Unmarshal builds them.
+func TestParseNVDItemDecodeStaysWithinFieldCaps(t *testing.T) {
+	fill := func(prefix, elem, suffix string) []byte {
+		n := (MaxNVDRecordBytes - len(prefix) - len(suffix) - 200) / (len(elem) + 1)
+		return []byte(nvdItem("CVE-2024-0001", prefix+nvdRepeat(elem, n)+suffix))
+	}
+	inputs := map[string][]byte{
+		"weaknesses of empty descriptions": fill(`,"weaknesses":[`, `{"description":[{},{},{},{},{},{},{},{}]}`, `]`),
+		"empty weakness description":       fill(`,"weaknesses":[{"description":[`, `{}`, `]}]`),
+		"empty references":                 fill(`,"references":[`, `{}`, `]`),
+		"empty metrics":                    fill(`,"metrics":{"cvssMetricV31":[`, `{}`, `]}`),
+		"empty tags":                       fill(`,"references":[{"url":"u","tags":[`, `""`, `]}]`),
+		"empty descriptions":               fill(`,"descriptions":[`, `{}`, `]`),
+	}
+	for name, in := range inputs {
+		t.Run(name, func(t *testing.T) {
+			if len(in) > MaxNVDRecordBytes || len(in) < MaxNVDRecordBytes-(1<<10) {
+				t.Fatalf("input is %d bytes", len(in))
+			}
+			assertRecordDecodeBudget(t, func() error { _, err := parseNVDItem(in); return err })
+		})
 	}
 }
 

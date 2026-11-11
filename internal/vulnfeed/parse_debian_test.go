@@ -76,17 +76,46 @@ func debianIssues(n int, body string) string {
 	return b.String()
 }
 
-func TestParseDebianTrackerRejectsMalformed(t *testing.T) {
-	releases := func(n int) string {
-		var b strings.Builder
-		for i := range n {
-			if i > 0 {
-				b.WriteString(",")
-			}
-			fmt.Fprintf(&b, `"r%c%c":{"status":"open"}`, 'a'+i/26, 'a'+i%26)
+// debianReleases is n distinct open release members of a releases object.
+func debianReleases(n int) string {
+	var b strings.Builder
+	for i := range n {
+		if i > 0 {
+			b.WriteString(",")
 		}
-		return b.String()
+		fmt.Fprintf(&b, `"r%c%c":{"status":"open"}`, 'a'+i/26, 'a'+i%26)
 	}
+	return b.String()
+}
+
+// TestParseDebianIssueDecodeStaysWithinFieldCaps: an issue whose releases
+// map holds far more entries than MaxDebianReleasesPerIssue is rejected
+// while the walk counts the map members, before json.Unmarshal builds the
+// map, and the issue is skipped and counted.
+func TestParseDebianIssueDecodeStaysWithinFieldCaps(t *testing.T) {
+	const n = 60_000 // the generic member limit is 65,536
+	var b strings.Builder
+	b.WriteString(`{"releases":{`)
+	for i := range n {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, `"r%d":{}`, i)
+	}
+	b.WriteString(`}}`)
+	raw := []byte(b.String())
+	p := &debianParse{ctx: context.Background(), visit: func(DebianEntry) error { return nil }, maxEntries: MaxDebianEntries}
+	assertRecordDecodeBudget(t, func() error {
+		var issue debianIssueJSON
+		return decodeChecked(raw, &issue, debianIssuePaths)
+	})
+	if err := p.parseIssue("zlib", "CVE-2024-1", raw); err != nil || p.sum.Skipped != 1 || p.sum.Issues != 0 || p.entries != 0 {
+		t.Fatalf("parseIssue: %v, %+v, entries %d", err, p.sum, p.entries)
+	}
+}
+
+func TestParseDebianTrackerRejectsMalformed(t *testing.T) {
+	releases := debianReleases
 	tests := []struct {
 		name string
 		in   string
@@ -102,7 +131,6 @@ func TestParseDebianTrackerRejectsMalformed(t *testing.T) {
 		{"case duplicate issue", `{"zlib":{"CVE-2024-1":{},"cve-2024-1":{}}}`, ErrFeedMalformed},
 		{"too deep", `{"zlib":{"CVE-2024-1111":{"x":` + strings.Repeat("[", MaxJSONDepth) + strings.Repeat("]", MaxJSONDepth) + `}}}`, ErrFeedLimit},
 		{"skipped package too deep", `{"Bad Name":` + strings.Repeat("[", MaxJSONDepth+1) + strings.Repeat("]", MaxJSONDepth+1) + `}`, ErrFeedLimit},
-		{"too many releases", `{"zlib":{"CVE-2024-1":{"releases":{` + releases(MaxDebianReleasesPerIssue+1) + `}}}}`, ErrFeedLimit},
 		{"whitespace run", `{"zlib":{}` + strings.Repeat(" ", recordWindowSlack+1) + `,"aa":{}}`, ErrFeedLimit},
 	}
 	for _, tc := range tests {
@@ -152,6 +180,10 @@ func TestParseDebianTrackerSkipsMalformedRecords(t *testing.T) {
 		{"bad fixed version", rel(`{"status":"resolved","fixed_version":"1.0 ; rm"}`)},
 		{"unknown nodsa reason", rel(`{"status":"open","nodsa":"x","nodsa_reason":"later"}`)},
 		{"bad urgency", rel(`{"status":"open","urgency":"HIGH!"}`)},
+		// Per-issue field and count limits skip the issue, not the export.
+		{"too many releases", issue(`"CVE-2024-2222":{"releases":{` + debianReleases(MaxDebianReleasesPerIssue+1) + `}}`)},
+		{"long release value", issue(`"CVE-2024-2222":{"releases":{"sid":{"status":"open","fixed_version":"` + strings.Repeat("1", maxDebianReleaseValueBytes+1) + `"}}}`)},
+		{"too many members", issue(`"CVE-2024-2222":{"x":[` + strings.TrimSuffix(strings.Repeat("0,", MaxJSONMembers+1), ",") + `]}`)},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

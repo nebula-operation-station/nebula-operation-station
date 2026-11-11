@@ -105,26 +105,108 @@ func TestCheckJSONCountsMembersWhileWalking(t *testing.T) {
 		want error
 	}{
 		{"array at limit", "[" + list(MaxJSONMembers, "{}") + "]", nil},
-		{"array over limit", "[" + list(MaxJSONMembers+1, "{}") + "]", ErrFeedLimit},
-		{"nested array over limit", `{"a":[` + list(MaxJSONMembers+1, "0") + "]}", ErrFeedLimit},
+		{"array over limit", "[" + list(MaxJSONMembers+1, "{}") + "]", ErrRecordLimit},
+		{"nested array over limit", `{"a":[` + list(MaxJSONMembers+1, "0") + "]}", ErrRecordLimit},
 		{"object at limit", obj(MaxJSONMembers), nil},
-		{"object over limit", obj(MaxJSONMembers + 1), ErrFeedLimit},
+		{"object over limit", obj(MaxJSONMembers + 1), ErrRecordLimit},
 		{"limit is per container", "[" + list(2, "["+list(MaxJSONMembers, "0")+"]") + "]", nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkJSON([]byte(tc.in), MaxJSONDepth)
+			err := checkJSON([]byte(tc.in), MaxJSONDepth, nil)
 			if tc.want == nil && err != nil || tc.want != nil && !errors.Is(err, tc.want) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
 			}
+			// A member limit rejects the record only, never the feed.
+			if tc.want != nil && (errors.Is(err, ErrFeedLimit) || !recordSkippable(err)) {
+				t.Fatalf("err = %v, want a skippable record error", err)
+			}
 		})
+	}
+}
+
+func TestCheckJSONEnforcesPathLimitsWhileWalking(t *testing.T) {
+	paths := jsonLimits{
+		"a":        {Members: 2},
+		"b[].c":    {Members: 2, Total: 3},
+		"m.*":      {Members: 1},
+		"m.*.s":    {Bytes: 3},
+		"s":        {Bytes: 4},
+		"l[]":      {Bytes: 2},
+		"o.*.deep": {Members: 1},
+	}.compile()
+	tests := []struct {
+		name string
+		in   string
+		want error
+	}{
+		{"within limits", `{"a":[1,2],"b":[{"c":[1,2]},{"c":[3]}],"m":{"x":{"s":"abc"}},"s":"abcd","l":["ab"]}`, nil},
+		{"members over", `{"a":[1,2,3]}`, ErrRecordLimit},
+		{"key is case-folded", `{"A":[1,2,3]}`, ErrRecordLimit},
+		{"total over", `{"b":[{"c":[1,2]},{"c":[3,4]}]}`, ErrRecordLimit},
+		{"map member object over", `{"m":{"x":{"s":"a","t":1}}}`, ErrRecordLimit},
+		{"map member string over", `{"m":{"y":{"s":"abcd"}}}`, ErrRecordLimit},
+		{"string over", `{"s":"abcde"}`, ErrRecordLimit},
+		{"array element string over", `{"l":["ab","abc"]}`, ErrRecordLimit},
+		{"untracked path unlimited", `{"x":[1,2,3],"a2":[1,2,3],"sx":"abcdef","m2":{"x":{"s":"abcdef"}}}`, nil},
+		{"limits do not leak to nested paths", `{"a":[[1,2,3]],"s2":{"s":"abcdef"}}`, nil},
+		{"wildcard paths below", `{"o":{"k":{"deep":[1,2]}}}`, ErrRecordLimit},
+		{"depth stays fatal", `{"a":` + strings.Repeat("[", MaxJSONDepth) + strings.Repeat("]", MaxJSONDepth) + `}`, ErrFeedLimit},
+		{"duplicate key", `{"a":[],"A":[]}`, ErrFeedMalformed},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkJSON([]byte(tc.in), MaxJSONDepth, paths)
+			if tc.want == nil && err != nil || tc.want != nil && !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+			if errors.Is(tc.want, ErrRecordLimit) && errors.Is(err, ErrFeedLimit) {
+				t.Fatalf("err = %v must not be ErrFeedLimit", err)
+			}
+		})
+	}
+}
+
+func TestCheckJSONDuplicateKeysInLargeObjects(t *testing.T) {
+	var b strings.Builder
+	b.WriteString(`{"n":{"x":{}},`)
+	for i := range 3 * maxObjectKeysLinear {
+		fmt.Fprintf(&b, `"k%d":{"k%d":0},`, i, i) // nested objects reuse the names
+	}
+	ok := b.String() + `"last":0}`
+	if err := checkJSON([]byte(ok), MaxJSONDepth, nil); err != nil {
+		t.Fatalf("distinct keys: %v", err)
+	}
+	for _, dup := range []string{`"k1":0}`, `"K70":0}`, `"N":0}`} {
+		if err := checkJSON([]byte(b.String()+dup), MaxJSONDepth, nil); !errors.Is(err, ErrFeedMalformed) {
+			t.Errorf("duplicate %s: err = %v", dup, err)
+		}
+	}
+}
+
+func TestCheckJSONWalkAllocatesNothingPerEmptyContainer(t *testing.T) {
+	// 60,000 empty objects and arrays: the walk must not allocate a frame
+	// or key set per container.
+	in := []byte(`{"x":[` + strings.TrimSuffix(strings.Repeat(`{},[],`, 30_000), ",") + "]}")
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	err := checkJSON(in, MaxJSONDepth, osvPaths)
+	runtime.ReadMemStats(&after)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if n := after.Mallocs - before.Mallocs; n > 1000 {
+		t.Fatalf("walk made %d allocations for empty containers", n)
 	}
 }
 
 func TestRecordSkippableOnlyForMalformedRecords(t *testing.T) {
 	cases := map[error]bool{
 		fmt.Errorf("x: %w", ErrFeedMalformed):       true,
+		fmt.Errorf("x: %w", ErrRecordLimit):         true,
 		fmt.Errorf("x: %w", ErrFeedLimit):           false,
+		errors.Join(ErrRecordLimit, ErrFeedLimit):   false,
 		errors.Join(ErrFeedMalformed, ErrFeedLimit): false,
 		context.Canceled:                            false,
 		errors.New("visit failed"):                  false,
@@ -171,6 +253,35 @@ func (s allocStats) assertCovers(t *testing.T, other allocStats) {
 	t.Helper()
 	if other.mallocs > s.mallocs+s.mallocs/4+1000 || other.bytes > s.bytes+s.bytes/4+1<<20 {
 		t.Fatalf("allocation grows with the input past the limit: just over %+v, longer %+v", s, other)
+	}
+}
+
+// Allocation budget of one per-record decode of an input of up to 4 MiB
+// that breaks a per-record count cap: it must be rejected during the walk,
+// so the cost is the walk (the decoder's buffer and key strings), not one
+// allocation per element beyond the cap.
+const (
+	recordDecodeBudgetBytes  = 1 << 20
+	recordDecodeBudgetAllocs = 2_000
+)
+
+// assertRecordDecodeBudget runs f once, requires it to reject one record
+// with ErrRecordLimit (not ErrFeedLimit) and to stay within the budget.
+func assertRecordDecodeBudget(t *testing.T, f func() error) {
+	t.Helper()
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	err := f()
+	runtime.ReadMemStats(&after)
+	if !errors.Is(err, ErrRecordLimit) || errors.Is(err, ErrFeedLimit) {
+		t.Fatalf("err = %v, want ErrRecordLimit", err)
+	}
+	bytes, allocs := after.TotalAlloc-before.TotalAlloc, after.Mallocs-before.Mallocs
+	t.Logf("decode allocated %d bytes in %d allocations", bytes, allocs)
+	if bytes > recordDecodeBudgetBytes || allocs > recordDecodeBudgetAllocs {
+		t.Fatalf("decode allocated %d bytes in %d allocations, budget %d bytes, %d allocations",
+			bytes, allocs, recordDecodeBudgetBytes, recordDecodeBudgetAllocs)
 	}
 }
 
@@ -257,7 +368,7 @@ func TestCheckJSONShapeRules(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkJSON([]byte(tc.in), MaxJSONDepth)
+			err := checkJSON([]byte(tc.in), MaxJSONDepth, nil)
 			if tc.want == nil {
 				if err != nil {
 					t.Fatalf("unexpected error %v", err)
@@ -285,11 +396,16 @@ func TestCheckTextRejectsControlAndBidi(t *testing.T) {
 		"rlo" + string(rune(0x202e)):     ErrFeedMalformed,
 		"isolate" + string(rune(0x2066)): ErrFeedMalformed,
 		"bad\xff":                        ErrFeedMalformed,
-		strings.Repeat("x", 101):         ErrFeedLimit,
+		strings.Repeat("x", 101):         ErrRecordLimit,
 	}
 	for s, want := range bad {
-		if err := checkText(s, 100); !errors.Is(err, want) {
+		err := checkText(s, 100)
+		if !errors.Is(err, want) {
 			t.Errorf("checkText(%q) = %v, want %v", s, err, want)
+		}
+		// Every checkText rejection, length included, skips one record.
+		if !recordSkippable(err) || errors.Is(err, ErrFeedLimit) {
+			t.Errorf("checkText(%q) = %v, want a skippable record error", s, err)
 		}
 	}
 	if err := checkToken("a b", 10); !errors.Is(err, ErrFeedMalformed) {

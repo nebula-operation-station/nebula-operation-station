@@ -31,8 +31,13 @@ import (
 var (
 	// ErrFeedMalformed: the feed data breaks its format or a field rule.
 	ErrFeedMalformed = errors.New("vulnfeed: malformed feed data")
-	// ErrFeedLimit: the feed data exceeds a size, depth or count limit.
+	// ErrFeedLimit: the feed data exceeds a stream size or count, record
+	// size or nesting depth limit. It aborts the whole feed.
 	ErrFeedLimit = errors.New("vulnfeed: feed data exceeds a parse limit")
+	// ErrRecordLimit: one record exceeds a per-record field length or
+	// count limit. It wraps ErrFeedMalformed: the parsers skip and count
+	// such a record like any other record that breaks a field rule.
+	ErrRecordLimit = fmt.Errorf("vulnfeed: record exceeds a field or count limit: %w", ErrFeedMalformed)
 )
 
 const (
@@ -183,12 +188,66 @@ func (g *gzipBounded) Read(p []byte) (int, error) {
 // Close implements io.Closer.
 func (g *gzipBounded) Close() error { return g.zr.Close() }
 
+// jsonLimit is a per-record limit of one path inside a record, enforced
+// by checkJSON while it walks, before anything is unmarshalled. A zero
+// field means "no limit beyond the generic ones".
+type jsonLimit struct {
+	// Members caps the members of each array or object at the path.
+	Members int
+	// Total caps the members of all arrays or objects at the path in one
+	// record together, so nested per-container caps cannot multiply.
+	Total int
+	// Bytes caps each string value at the path.
+	Bytes int
+}
+
+// jsonLimits maps a path inside a record to its limit. A path is the
+// lower-cased object keys from the record root joined by ".", with "[]"
+// for the elements of an array and "*" for every member of an object used
+// as a map (for example "affected[].ranges[].events" or "releases.*").
+// The root value has the path "".
+type jsonLimits map[string]jsonLimit
+
+// jsonPaths is a compiled jsonLimits: every path that has a limit or
+// leads to one, so the walk can stop tracking a subtree that has none.
+type jsonPaths struct {
+	limits jsonLimits
+	// prefix maps each tracked path to its canonical string, so the walk
+	// can look a path up from a scratch buffer without allocating.
+	prefix map[string]string
+}
+
+// compile prepares l for checkJSON. It is called once per parser, at
+// package initialisation.
+func (l jsonLimits) compile() *jsonPaths {
+	p := &jsonPaths{limits: l, prefix: map[string]string{"": ""}}
+	for path := range l {
+		for i := 0; i <= len(path); i++ {
+			if i == len(path) || path[i] == '.' || path[i] == '[' {
+				p.prefix[path[:i]] = path[:i]
+			}
+		}
+	}
+	return p
+}
+
+// maxObjectKeysLinear is the number of keys an object may have before
+// checkJSON builds a map for its duplicate check instead of comparing
+// keys linearly.
+const maxObjectKeysLinear = 32
+
 // checkJSON walks a single JSON value once and enforces the shape rules
 // shared by every parser: valid UTF-8, nesting depth at most maxDepth, at
 // most MaxJSONMembers members per array or object, object keys of
 // printable ASCII, at most maxJSONKeyBytes, unique per object under ASCII
-// case folding, and nothing after the value.
-func checkJSON(data []byte, maxDepth int) error {
+// case folding, and nothing after the value. It also enforces the
+// path-specific limits of paths (nil for none), so a count or length cap
+// fires before json.Unmarshal builds a slice, map or string beyond it.
+//
+// Breaking a member or path limit is ErrRecordLimit (the record is
+// skipped); breaking the depth limit is ErrFeedLimit. The walk itself
+// allocates nothing per empty array or object.
+func checkJSON(data []byte, maxDepth int, paths *jsonPaths) error {
 	if !utf8.Valid(data) {
 		return fmt.Errorf("invalid UTF-8: %w", ErrFeedMalformed)
 	}
@@ -198,19 +257,71 @@ func checkJSON(data []byte, maxDepth int) error {
 		object    bool
 		expectKey bool
 		members   int
-		keys      map[string]struct{}
+		// path is the canonical path of the container; tracked is false
+		// in a subtree without limits.
+		path    string
+		tracked bool
+		// key is the current member key of an object, lower-cased.
+		key string
+		// keyStart indexes the object's first key in keys; bigKeys
+		// replaces the linear search once the object grows.
+		keyStart int
+		bigKeys  map[string]struct{}
 	}
-	// member counts one more member of the innermost container.
-	member := func(f *frame) error {
-		if f == nil {
-			return nil
+	var (
+		stack   []frame
+		keys    []string // keys of the open objects, innermost last
+		buf     []byte   // scratch for child paths
+		totals  map[string]int
+		limitOf = func(path string, tracked bool) jsonLimit {
+			if !tracked || paths == nil {
+				return jsonLimit{}
+			}
+			return paths.limits[path]
 		}
-		if f.members++; f.members > MaxJSONMembers {
-			return fmt.Errorf("JSON container with more than %d members: %w", MaxJSONMembers, ErrFeedLimit)
+	)
+	// childPath resolves the path of a value inside container f.
+	childPath := func(f *frame) (string, bool) {
+		if paths == nil || !f.tracked {
+			return "", false
+		}
+		buf = append(buf[:0], f.path...)
+		if f.object {
+			if len(buf) > 0 {
+				buf = append(buf, '.')
+			}
+			n := len(buf)
+			buf = append(buf, '*')
+			if p, ok := paths.prefix[string(buf)]; ok {
+				return p, true
+			}
+			buf = append(buf[:n], f.key...)
+		} else {
+			buf = append(buf, "[]"...)
+		}
+		p, ok := paths.prefix[string(buf)]
+		return p, ok
+	}
+	// member counts one more member of container f.
+	member := func(f *frame) error {
+		f.members++
+		if f.members > MaxJSONMembers {
+			return fmt.Errorf("JSON container with more than %d members: %w", MaxJSONMembers, ErrRecordLimit)
+		}
+		lim := limitOf(f.path, f.tracked)
+		if lim.Members > 0 && f.members > lim.Members {
+			return fmt.Errorf("more than %d members at %q: %w", lim.Members, f.path, ErrRecordLimit)
+		}
+		if lim.Total > 0 {
+			if totals == nil {
+				totals = make(map[string]int)
+			}
+			if totals[f.path]++; totals[f.path] > lim.Total {
+				return fmt.Errorf("more than %d members in total at %q: %w", lim.Total, f.path, ErrRecordLimit)
+			}
 		}
 		return nil
 	}
-	var stack []*frame
 	seen := false
 	for {
 		tok, err := dec.Token()
@@ -229,9 +340,10 @@ func checkJSON(data []byte, maxDepth int) error {
 		seen = true
 		var top *frame
 		if len(stack) > 0 {
-			top = stack[len(stack)-1]
+			top = &stack[len(stack)-1]
 		}
 		if d, ok := tok.(json.Delim); ok && (d == '}' || d == ']') {
+			keys = keys[:top.keyStart]
 			stack = stack[:len(stack)-1]
 			if len(stack) > 0 && stack[len(stack)-1].object {
 				stack[len(stack)-1].expectKey = true
@@ -246,11 +358,13 @@ func checkJSON(data []byte, maxDepth int) error {
 			if err := checkJSONKey(k); err != nil {
 				return err
 			}
-			folded := strings.ToLower(k)
-			if _, dup := top.keys[folded]; dup {
-				return fmt.Errorf("duplicate object key: %w", ErrFeedMalformed)
+			if err := addKey(&keys, top.keyStart, &top.bigKeys, k); err != nil {
+				return err
 			}
-			top.keys[folded] = struct{}{}
+			top.key = k
+			if paths != nil && top.tracked {
+				top.key = strings.ToLower(k)
+			}
 			top.expectKey = false
 			continue
 		}
@@ -259,21 +373,58 @@ func checkJSON(data []byte, maxDepth int) error {
 				return err
 			}
 		}
+		// Resolve the path of this value.
+		path, tracked := "", paths != nil
+		if top != nil {
+			path, tracked = childPath(top)
+		}
 		if d, ok := tok.(json.Delim); ok { // '{' or '['
 			if len(stack) >= maxDepth {
 				return fmt.Errorf("JSON nested deeper than %d: %w", maxDepth, ErrFeedLimit)
 			}
-			f := &frame{object: d == '{', expectKey: d == '{'}
-			if f.object {
-				f.keys = make(map[string]struct{})
-			}
-			stack = append(stack, f)
+			stack = append(stack, frame{object: d == '{', expectKey: d == '{', path: path, tracked: tracked, keyStart: len(keys)})
 			continue
+		}
+		if s, ok := tok.(string); ok {
+			if lim := limitOf(path, tracked); lim.Bytes > 0 && len(s) > lim.Bytes {
+				return fmt.Errorf("string longer than %d bytes at %q: %w", lim.Bytes, path, ErrRecordLimit)
+			}
 		}
 		if top != nil && top.object {
 			top.expectKey = true
 		}
 	}
+}
+
+// addKey records key k of the innermost open object, whose keys start at
+// keys[start], and fails on a duplicate under ASCII case folding. Small
+// objects are searched linearly; a larger one gets a map in *big.
+func addKey(keys *[]string, start int, big *map[string]struct{}, k string) error {
+	if *big != nil {
+		folded := strings.ToLower(k)
+		if _, dup := (*big)[folded]; dup {
+			return fmt.Errorf("duplicate object key: %w", ErrFeedMalformed)
+		}
+		(*big)[folded] = struct{}{}
+		return nil
+	}
+	own := (*keys)[start:]
+	for _, o := range own {
+		if strings.EqualFold(o, k) {
+			return fmt.Errorf("duplicate object key: %w", ErrFeedMalformed)
+		}
+	}
+	if len(own) < maxObjectKeysLinear {
+		*keys = append(*keys, k)
+		return nil
+	}
+	*big = make(map[string]struct{}, 2*maxObjectKeysLinear)
+	for _, o := range own {
+		(*big)[strings.ToLower(o)] = struct{}{}
+	}
+	(*big)[strings.ToLower(k)] = struct{}{}
+	*keys = (*keys)[:start]
+	return nil
 }
 
 // checkJSONKey allows only printable ASCII keys, so encoding/json's
@@ -291,10 +442,11 @@ func checkJSONKey(k string) error {
 	return nil
 }
 
-// decodeChecked checks the shape of one JSON value and decodes it into v.
-// Unknown fields are skipped; a wrong JSON type for a known field fails.
-func decodeChecked(data []byte, v any) error {
-	if err := checkJSON(data, MaxJSONDepth); err != nil {
+// decodeChecked checks the shape of one JSON value, including the
+// path-specific limits of paths, and decodes it into v. Unknown fields are
+// skipped; a wrong JSON type for a known field fails.
+func decodeChecked(data []byte, v any, paths *jsonPaths) error {
+	if err := checkJSON(data, MaxJSONDepth, paths); err != nil {
 		return err
 	}
 	if err := json.Unmarshal(data, v); err != nil {
@@ -304,10 +456,11 @@ func decodeChecked(data []byte, v any) error {
 }
 
 // recordSkippable reports whether err rejects a single record only: the
-// record breaks a field or shape rule (ErrFeedMalformed) but no size,
-// depth or count limit. Such a record is skipped and counted; every other
-// error (limits, a broken stream, I/O, cancellation, duplicates the
-// parser reports as fatal) aborts the feed.
+// record breaks a field or shape rule or a per-record field length or
+// count limit (ErrFeedMalformed, which ErrRecordLimit wraps), but no
+// stream size, record size or depth limit. Such a record is skipped and
+// counted; every other error (ErrFeedLimit, a broken stream, I/O,
+// cancellation, duplicates the parser reports as fatal) aborts the feed.
 func recordSkippable(err error) bool {
 	return errors.Is(err, ErrFeedMalformed) && !errors.Is(err, ErrFeedLimit)
 }
@@ -403,7 +556,7 @@ func expectDelim(dec *json.Decoder, d json.Delim) error {
 // characters that could reorder surrounding UI text.
 func checkText(s string, max int) error {
 	if len(s) > max {
-		return fmt.Errorf("text longer than %d bytes: %w", max, ErrFeedLimit)
+		return fmt.Errorf("text longer than %d bytes: %w", max, ErrRecordLimit)
 	}
 	if !utf8.ValidString(s) {
 		return fmt.Errorf("text not UTF-8: %w", ErrFeedMalformed)

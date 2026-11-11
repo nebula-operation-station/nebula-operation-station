@@ -158,15 +158,46 @@ type nvdItemJSON struct {
 	} `json:"cve"`
 }
 
+// nvdPaths are the per-record limits checkJSON enforces on one NVD item
+// while it walks, before json.Unmarshal builds any slice or string.
+var nvdPaths = jsonLimits{
+	"cve.id":                                 {Bytes: 32},
+	"cve.published":                          {Bytes: maxTimeBytes},
+	"cve.lastmodified":                       {Bytes: maxTimeBytes},
+	"cve.vulnstatus":                         {Bytes: 32},
+	"cve.descriptions":                       {Members: MaxNVDDescriptions},
+	"cve.descriptions[].lang":                {Bytes: 16},
+	"cve.descriptions[].value":               {Bytes: MaxNVDDescriptionBytes},
+	"cve.metrics.cvssmetricv31":              {Members: MaxNVDMetrics},
+	"cve.metrics.cvssmetricv31[].source":     {Bytes: maxNVDSourceBytes},
+	"cve.metrics.cvssmetricv31[].type":       {Bytes: 16},
+	"cve.metrics.cvssmetricv31[].cvssdata.*": {Bytes: 256},
+	"cve.metrics.cvssmetricv40":              {Members: MaxNVDMetrics},
+	"cve.metrics.cvssmetricv40[].source":     {Bytes: maxNVDSourceBytes},
+	"cve.metrics.cvssmetricv40[].type":       {Bytes: 16},
+	"cve.metrics.cvssmetricv40[].cvssdata.*": {Bytes: 256},
+	"cve.weaknesses":                         {Members: MaxNVDWeaknesses},
+	"cve.weaknesses[].description":           {Members: MaxNVDWeaknesses},
+	"cve.weaknesses[].description[].lang":    {Bytes: 16},
+	"cve.weaknesses[].description[].value":   {Bytes: 32},
+	"cve.references":                         {Members: MaxNVDReferences},
+	"cve.references[].url":                   {Bytes: MaxNVDReferenceURLBytes},
+	"cve.references[].source":                {Bytes: maxNVDSourceBytes},
+	"cve.references[].tags":                  {Members: MaxNVDReferenceTags},
+	"cve.references[].tags[]":                {Bytes: 64},
+}.compile()
+
 // ParseNVD streams an NVD CVE JSON 2.0 feed (a decompressed
 // nvdcve-2.0-*.json) and calls visit once per valid CVE item in input
 // order. The top level must carry format "NVD_CVE", version "2.0", a
 // timestamp and a vulnerabilities array; other top-level fields are
 // skipped within MaxNVDHeaderValueBytes.
 //
-// An item that breaks a field rule is skipped and counted in
-// NVDSummary.Skipped; a size, depth or count limit, a duplicate CVE, a
-// broken stream or a bad top level fails the whole feed. Items are
+// An item that breaks a field rule or a per-item field length or count
+// limit (ErrRecordLimit) is skipped and counted in NVDSummary.Skipped; a
+// feed size or record count limit, an item over MaxNVDRecordBytes or
+// MaxJSONDepth, a duplicate CVE, a broken stream or a bad top level fails
+// the whole feed. Items are
 // delivered before the top level is fully checked (the header may follow
 // the array), so on any error the caller must discard what it has seen.
 func ParseNVD(ctx context.Context, r io.Reader, visit func(NVDRecord) error) (NVDSummary, error) {
@@ -213,7 +244,7 @@ func parseNVD(ctx context.Context, r io.Reader, maxRecords int, visit func(NVDRe
 		if err != nil {
 			return sum, err
 		}
-		if err := checkJSON(raw, MaxJSONDepth); err != nil {
+		if err := checkJSON(raw, MaxJSONDepth, nil); err != nil {
 			return sum, fmt.Errorf("nvd feed header: %w", err)
 		}
 		var target *string
@@ -305,7 +336,7 @@ func parseNVDItems(ctx context.Context, dec *json.Decoder, br *boundedReader, ma
 // parseNVDItem validates one {"cve": {...}} item.
 func parseNVDItem(raw []byte) (NVDRecord, error) {
 	var j nvdItemJSON
-	if err := decodeChecked(raw, &j); err != nil {
+	if err := decodeChecked(raw, &j, nvdPaths); err != nil {
 		return NVDRecord{}, err
 	}
 	c := j.CVE
@@ -330,7 +361,7 @@ func parseNVDItem(raw []byte) (NVDRecord, error) {
 		rec.Status = c.VulnStatus
 	}
 	if len(c.Descriptions) > MaxNVDDescriptions {
-		return NVDRecord{}, fmt.Errorf("%s: more than %d descriptions: %w", c.ID, MaxNVDDescriptions, ErrFeedLimit)
+		return NVDRecord{}, fmt.Errorf("%s: more than %d descriptions: %w", c.ID, MaxNVDDescriptions, ErrRecordLimit)
 	}
 	for _, d := range c.Descriptions {
 		if d.Lang != "en" || rec.Description != "" {
@@ -346,7 +377,7 @@ func parseNVDItem(raw []byte) (NVDRecord, error) {
 		list    []nvdMetricJSON
 	}{{NVDCVSS31, c.Metrics.V31}, {NVDCVSS40, c.Metrics.V40}} {
 		if len(m.list) > MaxNVDMetrics {
-			return NVDRecord{}, fmt.Errorf("%s: more than %d CVSS %s metrics: %w", c.ID, MaxNVDMetrics, m.version, ErrFeedLimit)
+			return NVDRecord{}, fmt.Errorf("%s: more than %d CVSS %s metrics: %w", c.ID, MaxNVDMetrics, m.version, ErrRecordLimit)
 		}
 		for _, mj := range m.list {
 			s, err := nvdCVSS(m.version, mj)
@@ -357,16 +388,19 @@ func parseNVDItem(raw []byte) (NVDRecord, error) {
 		}
 	}
 	if len(c.Weaknesses) > MaxNVDWeaknesses {
-		return NVDRecord{}, fmt.Errorf("%s: more than %d weaknesses: %w", c.ID, MaxNVDWeaknesses, ErrFeedLimit)
+		return NVDRecord{}, fmt.Errorf("%s: more than %d weaknesses: %w", c.ID, MaxNVDWeaknesses, ErrRecordLimit)
 	}
 	for _, w := range c.Weaknesses {
 		if len(w.Description) > MaxNVDWeaknesses {
-			return NVDRecord{}, fmt.Errorf("%s: weakness entries: %w", c.ID, ErrFeedLimit)
+			return NVDRecord{}, fmt.Errorf("%s: weakness entries: %w", c.ID, ErrRecordLimit)
 		}
 		for _, d := range w.Description {
 			switch {
 			case nvdCWERe.MatchString(d.Value):
 				if !slices.Contains(rec.CWEs, d.Value) {
+					if len(rec.CWEs) >= MaxNVDWeaknesses {
+						return NVDRecord{}, fmt.Errorf("%s: more than %d CWEs: %w", c.ID, MaxNVDWeaknesses, ErrRecordLimit)
+					}
 					rec.CWEs = append(rec.CWEs, d.Value)
 				}
 			case strings.HasPrefix(d.Value, "NVD-CWE-") && checkToken(d.Value, 32) == nil:
@@ -376,11 +410,8 @@ func parseNVDItem(raw []byte) (NVDRecord, error) {
 			}
 		}
 	}
-	if len(rec.CWEs) > MaxNVDWeaknesses {
-		return NVDRecord{}, fmt.Errorf("%s: more than %d CWEs: %w", c.ID, MaxNVDWeaknesses, ErrFeedLimit)
-	}
 	if len(c.References) > MaxNVDReferences {
-		return NVDRecord{}, fmt.Errorf("%s: more than %d references: %w", c.ID, MaxNVDReferences, ErrFeedLimit)
+		return NVDRecord{}, fmt.Errorf("%s: more than %d references: %w", c.ID, MaxNVDReferences, ErrRecordLimit)
 	}
 	for i, rj := range c.References {
 		ref, err := nvdReference(rj.URL, rj.Source, rj.Tags)
@@ -437,7 +468,7 @@ func nvdReference(url, source string, tags []string) (NVDReference, error) {
 		ref.Source = source
 	}
 	if len(tags) > MaxNVDReferenceTags {
-		return NVDReference{}, fmt.Errorf("more than %d tags: %w", MaxNVDReferenceTags, ErrFeedLimit)
+		return NVDReference{}, fmt.Errorf("more than %d tags: %w", MaxNVDReferenceTags, ErrRecordLimit)
 	}
 	for _, t := range tags {
 		if !nvdTagRe.MatchString(t) {

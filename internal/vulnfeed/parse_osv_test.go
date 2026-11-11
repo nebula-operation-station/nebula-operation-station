@@ -85,10 +85,16 @@ func TestParseOSVRejectsMalformed(t *testing.T) {
 		{"bad withdrawn", `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","withdrawn":"x"}`, ErrFeedMalformed},
 		{"bad alias", `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","aliases":["a b"]}`, ErrFeedMalformed},
 		{"alias wrong type", `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","aliases":"CVE-2024-1234"}`, ErrFeedMalformed},
-		{"too many aliases", `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","aliases":[` + strings.TrimSuffix(strings.Repeat(`"CVE-2024-1234",`, MaxOSVAliases+1), ",") + `]}`, ErrFeedLimit},
-		{"too many affected", base(strings.TrimSuffix(strings.Repeat(`{},`, MaxOSVAffected+1), ",")), ErrFeedLimit},
-		{"too many ranges", base(`{` + pkg + `,"ranges":[` + strings.TrimSuffix(strings.Repeat(`{"type":"GIT","events":[]},`, MaxOSVRanges+1), ",") + `]}`), ErrFeedLimit},
-		{"too many events", rng("ECOSYSTEM", strings.TrimSuffix(strings.Repeat(`{"introduced":"0"},`, MaxOSVEvents+1), ",")), ErrFeedLimit},
+		{"too many aliases", `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","aliases":[` + strings.TrimSuffix(strings.Repeat(`"CVE-2024-1234",`, MaxOSVAliases+1), ",") + `]}`, ErrRecordLimit},
+		{"too many affected", base(strings.TrimSuffix(strings.Repeat(`{},`, MaxOSVAffected+1), ",")), ErrRecordLimit},
+		{"too many ranges", base(`{` + pkg + `,"ranges":[` + strings.TrimSuffix(strings.Repeat(`{"type":"GIT","events":[]},`, MaxOSVRanges+1), ",") + `]}`), ErrRecordLimit},
+		{"too many events", rng("ECOSYSTEM", strings.TrimSuffix(strings.Repeat(`{"introduced":"0"},`, MaxOSVEvents+1), ",")), ErrRecordLimit},
+		{"too many ranges in record", base(strings.TrimSuffix(strings.Repeat(`{"ranges":[`+strings.TrimSuffix(strings.Repeat(`{},`, MaxOSVRanges), ",")+`]},`, MaxOSVRangesPerRecord/MaxOSVRanges+1), ",")), ErrRecordLimit},
+		{"too many events in record", base(`{"ranges":[` + strings.TrimSuffix(strings.Repeat(`{"events":[`+strings.TrimSuffix(strings.Repeat(`{},`, MaxOSVEvents), ",")+`]},`, MaxOSVEventsPerRecord/MaxOSVEvents+1), ",") + `]}`), ErrRecordLimit},
+		{"long alias", `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","aliases":["` + strings.Repeat("A", 65) + `"]}`, ErrRecordLimit},
+		{"long id", `{"id":"` + strings.Repeat("A", 65) + `","modified":"2024-01-01T00:00:00Z"}`, ErrRecordLimit},
+		{"long event version", rng("ECOSYSTEM", `{"introduced":"`+strings.Repeat("1", 129)+`"}`), ErrRecordLimit},
+		{"long package name", base(`{"package":{"ecosystem":"Go","name":"` + strings.Repeat("a", 215) + `"}}`), ErrRecordLimit},
 		{"case shadow id", `{"id":"OSV-1","ID":"OSV-2","modified":"2024-01-01T00:00:00Z"}`, ErrFeedMalformed},
 		{"bad ecosystem", base(`{"package":{"ecosystem":"","name":"zlib"}}`), ErrFeedMalformed},
 		{"bad package", base(`{"package":{"ecosystem":"Go","name":"a b"}}`), ErrFeedMalformed},
@@ -109,6 +115,71 @@ func TestParseOSVRejectsMalformed(t *testing.T) {
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
 			}
+			// A per-record limit only skips the record.
+			if errors.Is(tc.want, ErrRecordLimit) && (errors.Is(err, ErrFeedLimit) || !recordSkippable(err)) {
+				t.Fatalf("err = %v, want a skippable record error", err)
+			}
+		})
+	}
+	// Exactly at the per-record limits the record is accepted.
+	evs := strings.TrimSuffix(strings.Repeat(`{"introduced":"0"},`, MaxOSVEvents), ",")
+	at := base(`{` + pkg + `,"ranges":[` + strings.TrimSuffix(strings.Repeat(`{"type":"ECOSYSTEM","events":[`+evs+`]},`, MaxOSVEventsPerRecord/MaxOSVEvents), ",") + `]}`)
+	rec, err := ParseOSV([]byte(at))
+	if err != nil || len(rec.Affected) != 1 || len(rec.Affected[0].Ranges) != MaxOSVEventsPerRecord/MaxOSVEvents {
+		t.Fatalf("at the limits: %v", err)
+	}
+}
+
+// TestParseOSVDecodeStaysWithinFieldCaps: a 4 MiB record of tiny elements
+// spread over capped arrays (the shape that made json.Unmarshal build
+// about a million empty maps) is rejected during the walk.
+func TestParseOSVDecodeStaysWithinFieldCaps(t *testing.T) {
+	head := `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","affected":[`
+	fill := func(build func(n int) string) []byte {
+		// Grow n until the record is just below MaxOSVRecordBytes.
+		n := 1
+		for len(build(n*2)) < MaxOSVRecordBytes {
+			n *= 2
+		}
+		for step := n / 2; step > 0; step /= 2 {
+			if len(build(n+step)) < MaxOSVRecordBytes {
+				n += step
+			}
+		}
+		return []byte(build(n))
+	}
+	join := func(elem string, n int) string { return strings.TrimSuffix(strings.Repeat(elem+",", n), ",") }
+	inputs := map[string][]byte{
+		// ~20 ranges x 65,536 empty events: the review's example.
+		"20 ranges of 65536 events": fill(func(n int) string {
+			return head + `{"ranges":[` + join(`{"events":[`+join(`{}`, 65_536)+`]}`, n) + `]}]}`
+		}),
+		// The same events spread so that no single range exceeds its cap.
+		"events spread at the per-range cap": fill(func(n int) string {
+			return head + join(`{"ranges":[`+join(`{"events":[`+join(`{}`, MaxOSVEvents)+`]}`, 16)+`]}`, n) + `]}`
+		}),
+		"empty ranges":   fill(func(n int) string { return head + join(`{"ranges":[`+join(`{}`, MaxOSVRanges)+`]}`, n) + `]}` }),
+		"empty affected": fill(func(n int) string { return head + join(`{}`, n) + `]}` }),
+		"empty aliases": fill(func(n int) string {
+			return `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","aliases":[` + join(`""`, n) + `]}`
+		}),
+		"wide events": fill(func(n int) string {
+			var b strings.Builder
+			for i := range n {
+				if i > 0 {
+					b.WriteString(",")
+				}
+				fmt.Fprintf(&b, `"k%d":"0"`, i)
+			}
+			return head + `{"ranges":[{"events":[{` + b.String() + `}]}]}]}`
+		}),
+	}
+	for name, in := range inputs {
+		t.Run(name, func(t *testing.T) {
+			if len(in) > MaxOSVRecordBytes || len(in) < MaxOSVRecordBytes/2 {
+				t.Fatalf("input is %d bytes", len(in))
+			}
+			assertRecordDecodeBudget(t, func() error { _, err := ParseOSV(in); return err })
 		})
 	}
 }
@@ -184,8 +255,8 @@ func TestParseOSVArchiveRejectsBadArchives(t *testing.T) {
 		{"not json name", makeZip(t, zipFile{"GO-1.txt", rec}), ErrFeedMalformed},
 		{"duplicate name", makeZip(t, zipFile{"a.json", rec}, zipFile{"a.json", rec}), ErrFeedMalformed},
 		{"duplicate id", makeZip(t, zipFile{"a.json", rec}, zipFile{"b.json", rec}), ErrFeedMalformed},
-		{"record over a limit", makeZip(t, zipFile{"a.json", []byte(`{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","aliases":[` +
-			strings.TrimSuffix(strings.Repeat(`"CVE-2024-1234",`, MaxOSVAliases+1), ",") + `]}`)}), ErrFeedLimit},
+		{"record too deep", makeZip(t, zipFile{"a.json", []byte(`{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","x":` +
+			strings.Repeat("[", MaxJSONDepth) + strings.Repeat("]", MaxJSONDepth) + `}`)}), ErrFeedLimit},
 		{"bad name after good file", makeZip(t, zipFile{"a.json", rec}, zipFile{"b/c.json", rec}), ErrFeedMalformed},
 		{"data before archive", append([]byte("prefix"), makeZip(t, zipFile{"a.json", rec})...), ErrFeedMalformed},
 		{"truncated", makeZip(t, zipFile{"a.json", rec})[:30], ErrFeedMalformed},
@@ -214,6 +285,14 @@ func TestParseOSVArchiveSkipsMalformedRecord(t *testing.T) {
 		"non-ASCII key":           `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","database_specific":{"ünïcode":1}}`,
 		"case duplicate key":      `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","database_specific":{"a":1,"A":2}}`,
 		"version outside pattern": `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","affected":[{"package":{"ecosystem":"Debian:12","name":"zlib"},"ranges":[{"type":"ECOSYSTEM","events":[{"introduced":"0"},{"fixed":"1.0 beta"}]}]}]}`,
+		// Per-record field and count limits skip the record, not the archive.
+		"too many aliases": `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","aliases":[` +
+			strings.TrimSuffix(strings.Repeat(`"CVE-2024-1234",`, MaxOSVAliases+1), ",") + `]}`,
+		"too many events": `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","affected":[{"ranges":[{"events":[` +
+			strings.TrimSuffix(strings.Repeat(`{},`, MaxOSVEvents+1), ",") + `]}]}]}`,
+		"long alias": `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","aliases":["` + strings.Repeat("A", 1000) + `"]}`,
+		"too many members": `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","x":[` +
+			strings.TrimSuffix(strings.Repeat(`0,`, MaxJSONMembers+1), ",") + `]}`,
 	}
 	for name, b := range bad {
 		t.Run(name, func(t *testing.T) {

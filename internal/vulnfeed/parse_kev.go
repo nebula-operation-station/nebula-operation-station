@@ -77,6 +77,17 @@ type kevEntryJSON struct {
 	Ransomware        string `json:"knownRansomwareCampaignUse"`
 }
 
+// kevPaths are the per-entry limits checkJSON enforces while it walks.
+var kevPaths = jsonLimits{
+	"cveid":                      {Bytes: 32},
+	"vendorproject":              {Bytes: MaxKEVNameBytes},
+	"product":                    {Bytes: MaxKEVNameBytes},
+	"vulnerabilityname":          {Bytes: MaxKEVNameBytes},
+	"dateadded":                  {Bytes: maxTimeBytes},
+	"duedate":                    {Bytes: maxTimeBytes},
+	"knownransomwarecampaignuse": {Bytes: 32},
+}.compile()
+
 // KEV top-level keys the parser reads.
 const (
 	kevKeyVersion  = "catalogVersion"
@@ -92,9 +103,11 @@ const kevDateLayout = "2006-01-02"
 // catalog is streamed: entries are decoded one at a time and the entry
 // limit is checked before each one. The count field must equal the
 // number of entries, skipped ones included, and every CVE may appear
-// once. An entry that breaks a field rule is skipped and counted in
-// KEVCatalog.Skipped; a size, depth or count limit, a duplicate CVE or a
-// bad top level fails the catalog.
+// once. An entry that breaks a field rule or a per-entry field length or
+// count limit (ErrRecordLimit) is skipped and counted in
+// KEVCatalog.Skipped; a catalog size or entry count limit, an entry over
+// MaxKEVEntryBytes or MaxJSONDepth, a duplicate CVE or a bad top level
+// fails the catalog.
 func ParseKEV(ctx context.Context, r io.Reader) (KEVCatalog, error) {
 	cat, err := parseKEV(ctx, r)
 	if err != nil {
@@ -147,7 +160,7 @@ func parseKEV(ctx context.Context, r io.Reader) (KEVCatalog, error) {
 		if err != nil {
 			return cat, err
 		}
-		if err := checkJSON(raw, MaxJSONDepth); err != nil {
+		if err := checkJSON(raw, MaxJSONDepth, nil); err != nil {
 			return cat, fmt.Errorf("%s: %w", key, err)
 		}
 		var target any
@@ -233,7 +246,7 @@ func parseKEVEntries(ctx context.Context, dec *json.Decoder, br *boundedReader, 
 // parseKEVEntry validates one catalog entry.
 func parseKEVEntry(raw []byte) (KEVEntry, error) {
 	var v kevEntryJSON
-	if err := decodeChecked(raw, &v); err != nil {
+	if err := decodeChecked(raw, &v, kevPaths); err != nil {
 		return KEVEntry{}, err
 	}
 	if !cveIDRe.MatchString(v.CVEID) {

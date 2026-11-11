@@ -30,6 +30,12 @@ const (
 	MaxOSVRanges = 256
 	// MaxOSVEvents caps the events of one range.
 	MaxOSVEvents = 4096
+	// MaxOSVRangesPerRecord caps the ranges of all affected entries of
+	// one record together.
+	MaxOSVRangesPerRecord = 8192
+	// MaxOSVEventsPerRecord caps the events of all ranges of one record
+	// together.
+	MaxOSVEventsPerRecord = 32_768
 	// MaxOSVArchiveFiles caps the files in one OSV all.zip.
 	MaxOSVArchiveFiles = 1_000_000
 	// MaxOSVArchiveBytes caps the decompressed bytes of one OSV all.zip.
@@ -137,10 +143,38 @@ type osvAffectedJSON struct {
 		Name      string `json:"name"`
 	} `json:"package"`
 	Ranges []struct {
-		Type   string              `json:"type"`
-		Events []map[string]string `json:"events"`
+		Type   string         `json:"type"`
+		Events []osvEventJSON `json:"events"`
 	} `json:"ranges"`
 }
+
+// osvEventJSON is one range event; exactly one field must be set (an
+// event object has at most one member, see osvPaths).
+type osvEventJSON struct {
+	Introduced   *string `json:"introduced"`
+	Fixed        *string `json:"fixed"`
+	LastAffected *string `json:"last_affected"`
+	Limit        *string `json:"limit"`
+}
+
+// osvPaths are the per-record limits checkJSON enforces on an OSV record
+// while it walks, before json.Unmarshal builds any slice or string.
+var osvPaths = jsonLimits{
+	"id":                             {Bytes: 64},
+	"modified":                       {Bytes: maxTimeBytes},
+	"published":                      {Bytes: maxTimeBytes},
+	"withdrawn":                      {Bytes: maxTimeBytes},
+	"aliases":                        {Members: MaxOSVAliases},
+	"aliases[]":                      {Bytes: 64},
+	"affected":                       {Members: MaxOSVAffected},
+	"affected[].package.ecosystem":   {Bytes: 64},
+	"affected[].package.name":        {Bytes: 214},
+	"affected[].ranges":              {Members: MaxOSVRanges, Total: MaxOSVRangesPerRecord},
+	"affected[].ranges[].type":       {Bytes: 32},
+	"affected[].ranges[].events":     {Members: MaxOSVEvents, Total: MaxOSVEventsPerRecord},
+	"affected[].ranges[].events[]":   {Members: 1},
+	"affected[].ranges[].events[].*": {Bytes: 128},
+}.compile()
 
 // osvTimeLayouts are the RFC 3339 forms OSV uses.
 var osvTimeLayouts = []string{time.RFC3339Nano, time.RFC3339}
@@ -153,7 +187,7 @@ func ParseOSV(data []byte) (OSVRecord, error) {
 		return OSVRecord{}, fmt.Errorf("osv record: %w", ErrFeedLimit)
 	}
 	var j osvJSON
-	if err := decodeChecked(data, &j); err != nil {
+	if err := decodeChecked(data, &j, osvPaths); err != nil {
 		return OSVRecord{}, fmt.Errorf("osv record: %w", err)
 	}
 	if !feedVulnIDRe.MatchString(j.ID) {
@@ -176,7 +210,7 @@ func ParseOSV(data []byte) (OSVRecord, error) {
 		}
 	}
 	if len(j.Aliases) > MaxOSVAliases {
-		return OSVRecord{}, fmt.Errorf("%s: more than %d aliases: %w", where, MaxOSVAliases, ErrFeedLimit)
+		return OSVRecord{}, fmt.Errorf("%s: more than %d aliases: %w", where, MaxOSVAliases, ErrRecordLimit)
 	}
 	for _, a := range j.Aliases {
 		if !feedVulnIDRe.MatchString(a) {
@@ -187,7 +221,7 @@ func ParseOSV(data []byte) (OSVRecord, error) {
 		}
 	}
 	if len(j.Affected) > MaxOSVAffected {
-		return OSVRecord{}, fmt.Errorf("%s: more than %d affected: %w", where, MaxOSVAffected, ErrFeedLimit)
+		return OSVRecord{}, fmt.Errorf("%s: more than %d affected: %w", where, MaxOSVAffected, ErrRecordLimit)
 	}
 	for i, a := range j.Affected {
 		aff, ok, err := osvAffected(a)
@@ -207,7 +241,7 @@ func ParseOSV(data []byte) (OSVRecord, error) {
 // without a package (GIT-only), which the caller skips.
 func osvAffected(a osvAffectedJSON) (OSVAffected, bool, error) {
 	if len(a.Ranges) > MaxOSVRanges {
-		return OSVAffected{}, false, fmt.Errorf("more than %d ranges: %w", MaxOSVRanges, ErrFeedLimit)
+		return OSVAffected{}, false, fmt.Errorf("more than %d ranges: %w", MaxOSVRanges, ErrRecordLimit)
 	}
 	if a.Package == nil {
 		return OSVAffected{}, false, nil
@@ -221,7 +255,7 @@ func osvAffected(a osvAffectedJSON) (OSVAffected, bool, error) {
 	}
 	for i, r := range a.Ranges {
 		if len(r.Events) > MaxOSVEvents {
-			return OSVAffected{}, false, fmt.Errorf("range %d: more than %d events: %w", i, MaxOSVEvents, ErrFeedLimit)
+			return OSVAffected{}, false, fmt.Errorf("range %d: more than %d events: %w", i, MaxOSVEvents, ErrRecordLimit)
 		}
 		typ := OSVRangeType(r.Type)
 		if typ != OSVRangeSemver && typ != OSVRangeEcosystem {
@@ -247,29 +281,35 @@ func osvAffected(a osvAffectedJSON) (OSVAffected, bool, error) {
 }
 
 // osvEvent validates one event object: exactly one known key, and a
-// version valid for the range type.
-func osvEvent(typ OSVRangeType, ev map[string]string) (OSVEvent, error) {
-	if len(ev) != 1 {
-		return OSVEvent{}, fmt.Errorf("event must have exactly one key: %w", ErrFeedMalformed)
-	}
-	for k, v := range ev {
-		kind := OSVEventKind(k)
-		switch kind {
-		case OSVIntroduced, OSVFixed, OSVLastAffected, OSVLimit:
-		default:
-			return OSVEvent{}, fmt.Errorf("event kind: %w", ErrFeedMalformed)
+// version valid for the range type. The walk already rejected an event
+// with more than one member, so an unknown key leaves every field unset.
+func osvEvent(typ OSVRangeType, ev osvEventJSON) (OSVEvent, error) {
+	var kind OSVEventKind
+	var v *string
+	for _, f := range []struct {
+		kind OSVEventKind
+		v    *string
+	}{{OSVIntroduced, ev.Introduced}, {OSVFixed, ev.Fixed}, {OSVLastAffected, ev.LastAffected}, {OSVLimit, ev.Limit}} {
+		if f.v == nil {
+			continue
 		}
-		switch {
-		case kind == OSVIntroduced && v == "0":
-		case kind == OSVLimit && v == "*":
-		case typ == OSVRangeSemver && !osvSemverRe.MatchString(v):
-			return OSVEvent{}, fmt.Errorf("semver version: %w", ErrFeedMalformed)
-		case !feedVersionRe.MatchString(v):
-			return OSVEvent{}, fmt.Errorf("version: %w", ErrFeedMalformed)
+		if v != nil {
+			return OSVEvent{}, fmt.Errorf("event must have exactly one key: %w", ErrFeedMalformed)
 		}
-		return OSVEvent{Kind: kind, Version: v}, nil
+		kind, v = f.kind, f.v
 	}
-	return OSVEvent{}, fmt.Errorf("empty event: %w", ErrFeedMalformed) // unreachable
+	if v == nil {
+		return OSVEvent{}, fmt.Errorf("event kind: %w", ErrFeedMalformed)
+	}
+	switch {
+	case kind == OSVIntroduced && *v == "0":
+	case kind == OSVLimit && *v == "*":
+	case typ == OSVRangeSemver && !osvSemverRe.MatchString(*v):
+		return OSVEvent{}, fmt.Errorf("semver version: %w", ErrFeedMalformed)
+	case !feedVersionRe.MatchString(*v):
+		return OSVEvent{}, fmt.Errorf("version: %w", ErrFeedMalformed)
+	}
+	return OSVEvent{Kind: kind, Version: *v}, nil
 }
 
 // OSVArchiveSummary is the result of ParseOSVArchive.
@@ -291,10 +331,12 @@ type OSVArchiveSummary struct {
 // The central directory is counted before archive/zip builds it, and the
 // names and declared sizes of all files are checked before the first
 // file is read; sizes are enforced again while a file is decompressed. A
-// record that breaks a field rule is skipped and counted in
-// OSVArchiveSummary.Skipped; a size, depth or count limit, a bad file
-// name, a duplicate name or ID, or corrupt compressed data fails the
-// archive. On error the caller must discard what it has seen.
+// record that breaks a field rule or a per-record field length or count
+// limit (ErrRecordLimit) is skipped and counted in
+// OSVArchiveSummary.Skipped; an archive size or file count limit, a record
+// over MaxOSVRecordBytes or MaxJSONDepth, a bad file name, a duplicate
+// name or ID, or corrupt compressed data fails the archive. On error the
+// caller must discard what it has seen.
 func ParseOSVArchive(ctx context.Context, ra io.ReaderAt, size int64, visit func(OSVRecord) error) (OSVArchiveSummary, error) {
 	return parseOSVArchive(ctx, ra, size, MaxOSVArchiveFiles, visit)
 }

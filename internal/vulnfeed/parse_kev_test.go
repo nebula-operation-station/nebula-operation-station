@@ -66,7 +66,6 @@ func TestParseKEVRejectsMalformed(t *testing.T) {
 		{"case shadow top key", `{"Count":5,` + doc("0", ``)[1:], ErrFeedMalformed},
 		{"case top key", strings.Replace(doc("0", ``), `"vulnerabilities"`, `"Vulnerabilities"`, 1), ErrFeedMalformed},
 		{"truncated entry", `{"catalogVersion":"1","dateReleased":"2024-10-21T15:00:15Z","count":1,"vulnerabilities":[{"cveID":`, ErrFeedMalformed},
-		{"long name", doc("1", strings.Replace(entry(``), `"product":"P"`, `"product":"`+strings.Repeat("p", MaxKEVNameBytes+1)+`"`, 1)), ErrFeedLimit},
 		{"entry too deep", doc("1", entry(`,"x":`+strings.Repeat("[", MaxJSONDepth)+strings.Repeat("]", MaxJSONDepth))), ErrFeedLimit},
 		{"entry too large", doc("1", entry(`,"notes":"`+strings.Repeat("a", MaxKEVEntryBytes)+`"`)), ErrFeedLimit},
 		{"header value too large", `{"x":"` + strings.Repeat("a", MaxKEVHeaderValueBytes) + `",` + doc("0", ``)[1:], ErrFeedLimit},
@@ -96,6 +95,10 @@ func TestParseKEVSkipsMalformedEntry(t *testing.T) {
 		"name wrong type":   strings.Replace(entry(``), `"product":"P"`, `"product":7`, 1),
 		"entry not object":  `"CVE-2024-0001"`,
 		"non-ASCII key":     entry(`,"nötes":"x"`),
+		// Per-entry field limits skip the entry, not the catalog.
+		"long name":       strings.Replace(entry(``), `"product":"P"`, `"product":"`+strings.Repeat("p", MaxKEVNameBytes+1)+`"`, 1),
+		"long vendor":     strings.Replace(entry(``), `"vendorProject":"V"`, `"vendorProject":"`+strings.Repeat("v", 4*MaxKEVNameBytes)+`"`, 1),
+		"long ransomware": entry(`,"knownRansomwareCampaignUse":"` + strings.Repeat("K", 1000) + `"`),
 	}
 	for name, b := range bad {
 		t.Run(name, func(t *testing.T) {
