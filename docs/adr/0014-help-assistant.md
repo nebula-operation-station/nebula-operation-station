@@ -458,7 +458,16 @@ does NOS connect **from** (`--from`)?
   next to its expected-fields entry. It names the command's **final
   request** (the RPC, dial or HTTP request that carries its arguments,
   e.g. `ApproveGateCLI` for `batch stage`) and the inputs that make an
-  accepted value reach it:
+  accepted value reach it. **Entry point**: the harness calls the
+  command's subcommand function below `run` (for example `batchCmd`,
+  `pveCmd`, `netdevCmd`, `backupCmd`, `secretCmd`) with the injected
+  stdin reader, `prompter` and `netdevEnv` as arguments, because `run`
+  passes `os.Stdin`, `ttyPrompter` and `defaultNetdevEnv()` (which reads
+  `term.IsTerminal` on `os.Stdin`) and AS-05 changes no production
+  code; the harness never replaces `os.Stdin` with a pipe, whose
+  contents a per-prompt `bufio.Reader` such as `pveAskLine` could read
+  several lines at a time. The dispatch in `run` itself is covered by
+  the catalog test, not by the canary runs. The inputs are:
   - *executor fixtures*: the fake executor's answer to every call the
     command makes before the final request (rollouts, pending permits,
     probe results, reviews), each a fixed fixture value checked against
@@ -482,7 +491,8 @@ does NOS connect **from** (`--from`)?
   | --- | --- |
   | "Type 'yes' …" (`batch approve`/`stage`/`skip`, `approve`, `approve --stage`/`--skip`, `schedule`, read grants, `host pin`/`remove`, `container … remove`, `vault` delete, `webauthn` remove, `totp` remove, `risk` trust, `netdev` register/re-pin/state change, `pve remote remove`/`site`) | `yes` |
   | "CRITICAL: type the number of targets" (`approve`, `cmd/nebula/main.go`) | not reached: the pending-permit fixture is not `CRITICAL`, so the `yes` prompt applies |
-  | `Type "unencrypted"`, `Type "restore"`, `Type "<machine>"` (`backup`, `cmd/nebula/backup.go`) | the word the prompt names; the restore fixture's manifest names the host name the test reads with `os.Hostname()`, so the foreign-machine prompt is not reached |
+  | `Type "unencrypted"`, `Type "restore"`, `Type "<machine>"` (`backup`, `cmd/nebula/backup.go`) | the word the prompt names; the harness pins `backup.go`'s overridable `hostname` variable to the fixed fixture host name `nos-fixture-host` (no needle), and the restore fixture's manifest names that host, so the foreign-machine prompt is not reached and the run does not depend on the test machine (previously the fixture followed the real `os.Hostname()`) |
+  | "Type the current pin from the registry:" (`pve remote repin`, `cmd/nebula/pve.go`) | the `trust_pin` stored for the remote in the fake executor's `ListPVEAdminRemotes` answer (the registry fixture), so it matches the `old_pin` the fake `ProposePVERepin` expects; the next prompt, "Type the new trust fingerprint to confirm:", is the typed-fingerprint row below |
   | typed fingerprint (`pve remote add`/`repin`, `module` signer add/rotate in `cmd/nebula/signer.go`) | the fingerprint the command shows for that run (from the fake executor's probe answer or the run's fixture key) |
   | "type the manifest digest to commit" (`cmd/nebula/trust_builtins.go`) | the digest of the fake review answer; `retain … or retire` prompts get `r` |
   | "Enter the current 6-digit code" (`totp setup`) | a fixed fixture code; the fake executor accepts it |
@@ -748,7 +758,11 @@ does NOS connect **from** (`--from`)?
   the pattern zero-extended (`3221225985`) or sign-extended from 32 bits
   (`-1073741311` as `int64`, `0xffffffffc0000201` as `uint64`). Patterns
   whose top bit is clear (`0x010200c0` = `16908480`, `0x0000b799`) have
-  one form only. Fixtures and the canary
+  one form only. AS-05's tests cover each of these forms: a fake
+  argument that sends `192.0.2.1` as `int64` `-1073741311`, as `uint64`
+  `0xffffffffc0000201` or as zero-extended `uint64` `3221225985` fails,
+  so a search of 32-bit fields only or of zero-extended values only
+  does not pass. Fixtures and the canary
   file content must not contain any needle of the run, text or binary
   (the test fails otherwise), and run-time values are fixed or checked
   (above), so a match always comes from the argument under test.
