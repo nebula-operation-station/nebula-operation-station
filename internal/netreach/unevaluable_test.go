@@ -193,6 +193,52 @@ func TestDisabledRuleIsSkippedNotUnevaluable(t *testing.T) {
 	}
 }
 
+// TestUncollectedFlagsNeverDecide: a bool field with Collected false is
+// never read, whatever its Value. An uncollected Disabled {Value: true}
+// does not skip the rule; it makes it unevaluable, and so do uncollected
+// negation flags.
+func TestUncollectedFlagsNeverDecide(t *testing.T) {
+	uncollectedTrue := Field[bool]{Value: true}
+	t.Run("security rule disabled", func(t *testing.T) {
+		s := labSnapshot()
+		s.SecurityRules[1].Disabled = uncollectedTrue
+		x := mustIndex(t, s)
+		v := x.SecurityRules()[1]
+		if v.Disabled || v.Evaluable() || !strings.Contains(v.Reason(), "disabled: not collected") {
+			t.Fatalf("rule %+v reason %q", v, v.Reason())
+		}
+		if c := x.PathCompleteness("lan", "mgmt"); c.Complete {
+			t.Fatal("path complete with uncollected disabled flag")
+		}
+	})
+	t.Run("NAT rule disabled", func(t *testing.T) {
+		s := labSnapshot()
+		s.NATRules[0].Disabled = uncollectedTrue
+		x := mustIndex(t, s)
+		v := x.NATRules()[0]
+		if v.Disabled || v.Evaluable() || !strings.Contains(v.Reason(), "disabled: not collected") {
+			t.Fatalf("NAT rule %+v reason %q", v, v.Reason())
+		}
+		if c := x.PathCompleteness("lan", "mgmt"); c.Complete {
+			t.Fatal("path complete with uncollected NAT disabled flag")
+		}
+	})
+	t.Run("negation flags", func(t *testing.T) {
+		s := labSnapshot()
+		s.SecurityRules[0].NegateSource = uncollectedTrue
+		s.SecurityRules[0].NegateDestination = uncollectedTrue
+		v := mustIndex(t, s).SecurityRules()[0]
+		if v.NegateSource || v.NegateDestination || v.Evaluable() {
+			t.Fatalf("rule %+v", v)
+		}
+		for _, f := range []string{"negate-source", "negate-destination"} {
+			if !slices.ContainsFunc(v.Unevaluable, func(c Cause) bool { return c.Field == f && c.Detail == "not collected" }) {
+				t.Errorf("missing cause %s: %+v", f, v.Unevaluable)
+			}
+		}
+	})
+}
+
 // TestSnapshotWithoutQ11Fields is the "today" case of ADR 0012 Q11: no
 // negation flags, rule types, HIP fields and default rules collected.
 // Every rule and the default-rule step are unevaluable; no path is
@@ -588,6 +634,11 @@ func TestCauseTextIsSanitized(t *testing.T) {
 	}
 	if got.Field != "f�[31m" || !strings.HasPrefix(got.Detail, "type x��yyy") {
 		t.Errorf("got %+v", got)
+	}
+	var c2 causes
+	c2.add("a‮b\u0085c⁧d")
+	if c2[0].Field != "a�b�c�d" {
+		t.Errorf("bidi/C1 not sanitized: %q", c2[0].Field)
 	}
 	v := RuleView{Name: "r\x00", Unevaluable: []Cause{{Field: "f"}}}
 	if strings.ContainsRune(v.Reason(), 0) {

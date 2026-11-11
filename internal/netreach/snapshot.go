@@ -289,7 +289,8 @@ type DefaultRules struct {
 // Snapshot is the complete input of one model computation (ADR 0012 D2).
 // Inputs holds the state of every dataset; an input absent from the map is
 // missing. Vsys is the number of virtual systems the device reports; only
-// exactly one is evaluable (zero means not reported).
+// exactly one is evaluable (zero means not reported; a negative count
+// makes the snapshot invalid).
 type Snapshot struct {
 	Inputs        map[InputKind]Input
 	Vsys          int

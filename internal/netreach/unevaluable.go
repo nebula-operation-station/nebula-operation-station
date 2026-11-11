@@ -256,7 +256,8 @@ func (c *causes) add(field string, parts ...string) {
 }
 
 // sanitizeText concatenates parts into a text safe to render: invalid
-// UTF-8 and C0/C1 control characters become U+FFFD, and the result is cut
+// UTF-8, C0/C1 control and bidi formatting characters (isControl) become
+// U+FFFD, and the result is cut
 // at a rune boundary to at most MaxCauseTextBytes. Snapshot texts already
 // passed CheckLimits; this is the last line of defence for reason texts.
 func sanitizeText(parts ...string) string {
@@ -290,7 +291,21 @@ func cleanText(s string) bool {
 	return true
 }
 
-func isControl(r rune) bool { return r < 0x20 || (r >= 0x7f && r <= 0x9f) }
+// isControl reports C0 and C1 control characters, DEL and the Unicode
+// bidirectional formatting characters (marks, embeddings, overrides,
+// isolates), which can reorder how a name is displayed. CheckLimits
+// rejects them and sanitizeText replaces them.
+func isControl(r rune) bool {
+	switch {
+	case r < 0x20, r >= 0x7f && r <= 0x9f:
+		return true
+	case r == 0x061c, r == 0x200e, r == 0x200f, // ALM, LRM, RLM
+		r >= 0x202a && r <= 0x202e, // LRE, RLE, PDF, LRO, RLO
+		r >= 0x2066 && r <= 0x2069: // LRI, RLI, FSI, PDI
+		return true
+	}
+	return false
+}
 
 func (c *causes) markers(owner string, dropped, outside []string) {
 	for _, m := range dropped {
@@ -321,9 +336,13 @@ func (c *causes) list(field string, f Field[[]string]) ([]string, bool) {
 	return f.Value, true
 }
 
+// flag returns a collected bool. A field that was not collected records
+// the cause and returns false whatever its Value: an uncollected field
+// never decides (an uncollected Disabled never skips a rule).
 func (c *causes) flag(field string, f Field[bool]) bool {
 	if !f.Collected {
 		c.add(field, "not collected")
+		return false
 	}
 	return f.Value
 }

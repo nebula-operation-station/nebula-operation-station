@@ -195,6 +195,14 @@ func TestCheckLimitsRejectsMalformedText(t *testing.T) {
 		{"invalid utf-8 dataset id", func(s *Snapshot) { s.Inputs[InputZones] = Input{State: InputFresh, DatasetID: "ds\xff"} }},
 		{"control char in digest", func(s *Snapshot) { s.Inputs[InputRoutes] = Input{State: InputFresh, RedactedDigest: "ab\x00"} }},
 		{"invalid utf-8 input kind", func(s *Snapshot) { s.Inputs[InputKind("z\xff")] = Input{} }},
+		{"c1 control in interface name", func(s *Snapshot) { s.Interfaces[0].Name = "eth\u0085x" }},
+		{"c1 csi in zone name", func(s *Snapshot) { s.Zones[0].Name = "wan\u009b31m" }},
+		{"bidi override in rule name", func(s *Snapshot) { s.SecurityRules[0].Name = "allow‮gnp.exe" }},
+		{"bidi isolate in interface name", func(s *Snapshot) { s.Interfaces[0].Name = "eth⁦x⁩" }},
+		{"bidi mark in address name", func(s *Snapshot) { s.Addresses[0].Name = "a‏b" }},
+		{"arabic letter mark in subnet id", func(s *Snapshot) { s.Subnets[0].ID = "lan؜" }},
+		{"bidi embedding in route zone", func(s *Snapshot) { s.Routes[0].Zone = "‪wan" }},
+		{"negative vsys", func(s *Snapshot) { s.Vsys = -1 }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

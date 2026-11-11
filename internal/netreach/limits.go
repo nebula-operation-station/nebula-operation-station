@@ -110,6 +110,9 @@ func CheckLimits(s *Snapshot) error {
 			return fmt.Errorf("%w: %d %s, limit %d", ErrLimitReached, c.n, c.what, c.max)
 		}
 	}
+	if s.Vsys < 0 {
+		return fmt.Errorf("%w: negative vsys count %d", ErrInvalidSnapshot, s.Vsys)
+	}
 	if err := checkInputs(s.Inputs); err != nil {
 		return err
 	}
@@ -342,7 +345,8 @@ func checkMarkers(owner string, markers []string) error {
 }
 
 // checkText requires a non-empty, valid UTF-8 text of at most max bytes
-// without control characters.
+// without C0/C1 control or bidi formatting characters (isControl, the same
+// set sanitizeText replaces).
 func checkText(what, s string, max int) error {
 	if s == "" {
 		return fmt.Errorf("%w: empty %s", ErrInvalidSnapshot, what)
@@ -358,8 +362,8 @@ func checkOptionalText(what, s string, max int) error {
 		return fmt.Errorf("%w: %s is not valid UTF-8", ErrInvalidSnapshot, what)
 	}
 	for _, r := range s {
-		if r < 0x20 || r == 0x7f {
-			return fmt.Errorf("%w: %s contains a control character", ErrInvalidSnapshot, what)
+		if isControl(r) {
+			return fmt.Errorf("%w: %s contains a control or bidi formatting character", ErrInvalidSnapshot, what)
 		}
 	}
 	return nil
