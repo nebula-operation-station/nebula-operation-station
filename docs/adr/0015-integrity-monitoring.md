@@ -104,7 +104,9 @@ named in the handbook next to every "no unexpected change" result:
   `authorized_keys` and other SSH login files (D9 "SSH login files") of
   service accounts whose home is under `/var`, `/srv` or `/opt` outside
   the scanned `/opt` tree, SSH login files that the SSH configuration
-  names by an absolute path outside the D5 roots (not scanned, but each
+  names by an absolute path outside the D5 roots, or by a
+  `TrustedUserCAKeys` or `RevokedKeys` value that sshd resolves
+  daemon-wide to such a path (D7) (not scanned, but each
   such directive opens an "SSH login file outside the scanned roots"
   finding, D9), files that an `AuthorizedKeysCommand` or
   `AuthorizedPrincipalsCommand` program reads or runs (only the program
@@ -970,12 +972,13 @@ roles never mix:
        three conditions above clears the mark.
      - **`AuthorizedKeysFile` expansion.** The executor parses `Include`
        and every SSH login file directive of D9 (including those inside
-       `Match` blocks) and expands `AuthorizedKeysFile`,
-       `AuthorizedPrincipalsFile`, `TrustedUserCAKeys` and `RevokedKeys`
-       values alike; without an `AuthorizedKeysFile` directive it uses the
+       `Match` blocks). It expands the **per-user** values
+       `AuthorizedKeysFile` and `AuthorizedPrincipalsFile` as follows;
+       without an `AuthorizedKeysFile` directive it uses the
        OpenSSH default `.ssh/authorized_keys .ssh/authorized_keys2`.
-       `%h` expands to a whole home directory, and a value that does not
-       start with `/` or `%h` is relative to the home directory. Because
+       `%h` expands to a whole home directory, a leading `~` or `~name`
+       is a home directory like `%h`, and any other value that does not
+       start with `/` is relative to the home directory. Because
        the host's passwd entries are untrusted and homes may lie anywhere
        (`/root`, `/home/alice`, service homes under `/var`), the executor
        does not resolve homes: it matches `%h` and the implied home
@@ -985,6 +988,20 @@ roles never mix:
        covers `/root/.config/keys` and `/var/lib/svc/.config/keys`, and
        `/etc/ssh/authorized_keys/%u` covers every file in that directory.
        Over-matching only makes more entries critical-class, never fewer.
+     - **`TrustedUserCAKeys` and `RevokedKeys` are daemon-wide.** sshd
+       reads these two values as daemon paths, not per user, and the
+       executor resolves them exactly like sshd, **not** like
+       `AuthorizedKeysFile`: no `%` token is expanded (a `%` is a literal
+       character); a leading `~` or `~/` is root's home `/root` (sshd runs
+       as root), and a `~name` form, which sshd resolves through the
+       host's untrusted passwd data, is unclassifiable (below); a value
+       that does not start with `/` is relative to sshd's working
+       directory, which is `/`, so the executor prefixes `/` to it. So
+       `TrustedUserCAKeys etc/ssh/ca.pub` names `/etc/ssh/ca.pub`, which
+       is then classified as an SSH login file (critical-class) and, like
+       any absolute value, checked against the scanned roots (D9 "SSH
+       login file outside the scanned roots"); it never names a file
+       below a home.
      - **Unclassifiable means critical.** When the executor cannot
        classify an entry with certainty (no usable derived set, a parse
        failure, a limit hit, a directive, value or token it does not
@@ -1239,7 +1256,8 @@ that has a setuid or setgid bit before or after the change.
 a login is granted is critical-class, so none of them can be approved in
 the browser. These are the targets of these directives in
 `/etc/ssh/sshd_config` and its includes, including inside `Match`
-blocks, expanded as in D7 "`AuthorizedKeysFile` expansion":
+blocks, expanded as in D7 "`AuthorizedKeysFile` expansion" (per-user
+values) and D7 "`TrustedUserCAKeys` and `RevokedKeys` are daemon-wide":
 
 - `AuthorizedKeysFile` (default `.ssh/authorized_keys
   .ssh/authorized_keys2`): adds keys;
@@ -1319,7 +1337,10 @@ directory for `AuthorizedKeysFile /etc/ssh/ak/%u/keys`, since `%u`
 matches any single component; `/root`, `/home`, `/home/<name>`, every
 directory that `%h` or the implied home prefix matches, and the `.ssh`
 directory below it, for the home-relative patterns). Matching uses D7
-"`AuthorizedKeysFile` expansion", so it over-matches rather than
+"`AuthorizedKeysFile` expansion" for the per-user values and the D7
+daemon-wide rule for `TrustedUserCAKeys` and `RevokedKeys` (so
+`TrustedUserCAKeys etc/ssh/ca.pub` makes `/`, `/etc`, `/etc/ssh` and
+`/etc/ssh/ca.pub` SSH positions), so it over-matches rather than
 under-matches. Whenever the old or new record at an SSH position is a
 symlink (or, for a file position, any type other than `file`):
 
@@ -1358,13 +1379,16 @@ included files out of the array.
 Files that an `AuthorizedKeysCommand` or `AuthorizedPrincipalsCommand`
 program itself reads or runs are not derived (named in "Honest
 limits"). An absolute target outside the D5 roots and
-`/home/*/` (for example `TrustedUserCAKeys /srv/ca.pub` or
+`/home/*/` (for example `TrustedUserCAKeys /srv/ca.pub`, also
+`RevokedKeys srv/revoked`, which D7 resolves daemon-wide to
+`/srv/revoked`, or
 `AuthorizedKeysFile /var/lib/keys/%u`) is not scanned; the executor
 opens an "SSH login file outside the scanned roots" finding (high)
 naming the directive and its escaped value, kept open while the
 approved or the latest complete run's SSH configuration names it. A
-`%h`-based or relative value does not open this finding, because it
-matches homes anywhere: such files in homes outside `/root` and
+`%h`-based, `~`-based or relative **per-user** value
+(`AuthorizedKeysFile`, `AuthorizedPrincipalsFile`) does not open this
+finding, because it matches homes anywhere: such files in homes outside `/root` and
 `/home` (service accounts under `/var`, `/srv`, `/opt`) are not
 scanned, a named limit ("Honest limits").
 
