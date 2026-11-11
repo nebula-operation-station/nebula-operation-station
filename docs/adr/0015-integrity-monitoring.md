@@ -192,7 +192,8 @@ named in the handbook next to every "no unexpected change" result:
   - without a version change it lowers nothing: the finding stays high,
     or critical for a critical-class path (D7 "Same version, changed
     content"), and a reference already admitted for an installed
-    version cannot be replaced;
+    `(package, version, arch)` can neither be replaced nor joined by a
+    second one, whatever deb SHA-256 the builder names (D8);
   - a file that was already replaced at the first scan and matches the
     forged reference raises no "differs from signed reference" finding,
     so only trust on first scan remains for it.
@@ -203,7 +204,12 @@ named in the handbook next to every "no unexpected change" result:
   the admin's approval of an executor-computed digest, and critical-class
   entries need one executor-local CLI approval each (D7, D9). An admin
   who approves an entry labelled "verified" still trusts the builder for
-  that label.
+  that label. Replacing the builder key after a compromise revokes every
+  reference the old key signed and lets the builder re-admit correct
+  ones (D8 "Builder key replacement"); entries the admin approved on a
+  forged label stay in the baseline until the next full run compares
+  them with the re-admitted references, and for a version that can no
+  longer be fetched they stay undetected.
 - **Anything not a file.** Running processes, loaded kernel modules,
   memory-only implants, firmware and BIOS/UEFI settings (only I3 sees
   part of this).
@@ -631,10 +637,13 @@ roles never mix:
   no package update explains it. The finding is **high**, or
   **critical** for a critical-class path or when the new content differs
   from a verified reference; a match with a reference is shown as
-  context only and never lowers the severity below high. NOS keeps the
-  first admitted reference per `(package, version, arch, deb SHA-256)`
-  and rejects a later, different reference for the same key (D8), so a
-  forged reference cannot be swapped in for an installed version.
+  context only and never lowers the severity below high. The executor
+  keeps at most one admitted reference per `(package, version, arch)`
+  under the pinned builder key, the first one admitted, and rejects a
+  later, different reference for the same triple, whatever `.deb`
+  SHA-256 it names (D8). That one reference is the only one used for
+  the triple, so a builder cannot add or swap in a second reference for
+  an installed version; only a builder key replacement (D8) clears it.
 
 1. **Package files against the signed distribution archive.** For a
    path that belongs to an installed package from a configured Debian,
@@ -795,8 +804,8 @@ of `InRelease` and decompression of `data.tar.xz` (Debian) and
   operator-configured archive origins (or a local mirror/apt cache),
   rate limited, with cache keys
   `(archive, suite, component, package, version, arch, deb SHA-256)`.
-- **What NOS receives.** Per `(package, version, arch, deb SHA-256)` a
-  bounded list `(path, type, size, mode, uid, gid, sha256, link)` taken
+- **What NOS receives.** Per `(package, version, arch)`, naming the deb
+  SHA-256 it was built from, a bounded list `(path, type, size, mode, uid, gid, sha256, link)` taken
   from the `data.tar.*` headers and contents, as an RFC 8785 JCS
   document (`format` `nebula-fim-reference-v1`), posted through a
   new write scope on `/api/v1`. This is **untrusted input** under spec 09
@@ -815,15 +824,41 @@ of `InRelease` and decompression of `data.tar.xz` (Debian) and
   audited with old and new key). The executor admits a reference only if
   the signature verifies against the pinned key, the document passes the
   strict schema and no different reference for the same
-  `(package, version, arch, deb SHA-256)` was admitted before (the first
-  admitted one stays; a different one is rejected and audited). A
-  reference that fails any check counts as "no reference" (D9), never as
-  verified. Only references admitted this way are "verified" in D7 and
-  D9. A compromised server therefore cannot forge a reference; a
-  compromised builder (or its key) can, with exactly the effects listed
-  in "Honest limits". The builder key is file-based on the builder host:
-  root on that host can sign with it. It cannot change a host and cannot
-  authorize anything.
+  `(package, version, arch)` was admitted before under that key. The
+  deb SHA-256 is part of the signed document but not of this key: the
+  first admitted reference for a triple is the only one the executor
+  ever uses for it; a later one that differs in any byte, including a
+  different deb SHA-256, is rejected, audited and shown to the admin as
+  a reference conflict, and never replaces or joins the first. (Two
+  configured archives that publish different builds under the same
+  triple are therefore not both verifiable: hosts with the other build
+  show "differs from signed reference" until the admin accepts it or
+  configures one origin.) A reference that fails any check counts as
+  "no reference" (D9), never as verified. Only references admitted this
+  way are "verified" in D7 and D9. A compromised server therefore cannot
+  forge a reference; a compromised builder (or its key) can, with
+  exactly the effects listed in "Honest limits". The builder key is
+  file-based on the builder host: root on that host can sign with it. It
+  cannot change a host and cannot authorize anything.
+- **Builder key replacement revokes the old references.** Replacing the
+  pinned key (`trust-builder` with a new key, for example after a
+  builder compromise) drops every reference admitted under the old key:
+  from then on they count as "no reference", and open `expected_pending`
+  findings whose "verified" label rested on them become "changed during
+  NOS job, unverified" (high, or critical for a critical-class path,
+  D9). The builder re-fetches and re-signs references with the new key,
+  and the executor admits them again under the first-admitted rule, now
+  per new key, so a forged reference from the compromised key cannot
+  block the correct one. The next complete full run compares every
+  package file with the re-admitted references; a file that matches
+  the approved baseline but differs from the new reference is a
+  critical "differs from signed reference" finding (D7). The lasting
+  effect of a builder compromise is limited to what the admin approved
+  into a baseline while the forged reference was trusted: those entries
+  stay approved until that full run flags them, and for a version that
+  can no longer be fetched (D8 "Old versions") no new reference exists,
+  so a forged file the admin approved for it stays in the baseline
+  undetected until the package version changes.
 - **Old versions.** Debian versions that left the mirror are fetched from
   `snapshot.debian.org` if the operator allows that origin; Ubuntu and
   PVE versions that are no longer published become "no reference" and
