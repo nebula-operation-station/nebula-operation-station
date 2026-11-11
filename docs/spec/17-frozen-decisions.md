@@ -214,3 +214,85 @@ The following can be chosen during implementation without reopening the architec
 | [v23-17-17](17-frozen-decisions.md#v23-17-17) | 17: Paragraph changelog for Spec v2.3 |
 | [v23-17-18](17-frozen-decisions.md#v23-17-18) | 17: Revision markers |
 | [v23-17-19](17-frozen-decisions.md#v23-17-19) | 17: Complete paragraph/block changelog |
+
+<a id="v25-17-01"></a>
+<!-- Spec revision (ADR 0013, EN-02): v25-17-01 -->
+### Spec revision 2026-11-11: one-step enrollment (ADR 0013, EN-02)
+
+<a id="v25-17-02"></a>
+<!-- Spec revision (ADR 0013, EN-02): v25-17-02 -->
+**Accepted revision and sources.** The maintainer accepted [ADR 0013: One-step host enrollment with pairing code and optional NetBird join](../adr/0013-one-step-enrollment.md) on 2026-11-11 (previously: proposed) and decided Q1–Q9 in its section "Decisions of the maintainer (2026-11-11)". The ticket plan is [`docs/implementation/one-step-enrollment.md`](../implementation/one-step-enrollment.md); this revision is its ticket EN-02 and is recorded in [spec 04](04-revision-history.md#v25-04-01). ADR 0013 takes precedence over this summary; where a ticket sets a detail the ADR leaves open (RPC messages, schema, NetBird response limits), the spec says so.
+
+<a id="v25-17-03"></a>
+<!-- Spec revision (ADR 0013, EN-02): v25-17-03 -->
+**Authority review (ADR 0013).** Every authority one-step enrollment adds, with its holder, scope, limits, revocation and audit:
+
+| Authority | Holder and exact scope | Limits and expiry | Revocation and audit | Spec, ADR 0013 |
+| --- | --- | --- | --- | --- |
+| Download endpoint `GET /enroll/<offer-id>` | `nebula-server`, unauthenticated, outside the UI auth chain; returns only the script of an open offer, once, via `FetchEnrollScript`; no other content | Offer single use and 15 min; 10/min and 60/h per client address (IPv6 per /64); 4096-bucket LRU table; script ≤ 64 KiB; uniform `404` for every refusal | Offer expiry or revocation ends it; `enroll_script_downloaded` with client and peer address; path never logged | [03 v25-03-05](03-processes-and-data.md#v25-03-05), [02 v25-02-01](02-architecture.md#v25-02-01); D2, D7 |
+| Trusted-proxies settings and client-address rule | `nebula-server` configuration: single proxy addresses, or networks declared proxy-only; decides whose `X-Forwarded-For` counts for the enrollment routes only | Header ≤ 1 KiB, ≤ 16 entries; unparsable entry or other prefix fails startup; refused header charges no bucket | Startup log of proxy-only networks; startup warning without trusted proxy on loopback/private/wildcard listener; refusals counted in a metric | [03 v25-03-06](03-processes-and-data.md#v25-03-06), [09 v25-09-01](09-untrusted-host-data.md#v25-09-01); D7 |
+| Offer store | `nebula-executor`, `executor.db`: ID hash, salt, binding, state, script hash, setup-key record, key ID, counters, orphan peers; never script bytes or plaintext setup key | 10 non-final offers, 30 per hour, 5 probes, 3 rejected codes, 1 mismatch; 2 non-final NetBird offers; 15 min lifetime; forward-only atomic state changes | UI revoke (any session of the user), `nebula host offer-revoke`; salt wiped at final state; offer events in [03 v25-03-04](03-processes-and-data.md#v25-03-04) | [03 v25-03-03](03-processes-and-data.md#v25-03-03), [03 v25-03-04](03-processes-and-data.md#v25-03-04); D2 |
+| Offer session binding | The web session that created the offer may show, browser-download, submit, approve and commit; other sessions read-only | Creation needs an open privileged session; lock, restart or session end does not resurrect the binding | Any session of the user and the admin CLI may revoke | [05 v25-05-02](05-authentication.md#v25-05-02); D2 |
+| Paired enrollment permit | `nebula-executor` builds it after the executor's own constant-time code match; binds offer ID hash, host, endpoint, endpoint-to-add flag, SSH user, credential, full fingerprint, code matched | HIGH, user verification, single use, enrollment-permit expiry; commit re-probes and pins only the approved key | `enroll_paired_proposed`, `host_enrolled` (source `paired`), `inventory_endpoint_added`; `nebula approve` shows all bound fields | [05 v25-05-01](05-authentication.md#v25-05-01), [08 v25-08-01](08-ssh-transport.md#v25-08-01); D4 |
+| NetBird offer permit | `nebula-executor`; binds offer ID hash, host, SSH user, credential, managed group, ephemeral flag, setup-key expiry; releases one setup key | HIGH, user verification, single use; 2 non-final NetBird offers, 5 keys per hour | `enroll_offer_approved`; `nebula approve` shows all bound fields | [05 v25-05-01](05-authentication.md#v25-05-01), [06 v25-06-02](06-credentials.md#v25-06-02); D1, D6 |
+| NetBird peer delete permit | `nebula-executor`; binds peer ID, peer name, NetBird IP, offer ID hash, attribution method; needed only for peers attributed by the time-window fallback | HIGH, user verification, single use | `netbird_peer_deleted`; never automatic | [05 v25-05-01](05-authentication.md#v25-05-01), [06 v25-06-05](06-credentials.md#v25-06-05); D6, Q8 |
+| NetBird management token and egress | `nebula-executor` vault; dedicated NetBird service user; typed calls only (setup keys create/revoke/list by name, peers list/get, NOS peer, delete after confirmation, policies read) to the executor-configured management URL and TLS trust; no generic proxy | Role may be broader than needed (accepted, Q3); NOS never changes policies or groups | Set only by `nebula netbird token set` (admin UID, non-echoing); never in argv, environment, server or browser; never in errors or logs | [06 v25-06-01](06-credentials.md#v25-06-01), [02 v25-02-02](02-architecture.md#v25-02-02); D6 |
+| Per-offer NetBird setup key | `nebula-executor` vault only; created after the NetBird offer permit under a persisted `pending` record; reaches the host only in the downloaded script | One use, ≤ 1 h (default offer expiry + 45 min), auto-group only the managed group, not ephemeral by default; not in "Show script", no browser download | Wiped and revoked unconditionally at every final state; retry 1 min then ≤ 5 min until revoked or expired; reconcile by key name; `netbird_setup_key_*` events | [06 v25-06-02](06-credentials.md#v25-06-02) – [v25-06-04](06-credentials.md#v25-06-04); D2, D6 |
+
+<a id="v25-17-04"></a>
+<!-- Spec revision (ADR 0013, EN-02): v25-17-04 -->
+**Limit map (ADR 0013).** Every limit is a named constant next to the code that enforces it:
+
+| Limit | Value | Specified in | ADR 0013 |
+| --- | --- | --- | --- |
+| Offer lifetime | 15 min in total (raising it up to 60 min is a later constant change, Q2) | [03 v25-03-04](03-processes-and-data.md#v25-03-04) | D2, Q2 |
+| Offer ID | ≥ 128 bits (recommended 160), SHA-256 at rest, 8-hex log prefix | [03 v25-03-04](03-processes-and-data.md#v25-03-04) | D2 |
+| Offer salt | 256 bits | [03 v25-03-03](03-processes-and-data.md#v25-03-03), [08 v25-08-01](08-ssh-transport.md#v25-08-01) | Terms, D3 |
+| Pairing code | 25 characters: 24 Crockford data (120 bits) + 1 mod-37 check | [08 v25-08-01](08-ssh-transport.md#v25-08-01), [09 v25-09-01](09-untrusted-host-data.md#v25-09-01) | D3, Q1 |
+| Non-final offers / offers per hour | 10 / 30 | [03 v25-03-04](03-processes-and-data.md#v25-03-04) | D2 |
+| Probes per offer | 5 | [03 v25-03-04](03-processes-and-data.md#v25-03-04), [08 v25-08-01](08-ssh-transport.md#v25-08-01) | D2, D3 |
+| Rejected codes / mismatches per offer | 3 / 1 | [03 v25-03-04](03-processes-and-data.md#v25-03-04), [08 v25-08-01](08-ssh-transport.md#v25-08-01) | D2, D3, Q7 |
+| Non-final NetBird offers / setup keys per hour | 2 / 5 | [06 v25-06-02](06-credentials.md#v25-06-02) | D2, D6 |
+| Setup key | one use, ≤ 1 h (default offer expiry + 45 min) | [06 v25-06-02](06-credentials.md#v25-06-02) | D6 |
+| Setup-key revoke retry | first after 1 min, then at most every 5 min, until revoked or expired | [06 v25-06-03](06-credentials.md#v25-06-03) | D6 |
+| NetBird join wait on the host | 60 s | [06 v25-06-04](06-credentials.md#v25-06-04) | D6 |
+| Rendered script size | 64 KiB | [03 v25-03-04](03-processes-and-data.md#v25-03-04) | D5 |
+| Download rate | 10/min, 60/h per client address, IPv6 per /64 | [03 v25-03-06](03-processes-and-data.md#v25-03-06) | D7 |
+| Rate-limit table | 4096 buckets, LRU, never refuse because full | [03 v25-03-06](03-processes-and-data.md#v25-03-06) | D7 |
+| Forwarded header | 1 KiB combined, 16 entries | [03 v25-03-06](03-processes-and-data.md#v25-03-06), [09 v25-09-01](09-untrusted-host-data.md#v25-09-01) | D7 |
+| NetBird API response limits | named constants set by EN-11 (not ADR numbers) | [09 v25-09-01](09-untrusted-host-data.md#v25-09-01) | — |
+
+<a id="v25-17-05"></a>
+<!-- Spec revision (ADR 0013, EN-02): v25-17-05 -->
+**Verifications pending before EN-12 (not open decisions).** ADR 0013 decided Q1–Q9; two facts are still to be established and recorded in the ADR before EN-12 starts: whether the NetBird management API attributes a peer to the setup key it joined with (Q8; otherwise the decided time-window fallback applies, with the NetBird peer delete permit for deletes based on it), and whether the reference lab uses self-hosted management or NetBird Cloud (Q3; both TLS trust settings are supported). EN-12 also records per supported NetBird client version whether it accepts the setup key by environment variable or key file; a version that accepts neither is not offered.
+
+<a id="v25-17-06"></a>
+<!-- Spec revision (ADR 0013, EN-02): v25-17-06 -->
+**Paragraph changelog (ADR 0013, EN-02).** Every changed or added block carries a `Spec revision (ADR 0013, EN-02)` marker and the stable anchor below. One existing sentence was changed in place: [spec 08](08-ssh-transport.md) "Enrollment" now names three ways to avoid blind trust (previously: two).
+
+| Changed block | Short changelog |
+| --- | --- |
+| [v25-02-01](02-architecture.md#v25-02-01) | 02: One-step enrollment boundary, unauthenticated download endpoint |
+| [v25-02-02](02-architecture.md#v25-02-02) | 02: Executor NetBird egress |
+| [v25-03-01](03-processes-and-data.md#v25-03-01) | 03: One-step enrollment responsibilities per process |
+| [v25-03-02](03-processes-and-data.md#v25-03-02) | 03: Enrollment socket methods |
+| [v25-03-03](03-processes-and-data.md#v25-03-03) | 03: Enrollment data (offer store) |
+| [v25-03-04](03-processes-and-data.md#v25-03-04) | 03: Offer lifecycle, limits and audit events |
+| [v25-03-05](03-processes-and-data.md#v25-03-05) | 03: Download endpoint, headers, reverse proxy |
+| [v25-03-06](03-processes-and-data.md#v25-03-06) | 03: Client address, trusted proxies, rate-limit table |
+| [v25-03-07](03-processes-and-data.md#v25-03-07) | 03: Durable offer records and volatile approval |
+| [v25-04-01](04-revision-history.md#v25-04-01) | 04: Spec revision 2026-11-11, one-step enrollment |
+| [v25-05-01](05-authentication.md#v25-05-01) | 05: Paired enrollment, NetBird offer and NetBird peer delete permits |
+| [v25-05-02](05-authentication.md#v25-05-02) | 05: Offer session binding |
+| [v25-05-03](05-authentication.md#v25-05-03) | 05: Pairing-code trust anchor and approval deception |
+| [v25-06-01](06-credentials.md#v25-06-01) | 06: NetBird management token custody |
+| [v25-06-02](06-credentials.md#v25-06-02) | 06: Per-offer setup keys and creation order |
+| [v25-06-03](06-credentials.md#v25-06-03) | 06: Setup-key revocation at the final state |
+| [v25-06-04](06-credentials.md#v25-06-04) | 06: Setup key on the target host |
+| [v25-06-05](06-credentials.md#v25-06-05) | 06: NetBird peers: cross-check, orphans, deletion, policy warning |
+| [v25-08-01](08-ssh-transport.md#v25-08-01) | 08: Paired enrollment (third way to avoid blind trust) |
+| [v25-08-02](08-ssh-transport.md#v25-08-02) | 08: One-step enrollment script and compatibility |
+| [v25-09-01](09-untrusted-host-data.md#v25-09-01) | 09: One-step enrollment input |
+| [v25-12-01](12-inventory.md#v25-12-01) | 12: One-step enrollment dialog |
+| [v25-12-02](12-inventory.md#v25-12-02) | 12: Endpoint added at commit |
+| [v25-17-01](#v25-17-01) – [v25-17-06](#v25-17-06) | 17: Accepted revision, authority review, limit map, pending verifications, changelog |
