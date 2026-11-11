@@ -539,6 +539,9 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 			}
 		case "docker.check_updates":
 			if u, err := dockerhost.ParseImageUpdates(x.Result); err == nil && len(x.Result) > 0 {
+				// Images on an executor private registry get the digest
+				// the executor read under a registry read lease (G13).
+				u = h.resolveImageUpdates(ctx, u)
 				hv.DockerUpdates = &u
 			}
 		case "docker.start", "docker.stop", "docker.restart":
