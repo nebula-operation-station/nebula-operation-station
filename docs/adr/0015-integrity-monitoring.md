@@ -108,8 +108,11 @@ named in the handbook next to every "no unexpected change" result:
   `AuthorizedPrincipalsCommand` program reads or runs (only the program
   itself is critical-class), `at` job spools,
   and the files that sshd follows a symlink to outside the scanned roots
-  (each such symlink at an SSH login file position is critical-class and
-  opens the same finding, D9),
+  (each symlink at or above an SSH position is critical-class and
+  opens the same finding, D9), the configuration and login files that
+  sshd's command line names with `-f` or `-o` (the sources of that
+  command line, `/etc/default/ssh` and the sshd units, are
+  critical-class, but the executor does not parse them, D9),
   `/tmp`, `/dev/shm`, `/run`, `/etc/pve` (excluded by design, D5; Q1),
   container images and
   volumes. Under `/usr`, only the D5 roots are watched: **`/usr/share`
@@ -120,14 +123,21 @@ named in the handbook next to every "no unexpected change" result:
   `/usr/games`. Persistence placed there is not seen by I2.
 - **Login-relevant files that are not critical-class.** D9 "SSH login
   files" makes every file that sshd reads to grant a login
-  critical-class, plus PAM, the account files and `/etc/nsswitch.conf`.
-  Files that the PAM or NSS modules themselves read are not derived and
-  stay ordinary `/etc` or `/usr/lib` entries (high findings, approvable
-  in the browser): for example `/etc/sssd/`, LDAP client configuration,
-  `/etc/krb5.conf`, the `libnss_*` modules and any data file a module
-  reads outside `/etc/pam.d/` and `/etc/security/` (both
-  critical-class). A changed NSS source named in `/etc/nsswitch.conf` is
-  critical; a change inside that source's own configuration is not.
+  critical-class, plus PAM, the account files, `/etc/nsswitch.conf` and
+  `/etc/krb5.keytab`. Files that the PAM or NSS modules themselves read
+  are not derived and stay ordinary `/etc` or `/usr/lib` entries (high
+  findings, approvable in the browser): for example `/etc/sssd/`, LDAP
+  client configuration, `/etc/krb5.conf`, the `libnss_*` modules and any
+  data file a module reads outside `/etc/pam.d/` and `/etc/security/`
+  (both critical-class). A changed NSS source named in
+  `/etc/nsswitch.conf` is critical; a change inside that source's own
+  configuration is not. Likewise, hostbased trust (`/etc/hosts.equiv`,
+  `shosts.equiv`, `.shosts`, `.rhosts`, all critical-class) names hosts,
+  and sshd maps the client's address to a host name through
+  `/etc/hosts`, `/etc/host.conf`, `/etc/resolv.conf` and DNS; these
+  name-resolution sources are not critical-class, so on a host with
+  `HostbasedAuthentication yes` a browser-approved `/etc/hosts` change
+  can make another address count as a trusted host.
 - **Default exclusions that affect what runs.** D5 excludes Python
   `__pycache__` bytecode at any depth under `/usr/lib/python3*` and
   `/usr/local/lib/python3*`, which the interpreter executes instead of
@@ -799,12 +809,27 @@ roles never mix:
      **7 days** after the executor built it (executor clock); and when a
      baseline approval stores a new approved digest, the executor deletes
      every stored proposal of that host whose previous digest is no
-     longer the approved digest (they could never be approved). When the
-     per-host cap is reached, a new proposal evicts the oldest one; an
-     evicted or expired proposal is refused by `approve` like an unknown
-     digest, and the admin requests a new one. A compromised server can
-     therefore make the executor discard pending proposals, never store
-     more than the cap or approve anything. `pending` only lists stored proposed
+     longer the approved digest (they could never be approved). The store
+     is also bounded **in bytes**, measured as the stored encoding of the
+     difference entries (path, old and new values) plus the stored derived
+     set: one non-initial proposal at most **16 MiB**
+     (`maxProposalBytes`), the initial proposal at most **128 MiB**
+     (`maxInitialProposalBytes`, the D6 per-run document limit, since it
+     holds exactly one run), and all stored proposals of one host
+     together at most **256 MiB** (`maxProposalStoreBytesPerHost`). The
+     executor refuses to build a proposal that would exceed its own limit
+     (the admin approves the change in smaller batches; an initial run
+     over the limit cannot be proposed and the admin is told so). When the
+     per-host count or byte cap would be exceeded, a new proposal evicts
+     the oldest non-initial ones until it fits; an evicted or expired
+     proposal is refused by `approve` like an unknown digest, and the
+     admin requests a new one. **Proposal requests are rate-limited**:
+     the executor builds at most **30** new proposals per host per hour
+     (`maxProposalsPerHostHour`, sliding window, executor clock) and
+     refuses further requests without evicting anything. A compromised
+     server can therefore make the executor discard pending proposals, at
+     most at that rate, but never store more than the caps, never make it
+     recompute digests faster than that, and never approve anything. `pending` only lists stored proposed
      digests and approves nothing. `approve` itself, whatever the source
      of the digest the admin passes (typed, pasted from `pending` or from
      the browser), refuses a digest for which it holds no stored
