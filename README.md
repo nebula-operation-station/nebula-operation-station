@@ -14,6 +14,8 @@ A self-hosted operations control plane for Linux homelabs (about 5 to 100 hosts)
 - **Network.** IPAM, discovery scans and device lists.
 - **Audit and recovery.** Signed events, backup and restore with `age`, and release manifests signed with an offline hardware key ([release signing](docs/admin/release-signing.md)).
 
+How-tos and a FAQ for running it: the [operator handbook](docs/handbook/README.md).
+
 ## Screenshots
 
 Taken from the test harness's preview mode with demo data (`go run ./test/browser/harness -preview PORT /absolute/empty/dir`, then open `http://localhost:PORT`).
