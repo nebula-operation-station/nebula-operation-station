@@ -70,12 +70,15 @@ var migrationFS embed.FS
 
 // DB is the executor database. It is safe for concurrent use.
 type DB struct {
-	sql       *sql.DB
-	dirLock   *os.File // flock(LOCK_EX) on the data directory
-	created   bool
-	now       func() time.Time
-	closeOnce sync.Once
-	closeErr  error
+	sql     *sql.DB
+	dirLock *os.File // flock(LOCK_EX) on the data directory
+	created bool
+	now     func() time.Time
+	// offerLimits are the per-executor enrollment offer limits; always
+	// defaultOfferLimits outside this package's tests.
+	offerLimits offerLimits
+	closeOnce   sync.Once
+	closeErr    error
 }
 
 // Open opens (and if needed creates) executor.db in dataDir. dataDir must
@@ -142,7 +145,10 @@ func open(dataDir string, now func() time.Time) (_ *DB, err error) {
 	// _journal_mode and _synchronous keys run after all of them. So the
 	// exclusive locking mode is set before WAL is enabled, and SQLite keeps
 	// the WAL index in heap memory instead of a shared -shm file.
-	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(%d)&_pragma=foreign_keys(1)&_pragma=locking_mode(EXCLUSIVE)&_journal_mode=WAL&_synchronous=FULL",
+	// secure_delete overwrites deleted and overwritten content with zeros,
+	// so a wiped secret (an enrollment offer's salt) does not stay behind
+	// as free space in a page.
+	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(%d)&_pragma=foreign_keys(1)&_pragma=locking_mode(EXCLUSIVE)&_pragma=secure_delete(1)&_journal_mode=WAL&_synchronous=FULL",
 		path, busyTimeout.Milliseconds())
 	sdb, err := sql.Open("sqlite", dsn)
 	if err != nil {
@@ -178,7 +184,37 @@ func open(dataDir string, now func() time.Time) (_ *DB, err error) {
 		sdb.Close()
 		return nil, err
 	}
-	return &DB{sql: sdb, dirLock: dirLock, created: created, now: now}, nil
+	// A crash between a salt wipe's commit and its checkpoint leaves the
+	// wiped salt in the WAL; recovery replays it, and this removes it
+	// before Open returns (see purgeWipedSalt).
+	if err := checkpointTruncate(sdb); err != nil {
+		sdb.Close()
+		return nil, fmt.Errorf("executordb: %w", err)
+	}
+	return &DB{sql: sdb, dirLock: dirLock, created: created, now: now, offerLimits: defaultOfferLimits}, nil
+}
+
+// checkpointTruncate copies every WAL frame into the main file, syncs it
+// and truncates the -wal file to zero bytes. It fails if SQLite reports the
+// checkpoint as blocked.
+func checkpointTruncate(sdb *sql.DB) error {
+	busy, logFrames, checkpointed, err := walCheckpoint(sdb)
+	if err != nil {
+		return fmt.Errorf("wal checkpoint: %w", err)
+	}
+	if busy != 0 {
+		return fmt.Errorf("wal checkpoint blocked (%d of %d frames copied)", checkpointed, logFrames)
+	}
+	return nil
+}
+
+// walCheckpoint runs PRAGMA wal_checkpoint(TRUNCATE) and returns its three
+// result columns. Tests replace it to reach both failure branches of
+// checkpointTruncate (a failed query and a blocked checkpoint) from Open
+// and from purgeWipedSalt.
+var walCheckpoint = func(sdb *sql.DB) (busy, logFrames, checkpointed int64, err error) {
+	err = sdb.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &checkpointed)
+	return busy, logFrames, checkpointed, err
 }
 
 // lockDir takes a non-blocking exclusive flock on dir.

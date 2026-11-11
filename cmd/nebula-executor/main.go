@@ -178,9 +178,7 @@ func run() error {
 	}
 	keys := keyring.New(keysDir)
 	svc := executor.NewService(auth, keys, db, reg, log)
-	svc.SetPveGuestPowerBindings(powerBindings)
-	svc.SetEventKey(chain.PublicKey())
-	svc.SetBackupDirs(*dataDir, keysDir)
+	wireServedService(svc, powerBindings, chain.PublicKey(), *dataDir, keysDir)
 	// Built-in trust (ADR 0007 E16): commits record exact artifact trust
 	// in executor.db, the same entries the risk policy reads.
 	setupBuiltinTrust(svc, *dataDir, *trustDir, *bundleDir, db, log)

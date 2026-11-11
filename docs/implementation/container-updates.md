@@ -70,7 +70,7 @@ Gaps that the steps close:
 | G10 | Postchecks do not gate anything. The Compose verdict is computed for display on the server; the script's exit status covers only pull and up. `RequiredPostchecks` is always empty and `RecordPostcheck` has no production caller | `internal/web/ui/operations.go:537`, `internal/executions/actions/scripts/docker_compose_update.sh:61`, `internal/executions/batchplan.go:274`, `internal/permit/batch/rollout.go:456` |
 | G11 | `docker.check_updates` covers running containers only, is anonymous, and compares against the index digest, so an index change on another architecture reads as an update (ADR lines 359-362). A container recreated by digest would read as `pinned` from then on | `internal/executions/actions/scripts/docker_check_updates.sh:21-22,60,64` |
 | G12 | No candidate source for tag changes in a real install: nothing produces `registry.tags`, and `registrymeta.NewClient` has no production caller, so the chart's stable version stays "unknown" | `internal/web/ui/chart.go:446-451` |
-| G13 | Private reads fail closed in a real install: `SetRegistryReadAuthorizer` has no production caller, and the server never calls `ReadPrivateRegistry`. `PrivateClient` cannot fetch blobs by design | `internal/executor/registry_private.go:137`, `internal/registrymeta/private.go:48` |
+| G13 | Private reads fail closed in a real install: `SetRegistryReadAuthorizer` has no production caller, and the server never calls `ReadPrivateRegistry`. `PrivateClient` cannot fetch blobs by design. **Partly closed by cu06a (2026-11-11):** the executor wires the registry read lease profile (`setupRegistryReads`). **cu06af (2026-11-11):** the executor exposes the lease identity, and the server-side lease builder and `ReadPrivateRegistry` caller exist (`registrymeta`, `dockerhost.ResolvePrivateDigests`). **Closed by cu06af2 (2026-11-11; before: "still open: nothing in `nebula-server` or the UI calls them, and the lease list shows registry leases as invalid"):** `nebula-server` proposes registry read leases from the lease form, the lease pages show them as active, expired or revoked, and check_updates results on the operation page and chart get the executor-read digest (cached for the lease interval); the credential stays in the executor. `PrivateClient` still cannot fetch blobs by design (see cu06) | `internal/executor/registry_private.go:137`, `internal/registrymeta/private.go:48`, `internal/executor/registry_read_grant.go`, `cmd/nebula-executor/registry_reads.go`, `internal/registrymeta/lease.go`, `internal/registrymeta/executor_reads.go`, `internal/registrymeta/digest_reader.go`, `internal/registrymeta/lease_view.go`, `cmd/nebula-server/registry_reads.go`, `internal/web/ui/leases_registry.go` |
 | G14 | No rollback state, action or image retention exists. `executor.db` migrations end at 0019 | `internal/executordb/migrations/` |
 | G15 | Consumers keep old incarnations: batch bindings need a fresh `docker.inspect` of the new ID, and `ServicePlacement.ContainerID` keeps a full ID | `internal/executions/batchoutcome.go:489`, `internal/pveinventory/links.go:769` |
 
@@ -1192,8 +1192,10 @@ Until they land, cu04 shows those targets as unavailable with a reason.
 
 ### cu06 Private registry transfer (P2-04, split out, gated)
 
-**Do not start before Q6 is answered.** The ADR requires a reviewed profile
-before enablement.
+**Q6 answered 2026-11-11 (recommended profile):** the maintainer accepted
+option (a), executor fetch and `docker load` over SSH (previously: "Do not
+start before Q6 is answered"). The ADR still requires a reviewed profile
+before the transfer is enabled.
 
 - **Rules:** R7, R5 (registry credential), R4, R6 (resolve and verify for
   private images). **Gaps:** G13.
@@ -1223,11 +1225,68 @@ before enablement.
   wrong blob digest; oversize manifest or blob; out-of-scope repository;
   redirect; Lock, rotation and expiry during the transfer; no `docker login`
   and no `X-Registry-Auth`; both image stores.
-- **Real install:** `SetRegistryReadAuthorizer` has no production caller
+- **Real install:** `SetRegistryReadAuthorizer` had no production caller
   (G13), so a read-grant profile and the call in `cmd/nebula-executor` are
   required first, together with a server caller for `ReadPrivateRegistry`.
   Also needed: executor egress to each registry, and bounded executor disk or
   a streaming path. The threat model gets a line for the new data flow.
+- **G13 status (cu06a, 2026-11-11):**
+  - Done: read-grant profile `registry` (`schedgrant.RegistryReadProfile`,
+    `permit.RegistryTarget`): on_demand only, at most 7 days, 15-minute floor
+    per registry, repository and method, budget 24 (max 240) per registry and
+    rolling hour, 1 to 8 registries with 1 to 64 repositories and the methods
+    `tag_digest` and `list_tags` (floor per registry, repository, method
+    and tag since cu06af2; before: per registry, repository and method, so
+    two tags of one repository collided). Each registry is bound to its record digest
+    and version and to its credential's random identity and version, so Lock,
+    rotation, removal and re-add, and expiry follow the `ReadPrivateRegistry`
+    rules. The lease holds no credential value.
+  - Done: `Service.RegistryReadGrants` enforces the lease with the shared
+    durable read counters and the read pause, and `cmd/nebula-executor` wires
+    it (`setupRegistryReads`).
+  - Done (cu06af, 2026-11-11; before: open because `PrivateRegistryInfo`
+    lacked the lease identity): `PrivateRegistryInfo` carries
+    `config_digest` and `credential_id`, both non-secret.
+    `registrymeta.ProposeRegistryReadLease` builds the lease from
+    `ListPrivateRegistries` alone and proposes it through the ordinary
+    `ProposeReadGrant`; approval is the usual `CommitReadGrant` by digest.
+    `registrymeta.PrivateDigests` is the server caller of
+    `ReadPrivateRegistry`, and `dockerhost.ResolvePrivateDigests` fills the
+    executor-read digest into a `docker.check_updates` result for images the
+    host reported "unknown" (status stays "unknown": the result has no local
+    digest to compare). `TestServerBuiltRegistryLeaseEndToEnd` shows it end
+    to end with the real executor.
+  - Done (cu06af2, 2026-11-11; before: "still open, nothing in
+    `cmd/nebula-server` or `internal/web/ui` calls these, and the lease list
+    shows registry leases as invalid"): `cmd/nebula-server` passes
+    `serverRegistryReads` (`registry_reads.go`) as `ui.Options.RegistryReads`.
+    The lease form has a "Private registry" scope: POST `/leases/preview`
+    with `scope=registry` calls `registrymeta.ProposeRegistryReadLease`
+    under a fresh lease id, and the usual proposal page shows every frozen
+    registry (record digest and version, credential identity and version,
+    repositories, reads) before the security key or CLI approves the digest.
+    The lease list and detail pages decode registry leases with
+    `registrymeta.DecodeRegistryLease` (same re-verification as the
+    executor) and show them as active, expired or revoked with their
+    registries. The operation page and the chart run `docker.check_updates`
+    results through `dockerhost.ResolvePrivateDigestsWith` over one
+    long-lived `registrymeta.DigestReader`, which keeps each digest for the
+    15-minute interval, so a re-render is not rate limited. A rate-limited
+    read (`ResourceExhausted`) has its own note ("rate limited ... retry
+    later"), not the no-lease note. One stored registry lease that fails
+    re-verification is skipped (logged), not an internal error for every
+    read. Tests: `TestServerRegistryReadsThroughRoleTable` (real executor,
+    server role), `TestServerBuiltRegistryLeaseEndToEnd` (two tags of one
+    repository, re-render without moving the clock).
+  - Still open (outside G13): `internal/executions/readgrants.go` itself
+    still reports registry leases as "invalid" (the UI overlays the
+    verified view; other consumers of `ReadGrants` would not). The
+    executor's `ProposeReadGrant` does not compare registry targets with the
+    current records; a stale proposal is harmless (every read re-checks),
+    but an early refusal belongs in `internal/executor/roles_read.go`. The
+    lease form offers each registry's whole approved scope, not single
+    repositories. Status of a private image stays "unknown": the
+    check_updates result carries no local digest to compare with.
 
 ## Non-goals
 
@@ -1475,7 +1534,9 @@ The text below is the proposal of 2026-11-06 that the decisions accept.
    SSH reverse tunnel (the daemon verifies digests itself, but it needs
    forwarding enabled on every host and yields a rewritten image name). A
    credential handed to the engine is excluded by the ADR. Who signs off the
-   review?
+   review? **Answered 2026-11-11:** the maintainer accepts the recommended
+   profile (a). cu06a delivers the read-lease prerequisite (G13); the
+   transfer itself remains cu06.
 7. **Standalone definition format? Blocks cu05.** *Recommendation:* an exact
    argument list for `docker create`, which NOS completes only with the image.
    No shell, no template, no inspect input. An argument list would put secret env

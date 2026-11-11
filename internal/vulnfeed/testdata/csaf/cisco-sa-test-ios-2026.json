@@ -1,0 +1,65 @@
+{
+  "document": {
+    "category": "csaf_security_advisory",
+    "csaf_version": "2.0",
+    "title": "Cisco IOS, IOS XE and Business Switches Test Advisory (synthetic)",
+    "publisher": {
+      "category": "vendor",
+      "name": "Cisco",
+      "namespace": "https://www.cisco.com"
+    },
+    "tracking": {
+      "id": "cisco-sa-test-ios-2026",
+      "version": "@VERSION@",
+      "status": "final",
+      "initial_release_date": "2026-01-10T16:00:00+00:00",
+      "current_release_date": "@DATE@",
+      "revision_history": [
+        {"number": "@VERSION@", "date": "@DATE@", "summary": "Synthetic test revision."}
+      ]
+    }
+  },
+  "product_tree": {
+    "branches": [
+      {
+        "category": "vendor",
+        "name": "Cisco",
+        "branches": [
+          {
+            "category": "product_family",
+            "name": "Cisco IOS",
+            "branches": [
+              {"category": "product_version", "name": "15.2(4)M3", "product": {"product_id": "CSAFPID-0001", "name": "Cisco IOS 15.2(4)M3"}},
+              {"category": "product_version", "name": "15.2(4)M11", "product": {"product_id": "CSAFPID-0002", "name": "Cisco IOS 15.2(4)M11"}}
+            ]
+          },
+          {
+            "category": "product_family",
+            "name": "Cisco IOS XE Software",
+            "branches": [
+              {"category": "product_version", "name": "17.3.1", "product": {"product_id": "CSAFPID-0003", "name": "Cisco IOS XE Software 17.3.1"}},
+              {"category": "product_version", "name": "17.3.8", "product": {"product_id": "CSAFPID-0004", "name": "Cisco IOS XE Software 17.3.8"}}
+            ]
+          },
+          {
+            "category": "product_family",
+            "name": "Cisco Business 350 Series Managed Switches",
+            "branches": [
+              {"category": "product_version", "name": "3.2.0.84", "product": {"product_id": "CSAFPID-0005", "name": "Cisco Business 350 Series Managed Switches 3.2.0.84"}},
+              {"category": "product_version", "name": "3.3.0.16", "product": {"product_id": "CSAFPID-0006", "name": "Cisco Business 350 Series Managed Switches 3.3.0.16"}}
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "vulnerabilities": [
+    {
+      "cve": "CVE-2026-20001",
+      "product_status": {
+        "known_affected": ["CSAFPID-0001", "CSAFPID-0003", "CSAFPID-0005"],
+        "fixed": ["CSAFPID-0002", "CSAFPID-0004", "CSAFPID-0006"]
+      }
+    }
+  ]
+}

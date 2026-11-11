@@ -454,6 +454,13 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	}
 	isAdmin := vulnAdmin(exec)
 
+	// Private registry reads (G13). The digest reader's background worker
+	// lives as long as the server: when connCtx ends it is closed (its
+	// batch in flight cancelled, the worker drained), and bg waits for
+	// that before the executor connection closes.
+	registryReads := newServerRegistryReads(exec, time.Now, log)
+	bg.Go(func() { closeRegistryReads(connCtx, registryReads, shutdownTimeout, log) })
+
 	h, err := ui.New(withBatchPlanner(ui.Options{
 		PublicOrigin:   cfg.PublicOrigin,
 		Status:         exec,
@@ -501,7 +508,12 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		TOTPStatus:   totpStatus,
 		// Findings pages over the real store.
 		Vuln: vulnPages{v: vuln, admin: isAdmin},
-		Log:  log,
+		// Private registry reads (ADR 0006, cu06 part 1, G13): registry
+		// read leases on the lease pages and executor-read digests of
+		// private images in docker.check_updates results. The credential
+		// stays in the executor.
+		RegistryReads: registryReads,
+		Log:           log,
 	}, batches))
 	if err != nil {
 		return err

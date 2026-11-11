@@ -588,9 +588,11 @@ that lets the executor find and revoke it:
    record; so a failed revoke always leaves a retry or reconcile record
    (amended 2026-11-11; previously the key ID was used for the revoke
    without being stored). An unverified key ID (key name or setup key
-   failed) is revoked only after a get by ID returns that key with every
-   reconcile candidate property (step 5); a `404`, a revoked key or a
-   failing property sends the record to reconcile instead of closing it. A valid key is stored in the
+   failed) is revoked only after a get by ID returns that key with exactly
+   the requested key name and every reconcile candidate property (step 5;
+   amended 2026-11-11, fix round 3, previously: the NOS name prefix
+   sufficed); a `404`, a revoked key, another name or a failing property
+   sends the record to reconcile instead of closing it. A valid key is stored in the
    vault and, in one atomic compare-and-set, the record moves `pending` →
    `created` (key ID, vault reference), the SHA-256 of the full render is
    stored and the offer moves `awaiting_approval` → `open`. The key is
@@ -611,20 +613,44 @@ that lets the executor find and revoke it:
    out or failed without a clear "not created" answer, and for every
    record still `pending` on a final offer, the executor moves a non-final
    offer with a `pending` record to `failed` (the operator re-offers) and,
-   once the record's window has ended, lists setup keys. Only keys with a
+   once the record's window has ended, lists setup keys. Each pass takes
+   the key list first and only then the snapshot of all records, so every
+   listed NOS key's `pending` record is in the snapshot. NetBird's
+   setup-key list (`GET /api/setup-keys`) is not paginated, as documented
+   for NetBird's management API; before coding, EN-11 verifies this
+   against the reference lab's management server and NetBird Cloud and
+   records the NetBird version checked here, and the field that carries
+   a key's creation time (an endpoint found paginated, or without such a
+   field, stops EN-11 for a spec amendment). A pass therefore
+   sends one request; the list is complete only for status `200` and a
+   bare UTF-8 JSON array of at most 10 000 keys in at most 16 MiB, every
+   entry passing the spec 09 entry check (only `id`, `name`,
+   `usage_limit`, `expires`, the creation time, `revoked` and
+   `auto_groups` are read; every other field, `key` and `last_used`
+   included, is ignored and never logged, stored or put into an error)
+   and none of the closed list of pagination headers of spec 09. One
+   failing entry truncates the whole list. Anything else is truncated:
+   it matches nothing, revokes nothing and raises the unresolved alert
+   naming the truncation class (spec 03, 06, 09; amended 2026-11-11;
+   previously: page by page with an unnamed last-page indication and
+   limits "set by EN-11"). The get by key ID of step 3 uses the same
+   entry check within its own limit of 64 KiB. Only keys with a
    valid key ID, the NOS name prefix, `usage_limit` 1, expiry ≤ 1 h after
    creation, exactly the managed group, creation time inside the stored
    window and not revoked are candidates; keys whose ID or name any other
    offer's record holds (`pending`, mid-create, `created`) are excluded.
-   Every `pending` or unverified `created` record is matched by its key
-   name; only a record whose create answered with a mismatched key name
-   is matched by window if no name matches, and a window match counts
-   only if no other unresolved record (`pending` or unverified
-   `created`) with the same group has an overlapping window. A record
-   whose create never answered is matched by name only, so a key no
-   local record knows is never revoked automatically (amended
-   2026-11-11, fix round 2; previously: window match for every record,
-   ambiguity counted only `pending` records). Exactly one match is
+   Every `pending` or unverified `created` record is matched by exactly
+   its requested key name and by nothing else; no record, not even one
+   whose create answered with a mismatched key name, is matched by
+   window, so a key found only by window is never revoked automatically
+   and its record raises the unresolved alert (amended 2026-11-11, fix
+   round 3; previously: a name-mismatched record was matched by window
+   when no other unresolved record's window overlapped; before that, fix
+   round 2: window match for every record). Automatic revoke of a key
+   this executor did not create remains possible only through the
+   residuals R1–R3 of spec 06 (32-bit name collision, the same name
+   created by another party, a wrong key ID in a valid create
+   response). Exactly one match is
    recorded (`netbird_setup_key_reconciled`, key ID) and revoked like any
    final-state key; zero or several matches revoke nothing, and the
    operator is asked to revoke by hand (`netbird_setup_key_unresolved`).
@@ -959,7 +985,7 @@ this ADR either.
 | Other local users on the target host (shared or multi-user host) | Offer ID passed to `curl`/`wget` on standard input from the `printf` builtin, never in argv; download directory `0700` and files `0600` under `umask 077`; setup key passed to the NetBird client only by environment variable or key file, never in argv; NetBird option not offered for a client version that accepts neither (D5) | The ID stays in the operator's own shell history (`0600`) but is single-use and consumed seconds later; a user with root or the operator's UID is out of scope (they own the session) |
 | Setup key left on the host's disk | Download directory and key file in RAM-backed `/dev/shm` or `$XDG_RUNTIME_DIR`; `umask 077`, `mktemp -d` (`0700`), `trap` cleanup on exit, hang-up, interrupt and termination, in the command and in the script; no browser download for NetBird offers (D8) | `SIGKILL`/power loss leaves a `0700` file; without `/dev/shm` and `$XDG_RUNTIME_DIR` the fallback `$TMPDIR`/`/tmp` is disk-backed and freed blocks can keep the key; `tmpfs` pages can reach swap; key one-off, ≤ 1 h, revoked when the offer is final |
 | Setup key at rest on executor, server or reverse proxy | Key only encrypted in the vault; scripts rendered on demand and checked against the stored hash, never stored, cached or logged; "Show script" renders a placeholder instead of the key; reverse proxy required to run `/enroll/` with `proxy_buffering off`, `proxy_max_temp_file_size 0`, no cache, no access log | Plaintext in executor, server and proxy memory while a response is rendered and streamed; a proxy configured against the guide may spill it to disk |
-| Setup key created but not recorded (crash, timeout, locked vault, race with revoke or expiry) | Persisted `pending` record with key name, managed group and creation time window before the create call; atomic compare-and-set to `created`; a key created for an offer that became final meanwhile is revoked at once; reconcile by key name after restart or timeout, by window and group only after a create answered with a mismatched key name and no other unresolved record's window overlaps; zero or several matches alert and never revoke; a key no local record knows is never revoked automatically | Key live until reconcile reaches NetBird or the operator revokes it by hand, at most until its ≤ 1 h expiry; a 32-bit key-name collision with a foreign key in the same group and window (about 2⁻³²) revokes that one-off key |
+| Setup key created but not recorded (crash, timeout, locked vault, race with revoke or expiry) | Persisted `pending` record with key name, managed group and creation time window before the create call; atomic compare-and-set to `created`; a key created for an offer that became final meanwhile is revoked at once; get by key ID and reconcile revoke only a key with exactly the requested key name and every candidate property; reconcile takes the key list before the record snapshot, reads it within named limits and treats a truncated list as unresolved; no window match (previously: by window and group after a create answered with a mismatched key name); zero or several matches, a name-mismatched record without a name match and a truncated list alert and never revoke | Key live until reconcile reaches NetBird or the operator revokes it by hand, at most until its ≤ 1 h expiry; a create NetBird processes after the stored window never matches (alert, record closed at window end + 1 h, key valid at most 1 h after its late creation). Foreign key revoked automatically only by (R1) a 32-bit key-name collision with a foreign key in the same group and window (about 2⁻³²), (R2) a key with exactly the requested name created by another party (a second executor from a copy of `executor.db`, or someone copying the naming) in the same group and window, or (R3) a valid create response from the management server that names another key's ID |
 | Setup key still valid after the offer ended | Secret wiped from the vault at the final state; key ID kept until revoke succeeds, `netbird_setup_key_revoke_failed` audited, retried, shown on the dashboard and in `nebula host offers` until revoked or expired | Valid until NetBird is reachable again, at most until its ≤ 1 h expiry |
 | Wrong NetBird peer deleted | Never automatic; peers attributed only by the time-window fallback need a NetBird peer delete permit with the security key | Operator approves a wrong peer despite the shown peer name and IP |
 | Downgrade of the probed key type | Probe offers only `ssh-ed25519`; later connections restrict `HostKeyAlgorithms` to the pinned type | — |
@@ -1078,6 +1104,40 @@ follows; D1–D9 above already reflect these decisions.
     NetBird calls are create, revoke, get by key ID and list without a
     name filter (previously: create, revoke and list by name). The 32-bit
     key-name collision is named as a residual (spec 06).
+  - D6 "Creation order" steps 3 and 5 (fix round 3, spec text in
+    `docs/spec/02`, `03`, `06`, `09`, `17`; previously listed without
+    `09`, which still let a failing list entry be skipped, matched
+    name-mismatched records by window and left the list limits to EN-11): automatic revoke only of a key
+    whose name equals the record's requested name, in the get by key ID
+    as in reconcile; the window match for name-mismatched records is
+    removed and such a record raises the unresolved alert (previously:
+    window match when no other unresolved window overlapped). Reconcile
+    takes the key list before the record snapshot; the list is bounded
+    and a truncated list alerts instead of meaning "no candidate". The
+    complete-list condition is defined for NetBird's list endpoint as it
+    is: unpaginated, one request, status `200`, a bare JSON array within
+    `NetBirdKeyListMaxKeys` = 10 000 and `NetBirdKeyListMaxBytes` =
+    16 MiB, no pagination sign (`NetBirdKeyListMaxPages` = 1); every
+    other result is truncated and never leads to a revoke (amended
+    2026-11-11; previously: page by page, an unnamed last-page
+    indication and limit values "set by EN-11"). Spec 09 names the
+    list-entry fields that are read (`id`, `name`, `usage_limit`,
+    `expires`, the creation time, `revoked`, `auto_groups`); every other
+    field is ignored and `key`, `last_used` and similar fields are never
+    logged, stored or put into an error; one failing entry truncates the
+    whole list; the pagination headers are a closed list; the get by
+    key ID has its own limit `NetBirdKeyGetMaxBytes` = 64 KiB; spec 03
+    tells the operator to delete revoked keys in NetBird well before
+    10 000; EN-11 verifies the unpaginated endpoint on the reference lab
+    and NetBird Cloud and records the version (previously: "strict list
+    schema" without fields, "any header naming a next page", and the
+    get "checked like the list"). The foreign-key
+    revocation residuals R1–R3 and the late-create residual are named
+    in spec 06 and in this ADR's "Threat model additions" (previously
+    claimed: "in spec 06 and the threat model"; `docs/threat-model.md`
+    covers Release 0.9, does not describe enrollment yet and takes
+    these residuals over when the feature ships). "Show script" writes only the mismatch-audited
+    flag and the mismatch counter, which no state transition reads.
   - D5: every stored render input that reaches the script has a format and
     a quoting rule, including the NetBird management URL and the
     key-passing mode table (previously: only the setup key and `from=`).
@@ -1104,8 +1164,9 @@ follows; D1–D9 above already reflect these decisions.
   mismatch handling.
 - `docs/spec/06-credentials.md`: NetBird management token custody, per-offer
   setup keys in the vault created only after approval and under a persisted
-  `pending` record with reconcile by key name, else by stored time window
-  and managed group, no plaintext script at rest
+  `pending` record with reconcile by the requested key name only
+  (previously: by key name, else by stored time window and managed
+  group; see "Amendments", fix round 3), no plaintext script at rest
   (render on demand), unconditional revocation at the final state with
   retry and audit on failure, orphan peers.
 - `docs/spec/05-authentication.md`: paired enrollment permit, NetBird

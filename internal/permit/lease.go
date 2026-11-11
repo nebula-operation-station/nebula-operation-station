@@ -169,6 +169,11 @@ type ReadGrantDoc struct {
 	// lease (rate_profile "netdevice", ADR 0010 D4). Empty for every other
 	// profile.
 	NetDeviceTargets []NetDeviceTarget `json:"netdevice_targets,omitempty"`
+	// RegistryTargets binds the exact private registry records,
+	// credentials, repositories and methods of a registry read lease
+	// (rate_profile "registry", ADR 0006, cu06). Empty for every other
+	// profile.
+	RegistryTargets []RegistryTarget `json:"registry_targets,omitempty"`
 }
 
 // Device read lease limits (ADR 0010 D4) beyond the schedgrant profile.
@@ -338,6 +343,15 @@ func parseReadGrant(raw []byte, now time.Time, stored bool) (ReadGrantDoc, []byt
 	default:
 		return fail("trigger must be %q, %q or %q", TriggerScheduled, TriggerOnDemand, TriggerBoth)
 	}
+	if d.Grant == ReadGrantFormat && d.RateProfile == schedgrant.RegistryReadProfile {
+		if err := validateRegistryGrant(d); err != nil {
+			return fail("%v", err)
+		}
+		return d, canon, digest, nil
+	}
+	if len(d.RegistryTargets) != 0 {
+		return fail("only registry read leases bind private registries")
+	}
 	if d.Grant == ReadGrantFormat && d.RateProfile == schedgrant.NetDeviceReadProfile {
 		if err := validateNetDeviceGrant(d); err != nil {
 			return fail("%v", err)
@@ -405,7 +419,7 @@ func parseReadGrant(raw []byte, now time.Time, stored bool) (ReadGrantDoc, []byt
 	}
 	if d.Grant == ReadGrantFormat {
 		if d.RateProfile != schedgrant.OrdinaryReadProfile && d.RateProfile != schedgrant.TelemetryReadProfile {
-			return fail("rate_profile must be ordinary, telemetry, provider, provider_telemetry or netdevice")
+			return fail("rate_profile must be ordinary, telemetry, provider, provider_telemetry, netdevice or registry")
 		}
 		if len(d.Credentials) != len(d.Targets) {
 			return fail("each frozen target needs one credential binding")
@@ -661,8 +675,8 @@ func (a *Authority) ProposeReadGrant(raw []byte) (PendingReadGrant, error) {
 		}
 	}
 	a.readGrants[digest] = pg
-	a.emit(Event{Kind: "read_grant_proposed", Digest: digest, Detail: fmt.Sprintf("%s: %d actions, %d hosts, %d provider remotes, %d network devices, %d runs/hour/target, until %s",
-		doc.ID, len(doc.Actions), len(doc.Targets), len(doc.ProviderTargets), len(doc.NetDeviceTargets), doc.RunBudget, time.Unix(doc.ExpiryUnix, 0).UTC().Format(time.RFC3339))})
+	a.emit(Event{Kind: "read_grant_proposed", Digest: digest, Detail: fmt.Sprintf("%s: %d actions, %d hosts, %d provider remotes, %d network devices, %d private registries, %d runs/hour/target, until %s",
+		doc.ID, len(doc.Actions), len(doc.Targets), len(doc.ProviderTargets), len(doc.NetDeviceTargets), len(doc.RegistryTargets), doc.RunBudget, time.Unix(doc.ExpiryUnix, 0).UTC().Format(time.RFC3339))})
 	return PendingReadGrant{Digest: digest, Canonical: slices.Clone(canon), Requirement: req, Challenge: slices.Clone(pg.challenge),
 		Expiry: pg.expiry, Doc: cloneReadGrantDoc(doc)}, nil
 }
@@ -679,6 +693,11 @@ func cloneReadGrantDoc(doc ReadGrantDoc) ReadGrantDoc {
 	doc.NetDeviceTargets = slices.Clone(doc.NetDeviceTargets)
 	for i := range doc.NetDeviceTargets {
 		doc.NetDeviceTargets[i].Reads = slices.Clone(doc.NetDeviceTargets[i].Reads)
+	}
+	doc.RegistryTargets = slices.Clone(doc.RegistryTargets)
+	for i := range doc.RegistryTargets {
+		doc.RegistryTargets[i].Repositories = slices.Clone(doc.RegistryTargets[i].Repositories)
+		doc.RegistryTargets[i].Methods = slices.Clone(doc.RegistryTargets[i].Methods)
 	}
 	return doc
 }

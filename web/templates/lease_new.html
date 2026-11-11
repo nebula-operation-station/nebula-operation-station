@@ -4,7 +4,12 @@
 {{$p := $d.Preview}}
 <h1>Approve read lease</h1>
 <section class="panel" aria-label="Read lease preview">
-  {{if $d.Provider}}
+  {{if $d.Registry}}
+  <p class="hint">This is the complete read lease the executor will hold, exactly as it returned it. Each private registry is
+     frozen with its record digest and version and its credential identity and version: a rotated credential or a changed
+     record is no longer covered and needs a new lease. The lease holds no credential. Check every repository and read
+     before you approve.</p>
+  {{else if $d.Provider}}
   <p class="hint">This is the complete read lease the executor will hold, exactly as it returned it. The remote list is frozen
      with each remote's trust pin, trust generation and read credential version: a re-pinned remote or a rotated token is no
      longer covered and needs a new lease. Check every remote and method before you approve.</p>
@@ -22,13 +27,27 @@
     <dt>Trigger</dt><dd>{{$p.Trigger}}</dd>
     {{if $d.Telemetry}}
     <dt>Rate profile</dt><dd>{{$p.RateProfile}}, at most {{$p.RunBudget}} metrics requests per remote per hour, each node or guest at most every {{$d.MinInterval}}; live reads only while a box is on screen (trigger {{$p.Trigger}})</dd>
+    {{else if $d.Registry}}
+    <dt>Rate profile</dt><dd>{{$p.RateProfile}}, at most {{$p.RunBudget}} reads per registry per hour, each tag at most every {{$d.MinInterval}}</dd>
     {{else if $d.Provider}}
     <dt>Rate profile</dt><dd>{{$p.RateProfile}}, at most {{$p.RunBudget}} requests per remote per hour, each method at most every {{$d.MinInterval}}</dd>
     {{else}}
     <dt>Rate profile</dt><dd>{{$p.RateProfile}}, at most {{$p.RunBudget}} runs per host per hour, each action at most every {{$d.MinInterval}}</dd>
     {{end}}
   </dl>
-  {{if $d.Provider}}
+  {{if $d.Registry}}
+  <h2>{{len $d.RegistryTargets}} private registries</h2>
+  <div class="table-wrap">
+  <table class="inventory" aria-label="Private registries">
+    <thead><tr><th>Registry</th><th>Record digest</th><th>Record version</th><th>Credential identity</th><th>Credential version</th><th>Repositories</th><th>Reads</th></tr></thead>
+    <tbody>
+      {{range $d.RegistryTargets}}
+      <tr class="lease-registry"><td class="mono">{{.ID}}</td><td class="mono">{{.ConfigDigest}}</td><td class="mono">{{.ConfigVersion}}</td><td class="mono">{{.CredentialID}}</td><td class="mono">{{.CredentialVersion}}</td><td class="mono">{{.Repositories}}</td><td class="mono">{{.Methods}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else if $d.Provider}}
   <h2>{{$d.RemoteCount}} Proxmox remotes</h2>
   <div class="table-wrap">
   <table class="inventory" aria-label="Proxmox remotes">
@@ -111,6 +130,7 @@
       <label class="choice"><input type="radio" name="scope" value="tag"{{if eq $d.Kind "tag"}} checked{{end}}> Hosts with a tag (key=value)</label>
       <label class="choice"><input type="radio" name="scope" value="environment"{{if eq $d.Kind "environment"}} checked{{end}}> Hosts of an environment</label>
       {{if $d.ProviderOffered}}<label class="choice"><input type="radio" name="scope" value="provider"{{if eq $d.Kind "provider"}} checked{{end}}> Proxmox remote (uses the remotes and methods below, not the host actions)</label>{{end}}
+      {{if $d.RegistryOffered}}<label class="choice"><input type="radio" name="scope" value="registry"{{if eq $d.Kind "registry"}} checked{{end}}> Private registry (uses the registries and reads below, not the host actions; at most 7 days)</label>{{end}}
       <label>Tag or environment
         <input type="text" name="value" value="{{$d.Value}}" maxlength="200" list="lease-scope-values" autocomplete="off"></label>
       <datalist id="lease-scope-values">
@@ -139,6 +159,24 @@
       {{range $d.Methods}}
       <label class="choice"><input type="checkbox" name="method" value="{{.ID}}"{{if .Checked}} checked{{end}}> <strong>{{.ID}}</strong>
         <span class="hint provider-method">{{.Description}}</span></label>
+      {{end}}
+    </fieldset>
+    {{end}}
+    {{if $d.RegistryOffered}}
+    <fieldset>
+      <legend>Private registry</legend>
+      {{if $d.PrivateRegistries}}
+      <label>Executor private registries (each with its whole approved repository scope)
+        <select name="registry" multiple size="{{if lt (len $d.PrivateRegistries) 5}}{{len $d.PrivateRegistries}}{{else}}5{{end}}">
+          {{range $d.PrivateRegistries}}<option value="{{.ID}}"{{if .Selected}} selected{{end}}>{{.ID}} ({{.Origin}}: {{.Repositories}})</option>{{end}}
+        </select></label>
+      {{else}}
+      <p class="hint">No private registry on the executor.</p>
+      {{end}}
+      <p class="hint">Typed metadata reads the executor may make with the registry credential it holds; never a pull, push or login.</p>
+      {{range $d.RegistryMethods}}
+      <label class="choice"><input type="checkbox" name="registry_method" value="{{.ID}}"{{if .Checked}} checked{{end}}> <strong>{{.ID}}</strong>
+        <span class="hint">{{.Description}}</span></label>
       {{end}}
     </fieldset>
     {{end}}
