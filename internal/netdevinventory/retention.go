@@ -136,23 +136,41 @@ func boundUnchanged(ctx context.Context, tx *sql.Tx, read Read, deviceID string,
 	return err
 }
 
-// dropExpiredCarried removes rows carried over with a seen_at before now
-// minus HistoryRetention from every dataset of read, current or
-// superseded, for deviceID or (empty) every device. For one device it is
-// one DELETE per row table: the datasets come from
-// idx_netdev_datasets_history (at most MaxHistoryPerRead + 1 after the
-// bound) and their rows from the (dataset_id, row_key) primary key.
-func dropExpiredCarried(ctx context.Context, tx *sql.Tx, read Read, deviceID string, now time.Time) (int64, error) {
+// carriedIndex returns the name of the partial index on (dataset_id,
+// seen_at) WHERE seen_at IS NOT NULL of row table t (migration 0039),
+// which dropExpiredCarried's DELETE uses.
+func carriedIndex(t *table) string { return "idx_" + t.name + "_carried" }
+
+// expiredCarriedSQL returns the DELETE of dropExpiredCarried for row table
+// t. Its parameters are the cutoff, the read and, with byDevice, the
+// device ID.
+func expiredCarriedSQL(t *table, byDevice bool) string {
 	devFilter := ""
+	if byDevice {
+		devFilter = " AND device_id = ?"
+	}
+	return `DELETE FROM ` + t.name + ` WHERE seen_at IS NOT NULL AND seen_at < ?
+		AND dataset_id IN (SELECT id FROM netdev_datasets WHERE read = ?` + devFilter + `)`
+}
+
+// dropExpiredCarried removes rows carried over with a seen_at before now
+// minus HistoryRetention (strictly before: a row seen exactly at the
+// cutoff is kept) from every dataset of read, current or superseded, for
+// deviceID or (empty) every device. It runs on every write, so it must
+// not walk the rows of the history: for one device it is one DELETE per
+// row table, the datasets come from idx_netdev_datasets_history (at most
+// MaxHistoryPerRead + 1 after the bound) and, per dataset, only the
+// expired carried rows are visited, as a range on the partial index
+// carriedIndex (dataset_id, seen_at) WHERE seen_at IS NOT NULL. Present
+// rows (seen_at NULL) are not in that index and never touched.
+func dropExpiredCarried(ctx context.Context, tx *sql.Tx, read Read, deviceID string, now time.Time) (int64, error) {
 	args := []any{micros(now.Add(-HistoryRetention(read))), string(read)}
 	if deviceID != "" {
-		devFilter = " AND device_id = ?"
 		args = append(args, deviceID)
 	}
 	var total int64
 	for _, t := range readTables(read) {
-		n, err := exec(ctx, tx, `DELETE FROM `+t.name+` WHERE seen_at IS NOT NULL AND seen_at < ?
-			AND dataset_id IN (SELECT id FROM netdev_datasets WHERE read = ?`+devFilter+`)`, args...)
+		n, err := exec(ctx, tx, expiredCarriedSQL(t, deviceID != ""), args...)
 		if err != nil {
 			return 0, fmt.Errorf("netdevinventory: drop expired carried %s rows: %w", t.name, err)
 		}

@@ -524,7 +524,7 @@ func (s *Store) replace(ctx context.Context, tx *sql.Tx, deviceID string, read R
 			if err := boundUnchanged(ctx, tx, read, deviceID, now); err != nil {
 				return ReplaceResult{}, err
 			}
-			return ReplaceResult{DatasetID: prevID, Unchanged: true}, nil
+			return ReplaceResult{DatasetID: prevID, Unchanged: true}, s.runHook("commit")
 		case obs == prevObs:
 			return ReplaceResult{}, fmt.Errorf("netdevinventory: device %s read %s: %w", deviceID, read, ErrOutOfOrder)
 		}
