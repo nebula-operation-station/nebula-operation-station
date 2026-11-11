@@ -27,7 +27,7 @@ func internetQuery(dst string, port uint16) Query {
 
 func evalQ(t *testing.T, s *Snapshot, q Query) Result {
 	t.Helper()
-	return mustIndex(t, s).Evaluate(q)
+	return mustIndex(t, s).Evaluate(t.Context(), q)
 }
 
 func wantVerdict(t *testing.T, r Result, v Verdict, reason string) {
