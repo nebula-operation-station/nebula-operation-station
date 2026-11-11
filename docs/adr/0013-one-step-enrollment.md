@@ -226,10 +226,25 @@ code   = first 60 bits of digest, as 12 Crockford base32 characters,
 The host key blob is the SSH wire format of the public key (the bytes the
 SHA-256 fingerprint is computed over), so the code is "derived from the host
 key fingerprint" with the offer salt mixed in. The script computes it with
-coreutils (`base64 -d`, `sha256sum`, `basenc`), present on every supported
-host (Debian 12, Ubuntu 22.04/24.04, Proxmox VE); the executor computes it
-with `crypto/sha256`. This is a composition of SHA-256 and an encoding, not
-new cryptography; shared test vectors bind script and Go code (EN-03).
+coreutils (`base64 -d`, `sha256sum`, `cut`, `tr`) and POSIX shell arithmetic,
+present on every supported host (Debian 12, Ubuntu 22.04/24.04, Proxmox VE);
+the executor computes it with `crypto/sha256`. This is a composition of
+SHA-256 and an encoding, not new cryptography; shared test vectors bind
+script and Go code (EN-03, EN-04).
+
+`basenc` is not used: it produces RFC 4648 base32 or base32hex, not
+Crockford. The script takes the first 15 hex digits of the `sha256sum`
+output (exactly 60 bits), reads them as one number with `$((0x…))` (fits the
+64-bit signed shell arithmetic of dash and bash on the supported hosts; the
+script checks this at start), emits twelve 5-bit groups from the most
+significant end as base32hex digits (`0-9A-V`) and maps them to Crockford
+with `tr 0123456789ABCDEFGHIJKLMNOPQRSTUV 0123456789ABCDEFGHJKMNPQRSTVWXYZ`.
+The check character is the same number `% 37`, indexed into the fixed
+37-symbol string `0123456789ABCDEFGHJKMNPQRSTVWXYZ*~$=U` (quoted so `$` and
+`*` stay literal). The shared EN-03/EN-04 test vectors are chosen so that
+together they contain every one of the 32 data symbols at every one of the
+12 positions and every one of the 37 check values, including the five
+check-only symbols `*~$=U`, plus values with the top bit of the 60 set.
 
 The script reads the key sshd actually serves: the `hostkey` lines of
 `sshd -T` whose public half is `ssh-ed25519`, falling back to
@@ -276,7 +291,8 @@ random key has a 2^-60 chance per probe.
   a typo is not mistaken for an attack.
 - *Well-formed code that does not match the presented key*: the offer
   becomes `failed`, the endpoint is not pinned, the NetBird setup key is
-  revoked if unused, audit `enroll_code_mismatch` with the presented
+  revoked (unconditionally, D2) and a peer it joined is handled as an orphan
+  (D6), audit `enroll_code_mismatch` with the presented
   fingerprint and endpoint, dashboard notice and notification as for a host
   key mismatch. The UI states: "The host at this endpoint presents a key that
   does not match the code from the host. Either the endpoint is a different
@@ -339,12 +355,17 @@ mitigation.
   treats whatever the operator types as an endpoint to validate (spec 09:
   syntax, length, IP or DNS name), never as trusted.
 - The script carries no secret except, optionally, the NetBird setup key.
-  It writes the setup key only to a `0600` file under a `mktemp -d`
-  directory removed by `trap` on exit, passes it to the NetBird client
-  without putting it on a command line where the client allows that
-  (verified per supported client version in EN-12; otherwise documented as a
-  residual risk of a short `/proc` exposure on the host itself), and deletes
-  itself (`nos-enroll.sh`) at the end when it contained a setup key.
+  The script file itself lives only in the `0700` `mktemp -d` directory of
+  the command in D1 step 3, which removes it by `trap` on every exit path
+  (success, failure, hang-up, interrupt, termination). The script sets
+  `umask 077` itself as well, writes the setup key only to a `0600` file
+  under its own `mktemp -d` directory removed by its own `trap` on `EXIT`,
+  `HUP`, `INT` and `TERM`, and passes it to the NetBird client without
+  putting it on a command line where the client allows that (verified per
+  supported client version in EN-12; otherwise documented as a residual risk
+  of a short `/proc` exposure on the host itself). If the operator runs the
+  script outside the documented command, it still removes its own key file,
+  and when it contained a setup key it deletes itself from its `trap`.
 - Size limit of the rendered script: 64 KiB; the executor refuses larger.
 
 ### D6: Optional NetBird join
@@ -353,14 +374,17 @@ mitigation.
 vault (`nebula netbird token set`, non-echoing input, like PVE tokens; never
 in argv, environment, server configuration or browser). The token belongs to
 a dedicated NetBird **service user**; the executor uses it only for typed
-calls (create/revoke setup key, read peers, read the NOS peer), with no
+calls (create/revoke setup key, read peers, read the NOS peer, delete a
+peer after operator confirmation, read policies), with no
 generic HTTP proxy. Management URL and TLS trust are executor-local
 configuration (public CA for NetBird Cloud; pinned CA or leaf for
 self-hosted management). Without a token, the NetBird option is hidden and
 the script works exactly without NetBird.
 
 **Per-offer setup key.** For each offer with NetBird the executor creates
-one setup key:
+one setup key, and only after the operator approved the NetBird offer permit
+with the security key (D1 step 2); the server can neither trigger the
+creation without that approval nor receive more than one key per approval:
 
 - type one-off (`usage_limit` 1), expiry ≤ 1 hour (default: offer expiry
   plus 45 minutes, so a download at minute 14 still has time to join);
@@ -372,8 +396,27 @@ one setup key:
   revoked; it reveals nothing usable.
 
 The executor stores the setup key encrypted in the vault until the offer is
-final, then wipes it. It revokes the key when the offer expires, is revoked
-or fails while the key is unused.
+final, then wipes it. It revokes the key whenever the offer becomes final
+(`enrolled`, `expired`, `revoked`, `failed`), unconditionally, without first
+asking whether it was used (D2).
+
+**Peers from offers that did not enrol.** When an offer whose setup key was
+used becomes `failed`, `expired` or `revoked`, the peer that joined with it
+stays in `nos-managed` (peers are not ephemeral by default). The executor
+then looks up that peer (attribution per Q8), records it as an **orphan
+peer** (audit `netbird_peer_orphaned`) and the UI dashboard and
+`nebula host offers` list it until the operator decides:
+
+- **Delete** (default action; privileged session; typed delete call,
+  audit `netbird_peer_deleted`), or
+- **Keep** (for example because the operator will re-offer the same host
+  and wants it to stay reachable; audit `netbird_peer_kept`). A kept peer is
+  an ordinary NetBird peer; it is not pinned and not enrolled.
+
+NOS never deletes a peer automatically: attribution may be uncertain (Q8),
+and deleting the wrong peer would cut off a host. A peer the executor
+cannot attribute is reported as "unknown peer joined `nos-managed`" instead
+of being offered for deletion.
 
 **Join on the host.** The script installs the NetBird client from the
 official package repository if it is missing (repository signing key
@@ -390,6 +433,18 @@ NetBird endpoint is not offered and the operator is told why. The pairing
 code still decides the pin; the NetBird check only protects the endpoint
 suggestion.
 
+Whether the NetBird management API can say **which peer joined with a given
+setup key** is not yet verified (open question Q8). The setup-key object
+reports usage (used count, last use); whether a peer records the setup key
+it was registered with must be checked against the API documentation and a
+real management server before EN-12 starts. If the API cannot attribute a
+peer to a key, the fallback is weaker and must be accepted explicitly:
+"exactly one new peer in the managed group whose registration time lies
+between the offer's approval and the key's recorded use, and the key's use
+count is 1"; with any other result no NetBird endpoint is suggested and no
+peer is offered for deletion. The rogue-peer detection and the orphan-peer
+cleanup above depend on the same answer.
+
 **Policy (operator-set, documented, not created by NOS).**
 
 - Groups: `nos` (the NOS machine only) and `nos-managed` (enrolled hosts).
@@ -398,19 +453,41 @@ suggestion.
   rules can be bidirectional; this one must not be.
 - No rule from `nos-managed` to anything, including to `nos-managed` itself,
   unless the operator adds it deliberately for other reasons.
+- Every new NetBird account has a group **`All`** that contains every peer
+  and a **default policy that allows all traffic between `All` and `All` in
+  both directions**. While that policy is enabled, a `nos-managed` peer can
+  reach the NOS machine and every other peer, and the one-way assumption
+  above is false. The operator must disable or delete the default policy
+  (or restrict it so that it covers neither `nos` nor `nos-managed`) before
+  using the NetBird option.
 - The guide documents how to check this; NOS reads the policies through the
-  API and shows a warning when a rule lets `nos-managed` reach `nos` or other
-  groups (read-only check, Q3).
+  API and shows a warning when the default `All` ↔ `All` policy is enabled,
+  when any enabled rule has `All` as source or destination together with a
+  group that contains `nos` or `nos-managed` peers, when a rule is
+  bidirectional, or when a rule lets `nos-managed` reach `nos` or other
+  groups (read-only check, Q3). While the warning stands, the NetBird option
+  in the one-step dialog shows it next to the checkbox.
 
 **Why a stolen setup key is bounded.** If the setup key leaks (offer page,
 proxy log of the download, compromised server), the holder can join one peer
 into `nos-managed` within the hour. That peer can be reached by NOS on TCP 22
-and by nothing else under the documented policy; it cannot reach NOS. It
-cannot get pinned, because the pairing code is bound to the real host's key.
-Its use consumes the key, so the real host's join fails visibly, and the
-executor's cross-check reports a peer that did not come from this host. The
-executor then deletes that peer (typed call, audited) when the operator
-confirms.
+and by nothing else under the documented policy (default `All` policy
+disabled); it cannot reach NOS. It cannot get pinned, because the pairing
+code is bound to the real host's key. Its use consumes the key, so the real
+host's join fails visibly, and the executor's cross-check reports a peer
+that did not come from this host. The executor then deletes that peer (typed
+call, audited) when the operator confirms.
+
+A compromised server cannot multiply this: every setup key needs its own
+NetBird offer permit approved with the security key (HIGH, user
+verification; D1 step 2), the approval shows host, managed group and
+expiry, and `nebula approve` on the executor host shows the same binding.
+The separate limits (2 open NetBird offers, 5 setup keys per hour, D2) cap
+even an operator who is tricked into approving several. Without a touch the
+server gets offers without setup keys, which give it nothing in NetBird.
+Chosen over "only a lower limit" because a limit alone would still let a
+compromised server mint a few keys per hour silently; the cost is one extra
+security-key touch per NetBird enrollment.
 
 **Token scope.** NetBird's role model may not allow a token that can only
 create setup keys; a service user with the admin role can also change
@@ -431,13 +508,40 @@ step until a narrower role exists.
   confidentiality.
 - **Endpoint:** `GET /enroll/<offer-id>`, outside the authenticated UI. The
   server validates the ID's syntax, rate-limits per client address (10 per
-  minute, 60 per hour), calls the executor (`FetchEnrollScript`, server role)
-  and streams the bytes. Responses: `200` with `Content-Type: text/plain;
-  charset=utf-8`, `Content-Disposition: attachment`, `Cache-Control:
-  no-store`, `X-Content-Type-Options: nosniff`; every refusal (unknown,
-  expired, consumed, revoked, malformed, rate-limited) is the same `404` body.
-  The server does not log the path; the guide tells operators to exclude
-  `/enroll/` from proxy access logs.
+  minute, 60 per hour; IPv6 clients per /64), calls the executor
+  (`FetchEnrollScript`, server role) and streams the bytes. Responses: `200`
+  with `Content-Type: text/plain; charset=utf-8`, `Content-Disposition:
+  attachment`, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
+  `Content-Security-Policy: default-src 'none'; sandbox`; every refusal
+  (unknown, expired, consumed, revoked, malformed, rate-limited) is the same
+  `404` body with the same headers. The server does not log the path; the
+  guide tells operators to exclude `/enroll/` from proxy access logs.
+- **Client address behind the reverse proxy.** The server sits behind the
+  reverse proxy, so the TCP peer (`r.RemoteAddr`) is usually the proxy. A
+  new server setting, **trusted proxies** (list of IP addresses or CIDRs,
+  default empty, validated at startup), decides whose forwarded headers
+  count:
+  - If the TCP peer is not a trusted proxy, `X-Forwarded-For` and
+    `Forwarded` are ignored and the peer address is the client address.
+  - If the TCP peer is a trusted proxy, the server reads only
+    `X-Forwarded-For` (`Forwarded` is never used; at most 1 KiB, at most 16 entries, each a syntactically valid IP) and
+    walks it from the right, skipping entries that are themselves trusted
+    proxies; the first untrusted entry is the client address. Entries left
+    of it are client-supplied and ignored. A missing, oversized or malformed
+    header falls back to the peer address and is counted in a metric, never
+    trusted partially.
+  - The per-client rate limit and the `enroll_script_downloaded` audit
+    record use this client address; the audit record also carries the peer
+    address and whether the forwarded header was used.
+  - The shipped reverse proxy configuration must set (overwrite, not
+    append) `X-Forwarded-For` to the address it saw. If the endpoint is
+    enabled and no trusted proxy is configured while the server is not
+    reachable directly, all clients share the proxy's bucket: the server
+    logs a startup warning in that case (enrollment enabled, trusted
+    proxies empty, listener on loopback or a private address), and the
+    guide makes the setting part of the reverse-proxy setup.
+  This handling is limited to the enrollment endpoint in this ADR; other
+  routes keep their current address handling until a separate decision.
 - **Integrity:** the SHA-256 of the script is computed by the executor and
   shown on the offer page; the command checks it before running. A changed
   script (proxy, cache, wrong offer) does not run.
@@ -472,8 +576,9 @@ the NOS origin reachable for this purpose is not part of this ADR.
   one-step enrollment is for hosts NOS did not provision.
 - Hosts enrolled either way are indistinguishable afterwards except for the
   audit record (`source` `paired` versus `probe`/`known_hosts`).
-- Windows and BSD hosts are out of scope (Q5), as are hosts without
-  coreutils `basenc` (the script stops with a message pointing to §7.2).
+- Windows and BSD hosts are out of scope (Q5), as are hosts whose `sh` lacks
+  64-bit arithmetic or that lack coreutils `sha256sum`/`base64` (the script
+  stops with a message pointing to §7.2).
 
 ## Threat model additions
 
@@ -482,10 +587,13 @@ the NOS origin reachable for this purpose is not part of this ADR.
 | Machine in the path between executor and host at probe time | Pin only a key whose salted code matches the operator-carried code; re-probe at commit; mismatch fails the offer and notifies | Grinding success ≤ 2^-10 for a 10^12 keys/s attacker who also knows the salt (D3) |
 | Precomputed key grinding against a known host key | Salt per offer; code computed over salt and key | None beyond the row above |
 | Forged code shown to the operator | Code is read in the operator's own session or console | Equal to the operator's trust in that session (TOFU on a fresh VPS) |
-| Leaked or guessed offer ID | ≥ 128 bits, single use, 15 min, uniform 404, rate limit, hashed at rest | A leaked ID before the download lets someone take the script; the real download then fails and the operator sees the download address |
+| Leaked or guessed offer ID | ≥ 128 bits, single use, 15 min, uniform 404, per-client rate limit with trusted-proxy client address, hashed at rest | A leaked ID before the download lets someone take the script; the real download then fails and the operator sees the real download address |
+| Setup key left on the host's disk | `umask 077`, `mktemp -d` (`0700`), `trap` cleanup on exit, hang-up, interrupt and termination, in the command and in the script | `SIGKILL`/power loss leaves a `0700` file; key one-off, ≤ 1 h, revoked when the offer is final |
+| Downgrade of the probed key type | Probe offers only `ssh-ed25519`; later connections restrict `HostKeyAlgorithms` to the pinned type | — |
 | Script tampered in transit | TLS to the NOS origin, SHA-256 check before running, no `curl \| sh` | — |
 | Compromised server | Executor decides code match, builds the permit, holds token and setup keys; `nebula approve` independent view | Can serve a malicious script (root on the new host) and deceive the approval page, as today |
-| Leaked NetBird setup key | One use, ≤ 1 h, auto-group only `nos-managed`, one-way policy, executor peer cross-check and revocation | One rogue peer in `nos-managed` for a short time, reachable only from NOS |
+| Leaked NetBird setup key | One use, ≤ 1 h, auto-group only `nos-managed`, one-way policy with the default `All` policy disabled, executor peer cross-check, unconditional revocation, orphan-peer cleanup | One rogue peer in `nos-managed` for a short time, reachable only from NOS; attribution depends on Q8 |
+| Compromised server minting setup keys | Setup key created only after a NetBird offer permit approved with the security key; 2 open NetBird offers, 5 keys per hour | One key per tricked approval, visible in `nebula approve` |
 | NetBird token misuse | Executor vault, typed calls only, audit, dedicated service user | Role may be broader than needed (Q3) |
 | Hostile host output (addresses) | Addresses are hints the operator retypes; endpoint syntax validated; text-only rendering | — |
 | Offer flooding | Limits per executor and hour; offers require a privileged session | — |
@@ -510,7 +618,13 @@ the NOS origin reachable for this purpose is not part of this ADR.
 - **Q2: Offer lifetime.** 15 minutes for download and code (recommended), or
   longer for slow remote installs (the NetBird client install can take a few
   minutes)? Should the code submission get its own window after the download
-  (for example 15 minutes from download, at most 60 from creation)?
+  (for example 15 minutes from download, at most 60 from creation)? The
+  grinding bound of D3 assumes at most 15 minutes from the moment the salt
+  is known (offer creation) to the last probe. At 60 minutes a 60-bit code
+  gives a 10^12 keys/s attacker about 2^-8 instead of 2^-10. Recommendation:
+  any window longer than 15 minutes in total is allowed only together with
+  the 80-bit code of Q1 (≈ 2^-28 at 60 minutes); with 60 bits the total
+  stays at 15 minutes.
 - **Q3: NetBird token scope and group names.** Is a service user with the
   NetBird role needed for setup-key creation acceptable in the executor
   vault, or does NetBird stay a manual step until a narrower role exists?
@@ -530,29 +644,42 @@ the NOS origin reachable for this purpose is not part of this ADR.
 - **Q7: Mismatch handling.** One well-formed mismatch fails the offer
   (recommended, with the check character catching typos), or allow a second
   code submission?
+- **Q8: Peer attribution in NetBird.** Can the NetBird management API (the
+  version in the reference lab and NetBird Cloud) tell which peer joined
+  with a given setup key? To be checked against the API and a real
+  management server before EN-12. If not, is the weaker time-window
+  fallback of D6 acceptable, or does the NetBird endpoint suggestion,
+  rogue-peer detection and orphan cleanup stay manual?
 
 ## Required specification changes
 
 - `docs/spec/08-ssh-transport.md`: a third way to avoid blind trust
-  (paired enrollment with an offer-salted code), ed25519 only, re-probe at
-  commit, mismatch handling.
+  (paired enrollment with an offer-salted code), ed25519 only, the probe
+  offers only `ssh-ed25519` as host key algorithm, later connections
+  restrict `HostKeyAlgorithms` to the pinned type, re-probe at commit,
+  mismatch handling.
 - `docs/spec/06-credentials.md`: NetBird management token custody, per-offer
-  setup keys in the vault, wipe on final state.
-- `docs/spec/05-authentication.md`: paired enrollment permit (HIGH, UV),
-  session binding of offers.
+  setup keys in the vault created only after approval, unconditional
+  revocation and wipe on final state, orphan peers.
+- `docs/spec/05-authentication.md`: paired enrollment permit and NetBird
+  offer permit (both HIGH, UV), session binding of offers.
 - `docs/spec/02-architecture.md`, `03-processes-and-data.md`: the
-  unauthenticated download endpoint, the offer table (executor), executor
-  egress to the NetBird management URL.
+  unauthenticated download endpoint and its headers (including CSP), the
+  trusted-proxies setting and client-address rule, the offer table
+  (executor), executor egress to the NetBird management URL.
 - `docs/spec/09-untrusted-host-data.md`: script-printed addresses are
-  operator hints; endpoint validation.
-- `docs/spec/12-inventory.md`: one-step dialog and (Q4) inventory creation.
+  operator hints; endpoint validation; forwarded headers are untrusted
+  unless from a configured trusted proxy.
+- `docs/spec/12-inventory.md`: one-step dialog, (Q4) inventory creation, and
+  an endpoint added at commit under the paired permit.
 - `docs/spec/04-revision-history.md`, `17-frozen-decisions.md`: record the
   revision. Afterwards admin guide §7 and a NetBird policy section.
 
 ## Consequences
 
 - Enrollment of a single host becomes: one dialog, one command on the host,
-  one code typed into NOS, one security-key touch. The fingerprint
+  one code typed into NOS, one security-key touch (two with NetBird: one
+  to release the setup key, one to pin). The fingerprint
   comparison is done by the executor against a value the operator carried,
   not by eye.
 - Host-key pinning is not weakened: the same pin, the same HIGH approval,
