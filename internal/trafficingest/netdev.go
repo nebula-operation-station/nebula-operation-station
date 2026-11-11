@@ -16,7 +16,7 @@ import (
 )
 
 // Switch data on the traffic map (ADR 0010 D4 "Integration points",
-// ADR 0009 "LLDP switch-port mapping", ticket ND-18).
+// ADR 0009 "LLDP switch-port mapping", ticket ND-18 part 1).
 //
 // SwitchEndpoints turns the stored CBS MAC tables and LLDP neighbors into
 // traffic map facts: which MAC sits on which switch edge port, and which
@@ -80,6 +80,9 @@ type SwitchEndpoint struct {
 	EndpointID  string
 	IPAMAssetID string
 	HostID      string
+	// LinkLookedUp reports whether the traffic store was asked for this
+	// MAC; false when no EndpointLinks was given or the lookup cap was hit.
+	LinkLookedUp bool
 }
 
 // SwitchLink is one LLDP neighbor seen on a local switch port. The remote
@@ -100,14 +103,29 @@ type SwitchLink struct {
 type SwitchMap struct {
 	Endpoints []SwitchEndpoint
 	Links     []SwitchLink
+	// LinkState says how complete the traffic store lookup was: empty
+	// when no EndpointLinks was given, netdevinventory.StateFresh when
+	// every distinct MAC was looked up, netdevinventory.StatePartial when
+	// MaxSwitchEndpointLookups was hit and some endpoints carry no
+	// lookup result (their LinkLookedUp is false).
+	LinkState netdevinventory.DatasetState
 }
 
+// MaxSwitchEndpointLookups bounds the traffic store lookups of one
+// SwitchEndpoints call. Each distinct MAC is looked up once whatever the
+// number of switches, ports and VLANs it appears on; MACs beyond the
+// limit (in MAC order) are shown without links and the map is marked
+// partial.
+const MaxSwitchEndpointLookups = 2048
+
 // SwitchEndpoints reads the switch MAC tables and LLDP neighbors through
-// sw and returns the MACs learned on edge ports (uplink and LAG ports are
-// left out, see ipam.UplinkPorts) and the LLDP port mapping. links may be
-// nil; when set, the traffic store record of each MAC supplies the
-// endpoint ID and its confirmed IPAM asset and host links. LLDP data is
-// never looked up or linked. It only reads sw and links.
+// sw and returns the dynamically learned MACs on edge ports (uplink and
+// LAG ports are left out, see ipam.UplinkPorts; static and "other"
+// entries are ignored, see ipam.IsDynamicMAC) and the LLDP port mapping.
+// links may be nil; when set, the traffic store record of each distinct
+// MAC (at most MaxSwitchEndpointLookups lookups) supplies the endpoint ID
+// and its confirmed IPAM asset and host links. LLDP data is never looked
+// up or linked. It only reads sw and links.
 func SwitchEndpoints(ctx context.Context, sw SwitchReader, links EndpointLinks) (SwitchMap, error) {
 	if sw == nil {
 		return SwitchMap{}, errors.New("trafficingest: switch endpoints: nil reader")
@@ -124,7 +142,7 @@ func SwitchEndpoints(ctx context.Context, sw SwitchReader, links EndpointLinks) 
 	for _, t := range tables {
 		uplinks := ipam.UplinkPorts(t.Entries)
 		for _, e := range t.Entries {
-			if e.Port == "" || uplinks[e.Port] {
+			if e.Port == "" || uplinks[e.Port] || !ipam.IsDynamicMAC(e) {
 				continue
 			}
 			mac := normalizeMAC(e.MAC)
@@ -139,17 +157,11 @@ func SwitchEndpoints(ctx context.Context, sw SwitchReader, links EndpointLinks) 
 		}
 	}
 	if links != nil {
-		for i := range out.Endpoints {
-			se := &out.Endpoints[i]
-			ep, ok, err := links.LookupEndpoint(ctx, se.MAC, netip.Addr{})
-			if err != nil {
-				return SwitchMap{}, fmt.Errorf("trafficingest: switch endpoints: look up %s on %s %s: %w",
-					se.MAC, se.DeviceID, se.Port, err)
-			}
-			if ok {
-				se.EndpointID, se.IPAMAssetID, se.HostID = ep.ID, ep.IPAMAssetID, ep.HostID
-			}
+		state, err := lookupSwitchLinks(ctx, links, out.Endpoints)
+		if err != nil {
+			return SwitchMap{}, err
 		}
+		out.LinkState = state
 	}
 	for _, t := range lldp {
 		for _, n := range t.Neighbors {
@@ -184,4 +196,38 @@ func SwitchEndpoints(ctx context.Context, sw SwitchReader, links EndpointLinks) 
 		return a.RemoteChassisID < b.RemoteChassisID
 	})
 	return out, nil
+}
+
+// lookupSwitchLinks looks up each distinct MAC of eps once, in MAC order,
+// stopping after MaxSwitchEndpointLookups lookups, and copies the result
+// into every endpoint with that MAC. It returns StatePartial when MACs were
+// left without a lookup.
+func lookupSwitchLinks(ctx context.Context, links EndpointLinks, eps []SwitchEndpoint) (netdevinventory.DatasetState, error) {
+	byMAC := map[string][]int{}
+	for i := range eps {
+		byMAC[eps[i].MAC] = append(byMAC[eps[i].MAC], i)
+	}
+	macs := make([]string, 0, len(byMAC))
+	for m := range byMAC {
+		macs = append(macs, m)
+	}
+	sort.Strings(macs)
+	state := netdevinventory.StateFresh
+	if len(macs) > MaxSwitchEndpointLookups {
+		macs, state = macs[:MaxSwitchEndpointLookups], netdevinventory.StatePartial
+	}
+	for _, m := range macs {
+		ep, ok, err := links.LookupEndpoint(ctx, m, netip.Addr{})
+		if err != nil {
+			return "", fmt.Errorf("trafficingest: switch endpoints: look up %s: %w", m, err)
+		}
+		for _, i := range byMAC[m] {
+			se := &eps[i]
+			se.LinkLookedUp = true
+			if ok {
+				se.EndpointID, se.IPAMAssetID, se.HostID = ep.ID, ep.IPAMAssetID, ep.HostID
+			}
+		}
+	}
+	return state, nil
 }

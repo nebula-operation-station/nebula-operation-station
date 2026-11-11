@@ -233,14 +233,22 @@ func TestSwitchEndpointsWriteNothing(t *testing.T) {
 	}
 	countEP, _ := ts.CountEndpoints(ctx)
 	assets, _ := im.Assets(ctx)
-
-	sw := &fakeSwitchData{
-		macs: []ipam.MACTable{swTable("cbs1",
-			swMAC(10, "aa:bb:cc:00:00:01", "gi1/0/3"),
-			swMAC(10, "aa:bb:cc:00:00:09", "gi1/0/4"))},
-		lldp: []LLDPTable{{DeviceID: "cbs1", Neighbors: netdevinventory.LLDPRows{{LocalPort: "gi1/0/3", ChassisID: "x", PortID: "y", SystemName: "nas"}}}},
+	known, knownOK, err := ts.LookupEndpoint(ctx, "aa:bb:cc:00:00:01", netip.Addr{})
+	if err != nil || !knownOK {
+		t.Fatalf("seed endpoint: ok=%v err=%v", knownOK, err)
 	}
-	before := *sw
+
+	// newSwitchData builds the input afresh, so the copy compared below
+	// shares no slice backing array with the one SwitchEndpoints reads.
+	newSwitchData := func() *fakeSwitchData {
+		return &fakeSwitchData{
+			macs: []ipam.MACTable{swTable("cbs1",
+				swMAC(10, "AA:BB:CC:00:00:01", "gi1/0/3"),
+				swMAC(10, "aa:bb:cc:00:00:09", "gi1/0/4"))},
+			lldp: []LLDPTable{{DeviceID: "cbs1", Neighbors: netdevinventory.LLDPRows{{LocalPort: "gi1/0/3", ChassisID: "x", PortID: "y", SystemName: "nas"}}}},
+		}
+	}
+	sw, before := newSwitchData(), newSwitchData()
 	got, err := SwitchEndpoints(ctx, sw, ts)
 	if err != nil {
 		t.Fatal(err)
@@ -256,7 +264,138 @@ func TestSwitchEndpointsWriteNothing(t *testing.T) {
 	if !reflect.DeepEqual(assets, assets2) {
 		t.Fatal("SwitchEndpoints changed IPAM assets")
 	}
-	if !reflect.DeepEqual(before, *sw) {
+	known2, knownOK2, err := ts.LookupEndpoint(ctx, "aa:bb:cc:00:00:01", netip.Addr{})
+	if err != nil || !knownOK2 || !reflect.DeepEqual(known, known2) {
+		t.Fatalf("endpoint record changed: %+v -> %+v (ok=%v err=%v)", known, known2, knownOK2, err)
+	}
+	if known2.IPAMAssetID != "" || known2.HostID != "" {
+		t.Fatalf("endpoint links written: %+v", known2)
+	}
+	if _, ok, err := ts.LookupEndpoint(ctx, "aa:bb:cc:00:00:09", netip.Addr{}); err != nil || ok {
+		t.Fatalf("unknown MAC got a traffic store record: ok=%v err=%v", ok, err)
+	}
+	if !reflect.DeepEqual(before, sw) {
 		t.Fatal("SwitchEndpoints changed the switch data")
+	}
+}
+
+func TestSwitchEndpointsLookUpEachMACOnce(t *testing.T) {
+	// Three switches see the same five MACs on edge ports, two of them in
+	// two VLANs: five lookups, not twenty-one.
+	var tables []ipam.MACTable
+	for d := range 3 {
+		var entries []netdevcontract.MACEntry
+		for i := range 5 {
+			entries = append(entries, swMAC(10, fmt.Sprintf("02:00:00:00:00:%02x", i), fmt.Sprintf("gi1/0/%d", i)))
+		}
+		entries = append(entries, swMAC(20, "02:00:00:00:00:00", "gi1/0/0"), swMAC(20, "02:00:00:00:00:01", "gi1/0/1"))
+		tables = append(tables, swTable(fmt.Sprintf("cbs%d", d), entries...))
+	}
+	links := &fakeLinks{byMAC: map[string]trafficstore.Endpoint{"02:00:00:00:00:00": {ID: "ep-0", IPAMAssetID: "nas"}}}
+	got, err := SwitchEndpoints(context.Background(), &fakeSwitchData{macs: tables}, links)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Endpoints) != 21 {
+		t.Fatalf("endpoints = %d, want 21", len(got.Endpoints))
+	}
+	if len(links.called) != 5 {
+		t.Fatalf("lookups = %d (%v), want 5", len(links.called), links.called)
+	}
+	if got.LinkState != netdevinventory.StateFresh {
+		t.Fatalf("link state = %q, want fresh", got.LinkState)
+	}
+	linked := 0
+	for _, e := range got.Endpoints {
+		if !e.LinkLookedUp {
+			t.Fatalf("endpoint %+v not looked up", e)
+		}
+		if e.MAC == "02:00:00:00:00:00" {
+			if e.EndpointID != "ep-0" || e.IPAMAssetID != "nas" {
+				t.Fatalf("endpoint %+v missing its link", e)
+			}
+			linked++
+		}
+	}
+	if linked != 6 {
+		t.Fatalf("linked endpoints = %d, want 6 (3 switches x 2 VLANs)", linked)
+	}
+}
+
+func TestSwitchEndpointsLookupCapMarksPartial(t *testing.T) {
+	// Four switches each carry the same MaxSwitchEndpointLookups+100
+	// distinct MACs on edge ports (UplinkMACThreshold per port).
+	n := MaxSwitchEndpointLookups + 100
+	var entries []netdevcontract.MACEntry
+	for i := range n {
+		entries = append(entries, swMAC(10, fmt.Sprintf("02:00:00:00:%02x:%02x", i/256, i%256),
+			fmt.Sprintf("gi1/0/%d", i/ipam.UplinkMACThreshold)))
+	}
+	var tables []ipam.MACTable
+	for d := range 4 {
+		tables = append(tables, swTable(fmt.Sprintf("cbs%d", d), entries...))
+	}
+	links := &fakeLinks{}
+	got, err := SwitchEndpoints(context.Background(), &fakeSwitchData{macs: tables}, links)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Endpoints) != 4*n {
+		t.Fatalf("endpoints = %d, want %d", len(got.Endpoints), 4*n)
+	}
+	if len(links.called) != MaxSwitchEndpointLookups {
+		t.Fatalf("lookups = %d, want the cap %d", len(links.called), MaxSwitchEndpointLookups)
+	}
+	seen := map[string]bool{}
+	for _, m := range links.called {
+		if seen[m] {
+			t.Fatalf("MAC %s looked up twice", m)
+		}
+		seen[m] = true
+	}
+	if got.LinkState != netdevinventory.StatePartial {
+		t.Fatalf("link state = %q, want partial", got.LinkState)
+	}
+	notLooked := 0
+	for _, e := range got.Endpoints {
+		if e.LinkLookedUp != seen[e.MAC] {
+			t.Fatalf("endpoint %+v: LinkLookedUp %v, looked up %v", e, e.LinkLookedUp, seen[e.MAC])
+		}
+		if !e.LinkLookedUp {
+			notLooked++
+		}
+	}
+	if notLooked != 4*100 {
+		t.Fatalf("endpoints without lookup = %d, want %d", notLooked, 4*100)
+	}
+}
+
+func TestSwitchEndpointsNoLinkStateWithoutLinks(t *testing.T) {
+	sw := &fakeSwitchData{macs: []ipam.MACTable{swTable("cbs1", swMAC(10, "aa:bb:cc:00:00:01", "gi1/0/3"))}}
+	got, err := SwitchEndpoints(context.Background(), sw, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LinkState != "" || got.Endpoints[0].LinkLookedUp {
+		t.Fatalf("map = %+v, want no lookup state", got)
+	}
+}
+
+func TestSwitchEndpointsIgnoreStaticAndOtherEntries(t *testing.T) {
+	static := swMAC(10, "aa:bb:cc:00:00:01", "gi1/0/3")
+	static.Type = netdevcontract.MACStatic
+	other := swMAC(10, "aa:bb:cc:00:00:02", "gi1/0/4")
+	other.Type = netdevcontract.MACOther
+	sw := &fakeSwitchData{macs: []ipam.MACTable{swTable("cbs1", static, other, swMAC(10, "aa:bb:cc:00:00:03", "gi1/0/5"))}}
+	links := &fakeLinks{}
+	got, err := SwitchEndpoints(context.Background(), sw, links)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Endpoints) != 1 || got.Endpoints[0].MAC != "aa:bb:cc:00:00:03" {
+		t.Fatalf("endpoints = %+v, want only the dynamic entry", got.Endpoints)
+	}
+	if !reflect.DeepEqual(links.called, []string{"aa:bb:cc:00:00:03"}) {
+		t.Fatalf("lookups = %v, want only the dynamic MAC", links.called)
 	}
 }
