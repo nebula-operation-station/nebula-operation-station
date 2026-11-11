@@ -147,7 +147,7 @@ func TestDecodeRegistryLease(t *testing.T) {
 		"id":       func(g *pb.ReadGrant) { g.GrantId = "00000000-0000-4000-8000-000000000001" },
 		"expiry":   func(g *pb.ReadGrant) { g.ExpiryUnix++ },
 		"created":  func(g *pb.ReadGrant) { g.CreatedUnix = now.Unix() - 1 },
-		"approver": func(g *pb.ReadGrant) { g.ApprovedBy = "x‮y" },
+		"approver": func(g *pb.ReadGrant) { g.ApprovedBy = "x" + string(rune(0x202e)) + "y" },
 		"unknown":  func(g *pb.ReadGrant) { g.CanonicalGrant = append([]byte(`{"zz":1,`), g.CanonicalGrant[1:]...) },
 		"not utf8": func(g *pb.ReadGrant) { g.CanonicalGrant = append(g.CanonicalGrant, 0xff) },
 		"other grant": func(g *pb.ReadGrant) {
