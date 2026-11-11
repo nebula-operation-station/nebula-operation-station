@@ -183,7 +183,7 @@ type Check interface {
 
 // Checks returns the checks of this package in a fixed order.
 func Checks() []Check {
-	return []Check{ShadowCheck{}}
+	return []Check{ShadowCheck{}, AnyAnyCheck{}, ProfileCheck{}}
 }
 
 // precondition returns the state and reason when the snapshot as a whole
