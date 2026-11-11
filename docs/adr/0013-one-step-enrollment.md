@@ -93,11 +93,24 @@ Constraints that shape every decision below:
    ( umask 077 && d=$(mktemp -d) || exit 1
      trap 'rm -rf "$d"' EXIT; trap 'exit 130' HUP INT TERM
      cd "$d" &&
-     curl --proto '=https' --tlsv1.2 -fsS -o nos-enroll.sh \
-       https://nos.example.lan/enroll/<offer-id> &&
+     printf 'url = "https://nos.example.lan/enroll/%s"\noutput = "nos-enroll.sh"\n' \
+       '<offer-id>' |
+       curl --proto '=https' --tlsv1.2 -fsS -K - &&
      echo '<sha256>  nos-enroll.sh' | sha256sum -c - &&
      sudo sh nos-enroll.sh )
    ```
+
+   The offer ID never appears in a process's argument list: `printf` is a
+   shell builtin in bash, dash and zsh (no `exec`, so nothing in
+   `/proc/<pid>/cmdline`), and `curl` reads URL and output file from its
+   config on standard input (`-K -`). Another local user on the host
+   therefore cannot read the ID from the process list and race the
+   operator's download. The `wget` variant reads the URL from standard
+   input the same way (`wget --https-only -i - -O nos-enroll.sh`). The
+   pasted command, including the ID, can still land in the operator's shell
+   history file; that file belongs to the operator (`0600` by default) and
+   the ID is consumed by the download seconds later, after which it only
+   yields the uniform `404`. This residual is accepted (threat table).
 
    The subshell sets `umask 077`, downloads into a fresh `mktemp -d`
    directory (mode `0700`, file mode `0600`) and removes that directory from
@@ -702,6 +715,7 @@ this ADR either.
 | Precomputed key grinding against a known host key | Salt per offer; code computed over salt and key | None beyond the row above |
 | Forged code shown to the operator | Code is read in the operator's own session or console | Equal to the operator's trust in that session (TOFU on a fresh VPS) |
 | Leaked or guessed offer ID | ≥ 128 bits, single use, 15 min, uniform 404, per-client rate limit with trusted-proxy client address, hashed at rest | A leaked ID before the download lets someone take the script; the real download then fails and the operator sees the real download address |
+| Other local users on the target host (shared or multi-user host) | Offer ID passed to `curl`/`wget` on standard input from the `printf` builtin, never in argv; download directory `0700` and files `0600` under `umask 077`; setup key passed to the NetBird client outside argv where the client allows it (D5) | The ID stays in the operator's own shell history (`0600`) but is single-use and consumed seconds later; a user with root or the operator's UID is out of scope (they own the session); short `/proc` exposure of the setup key if the NetBird client only takes it in argv (EN-12) |
 | Setup key left on the host's disk | `umask 077`, `mktemp -d` (`0700`), `trap` cleanup on exit, hang-up, interrupt and termination, in the command and in the script; no browser download for NetBird offers (D8) | `SIGKILL`/power loss leaves a `0700` file; key one-off, ≤ 1 h, revoked when the offer is final |
 | Setup key at rest on executor or server | Key only encrypted in the vault; scripts rendered on demand and checked against the stored hash, never stored, cached or logged; "Show script" renders a placeholder instead of the key | Plaintext in executor and server memory while a response is rendered and streamed |
 | Setup key still valid after the offer ended | Secret wiped from the vault at the final state; key ID kept until revoke succeeds, `netbird_setup_key_revoke_failed` audited, retried, shown on the dashboard and in `nebula host offers` until revoked or expired | Valid until NetBird is reachable again, at most until its ≤ 1 h expiry |
