@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // copyCrashImage copies the database, its -wal file and the marker from
@@ -109,11 +110,11 @@ func failingScan(rows *sql.Rows) ([][offerHashLen]byte, error) {
 // salt.
 func TestOfferWipeIncompleteWhenCheckpointBlocked(t *testing.T) {
 	for _, tc := range []struct {
-		name    string
-		prep    func(*DB, [32]byte) error
-		wipe    func(*DB, *offerClock, [32]byte) ([][offerHashLen]byte, error)
-		want    OfferState
-		scanErr bool // the sweep's scan fails too
+		name     string
+		prep     func(*DB, [32]byte) error
+		wipe     func(*DB, *offerClock, [32]byte) ([][offerHashLen]byte, error)
+		want     OfferState
+		sweepErr bool // the sweep's commit reports an error too
 	}{
 		{"revoke", nil, func(db *DB, _ *offerClock, id [32]byte) ([][offerHashLen]byte, error) {
 			return nil, db.EndOffer(id, OfferOpen, OfferRevoked)
@@ -125,10 +126,10 @@ func TestOfferWipeIncompleteWhenCheckpointBlocked(t *testing.T) {
 			clk.Add(OfferLifetime)
 			return db.ExpireOffers()
 		}, OfferExpired, false},
-		{"expiry sweep with scan failure", nil, func(db *DB, clk *offerClock, _ [32]byte) ([][offerHashLen]byte, error) {
+		{"expiry sweep with commit failure", nil, func(db *DB, clk *offerClock, _ [32]byte) ([][offerHashLen]byte, error) {
 			clk.Add(OfferLifetime)
-			scanExpiredOffers = failingScan
-			defer func() { scanExpiredOffers = scanOfferIDs }()
+			commitSweep = committedButFailing
+			defer func() { commitSweep = (*sql.Tx).Commit }()
 			return db.ExpireOffers()
 		}, OfferExpired, true},
 	} {
@@ -164,15 +165,15 @@ func TestOfferWipeIncompleteWhenCheckpointBlocked(t *testing.T) {
 			if !errors.Is(err, ErrOfferWipeIncomplete) {
 				t.Fatalf("wipe with a blocked checkpoint: %v, want ErrOfferWipeIncomplete", err)
 			}
-			if tc.scanErr != errors.Is(err, errScan) {
-				t.Fatalf("wipe error %v: scan failure reported %v, want %v", err, !tc.scanErr, tc.scanErr)
+			if tc.sweepErr != errors.Is(err, errCommit) {
+				t.Fatalf("wipe error %v: commit failure reported %v, want %v", err, !tc.sweepErr, tc.sweepErr)
 			}
 			msg := err.Error()
 			if strings.Contains(msg, hex.EncodeToString(n.Salt[:])) || strings.Contains(msg, string(n.Salt[:])) ||
 				strings.Contains(msg, fmt.Sprintf("%x", n.Salt[:4])) {
 				t.Fatalf("error carries the salt: %q", msg)
 			}
-			if tc.want == OfferExpired && !tc.scanErr && (len(got) != 1 || got[0] != n.IDHash) {
+			if tc.want == OfferExpired && (len(got) != 1 || got[0] != n.IDHash) {
 				t.Fatalf("sweep returned %x with the error, want the expired offer", got)
 			}
 			// The state change is committed although the purge failed.
@@ -187,43 +188,200 @@ func TestOfferWipeIncompleteWhenCheckpointBlocked(t *testing.T) {
 			if err := reader.Rollback(); err != nil {
 				t.Fatal(err)
 			}
-			if err := bdb.sql.Close(); err != nil {
-				t.Fatal(err)
+			// Restart from the files as they are while bdb is still open:
+			// closing its last connection would checkpoint the WAL itself,
+			// so only Open's checkpoint can remove the salt here. (The
+			// blocked checkpoint left the old page with the salt in the
+			// main file and the wipe in the -wal file.)
+			crash := copyCrashImage(t, dir)
+			if in := saltOnDisk(t, crash, n.Salt); len(in) == 0 {
+				t.Fatal("crash image has no salt on disk: the restart proves nothing")
 			}
-			reopened := openOfferDB(t, dir, clk)
+			reopened := openOfferDB(t, crash, clk)
 			if o := mustOffer(t, reopened, n.IDHash); o.State != tc.want || o.Salt != nil {
 				t.Fatalf("offer after restart: %s, salt %v", o.State, o.Salt != nil)
 			}
-			if in := saltOnDisk(t, dir, n.Salt); len(in) != 0 {
+			if in := saltOnDisk(t, crash, n.Salt); len(in) != 0 {
 				t.Fatalf("wiped salt in %v after restart", in)
 			}
 		})
 	}
 }
 
-// TestExpireOffersPurgesAfterScanFailure: if reading the swept IDs fails
-// after the UPDATE committed, the sweep still removes the wiped salts from
-// the WAL before it returns its error.
-func TestExpireOffersPurgesAfterScanFailure(t *testing.T) {
+// errCommit stands for an error reported by the sweep's COMMIT.
+var errCommit = errors.New("injected commit failure")
+
+// committedButFailing commits and then reports an error, as a commit whose
+// outcome the caller cannot know.
+func committedButFailing(tx *sql.Tx) error {
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return errCommit
+}
+
+// rolledBackButFailing rolls back and reports an error, as a commit that
+// did not happen.
+func rolledBackButFailing(tx *sql.Tx) error {
+	if err := tx.Rollback(); err != nil {
+		return err
+	}
+	return errCommit
+}
+
+// tooManyIDs returns one ID more than a sweep may end.
+func tooManyIDs(rows *sql.Rows) ([][offerHashLen]byte, error) {
+	if _, err := scanOfferIDs(rows); err != nil {
+		return nil, err
+	}
+	return make([][offerHashLen]byte, maxSweptOffers+1), nil
+}
+
+// TestExpireOffersReadFailureEndsNothing: the sweep reads the IDs of the
+// offers it ends before it commits. If that read fails (or returns more
+// IDs than the bound), the sweep rolls back and returns only the error, so
+// no offer has ended without its ID being returned: the offer is unchanged
+// with its salt, and the next sweep ends it, returns its ID and removes
+// the salt from disk.
+func TestExpireOffersReadFailureEndsNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		scan func(*sql.Rows) ([][offerHashLen]byte, error)
+		is   func(error) bool
+	}{
+		{"scan error", failingScan, func(err error) bool { return errors.Is(err, errScan) }},
+		{"too many IDs", tooManyIDs, func(err error) bool {
+			return err != nil && strings.Contains(err.Error(), fmt.Sprintf("more than %d", maxSweptOffers))
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := privateDir(t)
+			clk := &offerClock{t: t0}
+			db := openOfferDB(t, dir, clk)
+			n := mustCreateOffer(t, db, false)
+
+			clk.Add(OfferLifetime)
+			scanExpiredOffers = tc.scan
+			got, err := db.ExpireOffers()
+			scanExpiredOffers = scanOfferIDs
+			if !tc.is(err) || errors.Is(err, ErrOfferWipeIncomplete) || got != nil {
+				t.Fatalf("sweep with a failing read: %x, %v; want only the read error", got, err)
+			}
+			if o := mustOffer(t, db, n.IDHash); o.State != OfferOpen || !bytes.Equal(o.Salt, n.Salt[:]) {
+				t.Fatalf("offer after the failed sweep: %s, salt kept %v; want it unchanged", o.State, o.Salt != nil)
+			}
+
+			got, err = db.ExpireOffers()
+			if err != nil || len(got) != 1 || got[0] != n.IDHash {
+				t.Fatalf("next sweep: %x, %v; want the offer", got, err)
+			}
+			if o := mustOffer(t, db, n.IDHash); o.State != OfferExpired || o.Salt != nil {
+				t.Fatalf("offer after the next sweep: %s, salt %v", o.State, o.Salt != nil)
+			}
+			if in := saltOnDisk(t, dir, n.Salt); len(in) != 0 {
+				t.Fatalf("wiped salt still in %v after the sweep returned", in)
+			}
+		})
+	}
+}
+
+// TestExpireOffersCommitFailureReturnsIDs: when the sweep's COMMIT reports
+// an error, the sweep cannot know whether the offers ended, so it returns
+// their IDs with the error and purges the WAL. If the commit happened, the
+// offers are expired and their salts gone from disk; if not, the next
+// sweep returns the same IDs again: an audit record may repeat but is
+// never lost. When the purge fails too, both errors are returned
+// (errors.Join), still with the IDs.
+func TestExpireOffersCommitFailureReturnsIDs(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		commit     func(*sql.Tx) error
+		committed  bool
+		checkpoint bool // the purge's checkpoint fails as well
+	}{
+		{"committed", committedButFailing, true, false},
+		{"rolled back", rolledBackButFailing, false, false},
+		{"committed, purge fails", committedButFailing, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := privateDir(t)
+			clk := &offerClock{t: t0}
+			db := openOfferDB(t, dir, clk)
+			n := mustCreateOffer(t, db, false)
+			m := mustCreateOffer(t, db, true)
+
+			clk.Add(OfferLifetime)
+			commitSweep = tc.commit
+			t.Cleanup(func() { commitSweep = (*sql.Tx).Commit })
+			if tc.checkpoint {
+				replaceWalCheckpoint(t, checkpointFaults[0].run)
+			}
+			got, err := db.ExpireOffers()
+			commitSweep = (*sql.Tx).Commit
+			if !errors.Is(err, errCommit) {
+				t.Fatalf("sweep with a failing commit: %v, want the commit error", err)
+			}
+			if tc.checkpoint != errors.Is(err, ErrOfferWipeIncomplete) || tc.checkpoint != errors.Is(err, errCheckpoint) {
+				t.Fatalf("sweep error %v: purge failure reported %v, want %v", err, !tc.checkpoint, tc.checkpoint)
+			}
+			want := [][offerHashLen]byte{n.IDHash, m.IDHash}
+			if !sameIDs(got, want) {
+				t.Fatalf("sweep returned %x with the error, want %x", got, want)
+			}
+
+			if !tc.committed {
+				if o := mustOffer(t, db, n.IDHash); o.State != OfferOpen {
+					t.Fatalf("offer after a rolled-back sweep: %s", o.State)
+				}
+				again, err := db.ExpireOffers()
+				if err != nil || !sameIDs(again, want) {
+					t.Fatalf("next sweep: %x, %v; want %x again", again, err, want)
+				}
+			}
+			for _, o := range []NewOffer{n, m} {
+				if got := mustOffer(t, db, o.IDHash); got.State != OfferExpired || got.Salt != nil {
+					t.Fatalf("offer after the sweep: %s, salt %v", got.State, got.Salt != nil)
+				}
+				if in := saltOnDisk(t, dir, o.Salt); tc.checkpoint == (len(in) == 0) {
+					t.Fatalf("wiped salt in %v with purge failure %v", in, tc.checkpoint)
+				}
+			}
+		})
+	}
+}
+
+// sameIDs reports whether a and b hold the same IDs in any order.
+func sameIDs(a, b [][offerHashLen]byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for _, id := range b {
+		if !slices.Contains(a, id) {
+			return false
+		}
+	}
+	return true
+}
+
+// TestExpireOffersSweepIsBounded: one sweep ends at most maxSweptOffers
+// offers, the ones that expired first; the next sweep ends the rest.
+func TestExpireOffersSweepIsBounded(t *testing.T) {
 	dir := privateDir(t)
 	clk := &offerClock{t: t0}
 	db := openOfferDB(t, dir, clk)
-	n := mustCreateOffer(t, db, false)
-	if in := saltOnDisk(t, dir, n.Salt); len(in) == 0 {
-		t.Fatal("live salt not found on disk: the scan proves nothing")
+	var ids [][offerHashLen]byte
+	for range maxSweptOffers + 1 {
+		ids = append(ids, mustCreateOffer(t, db, false).IDHash)
+		clk.Add(time.Second)
 	}
 
 	clk.Add(OfferLifetime)
-	scanExpiredOffers = failingScan
-	t.Cleanup(func() { scanExpiredOffers = scanOfferIDs })
-	got, err := db.ExpireOffers()
-	if !errors.Is(err, errScan) || errors.Is(err, ErrOfferWipeIncomplete) || got != nil {
-		t.Fatalf("sweep with a failing scan: %x, %v; want only the scan error", got, err)
+	first, err := db.ExpireOffers()
+	if err != nil || !sameIDs(first, ids[:maxSweptOffers]) {
+		t.Fatalf("first sweep: %d IDs, %v; want the %d oldest", len(first), err, maxSweptOffers)
 	}
-	if o := mustOffer(t, db, n.IDHash); o.State != OfferExpired || o.Salt != nil {
-		t.Fatalf("offer after sweep: %s, salt %v", o.State, o.Salt != nil)
-	}
-	if in := saltOnDisk(t, dir, n.Salt); len(in) != 0 {
-		t.Fatalf("wiped salt still in %v after the failed sweep returned", in)
+	rest, err := db.ExpireOffers()
+	if err != nil || !sameIDs(rest, ids[maxSweptOffers:]) {
+		t.Fatalf("second sweep: %x, %v; want the newest offer", rest, err)
 	}
 }
