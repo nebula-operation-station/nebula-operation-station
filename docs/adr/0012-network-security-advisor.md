@@ -8,6 +8,13 @@ Q1–Q10 below. Do not start tickets after NS-03 before acceptance (see
 History:
 
 - 2026-11-11: first draft (ticket ns00).
+- 2026-11-11: review fix round 1 (ticket ns00f): EDL manual entries only,
+  feed-driven rule sets moved to Q4b (previously an opt-in rule set in D7);
+  agent-token residual in the threat table; `vu-prio-v2` without the 0.3
+  own-segment level (previously 1.0/0.7/0.4/0.3/0.2); unowned subnets →
+  `unknown`; no export of log- or flow-derived evidence; rule-scoped
+  acknowledgement digest (previously the policy `redacted_digest`); feed
+  prefix minimum /16 and /32 (previously /8 and /24); Q2 and Q8 extended.
 
 ## Context
 
@@ -79,7 +86,7 @@ Constraints carried over unchanged:
 | `nebula-netdev-collector` | Schedules the typed log reads, spools the results (unchanged ADR 0010 role) | Hold credentials, listen on the network |
 | `nebula-vuln-agent` (ADR 0011 amendment 1) | Fetches reputation feeds from allowlisted origins, verifies, normalises and uploads prefix lists to NOS (D6) | Receive observed addresses, flows, topology or findings; do per-address lookups at any provider |
 | Firewall (PAN-OS) | Pulls the EDL if the operator configured it (D7) | Receive anything pushed by NOS |
-| Operator (admin) | Assigns zone trust classes and management targets, approves EDL entries, enables rule sets, applies any suggested rule change outside NOS (later perhaps through ND-30+) | — |
+| Operator (admin) | Assigns zone trust classes and management targets, adds EDL entries one by one, applies any suggested rule change outside NOS (later perhaps through ND-30+) | — |
 
 **All results are advisory.** Reachability verdicts, advisor findings,
 segmentation proposals, what-if results, reputation hits and mitigation
@@ -465,14 +472,16 @@ no write access to the firewall.
   pulls (*verify* in NS-03). **No token in the URL** (URLs end up in logs).
   Optional source-address allowlist set to the firewall's registered
   address (ADR 0010 D1).
-- **Content only from approved entries.** An entry is added by an admin
-  with the ADR 0011 Q4 assertion rule (fresh WebAuthn assertion), reason
-  and optional expiry; removal is audited. **No automatic adds** from feeds
-  unless the operator enables a **rule set** (for example "Feodo C2, all
-  entries, prefix ≥ /24"), which is itself an admin action with assertion;
-  entries added by a rule set expire when the feed delists them or the
-  feed goes stale (fail open: stale feeds stop contributing, never freeze
-  their entries forever), and are labelled with the rule set.
+- **Content only from manually approved entries.** An entry is added by an
+  admin with the ADR 0011 Q4 assertion rule (fresh WebAuthn assertion),
+  reason and optional expiry; removal is audited. The admin may start an
+  add from a reputation hit (the form is prefilled), but every entry needs
+  its own add with assertion. **No automatic adds from feeds.** Feed data
+  is untrusted (D6); a list fed from it and referenced in a deny rule would
+  be an auto-block, which this ADR excludes (non-goals). Feed-driven
+  **rule sets** are therefore not part of this ADR; whether they are ever
+  wanted is a maintainer question (Q4b) and would need an amendment of this
+  ADR that revises the non-goal.
 - **Refusals (checked on every add and every publish).** Entries
   overlapping private, reserved and special ranges, any IPAM network, the
   NOS path, the firewall's own addresses, configured protected destinations
@@ -480,14 +489,16 @@ no write access to the firewall.
   operator-listed) are refused; a list over its size cap (named constant,
   default 10,000 entries, below the model's EDL capacity, *verify*) is not
   published and the previous version stays.
-- **Audit.** Every add, removal, rule-set change, publish (version number,
+- **Audit.** Every add, removal, publish (version number,
   entry count, digest) and every pull (time, source address, result) is
   audited. The UI shows when the firewall last pulled.
 
 **Stated risk.** The EDL is an effect on the firewall that does not pass
 the ADR 0010 permit path. A compromised server could serve a list that
 blocks external addresses (availability) or empty it (removes blocks).
-Bounds: off by default; the refusals above keep internal and protected
+Bounds: off by default; every entry is a manual admin add with assertion,
+so feed data and the agent token cannot reach the list; the refusals
+above keep internal and protected
 destinations out; the operator guide requires the EDL to be used only in
 deny rules on untrusted/WAN zones; the firewall keeps its last fetched list
 when a pull fails (*verify*), so an outage of NOS does not unblock; the
@@ -511,8 +522,9 @@ policy, NAT or management of the firewall.
 ## Non-goals
 
 - No device change of any kind, no auto-block, no automatic rule, object,
-  EDL or NAT change; the EDL contains only operator-approved or
-  operator-enabled rule-set entries.
+  EDL or NAT change; the EDL contains only entries an admin added one by
+  one with assertion. No feed-driven EDL rule sets (open as Q4b; they
+  would need an amendment that revises this non-goal).
 - No change to ADR 0011 closure paths, states or retention; mitigation
   never closes a finding.
 - No per-address reputation lookups at any provider; no feed egress from
@@ -530,10 +542,10 @@ policy, NAT or management of the firewall.
 | Model error makes a reachable service look mitigated | Fail closed: unknown, conditional and stale count as reachable; any policy change voids mitigations; contradiction with observed traffic voids and reports; KEV floor unchanged; mitigation never closes |
 | Hostile device text (rule names, descriptions, threat names) | Spec 09 bounds, escaped text, no links from device text |
 | Spoofed or flooded logs | API pull over pinned TLS (recommended); per-hour key caps with `incomplete` marking; syslog only with TLS client certs and a separate decision |
-| Poisoned reputation feed (false hits, hidden hits, internal ranges) | Feed rules of ADR 0011 D4 on the agent host; NOS-side validation (special/internal ranges dropped, prefix minimum, caps, high-water marks, plausibility hold); hits are advisory; EDL auto-adds off by default and still pass the refusals |
-| Leak of observed addresses to third parties | No per-address lookups; agent has no read scope for flows, logs or endpoints; notifications omit external addresses by default |
-| Compromised agent token | Can upload false snapshots (noise) within caps and validation; cannot read anything; separate scope, rotatable, source-bound |
-| EDL abused to block or unblock | Off by default, approved entries with assertion, refusals, caps, audit, operator guide limits EDL to WAN deny rules; residual stated in D7 |
+| Poisoned reputation feed (false hits, hidden hits, internal ranges) | Feed rules of ADR 0011 D4 on the agent host; NOS-side validation (special/internal ranges dropped, prefix minimum, caps, high-water marks, plausibility hold); hits are advisory; no feed data reaches the EDL (manual entries only, D7) |
+| Leak of observed addresses to third parties | No per-address lookups; agent has no read scope for flows, logs or endpoints; notifications omit external addresses and personal endpoint labels by default (Q8) |
+| Compromised agent token | Can upload false snapshots within caps and validation: false or hidden reputation hits and notifications (misleading the operator, who may then add or skip EDL entries by hand); cannot read anything; separate scope, rotatable, source-bound. **Residual if Q4b ever allows feed-driven EDL rule sets:** false entries would flow into a list the firewall enforces and block legitimate external destinations (availability impact), bounded only by that amendment's hard limits (minimum prefix, per-rule-set cap, per-source opt-in, refusals); this is why D7 has no rule sets |
+| EDL abused to block or unblock | Off by default, manual entries with assertion, refusals, caps, audit, operator guide limits EDL to WAN deny rules; residual stated in D7 |
 | EDL credential leak | Basic credential hashed in NOS, rotatable, source allowlist; mTLS if supported; the list content is low sensitivity but reveals what the operator blocks |
 | Personal data in logs | Minimisation in the executor, aggregates only, short retention, prefix reduction, admin-only, no export, excluded from backups by default |
 | Advisor as a map for an attacker | Admin-only, not in the read-only API, exports audited |
@@ -591,8 +603,22 @@ Tickets: [docs/implementation/network-security.md](../implementation/network-sec
   the agent host, or none? Separate token for `netsec.reputation.write` or
   the existing agent identity with an added scope?
 - **Q4: EDL.** Build D7 at all? If yes: basic credentials or mTLS (subject
-  to NS-03), the default size cap, and whether rule sets (automatic adds
-  from feeds) are offered or only manual entries.
+  to NS-03) and the default size cap. D7 as drafted has manual entries
+  only.
+  - **Q4b: Feed-driven rule sets.** Should NOS ever add EDL entries
+    automatically from reputation feeds? This draft does not: it would be an
+    auto-block from untrusted feed data and conflicts with the non-goal.
+    If the maintainer wants it, it needs an amendment of this ADR that
+    revises the non-goal and states the residual risk (a compromised agent
+    token or poisoned feed blocks legitimate destinations), and at least
+    these hard limits, each a named constant the operator cannot exceed:
+    a **minimum prefix length** for rule-set entries (single addresses,
+    /32 IPv4 and /128 IPv6, unless the maintainer names a shorter one), a
+    **per-rule-set entry cap** far below the list size cap, an **explicit
+    operator opt-in per entry source** (per feed ID and category, with
+    assertion; no "all feeds" option), entries expiring when the source
+    delists them or goes stale, and the D7 refusals on every add and
+    publish.
 - **Q5: Where the advisor runs.** NOS server (recommended) or the agent
   host?
 - **Q6: UI placement.** Firewall view (ADR 0010 ND-20) for rule findings

@@ -25,7 +25,7 @@ steps, in the style of [network-devices.md](network-devices.md).
 | S10 | Retention: aggregates 30 days, external non-hit addresses full 7 days then /24 and /48, hits 90 days, admin-only, no export, excluded from backup (all Q2) | D5 |
 | S11 | Feeds fetched only by the agent host; no per-address lookups; upload via `netsec.reputation.write`; NOS-side validation (special/internal ranges dropped, prefix minimum, caps, content dates, plausibility hold) | D6 |
 | S12 | Matching in NOS; hits with first/last seen, allowed vs denied, direction, internal endpoints; `netsec.reputation_allowed` with dedupe and the ADR 0011 D9 rate limit | D6 |
-| S13 | EDL (only if Q4): HTTPS, basic credential or mTLS, no token in URL, approved entries with assertion, rule sets opt-in, refusals, size cap, audit, last-pulled view | D7 |
+| S13 | EDL (only if Q4): HTTPS, basic credential or mTLS, no token in URL, manual entries with assertion only (no feed-driven rule sets, Q4b), refusals, size cap, audit, last-pulled view | D7 |
 | S14 | Server runs everything (Q5); admin-only pages; not in the read-only API; strict CSP; device, log and feed text escaped | D8 |
 
 ## Current state and reuse
@@ -97,7 +97,7 @@ ticket. Order is the column "After".
 
 | Ticket | Scope / paths | P | After | Acceptance |
 | --- | --- | --- | --- | --- |
-| NS-17 | EDL lists, entries and rule sets: server migration, new `internal/edl/` | no | NS-15, Q4 | Add with fresh WebAuthn assertion (ADR 0011 Q4 rule), reason, expiry; removal audited; rule sets opt-in with assertion, entries expire on delisting or feed stale; refusals (special ranges, IPAM, NOS path, firewall addresses, protected destinations) on add and publish; size cap → not published, previous stays; deterministic output, ASCII, one entry per line |
+| NS-17 | EDL lists and entries: server migration, new `internal/edl/` | no | NS-02, NS-15, Q4 | Add with fresh WebAuthn assertion (ADR 0011 Q4 rule), reason, expiry; removal audited; no code path adds an entry from feed data, reputation hits or the agent token (test; a hit only prefills the form); refusals (special ranges, IPAM, NOS path, firewall addresses, protected destinations) on add and publish; size cap → not published, previous stays; deterministic output, ASCII, one entry per line |
 | NS-18 | EDL endpoint: `internal/web/` route `/edl/`, credential handling | yes if `internal/web/auth/` changes | NS-17, NS-03 | HTTPS only; basic credential (≥ 32 random bytes, shown once, stored hashed, rotatable) or mTLS per NS-03; no token in URL accepted; no cookies or session; source allowlist; `Content-Type: text/plain`, `Cache-Control: no-store`; every pull audited; "last pulled" shown |
 
 ### Phase 5: hardening and documentation
@@ -119,7 +119,7 @@ ticket that adds a table or method to the spec. Release placement per Q10.
 ## Non-goals
 
 As ADR 0012: no device change, no auto-block, no automatic EDL entries
-without an enabled rule set, no change to ADR 0011 closure rules, no
+(no feed-driven rule sets; Q4b would need an ADR amendment), no change to ADR 0011 closure rules, no
 per-address reputation lookups, no feed egress from the server, no
 payload, URL or user identity storage, no host-firewall modelling in
 `nr-v1`.
