@@ -130,6 +130,22 @@ func (f *fakeExecutor) approve(t *testing.T, digest string) {
 		t.Fatalf("no proposal %s", digest)
 	}
 	f.approved = append(f.approved, d)
+	// The executor then lists the approved lease (ListReadGrants).
+	f.grants = append(f.grants, &pb.ReadGrant{GrantId: d.ID, GrantDigest: digest, CanonicalGrant: f.canon[digest],
+		ApprovedBy: "webauthn:test", CreatedUnix: d.CreatedUnix, ExpiryUnix: d.ExpiryUnix})
+}
+
+// revoke stands in for revoking an approved lease: the executor stops
+// authorizing it and lists it as revoked.
+func (f *fakeExecutor) revoke(id string, at time.Time) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.approved = slices.DeleteFunc(f.approved, func(d permit.ReadGrantDoc) bool { return d.ID == id })
+	for _, g := range f.grants {
+		if g.GetGrantId() == id {
+			g.RevokedUnix = at.Unix()
+		}
+	}
 }
 
 func (f *fakeExecutor) ReadPrivateRegistry(_ context.Context, in *pb.ReadPrivateRegistryRequest, _ ...grpc.CallOption) (*pb.ReadPrivateRegistryResponse, error) {

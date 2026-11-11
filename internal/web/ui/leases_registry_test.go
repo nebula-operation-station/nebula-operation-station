@@ -36,9 +36,13 @@ type fakeRegistryReads struct {
 	proposed   []registrymeta.LeaseRequest
 	leases     []registrymeta.LeaseView
 	resolved   int
+	listed     int
 }
 
 func (f *fakeRegistryReads) PrivateRegistries(context.Context) ([]registrymeta.PrivateIdentity, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listed++
 	return f.regs, f.listErr
 }
 
@@ -169,6 +173,29 @@ func TestRegistryLeasePreviewRejections(t *testing.T) {
 	if code, _ := postLeaseForm(t, registryLeaseHandler(t, &fakeLeases{}, nil), "/leases/preview",
 		"scope=registry&registry=corp&registry_method=tag_digest&days=7"); code != http.StatusBadRequest {
 		t.Errorf("without registry reads = %d", code)
+	}
+}
+
+// TestRegistryLeasePreviewThrottledBeforeExecutor: the per-user preview
+// throttle applies before the executor's registries are listed, so
+// repeated POSTs (valid or not) never reach the executor faster than the
+// preview interval.
+func TestRegistryLeasePreviewThrottledBeforeExecutor(t *testing.T) {
+	r := newFakeRegistryReads()
+	h := registryLeaseHandler(t, &fakeLeases{}, r)
+	const form = "scope=registry&registry=corp&registry_method=tag_digest&days=7"
+	if code, body := postLeaseForm(t, h, "/leases/preview", form); code != http.StatusSeeOther {
+		t.Fatalf("first POST = %d (%s)", code, body)
+	}
+	for i, f := range []string{form, form, "scope=registry&registry=corp&registry_method=pull&days=7"} {
+		if code, _ := postLeaseForm(t, h, "/leases/preview", f); code != http.StatusTooManyRequests {
+			t.Fatalf("POST %d within the interval = %d", i, code)
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.listed != 1 || len(r.proposed) != 1 {
+		t.Fatalf("executor reached by throttled previews: listed %d, proposed %d", r.listed, len(r.proposed))
 	}
 }
 
