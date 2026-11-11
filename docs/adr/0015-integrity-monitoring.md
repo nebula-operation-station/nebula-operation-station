@@ -842,14 +842,36 @@ roles never mix:
        approved list (digest-checked, below) and in the executor's
        retained run. For (d), the executor never keeps SSH configuration
        content (D6), so it stores, next to the approved baseline digest,
-       the derived path set of the run from which the approved baseline's
-       current `sshd_config` and include entries were taken, and replaces
-       it only when a baseline approval makes the run's SSH configuration
-       entries the approved ones (a critical-class CLI approval). A
-       pending `sshd_config` change or a removed `/usr/bin` command
-       therefore never makes an entry non-critical; the smaller set takes
-       effect only after the admin approved that change in the CLI. Before
-       the first approved baseline, the run's set alone is used.
+       an approved derived set S and changes it only on a baseline
+       approval, by this rule. Let R be the complete run the approved
+       proposal was built from (its run ID and derived set are stored
+       with the proposal, above). R's SSH configuration array (D6) holds
+       `/etc/ssh/sshd_config` and every file it includes, checked for
+       consistency. S is **replaced** by R's derived set only when, for
+       **every** path in that array, the newly approved baseline holds an
+       entry equal to R's record of that path (type and content hash).
+       Then the approved `sshd_config` is R's, and so is every file it
+       includes, so R's derived set is exactly the set of the approved
+       configuration. In every other case, in particular an approval that
+       takes `sshd_config` but not a changed include from R (or the
+       reverse, one CLI approval at a time), an approval while an include
+       R names is still missing from the baseline, and a baseline whose
+       SSH configuration entries were taken from another run with
+       different content, S becomes the **union** of S and R's derived set
+       and never shrinks. So the set shrinks only when the approved
+       baseline holds the whole SSH configuration of one run; after
+       one-entry CLI approvals of a multi-file change, that is the last of
+       them, provided the entries approved earlier still equal that run's
+       records. If a newer run changed one of them in between, the
+       condition fails and S stays the larger union until the admin has
+       approved the whole configuration of one run, which only
+       over-classifies. Classification keeps using the union of S and the
+       latest complete run's set, as stated above. A pending `sshd_config` change or a removed
+       `/usr/bin` command therefore never makes an entry non-critical; the
+       smaller set takes effect only after the admin approved the whole
+       change in the CLI. Before the first approved baseline, the run's
+       set alone is used; the initial approval (above) sets S to the
+       initial run's derived set.
      - **`AuthorizedKeysFile` expansion.** The executor parses `Include`
        and every SSH login file directive of D9 (including those inside
        `Match` blocks) and expands `AuthorizedKeysFile`,
@@ -1325,8 +1347,11 @@ the direction.
 - Spec 05/06: I1 unlock refusal and `nebula integrity ack` (if Q4 is
   accepted); baseline approval challenge domains and what they bind
   (host ID, previous and new digest); `nebula integrity pending` and
-  `nebula integrity approve` as the only approval path for
-  critical-class entries.
+  `nebula integrity approve` (rendering and approving exactly the
+  executor-stored proposal bound to the digest, with the previous-digest
+  check) as the only approval path for critical-class entries, and
+  `nebula integrity approve --initial` for the first baseline (D7); the
+  rule by which an approval replaces the stored derived SSH set (D7).
 - Spec 07: `fim.scan` in the read-lease allowlist with its intervals and
   budgets.
 - Spec 09: `fim-scan-v1` schema, the action-specific limits of D6, path
