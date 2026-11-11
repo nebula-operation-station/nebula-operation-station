@@ -438,6 +438,19 @@ func oneStepVariants(t *testing.T) map[string]OneStepOptions {
 	o := validOneStep(t)
 	o.Salt = allFF
 	m["salt-ff"] = o
+	for _, sudo := range []bool{true, false} {
+		for name, nb := range map[string]NetBirdOptions{
+			"netbird-mixed": validNetBird(),
+			"netbird-env":   {ManagementURL: "https://[fd00::1]:33073/api", SetupKey: testSetupKey, Clients: []NetBirdClient{{Version: "0.31.0", KeyPassing: KeyPassingEnv}}},
+			"netbird-file":  {ManagementURL: "https://10.0.0.1", SetupKey: testSetupKey, Clients: []NetBirdClient{{Version: "0.30.2", KeyPassing: KeyPassingFile}, {Version: "0.30.3", KeyPassing: KeyPassingFile}}},
+			"netbird-show":  {ManagementURL: "https://nb.lan", SetupKey: SetupKeyPlaceholder, Clients: []NetBirdClient{{Version: "0.30.2", KeyPassing: KeyPassingFile}}},
+		} {
+			o := validOneStep(t)
+			o.Sudo = sudo
+			o.NetBird = &nb
+			m[fmt.Sprintf("%s-sudo%v", name, sudo)] = o
+		}
+	}
 	return m
 }
 

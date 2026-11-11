@@ -18,6 +18,9 @@ type OneStepOptions struct {
 	// Salt is the offer salt, exactly pairing.SaltSize bytes. It reaches
 	// the script only base64-encoded inside one single-quoted literal.
 	Salt []byte
+	// NetBird, when set, adds the NetBird join (ADR 0013 D6): its preflight
+	// right after `set -eu` and the join before the pairing code.
+	NetBird *NetBirdOptions
 }
 
 // Validate checks every field of o.
@@ -28,13 +31,19 @@ func (o OneStepOptions) Validate() error {
 	if len(o.Salt) != pairing.SaltSize {
 		return fmt.Errorf("%w: salt must be %d bytes, got %d", ErrInvalidOptions, pairing.SaltSize, len(o.Salt))
 	}
+	if o.NetBird != nil {
+		if err := o.NetBird.Validate(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 // RenderOneStep validates o and returns the one-step enrollment script: the
 // classic script for o.Options with a 64-bit arithmetic check at the start
 // and, at the end, the host's address list and the pairing code computed on
-// the host. It refuses invalid options with ErrInvalidOptions and a script
+// the host. With o.NetBird it also checks the NetBird client before any
+// change and joins NetBird before the pairing code. It refuses invalid options with ErrInvalidOptions and a script
 // over MaxScriptBytes with ErrTooLarge.
 func RenderOneStep(o OneStepOptions) ([]byte, error) {
 	if err := o.Validate(); err != nil {
@@ -49,7 +58,12 @@ func RenderOneStep(o OneStepOptions) ([]byte, error) {
 
 // renderOneStep writes the one-step script for validated options.
 func renderOneStep(o OneStepOptions) string {
-	return renderWith(o.Options, "\n"+check64) + "\n" + pairingFuncs(o.Salt, o.From) + pairingMain
+	early, join := "\n"+check64, ""
+	if o.NetBird != nil {
+		early += netbirdEarly(*o.NetBird)
+		join = netbirdJoin
+	}
+	return renderWith(o.Options, early) + join + "\n" + pairingFuncs(o.Salt, o.From) + pairingMain
 }
 
 // check64 stops the script before any change when the shell lacks 64-bit
