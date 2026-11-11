@@ -24,7 +24,11 @@ History:
 - 2026-11-11 (as00gf, review of PR #465): V5 trusted host set without
   inventory display names and IDs (previously: in the set as
   "operator-entered", although PVE guest import takes them from the
-  guest).
+  guest). V2 kinds `id`/`number`/`duration` without `.` (previously
+  `[A-Za-z0-9._:-]+`) and a `cmd/nebula/` canary test that forces every
+  host-sending argument to a host kind (previously hand review); new
+  kinds `bool` (with `backup --no-encrypt` red) and `trust-path`
+  (`--ca-file`, byte-identical or red; previously `in-path`, amber).
 
 ## Context
 
@@ -266,15 +270,58 @@ does NOS connect **from** (`--from`)?
   | --- | --- |
   | `host`, `host-port`, `host-list` | V4 host class shape (port `1`–`65535`, list separated by `,`); host parts by V5 |
   | `out-path` (anything the command writes or replaces, e.g. `backup --out`) | **byte-identical** to the value the shown doc command gives that flag or position (or a placeholder value there, V4a); otherwise red, also when the flag is not shown at all. Mentions in prose (`--out FILE`) do not count |
+  | `trust-path` (a file whose content NOS trusts before it sends a credential, e.g. `pve remote add --ca-file`, `pve remote repin --ca-file`) | as `out-path`: **byte-identical** to the shown doc value, otherwise red "trust anchor not from the cited documentation" (previously `in-path`, amber) |
   | `in-path` (read only, e.g. `restore --identity`, the restore archive) | `[A-Za-z0-9._/~-]+`, no `..` segment; not byte-identical to the shown doc value → amber "check the file path" |
   | `enum` | one of the catalog's values |
-  | `id`, `number`, `duration` | `[A-Za-z0-9._:-]+` (V4c applies) |
+  | `bool` (flag without value, e.g. `backup --full`, `pve remote add --action-token`) | written `--flag` only (`--flag=true`/`=false` → red "not a plain value"); the flag counts for "shown" like any other flag. A bool flag in the reviewed **red-flag list** makes the command red, cited or not: today `nebula backup --no-encrypt` → red "writes an unencrypted archive that contains secrets; run it only by hand from the cited section" (previously no kind, so the catalog test forced a wrong one) |
+  | `id` | `[A-Za-z0-9_:-]{1,128}`, **no `.`** (previously `.` allowed) |
+  | `number` | `[0-9]{1,19}` |
+  | `duration` | `([0-9]{1,6}(ms\|s\|m\|h))+`, no `.` (previously `[A-Za-z0-9._:-]+`) |
   | `text` | V4(b) free text |
 
+  So no `id`, `number`, `duration`, `enum` or `bool` value can be a DNS
+  name or an IP address, whatever V4(c) catches. A value that needs `.`
+  or another character outside these shapes (for example `artifact unpin
+  MODULE@VERSION` or `signer remove SHA256:…`) gets its own kind with a
+  fixed shape added to this table by the AS-05 catalog review; such a
+  kind must not admit a DNS name (its dotted part, if any, digits only),
+  and the catalog test runs the canary below against it.
+
   A flag or positional without a kind in the catalog makes the catalog
-  test fail (AS-05). The kinds are reviewed by hand against `cmd/nebula`
-  (the `cmd/nebula/` test checks names, not kinds; *verify* whether it can
-  derive `out-path` from the code at AS-05).
+  test fail (AS-05).
+
+  **Host-sending arguments are forced through V5 by a test**, not by hand
+  review of the kinds (previously: kinds reviewed only by hand; the
+  `cmd/nebula/` test checked names, not kinds). The AS-05 test in
+  `cmd/nebula/` runs every catalog command once per argument (flag or
+  positional) whose kind is **not** `host`, `host-port` or `host-list`,
+  with that argument set to a canary DNS name (`c<n>.canary.invalid`;
+  an argument whose kind cannot hold it is run with its closest valid
+  value and the canary checked with a property test instead, see below)
+  and every other argument set to a valid fixture. The command runs
+  against an in-process fake executor and with a recording dialer and
+  HTTP transport injected into the code under test (no network). The
+  test fails when a canary
+  1. reaches the address of a dial, TLS server name or URL host, or
+  2. appears in a gRPC request field whose name is in the test's fixed
+     destination list (`endpoint`, `address`, `host`, `url`, `ip`, `from`,
+     `cidr`, `target`, `server`, matched as a whole word of the snake case
+     field name) or in any `Endpoint` message, or
+  3. belongs to a flag whose usage text in the binary's flag set contains
+     `host`, `endpoint`, `address`, `URL`, `IP` or `CIDR` (word match).
+
+  A further property test checks that every kind except `host`,
+  `host-port`, `host-list`, `text`, `in-path`, `out-path` and
+  `trust-path` rejects `c1.canary.invalid`, `1.2.3.4` and `[::1]`, and
+  that every `text`, `in-path`, `out-path` and `trust-path` argument
+  passes the canary run. Together these make "every argument that sends
+  data or tokens to a host has a host kind, and with it V5" a test
+  result: a misclassified `--endpoint` fails the build. The mechanism of
+  injecting the fake executor and dialer into `package main` is *verify*
+  at AS-05; if it needs a hook in non-test code of `cmd/nebula/`, that is
+  a production change in a protected path and needs the maintainer's
+  approval. If the test cannot be built, D6 (T2) must say that the
+  host-kind classification is hand-reviewed only.
 
   **Shapes** (built once per chunk by AS-03/AS-05, the same code for the
   index and the cross-check):
@@ -383,7 +430,19 @@ does NOS connect **from** (`--from`)?
     backup` passes; `sudo nebula backup --out /etc/sudoers`,
     `nebula backup --out ../x` and `nebula backup --out ~/b.age` are red
     (`out-path` not shown in the cited code block; the prose `--out FILE`
-    does not count).
+    does not count). `sudo nebula backup --no-encrypt` is red with any
+    citation (red-flag list, kind `bool`).
+  - `docs/handbook/proxmox.md` cited: the section names
+    `--ca-file pve-root-ca.pem` only in prose, so the `pve remote add`
+    command with any `--ca-file` value, also `pve-root-ca.pem` or
+    `/tmp/x.pem`, is red (`trust-path` not shown in a cited code block),
+    because that file decides which server receives the PVE token. A
+    corpus code block that shows `--ca-file pve-root-ca.pem` would admit
+    exactly that value.
+  - A catalog argument of kind `id`, `number` or `duration` with the
+    value `evil.example` is red (no `.` in those shapes), so a
+    host-sending argument misclassified as `id` still cannot carry a DNS
+    name, and the canary test fails on the misclassification itself.
   - Admin guide 16 cited: `sudo rm -rf /var/lib/nebula /etc/nebula` and
     `sudo userdel nebula-server; sudo userdel nebula-executor; sudo userdel nebula-discovery`
     pass V3 but get amber "destructive" (V6); not cited, both are red.
