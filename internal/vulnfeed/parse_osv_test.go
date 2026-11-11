@@ -1,0 +1,260 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package vulnfeed
+
+import (
+	"archive/zip"
+	"bytes"
+	"context"
+	"errors"
+	"reflect"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestParseOSVDebianRecord(t *testing.T) {
+	rec, err := ParseOSV(readFixture(t, "parse_osv", "dsa.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := OSVRecord{
+		ID:        "DSA-5793-1",
+		Modified:  time.Date(2024, 10, 22, 8, 15, 30, 123456000, time.UTC),
+		Published: time.Date(2024, 10, 21, 0, 0, 0, 0, time.UTC),
+		Aliases:   []string{"CVE-2024-10229", "CVE-2024-10230"},
+		Affected: []OSVAffected{{
+			Ecosystem: "Debian:12", Name: "chromium",
+			Ranges: []OSVRange{{Type: OSVRangeEcosystem, Events: []OSVEvent{
+				{OSVIntroduced, "0"}, {OSVFixed, "130.0.6723.69-1~deb12u1"},
+			}}},
+		}},
+		SkippedAffected: 1,
+	}
+	if !reflect.DeepEqual(rec, want) {
+		t.Fatalf("record:\n got %+v\nwant %+v", rec, want)
+	}
+	if got := rec.CVEs(); !slices.Equal(got, []string{"CVE-2024-10229", "CVE-2024-10230"}) {
+		t.Fatalf("CVEs %v", got)
+	}
+}
+
+func TestParseOSVSemverRangesSkipOtherTypes(t *testing.T) {
+	rec, err := ParseOSV(readFixture(t, "parse_osv", "go.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.Affected) != 1 {
+		t.Fatalf("affected %+v", rec.Affected)
+	}
+	a := rec.Affected[0]
+	if a.Ecosystem != "Go" || a.Name != "github.com/example/mod" || a.SkippedRanges != 2 || len(a.Ranges) != 1 {
+		t.Fatalf("affected %+v", a)
+	}
+	wantEv := []OSVEvent{{OSVIntroduced, "0"}, {OSVFixed, "1.2.4"}, {OSVIntroduced, "2.0.0-rc.1"}, {OSVLastAffected, "2.0.1+build.5"}}
+	if a.Ranges[0].Type != OSVRangeSemver || !slices.Equal(a.Ranges[0].Events, wantEv) {
+		t.Fatalf("range %+v", a.Ranges[0])
+	}
+	if got := rec.CVEs(); !slices.Equal(got, []string{"CVE-2024-45678"}) {
+		t.Fatalf("CVEs %v", got)
+	}
+}
+
+func TestParseOSVRejectsMalformed(t *testing.T) {
+	base := func(affected string) string {
+		return `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","affected":[` + affected + `]}`
+	}
+	pkg := `"package":{"ecosystem":"Debian:12","name":"zlib"}`
+	rng := func(typ, events string) string {
+		return base(`{` + pkg + `,"ranges":[{"type":"` + typ + `","events":[` + events + `]}]}`)
+	}
+	tests := []struct {
+		name string
+		in   string
+		want error
+	}{
+		{"not json", `nope`, ErrFeedMalformed},
+		{"array", `[]`, ErrFeedMalformed},
+		{"missing id", `{"modified":"2024-01-01T00:00:00Z"}`, ErrFeedMalformed},
+		{"bad id", `{"id":"../etc","modified":"2024-01-01T00:00:00Z"}`, ErrFeedMalformed},
+		{"missing modified", `{"id":"OSV-1"}`, ErrFeedMalformed},
+		{"bad modified", `{"id":"OSV-1","modified":"yesterday"}`, ErrFeedMalformed},
+		{"bad withdrawn", `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","withdrawn":"x"}`, ErrFeedMalformed},
+		{"bad alias", `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","aliases":["a b"]}`, ErrFeedMalformed},
+		{"alias wrong type", `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","aliases":"CVE-2024-1234"}`, ErrFeedMalformed},
+		{"too many aliases", `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","aliases":[` + strings.TrimSuffix(strings.Repeat(`"CVE-2024-1234",`, MaxOSVAliases+1), ",") + `]}`, ErrFeedLimit},
+		{"case shadow id", `{"id":"OSV-1","ID":"OSV-2","modified":"2024-01-01T00:00:00Z"}`, ErrFeedMalformed},
+		{"bad ecosystem", base(`{"package":{"ecosystem":"","name":"zlib"}}`), ErrFeedMalformed},
+		{"bad package", base(`{"package":{"ecosystem":"Go","name":"a b"}}`), ErrFeedMalformed},
+		{"two keys in event", rng("ECOSYSTEM", `{"introduced":"0","fixed":"1.0"}`), ErrFeedMalformed},
+		{"empty event", rng("ECOSYSTEM", `{"introduced":"0"},{}`), ErrFeedMalformed},
+		{"unknown event", rng("ECOSYSTEM", `{"introduced":"0"},{"patched":"1.0"}`), ErrFeedMalformed},
+		{"event wrong type", rng("ECOSYSTEM", `{"introduced":0}`), ErrFeedMalformed},
+		{"no introduced", rng("ECOSYSTEM", `{"fixed":"1.0"}`), ErrFeedMalformed},
+		{"bad ecosystem version", rng("ECOSYSTEM", `{"introduced":"0"},{"fixed":"1.0;rm"}`), ErrFeedMalformed},
+		{"bad semver", rng("SEMVER", `{"introduced":"0"},{"fixed":"1.2"}`), ErrFeedMalformed},
+		{"semver leading v", rng("SEMVER", `{"introduced":"v1.0.0"}`), ErrFeedMalformed},
+		{"too deep", `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","x":` + strings.Repeat("[", MaxJSONDepth) + strings.Repeat("]", MaxJSONDepth) + `}`, ErrFeedLimit},
+		{"too large", `{"id":"OSV-1","details":"` + strings.Repeat("a", MaxOSVRecordBytes) + `"}`, ErrFeedLimit},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := ParseOSV([]byte(tc.in))
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseOSVIgnoresUnknownFields(t *testing.T) {
+	in := `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","future":{"a":[{"b":"c"}]},"affected":[{"package":{"ecosystem":"Go","name":"x","new":1},"ranges":[{"type":"SEMVER","events":[{"introduced":"0"}],"database_specific":{"z":1}}]}]}`
+	rec, err := ParseOSV([]byte(in))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rec.Affected) != 1 || len(rec.Affected[0].Ranges) != 1 {
+		t.Fatalf("got %+v", rec)
+	}
+}
+
+type zipFile struct {
+	name string
+	body []byte
+}
+
+func makeZip(t testing.TB, files ...zipFile) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for _, f := range files {
+		w, err := zw.Create(f.name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write(f.body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buf.Bytes()
+}
+
+func parseZip(data []byte) ([]OSVRecord, OSVArchiveSummary, error) {
+	var got []OSVRecord
+	sum, err := ParseOSVArchive(context.Background(), bytes.NewReader(data), int64(len(data)), func(r OSVRecord) error {
+		got = append(got, r)
+		return nil
+	})
+	return got, sum, err
+}
+
+func TestParseOSVArchiveNewestModifiedIsContentDate(t *testing.T) {
+	data := makeZip(t,
+		zipFile{"DSA-5793-1.json", readFixture(t, "parse_osv", "dsa.json")},
+		zipFile{"GO-2024-3000.json", readFixture(t, "parse_osv", "go.json")},
+	)
+	got, sum, err := parseZip(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || sum.Records != 2 || !sum.Newest.Equal(time.Date(2024, 11, 1, 12, 0, 0, 0, time.UTC)) {
+		t.Fatalf("summary %+v, records %d", sum, len(got))
+	}
+}
+
+func TestParseOSVArchiveRejectsBadArchives(t *testing.T) {
+	rec := readFixture(t, "parse_osv", "go.json")
+	tests := []struct {
+		name string
+		data []byte
+		want error
+	}{
+		{"not zip", []byte("PK nope"), ErrFeedMalformed},
+		{"nested path", makeZip(t, zipFile{"a/GO-1.json", rec}), ErrFeedMalformed},
+		{"traversal", makeZip(t, zipFile{"../GO-1.json", rec}), ErrFeedMalformed},
+		{"not json name", makeZip(t, zipFile{"GO-1.txt", rec}), ErrFeedMalformed},
+		{"duplicate name", makeZip(t, zipFile{"a.json", rec}, zipFile{"a.json", rec}), ErrFeedMalformed},
+		{"duplicate id", makeZip(t, zipFile{"a.json", rec}, zipFile{"b.json", rec}), ErrFeedMalformed},
+		{"bad record", makeZip(t, zipFile{"a.json", []byte("{}")}), ErrFeedMalformed},
+		{"record too large", makeZip(t, zipFile{"a.json", bytes.Repeat([]byte(" "), MaxOSVRecordBytes+1)}), ErrFeedLimit},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := parseZip(tc.data)
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+		})
+	}
+	if _, err := ParseOSVArchive(context.Background(), bytes.NewReader(nil), 0, func(OSVRecord) error { return nil }); !errors.Is(err, ErrFeedLimit) {
+		t.Fatalf("zero size: %v", err)
+	}
+}
+
+func TestParseOSVArchiveRejectsLyingSizeHeader(t *testing.T) {
+	// Store the entry uncompressed, then shrink its declared size in both
+	// headers: the reader must not deliver more than was declared.
+	body := readFixture(t, "parse_osv", "go.json")
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.CreateHeader(&zip.FileHeader{Name: "a.json", Method: zip.Store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Write(body); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data := buf.Bytes()
+	cd := bytes.LastIndex(data, []byte("PK\x01\x02"))
+	if cd < 0 {
+		t.Fatal("no central directory")
+	}
+	// Central directory: uncompressed size at offset 24 (little endian).
+	data[cd+24], data[cd+25], data[cd+26], data[cd+27] = 10, 0, 0, 0
+	if _, _, err := parseZip(data); err == nil {
+		t.Fatal("accepted an entry larger than its declared size")
+	}
+}
+
+func FuzzParseOSV(f *testing.F) {
+	f.Add(readFixture(f, "parse_osv", "dsa.json"))
+	f.Add(readFixture(f, "parse_osv", "go.json"))
+	f.Add([]byte(`{"id":"OSV-1","modified":"2024-01-01T00:00:00Z"}`))
+	f.Fuzz(func(t *testing.T, in []byte) {
+		rec, err := ParseOSV(in)
+		if err != nil {
+			if !errors.Is(err, ErrFeedMalformed) && !errors.Is(err, ErrFeedLimit) {
+				t.Fatalf("unexpected error class %v", err)
+			}
+			return
+		}
+		if !feedVulnIDRe.MatchString(rec.ID) || rec.Modified.IsZero() {
+			t.Fatalf("unvalidated record %+v", rec)
+		}
+		for _, a := range rec.Affected {
+			for _, r := range a.Ranges {
+				if len(r.Events) == 0 {
+					t.Fatalf("range without events %+v", a)
+				}
+			}
+		}
+	})
+}
+
+func FuzzParseOSVArchive(f *testing.F) {
+	f.Add(makeZip(f, zipFile{"GO-2024-3000.json", readFixture(f, "parse_osv", "go.json")}))
+	f.Add([]byte("PK\x05\x06" + strings.Repeat("\x00", 18)))
+	f.Fuzz(func(t *testing.T, in []byte) {
+		_, err := ParseOSVArchive(context.Background(), bytes.NewReader(in), int64(len(in)), func(OSVRecord) error { return nil })
+		if err != nil && !errors.Is(err, ErrFeedMalformed) && !errors.Is(err, ErrFeedLimit) {
+			t.Fatalf("unexpected error class %v", err)
+		}
+	})
+}
