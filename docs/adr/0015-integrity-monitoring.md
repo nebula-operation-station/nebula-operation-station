@@ -769,7 +769,19 @@ roles never mix:
      new values (the old values from the digest-checked approved list,
      the new values copied from the retained run when the proposal was
      built), and the derived set (d) of that run (below). A newer run that replaces the retained records does not
-     change a stored proposal. `pending` only lists stored proposed
+     change a stored proposal. **The proposal store is bounded** (new
+     named constants, fixed in IG-05): at most **16** stored proposals
+     per host, of which at most **one** initial proposal (a new initial
+     proposal replaces the stored one); a stored proposal expires
+     **7 days** after the executor built it (executor clock); and when a
+     baseline approval stores a new approved digest, the executor deletes
+     every stored proposal of that host whose previous digest is no
+     longer the approved digest (they could never be approved). When the
+     per-host cap is reached, a new proposal evicts the oldest one; an
+     evicted or expired proposal is refused by `approve` like an unknown
+     digest, and the admin requests a new one. A compromised server can
+     therefore make the executor discard pending proposals, never store
+     more than the cap or approve anything. `pending` only lists stored proposed
      digests and approves nothing. `approve` itself, whatever the source
      of the digest the admin passes (typed, pasted from `pending` or from
      the browser), refuses a digest for which it holds no stored
@@ -847,31 +859,61 @@ roles never mix:
        proposal was built from (its run ID and derived set are stored
        with the proposal, above). R's SSH configuration array (D6) holds
        `/etc/ssh/sshd_config` and every file it includes, checked for
-       consistency. S is **replaced** by R's derived set only when, for
-       **every** path in that array, the newly approved baseline holds an
-       entry equal to R's record of that path (type and content hash).
-       Then the approved `sshd_config` is R's, and so is every file it
-       includes, so R's derived set is exactly the set of the approved
-       configuration. In every other case, in particular an approval that
-       takes `sshd_config` but not a changed include from R (or the
-       reverse, one CLI approval at a time), an approval while an include
-       R names is still missing from the baseline, and a baseline whose
-       SSH configuration entries were taken from another run with
-       different content, S becomes the **union** of S and R's derived set
-       and never shrinks. So the set shrinks only when the approved
-       baseline holds the whole SSH configuration of one run; after
-       one-entry CLI approvals of a multi-file change, that is the last of
-       them, provided the entries approved earlier still equal that run's
-       records. If a newer run changed one of them in between, the
-       condition fails and S stays the larger union until the admin has
-       approved the whole configuration of one run, which only
-       over-classifies. Classification keeps using the union of S and the
-       latest complete run's set, as stated above. A pending `sshd_config` change or a removed
-       `/usr/bin` command therefore never makes an entry non-critical; the
-       smaller set takes effect only after the admin approved the whole
-       change in the CLI. Before the first approved baseline, the run's
-       set alone is used; the initial approval (above) sets S to the
-       initial run's derived set.
+       consistency. A derived set holds the `Include` values (paths and
+       globs, as written, resolved against `/etc/ssh` like sshd does) as
+       well as the files they matched and the SSH login file targets.
+       The **SSH configuration entries** of a baseline are its entries for
+       `/etc/ssh/sshd_config` and for every path that an `Include` value
+       in S or in R's derived set names or matches. S is **replaced** by
+       R's derived set only when all three conditions hold:
+
+       1. the approval is an executor-local CLI approval
+          (`nebula integrity approve`, including `--initial`); a browser
+          approval never replaces S, it only unites S with R's set;
+       2. for **every** path in R's SSH configuration array, the newly
+          approved baseline holds an entry equal to R's record of that
+          path (type and content hash); and
+       3. the reverse: the newly approved baseline holds **no** SSH
+          configuration entry whose path is not in R's array. So an
+          approved include that R no longer has (for example
+          `sshd_config.d/z.conf`, deleted on the host but its removal not
+          yet approved) blocks the replacement.
+
+       Then the approved SSH configuration is exactly R's, file for file
+       in both directions, so R's derived set is exactly the set of the
+       approved configuration. In every other case, in particular a
+       browser approval, an approval that takes `sshd_config` but not a
+       changed include from R (or the reverse, one CLI approval at a
+       time), an approval while an include R names is still missing from
+       the baseline or while the baseline still holds an include R does
+       not have, and a baseline whose SSH configuration entries were taken
+       from another run with different content, S becomes the **union** of
+       S and R's derived set and never shrinks. So the set shrinks only
+       when the approved baseline holds the whole SSH configuration of one
+       run and nothing else; after one-entry CLI approvals of a
+       multi-file change (adding, changing and removing includes), that is
+       the last of them, provided the entries approved earlier still equal
+       that run's records. If a newer run changed one of them in between,
+       the condition fails and S stays the larger union until the admin
+       has approved the whole configuration of one run in the CLI, which
+       only over-classifies. Classification keeps using the union of S and
+       the latest complete run's set, as stated above. A pending
+       `sshd_config` change, a deleted include or a removed `/usr/bin`
+       command therefore never makes an entry non-critical; the smaller
+       set takes effect only after the admin approved the whole change in
+       the CLI. Before the first approved baseline, the run's set alone is
+       used; the initial approval (above) sets S to the initial run's
+       derived set.
+     - **Derived-set limit.** S, and the derived set of any one run, holds
+       at most **4,096** values (`Include` values, matched files and SSH
+       login file targets together; new named constant, fixed in IG-05).
+       A run whose derived set would exceed it supplies no usable derived
+       set (below). When a union would make S exceed it, the executor
+       marks S **overflowed** instead of dropping values: while S is
+       overflowed, every entry that a proposed digest of that host adds,
+       changes or removes is unclassifiable and therefore critical-class
+       (each needing its own CLI approval). Only a replacement under the
+       three conditions above clears the mark.
      - **`AuthorizedKeysFile` expansion.** The executor parses `Include`
        and every SSH login file directive of D9 (including those inside
        `Match` blocks) and expands `AuthorizedKeysFile`,
