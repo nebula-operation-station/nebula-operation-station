@@ -142,7 +142,10 @@ func open(dataDir string, now func() time.Time) (_ *DB, err error) {
 	// _journal_mode and _synchronous keys run after all of them. So the
 	// exclusive locking mode is set before WAL is enabled, and SQLite keeps
 	// the WAL index in heap memory instead of a shared -shm file.
-	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(%d)&_pragma=foreign_keys(1)&_pragma=locking_mode(EXCLUSIVE)&_journal_mode=WAL&_synchronous=FULL",
+	// secure_delete overwrites deleted and overwritten content with zeros,
+	// so a wiped secret (an enrollment offer's salt) does not stay behind
+	// as free space in a page.
+	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(%d)&_pragma=foreign_keys(1)&_pragma=locking_mode(EXCLUSIVE)&_pragma=secure_delete(1)&_journal_mode=WAL&_synchronous=FULL",
 		path, busyTimeout.Milliseconds())
 	sdb, err := sql.Open("sqlite", dsn)
 	if err != nil {
