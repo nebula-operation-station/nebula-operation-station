@@ -99,9 +99,11 @@ func (r Result) Text() string {
 
 // SnapshotHash returns the snapshot hash of ADR 0012 D2: SHA-256 over a
 // canonical, length-prefixed encoding of the model version and, for every
-// required input in RequiredInputs order, its kind, dataset ID and
+// required input in RequiredInputs order, its kind, state, dataset ID and
 // redacted digest. The raw digest is not part of a Snapshot and never
-// enters the hash. Same inputs and model version give the same hash.
+// enters the hash. The state is part of it because a stale or incomplete
+// input changes verdicts without a new dataset version. Same inputs and
+// model version give the same hash.
 func SnapshotHash(s *Snapshot) string {
 	h := sha256.New()
 	write := func(v string) {
@@ -117,6 +119,7 @@ func SnapshotHash(s *Snapshot) string {
 			in = s.Inputs[k]
 		}
 		write(string(k))
+		write(in.State.String())
 		write(in.DatasetID)
 		write(in.RedactedDigest)
 	}
