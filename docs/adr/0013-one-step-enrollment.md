@@ -1075,8 +1075,10 @@ follows; D1–D9 above already reflect these decisions.
   - D1 step 2: a NetBird offer in `awaiting_approval` has fixed render
     inputs and a placeholder render, only no setup key and no download
     hash (previously: "no setup key and no script yet").
-  - Not yet aligned: the "Show script" row of `docs/spec/17-frozen-decisions.md`
-    still says "no hash check" and needs the same change.
+  - The "Show script" row of `docs/spec/17-frozen-decisions.md` is aligned
+    with the placeholder-hash check (previously: "no hash check", noted
+    here as not yet aligned). A "Show script" mismatch is audited at most
+    once per offer and counted after that (spec 03).
 
 ## Required specification changes
 
