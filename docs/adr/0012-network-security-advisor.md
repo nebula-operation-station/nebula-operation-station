@@ -203,8 +203,9 @@ evaluation semantics creates `nr-v2`.
    `denied` by the default interzone rule toward the internal address. A
    NAT rule whose translated or original address or port cannot be
    evaluated (FQDN, dynamic or region object, port range the model cannot
-   expand within its limits) makes the verdict `unknown`, never `denied`.
-   The chain lists every pre-NAT destination tried (previously: only the
+   expand within its limits) makes the verdict `unknown`, never `denied`;
+   so does an unevaluable NAT rule ("Unevaluable rules (fail-safe)"
+   below). The chain lists every pre-NAT destination tried (previously: only the
    internal address was queried, so a port forward could look `denied`).
 4. **Security rules.** In order, first match wins; disabled rules are
    skipped and listed in the chain as "skipped (disabled)". A rule matches
@@ -247,7 +248,7 @@ evaluation semantics creates `nr-v2`.
 | `conditional` | A conditional allow decides, or a conditional deny (App-ID, user, URL category, schedule, service `application-default`) is followed by an allow; counts as reachable for every security use (fail closed) |
 | `denied` | An unconditional deny/drop/reset rule or the collected default interzone rule matches, with no earlier conditional allow and no earlier unevaluable rule (a conditional deny counts only if its fall-through denies too) |
 | `not_filtered` | Same L2 segment, or a NetBird overlay path that bypasses the firewall; the firewall is not on the path |
-| `unknown` | Any input missing, stale (ADR 0010: three missed intervals) or `incomplete` (D3 limits); an object that cannot be evaluated (FQDN, EDL, dynamic group whose members are unknown, region objects), also in a NAT rule found by the reverse-NAT lookup; more than one vsys; route ambiguity; a private or special-range address outside known subnets; a known subnet on no firewall interface; a NetBird path not proven to cross the firewall; an unevaluable rule reached in rule order (match field outside the collected allowlist, a `<dropped:…>` marker, Q11 rule fields not collected); default rules not collected (Q11). The reason is listed |
+| `unknown` | Any input missing, stale (ADR 0010: three missed intervals) or `incomplete` (D3 limits); an object that cannot be evaluated (FQDN, EDL, dynamic group whose members are unknown, region objects), also in a NAT rule found by the reverse-NAT lookup; more than one vsys; route ambiguity; a private or special-range address outside known subnets; a known subnet on no firewall interface; a NetBird path not proven to cross the firewall; an unevaluable security rule reached in rule order (match field outside the collected allowlist, a `<dropped:…>` marker, Q11 rule fields not collected); an unevaluable NAT rule reached in NAT rule order or present during the reverse-NAT lookup; default rules not collected (Q11). The reason is listed |
 
 **Explanation chain.** Every verdict carries the ordered list of steps
 with the data that decided each step: segment and zone mapping with their
@@ -287,18 +288,21 @@ every verdict labelled "negation and default rules not collected", a
 `denied` shown but not counted as mitigating).
 
 **Unevaluable rules (fail-safe).** One rule covers every rule field the
-model cannot evaluate, instead of a label per field. A security rule (or
-the default-rule step) is **unevaluable** when any of these holds:
+model cannot evaluate, instead of a label per field. A security rule, a
+**NAT rule** (or the default-rule step) is **unevaluable** when any of
+these holds:
 
-- it carries a field that can change what the rule matches and that is
-  outside the collected allowlist (ND-07, plus the Q11 elements once
-  collected);
+- it carries a field that can change what the rule matches or, for a NAT
+  rule, what it translates to, and that is outside the collected
+  allowlist (ND-07, plus the Q11 elements once collected), for example
+  `disabled` on a NAT rule if the allowlist does not pass it;
 - it, or an object or group it references, carries a `<dropped:…>`
-  marker from the ADR 0010 D4 redaction;
+  marker from the ADR 0010 D4 redaction, for example a dropped
+  sub-element of a NAT rule's translated address;
 - its Q11 elements were not collected: `negate-source`,
   `negate-destination`, `rule-type`, `source-hip`, `destination-hip` for
-  every rule, and `rulebase/default-security-rules` for the default-rule
-  step.
+  every security rule, and `rulebase/default-security-rules` for the
+  default-rule step.
 
 Consequences, all fail-safe:
 
@@ -306,6 +310,14 @@ Consequences, all fail-safe:
   rule order, or ends at an uncollected default rule, is **`unknown`**
   with the reason "rule <name> unevaluable: <field or marker>", never
   `denied` and never `allowed`; the chain lists the rule;
+- for NAT rules (step 3): a query whose NAT step reaches an unevaluable
+  NAT rule in NAT rule order is `unknown`; and while any NAT rule is
+  unevaluable, the **reverse-NAT lookup** cannot exclude that the rule
+  forwards to the queried host and port, so the lookup's result is
+  `unknown` and a query to a host's internal address can never fall back
+  to `denied` (previously: the fail-safe rule covered only security rules
+  and the default-rule step, so an unevaluable NAT rule could hide a port
+  forward behind a `denied` on the internal address);
 - it never counts as mitigating in `vu-prio-v2` (D3);
 - it removes no attack-path edge (ADR 0011 D10; D3);
 - a snapshot is **not complete** (D4) for any path or check that touches
@@ -320,7 +332,12 @@ consuming tickets (NS-07, NS-08, NS-10, NS-16) reuse:
    another field outside the allowlist, and a snapshot without negation
    flags or default rules each give `unknown` (never `denied` or
    `allowed`), no mitigation, no removed attack-path edge, and leave an
-   existing `mgmt-from-untrusted` and `shadowed-rule` finding open.
+   existing `mgmt-from-untrusted` and `shadowed-rule` finding open. The
+   same for a NAT rule with a `<dropped:…>` marker (for example a dropped
+   translated-address sub-element) or a field outside the allowlist
+   (for example `disabled`): the NAT step is `unknown`, and a query to a
+   host's internal address that is otherwise `denied` gives `unknown`
+   through the reverse-NAT lookup, never `denied`.
 2. Mitigation voiding: a policy version that differs only in `raw_digest`
    voids the record with "mitigation unknown: policy changed outside
    collected elements"; a `redacted_digest` change voids it too.
