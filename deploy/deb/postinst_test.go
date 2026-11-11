@@ -83,6 +83,7 @@ if [ "$1" = is-active ]; then
   case "$last" in
     nebula-executor.service) [ -n "$EXECUTOR_ACTIVE" ] ;;
     nebula-pve-collector.service) [ -n "$COLLECTOR_ACTIVE" ] ;;
+    nebula-netdev-collector.service) [ -n "$NETDEV_ACTIVE" ] ;;
     *) false ;;
   esac
 else
@@ -854,6 +855,203 @@ func TestRepeatedUpgradeReportsNoChange(t *testing.T) {
 	}
 	if out := s.run(t, "configure", "1.0.1"); strings.Contains(out, "20-discovery.conf") {
 		t.Fatalf("unchanged drop-in reported:\n%s", out)
+	}
+}
+
+// netdevSpool is the network device collector's spool below var_lib (ND-15).
+const netdevSpool = "netdev"
+
+// An upgraded, configured host gets the netdev collector's user and its
+// spool in install.sh's state (2770, nebula-netdev-collector:nebula-rpc),
+// so the admin can enable the collector without running install.sh again.
+func TestUpgradeProvisionsNetdevCollectorAndSpool(t *testing.T) {
+	s := newSandbox(t)
+	s.installed(t)
+	s.env = append(s.env, "KNOWN_USERS=nebula-pve-collector")
+	s.run(t, "configure", "1.0.0")
+
+	calls := s.calls(t)
+	spool := filepath.Join(s.varLib, netdevSpool)
+	for _, want := range []string{
+		fmt.Sprintf("useradd --system --home-dir %s --shell /usr/sbin/nologin -G nebula-rpc nebula-netdev-collector\n", spool),
+		fmt.Sprintf("install -d -m 2770 -o nebula-netdev-collector -g nebula-rpc %s\n", spool),
+	} {
+		if !strings.Contains(calls, want) {
+			t.Errorf("missing %q in:\n%s", want, calls)
+		}
+	}
+	fi, err := os.Stat(spool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := octalMode(fi); got != "2770" {
+		t.Errorf("netdev spool mode = %s, want 2770", got)
+	}
+	// The same user and spool state as install.sh.
+	script := installScript(t)
+	for _, want := range []string{
+		`useradd --system --home-dir "${var_lib}/netdev" --shell /usr/sbin/nologin -G "${group_name}" nebula-netdev-collector`,
+		`install -d -m 2770 -o nebula-netdev-collector -g nebula-rpc "${var_lib}/netdev"`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("install.sh provisions the netdev collector differently; missing %q", want)
+		}
+	}
+	// The package never enables or starts the collector.
+	for _, line := range strings.Split(calls, "\n") {
+		if strings.Contains(line, "nebula-netdev-collector.service") && !strings.Contains(line, "is-active") {
+			t.Errorf("unexpected call on the netdev unit: %s", line)
+		}
+	}
+}
+
+// A repeated upgrade finds the user and the spool in install.sh's state and
+// changes nothing: no second user, no install on the spool.
+func TestUpgradeLeavesProvisionedNetdevSpoolAlone(t *testing.T) {
+	s := newSandbox(t)
+	s.installed(t)
+	s.mkdirAt(t, netdevSpool, 0o2770)
+	s.env = append(s.env,
+		"KNOWN_USERS=nebula-pve-collector nebula-netdev-collector",
+		"STAT_OWNERS=nebula-netdev-collector nebula-rpc")
+	s.run(t, "configure", "1.0.0")
+	s.run(t, "configure", "1.0.1")
+
+	calls := s.calls(t)
+	if strings.Contains(calls, "nebula-netdev-collector\n") {
+		t.Errorf("netdev collector user created again:\n%s", calls)
+	}
+	if strings.Contains(calls, filepath.Join(s.varLib, netdevSpool)+"\n") {
+		t.Errorf("netdev spool in install.sh's state was touched:\n%s", calls)
+	}
+}
+
+// A spool with a drifted mode, owner or group is converged to install.sh's
+// state with root's install -d, which applies all three.
+func TestUpgradeRepairsNetdevSpool(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mode   os.FileMode
+		owners string
+	}{
+		{"wrong mode", 0o0700, "nebula-netdev-collector nebula-rpc"},
+		{"no setgid", 0o0770, "nebula-netdev-collector nebula-rpc"},
+		{"wrong owner", 0o2770, "root nebula-rpc"},
+		{"wrong group", 0o2770, "nebula-netdev-collector nebula-netdev-collector"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newSandbox(t)
+			s.installed(t)
+			s.mkdirAt(t, netdevSpool, tc.mode)
+			s.env = append(s.env, "STAT_OWNERS="+tc.owners)
+			s.run(t, "configure", "1.0.0")
+
+			want := fmt.Sprintf("install -d -m 2770 -o nebula-netdev-collector -g nebula-rpc %s\n", filepath.Join(s.varLib, netdevSpool))
+			if !strings.Contains(s.calls(t), want) {
+				t.Errorf("missing repair call %q in:\n%s", want, s.calls(t))
+			}
+			fi, err := os.Stat(filepath.Join(s.varLib, netdevSpool))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := octalMode(fi); got != "2770" {
+				t.Errorf("netdev spool mode = %s, want 2770", got)
+			}
+		})
+	}
+}
+
+// A file or symlink at the netdev spool path is left alone, link and
+// target: install -d would follow the link. The upgrade still succeeds,
+// points the admin to install.sh, and the pve drop-in refresh is unaffected.
+func TestUpgradeLeavesANonDirectoryNetdevSpoolAlone(t *testing.T) {
+	for _, link := range []bool{false, true} {
+		t.Run(fmt.Sprintf("link=%v", link), func(t *testing.T) {
+			s := newSandbox(t)
+			s.installed(t, "pve/results", "pve/guestnet", "pve/requests", "pve/live")
+			path := filepath.Join(s.varLib, netdevSpool)
+			target := filepath.Join(s.varLib, "target")
+			if link {
+				if err := os.MkdirAll(target, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, path); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(path, []byte("swapped in"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			out := s.run(t, "configure", "1.0.0")
+
+			calls := s.calls(t)
+			if strings.Contains(calls, path+"\n") {
+				t.Errorf("install ran on the swapped-in netdev path:\n%s", calls)
+			}
+			if !strings.Contains(out, "could not provision "+path) || !strings.Contains(out, "install.sh --from-package") {
+				t.Errorf("no warning with a hint to install.sh in:\n%s", out)
+			}
+			want := strings.ReplaceAll(heredoc(t, installScript(t), `cat > "${tmp_server_drop_in}" <<EOF`), "${var_lib}", s.varLib)
+			if got := readFile(t, s.dropIn()); got != want {
+				t.Errorf("server drop-in not refreshed:\n%s", got)
+			}
+			if link {
+				fi, err := os.Stat(target)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := octalMode(fi); got != "755" {
+					t.Errorf("symlink target mode = %s, want 755 (unchanged)", got)
+				}
+			} else if got, err := os.ReadFile(path); err != nil || string(got) != "swapped in" {
+				t.Errorf("swapped-in file changed: %q, %v", got, err)
+			}
+		})
+	}
+}
+
+// The upgrade notice names the netdev collector's restart only while it
+// runs: restarting a unit the admin never enabled would start it. A running
+// netdev collector alone is enough for the notice. The postinst itself never
+// restarts anything.
+func TestUpgradeNoticeNamesNetdevCollectorOnlyWhenRunning(t *testing.T) {
+	const restart = "systemctl restart nebula-netdev-collector"
+	for _, tc := range []struct {
+		name           string
+		executorActive bool
+		netdevActive   bool
+		wantNotice     bool
+		wantRestart    bool
+	}{
+		{"nothing running", false, false, false, false},
+		{"executor running, netdev stopped", true, false, true, false},
+		{"executor and netdev running", true, true, true, true},
+		{"only netdev running", false, true, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newSandbox(t)
+			s.installed(t)
+			if tc.executorActive {
+				s.env = append(s.env, "EXECUTOR_ACTIVE=1")
+			}
+			if tc.netdevActive {
+				s.env = append(s.env, "NETDEV_ACTIVE=1")
+			}
+			out := s.run(t, "configure", "1.0.0")
+			if got := strings.Contains(out, "back up, then restart"); got != tc.wantNotice {
+				t.Errorf("admin notice present = %v, want %v:\n%s", got, tc.wantNotice, out)
+			}
+			if got := strings.Contains(out, restart); got != tc.wantRestart {
+				t.Errorf("netdev restart hint present = %v, want %v:\n%s", got, tc.wantRestart, out)
+			}
+			if tc.wantNotice && !strings.HasSuffix(out, "nebula: then run nebula unlock.\n") {
+				t.Errorf("notice does not end with the unlock step:\n%s", out)
+			}
+			for _, line := range strings.Split(s.calls(t), "\n") {
+				if strings.HasPrefix(line, "systemctl ") && !strings.Contains(line, "daemon-reload") && !strings.Contains(line, "is-active") {
+					t.Errorf("unexpected call: %s", line)
+				}
+			}
+		})
 	}
 }
 

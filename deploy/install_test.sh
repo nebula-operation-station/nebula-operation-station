@@ -130,6 +130,7 @@ run_rc 1 "nonexistent admin user rejected" -- --admin-users definitely-not-a-use
 run_rc 1 "root rejected as admin user" -- --admin-users root --rp-id nebula.example.org
 run_rc 1 "nebula-server rejected as admin user" -- --admin-users nebula-server --rp-id nebula.example.org
 run_rc 1 "nebula-pve-collector rejected as admin user" -- --admin-users nebula-pve-collector --rp-id nebula.example.org
+run_rc 1 "nebula-netdev-collector rejected as admin user" -- --admin-users nebula-netdev-collector --rp-id nebula.example.org
 run_rc 1 "empty entry in admin list rejected" -- --admin-users "${test_user},,${test_user}" --rp-id nebula.example.org
 run_rc 1 "second of two users missing" -- --admin-users "$test_user,definitely-not-a-user-12345" --rp-id nebula.example.org
 
@@ -249,12 +250,13 @@ else
   echo "ok   install.sh runs no root install -d on a pve spool path"
   pass=$((pass + 1))
 fi
-# The server drop-in grants exactly the discovery jobs, pve/requests and the
-# two directories the importers unlink in; the server unit itself grants no
-# write path.
+# The server drop-in grants exactly the discovery jobs, pve/requests, the
+# two pve directories the importers unlink in and the netdev spool (optional,
+# "-": the netdev import, ND-16, unlinks there); the server unit itself
+# grants no write path.
 rw=$(grep '^ReadWritePaths=' "$install_sh" | tr '\n' ' ')
-if [[ "$rw" == 'ReadWritePaths=${var_lib}/discovery/jobs ReadWritePaths=${var_lib}/pve/requests ReadWritePaths=${var_lib}/pve/results ReadWritePaths=${var_lib}/pve/guestnet ' ]]; then
-  echo "ok   server drop-in may write only discovery/jobs, pve/requests, pve/results and pve/guestnet"
+if [[ "$rw" == 'ReadWritePaths=${var_lib}/discovery/jobs ReadWritePaths=${var_lib}/pve/requests ReadWritePaths=${var_lib}/pve/results ReadWritePaths=${var_lib}/pve/guestnet ReadWritePaths=-${var_lib}/netdev ' ]]; then
+  echo "ok   server drop-in may write only discovery/jobs, pve/requests, pve/results, pve/guestnet and netdev"
   pass=$((pass + 1))
 else
   echo "FAIL server drop-in ReadWritePaths: ${rw:-none}"
@@ -273,11 +275,23 @@ compose_yaml="${script_dir}/container/compose.yaml"
 if [[ $(grep -cxF '      - pve-results:/var/lib/nebula/pve/results' "$compose_yaml") == 2 &&
       $(grep -cxF '      - pve-guestnet:/var/lib/nebula/pve/guestnet' "$compose_yaml") == 2 &&
       $(grep -c 'pve-spool:/var/lib/nebula/pve$' "$compose_yaml") == 1 &&
-      $(grep -cxF '    network_mode: none' "$compose_yaml") == 1 ]]; then
+      $(grep -cxF '    network_mode: none' "$compose_yaml") == 2 &&
+      $(awk '/^  pve-collector:$/{f=1;next} f&&/^  [a-z]/{exit} f{print}' "$compose_yaml" | grep -cxF '    network_mode: none') == 1 ]]; then
   echo "ok   compose mounts results and guestnet in both services, the root only in the collector, and the collector has no network"
   pass=$((pass + 1))
 else
   echo "FAIL compose PVE spool mounts differ from server and collector sharing, or the collector has a network"
+  fail=$((fail + 1))
+fi
+# The server shares the netdev spool volume writable (the ND-16 import
+# unlinks there), like pve/results, so that import needs no compose change.
+server_compose=$(awk '/^  server:$/{f=1;next} f&&/^  [a-z]/{exit} f{print}' "$compose_yaml")
+if printf '%s\n' "$server_compose" | grep -qxF '      - netdev-spool:/var/lib/nebula/netdev' &&
+   [[ $(grep -cxF '      - netdev-spool:/var/lib/nebula/netdev' "$compose_yaml") == 2 ]]; then
+  echo "ok   compose mounts the netdev spool writable in the server and the collector"
+  pass=$((pass + 1))
+else
+  echo "FAIL compose netdev spool is not shared writable by the server and the collector"
   fail=$((fail + 1))
 fi
 
@@ -308,7 +322,7 @@ package_list=$(awk '/^package_units=\(/{f=1;next} f&&/^\)/{exit} f{gsub(/^[[:spa
 # The tarball list must be exactly the provisioned units, in this order:
 # the server, executor and collector come before the discovery units so a
 # failing discovery unit cannot abort the install before they are enabled.
-expected_tarball=$'nebula-server.service\nnebula-executor.service\nnebula-pve-collector.service\nnebula-discovery.path\nnebula-discovery.service\nnebula-discovery.timer'
+expected_tarball=$'nebula-server.service\nnebula-executor.service\nnebula-pve-collector.service\nnebula-netdev-collector.service\nnebula-discovery.path\nnebula-discovery.service\nnebula-discovery.timer'
 if [[ "$tarball_list" == "$expected_tarball" ]]; then
   echo "ok   tarball unit list is exact and ordered (server/executor/collector before discovery)"
   pass=$((pass + 1))
@@ -2111,6 +2125,295 @@ CASES
   expect "restart on record, edited unit: the edit is kept" has_content "$refresh_sb/etc/$server" 'admin edit'
   expect "restart on record, edited unit: it restarts, once" restarts_are "restart $server"
   expect "restart on record, edited unit: nothing stays pending" nothing_pending
+fi
+
+# --- Network device collector deployment (ADR 0010 ND-15) --------------------
+# The netdev collector runs like the PVE collector: its own system user in
+# nebula-rpc, no capabilities, no network (AF_UNIX only), and the spool as
+# its only writable path. Its spool is one flat directory that
+# internal/netdevcollect/spool.go expects owned by the collector and the
+# shared nebula-rpc group, mode 2770 (the server unlinks what it imported).
+# install.sh installs the unit but never enables it: devices are registered
+# in the executor after the install, so the admin enables the collector.
+netdev_unit="${script_dir}/systemd/nebula-netdev-collector.service"
+pve_unit="${script_dir}/systemd/nebula-pve-collector.service"
+netdev_spool_go="${script_dir}/../internal/netdevcollect/spool.go"
+if [[ ! -f "$netdev_unit" ]]; then
+  echo "FAIL ${netdev_unit} is missing"
+  fail=$((fail + 1))
+else
+  # The sandbox block of the unit (from "# Hardening" to [Install]) equals
+  # the PVE collector's, apart from the one spool path it may write.
+  hardening_of() {
+    sed -n '/^# Hardening$/,/^\[Install\]$/p' "$1" | grep -v '^#' | grep -v '^ReadWritePaths='
+  }
+  netdev_hardening=$(hardening_of "$netdev_unit")
+  if [[ -n "$netdev_hardening" && "$netdev_hardening" == "$(hardening_of "$pve_unit")" ]]; then
+    echo "ok   netdev unit: sandbox options identical to the pve collector's"
+    pass=$((pass + 1))
+  else
+    echo "FAIL netdev unit: sandbox options differ from the pve collector's"
+    diff <(hardening_of "$pve_unit") <(printf '%s\n' "$netdev_hardening") | sed 's/^/     /'
+    fail=$((fail + 1))
+  fi
+  for line in \
+    'User=nebula-netdev-collector' \
+    'Group=nebula-netdev-collector' \
+    'SupplementaryGroups=nebula-rpc' \
+    'NoNewPrivileges=yes' \
+    'CapabilityBoundingSet=' \
+    'AmbientCapabilities=' \
+    'RestrictAddressFamilies=AF_UNIX' \
+    'ProtectSystem=strict' \
+    'ProtectHome=yes' \
+    'PrivateDevices=yes' \
+    'RestrictSUIDSGID=yes' \
+    'UMask=0077' \
+    'ReadWritePaths=/var/lib/nebula/netdev' \
+    '  -spool /var/lib/nebula/netdev \' \
+    '  -socket /run/nebula/executor.sock \' \
+    '  -executor-user nebula-executor \' \
+    'ExecStart=/usr/bin/nebula-netdev-collector \'; do
+    check_line "netdev unit has: ${line}" "$netdev_unit" "$line"
+  done
+  # Exactly one write path and one address family; no other grant.
+  if [[ $(grep -c '^ReadWritePaths=' "$netdev_unit") == 1 &&
+        $(grep -c '^RestrictAddressFamilies=' "$netdev_unit") == 1 &&
+        $(grep -cE '^(AmbientCapabilities|CapabilityBoundingSet)=.' "$netdev_unit") == 0 &&
+        $(grep -cE '^(PrivateNetwork=no|User=root|PermissionsStartOnly|ReadOnlyPaths|BindPaths|SupplementaryGroups=.*[[:space:]])' "$netdev_unit") == 0 ]]; then
+    echo "ok   netdev unit: one write path, AF_UNIX only, no capabilities, no extra grants"
+    pass=$((pass + 1))
+  else
+    echo "FAIL netdev unit grants more than the spool, AF_UNIX and nebula-rpc"
+    fail=$((fail + 1))
+  fi
+  # The spool, user and executor flags match the collector's defaults.
+  if grep -qxF '	defaultSpool        = "/var/lib/nebula/netdev"' "${script_dir}/../cmd/nebula-netdev-collector/main.go" &&
+     grep -qF 'RoleNetDevCollector: {Flag: "netdev-collector-user", DefaultUser: "nebula-netdev-collector"}' "${script_dir}/../internal/peercred/collector.go"; then
+    echo "ok   netdev unit: spool path and user match the collector and executor defaults"
+    pass=$((pass + 1))
+  else
+    echo "FAIL netdev unit: spool path or user no longer match cmd/nebula-netdev-collector or internal/peercred"
+    fail=$((fail + 1))
+  fi
+  # Nothing imports the spool before ND-16: the unit must not claim the
+  # server imports it, and must say to enable it only once that import is in.
+  if ! grep -qi 'server imports' "$netdev_unit" &&
+     grep -qF '# Off by default' "$netdev_unit" &&
+     grep -qF '# shares with the executor database. Enable it only once the server import' "$netdev_unit"; then
+    echo "ok   netdev unit: off by default, enable only once the server import (ND-16) is installed"
+    pass=$((pass + 1))
+  else
+    echo "FAIL netdev unit: must say it is off by default until the server import (ND-16), and not claim an import"
+    fail=$((fail + 1))
+  fi
+fi
+check_line "install.sh: next steps keep the netdev collector off until ND-16" "$install_sh" \
+  '     but off. Leave it off until the server import of its spool (ND-16)'
+# The provisioned spool state is what the collector's spool code checks.
+if grep -qF 'spoolDirMode = os.FileMode(0o770) | os.ModeSetgid' "$netdev_spool_go" &&
+   grep -qF 'const spoolGroupName = "nebula-rpc"' "$netdev_spool_go"; then
+  echo "ok   netdevcollect still expects mode 2770 and group nebula-rpc"
+  pass=$((pass + 1))
+else
+  echo "FAIL internal/netdevcollect/spool.go changed its spool mode or group; update install.sh, the postinst and the Dockerfile"
+  fail=$((fail + 1))
+fi
+check_line "install.sh creates the netdev collector user" "$install_sh" \
+  '  useradd --system --home-dir "${var_lib}/netdev" --shell /usr/sbin/nologin -G "${group_name}" nebula-netdev-collector'
+check_line "install.sh provisions the netdev spool 2770 collector:nebula-rpc" "$install_sh" \
+  'install -d -m 2770 -o nebula-netdev-collector -g nebula-rpc "${var_lib}/netdev"'
+check_line "install.sh rejects the netdev collector as an admin user" "$install_sh" \
+  '    root|nebula-server|nebula-executor|nebula-discovery|nebula-pve-collector|nebula-netdev-collector)'
+# The unit is installed (tarball list) but never enabled: not in the
+# package list, and the enable loop skips it.
+if printf '%s\n' "$tarball_list" | grep -qxF nebula-netdev-collector.service &&
+   ! printf '%s\n' "$package_list" | grep -qxF nebula-netdev-collector.service; then
+  echo "ok   netdev unit is installed from the tarball and not in the package enable list"
+  pass=$((pass + 1))
+else
+  echo "FAIL netdev unit: must be in tarball_units and not in package_units"
+  fail=$((fail + 1))
+fi
+check_line "install.sh: the enable loop skips the netdev collector" "$install_sh" \
+  '  if [[ "${name}" == "nebula-netdev-collector.service" ]]; then'
+# Compose: the netdev collector has no network, no capabilities, its own
+# UID, the rpc volume and its own spool volume, and starts only with the
+# netdev profile.
+netdev_compose=$(awk '/^  netdev-collector:$/{f=1;print;next} f&&/^  [a-z]/{exit} f&&/^[a-z]/{exit} f{print}' "$compose_yaml")
+netdev_compose_ok=1
+for line in \
+  '    <<: *hardening' \
+  '    user: "10005:10005"' \
+  '    group_add: ["10010"]' \
+  '    network_mode: none' \
+  '    profiles: [netdev]' \
+  '      - nebula-netdev-collector' \
+  '      - -spool=/var/lib/nebula/netdev' \
+  '      - rpc:/run/nebula' \
+  '      - netdev-spool:/var/lib/nebula/netdev'; do
+  if ! printf '%s\n' "$netdev_compose" | grep -qxF -- "$line"; then
+    echo "FAIL compose netdev-collector lacks: ${line}"
+    netdev_compose_ok=0
+  fi
+done
+if printf '%s\n' "$netdev_compose" | grep -qE 'cap_add|network_mode: host|ports:|privileged|executor-data'; then
+  echo "FAIL compose netdev-collector gets capabilities, a network, ports or the executor data"
+  netdev_compose_ok=0
+fi
+if [[ $(printf '%s\n' "$netdev_compose" | grep -c '^      - [a-z-]*:/') != 2 ]]; then
+  echo "FAIL compose netdev-collector mounts more than the rpc and spool volumes"
+  netdev_compose_ok=0
+fi
+if [[ $netdev_compose_ok -eq 1 ]]; then
+  echo "ok   compose netdev-collector: own UID, no network, no capabilities, rpc and spool volumes only, netdev profile"
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1))
+fi
+dockerfile="${script_dir}/container/Dockerfile"
+check_line "Dockerfile creates the netdev collector user (UID 10005, nebula-rpc)" "$dockerfile" \
+  ' && useradd --system --uid 10005 --gid 10005 --groups nebula-rpc --home-dir /var/lib/nebula/netdev --shell /usr/sbin/nologin nebula-netdev-collector \'
+check_line "Dockerfile provisions the netdev spool 2770 collector:nebula-rpc" "$dockerfile" \
+  ' && install -d -m 2770 -o nebula-netdev-collector -g nebula-rpc /var/lib/nebula/netdev \'
+if grep -qE '^COPY .* nebula-netdev-collector .*/usr/bin/$' "$dockerfile"; then
+  echo "ok   Dockerfile copies the netdev collector binary"
+  pass=$((pass + 1))
+else
+  echo "FAIL Dockerfile does not copy nebula-netdev-collector"
+  fail=$((fail + 1))
+fi
+
+# Functional, no root needed: the real netdev provisioning block of
+# install.sh with stubbed getent, useradd and install, run twice. The first
+# run creates the user and the spool; the second creates no user again and
+# re-applies the same spool state. A file or symlink at the spool path stops
+# the install before install -d follows it.
+netdev_block=$(sed -n '/^# begin: netdev collector provisioning/,/^# end: netdev collector provisioning/p' "$install_sh")
+netdev_sb=$(mktemp -d)
+trap 'rm -rf "$refresh_sb" "$pve_sb" "$netdev_sb"' EXIT
+run_netdev_block() {
+  netdev_out=$(
+    exec 2>&1
+    set -euo pipefail
+    getent() { grep -qxF "$2" "$netdev_sb/users"; }
+    useradd() {
+      printf 'useradd %s\n' "$*" >> "$netdev_sb/calls"
+      printf '%s\n' "${*: -1}" >> "$netdev_sb/users"
+    }
+    install() {
+      printf 'install %s\n' "$*" >> "$netdev_sb/calls"
+      mkdir -p "${*: -1}"
+      chmod "$3" "${*: -1}"
+    }
+    var_lib="$netdev_sb/var"
+    group_name=nebula-rpc
+    eval "$netdev_block"
+    echo "END"
+  )
+  netdev_rc=$?
+  refresh_out="$netdev_out" # expect prints it on a failure
+}
+netdev_reset() {
+  rm -rf "$netdev_sb/var" "$netdev_sb/calls" "$netdev_sb/target"
+  mkdir -p "$netdev_sb/var"
+  : > "$netdev_sb/users"
+  : > "$netdev_sb/calls"
+}
+netdev_rc_is() { [[ "$netdev_rc" -eq "$1" ]]; }
+netdev_calls_are() { [[ "$(cat "$netdev_sb/calls")" == "$1" ]]; }
+netdev_spool_mode_is() { [[ "$(stat -c '%a' "$netdev_sb/var/netdev")" == "$1" ]]; }
+netdev_out_has() { [[ "$netdev_out" == *"$1"* ]]; }
+if [[ -z "$netdev_block" ]]; then
+  echo "FAIL install.sh has no netdev collector provisioning block"
+  fail=$((fail + 1))
+else
+  netdev_useradd="useradd --system --home-dir $netdev_sb/var/netdev --shell /usr/sbin/nologin -G nebula-rpc nebula-netdev-collector"
+  netdev_install="install -d -m 2770 -o nebula-netdev-collector -g nebula-rpc $netdev_sb/var/netdev"
+  netdev_reset
+  run_netdev_block
+  expect "netdev provisioning: a fresh host succeeds" netdev_rc_is 0
+  expect "netdev provisioning: user created, then the spool 2770 collector:nebula-rpc" \
+    netdev_calls_are "$netdev_useradd"$'\n'"$netdev_install"
+  expect "netdev provisioning: the spool has mode 2770" netdev_spool_mode_is 2770
+  : > "$netdev_sb/calls"
+  chmod 0700 "$netdev_sb/var/netdev"
+  run_netdev_block
+  expect "netdev provisioning re-run: succeeds" netdev_rc_is 0
+  expect "netdev provisioning re-run: no second user, the same spool state re-applied" \
+    netdev_calls_are "$netdev_install"
+  expect "netdev provisioning re-run: a drifted spool mode is repaired to 2770" netdev_spool_mode_is 2770
+  # The link case runs last, so its target is still there for the check below.
+  for how in file link; do
+    netdev_reset
+    if [[ "$how" == link ]]; then
+      mkdir -p "$netdev_sb/target"
+      ln -s "$netdev_sb/target" "$netdev_sb/var/netdev"
+    else
+      printf 'swapped in\n' > "$netdev_sb/var/netdev"
+    fi
+    run_netdev_block
+    expect "netdev provisioning: a ${how} at the spool path is refused" netdev_rc_is 1
+    expect "netdev provisioning: a ${how} at the spool path is named" netdev_out_has "$netdev_sb/var/netdev"
+    expect "netdev provisioning: a ${how} at the spool path gets no install -d" \
+      eval '! grep -q "^install " "$netdev_sb/calls"'
+  done
+  if [[ -d "$netdev_sb/target" && -z "$(ls -A "$netdev_sb/target")" && "$(stat -c '%a' "$netdev_sb/target")" != 2770 ]]; then
+    echo "ok   netdev provisioning: the symlink target is left alone"
+    pass=$((pass + 1))
+  else
+    echo "FAIL netdev provisioning: the symlink target was touched"
+    fail=$((fail + 1))
+  fi
+fi
+
+# Functional: the enable and restart steps with the netdev unit in the
+# tarball list. A first install puts the unit file in place but enables
+# nothing for it; once the admin runs it, a changed unit is applied with
+# try-restart, which touches only a running unit.
+if [[ -n "$start_block" ]]; then
+  saved_install_units=("${install_units[@]}")
+  install_units+=(nebula-netdev-collector.service)
+  netdev_svc=nebula-netdev-collector.service
+  installed_host
+  expect "netdev install: the run succeeds" rc_is 0
+  expect "netdev install: the unit file is installed" has_content "$refresh_sb/etc/$netdev_svc" "$netdev_svc v1"
+  expect "netdev install: the unit is not enabled" not_called "enable --now $netdev_svc"
+  expect "netdev install: the unit is not enabled (without --now)" not_called "enable $netdev_svc"
+  expect "netdev install: the unit is not started" eval '! grep -qE "(^| )(start|restart|try-restart) '"$netdev_svc"'$" "$systemctl_log"'
+  expect "netdev install: the server is still enabled" called 'enable --now nebula-server.service'
+  # Running (the admin enabled it) and the unit changed: try-restart.
+  reset_install
+  stub_active="$both_services $netdev_svc"
+  ship "$netdev_svc" "$netdev_svc v2"
+  run_install
+  expect "netdev upgrade: the run succeeds" rc_is 0
+  expect "netdev upgrade: the changed unit is applied" has_content "$refresh_sb/etc/$netdev_svc" "$netdev_svc v2"
+  expect "netdev upgrade: a running collector gets try-restart" called "try-restart $netdev_svc"
+  expect "netdev upgrade: the unit is still not enabled by the install" not_called "enable --now $netdev_svc"
+  # New binaries and a changed unit in one run: the restart on the pending
+  # record and the replaced unit name the collector twice, but it gets one
+  # try-restart.
+  saved_sandbox_binaries=("${sandbox_binaries[@]}")
+  sandbox_binaries+=(nebula-netdev-collector)
+  installed_host
+  reset_install
+  stub_active="$both_services $netdev_svc"
+  inst_bin_changed=1
+  inst_new_bins="nebula-server nebula-netdev-collector"
+  ship "$netdev_svc" "$netdev_svc v2"
+  run_install
+  expect "netdev binaries and unit changed: the run succeeds" rc_is 0
+  expect "netdev binaries and unit changed: the changed unit is applied" has_content "$refresh_sb/etc/$netdev_svc" "$netdev_svc v2"
+  expect "netdev binaries and unit changed: one try-restart of the collector" \
+    eval '[[ $(grep -cxF "try-restart $netdev_svc" "$systemctl_log") -eq 1 ]]'
+  sandbox_binaries=("${saved_sandbox_binaries[@]}")
+  # Package mode never enables it either.
+  reset_install
+  inst_from_package=1
+  run_install
+  expect "netdev package mode: the unit is not enabled" not_called "enable --now $netdev_svc"
+  install_units=("${saved_install_units[@]}")
 fi
 
 # --- Root-gated: real runs of install.sh and uninstall.sh -------------------
