@@ -21,6 +21,7 @@ const (
 	ReasonSameSegment           = "same L2 segment"
 	ReasonSameVLAN              = "same VLAN"
 	ReasonSegmentTooShort       = "segment prefix too short for an L2 segment"
+	ReasonVLANAmbiguous         = "VLAN ambiguity"
 )
 
 // Minimum prefix lengths of an L2 segment. An IPAM subnet or interface
@@ -42,19 +43,25 @@ const (
 // leaves OwnerKnown false.
 //
 // Unsplit is set when placement checked that no firewall interface
-// network lies strictly inside the segment (otherwise the firewall splits
-// the prefix). NoRoute is set when the routes are fresh and no firewall
-// route overlaps the segment; only then does an unowned segment rule out
-// the firewall as a router to it. Both are proofs: the zero value proves
-// nothing.
+// network, no firewall route and no IPAM subnet lies strictly inside the
+// segment (otherwise the prefix is split into several segments), with the
+// routes input fresh. NoRoute is set when the routes are fresh and no
+// firewall route overlaps the segment; only then does an unowned segment
+// rule out the firewall as a router to it. Both are proofs: the zero
+// value proves nothing.
+//
+// VLANConflict is set when IPAM and the owning firewall interface record
+// different VLANs for the segment; VLAN is then left uncollected and the
+// segment shares nothing with any other.
 type Segment struct {
-	Prefix     netip.Prefix
-	SubnetID   string
-	VLAN       Field[uint16]
-	Owner      string
-	OwnerKnown bool
-	Unsplit    bool
-	NoRoute    bool
+	Prefix       netip.Prefix
+	SubnetID     string
+	VLAN         Field[uint16]
+	Owner        string
+	OwnerKnown   bool
+	Unsplit      bool
+	NoRoute      bool
+	VLANConflict bool
 }
 
 // Placement is the result of placing one address (ADR 0012 D2 step 1).
@@ -124,7 +131,9 @@ func NewPlacer(s *Snapshot) (*Placer, error) {
 //     ReasonPrivateOutsideSubnets, never the default route.
 //   - A public address outside every segment follows its longest-prefix
 //     route, the default route included; none → ReasonNoRoute.
-//   - Equal-length candidates with different results → ambiguity.
+//   - Equal-length candidates with different results → ambiguity; so is an
+//     IPAM VLAN that differs from the owning interface's VLAN
+//     (ReasonVLANAmbiguous).
 //   - Interfaces and IPAM must be fresh for any placement, routes for a
 //     placement by route.
 func (p *Placer) Place(addr netip.Addr) Placement {
@@ -146,26 +155,32 @@ func (p *Placer) Place(addr netip.Addr) Placement {
 		if seg.Prefix.Bits() < minSegmentBits(seg.Prefix.Addr()) {
 			return unknown(pl, ReasonSegmentTooShort)
 		}
-		seg.Unsplit = !p.firewallInside(seg.Prefix)
+		seg.Unsplit = !p.splitInside(seg.Prefix)
 		seg.NoRoute = p.noRouteOverlaps(seg.Prefix)
 		pl.Segment = seg
 		in, reason := p.owner(seg.Prefix)
 		switch reason {
-		case "":
+		case "", ReasonInterfaceNoZone:
 			seg.Owner, seg.OwnerKnown = in.Name, true
+			if in.VLAN.Collected {
+				switch {
+				case !seg.VLAN.Collected:
+					seg.VLAN = in.VLAN
+				case seg.VLAN.Value != in.VLAN.Value:
+					// IPAM and the owning interface contradict each other.
+					seg.VLAN = Field[uint16]{}
+					seg.VLANConflict = true
+					return unknown(pl, ReasonVLANAmbiguous)
+				}
+			}
 		case ReasonSubnetNoInterface:
 			seg.Owner, seg.OwnerKnown = "", true
-		case ReasonInterfaceNoZone:
-			seg.Owner, seg.OwnerKnown = in.Name, true
 		}
 		if reason != "" {
 			return unknown(pl, reason)
 		}
 		pl.Interface = in.Name
 		pl.Zone = in.Zone
-		if !seg.VLAN.Collected && in.VLAN.Collected {
-			pl.Segment.VLAN = in.VLAN
-		}
 		return pl
 	}
 	if r, bad := p.notFresh[InputRoutes]; bad {
@@ -243,14 +258,32 @@ func minSegmentBits(a netip.Addr) int {
 	return MinSegmentBitsIPv6
 }
 
-// firewallInside reports whether a firewall interface network lies
-// strictly inside seg (longer prefix within it).
-func (p *Placer) firewallInside(seg netip.Prefix) bool {
+// splitInside reports whether the data splits seg or cannot rule out a
+// split: a firewall interface network, a firewall route or an IPAM subnet
+// lies strictly inside seg (longer prefix within it), or the routes input
+// is not fresh. A route that equals or contains seg does not split it.
+func (p *Placer) splitInside(seg netip.Prefix) bool {
+	if _, bad := p.notFresh[InputRoutes]; bad {
+		return true
+	}
+	inside := func(pr netip.Prefix) bool {
+		return pr.Bits() > seg.Bits() && seg.Contains(pr.Addr())
+	}
 	for _, in := range p.interfaces {
 		for _, pr := range in.Prefixes {
-			if pr.Bits() > seg.Bits() && seg.Contains(pr.Addr()) {
+			if inside(pr) {
 				return true
 			}
+		}
+	}
+	for _, r := range p.routes {
+		if inside(r.Prefix) {
+			return true
+		}
+	}
+	for _, sn := range p.subnets {
+		if inside(sn.Prefix) {
+			return true
 		}
 	}
 	return false
@@ -305,7 +338,9 @@ func (p *Placer) owner(seg netip.Prefix) (Interface, string) {
 
 // route returns the longest route containing addr; for a special address
 // default routes are ignored. Equal-length routes leading to different
-// zones are ambiguous.
+// zones or through different interfaces (a route without interface counts
+// as different) are ambiguous: the placement never names an arbitrarily
+// chosen egress interface.
 func (p *Placer) route(addr netip.Addr, special bool) (*Route, string) {
 	best := -1
 	var rt *Route
@@ -321,7 +356,7 @@ func (p *Placer) route(addr netip.Addr, special bool) (*Route, string) {
 		case b == best:
 			z1, _ := p.routeZone(*rt)
 			z2, _ := p.routeZone(*r)
-			if z1 == "" || z1 != z2 {
+			if z1 == "" || z1 != z2 || rt.Interface != r.Interface {
 				ambiguous = true
 			}
 		}
@@ -362,30 +397,37 @@ type Crossing struct {
 // the data proves one L2 segment with no firewall interface between
 // source and destination; every ambiguity decides nothing.
 //
-//   - Both segments must have a known owner and be unsplit (no firewall
-//     interface network inside them). An ambiguous owner or a split
-//     prefix decides nothing.
-//   - The same segment (same prefix and subnet ID) gives not_filtered.
-//   - Two segments whose collected VLANs are equal give not_filtered when
-//     the same firewall interface owns both, or when no firewall interface
-//     owns either and the fresh routes prove that the firewall has no
-//     route into either (NoRoute). Equal tags on different interfaces
-//     (ethernet1/2.20 and ethernet1/3.20) are different segments.
+//   - Both segments must have a known owner, no VLAN conflict and be
+//     unsplit (no firewall interface network, firewall route or IPAM
+//     subnet inside them, routes fresh). An ambiguous owner, conflicting
+//     VLAN data or a split prefix decides nothing.
+//   - The same segment (same prefix and subnet ID) gives not_filtered. A
+//     firewall route that equals or contains the segment (a default route)
+//     does not put the firewall between two hosts of one on-link prefix;
+//     a route inside it splits it (Unsplit).
+//   - Two different segments whose collected VLANs are equal give
+//     not_filtered only when no firewall interface owns either and the
+//     fresh routes prove that the firewall has no route into either
+//     (NoRoute). Two IP subnets owned by the same firewall L3 interface
+//     are routed through that interface, so the firewall is on the path;
+//     equal tags on different interfaces (ethernet1/2.20 and
+//     ethernet1/3.20) are different segments.
 //
 // Host firewalls are not modelled in nr-v1. An address without a segment
 // never shares one.
 func CrossingTest(src, dst Placement) Crossing {
 	a, b := src.Segment, dst.Segment
-	if a == nil || b == nil || !a.OwnerKnown || !b.OwnerKnown || !a.Unsplit || !b.Unsplit {
+	if a == nil || b == nil || !a.OwnerKnown || !b.OwnerKnown || !a.Unsplit || !b.Unsplit ||
+		a.VLANConflict || b.VLANConflict {
 		return Crossing{}
 	}
 	if a.Prefix == b.Prefix && a.SubnetID == b.SubnetID {
 		return Crossing{NotFiltered: true, Reason: ReasonSameSegment}
 	}
-	if !a.VLAN.Collected || !b.VLAN.Collected || a.VLAN.Value != b.VLAN.Value || a.Owner != b.Owner {
+	if !a.VLAN.Collected || !b.VLAN.Collected || a.VLAN.Value != b.VLAN.Value {
 		return Crossing{}
 	}
-	if a.Owner == "" && (!a.NoRoute || !b.NoRoute) {
+	if a.Owner != "" || b.Owner != "" || !a.NoRoute || !b.NoRoute {
 		return Crossing{}
 	}
 	return Crossing{NotFiltered: true, Reason: ReasonSameVLAN}

@@ -205,7 +205,9 @@ func TestCrossingTest(t *testing.T) {
 		reason   string
 	}{
 		{"same ipam subnet", "10.0.1.5", "10.0.1.6", true, ReasonSameSegment},
-		{"same vlan different subnet", "10.0.2.5", "10.0.3.5", true, ReasonSameVLAN},
+		// Two IP subnets on one firewall L3 interface: traffic between them
+		// is routed through that interface, so the firewall is on the path.
+		{"same vlan different subnet same firewall interface", "10.0.2.5", "10.0.3.5", false, ""},
 		{"same subnet not on firewall", "172.30.0.5", "172.30.0.6", true, ReasonSameSegment},
 		{"different subnets", "10.0.1.5", "10.20.0.10", false, ""},
 		{"subnet vs interface network", "10.0.1.5", "10.0.77.1", false, ""},
@@ -222,12 +224,12 @@ func TestCrossingTest(t *testing.T) {
 	}
 }
 
-// TestCrossingVLANNeedsSameOwningInterface: equal VLAN tags give
-// not_filtered only when the same firewall interface owns both segments
-// or no firewall interface owns either. Tag 20 on ethernet1/2.20 (dmz)
-// and on ethernet1/3.20 (mgmt) are two segments with a firewall
-// interface between them.
-func TestCrossingVLANNeedsSameOwningInterface(t *testing.T) {
+// TestCrossingSameVLANNeedsUnownedSegments: equal VLAN tags on two
+// different subnets give not_filtered only when no firewall interface owns
+// either. Tag 20 on ethernet1/2.20 (dmz) and on ethernet1/3.20 (mgmt) are
+// two segments with a firewall interface between them; two subnets owned
+// by the same firewall L3 interface are routed through it.
+func TestCrossingSameVLANNeedsUnownedSegments(t *testing.T) {
 	s := labSnapshot()
 	s.Interfaces = append(s.Interfaces,
 		Interface{Name: "ethernet1/3.20", Zone: "mgmt", VLAN: Collected(uint16(20)), Prefixes: []netip.Prefix{pfx("10.30.0.0/24")}},
@@ -250,7 +252,7 @@ func TestCrossingVLANNeedsSameOwningInterface(t *testing.T) {
 	}{
 		{"same tag on different subinterfaces", "10.20.0.10", "10.30.0.5", false, ""},
 		{"same tag on different subinterfaces reversed", "10.30.0.5", "10.20.0.10", false, ""},
-		{"same tag same owning interface", "10.0.2.5", "10.0.3.5", true, ReasonSameVLAN},
+		{"same tag same owning interface is routed", "10.0.2.5", "10.0.3.5", false, ""},
 		// No owner on either, but the default route 0.0.0.0/0 covers both
 		// subnets: the firewall may route between them.
 		{"same tag no owner but firewall route covers them", "172.31.1.5", "172.31.2.5", false, ""},
