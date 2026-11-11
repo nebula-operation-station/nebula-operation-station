@@ -99,8 +99,14 @@ named in the handbook next to every "no unexpected change" result:
   (except the crontab spool), `/srv`, `/home` and `/root` except
   `authorized_keys*` (so shell start files such as `~/.bashrc`,
   `~/.profile` and per-user systemd units under `~/.config/systemd/`),
-  `authorized_keys` of service accounts whose home is under `/var`,
-  `/srv` or `/opt` outside the scanned `/opt` tree, `at` job spools,
+  `authorized_keys` and other SSH login files (D9 "SSH login files") of
+  service accounts whose home is under `/var`, `/srv` or `/opt` outside
+  the scanned `/opt` tree, SSH login files that the SSH configuration
+  names by an absolute path outside the D5 roots (not scanned, but each
+  such directive opens an "SSH login file outside the scanned roots"
+  finding, D9), files that an `AuthorizedKeysCommand` or
+  `AuthorizedPrincipalsCommand` program reads or runs (only the program
+  itself is critical-class), `at` job spools,
   `/tmp`, `/dev/shm`, `/run`, `/etc/pve` (excluded by design, D5; Q1),
   container images and
   volumes. Under `/usr`, only the D5 roots are watched: **`/usr/share`
@@ -128,9 +134,13 @@ named in the handbook next to every "no unexpected change" result:
   and opens a finding; it is never silently treated as covered. The
   mount list comes from the host, so a root attacker can hide a mount
   (threat model). On vfat, owner and mode come from mount options, so
-  under a vfat `/boot/efi` root only content, size, type and presence
-  are compared (D5); owner and mode changes there, including those from
-  changed mount options, open no finding.
+  under a vfat `/boot/efi` root owner and permission-bit changes,
+  including those from changed mount options, open no finding (D5);
+  content, size, type, presence and the setuid, setgid and sticky bits
+  are still compared. The file-system type is reported by the host: a
+  host that already reported `vfat` at its first approved scan keeps
+  the relaxation, and a later change of the reported type is a critical
+  finding (D5).
 - **Between scans.** A change that is reverted before the next scan is
   missed (threat model). Incremental runs hash only files whose `ctime`
   or `mtime` falls in the look-back window, and files larger than
@@ -476,9 +486,9 @@ following symlinks; final list is Q1):
 | Executables and libraries | `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/libexec` (with `/bin`, `/sbin`, `/lib` recorded as the usrmerge symlinks they should be) |
 | Local software | `/usr/local/bin`, `/usr/local/sbin`, `/usr/local/lib`, `/opt` (none of these is package-owned, so they are always compared against the baseline; `/usr/local/{bin,sbin}` come before `/usr/{bin,sbin}` in the default `PATH`, so a new file there that shadows a system command name is critical, D9) |
 | systemd units | `/usr/lib/systemd/system`, `/etc/systemd/system`, user units under `/etc/systemd/user` |
-| SSH access | `/root/.ssh/authorized_keys*`, `/home/*/.ssh/authorized_keys*`, plus any path named by an `AuthorizedKeysFile` directive found in `/etc/ssh/sshd_config` and its includes, limited to the roots above and `/home/*/` |
+| SSH access | `/root/.ssh/authorized_keys*`, `/home/*/.ssh/authorized_keys*`, plus every path that a login-granting directive (D9 "SSH login files": `AuthorizedKeysFile`, `AuthorizedPrincipalsFile`, `TrustedUserCAKeys`, `RevokedKeys`, the program of `AuthorizedKeysCommand` and `AuthorizedPrincipalsCommand`) found in `/etc/ssh/sshd_config` and its includes names, limited to the roots above and `/home/*/`. A target that can lie outside these roots is not scanned; the executor reports it as "SSH login file outside the scanned roots" (D7, D9) and names it in "Honest limits" |
 | Scheduled jobs | `/etc/crontab`, `/etc/cron.*/`, `/var/spool/cron/crontabs/`, systemd timers (covered by the unit roots) |
-| EFI system partition | `/boot/efi` as its **own root** when it is a mount point (UEFI hosts); otherwise it is ordinary `/boot` content. On vfat, owner, mode and `ctime` come from mount options, so every file under it is hashed in every run, incremental too (the partition is small), and for entries under a `/boot/efi` root whose type in the D6 mounts array is `vfat` only type, size, content hash, symlink target and presence are compared; owner and mode are recorded as context and never open a finding (D9) |
+| EFI system partition | `/boot/efi` as its **own root** when it is a mount point (UEFI hosts); otherwise it is ordinary `/boot` content. On vfat, owner, mode and `ctime` come from mount options, so every file under it is hashed in every run, incremental too (the partition is small), and for entries under a `/boot/efi` root whose type in the D6 mounts array is `vfat` only type, size, content hash, symlink target, presence and the setuid, setgid and sticky bits are compared; owner and the permission bits (`0777`) are recorded as context and never open a finding (D9). **Precedence:** this relaxation never covers the setuid, setgid and sticky bits: vfat cannot store them, so a reported setuid or setgid bit under `/boot/efi` is a new setuid/setgid bit and always critical (D9). **The type is host-reported and untrusted:** the relaxation applies only when `/boot/efi` is a covered root (D5 "Separate mounts below a root") and both the approved baseline and the run report `vfat` for it; the reported type is recorded in the baseline as part of the `/boot/efi` root, and a change of it (for example `ext4` to `vfat`) is a change of a critical-class path, in which run the relaxation is not applied |
 
 **Optional roots.** Each root in the approved profile carries a fixed
 `optional` flag (part of the profile, never taken from the host). In
@@ -553,8 +563,8 @@ parser is strict, bounded and fuzzed before the beta.
   each with its `path` (same rules as a record path), at most 64 files
   and 256 KiB decoded in total per run. The executor parses it in
   memory to derive the critical-class set of D7 "The executor
-  classifies, from its own data" and the D5 `AuthorizedKeysFile` paths
-  and keeps only that derived path set; the content itself is never
+  classifies, from its own data" and the D5 SSH login file paths (D9
+  "SSH login files") and keeps only that derived path set; the content itself is never
   persisted, logged or forwarded (the files' content hashes are keyed
   like all of `/etc`). The script sends this array and hashes every file
   in it in **every** run, incremental runs included (the files are
@@ -775,8 +785,11 @@ roles never mix:
      baseline) and new record (its own retained run) of the entry, for the
      setuid/setgid rule, (c) the command names in `/usr/bin` and
      `/usr/sbin`, for the shadowing rule, and (d) the set of
-     `sshd_config` includes and `AuthorizedKeysFile` targets that it
-     derives itself from D6 "SSH configuration" records. Item (a)
+     `sshd_config` includes and SSH login file targets (D9 "SSH login
+     files": `AuthorizedKeysFile`, `AuthorizedPrincipalsFile`,
+     `TrustedUserCAKeys`, `RevokedKeys` and the `AuthorizedKeysCommand`
+     and `AuthorizedPrincipalsCommand` programs) that it derives itself
+     from D6 "SSH configuration" records. Item (a)
      includes, independent of any `sshd_config`, every file whose name
      begins with `authorized_keys` anywhere in the scanned paths (D5,
      including `/root/.ssh` and `/home/*/.ssh`) and every path ending in `/.ssh/authorized_keys` or
@@ -798,8 +811,10 @@ roles never mix:
        effect only after the admin approved that change in the CLI. Before
        the first approved baseline, the run's set alone is used.
      - **`AuthorizedKeysFile` expansion.** The executor parses `Include`
-       and `AuthorizedKeysFile` directives (including those inside `Match`
-       blocks); without an `AuthorizedKeysFile` directive it uses the
+       and every SSH login file directive of D9 (including those inside
+       `Match` blocks) and expands `AuthorizedKeysFile`,
+       `AuthorizedPrincipalsFile`, `TrustedUserCAKeys` and `RevokedKeys`
+       values alike; without an `AuthorizedKeysFile` directive it uses the
        OpenSSH default `.ssh/authorized_keys .ssh/authorized_keys2`.
        `%h` expands to a whole home directory, and a value that does not
        start with `/` or `%h` is relative to the home directory. Because
@@ -815,8 +830,8 @@ roles never mix:
      - **Unclassifiable means critical.** When the executor cannot
        classify an entry with certainty (no usable derived set, a parse
        failure, a limit hit, a directive, value or token it does not
-       understand, an `AuthorizedKeysFile` value it cannot expand as
-       above, an `Include` that names or matches a file outside the
+       understand, an SSH login file value it cannot expand as
+       above or a command program path that is not absolute, an `Include` that names or matches a file outside the
        profile roots or a file that is not in the run's SSH configuration
        array, D6), it treats the entry as critical-class. If it lacks a
        usable derived set for a host from the latest complete run, it
@@ -1040,19 +1055,53 @@ Consequently, before Q6 every package file changed by a NOS apt job is an
 unverified finding the admin must review.
 
 **Critical-class paths.** These are: `authorized_keys*` files and every
-`AuthorizedKeysFile` target (D5 "SSH access", expanded as in D7 "The
-executor classifies, from its own data"), `/etc/sudoers` and `/etc/sudoers.d/`, PAM configuration
+SSH login file (below), `/etc/sudoers` and `/etc/sudoers.d/`, PAM configuration
 (`/etc/pam.d/`, `/etc/security/`) and PAM modules (`pam_*.so`),
 `/etc/ssh/sshd_config` and its includes, `/etc/ld.so.preload`, systemd
 units, drop-ins and timers under the D5 unit roots, crontabs and the
 crontab spool, every file under `/boot` (under a vfat `/boot/efi` root,
-D5, only its type, size, content, symlink target and presence are
-compared, so owner and mode changes there never open a finding), the
+D5, owner and permission-bit changes never open a finding; the setuid,
+setgid and sticky bits and the reported file-system type are still
+compared, D5), the
 SSH daemon and its helpers
 (`/usr/sbin/sshd`, `/usr/lib/openssh/`), `sudo` and `su`, the dynamic
 loader (`ld-linux*`), every file in `/usr/local/bin` or `/usr/local/sbin`
 whose name shadows a command in `/usr/bin` or `/usr/sbin`, and every file
-that has a setuid or setgid bit before or after the change. For them:
+that has a setuid or setgid bit before or after the change.
+
+**SSH login files.** Every file that sshd reads or runs to decide whether
+a login is granted is critical-class, so none of them can be approved in
+the browser. These are the targets of these directives in
+`/etc/ssh/sshd_config` and its includes, including inside `Match`
+blocks, expanded as in D7 "`AuthorizedKeysFile` expansion":
+
+- `AuthorizedKeysFile` (default `.ssh/authorized_keys
+  .ssh/authorized_keys2`): adds keys;
+- `AuthorizedPrincipalsFile`: names the certificate principals that may
+  log in as a user;
+- `TrustedUserCAKeys`: a CA key there makes every certificate it signs a
+  valid login key, for any user whose principals it names;
+- `RevokedKeys`: removing a key from it re-enables that key;
+- `AuthorizedKeysCommand` and `AuthorizedPrincipalsCommand`: the program
+  (the first word of the value, which sshd requires to be an absolute
+  path) decides which keys or principals are accepted.
+
+A value of `none` names no file. A program path that is not absolute or
+contains a `%` token, and any other value the executor cannot expand,
+is unclassifiable and handled as in D7 "Unclassifiable means critical".
+Files that such a program itself reads or runs are not derived (named in
+"Honest limits"). An absolute target outside the D5 roots and
+`/home/*/` (for example `TrustedUserCAKeys /srv/ca.pub` or
+`AuthorizedKeysFile /var/lib/keys/%u`) is not scanned; the executor
+opens an "SSH login file outside the scanned roots" finding (high)
+naming the directive and its escaped value, kept open while the
+approved or the latest complete run's SSH configuration names it. A
+`%h`-based or relative value does not open this finding, because it
+matches homes anywhere: such files in homes outside `/root` and
+`/home` (service accounts under `/var`, `/srv`, `/opt`) are not
+scanned, a named limit ("Honest limits").
+
+For all critical-class paths:
 
 - **Severity precedence.** When a change matches several classes of the
   table below, the highest severity wins, so a new setuid or setgid file
@@ -1122,7 +1171,7 @@ matching severity wins, see "Critical-class paths"):
 | Class | Severity |
 | --- | --- |
 | Package file differs from signed reference; NOS binary/unit mismatch (I1); any new, changed or removed critical-class path (above) that is not a verified expected change, including one changed during a NOS job without a verified reference; new setuid/setgid file or bit; missing NOS own key or extra key in root's `authorized_keys` | critical |
-| Other changed or new file in `/etc` or a watched `/usr` root (D5); owner/mode change; I2 baseline digest mismatch; change of a path that is not critical-class during a NOS job without a verified reference ("changed during NOS job, unverified"); package file content changed without a version change, even if it matches a reference (D7); package downgraded outside NOS (lower reported version), even with a matching signed reference; unexpected (skipped) mount below a profile root (D5), critical when it covers a critical-class path; reference conflict (`integrity.reference_conflict`, D8) | high |
+| Other changed or new file in `/etc` or a watched `/usr` root (D5); owner/mode change; I2 baseline digest mismatch; change of a path that is not critical-class during a NOS job without a verified reference ("changed during NOS job, unverified"); package file content changed without a version change, even if it matches a reference (D7); package downgraded outside NOS (lower reported version), even with a matching signed reference; unexpected (skipped) mount below a profile root (D5), critical when it covers a critical-class path; SSH login file outside the scanned roots (D9 "SSH login files"); reference conflict (`integrity.reference_conflict`, D8) | high |
 | Package updated outside NOS (strictly higher reported version) with matching reference; partial or stale scan | medium |
 | Verified expected change from a NOS job (`expected_pending` until approved by D7; a critical-class path still needs its own executor-local CLI approval) | info (record only) |
 
