@@ -51,8 +51,16 @@ func TestAttachedSecrets(t *testing.T) {
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("%s still exists", dir)
 	}
-	// Without a runtime directory the run does not start.
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
+	// Without a runtime directory the run does not start. The directory is
+	// made in the package folder, not t.TempDir(): /tmp is a tmpfs on some
+	// CI runners, which would rightly be accepted.
+	disk, err := os.MkdirTemp(".", "notmpfs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk, _ = filepath.Abs(disk)
+	t.Cleanup(func() { os.RemoveAll(disk) })
+	t.Setenv("XDG_RUNTIME_DIR", disk)
 	c2 := client(t)
 	r, _ = hostrun.Attached(context.Background(), c2, execID, []byte(`{}`), []byte("echo ran"), time.Minute, tokens...)
 	if strings.Contains(string(r.Result), "ran") || !strings.Contains(string(r.Log), "not a tmpfs") {
