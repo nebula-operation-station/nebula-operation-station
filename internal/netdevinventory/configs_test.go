@@ -761,6 +761,85 @@ func TestWriteCapKeepsOldProtectedOverNewerUnprotected(t *testing.T) {
 	}
 }
 
+// TestWriteCapCountsAndDeletesOnlyTheWrittenDevice writes one version over
+// the cap of device A while device B holds older versions, protected and
+// not: the cap deletes exactly A's oldest unprotected version, and B's
+// versions are neither deleted nor counted against A's cap.
+func TestWriteCapCountsAndDeletesOnlyTheWrittenDevice(t *testing.T) {
+	s, db, _ := newTestStore(t)
+	addDevice(t, s, cbsDevice())
+	addDevice(t, s, panosDevice())
+	start := testBase.Add(-60 * 24 * time.Hour)
+	// Device B: older than every version of A, so an unscoped cap would
+	// delete them first.
+	bBase := record(t, s, "fw-edge", ConfigRunning, start, snap('1', "<b1/>"))
+	bBound := record(t, s, "fw-edge", ConfigRunning, start.Add(time.Minute), snap('2', "<b2/>"))
+	bPlain := record(t, s, "fw-edge", ConfigRunning, start.Add(2*time.Minute), snap('3', "<b3/>"))
+	bNewest := record(t, s, "fw-edge", ConfigRunning, start.Add(3*time.Minute), snap('4', "<b4/>"))
+	markProtected(t, db, bBase.VersionID, true, nil)
+	recent := testBase.Add(-24 * time.Hour)
+	markProtected(t, db, bBound.VersionID, false, &recent)
+
+	// Device A: exactly the cap of unprotected history, then one new version.
+	firstFiller := configMaxID(t, db) + 1
+	fillVersions(t, db, "sw-core", ConfigRunning, testBase.Add(-time.Hour), MaxConfigVersionsPerDevice, 1<<20)
+	w := record(t, s, "sw-core", ConfigRunning, testBase, snap('e', "new"))
+
+	ids := configIDs(t, db)
+	for _, id := range []int64{bBase.VersionID, bBound.VersionID, bPlain.VersionID, bNewest.VersionID} {
+		if !ids[id] {
+			t.Errorf("version %d of the other device deleted by a write to sw-core", id)
+		}
+	}
+	if n := countRows(t, db, `SELECT COUNT(*) FROM netdev_config_versions WHERE device_id = 'sw-core'`); n != MaxConfigVersionsPerDevice {
+		t.Fatalf("sw-core keeps %d versions, want %d", n, MaxConfigVersionsPerDevice)
+	}
+	if !ids[w.VersionID] || ids[firstFiller+MaxConfigVersionsPerDevice-1] || !ids[firstFiller+MaxConfigVersionsPerDevice-2] {
+		t.Fatal("write did not delete exactly the oldest unprotected version of sw-core")
+	}
+}
+
+// TestWriteCapChangeBindingBoundaryIsInclusive pins the change-binding
+// cutoff of the write-path cap to Prune's configProtected: a binding exactly
+// ConfigVersionRetention old protects its version, one a second older does
+// not.
+func TestWriteCapChangeBindingBoundaryIsInclusive(t *testing.T) {
+	s, db, now := newTestStore(t)
+	addDevice(t, s, cbsDevice())
+	start := testBase.Add(-60 * 24 * time.Hour)
+	atCutoff := record(t, s, "sw-core", ConfigRunning, start, snap('1', "v1"))
+	before := record(t, s, "sw-core", ConfigRunning, start.Add(time.Minute), snap('2', "v2"))
+	cutoff := now.Add(-ConfigVersionRetention)
+	markProtected(t, db, atCutoff.VersionID, false, &cutoff)
+	beforeCutoff := cutoff.Add(-time.Second)
+	markProtected(t, db, before.VersionID, false, &beforeCutoff)
+
+	firstFiller := configMaxID(t, db) + 1
+	fillVersions(t, db, "sw-core", ConfigRunning, testBase.Add(-time.Hour), MaxConfigVersionsPerDevice-1, 1<<20)
+	w := record(t, s, "sw-core", ConfigRunning, testBase, snap('e', "new"))
+
+	// 2 + 999 + 1 versions, 2 protected (atCutoff, new): the 2 oldest
+	// unprotected go, which are the expired binding and the oldest filler.
+	ids := configIDs(t, db)
+	if len(ids) != MaxConfigVersionsPerDevice {
+		t.Fatalf("kept %d versions, want %d", len(ids), MaxConfigVersionsPerDevice)
+	}
+	for name, c := range map[string]struct {
+		id   int64
+		kept bool
+	}{
+		"binding at cutoff":    {atCutoff.VersionID, true},
+		"binding 1s before":    {before.VersionID, false},
+		"new version":          {w.VersionID, true},
+		"oldest filler":        {firstFiller + MaxConfigVersionsPerDevice - 2, false},
+		"second oldest filler": {firstFiller + MaxConfigVersionsPerDevice - 3, true},
+	} {
+		if ids[c.id] != c.kept {
+			t.Errorf("%s (version %d) kept = %v, want %v", name, c.id, ids[c.id], c.kept)
+		}
+	}
+}
+
 func TestListKeepsBaselineAndChangeBoundBeyondLimit(t *testing.T) {
 	s, db, now := newTestStore(t)
 	addDevice(t, s, cbsDevice())
