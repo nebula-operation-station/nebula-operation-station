@@ -432,29 +432,75 @@ var orderedPANOSContainers = map[string]bool{
 	"authentication-profiles": true,
 }
 
-// keptPANOSAttrs are the attributes NormalizePANOSConfig renders, in
-// rendering order: the identity (name, uuid) and the Panorama placement
-// (loc, ptpl, src), which change what the element means. Every other
-// attribute is PAN-OS change metadata (admin, dirtyId, time) and dropped.
-var keptPANOSAttrs = [...]string{"name", "uuid", "loc", "ptpl", "src"}
+// volatilePANOSAttrs are the attributes NormalizePANOSConfig drops: the
+// PAN-OS change metadata (who changed an element, its dirty ID and change
+// time), which differs between reads of an unchanged configuration. Only
+// these exact names without a namespace are dropped; every other attribute,
+// known or not, is rendered, so normalization never hides a change of an
+// attribute it does not know.
+var volatilePANOSAttrs = map[string]bool{"admin": true, "dirtyId": true, "time": true}
+
+// leadingPANOSAttrs are rendered first, in this order: the identity of an
+// element. The other attributes follow sorted by rendered key.
+var leadingPANOSAttrs = [...]string{"name", "uuid"}
+
+// panosAttr is one rendered attribute of a PAN-OS element.
+type panosAttr struct {
+	// key is the local name, prefixed with the Go-quoted namespace in
+	// braces if the attribute has one.
+	key   string
+	value string
+}
 
 // panosNode is one element (or comment) of a parsed PAN-OS configuration.
 type panosNode struct {
+	// tag is the local name, prefixed with the Go-quoted namespace in
+	// braces if the element has one.
 	tag string
-	// attrs holds the values of keptPANOSAttrs by index; empty if absent.
-	attrs    [len(keptPANOSAttrs)]string
+	// attrs are the non-volatile attributes in rendering order.
+	attrs    []panosAttr
 	text     []byte
 	comment  bool
 	children []*panosNode
 }
 
+// panosName renders an XML name. The namespace is device text that
+// encoding/xml may have resolved to an arbitrary URI, so it is Go-quoted;
+// the local name is an XML name, which a strict decoder has checked holds
+// no quote, space or newline.
+func panosName(n xml.Name) string {
+	if n.Space == "" {
+		return n.Local
+	}
+	return "{" + strconv.Quote(n.Space) + "}" + n.Local
+}
+
+func panosAttrRank(a panosAttr) int {
+	if i := slices.Index(leadingPANOSAttrs[:], a.key); i >= 0 {
+		return i
+	}
+	return len(leadingPANOSAttrs)
+}
+
+func comparePANOSAttrs(a, b panosAttr) int {
+	if c := panosAttrRank(a) - panosAttrRank(b); c != 0 {
+		return c
+	}
+	if c := strings.Compare(a.key, b.key); c != 0 {
+		return c
+	}
+	return strings.Compare(a.value, b.value)
+}
+
 // NormalizePANOSConfig renders redacted PAN-OS XML text as one element per
 // line for a readable diff (ADR 0010 D4): each line is the element name
-// indented two spaces per depth, the keptPANOSAttrs attributes present as
-// quoted key "[name=… uuid=… loc=…]" and non-whitespace element text as a
-// quoted " = …"; comments become a quoted "# …" line. Other attributes
-// (PAN-OS change metadata such as admin, dirtyId and time) are dropped.
-// Children are sorted by element name, kept attributes and text, except
+// indented two spaces per depth, its attributes as quoted key
+// "[name=… uuid=… loc=…]" (name and uuid first, the others sorted by key;
+// a namespace is rendered as a quoted {"…"} prefix of the element or
+// attribute name) and non-whitespace element text as a quoted " = …";
+// comments become a quoted "# …" line. Only the attributes of
+// volatilePANOSAttrs (PAN-OS change metadata: admin, dirtyId, time) are
+// dropped. Children are sorted by element name, attributes and text, except
 // under the elements of orderedPANOSContainers. All device text is
 // Go-quoted, so a newline or quote in it cannot forge a line.
 //
@@ -508,15 +554,14 @@ func parsePANOS(data []byte) ([]*panosNode, error) {
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
-			n := &panosNode{tag: t.Name.Local}
+			n := &panosNode{tag: panosName(t.Name)}
 			for _, a := range t.Attr {
-				if a.Name.Space != "" {
+				if a.Name.Space == "" && volatilePANOSAttrs[a.Name.Local] {
 					continue
 				}
-				if i := slices.Index(keptPANOSAttrs[:], a.Name.Local); i >= 0 {
-					n.attrs[i] = a.Value
-				}
+				n.attrs = append(n.attrs, panosAttr{key: panosName(a.Name), value: a.Value})
 			}
+			slices.SortFunc(n.attrs, comparePANOSAttrs)
 			add(n)
 			stack = append(stack, n)
 		case xml.EndElement:
@@ -560,10 +605,8 @@ func sortedPANOS(ns []*panosNode, ordered bool) []*panosNode {
 		if c := strings.Compare(a.tag, b.tag); c != 0 {
 			return c
 		}
-		for i := range a.attrs {
-			if c := strings.Compare(a.attrs[i], b.attrs[i]); c != 0 {
-				return c
-			}
+		if c := slices.CompareFunc(a.attrs, b.attrs, comparePANOSAttrs); c != 0 {
+			return c
 		}
 		return strings.Compare(a.elementText(), b.elementText())
 	})
@@ -584,11 +627,9 @@ func (r *panosRenderer) render(n *panosNode, depth int) bool {
 	} else {
 		b.WriteString(n.tag)
 		sep := "["
-		for i, v := range n.attrs {
-			if v != "" {
-				b.WriteString(sep + keptPANOSAttrs[i] + "=" + strconv.Quote(v))
-				sep = " "
-			}
+		for _, a := range n.attrs {
+			b.WriteString(sep + a.key + "=" + strconv.Quote(a.value))
+			sep = " "
 		}
 		if sep == " " {
 			b.WriteByte(']')

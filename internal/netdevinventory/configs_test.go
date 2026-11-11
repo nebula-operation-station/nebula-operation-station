@@ -348,6 +348,14 @@ func TestPANOSNormalizationKeepsSignificantOrderAndAttributes(t *testing.T) {
 		{"loc attribute", attr(``), attr(` loc="vsys1"`)},
 		{"ptpl attribute", attr(``), attr(` ptpl="tpl-a"`)},
 		{"src attribute", attr(` src="tpl"`), attr(``)},
+		{"unlisted attribute added", attr(``), attr(` disable-override="yes"`)},
+		{"unlisted attribute value", attr(` overrides="a"`), attr(` overrides="b"`)},
+		{"volatile name with other case", attr(` Admin="a"`), attr(` Admin="b"`)},
+		{"volatile name prefix", attr(` timestamp="1"`), attr(` timestamp="2"`)},
+		{"namespaced attribute", attr(` xmlns:x="urn:x" x:mode="a"`), attr(` xmlns:x="urn:x" x:mode="b"`)},
+		{"namespaced volatile name", attr(` xmlns:x="urn:x" x:admin="a"`), attr(` xmlns:x="urn:x" x:admin="b"`)},
+		{"attribute namespace", attr(` xmlns:x="urn:x" xmlns:y="urn:y" x:mode="a"`), attr(` xmlns:x="urn:x" xmlns:y="urn:y" y:mode="a"`)},
+		{"element namespace", `<config xmlns:x="urn:x" xmlns:y="urn:y"><x:a/></config>`, `<config xmlns:x="urn:x" xmlns:y="urn:y"><y:a/></config>`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -375,6 +383,48 @@ func TestPANOSNormalizationKeepsSignificantOrderAndAttributes(t *testing.T) {
 		return l.Op == textdiff.Insert && strings.Contains(l.Text, `loc="vsys1"`)
 	}) {
 		t.Fatalf("loc change hidden next to a visible change: %+v", d)
+	}
+	// So is an attribute normalization does not know.
+	z := record(t, s, "fw-edge", ConfigRunning, testBase,
+		snap('c', strings.Replace(attr(` loc="vsys1" disable-override="yes"`), "10.0.0.1", "10.0.0.8", 1)))
+	d, err = s.DiffConfigVersions(context.Background(), "fw-edge", y.VersionID, z.VersionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.Normalized || d.NotDisplayed || !slices.ContainsFunc(d.Lines, func(l textdiff.Line) bool {
+		return l.Op == textdiff.Insert && strings.Contains(l.Text, `disable-override="yes"`)
+	}) {
+		t.Fatalf("unlisted attribute change hidden next to a visible change: %+v", d)
+	}
+}
+
+// TestPANOSNormalizationDropsOnlyVolatileAttributes pins the deny-list:
+// exactly admin, dirtyId and time (without a namespace) are dropped, alone
+// or together, and every other attribute is rendered in a stable order.
+func TestPANOSNormalizationDropsOnlyVolatileAttributes(t *testing.T) {
+	norm := func(a string) []string {
+		t.Helper()
+		lines, ok := NormalizePANOSConfig(`<config><entry name="web"` + a + `/></config>`)
+		if !ok {
+			t.Fatalf("not normalized: %q", a)
+		}
+		return lines
+	}
+	plain := norm(``)
+	for _, a := range []string{` admin="x"`, ` dirtyId="7"`, ` time="2026/11/10 11:11:11"`,
+		` time="1" admin="y" dirtyId="2"`} {
+		if got := norm(a); !slices.Equal(got, plain) {
+			t.Errorf("volatile %q rendered: %q", a, got)
+		}
+	}
+	got := norm(` zeta="1" uuid="u" loc="l" admin="x" xmlns:p="urn:p" p:time="t"`)
+	want := []string{`config`, `  entry[name="web" uuid="u" loc="l" zeta="1" {"urn:p"}time="t" {"xmlns"}p="urn:p"]`}
+	if !slices.Equal(got, want) {
+		t.Fatalf("lines = %q, want %q", got, want)
+	}
+	// Attribute order in the document does not matter.
+	if got2 := norm(` p:time="t" xmlns:p="urn:p" loc="l" zeta="1" uuid="u"`); !slices.Equal(got2, want) {
+		t.Fatalf("reordered attributes = %q, want %q", got2, want)
 	}
 }
 
