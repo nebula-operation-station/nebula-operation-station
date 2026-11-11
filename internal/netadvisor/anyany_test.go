@@ -71,6 +71,29 @@ func TestAnyAnyCheck(t *testing.T) {
 			r:     with(func(r *nr.SecurityRule) { r.Service, r.Application = list("any"), list("any") }),
 			state: StateFinding, fields: s(VariantServiceAny), severity: SeverityMedium,
 		},
+		// "any" next to other members matches everything, as in netreach.
+		{
+			name:  "any inside source and destination lists",
+			r:     with(func(r *nr.SecurityRule) { r.Source, r.Destination = list("lan-net", "any"), list("any", "web-server") }),
+			state: StateFinding, fields: s(VariantAddressAny), severity: SeverityHigh,
+		},
+		{
+			name:  "any inside service and application lists",
+			r:     with(func(r *nr.SecurityRule) { r.Service, r.Application = list("svc-web", "any"), list("ssl", "any") }),
+			state: StateFinding, fields: s(VariantServiceAny), severity: SeverityMedium,
+		},
+		{
+			name:  "any inside a zone list",
+			r:     with(func(r *nr.SecurityRule) { r.From = list("lan", "any") }),
+			state: StateFinding, fields: s(VariantZoneAny), severity: SeverityMedium,
+		},
+		{
+			name: "negated source list with any is not any",
+			r: with(func(r *nr.SecurityRule) {
+				r.Source, r.Destination, r.NegateSource = list("lan-net", "any"), list("any"), nr.Collected(true)
+			}),
+			state: StateOK,
+		},
 		{
 			name:  "service any with an application is ok",
 			r:     with(func(r *nr.SecurityRule) { r.Service = list("any") }),

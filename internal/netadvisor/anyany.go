@@ -3,6 +3,7 @@
 package netadvisor
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/netreach"
@@ -101,7 +102,9 @@ func or(a, b tri) tri {
 	return b
 }
 
-// anyField answers whether a member list is exactly "any".
+// anyField answers whether a member list matches everything: it holds
+// "any", alone or next to other members (netreach expands such a list to
+// any as well).
 func anyField(name string, f netreach.Field[[]string]) tri {
 	switch {
 	case !f.Collected:
@@ -114,7 +117,7 @@ func anyField(name string, f netreach.Field[[]string]) tri {
 			return unknown(name+" has "+m, false)
 		}
 	}
-	if len(f.Value) == 1 && f.Value[0] == "any" {
+	if slices.Contains(f.Value, "any") {
 		return yes
 	}
 	return no
