@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"bytes"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -504,6 +505,32 @@ func TestNetBirdRejectsUnsafeInput(t *testing.T) {
 				t.Fatalf("error contains the setup key: %v", err)
 			}
 		})
+	}
+}
+
+// TestNetBirdSizeLimit: a NetBird script with the largest table and URL
+// obeys MaxScriptBytes, and one over the limit is refused.
+func TestNetBirdSizeLimit(t *testing.T) {
+	o := validOneStep(t)
+	nb := validNetBird()
+	nb.ManagementURL = "https://nb.lan/" + strings.Repeat("x", NetBirdMgmtURLMaxLen-len("https://nb.lan/"))
+	nb.Clients = nil
+	for i := 0; i < NetBirdClientVersionsMax; i++ {
+		nb.Clients = append(nb.Clients, NetBirdClient{Version: fmt.Sprintf("99999.99999.%05d", i), KeyPassing: KeyPassing(1 + i%2)})
+	}
+	o.NetBird = &nb
+	if s, err := RenderOneStep(o); err != nil || len(s) > MaxScriptBytes {
+		t.Fatalf("largest NetBird options: %d bytes, %v", len(s), err)
+	}
+	for n := 0; len(renderOneStep(o)) <= MaxScriptBytes; n++ {
+		o.From = append(o.From, fmt.Sprintf("2001:db8:%x::/64", n))
+	}
+	s, err := RenderOneStep(o)
+	if !errors.Is(err, ErrTooLarge) || s != nil {
+		t.Fatalf("over the limit: %d bytes, %v", len(s), err)
+	}
+	if strings.Contains(err.Error(), testSetupKey) {
+		t.Fatal("error contains the setup key")
 	}
 }
 
