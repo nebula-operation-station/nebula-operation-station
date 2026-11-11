@@ -112,7 +112,7 @@ named in the handbook next to every "no unexpected change" result:
   `AuthorizedPrincipalsCommand` program reads or runs (only the program
   itself is critical-class), `at` job spools,
   and the files that sshd follows a symlink to outside the scanned roots
-  (each symlink at or above an SSH position is critical-class and
+  or into unrecorded, excluded or skipped parts of them (each symlink at or above an SSH position is critical-class and
   opens the same finding, D9), the configuration and login files that
   sshd's command line names with `-f` or `-o` (the sources of that
   command line, `/etc/default/ssh` and the sshd units and drop-ins in
@@ -130,11 +130,14 @@ named in the handbook next to every "no unexpected change" result:
   `/usr/games`. Persistence placed there is not seen by I2.
 - **Login-relevant files that are not critical-class.** D9 "SSH login
   files" makes every file that sshd reads to grant a login
-  critical-class, plus PAM, the account files, `/etc/nsswitch.conf` and
-  `/etc/krb5.keytab`. Files that the PAM or NSS modules themselves read
+  critical-class, plus PAM, the account files, `/etc/nsswitch.conf`,
+  `/etc/krb5.keytab` and `/etc/krb5.conf` (critical-class, previously
+  listed here as non-critical; sshd's GSSAPI code reads it directly).
+  Files that `/etc/krb5.conf` includes (`include`, `includedir`) and
+  files that the PAM or NSS modules themselves read
   are not derived and stay ordinary `/etc` or `/usr/lib` entries (high
   findings, approvable in the browser): for example `/etc/sssd/`, LDAP
-  client configuration, `/etc/krb5.conf`, the `libnss_*` modules and any
+  client configuration, the `libnss_*` modules and any
   data file a module reads outside `/etc/pam.d/` and `/etc/security/`
   (both critical-class). A changed NSS source named in
   `/etc/nsswitch.conf` is critical; a change inside that source's own
@@ -823,12 +826,20 @@ roles never mix:
      (`maxProposalBytes`), the initial proposal at most **128 MiB**
      (`maxInitialProposalBytes`, the D6 per-run document limit, since it
      holds exactly one run), and all stored proposals of one host
-     together at most **256 MiB** (`maxProposalStoreBytesPerHost`). The
+     together at most **256 MiB** (`maxProposalStoreBytesPerHost`), and
+     all stored proposals of all hosts together, initial ones included,
+     at most **2 GiB** (`maxProposalStoreBytes`), so a compromised server
+     cannot fill executor storage with hosts × 256 MiB or with an initial
+     proposal for every host without a baseline. The
      executor refuses to build a proposal that would exceed its own limit
      (the admin approves the change in smaller batches; an initial run
      over the limit cannot be proposed and the admin is told so). When the
      per-host count or byte cap would be exceeded, a new proposal evicts
-     the oldest non-initial ones until it fits; an evicted or expired
+     the oldest non-initial ones of that host until it fits; when the
+     executor-wide cap would be exceeded, it evicts the oldest non-initial
+     proposals of any host until it fits, and if it still does not fit
+     (initial proposals are never evicted by another host's request) it
+     refuses the request and the admin is told so; an evicted or expired
      proposal is refused by `approve` like an unknown digest, and the
      admin requests a new one. **Proposal requests are rate-limited**:
      the executor builds at most **30** new proposals per host per hour
@@ -903,7 +914,8 @@ roles never mix:
      `/.ssh/authorized_keys2`, so every real `authorized_keys` file is
      critical-class whatever `AuthorizedKeysFile` says, and likewise the
      fixed SSH login files of D9 (hostbased trust, `known_hosts`,
-     `.k5login`, `/etc/krb5.keytab` and the account files), whatever
+     `.k5login`, `/etc/krb5.keytab`, `/etc/krb5.conf` and the account
+     files), whatever
      `HostbasedAuthentication` or `GSSAPIAuthentication` say, and the
      sshd command-line configuration sources of D9.
      - **Derived sets only grow until a change is approved.** The sets
@@ -1238,7 +1250,8 @@ unverified finding the admin must review.
 
 **Critical-class paths.** These are: `authorized_keys*` files and every
 SSH login file (below, including hostbased trust files, `known_hosts`,
-`.k5login`, `/etc/krb5.keytab`, `/etc/passwd`, `/etc/shadow`,
+`.k5login`, `/etc/krb5.keytab`, `/etc/krb5.conf`, `/etc/passwd`,
+`/etc/shadow`,
 `/etc/group`, `/etc/gshadow`, `/etc/nsswitch.conf` and symlinks at or
 above SSH positions), `/etc/sudoers` and `/etc/sudoers.d/`, PAM
 configuration (`/etc/pam.d/`, `/etc/security/`) and PAM modules
@@ -1284,9 +1297,14 @@ stack or its authentication methods read them to grant a login:
   `/etc/ssh/ssh_known_hosts2`, and every path ending in
   `/.ssh/known_hosts` or `/.ssh/known_hosts2`;
 - GSSAPI/Kerberos: every path ending in `/.k5login` (principal
-  mapping) and `/etc/krb5.keytab` (the host service key sshd accepts
+  mapping), `/etc/krb5.keytab` (the host service key sshd accepts
   tickets with; whoever replaces it can forge tickets that log in through
-  `.k5login` or the default principal mapping);
+  `.k5login` or the default principal mapping) and `/etc/krb5.conf`,
+  which sshd's GSSAPI code reads directly (its `auth_to_local` rules map
+  principals to accounts, `default_keytab_name` can point away from
+  `/etc/krb5.keytab`). Files that `/etc/krb5.conf` pulls in with
+  `include` or `includedir` are not derived, a named limit ("Honest
+  limits");
 - account and name-service data: `/etc/passwd`, `/etc/shadow`,
   `/etc/group`, `/etc/gshadow` and `/etc/nsswitch.conf` (a new UID-0
   account, a changed password hash, shell or home, or a changed
@@ -1372,23 +1390,37 @@ symlink (or, for a file position, any type other than `file`):
   files or SSH configuration files, so they are critical-class too.
 
 **Resolution is component by component, never lexical.** The executor
-walks the path from `/` one component at a time against the same run's
-records: a `.` is dropped; a `..` moves to the parent of the directory
-reached **so far**, that is, after every symlink before it has been
-followed (so `/etc/ssh/l/../x`, with `l` a symlink to `/srv/a/b`,
-resolves via `/srv/a/x`, not `/etc/ssh/x`); a component whose record is
-a symlink is replaced by its target (an absolute target restarts at
-`/`, a relative one continues from the link's directory) before the
-next component is taken. At most **40** symlinks are followed per
-resolution (the Linux limit; new named constant `maxSymlinkFollows`,
-fixed in IG-05).
+walks the path from `/` one component at a time against one record set:
+a **new** record (latest run) is resolved against that run's records,
+an **old** record (approved baseline) against the digest-checked
+approved baseline list (D7), each on its own; if either resolution
+fails, the entry is handled as below. A `.` is dropped; a `..` moves to
+the parent of the directory reached **so far**, that is, after every
+symlink before it has been followed (so `/etc/ssh/l/../x`, with `l` a
+symlink to `/srv/a/b`, resolves via `/srv/a/x`, not `/etc/ssh/x`), and
+a `..` at `/` stays at `/`; a component whose record is a symlink is
+replaced by its target (an absolute target restarts at `/`, a relative
+one continues from the link's directory) before the next component is
+taken. As in the kernel, resolution **fails** when a component that is
+followed by another component, or by a trailing slash, is neither a
+directory nor a symlink to one (ENOTDIR), when a symlink target is
+empty (ENOENT), when the path still to be resolved, target included,
+grows beyond 4,096 bytes (ENAMETOOLONG; the D6 record path limit), or
+when a path ends in a trailing slash but resolves to something other
+than a directory.
+At most **40** symlinks are followed per resolution (the Linux limit;
+new named constant `maxSymlinkFollows`, fixed in IG-05).
 
-If it cannot resolve the path within the run's records (a component
+If it cannot resolve the path within the record set (a component
 outside the profile roots or `/home/*/`, a loop, the link limit, a
-missing record), the symlink entry is unclassifiable and therefore
-critical-class (D7 "Unclassifiable means critical"), and a target
-outside the scanned roots, a loop or the link limit opens the "SSH login
-file outside the scanned roots" finding below (critical for a
+missing record, a failure as above), the symlink entry is
+unclassifiable and therefore critical-class (D7 "Unclassifiable means
+critical"), and a target outside the scanned roots, a loop, the link
+limit or a **missing record** (for example a symlink into a part of a
+home where only the fixed patterns are recorded, such as
+`/home/alice/.ssh` -> `/home/alice/dotfiles/ssh`, or into an excluded or
+skipped subtree) opens the "SSH login file outside the scanned roots"
+finding below (critical for a
 configuration position, high otherwise; naming the symlink and its
 escaped target, kept open while the approved baseline or the latest run
 holds that symlink), since the files sshd reads there are not scanned.
