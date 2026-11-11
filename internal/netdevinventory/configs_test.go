@@ -320,6 +320,75 @@ func TestPANOSNormalizationRemovesOrderAndTimestampNoise(t *testing.T) {
 	}
 }
 
+func TestPANOSNormalizationKeepsSignificantOrderAndAttributes(t *testing.T) {
+	const pre = `<config><devices><entry name="localhost"><network>`
+	const post = `</network></entry></devices></config>`
+	ike := func(enc string) string {
+		return pre + `<ike><crypto-profiles><ike-crypto-profiles><entry name="p1"><encryption>` + enc +
+			`</encryption><hash><member>sha256</member></hash></entry></ike-crypto-profiles></crypto-profiles></ike>` + post
+	}
+	ipsec := func(auth string) string {
+		return pre + `<ike><crypto-profiles><ipsec-crypto-profiles><entry name="p2"><esp><authentication>` + auth +
+			`</authentication></esp></entry></ipsec-crypto-profiles></crypto-profiles></ike>` + post
+	}
+	seq := func(m string) string {
+		return `<config><shared><authentication-sequence><entry name="s"><authentication-profiles>` + m +
+			`</authentication-profiles></entry></authentication-sequence></shared></config>`
+	}
+	attr := func(a string) string {
+		return `<config><devices><entry name="localhost"><address><entry name="web"` + a +
+			`><ip-netmask>10.0.0.1/32</ip-netmask></entry></address></entry></devices></config>`
+	}
+	cases := []struct{ name, a, b string }{
+		{"ike encryption order", ike(`<member>aes-256-cbc</member><member>3des</member>`), ike(`<member>3des</member><member>aes-256-cbc</member>`)},
+		{"ike hash order", strings.Replace(ike(`<member>x</member>`), `<member>sha256</member>`, `<member>sha256</member><member>sha1</member>`, 1),
+			strings.Replace(ike(`<member>x</member>`), `<member>sha256</member>`, `<member>sha1</member><member>sha256</member>`, 1)},
+		{"ipsec authentication order", ipsec(`<member>sha256</member><member>sha1</member>`), ipsec(`<member>sha1</member><member>sha256</member>`)},
+		{"authentication sequence order", seq(`<member>ldap</member><member>local</member>`), seq(`<member>local</member><member>ldap</member>`)},
+		{"loc attribute", attr(``), attr(` loc="vsys1"`)},
+		{"ptpl attribute", attr(``), attr(` ptpl="tpl-a"`)},
+		{"src attribute", attr(` src="tpl"`), attr(``)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, okA := NormalizePANOSConfig(tc.a)
+			b, okB := NormalizePANOSConfig(tc.b)
+			if !okA || !okB {
+				t.Fatal("not normalized")
+			}
+			if slices.Equal(a, b) {
+				t.Fatalf("significant difference dropped: %q", a)
+			}
+		})
+	}
+	// Under a visible change elsewhere, the significant one is still shown.
+	s, _, _ := newTestStore(t)
+	addDevice(t, s, panosDevice())
+	x := record(t, s, "fw-edge", ConfigRunning, testBase.Add(-2*time.Hour), snap('a', attr(``)))
+	y := record(t, s, "fw-edge", ConfigRunning, testBase.Add(-time.Hour),
+		snap('b', strings.Replace(attr(` loc="vsys1"`), "10.0.0.1", "10.0.0.9", 1)))
+	d, err := s.DiffConfigVersions(context.Background(), "fw-edge", x.VersionID, y.VersionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.Normalized || !slices.ContainsFunc(d.Lines, func(l textdiff.Line) bool {
+		return l.Op == textdiff.Insert && strings.Contains(l.Text, `loc="vsys1"`)
+	}) {
+		t.Fatalf("loc change hidden next to a visible change: %+v", d)
+	}
+}
+
+func TestPANOSNormalizationCappedAtConfigLines(t *testing.T) {
+	at := `<config>` + strings.Repeat(`<b/>`, netdevcontract.MaxConfigLines-1) + `</config>`
+	if lines, ok := NormalizePANOSConfig(at); !ok || len(lines) != netdevcontract.MaxConfigLines {
+		t.Fatalf("at line limit: ok=%v lines=%d", ok, len(lines))
+	}
+	over := `<config>` + strings.Repeat(`<b/>`, netdevcontract.MaxConfigLines) + `</config>`
+	if _, ok := NormalizePANOSConfig(over); ok {
+		t.Fatal("normalized output over MaxConfigLines accepted")
+	}
+}
+
 func TestCBSDiffIsNotNormalized(t *testing.T) {
 	s, _, _ := newTestStore(t)
 	addDevice(t, s, cbsDevice())
@@ -529,5 +598,138 @@ func TestRetentionNeverPrunesBaselineOrChangeBoundVersions(t *testing.T) {
 	}
 	if i := slices.IndexFunc(vs, func(v ConfigVersion) bool { return v.ID == bound.VersionID }); i < 0 || !vs[i].ChangeBoundAt.Equal(recent) {
 		t.Fatalf("change binding not listed: %+v", vs)
+	}
+}
+
+// fillVersions inserts n unprotected versions of (dev, cfg) directly, the
+// newest an hour before at, one hour apart.
+func fillVersions(t *testing.T, db *sql.DB, dev string, cfg ConfigKind, at time.Time, n, seed int) {
+	t.Helper()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range n {
+		ts := micros(at.Add(-time.Duration(i+1) * time.Hour))
+		d := fmt.Sprintf("%064x", seed+i)
+		if _, err := tx.Exec(`INSERT INTO netdev_config_versions (device_id, config, raw_digest, redacted_digest,
+			redacted_text, first_seen, last_seen) VALUES (?, ?, ?, ?, 'x', ?, ?)`, dev, string(cfg), d, d, ts, ts); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEveryReadChangingStaysAtVersionCap(t *testing.T) {
+	s, db, _ := newTestStore(t)
+	addDevice(t, s, cbsDevice())
+	start := testBase.Add(-30 * 24 * time.Hour)
+	base := record(t, s, "sw-core", ConfigRunning, start, snap('1', "v1"))
+	bound := record(t, s, "sw-core", ConfigRunning, start.Add(time.Minute), snap('2', "v2"))
+	markProtected(t, db, base.VersionID, true, nil)
+	recent := testBase.Add(-24 * time.Hour)
+	markProtected(t, db, bound.VersionID, false, &recent)
+	startup := record(t, s, "sw-core", ConfigStartup, start.Add(2*time.Minute), snap('3', "s1"))
+	// Earlier history up to just under the cap, oldest the hour before start.
+	fillVersions(t, db, "sw-core", ConfigRunning, start, MaxConfigVersionsPerDevice-3-20, 1<<20)
+	oldest := configMaxID(t, db)
+
+	// A config whose raw digest changes on every read (a counter outside
+	// the redaction allowlist), read every minute, without any Prune.
+	const reads = 80
+	var last RecordConfigResult
+	for i := range reads {
+		c := netdevcontract.ConfigSnapshot{Lines: []string{"hostname sw"}, RawDigest: fmt.Sprintf("%064x", 1<<24+i),
+			RedactedDigest: netdevcontract.RedactedDigestOf([]string{"hostname sw"})}
+		last = record(t, s, "sw-core", ConfigRunning, start.Add(time.Duration(10+i)*time.Minute), c)
+		if !last.New {
+			t.Fatalf("read %d made no new version", i)
+		}
+		if n := countVersions(t, db); n > MaxConfigVersionsPerDevice {
+			t.Fatalf("read %d: %d versions, over the cap %d", i, n, MaxConfigVersionsPerDevice)
+		}
+	}
+	ids := configIDs(t, db)
+	if len(ids) != MaxConfigVersionsPerDevice {
+		t.Fatalf("kept %d versions, want %d", len(ids), MaxConfigVersionsPerDevice)
+	}
+	for _, id := range []int64{base.VersionID, bound.VersionID, startup.VersionID, last.VersionID} {
+		if !ids[id] {
+			t.Errorf("protected or newest version %d was pruned on write", id)
+		}
+	}
+	// The oldest unprotected versions went first: the oldest of the earlier
+	// history is gone, every counter version is kept.
+	if ids[oldest] {
+		t.Error("oldest unprotected version kept")
+	}
+	for id := last.VersionID - reads + 1; id <= last.VersionID; id++ {
+		if !ids[id] {
+			t.Errorf("newer version %d pruned before older ones", id)
+		}
+	}
+}
+
+func configMaxID(t *testing.T, db *sql.DB) int64 {
+	t.Helper()
+	var id int64
+	if err := db.QueryRow(`SELECT MAX(id) FROM netdev_config_versions`).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+func TestProtectedOverCapAreKeptOnWrite(t *testing.T) {
+	s, db, _ := newTestStore(t)
+	addDevice(t, s, cbsDevice())
+	fillVersions(t, db, "sw-core", ConfigRunning, testBase.Add(-time.Hour), MaxConfigVersionsPerDevice+5, 1<<20)
+	recent := testBase.Add(-time.Hour)
+	if _, err := db.Exec(`UPDATE netdev_config_versions SET change_bound_at = ?`, micros(recent)); err != nil {
+		t.Fatal(err)
+	}
+	r := record(t, s, "sw-core", ConfigRunning, testBase, snap('e', "new"))
+	if n := countVersions(t, db); n != MaxConfigVersionsPerDevice+6 {
+		t.Fatalf("versions = %d, want every protected version and the new one", n)
+	}
+	vs := list(t, s, "sw-core", ConfigRunning)
+	if len(vs) != MaxConfigVersionsPerDevice+6 || vs[0].ID != r.VersionID {
+		t.Fatalf("listed %d versions, want all %d protected ones and the new current first",
+			len(vs), MaxConfigVersionsPerDevice+6)
+	}
+}
+
+func TestListKeepsBaselineAndChangeBoundBeyondLimit(t *testing.T) {
+	s, db, now := newTestStore(t)
+	addDevice(t, s, cbsDevice())
+	start := testBase.Add(-60 * 24 * time.Hour)
+	base := record(t, s, "sw-core", ConfigRunning, start, snap('1', "v1"))
+	bound := record(t, s, "sw-core", ConfigRunning, start.Add(time.Minute), snap('2', "v2"))
+	expired := record(t, s, "sw-core", ConfigRunning, start.Add(2*time.Minute), snap('3', "v3"))
+	markProtected(t, db, base.VersionID, true, nil)
+	recent := testBase.Add(-24 * time.Hour)
+	markProtected(t, db, bound.VersionID, false, &recent)
+	old := now.Add(-ConfigVersionRetention - time.Hour)
+	markProtected(t, db, expired.VersionID, false, &old)
+	// More newer versions than the list shows, inserted directly as between
+	// two prunes.
+	fillVersions(t, db, "sw-core", ConfigRunning, testBase, MaxListedConfigVersions+20, 1<<20)
+
+	vs := list(t, s, "sw-core", ConfigRunning)
+	if len(vs) != MaxListedConfigVersions+2 {
+		t.Fatalf("listed %d, want the %d newest plus baseline and change-bound", len(vs), MaxListedConfigVersions)
+	}
+	n := len(vs)
+	if vs[n-2].ID != bound.VersionID || vs[n-1].ID != base.VersionID || !vs[n-1].Baseline || !vs[n-2].ChangeBoundAt.Equal(recent) {
+		t.Fatalf("list tail = %+v, %+v; want change-bound then baseline", vs[n-2], vs[n-1])
+	}
+	if slices.ContainsFunc(vs, func(v ConfigVersion) bool { return v.ID == expired.VersionID }) {
+		t.Fatal("version with an expired change binding listed beyond the limit")
+	}
+	for i := 1; i < n; i++ {
+		if vs[i].LastSeen.After(vs[i-1].LastSeen) {
+			t.Fatalf("list not ordered by last_seen at %d", i)
+		}
 	}
 }

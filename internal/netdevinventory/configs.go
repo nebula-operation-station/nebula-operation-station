@@ -8,9 +8,11 @@ package netdevinventory
 // per distinct raw_digest of a (device, config) and only advances
 // last_seen on an identical read. Diffs between two versions run
 // internal/textdiff over the redacted text; a PAN-OS configuration is
-// normalized first (one element per line, stable sibling order outside the
-// rulebase, volatile attributes dropped) so the diff is readable. Retention
-// is Prune's (retention.go); the baseline flag and change binding are set
+// normalized first (one element per line, stable sibling order outside
+// order-significant containers, volatile attributes dropped) so the diff
+// is readable. Retention is Prune's (retention.go); RecordConfig enforces
+// its count limit on every new version. The baseline flag and change
+// binding are set
 // by the executor-mirroring code of ND-17 part 2 and never by a read.
 //
 // Every stored line is device text: validated with the netdevcontract
@@ -18,7 +20,6 @@ package netdevinventory
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"database/sql"
 	"encoding/xml"
@@ -226,10 +227,50 @@ func (s *Store) recordConfig(ctx context.Context, tx *sql.Tx, deviceID string, c
 	if err != nil {
 		return RecordConfigResult{}, fmt.Errorf("netdevinventory: config version id of %s: %w", deviceID, err)
 	}
+	if err := boundConfigVersions(ctx, tx, deviceID, now); err != nil {
+		return RecordConfigResult{}, err
+	}
 	if err := s.touchDevice(ctx, tx, deviceID, obs, nowM); err != nil {
 		return RecordConfigResult{}, err
 	}
 	return RecordConfigResult{VersionID: id, New: true}, nil
+}
+
+// boundConfigVersions enforces the count limit of Prune's
+// pruneConfigVersions for deviceID inside tx, so RecordConfig keeps
+// netdev_config_versions bounded after every new version whether or not
+// Prune runs (as boundHistory does for ReplaceDataset). The limit is
+// MaxConfigVersionsPerDevice over all configs of the device, as in Prune;
+// protected versions (baseline, change-bound within ConfigVersionRetention,
+// newest of each config) count against it but are never removed, and the
+// oldest unprotected versions go first. Age is left to Prune: a version
+// within the count limit cannot make the table grow without bound.
+func boundConfigVersions(ctx context.Context, tx *sql.Tx, deviceID string, now time.Time) error {
+	// The newest version of each config, looked up once on
+	// idx_netdev_config_versions_seen instead of per row.
+	newest := []any{int64(-1), int64(-1)}
+	for i, c := range []ConfigKind{ConfigRunning, ConfigStartup} {
+		var id int64
+		err := tx.QueryRowContext(ctx, `SELECT id FROM netdev_config_versions WHERE device_id = ? AND config = ?
+			ORDER BY last_seen DESC, id DESC LIMIT 1`, deviceID, string(c)).Scan(&id)
+		switch {
+		case err == nil:
+			newest[i] = id
+		case !errors.Is(err, sql.ErrNoRows):
+			return fmt.Errorf("netdevinventory: load newest %s config version of %s: %w", c, deviceID, err)
+		}
+	}
+	cutoff := micros(now.Add(-ConfigVersionRetention))
+	if _, err := tx.ExecContext(ctx, `WITH
+		p AS (SELECT id, last_seen, (baseline = 1 OR (change_bound_at IS NOT NULL AND change_bound_at >= ?)
+			OR id IN (?, ?)) AS prot FROM netdev_config_versions WHERE device_id = ?),
+		u AS (SELECT id, ROW_NUMBER() OVER (ORDER BY last_seen DESC, id DESC) AS rn FROM p WHERE prot = 0)
+		DELETE FROM netdev_config_versions WHERE id IN (
+			SELECT id FROM u WHERE rn > ? - (SELECT SUM(prot) FROM p))`,
+		cutoff, newest[0], newest[1], deviceID, MaxConfigVersionsPerDevice); err != nil {
+		return fmt.Errorf("netdevinventory: cap config versions of %s: %w", deviceID, err)
+	}
+	return nil
 }
 
 const configVersionCols = `id, device_id, config, raw_digest, redacted_digest, lease_id, first_seen, last_seen, baseline, change_bound_at`
@@ -257,7 +298,12 @@ func scanConfigVersion(r rowScanner, extra ...any) (ConfigVersion, error) {
 
 // ListConfigVersions returns the versions of (deviceID, config) without
 // their text, current first (by last_seen, as ConfigChangedNotDisplayed
-// orders them), at most MaxListedConfigVersions.
+// orders them): the newest MaxListedConfigVersions, plus every version
+// retention protects beyond them (the baseline and versions bound to a
+// change within ConfigVersionRetention), so a version retention promises
+// to keep never drops out of the list. Those are bounded by the count
+// limit RecordConfig enforces on every write unless the protected versions
+// alone exceed it.
 func (s *Store) ListConfigVersions(ctx context.Context, deviceID string, config ConfigKind) ([]ConfigVersion, error) {
 	if !validConfigKind(config) {
 		return nil, ErrUnknownConfig
@@ -265,9 +311,14 @@ func (s *Store) ListConfigVersions(ctx context.Context, deviceID string, config 
 	if _, err := s.GetDevice(ctx, deviceID); err != nil {
 		return nil, err
 	}
+	cutoff := micros(s.now().Add(-ConfigVersionRetention))
 	rs, err := s.db.QueryContext(ctx, `SELECT `+configVersionCols+` FROM netdev_config_versions
-		WHERE device_id = ? AND config = ? ORDER BY last_seen DESC, id DESC LIMIT ?`,
-		deviceID, string(config), MaxListedConfigVersions)
+		WHERE device_id = ? AND config = ? AND (baseline = 1
+			OR (change_bound_at IS NOT NULL AND change_bound_at >= ?)
+			OR id IN (SELECT id FROM netdev_config_versions WHERE device_id = ? AND config = ?
+				ORDER BY last_seen DESC, id DESC LIMIT ?))
+		ORDER BY last_seen DESC, id DESC`,
+		deviceID, string(config), cutoff, deviceID, string(config), MaxListedConfigVersions)
 	if err != nil {
 		return nil, fmt.Errorf("netdevinventory: list config versions of %s: %w", deviceID, err)
 	}
@@ -365,32 +416,53 @@ func (s *Store) DiffConfigVersions(ctx context.Context, deviceID string, fromID,
 }
 
 // orderedPANOSContainers are the PAN-OS elements whose children keep their
-// document order in NormalizePANOSConfig: rule order in a rulebase is the
-// policy. Every other element's children are sorted.
-var orderedPANOSContainers = map[string]bool{"rules": true}
+// document order in NormalizePANOSConfig, because the order is
+// significant: rule order in a rulebase is the policy, the member order of
+// IKE and IPsec crypto profiles (encryption, hash, dh-group,
+// authentication) is the proposal preference, and an authentication
+// sequence tries its profiles in order. Every other element's children are
+// sorted. Keeping a non-significant order only adds diff lines; it never
+// hides a change.
+var orderedPANOSContainers = map[string]bool{
+	"rules":                   true,
+	"encryption":              true,
+	"hash":                    true,
+	"dh-group":                true,
+	"authentication":          true,
+	"authentication-profiles": true,
+}
+
+// keptPANOSAttrs are the attributes NormalizePANOSConfig renders, in
+// rendering order: the identity (name, uuid) and the Panorama placement
+// (loc, ptpl, src), which change what the element means. Every other
+// attribute is PAN-OS change metadata (admin, dirtyId, time) and dropped.
+var keptPANOSAttrs = [...]string{"name", "uuid", "loc", "ptpl", "src"}
 
 // panosNode is one element (or comment) of a parsed PAN-OS configuration.
 type panosNode struct {
-	tag, name, uuid string
-	text            []byte
-	comment         bool
-	children        []*panosNode
+	tag string
+	// attrs holds the values of keptPANOSAttrs by index; empty if absent.
+	attrs    [len(keptPANOSAttrs)]string
+	text     []byte
+	comment  bool
+	children []*panosNode
 }
 
 // NormalizePANOSConfig renders redacted PAN-OS XML text as one element per
 // line for a readable diff (ADR 0010 D4): each line is the element name
-// indented two spaces per depth, the name and uuid attributes as quoted
-// key "[name=… uuid=…]" and non-whitespace element text as a quoted
-// " = …"; comments become a quoted "# …" line. Other attributes (PAN-OS
-// change metadata such as admin, dirtyId and time) are dropped. Children
-// are sorted by element name, name attribute and text, except under the
-// elements of orderedPANOSContainers. All device text is Go-quoted, so a
-// newline or quote in it cannot forge a line.
+// indented two spaces per depth, the keptPANOSAttrs attributes present as
+// quoted key "[name=… uuid=… loc=…]" and non-whitespace element text as a
+// quoted " = …"; comments become a quoted "# …" line. Other attributes
+// (PAN-OS change metadata such as admin, dirtyId and time) are dropped.
+// Children are sorted by element name, kept attributes and text, except
+// under the elements of orderedPANOSContainers. All device text is
+// Go-quoted, so a newline or quote in it cannot forge a line.
 //
 // The input must pass netdevcontract.CheckXML with MaxRedactedConfigBytes
 // (depth, element, text limits, no DTD) and the rendered text must stay
-// within MaxNormalizedConfigBytes; otherwise ok is false and the caller
-// diffs the stored lines.
+// within MaxNormalizedConfigBytes and netdevcontract.MaxConfigLines lines
+// (the line bound of a CBS config, so a diff costs no more than one of
+// CBS); otherwise ok is false and the caller diffs the stored lines.
 func NormalizePANOSConfig(text string) (lines []string, ok bool) {
 	data := []byte(text)
 	if netdevcontract.CheckXML(data, netdevcontract.MaxRedactedConfigBytes) != nil {
@@ -438,12 +510,11 @@ func parsePANOS(data []byte) ([]*panosNode, error) {
 		case xml.StartElement:
 			n := &panosNode{tag: t.Name.Local}
 			for _, a := range t.Attr {
-				switch {
-				case a.Name.Space != "":
-				case a.Name.Local == "name":
-					n.name = a.Value
-				case a.Name.Local == "uuid":
-					n.uuid = a.Value
+				if a.Name.Space != "" {
+					continue
+				}
+				if i := slices.Index(keptPANOSAttrs[:], a.Name.Local); i >= 0 {
+					n.attrs[i] = a.Value
 				}
 			}
 			add(n)
@@ -486,8 +557,15 @@ func sortedPANOS(ns []*panosNode, ordered bool) []*panosNode {
 			}
 			return -1
 		}
-		return cmp.Or(strings.Compare(a.tag, b.tag), strings.Compare(a.name, b.name),
-			strings.Compare(a.uuid, b.uuid), strings.Compare(a.elementText(), b.elementText()))
+		if c := strings.Compare(a.tag, b.tag); c != 0 {
+			return c
+		}
+		for i := range a.attrs {
+			if c := strings.Compare(a.attrs[i], b.attrs[i]); c != 0 {
+				return c
+			}
+		}
+		return strings.Compare(a.elementText(), b.elementText())
 	})
 	return out
 }
@@ -505,16 +583,14 @@ func (r *panosRenderer) render(n *panosNode, depth int) bool {
 		b.WriteString(strconv.Quote(string(n.text)))
 	} else {
 		b.WriteString(n.tag)
-		if n.name != "" || n.uuid != "" {
-			b.WriteByte('[')
-			sep := ""
-			if n.name != "" {
-				b.WriteString("name=" + strconv.Quote(n.name))
+		sep := "["
+		for i, v := range n.attrs {
+			if v != "" {
+				b.WriteString(sep + keptPANOSAttrs[i] + "=" + strconv.Quote(v))
 				sep = " "
 			}
-			if n.uuid != "" {
-				b.WriteString(sep + "uuid=" + strconv.Quote(n.uuid))
-			}
+		}
+		if sep == " " {
 			b.WriteByte(']')
 		}
 		if t := n.elementText(); t != "" {
@@ -523,7 +599,7 @@ func (r *panosRenderer) render(n *panosNode, depth int) bool {
 		}
 	}
 	r.bytes += b.Len() + 1
-	if r.bytes > MaxNormalizedConfigBytes {
+	if r.bytes > MaxNormalizedConfigBytes || len(r.lines) >= netdevcontract.MaxConfigLines {
 		return false
 	}
 	r.lines = append(r.lines, b.String())
