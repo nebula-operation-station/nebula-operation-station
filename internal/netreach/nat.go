@@ -55,7 +55,7 @@ func (e *evaluator) forward(srcZone string, src []AddrRange, dst Placement) []ou
 			e.chain.add(st)
 			return append(outs, unknownOut(v.Reason()))
 		}
-		m, why := natMatch(v, &base)
+		m, why := natMatch(v, &e.x.natAddrs[i], &base)
 		if m == matchNone {
 			st.Outcome, st.Detail = OutcomeNoMatch, "because "+why
 			e.chain.add(st)
@@ -84,7 +84,7 @@ func (e *evaluator) forward(srcZone string, src []AddrRange, dst Placement) []ou
 		}
 		st.Detail = "destination translated to " + v.Translation.Address
 		e.chain.add(st)
-		outs = append(outs, e.translated(v, p))
+		outs = append(outs, e.translated(v, e.x.natZone[i], p))
 		if m == matchFull {
 			return outs
 		}
@@ -97,73 +97,135 @@ func (e *evaluator) forward(srcZone string, src []AddrRange, dst Placement) []ou
 }
 
 // translated evaluates the security rules for a translated packet: the
-// post-NAT zone is the zone of the translated address.
-func (e *evaluator) translated(v *NATRuleView, p packet) outcome {
+// post-NAT zone is the zone of the translated address, computed once per
+// Index (postNATZones). Unknown results add a NAT step naming the cause.
+func (e *evaluator) translated(v *NATRuleView, z postZone, p packet) outcome {
 	if !e.newPath() {
 		return unknownOut(ErrLimitReached.Error())
 	}
-	zone, r := e.translatedZone(v)
+	r := z.reason
+	if r == "" && !e.x.zones[z.zone] {
+		r = "zone " + z.zone + " not in snapshot"
+	}
 	if r != "" {
 		e.chain.add(Step{Path: p.path, Kind: StepNAT, Name: v.Name, Outcome: OutcomeUnknown, Detail: "post-NAT zone: " + r})
 		return unknownOut("NAT rule " + sanitizeText(v.Name) + ": post-NAT zone: " + r)
 	}
-	if !e.x.zones[zone] {
-		return unknownOut("zone " + zone + " not in snapshot")
-	}
-	p.dstZone = zone
+	p.dstZone = z.zone
 	return e.securityPath(p)
 }
 
-// translatedZone places the translated address of a NAT rule. Every range
-// must be a single address, or lie in one placed segment that is Unsplit
-// (as placeSubnet requires: a split segment may hold a nested segment of
-// another zone); all ranges must give the same zone. Anything else leaves
-// the post-NAT zone unknown.
-func (e *evaluator) translatedZone(v *NATRuleView) (string, string) {
-	zone := ""
-	for _, r := range v.TranslatedAddress.Ranges {
-		pl := e.x.placer.Place(r.From)
-		if pl.Unknown {
-			return "", pl.Reason
-		}
-		if r.From != r.To {
-			if pl.Segment == nil || !pl.Segment.Prefix.Contains(r.To) {
-				return "", "translated address spans more than one segment"
-			}
-			if !pl.Segment.Unsplit {
-				return "", "translated address lies in a split segment"
-			}
-		}
-		if zone != "" && pl.Zone != zone {
-			return "", "translated address spans more than one zone"
-		}
-		zone = pl.Zone
-	}
-	if zone == "" {
-		return "", "translated address not placed"
-	}
-	return zone, ""
+// MaxNATPlacementsPerSnapshot bounds the Placer.Place calls one Index
+// makes for post-NAT zones: one per distinct translated range. One Place
+// is linear in the placement inputs (at most MaxInterfaces ·
+// MaxPrefixesPerInterface interface networks, MaxSubnets subnets and
+// MaxRoutes routes, a few passes each, about 2e5 operations), so the
+// post-NAT zones of a hostile snapshot cost at most about 2e8 operations,
+// once per Index. Queries only look the zones up. A NAT rule whose ranges
+// do not fit gives the post-NAT zone unknown "limit reached".
+const MaxNATPlacementsPerSnapshot = 1024
+
+// postZone is the post-NAT zone of one NAT rule or translated range, or
+// why it is unknown.
+type postZone struct {
+	zone   string
+	reason string
 }
 
-// natMatch matches an evaluable NAT rule against the pre-NAT packet: from
-// zone, to zone (the zone of the pre-NAT destination), source, destination
-// and service. It returns matchPartial when the rule matches only part of
-// the possible sources.
-func natMatch(v *NATRuleView, p *packet) (match, string) {
+// placeFunc places one address; it is Placer.Place except in tests that
+// count the calls.
+type placeFunc func(netip.Addr) Placement
+
+// postNATZones computes the post-NAT zone of every enabled, evaluable NAT
+// rule with a destination translation. Each distinct translated range is
+// placed at most once (memoised across rules), and at most max ranges are
+// placed in total.
+func postNATZones(nat []NATRuleView, place placeFunc, max int) []postZone {
+	out := make([]postZone, len(nat))
+	memo := map[AddrRange]postZone{}
+	for i := range nat {
+		v := &nat[i]
+		if v.Disabled || !v.Evaluable() || v.Translation == nil {
+			continue
+		}
+		out[i] = translatedZone(v.TranslatedAddress.Ranges, func(r AddrRange) (postZone, bool) {
+			if z, ok := memo[r]; ok {
+				return z, true
+			}
+			if len(memo) >= max {
+				return postZone{}, false
+			}
+			z := placeRange(place, r)
+			memo[r] = z
+			return z, true
+		})
+	}
+	return out
+}
+
+// placeRange places one translated range. It must be a single address,
+// or lie in one placed segment that is Unsplit (as placeSubnet requires: a
+// split segment may hold a nested segment of another zone).
+func placeRange(place placeFunc, r AddrRange) postZone {
+	pl := place(r.From)
+	if pl.Unknown {
+		return postZone{reason: pl.Reason}
+	}
+	if r.From != r.To {
+		if pl.Segment == nil || !pl.Segment.Prefix.Contains(r.To) {
+			return postZone{reason: "translated address spans more than one segment"}
+		}
+		if !pl.Segment.Unsplit {
+			return postZone{reason: "translated address lies in a split segment"}
+		}
+	}
+	return postZone{zone: pl.Zone}
+}
+
+// translatedZone combines the zones of the translated ranges of a NAT
+// rule: every range must be placed and all must give the same zone.
+// Anything else leaves the post-NAT zone unknown. zoneOf returns false
+// when the placement budget is spent.
+func translatedZone(rs []AddrRange, zoneOf func(AddrRange) (postZone, bool)) postZone {
+	zone := ""
+	for _, r := range rs {
+		z, ok := zoneOf(r)
+		if !ok {
+			return postZone{reason: ErrLimitReached.Error()}
+		}
+		if z.reason != "" {
+			return postZone{reason: z.reason}
+		}
+		if zone != "" && z.zone != zone {
+			return postZone{reason: "translated address spans more than one zone"}
+		}
+		zone = z.zone
+	}
+	if zone == "" {
+		return postZone{reason: "translated address not placed"}
+	}
+	return postZone{zone: zone}
+}
+
+// natMatch matches an evaluable NAT rule, with its merged address fields
+// a, against the pre-NAT packet: from zone, to zone (the zone of the
+// pre-NAT destination), source, destination and service. It returns
+// matchPartial when the rule matches only part of the possible sources.
+func natMatch(v *NATRuleView, a *natAddrs, p *packet) (match, string) {
 	if !zoneIn(v.From, p.srcZone) {
 		return matchNone, "from zone"
 	}
 	if v.To != memberAny && v.To != p.dstZone {
 		return matchNone, "to zone"
 	}
-	if matchAddr(v.Destination, false, p.dst) != matchFull {
+	if a.dst.match(false, p.dst) != matchFull {
 		// The queried destination is a single address.
 		return matchNone, "destination address"
 	}
 	if matchService(v.Service, p.proto, p.ports) != matchFull {
 		return matchNone, "service"
 	}
-	switch matchAddr(v.Source, false, p.src) {
+	switch a.src.match(false, p.src) {
 	case matchNone:
 		return matchNone, "source address"
 	case matchPartial:
@@ -190,7 +252,8 @@ func (e *evaluator) reverseNAT(srcZone string, src []AddrRange, dst Placement) [
 			outs = append(outs, unknownOut(v.Reason()+" (reverse-NAT lookup)"))
 			continue
 		}
-		if v.Translation == nil || !containsAddr(v.TranslatedAddress, d) {
+		a := &e.x.natAddrs[i]
+		if v.Translation == nil || a.translated.match(false, []AddrRange{{From: d, To: d}}) != matchFull {
 			continue
 		}
 		ports, why := e.preNATPorts(v)
@@ -199,7 +262,7 @@ func (e *evaluator) reverseNAT(srcZone string, src []AddrRange, dst Placement) [
 		}
 		m := matchFull
 		if why == "" {
-			if m = matchAddr(v.Source, false, src); m == matchNone {
+			if m = a.src.match(false, src); m == matchNone {
 				why = "source address"
 			}
 		}
@@ -217,8 +280,8 @@ func (e *evaluator) reverseNAT(srcZone string, src []AddrRange, dst Placement) [
 			" zone " + v.To + " port " + e.q.Protocol + "/" + portsText(ports)
 		e.chain.add(st)
 		dstSet := universe
-		if !v.Destination.Any {
-			dstSet = v.Destination.Ranges
+		if !a.dst.any {
+			dstSet = a.dst.m
 		}
 		p := packet{
 			path:    "reverse NAT rule " + v.Name,
@@ -260,9 +323,4 @@ func (e *evaluator) preNATPorts(v *NATRuleView) ([]portSpan, string) {
 		return nil, "service protocol"
 	}
 	return mergePorts(ps), ""
-}
-
-// containsAddr reports whether the set contains the address.
-func containsAddr(s AddrSet, a netip.Addr) bool {
-	return matchAddr(s, false, []AddrRange{{From: a, To: a}}) == matchFull
 }

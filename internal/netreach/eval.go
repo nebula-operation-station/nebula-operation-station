@@ -458,7 +458,7 @@ func (e *evaluator) securityPath(p packet) outcome {
 			e.chain.add(st)
 			return undecided(conds, v.Reason())
 		}
-		why, extra := ruleMatch(v, &p)
+		why, extra := ruleMatch(v, &e.x.ruleAddrs[i], &p)
 		if why != "" {
 			st.Outcome, st.Detail = OutcomeNoMatch, "because "+why
 			e.chain.add(st)
@@ -548,10 +548,10 @@ func zonesExclude(r *SecurityRule, src, dst string) string {
 	return ""
 }
 
-// ruleMatch matches an evaluable rule against a packet. It returns the
-// field that does not match, or "" and the fields that match only in part
-// (conditions).
-func ruleMatch(v *RuleView, p *packet) (string, []string) {
+// ruleMatch matches an evaluable rule, with its merged address fields a,
+// against a packet. It returns the field that does not match, or "" and
+// the fields that match only in part (conditions).
+func ruleMatch(v *RuleView, a *ruleAddrs, p *packet) (string, []string) {
 	if !zoneIn(v.From, p.srcZone) {
 		return "from zone", nil
 	}
@@ -559,13 +559,13 @@ func ruleMatch(v *RuleView, p *packet) (string, []string) {
 		return "to zone", nil
 	}
 	var extra []string
-	switch matchAddr(v.Source, v.NegateSource, p.src) {
+	switch a.src.match(v.NegateSource, p.src) {
 	case matchNone:
 		return "source address", nil
 	case matchPartial:
 		extra = append(extra, "source address")
 	}
-	switch matchAddr(v.Destination, v.NegateDestination, p.dst) {
+	switch a.dst.match(v.NegateDestination, p.dst) {
 	case matchNone:
 		return "destination address", nil
 	case matchPartial:
@@ -611,10 +611,35 @@ var universe = []AddrRange{
 // the field does not overlap x, and overlaps x when the field does not
 // cover x.
 func matchAddr(set AddrSet, neg bool, x []AddrRange) match {
+	return mergeSet(set).match(neg, x)
+}
+
+// mergedAddrs is an address field ready for matching: any, or its ranges
+// sorted and merged. The Index builds one per rule field (ruleAddrs,
+// natAddrs), so a query never sorts a rule's ranges.
+type mergedAddrs struct {
+	any bool
+	m   []AddrRange
+}
+
+// mergeSet merges the ranges of set. Ranges that are already sorted and
+// merged are shared, not copied.
+func mergeSet(set AddrSet) mergedAddrs {
+	if set.Any {
+		return mergedAddrs{any: true}
+	}
+	if isMerged(set.Ranges) {
+		return mergedAddrs{m: set.Ranges}
+	}
+	return mergedAddrs{m: mergeAddr(set.Ranges)}
+}
+
+// match matches the field, with negation, against the packet set x; see
+// matchAddr. The cost is O(len(x) · log len(m)).
+func (s mergedAddrs) match(neg bool, x []AddrRange) match {
 	cov, ov := true, true
-	if !set.Any {
-		m := mergeAddr(set.Ranges)
-		cov, ov = coversAddr(m, x), overlapsAddr(m, x)
+	if !s.any {
+		cov, ov = coversAddr(s.m, x), overlapsAddr(s.m, x)
 	}
 	if neg {
 		cov, ov = !ov, !cov
@@ -647,6 +672,18 @@ func mergeAddr(rs []AddrRange) []AddrRange {
 		out = append(out, r)
 	}
 	return out
+}
+
+// isMerged reports whether rs is sorted and merged as mergeAddr returns it.
+func isMerged(rs []AddrRange) bool {
+	for i := 1; i < len(rs); i++ {
+		last, r := rs[i-1], rs[i]
+		if r.From.Compare(last.From) < 0 || last.From.BitLen() == r.From.BitLen() &&
+			(r.From.Compare(last.To) <= 0 || last.To.Next() == r.From) {
+			return false
+		}
+	}
+	return true
 }
 
 // firstEndingAtOrAfter returns the index of the first merged range whose
