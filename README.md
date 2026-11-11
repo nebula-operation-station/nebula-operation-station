@@ -15,6 +15,8 @@ A self-hosted operations control plane for Linux homelabs (about 5 to 100 hosts)
 - **Vulnerability management.** CVE findings per host, container image and network device, prioritised by NOS (KEV, EPSS, CVSS, criticality) with attack paths; feeds are fetched and matched by a separate, minimal agent with fixed tools, never by the server ([ADR 0011](docs/adr/0011-vulnerability-management.md)). Advisory only: nothing here proposes or runs a change.
 - **Audit and recovery.** Signed events, backup and restore with `age`, and release manifests signed with an offline hardware key ([release signing](docs/admin/release-signing.md)).
 
+How-tos and a FAQ for running it: the [operator handbook](docs/handbook/README.md).
+
 ## Screenshots
 
 Taken from the test harness's preview mode with demo data (`go run ./test/browser/harness -preview PORT /absolute/empty/dir`, then open `http://localhost:PORT`), dark theme.
