@@ -38,7 +38,10 @@ History:
   host-shaped forms and fails when an argument rejects every form
   (previously a rejected canary passed); the `number` canary is
   `47000 + m` and fits `uint16` (previously a 10-digit sentinel above
-  2^32).
+  2^32). Usage-text condition 3 gets reviewed `usage-not-host`
+  exceptions for the four non-host flags of today's tree that name "the
+  host" (previously none, so the test failed on today's tree); the
+  destination-field names include `origin` and `realm`.
 
 ## Context
 
@@ -414,15 +417,51 @@ does NOS connect **from** (`--from`)?
      argument without an entry has no expected field, so any occurrence
      fails. The test also fails when an expected field is a
      **destination field**: its name contains `endpoint`, `addr`, `url`,
-     `uri`, `hostname`, `server`, `target`, `cidr`, `dial` or `peer`
-     (case-insensitive substring), or one of its snake-case words is
+     `uri`, `hostname`, `server`, `target`, `cidr`, `dial`, `peer`,
+     `origin` or `realm` (case-insensitive substring; `origin` and
+     `realm` added so `AddPrivateRegistryRequest.registry_origin` and
+     `realm`, which carry the HTTPS origin and token realm a registry
+     credential is sent to, count), or one of its snake-case words is
      `host`, `hosts`, `ip`, `ips` or `from`, unless the field is in the
      reviewed exception list (initially only the inventory-ID fields
      `host_id` and `host_ids`, which the executor resolves against its
      own inventory and never dials); or
   3. belongs to a flag whose usage text in the binary's flag set contains
-     `host`, `endpoint`, `address`, `URL`, `URI`, `IP` or `CIDR` (word
-     match).
+     `host`, `hosts`, `endpoint`, `endpoints`, `address`, `addresses`,
+     `URL`, `URI`, `IP` or `CIDR` as a **word** (case-insensitive; a word
+     is a maximal run of `[A-Za-z0-9_]`, so `known_hosts` in `host pin
+     --known-hosts` is not the word `host`), unless the catalog entry of
+     that flag carries a **usage-text exception** (below). This holds for
+     every form, rejected or not.
+
+  **Usage-text exceptions** (previously none, so the test failed on
+  today's tree for non-host flags whose usage text names "the host").
+  A catalog argument may carry the annotation `usage-not-host: <reason>`,
+  reviewed like the kinds. It exempts that flag from condition 3 only;
+  conditions 1 and 2 and the host-shaped forms still apply, so an
+  exempted flag that sends a canary anywhere still fails. An exception
+  covers only the words `host`/`hosts`: a non-host flag whose usage text
+  contains any of the other words fails whatever its annotation. The
+  test also fails when an annotated flag's usage text no longer contains
+  `host`/`hosts` (stale entry). Initial list, from the flags of today's
+  `cmd/nebula` whose usage text contains the word `host` and whose kind
+  is not a host kind (checked 2026-11-11 against every `flag.NewFlagSet`
+  in `cmd/nebula/`):
+
+  | Flag (usage text) | Kind | Reason |
+  | --- | --- | --- |
+  | `host pin --user` ("SSH user on the host") | `id` | login name sent as `ssh_user` of the pin request, never dialed |
+  | `host pin --key` ("keyring reference of the key for this host") | `id` | keyring reference resolved by the executor |
+  | `approve --skip` ("skip this host") | `id` | inventory host ID, checked by `canonical.ValidHostID` and sent as `Gate.host_id` |
+  | `host enroll-script --user` ("user to create on the host") | `id` | login name written into the script |
+
+  `host pin --criticality` also names "the host" but is an `enum` and has
+  no canary run, so it needs no entry. The remaining flags whose usage
+  text names a host word, `host enroll-script --from`, `netdev probe`/`add
+  --endpoint` and `pve remote add --endpoint`, have host kinds and no
+  canary run. With these four entries condition 3 is green on today's
+  tree; a new flag that mentions a host gets a host kind or a reviewed
+  entry, never a silent pass.
 
   **No vacuous passes: host-shaped forms** (previously: "a run in which
   the command rejects the canary before sending anything passes", so an
