@@ -29,6 +29,11 @@ History:
   host-sending argument to a host kind (previously hand review); new
   kinds `bool` (with `backup --no-encrypt` red) and `trust-path`
   (`--ca-file`, byte-identical or red; previously `in-path`, amber).
+  V6 lists the catalog removals and key replacements, enforced by a
+  catalog verb test (previously only `nebula restore`, rest *verify*),
+  and defines its units: every simple command after splitting at
+  operators and unwrapping `sudo`, `env`, `docker run`/`exec`,
+  `docker compose exec`/`run` and `sh -c` (previously undefined).
 
 ## Context
 
@@ -214,7 +219,43 @@ does NOS connect **from** (`--from`)?
   | V3 | **Every other command** (first word not `nebula`/`sudo nebula`, or any command with an operator, including a `nebula` command with `&&` or `>`): its tokens match the tokens of one **shape** (a logical command line from a code block of a cited chunk, see "Shapes" below) under the matching rules below | No matching shape → red flag "not found in the cited documentation". So `bash -c …`, `python3 -c …`, `nc …`, `tee -a ~/.ssh/authorized_keys`, `base64 -d \| …` or `curl` to another URL are red unless a cited chunk shows exactly that shape |
   | V4 | **Values.** (a) A value for a doc placeholder (V3, and in V2 a token that matches a doc placeholder) matches the fixed shape of that placeholder's **class** (below). (b) A `nebula` argument (V2) matches the shape of its catalog value kind (below) and in any case `[A-Za-z0-9._:/@%+=,-]+`, or (kind `text` only) is one single- or double-quoted string whose content is printable ASCII without `'`, `"`, `$`, backtick, `\` or `!` (free text such as `--reason "maintenance"`; `!` is excluded because interactive bash expands history inside double quotes, so the copied text would run something other than what is shown). (c) A V2 argument of a kind other than `host`, `host-port` or `host-list` that is **host-like** (an IP literal, contains `://` or `@`, or has the form DNS-name`:`port) is not plain, unless it is byte-identical to the value the cited shape shows in that position. All values ≤ 255 bytes | Otherwise red flag "argument is not a plain value" |
   | V5 | **Value origin of hosts.** Every host value comes from the **trusted host set** of this question (defined below: exact tokens of the question, inventory endpoint addresses of the D3 fact hosts, NOS source addresses). Host values are: a host-class placeholder value (V3, V2), and in V2 every value of kind `host`, the host part of a `host-port` value and every element of a `host-list` value. **Never** a value that occurs only in another D3 field (display name, inventory ID, OS family/release, enrollment state, endpoint label, criticality) or in the docs (previously: inventory display names and IDs were in the set) | Not in the trusted host set → **red** "host not from your question or inventory", in V2 as in V3. So neither a documented `curl` shape nor a `nebula` command that sends a credential (for example `nebula pve remote add … --endpoint … --action-token`) can be pointed at a host the user did not name or that came from host-controlled data |
-  | V6 | **Destructive shapes.** The command (V2 or V3, after the checks above passed) matches the reviewed **destructive-pattern list** in `internal/helpcmd/` (at least: `rm` with `-r`/`-f`, `userdel`, `groupdel`, `shred`, `dd`, `mkfs*`, `wipefs`, `truncate`, `docker compose down -v`, `docker volume rm`, `docker system prune`, `apt remove`/`purge`, `nebula restore`; further destructive `nebula` subcommands are added when AS-05 reviews the catalog, *verify*) | At least **amber** "destructive: deletes or replaces data, users or keys; compare with the cited section before running", even when the shape is cited. This covers today's documented `sudo rm -rf /var/lib/nebula /etc/nebula`, `sudo userdel nebula-server; …`, `sudo groupdel nebula-rpc` (admin guide 16) and `shred -u ./nebula-default.key` (admin guide 3.3). An uncited destructive command stays red (V2 unknown or V3 no shape) with the wording "potentially destructive, not from the docs" |
+  | V6 | **Destructive shapes.** Any **unit** of the command (V2 or V3, after the checks above passed; units defined below) matches the reviewed **destructive-pattern list** in `internal/helpcmd/`: `rm` with `-r`/`-f`, `userdel`, `groupdel`, `shred`, `dd`, `mkfs*`, `wipefs`, `truncate`, `tar` extracting (see units below), `docker compose down -v`, `docker volume rm`, `docker system prune`, `apt remove`/`purge`, and the catalog paths `nebula restore`, `nebula netdev remove`, `nebula pve remote remove`, `nebula container definition remove`, `nebula webauthn remove`, `nebula totp remove`, `nebula signer remove`, `nebula secret rm`, `nebula host unpin`, `nebula host clear`, `nebula artifact unpin`, `nebula read-grant revoke`, `nebula schedule revoke`, `nebula netdev repin`, `nebula pve remote repin`, `nebula pve remote rotate-token` (previously only `nebula restore`, the rest deferred as *verify*). The catalog test fails when a catalog path whose last word is `remove`, `rm`, `delete`, `revoke`, `unpin`, `clear`, `repin`, `rotate-token`, `reset`, `purge` or `wipe` is not in this list | At least **amber** "destructive: deletes or replaces data, users or keys; compare with the cited section before running", even when the shape is cited. This covers today's documented `sudo rm -rf /var/lib/nebula /etc/nebula`, `sudo userdel nebula-server; …`, `sudo groupdel nebula-rpc` (admin guide 16) and `shred -u ./nebula-default.key` (admin guide 3.3). An uncited destructive command stays red (V2 unknown or V3 no shape) with the wording "potentially destructive, not from the docs" |
+
+  **What V6 matches (units).** V6 never looks only at the first word of
+  the command (previously undefined). The command is split by the V3
+  tokenizer at every `;`, `&&`, `\|\|`, `\|` and `&` token into simple
+  commands, and redirections are dropped. Each simple command is then
+  unwrapped repeatedly until nothing changes:
+  1. a leading `sudo` with its options (`-u USER` and the other
+     value-taking options of a fixed table) is removed; so are leading
+     `env` with its `NAME=value` words, bare `NAME=value` words, `exec`,
+     `nohup`, `nice` (with `-n N`), `time` and `timeout DURATION`;
+  2. `docker run …`, `docker exec …`, `docker compose … exec …` and
+     `docker compose … run …` are reduced to the command after the image,
+     container or service word; the options before it are skipped with a
+     fixed table of the value-taking options (`-v`, `-e`, `-w`, `-u`,
+     `--name`, `--entrypoint`, `-f`, `-p`, …);
+  3. `sh -c`, `bash -c` and `su -c` give their quoted argument, split
+     again from the top (such commands are red unless cited anyway).
+
+  Each result is one **unit**; the program word is compared by its last
+  path element (`/usr/sbin/userdel` = `userdel`), and the `nebula` units
+  by catalog path after the bare `sudo`. An option or wrapper word the
+  unwrapper does not know (an unknown `docker run` option, a `--` it
+  cannot place) makes the unit count as destructive (fail-safe amber, at
+  worst a false warning). Required tests (each must hit V6: amber when a
+  cited shape matches, the "potentially destructive" red text
+  otherwise): `sudo userdel a; sudo userdel b` (destructive in the second
+  unit as well), `docker run --rm -v nebula_executor-data:/v
+  debian:12-slim rm -rf /v/x`, `docker compose exec executor rm -f /x`,
+  `sudo -u root shred -u k`, `env A=1 nice -n 5 dd if=/dev/zero of=x`,
+  `bash -c 'rm -rf /x'`, `nebula status && sudo nebula netdev remove
+  fw-01`, and the documented `nebula netdev remove fw-01`
+  (`docs/handbook/network.md`) on its own. The documented restore pipe
+  ending in `docker run … debian:12-slim tar -C /v -xpz` is amber when
+  cited (it replaces the volume content); `tar` counts when any
+  single-dash option word contains `x` or `--extract`/`--get` is
+  present.
 
   **Trusted host set (V5).** Built per question, before the LLM call, from
   exactly three sources:
