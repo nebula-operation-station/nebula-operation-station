@@ -82,11 +82,48 @@ against the CLI guide of your firmware before you rely on it.
 - **Paging off per session.** The driver sends `terminal datadump` after
   login and requires empty output. The account must be allowed to run it.
 
+### Order of steps for a switch
+
+1. Generate the key pair on the executor host ([Generating the CBS
+   key](#generating-the-cbs-key)). Keep the private key file for now.
+2. Install the public key on the switch ([Switch
+   configuration](#switch-configuration)).
+3. Check the login by hand with `ssh -i <key-file>` ([Checking the
+   login](#checking-the-login)).
+4. Register the device and store the private key through `--secret-fd`
+   ([Registering a device](#registering-a-device-with-the-nebula-cli) and
+   [Storing the read credential](#storing-the-read-credential)).
+5. Delete the private key file ([Deleting the key
+   file](#deleting-the-key-file)).
+
+The executor stores a credential only for a registered device, and the
+manual login check needs the private key file, so do not change this order.
+
+### Generating the CBS key
+
+No `nebula` command generates device keys. Create the key on the executor
+host as the admin, in a private directory, and keep the shell open (or note
+the directory) until step 5:
+
+```sh
+umask 077
+d=$(mktemp -d)
+ssh-keygen -t rsa -b 3072 -N '' -C 'nos-read <device-id>' -f "$d/nos-read"
+cat "$d/nos-read.pub"
+```
+
+- Use one key per switch. A key shared between switches cannot be revoked
+  for one of them.
+- Store it without a passphrase: the executor reads unattended and has no
+  way to ask for one; the vault envelope protects it at rest.
+- RSA keys must be at least 2048 bits (3072 recommended). See the key-type
+  note in [Switch configuration](#switch-configuration).
+- The public half (`"$d/nos-read.pub"`) is not secret; its second field is
+  the Base64 body you enter on the switch next.
+
 ### Switch configuration
 
-First create the key pair on the executor host (see [Generating the CBS
-key](#generating-the-cbs-key)); you need its public half here. Then, on the
-switch console or an existing admin session:
+On the switch console or an existing admin session:
 
 ```text
 configure terminal
@@ -115,13 +152,17 @@ The `user-key` type must match the key you generated. CBS user keys are
 RSA on the firmware this guide was written against; whether a firmware also
 accepts ECDSA or Ed25519 user keys is open (ADR 0010 Q1b). Do not use DSA.
 
+### Checking the login
+
 Check the account by hand from the executor host before you register it:
-log in with the new key (for example with `ssh -i <key-file> nos-read@<switch-ip>`
-from an admin shell; NOS itself never calls the `ssh` binary), confirm you
+log in with the new key (for example with
+`ssh -i "$d/nos-read" nos-read@<switch-ip>` from the same admin shell; NOS
+itself never calls the `ssh` binary), confirm you
 land at a `>` prompt without a second login prompt, run `terminal datadump`
 and each `show` command NOS uses (listed in [What NOS collects](#what-nos-collects)),
 then type `exit`. End the session with `exit`, never by killing the client
-(see [Known quirks](#known-quirks)).
+(see [Known quirks](#known-quirks)). Then register the device (next
+sections) while the key file still exists.
 
 ## Creating `nos-read` on PAN-OS
 
@@ -145,9 +186,11 @@ caller can supply an xpath, a command or a URL):
 
 - `type=op`: system info, the list of pending candidate changes, the config
   audit info and the security rule hit counts;
-- `type=config` with `action=show` or `action=get` on fixed subtrees of
-  `vsys1` and `shared`: security and NAT rules, address and service objects
-  and groups, zones, and `network/interface`.
+- `type=config` with `action=show` or `action=get` on fixed xpaths: in
+  `vsys1` the security and NAT rules, address and service objects and
+  groups, and zones; the `vsys` list of the device (all vsys entries; the
+  parser refuses a response with more than one); `shared`; and the device-level
+  `network/interface`.
 
 It never commits, imports, exports or writes. ADR 0010 D2 leaves open
 whether a custom role with XML API **Configuration** can read without being
@@ -274,12 +317,25 @@ The executor refuses a second device with the same trust identity.
 Unless you passed `--no-credential`, `add` asks for the read credential
 right after the `yes`, before it registers anything:
 
-- `cbs`: the OpenSSH private key of `nos-read` (see below);
-- `panos`: the API key.
+- `cbs`: the OpenSSH private key of `nos-read`, **always through
+  `--secret-fd`** (see below);
+- `panos`: the API key, at the prompt or through `--secret-fd`.
 
 The credential is asked **without echo** on the terminal, or read once from
 `--secret-fd N`. It is never accepted as an argument or from the
-environment. `--secret-fd` accepts only a regular file or a pipe that you
+environment. The terminal prompt reads **one line** only, which fits a
+PAN-OS API key but not a multi-line OpenSSH private key: a pasted key would
+store only its first line, and the remaining lines would reach your shell
+(and possibly its history). For `cbs`, always pass the key file with
+`--secret-fd`:
+
+```sh
+nebula netdev add <device-id> --family cbs --endpoint <switch-ip> \
+  --username nos-read --secret-fd 3 3< "$d/nos-read"
+```
+
+If you registered with `--no-credential`, store the key later with
+`nebula netdev credential set <device-id> --username nos-read --secret-fd 3 3< "$d/nos-read"`. `--secret-fd` accepts only a regular file or a pipe that you
 redirected (`3< file`); a socket, a closed descriptor or an internal one is
 refused before the executor is contacted, and the descriptor is closed
 after reading. One trailing newline is removed; the credential must be 1 to
@@ -296,30 +352,18 @@ API key only shows once reads run. Test the account by hand as described
 above. `credential set` stores the first credential only; it never
 overwrites an existing one (use `rotate`).
 
-### Generating the CBS key
+### Deleting the key file
 
-No `nebula` command generates device keys. Create the key on the executor
-host as the admin, store it in NOS through a descriptor and delete the
-file:
+Once the CLI reports `read credential stored`, delete the private key file
+on the executor host:
 
 ```sh
-umask 077
-d=$(mktemp -d)
-ssh-keygen -t rsa -b 3072 -N '' -C 'nos-read <device-id>' -f "$d/nos-read"
-# Put the Base64 field of "$d/nos-read.pub" into the switch (see above).
-nebula netdev credential set <device-id> --username nos-read --secret-fd 3 3< "$d/nos-read"
 shred -u "$d/nos-read"; rm -f "$d/nos-read.pub"; rmdir "$d"
 ```
 
-- Use one key per switch. A key shared between switches cannot be revoked
-  for one of them.
-- Store it without a passphrase: the executor reads unattended and has no
-  way to ask for one; the vault envelope protects it at rest.
-- RSA keys must be at least 2048 bits (3072 recommended). See the key-type
-  note in [Switch configuration](#switch-configuration).
-- The public half is not secret; keep it if you want to compare it with
-  the switch later. The private half exists only in the executor vault
-  afterwards.
+The public half is not secret; if you want to compare it with the switch
+later, copy `"$d/nos-read.pub"` elsewhere before you run these commands. The private half then exists only in the executor
+vault.
 
 ## Rotating the read credential
 
@@ -344,10 +388,19 @@ and its reason and only retries the revocation).
 
 Order of steps:
 
-- **CBS**: generate the new key pair, replace the `user-key nos-read` entry
-  on the switch, test the login by hand, then run `credential rotate` with
-  the new private key at once. Between the switch change and the rotation a
-  read with the old key fails authentication.
+- **CBS**: generate the new key pair as in [Generating the CBS
+  key](#generating-the-cbs-key), replace the `user-key nos-read` entry on
+  the switch, test the login by hand with `ssh -i "$d/nos-read"`, then run
+  `credential rotate` at once, always with the key file on a descriptor
+  (the terminal prompt reads one line only):
+
+  ```sh
+  nebula netdev credential rotate <device-id> --username nos-read --secret-fd 3 3< "$d/nos-read"
+  ```
+
+  Then delete the key file as in [Deleting the key
+  file](#deleting-the-key-file). Between the switch change and the rotation
+  a read with the old key fails authentication.
 - **PAN-OS**: generate a new key with `type=keygen` as above, run
   `credential rotate`, then retire the old key on the firewall (see
   [Revoking access](#revoking-access)).
@@ -442,8 +495,9 @@ command 60 s.
 
 **PAN-OS**, one request in flight per device, the requests listed in
 [Admin Role profile](#admin-role-profile): system info, pending changes,
-config audit info, rule hit counts, and the rule, object, zone and
-interface subtrees of `vsys1`.
+config audit info, rule hit counts, the rule, object and zone subtrees of
+`vsys1`, the device's `vsys` list (all entries), `shared`, and the
+interfaces from the device-level `network/interface` xpath.
 
 | Observation | Content |
 | --- | --- |
@@ -548,7 +602,7 @@ over its count limit is marked incomplete, never silently truncated.
 | `stdin is not a terminal: the credential is asked without echo on a terminal, or pass --secret-fd N` | Run in a terminal or pass `--secret-fd N` with `N< file`. |
 | `--secret-fd must name an open regular file or pipe` | The descriptor was not redirected, or is a socket. Use `--secret-fd 3 3< <file>`. |
 | `not confirmed; nothing registered` | Anything other than `yes` was typed. Compare the fingerprint again and re-run. |
-| `device registered, credential not stored: …` | Registration worked, storing the credential failed. Fix the cause and run `nebula netdev credential set <device-id>`. |
+| `device registered, credential not stored: …` | Registration worked, storing the credential failed. Fix the cause and run `nebula netdev credential set <device-id>` (for `cbs` with `--username nos-read --secret-fd 3 3< <key-file>`). |
 | `add`/`credential`/`remove` refuse with a locked vault | Run `nebula unlock` on the executor host first. |
 | `the device presents the stored pin; nothing to re-pin` | Nothing changed; no re-pin needed. |
 | Device `blocked` in `list` after a rotation or re-pin | Revoking the device's grants failed and the device was blocked to fail closed. Run `nebula netdev block <device-id> --reason '<note>'` to retry the revocation, then `unblock` if the device should be read again. |
