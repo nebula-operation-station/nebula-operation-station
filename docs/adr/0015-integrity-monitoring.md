@@ -270,12 +270,35 @@ parser is strict, bounded and fuzzed before the beta.
   only, absent when not hashed) and `link` (symlink target, base64, at
   most 4,096 decoded bytes, never followed).
 - **Limits (new named constants, implementation choices to be fixed in
-  IG-05).** 300,000 records per host and run, 32 MiB raw document per run
-  (above the 1 MiB `result.json` default of spec 09, so spec 09 needs an
-  action-specific limit like ADR 0011 D3), path depth at most 64. A run
-  cut at any limit, a non-zero exit, a skipped root, an unreadable file or
-  an invalid record is **partial**: it may open findings but never closes
-  one and never proves that a file is unchanged or absent.
+  IG-05).** 300,000 records per host and run, **128 MiB** raw document per
+  run (above the 1 MiB `result.json` default of spec 09, so spec 09 needs
+  an action-specific limit like ADR 0011 D3), path depth at most 64, one
+  record at most 16 KiB. The two run limits are sized to agree:
+  - *Record size.* A typical hashed file record (base64 path of a
+    60-byte path = 80 characters, 64-hex `sha256`, nine integer fields,
+    member names and punctuation) is about 250–300 bytes; budget 300.
+  - *Expected volume.* A Debian 12/13 or PVE 8/9 host has on the order of
+    100,000–150,000 entries under the D5 roots (mostly `/usr/lib`:
+    kernel modules of several kernels, firmware, Perl and Python);
+    150,000 × 300 B ≈ 43 MiB.
+  - *Cap consistency.* 300,000 records × 300 B = 90,000,000 B ≈ 86 MiB,
+    which fits in 128 MiB with room for an average record of up to
+    ~447 bytes (128 × 1,048,576 / 300,000), i.e. paths averaging about
+    250 bytes. The record cap, not the byte limit, is therefore the
+    binding limit for any normal host, and a normal full scan uses well
+    under half of both.
+  - *Memory.* The parser reads the document as a stream through a
+    byte-counting reader and validates record by record; it never buffers
+    the raw document. Validated records go to the store in batches.
+  - IG-05 measures real full-scan record counts and sizes on reference
+    Debian and PVE hosts; if either uses more than half of a limit, the
+    limit is raised (or the profile narrowed by an approved variant)
+    before the beta, so that a normal full scan can complete and close
+    findings.
+
+  A run cut at any limit, a non-zero exit, a skipped root, an unreadable
+  file or an invalid record is **partial**: it may open findings but never
+  closes one and never proves that a file is unchanged or absent.
 - **Display.** Paths are shown as escaped text: valid printable UTF-8 as
   is, everything else as `\xNN`; bidi controls and other format
   characters are always escaped. No host-supplied path ever becomes a
