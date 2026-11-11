@@ -5,7 +5,9 @@ package auditlog
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -95,10 +97,13 @@ func TestAttrKeySuffixCollision(t *testing.T) {
 	}
 }
 
-// AppendTx writes through the caller's transaction: a rolled-back
-// transaction leaves no line, a committed one keeps the line in the hash
-// chain, and a plain Append waits for release, so the chain stays intact.
-func TestAppendTxCommitsAndRollsBackWithTheCaller(t *testing.T) {
+// AppendFunc is the appendLine parameter of WithTx's function.
+type AppendFunc = func(kind string, attrs map[string]string) error
+
+// WithTx writes the lines through its transaction: a failing function or
+// commit leaves no line, a committed transaction keeps the line in the
+// hash chain.
+func TestWithTxCommitsAndRollsBackTheLines(t *testing.T) {
 	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -110,42 +115,53 @@ func TestAppendTxCommitsAndRollsBackWithTheCaller(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
+	// fn fails after appending: nothing is stored.
+	boom := errors.New("change refused")
+	err = s.WithTx(ctx, func(tx *sql.Tx, appendLine AppendFunc) error {
+		if err := appendLine("rolled_back", map[string]string{"user": "axel"}); err != nil {
+			return err
+		}
+		return boom
+	})
+	if !errors.Is(err, boom) {
+		t.Fatalf("WithTx = %v, want fn's error", err)
 	}
-	release, err := s.AppendTx(ctx, tx, "rolled_back", map[string]string{"user": "axel"})
-	if err != nil {
-		t.Fatal(err)
+	// The commit fails (context cancelled after the append): nothing is
+	// stored.
+	cctx, cancel := context.WithCancel(ctx)
+	err = s.WithTx(cctx, func(tx *sql.Tx, appendLine AppendFunc) error {
+		err := appendLine("commit_failed", map[string]string{"user": "axel"})
+		cancel()
+		return err
+	})
+	if err == nil {
+		t.Fatal("WithTx with a cancelled commit succeeded")
 	}
-	if err := tx.Rollback(); err != nil {
-		t.Fatal(err)
-	}
-	release()
-	release() // a second call is harmless
-	if got, err := s.List(ctx, 0, 10, "rolled_back"); err != nil || len(got) != 0 {
-		t.Fatalf("rolled-back line stored: %+v %v", got, err)
+	for _, kind := range []string{"rolled_back", "commit_failed"} {
+		if got, err := s.List(ctx, 0, 10, kind); err != nil || len(got) != 0 {
+			t.Fatalf("%s line stored: %+v %v", kind, got, err)
+		}
 	}
 
-	tx, err = db.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	release, err = s.AppendTx(ctx, tx, "committed", map[string]string{"user": "axel"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	// A committed transaction keeps the line and fn's own write; a plain
+	// Append meanwhile waits for the transaction, so the chain stays
+	// intact.
 	appended := make(chan error, 1)
-	go func() { appended <- s.Append(ctx, "after", map[string]string{"user": "bob"}) }()
-	select {
-	case err := <-appended:
-		t.Fatalf("plain Append did not wait for release: %v", err)
-	case <-time.After(50 * time.Millisecond):
-	}
-	if err := tx.Commit(); err != nil {
+	err = s.WithTx(ctx, func(tx *sql.Tx, appendLine AppendFunc) error {
+		if err := appendLine("committed", map[string]string{"user": "axel"}); err != nil {
+			return err
+		}
+		go func() { appended <- s.Append(ctx, "after", map[string]string{"user": "bob"}) }()
+		select {
+		case err := <-appended:
+			return fmt.Errorf("plain Append did not wait for the transaction: %v", err)
+		case <-time.After(50 * time.Millisecond):
+		}
+		return nil
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	release()
 	if err := <-appended; err != nil {
 		t.Fatal(err)
 	}
@@ -158,9 +174,9 @@ func TestAppendTxCommitsAndRollsBackWithTheCaller(t *testing.T) {
 	}
 }
 
-func TestAppendTxNeedsTransaction(t *testing.T) {
+func TestWithTxNeedsFunction(t *testing.T) {
 	s := New(nil, false)
-	if release, err := s.AppendTx(context.Background(), nil, "x", nil); err == nil || release != nil {
-		t.Fatal("nil transaction accepted")
+	if err := s.WithTx(context.Background(), nil); err == nil {
+		t.Fatal("nil function accepted")
 	}
 }

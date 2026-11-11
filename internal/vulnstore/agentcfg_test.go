@@ -18,37 +18,59 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 )
 
+// fakeAgentAuditor runs the change in a transaction on db and records the
+// appended entries; err fails the append.
 type fakeAgentAuditor struct {
-	kinds    []string
-	attrs    []map[string]string
-	err      error
-	released int
+	db        *sql.DB
+	kinds     []string
+	attrs     []map[string]string
+	err       error
+	committed int
 }
 
-func (f *fakeAgentAuditor) AppendTx(_ context.Context, tx *sql.Tx, kind string, attrs map[string]string) (func(), error) {
-	if tx == nil {
-		return nil, errors.New("no transaction")
+func (f *fakeAgentAuditor) WithTx(ctx context.Context, fn func(*sql.Tx, func(string, map[string]string) error) error) error {
+	if f.db == nil {
+		return errors.New("no database")
 	}
-	if f.err != nil {
-		return nil, f.err
+	tx, err := f.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
 	}
-	f.kinds = append(f.kinds, kind)
-	f.attrs = append(f.attrs, attrs)
-	return func() { f.released++ }, nil
+	defer tx.Rollback()
+	err = fn(tx, func(kind string, attrs map[string]string) error {
+		if f.err != nil {
+			return f.err
+		}
+		f.kinds = append(f.kinds, kind)
+		f.attrs = append(f.attrs, attrs)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	f.committed++
+	return nil
 }
 
-// cancelAfterAudit writes the entry through the real audit log in the
-// change's transaction and then cancels the change's context, so the
+// cancelAfterAudit runs the change through the real audit log and
+// cancels the change's context after the entry was written, so the
 // commit that follows fails.
 type cancelAfterAudit struct {
 	log    *auditlog.Store
 	cancel context.CancelFunc
 }
 
-func (c cancelAfterAudit) AppendTx(ctx context.Context, tx *sql.Tx, kind string, attrs map[string]string) (func(), error) {
-	release, err := c.log.AppendTx(ctx, tx, kind, attrs)
-	c.cancel()
-	return release, err
+func (c cancelAfterAudit) WithTx(ctx context.Context, fn func(*sql.Tx, func(string, map[string]string) error) error) error {
+	return c.log.WithTx(ctx, func(tx *sql.Tx, appendLine func(string, map[string]string) error) error {
+		return fn(tx, func(kind string, attrs map[string]string) error {
+			err := appendLine(kind, attrs)
+			c.cancel()
+			return err
+		})
+	})
 }
 
 // The audit entry is written through the change's transaction: a commit
@@ -140,7 +162,7 @@ func TestAgentConfigDefaultsWhenNeverSaved(t *testing.T) {
 func TestAgentConfigChangeStoresAuditsAndBumpsVersion(t *testing.T) {
 	s := newAgentStore(t)
 	ctx := context.Background()
-	au := &fakeAgentAuditor{}
+	au := &fakeAgentAuditor{db: s.db}
 	in := validAgentSettings()
 	old, cur, err := s.Change(ctx, AgentChange{Settings: in, BaseVersion: 0, Actor: "admin"}, au)
 	if err != nil {
@@ -185,15 +207,16 @@ func TestAgentConfigChangeStoresAuditsAndBumpsVersion(t *testing.T) {
 	if au.attrs[1]["llm_base_url_changed"] != "false" || au.attrs[1]["old_llm_model"] != "qwen3.5-9b-64k" {
 		t.Errorf("second audit %v", au.attrs[1])
 	}
-	if au.released != 2 || au.attrs[0]["user"] != "admin" {
-		t.Errorf("audit releases %d (want 2, one per written entry), user %q", au.released, au.attrs[0]["user"])
+	// Two changes committed; the conflicting one was not.
+	if au.committed != 2 || au.attrs[0]["user"] != "admin" {
+		t.Errorf("committed %d (want 2), user %q", au.committed, au.attrs[0]["user"])
 	}
 }
 
 func TestAgentConfigAuditFailureLeavesSettingsUnchanged(t *testing.T) {
 	s := newAgentStore(t)
 	ctx := context.Background()
-	_, _, err := s.Change(ctx, AgentChange{Settings: validAgentSettings(), Actor: "admin"}, &fakeAgentAuditor{err: errors.New("disk full")})
+	_, _, err := s.Change(ctx, AgentChange{Settings: validAgentSettings(), Actor: "admin"}, &fakeAgentAuditor{db: s.db, err: errors.New("disk full")})
 	if err == nil {
 		t.Fatal("change without audit entry succeeded")
 	}

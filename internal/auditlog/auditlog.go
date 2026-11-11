@@ -102,26 +102,39 @@ func (s *Store) Append(ctx context.Context, kind string, attrs map[string]string
 	return s.insert(ctx, s.db, kind, user, body)
 }
 
-// AppendTx stores one line through tx, the caller's write transaction on
-// the store's database, so the line commits or rolls back with the
-// caller's change. It keeps the store's lock (which orders the hash
-// chain) until the caller calls release, which it must do exactly once
-// after tx committed or rolled back, without logging audit lines in
-// between. On error the lock is already released and release is nil.
-func (s *Store) AppendTx(ctx context.Context, tx *sql.Tx, kind string, attrs map[string]string) (release func(), err error) {
-	if tx == nil {
-		return nil, errors.New("auditlog: append: transaction is required")
-	}
-	kind, user, body, err := line(kind, attrs)
-	if err != nil {
-		return nil, err
+// WithTx runs fn in a write transaction on the store's database and
+// commits it, so the lines fn appends through appendLine commit together
+// with fn's other writes or not at all: when fn or the commit fails, the
+// transaction is rolled back and the error returned. The store's lock,
+// which orders the hash chain, is taken before the transaction begins
+// (the same order as Append) and held until it ended; fn must not log
+// audit lines through the store's Handler, and appendLine is valid only
+// during fn.
+func (s *Store) WithTx(ctx context.Context, fn func(tx *sql.Tx, appendLine func(kind string, attrs map[string]string) error) error) error {
+	if fn == nil {
+		return errors.New("auditlog: with tx: function is required")
 	}
 	s.mu.Lock()
-	if err := s.insert(ctx, tx, kind, user, body); err != nil {
-		s.mu.Unlock()
-		return nil, err
+	defer s.mu.Unlock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("auditlog: begin: %w", err)
 	}
-	return sync.OnceFunc(s.mu.Unlock), nil
+	defer tx.Rollback()
+	appendLine := func(kind string, attrs map[string]string) error {
+		kind, user, body, err := line(kind, attrs)
+		if err != nil {
+			return err
+		}
+		return s.insert(ctx, tx, kind, user, body)
+	}
+	if err := fn(tx, appendLine); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("auditlog: commit: %w", err)
+	}
+	return nil
 }
 
 // execQuerier is *sql.DB or *sql.Tx.
