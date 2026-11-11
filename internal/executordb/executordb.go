@@ -198,14 +198,23 @@ func open(dataDir string, now func() time.Time) (_ *DB, err error) {
 // and truncates the -wal file to zero bytes. It fails if SQLite reports the
 // checkpoint as blocked.
 func checkpointTruncate(sdb *sql.DB) error {
-	var busy, logFrames, checkpointed int64
-	if err := sdb.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &checkpointed); err != nil {
+	busy, logFrames, checkpointed, err := walCheckpoint(sdb)
+	if err != nil {
 		return fmt.Errorf("wal checkpoint: %w", err)
 	}
 	if busy != 0 {
 		return fmt.Errorf("wal checkpoint blocked (%d of %d frames copied)", checkpointed, logFrames)
 	}
 	return nil
+}
+
+// walCheckpoint runs PRAGMA wal_checkpoint(TRUNCATE) and returns its three
+// result columns. Tests replace it to reach both failure branches of
+// checkpointTruncate (a failed query and a blocked checkpoint) from Open
+// and from purgeWipedSalt.
+var walCheckpoint = func(sdb *sql.DB) (busy, logFrames, checkpointed int64, err error) {
+	err = sdb.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &checkpointed)
+	return busy, logFrames, checkpointed, err
 }
 
 // lockDir takes a non-blocking exclusive flock on dir.

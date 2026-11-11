@@ -1,0 +1,51 @@
+{
+  "document": {
+    "category": "csaf_security_advisory",
+    "csaf_version": "2.0",
+    "title": "PAN-OS: Synthetic Test Advisory",
+    "publisher": {
+      "category": "vendor",
+      "name": "Palo Alto Networks",
+      "namespace": "https://www.paloaltonetworks.com"
+    },
+    "tracking": {
+      "id": "PAN-SA-2026-0001",
+      "version": "@VERSION@",
+      "status": "final",
+      "initial_release_date": "2026-02-11T17:00:00Z",
+      "current_release_date": "@DATE@",
+      "revision_history": [
+        {"number": "@VERSION@", "date": "@DATE@", "summary": "Synthetic test revision."}
+      ]
+    }
+  },
+  "product_tree": {
+    "branches": [
+      {
+        "category": "vendor",
+        "name": "Palo Alto Networks",
+        "branches": [
+          {
+            "category": "product_name",
+            "name": "PAN-OS",
+            "branches": [
+              {"category": "product_version_range", "name": "vers:generic/>=10.2.0|<10.2.9", "product": {"product_id": "CSAFPID-1001", "name": "PAN-OS >=10.2.0 <10.2.9"}},
+              {"category": "product_version", "name": "10.2.9", "product": {"product_id": "CSAFPID-1002", "name": "PAN-OS 10.2.9"}},
+              {"category": "product_version_range", "name": "vers:generic/>=11.1.0|<11.1.3", "product": {"product_id": "CSAFPID-1003", "name": "PAN-OS >=11.1.0 <11.1.3"}},
+              {"category": "product_version", "name": "11.1.3-h4", "product": {"product_id": "CSAFPID-1004", "name": "PAN-OS 11.1.3-h4"}}
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "vulnerabilities": [
+    {
+      "cve": "CVE-2026-0101",
+      "product_status": {
+        "known_affected": ["CSAFPID-1001", "CSAFPID-1003"],
+        "fixed": ["CSAFPID-1002", "CSAFPID-1004"]
+      }
+    }
+  ]
+}
