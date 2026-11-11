@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	filippo.io/age v1.3.2
+	github.com/ProtonMail/go-crypto v1.5.2
 	github.com/descope/virtualwebauthn v1.0.5
 	github.com/go-webauthn/webauthn v0.18.2
 	github.com/gowebpki/jcs v1.0.2
@@ -18,6 +19,7 @@ require (
 
 require (
 	filippo.io/hpke v0.4.0 // indirect
+	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.4 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect

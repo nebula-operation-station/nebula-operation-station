@@ -70,7 +70,8 @@ var (
 	// ErrPruneFailed: unreferenced objects could not be removed, so disk
 	// use is no longer bounded by SnapshotRetention. From Commit (and Sync)
 	// it means the snapshot itself was committed and the returned manifest
-	// is valid; only the clean-up failed.
+	// is valid; only the clean-up failed. Callers must still surface it
+	// (log or alert) rather than drop it with the valid result.
 	ErrPruneFailed = errors.New("vulnfeed: snapshot prune failed")
 )
 
@@ -377,6 +378,10 @@ func retainedPrevious(prev Manifest, cur string) []SnapshotRef {
 // such as editor or backup files) are left alone and are not errors. The
 // returned error joins one error per failed feed, each wrapping
 // ErrPruneFailed (and ErrCorruptManifest for an unreadable manifest).
+// A failure in one feed, or of one object's removal, does not stop the
+// rest from being pruned. Commit prunes only the committed feed and a
+// not-modified Sync prunes nothing, so a service calls Prune
+// periodically to collect what a failed or interrupted prune left.
 func (s *Store) Prune() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
