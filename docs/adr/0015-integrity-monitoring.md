@@ -587,7 +587,17 @@ parser is strict, bounded and fuzzed before the beta.
   file an `Include` names or matches is in the array: an `Include` whose
   path or glob reaches outside the profile roots (no file record can
   exist there) or matches a recorded file that the array leaves out
-  makes the array inconsistent. A missing, oversized or inconsistent
+  makes the array inconsistent. Both checks resolve paths component by
+  component against the run's records (D9 "Symlinks at or above SSH
+  positions"), never lexically: a symlink record at or above
+  `/etc/ssh/sshd_config` or at or above any path an `Include` names or
+  matches (for example `/etc/ssh/sshd_config.d` replaced by a symlink) is
+  followed, and the files below its resolved target are what the
+  `Include` matches. A symlink there that cannot be resolved within the
+  run's records (a target outside the scanned roots, a loop, the link
+  limit, a missing record) makes the array inconsistent **even when no
+  record lies below it**, because the files sshd reads behind it are not
+  in the run, and opens the D9 finding. A missing, oversized or inconsistent
   array makes the run partial; a partial run supplies no derived set and
   replaces no retained records, so D7 keeps classifying with the latest
   complete run and the approved baseline.
@@ -861,8 +871,9 @@ roles never mix:
      `/.ssh/authorized_keys2`, so every real `authorized_keys` file is
      critical-class whatever `AuthorizedKeysFile` says, and likewise the
      fixed SSH login files of D9 (hostbased trust, `known_hosts`,
-     `.k5login` and the account files), whatever `HostbasedAuthentication`
-     or `GSSAPIAuthentication` say.
+     `.k5login`, `/etc/krb5.keytab` and the account files), whatever
+     `HostbasedAuthentication` or `GSSAPIAuthentication` say, and the
+     sshd command-line configuration sources of D9.
      - **Derived sets only grow until a change is approved.** The sets
        for (c) and (d) are each the **union** of the set derived from the
        approved baseline and the set derived from the latest complete
@@ -953,7 +964,7 @@ roles never mix:
        understand, an SSH login file value it cannot expand as
        above, a command program path that is not absolute, contains a
        `%` token or is quoted or escaped (D9 "SSH login files"), a symlink
-       at an SSH login file position it cannot resolve (D9), an
+       at or above an SSH position it cannot resolve (D9), an
        overflowed or oversized derived set (above), an `Include` that
        names or matches a file outside the profile roots or a file that
        is not in the run's SSH configuration array, D6), it treats the
@@ -1180,11 +1191,12 @@ unverified finding the admin must review.
 
 **Critical-class paths.** These are: `authorized_keys*` files and every
 SSH login file (below, including hostbased trust files, `known_hosts`,
-`.k5login`, `/etc/passwd`, `/etc/shadow`, `/etc/group`, `/etc/gshadow`,
-`/etc/nsswitch.conf` and symlinks at SSH login file positions),
-`/etc/sudoers` and `/etc/sudoers.d/`, PAM configuration
-(`/etc/pam.d/`, `/etc/security/`) and PAM modules (`pam_*.so`),
-`/etc/ssh/sshd_config` and its includes, `/etc/ld.so.preload`, systemd
+`.k5login`, `/etc/krb5.keytab`, `/etc/passwd`, `/etc/shadow`,
+`/etc/group`, `/etc/gshadow`, `/etc/nsswitch.conf` and symlinks at or
+above SSH positions), `/etc/sudoers` and `/etc/sudoers.d/`, PAM
+configuration (`/etc/pam.d/`, `/etc/security/`) and PAM modules
+(`pam_*.so`), `/etc/ssh/sshd_config` and its includes, the sshd
+command-line configuration sources (below), `/etc/ld.so.preload`, systemd
 units, drop-ins and timers under the D5 unit roots, crontabs and the
 crontab spool, every file under `/boot` (under a vfat `/boot/efi` root,
 D5, owner and permission-bit changes never open a finding; the setuid,
@@ -1223,7 +1235,10 @@ stack or its authentication methods read them to grant a login:
 - host keys trusted for hostbased login: `/etc/ssh/ssh_known_hosts`,
   `/etc/ssh/ssh_known_hosts2`, and every path ending in
   `/.ssh/known_hosts` or `/.ssh/known_hosts2`;
-- GSSAPI/Kerberos principal mapping: every path ending in `/.k5login`;
+- GSSAPI/Kerberos: every path ending in `/.k5login` (principal
+  mapping) and `/etc/krb5.keytab` (the host service key sshd accepts
+  tickets with; whoever replaces it can forge tickets that log in through
+  `.k5login` or the default principal mapping);
 - account and name-service data: `/etc/passwd`, `/etc/shadow`,
   `/etc/group`, `/etc/gshadow` and `/etc/nsswitch.conf` (a new UID-0
   account, a changed password hash, shell or home, or a changed
@@ -1231,6 +1246,20 @@ stack or its authentication methods read them to grant a login:
 
 The home-relative files are scanned under `/root` and `/home/*/` (D5);
 the `/etc` files are under the `/etc` root.
+
+**sshd command-line configuration sources.** sshd's command line can
+replace or extend `/etc/ssh/sshd_config` (`-f <file>`, `-o
+<directive>=<value>`, for example `-o AuthorizedKeysFile=/srv/k/%u`).
+On the supported distributions that command line comes from
+`/etc/default/ssh` (`SSHD_OPTS`) and from the units that start sshd
+(`ssh.service`, `ssh@.service`, `ssh.socket`, `sshd.service` and their
+drop-ins). `/etc/default/ssh` is critical-class by fixed path (D7
+item (a)); the units and drop-ins already are as systemd units under the
+D5 unit roots. The executor does **not** parse `SSHD_OPTS` or
+`ExecStart` lines, so `-f` and `-o` targets are not derived: a change
+that adds such an option is critical and needs its own CLI approval,
+but the files it names are classified only by the fixed patterns, a
+named limit ("Honest limits").
 
 A value of `none` names no file. The executor takes the program of an
 `AuthorizedKeysCommand` or `AuthorizedPrincipalsCommand` value only when
@@ -1242,34 +1271,62 @@ program path that is not absolute or contains a `%` token, and any other
 value the executor cannot expand, is unclassifiable and handled as in D7
 "Unclassifiable means critical".
 
-**Symlinks at SSH login file positions.** The scan never follows
-symlinks (D5), so the file sshd actually reads may sit behind one. A
-**login file position** is a path that an SSH login file pattern (fixed
-or derived) matches, and every directory along such a pattern that the
-pattern names literally (for example `/etc`, `/etc/ssh` and
-`/etc/ssh/ak` in `AuthorizedKeysFile /etc/ssh/ak/%u`; `/root`, `/home`,
-`/home/<name>` and the `.ssh` directory below a home for the
-home-relative patterns). Whenever the old or new record at a login file
-position is a symlink (or, for a file position, any type other than
-`file`):
+**Symlinks at or above SSH positions.** The scan never follows
+symlinks (D5), so the file sshd actually reads may sit behind one. One
+general rule covers this: **any symlink at or above a position that
+sshd reads configuration or login data from is critical-class, and
+opens an "SSH login file outside the scanned roots" finding if it
+leaves the scanned roots.** An **SSH position** is:
+
+- a **configuration position**: `/etc/ssh/sshd_config`, every path that
+  an `Include` value (in S or in the run's derived set, D7) names or
+  matches, and every sshd command-line configuration source (above);
+- a **login file position**: every path that an SSH login file pattern
+  (fixed or derived) matches;
+
+and every directory **at or above** such a path, whether the pattern
+names it literally or matches it with a token or glob (for example
+`/etc`, `/etc/ssh` and `/etc/ssh/sshd_config.d` for `Include
+/etc/ssh/sshd_config.d/*.conf`; `/etc/ssh/ak` and every `/etc/ssh/ak/<x>`
+directory for `AuthorizedKeysFile /etc/ssh/ak/%u/keys`, since `%u`
+matches any single component; `/root`, `/home`, `/home/<name>`, every
+directory that `%h` or the implied home prefix matches, and the `.ssh`
+directory below it, for the home-relative patterns). Matching uses D7
+"`AuthorizedKeysFile` expansion", so it over-matches rather than
+under-matches. Whenever the old or new record at an SSH position is a
+symlink (or, for a file position, any type other than `file`):
 
 - the symlink entry itself is critical-class; and
-- the executor resolves the target lexically against the same run's
-  records (relative targets against the link's directory, at most 40
-  links followed, the Linux limit; new named constant) and classifies
-  the resolved path, and for a directory position every entry below the
+- the executor resolves it as the kernel does and classifies the
+  resolved path, and for a directory position every entry below the
   resolved directory that the rest of the pattern matches, as SSH login
-  files, so they are critical-class too.
+  files or SSH configuration files, so they are critical-class too.
 
-If it cannot resolve the target within the run's records (a target
+**Resolution is component by component, never lexical.** The executor
+walks the path from `/` one component at a time against the same run's
+records: a `.` is dropped; a `..` moves to the parent of the directory
+reached **so far**, that is, after every symlink before it has been
+followed (so `/etc/ssh/l/../x`, with `l` a symlink to `/srv/a/b`,
+resolves via `/srv/a/x`, not `/etc/ssh/x`); a component whose record is
+a symlink is replaced by its target (an absolute target restarts at
+`/`, a relative one continues from the link's directory) before the
+next component is taken. At most **40** symlinks are followed per
+resolution (the Linux limit; new named constant `maxSymlinkFollows`,
+fixed in IG-05).
+
+If it cannot resolve the path within the run's records (a component
 outside the profile roots or `/home/*/`, a loop, the link limit, a
 missing record), the symlink entry is unclassifiable and therefore
 critical-class (D7 "Unclassifiable means critical"), and a target
 outside the scanned roots, a loop or the link limit opens the "SSH login
-file outside the scanned roots" finding below (naming the symlink and
-its escaped target, kept open while the approved baseline or the latest
-complete run holds that symlink), since the files sshd reads there are
-not scanned.
+file outside the scanned roots" finding below (critical for a
+configuration position, high otherwise; naming the symlink and its
+escaped target, kept open while the approved baseline or the latest run
+holds that symlink), since the files sshd reads there are not scanned.
+At a configuration position this also makes the run's SSH configuration
+array inconsistent (D6), so the run is partial and supplies no derived
+set; a symlinked include directory therefore never lets the script leave
+included files out of the array.
 
 Files that an `AuthorizedKeysCommand` or `AuthorizedPrincipalsCommand`
 program itself reads or runs are not derived (named in "Honest
