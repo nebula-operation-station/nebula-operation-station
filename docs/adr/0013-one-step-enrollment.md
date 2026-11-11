@@ -1,8 +1,9 @@
 # ADR 0013: One-step host enrollment with pairing code and optional NetBird join
 
-Status: proposed, 2026-11-11. Awaiting the maintainer's decision on the open
-questions below; do not merge before that discussion. Nothing here is
-implemented; the ticket plan is
+Status: Accepted, 2026-11-11 (previously: proposed, 2026-11-11). The
+maintainer's decisions on Q1–Q9 are recorded in "Decisions of the maintainer
+(2026-11-11)" below and are worked into D1–D9. Nothing here is implemented;
+the ticket plan is
 [`docs/implementation/one-step-enrollment.md`](../implementation/one-step-enrollment.md).
 
 ## Context
@@ -66,7 +67,7 @@ Constraints that shape every decision below:
 ### D1: Flow
 
 1. **Web UI, "Add host (one step)".** The operator enters or picks the
-   inventory host (open question Q4), SSH user (default `nebula`), credential
+   inventory host, or creates it in the same dialog (Q4), SSH user (default `nebula`), credential
    reference (default `nebula-default`), sudo yes/no, and whether to join
    NetBird (D6, only offered when a NetBird token is configured). An open
    privileged session (ADR 0007) is required.
@@ -81,7 +82,8 @@ Constraints that shape every decision below:
      permit** (HIGH, user verification; binds offer ID hash, host ID, SSH
      user, credential reference, managed group, ephemeral flag and setup-key
      expiry). Only after the operator approves it with the security key does
-     the executor create the one-off setup key (D6), render the script in
+     the executor create the one-off setup key under a persisted pending
+     record (D6 "Creation order"), render the script in
      memory and store its hash (again not the bytes). A compromised server with an open privileged session
      can therefore create offers, but cannot obtain a single setup key
      without a security-key touch (D6, "Why a stolen setup key is bounded").
@@ -90,7 +92,10 @@ Constraints that shape every decision below:
    shell (bash, dash, zsh), for example:
 
    ```
-   ( umask 077 && d=$(mktemp -d) || exit 1
+   ( umask 077
+     for t in /dev/shm "${XDG_RUNTIME_DIR:-}" "${TMPDIR:-/tmp}"; do
+       [ -n "$t" ] && [ -d "$t" ] && [ -w "$t" ] && break; done
+     d=$(mktemp -d "$t/nos-enroll.XXXXXXXX") || exit 1
      trap 'rm -rf "$d"' EXIT; trap 'exit 130' HUP INT TERM
      cd "$d" &&
      printf 'url = "https://nos.example.lan/enroll/%s"\noutput = "nos-enroll.sh"\n' \
@@ -120,7 +125,20 @@ Constraints that shape every decision below:
    fails or the operator presses Ctrl-C. Only `SIGKILL` or a power loss can
    leave the file in the temporary directory (`0700`, root or the operator
    only); the setup key is then still one-off, at most 1 hour valid and
-   revoked when the offer becomes final (D6). The UI shows a second variant
+   revoked when the offer becomes final (D6).
+
+   **Which directory, and what reaches a disk.** The command creates its
+   directory in the first writable one of `/dev/shm` and
+   `$XDG_RUNTIME_DIR`, both RAM-backed `tmpfs` on the supported hosts, so
+   the script and the setup key in it normally never touch a disk. Only if
+   neither exists does it fall back to `$TMPDIR` or `/tmp`, which is
+   disk-backed on Debian 12, Ubuntu and Proxmox VE; then `rm -rf` removes
+   the file but the key can remain in freed blocks (and in SSD spare
+   areas). A `tmpfs` page can also be written to swap. Both are accepted
+   residuals (threat table): the key is one-off, at most 1 hour valid and
+   revoked when the offer is final, so a copy recovered from freed blocks
+   or swap is useless once the offer has ended. The same directory rule
+   applies to the script's own key file (D5). The UI shows a second variant
    for a root login without `sudo` (common on minimal Debian and VPS
    images): identical except that the last line is `sh nos-enroll.sh )`.
    Users of non-POSIX shells (fish) start `sh` first.
@@ -144,7 +162,7 @@ Constraints that shape every decision below:
    plus, optionally, the NetBird join (D6), and at the end it prints:
 
    ```
-   NOS pairing code:  K7QX-M2PD-9HTR-4
+   NOS pairing code:  K7QXM-2PD9H-TR4AB-6CJWN-0FE5S
    Addresses:         192.168.0.21  fd00::21  100.92.14.7 (netbird)
    ```
 
@@ -199,11 +217,19 @@ the other direction). The only channel host → NOS is the operator.
   characters of that hash.
 - **States:** `open` → `downloaded` → `pairing_proposed` → `enrolled`;
   NetBird offers start in `awaiting_approval` and move to `open` only after
-  the NetBird offer permit is approved (D1 step 2); from any non-final state
-  → `expired`, `revoked` or `failed`. Final states never return to `open`.
-- **Expiry:** 15 minutes from creation for the download and the code
-  submission (Q2). An approval started before expiry may finish within the
-  permit's own lifetime; a commit after the permit expired fails.
+  the NetBird offer permit is approved and the setup key is recorded (D1
+  step 2, D6 "Creation order"); from any non-final state → `expired`,
+  `revoked` or `failed`. Final states never return to `open`. Every state
+  change is one atomic compare-and-set on the offer row (expected old state
+  → new state); a transition whose expected state no longer holds fails and
+  changes nothing.
+- **Expiry:** 15 minutes in total from creation for the download and the
+  code submission (Q2, default; a named constant). An approval started
+  before expiry may finish within the permit's own lifetime; a commit after
+  the permit expired fails. With the 120-bit code (D3) a later change may
+  raise the total window up to 60 minutes without weakening the grinding
+  bound materially; that is a separate change of the constant, not part of
+  this decision.
 - **Single use:** the first successful download moves the offer to
   `downloaded`; a second download returns the same `404` as an unknown ID
   (no oracle). One well-formed code submission is accepted per offer (D3).
@@ -231,7 +257,8 @@ the other direction). The only channel host → NOS is the operator.
   `enroll_code_rejected` (malformed), `enroll_code_mismatch`,
   `enroll_paired_proposed`, `host_enrolled`, `enroll_offer_expired`,
   `enroll_offer_revoked`, `inventory_endpoint_added`,
-  `netbird_setup_key_created`, `netbird_setup_key_revoked`,
+  `netbird_setup_key_pending`, `netbird_setup_key_created`,
+  `netbird_setup_key_reconciled`, `netbird_setup_key_revoked`,
   `netbird_setup_key_revoke_failed`, `netbird_setup_key_expired_unrevoked`,
   `netbird_peer_joined`, `netbird_peer_orphaned`, `netbird_peer_deleted`,
   `netbird_peer_kept`.
@@ -243,7 +270,9 @@ the other direction). The only channel host → NOS is the operator.
   to `failed` and audits `enroll_script_hash_mismatch`), hands them to the RPC response and overwrites its
   buffer afterwards. No rendered script is written to the offer store, a
   temporary file, a cache or a log on the executor or the server (the server
-  streams the RPC response to the client without buffering it to disk).
+  streams the RPC response to the client without buffering it to disk; the
+  reverse proxy in front of it must not buffer it to disk either, D7
+  "Reverse proxy").
   The setup key itself exists at rest only encrypted in the vault (D6).
   Final offers are kept as audit records without salt and setup key; the
   salt is wiped when the offer becomes final, the setup key and its
@@ -251,13 +280,22 @@ the other direction). The only channel host → NOS is the operator.
 
 ### D3: Pairing code
 
-**Construction (recommended; Q1).**
+**Construction (decided, Q1).**
 
 ```
 digest = SHA-256( "nos-enroll-pair-v1" || 0x00 || salt[32] || ed25519 host key blob )
-code   = first 60 bits of digest, as 12 Crockford base32 characters,
-         plus 1 Crockford check character (mod 37), shown as XXXX-XXXX-XXXX-C
+v      = first 120 bits of digest (big-endian)
+hi, lo = the two 60-bit halves of v (bits 1–60 and 61–120)
+code   = hi as 12 Crockford base32 characters, then lo as 12 Crockford base32
+         characters (24 data characters, 120 bits), then 1 Crockford check
+         character for v mod 37; 25 characters in total,
+         shown as XXXXX-XXXXX-XXXXX-XXXXX-XXXXC
 ```
+
+Input is case-insensitive with Crockford folding (`O` → `0`, `I` and `L`
+→ `1`); hyphens and spaces anywhere are ignored. After folding and removing
+separators the input must be exactly 24 data characters from the 32-symbol
+alphabet and one check character from the 37-symbol alphabet.
 
 The host key blob is the SSH wire format of the public key (the bytes the
 SHA-256 fingerprint is computed over), so the code is "derived from the host
@@ -269,18 +307,37 @@ SHA-256 and an encoding, not new cryptography; shared test vectors bind
 script and Go code (EN-03, EN-04).
 
 `basenc` is not used: it produces RFC 4648 base32 or base32hex, not
-Crockford. The script takes the first 15 hex digits of the `sha256sum`
-output (exactly 60 bits), reads them as one number with `$((0x…))` (fits the
-64-bit signed shell arithmetic of dash and bash on the supported hosts; the
-script checks this at start), emits twelve 5-bit groups from the most
-significant end as base32hex digits (`0-9A-V`) and maps them to Crockford
-with `tr 0123456789ABCDEFGHIJKLMNOPQRSTUV 0123456789ABCDEFGHJKMNPQRSTVWXYZ`.
-The check character is the same number `% 37`, indexed into the fixed
-37-symbol string `0123456789ABCDEFGHJKMNPQRSTVWXYZ*~$=U` (quoted so `$` and
-`*` stay literal). The shared EN-03/EN-04 test vectors are chosen so that
-together they contain every one of the 32 data symbols at every one of the
-12 positions and every one of the 37 check values, including the five
-check-only symbols `*~$=U`, plus values with the top bit of the 60 set.
+Crockford. A 120-bit number does not fit shell arithmetic, so the script
+never forms it:
+
+1. It takes the first 30 hex digits of the `sha256sum` output (exactly 120
+   bits) and splits them into hex digits 1–15 (`hi`) and 16–30 (`lo`),
+   each exactly 60 bits.
+2. It reads each half as one number with `$((0x…))`. 60 bits fit the
+   64-bit signed shell arithmetic of dash and bash on the supported hosts
+   (the value is below 2^60, so the sign bit is never set); the script
+   checks 64-bit arithmetic at start.
+3. For each half it emits twelve 5-bit groups from the most significant end
+   (`$(( (x >> s) & 31 ))` for `s` = 55, 50, …, 0) as base32hex digits
+   (`0-9A-V`), `hi` first, and maps all 24 to Crockford with
+   `tr 0123456789ABCDEFGHIJKLMNOPQRSTUV 0123456789ABCDEFGHJKMNPQRSTVWXYZ`.
+   Because 60 is a multiple of 5, the 24 characters of the two halves are
+   exactly the 24 characters of `v`.
+4. It computes the check value without the 120-bit number, using
+   `v = hi · 2^60 + lo` and `2^60 mod 37 = 10`:
+   `c = ( (hi % 37) * 10 + lo % 37 ) % 37`. Every intermediate value is
+   below 400. The script writes the constant as `10` with a comment; the
+   Go code computes `v mod 37` from the full 120-bit value
+   (`math/big` or the same split), and the shared vectors bind both.
+5. It indexes `c` into the fixed 37-symbol string
+   `0123456789ABCDEFGHJKMNPQRSTVWXYZ*~$=U` (quoted so `$` and `*` stay
+   literal) and prints the 25 characters in groups of five.
+
+The shared EN-03/EN-04 test vectors are chosen so that together they contain
+every one of the 32 data symbols at every one of the 24 positions, every one
+of the 37 check values (including the five check-only symbols `*~$=U`), and
+values with the top bit of `hi` set, with the top bit of `lo` set, and with
+both set.
 
 The script reads the key sshd actually serves: the `hostkey` lines of
 `sshd -T` whose public half is `ssh-ed25519`, falling back to
@@ -297,35 +354,40 @@ salt, which is in the script and the offer page, and must finish before the
 executor's probe, inside the 15-minute offer lifetime.
 
 **Entropy versus grinding.** The attacker needs a second preimage of the
-60-bit truncation (an ed25519 key whose code equals the host's), not a
-collision: expected work 2^60 ≈ 1.2·10^18 key generations plus hashes.
+truncation (an ed25519 key whose code equals the host's), not a collision:
+expected work 2^n key generations plus hashes for an n-bit code; for the
+decided 120 bits that is 2^120 ≈ 1.3·10^36.
 
 | Code bits | Grind rate (keys/s) | Expected time |
 | --- | --- | --- |
 | 40 (8 chars) | 10^9 (one large GPU, optimistic) | ≈ 18 minutes: too weak |
 | 60 (12 chars) | 10^9 | ≈ 37 years |
-| 60 (12 chars) | 10^12 (large cluster) | ≈ 13 days; P(success in 15 min) ≈ 2^-10 |
+| 60 (12 chars) | 10^12 (large cluster) | ≈ 13 days; P(success in 15 min) ≈ 2^-10, in 60 min ≈ 2^-8 |
 | 80 (16 chars) | 10^12 | ≈ 38,000 years |
+| 120 (24 chars) | 10^12 | ≈ 4·10^16 years; P(success in 15 min) ≈ 2^-70, in 60 min ≈ 2^-68 |
 
-Recommendation: **60 bits minimum, 12 characters + check character.** With
-the salt this leaves an attacker a chance below 1 in 1,000 even with a
-cluster-scale budget dedicated to one enrollment, and that attacker must also
-have learned the salt and sit in the network path at probe time. 80 bits (16
-characters) is the conservative alternative if the maintainer prefers typing
-four more characters (Q1).
+Decision (Q1): **120 bits, 24 data characters + 1 check character.** 60
+bits would already leave a cluster-scale attacker below 1 in 1,000 within 15
+minutes; 120 bits removes the grinding question altogether, also for a
+window of up to 60 minutes (Q2) and for attackers far beyond today's
+clusters, for the cost of typing 12 more characters than the 60-bit
+variant. The attacker must in any case also have learned the salt and sit
+in the network path at probe time.
 
 **Online guessing does not apply.** The operator types the code; an attacker
 gains nothing from submitting codes. The probe limit (5 per offer) bounds the
 other direction: an attacker in the path who answers each probe with a fresh
-random key has a 2^-60 chance per probe.
+random key has a 2^-120 chance per probe.
 
 **Failure handling.**
 
-- *Malformed code* (wrong length, characters outside Crockford base32, wrong
-  check character): rejected before any probe, counted (max 3), audit
+- *Malformed code* (not 25 characters after folding and removing
+  separators, characters outside Crockford base32, wrong check character):
+  rejected before any probe, counted (max 3), audit
   `enroll_code_rejected`. The check character catches typing errors so that
   a typo is not mistaken for an attack.
-- *Well-formed code that does not match the presented key*: the offer
+- *Well-formed code that does not match the presented key*: one mismatch
+  ends the offer (Q7; there is no second submission). The offer
   becomes `failed`, the endpoint is not pinned, the NetBird setup key is
   revoked (unconditionally, D2) and a peer it joined is handled as an orphan
   (D6), audit `enroll_code_mismatch` with the presented
