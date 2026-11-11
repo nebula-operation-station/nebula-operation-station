@@ -431,7 +431,10 @@ type ReplaceResult struct {
 // one observed before the read's retention window with
 // ErrObservationTooOld. The same dataset delivered again stores nothing
 // (the dataset is not rewritten), and an identical payload only advances
-// observed_at; both still enforce the retention window (see below).
+// observed_at; both still enforce the retention window (see below). A
+// firewall policy part is compared against the newest dataset of its own
+// part as well, and when it is identical no dataset is stored either (see
+// unchangedPolicyPart).
 // Otherwise the previous
 // dataset becomes history and its rows missing from the new read are
 // carried over: as absent after a complete read, unchanged after a partial
@@ -552,6 +555,23 @@ func (s *Store) replace(ctx context.Context, tx *sql.Tx, deviceID string, read R
 			// Too many newer datasets to prove that no newer read of the
 			// part exists: refuse rather than risk rolling the part back.
 			return ReplaceResult{}, fmt.Errorf("netdevinventory: device %s read %s part %s: %w", deviceID, read, part.Part, ErrOutOfOrder)
+		}
+		if !same {
+			// Unchanged against the part's own newest dataset, not only
+			// against the current one (see unchangedPolicyPart).
+			hit, err := unchangedPolicyPart(ctx, tx, deviceID, part.Part, prevID, obs, nowM, sum, incomplete)
+			if err != nil {
+				return ReplaceResult{}, err
+			}
+			if hit {
+				if err := s.touchDevice(ctx, tx, deviceID, obs, nowM); err != nil {
+					return ReplaceResult{}, err
+				}
+				if err := boundUnchanged(ctx, tx, read, deviceID, now); err != nil {
+					return ReplaceResult{}, err
+				}
+				return ReplaceResult{DatasetID: prevID, Unchanged: true}, s.runHook("commit")
+			}
 		}
 	} else if hasPrev {
 		switch {

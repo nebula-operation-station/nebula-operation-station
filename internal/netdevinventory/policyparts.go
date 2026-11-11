@@ -154,6 +154,71 @@ func datasetParts(ctx context.Context, q querier, id int64, sum string, rowCount
 	return parts, nil
 }
 
+// unchangedPolicyPart handles a read of part that equals the newest stored
+// dataset of the same part (payload hash and incomplete flag) while another
+// dataset is current. The four parts are polled interleaved, so the current
+// dataset is almost always another part's and the identical-payload check
+// against it never matches; without this every unchanged part poll would
+// store a dataset with a full carried copy and fill the history cap with
+// non-versions.
+//
+// It applies only while the current dataset (curID) still holds that
+// part's rows exactly as the part's dataset does (the same row keys, not
+// absent, in the part's scope); otherwise the read is stored normally. When
+// it applies, nothing is inserted: the part's dataset advances its
+// observed_at to obs (so an older record of the part stays out of order,
+// and its version stays in the history window), and the part's rows carried
+// in the current dataset are marked seen at obs (so they do not expire
+// while the part keeps reading them). The caller has already refused a
+// record that is not newer than the part's newest dataset.
+func unchangedPolicyPart(ctx context.Context, tx *sql.Tx, deviceID string, part PolicyPart, curID, obs, now int64,
+	sum string, incomplete bool) (bool, error) {
+	found, _, err := latestPolicyParts(ctx, tx, deviceID, minMicros, part)
+	if err != nil {
+		return false, err
+	}
+	d, ok := found[part]
+	if !ok || d.id == curID || d.sum != sum || d.incomplete != incomplete || d.obs >= obs {
+		return false, nil
+	}
+	scope := PolicyPartRows{Part: part}
+	for _, t := range readTables(ReadFirewallPolicy) {
+		pred := carryScope(scope, t)
+		if pred == "0" {
+			continue
+		}
+		var inPart, inCur, matched int64
+		err := tx.QueryRowContext(ctx, `SELECT
+			(SELECT COUNT(*) FROM `+t.name+` WHERE dataset_id = ? AND absent = 0 AND (`+pred+`)),
+			(SELECT COUNT(*) FROM `+t.name+` WHERE dataset_id = ? AND absent = 0 AND (`+pred+`)),
+			(SELECT COUNT(*) FROM `+t.name+` c WHERE c.dataset_id = ? AND c.absent = 0 AND (`+pred+`)
+				AND EXISTS (SELECT 1 FROM `+t.name+` p WHERE p.dataset_id = ? AND p.row_key = c.row_key AND p.absent = 0))`,
+			d.id, curID, curID, d.id).Scan(&inPart, &inCur, &matched)
+		if err != nil {
+			return false, fmt.Errorf("netdevinventory: compare policy part %s rows: %w", part, err)
+		}
+		if inPart != inCur || inCur != matched {
+			return false, nil
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE netdev_datasets SET observed_at = ?, stored_at = ? WHERE id = ?`,
+		obs, now, d.id); err != nil {
+		return false, fmt.Errorf("netdevinventory: advance policy part %s: %w", part, err)
+	}
+	for _, t := range readTables(ReadFirewallPolicy) {
+		pred := carryScope(scope, t)
+		if pred == "0" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE `+t.name+` SET seen_at = ?
+			WHERE dataset_id = ? AND seen_at IS NOT NULL AND seen_at < ? AND absent = 0 AND (`+pred+`)`,
+			obs, curID, obs); err != nil {
+			return false, fmt.Errorf("netdevinventory: refresh policy part %s rows: %w", part, err)
+		}
+	}
+	return true, nil
+}
+
 // policyIncomplete reports whether the newest read of any policy part of
 // deviceID was incomplete, or a part could not be found within
 // maxPolicyPartScan datasets although older datasets exist.
