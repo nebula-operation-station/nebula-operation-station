@@ -263,7 +263,8 @@ the other direction). The only channel host → NOS is the operator.
   `enroll_paired_proposed`, `host_enrolled`, `enroll_offer_expired`,
   `enroll_offer_revoked`, `inventory_endpoint_added`,
   `netbird_setup_key_pending`, `netbird_setup_key_created`,
-  `netbird_setup_key_invalid`, `netbird_setup_key_reconciled`, `netbird_setup_key_revoked`,
+  `netbird_setup_key_invalid`, `netbird_setup_key_reconciled`,
+  `netbird_setup_key_unresolved`, `netbird_setup_key_revoked`,
   `netbird_setup_key_revoke_failed`, `netbird_setup_key_expired_unrevoked`,
   `netbird_peer_joined`, `netbird_peer_orphaned`, `netbird_peer_deleted`,
   `netbird_peer_kept`.
@@ -550,7 +551,15 @@ that lets the executor find and revoke it:
    constants (spec 09). A failing response is never stored or rendered:
    the offer moves to `failed`, `netbird_setup_key_invalid` is audited
    (failed check, no raw value) and the key is revoked by a valid key ID or
-   found and revoked by the reconcile below. A valid key is stored in the
+   found and revoked by the reconcile below. The checks apply to the
+   decoded JSON string values, untrimmed and unnormalised. Before any
+   revoke attempt, in one atomic write with the move to `failed`, the
+   executor stores the key ID when it passed its check (record `pending` →
+   `created`, no vault reference), otherwise a reconcile record on the
+   still `pending` record (offer ID hash, requested key name, creation time
+   window, managed group); so a failed revoke always leaves a retry or
+   reconcile record (amended 2026-11-11; previously the key ID was used for
+   the revoke without being stored). A valid key is stored in the
    vault and, in one atomic compare-and-set, the record moves `pending` →
    `created` (key ID, vault reference), the SHA-256 of the full render is
    stored and the offer moves `awaiting_approval` → `open`. The key is
@@ -570,7 +579,12 @@ that lets the executor find and revoke it:
    lists setup keys by the stored name. A found key is recorded
    (`netbird_setup_key_reconciled`, key ID) and revoked like any
    final-state key; if no key with that name exists once the key's maximum
-   lifetime has passed, the record is closed. A `pending` record is
+   lifetime has passed, the record is closed. A record with a reconcile
+   record (invalid create response) is matched by name, else by creation
+   time window and managed group excluding keys other offers hold; exactly
+   one match is revoked, otherwise the operator is asked to revoke by hand
+   (`netbird_setup_key_unresolved`) and the record stays until the key's
+   maximum lifetime has passed (spec 06). A `pending` record is
    retried with the same backoff as a failed revoke and listed in
    `nebula host offers` until it is closed.
 
