@@ -145,11 +145,13 @@ locally edited) changes legitimately and has no release reference.
   approve a baseline.
 - The executor stores the approved baseline and its digest in
   executor-owned storage. The server may display it but cannot change it.
-- A config file that contains a secret is listed by metadata and SHA-256
-  only; the content never leaves the executor. Low-entropy secret files
-  should not exist under `/etc/nebula` (secrets belong in the vault); if
-  one does, it is listed by metadata only (same rule as D6
-  "Secret-bearing paths").
+- Content hashes of configuration files are **keyed** with the same
+  executor-held HMAC scheme as D6 ("Content hashes and secrets"), with the
+  NOS machine as the subject; the content and its plain hash never leave
+  the executor. Low-entropy secret files should not exist under
+  `/etc/nebula` (secrets belong in the vault); if one does, the UI shows
+  only "content changed" for it (same rule as D6 "Named secret-bearing
+  paths").
 
 ### D4: I1 checks: who checks what, when, and what happens
 
@@ -303,13 +305,50 @@ parser is strict, bounded and fuzzed before the beta.
   is, everything else as `\xNN`; bidi controls and other format
   characters are always escaped. No host-supplied path ever becomes a
   link, a template or part of a shell command, including in exports.
-- **Secret-bearing paths.** `/etc/shadow`, `/etc/gshadow`, `/etc/ssh/ssh_host_*_key`
-  (private keys), `/etc/ssl/private/`, `/etc/wireguard/` and
-  `*.key`/`*.pem` under `/etc` are reported by **metadata only**, never by
-  content hash: a SHA-256 of a short or low-entropy secret file would
-  allow offline guessing (AGENTS.md rule 7). Their `size`, `mode`,
-  `owner`, `mtime`, `ctime` and `inode` are still compared. A keyed hash
-  is an alternative (Q1).
+- **Content hashes and secrets: keyed by default, plain only on an
+  allowlist.** A plain SHA-256 of a short or low-entropy secret file
+  allows offline guessing (AGENTS.md rule 7), and no denylist of secret
+  files can be complete. Therefore:
+  - **Plain SHA-256 is stored only for an allowlist of roots** whose
+    content is package-shipped binaries or kernel images:
+    `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/libexec`, and in `/boot`
+    only `vmlinuz-*`, `initrd.img-*`, `System.map-*` and `config-*`.
+    These are the files later compared against public archive references
+    (D7 item 1).
+  - **Every other content hash is keyed:** all of `/etc`, the rest of
+    `/boot` (for example GRUB configuration with `password_pbkdf2`
+    lines), `/usr/local`, `/opt`, SSH access files and the crontab spool.
+    The executor replaces the host's SHA-256 with
+    `HMAC-SHA-256(k_host, sha256)` (`crypto/hmac`), where `k_host` is
+    derived with HKDF (`crypto/hkdf`, info `nebula-fim-content-v1` plus
+    the host ID) from a 32-byte installation key generated with
+    `crypto/rand` and held only in executor-owned storage. Per-host keys
+    stop cross-host comparison (identical secrets on two hosts do not
+    show as identical values).
+  - The plain hash exists only in executor memory while the result is
+    parsed; the raw script output is never persisted, logged or forwarded.
+    The server, database, exports and notifications only ever see the
+    keyed value, which detects a change but cannot be tested against
+    guesses without the executor's key. The executor offers no operation
+    that keys a caller-supplied value (that would be a guessing oracle);
+    for this reason a keyed `/etc` conffile is not compared by hash with
+    its package default (D7 item 1, "Conffiles"), only shown next to it.
+  - **Named secret-bearing paths** are always keyed even if a future
+    profile puts them under an allowlisted root, and the UI shows only
+    "content changed" for them, never the keyed value: `/etc/shadow`,
+    `/etc/gshadow`, `/etc/ssh/ssh_host_*_key` (private keys),
+    `/etc/ssl/private/`, `/etc/wireguard/`, `*.key`/`*.pem` under `/etc`,
+    `/etc/NetworkManager/system-connections/`, `/etc/ppp/chap-secrets`,
+    `/etc/ppp/pap-secrets`, `/etc/ipsec.secrets`, `/etc/ipsec.d/private/`,
+    `/etc/postfix/sasl_passwd` (and its `.db`/`.lmdb`),
+    `/etc/cifs-credentials*` and other files named by a `credentials=`
+    option in `/etc/fstab` that lie under a profile root,
+    `/etc/mysql/debian.cnf`, `/etc/krb5.keytab`, `/etc/pve/priv/` (if
+    `/etc/pve` is ever included, Q1) and `/etc/nebula/` secret files (D3).
+  - Losing the installation key means re-baselining every keyed path;
+    the key is part of the executor's backup (spec 15). Their `size`,
+    `mode`, `owner`, `mtime`, `ctime` and `inode` are compared as for any
+    other file.
 
 ### D7: I2 references: never only on the host
 
@@ -557,12 +596,15 @@ the direction.
 
 - **Q1: Scope of paths and exceptions.** Is `fim-default-v1` (D5) the
   right default? Include `/etc/pve` (cluster-wide, changes on every node
-  at once) and `/var/lib/docker` metadata? Metadata-only or a keyed hash
-  for secret-bearing paths (D6)? May admins add per-host roots or
-  excludes, and must such a profile change be approved like a grant?
+  at once) and `/var/lib/docker` metadata? Is the plain-hash allowlist
+  and the keyed hash for everything else (D6) acceptable? May admins add
+  per-host roots or excludes, and must such a profile change be approved
+  like a grant?
   **Recommendation:** ship `fim-default-v1` as listed; `/etc/pve` out of
   scope in I2 (it is better watched once per PVE cluster later);
-  metadata-only for secret paths; per-host excludes allowed only as an
+  keyed hash outside the plain-hash allowlist (D6, recommended over the
+  earlier metadata-only idea because it still detects content changes);
+  per-host excludes allowed only as an
   approved profile variant (grant digest covers it), additional roots
   only from a fixed list.
 - **Q2: Intervals.** I1 every 60 minutes plus start/upgrade? I2
