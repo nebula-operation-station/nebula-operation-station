@@ -94,3 +94,73 @@ func TestAttrKeySuffixCollision(t *testing.T) {
 		t.Fatal("the reserved key was handed out")
 	}
 }
+
+// AppendTx writes through the caller's transaction: a rolled-back
+// transaction leaves no line, a committed one keeps the line in the hash
+// chain, and a plain Append waits for release, so the chain stays intact.
+func TestAppendTxCommitsAndRollsBackWithTheCaller(t *testing.T) {
+	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	s := New(db, true)
+	if err := s.Append(ctx, "before", map[string]string{"user": "axel"}); err != nil {
+		t.Fatal(err)
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err := s.AppendTx(ctx, tx, "rolled_back", map[string]string{"user": "axel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	release() // a second call is harmless
+	if got, err := s.List(ctx, 0, 10, "rolled_back"); err != nil || len(got) != 0 {
+		t.Fatalf("rolled-back line stored: %+v %v", got, err)
+	}
+
+	tx, err = db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, err = s.AppendTx(ctx, tx, "committed", map[string]string{"user": "axel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	appended := make(chan error, 1)
+	go func() { appended <- s.Append(ctx, "after", map[string]string{"user": "bob"}) }()
+	select {
+	case err := <-appended:
+		t.Fatalf("plain Append did not wait for release: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if err := <-appended; err != nil {
+		t.Fatal(err)
+	}
+	list, err := s.List(ctx, 0, 10, "")
+	if err != nil || len(list) != 3 || list[0].Kind != "after" || list[1].Kind != "committed" || !list[1].Chained {
+		t.Fatalf("lines %+v %v", list, err)
+	}
+	if n, err := s.Verify(ctx); err != nil || n != 3 {
+		t.Fatalf("chain verify: %d %v", n, err)
+	}
+}
+
+func TestAppendTxNeedsTransaction(t *testing.T) {
+	s := New(nil, false)
+	if release, err := s.AppendTx(context.Background(), nil, "x", nil); err == nil || release != nil {
+		t.Fatal("nil transaction accepted")
+	}
+}

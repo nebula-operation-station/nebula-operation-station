@@ -93,6 +93,45 @@ func attrKey(k string, taken map[string]string) string {
 
 // Append stores one line.
 func (s *Store) Append(ctx context.Context, kind string, attrs map[string]string) error {
+	kind, user, body, err := line(kind, attrs)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.insert(ctx, s.db, kind, user, body)
+}
+
+// AppendTx stores one line through tx, the caller's write transaction on
+// the store's database, so the line commits or rolls back with the
+// caller's change. It keeps the store's lock (which orders the hash
+// chain) until the caller calls release, which it must do exactly once
+// after tx committed or rolled back, without logging audit lines in
+// between. On error the lock is already released and release is nil.
+func (s *Store) AppendTx(ctx context.Context, tx *sql.Tx, kind string, attrs map[string]string) (release func(), err error) {
+	if tx == nil {
+		return nil, errors.New("auditlog: append: transaction is required")
+	}
+	kind, user, body, err := line(kind, attrs)
+	if err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	if err := s.insert(ctx, tx, kind, user, body); err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	return sync.OnceFunc(s.mu.Unlock), nil
+}
+
+// execQuerier is *sql.DB or *sql.Tx.
+type execQuerier interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// line cleans kind and attrs and returns the stored kind, user and body.
+func line(kind string, attrs map[string]string) (string, string, []byte, error) {
 	if kind == "" {
 		kind = "unknown"
 	}
@@ -113,24 +152,27 @@ func (s *Store) Append(ctx context.Context, kind string, attrs map[string]string
 	user := clip(clean["user"], 64)
 	body, err := json.Marshal(clean) // map keys are sorted: deterministic
 	if err != nil {
-		return err
+		return "", "", nil, err
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	return kind, user, body, nil
+}
+
+// insert writes one cleaned line through q; the caller holds s.mu.
+func (s *Store) insert(ctx context.Context, q execQuerier, kind, user string, body []byte) error {
 	at := s.now().UnixNano()
 	if !s.chain {
-		_, err := s.db.ExecContext(ctx, `INSERT INTO audit_log (at, kind, user_name, body) VALUES (?, ?, ?, ?)`, at, kind, user, string(body))
+		_, err := q.ExecContext(ctx, `INSERT INTO audit_log (at, kind, user_name, body) VALUES (?, ?, ?, ?)`, at, kind, user, string(body))
 		return err
 	}
 	var prev []byte
-	err = s.db.QueryRowContext(ctx, `SELECT hash FROM audit_log WHERE hash IS NOT NULL ORDER BY seq DESC LIMIT 1`).Scan(&prev)
+	err := q.QueryRowContext(ctx, `SELECT hash FROM audit_log WHERE hash IS NOT NULL ORDER BY seq DESC LIMIT 1`).Scan(&prev)
 	if errors.Is(err, sql.ErrNoRows) || prev == nil {
 		prev = make([]byte, sha256.Size)
 	} else if err != nil {
 		return err
 	}
 	h := sha256.Sum256(append(append([]byte{}, prev...), lineBytes(at, kind, user, body)...))
-	_, err = s.db.ExecContext(ctx, `INSERT INTO audit_log (at, kind, user_name, body, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?)`,
+	_, err = q.ExecContext(ctx, `INSERT INTO audit_log (at, kind, user_name, body, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?)`,
 		at, kind, user, string(body), prev, h[:])
 	return err
 }

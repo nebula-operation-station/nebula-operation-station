@@ -5,6 +5,7 @@ package vulnstore
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"path/filepath"
@@ -13,22 +14,91 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/auditlog"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 )
 
 type fakeAgentAuditor struct {
-	kinds []string
-	attrs []map[string]string
-	err   error
+	kinds    []string
+	attrs    []map[string]string
+	err      error
+	released int
 }
 
-func (f *fakeAgentAuditor) Append(_ context.Context, kind string, attrs map[string]string) error {
+func (f *fakeAgentAuditor) AppendTx(_ context.Context, tx *sql.Tx, kind string, attrs map[string]string) (func(), error) {
+	if tx == nil {
+		return nil, errors.New("no transaction")
+	}
 	if f.err != nil {
-		return f.err
+		return nil, f.err
 	}
 	f.kinds = append(f.kinds, kind)
 	f.attrs = append(f.attrs, attrs)
-	return nil
+	return func() { f.released++ }, nil
+}
+
+// cancelAfterAudit writes the entry through the real audit log in the
+// change's transaction and then cancels the change's context, so the
+// commit that follows fails.
+type cancelAfterAudit struct {
+	log    *auditlog.Store
+	cancel context.CancelFunc
+}
+
+func (c cancelAfterAudit) AppendTx(ctx context.Context, tx *sql.Tx, kind string, attrs map[string]string) (func(), error) {
+	release, err := c.log.AppendTx(ctx, tx, kind, attrs)
+	c.cancel()
+	return release, err
+}
+
+// The audit entry is written through the change's transaction: a commit
+// that fails after the entry was written leaves neither the change nor
+// the entry, and a committed change keeps exactly one entry.
+func TestAgentConfigFailedCommitLeavesNoAuditEntry(t *testing.T) {
+	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	s, err := NewAgentConfigStore(db, func() time.Time { return agentNow })
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := auditlog.New(db, true)
+	ctx, cancel := context.WithCancel(context.Background())
+	_, _, err = s.Change(ctx, AgentChange{Settings: validAgentSettings(), Actor: "admin"}, cancelAfterAudit{log: log, cancel: cancel})
+	if err == nil || !strings.Contains(err.Error(), "commit") {
+		t.Fatalf("change with a failed commit: %v", err)
+	}
+	bg := context.Background()
+	if c, err := s.Get(bg); err != nil || c.Version != 0 {
+		t.Fatalf("settings stored without commit: %+v %v", c, err)
+	}
+	if got, err := log.List(bg, 0, 10, AuditAgentLLMChanged); err != nil || len(got) != 0 {
+		t.Fatalf("audit entry left by a failed commit: %+v %v", got, err)
+	}
+	// The audit log's lock was released: the next change commits with
+	// its entry.
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := s.Change(bg, AgentChange{Settings: validAgentSettings(), Actor: "admin"}, log)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("audit log lock still held after the failed commit")
+	}
+	got, err := log.List(bg, 0, 10, AuditAgentLLMChanged)
+	if err != nil || len(got) != 1 || got[0].Attrs["new_version"] != "1" || got[0].User != "admin" {
+		t.Fatalf("audit after the committed change: %+v %v", got, err)
+	}
+	if n, err := log.Verify(bg); err != nil || n != 1 {
+		t.Fatalf("chain: %d %v", n, err)
+	}
 }
 
 var agentNow = time.Date(2026, 11, 11, 9, 0, 0, 0, time.UTC)
@@ -114,6 +184,9 @@ func TestAgentConfigChangeStoresAuditsAndBumpsVersion(t *testing.T) {
 	}
 	if au.attrs[1]["llm_base_url_changed"] != "false" || au.attrs[1]["old_llm_model"] != "qwen3.5-9b-64k" {
 		t.Errorf("second audit %v", au.attrs[1])
+	}
+	if au.released != 2 || au.attrs[0]["user"] != "admin" {
+		t.Errorf("audit releases %d (want 2, one per written entry), user %q", au.released, au.attrs[0]["user"])
 	}
 }
 

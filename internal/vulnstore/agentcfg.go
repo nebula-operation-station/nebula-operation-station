@@ -201,9 +201,13 @@ func (a AgentSettings) Validate() error {
 	return nil
 }
 
-// AgentAuditor writes one audit entry; the server passes its audit log.
+// AgentAuditor writes one audit entry through the change's write
+// transaction, so the entry commits or rolls back with the change; the
+// server passes its audit log (auditlog.Store). release, non-nil when err
+// is nil, is called exactly once after the transaction committed or
+// rolled back.
 type AgentAuditor interface {
-	Append(ctx context.Context, kind string, attrs map[string]string) error
+	AppendTx(ctx context.Context, tx *sql.Tx, kind string, attrs map[string]string) (release func(), err error)
 }
 
 // AgentChange is one admin change of the settings.
@@ -272,8 +276,9 @@ func (s *AgentConfigStore) AgentConfig(ctx context.Context) (AgentConfig, error)
 }
 
 // Change validates and stores ch, and writes the AuditAgentLLMChanged
-// entry with the old and new values inside the write transaction: when
-// the audit write fails, nothing is stored. It returns the old and the new
+// entry with the old and new values through the write transaction: when
+// the audit write or the commit fails, neither the change nor the entry
+// is stored. It returns the old and the new
 // row. The operator instructions are audited as length and SHA-256 (the
 // full text is on the settings page).
 func (s *AgentConfigStore) Change(ctx context.Context, ch AgentChange, audit AgentAuditor) (old, cur AgentConfig, err error) {
@@ -290,7 +295,15 @@ func (s *AgentConfigStore) Change(ctx context.Context, ch AgentChange, audit Age
 	if err != nil {
 		return old, cur, fmt.Errorf("change agent config: begin: %w", err)
 	}
-	defer tx.Rollback()
+	// The audit log's release runs after the transaction ended (Rollback
+	// after a commit is a no-op).
+	var release func()
+	defer func() {
+		_ = tx.Rollback()
+		if release != nil {
+			release()
+		}
+	}()
 	// Take the write lock before reading, so two changes from the same
 	// base version cannot both pass the version check.
 	if _, err := tx.ExecContext(ctx, `UPDATE vuln_store_state SET lock_counter = lock_counter + 1 WHERE id = 1`); err != nil {
@@ -317,7 +330,7 @@ func (s *AgentConfigStore) Change(ctx context.Context, ch AgentChange, audit Age
 		enabled, cur.LLMBaseURL, cur.LLMModel, cur.OperatorInstructions, cur.Language, cur.UpdatedBy, unix(cur.UpdatedAt), cur.Version); err != nil {
 		return old, cur, fmt.Errorf("change agent config: write: %w", err)
 	}
-	if err := audit.Append(ctx, AuditAgentLLMChanged, agentAuditAttrs(ch.Actor, old, cur)); err != nil {
+	if release, err = audit.AppendTx(ctx, tx, AuditAgentLLMChanged, agentAuditAttrs(ch.Actor, old, cur)); err != nil {
 		return old, cur, fmt.Errorf("change agent config: audit: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -335,6 +348,7 @@ func agentAuditAttrs(actor string, old, cur AgentConfig) map[string]string {
 	}
 	return map[string]string{
 		"actor":                            actor,
+		"user":                             actor,
 		"old_version":                      strconv.FormatInt(old.Version, 10),
 		"new_version":                      strconv.FormatInt(cur.Version, 10),
 		"old_llm_enabled":                  strconv.FormatBool(old.LLMEnabled),
