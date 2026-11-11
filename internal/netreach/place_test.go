@@ -251,7 +251,9 @@ func TestCrossingVLANNeedsSameOwningInterface(t *testing.T) {
 		{"same tag on different subinterfaces", "10.20.0.10", "10.30.0.5", false, ""},
 		{"same tag on different subinterfaces reversed", "10.30.0.5", "10.20.0.10", false, ""},
 		{"same tag same owning interface", "10.0.2.5", "10.0.3.5", true, ReasonSameVLAN},
-		{"same tag no firewall interface owns either", "172.31.1.5", "172.31.2.5", true, ReasonSameVLAN},
+		// No owner on either, but the default route 0.0.0.0/0 covers both
+		// subnets: the firewall may route between them.
+		{"same tag no owner but firewall route covers them", "172.31.1.5", "172.31.2.5", false, ""},
 		{"same tag one owned one not", "10.0.40.5", "172.31.1.5", false, ""},
 		{"same tag owner ambiguous", "10.60.0.5", "10.60.0.200", false, ""},
 	}
@@ -268,6 +270,166 @@ func TestCrossingVLANNeedsSameOwningInterface(t *testing.T) {
 	b := Placement{Segment: &Segment{Prefix: pfx("10.2.0.0/24"), VLAN: Collected(uint16(5))}}
 	if got := CrossingTest(a, b); got.NotFiltered {
 		t.Fatalf("segments without owner: %+v", got)
+	}
+}
+
+// TestCrossingSameVLANWithoutOwnerNeedsNoFirewallRoute: two subnets with
+// the same VLAN that no firewall interface owns are not_filtered only when
+// the routes are fresh and no firewall route overlaps either subnet.
+func TestCrossingSameVLANWithoutOwnerNeedsNoFirewallRoute(t *testing.T) {
+	base := func() *Snapshot {
+		s := labSnapshot()
+		// Only IPv6 and specific routes: nothing covers 172.31.0.0/16.
+		s.Routes = []Route{
+			{Prefix: pfx("::/0"), Interface: "ethernet1/1"},
+			{Prefix: pfx("100.64.0.0/10"), Interface: "tunnel.1"},
+		}
+		s.Subnets = append(s.Subnets,
+			Subnet{ID: "off-fw-a", Prefix: pfx("172.31.1.0/24"), VLAN: Collected(uint16(40))},
+			Subnet{ID: "off-fw-b", Prefix: pfx("172.31.2.0/24"), VLAN: Collected(uint16(40))},
+		)
+		return s
+	}
+	tests := []struct {
+		name   string
+		mod    func(*Snapshot)
+		want   bool
+		reason string
+	}{
+		{"no route overlaps", func(*Snapshot) {}, true, ReasonSameVLAN},
+		{"default route covers both", func(s *Snapshot) {
+			s.Routes = append(s.Routes, Route{Prefix: pfx("0.0.0.0/0"), Interface: "ethernet1/1", Zone: "wan"})
+		}, false, ""},
+		{"specific route to one subnet", func(s *Snapshot) {
+			s.Routes = append(s.Routes, Route{Prefix: pfx("172.31.2.0/24"), Interface: "tunnel.1"})
+		}, false, ""},
+		{"route inside one subnet", func(s *Snapshot) {
+			s.Routes = append(s.Routes, Route{Prefix: pfx("172.31.1.128/25"), Zone: "vpn"})
+		}, false, ""},
+		{"routes missing", func(s *Snapshot) { delete(s.Inputs, InputRoutes) }, false, ""},
+		{"routes stale", func(s *Snapshot) { s.Inputs[InputRoutes] = Input{State: InputStale} }, false, ""},
+		{"vlan not collected on one", func(s *Snapshot) { s.Subnets[len(s.Subnets)-1].VLAN = Field[uint16]{} }, false, ""},
+		{"vlan uncollected but value equal", func(s *Snapshot) {
+			s.Subnets[len(s.Subnets)-1].VLAN = Field[uint16]{Value: 40}
+		}, false, ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := base()
+			tc.mod(s)
+			p := mustPlacer(t, s)
+			got := CrossingTest(p.Place(addr("172.31.1.5")), p.Place(addr("172.31.2.5")))
+			if got.NotFiltered != tc.want || got.Reason != tc.reason {
+				t.Fatalf("got %+v, want notFiltered=%v %q", got, tc.want, tc.reason)
+			}
+		})
+	}
+	// Hand-built segments: owner "" known but no route proof.
+	a := Placement{Segment: &Segment{Prefix: pfx("10.1.0.0/24"), VLAN: Collected(uint16(5)), OwnerKnown: true}}
+	b := Placement{Segment: &Segment{Prefix: pfx("10.2.0.0/24"), VLAN: Collected(uint16(5)), OwnerKnown: true}}
+	if got := CrossingTest(a, b); got.NotFiltered {
+		t.Fatalf("no route proof: %+v", got)
+	}
+}
+
+// TestSegmentMinimumPrefixLength: only prefixes of at least
+// MinSegmentBitsIPv4 / MinSegmentBitsIPv6 count as an L2 segment; an
+// address whose longest containing prefix is shorter is unknown and never
+// shares a segment.
+func TestSegmentMinimumPrefixLength(t *testing.T) {
+	tests := []struct {
+		name   string
+		subnet string
+		a, b   string
+		ok     bool // segment accepted
+	}{
+		{"ipv4 /0", "0.0.0.0/0", "8.8.8.8", "10.99.0.1", false},
+		{"ipv4 container /8", "10.0.0.0/8", "10.98.0.1", "10.99.0.1", false},
+		{"ipv4 /15", "10.98.0.0/15", "10.98.0.1", "10.99.0.1", false},
+		{"ipv4 /16 is the minimum", "10.98.0.0/16", "10.98.0.1", "10.98.0.2", true},
+		{"ipv6 /0", "::/0", "2a00::1", "fd12::1", false},
+		{"ipv6 /47", "fd12::/47", "fd12::1", "fd12:1::1", false},
+		{"ipv6 /48 is the minimum", "fd12::/48", "fd12::1", "fd12::2", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Snapshot{Inputs: allFresh(), Vsys: 1, Subnets: []Subnet{{ID: "c", Prefix: pfx(tc.subnet)}}}
+			p := mustPlacer(t, s)
+			pa, pb := p.Place(addr(tc.a)), p.Place(addr(tc.b))
+			got := CrossingTest(pa, pb)
+			if tc.ok {
+				if pa.Segment == nil || !got.NotFiltered {
+					t.Fatalf("placement %+v crossing %+v, want shared segment", pa, got)
+				}
+				return
+			}
+			if !pa.Unknown || pa.Reason != ReasonSegmentTooShort || pa.Segment != nil || got.NotFiltered {
+				t.Fatalf("placement %+v crossing %+v, want unknown %q", pa, got, ReasonSegmentTooShort)
+			}
+		})
+	}
+	// A short interface network is no segment either.
+	s := &Snapshot{Inputs: allFresh(), Vsys: 1, Interfaces: []Interface{{Name: "e1", Zone: "lan", Prefixes: []netip.Prefix{pfx("10.0.0.0/8")}}}}
+	if got := mustPlacer(t, s).Place(addr("10.1.2.3")); !got.Unknown || got.Reason != ReasonSegmentTooShort {
+		t.Fatalf("short interface network: %+v", got)
+	}
+	// A short container does not hide a long enough subnet inside it.
+	s = &Snapshot{Inputs: allFresh(), Vsys: 1, Subnets: []Subnet{
+		{ID: "container", Prefix: pfx("10.0.0.0/8")},
+		{ID: "lan", Prefix: pfx("10.5.0.0/24")},
+	}}
+	if got := mustPlacer(t, s).Place(addr("10.5.0.9")); got.Segment == nil || got.Segment.SubnetID != "lan" {
+		t.Fatalf("subnet inside container: %+v", got)
+	}
+}
+
+// TestSameSegmentChecksOwnership: one prefix is one L2 segment only when
+// its owner is not ambiguous and no firewall network lies inside it.
+func TestSameSegmentChecksOwnership(t *testing.T) {
+	tests := []struct {
+		name string
+		mod  func(*Snapshot)
+		a, b string
+	}{
+		{"interface network on two firewall interfaces", func(s *Snapshot) {
+			s.Interfaces = append(s.Interfaces,
+				Interface{Name: "ethernet1/6", Zone: "lan", Prefixes: []netip.Prefix{pfx("10.60.0.0/24")}},
+				Interface{Name: "ethernet1/7", Zone: "dmz", Prefixes: []netip.Prefix{pfx("10.60.0.0/24")}},
+			)
+		}, "10.60.0.5", "10.60.0.6"},
+		{"ipam subnet owned by two interfaces", func(s *Snapshot) {
+			s.Interfaces = append(s.Interfaces,
+				Interface{Name: "ethernet1/6", Zone: "lan", Prefixes: []netip.Prefix{pfx("10.60.0.0/24")}},
+				Interface{Name: "ethernet1/7", Zone: "dmz", Prefixes: []netip.Prefix{pfx("10.60.0.0/24")}},
+			)
+			s.Subnets = append(s.Subnets, Subnet{ID: "amb", Prefix: pfx("10.60.0.0/24")})
+		}, "10.60.0.5", "10.60.0.6"},
+		{"firewall network inside ipam subnet", func(s *Snapshot) {
+			s.Subnets = append(s.Subnets, Subnet{ID: "big", Prefix: pfx("172.29.0.0/16")})
+			s.Interfaces = append(s.Interfaces, Interface{Name: "ethernet1/8", Zone: "lan", Prefixes: []netip.Prefix{pfx("172.29.5.0/24")}})
+		}, "172.29.1.5", "172.29.2.5"},
+		{"firewall network inside interface network", func(s *Snapshot) {
+			s.Interfaces = append(s.Interfaces, Interface{Name: "ethernet1/8", Zone: "dmz", Prefixes: []netip.Prefix{pfx("10.0.200.0/24")}})
+		}, "10.0.77.1", "10.0.78.1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s := labSnapshot()
+			tc.mod(s)
+			p := mustPlacer(t, s)
+			pa, pb := p.Place(addr(tc.a)), p.Place(addr(tc.b))
+			if pa.Segment == nil || pb.Segment == nil || pa.Segment.Prefix != pb.Segment.Prefix {
+				t.Fatalf("fixture: placements %+v %+v do not share a prefix", pa, pb)
+			}
+			if got := CrossingTest(pa, pb); got.NotFiltered {
+				t.Fatalf("got %+v, want no decision", got)
+			}
+		})
+	}
+	// A hand-built segment without owner information decides nothing.
+	a := Placement{Segment: &Segment{Prefix: pfx("10.1.0.0/24")}}
+	if got := CrossingTest(a, a); got.NotFiltered {
+		t.Fatalf("segment without owner: %+v", got)
 	}
 }
 

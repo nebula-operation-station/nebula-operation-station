@@ -20,6 +20,16 @@ const (
 	ReasonInvalidAddress        = "invalid address"
 	ReasonSameSegment           = "same L2 segment"
 	ReasonSameVLAN              = "same VLAN"
+	ReasonSegmentTooShort       = "segment prefix too short for an L2 segment"
+)
+
+// Minimum prefix lengths of an L2 segment. An IPAM subnet or interface
+// network shorter than this (an IPAM container, a /0) is not taken as one
+// L2 segment: an address whose longest containing prefix is shorter is
+// placed unknown with ReasonSegmentTooShort.
+const (
+	MinSegmentBitsIPv4 = 16
+	MinSegmentBitsIPv6 = 48
 )
 
 // Segment is the L2 segment an address lies in: an IPAM subnet (SubnetID
@@ -30,12 +40,21 @@ const (
 // owns the segment; Owner is then that interface's name, or "" when the
 // data proves that no firewall interface owns it. An ambiguous owner
 // leaves OwnerKnown false.
+//
+// Unsplit is set when placement checked that no firewall interface
+// network lies strictly inside the segment (otherwise the firewall splits
+// the prefix). NoRoute is set when the routes are fresh and no firewall
+// route overlaps the segment; only then does an unowned segment rule out
+// the firewall as a router to it. Both are proofs: the zero value proves
+// nothing.
 type Segment struct {
 	Prefix     netip.Prefix
 	SubnetID   string
 	VLAN       Field[uint16]
 	Owner      string
 	OwnerKnown bool
+	Unsplit    bool
+	NoRoute    bool
 }
 
 // Placement is the result of placing one address (ADR 0012 D2 step 1).
@@ -124,6 +143,11 @@ func (p *Placer) Place(addr netip.Addr) Placement {
 		return unknown(pl, reason)
 	}
 	if seg != nil {
+		if seg.Prefix.Bits() < minSegmentBits(seg.Prefix.Addr()) {
+			return unknown(pl, ReasonSegmentTooShort)
+		}
+		seg.Unsplit = !p.firewallInside(seg.Prefix)
+		seg.NoRoute = p.noRouteOverlaps(seg.Prefix)
 		pl.Segment = seg
 		in, reason := p.owner(seg.Prefix)
 		switch reason {
@@ -210,6 +234,41 @@ func (p *Placer) segment(addr netip.Addr) (*Segment, string) {
 		return nil, ReasonSubnetAmbiguous
 	}
 	return seg, ""
+}
+
+func minSegmentBits(a netip.Addr) int {
+	if a.Is4() {
+		return MinSegmentBitsIPv4
+	}
+	return MinSegmentBitsIPv6
+}
+
+// firewallInside reports whether a firewall interface network lies
+// strictly inside seg (longer prefix within it).
+func (p *Placer) firewallInside(seg netip.Prefix) bool {
+	for _, in := range p.interfaces {
+		for _, pr := range in.Prefixes {
+			if pr.Bits() > seg.Bits() && seg.Contains(pr.Addr()) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// noRouteOverlaps reports whether the data proves that the firewall has
+// no route into seg: the routes input is fresh and no route prefix,
+// default routes included, overlaps seg.
+func (p *Placer) noRouteOverlaps(seg netip.Prefix) bool {
+	if _, bad := p.notFresh[InputRoutes]; bad {
+		return false
+	}
+	for _, r := range p.routes {
+		if r.Prefix.Overlaps(seg) {
+			return false
+		}
+	}
+	return true
 }
 
 // owner returns the firewall interface whose network contains seg, the
@@ -299,27 +358,37 @@ type Crossing struct {
 	Reason      string
 }
 
-// CrossingTest compares two placements. The same segment (same prefix
-// and subnet ID) gives not_filtered. Two segments whose collected VLANs
-// are equal give not_filtered only when no firewall interface lies
-// between them: both are owned by the same firewall interface, or the
-// data proves that no firewall interface owns either. Equal tags on
-// different interfaces (ethernet1/2.20 and ethernet1/3.20) are different
-// segments, and an unknown owner decides nothing. Host firewalls are not
-// modelled in nr-v1. An address without a segment never shares one.
+// CrossingTest compares two placements. It gives not_filtered only when
+// the data proves one L2 segment with no firewall interface between
+// source and destination; every ambiguity decides nothing.
+//
+//   - Both segments must have a known owner and be unsplit (no firewall
+//     interface network inside them). An ambiguous owner or a split
+//     prefix decides nothing.
+//   - The same segment (same prefix and subnet ID) gives not_filtered.
+//   - Two segments whose collected VLANs are equal give not_filtered when
+//     the same firewall interface owns both, or when no firewall interface
+//     owns either and the fresh routes prove that the firewall has no
+//     route into either (NoRoute). Equal tags on different interfaces
+//     (ethernet1/2.20 and ethernet1/3.20) are different segments.
+//
+// Host firewalls are not modelled in nr-v1. An address without a segment
+// never shares one.
 func CrossingTest(src, dst Placement) Crossing {
 	a, b := src.Segment, dst.Segment
-	if a == nil || b == nil {
+	if a == nil || b == nil || !a.OwnerKnown || !b.OwnerKnown || !a.Unsplit || !b.Unsplit {
 		return Crossing{}
 	}
 	if a.Prefix == b.Prefix && a.SubnetID == b.SubnetID {
 		return Crossing{NotFiltered: true, Reason: ReasonSameSegment}
 	}
-	if a.VLAN.Collected && b.VLAN.Collected && a.VLAN.Value == b.VLAN.Value &&
-		a.OwnerKnown && b.OwnerKnown && a.Owner == b.Owner {
-		return Crossing{NotFiltered: true, Reason: ReasonSameVLAN}
+	if !a.VLAN.Collected || !b.VLAN.Collected || a.VLAN.Value != b.VLAN.Value || a.Owner != b.Owner {
+		return Crossing{}
 	}
-	return Crossing{}
+	if a.Owner == "" && (!a.NoRoute || !b.NoRoute) {
+		return Crossing{}
+	}
+	return Crossing{NotFiltered: true, Reason: ReasonSameVLAN}
 }
 
 // specialPrefixes are the private and special-purpose ranges of ADR 0012
