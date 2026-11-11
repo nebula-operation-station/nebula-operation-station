@@ -15,6 +15,14 @@ History:
   `unknown`; no export of log- or flow-derived evidence; rule-scoped
   acknowledgement digest (previously the policy `redacted_digest`); feed
   prefix minimum /16 and /32 (previously /8 and /24); Q2 and Q8 extended.
+- 2026-11-11: review fix round 2 (ticket ns00f2): conditional deny rules
+  and service `application-default` (previously conditional allow only);
+  private and special ranges outside IPAM → `unknown` (previously placed
+  via the route, default route → WAN); Q4 asks whether any
+  firewall-enforced effect outside the ADR 0010 permit path is allowed;
+  ND-07 allowlist additions moved to Q11 (previously decided in D2);
+  retention of the internal side of reputation hits; EDL source allowlist
+  required; acknowledgement and notification defaults offered in Q8/Q9.
 
 ## Context
 
@@ -127,9 +135,19 @@ evaluation semantics creates `nr-v2`.
 
 1. **Placement.** Map source and destination to an L2 segment (VLAN/IPAM
    subnet) and to a firewall zone through the interface that owns the
-   subnet. An address outside every known subnet maps to the zone of the
-   route that leads to it (default route → the zone of the WAN interface);
-   no route known → `unknown`. A **known IPAM subnet that no firewall
+   subnet. A **public** address outside every known subnet maps to the zone
+   of the route that leads to it (default route → the zone of the WAN
+   interface); no route known → `unknown`. An address in a **private or
+   special range** (RFC 1918, CGNAT 100.64/10, loopback, link-local, ULA
+   fc00::/7, multicast, documentation, reserved, unspecified) outside every
+   known subnet is **never** placed through the default route: in the flat
+   lab with incomplete IPAM it is most likely an internal device, so the
+   verdict is **`unknown`** with the reason "private address outside known
+   subnets", never `denied` by the default interzone rule toward WAN
+   (previously: any address outside known subnets followed its route). A
+   specific, non-default route the data proves for that range (for example
+   a NetBird or site-to-site interface route) still places it in that
+   route's zone. A **known IPAM subnet that no firewall
    interface owns** (routed by a host, a hypervisor or another router) has
    no zone: if the crossing test (step 2) does not already give
    `not_filtered`, the verdict is **`unknown`** with the reason "subnet not
@@ -147,12 +165,30 @@ evaluation semantics creates `nr-v2`.
    rule is part of the chain.
 4. **Security rules.** In order, first match wins; disabled rules are
    skipped and listed in the chain as "skipped (disabled)". A rule matches
-   when zones, addresses (with negation), and service match. Rules with an
-   application other than `any`, a `source-user`, a URL category or a
-   schedule match only conditionally; such a match yields
-   **`conditional`** with the conditions listed (for example "allowed if
-   App-ID identifies `ssh`"), and evaluation also continues to the next
-   unconditional match to show what happens otherwise.
+   when zones, addresses (with negation), and service match. A rule is
+   **conditional** when its match depends on data the model does not have:
+   an application other than `any`, a `source-user`, a URL category, a
+   schedule, or the service `application-default` (the ports then depend
+   on the App-ID result). This applies to **allow and deny rules alike**.
+   Evaluation records a conditional match with its conditions (for example
+   "allowed if App-ID identifies `ssh`", "denied if user is in group X")
+   and continues to the next unconditional match to show what happens
+   otherwise. The verdict over the conditional matches and the final
+   unconditional decision (a rule or the default rule) is then:
+   - any of them is an **allow** (a conditional allow, or a conditional
+     **deny** followed by a later allow or by the default intrazone allow)
+     → `conditional`: the traffic is allowed whenever the conditions fall
+     that way; never `denied`;
+   - all of them deny (conditional denies whose fall-through ends in an
+     unconditional deny or the default interzone deny) → `denied`, because
+     the traffic is denied either way;
+   - the final decision cannot be determined (for example a conditional
+     deny followed by a rule with an object that cannot be evaluated) →
+     `unknown`.
+   A conditional deny is therefore never counted as `denied` and never as
+   a mitigation in `vu-prio-v2` (D3) unless the unconditional fall-through
+   denies as well (previously: "conditional" was defined for allow rules
+   only).
 5. **Default rules.** No match → the default intrazone or interzone rule
    (from the data, else the vendor default labelled "assumed").
 
@@ -161,10 +197,10 @@ evaluation semantics creates `nr-v2`.
 | Verdict | Meaning |
 | --- | --- |
 | `allowed` | An allow rule matches unconditionally; chain names rule and NAT |
-| `conditional` | First matching allow depends on App-ID, user, URL category or schedule; counts as reachable for every security use (fail closed) |
-| `denied` | A deny/drop/reset rule or the default interzone rule matches |
+| `conditional` | A conditional allow decides, or a conditional deny (App-ID, user, URL category, schedule, service `application-default`) is followed by an allow; counts as reachable for every security use (fail closed) |
+| `denied` | An unconditional deny/drop/reset rule or the default interzone rule matches, with no earlier conditional allow (a conditional deny counts only if its fall-through denies too) |
 | `not_filtered` | Same L2 segment; the firewall is not on the path |
-| `unknown` | Any input missing, stale (ADR 0010: three missed intervals) or `incomplete` (D3 limits); an object that cannot be evaluated (FQDN, EDL, dynamic group whose members are unknown, region objects); more than one vsys; route ambiguity. The reason is listed |
+| `unknown` | Any input missing, stale (ADR 0010: three missed intervals) or `incomplete` (D3 limits); an object that cannot be evaluated (FQDN, EDL, dynamic group whose members are unknown, region objects); more than one vsys; route ambiguity; a private or special-range address outside known subnets; a known subnet on no firewall interface. The reason is listed |
 
 **Explanation chain.** Every verdict carries the ordered list of steps
 with the data that decided each step: segment and zone mapping with their
