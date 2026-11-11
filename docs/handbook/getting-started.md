@@ -247,7 +247,7 @@ each, and wipe the keys when you are done.
    and enter its PIN.
 2. Work. LOW actions run without a further prompt for the session (60
    minutes by default, executor flag `-session-minutes`).
-3. When you leave: Dashboard → **Lock**, or `nebula lock` on the machine.
+3. When you leave: Dashboard → **Lock executor**, or `nebula lock` on the machine.
 
 **Expected result:** after lock, `nebula status` shows `unlocked: false`
 and `privileged session: false`; every permit is revoked.
