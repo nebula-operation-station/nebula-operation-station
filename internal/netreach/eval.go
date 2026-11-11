@@ -189,6 +189,8 @@ type evaluator struct {
 	// it is then the reason of the verdict. limit names the limit.
 	stop  string
 	limit string
+	// cmp counts the comparisons made per step; nil except in tests.
+	cmp *cmpCounter
 }
 
 func (x *Index) newEvaluator(ctx context.Context, q Query, lim evalLimits) *evaluator {
@@ -206,6 +208,7 @@ func (e *evaluator) result() Result {
 	defer cancel()
 	e.job = job
 	out := e.run()
+	e.cmp.charge(0) // closes the last step
 	switch {
 	case e.stop != "":
 		out = unknownOut(e.stop)
@@ -250,6 +253,7 @@ func (e *evaluator) step(cost int) bool {
 		e.halt(limitWork)
 	default:
 		e.work += cost
+		e.cmp.charge(cost)
 		return true
 	}
 	return false
@@ -578,7 +582,7 @@ func (e *evaluator) securityPath(p packet) outcome {
 			continue
 		}
 		if !v.Evaluable() {
-			if f := zonesExclude(&e.x.snap.SecurityRules[i], p.srcZone, p.dstZone); f != "" {
+			if f := zonesExclude(&e.x.snap.SecurityRules[i], p.srcZone, p.dstZone, e.cmp); f != "" {
 				st.Outcome, st.Detail = OutcomeNoMatch, "because "+f+"; rule is unevaluable: "+v.Reason()
 				e.chain.add(st)
 				continue
@@ -587,7 +591,7 @@ func (e *evaluator) securityPath(p packet) outcome {
 			e.chain.add(st)
 			return undecided(conds, v.Reason())
 		}
-		why, extra := ruleMatch(v, &e.x.ruleAddrs[i], &p)
+		why, extra := ruleMatch(v, &e.x.ruleAddrs[i], &p, e.cmp)
 		if why != "" {
 			st.Outcome, st.Detail = OutcomeNoMatch, "because "+why
 			e.chain.add(st)
@@ -620,15 +624,21 @@ func (e *evaluator) securityPath(p packet) outcome {
 	return decide(conds, d.Name, d.Action, p.conds)
 }
 
-// ruleCost bounds the work of security rule i on packet p: the step, the
-// zone lists (raw and classified) and the three field matches.
+// ruleCost bounds the work of security rule i on packet p: the step and
+// the comparisons of its match. A disabled rule is only the step; an
+// unevaluable one compares its raw zone lists in zonesExclude (zoneMayMatch:
+// three comparisons per member); an evaluable one compares its classified
+// zone lists in ruleMatch (zoneIn: two per member) and its three fields.
 func (e *evaluator) ruleCost(i int, p *packet) int {
 	v, a, r := &e.x.rules[i], &e.x.ruleAddrs[i], &e.x.snap.SecurityRules[i]
-	c := 1 + len(v.From) + len(v.To) + len(r.From.Value) + len(r.To.Value)
-	if v.Disabled || !v.Evaluable() {
-		return c
+	switch {
+	case v.Disabled:
+		return 1
+	case !v.Evaluable():
+		return 1 + zoneMayMatchCost(r.From) + zoneMayMatchCost(r.To)
 	}
-	return c + a.src.cost(p.src) + a.dst.cost(p.dst) + a.svc.cost(p.proto, p.ports)
+	return 1 + zoneInCost(v.From) + zoneInCost(v.To) +
+		a.src.cost(p.src) + a.dst.cost(p.dst) + a.svc.cost(p.proto, p.ports)
 }
 
 // undecided is the outcome of a path whose final decision cannot be
@@ -678,14 +688,14 @@ func decide(conds []condMatch, name string, a Action, pathConds []string) outcom
 // the path, or "" when it may. Only collected zone lists without markers
 // decide, and only on a rule that carries no rule-level marker and no
 // field outside the allowlist (such a field could change what it matches).
-func zonesExclude(r *SecurityRule, src, dst string) string {
+func zonesExclude(r *SecurityRule, src, dst string, c *cmpCounter) string {
 	if len(r.Dropped) > 0 || len(r.OutsideAllowlist) > 0 {
 		return ""
 	}
-	if !zoneMayMatch(r.From, src) {
+	if !zoneMayMatch(r.From, src, c) {
 		return "from zone"
 	}
-	if !zoneMayMatch(r.To, dst) {
+	if !zoneMayMatch(r.To, dst, c) {
 		return "to zone"
 	}
 	return ""
@@ -694,21 +704,21 @@ func zonesExclude(r *SecurityRule, src, dst string) string {
 // ruleMatch matches an evaluable rule, with its merged fields a,
 // against a packet. It returns the field that does not match, or "" and
 // the fields that match only in part (conditions).
-func ruleMatch(v *RuleView, a *ruleAddrs, p *packet) (string, []string) {
-	if !zoneIn(v.From, p.srcZone) {
+func ruleMatch(v *RuleView, a *ruleAddrs, p *packet, c *cmpCounter) (string, []string) {
+	if !zoneIn(v.From, p.srcZone, c) {
 		return "from zone", nil
 	}
-	if !zoneIn(v.To, p.dstZone) {
+	if !zoneIn(v.To, p.dstZone, c) {
 		return "to zone", nil
 	}
 	var extra []string
-	switch a.src.match(v.NegateSource, p.src) {
+	switch a.src.match(v.NegateSource, p.src, c) {
 	case matchNone:
 		return "source address", nil
 	case matchPartial:
 		extra = append(extra, "source address")
 	}
-	switch a.dst.match(v.NegateDestination, p.dst) {
+	switch a.dst.match(v.NegateDestination, p.dst, c) {
 	case matchNone:
 		return "destination address", nil
 	case matchPartial:
@@ -716,7 +726,7 @@ func ruleMatch(v *RuleView, a *ruleAddrs, p *packet) (string, []string) {
 	}
 	if !v.Service.ApplicationDefault {
 		// application-default is a condition already (RuleView.Conditions).
-		switch a.svc.match(p.proto, p.ports) {
+		switch a.svc.match(p.proto, p.ports, c) {
 		case matchNone:
 			return "service", nil
 		case matchPartial:
@@ -726,8 +736,65 @@ func ruleMatch(v *RuleView, a *ruleAddrs, p *packet) (string, []string) {
 	return "", extra
 }
 
-func zoneIn(l []string, z string) bool {
-	return slices.Contains(l, memberAny) || slices.Contains(l, z)
+// zoneIn reports whether the zone list l holds any or z. It makes two
+// passes over l (zoneInCost comparisons at most).
+func zoneIn(l []string, z string, c *cmpCounter) bool {
+	return containsCounted(l, memberAny, c) || containsCounted(l, z, c)
+}
+
+// zoneInCost bounds the comparisons of zoneIn on l: two passes.
+func zoneInCost(l []string) int { return 2 * len(l) }
+
+// containsCounted is slices.Contains that counts its comparisons.
+func containsCounted(l []string, s string, c *cmpCounter) bool {
+	for i, m := range l {
+		if m == s {
+			c.add(i + 1)
+			return true
+		}
+	}
+	c.add(len(l))
+	return false
+}
+
+// cmpCounter counts the comparisons the matching functions make: address
+// and port comparisons (binary search probes included) and zone list
+// members compared. The evaluator charges each step before its matching
+// runs; charge closes the previous step and records it when its
+// comparisons exceeded its charge. Tests set one on the evaluator to
+// prove the charges are upper bounds; it is nil in production, and every
+// method is a no-op on nil.
+type cmpCounter struct {
+	n       int // comparisons since the last charge
+	charged int // cost charged for the step in progress
+	total   int // comparisons of closed steps
+	over    int // closed steps whose comparisons exceeded their charge
+	worst   int // largest excess of such a step
+}
+
+func (c *cmpCounter) add(k int) {
+	if c != nil {
+		c.n += k
+	}
+}
+
+// charge closes the step in progress and starts one charged cost.
+func (c *cmpCounter) charge(cost int) {
+	if c == nil {
+		return
+	}
+	c.close()
+	c.charged = cost
+}
+
+// close checks the step in progress against its charge.
+func (c *cmpCounter) close() {
+	if c.n > c.charged {
+		c.over++
+		c.worst = max(c.worst, c.n-c.charged)
+	}
+	c.total += c.n
+	c.n, c.charged = 0, 0
 }
 
 // match is the result of matching a rule field against a set of packet
@@ -754,7 +821,7 @@ var universe = []AddrRange{
 // the field does not overlap x, and overlaps x when the field does not
 // cover x.
 func matchAddr(set AddrSet, neg bool, x []AddrRange) match {
-	return mergeSet(set).match(neg, x)
+	return mergeSet(set).match(neg, x, nil)
 }
 
 // mergedAddrs is an address field ready for matching: any, or its ranges
@@ -786,11 +853,12 @@ func (s mergedAddrs) cost(x []AddrRange) int {
 }
 
 // match matches the field, with negation, against the packet set x; see
-// matchAddr. The cost is O(len(x) · log len(m)), at most cost(x).
-func (s mergedAddrs) match(neg bool, x []AddrRange) match {
+// matchAddr. The cost is O(len(x) · log len(m)), at most cost(x)
+// comparisons, counted in c.
+func (s mergedAddrs) match(neg bool, x []AddrRange, c *cmpCounter) match {
 	cov, ov := true, true
 	if !s.any {
-		cov, ov = coversAddr(s.m, x), overlapsAddr(s.m, x)
+		cov, ov = coversAddr(s.m, x, c), overlapsAddr(s.m, x, c)
 	}
 	if neg {
 		cov, ov = !ov, !cov
@@ -838,25 +906,33 @@ func isMerged(rs []AddrRange) bool {
 }
 
 // firstEndingAtOrAfter returns the index of the first merged range whose
-// end is not before a.
-func firstEndingAtOrAfter(m []AddrRange, a netip.Addr) int {
-	return sort.Search(len(m), func(i int) bool { return m[i].To.Compare(a) >= 0 })
+// end is not before a. Every probe is one comparison, counted in c.
+func firstEndingAtOrAfter(m []AddrRange, a netip.Addr, c *cmpCounter) int {
+	return sort.Search(len(m), func(i int) bool { c.add(1); return m[i].To.Compare(a) >= 0 })
 }
 
-func coversAddr(m, x []AddrRange) bool {
+func coversAddr(m, x []AddrRange, c *cmpCounter) bool {
 	for _, r := range x {
-		i := firstEndingAtOrAfter(m, r.From)
-		if i == len(m) || m[i].From.Compare(r.From) > 0 || m[i].To.Compare(r.To) < 0 {
+		i := firstEndingAtOrAfter(m, r.From, c)
+		if i == len(m) {
+			return false
+		}
+		c.add(2)
+		if m[i].From.Compare(r.From) > 0 || m[i].To.Compare(r.To) < 0 {
 			return false
 		}
 	}
 	return true
 }
 
-func overlapsAddr(m, x []AddrRange) bool {
+func overlapsAddr(m, x []AddrRange, c *cmpCounter) bool {
 	for _, r := range x {
-		i := firstEndingAtOrAfter(m, r.From)
-		if i < len(m) && m[i].From.Compare(r.To) <= 0 {
+		i := firstEndingAtOrAfter(m, r.From, c)
+		if i == len(m) {
+			continue
+		}
+		c.add(1)
+		if m[i].From.Compare(r.To) <= 0 {
 			return true
 		}
 	}
@@ -900,19 +976,26 @@ func (s mergedService) cost(proto string, x []portSpan) int {
 
 // match matches the field against the packet ports x of protocol proto.
 // A field with application-default is handled by the caller. The cost is
-// O(len(x) · log m), at most cost(proto, x), and it does not allocate.
-func (s mergedService) match(proto string, x []portSpan) match {
+// O(len(x) · log m), at most cost(proto, x) comparisons counted in c, and
+// it does not allocate.
+func (s mergedService) match(proto string, x []portSpan, c *cmpCounter) match {
 	if s.any {
+		c.add(1)
 		return matchFull
 	}
 	m := s.ports[proto]
 	cov, ov := true, false
 	for _, r := range x {
-		i := sort.Search(len(m), func(i int) bool { return m[i].to >= r.from })
-		if i == len(m) || m[i].from > r.from || m[i].to < r.to {
+		i := sort.Search(len(m), func(i int) bool { c.add(1); return m[i].to >= r.from })
+		if i == len(m) {
+			cov = false
+			continue
+		}
+		c.add(3)
+		if m[i].from > r.from || m[i].to < r.to {
 			cov = false
 		}
-		if i < len(m) && m[i].from <= r.to {
+		if m[i].from <= r.to {
 			ov = true
 		}
 	}

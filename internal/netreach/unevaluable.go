@@ -614,16 +614,31 @@ func (x *Index) PathCompleteness(src, dst string) Completeness {
 // touches reports whether a rule's zones could match src → dst. Unknown
 // zones (empty src or dst) and uncollected zone lists always match.
 func (x *Index) touches(r *SecurityRule, src, dst string) bool {
-	return zoneMayMatch(r.From, src) && zoneMayMatch(r.To, dst)
+	return zoneMayMatch(r.From, src, nil) && zoneMayMatch(r.To, dst, nil)
 }
 
-func zoneMayMatch(f Field[[]string], zone string) bool {
+// zoneMayMatch reports whether a raw zone list may match zone. It makes
+// up to three passes over the list (zoneMayMatchCost comparisons at most),
+// counted in c.
+func zoneMayMatch(f Field[[]string], zone string, c *cmpCounter) bool {
 	if !f.Collected || zone == "" || len(f.Value) == 0 {
 		return true
 	}
-	return slices.Contains(f.Value, memberAny) || slices.Contains(f.Value, zone) ||
-		slices.ContainsFunc(f.Value, func(m string) bool { return strings.HasPrefix(m, droppedPrefix) })
+	if containsCounted(f.Value, memberAny, c) || containsCounted(f.Value, zone, c) {
+		return true
+	}
+	for i, m := range f.Value {
+		if strings.HasPrefix(m, droppedPrefix) {
+			c.add(i + 1)
+			return true
+		}
+	}
+	c.add(len(f.Value))
+	return false
 }
+
+// zoneMayMatchCost bounds the comparisons of zoneMayMatch on f.
+func zoneMayMatchCost(f Field[[]string]) int { return 3 * len(f.Value) }
 
 // expander expands address and service members against the objects of
 // one snapshot, within the per-field and per-snapshot limits.

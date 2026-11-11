@@ -279,7 +279,7 @@ func TestMatchService(t *testing.T) {
 		{"udp", []portSpan{{53, 53}}, matchFull},
 	}
 	for _, c := range cases {
-		if got := mergeService(s).match(c.proto, c.x); got != c.want {
+		if got := mergeService(s).match(c.proto, c.x, nil); got != c.want {
 			t.Errorf("%s %v: %d, want %d", c.proto, c.x, got, c.want)
 		}
 	}

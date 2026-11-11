@@ -59,7 +59,7 @@ func (e *evaluator) forward(srcZone string, src []AddrRange, dst Placement) []ou
 			e.chain.add(st)
 			return append(outs, unknownOut(v.Reason()))
 		}
-		m, why := natMatch(v, &e.x.natAddrs[i], &base)
+		m, why := natMatch(v, &e.x.natAddrs[i], &base, e.cmp)
 		if m == matchNone {
 			st.Outcome, st.Detail = OutcomeNoMatch, "because "+why
 			e.chain.add(st)
@@ -211,47 +211,54 @@ func translatedZone(rs []AddrRange, zoneOf func(AddrRange) (postZone, bool)) pos
 	return postZone{zone: zone}
 }
 
+// natToZoneCost is the comparisons of the to zone check of natMatch.
+const natToZoneCost = 2
+
 // natCost bounds the work of NAT rule i in forward on packet p: the step,
-// the zone list and the field matches of natMatch.
+// the from zone list (both passes of zoneIn), the to zone and the field
+// matches of natMatch.
 func (e *evaluator) natCost(i int, p *packet) int {
 	v, a := &e.x.nat[i], &e.x.natAddrs[i]
 	if v.Disabled || !v.Evaluable() {
 		return 1
 	}
-	return 1 + len(v.From) + a.dst.cost(p.dst) + a.svc.cost(p.proto, p.ports) + a.src.cost(p.src)
+	return 1 + zoneInCost(v.From) + natToZoneCost +
+		a.dst.cost(p.dst) + a.svc.cost(p.proto, p.ports) + a.src.cost(p.src)
 }
 
 // reverseNATCost bounds the work of NAT rule i in reverseNAT for the
 // source set src: the step, the translated address, the service (once
-// in preNATPorts), the zone list and the source match.
+// in preNATPorts), the from zone list (both passes of zoneIn), the source
+// match and the pre-NAT destination members joined into the chain.
 func (e *evaluator) reverseNATCost(i int, src []AddrRange) int {
 	v, a := &e.x.nat[i], &e.x.natAddrs[i]
 	if v.Disabled || !v.Evaluable() {
 		return 1
 	}
 	return 1 + searchCost(1, len(a.translated.m)) + searchCost(1, len(a.svc.ports[e.q.Protocol])) +
-		len(v.From) + a.src.cost(src) + len(e.x.snap.NATRules[i].Destination.Value)
+		zoneInCost(v.From) + a.src.cost(src) + len(e.x.snap.NATRules[i].Destination.Value)
 }
 
 // natMatch matches an evaluable NAT rule, with its merged address fields
 // a, against the pre-NAT packet: from zone, to zone (the zone of the
 // pre-NAT destination), source, destination and service. It returns
 // matchPartial when the rule matches only part of the possible sources.
-func natMatch(v *NATRuleView, a *natAddrs, p *packet) (match, string) {
-	if !zoneIn(v.From, p.srcZone) {
+func natMatch(v *NATRuleView, a *natAddrs, p *packet, c *cmpCounter) (match, string) {
+	if !zoneIn(v.From, p.srcZone, c) {
 		return matchNone, "from zone"
 	}
+	c.add(natToZoneCost)
 	if v.To != memberAny && v.To != p.dstZone {
 		return matchNone, "to zone"
 	}
-	if a.dst.match(false, p.dst) != matchFull {
+	if a.dst.match(false, p.dst, c) != matchFull {
 		// The queried destination is a single address.
 		return matchNone, "destination address"
 	}
-	if a.svc.match(p.proto, p.ports) != matchFull {
+	if a.svc.match(p.proto, p.ports, c) != matchFull {
 		return matchNone, "service"
 	}
-	switch a.src.match(false, p.src) {
+	switch a.src.match(false, p.src, c) {
 	case matchNone:
 		return matchNone, "source address"
 	case matchPartial:
@@ -283,16 +290,16 @@ func (e *evaluator) reverseNAT(srcZone string, src []AddrRange, dst Placement) [
 			continue
 		}
 		a := &e.x.natAddrs[i]
-		if v.Translation == nil || a.translated.match(false, []AddrRange{{From: d, To: d}}) != matchFull {
+		if v.Translation == nil || a.translated.match(false, []AddrRange{{From: d, To: d}}, e.cmp) != matchFull {
 			continue
 		}
 		ports, why := e.preNATPorts(v, a.svc)
-		if why == "" && !zoneIn(v.From, srcZone) {
+		if why == "" && !zoneIn(v.From, srcZone, e.cmp) {
 			why = "from zone"
 		}
 		m := matchFull
 		if why == "" {
-			if m = a.src.match(false, src); m == matchNone {
+			if m = a.src.match(false, src, e.cmp); m == matchNone {
 				why = "source address"
 			}
 		}
@@ -336,7 +343,7 @@ var allPorts = []portSpan{{1, 65535}}
 func (e *evaluator) preNATPorts(v *NATRuleView, svc mergedService) ([]portSpan, string) {
 	q := portSpan{int(e.q.Port), int(e.q.Port)}
 	if v.Translation.Port == 0 {
-		if svc.match(e.q.Protocol, []portSpan{q}) != matchFull {
+		if svc.match(e.q.Protocol, []portSpan{q}, e.cmp) != matchFull {
 			return nil, "service"
 		}
 		return []portSpan{q}, ""

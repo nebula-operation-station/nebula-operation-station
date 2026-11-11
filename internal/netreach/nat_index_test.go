@@ -182,10 +182,10 @@ func TestServicePortsMergedAtBuild(t *testing.T) {
 	}
 	svc := x.ruleAddrs[1].svc
 	x1 := []portSpan{{60001, 60001}}
-	if svc.match("tcp", x1) != matchFull || svc.match("tcp", []portSpan{{60003, 60003}}) != matchNone {
+	if svc.match("tcp", x1, nil) != matchFull || svc.match("tcp", []portSpan{{60003, 60003}}, nil) != matchNone {
 		t.Fatal("merged service decides wrongly")
 	}
-	if n := testing.AllocsPerRun(100, func() { svc.match("tcp", x1) }); n != 0 {
+	if n := testing.AllocsPerRun(100, func() { svc.match("tcp", x1, nil) }); n != 0 {
 		t.Fatalf("matching a merged service allocates %.0f times per call", n)
 	}
 	// One query through both rules: the rule match uses the merged field.
@@ -224,7 +224,7 @@ func TestRuleAddressSetsMergedAtBuild(t *testing.T) {
 		{AddrRange{From: addr("10.0.1.5"), To: addr("10.0.1.12")}, matchPartial},
 		{AddrRange{From: addr("10.0.1.22"), To: addr("10.0.1.30")}, matchNone},
 	} {
-		if got := x.ruleAddrs[1].src.match(false, []AddrRange{c.x}); got != c.want {
+		if got := x.ruleAddrs[1].src.match(false, []AddrRange{c.x}, nil); got != c.want {
 			t.Errorf("match %v = %d, want %d", c.x, got, c.want)
 		}
 	}
