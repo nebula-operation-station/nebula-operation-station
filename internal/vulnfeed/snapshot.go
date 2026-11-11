@@ -541,6 +541,47 @@ func (s *Store) ProxyDate(feed Feed) (time.Time, error) {
 	return newest, nil
 }
 
+// RedateProxy moves a proxy-dated feed's current snapshot to a newer
+// proxy content date when its bytes are unchanged (a 304) but its
+// companions advanced. The object, validators and retained snapshots stay
+// as they are; the D4 rules apply as in Commit: the date must be set, not
+// beyond MaxFutureSkew and not below the high-water mark.
+func (s *Store) RedateProxy(feed Feed, date time.Time) (Manifest, error) {
+	if err := feed.validate(); err != nil {
+		return Manifest{}, err
+	}
+	if feed.DateKind != DateKindProxy {
+		return Manifest{}, fmt.Errorf("redate %s: not proxy-dated: %w", feed.Name, ErrInvalidFeed)
+	}
+	if date.IsZero() {
+		return Manifest{}, fmt.Errorf("redate %s: %w", feed.Name, ErrNoContentDate)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, err := s.Load(feed.Name)
+	if err != nil {
+		if errors.Is(err, ErrNoSnapshot) {
+			return Manifest{}, err
+		}
+		return Manifest{}, fmt.Errorf("redate %s: %w", feed.Name, err)
+	}
+	now := s.now().UTC()
+	if date.After(now.Add(MaxFutureSkew)) {
+		return Manifest{}, fmt.Errorf("redate %s: %w", feed.Name, ErrFutureContentDate)
+	}
+	if date.Before(m.HighWater.ContentDate) {
+		return Manifest{}, fmt.Errorf("redate %s: content date %s before %s: %w", feed.Name,
+			date.UTC().Format(time.RFC3339), m.HighWater.ContentDate.UTC().Format(time.RFC3339), ErrRollback)
+	}
+	m.ContentDate = date.UTC()
+	m.HighWater.ContentDate = m.ContentDate
+	m.FetchedAt = now
+	if err := s.writeManifest(m); err != nil {
+		return Manifest{}, fmt.Errorf("redate %s: %w", feed.Name, err)
+	}
+	return m, nil
+}
+
 // syncDir fsyncs a directory so a rename in it is durable.
 func syncDir(dir string) error {
 	d, err := os.Open(dir)

@@ -41,6 +41,8 @@ type SyncResult struct {
 type Syncer struct {
 	fetcher *Fetcher
 	store   *Store
+	// checksumTimeout bounds one checksum companion fetch.
+	checksumTimeout time.Duration
 }
 
 // NewSyncer builds a Syncer.
@@ -48,7 +50,7 @@ func NewSyncer(f *Fetcher, s *Store) (*Syncer, error) {
 	if f == nil || s == nil {
 		return nil, fmt.Errorf("new syncer: fetcher and store required: %w", ErrInvalidFeed)
 	}
-	return &Syncer{fetcher: f, store: s}, nil
+	return &Syncer{fetcher: f, store: s, checksumTimeout: ChecksumFetchTimeout}, nil
 }
 
 // Sync fetches feed, checks its integrity and content date, and commits it
@@ -93,6 +95,15 @@ func (s *Syncer) Sync(ctx context.Context, feed Feed, opt SyncOptions) (SyncResu
 		return SyncResult{}, fmt.Errorf("sync %s: %w", feed.Name, err)
 	}
 	if res.NotModified {
+		// The bytes are unchanged, but a proxy-dated feed's content date
+		// follows its companions, which may have moved forward.
+		if feed.DateKind == DateKindProxy && proxyDate.After(prev.ContentDate) {
+			m, err := s.store.RedateProxy(feed, proxyDate)
+			if err != nil {
+				return SyncResult{}, fmt.Errorf("sync %s: %w", feed.Name, err)
+			}
+			return SyncResult{Manifest: m, NotModified: true}, nil
+		}
 		return SyncResult{Manifest: prev, NotModified: true}, nil
 	}
 	if feed.Integrity == vulnfinding.IntegrityChecksum {

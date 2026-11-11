@@ -12,10 +12,18 @@ import (
 	"net/url"
 	"path"
 	"strings"
+	"time"
 )
 
-// MaxChecksumBytes caps a .sha256/.sha512 companion file.
-const MaxChecksumBytes = 1024
+// Checksum companion limits.
+const (
+	// MaxChecksumBytes caps a .sha256/.sha512 companion file.
+	MaxChecksumBytes = 1024
+	// ChecksumFetchTimeout bounds the companion fetch. It is far shorter
+	// than the whole-feed timeout, so a slow-drip origin cannot stall a
+	// sync for DefaultFetchTimeout on a 1 KiB file.
+	ChecksumFetchTimeout = 60 * time.Second
+)
 
 // Checksum errors.
 var (
@@ -67,11 +75,18 @@ func parseChecksum(b []byte, alg ChecksumAlg, want string) ([]byte, error) {
 
 // verifyChecksum fetches feed's companion and compares it with the staged
 // file's digest. Any failure rejects the file.
+//
+// The companion comes from the same origin as the feed, so this proves
+// integrity (no truncation or corruption in transfer), not authenticity:
+// a compromised origin can serve a matching pair. IntegrityChecksum must
+// not be read as "signed"; only IntegritySigned feeds are authenticated.
 func (s *Syncer) verifyChecksum(ctx context.Context, feed Feed, st *Staged) error {
 	cu, name, err := checksumURL(feed.URL, feed.Checksum)
 	if err != nil {
 		return err
 	}
+	ctx, cancel := context.WithTimeout(ctx, s.checksumTimeout)
+	defer cancel()
 	var buf bytes.Buffer
 	if _, err := s.fetcher.Fetch(ctx, cu, MaxChecksumBytes, Validators{}, &buf); err != nil {
 		return fmt.Errorf("checksum companion: %w", err)
