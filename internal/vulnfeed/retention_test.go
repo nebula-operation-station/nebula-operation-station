@@ -190,64 +190,75 @@ func TestRecommitOfSameBytesDoesNotDuplicateHistory(t *testing.T) {
 }
 
 func TestPruneWithCorruptManifestSkipsOnlyThatFeed(t *testing.T) {
-	s, _, dir := newTestStore(t)
-	a := testFeed(DateKindDated)
-	a.Name = "feed-a"
-	b := testFeed(DateKindDated)
-	b.Name = "feed-b"
-	ma, err := commitBytes(t, s, a, "a-1", Accept{ContentDate: day1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	mb, err := commitBytes(t, s, b, "b-1", Accept{ContentDate: day1})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Unreferenced objects in both feeds (e.g. left by a crash between
-	// object rename and manifest write), and feed-b's manifest is corrupt:
-	// feed-b's references are unknown, so none of its objects may go, but
-	// feed-a is collected as usual.
-	orphanA := strings.Repeat("ab", 32)
-	orphanB := strings.Repeat("cd", 32)
-	if err := os.WriteFile(objectPath(dir, a.Name, orphanA), []byte("orphan"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(objectPath(dir, b.Name, orphanB), []byte("orphan"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, manifestsDir, b.Name+".json"), []byte(`{"feed":`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	err = s.Prune()
-	if !errors.Is(err, ErrCorruptManifest) || !errors.Is(err, ErrPruneFailed) {
-		t.Fatalf("prune %v, want ErrPruneFailed and ErrCorruptManifest", err)
-	}
-	objs := feedObjectFiles(t, dir)
-	if _, ok := objs[a.Name][orphanA]; ok {
-		t.Fatal("feed-a orphan kept: a corrupt feed-b manifest blocked feed-a")
-	}
-	if _, ok := objs[a.Name][ma.SHA256]; !ok {
-		t.Fatal("feed-a current object removed")
-	}
-	if _, ok := objs[b.Name][orphanB]; !ok {
-		t.Fatal("feed-b object removed although its manifest is unreadable")
-	}
-	if _, ok := objs[b.Name][mb.SHA256]; !ok {
-		t.Fatal("feed-b object removed although its manifest is unreadable")
-	}
-	// Commits of feed-a keep succeeding without a prune error.
-	if _, err := commitBytes(t, s, a, "a-2", Accept{ContentDate: day2}); err != nil {
-		t.Fatalf("feed-a commit with corrupt feed-b manifest: %v", err)
-	}
-	// Once the manifest is gone, feed-b's objects are orphans and collected.
-	if err := os.Remove(filepath.Join(dir, manifestsDir, b.Name+".json")); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.Prune(); err != nil {
-		t.Fatal(err)
-	}
-	if n := len(feedObjectFiles(t, dir)[b.Name]); n != 0 {
-		t.Fatalf("feed-b: %d orphan objects kept", n)
+	// Prune walks the feeds in directory (name) order. The corrupt manifest
+	// is placed on the first, a middle and the last feed in turn, so an
+	// implementation that stops at the first unreadable manifest leaves the
+	// orphans of a later feed behind and fails.
+	names := []string{"feed-a", "feed-b", "feed-c"}
+	for _, corrupt := range names {
+		t.Run(corrupt, func(t *testing.T) {
+			s, _, dir := newTestStore(t)
+			feeds := map[string]Feed{}
+			current := map[string]string{}
+			orphans := map[string]string{}
+			for i, name := range names {
+				f := testFeed(DateKindDated)
+				f.Name = name
+				m, err := commitBytes(t, s, f, name+"-1", Accept{ContentDate: day1})
+				if err != nil {
+					t.Fatal(err)
+				}
+				feeds[name], current[name] = f, m.SHA256
+				// An unreferenced object (e.g. left by a crash between
+				// object rename and manifest write).
+				orphans[name] = strings.Repeat(fmt.Sprintf("%02x", 0xa0+i), 32)
+				if err := os.WriteFile(objectPath(dir, name, orphans[name]), []byte("orphan"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			manifest := filepath.Join(dir, manifestsDir, corrupt+".json")
+			if err := os.WriteFile(manifest, []byte(`{"feed":`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			err := s.Prune()
+			if !errors.Is(err, ErrCorruptManifest) || !errors.Is(err, ErrPruneFailed) {
+				t.Fatalf("prune %v, want ErrPruneFailed and ErrCorruptManifest", err)
+			}
+			objs := feedObjectFiles(t, dir)
+			for _, name := range names {
+				if _, ok := objs[name][current[name]]; !ok {
+					t.Fatalf("%s current object removed", name)
+				}
+				_, kept := objs[name][orphans[name]]
+				switch {
+				case name == corrupt && !kept:
+					t.Fatalf("%s object removed although its manifest is unreadable", name)
+				case name != corrupt && kept:
+					t.Fatalf("%s orphan kept: corrupt %s manifest blocked it", name, corrupt)
+				}
+			}
+			// Commits of the healthy feeds keep succeeding without a
+			// prune error.
+			for _, name := range names {
+				if name == corrupt {
+					continue
+				}
+				if _, err := commitBytes(t, s, feeds[name], name+"-2", Accept{ContentDate: day2}); err != nil {
+					t.Fatalf("%s commit with corrupt %s manifest: %v", name, corrupt, err)
+				}
+			}
+			// Once the manifest is gone, the feed's objects are orphans
+			// and collected.
+			if err := os.Remove(manifest); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Prune(); err != nil {
+				t.Fatal(err)
+			}
+			if n := len(feedObjectFiles(t, dir)[corrupt]); n != 0 {
+				t.Fatalf("%s: %d orphan objects kept", corrupt, n)
+			}
+		})
 	}
 }
 
