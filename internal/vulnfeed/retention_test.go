@@ -269,6 +269,9 @@ func TestPruneIgnoresStrayFiles(t *testing.T) {
 	if _, err := commitBytes(t, s, a, "a-1", Accept{ContentDate: day1}); err != nil {
 		t.Fatal(err)
 	}
+	// The orphan sorts after every in-feed stray, and feed-a after the
+	// stray entries of the objects directory, so an implementation that
+	// stops (returns or breaks) at the first stray never reaches it.
 	orphan := strings.Repeat("ef", 32)
 	if err := os.WriteFile(objectPath(dir, a.Name, orphan), []byte("orphan"), 0o600); err != nil {
 		t.Fatal(err)
@@ -277,7 +280,12 @@ func TestPruneIgnoresStrayFiles(t *testing.T) {
 		filepath.Join(dir, manifestsDir, ".feed-a.json.swp"),
 		filepath.Join(dir, manifestsDir, "feed-a.json.bak"),
 		filepath.Join(dir, manifestsDir, "README"),
+		filepath.Join(dir, objectsDir, "a-notes"), // feed-like name, but a file
 		filepath.Join(dir, objectsDir, "notes.txt"),
+		filepath.Join(dir, objectsDir, a.Name, ".keep"),
+		filepath.Join(dir, objectsDir, a.Name, "0.bak"),
+		filepath.Join(dir, objectsDir, a.Name, strings.Repeat("AB", 32)), // upper-case digest
+		filepath.Join(dir, objectsDir, a.Name, strings.Repeat("ab", 31)), // too short
 		filepath.Join(dir, objectsDir, a.Name, "keep.bak"),
 	}
 	for _, p := range strays {
