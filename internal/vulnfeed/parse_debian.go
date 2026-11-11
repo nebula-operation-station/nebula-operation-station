@@ -174,12 +174,8 @@ func parseDebianTracker(ctx context.Context, r io.Reader, maxEntries int, visit 
 
 func (p *debianParse) run() error {
 	dec, br := p.dec, p.br
-	tok, err := dec.Token()
-	if err != nil {
-		return br.fail("debian tracker", err)
-	}
-	if d, ok := tok.(json.Delim); !ok || d != '{' {
-		return fmt.Errorf("debian tracker: top level is not an object: %w", ErrFeedMalformed)
+	if err := expectDelim(dec, br, "debian tracker top level", '{'); err != nil {
+		return err
 	}
 	seen := make(map[string]struct{})
 	packages := 0
@@ -206,20 +202,10 @@ func (p *debianParse) run() error {
 			return err
 		}
 	}
-	tok, err = dec.Token()
-	if err != nil {
-		return br.fail("debian tracker end", err)
+	if err := expectDelim(dec, br, "debian tracker end", '}'); err != nil {
+		return err
 	}
-	if d, ok := tok.(json.Delim); !ok || d != '}' {
-		return fmt.Errorf("debian tracker end: %w", ErrFeedMalformed)
-	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return br.fail("debian tracker: data after the export", err)
-	}
-	if br.exceeded {
-		return fmt.Errorf("debian tracker: %w", ErrFeedLimit)
-	}
-	return nil
+	return expectEOF(dec, br, "debian tracker: data after the export")
 }
 
 // parsePackage streams the issues of one source package within a window
@@ -277,8 +263,13 @@ func (p *debianParse) parsePackage(pkg string, valid bool) error {
 			return err
 		}
 	}
-	if err := expectDelim(dec, '}'); err != nil {
+	// The closing brace is read within the package window.
+	tok, err = dec.Token()
+	if err != nil {
 		return br.fail(where+" end", err)
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '}' {
+		return fmt.Errorf("%s end: %w", where, ErrFeedMalformed)
 	}
 	if dec.InputOffset()-start > MaxDebianPackageBytes {
 		return fmt.Errorf("%s: more than %d bytes: %w", where, MaxDebianPackageBytes, ErrFeedLimit)

@@ -5,7 +5,6 @@ package vulnfeed
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"regexp"
@@ -123,8 +122,8 @@ func parseKEV(ctx context.Context, r io.Reader) (KEVCatalog, error) {
 	}
 	br := newBoundedReader(r, MaxKEVBytes)
 	dec := json.NewDecoder(br)
-	if err := expectDelim(dec, '{'); err != nil {
-		return cat, br.fail("top level", err)
+	if err := expectDelim(dec, br, "top level", '{'); err != nil {
+		return cat, err
 	}
 	keys := make(map[string]struct{})
 	var released string
@@ -178,14 +177,11 @@ func parseKEV(ctx context.Context, r io.Reader) (KEVCatalog, error) {
 			return cat, fmt.Errorf("%s: %w", key, ErrFeedMalformed)
 		}
 	}
-	if err := expectDelim(dec, '}'); err != nil {
-		return cat, br.fail("end", err)
+	if err := expectDelim(dec, br, "end", '}'); err != nil {
+		return cat, err
 	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return cat, br.fail("data after the catalog", err)
-	}
-	if br.exceeded {
-		return cat, ErrFeedLimit
+	if err := expectEOF(dec, br, "data after the catalog"); err != nil {
+		return cat, err
 	}
 	if !kevVersionRe.MatchString(cat.Version) {
 		return cat, fmt.Errorf("catalogVersion: %w", ErrFeedMalformed)
@@ -203,8 +199,8 @@ func parseKEV(ctx context.Context, r io.Reader) (KEVCatalog, error) {
 // parseKEVEntries streams the vulnerabilities array into cat and returns
 // the number of entries read, skipped ones included.
 func parseKEVEntries(ctx context.Context, dec *json.Decoder, br *boundedReader, cat *KEVCatalog) (int, error) {
-	if err := expectDelim(dec, '['); err != nil {
-		return 0, br.fail("vulnerabilities", err)
+	if err := expectDelim(dec, br, "vulnerabilities", '['); err != nil {
+		return 0, err
 	}
 	seen := make(map[string]struct{})
 	read := 0
@@ -237,8 +233,8 @@ func parseKEVEntries(ctx context.Context, dec *json.Decoder, br *boundedReader, 
 		seen[e.CVE] = struct{}{}
 		cat.Entries = append(cat.Entries, e)
 	}
-	if err := expectDelim(dec, ']'); err != nil {
-		return read, br.fail("vulnerabilities end", err)
+	if err := expectDelim(dec, br, "vulnerabilities end", ']'); err != nil {
+		return read, err
 	}
 	return read, nil
 }
