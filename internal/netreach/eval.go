@@ -149,9 +149,11 @@ func (x *Index) evaluate(q Query, lim evalLimits) Result {
 	}
 }
 
-// newPath charges one path; false means MaxPathsPerQuery was reached.
+// newPath charges one path; false means MaxPathsPerQuery was reached, or
+// the chain is full (MaxChainSteps), which already fixes the verdict to
+// unknown "limit reached", so no further path is evaluated.
 func (e *evaluator) newPath() bool {
-	if e.paths >= e.lim.paths {
+	if e.paths >= e.lim.paths || e.chain.full {
 		e.limitHit = true
 		return false
 	}
@@ -435,6 +437,10 @@ func isAllow(a Action) bool { return a == ActionAllow }
 func (e *evaluator) securityPath(p packet) outcome {
 	var conds []condMatch
 	for i := range e.x.rules {
+		if e.chain.full {
+			// The verdict is already unknown "limit reached".
+			return unknownOut(ErrLimitReached.Error())
+		}
 		v := &e.x.rules[i]
 		st := Step{Path: p.path, Kind: StepRule, Name: v.Name}
 		if v.Disabled {

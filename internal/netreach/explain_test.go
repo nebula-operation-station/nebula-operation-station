@@ -186,6 +186,27 @@ func TestChainStepsLimit(t *testing.T) {
 	}
 }
 
+func TestFullChainStopsEvaluation(t *testing.T) {
+	s := labSnapshot()
+	s.NATRules = forwards(MaxPathsPerQuery - 1)
+	x := mustIndex(t, s)
+	q := internetQuery(dmzHost, 8443)
+	e := &evaluator{x: x, q: q, lim: evalLimits{paths: MaxPathsPerQuery, steps: 1}, chain: chain{max: 1}}
+	if out := e.run(); out.verdict == VerdictDenied {
+		t.Fatalf("full chain gave %s %q", out.verdict, out.reason)
+	}
+	if !e.chain.full || e.paths != 0 {
+		t.Fatalf("full chain: full %v, %d paths evaluated, want none", e.chain.full, e.paths)
+	}
+	r := x.evaluate(q, evalLimits{paths: MaxPathsPerQuery, steps: 1})
+	wantVerdict(t, r, VerdictUnknown, "limit reached")
+	// Inside a path: a full chain ends the rule loop with limit reached.
+	e = &evaluator{x: x, q: q, chain: chain{max: 0, full: true}}
+	if out := e.securityPath(packet{srcZone: "wan", dstZone: "dmz"}); out.verdict != VerdictUnknown || out.reason != ErrLimitReached.Error() {
+		t.Fatalf("securityPath on full chain: %s %q", out.verdict, out.reason)
+	}
+}
+
 func TestMostReachable(t *testing.T) {
 	o := func(v Verdict) outcome { return outcome{verdict: v, reason: string(v)} }
 	cases := []struct {
