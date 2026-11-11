@@ -1,0 +1,30 @@
+{
+  "openssl": {
+    "CVE-2024-0001": {
+      "description": "Example flaw in openssl",
+      "scope": "remote",
+      "debianbug": 1050000,
+      "releases": {
+        "bookworm": {"status": "resolved", "repositories": {"bookworm": "3.0.11-1~deb12u2"}, "fixed_version": "3.0.11-1~deb12u2", "urgency": "medium"},
+        "bullseye": {"status": "open", "repositories": {"bullseye": "1.1.1w-0+deb11u1"}, "urgency": "low", "nodsa": "Minor issue", "nodsa_reason": ""},
+        "buster": {"status": "open", "repositories": {"buster": "1.1.1n-0+deb10u6"}, "urgency": "end-of-life"},
+        "trixie": {"status": "resolved", "repositories": {"trixie": "3.1.4-2"}, "fixed_version": "0", "urgency": "unimportant"}
+      },
+      "future_field": {"nested": [1, 2, {"x": null}]}
+    },
+    "TEMP-0000000-ABCDEF": {
+      "releases": {
+        "bookworm": {"status": "open", "repositories": {"bookworm": "3.0.11-1~deb12u2"}, "urgency": "not yet assigned", "nodsa": "", "nodsa_reason": "postponed"},
+        "bullseye": {"status": "open", "repositories": {}, "urgency": "low**", "nodsa": "x", "nodsa_reason": "ignored"},
+        "sid": {"status": "undetermined", "repositories": {}, "urgency": "not yet assigned"}
+      }
+    }
+  },
+  "zlib": {
+    "CVE-2023-9999": {
+      "releases": {
+        "bookworm": {"status": "open", "repositories": {"bookworm": "1:1.2.13.dfsg-1"}, "urgency": "high"}
+      }
+    }
+  }
+}
