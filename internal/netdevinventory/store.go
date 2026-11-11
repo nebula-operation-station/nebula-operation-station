@@ -595,7 +595,7 @@ func (s *Store) replace(ctx context.Context, tx *sql.Tx, deviceID string, read R
 		// later of observed_at and the server clock.
 		cutoff := max(obs, nowM) - HistoryRetention(read).Microseconds()
 		for _, t := range readTables(read) {
-			n, err := carryOver(ctx, tx, t, prevID, prevObs, id, !incomplete, cutoff)
+			n, err := carryOver(ctx, tx, t, prevID, prevObs, id, !incomplete, carryScope(rows, t), cutoff)
 			if err != nil {
 				return ReplaceResult{}, err
 			}
