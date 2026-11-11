@@ -6,7 +6,9 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"flag"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +18,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/enrollscript"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
@@ -154,6 +157,21 @@ func TestEnrollScriptGolden(t *testing.T) {
 				t.Fatalf("script differs from %s:\n%s", p, out.String())
 			}
 		})
+	}
+}
+
+// TestEnrollScriptOverLimitWritesNothing: a script over the 64 KiB limit
+// (thousands of --from entries) is refused and nothing is printed.
+func TestEnrollScriptOverLimitWritesNothing(t *testing.T) {
+	f := &fakeKey{line: goldenKeyLine(t)}
+	var addrs []string
+	for i := 1; i <= 2000; i++ {
+		addrs = append(addrs, fmt.Sprintf("2001:db8:%x::/64", i))
+	}
+	var out strings.Builder
+	err := hostEnrollScript(context.Background(), f, []string{"--from", strings.Join(addrs, ",")}, &out)
+	if !errors.Is(err, enrollscript.ErrTooLarge) || out.Len() != 0 {
+		t.Fatalf("err %v, %d bytes written; want ErrTooLarge and no output", err, out.Len())
 	}
 }
 
