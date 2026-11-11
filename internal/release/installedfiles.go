@@ -426,9 +426,11 @@ func matchInstalledFiles(m Manifest, list []byte) (InstalledFiles, error) {
 	if art.Name == "" {
 		return InstalledFiles{}, fmt.Errorf("%w: the manifest lists no %s", ErrInstalledFiles, InstalledFilesArtifact)
 	}
-	sum := sha256.Sum256(list)
-	if int64(len(list)) != art.Size || hex.EncodeToString(sum[:]) != art.SHA256 {
-		return InstalledFiles{}, fmt.Errorf("%w: size or SHA-256 differs from the manifest", ErrInstalledFiles)
+	if int64(len(list)) != art.Size {
+		return InstalledFiles{}, fmt.Errorf("%w: size differs from the manifest", ErrInstalledFiles)
+	}
+	if sum := sha256.Sum256(list); hex.EncodeToString(sum[:]) != art.SHA256 {
+		return InstalledFiles{}, fmt.Errorf("%w: SHA-256 differs from the manifest", ErrInstalledFiles)
 	}
 	l, err := ParseInstalledFiles(list)
 	if err != nil {
