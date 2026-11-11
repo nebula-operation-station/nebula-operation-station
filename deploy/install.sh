@@ -713,7 +713,7 @@ refresh_units() {
   # record, or a first install would count as well.
   for name in "${restart_units[@]}"; do
     if restart_pending "${name}"; then
-      refreshed_units+=("${name}")
+      mark_refreshed "${name}"
     fi
   done
   for name in "${tarball_units[@]}"; do
@@ -734,13 +734,13 @@ refresh_units() {
           # Up to date; recording it also adopts it on a pre-manifest host. A
           # stopped run may have left the restart for it to this one.
           if unit_pending "${name}"; then
-            refreshed_units+=("${name}")
+            mark_refreshed "${name}"
           fi
         elif [[ "${current_sum}" == "${stored_sum}" ]] \
           || { [[ -z "${stored_sum}" ]] && is_legacy_unit "${name}" "${current_sum}"; } \
           || unit_pending "${name}" "${current_sum}"; then
           install_unit "${name}" "${shipped_sum}"
-          refreshed_units+=("${name}")
+          mark_refreshed "${name}"
           echo "install.sh: updated ${target} to the shipped version"
         else
           warn_kept_unit "${name}" "differs from the version Nebula installed"
@@ -777,6 +777,15 @@ unit_refreshed() {
     fi
   done
   return 1
+}
+
+# mark_refreshed NAME adds NAME to refreshed_units unless it is listed
+# already: a unit whose restart new binaries made due and whose file was
+# replaced in the same run is restarted once, not twice.
+mark_refreshed() {
+  if ! unit_refreshed "$1"; then
+    refreshed_units+=("$1")
+  fi
 }
 # end: unit refresh
 

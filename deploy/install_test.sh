@@ -2366,6 +2366,23 @@ if [[ -n "$start_block" ]]; then
   expect "netdev upgrade: the changed unit is applied" has_content "$refresh_sb/etc/$netdev_svc" "$netdev_svc v2"
   expect "netdev upgrade: a running collector gets try-restart" called "try-restart $netdev_svc"
   expect "netdev upgrade: the unit is still not enabled by the install" not_called "enable --now $netdev_svc"
+  # New binaries and a changed unit in one run: the restart on the pending
+  # record and the replaced unit name the collector twice, but it gets one
+  # try-restart.
+  saved_sandbox_binaries=("${sandbox_binaries[@]}")
+  sandbox_binaries+=(nebula-netdev-collector)
+  installed_host
+  reset_install
+  stub_active="$both_services $netdev_svc"
+  inst_bin_changed=1
+  inst_new_bins="nebula-server nebula-netdev-collector"
+  ship "$netdev_svc" "$netdev_svc v2"
+  run_install
+  expect "netdev binaries and unit changed: the run succeeds" rc_is 0
+  expect "netdev binaries and unit changed: the changed unit is applied" has_content "$refresh_sb/etc/$netdev_svc" "$netdev_svc v2"
+  expect "netdev binaries and unit changed: one try-restart of the collector" \
+    eval '[[ $(grep -cxF "try-restart $netdev_svc" "$systemctl_log") -eq 1 ]]'
+  sandbox_binaries=("${saved_sandbox_binaries[@]}")
   # Package mode never enables it either.
   reset_install
   inst_from_package=1
