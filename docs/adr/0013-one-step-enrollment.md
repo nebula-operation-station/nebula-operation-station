@@ -568,7 +568,8 @@ step until a narrower role exists.
   with `Content-Type: text/plain; charset=utf-8`, `Content-Disposition:
   attachment`, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`,
   `Content-Security-Policy: default-src 'none'; sandbox`; every refusal
-  (unknown, expired, consumed, revoked, malformed, rate-limited) is the same
+  (unknown, expired, consumed, revoked, malformed, rate-limited, trusted
+  proxy without a usable forwarded header) is the same
   `404` body with the same headers. The server does not log the path; the
   guide tells operators to exclude `/enroll/` from proxy access logs.
 - **Client address behind the reverse proxy.** The server sits behind the
@@ -576,27 +577,66 @@ step until a narrower role exists.
   new server setting, **trusted proxies** (list of IP addresses or CIDRs,
   default empty, validated at startup), decides whose forwarded headers
   count:
+  - **Normalisation.** Every address is normalised before it is compared
+    or used, the same way for the TCP peer, every `X-Forwarded-For` entry
+    and every configured trusted-proxy entry (`net/netip`): a port is
+    stripped (`r.RemoteAddr` and entries of the form `a.b.c.d:port` or
+    `[v6]:port`), an IPv6 zone ID is stripped, and an IPv4-mapped IPv6
+    address (`::ffff:10.0.0.1`) is unmapped to its IPv4 form. So a
+    dual-stack listener that sees the proxy as `[::ffff:10.0.0.5]:41234`
+    still matches a trusted proxy configured as `10.0.0.5`. A trusted-proxy
+    entry that does not parse fails startup.
   - If the TCP peer is not a trusted proxy, `X-Forwarded-For` and
     `Forwarded` are ignored and the peer address is the client address.
   - If the TCP peer is a trusted proxy, the server reads only
-    `X-Forwarded-For` (`Forwarded` is never used; at most 1 KiB, at most 16 entries, each a syntactically valid IP) and
-    walks it from the right, skipping entries that are themselves trusted
-    proxies; the first untrusted entry is the client address. Entries left
-    of it are client-supplied and ignored. A missing, oversized or malformed
-    header falls back to the peer address and is counted in a metric, never
-    trusted partially.
-  - The per-client rate limit and the `enroll_script_downloaded` audit
-    record use this client address; the audit record also carries the peer
-    address and whether the forwarded header was used.
-  - The shipped reverse proxy configuration must set (overwrite, not
-    append) `X-Forwarded-For` to the address it saw. If the endpoint is
-    enabled and no trusted proxy is configured while the server is not
-    reachable directly, all clients share the proxy's bucket: the server
-    logs a startup warning in that case (enrollment enabled, trusted
-    proxies empty, listener on loopback or a private address), and the
-    guide makes the setting part of the reverse-proxy setup.
-  This handling is limited to the enrollment endpoint in this ADR; other
-  routes keep their current address handling until a separate decision.
+    `X-Forwarded-For` (`Forwarded` is never used; at most 1 KiB, at most 16
+    entries, each a syntactically valid IP after normalisation; several
+    header lines count as one comma-joined list) and walks it from the
+    right, skipping entries that are themselves trusted proxies; the first
+    untrusted entry is the client address. Entries left of it are
+    client-supplied and ignored for the address, but still count for size,
+    entry and syntax checks (never a partial parse).
+  - **A trusted proxy without a usable header is refused.** If the header
+    is missing, larger than 1 KiB, has more than 16 entries, contains an
+    entry that is not a valid IP, or contains only trusted proxies, the
+    request gets the uniform `404` at once: the executor is not called, the
+    offer is not touched, and **no** rate-limit bucket is charged, neither
+    the proxy's address nor any address from the header. The refusal is
+    counted in a metric and logged without the path. There is no fallback
+    to the proxy's peer address, so behind an appending proxy (for example
+    nginx `$proxy_add_x_forwarded_for`) a client that sends a long or
+    garbage header only refuses its own request and cannot exhaust a bucket
+    shared by other operators. A separate global ceiling for such refusals
+    is not needed because they cost no executor call.
+  - The per-client rate limit (10 per minute and 60 per hour per client
+    address, IPv6 clients bucketed per /64 after normalisation) and the
+    `enroll_script_downloaded` audit record use this client address; the
+    audit record also carries the peer address and whether the forwarded
+    header was used.
+  - The shipped reverse proxy configuration should set (overwrite, not
+    append) `X-Forwarded-For` to the address it saw; with an appending proxy
+    the rules above still hold. If the endpoint is enabled and no trusted
+    proxy is configured while the server is not reachable directly, all
+    clients share the proxy's bucket: the server logs a startup warning in
+    that case (enrollment enabled, trusted proxies empty, listener on
+    loopback, a private address or a wildcard address `0.0.0.0` / `::`),
+    and the guide makes the setting part of the reverse-proxy setup.
+  - **Same client address for the whole flow.** The authenticated UI
+    requests of the enrollment flow (create offer, NetBird offer approval,
+    "Show script", browser download, code submission, approval, commit,
+    revoke, orphan-peer decision) determine the operator's client address
+    with the same rule and pass it to the executor, so every audit record of
+    the flow (`enroll_offer_created`, `enroll_offer_approved`,
+    `enroll_code_rejected`, `enroll_code_mismatch`, `enroll_paired_proposed`,
+    `host_enrolled`, `enroll_offer_revoked`, `inventory_endpoint_added`,
+    `netbird_peer_deleted`, `netbird_peer_kept`, and the setup-key records
+    triggered by an operator action) carries the client address and the
+    peer address, not only the proxy's address. For these authenticated
+    requests a trusted proxy without a usable header is refused like the
+    download (`400` with the UI's normal error page; no state change).
+  Other routes keep their current address handling and rate limits until a
+  separate decision; this ADR only adds the shared client-address function
+  and uses it for the routes above.
 - **Integrity:** the SHA-256 of the script is computed by the executor and
   shown on the offer page; the command checks it before running. A changed
   script (proxy, cache, wrong offer) does not run.
@@ -674,6 +714,8 @@ this ADR either.
 | NetBird token misuse | Executor vault, typed calls only, audit, dedicated service user | Role may be broader than needed (Q3) |
 | Hostile host output (addresses) | Addresses are hints the operator retypes; endpoint syntax validated; text-only rendering | — |
 | Offer flooding | Limits per executor and hour; offers require a privileged session | — |
+| Shared rate-limit bucket starved through the reverse proxy | Addresses normalised (port, zone ID, IPv4-mapped IPv6) before the trusted-proxy match; a trusted proxy's request with a missing, oversized or malformed `X-Forwarded-For` is refused without charging any bucket; startup warning for loopback, private and wildcard listeners without trusted proxies | An attacker behind the same client address (or /64) as the operator shares the operator's bucket |
+| Audit records naming only the proxy | The same client-address rule for every request of the enrollment flow; records carry client and peer address | Other routes unchanged until a separate decision |
 
 ## Non-goals
 
