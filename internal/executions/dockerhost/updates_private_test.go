@@ -143,6 +143,16 @@ func TestResolvePrivateDigestsRateLimitedNote(t *testing.T) {
 		privateNoteRateLimited == privateNoteRefused {
 		t.Fatalf("note = %q", privateNoteRateLimited)
 	}
+	// The executor's per-repository and the server's per-host distinct-tag
+	// caps refuse as rate limits too; the note names them.
+	for _, want := range []string{"distinct tags", "per repository", "per host"} {
+		if !strings.Contains(privateNoteRateLimited, want) {
+			t.Fatalf("note %q does not name %q", privateNoteRateLimited, want)
+		}
+	}
+	if len(privateNoteRateLimited) > 200 {
+		t.Fatalf("note is %d bytes, over the 200-byte note bound", len(privateNoteRateLimited))
+	}
 }
 
 // pendingSource answers like a cache-only DigestReader render before the
