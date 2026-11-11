@@ -15,7 +15,8 @@ package netdevinventory
 // separately polled parts of one firewall_policy dataset; each is stored
 // as a PolicyPartRows, which replaces only the rows of its own part: rows
 // of the other parts are carried over unchanged and never marked absent
-// by a part that did not read them.
+// by a part that did not read them. Ordering and completeness are tracked
+// per part (policyparts.go).
 
 import (
 	"errors"
