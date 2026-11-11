@@ -231,7 +231,10 @@ func TestPruneCapsSnapshotCount(t *testing.T) {
 	s, db, _ := newTestStore(t)
 	addDevice(t, s, cbsDevice())
 	ctx := context.Background()
-	// Superseded VLAN datasets within the window, inserted directly.
+	cur := mustReplace(t, s, "sw-core", ReadVLANs, testBase, false, VLANRows{{ID: 1}})
+	// Superseded VLAN datasets within the window, inserted directly after
+	// the last write (so bypassing its write-path bound): Prune must cap
+	// them on its own.
 	const extra = 3
 	tx, err := db.Begin()
 	if err != nil {
@@ -248,7 +251,6 @@ func TestPruneCapsSnapshotCount(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	cur := mustReplace(t, s, "sw-core", ReadVLANs, testBase, false, VLANRows{{ID: 1}})
 	var oldestKept int64
 	rep, err := s.Prune(ctx)
 	if err != nil {

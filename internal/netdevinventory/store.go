@@ -19,10 +19,12 @@
 //     with the time they were last seen; nothing is silently deleted;
 //   - a dataset observed under another trust generation than the device's
 //     current one is refused inside the write transaction;
-//   - superseded datasets stay as history until retention (Q11) removes
-//     them; the newest dataset per (device, read) is never removed; MAC,
+//   - superseded datasets stay as history within the retention window
+//     (Q11); every write enforces that window and MaxHistoryPerRead for its
+//     (device, read) in its own transaction, Prune does the same for all
+//     devices; the newest dataset per (device, read) is never removed; MAC,
 //     LLDP and hit-count history closer than MinHistorySpacing collapses
-//     into the next dataset, so its size does not depend on the write rate;
+//     into the next dataset; an observed_at before the window is refused;
 //   - a device or dataset not refreshed for StaleAfterIntervals poll
 //     intervals is marked stale, never deleted.
 //
@@ -128,6 +130,11 @@ var (
 	// ErrFutureObservation is returned for observed_at more than
 	// MaxFutureSkew ahead of the server clock.
 	ErrFutureObservation = errors.New("netdevinventory: observed_at in the future")
+	// ErrObservationTooOld is returned for observed_at before the
+	// retention window of the read (server clock minus HistoryRetention).
+	// Nothing is written: stored, the dataset would be history that
+	// retention removes at once.
+	ErrObservationTooOld = errors.New("netdevinventory: observed_at before retention window")
 	// ErrTrustGenerationRegressed is returned when a device update carries
 	// a lower trust generation than the stored one.
 	ErrTrustGenerationRegressed = errors.New("netdevinventory: trust generation regressed")
@@ -402,14 +409,22 @@ type ReplaceResult struct {
 // written: a concurrent re-pin either commits first (and the dataset is
 // refused) or waits until the dataset is stored.
 //
-// A dataset older than the current one is refused with ErrOutOfOrder; the
-// same dataset delivered again is a no-op. An identical payload only
-// advances observed_at. Otherwise the previous dataset becomes history and
-// its rows missing from the new read are carried over: as absent after a
-// complete read, unchanged after a partial one. For reads with a
-// MinHistorySpacing, a previous dataset closer than that to the newest
-// history entry is not kept as history: it collapses into the new dataset,
-// which carries its rows.
+// A dataset older than the current one is refused with ErrOutOfOrder, and
+// one observed before the read's retention window with
+// ErrObservationTooOld; the same dataset delivered again is a no-op. An
+// identical payload only advances observed_at. Otherwise the previous
+// dataset becomes history and its rows missing from the new read are
+// carried over: as absent after a complete read, unchanged after a partial
+// one. For reads with a MinHistorySpacing, a previous dataset closer than
+// that to the newest history entry is not kept as history: it collapses
+// into the new dataset, which carries its rows.
+//
+// Before the transaction commits, the history of (deviceID, read) is
+// bounded: superseded datasets older than HistoryRetention are removed and
+// the rest is trimmed to MaxHistoryPerRead, oldest first. The current
+// dataset is never removed. So after every committed write the (device,
+// read) holds at most MaxHistoryPerRead + 1 datasets, whatever the write
+// rate or the observed_at values, and whether or not Prune runs.
 func (s *Store) ReplaceDataset(ctx context.Context, deviceID string, read Read, trustGeneration uint64, observedAt time.Time, incomplete bool, rows Rows) (ReplaceResult, error) {
 	if PollInterval(read) == 0 {
 		return ReplaceResult{}, ErrUnknownRead
@@ -423,6 +438,9 @@ func (s *Store) ReplaceDataset(ctx context.Context, deviceID string, read Read, 
 	now := s.now()
 	if observedAt.After(now.Add(MaxFutureSkew)) {
 		return ReplaceResult{}, ErrFutureObservation
+	}
+	if observedAt.Before(now.Add(-HistoryRetention(read))) {
+		return ReplaceResult{}, fmt.Errorf("netdevinventory: device %s read %s: %w", deviceID, read, ErrObservationTooOld)
 	}
 	var res ReplaceResult
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
@@ -569,6 +587,11 @@ func (s *Store) replace(ctx context.Context, tx *sql.Tx, deviceID string, read R
 				return ReplaceResult{}, fmt.Errorf("netdevinventory: collapse dataset: %w", err)
 			}
 		}
+	}
+	// Bound this (device, read)'s history in the same transaction, so it
+	// holds after every write, not only after Prune.
+	if _, err := boundHistory(ctx, tx, read, deviceID, now); err != nil {
+		return ReplaceResult{}, err
 	}
 	if err := s.runHook("commit"); err != nil {
 		return ReplaceResult{}, err

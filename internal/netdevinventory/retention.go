@@ -41,23 +41,69 @@ func HistoryRetention(r Read) time.Duration {
 	return SnapshotRetention
 }
 
-// countCapped reports whether the superseded datasets of read are also
-// bounded by MaxSnapshotsPerRead. MAC, LLDP and hit-count history is
-// bounded by its time window and MinHistorySpacing instead.
+// countCapped reports whether the superseded datasets of read are capped
+// at MaxSnapshotsPerRead (facts, ports, VLANs, firewall policy). MAC, LLDP
+// and hit-count history is spaced by MinHistorySpacing instead, and its
+// cap follows from that spacing (see MaxHistoryPerRead).
 func countCapped(r Read) bool { return HistoryRetention(r) == SnapshotRetention }
 
 // MinHistorySpacing returns the minimum distance in observed_at between two
 // superseded datasets of read that ReplaceDataset keeps, or 0 for reads
-// bounded by MaxSnapshotsPerRead. It is half the poll interval, so normal
-// polling keeps every dataset, while a replaying or misbehaving writer
-// cannot grow MAC, LLDP or hit-count history beyond
-// HistoryRetention/MinHistorySpacing + 1 superseded datasets per (device,
-// read), whatever its rate.
+// capped at MaxSnapshotsPerRead. It is half the poll interval, so normal
+// polling keeps every dataset while denser writes collapse.
 func MinHistorySpacing(r Read) time.Duration {
 	if countCapped(r) || PollInterval(r) == 0 {
 		return 0
 	}
 	return PollInterval(r) / 2
+}
+
+// MaxHistoryPerRead returns the most superseded datasets one (device,
+// read) keeps: MaxSnapshotsPerRead for count-capped reads, and
+// HistoryRetention/MinHistorySpacing + 1 for MAC, LLDP and hit counts
+// (more than normal polling produces over the window, so the cap only
+// bites on a replaying or misbehaving writer).
+func MaxHistoryPerRead(r Read) int {
+	if sp := MinHistorySpacing(r); sp > 0 {
+		return int(HistoryRetention(r)/sp) + 1
+	}
+	return MaxSnapshotsPerRead
+}
+
+// boundHistory enforces the history limits of read inside tx: superseded
+// datasets observed before now minus HistoryRetention are removed, and
+// the remaining superseded datasets are trimmed to MaxHistoryPerRead per
+// device, oldest first. Current datasets are never removed. With
+// deviceID empty it applies to every device (Prune); ReplaceDataset calls
+// it for the written (device, read) in its own transaction, so the bound
+// holds after every write whether or not Prune runs. Rows of removed
+// datasets go with them (ON DELETE CASCADE).
+func boundHistory(ctx context.Context, tx *sql.Tx, read Read, deviceID string, now time.Time) (int64, error) {
+	devFilter := ""
+	args := []any{string(read), micros(now.Add(-HistoryRetention(read)))}
+	if deviceID != "" {
+		devFilter = " AND device_id = ?"
+		args = append(args, deviceID)
+	}
+	aged, err := exec(ctx, tx, `DELETE FROM netdev_datasets
+		WHERE read = ? AND current = 0 AND observed_at < ?`+devFilter, args...)
+	if err != nil {
+		return 0, fmt.Errorf("netdevinventory: drop aged %s history: %w", read, err)
+	}
+	args = []any{string(read)}
+	if deviceID != "" {
+		args = append(args, deviceID)
+	}
+	args = append(args, MaxHistoryPerRead(read))
+	capped, err := exec(ctx, tx, `DELETE FROM netdev_datasets WHERE current = 0 AND id IN (
+		SELECT id FROM (
+			SELECT id, ROW_NUMBER() OVER (PARTITION BY device_id ORDER BY observed_at DESC, id DESC) AS rn
+			FROM netdev_datasets WHERE read = ? AND current = 0`+devFilter+`)
+		WHERE rn > ?)`, args...)
+	if err != nil {
+		return 0, fmt.Errorf("netdevinventory: cap %s history: %w", read, err)
+	}
+	return aged + capped, nil
 }
 
 // PruneReport counts what Prune removed.
@@ -72,8 +118,12 @@ type PruneReport struct {
 	ConfigVersions int64
 }
 
-// Prune applies the Q11 retention in one transaction. It never removes
-// the current (newest) dataset of a (device, read), a device, the newest
+// Prune applies the Q11 retention in one transaction: the bulk, periodic
+// form of the history bound ReplaceDataset already enforces per write
+// (boundHistory over all devices), plus removal of expired carried rows
+// and of config versions. Superseded datasets age out of their window
+// even for a device that is no longer written. It never removes the
+// current (newest) dataset of a (device, read), a device, the newest
 // config version of a (device, config), the approved baseline or a
 // version bound to a change in the last ConfigVersionRetention.
 func (s *Store) Prune(ctx context.Context) (PruneReport, error) {
@@ -82,23 +132,11 @@ func (s *Store) Prune(ctx context.Context) (PruneReport, error) {
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		for _, rd := range Reads {
 			cutoff := micros(now.Add(-HistoryRetention(rd)))
-			n, err := exec(ctx, tx, `DELETE FROM netdev_datasets
-				WHERE read = ? AND current = 0 AND observed_at < ?`, string(rd), cutoff)
+			n, err := boundHistory(ctx, tx, rd, "", now)
 			if err != nil {
-				return fmt.Errorf("netdevinventory: prune %s datasets: %w", rd, err)
+				return err
 			}
 			rep.Datasets += n
-			if countCapped(rd) {
-				n, err := exec(ctx, tx, `DELETE FROM netdev_datasets WHERE current = 0 AND id IN (
-					SELECT id FROM (
-						SELECT id, ROW_NUMBER() OVER (PARTITION BY device_id ORDER BY observed_at DESC, id DESC) AS rn
-						FROM netdev_datasets WHERE read = ? AND current = 0)
-					WHERE rn > ?)`, string(rd), MaxSnapshotsPerRead)
-				if err != nil {
-					return fmt.Errorf("netdevinventory: cap %s datasets: %w", rd, err)
-				}
-				rep.Datasets += n
-			}
 			for _, t := range readTables(rd) {
 				n, err := exec(ctx, tx, `DELETE FROM `+t.name+` WHERE seen_at IS NOT NULL AND seen_at < ?
 					AND dataset_id IN (SELECT id FROM netdev_datasets WHERE read = ?)`, cutoff, string(rd))
