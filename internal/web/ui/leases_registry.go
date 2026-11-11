@@ -49,7 +49,11 @@ type RegistryReads interface {
 	RegistryLeases(ctx context.Context) ([]registrymeta.LeaseView, error)
 	// ResolveImageUpdates fills executor-read digests into a
 	// docker.check_updates result (dockerhost.ResolvePrivateDigestsWith);
-	// on any failure it returns u unchanged.
+	// on any failure it returns u unchanged. ctx may carry
+	// registrymeta.WithCacheOnly (page renders: answer from memory, read
+	// in the background) and registrymeta.WithReadHost (the host the
+	// result came from, for the per-host caps); the server's
+	// registrymeta.DigestReader honours both.
 	ResolveImageUpdates(ctx context.Context, u dockerhost.ImageUpdates) dockerhost.ImageUpdates
 }
 
@@ -179,6 +183,15 @@ func (h *Handler) handleRegistryLeasePreview(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "private registry leases are not available", http.StatusBadRequest)
 		return
 	}
+	// The per-user throttle comes first: every later step calls the
+	// executor, so repeated POSTs never reach it faster than the interval.
+	user := webUser(r)
+	now := h.clockNow()
+	if !h.leaseProposals.allow(user, now) {
+		w.Header().Set("Retry-After", strconv.Itoa(int(leasePreviewInterval/time.Second)))
+		http.Error(w, "at most one read lease preview every 10 seconds: wait and try again", http.StatusTooManyRequests)
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), operationsCallTimeout)
 	defer cancel()
 	known, err := h.registryReads.PrivateRegistries(ctx)
@@ -190,13 +203,6 @@ func (h *Handler) handleRegistryLeasePreview(w http.ResponseWriter, r *http.Requ
 	req, reason := checkRegistryLeaseForm(r.PostForm, known)
 	if reason != "" {
 		http.Error(w, reason, http.StatusBadRequest)
-		return
-	}
-	user := webUser(r)
-	now := h.clockNow()
-	if !h.leaseProposals.allow(user, now) {
-		w.Header().Set("Retry-After", strconv.Itoa(int(leasePreviewInterval/time.Second)))
-		http.Error(w, "at most one read lease preview every 10 seconds: wait and try again", http.StatusTooManyRequests)
 		return
 	}
 	p, err := h.registryReads.ProposeRegistryLease(ctx, user, req)
