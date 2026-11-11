@@ -79,18 +79,15 @@ func MaxHistoryPerRead(r Read) int {
 // holds after every write whether or not Prune runs. Rows of removed
 // datasets go with them (ON DELETE CASCADE).
 func boundHistory(ctx context.Context, tx *sql.Tx, read Read, deviceID string, now time.Time) (int64, error) {
+	aged, err := dropAgedHistory(ctx, tx, read, deviceID, now)
+	if err != nil {
+		return 0, err
+	}
 	devFilter := ""
-	args := []any{string(read), micros(now.Add(-HistoryRetention(read)))}
 	if deviceID != "" {
 		devFilter = " AND device_id = ?"
-		args = append(args, deviceID)
 	}
-	aged, err := exec(ctx, tx, `DELETE FROM netdev_datasets
-		WHERE read = ? AND current = 0 AND observed_at < ?`+devFilter, args...)
-	if err != nil {
-		return 0, fmt.Errorf("netdevinventory: drop aged %s history: %w", read, err)
-	}
-	args = []any{string(read)}
+	args := []any{string(read)}
 	if deviceID != "" {
 		args = append(args, deviceID)
 	}
@@ -104,6 +101,82 @@ func boundHistory(ctx context.Context, tx *sql.Tx, read Read, deviceID string, n
 		return 0, fmt.Errorf("netdevinventory: cap %s history: %w", read, err)
 	}
 	return aged + capped, nil
+}
+
+// dropAgedHistory removes the superseded datasets of read observed before
+// now minus HistoryRetention, for deviceID or (empty) every device. For
+// one device it is a range delete on idx_netdev_datasets_history.
+func dropAgedHistory(ctx context.Context, tx *sql.Tx, read Read, deviceID string, now time.Time) (int64, error) {
+	devFilter := ""
+	args := []any{string(read), micros(now.Add(-HistoryRetention(read)))}
+	if deviceID != "" {
+		devFilter = " AND device_id = ?"
+		args = append(args, deviceID)
+	}
+	n, err := exec(ctx, tx, `DELETE FROM netdev_datasets
+		WHERE read = ? AND current = 0 AND observed_at < ?`+devFilter, args...)
+	if err != nil {
+		return 0, fmt.Errorf("netdevinventory: drop aged %s history: %w", read, err)
+	}
+	return n, nil
+}
+
+// boundUnchanged enforces the retention window of (deviceID, read) on a
+// write that keeps the current dataset (identical payload or redelivery):
+// superseded datasets that left the window are removed, and so are rows
+// carried over with a seen_at before it, in every kept dataset of the
+// (device, read). The current dataset itself is not rewritten. Such a
+// write adds no history, so the count cap cannot be newly exceeded and is
+// not rechecked.
+func boundUnchanged(ctx context.Context, tx *sql.Tx, read Read, deviceID string, now time.Time) error {
+	if _, err := dropAgedHistory(ctx, tx, read, deviceID, now); err != nil {
+		return err
+	}
+	_, err := dropExpiredCarried(ctx, tx, read, deviceID, now)
+	return err
+}
+
+// carriedIndex returns the name of the partial index on (dataset_id,
+// seen_at) WHERE seen_at IS NOT NULL of row table t (migration 0039),
+// which dropExpiredCarried's DELETE uses.
+func carriedIndex(t *table) string { return "idx_" + t.name + "_carried" }
+
+// expiredCarriedSQL returns the DELETE of dropExpiredCarried for row table
+// t. Its parameters are the cutoff, the read and, with byDevice, the
+// device ID.
+func expiredCarriedSQL(t *table, byDevice bool) string {
+	devFilter := ""
+	if byDevice {
+		devFilter = " AND device_id = ?"
+	}
+	return `DELETE FROM ` + t.name + ` WHERE seen_at IS NOT NULL AND seen_at < ?
+		AND dataset_id IN (SELECT id FROM netdev_datasets WHERE read = ?` + devFilter + `)`
+}
+
+// dropExpiredCarried removes rows carried over with a seen_at before now
+// minus HistoryRetention (strictly before: a row seen exactly at the
+// cutoff is kept) from every dataset of read, current or superseded, for
+// deviceID or (empty) every device. It runs on every write, so it must
+// not walk the rows of the history: for one device it is one DELETE per
+// row table, the datasets come from idx_netdev_datasets_history (at most
+// MaxHistoryPerRead + 1 after the bound) and, per dataset, only the
+// expired carried rows are visited, as a range on the partial index
+// carriedIndex (dataset_id, seen_at) WHERE seen_at IS NOT NULL. Present
+// rows (seen_at NULL) are not in that index and never touched.
+func dropExpiredCarried(ctx context.Context, tx *sql.Tx, read Read, deviceID string, now time.Time) (int64, error) {
+	args := []any{micros(now.Add(-HistoryRetention(read))), string(read)}
+	if deviceID != "" {
+		args = append(args, deviceID)
+	}
+	var total int64
+	for _, t := range readTables(read) {
+		n, err := exec(ctx, tx, expiredCarriedSQL(t, deviceID != ""), args...)
+		if err != nil {
+			return 0, fmt.Errorf("netdevinventory: drop expired carried %s rows: %w", t.name, err)
+		}
+		total += n
+	}
+	return total, nil
 }
 
 // PruneReport counts what Prune removed.
@@ -131,20 +204,16 @@ func (s *Store) Prune(ctx context.Context) (PruneReport, error) {
 	var rep PruneReport
 	err := s.withTx(ctx, func(tx *sql.Tx) error {
 		for _, rd := range Reads {
-			cutoff := micros(now.Add(-HistoryRetention(rd)))
 			n, err := boundHistory(ctx, tx, rd, "", now)
 			if err != nil {
 				return err
 			}
 			rep.Datasets += n
-			for _, t := range readTables(rd) {
-				n, err := exec(ctx, tx, `DELETE FROM `+t.name+` WHERE seen_at IS NOT NULL AND seen_at < ?
-					AND dataset_id IN (SELECT id FROM netdev_datasets WHERE read = ?)`, cutoff, string(rd))
-				if err != nil {
-					return fmt.Errorf("netdevinventory: prune carried %s rows: %w", t.name, err)
-				}
-				rep.CarriedRows += n
+			n, err = dropExpiredCarried(ctx, tx, rd, "", now)
+			if err != nil {
+				return err
 			}
+			rep.CarriedRows += n
 		}
 		n, err := pruneConfigVersions(ctx, tx, now)
 		if err != nil {

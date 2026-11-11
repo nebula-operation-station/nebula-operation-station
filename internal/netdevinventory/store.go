@@ -411,8 +411,10 @@ type ReplaceResult struct {
 //
 // A dataset older than the current one is refused with ErrOutOfOrder, and
 // one observed before the read's retention window with
-// ErrObservationTooOld; the same dataset delivered again is a no-op. An
-// identical payload only advances observed_at. Otherwise the previous
+// ErrObservationTooOld. The same dataset delivered again stores nothing
+// (the dataset is not rewritten), and an identical payload only advances
+// observed_at; both still enforce the retention window (see below).
+// Otherwise the previous
 // dataset becomes history and its rows missing from the new read are
 // carried over: as absent after a complete read, unchanged after a partial
 // one. For reads with a MinHistorySpacing, a previous dataset closer than
@@ -420,11 +422,18 @@ type ReplaceResult struct {
 // into the new dataset, which carries its rows.
 //
 // Before the transaction commits, the history of (deviceID, read) is
-// bounded: superseded datasets older than HistoryRetention are removed and
-// the rest is trimmed to MaxHistoryPerRead, oldest first. The current
-// dataset is never removed. So after every committed write the (device,
-// read) holds at most MaxHistoryPerRead + 1 datasets, whatever the write
-// rate or the observed_at values, and whether or not Prune runs.
+// bounded: superseded datasets older than HistoryRetention are removed,
+// the rest is trimmed to MaxHistoryPerRead, oldest first, and carried rows
+// whose seen_at left the window are removed from every kept dataset,
+// current or superseded. The current dataset is never removed. So after
+// every committed write the (device, read) holds at most MaxHistoryPerRead
+// + 1 datasets and no carried row older than the window, whatever the
+// write rate or the observed_at values, and whether or not Prune runs. An
+// identical payload or a redelivery runs the window part of that bound
+// too (it adds no history, so the cap cannot grow): aged superseded
+// datasets and expired carried rows of every kept dataset are removed
+// inside the transaction, without rewriting the current dataset. So the
+// window holds for a (device, read) whose payload never changes again.
 func (s *Store) ReplaceDataset(ctx context.Context, deviceID string, read Read, trustGeneration uint64, observedAt time.Time, incomplete bool, rows Rows) (ReplaceResult, error) {
 	if PollInterval(read) == 0 {
 		return ReplaceResult{}, ErrUnknownRead
@@ -510,7 +519,12 @@ func (s *Store) replace(ctx context.Context, tx *sql.Tx, deviceID string, read R
 		case obs < prevObs:
 			return ReplaceResult{}, fmt.Errorf("netdevinventory: device %s read %s: %w", deviceID, read, ErrOutOfOrder)
 		case obs == prevObs && same:
-			return ReplaceResult{DatasetID: prevID, Unchanged: true}, nil
+			// Nothing to store, but the window still holds for the
+			// history behind the current dataset.
+			if err := boundUnchanged(ctx, tx, read, deviceID, now); err != nil {
+				return ReplaceResult{}, err
+			}
+			return ReplaceResult{DatasetID: prevID, Unchanged: true}, s.runHook("commit")
 		case obs == prevObs:
 			return ReplaceResult{}, fmt.Errorf("netdevinventory: device %s read %s: %w", deviceID, read, ErrOutOfOrder)
 		}
@@ -522,6 +536,11 @@ func (s *Store) replace(ctx context.Context, tx *sql.Tx, deviceID string, read R
 		if _, err := tx.ExecContext(ctx, `UPDATE netdev_datasets SET observed_at = ?, stored_at = ?, state = ?
 			WHERE id = ?`, obs, nowM, string(state), prevID); err != nil {
 			return ReplaceResult{}, fmt.Errorf("netdevinventory: advance dataset: %w", err)
+		}
+		// A (device, read) whose payload never changes again must still
+		// lose history that leaves the window, without Prune.
+		if err := boundUnchanged(ctx, tx, read, deviceID, now); err != nil {
+			return ReplaceResult{}, err
 		}
 		return ReplaceResult{DatasetID: prevID, Unchanged: true}, s.runHook("commit")
 	}
@@ -572,7 +591,9 @@ func (s *Store) replace(ctx context.Context, tx *sql.Tx, deviceID string, read R
 	}
 	res := ReplaceResult{DatasetID: id}
 	if hasPrev {
-		cutoff := obs - HistoryRetention(read).Microseconds()
+		// Carry nothing that already left the window, measured from the
+		// later of observed_at and the server clock.
+		cutoff := max(obs, nowM) - HistoryRetention(read).Microseconds()
 		for _, t := range readTables(read) {
 			n, err := carryOver(ctx, tx, t, prevID, prevObs, id, !incomplete, cutoff)
 			if err != nil {
@@ -589,8 +610,12 @@ func (s *Store) replace(ctx context.Context, tx *sql.Tx, deviceID string, read R
 		}
 	}
 	// Bound this (device, read)'s history in the same transaction, so it
-	// holds after every write, not only after Prune.
+	// holds after every write, not only after Prune: aged and surplus
+	// datasets go, and expired carried rows leave every kept dataset.
 	if _, err := boundHistory(ctx, tx, read, deviceID, now); err != nil {
+		return ReplaceResult{}, err
+	}
+	if _, err := dropExpiredCarried(ctx, tx, read, deviceID, now); err != nil {
 		return ReplaceResult{}, err
 	}
 	if err := s.runHook("commit"); err != nil {

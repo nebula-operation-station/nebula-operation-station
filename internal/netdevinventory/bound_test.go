@@ -31,6 +31,9 @@ func boundCases() []boundCase {
 		{ReadVLANs, cbsDevice(), func(i int) Rows { return VLANRows{{ID: uint16(i%3 + 1)}} }},
 		{ReadFacts, cbsDevice(), func(i int) Rows { return factsRowsFor(i) }},
 		{ReadMACTable, cbsDevice(), func(i int) Rows { return MACRows{mac(byte(i % 3))} }},
+		{ReadLLDPNeighbors, cbsDevice(), func(i int) Rows {
+			return LLDPRows{{LocalPort: "gi1/0/1", ChassisID: "c", PortID: string(rune('a' + i%3))}}
+		}},
 		{ReadFirewallPolicy, panosDevice(), func(i int) Rows { return policy("rule-" + string(rune('a'+i%3))) }},
 		{ReadHitCounts, panosDevice(), func(i int) Rows {
 			return HitCountRows{{RuleName: "rule-a", Hits: uint64(i + 1), LastHit: &testBase}}
