@@ -87,7 +87,7 @@ func TestParseNVDRejectsMalformed(t *testing.T) {
 		{"bad lastModified", feed(`{"cve":{"id":"CVE-2024-0001","published":"2024-10-21T13:15:02","lastModified":"x"}}`), ErrFeedMalformed},
 		{"bad status", feed(item(`,"vulnStatus":"<b>"`)), ErrFeedMalformed},
 		{"control in description", feed(item(`,"descriptions":[{"lang":"en","value":"a\u001b[31m"}]`)), ErrFeedMalformed},
-		{"bidi in description", feed(item(`,"descriptions":[{"lang":"en","value":"a‮b"}]`)), ErrFeedMalformed},
+		{"bidi in description", feed(item(`,"descriptions":[{"lang":"en","value":"a` + `\` + `u202eb"}]`)), ErrFeedMalformed},
 		{"version mismatch", feed(metric("cvssMetricV31", `{"version":"3.0","vectorString":"CVSS:3.1/AV:N","baseScore":5.0,"baseSeverity":"MEDIUM"}`)), ErrFeedMalformed},
 		{"vector prefix", feed(metric("cvssMetricV31", `{"version":"3.1","vectorString":"CVSS:4.0/AV:N","baseScore":5.0,"baseSeverity":"MEDIUM"}`)), ErrFeedMalformed},
 		{"score above 10", feed(metric("cvssMetricV40", `{"version":"4.0","vectorString":"CVSS:4.0/AV:N","baseScore":10.1,"baseSeverity":"CRITICAL"}`)), ErrFeedMalformed},

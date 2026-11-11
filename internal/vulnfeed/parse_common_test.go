@@ -176,13 +176,13 @@ func TestCheckTextRejectsControlAndBidi(t *testing.T) {
 		}
 	}
 	bad := map[string]error{
-		"esc\x1b[31m":            ErrFeedMalformed,
-		"del\x7f":                ErrFeedMalformed,
-		"c1\u0085":               ErrFeedMalformed,
-		"rlo‮":                   ErrFeedMalformed,
-		"isolate⁦":               ErrFeedMalformed,
-		"bad\xff":                ErrFeedMalformed,
-		strings.Repeat("x", 101): ErrFeedLimit,
+		"esc\x1b[31m":                    ErrFeedMalformed,
+		"del\x7f":                        ErrFeedMalformed,
+		"c1\u0085":                       ErrFeedMalformed,
+		"rlo" + string(rune(0x202e)):     ErrFeedMalformed,
+		"isolate" + string(rune(0x2066)): ErrFeedMalformed,
+		"bad\xff":                        ErrFeedMalformed,
+		strings.Repeat("x", 101):         ErrFeedLimit,
 	}
 	for s, want := range bad {
 		if err := checkText(s, 100); !errors.Is(err, want) {
