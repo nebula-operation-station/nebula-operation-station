@@ -370,7 +370,9 @@ of `InRelease` and decompression of `data.tar.xz` (Debian) and
   the vuln agent only for CSAF signatures (ADR 0011 A1.6); using it for
   `InRelease` and adding xz and zstd decompressors are new maintainer
   decisions. Until Q6 is answered, package files are compared against the
-  baseline like any other file, and the UI says so.
+  baseline like any other file, and the UI says so; a package file changed
+  during a NOS apt job is then always "changed during NOS job, unverified"
+  (D9), never an expected change.
 
 ### D9: Change detection, attribution, findings and notifications
 
@@ -395,16 +397,46 @@ alone.** A change is *expected* only when all of these hold:
   executor authorized (apt install/upgrade, a module action that declares
   the paths it writes, an ADR 0007 batch member), and
 - for a package file: the package and new version are in the job's
-  result and the new hash equals the archive reference for that version
-  (or the reference is unavailable, which is labelled), and
-- for a non-package file: the job's action contract declares the path and
-  (where the action deploys a known artifact) the new hash equals it.
+  result **and** the new hash equals a **verified** archive reference for
+  that version (D7 item 1, built by D8), and
+- for a non-package file: the job's action contract declares the path
+  **and** the new hash equals content the executor itself knows: the bytes
+  it sent or the artifact it deployed.
+
+**Without a verified reference a change is never expected.** If no
+verified per-file reference exists for the package version (always the
+case until Q6 is answered, and afterwards for versions that left the
+archive, D8 "Old versions"), or if a declared non-package path was
+rewritten by a command whose resulting content the executor does not know,
+the change is classed **"changed during NOS job, unverified"**:
+
+- it is an open finding of severity **high** (D9 table), never
+  info-level and never `expected_pending`;
+- it is **never approved together with the job**, in any mode (Q3 does
+  not apply to it); the admin approves it only through a separate
+  baseline approval (D7) whose screen labels every such entry
+  "unverified: NOS cannot tell this change from an attacker's change made
+  during the job". Batch approval of the unverified entries of one job is
+  allowed, but the batch is its own assertion and never part of the job
+  approval;
+- host-side evidence does **not** make it verified:
+  `/var/lib/dpkg/info/*.md5sums`, `debsums` and `dpkg --verify` are
+  controlled by the same root that could have replaced the file, and
+  MD5 is broken (D7). Only the signed-archive chain of D7 item 1 counts as
+  a verified reference.
+
+Consequently, before Q6 every package file changed by a NOS apt job is an
+unverified finding the admin must review; this is the deliberate price of
+keeping the next sentence true.
 
 Expected changes update the baseline as **pending** and are shown as
 "changed by NOS job <id>"; they still need the admin's baseline approval
 (D7) in hardened mode and are approved together with the job in standard
-mode (Q3). Anything else changed in the same window is a finding: an
-attacker cannot hide behind a running apt job. Package updates done on the
+mode (Q3). Anything else changed in the same window, and every unverified
+change, is a finding: an attacker cannot hide behind a running apt job,
+because a replaced `/usr/sbin/sshd` during an approved `openssh-server`
+upgrade either fails the verified reference or has none, and both are
+findings the admin sees separately from the job. Package updates done on the
 host outside NOS (for example unattended-upgrades) whose new hashes match
 the signed archive reference are low-severity findings ("package updated
 outside NOS"), not alarms.
@@ -419,7 +451,7 @@ dedupe follow ADR 0011 D6/D9 patterns. Severity by class:
 | Class | Severity |
 | --- | --- |
 | Package file differs from signed reference; NOS binary/unit mismatch (I1); new or changed `authorized_keys`, `sudoers`, PAM, `sshd_config`, `ld.so.preload`, systemd unit or timer, crontab, `/boot` file; new setuid/setgid file; missing NOS own key or extra key in root's `authorized_keys` | critical |
-| Other changed or new file in `/etc`, `/usr`; owner/mode change; I2 baseline digest mismatch | high |
+| Other changed or new file in `/etc`, `/usr`; owner/mode change; I2 baseline digest mismatch; change during a NOS job without a verified reference ("changed during NOS job, unverified") | high |
 | Package updated outside NOS with matching reference; partial or stale scan | medium |
 | Expected change from a NOS job | info (record only) |
 
@@ -499,9 +531,10 @@ the direction.
   critical integrity finding" that withholds new permits (never cancels a
   running job, never touches the host). A block that an untrusted host
   can trigger must not stop the admin from fixing it, so admin override
-  with a fresh assertion is always possible. Also: should expected
-  changes in standard mode be approved together with the job
-  (recommended) or separately?
+  with a fresh assertion is always possible. Also: should *verified*
+  expected changes in standard mode be approved together with the job
+  (recommended) or separately? Unverified changes (D9) are always
+  approved separately; that is not part of this question.
 - **Q4: I1 lock on mismatch.** Should the executor refuse unlock and all
   dispatch on a binary/unit/module mismatch (D4)? On a configuration
   mismatch? **Recommendation:** yes for binaries, units, built-in modules
@@ -563,4 +596,6 @@ the direction.
   reference; the server gains a large but bounded per-host baseline store
   (about 300,000 records per host at most).
 - Package-file verification against signed archives depends on Q6;
-  without it, package files fall back to trust-on-first-scan baselines.
+  without it, package files fall back to trust-on-first-scan baselines,
+  and every package file a NOS apt job changes is an unverified finding
+  the admin reviews separately from the job.
