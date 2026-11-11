@@ -168,7 +168,7 @@ func TestAgentConfigRejectsInvalidInput(t *testing.T) {
 		"operator utf8":    mod(func(v *AgentSettings) { v.OperatorInstructions = "a\xffb" }),
 		"operator control": mod(func(v *AgentSettings) { v.OperatorInstructions = "a\x1bb" }),
 		"operator cr":      mod(func(v *AgentSettings) { v.OperatorInstructions = "a\r\nb" }),
-		"operator bidi":    mod(func(v *AgentSettings) { v.OperatorInstructions = "a‮b" }),
+		"operator bidi":    mod(func(v *AgentSettings) { v.OperatorInstructions = "a" + string(rune(0x202e)) + "b" }),
 		"operator c1":      mod(func(v *AgentSettings) { v.OperatorInstructions = "a\u0085b" }),
 	} {
 		t.Run(name, func(t *testing.T) {
