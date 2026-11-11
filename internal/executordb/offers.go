@@ -443,34 +443,52 @@ func (db *DB) EndOffer(idHash [offerHashLen]byte, from, to OfferState) error {
 // or downloaded whose lifetime is over, and every offer in
 // pairing_proposed more than OfferProposedGrace past its expiry, moves to
 // expired and loses its salt, in one statement; the old salts are removed
-// from the WAL before it returns (purgeWipedSalt). It returns the ID hashes
-// of the offers it expired, for audit, also together with
-// ErrOfferWipeIncomplete.
+// from the WAL before it returns (purgeWipedSalt). One call ends at most
+// maxSweptOffers offers, those that expired first; the next call ends the
+// rest.
+//
+// It returns the ID hashes of the offers it expired, for audit, and no
+// offer ends without its ID being returned (review en05af2, finding 2):
+// the IDs are read inside the transaction, before the commit, and a failed
+// read rolls the sweep back. If the commit itself reports an error, the
+// sweep cannot know whether it happened, so it returns the IDs with the
+// error and purges anyway; if it did not happen, the next sweep returns
+// the same IDs again. The IDs also come with ErrOfferWipeIncomplete.
 func (db *DB) ExpireOffers() ([][offerHashLen]byte, error) {
 	now := db.now().Unix()
-	rows, err := db.sql.Query(`UPDATE enroll_offers
-		SET state = 'expired', state_changed_at = ?, salt = NULL
-		WHERE (state IN ('awaiting_approval', 'open', 'downloaded') AND expires_at <= ?)
-		   OR (state = 'pairing_proposed' AND expires_at <= ?)
-		RETURNING id_hash`,
-		now, now, now-proposedGraceSeconds)
+	tx, err := db.sql.Begin()
 	if err != nil {
 		return nil, fmt.Errorf("executordb: expire offers: %w", err)
 	}
-	out, err := scanExpiredOffers(rows)
+	rows, err := tx.Query(`UPDATE enroll_offers
+		SET state = 'expired', state_changed_at = ?, salt = NULL
+		WHERE id_hash IN (SELECT id_hash FROM enroll_offers
+			WHERE (state IN ('awaiting_approval', 'open', 'downloaded') AND expires_at <= ?)
+			   OR (state = 'pairing_proposed' AND expires_at <= ?)
+			ORDER BY expires_at, id_hash LIMIT ?)
+		RETURNING id_hash`,
+		now, now, now-proposedGraceSeconds, maxSweptOffers)
 	if err != nil {
-		// The UPDATE may have committed wipes before the read failed;
-		// purge them anyway (rows is closed, so the single connection is
-		// free for the checkpoint).
-		err = fmt.Errorf("executordb: expire offers: %w", err)
+		return nil, rollbackSweep(tx, err)
+	}
+	out, err := scanExpiredOffers(rows)
+	if err == nil && len(out) > maxSweptOffers {
+		err = fmt.Errorf("sweep read %d IDs, more than %d", len(out), maxSweptOffers)
+	}
+	if err != nil {
+		rows.Close()
+		return nil, rollbackSweep(tx, err)
+	}
+	// rows is closed, so after the commit the single connection is free
+	// for the checkpoint.
+	if err := commitSweep(tx); err != nil {
+		err = fmt.Errorf("executordb: expire offers: commit: %w", err)
 		if perr := db.purgeWipedSalt("expire offers"); perr != nil {
-			return nil, errors.Join(err, perr)
+			return out, errors.Join(err, perr)
 		}
-		return nil, err
+		return out, err
 	}
 	if len(out) > 0 {
-		// rows is closed, so the single connection is free for the
-		// checkpoint.
 		if err := db.purgeWipedSalt("expire offers"); err != nil {
 			return out, err
 		}
@@ -478,9 +496,28 @@ func (db *DB) ExpireOffers() ([][offerHashLen]byte, error) {
 	return out, nil
 }
 
+// maxSweptOffers bounds how many offers one expiry sweep ends, and so how
+// many IDs it reads before it commits. It is far above OfferMaxLive +
+// OfferMaxLiveNetBird, so with the real limits one sweep ends every due
+// offer.
+const maxSweptOffers = 64
+
+// rollbackSweep rolls the expiry sweep back after err; nothing it changed
+// is committed.
+func rollbackSweep(tx *sql.Tx, err error) error {
+	if rerr := tx.Rollback(); rerr != nil {
+		err = errors.Join(err, fmt.Errorf("rollback: %w", rerr))
+	}
+	return fmt.Errorf("executordb: expire offers: %w", err)
+}
+
 // scanExpiredOffers reads the expiry sweep's RETURNING rows; tests replace
 // it to fail after the rows were read.
 var scanExpiredOffers = scanOfferIDs
+
+// commitSweep commits the expiry sweep; tests replace it to report an
+// error after (or instead of) the commit.
+var commitSweep = (*sql.Tx).Commit
 
 // scanOfferIDs reads rows of ID hashes and closes rows.
 func scanOfferIDs(rows *sql.Rows) ([][offerHashLen]byte, error) {
