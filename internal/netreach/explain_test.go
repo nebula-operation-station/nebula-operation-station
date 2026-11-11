@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func netbirdQuery(dst string, f NetBirdFacts) Query {
@@ -79,9 +80,10 @@ func TestExplanationText(t *testing.T) {
 func TestStepTextIsSanitized(t *testing.T) {
 	var c chain
 	c.max = 4
-	c.add(Step{Kind: StepRule, Name: "a‮b\x00", Outcome: "x", Detail: string([]byte{0xff})})
+	rlo := string(rune(0x202e)) // right-to-left override
+	c.add(Step{Kind: StepRule, Name: "a" + rlo + "b\x00", Outcome: "x", Detail: string([]byte{0xff})})
 	got := c.steps[0]
-	if strings.ContainsAny(got.Name, "‮\x00") || got.Detail != "�" {
+	if strings.ContainsAny(got.Name, rlo+"\x00") || got.Detail != string(utf8.RuneError) {
 		t.Fatalf("not sanitized: %+v", got)
 	}
 }
