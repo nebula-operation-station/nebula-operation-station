@@ -644,6 +644,8 @@ func (h *Handler) Handler() http.Handler {
 	// the session check live in internal/web/auth.
 	mux.HandleFunc("/login", h.handleBare("Log in", "login", "login.js"))
 	mux.HandleFunc("/setup", h.handleBare("Register a security key", "setup", "setup.js"))
+	// In-app help: the embedded handbook and FAQ (help.go).
+	h.registerHelp(mux)
 	for _, p := range emptyPages {
 		path := p.path
 		mux.HandleFunc(path, h.handleEmpty(path))
