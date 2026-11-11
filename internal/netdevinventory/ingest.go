@@ -181,11 +181,7 @@ func mapPayload(msg proto.Message) (Rows, error) {
 	case *pb.NetDevLLDPNeighbors:
 		return mapLLDP(m)
 	case *pb.NetDevZones:
-		var p netdevcontract.FirewallPolicy
-		for _, z := range m.GetZones() {
-			p.Zones = append(p.Zones, netdevcontract.Zone{Name: z.GetName(), Interfaces: z.GetInterfaces()})
-		}
-		return PolicyPartRows{Part: PolicyZones, Policy: p}, nil
+		return mapZones(m)
 	case *pb.NetDevObjects:
 		return mapObjects(m)
 	case *pb.NetDevSecurityRules:
@@ -331,6 +327,20 @@ func mapLLDP(m *pb.NetDevLLDPNeighbors) (Rows, error) {
 			Capabilities: caps})
 	}
 	return out, nil
+}
+
+// mapZones maps the zones read. A zone type must be one of the known
+// types, like every other enum; it has no stored column and is not kept.
+func mapZones(m *pb.NetDevZones) (Rows, error) {
+	var p netdevcontract.FirewallPolicy
+	for i, z := range m.GetZones() {
+		if _, ok := pb.NetDevZoneType_name[int32(z.GetType())]; !ok ||
+			z.GetType() == pb.NetDevZoneType_NET_DEV_ZONE_TYPE_UNSPECIFIED {
+			return nil, fmt.Errorf("zone %d: type is unspecified", i)
+		}
+		p.Zones = append(p.Zones, netdevcontract.Zone{Name: z.GetName(), Interfaces: z.GetInterfaces()})
+	}
+	return PolicyPartRows{Part: PolicyZones, Policy: p}, nil
 }
 
 var addressTypes = map[pb.NetDevAddressType]netdevcontract.AddressType{
