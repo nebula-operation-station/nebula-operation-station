@@ -64,7 +64,7 @@ What follows from that, per stage:
 | Root attacker who changes files with ordinary tools and does not tamper with the checker or its stored references | Detected | Detected | Detected |
 | Root attacker who runs a rootkit or patches the checker, `sha256sum`, the kernel or the NOS binary that performs the check | **Not reliably detected**: a replaced binary can skip its own check, and all NOS processes on one machine fall to the same root | **Not reliably detected**: the host lies | Detected for everything measured **before** or **at load** by the TPM-backed log, within the IMA policy; see I3 limits |
 | Attacker who restores the original file before the next scan | Missed between scans | Missed between scans (incremental runs use `ctime`, which ordinary tools cannot set; root can still fake it) | IMA records every measured load, including short-lived ones |
-| Compromised `nebula-server` | Executor detects server-binary changes (different UID, server cannot write executor storage); a compromised server can still suppress the *display* of I2 findings | Server can hide findings from the UI; it cannot silently rewrite an approved baseline (D7) | Quotes are verified by the executor, not the server |
+| Compromised `nebula-server` | Executor detects server-binary changes (different UID, server cannot write executor storage); a compromised server can still suppress the *display* of I2 findings | Server can hide findings from the UI; it cannot silently rewrite an approved baseline (D7). It can misrepresent in the browser which paths an approval covers; critical-class entries are therefore approved only in the executor-local CLI (D7), other entries carry this limit (see "Honest limits") | Quotes are verified by the executor, not the server |
 | Compromised `nebula-server` or D8 reference builder supplying false package references | n/a (I1 uses the YubiKey-signed list, D2) | **Not detected as such**: it can make an attacker's file match a "verified" reference, so the change is labelled expected (info) or, outside critical-class paths (D9), "package updated outside NOS" (medium) instead of critical; it cannot put the file into a baseline without the admin's executor-bound assertion (D7, D9), but an admin who approves trusts the label (see "Honest limits") | IMA entries are compared against the same references (D10); same limit |
 
 Consequences stated plainly:
@@ -132,6 +132,15 @@ named in the handbook next to every "no unexpected change" result:
   threat-table row "root attacker with ordinary tools" assumes the
   attacker does not also edit those; only the offline check (D4) is
   independent of the NOS machine.
+- **What a browser approval shows.** WebAuthn signs a challenge, not the
+  displayed list (ADR 0007). For baseline approvals in the browser (D3
+  configuration baselines and D7 entries that are not critical-class), a
+  compromised server can show a harmless list while the assertion covers
+  the executor digest of other paths it named; the record values still
+  come from the executor's own scan. Critical-class entries are approved
+  only in the executor-local CLI (D7, D9), and in hardened mode D3
+  baselines too; the CLI view is only as trustworthy as the NOS machine
+  (previous item).
 - **Trust on first scan.** The first complete scan of a host becomes its
   proposed baseline (D7); a host that was already compromised then is
   baselined as compromised.
@@ -474,10 +483,33 @@ the host:
      independently of the first scan.
    - **Approval.** The admin approves a baseline (initial or updated) by
      digest, with the same assertion as D3 (challenge domain
-     `nebula-fim-baseline-v1`). Bulk approval per host and per finding
-     batch is allowed except for critical-class paths, which are always
-     approved one entry per assertion (D9); every approved entry is
-     audited with old and new values.
+     `nebula-fim-baseline-v1`). The signed challenge binds the host ID,
+     the currently approved digest the proposal was built on and the new
+     executor-computed digest, so an approval cannot be applied to
+     another host or on top of a baseline that changed in the meantime
+     (the executor rejects it if its stored digest is no longer the
+     bound previous digest). Bulk approval per host and per finding batch
+     is allowed except for critical-class paths (D9); every approved
+     entry is audited with old and new values.
+   - **Critical-class entries are approved only in the executor-local
+     CLI.** WebAuthn signs a challenge, not what the browser displays
+     (ADR 0007): a compromised server chooses which paths it names and
+     serves the approval screen, so it could show a harmless list while
+     the admin's assertion covers the executor digest of an
+     attacker-chosen critical-class entry. Therefore a proposed baseline
+     that adds, changes or removes **any** critical-class path (D9) is
+     approved only with `nebula integrity pending <host>` and
+     `nebula integrity approve <host> <digest>` on the NOS machine, run
+     as the admin UID, audited, in every mode (the same independent
+     executor view as `nebula approve` for hardened HIGH/CRITICAL
+     batches, ADR 0007). `pending` renders the entry from the executor's
+     own retained records (old and new values, escaped as in D6
+     "Display", so no host byte reaches the terminal as a control
+     sequence); `approve` accepts exactly one critical-class entry per
+     digest. The executor rejects a browser assertion for a digest that
+     contains a critical-class entry, and recovery mode cannot approve
+     either way. Browser approval remains for entries that are not
+     critical-class, with the limit named in "Honest limits".
    - **The executor alone decides what goes into a baseline.** The
      digest the admin approves is computed by the executor, never taken
      from the server:
@@ -504,7 +536,11 @@ the host:
        proposed list or digest is at most compared with it; a mismatch is
        a baseline tamper finding, never a reason to approve.
 
-     This stops a compromised server from injecting entries; it does not
+     This stops a compromised server from supplying record values or a
+     digest. It does not stop a compromised server from naming other
+     paths than the ones it displays in the browser; for critical-class
+     paths the executor-local CLI (above) closes that gap, for other
+     paths it remains a named limit ("Honest limits"). Nor does it
      protect against a host that was already compromised at its first
      scan ("trust on first scan" above).
    - **Server compromise.** A compromised server could display a forged
@@ -637,11 +673,14 @@ that has a setuid or setgid bit before or after the change. For them:
   **critical** when it changes during a NOS job without a verified
   reference; it is labelled "changed during NOS job, unverified" in
   addition, never downgraded to high.
-- **Never batch-approvable.** In any mode, before and after Q6, verified
-  or not, each critical-class entry is approved with its own D7 assertion
-  that covers that one entry. It is never part of a bulk, per-job or
-  per-finding-batch approval, and never part of the Q3 standard-mode bulk
-  approval of verified expected changes.
+- **Never batch-approvable, never in the browser.** In any mode, before
+  and after Q6, verified or not, each critical-class entry is approved
+  with its own executor-local CLI approval that covers that one entry
+  (D7 "Critical-class entries are approved only in the executor-local
+  CLI"). It is never part of a bulk, per-job or per-finding-batch
+  approval, never part of the Q3 standard-mode bulk approval of
+  verified expected changes, and never approved with a browser
+  assertion.
 
 **"Expected" is a label, never an approval.** An expected change is
 recorded as `expected_pending` and shown as "changed by NOS job <id>,
@@ -649,7 +688,8 @@ matches verified reference". It enters the baseline **only through a D7
 baseline approval, in every mode**: the executor builds the proposed
 entries from its own retained post-job scan (D7 "The executor alone
 decides"), computes the digest, and the admin approves exactly that
-digest with the `nebula-fim-baseline-v1` assertion. The job approval
+digest with the `nebula-fim-baseline-v1` assertion (with the
+executor-local CLI for a critical-class entry). The job approval
 never covers baseline entries: it is given before the job and cannot bind
 a scan result, and the "verified" label rests on a D8 reference that
 reaches NOS through the server and that the executor cannot re-derive
@@ -687,7 +727,7 @@ matching severity wins, see "Critical-class paths"):
 | Package file differs from signed reference; NOS binary/unit mismatch (I1); any new, changed or removed critical-class path (above) that is not a verified expected change, including one changed during a NOS job without a verified reference; new setuid/setgid file or bit; missing NOS own key or extra key in root's `authorized_keys` | critical |
 | Other changed or new file in `/etc` or a watched `/usr` root (D5); owner/mode change; I2 baseline digest mismatch; change of a path that is not critical-class during a NOS job without a verified reference ("changed during NOS job, unverified") | high |
 | Package updated outside NOS with matching reference; partial or stale scan | medium |
-| Verified expected change from a NOS job (`expected_pending` until approved by D7; a critical-class path still needs its own assertion) | info (record only) |
+| Verified expected change from a NOS job (`expected_pending` until approved by D7; a critical-class path still needs its own executor-local CLI approval) | info (record only) |
 
 **Notifications** go through the existing webhook, ntfy and Telegram
 senders (ADR 0011 D9 pattern): events `integrity.nos_mismatch`,
@@ -797,7 +837,10 @@ the direction.
 - Spec 01: integrity monitoring as a bounded monitoring exception next to
   ADR 0011; restate that findings are advisory.
 - Spec 05/06: I1 unlock refusal and `nebula integrity ack` (if Q4 is
-  accepted); baseline approval challenge domains.
+  accepted); baseline approval challenge domains and what they bind
+  (host ID, previous and new digest); `nebula integrity pending` and
+  `nebula integrity approve` as the only approval path for
+  critical-class entries.
 - Spec 07: `fim.scan` in the read-lease allowlist with its intervals and
   budgets.
 - Spec 09: `fim-scan-v1` schema, the action-specific limits of D6, path
@@ -817,7 +860,7 @@ the direction.
 | IG-03 | I1 checks in all NOS processes, executor cross-check, server check of executor; `integrity_findings` store | IG-02 |
 | IG-04 | I1 reaction (unlock refusal per Q4), `nebula integrity ack` and `verify --offline`, configuration baseline approval | IG-03 |
 | IG-05 | `fim.scan` script, read-only contract, `fim-scan-v1` parser with fuzz tests and limits | IG-01 |
-| IG-06 | Host baseline store, executor-held digest, baseline approval UI | IG-05 |
+| IG-06 | Host baseline store, executor-held digest, baseline approval UI, `nebula integrity pending`/`approve` for critical-class entries | IG-05 |
 | IG-07 | Incremental/full logic and expected-change attribution from NOS jobs | IG-06 |
 | IG-08 | Findings UI and `integrity.*` notifications | IG-03, IG-06 |
 | IG-09 | Package reference builder and archive comparison | Q6 |
