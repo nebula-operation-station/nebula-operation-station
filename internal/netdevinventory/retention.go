@@ -79,18 +79,15 @@ func MaxHistoryPerRead(r Read) int {
 // holds after every write whether or not Prune runs. Rows of removed
 // datasets go with them (ON DELETE CASCADE).
 func boundHistory(ctx context.Context, tx *sql.Tx, read Read, deviceID string, now time.Time) (int64, error) {
+	aged, err := dropAgedHistory(ctx, tx, read, deviceID, now)
+	if err != nil {
+		return 0, err
+	}
 	devFilter := ""
-	args := []any{string(read), micros(now.Add(-HistoryRetention(read)))}
 	if deviceID != "" {
 		devFilter = " AND device_id = ?"
-		args = append(args, deviceID)
 	}
-	aged, err := exec(ctx, tx, `DELETE FROM netdev_datasets
-		WHERE read = ? AND current = 0 AND observed_at < ?`+devFilter, args...)
-	if err != nil {
-		return 0, fmt.Errorf("netdevinventory: drop aged %s history: %w", read, err)
-	}
-	args = []any{string(read)}
+	args := []any{string(read)}
 	if deviceID != "" {
 		args = append(args, deviceID)
 	}
@@ -104,6 +101,44 @@ func boundHistory(ctx context.Context, tx *sql.Tx, read Read, deviceID string, n
 		return 0, fmt.Errorf("netdevinventory: cap %s history: %w", read, err)
 	}
 	return aged + capped, nil
+}
+
+// dropAgedHistory removes the superseded datasets of read observed before
+// now minus HistoryRetention, for deviceID or (empty) every device. For
+// one device it is a range delete on idx_netdev_datasets_history.
+func dropAgedHistory(ctx context.Context, tx *sql.Tx, read Read, deviceID string, now time.Time) (int64, error) {
+	devFilter := ""
+	args := []any{string(read), micros(now.Add(-HistoryRetention(read)))}
+	if deviceID != "" {
+		devFilter = " AND device_id = ?"
+		args = append(args, deviceID)
+	}
+	n, err := exec(ctx, tx, `DELETE FROM netdev_datasets
+		WHERE read = ? AND current = 0 AND observed_at < ?`+devFilter, args...)
+	if err != nil {
+		return 0, fmt.Errorf("netdevinventory: drop aged %s history: %w", read, err)
+	}
+	return n, nil
+}
+
+// boundUnchanged enforces the retention window of (deviceID, read) on a
+// write that keeps the current dataset datasetID (identical payload or
+// redelivery): superseded datasets that left the window are removed, and
+// so are rows of the current dataset carried over with a seen_at before
+// it. The current dataset itself is not rewritten. Such a write adds no
+// history, so the count cap cannot be newly exceeded and is not rechecked.
+func boundUnchanged(ctx context.Context, tx *sql.Tx, read Read, deviceID string, datasetID int64, now time.Time) error {
+	if _, err := dropAgedHistory(ctx, tx, read, deviceID, now); err != nil {
+		return err
+	}
+	cutoff := micros(now.Add(-HistoryRetention(read)))
+	for _, t := range readTables(read) {
+		if _, err := exec(ctx, tx, `DELETE FROM `+t.name+` WHERE dataset_id = ? AND seen_at IS NOT NULL AND seen_at < ?`,
+			datasetID, cutoff); err != nil {
+			return fmt.Errorf("netdevinventory: drop expired carried %s rows: %w", t.name, err)
+		}
+	}
+	return nil
 }
 
 // PruneReport counts what Prune removed.
