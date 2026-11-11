@@ -1,0 +1,26 @@
+{
+  "schema_version": "1.6.0",
+  "id": "DSA-5793-1",
+  "modified": "2024-10-22T08:15:30.123456Z",
+  "published": "2024-10-21T00:00:00Z",
+  "aliases": ["CVE-2024-10229", "CVE-2024-10230", "CVE-2024-10229"],
+  "related": ["DLA-1-1"],
+  "summary": "chromium - security update",
+  "details": "Several issues were found.\n",
+  "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:H/I:H/A:H"}],
+  "affected": [
+    {
+      "package": {"ecosystem": "Debian:12", "name": "chromium", "purl": "pkg:deb/debian/chromium?arch=source"},
+      "ranges": [
+        {"type": "ECOSYSTEM", "events": [{"introduced": "0"}, {"fixed": "130.0.6723.69-1~deb12u1"}]}
+      ],
+      "versions": ["129.0.1-1", "130.0.6723.58-1~deb12u1"],
+      "ecosystem_specific": {"urgency": "not yet assigned"},
+      "database_specific": {"source": "https://example.invalid/x.json"}
+    },
+    {
+      "ranges": [{"type": "GIT", "repo": "https://example.invalid/r.git", "events": [{"introduced": "0"}, {"fixed": "abc123"}]}]
+    }
+  ],
+  "database_specific": {"anything": {"goes": [1, 2, 3]}}
+}
