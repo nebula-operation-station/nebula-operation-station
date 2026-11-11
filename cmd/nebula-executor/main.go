@@ -68,11 +68,20 @@ func run() error {
 	)
 	flag.Var(&origins, "origin", "allowed WebAuthn origin, e.g. https://nebula.example.org (repeatable)")
 	collectorUsers := collectorUserFlags(flag.CommandLine)
+	enrollFlags := registerEnrollFlags(flag.CommandLine)
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println(version.String())
 		return nil
+	}
+
+	// Executor-local enrollment configuration (ADR 0013, EN-06): checked
+	// before anything else starts; an invalid value stops the start. It
+	// stays in this function and is never served over RPC.
+	enrollCfg, err := enrollFlags.load()
+	if err != nil {
+		return err
 	}
 
 	sessionLength, err := sessionLengthFromMinutes(*sessionMin)
@@ -226,7 +235,9 @@ func run() error {
 
 	log.Info("started", "version", version.String(), "socket", *socketPath, "mode", modeName(mode),
 		"rp_id", *rpID, "webauthn_credentials", len(creds), "locked", true,
-		"permits", 0, "spent_execution_ids_pruned", pruned)
+		"permits", 0, "spent_execution_ids_pruned", pruned,
+		"enroll_sources", len(enrollCfg.Sources), "netbird", enrollCfg.NetBird.Enabled(),
+		"netbird_trust", enrollCfg.NetBird.TrustName(), "netbird_managed_group", enrollCfg.ManagedGroup)
 	return srv.Serve(lis)
 }
 
