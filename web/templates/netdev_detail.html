@@ -150,7 +150,7 @@
     <tr><th>NAT rules</th><td>{{$d.Policy.NATRules}}</td></tr>
     <tr><th>Objects</th><td>{{$d.Policy.Objects}}</td></tr>
   </table>
-  <p class="hint">Firewall view: not available yet.</p>
+  <p><a href="/netdev/{{$d.DeviceID}}/firewall">Firewall view</a>: rules, NAT, objects and hit counts.</p>
 
   <h3>Zones</h3>
   {{if $d.Zones}}
