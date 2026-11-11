@@ -467,7 +467,29 @@ does NOS connect **from** (`--from`)?
   code; the harness never replaces `os.Stdin` with a pipe, whose
   contents a per-prompt `bufio.Reader` such as `pveAskLine` could read
   several lines at a time. The dispatch in `run` itself is covered by
-  the catalog test, not by the canary runs. The inputs are:
+  the catalog test, not by the canary runs. **Commands whose group
+  function reads `os.Stdin` itself** (previously the entry point named
+  only group functions that take a reader, but `hostCmd`, `totpCmd`,
+  `webauthnCmd` and `artifactCmd` take none and pass `os.Stdin` to the
+  prompting function, `cmd/nebula/risk.go`, `totp.go`, `webauthn.go`,
+  and `artifactTrustBuiltins` also passes `os.Stdin`,
+  `trust_builtins.go`, so their prompted runs could never read the
+  script): AS-05 adds no test seam and runs no pty or pipe harness on
+  the built binary. For these commands the entry point is the prompting
+  function one level down, which already takes the reader: `hostPin`
+  and `hostUnpin` (`hostkeys.go`), `totpSetup`, `totpRemove` and
+  `totpFinishRecovery` (`totp.go`), `webauthnRemove` (`webauthn.go`),
+  `artifactTrust` (`risk.go`) and `artifactTrustBuiltinsIO`
+  (`trust_builtins.go`, with the fake executor as `builtinTrustClient`;
+  the skipped `artifactTrustBuiltins` only checks the effective UID and
+  dials). The harness passes the argument list after the subcommand
+  word, as the group function's `args[1:]` does; the skipped group
+  functions only match the subcommand word and slice the list, they
+  parse no argument, and their dispatch is covered by the catalog test
+  like the dispatch in `run`. A prompted command whose
+  stdin is read only in a function without a reader parameter fails the
+  catalog test as a harness error until a reviewed change adds the
+  parameter. The inputs are:
   - *executor fixtures*: the fake executor's answer to every call the
     command makes before the final request (rollouts, pending permits,
     probe results, reviews), each a fixed fixture value checked against
@@ -481,7 +503,21 @@ does NOS connect **from** (`--from`)?
     injected `netdevEnv.stdinIsTerminal` to true for the `netdev`
     commands, whose `netdevAskYes` refuses a non-terminal stdin, and the
     injected `prompter` answers secret prompts with a fixed fixture
-    secret that contains no needle.
+    secret that contains no needle and has the form the prompt's parser
+    accepts (previously only "a fixed fixture secret", so a secret that
+    fails the parse stopped the run before any traffic and every form
+    counted as rejected): the new vault passphrase and its repeat
+    (`vault init`, `cmd/nebula/vault.go`) are the same fixture of at
+    least 32 characters; the PVE token prompts (`pve remote add` read
+    and action token, `pve remote rotate-token`, `cmd/nebula/pve.go`)
+    get a fixture of the form `USER@REALM!TOKENID=VALUE`, for example
+    `nosfix@pve!nosfixtoken=00000000-0000-0000-0000-000000000000`;
+    every other secret prompt gets a fixture of the form its consumer
+    (the command or the real executor) accepts. These values are
+    checked by the executor, not by the command, so the fake executor
+    applies the same checks; a fixture it refuses comes after recorded
+    traffic and is therefore a harness error (below), not a
+    rejection.
 
   The scripted answers by prompt type (checked 2026-11-11 against the
   `Type …`/`type …`/`Enter …` prompts in `cmd/nebula/`; a prompt type
@@ -489,9 +525,9 @@ does NOS connect **from** (`--from`)?
 
   | Prompt | Scripted answer |
   | --- | --- |
-  | "Type 'yes' …" (`batch approve`/`stage`/`skip`, `approve`, `approve --stage`/`--skip`, `schedule`, read grants, `host pin`/`remove`, `container … remove`, `vault` delete, `webauthn` remove, `totp` remove, `risk` trust, `netdev` register/re-pin/state change, `pve remote remove`/`site`) | `yes` |
+  | "Type 'yes' …" (`batch approve`/`stage`/`skip`, `approve`, `approve --stage`/`--skip`, `schedule`, read grants, `host pin`/`unpin`, `container … remove`, `secret rm`, `webauthn remove`, `totp remove`, `artifact trust`, `netdev` register/re-pin/state change, `pve remote remove`/`site`; catalog paths, previously written `host … remove`, `vault` delete and `risk` trust) | `yes` |
   | "CRITICAL: type the number of targets" (`approve`, `cmd/nebula/main.go`) | not reached: the pending-permit fixture is not `CRITICAL`, so the `yes` prompt applies |
-  | `Type "unencrypted"`, `Type "restore"`, `Type "<machine>"` (`backup`, `cmd/nebula/backup.go`) | the word the prompt names; the harness pins `backup.go`'s overridable `hostname` variable to the fixed fixture host name `nos-fixture-host` (no needle), and the restore fixture's manifest names that host, so the foreign-machine prompt is not reached and the run does not depend on the test machine (previously the fixture followed the real `os.Hostname()`) |
+  | `Type "unencrypted"`, `Type "restore"`, `Type "<machine>"` (`backup`, `cmd/nebula/backup.go`) | the word the prompt names; the harness pins `backup.go`'s overridable `hostname` variable to the fixed fixture host name `nos-fixture-host` (no needle), and the restore fixture's manifest names that host, so the foreign-machine prompt of `restore` is not reached and the restore run does not depend on the test machine (previously the fixture followed the real `os.Hostname()`). `backup` (create) does not use that variable: it writes the manifest's `host` and `created_at` from `os.Hostname()` and `time.Now()` directly (`backupCmd`), and AS-05 adds no seam for them. Both are excluded from needle matching and from the differential check: they are written only into the archive, which is no recorded request, and the archive content is not searched; for the create run the harness checks only the recorded `BackupExecutor` traffic and the path the archive is written to (the `--out` value). Previously the row claimed the pinned variable made every `backup` run independent of the test machine |
   | "Type the current pin from the registry:" (`pve remote repin`, `cmd/nebula/pve.go`) | the `trust_pin` stored for the remote in the fake executor's `ListPVEAdminRemotes` answer (the registry fixture), so it matches the `old_pin` the fake `ProposePVERepin` expects; the next prompt, "Type the new trust fingerprint to confirm:", is the typed-fingerprint row below |
   | typed fingerprint (`pve remote add`/`repin`, `module` signer add/rotate in `cmd/nebula/signer.go`) | the fingerprint the command shows for that run (from the fake executor's probe answer or the run's fixture key) |
   | "type the manifest digest to commit" (`cmd/nebula/trust_builtins.go`) | the digest of the fake review answer; `retain … or retire` prompts get `r` |
