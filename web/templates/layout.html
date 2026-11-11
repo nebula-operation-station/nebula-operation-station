@@ -75,6 +75,10 @@
           <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-settings"></use></svg>
           <span>Settings</span>
         </a>
+        <a class="sidebar__item{{if eq .Active "help"}} sidebar__item--active{{end}}" href="/help"{{if .NavCollapsed}} title="Help"{{end}}{{if eq .Active "help"}} aria-current="page"{{end}}>
+          <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-book-open"></use></svg>
+          <span>Help</span>
+        </a>
       </nav>
     </aside>
     <div class="app__body">
