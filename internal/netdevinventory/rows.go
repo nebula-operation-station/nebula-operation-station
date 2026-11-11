@@ -130,6 +130,11 @@ func validateRows(deviceID string, family netdevcontract.Family, gen uint64, obs
 		o.LLDPNeighbors = wrap([]netdevcontract.LLDPNeighbor(r), incomplete)
 	case PolicyRows:
 		o.FirewallPolicy = wrap(r.Policy, incomplete)
+	case PolicyPartRows:
+		if err := r.check(); err != nil {
+			return err
+		}
+		o.FirewallPolicy = wrap(r.Policy, incomplete)
 	case HitCountRows:
 		o.HitCounts = wrap([]netdevcontract.HitCount(r), incomplete)
 		for i, h := range r {
@@ -420,12 +425,17 @@ func insertRows(ctx context.Context, tx *sql.Tx, datasetID int64, set rowSet) er
 // they keep their absent flag. A carried row keeps the time it was last
 // seen (the previous dataset's observed_at for a row present there). Rows
 // last seen before cutoff have passed retention and are not carried; at
-// most t.carryCap rows, the most recently seen, are carried.
-func carryOver(ctx context.Context, tx *sql.Tx, t *table, prevID, prevObs, newID int64, complete bool, cutoff int64) (int, error) {
+// most t.carryCap rows, the most recently seen, are carried. scope is a
+// constant SQL predicate (carryScope) selecting the rows a complete read
+// covers; rows outside it keep their absent flag, as after a partial read.
+func carryOver(ctx context.Context, tx *sql.Tx, t *table, prevID, prevObs, newID int64, complete bool, scope string, cutoff int64) (int, error) {
 	cols := strings.Join(t.cols, ", ")
 	absent := "absent"
-	if complete {
+	switch {
+	case complete && scope == "1":
 		absent = "1"
+	case complete && scope != "0":
+		absent = "CASE WHEN " + scope + " THEN 1 ELSE absent END"
 	}
 	q := "INSERT INTO " + t.name + " (dataset_id, row_key, seq, seen_at, absent, " + cols + ")" +
 		" SELECT ?, row_key, NULL, COALESCE(seen_at, ?), " + absent + ", " + cols +
