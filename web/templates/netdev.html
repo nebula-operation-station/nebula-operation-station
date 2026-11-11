@@ -1,0 +1,29 @@
+{{define "content"}}
+<section class="panel" aria-label="Network devices">
+  <h2>Network devices</h2>
+  {{if .NetDevList.Unavailable}}
+  <p class="status status--error">Stored device inventory unavailable</p>
+  {{else if not .NetDevList.Rows}}
+  <p class="status">No network devices observed yet.</p>
+  {{else}}
+  <table class="inventory">
+    <thead>
+      <tr><th>Device</th><th>Family</th><th>Endpoint</th><th>Trust generation</th><th>Last seen</th><th>Datasets</th><th>Device UI</th></tr>
+    </thead>
+    <tbody>
+      {{range .NetDevList.Rows}}
+      <tr>
+        <td><a href="{{.DetailURL}}">{{.Label}}</a>{{if .Stale}} <span class="badge badge--warning">stale</span>{{end}}</td>
+        <td>{{.Family}}</td>
+        <td class="mono">{{.Endpoint}}</td>
+        <td>{{.TrustGeneration}}{{if .TrustNote}} <span class="badge badge--warning">{{.TrustNote}}</span>{{end}}</td>
+        <td>{{timeTag .LastSeen}}{{if .Age}} ({{.Age}}){{else}}never{{end}}</td>
+        <td>{{range .Datasets}}<span class="badge badge--{{.Badge.Class}}">{{.Badge.Text}}</span> {{end}}</td>
+        <td>{{if .Link}}<a href="{{.Link}}" target="_blank" rel="noopener noreferrer">Open</a>{{end}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{end}}
+</section>
+{{end}}
