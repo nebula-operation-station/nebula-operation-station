@@ -247,8 +247,12 @@ func TestShadowCheck(t *testing.T) {
 			// the earlier rule's applications: not a definite cover.
 			name: "application-default rule does not shadow a rule mixing application-default and ports",
 			rules: []nr.SecurityRule{
-				with(func(r *nr.SecurityRule) { r.Name, r.Application, r.Service = "appdef", list("ssl"), list("application-default") }),
-				with(func(r *nr.SecurityRule) { r.Application, r.Service = list("ssl"), list("application-default", "svc-https") }),
+				with(func(r *nr.SecurityRule) {
+					r.Name, r.Application, r.Service = "appdef", list("ssl"), list("application-default")
+				}),
+				with(func(r *nr.SecurityRule) {
+					r.Application, r.Service = list("ssl"), list("application-default", "svc-https")
+				}),
 			},
 			want: want{StateCannotDecide, StateCannotDecide, s("appdef"), "cannot be compared", ""},
 		},
