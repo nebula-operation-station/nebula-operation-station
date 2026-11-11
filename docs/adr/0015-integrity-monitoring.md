@@ -353,6 +353,29 @@ the host:
      `nebula-fim-baseline-v1`). Bulk approval per host and per finding
      batch is allowed; every approved entry is audited with old and new
      values.
+   - **The executor alone decides what goes into a baseline.** The
+     digest the admin approves is computed by the executor, never taken
+     from the server:
+     - The executor parses each `fim.scan` result it received over its
+       own SSH session (D5) and keeps the validated records of the latest
+       complete run per host in executor-owned storage until the next
+       complete run replaces them or a baseline is approved from them.
+     - A proposed baseline is built by the executor as: the currently
+       approved list (fetched from the server and accepted only if its
+       digest equals the executor-stored digest; otherwise an
+       `integrity.baseline_tamper` finding and no approval) plus, for
+       the paths the admin selects, the record values from the executor's
+       own retained run. The server only names paths to include; it
+       cannot supply record values, a list or a digest that the executor
+       would approve.
+     - The approval screen is rendered from the executor's data, and the
+       assertion binds the executor-computed digest. A server-supplied
+       proposed list or digest is at most compared with it; a mismatch is
+       a baseline tamper finding, never a reason to approve.
+
+     This stops a compromised server from injecting entries; it does not
+     protect against a host that was already compromised at its first
+     scan ("trust on first scan" above).
    - **Server compromise.** A compromised server could display a forged
      baseline or hide findings; it cannot make the executor's stored
      digest match a rewritten list. On every scan and after any NOS
