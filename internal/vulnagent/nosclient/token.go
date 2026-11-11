@@ -51,9 +51,6 @@ func (Token) MarshalJSON() ([]byte, error) { return []byte(`"` + redacted + `"`)
 // MarshalText encodes a placeholder.
 func (Token) MarshalText() ([]byte, error) { return []byte(redacted), nil }
 
-// valid reports whether the token was loaded.
-func (t Token) valid() bool { return t.value != "" }
-
 // redact replaces every occurrence of the token in s.
 func (t Token) redact(s string) string {
 	if t.value == "" {
