@@ -355,7 +355,8 @@ func (s *Store) GetDevice(ctx context.Context, deviceID string) (Device, error) 
 
 // GetDataset returns the current dataset of (deviceID, read). Its state
 // is reported stale once it is StaleAfterIntervals poll intervals old,
-// even before MarkStale ran.
+// even before MarkStale ran. A firewall policy dataset is reported partial
+// (and Incomplete) while the newest read of any policy part was incomplete.
 func (s *Store) GetDataset(ctx context.Context, deviceID string, read Read) (Dataset, error) {
 	if PollInterval(read) == 0 {
 		return Dataset{}, ErrUnknownRead
@@ -380,6 +381,20 @@ func (s *Store) GetDataset(ctx context.Context, deviceID string, read Read) (Dat
 	d.State = DatasetState(state)
 	d.Incomplete = incomplete == 1
 	d.Current = current == 1
+	if d.Read == ReadFirewallPolicy && !d.Incomplete {
+		// The policy parts are stored as separate datasets: the dataset is
+		// partial while the newest read of any part was incomplete.
+		inc, err := policyIncomplete(ctx, s.db, deviceID)
+		if err != nil {
+			return Dataset{}, err
+		}
+		if inc {
+			d.Incomplete = true
+			if d.State == StateFresh {
+				d.State = StatePartial
+			}
+		}
+	}
 	if s.now().Sub(d.ObservedAt) > StaleAfterIntervals*PollInterval(d.Read) {
 		d.State = StateStale
 	}
@@ -409,11 +424,17 @@ type ReplaceResult struct {
 // written: a concurrent re-pin either commits first (and the dataset is
 // refused) or waits until the dataset is stored.
 //
-// A dataset older than the current one is refused with ErrOutOfOrder, and
+// A dataset older than the current one is refused with ErrOutOfOrder (a
+// firewall policy part: older than the newest dataset of its own part, see
+// policyparts.go; such a part may become current with an observed_at
+// below that of the superseded dataset), and
 // one observed before the read's retention window with
 // ErrObservationTooOld. The same dataset delivered again stores nothing
 // (the dataset is not rewritten), and an identical payload only advances
-// observed_at; both still enforce the retention window (see below).
+// observed_at; both still enforce the retention window (see below). A
+// firewall policy part is compared against the newest dataset of its own
+// part as well, and when it is identical no dataset is stored either (see
+// unchangedPolicyPart).
 // Otherwise the previous
 // dataset becomes history and its rows missing from the new read are
 // carried over: as absent after a complete read, unchanged after a partial
@@ -514,7 +535,45 @@ func (s *Store) replace(ctx context.Context, tx *sql.Tx, deviceID string, read R
 		return ReplaceResult{}, fmt.Errorf("netdevinventory: load current dataset: %w", err)
 	}
 	same := hasPrev && prevSum == sum && (prevIncomplete == 1) == incomplete
-	if hasPrev {
+	if part, ok := rows.(PolicyPartRows); ok && hasPrev {
+		// A policy part is ordered against the newest dataset of its own
+		// part, not against whichever part was stored last.
+		found, cut, err := latestPolicyParts(ctx, tx, deviceID, obs, part.Part)
+		if err != nil {
+			return ReplaceResult{}, err
+		}
+		if d, ok := found[part.Part]; ok {
+			if d.obs == obs && d.sum == sum && d.incomplete == incomplete {
+				if err := boundUnchanged(ctx, tx, read, deviceID, now); err != nil {
+					return ReplaceResult{}, err
+				}
+				return ReplaceResult{DatasetID: prevID, Unchanged: true}, s.runHook("commit")
+			}
+			return ReplaceResult{}, fmt.Errorf("netdevinventory: device %s read %s part %s: %w", deviceID, read, part.Part, ErrOutOfOrder)
+		}
+		if cut {
+			// Too many newer datasets to prove that no newer read of the
+			// part exists: refuse rather than risk rolling the part back.
+			return ReplaceResult{}, fmt.Errorf("netdevinventory: device %s read %s part %s: %w", deviceID, read, part.Part, ErrOutOfOrder)
+		}
+		if !same {
+			// Unchanged against the part's own newest dataset, not only
+			// against the current one (see unchangedPolicyPart).
+			hit, err := unchangedPolicyPart(ctx, tx, deviceID, part.Part, prevID, obs, nowM, sum, incomplete)
+			if err != nil {
+				return ReplaceResult{}, err
+			}
+			if hit {
+				if err := s.touchDevice(ctx, tx, deviceID, obs, nowM); err != nil {
+					return ReplaceResult{}, err
+				}
+				if err := boundUnchanged(ctx, tx, read, deviceID, now); err != nil {
+					return ReplaceResult{}, err
+				}
+				return ReplaceResult{DatasetID: prevID, Unchanged: true}, s.runHook("commit")
+			}
+		}
+	} else if hasPrev {
 		switch {
 		case obs < prevObs:
 			return ReplaceResult{}, fmt.Errorf("netdevinventory: device %s read %s: %w", deviceID, read, ErrOutOfOrder)
@@ -595,7 +654,7 @@ func (s *Store) replace(ctx context.Context, tx *sql.Tx, deviceID string, read R
 		// later of observed_at and the server clock.
 		cutoff := max(obs, nowM) - HistoryRetention(read).Microseconds()
 		for _, t := range readTables(read) {
-			n, err := carryOver(ctx, tx, t, prevID, prevObs, id, !incomplete, cutoff)
+			n, err := carryOver(ctx, tx, t, prevID, prevObs, id, !incomplete, carryScope(rows, t), cutoff)
 			if err != nil {
 				return ReplaceResult{}, err
 			}
