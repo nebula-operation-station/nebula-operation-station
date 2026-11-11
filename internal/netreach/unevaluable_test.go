@@ -528,3 +528,25 @@ func TestParsePorts(t *testing.T) {
 		}
 	}
 }
+
+// FuzzParseLiterals checks that the device-text parsers never panic and
+// return only ascending ranges of one family and ports 1–65535.
+func FuzzParseLiterals(f *testing.F) {
+	for _, s := range []string{"10.0.0.0/8", "10.0.0.1-10.0.0.9", "::/0", "fe80::1%x", "::ffff:1.2.3.4", "80,443", "1-65535", "0"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		if r, err := parseAddrLiteral(s); err == nil {
+			if !r.From.IsValid() || r.From.BitLen() != r.To.BitLen() || r.To.Less(r.From) || r.From.Zone() != "" || r.From.Is4In6() {
+				t.Fatalf("%q: bad range %v-%v", s, r.From, r.To)
+			}
+		}
+		if ps, err := parsePorts(s); err == nil {
+			for _, p := range ps {
+				if p[0] == 0 || p[1] < p[0] {
+					t.Fatalf("%q: bad ports %v", s, p)
+				}
+			}
+		}
+	})
+}
