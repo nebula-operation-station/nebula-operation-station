@@ -140,6 +140,21 @@ named in the handbook next to every "no unexpected change" result:
   threat-table row "root attacker with ordinary tools" assumes the
   attacker does not also edit those; only the offline check (D4) is
   independent of the NOS machine.
+- **`nebula verify` from an admin machine.** It hashes locally, but the
+  bytes come from the NOS machine's kernel and file system (D2 "(b)"). A
+  root rootkit on the NOS machine can serve the original bytes for a
+  replaced file, so a clean `nebula verify` does not prove the absence
+  of a root compromise; it also trusts the admin machine and the
+  `nebula` binary on it. Only the offline check from read-only media
+  (D4) avoids the NOS machine's software.
+- **GitHub as distribution channel.** The signature, not GitHub, is
+  trusted (D2). GitHub (or whoever controls the release page) can still
+  withhold a release or a newer root rotation, or serve an older,
+  validly signed version; the executor rejects a lower version than it
+  admitted (D4), and `nebula verify` checks the version the admin names.
+  A signed list proves only that the maintainer approved those hashes,
+  not that the build was safe; until reproducible builds (IG-11) are in
+  place, nobody but the release process can re-derive them.
 - **What a browser approval shows.** WebAuthn signs a challenge, not the
   displayed list (ADR 0007). For baseline approvals in the browser (D3
   configuration baselines and D7 entries that are not critical-class), a
@@ -236,9 +251,94 @@ artifact mandatory (see "Required specification changes").
   against `deploy/deb`), unit drop-ins shipped by the package, the
   built-in module bundle and its extracted YAML/scripts, web templates and
   static assets, shipped nftables files and the public root keys. Not
-  covered: databases, logs, spools, runtime directories and caches, which
-  change by design; their integrity is the job of `PRAGMA integrity_check`,
-  backups (spec 15) and the audit log.
+  covered: configuration (D3) and data (databases, logs, spools, runtime
+  directories and caches), which change by design; their integrity is
+  the job of D3, `PRAGMA integrity_check`, backups (spec 15) and the
+  audit log.
+
+**Per-version publication on GitHub (maintainer decision, 2026-11-11).**
+The target hashes of every version are public, so anyone can check an
+installation against them:
+
+- **What is published.** The existing signed release process (spec 10
+  "Release signing", `docs/admin/release-signing.md`, YubiKey root) is
+  extended by `installed-files.json` as above: per installed file the
+  path, size and SHA-256 (plus type, mode and owner), for every binary,
+  systemd unit, the built-in module bundle and its files, and every web
+  asset; no configuration and no data. `release-manifest.json`,
+  `release-manifest.json.sig` and `installed-files.json` are attached as
+  assets to the GitHub release of **every** version, next to the other
+  artifacts.
+- **GitHub is only a distribution channel, never a trust anchor.** The
+  trust anchor is the signature: a verifier accepts the files only after
+  verifying `release-manifest.json.sig` against the root public keys
+  built into its NOS binaries, advanced by the published signed root
+  rotations (spec 10), and the SHA-256 of `installed-files.json` against
+  the manifest. An unsigned manifest, a wrong signature, a signature by
+  a revoked or unknown key, a hash mismatch or a non-canonical document
+  is rejected, **also when it comes from the official GitHub release**.
+  A public key, checksum or signature published beside the files (on
+  GitHub or elsewhere) establishes no trust.
+- **Offline installations.** The three files are part of every update
+  bundle. The upgrade (spec 15) admits them into executor-owned storage
+  before installing (D4 "Reference"); all later checks use that local
+  copy. The NOS machine never fetches from GitHub itself (no new egress).
+  GitHub is the second source: an admin can download the same assets on
+  another machine and compare them, by hand or with `nebula verify`
+  (below). Two validly signed but different manifests for the same
+  `release_version` mean misuse of a root key or a broken release
+  process; `nebula verify` reports that as critical, and the maintainer
+  must be told.
+
+**Two ways to check against the published list.**
+
+- **(a) On the NOS machine.** The executor and the server check the
+  installed files against the admitted list of the running version (D4).
+  This runs continuously but depends on the NOS machine's own software.
+- **(b) From a trusted admin machine: `nebula verify`.** The admin runs
+  the `nebula` binary of a verified release on a separate, trusted
+  machine: `nebula verify --host <NOS machine> --version <version>
+  --flavour <flavour> [--from <dir>]`. It takes the three files from the
+  GitHub release of that exact version (or from a local directory),
+  verifies them as above, connects to the NOS machine with the admin's
+  own SSH account and key (`golang.org/x/crypto/ssh`, host key pinned by
+  the admin; no `ssh` binary, never NOS's managed-host keys), reads every
+  listed file and hashes it **locally** (`crypto/sha256`). It reports
+  each file as matching, different, missing or (for `/usr/bin/nebula*`)
+  extra, and compares the SHA-256 of the manifest copy the executor
+  admitted with the GitHub copy. The version is given by the admin, not
+  taken from the machine, so an old installation is not checked against
+  its own old list unnoticed. Everything read from the NOS machine is
+  untrusted input (size limit from the list, strict parsing, escaped
+  text output). How file bytes are read without a new module (a fixed
+  read command per listed path, whose characters D2 restricts, versus
+  SFTP, which needs a new dependency) is decided in IG-04. Limit: a
+  root rootkit on the NOS machine answers these reads too and can
+  return the original bytes; only the offline check from read-only media
+  (D4 "Recommended outside anchor") is independent of the NOS machine's
+  software (see "Honest limits").
+
+**Reproducible builds (follow-up, IG-11).** A signature proves only that
+the maintainer approved the hashes, not that the build was safe. Spec 14
+already asks for reproducible builds (`-trimpath`, pinned toolchain).
+IG-11 makes them checkable, so that anyone can rebuild a tag and obtain
+the same hashes as `installed-files.json` (sketch only; the build and CI
+files it touches are protected paths and need the maintainer):
+
+- Build flags: `CGO_ENABLED=0`, `-trimpath`, `-buildvcs` with the tag
+  commit only (a dirty tree fails the build), `-ldflags=-buildid=`, the
+  exact Go version pinned for releases (not only the `go.mod` minimum).
+- Deterministic packaging: `SOURCE_DATE_EPOCH` from the tag commit for
+  every file time in `.deb`, tarball, container layer and
+  `builtins.tar`; sorted entries; fixed owner `0:0` and modes; web assets
+  from a locked dependency set.
+- Check: a CI job that rebuilds the tag in a clean container and compares
+  every installed file with `installed-files.json`; a documented
+  `make reproduce` style procedure for third parties. Comparison is by
+  installed file, not by `.deb`, because package metadata may still
+  differ.
+- Acceptance: two independent rebuilds of one tag produce identical
+  `installed-files.json` hashes; any difference blocks the release.
 
 ### D3: I1 reference for NOS configuration: an admin-approved baseline
 
@@ -965,32 +1065,39 @@ the direction.
 - Spec 10 or 06: the pinned builder key, `nebula integrity
   trust-builder` and the `nebula-fim-reference` signature namespace
   (D8).
-- Spec 10: mandatory `installed-files.json` artifact and its schema; the
-  `fim.scan` read-only action contract.
+- Spec 10: mandatory `installed-files.json` artifact and its schema;
+  `release-manifest.json`, its signature and `installed-files.json` as
+  assets of every GitHub release, with GitHub named as distribution
+  channel only (D2); the `fim.scan` read-only action contract.
+- Spec 14: reproducible-build acceptance criteria (D2, IG-11).
 - Spec 13: `integrity.*` notification events.
 - Spec 15: upgrade step 4 "self-check" is the I1 check against the
-  admitted installed-files list.
+  admitted installed-files list; every update bundle carries the signed
+  manifest, its signature and `installed-files.json` (offline case, D2).
 
 ## Ticket plan (sketch only)
 
 | Ticket | Content | Depends on |
 | --- | --- | --- |
 | IG-01 | Spec revision listed above | maintainer answers Q1–Q4 |
-| IG-02 | `installed-files.json` in release tooling; parser and verifier with fuzz tests; executor admission next to `trust-builtins` | IG-01 |
+| IG-02 | `installed-files.json` in release tooling and `docs/admin/release-signing.md`; publication of manifest, signature and list as GitHub release assets; parser and verifier with fuzz tests; executor admission next to `trust-builtins` | IG-01 |
 | IG-03 | I1 checks in all NOS processes, executor cross-check, server check of executor; `integrity_findings` store | IG-02 |
-| IG-04 | I1 reaction (unlock refusal per Q4), `nebula integrity ack` and `verify --offline`, configuration baseline approval | IG-03 |
+| IG-04 | I1 reaction (unlock refusal per Q4), `nebula integrity ack` and `verify --offline`, `nebula verify` from an admin machine (D2), configuration baseline approval | IG-03 |
 | IG-05 | `fim.scan` script, read-only contract, `fim-scan-v1` parser with fuzz tests and limits | IG-01 |
 | IG-06 | Host baseline store, executor-held digest, baseline approval UI, `nebula integrity pending`/`approve` for critical-class entries | IG-05 |
 | IG-07 | Incremental/full logic and expected-change attribution from NOS jobs | IG-06 |
 | IG-08 | Findings UI and `integrity.*` notifications | IG-03, IG-06 |
 | IG-09 | Package reference builder, reference signing, executor admission against the pinned builder key, archive comparison | Q6 |
 | IG-10 | I3 ADR | Q5 |
+| IG-11 | Reproducible builds: pinned release toolchain, deterministic packaging, CI rebuild comparison against `installed-files.json` (D2; touches protected build and CI files) | IG-02 |
 
 ## Consequences
 
 - NOS can tell the admin whether its own installed code still matches a
   YubiKey-signed release, and whether watched files on managed hosts
-  changed without a NOS job explaining it.
+  changed without a NOS job explaining it. The signed target hashes of
+  every version are public on GitHub, so an admin can also check from a
+  separate machine (`nebula verify`).
 - The guarantee is deliberately modest and stated everywhere it is
   shown: I1 and I2 catch mistakes and ordinary attackers, not a root
   attacker who tampers with the checker. A hardware-backed answer needs
