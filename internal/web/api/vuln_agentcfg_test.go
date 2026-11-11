@@ -160,6 +160,25 @@ func TestAgentConfigRateLimited(t *testing.T) {
 	}
 }
 
+// Requests with another token never count against the vuln token's
+// budget: they are refused before the rate limit, which is per token.
+func TestAgentConfigRateLimitIsPerToken(t *testing.T) {
+	_, h := agentCfgEnv(t, &fakeAgentCfg{cfg: storedAgentCfg()})
+	for i := range 2 * api.MaxAgentConfigRequests {
+		if r := agentCfgDo(h, http.MethodGet, invTok, hermesAddr, api.AgentConfigPath); r.code != http.StatusUnauthorized {
+			t.Fatalf("other token request %d: %d", i, r.code)
+		}
+	}
+	for i := range api.MaxAgentConfigRequests {
+		if r := agentCfgDo(h, http.MethodGet, vulnTok, hermesAddr, api.AgentConfigPath); r.code != http.StatusOK {
+			t.Fatalf("vuln token request %d after other token's requests: %d", i, r.code)
+		}
+	}
+	if r := agentCfgDo(h, http.MethodGet, vulnTok, hermesAddr, api.AgentConfigPath); r.code != http.StatusTooManyRequests {
+		t.Fatalf("vuln token over its own limit: %d", r.code)
+	}
+}
+
 func TestWithAgentConfigNeedsSource(t *testing.T) {
 	e := newVulnEnv(t)
 	if _, err := e.h.WithAgentConfig(api.AgentConfigOptions{}); err == nil {

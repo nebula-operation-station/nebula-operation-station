@@ -53,8 +53,24 @@ type agentConfigHandler struct {
 	src  AgentConfigSource
 	core string
 
-	mu    sync.Mutex
-	limit rateWindow
+	// limits holds one rate window per authenticated token name, so one
+	// token's requests never use up another token's budget. Only
+	// authenticated tokens get an entry, so the map is bounded by the
+	// configured tokens.
+	mu     sync.Mutex
+	limits map[string]*rateWindow
+}
+
+// allow counts a request of the token name against its own window.
+func (a *agentConfigHandler) allow(name string, now time.Time) (bool, time.Duration) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	rw, ok := a.limits[name]
+	if !ok {
+		rw = &rateWindow{span: AgentConfigWindow, max: MaxAgentConfigRequests}
+		a.limits[name] = rw
+	}
+	return rw.allow(now)
 }
 
 // WithAgentConfig returns a handler that serves AgentConfigPath with the
@@ -65,7 +81,7 @@ func (h *VulnHandler) WithAgentConfig(o AgentConfigOptions) (http.Handler, error
 		return nil, errors.New("vuln api: agent config: vuln handler and source are required")
 	}
 	return &agentConfigHandler{vuln: h, src: o.Source, core: o.CorePrompt,
-		limit: rateWindow{span: AgentConfigWindow, max: MaxAgentConfigRequests}}, nil
+		limits: map[string]*rateWindow{}}, nil
 }
 
 // agentConfigResponse is the answer; no secret, no actor.
@@ -108,10 +124,7 @@ func (a *agentConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "use GET")
 		return
 	}
-	a.mu.Lock()
-	ok, wait := a.limit.allow(h.now())
-	a.mu.Unlock()
-	if !ok {
+	if ok, wait := a.allow(t.name, h.now()); !ok {
 		h.log.Warn("audit", "kind", "api_rate_limited", "token", t.name, "path", r.URL.Path)
 		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
 		writeError(w, http.StatusTooManyRequests, "rate limit reached")

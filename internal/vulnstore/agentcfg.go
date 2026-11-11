@@ -4,7 +4,7 @@ package vulnstore
 
 // LLM settings of the vulnerability agent (ADR 0011 amendment 1, "LLM
 // settings"; autopilot va09): the one-row table vuln_agent_config (serverdb
-// migration 0040) holds whether the agent's assessor is enabled, the LLM
+// migration 0041) holds whether the agent's assessor is enabled, the LLM
 // base URL and model, the operator instructions and the assessment
 // language. The admin changes them on the settings page with a fresh
 // WebAuthn assertion; the agent reads them with its token through
@@ -12,10 +12,11 @@ package vulnstore
 // stays on the agent host, and an empty URL or model means the agent's
 // local configuration wins.
 //
-// AgentConfigStore validates every value (the API serves stored values
-// without re-checking, and the agent re-validates the URL on its side)
-// and writes the audit entry inside the write transaction, so no change
-// commits without one.
+// AgentConfigStore validates every value before it stores it; the API
+// re-validates every stored row before it serves it (a row that fails is
+// not served), and the agent re-validates the URL on its side. The store
+// writes the audit entry through the write transaction itself, so a
+// change commits together with its audit entry or not at all.
 
 import (
 	"context"
