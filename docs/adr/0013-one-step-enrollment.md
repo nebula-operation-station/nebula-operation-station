@@ -616,13 +616,25 @@ that lets the executor find and revoke it:
    once the record's window has ended, lists setup keys. Each pass takes
    the key list first and only then the snapshot of all records, so every
    listed NOS key's `pending` record is in the snapshot. NetBird's
-   setup-key list (`GET /api/setup-keys`) is not paginated, so a pass
+   setup-key list (`GET /api/setup-keys`) is not paginated, as documented
+   for NetBird's management API; before coding, EN-11 verifies this
+   against the reference lab's management server and NetBird Cloud and
+   records the NetBird version checked here, and the field that carries
+   a key's creation time (an endpoint found paginated, or without such a
+   field, stops EN-11 for a spec amendment). A pass therefore
    sends one request; the list is complete only for status `200` and a
-   bare JSON array of at most 10 000 keys in at most 16 MiB, every entry
-   valid and no pagination sign. Anything else is truncated: it matches
-   nothing, revokes nothing and raises the unresolved alert (spec 03,
-   06; amended 2026-11-11; previously: page by page with an unnamed
-   last-page indication and limits "set by EN-11"). Only keys with a
+   bare UTF-8 JSON array of at most 10 000 keys in at most 16 MiB, every
+   entry passing the spec 09 entry check (only `id`, `name`,
+   `usage_limit`, `expires`, the creation time, `revoked` and
+   `auto_groups` are read; every other field, `key` and `last_used`
+   included, is ignored and never logged, stored or put into an error)
+   and none of the closed list of pagination headers of spec 09. One
+   failing entry truncates the whole list. Anything else is truncated:
+   it matches nothing, revokes nothing and raises the unresolved alert
+   naming the truncation class (spec 03, 06, 09; amended 2026-11-11;
+   previously: page by page with an unnamed last-page indication and
+   limits "set by EN-11"). The get by key ID of step 3 uses the same
+   entry check within its own limit of 64 KiB. Only keys with a
    valid key ID, the NOS name prefix, `usage_limit` 1, expiry ≤ 1 h after
    creation, exactly the managed group, creation time inside the stored
    window and not revoked are candidates; keys whose ID or name any other
@@ -1093,7 +1105,9 @@ follows; D1–D9 above already reflect these decisions.
     name filter (previously: create, revoke and list by name). The 32-bit
     key-name collision is named as a residual (spec 06).
   - D6 "Creation order" steps 3 and 5 (fix round 3, spec text in
-    `docs/spec/02`, `03`, `06`, `17`): automatic revoke only of a key
+    `docs/spec/02`, `03`, `06`, `09`, `17`; previously listed without
+    `09`, which still let a failing list entry be skipped, matched
+    name-mismatched records by window and left the list limits to EN-11): automatic revoke only of a key
     whose name equals the record's requested name, in the get by key ID
     as in reconcile; the window match for name-mismatched records is
     removed and such a record raises the unresolved alert (previously:
@@ -1106,7 +1120,18 @@ follows; D1–D9 above already reflect these decisions.
     16 MiB, no pagination sign (`NetBirdKeyListMaxPages` = 1); every
     other result is truncated and never leads to a revoke (amended
     2026-11-11; previously: page by page, an unnamed last-page
-    indication and limit values "set by EN-11"). The foreign-key
+    indication and limit values "set by EN-11"). Spec 09 names the
+    list-entry fields that are read (`id`, `name`, `usage_limit`,
+    `expires`, the creation time, `revoked`, `auto_groups`); every other
+    field is ignored and `key`, `last_used` and similar fields are never
+    logged, stored or put into an error; one failing entry truncates the
+    whole list; the pagination headers are a closed list; the get by
+    key ID has its own limit `NetBirdKeyGetMaxBytes` = 64 KiB; spec 03
+    tells the operator to delete revoked keys in NetBird well before
+    10 000; EN-11 verifies the unpaginated endpoint on the reference lab
+    and NetBird Cloud and records the version (previously: "strict list
+    schema" without fields, "any header naming a next page", and the
+    get "checked like the list"). The foreign-key
     revocation residuals R1–R3 and the late-create residual are named
     in spec 06 and in this ADR's "Threat model additions" (previously
     claimed: "in spec 06 and the threat model"; `docs/threat-model.md`
