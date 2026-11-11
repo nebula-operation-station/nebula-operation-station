@@ -332,7 +332,8 @@ func TestRegistryLeaseIntervalAndBudget(t *testing.T) {
 	e.addRepos(t, "team/app", "team/worker")
 	e.lease(t, 2, 7*24*time.Hour, e.target(t, schedgrant.RegistryReadMethods(), "team/app", "team/worker"))
 	ctx := context.Background()
-	r := RegistryRead{RegistryID: "corp", Method: schedgrant.RegistryReadTagDigest, Repository: "team/app"}
+	// The same tag as digestRead, so the RPC below is the same read.
+	r := RegistryRead{RegistryID: "corp", Method: schedgrant.RegistryReadTagDigest, Repository: "team/app", Reference: "1.0.0"}
 	l, err := e.svc.loadRegistry("corp")
 	if err != nil {
 		t.Fatal(err)
@@ -376,5 +377,62 @@ func TestRegistryLeaseDoesNotAuthorizeOtherReads(t *testing.T) {
 	doc, isLease, err := registryLeaseDoc(g)
 	if err != nil || !isLease || len(doc.Actions) != 0 || len(doc.Targets) != 0 {
 		t.Fatalf("registry lease doc: %+v %v %v", doc, isLease, err)
+	}
+}
+
+// TestRegistryLeaseIntervalIsPerTag: the interval key is registry, method,
+// repository and tag, so two tags of one repository read at the same time
+// are both authorized, while the same tag again within the floor is not.
+func TestRegistryLeaseIntervalIsPerTag(t *testing.T) {
+	e := newRegistryLeaseEnv(t)
+	e.addRepos(t, "team/app")
+	e.defaultLease(t)
+	ctx := context.Background()
+	r := RegistryRead{RegistryID: "corp", Method: schedgrant.RegistryReadTagDigest, Repository: "team/app", Reference: "1.0.0"}
+	l, err := e.svc.loadRegistry("corp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.ConfigDigest, r.ConfigVersion, r.CredentialID, r.CredentialVersion = l.configDigest, l.configVersion, l.cred.ID, l.credVersion
+	l.wipe()
+	if _, err := e.svc.checkRegistryLease(ctx, r, e.clock.Now()); err != nil {
+		t.Fatalf("first tag: %v", err)
+	}
+	second := r
+	second.Reference = "2.0.0"
+	if _, err := e.svc.checkRegistryLease(ctx, second, e.clock.Now()); err != nil {
+		t.Fatalf("second tag of the same repository: %v", err)
+	}
+	if _, err := e.svc.checkRegistryLease(ctx, r, e.clock.Now()); !errors.Is(err, ErrRegistryTooSoon) {
+		t.Fatalf("same tag again: %v", err)
+	}
+	if registryActionKey(r.Method, r.Repository, "1.0.0") == registryActionKey(r.Method, r.Repository, "2.0.0") ||
+		registryActionKey(r.Method, "team/app", "") == registryActionKey(schedgrant.RegistryReadListTags, "team/app", "") {
+		t.Fatal("interval keys collide")
+	}
+}
+
+// TestRegistryLeaseUnverifiableStoredLeaseIsSkipped: one stored registry
+// lease that fails re-verification is skipped (and logged), so a valid
+// lease still authorizes the read instead of an internal error for all.
+func TestRegistryLeaseUnverifiableStoredLeaseIsSkipped(t *testing.T) {
+	e := newRegistryLeaseEnv(t)
+	e.addRepos(t, "team/app")
+	id := e.defaultLease(t)
+	g, ok, err := e.db.ReadGrant(id)
+	if err != nil || !ok {
+		t.Fatal(ok, err)
+	}
+	bad := g
+	bad.ID = "00000000-0000-4000-8000-000000000001" // sorts first
+	bad.Digest = strings.Repeat("0", 64)
+	if err := e.db.SaveReadGrant(bad); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.svc.ReadPrivateRegistry(context.Background(), digestRead()); err != nil {
+		t.Fatalf("read with one valid and one unverifiable lease: %v", err)
+	}
+	if !strings.Contains(allLogText(e.logs), "registry read lease skipped") {
+		t.Fatalf("skipped lease not logged: %s", allLogText(e.logs))
 	}
 }

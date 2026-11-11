@@ -33,8 +33,9 @@ import (
 // restart until local credential unlock, pending recovery) exactly like
 // SSH, provider and device reads. The spend is reserved durably in the
 // shared read-grant counters before any registry I/O: one unit of the
-// per-registry rolling-hour budget and the per-repository, per-method
-// interval (at least schedgrant.RegistryMinInterval). A refusal of the
+// per-registry rolling-hour budget and the interval (at least
+// schedgrant.RegistryMinInterval) of the read itself: one method on one
+// repository and one tag (or digest). A refusal of the
 // re-check right after the reservation releases it again.
 //
 // The lease never names or carries a credential value: the credential
@@ -71,10 +72,13 @@ const registryGrantKeyPrefix = "registry:"
 // registryBudgetKey is the rolling-hour budget key of a registry.
 func registryBudgetKey(registryID string) string { return registryGrantKeyPrefix + registryID }
 
-// registryActionKey is the interval key of one method on one repository;
-// combined with the budget key it is per registry, repository and method.
-func registryActionKey(method, repository string) string {
-	return registryGrantKeyPrefix + method + ":" + repository
+// registryActionKey is the interval key of one method on one repository
+// and reference (the tag or digest of a tag_digest read, empty for
+// list_tags); combined with the budget key it is per registry, method,
+// repository and tag. Neither method nor repository contains ':', so the
+// reference (a digest has one) cannot make two keys collide.
+func registryActionKey(method, repository, reference string) string {
+	return registryGrantKeyPrefix + method + ":" + repository + ":" + reference
 }
 
 // RegistryReadGrants returns the production RegistryReadAuthorizer: the
@@ -227,7 +231,12 @@ func (s *Service) checkRegistryLease(ctx context.Context, r RegistryRead, now ti
 		}
 		doc, isLease, err := registryLeaseDoc(g)
 		if err != nil {
-			return nil, err
+			// One unverifiable stored lease never blocks the reads other
+			// leases cover; it authorizes nothing itself.
+			if s.log != nil {
+				s.log.Error("registry read lease skipped", "grant", g.ID, "error", err.Error())
+			}
+			continue
 		}
 		if !isLease {
 			continue
@@ -258,7 +267,7 @@ func (s *Service) checkRegistryLease(ctx context.Context, r RegistryRead, now ti
 		return nil, ErrRegistryNoLease
 	}
 
-	actionKey, budgetKey := registryActionKey(r.Method, r.Repository), registryBudgetKey(r.RegistryID)
+	actionKey, budgetKey := registryActionKey(r.Method, r.Repository, r.Reference), registryBudgetKey(r.RegistryID)
 	denied := false
 	var deniedInterval time.Duration
 	for _, c := range candidates {

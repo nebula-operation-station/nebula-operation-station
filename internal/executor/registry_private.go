@@ -97,6 +97,10 @@ type RegistryRead struct {
 	// every add or rotation, so a version number reused after a removal
 	// never matches an old grant.
 	CredentialID string
+	// Reference is the tag (or digest) of a tag_digest read and empty for
+	// list_tags; it is part of the read's interval key, so two tags of one
+	// repository are two reads.
+	Reference string
 }
 
 // RegistryReadClaim is one reserved read. Check re-verifies it (lock,
@@ -616,6 +620,12 @@ func (s *Service) ReadPrivateRegistry(ctx context.Context, in *pb.ReadPrivateReg
 	}
 	read := RegistryRead{RegistryID: l.rec.ID, Method: method, Repository: in.GetRepository(), ConfigDigest: l.configDigest,
 		ConfigVersion: l.configVersion, CredentialVersion: l.credVersion, CredentialID: l.cred.ID}
+	if method == RegistryMethodTagDigest {
+		read.Reference = in.GetTag()
+		if read.Reference == "" {
+			read.Reference = in.GetDigest()
+		}
+	}
 	claim, err := s.registryAuthorizer().AuthorizeRegistryRead(read)
 	if err != nil {
 		return nil, registryGrantStatus(err)
