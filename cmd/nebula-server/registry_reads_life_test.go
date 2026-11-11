@@ -71,7 +71,15 @@ func TestServerRegistryReadsStopWithServerLifetime(t *testing.T) {
 	}
 	before := exec.lists.Load()
 	s.ResolveImageUpdates(render, u)
-	time.Sleep(50 * time.Millisecond) // a started worker would list at once
+	// A worker the render started is marked running before the render
+	// returns and lists first thing; Drain waits until any such worker is
+	// idle, so its list (if any) is counted before the check, without
+	// relying on timing.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := s.reader.Drain(ctx); err != nil {
+		t.Fatalf("a background worker after shutdown did not stop: %v", err)
+	}
 	if n := exec.lists.Load(); n != before {
 		t.Fatalf("a render after shutdown started %d executor calls", n-before)
 	}
