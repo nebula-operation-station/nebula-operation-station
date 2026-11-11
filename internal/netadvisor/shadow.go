@@ -149,7 +149,7 @@ func (sh *shadowState) rule(i int, w *work) (Finding, Finding) {
 		// The real ports are the default ports of the rule's
 		// applications, a subset of every port: covering the whole
 		// service dimension is enough to shadow; covering only some
-		// ports decides nothing (see appDefaultUnknown below).
+		// ports decides nothing (the projection test below).
 		target.svc = fullService()
 	}
 
