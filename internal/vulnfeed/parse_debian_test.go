@@ -130,6 +130,8 @@ func TestParseDebianTrackerRejectsMalformed(t *testing.T) {
 		{"duplicate issue", `{"zlib":{"CVE-2024-1":{},"CVE-2024-1":{}}}`, ErrFeedMalformed},
 		{"case duplicate issue", `{"zlib":{"CVE-2024-1":{},"cve-2024-1":{}}}`, ErrFeedMalformed},
 		{"too deep", `{"zlib":{"CVE-2024-1111":{"x":` + strings.Repeat("[", MaxJSONDepth) + strings.Repeat("]", MaxJSONDepth) + `}}}`, ErrFeedLimit},
+		// An issue skipped for its ID is still held to the depth limit.
+		{"skipped issue too deep", `{"zlib":{"../x":{"x":` + strings.Repeat("[", MaxJSONDepth) + strings.Repeat("]", MaxJSONDepth) + `}}}`, ErrFeedLimit},
 		{"skipped package too deep", `{"Bad Name":` + strings.Repeat("[", MaxJSONDepth+1) + strings.Repeat("]", MaxJSONDepth+1) + `}`, ErrFeedLimit},
 		{"whitespace run", `{"zlib":{}` + strings.Repeat(" ", recordWindowSlack+1) + `,"aa":{}}`, ErrFeedLimit},
 	}

@@ -267,6 +267,11 @@ func (p *debianParse) parsePackage(pkg string, valid bool) error {
 			return br.fail(where+" issue", err)
 		}
 		if !feedVulnIDRe.MatchString(id) {
+			// The issue is skipped for its ID, but its depth limit stays
+			// fatal like that of any other issue.
+			if err := checkJSON(raw, MaxJSONDepth, nil); err != nil && !recordSkippable(err) {
+				return fmt.Errorf("%s issue: %w", where, err)
+			}
 			p.sum.Skipped++
 			continue
 		}
