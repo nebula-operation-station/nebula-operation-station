@@ -525,7 +525,7 @@ func TestHostileStringsStoredVerbatimWithinLimits(t *testing.T) {
 		"\x1b[31mred",
 		"line\nbreak",
 		"nul\x00byte",
-		"bidi ‮ override",
+		"bidi " + string(rune(0x202e)) + " override",
 		"bad utf8 \xff",
 	}
 	before, err := s.GetDataset(context.Background(), "sw-core", ReadVLANs)
