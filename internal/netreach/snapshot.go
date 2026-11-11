@@ -13,8 +13,9 @@
 // step without data is not collected. Whatever cannot be evaluated leads to
 // the verdict unknown with a reason, never to denied or allowed.
 //
-// Rule evaluation, NAT and the explanation chain follow in a later part
-// (NS-05 part 2); this part holds only types, placement and limits.
+// Index.Evaluate answers one query: placement, crossing test, NAT with the
+// reverse-NAT lookup, security rules in order and the default rules, with
+// an explanation chain (eval.go, nat.go, explain.go).
 package netreach
 
 import (
