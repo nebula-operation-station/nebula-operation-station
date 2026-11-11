@@ -122,7 +122,8 @@ const maxDebianReleaseValueBytes = 1024
 // debianIssuePaths are the per-issue limits checkJSON enforces while it
 // walks, so the releases map never holds more than
 // MaxDebianReleasesPerIssue entries and no release value is copied
-// beyond its cap.
+// beyond its cap. The releases count check in parseIssue repeats the cap
+// as defence in depth; it cannot fire while debianIssuePaths holds it.
 var debianIssuePaths = jsonLimits{
 	"releases": {Members: MaxDebianReleasesPerIssue},
 	// Every direct member of every release object.
@@ -140,9 +141,15 @@ var debianIssuePaths = jsonLimits{
 // issue that breaks a per-issue field length or count limit
 // (ErrRecordLimit, e.g. more than MaxDebianReleasesPerIssue releases), is
 // skipped and counted in DebianTrackerSummary.Skipped (a skipped package
-// or issue counts once, not per entry inside it). An export size, package
-// size, package, issue-per-package or entry count limit, the depth limit,
-// a duplicate package or issue, or a broken stream fails the whole export.
+// or issue counts once, not per entry inside it). A package with more than
+// MaxDebianIssuesPerPackage issues breaks a per-package count limit: its
+// remaining issues are consumed unread and the package is counted once in
+// Skipped instead of Packages. The entries of its first
+// MaxDebianIssuesPerPackage issues have been visited by then, like the
+// entries of any package before a later error. An export size, package
+// size, package or entry count limit, the depth limit (also inside a
+// skipped package or issue), a duplicate package or issue, or a broken
+// stream fails the whole export.
 //
 // The export is undated: its content date is the proxy date of the DSA
 // and DLA lists (ParseDebianAdvisoryList), never a fetch time. On any
@@ -174,12 +181,8 @@ func parseDebianTracker(ctx context.Context, r io.Reader, maxEntries int, visit 
 
 func (p *debianParse) run() error {
 	dec, br := p.dec, p.br
-	tok, err := dec.Token()
-	if err != nil {
-		return br.fail("debian tracker", err)
-	}
-	if d, ok := tok.(json.Delim); !ok || d != '{' {
-		return fmt.Errorf("debian tracker: top level is not an object: %w", ErrFeedMalformed)
+	if err := expectDelim(dec, br, "debian tracker top level", '{'); err != nil {
+		return err
 	}
 	seen := make(map[string]struct{})
 	packages := 0
@@ -206,20 +209,10 @@ func (p *debianParse) run() error {
 			return err
 		}
 	}
-	tok, err = dec.Token()
-	if err != nil {
-		return br.fail("debian tracker end", err)
+	if err := expectDelim(dec, br, "debian tracker end", '}'); err != nil {
+		return err
 	}
-	if d, ok := tok.(json.Delim); !ok || d != '}' {
-		return fmt.Errorf("debian tracker end: %w", ErrFeedMalformed)
-	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return br.fail("debian tracker: data after the export", err)
-	}
-	if br.exceeded {
-		return fmt.Errorf("debian tracker: %w", ErrFeedLimit)
-	}
-	return nil
+	return expectEOF(dec, br, "debian tracker: data after the export")
 }
 
 // parsePackage streams the issues of one source package within a window
@@ -252,7 +245,17 @@ func (p *debianParse) parsePackage(pkg string, valid bool) error {
 	issues := 0
 	for dec.More() {
 		if issues >= MaxDebianIssuesPerPackage {
-			return fmt.Errorf("%s: more than %d issues: %w", where, MaxDebianIssuesPerPackage, ErrFeedLimit)
+			// A per-package count limit: the rest of the package is
+			// consumed within the package window, which keeps the size
+			// and depth limits fatal, and the package is skipped.
+			if err := skipValueRest(dec, json.Delim('{')); err != nil {
+				return br.fail(where, err)
+			}
+			if dec.InputOffset()-start > MaxDebianPackageBytes {
+				return fmt.Errorf("%s: more than %d bytes: %w", where, MaxDebianPackageBytes, ErrFeedLimit)
+			}
+			p.sum.Skipped++
+			return nil
 		}
 		issues++
 		tok, err := dec.Token()
@@ -265,6 +268,11 @@ func (p *debianParse) parsePackage(pkg string, valid bool) error {
 			return br.fail(where+" issue", err)
 		}
 		if !feedVulnIDRe.MatchString(id) {
+			// The issue is skipped for its ID, but its depth limit stays
+			// fatal like that of any other issue.
+			if err := checkJSON(raw, MaxJSONDepth, nil); err != nil && !recordSkippable(err) {
+				return fmt.Errorf("%s issue: %w", where, err)
+			}
 			p.sum.Skipped++
 			continue
 		}
@@ -277,8 +285,13 @@ func (p *debianParse) parsePackage(pkg string, valid bool) error {
 			return err
 		}
 	}
-	if err := expectDelim(dec, '}'); err != nil {
+	// The closing brace is read within the package window.
+	tok, err = dec.Token()
+	if err != nil {
 		return br.fail(where+" end", err)
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '}' {
+		return fmt.Errorf("%s end: %w", where, ErrFeedMalformed)
 	}
 	if dec.InputOffset()-start > MaxDebianPackageBytes {
 		return fmt.Errorf("%s: more than %d bytes: %w", where, MaxDebianPackageBytes, ErrFeedLimit)

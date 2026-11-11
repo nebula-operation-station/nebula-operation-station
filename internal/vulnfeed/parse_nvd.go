@@ -5,7 +5,6 @@ package vulnfeed
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -159,7 +158,10 @@ type nvdItemJSON struct {
 }
 
 // nvdPaths are the per-record limits checkJSON enforces on one NVD item
-// while it walks, before json.Unmarshal builds any slice or string.
+// while it walks, before json.Unmarshal builds any slice or string. The
+// count checks after Unmarshal (descriptions, metrics, weaknesses,
+// references, tags) repeat these caps as defence in depth; they cannot
+// fire while nvdPaths holds them.
 var nvdPaths = jsonLimits{
 	"cve.id":                                 {Bytes: 32},
 	"cve.published":                          {Bytes: maxTimeBytes},
@@ -210,8 +212,8 @@ func parseNVD(ctx context.Context, r io.Reader, maxRecords int, visit func(NVDRe
 	var sum NVDSummary
 	br := newBoundedReader(r, MaxNVDFeedBytes)
 	dec := json.NewDecoder(br)
-	if err := expectDelim(dec, '{'); err != nil {
-		return sum, br.fail("nvd feed", err)
+	if err := expectDelim(dec, br, "nvd feed", '{'); err != nil {
+		return sum, err
 	}
 	keys := make(map[string]struct{})
 	var format, version string
@@ -269,14 +271,11 @@ func parseNVD(ctx context.Context, r io.Reader, maxRecords int, visit func(NVDRe
 			return sum, fmt.Errorf("nvd feed %s: %w", key, ErrFeedMalformed)
 		}
 	}
-	if err := expectDelim(dec, '}'); err != nil {
-		return sum, br.fail("nvd feed end", err)
+	if err := expectDelim(dec, br, "nvd feed end", '}'); err != nil {
+		return sum, err
 	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return sum, br.fail("nvd feed: data after the feed", err)
-	}
-	if br.exceeded {
-		return sum, fmt.Errorf("nvd feed: %w", ErrFeedLimit)
+	if err := expectEOF(dec, br, "nvd feed: data after the feed"); err != nil {
+		return sum, err
 	}
 	if format != "NVD_CVE" || version != "2.0" {
 		return sum, fmt.Errorf("nvd feed: format or version: %w", ErrFeedMalformed)
@@ -290,8 +289,8 @@ func parseNVD(ctx context.Context, r io.Reader, maxRecords int, visit func(NVDRe
 // parseNVDItems streams the vulnerabilities array. maxRecords counts every
 // item read, skipped ones included.
 func parseNVDItems(ctx context.Context, dec *json.Decoder, br *boundedReader, maxRecords int, ids map[string]struct{}, sum *NVDSummary, visit func(NVDRecord) error) error {
-	if err := expectDelim(dec, '['); err != nil {
-		return br.fail("nvd vulnerabilities", err)
+	if err := expectDelim(dec, br, "nvd vulnerabilities", '['); err != nil {
+		return err
 	}
 	read := 0
 	for more(dec, br) {
@@ -327,8 +326,8 @@ func parseNVDItems(ctx context.Context, dec *json.Decoder, br *boundedReader, ma
 			sum.Newest = rec.LastModified
 		}
 	}
-	if err := expectDelim(dec, ']'); err != nil {
-		return br.fail("nvd vulnerabilities end", err)
+	if err := expectDelim(dec, br, "nvd vulnerabilities end", ']'); err != nil {
+		return err
 	}
 	return nil
 }
