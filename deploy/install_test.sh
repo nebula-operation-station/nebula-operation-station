@@ -274,7 +274,8 @@ compose_yaml="${script_dir}/container/compose.yaml"
 if [[ $(grep -cxF '      - pve-results:/var/lib/nebula/pve/results' "$compose_yaml") == 2 &&
       $(grep -cxF '      - pve-guestnet:/var/lib/nebula/pve/guestnet' "$compose_yaml") == 2 &&
       $(grep -c 'pve-spool:/var/lib/nebula/pve$' "$compose_yaml") == 1 &&
-      $(grep -cxF '    network_mode: none' "$compose_yaml") == 1 ]]; then
+      $(grep -cxF '    network_mode: none' "$compose_yaml") == 2 &&
+      $(awk '/^  pve-collector:$/{f=1;next} f&&/^  [a-z]/{exit} f{print}' "$compose_yaml" | grep -cxF '    network_mode: none') == 1 ]]; then
   echo "ok   compose mounts results and guestnet in both services, the root only in the collector, and the collector has no network"
   pass=$((pass + 1))
 else

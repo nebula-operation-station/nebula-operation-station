@@ -99,6 +99,40 @@ provision_pve_spool() {
   done
 }
 
+# provision_netdev_spool gives an upgraded host the network device
+# collector's user and spool (ADR 0010, ND-15) in install.sh's state, so the
+# admin can enable the collector without running install.sh again; the
+# package never enables or starts it. The spool is one flat directory
+# (2770, nebula-netdev-collector:nebula-rpc, internal/netdevcollect/spool.go)
+# directly below the root-owned var_lib, so only root could swap a link in
+# there; still, like the pve root, a file or symlink at the path is left
+# alone (install -d would follow it) and the admin is pointed to install.sh.
+# A directory already in install.sh's state is not touched.
+provision_netdev_spool() {
+  if ! getent passwd nebula-netdev-collector >/dev/null; then
+    useradd --system --home-dir "${var_lib}/netdev" --shell /usr/sbin/nologin -G nebula-rpc nebula-netdev-collector || return 1
+  fi
+  if [ -L "${var_lib}/netdev" ] || { [ -e "${var_lib}/netdev" ] && [ ! -d "${var_lib}/netdev" ]; }; then
+    return 1
+  fi
+  if [ "$(stat -c '%a %U %G' "${var_lib}/netdev" 2>/dev/null)" = "2770 nebula-netdev-collector nebula-rpc" ]; then
+    return 0
+  fi
+  install -d -m 2770 -o nebula-netdev-collector -g nebula-rpc "${var_lib}/netdev" || return 1
+}
+
+# refresh_netdev_spool acts only where install.sh has run, like the drop-in
+# refresh below, and never fails the upgrade: the collector is not enabled by
+# the package, and install.sh provisions the spool as well.
+refresh_netdev_spool() {
+  [ -f "${server_drop_in}" ] || return 0
+  provision_netdev_spool && return 0
+  cat >&2 <<EOF
+nebula: warning: could not provision ${var_lib}/netdev for nebula-netdev-collector;
+nebula: before enabling it, run: sudo /usr/share/nebula/deploy/install.sh --from-package --admin-users USER --rp-id HOST
+EOF
+}
+
 # refresh_server_drop_in acts only where install.sh has run: without the
 # drop-in the host is not configured yet. It never fails the upgrade: the old
 # drop-in still lets the server start, the spool just keeps growing.
@@ -136,20 +170,31 @@ EOF
       exit 0
     fi
     refresh_server_drop_in
+    refresh_netdev_spool
     [ -d /run/systemd/system ] || exit 0
     systemctl daemon-reload || true
     # The hint, never a restart: also when the executor is stopped or failed,
     # a running collector stays on the old binary until the admin restarts it.
+    # The netdev collector is named only when it runs: a restart would start
+    # a collector the admin never enabled.
+    netdev_active=0
+    if systemctl is-active --quiet nebula-netdev-collector.service; then
+      netdev_active=1
+    fi
     if ! systemctl is-active --quiet nebula-executor.service \
-      && ! systemctl is-active --quiet nebula-pve-collector.service; then
+      && ! systemctl is-active --quiet nebula-pve-collector.service \
+      && [ "${netdev_active}" -eq 0 ]; then
       exit 0
     fi
     cat <<EOF
 nebula: the new version is installed; the services keep running the old one.
 nebula: back up, then restart (the new version migrates the databases):
 nebula:   sudo nebula backup && sudo systemctl restart nebula-executor nebula-server nebula-pve-collector
-nebula: then run nebula unlock.
 EOF
+    if [ "${netdev_active}" -eq 1 ]; then
+      echo "nebula:   sudo systemctl restart nebula-netdev-collector"
+    fi
+    echo "nebula: then run nebula unlock."
     ;;
 esac
 exit 0

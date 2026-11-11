@@ -105,6 +105,32 @@ services:
       - pve-results:/var/lib/nebula/pve/results
       - pve-guestnet:/var/lib/nebula/pve/guestnet
 
+  # Network device collector (ADR 0010, ND-15). Like the systemd unit it is
+  # not started by default: register the network devices in the executor
+  # first, then start it with
+  #   NEBULA_RP_ID=nebula.example.org docker compose --profile netdev up -d
+  netdev-collector:
+    <<: *hardening
+    image: ${NEBULA_IMAGE:-ghcr.io/nebula-operation-station/nebula:latest}
+    user: "10005:10005"
+    group_add: ["10010"]
+    depends_on: [executor]
+    profiles: [netdev]
+    # The same restrictions as the PVE collector: no network listener, no
+    # capabilities, no network at all (network_mode: none, matching the
+    # unit's AF_UNIX-only grant). It only reaches the executor socket (on
+    # the shared rpc volume) and writes its spool; it never reaches a device.
+    network_mode: none
+    command:
+      - nebula-netdev-collector
+      - -socket=/run/nebula/executor.sock
+      - -executor-user=nebula-executor
+      - -spool=/var/lib/nebula/netdev
+      - -interval=1m
+    volumes:
+      - rpc:/run/nebula
+      - netdev-spool:/var/lib/nebula/netdev
+
 volumes:
   executor-data:
   server-data:
@@ -116,3 +142,4 @@ volumes:
   pve-live:
   pve-results:
   pve-guestnet:
+  netdev-spool:
