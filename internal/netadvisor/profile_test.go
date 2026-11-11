@@ -134,3 +134,33 @@ func TestProfileCheck(t *testing.T) {
 		})
 	}
 }
+
+// TestProfileDuplicateUUIDCannotDecide: the profile-setting is looked up
+// by rule UUID, so a second rule with the same UUID (a hostile or broken
+// device report) must not borrow the setting of the first. Every rule
+// sharing the UUID is cannot_decide; a rule with its own UUID is not
+// affected.
+func TestProfileDuplicateUUIDCannotDecide(t *testing.T) {
+	first := rule("r", allow, s("guest"), s("lan"), s("any"), s("lan-net"), s("svc-web"))
+	second := rule("copy", allow, s("wan"), s("lan"), s("any"), s("any"), s("any"))
+	second.UUID = first.UUID
+	other := rule("other", allow, s("guest"), s("lan"), s("any"), s("lan-net"), s("svc-web"))
+	profiles := nr.Collected(map[string]ProfileSetting{
+		"uuid-r":     {Group: "strict"},
+		"uuid-other": {Group: "strict"},
+	})
+	in, err := NewInput(labSnapshot(first, second, other), labClasses, profiles)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep := ProfileCheck{}.Run(in)
+	for i := range 2 {
+		f := byRule(t, rep, CheckAllowWithoutProfile, i)
+		if f.State != StateCannotDecide || !strings.Contains(f.Reason, "UUID") {
+			t.Errorf("rule %d = %s (%q), want cannot_decide on the duplicate UUID", i, f.State, f.Reason)
+		}
+	}
+	if f := byRule(t, rep, CheckAllowWithoutProfile, 2); f.State != StateOK {
+		t.Errorf("rule with its own UUID = %s (%q), want ok", f.State, f.Reason)
+	}
+}

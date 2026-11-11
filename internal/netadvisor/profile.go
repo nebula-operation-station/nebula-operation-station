@@ -33,14 +33,21 @@ func (ProfileCheck) Run(in *Input) Report {
 	if !in.Profiles.Collected {
 		return failedReport(CheckAllowWithoutProfile, in, StateDataNotCollected, "data not collected: profile-setting (NS-04)")
 	}
+	// The profile-setting is keyed by rule UUID: a UUID that several rules
+	// carry cannot tell whose setting it is.
+	uuids := make(map[string]int, len(in.Snapshot.SecurityRules))
+	for i := range in.Snapshot.SecurityRules {
+		uuids[in.Snapshot.SecurityRules[i].UUID]++
+	}
 	r := Report{CheckID: CheckAllowWithoutProfile, CheckVersion: CheckVersion, State: StateOK}
 	for i := range in.Snapshot.SecurityRules {
-		r.Findings = append(r.Findings, profileRule(in, i))
+		r.Findings = append(r.Findings, profileRule(in, i, uuids))
 	}
 	return r
 }
 
-func profileRule(in *Input, i int) Finding {
+// profileRule checks rule i; uuids counts the rules per UUID.
+func profileRule(in *Input, i int, uuids map[string]int) Finding {
 	r := &in.Snapshot.SecurityRules[i]
 	f := newFinding(CheckAllowWithoutProfile, i, r)
 	marker := ""
@@ -87,6 +94,9 @@ func profileRule(in *Input, i int) Finding {
 	f.Zones = cleanAll(sortedUnique(zones))
 	if r.UUID == "" {
 		return set(StateCannotDecide, "cannot decide: rule has no UUID")
+	}
+	if uuids[r.UUID] > 1 {
+		return set(StateCannotDecide, "cannot decide: rule UUID is not unique in the snapshot")
 	}
 	p, ok := in.Profiles.Value[r.UUID]
 	if !ok {
