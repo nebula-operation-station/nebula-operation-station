@@ -26,9 +26,18 @@ docs/              user guide, module SDK, threat model
 **Builds and releases.**
 
 - Pure-Go SQLite (`modernc.org/sqlite`), so every binary is static without CGO.
-- Reproducible builds (`-trimpath`, pinned toolchain), built by goreleaser into tarballs, `.deb` packages and container images.
+- Reproducible builds (`-trimpath`, pinned toolchain), built by goreleaser into tarballs, `.deb` packages and container images; acceptance criteria [below](#v26-14-01).
 - Signed checksums and a CycloneDX SBOM per release; `govulncheck` and dependency updates in CI.
 - No telemetry of any kind.
+
+<a id="v26-14-01"></a>
+<!-- Spec revision (ADR 0015, IG-01): v26-14-01 -->
+**Reproducible-build acceptance criteria (ADR 0015 D2; implementation IG-11).** A signature on `installed-files.json` ([10-modules.md](10-modules.md#v26-10-01)) proves only that the maintainer approved the hashes, not that the build was safe; reproducible builds make the hashes checkable by anyone who rebuilds a tag (previously: "reproducible" without a check or acceptance criterion). Until IG-11 is in place, nobody but the release process can re-derive them.
+
+- **Build flags.** `CGO_ENABLED=0`, `-trimpath`, `-buildvcs` with the tag commit only (a dirty tree fails the build), `-ldflags=-buildid=`, and the exact Go version pinned for releases, not only the `go.mod` minimum.
+- **Deterministic packaging.** `SOURCE_DATE_EPOCH` from the tag commit for every file time in `.deb`, tarball, container layer and `builtins.tar`; sorted entries; fixed owner `0:0` and modes; web assets from a locked dependency set.
+- **Check.** A CI job rebuilds the tag in a clean container and compares every installed file with `installed-files.json`, and a documented `make reproduce` style procedure lets third parties do the same. Comparison is by installed file, not by `.deb`, because package metadata may still differ.
+- **Acceptance.** Two independent rebuilds of one tag produce identical `installed-files.json` hashes; any difference blocks the release.
 
 **Install paths.**
 
