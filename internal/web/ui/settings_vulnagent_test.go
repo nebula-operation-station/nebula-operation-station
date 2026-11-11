@@ -260,6 +260,7 @@ func TestVulnAgentSettingsStaleVersionAndBackendErrors(t *testing.T) {
 		want int
 	}{
 		{ui.ErrVulnAssertionRefused, http.StatusForbidden},
+		{fmt.Errorf("commit: %w", ui.ErrVulnAgentNotMaintainer), http.StatusForbidden},
 		{vulnstore.ErrAgentConfigConflict, http.StatusConflict},
 		{vulnstore.ErrInvalidInput, http.StatusBadRequest},
 		{errors.New("audit log /var/lib/nebula/audit.log: disk full"), http.StatusBadGateway},

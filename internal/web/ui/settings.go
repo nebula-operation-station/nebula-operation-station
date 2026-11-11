@@ -294,6 +294,10 @@ func (c VulnAgentChange) Digest() string {
 	return hex.EncodeToString(sum[:])
 }
 
+// ErrVulnAgentNotMaintainer: the backend's re-check found that the
+// request's user is not the maintainer.
+var ErrVulnAgentNotMaintainer = errors.New("only the maintainer can change the vulnerability agent settings")
+
 // VulnAgentSettings is the backend of the "Vulnerability agent – LLM"
 // section. The server implements it over vulnstore.AgentConfigStore, its
 // audit log and the executor's WebAuthn verification; it re-checks the
@@ -566,6 +570,8 @@ func (h *Handler) vulnAgentError(w http.ResponseWriter, op string, err error) {
 	switch {
 	case errors.Is(err, ErrVulnAssertionRefused):
 		writeJSONError(w, http.StatusForbidden, "the security key assertion was refused")
+	case errors.Is(err, ErrVulnAgentNotMaintainer):
+		writeJSONError(w, http.StatusForbidden, "only the maintainer can change the vulnerability agent settings")
 	case errors.Is(err, vulnstore.ErrAgentConfigConflict):
 		writeJSONError(w, http.StatusConflict, "the settings were changed meanwhile; reload the page")
 	case errors.Is(err, vulnstore.ErrInvalidInput):
