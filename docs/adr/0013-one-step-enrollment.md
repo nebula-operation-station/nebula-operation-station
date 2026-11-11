@@ -1164,8 +1164,9 @@ follows; D1–D9 above already reflect these decisions.
   mismatch handling.
 - `docs/spec/06-credentials.md`: NetBird management token custody, per-offer
   setup keys in the vault created only after approval and under a persisted
-  `pending` record with reconcile by key name, else by stored time window
-  and managed group, no plaintext script at rest
+  `pending` record with reconcile by the requested key name only
+  (previously: by key name, else by stored time window and managed
+  group; see "Amendments", fix round 3), no plaintext script at rest
   (render on demand), unconditional revocation at the final state with
   retry and audit on failure, orphan peers.
 - `docs/spec/05-authentication.md`: paired enrollment permit, NetBird
