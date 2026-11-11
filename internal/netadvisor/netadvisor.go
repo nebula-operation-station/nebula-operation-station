@@ -111,6 +111,9 @@ const (
 	MaxProfilesPerRule = 64
 	// MaxTextBytes bounds every text a finding carries (reasons, names).
 	MaxTextBytes = 2048
+	// MaxCoveringNames bounds the rule names a finding lists in Covering
+	// and in its reason; the rest is only counted (CoveringTotal).
+	MaxCoveringNames = 8
 )
 
 // ErrInvalidInput is wrapped by errors for an input the advisor cannot use
@@ -145,21 +148,23 @@ func NewInput(s *netreach.Snapshot, classes map[string]TrustClass, profiles netr
 // Finding is the result of one check for one rule. RuleIndex is the
 // position in rule order (-1 for a result that concerns no single rule).
 // Reason says why, in one sentence. Covering lists the covering rules of
-// shadowed-rule and overlap; Fields the fields that are "any" (any-any);
-// Zones the zones that made the rule relevant (any-any,
-// allow-without-profile).
+// shadowed-rule and overlap, at most MaxCoveringNames of them in rule
+// order; CoveringTotal is the number of covering rules, listed or not.
+// Fields lists the fields that are "any" (any-any); Zones the zones that
+// made the rule relevant (any-any, allow-without-profile).
 type Finding struct {
-	CheckID      string
-	CheckVersion string
-	RuleIndex    int
-	RuleName     string
-	RuleUUID     string
-	State        State
-	Severity     Severity
-	Reason       string
-	Covering     []string
-	Fields       []string
-	Zones        []string
+	CheckID       string
+	CheckVersion  string
+	RuleIndex     int
+	RuleName      string
+	RuleUUID      string
+	State         State
+	Severity      Severity
+	Reason        string
+	Covering      []string
+	CoveringTotal int
+	Fields        []string
+	Zones         []string
 }
 
 // Report is the result of one check over one snapshot. State is StateOK
@@ -299,6 +304,7 @@ func ruleMarker(r *netreach.SecurityRule) string {
 // format characters become U+FFFD, and the text is cut at MaxTextBytes.
 func clean(s string) string {
 	var b strings.Builder
+	b.Grow(min(len(s), MaxTextBytes))
 	for _, r := range s {
 		if r == utf8.RuneError || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			r = utf8.RuneError

@@ -237,6 +237,57 @@ func (b *box) intersect(c *box, w *work) box {
 	}
 }
 
+// overlaps reports whether b and c share a point, like
+// !b.intersect(c).empty() but without building the intersection: it
+// allocates nothing and charges at most the work intersect would.
+func (b *box) overlaps(c *box, w *work) bool {
+	return zonesOverlap(b.from, c.from, w) && zonesOverlap(b.to, c.to, w) &&
+		isetsOverlap(b.src, c.src, w) && isetsOverlap(b.dst, c.dst, w) &&
+		b.svc.overlaps(c.svc, w)
+}
+
+func zonesOverlap(a, b []string, w *work) bool {
+	w.add(len(a) + len(b))
+	for _, z := range a {
+		if _, ok := slices.BinarySearch(b, z); ok {
+			return true
+		}
+	}
+	return false
+}
+
+func isetsOverlap[T point[T]](a, b iset[T], w *work) bool {
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		w.add(1)
+		lo, hi := a[i].lo, a[i].hi
+		if b[j].lo.Compare(lo) > 0 {
+			lo = b[j].lo
+		}
+		if b[j].hi.Compare(hi) < 0 {
+			hi = b[j].hi
+		}
+		if lo.Compare(hi) <= 0 {
+			return true
+		}
+		if a[i].hi.Compare(b[j].hi) < 0 {
+			i++
+		} else {
+			j++
+		}
+	}
+	return false
+}
+
+func (s svcSet) overlaps(o svcSet, w *work) bool {
+	for p := range numProtos {
+		if isetsOverlap(s[p], o[p], w) {
+			return true
+		}
+	}
+	return false
+}
+
 // minus returns b \ c as disjoint boxes: for each dimension k, the part of
 // b that agrees with c on the dimensions before k and lies outside c on k.
 func (b *box) minus(c *box, w *work) []box {

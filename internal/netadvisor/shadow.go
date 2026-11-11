@@ -74,14 +74,24 @@ func (c ShadowCheck) Run(in *Input) Report {
 		views:    in.Index.SecurityRules(),
 		raws:     in.Snapshot.SecurityRules,
 		allZones: sortedUnique(allZones),
+		fullSvc:  fullService(),
 		shared:   perSnapshot,
 	}
-	// Match spaces and condition sets are built once per rule (linear in
-	// the snapshot) and charged to the shared budget.
+	// Match spaces, condition sets and clean names are built once per
+	// rule (linear in the snapshot) and charged to the shared budget. The
+	// candidate and box buffers are reused for every rule, so the memory
+	// of a run grows with the rules, not with the pairs of rules.
 	prep := &work{max: perSnapshot, shared: &sh.shared}
-	sh.boxes = make([]box, len(sh.views))
-	sh.conds = make([]ruleConds, len(sh.views))
+	n := len(sh.views)
+	sh.boxes = make([]box, n)
+	sh.conds = make([]ruleConds, n)
+	sh.names = make([]string, n)
+	sh.definite = make([]candidate, 0, n)
+	sh.possible = make([]candidate, 0, n)
+	sh.all = make([]box, 0, n)
 	for i, v := range sh.views {
+		prep.add(len(sh.raws[i].Name))
+		sh.names[i] = clean(sh.raws[i].Name)
 		if v.Disabled || !v.Evaluable() {
 			continue
 		}
@@ -112,14 +122,56 @@ type candidate struct {
 
 // shadowState is the per-run state of the shadow check: the rules, their
 // match spaces and condition sets (zero for disabled and unevaluable
-// rules) and the remaining shared budget.
+// rules), their clean names, the buffers reused for every rule and the
+// remaining shared budget.
 type shadowState struct {
 	views    []netreach.RuleView
 	raws     []netreach.SecurityRule
 	allZones []string
+	fullSvc  svcSet // never modified; shared by the boxes that need it
 	boxes    []box
 	conds    []ruleConds
+	names    []string
+	definite []candidate
+	possible []candidate
+	all      []box
 	shared   int
+}
+
+// nameList is a bounded list of covering rule names: at most
+// MaxCoveringNames names in rule order and the count of all of them.
+type nameList struct {
+	names []string
+	total int
+}
+
+func (l *nameList) add(name string) {
+	l.total++
+	if len(l.names) < MaxCoveringNames {
+		l.names = append(l.names, name)
+	}
+}
+
+// String joins the listed names and counts the rest.
+func (l *nameList) String() string {
+	s := strings.Join(l.names, ", ")
+	if more := l.total - len(l.names); more > 0 {
+		s += fmt.Sprintf(" and %d more", more)
+	}
+	return s
+}
+
+// setCovering sets Covering (a copy of the bounded list) and
+// CoveringTotal of a finding.
+func (l *nameList) setCovering(f *Finding) {
+	f.Covering, f.CoveringTotal = slices.Clone(l.names), l.total
+}
+
+func appendBoxes(dst []box, cs []candidate) []box {
+	for _, c := range cs {
+		dst = append(dst, c.b)
+	}
+	return dst
 }
 
 func (sh *shadowState) rule(i int, w *work) (Finding, Finding) {
@@ -145,16 +197,21 @@ func (sh *shadowState) rule(i int, w *work) (Finding, Finding) {
 	}
 	target := sh.boxes[i]
 	appDefault := v.Service.ApplicationDefault
+	// defaultOnly: the rule matches only the default ports of its
+	// applications. A service list that mixes application-default with
+	// explicit services also matches those ports.
+	defaultOnly := appDefault && !v.Service.Any && len(v.Service.Ports) == 0
 	if appDefault {
 		// The real ports are the default ports of the rule's
-		// applications, a subset of every port: covering the whole
-		// service dimension is enough to shadow; covering only some
-		// ports decides nothing (the projection test below).
-		target.svc = fullService()
+		// applications (and any explicit ports), a subset of every port:
+		// covering the whole service dimension is enough to shadow;
+		// covering only some ports decides nothing (the projection test
+		// below).
+		target.svc = sh.fullSvc
 	}
 
-	var definite, possible []candidate
-	var definiteHit, overlapping, incomparable []string
+	definite, possible := sh.definite[:0], sh.possible[:0]
+	var definiteHit, overlapping, incomparable nameList
 	firstUneval := ""
 	for j := range i {
 		cv := sh.views[j]
@@ -176,13 +233,16 @@ func (sh *shadowState) rule(i int, w *work) (Finding, Finding) {
 		}
 		cb := sh.boxes[j]
 		if cv.Service.ApplicationDefault {
-			cb.svc = fullService()
+			cb.svc = sh.fullSvc
 		}
-		in := target.intersect(&cb, w)
+		// The pair's bookkeeping (candidate and name entries) is charged
+		// along with the overlap test.
+		w.add(1)
+		hit := target.overlaps(&cb, w)
 		if w.exhausted() {
 			return limit()
 		}
-		if in.empty() {
+		if !hit {
 			continue
 		}
 		sure := conditionsCover(&sh.conds[j], &sh.conds[i], w)
@@ -191,31 +251,35 @@ func (sh *shadowState) rule(i int, w *work) (Finding, Finding) {
 		}
 		if cv.Service.ApplicationDefault {
 			// The default ports of the earlier rule's applications are
-			// known to include the rule's own only when both use
-			// application-default and the applications are included.
-			sure = sure && appDefault
+			// known to include the rule's own ports only when the rule
+			// matches nothing but the default ports of included
+			// applications.
+			sure = sure && defaultOnly
 		}
-		name := clean(cv.Name)
-		overlapping = append(overlapping, name)
+		name := sh.names[j]
+		overlapping.add(name)
 		if sure {
 			definite = append(definite, candidate{j, cb})
-			definiteHit = append(definiteHit, name)
+			definiteHit.add(name)
 		} else {
 			possible = append(possible, candidate{j, cb})
-			incomparable = append(incomparable, name)
+			incomparable.add(name)
 		}
 	}
 
-	switch covers(target, boxes(definite), w) {
+	all := appendBoxes(sh.all[:0], definite)
+	switch covers(target, all, w) {
 	case fullyCovered:
-		sf.State, sf.Covering = StateFinding, definiteHit
+		sf.State = StateFinding
+		definiteHit.setCovering(&sf)
 		sf.Severity = shadowSeverity(&raws[i], raws, definite)
-		if len(definiteHit) == 0 {
+		if definiteHit.total == 0 {
 			sf.Reason = "rule matches no traffic (empty match space)"
 		} else {
-			sf.Reason = clean("rule never matches: earlier rules cover its zones, addresses, service and conditions: " + strings.Join(definiteHit, ", "))
+			sf.Reason = clean("rule never matches: earlier rules cover its zones, addresses, service and conditions: " + definiteHit.String())
 		}
-		of.State, of.Covering = StateOK, definiteHit
+		of.State = StateOK
+		definiteHit.setCovering(&of)
 		of.Reason = "fully covered, reported as shadowed-rule"
 		return sf, of
 	case coverLimit:
@@ -223,14 +287,16 @@ func (sh *shadowState) rule(i int, w *work) (Finding, Finding) {
 	}
 	if firstUneval != "" {
 		sf, of = both(StateCannotDecide, "cannot decide: earlier "+firstUneval)
-		sf.Covering, of.Covering = overlapping, overlapping
+		overlapping.setCovering(&sf)
+		overlapping.setCovering(&of)
 		return sf, of
 	}
-	all := append(boxes(definite), boxes(possible)...)
+	all = appendBoxes(all, possible)
 	switch covers(target, all, w) {
 	case fullyCovered:
-		sf, of = both(StateCannotDecide, "cannot decide: covered only together with rules whose conditions cannot be compared: "+strings.Join(incomparable, ", "))
-		sf.Covering, of.Covering = overlapping, overlapping
+		sf, of = both(StateCannotDecide, "cannot decide: covered only together with rules whose conditions cannot be compared: "+incomparable.String())
+		overlapping.setCovering(&sf)
+		overlapping.setCovering(&of)
 		return sf, of
 	case coverLimit:
 		return limit()
@@ -239,36 +305,31 @@ func (sh *shadowState) rule(i int, w *work) (Finding, Finding) {
 		// Not covered on every port. When earlier rules still match
 		// every zone and address pair of the rule on some port, whether
 		// they cover the applications' default ports is unknown.
+		w.add(len(all))
 		for k := range all {
-			all[k].svc = fullService()
+			all[k].svc = sh.fullSvc
 		}
 		switch covers(target, all, w) {
 		case fullyCovered:
-			sf, of = both(StateCannotDecide, "cannot decide: service application-default: default ports unknown, earlier rules cover only some ports: "+strings.Join(overlapping, ", "))
-			sf.Covering, of.Covering = overlapping, overlapping
+			sf, of = both(StateCannotDecide, "cannot decide: service application-default: default ports unknown, earlier rules cover only some ports: "+overlapping.String())
+			overlapping.setCovering(&sf)
+			overlapping.setCovering(&of)
 			return sf, of
 		case coverLimit:
 			return limit()
 		}
 	}
 	sf.State, sf.Reason = StateOK, "not covered by earlier rules"
-	if len(overlapping) == 0 {
+	if overlapping.total == 0 {
 		of.State, of.Reason = StateOK, "no earlier rule overlaps"
 		return sf, of
 	}
-	of.State, of.Severity, of.Covering = StateFinding, SeverityInfo, overlapping
+	of.State, of.Severity = StateFinding, SeverityInfo
+	overlapping.setCovering(&of)
 	// Earlier rules whose conditions cannot be compared are listed too:
 	// they may, not certainly, match the shared traffic.
-	of.Reason = clean("earlier rules may match part of this rule's traffic: " + strings.Join(overlapping, ", "))
+	of.Reason = clean("earlier rules may match part of this rule's traffic: " + overlapping.String())
 	return sf, of
-}
-
-func boxes(cs []candidate) []box {
-	out := make([]box, len(cs))
-	for i, c := range cs {
-		out[i] = c.b
-	}
-	return out
 }
 
 // ruleBox returns the match space of an evaluable rule, without

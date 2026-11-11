@@ -4,6 +4,7 @@ package netadvisor
 
 import (
 	"fmt"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -240,6 +241,26 @@ func TestShadowCheck(t *testing.T) {
 				base(),
 			},
 			want: want{StateCannotDecide, StateCannotDecide, s("appdef"), "conditions cannot be compared", ""},
+		},
+		{
+			// The rule's explicit https ports are not default ports of
+			// the earlier rule's applications: not a definite cover.
+			name: "application-default rule does not shadow a rule mixing application-default and ports",
+			rules: []nr.SecurityRule{
+				with(func(r *nr.SecurityRule) { r.Name, r.Application, r.Service = "appdef", list("ssl"), list("application-default") }),
+				with(func(r *nr.SecurityRule) { r.Application, r.Service = list("ssl"), list("application-default", "svc-https") }),
+			},
+			want: want{StateCannotDecide, StateCannotDecide, s("appdef"), "cannot be compared", ""},
+		},
+		{
+			name: "rule mixing application-default and ports shadows an application-default rule",
+			rules: []nr.SecurityRule{
+				with(func(r *nr.SecurityRule) {
+					r.Name, r.Application, r.Service = "mixed", list("ssl"), list("application-default", "svc-https")
+				}),
+				with(func(r *nr.SecurityRule) { r.Application, r.Service = list("ssl"), list("application-default") }),
+			},
+			want: want{StateFinding, StateOK, s("mixed"), "never matches", SeverityMedium},
 		},
 		// Cannot decide: the rule itself is unevaluable (ADR 0012 D2).
 		{
@@ -580,5 +601,72 @@ func TestShadowConditionWorkCharged(t *testing.T) {
 	// With the default budget the same policy is decided.
 	if f := byRule(t, ShadowCheck{}.Run(in), CheckShadowedRule, 10); f.State != StateOK {
 		t.Errorf("default budget: %v, want ok", f)
+	}
+}
+
+// TestShadowOverlapBookkeepingBounded: a hostile policy of many rules that
+// all match everything, with long names, makes every pair of rules
+// overlap. The covering names a finding carries stay bounded
+// (MaxCoveringNames plus a count), the reasons stay within MaxTextBytes,
+// and the bytes the whole run allocates grow linearly with the rules, not
+// with the pairs.
+func TestShadowOverlapBookkeepingBounded(t *testing.T) {
+	const (
+		n = 800
+		// perRuleBytes is the stated allocation bound of one rule (its
+		// match space, conditions, two findings with reasons and covering
+		// names). Holding one name per overlapping pair would need about
+		// n/2 * 200 bytes per rule (80 KiB here) on average, and joining
+		// them into the reason as much again.
+		perRuleBytes = 32 << 10
+	)
+	variants := map[string]struct {
+		app   func(k int) nr.Field[[]string]
+		state State
+	}{
+		// Identical rules: rule k is shadowed by all k earlier rules.
+		"identical": {func(int) nr.Field[[]string] { return list("any") }, StateFinding},
+		// Distinct applications: conditions cannot be compared, rule k
+		// is covered only together with them.
+		"distinct applications": {func(k int) nr.Field[[]string] { return list(fmt.Sprintf("app-%d", k)) }, StateCannotDecide},
+	}
+	for name, v := range variants {
+		t.Run(name, func(t *testing.T) {
+			rules := make([]nr.SecurityRule, n)
+			for k := range rules {
+				rules[k] = rule(fmt.Sprintf("%0200d", k), allow, s("any"), s("any"), s("any"), s("any"), s("any"))
+				rules[k].UUID = fmt.Sprintf("uuid-%d", k)
+				rules[k].Application = v.app(k)
+			}
+			in := newInput(t, labSnapshot(rules...), nr.Field[map[string]ProfileSetting]{})
+
+			var before, after runtime.MemStats
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+			r := ShadowCheck{}.Run(in)
+			runtime.ReadMemStats(&after)
+
+			if got := after.TotalAlloc - before.TotalAlloc; got > n*perRuleBytes {
+				t.Errorf("run allocated %d bytes, bound %d (%d per rule)", got, n*perRuleBytes, perRuleBytes)
+			}
+			for _, f := range r.Findings {
+				if len(f.Covering) > MaxCoveringNames || len(f.Reason) > MaxTextBytes {
+					t.Fatalf("rule %d %s: %d covering names, reason %d bytes", f.RuleIndex, f.CheckID, len(f.Covering), len(f.Reason))
+				}
+				if f.RuleIndex > 0 && f.CoveringTotal != f.RuleIndex {
+					t.Fatalf("rule %d %s: covering total %d, want %d", f.RuleIndex, f.CheckID, f.CoveringTotal, f.RuleIndex)
+				}
+				if f.CoveringTotal < len(f.Covering) {
+					t.Fatalf("rule %d %s: covering total %d below %d names", f.RuleIndex, f.CheckID, f.CoveringTotal, len(f.Covering))
+				}
+			}
+			last := byRule(t, r, CheckShadowedRule, n-1)
+			if last.State != v.state {
+				t.Fatalf("last rule = %v, want %s", last, v.state)
+			}
+			if len(last.Covering) != MaxCoveringNames || !strings.Contains(last.Reason, fmt.Sprintf("%d more", n-1-MaxCoveringNames)) {
+				t.Errorf("last rule covering %d names, reason %q: want %d names and the rest counted", len(last.Covering), last.Reason, MaxCoveringNames)
+			}
+		})
 	}
 }
