@@ -477,18 +477,49 @@ func TestInvalidEnrollConfigStopsStart(t *testing.T) {
 			}
 		})
 	}
-	t.Run("valid enrollment config passes the check", func(t *testing.T) {
-		args := []string{"-test.run=^TestInvalidEnrollConfigStopsStart$", "--",
-			"-data-dir", filepath.Join(t.TempDir(), "absent"),
-			"-enroll-source", "192.0.2.10,2001:db8::/32",
-			"-netbird-management-url", "https://[2001:db8::5]:443"}
+	// The start checks -session-minutes right after the enrollment
+	// configuration. An out-of-range value is the sentinel: its error can
+	// only appear once load() has run and accepted the configuration.
+	const sentinel = "session-minutes must be between"
+	runStart := func(t *testing.T, extra ...string) string {
+		t.Helper()
+		args := append([]string{"-test.run=^TestInvalidEnrollConfigStopsStart$", "--",
+			"-data-dir", filepath.Join(t.TempDir(), "absent"), "-session-minutes", "1"}, extra...)
 		cmd := exec.Command(os.Args[0], args...)
 		cmd.Env = append(os.Environ(), enrollHelperEnv+"=1")
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
-		_ = cmd.Run() // fails later (no -rp-id, root or data dir), not on enrollment
-		if strings.Contains(stderr.String(), "enrollment configuration") {
-			t.Errorf("valid config refused: %q", stderr.String())
+		err := cmd.Run()
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() == 0 {
+			t.Fatalf("start with %v: err = %v, want non-zero exit", extra, err)
+		}
+		return stderr.String()
+	}
+	t.Run("valid enrollment config passes the check", func(t *testing.T) {
+		ca := writeCert(t, 1, "")
+		for _, extra := range [][]string{
+			nil, // defaults
+			{"-enroll-source", "192.0.2.10,2001:db8::/32",
+				"-netbird-management-url", "https://[2001:db8::5]:443/mgmt",
+				"-netbird-ca-file", ca,
+				"-netbird-managed-group", "lab_hosts"},
+		} {
+			msg := runStart(t, extra...)
+			if strings.Contains(msg, "enrollment configuration") {
+				t.Errorf("valid config %v refused: %q", extra, msg)
+			}
+			if !strings.Contains(msg, sentinel) {
+				t.Errorf("start with %v did not reach the step after load(): stderr = %q", extra, msg)
+			}
+		}
+	})
+	t.Run("enrollment check runs before the sentinel step", func(t *testing.T) {
+		// Control: the same start with an invalid enrollment value stops at
+		// load(), so the sentinel above really marks "load() accepted".
+		msg := runStart(t, "-netbird-management-url", "https://netbird.example.org/a:b")
+		if !strings.Contains(msg, "invalid enrollment configuration") || strings.Contains(msg, sentinel) {
+			t.Errorf("stderr = %q, want the enrollment error and not %q", msg, sentinel)
 		}
 	})
 }
