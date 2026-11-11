@@ -445,6 +445,69 @@ does NOS connect **from** (`--from`)?
   outside it; every path-kind value, relative or absolute, resolves
   inside this directory).
 
+  **Harness inputs for gated commands** (previously unspecified, so a
+  run of a command that first reads executor state or asks for a typed
+  confirmation stopped before the request that carries the argument:
+  `nebula batch stage N` calls `GetRollout`, returns "the batch has K
+  stages" when `N` exceeds the fake rollout's stage count, and sends
+  `ApproveGateCLI` only after a typed `yes` (`batchGate`,
+  `cmd/nebula/batch.go`); with a smaller fixture or an empty stdin the
+  `MAX` run recorded `GetRollout` and then failed, which is neither
+  *rejected* nor reaches `Gate.stage`, so the positive check failed on
+  today's tree). Every catalog command has a reviewed **harness entry**
+  next to its expected-fields entry. It names the command's **final
+  request** (the RPC, dial or HTTP request that carries its arguments,
+  e.g. `ApproveGateCLI` for `batch stage`) and the inputs that make an
+  accepted value reach it:
+  - *executor fixtures*: the fake executor's answer to every call the
+    command makes before the final request (rollouts, pending permits,
+    probe results, reviews), each a fixed fixture value checked against
+    the needles like every fixture;
+  - *stdin script*: one line per prompt of the command, in order. The
+    harness stdin returns at most one line per `Read` call, so a command
+    that wraps stdin in a new `bufio.Reader` per prompt still reads each
+    line; a prompt the script does not answer reads end of file, so a
+    missing line shows up as a failing run, never as a pass;
+  - *terminal*: whether stdin counts as a terminal; the harness sets the
+    injected `netdevEnv.stdinIsTerminal` to true for the `netdev`
+    commands, whose `netdevAskYes` refuses a non-terminal stdin, and the
+    injected `prompter` answers secret prompts with a fixed fixture
+    secret that contains no needle.
+
+  The scripted answers by prompt type (checked 2026-11-11 against the
+  `Type …`/`type …`/`Enter …` prompts in `cmd/nebula/`; a prompt type
+  not in this table needs a reviewed row before its command can pass):
+
+  | Prompt | Scripted answer |
+  | --- | --- |
+  | "Type 'yes' …" (`batch approve`/`stage`/`skip`, `approve`, `approve --stage`/`--skip`, `schedule`, read grants, `host pin`/`remove`, `container … remove`, `vault` delete, `webauthn` remove, `totp` remove, `risk` trust, `netdev` register/re-pin/state change, `pve remote remove`/`site`) | `yes` |
+  | "CRITICAL: type the number of targets" (`approve`, `cmd/nebula/main.go`) | not reached: the pending-permit fixture is not `CRITICAL`, so the `yes` prompt applies |
+  | `Type "unencrypted"`, `Type "restore"`, `Type "<machine>"` (`backup`, `cmd/nebula/backup.go`) | the word the prompt names; the restore fixture's manifest names the host name the test reads with `os.Hostname()`, so the foreign-machine prompt is not reached |
+  | typed fingerprint (`pve remote add`/`repin`, `module` signer add/rotate in `cmd/nebula/signer.go`) | the fingerprint the command shows for that run (from the fake executor's probe answer or the run's fixture key) |
+  | "type the manifest digest to commit" (`cmd/nebula/trust_builtins.go`) | the digest of the fake review answer; `retain … or retire` prompts get `r` |
+  | "Enter the current 6-digit code" (`totp setup`) | a fixed fixture code; the fake executor accepts it |
+  | "Type the first 8 or more characters of YOUR new key's ID" (`totp finish-recovery`) | the first 8 characters of the fixture credential ID |
+
+  For `batch stage N` the entry is: a `GetRollout` answer with exactly
+  `canonical.MaxBatchStages` = 20 stages (fixture names and host IDs, no
+  needle), stdin `yes`, and an `ApproveGateCLI` answer holding the same
+  rollout. The test fails when the fixture has fewer stages than the
+  `canary-range` maximum of an argument of that command (below), so the
+  fixture cannot fall behind a raised `MaxBatchStages`. `approve --stage`
+  uses the same rollout fixture. `batch skip MEMBER` checks the member
+  against the rollout before it asks: its harness entry declares an
+  **echo field**, the `host_ids` of the first fake stage, which the fake
+  executor fills with the run's value. An echo field is the only place a
+  fixture may hold a needle; it carries exactly the run's value, is
+  declared per command and reviewed, and the needle search of the
+  requests is unchanged, so a value the command copies from the echo
+  into an unexpected field still fails. An **accepted** run is one that
+  returns no error and recorded the final request. A run that recorded
+  traffic and then returned an error is neither accepted nor rejected:
+  the test fails and names the harness entry (a harness error, not an
+  argument result), so a missing or too small fixture or a missing stdin
+  line cannot turn into a pass or into a silent `canary-rejects`.
+
   **Bounded numbers** (previously a `canary-max: N` annotation that
   named only `events --limit`; `nebula batch stage N` parses with
   `strconv.ParseUint(…, 10, 32)` and rejects anything outside 2 to
@@ -495,11 +558,15 @@ does NOS connect **from** (`--from`)?
   The annotation is **stale**, and the test fails, when the argument
   accepts `MAX + 1` or `47000 + m`, or rejects `MAX` or `MAX − 1`; so
   the range is pinned to the parser. On today's tree both entries are
-  green: in both commands the parsed value goes only into the expected
-  field (`Gate{Kind: OPEN_STAGE, Stage: uint32(n)}`,
-  `ListEventsRequest{Limit: int32(*limit)}`), nothing else in the
-  recorded traffic depends on it, and `21`/`47001` and `1001`/`47001`
-  are rejected before anything is sent (`2..20`, `1..1000` checks).
+  green with the harness entries above (for `batch stage`: the 20-stage
+  `GetRollout` fixture and stdin `yes`, so the runs `20`, `20` and `19`
+  pass the stage-count check in `batchGate` and reach `ApproveGateCLI`;
+  `events --limit` has no prompt): in both commands the parsed value
+  goes only into the expected field (`Gate{Kind: OPEN_STAGE, Stage:
+  uint32(n)}`, `ListEventsRequest{Limit: int32(*limit)}`), nothing else
+  in the recorded traffic depends on it, and `21`/`47001` and
+  `1001`/`47001` are rejected by the argument parser before anything is
+  sent (`2..20`, `1..1000` checks).
 
   **Run-time values** (previously only fixtures and canary file content
   were kept free of needles, so a digit needle such as `47012` could
@@ -658,15 +725,30 @@ does NOS connect **from** (`--from`)?
   (previously only text was matched, so an IP literal or `number` sent
   as a binary address passed): for the IP literal needle `192.0.2.1` and
   for the `inet_aton` address of a `number` canary (`47001` =
-  `0.0.183.153`) the test also searches every bytes field for the raw
-  4-byte network-order form (`c0 00 02 01`; `00 00 b7 99`) and the
-  16-byte IPv4-mapped form (ten `00` bytes, `ff ff`, then the four
-  bytes), as a byte subsequence; every string field also for the
-  hexadecimal IPv4-mapped text `::ffff:c000:201` (`::ffff:0:b799`); and
-  every integer field of 32 bits or more, signed or unsigned, for the
-  packed value in network order (`3221225985` for `192.0.2.1`; for a
-  `number` it equals the canary, already covered) and in little-endian
-  order (`16908480`; `2578907136` for `47001`). Fixtures and the canary
+  `0.0.183.153`) the test also searches every bytes field, as a byte
+  subsequence, for the raw 4-byte network-order form (`c0 00 02 01`;
+  `00 00 b7 99`), the raw 4-byte little-endian form (`01 02 00 c0`;
+  `99 b7 00 00`, as `binary.LittleEndian.PutUint32` writes it;
+  previously only network order was searched in bytes fields, although
+  little-endian was already checked in integer fields) and the 16-byte
+  IPv4-mapped form (ten `00` bytes, `ff ff`, then the four network-order
+  bytes); every string field also for the hexadecimal IPv4-mapped text
+  `::ffff:c000:201` (`::ffff:0:b799`); and every integer field of 32
+  bits or more, signed or unsigned, for the packed **32-bit pattern** in
+  network order (`0xc0000201` for `192.0.2.1`; `0x0000b799` for a
+  `number`, equal to the canary and already covered) and in
+  little-endian order (`0x010200c0`; `0x99b70000` for `47001`). The
+  comparison is by bit pattern, not by decimal value (previously only
+  the unsigned values `3221225985` and `2578907136` were given, so a
+  test comparing integers missed the same bits in a signed field): a
+  32-bit field (`int32`, `uint32`, `sint32`, `fixed32`, `sfixed32`)
+  matches when its value converted to `uint32` equals the pattern, so
+  an `int32` holding `-1073741311` (`192.0.2.1`) or `-1716060160`
+  (`47001` little-endian) matches; a 64-bit field matches when it holds
+  the pattern zero-extended (`3221225985`) or sign-extended from 32 bits
+  (`-1073741311` as `int64`, `0xffffffffc0000201` as `uint64`). Patterns
+  whose top bit is clear (`0x010200c0` = `16908480`, `0x0000b799`) have
+  one form only. Fixtures and the canary
   file content must not contain any needle of the run, text or binary
   (the test fails otherwise), and run-time values are fixed or checked
   (above), so a match always comes from the argument under test.
