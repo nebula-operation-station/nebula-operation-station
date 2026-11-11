@@ -89,6 +89,8 @@ func labSnapshot(rules ...nr.SecurityRule) *nr.Snapshot {
 			{Name: "svc-dns", Protocol: "udp", Ports: "53", SourcePorts: nr.Collected("")},
 			{Name: "svc-high", Protocol: "tcp", Ports: "1024-65535", SourcePorts: nr.Collected("")},
 			{Name: "svc-low", Protocol: "tcp", Ports: "1-1023", SourcePorts: nr.Collected("")},
+			{Name: "svc-tcp-all", Protocol: "tcp", Ports: "1-65535", SourcePorts: nr.Collected("")},
+			{Name: "svc-udp-all", Protocol: "udp", Ports: "1-65535", SourcePorts: nr.Collected("")},
 		},
 		SecurityRules: rules,
 		DefaultRules:  nr.Collected(nr.DefaultRules{Intrazone: nr.ActionAllow, Interzone: nr.ActionDeny}),

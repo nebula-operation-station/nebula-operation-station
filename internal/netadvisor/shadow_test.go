@@ -3,6 +3,7 @@
 package netadvisor
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -158,6 +159,54 @@ func TestShadowCheck(t *testing.T) {
 				with(func(r *nr.SecurityRule) { r.Application, r.Service = list("ssl"), list("application-default") }),
 			},
 			want: want{StateFinding, StateOK, s("any-svc"), "never matches", SeverityMedium},
+		},
+		// Application-default target: its real ports are unknown, so
+		// earlier rules that cover only some ports decide nothing.
+		{
+			name: "application-default rule under tcp and udp all ports cannot decide",
+			rules: []nr.SecurityRule{
+				with(func(r *nr.SecurityRule) { r.Name, r.Service = "tcpudp", list("svc-tcp-all", "svc-udp-all") }),
+				with(func(r *nr.SecurityRule) { r.Application, r.Service = list("ssl"), list("application-default") }),
+			},
+			want: want{StateCannotDecide, StateCannotDecide, s("tcpudp"), "application-default", ""},
+		},
+		{
+			name: "application-default rule under tcp 80 and 443 cannot decide",
+			rules: []nr.SecurityRule{
+				with(func(r *nr.SecurityRule) { r.Name = "web" }),
+				with(func(r *nr.SecurityRule) { r.Application, r.Service = list("ssl"), list("application-default") }),
+			},
+			want: want{StateCannotDecide, StateCannotDecide, s("web"), "application-default", ""},
+		},
+		{
+			name: "application-default rule under two port rules cannot decide",
+			rules: []nr.SecurityRule{
+				with(func(r *nr.SecurityRule) { r.Name, r.Service = "https", list("svc-https") }),
+				with(func(r *nr.SecurityRule) { r.Name, r.Service, r.Source = "http", list("svc-http"), list("lan-low") }),
+				with(func(r *nr.SecurityRule) { r.Application, r.Service = list("ssl"), list("application-default") }),
+			},
+			want: want{StateCannotDecide, StateCannotDecide, s("https", "http"), "application-default", ""},
+		},
+		{
+			name: "application-default rule under a port rule on its whole address space cannot decide",
+			rules: []nr.SecurityRule{
+				with(func(r *nr.SecurityRule) { r.Name, r.Source = "low", list("lan-low") }),
+				with(func(r *nr.SecurityRule) {
+					r.Name, r.Source, r.Service = "high-web", list("lan-high"), list("svc-https")
+				}),
+				with(func(r *nr.SecurityRule) {
+					r.Source, r.Application, r.Service = list("lan-low"), list("ssl"), list("application-default")
+				}),
+			},
+			want: want{StateCannotDecide, StateCannotDecide, s("low"), "application-default", ""},
+		},
+		{
+			name: "application-default rule partly covered on addresses is ok",
+			rules: []nr.SecurityRule{
+				with(func(r *nr.SecurityRule) { r.Name, r.Source = "low", list("lan-low") }),
+				with(func(r *nr.SecurityRule) { r.Application, r.Service = list("ssl"), list("application-default") }),
+			},
+			want: want{StateOK, StateFinding, nil, "not covered", ""},
 		},
 		// Cannot decide: conditions that cannot be compared.
 		{
@@ -460,5 +509,76 @@ func TestShadowLimitCannotDecide(t *testing.T) {
 	w = &work{max: MaxShadowWorkPerRule}
 	if got := covers(target, []box{cover}, w); got != fullyCovered {
 		t.Errorf("enough budget: covers = %v, want fullyCovered", got)
+	}
+}
+
+// partialOverlaps returns n earlier rules that each cover a part of the
+// target (lan-low, https) followed by the target, which is not covered:
+// with enough budget it is ok with an overlap hint.
+func partialOverlaps(n int, apps nr.Field[[]string]) []nr.SecurityRule {
+	var rules []nr.SecurityRule
+	for k := range n {
+		r := rule(fmt.Sprintf("part-%d", k), deny, s("lan"), s("dmz"), s("lan-low"), s("web-server"), s("svc-https"))
+		r.Application = apps
+		rules = append(rules, r)
+	}
+	target := rule("target", allow, s("lan"), s("dmz"), s("lan-net"), s("web-server"), s("svc-web"))
+	target.Application = apps
+	return append(rules, target)
+}
+
+func wantLimit(t *testing.T, r Report, i int) {
+	t.Helper()
+	for _, id := range []string{CheckShadowedRule, CheckOverlap} {
+		f := byRule(t, r, id, i)
+		if f.State != StateCannotDecide || !strings.Contains(f.Reason, "limit reached") {
+			t.Errorf("%s rule %d = %s %q, want cannot_decide limit reached", id, i, f.State, f.Reason)
+		}
+	}
+}
+
+// TestShadowRunLimitCannotDecide exhausts the per-rule and the shared
+// budget inside ShadowCheck.Run: the rule is cannot_decide "limit
+// reached", never ok, while the same policy with enough budget is ok.
+func TestShadowRunLimitCannotDecide(t *testing.T) {
+	rules := partialOverlaps(30, list("any"))
+	last := len(rules) - 1
+	in := newInput(t, labSnapshot(rules...), nr.Field[map[string]ProfileSetting]{})
+
+	r := ShadowCheck{}.Run(in)
+	if f := byRule(t, r, CheckShadowedRule, last); f.State != StateOK {
+		t.Fatalf("default budget: %v, want ok", f)
+	}
+	if f := byRule(t, r, CheckOverlap, last); f.State != StateFinding {
+		t.Fatalf("default budget: %v, want overlap finding", f)
+	}
+
+	wantLimit(t, ShadowCheck{workPerRule: 100}.Run(in), last)
+	wantLimit(t, ShadowCheck{workPerSnapshot: 1000}.Run(in), last)
+}
+
+// TestShadowConditionWorkCharged: a hostile policy within the snapshot
+// limits (large application lists on every rule) is stopped by the work
+// budget before the condition comparison, so it ends with cannot_decide
+// "limit reached". The same policy with application "any" fits the same
+// budget and is ok, so the limit comes from the condition work.
+func TestShadowConditionWorkCharged(t *testing.T) {
+	const budget = 20000
+	apps := make([]string, nr.MaxRuleMembers)
+	for k := range apps {
+		apps[k] = fmt.Sprintf("app-%d", k)
+	}
+	small := partialOverlaps(10, list("any"))
+	in := newInput(t, labSnapshot(small...), nr.Field[map[string]ProfileSetting]{})
+	if f := byRule(t, ShadowCheck{workPerRule: budget}.Run(in), CheckShadowedRule, 10); f.State != StateOK {
+		t.Fatalf("application any: %v, want ok within budget %d", f, budget)
+	}
+
+	hostile := partialOverlaps(10, list(apps...))
+	in = newInput(t, labSnapshot(hostile...), nr.Field[map[string]ProfileSetting]{})
+	wantLimit(t, ShadowCheck{workPerRule: budget}.Run(in), 10)
+	// With the default budget the same policy is decided.
+	if f := byRule(t, ShadowCheck{}.Run(in), CheckShadowedRule, 10); f.State != StateOK {
+		t.Errorf("default budget: %v, want ok", f)
 	}
 }

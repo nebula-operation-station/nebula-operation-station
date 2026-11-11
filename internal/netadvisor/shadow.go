@@ -21,13 +21,27 @@ import (
 //     earlier rules does not matter: whichever matches first, the rule is
 //     never reached.
 //   - overlap fires when the rule is not shadowed but an earlier evaluable
-//     rule matches part of its match space.
+//     rule may match part of its match space (its conditions need not
+//     certainly include the rule's own).
+//
+// A rule with service application-default matches only the default ports
+// of its applications, which the snapshot does not hold: it is shadowed
+// when earlier rules cover it on every port, ok when some of its zones and
+// addresses are matched by no earlier rule on any port, and otherwise
+// StateCannotDecide.
 //
 // Fail-safe (ADR 0012 D2): the rule itself unevaluable, an earlier rule
 // that is unevaluable and may match the rule's traffic, a covering set
-// that needs a rule whose conditions cannot be compared, or a work limit
-// give StateCannotDecide for both IDs, never StateOK.
-type ShadowCheck struct{}
+// that needs a rule whose conditions cannot be compared, unknown
+// application-default ports, or a work limit give StateCannotDecide for
+// both IDs, never StateOK. All per-pair work (zone tests, condition
+// comparison, set operations) is charged to the work limits before it is
+// done.
+type ShadowCheck struct {
+	// workPerRule and workPerSnapshot override MaxShadowWorkPerRule and
+	// MaxShadowWorkPerSnapshot when not zero (tests only).
+	workPerRule, workPerSnapshot int
+}
 
 // ID returns CheckShadowedRule.
 func (ShadowCheck) ID() string { return CheckShadowedRule }
@@ -45,20 +59,41 @@ func (c ShadowCheck) Run(in *Input) Report {
 		r.Findings = append(r.Findings, o.Findings...)
 		return r
 	}
-	views := in.Index.SecurityRules()
-	raws := in.Snapshot.SecurityRules
+	perRule, perSnapshot := MaxShadowWorkPerRule, MaxShadowWorkPerSnapshot
+	if c.workPerRule != 0 {
+		perRule = c.workPerRule
+	}
+	if c.workPerSnapshot != 0 {
+		perSnapshot = c.workPerSnapshot
+	}
 	var allZones []string
 	for _, z := range in.Snapshot.Zones {
 		allZones = append(allZones, z.Name)
 	}
-	allZones = sortedUnique(allZones)
+	sh := shadowState{
+		views:    in.Index.SecurityRules(),
+		raws:     in.Snapshot.SecurityRules,
+		allZones: sortedUnique(allZones),
+		shared:   perSnapshot,
+	}
+	// Match spaces and condition sets are built once per rule (linear in
+	// the snapshot) and charged to the shared budget.
+	prep := &work{max: perSnapshot, shared: &sh.shared}
+	sh.boxes = make([]box, len(sh.views))
+	sh.conds = make([]ruleConds, len(sh.views))
+	for i, v := range sh.views {
+		if v.Disabled || !v.Evaluable() {
+			continue
+		}
+		sh.boxes[i] = ruleBox(v, sh.allZones, prep)
+		sh.conds[i] = newRuleConds(&sh.raws[i], prep)
+	}
 
-	shared := MaxShadowWorkPerSnapshot
-	shadowed := make([]Finding, len(views))
-	overlap := make([]Finding, len(views))
-	for i := range views {
-		w := &work{max: MaxShadowWorkPerRule, shared: &shared}
-		s, o := shadowRule(views, raws, allZones, i, w)
+	shadowed := make([]Finding, len(sh.views))
+	overlap := make([]Finding, len(sh.views))
+	for i := range sh.views {
+		w := &work{max: perRule, shared: &sh.shared}
+		s, o := sh.rule(i, w)
 		shadowed[i], overlap[i] = s, o
 	}
 	return Report{
@@ -75,7 +110,20 @@ type candidate struct {
 	b     box
 }
 
-func shadowRule(views []netreach.RuleView, raws []netreach.SecurityRule, allZones []string, i int, w *work) (Finding, Finding) {
+// shadowState is the per-run state of the shadow check: the rules, their
+// match spaces and condition sets (zero for disabled and unevaluable
+// rules) and the remaining shared budget.
+type shadowState struct {
+	views    []netreach.RuleView
+	raws     []netreach.SecurityRule
+	allZones []string
+	boxes    []box
+	conds    []ruleConds
+	shared   int
+}
+
+func (sh *shadowState) rule(i int, w *work) (Finding, Finding) {
+	raws := sh.raws
 	sf := newFinding(CheckShadowedRule, i, &raws[i])
 	of := newFinding(CheckOverlap, i, &raws[i])
 	both := func(st State, why string) (Finding, Finding) {
@@ -83,51 +131,69 @@ func shadowRule(views []netreach.RuleView, raws []netreach.SecurityRule, allZone
 		of.State, of.Reason = st, clean(why)
 		return sf, of
 	}
-	v := views[i]
+	limit := func() (Finding, Finding) {
+		return both(StateCannotDecide, "cannot decide: "+netreach.ErrLimitReached.Error())
+	}
+	v := sh.views[i]
 	switch {
 	case v.Disabled:
 		return both(StateOK, "rule disabled")
 	case !v.Evaluable():
 		return both(StateCannotDecide, "cannot decide: "+v.Reason())
+	case w.exhausted():
+		return limit()
 	}
-	target := ruleBox(v, allZones, w)
+	target := sh.boxes[i]
 	appDefault := v.Service.ApplicationDefault
 	if appDefault {
 		// The real ports are the default ports of the rule's
 		// applications, a subset of every port: covering the whole
-		// service dimension is enough, never needed.
+		// service dimension is enough to shadow; covering only some
+		// ports decides nothing (see appDefaultUnknown below).
 		target.svc = fullService()
 	}
 
 	var definite, possible []candidate
-	var definiteHit, overlapping, uneval, incomparable []string
+	var definiteHit, overlapping, incomparable []string
+	firstUneval := ""
 	for j := range i {
-		cv := views[j]
+		cv := sh.views[j]
 		if cv.Disabled {
 			continue
 		}
 		if !cv.Evaluable() {
+			w.add(len(raws[j].From.Value) + len(raws[j].To.Value))
+			if w.exhausted() {
+				return limit()
+			}
 			if zonesExclude(&raws[j], target) {
 				continue
 			}
-			uneval = append(uneval, cv.Reason())
+			if firstUneval == "" {
+				firstUneval = cv.Reason()
+			}
 			continue
 		}
-		cb := ruleBox(cv, allZones, w)
-		sure := conditionsCover(&raws[j], &raws[i])
+		cb := sh.boxes[j]
 		if cv.Service.ApplicationDefault {
 			cb.svc = fullService()
+		}
+		in := target.intersect(&cb, w)
+		if w.exhausted() {
+			return limit()
+		}
+		if in.empty() {
+			continue
+		}
+		sure := conditionsCover(&sh.conds[j], &sh.conds[i], w)
+		if w.exhausted() {
+			return limit()
+		}
+		if cv.Service.ApplicationDefault {
 			// The default ports of the earlier rule's applications are
 			// known to include the rule's own only when both use
 			// application-default and the applications are included.
 			sure = sure && appDefault
-		}
-		in := target.intersect(&cb, w)
-		if w.exhausted() {
-			return both(StateCannotDecide, "cannot decide: "+netreach.ErrLimitReached.Error())
-		}
-		if in.empty() {
-			continue
 		}
 		name := clean(cv.Name)
 		overlapping = append(overlapping, name)
@@ -153,20 +219,37 @@ func shadowRule(views []netreach.RuleView, raws []netreach.SecurityRule, allZone
 		of.Reason = "fully covered, reported as shadowed-rule"
 		return sf, of
 	case coverLimit:
-		return both(StateCannotDecide, "cannot decide: "+netreach.ErrLimitReached.Error())
+		return limit()
 	}
-	if len(uneval) > 0 {
-		sf, of = both(StateCannotDecide, "cannot decide: earlier "+uneval[0])
+	if firstUneval != "" {
+		sf, of = both(StateCannotDecide, "cannot decide: earlier "+firstUneval)
 		sf.Covering, of.Covering = overlapping, overlapping
 		return sf, of
 	}
-	switch covers(target, append(boxes(definite), boxes(possible)...), w) {
+	all := append(boxes(definite), boxes(possible)...)
+	switch covers(target, all, w) {
 	case fullyCovered:
 		sf, of = both(StateCannotDecide, "cannot decide: covered only together with rules whose conditions cannot be compared: "+strings.Join(incomparable, ", "))
 		sf.Covering, of.Covering = overlapping, overlapping
 		return sf, of
 	case coverLimit:
-		return both(StateCannotDecide, "cannot decide: "+netreach.ErrLimitReached.Error())
+		return limit()
+	}
+	if appDefault {
+		// Not covered on every port. When earlier rules still match
+		// every zone and address pair of the rule on some port, whether
+		// they cover the applications' default ports is unknown.
+		for k := range all {
+			all[k].svc = fullService()
+		}
+		switch covers(target, all, w) {
+		case fullyCovered:
+			sf, of = both(StateCannotDecide, "cannot decide: service application-default: default ports unknown, earlier rules cover only some ports: "+strings.Join(overlapping, ", "))
+			sf.Covering, of.Covering = overlapping, overlapping
+			return sf, of
+		case coverLimit:
+			return limit()
+		}
 	}
 	sf.State, sf.Reason = StateOK, "not covered by earlier rules"
 	if len(overlapping) == 0 {
@@ -174,7 +257,9 @@ func shadowRule(views []netreach.RuleView, raws []netreach.SecurityRule, allZone
 		return sf, of
 	}
 	of.State, of.Severity, of.Covering = StateFinding, SeverityInfo, overlapping
-	of.Reason = clean("earlier rules match part of this rule's traffic: " + strings.Join(overlapping, ", "))
+	// Earlier rules whose conditions cannot be compared are listed too:
+	// they may, not certainly, match the shared traffic.
+	of.Reason = clean("earlier rules may match part of this rule's traffic: " + strings.Join(overlapping, ", "))
 	return sf, of
 }
 
@@ -227,32 +312,88 @@ func zonesExclude(r *netreach.SecurityRule, target box) bool {
 	return disjoint(r.From, target.from) || disjoint(r.To, target.to)
 }
 
+// condList is one condition list of a rule (application, source user,
+// URL category), prepared once per run for coverage tests.
+type condList struct {
+	// certain: collected, non-empty and free of markers.
+	certain bool
+	// any: exactly "any".
+	any bool
+	// hasAny: "any" is one of several members.
+	hasAny bool
+	// members holds the members by name when certain and not any.
+	members map[string]struct{}
+	// list is the member list in input order (for the included side).
+	list []string
+}
+
+func newCondList(f netreach.Field[[]string], w *work) condList {
+	w.add(len(f.Value))
+	if !f.Collected || len(f.Value) == 0 {
+		return condList{}
+	}
+	for _, m := range f.Value {
+		if hasMarker(m) {
+			return condList{}
+		}
+	}
+	if len(f.Value) == 1 && f.Value[0] == "any" {
+		return condList{certain: true, any: true}
+	}
+	l := condList{certain: true, members: make(map[string]struct{}, len(f.Value)), list: f.Value}
+	for _, m := range f.Value {
+		if m == "any" {
+			l.hasAny = true
+		}
+		l.members[m] = struct{}{}
+	}
+	return l
+}
+
+// ruleConds are the conditions of a rule prepared for conditionsCover.
+type ruleConds struct {
+	app, user, category condList
+	schedule            netreach.Field[string]
+}
+
+func newRuleConds(r *netreach.SecurityRule, w *work) ruleConds {
+	return ruleConds{
+		app:      newCondList(r.Application, w),
+		user:     newCondList(r.SourceUser, w),
+		category: newCondList(r.Category, w),
+		schedule: r.Schedule,
+	}
+}
+
 // conditionsCover reports whether the conditions of rule c (application,
 // source user, URL category, schedule) certainly include those of rule t.
 // A list includes another when it is "any" or holds every member of the
 // other by name; a schedule includes another when it is empty or the
-// same. Anything not collected or different is not certain.
-func conditionsCover(c, t *netreach.SecurityRule) bool {
-	return listCovers(c.Application, t.Application) &&
-		listCovers(c.SourceUser, t.SourceUser) &&
-		listCovers(c.Category, t.Category) &&
-		scheduleCovers(c.Schedule, t.Schedule)
-}
-
-func listCovers(c, t netreach.Field[[]string]) bool {
-	if !c.Collected || !t.Collected || len(c.Value) == 0 || len(t.Value) == 0 {
+// same. Anything not collected or different is not certain. The member
+// lookups are charged to w before they are done; when w is exhausted the
+// answer is false and the caller must stop.
+func conditionsCover(c, t *ruleConds, w *work) bool {
+	w.add(len(t.app.list) + len(t.user.list) + len(t.category.list) + 1)
+	if w.exhausted() {
 		return false
 	}
-	for _, m := range c.Value {
-		if hasMarker(m) {
-			return false
-		}
-	}
-	if len(c.Value) == 1 && c.Value[0] == "any" {
+	return listCovers(&c.app, &t.app) &&
+		listCovers(&c.user, &t.user) &&
+		listCovers(&c.category, &t.category) &&
+		scheduleCovers(c.schedule, t.schedule)
+}
+
+func listCovers(c, t *condList) bool {
+	switch {
+	case !c.certain || !t.certain:
+		return false
+	case c.any:
 		return true
+	case t.any || t.hasAny:
+		return false
 	}
-	for _, m := range t.Value {
-		if m == "any" || hasMarker(m) || !slices.Contains(c.Value, m) {
+	for _, m := range t.list {
+		if _, ok := c.members[m]; !ok {
 			return false
 		}
 	}
