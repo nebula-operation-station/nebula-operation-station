@@ -1,8 +1,10 @@
 # ADR 0015: Integrity monitoring for NOS itself and for managed hosts
 
-Status: **proposed, 2026-11-11**. Awaiting the maintainer's answers to the
-open questions below. Nothing here is implemented; every path, unit name and
-package below is to be *verified* in the ticket that implements it.
+Status: **Accepted, 2026-11-11** (previously: proposed, awaiting the
+maintainer's answers to the open questions). The maintainer accepted the
+recommendations to Q1–Q6; see "Maintainer decisions 2026-11-11". Nothing
+here is implemented; every path, unit name and package below is to be
+*verified* in the ticket that implements it.
 
 ## Context
 
@@ -1451,7 +1453,7 @@ rules. Dedupe per `(subject, class, path)`, at most 10 messages per hour,
 then an hourly digest.
 
 **Reaction stays advisory.** By default an I2 finding does not block
-jobs on the host (Q3 asks whether it should). It never triggers a
+jobs on the host (Q3 decision: only the opt-in per-host block). It never triggers a
 restore, reinstall or any other mutation.
 
 ### D10: I3, later: measured boot and IMA attestation (outline only)
@@ -1484,7 +1486,7 @@ the direction.
 
 - A persistent agent, inotify/fanotify watcher, auditd configuration or
   eBPF sensor on managed hosts.
-- Automatic restore, reinstall, rollback or quarantine actions. Q3 asks
+- Automatic restore, reinstall, rollback or quarantine actions. Q3 decides
   only about *withholding* NOS authority.
 - Proving the absence of a rootkit with I1 or I2.
 - Integrity of databases, logs and spools (covered elsewhere).
@@ -1492,7 +1494,13 @@ the direction.
   own host); Docker image layers.
 - Windows, network devices (ADR 0010).
 
-## Open questions for the maintainer
+## Maintainer decisions 2026-11-11
+
+(Previously "Open questions for the maintainer".) The maintainer accepted
+the recommendation to each question on 2026-11-11; each recommendation is
+now the decision. The questions are kept for context. Where the text
+above says "before Q6" or "until Q6 is answered", it now means until the
+Q6 decision is implemented (IG-09).
 
 - **Q1: Scope of paths and exceptions.** Is `fim-default-v1` (D5) the
   right default? Include `/etc/pve` (cluster-wide, changes on every node
@@ -1500,45 +1508,52 @@ the direction.
   and the keyed hash for everything else (D6) acceptable? May admins add
   per-host roots or excludes, and must such a profile change be approved
   like a grant?
-  **Recommendation:** ship `fim-default-v1` as listed; `/etc/pve` out of
-  scope in I2 (it is better watched once per PVE cluster later);
-  keyed hash outside the plain-hash allowlist (D6, recommended over the
-  earlier metadata-only idea because it still detects content changes);
-  per-host excludes allowed only as an
-  approved profile variant (grant digest covers it), additional roots
-  only from a fixed list.
+  **Decision** (the recommendation): ship `fim-default-v1` as listed
+  (so no `/var/lib/docker` root); `/etc/pve` out of scope in I2 (it is
+  better watched once per PVE cluster later); keyed hash outside the
+  plain-hash allowlist (D6, chosen over the earlier metadata-only idea
+  because it still detects content changes); per-host excludes allowed
+  only as an approved profile variant (grant digest covers it),
+  additional roots only from a fixed list.
 - **Q2: Intervals.** I1 every 60 minutes plus start/upgrade? I2
-  incremental hourly, full weekly? **Recommendation:** I1 at start, after
-  upgrade and every 60 minutes; I2 incremental every 6 hours and full
-  weekly by default (hourly incremental on hosts the admin marks as crown
-  jewels, ADR 0011 D10), all within the ADR 0007 ordinary read budget.
+  incremental hourly, full weekly?
+  **Decision** (the recommendation): I1 at start, after upgrade and
+  every 60 minutes; I2 incremental every 6 hours and full weekly by
+  default (hourly incremental on hosts the admin marks as crown jewels,
+  ADR 0011 D10), all within the ADR 0007 ordinary read budget.
 - **Q3: Reaction on an I2 finding.** Only alarm, or also a host
   quarantine that blocks new NOS jobs (except reads and the job that
-  investigates) until the admin acknowledges it? **Recommendation:**
-  alarm only by default; an opt-in per host "block mutations on open
-  critical integrity finding" that withholds new permits (never cancels a
-  running job, never touches the host). A block that an untrusted host
-  can trigger must not stop the admin from fixing it, so admin override
-  with a fresh assertion is always possible. Also: in standard mode, may
-  the *verified* expected changes of one job (except critical-class
+  investigates) until the admin acknowledges it? Also: in standard mode,
+  may the *verified* expected changes of one job (except critical-class
   paths, D9) be approved in one bulk D7 assertion offered right after the
-  job (recommended), or must they be reviewed in smaller batches? In
-  every mode they enter the baseline only through an executor-computed
-  digest (D7, D9), never through the job approval; unverified changes and
-  critical-class paths follow D9 and are not part of this question.
+  job, or must they be reviewed in smaller batches?
+  **Decision** (the recommendation): alarm only by default; an opt-in
+  per host "block mutations on open critical integrity finding" that
+  withholds new permits (never cancels a running job, never touches the
+  host). A block that an untrusted host can trigger must not stop the
+  admin from fixing it, so admin override with a fresh assertion is
+  always possible. In standard mode the verified expected changes of one
+  job (except critical-class paths) may be approved in one bulk D7
+  assertion offered right after the job. In every mode they enter the
+  baseline only through an executor-computed digest (D7, D9), never
+  through the job approval; unverified changes and critical-class paths
+  follow D9 and are not part of this decision.
 - **Q4: I1 lock on mismatch.** Should the executor refuse unlock and all
   dispatch on a binary/unit/module mismatch (D4)? On a configuration
-  mismatch? **Recommendation:** yes for binaries, units, built-in modules
-  and root keys (cleared only by local CLI); no lock for configuration
-  (alarm and baseline approval); web assets are refused individually
-  rather than locking the whole system.
+  mismatch?
+  **Decision** (the recommendation): yes for binaries, units, built-in
+  modules and root keys (cleared only by local CLI); no lock for
+  configuration (alarm and baseline approval); web assets are refused
+  individually rather than locking the whole system.
 - **Q5: I3 yes or no.** Plan measured boot/IMA attestation, including a
-  new TPM library dependency? **Recommendation:** yes as a later,
-  separate ADR after I2 is in use, starting with physical hosts with a
-  TPM and the NOS machine itself; vTPM guests only with the stated limit.
+  new TPM library dependency?
+  **Decision** (the recommendation): yes, as a later, separate ADR after
+  I2 is in use, starting with physical hosts with a TPM and the NOS
+  machine itself; vTPM guests only with the stated limit.
 - **Q6: Package reference builder and dependencies.** Where does it run,
-  and which modules may it use (D8)? **Recommendation:** on the
-  `nebula-vuln-agent` host, extending the ADR 0011 A1.6 approval of
+  and which modules may it use (D8)?
+  **Decision** (the recommendation): on the `nebula-vuln-agent` host,
+  extending the ADR 0011 A1.6 approval of
   `github.com/ProtonMail/go-crypto` to `InRelease` verification and
   approving one xz and one zstd decompression module for that binary
   only; until then, package files use the baseline mode.
@@ -1547,8 +1562,8 @@ the direction.
 
 - Spec 01: integrity monitoring as a bounded monitoring exception next to
   ADR 0011; restate that findings are advisory.
-- Spec 05/06: I1 unlock refusal and `nebula integrity ack` (if Q4 is
-  accepted); baseline approval challenge domains and what they bind
+- Spec 05/06: I1 unlock refusal and `nebula integrity ack` (Q4
+  decision); baseline approval challenge domains and what they bind
   (host ID, previous and new digest); `nebula integrity pending` and
   `nebula integrity approve` (rendering and approving exactly the
   executor-stored proposal bound to the digest, with the previous-digest
@@ -1577,7 +1592,7 @@ the direction.
 
 | Ticket | Content | Depends on |
 | --- | --- | --- |
-| IG-01 | Spec revision listed above | maintainer answers Q1–Q4 |
+| IG-01 | Spec revision listed above | maintainer decisions Q1–Q4 (2026-11-11) |
 | IG-02 | `installed-files.json` in release tooling and `docs/admin/release-signing.md`; publication of manifest, signature and list as GitHub release assets; parser and verifier with fuzz tests; executor admission next to `trust-builtins` | IG-01 |
 | IG-03 | I1 checks in all NOS processes, executor cross-check, server check of executor; `integrity_findings` store | IG-02 |
 | IG-04 | I1 reaction (unlock refusal per Q4), `nebula integrity ack` and `verify --offline`, `nebula verify` from an admin machine (D2), configuration baseline approval | IG-03 |
