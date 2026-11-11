@@ -112,6 +112,8 @@ func offerIn(t *testing.T, db *DB, state OfferState) NewOffer {
 	case OfferPairingProposed, OfferEnrolled:
 		step(db.ClaimOfferDownload(n.IDHash, "192.0.2.10", "127.0.0.1"))
 		step(db.ClaimOfferSubmission(n.IDHash))
+		_, err := db.CountOfferProbe(n.IDHash)
+		step(err)
 		step(db.ProposeOfferPairing(n.IDHash))
 		if state == OfferEnrolled {
 			step(db.CompleteOffer(n.IDHash))
@@ -256,6 +258,9 @@ func offerOps() []offerOp {
 		}},
 		{"propose", OfferDownloaded, OfferPairingProposed, func(db *DB, id [32]byte) error {
 			if err := db.ClaimOfferSubmission(id); err != nil {
+				return err
+			}
+			if _, err := db.CountOfferProbe(id); err != nil {
 				return err
 			}
 			return db.ProposeOfferPairing(id)
@@ -419,44 +424,13 @@ func TestOfferFinalStatesWipeSalt(t *testing.T) {
 	}
 }
 
-// TestOfferWipedSaltNotOnDisk scans the database file, WAL and journal
-// after the final state for the salt bytes.
-func TestOfferWipedSaltNotOnDisk(t *testing.T) {
-	dir := privateDir(t)
-	clk := &offerClock{t: t0}
-	db, err := open(dir, clk.Now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var salts [][32]byte
-	for _, end := range []func(*DB, [32]byte) error{
-		func(db *DB, id [32]byte) error { return db.EndOffer(id, OfferOpen, OfferRevoked) },
-		func(db *DB, id [32]byte) error {
-			if err := db.ClaimOfferDownload(id, "192.0.2.10", "127.0.0.1"); err != nil {
-				return err
-			}
-			if err := db.ClaimOfferSubmission(id); err != nil {
-				return err
-			}
-			if err := db.ProposeOfferPairing(id); err != nil {
-				return err
-			}
-			return db.CompleteOffer(id)
-		},
-	} {
-		// Live offers before and after on the same page, so the wiped
-		// cell's old bytes are not simply overwritten by the new one.
-		mustCreateOffer(t, db, false)
-		n := mustCreateOffer(t, db, false)
-		mustCreateOffer(t, db, false)
-		salts = append(salts, n.Salt)
-		if err := end(db, n.IDHash); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
+// saltOnDisk returns the names of the database's on-disk files (main
+// file, WAL, rollback journal) that contain salt. It reads the files as
+// they are, also while the DB is open, as a backup of the data directory
+// or a crash would see them.
+func saltOnDisk(t *testing.T, dir string, salt [32]byte) []string {
+	t.Helper()
+	var in []string
 	for _, name := range []string{FileName, FileName + "-wal", FileName + "-journal"} {
 		b, err := os.ReadFile(filepath.Join(dir, name))
 		if os.IsNotExist(err) {
@@ -465,11 +439,145 @@ func TestOfferWipedSaltNotOnDisk(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, s := range salts {
-			if bytes.Contains(b, s[:]) {
-				t.Fatalf("wiped salt still in %s", name)
-			}
+		if bytes.Contains(b, salt[:]) {
+			in = append(in, name)
 		}
+	}
+	return in
+}
+
+// proposeOffer drives an open offer to pairing_proposed.
+func proposeOffer(db *DB, id [32]byte) error {
+	if err := db.ClaimOfferDownload(id, "192.0.2.10", "127.0.0.1"); err != nil {
+		return err
+	}
+	if err := db.ClaimOfferSubmission(id); err != nil {
+		return err
+	}
+	if _, err := db.CountOfferProbe(id); err != nil {
+		return err
+	}
+	return db.ProposeOfferPairing(id)
+}
+
+// TestOfferWipedSaltNotOnDisk scans the database file, WAL and journal for
+// the salt bytes right after each wiping call returns, while the database
+// is still open: the salt is on disk while the offer is live and gone from
+// every file once the wipe returned.
+func TestOfferWipedSaltNotOnDisk(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		prep func(*DB, [32]byte) error
+		wipe func(*DB, *offerClock, [32]byte) error
+	}{
+		{"revoke", nil, func(db *DB, _ *offerClock, id [32]byte) error {
+			return db.EndOffer(id, OfferOpen, OfferRevoked)
+		}},
+		{"fail from downloaded", func(db *DB, id [32]byte) error {
+			return db.ClaimOfferDownload(id, "192.0.2.10", "127.0.0.1")
+		}, func(db *DB, _ *offerClock, id [32]byte) error {
+			return db.EndOffer(id, OfferDownloaded, OfferFailed)
+		}},
+		{"complete", proposeOffer, func(db *DB, _ *offerClock, id [32]byte) error {
+			return db.CompleteOffer(id)
+		}},
+		{"expiry sweep", nil, func(db *DB, clk *offerClock, _ [32]byte) error {
+			clk.Add(OfferLifetime)
+			_, err := db.ExpireOffers()
+			return err
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := privateDir(t)
+			clk := &offerClock{t: t0}
+			db := openOfferDB(t, dir, clk)
+			// Live offers before and after the wiped one, on the same page,
+			// so the wiped cell is not simply overwritten by a new one.
+			before := mustCreateOffer(t, db, false)
+			n := mustCreateOffer(t, db, false)
+			if tc.prep != nil {
+				if err := tc.prep(db, n.IDHash); err != nil {
+					t.Fatal(err)
+				}
+			}
+			clk.Add(time.Minute)
+			after := mustCreateOffer(t, db, false)
+			clk.Add(-time.Minute)
+			// The scan finds the salt while the offer is live, so a miss
+			// after the wipe is not a scan that looks in the wrong place.
+			if in := saltOnDisk(t, dir, n.Salt); len(in) == 0 {
+				t.Fatal("live salt not found on disk: the scan proves nothing")
+			}
+			if err := tc.wipe(db, clk, n.IDHash); err != nil {
+				t.Fatal(err)
+			}
+			if in := saltOnDisk(t, dir, n.Salt); len(in) != 0 {
+				t.Fatalf("wiped salt still in %v while the database is open", in)
+			}
+			// The still-live offer keeps its salt, also on disk.
+			if in := saltOnDisk(t, dir, after.Salt); len(in) == 0 {
+				t.Fatal("live salt of the later offer missing on disk")
+			}
+			if tc.name != "expiry sweep" {
+				if in := saltOnDisk(t, dir, before.Salt); len(in) == 0 {
+					t.Fatal("live salt of the earlier offer missing on disk")
+				}
+			}
+			// And after Close (which checkpoints again) as before.
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if in := saltOnDisk(t, dir, n.Salt); len(in) != 0 {
+				t.Fatalf("wiped salt in %v after close", in)
+			}
+		})
+	}
+}
+
+// TestOfferWipeWaitsForReaderSnapshot: a reader holding a snapshot that
+// still contains the salt cannot make the wipe return with the salt left in
+// the WAL. The DB has a single connection and SQLite runs in exclusive
+// locking mode, so no other connection can hold a snapshot; a reader on
+// the one connection delays the wipe until it ends, and when the wipe
+// returns, the salt is gone from every file.
+func TestOfferWipeWaitsForReaderSnapshot(t *testing.T) {
+	dir := privateDir(t)
+	db := openOfferDB(t, dir, &offerClock{t: t0})
+	n := mustCreateOffer(t, db, false)
+
+	tx, err := db.sql.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var salt []byte
+	if err := tx.QueryRow(`SELECT salt FROM enroll_offers WHERE id_hash = ?`, n.IDHash[:]).Scan(&salt); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(salt, n.Salt[:]) {
+		t.Fatal("reader snapshot does not hold the salt")
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- db.EndOffer(n.IDHash, OfferOpen, OfferRevoked) }()
+	select {
+	case err := <-done:
+		t.Fatalf("wipe returned while a reader held its snapshot: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if in := saltOnDisk(t, dir, n.Salt); len(in) == 0 {
+		t.Fatal("salt not on disk while the reader holds its snapshot: the scan proves nothing")
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if in := saltOnDisk(t, dir, n.Salt); len(in) != 0 {
+		t.Fatalf("wiped salt still in %v while the database is open", in)
+	}
+	if o := mustOffer(t, db, n.IDHash); o.State != OfferRevoked || o.Salt != nil {
+		t.Fatalf("offer in %s, salt %v", o.State, o.Salt != nil)
 	}
 }
 
@@ -605,14 +713,25 @@ func TestOfferCounters(t *testing.T) {
 	if _, err := db.CountOfferProbe(n.IDHash); !errors.Is(err, ErrOfferState) {
 		t.Fatalf("probe before submission: %v, want ErrOfferState", err)
 	}
+	// Rejected codes count up to the limit and stop there.
+	rejected := offerIn(t, db, OfferDownloaded)
 	for i := 1; i <= OfferMaxRejectedCodes; i++ {
-		got, err := db.CountOfferRejectedCode(n.IDHash)
+		got, err := db.CountOfferRejectedCode(rejected.IDHash)
 		if err != nil || got != i {
 			t.Fatalf("rejected code %d: got %d, %v", i, got, err)
 		}
 	}
-	if _, err := db.CountOfferRejectedCode(n.IDHash); !errors.Is(err, ErrOfferLimit) {
+	if _, err := db.CountOfferRejectedCode(rejected.IDHash); !errors.Is(err, ErrOfferLimit) {
 		t.Fatalf("rejected code over limit: %v, want ErrOfferLimit", err)
+	}
+	if o := mustOffer(t, db, rejected.IDHash); o.RejectedCodes != OfferMaxRejectedCodes || o.State != OfferDownloaded {
+		t.Fatalf("rejected counter %d state %s", o.RejectedCodes, o.State)
+	}
+	// Below the limit a well-formed code is still accepted.
+	for i := 1; i < OfferMaxRejectedCodes; i++ {
+		if _, err := db.CountOfferRejectedCode(n.IDHash); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := db.ClaimOfferSubmission(n.IDHash); err != nil {
 		t.Fatal(err)
@@ -631,13 +750,91 @@ func TestOfferCounters(t *testing.T) {
 		t.Fatalf("probe over limit: %v, want ErrOfferLimit", err)
 	}
 	o := mustOffer(t, db, n.IDHash)
-	if o.Probes != OfferMaxProbes || o.RejectedCodes != OfferMaxRejectedCodes || o.State != OfferDownloaded {
+	if o.Probes != OfferMaxProbes || o.RejectedCodes != OfferMaxRejectedCodes-1 || o.State != OfferDownloaded {
 		t.Fatalf("counters %d/%d state %s", o.Probes, o.RejectedCodes, o.State)
 	}
 	// Counters are refused outside downloaded.
 	open := offerIn(t, db, OfferOpen)
 	if _, err := db.CountOfferRejectedCode(open.IDHash); !errors.Is(err, ErrOfferState) {
 		t.Fatalf("rejected code on open offer: %v, want ErrOfferState", err)
+	}
+}
+
+// TestOfferLimitsStopSubmissionAndProposal: the store itself refuses a
+// code submission once the rejected-code limit is reached and a proposal
+// without a counted probe, also when the caller has not ended the offer.
+func TestOfferLimitsStopSubmissionAndProposal(t *testing.T) {
+	db, _ := offerDB(t)
+
+	atLimit := offerIn(t, db, OfferDownloaded)
+	for i := 0; i < OfferMaxRejectedCodes; i++ {
+		if _, err := db.CountOfferRejectedCode(atLimit.IDHash); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.ClaimOfferSubmission(atLimit.IDHash); !errors.Is(err, ErrOfferLimit) {
+		t.Fatalf("submission at rejected-code limit: %v, want ErrOfferLimit", err)
+	}
+	if o := mustOffer(t, db, atLimit.IDHash); !o.CodeSubmittedAt.IsZero() || o.State != OfferDownloaded {
+		t.Fatalf("refused submission changed the offer: submitted %v state %s", o.CodeSubmittedAt, o.State)
+	}
+	if err := db.ProposeOfferPairing(atLimit.IDHash); !errors.Is(err, ErrOfferState) {
+		t.Fatalf("proposal without submission: %v, want ErrOfferState", err)
+	}
+
+	noProbe := offerIn(t, db, OfferDownloaded)
+	if err := db.ClaimOfferSubmission(noProbe.IDHash); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ProposeOfferPairing(noProbe.IDHash); !errors.Is(err, ErrOfferState) {
+		t.Fatalf("proposal without a counted probe: %v, want ErrOfferState", err)
+	}
+	if o := mustOffer(t, db, noProbe.IDHash); o.State != OfferDownloaded {
+		t.Fatalf("refused proposal moved the offer to %s", o.State)
+	}
+
+	// The last allowed probe may still lead to a proposal.
+	lastProbe := offerIn(t, db, OfferDownloaded)
+	if err := db.ClaimOfferSubmission(lastProbe.IDHash); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < OfferMaxProbes; i++ {
+		if _, err := db.CountOfferProbe(lastProbe.IDHash); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.ProposeOfferPairing(lastProbe.IDHash); err != nil {
+		t.Fatalf("proposal after the last allowed probe: %v", err)
+	}
+}
+
+// TestCompleteOfferRefusedAfterGrace: a pairing_proposed offer can be
+// committed until OfferProposedGrace after its expiry, not at or after
+// that bound, even if the sweep has not run.
+func TestCompleteOfferRefusedAfterGrace(t *testing.T) {
+	db, clk := offerDB(t)
+	inGrace := offerIn(t, db, OfferPairingProposed)
+	late := offerIn(t, db, OfferPairingProposed)
+
+	clk.Add(OfferLifetime + OfferProposedGrace - time.Second)
+	if err := db.CompleteOffer(inGrace.IDHash); err != nil {
+		t.Fatalf("complete one second before the grace ends: %v", err)
+	}
+	clk.Add(time.Second)
+	if err := db.CompleteOffer(late.IDHash); !errors.Is(err, ErrOfferExpired) {
+		t.Fatalf("complete when the grace ends: %v, want ErrOfferExpired", err)
+	}
+	o := mustOffer(t, db, late.IDHash)
+	if o.State != OfferPairingProposed || o.Salt == nil {
+		t.Fatalf("refused commit changed the offer: %s, salt %v", o.State, o.Salt != nil)
+	}
+	// The sweep ends it at the same bound.
+	ids, err := db.ExpireOffers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != late.IDHash {
+		t.Fatalf("sweep expired %d offers, want the late one", len(ids))
 	}
 }
 

@@ -67,6 +67,8 @@ const (
 	// after this grace.
 	OfferProposedGrace = canonical.MaxPermitLifetime
 
+	proposedGraceSeconds = int64(OfferProposedGrace / time.Second)
+
 	offerHashLen       = 32
 	offerSaltLen       = 32 // 256-bit salt (spec 03 v25-03-03)
 	maxOfferHostIDLen  = 63 // as host_keys.host_id
@@ -89,9 +91,14 @@ var (
 	ErrOfferState = errors.New("executordb: enrollment offer is not in the expected state")
 	// ErrOfferExpired: the offer's lifetime is over; nothing was changed.
 	ErrOfferExpired = errors.New("executordb: enrollment offer expired")
-	// ErrOfferLimit: a per-offer counter reached its limit; nothing was
-	// changed.
+	// ErrOfferLimit: a per-offer counter or a per-executor offer limit was
+	// reached; nothing was changed.
 	ErrOfferLimit = errors.New("executordb: enrollment offer limit reached")
+	// ErrOfferWipeIncomplete: the offer's final state and the NULL salt are
+	// committed, but the WAL checkpoint that removes the old salt from the
+	// -wal file did not complete. The state change stands; the next wiping
+	// call, the next Open or Close retries the checkpoint.
+	ErrOfferWipeIncomplete = errors.New("executordb: enrollment offer salt wiped, but not yet removed from the WAL")
 )
 
 // NewOffer is what CreateOffer stores. The offer ID itself is never passed
@@ -240,7 +247,7 @@ func (db *DB) OpenOffer(idHash, scriptSHA256 [offerHashLen]byte) error {
 		return fmt.Errorf("executordb: %w: offer script hash is required", ErrInvalid)
 	}
 	now := db.now().Unix()
-	return db.offerCAS(idHash, "open offer", now, true, OfferAwaitingApproval, `UPDATE enroll_offers
+	return db.offerCAS(idHash, "open offer", now, true, OfferAwaitingApproval, nil, `UPDATE enroll_offers
 		SET state = 'open', state_changed_at = ?, script_sha256 = ?
 		WHERE id_hash = ? AND state = 'awaiting_approval' AND expires_at > ?`,
 		now, scriptSHA256[:], idHash[:], now)
@@ -261,7 +268,7 @@ func (db *DB) ClaimOfferDownload(idHash [offerHashLen]byte, clientAddr, peerAddr
 		return err
 	}
 	now := db.now().Unix()
-	return db.offerCAS(idHash, "claim offer download", now, true, OfferOpen, `UPDATE enroll_offers
+	return db.offerCAS(idHash, "claim offer download", now, true, OfferOpen, nil, `UPDATE enroll_offers
 		SET state = 'downloaded', state_changed_at = ?, downloaded_at = ?, client_addr = ?, peer_addr = ?
 		WHERE id_hash = ? AND state = 'open' AND expires_at > ?`,
 		now, now, client, peer, idHash[:], now)
@@ -269,13 +276,18 @@ func (db *DB) ClaimOfferDownload(idHash [offerHashLen]byte, clientAddr, peerAddr
 
 // ClaimOfferSubmission accepts the one well-formed code submission of a
 // downloaded offer (ADR 0013 D3). Of concurrent claims exactly one
-// succeeds; the others, and every later one, get ErrOfferState.
+// succeeds; the others, and every later one, get ErrOfferState. An offer
+// with OfferMaxRejectedCodes rejected submissions accepts none any more
+// (ErrOfferLimit), even if the caller has not ended it yet.
 func (db *DB) ClaimOfferSubmission(idHash [offerHashLen]byte) error {
 	now := db.now().Unix()
-	return db.offerCAS(idHash, "claim offer submission", now, true, OfferDownloaded, `UPDATE enroll_offers
+	return db.offerCAS(idHash, "claim offer submission", now, true, OfferDownloaded,
+		func(o Offer) bool { return o.CodeSubmittedAt.IsZero() && o.RejectedCodes >= OfferMaxRejectedCodes },
+		`UPDATE enroll_offers
 		SET code_submitted_at = ?
-		WHERE id_hash = ? AND state = 'downloaded' AND code_submitted_at IS NULL AND expires_at > ?`,
-		now, idHash[:], now)
+		WHERE id_hash = ? AND state = 'downloaded' AND code_submitted_at IS NULL
+		  AND rejected_codes < ? AND expires_at > ?`,
+		now, idHash[:], OfferMaxRejectedCodes, now)
 }
 
 // CountOfferProbe counts one probe for the submitted code of a downloaded
@@ -309,29 +321,47 @@ func (db *DB) CountOfferRejectedCode(idHash [offerHashLen]byte) (int, error) {
 
 // ProposeOfferPairing moves a downloaded offer whose code was submitted
 // and matched to pairing_proposed, in one compare-and-set, before expiry.
+// The match comes from a probe, and every probe is counted before it runs
+// (CountOfferProbe): an offer without a counted probe is refused
+// (ErrOfferState), and so is one whose counters are outside their limits
+// (ErrOfferLimit; the CHECK constraints make that unreachable through the
+// store). A proposal at exactly OfferMaxProbes is the result of the last
+// allowed probe and is accepted.
 func (db *DB) ProposeOfferPairing(idHash [offerHashLen]byte) error {
 	now := db.now().Unix()
-	return db.offerCAS(idHash, "propose offer pairing", now, true, OfferDownloaded, `UPDATE enroll_offers
+	return db.offerCAS(idHash, "propose offer pairing", now, true, OfferDownloaded,
+		func(o Offer) bool { return o.Probes > OfferMaxProbes || o.RejectedCodes > OfferMaxRejectedCodes },
+		`UPDATE enroll_offers
 		SET state = 'pairing_proposed', state_changed_at = ?
-		WHERE id_hash = ? AND state = 'downloaded' AND code_submitted_at IS NOT NULL AND expires_at > ?`,
-		now, idHash[:], now)
+		WHERE id_hash = ? AND state = 'downloaded' AND code_submitted_at IS NOT NULL
+		  AND probes BETWEEN 1 AND ? AND rejected_codes <= ? AND expires_at > ?`,
+		now, idHash[:], OfferMaxProbes, OfferMaxRejectedCodes, now)
 }
 
 // CompleteOffer moves an offer from pairing_proposed to enrolled and wipes
-// its salt, in one compare-and-set. The offer's own expiry is not checked
-// here: the approval started before it, and its permit's lifetime governs
-// the commit (ADR 0013 D2).
+// its salt, in one compare-and-set, and removes the old salt from the WAL
+// before it returns (purgeWipedSalt). The approval started before the
+// offer's expiry and its permit's lifetime governs the commit (ADR 0013
+// D2); the store still refuses with ErrOfferExpired once the offer is
+// OfferProposedGrace or more past its expiry, the bound at which the
+// expiry sweep ends it, so a late commit does not depend on the sweep
+// having run.
 func (db *DB) CompleteOffer(idHash [offerHashLen]byte) error {
 	now := db.now().Unix()
-	return db.offerCAS(idHash, "complete offer", now, false, OfferPairingProposed, `UPDATE enroll_offers
+	cutoff := now - proposedGraceSeconds
+	if err := db.offerCAS(idHash, "complete offer", cutoff, true, OfferPairingProposed, nil, `UPDATE enroll_offers
 		SET state = 'enrolled', state_changed_at = ?, salt = NULL
-		WHERE id_hash = ? AND state = 'pairing_proposed'`,
-		now, idHash[:])
+		WHERE id_hash = ? AND state = 'pairing_proposed' AND expires_at > ?`,
+		now, idHash[:], cutoff); err != nil {
+		return err
+	}
+	return db.purgeWipedSalt("complete offer")
 }
 
 // EndOffer moves an offer from the non-final state from to the final state
 // to (expired, revoked or failed) and wipes its salt, in one
-// compare-and-set. If the offer is no longer in from, nothing changes and
+// compare-and-set, and removes the old salt from the WAL before it returns
+// (purgeWipedSalt). If the offer is no longer in from, nothing changes and
 // ErrOfferState is returned; the caller re-reads the offer and decides
 // again (a revoke racing a download, for example).
 func (db *DB) EndOffer(idHash [offerHashLen]byte, from, to OfferState) error {
@@ -342,17 +372,22 @@ func (db *DB) EndOffer(idHash [offerHashLen]byte, from, to OfferState) error {
 		return fmt.Errorf("executordb: %w: offer can only end as expired, revoked or failed, not %q", ErrInvalid, to)
 	}
 	now := db.now().Unix()
-	return db.offerCAS(idHash, "end offer", now, false, from, `UPDATE enroll_offers
+	if err := db.offerCAS(idHash, "end offer", now, false, from, nil, `UPDATE enroll_offers
 		SET state = ?, state_changed_at = ?, salt = NULL
 		WHERE id_hash = ? AND state = ?`,
-		string(to), now, idHash[:], string(from))
+		string(to), now, idHash[:], string(from)); err != nil {
+		return err
+	}
+	return db.purgeWipedSalt("end offer")
 }
 
 // ExpireOffers is the expiry sweep: every offer in awaiting_approval, open
 // or downloaded whose lifetime is over, and every offer in
 // pairing_proposed more than OfferProposedGrace past its expiry, moves to
-// expired and loses its salt, in one statement. It returns the ID hashes
-// of the offers it expired, for audit.
+// expired and loses its salt, in one statement; the old salts are removed
+// from the WAL before it returns (purgeWipedSalt). It returns the ID hashes
+// of the offers it expired, for audit, also together with
+// ErrOfferWipeIncomplete.
 func (db *DB) ExpireOffers() ([][offerHashLen]byte, error) {
 	now := db.now().Unix()
 	rows, err := db.sql.Query(`UPDATE enroll_offers
@@ -360,34 +395,81 @@ func (db *DB) ExpireOffers() ([][offerHashLen]byte, error) {
 		WHERE (state IN ('awaiting_approval', 'open', 'downloaded') AND expires_at <= ?)
 		   OR (state = 'pairing_proposed' AND expires_at <= ?)
 		RETURNING id_hash`,
-		now, now, now-int64(OfferProposedGrace/time.Second))
+		now, now, now-proposedGraceSeconds)
 	if err != nil {
 		return nil, fmt.Errorf("executordb: expire offers: %w", err)
 	}
+	out, err := scanOfferIDs(rows)
+	if err != nil {
+		return nil, fmt.Errorf("executordb: expire offers: %w", err)
+	}
+	if len(out) > 0 {
+		// rows is closed, so the single connection is free for the
+		// checkpoint.
+		if err := db.purgeWipedSalt("expire offers"); err != nil {
+			return out, err
+		}
+	}
+	return out, nil
+}
+
+// scanOfferIDs reads rows of ID hashes and closes rows.
+func scanOfferIDs(rows *sql.Rows) ([][offerHashLen]byte, error) {
 	defer rows.Close()
 	var out [][offerHashLen]byte
 	for rows.Next() {
 		var id []byte
 		if err := rows.Scan(&id); err != nil {
-			return nil, fmt.Errorf("executordb: expire offers: %w", err)
+			return nil, err
 		}
 		if len(id) != offerHashLen {
-			return nil, fmt.Errorf("executordb: expire offers: stored ID hash has %d bytes", len(id))
+			return nil, fmt.Errorf("stored ID hash has %d bytes", len(id))
 		}
 		out = append(out, [offerHashLen]byte(id))
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("executordb: expire offers: %w", err)
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
 
+// purgeWipedSalt removes a salt that a just-committed wipe set to NULL
+// from every on-disk file before the wiping call returns (review en05a,
+// finding 1). secure_delete (executordb.go) zeroes the old cell content in
+// the new page image, but the WAL frames written while the offer was live
+// still hold the salt in the -wal file. A TRUNCATE checkpoint copies the
+// current page images (without the salt) into the main file, syncs it and
+// truncates the -wal file to zero bytes.
+//
+// A checkpoint can only be blocked by a reader on another connection that
+// still needs the old frames. There is none: the pool has a single
+// connection, so an in-process reader holds that connection and the
+// wiping call waits for it before it commits or checkpoints, and the
+// exclusive locking mode keeps every other process out of the file. If the
+// checkpoint still reports busy, the call fails with
+// ErrOfferWipeIncomplete. A crash between the commit and the checkpoint
+// leaves the salt in the WAL until the next Open, which checkpoints the
+// same way before it returns. Outside this guarantee is everything below
+// the file interface: blocks freed by the truncate, and copies kept by the
+// storage device or by a file-system snapshot or backup taken while the
+// offer was live.
+func (db *DB) purgeWipedSalt(what string) error {
+	if err := checkpointTruncate(db.sql); err != nil {
+		return fmt.Errorf("executordb: %s: %w: %w", what, ErrOfferWipeIncomplete, err)
+	}
+	return nil
+}
+
 // offerCAS runs one compare-and-set UPDATE. When it changed no row, it
 // reads the offer to report why: ErrOfferNotFound, ErrOfferExpired (when
-// checkExpiry and the offer is still in the expected state but past its
-// expiry) or ErrOfferState. The read only explains a refusal; it never
-// leads to a change.
-func (db *DB) offerCAS(idHash [offerHashLen]byte, what string, now int64, checkExpiry bool, expected OfferState, query string, args ...any) error {
+// checkExpiry and the offer is still in the expected state but its expiry
+// is at or before cutoff), ErrOfferLimit (when atLimit holds for an offer
+// in the expected state) or ErrOfferState. The read only explains a
+// refusal; it never leads to a change.
+func (db *DB) offerCAS(idHash [offerHashLen]byte, what string, cutoff int64, checkExpiry bool, expected OfferState, atLimit func(Offer) bool, query string, args ...any) error {
 	res, err := db.sql.Exec(query, args...)
 	if err != nil {
 		return fmt.Errorf("executordb: %s %s: %w", what, offerLogID(idHash), err)
@@ -403,8 +485,11 @@ func (db *DB) offerCAS(idHash [offerHashLen]byte, what string, now int64, checkE
 	if err != nil {
 		return fmt.Errorf("executordb: %s: %w", what, err)
 	}
-	if checkExpiry && o.State == expected && o.ExpiresAt.Unix() <= now {
+	if checkExpiry && o.State == expected && o.ExpiresAt.Unix() <= cutoff {
 		return fmt.Errorf("executordb: %s %s: %w", what, offerLogID(idHash), ErrOfferExpired)
+	}
+	if atLimit != nil && o.State == expected && atLimit(o) {
+		return fmt.Errorf("executordb: %s %s: %w", what, offerLogID(idHash), ErrOfferLimit)
 	}
 	return fmt.Errorf("executordb: %s %s: %s: %w", what, offerLogID(idHash), o.State, ErrOfferState)
 }

@@ -181,7 +181,28 @@ func open(dataDir string, now func() time.Time) (_ *DB, err error) {
 		sdb.Close()
 		return nil, err
 	}
+	// A crash between a salt wipe's commit and its checkpoint leaves the
+	// wiped salt in the WAL; recovery replays it, and this removes it
+	// before Open returns (see purgeWipedSalt).
+	if err := checkpointTruncate(sdb); err != nil {
+		sdb.Close()
+		return nil, fmt.Errorf("executordb: %w", err)
+	}
 	return &DB{sql: sdb, dirLock: dirLock, created: created, now: now}, nil
+}
+
+// checkpointTruncate copies every WAL frame into the main file, syncs it
+// and truncates the -wal file to zero bytes. It fails if SQLite reports the
+// checkpoint as blocked.
+func checkpointTruncate(sdb *sql.DB) error {
+	var busy, logFrames, checkpointed int64
+	if err := sdb.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logFrames, &checkpointed); err != nil {
+		return fmt.Errorf("wal checkpoint: %w", err)
+	}
+	if busy != 0 {
+		return fmt.Errorf("wal checkpoint blocked (%d of %d frames copied)", checkpointed, logFrames)
+	}
+	return nil
 }
 
 // lockDir takes a non-blocking exclusive flock on dir.
