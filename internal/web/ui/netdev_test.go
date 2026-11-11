@@ -673,7 +673,7 @@ func TestNetDevDetailShowsDatasets(t *testing.T) {
 	}
 	_, body = e.get("/netdev/fw1")
 	for _, want := range []string{"PA-440", "11.1.4", "trust", "untrust", "ethernet1/2", "10.0.0.1/24",
-		"Security rules</th><td>7", "NAT rules</th><td>2", "Objects</th><td>10", "Firewall view: not available yet"} {
+		"Security rules</th><td>7", "NAT rules</th><td>2", "Objects</th><td>10", `href="/netdev/fw1/firewall"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("PAN-OS detail misses %q", want)
 		}
@@ -681,7 +681,7 @@ func TestNetDevDetailShowsDatasets(t *testing.T) {
 	if strings.Contains(body, "MAC table") {
 		t.Error("PAN-OS detail shows the switch MAC table")
 	}
-	if strings.Contains(body, `href="/netdev/fw1/firewall"`) {
-		t.Error("firewall view linked before ND-20")
+	if strings.Contains(body, "not available yet") {
+		t.Error("PAN-OS detail still shows the ND-19 firewall view placeholder")
 	}
 }
