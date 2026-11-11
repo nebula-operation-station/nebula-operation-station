@@ -124,14 +124,18 @@ func pruneConfigVersions(ctx context.Context, tx *sql.Tx, now time.Time) (int64,
 	if err != nil {
 		return 0, fmt.Errorf("netdevinventory: prune config versions: %w", err)
 	}
-	// Over the count limit, the oldest unprotected versions go first;
-	// protected versions count against the limit but are never removed.
-	capped, err := exec(ctx, tx, `DELETE FROM netdev_config_versions WHERE id IN (
-		SELECT id FROM (
-			SELECT v.id, ROW_NUMBER() OVER (PARTITION BY v.device_id ORDER BY v.last_seen DESC, v.id DESC) AS rn,
-				`+configProtected+` AS protected
-			FROM netdev_config_versions v)
-		WHERE rn > ? AND protected = 0)`, cutoff, MaxConfigVersionsPerDevice)
+	// Over the count limit, the oldest unprotected versions go first.
+	// Protected versions count against the limit but are never removed, so
+	// a device keeps at most the limit unless its protected versions alone
+	// exceed it.
+	capped, err := exec(ctx, tx, `WITH
+		p AS (SELECT v.id, v.device_id, v.last_seen, `+configProtected+` AS prot FROM netdev_config_versions v),
+		u AS (SELECT id, device_id, ROW_NUMBER() OVER (PARTITION BY device_id ORDER BY last_seen DESC, id DESC) AS rn
+			FROM p WHERE prot = 0),
+		c AS (SELECT device_id, SUM(prot) AS np FROM p GROUP BY device_id)
+		DELETE FROM netdev_config_versions WHERE id IN (
+			SELECT u.id FROM u JOIN c ON c.device_id = u.device_id WHERE u.rn > ? - c.np)`,
+		cutoff, MaxConfigVersionsPerDevice)
 	if err != nil {
 		return 0, fmt.Errorf("netdevinventory: cap config versions: %w", err)
 	}
