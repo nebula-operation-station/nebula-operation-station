@@ -377,6 +377,42 @@ func TestNetBirdCAFileInvalidFailLoad(t *testing.T) {
 	}
 }
 
+func TestNetBirdCAFileSymlinkFailsLoad(t *testing.T) {
+	target := writeCert(t, 1, "")
+	link := filepath.Join(t.TempDir(), "link.pem")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	_, err := parseEnroll(t, "-netbird-management-url", "https://netbird.example.org", "-netbird-ca-file", link)
+	if !errors.Is(err, errInvalidEnrollConfig) || !strings.Contains(err.Error(), "-netbird-ca-file") {
+		t.Fatalf("symlinked CA file: err = %v, want errInvalidEnrollConfig naming the flag", err)
+	}
+}
+
+func TestNetBirdCAFileOwner(t *testing.T) {
+	p := writeCert(t, 1, "")
+	self := os.Geteuid()
+	// Owned by the executor user: accepted.
+	if _, err := loadNetBirdCAFile(p, self); err != nil {
+		t.Fatalf("file owned by the executor user refused: %v", err)
+	}
+	// Owned by neither root nor the executor user: refused. As root the
+	// file is handed to another UID first; otherwise the executor UID is
+	// set to one that does not own it.
+	executorUID := self + 1
+	if self == 0 {
+		const other = 65534
+		if err := os.Chown(p, other, -1); err != nil {
+			t.Fatal(err)
+		}
+		executorUID = other + 1
+	}
+	_, err := loadNetBirdCAFile(p, executorUID)
+	if err == nil || !strings.Contains(err.Error(), "owned by") {
+		t.Fatalf("file of a foreign owner: err = %v, want an owner refusal", err)
+	}
+}
+
 func TestNetBirdCAFileWithoutURLFailsLoad(t *testing.T) {
 	p := writeCert(t, 1, "")
 	_, err := parseEnroll(t, "-netbird-ca-file", p)

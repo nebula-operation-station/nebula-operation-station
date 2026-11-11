@@ -111,7 +111,7 @@ func registerEnrollFlags(fs *flag.FlagSet) *enrollFlags {
 	f := &enrollFlags{}
 	fs.Var(&f.sources, "enroll-source", "enrollment source address: IP address or CIDR range Nebula connects to enrolled hosts from (comma-separated, repeatable; goes into the key's from= option)")
 	f.mgmtURL = fs.String("netbird-management-url", "", "NetBird management API URL (https only; empty disables the NetBird join)")
-	f.caFile = fs.String("netbird-ca-file", "", "absolute path of a PEM file with the pinned CA or leaf certificate of the NetBird management API (empty: system trust store)")
+	f.caFile = fs.String("netbird-ca-file", "", "absolute path of a PEM file with the pinned CA or leaf certificate of the NetBird management API (empty: system trust store); must be a regular file, not a symlink, owned by root or the executor user, not group- or world-writable, in directories only root or the executor user can write")
 	f.managedGroup = fs.String("netbird-managed-group", defaultManagedGroup, "NetBird group enrolled hosts join")
 	return f
 }
@@ -135,7 +135,7 @@ func (f *enrollFlags) load() (enrollConfig, error) {
 		if !cfg.NetBird.Enabled() {
 			return enrollConfig{}, fmt.Errorf("%w: -netbird-ca-file is set without -netbird-management-url", errInvalidEnrollConfig)
 		}
-		pool, err := loadNetBirdCAFile(*f.caFile)
+		pool, err := loadNetBirdCAFile(*f.caFile, os.Geteuid())
 		if err != nil {
 			return enrollConfig{}, fmt.Errorf("%w: -netbird-ca-file: %w", errInvalidEnrollConfig, err)
 		}
@@ -348,29 +348,42 @@ func validDNSName(s string) bool {
 }
 
 // loadNetBirdCAFile reads the pinned CA (or leaf) certificates for the
-// NetBird management API: an absolute path to a regular file that is not
-// group- or world-writable, at most netBirdCAFileMaxBytes, holding one or
-// more PEM CERTIFICATE blocks and nothing else. Errors never quote the
-// file content.
-func loadNetBirdCAFile(path string) (*x509.CertPool, error) {
+// NetBird management API: an absolute path to a regular file, not a
+// symlink, owned by root or executorUID, not group- or world-writable, at
+// most netBirdCAFileMaxBytes, holding one or more PEM CERTIFICATE blocks
+// and nothing else. Errors never quote the file content.
+//
+// O_NOFOLLOW covers the last path component only. The directories above
+// the file are assumed to be writable by root or the executor user alone
+// (for example /etc/nebula); whoever can replace a directory on the path
+// controls the pinned trust.
+func loadNetBirdCAFile(path string, executorUID int) (*x509.CertPool, error) {
 	if !filepath.IsAbs(path) {
 		return nil, fmt.Errorf("%q is not an absolute path", path)
 	}
-	// O_NONBLOCK: a FIFO in place of the file must not block the start.
-	f, err := os.OpenFile(path, os.O_RDONLY|unix.O_NONBLOCK, 0)
+	// O_NOFOLLOW: a symlink in place of the file is refused (ELOOP), not
+	// followed. O_NONBLOCK: a FIFO in place of the file must not block the
+	// start.
+	f, err := os.OpenFile(path, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
+		if errors.Is(err, unix.ELOOP) {
+			return nil, fmt.Errorf("%s is a symlink; give the path of the file itself", path)
+		}
 		return nil, fmt.Errorf("open: %w", err)
 	}
 	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
+	var st unix.Stat_t
+	if err := unix.Fstat(int(f.Fd()), &st); err != nil {
 		return nil, fmt.Errorf("stat %s: %w", path, err)
 	}
-	if !st.Mode().IsRegular() {
+	if st.Mode&unix.S_IFMT != unix.S_IFREG {
 		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
-	if st.Mode().Perm()&0o022 != 0 {
-		return nil, fmt.Errorf("%s is group- or world-writable (mode %04o)", path, st.Mode().Perm())
+	if st.Uid != 0 && int64(st.Uid) != int64(executorUID) {
+		return nil, fmt.Errorf("%s is owned by UID %d, not by root or the executor user", path, st.Uid)
+	}
+	if perm := st.Mode & 0o7777; perm&0o022 != 0 {
+		return nil, fmt.Errorf("%s is group- or world-writable (mode %04o)", path, perm)
 	}
 	data, err := io.ReadAll(io.LimitReader(f, netBirdCAFileMaxBytes+1))
 	if err != nil {
