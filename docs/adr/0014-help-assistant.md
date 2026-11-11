@@ -21,6 +21,10 @@ History:
   makes cited destructive shapes amber (previously unflagged); no default
   placeholder class (previously `id`); unchanged placeholders not
   copyable (previously amber and copyable); no `!` in quoted V2 text.
+- 2026-11-11 (as00gf, review of PR #465): V5 trusted host set without
+  inventory display names and IDs (previously: in the set as
+  "operator-entered", although PVE guest import takes them from the
+  guest).
 
 ## Context
 
@@ -205,7 +209,7 @@ does NOS connect **from** (`--from`)?
   | V2 | **`nebula` catalog**, only for a **single simple command** whose first word is exactly `nebula` or exactly `sudo` followed by `nebula` (no `sudo` option, no `env`, no `VAR=…` prefix, no path such as `/usr/local/bin/nebula`; those forms go to V3), with no pipe, redirection, `;`, `&`, `&&`, `\|\|`, backtick, `$(…)`, `$VAR` or `#` comment: subcommand path and every flag exist in the **command catalog** (built from the `cmd/nebula` command tree, never from the docs; see "Command catalog" below); every argument is a `nebula` argument value of its catalog **value kind** (V4); **write paths** follow the cited section (see "V2 comparison" below) | Unknown subcommand or flag → red flag "`--foo` is not a documented option of `nebula host pin`"; non-plain arguments → red; an `out-path` value that the cited section does not show for that flag (e.g. `sudo nebula backup --out /etc/sudoers` with "Back up Nebula" cited) → red "write path not from the cited documentation". Valid but not shown in a cited chunk → amber "valid `nebula` command, not in the cited section" naming what differs (subcommand, flag, or `sudo`) |
   | V3 | **Every other command** (first word not `nebula`/`sudo nebula`, or any command with an operator, including a `nebula` command with `&&` or `>`): its tokens match the tokens of one **shape** (a logical command line from a code block of a cited chunk, see "Shapes" below) under the matching rules below | No matching shape → red flag "not found in the cited documentation". So `bash -c …`, `python3 -c …`, `nc …`, `tee -a ~/.ssh/authorized_keys`, `base64 -d \| …` or `curl` to another URL are red unless a cited chunk shows exactly that shape |
   | V4 | **Values.** (a) A value for a doc placeholder (V3, and in V2 a token that matches a doc placeholder) matches the fixed shape of that placeholder's **class** (below). (b) A `nebula` argument (V2) matches the shape of its catalog value kind (below) and in any case `[A-Za-z0-9._:/@%+=,-]+`, or (kind `text` only) is one single- or double-quoted string whose content is printable ASCII without `'`, `"`, `$`, backtick, `\` or `!` (free text such as `--reason "maintenance"`; `!` is excluded because interactive bash expands history inside double quotes, so the copied text would run something other than what is shown). (c) A V2 argument of a kind other than `host`, `host-port` or `host-list` that is **host-like** (an IP literal, contains `://` or `@`, or has the form DNS-name`:`port) is not plain, unless it is byte-identical to the value the cited shape shows in that position. All values ≤ 255 bytes | Otherwise red flag "argument is not a plain value" |
-  | V5 | **Value origin of hosts.** Every host value comes from the **trusted host set** of this question (defined below: exact tokens of the question, inventory endpoint addresses and inventory host names/IDs of the D3 fact hosts, NOS source addresses). Host values are: a host-class placeholder value (V3, V2), and in V2 every value of kind `host`, the host part of a `host-port` value and every element of a `host-list` value. **Never** a value that occurs only in another D3 field (OS family/release, enrollment state, endpoint label, criticality) or in the docs | Not in the trusted host set → **red** "host not from your question or inventory", in V2 as in V3. So neither a documented `curl` shape nor a `nebula` command that sends a credential (for example `nebula pve remote add … --endpoint … --action-token`) can be pointed at a host the user did not name or that came from host-controlled data |
+  | V5 | **Value origin of hosts.** Every host value comes from the **trusted host set** of this question (defined below: exact tokens of the question, inventory endpoint addresses of the D3 fact hosts, NOS source addresses). Host values are: a host-class placeholder value (V3, V2), and in V2 every value of kind `host`, the host part of a `host-port` value and every element of a `host-list` value. **Never** a value that occurs only in another D3 field (display name, inventory ID, OS family/release, enrollment state, endpoint label, criticality) or in the docs (previously: inventory display names and IDs were in the set) | Not in the trusted host set → **red** "host not from your question or inventory", in V2 as in V3. So neither a documented `curl` shape nor a `nebula` command that sends a credential (for example `nebula pve remote add … --endpoint … --action-token`) can be pointed at a host the user did not name or that came from host-controlled data |
   | V6 | **Destructive shapes.** The command (V2 or V3, after the checks above passed) matches the reviewed **destructive-pattern list** in `internal/helpcmd/` (at least: `rm` with `-r`/`-f`, `userdel`, `groupdel`, `shred`, `dd`, `mkfs*`, `wipefs`, `truncate`, `docker compose down -v`, `docker volume rm`, `docker system prune`, `apt remove`/`purge`, `nebula restore`; further destructive `nebula` subcommands are added when AS-05 reviews the catalog, *verify*) | At least **amber** "destructive: deletes or replaces data, users or keys; compare with the cited section before running", even when the shape is cited. This covers today's documented `sudo rm -rf /var/lib/nebula /etc/nebula`, `sudo userdel nebula-server; …`, `sudo groupdel nebula-rpc` (admin guide 16) and `shred -u ./nebula-default.key` (admin guide 3.3). An uncited destructive command stays red (V2 unknown or V3 no shape) with the wording "potentially destructive, not from the docs" |
 
   **Trusted host set (V5).** Built per question, before the LLM call, from
@@ -223,13 +227,28 @@ does NOS connect **from** (`--from`)?
      naming `lab` does not admit `pve1.lab`. A CIDR in the question admits
      no address by itself, only the inventory endpoints of the fact hosts
      inside it (source 2).
-  2. **Inventory of the fact hosts** (only with facts on, D3): the
-     endpoint addresses, the inventory display names and the inventory IDs
-     of the hosts selected for this question. These are operator-entered
-     inventory fields. OS family/release and every other fact field are
-     host-controlled or descriptive and are **never** in the set, so a host
-     that writes `evil.example` into its OS release string cannot become a
-     `curl` target.
+  2. **Inventory endpoints of the fact hosts** (only with facts on, D3):
+     the endpoint addresses (`inventory.Endpoint.Address`) of the hosts
+     selected for this question, and nothing else from the inventory
+     (previously: also display names and IDs, called "operator-entered").
+     Display names and IDs are **not** in the set because the inventory
+     does not record who chose them: the web host form, the CSV import and
+     the deploy wizard take an operator-typed name, but the PVE guest
+     import sets both the ID and the display name from the guest name that
+     the PVE cluster reports (`internal/pveinventory/staging.go`), and
+     discovery/IPAM names come from scans and reverse DNS. Until the
+     inventory stores a name source, no name source counts as
+     operator-entered; a name the user types into the question is still
+     admitted by source 1 (exact token). A host selected only through a
+     CIDR in the question contributes its endpoint addresses, never its
+     name. OS family/release and every other fact field are host-controlled
+     or descriptive and are **never** in the set, so a host that writes
+     `evil.example` into its OS release string, or a PVE guest named
+     `evil.example`, cannot become a `curl` or `--endpoint … --action-token`
+     target. Residual: endpoint addresses of PVE-imported hosts are the
+     guest-reported IPs the operator accepted at import; NOS already
+     connects to them over SSH, so they are no new destination (AS-06
+     *verify* whether imported endpoints should be excluded too).
   3. **NOS source addresses** (Q6, admin setting), for `--from`.
 
   **V2 comparison ("shown in the cited section").** The command is parsed
@@ -345,9 +364,9 @@ does NOS connect **from** (`--from`)?
   - The backup loop with `$(date +%F)` (compound construct) is **not** a
     shape: any command copied from it is red.
   - `nebula host pin --criticality MEDIUM web-01 192.168.0.21` passes V2
-    when `web-01` and the address are in the trusted host set (question
-    tokens or inventory of the fact hosts), else red (V5; previously
-    amber); `nebula status && nebula events verify` passes V3 when its
+    when the address is in the trusted host set (question token or
+    inventory endpoint of a fact host), else red (V5; previously amber);
+    `web-01` is the inventory ID (kind `id`), which is not a host value; `nebula status && nebula events verify` passes V3 when its
     chunk is cited (documented line); `sudo -u root nebula unlock` is red
     (not V2, no such shape).
   - V5 with facts on: a fact host whose OS release string is
