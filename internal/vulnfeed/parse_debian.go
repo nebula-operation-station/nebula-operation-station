@@ -140,9 +140,15 @@ var debianIssuePaths = jsonLimits{
 // issue that breaks a per-issue field length or count limit
 // (ErrRecordLimit, e.g. more than MaxDebianReleasesPerIssue releases), is
 // skipped and counted in DebianTrackerSummary.Skipped (a skipped package
-// or issue counts once, not per entry inside it). An export size, package
-// size, package, issue-per-package or entry count limit, the depth limit,
-// a duplicate package or issue, or a broken stream fails the whole export.
+// or issue counts once, not per entry inside it). A package with more than
+// MaxDebianIssuesPerPackage issues breaks a per-package count limit: its
+// remaining issues are consumed unread and the package is counted once in
+// Skipped instead of Packages. The entries of its first
+// MaxDebianIssuesPerPackage issues have been visited by then, like the
+// entries of any package before a later error. An export size, package
+// size, package or entry count limit, the depth limit (also inside a
+// skipped package or issue), a duplicate package or issue, or a broken
+// stream fails the whole export.
 //
 // The export is undated: its content date is the proxy date of the DSA
 // and DLA lists (ParseDebianAdvisoryList), never a fetch time. On any
@@ -238,7 +244,17 @@ func (p *debianParse) parsePackage(pkg string, valid bool) error {
 	issues := 0
 	for dec.More() {
 		if issues >= MaxDebianIssuesPerPackage {
-			return fmt.Errorf("%s: more than %d issues: %w", where, MaxDebianIssuesPerPackage, ErrFeedLimit)
+			// A per-package count limit: the rest of the package is
+			// consumed within the package window, which keeps the size
+			// and depth limits fatal, and the package is skipped.
+			if err := skipValueRest(dec, json.Delim('{')); err != nil {
+				return br.fail(where, err)
+			}
+			if dec.InputOffset()-start > MaxDebianPackageBytes {
+				return fmt.Errorf("%s: more than %d bytes: %w", where, MaxDebianPackageBytes, ErrFeedLimit)
+			}
+			p.sum.Skipped++
+			return nil
 		}
 		issues++
 		tok, err := dec.Token()

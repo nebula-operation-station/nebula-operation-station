@@ -254,22 +254,50 @@ func TestParseDebianTrackerEntryLimit(t *testing.T) {
 	}
 }
 
-func TestParseDebianTrackerIssueLimitFiresBeforeTheRestIsDecoded(t *testing.T) {
-	// One package just over the issue limit (rejected, see
-	// measureAllocs) and one ten times longer must cost the same: issues
-	// are decoded one at a time.
-	shortIn := []byte(`{"zlib":` + debianIssues(MaxDebianIssuesPerPackage+1, "{}") + `}`)
-	longIn := []byte(`{"zlib":` + debianIssues(10*(MaxDebianIssuesPerPackage+1), "{}") + `}`)
-	visit := func(DebianEntry) error { return nil }
-	short := measureAllocs(t, func() error {
-		_, err := ParseDebianTracker(context.Background(), bytes.NewReader(shortIn), visit)
-		return err
+// TestParseDebianTrackerSkipsPackageOverIssueLimit: MaxDebianIssuesPerPackage
+// is a per-package count limit. A package over it is consumed and skipped
+// (counted once), and the export goes on with the next package.
+func TestParseDebianTrackerSkipsPackageOverIssueLimit(t *testing.T) {
+	for _, n := range []int{MaxDebianIssuesPerPackage + 1, 3 * MaxDebianIssuesPerPackage} {
+		in := []byte(`{"big":` + debianIssues(n, "{}") + `,` + debianGoodPackage + `}`)
+		got, sum, err := collectDebian(t, in)
+		if err != nil {
+			t.Fatalf("%d issues: err = %v, want the package skipped", n, err)
+		}
+		// The issues read before the limit are counted; the rest are not.
+		want := DebianTrackerSummary{Packages: 1, Issues: MaxDebianIssuesPerPackage + 1, Entries: 1, Skipped: 1}
+		if sum != want || !slices.Equal(got, []DebianEntry{debianGoodEntry}) {
+			t.Fatalf("%d issues: summary %+v, entries %+v", n, sum, got)
+		}
+	}
+}
+
+// TestParseDebianTrackerIssueLimitSkipKeepsFatalLimits: consuming the rest
+// of a package over the issue limit still enforces the package size and
+// depth limits, which abort the export.
+func TestParseDebianTrackerIssueLimitSkipKeepsFatalLimits(t *testing.T) {
+	over := strings.TrimSuffix(debianIssues(MaxDebianIssuesPerPackage, "{}"), "}")
+	t.Run("too deep", func(t *testing.T) {
+		deep := `,"CVE-2024-99999":` + strings.Repeat("[", MaxJSONDepth+1) + strings.Repeat("]", MaxJSONDepth+1)
+		_, _, err := collectDebian(t, []byte(`{"zlib":`+over+deep+`}}`))
+		if !errors.Is(err, ErrFeedLimit) {
+			t.Fatalf("err = %v, want ErrFeedLimit", err)
+		}
 	})
-	long := measureAllocs(t, func() error {
-		_, err := ParseDebianTracker(context.Background(), bytes.NewReader(longIn), visit)
-		return err
+	t.Run("too large", func(t *testing.T) {
+		// The skipped rest holds a string longer than MaxDebianPackageBytes,
+		// streamed without building it in memory.
+		pad := strings.Repeat("a", 1<<20)
+		readers := []io.Reader{strings.NewReader(`{"zlib":` + over + `,"CVE-2024-99999":{"x":"`)}
+		for range MaxDebianPackageBytes>>20 + 1 {
+			readers = append(readers, strings.NewReader(pad))
+		}
+		readers = append(readers, strings.NewReader(`"}}}`))
+		_, err := ParseDebianTracker(context.Background(), io.MultiReader(readers...), func(DebianEntry) error { return nil })
+		if !errors.Is(err, ErrFeedLimit) {
+			t.Fatalf("err = %v, want ErrFeedLimit", err)
+		}
 	})
-	short.assertCovers(t, long)
 }
 
 func TestParseDebianTrackerIgnoresUnknownFields(t *testing.T) {
