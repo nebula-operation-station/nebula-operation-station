@@ -19,6 +19,13 @@ const MaxAllowlistOrigins = 64
 
 // Allowlist is a set of exact origins (scheme "https", lower-case host,
 // explicit port). Matching is exact; no wildcard, suffix or IP mapping.
+//
+// The allowlist matches host names only, at the URL, redirect and dial
+// layers. It does not restrict the addresses a name resolves to: an
+// allowlisted name whose DNS answer is a loopback or private address is
+// still dialled. That is accepted for the fixed table of public feed
+// origins (sources.go); TLS verification against the system roots is what
+// binds the connection to the named origin.
 type Allowlist struct {
 	origins map[string]bool // "https://host:port"
 	addrs   map[string]bool // "host:port" for the dialer check
