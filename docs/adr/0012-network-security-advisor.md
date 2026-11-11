@@ -129,7 +129,13 @@ evaluation semantics creates `nr-v2`.
    subnet) and to a firewall zone through the interface that owns the
    subnet. An address outside every known subnet maps to the zone of the
    route that leads to it (default route → the zone of the WAN interface);
-   no route known → `unknown`.
+   no route known → `unknown`. A **known IPAM subnet that no firewall
+   interface owns** (routed by a host, a hypervisor or another router) has
+   no zone: if the crossing test (step 2) does not already give
+   `not_filtered`, the verdict is **`unknown`** with the reason "subnet not
+   on a firewall interface", never `denied`. The default interzone rule
+   applies only between zones the data proves; the firewall may not be on
+   that path at all.
 2. **Crossing test.** Source and destination in the **same L2 segment**
    (same VLAN or same IPAM subnet, and no firewall interface between them
    per the data) → verdict **`not_filtered`**: traffic does not cross the
@@ -211,10 +217,20 @@ valid mitigation record exists:
 reachable(s) = verdict(s) ∈ {allowed, conditional, not_filtered, unknown}
 expo = 1.0  if reachable(internet)
        0.7  else if reachable(netbird)
-       0.4  else if reachable(any zone other than the host's own segment)
-       0.3  else if reachable only from the host's own segment
+       0.4  else (listening service reachable from any zone or from the
+            host's own segment, or from no source at all)
        0.2  no listening service (unchanged)
 ```
+
+**`not_filtered` is never a compensating control.** It means the firewall
+is not on the path, so nothing filters the traffic. In the flat lab network
+the host's own segment holds guest and IoT devices, so reachability from
+the own segment is internal reachability and keeps the v1 level 0.4; there
+is no level below 0.4 for a listening service. `vu-prio-v2` can therefore
+only lower exposure from 1.0 or 0.7 to 0.4 through `denied` verdicts on the
+internet and NetBird paths, never below what v1 gives an internal-only
+service. A `not_filtered` source never appears as "mitigated" in the
+summary; it is listed as "not filtered (firewall not on path)".
 
 All other terms, the tier thresholds and the **KEV floor (never below
 high)** are unchanged. Weights are named constants; the record names the
@@ -626,7 +642,8 @@ Tickets: [docs/implementation/network-security.md](../implementation/network-sec
   renderer); vulnerability page for mitigation (ADR 0011 VU-11); or one
   "Network security" page that links into those?
 - **Q7: Priority formula.** Accept `vu-prio-v2` exposure levels (1.0 / 0.7
-  / 0.4 / 0.3 / 0.2), and show v1 beside v2 until retired?
+  / 0.4 / 0.2; no level below v1's internal 0.4 for a listening service,
+  `not_filtered` never mitigates), and show v1 beside v2 until retired?
 - **Q8: Notifications.** Include the external address in
   `netsec.reputation_allowed` messages to webhook/ntfy/Telegram, or
   structured fields without it (proposed)? Notify on threat logs with
