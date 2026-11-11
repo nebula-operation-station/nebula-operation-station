@@ -2,9 +2,10 @@
 
 Status: **plan, not started, 2026-11-11; ADR 0012 Proposed** with Q1 to Q10
 open. Only NS-01 (this plan and the ADR) and the lab verification NS-03 may
-run before acceptance. Phase-1 libraries (NS-05, NS-09) may start once the
-ADR is accepted, before the spec revision NS-02 is merged, as in ADR 0009
-and ADR 0010.
+run before acceptance. Pure libraries without tables or migrations
+(NS-04, NS-05, NS-09) may start once the ADR is accepted, before the spec
+revision NS-02 is merged, as in ADR 0009 and ADR 0010; every ticket that
+adds a table, migration, API scope or device method waits for NS-02.
 
 It turns [ADR 0012](../adr/0012-network-security-advisor.md) into PR-sized
 steps, in the style of [network-devices.md](network-devices.md).
@@ -22,7 +23,7 @@ steps, in the style of [network-devices.md](network-devices.md).
 | S7 | Advisor checks `na-v1` (shadowed, any-any, allow without profile, zero hits ≥ 30 days with reset time, DNS bypass, management from untrusted, model contradiction); separate store; NOS resolves; admin acknowledge with expiry | D4 |
 | S8 | Segmentation proposals `sp-v1` (rule-based) and what-if (findings mitigated, paths cut, flows broken, ADR 0010 CRITICAL flag); no apply | D4 |
 | S9 | Logs via executor typed methods `panos.log.traffic_hourly`/`threat_hourly` (recommended, Q1); minimisation in the executor; hourly aggregates with caps and `incomplete` | D5 |
-| S10 | Retention: aggregates 30 days, external non-hit addresses full 7 days then /24 and /48, hits 90 days, admin-only, no export, excluded from backup (all Q2) | D5 |
+| S10 | Retention: aggregates 30 days, external non-hit addresses full 7 days then /24 and /48, hits 90 days, admin-only, no export (advisor finding exports carry counts only for log- or flow-derived evidence, which follows its source's retention), excluded from backup; earlier minimisation of internal addresses open (all Q2) | D5, D8 |
 | S11 | Feeds fetched only by the agent host; no per-address lookups; upload via `netsec.reputation.write`; NOS-side validation (special/internal ranges dropped, prefix minimum, caps, content dates, plausibility hold) | D6 |
 | S12 | Matching in NOS; hits with first/last seen, allowed vs denied, direction, internal endpoints; `netsec.reputation_allowed` with dedupe and the ADR 0011 D9 rate limit | D6 |
 | S13 | EDL (only if Q4): HTTPS, basic credential or mTLS, no token in URL, manual entries with assertion only (no feed-driven rule sets, Q4b), refusals, size cap, audit, last-pulled view | D7 |
@@ -70,7 +71,7 @@ ticket. Order is the column "After".
 | --- | --- | --- | --- | --- |
 | NS-04 | PAN-OS allowlist additions and parsers: `internal/netdevredact/` (allowlist), `internal/panapi/{rules,config}.go` (fields), fixtures | yes (`internal/netdevredact/`) | NS-01, NS-03 | Only the ADR 0012 D2 element paths added; fail-closed keyword rule unchanged and tested on the new elements; profile and group **names** only; unknown elements still dropped with marker; fixtures from NS-03 parse; fuzz |
 | NS-05 | Reachability library `nr-v1`: new `internal/netreach/{snapshot,place,nat,eval,explain,limits}.go`, tests, fuzz | no | NS-01 (accepted) | Table tests per verdict; same-L2 → `not_filtered` in a flat-network fixture; NAT pre-NAT address/post-NAT zone; first match wins; disabled skipped and listed; negation; conditional (App-ID, user, URL category, schedule) continues to the next unconditional match; FQDN/EDL/dynamic/region objects → `unknown`; a known IPAM subnet owned by no firewall interface → `unknown` "subnet not on a firewall interface", never `denied` by the default interzone rule (test with source, destination and both sides unowned; same-subnet pair stays `not_filtered`); multi-vsys → `unknown`; stale or `incomplete` input → `unknown`; every limit is a named constant tested at limit and limit+1 with `unknown` "limit reached"; snapshot hash ignores `raw_digest`; determinism (same hash + version → identical output) |
-| NS-06 | Reachability job and store: server migration, new `internal/netreachstore/` | no | NS-05, ND-16 | Recompute on new dataset version and at most hourly; wall-clock budget; verdicts keyed by snapshot hash and model version; old snapshots pruned with their consumers; a policy or object change marks dependent results void before recomputation |
+| NS-06 | Reachability job and store: server migration, new `internal/netreachstore/` | no | NS-02, NS-05, ND-16 | Recompute on new dataset version and at most hourly; wall-clock budget; verdicts keyed by snapshot hash and model version; old snapshots pruned with their consumers; a policy or object change marks dependent results void before recomputation |
 | NS-07 | `vu-prio-v2` and mitigation records: `internal/vulnprio/`, `internal/vulnstore/` (mitigation table), server migration | no | NS-02, NS-06, VU-10 | Every exposure level and the KEV floor tested; a listening service never below 0.4; `not_filtered` from the own segment or any zone never counts as mitigated (test: all zones `denied` except own segment `not_filtered` → 0.4, summary "not filtered"); v1 kept beside v2; fail-closed cases each a test (stale input, policy change, object change, `unknown`, contradiction by flow or allowed log aggregate in 24 h, port unknown) → v1 exposure and "mitigation unknown: <reason>"; no state, closure or D5 path touched (test: mitigated finding stays `open`, closure preconditions unchanged); tier rise after void raises `vuln.critical_new` under D9 dedupe |
 | NS-08 | Attack-path edges from the model: `internal/attackpath/sources/` | no | NS-06, VU-22 | `allowed`/`conditional` → policy edge, `not_filtered` → L2 edge "assumed", `denied` → no edge, `unknown` → "assumed"; graph snapshot hash includes the reachability snapshot hash; `ap-v1` numbers unchanged for golden graphs without firewall data |
 | NS-09 | Advisor checks `na-v1`: new `internal/netadvisor/{shadow,anyany,profile,hits,dns,mgmt,contradiction}.go`, tests | no | NS-05 | Shadowed vs partial overlap vs "cannot decide"; any-any variants; profile check only with NS-04 data, else "data not collected"; zero hits only with ≥ 30 days observed since the later of creation and reset, reset time in evidence, never a delete proposal; DNS bypass (53/udp, 53/tcp, 853/tcp) against designated resolvers and against permissive DNS rules; management targets × untrusted classes incl. `not_filtered` and `unknown`; unknown zone class counts as untrusted |
@@ -81,8 +82,8 @@ ticket. Order is the column "After".
 
 | Ticket | Scope / paths | P | After | Acceptance |
 | --- | --- | --- | --- | --- |
-| NS-12 | Typed log reads: `internal/panapi/logs.go` (query, job poll, parse), `internal/executor/` dispatch and minimisation, `internal/netdevcontract/` log aggregate contract, device read-lease methods in `internal/schedgrant/` and `internal/permit/` | yes (`internal/executor/`, `internal/permit/`) | NS-01 (Q1 = API), NS-03, ND-13 | Parameters only `(device_id, hour)`; fixed query, no caller filter/xpath; dropped fields (user, URL, file, pcap, XFF, host names, session IDs, NAT source port) absent from every output (test per field); hour truncation; per-hour key cap with top-by-sessions and `incomplete` plus dropped count; `nlogs` cap → `incomplete`; XML limits; loopback TLS fixtures; fuzz; lease binds the new methods and budgets; no change dispatch |
-| NS-13 | Collector and log store: `internal/netdevcollect/` (schedule the two methods), server migration, new `internal/fwlogstore/` | no | NS-12, ND-14, ND-16 | Hourly aggregates; retention and prefix reduction per Q2 (7-day full external addresses then /24 and /48, 30-day aggregates; hit addresses exempt) with injected time; pruning hourly; excluded from the instance backup unless Q2 says otherwise; admin-only access; no export path |
+| NS-12 | Typed log reads: `internal/panapi/logs.go` (query, job poll, parse), `internal/executor/` dispatch and minimisation, `internal/netdevcontract/` log aggregate contract, device read-lease methods in `internal/schedgrant/` and `internal/permit/` | yes (`internal/executor/`, `internal/permit/`) | NS-01 (Q1 = API), NS-02, NS-03, ND-13 | Parameters only `(device_id, hour)`; fixed query, no caller filter/xpath; every ADR 0012 D5 "dropped always" field absent from every output, one test per field: source-user and every User-ID field, URLs, URL categories, file names, file hashes, packet captures, X-Forwarded-For, host names, device serials of endpoints, session IDs, NAT-translated source ports; hour truncation; per-hour key cap with top-by-sessions and `incomplete` plus dropped count; `nlogs` cap → `incomplete`; XML limits; loopback TLS fixtures; fuzz; lease binds the new methods and budgets; no change dispatch |
+| NS-13 | Collector and log store: `internal/netdevcollect/` (schedule the two methods), server migration, new `internal/fwlogstore/` | no | NS-02, NS-12, ND-14, ND-16 | Hourly aggregates; retention and prefix reduction per Q2 (7-day full external addresses then /24 and /48, 30-day aggregates; hit addresses exempt) with injected time; pruning hourly; excluded from the instance backup unless Q2 says otherwise; admin-only access; no export path |
 | NS-13b | Syslog receiver (**only if Q1 chooses syslog**): separate ADR amendment first | yes (`deploy/systemd/`) | NS-01 | Not planned unless Q1 changes the recommendation |
 
 ### Phase 3: reputation
@@ -109,12 +110,16 @@ ticket. Order is the column "After".
 
 ## Order and release
 
-NS-01 (decision) and NS-03 (lab) first. After acceptance: NS-04 and NS-05
-in parallel, then NS-06 → NS-07, NS-08, NS-09 → NS-10 → NS-11 (phase 1
-needs only ADR 0010 phase-1 data and ADR 0011 VU-10/VU-22). Phase 2 needs
-Q1 and ND-13/ND-14. Phase 3 needs ADR 0011 amendment 1 and its agent
-tickets. Phase 4 only if Q4 says yes. NS-02 lands before the first phase-2
-ticket that adds a table or method to the spec. Release placement per Q10.
+NS-01 (decision) and NS-03 (lab) first. After acceptance: NS-02 (spec
+revision) and the pure libraries NS-04, NS-05 and NS-09 in parallel; NS-02
+must be merged before the first ticket that adds a table, migration,
+API scope or device method, that is before NS-06, NS-07, NS-10, NS-12,
+NS-13, NS-15 and NS-17 (previously: before the first phase-2 ticket,
+which let phase-1 migrations land unspecified). Then NS-06 → NS-07,
+NS-08, NS-09 → NS-10 → NS-11 (phase 1 needs only ADR 0010 phase-1 data and
+ADR 0011 VU-10/VU-22). Phase 2 needs Q1 and ND-13/ND-14. Phase 3 needs
+ADR 0011 amendment 1 and its agent tickets. Phase 4 only if Q4 says yes.
+Release placement per Q10.
 
 ## Non-goals
 
