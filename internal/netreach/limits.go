@@ -67,8 +67,9 @@ const (
 	// MaxExpansionSteps bounds the members visited while expanding one
 	// rule field; it bounds the CPU time of shared nested groups.
 	MaxExpansionSteps = 1 << 18
-	// MaxQueriesPerBatch bounds the queries of one batch computation.
-	MaxQueriesPerBatch = 100000
+	// MaxInputs bounds the entries of Snapshot.Inputs. Only the
+	// RequiredInputs are read; the bound keeps a hostile map small.
+	MaxInputs = 64
 )
 
 // ErrLimitReached is wrapped by every error caused by a limit. The caller
@@ -102,11 +103,15 @@ func CheckLimits(s *Snapshot) error {
 		{"interfaces", len(s.Interfaces), MaxInterfaces},
 		{"subnets", len(s.Subnets), MaxSubnets},
 		{"routes", len(s.Routes), MaxRoutes},
+		{"inputs", len(s.Inputs), MaxInputs},
 	}
 	for _, c := range counts {
 		if c.n > c.max {
 			return fmt.Errorf("%w: %d %s, limit %d", ErrLimitReached, c.n, c.what, c.max)
 		}
+	}
+	if err := checkInputs(s.Inputs); err != nil {
+		return err
 	}
 	for _, z := range s.Zones {
 		if err := checkText("zone name", z.Name, MaxNameBytes); err != nil {
@@ -141,6 +146,9 @@ func CheckLimits(s *Snapshot) error {
 		if err := checkText("address name", a.Name, MaxNameBytes); err != nil {
 			return err
 		}
+		if err := checkOptionalText("address type", string(a.Type), MaxNameBytes); err != nil {
+			return err
+		}
 		if err := checkOptionalText("address value", a.Value, MaxValueBytes); err != nil {
 			return err
 		}
@@ -171,11 +179,41 @@ func CheckLimits(s *Snapshot) error {
 		}
 	}
 	if s.DefaultRules.Collected {
-		if err := checkMarkers("default rules", s.DefaultRules.Value.Dropped); err != nil {
+		if err := checkDefaultRules(&s.DefaultRules.Value); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// checkInputs bounds the input kinds, dataset IDs and redacted digests;
+// they enter the snapshot hash and may be shown.
+func checkInputs(inputs map[InputKind]Input) error {
+	for k, in := range inputs {
+		if err := checkText("input kind", string(k), MaxNameBytes); err != nil {
+			return err
+		}
+		if err := checkOptionalText("input dataset id", in.DatasetID, MaxNameBytes); err != nil {
+			return err
+		}
+		if err := checkOptionalText("input redacted digest", in.RedactedDigest, MaxNameBytes); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func checkDefaultRules(d *DefaultRules) error {
+	if err := checkOptionalText("default intrazone action", string(d.Intrazone), MaxNameBytes); err != nil {
+		return err
+	}
+	if err := checkOptionalText("default interzone action", string(d.Interzone), MaxNameBytes); err != nil {
+		return err
+	}
+	if err := checkMarkers("default rules", d.Dropped); err != nil {
+		return err
+	}
+	return checkMarkers("default rules", d.OutsideAllowlist)
 }
 
 func checkInterface(in Interface) error {
@@ -230,6 +268,12 @@ func checkSecurityRule(r *SecurityRule) error {
 		return err
 	}
 	if err := checkOptionalText("rule schedule", r.Schedule.Value, MaxNameBytes); err != nil {
+		return err
+	}
+	if err := checkOptionalText("rule type", string(r.Type.Value), MaxNameBytes); err != nil {
+		return err
+	}
+	if err := checkOptionalText("rule action", string(r.Action), MaxNameBytes); err != nil {
 		return err
 	}
 	lists := []Field[[]string]{r.From, r.To, r.Source, r.Destination, r.SourceHIP, r.DestinationHIP, r.SourceUser, r.Application, r.Service, r.Category}

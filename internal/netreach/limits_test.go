@@ -111,6 +111,39 @@ func TestCheckLimitsAtLimitAndOver(t *testing.T) {
 		{"value bytes", MaxValueBytes, func(s *Snapshot, n int) {
 			s.Addresses = []AddressObject{{Name: "a", Type: AddressFQDN, Value: strings.Repeat("v", n)}}
 		}},
+		{"address type bytes", MaxNameBytes, func(s *Snapshot, n int) {
+			s.Addresses = []AddressObject{{Name: "a", Type: AddressType(strings.Repeat("t", n))}}
+		}},
+		{"rule type bytes", MaxNameBytes, func(s *Snapshot, n int) {
+			s.SecurityRules = []SecurityRule{{Name: "r", Type: Collected(RuleType(strings.Repeat("t", n)))}}
+		}},
+		{"rule action bytes", MaxNameBytes, func(s *Snapshot, n int) {
+			s.SecurityRules = []SecurityRule{{Name: "r", Action: Action(strings.Repeat("a", n))}}
+		}},
+		{"default intrazone action bytes", MaxNameBytes, func(s *Snapshot, n int) {
+			s.DefaultRules = Collected(DefaultRules{Intrazone: Action(strings.Repeat("a", n))})
+		}},
+		{"default interzone action bytes", MaxNameBytes, func(s *Snapshot, n int) {
+			s.DefaultRules = Collected(DefaultRules{Interzone: Action(strings.Repeat("a", n))})
+		}},
+		{"default rules outside allowlist", MaxMarkers, func(s *Snapshot, n int) {
+			s.DefaultRules = Collected(DefaultRules{OutsideAllowlist: make([]string, n)})
+			for i := range n {
+				s.DefaultRules.Value.OutsideAllowlist[i] = "f"
+			}
+		}},
+		{"dataset id bytes", MaxNameBytes, func(s *Snapshot, n int) {
+			s.Inputs = map[InputKind]Input{InputZones: {State: InputFresh, DatasetID: strings.Repeat("d", n)}}
+		}},
+		{"redacted digest bytes", MaxNameBytes, func(s *Snapshot, n int) {
+			s.Inputs = map[InputKind]Input{InputZones: {State: InputFresh, RedactedDigest: strings.Repeat("d", n)}}
+		}},
+		{"inputs", MaxInputs, func(s *Snapshot, n int) {
+			s.Inputs = map[InputKind]Input{}
+			for i := range n {
+				s.Inputs[InputKind(fmt.Sprint("k", i))] = Input{}
+			}
+		}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -151,6 +184,17 @@ func TestCheckLimitsRejectsMalformedText(t *testing.T) {
 			s.Interfaces[0].Prefixes = []netip.Prefix{netip.MustParsePrefix("::ffff:10.0.0.0/120")}
 		}},
 		{"invalid route prefix", func(s *Snapshot) { s.Routes[0].Prefix = netip.Prefix{} }},
+		{"invalid utf-8 address type", func(s *Snapshot) { s.Addresses[4].Type = "fq\xffdn" }},
+		{"control char in address type", func(s *Snapshot) { s.Addresses[4].Type = "fqdn\x1b[2J" }},
+		{"invalid utf-8 rule type", func(s *Snapshot) { s.SecurityRules[0].Type = Collected(RuleType("uni\xff")) }},
+		{"control char in rule action", func(s *Snapshot) { s.SecurityRules[0].Action = "allow\n" }},
+		{"invalid utf-8 default action", func(s *Snapshot) { s.DefaultRules.Value.Interzone = "deny\xc3" }},
+		{"control char in default rules outside allowlist", func(s *Snapshot) {
+			s.DefaultRules.Value.OutsideAllowlist = []string{"a\tb"}
+		}},
+		{"invalid utf-8 dataset id", func(s *Snapshot) { s.Inputs[InputZones] = Input{State: InputFresh, DatasetID: "ds\xff"} }},
+		{"control char in digest", func(s *Snapshot) { s.Inputs[InputRoutes] = Input{State: InputFresh, RedactedDigest: "ab\x00"} }},
+		{"invalid utf-8 input kind", func(s *Snapshot) { s.Inputs[InputKind("z\xff")] = Input{} }},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

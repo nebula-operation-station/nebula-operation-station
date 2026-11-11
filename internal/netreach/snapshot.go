@@ -276,11 +276,14 @@ type NATRule struct {
 // DefaultRules are the collected default security rules
 // (rulebase/default-security-rules, ADR 0012 Q11). Without them
 // (Collected false in Snapshot.DefaultRules) the default-rule step is
-// unevaluable.
+// unevaluable. Dropped holds the <dropped:…> markers the redaction left;
+// OutsideAllowlist names fields the device carried that the allowlist did
+// not pass. Either makes both default rules unevaluable.
 type DefaultRules struct {
-	Intrazone Action
-	Interzone Action
-	Dropped   []string
+	Intrazone        Action
+	Interzone        Action
+	Dropped          []string
+	OutsideAllowlist []string
 }
 
 // Snapshot is the complete input of one model computation (ADR 0012 D2).

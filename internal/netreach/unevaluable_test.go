@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func mustIndex(t *testing.T, s *Snapshot) *Index {
@@ -84,6 +85,9 @@ func TestUnevaluableSecurityRuleFailSafe(t *testing.T) {
 		{"destination-hip set", func(_ *Snapshot, r *SecurityRule) { r.DestinationHIP = list("srv") }, "destination-hip: HIP profiles not modelled"},
 		{"source-hip not collected", func(_ *Snapshot, r *SecurityRule) { r.SourceHIP = Field[[]string]{} }, "source-hip: not collected"},
 		{"destination-hip not collected", func(_ *Snapshot, r *SecurityRule) { r.DestinationHIP = Field[[]string]{} }, "destination-hip: not collected"},
+		{"source-hip empty never any", func(_ *Snapshot, r *SecurityRule) { r.SourceHIP = list() }, "source-hip: empty"},
+		{"destination-hip empty never any", func(_ *Snapshot, r *SecurityRule) { r.DestinationHIP = list() }, "destination-hip: empty"},
+		{"source-hip dropped marker", func(_ *Snapshot, r *SecurityRule) { r.SourceHIP = list("<dropped:hip>") }, "<dropped:hip>: source-hip"},
 		{"negate-source not collected", func(_ *Snapshot, r *SecurityRule) { r.NegateSource = Field[bool]{} }, "negate-source: not collected"},
 		{"negate-destination not collected", func(_ *Snapshot, r *SecurityRule) { r.NegateDestination = Field[bool]{} }, "negate-destination: not collected"},
 		{"dropped marker on rule", func(_ *Snapshot, r *SecurityRule) { r.Dropped = []string{"<dropped:option>"} }, "<dropped:option>: rule"},
@@ -233,6 +237,9 @@ func TestDefaultRulesUnevaluable(t *testing.T) {
 			"rule intrazone-default unevaluable: <dropped:log-setting>: default rules", "rule interzone-default unevaluable: <dropped:log-setting>: default rules"},
 		{"interzone action missing", DefaultRules{Intrazone: ActionAllow},
 			"", "rule interzone-default unevaluable: action: unknown action"},
+		{"field outside allowlist", DefaultRules{Intrazone: ActionAllow, Interzone: ActionDeny, OutsideAllowlist: []string{"log-setting"}},
+			"rule intrazone-default unevaluable: log-setting: outside the collected allowlist",
+			"rule interzone-default unevaluable: log-setting: outside the collected allowlist"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -345,6 +352,12 @@ func TestPathCompleteness(t *testing.T) {
 		{"multi vsys", func(s *Snapshot) { s.Vsys = 2 }, "lan", "mgmt", "more than one vsys"},
 		{"vsys not reported", func(s *Snapshot) { s.Vsys = 0 }, "lan", "mgmt", "vsys count not reported"},
 		{"zone not proven", func(*Snapshot) {}, "", "mgmt", "zone not proven"},
+		{"source zone not in zones dataset", func(s *Snapshot) {
+			// The interface proves zone guest, the zones dataset lacks it.
+			s.Interfaces[3].Zone = "guest"
+		}, "guest", "mgmt", "zone guest not in snapshot"},
+		{"destination zone not in zones dataset", func(*Snapshot) {}, "lan", "corp", "zone corp not in snapshot"},
+		{"same unknown zone on both sides", func(*Snapshot) {}, "corp", "corp", "zone corp not in snapshot"},
 		{"unevaluable rule on other path does not touch", func(s *Snapshot) { s.SecurityRules[1].Type = Field[RuleType]{} }, "wan", "dmz", ""},
 		{"unevaluable rule with uncollected zones touches", func(s *Snapshot) {
 			s.SecurityRules[1].Type = Field[RuleType]{}
@@ -479,6 +492,106 @@ func TestExpansionStepsPerFieldLimit(t *testing.T) {
 	v := mustIndex(t, s).SecurityRules()[1]
 	if !v.LimitReached || v.Evaluable() {
 		t.Fatalf("got limit %v", v.LimitReached)
+	}
+}
+
+// literalRule returns an evaluable any→any rule whose source holds n
+// distinct address literals (n expansion steps and n ranges).
+func literalRule(name string, n, base int) SecurityRule {
+	src := make([]string, n)
+	for i := range n {
+		src[i] = fmt.Sprintf("10.%d.%d.%d", base, i/256, i%256)
+	}
+	anyL := []string{"any"}
+	return evaluableRule(name, ActionAllow, anyL, anyL, src, anyL, anyL)
+}
+
+// TestPerSnapshotWorkLimits checks MaxExpansionStepsPerSnapshot and
+// MaxExpandedRangesPerSnapshot at the limit and one over, with the
+// limits scaled down so the test stays fast: two rules share the
+// snapshot budget, and the rule that crosses it is LimitReached while
+// the first stays evaluable.
+func TestPerSnapshotWorkLimits(t *testing.T) {
+	if d := defaultWorkLimits(); d.steps != MaxExpansionStepsPerSnapshot || d.ranges != MaxExpandedRangesPerSnapshot {
+		t.Fatalf("default work limits %+v do not match the constants", d)
+	}
+	const k = 5
+	for _, tc := range []struct {
+		name string
+		lim  workLimits
+	}{
+		{"steps", workLimits{steps: 2 * k, ranges: MaxExpandedRangesPerSnapshot}},
+		{"ranges", workLimits{steps: MaxExpansionStepsPerSnapshot, ranges: 2 * k}},
+	} {
+		for _, extra := range []int{0, 1} {
+			s := &Snapshot{SecurityRules: []SecurityRule{literalRule("a", k, 1), literalRule("b", k+extra, 2)}}
+			x, err := newIndex(s, tc.lim)
+			if err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			a, b := x.SecurityRules()[0], x.SecurityRules()[1]
+			if !a.Evaluable() {
+				t.Errorf("%s +%d: first rule %s", tc.name, extra, a.Reason())
+			}
+			if b.LimitReached != (extra == 1) || b.Evaluable() == (extra == 1) {
+				t.Errorf("%s +%d: second rule limit %v", tc.name, extra, b.LimitReached)
+			}
+			if extra == 0 && len(b.Source.Ranges) != k {
+				t.Errorf("%s: %d ranges", tc.name, len(b.Source.Ranges))
+			}
+		}
+	}
+}
+
+// TestMaxCausesPerRule: a rule records at most MaxCausesPerRule causes,
+// the first one always kept.
+func TestMaxCausesPerRule(t *testing.T) {
+	for _, n := range []int{MaxCausesPerRule, MaxCausesPerRule + 1, MaxMarkers} {
+		s := labSnapshot()
+		r := &s.SecurityRules[1]
+		r.Dropped = nil
+		for i := range n {
+			r.Dropped = append(r.Dropped, fmt.Sprintf("<dropped:m%d>", i))
+		}
+		v := mustIndex(t, s).SecurityRules()[1]
+		if len(v.Unevaluable) != MaxCausesPerRule {
+			t.Errorf("n=%d: %d causes, want %d", n, len(v.Unevaluable), MaxCausesPerRule)
+		}
+		if v.Reason() != "rule deny-lan-mgmt unevaluable: <dropped:m0>: rule" {
+			t.Errorf("n=%d: reason %q", n, v.Reason())
+		}
+	}
+	// A full list does not build further causes.
+	var c causes
+	for i := range MaxCausesPerRule {
+		c.add(fmt.Sprint("f", i))
+	}
+	member := strings.Repeat("x", MaxValueBytes)
+	allocs := testing.AllocsPerRun(100, func() {
+		c.add("source", "member ", member, ": object not found")
+	})
+	if allocs != 0 || len(c) != MaxCausesPerRule {
+		t.Errorf("full causes: %v allocs, %d causes", allocs, len(c))
+	}
+}
+
+// TestCauseTextIsSanitized: cause texts never carry control characters
+// or invalid UTF-8 and are bounded, even if CheckLimits were bypassed.
+func TestCauseTextIsSanitized(t *testing.T) {
+	var c causes
+	c.add("f\x1b[31m", "type ", "x\xff\n", strings.Repeat("y", 3*MaxCauseTextBytes))
+	got := c[0]
+	for _, s := range []string{got.Field, got.Detail} {
+		if !utf8.ValidString(s) || len(s) > MaxCauseTextBytes || strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }) {
+			t.Errorf("unsanitized %q", s)
+		}
+	}
+	if got.Field != "f�[31m" || !strings.HasPrefix(got.Detail, "type x��yyy") {
+		t.Errorf("got %+v", got)
+	}
+	v := RuleView{Name: "r\x00", Unevaluable: []Cause{{Field: "f"}}}
+	if strings.ContainsRune(v.Reason(), 0) {
+		t.Errorf("reason %q", v.Reason())
 	}
 }
 

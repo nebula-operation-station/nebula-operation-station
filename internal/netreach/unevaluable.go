@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Work limits of one Index over all rules (ADR 0012 D2 "Limits"). Fields
@@ -145,9 +146,9 @@ func reason(name string, causes []Cause, limit, disabled bool) string {
 	case disabled:
 		return ""
 	case len(causes) > 0:
-		return fmt.Sprintf("rule %s unevaluable: %s", name, causes[0])
+		return fmt.Sprintf("rule %s unevaluable: %s", sanitizeText(name), causes[0])
 	case limit:
-		return fmt.Sprintf("rule %s: %s", name, ErrLimitReached)
+		return fmt.Sprintf("rule %s: %s", sanitizeText(name), ErrLimitReached)
 	}
 	return ""
 }
@@ -175,6 +176,21 @@ type Index struct {
 // only when the snapshot as a whole cannot be used; a single rule that
 // cannot be evaluated is marked in its view instead.
 func NewIndex(s *Snapshot) (*Index, error) {
+	return newIndex(s, defaultWorkLimits())
+}
+
+// workLimits are the per-snapshot work limits of one Index. They are a
+// value so tests can check the limit logic at small sizes.
+type workLimits struct {
+	steps  int // MaxExpansionStepsPerSnapshot
+	ranges int // MaxExpandedRangesPerSnapshot
+}
+
+func defaultWorkLimits() workLimits {
+	return workLimits{steps: MaxExpansionStepsPerSnapshot, ranges: MaxExpandedRangesPerSnapshot}
+}
+
+func newIndex(s *Snapshot, lim workLimits) (*Index, error) {
 	pl, err := NewPlacer(s)
 	if err != nil {
 		return nil, fmt.Errorf("new index: %w", err)
@@ -186,7 +202,7 @@ func NewIndex(s *Snapshot) (*Index, error) {
 		}
 		x.zones[z.Name] = true
 	}
-	ex, err := newExpander(s)
+	ex, err := newExpander(s, lim)
 	if err != nil {
 		return nil, fmt.Errorf("new index: %w", err)
 	}
@@ -222,14 +238,59 @@ func (x *Index) DefaultRule(intrazone bool) RuleView {
 	return x.interzone
 }
 
+// MaxCauseTextBytes bounds the field and the detail text of one Cause
+// after sanitizing.
+const MaxCauseTextBytes = 2048
+
 // causes collects unevaluable causes up to MaxCausesPerRule.
 type causes []Cause
 
-func (c *causes) add(field, detail string) {
-	if len(*c) < MaxCausesPerRule {
-		*c = append(*c, Cause{Field: field, Detail: detail})
+// add records a cause whose detail is the concatenation of parts. The
+// cap is checked first, so a full list builds no strings. Field and
+// detail are sanitized: they hold device text.
+func (c *causes) add(field string, parts ...string) {
+	if len(*c) >= MaxCausesPerRule {
+		return
 	}
+	*c = append(*c, Cause{Field: sanitizeText(field), Detail: sanitizeText(parts...)})
 }
+
+// sanitizeText concatenates parts into a text safe to render: invalid
+// UTF-8 and C0/C1 control characters become U+FFFD, and the result is cut
+// at a rune boundary to at most MaxCauseTextBytes. Snapshot texts already
+// passed CheckLimits; this is the last line of defence for reason texts.
+func sanitizeText(parts ...string) string {
+	if len(parts) == 1 && len(parts[0]) <= MaxCauseTextBytes && cleanText(parts[0]) {
+		return parts[0]
+	}
+	var b strings.Builder
+	for _, p := range parts {
+		for _, r := range p {
+			if r == utf8.RuneError || isControl(r) {
+				r = utf8.RuneError
+			}
+			if b.Len()+utf8.RuneLen(r) > MaxCauseTextBytes {
+				return b.String()
+			}
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func cleanText(s string) bool {
+	if !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if isControl(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func isControl(r rune) bool { return r < 0x20 || (r >= 0x7f && r <= 0x9f) }
 
 func (c *causes) markers(owner string, dropped, outside []string) {
 	for _, m := range dropped {
@@ -276,7 +337,7 @@ func (x *Index) zoneList(c *causes, field string, f Field[[]string]) []string {
 	}
 	for _, z := range l {
 		if !x.zones[z] {
-			c.add(field, "zone "+z+" not in snapshot")
+			c.add(field, "zone ", z, " not in snapshot")
 		}
 	}
 	return l
@@ -301,16 +362,15 @@ func (x *Index) classifyRule(ex *expander, i int, r *SecurityRule) RuleView {
 	case !r.Type.Collected:
 		c.add("rule-type", "not collected")
 	case r.Type.Value != RuleTypeUniversal:
-		c.add("rule-type", string(r.Type.Value)+" not modelled")
+		c.add("rule-type", string(r.Type.Value), " not modelled")
 	}
 	for _, h := range []struct {
 		name string
 		f    Field[[]string]
 	}{{"source-hip", r.SourceHIP}, {"destination-hip", r.DestinationHIP}} {
-		switch {
-		case !h.f.Collected:
-			c.add(h.name, "not collected")
-		case len(h.f.Value) > 0 && !isAny(h.f.Value):
+		// Like every list: not collected, empty or a marker is
+		// unevaluable; only an explicit "any" means no HIP condition.
+		if l, ok := c.list(h.name, h.f); ok && !isAny(l) {
 			c.add(h.name, "HIP profiles not modelled")
 		}
 	}
@@ -359,7 +419,7 @@ func (x *Index) classifyNAT(ex *expander, i int, r *NATRule) NATRuleView {
 	case strings.HasPrefix(r.To.Value, droppedPrefix):
 		c.add(r.To.Value, "to")
 	case r.To.Value != memberAny && !x.zones[r.To.Value]:
-		c.add("to", "zone "+r.To.Value+" not in snapshot")
+		c.add("to", "zone ", r.To.Value, " not in snapshot")
 	default:
 		v.To = r.To.Value
 	}
@@ -414,7 +474,7 @@ func classifyDefaults(f Field[DefaultRules]) (RuleView, RuleView) {
 		a Action
 	}{{&intra, f.Value.Intrazone}, {&inter, f.Value.Interzone}} {
 		var c causes
-		c.markers("default rules", f.Value.Dropped, nil)
+		c.markers("default rules", f.Value.Dropped, f.Value.OutsideAllowlist)
 		if !validAction(d.a) {
 			c.add("action", "unknown action")
 		}
@@ -444,7 +504,9 @@ type Completeness struct {
 
 // PathCompleteness returns the completeness of the snapshot for traffic
 // from zone src to zone dst. An empty zone (not proven by placement) is
-// incomplete. A security rule touches the path when its zones could match
+// incomplete, and so is a zone that the zones dataset does not hold (an
+// interface or route may name a zone the dataset lacks; the rules and the
+// default step cannot be trusted for it). A security rule touches the path when its zones could match
 // it (zone lists not collected count as matching); every unevaluable NAT
 // rule touches every path, because the reverse-NAT lookup cannot exclude
 // that it forwards to the destination.
@@ -464,6 +526,11 @@ func (x *Index) PathCompleteness(src, dst string) Completeness {
 	}
 	if src == "" || dst == "" {
 		rs = append(rs, "zone not proven")
+	}
+	for i, z := range []string{src, dst} {
+		if z != "" && !x.zones[z] && (i == 0 || z != src) {
+			rs = append(rs, "zone "+sanitizeText(z)+" not in snapshot")
+		}
 	}
 	for i := range x.rules {
 		v := &x.rules[i]
@@ -506,10 +573,12 @@ type expander struct {
 	svcGroups  map[string]*Group
 	steps      int // per snapshot
 	ranges     int // per snapshot
+	lim        workLimits
 }
 
-func newExpander(s *Snapshot) (*expander, error) {
+func newExpander(s *Snapshot, lim workLimits) (*expander, error) {
 	ex := &expander{
+		lim:        lim,
 		addrs:      make(map[string]*AddressObject, len(s.Addresses)),
 		addrGroups: make(map[string]*Group, len(s.AddressGroups)),
 		svcs:       make(map[string]*ServiceObject, len(s.Services)),
@@ -555,7 +624,7 @@ type fieldWork struct {
 
 // step charges one member visit; false means a limit was reached.
 func (ex *expander) step(w *fieldWork) bool {
-	if w.limit || w.steps >= MaxExpansionSteps || ex.steps >= MaxExpansionStepsPerSnapshot {
+	if w.limit || w.steps >= MaxExpansionSteps || ex.steps >= ex.lim.steps {
 		w.limit = true
 		return false
 	}
@@ -566,7 +635,7 @@ func (ex *expander) step(w *fieldWork) bool {
 
 // addRange charges one result range; false means a limit was reached.
 func (ex *expander) addRange(w *fieldWork, max int) bool {
-	if w.limit || w.ranges >= max || ex.ranges >= MaxExpandedRangesPerSnapshot {
+	if w.limit || w.ranges >= max || ex.ranges >= ex.lim.ranges {
 		w.limit = true
 		return false
 	}
@@ -609,7 +678,7 @@ func (ex *expander) addrMember(c *causes, w *fieldWork, out *AddrSet, field, m s
 	}
 	r, err := parseAddrLiteral(m)
 	if err != nil {
-		c.add(field, "member "+m+": object not found")
+		c.add(field, "member ", m, ": object not found")
 		return
 	}
 	if ex.addRange(w, MaxExpandedRangesPerField) {
@@ -619,7 +688,7 @@ func (ex *expander) addrMember(c *causes, w *fieldWork, out *AddrSet, field, m s
 
 func (ex *expander) addrObject(c *causes, w *fieldWork, out *AddrSet, field string, o *AddressObject) {
 	if len(o.Dropped) > 0 {
-		c.add(o.Dropped[0], "address "+o.Name)
+		c.add(o.Dropped[0], "address ", o.Name)
 		return
 	}
 	var r AddrRange
@@ -636,11 +705,11 @@ func (ex *expander) addrObject(c *causes, w *fieldWork, out *AddrSet, field stri
 			err = fmt.Errorf("no range in an ip-range object")
 		}
 	default:
-		c.add(field, "address "+o.Name+": type "+string(o.Type)+" not evaluable")
+		c.add(field, "address ", o.Name, ": type ", string(o.Type), " not evaluable")
 		return
 	}
 	if err != nil {
-		c.add(field, "address "+o.Name+": "+err.Error())
+		c.add(field, "address ", o.Name, ": ", err.Error())
 		return
 	}
 	if ex.addRange(w, MaxExpandedRangesPerField) {
@@ -657,16 +726,16 @@ func (ex *expander) group(c *causes, w *fieldWork, field string, g *Group, depth
 		w.limit = true
 		return
 	case slices.Contains(w.stack, g.Name):
-		c.add(field, "group "+g.Name+": cycle")
+		c.add(field, "group ", g.Name, ": cycle")
 		return
 	case g.Dynamic:
-		c.add(field, "group "+g.Name+": dynamic members unknown")
+		c.add(field, "group ", g.Name, ": dynamic members unknown")
 		return
 	case len(g.Dropped) > 0:
-		c.add(g.Dropped[0], "group "+g.Name)
+		c.add(g.Dropped[0], "group ", g.Name)
 		return
 	case len(g.Static) == 0:
-		c.add(field, "group "+g.Name+": no members")
+		c.add(field, "group ", g.Name, ": no members")
 		return
 	}
 	w.stack = append(w.stack, g.Name)
@@ -714,27 +783,27 @@ func (ex *expander) svcMember(c *causes, w *fieldWork, out *ServiceSet, m string
 		ex.group(c, w, "service", g, depth, func(mm string) { ex.svcMember(c, w, out, mm, depth+1) })
 		return
 	}
-	c.add("service", "member "+m+": object not found")
+	c.add("service", "member ", m, ": object not found")
 }
 
 func (ex *expander) svcObject(c *causes, w *fieldWork, out *ServiceSet, o *ServiceObject) {
 	switch {
 	case len(o.Dropped) > 0:
-		c.add(o.Dropped[0], "service "+o.Name)
+		c.add(o.Dropped[0], "service ", o.Name)
 		return
 	case !o.SourcePorts.Collected:
-		c.add("service", "service "+o.Name+": source-port not collected")
+		c.add("service", "service ", o.Name, ": source-port not collected")
 		return
 	case o.SourcePorts.Value != "":
-		c.add("service", "service "+o.Name+": source-port condition not modelled")
+		c.add("service", "service ", o.Name, ": source-port condition not modelled")
 		return
 	case o.Protocol != "tcp" && o.Protocol != "udp" && o.Protocol != "sctp":
-		c.add("service", "service "+o.Name+": protocol not evaluable")
+		c.add("service", "service ", o.Name, ": protocol not evaluable")
 		return
 	}
 	ranges, err := parsePorts(o.Ports)
 	if err != nil {
-		c.add("service", "service "+o.Name+": "+err.Error())
+		c.add("service", "service ", o.Name, ": ", err.Error())
 		return
 	}
 	for _, r := range ranges {
