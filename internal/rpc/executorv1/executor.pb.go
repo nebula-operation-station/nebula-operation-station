@@ -20664,8 +20664,16 @@ type PrivateRegistryInfo struct {
 	ConfigVersion         int64                   `protobuf:"varint,9,opt,name=config_version,json=configVersion,proto3" json:"config_version,omitempty"`
 	CredentialVersion     int64                   `protobuf:"varint,10,opt,name=credential_version,json=credentialVersion,proto3" json:"credential_version,omitempty"`
 	CredentialExpiresUnix int64                   `protobuf:"varint,11,opt,name=credential_expires_unix,json=credentialExpiresUnix,proto3" json:"credential_expires_unix,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	// Lowercase hex SHA-256 of the stored registry record, which includes
+	// the record's random nonce, so a removed and re-added registry differs.
+	// A registry read lease binds it (cu06, G13). Not secret.
+	ConfigDigest string `protobuf:"bytes,12,opt,name=config_digest,json=configDigest,proto3" json:"config_digest,omitempty"`
+	// Random identity (32 lowercase hex) of the stored credential, new on
+	// every add or rotation. A registry read lease binds it. It is neither
+	// the user name, the secret nor a token, and derives from none of them.
+	CredentialId  string `protobuf:"bytes,13,opt,name=credential_id,json=credentialId,proto3" json:"credential_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PrivateRegistryInfo) Reset() {
@@ -20773,6 +20781,20 @@ func (x *PrivateRegistryInfo) GetCredentialExpiresUnix() int64 {
 		return x.CredentialExpiresUnix
 	}
 	return 0
+}
+
+func (x *PrivateRegistryInfo) GetConfigDigest() string {
+	if x != nil {
+		return x.ConfigDigest
+	}
+	return ""
+}
+
+func (x *PrivateRegistryInfo) GetCredentialId() string {
+	if x != nil {
+		return x.CredentialId
+	}
+	return ""
 }
 
 type ReadPrivateRegistryRequest struct {
@@ -27163,7 +27185,7 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\x1dListPrivateRegistriesResponse\x12G\n" +
 	"\n" +
 	"registries\x18\x01 \x03(\v2'.nebula.executor.v1.PrivateRegistryInfoR\n" +
-	"registries\"\xdc\x03\n" +
+	"registries\"\xa6\x04\n" +
 	"\x13PrivateRegistryInfo\x12\x1f\n" +
 	"\vregistry_id\x18\x01 \x01(\tR\n" +
 	"registryId\x12'\n" +
@@ -27177,7 +27199,9 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\x0econfig_version\x18\t \x01(\x03R\rconfigVersion\x12-\n" +
 	"\x12credential_version\x18\n" +
 	" \x01(\x03R\x11credentialVersion\x126\n" +
-	"\x17credential_expires_unix\x18\v \x01(\x03R\x15credentialExpiresUnix\"\xce\x01\n" +
+	"\x17credential_expires_unix\x18\v \x01(\x03R\x15credentialExpiresUnix\x12#\n" +
+	"\rconfig_digest\x18\f \x01(\tR\fconfigDigest\x12#\n" +
+	"\rcredential_id\x18\r \x01(\tR\fcredentialId\"\xce\x01\n" +
 	"\x1aReadPrivateRegistryRequest\x12\x1f\n" +
 	"\vregistry_id\x18\x01 \x01(\tR\n" +
 	"registryId\x12E\n" +
