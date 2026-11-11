@@ -130,6 +130,7 @@ The server and collector cannot read the executor database or key files. The exe
 | NetBird setup key (`NetBirdSetupKeyLen`) | exactly 36 characters, uppercase hex UUID form | executor |
 | NetBird key ID (`NetBirdKeyIDMaxLen`) | 1–64 characters `0-9a-z` | executor |
 | Reconcile time window widening (`NetBirdKeyClockSkew`) | 5 min on each side | executor |
+| NetBird create-call bound (`NetBirdCreateTimeout`) | 30 s from the `pending` write; part of the stored window | executor |
 | NetBird management URL (`NetBirdMgmtURLMaxLen`) | 256 bytes ASCII, `https` only ([v25-03-03](#v25-03-03)) | executor |
 | Key-passing mode entries (`NetBirdClientVersionsMax`) | 16 client versions | executor |
 | Downloads per client address | 10 per minute, 60 per hour; IPv6 per /64 | server |
