@@ -4,7 +4,6 @@ package release
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -12,8 +11,6 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-
-	"github.com/gowebpki/jcs"
 )
 
 // regEntry and linkEntry build installed-files entries as maps.
@@ -676,7 +673,7 @@ func TestValidInstalledPathRejectsConfigurationDataAndForeignUnitDirs(t *testing
 }
 
 func FuzzParseInstalledFiles(f *testing.F) {
-	good := canonF(f, testList())
+	good := canon(f, testList())
 	f.Add(good)
 	f.Add([]byte(`{"flavours":{"deb:amd64":[{"mode":"0755","owner":"root:root","path":"/usr/bin/nebula","sha256":"` + hexSum(nil) + `","size":0,"type":"file"}]},"format":"nebula-installed-files-v1","release_version":"1.0.0"}`))
 	f.Add([]byte(`{"flavours":{"deb:amd64":[{"owner":"root:root","path":"/usr/bin/nebula","target":"x","type":"symlink"}]},"format":"nebula-installed-files-v1","release_version":"1.0.0"}`))
@@ -713,16 +710,240 @@ func FuzzParseInstalledFiles(f *testing.F) {
 	})
 }
 
-// canonF is canon for fuzz seeds.
-func canonF(f *testing.F, v any) []byte {
-	f.Helper()
-	b, err := json.Marshal(v)
-	if err != nil {
-		f.Fatal(err)
+// checkAdmitted asserts what an admitted list guarantees, independently of
+// the code under test: the manifest covers its exact bytes and version,
+// and no listed path is configuration or data (ADR 0015 D3).
+func checkAdmitted(t *testing.T, m Manifest, l InstalledFiles, list []byte) {
+	t.Helper()
+	covered := false
+	for _, a := range m.Artifacts {
+		if a.Name == InstalledFilesArtifact && a.Size == int64(len(list)) && a.SHA256 == hexSum(list) {
+			covered = true
+		}
 	}
-	c, err := jcs.Transform(b)
-	if err != nil {
-		f.Fatal(err)
+	if !covered || l.Digest != hexSum(list) || l.ReleaseVersion != m.ReleaseVersion {
+		t.Fatalf("admitted list not covered by the manifest: %+v", m)
 	}
-	return c
+	for _, fl := range l.Flavours {
+		for _, e := range fl.Files {
+			if !ValidInstalledPath(fl.Name, e.Path) || strings.HasPrefix(e.Path, "/etc/nebula/") || strings.HasPrefix(e.Path, "/var/") ||
+				strings.HasPrefix(e.Path, "/run/") || (strings.HasPrefix(e.Path, "/etc/systemd/system/") && strings.Count(e.Path, "/") > 4) {
+				t.Fatalf("admitted configuration or data path %q in %s", e.Path, fl.Name)
+			}
+		}
+	}
+}
+
+func FuzzVerifyInstalledFiles(f *testing.F) {
+	k := newTestSK(f)
+	state := testState(f, k)
+	list := canon(f, testList())
+	man, sig := signedRelease(f, k, list, nil)
+	f.Add(man, sig, list)
+	f.Add(man, sig, bytes.Replace(list, []byte(`"0755"`), []byte(`"4755"`), 1))
+	f.Add(man, []byte{}, list)
+	f.Add([]byte{}, []byte{}, []byte{})
+	f.Add(man, sig, []byte(`{"format":"x"}`))
+	// Validly signed and covered, but listing a local drop-in: only the
+	// list parser can reject it.
+	dropIn := canon(f, mutate(func(m map[string]any, _ []any) map[string]any {
+		m["flavours"].(map[string]any)["tarball:arm64"] = []any{
+			regEntry("/etc/systemd/system/nebula-executor.service.d/10-local.conf", []byte("[Service]\n"), "0644"),
+		}
+		return nil
+	}))
+	dMan, dSig := signedRelease(f, k, dropIn, nil)
+	f.Add(dMan, dSig, dropIn)
+	f.Fuzz(func(t *testing.T, manifest, sig, list []byte) {
+		known := func(err error, sentinels ...error) {
+			t.Helper()
+			for _, s := range sentinels {
+				if errors.Is(err, s) {
+					return
+				}
+			}
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if m, l, err := VerifyInstalledFiles(state, manifest, sig, list); err != nil {
+			known(err, ErrFormat, ErrSignature, ErrUntrusted, ErrInstalledFiles)
+		} else {
+			checkAdmitted(t, m, l, list)
+		}
+		// Any well-formed manifest, signed or not, against the list.
+		if pm, err := ParseManifest(manifest); err == nil {
+			if l, err := matchInstalledFiles(pm, list); err != nil {
+				known(err, ErrFormat, ErrInstalledFiles)
+			} else {
+				checkAdmitted(t, pm, l, list)
+			}
+		}
+		// A manifest that covers the list exactly: only the list parser
+		// and the version comparison decide.
+		cover := Manifest{ReleaseVersion: "1.4.0", Artifacts: []Artifact{{Name: InstalledFilesArtifact, Size: int64(len(list)), SHA256: hexSum(list)}}}
+		if l, err := matchInstalledFiles(cover, list); err != nil {
+			known(err, ErrFormat, ErrInstalledFiles)
+		} else {
+			checkAdmitted(t, cover, l, list)
+		}
+	})
+}
+
+func TestParseInstalledFilesAcceptsValuesAtLimits(t *testing.T) {
+	// MaxInstalledEntries entries, one of them a MaxInstalledPath-byte
+	// path, and a symlink target of MaxInstalledPath bytes.
+	// Sorted: pathAtLimit (/usr/share/nebula/aaa...) < f00000 < link.
+	entries := []any{regEntry(pathAtLimit, nil, "0644")}
+	for i := 0; i < MaxInstalledEntries-2; i++ {
+		entries = append(entries, regEntry(fmt.Sprintf("/usr/share/nebula/f%05d", i), nil, "0644"))
+	}
+	entries = append(entries, linkEntry("/usr/share/nebula/link", strings.Repeat("b", MaxInstalledPath)))
+	// MaxFlavours flavours.
+	flavours := map[string]any{"deb:amd64": entries}
+	for i := 1; i < MaxFlavours; i++ {
+		flavours[fmt.Sprintf("deb:a%d", i)] = []any{regEntry("/usr/bin/nebula", nil, "0755")}
+	}
+	m := testList()
+	m["flavours"] = flavours
+	// A regular file of exactly MaxInstalledFileSize bytes.
+	flavours["deb:a1"].([]any)[0].(map[string]any)["size"] = int64(MaxInstalledFileSize)
+	l, err := ParseInstalledFiles(canon(t, m))
+	if err != nil {
+		t.Fatalf("list at the limits rejected: %v", err)
+	}
+	deb, _ := l.Flavour("deb:amd64")
+	a1, _ := l.Flavour("deb:a1")
+	if len(l.Flavours) != MaxFlavours || len(deb.Files) != MaxInstalledEntries || a1.Files[0].Size != MaxInstalledFileSize ||
+		deb.Files[len(deb.Files)-1].Target != strings.Repeat("b", MaxInstalledPath) || deb.Files[0].Path != pathAtLimit {
+		t.Fatalf("limits not kept: %d flavours, %d entries", len(l.Flavours), len(deb.Files))
+	}
+	// One byte more in the symlink target is rejected (the other
+	// over-limit cases are in TestParseInstalledFilesRejectsMalformedLists).
+	entries[len(entries)-1] = linkEntry("/usr/share/nebula/link", strings.Repeat("b", MaxInstalledPath+1))
+	if _, err := ParseInstalledFiles(canon(t, m)); !errors.Is(err, ErrFormat) {
+		t.Fatalf("symlink target over the limit: %v", err)
+	}
+}
+
+func TestParseInstalledFilesDocumentSizeLimit(t *testing.T) {
+	// Entries with paths of a fixed prefix, padded with x up to
+	// MaxInstalledPath bytes; shortening a path by n bytes shortens the
+	// document by n bytes.
+	const prefix = "/usr/share/nebula/f%05d-"
+	var flavours []string
+	var paths [][]string
+	for fi := 0; fi < 3; fi++ {
+		flavours = append(flavours, fmt.Sprintf("deb:a%d", fi))
+		ps := make([]string, MaxInstalledEntries)
+		for i := range ps {
+			p := fmt.Sprintf(prefix, i)
+			ps[i] = p + strings.Repeat("x", MaxInstalledPath-len(p))
+		}
+		paths = append(paths, ps)
+	}
+	build := func() []byte {
+		fl := map[string]any{}
+		for fi, name := range flavours {
+			es := make([]any, len(paths[fi]))
+			for i, p := range paths[fi] {
+				es[i] = regEntry(p, nil, "0644")
+			}
+			fl[name] = es
+		}
+		return canon(t, map[string]any{"format": InstalledFilesFormat, "release_version": "1.4.0", "flavours": fl})
+	}
+	excess := len(build()) - MaxInstalledFilesDocument
+	if excess <= 0 {
+		t.Fatalf("test document too small by %d bytes", -excess)
+	}
+	var last *string
+	for fi := len(paths) - 1; fi >= 0 && excess > 0; fi-- {
+		for i := len(paths[fi]) - 1; i >= 0 && excess > 0; i-- {
+			p := &paths[fi][i]
+			cut := min(excess, len(*p)-len(fmt.Sprintf(prefix, i)))
+			*p = (*p)[:len(*p)-cut]
+			excess -= cut
+			last = p
+		}
+	}
+	exact := build()
+	if len(exact) != MaxInstalledFilesDocument {
+		t.Fatalf("document has %d bytes", len(exact))
+	}
+	if _, err := ParseInstalledFiles(exact); err != nil {
+		t.Fatalf("document of exactly %d bytes rejected: %v", MaxInstalledFilesDocument, err)
+	}
+	*last += "x"
+	over := build()
+	_, err := ParseInstalledFiles(over)
+	if len(over) != MaxInstalledFilesDocument+1 || !errors.Is(err, ErrFormat) || !strings.Contains(err.Error(), fmt.Sprintf("1 to %d bytes", MaxInstalledFilesDocument)) {
+		t.Fatalf("document of %d bytes: %v", len(over), err)
+	}
+}
+
+func TestGenerateInstalledFilesLimits(t *testing.T) {
+	t.Run("entries", func(t *testing.T) {
+		dir := t.TempDir()
+		deb := filepath.Join(dir, "deb:amd64")
+		for i := 0; i < MaxInstalledEntries; i++ {
+			writeFile(t, deb, fmt.Sprintf("usr/share/nebula/f%05d", i), nil, 0o644)
+		}
+		raw, err := GenerateInstalledFiles("1.4.0", dir)
+		if err != nil {
+			t.Fatalf("%d files rejected: %v", MaxInstalledEntries, err)
+		}
+		if l, err := ParseInstalledFiles(raw); err != nil || len(l.Flavours[0].Files) != MaxInstalledEntries {
+			t.Fatalf("generated list: %v", err)
+		}
+		writeFile(t, deb, "usr/share/nebula/g", nil, 0o644)
+		if _, err := GenerateInstalledFiles("1.4.0", dir); !errors.Is(err, ErrFormat) {
+			t.Fatalf("%d files: %v", MaxInstalledEntries+1, err)
+		}
+	})
+	t.Run("flavours", func(t *testing.T) {
+		dir := t.TempDir()
+		for i := 0; i < MaxFlavours; i++ {
+			writeFile(t, filepath.Join(dir, fmt.Sprintf("deb:a%d", i)), "usr/bin/nebula", nil, 0o755)
+		}
+		if _, err := GenerateInstalledFiles("1.4.0", dir); err != nil {
+			t.Fatalf("%d flavours rejected: %v", MaxFlavours, err)
+		}
+		writeFile(t, filepath.Join(dir, "deb:z"), "usr/bin/nebula", nil, 0o755)
+		if _, err := GenerateInstalledFiles("1.4.0", dir); !errors.Is(err, ErrFormat) {
+			t.Fatalf("%d flavours: %v", MaxFlavours+1, err)
+		}
+	})
+	t.Run("path", func(t *testing.T) {
+		dir := t.TempDir()
+		deb := filepath.Join(dir, "deb:amd64")
+		writeFile(t, deb, pathAtLimit[1:], nil, 0o644)
+		if _, err := GenerateInstalledFiles("1.4.0", dir); err != nil {
+			t.Fatalf("%d-byte path rejected: %v", MaxInstalledPath, err)
+		}
+		writeFile(t, deb, pathOverLimit[1:], nil, 0o644)
+		if _, err := GenerateInstalledFiles("1.4.0", dir); !errors.Is(err, ErrFormat) {
+			t.Fatalf("%d-byte path: %v", MaxInstalledPath+1, err)
+		}
+	})
+	t.Run("file size", func(t *testing.T) {
+		dir := t.TempDir()
+		p := filepath.Join(dir, "deb:amd64", "usr/bin/nebula")
+		writeFile(t, filepath.Join(dir, "deb:amd64"), "usr/bin/nebula", nil, 0o755)
+		// Sparse: no disk space is used.
+		if err := os.Truncate(p, MaxInstalledFileSize); err != nil {
+			t.Fatal(err)
+		}
+		raw, err := GenerateInstalledFiles("1.4.0", dir)
+		if err != nil {
+			t.Fatalf("file of %d bytes rejected: %v", MaxInstalledFileSize, err)
+		}
+		if l, err := ParseInstalledFiles(raw); err != nil || l.Flavours[0].Files[0].Size != MaxInstalledFileSize {
+			t.Fatalf("generated list: %v", err)
+		}
+		if err := os.Truncate(p, MaxInstalledFileSize+1); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := GenerateInstalledFiles("1.4.0", dir); !errors.Is(err, ErrFormat) {
+			t.Fatalf("file of %d bytes: %v", MaxInstalledFileSize+1, err)
+		}
+	})
 }
