@@ -95,6 +95,7 @@ const (
 	privateNoteRateLimited = "private registry: rate limited (the lease's hourly budget or 15-minute interval is used up), retry later"
 	privateNoteOutScope    = "private registry: the repository is outside the registry's approved scope"
 	privateNoteFailed      = "private registry: the executor could not read the digest"
+	privateNotePending     = "private registry: the executor read is queued; reload shortly"
 )
 
 // PrivateDigestSource resolves private image digests through the executor;
@@ -157,6 +158,8 @@ func ResolvePrivateDigestsWith(ctx context.Context, u ImageUpdates, src PrivateD
 		}
 		out.Images[i].Private, out.Images[i].Remote = true, ""
 		switch {
+		case errors.Is(e, registrymeta.ErrPrivateReadPending):
+			out.Images[i].Note = privateNotePending
 		case errors.Is(e, registrymeta.ErrPrivateReadRefused):
 			out.Images[i].Note = privateNoteRefused
 		case errors.Is(e, registrymeta.ErrPrivateReadRateLimited):
