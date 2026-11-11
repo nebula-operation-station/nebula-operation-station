@@ -742,12 +742,17 @@ roles never mix:
      builds it as the approved list plus exactly one added, changed or
      removed entry, and `approve` rejects a digest whose difference from
      the approved baseline has more than one entry when any of them is
-     critical-class. `pending` renders **every** entry in which the
-     proposed digest differs from the approved baseline (which for such a
-     digest is that one entry) from the executor's own retained records
-     (old and new values, escaped as in D6 "Display", so no host byte
-     reaches the terminal as a control sequence), so the CLI never
-     approves an entry it did not show. The executor rejects a browser
+     critical-class. `pending` only lists proposed digests and approves
+     nothing. `approve` itself, whatever the source of the digest the
+     admin passes (typed, pasted from `pending` or from the browser),
+     renders **every** entry in which that digest differs from the
+     approved baseline (which for such a digest is that one entry) from
+     the executor's own retained records (old and new values, escaped as
+     in D6 "Display", so no host byte reaches the terminal as a control
+     sequence) and then asks for an interactive confirmation on the
+     terminal; it approves only after that confirmation, has no flag
+     that skips it, and refuses when stdin is not a terminal. So the CLI
+     never approves an entry it did not show. The executor rejects a browser
      assertion for a digest whose difference from the approved baseline
      adds, changes or removes a critical-class entry; unchanged
      critical-class entries carried over from the approved baseline (for
