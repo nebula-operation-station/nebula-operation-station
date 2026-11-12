@@ -24,4 +24,10 @@
 //
 // Errors and results never quote host-supplied bytes; host paths are
 // returned as raw bytes and must be shown through EscapePath.
+//
+// The package also holds the producing side: Script, the embedded
+// read-only fim.scan script for the profile DefaultProfile
+// (fim-default-v1), and Action, its read-only action contract. The script
+// reports plain SHA-256 values only; keying them is the parser's job, so the
+// per-host key never reaches the host.
 package fimscan
