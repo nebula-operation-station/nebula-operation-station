@@ -1,8 +1,11 @@
 # One-step enrollment plan (ADR 0013)
 
-Status: **plan, not started, 2026-11-11.** [ADR 0013](../adr/0013-one-step-enrollment.md)
+Status: **in progress, 2026-11-12.** [ADR 0013](../adr/0013-one-step-enrollment.md)
 is Accepted (2026-11-11, previously Proposed) with the maintainer's decisions
-on Q1–Q9; only EN-01 is done. Decisions that shape the tickets: a 25-character
+on Q1–Q9. Merged on `main`: EN-01 to EN-08, EN-10 (without NetBird) and EN-13,
+and EN-09 as a package that is not yet mounted (see the status table below).
+Open: EN-11, EN-12, EN-14 and EN-15 part 2 (the NetBird parts). (previously:
+"plan, not started, 2026-11-11 … only EN-01 is done".) Decisions that shape the tickets: a 25-character
 pairing code (24 Crockford data characters = 120 bits, plus a mod-37 check
 character, `XXXXX-XXXXX-XXXXX-XXXXX-XXXXC`; Q1), 15 minutes total offer
 lifetime by default (Q2), NetBird service user in the executor vault, groups
@@ -14,6 +17,31 @@ fallback otherwise (Q8), NetBird by hand for hosts that cannot reach NOS
 
 This plan turns ADR 0013 into PR-sized tickets: one agent job each, tests
 first, `make check` per Go ticket, no new dependencies.
+
+## Status on main (2026-11-12)
+
+The "Stand" column is the state on `main` at 2026-11-12; the "Beleg" column
+names the package or file that shows it. (previously: the status line above
+said "plan, not started, 2026-11-11", with only EN-01 done; the ticket rows
+below are unchanged.)
+
+| Ticket | Stand 2026-11-12 | Beleg on `main` |
+| --- | --- | --- |
+| EN-01 | Done | `docs/adr/0013-one-step-enrollment.md`, Accepted 2026-11-11 |
+| EN-02 | Done | `docs/spec/04-revision-history.md`, entry "Spec revision, 2026-11-11" |
+| EN-03 | Done | `internal/pairing/` (`pairing.go`, `vectors_test.go`, `fuzz_test.go`) |
+| EN-04 | Done (script generator; NetBird offers are EN-12) | `internal/enrollscript/` (`onestep.go`, `netbird.go`, `command.go`) |
+| EN-05 | Done | `internal/executordb/offers.go`, `offers_netbird.go` |
+| EN-06 | Done | `cmd/nebula-executor/enroll_config.go` (`-enroll-source`, `-netbird-*`) |
+| EN-07 | Done | `internal/permit/` (paired, NetBird offer, NetBird peer delete), `internal/canonical/` |
+| EN-08 | Done for the offer RPCs; its NetBird acceptance points wait for EN-12 | `proto/`, `internal/executor/enroll_offer.go`, `enroll_pairing.go` |
+| EN-09 | Partly: the route package is merged, but nothing mounts it yet. No code on `main` imports `internal/web/enroll`, so `GET /enroll/<offer-id>` is not served by `nebula-server`, and the trusted-proxies resolver (`clientaddr.WarnListener`) is not called | `internal/web/enroll/enroll.go`, `internal/web/clientaddr/clientaddr.go` |
+| EN-10 | Partly: the dialog works without NetBird; the NetBird option and its approval wait for EN-12 | `internal/web/ui/enroll_onestep*.go`, `web/templates/enroll_onestep.html` |
+| EN-11 | Open | `internal/netbirdapi/` does not exist |
+| EN-12 | Open | no NetBird key creation in offers on `main` |
+| EN-13 | Done | `cmd/nebula/enroll_offers.go` (`nebula host offers`, `nebula host offer-revoke`) |
+| EN-14 | Open | no one-step acceptance tests in `test/security/` |
+| EN-15 | Part 1 in progress (`docs/admin/guide.md` §7); part 2 (NetBird section) open with EN-12 | `docs/admin/guide.md` |
 
 ## Rules every ticket keeps
 
