@@ -220,10 +220,7 @@ func TestOversizedParagraphSplitsIntoNumberedParts(t *testing.T) {
 		b.WriteString(para(fmt.Sprintf("P%02d:", i), 1000))
 	}
 	ix := build(t, "p", b.String())
-	var parts []Chunk
-	for _, c := range ix.Chunks {
-		parts = append(parts, c)
-	}
+	parts := ix.Chunks
 	if len(parts) < 2 {
 		t.Fatalf("expected numbered parts, got %v", chunkIDs(ix))
 	}
