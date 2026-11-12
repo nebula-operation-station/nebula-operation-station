@@ -550,6 +550,188 @@ verification. Nebula reads the key again before it pins it; the host's
 criticality stays. On the executor host the same is
 `nebula host unpin web-01`, then `nebula host pin` again.
 
+### 7.4 One-step enrollment from the web UI
+
+The dialog **Add host (one step)** (`/inventory/enroll/onestep`) enrolls a
+host without a separate `known_hosts` step. NOS creates a single-use offer
+that is valid for 15 minutes. You run one command on the new host; the
+script prints a pairing code, which you type into the dialog. The executor
+checks that the key the host presents matches the code, and you approve the
+pin with your security key. Sections 7.1 to 7.3 stay valid for hosts you
+enroll from the command line.
+
+**Status on this release.** The dialog works, but two things are not
+complete yet:
+
+- The command block downloads the script from `GET /enroll/<offer-id>`. The
+  route exists in the code, but `nebula-server` does not serve it yet. Until
+  it does, the command fails with an HTTP error on the host. Use **Download
+  in browser** (below) or `nebula host enroll-script` (section 7.1).
+- NetBird is not offered in the dialog. NetBird for one-step offers follows
+  with EN-12.
+
+**Before you start**
+
+- The executor needs at least one enrollment source address
+  (`-enroll-source`, the IP address or CIDR range the Nebula machine
+  connects from, the same value as `--from` in section 7.1). Without one,
+  the executor refuses to create offers.
+- Open a privileged session on the dashboard with your security key first.
+  The dialog says so when it is missing.
+- The host must be in the inventory without a pinned key. The **Host**
+  list shows only such hosts; otherwise add the host under **Inventory**.
+
+**The steps**
+
+1. Open **Add host (one step)**, pick the **Host**, and check the **SSH
+   user** (prefilled `nebula`) and **Credential** (prefilled
+   `nebula-default`). **Grant the user sudo without password** adds the
+   NOPASSWD sudo rule that section 7.1 describes; without it the user can
+   only run read-only actions, as with `--no-sudo` in section 7.1.
+2. Click **Create offer**. The offer page shows the command, the script's
+   SHA-256 and the time until which the offer is valid.
+3. On the host, run the command for your account (see below). The script
+   prints a pairing code.
+4. Type the code into **Pairing code** and choose the endpoint to probe.
+   Use one of the inventory endpoints, or the address the script printed.
+   Then click **Check code**.
+5. The approval page shows **Code matched**, the endpoint, the key type and
+   the full fingerprint. Compare the fingerprint with the host's own key
+   (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`, run on the host's
+   console), then **Approve with security key**. NOS pins the key, logs in
+   once to test it, and adds a new endpoint to the inventory host if you
+   entered one.
+6. If you stop before step 5, **Revoke offer** ends the offer.
+
+**The command the dialog shows**
+
+Paste the command into a POSIX shell (bash, dash or zsh; in fish, start
+`sh` first). Use the variant for your account:
+
+- **1. Run this on the host**, as a user with sudo (`sudo` variant):
+
+```
+( umask 077
+  for t in /dev/shm "${XDG_RUNTIME_DIR:-}" "${TMPDIR:-/tmp}"; do
+    [ -n "$t" ] && [ -d "$t" ] && [ -w "$t" ] && break; done
+  d=$(mktemp -d "$t/nos-enroll.XXXXXXXX") || exit 1
+  trap 'rm -rf "$d"' EXIT; trap 'exit 130' HUP INT TERM
+  cd "$d" &&
+  printf 'url = "https://<host>/enroll/%s"\noutput = "nos-enroll.sh"\n' \
+    '<offer-id>' |
+    curl --proto '=https' --tlsv1.2 -fsS -K - &&
+  echo '<sha256>  nos-enroll.sh' | sha256sum -c - &&
+  sudo sh nos-enroll.sh )
+```
+
+- **Logged in as root without sudo:** the same block, except that the last
+  line is `  sh nos-enroll.sh )`.
+
+The dialog fills in `<host>` (the host part of `public_origin`),
+`<offer-id>` and `<sha256>`. Do not edit the block. It runs in a private
+directory (`umask 077`, removed on exit or interrupt), downloads the script
+over HTTPS only, checks its SHA-256 and runs it only after the check passed.
+The offer ID goes to `curl` on standard input, not on the command line.
+
+**Show script** displays the script for review and does not use up the
+offer. The setup-key line, if any, reads `<netbird-setup-key-withheld>`.
+
+**Download in browser** is only for hosts that cannot reach NOS, such as a
+remote VPS when NOS is LAN-only. It uses up the offer. Copy the file to the
+host once (scp or paste), check it with `sha256sum nos-enroll.sh` against
+the SHA-256 shown on the offer page, and run it as root with
+`sh nos-enroll.sh`. The browser download is not offered for NetBird offers.
+Hosts that cannot reach NOS and need NetBird join NetBird by hand first;
+the NetBird section follows with EN-12.
+
+**Trust on first use**
+
+The pairing code is derived from the host key that the script reads on the
+host. A matching code shows that the key the executor sees is the key the
+script printed. It does not show that the code reached you unchanged, so
+read the code in a session you trust:
+
+- For a host on your own network, read the code on the host's console.
+- For an internet-facing or remote host, read the code on the provider's
+  web console, or over SSH with a `known_hosts` entry you verified. Do not
+  read it over a first SSH login whose host key you accepted without
+  checking.
+
+**Use `--cacert`, never `-k`**
+
+The dialog's command does not contain `-k`, and you must not add it. `-k`
+turns off certificate checks, so anyone on the path can serve the script.
+If the NOS origin uses a private CA, the download fails with a certificate
+error on the host. Then add the CA to the host's trust store, or, when you
+test the URL by hand, use `curl --cacert <ca.pem>`.
+
+**A code mismatch**
+
+If the key the host presents does not match the code, the offer fails at
+once and the endpoint is not pinned. The dialog shows:
+
+> The host at this endpoint presents a key that does not match the code from
+> the host. Either the endpoint is a different machine, or something is in
+> between. Check the endpoint, then create a new offer.
+
+One well-formed code submission is accepted per offer, and one mismatch ends
+the offer. A probe that fails to connect, for example an endpoint without an
+ed25519 key or a timeout, does not use up the submission; each offer allows
+5 probes. Three codes the executor rejects as malformed (for example a
+mistyped check character) end the offer as well. Create a new offer and run the script again: it is
+safe to run again and prints a new code.
+
+**Reverse proxy for `/enroll/`**
+
+The download route is unauthenticated, so it is the one path on the proxy
+that handles offer IDs. Give it its own location. A specific prefix wins
+over `location /` in section 4:
+
+```
+location /enroll/ {
+    access_log off;                       # the path carries the offer ID
+    proxy_buffering off;                  # no buffering of the script to disk
+    proxy_max_temp_file_size 0;           # the same, if buffering is ever enabled
+    proxy_cache off;                      # never cache the script
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $remote_addr;   # overwrite, never append
+    proxy_pass http://127.0.0.1:8080;
+}
+```
+
+- **No access log for `/enroll/`.** An offer ID in a log is a capability
+  that someone can use. Keep the rule for error logs too: nginx writes the
+  request line into the error log for some errors, so do not raise the
+  error log to `debug`.
+- **`X-Forwarded-For` is overwritten by the proxy.** `$remote_addr` replaces
+  any value the client sent. Do not append to a client-supplied header.
+- **Trusted proxies.** On this release `nebula-server` has no setting for
+  trusted proxies, and it uses the TCP peer as the client address. Behind a
+  reverse proxy, all clients then share the proxy's address, and so one
+  download limit. A trusted-proxies setting follows with the route. When it
+  exists, list only single proxy addresses; a network may be listed only if
+  it contains no clients.
+
+For other proxies, apply the same four points (no access log for the path,
+no buffering to disk, no cache, `X-Forwarded-For` overwritten). This guide
+does not give Caddy directives yet; check them against your Caddy version.
+
+**Offers on the executor host**
+
+```
+nebula host offers                 # state, host, expiry, script SHA-256, download address
+nebula host offers --json          # the same as one JSON object
+nebula host offer-revoke OFFER     # OFFER: the hash from "host offers" (64 hex or a unique prefix of at least 8)
+```
+
+Both commands need the executor's admin UID. `offer-revoke` works in every
+state that is not final, including `awaiting_approval`. The list never shows
+an offer ID, salt, script or setup key.
+
+**NetBird:** the NetBird join for offers follows with EN-12. Until then,
+a host that must join NetBird joins by hand, with a setup key you create in
+NetBird.
+
 ## 8. Trusting actions, signers and modules
 
 The executor treats every script it does not know as at least HIGH. Trust
