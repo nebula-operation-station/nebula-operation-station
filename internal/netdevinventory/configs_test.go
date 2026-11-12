@@ -1078,36 +1078,115 @@ func applySeenIndexVariant(t *testing.T, db *sql.DB, ddl string) {
 	}
 }
 
-// TestSeenIndexVariantsReverseTieScanOrder guards the tie tests below: the
-// newest lookup without its id tie-break must return the higher id of a
-// tie in one variant and the lower id in another, or those tests could
-// not tell a missing tie-break from a lucky scan order.
+// withoutIDTieBreak returns stmt with its single occurrence of tieBreak
+// replaced by untied, failing the test if stmt does not contain it exactly
+// once (so the guard below tracks the production statement).
+func withoutIDTieBreak(t *testing.T, stmt, tieBreak, untied string) string {
+	t.Helper()
+	if n := strings.Count(stmt, tieBreak); n != 1 {
+		t.Fatalf("statement contains %q %d times, want 1:\n%s", tieBreak, n, stmt)
+	}
+	return strings.Replace(stmt, tieBreak, untied, 1)
+}
+
+// newestTieState builds the state TestWriteCapNewestTieGoesToHigherID
+// caps: two startup versions with the same last_seen and running fillers
+// up to the cap with the new version. It returns the tie's ids.
+func newestTieState(t *testing.T, s *Store, db *sql.DB, ddl string) (low, high int64) {
+	t.Helper()
+	addDevice(t, s, cbsDevice())
+	applySeenIndexVariant(t, db, ddl)
+	start := testBase.Add(-60 * 24 * time.Hour)
+	l := record(t, s, "sw-core", ConfigStartup, start, snap('1', "v1"))
+	h := record(t, s, "sw-core", ConfigStartup, start.Add(time.Minute), snap('2', "v2"))
+	setLastSeen(t, db, l.VersionID, lastSeenOf(t, db, h.VersionID))
+	fillVersions(t, db, "sw-core", ConfigRunning, testBase.Add(-time.Hour), MaxConfigVersionsPerDevice-2, 1<<20)
+	return l.VersionID, h.VersionID
+}
+
+// TestSeenIndexVariantsReverseTieScanOrder guards the tie tests below. For
+// each id DESC tie-break of boundConfigVersions, the production statement
+// with that tie-break removed is run on the tie test's state inside a
+// transaction, as RecordConfig runs it; it must favour the higher id of
+// the tie in one variant and the lower id in another. Otherwise a tie test
+// could pass on a lucky scan or sort order with the tie-break missing.
 func TestSeenIndexVariantsReverseTieScanOrder(t *testing.T) {
-	got := map[string]bool{}
-	for _, v := range seenIndexVariants {
-		s, db, _ := newTestStore(t)
-		addDevice(t, s, cbsDevice())
-		applySeenIndexVariant(t, db, v.ddl)
-		start := testBase.Add(-60 * 24 * time.Hour)
-		low := record(t, s, "sw-core", ConfigStartup, start, snap('1', "v1"))
-		high := record(t, s, "sw-core", ConfigStartup, start.Add(time.Minute), snap('2', "v2"))
-		setLastSeen(t, db, low.VersionID, lastSeenOf(t, db, high.VersionID))
-		var id int64
-		if err := db.QueryRow(`SELECT id FROM netdev_config_versions WHERE device_id = ? AND config = ?
-			ORDER BY last_seen DESC LIMIT 1`, "sw-core", string(ConfigStartup)).Scan(&id); err != nil {
-			t.Fatal(err)
+	t.Run("newest lookup", func(t *testing.T) {
+		q := withoutIDTieBreak(t, newestConfigVersionQuery, "last_seen DESC, id DESC", "last_seen DESC")
+		got := map[string]bool{}
+		for _, v := range seenIndexVariants {
+			s, db, _ := newTestStore(t)
+			low, high := newestTieState(t, s, db, v.ddl)
+			tx, err := db.Begin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var id int64
+			err = tx.QueryRow(q, "sw-core", string(ConfigStartup)).Scan(&id)
+			if rbErr := tx.Rollback(); rbErr != nil {
+				t.Fatal(rbErr)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch id {
+			case low:
+				got["lower id"] = true
+			case high:
+				got["higher id"] = true
+			default:
+				t.Fatalf("%s: untied newest lookup returns %d, not in tie %d, %d", v.name, id, low, high)
+			}
+			t.Logf("%s: untied newest lookup returns %d (low %d, high %d)", v.name, id, low, high)
 		}
-		switch id {
-		case low.VersionID:
-			got["lower id first"] = true
-		case high.VersionID:
-			got["higher id first"] = true
+		if !got["lower id"] || !got["higher id"] {
+			t.Fatalf("index variants make the untied newest lookup return only %v; "+
+				"TestWriteCapNewestTieGoesToHigherID cannot detect a missing id tie-break", got)
 		}
-		t.Logf("%s: untied newest lookup returns %d (low %d, high %d)", v.name, id, low.VersionID, high.VersionID)
-	}
-	if !got["lower id first"] || !got["higher id first"] {
-		t.Fatalf("index variants yield only %v; the tie tests cannot detect a missing id tie-break", got)
-	}
+	})
+	t.Run("deletion order", func(t *testing.T) {
+		stmt := withoutIDTieBreak(t, capConfigVersionsStmt,
+			"ROW_NUMBER() OVER (ORDER BY last_seen DESC, id DESC)", "ROW_NUMBER() OVER (ORDER BY last_seen DESC)")
+		got := map[string]bool{}
+		for _, v := range seenIndexVariants {
+			s, db, now := newTestStore(t)
+			low, high := deletionTieState(t, s, db, v.ddl)
+			// The new running version, newest and protected, as the write adds it.
+			fillVersions(t, db, "sw-core", ConfigRunning, testBase.Add(time.Hour), 1, 1<<22)
+			newID := configMaxID(t, db)
+			tx, err := db.Begin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			var lowLeft, highLeft bool
+			_, err = tx.Exec(stmt, micros(now.Add(-ConfigVersionRetention)), newID, int64(-1), "sw-core",
+				MaxConfigVersionsPerDevice)
+			if err == nil {
+				err = tx.QueryRow(`SELECT EXISTS (SELECT 1 FROM netdev_config_versions WHERE id = ?),
+					EXISTS (SELECT 1 FROM netdev_config_versions WHERE id = ?)`, low, high).Scan(&lowLeft, &highLeft)
+			}
+			if rbErr := tx.Rollback(); rbErr != nil {
+				t.Fatal(rbErr)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch {
+			case !lowLeft && highLeft:
+				got["lower id"] = true
+			case lowLeft && !highLeft:
+				got["higher id"] = true
+			default:
+				t.Fatalf("%s: untied cap keeps low %d = %v, high %d = %v; want exactly one deleted",
+					v.name, low, lowLeft, high, highLeft)
+			}
+			t.Logf("%s: untied cap keeps low %d = %v, high %d = %v", v.name, low, lowLeft, high, highLeft)
+		}
+		if !got["lower id"] || !got["higher id"] {
+			t.Fatalf("index variants make the untied cap delete only the %v of the tie; "+
+				"TestWriteCapDeletionTieGoesToLowerID cannot detect a missing id tie-break", got)
+		}
+	})
 }
 
 // TestWriteCapNewestTieGoesToHigherID gives the two versions of the other
@@ -1119,26 +1198,20 @@ func TestWriteCapNewestTieGoesToHigherID(t *testing.T) {
 	for _, v := range seenIndexVariants {
 		t.Run(v.name, func(t *testing.T) {
 			s, db, now := newTestStore(t)
-			addDevice(t, s, cbsDevice())
-			applySeenIndexVariant(t, db, v.ddl)
-			start := testBase.Add(-60 * 24 * time.Hour)
-			low := record(t, s, "sw-core", ConfigStartup, start, snap('1', "v1"))
-			high := record(t, s, "sw-core", ConfigStartup, start.Add(time.Minute), snap('2', "v2"))
-			setLastSeen(t, db, low.VersionID, lastSeenOf(t, db, high.VersionID))
-			if p := pruneProtectedIDs(t, db, "sw-core", *now); !p[high.VersionID] || p[low.VersionID] {
-				t.Fatalf("Prune protects %v; want %d, not %d", p, high.VersionID, low.VersionID)
+			low, high := newestTieState(t, s, db, v.ddl)
+			if p := pruneProtectedIDs(t, db, "sw-core", *now); !p[high] || p[low] {
+				t.Fatalf("Prune protects %v; want %d, not %d", p, high, low)
 			}
 
-			fillVersions(t, db, "sw-core", ConfigRunning, testBase.Add(-time.Hour), MaxConfigVersionsPerDevice-2, 1<<20)
 			w := record(t, s, "sw-core", ConfigRunning, testBase, snap('e', "new"))
 
 			ids := configIDs(t, db)
 			if len(ids) != MaxConfigVersionsPerDevice {
 				t.Fatalf("kept %d versions, want %d", len(ids), MaxConfigVersionsPerDevice)
 			}
-			if !ids[high.VersionID] || ids[low.VersionID] || !ids[w.VersionID] {
+			if !ids[high] || ids[low] || !ids[w.VersionID] {
 				t.Fatalf("kept high %d = %v, low %d = %v, new = %v; want only the higher id of the tie kept",
-					high.VersionID, ids[high.VersionID], low.VersionID, ids[low.VersionID], ids[w.VersionID])
+					high, ids[high], low, ids[low], ids[w.VersionID])
 			}
 		})
 	}
