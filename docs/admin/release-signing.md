@@ -25,10 +25,10 @@ cd "$HOME/nebula-release-offline"
 
 ## Primary root and second-key enrollment
 
-**Do not regenerate root-1.** Axel generated it on 2026-10-30 on YubiKey 34718658, a YubiKey 5C NFC running firmware 5.7.4. It is a non-resident FIDO2 key with touch required. The canonical primary fingerprint is `SHA256:DMcoE6ngofND0L6+vT1OIPrvzDFSRmBNDPrR3hpy1MY` and the recorded public key is:
+**Do not regenerate root-1.** Axel generated it on 2026-10-30 on a YubiKey. It is a non-resident FIDO2 key with touch required. The canonical primary fingerprint is `SHA256:DMcoE6ngofND0L6+vT1OIPrvzDFSRmBNDPrR3hpy1MY` and the recorded public key is:
 
 ```text
-sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIH6DVvY6q6jDyLGQeYjKhNufFKi2jzFHzFO04+ng5mkoAAAABHNzaDo= nebula-release-root-1 (Axel, YubiKey 34718658)
+sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIH6DVvY6q6jDyLGQeYjKhNufFKi2jzFHzFO04+ng5mkoAAAABHNzaDo= nebula-release-root-1 (Axel)
 ```
 
 The original resident-key proposal did not work on this setup: both `-O resident` and `-O verify-required` failed with `invalid format`. The working generation form was equivalent to the following (shown for documentation, not as a command to rerun over the existing key):
