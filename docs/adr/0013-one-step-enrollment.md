@@ -100,9 +100,17 @@ Constraints that shape every decision below:
      operator approves it with the security key does the executor render
      the script with the key in memory, store its hash (again not the
      bytes) and move the offer to `open`. A compromised server with an open
-     privileged session can therefore not get a substituted setup key into
-     a script without a security-key touch whose view names the key check
-     value (D6 "Why a stolen setup key is bounded"). NetBird offers also
+     privileged session can therefore not get any setup key into a script
+     without a security-key touch whose view names the key check value.
+     That touch detects a substituted key only if the operator compares
+     the check value with a reference the server cannot forge: the value
+     printed by the executor-local CLI entry, or the value the operator
+     computes on their own machine for a key typed into the dialog (D6
+     "Check value"). For a key typed into the dialog without that
+     comparison, every check value the operator sees derives from what the
+     server forwarded, so substitution is not detected (D6 "Compromised
+     server"; fix round 2, previously this sentence claimed protection
+     against substitution for both entry paths). NetBird offers also
      have their own lower limits (D2). If the operator chooses to enter
      the key with the executor-local CLI instead of the dialog, the offer
      starts in `awaiting_key` and moves to `awaiting_approval` only when the
@@ -627,19 +635,30 @@ through the API, with expiry offer expiry plus 45 minutes, at most 1 hour.)
 
 *Entry.* Two ways, both only for a privileged operator:
 
-- **Web dialog:** a masked input (`type="password"`,
-  `autocomplete="new-password"`, `spellcheck="false"`, inside a form that
-  has no username field) in the one-step dialog, so browsers and password
-  managers do not offer to save or fill the key (fix round 1; previously
-  `autocomplete="off"`, which major browsers ignore for password fields),
-  sent only in the body of
-  the create request of the privileged session. The server passes it
+- **Web dialog:** a masked input (`type="password"`, `spellcheck="false"`)
+  in the one-step dialog, sent only in the body of the create request of
+  the privileged session. NOS does not rely on any `autocomplete` value
+  for secrecy: browsers and password managers treat such hints as advice
+  (`autocomplete="new-password"` even invites them to save the field as a
+  new credential), so whether the operator's browser keeps the value is
+  part of the operator's own client residual (threat table), and the
+  dialog and guide say so next to the input. What NOS guarantees and tests
+  is server-side: the key is never stored, logged or re-rendered. (Fix
+  round 2; fix round 1 specified `autocomplete="new-password"` in a form
+  without username field "so browsers and password managers do not offer
+  to save or fill the key", and before that `autocomplete="off"`; neither
+  hint is reliable.) The server passes it
   straight into `CreateEnrollOffer` and never logs, stores, caches or
   echoes it: an error page never refills the field, the response carries
   `Cache-Control: no-store`, and the value is not part of any server-side
   form state. While the request is handled it is in server memory, the
   same class of exposure as the download stream that carries the key
-  (threat table).
+  (threat table). The create request also passes the reverse proxy, so
+  the D7 "Reverse proxy" rules for `/enroll/` (no request or response
+  buffering to disk, no cache, no access log, no body logging or body
+  inspection that records content) apply to the one-step create route as
+  well (fix round 2; previously only `/enroll/` and "Download in
+  browser").
 - **Executor-local CLI** (admin UID, command name fixed by the follow-up
   ticket): non-echoing terminal input, or standard input when that is not
   a terminal; never an argument and never an environment variable. The
@@ -706,6 +725,41 @@ NetBird offer permit, shown in its approval view, in `nebula approve`, in
 confirm that the approval names the key they entered without the key being
 shown anywhere. 32 bits of a hash of a 122-bit random key reveal nothing
 usable about the key.
+
+*Trusted reference for the check value* (fix round 2). The comparison only
+detects a substituted key if the operator's reference value does not come
+from the server, because a compromised server can show any value on its
+pages and forward another key to the executor, whose check value then
+appears consistently in the approval view and in `nebula approve`:
+
+- **CLI entry:** the reference is the value the executor-local CLI prints;
+  the key never passes the server, so the server cannot substitute it.
+  This is the entry the dialog, the CLI help and the guide recommend
+  whenever the operator wants substitution protection (and for
+  high-assurance hosts, as for the server-memory exposure).
+- **Dialog entry:** the dialog's own display of the check value is
+  convenience only and is labelled "shown by the server". The reference
+  is a value the operator computes on their own machine from the key
+  copied out of the NetBird dashboard, with standard tools that the guide
+  and the dialog document, for example
+  `printf 'nos-netbird-setup-key-check-v1\0%s' "$KEY" | sha256sum | cut -c1-8`
+  after `read -rs KEY` in bash (the key read without echo and kept out of
+  argv and shell history; a test vector in EN-16g checks that the
+  documented command and the executor compute the same value; already in the
+  canonical uppercase form the NetBird dashboard shows; the guide shows
+  the uppercase fold for a key copied in lowercase). The operator compares
+  this value with `nebula approve` on the executor host before the
+  security-key touch. Without this step, dialog entry gives no protection
+  against substitution by a compromised server; that is a named residual
+  (threat table, "Compromised server substituting a setup key").
+- Rejected: computing the check value in the browser (the JavaScript
+  comes from the same server, so a compromised server can make it show
+  the value of the key it forwarded), and comparing with a value from the
+  NetBird dashboard (NOS cannot check what the dashboard displays for a
+  key, and a prefix of the key would weaken the key's secrecy).
+
+Whether dialog entry should stay available at all, given this residual,
+is open question Q11 (amendment).
 
 *Storage.* The executor stores the setup key only encrypted in the vault,
 written in the same commit as the offer row (a vault that is locked refuses
@@ -918,15 +972,32 @@ privileged session:
   joins a network of the attacker's choosing. The key reaches a script only
   after a NetBird offer permit approved with the security key (HIGH, user
   verification; D1 step 2) whose binding includes the key's check value;
-  `nebula approve` on the executor host shows the same binding, and the
-  operator compares the check value with the one the dialog or the CLI
-  entry showed. As in D4 the server can deceive the web page, so the
-  independent `nebula approve` view, the CLI entry and the operator's check
-  that the host appears in their own NetBird dashboard are the
-  mitigations; with a self-hosted management server a key of another
-  account does not join at all.
+  `nebula approve` on the executor host shows the same binding. That
+  binding names the key the executor received, so it detects substitution
+  only against a reference the server cannot forge (D6 "Trusted reference
+  for the check value"): with CLI entry the key never passes the server
+  and cannot be substituted; with dialog entry the operator must compare
+  `nebula approve` with the value they computed themselves, because the
+  dialog's display of the check value comes from the server and a
+  compromised server shows the value of the key it forwarded. Dialog entry
+  without that comparison is not protected against substitution; the
+  operator's check that the host appears in their own NetBird dashboard
+  then detects it only after the join. With a self-hosted management
+  server a key of another account does not join at all. (Fix round 2;
+  previously: "the operator compares the check value with the one the
+  dialog or the CLI entry showed", which for the dialog compared two
+  server-controlled values.)
 - *Flood offers.* The separate limits (2 open NetBird offers, 5 NetBird
   offers per hour, D2) still apply.
+
+- *Seal secrets without a touch.* Creating a NetBird offer seals the
+  supplied key into the vault before any security-key approval (CLI entry:
+  when the CLI supplies it), so a compromised server with an open
+  privileged session can make sealed secrets of its choice exist on the
+  executor without a touch. Bounded by the NetBird limits (2 open, 5 per
+  hour), the 15-minute expiry with wipe at the final state, and the
+  approval required before any of them is rendered; it gives the server
+  no read path to the vault (fix round 2).
 
 The NetBird offer permit stays, now as the approval of exactly one
 supplied key (check value) for exactly one offer. (Amended 2026-11-12;
@@ -969,7 +1040,13 @@ accepted in Q3.)
   "Show script" routes): `proxy_buffering off`,
   `proxy_max_temp_file_size 0`, no proxy cache, and the access-log
   exclusion above. The server additionally sends `X-Accel-Buffering: no`
-  on these responses. A proxy configured otherwise is an operator error the
+  on these responses. The one-step create route, whose request body
+  carries a setup key typed into the dialog (D6 "Entry"), gets the same
+  rules for the request direction: `proxy_request_buffering off`,
+  `client_body_in_file_only off`, a client body buffer at least as large
+  as the create form's size limit so nginx never writes the body to
+  `client_body_temp_path`, no access log with request bodies, and no
+  WAF or body-logging module that records the body (fix round 2). A proxy configured otherwise is an operator error the
   guide warns about; the NetBird option's key is then one-off and
   short-lived only if the operator created it so (D6), and NOS asks the
   operator to revoke it when the offer ends without enrollment (amended
@@ -1132,7 +1209,7 @@ this ADR either.
 | Other local users on the target host (shared or multi-user host) | Offer ID passed to `curl`/`wget` on standard input from the `printf` builtin, never in argv; download directory `0700` and files `0600` under `umask 077`; setup key passed to the NetBird client only by environment variable or key file, never in argv; NetBird option not offered for a client version that accepts neither (D5) | The ID stays in the operator's own shell history (`0600`) but is single-use and consumed seconds later; a user with root or the operator's UID is out of scope (they own the session) |
 | Setup key left on the host's disk | Download directory and key file in RAM-backed `/dev/shm` or `$XDG_RUNTIME_DIR`; `umask 077`, `mktemp -d` (`0700`), `trap` cleanup on exit, hang-up, interrupt and termination, in the command and in the script; no browser download for NetBird offers (D8) | `SIGKILL`/power loss leaves a `0700` file; without `/dev/shm` and `$XDG_RUNTIME_DIR` the fallback `$TMPDIR`/`/tmp` is disk-backed and freed blocks can keep the key; `tmpfs` pages can reach swap; the key is one-off and short-lived only if the operator created it so (D6), and NOS can only advise revoking it (amended 2026-11-12; previously "key one-off, ≤ 1 h, revoked when the offer is final") |
 | Setup key at rest on executor, server or reverse proxy | Key only encrypted in the vault, wiped at the download and at the latest at the final state; scripts rendered on demand and checked against the stored hash, never stored, cached or logged; "Show script" renders a placeholder instead of the key; the key is never displayed, only its 32-bit check value; reverse proxy required to run `/enroll/` with `proxy_buffering off`, `proxy_max_temp_file_size 0`, no cache, no access log | Plaintext in executor, server and proxy memory while a response is rendered and streamed; a proxy configured against the guide may spill it to disk |
-| Setup key entered by the operator (added 2026-11-12) | Masked dialog input sent only in the create request of the privileged session, never logged, stored, cached or echoed by the server (`no-store`, no refilled field); executor-local CLI entry by non-echoing input or standard input, never argv or environment; strict format check before storage, refusal audited without the value | Plaintext in server memory while the create request is handled (avoided by the CLI entry); the operator's own clipboard and browser memory |
+| Setup key entered by the operator (added 2026-11-12) | Masked dialog input sent only in the create request of the privileged session, never logged, stored, cached or echoed by the server (`no-store`, no refilled field); executor-local CLI entry by non-echoing input or standard input, never argv or environment; strict format check before storage, refusal audited without the value; the reverse-proxy rules of D7 apply to the create route too (no request buffering to disk, no body logging, no recording WAF; fix round 2) | Plaintext in server and reverse-proxy memory while the create request is handled, and on the proxy's disk or in its logs if the proxy is configured against the guide (all avoided by the CLI entry); the operator's own clipboard and browser, including a browser or password manager that saves the field despite any `autocomplete` hint (fix round 2: NOS does not rely on such hints) |
 | *(Removed 2026-11-12: NOS creates no setup key, so this row no longer applies. Previous text follows.)* Setup key created but not recorded (crash, timeout, locked vault, race with revoke or expiry) | Persisted `pending` record with key name, managed group and creation time window before the create call; atomic compare-and-set to `created`; a key created for an offer that became final meanwhile is revoked at once; get by key ID and reconcile revoke only a key with exactly the requested key name and every candidate property; reconcile takes the key list before the record snapshot, reads it within named limits and treats a truncated list as unresolved; no window match (previously: by window and group after a create answered with a mismatched key name); zero or several matches, a name-mismatched record without a name match and a truncated list alert and never revoke | Key live until reconcile reaches NetBird or the operator revokes it by hand, at most until its ≤ 1 h expiry; a create NetBird processes after the stored window never matches (alert, record closed at window end + 1 h, key valid at most 1 h after its late creation). Foreign key revoked automatically only by (R1) a 32-bit key-name collision with a foreign key in the same group and window (about 2⁻³²), (R2) a key with exactly the requested name created by another party (a second executor from a copy of `executor.db`, or someone copying the naming) in the same group and window, or (R3) a valid create response from the management server that names another key's ID |
 | Setup key still valid after the offer ended | Secret wiped from the vault at the download and at the latest at the final state (failed wipe retried and shown); for every NetBird offer that ends without enrollment `netbird_setup_key_revoke_advised` audited and the revoke advice (with check value) shown on the offer page, the dashboard, `nebula host offers` and `nebula host offer-revoke` until dismissed; recommendation to create keys one-off and short-lived | Valid in NetBird until its own expiry or until the operator revokes it; NOS cannot revoke or check it (amended 2026-11-12; previously: key ID kept until an API revoke succeeded, retried, residual "at most until its ≤ 1 h expiry") |
 | *(Removed 2026-11-12: NOS deletes no NetBird peer.)* Wrong NetBird peer deleted | Never automatic; peers attributed only by the time-window fallback need a NetBird peer delete permit with the security key | Operator approves a wrong peer despite the shown peer name and IP |
@@ -1141,7 +1218,8 @@ this ADR either.
 | Script tampered in transit | TLS to the NOS origin, SHA-256 check before running, no `curl \| sh` | — |
 | Compromised server | Executor decides code match, builds the permit, holds the setup keys (amended 2026-11-12, previously "holds token and setup keys"); `nebula approve` independent view | Can serve a malicious script (root on the new host) and deceive the approval page, as today; can read a setup key typed into the web dialog (CLI entry avoids it) |
 | Leaked NetBird setup key | Recommended key properties: one use, short validity, auto-group only `nos-managed`; one-way policy with the default `All` policy disabled; failed real join visible in the script output (`netbird status`); vault wipe and revoke advice; possible-orphan listing (amended 2026-11-12; previously enforced one use and ≤ 1 h, executor peer cross-check, unconditional revocation, orphan-peer cleanup) | Rogue peers in the key's auto groups while the key is valid in NetBird; for a key created as recommended one rogue peer in `nos-managed`, reachable only from NOS, removed by the operator in NetBird; no detection by NOS (previously: attribution by the API or the time-window fallback, Q8) |
-| Compromised server substituting a setup key (added 2026-11-12; replaces "Compromised server minting setup keys": NOS mints none) | Key rendered only after a NetBird offer permit approved with the security key whose binding includes the key's check value; `nebula approve` shows it; check value shown at entry and by the CLI; operator confirms the host appears in their own NetBird dashboard; 2 open NetBird offers, 5 NetBird offers per hour | A deceived approval page with a foreign key joins the new host to a network of the attacker's choosing on a shared management service; the pairing code still prevents a wrong pin |
+| Compromised server substituting a setup key (added 2026-11-12; replaces "Compromised server minting setup keys": NOS mints none) | Key rendered only after a NetBird offer permit approved with the security key whose binding includes the key's check value; `nebula approve` shows it; CLI entry (the key never passes the server) recommended for substitution protection; for dialog entry the operator compares `nebula approve` with a check value computed on their own machine (D6 "Trusted reference for the check value"); operator confirms the host appears in their own NetBird dashboard; 2 open NetBird offers, 5 NetBird offers per hour | Dialog entry without the operator's own computation: every check value the operator sees derives from the key the server forwarded, so a substituted key joins the new host to a network of the attacker's choosing on a shared management service and is noticed only when the host is missing from the operator's NetBird dashboard (fix round 2; previously the check value "shown at entry" counted as a mitigation for both paths; open question Q11); the pairing code still prevents a wrong pin |
+| Sealed secrets created without a security-key touch (added 2026-11-12, fix round 2) | NetBird limits (2 open, 5 per hour); 15-minute expiry; wipe at download and final state; no render before the NetBird offer permit is approved; no vault read path for the server | A compromised server with an open privileged session can make operator-unrelated keys sit sealed in the executor vault for up to 15 minutes without a touch (previously no setup key existed before the approval, because NOS created it on approval) |
 | *(Removed 2026-11-12: NOS holds no NetBird token.)* NetBird token misuse | Executor vault, typed calls only, audit, dedicated service user | Role may be broader than needed; accepted (Q3) |
 | Hostile host output (addresses) | Addresses are hints the operator retypes; endpoint syntax validated; text-only rendering | — |
 | Offer flooding | Limits per executor and hour; offers require a privileged session | — |
@@ -1373,15 +1451,53 @@ decided by this (see "Decisions of the maintainer").
 **Secret handling compared with before.** Unchanged or stricter: vault
 only, never displayed or logged, placeholder in "Show script", no browser
 download for NetBird offers, `umask 077`/`mktemp -d`/`trap` on the host,
-never argv, one security-key approval per key; the key is now wiped at the
-download instead of only at the final state, and the executor holds no
-NetBird token at all. Weaker, because NOS can no longer act in NetBird:
-the key's lifetime, use count and groups are the operator's choice and NOS
-cannot revoke the key, detect a rogue peer or delete a peer; these
-residuals are named in the threat table and answered with recommendations,
-the audited revoke advice and the possible-orphan listing. New exposure:
-a key typed into the web dialog passes the server in memory (as the
-download stream did before); the CLI entry avoids it.
+never argv, one security-key approval per key before it is rendered; the
+key is now wiped at the download instead of only at the final state, and
+the executor holds no NetBird token at all. Weaker, because NOS can no
+longer act in NetBird: the key's lifetime, use count and groups are the
+operator's choice and NOS cannot revoke the key, detect a rogue peer or
+delete a peer; these residuals are named in the threat table and answered
+with recommendations, the audited revoke advice and the possible-orphan
+listing. Also weaker (fix round 2, previously not listed here):
+
+- *Exposure in transit:* a key typed into the web dialog passes the
+  server and the reverse proxy in memory (as the download stream did
+  before); the D7 proxy rules now cover the create route; the CLI entry
+  avoids both.
+- *Integrity:* before, NOS created the key itself, so a compromised
+  server could not substitute it. Now a key typed into the dialog can be
+  substituted by a compromised server, and the check value detects that
+  only if the operator compares `nebula approve` with a value computed on
+  their own machine (D6 "Trusted reference for the check value"); the CLI
+  entry is not affected. Open question Q11.
+- *Secrets before approval:* before, no key existed until the security-key
+  approval. Now a NetBird offer seals the supplied key at creation (CLI:
+  at entry), so a compromised server with an open privileged session can
+  make sealed secrets exist in the vault without a touch, bounded by the
+  NetBird limits, the 15-minute expiry and the wipe; none is rendered
+  without the approval.
+- *Operator client:* NOS no longer claims that the browser does not save
+  the field; whether a browser or password manager keeps the typed key is
+  the operator's client residual (D6 "Entry").
+
+**Open question Q11 (fix round 2, for the maintainer): dialog entry and
+key substitution.** The decision of 2026-11-12 allows the key in the web
+dialog. A compromised server can substitute such a key, and only a check
+value the operator computes outside NOS detects it. Options: (a) keep
+dialog entry, label the dialog's check value "shown by the server", and
+document the workstation computation as the comparison step before the
+touch (what this ADR now specifies); (b) keep dialog entry but make the
+NetBird offer permit's approval in `nebula approve` require the operator to
+type the self-computed check value, so the comparison cannot be skipped;
+(c) drop dialog entry and require the CLI entry for every NetBird offer.
+**Recommendation: (a) now, (c) as the guide's default for high-assurance
+hosts.** (a) matches the decision as given and keeps the extra exposure
+named; (b) adds a typed step to every NetBird enrollment and still fails
+when the operator computes from the wrong copy; (c) changes the decision
+of 2026-11-12, so it needs the maintainer. The substitution threat is in
+the same class as the existing residual "a compromised server can serve a
+malicious script" (threat table, "Compromised server"), which already
+gives root on the new host.
 
 **Open question Q10 (fix round 1, for the maintainer): link of the CLI
 key entry to an offer.** The decision of 2026-11-12 names the key entry
@@ -1408,7 +1524,7 @@ the dialog stays the only entry path's residual.
 | --- | --- | --- |
 | Context, constraints | Provider tokens executor-held (applied to a NetBird token) | No NetBird token, no NetBird API call |
 | D1 step 1 | NetBird option shown when a NetBird token is configured | Shown when a NetBird management URL is configured; operator enters the setup key |
-| D1 step 2 | Offer without key until approval; on approval the executor creates the key through the API; permit binds managed group, ephemeral flag, setup-key expiry | Supplied key sealed at creation; permit binds its check value; on approval the script is rendered and hashed |
+| D1 step 2 | Offer without key until approval; on approval the executor creates the key through the API; permit binds managed group, ephemeral flag, setup-key expiry | Supplied key sealed at creation (before any touch); permit binds its check value, which detects substitution only against a reference the server cannot forge (fix round 2); on approval the script is rendered and hashed |
 | D1 step 3 (residual after `SIGKILL`, disk and swap residuals) | Key "one-off, at most 1 hour valid and revoked when the offer becomes final" | One-off and short-lived only as created by the operator; NOS advises revoking |
 | D1 step 3 ("Show script" in `awaiting_approval`) | No setup key yet | Key sealed already; "Show script" never reads it |
 | D2 "States" | `open` after "the setup key is recorded" (Creation order) | `open` after approval and the stored full-render hash (Supply order); `awaiting_key` before `awaiting_approval` for CLI key entry |
@@ -1428,9 +1544,9 @@ the dialog stays the only entry path's residual.
 | D6 "Join on the host" | Join, wait for address | Join, check with `netbird status`, operator confirms in dashboard; SSH step rules |
 | D6 "Executor cross-check" and peer attribution (Q8) | Peer list read through the API; API attribution or time-window fallback | Removed; Q8 decided |
 | D6 "Policy" last item | Policies read through the API, warnings | Static reminder in the dialog; guide documents the check |
-| D6 "Why a stolen setup key is bounded" | "Within the hour", cross-check reports and executor deletes the rogue peer; permit stops minting | Bound depends on the operator's key properties; operator removes the rogue peer; permit stops substitution |
+| D6 "Why a stolen setup key is bounded" | "Within the hour", cross-check reports and executor deletes the rogue peer; permit stops minting | Bound depends on the operator's key properties; operator removes the rogue peer; permit stops substitution only against a reference the server cannot forge (CLI entry, or the operator's own check-value computation for dialog entry; fix round 2, previously "permit stops substitution"; Q11) |
 | D6 "Token scope" | Service-user role broader than needed, accepted (Q3) | Removed |
-| D7 "Reverse proxy" | Key "still one-off, short-lived and revoked" | One-off and short-lived as created; revoke advice |
+| D7 "Reverse proxy" | Key "still one-off, short-lived and revoked" | One-off and short-lived as created; revoke advice; the same no-disk, no-log rules also for the one-step create route that carries a dialog-typed key (fix round 2) |
 | D7 "Same client address" | Orphan-peer decision, `netbird_peer_deleted`, `netbird_peer_kept` | Revoke-advice dismissal, `netbird_setup_key_supplied`, `_rejected` |
 | Threat model additions | Rows on key creation/recording, revoke, wrong peer deleted, leaked key with cross-check, minting, token misuse | Rows reworded, removed rows marked, new rows for key entry, possible orphan peers and key substitution |
 | Non-goals | — | No NetBird Management API access |
