@@ -31,6 +31,7 @@ const fakeMountinfo = `22 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw,err
 24 22 0:50 / /etc/pve rw,nosuid,nodev shared:3 - fuse /dev/fuse rw,user_id=0
 25 22 8:17 / /opt/data\040disk rw,relatime shared:4 - ext4 /dev/sdb1 rw
 26 22 0:5 / /proc rw,nosuid shared:5 - proc proc rw
+27 22 0:60 / /usr/lib/x\011t\134b rw shared:6 opt:x - FUSE"x\ none rw
 `
 
 // weirdName is a file name with a newline, a backslash and a non-UTF-8 byte.
@@ -154,6 +155,11 @@ func shells(t *testing.T) []string {
 // runScript runs the embedded script against root and returns its stdout.
 func runScript(t *testing.T, shell, root string, params []byte) ([]byte, []byte, error) {
 	t.Helper()
+	return runScriptPath(t, shell, root, params, os.Getenv("PATH"))
+}
+
+func runScriptPath(t *testing.T, shell, root string, params []byte, path string) ([]byte, []byte, error) {
+	t.Helper()
 	work := t.TempDir()
 	scriptPath := filepath.Join(work, "action.sh")
 	if err := os.WriteFile(scriptPath, Script, 0o600); err != nil {
@@ -169,7 +175,7 @@ func runScript(t *testing.T, shell, root string, params []byte) ([]byte, []byte,
 	cmd := exec.CommandContext(ctx, shell, scriptPath)
 	cmd.Dir = cwd
 	cmd.Env = []string{
-		"PATH=" + os.Getenv("PATH"),
+		"PATH=" + path,
 		"NEBULA_PARAMS=" + paramsPath,
 		"NEBULA_FIM_TEST_ROOT=" + root,
 		// A here-document or temporary file would need TMPDIR.
@@ -371,7 +377,7 @@ func TestScriptOutputMatchesParserAndTree(t *testing.T) {
 				}
 			}
 
-			wantMounts := []Mount{{Path: []byte("/boot/efi"), FSType: "vfat"}, {Path: []byte("/etc/pve"), FSType: "fuse"}, {Path: []byte("/opt/data disk"), FSType: "ext4"}}
+			wantMounts := []Mount{{Path: []byte("/boot/efi"), FSType: "vfat"}, {Path: []byte("/etc/pve"), FSType: "fuse"}, {Path: []byte("/opt/data disk"), FSType: "ext4"}, {Path: []byte("/usr/lib/x\tt\\b"), FSType: "invalid"}}
 			if len(res.Mounts) != len(wantMounts) {
 				t.Fatalf("mounts %+v, want %+v", res.Mounts, wantMounts)
 			}
@@ -422,7 +428,39 @@ func TestScriptOutputMatchesParserAndTree(t *testing.T) {
 	}
 }
 
-// TestScriptNeverReportsOutsideProfile: excluded and out-of-profile paths
+// TestScriptAwkImplementations: the document is the same with every awk
+// the host may have (mawk is Debian's default; gawk and busybox awk are
+// common), each skipped when not installed.
+func TestScriptAwkImplementations(t *testing.T) {
+	root := buildTree(t, treeOpts{})
+	ref, stderr, err := runScript(t, "/bin/sh", root, scanParams(t, ModeFull))
+	if err != nil {
+		t.Fatalf("script: %v %s", err, stderr)
+	}
+	for _, c := range []struct{ name, bin string }{{"mawk", "mawk"}, {"gawk", "gawk"}, {"original-awk", "original-awk"}, {"busybox", "busybox"}} {
+		t.Run(c.name, func(t *testing.T) {
+			bin, err := exec.LookPath(c.bin)
+			if err != nil {
+				t.Skipf("%s not installed", c.bin)
+			}
+			dir := t.TempDir()
+			if err := os.Symlink(bin, filepath.Join(dir, "awk")); err != nil {
+				t.Fatal(err)
+			}
+			out, stderr, err := runScriptPath(t, "/bin/sh", root, scanParams(t, ModeFull), dir+":"+os.Getenv("PATH"))
+			if err != nil {
+				t.Fatalf("script: %v %s", err, stderr)
+			}
+			// The host times may differ by a second between the runs.
+			norm := regexp.MustCompile(`"(started|ended)":-?[0-9]+`)
+			if a, b := norm.ReplaceAll(out, nil), norm.ReplaceAll(ref, nil); !bytes.Equal(a, b) {
+				t.Errorf("output with %s differs from the default awk:\n%.2000s\n---\n%.2000s", c.name, a, b)
+			}
+		})
+	}
+}
+
+// TestScriptNeverReportsOutsideProfile:excluded and out-of-profile paths
 // never appear, and nothing is read through a symlink.
 func TestScriptNeverReportsOutsideProfile(t *testing.T) {
 	root := buildTree(t, treeOpts{symlinkHome: true})
