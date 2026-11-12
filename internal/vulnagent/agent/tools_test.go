@@ -160,13 +160,24 @@ func TestSubmitAssessmentSchema(t *testing.T) {
 		"case-folded field": `{"Text":"t","backport_checked":true,"likely_false_positive":false,"exploit_public":true,"rationale":""}`,
 		"trailing":          ok + `x`,
 		"not json":          `PWNED`,
-		"oversized raw":     `{"text":"` + strings.Repeat(`A`, MaxSubmitArgumentsBytes/6+1) + `"}`,
+		"oversized raw":     padded(ok, MaxSubmitArgumentsBytes+1),
+	}
+	// The padded payload differs from ok only in whitespace: at the raw
+	// limit it is accepted, so its rejection one byte over is the size check.
+	if a, err := parseSubmit(padded(ok, MaxSubmitArgumentsBytes)); err != nil || a.Rationale != "KEV listed" {
+		t.Fatalf("payload padded to the raw limit rejected: %v", err)
 	}
 	for name, p := range bad {
 		if _, err := parseSubmit(p); !errors.Is(err, ErrInvalidArguments) {
 			t.Errorf("%s: err = %v, want ErrInvalidArguments", name, err)
 		}
 	}
+}
+
+// padded inserts JSON whitespace after the opening brace of obj so the
+// result is exactly n bytes long.
+func padded(obj string, n int) string {
+	return "{" + strings.Repeat(" ", n-len(obj)) + obj[1:]
 }
 
 func TestTextLimitsMatchFindingRecord(t *testing.T) {
