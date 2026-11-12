@@ -31,6 +31,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"html"
 	"io"
 	"log/slog"
@@ -352,9 +353,94 @@ const ndExecutorSrc = "../../internal/executor"
 // can open a connection.
 var ndIOImports = map[string]bool{
 	"net": true, "net/http": true, "crypto/tls": true, "os/exec": true, "syscall": true,
-	"golang.org/x/crypto/ssh": true,
+	"golang.org/x/crypto/ssh": true, "google.golang.org/grpc": true,
 	"github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport": true,
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun":      true,
+}
+
+// ndModule is the module path; ndRepoRoot the repository root, relative
+// to this test.
+const (
+	ndModule   = "github.com/nebula-operation-station/nebula-operation-station"
+	ndRepoRoot = "../.."
+)
+
+// ndReviewedIOSymbols are the uses of an I/O package (ndIOImports) inside
+// the module packages the read path may use (ndReadPathImports and the
+// module packages they import), each reviewed as opening no connection. A
+// new use (a dial, a client, a request) in permit, executordb, vault or
+// any package below them fails the guard until it is reviewed here.
+var ndReviewedIOSymbols = map[string]string{
+	"internal/events: syscall.O_NOFOLLOW":                    "open flag of the local event key file",
+	"internal/events: syscall.Stat_t":                        "owner check of a local file",
+	"internal/fsguard: syscall.O_NOFOLLOW":                   "open flag of a local file",
+	"internal/fsguard: syscall.Stat_t":                       "owner check of a local file",
+	"internal/pvecontract: net.ParseCIDR":                    "parses text",
+	"internal/pvecontract: net.ParseIP":                      "parses text",
+	"internal/canonical: sshtransport.ParseEndpoint":         "parses host[:port] text, no lookup",
+	"internal/executordb: sshtransport.CheckHostKey":         "checks a key type and size",
+	"internal/executordb: ssh.FingerprintSHA256":             "hashes a public key",
+	"internal/executordb: ssh.ParsePublicKey":                "parses a public key",
+	"internal/rpc/executorv1: grpc.CallOption":               "generated client type",
+	"internal/rpc/executorv1: grpc.ClientConnInterface":      "generated client type (the read path makes no client)",
+	"internal/rpc/executorv1: grpc.MethodDesc":               "generated service descriptor",
+	"internal/rpc/executorv1: grpc.ServiceDesc":              "generated service descriptor",
+	"internal/rpc/executorv1: grpc.ServiceRegistrar":         "generated server registration",
+	"internal/rpc/executorv1: grpc.StaticMethod":             "generated call option",
+	"internal/rpc/executorv1: grpc.StreamDesc":               "generated service descriptor",
+	"internal/rpc/executorv1: grpc.SupportPackageIsVersion9": "generated version check",
+	"internal/rpc/executorv1: grpc.UnaryServerInfo":          "generated server type",
+	"internal/rpc/executorv1: grpc.UnaryServerInterceptor":   "generated server type",
+}
+
+// ndReadPathCalls are the calls on the read path that the walk cannot
+// follow by name: calls through a receiver, a struct field, a local value
+// or a func value, whose target is not a function of the executor
+// package. Each is reviewed as opening no connection. A new call through
+// an injected interface or func-valued field with a neutral name (such as
+// s.devices.Fetch or s.fetch) fails the guard until it is reviewed here
+// and the tests inject a dialer.
+var ndReadPathCalls = map[string]string{
+	"(*hook)":                          "test hook after the reservation (nil in production)",
+	"a.Now":                            "injected clock",
+	"b.Now":                            "injected clock",
+	"m.Now":                            "injected clock",
+	"s.Now":                            "injected clock",
+	"b.String":                         "strings.Builder",
+	"r.String":                         "enum name",
+	"binary.BigEndian.Uint64":          "byte decoding",
+	"ctx.Err":                          "context state",
+	"doc.NetDeviceTarget":              "permit lease document lookup",
+	"t.AllowsRead":                     "permit lease target check",
+	"effective.Before":                 "time comparison",
+	"effective.Unix":                   "time conversion",
+	"g.ExpiresAt.Unix":                 "time conversion",
+	"g.RevokedAt.IsZero":               "time check",
+	"i.UpdatedAt.Unix":                 "time conversion",
+	"last.Unix":                        "time conversion",
+	"netDevAfterReserve.Load":          "atomic test hook load",
+	"pub.Marshal":                      "public key encoding",
+	"signer.PublicKey":                 "public key of a loaded signer",
+	"s.keys.Signer":                    "keyring file load (local disk)",
+	"s.auth.ReadDispatchEpoch":         "permit authority state",
+	"s.db.GetNetDevice":                "executor.db (SQLite, local)",
+	"s.db.ReadActionLastRun":           "executor.db (SQLite, local)",
+	"s.db.ReadGrantClock":              "executor.db (SQLite, local)",
+	"s.db.ReadGrants":                  "executor.db (SQLite, local)",
+	"s.db.ReleaseReadRun":              "executor.db (SQLite, local)",
+	"s.db.ReserveReadRun":              "executor.db (SQLite, local)",
+	"s.log.Info":                       "audit log",
+	"s.vault.List":                     "vault metadata (executor.db)",
+	"s.vault.State":                    "vault state",
+	"status.FromContextError(err).Err": "gRPC status of a context error",
+}
+
+// ndBuiltinCalls are builtins and conversions, which do no I/O.
+var ndBuiltinCalls = map[string]bool{
+	"append": true, "cap": true, "clear": true, "copy": true, "delete": true, "len": true, "max": true, "min": true,
+	"make": true, "new": true, "panic": true, "recover": true,
+	"[]byte": true, "[]rune": true, "string": true, "int": true, "int32": true, "int64": true, "uint": true,
+	"uint16": true, "uint32": true, "uint64": true, "float64": true, "bool": true, "byte": true, "rune": true,
 }
 
 // ndReadPathImports are the packages the read path may use: those it uses
@@ -381,12 +467,13 @@ var ndIOName = regexp.MustCompile(`(?i)dial|transport|probe|netdevadmin|conn$|^c
 // ndReadIOFindings walks the executor sources from ReadNetDevice through
 // every package function or method it names (by name, so it
 // over-approximates) and returns each use of an I/O package or a dial-like
-// identifier, plus the visited function names.
-func ndReadIOFindings(dir string) (findings, visited []string, err error) {
+// identifier and each call it cannot follow that is not in
+// ndReadPathCalls, plus the visited function names and every such call.
+func ndReadIOFindings(dir string) (findings, visited, calls []string, err error) {
 	fset := token.NewFileSet()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	type fn struct {
 		decl    *ast.FuncDecl
@@ -400,17 +487,9 @@ func ndReadIOFindings(dir string) (findings, visited []string, err error) {
 		}
 		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		imports := map[string]string{}
-		for _, imp := range f.Imports {
-			p := strings.Trim(imp.Path.Value, `"`)
-			alias := p[strings.LastIndex(p, "/")+1:]
-			if imp.Name != nil {
-				alias = imp.Name.Name
-			}
-			imports[alias] = p
-		}
+		imports := ndFileImports(f)
 		for _, d := range f.Decls {
 			if fd, ok := d.(*ast.FuncDecl); ok && fd.Body != nil {
 				funcs[fd.Name.Name] = append(funcs[fd.Name.Name], fn{fd, imports})
@@ -418,9 +497,10 @@ func ndReadIOFindings(dir string) (findings, visited []string, err error) {
 		}
 	}
 	if len(funcs["ReadNetDevice"]) == 0 {
-		return nil, nil, fmt.Errorf("ReadNetDevice not found in %s", dir)
+		return nil, nil, nil, fmt.Errorf("ReadNetDevice not found in %s", dir)
 	}
 	seen := map[string]bool{"ReadNetDevice": true}
+	seenCalls := map[string]bool{}
 	queue := []string{"ReadNetDevice"}
 	for len(queue) > 0 {
 		cur := queue[0]
@@ -428,6 +508,36 @@ func ndReadIOFindings(dir string) (findings, visited []string, err error) {
 		visited = append(visited, cur)
 		for _, f := range funcs[cur] {
 			ast.Inspect(f.decl.Body, func(n ast.Node) bool {
+				// A call the walk cannot follow by name: a method of
+				// another package's value, a field, a func value.
+				if c, ok := n.(*ast.CallExpr); ok {
+					target := ""
+					switch x := c.Fun.(type) {
+					case *ast.SelectorExpr:
+						pkg, isIdent := x.X.(*ast.Ident)
+						_, isPkg := f.imports[ndIdentName(pkg, isIdent)]
+						if _, local := funcs[x.Sel.Name]; !isPkg && !local {
+							target = types.ExprString(c.Fun)
+						}
+					case *ast.Ident:
+						if _, local := funcs[x.Name]; !local && !ndBuiltinCalls[x.Name] {
+							target = x.Name
+						}
+					case *ast.ArrayType:
+						if !ndBuiltinCalls[types.ExprString(x)] {
+							target = types.ExprString(x)
+						}
+					default:
+						target = types.ExprString(c.Fun)
+					}
+					if target != "" && !seenCalls[target] {
+						seenCalls[target] = true
+						calls = append(calls, target)
+						if _, ok := ndReadPathCalls[target]; !ok {
+							findings = append(findings, fmt.Sprintf("%s: unreviewed call %s (an injected interface, field or func value could dial)", fset.Position(c.Pos()), target))
+						}
+					}
+				}
 				var id *ast.Ident
 				switch x := n.(type) {
 				case *ast.SelectorExpr:
@@ -453,7 +563,102 @@ func ndReadIOFindings(dir string) (findings, visited []string, err error) {
 			})
 		}
 	}
-	return findings, visited, nil
+	return findings, visited, calls, nil
+}
+
+// ndIdentName returns the name of id, or "" if ok is false.
+func ndIdentName(id *ast.Ident, ok bool) string {
+	if !ok {
+		return ""
+	}
+	return id.Name
+}
+
+// ndFileImports maps the import names of f to their paths.
+func ndFileImports(f *ast.File) map[string]string {
+	imports := map[string]string{}
+	for _, imp := range f.Imports {
+		p := strings.Trim(imp.Path.Value, `"`)
+		alias := p[strings.LastIndex(p, "/")+1:]
+		if imp.Name != nil {
+			alias = imp.Name.Name
+		}
+		imports[alias] = p
+	}
+	return imports
+}
+
+// ndPackageIOFindings scans the module packages the read path may use
+// (the module entries of ndReadPathImports and, transitively, the module
+// packages they import; I/O packages such as sshtransport are not entered,
+// their uses are checked where they are imported) and returns each use of
+// an I/O package symbol that is not in ndReviewedIOSymbols, plus the
+// scanned package directories and every use met. root is the repository
+// root, module the module path.
+func ndPackageIOFindings(root, module string) (findings, scanned, uses []string, err error) {
+	var queue []string
+	for p := range ndReadPathImports {
+		if strings.HasPrefix(p, module+"/") {
+			queue = append(queue, strings.TrimPrefix(p, module+"/"))
+		}
+	}
+	slices.Sort(queue)
+	seen := map[string]bool{}
+	for _, q := range queue {
+		seen[q] = true
+	}
+	seenUse := map[string]bool{}
+	for len(queue) > 0 {
+		rel := queue[0]
+		queue = queue[1:]
+		scanned = append(scanned, rel)
+		dir := filepath.Join(root, filepath.FromSlash(rel))
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("scan %s: %w", rel, err)
+		}
+		fset := token.NewFileSet()
+		for _, ent := range entries {
+			name := ent.Name()
+			if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			imports := ndFileImports(f)
+			for _, p := range imports {
+				sub, ok := strings.CutPrefix(p, module+"/")
+				if ok && !ndIOImports[p] && !seen[sub] {
+					seen[sub] = true
+					queue = append(queue, sub)
+				}
+			}
+			ast.Inspect(f, func(n ast.Node) bool {
+				x, ok := n.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				pkg, ok := x.X.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				if p, ok := imports[pkg.Name]; ok && ndIOImports[p] {
+					use := rel + ": " + pkg.Name + "." + x.Sel.Name
+					if !seenUse[use] {
+						seenUse[use] = true
+						uses = append(uses, use)
+					}
+					if _, ok := ndReviewedIOSymbols[use]; !ok {
+						findings = append(findings, fmt.Sprintf("%s: unreviewed use of %s.%s (%s)", fset.Position(x.Pos()), pkg.Name, x.Sel.Name, p))
+					}
+				}
+				return true
+			})
+		}
+	}
+	return findings, scanned, uses, nil
 }
 
 // requireNoNetDevReadIO stops the test before any read when the
@@ -462,15 +667,40 @@ func ndReadIOFindings(dir string) (findings, visited []string, err error) {
 // executor has no dialer hook yet, so once ND-14 adds device I/O these
 // tests must inject a loopback or failing dialer first; until then this
 // guard keeps every read in this file off the network.
+//
+// It checks, statically: the executor functions reachable from
+// ReadNetDevice by name (I/O packages, dial-like names, and every call
+// through a receiver, field or func value against ndReadPathCalls), and
+// the module packages the read path may use, with the module packages
+// below them (every use of an I/O package against ndReviewedIOSymbols).
+//
+// Limits (reviewed, ND-21 follow-up): the walk is by name, not by type,
+// so it does not resolve which implementation an interface call reaches;
+// a reviewed call such as s.db.ReadGrants is trusted to stay local
+// because executordb itself is scanned. I/O reached through a value
+// injected into a scanned package from outside it (a func or interface
+// handed to permit at construction), or through a third-party package
+// other than those in ndIOImports, is not seen. These gaps close when
+// ND-14 adds a dialer hook that ndEnv replaces with a failing one; until
+// then the guard plus the Unimplemented reply in wantAuthorized are the
+// protection.
 func requireNoNetDevReadIO(t *testing.T) {
 	t.Helper()
-	findings, visited, err := ndReadIOFindings(ndExecutorSrc)
+	findings, visited, _, err := ndReadIOFindings(ndExecutorSrc)
 	if err != nil {
 		t.Fatalf("scan the executor read path: %v", err)
+	}
+	pkgFindings, scanned, _, err := ndPackageIOFindings(ndRepoRoot, ndModule)
+	if err != nil {
+		t.Fatalf("scan the read path packages: %v", err)
 	}
 	if len(findings) > 0 {
 		t.Fatalf("ReadNetDevice can reach device I/O; inject a loopback or test-failing dialer into ndEnv before reading %s at %s (functions on the path: %v):\n%s",
 			ndDevice, ndEndpoint, visited, strings.Join(findings, "\n"))
+	}
+	if len(pkgFindings) > 0 {
+		t.Fatalf("a package on the read path can open a connection; review it and inject a dialer into ndEnv before reading %s at %s (packages scanned: %v):\n%s",
+			ndDevice, ndEndpoint, scanned, strings.Join(pkgFindings, "\n"))
 	}
 }
 
@@ -492,12 +722,26 @@ func (s *S) ReadNetDevice() { var c st.Config; _ = c }`,
 import "github.com/nebula-operation-station/nebula-operation-station/internal/netdevcbs"
 func (s *S) ReadNetDevice() { s.run() }
 func (s *S) run() { _ = netdevcbs.Collect(s.target) }`,
+		// Dials behind neutral names: an injected interface, a func-valued
+		// field, a func value in a local, a method value.
+		"injected interface with a neutral name": `package x
+func (s *S) ReadNetDevice() { s.check() }
+func (s *S) check() { _, _ = s.devices.Fetch(s.target) }`,
+		"func-valued field": `package x
+func (s *S) ReadNetDevice() { _ = s.fetch(s.target) }`,
+		"func value in a local": `package x
+func (s *S) ReadNetDevice() { f := s.hooks[0]; f() }`,
+		"call of a returned func": `package x
+func (s *S) ReadNetDevice() { s.client()() }
+func (s *S) client() func() { return s.c }`,
+		"reviewed receiver, new method": `package x
+func (s *S) ReadNetDevice() { s.db.OpenDeviceSession() }`,
 	} {
 		dir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(dir, "x.go"), []byte(src), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		findings, _, err := ndReadIOFindings(dir)
+		findings, _, _, err := ndReadIOFindings(dir)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -505,15 +749,85 @@ func (s *S) run() { _ = netdevcbs.Collect(s.target) }`,
 			t.Errorf("%s: guard found no I/O", name)
 		}
 	}
+
+	// I/O added inside a package the read path may use (here permit) or
+	// below it is reported, while the reviewed non-dialing uses are not.
+	for name, tc := range map[string]struct {
+		src  string
+		want bool
+	}{
+		"net.Dial in permit": {`package permit
+import "net"
+func f() { _, _ = net.Dial("tcp", "10.20.0.2:22") }`, true},
+		"ssh.Dial in permit": {`package permit
+import "golang.org/x/crypto/ssh"
+func f() { _, _ = ssh.Dial("tcp", "10.20.0.2:22", nil) }`, true},
+		"http client in permit": {`package permit
+import "net/http"
+func f() { _, _ = http.Get("https://10.20.0.1/") }`, true},
+		"sshtransport dial in a package below permit": {`package permit
+import "github.com/nebula-operation-station/nebula-operation-station/internal/below"
+func f() { below.G() }`, true},
+		"reviewed sshtransport parse in canonical": {`package canonical
+import "github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport"
+func f() { _, _ = sshtransport.ParseEndpoint("10.20.0.2") }`, false},
+	} {
+		root := t.TempDir()
+		pkg := "internal/permit"
+		if !tc.want {
+			pkg = "internal/canonical"
+		}
+		for _, rel := range []string{"internal/canonical", "internal/executordb", "internal/netdevcontract", "internal/permit",
+			"internal/rpc/executorv1", "internal/schedgrant", "internal/vault", "internal/below"} {
+			if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(rel)), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(pkg), "x.go"), []byte(tc.src), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		below := `package below
+import "github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport"
+func G() { _, _ = sshtransport.Dial(nil, "10.20.0.2:22") }`
+		if err := os.WriteFile(filepath.Join(root, "internal", "below", "x.go"), []byte(below), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		findings, scanned, _, err := ndPackageIOFindings(root, ndModule)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if tc.want != (len(findings) > 0) {
+			t.Errorf("%s: findings %v (scanned %v), want found = %v", name, findings, scanned, tc.want)
+		}
+	}
+
 	// The walk follows the real read path into the lease check, and that
-	// path is I/O-free today.
-	_, visited, err := ndReadIOFindings(ndExecutorSrc)
+	// path is I/O-free today. Neither reviewed list holds a stale entry.
+	_, visited, calls, err := ndReadIOFindings(ndExecutorSrc)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("read path: %v", visited)
 	if !slices.Contains(visited, "checkNetDeviceGrant") {
 		t.Errorf("guard did not follow ReadNetDevice into checkNetDeviceGrant: %v", visited)
+	}
+	for c := range ndReadPathCalls {
+		if !slices.Contains(calls, c) {
+			t.Errorf("ndReadPathCalls lists %s, which the read path no longer calls", c)
+		}
+	}
+	_, scanned, uses, err := ndPackageIOFindings(ndRepoRoot, ndModule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("read path packages: %v", scanned)
+	if !slices.Contains(scanned, "internal/permit") || !slices.Contains(scanned, "internal/executordb") {
+		t.Errorf("package scan missed permit or executordb: %v", scanned)
+	}
+	for u := range ndReviewedIOSymbols {
+		if !slices.Contains(uses, u) {
+			t.Errorf("ndReviewedIOSymbols lists %s, which no scanned package uses", u)
+		}
 	}
 	requireNoNetDevReadIO(t)
 }
