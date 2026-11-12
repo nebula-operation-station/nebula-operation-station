@@ -20,8 +20,9 @@ const BundleArtifact = "builtins.tar"
 
 // ErrManifestInstalledFiles is a manifest that does not list exactly one
 // installed-files.json (spec 10, ADR 0015 D2). ParseManifest wraps it
-// together with ErrFormat.
-var ErrManifestInstalledFiles = errors.New("release: manifest must list exactly one installed-files.json")
+// together with ErrFormat. The text names the no-list case explicitly so
+// that operator-facing output reports it as such.
+var ErrManifestInstalledFiles = errors.New("release: manifest lists no installed-files.json, or more than one; exactly one is required")
 
 // Manifest limits (spec 10, hard limits).
 const (

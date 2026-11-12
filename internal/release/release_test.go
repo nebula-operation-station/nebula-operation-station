@@ -194,9 +194,15 @@ func TestParseManifestRequiresExactlyOneInstalledFiles(t *testing.T) {
 			a := m["artifacts"].([]any)
 			m["artifacts"] = []any{a[0], a[1], a[1], a[2]}
 		},
-		// Sorts before builtins.tar, so only the count check rejects it.
+		// Sorts before builtins.tar, so sortedUnique rejects it too. The
+		// count check runs first and decides the error.
 		"name case": func(m map[string]any) {
 			setArtifactName(m, InstalledFilesArtifact, "Installed-Files.json")
+		},
+		// Sorts correctly (after builtins.tar, before the .deb), so the
+		// count check alone rejects it.
+		"name case, sorted": func(m map[string]any) {
+			setArtifactName(m, InstalledFilesArtifact, "installed-files.JSON")
 		},
 	}
 	for name, edit := range cases {
