@@ -468,8 +468,10 @@ does NOS connect **from** (`--from`)?
   today's tree). Every catalog command has a reviewed **harness entry**
   next to its expected-fields entry. It names the command's **final
   request** (the RPC, dial or HTTP request that carries its arguments,
-  e.g. `ApproveGateCLI` for `batch stage`) and the inputs that make an
-  accepted value reach it. **Entry point**: the harness calls the
+  e.g. `ApproveGateCLI` for `batch stage`; for `restore`, which makes no
+  RPC, dial or HTTP request, the **final action** defined under
+  *Restore runs* below) and the inputs that make an accepted value reach
+  it. **Entry point**: the harness calls the
   command's subcommand function below `run` (for example `batchCmd`,
   `netdevCmd`, `secretCmd`; for `pve`, `backup` and `restore` the seam
   functions `pveWith`, `backupWith` and `restoreWith` named under **Test
@@ -699,6 +701,39 @@ does NOS connect **from** (`--from`)?
   the test fails and names the harness entry (a harness error, not an
   argument result), so a missing or too small fixture or a missing stdin
   line cannot turn into a pass or into a silent `canary-rejects`.
+
+  **Restore runs** (previously the harness entry of `restore` had to
+  name a final request and an accepted run had to record it, but
+  `restoreWith` makes no RPC, dial or HTTP request: it reads the
+  `--identity` file and the archive and then calls `backup.Restore`
+  with the injected `backup.System`, so no `restore` run could be
+  accepted or rejected, and it was open whether that was a harness
+  error or needed `canary-rejects`). For `restore` the recording fake
+  `backup.System` of **Test seams** item 2 is the recorder, and each of
+  its calls (`Stop`, `Start`, `Chown` with their arguments, in order)
+  counts as recorded traffic. The harness entry names as **final
+  action** the call `Start` with exactly `backup.StartUnits`, the last
+  call `backup.Restore` makes on success. Then the rules above apply
+  unchanged:
+  - **accepted**: `restoreWith` returns no error, the first recorded
+    call is `Stop` with exactly `backup.StopUnits`, and the last
+    recorded call is the final action;
+  - **rejected**: `restoreWith` returns an error and the fake recorded
+    no call (for example an `ARCHIVE` or `--identity` form whose file
+    does not parse as the minimal valid restore input);
+  - **harness error**: an error after at least one recorded call
+    (including the rollback `Start` that `backup.Restore` makes when a
+    step fails after `Stop`), or no error without the final action as
+    last call; the test fails and names the harness entry, never the
+    argument, and no `canary-rejects` covers it.
+  The `restore` arguments are `in-path` values that are read, not sent:
+  their expected-fields entry lists no field. The needle search of
+  conditions 1 and 2 covers the recorded `backup.System` calls (unit
+  names, `Chown` paths and user names) in place of requests; the files
+  written below `nebulaRoot` and the output text are not searched,
+  like the `backup` archive (prompt table above). The `Chown` paths lie
+  inside the working directory, whose path is checked against the
+  needles before the run (**Run-time values** below).
 
   **Bounded numbers** (previously a `canary-max: N` annotation that
   named only `events --limit`; `nebula batch stage N` parses with
