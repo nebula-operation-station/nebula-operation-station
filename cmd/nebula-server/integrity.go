@@ -44,11 +44,18 @@ var containerMarkers = []string{".dockerenv", "run/.containerenv"}
 // version, reading the signed reference from dir and checking the files
 // under root.
 //
-// The server has no durable release root state of its own (that is the
-// executor's, ADR 0015 D4 "Reference"), so the manifest signature is
-// verified against the root anchors compiled into this binary. A list
-// signed by a later, rotated root is therefore rejected (incomplete),
-// never accepted from keys beside the files.
+// Interim reference, deviating from ADR 0015 D4 "Reference" (open for a
+// maintainer decision, see docs/implementation/m0.md): the ADR wants later
+// checks against the copy the executor admitted into its own storage,
+// never against the copy in /usr/share, with the rollback rule. No
+// process admits that copy yet (IG-04), and the server cannot read
+// executor storage. So each run re-admits the /usr/share copy against the
+// root anchors compiled into this binary, and every status and log record
+// says so (integrity.SourceReleaseDirBuiltinAnchors). Rotations are not
+// applied: no installation can admit one yet either, so today this is
+// the same root state the executor has. A list signed by a root this
+// binary does not know is incomplete (reference-root-not-trusted), never
+// accepted from keys beside the files.
 func newIntegrityMonitor(log *slog.Logger, version, dir, root string) *integrity.Monitor {
 	v := strings.TrimPrefix(version, "v")
 	return &integrity.Monitor{
@@ -59,9 +66,10 @@ func newIntegrityMonitor(log *slog.Logger, version, dir, root string) *integrity
 			}
 			return integrity.LoadReference(state, v, dir)
 		},
-		Options:  integrity.Options{Root: root, Flavour: installFlavour(root)},
-		Interval: integrityCheckInterval,
-		Log:      log,
+		ReferenceSource: integrity.SourceReleaseDirBuiltinAnchors,
+		Options:         integrity.Options{Root: root, Flavour: installFlavour(root)},
+		Interval:        integrityCheckInterval,
+		Log:             log,
 	}
 }
 

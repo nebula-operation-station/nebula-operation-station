@@ -31,6 +31,26 @@ func TestIntegrityCheckIntervalIsADRValue(t *testing.T) {
 	}
 }
 
+// TestIntegrityServerNamesInterimReference: the server re-admits the
+// /usr/share copy against its built-in anchors, which ADR 0015 D4
+// "Reference" does not foresee (later checks use the executor-admitted
+// copy). Until that exists, every status says so instead of hiding it.
+func TestIntegrityServerNamesInterimReference(t *testing.T) {
+	m := newIntegrityMonitor(slog.New(slog.DiscardHandler), "1.0.0", t.TempDir(), t.TempDir())
+	if m.ReferenceSource != integrity.SourceReleaseDirBuiltinAnchors {
+		t.Fatalf("reference source %q", m.ReferenceSource)
+	}
+	mux := http.NewServeMux()
+	mountIntegrityStatus(mux, m)
+	if got := getIntegrityStatus(t, mux); got.ReferenceSource != integrity.SourceReleaseDirBuiltinAnchors {
+		t.Fatalf("pending status %+v", got)
+	}
+	m.RunOnce(context.Background())
+	if got := getIntegrityStatus(t, mux); got.ReferenceSource != integrity.SourceReleaseDirBuiltinAnchors {
+		t.Fatalf("status %+v", got)
+	}
+}
+
 func TestIntegrityInstallFlavour(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -67,6 +87,9 @@ func TestIntegrityInstallFlavour(t *testing.T) {
 func TestIntegrityServerWithoutListIsIncompleteOrNotCheckable(t *testing.T) {
 	releaseDir := t.TempDir()
 	// What install.sh provides today: manifest and signature, no list.
+	// Every release install therefore logs incomplete/no-installed-files-list
+	// at ERROR each hour until the list is installed (known gap, tracked in
+	// docs/implementation/m0.md).
 	for _, name := range []string{release.ManifestFile, release.SignatureFile} {
 		if err := os.WriteFile(filepath.Join(releaseDir, name), []byte("x"), 0o644); err != nil {
 			t.Fatal(err)

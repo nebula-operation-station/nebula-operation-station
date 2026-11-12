@@ -304,11 +304,15 @@ func TestSelfCheckRejectedReferenceIsIncomplete(t *testing.T) {
 		name  string
 		edit  func(dir string)
 		state release.RootState
+		cause string
 	}{
-		{"list edited", func(dir string) { mustWrite(t, filepath.Join(dir, release.InstalledFilesArtifact), tamperedList) }, f.k.state(t)},
-		{"signature missing", func(dir string) { mustRemove(t, filepath.Join(dir, release.SignatureFile)) }, f.k.state(t)},
-		{"manifest missing", func(dir string) { mustRemove(t, filepath.Join(dir, release.ManifestFile)) }, f.k.state(t)},
-		{"unknown root", func(string) {}, other.state(t)},
+		{"list edited", func(dir string) { mustWrite(t, filepath.Join(dir, release.InstalledFilesArtifact), tamperedList) }, f.k.state(t), CauseReferenceRejected},
+		{"signature missing", func(dir string) { mustRemove(t, filepath.Join(dir, release.SignatureFile)) }, f.k.state(t), CauseReferenceRejected},
+		{"manifest missing", func(dir string) { mustRemove(t, filepath.Join(dir, release.ManifestFile)) }, f.k.state(t), CauseReferenceRejected},
+		// A root the verifier does not know (for example a rotated root
+		// the root state was not advanced to) gets its own cause; it is
+		// still incomplete and logged at ERROR, never ok (ADR 0015 D4).
+		{"unknown root", func(string) {}, other.state(t), CauseRootNotTrusted},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := f.writeReferenceDir(t)
@@ -317,8 +321,11 @@ func TestSelfCheckRejectedReferenceIsIncomplete(t *testing.T) {
 			m, _ := newTestMonitor(t, f, dir, &buf)
 			m.Load = func(context.Context) (Reference, error) { return LoadReference(tc.state, testVersion, dir) }
 			st := m.RunOnce(context.Background())
-			if st.State != StateIncomplete || st.Cause != CauseReferenceRejected {
-				t.Fatalf("state %q cause %q, want incomplete/reference-rejected", st.State, st.Cause)
+			if st.State != StateIncomplete || st.Cause != tc.cause {
+				t.Fatalf("state %q cause %q, want incomplete/%s", st.State, st.Cause, tc.cause)
+			}
+			if !strings.Contains(buf.String(), `"level":"ERROR"`) || !strings.Contains(buf.String(), `"cause":"`+tc.cause+`"`) {
+				t.Fatalf("log: %s", buf.String())
 			}
 		})
 	}
@@ -423,6 +430,38 @@ func TestSelfCheckNoLoaderIsIncomplete(t *testing.T) {
 	m := &Monitor{Log: slog.New(slog.DiscardHandler)}
 	if st := m.RunOnce(context.Background()); st.State != StateIncomplete || st.Cause != CauseReferenceRejected {
 		t.Fatalf("%+v", st)
+	}
+}
+
+// TestSelfCheckNamesReferenceSource: the pending status, every run's
+// status (ok or not) and every run's log record say where the reference
+// came from, so an interim source is never a silent choice.
+func TestSelfCheckNamesReferenceSource(t *testing.T) {
+	const source = "test-source"
+	f := newFixture(t, defaultTree())
+	dir := f.writeReferenceDir(t)
+	var buf bytes.Buffer
+	m, _ := newTestMonitor(t, f, dir, &buf)
+	m.ReferenceSource = source
+	if st := m.Status(); st.State != StatePending || st.ReferenceSource != source {
+		t.Fatalf("pending status %+v", st)
+	}
+	if st := m.RunOnce(context.Background()); st.State != StateOK || st.ReferenceSource != source {
+		t.Fatalf("ok run %+v", st)
+	}
+	mustRemove(t, filepath.Join(dir, release.SignatureFile))
+	if st := m.RunOnce(context.Background()); st.State != StateIncomplete || st.ReferenceSource != source {
+		t.Fatalf("failed run %+v", st)
+	}
+	if got := strings.Count(buf.String(), `"reference_source":"`+source+`"`); got != 2 {
+		t.Fatalf("%d log records name the source, want 2: %s", got, buf.String())
+	}
+	b, err := json.Marshal(m.Status())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"reference_source":"`+source+`"`) {
+		t.Fatalf("status JSON: %s", b)
 	}
 }
 

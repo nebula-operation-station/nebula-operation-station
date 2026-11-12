@@ -76,11 +76,28 @@ const (
 	// CauseReferenceRejected: the list, manifest or signature is
 	// missing, unreadable or did not verify.
 	CauseReferenceRejected = "reference-rejected"
+	// CauseRootNotTrusted: the manifest is signed by a key the verifier's
+	// root state does not trust, for example a rotated root the state was
+	// not advanced to. Like any rejected reference it is StateIncomplete,
+	// never ok; the separate word only tells the admin why.
+	CauseRootNotTrusted = "reference-root-not-trusted"
 	// CauseCheckFailed: the check could not start (unknown flavour,
 	// root not openable, invalid options).
 	CauseCheckFailed = "check-failed"
 	// CauseUnreadable: listed files could not be read.
 	CauseUnreadable = "unreadable-files"
+)
+
+// Reference sources named in SelfCheck.ReferenceSource.
+const (
+	// SourceReleaseDirBuiltinAnchors: the caller re-admits the
+	// installed-files list from the release directory in /usr/share on
+	// every run, verified only against the root anchors built into its
+	// binary (no rotations). This is an interim source: ADR 0015 D4
+	// "Reference" wants later checks against the executor-admitted copy,
+	// never against the copy in /usr/share, with the rollback rule. That
+	// copy does not exist yet (admission during upgrade is IG-04).
+	SourceReleaseDirBuiltinAnchors = "usr-share-builtin-anchors"
 )
 
 // Deviation is one file whose status is not ok. It never holds file
@@ -103,6 +120,9 @@ type SelfCheck struct {
 	State State `json:"state"`
 	// Cause is a fixed word for not-ok states.
 	Cause string `json:"cause,omitempty"`
+	// ReferenceSource is Monitor.ReferenceSource: where the reference
+	// comes from and how it is admitted.
+	ReferenceSource string `json:"reference_source,omitempty"`
 	// Checked is when the latest check finished.
 	Checked time.Time `json:"checked,omitzero"`
 	// Runs counts finished checks since the process started.
@@ -147,6 +167,10 @@ type Monitor struct {
 	// ErrDevelopmentBuild makes the run not-checkable, any other error
 	// incomplete.
 	Load func(ctx context.Context) (Reference, error)
+	// ReferenceSource names where Load takes the reference from (for
+	// example SourceReleaseDirBuiltinAnchors); it is copied into every
+	// status and log record.
+	ReferenceSource string
 	// Options configures Check. Options.Now defaults to Now.
 	Options Options
 	// Interval is the period after the start check; 0 means
@@ -169,7 +193,7 @@ func (m *Monitor) Status() SelfCheck {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.runs == 0 {
-		return SelfCheck{State: StatePending, Note: RootCompromiseNote}
+		return SelfCheck{State: StatePending, ReferenceSource: m.ReferenceSource, Note: RootCompromiseNote}
 	}
 	st := m.latest
 	st.Deviations = append([]Deviation(nil), st.Deviations...)
@@ -224,6 +248,7 @@ func (m *Monitor) RunOnce(ctx context.Context) SelfCheck {
 		return m.Status()
 	}
 	st.Checked = now()
+	st.ReferenceSource = m.ReferenceSource
 	st.Note = RootCompromiseNote
 
 	m.mu.Lock()
@@ -246,6 +271,8 @@ func (m *Monitor) check(ctx context.Context, now func() time.Time) (SelfCheck, e
 		return SelfCheck{State: StateNotCheckable, Cause: CauseDevelopmentBuild}, err
 	case errors.Is(err, ErrNoInstalledFiles):
 		return SelfCheck{State: StateIncomplete, Cause: CauseNoList}, err
+	case errors.Is(err, release.ErrUntrusted):
+		return SelfCheck{State: StateIncomplete, Cause: CauseRootNotTrusted}, err
 	case err != nil:
 		return SelfCheck{State: StateIncomplete, Cause: CauseReferenceRejected}, err
 	}
@@ -320,6 +347,7 @@ func logSelfCheck(ctx context.Context, log *slog.Logger, st SelfCheck, took time
 		slog.String("kind", "integrity_self_check"),
 		slog.String("state", string(st.State)),
 		slog.String("cause", st.Cause),
+		slog.String("reference_source", st.ReferenceSource),
 		slog.String("release_version", st.ReleaseVersion),
 		slog.String("flavour", st.Flavour),
 		slog.String("list_digest", st.ListDigest),
