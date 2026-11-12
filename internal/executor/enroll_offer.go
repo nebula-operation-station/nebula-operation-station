@@ -134,6 +134,9 @@ type enrollOfferState struct {
 type offerEntry struct {
 	seq    uint64
 	render *offerRender // nil once the offer is final
+	// paired is the paired permit proposed for the offer (EN-08 part 2);
+	// nil before the match and once the offer is final.
+	paired *pairedProposal
 }
 
 // offerRender are an offer's render inputs, fixed at creation.
@@ -229,7 +232,7 @@ func (st *enrollOfferState) final(h [sha256.Size]byte) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if e := st.offers[h]; e != nil {
-		e.render = nil
+		e.render, e.paired = nil, nil
 	}
 }
 
