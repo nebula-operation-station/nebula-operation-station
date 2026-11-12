@@ -81,6 +81,16 @@ History:
   behaviour change in the production path (previously "AS-05 changes no
   production code", which left `backup`/`restore` unreachable under a
   non-root test).
+- 2026-11-12 (as00igf2, second review of PR #524): the `restore` canary
+  fixtures and their pairing are defined (`--identity` runs with an
+  archive sealed to the fixture identity only, `ARCHIVE` runs with an
+  unencrypted archive, plus fixture checks and a control run with an
+  unrelated identity; previously "minimal valid restore input",
+  undefined, so a wrong identity could pass); every error of an
+  `in-path`/`trust-path` run is a harness error, also for
+  `host pin --known-hosts` and `pve remote add`/`repin --ca-file`
+  (previously only for `restore`); the wrapper rejection test restores
+  `nebulaRoot` in `t.Cleanup` and runs without `t.Parallel`.
 
 ## Context
 
@@ -468,8 +478,10 @@ does NOS connect **from** (`--from`)?
   today's tree). Every catalog command has a reviewed **harness entry**
   next to its expected-fields entry. It names the command's **final
   request** (the RPC, dial or HTTP request that carries its arguments,
-  e.g. `ApproveGateCLI` for `batch stage`) and the inputs that make an
-  accepted value reach it. **Entry point**: the harness calls the
+  e.g. `ApproveGateCLI` for `batch stage`; for `restore`, which makes no
+  RPC, dial or HTTP request, the **final action** defined under
+  *Restore runs* below) and the inputs that make an accepted value reach
+  it. **Entry point**: the harness calls the
   command's subcommand function below `run` (for example `batchCmd`,
   `netdevCmd`, `secretCmd`; for `pve`, `backup` and `restore` the seam
   functions `pveWith`, `backupWith` and `restoreWith` named under **Test
@@ -570,6 +582,77 @@ does NOS connect **from** (`--from`)?
      `go test`. The manifest's `host` and `created_at` stay
      `os.Hostname()` and `time.Now()` (no seam; prompt table below).
 
+  **Wrapper tests** (previously the ADR required no behaviour change of
+  the production path but named no test that would catch a wrong
+  wrapper: under the non-root `go test` of CI, a `restoreCmd` passing an
+  always-true `isRoot`, or a `backupCmd` skipping `adminFromSudo` or
+  passing a no-op `drop`, went unnoticed, because the canary runs call
+  only the seams and the existing restore test skips without root).
+  AS-05 adds, in its new test files of `cmd/nebula/`, two tests that run
+  without root, call no seam with a fake and contain no `t.Skip`:
+  - *rejection test*, calling the production wrappers `backupCmd` and
+    `restoreCmd` themselves with an empty stdin, `SUDO_UID` set to the
+    empty string via `t.Setenv` (restored after the test; never
+    `os.Unsetenv`), which `adminFromSudo` treats like unset (previously
+    "unset (`t.Setenv`)", which `t.Setenv` cannot do), `nebulaRoot`
+    pointed at an empty `t.TempDir()` (the test saves the previous
+    value of the package variable `nebulaRoot` and restores it in a
+    `t.Cleanup` registered before the change, so no later test of
+    `cmd/nebula/` sees the temporary root; previously the ADR required
+    a restore only for `SUDO_UID`), the test and its subtests calling no
+    `t.Parallel` (which `t.Setenv` forbids as well, and which would let
+    a parallel test see the changed global) and
+    `NEBULA_EXECUTOR_SOCKET` naming a path in that directory where
+    nothing listens (no socket file is created). Each case asserts the
+    exact error text of today's tree, and an error of another type or
+    text fails the test:
+    - `backupCmd` with the argument `extra` returns the usage message
+      "usage: sudo nebula backup [--out FILE] [--full] [--no-encrypt]
+      [--pre-upgrade]" (usage before the admin check);
+    - `backupCmd` without arguments returns "run this with sudo as an
+      admin user (it reads the server's data as root and asks the
+      executor as you)", also when the test runs as root, because
+      `SUDO_UID` is empty;
+    - `backupCmd --pre-upgrade` returns the `skipped` error with exit
+      code `ExitSkipped` and the text "backup: no backup was made: needs
+      sudo from an admin user: " followed by that message;
+    - `restoreCmd` with two positional arguments returns "usage: sudo
+      nebula restore [--identity FILE] ARCHIVE" (argument count before
+      the root check);
+    - `restoreCmd` with one `ARCHIVE` that names a missing file in the
+      temporary directory returns "run this with sudo (it stops the
+      services and replaces their data)" when the test runs with an
+      effective UID other than 0, and an error matching `fs.ErrNotExist`
+      from opening the archive when it runs as root (the expectation
+      follows `os.Geteuid()`, so the case asserts in both environments
+      and never skips);
+    - in every case the output holds no "Restore this backup?" and no
+      "Type" prompt.
+    No case reaches `readServerPart`, `dropTo`, `dialExecutor`,
+    `backup.Restore` or the real `systemctl{}`: the admin check, the
+    root check or the missing archive stops each run first, and a
+    wrapper that skips a check runs into a different error (no backup
+    recipients in the empty `nebulaRoot`, the missing archive, a failed
+    dial) and fails on the text. So an always-true `isRoot` and a
+    skipped `adminFromSudo` are caught without root.
+  - *wrapper shape test*, for what a non-root run cannot reach (`dropTo`
+    runs only after `adminFromSudo` has accepted an admin, which needs
+    euid 0 and `SUDO_UID`): it parses `backup.go` and `pve.go` of the
+    package with `go/parser` and fails unless the body of each of
+    `restoreCmd`, `backupCmd` and `pveCmd` is a single `return` of a
+    call to `restoreWith`, `backupWith` or `pveWith` that first passes
+    the wrapper's own parameters unchanged and in order and then exactly
+    these trailing arguments, compared as gofmt output: `systemctl{}`,
+    `time.Now()` and `func() bool { return os.Geteuid() == 0 }` for
+    `restoreCmd`; `adminFromSudo`, `dropTo` and `dialExecutor` for
+    `backupCmd`; `dialExecutor` for `pveCmd`. A no-op `drop`, a
+    different `dial` or a changed root check therefore fails the test,
+    and changing a wrapper needs a reviewed change of this test (both in
+    the protected `cmd/nebula/`).
+  The existing root-only restore test keeps its root check and changes
+  only its call signature (above); the wrapper tests add to it and
+  replace nothing.
+
   Any other hook in non-test code of `cmd/nebula/` needs a new
   maintainer decision.
 
@@ -637,6 +720,95 @@ does NOS connect **from** (`--from`)?
   the test fails and names the harness entry (a harness error, not an
   argument result), so a missing or too small fixture or a missing stdin
   line cannot turn into a pass or into a silent `canary-rejects`.
+
+  **Restore runs** (previously the harness entry of `restore` had to
+  name a final request and an accepted run had to record it, but
+  `restoreWith` makes no RPC, dial or HTTP request: it reads the
+  `--identity` file and the archive and then calls `backup.Restore`
+  with the injected `backup.System`, so no `restore` run could be
+  accepted or rejected, and it was open whether that was a harness
+  error or needed `canary-rejects`). For `restore` the recording fake
+  `backup.System` of **Test seams** item 2 is the recorder, and each of
+  its calls (`Stop`, `Start`, `Chown` with their arguments, in order)
+  counts as recorded traffic. The harness entry names as **final
+  action** the call `Start` with exactly `backup.StartUnits`, the last
+  call `backup.Restore` makes on success. Then the rules above apply
+  unchanged:
+  - **accepted**: `restoreWith` returns no error, the first recorded
+    call is `Stop` with exactly `backup.StopUnits`, and the last
+    recorded call is the final action;
+  - **rejected**: never; a `restore` form cannot be rejected;
+  - **harness error**: every error `restoreWith` returns, with or
+    without a recorded call (including the rollback `Start` that
+    `backup.Restore` makes when a step fails after `Stop`), and no
+    error without the final action as last call; the test fails and
+    names the harness entry, never the argument, and no
+    `canary-rejects` covers it.
+  Previously an error with no recorded call counted as rejected (for
+  example an `ARCHIVE` or `--identity` form whose file did not parse as
+  the minimal valid restore input). That class also caught every
+  harness or fixture defect before `Stop`: a missing `restore` stdin
+  line, an unpinned `hostname`, fixture schemas behind a new migration
+  (`backup.CheckSchemas`), a fixture archive or identity that does not
+  parse. Such a defect then counted as an argument rejection, against
+  the rule above that a missing fixture or stdin line can never become
+  a pass or a silent `canary-rejects`. No argument-caused rejection
+  remains: the only property a `restore` form gives the command is a
+  path, and the test creates the file at that path with the minimal
+  valid restore input before the run (**Canary files for path kinds**
+  below), so a file that is missing or does not parse is itself a
+  harness error. The `restore` arguments therefore never carry
+  `canary-rejects`; the test fails when one does.
+
+  **Minimal valid restore input and run pairing** (previously "the
+  minimal valid restore input" was not defined per argument and the
+  pairing of the two arguments was open; `backup.Read`
+  (`internal/backup/backup.go`) decrypts only an archive that starts
+  with the age header and ignores the identities for an unencrypted
+  archive, so an `--identity` run paired with an unencrypted archive
+  was accepted whatever identity file the harness had written, and an
+  `ARCHIVE` run paired with an encrypted archive failed with
+  `backup.ErrEncrypted`). The `restore` harness entry defines these
+  fixtures, none of which holds a needle:
+  - *fixture identity*: one age X25519 identity (`AGE-SECRET-KEY-1…`
+    line) as `backup.ParseIdentities` accepts it, generated once per
+    test process; and a second, unrelated *control identity* generated
+    the same way;
+  - *plain archive*: written with `backup.Write` and no recipient
+    (unencrypted) from the fixture server tree, manifest host
+    `nos-fixture-host`, schemas of today's tree;
+  - *sealed archive*: the same content written with `backup.Write` to
+    exactly one recipient, the public key of the fixture identity, so
+    only the fixture identity decrypts it.
+  Pairing, the only two forms the test runs:
+  - a run of `--identity` (value = the run's canary form): the file at
+    that path holds the fixture identity, and `ARCHIVE` is the sealed
+    archive at a fixed fixture path in the working directory;
+  - a run of `ARCHIVE` (value = the run's canary form): no
+    `--identity`, and the file at that path holds the plain archive.
+  The plain archive is never paired with `--identity` and the sealed
+  archive never without it, so an accepted `--identity` run proves that
+  the command decrypted with the file at the run's path. Before the
+  first `restore` run the test checks the fixtures themselves and
+  reports any deviation as a harness error, never as an argument
+  result: `backup.Read` of the sealed archive returns
+  `backup.ErrEncrypted` with no identity, a decrypt error with the
+  control identity and the fixture manifest with the fixture identity;
+  `backup.Read` of the plain archive returns the fixture manifest with
+  no identity. In addition one *control run* per `--identity` form
+  writes the control identity to the run's path; it must return an
+  error and record no `backup.System` call, and an accepted control run
+  fails the test (the identity file was not used). A control run is a
+  check of the harness, not a canary run: its error never counts as a
+  rejection of the argument.
+  The `restore` arguments are `in-path` values that are read, not sent:
+  their expected-fields entry lists no field. The needle search of
+  conditions 1 and 2 covers the recorded `backup.System` calls (unit
+  names, `Chown` paths and user names) in place of requests; the files
+  written below `nebulaRoot` and the output text are not searched,
+  like the `backup` archive (prompt table above). The `Chown` paths lie
+  inside the working directory, whose path is checked against the
+  needles before the run (**Run-time values** below).
 
   **Bounded numbers** (previously a `canary-max: N` annotation that
   named only `events --limit`; `nebula batch stage N` parses with
@@ -756,7 +928,44 @@ does NOS connect **from** (`--from`)?
   directories, so the command writes the file itself. A file-reading
   argument therefore reaches the code that sends what it read, and
   `canary-rejects` stays for arguments that cannot accept any form even
-  with the file present (such as `--secret-fd`).
+  with the file present (such as `--secret-fd`, which is no path kind).
+
+  **Errors before traffic in path-kind runs** (previously only the
+  `restore` arguments treated an error before any recorded traffic as a
+  harness error; for `host pin --known-hosts` and `pve remote add`/
+  `repin --ca-file` it still counted as a rejection of the form, so a
+  fixture defect hit by only some forms, such as a `known_hosts` line
+  that does not parse or a CA PEM outside its validity, passed as a
+  per-form rejection). The same reasoning applies to every `in-path`
+  and `trust-path` argument: the only property a form gives the command
+  is a path, and the test has created the file at that path with the
+  minimal valid content. So for every run of an `in-path` or
+  `trust-path` argument an error, with or without recorded traffic, is
+  a **harness error** that fails the test and names the harness entry;
+  such a run is never rejected, and these arguments never carry
+  `canary-rejects` (the test fails when one does). An argument whose
+  parser rejects some path shapes would need a reviewed change of this
+  rule; it fails until then and never passes. The minimal valid content
+  is defined per argument so that a correct command accepts it:
+  - `host pin --known-hosts`: one `known_hosts` line with a fixture
+    ed25519 public key whose host field names exactly the fixture
+    endpoint the harness entry passes as `ENDPOINT` in that run
+    (`sshtransport.ImportKnownHosts` refuses a file with no usable
+    entry for the given endpoints); a run of the `ENDPOINT` argument
+    itself passes no `--known-hosts`;
+  - `pve remote add`/`repin --ca-file`: one self-signed CA certificate
+    in PEM, nothing else, generated once per test process with a
+    validity window that contains the real time of the whole test run
+    (`readPveCAFile` checks it against `time.Now()`, and no seam
+    injects the time), and the fake executor's probe answer derives the
+    same CA fingerprint;
+  - `restore --identity` and `ARCHIVE`: **Minimal valid restore input
+    and run pairing** above.
+  Before the first run of such an argument the test parses its fixture
+  with the same function the command uses (`ImportKnownHosts` with the
+  fixture endpoint, `executor.ParsePveSuppliedCA` with `time.Now()`,
+  the restore checks above) and fails as a harness error if it does
+  not parse.
 
   Because the executor is faked, nothing is dialed for
   most commands, so the test inspects **every outgoing request in full**
@@ -893,7 +1102,10 @@ does NOS connect **from** (`--from`)?
   admit most of them for a non-host kind, but they show what the
   argument **does** with a host value. A form is **rejected** when the
   command returns an error and the fake executor, dialer and transport
-  recorded nothing; a rejected form passes on its own. The **argument
+  recorded nothing; a rejected form passes on its own. This class does
+  not exist for `in-path` and `trust-path` arguments, whose every error
+  is a harness error (**Errors before traffic in path-kind runs**
+  above). The **argument
   fails** when every form is rejected, unless its catalog entry carries
   the reviewed annotation `canary-rejects: <reason>` (for example an
   argument that must name an open file descriptor, such as
