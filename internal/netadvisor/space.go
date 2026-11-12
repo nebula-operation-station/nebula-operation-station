@@ -96,11 +96,14 @@ func intersect[T point[T]](a, b iset[T], w *work) iset[T] {
 }
 
 // subtract returns a \ b. Next and Prev are only taken strictly inside an
-// interval of a, so they never leave the domain.
+// interval of a, so they never leave the domain. Every interval of a is
+// charged, the ones copied unchanged included, so a long a against a
+// short b is not copied for free.
 func subtract[T point[T]](a, b iset[T], w *work) iset[T] {
 	var out iset[T]
 	j := 0
 	for _, x := range a {
+		w.add(1)
 		cur, done := x.lo, false
 		for j < len(b) && b[j].hi.Compare(cur) < 0 {
 			w.add(1)
