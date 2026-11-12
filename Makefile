@@ -11,7 +11,7 @@ LDFLAGS       := -s -w \
   -X github.com/nebula-operation-station/nebula-operation-station/internal/version.Version=$(VERSION) \
   -X github.com/nebula-operation-station/nebula-operation-station/internal/version.Commit=$(COMMIT)
 
-.PHONY: all build test test-deploy test-privileged test-integration test-browser lint fmt fmt-check generate generate-check vuln fuzz check hooks clean
+.PHONY: all build test test-deploy test-privileged test-integration test-browser lint fmt fmt-check generate generate-check vuln fuzz check hooks clean release-stage
 
 all: check build
 
@@ -87,6 +87,26 @@ check: lint generate-check test test-deploy vuln
 
 hooks:
 	git config core.hooksPath .githooks
+
+# Unsigned staging for offline release signing (docs/admin/release-signing.md):
+# goreleaser builds at the pinned VERSION without publishing (release.disable
+# and skip_push in .goreleaser.yaml; --skip=publish,announce here, --skip=validate
+# because the tag need not exist yet), the container image is exported as a flat
+# filesystem tar for its installed-files flavour, and nebula-release-stage
+# writes payloads/, module-bytes/, installed/ and SHA256SUMS to RELEASE_STAGE.
+# Nothing is signed. Needs goreleaser and docker.
+#   make release-stage VERSION=0.1.0
+GORELEASER    ?= goreleaser
+DOCKER        ?= docker
+RELEASE_STAGE ?= dist/stage
+RELEASE_IMAGE  = ghcr.io/nebula-operation-station/nebula:$(VERSION)
+
+release-stage:
+	@if [ "$(origin VERSION)" != "command line" ]; then echo "release-stage: pass the release version: make release-stage VERSION=X.Y.Z" >&2; exit 1; fi
+	GORELEASER_CURRENT_TAG='v$(VERSION)' $(GORELEASER) release --clean --skip=publish,announce,validate
+	cid=$$($(DOCKER) create '$(RELEASE_IMAGE)' /usr/bin/nebula) && \
+	  { $(DOCKER) export -o 'dist/nebula_$(VERSION)_container_linux_amd64.tar' "$$cid"; rc=$$?; $(DOCKER) rm "$$cid" >/dev/null; exit $$rc; }
+	$(GO) run ./cmd/nebula-release-stage --version '$(VERSION)' --dist dist --out '$(RELEASE_STAGE)' --modules modules
 
 clean:
 	rm -rf bin/
