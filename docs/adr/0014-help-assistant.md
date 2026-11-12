@@ -132,6 +132,20 @@ History:
   did). `hostname` is a function variable, replaced by a function
   returning `nos-fixture-host` (previously written as if it were a
   string).
+- 2026-11-12 (as00iif and as00iif2, review rounds of PR #531): the
+  rule (a) meta-test also has fakes that record other traffic but no
+  final request (failing a harness that checks "anything recorded") and
+  three `restore` fakes with a wrong `backup.System` call order
+  (`Start` before `Stop`, `Chown` before `Stop`, `Chown` after the
+  final `Start`) (previously only fakes that send nothing). Rule (a)
+  also covers `pve remote repin --ca-file` and rule (c) also a
+  `trust-path` fake for `pve remote add`/`repin --ca-file` (previously
+  rule (a) without `repin`, rule (c) only `in-path`). The range-check
+  meta-test also has fakes whose first `MAX` run is accepted and whose
+  second `MAX` run or `MAX − 1` run is rejected (previously only a
+  rejected first `MAX`). The AS-05 plan row lists the "rejected"
+  meta-test next to the class-rule tests (previously only its
+  every-form-rejected failure).
 
 ## Context
 
@@ -832,14 +846,17 @@ does NOS connect **from** (`--from`)?
     as a harness error naming the harness entry; a harness that
     classifies any of them as rejected (counting toward
     `canary-rejects`) or as accepted fails the meta-test:
-    - a fake `host pin --known-hosts` entry and a fake
-      `pve remote add --ca-file` entry that send nothing (exit cleanly
-      before the pin or add request);
-    - the same two entries with a command that records other traffic
+    - a fake `host pin --known-hosts` entry, a fake
+      `pve remote add --ca-file` entry and a fake
+      `pve remote repin --ca-file` entry that send nothing (exit
+      cleanly before the pin, add or repin request; as00iif2,
+      previously without the `repin` entry);
+    - the same three entries with a command that records other traffic
       (at least one request that is not the entry's final request,
-      such as a lookup before the pin or add) and then exits cleanly
-      without the final request; a harness that checks "anything
-      recorded" accepts them;
+      such as a lookup before the pin, add or repin) and then exits
+      cleanly without the final request; a harness that checks
+      "anything recorded" accepts them (previously only the first
+      two);
     - three fake `restore` entries whose recording fake `backup.System`
       records, in this order: `Start(backup.StartUnits)` then
       `Stop(backup.StopUnits)` (both calls present, out of order);
@@ -850,16 +867,25 @@ does NOS connect **from** (`--from`)?
       `Stop`-first or the `Start`-last check, accepts one of them;
   - rule (b): a fake argument that records a request and then returns
     an error must fail as a harness error, never as rejected;
-  - rule (c): a fake `in-path` argument that returns an error before
-    any traffic for one form only must fail as a harness error, never
-    as a per-form rejection;
+  - rule (c): a fake `in-path` argument and a fake `trust-path`
+    argument (`pve remote add --ca-file` and
+    `pve remote repin --ca-file`) that each return an error before any
+    traffic for one form only must fail as a harness error, never as a
+    per-form rejection (as00iif2; previously only the `in-path` fake,
+    so a harness that exempted only `in-path` from per-form rejection
+    passed);
   - rejected: a fake non-path argument that returns an error without
     traffic for one form and is accepted for the others passes; one
     that rejects every form without `canary-rejects` fails (the
     `canary-rejects` rule below);
-  - range checks: a fake `canary-range` entry whose `MAX` run is
-    rejected must fail as a stale `canary-range`, never pass and never
-    count toward `canary-rejects`;
+  - range checks: each of these fake `canary-range` entries must fail
+    as a stale `canary-range`, never pass and never count toward
+    `canary-rejects`: one whose first `MAX` run is rejected; one whose
+    first `MAX` run is accepted and whose second `MAX` run is
+    rejected; one whose two `MAX` runs are accepted and whose
+    `MAX − 1` run is rejected (as00iif2; previously only the first,
+    so a harness that applied the range-check class to the first `MAX`
+    run only and let a rejected later run pass on its own passed);
   - confirmation rerun: a fake `number` argument whose first run is
     accepted with a `47000 + m` hit, and whose rerun with `48000 + m`
     returns **no error and sends nothing**, must fail as a harness
