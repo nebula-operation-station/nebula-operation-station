@@ -214,7 +214,7 @@ func TestExportAcceptsAValidHandWrittenExport(t *testing.T) {
 // D3): vendor, model, firmware version and the vendor ecosystem, no packages.
 func devicePart(id string, complete bool) map[string]any {
 	return map[string]any{"subject_kind": "device", "subject_ref": map[string]any{"id": id}, "ecosystem": "vendor:cisco:iosxe",
-		"device": map[string]any{"vendor": "cisco", "model": "CBS350-24P-4G", "firmware_version": "3.1.1.7"},
+		"device":   map[string]any{"vendor": "cisco", "model": "CBS350-24P-4G", "firmware_version": "3.1.1.7"},
 		"complete": complete, "part": 1, "last_part": true, "components": []any{}}
 }
 
