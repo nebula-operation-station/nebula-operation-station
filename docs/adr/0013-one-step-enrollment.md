@@ -709,7 +709,15 @@ through the API, with expiry offer expiry plus 45 minutes, at most 1 hour.)
   decided), not a setting and not a request field, so neither the server
   nor any RPC caller can switch it on. The server refuses such a create
   as well, before it calls the executor (EN-16g), so the value does not
-  reach the executor in normal operation.
+  reach the executor in normal operation. A NetBird `CreateEnrollOffer`
+  that selects entry path `dialog` without a key is refused too while
+  dialog entry is not enabled: no offer is created and the executor does
+  not turn it into a CLI-entry offer, because until Q11 is decided the
+  only NetBird create is the one that selects CLI entry ("Supply order"
+  step 1). It carries no key, so it is neither audited as
+  `netbird_setup_key_rejected` nor counted in a budget of "Rejection
+  limit" (fix round 6; previously the empty-key case of the dialog path
+  was not stated).
 - **Executor-local CLI** (admin UID, command name fixed by the follow-up
   ticket): non-echoing terminal input, or standard input when that is not
   a terminal, both read only up to the bound of "Input bounds"; never an
@@ -862,9 +870,12 @@ store error without the key; such a refusal is neither counted nor
 audited as a key refusal.
 
 Availability residuals (fix round 4): a compromised server or any open
-privileged session can exhaust the server budget and the NetBird offer
-limits of D2 (2 non-final, 5 per hour), which both serve the web create
-that every NetBird offer, CLI entry included, starts with; that is the
+privileged session can exhaust the server budget, which blocks only
+key-carrying creates and so not the keyless web create of the CLI entry,
+and the NetBird offer limits of D2 (2 non-final, 5 per hour), which
+serve the web create that every NetBird offer, CLI entry included,
+starts with (fix round 6; previously both were said to serve that
+create); that is the
 existing residual of a compromised server with an open privileged
 session, which can also revoke any offer (threat table, "Compromised
 server"); a restart of the executor does not end it, the budget frees up
@@ -1776,7 +1787,11 @@ its expiry and wipe, and the permit's check value ties the CLI entry to
 the web approval. If the maintainer prefers to drop the CLI entry
 instead, D6 "Entry" loses its second bullet, `awaiting_key` and
 `OfferMaxRejectedSetupKeys` go away, and the server-memory exposure of
-the dialog stays the only entry path's residual.
+the dialog stays the only entry path's residual; because dialog entry
+is not enabled until Q11 is decided, that choice also needs a Q11
+decision enabling dialog entry (option (a) or (b)), otherwise NetBird
+offers would have no entry path at all (fix round 6; previously this
+sentence did not name the Q11 gate).
 
 **Every passage that assumed the Management API, and its new rule.**
 
