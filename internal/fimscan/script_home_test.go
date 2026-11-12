@@ -249,7 +249,13 @@ func TestScriptHomeSwapBetweenPassesNeverMisattributes(t *testing.T) {
 				t.Error(err)
 				return
 			}
-			time.Sleep(time.Duration(rand.IntN(3000)) * time.Microsecond)
+			// Mostly quick swaps; every third file stays long enough for
+			// a whole run to see it unchanged (and keep its hash).
+			hold := time.Duration(rand.IntN(3000)) * time.Microsecond
+			if i%3 == 0 {
+				hold = time.Duration(300+rand.IntN(700)) * time.Millisecond
+			}
+			time.Sleep(hold)
 			if err := os.Rename(name, p); err != nil {
 				t.Error(err)
 				return
@@ -260,18 +266,26 @@ func TestScriptHomeSwapBetweenPassesNeverMisattributes(t *testing.T) {
 		close(stop)
 		<-done
 	}()
-	for range 10 {
+	// At least 10 runs, and runs until one record kept a hash: a scan
+	// that never hashes home files must not pass.
+	hashed := 0
+	for run := 0; run < 10 || (hashed == 0 && run < 40); run++ {
 		res := runWith(t, root, ModeFull, os.Getenv("PATH"))
 		for _, r := range res.Records {
 			if string(r.Path) != "/home/alice/.ssh/authorized_keys" || r.Hash.Kind == HashNone {
 				continue
 			}
+			hashed++
 			sum, ok := sums[r.Inode]
 			if !ok || r.Hash != sealHash(scriptTestKey, r.Path, sum) {
 				t.Errorf("record of inode %d carries a hash that is not its content's", r.Inode)
 			}
 		}
 	}
+	if hashed == 0 {
+		t.Error("no run kept a hash for the swapped file")
+	}
+	t.Logf("%d hashed records", hashed)
 }
 
 // scriptVar returns the single-quoted value of the top-level shell
@@ -485,6 +499,72 @@ func TestScriptRootOpensHomeFilesAsOwner(t *testing.T) {
 			t.Errorf("host %+v, want 5 unreadable", res.Host)
 		}
 	})
+}
+
+// TestScriptRootOwnedHomeDirsOpenUser: run as root, a home SSH file in a
+// root-owned directory that group or others can write is opened by a
+// holder dropped to nobody (65534), and one in a root-owned directory only
+// root can change is opened without dropping. A find wrapper reports every
+// directory the open check looks at as owned by root (a test cannot chown).
+func TestScriptRootOwnedHomeDirsOpenUser(t *testing.T) {
+	realFind, err := exec.LookPath("find")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const nobody = "--reuid=65534 --regid=65534 --clear-groups"
+	for _, c := range []struct {
+		name       string
+		alice, ssh os.FileMode // modes of /home/alice and /home/alice/.ssh
+		drops      []string    // setpriv options, one line per dropped open
+		sums       []string    // who read each home SSH file, sorted
+	}{
+		{"group- and other-writable", 0o757, 0o770, []string{nobody, nobody, nobody}, []string{"dropped", "dropped", "dropped", "root", "root"}},
+		{"other-writable sticky", os.ModeSticky | 0o777, 0o702, []string{nobody, nobody, nobody}, []string{"dropped", "dropped", "dropped", "root", "root"}},
+		{"only root can change", 0o755, 0o700, nil, []string{"root", "root", "root", "root", "root"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			root := buildTree(t, treeOpts{})
+			for p, m := range map[string]os.FileMode{"root/.ssh": 0o700, "home/alice": c.alice, "home/alice/.ssh": c.ssh} {
+				if err := os.Chmod(filepath.Join(root, p), m); err != nil {
+					t.Fatal(err)
+				}
+			}
+			log := filepath.Join(t.TempDir(), "setpriv.log")
+			dir := t.TempDir()
+			wrapper := "#!/bin/sh\n" +
+				"if [ $# -eq 5 ] && [ \"$1\" = . ] && [ \"$2\" = -maxdepth ] && [ \"$3\" = 0 ] && [ \"$4\" = -printf ] && [ \"$5\" = '%U %m\\n' ]; then\n" +
+				"\tm=$('" + realFind + "' . -maxdepth 0 -printf '%m') || exit 1\n\techo \"0 $m\"\n\texit 0\nfi\n" +
+				"exec '" + realFind + "' \"$@\"\n"
+			if err := os.WriteFile(filepath.Join(dir, "find"), []byte(wrapper), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			res := runWith(t, root, ModeFull, dir+":"+fakeRootPath(t, true, log))
+			want, sums := expectedRecords(t, root)
+			compareRecords(t, res, want, sums, nil)
+			b, err := os.ReadFile(log)
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			var drops []string
+			for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+				if l = strings.TrimSpace(l); l != "" {
+					drops = append(drops, l)
+				}
+			}
+			if !slices.Equal(drops, c.drops) {
+				t.Errorf("setpriv ran with %q, want %q", drops, c.drops)
+			}
+			b, err = os.ReadFile(log + ".sum")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := strings.Fields(string(b))
+			slices.Sort(got)
+			if !slices.Equal(got, c.sums) {
+				t.Errorf("home files read by %q, want %q", got, c.sums)
+			}
+		})
+	}
 }
 
 // TestScriptNewlineNamedKeyFileIsUnreadable: an authorized_keys* match whose
