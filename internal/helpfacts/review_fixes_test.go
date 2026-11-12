@@ -57,8 +57,8 @@ func TestUnicodeLookalikeNameDoesNotMatch(t *testing.T) {
 		t.Fatalf("Unicode look-alike matched the name literal: %+v", res.Hosts)
 	}
 	// An ASCII name still matches case-insensitively.
-	r = baseRecord("h2", "KUBE", "10.0.0.2")
-	res = mustProject(t, request("is kube healthy?", fakeSource{hosts: []Record{r}}, visibleOnly("h2")))
+	r = baseRecord("h2", "KUBE-1", "10.0.0.2")
+	res = mustProject(t, request("is kube-1 healthy?", fakeSource{hosts: []Record{r}}, visibleOnly("h2")))
 	if got := hostIDs(res); !reflect.DeepEqual(got, []string{"h2"}) {
 		t.Fatalf("ASCII name hosts = %v, want [h2]", got)
 	}

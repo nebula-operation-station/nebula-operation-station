@@ -298,11 +298,27 @@ type matchSet struct {
 	order []string        // canonical IP strings in order of appearance
 	cidrs []*net.IPNet
 	names map[string]bool // ASCII-lowercased names and IDs
+	// identNames are the name literals specific enough to match a display
+	// name: they contain a digit, hyphen, dot or underscore.
+	identNames map[string]bool
+}
+
+// identifierLike reports whether a name literal is at least as specific as
+// a host ID: it contains a digit, hyphen, dot or underscore. Ordinary words
+// such as "is", "up" or "database" are not identifier-like.
+func identifierLike(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= '0' && c <= '9') || c == '-' || c == '.' || c == '_' {
+			return true
+		}
+	}
+	return false
 }
 
 // newMatchSet indexes the literals of a question.
 func newMatchSet(lits []literal) *matchSet {
-	ms := &matchSet{addrs: map[string]bool{}, names: map[string]bool{}}
+	ms := &matchSet{addrs: map[string]bool{}, names: map[string]bool{}, identNames: map[string]bool{}}
 	for _, l := range lits {
 		switch l.kind {
 		case litAddress:
@@ -314,7 +330,11 @@ func newMatchSet(lits []literal) *matchSet {
 		case litCIDR:
 			ms.cidrs = append(ms.cidrs, l.network)
 		default:
-			ms.names[asciiLower(l.name)] = true
+			folded := asciiLower(l.name)
+			ms.names[folded] = true
+			if identifierLike(folded) {
+				ms.identNames[folded] = true
+			}
 		}
 	}
 	return ms
@@ -349,7 +369,13 @@ func (ms *matchSet) selectsHost(r Record) bool {
 			return true
 		}
 	}
-	return ms.nameSelected(r.ID) || ms.nameSelected(r.DisplayName)
+	// A display name selects only through an identifier-like literal, so a
+	// host whose display name is a common word is not selected by it.
+	if ms.nameSelected(r.ID) {
+		return true
+	}
+	folded, ok := asciiName(r.DisplayName)
+	return ok && ms.identNames[folded]
 }
 
 // addressesNotIn returns the question's address literals that no host in
