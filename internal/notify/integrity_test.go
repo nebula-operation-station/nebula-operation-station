@@ -238,7 +238,7 @@ func TestDigestIsSentBeforeTheNextMessageAfterTheHour(t *testing.T) {
 	}
 }
 
-func TestDedupePerSubjectClassPathAndKind(t *testing.T) {
+func TestDedupePerSubjectClassAndPath(t *testing.T) {
 	var r intRecorder
 	r.ok = true
 	g, _ := newTestGate(t, &r)
@@ -248,11 +248,14 @@ func TestDedupePerSubjectClassPathAndKind(t *testing.T) {
 		t.Fatalf("first: %v", d)
 	}
 	if d, _ := g.Submit(ctx, validEvent(IntegrityHostChange), key); d != DecisionDuplicate {
-		t.Fatalf("repeat of same key and kind: %v", d)
+		t.Fatalf("repeat of same key: %v", d)
 	}
-	// Same path, another event type: a separate episode.
-	if d, _ := g.Submit(ctx, validEvent(IntegrityBaselineTamper), key); d != DecisionSent {
-		t.Fatalf("other kind: %v", d)
+	// Dedupe is per (subject, class, path), not per kind (spec 13 v26-13-01):
+	// the same finding under another integrity kind is still a duplicate.
+	for _, k := range allIntegrityKinds {
+		if d, _ := g.Submit(ctx, validEvent(k), key); d != DecisionDuplicate {
+			t.Fatalf("same finding under %s: %v, want duplicate", k, d)
+		}
 	}
 	// Other subject, other path, other class: all separate.
 	for _, k := range []IntegrityKey{
@@ -260,12 +263,85 @@ func TestDedupePerSubjectClassPathAndKind(t *testing.T) {
 		NewIntegrityKey("host-1", "binary", "/usr/bin/nebula-server2"),
 		NewIntegrityKey("host-1", "unit", "/usr/bin/nebula-server"),
 	} {
-		if d, _ := g.Submit(ctx, validEvent(IntegrityHostChange), k); d != DecisionSent {
+		ev := validEvent(IntegrityHostChange)
+		ev.Class = k.class
+		if d, _ := g.Submit(ctx, ev, k); d != DecisionSent {
 			t.Fatalf("separate key: %v", d)
 		}
 	}
-	if n := len(r.list()); n != 5 {
-		t.Fatalf("sent %d, want 5", n)
+	if n := len(r.list()); n != 4 {
+		t.Fatalf("sent %d, want 4", n)
+	}
+}
+
+func TestSubmitRejectsKeyOfAnotherClass(t *testing.T) {
+	var r intRecorder
+	r.ok = true
+	g, _ := newTestGate(t, &r)
+	ctx := context.Background()
+	// The event says binary; the key was built for unit. Dedupe would be
+	// silently wrong, so the mismatch is an error and nothing is sent.
+	ev := validEvent(IntegrityHostChange)
+	if _, err := g.Submit(ctx, ev, NewIntegrityKey("host-1", "unit", "/p")); !errors.Is(err, ErrInvalidIntegrityEvent) {
+		t.Fatalf("mismatched class: %v", err)
+	}
+	if _, err := g.Submit(ctx, ev, IntegrityKey{}); !errors.Is(err, ErrInvalidIntegrityEvent) {
+		t.Fatalf("zero key: %v", err)
+	}
+	if n := len(r.list()); n != 0 {
+		t.Fatalf("sent %d for rejected keys", n)
+	}
+}
+
+func TestRateLimitWindowBoundaryIsExact(t *testing.T) {
+	var r intRecorder
+	r.ok = true
+	g, clk := newTestGate(t, &r)
+	ctx := context.Background()
+	// Fill the hour: the first at integrityBase, the second one second later.
+	for i := 0; i < MaxIntegrityPerHour; i++ {
+		clk.t = integrityBase.Add(time.Duration(i) * time.Second)
+		if d, _ := g.Submit(ctx, validEvent(IntegrityNOSMismatch), NewIntegrityKey("s", "binary", string(rune('a'+i)))); d != DecisionSent {
+			t.Fatalf("fill %d: %v", i, d)
+		}
+	}
+	// One tick before the first send has been an hour: still held.
+	clk.t = integrityBase.Add(time.Hour - time.Nanosecond)
+	if d, _ := g.Submit(ctx, validEvent(IntegrityNOSMismatch), NewIntegrityKey("s", "binary", "early")); d != DecisionHeld {
+		t.Fatalf("one tick before the window ends: %v, want held", d)
+	}
+	// Exactly an hour after the first send, only that slot is free: the
+	// second send (one second later) still counts.
+	clk.t = integrityBase.Add(time.Hour)
+	if d, _ := g.Submit(ctx, validEvent(IntegrityNOSMismatch), NewIntegrityKey("s", "binary", "exact")); d != DecisionSent {
+		t.Fatalf("exactly one hour after the first send: %v, want sent", d)
+	}
+	if d, _ := g.Submit(ctx, validEvent(IntegrityNOSMismatch), NewIntegrityKey("s", "binary", "second")); d != DecisionHeld {
+		t.Fatalf("second slot still in the window: %v, want held", d)
+	}
+	// One second later the second send leaves the window too.
+	clk.t = integrityBase.Add(time.Hour + time.Second)
+	if d, _ := g.Submit(ctx, validEvent(IntegrityNOSMismatch), NewIntegrityKey("s", "binary", "later")); d != DecisionSent {
+		t.Fatalf("second slot freed: %v, want sent", d)
+	}
+}
+
+func TestNotifierRefusesIntegrityKindsOutsideTheGate(t *testing.T) {
+	var r intRecorder
+	r.ok = true
+	n := NewWithSenders(quiet(), nil, &r)
+	ctx := context.Background()
+	// A direct Notify skips the gate's link allow-list and host-label rules,
+	// so integrity kinds (and the digest) are refused there.
+	for _, kind := range []string{string(IntegrityNOSMismatch), string(IntegrityBaselineTamper), KindIntegrityDigest} {
+		ev := Event{Kind: kind, Host: "evil.example.com", State: "critical",
+			Reason: "Class: binary, count: 1", Time: integrityBase}
+		if n.Notify(ctx, ev) != 0 {
+			t.Fatalf("direct Notify of %s was delivered", kind)
+		}
+	}
+	if len(r.list()) != 0 {
+		t.Fatalf("direct integrity Notify reached a provider: %+v", r.list())
 	}
 }
 
@@ -336,7 +412,7 @@ func TestKeyHashesSubjectClassAndPath(t *testing.T) {
 	}
 	path := "/home/victim/.ssh/authorized_keys"
 	k := NewIntegrityKey("host-1", "ssh", path)
-	if strings.Contains(string(k[:]), path) {
+	if strings.Contains(string(k.digest[:]), path) {
 		t.Fatal("key holds the path in clear")
 	}
 }
@@ -426,15 +502,19 @@ func TestForgetLetsAClosedFindingNotifyAgain(t *testing.T) {
 	}
 }
 
-func TestForgetClearsEveryKindOfTheKey(t *testing.T) {
+func TestForgetClearsTheFindingForEveryKind(t *testing.T) {
 	var r intRecorder
 	r.ok = true
 	g, _ := newTestGate(t, &r)
 	ctx := context.Background()
 	key := NewIntegrityKey("host-1", "binary", "/etc/ssh/sshd_config")
+	if d, _ := g.Submit(ctx, validEvent(IntegrityNOSMismatch), key); d != DecisionSent {
+		t.Fatalf("first: %v", d)
+	}
+	// One finding, one episode: another kind for the same key is a duplicate.
 	for _, k := range allIntegrityKinds {
-		if d, _ := g.Submit(ctx, validEvent(k), key); d != DecisionSent {
-			t.Fatalf("%s: %v", k, d)
+		if d, _ := g.Submit(ctx, validEvent(k), key); d != DecisionDuplicate {
+			t.Fatalf("%s before forget: %v", k, d)
 		}
 	}
 	g.Forget(key)
@@ -442,6 +522,8 @@ func TestForgetClearsEveryKindOfTheKey(t *testing.T) {
 		if d, _ := g.Submit(ctx, validEvent(k), key); d != DecisionSent {
 			t.Fatalf("%s after forget: %v", k, d)
 		}
+		// Each of those sends opened a new episode; drop it for the next kind.
+		g.Forget(key)
 	}
 }
 
@@ -587,6 +669,19 @@ func TestNOSBaseURLIsValidated(t *testing.T) {
 		"https://nos.example.net/?q=1", "https://nos.example.net/#f", "nos.example.net"} {
 		if _, err := NewIntegrityGate(NewWithSenders(quiet(), nil), base, nil); !errors.Is(err, ErrInvalidNOSBase) {
 			t.Errorf("base %q accepted: %v", base, err)
+		}
+	}
+	// A base URL that carries user info is rejected, and its credential is
+	// not echoed in the error or in anything a caller logs from it.
+	for _, base := range []string{"https://nebula:s3cret-pass@nos.example.net", "not a url s3cret-pass :%"} {
+		_, err := NewIntegrityGate(NewWithSenders(quiet(), nil), base, nil)
+		if !errors.Is(err, ErrInvalidNOSBase) {
+			t.Fatalf("base %q: %v", base, err)
+		}
+		for _, secret := range []string{"s3cret-pass", "nebula", "nos.example.net"} {
+			if strings.Contains(err.Error(), secret) {
+				t.Fatalf("error echoes the base URL (%q): %v", secret, err)
+			}
 		}
 	}
 	// A trailing slash and a path prefix are part of the configured base.

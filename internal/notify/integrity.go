@@ -113,9 +113,16 @@ type IntegrityEvent struct {
 	Link string
 }
 
-// IntegrityKey identifies a finding for de-duplication: a SHA-256 hash of
-// (subject, class, path). Only the hash is kept.
-type IntegrityKey [sha256.Size]byte
+// IntegrityKey identifies a finding for de-duplication (spec 13
+// v26-13-01: per (subject, class, path), not per kind). It holds a SHA-256
+// hash of the three parts, so the path is never kept in clear, and the
+// class in clear, so Submit can check that the key belongs to the event's
+// class. Build it with NewIntegrityKey; the zero value matches no finding and
+// is rejected by Submit.
+type IntegrityKey struct {
+	digest [sha256.Size]byte
+	class  string
+}
 
 // NewIntegrityKey returns the de-duplication key of a finding. Each part is
 // length-prefixed, so different splits of the same text give different keys.
@@ -128,7 +135,8 @@ func NewIntegrityKey(subject, class, path string) IntegrityKey {
 		h.Write([]byte(part))
 	}
 	var k IntegrityKey
-	copy(k[:], h.Sum(nil))
+	copy(k.digest[:], h.Sum(nil))
+	k.class = class
 	return k
 }
 
@@ -141,7 +149,7 @@ const (
 	DecisionNone Decision = iota
 	// DecisionSent: a provider accepted the message.
 	DecisionSent
-	// DecisionDuplicate: the same (kind, key) was already notified.
+	// DecisionDuplicate: the same key was already notified or held.
 	DecisionDuplicate
 	// DecisionHeld: the hourly limit held the message; the digest counts it.
 	DecisionHeld
@@ -150,19 +158,15 @@ const (
 	DecisionUndelivered
 )
 
-type integrityDedupe struct {
-	kind IntegrityKind
-	key  IntegrityKey
-}
-
 // IntegrityGate applies de-duplication and the hourly limit to integrity
-// events, then sends them through a Notifier. It is safe for concurrent use;
-// messages are sent outside its lock.
+// events, then sends them through a Notifier. It is the only sender of
+// integrity kinds: Notifier.Notify refuses them. It is safe for concurrent
+// use; messages are sent outside its lock.
 //
-// A submission for a (kind, key) that is still being sent waits for that
-// send to finish, then reports DecisionDuplicate if it was delivered or
-// sends the event itself if it was not. So concurrent submissions of one
-// finding send it at most once.
+// A submission for a key that is still being sent waits for that send to
+// finish, then reports DecisionDuplicate if it was delivered or sends the
+// event itself if it was not. So concurrent submissions of one finding send
+// it at most once.
 //
 // De-duplication state is held in memory: after a restart a finding that is
 // still open notifies once more inside the limit. Forget clears the state of
@@ -174,42 +178,59 @@ type IntegrityGate struct {
 
 	mu        sync.Mutex
 	sent      []time.Time // delivery times (and reserved slots) inside the window
-	notified  map[integrityDedupe]bool
-	inflight  map[integrityDedupe]chan struct{} // closed when the send ends
-	order     []integrityDedupe                 // insertion order for eviction
+	notified  map[IntegrityKey]bool
+	inflight  map[IntegrityKey]chan struct{} // closed when the send ends
+	order     []IntegrityKey                 // insertion order for eviction
 	held      map[IntegrityKind]int
 	heldSince time.Time
 }
 
 // NewIntegrityGate returns a gate that sends through n. nosBase is the
 // configured NOS base URL that finding links must start with, for example
-// "https://nos.example.net". now defaults to time.Now.
+// "https://nos.example.net". now defaults to time.Now. The error never
+// contains nosBase: it may carry credentials.
 func NewIntegrityGate(n *Notifier, nosBase string, now func() time.Time) (*IntegrityGate, error) {
 	if now == nil {
 		now = time.Now
 	}
 	u, err := url.Parse(nosBase)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
-		u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
-		return nil, fmt.Errorf("%w: %q", ErrInvalidNOSBase, nosBase)
+	var reason string
+	switch {
+	case err != nil:
+		reason = "not a URL"
+	case u.Scheme != "http" && u.Scheme != "https":
+		reason = "scheme must be http or https"
+	case u.Host == "":
+		reason = "missing host"
+	case u.User != nil:
+		reason = "user info is not allowed"
+	case u.RawQuery != "" || u.Fragment != "" || u.Opaque != "":
+		reason = "query, fragment or opaque form is not allowed"
+	}
+	if reason != "" {
+		return nil, fmt.Errorf("%w: %s", ErrInvalidNOSBase, reason)
 	}
 	return &IntegrityGate{
 		n:         n,
 		now:       now,
 		linkStart: strings.TrimSuffix(nosBase, "/") + integrityLinkRoute,
-		notified:  map[integrityDedupe]bool{},
-		inflight:  map[integrityDedupe]chan struct{}{},
+		notified:  map[IntegrityKey]bool{},
+		inflight:  map[IntegrityKey]chan struct{}{},
 		held:      map[IntegrityKind]int{},
 	}, nil
 }
 
 // Submit validates ev and, unless it is a duplicate, sends it inside the
-// hourly limit or holds it for the digest. A due digest is sent first.
+// hourly limit or holds it for the digest. A due digest is sent first. key
+// must be built by NewIntegrityKey with the same class as ev.Class.
 func (g *IntegrityGate) Submit(ctx context.Context, ev IntegrityEvent, key IntegrityKey) (Decision, error) {
 	if err := ev.validate(g.linkStart); err != nil {
 		return DecisionNone, err
 	}
-	dk := integrityDedupe{kind: ev.Kind, key: key}
+	if key.class != ev.Class {
+		return DecisionNone, fmt.Errorf("%w: key class does not match event class", ErrInvalidIntegrityEvent)
+	}
+	dk := key // the dedupe key; spec 13 dedupes per (subject, class, path)
 	for {
 		g.mu.Lock()
 		now := g.now()
@@ -245,7 +266,7 @@ func (g *IntegrityGate) Submit(ctx context.Context, ev IntegrityEvent, key Integ
 		g.mu.Unlock()
 
 		g.deliverDigest(ctx, due)
-		ok := g.n.Notify(ctx, ev.message(now)) > 0
+		ok := len(g.n.send(ctx, ev.message(now), nil)) > 0
 
 		g.mu.Lock()
 		delete(g.inflight, dk)
@@ -261,8 +282,8 @@ func (g *IntegrityGate) Submit(ctx context.Context, ev IntegrityEvent, key Integ
 	}
 }
 
-// Forget drops the de-duplication state of key for every integrity kind, so
-// a later event for the same finding notifies again. Call it when the finding
+// Forget drops the de-duplication state of key, so a later event for the
+// same finding notifies again. Call it when the finding
 // closes or its baseline is approved. A send already in flight for key is not
 // cancelled; it records its key when it ends.
 func (g *IntegrityGate) Forget(key IntegrityKey) {
@@ -270,7 +291,7 @@ func (g *IntegrityGate) Forget(key IntegrityKey) {
 	defer g.mu.Unlock()
 	kept := g.order[:0]
 	for _, dk := range g.order {
-		if dk.key == key {
+		if dk == key {
 			delete(g.notified, dk)
 			continue
 		}
@@ -291,7 +312,7 @@ func (g *IntegrityGate) Flush(ctx context.Context) bool {
 // message renders ev as a notification with fixed wording.
 func (ev IntegrityEvent) message(now time.Time) Event {
 	return Event{Kind: string(ev.Kind), Host: integrityLabel(ev.Host), State: string(ev.Severity),
-		Reason: fmt.Sprintf("Class: %s, count: %d", ev.Class, ev.Count), Link: ev.Link, Time: now}
+		Reason: fmt.Sprintf("Class: %s, count: %d", ev.Class, ev.Count), link: ev.Link, Time: now}
 }
 
 func (ev IntegrityEvent) validate(linkStart string) error {
@@ -440,7 +461,7 @@ func (g *IntegrityGate) deliverDigest(ctx context.Context, d *integrityDigest) b
 	ev := Event{Kind: KindIntegrityDigest, State: "digest",
 		Reason: fmt.Sprintf("%d integrity %s held by the hourly limit (%s)", total, noun, strings.Join(parts, ", ")),
 		Time:   g.now()}
-	if g.n.Notify(ctx, ev) > 0 {
+	if len(g.n.send(ctx, ev, nil)) > 0 {
 		return true
 	}
 	g.mu.Lock()
@@ -481,8 +502,8 @@ func (g *IntegrityGate) holdLocked(kind IntegrityKind, now time.Time) {
 	g.held[kind]++
 }
 
-// markLocked records that (kind, key) was notified or held. Caller holds g.mu.
-func (g *IntegrityGate) markLocked(dk integrityDedupe) {
+// markLocked records that key was notified or held. Caller holds g.mu.
+func (g *IntegrityGate) markLocked(dk IntegrityKey) {
 	if g.notified[dk] {
 		return
 	}
