@@ -555,7 +555,7 @@ mitigation.
   pinned host (D6 "Join on the host"): the key travels on the SSH
   session's standard input into a `0600` file or the client's
   environment, never in the remote command line (added 2026-11-12).
-  EN-12 verifies per supported client version which of the two the client
+  EN-12 (since 2026-11-12 its follow-up EN-16e) verifies per supported client version which of the two the client
   accepts; for a client version that accepts neither, the NetBird option is
   not offered and the script stops before the join. If the operator runs the
   script outside the documented command, it still removes its own key file,
