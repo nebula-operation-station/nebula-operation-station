@@ -865,15 +865,23 @@ does NOS connect **from** (`--from`)?
       `Start(backup.StartUnits)`, `Chown` (final action not last); a
       harness that checks only that both calls occur, or skips the
       `Stop`-first or the `Start`-last check, accepts one of them;
-  - rule (b): a fake argument that records a request and then returns
-    an error must fail as a harness error, never as rejected;
-  - rule (c): a fake `in-path` argument and a fake `trust-path`
-    argument (`pve remote add --ca-file` and
-    `pve remote repin --ca-file`) that each return an error before any
+  - rule (b) (as00ij; previously "records a request and then returns
+    an error … never as rejected", so a harness that decided accepted
+    from "final request recorded" and ignored the returned error
+    passed): a fake non-path argument (kind `id`) whose run records
+    the entry's **final request** and then returns an error must fail
+    as a harness error naming harness entry and argument, never as
+    rejected and never as accepted; a harness that classifies it as
+    accepted (final request recorded, error ignored) or as rejected
+    (error, recorder not consulted) fails the meta-test;
+  - rule (c): a fake `in-path` argument and two fake `trust-path`
+    arguments, one for `pve remote add --ca-file` and one for
+    `pve remote repin --ca-file`, that each return an error before any
     traffic for one form only must fail as a harness error, never as a
     per-form rejection (as00iif2; previously only the `in-path` fake,
     so a harness that exempted only `in-path` from per-form rejection
-    passed);
+    passed; as00ij: one fake per command, previously "a fake
+    `trust-path` argument" for both);
   - rejected: a fake non-path argument that returns an error without
     traffic for one form and is accepted for the others passes; one
     that rejects every form without `canary-rejects` fails (the
@@ -886,7 +894,23 @@ does NOS connect **from** (`--from`)?
     `MAX − 1` run is rejected (as00iif2; previously only the first,
     so a harness that applied the range-check class to the first `MAX`
     run only and let a rejected later run pass on its own passed);
-  - confirmation rerun: a fake `number` argument whose first run is
+  - range-check isolation (as00ij; previously only "both entries green
+    on today's tree", which catches a reused recorder only when the
+    harness runs the rejection checks after the `MAX − 1` run): a fake
+    `canary-range` entry whose every run (`MAX`, `MAX`, `MAX − 1` and
+    the rejection checks `MAX + 1`, `47000 + m`, `MIN − 1`) first
+    looks at the objects the harness handed it and, if its recorders
+    or fake executor hold a call or its working directory holds a
+    marker file, records the final request and returns an error;
+    otherwise it creates a marker file in its working directory and
+    then, for `MAX`, `MAX` and `MAX − 1`, returns no error after
+    recording the final request with the value in its expected field
+    (passing the distinctive check) and, for the rejection values,
+    returns an error without traffic. It must pass. A harness that
+    hands a run a recorder or fake executor an earlier accepted run
+    used, or a working directory any earlier run used, fails it in
+    every run order (a later accepted run becomes a harness error, a
+    later rejection check records traffic); a fake `number` argument whose first run is
     accepted with a `47000 + m` hit, and whose rerun with `48000 + m`
     returns **no error and sends nothing**, must fail as a harness
     error naming harness entry and argument; a harness that reuses the
