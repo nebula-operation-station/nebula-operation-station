@@ -24,7 +24,12 @@
 # 8 GiB: before a start point is read, the sizes of its files are summed and
 # larger files are left out (metadata only) once the budget would be passed.
 # A run cut at any of these limits says "truncated":true. Paths are never
-# opened through a symlink in any component.
+# opened through a symlink in any component. The SSH files below /root and
+# /home/* lie in directories their users own and can change at any time:
+# each is scanned from inside its directory, entered once and checked by
+# its physical path, as a single entry (a directory there is reported, not
+# walked), and hashed through one descriptor checked to be the regular
+# file find saw; at most 16 authorized_keys* files per home are scanned.
 #
 # NEBULA_FIM_TEST_ROOT is for tests only: it prefixes every path the script
 # reads (the reported paths stay host paths), suppresses the sudo
@@ -33,7 +38,14 @@
 set -u
 LC_ALL=C
 export LC_ALL
+unset CDPATH
 P=${NEBULA_FIM_TEST_ROOT:-}
+# PREAL: the physical path of the read root, for the pwd -P check of
+# home_cd ("" on a host).
+PREAL=""
+if [ -n "$P" ]; then
+	PREAL=$(cd -P "$P" && pwd -P) || exit 2
+fi
 fail() { printf 'fim.scan: %s\n' "$1" >&2; exit 2; }
 
 # The mode comes from the canonical parameters, or from $1 after the sudo
@@ -177,17 +189,94 @@ watchdog() {
 	[ -n "$kids" ] && kill -TERM $kids 2>/dev/null
 }
 
-# scan START KIND ALL CAP: walk one start point. KIND size prints the bytes
-# and cap of the files to hash (SIZE_AWK), KIND hash runs sha256sum on the
-# files to hash, KIND meta prints one metadata entry per path ("M1" for a
-# file that should have a hash, "M0" otherwise). ALL=1 hashes every file;
-# CAP ("-" for none) leaves files of CAP bytes or more unhashed.
+# scan START KIND ALL CAP [HOME]: walk one start point. KIND size prints
+# the bytes and cap of the files to hash (SIZE_AWK), KIND hash runs
+# sha256sum on the files to hash, KIND meta prints one metadata entry per
+# path ("M1" for a file that should have a hash, "M0" otherwise). ALL=1
+# hashes every file; CAP ("-" for none) leaves files of CAP bytes or more
+# unhashed. HOME=1 marks a home SSH file (home_scan). Status 3: the
+# deadline cut the hash pass of this start point.
 scan() {
 	start=$1
 	kind=$2
 	all=$3
 	cap=$4
-	set -- -P "$P$start" -xdev "(" -path "$P/etc/pve" -o -path "$P/usr/lib/python3*/__pycache__" -o -path "$P/usr/local/lib/python3*/__pycache__"
+	if [ "${5:-0}" = 1 ]; then
+		home_scan
+		return
+	fi
+	find_scan "$P$start" '%p' 0
+}
+
+# home_scan: scan the home SSH file $start. Its user owns the home (and
+# .ssh) directory and can swap any entry in it for a symlink at any time,
+# so after the check the path is never resolved by name again: the
+# subshell enters the directory once (cd -P) and goes on only if it is the
+# directory at exactly this physical path, i.e. no component was a
+# symlink. Everything after is relative to that working directory, which
+# a later swap cannot move. find -P looks at the single entry (-maxdepth
+# 0) without following it, and HASH_FD hashes it through one descriptor
+# checked to be that same regular file. A directory swapped for a symlink
+# in time makes the file unreadable for this run.
+home_scan() {
+	(
+		home_cd "${start%/*}" || {
+			[ "$kind" = meta ] && printf 'U\0'
+			exit 0
+		}
+		find_scan "./${start##*/}" "$(fmt_path "$P$start")" 1
+	)
+}
+
+# home_cd DIR: enter DIR (a host path below the read root); true only if
+# the working directory is now the directory at exactly that physical path.
+home_cd() {
+	cd -P "$P$1" 2>/dev/null || return 1
+	[ "$(pwd -P)" = "$PREAL$1" ]
+}
+
+# fmt_path PATH: PATH as literal text in a find -printf format.
+fmt_path() {
+	printf '%s' "$1" | sed 's/\\/\\\\/g; s/%/%%/g'
+}
+
+# HASH_FD runs as /bin/sh -c "$HASH_FD" sh NAME ID in the checked home
+# directory: it opens NAME once, checks with find -H on /proc/self/fd/3
+# that the open file is the regular file ID (device:inode) that find saw
+# at NAME without following it, and hashes it through that descriptor. A
+# symlink or another file swapped in between fails the check: no hash. It
+# runs under the deadline (timeout or the watchdog), which also ends an
+# open blocked on a FIFO swapped in.
+# shellcheck disable=SC2016 # expanded by the inner shell
+HASH_FD='exec 2>/dev/null 3<"$1" || exit 1
+[ "$(find -H /proc/self/fd/3 -maxdepth 0 -type f -printf "%D:%i\n")" = "$2" ] || exit 1
+exec sha256sum <&3'
+
+# bounded SECONDS CMD...: run CMD and stop it, and a tool it runs, after
+# SECONDS (the watchdog, for hosts without the timeout tool).
+bounded() {
+	b_s=$1
+	shift
+	"$@" &
+	b_p=$!
+	watchdog "$b_s" "$b_p" >/dev/null 2>&1 &
+	b_w=$!
+	wait "$b_p"
+	b_r=$?
+	kill "$b_w" 2>/dev/null
+	return "$b_r"
+}
+
+# find_scan SP PF ONE: the find run of scan for the start path SP. PF is
+# the -printf text of the reported path (%p, or the escaped host path when
+# SP is relative); ONE=1 looks at SP alone (a home SSH file).
+find_scan() {
+	sp=$1
+	pf=$2
+	one=$3
+	set -- -P "$sp"
+	[ "$one" = 1 ] && set -- "$@" -maxdepth 0
+	set -- "$@" -xdev "(" -path "$P/etc/pve" -o -path "$P/usr/lib/python3*/__pycache__" -o -path "$P/usr/local/lib/python3*/__pycache__"
 	for n in $NESTED_MOUNTS; do
 		case $n in "$start"/*) set -- "$@" -o -path "$P$n" ;; esac
 	done
@@ -207,7 +296,6 @@ scan() {
 		$LOW find "$@" 2>/dev/null | awk -v left="$HASH_LEFT" "$SIZE_AWK"
 		;;
 	hash)
-		set -- "$@" -exec sha256sum -z -- "{}" + ")"
 		left=$((DEADLINE - $(date +%s)))
 		# Every T of the hash pass has a leading NUL: a killed pass may end in
 		# a record cut mid-path, and the NUL ends that fragment as a field of
@@ -217,27 +305,27 @@ scan() {
 			printf '\0T\0'
 			return 3
 		fi
-		# cat ends only when find and every sha256sum it ran have closed the
-		# pipe, so the marker is never written between hash records.
-		if [ -n "$TIMEOUT" ]; then
-			# GNU timeout signals its process group (find and sha256sum);
-			# BusyBox timeout signals find only, and the running sha256sum
-			# batch ends on its own before cat does.
-			{
-				# shellcheck disable=SC2086
-				$TIMEOUT "$left" $LOW find "$@" 2>/dev/null
-			} | cat
+		if [ "$one" = 1 ]; then
+			set -- "$@" -printf '%D:%i\n' ")"
+			id=$(find "$@" 2>/dev/null)
+			if [ -n "$id" ]; then
+				if [ -n "$TIMEOUT" ]; then
+					h=$($TIMEOUT "$left" /bin/sh -c "$HASH_FD" sh "$sp" "$id")
+				else
+					h=$(bounded "$left" /bin/sh -c "$HASH_FD" sh "$sp" "$id")
+				fi
+				# Written whole, only for a complete hash.
+				hx=${h%% *}
+				if [ "${#hx}" -eq 64 ]; then
+					case $hx in
+					*[!0-9a-f]*) ;;
+					*) printf '%s  %s\0' "$hx" "$P$start" ;;
+					esac
+				fi
+			fi
 		else
-			# The watchdog stops find and its sha256sum at the deadline.
-			{
-				# shellcheck disable=SC2086
-				$LOW find "$@" 2>/dev/null &
-				fp=$!
-				watchdog "$left" "$fp" >/dev/null 2>&1 &
-				wp=$!
-				wait "$fp"
-				kill "$wp" 2>/dev/null
-			} | cat
+			set -- "$@" -exec sha256sum -z -- "{}" + ")"
+			hash_pass "$@"
 		fi
 		# The clock, not an exit status, says whether the deadline stopped
 		# the pass: GNU timeout exits 124, BusyBox timeout 143.
@@ -247,11 +335,38 @@ scan() {
 		fi
 		;;
 	meta)
-		set -- "$@" -printf 'M1 %y %s %m %U %G %i %T@ %C@\0%p\0%l\0' ")" -o -printf 'M0 %y %s %m %U %G %i %T@ %C@\0%p\0%l\0'
+		set -- "$@" -printf 'M1 %y %s %m %U %G %i %T@ %C@\0'"$pf"'\0%l\0' ")" -o -printf 'M0 %y %s %m %U %G %i %T@ %C@\0'"$pf"'\0%l\0'
 		# shellcheck disable=SC2086
 		$LOW find "$@" 2>/dev/null || printf 'U\0'
 		;;
 	esac
+}
+
+# hash_pass FIND-ARGS...: run find and its sha256sum until the deadline
+# (left seconds).
+hash_pass() {
+	# cat ends only when find and every sha256sum it ran have closed the
+	# pipe, so the marker is never written between hash records.
+	if [ -n "$TIMEOUT" ]; then
+		# GNU timeout signals its process group (find and sha256sum);
+		# BusyBox timeout signals find only, and the running sha256sum
+		# batch ends on its own before cat does.
+		{
+			# shellcheck disable=SC2086
+			$TIMEOUT "$left" $LOW find "$@" 2>/dev/null
+		} | cat
+	else
+		# The watchdog stops find and its sha256sum at the deadline.
+		{
+			# shellcheck disable=SC2086
+			$LOW find "$@" 2>/dev/null &
+			fp=$!
+			watchdog "$left" "$fp" >/dev/null 2>&1 &
+			wp=$!
+			wait "$fp"
+			kill "$wp" 2>/dev/null
+		} | cat
+	fi
 }
 
 # homes CALLBACK: call CALLBACK with every home directory (/root, /home/*)
@@ -361,10 +476,22 @@ home_file() {
 HOME_CUT=0
 FOUND=0
 found() { FOUND=1; }
-scan_hash() { visit hash "$1" 0; }
-scan_meta() { visit meta "$1" 0; }
 
-# visit KIND START ALL: the hash or meta pass of one start point. Before the
+# each_pattern CALLBACK: call CALLBACK BASE REL for every home pattern. The
+# list is split with globbing off: a .ssh directory in the working
+# directory must not expand .ssh/authorized_keys*.
+each_pattern() {
+	for base in /root /home; do
+		set -f
+		for rel in $HOME_FILES; do
+			set +f
+			"$1" "$base" "$rel"
+		done
+		set +f
+	done
+}
+
+# visit KIND START ALL [HOME]: the hash or meta pass of one start point. Before the
 # hash pass reads a byte, the sizes of the files it would hash are summed
 # (metadata only) and, when they exceed the budget left, the file size is
 # capped so the run hashes at most HASH_BUDGET bytes. The cap is kept for
@@ -377,7 +504,7 @@ visit() {
 		CAPS=${CAPS# }
 		vcap=${CAPS%% *}
 		CAPS=${CAPS#"$vcap"}
-		scan "$2" meta "$3" "${vcap:--}"
+		scan "$2" meta "$3" "${vcap:--}" "${4:-0}"
 		return
 	fi
 	if [ "$(date +%s)" -ge "$DEADLINE" ]; then
@@ -387,21 +514,25 @@ visit() {
 	fi
 	vstart=$2
 	vall=$3
+	vhome=${4:-0}
 	# shellcheck disable=SC2046 # two numbers
-	set -- $(scan "$vstart" size "$vall" -)
+	set -- $(scan "$vstart" size "$vall" - "$vhome")
 	vcap=${2:--}
 	[ "$vcap" = - ] || BUDGET_CUT=1
 	HASH_LEFT=$((HASH_LEFT - ${1:-0}))
 	# A start point the deadline cut is truncated, not unreadable: cap 0
 	# marks none of its files as expected to have a hash (M0), and the
 	# hashes written before the cut still reach their files by path.
-	scan "$vstart" hash "$vall" "$vcap"
+	scan "$vstart" hash "$vall" "$vcap" "$vhome"
 	[ $? -eq 3 ] && vcap=0
 	CAPS="$CAPS $vcap"
 }
 
-# walk KIND: every start point of the profile.
-walk() {
+# starts: collect every start point of the profile once, as lines "ALL
+# HOME PATH", so that the hash and the meta pass visit the same start
+# points in the same order (CAPS is matched by position).
+STARTS=""
+starts() {
 	for r in $LITERAL_ROOTS; do
 		if nested "$r" && ! nested_mount "$r"; then
 			continue
@@ -409,13 +540,34 @@ walk() {
 		[ "$(root_state "$r")" = scanned ] || continue
 		all=0
 		[ "$r" = /boot/efi ] && all=1
-		visit "$1" "$r" "$all"
+		STARTS="$STARTS$all 0 $r
+"
 	done
-	for base in /root /home; do
-		for rel in $HOME_FILES; do
-			each_home_file "$base" "$rel" "scan_$1"
-		done
+	HOME_LIST=""
+	each_pattern each_home_add
+	STARTS="$STARTS$HOME_LIST"
+}
+each_home_add() {
+	each_home_file "$1" "$2" home_add
+}
+home_add() {
+	HOME_LIST="${HOME_LIST}0 1 $1
+"
+}
+
+# walk KIND: visit every start point.
+walk() {
+	set -f
+	w_ifs=$IFS
+	IFS='
+'
+	for w_s in $STARTS; do
+		IFS=$w_ifs
+		w_rest=${w_s#* }
+		visit "$1" "${w_rest#* }" "${w_s%% *}" "${w_rest%% *}"
 	done
+	IFS=$w_ifs
+	set +f
 }
 
 # SSH configuration: /etc/ssh/sshd_config and every regular file under /etc
@@ -492,6 +644,22 @@ ssh_collect() {
 	done
 }
 
+# pattern_state BASE REL: the roots summary entry of one home pattern.
+pattern_state() {
+	FOUND=0
+	UNL=0
+	each_home_file "$1" "$2" found
+	if [ "$1" = /root ]; then pat="/root/$2"; else pat="/home/*/$2"; fi
+	if [ "$FOUND" = 1 ]; then
+		printf 'R%s %s\0' scanned "$pat"
+	elif [ "$UNL" = 1 ]; then
+		printf 'R%s %s\0' error "$pat"
+	else
+		printf 'R%s %s\0' missing "$pat"
+	fi
+	[ "$UNL" = 1 ] && printf 'U\0'
+}
+
 produce() {
 	printf 'B%s\0' "$(date +%s)"
 	[ -n "$P" ] && printf 'P\0%s\0' "$P"
@@ -505,27 +673,13 @@ produce() {
 	# A home pattern is missing only when every place it could match was
 	# looked at; a directory that cannot be searched makes it unreadable
 	# (and "error" when nothing else matched), never missing.
-	for base in /root /home; do
-		for rel in $HOME_FILES; do
-			FOUND=0
-			UNL=0
-			each_home_file "$base" "$rel" found
-			if [ "$base" = /root ]; then pat="/root/$rel"; else pat="/home/*/$rel"; fi
-			if [ "$FOUND" = 1 ]; then
-				printf 'R%s %s\0' scanned "$pat"
-			elif [ "$UNL" = 1 ]; then
-				printf 'R%s %s\0' error "$pat"
-			else
-				printf 'R%s %s\0' missing "$pat"
-			fi
-			[ "$UNL" = 1 ] && printf 'U\0'
-		done
-	done
+	each_pattern pattern_state
 	report_links
 
 	# Hashes first, then metadata: the awk program needs each hash before
 	# the record it belongs to.
 	ssh_collect
+	starts
 	DEADLINE=$(($(date +%s) + HASH_SECONDS))
 	HASH_LEFT=$HASH_BUDGET
 	walk hash

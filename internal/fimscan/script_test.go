@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"io"
 	"io/fs"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -605,6 +606,169 @@ func TestScriptNeverFollowsSymlinkedDirectories(t *testing.T) {
 			}
 			c.check(t, res)
 		})
+	}
+}
+
+// TestScriptHomeSymlinksNeverFollowed: a user's ~/.ssh that is a symlink
+// (to a directory or a file outside the profile) or an SSH file in it that
+// is a symlink is never read through: nothing behind it is reported or
+// hashed.
+func TestScriptHomeSymlinksNeverFollowed(t *testing.T) {
+	const leak = "LEAKED-ROOT-KEYS\n"
+	for _, c := range []struct {
+		name    string
+		setup   func(t *testing.T, root string)
+		partial bool
+	}{
+		{"symlinked .ssh to a directory", func(t *testing.T, root string) {
+			moveAndLink(t, root, "home/alice/.ssh", "/elsewhere/alice-ssh")
+			if err := os.WriteFile(filepath.Join(root, "elsewhere/alice-ssh/authorized_keys"), []byte(leak), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"symlinked .ssh to a file", func(t *testing.T, root string) {
+			if err := os.RemoveAll(filepath.Join(root, "home/alice/.ssh")); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "elsewhere/leak"), []byte(leak), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			relLink(t, root, "/elsewhere/leak", "/home/alice/.ssh")
+		}, true},
+		{"symlinked authorized_keys", func(t *testing.T, root string) {
+			if err := os.WriteFile(filepath.Join(root, "elsewhere/leak"), []byte(leak), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(filepath.Join(root, "home/alice/.ssh/authorized_keys")); err != nil {
+				t.Fatal(err)
+			}
+			relLink(t, root, "/elsewhere/leak", "/home/alice/.ssh/authorized_keys")
+		}, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			root := buildTree(t, treeOpts{})
+			c.setup(t, root)
+			res := runAndParse(t, "/bin/sh", root, ModeFull)
+			leakSum := sha256.Sum256([]byte(leak))
+			for _, r := range res.Records {
+				p := string(r.Path)
+				if strings.HasPrefix(p, "/elsewhere") || (p == "/home/alice/.ssh/authorized_keys" && r.Type != TypeSymlink) ||
+					(c.partial && strings.HasPrefix(p, "/home/alice/.ssh/")) {
+					t.Errorf("record %s (%v) behind a symlink", EscapePath(r.Path), r.Type)
+				}
+				if r.Hash == sealHash(scriptTestKey, r.Path, leakSum) {
+					t.Errorf("%s carries the hash of the file behind a symlink", EscapePath(r.Path))
+				}
+			}
+			if c.partial && (res.Complete() || res.Host.Unreadable == 0) {
+				t.Errorf("partial %v, host %+v", res.Partial, res.Host)
+			}
+		})
+	}
+}
+
+// TestScriptHomeSymlinkSwapNeverMisattributes: while the scan runs, a user
+// keeps swapping ~/.ssh for a symlink to a directory outside the profile,
+// ~/.ssh/authorized_keys for a symlink to a file outside it, and another
+// authorized_keys for a symlink to a FIFO. Whatever the timing, a hash
+// reported for a home SSH file is the hash of that file, never of a file
+// behind a symlink; nothing outside the profile is reported, and a FIFO
+// swapped in cannot stall the run past the deadline.
+func TestScriptHomeSymlinkSwapNeverMisattributes(t *testing.T) {
+	const leak = "LEAKED-ROOT-KEYS\n"
+	root := buildTree(t, treeOpts{})
+	j := func(p string) string { return filepath.Join(root, p) }
+	if err := os.MkdirAll(j("elsewhere/alice-ssh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(j("elsewhere/alice-ssh/authorized_keys"), []byte(leak), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(j("elsewhere/leak"), []byte(leak), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(j("elsewhere/fifo"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"home/bob/.ssh/authorized_keys", "home/erin/.ssh/authorized_keys"} {
+		if err := os.MkdirAll(filepath.Dir(j(p)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(j(p), []byte("ssh-ed25519 AAAA "+p+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	real := map[string][sha256.Size]byte{}
+	for _, p := range []string{"/home/alice/.ssh/authorized_keys", "/home/alice/.ssh/known_hosts", "/home/bob/.ssh/authorized_keys", "/home/erin/.ssh/authorized_keys"} {
+		b, err := os.ReadFile(j(p))
+		if err != nil {
+			t.Fatal(err)
+		}
+		real[p] = sha256.Sum256(b)
+	}
+	// swap flips path p between itself and a symlink to target until stop;
+	// meanwhile the real entry is parked under a name no pattern matches.
+	swap := func(p, target string, stop <-chan struct{}, done chan<- struct{}) {
+		defer func() { done <- struct{}{} }()
+		park := filepath.Join(filepath.Dir(p), "parked")
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			// Each state holds for a few milliseconds, about as long as
+			// one step of the scan of a home file.
+			time.Sleep(time.Duration(rand.IntN(4000)) * time.Microsecond)
+			if err := os.Rename(j(p), j(park)); err != nil {
+				t.Error(err)
+				return
+			}
+			if err := os.Symlink(j(target), j(p)); err != nil {
+				t.Error(err)
+			}
+			time.Sleep(time.Duration(rand.IntN(4000)) * time.Microsecond)
+			if err := os.Remove(j(p)); err != nil {
+				t.Error(err)
+			}
+			if err := os.Rename(j(park), j(p)); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{}, 3)
+	go swap("home/alice/.ssh", "elsewhere/alice-ssh", stop, done)
+	go swap("home/bob/.ssh/authorized_keys", "elsewhere/leak", stop, done)
+	go swap("home/erin/.ssh/authorized_keys", "elsewhere/fifo", stop, done)
+	defer func() {
+		close(stop)
+		for range 3 {
+			<-done
+		}
+	}()
+	leakSum := sha256.Sum256([]byte(leak))
+	// Without the fix (re-resolving the path by name) a run leaked the
+	// hash of a file behind a symlink about once in eight runs.
+	for range 20 {
+		start := time.Now()
+		res := runWith(t, root, ModeFull, os.Getenv("PATH"), "NEBULA_FIM_TEST_HASH_SECONDS=3")
+		if d := time.Since(start); d > time.Minute {
+			t.Errorf("run took %v", d)
+		}
+		for _, r := range res.Records {
+			p := string(r.Path)
+			if strings.HasPrefix(p, "/elsewhere") || strings.Contains(p, "parked") {
+				t.Errorf("record %s outside the profile", EscapePath(r.Path))
+			}
+			if r.Hash == sealHash(scriptTestKey, r.Path, leakSum) {
+				t.Errorf("%s carries the hash of a file behind a swapped-in symlink", EscapePath(r.Path))
+			}
+			if sum, ok := real[p]; ok && r.Hash.Kind != HashNone && r.Hash != sealHash(scriptTestKey, r.Path, sum) {
+				t.Errorf("%s carries a hash that is not its own", EscapePath(r.Path))
+			}
+		}
 	}
 }
 
