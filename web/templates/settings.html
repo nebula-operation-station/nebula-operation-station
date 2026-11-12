@@ -80,6 +80,52 @@
   {{end}}
 </section>
 
+{{with .Settings.Agent}}
+<section class="panel" id="vuln-agent">
+  <h2>Vulnerability agent – LLM</h2>
+  <p class="hint">The vulnerability agent sends finding context (package names, versions, advisory text) to this LLM endpoint for its assessment text. Use only an endpoint inside the lab. The LLM API key is never stored in NOS; it stays on the agent host. An empty URL or model means the agent’s local configuration is used.</p>
+  {{if .Error}}
+  <p class="message message--error">{{.Error}}</p>
+  {{else}}
+  {{if not .Maintainer}}
+  <p class="hint">Only the maintainer (admin) can change these settings, with a security key.</p>
+  {{end}}
+  <form id="vuln-agent-form" class="form" novalidate data-version="{{.Config.Version}}" data-url="{{.Config.LLMBaseURL}}">
+    <fieldset{{if not .Maintainer}} disabled{{end}}>
+      <legend>Assessor</legend>
+      <label class="choice"><input type="checkbox" id="vuln-agent-enabled" name="llm_enabled"{{if .Config.LLMEnabled}} checked{{end}}> LLM assessment enabled</label>
+      <label for="vuln-agent-url">LLM base URL (OpenAI-compatible)</label>
+      <input id="vuln-agent-url" name="llm_base_url" class="mono" maxlength="{{.MaxURL}}" autocomplete="off" spellcheck="false" value="{{.Config.LLMBaseURL}}" placeholder="{{.URLPlaceholder}}">
+      <p class="message message--error">The LLM URL is security-relevant: changing it redirects finding context to another endpoint. The change needs your explicit confirmation and a security key, and it is audited.</p>
+      <label class="choice"><input type="checkbox" id="vuln-agent-confirm-url" name="confirm_url_change"> I confirm the change of the LLM URL</label>
+      <label for="vuln-agent-model">Model</label>
+      <input id="vuln-agent-model" name="llm_model" class="mono" maxlength="{{.MaxModel}}" autocomplete="off" spellcheck="false" value="{{.Config.LLMModel}}" placeholder="{{.ModelPlaceholder}}">
+      <label for="vuln-agent-language">Assessment language</label>
+      <select id="vuln-agent-language" name="language">
+        <option value="de"{{if eq .Config.Language "de"}} selected{{end}}>Deutsch</option>
+        <option value="en"{{if eq .Config.Language "en"}} selected{{end}}>English</option>
+      </select>
+      <label for="vuln-agent-operator">Operator instructions (added after the core prompt, at most 4 KiB)</label>
+      <textarea id="vuln-agent-operator" name="operator_instructions" rows="6" maxlength="{{.MaxOperator}}" spellcheck="false">{{.Config.OperatorInstructions}}</textarea>
+    </fieldset>
+    <h3>Core prompt (fixed in the agent, read-only)</h3>
+    {{if .CorePrompt}}
+    <pre class="mono" id="vuln-agent-core">{{.CorePrompt}}</pre>
+    {{else}}
+    <p class="hint">This build does not include the agent’s core prompt.</p>
+    {{end}}
+    <p class="hint">{{if .Config.Version}}Version {{.Config.Version}}, saved by {{.Config.UpdatedBy}} {{.Updated}}.{{else}}Never saved: the defaults apply.{{end}}</p>
+    <p id="vuln-agent-message" class="message" role="status" aria-live="polite"></p>
+    {{if .Maintainer}}
+    <div class="actions">
+      <button type="submit" id="vuln-agent-submit" class="button">Save with security key</button>
+    </div>
+    {{end}}
+  </form>
+  {{end}}
+</section>
+{{end}}
+
 <section class="panel">
   <h2>Inventory tools</h2>
   <div class="actions actions--stack">
