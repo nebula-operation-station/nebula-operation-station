@@ -581,8 +581,11 @@ does NOS connect **from** (`--from`)?
   AS-05 adds, in its new test files of `cmd/nebula/`, two tests that run
   without root, call no seam with a fake and contain no `t.Skip`:
   - *rejection test*, calling the production wrappers `backupCmd` and
-    `restoreCmd` themselves with an empty stdin, `SUDO_UID` unset
-    (`t.Setenv`), `nebulaRoot` pointed at an empty `t.TempDir()` and
+    `restoreCmd` themselves with an empty stdin, `SUDO_UID` set to the
+    empty string via `t.Setenv` (restored after the test; never
+    `os.Unsetenv`), which `adminFromSudo` treats like unset (previously
+    "unset (`t.Setenv`)", which `t.Setenv` cannot do), `nebulaRoot`
+    pointed at an empty `t.TempDir()` and
     `NEBULA_EXECUTOR_SOCKET` naming a path in that directory where
     nothing listens (no socket file is created). Each case asserts the
     exact error text of today's tree, and an error of another type or
@@ -593,7 +596,7 @@ does NOS connect **from** (`--from`)?
     - `backupCmd` without arguments returns "run this with sudo as an
       admin user (it reads the server's data as root and asks the
       executor as you)", also when the test runs as root, because
-      `SUDO_UID` is unset;
+      `SUDO_UID` is empty;
     - `backupCmd --pre-upgrade` returns the `skipped` error with exit
       code `ExitSkipped` and the text "backup: no backup was made: needs
       sudo from an admin user: " followed by that message;
@@ -718,14 +721,28 @@ does NOS connect **from** (`--from`)?
   - **accepted**: `restoreWith` returns no error, the first recorded
     call is `Stop` with exactly `backup.StopUnits`, and the last
     recorded call is the final action;
-  - **rejected**: `restoreWith` returns an error and the fake recorded
-    no call (for example an `ARCHIVE` or `--identity` form whose file
-    does not parse as the minimal valid restore input);
-  - **harness error**: an error after at least one recorded call
-    (including the rollback `Start` that `backup.Restore` makes when a
-    step fails after `Stop`), or no error without the final action as
-    last call; the test fails and names the harness entry, never the
-    argument, and no `canary-rejects` covers it.
+  - **rejected**: never; a `restore` form cannot be rejected;
+  - **harness error**: every error `restoreWith` returns, with or
+    without a recorded call (including the rollback `Start` that
+    `backup.Restore` makes when a step fails after `Stop`), and no
+    error without the final action as last call; the test fails and
+    names the harness entry, never the argument, and no
+    `canary-rejects` covers it.
+  Previously an error with no recorded call counted as rejected (for
+  example an `ARCHIVE` or `--identity` form whose file did not parse as
+  the minimal valid restore input). That class also caught every
+  harness or fixture defect before `Stop`: a missing `restore` stdin
+  line, an unpinned `hostname`, fixture schemas behind a new migration
+  (`backup.CheckSchemas`), a fixture archive or identity that does not
+  parse. Such a defect then counted as an argument rejection, against
+  the rule above that a missing fixture or stdin line can never become
+  a pass or a silent `canary-rejects`. No argument-caused rejection
+  remains: the only property a `restore` form gives the command is a
+  path, and the test creates the file at that path with the minimal
+  valid restore input before the run (**Canary files for path kinds**
+  below), so a file that is missing or does not parse is itself a
+  harness error. The `restore` arguments therefore never carry
+  `canary-rejects`; the test fails when one does.
   The `restore` arguments are `in-path` values that are read, not sent:
   their expected-fields entry lists no field. The needle search of
   conditions 1 and 2 covers the recorded `backup.System` calls (unit
