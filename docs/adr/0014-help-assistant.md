@@ -825,12 +825,29 @@ does NOS connect **from** (`--from`)?
   that reused a recorder, passed every listed test). AS-05 adds one
   meta-test per rule, each with a fake harness entry or fake argument
   whose expected outcome a wrong harness does not produce:
-  - rule (a): a fake `host pin --known-hosts` entry and a fake
-    `pve remote add --ca-file` entry whose command returns no error and
-    sends nothing (exits cleanly before the pin or add request) must
-    fail the test as a harness error naming the harness entry; a
-    harness that classifies them as rejected (counting toward
-    `canary-rejects`) or as accepted fails the meta-test;
+  - rule (a) (as00iif; previously only fakes that send nothing, so a
+    harness that checked "anything recorded" instead of "final request
+    recorded", or skipped the `restore` order check, passed): each of
+    these fake harness entries returns no error and must fail the test
+    as a harness error naming the harness entry; a harness that
+    classifies any of them as rejected (counting toward
+    `canary-rejects`) or as accepted fails the meta-test:
+    - a fake `host pin --known-hosts` entry and a fake
+      `pve remote add --ca-file` entry that send nothing (exit cleanly
+      before the pin or add request);
+    - the same two entries with a command that records other traffic
+      (at least one request that is not the entry's final request,
+      such as a lookup before the pin or add) and then exits cleanly
+      without the final request; a harness that checks "anything
+      recorded" accepts them;
+    - three fake `restore` entries whose recording fake `backup.System`
+      records, in this order: `Start(backup.StartUnits)` then
+      `Stop(backup.StopUnits)` (both calls present, out of order);
+      `Chown`, `Stop(backup.StopUnits)`, `Start(backup.StartUnits)`
+      (`Stop` not first); `Stop(backup.StopUnits)`,
+      `Start(backup.StartUnits)`, `Chown` (final action not last); a
+      harness that checks only that both calls occur, or skips the
+      `Stop`-first or the `Start`-last check, accepts one of them;
   - rule (b): a fake argument that records a request and then returns
     an error must fail as a harness error, never as rejected;
   - rule (c): a fake `in-path` argument that returns an error before
