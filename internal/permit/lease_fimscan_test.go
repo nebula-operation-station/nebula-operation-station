@@ -7,11 +7,13 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/scanner"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/schedgrant"
 )
 
@@ -47,15 +49,23 @@ func fimScanDoc(t *testing.T, now time.Time, act ReadGrantAction) ReadGrantDoc {
 	return d
 }
 
-// fimScanScannerVerdict fixes the executor's Safety Scanner result for the
-// pinned script. The shipped script names authorized_keys (it reads them),
-// which the scanner rates MEDIUM; the authorization tests below set LOW to
-// exercise the lease path, and TestFimScanScannerFloorStillApplies shows a
-// MEDIUM verdict refusing the lease.
-func fimScanScannerVerdict(e *env, risk canonical.Risk) {
+// observeFimScan lets the executor's own Safety Scanner scan the real
+// pinned script, so approvals and runs below see its actual verdict.
+func observeFimScan(t *testing.T, e *env) {
+	t.Helper()
+	sha, err := e.auth.ObserveArtifact(fimScanScript(t))
+	if err != nil || sha != FimScanArtifactSHA256 {
+		t.Fatalf("observe: %s %v", sha, err)
+	}
+}
+
+// fimScanScannerVerdict replaces the executor's Safety Scanner result for
+// the pinned script with one that differs from the reviewed result, as a
+// changed scanner would produce.
+func fimScanScannerVerdict(e *env, risk canonical.Risk, findings []scanner.Finding) {
 	e.auth.scanMu.Lock()
 	defer e.auth.scanMu.Unlock()
-	e.auth.scans[FimScanArtifactSHA256] = scanResult{risk: risk}
+	e.auth.scans[FimScanArtifactSHA256] = scanResult{risk: risk, findings: findings, categories: scanner.Categories(findings)}
 }
 
 func fimScanRun(t *testing.T, mode string) Run {
@@ -158,7 +168,7 @@ func TestFimScanReadGrantBindsExactContract(t *testing.T) {
 // before any budget is spent.
 func TestFimScanRunRejectsChangedScriptOrParameters(t *testing.T) {
 	e, le := newLeaseEnv(t, ModeStandard)
-	fimScanScannerVerdict(e, canonical.RiskLow)
+	observeFimScan(t, e)
 	g := approveReadGrant(t, e, readGrantRaw(t, fimScanDoc(t, e.clk.Now(),
 		fimScanGrantAction(t, FimScanArtifactSHA256, "incremental", "fim-default-v1"))))
 	changed := fimScanRun(t, "incremental")
@@ -192,7 +202,7 @@ func TestFimScanRunRejectsChangedScriptOrParameters(t *testing.T) {
 // count in the ordinary per-host rolling-hour budget.
 func TestFimScanIntervalsAndBudget(t *testing.T) {
 	e, le := newLeaseEnv(t, ModeStandard)
-	fimScanScannerVerdict(e, canonical.RiskLow)
+	observeFimScan(t, e)
 	now := e.clk.Now()
 	inc := fimScanDoc(t, now, fimScanGrantAction(t, FimScanArtifactSHA256, "incremental", "fim-default-v1"))
 	inc.ID = rgID
@@ -208,6 +218,7 @@ func TestFimScanIntervalsAndBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A full run keeps its own floor and is not blocked by the incremental one.
+	gfStart := e.clk.Now()
 	if _, err := e.auth.AuthorizeReadRun(gf.ID, "f1", TriggerOnDemand, fimScanRun(t, "full")); err != nil {
 		t.Fatalf("full after incremental: %v", err)
 	}
@@ -219,13 +230,22 @@ func TestFimScanIntervalsAndBudget(t *testing.T) {
 	if _, err := e.auth.AuthorizeReadRun(gi.ID, "i3", TriggerScheduled, fimScanRun(t, "incremental")); err != nil {
 		t.Fatalf("incremental after 1 h: %v", err)
 	}
-	// The full floor is weekly, also for scheduled runs.
-	e.clk.Add(6 * 24 * time.Hour)
+	// The full floor is weekly less the scheduler slack, also for
+	// scheduled runs: a second full run in the same week is denied ...
+	e.clk.Add(6 * 24 * time.Hour) // f1 + 6 d 1 h
 	_, err = e.auth.AuthorizeReadRun(gf.ID, "f2", TriggerScheduled, fimScanRun(t, "full"))
 	wantCode(t, err, CodeLeaseBudget)
-	e.clk.Add(24*time.Hour - time.Hour)
+	e.clk.Add(17*time.Hour - time.Second) // one second below the floor
+	_, err = e.auth.AuthorizeReadRun(gf.ID, "f2b", TriggerScheduled, fimScanRun(t, "full"))
+	wantCode(t, err, CodeLeaseBudget)
+	// ... while a weekly schedule that fires up to 6 h early is not
+	// pushed to the slot after (review ig05c: weekly became fortnightly).
+	e.clk.Add(time.Second)
+	if got := e.clk.Now().Sub(gfStart); got != 7*24*time.Hour-FimScanFullScheduleSlack {
+		t.Fatalf("full run at %s after f1", got)
+	}
 	if _, err := e.auth.AuthorizeReadRun(gf.ID, "f3", TriggerScheduled, fimScanRun(t, "full")); err != nil {
-		t.Fatalf("full after 7 days: %v", err)
+		t.Fatalf("full %s early: %v", FimScanFullScheduleSlack, err)
 	}
 	// The two modes keep separate interval keys; the full key never
 	// shadows another action ID.
@@ -243,7 +263,7 @@ func TestFimScanIntervalsAndBudget(t *testing.T) {
 // read; an exhausted budget denies them.
 func TestFimScanBudgetExhaustedDenies(t *testing.T) {
 	e, le := newLeaseEnv(t, ModeStandard)
-	fimScanScannerVerdict(e, canonical.RiskLow)
+	observeFimScan(t, e)
 	d := fimScanDoc(t, e.clk.Now(), fimScanGrantAction(t, FimScanArtifactSHA256, "incremental", "fim-default-v1"))
 	cf := readGrantDocWith(t, rgID, e.clk.Now(), DefaultReadGrantLifetime, 1, []string{"core.facts"})
 	d.Actions = append(d.Actions, cf.Actions...)
@@ -266,22 +286,161 @@ func TestFimScanBudgetExhaustedDenies(t *testing.T) {
 }
 
 // The pinned contract does not bypass the executor's risk floor (spec 10:
-// scanner and host floors still apply): with a MEDIUM scanner verdict for
-// the script a fim.scan lease is refused, and runs of an approved lease are
-// denied once the verdict rises.
+// scanner and host floors still apply): a scanner result for the script
+// that differs from the reviewed one (here: one extra finding) refuses a
+// fim.scan lease, and denies runs of an approved lease once it appears.
 func TestFimScanScannerFloorStillApplies(t *testing.T) {
 	e, le := newLeaseEnv(t, ModeStandard)
 	raw := readGrantRaw(t, fimScanDoc(t, e.clk.Now(), fimScanGrantAction(t, FimScanArtifactSHA256, "full", "fim-default-v1")))
-	fimScanScannerVerdict(e, canonical.RiskMedium)
+	other := append(slices.Clone(fimScanReviewedFindings),
+		scanner.Finding{Category: scanner.UsersGroups, Risk: canonical.RiskMedium, Line: 200, Excerpt: "authorized_keys"})
+	fimScanScannerVerdict(e, canonical.RiskMedium, other)
 	_, err := e.auth.ProposeReadGrant(raw)
 	wantCode(t, err, CodeGrantInvalid)
 
-	fimScanScannerVerdict(e, canonical.RiskLow)
+	clear(e.auth.scans)
+	observeFimScan(t, e)
 	g := approveReadGrant(t, e, raw)
-	fimScanScannerVerdict(e, canonical.RiskMedium)
+	fimScanScannerVerdict(e, canonical.RiskMedium, other)
 	_, err = e.auth.AuthorizeReadRun(g.ID, "f1", TriggerOnDemand, fimScanRun(t, "full"))
 	wantCode(t, err, CodeGrantInvalid)
 	if n := len(le.hostRes["dockerflux"]); n != 0 {
 		t.Fatalf("%d reservations, want 0", n)
+	}
+}
+
+// The real pinned script, scanned by the executor's own Safety Scanner,
+// passes floor() as LOW for fim.scan and runs under a read lease; the
+// approver still sees the scanner's findings. The same bytes under any
+// other action or version keep the scanner's MEDIUM (review ig05c: the
+// lease could never be approved in production).
+func TestFimScanRealScriptPassesFloor(t *testing.T) {
+	e, le := newLeaseEnv(t, ModeStandard)
+	script := fimScanScript(t)
+	findings, risk := scanner.Scan(script)
+	if risk != canonical.RiskMedium || !slices.Equal(findings, fimScanReviewedFindings) || scanner.Version != fimScanReviewedScannerVersion {
+		t.Fatalf("scanner %s rates the pinned script %s with %+v; the reviewed result is %+v under %s: review the change and update fimScanReviewedFindings",
+			scanner.Version, risk, findings, fimScanReviewedFindings, fimScanReviewedScannerVersion)
+	}
+	observeFimScan(t, e)
+	shown, _, ok := e.auth.ScanInfo(FimScanArtifactSHA256)
+	if !ok || !slices.Equal(shown, fimScanReviewedFindings) {
+		t.Fatalf("approver sees %+v (%v), want the scanner's findings", shown, ok)
+	}
+	tgt := []canonical.Target{{HostID: "dockerflux"}}
+	floorOf := func(id, version, sha string) canonical.Risk {
+		t.Helper()
+		f, _, err := e.auth.floor(canonical.Request{ActionID: id, ModuleVersion: version, ArtifactSHA256: sha}, tgt, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return f
+	}
+	if f := floorOf(FimScanActionID, FimScanModuleVersion, FimScanArtifactSHA256); f != canonical.RiskLow {
+		t.Fatalf("fim.scan floor %s, want LOW", f)
+	}
+	for _, c := range [][2]string{{"core.facts", FimScanModuleVersion}, {"net.facts", FimScanModuleVersion}, {FimScanActionID, "1.0.1"}} {
+		if f := floorOf(c[0], c[1], FimScanArtifactSHA256); f != canonical.RiskMedium {
+			t.Errorf("%s@%s with the fim.scan bytes: floor %s, want MEDIUM", c[0], c[1], f)
+		}
+	}
+
+	g := approveReadGrant(t, e, readGrantRaw(t, fimScanDoc(t, e.clk.Now(),
+		fimScanGrantAction(t, FimScanArtifactSHA256, "incremental", "fim-default-v1"))))
+	got, err := e.auth.AuthorizeReadRun(g.ID, "r1", TriggerScheduled, fimScanRun(t, "incremental"))
+	if err != nil {
+		t.Fatalf("real script under the lease: %v", err)
+	}
+	if string(got.Parameters) != `{"mode":"incremental","profile":"fim-default-v1"}` {
+		t.Fatalf("parameters %s", got.Parameters)
+	}
+	if n := len(le.hostRes["dockerflux"]); n != 1 {
+		t.Fatalf("%d reservations, want 1", n)
+	}
+
+	// A lease proposed before the executor saw the bytes is approved
+	// without the scanner; the run then scans the real bytes and passes.
+	e2, _ := newLeaseEnv(t, ModeStandard)
+	g2 := approveReadGrant(t, e2, readGrantRaw(t, fimScanDoc(t, e2.clk.Now(),
+		fimScanGrantAction(t, FimScanArtifactSHA256, "full", "fim-default-v1"))))
+	if _, err := e2.auth.AuthorizeReadRun(g2.ID, "r1", TriggerOnDemand, fimScanRun(t, "full")); err != nil {
+		t.Fatalf("run that triggers the scan: %v", err)
+	}
+	if _, _, ok := e2.auth.ScanInfo(FimScanArtifactSHA256); !ok {
+		t.Fatal("the run did not scan the artifact")
+	}
+}
+
+// Only exactly the reviewed scanner result for exactly the pinned action,
+// version and bytes is exempt; any other result keeps its floor.
+func TestFimScanReviewedScanIsExact(t *testing.T) {
+	pinned := canonical.Request{ActionID: FimScanActionID, ModuleVersion: FimScanModuleVersion, ArtifactSHA256: FimScanArtifactSHA256}
+	reviewed := scanResult{risk: canonical.RiskMedium, findings: slices.Clone(fimScanReviewedFindings)}
+	if !fimScanReviewedScan(pinned, reviewed) {
+		t.Fatal("reviewed result of the pinned script not recognised")
+	}
+	withFindings := func(f ...scanner.Finding) scanResult { return scanResult{risk: canonical.RiskHigh, findings: f} }
+	r0, r1 := fimScanReviewedFindings[0], fimScanReviewedFindings[1]
+	moved := r1
+	moved.Line++
+	other := r1
+	other.Excerpt = "/etc/sudoers"
+	high := r1
+	high.Risk = canonical.RiskHigh
+	destructive := scanner.Finding{Category: scanner.DestructiveFS, Risk: canonical.RiskHigh, Line: 300, Excerpt: "rm -rf /"}
+	many := make([]scanner.Finding, scanner.MaxFindings)
+	for name, c := range map[string]struct {
+		r canonical.Request
+		s scanResult
+	}{
+		"other action":       {canonical.Request{ActionID: "core.facts", ModuleVersion: FimScanModuleVersion, ArtifactSHA256: FimScanArtifactSHA256}, reviewed},
+		"other version":      {canonical.Request{ActionID: FimScanActionID, ModuleVersion: "1.0.1", ArtifactSHA256: FimScanArtifactSHA256}, reviewed},
+		"other bytes":        {canonical.Request{ActionID: FimScanActionID, ModuleVersion: FimScanModuleVersion, ArtifactSHA256: hexSum([]byte("x"))}, reviewed},
+		"extra finding":      {pinned, withFindings(r0, r1, destructive)},
+		"missing finding":    {pinned, withFindings(r0)},
+		"moved finding":      {pinned, withFindings(r0, moved)},
+		"other excerpt":      {pinned, withFindings(r0, other)},
+		"higher risk":        {pinned, withFindings(r0, high)},
+		"verdict, no detail": {pinned, withFindings()},
+		"cut-off findings":   {pinned, withFindings(many...)},
+	} {
+		if fimScanReviewedScan(c.r, c.s) {
+			t.Errorf("%s: exempt", name)
+		}
+	}
+}
+
+// The AuthorizeReadRun guard behind the lease's parameters hash: a fim.scan
+// run whose canonical parameters are not one of the pinned modes is denied
+// before any reservation, whatever the lease says.
+func TestFimScanReservationDeniesUnpinnedParameters(t *testing.T) {
+	d := fimScanDoc(t, time.Date(2026, 11, 12, 12, 0, 0, 0, time.UTC),
+		fimScanGrantAction(t, FimScanArtifactSHA256, "incremental", "fim-default-v1"))
+	for _, raw := range []string{
+		`{"mode":"incremental","path":"/","profile":"fim-default-v1"}`,
+		`{"mode":"incremental","profile":"fim-other-v1"}`,
+		`{"mode":"weekly","profile":"fim-default-v1"}`,
+		`{}`,
+		``,
+	} {
+		_, _, err := readRunReservation(d, TriggerScheduled, FimScanActionID, []byte(raw))
+		wantCode(t, err, CodeParametersMismatch)
+	}
+	for mode, want := range map[string]struct {
+		key   string
+		floor time.Duration
+	}{
+		"incremental": {FimScanActionID, FimScanIncrementalMinInterval},
+		"full":        {fimScanFullIntervalKey, FimScanFullMinInterval},
+	} {
+		key, iv, err := readRunReservation(d, TriggerScheduled, FimScanActionID, fimScanParams(mode, "fim-default-v1"))
+		if err != nil || key != want.key || iv != max(want.floor, time.Duration(d.MinIntervalS)*time.Second) {
+			t.Errorf("%s: key %q interval %s (%v)", mode, key, iv, err)
+		}
+	}
+	// Other actions keep their own key and floor.
+	key, iv, err := readRunReservation(d, TriggerScheduled, "package.list_installed", []byte(`{}`))
+	if err != nil || key != "package.list_installed" || iv != PackageListInstalledMinInterval {
+		t.Errorf("package.list_installed: key %q interval %s (%v)", key, iv, err)
 	}
 }

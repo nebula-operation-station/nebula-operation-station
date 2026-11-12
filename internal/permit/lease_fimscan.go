@@ -6,7 +6,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"slices"
 	"time"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/scanner"
 )
 
 // fim.scan read-only contract (ADR 0015 D5, spec 07 "Integrity scan read",
@@ -40,15 +44,57 @@ const (
 	// scheduler's choice above it.
 	FimScanIncrementalMinInterval = time.Hour
 	// FimScanFullMinInterval is the per-host floor between two full runs
-	// (spec 07 Q2: full weekly). It equals schedgrant.MaxInterval, the
-	// longest interval the read store retains.
-	FimScanFullMinInterval = 7 * 24 * time.Hour
+	// (spec 07 Q2: full weekly). It lies FimScanFullScheduleSlack below one
+	// week (schedgrant.MaxInterval, the longest interval the read store
+	// retains), so a weekly schedule that fires slightly early is not
+	// denied and pushed to the slot after, while two full runs in one week
+	// still are.
+	FimScanFullMinInterval = 7*24*time.Hour - FimScanFullScheduleSlack
+	// FimScanFullScheduleSlack is the scheduler jitter by which a weekly
+	// full run may fire early.
+	FimScanFullScheduleSlack = 6 * time.Hour
 
 	// fimScanFullIntervalKey keys the floor of full runs apart from
 	// incremental ones, so neither mode blocks the other. It contains '#',
 	// which no action ID can, so it never shares a key with an action.
 	fimScanFullIntervalKey = "fim.scan#full"
 )
+
+// fimScanReviewedScannerVersion is the Safety Scanner pattern list under
+// which fimScanReviewedFindings were reviewed.
+const fimScanReviewedScannerVersion = "scanner-v1"
+
+// fimScanReviewedFindings is the complete, reviewed Safety Scanner result
+// for the pinned script FimScanArtifactSHA256 under scanner-v1. Both
+// findings are data, not commands: line 84 is the HOME_MAX_MATCHES limit
+// whose comment names .ssh/authorized_keys*, line 124 the HOME_FILES list
+// of files the scan reads (hashed only through a holder dropped to the
+// file's owner). The script never writes them (ADR 0015 D5: it only
+// reads). The scanner rates any mention of authorized_keys MEDIUM, which
+// would raise every fim.scan run above the LOW of a read lease, so exactly
+// this result for exactly these bytes does not raise the floor. Any other
+// finding, another scanner version, another action or other bytes keep
+// the scanner's full verdict. A change of the script or of the scanner
+// needs a reviewed update of this list (TestFimScanRealScriptPassesFloor
+// fails until then, and runs fail closed at MEDIUM).
+var fimScanReviewedFindings = []scanner.Finding{
+	{Category: scanner.UsersGroups, Risk: canonical.RiskMedium, Line: 84, Excerpt: "authorized_keys"},
+	{Category: scanner.UsersGroups, Risk: canonical.RiskMedium, Line: 124, Excerpt: "authorized_keys"},
+}
+
+// fimScanReviewedScan reports whether the scanner result s for request r
+// is the reviewed result of the pinned fim.scan script, so it does not
+// raise r's floor. It holds only for the pinned action, version and script
+// hash, under the reviewed scanner version, with exactly the reviewed
+// findings (fewer than scanner.MaxFindings, so none were cut off).
+func fimScanReviewedScan(r canonical.Request, s scanResult) bool {
+	return r.ActionID == FimScanActionID &&
+		r.ModuleVersion == FimScanModuleVersion &&
+		r.ArtifactSHA256 == FimScanArtifactSHA256 &&
+		scanner.Version == fimScanReviewedScannerVersion &&
+		len(s.findings) < scanner.MaxFindings &&
+		slices.Equal(s.findings, fimScanReviewedFindings)
+}
 
 // validateFimScanAction checks a lease entry for fim.scan against the
 // pinned contract.

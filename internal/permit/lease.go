@@ -850,15 +850,10 @@ func (a *Authority) AuthorizeReadRun(grantID, executionID, trigger string, run R
 	if err != nil {
 		return Grant{}, err
 	}
-	interval := time.Duration(doc.MinIntervalS) * time.Second
-	if doc.RateProfile == schedgrant.TelemetryReadProfile && trigger == TriggerScheduled {
-		interval = max(interval, schedgrant.TelemetryHistoryInterval)
+	key, interval, err := readRunReservation(doc, trigger, run.ActionID, params)
+	if err != nil {
+		return Grant{}, err
 	}
-	key, floor, ok := readRunInterval(run.ActionID, params)
-	if !ok {
-		return Grant{}, fail(CodeParametersMismatch, "parameters are not in the approved contract of %s", run.ActionID)
-	}
-	interval = max(interval, floor)
 	reserved, err := a.leases.ReserveReadRun(grantID, key, run.HostID, a.now(), int(doc.RunBudget), interval)
 	if errors.Is(err, ErrReadGrantInactive) {
 		return Grant{}, fail(CodeLeaseInactive, "the read grant was revoked or has expired")
@@ -878,6 +873,23 @@ func (a *Authority) AuthorizeReadRun(grantID, executionID, trigger string, run R
 	return Grant{ExecutionID: executionID, Parameters: params, read: &readClaim{
 		authority: a, grantID: grantID, trigger: trigger, executionID: executionID, epoch: epoch, run: run,
 	}}, nil
+}
+
+// readRunReservation returns the interval key and the per-host interval
+// for one read run of actionID with canonical parameters params under doc:
+// the grant's min_interval_s, raised by the telemetry history interval for
+// scheduled telemetry runs and by the action's own floor. A fim.scan run
+// whose parameters are not one of the pinned modes is denied.
+func readRunReservation(doc ReadGrantDoc, trigger, actionID string, params []byte) (string, time.Duration, error) {
+	interval := time.Duration(doc.MinIntervalS) * time.Second
+	if doc.RateProfile == schedgrant.TelemetryReadProfile && trigger == TriggerScheduled {
+		interval = max(interval, schedgrant.TelemetryHistoryInterval)
+	}
+	key, floor, ok := readRunInterval(actionID, params)
+	if !ok {
+		return "", 0, fail(CodeParametersMismatch, "parameters are not in the approved contract of %s", actionID)
+	}
+	return key, max(interval, floor), nil
 }
 
 func (a *Authority) checkReadRun(grantID, trigger string, run Run) (ReadGrantDoc, []byte, error) {
