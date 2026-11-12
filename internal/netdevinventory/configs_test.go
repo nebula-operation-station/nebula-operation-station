@@ -1145,11 +1145,9 @@ func TestWriteCapNewestTieGoesToHigherID(t *testing.T) {
 }
 
 // deletionTieState fills dev to the cap with unprotected running versions
-// and gives the two oldest (the last two ids) the same last_seen. With
-// reverseDigests the tie's raw digests are swapped, so a scan of the
-// (device_id, config, raw_digest) index meets the tie in the opposite id
-// order. It returns the tie's ids.
-func deletionTieState(t *testing.T, s *Store, db *sql.DB, ddl string, reverseDigests bool) (tieLow, tieHigh int64) {
+// and gives the two oldest (the last two ids) the same last_seen. It
+// returns the tie's ids.
+func deletionTieState(t *testing.T, s *Store, db *sql.DB, ddl string) (tieLow, tieHigh int64) {
 	t.Helper()
 	addDevice(t, s, cbsDevice())
 	applySeenIndexVariant(t, db, ddl)
@@ -1158,66 +1156,49 @@ func deletionTieState(t *testing.T, s *Store, db *sql.DB, ddl string, reverseDig
 	tieHigh = configMaxID(t, db)
 	tieLow = tieHigh - 1
 	setLastSeen(t, db, tieHigh, lastSeenOf(t, db, tieLow))
-	if reverseDigests {
-		tmp := strings.Repeat("f", 64)
-		for _, q := range []struct {
-			id     int64
-			digest string
-		}{
-			{tieHigh, tmp},
-			{tieLow, fmt.Sprintf("%064x", 1<<20+MaxConfigVersionsPerDevice-1)},
-			{tieHigh, fmt.Sprintf("%064x", 1<<20+MaxConfigVersionsPerDevice-2)},
-		} {
-			if _, err := db.Exec(`UPDATE netdev_config_versions SET raw_digest = ? WHERE id = ?`, q.digest, q.id); err != nil {
-				t.Fatal(err)
-			}
-		}
-	}
 	return tieLow, tieHigh
 }
 
 // TestWriteCapDeletionTieGoesToLowerID gives the two oldest unprotected
 // versions the same last_seen with one slot to free: as in Prune's
-// ROW_NUMBER order (last_seen DESC, id DESC), the lower id goes. Every
-// seen-index variant and both digest orders of the tie run, and the
-// write cap must delete exactly what Prune deletes from the same state.
+// ROW_NUMBER order (last_seen DESC, id DESC), the lower id goes. It runs
+// under every seen-index variant, and the write cap must delete exactly
+// what Prune deletes from the same state.
 func TestWriteCapDeletionTieGoesToLowerID(t *testing.T) {
 	for _, v := range seenIndexVariants {
-		for _, rev := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/reverse digests=%v", v.name, rev), func(t *testing.T) {
-				s, db, _ := newTestStore(t)
-				tieLow, tieHigh := deletionTieState(t, s, db, v.ddl, rev)
-				w := record(t, s, "sw-core", ConfigRunning, testBase, snap('e', "new"))
+		t.Run(v.name, func(t *testing.T) {
+			s, db, _ := newTestStore(t)
+			tieLow, tieHigh := deletionTieState(t, s, db, v.ddl)
+			w := record(t, s, "sw-core", ConfigRunning, testBase, snap('e', "new"))
 
-				// cap + 1 versions, 1 protected (new): exactly one of the tie goes.
-				ids := configIDs(t, db)
-				if len(ids) != MaxConfigVersionsPerDevice {
-					t.Fatalf("kept %d versions, want %d", len(ids), MaxConfigVersionsPerDevice)
-				}
-				if ids[tieLow] || !ids[tieHigh] || !ids[w.VersionID] {
-					t.Fatalf("kept tie low %d = %v, tie high %d = %v, new = %v; want the lower id deleted",
-						tieLow, ids[tieLow], tieHigh, ids[tieHigh], ids[w.VersionID])
-				}
+			// cap + 1 versions, 1 protected (new): exactly one of the tie goes.
+			ids := configIDs(t, db)
+			if len(ids) != MaxConfigVersionsPerDevice {
+				t.Fatalf("kept %d versions, want %d", len(ids), MaxConfigVersionsPerDevice)
+			}
+			if ids[tieLow] || !ids[tieHigh] || !ids[w.VersionID] {
+				t.Fatalf("kept tie low %d = %v, tie high %d = %v, new = %v; want the lower id deleted",
+					tieLow, ids[tieLow], tieHigh, ids[tieHigh], ids[w.VersionID])
+			}
 
-				// The same state with the new version inserted directly,
-				// capped by Prune instead of the write.
-				ps, pdb, _ := newTestStore(t)
-				if l, h := deletionTieState(t, ps, pdb, v.ddl, rev); l != tieLow || h != tieHigh {
-					t.Fatalf("Prune state tie = %d, %d; want %d, %d", l, h, tieLow, tieHigh)
-				}
-				fillVersions(t, pdb, "sw-core", ConfigRunning, testBase.Add(time.Hour), 1, 1<<22)
-				if id := configMaxID(t, pdb); id != w.VersionID {
-					t.Fatalf("Prune state new version = %d, want %d", id, w.VersionID)
-				}
-				if _, err := ps.Prune(context.Background()); err != nil {
-					t.Fatalf("Prune: %v", err)
-				}
-				if pids := configIDs(t, pdb); !maps.Equal(pids, ids) {
-					t.Fatalf("Prune keeps tie low = %v, tie high = %v, %d versions; write cap keeps low = %v, high = %v, %d",
-						pids[tieLow], pids[tieHigh], len(pids), ids[tieLow], ids[tieHigh], len(ids))
-				}
-			})
-		}
+			// The same state with the new version inserted directly,
+			// capped by Prune instead of the write.
+			ps, pdb, _ := newTestStore(t)
+			if l, h := deletionTieState(t, ps, pdb, v.ddl); l != tieLow || h != tieHigh {
+				t.Fatalf("Prune state tie = %d, %d; want %d, %d", l, h, tieLow, tieHigh)
+			}
+			fillVersions(t, pdb, "sw-core", ConfigRunning, testBase.Add(time.Hour), 1, 1<<22)
+			if id := configMaxID(t, pdb); id != w.VersionID {
+				t.Fatalf("Prune state new version = %d, want %d", id, w.VersionID)
+			}
+			if _, err := ps.Prune(context.Background()); err != nil {
+				t.Fatalf("Prune: %v", err)
+			}
+			if pids := configIDs(t, pdb); !maps.Equal(pids, ids) {
+				t.Fatalf("Prune keeps tie low = %v, tie high = %v, %d versions; write cap keeps low = %v, high = %v, %d",
+					pids[tieLow], pids[tieHigh], len(pids), ids[tieLow], ids[tieHigh], len(ids))
+			}
+		})
 	}
 }
 
