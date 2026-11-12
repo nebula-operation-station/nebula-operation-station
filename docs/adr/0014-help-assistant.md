@@ -146,6 +146,17 @@ History:
   rejected first `MAX`). The AS-05 plan row lists the "rejected"
   meta-test next to the class-rule tests (previously only its
   every-form-rejected failure).
+- 2026-11-12 (as00ij, follow-up to PR #531): the rule (b) meta-test
+  fake records the entry's final request before its error and must be
+  neither rejected nor accepted (previously "records a request … never
+  as rejected", which a harness ignoring the error passed). Rule (c)
+  has one `trust-path` fake per command (previously one fake for
+  `pve remote add`/`repin --ca-file`). Fake entries that check their
+  recorders, fake executor and working directory at the start of each
+  run test the isolation of the `canary-range` runs and of the
+  `--identity` control run in every order (previously the range
+  rejection checks had no fake-based test, and the control-run check
+  caught only a shared `backup.System` recorder in the after order).
 
 ## Context
 
@@ -924,7 +935,20 @@ does NOS connect **from** (`--from`)?
     `*age.NoIdentityMatchError` and no `backup.System` call on its own
     recorder; canary: accepted), so a harness that shares a recorder
     between them fails in one of the two orders (**Restore runs**
-    below).
+    below); in addition (as00ij; previously only that check, which
+    catches a shared `backup.System` recorder only in the after order,
+    because a correct control run records no call, and never a shared
+    fake executor or working directory) a fake `restore --identity`
+    harness entry whose every run (canary and control) first looks at
+    its fake `backup.System`, fake executor and working directory and,
+    if any of them holds a call or a marker file, returns an error
+    other than `*age.NoIdentityMatchError` after a `Stop` call;
+    otherwise it creates a marker file in its working directory, makes
+    one call to its fake executor, and then behaves like the real
+    entry (canary: `Stop`, final `Start`, no error; control:
+    `*age.NoIdentityMatchError`, no `backup.System` call). It must pass
+    in both orders; a harness that shares any of the three between
+    control and canary run fails it in both orders.
   **Range checks** (previously Run classes sent every accepted run
   through conditions 1 to 3 and let a rejected run pass on its own,
   while **Bounded numbers** below replaces conditions 1 and 2 for
