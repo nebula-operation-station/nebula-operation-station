@@ -570,6 +570,68 @@ does NOS connect **from** (`--from`)?
      `go test`. The manifest's `host` and `created_at` stay
      `os.Hostname()` and `time.Now()` (no seam; prompt table below).
 
+  **Wrapper tests** (previously the ADR required no behaviour change of
+  the production path but named no test that would catch a wrong
+  wrapper: under the non-root `go test` of CI, a `restoreCmd` passing an
+  always-true `isRoot`, or a `backupCmd` skipping `adminFromSudo` or
+  passing a no-op `drop`, went unnoticed, because the canary runs call
+  only the seams and the existing restore test skips without root).
+  AS-05 adds, in its new test files of `cmd/nebula/`, two tests that run
+  without root, call no seam with a fake and contain no `t.Skip`:
+  - *rejection test*, calling the production wrappers `backupCmd` and
+    `restoreCmd` themselves with an empty stdin, `SUDO_UID` unset
+    (`t.Setenv`), `nebulaRoot` pointed at an empty `t.TempDir()` and
+    `NEBULA_EXECUTOR_SOCKET` naming a path in that directory where
+    nothing listens (no socket file is created). Each case asserts the
+    exact error text of today's tree, and an error of another type or
+    text fails the test:
+    - `backupCmd` with the argument `extra` returns the usage message
+      "usage: sudo nebula backup [--out FILE] [--full] [--no-encrypt]
+      [--pre-upgrade]" (usage before the admin check);
+    - `backupCmd` without arguments returns "run this with sudo as an
+      admin user (it reads the server's data as root and asks the
+      executor as you)", also when the test runs as root, because
+      `SUDO_UID` is unset;
+    - `backupCmd --pre-upgrade` returns the `skipped` error with exit
+      code `ExitSkipped` and the text "backup: no backup was made: needs
+      sudo from an admin user: " followed by that message;
+    - `restoreCmd` with two positional arguments returns "usage: sudo
+      nebula restore [--identity FILE] ARCHIVE" (argument count before
+      the root check);
+    - `restoreCmd` with one `ARCHIVE` that names a missing file in the
+      temporary directory returns "run this with sudo (it stops the
+      services and replaces their data)" when the test runs with an
+      effective UID other than 0, and an error matching `fs.ErrNotExist`
+      from opening the archive when it runs as root (the expectation
+      follows `os.Geteuid()`, so the case asserts in both environments
+      and never skips);
+    - in every case the output holds no "Restore this backup?" and no
+      "Type" prompt.
+    No case reaches `readServerPart`, `dropTo`, `dialExecutor`,
+    `backup.Restore` or the real `systemctl{}`: the admin check, the
+    root check or the missing archive stops each run first, and a
+    wrapper that skips a check runs into a different error (no backup
+    recipients in the empty `nebulaRoot`, the missing archive, a failed
+    dial) and fails on the text. So an always-true `isRoot` and a
+    skipped `adminFromSudo` are caught without root.
+  - *wrapper shape test*, for what a non-root run cannot reach (`dropTo`
+    runs only after `adminFromSudo` has accepted an admin, which needs
+    euid 0 and `SUDO_UID`): it parses `backup.go` and `pve.go` of the
+    package with `go/parser` and fails unless the body of each of
+    `restoreCmd`, `backupCmd` and `pveCmd` is a single `return` of a
+    call to `restoreWith`, `backupWith` or `pveWith` that first passes
+    the wrapper's own parameters unchanged and in order and then exactly
+    these trailing arguments, compared as gofmt output: `systemctl{}`,
+    `time.Now()` and `func() bool { return os.Geteuid() == 0 }` for
+    `restoreCmd`; `adminFromSudo`, `dropTo` and `dialExecutor` for
+    `backupCmd`; `dialExecutor` for `pveCmd`. A no-op `drop`, a
+    different `dial` or a changed root check therefore fails the test,
+    and changing a wrapper needs a reviewed change of this test (both in
+    the protected `cmd/nebula/`).
+  The existing root-only restore test keeps its root check and changes
+  only its call signature (above); the wrapper tests add to it and
+  replace nothing.
+
   Any other hook in non-test code of `cmd/nebula/` needs a new
   maintainer decision.
 
