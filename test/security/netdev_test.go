@@ -23,6 +23,8 @@ package security
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -525,26 +527,104 @@ func (e *ndEnv) wantRefused(what string, before int, err error, c codes.Code) {
 	}
 }
 
+// ndSecretValues are the credential values no reply, error or log line
+// may carry: the stored secret, its rotated successor, the user name and
+// the secret a compromised caller tries to plant.
+var ndSecretValues = []string{ndSecret, ndSecret + "-2", ndUser, ndAttackerSecret}
+
+// ndSecretForms returns every form in which a credential value would
+// appear in text: plain, and the encodings of its bytes that the JSON slog
+// handler, encoding/json and protojson use for []byte (standard base64),
+// plus the unpadded and URL-safe base64 variants and lower- and upper-case
+// hex, so a secret that leaks as bytes is found as well.
+func ndSecretForms() map[string]string {
+	out := map[string]string{}
+	for _, s := range ndSecretValues {
+		b := []byte(s)
+		out[s] = s
+		for enc, form := range map[string]string{
+			"base64":         base64.StdEncoding.EncodeToString(b),
+			"raw base64":     base64.RawStdEncoding.EncodeToString(b),
+			"base64url":      base64.URLEncoding.EncodeToString(b),
+			"raw base64url":  base64.RawURLEncoding.EncodeToString(b),
+			"hex":            hex.EncodeToString(b),
+			"upper-case hex": strings.ToUpper(hex.EncodeToString(b)),
+		} {
+			out[form] = enc + " of " + s
+		}
+	}
+	return out
+}
+
+// ndSecretLeaks returns a description of every credential form in text.
+func ndSecretLeaks(text string) []string {
+	var out []string
+	for form, what := range ndSecretForms() {
+		if strings.Contains(text, form) {
+			out = append(out, what)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
 // requireNoSecret asserts that neither the stored credential nor a
-// planted one appears in the executor's log and event lines.
+// planted one appears, plain or encoded, in the executor's log and event
+// lines.
 func (e *ndEnv) requireNoSecret() {
 	e.t.Helper()
-	logs := e.logs.String()
-	for _, s := range []string{ndSecret, ndUser, ndAttackerSecret} {
-		if strings.Contains(logs, s) {
-			e.t.Fatalf("executor log contains credential material %q", s)
-		}
+	if leaks := ndSecretLeaks(e.logs.String()); len(leaks) > 0 {
+		e.t.Fatalf("executor log contains credential material: %v", leaks)
 	}
 }
 
 // requireNoSecretIn asserts that a reply or error text carries no
-// credential material and no vault reference of a device.
+// credential material, plain or encoded, and no vault reference of a
+// device.
 func requireNoSecretIn(t *testing.T, what, text string) {
 	t.Helper()
-	for _, s := range []string{ndSecret, ndUser, ndAttackerSecret, "netdev-"} {
-		if strings.Contains(text, s) {
-			t.Errorf("%s contains %q: %s", what, s, text)
+	if leaks := ndSecretLeaks(text); len(leaks) > 0 {
+		t.Errorf("%s contains credential material %v: %s", what, leaks, text)
+	}
+	if strings.Contains(text, "netdev-") {
+		t.Errorf("%s contains a device vault reference: %s", what, text)
+	}
+}
+
+// TestNetDevSecretCheckFindsEncodedLeaks proves that the secret checks
+// are not limited to plain text: a credential that leaks as []byte through
+// the JSON slog handler, protojson or encoding/json (base64), or as hex,
+// is found, and clean text is not flagged.
+func TestNetDevSecretCheckFindsEncodedLeaks(t *testing.T) {
+	var logBuf bytes.Buffer
+	slog.New(slog.NewJSONHandler(&logBuf, nil)).Info("leak", "secret", []byte(ndSecret))
+	pj, err := protojson.Marshal(&pb.SetNetDeviceCredentialRequest{DeviceId: ndDevice, Secret: []byte(ndAttackerSecret)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, text := range map[string]string{
+		"slog JSON of []byte":     logBuf.String(),
+		"protojson bytes field":   string(pj),
+		"encoding/json of []byte": string(ndMarshal(t, struct{ S []byte }{[]byte(ndSecret)})),
+		"raw base64url":           "x=" + base64.RawURLEncoding.EncodeToString([]byte(ndAttackerSecret)) + "&",
+		"raw base64":              base64.RawStdEncoding.EncodeToString([]byte(ndSecret + "-2")),
+		"hex":                     "secret " + hex.EncodeToString([]byte(ndSecret)),
+		"upper-case hex":          strings.ToUpper(hex.EncodeToString([]byte(ndAttackerSecret))),
+	} {
+		for _, s := range ndSecretValues {
+			if strings.Contains(text, s) {
+				t.Fatalf("%s: fixture holds the plain value %q, so it does not test an encoding: %s", name, s, text)
+			}
 		}
+		if len(ndSecretLeaks(text)) == 0 {
+			t.Errorf("%s: secret check missed the leak in %s", name, text)
+		}
+	}
+	if len(ndSecretLeaks("user "+ndUser)) == 0 {
+		t.Error("secret check missed the plain user name")
+	}
+	if leaks := ndSecretLeaks(`{"device_id":"core-sw","credential_version":1,"secret_count":0}`); len(leaks) != 0 {
+		t.Errorf("clean metadata flagged: %v", leaks)
 	}
 }
 
@@ -953,6 +1033,94 @@ func TestNetDevCompromisedServerCannotWidenOrExtendLeases(t *testing.T) {
 			t.Errorf("%s: want InvalidArgument at proposal, got %v", tc.name, err)
 		}
 	}
+
+	// Edge cases of the lease bounds. Each is refused at proposal over the
+	// socket, and the executor's own parser (permit.ParseReadGrant, whose
+	// reason the RPC does not echo) refuses it for its own reason, so a
+	// regression in that one check is caught even if another check would
+	// still refuse a sloppier document.
+	day := int64(24 * time.Hour / time.Second)
+	maxLife := int64(permit.ReadGrantMaxLifetime / time.Second)
+	distinctTargets := func(n int) []permit.NetDeviceTarget {
+		out := make([]permit.NetDeviceTarget, n)
+		for i := range out {
+			out[i] = e.target(schedgrant.NetDeviceReadCBSVersion)
+			out[i].DeviceID = fmt.Sprintf("sw-%02d", i)
+		}
+		return out
+	}
+	edges := []struct {
+		name, reason string
+		doc          func(*permit.ReadGrantDoc)
+	}{
+		// A server-chosen future creation time would move a 30-day window
+		// past 30 days from now.
+		{"created_unix one day ahead, 30 days from creation", "future", func(d *permit.ReadGrantDoc) {
+			d.CreatedUnix += day
+			d.ExpiryUnix = d.CreatedUnix + maxLife
+		}},
+		{"created_unix one minute ahead, 30 days from creation", "future", func(d *permit.ReadGrantDoc) {
+			d.CreatedUnix += 60
+			d.ExpiryUnix = d.CreatedUnix + maxLife
+		}},
+		{"created_unix one year ahead, one hour long", "future", func(d *permit.ReadGrantDoc) {
+			d.CreatedUnix += 365 * day
+			d.ExpiryUnix = d.CreatedUnix + 3600
+		}},
+		// Target merging: the same device twice, identical or with other
+		// reads, must not add up to wider reads.
+		{"same target twice", "listed twice", func(d *permit.ReadGrantDoc) {
+			d.NetDeviceTargets = append(d.NetDeviceTargets, d.NetDeviceTargets[0])
+		}},
+		{"same device twice with other reads", "listed twice", func(d *permit.ReadGrantDoc) {
+			d.NetDeviceTargets = append(d.NetDeviceTargets, e.target(schedgrant.NetDeviceReadCBSMACTable, schedgrant.NetDeviceReadCBSLLDP))
+		}},
+		{"same read twice in a target", "listed twice", func(d *permit.ReadGrantDoc) {
+			d.NetDeviceTargets[0].Reads = []string{schedgrant.NetDeviceReadCBSVersion, schedgrant.NetDeviceReadCBSVersion}
+		}},
+		{"more than MaxNetDeviceTargets devices", "devices", func(d *permit.ReadGrantDoc) {
+			d.NetDeviceTargets = distinctTargets(permit.MaxNetDeviceTargets + 1)
+		}},
+		{"no device", "devices", func(d *permit.ReadGrantDoc) { d.NetDeviceTargets = []permit.NetDeviceTarget{} }},
+		// Lower bounds of the budget and the interval.
+		{"zero run_budget", "run_budget", func(d *permit.ReadGrantDoc) { d.RunBudget = 0 }},
+		{"negative run_budget", "run_budget", func(d *permit.ReadGrantDoc) { d.RunBudget = -1 }},
+		{"most negative run_budget", "run_budget", func(d *permit.ReadGrantDoc) { d.RunBudget = -1 << 63 }},
+		{"zero min_interval_s", "min_interval_s", func(d *permit.ReadGrantDoc) { d.MinIntervalS = 0 }},
+		{"negative min_interval_s", "min_interval_s", func(d *permit.ReadGrantDoc) { d.MinIntervalS = -900 }},
+		// Version and generation bounds of a target.
+		{"zero credential_version", "credential_version", func(d *permit.ReadGrantDoc) { d.NetDeviceTargets[0].CredentialVersion = 0 }},
+		{"negative credential_version", "credential_version", func(d *permit.ReadGrantDoc) { d.NetDeviceTargets[0].CredentialVersion = -1 }},
+		{"zero trust_generation", "trust_generation", func(d *permit.ReadGrantDoc) { d.NetDeviceTargets[0].TrustGeneration = 0 }},
+	}
+	for _, tc := range edges {
+		d := valid()
+		tc.doc(&d)
+		raw := ndMarshal(t, d)
+		_, err := e.client.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: raw})
+		if status.Code(err) != codes.InvalidArgument {
+			t.Errorf("%s: want InvalidArgument at proposal, got %v", tc.name, err)
+		}
+		if _, _, _, err := permit.ParseReadGrant(raw, e.clock.now()); err == nil || !strings.Contains(err.Error(), tc.reason) {
+			t.Errorf("%s: parser: want a refusal naming %q, got %v", tc.name, tc.reason, err)
+		}
+	}
+	// Controls: the bounds sit exactly where the edge cases put them. A
+	// lease created now with the full 30 days, one with exactly
+	// MaxNetDeviceTargets devices and one with the smallest budget are
+	// valid proposals (they stay proposals; none is approved).
+	for name, edit := range map[string]func(*permit.ReadGrantDoc){
+		"created now, 30 days":        func(d *permit.ReadGrantDoc) { d.ExpiryUnix = d.CreatedUnix + maxLife },
+		"MaxNetDeviceTargets devices": func(d *permit.ReadGrantDoc) { d.NetDeviceTargets = distinctTargets(permit.MaxNetDeviceTargets) },
+		"run_budget 1":                func(d *permit.ReadGrantDoc) { d.RunBudget = 1 },
+	} {
+		d := valid()
+		edit(&d)
+		if _, err := e.client.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: ndMarshal(t, d)}); err != nil {
+			t.Errorf("control %s: refused at proposal: %v", name, err)
+		}
+	}
+	e.wantRefused("read after the widening proposals", n, e.read(ndDevice, cbsVersion), codes.PermissionDenied)
 
 	// The admin approves a narrow lease: one read, at least 15 minutes
 	// apart, for one hour.
