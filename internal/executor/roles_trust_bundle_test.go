@@ -155,7 +155,7 @@ func writeDockerBundle(t *testing.T, k *bundleSK, dir, releaseVersion, moduleVer
 			map[string]any{"name": release.BundleArtifact, "size": len(bundle), "sha256": bundleSum(bundle)},
 			map[string]any{"name": release.InstalledFilesArtifact, "size": len(list), "sha256": bundleSum(list)},
 		},
-		"modules":   []any{map[string]any{"name": "docker", "version": moduleVersion, "size": len(mod), "sha256": bundleSum(mod)}}})
+		"modules": []any{map[string]any{"name": "docker", "version": moduleVersion, "size": len(mod), "sha256": bundleSum(mod)}}})
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
