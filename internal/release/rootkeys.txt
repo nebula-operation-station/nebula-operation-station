@@ -12,7 +12,7 @@
 # The second form is an explicit empty placeholder: it never verifies
 # anything. Only public keys belong here; the signing secrets stay on
 # offline YubiKeys (docs/admin/release-signing.md).
-root-1 sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIH6DVvY6q6jDyLGQeYjKhNufFKi2jzFHzFO04+ng5mkoAAAABHNzaDo= nebula-release-root-1 (Axel, YubiKey 34718658)
+root-1 sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIH6DVvY6q6jDyLGQeYjKhNufFKi2jzFHzFO04+ng5mkoAAAABHNzaDo= nebula-release-root-1 (Axel)
 # Backup root-2 is pending (spec 10): it is enrolled through a rotation
 # signed by root-1, not by editing this file first.
 root-2 -
