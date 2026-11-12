@@ -3,6 +3,7 @@
 package netadvisor
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/netreach"
@@ -15,7 +16,8 @@ import (
 //
 // It needs the NS-04 profile-setting data (ADR 0012 Q11). Without it every
 // rule is StateDataNotCollected, never StateOK, and so is a relevant rule
-// whose entry is missing; a <dropped:…> marker gives StateCannotDecide. A
+// whose entry is missing; a <dropped:…> marker, or profile names that are
+// all empty without a group, give StateCannotDecide. A
 // rule with a rule-level marker (SecurityRule.Dropped or
 // OutsideAllowlist) is never StateOK.
 type ProfileCheck struct{}
@@ -110,8 +112,12 @@ func profileRule(in *Input, i int, uuids map[string]int) Finding {
 			return set(StateCannotDecide, "cannot decide: profile-setting has "+n)
 		}
 	}
-	if len(p.Profiles) > 0 || p.Group != "" {
+	if p.Group != "" || slices.ContainsFunc(p.Profiles, func(n string) bool { return n != "" }) {
 		return set(StateOK, "security profile set")
+	}
+	if len(p.Profiles) > 0 {
+		// Only empty names: whether a profile is set is ambiguous.
+		return set(StateCannotDecide, "cannot decide: profile-setting has only an empty profile name")
 	}
 	f.Severity = SeverityMedium
 	return set(StateFinding, "allow rule with untrusted or guest zone has no security profile: "+strings.Join(f.Zones, ", "))
