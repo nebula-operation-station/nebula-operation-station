@@ -191,14 +191,34 @@ func classifyHost(h string) (literal, bool) {
 	return literal{}, false
 }
 
+// ipv4MappedBase is ::ffff:0.0.0.0, the first address of the IPv4-mapped
+// range ::ffff:0:0/96.
+var ipv4MappedBase = net.ParseIP("::ffff:0.0.0.0").To16()
+
 // classifyCIDR classifies a CIDR token and refuses blocks broader than
 // the minimum prefix of its family.
+//
+// An IPv6 block that contains the IPv4-mapped range covers every IPv4
+// host. net.IPNet reads ::ffff:0.0.0.0/96 as an IPv4 /0, so such a block
+// is refused outright. A narrower mapped block is converted to the IPv4
+// block it names (::ffff:10.1.0.0/112 is 10.1.0.0/16) and checked against
+// the IPv4 minimum.
 func classifyCIDR(t string) (literal, bool, bool) {
 	_, n, err := net.ParseCIDR(t)
 	if err != nil {
 		return literal{}, false, false
 	}
 	ones, bits := n.Mask.Size()
+	if bits == 128 {
+		if ones <= 96 && ipv4MappedBase.Mask(n.Mask).Equal(n.IP) {
+			return literal{}, false, true
+		}
+		if v4 := n.IP.To4(); v4 != nil {
+			ones -= 96
+			bits = 32
+			n = &net.IPNet{IP: v4.Mask(net.CIDRMask(ones, bits)), Mask: net.CIDRMask(ones, bits)}
+		}
+	}
 	minPrefix := minIPv6CIDRPrefix
 	if bits == 32 {
 		minPrefix = minIPv4CIDRPrefix
