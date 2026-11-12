@@ -70,18 +70,78 @@ func hostIDs(res Result) []string {
 	return ids
 }
 
-// TestFactHasOnlyTheFixedFields guards the fixed struct of AS-06: no field
-// may be added without changing this list and the reviewed ADR D3 table.
-func TestFactHasOnlyTheFixedFields(t *testing.T) {
-	want := []string{"ID", "Name", "Endpoints", "EndpointsDropped", "InventoryCriticality",
-		"ExecutorCriticality", "Enrollment", "EnrollmentSince", "OSFamily", "OSRelease"}
-	typ := reflect.TypeOf(Fact{})
-	var got []string
-	for i := 0; i < typ.NumField(); i++ {
-		got = append(got, typ.Field(i).Name)
+// structSpec lists every field of t and, recursively, of the package's own
+// struct types it contains (directly, or as slice elements), as
+// "Type.Field type" lines in declaration order. Types from other packages,
+// such as time.Time, are listed by name and not walked.
+func structSpec(t reflect.Type, seen map[reflect.Type]bool) []string {
+	for t.Kind() == reflect.Slice || t.Kind() == reflect.Pointer {
+		t = t.Elem()
 	}
+	if t.Kind() != reflect.Struct || t.PkgPath() != reflect.TypeOf(Fact{}).PkgPath() || seen[t] {
+		return nil
+	}
+	seen[t] = true
+	var out []string
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		out = append(out, t.Name()+"."+f.Name+" "+f.Type.String())
+		out = append(out, structSpec(f.Type, seen)...)
+	}
+	return out
+}
+
+// TestFactHasOnlyTheFixedFields guards the fixed struct of AS-06: no field
+// may be added anywhere in the projection, nested types included (Endpoint,
+// Text and the Result that carries Fact), without changing this list and
+// the reviewed ADR D3 table.
+func TestFactHasOnlyTheFixedFields(t *testing.T) {
+	want := []string{
+		"Fact.ID helpfacts.Text",
+		"Text.Value string",
+		"Text.Altered bool",
+		"Fact.Name helpfacts.Text",
+		"Fact.Endpoints []helpfacts.Endpoint",
+		"Endpoint.Address string",
+		"Endpoint.Port int",
+		"Endpoint.Label helpfacts.Text",
+		"Fact.EndpointsDropped int",
+		"Fact.InventoryCriticality string",
+		"Fact.ExecutorCriticality string",
+		"Fact.Enrollment helpfacts.EnrollmentState",
+		"Fact.EnrollmentSince time.Time",
+		"Fact.OSFamily helpfacts.Text",
+		"Fact.OSRelease helpfacts.Text",
+	}
+	got := structSpec(reflect.TypeOf(Fact{}), map[reflect.Type]bool{})
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("Fact fields = %v, want %v", got, want)
+		t.Fatalf("Fact projection fields =\n%v\nwant\n%v", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+
+	wantResult := []string{
+		"Result.Hosts []helpfacts.Fact",
+		"Fact.ID helpfacts.Text",
+		"Text.Value string",
+		"Text.Altered bool",
+		"Fact.Name helpfacts.Text",
+		"Fact.Endpoints []helpfacts.Endpoint",
+		"Endpoint.Address string",
+		"Endpoint.Port int",
+		"Endpoint.Label helpfacts.Text",
+		"Fact.EndpointsDropped int",
+		"Fact.InventoryCriticality string",
+		"Fact.ExecutorCriticality string",
+		"Fact.Enrollment helpfacts.EnrollmentState",
+		"Fact.EnrollmentSince time.Time",
+		"Fact.OSFamily helpfacts.Text",
+		"Fact.OSRelease helpfacts.Text",
+		"Result.NotInInventory []string",
+		"Result.SourceAddresses []string",
+		"Result.Truncated bool",
+	}
+	gotResult := structSpec(reflect.TypeOf(Result{}), map[reflect.Type]bool{})
+	if !reflect.DeepEqual(gotResult, wantResult) {
+		t.Fatalf("Result fields =\n%v\nwant\n%v", strings.Join(gotResult, "\n"), strings.Join(wantResult, "\n"))
 	}
 }
 

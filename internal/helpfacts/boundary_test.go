@@ -11,29 +11,30 @@ import (
 	"testing"
 )
 
-// forbiddenImports are the stores and services the fact projector must
-// never reach (ADR 0014 D3, AS-06): hosts' secrets, audit, execution,
-// findings, traffic and the web layer.
-var forbiddenImports = []string{
-	"internal/vault",
-	"internal/keyring",
-	"internal/auditlog",
-	"internal/executor",
-	"internal/executordb",
-	"internal/executions",
-	"internal/vulnstore",
-	"internal/vulnfinding",
-	"internal/trafficstore",
-	"internal/serverdb",
-	"internal/permit",
-	"internal/hostrun",
-	"internal/web",
-	"internal/sshtransport",
+// allowedImports is the complete list of packages the fact projector may
+// import (ADR 0014 D3, AS-06). Every one is from the standard library. The
+// projector reaches no other store or service: a new import, including a
+// new internal package such as a future secrets or inventory store, fails
+// TestProjectorImportsOnlyStandardLibrary until it is reviewed and added
+// here.
+var allowedImports = map[string]bool{
+	"context":      true,
+	"errors":       true,
+	"fmt":          true,
+	"net":          true,
+	"net/url":      true,
+	"regexp":       true,
+	"sort":         true,
+	"strconv":      true,
+	"strings":      true,
+	"time":         true,
+	"unicode":      true,
+	"unicode/utf8": true,
 }
 
-// TestProjectorImportsNoStoreOrService parses every non-test file of the
-// package and fails on an import of a forbidden package.
-func TestProjectorImportsNoStoreOrService(t *testing.T) {
+// TestProjectorImportsOnlyStandardLibrary parses every non-test file of the
+// package and fails on any import that is not in allowedImports.
+func TestProjectorImportsOnlyStandardLibrary(t *testing.T) {
 	files, err := filepath.Glob("*.go")
 	if err != nil {
 		t.Fatalf("glob: %v", err)
@@ -55,14 +56,17 @@ func TestProjectorImportsNoStoreOrService(t *testing.T) {
 		checked++
 		for _, imp := range f.Imports {
 			path := strings.Trim(imp.Path.Value, `"`)
-			for _, bad := range forbiddenImports {
-				if strings.Contains(path, bad) {
-					t.Errorf("%s imports %s, which the fact projector must not reach", name, path)
-				}
+			if !allowedImports[path] {
+				t.Errorf("%s imports %q, which is not on the fact projector's allowlist", name, path)
 			}
 		}
 	}
 	if checked == 0 {
 		t.Fatal("no source files checked")
+	}
+	for path := range allowedImports {
+		if strings.Contains(path, ".") {
+			t.Errorf("allowlist entry %q is not a standard library path", path)
+		}
 	}
 }
