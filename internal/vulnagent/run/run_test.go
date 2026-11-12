@@ -611,8 +611,49 @@ func TestAgentSettingsUnavailableFallsBackToLocal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rep.LLM.Origin != "local" || rep.LLM.Assessed != 1 {
-		t.Errorf("llm = %+v", rep.LLM)
+	if rep.LLM.Origin != "local" || rep.LLM.Assessed != 1 || rep.LLM.Failed || rep.Degraded() {
+		t.Errorf("llm = %+v degraded=%v", rep.LLM, rep.Degraded())
+	}
+}
+
+func TestAgentSettingsErrorFailsClosed(t *testing.T) {
+	for name, h := range map[string]http.HandlerFunc{
+		"timeout": func(_ http.ResponseWriter, r *http.Request) { <-r.Context().Done() },
+		"status 500": func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "boom", http.StatusInternalServerError)
+		},
+		"status 503":    func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) },
+		"malformed":     jsonAnswer(`{"llm_enabled":`),
+		"no enabled":    jsonAnswer(`{"llm_base_url":""}`),
+		"wrong type":    func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{"llm_enabled":true}`) },
+		"out of bounds": jsonAnswer(`{"llm_enabled":true,"language":"fr"}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			srv := httptest.NewTLSServer(h)
+			t.Cleanup(srv.Close)
+			ac, err := NewHTTPAgentConfig(AgentConfigOptions{BaseURL: srv.URL, TokenFile: e.nos.tokFile, CAFile: writeCA(t, srv)})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ac.http.Timeout = 200 * time.Millisecond
+			// The local configuration would enable a working assessor.
+			r := e.runner(t, func(c *Config) {
+				c.AgentConfig = ac
+				c.LLM.Enabled, c.LLM.BaseURL = true, e.llm.srv.URL+"/v1"
+			})
+			rep, err := r.Run(context.Background(), ModeRun)
+			if err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if rep.LLM.Enabled || !rep.LLM.Failed || rep.LLM.Origin != "nos" || e.llm.callCount() != 0 {
+				t.Errorf("assessor not off: %+v, llm calls %d", rep.LLM, e.llm.callCount())
+			}
+			if !rep.Degraded() {
+				t.Error("settings failure did not degrade the run")
+			}
+			assertSentWithoutText(t, e, rep)
+		})
 	}
 }
 
@@ -715,12 +756,23 @@ func TestConfigRejected(t *testing.T) {
 func TestHTTPAgentConfigRejectsBadAnswers(t *testing.T) {
 	tok := writeSecret(t, "token", testToken)
 	for name, h := range map[string]http.HandlerFunc{
-		"not json":     func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, "{}") },
-		"no enabled":   jsonAnswer(`{"llm_base_url":""}`),
-		"long model":   jsonAnswer(`{"llm_enabled":true,"llm_model":"` + strings.Repeat("m", MaxLLMModelBytes+1) + `"}`),
-		"bad language": jsonAnswer(`{"llm_enabled":true,"language":"fr"}`),
-		"too large":    jsonAnswer(`{"llm_enabled":true,"operator_instructions":"` + strings.Repeat("a", MaxAgentConfigBytes) + `"}`),
-		"status 500":   func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(500) },
+		// A valid answer without a JSON content type (net/http sniffs
+		// text/plain).
+		"no content type": func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, `{"llm_enabled":true}`)
+		},
+		"wrong content type": func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/plain")
+			_, _ = io.WriteString(w, `{"llm_enabled":true}`)
+		},
+		"not json":      jsonAnswer(`llm_enabled=true`),
+		"trailing data": jsonAnswer(`{"llm_enabled":true} {}`),
+		"not utf-8":     jsonAnswer("{\"llm_enabled\":true,\"llm_model\":\"\xff\"}"),
+		"no enabled":    jsonAnswer(`{"llm_base_url":""}`),
+		"long model":    jsonAnswer(`{"llm_enabled":true,"llm_model":"` + strings.Repeat("m", MaxLLMModelBytes+1) + `"}`),
+		"bad language":  jsonAnswer(`{"llm_enabled":true,"language":"fr"}`),
+		"too large":     jsonAnswer(`{"llm_enabled":true,"operator_instructions":"` + strings.Repeat("a", MaxAgentConfigBytes) + `"}`),
+		"status 500":    func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(500) },
 		"redirect": func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "https://elsewhere.invalid/", http.StatusFound)
 		},
@@ -740,6 +792,17 @@ func TestHTTPAgentConfigRejectsBadAnswers(t *testing.T) {
 				t.Error("token in error or printed client")
 			}
 		})
+	}
+	// Control: the same body with the JSON content type is accepted, so
+	// each case above fails for its own reason.
+	ok := httptest.NewTLSServer(jsonAnswer(`{"llm_enabled":true}`))
+	defer ok.Close()
+	oc, err := NewHTTPAgentConfig(AgentConfigOptions{BaseURL: ok.URL, TokenFile: tok, CAFile: writeCA(t, ok)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rc, err := oc.AgentConfig(context.Background()); err != nil || !rc.Enabled {
+		t.Errorf("valid answer = %+v, %v", rc, err)
 	}
 	srv := httptest.NewTLSServer(http.NotFoundHandler())
 	defer srv.Close()
