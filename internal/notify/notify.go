@@ -52,7 +52,10 @@ type Event struct {
 	State       string
 	Reason      string
 	ExecutionID string
-	Time        time.Time
+	// link is a NOS UI link for integrity events. Only IntegrityGate sets
+	// it, after validating it; it is empty for every other kind.
+	link string
+	Time time.Time
 }
 
 const (
@@ -85,11 +88,14 @@ func clean(s string, limit int) string {
 
 func (e Event) cleaned() Event {
 	return Event{Kind: clean(e.Kind, 64), Host: clean(e.Host, 64), State: clean(e.State, 64), Reason: clean(e.Reason, maxField),
-		ExecutionID: clean(e.ExecutionID, 128), Time: e.Time.UTC().Truncate(time.Second)}
+		ExecutionID: clean(e.ExecutionID, 128), link: clean(e.link, maxIntegrityLink), Time: e.Time.UTC().Truncate(time.Second)}
 }
 
 // Title is a short summary line.
 func (e Event) Title() string {
+	if t, ok := integrityTitle(e); ok {
+		return t
+	}
 	switch e.Kind {
 	case KindHostKeyMismatch:
 		return "Nebula: host key mismatch on " + e.Host
@@ -117,6 +123,9 @@ func (e Event) Text() string {
 	}
 	if e.ExecutionID != "" {
 		b.WriteString("\nExecution: " + e.ExecutionID)
+	}
+	if e.link != "" {
+		b.WriteString("\nDetails: " + e.link)
 	}
 	b.WriteString("\n" + e.Time.Format(time.RFC3339))
 	return b.String()
@@ -186,7 +195,31 @@ func (n *Notifier) Providers() []string {
 
 // NotifyProviders sends e to every provider skip does not exclude (nil
 // skips none) and returns the names of those that accepted it.
+//
+// Integrity kinds and the integrity digest are refused here and send
+// nothing: they must go through IntegrityGate, which applies the link
+// allow-list and the host-label rules. Refusing them keeps those rules from
+// being skipped.
 func (n *Notifier) NotifyProviders(ctx context.Context, e Event, skip func(provider string) bool) []string {
+	if isIntegrityKind(e.Kind) {
+		n.log.Warn("integrity notification refused outside IntegrityGate", "kind", e.Kind)
+		return nil
+	}
+	return n.send(ctx, e, skip)
+}
+
+// isIntegrityKind reports whether kind belongs to the integrity events or
+// their digest.
+func isIntegrityKind(kind string) bool {
+	switch IntegrityKind(kind) {
+	case IntegrityNOSMismatch, IntegrityHostChange, IntegrityScanIncomplete, IntegrityBaselineTamper, IntegrityReferenceConflict:
+		return true
+	}
+	return kind == KindIntegrityDigest
+}
+
+// send is the delivery loop shared by NotifyProviders and IntegrityGate.
+func (n *Notifier) send(ctx context.Context, e Event, skip func(provider string) bool) []string {
 	e = e.cleaned()
 	var ok []string
 	for _, s := range n.senders {
@@ -257,6 +290,7 @@ type WebhookPayload struct {
 	State       string `json:"state,omitempty"`
 	Reason      string `json:"reason,omitempty"`
 	ExecutionID string `json:"execution_id,omitempty"`
+	Link        string `json:"link,omitempty"`
 	Time        string `json:"time"`
 }
 
@@ -273,7 +307,7 @@ func Sign(secret []byte, timestamp string, body []byte) string {
 
 func (w *webhook) Send(ctx context.Context, e Event) error {
 	body, err := json.Marshal(WebhookPayload{Kind: e.Kind, Host: e.Host, State: e.State, Reason: e.Reason,
-		ExecutionID: e.ExecutionID, Time: e.Time.Format(time.RFC3339)})
+		ExecutionID: e.ExecutionID, Link: e.link, Time: e.Time.Format(time.RFC3339)})
 	if err != nil {
 		return err
 	}
