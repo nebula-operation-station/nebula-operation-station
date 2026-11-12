@@ -60,6 +60,14 @@ Usage: install.sh --admin-users USER[,USER...] --rp-id HOST
 Both options are required. They are written into the systemd drop-in
 /etc/systemd/system/nebula-executor.service.d/10-local.conf, which
 overrides the executor's ExecStart (origin = https://<rp-id>).
+
+Usage: install.sh --vuln-agent
+
+  --vuln-agent   install only the vulnerability agent from the tarball
+                 (ADR 0011 Amendment 1): binary, unit and timer, its own
+                 user, data dir and config skeleton. Nothing is enabled.
+                 Takes no other option. On a Debian host, the
+                 nebula-vuln-agent package does the same.
 EOF
 }
 
@@ -70,6 +78,9 @@ rp_id=""
 # server.json, then enable and start.
 from_package=0
 bundle_source_dir="${NEBULA_RELEASE_BUNDLE_DIR:-}"
+bundle_dir_option=0
+# --vuln-agent: install only the vulnerability agent (see below).
+vuln_agent=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -105,6 +116,7 @@ while [[ $# -gt 0 ]]; do
         exit 2
       fi
       bundle_source_dir="$2"
+      bundle_dir_option=1
       shift 2
       ;;
     --release-bundle-dir=*)
@@ -113,10 +125,15 @@ while [[ $# -gt 0 ]]; do
         echo "install.sh: --release-bundle-dir requires a directory" >&2
         exit 2
       fi
+      bundle_dir_option=1
       shift
       ;;
     --from-package)
       from_package=1
+      shift
+      ;;
+    --vuln-agent)
+      vuln_agent=1
       shift
       ;;
     -h|--help)
@@ -130,6 +147,164 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# --- Vulnerability agent only (ADR 0011 Amendment 1, va08) -------------------
+# The agent runs best on its own VM (nos-vuln) and needs nothing of the NOS
+# install: no admin users, no rp-id, no executor. --vuln-agent installs its
+# binary from the tarball, its unit and timer, and provisions its user, data
+# dir and config skeleton, then stops. It never enables or starts anything:
+# the agent needs a NOS token and URL first (guide, "Vulnerability agent").
+# On a Debian host the nebula-vuln-agent package does the same
+# (deploy/deb/vuln-agent/postinst, which must render the same skeleton).
+# begin: vuln agent install
+if [[ ${vuln_agent} -eq 1 ]]; then
+  if [[ -n "$admin_users" || -n "$rp_id" || ${from_package} -eq 1 || ${bundle_dir_option} -eq 1 ]]; then
+    echo "install.sh: --vuln-agent takes no other option (the nebula-vuln-agent package provisions itself)" >&2
+    usage >&2
+    exit 2
+  fi
+  if [[ "${NEBULA_INSTALL_DRY_RUN:-0}" == "1" ]]; then
+    echo "install.sh: dry run: would install nebula-vuln-agent, its unit and timer (not enabled), its user, data dir and config skeleton; no changes made"
+    exit 0
+  fi
+  if [[ ${EUID} -ne 0 ]]; then
+    echo "install.sh: must be run as root (try: sudo ./deploy/install.sh --vuln-agent)" >&2
+    exit 1
+  fi
+  script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+  tarball_root=$(dirname -- "$script_dir")
+  vuln_units=(nebula-vuln-agent.service nebula-vuln-agent.timer)
+  for f in "${tarball_root}/nebula-vuln-agent" "${script_dir}/systemd/${vuln_units[0]}" "${script_dir}/systemd/${vuln_units[1]}"; do
+    if [[ ! -f "$f" ]]; then
+      echo "install.sh: ${f} not found; run this script from the extracted release tarball" >&2
+      exit 1
+    fi
+  done
+  vuln_data_dir=/var/lib/nebula-vuln-agent
+  vuln_etc_dir=/etc/nebula-vuln-agent
+  vuln_unit_dir=/etc/systemd/system
+
+  # The agent's own user, not in nebula-rpc: it never talks to the executor,
+  # only to the NOS API with its token. Its data dir (feed snapshots, last
+  # run, evidence) is the one path its unit may write: 0700, its own. The
+  # config dir and file are root's, readable by the agent's group only, so
+  # the agent cannot change its own configuration. The token and the LLM key
+  # are secrets the admin puts there (mode 0600, owned by the agent; the
+  # agent refuses a file group or others can read); no file here holds one.
+  # A file or symlink at one of these paths is refused before install -d or
+  # install follows it.
+  # begin: vuln agent provisioning
+  if ! getent passwd nebula-vuln-agent >/dev/null; then
+    useradd --system --home-dir "${vuln_data_dir}" --shell /usr/sbin/nologin nebula-vuln-agent
+  fi
+  for vuln_path in "${vuln_data_dir}" "${vuln_etc_dir}"; do
+    if [[ -L "$vuln_path" ]] || { [[ -e "$vuln_path" ]] && [[ ! -d "$vuln_path" ]]; }; then
+      echo "install.sh: ${vuln_path} is a file or a symlink, not a directory; refusing to follow it" >&2
+      echo "install.sh: inspect it (ls -ld ${vuln_path}), remove it if it is not yours, and run install.sh --vuln-agent again" >&2
+      exit 1
+    fi
+  done
+  if [[ -L "${vuln_etc_dir}/config.json" ]] || { [[ -e "${vuln_etc_dir}/config.json" ]] && [[ ! -f "${vuln_etc_dir}/config.json" ]]; }; then
+    echo "install.sh: ${vuln_etc_dir}/config.json is not a regular file; refusing to follow it" >&2
+    exit 1
+  fi
+  install -d -m 0700 -o nebula-vuln-agent -g nebula-vuln-agent "${vuln_data_dir}"
+  install -d -m 0750 -o root -g nebula-vuln-agent "${vuln_etc_dir}"
+  if [[ -e "${vuln_etc_dir}/config.json" ]]; then
+    echo "install.sh: ${vuln_etc_dir}/config.json already exists; leaving it untouched"
+  else
+    tmp_vuln_config=$(mktemp)
+    cat > "${tmp_vuln_config}" <<'EOF' # vuln agent config skeleton
+{
+  "data_dir": "/var/lib/nebula-vuln-agent",
+  "nos": {
+    "url": "",
+    "token_file": "/etc/nebula-vuln-agent/token"
+  },
+  "llm": {
+    "enabled": false
+  }
+}
+EOF
+    install -m 0640 -o root -g nebula-vuln-agent "${tmp_vuln_config}" "${vuln_etc_dir}/config.json"
+    rm -f "${tmp_vuln_config}"
+  fi
+  # end: vuln agent provisioning
+
+  install -m 0755 -o root -g root "${tarball_root}/nebula-vuln-agent" /usr/bin/nebula-vuln-agent
+
+  # Units: installed when absent, replaced when unedited (the checksum
+  # recorded in units.sha256 is the one this script installed), kept with a
+  # warning when edited or not a regular file, like the NOS units. The
+  # record lives in the root-owned config dir, out of the agent's reach.
+  # begin: vuln agent units
+  vuln_units_manifest="${vuln_etc_dir}/units.sha256"
+  vuln_manifest_lines=""
+  for unit in "${vuln_units[@]}"; do
+    shipped="${script_dir}/systemd/${unit}"
+    target="${vuln_unit_dir}/${unit}"
+    shipped_sum=$(sha256sum "${shipped}" | cut -d' ' -f1)
+    recorded_sum=""
+    if [[ -f "${vuln_units_manifest}" ]]; then
+      while read -r sum entry; do
+        if [[ "${entry}" == "${unit}" && "${sum}" =~ ^[0-9a-f]{64}$ ]]; then
+          recorded_sum="${sum}"
+          break
+        fi
+      done < "${vuln_units_manifest}"
+    fi
+    record="${shipped_sum}"
+    if [[ -L "${target}" ]] || { [[ -e "${target}" ]] && [[ ! -f "${target}" ]]; }; then
+      echo "install.sh: warning: ${target} is not a regular file; keeping it, shipped changes to it do not apply" >&2
+      record="${recorded_sum}"
+    elif [[ -f "${target}" ]]; then
+      current_sum=$(sha256sum "${target}" | cut -d' ' -f1)
+      if [[ "${current_sum}" == "${shipped_sum}" ]]; then
+        :
+      elif [[ -n "${recorded_sum}" && "${current_sum}" == "${recorded_sum}" ]]; then
+        install -m 0644 -o root -g root "${shipped}" "${target}"
+        echo "install.sh: updated ${target} to the shipped version"
+      else
+        echo "install.sh: warning: ${target} differs from the version Nebula installed; keeping it, shipped changes to it do not apply" >&2
+        echo "install.sh:   compare: diff -u ${shipped} ${target}" >&2
+        record="${recorded_sum}"
+      fi
+    else
+      install -m 0644 -o root -g root "${shipped}" "${target}"
+    fi
+    if [[ -n "${record}" ]]; then
+      vuln_manifest_lines+="${record}  ${unit}"$'\n'
+    fi
+  done
+  tmp_vuln_manifest=$(mktemp)
+  printf '%s' "${vuln_manifest_lines}" > "${tmp_vuln_manifest}"
+  install -m 0644 -o root -g root "${tmp_vuln_manifest}" "${vuln_units_manifest}"
+  rm -f "${tmp_vuln_manifest}"
+  systemctl daemon-reload
+  # end: vuln agent units
+
+  cat <<EOF
+
+nebula-vuln-agent installed; its timer is NOT enabled.
+
+Next steps (guide, section "Vulnerability agent"):
+
+  1. In the NOS web UI create the API token vuln-agent with the source
+     address of this host, and save it here (owned by the agent, 0600):
+       sudo sh -c 'umask 077; cat > ${vuln_etc_dir}/token'
+       (paste the token, then Ctrl-D)
+       sudo chown nebula-vuln-agent:nebula-vuln-agent ${vuln_etc_dir}/token
+
+  2. Set "url" (https://<NOS host>) in ${vuln_etc_dir}/config.json, and
+     "ca_file" if NOS uses a lab CA. Allow only the egress the guide lists.
+
+  3. Try it, then enable the timer (every 6 hours):
+       sudo systemctl start nebula-vuln-agent.service
+       sudo systemctl enable --now nebula-vuln-agent.timer
+EOF
+  exit 0
+fi
+# end: vuln agent install
 
 if [[ -z "$admin_users" || -z "$rp_id" ]]; then
   echo "install.sh: --admin-users and --rp-id are required" >&2
@@ -186,7 +361,7 @@ for user in "${raw_users[@]}"; do
     exit 1
   fi
   case "$user" in
-    root|nebula-server|nebula-executor|nebula-discovery|nebula-pve-collector|nebula-netdev-collector)
+    root|nebula-server|nebula-executor|nebula-discovery|nebula-pve-collector|nebula-netdev-collector|nebula-vuln-agent)
       echo "install.sh: $user cannot be an admin user; use a personal account" >&2
       exit 1
       ;;
