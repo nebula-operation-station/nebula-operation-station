@@ -2,7 +2,8 @@
 
 // Package netadvisor holds the rule advisor checks na-v1 of ADR 0012 D4.
 // It is a pure library on top of the reachability model nr-v1
-// (internal/netreach): no I/O, no clock, no global state.
+// (internal/netreach): no I/O, no global state, and no clock other than
+// the injected Input.Now.
 //
 // Every check reports one of four states per rule. A check never turns
 // something it cannot evaluate into "ok" (which would resolve an existing
@@ -20,6 +21,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -103,6 +105,10 @@ type Input struct {
 	Index       *netreach.Index
 	ZoneClasses map[string]TrustClass
 	Profiles    netreach.Field[map[string]ProfileSetting]
+	// Now is the injected clock of the run. zero-hits compares the
+	// hit-count observation time with it; when Now is nil zero-hits
+	// reports StateCannotDecide (the package never reads the system clock).
+	Now func() time.Time
 
 	// obs holds the observations of the checks zero-hits, dns-bypass,
 	// mgmt-from-untrusted and model-contradiction. Only SetObservations

@@ -61,7 +61,10 @@ type Flows struct {
 	Flows []Flow
 }
 
-// FlowAction is what the observation says happened to a flow.
+// FlowAction is what the observation says happened to a flow. It is a
+// closed enum: SetObservations refuses every value other than FlowAllow
+// and FlowDeny, so a firewall action such as "drop" or "reset-both" must
+// be mapped by the caller and is never read as allowed.
 type FlowAction string
 
 // Flow actions. A traffic-map flow was observed on a host and therefore
@@ -135,9 +138,13 @@ const (
 // SetObservations validates o and makes it the observations of the run.
 // It refuses, wrapping ErrInvalidInput, every part over its limit, every
 // name or text that is not valid UTF-8 or longer than
-// netreach.MaxNameBytes, every invalid address, a protocol other than tcp
-// or udp on a management port, port 0 on a management port and an unknown
-// input state. On error the previous observations stay.
+// netreach.MaxNameBytes, every invalid address, a flow action other than
+// FlowAllow or FlowDeny (the enum is closed: "drop", "reset-both" or an
+// empty action are refused), a protocol other than tcp or udp on a
+// management port, port 0 on a management port, a duplicate management
+// target name, a duplicate address or port within one target (an
+// IPv4-mapped address equals its IPv4 form) and an unknown input state.
+// On error the previous observations stay.
 func (in *Input) SetObservations(o Observations) error {
 	if in == nil {
 		return fmt.Errorf("set observations: %w: no input", ErrInvalidInput)
@@ -184,8 +191,11 @@ func checkObservations(o *Observations) error {
 		if !f.Src.IsValid() || !f.Dst.IsValid() {
 			return fmt.Errorf("flow %d: invalid address", i)
 		}
-		if f.Protocol == "" || !validName(f.Protocol) || !validName(f.Origin) || !validName(string(f.Action)) {
+		if f.Protocol == "" || !validName(f.Protocol) || !validName(f.Origin) {
 			return fmt.Errorf("flow %d: text empty, not valid UTF-8 or over %d bytes", i, netreach.MaxNameBytes)
+		}
+		if f.Action != FlowAllow && f.Action != FlowDeny {
+			return fmt.Errorf("flow %d: action must be %q or %q", i, FlowAllow, FlowDeny)
 		}
 	}
 	if len(o.FirewallAddrs.Addrs) > MaxFirewallAddrs {
@@ -199,10 +209,15 @@ func checkObservations(o *Observations) error {
 	if len(o.MgmtTargets.Targets) > MaxMgmtTargets {
 		return fmt.Errorf("%d management targets, limit %d", len(o.MgmtTargets.Targets), MaxMgmtTargets)
 	}
+	names := make(map[string]bool, len(o.MgmtTargets.Targets))
 	for i, t := range o.MgmtTargets.Targets {
 		if err := checkMgmtTarget(&t); err != nil {
 			return fmt.Errorf("management target %d: %w", i, err)
 		}
+		if names[t.Name] {
+			return fmt.Errorf("management target %d: duplicate name", i)
+		}
+		names[t.Name] = true
 	}
 	return nil
 }
@@ -218,15 +233,25 @@ func checkMgmtTarget(t *MgmtTarget) error {
 	case len(t.NetBird.RoutingPeers.Value) > MaxRoutingPeers:
 		return fmt.Errorf("%d routing peers, limit %d", len(t.NetBird.RoutingPeers.Value), MaxRoutingPeers)
 	}
+	addrs := make(map[netip.Addr]bool, len(t.Addrs))
 	for _, a := range t.Addrs {
 		if !a.IsValid() {
 			return fmt.Errorf("invalid address")
 		}
+		if addrs[a.Unmap()] {
+			return fmt.Errorf("duplicate address")
+		}
+		addrs[a.Unmap()] = true
 	}
+	ports := make(map[MgmtPort]bool, len(t.Ports))
 	for _, p := range t.Ports {
 		if (p.Protocol != "tcp" && p.Protocol != "udp") || p.Port == 0 {
 			return fmt.Errorf("port must be tcp or udp 1-65535")
 		}
+		if ports[p] {
+			return fmt.Errorf("duplicate port")
+		}
+		ports[p] = true
 	}
 	for _, p := range t.NetBird.RoutingPeers.Value {
 		if !validName(p.Name) || !p.Addr.IsValid() {

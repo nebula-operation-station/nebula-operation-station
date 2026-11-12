@@ -35,7 +35,10 @@ type HitEvidence struct {
 // Only fresh, complete hit counts decide: stale, incomplete or missing
 // hit counts, or a stale security-rule input, give StateCannotDecide (or
 // StateDataNotCollected) for every rule, so neither a new finding nor
-// "no longer fires" comes from old data. Per rule, a missing or ambiguous
+// "no longer fires" comes from old data. Hit counts observed after the
+// injected clock Input.Now (a skewed or forged ObservedAt that would
+// stretch the observed window), or a nil clock, give StateCannotDecide
+// for every rule as well. Per rule, a missing or ambiguous
 // counter, a missing reset or creation time, inconsistent values or a
 // window shorter than MinZeroHitsWindow give "cannot decide" too; only a
 // counter with hits gives StateOK.
@@ -55,6 +58,13 @@ func (HitsCheck) Run(in *Input) Report {
 	}
 	if h.ObservedAt.IsZero() {
 		return failedReport(CheckZeroHits, in, StateCannotDecide, "hit counts without observation time")
+	}
+	if in.Now == nil {
+		return failedReport(CheckZeroHits, in, StateCannotDecide, "no clock: observation time of the hit counts cannot be checked")
+	}
+	if now := in.Now(); h.ObservedAt.After(now) {
+		return failedReport(CheckZeroHits, in, StateCannotDecide, fmt.Sprintf("hit counts observed at %s, after the current time %s",
+			h.ObservedAt.UTC().Format(time.RFC3339), now.UTC().Format(time.RFC3339)))
 	}
 	byName := make(map[string][]int, len(h.Rules))
 	for i := range h.Rules {

@@ -52,6 +52,7 @@ func FuzzRuleInputs(f *testing.F) {
 		if err != nil {
 			return
 		}
+		in.Now = func() time.Time { return hitsNow }
 		rh := RuleHits{RuleName: name, Hits: hits, ResetAt: hitsNow.Add(-time.Duration(resetDays) * 24 * time.Hour)}
 		if flags&32 == 0 {
 			rh.Created = nr.Collected(hitsNow.Add(-time.Duration(createdDays) * 24 * time.Hour))

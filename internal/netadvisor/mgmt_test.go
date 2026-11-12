@@ -6,6 +6,7 @@ import (
 	"context"
 	"maps"
 	"net/netip"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -169,8 +170,9 @@ func TestMgmtClosesOnlyOnCompleteSnapshot(t *testing.T) {
 	}
 
 	big := make([]MgmtTarget, 0, MaxMgmtQueries/(MaxMgmtAddrsPerTarget*MaxMgmtPortsPerTarget)+1)
-	for range cap(big) {
+	for n := range cap(big) {
 		tg := pveTarget()
+		tg.Name = "pve" + strconv.Itoa(n)
 		tg.Addrs = make([]netip.Addr, MaxMgmtAddrsPerTarget)
 		tg.Ports = make([]MgmtPort, MaxMgmtPortsPerTarget)
 		for i := range tg.Addrs {
@@ -201,15 +203,21 @@ func TestSetObservationsRejectsTargets(t *testing.T) {
 		return Observations{MgmtTargets: MgmtTargets{Targets: []MgmtTarget{tg}}}
 	}
 	tests := map[string]Observations{
-		"empty name":       with(func(t *MgmtTarget) { t.Name = "" }),
-		"invalid name":     with(func(t *MgmtTarget) { t.Name = "\xff" }),
-		"icmp port":        with(func(t *MgmtTarget) { t.Ports = []MgmtPort{{"icmp", 1}} }),
-		"port 0":           with(func(t *MgmtTarget) { t.Ports = []MgmtPort{{"tcp", 0}} }),
-		"invalid address":  with(func(t *MgmtTarget) { t.Addrs = []netip.Addr{{}} }),
-		"too many addrs":   with(func(t *MgmtTarget) { t.Addrs = make([]netip.Addr, MaxMgmtAddrsPerTarget+1) }),
-		"too many ports":   with(func(t *MgmtTarget) { t.Ports = make([]MgmtPort, MaxMgmtPortsPerTarget+1) }),
-		"bad peer":         with(func(t *MgmtTarget) { t.NetBird.RoutingPeers = nr.Collected([]nr.RoutingPeer{{Name: "p"}}) }),
-		"too many targets": {MgmtTargets: MgmtTargets{Targets: make([]MgmtTarget, MaxMgmtTargets+1)}},
+		"empty name":        with(func(t *MgmtTarget) { t.Name = "" }),
+		"invalid name":      with(func(t *MgmtTarget) { t.Name = "\xff" }),
+		"icmp port":         with(func(t *MgmtTarget) { t.Ports = []MgmtPort{{"icmp", 1}} }),
+		"port 0":            with(func(t *MgmtTarget) { t.Ports = []MgmtPort{{"tcp", 0}} }),
+		"invalid address":   with(func(t *MgmtTarget) { t.Addrs = []netip.Addr{{}} }),
+		"too many addrs":    with(func(t *MgmtTarget) { t.Addrs = make([]netip.Addr, MaxMgmtAddrsPerTarget+1) }),
+		"too many ports":    with(func(t *MgmtTarget) { t.Ports = make([]MgmtPort, MaxMgmtPortsPerTarget+1) }),
+		"bad peer":          with(func(t *MgmtTarget) { t.NetBird.RoutingPeers = nr.Collected([]nr.RoutingPeer{{Name: "p"}}) }),
+		"too many targets":  {MgmtTargets: MgmtTargets{Targets: make([]MgmtTarget, MaxMgmtTargets+1)}},
+		"duplicate address": with(func(t *MgmtTarget) { t.Addrs = append(t.Addrs, t.Addrs[0]) }),
+		"duplicate mapped address": with(func(t *MgmtTarget) {
+			t.Addrs = append(t.Addrs, netip.AddrFrom16(t.Addrs[0].As16()))
+		}),
+		"duplicate port": with(func(t *MgmtTarget) { t.Ports = append(t.Ports, t.Ports[0]) }),
+		"duplicate name": {MgmtTargets: MgmtTargets{Targets: []MgmtTarget{pveTarget(), pveTarget()}}},
 	}
 	for name, o := range tests {
 		if err := in.SetObservations(o); err == nil {

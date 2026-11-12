@@ -17,6 +17,7 @@ func daysAgo(d int) time.Time { return hitsNow.Add(-time.Duration(d) * 24 * time
 func hitInput(t *testing.T, st nr.InputState, rules []nr.SecurityRule, hits ...RuleHits) *Input {
 	t.Helper()
 	in := newInput(t, labSnapshot(rules...), nr.Field[map[string]ProfileSetting]{})
+	in.Now = func() time.Time { return hitsNow }
 	if err := in.SetObservations(Observations{Hits: HitCounts{State: st, ObservedAt: hitsNow, Rules: hits}}); err != nil {
 		t.Fatalf("SetObservations: %v", err)
 	}
@@ -127,6 +128,7 @@ func TestZeroHitsOnlyFromFreshData(t *testing.T) {
 				snap.Inputs[tc.stale] = nr.Input{State: nr.InputStale}
 			}
 			in := newInput(t, snap, nr.Field[map[string]ProfileSetting]{})
+			in.Now = func() time.Time { return hitsNow }
 			if err := in.SetObservations(Observations{Hits: HitCounts{State: tc.st, ObservedAt: hitsNow, Rules: hits}}); err != nil {
 				t.Fatal(err)
 			}
@@ -153,6 +155,67 @@ func TestZeroHitsOnlyFromFreshData(t *testing.T) {
 	}
 	if rep := (HitsCheck{}).Run(in); rep.State != StateCannotDecide {
 		t.Errorf("no observation time: %s", rep.State)
+	}
+}
+
+// TestZeroHitsFutureObservationCannotDecide: hit counts observed after
+// the injected clock (a skewed or forged ObservedAt) would stretch the
+// observed window; they give cannot_decide for every rule, never a
+// finding and never ok.
+func TestZeroHitsFutureObservationCannotDecide(t *testing.T) {
+	rules := []nr.SecurityRule{
+		rule("busy", allow, s("lan"), s("dmz"), s("lan-net"), s("web-server"), s("svc-web")),
+		rule("idle", allow, s("lan"), s("dmz"), s("lan-net"), s("web-server"), s("svc-http")),
+	}
+	hits := []RuleHits{
+		{RuleName: "busy", Hits: 9, ResetAt: daysAgo(1), Created: nr.Collected(daysAgo(2))},
+		{RuleName: "idle", ResetAt: daysAgo(1), Created: nr.Collected(daysAgo(2))},
+	}
+	for _, tc := range []struct {
+		name     string
+		observed time.Time
+		want     State
+	}{
+		{"observed 400 days ahead", hitsNow.Add(400 * 24 * time.Hour), StateCannotDecide},
+		{"observed one second ahead", hitsNow.Add(time.Second), StateCannotDecide},
+		{"observed now", hitsNow, StateOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := newInput(t, labSnapshot(rules...), nr.Field[map[string]ProfileSetting]{})
+			in.Now = func() time.Time { return hitsNow }
+			if err := in.SetObservations(Observations{Hits: HitCounts{State: nr.InputFresh, ObservedAt: tc.observed, Rules: hits}}); err != nil {
+				t.Fatal(err)
+			}
+			rep := HitsCheck{}.Run(in)
+			if rep.State != tc.want {
+				t.Fatalf("report %s %q, want %s", rep.State, rep.Reason, tc.want)
+			}
+			if tc.want != StateCannotDecide {
+				return
+			}
+			if !strings.Contains(rep.Reason, "after the current time") {
+				t.Errorf("reason %q", rep.Reason)
+			}
+			for _, f := range rep.Findings {
+				if f.State != StateCannotDecide {
+					t.Errorf("rule %s: %s, want cannot_decide", f.RuleName, f.State)
+				}
+			}
+		})
+	}
+	// Without an injected clock the observation time cannot be checked.
+	in := newInput(t, labSnapshot(rules...), nr.Field[map[string]ProfileSetting]{})
+	if err := in.SetObservations(Observations{Hits: HitCounts{State: nr.InputFresh, ObservedAt: hitsNow, Rules: hits}}); err != nil {
+		t.Fatal(err)
+	}
+	rep := HitsCheck{}.Run(in)
+	if rep.State != StateCannotDecide || !strings.Contains(rep.Reason, "no clock") {
+		t.Errorf("nil clock: %s %q, want cannot_decide", rep.State, rep.Reason)
+	}
+	for _, f := range rep.Findings {
+		if f.State != StateCannotDecide {
+			t.Errorf("nil clock: rule %s: %s", f.RuleName, f.State)
+		}
 	}
 }
 
