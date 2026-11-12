@@ -1134,9 +1134,10 @@ does NOS connect **from** (`--from`)?
   `MIN − 1` must each be rejected (error, nothing recorded), each with
   fresh recorders, a fresh fake executor and a fresh working directory
   (previously not stated, so a harness reusing the `MAX − 1` run's
-  recorder saw its traffic; the test "both entries green on today's
-  tree" fails such a harness, because `21` and `1001` are rejected
-  before any request). The
+  recorder saw its traffic; the range-check isolation meta-test of
+  **Class-rule tests** fails such a harness in every run order, while
+  "both entries green on today's tree" catches it only when the
+  rejection checks run after `MAX − 1`). The
   host-shaped forms and condition 3 apply as for every argument. Instead
   of the needle search of conditions 1 and 2, which a small value cannot
   pass reliably, the runs get a **distinctive check**:
