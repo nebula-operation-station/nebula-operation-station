@@ -628,7 +628,11 @@ through the API, with expiry offer expiry plus 45 minutes, at most 1 hour.)
 *Entry.* Two ways, both only for a privileged operator:
 
 - **Web dialog:** a masked input (`type="password"`,
-  `autocomplete="off"`) in the one-step dialog, sent only in the body of
+  `autocomplete="new-password"`, `spellcheck="false"`, inside a form that
+  has no username field) in the one-step dialog, so browsers and password
+  managers do not offer to save or fill the key (fix round 1; previously
+  `autocomplete="off"`, which major browsers ignore for password fields),
+  sent only in the body of
   the create request of the privileged session. The server passes it
   straight into `CreateEnrollOffer` and never logs, stores, caches or
   echoes it: an error page never refills the field, the response carries
@@ -681,7 +685,15 @@ through the API, with expiry offer expiry plus 45 minutes, at most 1 hour.)
 
 *Validation.* The executor removes surrounding ASCII whitespace, folds hex
 letters to uppercase and then requires exactly the canonical setup-key form
-of spec 09 (36 characters, uppercase hex UUID `8-4-4-4-12`). Anything else
+of spec 09 (36 characters, uppercase hex UUID `8-4-4-4-12`). Because the
+key is now created in the dashboard and no longer by NOS, EN-16b confirms
+before the spec keeps this rule that keys created in the NetBird dashboard
+of the reference-lab version and of NetBird Cloud (one-off and reusable,
+with and without auto groups, ephemeral and not) have this form, and
+records the versions checked here; a key form that fails the rule stops
+EN-16b for an ADR and spec amendment instead of being refused in
+operation (fix round 1; previously EN-11/EN-12 confirmed the form for
+keys NOS created through the API). Anything else
 is refused before anything is stored: no offer is created, and
 `netbird_setup_key_rejected` is audited with the reason class only, never
 the value or a part of it.
@@ -1309,7 +1321,10 @@ follows; D1–D9 above already reflect these decisions.
   next section. It supersedes the 2026-11-11 entries above on D6
   "Creation order" (response validation, key ID storage, reconcile,
   NetBird calls, list and get limits) and the EN-11/EN-12 verification
-  duties they name; they stay here as history.
+  duties they name; they stay here as history. Two verification duties
+  carry over (fix round 1): the setup-key form against real NetBird
+  versions moves to EN-16b (D6 "Validation"), and the per-client-version
+  key-passing mode (env or file) to EN-16e (D5).
 
 ## Amendment 2026-11-12: no NetBird Management API
 
