@@ -309,6 +309,52 @@ func TestDiffEFIFSTypeChangeMergesAndOrders(t *testing.T) {
 	}
 }
 
+// TestDiffEFIFSTypeFlagOnlyForChangedEntry: ChangeFSType is set only on a
+// KindChanged deviation (Deviation.Changes doc). An added or removed
+// /boot/efi entry already is the mount change, so its Changes carry no
+// ChangeFSType; in particular a complete scan without the optional root
+// yields a KindRemoved deviation with Changes 0.
+func TestDiffEFIFSTypeFlagOnlyForChangedEntry(t *testing.T) {
+	t.Run("removed root", func(t *testing.T) {
+		b := mustBaseline(t, efiResult("vfat", dir("/boot"), dir("/boot/efi"), file("/boot/z", 1)))
+		scan := efiResult("", dir("/boot"), file("/boot/z", 1))
+		for i := range scan.Roots {
+			if scan.Roots[i].Pattern == efiRoot {
+				scan.Roots[i].State = fimscan.RootAbsent
+			}
+		}
+		rep := mustDiff(t, b, scan, usable())
+		if len(rep.Deviations) != 1 || string(rep.Deviations[0].Path) != efiRoot {
+			t.Fatalf("got %+v", rep.Deviations)
+		}
+		if d := rep.Deviations[0]; d.Kind != KindRemoved || d.Changes != 0 || d.Class != ClassCritical {
+			t.Fatalf("removed root: kind %v changes %b class %v", d.Kind, d.Changes, d.Class)
+		}
+	})
+	t.Run("added root", func(t *testing.T) {
+		b := mustBaseline(t, efiResult("", dir("/boot"), file("/boot/z", 1)))
+		scan := efiResult("vfat", dir("/boot"), dir("/boot/efi"), file("/boot/z", 1))
+		rep := mustDiff(t, b, scan, usable())
+		if len(rep.Deviations) != 1 || string(rep.Deviations[0].Path) != efiRoot {
+			t.Fatalf("got %+v", rep.Deviations)
+		}
+		if d := rep.Deviations[0]; d.Kind != KindAdded || d.Changes != 0 || d.Class != ClassCritical {
+			t.Fatalf("added root: kind %v changes %b class %v", d.Kind, d.Changes, d.Class)
+		}
+	})
+	t.Run("changed root", func(t *testing.T) {
+		b := mustBaseline(t, efiResult("vfat", dir("/boot"), dir("/boot/efi"), file("/boot/z", 1)))
+		scan := efiResult("ext4", dir("/boot"), dir("/boot/efi"), file("/boot/z", 1))
+		rep := mustDiff(t, b, scan, usable())
+		if len(rep.Deviations) != 1 {
+			t.Fatalf("got %+v", rep.Deviations)
+		}
+		if d := rep.Deviations[0]; d.Kind != KindChanged || d.Changes != ChangeFSType || d.Old == nil || d.New == nil {
+			t.Fatalf("changed root: kind %v changes %b", d.Kind, d.Changes)
+		}
+	})
+}
+
 // TestDiffSSHSymlinkFailsClosed: a symlink at an SSH position (the home
 // .ssh directory points elsewhere) makes the file behind it, and every other
 // deviation of the run, unclassifiable instead of ClassNormal.

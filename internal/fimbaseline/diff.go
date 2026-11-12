@@ -19,7 +19,9 @@ const (
 	// KindRemoved: the path is in the baseline and a complete scan does not
 	// have it. A partial scan never yields it (ADR 0015 D6).
 	KindRemoved
-	// KindChanged: the path is in both and differs; see Changes.
+	// KindChanged: the path is in both and differs; see Changes. It also
+	// covers a /boot/efi mount-type change (ChangeFSType) where one side has
+	// no record at /boot/efi; then Old or New is nil.
 	KindChanged
 )
 
@@ -73,7 +75,12 @@ type Deviation struct {
 	Path []byte
 	// Kind is added, removed or changed.
 	Kind Kind
-	// Changes is set for KindChanged (and ChangeNotHashed for KindAdded).
+	// Changes is the bit set of what differs. It is non-zero for KindChanged
+	// (ChangeFSType for a /boot/efi mount-type change; see Kind). For
+	// KindAdded it is 0, or ChangeNotHashed for a new file that is not
+	// hashed. For KindRemoved it is always 0. ChangeFSType is never set on
+	// an added or removed /boot/efi entry: that entry already is the mount
+	// change.
 	Changes Change
 	// Old is the baseline record (nil for KindAdded); New the scan record
 	// (nil for KindRemoved). Both are copies owned by the caller.
@@ -184,7 +191,12 @@ func Diff(b *Baseline, scan *fimscan.Result, opts Options) (*Report, error) {
 			return bytes.Compare(d.Path, t)
 		})
 		if found {
-			rep.Deviations[k].Changes |= ChangeFSType
+			// An added or removed /boot/efi entry already is the mount
+			// change; only a changed entry carries ChangeFSType (see
+			// Deviation.Changes).
+			if rep.Deviations[k].Kind == KindChanged {
+				rep.Deviations[k].Changes |= ChangeFSType
+			}
 		} else {
 			old, nw := findRecord(b.entries, p), findRecord(cur, p)
 			add(p, KindChanged, ChangeFSType, old, nw)
