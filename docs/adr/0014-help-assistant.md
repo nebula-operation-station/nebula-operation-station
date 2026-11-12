@@ -91,6 +91,18 @@ History:
   `host pin --known-hosts` and `pve remote add`/`repin --ca-file`
   (previously only for `restore`); the wrapper rejection test restores
   `nebulaRoot` in `t.Cleanup` and runs without `t.Parallel`.
+- 2026-11-12 (as00ih, follow-up to PR #524): **Run classes** put every
+  canary run into exactly one of harness error, accepted and rejected;
+  a run without error that records no final request is a harness error
+  for every argument (previously only for `restore`, so such a run of
+  `host pin --known-hosts` or `pve remote add --ca-file` was
+  unclassified). **Package globals**: every AS-05 test that changes
+  `nebulaRoot` or `hostname`, including the restore and backup canary
+  runs, restores them in a `t.Cleanup` and calls no `t.Parallel`
+  (previously only the wrapper rejection test). The restore fixture
+  check and the `--identity` control run require
+  `*age.NoIdentityMatchError` after `backup.ParseIdentities` accepted
+  the control identity (previously any error).
 
 ## Context
 
