@@ -165,7 +165,16 @@ History:
   order, because a correct control run makes no `backup.System` call.
   The range-check fake records its final request by one call to its
   fake executor (previously not stated, so whether it caught a harness
-  sharing only the fake executor was open).
+  sharing only the fake executor was open; superseded by as00ik).
+- 2026-11-12 (as00ik and as00ikf, follow-up to PR #532): the rule (b)
+  meta-test again has a fake that records only other traffic, next to
+  the final-request fake, and names the accepted misclassification of
+  each. On an accepted run the range-check isolation fake makes one
+  dial through its recording dialer, one other request through its
+  HTTP transport and the final request through its fake executor
+  (previously one fake-executor call only). The `restore --identity`
+  fake gets a fresh fake executor from the harness (previously
+  unstated).
 - 2026-11-12 (as01d, maintainer decision of the same day): status
   Accepted; Q1–Q12 decided as recommended, see "Maintainer decisions
   2026-11-12" (previously proposed with open questions). Round 1 of PR
@@ -901,10 +910,12 @@ does NOS connect **from** (`--from`)?
     only other traffic (a request that is not the final request), each
     then returning an error, must each fail as a harness error naming
     harness entry and argument, never as rejected and never as
-    accepted; a harness that classifies either as accepted (final
-    request recorded, error ignored) or as rejected (error, recorder
-    not consulted, or only the final request consulted) fails the
-    meta-test (as00ik; as00ij kept only the final-request fake);
+    accepted; a harness that classifies the final-request fake as
+    accepted (final request recorded, error ignored), the other-traffic
+    fake as accepted (anything recorded, error ignored) or either as
+    rejected (error, recorder not consulted, or only the final request
+    consulted) fails the meta-test (as00ik; as00ij kept only the
+    final-request fake; as00ikf: accepted case per fake);
   - rule (c): a fake `in-path` argument and two fake `trust-path`
     arguments, one for `pve remote add --ca-file` and one for
     `pve remote repin --ca-file`, that each return an error before any
@@ -939,10 +950,12 @@ does NOS connect **from** (`--from`)?
     expected field (passing the distinctive check) and, for the
     rejection values, returns an error without traffic. On an accepted
     run the fake makes exactly one call through each of the three: one
-    other request through each of two of them, then the final request
-    through the third (as00ik; previously one fake-executor call
-    only, which over the in-memory connection need not pass through the
-    recording dialer or HTTP transport), so after an accepted run its
+    dial through its recording dialer, one other request through its
+    HTTP transport, then the final request through its fake executor
+    (as00ikf, previously open which of the three carries it; before
+    as00ik one fake-executor call only, which over the in-memory
+    connection need not pass through the recording dialer or HTTP
+    transport), so after an accepted run its
     recording dialer, HTTP transport and fake executor each hold a
     call, and a rejection value calls none of them. It must pass. A
     harness that hands a run a recorder or fake executor an earlier
