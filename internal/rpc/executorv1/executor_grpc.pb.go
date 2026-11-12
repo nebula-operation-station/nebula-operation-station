@@ -63,6 +63,14 @@ const (
 	ExecutorService_CommitRepin_FullMethodName                     = "/nebula.executor.v1.ExecutorService/CommitRepin"
 	ExecutorService_ProposeEnroll_FullMethodName                   = "/nebula.executor.v1.ExecutorService/ProposeEnroll"
 	ExecutorService_CommitEnroll_FullMethodName                    = "/nebula.executor.v1.ExecutorService/CommitEnroll"
+	ExecutorService_CreateEnrollOffer_FullMethodName               = "/nebula.executor.v1.ExecutorService/CreateEnrollOffer"
+	ExecutorService_FetchEnrollScript_FullMethodName               = "/nebula.executor.v1.ExecutorService/FetchEnrollScript"
+	ExecutorService_ShowEnrollScript_FullMethodName                = "/nebula.executor.v1.ExecutorService/ShowEnrollScript"
+	ExecutorService_DownloadEnrollScript_FullMethodName            = "/nebula.executor.v1.ExecutorService/DownloadEnrollScript"
+	ExecutorService_RevokeEnrollOffer_FullMethodName               = "/nebula.executor.v1.ExecutorService/RevokeEnrollOffer"
+	ExecutorService_ListEnrollOffers_FullMethodName                = "/nebula.executor.v1.ExecutorService/ListEnrollOffers"
+	ExecutorService_SubmitPairingCode_FullMethodName               = "/nebula.executor.v1.ExecutorService/SubmitPairingCode"
+	ExecutorService_CommitPairedEnroll_FullMethodName              = "/nebula.executor.v1.ExecutorService/CommitPairedEnroll"
 	ExecutorService_ProposeGuestJoin_FullMethodName                = "/nebula.executor.v1.ExecutorService/ProposeGuestJoin"
 	ExecutorService_CommitGuestJoin_FullMethodName                 = "/nebula.executor.v1.ExecutorService/CommitGuestJoin"
 	ExecutorService_GetSSHPublicKey_FullMethodName                 = "/nebula.executor.v1.ExecutorService/GetSSHPublicKey"
@@ -313,6 +321,48 @@ type ExecutorServiceClient interface {
 	// still presents the approved key, and tries a login when the keys are
 	// unlocked.
 	CommitEnroll(ctx context.Context, in *CommitEnrollRequest, opts ...grpc.CallOption) (*CommitEnrollResponse, error)
+	// One-step enrollment offers (ADR 0013 D1, D2, D7; spec 03 v25-03-02).
+	// Role: server. Creates an offer for an inventory host that is neither
+	// pinned nor blocked; needs an open privileged session. The offer is
+	// bound to the creating web session (session_binding). An offer without
+	// NetBird is open at once; a NetBird offer starts awaiting_approval,
+	// without setup key and without download hash, and the executor proposes
+	// its NetBird offer permit (HIGH, user verification).
+	CreateEnrollOffer(ctx context.Context, in *CreateEnrollOfferRequest, opts ...grpc.CallOption) (*CreateEnrollOfferResponse, error)
+	// Role: server. The download route GET /enroll/<offer-id>: releases the
+	// full script of an open offer exactly once. Every refusal is the same
+	// NotFound, whatever the reason.
+	FetchEnrollScript(ctx context.Context, in *FetchEnrollScriptRequest, opts ...grpc.CallOption) (*FetchEnrollScriptResponse, error)
+	// Role: server, creating web session only. "Show script": the
+	// placeholder render (the setup key replaced by
+	// <netbird-setup-key-withheld>). Never consumes the offer, never changes
+	// its state, never reads the setup key; repeatable.
+	ShowEnrollScript(ctx context.Context, in *ShowEnrollScriptRequest, opts ...grpc.CallOption) (*ShowEnrollScriptResponse, error)
+	// Role: server, creating web session only. "Download in browser":
+	// consumes the offer exactly like FetchEnrollScript; refused without
+	// consuming for an offer with NetBird.
+	DownloadEnrollScript(ctx context.Context, in *DownloadEnrollScriptRequest, opts ...grpc.CallOption) (*DownloadEnrollScriptResponse, error)
+	// Role: server (any web session) and admin. Revokes an offer in any
+	// non-final state, including awaiting_approval.
+	RevokeEnrollOffer(ctx context.Context, in *RevokeEnrollOfferRequest, opts ...grpc.CallOption) (*RevokeEnrollOfferResponse, error)
+	// Role: admin (nebula host offers). Lists the stored offers, without
+	// offer ID, salt, script or setup key.
+	ListEnrollOffers(ctx context.Context, in *ListEnrollOffersRequest, opts ...grpc.CallOption) (*ListEnrollOffersResponse, error)
+	// Role: server, creating web session only. Pairing (ADR 0013 D1 step 5,
+	// D3; spec 08 v25-08-01): checks the code format first (a malformed code
+	// is counted and never probed), then probes the endpoint offering only
+	// ssh-ed25519, computes the code from the presented key and the offer
+	// salt and compares in constant time. A match proposes the paired
+	// enrollment permit (HIGH, user verification); a mismatch fails the
+	// offer, audits the presented fingerprint and asks the server to notify;
+	// a probe failure is not a mismatch. Refused for a pinned or blocked host.
+	SubmitPairingCode(ctx context.Context, in *SubmitPairingCodeRequest, opts ...grpc.CallOption) (*SubmitPairingCodeResponse, error)
+	// Role: server, creating web session only. Commits an approved paired
+	// enrollment: re-probes the endpoint (ssh-ed25519 only), pins only the
+	// approved key, completes the offer and tries a login when the keys are
+	// unlocked. Only after a successful pin does the response name an
+	// endpoint to add to the inventory host.
+	CommitPairedEnroll(ctx context.Context, in *CommitPairedEnrollRequest, opts ...grpc.CallOption) (*CommitPairedEnrollResponse, error)
 	// Role: server. Join of a provisioned PVE guest (ADR 0008 section 4,
 	// PV-06): proposes the guest's enrollment with the normal enrollment
 	// approval (at least HIGH). The executor checks the live guest, tries a
@@ -1072,6 +1122,86 @@ func (c *executorServiceClient) CommitEnroll(ctx context.Context, in *CommitEnro
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CommitEnrollResponse)
 	err := c.cc.Invoke(ctx, ExecutorService_CommitEnroll_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) CreateEnrollOffer(ctx context.Context, in *CreateEnrollOfferRequest, opts ...grpc.CallOption) (*CreateEnrollOfferResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CreateEnrollOfferResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_CreateEnrollOffer_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) FetchEnrollScript(ctx context.Context, in *FetchEnrollScriptRequest, opts ...grpc.CallOption) (*FetchEnrollScriptResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(FetchEnrollScriptResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_FetchEnrollScript_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ShowEnrollScript(ctx context.Context, in *ShowEnrollScriptRequest, opts ...grpc.CallOption) (*ShowEnrollScriptResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ShowEnrollScriptResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ShowEnrollScript_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) DownloadEnrollScript(ctx context.Context, in *DownloadEnrollScriptRequest, opts ...grpc.CallOption) (*DownloadEnrollScriptResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(DownloadEnrollScriptResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_DownloadEnrollScript_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) RevokeEnrollOffer(ctx context.Context, in *RevokeEnrollOfferRequest, opts ...grpc.CallOption) (*RevokeEnrollOfferResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RevokeEnrollOfferResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_RevokeEnrollOffer_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ListEnrollOffers(ctx context.Context, in *ListEnrollOffersRequest, opts ...grpc.CallOption) (*ListEnrollOffersResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListEnrollOffersResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ListEnrollOffers_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) SubmitPairingCode(ctx context.Context, in *SubmitPairingCodeRequest, opts ...grpc.CallOption) (*SubmitPairingCodeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SubmitPairingCodeResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_SubmitPairingCode_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) CommitPairedEnroll(ctx context.Context, in *CommitPairedEnrollRequest, opts ...grpc.CallOption) (*CommitPairedEnrollResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommitPairedEnrollResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_CommitPairedEnroll_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2109,6 +2239,48 @@ type ExecutorServiceServer interface {
 	// still presents the approved key, and tries a login when the keys are
 	// unlocked.
 	CommitEnroll(context.Context, *CommitEnrollRequest) (*CommitEnrollResponse, error)
+	// One-step enrollment offers (ADR 0013 D1, D2, D7; spec 03 v25-03-02).
+	// Role: server. Creates an offer for an inventory host that is neither
+	// pinned nor blocked; needs an open privileged session. The offer is
+	// bound to the creating web session (session_binding). An offer without
+	// NetBird is open at once; a NetBird offer starts awaiting_approval,
+	// without setup key and without download hash, and the executor proposes
+	// its NetBird offer permit (HIGH, user verification).
+	CreateEnrollOffer(context.Context, *CreateEnrollOfferRequest) (*CreateEnrollOfferResponse, error)
+	// Role: server. The download route GET /enroll/<offer-id>: releases the
+	// full script of an open offer exactly once. Every refusal is the same
+	// NotFound, whatever the reason.
+	FetchEnrollScript(context.Context, *FetchEnrollScriptRequest) (*FetchEnrollScriptResponse, error)
+	// Role: server, creating web session only. "Show script": the
+	// placeholder render (the setup key replaced by
+	// <netbird-setup-key-withheld>). Never consumes the offer, never changes
+	// its state, never reads the setup key; repeatable.
+	ShowEnrollScript(context.Context, *ShowEnrollScriptRequest) (*ShowEnrollScriptResponse, error)
+	// Role: server, creating web session only. "Download in browser":
+	// consumes the offer exactly like FetchEnrollScript; refused without
+	// consuming for an offer with NetBird.
+	DownloadEnrollScript(context.Context, *DownloadEnrollScriptRequest) (*DownloadEnrollScriptResponse, error)
+	// Role: server (any web session) and admin. Revokes an offer in any
+	// non-final state, including awaiting_approval.
+	RevokeEnrollOffer(context.Context, *RevokeEnrollOfferRequest) (*RevokeEnrollOfferResponse, error)
+	// Role: admin (nebula host offers). Lists the stored offers, without
+	// offer ID, salt, script or setup key.
+	ListEnrollOffers(context.Context, *ListEnrollOffersRequest) (*ListEnrollOffersResponse, error)
+	// Role: server, creating web session only. Pairing (ADR 0013 D1 step 5,
+	// D3; spec 08 v25-08-01): checks the code format first (a malformed code
+	// is counted and never probed), then probes the endpoint offering only
+	// ssh-ed25519, computes the code from the presented key and the offer
+	// salt and compares in constant time. A match proposes the paired
+	// enrollment permit (HIGH, user verification); a mismatch fails the
+	// offer, audits the presented fingerprint and asks the server to notify;
+	// a probe failure is not a mismatch. Refused for a pinned or blocked host.
+	SubmitPairingCode(context.Context, *SubmitPairingCodeRequest) (*SubmitPairingCodeResponse, error)
+	// Role: server, creating web session only. Commits an approved paired
+	// enrollment: re-probes the endpoint (ssh-ed25519 only), pins only the
+	// approved key, completes the offer and tries a login when the keys are
+	// unlocked. Only after a successful pin does the response name an
+	// endpoint to add to the inventory host.
+	CommitPairedEnroll(context.Context, *CommitPairedEnrollRequest) (*CommitPairedEnrollResponse, error)
 	// Role: server. Join of a provisioned PVE guest (ADR 0008 section 4,
 	// PV-06): proposes the guest's enrollment with the normal enrollment
 	// approval (at least HIGH). The executor checks the live guest, tries a
@@ -2579,6 +2751,30 @@ func (UnimplementedExecutorServiceServer) ProposeEnroll(context.Context, *Propos
 }
 func (UnimplementedExecutorServiceServer) CommitEnroll(context.Context, *CommitEnrollRequest) (*CommitEnrollResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CommitEnroll not implemented")
+}
+func (UnimplementedExecutorServiceServer) CreateEnrollOffer(context.Context, *CreateEnrollOfferRequest) (*CreateEnrollOfferResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CreateEnrollOffer not implemented")
+}
+func (UnimplementedExecutorServiceServer) FetchEnrollScript(context.Context, *FetchEnrollScriptRequest) (*FetchEnrollScriptResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method FetchEnrollScript not implemented")
+}
+func (UnimplementedExecutorServiceServer) ShowEnrollScript(context.Context, *ShowEnrollScriptRequest) (*ShowEnrollScriptResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ShowEnrollScript not implemented")
+}
+func (UnimplementedExecutorServiceServer) DownloadEnrollScript(context.Context, *DownloadEnrollScriptRequest) (*DownloadEnrollScriptResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method DownloadEnrollScript not implemented")
+}
+func (UnimplementedExecutorServiceServer) RevokeEnrollOffer(context.Context, *RevokeEnrollOfferRequest) (*RevokeEnrollOfferResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RevokeEnrollOffer not implemented")
+}
+func (UnimplementedExecutorServiceServer) ListEnrollOffers(context.Context, *ListEnrollOffersRequest) (*ListEnrollOffersResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListEnrollOffers not implemented")
+}
+func (UnimplementedExecutorServiceServer) SubmitPairingCode(context.Context, *SubmitPairingCodeRequest) (*SubmitPairingCodeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SubmitPairingCode not implemented")
+}
+func (UnimplementedExecutorServiceServer) CommitPairedEnroll(context.Context, *CommitPairedEnrollRequest) (*CommitPairedEnrollResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CommitPairedEnroll not implemented")
 }
 func (UnimplementedExecutorServiceServer) ProposeGuestJoin(context.Context, *ProposeGuestJoinRequest) (*ProposeGuestJoinResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ProposeGuestJoin not implemented")
@@ -3614,6 +3810,150 @@ func _ExecutorService_CommitEnroll_Handler(srv interface{}, ctx context.Context,
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ExecutorServiceServer).CommitEnroll(ctx, req.(*CommitEnrollRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_CreateEnrollOffer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CreateEnrollOfferRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).CreateEnrollOffer(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_CreateEnrollOffer_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).CreateEnrollOffer(ctx, req.(*CreateEnrollOfferRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_FetchEnrollScript_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(FetchEnrollScriptRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).FetchEnrollScript(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_FetchEnrollScript_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).FetchEnrollScript(ctx, req.(*FetchEnrollScriptRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ShowEnrollScript_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ShowEnrollScriptRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ShowEnrollScript(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ShowEnrollScript_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ShowEnrollScript(ctx, req.(*ShowEnrollScriptRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_DownloadEnrollScript_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(DownloadEnrollScriptRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).DownloadEnrollScript(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_DownloadEnrollScript_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).DownloadEnrollScript(ctx, req.(*DownloadEnrollScriptRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_RevokeEnrollOffer_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RevokeEnrollOfferRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).RevokeEnrollOffer(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_RevokeEnrollOffer_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).RevokeEnrollOffer(ctx, req.(*RevokeEnrollOfferRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ListEnrollOffers_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListEnrollOffersRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ListEnrollOffers(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ListEnrollOffers_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ListEnrollOffers(ctx, req.(*ListEnrollOffersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_SubmitPairingCode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SubmitPairingCodeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).SubmitPairingCode(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_SubmitPairingCode_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).SubmitPairingCode(ctx, req.(*SubmitPairingCodeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_CommitPairedEnroll_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CommitPairedEnrollRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).CommitPairedEnroll(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_CommitPairedEnroll_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).CommitPairedEnroll(ctx, req.(*CommitPairedEnrollRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -5358,6 +5698,38 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CommitEnroll",
 			Handler:    _ExecutorService_CommitEnroll_Handler,
+		},
+		{
+			MethodName: "CreateEnrollOffer",
+			Handler:    _ExecutorService_CreateEnrollOffer_Handler,
+		},
+		{
+			MethodName: "FetchEnrollScript",
+			Handler:    _ExecutorService_FetchEnrollScript_Handler,
+		},
+		{
+			MethodName: "ShowEnrollScript",
+			Handler:    _ExecutorService_ShowEnrollScript_Handler,
+		},
+		{
+			MethodName: "DownloadEnrollScript",
+			Handler:    _ExecutorService_DownloadEnrollScript_Handler,
+		},
+		{
+			MethodName: "RevokeEnrollOffer",
+			Handler:    _ExecutorService_RevokeEnrollOffer_Handler,
+		},
+		{
+			MethodName: "ListEnrollOffers",
+			Handler:    _ExecutorService_ListEnrollOffers_Handler,
+		},
+		{
+			MethodName: "SubmitPairingCode",
+			Handler:    _ExecutorService_SubmitPairingCode_Handler,
+		},
+		{
+			MethodName: "CommitPairedEnroll",
+			Handler:    _ExecutorService_CommitPairedEnroll_Handler,
 		},
 		{
 			MethodName: "ProposeGuestJoin",

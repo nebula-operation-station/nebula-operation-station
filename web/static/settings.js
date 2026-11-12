@@ -86,3 +86,57 @@
       });
   });
 })();
+
+// Vulnerability agent – LLM (ADR 0011 amendment 1): the maintainer's
+// change is posted to /settings/vuln-agent/begin, the returned challenge
+// is signed with the security key and the assertion committed. A changed
+// LLM URL needs the confirmation box (the server enforces it). Server text
+// is shown with textContent only.
+(function () {
+  'use strict';
+
+  var form = document.getElementById('vuln-agent-form');
+  var btn = document.getElementById('vuln-agent-submit');
+  if (!form || !btn || typeof nebulaWebAuthn === 'undefined') return;
+  var w = nebulaWebAuthn;
+  var message = document.getElementById('vuln-agent-message');
+
+  function show(text, isError) {
+    message.textContent = text;
+    message.classList.toggle('message--error', !!isError);
+  }
+
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var body = {
+      llm_enabled: document.getElementById('vuln-agent-enabled').checked,
+      llm_base_url: document.getElementById('vuln-agent-url').value.trim(),
+      llm_model: document.getElementById('vuln-agent-model').value.trim(),
+      language: document.getElementById('vuln-agent-language').value,
+      // The server rejects '\r'; send textarea line breaks as '\n'.
+      operator_instructions: document.getElementById('vuln-agent-operator').value.replace(/\r\n?/g, '\n'),
+      base_version: Number(form.dataset.version),
+      confirm_url_change: document.getElementById('vuln-agent-confirm-url').checked,
+    };
+    if (body.llm_base_url !== form.dataset.url && !body.confirm_url_change) {
+      show('Changing the LLM URL is security-relevant: tick the confirmation box first.', true);
+      return;
+    }
+    btn.disabled = true;
+    w.post('/settings/vuln-agent/begin', body)
+      .then(function (begin) {
+        show('Touch your security key…', false);
+        return navigator.credentials.get(w.requestOptions(begin.options)).then(function (cred) {
+          return w.post('/settings/vuln-agent/commit', { id: begin.id, assertion: w.assertionJSON(cred) });
+        });
+      })
+      .then(function () {
+        show('Saved.', false);
+        window.location.reload();
+      })
+      .catch(function (err) {
+        show(err.name === 'NotAllowedError' ? 'Cancelled or timed out.' : (err.message || 'The change failed.'), true);
+        btn.disabled = false;
+      });
+  });
+})();

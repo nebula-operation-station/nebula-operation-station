@@ -35,7 +35,7 @@ const netdevUsage = `usage: nebula netdev probe --family cbs|panos --endpoint <i
        nebula netdev credential set <device-id> [--username NAME] [--secret-fd N]
        nebula netdev credential rotate <device-id> [--username NAME] [--secret-fd N]
        nebula netdev repin <device-id>
-       nebula netdev block <device-id> [--reason TEXT]
+       nebula netdev block <device-id> --reason TEXT
        nebula netdev unblock <device-id>
        nebula netdev remove <device-id>
        nebula netdev list
@@ -50,18 +50,28 @@ add registers the device only after you type "yes". add, repin, unblock
 and remove read that "yes" from a terminal on stdin only; a piped "yes"
 is refused.
 
-The read credential (CBS password, PAN-OS API key) is asked without echo
-on the terminal. It is never accepted as an argument or from the
-environment. Alternatively pass --secret-fd N to read it once from an
-already open file descriptor N (3 or higher) that is a regular file or a
-pipe; anything else is refused before the executor is contacted. The
-descriptor is closed after reading.
+--label is a display name only. --label is required for an IP literal
+--endpoint. For a host-name --endpoint the label is the host name: omit
+--label or pass exactly that name; any other label is refused.
+
+block requires --reason: a short admin note of printable text, no secrets.
+
+The read credential (CBS: the OpenSSH private key of the read account,
+always via --secret-fd because the terminal prompt reads one line only;
+PAN-OS: the API key) is asked without echo on the terminal. It is never
+accepted as an argument or from the environment. Alternatively pass
+--secret-fd N to read it once from an already open file descriptor N
+(3 or higher) that is a regular file or a pipe; anything else is refused
+before the executor is contacted. The descriptor is closed after reading.
 
 Examples:
   nebula netdev probe --family cbs --endpoint <switch-ip>
   nebula netdev add <device-id> --family panos --endpoint <firewall-ip> --label <label>
   nebula netdev credential rotate <device-id> --secret-fd 3 3< <file>
   nebula netdev list`
+
+// netdevReasonFlagHelp is the help of the --reason flag of block.
+const netdevReasonFlagHelp = "required: short admin note (no secrets)"
 
 // Limits enforced by this file.
 const (
@@ -476,7 +486,7 @@ func netdevProbe(args []string, env netdevEnv) error {
 func netdevAdd(args []string, env netdevEnv) error {
 	fs := flag.NewFlagSet("netdev add", flag.ContinueOnError)
 	t := netdevTargetFlags(fs)
-	label := fs.String("label", "", "display name")
+	label := fs.String("label", "", "display name; required for an IP literal endpoint, omit or equal to the name for a host-name endpoint")
 	username := fs.String("username", "", "device account name (not a secret)")
 	noCred := fs.Bool("no-credential", false, "register only; set the credential later")
 	src := netdevSecretFlag(fs)
@@ -551,8 +561,8 @@ func netdevAdd(args []string, env netdevEnv) error {
 		fmt.Fprintf(env.out, "no credential stored; run nebula netdev credential set %s\n", netdevSafe(d.GetDeviceId()))
 		return nil
 	}
-	// 5. Store the credential (the executor validates it against the
-	// device first), with its own budget.
+	// 5. Store the credential (stored as given; it is not tested against
+	// the device), with its own budget.
 	cctx, ccancel := env.rpcContext(netdevDeviceTimeout)
 	defer ccancel()
 	cr, err := c.SetNetDeviceCredential(cctx, &pb.SetNetDeviceCredentialRequest{DeviceId: id, Username: *username, Secret: secret})
@@ -706,7 +716,7 @@ func netdevRepin(args []string, env netdevEnv) error {
 // netdevBlock implements `nebula netdev block`.
 func netdevBlock(args []string, env netdevEnv) error {
 	fs := flag.NewFlagSet("netdev block", flag.ContinueOnError)
-	reason := fs.String("reason", "", "short admin note (no secrets)")
+	reason := fs.String("reason", "", netdevReasonFlagHelp)
 	id, err := netdevParse(fs, args, true)
 	if err != nil {
 		return err

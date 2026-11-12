@@ -50,6 +50,18 @@ Per-host mute with expiry. Messages carry host, state, reason and execution ID, 
 
 Dedupe per `(finding_key, event type)`; a re-opened finding starts a new episode and may notify again, tier flapping inside one episode does not. At most 10 vulnerability messages per hour, the rest in one hourly digest with counts. Messages carry structured fields only (vulnerability ID, subject, tier, KEV), never the Hermes assessment text. The subject is the subject kind and its opaque subject ID shortened to 40 characters (an image subject also carries its full platform digest), never a host label or host name. ADR 0011 D9 names a "subject label"; the kind-and-ID form and the 40 characters are an *implementation choice* of `internal/vulnnotify` (`maxSubjectID`).
 
+<a id="v26-13-01"></a>
+<!-- Spec revision (ADR 0015, IG-01): v26-13-01 -->
+**Integrity notification events (ADR 0015 D9).** Sent through the existing webhook, ntfy and Telegram senders (previously: no integrity events):
+
+- `integrity.nos_mismatch`: an I1 finding on the NOS machine (code, unit, built-in module, root key, web asset or configuration differs from its reference).
+- `integrity.host_change`: an I2 finding on a managed host.
+- `integrity.scan_incomplete`: an I1 check or an I2 run that could not complete (partial or stale scan).
+- `integrity.baseline_tamper`: the server's I2 baseline list does not match the executor-stored digest.
+- `integrity.reference_conflict`: the executor rejected a package reference that differs from the one admitted for the same `(package, version, arch)` ([10-modules.md](10-modules.md#v26-10-03)).
+
+Messages carry **structured fields only**: host label, class, severity, count and a NOS link. **No host-supplied path or content is put into a notification**, because chat clients render Markdown and links; the path is shown only in the NOS UI under the rules of [09-untrusted-host-data.md](09-untrusted-host-data.md#v26-09-01). Dedupe per `(subject, class, path)`; at most 10 integrity messages per hour, then an hourly digest. A notification never triggers an execution, a restore or any other mutation.
+
 **Findings export (ADR 0011 D9).** Findings can be exported as CSV or JSON with structured fields only; admin only, and every export is audited before any data is written. CSV cells are prefixed against formula injection ([09-untrusted-host-data.md](09-untrusted-host-data.md#v24-09-02)). D9 excludes the assessment text from CSV by default; the merged export (`internal/vulnnotify`) carries no assessment text, admin reasons, host labels or addresses in either format (implementation choice).
 
 **Later (1.1).** An OpenMetrics endpoint behind the same scopes, so Prometheus or Telegraf can scrape Ops State and update counts into an existing monitoring stack.

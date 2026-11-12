@@ -815,6 +815,74 @@ func (c *Client) BackupExecutor(ctx context.Context, in *pb.BackupExecutorReques
 	return resp, mapCallError(ctx, err)
 }
 
+// CreateEnrollOffer creates a one-step enrollment offer (ADR 0013 D1).
+func (c *Client) CreateEnrollOffer(ctx context.Context, in *pb.CreateEnrollOfferRequest, opts ...grpc.CallOption) (*pb.CreateEnrollOfferResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.CreateEnrollOffer(ctx, in, opts...)
+	return resp, mapCallError(ctx, err)
+}
+
+// FetchEnrollScript releases an offer's script once (download route).
+func (c *Client) FetchEnrollScript(ctx context.Context, in *pb.FetchEnrollScriptRequest, opts ...grpc.CallOption) (*pb.FetchEnrollScriptResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.FetchEnrollScript(ctx, in, opts...)
+	return resp, mapCallError(ctx, err)
+}
+
+// ShowEnrollScript renders an offer's placeholder script without consuming
+// it.
+func (c *Client) ShowEnrollScript(ctx context.Context, in *pb.ShowEnrollScriptRequest, opts ...grpc.CallOption) (*pb.ShowEnrollScriptResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ShowEnrollScript(ctx, in, opts...)
+	return resp, mapCallError(ctx, err)
+}
+
+// DownloadEnrollScript releases an offer's script once (browser download).
+func (c *Client) DownloadEnrollScript(ctx context.Context, in *pb.DownloadEnrollScriptRequest, opts ...grpc.CallOption) (*pb.DownloadEnrollScriptResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.DownloadEnrollScript(ctx, in, opts...)
+	return resp, mapCallError(ctx, err)
+}
+
+// RevokeEnrollOffer revokes a non-final offer.
+func (c *Client) RevokeEnrollOffer(ctx context.Context, in *pb.RevokeEnrollOfferRequest, opts ...grpc.CallOption) (*pb.RevokeEnrollOfferResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.RevokeEnrollOffer(ctx, in, opts...)
+	return resp, mapCallError(ctx, err)
+}
+
+// ListEnrollOffers is admin-only on the executor; the server's calls are
+// refused there.
+func (c *Client) ListEnrollOffers(ctx context.Context, in *pb.ListEnrollOffersRequest, opts ...grpc.CallOption) (*pb.ListEnrollOffersResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ListEnrollOffers(ctx, in, opts...)
+	return resp, mapCallError(ctx, err)
+}
+
+// SubmitPairingCode submits an offer's pairing code and endpoint; the
+// executor probes the endpoint once.
+func (c *Client) SubmitPairingCode(ctx context.Context, in *pb.SubmitPairingCodeRequest, opts ...grpc.CallOption) (*pb.SubmitPairingCodeResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout+time.Minute)
+	defer cancel()
+	resp, err := c.rpc.SubmitPairingCode(ctx, in, opts...)
+	return resp, mapCallError(ctx, err)
+}
+
+// CommitPairedEnroll commits an approved paired enrollment (re-probe, pin,
+// login test).
+func (c *Client) CommitPairedEnroll(ctx context.Context, in *pb.CommitPairedEnrollRequest, opts ...grpc.CallOption) (*pb.CommitPairedEnrollResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout+time.Minute)
+	defer cancel()
+	resp, err := c.rpc.CommitPairedEnroll(ctx, in, opts...)
+	return resp, mapCallError(ctx, err)
+}
+
 // Compile-time check: the client must implement the generated interface so
 // that a generated-code change breaks the build here.
 var _ pb.ExecutorServiceClient = (*Client)(nil)

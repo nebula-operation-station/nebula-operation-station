@@ -63,6 +63,23 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_CommitRepin_FullMethodName:               {server},
 		pb.ExecutorService_ProposeEnroll_FullMethodName:             {server},
 		pb.ExecutorService_CommitEnroll_FullMethodName:              {server},
+		// One-step enrollment offers (ADR 0013 D1, D2; spec 03
+		// v25-03-02). The server creates offers, fetches the script for
+		// the download route, renders "Show script" and the browser
+		// download (both only for the creating web session, checked in
+		// the handler) and revokes from any session; the local admin
+		// lists and revokes (nebula host offers, offer-revoke). No
+		// collector role gets any of them.
+		pb.ExecutorService_CreateEnrollOffer_FullMethodName:    {server},
+		pb.ExecutorService_FetchEnrollScript_FullMethodName:    {server},
+		pb.ExecutorService_ShowEnrollScript_FullMethodName:     {server},
+		pb.ExecutorService_DownloadEnrollScript_FullMethodName: {server},
+		pb.ExecutorService_RevokeEnrollOffer_FullMethodName:    {server, admin},
+		pb.ExecutorService_ListEnrollOffers_FullMethodName:     {admin},
+		// Pairing and paired commit: only for the creating web session,
+		// checked in the handler (ADR 0013 D2 "Binding").
+		pb.ExecutorService_SubmitPairingCode_FullMethodName:  {server},
+		pb.ExecutorService_CommitPairedEnroll_FullMethodName: {server},
 		// Join of a provisioned PVE guest (ADR 0008 section 4, PV-06): the
 		// normal enrollment approval, proposed and committed by the server.
 		pb.ExecutorService_ProposeGuestJoin_FullMethodName: {server},

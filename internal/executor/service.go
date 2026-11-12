@@ -65,6 +65,11 @@ type Service struct {
 	// batchRun is the production batch member dispatch
 	// (EnableBatchExecution); nil leaves RunBatchMember Unimplemented.
 	batchRun *batchExec
+	// netDevBaselineDigest confirms an executor-computed raw_digest for a
+	// network device baseline (NetDevAdmin.VerifyBaselineDigest). Nothing
+	// sets it in production until ND-14, so baselines are refused; tests
+	// set it directly.
+	netDevBaselineDigest func(ctx context.Context, deviceID string, versionID int64, rawDigest string) error
 	// builtinTrust is the local built-in trust transaction (ADR 0007, E19c);
 	// nil until SetBuiltinTrust wires it.
 	builtinTrust BuiltinTrust
@@ -125,6 +130,12 @@ type Service struct {
 	// open run gets one try at startup.
 	reconcileBackoffMu sync.Mutex
 	reconcileBackoff   map[string]*reconcileBackoffState
+	// offers holds the one-step enrollment configuration and the render
+	// inputs of the offers (enroll_offer.go).
+	offers enrollOfferState
+	// pairingHooks are test seams of the pairing steps; nil in production
+	// (enroll_pairing.go).
+	pairingHooks *pairingHooks
 }
 
 func (s *Service) clock() time.Time {

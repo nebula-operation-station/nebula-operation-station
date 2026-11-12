@@ -62,7 +62,11 @@ func NewSyncer(f *Fetcher, s *Store) (*Syncer, error) {
 // in use and nothing partial is kept. A proxy-dated feed's companions must
 // be synced first; its date is their newest content date. An error
 // wrapping ErrPruneFailed means the new snapshot was committed (the
-// result is valid) but removing expired objects failed.
+// result is valid) but removing expired objects failed. Callers must not
+// drop that error: they use the result and still surface the error (log,
+// alert), since disk use is no longer bounded. A 304 (NotModified) never
+// prunes, so leftovers are retried only by the next changed snapshot;
+// a service should also call Store.Prune periodically.
 func (s *Syncer) Sync(ctx context.Context, feed Feed, opt SyncOptions) (SyncResult, error) {
 	if err := feed.validate(); err != nil {
 		return SyncResult{}, err

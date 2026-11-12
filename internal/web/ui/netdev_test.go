@@ -10,6 +10,7 @@ package ui_test
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -155,17 +156,29 @@ type netdevEnv struct {
 	admins   map[string]bool
 	sessions *auth.Store
 	cookie   *http.Cookie
+	db       *sql.DB
 }
 
 func newNetDevEnv(t *testing.T) *netdevEnv {
+	t.Helper()
+	return newNetDevEnvWith(t, nil, io.Discard)
+}
+
+// newNetDevEnvWith is newNetDevEnv with an optional asset link store built
+// on the environment's server database and a log writer (audit lines).
+func newNetDevEnvWith(t *testing.T, links func(*sql.DB) ui.NetDevLinkStore, logw io.Writer) *netdevEnv {
 	t.Helper()
 	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
 	if err != nil {
 		t.Fatalf("open server DB: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	e := &netdevEnv{t: t, store: newFakeNetDevStore(), admins: map[string]bool{"alice": true}}
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	e := &netdevEnv{t: t, store: newFakeNetDevStore(), admins: map[string]bool{"alice": true}, db: db}
+	log := slog.New(slog.NewTextHandler(logw, nil))
+	var linkStore ui.NetDevLinkStore
+	if links != nil {
+		linkStore = links(db)
+	}
 	u, err := ui.New(ui.Options{PublicOrigin: pveOrigin, Log: log, Now: func() time.Time { return netdevNow }})
 	if err != nil {
 		t.Fatalf("ui.New: %v", err)
@@ -176,6 +189,7 @@ func newNetDevEnv(t *testing.T) *netdevEnv {
 			return e.registry, e.regErr
 		},
 		IsAdmin: func(_ context.Context, user string) (bool, error) { return e.admins[user], nil },
+		Links:   linkStore,
 	})
 	if err != nil {
 		t.Fatalf("NetDevPages: %v", err)
@@ -659,7 +673,7 @@ func TestNetDevDetailShowsDatasets(t *testing.T) {
 	}
 	_, body = e.get("/netdev/fw1")
 	for _, want := range []string{"PA-440", "11.1.4", "trust", "untrust", "ethernet1/2", "10.0.0.1/24",
-		"Security rules</th><td>7", "NAT rules</th><td>2", "Objects</th><td>10", "Firewall view: not available yet"} {
+		"Security rules</th><td>7", "NAT rules</th><td>2", "Objects</th><td>10", `href="/netdev/fw1/firewall"`} {
 		if !strings.Contains(body, want) {
 			t.Errorf("PAN-OS detail misses %q", want)
 		}
@@ -667,7 +681,7 @@ func TestNetDevDetailShowsDatasets(t *testing.T) {
 	if strings.Contains(body, "MAC table") {
 		t.Error("PAN-OS detail shows the switch MAC table")
 	}
-	if strings.Contains(body, `href="/netdev/fw1/firewall"`) {
-		t.Error("firewall view linked before ND-20")
+	if strings.Contains(body, "not available yet") {
+		t.Error("PAN-OS detail still shows the ND-19 firewall view placeholder")
 	}
 }

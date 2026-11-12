@@ -17,10 +17,14 @@ const RegistryReadProfile = "registry"
 
 // Registry read lease limits. The ordinary floor and budgets apply; the
 // budget counts reads per registry per rolling hour across all leases, the
-// floor applies per registry, repository and method.
+// floor applies per registry, method, repository and tag (or digest; the
+// tag list has none), so two tags of one repository are two reads. Before
+// the budget is charged, the executor also bounds the distinct tags of one
+// repository read per rolling hour, and the server bounds them per managed
+// host, so one host's tag list cannot spend the whole registry budget.
 const (
 	// RegistryMinInterval is the 15-minute floor between two reads of one
-	// method on one repository of one registry.
+	// method on one tag (or digest) of one repository of one registry.
 	RegistryMinInterval = MinInterval
 	// RegistryDefaultRunBudget is the default per-registry rolling-hour budget.
 	RegistryDefaultRunBudget = 24

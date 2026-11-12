@@ -14,6 +14,53 @@
     <tr><th>Last seen</th><td>{{timeTag $d.LastSeen}}{{if $d.Age}} ({{$d.Age}}){{else}}never{{end}}</td></tr>
   </table>
 
+  {{with $d.AssetLink}}
+  <h3 id="asset-link">IPAM asset</h3>
+  {{if .Unavailable}}
+  <p class="status status--error">Asset link unavailable.</p>
+  {{else if .Linked}}
+  <table class="inventory">
+    <tr><th>Asset</th><td><a href="{{.Linked.AssetURL}}">{{.Linked.AssetName}}</a> <span class="mono">{{.Linked.AssetID}}</span> ({{.Linked.AssetKind}})</td></tr>
+    <tr><th>Confirmed by</th><td>{{.Linked.ConfirmedBy}}, {{timeTag .Linked.ConfirmedAt}}</td></tr>
+  </table>
+  <form method="post" action="{{.RemoveURL}}">
+    <button type="submit">Remove link</button>
+  </form>
+  {{else}}
+  <p class="status">Not linked to an IPAM asset. A link is made only by confirming it here.</p>
+  {{if .Suggestions}}
+  <p class="hint">MAC suggestions: these assets share a MAC with this device's MAC table. A suggestion is not a link.</p>
+  <table class="inventory">
+    <thead><tr><th>Asset</th><th>Kind</th><th>MAC</th><th>VLAN</th><th>Port</th><th>Entry</th><th>Source</th><th></th></tr></thead>
+    <tbody>
+      {{range .Suggestions}}<tr>
+        <td>{{.AssetName}} <span class="mono">{{.AssetID}}</span></td>
+        <td>{{.AssetKind}}</td>
+        <td class="mono">{{.MAC}}</td>
+        <td>{{.VLAN}}</td>
+        <td class="mono">{{.Port}}</td>
+        <td>{{.EntryType}}{{if .Self}} (device's own){{end}}</td>
+        <td><span class="badge badge--unknown">suggestion: {{.Source}}</span></td>
+        <td>{{if .KindMatches}}<form method="post" action="{{$.NetDevDetail.AssetLink.ConfirmURL}}"><input type="hidden" name="asset" value="{{.AssetID}}"><button type="submit">Confirm link</button></form>{{else}}not a switch or firewall asset{{end}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  {{end}}
+  {{if .Options}}
+  <form method="post" action="{{.ConfirmURL}}">
+    <label>Asset <select name="asset">
+      {{range .Options}}<option value="{{.ID}}">{{.Label}}</option>
+      {{end}}
+    </select></label>
+    <button type="submit">Confirm link</button>
+  </form>
+  {{else}}
+  <p class="hint">No switch or firewall asset in IPAM to link.</p>
+  {{end}}
+  {{end}}
+  {{end}}
+
   <h3>Datasets</h3>
   <table class="inventory">
     <thead><tr><th>Dataset</th><th>State</th><th>Observed</th><th>Rows</th></tr></thead>
@@ -103,7 +150,7 @@
     <tr><th>NAT rules</th><td>{{$d.Policy.NATRules}}</td></tr>
     <tr><th>Objects</th><td>{{$d.Policy.Objects}}</td></tr>
   </table>
-  <p class="hint">Firewall view: not available yet.</p>
+  <p><a href="/netdev/{{$d.DeviceID}}/firewall">Firewall view</a>: rules, NAT, objects and hit counts.</p>
 
   <h3>Zones</h3>
   {{if $d.Zones}}
