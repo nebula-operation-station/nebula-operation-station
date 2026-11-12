@@ -815,16 +815,36 @@ func pathWithout(t *testing.T) string {
 	return dir
 }
 
+// pathBusyBoxStatus returns a PATH directory like pathWithout whose timeout
+// tool exits 143 instead of 124 when it stops the command, as BusyBox
+// timeout does: the script must notice the deadline by the clock.
+func pathBusyBoxStatus(t *testing.T) string {
+	t.Helper()
+	real, err := exec.LookPath("timeout")
+	if err != nil {
+		t.Fatalf("timeout: %v", err)
+	}
+	dir := pathWithout(t)
+	fake := "#!/bin/sh\n'" + real + "' \"$@\"\nr=$?\n[ \"$r\" -eq 124 ] && exit 143\nexit \"$r\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "timeout"), []byte(fake), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
 // TestScriptTimeBoundStopsHashing: hashing stops at the deadline with the
-// timeout tool and, without it, with the watchdog; the run is truncated,
-// no hash is attributed to the wrong file and the script returns well
-// before it would have hashed everything.
+// timeout tool (whatever its exit status) and, without it, with the
+// watchdog; the run is truncated, not unreadable: the files the deadline
+// left unhashed (also those of the start point it cut) are not counted
+// unreadable, no hash is attributed to the wrong file and the script
+// returns well before it would have hashed everything.
 func TestScriptTimeBoundStopsHashing(t *testing.T) {
 	for _, c := range []struct {
 		name string
 		path func(t *testing.T) string
 	}{
 		{"timeout", func(*testing.T) string { return os.Getenv("PATH") }},
+		{"timeout exit 143", pathBusyBoxStatus},
 		{"watchdog", pathWithout},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -856,6 +876,9 @@ func TestScriptTimeBoundStopsHashing(t *testing.T) {
 			d := time.Since(start)
 			if !slices.Contains(res.Partial, ReasonHostTruncated) {
 				t.Errorf("run past the deadline not truncated: partial %v", res.Partial)
+			}
+			if res.Host.Unreadable != 0 {
+				t.Errorf("time-truncated run counts %d files unreadable", res.Host.Unreadable)
 			}
 			_, unhashed := hashedRecordsAreRight(t, res, root, sparse)
 			bigUnhashed := 0

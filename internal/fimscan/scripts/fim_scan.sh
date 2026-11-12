@@ -152,7 +152,8 @@ END {
 # watchdog SECONDS PID: without the timeout tool, stop find (PID) and the
 # hash tool it runs once SECONDS have passed.
 watchdog() {
-	trap 'kill "$ws" 2>/dev/null; exit 0' TERM
+	ws=""
+	trap '[ -n "$ws" ] && kill "$ws" 2>/dev/null; exit 0' TERM
 	sleep "$1" &
 	ws=$!
 	wait "$ws"
@@ -196,20 +197,24 @@ scan() {
 		left=$((DEADLINE - $(date +%s)))
 		# Every T of the hash pass has a leading NUL: a killed pass may end in
 		# a record cut mid-path, and the NUL ends that fragment as a field of
-		# its own (the awk program drops the hash just before a T).
+		# its own (the awk program drops the hash just before a T). Status 3
+		# tells visit that the deadline cut this start point.
 		if [ "$left" -le 0 ]; then
 			printf '\0T\0'
-			return
+			return 3
 		fi
+		# cat ends only when find and every sha256sum it ran have closed the
+		# pipe, so the marker is never written between hash records.
 		if [ -n "$TIMEOUT" ]; then
-			# timeout signals its whole process group: find and sha256sum.
-			# shellcheck disable=SC2086
-			$TIMEOUT "$left" $LOW find "$@" 2>/dev/null
-			[ $? -eq 124 ] && printf '\0T\0'
+			# GNU timeout signals its process group (find and sha256sum);
+			# BusyBox timeout signals find only, and the running sha256sum
+			# batch ends on its own before cat does.
+			{
+				# shellcheck disable=SC2086
+				$TIMEOUT "$left" $LOW find "$@" 2>/dev/null
+			} | cat
 		else
-			# The watchdog stops find and its sha256sum at the deadline; cat
-			# ends only when both have closed the pipe, so the marker is
-			# never written between hash records.
+			# The watchdog stops find and its sha256sum at the deadline.
 			{
 				# shellcheck disable=SC2086
 				$LOW find "$@" 2>/dev/null &
@@ -219,7 +224,12 @@ scan() {
 				wait "$fp"
 				kill "$wp" 2>/dev/null
 			} | cat
-			[ "$(date +%s)" -lt "$DEADLINE" ] || printf '\0T\0'
+		fi
+		# The clock, not an exit status, says whether the deadline stopped
+		# the pass: GNU timeout exits 124, BusyBox timeout 143.
+		if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+			printf '\0T\0'
+			return 3
 		fi
 		;;
 	meta)
@@ -358,8 +368,12 @@ visit() {
 	vcap=${2:--}
 	[ "$vcap" = - ] || BUDGET_CUT=1
 	HASH_LEFT=$((HASH_LEFT - ${1:-0}))
-	CAPS="$CAPS $vcap"
+	# A start point the deadline cut is truncated, not unreadable: cap 0
+	# marks none of its files as expected to have a hash (M0), and the
+	# hashes written before the cut still reach their files by path.
 	scan "$vstart" hash "$vall" "$vcap"
+	[ $? -eq 3 ] && vcap=0
+	CAPS="$CAPS $vcap"
 }
 
 # walk KIND: every start point of the profile.
