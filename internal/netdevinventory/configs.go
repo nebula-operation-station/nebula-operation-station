@@ -422,7 +422,8 @@ func (s *Store) DiffConfigVersions(ctx context.Context, deviceID string, fromID,
 // authentication) is the proposal preference, and an authentication
 // sequence tries its profiles in order. Every other element's children are
 // sorted. Keeping a non-significant order only adds diff lines; it never
-// hides a change.
+// hides a change. The keys are local names and match whatever namespace
+// the element is in.
 var orderedPANOSContainers = map[string]bool{
 	"rules":                   true,
 	"encryption":              true,
@@ -457,6 +458,10 @@ type panosNode struct {
 	// tag is the local name, prefixed with the Go-quoted namespace in
 	// braces if the element has one.
 	tag string
+	// local is the local name alone, which orderedPANOSContainers is
+	// matched on: a namespace (a default one on the root included) must not
+	// make an order-significant container sorted.
+	local string
 	// attrs are the non-volatile attributes in rendering order.
 	attrs    []panosAttr
 	text     []byte
@@ -554,7 +559,7 @@ func parsePANOS(data []byte) ([]*panosNode, error) {
 		}
 		switch t := tok.(type) {
 		case xml.StartElement:
-			n := &panosNode{tag: panosName(t.Name)}
+			n := &panosNode{tag: panosName(t.Name), local: t.Name.Local}
 			for _, a := range t.Attr {
 				if a.Name.Space == "" && volatilePANOSAttrs[a.Name.Local] {
 					continue
@@ -644,7 +649,7 @@ func (r *panosRenderer) render(n *panosNode, depth int) bool {
 		return false
 	}
 	r.lines = append(r.lines, b.String())
-	for _, c := range sortedPANOS(n.children, orderedPANOSContainers[n.tag]) {
+	for _, c := range sortedPANOS(n.children, orderedPANOSContainers[n.local]) {
 		if !r.render(c, depth+1) {
 			return false
 		}

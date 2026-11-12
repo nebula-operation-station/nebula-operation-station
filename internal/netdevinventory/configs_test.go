@@ -335,6 +335,9 @@ func TestPANOSNormalizationKeepsSignificantOrderAndAttributes(t *testing.T) {
 		return `<config><shared><authentication-sequence><entry name="s"><authentication-profiles>` + m +
 			`</authentication-profiles></entry></authentication-sequence></shared></config>`
 	}
+	defaultNS := func(x string) string {
+		return strings.Replace(x, `<config>`, `<config xmlns="urn:x">`, 1)
+	}
 	attr := func(a string) string {
 		return `<config><devices><entry name="localhost"><address><entry name="web"` + a +
 			`><ip-netmask>10.0.0.1/32</ip-netmask></entry></address></entry></devices></config>`
@@ -356,6 +359,17 @@ func TestPANOSNormalizationKeepsSignificantOrderAndAttributes(t *testing.T) {
 		{"namespaced volatile name", attr(` xmlns:x="urn:x" x:admin="a"`), attr(` xmlns:x="urn:x" x:admin="b"`)},
 		{"attribute namespace", attr(` xmlns:x="urn:x" xmlns:y="urn:y" x:mode="a"`), attr(` xmlns:x="urn:x" xmlns:y="urn:y" y:mode="a"`)},
 		{"element namespace", `<config xmlns:x="urn:x" xmlns:y="urn:y"><x:a/></config>`, `<config xmlns:x="urn:x" xmlns:y="urn:y"><y:a/></config>`},
+		// An ordered container in a namespace keeps its order: a default
+		// namespace on the root puts every element in it.
+		{"ike encryption order, default namespace", defaultNS(ike(`<member>aes-256-cbc</member><member>3des</member>`)),
+			defaultNS(ike(`<member>3des</member><member>aes-256-cbc</member>`))},
+		{"ipsec authentication order, default namespace", defaultNS(ipsec(`<member>sha256</member><member>sha1</member>`)),
+			defaultNS(ipsec(`<member>sha1</member><member>sha256</member>`))},
+		{"authentication sequence order, default namespace", defaultNS(seq(`<member>ldap</member><member>local</member>`)),
+			defaultNS(seq(`<member>local</member><member>ldap</member>`))},
+		{"rule order, prefixed namespace",
+			`<x:config xmlns:x="urn:x"><x:rules><x:entry name="a"/><x:entry name="b"/></x:rules></x:config>`,
+			`<x:config xmlns:x="urn:x"><x:rules><x:entry name="b"/><x:entry name="a"/></x:rules></x:config>`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
