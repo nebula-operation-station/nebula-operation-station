@@ -248,9 +248,11 @@ func (r Request) validate(p *Puller) (digest, error) {
 }
 
 // Pull fetches the approved image req with cred, verifies it and writes a
-// docker-archive tar stream to w. On error the stream written so far lacks
-// manifest.json and the tar trailer and must be discarded by the caller;
-// it never contains unverified blob bytes.
+// tar stream to w that is both a docker-archive and an OCI image layout
+// holding the registry's platform manifest byte for byte (see
+// archiveWriter.finish). On error the stream written so far lacks
+// manifest.json, index.json, oci-layout and the tar trailer and must be
+// discarded by the caller; it never contains unverified blob bytes.
 func (p *Puller) Pull(ctx context.Context, cred registrymeta.Credential, req Request, w io.Writer) (Result, error) {
 	top, err := req.validate(p)
 	if err != nil {
@@ -294,7 +296,8 @@ func (p *Puller) Pull(ctx context.Context, cred registrymeta.Credential, req Req
 		return Result{}, err
 	}
 	res.BlobBytes += int64(len(cfgBytes))
-	if err := aw.finish(cfgDigest, res.RepoTag, p.host+"/"+req.Repository, req.Tag, layerPaths); err != nil {
+	written[cfgDigest.String()] = true
+	if err := aw.finish(cfgDigest, res.RepoTag, p.host+"/"+req.Repository, req.Tag, layerPaths, man.verified, req.Platform, written); err != nil {
 		return Result{}, err
 	}
 	return res, nil
