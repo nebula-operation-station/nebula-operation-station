@@ -46,17 +46,19 @@ const (
 	RuleShadow
 	// RuleSSHDerived: a path the derived SSH set (D7 (d)) names.
 	RuleSSHDerived
-	// RuleSSHSymlink: a symlink at or above an SSH position (D9 "Symlinks
-	// at or above SSH positions").
+	// RuleSSHSymlink: a symlink at or above an SSH position, or a record of
+	// another non-file type at an SSH file position (D9 "Symlinks at or
+	// above SSH positions": "for a file position, any type other than
+	// file" counts like a symlink).
 	RuleSSHSymlink
 	// RuleUnclassifiable: every deviation of the run is critical-class
 	// (D7 "Unclassifiable means critical") because either there is no
-	// usable derived SSH set, or a symlink at an SSH position exists in
-	// the approved baseline, the scan or the latest complete run and its
-	// target cannot be resolved yet (D9 "Symlinks at or above SSH
+	// usable derived SSH set, or a symlink at an SSH position, or a non-file
+	// record at an SSH file position, exists in the approved baseline, the
+	// scan or the latest complete run (D9 "Symlinks at or above SSH
 	// positions"). The second case is a fail-closed interim: it is applied
-	// to the whole run, since the files behind such a symlink are not
-	// known, and it is replaced by resolution-based classification later.
+	// to the whole run, since the files behind such a record are not known,
+	// and it is replaced by resolution-based classification later.
 	RuleUnclassifiable
 )
 
@@ -161,10 +163,30 @@ var sshdUnitNames = map[string]bool{
 	"sshd.service": true, "sshd@.service": true, "sshd.socket": true,
 }
 
+// sshFileExact are the fixed SSH file positions named literally: the
+// sshd configuration and its command-line source, and the fixed /etc login
+// and name-service files (D9 "SSH login files", "sshd command-line
+// configuration sources"). A symlink or another non-file record here makes
+// the run unclassifiable like any symlink at an SSH position.
+var sshFileExact = map[string]bool{
+	"/etc/ssh/sshd_config": true, "/etc/default/ssh": true,
+	"/etc/hosts.equiv": true, "/etc/ssh/shosts.equiv": true,
+	"/etc/ssh/ssh_known_hosts": true, "/etc/ssh/ssh_known_hosts2": true,
+	"/etc/krb5.keytab": true, "/etc/krb5.conf": true,
+	"/etc/passwd": true, "/etc/shadow": true, "/etc/group": true,
+	"/etc/gshadow": true, "/etc/nsswitch.conf": true,
+}
+
 // fixedSSHDirs are the directories at or above the fixed SSH positions
 // (D9 "Symlinks at or above SSH positions"): /etc/ssh/sshd_config, the
 // fixed /etc login files, /etc/default/ssh, the home-relative login files
 // under /root and /home/*/ (D5, D9) and the unit search paths.
+//
+// Known limit (ADR 0015 "Honest limits"): on usrmerge hosts /lib is a symlink
+// to usr/lib, and it is an SSH position through /lib/systemd/system. Resolving
+// it needs the records of /usr, which the scan does not record, so until
+// resolution is implemented that link makes every deviation of the run
+// unclassifiable (TestUsrmergeLibLinkIsKnownLimit).
 var fixedSSHDirs = map[string]bool{
 	"/etc": true, "/etc/ssh": true, "/etc/default": true,
 	"/root": true, "/root/.ssh": true, "/home": true,
@@ -276,6 +298,26 @@ func fixedCritical(s string) bool {
 	return sshdUnitEntry(s)
 }
 
+// fixedSSHFile reports whether s is a fixed SSH file position (D9): a
+// literal file of sshFileExact, a home-relative login file or
+// authorized_keys, or an sshd unit or enablement or alias entry that is not
+// itself a drop-in directory.
+func fixedSSHFile(s string) bool {
+	if sshFileExact[s] {
+		return true
+	}
+	for _, suf := range fixedSuffixes {
+		if strings.HasSuffix(s, suf) {
+			return true
+		}
+	}
+	_, name := split(s)
+	if strings.HasPrefix(name, "authorized_keys") {
+		return true
+	}
+	return sshdUnitEntry(s) && !isSSHDDropInDir(name)
+}
+
 // fixedSSHDir reports whether s is a directory at or above a fixed SSH
 // position.
 func fixedSSHDir(s string) bool {
@@ -311,9 +353,10 @@ func containsString(list []string, s string) bool {
 type classifier struct {
 	shadowed map[string]bool // command names in /usr/bin and /usr/sbin
 	ssh      SSHSet
-	// sshSymlink: a symlink at an SSH position exists in one of the record
-	// sets. Its target is not resolved yet, so the whole run is
-	// unclassifiable (fail closed, see RuleUnclassifiable).
+	// sshSymlink: a symlink at an SSH position, or a non-file record at an
+	// SSH file position, exists in one of the record sets. Its target is not
+	// resolved yet, so the whole run is unclassifiable (fail closed, see
+	// RuleUnclassifiable).
 	sshSymlink bool
 }
 
@@ -333,22 +376,38 @@ func newClassifier(old, cur []fimscan.Record, opts Options) *classifier {
 			if recs[i].Type == fimscan.TypeSymlink && c.atSSHPosition(recs[i].Path) {
 				c.sshSymlink = true
 			}
+			if recs[i].Type != fimscan.TypeFile && recs[i].Type != fimscan.TypeSymlink && c.sshFilePosition(recs[i].Path) {
+				c.sshSymlink = true
+			}
 		}
 	}
 	return c
 }
 
 // atSSHPosition reports whether the path is an SSH position of D9 (a
-// configuration or login file position, or a directory at or above one),
-// as far as the fixed patterns and the derived set know it.
+// configuration or login file position, a directory at or above one, or
+// an sshd drop-in directory and its entries), as far as the fixed patterns
+// and the derived set know it.
 func (c *classifier) atSSHPosition(p []byte) bool {
-	if fixedSSHDir(string(p)) {
+	s := string(p)
+	if fixedSSHDir(s) || fixedSSHFile(s) || sshdUnitEntry(s) {
 		return true
 	}
+	return c.derived(p) != SSHNone
+}
+
+// sshFilePosition reports whether the path is an SSH file position of D9:
+// a fixed one, or one the derived set names as a file.
+func (c *classifier) sshFilePosition(p []byte) bool {
+	return fixedSSHFile(string(p)) || c.derived(p) == SSHFile
+}
+
+// derived matches p against the derived SSH set, if there is a usable one.
+func (c *classifier) derived(p []byte) SSHMatch {
 	if c.ssh == nil {
-		return false
+		return SSHNone
 	}
-	return c.ssh.Match(bytes.Clone(p)) != SSHNone
+	return c.ssh.Match(bytes.Clone(p))
 }
 
 // classify returns the class of the deviation at path p and the rules that
@@ -372,24 +431,26 @@ func (c *classifier) classify(p []byte, old, cur *fimscan.Record) (Class, Rule) 
 	if dir, name := split(s); containsString(shadowingDirs, dir) && c.shadowed[name] {
 		r |= RuleShadow
 	}
-	symlink := (old != nil && old.Type == fimscan.TypeSymlink) || (cur != nil && cur.Type == fimscan.TypeSymlink)
-	if symlink && fixedSSHDir(s) {
-		r |= RuleSSHSymlink
+	// D9: a symlink at an SSH position is critical; so is a record of
+	// another non-file type at an SSH file position.
+	for _, rec := range []*fimscan.Record{old, cur} {
+		if rec == nil {
+			continue
+		}
+		if rec.Type == fimscan.TypeSymlink && c.atSSHPosition(p) {
+			r |= RuleSSHSymlink
+		}
+		if rec.Type != fimscan.TypeFile && rec.Type != fimscan.TypeSymlink && c.sshFilePosition(p) {
+			r |= RuleSSHSymlink
+		}
 	}
 	if c.sshSymlink {
 		r |= RuleUnclassifiable
 	}
 	if c.ssh == nil {
 		r |= RuleUnclassifiable
-	} else {
-		switch c.ssh.Match(bytes.Clone(p)) {
-		case SSHFile:
-			r |= RuleSSHDerived
-		case SSHPosition:
-			if symlink {
-				r |= RuleSSHSymlink
-			}
-		}
+	} else if c.derived(p) == SSHFile {
+		r |= RuleSSHDerived
 	}
 	if r != 0 {
 		return ClassCritical, r

@@ -207,4 +207,91 @@ func TestSymlinkOutsideSSHPositionsKeepsClassification(t *testing.T) {
 	}
 }
 
+// sshFileLinkCases are fixed SSH file positions (ADR 0015 D9 "SSH login
+// files", "sshd command-line configuration sources") and sshd unit or
+// drop-in positions that a symlink must not hide behind.
+var sshFileLinkCases = []string{
+	"/etc/ssh/sshd_config", "/etc/default/ssh", "/etc/passwd", "/etc/nsswitch.conf",
+	"/etc/hosts.equiv", "/etc/krb5.conf",
+	"/root/.ssh/authorized_keys", "/home/bob/.ssh/authorized_keys2", "/home/bob/.ssh/known_hosts",
+	"/etc/systemd/system/ssh.service", "/usr/local/lib/systemd/system/ssh.service.d",
+	"/etc/systemd/system/ssh.service.d/opts.conf",
+}
+
+// TestSymlinkAtSSHFilePositionMakesRunUnclassifiable pins ADR 0015 D9: a
+// symlink at a fixed SSH file or drop-in position makes the run
+// unclassifiable (fail closed until resolution), so a change of the file
+// behind it is never classed normal.
+func TestSymlinkAtSSHFilePositionMakesRunUnclassifiable(t *testing.T) {
+	for _, p := range sshFileLinkCases {
+		t.Run(p, func(t *testing.T) {
+			link := symlink(p, "/opt/x/ssh")
+			o1, o2 := file("/opt/x/ssh", 1), file("/opt/x/ssh", 2)
+			cl := newClassifier([]fimscan.Record{link, o1}, []fimscan.Record{link, o2}, usable())
+			if c, r := cl.classify([]byte("/opt/x/ssh"), &o1, &o2); c != ClassCritical || r != RuleUnclassifiable {
+				t.Fatalf("change behind the link: got %v/%b, want critical/unclassifiable", c, r)
+			}
+			want := RuleSSHSymlink | RuleUnclassifiable
+			if c, r := cl.classify([]byte(p), &link, &link); c != ClassCritical || r&want != want {
+				t.Fatalf("the link itself: got %v/%b", c, r)
+			}
+		})
+	}
+}
+
+// TestNonFileAtSSHFilePositionMakesRunUnclassifiable pins the D9 rule that a
+// file position holding any type other than file counts like a symlink.
+func TestNonFileAtSSHFilePositionMakesRunUnclassifiable(t *testing.T) {
+	other := func(p string) fimscan.Record { return fimscan.Record{Path: []byte(p), Type: fimscan.TypeOther} }
+	tests := []struct {
+		name string
+		rec  fimscan.Record
+	}{
+		{"directory at sshd_config", dir("/etc/ssh/sshd_config")},
+		{"other at sshd_config", other("/etc/ssh/sshd_config")},
+		{"directory at authorized_keys", dir("/root/.ssh/authorized_keys")},
+		{"other at authorized_keys", other("/home/bob/.ssh/authorized_keys")},
+		{"other at default ssh", other("/etc/default/ssh")},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			old := file(string(tc.rec.Path), 1)
+			o1, o2 := file("/opt/app/bin/run", 1), file("/opt/app/bin/run", 2)
+			cl := newClassifier([]fimscan.Record{o1, old}, []fimscan.Record{o2, tc.rec}, usable())
+			if c, r := cl.classify([]byte("/opt/app/bin/run"), &o1, &o2); c != ClassCritical || r != RuleUnclassifiable {
+				t.Fatalf("unrelated change: got %v/%b, want critical/unclassifiable", c, r)
+			}
+			if c, r := cl.classify(tc.rec.Path, &old, &tc.rec); c != ClassCritical || r&RuleSSHSymlink == 0 {
+				t.Fatalf("the entry itself: got %v/%b", c, r)
+			}
+		})
+	}
+}
+
+// TestNonFileAtSSHDirectoryPositionKeepsClassification: a directory where
+// sshd only looks for a directory (/etc/ssh) is not a file position.
+func TestNonFileAtSSHDirectoryPositionKeepsClassification(t *testing.T) {
+	d1, d2 := dir("/etc/ssh"), dir("/etc/ssh")
+	app1, app2 := file("/opt/app/bin/run", 1), file("/opt/app/bin/run", 2)
+	cl := newClassifier([]fimscan.Record{d1, app1}, []fimscan.Record{d2, app2}, usable())
+	if c, r := cl.classify([]byte("/opt/app/bin/run"), &app1, &app2); c != ClassNormal || r != 0 {
+		t.Fatalf("got %v/%b, want normal/0", c, r)
+	}
+}
+
+// TestUsrmergeLibLinkIsKnownLimit pins the current fail-closed interim for
+// the usrmerge /lib -> usr/lib link (ADR 0015 D5, D9): /lib is an SSH
+// position, and resolving it needs records of /usr, which the scan does not
+// record, so every deviation of such a run is unclassifiable. This is a named
+// limit ("Honest limits"): safe, but ClassNormal stays unreachable on usrmerge
+// hosts until resolution is implemented.
+func TestUsrmergeLibLinkIsKnownLimit(t *testing.T) {
+	lib := symlink("/lib", "usr/lib")
+	app1, app2 := file("/opt/app/bin/run", 1), file("/opt/app/bin/run", 2)
+	cl := newClassifier([]fimscan.Record{lib, app1}, []fimscan.Record{lib, app2}, usable())
+	if c, r := cl.classify([]byte("/opt/app/bin/run"), &app1, &app2); c != ClassCritical || r != RuleUnclassifiable {
+		t.Fatalf("got %v/%b, want critical/unclassifiable", c, r)
+	}
+}
+
 func ptr[T any](v T) *T { return &v }
