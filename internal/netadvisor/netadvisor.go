@@ -200,6 +200,7 @@ type Finding struct {
 	Zones         []string
 	Hits          *HitEvidence
 	Flow          *FlowEvidence
+	Mgmt          *MgmtEvidence
 }
 
 // Report is the result of one check over one snapshot. State is StateOK
@@ -223,7 +224,7 @@ type Check interface {
 
 // Checks returns the checks of this package in a fixed order.
 func Checks() []Check {
-	return []Check{ShadowCheck{}, AnyAnyCheck{}, ProfileCheck{}, HitsCheck{}, DNSCheck{}}
+	return []Check{ShadowCheck{}, AnyAnyCheck{}, ProfileCheck{}, HitsCheck{}, DNSCheck{}, MgmtCheck{}}
 }
 
 // precondition returns the state and reason when the snapshot as a whole
