@@ -27,8 +27,10 @@ const MaxContradictionQueries = 1 << 14
 //
 // It needs every snapshot input fresh and fresh flows; otherwise the
 // report is "cannot decide" or "data not collected" and resolves nothing.
-// Only tcp and udp flows with a port are evaluated (nr-v1 models nothing
-// else, so it never claims denied for them).
+// Only tcp and udp flows with a port are evaluated against the model
+// (nr-v1 models nothing else); every other allowed flow (icmp, other
+// protocols, tcp or udp without a port) gets a StateCannotDecide result,
+// so an unevaluable flow never reads as "no longer fires".
 type ContradictionCheck struct{}
 
 // ID returns CheckModelContradiction.
@@ -41,7 +43,7 @@ func (c ContradictionCheck) Run(in *Input) Report {
 
 type contraKey struct {
 	src, dst netip.Addr
-	proto    string
+	proto    FlowProtocol
 	port     uint16
 }
 
@@ -64,7 +66,7 @@ func (ContradictionCheck) RunContext(ctx context.Context, in *Input) Report {
 	}
 	aggs := map[contraKey]*contraAgg{}
 	for _, fl := range in.obs.Flows.Flows {
-		if fl.Action != FlowAllow || (fl.Protocol != "tcp" && fl.Protocol != "udp") || fl.Port == 0 {
+		if fl.Action != FlowAllow {
 			continue
 		}
 		k := contraKey{fl.Src.Unmap(), fl.Dst.Unmap(), fl.Protocol, fl.Port}
@@ -90,9 +92,26 @@ func (ContradictionCheck) RunContext(ctx context.Context, in *Input) Report {
 	defer cancel()
 	r := Report{CheckID: CheckModelContradiction, CheckVersion: CheckVersion, State: StateOK}
 	for _, k := range keys {
-		res := in.Index.Evaluate(ctx, netreach.Query{Source: netreach.SourceAddress, SourceAddr: k.src, Destination: k.dst, Protocol: k.proto, Port: k.port})
 		flow := fmt.Sprintf("%s -> %s %s/%d", k.src, k.dst, k.proto, k.port)
 		f := Finding{CheckID: CheckModelContradiction, CheckVersion: CheckVersion, RuleIndex: -1}
+		a := aggs[k]
+		if !k.proto.evaluable(k.port) {
+			// nr-v1 models only tcp and udp with a port: the flow may
+			// contradict the model or not, so it is never left out.
+			why := "protocol " + string(k.proto) + " is not modelled"
+			if k.proto == FlowTCP || k.proto == FlowUDP {
+				why = "observation has no port"
+			}
+			f.State = StateCannotDecide
+			f.Reason = clean("cannot decide: " + flow + ": " + why)
+			f.Flow = &FlowEvidence{
+				Source: k.src.String(), Destination: k.dst.String(), Protocol: string(k.proto), Port: k.port,
+				Sessions: a.sessions, Origins: cleanAll(sortedUnique(mapKeys(a.origins))),
+			}
+			r.Findings = append(r.Findings, f)
+			continue
+		}
+		res := in.Index.Evaluate(ctx, netreach.Query{Source: netreach.SourceAddress, SourceAddr: k.src, Destination: k.dst, Protocol: string(k.proto), Port: k.port})
 		switch res.Verdict {
 		case netreach.VerdictDenied:
 			f.State, f.Severity = StateFinding, SeverityHigh
@@ -103,9 +122,8 @@ func (ContradictionCheck) RunContext(ctx context.Context, in *Input) Report {
 			f.State = StateCannotDecide
 			f.Reason = clean("cannot decide: " + flow + ": model verdict unknown (" + res.Reason + ")")
 		}
-		a := aggs[k]
 		f.Flow = &FlowEvidence{
-			Source: k.src.String(), Destination: k.dst.String(), Protocol: k.proto, Port: k.port,
+			Source: k.src.String(), Destination: k.dst.String(), Protocol: string(k.proto), Port: k.port,
 			Sessions: a.sessions, Origins: cleanAll(sortedUnique(mapKeys(a.origins))), Chain: clean(res.Text()),
 		}
 		r.Findings = append(r.Findings, f)

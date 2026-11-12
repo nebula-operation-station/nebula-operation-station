@@ -74,12 +74,46 @@ const (
 	FlowDeny  FlowAction = "deny"
 )
 
-// Flow is one observed flow aggregate. Origin names where it was seen
-// ("traffic-map", "fw-log"); it is device or host text.
+// FlowProtocol is the IP protocol of an observed flow. It is a closed
+// enum: SetObservations refuses every value other than FlowTCP, FlowUDP,
+// FlowICMP and FlowOtherProtocol, so a spelling such as "TCP" or a
+// protocol number such as "6" or "17" must be mapped by the caller once
+// and is never compared as text in a check.
+type FlowProtocol string
+
+// Flow protocols. FlowOtherProtocol is every IP protocol other than tcp,
+// udp and icmp (gre, esp, ...). Only tcp and udp flows with a port can be
+// evaluated against the model; every other flow is unevaluable and gives
+// StateCannotDecide wherever a check would need its verdict.
+const (
+	FlowTCP           FlowProtocol = "tcp"
+	FlowUDP           FlowProtocol = "udp"
+	FlowICMP          FlowProtocol = "icmp"
+	FlowOtherProtocol FlowProtocol = "other"
+)
+
+// valid reports whether p is one of the enum values.
+func (p FlowProtocol) valid() bool {
+	switch p {
+	case FlowTCP, FlowUDP, FlowICMP, FlowOtherProtocol:
+		return true
+	}
+	return false
+}
+
+// evaluable reports whether a flow with this protocol and port can be
+// evaluated against the model: tcp or udp with a port 1-65535.
+func (p FlowProtocol) evaluable(port uint16) bool {
+	return (p == FlowTCP || p == FlowUDP) && port != 0
+}
+
+// Flow is one observed flow aggregate. Port is 0 when the observation
+// carries none (always so for icmp and other protocols). Origin names
+// where it was seen ("traffic-map", "fw-log"); it is device or host text.
 type Flow struct {
 	Src      netip.Addr
 	Dst      netip.Addr
-	Protocol string
+	Protocol FlowProtocol
 	Port     uint16
 	Action   FlowAction
 	Sessions uint64
@@ -140,7 +174,9 @@ const (
 // name or text that is not valid UTF-8 or longer than
 // netreach.MaxNameBytes, every invalid address, a flow action other than
 // FlowAllow or FlowDeny (the enum is closed: "drop", "reset-both" or an
-// empty action are refused), a protocol other than tcp or udp on a
+// empty action are refused), a flow protocol other than FlowTCP, FlowUDP,
+// FlowICMP or FlowOtherProtocol ("TCP", "6", "17" or an empty protocol are
+// refused), a protocol other than tcp or udp on a
 // management port, port 0 on a management port, a duplicate management
 // target name, a duplicate address or port within one target (an
 // IPv4-mapped address equals its IPv4 form) and an unknown input state.
@@ -191,8 +227,11 @@ func checkObservations(o *Observations) error {
 		if !f.Src.IsValid() || !f.Dst.IsValid() {
 			return fmt.Errorf("flow %d: invalid address", i)
 		}
-		if f.Protocol == "" || !validName(f.Protocol) || !validName(f.Origin) {
-			return fmt.Errorf("flow %d: text empty, not valid UTF-8 or over %d bytes", i, netreach.MaxNameBytes)
+		if !f.Protocol.valid() {
+			return fmt.Errorf("flow %d: protocol must be %q, %q, %q or %q", i, FlowTCP, FlowUDP, FlowICMP, FlowOtherProtocol)
+		}
+		if !validName(f.Origin) {
+			return fmt.Errorf("flow %d: origin not valid UTF-8 or over %d bytes", i, netreach.MaxNameBytes)
 		}
 		if f.Action != FlowAllow && f.Action != FlowDeny {
 			return fmt.Errorf("flow %d: action must be %q or %q", i, FlowAllow, FlowDeny)

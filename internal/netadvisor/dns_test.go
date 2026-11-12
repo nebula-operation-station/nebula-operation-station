@@ -17,7 +17,7 @@ var labFirewallAddrs = []netip.Addr{
 }
 
 func flow(src, dst, proto string, port uint16) Flow {
-	return Flow{Src: netip.MustParseAddr(src), Dst: netip.MustParseAddr(dst), Protocol: proto, Port: port, Action: FlowAllow, Sessions: 3, Origin: "traffic-map"}
+	return Flow{Src: netip.MustParseAddr(src), Dst: netip.MustParseAddr(dst), Protocol: FlowProtocol(proto), Port: port, Action: FlowAllow, Sessions: 3, Origin: "traffic-map"}
 }
 
 func dnsInput(t *testing.T, snap *nr.Snapshot, flows ...Flow) *Input {
@@ -254,7 +254,7 @@ func TestSetObservationsRejectsFlows(t *testing.T) {
 	bad := flow("10.0.0.5", "8.8.8.8", "udp", 53)
 	bad.Origin = "x\xff"
 	tests := map[string]Observations{
-		"invalid flow address":   {Flows: Flows{Flows: []Flow{{Protocol: "udp"}}}},
+		"invalid flow address":   {Flows: Flows{Flows: []Flow{{Protocol: FlowUDP}}}},
 		"invalid origin":         {Flows: Flows{Flows: []Flow{bad}}},
 		"empty protocol":         {Flows: Flows{Flows: []Flow{flow("10.0.0.5", "8.8.8.8", "", 53)}}},
 		"too many flows":         {Flows: Flows{Flows: make([]Flow, MaxFlows+1)}},
@@ -267,9 +267,42 @@ func TestSetObservationsRejectsFlows(t *testing.T) {
 		f.Action = a
 		tests["action "+string(a)] = Observations{Flows: Flows{State: nr.InputFresh, Flows: []Flow{f}}}
 	}
+	// Flow protocols are a closed enum too: no other spelling, no number.
+	for _, p := range []string{"TCP", "UDP", "Udp", "ICMP", "6", "17", "1", "tcp ", " udp", "gre", "esp", "sctp", "any"} {
+		tests["protocol "+p] = Observations{Flows: Flows{State: nr.InputFresh, Flows: []Flow{flow("10.0.0.5", "8.8.8.8", p, 53)}}}
+	}
 	for name, o := range tests {
 		if err := in.SetObservations(o); err == nil {
 			t.Errorf("%s: accepted", name)
+		}
+	}
+	for _, p := range []FlowProtocol{FlowTCP, FlowUDP, FlowICMP, FlowOtherProtocol} {
+		f := flow("10.0.0.5", "8.8.8.8", string(p), 0)
+		if err := in.SetObservations(Observations{Flows: Flows{State: nr.InputFresh, Flows: []Flow{f}}}); err != nil {
+			t.Errorf("protocol %s refused: %v", p, err)
+		}
+	}
+}
+
+// TestDNSBypassFlowWithoutPortCannotDecide: a tcp or udp flow without a
+// port (0) from an internal endpoint may be DNS; it gives cannot decide,
+// never a silent drop under StateOK. icmp and other protocols carry no
+// DNS; a portless flow to the firewall is not a bypass.
+func TestDNSBypassFlowWithoutPortCannotDecide(t *testing.T) {
+	rep := DNSCheck{}.Run(dnsInput(t, labSnapshot(),
+		flow("10.0.1.5", "8.8.8.8", "udp", 0), flow("10.0.1.5", "1.1.1.1", "tcp", 0),
+		flow("10.0.1.5", "9.9.9.9", "icmp", 0), flow("10.0.1.5", "9.9.9.9", "other", 0),
+		flow("10.0.1.5", "10.0.0.1", "udp", 0)))
+	if rep.State != StateOK {
+		t.Fatalf("report %s: %s", rep.State, rep.Reason)
+	}
+	got := flowFindings(rep)
+	if len(got) != 2 {
+		t.Fatalf("flow results %v, want two", got)
+	}
+	for _, k := range []string{"8.8.8.8 udp", "1.1.1.1 tcp"} {
+		if f := got[k]; f.State != StateCannotDecide || !strings.Contains(f.Reason, "no port") || f.Flow.EndpointsTotal != 1 {
+			t.Errorf("%s: %s %q %+v", k, f.State, f.Reason, f.Flow)
 		}
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"cmp"
 	"encoding/binary"
 	"fmt"
+	"maps"
 	"net/netip"
 	"slices"
 	"strings"
@@ -51,7 +52,9 @@ type FlowEvidence struct {
 //     internal resolver that is not the firewall fires too. One result
 //     per (destination, protocol, port) with RuleIndex -1: a finding when
 //     at least one source is proven internal, StateCannotDecide when no
-//     source could be placed. Flows the firewall denied, and loopback
+//     source could be placed. A tcp or udp flow without a port (port 0)
+//     from a source that is not proven external may be DNS and gives
+//     StateCannotDecide. Flows the firewall denied, and loopback
 //     destinations, are not a bypass. With Report.State StateOK a
 //     destination without a result no longer fires.
 //   - Rule part: per rule, an allow rule that permits DNS from an
@@ -334,7 +337,12 @@ func dnsFlows(in *Input, ext map[string]bool) []Finding {
 	placed := map[netip.Addr]int{} // 1 internal, 2 external, 3 undecided
 	for _, fl := range in.obs.Flows.Flows {
 		dst := fl.Dst.Unmap()
-		if !isDNSPort(fl.Protocol, fl.Port) || fl.Action == FlowDeny || fw[dst] || dst.IsLoopback() {
+		// A tcp or udp flow without a port may be DNS: it is kept and
+		// gives cannot decide below. icmp and other protocols carry no
+		// DNS (53/853 are tcp and udp only).
+		maybeDNS := isDNSPort(string(fl.Protocol), fl.Port) ||
+			((fl.Protocol == FlowTCP || fl.Protocol == FlowUDP) && fl.Port == 0)
+		if !maybeDNS || fl.Action == FlowDeny || fw[dst] || dst.IsLoopback() {
 			continue
 		}
 		src := fl.Src.Unmap()
@@ -346,7 +354,7 @@ func dnsFlows(in *Input, ext map[string]bool) []Finding {
 		if where == sideExternal {
 			continue
 		}
-		k := flowKey{dst, fl.Protocol, fl.Port}
+		k := flowKey{dst, string(fl.Protocol), fl.Port}
 		a := aggs[k]
 		if a == nil {
 			a = &dnsAgg{internal: map[netip.Addr]bool{}, undecided: map[netip.Addr]bool{}, origins: map[string]bool{}}
@@ -377,7 +385,15 @@ func dnsFlows(in *Input, ext map[string]bool) []Finding {
 		if netreach.IsSpecialAddress(k.dst) {
 			where = "internal resolver"
 		}
-		if len(a.internal) > 0 {
+		if k.port == 0 {
+			all := make(map[netip.Addr]bool, len(a.internal)+len(a.undecided))
+			maps.Copy(all, a.internal)
+			maps.Copy(all, a.undecided)
+			ev.Endpoints, ev.EndpointsTotal = listAddrs(all)
+			f.State = StateCannotDecide
+			f.Reason = clean(fmt.Sprintf("cannot decide: %s flow with no port to %s from %d source(s) may be DNS",
+				k.proto, k.dst, ev.EndpointsTotal))
+		} else if len(a.internal) > 0 {
 			ev.Endpoints, ev.EndpointsTotal = listAddrs(a.internal)
 			f.State, f.Severity = StateFinding, SeverityMedium
 			f.Reason = clean(fmt.Sprintf("DNS %s/%d from %d internal endpoint(s) to %s %s, not the firewall (the designated resolver)",

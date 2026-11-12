@@ -38,7 +38,14 @@ func TestModelContradiction(t *testing.T) {
 		{name: "model allows", rules: []nr.SecurityRule{webAllow}, flows: []Flow{flow("10.0.1.5", "10.20.0.10", "tcp", 443)}},
 		{name: "same segment is not filtered", flows: []Flow{flow("10.0.1.5", "10.0.1.6", "tcp", 22)}},
 		{name: "denied flow is no contradiction", flows: []Flow{denied}},
-		{name: "icmp not modelled", flows: []Flow{flow("10.0.1.5", "10.20.0.10", "icmp", 0)}},
+		{name: "icmp is not modelled and cannot decide", flows: []Flow{flow("10.0.1.5", "10.20.0.10", "icmp", 0)},
+			state: StateCannotDecide, reason: "not modelled"},
+		{name: "other protocol cannot decide", flows: []Flow{flow("10.0.1.5", "10.20.0.10", "other", 0)},
+			state: StateCannotDecide, reason: "not modelled"},
+		{name: "tcp without port cannot decide", flows: []Flow{flow("10.0.1.5", "10.20.0.10", "tcp", 0)},
+			state: StateCannotDecide, reason: "no port"},
+		{name: "udp without port cannot decide even if the model allows udp", rules: []nr.SecurityRule{webAllow},
+			flows: []Flow{flow("10.0.1.5", "10.20.0.10", "udp", 0)}, state: StateCannotDecide, reason: "no port"},
 		{name: "unevaluable rule gives cannot decide", rules: []nr.SecurityRule{noType},
 			flows: []Flow{flow("10.0.1.5", "10.20.0.10", "tcp", 443)}, state: StateCannotDecide, reason: "unknown"},
 	}
@@ -58,10 +65,25 @@ func TestModelContradiction(t *testing.T) {
 			if f.State != tc.state || !strings.Contains(f.Reason, tc.reason) {
 				t.Errorf("got %s %q, want %s containing %q", f.State, f.Reason, tc.state, tc.reason)
 			}
-			if f.Flow == nil || f.Flow.Source != "10.0.1.5" || f.Flow.Chain == "" {
+			unevaluable := f.Flow != nil && (f.Flow.Port == 0 || f.Flow.Protocol == "icmp" || f.Flow.Protocol == "other")
+			if f.Flow == nil || f.Flow.Source != "10.0.1.5" || (f.Flow.Chain == "") != unevaluable {
 				t.Errorf("evidence %+v", f.Flow)
 			}
 		})
+	}
+}
+
+// TestModelContradictionUnevaluableFlowNeverResolves: an allowed flow the
+// model cannot evaluate is listed as cannot decide (aggregated over
+// IPv4-mapped sources), so it never reads as "no longer fires".
+func TestModelContradictionUnevaluableFlowNeverResolves(t *testing.T) {
+	denied := flow("10.0.1.5", "10.20.0.10", "udp", 0)
+	denied.Action = FlowDeny
+	rep := ContradictionCheck{}.Run(contraInput(t, labSnapshot(), nr.InputFresh,
+		flow("10.0.1.5", "10.20.0.10", "udp", 0), flow("::ffff:10.0.1.5", "10.20.0.10", "udp", 0), denied))
+	f := onlyResult(t, rep)
+	if f.State != StateCannotDecide || f.Flow.Sessions != 6 {
+		t.Errorf("got %s %q %+v", f.State, f.Reason, f.Flow)
 	}
 }
 
