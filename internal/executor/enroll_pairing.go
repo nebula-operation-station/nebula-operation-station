@@ -78,15 +78,103 @@ func (st *enrollOfferState) setPaired(h [sha256.Size]byte, p pairedProposal) {
 	e.paired = &p
 }
 
-// paired returns the proposal of an offer, nil if none.
+// paired returns the proposal of an offer, nil if none or if a mismatch
+// was observed for it.
 func (st *enrollOfferState) paired(h [sha256.Size]byte) *pairedProposal {
 	st.mu.Lock()
 	defer st.mu.Unlock()
-	if e := st.offers[h]; e != nil && e.paired != nil {
+	if e := st.offers[h]; e != nil && e.paired != nil && !e.mismatched {
 		p := *e.paired
 		return &p
 	}
 	return nil
+}
+
+// beginSubmit marks a submission of an offer as running; it reports false
+// if another one is running. release ends it.
+func (st *enrollOfferState) beginSubmit(h [sha256.Size]byte) (release func(), ok bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.offers == nil {
+		st.offers = map[[sha256.Size]byte]*offerEntry{}
+	}
+	e := st.offers[h]
+	if e == nil {
+		st.seq++
+		e = &offerEntry{seq: st.seq}
+		st.offers[h] = e
+	}
+	if e.submitting {
+		return nil, false
+	}
+	e.submitting = true
+	return func() {
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		e.submitting = false
+	}, true
+}
+
+// claim remembers the code of the one well-formed submission.
+func (st *enrollOfferState) claim(h [sha256.Size]byte, c pairing.Code) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if e := st.offers[h]; e != nil {
+		e.claimed = &c
+	}
+}
+
+// claimedCode returns the claimed code of an offer.
+func (st *enrollOfferState) claimedCode(h [sha256.Size]byte) (pairing.Code, bool) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if e := st.offers[h]; e != nil && e.claimed != nil {
+		return *e.claimed, true
+	}
+	return pairing.Code{}, false
+}
+
+// mismatch records an observed mismatch: the proposal, if any, is dropped
+// and the offer accepts neither a submission nor a commit any more.
+func (st *enrollOfferState) mismatch(h [sha256.Size]byte) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if e := st.offers[h]; e != nil {
+		e.mismatched, e.paired = true, nil
+	}
+}
+
+// mismatched reports whether a mismatch was observed for an offer.
+func (st *enrollOfferState) mismatched(h [sha256.Size]byte) bool {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	e := st.offers[h]
+	return e != nil && e.mismatched
+}
+
+// pairingHooks are test seams of the pairing steps. Each hook that is set
+// runs at its point; endOffer can make the store transition fail.
+type pairingHooks struct {
+	endOffer   func(h [sha256.Size]byte, from, to executordb.OfferState) error
+	afterProbe func()
+	afterPin   func()
+}
+
+// endOffer is db.EndOffer behind the endOffer test hook.
+func (s *Service) endOffer(h [sha256.Size]byte, from, to executordb.OfferState) error {
+	if s.pairingHooks != nil && s.pairingHooks.endOffer != nil {
+		if err := s.pairingHooks.endOffer(h, from, to); err != nil {
+			return err
+		}
+	}
+	return s.db.EndOffer(h, from, to)
+}
+
+// runHook runs a test hook that is set.
+func runHook(f func()) {
+	if f != nil {
+		f()
+	}
 }
 
 // probeEd25519 reads the ed25519 host key of ep, offering only
@@ -161,12 +249,43 @@ func (s *Service) pairingOffer(op, idHashHex string, binding []byte) ([sha256.Si
 // endOfferFailed moves an offer from from to failed and drops its
 // process-local state; it reports whether this call ended it.
 func (s *Service) endOfferFailed(h [sha256.Size]byte, from executordb.OfferState) bool {
-	err := s.db.EndOffer(h, from, executordb.OfferFailed)
+	err := s.endOffer(h, from, executordb.OfferFailed)
 	if err == nil || errors.Is(err, executordb.ErrOfferWipeIncomplete) {
 		s.offers.final(h)
 		return true
 	}
 	s.log.Error("enroll offer: fail offer", "offer", offerLog(h), "err", err)
+	return false
+}
+
+// endAfterMismatch ends an offer after an observed mismatch, failing
+// closed: if the offer is no longer downloaded it re-reads the state and
+// also ends an offer a concurrent submission moved to pairing_proposed. It
+// reports whether the offer is final afterwards. The caller has already
+// dropped the process-local proposal (enrollOfferState.mismatch), so no
+// commit can follow even when this fails.
+func (s *Service) endAfterMismatch(h [sha256.Size]byte) bool {
+	if s.endOfferFailed(h, executordb.OfferDownloaded) {
+		return true
+	}
+	o, err := s.db.Offer(h)
+	if err != nil {
+		s.log.Error("audit", "kind", "store_error", "op", "end_offer_after_mismatch", "offer", offerLog(h), "detail", err.Error())
+		return false
+	}
+	switch {
+	case o.State.Final():
+		s.offers.final(h)
+		return true
+	case o.State == executordb.OfferPairingProposed:
+		if s.endOfferFailed(h, executordb.OfferPairingProposed) {
+			s.log.Warn("audit", "kind", "enroll_offer_failed", "offer", offerLog(h), "reason", "proposal ended by an observed mismatch")
+			return true
+		}
+		return false
+	case o.State == executordb.OfferDownloaded:
+		return s.endOfferFailed(h, executordb.OfferDownloaded)
+	}
 	return false
 }
 
@@ -204,9 +323,23 @@ func (s *Service) SubmitPairingCode(ctx context.Context, req *pb.SubmitPairingCo
 			toAdd = false
 		}
 	}
-	idHash, o, err := s.pairingOffer(op, req.GetOfferIdHash(), req.GetSessionBinding())
+	idHash, _, err := s.pairingOffer(op, req.GetOfferIdHash(), req.GetSessionBinding())
 	if err != nil {
 		return nil, err
+	}
+	// One submission of an offer at a time; the offer is read again under
+	// it, so every decision below sees the result of the previous one.
+	release, ok := s.offers.beginSubmit(idHash)
+	if !ok {
+		return nil, status.Errorf(codes.FailedPrecondition, "%s: another submission for this offer is in progress", op)
+	}
+	defer release()
+	if s.offers.mismatched(idHash) {
+		return nil, status.Errorf(codes.FailedPrecondition, "%s: a code mismatch ended this offer; create a new offer", op)
+	}
+	o, err := s.db.Offer(idHash)
+	if err != nil {
+		return nil, s.claimError(op, err)
 	}
 	if o.State != executordb.OfferDownloaded {
 		return nil, status.Errorf(codes.FailedPrecondition, "%s: offer is %s, not downloaded", op, o.State)
@@ -246,17 +379,18 @@ func (s *Service) SubmitPairingCode(ctx context.Context, req *pb.SubmitPairingCo
 	}
 
 	// 2. The one well-formed submission, then one counted probe.
+	// A retry after a probe failure carries exactly the claimed code: a
+	// different one is refused without a probe, and so is any code once
+	// the claimed one is unknown (executor restarted).
 	if o.CodeSubmittedAt.IsZero() {
-		err := s.db.ClaimOfferSubmission(idHash)
-		if errors.Is(err, executordb.ErrOfferState) {
-			// A concurrent submission claimed it; continue only if the
-			// offer is still waiting for a probe.
-			if o, err = s.db.Offer(idHash); err != nil || o.State != executordb.OfferDownloaded || o.CodeSubmittedAt.IsZero() {
-				return nil, status.Errorf(codes.FailedPrecondition, "%s: offer no longer accepts codes", op)
-			}
-		} else if err != nil {
+		if err := s.db.ClaimOfferSubmission(idHash); err != nil {
 			return nil, s.claimError(op, err)
 		}
+		s.offers.claim(idHash, code)
+	} else if claimed, ok := s.offers.claimedCode(idHash); !ok {
+		return nil, status.Errorf(codes.FailedPrecondition, "%s: the submitted code is no longer known; create a new offer", op)
+	} else if !pairing.Equal(code, claimed) {
+		return nil, status.Errorf(codes.FailedPrecondition, "%s: a different code was already submitted for this offer; create a new offer", op)
 	}
 	n, err := s.db.CountOfferProbe(idHash)
 	if errors.Is(err, executordb.ErrOfferLimit) {
@@ -272,6 +406,9 @@ func (s *Service) SubmitPairingCode(ctx context.Context, req *pb.SubmitPairingCo
 
 	// 3. Probe, offering only ssh-ed25519.
 	k, err := s.probeEd25519(ctx, ep)
+	if s.pairingHooks != nil {
+		runHook(s.pairingHooks.afterProbe)
+	}
 	if err != nil {
 		resp.Outcome, resp.Detail, resp.State = pb.PairingOutcome_PAIRING_OUTCOME_PROBE_FAILED, probeDetail(err), s.offerState(idHash)
 		s.log.Info("audit", "kind", "enroll_probe_failed", "offer", offerLog(idHash), "host", o.HostID,
@@ -285,12 +422,18 @@ func (s *Service) SubmitPairingCode(ctx context.Context, req *pb.SubmitPairingCo
 		return nil, status.Errorf(codes.Internal, "%s: compute code", op)
 	}
 
-	// 4. Mismatch: the offer ends; there is no second submission.
+	// 4. Mismatch: the offer ends; there is no second submission. The
+	// process-local block comes first, so even a failed store transition
+	// leaves no proposal to commit and no submission to retry.
 	if !pairing.Equal(code, want) {
-		s.endOfferFailed(idHash, executordb.OfferDownloaded)
+		s.offers.mismatch(idHash)
 		s.log.Error("audit", "kind", "enroll_code_mismatch", "offer", offerLog(idHash), "host", o.HostID,
 			"endpoint", ep.String(), "presented", fp, "key_type", k.Type())
-		resp.Outcome, resp.Notify, resp.State = pb.PairingOutcome_PAIRING_OUTCOME_MISMATCH, true, s.offerState(idHash)
+		resp.Outcome, resp.Notify = pb.PairingOutcome_PAIRING_OUTCOME_MISMATCH, true
+		if !s.endAfterMismatch(idHash) {
+			resp.Detail = "the offer could not be ended in the store; it accepts no further code and no commit (revoke it)"
+		}
+		resp.State = s.offerState(idHash)
 		return resp, nil
 	}
 
@@ -407,6 +550,9 @@ func (s *Service) CommitPairedEnroll(ctx context.Context, req *pb.CommitPairedEn
 		return resp, nil
 	case err != nil:
 		return nil, s.adminStoreError(op, err)
+	}
+	if s.pairingHooks != nil {
+		runHook(s.pairingHooks.afterPin)
 	}
 	// The offer completes in the same step; an offer revoked or expired
 	// meanwhile gets no pin and adds nothing.

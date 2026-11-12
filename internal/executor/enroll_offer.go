@@ -137,6 +137,18 @@ type offerEntry struct {
 	// paired is the paired permit proposed for the offer (EN-08 part 2);
 	// nil before the match and once the offer is final.
 	paired *pairedProposal
+	// submitting is set while one SubmitPairingCode runs for the offer:
+	// submissions of an offer are serialized, so at most one well-formed
+	// code is ever compared against a probed key at a time.
+	submitting bool
+	// claimed is the well-formed code claimed by the one submission; a
+	// retry after a probe failure must carry exactly this code. nil before
+	// the claim, after a restart and once the offer is final.
+	claimed *pairing.Code
+	// mismatched is set once a code mismatch was observed: no further
+	// submission and no commit, even if ending the offer in the store
+	// failed.
+	mismatched bool
 }
 
 // offerRender are an offer's render inputs, fixed at creation.
@@ -232,7 +244,7 @@ func (st *enrollOfferState) final(h [sha256.Size]byte) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if e := st.offers[h]; e != nil {
-		e.render, e.paired = nil, nil
+		e.render, e.paired, e.claimed = nil, nil, nil
 	}
 }
 

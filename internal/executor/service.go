@@ -133,6 +133,9 @@ type Service struct {
 	// offers holds the one-step enrollment configuration and the render
 	// inputs of the offers (enroll_offer.go).
 	offers enrollOfferState
+	// pairingHooks are test seams of the pairing steps; nil in production
+	// (enroll_pairing.go).
+	pairingHooks *pairingHooks
 }
 
 func (s *Service) clock() time.Time {

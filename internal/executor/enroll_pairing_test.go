@@ -536,7 +536,10 @@ func TestCommitPairedEnrollRevokedOrExpiredAddsNothing(t *testing.T) {
 }
 
 // After a paired pin the host key algorithms are restricted to the pinned
-// type: a host that now presents only ECDSA fails the connection.
+// type: a host that now has only an ECDSA key fails the connection in the
+// algorithm negotiation, before it can present that key at all. Without
+// the restriction the client would read the ECDSA key and report it as
+// the presented key of a mismatch instead.
 func TestPairedPinRestrictsHostKeyAlgorithms(t *testing.T) {
 	e := newPairEnv(t)
 	key := newEd25519HostKey(t)
@@ -546,10 +549,15 @@ func TestPairedPinRestrictsHostKeyAlgorithms(t *testing.T) {
 	if c, err := e.commit(resp.GetPermit().GetDigest(), offerSessionA); err != nil || !c.GetLoginOk() {
 		t.Fatalf("commit %+v %v", c, err)
 	}
-	srv.setKeys(newECDSAHostKey(t))
+	ecdsaKey := newECDSAHostKey(t)
+	srv.setKeys(ecdsaKey)
 	ep, _ := sshtransport.ParseEndpoint(srv.addr)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	// Premise: an unrestricted client reads the ECDSA key from this host.
+	if k, err := e.svc.transport.Probe(ctx, ep); err != nil || k.Type() != ecdsaKey.PublicKey().Type() {
+		t.Fatalf("unrestricted probe: %v %v, want the ECDSA key", k, err)
+	}
 	c, err := e.svc.Connect(ctx, offerTestHost, "", []sshtransport.Endpoint{ep})
 	if err == nil {
 		c.Close()
@@ -557,6 +565,310 @@ func TestPairedPinRestrictsHostKeyAlgorithms(t *testing.T) {
 	}
 	if sshtransport.ClassOf(err) != sshtransport.ClassHostKeyMismatch {
 		t.Fatalf("class %s, want host_key_mismatch", sshtransport.ClassOf(err))
+	}
+	var te *sshtransport.Error
+	if !errors.As(err, &te) || te.Presented != nil || !noEd25519Offered(err) {
+		t.Fatalf("connect error %v: the ECDSA key was negotiated, HostKeyAlgorithms not restricted to ssh-ed25519", err)
+	}
+	recs := e.logs.find("host_key_mismatch", "")
+	if len(recs) != 1 || recs[0].attrs["presented"] != "" {
+		t.Fatalf("mismatch audit %v, want one without a presented key", recs)
+	}
+}
+
+func (e *pairEnv) idHash(t *testing.T) [32]byte {
+	t.Helper()
+	h, ok := parseOfferIDHash(e.offer.GetOfferIdHash())
+	if !ok {
+		t.Fatal("offer ID hash")
+	}
+	return h
+}
+
+// A mismatch observed while a concurrent submission moved the offer to
+// pairing_proposed ends that proposal too: the offer fails and the
+// proposal cannot be committed.
+func TestSubmitPairingCodeMismatchEndsConcurrentProposal(t *testing.T) {
+	e := newPairEnv(t)
+	h := e.idHash(t)
+	presented := newEd25519HostKey(t)
+	srv := startPairSSH(t, e.userPub, presented)
+	fake, err := canonical.ParseDigest(strings.Repeat("ab", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.svc.pairingHooks = &pairingHooks{afterProbe: func() {
+		if err := e.db.ProposeOfferPairing(h); err != nil {
+			t.Errorf("concurrent proposal: %v", err)
+		}
+		e.svc.offers.setPaired(h, pairedProposal{digest: fake})
+	}}
+	resp, err := e.submit(e.code(t, newEd25519HostKey(t)), srv.addr, offerSessionA)
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if resp.GetOutcome() != pb.PairingOutcome_PAIRING_OUTCOME_MISMATCH || !resp.GetNotify() || resp.GetDetail() != "" {
+		t.Fatalf("outcome %v notify %v detail %q", resp.GetOutcome(), resp.GetNotify(), resp.GetDetail())
+	}
+	if resp.GetState() != string(executordb.OfferFailed) {
+		t.Fatalf("state %s, want failed", resp.GetState())
+	}
+	e.wantState(t, e.offer, executordb.OfferFailed)
+	if e.svc.offers.paired(h) != nil {
+		t.Fatal("proposal survived the mismatch")
+	}
+	recs := e.logs.find("enroll_offer_failed", "")
+	if len(recs) != 1 || recs[0].attrs["reason"] != "proposal ended by an observed mismatch" {
+		t.Fatalf("offer failed audit %v", recs)
+	}
+	if len(e.logs.find("enroll_code_mismatch", "")) != 1 {
+		t.Fatal("mismatch not audited")
+	}
+}
+
+// A mismatch whose store transition fails is not reported as a clean
+// mismatch: the response names the failure and the real state, the
+// mismatch is still audited with a notification, and the offer accepts
+// neither another code nor a commit of a proposal.
+func TestSubmitPairingCodeMismatchEndOfferStoreError(t *testing.T) {
+	e := newPairEnv(t)
+	h := e.idHash(t)
+	presented := newEd25519HostKey(t)
+	srv := startPairSSH(t, e.userPub, presented)
+	fake, err := canonical.ParseDigest(strings.Repeat("cd", 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ends atomic.Int64
+	e.svc.pairingHooks = &pairingHooks{
+		endOffer: func([32]byte, executordb.OfferState, executordb.OfferState) error {
+			ends.Add(1)
+			return errors.New("injected store error")
+		},
+		afterProbe: func() {
+			// A matched proposal from a concurrent submission.
+			if err := e.db.ProposeOfferPairing(h); err != nil {
+				t.Errorf("concurrent proposal: %v", err)
+			}
+			e.svc.offers.setPaired(h, pairedProposal{digest: fake})
+		},
+	}
+	resp, err := e.submit(e.code(t, newEd25519HostKey(t)), srv.addr, offerSessionA)
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if resp.GetOutcome() != pb.PairingOutcome_PAIRING_OUTCOME_MISMATCH || !resp.GetNotify() {
+		t.Fatalf("outcome %v notify %v", resp.GetOutcome(), resp.GetNotify())
+	}
+	if !strings.Contains(resp.GetDetail(), "could not be ended") || resp.GetState() != string(executordb.OfferPairingProposed) {
+		t.Fatalf("detail %q state %s, want the failure and the real state", resp.GetDetail(), resp.GetState())
+	}
+	if ends.Load() < 2 {
+		t.Fatalf("%d end attempts, want the downloaded and the pairing_proposed one", ends.Load())
+	}
+	if len(e.logs.find("enroll_code_mismatch", "")) != 1 {
+		t.Fatal("mismatch not audited")
+	}
+	// The surviving store state is not usable: no commit, no submission.
+	if e.svc.offers.paired(h) != nil {
+		t.Fatal("proposal survived the mismatch")
+	}
+	if _, err := e.commit(fake.String(), offerSessionA); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("commit after mismatch: %v, want FailedPrecondition", err)
+	}
+	e.wantNotPinned(t)
+	e.svc.pairingHooks = nil
+	before := srv.connections()
+	if _, err := e.submit(e.code(t, presented), srv.addr, offerSessionA); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("submission after mismatch: %v, want FailedPrecondition", err)
+	}
+	if srv.connections() != before {
+		t.Fatal("submission after mismatch probed")
+	}
+}
+
+// A mismatch whose store transition fails while the offer is still
+// downloaded blocks every later submission of the offer, even one with
+// the right code.
+func TestSubmitPairingCodeMismatchStoreErrorBlocksRetry(t *testing.T) {
+	e := newPairEnv(t)
+	presented := newEd25519HostKey(t)
+	srv := startPairSSH(t, e.userPub, presented)
+	e.svc.pairingHooks = &pairingHooks{endOffer: func([32]byte, executordb.OfferState, executordb.OfferState) error {
+		return errors.New("injected store error")
+	}}
+	wrong := e.code(t, newEd25519HostKey(t))
+	resp, err := e.submit(wrong, srv.addr, offerSessionA)
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if resp.GetOutcome() != pb.PairingOutcome_PAIRING_OUTCOME_MISMATCH || !resp.GetNotify() || resp.GetDetail() == "" ||
+		resp.GetState() != string(executordb.OfferDownloaded) {
+		t.Fatalf("response %+v, want MISMATCH naming the failed end", resp)
+	}
+	before := srv.connections()
+	for _, code := range []string{wrong, e.code(t, presented)} {
+		if _, err := e.submit(code, srv.addr, offerSessionA); status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("submission after mismatch: %v, want FailedPrecondition", err)
+		}
+	}
+	if srv.connections() != before {
+		t.Fatal("submission after mismatch probed")
+	}
+}
+
+// Submissions of one offer are serialized: while one is probing, another
+// one, with whatever code, is refused without a probe and without
+// counting.
+func TestSubmitPairingCodeConcurrentSubmissionRefused(t *testing.T) {
+	e := newPairEnv(t)
+	key := newEd25519HostKey(t)
+	srv := startPairSSH(t, e.userPub, key)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	e.svc.pairingHooks = &pairingHooks{afterProbe: func() {
+		once.Do(func() {
+			close(entered)
+			<-release
+		})
+	}}
+	type result struct {
+		resp *pb.SubmitPairingCodeResponse
+		err  error
+	}
+	first := make(chan result, 1)
+	wrong := e.code(t, newEd25519HostKey(t))
+	go func() {
+		r, err := e.submit(wrong, srv.addr, offerSessionA)
+		first <- result{r, err}
+	}()
+	<-entered
+	for _, code := range []string{e.code(t, key), wrong, "malformed"} {
+		if _, err := e.submit(code, srv.addr, offerSessionA); status.Code(err) != codes.FailedPrecondition {
+			close(release)
+			t.Fatalf("concurrent submission %q: %v, want FailedPrecondition", code, err)
+		}
+	}
+	close(release)
+	r := <-first
+	if r.err != nil || r.resp.GetOutcome() != pb.PairingOutcome_PAIRING_OUTCOME_MISMATCH {
+		t.Fatalf("first submission: %+v %v", r.resp, r.err)
+	}
+	if n := srv.connections(); n != 1 {
+		t.Fatalf("%d probes, want only the first submission's", n)
+	}
+	o := e.stored(t)
+	if o.Probes != 1 || o.RejectedCodes != 0 || o.State != executordb.OfferFailed {
+		t.Fatalf("offer %s probes %d rejected %d", o.State, o.Probes, o.RejectedCodes)
+	}
+	if len(e.logs.find("enroll_code_mismatch", "")) != 1 || len(e.logs.find("enroll_paired_proposed", "")) != 0 {
+		t.Fatal("more than one code compared")
+	}
+}
+
+// After a probe failure a retry must carry the code claimed by the first
+// well-formed submission: a different code is refused without a probe,
+// and a claim the executor no longer knows (restart) refuses every code.
+func TestSubmitPairingCodeRetryCarriesClaimedCode(t *testing.T) {
+	e := newPairEnv(t)
+	key := newEd25519HostKey(t)
+	noEd := startPairSSH(t, e.userPub, newECDSAHostKey(t))
+	good := startPairSSH(t, e.userPub, key)
+	right := e.code(t, key)
+	resp, err := e.submit(right, noEd.addr, offerSessionA)
+	if err != nil || resp.GetOutcome() != pb.PairingOutcome_PAIRING_OUTCOME_PROBE_FAILED {
+		t.Fatalf("first submission: %+v %v", resp, err)
+	}
+	other := e.code(t, newEd25519HostKey(t))
+	if _, err := e.submit(other, good.addr, offerSessionA); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("retry with another code: %v, want FailedPrecondition", err)
+	}
+	if good.connections() != 0 || e.stored(t).Probes != 1 {
+		t.Fatal("retry with another code probed or was counted")
+	}
+	e.wantState(t, e.offer, executordb.OfferDownloaded)
+	e.matched(t, good, key)
+
+	// Restart: the claimed code is gone with the process.
+	e2 := newPairEnv(t)
+	resp, err = e2.submit(e2.code(t, key), noEd.addr, offerSessionA)
+	if err != nil || resp.GetOutcome() != pb.PairingOutcome_PAIRING_OUTCOME_PROBE_FAILED {
+		t.Fatalf("first submission: %+v %v", resp, err)
+	}
+	e2.svc.offers.mu.Lock()
+	e2.svc.offers.offers[e2.idHash(t)].claimed = nil
+	e2.svc.offers.mu.Unlock()
+	before := good.connections()
+	if _, err := e2.submit(e2.code(t, key), good.addr, offerSessionA); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("retry with an unknown claim: %v, want FailedPrecondition", err)
+	}
+	if good.connections() != before {
+		t.Fatal("retry with an unknown claim probed")
+	}
+}
+
+// A matching key that is already pinned for another host is refused: the
+// offer fails and nothing is proposed or pinned.
+func TestSubmitPairingCodeKeyPinnedForOtherHost(t *testing.T) {
+	e := newPairEnv(t)
+	key := newEd25519HostKey(t)
+	srv := startPairSSH(t, e.userPub, key)
+	if _, err := e.db.PinHostKey(executordb.HostKey{HostID: "db-02", PublicKey: key.PublicKey().Marshal(),
+		User: "nebula", CredentialRef: "cred", Source: executordb.SourceProbe, PinnedBy: "test"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.submit(e.code(t, key), srv.addr, offerSessionA)
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(err.Error(), "db-02") {
+		t.Fatalf("submit: %v, want FailedPrecondition naming db-02", err)
+	}
+	e.wantState(t, e.offer, executordb.OfferFailed)
+	e.wantNotPinned(t)
+	if e.svc.offers.paired(e.idHash(t)) != nil || len(e.logs.find("enroll_paired_proposed", "")) != 0 {
+		t.Fatal("proposal for a key pinned for another host")
+	}
+	recs := e.logs.find("enroll_offer_failed", "")
+	if len(recs) != 1 || recs[0].attrs["reason"] != "host key pinned for another host" || recs[0].attrs["other"] != "db-02" {
+		t.Fatalf("offer failed audit %v", recs)
+	}
+}
+
+// An offer that ends between the pin and CompleteOffer gets its pin
+// undone: nothing stays pinned, nothing is added, nothing is enrolled.
+func TestCommitPairedEnrollUndoesPinWhenOfferEnds(t *testing.T) {
+	e := newPairEnv(t)
+	h := e.idHash(t)
+	key := newEd25519HostKey(t)
+	srv := startPairSSH(t, e.userPub, key)
+	resp := e.matched(t, srv, key, "192.0.2.21")
+	e.approve(t, resp.GetPermit().GetDigest())
+	var pinnedAtHook bool
+	e.svc.pairingHooks = &pairingHooks{afterPin: func() {
+		_, pinnedAtHook, _ = e.db.HostKey(offerTestHost)
+		if err := e.db.EndOffer(h, executordb.OfferPairingProposed, executordb.OfferRevoked); err != nil {
+			t.Errorf("revoke: %v", err)
+		}
+	}}
+	c, err := e.commit(resp.GetPermit().GetDigest(), offerSessionA)
+	if err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if !pinnedAtHook {
+		t.Fatal("hook did not run between pin and CompleteOffer")
+	}
+	if c.GetPinned() || c.GetEndpointAdded() != "" || c.GetLoginOk() || !strings.Contains(c.GetError(), "offer ended") {
+		t.Fatalf("commit %+v", c)
+	}
+	if c.GetState() != string(executordb.OfferRevoked) {
+		t.Fatalf("state %s, want revoked", c.GetState())
+	}
+	e.wantNotPinned(t)
+	if len(e.logs.find("enroll_pin_undone", "")) != 1 {
+		t.Fatal("pin undo not audited")
+	}
+	for _, kind := range []string{"host_key_pinned", "host_enrolled", "inventory_endpoint_added"} {
+		if len(e.logs.find(kind, "")) != 0 {
+			t.Fatalf("%s audited for an undone pin", kind)
+		}
 	}
 }
 
