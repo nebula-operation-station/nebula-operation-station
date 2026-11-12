@@ -36,22 +36,36 @@ concurrency:
 env:
   # Pinned build tool versions. goreleaser is installed with `go install`,
   # so its module bytes are checked against the Go checksum database.
+  # GO_VERSION is the exact Go release that builds the payloads (previously:
+  # newest patch of the go.mod minor version, check-latest). Its minor
+  # version must match go.mod; raise it by a reviewed change, for example
+  # when govulncheck in make check reports a standard library fix.
+  GO_VERSION: "1.26.9"
   GORELEASER_VERSION: v2.12.0
   PROTOC_GEN_GO_VERSION: v1.36.12
   PROTOC_GEN_GO_GRPC_VERSION: v1.6.2
 
 jobs:
   build:
-    # Same self-hosted runner class as the ci.yml test job; needs docker
-    # for the goreleaser image and the container flavour of release-stage.
-    runs-on: [self-hosted, linux, nos]
+    # GitHub-hosted (previously the persistent self-hosted `nos` runner that
+    # also runs pull_request jobs): every release build starts on a fresh VM
+    # without a shared GOCACHE, GOMODCACHE, ~/go/bin, tool cache or docker
+    # image cache, so nothing a PR left behind can reach the payloads. No
+    # actions cache is restored either (setup-go cache: false). Docker for
+    # the goreleaser image and the container flavour of release-stage is
+    # preinstalled on the image.
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     timeout-minutes: 180
+    env:
+      # Never let go.mod or a tool switch to another, downloaded toolchain.
+      GOTOOLCHAIN: local
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       version: ${{ steps.tag.outputs.version }}
       commit: ${{ steps.commit.outputs.commit }}
+      go_version: ${{ steps.goversion.outputs.go_version }}
     steps:
       - name: Resolve and validate tag
         id: tag
@@ -102,26 +116,45 @@ jobs:
           fi
           echo "commit=$head" >> "$GITHUB_OUTPUT"
 
-      - name: Go version from go.mod
-        id: gomod
+      - name: Check pinned Go version against go.mod
         run: |
           set -euo pipefail
           # The go line names the language version (for example 1.26.0);
-          # build with the newest patch release of that minor version so
-          # govulncheck and the binaries get the current standard library.
+          # the pinned GO_VERSION must be a release of that minor version.
           minor=$(sed -n 's/^go \([0-9][0-9]*\.[0-9][0-9]*\)\(\.[0-9][0-9]*\)\{0,1\}$/\1/p' go.mod)
           if [ -z "$minor" ]; then
             echo "::error::no go line in go.mod" >&2
             exit 1
           fi
-          echo "go=$minor.x" >> "$GITHUB_OUTPUT"
+          if ! [[ "$GO_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::GO_VERSION $GO_VERSION is not an exact release" >&2
+            exit 1
+          fi
+          if [ "${GO_VERSION%.*}" != "$minor" ]; then
+            echo "::error::GO_VERSION $GO_VERSION does not match go.mod minor $minor" >&2
+            exit 1
+          fi
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: ${{ steps.gomod.outputs.go }}
-          check-latest: true
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: false
 
-      # TestLiveClientBehaviour (internal/web/ui/live) needs node.
+      - name: Record Go version
+        id: goversion
+        run: |
+          set -euo pipefail
+          got=$(go env GOVERSION)
+          if [ "$got" != "go$GO_VERSION" ]; then
+            echo "::error::go is $got, want go$GO_VERSION" >&2
+            exit 1
+          fi
+          go version
+          echo "go_version=$got" >> "$GITHUB_OUTPUT"
+          echo "Release build toolchain: \`$got\` (GoReleaser \`$GORELEASER_VERSION\`)" >> "$GITHUB_STEP_SUMMARY"
+
+      # TestLiveClientBehaviour (internal/web/ui/live) needs node. No cache.
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "22"
