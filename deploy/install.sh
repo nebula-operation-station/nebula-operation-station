@@ -66,8 +66,7 @@ Usage: install.sh --vuln-agent
   --vuln-agent   install only the vulnerability agent from the tarball
                  (ADR 0011 Amendment 1): binary, unit and timer, its own
                  user, data dir and config skeleton. Nothing is enabled.
-                 Takes no other option. On a Debian host, the
-                 nebula-vuln-agent package does the same.
+                 Takes no other option.
 EOF
 }
 
@@ -154,12 +153,12 @@ done
 # binary from the tarball, its unit and timer, and provisions its user, data
 # dir and config skeleton, then stops. It never enables or starts anything:
 # the agent needs a NOS token and URL first (guide, "Vulnerability agent").
-# On a Debian host the nebula-vuln-agent package does the same
-# (deploy/deb/vuln-agent/postinst, which must render the same skeleton).
+# The (not yet built) nebula-vuln-agent package's postinst,
+# deploy/deb/vuln-agent/postinst, must render the same skeleton.
 # begin: vuln agent install
 if [[ ${vuln_agent} -eq 1 ]]; then
   if [[ -n "$admin_users" || -n "$rp_id" || ${from_package} -eq 1 || ${bundle_dir_option} -eq 1 ]]; then
-    echo "install.sh: --vuln-agent takes no other option (the nebula-vuln-agent package provisions itself)" >&2
+    echo "install.sh: --vuln-agent takes no other option" >&2
     usage >&2
     exit 2
   fi
@@ -361,7 +360,11 @@ for user in "${raw_users[@]}"; do
     exit 1
   fi
   case "$user" in
-    root|nebula-server|nebula-executor|nebula-discovery|nebula-pve-collector|nebula-netdev-collector|nebula-vuln-agent)
+    root|nebula-server|nebula-executor|nebula-discovery|nebula-pve-collector|nebula-netdev-collector)
+      echo "install.sh: $user cannot be an admin user; use a personal account" >&2
+      exit 1
+      ;;
+    nebula-vuln-agent)
       echo "install.sh: $user cannot be an admin user; use a personal account" >&2
       exit 1
       ;;

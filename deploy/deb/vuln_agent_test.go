@@ -554,32 +554,28 @@ func goreleaserSection(t *testing.T, key, id string) string {
 	return rest
 }
 
-// The agent ships as its own package for the VM nos-vuln: its binary, unit
-// and timer and its own maintainer scripts, nothing of the server or the
-// executor. The NOS package does not carry the agent binary.
-func TestVulnAgentPackagedSeparately(t *testing.T) {
+// The release builds the agent (static, -trimpath) and the tarball carries
+// it with its unit, timer and maintainer scripts, for install.sh
+// --vuln-agent. The NOS package does not carry the agent binary.
+func TestVulnAgentBuiltIntoTheTarball(t *testing.T) {
 	build := goreleaserSection(t, "builds", "nebula-vuln-agent")
 	for _, want := range []string{"    main: ./cmd/nebula-vuln-agent\n", "    binary: nebula-vuln-agent\n", "      - -trimpath\n"} {
 		if !strings.Contains(build, want) {
 			t.Errorf("build lacks %q", want)
 		}
 	}
-	pkg := goreleaserSection(t, "nfpms", "nebula-vuln-agent")
-	for _, want := range []string{
-		"    package_name: nebula-vuln-agent\n",
-		"    ids: [nebula-vuln-agent]\n",
-		"    bindir: /usr/bin\n",
-		"      - src: deploy/systemd/nebula-vuln-agent.service\n        dst: /lib/systemd/system/nebula-vuln-agent.service\n",
-		"      - src: deploy/systemd/nebula-vuln-agent.timer\n        dst: /lib/systemd/system/nebula-vuln-agent.timer\n",
-		"      postinstall: deploy/deb/vuln-agent/postinst\n",
-		"      preremove: deploy/deb/vuln-agent/prerm\n",
-	} {
-		if !strings.Contains(pkg, want) {
-			t.Errorf("nfpm nebula-vuln-agent lacks %q", want)
-		}
+	archive := goreleaserSection(t, "archives", "nebula")
+	if strings.Contains(archive, "    ids:") {
+		t.Errorf("the tarball is restricted to some builds; it must carry nebula-vuln-agent")
 	}
-	if n := strings.Count(pkg, "      - src: "); n != 3 {
-		t.Errorf("nfpm nebula-vuln-agent ships %d files, want unit, timer and guide", n)
+	for _, want := range []string{
+		"      - src: deploy/systemd/*\n",
+		"      - src: deploy/deb/vuln-agent/postinst\n        dst: deploy/deb/vuln-agent/postinst\n",
+		"      - src: deploy/deb/vuln-agent/prerm\n        dst: deploy/deb/vuln-agent/prerm\n",
+	} {
+		if !strings.Contains(archive, want) {
+			t.Errorf("tarball lacks %q", want)
+		}
 	}
 	main := goreleaserSection(t, "nfpms", "nebula")
 	if strings.Contains(main, "vuln-agent") {

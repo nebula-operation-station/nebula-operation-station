@@ -1,6 +1,9 @@
 #!/bin/sh
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # postinst of the nebula-vuln-agent package (ADR 0011 Amendment 1, va08).
+# Not built yet: .goreleaser.yaml has no nfpm entry for it until the
+# maintainer decides how the agent is packaged (one nfpm binary set is
+# enforced by deploy/quickstart/quickstart_test.sh).
 # It provisions what deploy/install.sh --vuln-agent provisions for a tarball
 # install: the agent's own system user, its data dir and its config dir with
 # a skeleton configuration. It never enables or starts the agent, on install

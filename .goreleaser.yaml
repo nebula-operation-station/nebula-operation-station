@@ -103,8 +103,10 @@ builds:
       - -X github.com/nebula-operation-station/nebula-operation-station/internal/version.Commit={{.ShortCommit}}
   # The vulnerability agent (ADR 0011 Amendment 1). No version -X flags:
   # its import allowlist (A1.2) does not include internal/version. It is in
-  # the tarball (install.sh --vuln-agent) and in its own package below, not
-  # in the NOS package or image.
+  # the tarball (install.sh --vuln-agent), not in the NOS package or image
+  # (their binary set is deploy/quickstart/binaries.txt). Its own .deb
+  # (deploy/deb/vuln-agent/) waits for a maintainer decision: the
+  # quickstart test allows only one nfpm binary set.
   - id: nebula-vuln-agent
     main: ./cmd/nebula-vuln-agent
     binary: nebula-vuln-agent
@@ -217,33 +219,6 @@ nfpms:
     scripts:
       postinstall: deploy/deb/postinst
       preremove: deploy/deb/prerm
-  # The vulnerability agent for its own VM (nos-vuln; ADR 0011 Amendment 1,
-  # va08): only its binary, unit and timer, nothing of the server or the
-  # executor. Also installable next to the NOS package (no shared files).
-  # The postinst creates the user, data dir and config skeleton; nothing
-  # is enabled.
-  - id: nebula-vuln-agent
-    package_name: nebula-vuln-agent
-    ids: [nebula-vuln-agent]
-    file_name_template: "nebula-vuln-agent_{{ .Version }}_{{ .Arch }}"
-    vendor: Nebula Operation Station
-    homepage: https://github.com/nebula-operation-station/nebula-operation-station
-    maintainer: Nebula Operation Station maintainers <maintainers@nebula-operation-station.invalid>
-    description: Vulnerability agent for Nebula Operation Station (feed sync, matching, optional lab LLM assessment).
-    license: AGPL-3.0-or-later
-    section: admin
-    formats: [deb]
-    bindir: /usr/bin
-    contents:
-      - src: deploy/systemd/nebula-vuln-agent.service
-        dst: /lib/systemd/system/nebula-vuln-agent.service
-      - src: deploy/systemd/nebula-vuln-agent.timer
-        dst: /lib/systemd/system/nebula-vuln-agent.timer
-      - src: docs/admin/guide.md
-        dst: /usr/share/doc/nebula-vuln-agent/guide.md
-    scripts:
-      postinstall: deploy/deb/vuln-agent/postinst
-      preremove: deploy/deb/vuln-agent/prerm
 
 # The container image (decision 5 of the M10 plan): the binaries on
 # debian:12-slim; deploy/container/compose.yaml runs it. Pushing happens
