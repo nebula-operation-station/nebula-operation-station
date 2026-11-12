@@ -110,6 +110,50 @@ func TestSubjectsFromExportKeepsIncompleteness(t *testing.T) {
 	}
 }
 
+// deviceExport is a device subject part as NOS exports it through the client.
+func deviceExport(id string, complete bool, firmware string) nosclient.SubjectPart {
+	return nosclient.SubjectPart{Kind: vulnfinding.SubjectDevice, Ref: vulnfinding.SubjectRef{ID: id}, Ecosystem: "vendor:cisco:iosxe",
+		Device:   &nosclient.Device{Vendor: "cisco", Model: "CBS350-24P-4G", FirmwareVersion: firmware},
+		Complete: complete, Part: 1, LastPart: true}
+}
+
+// TestSubjectsFromExportCarriesDeviceModelAndFirmware: a device's model and
+// firmware reach the matcher; "unknown" reaches it as an empty value.
+func TestSubjectsFromExportCarriesDeviceModelAndFirmware(t *testing.T) {
+	subs, err := SubjectsFromExport(exportThroughClient(t,
+		[]nosclient.SubjectPart{deviceExport("sw01", true, "3.1.1.7"), deviceExport("sw02", true, "unknown")}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(subs) != 2 || subs[0].Device == nil || subs[0].Device.Model != "CBS350-24P-4G" || subs[0].Device.Firmware != "3.1.1.7" {
+		t.Fatalf("subjects = %+v", subs)
+	}
+	if subs[0].Incomplete || subs[0].Ecosystem != "vendor:cisco:iosxe" {
+		t.Fatalf("complete device: %+v", subs[0])
+	}
+	if subs[1].Device == nil || subs[1].Device.Firmware != "" {
+		t.Fatalf("unknown firmware not empty: %+v", subs[1].Device)
+	}
+}
+
+// TestDeviceWithoutKnownFirmwareIsNeverClean: a device whose firmware NOS
+// does not know, or whose record is incomplete, is a coverage gap, never a
+// clean result.
+func TestDeviceWithoutKnownFirmwareIsNeverClean(t *testing.T) {
+	subs, err := SubjectsFromExport(exportThroughClient(t,
+		[]nosclient.SubjectPart{deviceExport("sw01", true, "unknown"), deviceExport("sw02", false, "3.1.1.7")}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := mustMatch(t, newDB(t), subs...)
+	if !hasGap(r, "", GapVersionUnknown) {
+		t.Fatalf("unknown firmware is not a version gap: %+v", r.Gaps)
+	}
+	if !hasGap(r, "", GapInventoryIncomplete) {
+		t.Fatalf("incomplete device is not an inventory gap: %+v", r.Gaps)
+	}
+}
+
 func TestSubjectsFromExportRejectsIncompleteSubjects(t *testing.T) {
 	tests := []struct {
 		name  string

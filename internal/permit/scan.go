@@ -143,7 +143,9 @@ func (a *Authority) floor(r canonical.Request, targets []canonical.Target, param
 	a.scanMu.Lock()
 	s, ok := a.scans[r.ArtifactSHA256]
 	a.scanMu.Unlock()
-	if ok && s.risk.Rank() > f.Rank() {
+	// The reviewed result of the pinned fim.scan script does not raise the
+	// floor (lease_fimscan.go); the approver still sees its findings.
+	if ok && s.risk.Rank() > f.Rank() && !fimScanReviewedScan(r, s) {
 		f, why = s.risk, "safety scanner ("+scanner.Version+"): "+strings.Join(s.categories, ", ")
 	}
 	return f, why, nil

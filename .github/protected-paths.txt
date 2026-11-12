@@ -11,6 +11,8 @@ go.sum
 docs/spec/
 docs/adr/
 docs/threat-model.md
+docs/handbook/
+docs/admin/guide.md
 proto/
 internal/canonical/
 internal/permit/
