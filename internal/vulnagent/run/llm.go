@@ -130,9 +130,11 @@ func checkLocalLLM(c LLMConfig) error {
 // resolveLLM merges the settings NOS serves over the local ones: NOS
 // decides enabled, a non-empty URL, model, language and operator
 // instructions; an empty value keeps the local one. The API key always
-// comes from the local key file. Any setting that fails validation
-// disables the assessor for this run (fail closed, never a fallback to a
-// different endpoint).
+// comes from the local key file. Only ErrNoRemoteSettings (an older NOS)
+// falls back to the local configuration; any other settings error, and
+// any setting that fails validation, disables the assessor for this run
+// and marks it failed (fail closed, never a fallback to a different
+// endpoint).
 func (r *Runner) resolveLLM(ctx context.Context) (LLMConfig, LLMEvidence) {
 	eff := r.cfg.LLM
 	ev := LLMEvidence{Origin: "local"}
@@ -157,8 +159,14 @@ func (r *Runner) resolveLLM(ctx context.Context) (LLMConfig, LLMEvidence) {
 		case errors.Is(err, ErrNoRemoteSettings):
 			ev.Reason = "NOS serves no agent settings; local configuration used"
 		default:
-			ev.Reason = "agent settings unavailable; local configuration used: " + cleanText(err.Error(), maxEvidenceText)
-			r.log.Warn("agent settings read failed, local configuration used", "error", cleanText(err.Error(), maxEvidenceText))
+			// Only an older NOS without the endpoint falls back. A timeout,
+			// server error or malformed answer must not re-enable an
+			// assessor the admin may have disabled in NOS.
+			eff.Enabled = false
+			ev.Origin, ev.Failed = "nos", true
+			ev.Reason = "agent settings unavailable; assessor off for this run: " + cleanText(err.Error(), maxEvidenceText)
+			r.log.Warn("agent settings read failed, assessor off for this run", "error", cleanText(err.Error(), maxEvidenceText))
+			return eff, ev
 		}
 	}
 	ev.Model = cleanText(eff.Model, MaxLLMModelBytes)
@@ -169,7 +177,7 @@ func (r *Runner) resolveLLM(ctx context.Context) (LLMConfig, LLMEvidence) {
 		return eff, ev
 	}
 	if err := checkLLM(eff); err != nil {
-		eff.Enabled = false
+		eff.Enabled, ev.Failed = false, true
 		ev.Reason = "assessor disabled for this run: " + cleanText(err.Error(), maxEvidenceText)
 		r.log.Warn("llm settings refused, findings sent without text", "origin", ev.Origin, "error", cleanText(err.Error(), maxEvidenceText))
 		return eff, ev

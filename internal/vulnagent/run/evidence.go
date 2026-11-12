@@ -78,9 +78,13 @@ type LLMEvidence struct {
 	// SettingsVersion is the version NOS served.
 	SettingsVersion int64  `json:"settings_version,omitempty"`
 	Reason          string `json:"reason,omitempty"`
-	Assessed        int    `json:"assessed"`
-	Calls           int    `json:"calls"`
-	Tokens          int64  `json:"tokens"`
+	// Failed: the assessor was off for this run because the NOS settings
+	// could not be read or the effective settings or endpoint were
+	// refused (fail closed); the run is degraded.
+	Failed   bool  `json:"failed,omitempty"`
+	Assessed int   `json:"assessed"`
+	Calls    int   `json:"calls"`
+	Tokens   int64 `json:"tokens"`
 }
 
 // Report is the evidence of one run.
@@ -114,8 +118,12 @@ type Report struct {
 }
 
 // Degraded reports a run that finished but not cleanly: a feed failed to
-// sync, a document or record was rejected, or a finding was withheld.
+// sync, a document or record was rejected, a finding was withheld, or the
+// assessor failed closed.
 func (r *Report) Degraded() bool {
+	if r.LLM.Failed {
+		return true
+	}
 	for _, s := range r.Sources {
 		if s.Status == SourceFailed {
 			return true

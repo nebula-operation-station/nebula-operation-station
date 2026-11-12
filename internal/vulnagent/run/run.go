@@ -36,6 +36,8 @@ const (
 	HardMaxAssessPhaseMax = 4 * time.Hour
 	// UploadPhaseMax bounds run start, batches and complete; fixed.
 	UploadPhaseMax = 90 * time.Minute
+	// maxSocketPath bounds the LLM Unix socket path (sun_path).
+	maxSocketPath = 107
 	// TemplateMarginTokens is reserved for the endpoint's chat and tool
 	// templates when checking the declared context window (A1.4).
 	TemplateMarginTokens = 4096
@@ -106,6 +108,12 @@ type LLMConfig struct {
 	OperatorInstructions string
 	// Limits are the assessor limits; zero means agent.DefaultLimits.
 	Limits agent.Limits
+	// AllowedNetworks are extra lab networks the endpoint may be in
+	// (llm.allowed_networks, see ParseAllowedNetworks).
+	AllowedNetworks []string
+	// UnixSocket, when set, is the absolute path of a Unix socket on the
+	// agent host; every LLM connection then goes there.
+	UnixSocket string
 }
 
 // Config configures a Runner.
@@ -125,8 +133,12 @@ type Config struct {
 	AgentConfig AgentConfigSource
 	// LLM is the local assessor configuration.
 	LLM LLMConfig
-	// NewLLM builds the LLM client; nil uses agent.NewHTTPClient.
+	// NewLLM builds the LLM client; nil uses agent.NewHTTPClient. The
+	// ClientConfig it gets carries the lab-only transport.
 	NewLLM func(agent.ClientConfig) (agent.LLM, error)
+	// LLMNet overrides resolver, dialer and TLS roots of the LLM
+	// endpoint; the lab-address check applies regardless.
+	LLMNet LLMNetwork
 	// AssessPhaseMax bounds the assessment phase; zero means
 	// DefaultAssessPhaseMax.
 	AssessPhaseMax time.Duration
@@ -140,13 +152,14 @@ type Config struct {
 
 // Runner runs the agent.
 type Runner struct {
-	cfg   Config
-	feeds []vulnfeed.Feed
-	store *vulnfeed.Store
-	sync  *vulnfeed.Syncer
-	csaf  *vulnfeed.CSAFClient
-	log   *slog.Logger
-	now   func() time.Time
+	cfg     Config
+	llmDial *labDialer
+	feeds   []vulnfeed.Feed
+	store   *vulnfeed.Store
+	sync    *vulnfeed.Syncer
+	csaf    *vulnfeed.CSAFClient
+	log     *slog.Logger
+	now     func() time.Time
 }
 
 // New validates cfg and opens the feed store.
@@ -171,6 +184,13 @@ func New(cfg Config) (*Runner, error) {
 	}
 	if err := checkLocalLLM(cfg.LLM); err != nil {
 		return nil, err
+	}
+	allowed, err := ParseAllowedNetworks(cfg.LLM.AllowedNetworks)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.LLM.UnixSocket != "" && (!filepath.IsAbs(cfg.LLM.UnixSocket) || len(cfg.LLM.UnixSocket) > maxSocketPath) {
+		return nil, fmt.Errorf("llm unix socket must be an absolute path of at most %d bytes: %w", maxSocketPath, ErrConfig)
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -206,7 +226,7 @@ func New(cfg Config) (*Runner, error) {
 	if err != nil {
 		return nil, fmt.Errorf("csaf client: %w", err)
 	}
-	return &Runner{cfg: cfg, feeds: feeds, store: store, sync: syncer, csaf: cc, log: log, now: cfg.Now}, nil
+	return &Runner{cfg: cfg, llmDial: &labDialer{allowed: allowed, socket: cfg.LLM.UnixSocket, net: cfg.LLMNet}, feeds: feeds, store: store, sync: syncer, csaf: cc, log: log, now: cfg.Now}, nil
 }
 
 // Data directory layout.

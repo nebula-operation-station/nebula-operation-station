@@ -148,9 +148,18 @@ func (r *Runner) assess(ctx context.Context, m *matched, rep *Report) {
 		r.log.Info("assessment skipped", "enabled", eff.Enabled, "reason", ev.Reason, "findings", len(m.findings))
 		return
 	}
+	// The endpoint must be a lab address before any finding context or
+	// the API key is handed to the client; the dialer checks again on
+	// every connection.
+	if err := r.checkEndpoint(ctx, eff); err != nil {
+		rep.LLM.Enabled, rep.LLM.Failed = false, true
+		rep.LLM.Reason = "assessor disabled for this run: " + cleanText(err.Error(), maxEvidenceText)
+		r.log.Warn("llm endpoint refused, findings sent without text", "origin", ev.Origin, "host", ev.Host, "error", cleanText(err.Error(), maxEvidenceText))
+		return
+	}
 	a, err := r.newAssessor(eff, m)
 	if err != nil {
-		rep.LLM.Enabled = false
+		rep.LLM.Enabled, rep.LLM.Failed = false, true
 		rep.LLM.Reason = cleanText(err.Error(), maxEvidenceText)
 		r.log.Warn("assessor not started, findings sent without text", "error", rep.LLM.Reason)
 		return
@@ -198,7 +207,7 @@ func (r *Runner) newAssessor(eff LLMConfig, m *matched) (*agent.Agent, error) {
 		newLLM = func(c agent.ClientConfig) (agent.LLM, error) { return agent.NewHTTPClient(c) }
 	}
 	llm, err := newLLM(agent.ClientConfig{BaseURL: eff.BaseURL, Model: eff.Model, APIKeyFile: eff.APIKeyFile,
-		AllowPlainHTTP: eff.AllowPlainHTTP, Timeout: eff.Limits.LLMCallTimeout})
+		AllowPlainHTTP: eff.AllowPlainHTTP, Timeout: eff.Limits.LLMCallTimeout, Transport: llmTransport(r.llmDial)})
 	if err != nil {
 		return nil, fmt.Errorf("llm client: %w", err)
 	}

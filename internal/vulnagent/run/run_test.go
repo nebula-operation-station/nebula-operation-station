@@ -282,7 +282,14 @@ type fakeLLM struct {
 func newFakeLLM(t *testing.T) *fakeLLM {
 	t.Helper()
 	f := &fakeLLM{}
-	f.srv = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	f.srv = httptest.NewTLSServer(f.handler())
+	t.Cleanup(f.srv.Close)
+	return f
+}
+
+// handler answers every chat-completions call with a submit_assessment.
+func (f *fakeLLM) handler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Model string `json:"model"`
 		}
@@ -305,9 +312,7 @@ func newFakeLLM(t *testing.T) *fakeLLM {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	t.Cleanup(f.srv.Close)
-	return f
+	})
 }
 
 func (f *fakeLLM) callCount() int {
@@ -343,7 +348,8 @@ func (e *env) config(t *testing.T) Config {
 	if err != nil {
 		t.Fatal(err)
 	}
-	llmTransport := e.llm.srv.Client().Transport
+	roots := x509.NewCertPool()
+	roots.AddCert(e.llm.srv.Certificate())
 	return Config{
 		DataDir: e.dir, Feeds: e.feeds.feeds(t), Fetcher: e.feeds.fetcher(t), NOS: nc, AgentConfig: ac,
 		LLM: LLMConfig{
@@ -352,10 +358,9 @@ func (e *env) config(t *testing.T) Config {
 			BaseURL: "https://llm.invalid/v1", Model: "local-model", APIKeyFile: writeSecret(t, "llm.key", testAPIKey+"\n"),
 			ContextWindow: 65536, Language: agent.LanguageEN,
 		},
-		NewLLM: func(c agent.ClientConfig) (agent.LLM, error) {
-			c.Transport = llmTransport
-			return agent.NewHTTPClient(c)
-		},
+		// The real client with the runner's lab-only transport; only the
+		// TLS roots of the fake endpoint are injected.
+		LLMNet: LLMNetwork{RootCAs: roots},
 		Out:    e.out,
 		Logger: slog.New(slog.NewJSONHandler(e.logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Now:    func() time.Time { return t0 },
