@@ -1,0 +1,422 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package notify
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"net/url"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+	"unicode"
+)
+
+// IntegrityKind is one of the integrity notification events (spec 13,
+// ADR 0015 D9).
+type IntegrityKind string
+
+// Integrity event kinds.
+const (
+	// IntegrityNOSMismatch: an I1 finding on the NOS machine.
+	IntegrityNOSMismatch IntegrityKind = "integrity.nos_mismatch"
+	// IntegrityHostChange: an I2 finding on a managed host.
+	IntegrityHostChange IntegrityKind = "integrity.host_change"
+	// IntegrityScanIncomplete: an I1 check or I2 run that could not complete.
+	IntegrityScanIncomplete IntegrityKind = "integrity.scan_incomplete"
+	// IntegrityBaselineTamper: the I2 baseline list does not match the
+	// executor-stored digest.
+	IntegrityBaselineTamper IntegrityKind = "integrity.baseline_tamper"
+	// IntegrityReferenceConflict: the executor rejected a package reference
+	// that differs from the one admitted for the same package, version and arch.
+	IntegrityReferenceConflict IntegrityKind = "integrity.reference_conflict"
+)
+
+// KindIntegrityDigest summarises the integrity messages the hourly limit
+// held back. ADR 0015 D9 requires the hourly digest; spec 13 names only the
+// five events above.
+const KindIntegrityDigest = "integrity.digest"
+
+// Severity is the fixed severity scale of integrity findings.
+type Severity string
+
+// Severities.
+const (
+	SeverityInfo     Severity = "info"
+	SeverityLow      Severity = "low"
+	SeverityMedium   Severity = "medium"
+	SeverityHigh     Severity = "high"
+	SeverityCritical Severity = "critical"
+)
+
+// Limits (ADR 0015 D9, ADR 0011 D9).
+const (
+	// MaxIntegrityPerHour is the number of integrity messages that may leave
+	// in any hour; the rest are counted into the digest.
+	MaxIntegrityPerHour = 10
+	// IntegrityWindow is the period MaxIntegrityPerHour applies to.
+	IntegrityWindow = time.Hour
+	// MaxTrackedIntegrityKeys bounds the de-duplication state; the oldest
+	// entries are dropped first.
+	MaxTrackedIntegrityKeys = 100_000
+	// maxIntegrityClass bounds the class code.
+	maxIntegrityClass = 32
+	// maxIntegrityLink bounds the NOS link.
+	maxIntegrityLink = 512
+	// maxIntegrityLabel bounds the host label (the plain-text rule of clean).
+	maxIntegrityLabel = 64
+	// unnamedHost stands in for an empty host label.
+	unnamedHost = "unnamed host"
+)
+
+// ErrInvalidIntegrityEvent is returned for an event with an unknown kind,
+// class, severity or link, or a negative count. Such an event is never sent.
+var ErrInvalidIntegrityEvent = errors.New("invalid integrity event")
+
+// IntegrityEvent is one integrity notification. It has fixed fields only:
+// there is no field for a path or for file content, so no host-supplied
+// path or content can reach a message through it. The path that identifies
+// a finding enters only as a hash, through NewIntegrityKey.
+type IntegrityEvent struct {
+	// Kind selects the event and its fixed wording.
+	Kind IntegrityKind
+	// Host is the host label as the admin set it; it is reduced to letters,
+	// digits, spaces, '-', '_' and '.' before it is sent.
+	Host string
+	// Class is the fixed class code of the finding (lowercase letters,
+	// digits and '_', starting with a letter).
+	Class string
+	// Severity is the fixed severity scale.
+	Severity Severity
+	// Count is the number of findings the event covers.
+	Count int
+	// Link is the NOS UI link for the finding: an http or https URL without
+	// spaces. Empty is allowed.
+	Link string
+}
+
+// IntegrityKey identifies a finding for de-duplication: a SHA-256 hash of
+// (subject, class, path). Only the hash is kept.
+type IntegrityKey [sha256.Size]byte
+
+// NewIntegrityKey returns the de-duplication key of a finding. Each part is
+// length-prefixed, so different splits of the same text give different keys.
+func NewIntegrityKey(subject, class, path string) IntegrityKey {
+	h := sha256.New()
+	for _, part := range []string{subject, class, path} {
+		var n [8]byte
+		binary.BigEndian.PutUint64(n[:], uint64(len(part)))
+		h.Write(n[:])
+		h.Write([]byte(part))
+	}
+	var k IntegrityKey
+	copy(k[:], h.Sum(nil))
+	return k
+}
+
+// Decision is the outcome of IntegrityGate.Submit.
+type Decision int
+
+// Decisions.
+const (
+	// DecisionNone: the event was rejected, nothing was sent or recorded.
+	DecisionNone Decision = iota
+	// DecisionSent: a provider accepted the message.
+	DecisionSent
+	// DecisionDuplicate: the same (kind, key) was already notified.
+	DecisionDuplicate
+	// DecisionHeld: the hourly limit held the message; the digest counts it.
+	DecisionHeld
+	// DecisionUndelivered: no provider accepted the message. Its key is not
+	// recorded, so a later event with the same key may send it.
+	DecisionUndelivered
+)
+
+type integrityDedupe struct {
+	kind IntegrityKind
+	key  IntegrityKey
+}
+
+// IntegrityGate applies de-duplication and the hourly limit to integrity
+// events, then sends them through a Notifier. It is safe for concurrent use;
+// messages are sent outside its lock.
+//
+// De-duplication state is held in memory: after a restart a finding that is
+// still open notifies once more inside the limit.
+type IntegrityGate struct {
+	n   *Notifier
+	now func() time.Time
+
+	mu        sync.Mutex
+	sent      []time.Time // delivery times (and reserved slots) inside the window
+	notified  map[integrityDedupe]bool
+	order     []integrityDedupe // insertion order for eviction
+	held      map[IntegrityKind]int
+	heldSince time.Time
+}
+
+// NewIntegrityGate returns a gate that sends through n. now defaults to
+// time.Now.
+func NewIntegrityGate(n *Notifier, now func() time.Time) *IntegrityGate {
+	if now == nil {
+		now = time.Now
+	}
+	return &IntegrityGate{n: n, now: now, notified: map[integrityDedupe]bool{}, held: map[IntegrityKind]int{}}
+}
+
+// Submit validates ev and, unless it is a duplicate, sends it inside the
+// hourly limit or holds it for the digest. A due digest is sent first.
+func (g *IntegrityGate) Submit(ctx context.Context, ev IntegrityEvent, key IntegrityKey) (Decision, error) {
+	if err := ev.validate(); err != nil {
+		return DecisionNone, err
+	}
+	now := g.now()
+	dk := integrityDedupe{kind: ev.Kind, key: key}
+
+	g.mu.Lock()
+	due := g.digestLocked(now)
+	if g.notified[dk] {
+		g.mu.Unlock()
+		g.deliverDigest(ctx, due)
+		return DecisionDuplicate, nil
+	}
+	g.prune(now)
+	if len(g.sent) >= MaxIntegrityPerHour {
+		// Held messages count as notified: the digest reports them.
+		g.holdLocked(ev.Kind, now)
+		g.markLocked(dk)
+		g.mu.Unlock()
+		g.deliverDigest(ctx, due)
+		return DecisionHeld, nil
+	}
+	g.sent = append(g.sent, now)
+	g.mu.Unlock()
+
+	g.deliverDigest(ctx, due)
+	ok := g.n.Notify(ctx, ev.message(now)) > 0
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if !ok {
+		g.releaseLocked(now)
+		return DecisionUndelivered, nil
+	}
+	g.markLocked(dk)
+	return DecisionSent, nil
+}
+
+// Flush sends the digest if its hour has ended and reports whether a digest
+// was sent. Call it periodically so a quiet hour still gets its summary.
+func (g *IntegrityGate) Flush(ctx context.Context) bool {
+	g.mu.Lock()
+	due := g.digestLocked(g.now())
+	g.mu.Unlock()
+	return g.deliverDigest(ctx, due)
+}
+
+// message renders ev as a notification with fixed wording.
+func (ev IntegrityEvent) message(now time.Time) Event {
+	return Event{Kind: string(ev.Kind), Host: integrityLabel(ev.Host), State: string(ev.Severity),
+		Reason: fmt.Sprintf("Class: %s, count: %d", ev.Class, ev.Count), Link: ev.Link, Time: now}
+}
+
+func (ev IntegrityEvent) validate() error {
+	switch ev.Kind {
+	case IntegrityNOSMismatch, IntegrityHostChange, IntegrityScanIncomplete, IntegrityBaselineTamper, IntegrityReferenceConflict:
+	default:
+		return fmt.Errorf("%w: unknown kind", ErrInvalidIntegrityEvent)
+	}
+	if !validClass(ev.Class) {
+		return fmt.Errorf("%w: class", ErrInvalidIntegrityEvent)
+	}
+	switch ev.Severity {
+	case SeverityInfo, SeverityLow, SeverityMedium, SeverityHigh, SeverityCritical:
+	default:
+		return fmt.Errorf("%w: severity", ErrInvalidIntegrityEvent)
+	}
+	if ev.Count < 0 {
+		return fmt.Errorf("%w: negative count", ErrInvalidIntegrityEvent)
+	}
+	if ev.Link != "" && !validLink(ev.Link) {
+		return fmt.Errorf("%w: link", ErrInvalidIntegrityEvent)
+	}
+	return nil
+}
+
+// validClass accepts 1 to maxIntegrityClass bytes of a-z, 0-9 and '_',
+// starting with a letter.
+func validClass(s string) bool {
+	if s == "" || len(s) > maxIntegrityClass || s[0] < 'a' || s[0] > 'z' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// validLink accepts an absolute http or https URL with a host and only
+// printable ASCII without spaces.
+func validLink(s string) bool {
+	if len(s) > maxIntegrityLink {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] <= 0x20 || s[i] > 0x7e {
+			return false
+		}
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return false
+	}
+	return (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+}
+
+// integrityLabel reduces a host label to plain text: the shared clean rules
+// (control and bidi characters, one line, length bound), then only letters,
+// digits, spaces and '-', '_', '.'. Everything else, including Markdown
+// link syntax, URLs and mentions, becomes '?'.
+func integrityLabel(s string) string {
+	s = clean(s, maxIntegrityLabel)
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case unicode.IsLetter(r) || unicode.IsDigit(r) || r == ' ' || r == '-' || r == '_' || r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('?')
+		}
+	}
+	out := strings.TrimSpace(b.String())
+	if out == "" {
+		return unnamedHost
+	}
+	return out
+}
+
+// integrityTitle returns the title of an integrity event; ok is false for
+// other kinds.
+func integrityTitle(e Event) (string, bool) {
+	var what string
+	switch IntegrityKind(e.Kind) {
+	case IntegrityNOSMismatch:
+		what = "NOS mismatch on "
+	case IntegrityHostChange:
+		what = "host change on "
+	case IntegrityScanIncomplete:
+		what = "scan incomplete on "
+	case IntegrityBaselineTamper:
+		what = "baseline tamper on "
+	case IntegrityReferenceConflict:
+		what = "reference conflict on "
+	default:
+		if e.Kind == KindIntegrityDigest {
+			return "Nebula: integrity: summary of the last hour", true
+		}
+		return "", false
+	}
+	return "Nebula: integrity: " + what + e.Host, true
+}
+
+// digestLocked takes the held counts when their hour has ended. Caller
+// holds g.mu.
+func (g *IntegrityGate) digestLocked(now time.Time) *integrityDigest {
+	if len(g.held) == 0 || now.Sub(g.heldSince) < IntegrityWindow {
+		return nil
+	}
+	d := &integrityDigest{counts: g.held, since: g.heldSince}
+	g.held = map[IntegrityKind]int{}
+	g.heldSince = time.Time{}
+	return d
+}
+
+type integrityDigest struct {
+	counts map[IntegrityKind]int
+	since  time.Time
+}
+
+// deliverDigest sends d. A digest no provider accepts gives its counts back,
+// so the next attempt reports them.
+func (g *IntegrityGate) deliverDigest(ctx context.Context, d *integrityDigest) bool {
+	if d == nil {
+		return false
+	}
+	kinds := make([]string, 0, len(d.counts))
+	total := 0
+	for k, c := range d.counts {
+		kinds = append(kinds, string(k))
+		total += c
+	}
+	sort.Strings(kinds)
+	parts := make([]string, 0, len(kinds))
+	for _, k := range kinds {
+		parts = append(parts, fmt.Sprintf("%s: %d", k, d.counts[IntegrityKind(k)]))
+	}
+	noun := "notifications"
+	if total == 1 {
+		noun = "notification"
+	}
+	ev := Event{Kind: KindIntegrityDigest, State: "digest",
+		Reason: fmt.Sprintf("%d integrity %s held by the hourly limit (%s)", total, noun, strings.Join(parts, ", ")),
+		Time:   g.now()}
+	if g.n.Notify(ctx, ev) > 0 {
+		return true
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for k, c := range d.counts {
+		g.held[k] += c
+	}
+	if g.heldSince.IsZero() || d.since.Before(g.heldSince) {
+		g.heldSince = d.since
+	}
+	return false
+}
+
+// prune drops delivery times that left the window. Caller holds g.mu.
+func (g *IntegrityGate) prune(now time.Time) {
+	cut := 0
+	for cut < len(g.sent) && now.Sub(g.sent[cut]) >= IntegrityWindow {
+		cut++
+	}
+	g.sent = g.sent[cut:]
+}
+
+// releaseLocked removes one reserved slot taken at t. Caller holds g.mu.
+func (g *IntegrityGate) releaseLocked(t time.Time) {
+	for i := len(g.sent) - 1; i >= 0; i-- {
+		if g.sent[i].Equal(t) {
+			g.sent = append(g.sent[:i], g.sent[i+1:]...)
+			return
+		}
+	}
+}
+
+// holdLocked counts one held message of kind. Caller holds g.mu.
+func (g *IntegrityGate) holdLocked(kind IntegrityKind, now time.Time) {
+	if len(g.held) == 0 {
+		g.heldSince = now
+	}
+	g.held[kind]++
+}
+
+// markLocked records that (kind, key) was notified or held. Caller holds g.mu.
+func (g *IntegrityGate) markLocked(dk integrityDedupe) {
+	if g.notified[dk] {
+		return
+	}
+	g.notified[dk] = true
+	g.order = append(g.order, dk)
+	if len(g.order) > MaxTrackedIntegrityKeys {
+		delete(g.notified, g.order[0])
+		g.order = g.order[1:]
+	}
+}

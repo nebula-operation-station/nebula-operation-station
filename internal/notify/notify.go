@@ -52,7 +52,10 @@ type Event struct {
 	State       string
 	Reason      string
 	ExecutionID string
-	Time        time.Time
+	// Link is a NOS UI link for integrity events (validated by
+	// IntegrityGate.Submit); empty for other kinds.
+	Link string
+	Time time.Time
 }
 
 const (
@@ -85,11 +88,14 @@ func clean(s string, limit int) string {
 
 func (e Event) cleaned() Event {
 	return Event{Kind: clean(e.Kind, 64), Host: clean(e.Host, 64), State: clean(e.State, 64), Reason: clean(e.Reason, maxField),
-		ExecutionID: clean(e.ExecutionID, 128), Time: e.Time.UTC().Truncate(time.Second)}
+		ExecutionID: clean(e.ExecutionID, 128), Link: clean(e.Link, maxIntegrityLink), Time: e.Time.UTC().Truncate(time.Second)}
 }
 
 // Title is a short summary line.
 func (e Event) Title() string {
+	if t, ok := integrityTitle(e); ok {
+		return t
+	}
 	switch e.Kind {
 	case KindHostKeyMismatch:
 		return "Nebula: host key mismatch on " + e.Host
@@ -117,6 +123,9 @@ func (e Event) Text() string {
 	}
 	if e.ExecutionID != "" {
 		b.WriteString("\nExecution: " + e.ExecutionID)
+	}
+	if e.Link != "" {
+		b.WriteString("\nDetails: " + e.Link)
 	}
 	b.WriteString("\n" + e.Time.Format(time.RFC3339))
 	return b.String()
@@ -257,6 +266,7 @@ type WebhookPayload struct {
 	State       string `json:"state,omitempty"`
 	Reason      string `json:"reason,omitempty"`
 	ExecutionID string `json:"execution_id,omitempty"`
+	Link        string `json:"link,omitempty"`
 	Time        string `json:"time"`
 }
 
@@ -273,7 +283,7 @@ func Sign(secret []byte, timestamp string, body []byte) string {
 
 func (w *webhook) Send(ctx context.Context, e Event) error {
 	body, err := json.Marshal(WebhookPayload{Kind: e.Kind, Host: e.Host, State: e.State, Reason: e.Reason,
-		ExecutionID: e.ExecutionID, Time: e.Time.Format(time.RFC3339)})
+		ExecutionID: e.ExecutionID, Link: e.Link, Time: e.Time.Format(time.RFC3339)})
 	if err != nil {
 		return err
 	}
