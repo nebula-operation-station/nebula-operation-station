@@ -271,7 +271,7 @@ func summarize(rep Report) SelfCheck {
 			st.DeviationsTruncated = true
 			continue
 		}
-		st.Deviations = append(st.Deviations, Deviation{Path: f.Path, Class: f.Class, Status: f.Status, Reason: f.Reason})
+		st.Deviations = append(st.Deviations, Deviation(f))
 	}
 	switch {
 	case st.Different+st.Missing+st.Extra > 0:
