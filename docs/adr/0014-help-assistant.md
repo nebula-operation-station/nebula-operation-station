@@ -106,7 +106,11 @@ History:
   (as00ihf): a confirmation rerun (`48000 + m` or leading `8`) must be
   accepted; one that errors, records nothing or records no final
   request is a harness error, never a chance match (previously the
-  rerun had no stated expected result).
+  rerun had no stated expected result). Round 2 (as00ihf2): the
+  confirmation rerun starts with fresh recorders, a fresh fake executor
+  and a fresh working directory like every canary form (previously not
+  stated, so the first run's recorded final request could make the
+  rerun accepted).
 
 ## Context
 
@@ -998,7 +1002,18 @@ does NOS connect **from** (`--from`)?
     **confirmation run**: when condition 1 or 2 finds a `number` or
     `duration` needle, the test repeats the same run once with the
     confirmation canary (`48000 + m` for `number`, the duration canary
-    with the leading `7` replaced by `8`) and its needles. Expected
+    with the leading `7` replaced by `8`) and its needles. The rerun is
+    a run of its own: like every canary form it starts with fresh
+    recorders (recording dialer, HTTP transport and, for `restore`, a
+    fresh recording fake `backup.System`), a fresh fake executor and a
+    fresh working directory, whose path is checked against the rerun's
+    needles and whose fixture and canary files are created anew as for
+    the first run; nothing recorded by the first run is visible to it,
+    so "records the final request" and the first-`Stop`/last-`Start`
+    check of **Restore runs** are decided from the rerun's own traffic
+    alone (previously not stated, so a harness that reused the first
+    run's recorder saw that run's final request and classified a rerun
+    as accepted that never reached it). Expected
     result: the rerun is classified by the **Run classes** above, with
     the same inputs except the canary, and must be accepted, because
     the run it confirms was accepted (only accepted runs reach the
