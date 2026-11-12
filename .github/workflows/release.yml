@@ -1,0 +1,249 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Unsigned release staging for the offline signing procedure
+# (docs/admin/release-signing.md, docs/admin/release-0.9.md).
+#
+# On a version tag this workflow runs `make check`, builds the staging with
+# `make release-stage`, keeps it as a workflow artifact and attaches the
+# files from payloads/ to the tag's GitHub release as a DRAFT. It never
+# signs, never writes a manifest, never touches a key and never publishes:
+# a maintainer checks the artifact offline, signs with the YubiKey,
+# attaches release-manifest.json and its .sig to the draft and publishes by
+# hand. A release that is already published is never modified.
+#
+# Secrets: only the automatic GITHUB_TOKEN, read-only except in the draft
+# job.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing version tag to stage, e.g. v0.9.0-beta.1"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # One run per tag at a time; never cancel a half-done draft update.
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  # Pinned build tool versions. goreleaser is installed with `go install`,
+  # so its module bytes are checked against the Go checksum database.
+  GORELEASER_VERSION: v2.12.0
+  PROTOC_GEN_GO_VERSION: v1.36.12
+  PROTOC_GEN_GO_GRPC_VERSION: v1.6.2
+
+jobs:
+  build:
+    # Same self-hosted runner class as the ci.yml test job; needs docker
+    # for the goreleaser image and the container flavour of release-stage.
+    runs-on: [self-hosted, linux, nos]
+    permissions:
+      contents: read
+    timeout-minutes: 180
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      commit: ${{ steps.commit.outputs.commit }}
+    steps:
+      - name: Resolve and validate tag
+        id: tag
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = workflow_dispatch ]; then
+            tag=$INPUT_TAG
+          elif [ "$REF_TYPE" = tag ]; then
+            tag=$REF_NAME
+          else
+            echo "::error::release runs only for tags" >&2
+            exit 1
+          fi
+          # vMAJOR.MINOR.PATCH with an optional SemVer pre-release; no
+          # build metadata, nothing a shell or a file name could misread.
+          re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$'
+          if ! [[ "$tag" =~ $re ]]; then
+            echo "::error::not a release tag: $tag" >&2
+            exit 1
+          fi
+          {
+            echo "tag=$tag"
+            echo "version=${tag#v}"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Check that HEAD is the tagged commit
+        id: commit
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          want=$(git rev-parse --verify "refs/tags/$TAG^{commit}")
+          head=$(git rev-parse --verify HEAD)
+          if [ "$want" != "$head" ]; then
+            echo "::error::HEAD $head is not tag $TAG ($want)" >&2
+            exit 1
+          fi
+          echo "commit=$head" >> "$GITHUB_OUTPUT"
+
+      - name: Go version from go.mod
+        id: gomod
+        run: |
+          set -euo pipefail
+          # The go line names the language version (for example 1.26.0);
+          # build with the newest patch release of that minor version so
+          # govulncheck and the binaries get the current standard library.
+          minor=$(sed -n 's/^go \([0-9][0-9]*\.[0-9][0-9]*\)\(\.[0-9][0-9]*\)\{0,1\}$/\1/p' go.mod)
+          if [ -z "$minor" ]; then
+            echo "::error::no go line in go.mod" >&2
+            exit 1
+          fi
+          echo "go=$minor.x" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ steps.gomod.outputs.go }}
+          check-latest: true
+
+      # TestLiveClientBehaviour (internal/web/ui/live) needs node.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "22"
+
+      - uses: bufbuild/buf-action@85aebf73123b5c15fd5528aaecbf9129cddf7fa7 # v1.6.0
+        with:
+          setup_only: true
+
+      - name: Install code generators
+        run: |
+          go install "google.golang.org/protobuf/cmd/protoc-gen-go@$PROTOC_GEN_GO_VERSION"
+          go install "google.golang.org/grpc/cmd/protoc-gen-go-grpc@$PROTOC_GEN_GO_GRPC_VERSION"
+
+      # The installed Go is the go.mod minor version, so staticcheck runs on
+      # it directly (as in the ci.yml lint job).
+      - name: make check
+        run: make check LINT_TOOLCHAIN=local
+
+      - name: Install goreleaser
+        run: |
+          go install "github.com/goreleaser/goreleaser/v2@$GORELEASER_VERSION"
+          goreleaser --version
+
+      - name: make release-stage
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+        run: |
+          set -euo pipefail
+          rm -rf staging
+          make release-stage VERSION="$VERSION" RELEASE_STAGE=staging
+          (cd staging && sha256sum --strict -c SHA256SUMS)
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nebula-release-staging-${{ steps.tag.outputs.version }}
+          path: staging/
+          retention-days: 30
+          if-no-files-found: error
+
+  draft:
+    # Runs no repository code: it only downloads the artifact and talks to
+    # the GitHub API. GitHub-hosted, so the write token never reaches a
+    # persistent self-hosted machine.
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # create or update the draft release
+      actions: read # gh run download of this run's artifact
+    timeout-minutes: 30
+    steps:
+      - name: Attach payloads to the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          SERVER_URL: ${{ github.server_url }}
+          TAG: ${{ needs.build.outputs.tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+          COMMIT: ${{ needs.build.outputs.commit }}
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*" >&2; exit 1; }
+
+          work=$(mktemp -d)
+          gh run download "$RUN_ID" --repo "$REPO" \
+            --name "nebula-release-staging-$VERSION" --dir "$work/staging"
+          cd "$work/staging"
+
+          # Transfer check, and payloads/ must be exactly the SHA256SUMS set.
+          sha256sum --strict -c SHA256SUMS
+          listed=$(awk '{print $2}' SHA256SUMS | sort)
+          present=$(find payloads -mindepth 1 -maxdepth 1 -printf 'payloads/%f\n' | sort)
+          [ "$listed" = "$present" ] || fail "payloads/ differs from SHA256SUMS"
+          [ -z "$(find payloads -mindepth 1 ! -type f)" ] || fail "payloads/ holds a non-regular file"
+          mapfile -t files < <(find payloads -mindepth 1 -maxdepth 1 -type f | sort)
+          [ "${#files[@]}" -gt 0 ] || fail "no payloads"
+          names=$(printf '%s\n' "${files[@]##*/}" | sort)
+
+          # The tag must still point at the commit that was built.
+          tagged=$(gh api "repos/$REPO/commits/$TAG" --jq .sha)
+          [ "$tagged" = "$COMMIT" ] || fail "tag $TAG moved: built $COMMIT, now $tagged"
+
+          # The tags endpoint does not return drafts, so list every release.
+          find_release() {
+            gh api --paginate "repos/$REPO/releases" \
+              | jq -s --arg tag "$TAG" '[add[] | select(.tag_name == $tag)]'
+          }
+          rel=$(find_release)
+          count=$(jq length <<<"$rel")
+
+          notes="Unsigned draft staged by $SERVER_URL/$REPO/actions/runs/$RUN_ID from $COMMIT. Not a release: release-manifest.json and its signature are added after offline review and signing (docs/admin/release-signing.md)."
+
+          if [ "$count" -eq 0 ]; then
+            gh release create "$TAG" --repo "$REPO" --draft --verify-tag \
+              --title "$TAG" --notes "$notes" "${files[@]}"
+          elif [ "$count" -eq 1 ]; then
+            [ "$(jq -r '.[0].draft' <<<"$rel")" = true ] \
+              || fail "release $TAG is published; it is never modified (a fix is a new version)"
+            id=$(jq -r '.[0].id' <<<"$rel")
+            # Refuse extra assets: a manifest or signature means signing
+            # already happened, and anything else would be a stale payload.
+            extra=$(comm -13 <(printf '%s\n' "$names") <(jq -r '.[0].assets[].name' <<<"$rel" | sort))
+            [ -z "$extra" ] || fail "draft $TAG has assets this build does not produce (remove them by hand): ${extra//$'\n'/ }"
+            [ "$(gh api "repos/$REPO/releases/$id" --jq .draft)" = true ] \
+              || fail "release $TAG was published meanwhile; not modified"
+            gh release upload "$TAG" --repo "$REPO" --clobber "${files[@]}"
+          else
+            fail "$count releases carry tag $TAG"
+          fi
+
+          # Afterwards: still exactly one draft, with exactly our bytes.
+          rel=$(find_release)
+          [ "$(jq length <<<"$rel")" -eq 1 ] || fail "release $TAG not found after upload"
+          [ "$(jq -r '.[0].draft' <<<"$rel")" = true ] || fail "release $TAG is no longer a draft"
+          [ "$(jq -r '.[0].assets[].name' <<<"$rel" | sort)" = "$names" ] || fail "draft assets differ from payloads/"
+          for f in "${files[@]}"; do
+            n=${f##*/}
+            size=$(jq -r --arg n "$n" '.[0].assets[] | select(.name == $n) | .size' <<<"$rel")
+            [ "$size" = "$(stat -c %s "$f")" ] || fail "size of $n differs on the draft"
+            digest=$(jq -r --arg n "$n" '.[0].assets[] | select(.name == $n) | .digest // ""' <<<"$rel")
+            if [ -n "$digest" ]; then
+              [ "$digest" = "sha256:$(sha256sum "$f" | cut -d' ' -f1)" ] || fail "digest of $n differs on the draft"
+            fi
+          done
+          echo "draft $TAG holds ${#files[@]} unsigned payloads"
