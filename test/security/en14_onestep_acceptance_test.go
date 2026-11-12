@@ -40,8 +40,11 @@ import (
 // E1–E4). Every attack goes through the real executor RPCs over the Unix
 // socket and through the real download route (internal/web/enroll with the
 // real client-address resolver and limiter) on a loopback test server; the
-// hosts are in-process SSH servers on 127.0.0.1. The NetBird cases
-// (setup key, peer delete, rogue peer) follow with EN-11/EN-12.
+// hosts are in-process SSH servers on 127.0.0.1. The operator's HIGH
+// approval is a virtual security key's assertion submitted through
+// SubmitAssertion, as the one-step approval page does. The NetBird cases
+// follow with EN-16c to EN-16g (EN-11/EN-12 were dropped or reshaped on
+// 2026-11-12).
 
 // en14Origin is the public origin the UI command names.
 const en14Origin = "https://nebula.example.org"
