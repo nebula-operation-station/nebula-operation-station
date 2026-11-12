@@ -896,12 +896,15 @@ does NOS connect **from** (`--from`)?
   - rule (b) (as00ij; previously "records a request and then returns
     an error … never as rejected", so a harness that decided accepted
     from "final request recorded" and ignored the returned error
-    passed): a fake non-path argument (kind `id`) whose run records
-    the entry's **final request** and then returns an error must fail
-    as a harness error naming harness entry and argument, never as
-    rejected and never as accepted; a harness that classifies it as
-    accepted (final request recorded, error ignored) or as rejected
-    (error, recorder not consulted) fails the meta-test;
+    passed): two fake non-path arguments (kind `id`), one whose run
+    records the entry's **final request** and one whose run records
+    only other traffic (a request that is not the final request), each
+    then returning an error, must each fail as a harness error naming
+    harness entry and argument, never as rejected and never as
+    accepted; a harness that classifies either as accepted (final
+    request recorded, error ignored) or as rejected (error, recorder
+    not consulted, or only the final request consulted) fails the
+    meta-test (as00ik; as00ij kept only the final-request fake);
   - rule (c): a fake `in-path` argument and two fake `trust-path`
     arguments, one for `pve remote add --ca-file` and one for
     `pve remote repin --ca-file`, that each return an error before any
@@ -927,23 +930,27 @@ does NOS connect **from** (`--from`)?
     harness runs the rejection checks after the `MAX − 1` run): a fake
     `canary-range` entry whose every run (`MAX`, `MAX`, `MAX − 1` and
     the rejection checks `MAX + 1`, `47000 + m`, `MIN − 1`) first
-    looks at the objects the harness handed it and, if its recorders
-    or fake executor hold a call or its working directory holds a
-    marker file, records the final request and returns an error;
-    otherwise it creates a marker file in its working directory and
-    then, for `MAX`, `MAX` and `MAX − 1`, returns no error after
-    recording the final request with the value in its expected field
-    (passing the distinctive check) and, for the rejection values,
-    returns an error without traffic. The fake records the final
-    request by exactly one call to its fake executor that sends that
-    request, so after an accepted run both its recorders and its fake
-    executor hold a call, and a rejection value calls neither. It must
-    pass. A harness that hands a run a recorder or fake executor an
-    earlier accepted run used, or a working directory any earlier run
-    used, fails it (a later accepted run becomes a harness error, a
-    later rejection check records traffic); a recorder or fake
-    executor shared only with earlier rejection checks is not caught,
-    because a rejection value calls neither;
+    looks at the objects the harness handed it and, if its recording
+    dialer, its HTTP transport or its fake executor holds a call or its
+    working directory holds a marker file, records the final request
+    and returns an error; otherwise it creates a marker file in its
+    working directory and then, for `MAX`, `MAX` and `MAX − 1`, returns
+    no error after recording the final request with the value in its
+    expected field (passing the distinctive check) and, for the
+    rejection values, returns an error without traffic. On an accepted
+    run the fake makes exactly one call through each of the three: one
+    other request through each of two of them, then the final request
+    through the third (as00ik; previously one fake-executor call
+    only, which over the in-memory connection need not pass through the
+    recording dialer or HTTP transport), so after an accepted run its
+    recording dialer, HTTP transport and fake executor each hold a
+    call, and a rejection value calls none of them. It must pass. A
+    harness that hands a run a recorder or fake executor an earlier
+    accepted run used, or a working directory any earlier run used,
+    fails it (a later accepted run becomes a harness error, a later
+    rejection check records traffic); a recorder or fake executor
+    shared only with earlier rejection checks is not caught, because a
+    rejection value calls none of them;
   - confirmation rerun: a fake `number` argument whose first run is
     accepted with a `47000 + m` hit, and whose rerun with `48000 + m`
     returns **no error and sends nothing**, must fail as a harness
@@ -962,9 +969,13 @@ does NOS connect **from** (`--from`)?
     catches a shared `backup.System` recorder only in the after order,
     because a correct control run records no call, and never a shared
     fake executor or working directory) a fake `restore --identity`
-    harness entry whose every run (canary and control) first looks at
-    its fake `backup.System`, fake executor and working directory and,
-    if any of them holds a call or a marker file, returns an error
+    harness entry (a test function the harness calls in place of
+    `restoreWith`, handing it the per-run objects it creates for every
+    run, a fresh fake executor included, although `restoreWith` itself
+    takes no dial or executor; as00ik, previously unstated) whose every
+    run (canary and control) first looks at its fake `backup.System`,
+    fake executor and working directory and, if any of them holds a
+    call or a marker file, returns an error
     other than `*age.NoIdentityMatchError` after a `Stop` call;
     otherwise it creates a marker file in its working directory, makes
     one call to its fake executor, and then behaves like the real
