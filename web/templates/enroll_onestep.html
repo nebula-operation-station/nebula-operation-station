@@ -1,0 +1,133 @@
+{{define "content"}}
+{{with .Onestep}}
+<h1>Add host (one step)</h1>
+<p id="message" class="message" role="status" aria-live="polite"></p>
+{{if .Error}}<p class="status status--error" role="alert">{{.Error}}</p>{{end}}
+
+{{if eq .Step "dialog"}}
+{{if not .Privileged}}
+<section class="panel" aria-label="Privileged session required">
+  <p class="status status--pending">Creating an enrollment offer needs a privileged session opened from this web session.
+     Open it on the dashboard with your security key, then come back.</p>
+</section>
+{{else}}
+<section class="panel" aria-label="New enrollment offer">
+  <p class="hint">NOS creates a single-use offer, valid for 15 minutes. You run one command on the new host; the script prints a
+     pairing code that you type in here. The executor compares the code with the key the host presents and you approve the pin with
+     your security key.</p>
+  {{if .Hosts}}
+  <form id="onestep-create" method="post" action="/inventory/enroll/onestep">
+    <label>Host
+      <select name="host" required>
+        {{range .Hosts}}<option value="{{.ID}}"{{if .Selected}} selected{{end}}>{{.ID}} ({{.Name}})</option>{{end}}
+      </select>
+    </label>
+    <label>SSH user <input type="text" name="ssh_user" value="{{.SSHUser}}" size="12" maxlength="32" autocomplete="off" spellcheck="false" required></label>
+    <label>Credential <input type="text" name="credential" value="{{.Credential}}" size="18" maxlength="64" autocomplete="off" spellcheck="false" required></label>
+    <label class="choice"><input type="checkbox" name="sudo" value="1"{{if .Sudo}} checked{{end}}> Grant the user sudo without password</label>
+    <div class="actions"><button type="submit" class="button">Create offer</button></div>
+  </form>
+  {{else}}
+  <p>Every inventory host has a pinned key. Add the new host to the <a href="/inventory">inventory</a> first.</p>
+  {{end}}
+</section>
+{{end}}
+
+{{else if eq .Step "offer"}}
+<section class="panel" aria-label="Offer">
+  <table class="kv">
+    <tr><th>Host</th><td>{{.HostID}} ({{.HostName}})</td></tr>
+    <tr><th>SSH user</th><td>{{.SSHUser}}{{if .OfferSudo}} (sudo){{end}}</td></tr>
+    <tr><th>Credential</th><td>{{.Credential}}</td></tr>
+    <tr><th>Valid until</th><td>{{timeTag .Expires}}</td></tr>
+    <tr><th>Script SHA-256</th><td><code>{{.SHA256}}</code></td></tr>
+  </table>
+</section>
+{{if .CommandSudo}}
+<section class="panel" aria-label="Command">
+  <h2>1. Run this on the host</h2>
+  <p class="hint">Paste it into a POSIX shell (bash, dash, zsh; in fish start <code>sh</code> first) as a user with <code>sudo</code>.
+     It downloads the script once into a private temporary directory, checks its SHA-256 and only then runs it.</p>
+  <pre class="command" id="onestep-cmd-sudo">{{.CommandSudo}}</pre>
+  <p class="hint">Logged in as root without <code>sudo</code>:</p>
+  <pre class="command" id="onestep-cmd-root">{{.CommandRoot}}</pre>
+  <p class="hint"><a href="{{.Path}}/script" target="_blank" rel="noopener noreferrer">Show script</a> shows the script for review without
+     using up the offer. The setup-key line, if any, reads <code>&lt;netbird-setup-key-withheld&gt;</code>; apart from that it is the
+     script the command downloads, and the SHA-256 above is the hash of the downloaded script.</p>
+  <form method="post" action="{{.Path}}/download" class="inline-form">
+    <button type="submit" class="button button--secondary">Download in browser</button>
+    <span class="hint">Only for hosts that cannot reach NOS: this uses up the offer. Copy the file to the host once (scp or paste),
+      check it with <code>sha256sum</code> and run it as root.</span>
+  </form>
+</section>
+<section class="panel" aria-label="Pairing code">
+  <h2>2. Enter the pairing code</h2>
+  <p class="status status--pending"><strong>Trust on first use:</strong> the code is only as authentic as the session in which you read it.
+     For an internet-facing or remote host, read it on the provider's web console or over SSH with a verified <code>known_hosts</code>
+     entry, not over a first SSH login whose host key you accepted unchecked.</p>
+  <form id="onestep-code" method="post" action="{{.Path}}/code" novalidate>
+    <label>Pairing code
+      <input type="text" name="code" id="onestep-code-input" value="{{.Code}}" size="32" maxlength="64" autocomplete="off"
+             autocapitalize="characters" spellcheck="false" placeholder="XXXXX-XXXXX-XXXXX-XXXXX-XXXXX" required>
+    </label>
+    <p id="onestep-code-msg" class="hint" aria-live="polite"></p>
+    <fieldset>
+      <legend>Endpoint to probe</legend>
+      {{range $i, $e := .Endpoints}}
+      <label class="choice"><input type="radio" name="endpoint" value="{{$e}}"{{if eq $i 0}} checked{{end}}> {{$e}} (inventory)</label>
+      {{end}}
+      <label class="choice"><input type="radio" name="endpoint" value="other"{{if not .Endpoints}} checked{{end}}> Address the script printed:
+        <input type="text" name="endpoint_other" value="{{.Other}}" size="28" maxlength="262" autocomplete="off" spellcheck="false"></label>
+    </fieldset>
+    <div class="actions"><button type="submit" class="button">Check code</button></div>
+  </form>
+</section>
+{{end}}
+<form method="post" action="{{.Path}}/revoke"><button type="submit" class="button button--secondary">Revoke offer</button></form>
+
+{{else if eq .Step "approve"}}
+{{with .Paired}}
+<section class="panel" aria-label="Approve the pin">
+  <h2>Approve the pin</h2>
+  <p class="status status--ok">Code matched: the key the host presents matches the pairing code from the host.</p>
+  <table class="kv">
+    <tr><th>Host</th><td>{{$.Onestep.HostID}} ({{$.Onestep.HostName}})</td></tr>
+    <tr><th>Endpoint</th><td>{{.Endpoint}}{{if .EndpointToAdd}} (will be added to the inventory host){{end}}</td></tr>
+    <tr><th>SSH user</th><td>{{$.Onestep.SSHUser}}</td></tr>
+    <tr><th>Credential</th><td>{{$.Onestep.Credential}}</td></tr>
+    <tr><th>Key type</th><td>{{.KeyType}}</td></tr>
+    <tr><th>Fingerprint</th><td><code>{{.Fingerprint}}</code></td></tr>
+    <tr><th>Pairing code</th><td><code>{{.Code}}</code> (code matched)</td></tr>
+  </table>
+  <p class="hint">The same binding is shown by <code>nebula approve</code> on the executor host.</p>
+  <div id="onestep-approval" data-commit="{{$.Onestep.Path}}/commit" data-options="{{.OptionsJSON}}">
+    <div class="actions">
+      <button type="button" id="onestep-approve" class="button">Approve with security key</button>
+      <button type="button" id="onestep-approved-cli" class="button button--secondary">Approved with nebula approve</button>
+    </div>
+    <p id="onestep-result" aria-live="polite"></p>
+  </div>
+</section>
+{{end}}
+
+{{else if eq .Step "mismatch"}}
+<section class="panel" aria-label="Code mismatch">
+  <p class="status status--error" role="alert">{{.Mismatch}}</p>
+  {{with .Paired}}
+  <table class="kv">
+    <tr><th>Endpoint</th><td>{{.Endpoint}}</td></tr>
+    <tr><th>Presented key</th><td>{{.KeyType}} <code>{{.Fingerprint}}</code></td></tr>
+  </table>
+  {{end}}
+  <p>The offer has failed and the endpoint was not pinned. <a href="/inventory/enroll/onestep?host={{.HostID}}">Create a new offer</a>;
+     the script is safe to run again and prints a new code.</p>
+</section>
+
+{{else}}
+<section class="panel" aria-label="Offer finished">
+  <p>This offer is {{.FinalState}}. <a href="/inventory/enroll/onestep">Create a new offer</a></p>
+</section>
+{{end}}
+{{end}}
+<p><a href="/inventory">Back to the inventory</a></p>
+{{end}}
