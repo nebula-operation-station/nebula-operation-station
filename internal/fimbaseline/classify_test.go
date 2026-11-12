@@ -207,19 +207,18 @@ func TestSymlinkOutsideSSHPositionsKeepsClassification(t *testing.T) {
 	}
 }
 
-// sshFileLinkCases are fixed SSH file positions (ADR 0015 D9 "SSH login
-// files", "sshd command-line configuration sources") and sshd unit or
-// drop-in positions that a symlink must not hide behind.
+// sshFileLinkCases are fixed SSH configuration and login file positions (ADR
+// 0015 D9 "SSH login files", "sshd command-line configuration sources") that
+// a symlink must not hide behind. sshd units and drop-ins are not listed:
+// they are per-entry critical only (TestStandardSystemdLayoutKeepsClassification).
 var sshFileLinkCases = []string{
 	"/etc/ssh/sshd_config", "/etc/default/ssh", "/etc/passwd", "/etc/nsswitch.conf",
 	"/etc/hosts.equiv", "/etc/krb5.conf",
 	"/root/.ssh/authorized_keys", "/home/bob/.ssh/authorized_keys2", "/home/bob/.ssh/known_hosts",
-	"/etc/systemd/system/ssh.service", "/usr/local/lib/systemd/system/ssh.service.d",
-	"/etc/systemd/system/ssh.service.d/opts.conf",
 }
 
 // TestSymlinkAtSSHFilePositionMakesRunUnclassifiable pins ADR 0015 D9: a
-// symlink at a fixed SSH file or drop-in position makes the run
+// symlink at a fixed SSH configuration or login file position makes the run
 // unclassifiable (fail closed until resolution), so a change of the file
 // behind it is never classed normal.
 func TestSymlinkAtSSHFilePositionMakesRunUnclassifiable(t *testing.T) {
@@ -279,18 +278,73 @@ func TestNonFileAtSSHDirectoryPositionKeepsClassification(t *testing.T) {
 	}
 }
 
-// TestUsrmergeLibLinkIsKnownLimit pins the current fail-closed interim for
-// the usrmerge /lib -> usr/lib link (ADR 0015 D5, D9): /lib is an SSH
-// position, and resolving it needs records of /usr, which the scan does not
-// record, so every deviation of such a run is unclassifiable. This is a named
-// limit ("Honest limits"): safe, but ClassNormal stays unreachable on usrmerge
-// hosts until resolution is implemented.
-func TestUsrmergeLibLinkIsKnownLimit(t *testing.T) {
-	lib := symlink("/lib", "usr/lib")
+// TestStandardSystemdLayoutKeepsClassification pins the round-1 regression
+// fix. On normal Debian and usrmerge hosts the usrmerge link /lib -> usr/lib
+// (ADR 0015 D5) and the ordinary sshd enablement and alias links
+// (ssh.service in *.wants/, sshd.service in /etc/systemd/system) are recorded.
+// They must not make the run unclassifiable, so an unrelated change stays
+// ClassNormal. The links themselves stay critical: sshd units are critical-
+// class by fixed pattern (D7 (a)).
+func TestStandardSystemdLayoutKeepsClassification(t *testing.T) {
+	layout := []fimscan.Record{
+		symlink("/lib", "usr/lib"), symlink("/bin", "usr/bin"), symlink("/sbin", "usr/sbin"),
+		file("/usr/lib/systemd/system/ssh.service", 7),
+		symlink("/etc/systemd/system/multi-user.target.wants/ssh.service", "/lib/systemd/system/ssh.service"),
+		symlink("/etc/systemd/system/sshd.service", "/lib/systemd/system/ssh.service"),
+	}
 	app1, app2 := file("/opt/app/bin/run", 1), file("/opt/app/bin/run", 2)
-	cl := newClassifier([]fimscan.Record{lib, app1}, []fimscan.Record{lib, app2}, usable())
+	cl := newClassifier(append([]fimscan.Record{app1}, layout...), append([]fimscan.Record{app2}, layout...), usable())
+	if c, r := cl.classify([]byte("/opt/app/bin/run"), &app1, &app2); c != ClassNormal || r != 0 {
+		t.Fatalf("unrelated change: got %v/%b, want normal/0", c, r)
+	}
+	for _, p := range []string{"/etc/systemd/system/multi-user.target.wants/ssh.service", "/etc/systemd/system/sshd.service"} {
+		rec := symlink(p, "/lib/systemd/system/ssh.service")
+		if c, r := cl.classify([]byte(p), &rec, &rec); c != ClassCritical || r&RuleUnclassifiable != 0 {
+			t.Errorf("%s: got %v/%b, want critical without unclassifiable", p, c, r)
+		}
+	}
+	// A retargeted usrmerge link is itself a per-entry critical deviation.
+	libOld, libNew := symlink("/lib", "usr/lib"), symlink("/lib", "/tmp/evil")
+	if c, r := cl.classify([]byte("/lib"), &libOld, &libNew); c != ClassCritical || r&RuleSSHSymlink == 0 || r&RuleUnclassifiable != 0 {
+		t.Errorf("/lib retargeted: got %v/%b, want critical with RuleSSHSymlink and without unclassifiable", c, r)
+	}
+}
+
+// TestNonFileAtSSHUnitPositionIsNotRunWide: a directory where an sshd unit
+// file is expected is critical for that entry, but it does not make the
+// unrelated deviations of the run unclassifiable.
+func TestNonFileAtSSHUnitPositionIsNotRunWide(t *testing.T) {
+	unitDir := dir("/etc/systemd/system/ssh.service")
+	app1, app2 := file("/opt/app/bin/run", 1), file("/opt/app/bin/run", 2)
+	cl := newClassifier([]fimscan.Record{app1}, []fimscan.Record{app2, unitDir}, usable())
+	if c, r := cl.classify([]byte("/opt/app/bin/run"), &app1, &app2); c != ClassNormal || r != 0 {
+		t.Fatalf("unrelated change: got %v/%b, want normal/0", c, r)
+	}
+	if c, r := cl.classify([]byte("/etc/systemd/system/ssh.service"), nil, &unitDir); c != ClassCritical || r&RuleSSHSymlink == 0 {
+		t.Fatalf("the entry itself: got %v/%b", c, r)
+	}
+}
+
+// TestSSHConfigSymlinkStillFailsClosedOnUsrmerge: the usrmerge exemption does
+// not weaken the configuration rule. A symlink at /etc/ssh/sshd_config on a
+// usrmerge host still makes every deviation unclassifiable.
+func TestSSHConfigSymlinkStillFailsClosedOnUsrmerge(t *testing.T) {
+	lib := symlink("/lib", "usr/lib")
+	cfg := symlink("/etc/ssh/sshd_config", "/srv/sshd_config")
+	app1, app2 := file("/opt/app/bin/run", 1), file("/opt/app/bin/run", 2)
+	cl := newClassifier([]fimscan.Record{lib, cfg, app1}, []fimscan.Record{lib, cfg, app2}, usable())
 	if c, r := cl.classify([]byte("/opt/app/bin/run"), &app1, &app2); c != ClassCritical || r != RuleUnclassifiable {
 		t.Fatalf("got %v/%b, want critical/unclassifiable", c, r)
+	}
+}
+
+// TestSSHFileExactIsCriticalByFixedPath guards against drift: every SSH file
+// position named literally is also a fixed critical-class path (D9).
+func TestSSHFileExactIsCriticalByFixedPath(t *testing.T) {
+	for p := range sshFileExact {
+		if !fixedCritical(p) {
+			t.Errorf("%s: SSH file position but not critical-class", p)
+		}
 	}
 }
 
