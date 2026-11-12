@@ -865,6 +865,24 @@ func (c *Client) ListEnrollOffers(ctx context.Context, in *pb.ListEnrollOffersRe
 	return resp, mapCallError(ctx, err)
 }
 
+// SubmitPairingCode submits an offer's pairing code and endpoint; the
+// executor probes the endpoint once.
+func (c *Client) SubmitPairingCode(ctx context.Context, in *pb.SubmitPairingCodeRequest, opts ...grpc.CallOption) (*pb.SubmitPairingCodeResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout+time.Minute)
+	defer cancel()
+	resp, err := c.rpc.SubmitPairingCode(ctx, in, opts...)
+	return resp, mapCallError(ctx, err)
+}
+
+// CommitPairedEnroll commits an approved paired enrollment (re-probe, pin,
+// login test).
+func (c *Client) CommitPairedEnroll(ctx context.Context, in *pb.CommitPairedEnrollRequest, opts ...grpc.CallOption) (*pb.CommitPairedEnrollResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout+time.Minute)
+	defer cancel()
+	resp, err := c.rpc.CommitPairedEnroll(ctx, in, opts...)
+	return resp, mapCallError(ctx, err)
+}
+
 // Compile-time check: the client must implement the generated interface so
 // that a generated-code change breaks the build here.
 var _ pb.ExecutorServiceClient = (*Client)(nil)
