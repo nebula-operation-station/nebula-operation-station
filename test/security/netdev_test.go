@@ -1168,6 +1168,56 @@ func TestNetDevCompromisedServerCannotWidenOrExtendLeases(t *testing.T) {
 	e.requireNoSecret()
 }
 
+// TestNetDevLeaseAheadOfRegistryAuthorizesNothing (ND-21 1): a lease
+// whose credential_version or trust_generation is ahead of the registry
+// binds an identity the device does not have. Even approved, alone or all
+// together, such leases authorize no read, for any of their reads. A lease
+// at the registry's current identity does read, so the refusals come from
+// the lease binding, not from the device.
+//
+// Open (nd21g report): such a lease becomes live once an admin rotation
+// brings the registry to the version it names, because the device
+// lifecycle's revocation (NetDevAdmin.Revoke) revokes provider grants
+// only, not device read leases. The assertion for that belongs here once
+// the executor revokes device leases on rotation, block, re-pin and
+// removal.
+func TestNetDevLeaseAheadOfRegistryAuthorizesNothing(t *testing.T) {
+	e := newNDEnv(t, peercred.RoleServer)
+	cbsVersion := pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION
+	before := e.device()
+	if before.GetCredentialVersion() != 1 || before.GetTrustGeneration() != 1 {
+		t.Fatalf("fixture: device at credential version %d, trust generation %d; want 1, 1", before.GetCredentialVersion(), before.GetTrustGeneration())
+	}
+	n := e.authorizedReads()
+
+	ahead := []struct {
+		name string
+		edit func(*permit.NetDeviceTarget)
+	}{
+		{"credential_version one ahead", func(t *permit.NetDeviceTarget) { t.CredentialVersion++ }},
+		{"credential_version far ahead", func(t *permit.NetDeviceTarget) { t.CredentialVersion = 1<<53 - 1 }},
+		{"trust_generation one ahead", func(t *permit.NetDeviceTarget) { t.TrustGeneration++ }},
+		{"trust_generation far ahead", func(t *permit.NetDeviceTarget) { t.TrustGeneration = 1 << 48 }},
+		{"both ahead", func(t *permit.NetDeviceTarget) { t.CredentialVersion++; t.TrustGeneration++ }},
+	}
+	for _, tc := range ahead {
+		tgt := e.target(schedgrant.NetDeviceReadCBSVersion, schedgrant.NetDeviceReadCBSMACTable)
+		tc.edit(&tgt)
+		e.approve(e.leaseDoc(2*time.Hour, 24, 900, tgt))
+		e.wantRefused("read on a lease with "+tc.name, n, e.read(ndDevice, cbsVersion), codes.PermissionDenied)
+	}
+	// All of them together still authorize nothing, for either read.
+	e.wantRefused("read with every ahead lease approved", n, e.read(ndDevice, cbsVersion), codes.PermissionDenied)
+	e.wantRefused("MAC table read with every ahead lease approved", n, e.read(ndDevice, pb.NetDeviceRead_NET_DEVICE_READ_CBS_MAC_TABLE), codes.PermissionDenied)
+	// The approvals changed nothing in the registry.
+	e.requireRegistryUnchanged(before.GetTrustGeneration(), before.GetCredentialVersion())
+
+	// Control: a lease at the registry's current identity reads.
+	e.approve(e.leaseDoc(time.Hour, 24, 900, e.target(schedgrant.NetDeviceReadCBSVersion)))
+	e.wantAuthorized(n, e.read(ndDevice, cbsVersion))
+	e.requireNoSecret()
+}
+
 // approvedGrant returns the stored lease id as the server sees it.
 func (e *ndEnv) approvedGrant(id string) *pb.ReadGrant {
 	e.t.Helper()
