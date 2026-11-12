@@ -489,6 +489,45 @@ func TestCoverageUnknownNeverClean(t *testing.T) {
 	}
 }
 
+// TestMissingFeedSnapshotIsGap: a covered ecosystem whose feed snapshot is
+// not in the DB yields a gap, never an empty (clean-looking) result.
+func TestMissingFeedSnapshotIsGap(t *testing.T) {
+	tests := []struct {
+		name string
+		feed string
+		sub  Subject
+	}{
+		{"debian tracker", FeedDebianTracker, host("debian:bookworm", comp("openssl", "3.0.14-1~deb12u2"))},
+		{"osv ubuntu", FeedOSVUbuntu, host("ubuntu:24.04", comp("openssl", "3.0.13-0ubuntu3.4"))},
+		{"osv alpine", FeedOSVAlpine, Subject{Kind: vulnfinding.SubjectImage, Ref: vulnfinding.SubjectRef{ID: "i1", ImageDigest: "sha256:" + strings.Repeat("ab", 32)},
+			Ecosystem: "alpine:3.20", Components: []Component{comp("openssl", "3.3.2-r0")}}},
+		{"cisco csaf", FeedCiscoCSAF, Subject{Kind: vulnfinding.SubjectDevice, Ref: vulnfinding.SubjectRef{ID: "d1"}, Ecosystem: "vendor:cisco:cbs", Device: &Device{Model: "CBS350-24P", Firmware: "3.4.0.17"}}},
+		{"paloalto csaf", FeedPaloAltoCSAF, Subject{Kind: vulnfinding.SubjectDevice, Ref: vulnfinding.SubjectRef{ID: "d1"}, Ecosystem: "vendor:paloalto:panos", Device: &Device{Model: "PA-440", Firmware: "10.2.9"}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			db := NewDB()
+			for i, f := range vulnfeed.Feeds() {
+				if f.Name == tc.feed {
+					continue
+				}
+				if err := db.SetFeed(f.Name, FeedRef{SourceID: f.SourceID, SnapshotID: snap(i + 1), Integrity: f.Integrity}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			r := mustMatch(t, db, tc.sub)
+			want := Gap{Kind: tc.sub.Kind, Ref: tc.sub.Ref, Ecosystem: tc.sub.Ecosystem, Reason: GapFeedMissing}
+			if len(r.Findings) != 0 || !slices.Contains(r.Gaps, want) {
+				t.Fatalf("result = %+v, want gap %+v", r, want)
+			}
+			// With the snapshot set, the same subject is not a feed gap.
+			if r := mustMatch(t, newDB(t), tc.sub); hasGap(r, "", GapFeedMissing) {
+				t.Fatalf("feed gap with every snapshot set: %+v", r.Gaps)
+			}
+		})
+	}
+}
+
 func csafProduct(id, eco, version, train string) vulnfeed.CSAFProduct {
 	return vulnfeed.CSAFProduct{ProductID: id, Name: id, Version: version, Train: train, Ecosystem: eco}
 }

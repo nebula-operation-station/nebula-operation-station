@@ -58,13 +58,22 @@ func (m *matcher) subject(s Subject) {
 		return
 	}
 	var scheme vulnver.Scheme
+	var feed string
 	switch {
-	case debianEcoRe.MatchString(s.Ecosystem), ubuntuEcoRe.MatchString(s.Ecosystem):
-		scheme = vulnver.SchemeDpkg
+	case debianEcoRe.MatchString(s.Ecosystem):
+		scheme, feed = vulnver.SchemeDpkg, FeedDebianTracker
+	case ubuntuEcoRe.MatchString(s.Ecosystem):
+		scheme, feed = vulnver.SchemeDpkg, FeedOSVUbuntu
 	case alpineEcoRe.MatchString(s.Ecosystem):
-		scheme = vulnver.SchemeAPK
+		scheme, feed = vulnver.SchemeAPK, FeedOSVAlpine
 	default:
 		m.gap(s, "", "", GapEcosystemUnknown)
+		return
+	}
+	if _, ok := m.db.feeds[feed]; !ok {
+		// A covered ecosystem without its feed snapshot is unknown, never
+		// clean.
+		m.gap(s, "", "", GapFeedMissing)
 		return
 	}
 	hostKernel := s.Kind == vulnfinding.SubjectHost && scheme == vulnver.SchemeDpkg
@@ -163,11 +172,9 @@ func (m *matcher) component(s Subject, scheme vulnver.Scheme, c Component, insta
 }
 
 // debian applies the Security Tracker entries of (source package, release)
-// with the D4 state table.
+// with the D4 state table. The caller has checked that the tracker
+// snapshot is set.
 func (m *matcher) debian(s Subject, c Component, basis string, installed []string) {
-	if _, ok := m.db.feeds[FeedDebianTracker]; !ok {
-		return
-	}
 	release := debianEcoRe.FindStringSubmatch(s.Ecosystem)[1]
 	for _, e := range m.db.debian[debKey{c.SourcePackage, release}] {
 		mp, err := vulnfinding.MapDebianTrackerState(e.state)
@@ -225,10 +232,8 @@ func alpineOSVEcosystems(eco string) []string {
 // osv evaluates the OSV records of the subject's release for c's source
 // package. ESM/Pro ecosystems are never consulted (D4: they count only
 // when the host has that archive enabled, which the export does not say).
+// The caller has checked that the feed's snapshot is set.
 func (m *matcher) osv(s Subject, scheme vulnver.Scheme, c Component, basis string, installed []string, feed string, ecos []string, mb vulnfinding.MatchBasis) {
-	if _, ok := m.db.feeds[feed]; !ok {
-		return
-	}
 	var hits []osvHit
 	for _, eco := range ecos {
 		for _, h := range m.db.osvIndex[osvKey{eco, c.SourcePackage}] {

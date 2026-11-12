@@ -39,6 +39,9 @@ func (m *matcher) device(s Subject) {
 		return
 	}
 	if _, ok := m.db.feeds[feed]; !ok {
+		// A covered ecosystem without its feed snapshot is unknown, never
+		// clean.
+		m.gap(s, "", "", GapFeedMissing)
 		return
 	}
 	docs := make([]*vulnfeed.CSAFAdvisory, 0, len(m.db.csaf))
