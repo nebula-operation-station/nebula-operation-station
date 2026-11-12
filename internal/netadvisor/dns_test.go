@@ -129,6 +129,8 @@ func TestDNSBypassRules(t *testing.T) {
 	dropped.Dropped = s("<dropped:profile>")
 	negated := rule("r", allow, s("lan"), s("wan"), s("any"), s("any"), s("any"))
 	negated.NegateDestination = nr.Collected(true)
+	negatedHost := rule("r", allow, s("lan"), s("wan"), s("any"), s("9.9.9.9"), s("any"))
+	negatedHost.NegateDestination = nr.Collected(true)
 	sched := rule("r", allow, s("lan"), s("wan"), s("any"), s("any"), s("any"))
 	sched.Schedule = nr.Collected("weekdays")
 	tests := []struct {
@@ -146,6 +148,15 @@ func TestDNSBypassRules(t *testing.T) {
 		{"other app only", withApp(rule("r", allow, s("lan"), s("wan"), s("any"), s("any"), s("any")), "ssl"), StateOK, "does not permit DNS"},
 		{"web service only", rule("r", allow, s("lan"), s("wan"), s("any"), s("any"), s("svc-web")), StateOK, "does not permit DNS"},
 		{"destination restricted", rule("r", allow, s("lan"), s("wan"), s("any"), s("9.9.9.9"), s("svc-dns")), StateOK, "destination restricted"},
+		{"small destination range restricted", rule("r", allow, s("lan"), s("wan"), s("any"), s("9.9.9.0/24"), s("svc-dns")), StateOK, "destination restricted"},
+		{"destination 0.0.0.0/0 is not restricted", rule("r", allow, s("lan"), s("wan"), s("any"), s("0.0.0.0/0"), s("svc-dns")), StateFinding, "too broad"},
+		{"large public destination is not restricted", rule("r", allow, s("lan"), s("wan"), s("any"), s("8.0.0.0/8"), s("svc-dns")), StateFinding, "too broad"},
+		{"broad range next to a host is not restricted", rule("r", allow, s("lan"), s("wan"), s("any"), s("9.9.9.9", "1.0.0.0/16"), s("svc-dns")), StateFinding, "too broad"},
+		{"negated destination is not restricted", negatedHost, StateFinding, "negated"},
+		{"application group cannot decide", withApp(rule("r", allow, s("lan"), s("wan"), s("any"), s("any"), s("any")), "office-apps"), StateCannotDecide, "office-apps"},
+		{"application filter next to known app cannot decide", withApp(rule("r", allow, s("lan"), s("wan"), s("any"), s("any"), s("svc-dns")), "ssl", "filter-risky"), StateCannotDecide, "filter-risky"},
+		{"application group with application-default cannot decide", withApp(rule("r", allow, s("lan"), s("wan"), s("any"), s("any"), s("application-default")), "office-apps"), StateCannotDecide, "office-apps"},
+		{"application group on a non-dns service", withApp(rule("r", allow, s("lan"), s("wan"), s("any"), s("any"), s("svc-web")), "office-apps"), StateOK, "does not permit DNS"},
 		{"negated destination any", negated, StateOK, "destination restricted"},
 		{"internal only", rule("r", allow, s("lan"), s("dmz"), s("any"), s("any"), s("any")), StateOK, "not from an internal"},
 		{"inbound from wan", rule("r", allow, s("wan"), s("wan"), s("any"), s("any"), s("any")), StateOK, "not from an internal"},
@@ -210,6 +221,34 @@ func TestDNSBypassFailSafe(t *testing.T) {
 	}
 }
 
+func TestDNSDestinationRangeSize(t *testing.T) {
+	a := netip.MustParseAddr
+	tests := []struct {
+		name     string
+		from, to string
+		small    bool
+	}{
+		{"single host", "9.9.9.9", "9.9.9.9", true},
+		{"ipv4 /24", "9.9.9.0", "9.9.9.255", true},
+		{"ipv4 257 addresses", "9.9.9.0", "9.9.10.0", false},
+		{"ipv4 all", "0.0.0.0", "255.255.255.255", false},
+		{"ipv6 /120", "2001:db8::", "2001:db8::ff", true},
+		{"ipv6 /64", "2001:db8::", "2001:db8::ffff:ffff:ffff:ffff", false},
+		{"ipv6 all", "::", "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", false},
+		{"mixed families", "9.9.9.9", "2001:db8::1", false},
+		{"reversed", "9.9.9.10", "9.9.9.9", false},
+		{"mapped equals ipv4", "::ffff:9.9.9.0", "9.9.9.255", true},
+	}
+	for _, tc := range tests {
+		if got := rangeAtMost(nr.AddrRange{From: a(tc.from), To: a(tc.to)}, MaxRestrictedDNSDestination); got != tc.small {
+			t.Errorf("%s: %v, want %v", tc.name, got, tc.small)
+		}
+	}
+	if smallRanges(nil) || rangeAtMost(nr.AddrRange{}, MaxRestrictedDNSDestination) {
+		t.Error("empty or invalid range counts as restricted")
+	}
+}
+
 func TestSetObservationsRejectsFlows(t *testing.T) {
 	in := newInput(t, labSnapshot(), nr.Field[map[string]ProfileSetting]{})
 	bad := flow("10.0.0.5", "8.8.8.8", "udp", 53)
@@ -221,6 +260,12 @@ func TestSetObservationsRejectsFlows(t *testing.T) {
 		"too many flows":         {Flows: Flows{Flows: make([]Flow, MaxFlows+1)}},
 		"invalid firewall addr":  {FirewallAddrs: FirewallAddrs{Addrs: []netip.Addr{{}}}},
 		"too many firewall addr": {FirewallAddrs: FirewallAddrs{Addrs: make([]netip.Addr, MaxFirewallAddrs+1)}},
+	}
+	// Flow actions are a closed enum: only FlowAllow and FlowDeny.
+	for _, a := range []FlowAction{"", "drop", "reset-both", "reset-client", "reset-server", "Allow", "DENY", "allow "} {
+		f := flow("10.0.0.5", "8.8.8.8", "udp", 53)
+		f.Action = a
+		tests["action "+string(a)] = Observations{Flows: Flows{State: nr.InputFresh, Flows: []Flow{f}}}
 	}
 	for name, o := range tests {
 		if err := in.SetObservations(o); err == nil {

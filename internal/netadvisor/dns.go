@@ -4,6 +4,7 @@ package netadvisor
 
 import (
 	"cmp"
+	"encoding/binary"
 	"fmt"
 	"net/netip"
 	"slices"
@@ -153,16 +154,38 @@ func dnsRule(in *Input, i int, v *netreach.RuleView, ext map[string]bool, extWhy
 			toExt = append(toExt, z)
 		}
 	}
-	switch {
-	case len(fromInt) == 0 || len(toExt) == 0:
+	if len(fromInt) == 0 || len(toExt) == 0 {
 		return set(StateOK, "not from an internal to an external zone")
-	case !v.Destination.Any || v.NegateDestination:
-		return set(StateOK, "destination restricted")
-	case !permitsDNS(v, sr.Application.Value):
-		return set(StateOK, "does not permit DNS")
 	}
-	why := fmt.Sprintf("allow rule permits DNS from internal zone(s) %s to external zone(s) %s without restricting the destination; the designated resolver is the firewall",
-		strings.Join(fromInt, ", "), strings.Join(toExt, ", "))
+	unrestricted := ""
+	switch {
+	case v.Destination.Any && v.NegateDestination:
+		return set(StateOK, "destination restricted (negated any matches nothing)")
+	case v.Destination.Any:
+		unrestricted = "without restricting the destination"
+	case v.NegateDestination:
+		unrestricted = "with a negated destination (everything except the listed addresses)"
+	case !smallRanges(v.Destination.Ranges):
+		unrestricted = fmt.Sprintf("with a destination too broad to count as restricted (a range of more than %d addresses)", MaxRestrictedDNSDestination)
+	default:
+		return set(StateOK, "destination restricted")
+	}
+	switch dns, unknown := permitsDNS(v, sr.Application.Value); dns {
+	case dnsNo:
+		return set(StateOK, "does not permit DNS")
+	case dnsUnknown:
+		names := "(empty list)"
+		if len(unknown) > 0 {
+			names = strings.Join(unknown[:min(len(unknown), MaxCoveringNames)], ", ")
+			if len(unknown) > MaxCoveringNames {
+				names += fmt.Sprintf(" and %d more", len(unknown)-MaxCoveringNames)
+			}
+		}
+		return set(StateCannotDecide, "cannot decide: application(s) "+names+
+			" not resolvable (application group, filter or unknown App-ID); whether the rule permits DNS is unknown")
+	}
+	why := fmt.Sprintf("allow rule permits DNS from internal zone(s) %s to external zone(s) %s %s; the designated resolver is the firewall",
+		strings.Join(fromInt, ", "), strings.Join(toExt, ", "), unrestricted)
 	if len(v.Conditions) > 0 {
 		why += " (conditional: " + strings.Join(v.Conditions, ", ") + ")"
 	}
@@ -194,34 +217,98 @@ func expandZones(s *netreach.Snapshot, l []string) []string {
 	return l
 }
 
-// permitsDNS reports whether an evaluable rule's service and application
-// let DNS through. Applications: "any" or an App-ID whose name starts with
-// "dns" (dns, dns-base, dns-over-tls, ...); a rule limited to other
-// applications does not pass DNS, which App-ID identifies as such. Service:
-// "any", application-default (with a DNS application or "any") or a port
-// range holding a DNS port.
-func permitsDNS(v *netreach.RuleView, apps []string) bool {
-	appOK := false
-	for _, a := range apps {
-		if a == "any" || strings.HasPrefix(strings.ToLower(a), "dns") {
-			appOK = true
-			break
+// MaxRestrictedDNSDestination is the largest number of addresses one
+// destination range of a rule may hold and still count as "destination
+// restricted" in the dns-bypass rule part (one IPv4 /24). A broader range,
+// such as 0.0.0.0/0 or a large public block, does not restrict where DNS
+// goes.
+const MaxRestrictedDNSDestination = 256
+
+// smallRanges reports whether every range holds at most
+// MaxRestrictedDNSDestination addresses. An empty list is not small: it
+// restricts nothing the check can show.
+func smallRanges(rs []netreach.AddrRange) bool {
+	for _, r := range rs {
+		if !rangeAtMost(r, MaxRestrictedDNSDestination) {
+			return false
 		}
 	}
-	if !appOK {
+	return len(rs) > 0
+}
+
+// rangeAtMost reports whether the inclusive range r holds at most n
+// addresses (n >= 1). A range of mixed or invalid families, or with To
+// before From, is not small.
+func rangeAtMost(r netreach.AddrRange, n uint64) bool {
+	from, to := r.From.Unmap(), r.To.Unmap()
+	if !from.IsValid() || !to.IsValid() || from.Is4() != to.Is4() || to.Less(from) {
 		return false
 	}
-	if v.Service.Any || v.Service.ApplicationDefault {
-		return true
+	f, t := from.As16(), to.As16()
+	fHi, fLo := binary.BigEndian.Uint64(f[:8]), binary.BigEndian.Uint64(f[8:])
+	tHi, tLo := binary.BigEndian.Uint64(t[:8]), binary.BigEndian.Uint64(t[8:])
+	if tHi != fHi {
+		return false // more than 2^64 addresses apart
 	}
+	return tLo-fLo < n
+}
+
+// dnsVerdict is what permitsDNS can say about a rule.
+type dnsVerdict int
+
+const (
+	dnsNo dnsVerdict = iota
+	dnsYes
+	dnsUnknown
+)
+
+// nonDNSAppIDs are predefined PAN-OS App-IDs that never carry DNS. PAN-OS
+// identifies DNS as dns, dns-base, dns-over-tls, ... ; a rule limited to
+// these applications does not pass DNS. The list is closed on purpose:
+// every other application name may be an application group or filter
+// (the snapshot has no application definitions) and is not resolvable.
+var nonDNSAppIDs = map[string]bool{
+	"ssl": true, "web-browsing": true, "ssh": true, "ping": true, "icmp": true,
+	"ipv6-icmp": true, "traceroute": true, "ntp": true, "ntp-base": true,
+	"snmp": true, "smtp": true, "imap": true, "pop3": true, "ftp": true,
+	"ms-rdp": true, "quic": true, "ike": true, "ipsec-esp": true,
+	"openvpn": true, "wireguard": true, "syslog": true, "ldap": true,
+	"kerberos": true,
+}
+
+// permitsDNS reports whether an evaluable rule's service and application
+// let DNS through. Service: "any", application-default or a port range
+// holding a DNS port; any other service gives dnsNo whatever the
+// applications are. Applications: "any" or a name starting with "dns"
+// (dns, dns-base, dns-over-tls, ...) gives dnsYes; a list made only of
+// nonDNSAppIDs gives dnsNo. Any other name (an application group, filter,
+// custom or unknown App-ID) cannot be resolved here and gives dnsUnknown
+// with those names, never dnsNo.
+func permitsDNS(v *netreach.RuleView, apps []string) (dnsVerdict, []string) {
+	svcOK := v.Service.Any || v.Service.ApplicationDefault
 	for _, p := range v.Service.Ports {
 		for _, d := range dnsPorts {
 			if p.Protocol == d.Protocol && p.From <= d.Port && d.Port <= p.To {
-				return true
+				svcOK = true
 			}
 		}
 	}
-	return false
+	if !svcOK {
+		return dnsNo, nil
+	}
+	var unknown []string
+	for _, a := range apps {
+		switch {
+		case a == "any" || strings.HasPrefix(strings.ToLower(a), "dns"):
+			return dnsYes, nil
+		case !nonDNSAppIDs[a]:
+			unknown = append(unknown, a)
+		}
+	}
+	if len(unknown) > 0 || len(apps) == 0 {
+		return dnsUnknown, cleanAll(sortedUnique(unknown))
+	}
+	return dnsNo, nil
 }
 
 type flowKey struct {
