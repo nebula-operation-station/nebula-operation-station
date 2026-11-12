@@ -369,7 +369,7 @@ func (a *Agent) assess(ctx context.Context, f FindingFacts, st *runState) Findin
 			msgs = append(msgs, Message{Role: "user", Content: noticeEnvelope(noticeCallTooLarge)})
 			continue
 		}
-		out, err := a.tools.execLookup(call.Name, call.Arguments)
+		out, err := a.tools.execLookup(f.FindingKey, call.Name, call.Arguments)
 		switch {
 		case errors.Is(err, ErrNotFound):
 			out = lookupResult{data: map[string]any{"found": false}}

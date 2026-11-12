@@ -350,6 +350,9 @@ func TestDisabledAssessorMakesNoCallAndNoText(t *testing.T) {
 			t.Fatalf("result %+v", r)
 		}
 	}
+	if logs.Len() != 0 {
+		t.Fatalf("disabled assessor logged: %s", logs.String())
+	}
 	// Also without any LLM configured.
 	if _, err := New(Config{}); err != nil {
 		t.Fatalf("zero disabled config rejected: %v", err)

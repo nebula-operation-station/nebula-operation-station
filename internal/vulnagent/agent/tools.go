@@ -188,9 +188,9 @@ var toolDefs = []ToolDef{
 		json.RawMessage(`{"type":"object","properties":{"advisory_id":{"type":"string","maxLength":64},"source":{"type":"string","maxLength":64}},"required":["advisory_id"],"additionalProperties":false}`)},
 	{ToolPackageHistory, "Record IDs, fixed versions and tracker states for a source package in an ecosystem/release.",
 		json.RawMessage(`{"type":"object","properties":{"ecosystem":{"type":"string","maxLength":64},"source_package":{"type":"string","maxLength":214}},"required":["ecosystem","source_package"],"additionalProperties":false}`)},
-	{ToolBackportCheck, "The deterministic pipeline's version comparison for a finding of this run: basis version, fixed version, verdict and tracker note.",
+	{ToolBackportCheck, "The deterministic pipeline's version comparison for the finding being assessed (its finding_key only): basis version, fixed version, verdict and tracker note.",
 		json.RawMessage(`{"type":"object","properties":{"finding_key":{"type":"string","pattern":"^[0-9a-f]{64}$"}},"required":["finding_key"],"additionalProperties":false}`)},
-	{ToolExposure, "Subject kind, ecosystem, binary packages and kernel boot state of a finding's subject.",
+	{ToolExposure, "Subject kind, ecosystem, binary packages and kernel boot state of the assessed finding's subject (its finding_key only).",
 		json.RawMessage(`{"type":"object","properties":{"finding_key":{"type":"string","pattern":"^[0-9a-f]{64}$"}},"required":["finding_key"],"additionalProperties":false}`)},
 	{ToolKEVEPSS, "KEV listing with date added and EPSS probability, percentile and date for a vulnerability ID.",
 		json.RawMessage(`{"type":"object","properties":{"vuln_id":{"type":"string","maxLength":64}},"required":["vuln_id"],"additionalProperties":false}`)},
@@ -237,9 +237,13 @@ type lookupResult struct {
 	record *RecordRef
 }
 
-// execLookup validates the arguments of a lookup tool and runs it. The
-// returned errors are ErrUnknownTool, ErrInvalidArguments or ErrNotFound.
-func (t tools) execLookup(name, args string) (lookupResult, error) {
+// execLookup validates the arguments of a lookup tool and runs it for the
+// finding being assessed. backport_check and exposure answer only for that
+// finding's key; any other key, even one of this run, is ErrNotFound, so
+// injected text cannot pull another finding's data into this assessment.
+// The returned errors are ErrUnknownTool, ErrInvalidArguments or
+// ErrNotFound.
+func (t tools) execLookup(finding, name, args string) (lookupResult, error) {
 	switch name {
 	case ToolCVEDetails:
 		f, err := decodeArgs(args, []string{"vuln_id"}, []string{"source"})
@@ -277,6 +281,9 @@ func (t tools) execLookup(name, args string) (lookupResult, error) {
 		if err != nil {
 			return lookupResult{}, err
 		}
+		if key != finding {
+			return lookupResult{}, ErrNotFound
+		}
 		b, ok := t.view.Backport(key)
 		if !ok {
 			return lookupResult{}, ErrNotFound
@@ -293,6 +300,9 @@ func (t tools) execLookup(name, args string) (lookupResult, error) {
 		key, err := findingKeyArg(args)
 		if err != nil {
 			return lookupResult{}, err
+		}
+		if key != finding {
+			return lookupResult{}, ErrNotFound
 		}
 		e, ok := t.view.Exposure(key)
 		if !ok {

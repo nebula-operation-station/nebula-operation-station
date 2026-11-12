@@ -64,16 +64,31 @@ func TestLookupRejectsUnknownToolsAndInvalidArguments(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if _, err := tl.execLookup(c.tool, c.args); !errors.Is(err, c.want) {
+			if _, err := tl.execLookup(keyA, c.tool, c.args); !errors.Is(err, c.want) {
 				t.Fatalf("err = %v, want %v", err, c.want)
 			}
 		})
 	}
 }
 
+func TestFindingLookupsOnlyServeTheAssessedFinding(t *testing.T) {
+	snap := newFakeSnapshot()
+	snap.backports[keyB] = Backport{BasisVersion: "1", FixedVersion: "2", Verdict: "fixed", TrackerNote: "other note", NoteRef: &RecordRef{"debian-tracker", 9}}
+	snap.exposures[keyB] = Exposure{SubjectKind: "image", Ecosystem: "alpine:3.20"}
+	tl := tools{snap: snap, view: snap}
+	for _, tool := range []string{ToolBackportCheck, ToolExposure} {
+		if _, err := tl.execLookup(keyA, tool, `{"finding_key":"`+keyB+`"}`); !errors.Is(err, ErrNotFound) {
+			t.Errorf("%s for another finding of the run: err = %v, want ErrNotFound", tool, err)
+		}
+		if _, err := tl.execLookup(keyB, tool, `{"finding_key":"`+keyB+`"}`); err != nil {
+			t.Errorf("%s for the assessed finding: %v", tool, err)
+		}
+	}
+}
+
 func TestLookupResultsCarryOneRecordText(t *testing.T) {
 	tl := tools{snap: newFakeSnapshot(), view: newFakeSnapshot()}
-	r, err := tl.execLookup(ToolCVEDetails, `{"vuln_id":"CVE-2026-0001"}`)
+	r, err := tl.execLookup(keyA, ToolCVEDetails, `{"vuln_id":"CVE-2026-0001"}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +100,7 @@ func TestLookupResultsCarryOneRecordText(t *testing.T) {
 	if strings.Contains(string(b), "NVD description") || !strings.Contains(string(b), "Tracker text") || !strings.Contains(string(b), "CVSS:3.1") {
 		t.Fatalf("default result = %s", b)
 	}
-	r, err = tl.execLookup(ToolCVEDetails, `{"vuln_id":"CVE-2026-0001","source":"nvd"}`)
+	r, err = tl.execLookup(keyA, ToolCVEDetails, `{"vuln_id":"CVE-2026-0001","source":"nvd"}`)
 	if err != nil || r.record == nil || r.record.SourceID != "nvd" {
 		t.Fatalf("named source: %+v %v", r.record, err)
 	}
@@ -94,12 +109,12 @@ func TestLookupResultsCarryOneRecordText(t *testing.T) {
 		{ToolExposure, `{"finding_key":"` + keyA + `"}`},
 		{ToolKEVEPSS, `{"vuln_id":"CVE-2026-0001"}`},
 	} {
-		r, err := tl.execLookup(tc.tool, tc.args)
+		r, err := tl.execLookup(keyA, tc.tool, tc.args)
 		if err != nil || r.record != nil {
 			t.Errorf("%s: record %+v err %v, want untagged result", tc.tool, r.record, err)
 		}
 	}
-	r, err = tl.execLookup(ToolBackportCheck, `{"finding_key":"`+keyA+`"}`)
+	r, err = tl.execLookup(keyA, ToolBackportCheck, `{"finding_key":"`+keyA+`"}`)
 	if err != nil || r.record == nil || r.record.SourceID != "debian-tracker" {
 		t.Fatalf("backport: %+v %v", r.record, err)
 	}
@@ -111,7 +126,7 @@ func TestLookupResultsCarryOneRecordText(t *testing.T) {
 
 func TestToolResultIsCutToLimitAndStaysDelimited(t *testing.T) {
 	tl := tools{snap: newFakeSnapshot(), view: newFakeSnapshot()}
-	r, err := tl.execLookup(ToolAdvisoryText, `{"advisory_id":"DSA-6000-1"}`)
+	r, err := tl.execLookup(keyA, ToolAdvisoryText, `{"advisory_id":"DSA-6000-1"}`)
 	if err != nil {
 		t.Fatal(err)
 	}
