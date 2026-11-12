@@ -70,6 +70,17 @@ History:
   or checked by the harness, and a digit needle hit is confirmed by a
   rerun with `48000 + m` (previously only fixtures were needle-free, so
   temp paths, ports or timestamps could fail a correct argument).
+- 2026-11-12 (as00if3, maintainer decision of the same day, PR #477):
+  D4 "Test seams" fixes the only non-test changes AS-05 makes in
+  `cmd/nebula/`: an injectable executor client for `pve` and `backup`
+  (default `dialExecutor` with the peercred check; the harness uses
+  in-memory connections and no listening socket), `restoreWith` with a
+  fake `backup.System`, fixed time and an injected root check, and
+  `backupWith` with injected admin identity and privilege drop instead
+  of euid 0/`SUDO_UID` and `setresuid` on the test process; no
+  behaviour change in the production path (previously "AS-05 changes no
+  production code", which left `backup`/`restore` unreachable under a
+  non-root test).
 
 ## Context
 
@@ -445,6 +456,188 @@ does NOS connect **from** (`--from`)?
   outside it; every path-kind value, relative or absolute, resolves
   inside this directory).
 
+  **Harness inputs for gated commands** (previously unspecified, so a
+  run of a command that first reads executor state or asks for a typed
+  confirmation stopped before the request that carries the argument:
+  `nebula batch stage N` calls `GetRollout`, returns "the batch has K
+  stages" when `N` exceeds the fake rollout's stage count, and sends
+  `ApproveGateCLI` only after a typed `yes` (`batchGate`,
+  `cmd/nebula/batch.go`); with a smaller fixture or an empty stdin the
+  `MAX` run recorded `GetRollout` and then failed, which is neither
+  *rejected* nor reaches `Gate.stage`, so the positive check failed on
+  today's tree). Every catalog command has a reviewed **harness entry**
+  next to its expected-fields entry. It names the command's **final
+  request** (the RPC, dial or HTTP request that carries its arguments,
+  e.g. `ApproveGateCLI` for `batch stage`) and the inputs that make an
+  accepted value reach it. **Entry point**: the harness calls the
+  command's subcommand function below `run` (for example `batchCmd`,
+  `netdevCmd`, `secretCmd`; for `pve`, `backup` and `restore` the seam
+  functions `pveWith`, `backupWith` and `restoreWith` named under **Test
+  seams** below, previously `pveCmd` and `backupCmd` themselves) with the
+  injected stdin reader, `prompter` and `netdevEnv` as arguments, because
+  `run` passes `os.Stdin`, `ttyPrompter` and `defaultNetdevEnv()` (which
+  reads `term.IsTerminal` on `os.Stdin`) and AS-05 changes no production
+  behaviour (its only non-test changes are the seams below; previously
+  "no production code"); the harness never replaces `os.Stdin` with a pipe, whose
+  contents a per-prompt `bufio.Reader` such as `pveAskLine` could read
+  several lines at a time. The dispatch in `run` itself is covered by
+  the catalog test, not by the canary runs. **Commands whose group
+  function reads `os.Stdin` itself** (previously the entry point named
+  only group functions that take a reader, but `hostCmd`, `totpCmd`,
+  `webauthnCmd` and `artifactCmd` take none and pass `os.Stdin` to the
+  prompting function, `cmd/nebula/risk.go`, `totp.go`, `webauthn.go`,
+  and `artifactTrustBuiltins` also passes `os.Stdin`,
+  `trust_builtins.go`, so their prompted runs could never read the
+  script): AS-05 adds no test seam for them and runs no pty or pipe harness on
+  the built binary. For these commands the entry point is the prompting
+  function one level down, which already takes the reader: `hostPin`
+  and `hostUnpin` (`hostkeys.go`), `totpSetup`, `totpRemove` and
+  `totpFinishRecovery` (`totp.go`), `webauthnRemove` (`webauthn.go`),
+  `artifactTrust` (`risk.go`) and `artifactTrustBuiltinsIO`
+  (`trust_builtins.go`, with the fake executor as `builtinTrustClient`;
+  the skipped `artifactTrustBuiltins` only checks the effective UID and
+  dials). The harness passes the argument list after the subcommand
+  word, as the group function's `args[1:]` does; the skipped group
+  functions only match the subcommand word and slice the list, they
+  parse no argument, and their dispatch is covered by the catalog test
+  like the dispatch in `run`. A prompted command whose
+  stdin is read only in a function without a reader parameter fails the
+  catalog test as a harness error until a reviewed change adds the
+  parameter.
+
+  **Test seams in `cmd/nebula/` (maintainer decision, 2026-11-12)**
+  (previously the ADR named `pveCmd` and `backupCmd` as entry points
+  without a seam, but both dial with `dialExecutor()`, `backupCmd`
+  requires euid 0 plus `SUDO_UID` (`adminFromSudo`) and then calls
+  `dropTo`, which runs `setgroups`/`setresgid`/`setresuid` on the whole
+  process, and `restoreWith` checks `os.Geteuid() != 0` itself while
+  `restoreCmd` passes the real `systemctl{}`: under a non-root `go test`
+  every form was rejected before any traffic, forcing a `canary-rejects`
+  that hides the arguments, and under root a run would drop the test
+  process's privileges or stop real services). AS-05 adds exactly these
+  small injection points to `cmd/nebula/` (protected path, maintainer
+  review). They change **no behaviour of the production path**: each
+  production function becomes a thin wrapper that passes exactly the
+  function or value it uses today; the checks keep their order, their
+  messages and their `--pre-upgrade` handling; the seams are unexported
+  parameters of `package main`, and no flag, environment variable or
+  build tag selects them, so the shipped binary cannot reach a fake.
+  Existing tests change only their call signature.
+  1. **Executor client** for `pve` and `backup`: `pveCmd` becomes a
+     wrapper over `pveWith(args, stdin, ask, w, dial)`, which passes
+     `dial` down to the `pve remote` functions in place of their direct
+     `dialExecutor()` calls (`cmd/nebula/pve.go`), and `backupWith` (item
+     3) takes `dial` the same way (`cmd/nebula/backup.go`). `dial` has the
+     type of `dialExecutor`, `func() (*grpc.ClientConn, error)`, and the
+     production default stays `dialExecutor` unchanged
+     (`NEBULA_EXECUTOR_SOCKET`, `NEBULA_EXECUTOR_USER` and the
+     `peercred.DialVerified` check of the server's UID). The harness
+     passes a `dial` that returns a gRPC client over an **in-memory
+     connection** to the fake executor's in-process gRPC server (an
+     in-memory listener such as `google.golang.org/grpc/test/bufconn`
+     from the grpc module already required, so no `go.mod` change); this
+     is the "in-memory connections … no listening socket" of **Run-time
+     values** below and applies to every executor connection of the
+     canary runs: the harness opens **no listening socket** (no Unix
+     socket file, no TCP port), sets no `NEBULA_EXECUTOR_*` variable and
+     does not exercise the peercred check, which stays covered by the
+     tests of `internal/peercred/` (previously the ADR did not say
+     whether the fake executor was reached through an injected dialer
+     or through a listening Unix socket and environment variables).
+  2. **Restore**: `restoreWith(args, stdin, w, sys, now, isRoot)` keeps
+     its fake `backup.System` and fixed-time parameters and gets the
+     root check as `isRoot func() bool`, evaluated at the same place
+     (after flag parsing and the argument count) with the same message;
+     `restoreCmd` passes `systemctl{}`, `time.Now()` and
+     `func() bool { return os.Geteuid() == 0 }`. The harness calls
+     `restoreWith` with a fake `backup.System` that records
+     `Stop`/`Start`/`Chown` and runs nothing (**no real `systemctl`**,
+     no `chown` to real users), a fixed fixture time without a needle,
+     an `isRoot` that returns true, `nebulaRoot` pointed at the working
+     directory and the pinned `hostname` (prompt table below).
+  3. **Backup create**: `backupCmd` becomes a wrapper over
+     `backupWith(args, stdin, w, admin, drop, dial)` and passes
+     `adminFromSudo`, `dropTo` and `dialExecutor`. The harness passes an
+     `admin` that returns a fixed fixture identity (user name `nosfix`,
+     the test process's own UID and GID, home directory inside the
+     working directory) instead of evaluating euid 0 and `SUDO_UID`, a
+     `drop` that records its argument and returns nil without changing
+     any process ID (**no `setresuid` on the test process**; the harness
+     checks that `drop` ran with the fixture identity before the first
+     `dial`), the in-memory `dial` of item 1, and `nebulaRoot` pointed at
+     a fixture server tree in the working directory. The run therefore
+     needs no root and reaches `BackupExecutor` under a non-root
+     `go test`. The manifest's `host` and `created_at` stay
+     `os.Hostname()` and `time.Now()` (no seam; prompt table below).
+
+  Any other hook in non-test code of `cmd/nebula/` needs a new
+  maintainer decision.
+
+  The inputs are:
+  - *executor fixtures*: the fake executor's answer to every call the
+    command makes before the final request (rollouts, pending permits,
+    probe results, reviews), each a fixed fixture value checked against
+    the needles like every fixture;
+  - *stdin script*: one line per prompt of the command, in order. The
+    harness stdin returns at most one line per `Read` call, so a command
+    that wraps stdin in a new `bufio.Reader` per prompt still reads each
+    line; a prompt the script does not answer reads end of file, so a
+    missing line shows up as a failing run, never as a pass;
+  - *terminal*: whether stdin counts as a terminal; the harness sets the
+    injected `netdevEnv.stdinIsTerminal` to true for the `netdev`
+    commands, whose `netdevAskYes` refuses a non-terminal stdin, and the
+    injected `prompter` answers secret prompts with a fixed fixture
+    secret that contains no needle and has the form the prompt's parser
+    accepts (previously only "a fixed fixture secret", so a secret that
+    fails the parse stopped the run before any traffic and every form
+    counted as rejected): the new vault passphrase and its repeat
+    (`vault init`, `cmd/nebula/vault.go`) are the same fixture of at
+    least 32 characters; the PVE token prompts (`pve remote add` read
+    and action token, `pve remote rotate-token`, `cmd/nebula/pve.go`)
+    get a fixture of the form `USER@REALM!TOKENID=VALUE`, for example
+    `nosfix@pve!nosfixtoken=00000000-0000-0000-0000-000000000000`;
+    every other secret prompt gets a fixture of the form its consumer
+    (the command or the real executor) accepts. These values are
+    checked by the executor, not by the command, so the fake executor
+    applies the same checks; a fixture it refuses comes after recorded
+    traffic and is therefore a harness error (below), not a
+    rejection.
+
+  The scripted answers by prompt type (checked 2026-11-11 against the
+  `Type …`/`type …`/`Enter …` prompts in `cmd/nebula/`; a prompt type
+  not in this table needs a reviewed row before its command can pass):
+
+  | Prompt | Scripted answer |
+  | --- | --- |
+  | "Type 'yes' …" (`batch approve`/`stage`/`skip`, `approve`, `approve --stage`/`--skip`, `schedule`, read grants, `host pin`/`unpin`, `container … remove`, `secret rm`, `webauthn remove`, `totp remove`, `artifact trust`, `netdev` register/re-pin/state change, `pve remote remove`/`site`; catalog paths, previously written `host … remove`, `vault` delete and `risk` trust) | `yes` |
+  | "CRITICAL: type the number of targets" (`approve`, `cmd/nebula/main.go`) | not reached: the pending-permit fixture is not `CRITICAL`, so the `yes` prompt applies |
+  | `Type "unencrypted"`, `Type "restore"`, `Type "<machine>"` (`backup`, `cmd/nebula/backup.go`) | the word the prompt names; the harness pins `backup.go`'s overridable `hostname` variable to the fixed fixture host name `nos-fixture-host` (no needle), and the restore fixture's manifest names that host, so the foreign-machine prompt of `restore` is not reached and the restore run does not depend on the test machine (previously the fixture followed the real `os.Hostname()`). `backup` (create) does not use that variable: it writes the manifest's `host` and `created_at` from `os.Hostname()` and `time.Now()` directly (`backupWith`), and AS-05 adds no seam for them (the create seam injects only the admin identity, `drop` and `dial`, **Test seams** above). Both are excluded from needle matching and from the differential check: they are written only into the archive, which is no recorded request, and the archive content is not searched; for the create run the harness checks only the recorded `BackupExecutor` traffic and the path the archive is written to (the `--out` value). Previously the row claimed the pinned variable made every `backup` run independent of the test machine |
+  | "Type the current pin from the registry:" (`pve remote repin`, `cmd/nebula/pve.go`) | the `trust_pin` stored for the remote in the fake executor's `ListPVEAdminRemotes` answer (the registry fixture), so it matches the `old_pin` the fake `ProposePVERepin` expects; the next prompt, "Type the new trust fingerprint to confirm:", is the typed-fingerprint row below |
+  | typed fingerprint (`pve remote add`/`repin`, `module` signer add/rotate in `cmd/nebula/signer.go`) | the fingerprint the command shows for that run (from the fake executor's probe answer or the run's fixture key) |
+  | "type the manifest digest to commit" (`cmd/nebula/trust_builtins.go`) | the digest of the fake review answer; `retain … or retire` prompts get `r` |
+  | "Enter the current 6-digit code" (`totp setup`) | a fixed fixture code; the fake executor accepts it |
+  | "Type the first 8 or more characters of YOUR new key's ID" (`totp finish-recovery`) | the first 8 characters of the fixture credential ID |
+
+  For `batch stage N` the entry is: a `GetRollout` answer with exactly
+  `canonical.MaxBatchStages` = 20 stages (fixture names and host IDs, no
+  needle), stdin `yes`, and an `ApproveGateCLI` answer holding the same
+  rollout. The test fails when the fixture has fewer stages than the
+  `canary-range` maximum of an argument of that command (below), so the
+  fixture cannot fall behind a raised `MaxBatchStages`. `approve --stage`
+  uses the same rollout fixture. `batch skip MEMBER` checks the member
+  against the rollout before it asks: its harness entry declares an
+  **echo field**, the `host_ids` of the first fake stage, which the fake
+  executor fills with the run's value. An echo field is the only place a
+  fixture may hold a needle; it carries exactly the run's value, is
+  declared per command and reviewed, and the needle search of the
+  requests is unchanged, so a value the command copies from the echo
+  into an unexpected field still fails. An **accepted** run is one that
+  returns no error and recorded the final request. A run that recorded
+  traffic and then returned an error is neither accepted nor rejected:
+  the test fails and names the harness entry (a harness error, not an
+  argument result), so a missing or too small fixture or a missing stdin
+  line cannot turn into a pass or into a silent `canary-rejects`.
+
   **Bounded numbers** (previously a `canary-max: N` annotation that
   named only `events --limit`; `nebula batch stage N` parses with
   `strconv.ParseUint(…, 10, 32)` and rejects anything outside 2 to
@@ -495,11 +688,15 @@ does NOS connect **from** (`--from`)?
   The annotation is **stale**, and the test fails, when the argument
   accepts `MAX + 1` or `47000 + m`, or rejects `MAX` or `MAX − 1`; so
   the range is pinned to the parser. On today's tree both entries are
-  green: in both commands the parsed value goes only into the expected
-  field (`Gate{Kind: OPEN_STAGE, Stage: uint32(n)}`,
-  `ListEventsRequest{Limit: int32(*limit)}`), nothing else in the
-  recorded traffic depends on it, and `21`/`47001` and `1001`/`47001`
-  are rejected before anything is sent (`2..20`, `1..1000` checks).
+  green with the harness entries above (for `batch stage`: the 20-stage
+  `GetRollout` fixture and stdin `yes`, so the runs `20`, `20` and `19`
+  pass the stage-count check in `batchGate` and reach `ApproveGateCLI`;
+  `events --limit` has no prompt): in both commands the parsed value
+  goes only into the expected field (`Gate{Kind: OPEN_STAGE, Stage:
+  uint32(n)}`, `ListEventsRequest{Limit: int32(*limit)}`), nothing else
+  in the recorded traffic depends on it, and `21`/`47001` and
+  `1001`/`47001` are rejected by the argument parser before anything is
+  sent (`2..20`, `1..1000` checks).
 
   **Run-time values** (previously only fixtures and canary file content
   were kept free of needles, so a digit needle such as `47012` could
@@ -521,9 +718,11 @@ does NOS connect **from** (`--from`)?
     the run; on a hit the test takes a new directory, at most three
     times, and otherwise fails naming the harness collision, never the
     argument;
-  - values the test cannot fix without a production change, because
-    AS-05 adds a test file only (today the wall clock: `time.Now` in
-    `cmd/nebula/backup.go`, `batch.go` and `pve.go`), are handled by a
+  - values the test cannot fix because the **Test seams** above do not
+    cover them (today the wall clock: `time.Now` in `backupWith`, where
+    it reaches only the archive and the default file name, in `batch.go`
+    and in `pve.go`; the restore time is fixed through `restoreWith`;
+    previously "AS-05 adds a test file only" and all of `backup.go`), are handled by a
     **confirmation run**: when condition 1 or 2 finds a `number` or
     `duration` needle, the test repeats the same run once with the
     confirmation canary (`48000 + m` for `number`, the duration canary
@@ -658,15 +857,34 @@ does NOS connect **from** (`--from`)?
   (previously only text was matched, so an IP literal or `number` sent
   as a binary address passed): for the IP literal needle `192.0.2.1` and
   for the `inet_aton` address of a `number` canary (`47001` =
-  `0.0.183.153`) the test also searches every bytes field for the raw
-  4-byte network-order form (`c0 00 02 01`; `00 00 b7 99`) and the
-  16-byte IPv4-mapped form (ten `00` bytes, `ff ff`, then the four
-  bytes), as a byte subsequence; every string field also for the
-  hexadecimal IPv4-mapped text `::ffff:c000:201` (`::ffff:0:b799`); and
-  every integer field of 32 bits or more, signed or unsigned, for the
-  packed value in network order (`3221225985` for `192.0.2.1`; for a
-  `number` it equals the canary, already covered) and in little-endian
-  order (`16908480`; `2578907136` for `47001`). Fixtures and the canary
+  `0.0.183.153`) the test also searches every bytes field, as a byte
+  subsequence, for the raw 4-byte network-order form (`c0 00 02 01`;
+  `00 00 b7 99`), the raw 4-byte little-endian form (`01 02 00 c0`;
+  `99 b7 00 00`, as `binary.LittleEndian.PutUint32` writes it;
+  previously only network order was searched in bytes fields, although
+  little-endian was already checked in integer fields) and the 16-byte
+  IPv4-mapped form (ten `00` bytes, `ff ff`, then the four network-order
+  bytes); every string field also for the hexadecimal IPv4-mapped text
+  `::ffff:c000:201` (`::ffff:0:b799`); and every integer field of 32
+  bits or more, signed or unsigned, for the packed **32-bit pattern** in
+  network order (`0xc0000201` for `192.0.2.1`; `0x0000b799` for a
+  `number`, equal to the canary and already covered) and in
+  little-endian order (`0x010200c0`; `0x99b70000` for `47001`). The
+  comparison is by bit pattern, not by decimal value (previously only
+  the unsigned values `3221225985` and `2578907136` were given, so a
+  test comparing integers missed the same bits in a signed field): a
+  32-bit field (`int32`, `uint32`, `sint32`, `fixed32`, `sfixed32`)
+  matches when its value converted to `uint32` equals the pattern, so
+  an `int32` holding `-1073741311` (`192.0.2.1`) or `-1716060160`
+  (`47001` little-endian) matches; a 64-bit field matches when it holds
+  the pattern zero-extended (`3221225985`) or sign-extended from 32 bits
+  (`-1073741311` as `int64`, `0xffffffffc0000201` as `uint64`). Patterns
+  whose top bit is clear (`0x010200c0` = `16908480`, `0x0000b799`) have
+  one form only. AS-05's tests cover each of these forms: a fake
+  argument that sends `192.0.2.1` as `int64` `-1073741311`, as `uint64`
+  `0xffffffffc0000201` or as zero-extended `uint64` `3221225985` fails,
+  so a search of 32-bit fields only or of zero-extended values only
+  does not pass. Fixtures and the canary
   file content must not contain any needle of the run, text or binary
   (the test fails otherwise), and run-time values are fixed or checked
   (above), so a match always comes from the argument under test.
@@ -695,10 +913,11 @@ does NOS connect **from** (`--from`)?
   is accepted by its kind. Together these make "every argument that
   sends data or tokens to a host has a host kind, and with it V5" a test
   result: a misclassified `--endpoint` fails the build, whatever kind it
-  was given and whatever the request field is called. The mechanism of
-  injecting the fake executor and dialer into `package main` is *verify*
-  at AS-05; if it needs a hook in non-test code of `cmd/nebula/`, that is
-  a production change in a protected path and needs the maintainer's
+  was given and whatever the request field is called. The hooks in
+  non-test code of `cmd/nebula/` that inject the fake executor are the
+  **Test seams** under the harness entry above (maintainer decision
+  2026-11-12; previously *verify* at AS-05); any further hook is a
+  production change in a protected path and needs a new maintainer
   approval. If the test cannot be built, D6 (T2) must say that the
   host-kind classification is hand-reviewed only.
 
