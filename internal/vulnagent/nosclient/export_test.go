@@ -209,3 +209,123 @@ func TestExportAcceptsAValidHandWrittenExport(t *testing.T) {
 		t.Fatalf("%+v", snap)
 	}
 }
+
+// devicePart is one device subject part as the server exports it (ADR 0011
+// D3): vendor, model, firmware version and the vendor ecosystem, no packages.
+func devicePart(id string, complete bool) map[string]any {
+	return map[string]any{"subject_kind": "device", "subject_ref": map[string]any{"id": id}, "ecosystem": "vendor:cisco:iosxe",
+		"device":   map[string]any{"vendor": "cisco", "model": "CBS350-24P-4G", "firmware_version": "3.1.1.7"},
+		"complete": complete, "part": 1, "last_part": true, "components": []any{}}
+}
+
+func TestExportAcceptsADeviceSubjectAndKeepsItsCompleteness(t *testing.T) {
+	c, err := New(pageSrv(t, page("s1", 0, 1, hostPart("a", 1, true), devicePart("sw01", true), devicePart("sw02", false))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := c.Export(context.Background(), func(Page) error { return nil })
+	if err != nil {
+		t.Fatalf("export with a device subject: %v", err)
+	}
+	sw01, ok := snap.Subject(vulnfinding.SubjectDevice, vulnfinding.SubjectRef{ID: "sw01"})
+	if !ok || sw01.Parts != 1 || !sw01.Complete {
+		t.Fatalf("sw01: %+v", sw01)
+	}
+	sw02, ok := snap.Subject(vulnfinding.SubjectDevice, vulnfinding.SubjectRef{ID: "sw02"})
+	if !ok || sw02.Complete {
+		t.Fatalf("incomplete device is covered: %+v", sw02)
+	}
+}
+
+func TestExportRefusesADeviceSubjectThatBreaksTheContract(t *testing.T) {
+	noData := devicePart("sw03", true)
+	delete(noData, "device")
+	withComponents := devicePart("sw04", true)
+	withComponents["components"] = []any{map[string]any{"source_package": "openssl", "source_version": "3.0.15-1"}}
+	withKernel := devicePart("sw05", true)
+	withKernel["running_kernel"] = map[string]any{"release": "6.1.0", "mapped": false}
+	withDigest := devicePart("sw06", true)
+	withDigest["subject_ref"] = map[string]any{"id": "sw06", "image_digest": "sha256:" + strings.Repeat("a", 64)}
+	hostWithDevice := hostPart("h01", 1, true)
+	hostWithDevice["device"] = map[string]any{"vendor": "cisco", "model": "CBS350", "firmware_version": "3.1.1.7"}
+	hugeField := devicePart("sw07", true)
+	hugeField["device"] = map[string]any{"vendor": "cisco", "model": strings.Repeat("A", MaxDeviceFieldBytes+1), "firmware_version": "3.1.1.7"}
+	cases := map[string]map[string]any{
+		"no device data": noData, "packages on a device": withComponents, "kernel on a device": withKernel,
+		"digest on a device": withDigest, "device data on a host": hostWithDevice, "oversized device field": hugeField,
+	}
+	for name, part := range cases {
+		t.Run(name, func(t *testing.T) {
+			c, err := New(pageSrv(t, page("s1", 0, 1, part)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = c.Export(context.Background(), func(Page) error { return nil })
+			if !errors.Is(err, ErrProtocol) {
+				t.Fatalf("got %v, want ErrProtocol", err)
+			}
+		})
+	}
+}
+
+// TestExportRefusesDeviceFieldsOutsideTheServerPattern: every device value is
+// checked against the server's pattern (ADR 0011 D2/D3) before it reaches the
+// matcher: no control characters, spaces, non-ASCII text, colons, or address
+// literals in the model; the vendor is a lowercase slug.
+func TestExportRefusesDeviceFieldsOutsideTheServerPattern(t *testing.T) {
+	cases := map[string]struct{ vendor, model, fw string }{
+		"model control char":   {"cisco", "PA\x01X", "3.1.1.7"},
+		"model newline":        {"cisco", "PA\nX", "3.1.1.7"},
+		"model space":          {"cisco", "C1300 8FE", "3.1.1.7"},
+		"model non-ascii":      {"cisco", "Schalter-Ä", "3.1.1.7"},
+		"model ipv4 address":   {"cisco", "10.0.0.7", "3.1.1.7"},
+		"model ipv6 address":   {"cisco", "fe80::1", "3.1.1.7"},
+		"model host label":     {"cisco", "core-sw.lab", "3.1.1.7"},
+		"vendor uppercase":     {"Cisco", "CBS350", "3.1.1.7"},
+		"vendor space":         {"cisco systems", "CBS350", "3.1.1.7"},
+		"firmware control":     {"cisco", "CBS350", "3.1.1\x00"},
+		"firmware space":       {"cisco", "CBS350", "3.1 1"},
+		"firmware colon":       {"cisco", "CBS350", "1:2"},
+		"firmware ipv6":        {"cisco", "CBS350", "fe80::1"},
+		"firmware non-ascii":   {"cisco", "CBS350", "3.1.1.７"},
+		"firmware leading dot": {"cisco", "CBS350", ".3.1.1"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := devicePart("sw08", true)
+			p["device"] = map[string]any{"vendor": c.vendor, "model": c.model, "firmware_version": c.fw}
+			cl, err := New(pageSrv(t, page("s1", 0, 1, p)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = cl.Export(context.Background(), func(Page) error { return nil })
+			if !errors.Is(err, ErrProtocol) {
+				t.Fatalf("got %v, want ErrProtocol", err)
+			}
+		})
+	}
+}
+
+// TestExportAcceptsUnknownAndDottedDeviceValues: the server states "unknown"
+// for a value it does not export, and a dotted firmware version is a version.
+func TestExportAcceptsUnknownAndDottedDeviceValues(t *testing.T) {
+	cases := map[string]struct{ vendor, model, fw string }{
+		"all unknown":   {"unknown", "unknown", "unknown"},
+		"dotted quad":   {"cisco", "CBS350-24P-4G", "3.1.1.7"},
+		"three parts":   {"paloalto", "PA-220", "10.2.3"},
+		"plus and tild": {"cisco", "C9300_48U+", "17.3.4~rc1"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := devicePart("sw09", true)
+			p["device"] = map[string]any{"vendor": c.vendor, "model": c.model, "firmware_version": c.fw}
+			cl, err := New(pageSrv(t, page("s1", 0, 1, p)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := cl.Export(context.Background(), func(Page) error { return nil }); err != nil {
+				t.Fatalf("export refused %v: %v", c, err)
+			}
+		})
+	}
+}
