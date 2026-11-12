@@ -182,6 +182,11 @@ type NetDevAdmin struct {
 	// AuthorizeRepin consumes the approved permit of exactly this re-pin.
 	// Nil refuses every re-pin.
 	AuthorizeRepin func(ctx context.Context, b NetDevRepinBinding, digest string) error
+	// AuthorizeBaseline consumes the approved permit of exactly this
+	// baseline approval. Nil refuses every baseline approval.
+	AuthorizeBaseline func(ctx context.Context, b NetDevBaselineBinding, digest string) error
+	// Now returns the current time. Nil uses time.Now.
+	Now func() time.Time
 	// Log receives non-secret audit events. Default: discarded.
 	Log *slog.Logger
 	// CommitLock, if set, is held by Register for its store step only; the
@@ -824,7 +829,7 @@ func (a *NetDevAdmin) Remove(_ context.Context, id, confirm string) (executordb.
 	if err := a.revoke(id, "network device removed"); err != nil {
 		return executordb.NetDevice{}, err
 	}
-	for _, ref := range []string{netDevReadCredRef(dev), dev.DigestKeyRef, dev.FingerprintKeyRef} {
+	for _, ref := range []string{netDevReadCredRef(dev), netDevBaselineRef(dev.ID), dev.DigestKeyRef, dev.FingerprintKeyRef} {
 		if err := a.Vault.Delete(ref); err != nil && !errors.Is(err, vault.ErrNotFound) {
 			return executordb.NetDevice{}, fmt.Errorf("remove network device %s: delete vault entry: %w", id, err)
 		}
@@ -976,7 +981,7 @@ func repinBindingCurrent(b NetDevRepinBinding, d executordb.NetDevice) bool {
 // netDevAdmin builds the lifecycle over the service's database, vault,
 // permit authority and transport dialer.
 func (s *Service) netDevAdmin() *NetDevAdmin {
-	a := &NetDevAdmin{Resolve: DefaultNetDeviceResolver, Dial: s.transport.DialContext, Log: s.log, CommitLock: &netDevAdminMu}
+	a := &NetDevAdmin{Resolve: DefaultNetDeviceResolver, Dial: s.transport.DialContext, Log: s.log, CommitLock: &netDevAdminMu, Now: s.clock}
 	if s.db != nil {
 		a.Store = s.db
 	}
@@ -989,6 +994,7 @@ func (s *Service) netDevAdmin() *NetDevAdmin {
 			return err
 		}
 		a.AuthorizeRepin = s.authorizeNetDevRepin
+		a.AuthorizeBaseline = s.authorizeNetDevBaseline
 	}
 	return a
 }
@@ -1025,6 +1031,16 @@ func (s *Service) netDevRPCError(method string, err error) error {
 		code, msg = codes.Internal, "network device authority could not be revoked; the device is blocked"
 	case errors.Is(err, ErrNetDevConcurrentChange):
 		code, msg = codes.Aborted, "network device trust state changed concurrently; the device is blocked if the change was committed"
+	case errors.Is(err, ErrNetDevBaselineConcurrent):
+		code, msg = codes.Aborted, "network device or its baseline changed since the approval; propose again"
+	case errors.Is(err, ErrNetDevBaselineFormat):
+		code, msg = codes.Internal, netDevRPCFailed
+	case errors.Is(err, ErrNetDevBaselineRequest):
+		code, msg = codes.InvalidArgument, "invalid network device baseline request"
+	case errors.Is(err, ErrNetDevBaselineApproval):
+		code, msg = codes.FailedPrecondition, "network device baseline requires an approved permit for exactly this version"
+	case errors.Is(err, ErrNetDevBaselineBlocked):
+		code, msg = codes.FailedPrecondition, "network device is blocked; no baseline can be approved"
 	case errors.Is(err, ErrNetDevConfirm):
 		code, msg = codes.InvalidArgument, "confirmation must be exactly \"yes\""
 	case errors.Is(err, ErrNetDevCredentialRequest):
