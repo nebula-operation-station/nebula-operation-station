@@ -32,6 +32,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/clientaddr"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/middleware"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui/invsort"
 	"github.com/nebula-operation-station/nebula-operation-station/web/static"
@@ -138,6 +139,11 @@ type Options struct {
 	// Enroll pins new hosts in bulk from the inventory. It needs
 	// Inventory; nil leaves enrollment to the CLI.
 	Enroll Enroller
+	// EnrollClientAddr determines client and peer address for the
+	// one-step enrollment routes (ADR 0013 D7, enroll_onestep.go); it
+	// should be the resolver of the download route. Nil treats the TCP
+	// peer as the client (no trusted proxy).
+	EnrollClientAddr *clientaddr.Resolver
 	// ServerIP returns the server's own first private IPv4, for the
 	// quick-scan prefill. Nil uses the machine's interfaces.
 	ServerIP func() netip.Addr
@@ -253,6 +259,7 @@ type Handler struct {
 	log            *slog.Logger
 	repin          Repinner
 	enroll         Enroller
+	onestep        *onestep
 	serverIP       func() netip.Addr
 	securityKeys   func(ctx context.Context) ([]*pb.WebAuthnCredential, error)
 	totpStatus     func(ctx context.Context) (*pb.GetTOTPStatusResponse, error)
@@ -389,6 +396,9 @@ func New(o Options) (*Handler, error) {
 	}
 	if o.BuiltinTrust != nil {
 		h.builtinTrust = newBuiltinTrustCache(o.BuiltinTrust, h.clockNow, log)
+	}
+	if h.onestep, err = newOnestep(o, log); err != nil {
+		return nil, err
 	}
 	return h, nil
 }
@@ -661,6 +671,7 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("GET /inventory/enroll", h.handleEnrollPage)
 	mux.HandleFunc("POST /inventory/enroll/propose", h.handleEnrollPropose)
 	mux.HandleFunc("POST /inventory/enroll/commit", h.handleEnrollCommit)
+	h.registerOnestep(mux)
 	// The login and setup pages only render; the endpoints they call and
 	// the session check live in internal/web/auth.
 	mux.HandleFunc("/login", h.handleBare("Log in", "login", "login.js"))
