@@ -1491,12 +1491,13 @@ func TestNetDevCompromisedServerCannotWidenOrExtendLeases(t *testing.T) {
 // at the registry's current identity does read, so the refusals come from
 // the lease binding, not from the device.
 //
-// Open (nd21g report): such a lease becomes live once an admin rotation
-// brings the registry to the version it names, because the device
-// lifecycle's revocation (NetDevAdmin.Revoke) revokes provider grants
-// only, not device read leases. The assertion for that belongs here once
-// the executor revokes device leases on rotation, block, re-pin and
-// removal.
+// Nor does such a lease go live later: when an admin rotation, a block
+// and unblock, or a removal brings the registry to (or past) the identity
+// it names, the lifecycle has revoked every lease of the device (ADR 0010
+// D1/D2), so the lease that now matches the registry still reads nothing.
+// (Re-pin runs the same revocation; it needs a HIGH permit and a probe of
+// the new key, and is covered by
+// internal/executor TestNetDevLifecycleRevokesLeasesAheadOfRegistry.)
 func TestNetDevLeaseAheadOfRegistryAuthorizesNothing(t *testing.T) {
 	e := newNDEnv(t, peercred.RoleServer)
 	cbsVersion := pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION
@@ -1516,10 +1517,11 @@ func TestNetDevLeaseAheadOfRegistryAuthorizesNothing(t *testing.T) {
 		{"trust_generation far ahead", func(t *permit.NetDeviceTarget) { t.TrustGeneration = 1 << 48 }},
 		{"both ahead", func(t *permit.NetDeviceTarget) { t.CredentialVersion++; t.TrustGeneration++ }},
 	}
+	var aheadIDs []string
 	for _, tc := range ahead {
 		tgt := e.target(schedgrant.NetDeviceReadCBSVersion, schedgrant.NetDeviceReadCBSMACTable)
 		tc.edit(&tgt)
-		e.approve(e.leaseDoc(2*time.Hour, 24, 900, tgt))
+		aheadIDs = append(aheadIDs, e.approve(e.leaseDoc(2*time.Hour, 24, 900, tgt)))
 		e.wantRefused("read on a lease with "+tc.name, n, e.read(ndDevice, cbsVersion), codes.PermissionDenied)
 	}
 	// All of them together still authorize nothing, for either read.
@@ -1529,8 +1531,70 @@ func TestNetDevLeaseAheadOfRegistryAuthorizesNothing(t *testing.T) {
 	e.requireRegistryUnchanged(before.GetTrustGeneration(), before.GetCredentialVersion())
 
 	// Control: a lease at the registry's current identity reads.
-	e.approve(e.leaseDoc(time.Hour, 24, 900, e.target(schedgrant.NetDeviceReadCBSVersion)))
+	currentID := e.approve(e.leaseDoc(time.Hour, 24, 900, e.target(schedgrant.NetDeviceReadCBSVersion)))
 	e.wantAuthorized(n, e.read(ndDevice, cbsVersion))
+	n = e.authorizedReads()
+
+	// The widening path: the admin rotates the credential, so the registry
+	// reaches credential version 2, exactly what "credential_version one
+	// ahead" names. Past the interval floor a live lease would read; the
+	// rotation revoked every lease of the device, so none does.
+	ctx := e.ctx()
+	requireRevoked := func(step string, ids ...string) {
+		t.Helper()
+		for _, id := range ids {
+			if e.approvedGrant(id).GetRevokedUnix() == 0 {
+				t.Errorf("after %s: lease %s is still active", step, id)
+			}
+		}
+	}
+	e.clock.add(16 * time.Minute)
+	if _, err := e.svc.RotateNetDeviceCredential(ctx, &pb.RotateNetDeviceCredentialRequest{DeviceId: ndDevice, ExpectedCredentialVersion: 1,
+		Username: ndUser, Secret: []byte(ndSecret + "-2")}); err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+	if d := e.device(); d.GetCredentialVersion() != 2 || d.GetTrustGeneration() != 1 {
+		t.Fatalf("after rotation: credential version %d, trust generation %d; want 2, 1", d.GetCredentialVersion(), d.GetTrustGeneration())
+	}
+	requireRevoked("rotation", append(aheadIDs, currentID)...)
+	e.wantRefused("read after rotation reached the ahead lease's version", n, e.read(ndDevice, cbsVersion), codes.PermissionDenied)
+	e.wantRefused("MAC table read after rotation reached the ahead lease's version", n, e.read(ndDevice, pb.NetDeviceRead_NET_DEVICE_READ_CBS_MAC_TABLE), codes.PermissionDenied)
+
+	// A block and unblock revoke a lease approved ahead of the next
+	// rotation before that rotation happens.
+	next := e.target(schedgrant.NetDeviceReadCBSVersion)
+	next.CredentialVersion = 3
+	nextID := e.approve(e.leaseDoc(2*time.Hour, 24, 900, next))
+	if _, err := e.svc.BlockNetDevice(ctx, &pb.BlockNetDeviceRequest{DeviceId: ndDevice, Reason: "maintenance"}); err != nil {
+		t.Fatalf("block: %v", err)
+	}
+	requireRevoked("block", nextID)
+	if _, err := e.svc.UnblockNetDevice(ctx, &pb.UnblockNetDeviceRequest{DeviceId: ndDevice, Confirm: "yes"}); err != nil {
+		t.Fatalf("unblock: %v", err)
+	}
+	// Registry at version 2; the server proposes, the admin approves a
+	// lease for version 3 again, and only the rotation revokes that one.
+	laterID := e.approve(e.leaseDoc(2*time.Hour, 24, 900, next))
+	e.clock.add(16 * time.Minute)
+	if _, err := e.svc.RotateNetDeviceCredential(ctx, &pb.RotateNetDeviceCredentialRequest{DeviceId: ndDevice, ExpectedCredentialVersion: 2,
+		Username: ndUser, Secret: []byte(ndSecret + "-2")}); err != nil {
+		t.Fatalf("second rotate: %v", err)
+	}
+	requireRevoked("second rotation", laterID)
+	e.wantRefused("read after the second rotation reached version 3", n, e.read(ndDevice, cbsVersion), codes.PermissionDenied)
+
+	// Removal revokes a lease approved ahead of the registry too, so it
+	// cannot match a device that is later registered again.
+	gone := e.target(schedgrant.NetDeviceReadCBSVersion)
+	gone.CredentialVersion = 4
+	goneID := e.approve(e.leaseDoc(2*time.Hour, 24, 900, gone))
+	if _, err := e.svc.RemoveNetDevice(ctx, &pb.RemoveNetDeviceRequest{DeviceId: ndDevice, Confirm: "yes"}); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	requireRevoked("removal", goneID)
+	if got := e.authorizedReads(); got != n {
+		t.Errorf("reads authorized after the lifecycle steps: %d audit lines, want %d", got, n)
+	}
 	e.requireNoSecret()
 }
 
