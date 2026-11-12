@@ -1,0 +1,36 @@
+{
+  "format": "fim-scan-v1",
+  "profile": "fim-test-v1",
+  "mode": "full",
+  "started": 1762934400,
+  "roots": [
+    {"root": "/etc", "status": "scanned"},
+    {"root": "/usr/bin", "status": "scanned"},
+    {"root": "/boot", "status": "scanned"},
+    {"root": "/boot/efi", "status": "missing"},
+    {"root": "/home/*/.ssh/authorized_keys*", "status": "scanned"},
+    {"root": "/opt", "status": "missing"}
+  ],
+  "records": [
+    {"path": "L2V0Yw==", "type": "dir", "size": 4096, "mode": 493, "uid": 0, "gid": 0, "inode": 2, "mtime": 1762934000, "ctime": 1762934000},
+    {"path": "L2V0Yy9zc2g=", "type": "dir", "size": 4096, "mode": 493, "uid": 0, "gid": 0, "inode": 3, "mtime": 1762934000, "ctime": 1762934000},
+    {"path": "L2V0Yy9zc2gvc3NoZF9jb25maWc=", "type": "file", "size": 8, "mode": 420, "uid": 0, "gid": 0, "inode": 4, "mtime": 1762934000, "ctime": 1762934000, "sha256": "e807422bad84e7926a98fb262153b3d9c84244080e69b0e5d20446c183ffafc4"},
+    {"path": "L2V0Yy9zaGFkb3c=", "type": "file", "size": 1024, "mode": 416, "uid": 0, "gid": 42, "inode": 5, "mtime": 1762934000, "ctime": 1762934000, "sha256": "1111111111111111111111111111111111111111111111111111111111111111"},
+    {"path": "L3Vzci9iaW4=", "type": "dir", "size": 4096, "mode": 493, "uid": 0, "gid": 0, "inode": 6, "mtime": 1762934000, "ctime": 1762934000},
+    {"path": "L3Vzci9iaW4vbHM=", "type": "file", "size": 151344, "mode": 493, "uid": 0, "gid": 0, "inode": 7, "mtime": 1762934000, "ctime": 1762934000, "sha256": "2222222222222222222222222222222222222222222222222222222222222222"},
+    {"path": "L3Vzci9iaW4vc2g=", "type": "symlink", "size": 4, "mode": 511, "uid": 0, "gid": 0, "inode": 8, "mtime": 1762934000, "ctime": 1762934000, "link": "ZGFzaA=="},
+    {"path": "L2Jvb3Q=", "type": "dir", "size": 4096, "mode": 493, "uid": 0, "gid": 0, "inode": 9, "mtime": 1762934000, "ctime": 1762934000},
+    {"path": "L2Jvb3Qvdm1saW51ei02LjEuMC0xOC1hbWQ2NA==", "type": "file", "size": 8000000, "mode": 420, "uid": 0, "gid": 0, "inode": 10, "mtime": 1762934000, "ctime": 1762934000, "sha256": "3333333333333333333333333333333333333333333333333333333333333333"},
+    {"path": "L2Jvb3QvZ3J1Yi9ncnViLmNmZw==", "type": "file", "size": 2000, "mode": 292, "uid": 0, "gid": 0, "inode": 11, "mtime": 1762934000, "ctime": 1762934000, "sha256": "4444444444444444444444444444444444444444444444444444444444444444"},
+    {"path": "L2hvbWUvYWxpY2UvLnNzaC9hdXRob3JpemVkX2tleXM=", "type": "file", "size": 100, "mode": 384, "uid": 1000, "gid": 1000, "inode": 12, "mtime": 1762934000, "ctime": 1762934000, "sha256": "5555555555555555555555555555555555555555555555555555555555555555"}
+  ],
+  "mounts": [
+    {"path": "L2V0Yy9wdmU=", "fstype": "fuse"}
+  ],
+  "ssh_config": [
+    {"path": "L2V0Yy9zc2gvc3NoZF9jb25maWc=", "content": "UG9ydCAyMgo="}
+  ],
+  "truncated": false,
+  "ended": 1762934460,
+  "counters": {"records": 11, "mounts": 1, "ssh_config": 1, "unreadable": 0}
+}
