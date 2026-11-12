@@ -716,7 +716,9 @@ func TestHTTPAgentConfigRejectsBadAnswers(t *testing.T) {
 		"bad language": jsonAnswer(`{"llm_enabled":true,"language":"fr"}`),
 		"too large":    jsonAnswer(`{"llm_enabled":true,"operator_instructions":"` + strings.Repeat("a", MaxAgentConfigBytes) + `"}`),
 		"status 500":   func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(500) },
-		"redirect":     func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "https://elsewhere.invalid/", http.StatusFound) },
+		"redirect": func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "https://elsewhere.invalid/", http.StatusFound)
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv := httptest.NewTLSServer(h)
