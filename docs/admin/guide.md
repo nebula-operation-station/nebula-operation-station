@@ -685,7 +685,23 @@ safe to run again and prints a new code.
 
 The download route is unauthenticated, so it is the one path on the proxy
 that handles offer IDs. Give it its own location. A specific prefix wins
-over `location /` in section 4:
+over `location /` in section 4.
+
+The route sends these response headers on `200` and on every `404` (the
+`404` body is `not found`), so the proxy must pass them through unchanged:
+
+```
+Content-Type: text/plain; charset=utf-8
+Content-Disposition: attachment; filename="nebula-enroll.sh"
+Cache-Control: no-store
+X-Content-Type-Options: nosniff
+Content-Security-Policy: default-src 'none'; sandbox
+X-Accel-Buffering: no
+```
+
+The browser download of the dialog sends the same headers, with
+`filename="nos-enroll.sh"` in `Content-Disposition`.
+
 
 ```
 location /enroll/ {
