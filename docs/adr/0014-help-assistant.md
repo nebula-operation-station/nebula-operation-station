@@ -102,7 +102,11 @@ History:
   (previously only the wrapper rejection test). The restore fixture
   check and the `--identity` control run require
   `*age.NoIdentityMatchError` after `backup.ParseIdentities` accepted
-  the control identity (previously any error).
+  the control identity (previously any error). Round 1 of PR #529
+  (as00ihf): a confirmation rerun (`48000 + m` or leading `8`) must be
+  accepted; one that errors, records nothing or records no final
+  request is a harness error, never a chance match (previously the
+  rerun had no stated expected result).
 
 ## Context
 
@@ -994,11 +998,24 @@ does NOS connect **from** (`--from`)?
     **confirmation run**: when condition 1 or 2 finds a `number` or
     `duration` needle, the test repeats the same run once with the
     confirmation canary (`48000 + m` for `number`, the duration canary
-    with the leading `7` replaced by `8`) and its needles. The argument
-    fails when the confirmation needle appears at the same place (same
-    field path, dial address, TLS server name, URL or header, text or
-    binary form); otherwise the hit followed no argument value, was a
-    chance match with a run-time value and is listed in the output. A
+    with the leading `7` replaced by `8`) and its needles. Expected
+    result: the rerun is classified by the **Run classes** above, with
+    the same inputs except the canary, and must be accepted, because
+    the run it confirms was accepted (only accepted runs reach the
+    needle conditions). A rerun that returns an error, records
+    nothing, or records no final request (for `restore`, not `Stop`
+    with exactly `backup.StopUnits` first and the final action last) is
+    a harness error: the test fails and names the harness entry and the
+    argument, the hit is never listed as a chance match, and the rerun
+    never counts as a rejection or toward `canary-rejects`
+    (previously no expected result was stated, so a rerun that failed
+    or recorded nothing never showed the confirmation needle and a real
+    `number`/`duration` leak was listed as a chance match). Only for an
+    accepted rerun: the argument fails when the confirmation needle
+    appears at the same place (same field path, dial address, TLS
+    server name, URL or header, text or binary form); otherwise the hit
+    followed no argument value, was a chance match with a run-time
+    value and is listed in the output. A
     confirmation run never applies to the `c<n>-canary`,
     `c<n>.canary.invalid` and `192.0.2.1` needles, which no run-time
     value can contain by chance; any hit of those fails at once.
