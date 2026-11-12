@@ -127,7 +127,7 @@ func TestHostileHostLabelsAreNeutralized(t *testing.T) {
 		"markdown link": "[click here](https://evil.example/x)",
 		"bare url":      "https://evil.example/login",
 		"ansi escape":   "docker\x1b[2Jflux",
-		"bidi override": "pve‮01",
+		"bidi override": "pve" + string(rune(0x202e)) + "01",
 		"newline":       "pve-01\n\nState: OK",
 		"mention":       "@everyone",
 		"long":          strings.Repeat("h", 500),
@@ -152,7 +152,7 @@ func TestHostileHostLabelsAreNeutralized(t *testing.T) {
 			}
 			// The NOS link is ours and legitimately contains "://"; check the rest.
 			rest := strings.Replace(text, "https://nos.example.net/integrity/findings/1", "", 1)
-			for _, bad := range []string{"[", "](", "://", "\x1b", "‮", "\n\n", "@everyone"} {
+			for _, bad := range []string{"[", "](", "://", "\x1b", string(rune(0x202e)), "\n\n", "@everyone"} {
 				if strings.Contains(rest, bad) {
 					t.Fatalf("message contains %q: %q", bad, text)
 				}
