@@ -401,6 +401,72 @@ func TestRunBudgetAndPriorityOrder(t *testing.T) {
 	})
 }
 
+func TestHostileUsageCannotDisableRunTokenBudget(t *testing.T) {
+	const maxInt64 = int64(^uint64(0) >> 1)
+	big := strings.Repeat("x", 2000)
+	bigSubmit := `{"text":"` + big + `","backport_checked":true,"likely_false_positive":false,"exploit_public":true,"rationale":""}`
+	cases := []struct {
+		name   string
+		usage  Usage
+		submit string
+		// want is the charge of the first call given its estimate.
+		want func(est int64, l Limits) int64
+	}{
+		{"max int64 both", Usage{maxInt64, maxInt64}, validSubmit,
+			func(_ int64, l Limits) int64 { return l.MaxRunTokens }},
+		{"max int64 prompt", Usage{maxInt64, 0}, validSubmit,
+			func(_ int64, l Limits) int64 { return l.MaxRunTokens }},
+		{"max int64 completion", Usage{1, maxInt64}, validSubmit,
+			func(_ int64, l Limits) int64 { return l.MaxRunTokens }},
+		{"completion above max_tokens is charged", Usage{1, 3 * DefaultMaxOutputTokens}, validSubmit,
+			func(est int64, _ Limits) int64 { return est + 3*DefaultMaxOutputTokens }},
+		{"zero usage is charged at least the bytes seen", Usage{0, 0}, bigSubmit,
+			func(est int64, _ Limits) int64 { return est + int64(len(ToolSubmitAssessment)+len(bigSubmit)) }},
+		{"negative usage", Usage{-maxInt64, -maxInt64}, bigSubmit,
+			func(est int64, _ Limits) int64 { return est + int64(len(ToolSubmitAssessment)+len(bigSubmit)) }},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			llm := &scriptedLLM{step: func(int, Request) (Response, error) {
+				r := respond(call(ToolSubmitAssessment, c.submit))
+				u := c.usage
+				r.Usage = &u
+				return r, nil
+			}}
+			a := newTestAgent(t, llm, "", nil)
+			fs := []FindingFacts{factsA(), {FindingKey: keyB, VulnID: "CVE-2026-0002"}, {FindingKey: keyC, VulnID: "CVE-2026-0003"}}
+			rep := a.Run(context.Background(), fs)
+			if rep.Results[0].Outcome != OutcomeAssessed {
+				t.Fatalf("first result %+v", rep.Results[0])
+			}
+			est := a.estimate(llm.reqs[0].Messages)
+			want := c.want(est, a.limits)
+			if want >= a.limits.MaxRunTokens {
+				// The first call used up the whole budget: no further call.
+				if llm.calls() != 1 || !rep.BudgetExhausted || rep.TokensCharged != a.limits.MaxRunTokens {
+					t.Fatalf("calls %d exhausted %v charged %d of %d", llm.calls(), rep.BudgetExhausted, rep.TokensCharged, a.limits.MaxRunTokens)
+				}
+				for _, r := range rep.Results[1:] {
+					if r.Outcome != OutcomeRunBudget {
+						t.Fatalf("result after exhausted budget %+v", r)
+					}
+				}
+				return
+			}
+			if llm.calls() != 3 {
+				t.Fatalf("calls %d, want 3", llm.calls())
+			}
+			var sum int64
+			for _, req := range llm.reqs {
+				sum += c.want(a.estimate(req.Messages), a.limits)
+			}
+			if rep.TokensCharged != sum {
+				t.Fatalf("charged %d, want %d", rep.TokensCharged, sum)
+			}
+		})
+	}
+}
+
 func TestTimeoutsEndFindingWithoutText(t *testing.T) {
 	slow := &blockingLLM{}
 	a := newTestAgent(t, slow, "", func(l *Limits) {

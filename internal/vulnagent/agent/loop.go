@@ -259,6 +259,23 @@ func encodedCallBytes(c ToolCall) int {
 	return len(b)
 }
 
+// chargeUsage is the run-budget charge of one answered call. The reported
+// usage is untrusted: each part is floored at what NOS measured itself
+// (the prompt estimate, the bytes of the returned text and tool calls)
+// and the charge is capped at maxRun, so a huge, negative or understated
+// report can neither overflow the run total nor lower the charge below
+// the measured size. Before the call st.tokens+reserve <= maxRun held, so
+// the sum stays below 2 × HardMaxRunTokens.
+func chargeUsage(est int64, u Usage, resp Response, maxRun int64) int64 {
+	seen := int64(len(resp.Content))
+	for _, c := range resp.ToolCalls {
+		seen += int64(len(c.Name)) + int64(len(c.Arguments))
+	}
+	prompt := min(max(est, u.PromptTokens), maxRun)
+	completion := min(max(seen, u.CompletionTokens), maxRun)
+	return min(prompt+completion, maxRun)
+}
+
 // assess runs the loop for one finding.
 func (a *Agent) assess(ctx context.Context, f FindingFacts, st *runState) FindingResult {
 	res := FindingResult{FindingKey: f.FindingKey}
@@ -312,7 +329,7 @@ func (a *Agent) assess(ctx context.Context, f FindingFacts, st *runState) Findin
 		if err != nil || resp.Usage == nil {
 			st.tokens += reserve
 		} else {
-			st.tokens += max(est, resp.Usage.PromptTokens) + resp.Usage.CompletionTokens
+			st.tokens += chargeUsage(est, *resp.Usage, resp, l.MaxRunTokens)
 		}
 		if err != nil {
 			switch {
