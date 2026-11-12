@@ -9,9 +9,9 @@
 -- Findings are notes for the admin: nothing in this schema triggers an
 -- action.
 --
--- integrity_store_state: one row (id = 1). next_run_seq is not used for
--- ordering; lock_counter is bumped at the start of every write transaction
--- so that writers take the database write lock before they read.
+-- integrity_store_state: one row (id = 1). lock_counter is bumped at the
+-- start of every write transaction so that writers take the database write
+-- lock before they read.
 --
 -- integrity_runs: one row per check run of one subject. A run is
 -- 'running', then 'complete' (closes findings it did not see) or
@@ -27,10 +27,9 @@
 
 CREATE TABLE integrity_store_state (
     id            INTEGER PRIMARY KEY CHECK (id = 1),
-    next_run_seq  INTEGER NOT NULL CHECK (next_run_seq >= 1),
     lock_counter  INTEGER NOT NULL DEFAULT 0 CHECK (lock_counter >= 0)
 );
-INSERT INTO integrity_store_state (id, next_run_seq, lock_counter) VALUES (1, 1, 0);
+INSERT INTO integrity_store_state (id, lock_counter) VALUES (1, 0);
 
 CREATE TABLE integrity_runs (
     id          TEXT PRIMARY KEY CHECK (length(id) = 32),
@@ -68,7 +67,8 @@ CREATE TABLE integrity_findings (
     last_run_id      TEXT NOT NULL CHECK (length(last_run_id) = 32),
     closed_run_id    TEXT CHECK (closed_run_id IS NULL OR length(closed_run_id) = 32),
     closed_at        INTEGER,
-    state_by        TEXT CHECK (state_by IS NULL OR length(CAST(state_by AS BLOB)) BETWEEN 1 AND 128),
+    state_run_id     TEXT CHECK (state_run_id IS NULL OR length(state_run_id) = 32),
+    state_by         TEXT CHECK (state_by IS NULL OR length(CAST(state_by AS BLOB)) BETWEEN 1 AND 128),
     state_at         INTEGER NOT NULL,
     PRIMARY KEY (subject, class, path),
     CHECK ((state = 'resolved') = (closed_run_id IS NOT NULL)),
