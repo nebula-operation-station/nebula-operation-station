@@ -372,9 +372,13 @@ hash_pass() {
 # homes CALLBACK: call CALLBACK with every home directory (/root, /home/*)
 # that is a real directory. Symlinked homes, and /home when it is a
 # symlink or cannot be listed, are never followed (report_links counts
-# them as unreadable).
+# them as unreadable); each one not looked into calls home_skip, so that
+# the patterns that could match behind it are unknown, never missing.
 homes() {
 	if [ -L "$P/home" ] || [ ! -d "$P/home" ] || [ ! -r "$P/home" ] || [ ! -x "$P/home" ]; then
+		if [ -e "$P/home" ] || [ -L "$P/home" ]; then
+			home_skip /home
+		fi
 		set -- "$1" "$P/root"
 	else
 		set -- "$1" "$P/root" "$P"/home/*
@@ -382,14 +386,31 @@ homes() {
 	cb=$1
 	shift
 	for h; do
-		if [ -L "$h" ] || [ ! -d "$h" ]; then
+		if [ -L "$h" ]; then
+			home_skip "${h#"$P"}"
 			continue
 		fi
+		[ -d "$h" ] || continue
 		h=${h#"$P"}
 		case $h in *"
-"*) continue ;; esac
+"*)
+			home_skip "$h"
+			continue
+			;;
+		esac
 		"$cb" "$h"
 	done
+}
+
+# home_skip HOME: HOME (or all of /home) was not looked into; the patterns
+# of BASE that could match there are unknown (SKIP=1). report_links counts
+# it as unreadable once.
+home_skip() {
+	case $1 in
+	/root) [ "$BASE" = /root ] && SKIP=1 ;;
+	*) [ "$BASE" = /root ] || SKIP=1 ;;
+	esac
+	return 0
 }
 
 # report_links: a symlinked or unlistable /home, every symlinked home or
@@ -439,7 +460,10 @@ home_file() {
 		return 0
 	fi
 	case $REL in .ssh/*)
-		[ -L "$hd/.ssh" ] && return 0
+		if [ -L "$hd/.ssh" ]; then
+			SKIP=1
+			return 0
+		fi
 		[ -d "$hd/.ssh" ] || return 0
 		hd="$hd/.ssh"
 		if [ ! -x "$hd" ]; then
@@ -468,7 +492,12 @@ home_file() {
 		fi
 		f=${f#"$P"}
 		case $f in *"
-"*) continue ;; esac
+"*)
+			# Not scanned: its name cannot be a start point.
+			UNL=1
+			continue
+			;;
+		esac
 		"$FILE_CB" "$f"
 	done
 }
@@ -645,14 +674,19 @@ ssh_collect() {
 }
 
 # pattern_state BASE REL: the roots summary entry of one home pattern.
+# UNL=1 (a directory that cannot be searched) counts as unreadable here;
+# SKIP=1 (a symlinked or newline-named home, /home or .ssh directory) is
+# counted once by report_links. Both make the pattern unknown, never
+# missing.
 pattern_state() {
 	FOUND=0
 	UNL=0
+	SKIP=0
 	each_home_file "$1" "$2" found
 	if [ "$1" = /root ]; then pat="/root/$2"; else pat="/home/*/$2"; fi
 	if [ "$FOUND" = 1 ]; then
 		printf 'R%s %s\0' scanned "$pat"
-	elif [ "$UNL" = 1 ]; then
+	elif [ "$UNL" = 1 ] || [ "$SKIP" = 1 ]; then
 		printf 'R%s %s\0' error "$pat"
 	else
 		printf 'R%s %s\0' missing "$pat"
