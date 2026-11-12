@@ -144,6 +144,90 @@ python3 make-manifest.py 0.1.0
 
 Review the entire manifest as text and recompute each artifact/module digest independently. Require that `builtins.tar` has exactly the manifest modules, with matching exact bytes and lock identities, and no extra files. Check every built-in shipped in every other artifact against this list. A signature cannot repair an incomplete artifact inventory or a module archive reconstructed differently after hashing. Keep the staging immutable throughout review/signing, and revalidate it before publication.
 
+## installed-files.json
+
+`installed-files.json` ([ADR 0015](../adr/0015-integrity-monitoring.md) D2) lists every file a release installs, per install flavour, so that the executor, the server and `nebula verify` can check an installation against the release. It is an ordinary payload: stage it in `payloads/` **before** running `make-manifest.py`, so the manifest's `artifacts` array carries its exact size and SHA-256 and the YubiKey signature covers it. The list itself has no signature and contains no key.
+
+**Format** (`nebula-installed-files-v1`, RFC 8785 JCS bytes, no trailing newline, at most 4 MiB):
+
+```json
+{"flavours":{"deb:amd64":[{"mode":"0755","owner":"root:root","path":"/usr/bin/nebula","sha256":"<64 lowercase hex>","size":123,"type":"file"},{"owner":"root:root","path":"/usr/share/nebula/web/app.css","target":"app.1234.css","type":"symlink"}]},"format":"nebula-installed-files-v1","release_version":"0.1.0"}
+```
+
+- `release_version` equals the manifest's.
+- `flavours` has 1 to 16 keys `<deb|tarball|container>:<arch>`; each holds 1 to 4,096 entries, sorted by `path` (bytewise) without duplicates. No listed path may also be a directory of another.
+- A regular file has exactly `path`, `type` `"file"`, `size` (0 to 1 GiB), `sha256` of the exact bytes, `mode` (four octal digits, setuid/setgid/sticky included) and `owner` (`user:group`). A symlink has exactly `path`, `type` `"symlink"`, the exact `target` (not followed) and `owner`. Directories are implied.
+- `path` is absolute, at most 255 bytes of `[A-Za-z0-9/._+-]`, without empty, `.` or `..` components, and under a covered NOS prefix **of its flavour**:
+  - every flavour: `/usr/bin/nebula*`; anything under `/usr/share/nebula/`, `/usr/lib/nebula/` and `/usr/share/doc/nebula-operation-station/`;
+  - `deb:<arch>`: `nebula-*` units under `/lib/systemd/system` or `/usr/lib/systemd/system`, and drop-ins the package ships beside them, `nebula-<unit>.d/<name>.conf`;
+  - `tarball:<arch>`: `nebula-*` units under `/etc/systemd/system`, never a drop-in there;
+  - `container:<arch>`: no unit directory.
+
+  A unit path in another flavour's unit directory (for example `/etc/systemd/system/nebula-server.service` in a `deb` flavour) makes the list invalid. That covers binaries, systemd units and package-shipped drop-ins, the built-in module bundle and its files, and web assets.
+- **Never listed:** configuration and data. Configuration is `/etc/nebula` and every drop-in under `/etc/systemd/system/nebula-*.service.d/`, including the ones `install.sh` and the deb `postinst` generate (`nebula-executor.service.d/10-local.conf`, `nebula-server.service.d/20-discovery.conf`) and admin-created ones such as `20-local.conf`; data is `/var/lib/nebula`, logs, spools, runtime directories and caches. They change by design; ADR 0015 D3, backups and the audit log cover them. A path outside the prefixes of its flavour makes the list invalid, in the parser and in the generator.
+- **nftables.** ADR 0015 D2 and spec 10 name "shipped nftables files" as covered. The only nftables file NOS has, `nebula-iconfetch.nft`, lives at `/etc/nebula/nebula-iconfetch.nft`: it is read from configuration, nothing in a release installs it (see the iconfetch note in `deploy/install.sh`), and the admin may edit it. It is therefore treated as configuration (ADR 0015 D3 lists "the iconfetch nftables file" there) and is **never listed**; a list naming it is invalid. A release that ships an nftables file as code must install it under a covered prefix such as `/usr/share/nebula/`.
+
+Unknown or missing fields, nulls, escapes JCS would not write, duplicate keys and any other non-canonical spelling reject the whole list (`internal/release.ParseInstalledFiles`).
+
+**Producing it.** Release tooling stages each flavour's file tree as it is installed, one directory per flavour named exactly like the flavour (for example `installed/deb:amd64/usr/bin/nebula`, taken from the extracted package data), and calls `internal/release.GenerateInstalledFiles(version, "installed")`. It records modes from the tree and the owner `root:root` (packages and `install.sh` install code as root), records symlinks without following them, and refuses any other file type and any configuration or data file in the staging. A command-line wrapper and the CI wiring are separate changes; until then the generator is a library function only.
+
+**Offline recheck before signing.** Transfer the `installed/` staging with the payloads. On the signing station recompute the list independently and require byte-for-byte agreement with the staged `payloads/installed-files.json`. Save as `check-installed-files.py`:
+
+```python
+import hashlib
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+
+
+def require(ok, message):
+    if not ok:
+        raise SystemExit(message)
+
+
+def entry(path, rel):
+    st = os.lstat(path)
+    if stat.S_ISLNK(st.st_mode):
+        return {"owner": "root:root", "path": rel, "target": os.readlink(path), "type": "symlink"}
+    require(stat.S_ISREG(st.st_mode), "unexpected file type: " + rel)
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for block in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(block)
+    require(os.lstat(path).st_size == st.st_size, "file changed during hashing: " + rel)
+    return {"mode": "%04o" % stat.S_IMODE(st.st_mode), "owner": "root:root", "path": rel,
+            "sha256": digest.hexdigest(), "size": st.st_size, "type": "file"}
+
+
+require(len(sys.argv) == 2, "usage: check-installed-files.py RELEASE_VERSION")
+listed = Path("payloads/installed-files.json").read_bytes()
+flavours = {}
+for flavour in sorted(Path("installed").iterdir()):
+    require(flavour.is_dir() and not flavour.is_symlink(), "flavour must be a directory")
+    entries = []
+    for dirpath, dirnames, filenames in os.walk(flavour):
+        for name in dirnames + filenames:
+            path = os.path.join(dirpath, name)
+            if os.path.isdir(path) and not os.path.islink(path):
+                continue
+            entries.append(entry(path, "/" + os.path.relpath(path, flavour)))
+    flavours[flavour.name] = sorted(entries, key=lambda e: e["path"].encode())
+expected = {"flavours": flavours, "format": "nebula-installed-files-v1",
+            "release_version": sys.argv[1]}
+encoded = json.dumps(expected, sort_keys=True, separators=(",", ":"),
+                     ensure_ascii=False).encode("utf-8")
+require(encoded == listed, "installed-files.json differs from the staged trees")
+print("installed-files.json matches:", hashlib.sha256(listed).hexdigest())
+```
+
+```sh
+python3 check-installed-files.py 0.1.0
+```
+
+The recipe compares only what the trees contain; the path rules above are enforced by the generator and by every verifier, so a list that passes here but breaks them is still rejected. Review the path list as text as well: every file the packages install under a covered prefix must be listed, and nothing else. A signature proves only that the maintainer approved these hashes, not that the build was safe; reproducible builds (ADR 0015 IG-11) are a separate step.
+
 ## Sign offline and verify
 
 Connect root-1 only after review. Sign the canonical file bytes using SSHSIG namespace `nebula-release` and SHA-512:
@@ -166,6 +250,16 @@ cat root-1.pub >> allowed-signers
 Before publication of any release or rotation, a security-key-aware verifier must cryptographically authenticate the FIDO flags/counter and explicitly require `(flags & 0x01) != 0`. If that check is unavailable, do not publish. The production verifier must additionally enforce the spec's canonical/schema/bundle/root-state policy and match the security-key application `ssh:`. It must not strip the wrapper or substitute plain Ed25519 verification. The FIDO counter is not an anti-replay release number and must not prevent verification of older signed releases. See [OpenSSH SSHSIG](https://raw.githubusercontent.com/openssh/openssh-portable/master/PROTOCOL.sshsig), [security-key encoding](https://raw.githubusercontent.com/openssh/openssh-portable/master/PROTOCOL.u2f) and [ssh-keygen](https://man.openbsd.org/ssh-keygen.1).
 
 Disconnect the token. Transfer only the public manifest/signature and reviewed payloads to the publication machine. Attach `release-manifest.json`, `release-manifest.json.sig` and all listed artifacts to the release; verify the downloaded bytes again. Signing secrets and key handles never enter the publication machine or CI. Installation verifies each consumed artifact; built-in trust review copies only the manifest, signature and `builtins.tar` to an executor-local directory and verifies current root state. Signing establishes provenance; a local administrator must still review/confirm `nebula artifact trust-builtins` once that specified interface is implemented. It does not approve a host operation or update an existing grant.
+
+## Publish manifest, signature and installed-files.json on GitHub
+
+For **every** version, attach `release-manifest.json`, `release-manifest.json.sig` and `installed-files.json` as assets of that version's GitHub release, next to the other listed artifacts, and attach every published `root-rotation.json` with its signature so that verifiers can advance from their compiled anchors. Upload the exact reviewed bytes; never regenerate or re-sign them on the publication machine or in CI.
+
+**GitHub is only a distribution channel, never a trust anchor.** A verifier accepts the list only after it has verified `release-manifest.json.sig` against the release root public keys compiled into its NOS binaries, advanced by the signed root rotations (spec 10), and the size and SHA-256 of `installed-files.json` against that manifest, and the list's `release_version` against the manifest's. An unsigned manifest, a wrong signature, a signature by a revoked or unknown key, a size or hash mismatch and a non-canonical document are rejected, also when they come from the official GitHub release. A public key, checksum or signature shown beside the files (release notes, `SHA256SUMS`, another web page) establishes no trust. In code this is `internal/release.VerifyPublishedInstalledFiles` (compiled anchors plus the given rotations, nothing else) and, on the NOS machine, `internal/release.VerifyInstalledFiles` with the executor's durable root state.
+
+After the upload, download the three assets on a different machine and compare their SHA-256 with the reviewed offline copies. Never replace an asset of a published version: two validly signed but different manifests for the same `release_version` mean misuse of a root key or a broken release process, and verifiers report that as critical. A corrected build is a new version.
+
+Offline installations get the same three files inside the update bundle; the NOS machine never fetches from GitHub itself. Admitting them into executor-owned storage during upgrade (ADR 0015 IG-03), the checks on the NOS machine and `nebula verify` from an admin machine (IG-04), and the release workflow that uploads the assets are separate changes; this section describes the maintainer procedure they implement.
 
 ## Enroll, rotate and recover
 
