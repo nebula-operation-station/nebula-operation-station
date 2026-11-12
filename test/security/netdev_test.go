@@ -848,25 +848,40 @@ func (e *ndEnv) wantRefused(what string, before int, err error, c codes.Code) {
 // the secret a compromised caller tries to plant.
 var ndSecretValues = []string{ndSecret, ndSecret + "-2", ndUser, ndAttackerSecret}
 
+// ndBase64Core returns the part of enc's encoding of any byte string that
+// holds b at a byte offset of off mod 3 which depends on b alone. Base64
+// maps 3 bytes to 4 characters, so the characters that mix in the bytes
+// before b (the first 2 or 3 of the group b starts in, for off 1 or 2) or
+// after it (the last 1 or 2 of the group b ends in) are cut; what is left
+// appears verbatim in the encoding of every larger value that embeds b at
+// that offset, padded or not.
+func ndBase64Core(enc *base64.Encoding, b []byte, off int) string {
+	pre := make([]byte, off)
+	s := enc.WithPadding(base64.NoPadding).EncodeToString(append(pre, b...))
+	start := [3]int{0, 2, 3}[off]
+	n := off + len(b)
+	end := n/3*4 + [3]int{0, 1, 2}[n%3]
+	return s[start:end]
+}
+
 // ndSecretForms returns every form in which a credential value would
-// appear in text: plain, and the encodings of its bytes that the JSON slog
-// handler, encoding/json and protojson use for []byte (standard base64),
-// plus the unpadded and URL-safe base64 variants and lower- and upper-case
-// hex, so a secret that leaks as bytes is found as well.
+// appear in text: plain; base64 (standard, as the JSON slog handler,
+// encoding/json and protojson use for []byte, and URL-safe, padded or not)
+// of the value alone or embedded at any byte offset in a larger []byte
+// (a logged request, "user:secret", a proto payload), found through the
+// offset cores of ndBase64Core; and lower- and upper-case hex, which is
+// byte-aligned at every offset.
 func ndSecretForms() map[string]string {
 	out := map[string]string{}
 	for _, s := range ndSecretValues {
 		b := []byte(s)
 		out[s] = s
-		for enc, form := range map[string]string{
-			"base64":         base64.StdEncoding.EncodeToString(b),
-			"raw base64":     base64.RawStdEncoding.EncodeToString(b),
-			"base64url":      base64.URLEncoding.EncodeToString(b),
-			"raw base64url":  base64.RawURLEncoding.EncodeToString(b),
-			"hex":            hex.EncodeToString(b),
-			"upper-case hex": strings.ToUpper(hex.EncodeToString(b)),
-		} {
-			out[form] = enc + " of " + s
+		out[hex.EncodeToString(b)] = "hex of " + s
+		out[strings.ToUpper(hex.EncodeToString(b))] = "upper-case hex of " + s
+		for name, enc := range map[string]*base64.Encoding{"base64": base64.StdEncoding, "base64url": base64.URLEncoding} {
+			for off := range 3 {
+				out[ndBase64Core(enc, b, off)] = fmt.Sprintf("%s of %s at byte offset %d mod 3", name, s, off)
+			}
 		}
 	}
 	return out
@@ -934,6 +949,63 @@ func TestNetDevSecretCheckFindsEncodedLeaks(t *testing.T) {
 		}
 		if len(ndSecretLeaks(text)) == 0 {
 			t.Errorf("%s: secret check missed the leak in %s", name, text)
+		}
+	}
+	// A secret embedded in a larger []byte, at byte offsets 0, 1 and 2
+	// mod 3 (and with 0, 1 or 2 bytes after it), in every base64 variant
+	// and through the encoders that log []byte, is found. Prefixes and
+	// suffixes are arbitrary bytes, including ones that change the bits
+	// shared with the secret's first and last characters.
+	encoders := map[string]func([]byte) string{
+		"base64":        base64.StdEncoding.EncodeToString,
+		"raw base64":    base64.RawStdEncoding.EncodeToString,
+		"base64url":     base64.URLEncoding.EncodeToString,
+		"raw base64url": base64.RawURLEncoding.EncodeToString,
+		"slog JSON": func(b []byte) string {
+			var buf bytes.Buffer
+			slog.New(slog.NewJSONHandler(&buf, nil)).Info("request", "body", b)
+			return buf.String()
+		},
+		"protojson": func(b []byte) string {
+			pj, err := protojson.Marshal(&pb.SetNetDeviceCredentialRequest{DeviceId: ndDevice, Secret: b})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return string(pj)
+		},
+	}
+	prefixes := [][]byte{{}, {0xff}, []byte("u:"), []byte("abc"), {0x00, 0xfe, 0x7f, 0x80}, []byte(ndUser + ":")}
+	suffixes := [][]byte{{}, {0xff}, []byte("\n\x00"), []byte("&x=1")}
+	offsets := map[int]bool{}
+	for _, s := range ndSecretValues {
+		for _, pre := range prefixes {
+			for _, suf := range suffixes {
+				offsets[len(pre)%3] = true
+				payload := append(append(append([]byte{}, pre...), s...), suf...)
+				for name, encode := range encoders {
+					text := encode(payload)
+					if strings.Contains(text, s) {
+						t.Fatalf("%s fixture holds the plain value %q: %s", name, s, text)
+					}
+					if leaks := ndSecretLeaks(text); !slices.ContainsFunc(leaks, func(l string) bool { return strings.Contains(l, " of "+s+" ") || strings.HasSuffix(l, " of "+s) }) {
+						t.Errorf("%s of %q embedded at offset %d (%d bytes after): secret check missed it in %s (found %v)",
+							name, s, len(pre), len(suf), text, leaks)
+					}
+				}
+			}
+		}
+	}
+	if len(offsets) != 3 {
+		t.Fatalf("fixtures cover byte offsets %v mod 3, want 0, 1 and 2", offsets)
+	}
+	// The cores are what makes this work: at offsets 1 and 2 the
+	// whole-value encoding of the secret does not occur at all.
+	for _, off := range []int{1, 2} {
+		payload := append(make([]byte, off), ndSecret...)
+		payload[0] = 0xff
+		text := base64.StdEncoding.EncodeToString(payload)
+		if strings.Contains(text, base64.RawStdEncoding.EncodeToString([]byte(ndSecret))[:8]) {
+			t.Errorf("offset %d: whole-value base64 prefix occurs; the fixture does not exercise the offset", off)
 		}
 	}
 	if len(ndSecretLeaks("user "+ndUser)) == 0 {
