@@ -582,6 +582,31 @@ does NOS connect **from** (`--from`)?
      `go test`. The manifest's `host` and `created_at` stay
      `os.Hostname()` and `time.Now()` (no seam; prompt table below).
 
+  **Package globals** (previously only the wrapper rejection test below
+  had to restore `nebulaRoot` and avoid `t.Parallel`, while the restore
+  and backup canary runs repoint `nebulaRoot` per fresh working
+  directory and the restore runs pin `hostname` without such a rule, so
+  a later or parallel test could see a stale root or host name). The
+  package variables `nebulaRoot` and `hostname` of `cmd/nebula/backup.go`
+  are process-wide. Every test that AS-05 adds and that changes either
+  of them (the wrapper rejection test, the restore and backup canary
+  runs, the restore fixture checks and control runs, and any other)
+  follows the same rule:
+  - it saves the previous value and restores it in a `t.Cleanup`
+    registered **before** the first change, in the top-level test (one
+    per variable, so per-run changes in subtests are undone too and a
+    failing or aborted run cannot leak its value);
+  - neither the test nor any of its subtests calls `t.Parallel`, so no
+    two runs that repoint the variables overlap and no parallel test of
+    the package runs while they hold a test value (Go starts the
+    top-level parallel tests only after the sequential ones have
+    returned);
+  - each run sets the values it needs itself (its working directory as
+    `nebulaRoot`, the fixture host name `nos-fixture-host` as
+    `hostname`) and never relies on what an earlier run left behind.
+  Existing tests are not changed by this rule (today none of them in
+  `cmd/nebula/` calls `t.Parallel`).
+
   **Wrapper tests** (previously the ADR required no behaviour change of
   the production path but named no test that would catch a wrong
   wrapper: under the non-root `go test` of CI, a `restoreCmd` passing an
@@ -595,13 +620,11 @@ does NOS connect **from** (`--from`)?
     empty string via `t.Setenv` (restored after the test; never
     `os.Unsetenv`), which `adminFromSudo` treats like unset (previously
     "unset (`t.Setenv`)", which `t.Setenv` cannot do), `nebulaRoot`
-    pointed at an empty `t.TempDir()` (the test saves the previous
-    value of the package variable `nebulaRoot` and restores it in a
-    `t.Cleanup` registered before the change, so no later test of
-    `cmd/nebula/` sees the temporary root; previously the ADR required
-    a restore only for `SUDO_UID`), the test and its subtests calling no
-    `t.Parallel` (which `t.Setenv` forbids as well, and which would let
-    a parallel test see the changed global) and
+    pointed at an empty `t.TempDir()` (restored per **Package globals**
+    above, so no later test of `cmd/nebula/` sees the temporary root;
+    previously the ADR required a restore only for `SUDO_UID`), the
+    test and its subtests calling no `t.Parallel` (**Package globals**;
+    `t.Setenv` forbids it as well) and
     `NEBULA_EXECUTOR_SOCKET` naming a path in that directory where
     nothing listens (no socket file is created). Each case asserts the
     exact error text of today's tree, and an error of another type or
