@@ -264,6 +264,23 @@ service ExecutorService {
   // offer ID, salt, script or setup key.
   rpc ListEnrollOffers(ListEnrollOffersRequest) returns (ListEnrollOffersResponse);
 
+  // Role: server, creating web session only. Pairing (ADR 0013 D1 step 5,
+  // D3; spec 08 v25-08-01): checks the code format first (a malformed code
+  // is counted and never probed), then probes the endpoint offering only
+  // ssh-ed25519, computes the code from the presented key and the offer
+  // salt and compares in constant time. A match proposes the paired
+  // enrollment permit (HIGH, user verification); a mismatch fails the
+  // offer, audits the presented fingerprint and asks the server to notify;
+  // a probe failure is not a mismatch. Refused for a pinned or blocked host.
+  rpc SubmitPairingCode(SubmitPairingCodeRequest) returns (SubmitPairingCodeResponse);
+
+  // Role: server, creating web session only. Commits an approved paired
+  // enrollment: re-probes the endpoint (ssh-ed25519 only), pins only the
+  // approved key, completes the offer and tries a login when the keys are
+  // unlocked. Only after a successful pin does the response name an
+  // endpoint to add to the inventory host.
+  rpc CommitPairedEnroll(CommitPairedEnrollRequest) returns (CommitPairedEnrollResponse);
+
   // Role: server. Join of a provisioned PVE guest (ADR 0008 section 4,
   // PV-06): proposes the guest's enrollment with the normal enrollment
   // approval (at least HIGH). The executor checks the live guest, tries a
@@ -1420,6 +1437,96 @@ message EnrollOfferInfo {
 
 message ListEnrollOffersResponse {
   repeated EnrollOfferInfo offers = 1;
+}
+
+message SubmitPairingCodeRequest {
+  // Lowercase hex SHA-256 of the offer ID.
+  string offer_id_hash = 1;
+  // The creating web session's token (see CreateEnrollOfferRequest).
+  bytes session_binding = 2;
+  // The pairing code as the operator typed it; separators, spaces and
+  // case are folded.
+  string code = 3;
+  // The endpoint to probe: an inventory endpoint of the host or an address
+  // the script printed (host or host:port).
+  string endpoint = 4;
+  // The host's current inventory endpoints, at most 8. An endpoint not
+  // among them is bound into the permit as "endpoint to add".
+  repeated string inventory_endpoints = 5;
+}
+
+// Outcome of a pairing-code submission.
+enum PairingOutcome {
+  PAIRING_OUTCOME_UNSPECIFIED = 0;
+  // The code matched the presented ed25519 key; permit is set.
+  PAIRING_OUTCOME_MATCHED = 1;
+  // The code is malformed; counted, nothing probed.
+  PAIRING_OUTCOME_CODE_REJECTED = 2;
+  // The probe failed (unreachable, timeout, no ed25519 key); not a
+  // mismatch, another endpoint may be tried within the probe limit.
+  PAIRING_OUTCOME_PROBE_FAILED = 3;
+  // A well-formed code that does not match the presented key: the offer
+  // has failed; the server shows a dashboard notice and notifies.
+  PAIRING_OUTCOME_MISMATCH = 4;
+}
+
+// The paired enrollment permit a matched offer waits for.
+message PairedPermitInfo {
+  string digest = 1;
+  bytes challenge = 2;
+  // RFC 8785 form of the binding the approval covers.
+  bytes canonical = 3;
+  int64 approval_expiry_unix = 4;
+}
+
+message SubmitPairingCodeResponse {
+  PairingOutcome outcome = 1;
+  // The offer's state after the submission.
+  string state = 2;
+  // The probed endpoint in canonical form.
+  string endpoint = 3;
+  // The presented key (matched or mismatching); empty when nothing was
+  // probed or the probe failed.
+  string fingerprint = 4;
+  string key_type = 5;
+  // The endpoint is not an inventory endpoint and is added only after a
+  // successful commit.
+  bool endpoint_to_add = 6;
+  // Human-readable reason for CODE_REJECTED and PROBE_FAILED.
+  string detail = 7;
+  int32 rejected_codes = 8;
+  int32 probes = 9;
+  // Set for MATCHED.
+  PairedPermitInfo permit = 10;
+  // Set for MISMATCH: notify as for a host key mismatch.
+  bool notify = 11;
+}
+
+message CommitPairedEnrollRequest {
+  // Lowercase hex SHA-256 of the offer ID.
+  string offer_id_hash = 1;
+  bytes session_binding = 2;
+  // Digest of the approved paired enrollment permit.
+  string permit_digest = 3;
+}
+
+message CommitPairedEnrollResponse {
+  string host_id = 1;
+  bool pinned = 2;
+  string fingerprint = 3;
+  bool login_ok = 4;
+  string login_detail = 5;
+  // Why nothing was pinned.
+  string error = 6;
+  // The offer's state after the commit.
+  string state = 7;
+  // Set only after a successful pin: the endpoint to append to the
+  // inventory host's endpoint list (canonical form). Empty when the
+  // endpoint is already an inventory endpoint or nothing was pinned.
+  string endpoint_added = 8;
+  // The endpoint presented a key other than the approved one: notify as
+  // for a host key mismatch.
+  bool notify = 9;
 }
 
 // GuestJoinTarget is the provisioned guest a join enrolls (ADR 0008
