@@ -249,7 +249,7 @@ fmt_path() {
 # open blocked on a FIFO swapped in.
 # shellcheck disable=SC2016 # expanded by the inner shell
 HASH_FD='exec 2>/dev/null 3<"$1" || exit 1
-[ "$(find -H /proc/self/fd/3 -maxdepth 0 -type f -printf "%D:%i\n")" = "$2" ] || exit 1
+[ "$(find -H /proc/self/fd/3 -maxdepth 0 -type f -printf "%D:%i:%C@\n")" = "$2" ] || exit 1
 exec sha256sum <&3'
 
 # bounded SECONDS CMD...: run CMD and stop it, and a tool it runs, after
@@ -306,7 +306,7 @@ find_scan() {
 			return 3
 		fi
 		if [ "$one" = 1 ]; then
-			set -- "$@" -printf '%D:%i\n' ")"
+			set -- "$@" -printf '%D:%i:%C@\n' ")"
 			id=$(find "$@" 2>/dev/null)
 			if [ -n "$id" ]; then
 				if [ -n "$TIMEOUT" ]; then
@@ -319,7 +319,10 @@ find_scan() {
 				if [ "${#hx}" -eq 64 ]; then
 					case $hx in
 					*[!0-9a-f]*) ;;
-					*) printf '%s  %s\0' "$hx" "$P$start" ;;
+					# After the device:inode:ctime it was read from:
+					# the meta pass keeps it only for a record with
+					# the same.
+					*) printf 'H%s\0%s  %s\0' "$id" "$hx" "$P$start" ;;
 					esac
 				fi
 			fi
@@ -335,7 +338,7 @@ find_scan() {
 		fi
 		;;
 	meta)
-		set -- "$@" -printf 'M1 %y %s %m %U %G %i %T@ %C@\0'"$pf"'\0%l\0' ")" -o -printf 'M0 %y %s %m %U %G %i %T@ %C@\0'"$pf"'\0%l\0'
+		set -- "$@" -printf 'M1 %y %s %m %U %G %i %T@ %C@ %D\0'"$pf"'\0%l\0' ")" -o -printf 'M0 %y %s %m %U %G %i %T@ %C@ %D\0'"$pf"'\0%l\0'
 		# shellcheck disable=SC2086
 		$LOW find "$@" 2>/dev/null || printf 'U\0'
 		;;
@@ -812,12 +815,13 @@ function open_records(   k) {
 	for (k = 1; k <= nroots; k++) printf "%s{\"root\":\"%s\",\"status\":\"%s\"}", (k > 1 ? "," : ""), ROOTN[k], ROOTS[k]
 	printf "],\"records\":["
 }
-function field(   s, c, k, from, ph) {
+function field(   s, c, k, from, ph, hid) {
 	ph = LASTH; LASTH = ""
+	hid = HID1; HID1 = ""
 	if (st == "tag") {
 		if (n == 0) { trunc = 1; return }
 		c = B[1]
-		if ((c >= 48 && c <= 57) || (c >= 97 && c <= 102)) { hashline(); return }
+		if ((c >= 48 && c <= 57) || (c >= 97 && c <= 102)) { hashline(hid); return }
 		s = asc(1, n)
 		c = substr(s, 1, 1)
 		if (c == "B") { started = etime(substr(s, 2)); if (started == "") started = 0 }
@@ -830,6 +834,9 @@ function field(   s, c, k, from, ph) {
 		}
 		else if (c == "M") { open_records(); META = s; st = "mpath" }
 		else if (c == "U") unread++
+		# H: the device:inode:ctime the next hash (a home SSH file) was
+		# read from; an id of another form never matches a record.
+		else if (c == "H") { HID1 = substr(s, 2); if (HID1 !~ /^[0-9]+:[0-9]+:[0-9]+(\.[0-9]+)?$/) HID1 = "-" }
 		else if (c == "T") {
 			# The field before a T may be a hash record cut by a killed
 			# hash pass, its path a prefix of another path: drop it.
@@ -865,7 +872,7 @@ function field(   s, c, k, from, ph) {
 		st = "tag"; return
 	}
 }
-function hashline(   k, from, hex) {
+function hashline(id,   k, from, hex) {
 	if (n < 67 || B[65] != 32 || (B[66] != 32 && B[66] != 42)) return
 	hex = asc(1, 64)
 	if (hex !~ /^[0-9a-f]+$/ || length(hex) != 64) return
@@ -875,18 +882,28 @@ function hashline(   k, from, hex) {
 	LASTHAD = LASTH in HS
 	if (LASTHAD) LASTOLD = HS[LASTH]
 	HS[LASTH] = hex
+	if (id != "") HID[LASTH] = id; else delete HID[LASTH]
 }
-function record(   f, t, rec, m, mt, ct, hash) {
-	if (split(META, f, " ") != 9 || MPATH == "" || MLINKBAD) { unread++; return }
+function record(   f, t, rec, m, mt, ct, hash, moved) {
+	if (split(META, f, " ") != 10 || MPATH == "" || MLINKBAD) { unread++; return }
 	t = f[2] == "f" ? "file" : f[2] == "d" ? "dir" : f[2] == "l" ? "symlink" : "other"
 	m = oct(f[4]); mt = etime(f[8]); ct = etime(f[9])
 	if (!uint(f[3]) || m < 0 || m > 4095 || !uint(f[5]) || !uint(f[6]) || !uint(f[7]) || mt == "" || ct == "" || (t == "symlink" && MLINK == "")) { unread++; return }
 	hash = ""
+	# A hash bound to a device:inode:ctime (a home SSH file) belongs to this
+	# record only if the meta pass saw the same: a file swapped or changed
+	# between the passes keeps no hash (unknown; the run is truncated), so
+	# the hash of the old content never stands for the new file.
+	moved = 0
+	if (MPATH in HID) {
+		if (HID[MPATH] != f[10] ":" f[7] ":" f[9]) { delete HS[MPATH]; moved = 1; trunc = 1 }
+		delete HID[MPATH]
+	}
 	if (t == "file" && (MPATH in HS)) {
 		if (hashed + f[3] > HASHBUDGET) trunc = 1
 		else { hashed += f[3]; hash = HS[MPATH] }
 		delete HS[MPATH]
-	} else if (t == "file" && f[1] == "M1") unread++
+	} else if (t == "file" && f[1] == "M1" && !moved) unread++
 	if (nrec >= MAXREC || recbytes > RECBUDGET) { trunc = 1; return }
 	rec = "{\"path\":\"" MPATH "\",\"type\":\"" t "\",\"size\":" f[3] ",\"mode\":" m ",\"uid\":" f[5] ",\"gid\":" f[6] ",\"inode\":" f[7] ",\"mtime\":" mt ",\"ctime\":" ct
 	if (hash != "") rec = rec ",\"sha256\":\"" hash "\""

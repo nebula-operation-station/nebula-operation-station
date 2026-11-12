@@ -1222,7 +1222,7 @@ func TestScriptCutHashStreamNeverMisattributes(t *testing.T) {
 	hB := strings.Repeat("b", 64)
 	hC := strings.Repeat("c", 64)
 	meta := func(p string, ino int) string {
-		return "M1 f 1 644 0 0 " + strconv.Itoa(ino) + " 1700000000.5 1700000000.5\x00" + p + "\x00\x00"
+		return "M1 f 1 644 0 0 " + strconv.Itoa(ino) + " 1700000000.5 1700000000.5 2049\x00" + p + "\x00\x00"
 	}
 	head := "B1700000000\x00Rscanned /etc\x00"
 	tail := meta("/etc/a", 1) + meta("/etc/ab", 2) + "E1700000001\x00"

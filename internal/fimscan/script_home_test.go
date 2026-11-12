@@ -3,10 +3,16 @@
 package fimscan
 
 import (
+	"crypto/sha256"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // homePatterns are the roots summary entries of the home SSH files.
@@ -97,6 +103,114 @@ func TestScriptUnlookedHomesAreUnreadableNotMissing(t *testing.T) {
 				t.Errorf("partial %v, host %+v", res.Partial, res.Host)
 			}
 		})
+	}
+}
+
+// TestScriptHomeHashBoundToInode: a home SSH hash comes with the
+// device:inode:ctime it was read from, and the record keeps it only if the
+// meta pass saw the same file in the same state. A file swapped (another
+// inode) or changed in place (another ctime) between the passes has no
+// hash and makes the run truncated, not unreadable; the old content's hash
+// never stands for it.
+func TestScriptHomeHashBoundToInode(t *testing.T) {
+	const p = "/home/alice/.ssh/authorized_keys"
+	h := strings.Repeat("a", 64)
+	meta := func(ino, ctime string) string {
+		return "M1 f 1 600 1000 1000 " + ino + " 1700000000.5 " + ctime + " 2049\x00" + p + "\x00\x00"
+	}
+	head := "B1700000000\x00Rscanned /home/*/.ssh/authorized_keys*\x00"
+	for _, c := range []struct {
+		name   string
+		stream string
+		hashed bool
+	}{
+		{"same file", "H2049:7:1700000000.5\x00" + h + "  " + p + "\x00" + meta("7", "1700000000.5"), true},
+		{"swapped between the passes", "H2049:7:1700000000.5\x00" + h + "  " + p + "\x00" + meta("8", "1700000000.5"), false},
+		{"changed in place between the passes", "H2049:7:1700000000.5\x00" + h + "  " + p + "\x00" + meta("7", "1700000001.25"), false},
+		{"other device", "H2050:7:1700000000.5\x00" + h + "  " + p + "\x00" + meta("7", "1700000000.5"), false},
+		{"malformed id", "H2049:7:x\x00" + h + "  " + p + "\x00" + meta("7", "1700000000.5"), false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			res := runAwk(t, head+c.stream+"E1700000001\x00")
+			r := findRecord(t, res, p)
+			if c.hashed {
+				if r.Hash != sealHash(scriptTestKey, []byte(p), mustHex(t, h)) || slices.Contains(res.Partial, ReasonHostTruncated) || res.Host.Unreadable != 0 {
+					t.Errorf("hash %+v, partial %v, host %+v", r.Hash, res.Partial, res.Host)
+				}
+				return
+			}
+			if r.Hash.Kind != HashNone {
+				t.Errorf("hash %+v kept for another file", r.Hash)
+			}
+			if !slices.Contains(res.Partial, ReasonHostTruncated) || res.Host.Unreadable != 0 {
+				t.Errorf("partial %v, host %+v", res.Partial, res.Host)
+			}
+		})
+	}
+}
+
+// TestScriptHomeSwapBetweenPassesNeverMisattributes: while the scan runs, a
+// user keeps replacing ~/.ssh/authorized_keys by one of two files with
+// different contents (two inodes). A hash reported for it is always the
+// hash of the inode the record names, never the other file's.
+func TestScriptHomeSwapBetweenPassesNeverMisattributes(t *testing.T) {
+	root := buildTree(t, treeOpts{})
+	j := func(p string) string { return filepath.Join(root, p) }
+	name := j("home/alice/.ssh/authorized_keys")
+	sums := map[uint64][sha256.Size]byte{}
+	var parked []string
+	for i, content := range []string{"ssh-ed25519 AAAA old\n", "ssh-ed25519 AAAA new attacker\n"} {
+		p := j("home/alice/.ssh/park" + strconv.Itoa(i))
+		if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var st syscall.Stat_t
+		if err := syscall.Stat(p, &st); err != nil {
+			t.Fatal(err)
+		}
+		sums[st.Ino] = sha256.Sum256([]byte(content))
+		parked = append(parked, p)
+	}
+	if err := os.Remove(name); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			p := parked[i%2]
+			if err := os.Rename(p, name); err != nil {
+				t.Error(err)
+				return
+			}
+			time.Sleep(time.Duration(rand.IntN(3000)) * time.Microsecond)
+			if err := os.Rename(name, p); err != nil {
+				t.Error(err)
+				return
+			}
+		}
+	}()
+	defer func() {
+		close(stop)
+		<-done
+	}()
+	for range 10 {
+		res := runWith(t, root, ModeFull, os.Getenv("PATH"))
+		for _, r := range res.Records {
+			if string(r.Path) != "/home/alice/.ssh/authorized_keys" || r.Hash.Kind == HashNone {
+				continue
+			}
+			sum, ok := sums[r.Inode]
+			if !ok || r.Hash != sealHash(scriptTestKey, r.Path, sum) {
+				t.Errorf("record of inode %d carries a hash that is not its content's", r.Inode)
+			}
+		}
 	}
 }
 
