@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -182,9 +183,11 @@ func printableASCII(s string) bool {
 
 // readAPIKey reads a bearer token: one line of printable ASCII from a
 // regular file that neither group nor others can access (mode 0600 or
-// 0400), like the NOS token file.
+// 0400), like the NOS token file. The open is non-blocking, so a FIFO or
+// device at the path is rejected by the regular-file check instead of
+// hanging the run in open(); for a regular file the flag has no effect.
 func readAPIKey(path string) (string, error) {
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		return "", fmt.Errorf("open llm api key file: %w", errors.Unwrap(err))
 	}

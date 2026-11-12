@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -73,6 +74,32 @@ func TestHTTPClientRejectsKeyFileThatIsNotRegular(t *testing.T) {
 	_, err := NewHTTPClient(ClientConfig{BaseURL: "https://127.0.0.1/v1", Model: "m", Timeout: time.Second, APIKeyFile: dir})
 	if !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("directory as key file: err = %v, want ErrInvalidConfig", err)
+	}
+}
+
+// A FIFO without a writer must be rejected at once: a blocking open would
+// hang the run before the regular-file check could fire.
+func TestHTTPClientRejectsFIFOKeyFileWithoutBlocking(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "fifo")
+	if err := syscall.Mkfifo(p, 0o600); err != nil {
+		t.Fatalf("mkfifo: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := NewHTTPClient(ClientConfig{BaseURL: "https://127.0.0.1/v1", Model: "m", Timeout: time.Second, APIKeyFile: p})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrInvalidConfig) {
+			t.Fatalf("FIFO as key file: err = %v, want ErrInvalidConfig", err)
+		}
+	case <-time.After(5 * time.Second):
+		// Unblock the stuck open so the goroutine can finish.
+		if w, err := os.OpenFile(p, os.O_WRONLY, 0); err == nil {
+			_ = w.Close()
+		}
+		t.Fatal("NewHTTPClient blocked on a FIFO key file")
 	}
 }
 
