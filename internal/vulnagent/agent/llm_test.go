@@ -135,6 +135,43 @@ func TestHTTPClientHonoursContextDeadline(t *testing.T) {
 	}
 }
 
+// longBaseURL is a valid https base URL of exactly n bytes.
+func longBaseURL(n int) string {
+	const prefix = "https://127.0.0.1/"
+	return prefix + strings.Repeat("v", n-len(prefix))
+}
+
+// paddedResponse is a valid chat-completions body of exactly n bytes:
+// one tool call, then JSON whitespace.
+func paddedResponse(n int) string {
+	const body = `{"choices":[{"message":{"tool_calls":[{"id":"c1","type":"function","function":{"name":"kev_epss","arguments":"{}"}}]}}]}`
+	return body + strings.Repeat(" ", n-len(body))
+}
+
+func TestHTTPClientResponseSizeLimit(t *testing.T) {
+	for _, tc := range []struct {
+		size int
+		ok   bool
+	}{{MaxLLMResponseBytes, true}, {MaxLLMResponseBytes + 1, false}} {
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = io.WriteString(w, paddedResponse(tc.size))
+		}))
+		c, err := NewHTTPClient(ClientConfig{BaseURL: srv.URL, Model: "m", Timeout: 5 * time.Second, Transport: srv.Client().Transport})
+		if err != nil {
+			srv.Close()
+			t.Fatal(err)
+		}
+		resp, err := c.Complete(context.Background(), Request{MaxTokens: 1})
+		srv.Close()
+		switch {
+		case tc.ok && (err != nil || len(resp.ToolCalls) != 1):
+			t.Errorf("valid body of %d bytes: %+v %v", tc.size, resp, err)
+		case !tc.ok && !errors.Is(err, ErrLLM):
+			t.Errorf("valid body of %d bytes (over the limit): err = %v, want ErrLLM", tc.size, err)
+		}
+	}
+}
+
 func TestHTTPClientConfigRejected(t *testing.T) {
 	key := writeKeyFile(t, testKey)
 	cases := map[string]ClientConfig{
@@ -150,6 +187,13 @@ func TestHTTPClientConfigRejected(t *testing.T) {
 		"empty key file":         {BaseURL: "https://127.0.0.1/v1", Model: "m", Timeout: time.Second, APIKeyFile: writeKeyFile(t, "\n")},
 		"two-line key file":      {BaseURL: "https://127.0.0.1/v1", Model: "m", Timeout: time.Second, APIKeyFile: writeKeyFile(t, "a\nb")},
 		"oversized key file":     {BaseURL: "https://127.0.0.1/v1", Model: "m", Timeout: time.Second, APIKeyFile: writeKeyFile(t, strings.Repeat("k", MaxAPIKeyFileBytes+1))},
+		"model too long":         {BaseURL: "https://127.0.0.1/v1", Model: strings.Repeat("m", MaxModelBytes+1), Timeout: time.Second},
+		"base url too long":      {BaseURL: longBaseURL(MaxBaseURLBytes + 1), Model: "m", Timeout: time.Second},
+	}
+	// The same values at their limits are accepted, so the rejections
+	// above are the size checks.
+	if _, err := NewHTTPClient(ClientConfig{BaseURL: longBaseURL(MaxBaseURLBytes), Model: strings.Repeat("m", MaxModelBytes), Timeout: time.Second}); err != nil {
+		t.Fatalf("model and base url at their limits rejected: %v", err)
 	}
 	for name, cfg := range cases {
 		if _, err := NewHTTPClient(cfg); !errors.Is(err, ErrInvalidConfig) {

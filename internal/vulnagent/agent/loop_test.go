@@ -467,6 +467,34 @@ func TestHostileUsageCannotDisableRunTokenBudget(t *testing.T) {
 	}
 }
 
+// Limits.Validate makes OutcomePromptLimit unreachable with valid limits;
+// the guard is a second line of defence and is exercised by lowering the
+// validated limit after New.
+func TestPromptLimitStopsBeforeOversizedCall(t *testing.T) {
+	llm := &scriptedLLM{step: sequence(
+		respond(call(ToolKEVEPSS, `{"vuln_id":"CVE-2026-0001"}`)),
+		respond(call(ToolSubmitAssessment, validSubmit)),
+	)}
+	a := newTestAgent(t, llm, "", nil)
+	facts, err := untrustedEnvelope("finding_facts", factsA())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Room for exactly the first call: the kept lookup pushes the second
+	// estimate over the limit.
+	a.limits.MaxPromptTokens = int(a.estimate([]Message{{Role: "system", Content: a.prompt.system}, {Role: "user", Content: facts}}))
+	rep := a.Run(context.Background(), []FindingFacts{factsA()})
+	r := rep.Results[0]
+	if r.Outcome != OutcomePromptLimit || r.Assessment != nil || r.Calls != 1 || llm.calls() != 1 {
+		t.Fatalf("result %+v, calls %d", r, llm.calls())
+	}
+	for _, req := range llm.reqs {
+		if est := a.estimate(req.Messages); est > int64(a.limits.MaxPromptTokens) {
+			t.Fatalf("sent a prompt of %d tokens over the limit %d", est, a.limits.MaxPromptTokens)
+		}
+	}
+}
+
 func TestTimeoutsEndFindingWithoutText(t *testing.T) {
 	slow := &blockingLLM{}
 	a := newTestAgent(t, slow, "", func(l *Limits) {
