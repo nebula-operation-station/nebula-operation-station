@@ -56,6 +56,8 @@ MAXSIZE_INC=536870913   # find -size -Nc: at most 512 MiB in incremental runs
 HASH_SECONDS=1800       # hashing stops after 30 minutes
 SSH_MAX_FILES=64        # spec 09: at most 64 SSH configuration files
 SSH_MAX_BYTES=262144    # spec 09: at most 256 KiB decoded in total
+SSH_MAX_QUEUE=256       # Include matches waiting to be read
+SSH_MAX_SEEN=1024       # Include matches looked at in total
 MOUNTINFO="$P/proc/self/mountinfo"
 
 LOW=""
@@ -82,6 +84,32 @@ for n in $NESTED_ROOTS; do
 done
 
 exists() { [ -e "$P$1" ] || [ -L "$P$1" ]; }
+
+# nolink PATH: true if no component of the host path PATH (below the read
+# root) is a symlink. Every path the script opens by name is checked with
+# it first, so no symlinked directory anywhere in a path is followed.
+nolink() {
+	nl_rest=${1#/}
+	nl_cur=""
+	while [ -n "$nl_rest" ]; do
+		nl_cur="$nl_cur/${nl_rest%%/*}"
+		case $nl_rest in */*) nl_rest=${nl_rest#*/} ;; *) nl_rest="" ;; esac
+		[ -L "$P$nl_cur" ] && return 1
+	done
+	return 0
+}
+
+# root_state ROOT: scanned, missing, or error when a directory above the
+# root is a symlink (find would resolve it; the root is not scanned).
+root_state() {
+	if ! nolink "${1%/*}"; then
+		echo error
+	elif exists "$1"; then
+		echo scanned
+	else
+		echo missing
+	fi
+}
 
 nested() {
 	for n in $NESTED_ROOTS; do [ "$n" = "$1" ] && return 0; done
@@ -139,24 +167,39 @@ scan() {
 }
 
 # homes CALLBACK: call CALLBACK with every home directory (/root, /home/*)
-# that is a real directory. Symlinked homes are never followed.
+# that is a real directory. Symlinked homes, and /home when it is a
+# symlink or cannot be listed, are never followed (report_links counts
+# them as unreadable).
 homes() {
-	for h in "$P/root" "$P"/home/*; do
+	if [ -L "$P/home" ] || [ ! -d "$P/home" ] || [ ! -r "$P/home" ] || [ ! -x "$P/home" ]; then
+		set -- "$1" "$P/root"
+	else
+		set -- "$1" "$P/root" "$P"/home/*
+	fi
+	cb=$1
+	shift
+	for h; do
 		if [ -L "$h" ] || [ ! -d "$h" ]; then
 			continue
 		fi
 		h=${h#"$P"}
 		case $h in *"
 "*) continue ;; esac
-		"$1" "$h"
+		"$cb" "$h"
 	done
 }
 
-# report_links: every symlinked home or .ssh directory, and every home whose
-# name holds a newline, counts as unreadable: the files behind it are not
-# scanned, so the run is partial.
+# report_links: a symlinked or unlistable /home, every symlinked home or
+# .ssh directory, and every home whose name holds a newline, counts as
+# unreadable: the files behind it are not scanned, so the run is partial.
 report_links() {
-	for h in "$P/root" "$P"/home/*; do
+	if [ -L "$P/home" ] || { [ -e "$P/home" ] && { [ ! -d "$P/home" ] || [ ! -r "$P/home" ] || [ ! -x "$P/home" ]; }; }; then
+		printf 'U\0'
+		set -- "$P/root"
+	else
+		set -- "$P/root" "$P"/home/*
+	fi
+	for h; do
 		[ -e "$h" ] || [ -L "$h" ] || continue
 		case $h in *"
 "*)
@@ -172,7 +215,9 @@ report_links() {
 
 # each_home_file BASE REL CALLBACK: call CALLBACK for every existing BASE/REL
 # with BASE /root or /home (meaning /home/*), never through a symlinked home
-# or .ssh directory. REL may end in a glob.
+# or .ssh directory. REL may end in a glob. A directory that cannot be
+# searched (or, for a glob, listed) sets UNL=1: whether files are behind it
+# is unknown, so they are unreadable, never missing.
 each_home_file() {
 	BASE=$1
 	REL=$2
@@ -185,7 +230,28 @@ home_file() {
 	/root) [ "$1" = /root ] || return 0 ;;
 	*) [ "$1" = /root ] && return 0 ;;
 	esac
-	case $REL in .ssh/*) [ -L "$P$1/.ssh" ] && return 0 ;; esac
+	hd="$P$1"
+	if [ ! -x "$hd" ]; then
+		UNL=1
+		return 0
+	fi
+	case $REL in .ssh/*)
+		[ -L "$hd/.ssh" ] && return 0
+		[ -d "$hd/.ssh" ] || return 0
+		hd="$hd/.ssh"
+		if [ ! -x "$hd" ]; then
+			UNL=1
+			return 0
+		fi
+		;;
+	esac
+	case $REL in *[\*\?\[]*)
+		if [ ! -r "$hd" ]; then
+			UNL=1
+			return 0
+		fi
+		;;
+	esac
 	for f in "$P$1"/$REL; do
 		[ -e "$f" ] || [ -L "$f" ] || continue
 		f=${f#"$P"}
@@ -206,7 +272,7 @@ walk() {
 		if nested "$r" && ! nested_mount "$r"; then
 			continue
 		fi
-		exists "$r" || continue
+		[ "$(root_state "$r")" = scanned ] || continue
 		all=0
 		[ "$r" = /boot/efi ] && all=1
 		scan "$r" "$1" "$all"
@@ -232,11 +298,25 @@ ssh_collect() {
 	SSH_BYTES=0
 	SSH_CUT=0
 	queue=/etc/ssh/sshd_config
+	ssh_qn=1
+	ssh_seen=0
 	while [ -n "$queue" ]; do
 		f=${queue%% *}
 		case $queue in *" "*) queue=${queue#* } ;; *) queue="" ;; esac
+		ssh_qn=$((ssh_qn - 1))
+		ssh_seen=$((ssh_seen + 1))
+		if [ "$ssh_seen" -gt "$SSH_MAX_SEEN" ]; then
+			SSH_CUT=1
+			break
+		fi
 		ssh_known "$f" && continue
-		if [ -L "$P$f" ] || [ ! -f "$P$f" ] || [ ! -r "$P$f" ]; then
+		# A symlink anywhere in the path (a symlinked /etc/ssh, drop-in or
+		# Include directory) is never followed; the file is unreadable.
+		if ! nolink "$f"; then
+			printf 'U\0'
+			continue
+		fi
+		if [ ! -f "$P$f" ] || [ ! -r "$P$f" ]; then
 			continue
 		fi
 		size=$(wc -c <"$P$f" 2>/dev/null) || continue
@@ -261,6 +341,14 @@ ssh_collect() {
 				m=${m#"$P"}
 				case $m in /etc/*) ;; *) continue ;; esac
 				case $m in *[[:space:]]* | *[\*\?\[]* | */./* | */../* | */.. | */. | *//*) continue ;; esac
+				ssh_known "$m" && continue
+				# The queue is bounded: wide globs cannot grow it without
+				# limit; a cut queue makes the SSH configuration truncated.
+				if [ "$ssh_qn" -ge "$SSH_MAX_QUEUE" ]; then
+					SSH_CUT=1
+					break
+				fi
+				ssh_qn=$((ssh_qn + 1))
 				queue="$queue $m"
 				queue=${queue# }
 			done
@@ -276,14 +364,27 @@ produce() {
 
 	# Roots summary.
 	for r in $LITERAL_ROOTS; do
-		if exists "$r"; then printf 'R%s %s\0' scanned "$r"; else printf 'R%s %s\0' missing "$r"; fi
+		s=$(root_state "$r")
+		printf 'R%s %s\0' "$s" "$r"
+		[ "$s" = error ] && printf 'U\0'
 	done
+	# A home pattern is missing only when every place it could match was
+	# looked at; a directory that cannot be searched makes it unreadable
+	# (and "error" when nothing else matched), never missing.
 	for base in /root /home; do
 		for rel in $HOME_FILES; do
 			FOUND=0
+			UNL=0
 			each_home_file "$base" "$rel" found
 			if [ "$base" = /root ]; then pat="/root/$rel"; else pat="/home/*/$rel"; fi
-			if [ "$FOUND" = 1 ]; then printf 'R%s %s\0' scanned "$pat"; else printf 'R%s %s\0' missing "$pat"; fi
+			if [ "$FOUND" = 1 ]; then
+				printf 'R%s %s\0' scanned "$pat"
+			elif [ "$UNL" = 1 ]; then
+				printf 'R%s %s\0' error "$pat"
+			else
+				printf 'R%s %s\0' missing "$pat"
+			fi
+			[ "$UNL" = 1 ] && printf 'U\0'
 		done
 	done
 	report_links

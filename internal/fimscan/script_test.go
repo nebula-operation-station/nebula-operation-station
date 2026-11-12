@@ -495,6 +495,157 @@ func TestScriptSymlinkedHomeIsPartial(t *testing.T) {
 	}
 }
 
+// moveAndLink moves root/p to root/target and leaves a symlink to it at p.
+func moveAndLink(t *testing.T, root, p, target string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(root, target)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(root, p), filepath.Join(root, target)); err != nil {
+		t.Fatal(err)
+	}
+	relLink(t, root, target, p)
+}
+
+// relLink creates root/p as a relative symlink to root/target, so that it
+// resolves inside the test tree.
+func relLink(t *testing.T, root, target, p string) {
+	t.Helper()
+	rel, err := filepath.Rel(filepath.Dir(filepath.Join(root, p)), filepath.Join(root, target))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(rel, filepath.Join(root, p)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestScriptNeverFollowsSymlinkedDirectories: a symlink in any component
+// of a path is never followed: a symlinked Include directory, a symlinked
+// /etc/ssh pointing outside /etc, a symlinked directory above a profile
+// root. Nothing behind them is reported or shipped, and the run is partial.
+func TestScriptNeverFollowsSymlinkedDirectories(t *testing.T) {
+	const leak = "LEAKED-SECRET-CONTENT"
+	for _, c := range []struct {
+		name  string
+		setup func(t *testing.T, root string)
+		check func(t *testing.T, res *Result)
+	}{
+		{"symlinked include directory", func(t *testing.T, root string) {
+			if err := os.MkdirAll(filepath.Join(root, "elsewhere/inc"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, "elsewhere/inc/leak.conf"), []byte(leak+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			relLink(t, root, "/elsewhere/inc", "/etc/ssh/linked.d")
+			f, err := os.OpenFile(filepath.Join(root, "etc/ssh/sshd_config"), os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := f.WriteString("Include linked.d/*.conf\n"); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.Close(); err != nil {
+				t.Fatal(err)
+			}
+		}, func(t *testing.T, res *Result) {
+			if len(res.SSHConfig) != 3 {
+				t.Errorf("ssh config files %d, want the 3 real ones", len(res.SSHConfig))
+			}
+		}},
+		{"symlinked /etc/ssh", func(t *testing.T, root string) {
+			moveAndLink(t, root, "etc/ssh", "/elsewhere/ssh")
+			if err := os.WriteFile(filepath.Join(root, "elsewhere/ssh/sshd_config"), []byte(leak+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}, func(t *testing.T, res *Result) {
+			if len(res.SSHConfig) != 0 {
+				t.Errorf("ssh config read through a symlinked /etc/ssh: %d files", len(res.SSHConfig))
+			}
+		}},
+		{"symlinked directory above a root", func(t *testing.T, root string) {
+			moveAndLink(t, root, "var/spool/cron", "/elsewhere/cron")
+		}, func(t *testing.T, res *Result) {
+			if s := rootStates(res)["/var/spool/cron/crontabs"]; s != RootSkipped {
+				t.Errorf("root behind a symlinked directory: state %v, want skipped", s)
+			}
+			for _, r := range res.Records {
+				if strings.HasPrefix(string(r.Path), "/var/spool/cron/") {
+					t.Errorf("record %s behind a symlink", EscapePath(r.Path))
+				}
+			}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			root := buildTree(t, treeOpts{})
+			c.setup(t, root)
+			out, stderr, err := runScript(t, "/bin/sh", root, scanParams(t, ModeFull))
+			if err != nil {
+				t.Fatalf("script: %v %s", err, stderr)
+			}
+			res, err := Parse(context.Background(), bytes.NewReader(out), Options{Profile: DefaultProfile(), Mode: ModeFull, HostKey: scriptTestKey})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.Complete() || res.Host.Unreadable == 0 {
+				t.Errorf("run complete or nothing unreadable: partial %v, host %+v", res.Partial, res.Host)
+			}
+			for _, f := range res.SSHConfig {
+				if bytes.Contains(f.Content, []byte(leak)) || !strings.HasPrefix(string(f.Path), "/etc/ssh/") {
+					t.Errorf("ssh config %s read through a symlink", EscapePath(f.Path))
+				}
+			}
+			for _, r := range res.Records {
+				if strings.HasPrefix(string(r.Path), "/elsewhere") {
+					t.Errorf("record %s behind a symlink", EscapePath(r.Path))
+				}
+			}
+			c.check(t, res)
+		})
+	}
+}
+
+// TestScriptUnlistableHomeIsUnreadableNotMissing: SSH files below a home or
+// .ssh directory the scan cannot search (mode 0700 of another user without
+// sudo, NFS root_squash) are unknown: counted unreadable, the pattern is
+// "error" when nothing else matched, never "missing" (RootAbsent). Needs an
+// unprivileged user: root searches a mode 000 directory.
+func TestScriptUnlistableHomeIsUnreadableNotMissing(t *testing.T) {
+	root := buildTree(t, treeOpts{})
+	locked := []string{filepath.Join(root, "root/.ssh"), filepath.Join(root, "home/dave")}
+	if err := os.MkdirAll(locked[1], 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range locked {
+		if err := os.Chmod(d, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		for _, d := range locked {
+			_ = os.Chmod(d, 0o755)
+		}
+	})
+	res := runAndParse(t, "/bin/sh", root, ModeFull)
+	states := rootStates(res)
+	for p, s := range map[string]RootState{
+		"/root/.ssh/authorized_keys*":   RootSkipped, // only /root/.ssh: unknown
+		"/root/.ssh/known_hosts":        RootSkipped,
+		"/root/.shosts":                 RootAbsent, // /root itself is searchable
+		"/home/*/.ssh/authorized_keys*": RootScanned,
+		"/home/*/.k5login":              RootScanned,
+	} {
+		if states[p] != s {
+			t.Errorf("root %s: state %v, want %v", p, states[p], s)
+		}
+	}
+	// /root: 3 .ssh patterns; /home/dave: all 6 patterns.
+	if res.Complete() || !slices.Contains(res.Partial, ReasonUnreadable) || res.Host.Unreadable != 9 {
+		t.Errorf("partial %v, host %+v", res.Partial, res.Host)
+	}
+}
+
 // TestScriptUnreadableFileIsPartial: a file the scan cannot hash is
 // reported by metadata, counted as unreadable, and the run is partial.
 func TestScriptUnreadableFileIsPartial(t *testing.T) {
