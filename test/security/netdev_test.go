@@ -23,14 +23,19 @@ package security
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"go/types"
+	"html"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -348,9 +353,94 @@ const ndExecutorSrc = "../../internal/executor"
 // can open a connection.
 var ndIOImports = map[string]bool{
 	"net": true, "net/http": true, "crypto/tls": true, "os/exec": true, "syscall": true,
-	"golang.org/x/crypto/ssh": true,
+	"golang.org/x/crypto/ssh": true, "google.golang.org/grpc": true,
 	"github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport": true,
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun":      true,
+}
+
+// ndModule is the module path; ndRepoRoot the repository root, relative
+// to this test.
+const (
+	ndModule   = "github.com/nebula-operation-station/nebula-operation-station"
+	ndRepoRoot = "../.."
+)
+
+// ndReviewedIOSymbols are the uses of an I/O package (ndIOImports) inside
+// the module packages the read path may use (ndReadPathImports and the
+// module packages they import), each reviewed as opening no connection. A
+// new use (a dial, a client, a request) in permit, executordb, vault or
+// any package below them fails the guard until it is reviewed here.
+var ndReviewedIOSymbols = map[string]string{
+	"internal/events: syscall.O_NOFOLLOW":                    "open flag of the local event key file",
+	"internal/events: syscall.Stat_t":                        "owner check of a local file",
+	"internal/fsguard: syscall.O_NOFOLLOW":                   "open flag of a local file",
+	"internal/fsguard: syscall.Stat_t":                       "owner check of a local file",
+	"internal/pvecontract: net.ParseCIDR":                    "parses text",
+	"internal/pvecontract: net.ParseIP":                      "parses text",
+	"internal/canonical: sshtransport.ParseEndpoint":         "parses host[:port] text, no lookup",
+	"internal/executordb: sshtransport.CheckHostKey":         "checks a key type and size",
+	"internal/executordb: ssh.FingerprintSHA256":             "hashes a public key",
+	"internal/executordb: ssh.ParsePublicKey":                "parses a public key",
+	"internal/rpc/executorv1: grpc.CallOption":               "generated client type",
+	"internal/rpc/executorv1: grpc.ClientConnInterface":      "generated client type (the read path makes no client)",
+	"internal/rpc/executorv1: grpc.MethodDesc":               "generated service descriptor",
+	"internal/rpc/executorv1: grpc.ServiceDesc":              "generated service descriptor",
+	"internal/rpc/executorv1: grpc.ServiceRegistrar":         "generated server registration",
+	"internal/rpc/executorv1: grpc.StaticMethod":             "generated call option",
+	"internal/rpc/executorv1: grpc.StreamDesc":               "generated service descriptor",
+	"internal/rpc/executorv1: grpc.SupportPackageIsVersion9": "generated version check",
+	"internal/rpc/executorv1: grpc.UnaryServerInfo":          "generated server type",
+	"internal/rpc/executorv1: grpc.UnaryServerInterceptor":   "generated server type",
+}
+
+// ndReadPathCalls are the calls on the read path that the walk cannot
+// follow by name: calls through a receiver, a struct field, a local value
+// or a func value, whose target is not a function of the executor
+// package. Each is reviewed as opening no connection. A new call through
+// an injected interface or func-valued field with a neutral name (such as
+// s.devices.Fetch or s.fetch) fails the guard until it is reviewed here
+// and the tests inject a dialer.
+var ndReadPathCalls = map[string]string{
+	"(*hook)":                          "test hook after the reservation (nil in production)",
+	"a.Now":                            "injected clock",
+	"b.Now":                            "injected clock",
+	"m.Now":                            "injected clock",
+	"s.Now":                            "injected clock",
+	"b.String":                         "strings.Builder",
+	"r.String":                         "enum name",
+	"binary.BigEndian.Uint64":          "byte decoding",
+	"ctx.Err":                          "context state",
+	"doc.NetDeviceTarget":              "permit lease document lookup",
+	"t.AllowsRead":                     "permit lease target check",
+	"effective.Before":                 "time comparison",
+	"effective.Unix":                   "time conversion",
+	"g.ExpiresAt.Unix":                 "time conversion",
+	"g.RevokedAt.IsZero":               "time check",
+	"i.UpdatedAt.Unix":                 "time conversion",
+	"last.Unix":                        "time conversion",
+	"netDevAfterReserve.Load":          "atomic test hook load",
+	"pub.Marshal":                      "public key encoding",
+	"signer.PublicKey":                 "public key of a loaded signer",
+	"s.keys.Signer":                    "keyring file load (local disk)",
+	"s.auth.ReadDispatchEpoch":         "permit authority state",
+	"s.db.GetNetDevice":                "executor.db (SQLite, local)",
+	"s.db.ReadActionLastRun":           "executor.db (SQLite, local)",
+	"s.db.ReadGrantClock":              "executor.db (SQLite, local)",
+	"s.db.ReadGrants":                  "executor.db (SQLite, local)",
+	"s.db.ReleaseReadRun":              "executor.db (SQLite, local)",
+	"s.db.ReserveReadRun":              "executor.db (SQLite, local)",
+	"s.log.Info":                       "audit log",
+	"s.vault.List":                     "vault metadata (executor.db)",
+	"s.vault.State":                    "vault state",
+	"status.FromContextError(err).Err": "gRPC status of a context error",
+}
+
+// ndBuiltinCalls are builtins and conversions, which do no I/O.
+var ndBuiltinCalls = map[string]bool{
+	"append": true, "cap": true, "clear": true, "copy": true, "delete": true, "len": true, "max": true, "min": true,
+	"make": true, "new": true, "panic": true, "recover": true,
+	"[]byte": true, "[]rune": true, "string": true, "int": true, "int32": true, "int64": true, "uint": true,
+	"uint16": true, "uint32": true, "uint64": true, "float64": true, "bool": true, "byte": true, "rune": true,
 }
 
 // ndReadPathImports are the packages the read path may use: those it uses
@@ -377,12 +467,13 @@ var ndIOName = regexp.MustCompile(`(?i)dial|transport|probe|netdevadmin|conn$|^c
 // ndReadIOFindings walks the executor sources from ReadNetDevice through
 // every package function or method it names (by name, so it
 // over-approximates) and returns each use of an I/O package or a dial-like
-// identifier, plus the visited function names.
-func ndReadIOFindings(dir string) (findings, visited []string, err error) {
+// identifier and each call it cannot follow that is not in
+// ndReadPathCalls, plus the visited function names and every such call.
+func ndReadIOFindings(dir string) (findings, visited, calls []string, err error) {
 	fset := token.NewFileSet()
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	type fn struct {
 		decl    *ast.FuncDecl
@@ -396,17 +487,9 @@ func ndReadIOFindings(dir string) (findings, visited []string, err error) {
 		}
 		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
-		imports := map[string]string{}
-		for _, imp := range f.Imports {
-			p := strings.Trim(imp.Path.Value, `"`)
-			alias := p[strings.LastIndex(p, "/")+1:]
-			if imp.Name != nil {
-				alias = imp.Name.Name
-			}
-			imports[alias] = p
-		}
+		imports := ndFileImports(f)
 		for _, d := range f.Decls {
 			if fd, ok := d.(*ast.FuncDecl); ok && fd.Body != nil {
 				funcs[fd.Name.Name] = append(funcs[fd.Name.Name], fn{fd, imports})
@@ -414,9 +497,10 @@ func ndReadIOFindings(dir string) (findings, visited []string, err error) {
 		}
 	}
 	if len(funcs["ReadNetDevice"]) == 0 {
-		return nil, nil, fmt.Errorf("ReadNetDevice not found in %s", dir)
+		return nil, nil, nil, fmt.Errorf("ReadNetDevice not found in %s", dir)
 	}
 	seen := map[string]bool{"ReadNetDevice": true}
+	seenCalls := map[string]bool{}
 	queue := []string{"ReadNetDevice"}
 	for len(queue) > 0 {
 		cur := queue[0]
@@ -424,6 +508,36 @@ func ndReadIOFindings(dir string) (findings, visited []string, err error) {
 		visited = append(visited, cur)
 		for _, f := range funcs[cur] {
 			ast.Inspect(f.decl.Body, func(n ast.Node) bool {
+				// A call the walk cannot follow by name: a method of
+				// another package's value, a field, a func value.
+				if c, ok := n.(*ast.CallExpr); ok {
+					target := ""
+					switch x := c.Fun.(type) {
+					case *ast.SelectorExpr:
+						pkg, isIdent := x.X.(*ast.Ident)
+						_, isPkg := f.imports[ndIdentName(pkg, isIdent)]
+						if _, local := funcs[x.Sel.Name]; !isPkg && !local {
+							target = types.ExprString(c.Fun)
+						}
+					case *ast.Ident:
+						if _, local := funcs[x.Name]; !local && !ndBuiltinCalls[x.Name] {
+							target = x.Name
+						}
+					case *ast.ArrayType:
+						if !ndBuiltinCalls[types.ExprString(x)] {
+							target = types.ExprString(x)
+						}
+					default:
+						target = types.ExprString(c.Fun)
+					}
+					if target != "" && !seenCalls[target] {
+						seenCalls[target] = true
+						calls = append(calls, target)
+						if _, ok := ndReadPathCalls[target]; !ok {
+							findings = append(findings, fmt.Sprintf("%s: unreviewed call %s (an injected interface, field or func value could dial)", fset.Position(c.Pos()), target))
+						}
+					}
+				}
 				var id *ast.Ident
 				switch x := n.(type) {
 				case *ast.SelectorExpr:
@@ -449,7 +563,102 @@ func ndReadIOFindings(dir string) (findings, visited []string, err error) {
 			})
 		}
 	}
-	return findings, visited, nil
+	return findings, visited, calls, nil
+}
+
+// ndIdentName returns the name of id, or "" if ok is false.
+func ndIdentName(id *ast.Ident, ok bool) string {
+	if !ok {
+		return ""
+	}
+	return id.Name
+}
+
+// ndFileImports maps the import names of f to their paths.
+func ndFileImports(f *ast.File) map[string]string {
+	imports := map[string]string{}
+	for _, imp := range f.Imports {
+		p := strings.Trim(imp.Path.Value, `"`)
+		alias := p[strings.LastIndex(p, "/")+1:]
+		if imp.Name != nil {
+			alias = imp.Name.Name
+		}
+		imports[alias] = p
+	}
+	return imports
+}
+
+// ndPackageIOFindings scans the module packages the read path may use
+// (the module entries of ndReadPathImports and, transitively, the module
+// packages they import; I/O packages such as sshtransport are not entered,
+// their uses are checked where they are imported) and returns each use of
+// an I/O package symbol that is not in ndReviewedIOSymbols, plus the
+// scanned package directories and every use met. root is the repository
+// root, module the module path.
+func ndPackageIOFindings(root, module string) (findings, scanned, uses []string, err error) {
+	var queue []string
+	for p := range ndReadPathImports {
+		if strings.HasPrefix(p, module+"/") {
+			queue = append(queue, strings.TrimPrefix(p, module+"/"))
+		}
+	}
+	slices.Sort(queue)
+	seen := map[string]bool{}
+	for _, q := range queue {
+		seen[q] = true
+	}
+	seenUse := map[string]bool{}
+	for len(queue) > 0 {
+		rel := queue[0]
+		queue = queue[1:]
+		scanned = append(scanned, rel)
+		dir := filepath.Join(root, filepath.FromSlash(rel))
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("scan %s: %w", rel, err)
+		}
+		fset := token.NewFileSet()
+		for _, ent := range entries {
+			name := ent.Name()
+			if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			imports := ndFileImports(f)
+			for _, p := range imports {
+				sub, ok := strings.CutPrefix(p, module+"/")
+				if ok && !ndIOImports[p] && !seen[sub] {
+					seen[sub] = true
+					queue = append(queue, sub)
+				}
+			}
+			ast.Inspect(f, func(n ast.Node) bool {
+				x, ok := n.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				pkg, ok := x.X.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				if p, ok := imports[pkg.Name]; ok && ndIOImports[p] {
+					use := rel + ": " + pkg.Name + "." + x.Sel.Name
+					if !seenUse[use] {
+						seenUse[use] = true
+						uses = append(uses, use)
+					}
+					if _, ok := ndReviewedIOSymbols[use]; !ok {
+						findings = append(findings, fmt.Sprintf("%s: unreviewed use of %s.%s (%s)", fset.Position(x.Pos()), pkg.Name, x.Sel.Name, p))
+					}
+				}
+				return true
+			})
+		}
+	}
+	return findings, scanned, uses, nil
 }
 
 // requireNoNetDevReadIO stops the test before any read when the
@@ -458,15 +667,40 @@ func ndReadIOFindings(dir string) (findings, visited []string, err error) {
 // executor has no dialer hook yet, so once ND-14 adds device I/O these
 // tests must inject a loopback or failing dialer first; until then this
 // guard keeps every read in this file off the network.
+//
+// It checks, statically: the executor functions reachable from
+// ReadNetDevice by name (I/O packages, dial-like names, and every call
+// through a receiver, field or func value against ndReadPathCalls), and
+// the module packages the read path may use, with the module packages
+// below them (every use of an I/O package against ndReviewedIOSymbols).
+//
+// Limits (reviewed, ND-21 follow-up): the walk is by name, not by type,
+// so it does not resolve which implementation an interface call reaches;
+// a reviewed call such as s.db.ReadGrants is trusted to stay local
+// because executordb itself is scanned. I/O reached through a value
+// injected into a scanned package from outside it (a func or interface
+// handed to permit at construction), or through a third-party package
+// other than those in ndIOImports, is not seen. These gaps close when
+// ND-14 adds a dialer hook that ndEnv replaces with a failing one; until
+// then the guard plus the Unimplemented reply in wantAuthorized are the
+// protection.
 func requireNoNetDevReadIO(t *testing.T) {
 	t.Helper()
-	findings, visited, err := ndReadIOFindings(ndExecutorSrc)
+	findings, visited, _, err := ndReadIOFindings(ndExecutorSrc)
 	if err != nil {
 		t.Fatalf("scan the executor read path: %v", err)
+	}
+	pkgFindings, scanned, _, err := ndPackageIOFindings(ndRepoRoot, ndModule)
+	if err != nil {
+		t.Fatalf("scan the read path packages: %v", err)
 	}
 	if len(findings) > 0 {
 		t.Fatalf("ReadNetDevice can reach device I/O; inject a loopback or test-failing dialer into ndEnv before reading %s at %s (functions on the path: %v):\n%s",
 			ndDevice, ndEndpoint, visited, strings.Join(findings, "\n"))
+	}
+	if len(pkgFindings) > 0 {
+		t.Fatalf("a package on the read path can open a connection; review it and inject a dialer into ndEnv before reading %s at %s (packages scanned: %v):\n%s",
+			ndDevice, ndEndpoint, scanned, strings.Join(pkgFindings, "\n"))
 	}
 }
 
@@ -488,12 +722,26 @@ func (s *S) ReadNetDevice() { var c st.Config; _ = c }`,
 import "github.com/nebula-operation-station/nebula-operation-station/internal/netdevcbs"
 func (s *S) ReadNetDevice() { s.run() }
 func (s *S) run() { _ = netdevcbs.Collect(s.target) }`,
+		// Dials behind neutral names: an injected interface, a func-valued
+		// field, a func value in a local, a method value.
+		"injected interface with a neutral name": `package x
+func (s *S) ReadNetDevice() { s.check() }
+func (s *S) check() { _, _ = s.devices.Fetch(s.target) }`,
+		"func-valued field": `package x
+func (s *S) ReadNetDevice() { _ = s.fetch(s.target) }`,
+		"func value in a local": `package x
+func (s *S) ReadNetDevice() { f := s.hooks[0]; f() }`,
+		"call of a returned func": `package x
+func (s *S) ReadNetDevice() { s.client()() }
+func (s *S) client() func() { return s.c }`,
+		"reviewed receiver, new method": `package x
+func (s *S) ReadNetDevice() { s.db.OpenDeviceSession() }`,
 	} {
 		dir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(dir, "x.go"), []byte(src), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		findings, _, err := ndReadIOFindings(dir)
+		findings, _, _, err := ndReadIOFindings(dir)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
@@ -501,15 +749,85 @@ func (s *S) run() { _ = netdevcbs.Collect(s.target) }`,
 			t.Errorf("%s: guard found no I/O", name)
 		}
 	}
+
+	// I/O added inside a package the read path may use (here permit) or
+	// below it is reported, while the reviewed non-dialing uses are not.
+	for name, tc := range map[string]struct {
+		src  string
+		want bool
+	}{
+		"net.Dial in permit": {`package permit
+import "net"
+func f() { _, _ = net.Dial("tcp", "10.20.0.2:22") }`, true},
+		"ssh.Dial in permit": {`package permit
+import "golang.org/x/crypto/ssh"
+func f() { _, _ = ssh.Dial("tcp", "10.20.0.2:22", nil) }`, true},
+		"http client in permit": {`package permit
+import "net/http"
+func f() { _, _ = http.Get("https://10.20.0.1/") }`, true},
+		"sshtransport dial in a package below permit": {`package permit
+import "github.com/nebula-operation-station/nebula-operation-station/internal/below"
+func f() { below.G() }`, true},
+		"reviewed sshtransport parse in canonical": {`package canonical
+import "github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport"
+func f() { _, _ = sshtransport.ParseEndpoint("10.20.0.2") }`, false},
+	} {
+		root := t.TempDir()
+		pkg := "internal/permit"
+		if !tc.want {
+			pkg = "internal/canonical"
+		}
+		for _, rel := range []string{"internal/canonical", "internal/executordb", "internal/netdevcontract", "internal/permit",
+			"internal/rpc/executorv1", "internal/schedgrant", "internal/vault", "internal/below"} {
+			if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(rel)), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(pkg), "x.go"), []byte(tc.src), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		below := `package below
+import "github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport"
+func G() { _, _ = sshtransport.Dial(nil, "10.20.0.2:22") }`
+		if err := os.WriteFile(filepath.Join(root, "internal", "below", "x.go"), []byte(below), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		findings, scanned, _, err := ndPackageIOFindings(root, ndModule)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if tc.want != (len(findings) > 0) {
+			t.Errorf("%s: findings %v (scanned %v), want found = %v", name, findings, scanned, tc.want)
+		}
+	}
+
 	// The walk follows the real read path into the lease check, and that
-	// path is I/O-free today.
-	_, visited, err := ndReadIOFindings(ndExecutorSrc)
+	// path is I/O-free today. Neither reviewed list holds a stale entry.
+	_, visited, calls, err := ndReadIOFindings(ndExecutorSrc)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Logf("read path: %v", visited)
 	if !slices.Contains(visited, "checkNetDeviceGrant") {
 		t.Errorf("guard did not follow ReadNetDevice into checkNetDeviceGrant: %v", visited)
+	}
+	for c := range ndReadPathCalls {
+		if !slices.Contains(calls, c) {
+			t.Errorf("ndReadPathCalls lists %s, which the read path no longer calls", c)
+		}
+	}
+	_, scanned, uses, err := ndPackageIOFindings(ndRepoRoot, ndModule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("read path packages: %v", scanned)
+	if !slices.Contains(scanned, "internal/permit") || !slices.Contains(scanned, "internal/executordb") {
+		t.Errorf("package scan missed permit or executordb: %v", scanned)
+	}
+	for u := range ndReviewedIOSymbols {
+		if !slices.Contains(uses, u) {
+			t.Errorf("ndReviewedIOSymbols lists %s, which no scanned package uses", u)
+		}
 	}
 	requireNoNetDevReadIO(t)
 }
@@ -525,26 +843,104 @@ func (e *ndEnv) wantRefused(what string, before int, err error, c codes.Code) {
 	}
 }
 
+// ndSecretValues are the credential values no reply, error or log line
+// may carry: the stored secret, its rotated successor, the user name and
+// the secret a compromised caller tries to plant.
+var ndSecretValues = []string{ndSecret, ndSecret + "-2", ndUser, ndAttackerSecret}
+
+// ndSecretForms returns every form in which a credential value would
+// appear in text: plain, and the encodings of its bytes that the JSON slog
+// handler, encoding/json and protojson use for []byte (standard base64),
+// plus the unpadded and URL-safe base64 variants and lower- and upper-case
+// hex, so a secret that leaks as bytes is found as well.
+func ndSecretForms() map[string]string {
+	out := map[string]string{}
+	for _, s := range ndSecretValues {
+		b := []byte(s)
+		out[s] = s
+		for enc, form := range map[string]string{
+			"base64":         base64.StdEncoding.EncodeToString(b),
+			"raw base64":     base64.RawStdEncoding.EncodeToString(b),
+			"base64url":      base64.URLEncoding.EncodeToString(b),
+			"raw base64url":  base64.RawURLEncoding.EncodeToString(b),
+			"hex":            hex.EncodeToString(b),
+			"upper-case hex": strings.ToUpper(hex.EncodeToString(b)),
+		} {
+			out[form] = enc + " of " + s
+		}
+	}
+	return out
+}
+
+// ndSecretLeaks returns a description of every credential form in text.
+func ndSecretLeaks(text string) []string {
+	var out []string
+	for form, what := range ndSecretForms() {
+		if strings.Contains(text, form) {
+			out = append(out, what)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
 // requireNoSecret asserts that neither the stored credential nor a
-// planted one appears in the executor's log and event lines.
+// planted one appears, plain or encoded, in the executor's log and event
+// lines.
 func (e *ndEnv) requireNoSecret() {
 	e.t.Helper()
-	logs := e.logs.String()
-	for _, s := range []string{ndSecret, ndUser, ndAttackerSecret} {
-		if strings.Contains(logs, s) {
-			e.t.Fatalf("executor log contains credential material %q", s)
-		}
+	if leaks := ndSecretLeaks(e.logs.String()); len(leaks) > 0 {
+		e.t.Fatalf("executor log contains credential material: %v", leaks)
 	}
 }
 
 // requireNoSecretIn asserts that a reply or error text carries no
-// credential material and no vault reference of a device.
+// credential material, plain or encoded, and no vault reference of a
+// device.
 func requireNoSecretIn(t *testing.T, what, text string) {
 	t.Helper()
-	for _, s := range []string{ndSecret, ndUser, ndAttackerSecret, "netdev-"} {
-		if strings.Contains(text, s) {
-			t.Errorf("%s contains %q: %s", what, s, text)
+	if leaks := ndSecretLeaks(text); len(leaks) > 0 {
+		t.Errorf("%s contains credential material %v: %s", what, leaks, text)
+	}
+	if strings.Contains(text, "netdev-") {
+		t.Errorf("%s contains a device vault reference: %s", what, text)
+	}
+}
+
+// TestNetDevSecretCheckFindsEncodedLeaks proves that the secret checks
+// are not limited to plain text: a credential that leaks as []byte through
+// the JSON slog handler, protojson or encoding/json (base64), or as hex,
+// is found, and clean text is not flagged.
+func TestNetDevSecretCheckFindsEncodedLeaks(t *testing.T) {
+	var logBuf bytes.Buffer
+	slog.New(slog.NewJSONHandler(&logBuf, nil)).Info("leak", "secret", []byte(ndSecret))
+	pj, err := protojson.Marshal(&pb.SetNetDeviceCredentialRequest{DeviceId: ndDevice, Secret: []byte(ndAttackerSecret)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, text := range map[string]string{
+		"slog JSON of []byte":     logBuf.String(),
+		"protojson bytes field":   string(pj),
+		"encoding/json of []byte": string(ndMarshal(t, struct{ S []byte }{[]byte(ndSecret)})),
+		"raw base64url":           "x=" + base64.RawURLEncoding.EncodeToString([]byte(ndAttackerSecret)) + "&",
+		"raw base64":              base64.RawStdEncoding.EncodeToString([]byte(ndSecret + "-2")),
+		"hex":                     "secret " + hex.EncodeToString([]byte(ndSecret)),
+		"upper-case hex":          strings.ToUpper(hex.EncodeToString([]byte(ndAttackerSecret))),
+	} {
+		for _, s := range ndSecretValues {
+			if strings.Contains(text, s) {
+				t.Fatalf("%s: fixture holds the plain value %q, so it does not test an encoding: %s", name, s, text)
+			}
 		}
+		if len(ndSecretLeaks(text)) == 0 {
+			t.Errorf("%s: secret check missed the leak in %s", name, text)
+		}
+	}
+	if len(ndSecretLeaks("user "+ndUser)) == 0 {
+		t.Error("secret check missed the plain user name")
+	}
+	if leaks := ndSecretLeaks(`{"device_id":"core-sw","credential_version":1,"secret_count":0}`); len(leaks) != 0 {
+		t.Errorf("clean metadata flagged: %v", leaks)
 	}
 }
 
@@ -954,6 +1350,94 @@ func TestNetDevCompromisedServerCannotWidenOrExtendLeases(t *testing.T) {
 		}
 	}
 
+	// Edge cases of the lease bounds. Each is refused at proposal over the
+	// socket, and the executor's own parser (permit.ParseReadGrant, whose
+	// reason the RPC does not echo) refuses it for its own reason, so a
+	// regression in that one check is caught even if another check would
+	// still refuse a sloppier document.
+	day := int64(24 * time.Hour / time.Second)
+	maxLife := int64(permit.ReadGrantMaxLifetime / time.Second)
+	distinctTargets := func(n int) []permit.NetDeviceTarget {
+		out := make([]permit.NetDeviceTarget, n)
+		for i := range out {
+			out[i] = e.target(schedgrant.NetDeviceReadCBSVersion)
+			out[i].DeviceID = fmt.Sprintf("sw-%02d", i)
+		}
+		return out
+	}
+	edges := []struct {
+		name, reason string
+		doc          func(*permit.ReadGrantDoc)
+	}{
+		// A server-chosen future creation time would move a 30-day window
+		// past 30 days from now.
+		{"created_unix one day ahead, 30 days from creation", "future", func(d *permit.ReadGrantDoc) {
+			d.CreatedUnix += day
+			d.ExpiryUnix = d.CreatedUnix + maxLife
+		}},
+		{"created_unix one minute ahead, 30 days from creation", "future", func(d *permit.ReadGrantDoc) {
+			d.CreatedUnix += 60
+			d.ExpiryUnix = d.CreatedUnix + maxLife
+		}},
+		{"created_unix one year ahead, one hour long", "future", func(d *permit.ReadGrantDoc) {
+			d.CreatedUnix += 365 * day
+			d.ExpiryUnix = d.CreatedUnix + 3600
+		}},
+		// Target merging: the same device twice, identical or with other
+		// reads, must not add up to wider reads.
+		{"same target twice", "listed twice", func(d *permit.ReadGrantDoc) {
+			d.NetDeviceTargets = append(d.NetDeviceTargets, d.NetDeviceTargets[0])
+		}},
+		{"same device twice with other reads", "listed twice", func(d *permit.ReadGrantDoc) {
+			d.NetDeviceTargets = append(d.NetDeviceTargets, e.target(schedgrant.NetDeviceReadCBSMACTable, schedgrant.NetDeviceReadCBSLLDP))
+		}},
+		{"same read twice in a target", "listed twice", func(d *permit.ReadGrantDoc) {
+			d.NetDeviceTargets[0].Reads = []string{schedgrant.NetDeviceReadCBSVersion, schedgrant.NetDeviceReadCBSVersion}
+		}},
+		{"more than MaxNetDeviceTargets devices", "devices", func(d *permit.ReadGrantDoc) {
+			d.NetDeviceTargets = distinctTargets(permit.MaxNetDeviceTargets + 1)
+		}},
+		{"no device", "devices", func(d *permit.ReadGrantDoc) { d.NetDeviceTargets = []permit.NetDeviceTarget{} }},
+		// Lower bounds of the budget and the interval.
+		{"zero run_budget", "run_budget", func(d *permit.ReadGrantDoc) { d.RunBudget = 0 }},
+		{"negative run_budget", "run_budget", func(d *permit.ReadGrantDoc) { d.RunBudget = -1 }},
+		{"most negative run_budget", "run_budget", func(d *permit.ReadGrantDoc) { d.RunBudget = -1 << 63 }},
+		{"zero min_interval_s", "min_interval_s", func(d *permit.ReadGrantDoc) { d.MinIntervalS = 0 }},
+		{"negative min_interval_s", "min_interval_s", func(d *permit.ReadGrantDoc) { d.MinIntervalS = -900 }},
+		// Version and generation bounds of a target.
+		{"zero credential_version", "credential_version", func(d *permit.ReadGrantDoc) { d.NetDeviceTargets[0].CredentialVersion = 0 }},
+		{"negative credential_version", "credential_version", func(d *permit.ReadGrantDoc) { d.NetDeviceTargets[0].CredentialVersion = -1 }},
+		{"zero trust_generation", "trust_generation", func(d *permit.ReadGrantDoc) { d.NetDeviceTargets[0].TrustGeneration = 0 }},
+	}
+	for _, tc := range edges {
+		d := valid()
+		tc.doc(&d)
+		raw := ndMarshal(t, d)
+		_, err := e.client.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: raw})
+		if status.Code(err) != codes.InvalidArgument {
+			t.Errorf("%s: want InvalidArgument at proposal, got %v", tc.name, err)
+		}
+		if _, _, _, err := permit.ParseReadGrant(raw, e.clock.now()); err == nil || !strings.Contains(err.Error(), tc.reason) {
+			t.Errorf("%s: parser: want a refusal naming %q, got %v", tc.name, tc.reason, err)
+		}
+	}
+	// Controls: the bounds sit exactly where the edge cases put them. A
+	// lease created now with the full 30 days, one with exactly
+	// MaxNetDeviceTargets devices and one with the smallest budget are
+	// valid proposals (they stay proposals; none is approved).
+	for name, edit := range map[string]func(*permit.ReadGrantDoc){
+		"created now, 30 days":        func(d *permit.ReadGrantDoc) { d.ExpiryUnix = d.CreatedUnix + maxLife },
+		"MaxNetDeviceTargets devices": func(d *permit.ReadGrantDoc) { d.NetDeviceTargets = distinctTargets(permit.MaxNetDeviceTargets) },
+		"run_budget 1":                func(d *permit.ReadGrantDoc) { d.RunBudget = 1 },
+	} {
+		d := valid()
+		edit(&d)
+		if _, err := e.client.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: ndMarshal(t, d)}); err != nil {
+			t.Errorf("control %s: refused at proposal: %v", name, err)
+		}
+	}
+	e.wantRefused("read after the widening proposals", n, e.read(ndDevice, cbsVersion), codes.PermissionDenied)
+
 	// The admin approves a narrow lease: one read, at least 15 minutes
 	// apart, for one hour.
 	e.approve(e.leaseDoc(time.Hour, 24, 900, e.target(schedgrant.NetDeviceReadCBSVersion)))
@@ -997,6 +1481,56 @@ func TestNetDevCompromisedServerCannotWidenOrExtendLeases(t *testing.T) {
 	e.wantRefused("read on a revoked lease", n, e.read(ndDevice, cbsVersion), codes.PermissionDenied)
 
 	e.requireRegistryUnchanged(before.GetTrustGeneration(), before.GetCredentialVersion())
+	e.requireNoSecret()
+}
+
+// TestNetDevLeaseAheadOfRegistryAuthorizesNothing (ND-21 1): a lease
+// whose credential_version or trust_generation is ahead of the registry
+// binds an identity the device does not have. Even approved, alone or all
+// together, such leases authorize no read, for any of their reads. A lease
+// at the registry's current identity does read, so the refusals come from
+// the lease binding, not from the device.
+//
+// Open (nd21g report): such a lease becomes live once an admin rotation
+// brings the registry to the version it names, because the device
+// lifecycle's revocation (NetDevAdmin.Revoke) revokes provider grants
+// only, not device read leases. The assertion for that belongs here once
+// the executor revokes device leases on rotation, block, re-pin and
+// removal.
+func TestNetDevLeaseAheadOfRegistryAuthorizesNothing(t *testing.T) {
+	e := newNDEnv(t, peercred.RoleServer)
+	cbsVersion := pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION
+	before := e.device()
+	if before.GetCredentialVersion() != 1 || before.GetTrustGeneration() != 1 {
+		t.Fatalf("fixture: device at credential version %d, trust generation %d; want 1, 1", before.GetCredentialVersion(), before.GetTrustGeneration())
+	}
+	n := e.authorizedReads()
+
+	ahead := []struct {
+		name string
+		edit func(*permit.NetDeviceTarget)
+	}{
+		{"credential_version one ahead", func(t *permit.NetDeviceTarget) { t.CredentialVersion++ }},
+		{"credential_version far ahead", func(t *permit.NetDeviceTarget) { t.CredentialVersion = 1<<53 - 1 }},
+		{"trust_generation one ahead", func(t *permit.NetDeviceTarget) { t.TrustGeneration++ }},
+		{"trust_generation far ahead", func(t *permit.NetDeviceTarget) { t.TrustGeneration = 1 << 48 }},
+		{"both ahead", func(t *permit.NetDeviceTarget) { t.CredentialVersion++; t.TrustGeneration++ }},
+	}
+	for _, tc := range ahead {
+		tgt := e.target(schedgrant.NetDeviceReadCBSVersion, schedgrant.NetDeviceReadCBSMACTable)
+		tc.edit(&tgt)
+		e.approve(e.leaseDoc(2*time.Hour, 24, 900, tgt))
+		e.wantRefused("read on a lease with "+tc.name, n, e.read(ndDevice, cbsVersion), codes.PermissionDenied)
+	}
+	// All of them together still authorize nothing, for either read.
+	e.wantRefused("read with every ahead lease approved", n, e.read(ndDevice, cbsVersion), codes.PermissionDenied)
+	e.wantRefused("MAC table read with every ahead lease approved", n, e.read(ndDevice, pb.NetDeviceRead_NET_DEVICE_READ_CBS_MAC_TABLE), codes.PermissionDenied)
+	// The approvals changed nothing in the registry.
+	e.requireRegistryUnchanged(before.GetTrustGeneration(), before.GetCredentialVersion())
+
+	// Control: a lease at the registry's current identity reads.
+	e.approve(e.leaseDoc(time.Hour, 24, 900, e.target(schedgrant.NetDeviceReadCBSVersion)))
+	e.wantAuthorized(n, e.read(ndDevice, cbsVersion))
 	e.requireNoSecret()
 }
 
@@ -1146,7 +1680,7 @@ func TestNetDevCompromisedCollectorBoundary(t *testing.T) {
 		pb.ExecutorService_ListNetDevices_FullMethodName: true,
 		pb.ExecutorService_ReadNetDevice_FullMethodName:  true,
 	}
-	if got := rolesOf(peercred.RoleNetDevCollector); len(got) != len(allowed) {
+	if got := rolesOf(peercred.RoleNetDevCollector); !maps.Equal(got, allowed) {
 		t.Errorf("netdev-collector role grants %v, want exactly %v", got, allowed)
 	}
 	for method := range executor.MethodRoles() {
@@ -1479,6 +2013,7 @@ type ndUIStore struct {
 	vlans  map[string][]netdevcontract.VLAN
 	ports  map[string][]netdevcontract.Port
 	lldp   map[string][]netdevcontract.LLDPNeighbor
+	macs   map[string][]netdevcontract.MACEntry
 	policy map[string]netdevcontract.FirewallPolicy
 }
 
@@ -1514,14 +2049,25 @@ func (s *ndUIStore) VLANs(_ context.Context, id string) ([]netdevcontract.VLAN, 
 func (s *ndUIStore) Ports(_ context.Context, id string) ([]netdevcontract.Port, error) {
 	return ndRowsOf(s.ports, id)
 }
-func (s *ndUIStore) MACEntries(context.Context, string, int, int) ([]netdevcontract.MACEntry, int, error) {
-	return nil, 0, netdevinventory.ErrDatasetNotFound
+func (s *ndUIStore) MACEntries(_ context.Context, id string, offset, limit int) ([]netdevcontract.MACEntry, int, error) {
+	all, err := ndRowsOf(s.macs, id)
+	if err != nil {
+		return nil, 0, err
+	}
+	offset = min(max(offset, 0), len(all))
+	return all[offset:min(offset+max(limit, 0), len(all))], len(all), nil
 }
 func (s *ndUIStore) LLDPNeighbors(_ context.Context, id string) ([]netdevcontract.LLDPNeighbor, error) {
 	return ndRowsOf(s.lldp, id)
 }
 func (s *ndUIStore) FirewallPolicy(_ context.Context, id string) (netdevcontract.FirewallPolicy, error) {
 	return ndRowsOf(s.policy, id)
+}
+
+// HitCounts serves no hit counts: the firewall page under test shows the
+// rules only.
+func (s *ndUIStore) HitCounts(context.Context, string) ([]netdevcontract.HitCount, error) {
+	return nil, netdevinventory.ErrDatasetNotFound
 }
 
 // ndAuthExec is the executor client of the web login; the pages under
@@ -1604,8 +2150,11 @@ func requireInert(t *testing.T, path, body string) {
 // names and firewall rule descriptions passes the strict ingest only as
 // text and renders escaped; the same fields with terminal escapes, NUL,
 // line breaks or a bidi override are refused at ingest; structured names
-// (interface names, PAN-OS rule and zone names) refuse markup outright.
-// Nothing hostile reaches the page as markup.
+// (interface names, PAN-OS rule and zone names, MAC addresses and MAC
+// table ports) refuse markup outright. PAN-OS rule list members refuse
+// control characters in every list; a list that accepts markup as a member
+// shows it escaped on the firewall view. Nothing hostile reaches the device
+// list, detail or firewall page as markup.
 func TestNetDevHostileDeviceOutputIsInertText(t *testing.T) {
 	ctx := context.Background()
 	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
@@ -1635,6 +2184,7 @@ func TestNetDevHostileDeviceOutputIsInertText(t *testing.T) {
 	}
 
 	up, access := pb.NetDevLinkState_NET_DEV_LINK_STATE_UP, pb.NetDevPortMode_NET_DEV_PORT_MODE_ACCESS
+	macDynamic := pb.NetDevMACType_NET_DEV_MAC_TYPE_DYNAMIC
 	cbsPayloads := func(s string) map[pb.NetDeviceRead][]byte {
 		return map[pb.NetDeviceRead][]byte{
 			pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION: ndPayload(t, &pb.NetDevCBSVersion{Model: s, Firmware: "1.0", Serial: "SN1"}),
@@ -1671,11 +2221,54 @@ func TestNetDevHostileDeviceOutputIsInertText(t *testing.T) {
 		if _, err := ndIngest(ctx, inv, fw.DeviceID, 1, now, pb.NetDeviceRead_NET_DEVICE_READ_PANOS_SECURITY_RULES, fwPayload(s, "")); err == nil {
 			t.Errorf("rule name %q: accepted at ingest", s)
 		}
+		// The MAC table has no free text: a hostile MAC address or port
+		// name is refused outright.
+		for field, entry := range map[string]*pb.NetDevMACEntry{
+			"mac":  {Vlan: 10, Mac: s, Port: "gi1/0/1", Type: macDynamic},
+			"port": {Vlan: 10, Mac: "00:11:22:33:44:55", Port: s, Type: macDynamic},
+		} {
+			if _, err := ndIngest(ctx, inv, sw.DeviceID, 1, now, pb.NetDeviceRead_NET_DEVICE_READ_CBS_MAC_TABLE,
+				ndPayload(t, &pb.NetDevMACTable{Entries: []*pb.NetDevMACEntry{entry}})); err == nil {
+				t.Errorf("MAC table %s %q: accepted at ingest", field, s)
+			}
+		}
+	}
+
+	// PAN-OS list members (zones, addresses, users, applications,
+	// services, URL categories, tags): a control or format character is
+	// refused at ingest in every list; markup is either refused or, if a
+	// list accepts it as a name, rendered inert below.
+	ruleLists := map[string]func(*pb.NetDevSecurityRule, string){
+		"from_zones":  func(r *pb.NetDevSecurityRule, s string) { r.FromZones = []string{"trust", s} },
+		"to_zones":    func(r *pb.NetDevSecurityRule, s string) { r.ToZones = []string{s} },
+		"source":      func(r *pb.NetDevSecurityRule, s string) { r.Source = []string{"10.0.0.0/8", s} },
+		"destination": func(r *pb.NetDevSecurityRule, s string) { r.Destination = []string{s} },
+		"source_user": func(r *pb.NetDevSecurityRule, s string) { r.SourceUser = []string{s} },
+		"application": func(r *pb.NetDevSecurityRule, s string) { r.Application = []string{"dns", s} },
+		"service":     func(r *pb.NetDevSecurityRule, s string) { r.Service = []string{s} },
+		"category":    func(r *pb.NetDevSecurityRule, s string) { r.Category = []string{s} },
+		"tags":        func(r *pb.NetDevSecurityRule, s string) { r.Tags = []string{s} },
+	}
+	listPayload := func(field, s string) []byte {
+		var rs pb.NetDevSecurityRules
+		if err := protojson.Unmarshal(fwPayload("allow-dns", ""), &rs); err != nil {
+			t.Fatal(err)
+		}
+		ruleLists[field](rs.Rules[0], s)
+		return ndPayload(t, &rs)
+	}
+	for field := range ruleLists {
+		for _, s := range ndHostileControl {
+			if _, err := ndIngest(ctx, inv, fw.DeviceID, 1, now, pb.NetDeviceRead_NET_DEVICE_READ_PANOS_SECURITY_RULES, listPayload(field, s)); err == nil {
+				t.Errorf("rule %s member %q: accepted at ingest", field, s)
+			}
+		}
 	}
 
 	// Markup in free text passes ingest as text; one page per payload.
 	store := &ndUIStore{Store: inv, facts: map[string]netdevcontract.Facts{}, vlans: map[string][]netdevcontract.VLAN{},
-		ports: map[string][]netdevcontract.Port{}, lldp: map[string][]netdevcontract.LLDPNeighbor{}, policy: map[string]netdevcontract.FirewallPolicy{}}
+		ports: map[string][]netdevcontract.Port{}, lldp: map[string][]netdevcontract.LLDPNeighbor{}, macs: map[string][]netdevcontract.MACEntry{},
+		policy: map[string]netdevcontract.FirewallPolicy{}}
 	for i, s := range ndHostileMarkup {
 		id := fmt.Sprintf("sw-hostile-%d", i)
 		d := sw
@@ -1713,6 +2306,53 @@ func TestNetDevHostileDeviceOutputIsInertText(t *testing.T) {
 	}
 	store.policy[fw.DeviceID] = part.Policy
 
+	// A MAC table that passed ingest is shown on the switch page.
+	macRows, err := ndIngest(ctx, inv, "sw-hostile-0", 1, now, pb.NetDeviceRead_NET_DEVICE_READ_CBS_MAC_TABLE,
+		ndPayload(t, &pb.NetDevMACTable{Entries: []*pb.NetDevMACEntry{{Vlan: 10, Mac: "00:11:22:33:44:55", Port: "gi1/0/1", Type: macDynamic}}}))
+	if err != nil {
+		t.Fatalf("valid MAC table refused at ingest: %v", err)
+	}
+	macs, ok := macRows.(netdevinventory.MACRows)
+	if !ok {
+		t.Fatalf("MAC table decodes to %T", macRows)
+	}
+	store.macs["sw-hostile-0"] = macs
+
+	// Markup in PAN-OS list members: refused at ingest, or accepted and
+	// then served on its own firewall page, which must be inert.
+	// fw-probe takes the full ingest of each candidate; it is not served.
+	probe := fw
+	probe.DeviceID, probe.TrustPin = "fw-probe", strings.Repeat("c", 64)
+	probe.Endpoints = []netdevcontract.Endpoint{{Address: "10.20.2.250", Port: 443}}
+	if err := inv.UpsertDevice(ctx, probe); err != nil {
+		t.Fatalf("upsert fw-probe: %v", err)
+	}
+	type hostileMember struct{ id, field, value string }
+	var hostileFW []hostileMember
+	for _, field := range slices.Sorted(maps.Keys(ruleLists)) {
+		for _, s := range ndHostileMarkup {
+			payload := listPayload(field, s)
+			if _, err := ndIngest(ctx, inv, probe.DeviceID, 1, now, pb.NetDeviceRead_NET_DEVICE_READ_PANOS_SECURITY_RULES, payload); err != nil {
+				continue
+			}
+			id := fmt.Sprintf("fw-hostile-%d", len(hostileFW))
+			d := fw
+			d.DeviceID, d.TrustPin = id, fmt.Sprintf("%064x", 0x100+len(hostileFW))
+			d.Endpoints = []netdevcontract.Endpoint{{Address: fmt.Sprintf("10.20.2.%d", len(hostileFW)+1), Port: 443}}
+			if err := inv.UpsertDevice(ctx, d); err != nil {
+				t.Fatalf("upsert %s: %v", id, err)
+			}
+			rows, err := ndIngest(ctx, inv, id, 1, now, pb.NetDeviceRead_NET_DEVICE_READ_PANOS_SECURITY_RULES, payload)
+			if err != nil {
+				t.Fatalf("rule %s member %q: accepted on fw-probe, refused on %s: %v", field, s, id, err)
+			}
+			store.policy[id] = rows.(netdevinventory.PolicyPartRows).Policy
+			store.ids = append(store.ids, id)
+			hostileFW = append(hostileFW, hostileMember{id, field, s})
+			t.Logf("rule %s accepts %q as a list member; %s renders it", field, s, id)
+		}
+	}
+
 	// The real pages behind the real session and security middleware.
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	u, err := ui.New(ui.Options{PublicOrigin: origin, Log: log, Now: func() time.Time { return now }})
@@ -1723,9 +2363,14 @@ func TestNetDevHostileDeviceOutputIsInertText(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NetDevPages: %v", err)
 	}
+	fwPage, err := u.NetDevFirewallPage(ui.NetDevFirewallOptions{Store: store, IsAdmin: func(_ context.Context, user string) (bool, error) { return user == "alice", nil }})
+	if err != nil {
+		t.Fatalf("NetDevFirewallPage: %v", err)
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/", u.Handler())
 	pages.Register(mux)
+	fwPage.Register(mux)
 	sessions := auth.NewStore(db, time.Now)
 	a, err := auth.New(auth.Options{Executor: ndAuthExec{}, Sessions: sessions, Log: log})
 	if err != nil {
@@ -1774,8 +2419,26 @@ func TestNetDevHostileDeviceOutputIsInertText(t *testing.T) {
 		if i == 0 && !strings.Contains(body, "&lt;script&gt;alert(1)&lt;/script&gt;") {
 			t.Errorf("%s: the hostile text is not shown as escaped text", path)
 		}
+		if i == 0 && !strings.Contains(body, "00:11:22:33:44:55") {
+			t.Errorf("%s: the MAC table is not shown", path)
+		}
 	}
 	requireInert(t, "/netdev/fw-edge", get("/netdev/fw-edge"))
+	// The firewall view shows the rules: the rule description with markup
+	// is there as escaped text.
+	fwBody := get("/netdev/fw-edge/firewall")
+	requireInert(t, "/netdev/fw-edge/firewall", fwBody)
+	if !strings.Contains(fwBody, "allow-dns") || !strings.Contains(fwBody, html.EscapeString(ndHostileMarkup[0])) {
+		t.Error("/netdev/fw-edge/firewall: the rule or its hostile description is not shown as escaped text")
+	}
+	for _, h := range hostileFW {
+		path := "/netdev/" + h.id + "/firewall"
+		body := get(path)
+		requireInert(t, path, body)
+		if !strings.Contains(body, html.EscapeString(h.value)) {
+			t.Errorf("/netdev/%s: rule %s member %q is not shown as escaped text", h.id, h.field, h.value)
+		}
+	}
 	if !bytes.Contains([]byte(list), []byte("&lt;script&gt;")) {
 		t.Error("/netdev: the hostile label is not shown as escaped text")
 	}
