@@ -117,16 +117,10 @@ func runAccessible(ctx context.Context, tx *sql.Tx, runID string, r runRow, now 
 
 // Record stores the observations of a running run. It returns counts; see
 // Result. A batch over MaxObservationsPerBatch, or with an unknown class, is
-// refused whole. An expired run is aborted and returns ErrRunExpired.
+// refused whole with an error, and the run is marked as dropped by every
+// observation of the batch, so Finish cannot close findings on it. An
+// expired run is aborted and returns ErrRunExpired.
 func (s *Store) Record(ctx context.Context, runID string, obs []Observation) (Result, error) {
-	if len(obs) > MaxObservationsPerBatch {
-		return Result{}, fmt.Errorf("integritystore: record %d observations: %w", len(obs), ErrBatchTooLarge)
-	}
-	for _, o := range obs {
-		if _, err := o.Class.Severity(); err != nil {
-			return Result{}, fmt.Errorf("integritystore: record: %w", err)
-		}
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := unix(s.now())
@@ -147,10 +141,20 @@ func (s *Store) Record(ctx context.Context, runID string, obs []Observation) (Re
 		}
 		return Result{}, err
 	}
+	if err := checkBatch(obs); err != nil {
+		if _, uerr := tx.ExecContext(ctx,
+			`UPDATE integrity_runs SET dropped = dropped + ? WHERE id = ?`, len(obs), runID); uerr != nil {
+			return Result{}, fmt.Errorf("integritystore: record: refused batch: %w", uerr)
+		}
+		if cerr := tx.Commit(); cerr != nil {
+			return Result{}, fmt.Errorf("integritystore: record: refused batch: commit: %w", cerr)
+		}
+		return Result{}, err
+	}
 
 	var res Result
 	uniq, dropped := dedupeBatch(obs, &res)
-	n, err := countUnresolved(ctx, tx, run.subject)
+	n, err := countActive(ctx, tx, run.subject)
 	if err != nil {
 		return Result{}, err
 	}
@@ -196,15 +200,50 @@ func dedupeBatch(obs []Observation, res *Result) ([]Observation, int64) {
 	return out, dropped
 }
 
-// countUnresolved counts the findings of subj that are not resolved.
-func countUnresolved(ctx context.Context, tx *sql.Tx, subj Subject) (int, error) {
+// checkBatch refuses a batch over the observation limit or with an unknown
+// class.
+func checkBatch(obs []Observation) error {
+	if len(obs) > MaxObservationsPerBatch {
+		return fmt.Errorf("integritystore: record %d observations: %w", len(obs), ErrBatchTooLarge)
+	}
+	for _, o := range obs {
+		if _, err := o.Class.Severity(); err != nil {
+			return fmt.Errorf("integritystore: record: %w", err)
+		}
+	}
+	return nil
+}
+
+// limitFor returns the number of active findings (open or expected_pending)
+// that a new or reopened finding of severity sev may see before it is
+// refused. Critical findings may use the whole MaxFindingsPerSubject; lower
+// severities leave ReservedCriticalSlots free for critical ones.
+func limitFor(sev Severity) int {
+	if sev == SeverityCritical {
+		return MaxFindingsPerSubject
+	}
+	return MaxFindingsPerSubject - ReservedCriticalSlots
+}
+
+// countActive counts the findings of subj that count against the limit:
+// open and expected_pending ones.
+func countActive(ctx context.Context, tx *sql.Tx, subj Subject) (int, error) {
 	var n int
 	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM integrity_findings WHERE subject = ? AND state <> 'resolved'`,
+		`SELECT COUNT(*) FROM integrity_findings WHERE subject = ? AND state IN ('open', 'expected_pending')`,
 		string(subj)).Scan(&n); err != nil {
 		return 0, fmt.Errorf("integritystore: count findings: %w", err)
 	}
 	return n, nil
+}
+
+// findingRow is the stored state of a finding that recordOne decides on.
+type findingRow struct {
+	state          State
+	oldRec, newRec string
+	basisOld       sql.NullString
+	basisNew       sql.NullString
+	expiresAt      sql.NullInt64
 }
 
 // recordOne writes one observation of a run inside tx.
@@ -219,18 +258,23 @@ func (s *Store) recordOne(ctx context.Context, tx *sql.Tx, run runRow, runID str
 		newRec = ""
 		res.RecordsDropped++
 	}
-	var state string
-	err := tx.QueryRowContext(ctx,
-		`SELECT state FROM integrity_findings WHERE subject = ? AND class = ? AND path = ?`,
-		subj, string(o.Class), o.Path).Scan(&state)
+	sev, err := o.Class.Severity()
+	if err != nil {
+		return err
+	}
+	var cur findingRow
+	err = tx.QueryRowContext(ctx,
+		`SELECT state, old_record, new_record, basis_old_record, basis_new_record, expires_at
+		FROM integrity_findings WHERE subject = ? AND class = ? AND path = ?`,
+		subj, string(o.Class), o.Path).Scan(&cur.state, &cur.oldRec, &cur.newRec,
+		&cur.basisOld, &cur.basisNew, &cur.expiresAt)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
-		if *n >= MaxFindingsPerSubject {
+		if *n >= limitFor(sev) {
 			res.OverLimit++
 			*dropped++
 			return nil
 		}
-		sev, _ := o.Class.Severity()
 		if _, err := tx.ExecContext(ctx, `INSERT INTO integrity_findings (
 				subject, class, severity, path, path_display, old_record, new_record, state,
 				first_seen_at, last_seen_at, opened_run_id, last_run_id, state_run_id, state_at)
@@ -241,10 +285,14 @@ func (s *Store) recordOne(ctx context.Context, tx *sql.Tx, run runRow, runID str
 		}
 		*n++
 		res.Inserted++
+		return nil
 	case err != nil:
 		return fmt.Errorf("integritystore: read finding: %w", err)
-	case State(state) == StateResolved:
-		if *n >= MaxFindingsPerSubject {
+	}
+
+	switch cur.state {
+	case StateResolved:
+		if *n >= limitFor(sev) {
 			res.OverLimit++
 			*dropped++
 			return nil
@@ -260,15 +308,42 @@ func (s *Store) recordOne(ctx context.Context, tx *sql.Tx, run runRow, runID str
 		}
 		*n++
 		res.Reopened++
-	default:
-		if _, err := tx.ExecContext(ctx, `UPDATE integrity_findings SET
-				old_record = ?, new_record = ?, last_seen_at = ?, last_run_id = ?
-			WHERE subject = ? AND class = ? AND path = ?`,
-			oldRec, newRec, now, runID, subj, string(o.Class), o.Path); err != nil {
-			return fmt.Errorf("integritystore: update finding: %w", err)
+		return nil
+	case StateAccepted, StateExpectedPending:
+		// A human or expected state holds only for the records it was
+		// decided for, and an accepted one only until it expires (ADR 0011
+		// D6). Otherwise the finding reopens as open.
+		expired := cur.state == StateAccepted && cur.expiresAt.Valid && now >= cur.expiresAt.Int64
+		same := cur.basisOld.Valid && cur.basisNew.Valid &&
+			cur.basisOld.String == oldRec && cur.basisNew.String == newRec
+		if !expired && same {
+			break
 		}
-		res.Updated++
+		if _, err := tx.ExecContext(ctx, `UPDATE integrity_findings SET
+				old_record = ?, new_record = ?, state = 'open', last_seen_at = ?, last_run_id = ?,
+				state_run_id = ?, state_by = NULL, state_at = ?,
+				basis_old_record = NULL, basis_new_record = NULL, expires_at = NULL
+			WHERE subject = ? AND class = ? AND path = ?`,
+			oldRec, newRec, now, runID, runID, now,
+			subj, string(o.Class), o.Path); err != nil {
+			return fmt.Errorf("integritystore: reopen human state: %w", err)
+		}
+		if cur.state == StateAccepted {
+			// An accepted finding is not counted against the limit; reopened
+			// it is.
+			*n++
+		}
+		res.Reopened++
+		return nil
 	}
+
+	if _, err := tx.ExecContext(ctx, `UPDATE integrity_findings SET
+			old_record = ?, new_record = ?, last_seen_at = ?, last_run_id = ?
+		WHERE subject = ? AND class = ? AND path = ?`,
+		oldRec, newRec, now, runID, subj, string(o.Class), o.Path); err != nil {
+		return fmt.Errorf("integritystore: update finding: %w", err)
+	}
+	res.Updated++
 	return nil
 }
 
@@ -305,7 +380,8 @@ func (s *Store) Finish(ctx context.Context, runID string, complete bool) (Finish
 	if complete && dropped == 0 {
 		res.Outcome = OutcomeComplete
 		r, err := tx.ExecContext(ctx, `UPDATE integrity_findings SET
-				state = 'resolved', closed_run_id = ?, closed_at = ?, state_run_id = ?, state_at = ?
+				state = 'resolved', closed_run_id = ?, closed_at = ?, state_run_id = ?, state_at = ?,
+				basis_old_record = NULL, basis_new_record = NULL, expires_at = NULL
 			WHERE subject = ? AND state <> 'resolved' AND last_run_id <> ?`,
 			runID, now, runID, now, string(run.subject), runID)
 		if err != nil {
@@ -374,7 +450,13 @@ func (s *Store) transition(ctx context.Context, runID string, key Key, from, to 
 	if cur != from {
 		return fmt.Errorf("state %s, want %s: %w", cur, from, ErrWrongState)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE integrity_findings SET state = ?, state_run_id = ?, state_at = ?
+	// Entering expected_pending binds the state to the current records;
+	// leaving it drops the binding.
+	basis := `basis_old_record = NULL, basis_new_record = NULL`
+	if to == StateExpectedPending {
+		basis = `basis_old_record = old_record, basis_new_record = new_record`
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE integrity_findings SET state = ?, state_run_id = ?, state_at = ?, `+basis+`
 		WHERE subject = ? AND class = ? AND path = ?`,
 		string(to), runID, now, string(key.Subject), string(key.Class), key.Path); err != nil {
 		return fmt.Errorf("integritystore: transition: %w", err)
@@ -397,8 +479,10 @@ func readState(ctx context.Context, tx *sql.Tx, key Key) (State, error) {
 }
 
 // Accept records an admin's acceptance of an open or expected_pending
-// finding. actor is the admin name; it is required. The caller authenticates
-// the admin and audits the change.
+// finding. actor is the admin name; it is required. The acceptance is bound
+// to the records the finding has now, and it expires after AcceptValidity:
+// a different record, or the expiry, reopens the finding at its next run. The
+// caller authenticates the admin and audits the change.
 func (s *Store) Accept(ctx context.Context, key Key, actor string) error {
 	if err := key.validate(); err != nil {
 		return err
@@ -422,8 +506,9 @@ func (s *Store) Accept(ctx context.Context, key Key, actor string) error {
 		return fmt.Errorf("state %s: %w", cur, ErrWrongState)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE integrity_findings SET state = 'accepted', state_by = ?,
-		state_run_id = NULL, state_at = ? WHERE subject = ? AND class = ? AND path = ?`,
-		actor, now, string(key.Subject), string(key.Class), key.Path); err != nil {
+		state_run_id = NULL, state_at = ?, basis_old_record = old_record, basis_new_record = new_record,
+		expires_at = ? WHERE subject = ? AND class = ? AND path = ?`,
+		actor, now, now+int64(AcceptValidity/time.Second), string(key.Subject), string(key.Class), key.Path); err != nil {
 		return fmt.Errorf("integritystore: accept: %w", err)
 	}
 	return tx.Commit()
@@ -439,17 +524,18 @@ func (s *Store) Get(ctx context.Context, key Key) (Finding, error) {
 		subj, class, sev, st         string
 		firstSeen, lastSeen, stateAt int64
 		closedRun, stateRun, stateBy sql.NullString
-		closedAt                     sql.NullInt64
+		closedAt, expires            sql.NullInt64
+		basisOld, basisNew           sql.NullString
 		path                         []byte
 	)
 	err := s.db.QueryRowContext(ctx, `SELECT subject, class, severity, path, path_display, old_record, new_record,
 			state, first_seen_at, last_seen_at, opened_run_id, last_run_id, closed_run_id, closed_at,
-			state_run_id, state_by, state_at
+			state_run_id, state_by, state_at, basis_old_record, basis_new_record, expires_at
 		FROM integrity_findings WHERE subject = ? AND class = ? AND path = ?`,
 		string(key.Subject), string(key.Class), key.Path).Scan(
 		&subj, &class, &sev, &path, &f.PathDisplay, &f.OldRecord, &f.NewRecord,
 		&st, &firstSeen, &lastSeen, &f.OpenedRunID, &f.LastRunID, &closedRun, &closedAt,
-		&stateRun, &stateBy, &stateAt)
+		&stateRun, &stateBy, &stateAt, &basisOld, &basisNew, &expires)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Finding{}, ErrFindingNotFound
 	}
@@ -468,5 +554,10 @@ func (s *Store) Get(ctx context.Context, key Key) (Finding, error) {
 	}
 	f.StateRunID = stateRun.String
 	f.StateBy = stateBy.String
+	f.BasisOldRecord = basisOld.String
+	f.BasisNewRecord = basisNew.String
+	if expires.Valid {
+		f.ExpiresAt = fromUnix(expires.Int64)
+	}
 	return f, nil
 }

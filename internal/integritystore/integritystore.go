@@ -53,9 +53,18 @@ const (
 	// MaxObservationsPerBatch bounds one Record call; a larger batch is
 	// refused whole with ErrBatchTooLarge, so the caller splits it.
 	MaxObservationsPerBatch = 1000
-	// MaxFindingsPerSubject bounds the findings of one subject that are not
-	// resolved. A new finding over the bound is counted in Result.OverLimit.
+	// MaxFindingsPerSubject bounds the findings of one subject that are open
+	// or expected_pending. Accepted findings do not count, so an admin's
+	// Accept frees a slot; a new finding over the bound is counted in
+	// Result.OverLimit. Accepted findings are only created by Accept.
 	MaxFindingsPerSubject = 10000
+	// ReservedCriticalSlots of MaxFindingsPerSubject are kept for critical
+	// findings: a finding of any lower severity is refused once the subject
+	// has MaxFindingsPerSubject - ReservedCriticalSlots active findings.
+	ReservedCriticalSlots = 1000
+	// AcceptValidity: an accepted finding re-opens this long after Accept
+	// unless its records change first (ADR 0011 D6 default, 90 days).
+	AcceptValidity = 90 * 24 * time.Hour
 	// MaxRunDuration: a run not finished within this time is aborted and
 	// closes nothing.
 	MaxRunDuration = 6 * time.Hour
@@ -203,6 +212,13 @@ type Finding struct {
 	StateRunID string
 	StateBy    string
 	StateAt    time.Time
+	// BasisOldRecord and BasisNewRecord are the records an accepted or
+	// expected_pending finding was decided for; empty otherwise. A run that
+	// sees other records reopens the finding.
+	BasisOldRecord string
+	BasisNewRecord string
+	// ExpiresAt is when an accepted finding re-opens; zero otherwise.
+	ExpiresAt time.Time
 }
 
 // Result counts what one Record call did. Nothing in it is silent: every
@@ -210,7 +226,10 @@ type Finding struct {
 type Result struct {
 	Inserted int
 	Updated  int
-	// Reopened: a resolved finding seen again, opened as a new episode.
+	// Reopened: a resolved finding seen again, opened as a new episode; or an
+	// accepted or expected_pending finding whose records changed or whose
+	// acceptance expired, opened again as open. Reopening an accepted
+	// finding is not refused by the limit: it stores no new row.
 	Reopened int
 	// Duplicates: observations with a key already in the same batch; the
 	// later one wins.

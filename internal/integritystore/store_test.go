@@ -375,7 +375,7 @@ func TestFindingsPerSubjectLimitCountsOverflow(t *testing.T) {
 	for start := 0; start < MaxFindingsPerSubject; start += MaxObservationsPerBatch {
 		batch := make([]Observation, 0, MaxObservationsPerBatch)
 		for i := start; i < start+MaxObservationsPerBatch; i++ {
-			batch = append(batch, Observation{Class: ClassEtcChanged, Path: sizedPath(i, 40)})
+			batch = append(batch, Observation{Class: ClassCriticalPathChanged, Path: sizedPath(i, 40)})
 		}
 		res, err := s.Record(t.Context(), run.ID, batch)
 		if err != nil {
@@ -388,7 +388,7 @@ func TestFindingsPerSubjectLimitCountsOverflow(t *testing.T) {
 	if rowCount(t, db, subj) != MaxFindingsPerSubject {
 		t.Fatalf("rows = %d, want %d", rowCount(t, db, subj), MaxFindingsPerSubject)
 	}
-	extra := Observation{Class: ClassEtcChanged, Path: []byte("/etc/over-the-limit")}
+	extra := Observation{Class: ClassCriticalPathChanged, Path: []byte("/etc/over-the-limit")}
 	res, err := s.Record(t.Context(), run.ID, []Observation{extra})
 	if err != nil {
 		t.Fatal(err)
@@ -400,7 +400,7 @@ func TestFindingsPerSubjectLimitCountsOverflow(t *testing.T) {
 		t.Fatal("finding over the limit was stored")
 	}
 	// An already stored finding is still updated at the limit.
-	res, err = s.Record(t.Context(), run.ID, []Observation{{Class: ClassEtcChanged, Path: sizedPath(0, 40)}})
+	res, err = s.Record(t.Context(), run.ID, []Observation{{Class: ClassCriticalPathChanged, Path: sizedPath(0, 40)}})
 	if err != nil {
 		t.Fatal(err)
 	}

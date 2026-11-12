@@ -70,10 +70,20 @@ CREATE TABLE integrity_findings (
     state_run_id     TEXT CHECK (state_run_id IS NULL OR length(state_run_id) = 32),
     state_by         TEXT CHECK (state_by IS NULL OR length(CAST(state_by AS BLOB)) BETWEEN 1 AND 128),
     state_at         INTEGER NOT NULL,
+    -- The records a human or expected state was decided for (ADR 0011 D6
+    -- basis pattern): set on Accept and on MarkExpectedPending, cleared
+    -- otherwise. A different record seen later reopens the finding.
+    basis_old_record TEXT CHECK (basis_old_record IS NULL OR length(CAST(basis_old_record AS BLOB)) <= 2048),
+    basis_new_record TEXT CHECK (basis_new_record IS NULL OR length(CAST(basis_new_record AS BLOB)) <= 2048),
+    -- Acceptance expiry; NULL unless accepted.
+    expires_at       INTEGER,
     PRIMARY KEY (subject, class, path),
     CHECK ((state = 'resolved') = (closed_run_id IS NOT NULL)),
     CHECK ((state = 'resolved') = (closed_at IS NOT NULL)),
-    CHECK (state <> 'accepted' OR state_by IS NOT NULL)
+    CHECK (state <> 'accepted' OR state_by IS NOT NULL),
+    CHECK ((state IN ('accepted', 'expected_pending')) = (basis_new_record IS NOT NULL)),
+    CHECK ((basis_old_record IS NULL) = (basis_new_record IS NULL)),
+    CHECK ((state = 'accepted') = (expires_at IS NOT NULL))
 );
 CREATE INDEX idx_integrity_findings_subject ON integrity_findings (subject, state);
 CREATE INDEX idx_integrity_findings_closed ON integrity_findings (state, closed_at);
