@@ -199,6 +199,10 @@ func hostCmd(ctx context.Context, c pb.ExecutorServiceClient, args []string) err
 		return hostKeys(ctx, c, os.Stdout)
 	case len(args) >= 1 && args[0] == "test":
 		return hostTest(ctx, c, args[1:], os.Stdout)
+	case len(args) >= 1 && args[0] == "offers":
+		return hostOffers(ctx, c, args[1:], os.Stdout)
+	case len(args) >= 1 && args[0] == "offer-revoke":
+		return hostOfferRevoke(ctx, c, args[1:], os.Stdout)
 	case len(args) >= 1 && args[0] == "enroll-script":
 		return hostEnrollScript(ctx, c, args[1:], os.Stdout)
 	case len(args) == 2 && args[0] == "clear":
@@ -225,7 +229,7 @@ fingerprint can be left out. Otherwise FINGERPRINT is the host's key: check it o
 the host itself with ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
 (not with ssh-keyscan).
 
-` + hostKeysUsage
+` + hostKeysUsage + "\n\n" + offersUsage
 
 func hostList(ctx context.Context, c pb.ExecutorServiceClient, w io.Writer) error {
 	resp, err := c.ListHostCriticality(ctx, &pb.ListHostCriticalityRequest{})
