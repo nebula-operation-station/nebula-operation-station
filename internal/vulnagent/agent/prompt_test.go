@@ -85,6 +85,7 @@ func TestLimitsValidate(t *testing.T) {
 		}),
 		"output tokens max":   mod(func(l *Limits) { l.MaxOutputTokens = HardMaxOutputTokens + 1 }),
 		"finding timeout neg": mod(func(l *Limits) { l.FindingTimeout = -1 }),
+		"result below min":    mod(func(l *Limits) { l.MaxToolResultBytes = MinToolResultBytes - 1 }),
 	}
 	for name, l := range bad {
 		if err := l.Validate(); !errors.Is(err, ErrInvalidConfig) {

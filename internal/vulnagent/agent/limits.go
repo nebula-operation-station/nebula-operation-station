@@ -23,6 +23,9 @@ const (
 	DefaultMaxToolResultBytes = 4 << 10
 	// HardMaxToolResultBytes caps MaxToolResultBytes.
 	HardMaxToolResultBytes = 64 << 10
+	// MinToolResultBytes is the smallest MaxToolResultBytes: room for the
+	// cut envelope with its marker and record tag.
+	MinToolResultBytes = 1 << 10
 
 	// DefaultMaxOutputTokens is sent as max_tokens with every LLM call.
 	DefaultMaxOutputTokens = 1024
@@ -141,6 +144,9 @@ func (l Limits) Validate() error {
 		if c.v < 1 || c.v > c.limit {
 			return fmt.Errorf("%s %d outside 1..%d: %w", c.name, c.v, c.limit, ErrInvalidConfig)
 		}
+	}
+	if l.MaxToolResultBytes < MinToolResultBytes {
+		return fmt.Errorf("max_tool_result_bytes %d below %d: %w", l.MaxToolResultBytes, MinToolResultBytes, ErrInvalidConfig)
 	}
 	need := int64(PromptBaseMaxBytes) +
 		int64(l.MaxToolSteps)*int64(ToolCallMaxBytes+l.MaxToolResultBytes) +
