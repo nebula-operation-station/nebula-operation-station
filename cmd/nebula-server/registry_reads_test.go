@@ -277,3 +277,50 @@ func TestServerRegistryReadsThroughRoleTable(t *testing.T) {
 		t.Fatalf("not connected changed the result: %+v", out.Images[0])
 	}
 }
+
+// TestServerRegistryLeaseApprovedInLaterSecondIsListed: the executor stamps
+// an approved read grant with its approval clock, not the document's
+// created_unix, so a lease proposed in one second and approved in a later
+// one must still be listed as active by the next RegistryLeases call. The
+// proposal clock is set two seconds back so the approval always lands in a
+// later second (the CI flake hit this only when the seconds rolled over).
+func TestServerRegistryLeaseApprovedInLaterSecondIsListed(t *testing.T) {
+	r := newProviderRig(t)
+	ctx := context.Background()
+	pass := []byte(strings.Repeat("correct-horse-battery-staple-", 4))
+	r.svc.SetVaultParams(vault.Params{Time: 1, MemoryKiB: 64, Threads: 1})
+	if _, err := r.svc.InitVault(ctx, &pb.InitVaultRequest{Passphrase: slices.Clone(pass)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.svc.Unlock(ctx, &pb.UnlockRequest{Passphrase: slices.Clone(pass), Scope: pb.UnlockScope_UNLOCK_SCOPE_VAULT}); err != nil {
+		t.Fatal(err)
+	}
+	r.svc.SetRegistryReadAuthorizer(r.svc.RegistryReadGrants())
+	lazy := new(lazyExecutor)
+	lazy.c.Store(r.client)
+	proposed := func() time.Time { return time.Now().Add(-2 * time.Second) }
+	s := newServerRegistryReads(lazy, proposed, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if _, err := r.svc.AddPrivateRegistry(ctx, &pb.AddPrivateRegistryRequest{RegistryId: "corp",
+		RegistryOrigin: "https://registry.corp.example", AuthMode: pb.PrivateRegistryAuthMode_PRIVATE_REGISTRY_AUTH_MODE_BASIC,
+		Repositories: []string{"team/app"}, Username: "ci-robot", Secret: []byte(srvRegSecret),
+		CredentialExpiresUnix: time.Now().Add(30 * 24 * time.Hour).Unix()}); err != nil {
+		t.Fatalf("AddPrivateRegistry: %v", err)
+	}
+	p, err := s.ProposeRegistryLease(ctx, "alice", registrymeta.LeaseRequest{Days: 7,
+		Registries: []registrymeta.LeaseSelection{{RegistryID: "corp", Repositories: []string{"team/app"}}}})
+	if err != nil {
+		t.Fatalf("propose: %v", err)
+	}
+	approved, err := r.svc.ApproveReadGrantCLI(ctx, &pb.ApproveReadGrantCLIRequest{GrantDigest: p.Digest})
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	if approved.GetGrant().GetCreatedUnix() <= p.Doc.CreatedUnix {
+		t.Fatalf("approval %d not after proposal %d", approved.GetGrant().GetCreatedUnix(), p.Doc.CreatedUnix)
+	}
+	leases, err := s.RegistryLeases(ctx)
+	if err != nil || len(leases) != 1 || leases[0].ID != p.Doc.ID || leases[0].State != "active" ||
+		leases[0].Created.Unix() != approved.GetGrant().GetCreatedUnix() {
+		t.Fatalf("registry leases = %+v, %v", leases, err)
+	}
+}
