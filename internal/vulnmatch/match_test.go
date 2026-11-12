@@ -528,6 +528,45 @@ func TestMissingFeedSnapshotIsGap(t *testing.T) {
 	}
 }
 
+// TestScoreMapsBoundedInTotal: KEV, NVD and EPSS stay within the score
+// limit over repeated calls, not only per call; a rejected EPSS file
+// leaves the DB unchanged, and re-setting known CVEs is not growth.
+func TestScoreMapsBoundedInTotal(t *testing.T) {
+	db := newDB(t)
+	db.scoreLimit = 3
+	day := time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC)
+	epss := func(cves ...string) vulnfeed.EPSSScores {
+		s := vulnfeed.EPSSScores{Date: day}
+		for _, c := range cves {
+			s.Scores = append(s.Scores, vulnfeed.EPSSScore{CVE: c, Probability: 0.1, Percentile: 0.2})
+		}
+		return s
+	}
+	if err := db.SetEPSS(epss("CVE-2024-0001", "CVE-2024-0002")); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetEPSS(epss("cve-2024-0001", "CVE-2024-0002", "CVE-2024-0003")); err != nil {
+		t.Fatalf("known CVEs plus one within the limit: %v", err)
+	}
+	if err := db.SetEPSS(epss("CVE-2024-0004")); !errors.Is(err, ErrLimit) {
+		t.Fatalf("SetEPSS over total limit: err = %v", err)
+	}
+	if err := db.SetEPSS(epss("CVE-2024-0001", "CVE-2024-0002", "CVE-2024-0003", "CVE-2024-0004")); !errors.Is(err, ErrLimit) {
+		t.Fatalf("SetEPSS file over limit: err = %v", err)
+	}
+	if len(db.epss) != 3 {
+		t.Fatalf("epss entries = %d after rejected calls", len(db.epss))
+	}
+	for i := range 3 {
+		if err := db.AddKEV(vulnfeed.KEVEntry{CVE: fmt.Sprintf("CVE-2024-%04d", i+1), DateAdded: day}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.AddKEV(vulnfeed.KEVEntry{CVE: "CVE-2024-0009", DateAdded: day}); !errors.Is(err, ErrLimit) {
+		t.Fatalf("AddKEV over limit: err = %v", err)
+	}
+}
+
 func csafProduct(id, eco, version, train string) vulnfeed.CSAFProduct {
 	return vulnfeed.CSAFProduct{ProductID: id, Name: id, Version: version, Train: train, Ecosystem: eco}
 }

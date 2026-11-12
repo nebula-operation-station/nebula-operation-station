@@ -88,17 +88,20 @@ type DB struct {
 	nvd        map[string]vulnfinding.CVSS
 	nvdCut     int
 	sortedDebs bool
+	// scoreLimit is MaxScoreEntries; tests lower it.
+	scoreLimit int
 }
 
 // NewDB returns an empty DB.
 func NewDB() *DB {
 	return &DB{
-		feeds:    map[string]FeedRef{},
-		debian:   map[debKey][]debEntry{},
-		osvIndex: map[osvKey][]osvHit{},
-		kev:      map[string]string{},
-		epss:     map[string]epssScore{},
-		nvd:      map[string]vulnfinding.CVSS{},
+		feeds:      map[string]FeedRef{},
+		debian:     map[debKey][]debEntry{},
+		osvIndex:   map[osvKey][]osvHit{},
+		kev:        map[string]string{},
+		epss:       map[string]epssScore{},
+		nvd:        map[string]vulnfinding.CVSS{},
+		scoreLimit: MaxScoreEntries,
 	}
 }
 
@@ -185,7 +188,7 @@ func (db *DB) AddKEV(e vulnfeed.KEVEntry) error {
 	if err := db.needFeed(FeedKEV); err != nil {
 		return err
 	}
-	if len(db.kev) >= MaxScoreEntries {
+	if len(db.kev) >= db.scoreLimit {
 		return fmt.Errorf("kev entries: %w", ErrLimit)
 	}
 	if e.DateAdded.IsZero() {
@@ -195,13 +198,26 @@ func (db *DB) AddKEV(e vulnfeed.KEVEntry) error {
 	return nil
 }
 
-// SetEPSS adds the scores of one EPSS file.
+// SetEPSS adds the scores of one EPSS file. Like AddKEV and AddNVD it
+// bounds the total number of entries the DB holds, not just one file's; a
+// file that would exceed the bound is rejected whole and leaves the DB
+// unchanged.
 func (db *DB) SetEPSS(s vulnfeed.EPSSScores) error {
 	if err := db.needFeed(FeedEPSS); err != nil {
 		return err
 	}
-	if len(s.Scores) > MaxScoreEntries {
+	if len(s.Scores) > db.scoreLimit {
 		return fmt.Errorf("epss scores: %w", ErrLimit)
+	}
+	added := map[string]struct{}{}
+	for _, sc := range s.Scores {
+		k := strings.ToUpper(sc.CVE)
+		if _, ok := db.epss[k]; !ok {
+			added[k] = struct{}{}
+		}
+	}
+	if len(db.epss)+len(added) > db.scoreLimit {
+		return fmt.Errorf("epss scores: %d entries: %w", len(db.epss)+len(added), ErrLimit)
 	}
 	date := s.Date.UTC().Format("2006-01-02")
 	for _, sc := range s.Scores {
@@ -217,7 +233,7 @@ func (db *DB) AddNVD(r vulnfeed.NVDRecord) error {
 	if err := db.needFeed(FeedNVD); err != nil {
 		return err
 	}
-	if len(db.nvd) >= MaxScoreEntries {
+	if len(db.nvd) >= db.scoreLimit {
 		return fmt.Errorf("nvd records: %w", ErrLimit)
 	}
 	var cands []vulnfinding.CVSS
