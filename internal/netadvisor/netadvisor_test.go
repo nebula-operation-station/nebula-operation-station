@@ -84,7 +84,7 @@ func TestCleanText(t *testing.T) {
 }
 
 func TestChecksIDsAndStates(t *testing.T) {
-	want := []string{CheckShadowedRule, CheckAnyAny, CheckAllowWithoutProfile, CheckZeroHits}
+	want := []string{CheckShadowedRule, CheckAnyAny, CheckAllowWithoutProfile, CheckZeroHits, CheckDNSBypass}
 	cs := Checks()
 	if len(cs) != len(want) {
 		t.Fatalf("checks = %d, want %d", len(cs), len(want))
