@@ -1,10 +1,14 @@
 # ADR 0013: One-step host enrollment with pairing code and optional NetBird join
 
-Status: Accepted, 2026-11-11 (previously: proposed, 2026-11-11). The
+Status: Accepted, 2026-11-11 (previously: proposed, 2026-11-11); amended
+2026-11-12 ("Amendment 2026-11-12: no NetBird Management API" below: NOS
+does not talk to the NetBird Management API; the operator supplies a
+one-off setup key, Q8 decided). The
 maintainer's decisions on Q1–Q9 are recorded in "Decisions of the maintainer
-(2026-11-11)" below and are worked into D1–D9. Nothing here is implemented;
-the ticket plan is
-[`docs/implementation/one-step-enrollment.md`](../implementation/one-step-enrollment.md).
+(2026-11-11)" below and are worked into D1–D9. Implementation status and
+ticket plan:
+[`docs/implementation/one-step-enrollment.md`](../implementation/one-step-enrollment.md)
+(previously: "Nothing here is implemented").
 
 ## Context
 
@@ -46,7 +50,9 @@ Constraints that shape every decision below:
   from Go production code (`AGENTS.md`).
 - Profiles never contain secret values; a NetBird setup key is an executor
   vault entry (ADR 0008 §1). Provider tokens are executor-held, least
-  privilege, typed calls only, no generic HTTP proxy (ADR 0006).
+  privilege, typed calls only, no generic HTTP proxy (ADR 0006). Since the
+  amendment of 2026-11-12 one-step enrollment holds no NetBird token and
+  makes no NetBird API call at all.
 
 ## Terms
 
@@ -71,28 +77,38 @@ Constraints that shape every decision below:
    "not enrolled" until the pin; if the offer fails it is deleted only when
    the operator chooses so), and enters SSH user (default `nebula`),
    credential reference (default `nebula-default`), sudo yes/no, and
-   whether to join NetBird (D6, only offered when a NetBird token is
-   configured). An open privileged session (ADR 0007) is required.
+   whether to join NetBird (D6, only offered when the executor has a
+   NetBird management URL configured; amended 2026-11-12, previously "when
+   a NetBird token is configured"). With NetBird the operator also enters
+   a **one-off setup key** they created in the NetBird dashboard (D6
+   "Operator-supplied setup key"), in a masked input of the dialog or with
+   the executor-local CLI. An open privileged session (ADR 0007) is required.
 2. **Offer.** The server calls the executor (`CreateEnrollOffer`). The
    executor creates the offer: offer ID (D2), salt, expiry **15 minutes**,
    bound to the host ID, SSH user, credential reference and the web session
    that created it. Without NetBird the executor renders the script (D5) at
    once in memory and stores only its SHA-256, never the bytes (D2
    "Retention"). Audit `enroll_offer_created`.
-   - **With NetBird** the offer starts in `awaiting_approval` and has no
-     setup key, no stored download hash and cannot be downloaded yet; its
-     render inputs are fixed and "Show script" already renders the
-     placeholder variant (step 3, D2; amended 2026-11-11, previously "no
-     setup key and no script yet"). The executor proposes a **NetBird offer
-     permit** (HIGH, user verification; binds offer ID hash, host ID, SSH
-     user, credential reference, managed group, ephemeral flag and setup-key
-     expiry). Only after the operator approves it with the security key does
-     the executor create the one-off setup key under a persisted pending
-     record (D6 "Creation order"), render the script in
-     memory and store its hash (again not the bytes). A compromised server with an open privileged session
-     can therefore create offers, but cannot obtain a single setup key
-     without a security-key touch (D6, "Why a stolen setup key is bounded").
-     NetBird offers also have their own lower limits (D2).
+   - **With NetBird** the offer starts in `awaiting_approval`. The executor
+     validates the operator-supplied setup key (D6), seals it into the
+     vault at once and records only the vault reference; the offer has no
+     stored download hash and cannot be downloaded yet; its render inputs
+     are fixed and "Show script" already renders the placeholder variant
+     (step 3, D2). The executor proposes a **NetBird offer permit** (HIGH,
+     user verification; binds offer ID hash, host ID, SSH user, credential
+     reference and the setup-key check value of D6). Only after the
+     operator approves it with the security key does the executor render
+     the script with the key in memory, store its hash (again not the
+     bytes) and move the offer to `open`. A compromised server with an open
+     privileged session can therefore not get a substituted setup key into
+     a script without a security-key touch whose view names the key check
+     value (D6 "Why a stolen setup key is bounded"). NetBird offers also
+     have their own lower limits (D2). (Amended 2026-11-12; previously:
+     the offer had no setup key until approval, the permit bound managed
+     group, ephemeral flag and setup-key expiry, and on approval the
+     executor created the key through the NetBird Management API under a
+     persisted pending record. Before that, amended 2026-11-11: "no setup
+     key and no script yet".)
 3. **Command.** The UI shows one command block for the operator's POSIX
    shell (bash, dash, zsh), for example:
 
@@ -129,8 +145,12 @@ Constraints that shape every decision below:
    and is not left behind when the download, the hash check or the script
    fails or the operator presses Ctrl-C. Only `SIGKILL` or a power loss can
    leave the file in the temporary directory (`0700`, root or the operator
-   only); the setup key is then still one-off, at most 1 hour valid and
-   revoked when the offer becomes final (D6).
+   only); the setup key is then one-off and short-lived when the operator
+   created it as D6 recommends, and NOS tells the operator to revoke it in
+   NetBird when the offer ends without enrollment (D6). (Amended
+   2026-11-12; previously: "still one-off, at most 1 hour valid and
+   revoked when the offer becomes final", which NOS enforced through the
+   NetBird API.)
 
    **Which directory, and what reaches a disk.** The command creates its
    directory in the first writable one of `/dev/shm` and
@@ -140,9 +160,13 @@ Constraints that shape every decision below:
    disk-backed on Debian 12, Ubuntu and Proxmox VE; then `rm -rf` removes
    the file but the key can remain in freed blocks (and in SSD spare
    areas). A `tmpfs` page can also be written to swap. Both are accepted
-   residuals (threat table): the key is one-off, at most 1 hour valid and
-   revoked when the offer is final, so a copy recovered from freed blocks
-   or swap is useless once the offer has ended. The same directory rule
+   residuals (threat table): a key created as D6 recommends is one-off and
+   short-lived, and a used key cannot join a second peer, so a copy
+   recovered from freed blocks or swap is useless once it was used or has
+   expired; an unused key stays valid until its NetBird expiry or until
+   the operator revokes it, which NOS asks for when the offer ends
+   without enrollment (amended 2026-11-12; previously: "one-off, at most
+   1 hour valid and revoked when the offer is final"). The same directory rule
    applies to the script's own key file (D5). The UI shows a second variant
    for a root login without `sudo` (common on minimal Debian and VPS
    images): identical except that the last line is `sh nos-enroll.sh )`.
@@ -157,9 +181,12 @@ Constraints that shape every decision below:
    Apart from that line the bytes are those of the download (checked via
    the placeholder hash stored at creation, D2 "Retention"); the page says
    so, and the hash on the page is the hash of the downloaded script. For a
-   NetBird offer still in `awaiting_approval` there is no setup key and no
-   stored hash yet; "Show script" then shows the placeholder render without
-   a hash and says so (amended 2026-11-11, see "Amendments"). The
+   NetBird offer still in `awaiting_approval` there is no stored hash yet
+   (the supplied setup key is already sealed in the vault, but "Show
+   script" never reads it); "Show script" then shows the placeholder render
+   without a hash and says so (amended 2026-11-11, see "Amendments";
+   amended 2026-11-12, previously "there is no setup key and no stored
+   hash yet"). The
    server serves the view as its own `text/plain` response with the same
    headers as the download (`Cache-Control: no-store`,
    `X-Content-Type-Options: nosniff`,
@@ -226,8 +253,9 @@ the other direction). The only channel host → NOS is the operator.
   characters of that hash.
 - **States:** `open` → `downloaded` → `pairing_proposed` → `enrolled`;
   NetBird offers start in `awaiting_approval` and move to `open` only after
-  the NetBird offer permit is approved and the setup key is recorded (D1
-  step 2, D6 "Creation order"); from any non-final state → `expired`,
+  the NetBird offer permit is approved and the full render's hash is
+  stored (D1 step 2, D6 "Supply order"; amended 2026-11-12, previously
+  "and the setup key is recorded", D6 "Creation order"); from any non-final state → `expired`,
   `revoked` or `failed`. Final states never return to `open`. Every state
   change is one atomic compare-and-set on the offer row (expected old state
   → new state); a transition whose expected state no longer holds fails and
@@ -248,16 +276,22 @@ the other direction). The only channel host → NOS is the operator.
   privileged session does not resurrect it.
 - **Revocation:** the operator can revoke an open offer in the UI; the
   executor-local CLI can list and revoke offers (`nebula host offers`,
-  `nebula host offer-revoke`). Revoking also revokes the NetBird setup key
-  (D6), unconditionally: there is no "is it used?" check first, so there is
-  no check-then-revoke race, and revoking a consumed one-off key is
-  harmless.
+  `nebula host offer-revoke`). NOS cannot revoke the NetBird setup key
+  (it does not talk to the NetBird Management API): revoking a NetBird
+  offer wipes the key from the vault and, unconditionally (no "is it
+  used?" check), shows the operator in the UI, in the CLI output of
+  `nebula host offer-revoke` and in the audit record that the key must be
+  revoked in the NetBird dashboard if it was not used (D6 "Final state").
+  (Amended 2026-11-12; previously: "Revoking also revokes the NetBird
+  setup key (D6), unconditionally" through the NetBird API.)
 - **Limits** (named constants in the implementation): at most 10 non-final
   offers per executor, at most 30 offers created per hour, at most 5 probes
   per offer, at most 3 rejected (malformed) code submissions per offer.
   NetBird offers have separate, lower limits on top: at most 2 non-final
-  NetBird offers and at most 5 setup keys created per hour (each one also
-  needs its own security-key approval, D1 step 2).
+  NetBird offers and at most 5 NetBird offers (that is, supplied setup
+  keys) created per hour (each one also needs its own security-key
+  approval, D1 step 2; amended 2026-11-12, previously "at most 5 setup
+  keys created per hour").
 - **Audit** (executor and server, no secret values): `enroll_offer_created`,
   `enroll_offer_approved` (NetBird offers),
   `enroll_script_downloaded` (with the client address determined as in D7
@@ -266,26 +300,33 @@ the other direction). The only channel host → NOS is the operator.
   `enroll_code_rejected` (malformed), `enroll_code_mismatch`,
   `enroll_paired_proposed`, `host_enrolled`, `enroll_offer_expired`,
   `enroll_offer_revoked`, `inventory_endpoint_added`,
+  `netbird_setup_key_supplied`, `netbird_setup_key_rejected`,
+  `netbird_setup_key_wiped`, `netbird_setup_key_revoke_advised`,
+  `netbird_possible_orphan_peer` (D6; amended 2026-11-12, previously
   `netbird_setup_key_pending`, `netbird_setup_key_created`,
   `netbird_setup_key_invalid`, `netbird_setup_key_reconciled`,
   `netbird_setup_key_unresolved`, `netbird_setup_key_revoked`,
   `netbird_setup_key_revoke_failed`, `netbird_setup_key_expired_unrevoked`,
   `netbird_peer_joined`, `netbird_peer_orphaned`, `netbird_peer_deleted`,
-  `netbird_peer_kept`.
+  `netbird_peer_kept`, all of which needed the NetBird API and are
+  dropped).
 - **Retention:** the offer store never holds script bytes. It holds every
   render input, fixed when the offer is created (script options, NetBird
-  choice and ephemeral flag, managed group, `from=` addresses, validated
-  NOS NetBird address, setup-key expiry, Nebula's key line, and for NetBird
-  offers the management URL and the key-passing mode per client version,
-  and the script template version), so a render never reads live executor
+  choice, `from=` addresses, Nebula's key line, and for NetBird
+  offers the management URL, the key-passing mode per client version and
+  the setup key's vault reference and check value, and the script
+  template version; amended 2026-11-12, previously also the ephemeral
+  flag, managed group, NOS NetBird address read from the API and
+  setup-key expiry), so a render never reads live executor
   configuration. At creation it also stores the SHA-256 of the placeholder
   variant, for every offer; an executor whose template version differs
   from the stored one refuses to render the offer and fails it with
   `enroll_script_template_changed` instead of a hash mismatch (amended
   2026-11-11). The stored SHA-256
   covers the full render: computed at creation for an offer without
-  NetBird, and for a NetBird offer in the step that records the validated
-  setup key (D6 "Creation order"). The executor renders the script on
+  NetBird, and for a NetBird offer when its NetBird offer permit is
+  approved (D6 "Supply order"; amended 2026-11-12, previously "in the step
+  that records the validated setup key", D6 "Creation order"). The executor renders the script on
   demand in two variants:
   - **Download** (`FetchEnrollScript`, `DownloadEnrollScript`): the full
     script from the stored render inputs, the salt and, for NetBird
@@ -293,7 +334,11 @@ the other direction). The only channel host → NOS is the operator.
     against the stored SHA-256 (a difference refuses the download with the
     uniform `404`, moves the offer to `failed` and audits
     `enroll_script_hash_mismatch`), hands them to the RPC response and
-    overwrites its buffer afterwards.
+    overwrites its buffer afterwards. For a NetBird offer the setup key is
+    wiped from the vault in the same step that moves the offer to
+    `downloaded`, because no further render of the full script is allowed
+    (D6 "Final state"; added 2026-11-12, previously wiped only at the
+    final state).
   - **"Show script"** (`ShowEnrollScript`): the placeholder variant
     directly, with `<netbird-setup-key-withheld>` in the setup-key line; it
     never reads the setup key from the vault, is checked against the
@@ -310,8 +355,10 @@ the other direction). The only channel host → NOS is the operator.
   "Reverse proxy").
   The setup key itself exists at rest only encrypted in the vault (D6).
   Final offers are kept as audit records without salt and setup key; the
-  salt is wiped when the offer becomes final, the setup key and its
-  NetBird key ID as described in D6 "Revocation at the final state".
+  salt is wiped when the offer becomes final, the setup key as described
+  in D6 "Final state" (amended 2026-11-12; previously "the setup key and
+  its NetBird key ID as described in D6 'Revocation at the final state'";
+  there is no NetBird key ID any more).
 
 ### D3: Pairing code
 
@@ -424,8 +471,10 @@ random key has a 2^-120 chance per probe.
 - *Well-formed code that does not match the presented key*: one mismatch
   ends the offer (Q7; there is no second submission). The offer
   becomes `failed`, the endpoint is not pinned, the NetBird setup key is
-  revoked (unconditionally, D2) and a peer it joined is handled as an orphan
-  (D6), audit `enroll_code_mismatch` with the presented
+  wiped from the vault and the operator is told to revoke it and to check
+  NetBird for a peer it joined (D6 "Final state"; amended 2026-11-12,
+  previously "revoked (unconditionally, D2) and a peer it joined is
+  handled as an orphan"), audit `enroll_code_mismatch` with the presented
   fingerprint and endpoint, dashboard notice and notification as for a host
   key mismatch. The UI states: "The host at this endpoint presents a key that
   does not match the code from the host. Either the endpoint is a different
@@ -478,8 +527,11 @@ mitigation.
   byte-identical for the same options (golden test).
 - `from=` addresses come from **executor-local configuration** (new executor
   flag or config entry: enrollment source addresses), never from the server
-  or the browser. With D6 the executor adds the NOS machine's own NetBird
-  address, read from the NetBird API, not from input.
+  or the browser. With D6 the NOS machine's own NetBird address is one of
+  these executor-local source addresses, set by the operator in the
+  executor configuration, never read from input (amended 2026-11-12;
+  previously "the executor adds the NOS machine's own NetBird address,
+  read from the NetBird API").
 - The user name and credential reference are validated as in
   `cmd/nebula/enroll.go`; the key line is re-encoded from the parsed key.
 - One-step additions, all at the end: the optional NetBird section (D6),
@@ -499,6 +551,10 @@ mitigation.
   NetBird client **only** through an environment variable or that key file,
   never as a command-line argument: an argument can be persisted to disk
   logs by auditd `execve` rules, process accounting or the client's own log.
+  The same rule holds for an executor SSH step that hands the key to a
+  pinned host (D6 "Join on the host"): the key travels on the SSH
+  session's standard input into a `0600` file or the client's
+  environment, never in the remote command line (added 2026-11-12).
   EN-12 verifies per supported client version which of the two the client
   accepts; for a client version that accepts neither, the NetBird option is
   not offered and the script stops before the join. If the operator runs the
@@ -517,233 +573,228 @@ mitigation.
 
 ### D6: Optional NetBird join
 
-**Precondition.** A NetBird management API token is stored in the executor
-vault (`nebula netbird token set`, non-echoing input, like PVE tokens; never
-in argv, environment, server configuration or browser). The token belongs to
-a dedicated NetBird **service user** (accepted in the executor vault, Q3);
-the executor uses it only for typed
-calls (create/revoke setup key, read peers, read the NOS peer, delete a
-peer after operator confirmation, read policies), with no
-generic HTTP proxy. Management URL and TLS trust are executor-local
-configuration (public CA for NetBird Cloud; pinned CA or leaf for
-self-hosted management). Whether the reference lab uses self-hosted
-management or NetBird Cloud is established in the lab test before EN-12
-(Q3); both settings are supported. Without a token, the NetBird option is
-hidden and the script works exactly without NetBird.
+(Amended 2026-11-12, see "Amendment 2026-11-12: no NetBird Management
+API": **NOS does not talk to the NetBird Management API.** The operator
+creates the setup key in the NetBird dashboard, the host joins with it
+and then appears in NetBird; NOS works only through the enrollment script
+or an SSH step. Previously the executor held a NetBird service-user
+token and created, revoked and reconciled one setup key per offer,
+attributed, listed and deleted peers and read policies through the API;
+each replaced subsection below names what it replaces.)
 
-**Per-offer setup key.** For each offer with NetBird the executor creates
-one setup key, and only after the operator approved the NetBird offer permit
-with the security key (D1 step 2); the server can neither trigger the
-creation without that approval nor receive more than one key per approval:
+**Precondition.** The NetBird option is offered only when the executor
+has a NetBird management URL in its executor-local configuration (https
+only, spec 03 "Render-input format"). The URL is only a render input for
+`netbird up --management-url` on the host; the executor never connects to
+it. No NetBird token is stored, no NetBird API call is made, and
+enrollment gives the executor no egress to the management server, so no
+TLS trust setting for it is needed. Without a management URL the NetBird
+option is hidden and the script works exactly without NetBird.
+(Previously: a NetBird management API token of a dedicated service user
+in the executor vault, set with `nebula netbird token set`, used for typed
+calls with no generic HTTP proxy, and executor-local TLS trust for the
+management API.)
 
-- type one-off (`usage_limit` 1), expiry ≤ 1 hour (default: offer expiry
-  plus 45 minutes, so a download at minute 14 still has time to join);
-- `auto_groups` exactly the configured managed group (default
-  `nos-managed`), nothing else;
+**Operator-supplied setup key.** The operator creates one setup key per
+offer in the NetBird dashboard, as for a manual join today, and enters it
+into NOS. NOS cannot see or check the key's properties in NetBird, so the
+dialog, the CLI help and the guide **recommend** creating it:
+
+- one-off (usage limit 1);
+- with a short validity: as short as the enrollment needs (recommended
+  1 hour; the guide says never more than 1 day);
+- with exactly the managed group (default `nos-managed`) as its only auto
+  group;
 - not ephemeral by default (a server that is offline for a while must not
-  disappear from NetBird); ephemeral only by explicit option;
-- name `nos-offer-<first 8 hex of offer ID hash>`, so it can be found and
-  revoked; it reveals nothing usable.
+  disappear from NetBird); ephemeral only when the operator wants peers
+  removed while offline;
+- with a name that identifies the offer; the dialog suggests
+  `nos-offer-<first 8 hex of offer ID hash>`, which reveals nothing usable.
 
-The executor stores the setup key only encrypted in the vault; the offer
-row holds the vault reference and NetBird's key ID (an identifier, not a
-secret, needed for the revoke call). The key never exists in plaintext at
+(Previously: the executor created the key with exactly these properties
+through the API, with expiry offer expiry plus 45 minutes, at most 1 hour.)
+
+*Entry.* Two ways, both only for a privileged operator:
+
+- **Web dialog:** a masked input (`type="password"`,
+  `autocomplete="off"`) in the one-step dialog, sent only in the body of
+  the create request of the privileged session. The server passes it
+  straight into `CreateEnrollOffer` and never logs, stores, caches or
+  echoes it: an error page never refills the field, the response carries
+  `Cache-Control: no-store`, and the value is not part of any server-side
+  form state. While the request is handled it is in server memory, the
+  same class of exposure as the download stream that carries the key
+  (threat table).
+- **Executor-local CLI** (admin UID, command name fixed by the follow-up
+  ticket): non-echoing terminal input, or standard input when that is not
+  a terminal; never an argument and never an environment variable. The
+  guide recommends the CLI for high-assurance hosts, because the key then
+  never passes the server.
+
+*Validation.* The executor removes surrounding ASCII whitespace, folds hex
+letters to uppercase and then requires exactly the canonical setup-key form
+of spec 09 (36 characters, uppercase hex UUID `8-4-4-4-12`). Anything else
+is refused before anything is stored: no offer is created, and
+`netbird_setup_key_rejected` is audited with the reason class only, never
+the value or a part of it.
+
+*Check value.* The executor computes `check = first 8 hex characters of
+SHA-256("nos-netbird-setup-key-check-v1" || 0x00 || key)` (a composition of
+SHA-256 and an encoding, not new cryptography). It is bound into the
+NetBird offer permit, shown in its approval view, in `nebula approve`, in
+`nebula host offers` and printed by the CLI entry, so the operator can
+confirm that the approval names the key they entered without the key being
+shown anywhere. 32 bits of a hash of a 122-bit random key reveal nothing
+usable about the key.
+
+*Storage.* The executor stores the setup key only encrypted in the vault,
+written in the same commit as the offer row (a vault that is locked refuses
+the offer; a failed commit leaves neither). The offer row holds only the
+vault reference and the check value. The key never exists in plaintext at
 rest on the executor or the server: not in the offer store, not as rendered
-script bytes (D2 "Retention"), not in a temporary file. On the target host
-it is kept off disk as far as D1 step 3 and D5 describe, with the residuals
-named there.
+script bytes (D2 "Retention"), not in a temporary file, not in a log, an
+error, an audit record or an RPC response other than the full-script
+download. It is never displayed: "Show script" renders the placeholder (D1
+step 3), and no UI page, CLI output or `nebula approve` view shows it. On
+the target host it is kept off disk as far as D1 step 3 and D5 describe,
+with the residuals named there. (Previously: the offer row also held
+NetBird's key ID for the revoke call.)
 
-**Creation order.** A setup key is never created without a durable record
-that lets the executor find and revoke it:
+**Supply order.** A setup key is never rendered without an approval that
+names it, and never kept longer than needed:
 
-1. On approval of the NetBird offer permit the executor first checks the
-   offer's stored script template version against its own; on a
-   difference it creates no key, fails the offer and audits
-   `enroll_script_template_changed` (amended 2026-11-11; previously checked
-   only at render, after the key existed). Otherwise it, in one atomic
-   compare-and-set, moves the offer's setup-key record from `none` to
-   `pending` and persists the key name (`nos-offer-<prefix>`), the offer
-   ID hash, the managed group and the creation time window (the time of
-   this write widened by the create-call bound and the clock skew; spec 09)
-   as the record's reconcile record, **only if** the offer is still
-   `awaiting_approval` and not expired; otherwise no key is created (audit
-   `netbird_setup_key_pending` only on success). (Amended 2026-11-11:
-   previously key name and offer ID hash only, so a record whose create
-   response was lost could be reconciled by name only.)
-2. Only then does it call create, once and bounded by the create-call
-   bound; it is never called again for a record that is already `pending`.
-3. On a success answer it first validates the response as untrusted
-   provider data (amended 2026-11-11): the setup key must be exactly 36
-   characters in uppercase hex UUID form (8-4-4-4-12), the key ID 1–64
-   characters `0-9a-z`, the key name the requested one; limits are named
-   constants (spec 09). A failing response is never stored or rendered:
-   the offer moves to `failed`, `netbird_setup_key_invalid` is audited
-   (failed check, no raw value) and the key is revoked by a valid key ID or
-   found and revoked by the reconcile below. The checks apply to the
-   decoded JSON string values, untrimmed and unnormalised. Before any
-   revoke attempt, in one atomic write with the move to `failed`, the
-   executor stores the key ID when it passed its check (record `pending` →
-   `created`, no vault reference, unverified, keeping the step-1 reconcile
-   record), otherwise the record stays `pending` with its step-1 reconcile
-   record; so a failed revoke always leaves a retry or reconcile record
-   (amended 2026-11-11; previously the key ID was used for the revoke
-   without being stored). An unverified key ID (key name or setup key
-   failed) is revoked only after a get by ID returns that key with exactly
-   the requested key name and every reconcile candidate property (step 5;
-   amended 2026-11-11, fix round 3, previously: the NOS name prefix
-   sufficed); a `404`, a revoked key, another name or a failing property
-   sends the record to reconcile instead of closing it. A valid key is stored in the
-   vault and, in one atomic compare-and-set, the record moves `pending` →
-   `created` (key ID, vault reference), the SHA-256 of the full render is
-   stored and the offer moves `awaiting_approval` → `open`. The key is
-   rendered into the script only as a single-quoted shell literal. If that
-   compare-and-set fails because the offer became final meanwhile (revoke
-   or expiry raced the create call), the key cannot be stored (vault
-   locked) or the placeholder-hash check fails (D2 "Retention"), the
-   executor first stores the key ID (record `pending` → `created`, no vault
-   reference) in one atomic write with the move to `failed` if the offer
-   is not final yet, then revokes the new key and handles it like any
-   final-state key below (amended 2026-11-11; previously revoked at once
-   without storing the key ID). If that write fails, the record stays
-   `pending` for the reconcile below.
-4. Revoke and expiry of an offer whose record is `pending` move the offer to
-   its final state as usual and leave the record `pending` for the
-   reconcile below; they never treat "no key ID yet" as "no key".
-5. **Reconcile.** After an executor restart, after a create call that timed
-   out or failed without a clear "not created" answer, and for every
-   record still `pending` on a final offer, the executor moves a non-final
-   offer with a `pending` record to `failed` (the operator re-offers) and,
-   once the record's window has ended, lists setup keys. Each pass takes
-   the key list first and only then the snapshot of all records, so every
-   listed NOS key's `pending` record is in the snapshot. NetBird's
-   setup-key list (`GET /api/setup-keys`) is not paginated, as documented
-   for NetBird's management API; before coding, EN-11 verifies this
-   against the reference lab's management server and NetBird Cloud and
-   records the NetBird version checked here, and the field that carries
-   a key's creation time (an endpoint found paginated, or without such a
-   field, stops EN-11 for a spec amendment). A pass therefore
-   sends one request; the list is complete only for status `200` and a
-   bare UTF-8 JSON array of at most 10 000 keys in at most 16 MiB, every
-   entry passing the spec 09 entry check (only `id`, `name`,
-   `usage_limit`, `expires`, the creation time, `revoked` and
-   `auto_groups` are read; every other field, `key` and `last_used`
-   included, is ignored and never logged, stored or put into an error)
-   and none of the closed list of pagination headers of spec 09. One
-   failing entry truncates the whole list. Anything else is truncated:
-   it matches nothing, revokes nothing and raises the unresolved alert
-   naming the truncation class (spec 03, 06, 09; amended 2026-11-11;
-   previously: page by page with an unnamed last-page indication and
-   limits "set by EN-11"). The get by key ID of step 3 uses the same
-   entry check within its own limit of 64 KiB. Only keys with a
-   valid key ID, the NOS name prefix, `usage_limit` 1, expiry ≤ 1 h after
-   creation, exactly the managed group, creation time inside the stored
-   window and not revoked are candidates; keys whose ID or name any other
-   offer's record holds (`pending`, mid-create, `created`) are excluded.
-   Every `pending` or unverified `created` record is matched by exactly
-   its requested key name and by nothing else; no record, not even one
-   whose create answered with a mismatched key name, is matched by
-   window, so a key found only by window is never revoked automatically
-   and its record raises the unresolved alert (amended 2026-11-11, fix
-   round 3; previously: a name-mismatched record was matched by window
-   when no other unresolved record's window overlapped; before that, fix
-   round 2: window match for every record). Automatic revoke of a key
-   this executor did not create remains possible only through the
-   residuals R1–R3 of spec 06 (32-bit name collision, the same name
-   created by another party, a wrong key ID in a valid create
-   response). Exactly one match is
-   recorded (`netbird_setup_key_reconciled`, key ID) and revoked like any
-   final-state key; zero or several matches revoke nothing, and the
-   operator is asked to revoke by hand (`netbird_setup_key_unresolved`).
-   A revoked key, an operator's key or the absence of a key never resolves
-   a record; an open record is closed only after the window end plus the
-   key's maximum lifetime, with `netbird_setup_key_expired_unrevoked`
-   (spec 06; amended 2026-11-11, previously by name only and closed
-   silently when no key had the name). A `pending` record is
-   retried with the same backoff as a failed revoke and listed in
-   `nebula host offers` until it is closed.
+1. `CreateEnrollOffer` with NetBird: the executor checks the limits (D2),
+   validates the key, computes its check value, and in one commit seals the
+   key into the vault and creates the offer in `awaiting_approval` with the
+   vault reference, the check value and the fixed render inputs, including
+   the placeholder hash (D2 "Retention"). Audit
+   `netbird_setup_key_supplied` (offer, check value, client address; never
+   the key).
+2. It proposes the NetBird offer permit (D1 step 2).
+3. On approval it first checks the offer's stored script template version
+   against its own; on a difference it fails the offer, wipes the key and
+   audits `enroll_script_template_changed`. Otherwise it reads the key
+   from the vault, renders the placeholder and the full variant in memory,
+   checks that they differ only in the setup-key line and that the
+   placeholder matches the stored placeholder hash, and in one atomic
+   compare-and-set stores the full render's SHA-256 and moves the offer
+   `awaiting_approval` → `open`, **only if** the offer is still
+   `awaiting_approval` and not expired. If the compare-and-set fails or a
+   check fails, nothing is stored, the offer is failed (if not final
+   already) and the key is wiped (see "Final state").
 
-So "always revoked or recorded" holds across crashes, a locked vault at
-create time, timeouts and races between create and a final transition.
+There is no create call, no `pending` record and no reconcile: nothing on
+NetBird's side has to be found again by NOS. (Previously, "Creation order"
+steps 1–5: a persisted `pending` record with key name, offer ID hash,
+managed group and creation time window before the API create call; one
+bounded create call; validation of the create response as untrusted
+provider data with `netbird_setup_key_invalid`; storing the key ID before
+any revoke; reconcile after restart or timeout by listing setup keys
+(`GET /api/setup-keys`, unpaginated, `NetBirdKeyListMaxKeys` = 10 000,
+`NetBirdKeyListMaxBytes` = 16 MiB, `NetBirdKeyGetMaxBytes` = 64 KiB),
+matching by exactly the requested key name, with
+`netbird_setup_key_pending`, `netbird_setup_key_created`,
+`netbird_setup_key_reconciled`, `netbird_setup_key_unresolved` and
+`netbird_setup_key_expired_unrevoked`, and the foreign-key residuals R1–R3
+of spec 06. All of this needed the NetBird API and is dropped with it.)
 
-**Revocation at the final state.** Whenever the offer becomes final
-(`enrolled`, `expired`, `revoked`, `failed`), the executor, in this order:
+**Final state.** (Previously "Revocation at the final state".)
 
-1. wipes the setup-key secret from the vault (it is no longer needed: no
-   further render is allowed for a final offer);
-2. calls revoke for the key ID, unconditionally, without first asking
-   whether the key was used (D2);
-3. on success audits `netbird_setup_key_revoked` and only then wipes the key
-   ID from the offer row;
-4. on failure (API unreachable, timeout, non-success answer) audits
-   `netbird_setup_key_revoke_failed` (key-ID name prefix, error class, no
-   secret), keeps the key ID, shows a dashboard notice and lists the key in
-   `nebula host offers`, and retries with bounded backoff (first after 1
-   minute, then at most every 5 minutes) until the revoke succeeds or the
-   key's own expiry has passed. A restart of the executor resumes the retries
-   from the stored key IDs. When the expiry passes without a successful
-   revoke, it audits `netbird_setup_key_expired_unrevoked` and wipes the key
-   ID; the key is then dead on NetBird's side anyway.
+1. **Wipe after use.** The setup-key secret is wiped from the vault in the
+   same step that moves the offer to `downloaded` (the full script is
+   never rendered again), and at the latest when the offer becomes final
+   (`enrolled`, `expired`, `revoked`, `failed`), also straight from
+   `awaiting_approval`. Audit `netbird_setup_key_wiped` (offer, check
+   value, reason `downloaded` or the final state). A wipe that fails is
+   retried with bounded backoff (first after 1 minute, then at most every
+   5 minutes, also after an executor restart), shown as a dashboard notice
+   and listed in `nebula host offers` until it succeeds; an offer whose
+   wipe is outstanding is never rendered again. (Previously: wiped only at
+   the final state.)
+2. **No revoke by NOS, advice instead.** NOS cannot revoke the key. When a
+   NetBird offer becomes `expired`, `revoked` or `failed`, the executor
+   audits `netbird_setup_key_revoke_advised` (offer, check value, whether
+   the script was downloaded), and the offer page, the dashboard,
+   `nebula host offers` and the output of `nebula host offer-revoke` show:
+   "NOS cannot revoke NetBird setup keys. Revoke the setup key with check
+   value `<check>` in the NetBird dashboard unless it was used; if the
+   script was downloaded, also check NetBird for a peer that joined with
+   it." The advice is given unconditionally, without asking whether the
+   key was used (NOS cannot know), and stays on the dashboard until the
+   operator dismisses it in a privileged session. For `enrolled` no advice
+   is shown; the guide says a key that was not one-off must be revoked by
+   hand after enrollment. (Previously, in this order: wipe the secret,
+   call revoke for the NetBird key ID unconditionally,
+   `netbird_setup_key_revoked` and only then wipe the key ID, or
+   `netbird_setup_key_revoke_failed` with retries until success or the
+   key's expiry, then `netbird_setup_key_expired_unrevoked`; `pending`
+   records included.)
 
-A `pending` setup-key record (see "Creation order") is part of this rule:
-the final transition never skips it.
+So a supplied key always has either a completed wipe or an open, audited
+and visible wipe retry on the NOS side, and every NetBird offer that ended
+without enrollment carries an audited, visible request to revoke the key in
+NetBird. Whether the key is still valid in NetBird is the operator's
+responsibility; the residual is in the threat table. (Previously: "a live
+key always has either a successful revoke or an open, audited and visible
+retry or reconcile record".)
 
-So a live key always has either a successful revoke or an open, audited and
-visible retry or reconcile record; the reference is never wiped while the
-key may still be valid.
-
-**Peers from offers that did not enrol.** When an offer whose setup key was
-used becomes `failed`, `expired` or `revoked`, the peer that joined with it
-stays in `nos-managed` (peers are not ephemeral by default). The executor
-then looks up that peer (attribution per Q8), records it as an **orphan
-peer** (audit `netbird_peer_orphaned`) and the UI dashboard and
-`nebula host offers` list it until the operator decides:
-
-- **Delete** (default action; privileged session; typed delete call,
-  audit `netbird_peer_deleted`). If the peer is attributed only by the
-  weaker time-window fallback of Q8 (not by the API naming the setup key),
-  the delete additionally needs a **NetBird peer delete permit** (HIGH,
-  user verification; binds peer ID, peer name, NetBird IP, offer ID hash and
-  the attribution method), approved with the security key and shown the
-  same way by `nebula approve`, so a compromised server cannot use an
-  uncertain attribution to cut off a legitimate host. The same rule applies
-  to deleting a rogue peer found by the cross-check below. Or
-- **Keep** (for example because the operator will re-offer the same host
-  and wants it to stay reachable; audit `netbird_peer_kept`). A kept peer is
-  an ordinary NetBird peer; it is not pinned and not enrolled.
-
-NOS never deletes a peer automatically: attribution may be uncertain (Q8),
-and deleting the wrong peer would cut off a host. A peer the executor
-cannot attribute is reported as "unknown peer joined `nos-managed`" instead
-of being offered for deletion.
+**Peers from offers that did not enrol.** NOS cannot see NetBird peers.
+When a NetBird offer whose script was downloaded becomes `failed`,
+`expired` or `revoked`, a peer may have joined with its key and stays in
+NetBird. The executor audits `netbird_possible_orphan_peer` (offer, check
+value, download time and address), and the dashboard and
+`nebula host offers` list the offer as a **possible orphan peer** with the
+advice to look for that peer in the NetBird dashboard and delete or keep
+it there. NOS never deletes, keeps or attributes a peer itself.
+(Previously: the executor looked up the peer through the API, recorded it
+as an orphan peer with `netbird_peer_orphaned`, and the operator chose
+**Delete** (typed delete call, `netbird_peer_deleted`; with a **NetBird
+peer delete permit** when the peer was attributed only by the time-window
+fallback) or **Keep** (`netbird_peer_kept`); unattributable peers were
+reported as "unknown peer joined `nos-managed`". The NetBird peer delete
+permit is no longer used.)
 
 **Join on the host.** The script installs the NetBird client from the
 official package repository if it is missing (repository signing key
 fingerprint pinned in the script template, not fetched blindly), runs the
-join with the setup key and the configured management URL, waits a bounded
-time (60 s) for the NetBird address and prints it as the first address.
+join with the setup key and the configured management URL, passing the
+key only as D5 describes, and then **checks the join on the host** with
+`netbird status`: it waits a bounded time (60 s) for the NetBird address
+and prints it as the first address, or prints that no address appeared
+and that the operator should check `netbird status` and the NetBird
+dashboard. NOS itself does not verify the join: the operator confirms in
+the NetBird dashboard that the host appears as a peer (in the managed
+group) and picks the printed NetBird address as the endpoint in step 5 of
+D1. That address is an operator hint like every printed address (spec 09);
+the pairing code still decides the pin.
 
-**Executor cross-check.** Before the operator can submit the code with a
-NetBird endpoint, the executor reads the peer list through the API and finds
-the peer that joined with this offer's setup key (exactly one, in exactly the
-managed group). It shows that peer's NetBird IP as the suggested endpoint.
-If no peer, more than one peer, or a peer in other groups is found, the
-NetBird endpoint is not offered and the operator is told why. The pairing
-code still decides the pin; the NetBird check only protects the endpoint
-suggestion.
+*SSH step.* For a host that is already pinned (for example one enrolled
+without NetBird through D8), a later executor SSH step over the pinned
+connection may run the same join with an operator-supplied key. It follows
+the same rules: the key is entered and stored as above, travels on the SSH
+session's standard input into a `0600` file under a `0700` `mktemp -d`
+directory (or into the client's environment), never in the remote command
+line, the directory is removed on every exit, the join is checked with
+`netbird status` on the host, and the key is wiped and the revoke advice
+given as in "Final state". It is a separate privileged action with its own
+approval and ticket; this amendment fixes only its secret handling.
 
-Whether the NetBird management API can say **which peer joined with a given
-setup key** is not yet verified. The setup-key object reports usage (used
-count, last use); whether a peer records the setup key it was registered
-with is checked against the API documentation and a real management server
-before EN-12 starts, and the result is recorded in this ADR (Q8). If the API
-can attribute a peer to a key, that attribution is used. If it cannot, the
-weaker time-window fallback is accepted (Q8): "exactly one new peer in the
-managed group whose registration time lies between the offer's approval and
-the key's recorded use, and the key's use count is 1"; with any other result
-no NetBird endpoint is suggested and no peer is offered for deletion. The
-rogue-peer detection and the orphan-peer cleanup above use the same
-attribution, and a delete based on the fallback needs the NetBird peer
-delete permit.
+**Executor cross-check.** Removed 2026-11-12. (Previously: before the code
+could be submitted with a NetBird endpoint, the executor read the peer
+list through the API, found exactly one peer that joined with this offer's
+key in exactly the managed group and suggested its NetBird IP; otherwise no
+NetBird endpoint was offered.) The protection it gave the endpoint
+suggestion is replaced by the operator's check in the NetBird dashboard;
+the pin is protected by the pairing code as before.
+
+**Peer attribution (Q8, decided 2026-11-12).** NOS does not attribute peers
+to setup keys: there is no API access, so neither the API attribution nor
+the time-window fallback is used. (Previously: whether the API can name the
+setup key a peer joined with was to be checked before EN-12; failing that,
+the time-window fallback "exactly one new peer in the managed group whose
+registration time lies between the offer's approval and the key's recorded
+use, and the key's use count is 1" applied, and deletes based on it needed
+the NetBird peer delete permit.)
 
 **Policy (operator-set, documented, not created by NOS).**
 
@@ -761,44 +812,69 @@ delete permit.
   above is false. The operator must disable or delete the default policy
   (or restrict it so that it covers neither `nos` nor `nos-managed`) before
   using the NetBird option.
-- The guide documents how to check this; NOS reads the policies through the
-  API and shows a warning when the default `All` ↔ `All` policy is enabled,
-  when any enabled rule has `All` as source or destination together with a
-  group that contains `nos` or `nos-managed` peers, when a rule is
-  bidirectional, or when a rule lets `nos-managed` reach `nos` or other
-  groups (read-only check, Q3: NOS only reads policies and warns, it never
-  changes them). While the warning stands, the NetBird option
-  in the one-step dialog shows it next to the checkbox.
+- The guide documents how to check this in the NetBird dashboard. NOS does
+  not read policies (no API access); the NetBird option in the one-step
+  dialog always shows a static reminder next to the checkbox: the default
+  `All` ↔ `All` policy must be disabled, and only the one-way rule `nos` →
+  `nos-managed` may cover these groups. (Amended 2026-11-12; previously:
+  NOS read the policies through the API and warned when the default
+  `All` ↔ `All` policy was enabled, when an enabled rule had `All` as
+  source or destination together with a group containing `nos` or
+  `nos-managed` peers, when a rule was bidirectional, or when a rule let
+  `nos-managed` reach `nos` or other groups; read-only, Q3.)
 
-**Why a stolen setup key is bounded.** If the setup key leaks (offer page,
-proxy log of the download, compromised server), the holder can join one peer
-into `nos-managed` within the hour. That peer can be reached by NOS on TCP 22
-and by nothing else under the documented policy (default `All` policy
-disabled); it cannot reach NOS. It cannot get pinned, because the pairing
-code is bound to the real host's key. Its use consumes the key, so the real
-host's join fails visibly, and the executor's cross-check reports a peer
-that did not come from this host. The executor then deletes that peer (typed
-call, audited) when the operator confirms, with the NetBird peer delete
-permit when the peer is attributed only by the time-window fallback.
+**Why a stolen setup key is bounded.** If the setup key leaks (the
+operator's dialog input on a compromised server, proxy log of the download,
+the host's disk residuals), the holder can join peers into the key's auto
+groups while the key is valid. For a key created as recommended above
+(one-off, short validity, only `nos-managed`) that is one peer in
+`nos-managed`, reachable by NOS on TCP 22 and by nothing else under the
+documented policy (default `All` policy disabled); it cannot reach NOS. It
+cannot get pinned, because the pairing code is bound to the real host's
+key. Its use consumes a one-off key, so the real host's join fails visibly
+in the script output ("netbird up failed", no NetBird address), and the
+operator removes the rogue peer in the NetBird dashboard. NOS no longer
+detects or deletes such a peer itself, and how long and for how many peers
+a key is usable now depends on the properties the operator gave it in
+NetBird. (Amended 2026-11-12; previously: "within the hour", enforced by
+NOS, and the executor's cross-check reported the rogue peer, which the
+executor deleted on confirmation, with the NetBird peer delete permit for a
+time-window attribution.)
 
-A compromised server cannot multiply this: every setup key needs its own
-NetBird offer permit approved with the security key (HIGH, user
-verification; D1 step 2), the approval shows host, managed group and
-expiry, and `nebula approve` on the executor host shows the same binding.
-The separate limits (2 open NetBird offers, 5 setup keys per hour, D2) cap
-even an operator who is tricked into approving several. Without a touch the
-server gets offers without setup keys, which give it nothing in NetBird.
-Chosen over "only a lower limit" because a limit alone would still let a
-compromised server mint a few keys per hour silently; the cost is one extra
-security-key touch per NetBird enrollment.
+**Compromised server.** NOS mints no setup key, so a compromised server
+cannot obtain a new key from NOS at all. What it can try with an open
+privileged session:
 
-**Token scope.** NetBird's role model may not allow a token that can only
-create setup keys; a service user with the admin role can also change
-policies and groups. That is a real widening of executor authority (the
-executor already holds root on all managed hosts, so the marginal risk is
-the NetBird network itself). The executor code uses only the calls listed
-above. The maintainer accepted this service user in the executor vault
-(Q3).
+- *Read the key the operator types into the web dialog.* The same class of
+  exposure as before, when the key passed the server in the download
+  stream; the CLI entry on the executor host avoids it (above).
+- *Substitute another key* (for example one of an account it controls on a
+  shared management service such as NetBird Cloud), so that the new host
+  joins a network of the attacker's choosing. The key reaches a script only
+  after a NetBird offer permit approved with the security key (HIGH, user
+  verification; D1 step 2) whose binding includes the key's check value;
+  `nebula approve` on the executor host shows the same binding, and the
+  operator compares the check value with the one the dialog or the CLI
+  entry showed. As in D4 the server can deceive the web page, so the
+  independent `nebula approve` view, the CLI entry and the operator's check
+  that the host appears in their own NetBird dashboard are the
+  mitigations; with a self-hosted management server a key of another
+  account does not join at all.
+- *Flood offers.* The separate limits (2 open NetBird offers, 5 NetBird
+  offers per hour, D2) still apply.
+
+The NetBird offer permit stays, now as the approval of exactly one
+supplied key (check value) for exactly one offer. (Amended 2026-11-12;
+previously: every setup key the executor created needed its own NetBird
+offer permit, whose approval showed host, managed group and expiry, so a
+compromised server could not mint keys silently; chosen over "only a lower
+limit".)
+
+**Token scope.** Removed 2026-11-12: NOS holds no NetBird token.
+(Previously: NetBird's role model might not allow a token that can only
+create setup keys; a service user with the admin role could also change
+policies and groups, a widening of executor authority the maintainer
+accepted in Q3.)
 
 ### D7: Download security
 
