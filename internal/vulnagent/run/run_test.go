@@ -825,6 +825,61 @@ func TestHTTPAgentConfigRejectsBadAnswers(t *testing.T) {
 	}
 }
 
+func TestReadTokenMatchesNosclient(t *testing.T) {
+	type tc struct {
+		content string
+		mode    os.FileMode
+		dir     bool
+	}
+	for name, c := range map[string]tc{
+		"plain":        {testToken, 0o600, false},
+		"newline":      {testToken + "\n", 0o400, false},
+		"crlf":         {testToken + "\r\n", 0o600, false},
+		"empty":        {"", 0o600, false},
+		"only newline": {"\n", 0o600, false},
+		"two lines":    {testToken + "\n\n", 0o600, false},
+		"space":        {"a b", 0o600, false},
+		"non-ascii":    {"tök", 0o600, false},
+		"max length":   {strings.Repeat("a", nosclient.MaxTokenBytes), 0o600, false},
+		"over length":  {strings.Repeat("a", nosclient.MaxTokenBytes+1), 0o600, false},
+		"group read":   {testToken, 0o640, false},
+		"other read":   {testToken, 0o604, false},
+		"directory":    {"", 0o700, true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "tok")
+			if c.dir {
+				if err := os.Mkdir(p, c.mode); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.WriteFile(p, []byte(c.content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(p, c.mode); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, nerr := nosclient.LoadToken(p)
+			s, rerr := readToken(p)
+			if (nerr == nil) != (rerr == nil) {
+				t.Fatalf("nosclient %v, readToken %v", nerr, rerr)
+			}
+			for _, sentinel := range []error{nosclient.ErrTokenFilePermissions, nosclient.ErrTokenMalformed} {
+				if errors.Is(nerr, sentinel) != errors.Is(rerr, sentinel) {
+					t.Errorf("sentinel %v: nosclient %v, readToken %v", sentinel, nerr, rerr)
+				}
+			}
+			if rerr == nil && strings.TrimRight(c.content, "\r\n") != s.v {
+				t.Error("token value differs from the file")
+			}
+			if rerr != nil && strings.Contains(rerr.Error(), testToken) {
+				t.Error("token in error")
+			}
+		})
+	}
+}
+
 func fmtAll(c *HTTPAgentConfig) string {
 	var b bytes.Buffer
 	slog.New(slog.NewJSONHandler(&b, nil)).Info("x", "token", c.token)

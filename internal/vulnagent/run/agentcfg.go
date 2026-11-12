@@ -59,15 +59,12 @@ type AgentConfigOptions struct {
 	CAFile    string
 }
 
-// NewHTTPAgentConfig builds the settings reader. The token file passes
-// nosclient's checks (mode, size, printable ASCII) before it is read.
+// NewHTTPAgentConfig builds the settings reader. The token file is read
+// once, with nosclient's checks (mode, size, printable ASCII).
 func NewHTTPAgentConfig(o AgentConfigOptions) (*HTTPAgentConfig, error) {
 	u, err := url.Parse(o.BaseURL)
 	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
 		return nil, fmt.Errorf("agent settings: base URL must be https://host[:port]: %w", ErrConfig)
-	}
-	if _, err := nosclient.LoadToken(o.TokenFile); err != nil {
-		return nil, fmt.Errorf("agent settings: %w", err)
 	}
 	tok, err := readToken(o.TokenFile)
 	if err != nil {
@@ -94,13 +91,26 @@ func NewHTTPAgentConfig(o AgentConfigOptions) (*HTTPAgentConfig, error) {
 	}, nil
 }
 
-// readToken reads the token file that nosclient.LoadToken accepted.
+// readToken opens the token file once and applies nosclient.LoadToken's
+// rules to the opened file (regular, no group or other access, one line
+// of printable ASCII within nosclient.MaxTokenBytes), so the checked file
+// is the read one. TestReadTokenMatchesNosclient keeps both in step.
 func readToken(path string) (secret, error) {
+	if path == "" {
+		return secret{}, fmt.Errorf("agent settings: no token file configured: %w", ErrConfig)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return secret{}, fmt.Errorf("agent settings: open token file: %w", err)
 	}
 	defer func() { _ = f.Close() }()
+	fi, err := f.Stat()
+	if err != nil {
+		return secret{}, fmt.Errorf("agent settings: stat token file: %w", err)
+	}
+	if !fi.Mode().IsRegular() || fi.Mode().Perm()&0o077 != 0 {
+		return secret{}, fmt.Errorf("agent settings: token file %s (mode %v): %w", path, fi.Mode(), nosclient.ErrTokenFilePermissions)
+	}
 	b, err := io.ReadAll(io.LimitReader(f, nosclient.MaxTokenBytes+2))
 	if err != nil {
 		return secret{}, fmt.Errorf("agent settings: read token file: %w", err)
