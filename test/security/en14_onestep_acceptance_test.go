@@ -22,12 +22,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/descope/virtualwebauthn"
 	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc/codes"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/enrollscript"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pairing"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/clientaddr"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/enroll"
@@ -58,9 +60,13 @@ type en14 struct {
 	secrets   []string         // values that must appear in no log line
 }
 
-func newEN14(t *testing.T) *en14 {
+func newEN14(t *testing.T, opts ...harnessOptions) *en14 {
 	t.Helper()
-	h := newHarness(t, harnessOptions{})
+	var o harnessOptions
+	if len(opts) > 0 {
+		o = opts[0]
+	}
+	h := newHarness(t, o)
 	if err := h.svc.SetEnrollOffers(executor.EnrollOfferConfig{Sources: []string{"127.0.0.1"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -179,11 +185,25 @@ func (e *en14) submit(o *pb.CreateEnrollOfferResponse, endpoint, code string) *p
 	return r
 }
 
-// The operator's HIGH approval of a paired permit has no RPC on main:
-// SubmitAssertion answers permit_not_found for a paired digest and
-// permit.SubmitPairedAssertion is not called by any handler (reported in
-// en14a; the approved-path cases wait for that fix). These tests therefore
-// check every refusal up to and including "no pin without approval".
+// approveWith submits a WebAuthn assertion for the paired permit digest
+// through the RPC the one-step approval page uses (SubmitAssertion with the
+// permit digest, internal/web/ui/enroll_onestep.go).
+func (e *en14) approveWith(digest string, assertion []byte) (*pb.SubmitAssertionResponse, error) {
+	return e.h.client.SubmitAssertion(e.h.ctx(), &pb.SubmitAssertionRequest{ExecutionDigest: digest, AssertionJson: assertion})
+}
+
+// approve is the operator's HIGH approval of the proposal r with the
+// security key (user verification), over the permit's own challenge.
+func (e *en14) approve(r *pb.SubmitPairingCodeResponse) {
+	e.t.Helper()
+	a, err := e.approveWith(r.GetPermit().GetDigest(), e.h.sign(r.GetPermit().GetChallenge()))
+	if err != nil {
+		e.t.Fatalf("approve paired permit: %v", err)
+	}
+	if a.GetState() != pb.PermitState_PERMIT_STATE_APPROVED {
+		e.t.Fatalf("approval state %v", a.GetState())
+	}
+}
 
 func (e *en14) commit(o *pb.CreateEnrollOfferResponse, digest string) (*pb.CommitPairedEnrollResponse, error) {
 	return e.h.client.CommitPairedEnroll(e.h.ctx(), &pb.CommitPairedEnrollRequest{
@@ -244,12 +264,16 @@ func (e *en14) matched(host string, real ssh.Signer, endpoint string) (*pb.Creat
 }
 
 // requireCommitRefused asserts that committing a proposal that was not
-// approved with the security key pins nothing.
+// approved with the security key is refused for exactly that reason (the
+// permit authority's wrong-state denial, not a session, parse or store
+// error) and pins nothing.
 func (e *en14) requireCommitRefused(o *pb.CreateEnrollOfferResponse, digest, host string) {
 	e.t.Helper()
-	if c, err := e.commit(o, digest); err == nil {
+	c, err := e.commit(o, digest)
+	if err == nil {
 		e.t.Fatalf("commit without approval accepted: %v", c)
 	}
+	wantCode(e.t, err, codes.FailedPrecondition, "wrong_state: paired permit is not approved")
 	e.requireNoPin(host)
 }
 
@@ -396,11 +420,13 @@ func TestEN14_LeakedOfferIDAndTamperedScript(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tampered := []byte(strings.Replace(string(script), "\n", "\necho tampered > \"$EN14_MARK\"\n", 1))
+	tampered := []byte(strings.Replace(string(script), "\n", "\necho tampered\n", 1))
 	if hexSum(tampered) == o.GetScriptSha256() {
 		t.Fatal("tampering did not change the hash")
 	}
-	runCommand := func(served []byte) (ran bool, err error) {
+	// runCommand returns the bytes the command handed to "sudo sh" (nil if
+	// the run step was never reached) and the command's exit error.
+	runCommand := func(served []byte) (handed []byte, err error) {
 		dir := t.TempDir()
 		bin := filepath.Join(dir, "bin")
 		if err := os.Mkdir(bin, 0o700); err != nil {
@@ -410,13 +436,14 @@ func TestEN14_LeakedOfferIDAndTamperedScript(t *testing.T) {
 		if err := os.WriteFile(src, served, 0o600); err != nil {
 			t.Fatal(err)
 		}
-		mark, sudoMark := filepath.Join(dir, "tampered-ran"), filepath.Join(dir, "sudo-ran")
+		sudoMark := filepath.Join(dir, "sudo-ran")
 		stubs := map[string]string{
 			// The download client reads its config from stdin and writes
 			// the served bytes to the output file in the working directory.
 			"curl": "#!/bin/sh\ncat >/dev/null\ncp \"$EN14_SRC\" nos-enroll.sh\n",
-			// sudo only records that the script would have run.
-			"sudo": "#!/bin/sh\necho ran > \"$EN14_SUDO\"\n",
+			// sudo does not run anything as root: it records the exact
+			// file the command asks it to run ("sudo sh nos-enroll.sh").
+			"sudo": "#!/bin/sh\n[ \"$1\" = sh ] || exit 97\ncp \"$2\" \"$EN14_SUDO\"\n",
 		}
 		for n, body := range stubs {
 			if err := os.WriteFile(filepath.Join(bin, n), []byte(body), 0o700); err != nil {
@@ -426,19 +453,20 @@ func TestEN14_LeakedOfferIDAndTamperedScript(t *testing.T) {
 		c := exec.Command("sh", "-c", cmd)
 		c.Dir = dir
 		c.Env = []string{"PATH=" + bin + ":" + os.Getenv("PATH"), "HOME=" + dir, "TMPDIR=" + dir,
-			"EN14_SRC=" + src, "EN14_MARK=" + mark, "EN14_SUDO=" + sudoMark}
-		out, err := c.CombinedOutput()
-		if _, serr := os.Stat(mark); serr == nil {
-			t.Fatalf("the altered script ran; output %q", out)
+			"EN14_SRC=" + src, "EN14_SUDO=" + sudoMark}
+		_, err = c.CombinedOutput()
+		b, rerr := os.ReadFile(sudoMark)
+		if rerr != nil && !os.IsNotExist(rerr) {
+			t.Fatal(rerr)
 		}
-		_, serr := os.Stat(sudoMark)
-		return serr == nil, err
+		return b, err
 	}
-	if ran, err := runCommand(tampered); err == nil || ran {
-		t.Fatalf("altered script: exit %v, run step reached %v", err, ran)
+	if handed, err := runCommand(tampered); err == nil || handed != nil {
+		t.Fatalf("altered script: exit %v, handed to sudo: %d bytes", err, len(handed))
 	}
-	if ran, err := runCommand(script); err != nil || !ran {
-		t.Fatalf("original script: exit %v, run step reached %v", err, ran)
+	// Control: the original bytes, and exactly those, reach the run step.
+	if handed, err := runCommand(script); err != nil || hexSum(handed) != o.GetScriptSha256() {
+		t.Fatalf("original script: exit %v, handed to sudo: %d bytes", err, len(handed))
 	}
 	e.requireNoSecretsInLogs()
 }
@@ -533,6 +561,116 @@ func TestEN14_CompromisedServerCannotPinWithoutCodeAndApproval(t *testing.T) {
 	e.requireNoSecretsInLogs()
 }
 
+// The operator's HIGH approval with the security key is what turns a
+// matching code into a pin, and it covers exactly one permit. Approved
+// through SubmitAssertion over the permit's own challenge with user
+// verification, the commit pins the approved key with the paired source,
+// once. An assertion over another permit's challenge, one without user
+// verification, a replayed assertion, a browser approval in hardened mode
+// and an approved permit presented for another offer pin nothing.
+func TestEN14_HighApprovalPinsOnlyTheApprovedKey(t *testing.T) {
+	e := newEN14(t)
+	// Each case uses its own host keys: a pinned key cannot be proposed for
+	// a second host.
+	host := func() (ssh.Signer, *sshd) {
+		k := hostSigner(t)
+		return k, newSSHD(t, k, e.h.userKey)
+	}
+
+	t.Run("matching code and HIGH approval pin the approved key", func(t *testing.T) {
+		k, srv := host()
+		o, r := e.matched("en14-ok", k, srv.endpoint())
+		digest := r.GetPermit().GetDigest()
+		e.requireCommitRefused(o, digest, "en14-ok") // control: not yet approved
+		assertion := e.h.sign(r.GetPermit().GetChallenge())
+		a, err := e.approveWith(digest, assertion)
+		if err != nil || a.GetState() != pb.PermitState_PERMIT_STATE_APPROVED {
+			t.Fatalf("approval: %v %v", a, err)
+		}
+		// The challenge is single use: the same assertion approves nothing
+		// a second time.
+		_, err = e.approveWith(digest, assertion)
+		wantCode(t, err, codes.FailedPrecondition, "paired permit is not pending")
+		e.h.requireAudit(`"kind":"approved"`, digest)
+
+		c, err := e.commit(o, digest)
+		if err != nil || !c.GetPinned() || c.GetFingerprint() != ssh.FingerprintSHA256(k.PublicKey()) ||
+			c.GetState() != "enrolled" || c.GetHostId() != "en14-ok" || !c.GetLoginOk() {
+			t.Fatalf("commit after approval: %v %v", c, err)
+		}
+		pin, ok := e.pinned("en14-ok")
+		if !ok || pin.GetFingerprint() != ssh.FingerprintSHA256(k.PublicKey()) || pin.GetPinnedBy() != "paired:"+digest[:16] {
+			t.Fatalf("pin %v", pin)
+		}
+		e.h.requireAudit(`"kind":"host_enrolled"`, `"host":"en14-ok"`, `"source":"paired"`)
+		// The permit is consumed: no second commit.
+		_, err = e.commit(o, digest)
+		wantCode(t, err, codes.FailedPrecondition, "not pairing_proposed")
+		if i := e.info(o); i.GetState() != "enrolled" {
+			t.Fatalf("offer after commit: %v", i)
+		}
+	})
+
+	t.Run("assertion over another permit's challenge, approved permit of another offer", func(t *testing.T) {
+		ka, sa := host()
+		kb, sb := host()
+		oa, ra := e.matched("en14-fa", ka, sa.endpoint())
+		ob, rb := e.matched("en14-fb", kb, sb.endpoint())
+		// The operator's assertion for B does not approve A.
+		_, err := e.approveWith(ra.GetPermit().GetDigest(), e.h.sign(rb.GetPermit().GetChallenge()))
+		wantCode(t, err, codes.PermissionDenied, "assertion_rejected")
+		e.requireCommitRefused(oa, ra.GetPermit().GetDigest(), "en14-fa")
+		// B approved: its permit pins nothing for offer A, and A's
+		// unapproved permit pins nothing for offer B.
+		e.approve(rb)
+		_, err = e.commit(oa, rb.GetPermit().GetDigest())
+		wantCode(t, err, codes.PermissionDenied, "does not belong to this offer")
+		_, err = e.commit(ob, ra.GetPermit().GetDigest())
+		wantCode(t, err, codes.PermissionDenied, "does not belong to this offer")
+		e.requireNoPin("en14-fa")
+		e.requireNoPin("en14-fb")
+		if sa.auths.Load() != 0 {
+			t.Fatal("credential offered to an unapproved key")
+		}
+		// B's own commit pins B's key only.
+		c, err := e.commit(ob, rb.GetPermit().GetDigest())
+		if err != nil || !c.GetPinned() || c.GetFingerprint() != ssh.FingerprintSHA256(kb.PublicKey()) {
+			t.Fatalf("commit B: %v %v", c, err)
+		}
+		e.requireCommitRefused(oa, ra.GetPermit().GetDigest(), "en14-fa")
+	})
+
+	t.Run("assertion without user verification", func(t *testing.T) {
+		k, srv := host()
+		o, r := e.matched("en14-nouv", k, srv.endpoint())
+		dev := e.h.id.dev
+		dev.Options.UserNotVerified = true // presence only, as a touch without PIN
+		noUV := []byte(virtualwebauthn.CreateAssertionResponse(e.h.rp, dev, e.h.id.cred,
+			virtualwebauthn.AssertionOptions{Challenge: r.GetPermit().GetChallenge(), RelyingPartyID: rpID}))
+		_, err := e.approveWith(r.GetPermit().GetDigest(), noUV)
+		wantCode(t, err, codes.PermissionDenied, "assertion_rejected")
+		e.requireCommitRefused(o, r.GetPermit().GetDigest(), "en14-nouv")
+		// Control: the same credential over the same challenge with user
+		// verification approves, so the refusal was for the missing UV.
+		e.approve(r)
+		if c, err := e.commit(o, r.GetPermit().GetDigest()); err != nil || !c.GetPinned() {
+			t.Fatalf("commit after the user-verified approval: %v %v", c, err)
+		}
+	})
+
+	t.Run("hardened mode refuses the browser approval", func(t *testing.T) {
+		hd := newEN14(t, harnessOptions{mode: permit.ModeHardened})
+		k := hostSigner(t)
+		srv := newSSHD(t, k, hd.h.userKey)
+		o, r := hd.matched("en14-hardened", k, srv.endpoint())
+		_, err := hd.approveWith(r.GetPermit().GetDigest(), hd.h.sign(r.GetPermit().GetChallenge()))
+		wantCode(t, err, codes.FailedPrecondition, "cli_approval_required: hardened mode")
+		hd.requireCommitRefused(o, r.GetPermit().GetDigest(), "en14-hardened")
+		hd.requireNoSecretsInLogs()
+	})
+	e.requireNoSecretsInLogs()
+}
+
 // ECDSA, forwarded headers and logs: a machine in the path that offers
 // only ECDSA makes the probe fail without a mismatch and without a
 // rejected code; a pinned ed25519 host that later answers only with ECDSA
@@ -570,21 +708,25 @@ func TestEN14_ECDSAForwardedHeaderAndLogs(t *testing.T) {
 	})
 
 	t.Run("pinned ed25519 host later answers only with ECDSA", func(t *testing.T) {
-		// The paired pin needs the approval RPC (see above); the host is
-		// pinned through the admin probe-and-pin path, and the connection
-		// rule under test (HostKeyAlgorithms restricted to the pinned
-		// type) is the same for every pin source.
-		pin := e.h.pin("en14-pinned", e.h.probe(realSSHD.endpoint()))
-		if pin.GetFingerprint() != ssh.FingerprintSHA256(real.PublicKey()) {
+		// The host is pinned by one-step enrollment: matching code, HIGH
+		// approval with the security key, CommitPairedEnroll.
+		o, r := e.matched("en14-pinned", real, realSSHD.endpoint())
+		e.approve(r)
+		c, err := e.commit(o, r.GetPermit().GetDigest())
+		if err != nil || !c.GetPinned() {
+			t.Fatalf("paired commit: %v %v", c, err)
+		}
+		pin, ok := e.pinned("en14-pinned")
+		if !ok || pin.GetFingerprint() != ssh.FingerprintSHA256(real.PublicKey()) || !strings.HasPrefix(pin.GetPinnedBy(), "paired:") {
 			t.Fatalf("pin %v", pin)
 		}
 		if r := e.h.testConn("en14-pinned", realSSHD.endpoint()); !r.GetOk() {
 			t.Fatalf("control connection: %v", r)
 		}
 		ec := newSSHD(t, ecdsaSigner(t), e.h.userKey)
-		r := e.h.testConn("en14-pinned", ec.endpoint())
-		if r.GetOk() || r.GetFailureClass() != "host_key_mismatch" {
-			t.Fatalf("ECDSA answer accepted: %v", r)
+		tc := e.h.testConn("en14-pinned", ec.endpoint())
+		if tc.GetOk() || tc.GetFailureClass() != "host_key_mismatch" {
+			t.Fatalf("ECDSA answer accepted: %v", tc)
 		}
 		if ec.auths.Load() != 0 {
 			t.Fatal("credential offered to the ECDSA server")
