@@ -721,6 +721,44 @@ does NOS connect **from** (`--from`)?
   argument result), so a missing or too small fixture or a missing stdin
   line cannot turn into a pass or into a silent `canary-rejects`.
 
+  **Run classes** (previously the classes were defined by separate
+  rules, and a run that returned no error but recorded no final request,
+  for example an `in-path` run of `host pin --known-hosts` or a
+  `trust-path` run of `pve remote add --ca-file` that exits cleanly
+  without sending, fell into none of them; only `restore` named it a
+  harness error). Every canary run of every argument and form lands in
+  exactly one of three classes, decided after the run from its error
+  result and its recording alone, in this order:
+  1. **harness error** if any of these holds: (a) the run returned no
+     error and did not record the final request of its harness entry
+     (for `restore` the final request counts as recorded only when the
+     first recorded call is `Stop(backup.StopUnits)` and the last is
+     the final action, **Restore runs** below), whatever else it
+     recorded; (b) the run returned an error
+     after recording traffic; (c) the run belongs to an `in-path` or
+     `trust-path` argument (including both `restore` arguments) and
+     returned an error, with or without recorded traffic (**Errors
+     before traffic in path-kind runs** below);
+  2. **accepted** if the run returned no error and recorded the final
+     request in the sense of (a);
+  3. **rejected** otherwise, which leaves exactly: the run returned an
+     error, recorded nothing, and its argument is neither `in-path` nor
+     `trust-path`.
+  The three conditions are disjoint and together cover every
+  combination of "error or not", "anything recorded or not", "final
+  request recorded or not" and "path kind or not", so no run is left
+  unclassified and none counts twice. A harness error fails the test and
+  names the harness entry; it is never an argument result, never a pass
+  and never covered by `canary-rejects` or `canary-range`. An accepted
+  run then goes through the needle conditions 1 to 3 below, and only a
+  rejected run counts toward "every form rejected" (`canary-rejects`).
+  Harness checks that are not canary runs (the restore fixture checks
+  and control runs, the `canary-range` rejection checks of `MAX + 1`,
+  `47000 + m` and `MIN − 1`, the confirmation reruns) have their own
+  expected result, stated next to them; any other result fails the test
+  with the failure named there (such as a stale `canary-range`) or, where
+  none is named, as a harness error.
+
   **Restore runs** (previously the harness entry of `restore` had to
   name a final request and an accepted run had to record it, but
   `restoreWith` makes no RPC, dial or HTTP request: it reads the
@@ -740,10 +778,11 @@ does NOS connect **from** (`--from`)?
   - **rejected**: never; a `restore` form cannot be rejected;
   - **harness error**: every error `restoreWith` returns, with or
     without a recorded call (including the rollback `Start` that
-    `backup.Restore` makes when a step fails after `Stop`), and no
-    error without the final action as last call; the test fails and
-    names the harness entry, never the argument, and no
-    `canary-rejects` covers it.
+    `backup.Restore` makes when a step fails after `Stop`), and every
+    run without error that does not have `Stop` with exactly
+    `backup.StopUnits` as first and the final action as last call
+    (**Run classes** (a) above); the test fails and names the harness
+    entry, never the argument, and no `canary-rejects` covers it.
   Previously an error with no recorded call counted as rejected (for
   example an `ARCHIVE` or `--identity` form whose file did not parse as
   the minimal valid restore input). That class also caught every
@@ -941,8 +980,14 @@ does NOS connect **from** (`--from`)?
   is a path, and the test has created the file at that path with the
   minimal valid content. So for every run of an `in-path` or
   `trust-path` argument an error, with or without recorded traffic, is
-  a **harness error** that fails the test and names the harness entry;
-  such a run is never rejected, and these arguments never carry
+  a **harness error** that fails the test and names the harness entry,
+  and so is a run that returns no error without recording the final
+  request of its harness entry (**Run classes** (a) above, which holds
+  for every argument; for example a `host pin --known-hosts` or
+  `pve remote add --ca-file` run whose fixture makes the command exit
+  cleanly before the pin or add request is sent; previously
+  unclassified for these arguments); such a run is never rejected or
+  accepted, and these arguments never carry
   `canary-rejects` (the test fails when one does). An argument whose
   parser rejects some path shapes would need a reviewed change of this
   rule; it fails until then and never passes. The minimal valid content
