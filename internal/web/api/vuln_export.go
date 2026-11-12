@@ -145,10 +145,18 @@ var (
 	exportVersionRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+~:_-]{0,127}$`)
 	exportArchRe       = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 	exportReleaseRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+_~-]{0,127}$`)
-	// exportVendorRe and exportModelRe are the D2 device patterns
-	// (vendor:* ecosystems, component.model); firmware uses exportVersionRe.
+	// exportVendorRe and exportModelRe are the D2 device patterns. The model
+	// has no dot and no colon, so a host name ("core-sw.lab.example"), an
+	// IP address and an IPv6 address are not models; exportMACRe refuses the
+	// hyphenated MAC form that the pattern would allow. Firmware uses
+	// exportVersionRe, plus the checks in deviceFirmwareOK.
 	exportVendorRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
-	exportModelRe  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`)
+	exportModelRe  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_+-]{0,63}$`)
+	exportMACRe    = regexp.MustCompile(`^[0-9A-Fa-f]{2}(-[0-9A-Fa-f]{2}){5}$`)
+	// exportCiscoEcoRe is the vendor ecosystem of a Cisco device: the OS
+	// train the matcher's CSAF feed is keyed by (vendorFeed). The Palo Alto
+	// ecosystem is fixed.
+	exportCiscoEcoRe = regexp.MustCompile(`^vendor:cisco:[a-z0-9-]{1,32}$`)
 )
 
 // exportUnknown is what the export states for a device value it cannot
@@ -359,40 +367,78 @@ func prepareSubject(sub VulnSubject) (preparedSubject, bool) {
 }
 
 // prepareDevice validates a network device subject (ADR 0011 D2, D3). Only
-// the device ID and the model and firmware version are exported. A value
-// that is missing, invalid or from a stale or incomplete record is exported
-// as "unknown", and the device is then never coverable. Packages, kernel
-// and ecosystem do not apply to a device; if one is set, the device is
+// the device ID, the vendor ecosystem (the OS train the matcher reads), and
+// the vendor, model and firmware version are exported. A value that is
+// missing, invalid or from a stale record is exported as "unknown" (the
+// ecosystem is left out), and the device is then never coverable. Packages
+// and a kernel do not apply to a device; if one is set, the device is
 // incomplete and that data is left out.
 func prepareDevice(sub VulnSubject) (preparedSubject, bool) {
 	d := sub.Device
 	if d == nil || sub.Ref.ImageDigest != "" || !exportSubjectIDRe.MatchString(sub.Ref.ID) || !notAddress(sub.Ref.ID) {
 		return preparedSubject{}, false
 	}
-	coverable := sub.Complete && d.Current && len(sub.Components) == 0 && sub.Ecosystem == "" && sub.Kernel == nil
+	coverable := sub.Complete && d.Current && len(sub.Components) == 0 && sub.Kernel == nil
 	out := exportDeviceJSON{Vendor: exportUnknown, Model: exportUnknown, FirmwareVersion: exportUnknown}
+	eco := ""
 	if exportVendorRe.MatchString(d.Vendor) {
 		out.Vendor = d.Vendor
 	} else {
 		coverable = false
 	}
-	// A model that parses as an address is refused too (D3: no addresses).
-	if d.Current && exportModelRe.MatchString(d.Model) && notAddress(d.Model) {
+	if d.Current && deviceEcosystemOK(d.Vendor, sub.Ecosystem) {
+		eco = sub.Ecosystem
+	} else {
+		coverable = false
+	}
+	if d.Current && exportModelRe.MatchString(d.Model) && notAddress(d.Model) && !exportMACRe.MatchString(d.Model) {
 		out.Model = d.Model
 	} else {
 		coverable = false
 	}
-	if d.Current && exportVersionRe.MatchString(d.FirmwareVersion) {
+	if d.Current && deviceFirmwareOK(d.FirmwareVersion) {
 		out.FirmwareVersion = d.FirmwareVersion
 	} else {
 		coverable = false
 	}
 	return preparedSubject{
 		key:       subjectKey(sub.Kind, sub.Ref),
-		head:      exportSubjectJSON{SubjectKind: sub.Kind, SubjectRef: vulnfinding.SubjectRef{ID: sub.Ref.ID}, Device: &out, Complete: coverable},
+		head:      exportSubjectJSON{SubjectKind: sub.Kind, SubjectRef: vulnfinding.SubjectRef{ID: sub.Ref.ID}, Ecosystem: eco, Device: &out, Complete: coverable},
 		basis:     map[string]string{},
 		coverable: coverable,
 	}, true
+}
+
+// deviceEcosystemOK reports whether eco is the vendor ecosystem the matcher
+// reads for vendor (D2): "vendor:cisco:<train>" for Cisco and
+// "vendor:paloalto:panos" for Palo Alto. Any other vendor or ecosystem is
+// not a device ecosystem.
+func deviceEcosystemOK(vendor, eco string) bool {
+	switch vendor {
+	case "cisco":
+		return exportCiscoEcoRe.MatchString(eco)
+	case "paloalto":
+		return eco == "vendor:paloalto:panos"
+	}
+	return false
+}
+
+// deviceFirmwareOK reports whether v may be exported as a firmware version.
+// Colons are refused (no vendor firmware string needs one, and IPv6 forms
+// use them). An IP address literal is refused unless it is a public dotted
+// quad: a private, loopback, link-local, multicast or unspecified IPv4
+// address is never a firmware version. Public dotted quads such as "3.1.1.7"
+// cannot be told from a version and are accepted; this residual is a
+// decision (D3), not a guarantee.
+func deviceFirmwareOK(v string) bool {
+	if v == exportUnknown || !exportVersionRe.MatchString(v) || strings.Contains(v, ":") {
+		return false
+	}
+	a, err := netip.ParseAddr(v)
+	if err != nil {
+		return true
+	}
+	return a.Is4() && !(a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsMulticast() || a.IsUnspecified())
 }
 
 func exportComponent(c VulnComponent) (exportComponentJSON, bool) {

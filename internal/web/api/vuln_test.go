@@ -491,7 +491,7 @@ func TestVulnExportCarriesNoAddressesNamesOrSecrets(t *testing.T) {
 		// An ID that is an address is left out.
 		api.VulnSubject{Kind: vulnfinding.SubjectHost, Ref: vulnfinding.SubjectRef{ID: "10.0.0.5"}, Complete: true},
 		// A device is exported with its model and firmware only (ADR 0011 D3).
-		api.VulnSubject{Kind: vulnfinding.SubjectDevice, Ref: vulnfinding.SubjectRef{ID: "fw01"}, Complete: true,
+		api.VulnSubject{Kind: vulnfinding.SubjectDevice, Ref: vulnfinding.SubjectRef{ID: "fw01"}, Ecosystem: "vendor:paloalto:panos", Complete: true,
 			Device: &api.VulnDevice{Vendor: "paloalto", Model: "PA-220", FirmwareVersion: "10.2.3-h1", Current: true}},
 		// Free text in a package field is left out and the subject is not
 		// complete any more.
