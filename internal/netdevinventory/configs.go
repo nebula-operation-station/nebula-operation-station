@@ -251,8 +251,7 @@ func boundConfigVersions(ctx context.Context, tx *sql.Tx, deviceID string, now t
 	newest := []any{int64(-1), int64(-1)}
 	for i, c := range []ConfigKind{ConfigRunning, ConfigStartup} {
 		var id int64
-		err := tx.QueryRowContext(ctx, `SELECT id FROM netdev_config_versions WHERE device_id = ? AND config = ?
-			ORDER BY last_seen DESC, id DESC LIMIT 1`, deviceID, string(c)).Scan(&id)
+		err := tx.QueryRowContext(ctx, newestConfigVersionQuery, deviceID, string(c)).Scan(&id)
 		switch {
 		case err == nil:
 			newest[i] = id
@@ -261,17 +260,29 @@ func boundConfigVersions(ctx context.Context, tx *sql.Tx, deviceID string, now t
 		}
 	}
 	cutoff := micros(now.Add(-ConfigVersionRetention))
-	if _, err := tx.ExecContext(ctx, `WITH
-		p AS (SELECT id, last_seen, (baseline = 1 OR (change_bound_at IS NOT NULL AND change_bound_at >= ?)
-			OR id IN (?, ?)) AS prot FROM netdev_config_versions WHERE device_id = ?),
-		u AS (SELECT id, ROW_NUMBER() OVER (ORDER BY last_seen DESC, id DESC) AS rn FROM p WHERE prot = 0)
-		DELETE FROM netdev_config_versions WHERE id IN (
-			SELECT id FROM u WHERE rn > ? - (SELECT SUM(prot) FROM p))`,
+	if _, err := tx.ExecContext(ctx, capConfigVersionsStmt,
 		cutoff, newest[0], newest[1], deviceID, MaxConfigVersionsPerDevice); err != nil {
 		return fmt.Errorf("netdevinventory: cap config versions of %s: %w", deviceID, err)
 	}
 	return nil
 }
+
+// The statements of boundConfigVersions. Both break last_seen ties by id
+// DESC, as Prune does; the tests check that each tie-break is needed under
+// every index layout instead of being supplied by scan order.
+const (
+	// newestConfigVersionQuery takes device_id and config.
+	newestConfigVersionQuery = `SELECT id FROM netdev_config_versions WHERE device_id = ? AND config = ?
+			ORDER BY last_seen DESC, id DESC LIMIT 1`
+	// capConfigVersionsStmt takes the change-binding cutoff, the newest
+	// running and startup ids (-1 if none), device_id and the cap.
+	capConfigVersionsStmt = `WITH
+		p AS (SELECT id, last_seen, (baseline = 1 OR (change_bound_at IS NOT NULL AND change_bound_at >= ?)
+			OR id IN (?, ?)) AS prot FROM netdev_config_versions WHERE device_id = ?),
+		u AS (SELECT id, ROW_NUMBER() OVER (ORDER BY last_seen DESC, id DESC) AS rn FROM p WHERE prot = 0)
+		DELETE FROM netdev_config_versions WHERE id IN (
+			SELECT id FROM u WHERE rn > ? - (SELECT SUM(prot) FROM p))`
+)
 
 const configVersionCols = `id, device_id, config, raw_digest, redacted_digest, lease_id, first_seen, last_seen, baseline, change_bound_at`
 
