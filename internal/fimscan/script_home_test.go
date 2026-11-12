@@ -422,6 +422,24 @@ func TestScriptRootOpensHomeFilesAsOwner(t *testing.T) {
 	})
 }
 
+// TestScriptNewlineNamedKeyFileIsUnreadable: an authorized_keys* match whose
+// name holds a newline cannot be a start point; it is not reported and
+// counts as unreadable, so the run is partial.
+func TestScriptNewlineNamedKeyFileIsUnreadable(t *testing.T) {
+	root := buildTree(t, treeOpts{})
+	if err := os.WriteFile(filepath.Join(root, "home/alice/.ssh/authorized_keys\nx"), []byte("k\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res := runAndParse(t, "/bin/sh", root, ModeFull)
+	if s := rootStates(res)["/home/*/.ssh/authorized_keys*"]; s != RootScanned {
+		t.Errorf("state %v", s)
+	}
+	if res.Host.Unreadable != 1 || !slices.Contains(res.Partial, ReasonUnreadable) {
+		t.Errorf("partial %v, host %+v", res.Partial, res.Host)
+	}
+	findRecord(t, res, "/home/alice/.ssh/authorized_keys")
+}
+
 func statesFor(patterns []string, s RootState) map[string]RootState {
 	m := map[string]RootState{}
 	for _, p := range patterns {
