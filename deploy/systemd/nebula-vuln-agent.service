@@ -32,11 +32,13 @@ User=nebula-vuln-agent
 Group=nebula-vuln-agent
 ExecStart=/usr/bin/nebula-vuln-agent -config /etc/nebula-vuln-agent/config.json run
 # A oneshot has no start timeout by default. The assessment phase is at
-# most 4 h and the upload 1.5 h (ADR 0011 A1.3); a run that hangs beyond
-# that is stopped before the next timer slot. Exit 3 (degraded run) and 2
-# (configuration refused) mark the unit failed, so they show in
-# systemctl --failed.
-TimeoutStartSec=6h
+# most 4 h and the upload 1.5 h (ADR 0011 A1.3); 8 h leaves 2.5 h for
+# feed sync, export and matching, so a slow run ends on its own phase
+# budgets (degraded) and only a hung one is stopped here. A timer slot
+# that fires while a run is still active starts nothing; the next run
+# follows at the slot after. Exit 3 (degraded run) and 2 (configuration
+# refused) mark the unit failed, so they show in systemctl --failed.
+TimeoutStartSec=8h
 Nice=10
 IOSchedulingClass=idle
 UMask=0077
@@ -70,6 +72,10 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 # Co-located with NOS: the server's and executor's state, configuration
 # and sockets do not exist for the agent (ADR 0011 A1.2).
 InaccessiblePaths=-/var/lib/nebula -/etc/nebula -/run/nebula
+# Nor do their processes: /proc shows only the agent's own processes and
+# no kernel or system information beyond the per-process entries.
+ProtectProc=invisible
+ProcSubset=pid
 # Feed snapshots, high-water marks, the last completed run and run
 # evidence. /etc/nebula-vuln-agent (config, token, keys) stays read-only.
 ReadWritePaths=/var/lib/nebula-vuln-agent

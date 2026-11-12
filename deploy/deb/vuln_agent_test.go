@@ -457,6 +457,10 @@ func TestVulnAgentUnitIsHardened(t *testing.T) {
 		"RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX",
 		"ReadWritePaths=" + vulnDataDir,
 		"InaccessiblePaths=-/var/lib/nebula -/etc/nebula -/run/nebula",
+		// Co-located with NOS, the processes of the server, the executor
+		// and the collectors (and their command lines) stay invisible.
+		"ProtectProc=invisible",
+		"ProcSubset=pid",
 	} {
 		if !slices.Contains(lines, want) {
 			t.Errorf("unit lacks %q", want)
@@ -471,7 +475,7 @@ func TestVulnAgentUnitIsHardened(t *testing.T) {
 		}
 		return n
 	}
-	for _, p := range []string{"ReadWritePaths=", "RestrictAddressFamilies=", "CapabilityBoundingSet=", "AmbientCapabilities=", "User=", "ExecStart="} {
+	for _, p := range []string{"ReadWritePaths=", "RestrictAddressFamilies=", "CapabilityBoundingSet=", "AmbientCapabilities=", "User=", "ExecStart=", "ProtectProc=", "ProcSubset=", "TimeoutStartSec="} {
 		if n := count(p); n != 1 {
 			t.Errorf("unit has %d %s lines, want 1", n, p)
 		}
@@ -481,17 +485,19 @@ func TestVulnAgentUnitIsHardened(t *testing.T) {
 			t.Errorf("unit must not have %s", bad)
 		}
 	}
-	// A oneshot has no start timeout by default; the run must end before
-	// the next timer slot and well inside NOS's run abort.
-	if !slices.Contains(lines, "TimeoutStartSec=6h") {
-		t.Errorf("unit lacks TimeoutStartSec=6h")
+	// A oneshot has no start timeout by default. The stop must leave room
+	// for feed sync, export and matching beyond the longest assessment
+	// (4 h) and the upload (1.5 h), so a slow run ends on its own phase
+	// budgets (degraded) instead of being killed by systemd.
+	if !slices.Contains(lines, "TimeoutStartSec=8h") {
+		t.Errorf("unit lacks TimeoutStartSec=8h")
 	}
 }
 
-// Apart from the network and its own write path, the sandbox is exactly the
-// collectors'.
+// Apart from the network, its own write path and what it must not see of a
+// co-located NOS (paths, processes), the sandbox is exactly the collectors'.
 func TestVulnAgentUnitSandboxEqualsCollectors(t *testing.T) {
-	drop := []string{"ReadWritePaths=", "RestrictAddressFamilies=", "InaccessiblePaths="}
+	drop := []string{"ReadWritePaths=", "RestrictAddressFamilies=", "InaccessiblePaths=", "ProtectProc=", "ProcSubset="}
 	got := hardening(t, vulnUnit, drop...)
 	want := hardening(t, pveUnit, drop...)
 	if len(got) == 0 || !slices.Equal(got, want) {

@@ -1847,8 +1847,9 @@ The install creates this setup, and it enables or starts nothing:
 | `/etc/systemd/system/` | root, 0644 | `nebula-vuln-agent.service`, `nebula-vuln-agent.timer` |
 
 The installer refuses a symlink or a file where one of these directories
-or the configuration belongs. The agent refuses a
-token or key file that its group or others can read.
+or the configuration belongs. The agent refuses a NOS token or LLM key
+file that is not a regular file or that its group or others can access
+in any way (only 0600 or 0400 is accepted).
 
 #### The token `vuln-agent`
 
@@ -1927,7 +1928,8 @@ win, unless their URL or model is empty.
   works only with `llm.allow_plain_http`, and never with an API key.
 - **API key** (if your endpoint needs one): put it in a file such as
   `/etc/nebula-vuln-agent/llm.key`, owned by `nebula-vuln-agent`, mode
-  0600. Name that file in `llm.api_key_file`. The key never leaves
+  0600 (0400 also works; anything else is refused). Name that file in
+  `llm.api_key_file`. The key never leaves
   `nos-vuln`, and Nebula never stores it.
 - **Context window.** The model's context (Ollama `num_ctx`) must be at
   least `max_prompt_tokens + max_output_tokens + 4096`. With the
@@ -1990,7 +1992,10 @@ sudo systemctl enable --now nebula-vuln-agent.timer
 systemctl list-timers nebula-vuln-agent.timer
 ```
 
-A run that takes longer than 6 hours is stopped. These exit codes leave
+A run ends on its own phase limits (assessment at most 4 hours, upload
+1.5 hours) as a degraded run; one that hangs for 8 hours is stopped by
+systemd, and a timer slot that comes while a run is still active starts
+nothing. These exit codes leave
 the unit `failed` (`systemctl --failed`), so they also show in your
 monitoring:
 
