@@ -71,7 +71,7 @@ const (
 	// as embedded in the server's catalog (checked by
 	// TestShippedComposeUpdatePinMatchesEmbeddedScript). Changing it is a
 	// reviewed change of this protected package.
-	composeUpdateArtifactSHA256 = "2b466a5323341bb5012d1417f67c747e0fa0f05fc65748e379356c15df3416f1"
+	composeUpdateArtifactSHA256 = "39ecf0be674988af9c3893ceb23b78f7e7bb18f9d1dff9b92d6ee746c3b7b9ae"
 
 	// composeRollbackVersion is the docker.compose_rollback module version
 	// whose artifact consumes the rollback binding (result

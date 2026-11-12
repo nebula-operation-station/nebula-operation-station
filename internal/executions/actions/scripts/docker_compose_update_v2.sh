@@ -15,6 +15,9 @@
 #   2 resolve    every entry's new tag, anonymously, against the bound index
 #                and platform digests (tag_moved, tag_unresolved)
 #   3 pull       by bound platform digest only, with an empty DOCKER_CONFIG
+#                (private registry binding, cu06: phases 2 and 3 ran in the
+#                executor, which loaded the image over SSH; here phase 2 is
+#                skipped and phase 3 only verifies repository@digest)
 #   4 retain     nos-retained:<execution-id>-<entry> for each old image
 #   5 recreate   the NOS override gets image repository:new_tag@digest for
 #                the frozen services, then `up -d --no-deps --no-build
@@ -110,6 +113,8 @@ TAG = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}")
 REGHOST = re.compile(r"(localhost|[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*)(:[0-9]{1,5})?")
 PATHPART = re.compile(r"[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*")
 TOKEN = re.compile(r"[A-Za-z0-9._~+/=-]{1,8192}")
+REGID = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
+CREDREF = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 
 ACCEPT = ",".join([
     "application/vnd.oci.image.index.v1+json",
@@ -229,10 +234,19 @@ def load_binding():
     keys(doc, ["container_update"])
     u = doc["container_update"]
     keys(u, ["kind", "form", "images", "targets", "dependencies", "source_digest", "project",
-             "working_dir_hash", "config_files_hash"])
-    # Only a public compose update: no registry, definition or rollback
-    # binding (absent from the required set above, so refused).
+             "working_dir_hash", "config_files_hash"], ["registry"])
+    # Only a compose update: no definition or rollback binding (absent from
+    # the key sets above, so refused). A private registry binding (cu06)
+    # names no credential: the executor resolved and loaded the images
+    # before this job, so phases 2 and 3 only verify what is local.
     need(u["kind"] == "update" and u["form"] == "compose")
+    if "registry" in u:
+        reg = u["registry"]
+        keys(reg, ["registry_id", "record_digest", "credential_id", "credential_version"])
+        need(fullmatch(REGID, reg["registry_id"]) and fullmatch(HEX64, reg["record_digest"]))
+        need(fullmatch(CREDREF, reg["credential_id"]))
+        v = reg["credential_version"]
+        need(isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 2 ** 53 - 1)
     need(fullmatch(PROJECT, u["project"]))
     for k in ("source_digest", "working_dir_hash", "config_files_hash"):
         need(fullmatch(HEX64, u[k]))
@@ -972,6 +986,11 @@ def registry_of(repo):
 
 
 def phase2(u, budget):
+    if "registry" in u:
+        # Private registry (cu06): the executor resolved every tag over its
+        # read grant; this host has no credential and asks no registry.
+        log("phase 2: resolve (executor)")
+        return
     log("phase 2: resolve")
     reg = Registry(budget)
     for img in u["images"]:
@@ -1020,6 +1039,12 @@ def phase2(u, budget):
 # --- phase 3: pull, phase 4: retain ------------------------------------------------------
 
 def phase3(u, budget):
+    if "registry" in u:
+        # Private registry (cu06): the executor streamed the verified image
+        # into `docker load`; nothing is pulled. The image must be found by
+        # the bound digest exactly as below (the containerd store's evidence).
+        log("phase 3: verify loaded")
+        return verify_pulled(u, budget)
     log("phase 3: pull")
     run_dir = os.environ.get("NEBULA_RUN_DIR", "")
     empty = run_dir + "/nos-empty-docker-config"
@@ -1042,6 +1067,10 @@ def phase3(u, budget):
             raise Stop("pull_timeout", img["service"])
         if rc != 0:
             raise Stop("pull_failed", img["service"])
+    return verify_pulled(u, budget)
+
+
+def verify_pulled(u, budget):
     pulled = []
     for img in u["images"]:
         ref = img["repository"] + "@" + img["new_platform_digest"]
