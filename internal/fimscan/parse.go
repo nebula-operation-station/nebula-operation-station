@@ -56,10 +56,10 @@ type parser struct {
 	sshSeen       bool
 	rootsSeen     bool
 
-	paths   map[string]int      // record path -> index in res.Records
-	plains  [][sha256.Size]byte // plain hash per record, zeroed at the end
-	hashed  []bool              // record carried a sha256
-	rootRep map[string]string   // profile root -> reported status
+	paths   map[[sha256.Size]byte]int // SHA-256 of record path -> index in res.Records
+	plains  [][sha256.Size]byte       // plain hash per record, zeroed at the end
+	hashed  []bool                    // record carried a sha256
+	rootRep map[string]string         // profile root -> reported status
 }
 
 func parse(ctx context.Context, r io.Reader, opts Options, lim limits) (*Result, error) {
@@ -80,7 +80,7 @@ func parse(ctx context.Context, r io.Reader, opts Options, lim limits) (*Result,
 		res: &Result{
 			Dropped: map[DropReason]int{},
 		},
-		paths:   map[string]int{},
+		paths:   map[[sha256.Size]byte]int{},
 		rootRep: map[string]string{},
 	}
 	err := p.document()
@@ -599,7 +599,7 @@ func (p *parser) recordEntry() error {
 		verdict = raw.check()
 	}
 	if verdict == "" {
-		if _, dup := p.paths[string(raw.rec.Path)]; dup {
+		if _, dup := p.paths[sha256.Sum256(raw.rec.Path)]; dup {
 			verdict = DropDuplicatePath
 		}
 	}
@@ -607,7 +607,7 @@ func (p *parser) recordEntry() error {
 		p.drop(verdict, ReasonInvalidRecord)
 		return nil
 	}
-	p.paths[string(raw.rec.Path)] = len(p.res.Records)
+	p.paths[sha256.Sum256(raw.rec.Path)] = len(p.res.Records)
 	p.res.Records = append(p.res.Records, raw.rec)
 	p.plains = append(p.plains, raw.plain)
 	p.hashed = append(p.hashed, raw.hashed)
@@ -914,7 +914,7 @@ func (p *parser) finish(cut bool) error {
 		res.Records, p.plains, p.hashed = keep, keepPlain, keepHashed
 		clear(p.paths)
 		for i, rec := range res.Records {
-			p.paths[string(rec.Path)] = i
+			p.paths[sha256.Sum256(rec.Path)] = i
 		}
 	}
 
@@ -949,7 +949,7 @@ func (p *parser) sshConfigState(cut bool) {
 	default:
 		res.SSHConfigState = SSHConfigValid
 		for _, f := range res.SSHConfig {
-			i, ok := p.paths[string(f.Path)]
+			i, ok := p.paths[sha256.Sum256(f.Path)]
 			if !ok || res.Records[i].Type != TypeFile || !p.hashed[i] || sha256.Sum256(f.Content) != p.plains[i] {
 				res.SSHConfigState = SSHConfigInconsistent
 				break
