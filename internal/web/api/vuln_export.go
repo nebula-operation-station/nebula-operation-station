@@ -68,7 +68,7 @@ type VulnSnapshot struct {
 	Generation int64
 	// TakenAt is when the snapshot was taken.
 	TakenAt time.Time
-	// Subjects are hosts and images. Devices follow with VU-15.
+	// Subjects are hosts, images and network devices.
 	Subjects []VulnSubject
 }
 
@@ -86,8 +86,27 @@ type VulnSubject struct {
 	// Complete is the D3 completeness of NOS's package read. A partial
 	// read can add findings but never lets a run cover the subject.
 	Complete bool
-	// Components are the installed source packages.
+	// Components are the installed source packages. A device has none.
 	Components []VulnComponent
+	// Device is the model and firmware of a network device (ADR 0010);
+	// required for a device subject, nil for hosts and images.
+	Device *VulnDevice
+}
+
+// VulnDevice is what the export states about a network device (ADR 0011
+// D3): vendor, model and firmware version, nothing else. No label, address,
+// name or configuration field exists here, so none can be exported.
+type VulnDevice struct {
+	// Vendor is the lowercase vendor slug ("cisco", "paloalto").
+	Vendor string
+	// Model is the model designation as the device reports it.
+	Model string
+	// FirmwareVersion is the firmware version as the device reports it.
+	FirmwareVersion string
+	// Current is true only for a complete, not stale record. Otherwise the
+	// export states model and firmware version as "unknown" and the device
+	// is never covered by a run.
+	Current bool
 }
 
 // VulnKernel is the running kernel and its D4 version basis.
@@ -126,7 +145,23 @@ var (
 	exportVersionRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+~:_-]{0,127}$`)
 	exportArchRe       = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 	exportReleaseRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+_~-]{0,127}$`)
+	// exportVendorRe and exportModelRe are the D2 device patterns. The model
+	// has no dot and no colon, so a host name ("core-sw.lab.example"), an
+	// IP address and an IPv6 address are not models; exportMACRe refuses the
+	// hyphenated MAC form that the pattern would allow. Firmware uses
+	// exportVersionRe, plus the checks in deviceFirmwareOK.
+	exportVendorRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+	exportModelRe  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_+-]{0,63}$`)
+	exportMACRe    = regexp.MustCompile(`^[0-9A-Fa-f]{2}(-[0-9A-Fa-f]{2}){5}$`)
+	// exportCiscoEcoRe is the vendor ecosystem of a Cisco device: the OS
+	// train the matcher's CSAF feed is keyed by (vendorFeed). The Palo Alto
+	// ecosystem is fixed.
+	exportCiscoEcoRe = regexp.MustCompile(`^vendor:cisco:[a-z0-9-]{1,32}$`)
 )
+
+// exportUnknown is what the export states for a device value it cannot
+// vouch for (ADR 0011 D3).
+const exportUnknown = "unknown"
 
 // Export JSON. Every string in it has passed a strict pattern above.
 type exportBinaryJSON struct {
@@ -148,11 +183,18 @@ type exportKernelJSON struct {
 	SourceVersion string `json:"source_version,omitempty"`
 }
 
+type exportDeviceJSON struct {
+	Vendor          string `json:"vendor"`
+	Model           string `json:"model"`
+	FirmwareVersion string `json:"firmware_version"`
+}
+
 type exportSubjectJSON struct {
 	SubjectKind vulnfinding.SubjectKind `json:"subject_kind"`
 	SubjectRef  vulnfinding.SubjectRef  `json:"subject_ref"`
 	Ecosystem   string                  `json:"ecosystem,omitempty"`
 	Kernel      *exportKernelJSON       `json:"running_kernel,omitempty"`
+	Device      *exportDeviceJSON       `json:"device,omitempty"`
 	// Complete: NOS's read was complete and nothing was dropped; only
 	// then can a run cover the subject.
 	Complete   bool                  `json:"complete"`
@@ -255,6 +297,9 @@ func subjectKey(kind vulnfinding.SubjectKind, ref vulnfinding.SubjectRef) string
 }
 
 func prepareSubject(sub VulnSubject) (preparedSubject, bool) {
+	if sub.Kind == vulnfinding.SubjectDevice {
+		return prepareDevice(sub)
+	}
 	limit := MaxHostPackages
 	switch sub.Kind {
 	case vulnfinding.SubjectHost:
@@ -267,7 +312,7 @@ func prepareSubject(sub VulnSubject) (preparedSubject, bool) {
 		}
 		limit = MaxImagePackages
 	default:
-		// Devices follow with VU-15; nothing else is exported.
+		// Nothing else is exported.
 		return preparedSubject{}, false
 	}
 	if !exportSubjectIDRe.MatchString(sub.Ref.ID) || !notAddress(sub.Ref.ID) {
@@ -319,6 +364,105 @@ func prepareSubject(sub VulnSubject) (preparedSubject, bool) {
 	}
 	ps.head.Complete = ps.coverable
 	return ps, true
+}
+
+// prepareDevice validates a network device subject (ADR 0011 D2, D3). Only
+// the device ID, the vendor ecosystem (the OS train the matcher reads), and
+// the vendor, model and firmware version are exported. A value that is
+// missing, invalid or from a stale record is exported as "unknown" (the
+// ecosystem is left out), and the device is then never coverable. Packages
+// and a kernel do not apply to a device; if one is set, the device is
+// incomplete and that data is left out.
+func prepareDevice(sub VulnSubject) (preparedSubject, bool) {
+	d := sub.Device
+	if d == nil || sub.Ref.ImageDigest != "" || !exportSubjectIDRe.MatchString(sub.Ref.ID) || !notAddress(sub.Ref.ID) {
+		return preparedSubject{}, false
+	}
+	coverable := sub.Complete && d.Current && len(sub.Components) == 0 && sub.Kernel == nil
+	out := exportDeviceJSON{Vendor: exportUnknown, Model: exportUnknown, FirmwareVersion: exportUnknown}
+	eco := ""
+	if exportVendorRe.MatchString(d.Vendor) {
+		out.Vendor = d.Vendor
+	} else {
+		coverable = false
+	}
+	if d.Current && deviceEcosystemOK(d.Vendor, sub.Ecosystem) {
+		eco = sub.Ecosystem
+	} else {
+		coverable = false
+	}
+	if d.Current && exportModelRe.MatchString(d.Model) && notAddress(d.Model) && !exportMACRe.MatchString(d.Model) {
+		out.Model = d.Model
+	} else {
+		coverable = false
+	}
+	if d.Current && deviceFirmwareOK(d.FirmwareVersion) {
+		out.FirmwareVersion = d.FirmwareVersion
+	} else {
+		coverable = false
+	}
+	return preparedSubject{
+		key:       subjectKey(sub.Kind, sub.Ref),
+		head:      exportSubjectJSON{SubjectKind: sub.Kind, SubjectRef: vulnfinding.SubjectRef{ID: sub.Ref.ID}, Ecosystem: eco, Device: &out, Complete: coverable},
+		basis:     map[string]string{},
+		coverable: coverable,
+	}, true
+}
+
+// deviceEcosystemOK reports whether eco is the vendor ecosystem the matcher
+// reads for vendor (D2): "vendor:cisco:<train>" for Cisco and
+// "vendor:paloalto:panos" for Palo Alto. Any other vendor or ecosystem is
+// not a device ecosystem.
+func deviceEcosystemOK(vendor, eco string) bool {
+	switch vendor {
+	case "cisco":
+		return exportCiscoEcoRe.MatchString(eco)
+	case "paloalto":
+		return eco == "vendor:paloalto:panos"
+	}
+	return false
+}
+
+// nonPublicIPv4 are the IPv4 ranges that are not public unicast and that
+// netip does not flag on its own: shared address space (CGNAT, and the
+// overlay peers such as NetBird), benchmarking, the documentation ranges, the
+// IETF protocol assignments, the reserved class E range and "this network".
+var nonPublicIPv4 = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+}
+
+// deviceFirmwareOK reports whether v may be exported as a firmware version.
+// Colons are refused (no vendor firmware string needs one, and IPv6 forms
+// use them). An IP address literal is refused unless it is a dotted quad from
+// a public IPv4 range: a private, loopback, link-local, multicast, unspecified,
+// shared (CGNAT), benchmark, documentation, reserved or broadcast IPv4 address
+// is never a firmware version. Public dotted quads such as "3.1.1.7" cannot
+// be told from a version by their shape and are accepted; this residual is a
+// decision (D3), not a guarantee.
+func deviceFirmwareOK(v string) bool {
+	if v == exportUnknown || !exportVersionRe.MatchString(v) || strings.Contains(v, ":") {
+		return false
+	}
+	a, err := netip.ParseAddr(v)
+	if err != nil {
+		return true
+	}
+	if !a.Is4() || !a.IsGlobalUnicast() || a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsMulticast() || a.IsUnspecified() {
+		return false
+	}
+	for _, p := range nonPublicIPv4 {
+		if p.Contains(a) {
+			return false
+		}
+	}
+	return true
 }
 
 func exportComponent(c VulnComponent) (exportComponentJSON, bool) {
