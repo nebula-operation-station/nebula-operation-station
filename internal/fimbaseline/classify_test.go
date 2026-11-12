@@ -166,4 +166,45 @@ func TestShadowFromScanSide(t *testing.T) {
 	}
 }
 
+// TestSSHSymlinkMakesEveryDeviationUnclassifiable pins the fail-closed
+// interim of ADR 0015 D9 "Symlinks at or above SSH positions": until the
+// executor resolves such a symlink, the files behind it cannot be
+// classified, so no deviation of the run may stay critical-free.
+func TestSSHSymlinkMakesEveryDeviationUnclassifiable(t *testing.T) {
+	link := symlink("/home/bob/.ssh", "/home/bob/dotssh")
+	kh1, kh2 := file("/home/bob/dotssh/known_hosts", 1), file("/home/bob/dotssh/known_hosts", 2)
+	app1, app2 := file("/opt/app/bin/run", 1), file("/opt/app/bin/run", 2)
+	cl := newClassifier([]fimscan.Record{link, kh1, app1}, []fimscan.Record{link, kh2, app2}, usable())
+	tests := []struct {
+		name      string
+		path      string
+		old, cur  *fimscan.Record
+		wantClass Class
+		wantRules Rule
+	}{
+		{"file behind the symlink", "/home/bob/dotssh/known_hosts", &kh1, &kh2, ClassCritical, RuleUnclassifiable},
+		{"unrelated file, same run", "/opt/app/bin/run", &app1, &app2, ClassCritical, RuleUnclassifiable},
+		{"the symlink itself", "/home/bob/.ssh", &link, &link, ClassCritical, RuleSSHSymlink | RuleUnclassifiable},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c, r := cl.classify([]byte(tc.path), tc.old, tc.cur)
+			if c != tc.wantClass || r != tc.wantRules {
+				t.Fatalf("got %v/%b, want %v/%b", c, r, tc.wantClass, tc.wantRules)
+			}
+		})
+	}
+}
+
+// TestSymlinkOutsideSSHPositionsKeepsClassification pins the other side:
+// a symlink that is no SSH position does not make the run unclassifiable.
+func TestSymlinkOutsideSSHPositionsKeepsClassification(t *testing.T) {
+	link := symlink("/opt/app", "/srv/app")
+	app1, app2 := file("/opt/app/bin/run", 1), file("/opt/app/bin/run", 2)
+	cl := newClassifier([]fimscan.Record{link, app1}, []fimscan.Record{link, app2}, usable())
+	if c, r := cl.classify([]byte("/opt/app/bin/run"), &app1, &app2); c != ClassNormal || r != 0 {
+		t.Fatalf("got %v/%b, want normal/0", c, r)
+	}
+}
+
 func ptr[T any](v T) *T { return &v }

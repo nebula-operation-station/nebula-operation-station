@@ -309,6 +309,24 @@ func TestDiffEFIFSTypeChangeMergesAndOrders(t *testing.T) {
 	}
 }
 
+// TestDiffSSHSymlinkFailsClosed: a symlink at an SSH position (the home
+// .ssh directory points elsewhere) makes the file behind it, and every other
+// deviation of the run, unclassifiable instead of ClassNormal.
+func TestDiffSSHSymlinkFailsClosed(t *testing.T) {
+	link := symlink("/home/bob/.ssh", "/home/bob/dotssh")
+	b := mustBaseline(t, result(dir("/home/bob"), link, dir("/home/bob/dotssh"), file("/home/bob/dotssh/known_hosts", 1), file("/opt/a", 1)))
+	scan := result(dir("/home/bob"), link, dir("/home/bob/dotssh"), file("/home/bob/dotssh/known_hosts", 2), file("/opt/a", 2))
+	rep := mustDiff(t, b, scan, usable())
+	if len(rep.Deviations) != 2 {
+		t.Fatalf("got %+v", rep.Deviations)
+	}
+	for _, d := range rep.Deviations {
+		if d.Class != ClassCritical || d.Rules&RuleUnclassifiable == 0 {
+			t.Fatalf("%s: class %v rules %b, want critical with unclassifiable", d.Path, d.Class, d.Rules)
+		}
+	}
+}
+
 func TestDiffRejects(t *testing.T) {
 	b := mustBaseline(t, result(file("/etc/a", 1)))
 	other := result(file("/etc/a", 1))

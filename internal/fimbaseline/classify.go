@@ -49,8 +49,14 @@ const (
 	// RuleSSHSymlink: a symlink at or above an SSH position (D9 "Symlinks
 	// at or above SSH positions").
 	RuleSSHSymlink
-	// RuleUnclassifiable: no usable derived SSH set, so every deviation is
-	// critical-class (D7 "Unclassifiable means critical").
+	// RuleUnclassifiable: every deviation of the run is critical-class
+	// (D7 "Unclassifiable means critical") because either there is no
+	// usable derived SSH set, or a symlink at an SSH position exists in
+	// the approved baseline, the scan or the latest complete run and its
+	// target cannot be resolved yet (D9 "Symlinks at or above SSH
+	// positions"). The second case is a fail-closed interim: it is applied
+	// to the whole run, since the files behind such a symlink are not
+	// known, and it is replaced by resolution-based classification later.
 	RuleUnclassifiable
 )
 
@@ -305,6 +311,10 @@ func containsString(list []string, s string) bool {
 type classifier struct {
 	shadowed map[string]bool // command names in /usr/bin and /usr/sbin
 	ssh      SSHSet
+	// sshSymlink: a symlink at an SSH position exists in one of the record
+	// sets. Its target is not resolved yet, so the whole run is
+	// unclassifiable (fail closed, see RuleUnclassifiable).
+	sshSymlink bool
 }
 
 func newClassifier(old, cur []fimscan.Record, opts Options) *classifier {
@@ -320,9 +330,25 @@ func newClassifier(old, cur []fimscan.Record, opts Options) *classifier {
 			if containsString(shadowedDirs, dir) {
 				c.shadowed[name] = true
 			}
+			if recs[i].Type == fimscan.TypeSymlink && c.atSSHPosition(recs[i].Path) {
+				c.sshSymlink = true
+			}
 		}
 	}
 	return c
+}
+
+// atSSHPosition reports whether the path is an SSH position of D9 (a
+// configuration or login file position, or a directory at or above one),
+// as far as the fixed patterns and the derived set know it.
+func (c *classifier) atSSHPosition(p []byte) bool {
+	if fixedSSHDir(string(p)) {
+		return true
+	}
+	if c.ssh == nil {
+		return false
+	}
+	return c.ssh.Match(bytes.Clone(p)) != SSHNone
 }
 
 // classify returns the class of the deviation at path p and the rules that
@@ -331,7 +357,9 @@ func newClassifier(old, cur []fimscan.Record, opts Options) *classifier {
 // TODO(ADR 0015 D9 "Symlinks at or above SSH positions"): resolve such a
 // symlink component by component against its record set, classify the
 // resolved path and the entries below it, and report targets outside the
-// scanned roots. Only the symlink entry itself is classified here.
+// scanned roots. Until then a symlink at an SSH position makes every
+// deviation unclassifiable (sshSymlink), so nothing behind it is approved
+// as a normal change.
 func (c *classifier) classify(p []byte, old, cur *fimscan.Record) (Class, Rule) {
 	s := string(p)
 	var r Rule
@@ -347,6 +375,9 @@ func (c *classifier) classify(p []byte, old, cur *fimscan.Record) (Class, Rule) 
 	symlink := (old != nil && old.Type == fimscan.TypeSymlink) || (cur != nil && cur.Type == fimscan.TypeSymlink)
 	if symlink && fixedSSHDir(s) {
 		r |= RuleSSHSymlink
+	}
+	if c.sshSymlink {
+		r |= RuleUnclassifiable
 	}
 	if c.ssh == nil {
 		r |= RuleUnclassifiable
