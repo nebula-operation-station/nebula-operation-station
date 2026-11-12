@@ -422,6 +422,122 @@ func methodOutput(t *testing.T, full string) protoreflect.MessageDescriptor {
 // raw (unredacted) device config.
 var revealField = regexp.MustCompile(`(?i)(password|passphrase|api_key|private_key|secret_value|raw_config|running_config|startup_config|config_text|raw_text|raw_output)`)
 
+// revealScalarField matches the plain words secret, credential, username
+// and config as a whole name or as its last "_"-separated part (secret,
+// device_credential, config), but not metadata such as credential_version
+// or config_digest. It applies to scalar fields: a message field of that
+// name (such as the WebAuthn credential metadata list) is a container whose
+// own fields are checked.
+var revealScalarField = regexp.MustCompile(`(?i)(^|_)(secrets?|credentials?|username|configs?)$`)
+
+// revealsByName reports whether field f's name marks it as a carrier of a
+// credential or a raw config.
+func revealsByName(f protoreflect.FieldDescriptor) bool {
+	name := string(f.Name())
+	return revealField.MatchString(name) || (f.Kind() != protoreflect.MessageKind && revealScalarField.MatchString(name))
+}
+
+// TestNetDevRevealFieldMatchesPlainNames pins revealField: plain names a
+// new response field could use for a credential or a raw config match;
+// the metadata fields the server legitimately sees do not.
+func TestNetDevRevealFieldMatchesPlainNames(t *testing.T) {
+	for _, name := range []string{"secret", "secrets", "credential", "credentials", "username", "config", "configs",
+		"device_secret", "read_credential", "admin_username", "device_config", "password", "raw_config", "running_config"} {
+		if !revealField.MatchString(name) && !revealScalarField.MatchString(name) {
+			t.Errorf("reveal patterns do not match %q", name)
+		}
+	}
+	for _, name := range []string{"credential_version", "credential_ref", "credential_id", "config_version", "config_digest",
+		"user_name", "ssh_user", "configured", "secret_count"} {
+		if revealField.MatchString(name) || revealScalarField.MatchString(name) {
+			t.Errorf("reveal patterns match metadata field %q", name)
+		}
+	}
+	// On a real descriptor: a scalar named like a credential is flagged,
+	// the container list of WebAuthn credential metadata is not (its
+	// fields are checked on their own).
+	cred := (&pb.ListWebAuthnCredentialsResponse{}).ProtoReflect().Descriptor().Fields().ByName("credentials")
+	if cred == nil || revealsByName(cred) {
+		t.Errorf("container field %v flagged by name", cred)
+	}
+	user := (&pb.SetNetDeviceCredentialRequest{}).ProtoReflect().Descriptor().Fields().ByName("username")
+	if user == nil || !revealsByName(user) {
+		t.Errorf("scalar field %v not flagged by name", user)
+	}
+}
+
+// serverBytesFields are the bytes fields of every response the server
+// role may obtain, each with what it carries. None holds a device
+// credential or a device config. A new bytes field in a server-visible
+// response fails TestNetDevCompromisedServerCannotReachDevicesOrCredentials
+// until it is reviewed and listed here.
+var serverBytesFields = map[protoreflect.FullName]string{
+	"nebula.executor.v1.BeginGateResponse.challenge":                          "WebAuthn challenge",
+	"nebula.executor.v1.BeginGateResponse.request_options_json":               "WebAuthn options",
+	"nebula.executor.v1.BeginLoginResponse.request_options_json":              "WebAuthn options",
+	"nebula.executor.v1.BeginPrivilegedSessionResponse.challenge":             "WebAuthn challenge",
+	"nebula.executor.v1.BeginPrivilegedSessionResponse.request_options_json":  "WebAuthn options",
+	"nebula.executor.v1.BeginRegistrationResponse.authorization_options_json": "WebAuthn options",
+	"nebula.executor.v1.BeginRegistrationResponse.creation_options_json":      "WebAuthn options",
+	"nebula.executor.v1.BeginTrustArtifactResponse.challenge":                 "WebAuthn challenge",
+	"nebula.executor.v1.BeginTrustArtifactResponse.request_options_json":      "WebAuthn options",
+	"nebula.executor.v1.DownloadEnrollScriptResponse.script":                  "public enroll script",
+	"nebula.executor.v1.Event.body":                                           "signed audit event",
+	"nebula.executor.v1.Event.hash":                                           "event chain hash",
+	"nebula.executor.v1.Event.prev_hash":                                      "event chain hash",
+	"nebula.executor.v1.Event.signature":                                      "event signature",
+	"nebula.executor.v1.EventKey.public_key":                                  "event public key",
+	"nebula.executor.v1.FetchEnrollScriptResponse.script":                     "public enroll script",
+	"nebula.executor.v1.ListEventsResponse.public_key":                        "event public key",
+	"nebula.executor.v1.NetBirdOfferPermitInfo.canonical":                     "canonical permit document",
+	"nebula.executor.v1.NetBirdOfferPermitInfo.challenge":                     "WebAuthn challenge",
+	"nebula.executor.v1.ProposeBatchResponse.canonical_batch":                 "canonical batch document",
+	"nebula.executor.v1.ProposeBatchResponse.challenge":                       "WebAuthn challenge",
+	"nebula.executor.v1.ProposeBatchResponse.request_options_json":            "WebAuthn options",
+	"nebula.executor.v1.ProposeExecutionResponse.canonical_request":           "canonical request document",
+	"nebula.executor.v1.ProposeExecutionResponse.challenge":                   "WebAuthn challenge",
+	"nebula.executor.v1.ProposeExecutionResponse.request_options_json":        "WebAuthn options",
+	"nebula.executor.v1.ProposeReadGrantResponse.canonical_grant":             "canonical lease document",
+	"nebula.executor.v1.ProposeReadGrantResponse.challenge":                   "WebAuthn challenge",
+	"nebula.executor.v1.ProposeReadGrantResponse.request_options_json":        "WebAuthn options",
+	"nebula.executor.v1.ProposeScheduleGrantResponse.canonical_grant":         "canonical schedule document",
+	"nebula.executor.v1.ProposeScheduleGrantResponse.challenge":               "WebAuthn challenge",
+	"nebula.executor.v1.ProposeScheduleGrantResponse.request_options_json":    "WebAuthn options",
+	"nebula.executor.v1.ReadGrant.canonical_grant":                            "canonical lease document",
+	"nebula.executor.v1.RunAttachedResponse.log":                              "SSH run log (host actions only)",
+	"nebula.executor.v1.RunAttachedResponse.result":                           "SSH run result (host actions only)",
+	"nebula.executor.v1.RunBatchMemberResponse.log":                           "SSH run log (host actions only)",
+	"nebula.executor.v1.RunBatchMemberResponse.result":                        "SSH run result (host actions only)",
+	"nebula.executor.v1.RunStatus.log":                                        "SSH run log (host actions only)",
+	"nebula.executor.v1.RunStatus.result":                                     "SSH run result (host actions only)",
+	"nebula.executor.v1.ScheduleGrant.canonical_grant":                        "canonical schedule document",
+	"nebula.executor.v1.ShowEnrollScriptResponse.script":                      "public enroll script",
+}
+
+// checkBytesListed fails for every bytes field reachable from d that is
+// not in allowed: raw bytes are where a credential or a raw config would
+// travel unnoticed by name checks.
+// Every bytes field met is recorded in found.
+func checkBytesListed(t *testing.T, method string, d protoreflect.MessageDescriptor, allowed map[protoreflect.FullName]string, seen, found map[protoreflect.FullName]bool) {
+	t.Helper()
+	if seen[d.FullName()] {
+		return
+	}
+	seen[d.FullName()] = true
+	for i := 0; i < d.Fields().Len(); i++ {
+		f := d.Fields().Get(i)
+		switch f.Kind() {
+		case protoreflect.BytesKind:
+			found[f.FullName()] = true
+			if _, ok := allowed[f.FullName()]; !ok {
+				t.Errorf("%s: response field %s is an unreviewed bytes field", method, f.FullName())
+			}
+		case protoreflect.MessageKind:
+			checkBytesListed(t, method, f.Message(), allowed, seen, found)
+		}
+	}
+}
+
 func checkNoRevealFields(t *testing.T, method string, d protoreflect.MessageDescriptor, seen map[protoreflect.FullName]bool) {
 	t.Helper()
 	if seen[d.FullName()] {
@@ -430,7 +546,7 @@ func checkNoRevealFields(t *testing.T, method string, d protoreflect.MessageDesc
 	seen[d.FullName()] = true
 	for i := 0; i < d.Fields().Len(); i++ {
 		f := d.Fields().Get(i)
-		if revealField.MatchString(string(f.Name())) {
+		if revealsByName(f) {
 			t.Errorf("%s: response field %s.%s could carry a credential or a raw config", method, d.FullName(), f.Name())
 		}
 		if f.Kind() == protoreflect.MessageKind {
@@ -539,8 +655,16 @@ func TestNetDevCompromisedServerCannotReachDevicesOrCredentials(t *testing.T) {
 		}
 	}
 	seen := map[protoreflect.FullName]bool{}
+	seenBytes, found := map[protoreflect.FullName]bool{}, map[protoreflect.FullName]bool{}
 	for m := range server {
 		checkNoRevealFields(t, m, methodOutput(t, m), seen)
+		checkBytesListed(t, m, methodOutput(t, m), serverBytesFields, seenBytes, found)
+	}
+	// The allowlist holds no stale entry.
+	for name := range serverBytesFields {
+		if !found[name] {
+			t.Errorf("serverBytesFields lists %s, which no server response contains", name)
+		}
 	}
 	reveal := regexp.MustCompile(`(?i)(get|read|open|reveal|export|dump|fetch).*(credential|config|secret)`)
 	svc := pb.File_nebula_executor_v1_executor_proto.Services().ByName("ExecutorService")
@@ -691,6 +815,136 @@ func TestNetDevCompromisedServerCannotWidenOrExtendLeases(t *testing.T) {
 	e.wantRefused("read on a revoked lease", n, e.read(ndDevice, cbsVersion), codes.PermissionDenied)
 
 	e.requireRegistryUnchanged(before.GetTrustGeneration(), before.GetCredentialVersion())
+	e.requireNoSecret()
+}
+
+// approvedGrant returns the stored lease id as the server sees it.
+func (e *ndEnv) approvedGrant(id string) *pb.ReadGrant {
+	e.t.Helper()
+	got, err := e.client.ListReadGrants(e.ctx(), &pb.ListReadGrantsRequest{})
+	if err != nil {
+		e.t.Fatalf("server ListReadGrants: %v", err)
+	}
+	for _, g := range got.GetGrants() {
+		if g.GetGrantId() == id {
+			return g
+		}
+	}
+	e.t.Fatalf("lease %s not stored", id)
+	return nil
+}
+
+// TestNetDevServerCannotReproposeApprovedLease (ND-21 1): the server
+// re-proposes the id of an already approved device read lease with wider
+// reads, with a later expiry, or both. Every such proposal is refused, so
+// there is nothing for the admin to approve over the stored lease; the
+// stored lease is byte-for-byte unchanged, its reads stay narrow and it
+// still expires on time. The same wider document under a fresh id is
+// accepted as a proposal, which shows that the refusal comes from the
+// reused id ("grant exists"), not from the document's content.
+func TestNetDevServerCannotReproposeApprovedLease(t *testing.T) {
+	e := newNDEnv(t, peercred.RoleServer)
+	ctx := e.ctx()
+	cbsVersion := pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION
+
+	approved := e.leaseDoc(time.Hour, 24, 900, e.target(schedgrant.NetDeviceReadCBSVersion))
+	id := e.approve(approved)
+	stored := e.approvedGrant(id)
+
+	allReads := func() []permit.NetDeviceTarget {
+		return []permit.NetDeviceTarget{e.target(schedgrant.NetDeviceReadCBSVersion, schedgrant.NetDeviceReadCBSVLANs,
+			schedgrant.NetDeviceReadCBSInterfaces, schedgrant.NetDeviceReadCBSMACTable, schedgrant.NetDeviceReadCBSLLDP)}
+	}
+	maxExpiry := approved.CreatedUnix + int64(permit.ReadGrantMaxLifetime/time.Second)
+	wider := approved
+	wider.NetDeviceTargets = allReads()
+	later := approved
+	later.NetDeviceTargets = []permit.NetDeviceTarget{e.target(schedgrant.NetDeviceReadCBSVersion)}
+	later.ExpiryUnix = maxExpiry
+	both := approved
+	both.NetDeviceTargets = allReads()
+	both.ExpiryUnix = maxExpiry
+	for _, tc := range []struct {
+		name string
+		doc  permit.ReadGrantDoc
+	}{
+		{"same id with wider reads", wider},
+		{"same id with a later expiry", later},
+		{"same id with wider reads and a later expiry", both},
+	} {
+		if tc.doc.ID != id {
+			t.Fatalf("%s: id %s, want the approved %s", tc.name, tc.doc.ID, id)
+		}
+		_, err := e.client.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: ndMarshal(t, tc.doc)})
+		if status.Code(err) != codes.InvalidArgument || !strings.Contains(status.Convert(err).Message(), "exists") {
+			t.Errorf("%s: want InvalidArgument (grant exists), got %v", tc.name, err)
+		}
+	}
+	pending, err := e.svc.ListPendingReadGrants(ctx, &pb.ListPendingReadGrantsRequest{})
+	if err != nil {
+		t.Fatalf("list pending: %v", err)
+	}
+	if n := len(pending.GetGrants()); n != 0 {
+		t.Fatalf("%d pending leases after the re-proposals, want none to approve", n)
+	}
+
+	// Control: the same wide, long document under a fresh id is a valid
+	// proposal (it stays one until the admin approves it).
+	fresh := both
+	fresh.ID = "4d210000-0000-4000-8000-0000000fffff"
+	if _, err := e.client.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: ndMarshal(t, fresh)}); err != nil {
+		t.Fatalf("control: wide lease under a fresh id refused at proposal: %v", err)
+	}
+
+	after := e.approvedGrant(id)
+	if !bytes.Equal(after.GetCanonicalGrant(), stored.GetCanonicalGrant()) || after.GetGrantDigest() != stored.GetGrantDigest() ||
+		after.GetExpiryUnix() != approved.ExpiryUnix || after.GetRevokedUnix() != 0 {
+		t.Fatalf("approved lease changed by the re-proposals:\nbefore %v\nafter  %v", stored, after)
+	}
+
+	n := e.authorizedReads()
+	e.wantAuthorized(n, e.read(ndDevice, cbsVersion))
+	n = e.authorizedReads()
+	e.wantRefused("read the re-proposal would add", n, e.read(ndDevice, pb.NetDeviceRead_NET_DEVICE_READ_CBS_MAC_TABLE), codes.PermissionDenied)
+	e.clock.add(time.Hour)
+	e.wantRefused("read after the approved expiry", n, e.read(ndDevice, cbsVersion), codes.PermissionDenied)
+	e.requireNoSecret()
+}
+
+// TestNetDevLeaseRunBudgetIsEnforced (ND-21 2): a lease's RunBudget caps
+// the reads per device in any rolling hour, even when every read respects
+// the interval. With a budget of 2 and a 15-minute interval the collector
+// gets two reads; the third, after the interval, is refused for the
+// budget; only when the first read leaves the hour window is one more read
+// authorized.
+func TestNetDevLeaseRunBudgetIsEnforced(t *testing.T) {
+	e := newNDEnv(t, peercred.RoleNetDevCollector)
+	ctx := e.ctx()
+	cbsVersion := pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION
+	read := func() error {
+		t.Helper()
+		got, err := e.client.ReadNetDevice(ctx, &pb.ReadNetDeviceRequest{DeviceId: ndDevice, Read: cbsVersion})
+		if got != nil {
+			t.Errorf("collector read: unexpected reply %v", got)
+		}
+		return err
+	}
+
+	e.approve(e.leaseDoc(2*time.Hour, 2, 900, e.target(schedgrant.NetDeviceReadCBSVersion)))
+	n := e.authorizedReads()
+	e.wantAuthorized(n, read()) // t = 0
+	e.clock.add(16 * time.Minute)
+	e.wantAuthorized(n+1, read()) // t = 16m
+	n = e.authorizedReads()
+	e.clock.add(16 * time.Minute)
+	e.wantRefused("third read in the hour (interval elapsed, budget spent)", n, read(), codes.ResourceExhausted) // t = 32m
+	e.clock.add(16 * time.Minute)
+	e.wantRefused("read at 48m (budget still spent)", n, read(), codes.ResourceExhausted)
+	e.clock.add(14 * time.Minute)
+	e.wantAuthorized(n, read()) // t = 62m: the read at t = 0 left the window
+	n = e.authorizedReads()
+	e.clock.add(time.Minute)
+	e.wantRefused("read at 63m (interval and budget)", n, read(), codes.ResourceExhausted)
 	e.requireNoSecret()
 }
 
@@ -883,12 +1137,17 @@ func TestNetDevBaselineNotSettableByServer(t *testing.T) {
 		wantCode(t, err, codes.InvalidArgument, "reserved")
 	}
 
+	// The request is otherwise well-formed (registered, unblocked device;
+	// positive version; 64 lowercase hex digest), so the only check left to
+	// refuse it is that the executor did not compute the digest.
 	digest := strings.Repeat("e", 64)
-	if _, err := e.svc.ProposeNetDeviceBaseline(ctx, ndDevice, 1, digest); status.Code(err) != codes.FailedPrecondition {
-		t.Errorf("propose baseline with a digest the executor did not compute: want FailedPrecondition, got %v", err)
+	_, err = e.svc.ProposeNetDeviceBaseline(ctx, ndDevice, 1, digest)
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(status.Convert(err).Message(), "not computed by the executor") {
+		t.Errorf("propose baseline with a digest the executor did not compute: want FailedPrecondition (not computed by the executor), got %v", err)
 	}
-	if _, err := e.svc.CommitNetDeviceBaseline(ctx, ndDevice, 1, digest, strings.Repeat("0", 64)); err == nil {
-		t.Error("commit baseline without an approved permit: accepted")
+	_, err = e.svc.CommitNetDeviceBaseline(ctx, ndDevice, 1, digest, strings.Repeat("0", 64))
+	if status.Code(err) != codes.FailedPrecondition || !strings.Contains(status.Convert(err).Message(), "not computed by the executor") {
+		t.Errorf("commit baseline with a digest the executor did not compute: want FailedPrecondition (not computed by the executor), got %v", err)
 	}
 	if b, ok, err := e.svc.GetNetDeviceBaseline(ctx, ndDevice); err != nil || ok {
 		t.Errorf("baseline after the attempts: %v, %v, %v; want none", b, ok, err)
