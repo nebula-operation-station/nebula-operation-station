@@ -269,7 +269,7 @@ func TestEscapePathKeepsPrintableUTF8AndEscapesTheRest(t *testing.T) {
 		{"invalid byte", []byte{'/', 0xff}, `/\xff`},
 		{"truncated multibyte", []byte{'/', 0xc3}, `/\xc3`},
 		{"printable utf8", []byte("/etc/ä"), "/etc/ä"},
-		{"bidi override", []byte("/etc/‮x"), `/etc/\xe2\x80\xaex`},
+		{"bidi override", []byte{'/', 'e', 't', 'c', '/', 0xe2, 0x80, 0xae, 'x'}, `/etc/\xe2\x80\xaex`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
