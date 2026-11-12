@@ -103,7 +103,11 @@ Constraints that shape every decision below:
      privileged session can therefore not get a substituted setup key into
      a script without a security-key touch whose view names the key check
      value (D6 "Why a stolen setup key is bounded"). NetBird offers also
-     have their own lower limits (D2). (Amended 2026-11-12; previously:
+     have their own lower limits (D2). If the operator chooses to enter
+     the key with the executor-local CLI instead of the dialog, the offer
+     starts in `awaiting_key` and moves to `awaiting_approval` only when the
+     CLI has sealed the key (D6 "Entry"); the web session that created the
+     offer stays its only binding (D2). (Amended 2026-11-12; previously:
      the offer had no setup key until approval, the permit bound managed
      group, ephemeral flag and setup-key expiry, and on approval the
      executor created the key through the NetBird Management API under a
@@ -255,7 +259,10 @@ the other direction). The only channel host → NOS is the operator.
   NetBird offers start in `awaiting_approval` and move to `open` only after
   the NetBird offer permit is approved and the full render's hash is
   stored (D1 step 2, D6 "Supply order"; amended 2026-11-12, previously
-  "and the setup key is recorded", D6 "Creation order"); from any non-final state → `expired`,
+  "and the setup key is recorded", D6 "Creation order"); a NetBird offer
+  whose key is entered with the executor-local CLI starts one step
+  earlier in `awaiting_key` → `awaiting_approval` (D6 "Entry"; added
+  2026-11-12); from any non-final state → `expired`,
   `revoked` or `failed`. Final states never return to `open`. Every state
   change is one atomic compare-and-set on the offer row (expected old state
   → new state); a transition whose expected state no longer holds fails and
@@ -273,7 +280,11 @@ the other direction). The only channel host → NOS is the operator.
 - **Binding:** only the web session that created the offer may submit the
   code, approve and commit; another session (also of the same user) sees the
   offer read-only and may revoke it. Lock, restart or session end of the
-  privileged session does not resurrect it.
+  privileged session does not resurrect it. The executor-local CLI never
+  creates an offer and never becomes a binding: it can only supply the
+  setup key of a NetBird offer in `awaiting_key` that a web session
+  created; approval, code submission and commit stay with that creating
+  web session (D6 "Entry"; added 2026-11-12).
 - **Revocation:** the operator can revoke an open offer in the UI; the
   executor-local CLI can list and revoke offers (`nebula host offers`,
   `nebula host offer-revoke`). NOS cannot revoke the NetBird setup key
@@ -629,7 +640,44 @@ through the API, with expiry offer expiry plus 45 minutes, at most 1 hour.)
   ticket): non-echoing terminal input, or standard input when that is not
   a terminal; never an argument and never an environment variable. The
   guide recommends the CLI for high-assurance hosts, because the key then
-  never passes the server.
+  never passes the server. *Link to the offer* (added 2026-11-12, fix
+  round 1; the stricter of the possible links, see "Open question Q10"
+  in the amendment):
+  - The offer is always created in the web dialog by a privileged
+    session; the operator picks "enter the key on the executor host".
+    `CreateEnrollOffer` then creates the NetBird offer in `awaiting_key`
+    without a key, vault reference, check value or permit, with all other
+    render inputs fixed as in "Supply order" step 1, bound to the creating
+    web session (D2 "Binding"). The dialog shows the offer reference (the
+    first 8 hex characters of the offer ID hash, already the logged form,
+    D2) and the CLI command with it.
+  - The CLI takes the offer reference and the key, nothing else. It is
+    accepted only for an offer in `awaiting_key` that is not expired;
+    every other state, an unknown or ambiguous reference (two non-final
+    offers with the same reference) and a second entry for the same
+    offer are refused without reading further input, and nothing changes.
+    The CLI never creates an offer, cannot select host, SSH user,
+    credential or render inputs, and gets no binding: approval, code
+    submission and commit stay with the creating web session; another
+    web session sees the offer read-only and may revoke it, as for every
+    offer.
+  - A valid key is sealed exactly as in "Supply order" step 1, in one
+    commit with the atomic compare-and-set `awaiting_key` →
+    `awaiting_approval` (a failed compare-and-set seals nothing); then
+    "Supply order" continues at step 2 and the permit is proposed to the
+    creating web session. The CLI prints the check value; the approval
+    view shows the same value, so the operator confirms that the approval
+    names the key entered on the executor host. A malformed key is refused
+    as under "Validation" (the offer stays in `awaiting_key`); after 3
+    refused entries (`OfferMaxRejectedSetupKeys`, a named constant like
+    the 3 rejected codes of D2 "Limits") the offer is `failed`.
+  - An offer in `awaiting_key` counts against the NetBird limits of D2
+    from creation, expires with the same 15 minutes total and needs no
+    wipe; if it ends without a key, the revoke advice of "Final state" is
+    still shown, without a check value ("if you created a setup key for
+    this offer, revoke it").
+  - "Show script" for an offer in `awaiting_key` renders the placeholder
+    variant without a hash, as for `awaiting_approval` (D1 step 3).
 
 *Validation.* The executor removes surrounding ASCII whitespace, folds hex
 letters to uppercase and then requires exactly the canonical setup-key form
@@ -668,8 +716,13 @@ names it, and never kept longer than needed:
    key into the vault and creates the offer in `awaiting_approval` with the
    vault reference, the check value and the fixed render inputs, including
    the placeholder hash (D2 "Retention"). Audit
-   `netbird_setup_key_supplied` (offer, check value, client address; never
-   the key).
+   `netbird_setup_key_supplied` (offer, check value, client address, entry
+   path `dialog` or `cli`; never the key). For CLI entry, step 1 is split:
+   the web create makes the offer in `awaiting_key` with the same checks
+   and fixed render inputs but no key; the CLI then validates, computes
+   the check value and seals the key in one commit with `awaiting_key` →
+   `awaiting_approval` ("Entry" above). A web create that selects CLI
+   entry and still carries a key is refused.
 2. It proposes the NetBird offer permit (D1 step 2).
 3. On approval it first checks the offer's stored script template version
    against its own; on a difference it fails the offer, wipes the key and
@@ -1272,6 +1325,9 @@ decided by this (see "Decisions of the maintainer").
 1. The operator enters a one-off setup key per NetBird offer in the
    one-step dialog (masked input) or with the executor-local CLI
    (non-echoing input or standard input, never argv or environment). The
+   CLI only supplies the key of an offer that a web session created in
+   `awaiting_key`; it never creates an offer and never becomes a binding
+   (D2 "Binding", D6 "Entry"; added in fix round 1). The
    dialog, the CLI help and the guide recommend creating it in NetBird
    one-off, with a short validity (recommended 1 hour, never more than
    1 day), with only the managed group as auto group and ephemeral only
@@ -1312,6 +1368,25 @@ the audited revoke advice and the possible-orphan listing. New exposure:
 a key typed into the web dialog passes the server in memory (as the
 download stream did before); the CLI entry avoids it.
 
+**Open question Q10 (fix round 1, for the maintainer): link of the CLI
+key entry to an offer.** The decision of 2026-11-12 names the key entry
+but not how a CLI-entered key reaches an offer that D2 binds to a web
+session. Options: (a) the web session creates the offer in a new state
+`awaiting_key` and the CLI only supplies the key for it; (b) the CLI
+creates the offer itself, which needs a new kind of binding (a CLI-created
+offer that some web session later claims for code submission and commit);
+(c) the CLI seals a key without an offer and the web dialog picks it up,
+which leaves a secret in the vault with no offer lifecycle, expiry or
+wipe. **Recommendation and what this ADR now specifies: (a)**, because it
+is the strictest: D2 "Binding" stays exactly as it is (one creating web
+session, no claim step), the CLI gains no authority beyond supplying one
+key for one existing offer, every sealed key belongs to an offer with
+its expiry and wipe, and the permit's check value ties the CLI entry to
+the web approval. If the maintainer prefers to drop the CLI entry
+instead, D6 "Entry" loses its second bullet, `awaiting_key` and
+`OfferMaxRejectedSetupKeys` go away, and the server-memory exposure of
+the dialog stays the only entry path's residual.
+
 **Every passage that assumed the Management API, and its new rule.**
 
 | Passage | Previously (API assumed) | Now |
@@ -1321,7 +1396,8 @@ download stream did before); the CLI entry avoids it.
 | D1 step 2 | Offer without key until approval; on approval the executor creates the key through the API; permit binds managed group, ephemeral flag, setup-key expiry | Supplied key sealed at creation; permit binds its check value; on approval the script is rendered and hashed |
 | D1 step 3 (residual after `SIGKILL`, disk and swap residuals) | Key "one-off, at most 1 hour valid and revoked when the offer becomes final" | One-off and short-lived only as created by the operator; NOS advises revoking |
 | D1 step 3 ("Show script" in `awaiting_approval`) | No setup key yet | Key sealed already; "Show script" never reads it |
-| D2 "States" | `open` after "the setup key is recorded" (Creation order) | `open` after approval and the stored full-render hash (Supply order) |
+| D2 "States" | `open` after "the setup key is recorded" (Creation order) | `open` after approval and the stored full-render hash (Supply order); `awaiting_key` before `awaiting_approval` for CLI key entry |
+| D2 "Binding" | Creating web session only (no key entry outside it) | Unchanged; the executor-local CLI only supplies the key of an `awaiting_key` offer and never becomes a binding (Q10) |
 | D2 "Revocation" | Revoking an offer revokes the setup key through the API, unconditionally | Wipe plus unconditional revoke advice in UI, CLI and audit |
 | D2 "Limits" | 5 setup keys created per hour | 5 NetBird offers (supplied keys) per hour; 2 open NetBird offers unchanged |
 | D2 "Audit" | `netbird_setup_key_pending`, `_created`, `_invalid`, `_reconciled`, `_unresolved`, `_revoked`, `_revoke_failed`, `_expired_unrevoked`, `netbird_peer_joined`, `_orphaned`, `_deleted`, `_kept` | `netbird_setup_key_supplied`, `_rejected`, `_wiped`, `_revoke_advised`, `netbird_possible_orphan_peer` |
