@@ -69,6 +69,8 @@ const (
 	ExecutorService_DownloadEnrollScript_FullMethodName            = "/nebula.executor.v1.ExecutorService/DownloadEnrollScript"
 	ExecutorService_RevokeEnrollOffer_FullMethodName               = "/nebula.executor.v1.ExecutorService/RevokeEnrollOffer"
 	ExecutorService_ListEnrollOffers_FullMethodName                = "/nebula.executor.v1.ExecutorService/ListEnrollOffers"
+	ExecutorService_SubmitPairingCode_FullMethodName               = "/nebula.executor.v1.ExecutorService/SubmitPairingCode"
+	ExecutorService_CommitPairedEnroll_FullMethodName              = "/nebula.executor.v1.ExecutorService/CommitPairedEnroll"
 	ExecutorService_ProposeGuestJoin_FullMethodName                = "/nebula.executor.v1.ExecutorService/ProposeGuestJoin"
 	ExecutorService_CommitGuestJoin_FullMethodName                 = "/nebula.executor.v1.ExecutorService/CommitGuestJoin"
 	ExecutorService_GetSSHPublicKey_FullMethodName                 = "/nebula.executor.v1.ExecutorService/GetSSHPublicKey"
@@ -346,6 +348,21 @@ type ExecutorServiceClient interface {
 	// Role: admin (nebula host offers). Lists the stored offers, without
 	// offer ID, salt, script or setup key.
 	ListEnrollOffers(ctx context.Context, in *ListEnrollOffersRequest, opts ...grpc.CallOption) (*ListEnrollOffersResponse, error)
+	// Role: server, creating web session only. Pairing (ADR 0013 D1 step 5,
+	// D3; spec 08 v25-08-01): checks the code format first (a malformed code
+	// is counted and never probed), then probes the endpoint offering only
+	// ssh-ed25519, computes the code from the presented key and the offer
+	// salt and compares in constant time. A match proposes the paired
+	// enrollment permit (HIGH, user verification); a mismatch fails the
+	// offer, audits the presented fingerprint and asks the server to notify;
+	// a probe failure is not a mismatch. Refused for a pinned or blocked host.
+	SubmitPairingCode(ctx context.Context, in *SubmitPairingCodeRequest, opts ...grpc.CallOption) (*SubmitPairingCodeResponse, error)
+	// Role: server, creating web session only. Commits an approved paired
+	// enrollment: re-probes the endpoint (ssh-ed25519 only), pins only the
+	// approved key, completes the offer and tries a login when the keys are
+	// unlocked. Only after a successful pin does the response name an
+	// endpoint to add to the inventory host.
+	CommitPairedEnroll(ctx context.Context, in *CommitPairedEnrollRequest, opts ...grpc.CallOption) (*CommitPairedEnrollResponse, error)
 	// Role: server. Join of a provisioned PVE guest (ADR 0008 section 4,
 	// PV-06): proposes the guest's enrollment with the normal enrollment
 	// approval (at least HIGH). The executor checks the live guest, tries a
@@ -1165,6 +1182,26 @@ func (c *executorServiceClient) ListEnrollOffers(ctx context.Context, in *ListEn
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListEnrollOffersResponse)
 	err := c.cc.Invoke(ctx, ExecutorService_ListEnrollOffers_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) SubmitPairingCode(ctx context.Context, in *SubmitPairingCodeRequest, opts ...grpc.CallOption) (*SubmitPairingCodeResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SubmitPairingCodeResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_SubmitPairingCode_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) CommitPairedEnroll(ctx context.Context, in *CommitPairedEnrollRequest, opts ...grpc.CallOption) (*CommitPairedEnrollResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommitPairedEnrollResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_CommitPairedEnroll_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2229,6 +2266,21 @@ type ExecutorServiceServer interface {
 	// Role: admin (nebula host offers). Lists the stored offers, without
 	// offer ID, salt, script or setup key.
 	ListEnrollOffers(context.Context, *ListEnrollOffersRequest) (*ListEnrollOffersResponse, error)
+	// Role: server, creating web session only. Pairing (ADR 0013 D1 step 5,
+	// D3; spec 08 v25-08-01): checks the code format first (a malformed code
+	// is counted and never probed), then probes the endpoint offering only
+	// ssh-ed25519, computes the code from the presented key and the offer
+	// salt and compares in constant time. A match proposes the paired
+	// enrollment permit (HIGH, user verification); a mismatch fails the
+	// offer, audits the presented fingerprint and asks the server to notify;
+	// a probe failure is not a mismatch. Refused for a pinned or blocked host.
+	SubmitPairingCode(context.Context, *SubmitPairingCodeRequest) (*SubmitPairingCodeResponse, error)
+	// Role: server, creating web session only. Commits an approved paired
+	// enrollment: re-probes the endpoint (ssh-ed25519 only), pins only the
+	// approved key, completes the offer and tries a login when the keys are
+	// unlocked. Only after a successful pin does the response name an
+	// endpoint to add to the inventory host.
+	CommitPairedEnroll(context.Context, *CommitPairedEnrollRequest) (*CommitPairedEnrollResponse, error)
 	// Role: server. Join of a provisioned PVE guest (ADR 0008 section 4,
 	// PV-06): proposes the guest's enrollment with the normal enrollment
 	// approval (at least HIGH). The executor checks the live guest, tries a
@@ -2717,6 +2769,12 @@ func (UnimplementedExecutorServiceServer) RevokeEnrollOffer(context.Context, *Re
 }
 func (UnimplementedExecutorServiceServer) ListEnrollOffers(context.Context, *ListEnrollOffersRequest) (*ListEnrollOffersResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListEnrollOffers not implemented")
+}
+func (UnimplementedExecutorServiceServer) SubmitPairingCode(context.Context, *SubmitPairingCodeRequest) (*SubmitPairingCodeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method SubmitPairingCode not implemented")
+}
+func (UnimplementedExecutorServiceServer) CommitPairedEnroll(context.Context, *CommitPairedEnrollRequest) (*CommitPairedEnrollResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CommitPairedEnroll not implemented")
 }
 func (UnimplementedExecutorServiceServer) ProposeGuestJoin(context.Context, *ProposeGuestJoinRequest) (*ProposeGuestJoinResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ProposeGuestJoin not implemented")
@@ -3860,6 +3918,42 @@ func _ExecutorService_ListEnrollOffers_Handler(srv interface{}, ctx context.Cont
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ExecutorServiceServer).ListEnrollOffers(ctx, req.(*ListEnrollOffersRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_SubmitPairingCode_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SubmitPairingCodeRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).SubmitPairingCode(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_SubmitPairingCode_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).SubmitPairingCode(ctx, req.(*SubmitPairingCodeRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_CommitPairedEnroll_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CommitPairedEnrollRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).CommitPairedEnroll(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_CommitPairedEnroll_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).CommitPairedEnroll(ctx, req.(*CommitPairedEnrollRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -5628,6 +5722,14 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListEnrollOffers",
 			Handler:    _ExecutorService_ListEnrollOffers_Handler,
+		},
+		{
+			MethodName: "SubmitPairingCode",
+			Handler:    _ExecutorService_SubmitPairingCode_Handler,
+		},
+		{
+			MethodName: "CommitPairedEnroll",
+			Handler:    _ExecutorService_CommitPairedEnroll_Handler,
 		},
 		{
 			MethodName: "ProposeGuestJoin",
