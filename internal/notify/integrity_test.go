@@ -55,8 +55,15 @@ func newTestGate(t *testing.T, s ...Sender) (*IntegrityGate, *clock) {
 	t.Helper()
 	clk := &clock{t: integrityBase}
 	n := NewWithSenders(quiet(), nil, s...)
-	return NewIntegrityGate(n, clk.now), clk
+	g, err := NewIntegrityGate(n, testNOSBase, clk.now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return g, clk
 }
+
+// testNOSBase is the configured NOS base URL used by the tests.
+const testNOSBase = "https://nos.example.net"
 
 var allIntegrityKinds = []IntegrityKind{IntegrityNOSMismatch, IntegrityHostChange, IntegrityScanIncomplete,
 	IntegrityBaselineTamper, IntegrityReferenceConflict}
@@ -84,7 +91,10 @@ func TestIntegrityKindsSendInEveryChannel(t *testing.T) {
 		&ntfy{url: nsrv.URL + "/nebula", client: http.DefaultClient},
 		&telegram{base: tsrv.URL, token: botToken, chatID: "-100123", client: http.DefaultClient})
 	clk := &clock{t: integrityBase}
-	g := NewIntegrityGate(n, clk.now)
+	g, err := NewIntegrityGate(n, testNOSBase, clk.now)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for i, k := range allIntegrityKinds {
 		d, err := g.Submit(context.Background(), validEvent(k), NewIntegrityKey("host-"+string(rune('a'+i)), "binary", "/usr/bin/nebula"))
 		if err != nil || d != DecisionSent {
@@ -345,6 +355,19 @@ func TestInvalidEventsAreRejectedAndNotSent(t *testing.T) {
 		"link with space":  func(e *IntegrityEvent) { e.Link = "https://nos.example.net/a b" },
 		"link no host":     func(e *IntegrityEvent) { e.Link = "https:///x" },
 		"long link":        func(e *IntegrityEvent) { e.Link = "https://nos.example.net/" + strings.Repeat("a", 600) },
+		"other host":       func(e *IntegrityEvent) { e.Link = "https://evil.example/integrity/findings/1" },
+		"other scheme":     func(e *IntegrityEvent) { e.Link = "http://nos.example.net/integrity/findings/1" },
+		"other route":      func(e *IntegrityEvent) { e.Link = "https://nos.example.net/login" },
+		"path traversal":   func(e *IntegrityEvent) { e.Link = "https://nos.example.net/integrity/findings/1/../../x" },
+		"host path":        func(e *IntegrityEvent) { e.Link = "https://nos.example.net/integrity/findings/etc/passwd" },
+		"link query":       func(e *IntegrityEvent) { e.Link = "https://nos.example.net/integrity/findings/1?p=/etc/shadow" },
+		"link fragment":    func(e *IntegrityEvent) { e.Link = "https://nos.example.net/integrity/findings/1#x" },
+		"link userinfo":    func(e *IntegrityEvent) { e.Link = "https://a@nos.example.net/integrity/findings/1" },
+		"non-numeric id":   func(e *IntegrityEvent) { e.Link = "https://nos.example.net/integrity/findings/abc" },
+		"empty id":         func(e *IntegrityEvent) { e.Link = "https://nos.example.net/integrity/findings/" },
+		"long id": func(e *IntegrityEvent) {
+			e.Link = "https://nos.example.net/integrity/findings/" + strings.Repeat("9", 21)
+		},
 	}
 	for name, mut := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -375,6 +398,226 @@ func TestIntegrityTitlesPerKind(t *testing.T) {
 	for _, k := range allIntegrityKinds {
 		if got := validEvent(k).message(integrityBase).Title(); got != want[k] {
 			t.Fatalf("%s: title %q, want %q", k, got, want[k])
+		}
+	}
+}
+
+func TestForgetLetsAClosedFindingNotifyAgain(t *testing.T) {
+	var r intRecorder
+	r.ok = true
+	g, _ := newTestGate(t, &r)
+	ctx := context.Background()
+	closed := NewIntegrityKey("host-1", "binary", "/etc/ssh/sshd_config")
+	other := NewIntegrityKey("host-1", "binary", "/usr/bin/nebula")
+	for _, k := range []IntegrityKey{closed, other} {
+		if d, _ := g.Submit(ctx, validEvent(IntegrityHostChange), k); d != DecisionSent {
+			t.Fatalf("first: %v", d)
+		}
+	}
+	if d, _ := g.Submit(ctx, validEvent(IntegrityHostChange), closed); d != DecisionDuplicate {
+		t.Fatalf("before forget: %v", d)
+	}
+	g.Forget(closed)
+	if d, _ := g.Submit(ctx, validEvent(IntegrityHostChange), closed); d != DecisionSent {
+		t.Fatalf("re-tamper after forget stayed silent: %v", d)
+	}
+	if d, _ := g.Submit(ctx, validEvent(IntegrityHostChange), other); d != DecisionDuplicate {
+		t.Fatalf("forget touched another finding: %v", d)
+	}
+}
+
+func TestForgetClearsEveryKindOfTheKey(t *testing.T) {
+	var r intRecorder
+	r.ok = true
+	g, _ := newTestGate(t, &r)
+	ctx := context.Background()
+	key := NewIntegrityKey("host-1", "binary", "/etc/ssh/sshd_config")
+	for _, k := range allIntegrityKinds {
+		if d, _ := g.Submit(ctx, validEvent(k), key); d != DecisionSent {
+			t.Fatalf("%s: %v", k, d)
+		}
+	}
+	g.Forget(key)
+	for _, k := range allIntegrityKinds {
+		if d, _ := g.Submit(ctx, validEvent(k), key); d != DecisionSent {
+			t.Fatalf("%s after forget: %v", k, d)
+		}
+	}
+}
+
+func TestForgetOfAHeldFindingAllowsANewHold(t *testing.T) {
+	var r intRecorder
+	r.ok = true
+	g, _ := newTestGate(t, &r)
+	ctx := context.Background()
+	for i := 0; i < MaxIntegrityPerHour; i++ {
+		_, _ = g.Submit(ctx, validEvent(IntegrityNOSMismatch), NewIntegrityKey("s", "binary", string(rune('a'+i))))
+	}
+	held := NewIntegrityKey("s", "binary", "held")
+	if d, _ := g.Submit(ctx, validEvent(IntegrityNOSMismatch), held); d != DecisionHeld {
+		t.Fatalf("setup: %v", d)
+	}
+	if d, _ := g.Submit(ctx, validEvent(IntegrityNOSMismatch), held); d != DecisionDuplicate {
+		t.Fatalf("held finding not deduplicated: %v", d)
+	}
+	g.Forget(held)
+	if d, _ := g.Submit(ctx, validEvent(IntegrityNOSMismatch), held); d != DecisionHeld {
+		t.Fatalf("held finding not forgotten: %v", d)
+	}
+}
+
+// gateSender blocks inside Send for its first call until release is closed,
+// so a test can keep one submission in flight while another one arrives for
+// the same key. The first fail calls are refused.
+type gateSender struct {
+	mu      sync.Mutex
+	calls   int
+	fail    int
+	entered chan struct{}
+	release chan struct{}
+	sent    []Event
+}
+
+func (s *gateSender) Name() string { return "gateSender" }
+
+func (s *gateSender) Send(_ context.Context, e Event) error {
+	s.mu.Lock()
+	s.calls++
+	call := s.calls
+	s.mu.Unlock()
+	if call == 1 {
+		close(s.entered)
+		<-s.release
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if call <= s.fail {
+		return errors.New("refused")
+	}
+	s.sent = append(s.sent, e)
+	return nil
+}
+
+func TestConcurrentSubmitOfSameKeySendsOnce(t *testing.T) {
+	s := &gateSender{entered: make(chan struct{}), release: make(chan struct{})}
+	g, _ := newTestGate(t, s)
+	ctx := context.Background()
+	key := NewIntegrityKey("host-1", "binary", "/etc/ssh/sshd_config")
+
+	first := make(chan Decision, 1)
+	go func() {
+		d, _ := g.Submit(ctx, validEvent(IntegrityHostChange), key)
+		first <- d
+	}()
+	<-s.entered
+
+	second := make(chan Decision, 1)
+	go func() {
+		d, _ := g.Submit(ctx, validEvent(IntegrityHostChange), key)
+		second <- d
+	}()
+	close(s.release)
+
+	if d := <-first; d != DecisionSent {
+		t.Fatalf("first: %v", d)
+	}
+	if d := <-second; d != DecisionDuplicate {
+		t.Fatalf("concurrent second: %v, want duplicate", d)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.sent) != 1 || s.calls != 1 {
+		t.Fatalf("sent %d events in %d sends, want 1 of each", len(s.sent), s.calls)
+	}
+}
+
+func TestConcurrentSubmitRetriesWhenFirstIsUndelivered(t *testing.T) {
+	s := &gateSender{entered: make(chan struct{}), release: make(chan struct{}), fail: 1}
+	g, _ := newTestGate(t, s)
+	ctx := context.Background()
+	key := NewIntegrityKey("host-1", "binary", "/etc/ssh/sshd_config")
+
+	first := make(chan Decision, 1)
+	go func() {
+		d, _ := g.Submit(ctx, validEvent(IntegrityHostChange), key)
+		first <- d
+	}()
+	<-s.entered
+
+	second := make(chan Decision, 1)
+	go func() {
+		d, _ := g.Submit(ctx, validEvent(IntegrityHostChange), key)
+		second <- d
+	}()
+	close(s.release)
+
+	if d := <-first; d != DecisionUndelivered {
+		t.Fatalf("first: %v", d)
+	}
+	if d := <-second; d != DecisionSent {
+		t.Fatalf("waiting submission lost the message: %v", d)
+	}
+}
+
+func TestConcurrentSubmitHonoursContextWhileWaiting(t *testing.T) {
+	s := &gateSender{entered: make(chan struct{}), release: make(chan struct{})}
+	g, _ := newTestGate(t, s)
+	key := NewIntegrityKey("host-1", "binary", "/etc/ssh/sshd_config")
+
+	first := make(chan Decision, 1)
+	go func() {
+		d, _ := g.Submit(context.Background(), validEvent(IntegrityHostChange), key)
+		first <- d
+	}()
+	<-s.entered
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := g.Submit(ctx, validEvent(IntegrityHostChange), key); !errors.Is(err, context.Canceled) {
+		t.Fatalf("waiting submission with cancelled context: %v", err)
+	}
+	close(s.release)
+	if d := <-first; d != DecisionSent {
+		t.Fatalf("first: %v", d)
+	}
+}
+
+func TestNOSBaseURLIsValidated(t *testing.T) {
+	for _, base := range []string{"", "ftp://nos.example.net", "https:///x", "https://a@nos.example.net",
+		"https://nos.example.net/?q=1", "https://nos.example.net/#f", "nos.example.net"} {
+		if _, err := NewIntegrityGate(NewWithSenders(quiet(), nil), base, nil); !errors.Is(err, ErrInvalidNOSBase) {
+			t.Errorf("base %q accepted: %v", base, err)
+		}
+	}
+	// A trailing slash and a path prefix are part of the configured base.
+	g, err := NewIntegrityGate(NewWithSenders(quiet(), nil), "https://nos.example.net/nos/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ev := validEvent(IntegrityNOSMismatch)
+	ev.Link = "https://nos.example.net/nos/integrity/findings/7"
+	if _, err := g.Submit(context.Background(), ev, NewIntegrityKey("s", "binary", "/p")); err != nil {
+		t.Fatalf("link under configured prefix rejected: %v", err)
+	}
+}
+
+func TestHostLabelDotsCannotFormDomains(t *testing.T) {
+	for _, label := range []string{"evil.example.com", "pve.lab", "www.evil.example", "a.b"} {
+		var r intRecorder
+		r.ok = true
+		g, _ := newTestGate(t, &r)
+		ev := validEvent(IntegrityNOSMismatch)
+		ev.Host = label
+		if _, err := g.Submit(context.Background(), ev, NewIntegrityKey("s", "binary", "/p")); err != nil {
+			t.Fatal(err)
+		}
+		got := r.list()
+		if len(got) != 1 {
+			t.Fatalf("%q: sent %d", label, len(got))
+		}
+		text := strings.Replace(got[0].Text(), testNOSBase, "", 1)
+		if strings.Contains(text, ".") || strings.Contains(text, label) {
+			t.Fatalf("%q: label not neutralized: %q", label, got[0].Text())
 		}
 	}
 }

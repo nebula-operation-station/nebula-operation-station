@@ -67,6 +67,12 @@ const (
 	maxIntegrityClass = 32
 	// maxIntegrityLink bounds the NOS link.
 	maxIntegrityLink = 512
+	// maxIntegrityLinkID bounds the decimal finding ID at the end of the link.
+	maxIntegrityLinkID = 20
+	// integrityLinkRoute is the fixed NOS UI route of an integrity finding,
+	// relative to the configured NOS base URL. The link carries no other path,
+	// query or fragment.
+	integrityLinkRoute = "/integrity/findings/"
 	// maxIntegrityLabel bounds the host label (the plain-text rule of clean).
 	maxIntegrityLabel = 64
 	// unnamedHost stands in for an empty host label.
@@ -77,6 +83,11 @@ const (
 // class, severity or link, or a negative count. Such an event is never sent.
 var ErrInvalidIntegrityEvent = errors.New("invalid integrity event")
 
+// ErrInvalidNOSBase is returned by NewIntegrityGate for a NOS base URL that
+// is not an absolute http or https URL with a host and without user info,
+// query or fragment.
+var ErrInvalidNOSBase = errors.New("invalid NOS base URL")
+
 // IntegrityEvent is one integrity notification. It has fixed fields only:
 // there is no field for a path or for file content, so no host-supplied
 // path or content can reach a message through it. The path that identifies
@@ -85,7 +96,9 @@ type IntegrityEvent struct {
 	// Kind selects the event and its fixed wording.
 	Kind IntegrityKind
 	// Host is the host label as the admin set it; it is reduced to letters,
-	// digits, spaces, '-', '_' and '.' before it is sent.
+	// digits, spaces, '-' and '_' before it is sent. Every other character,
+	// including '.', becomes '?', so no domain-like text is left for a chat
+	// client to link.
 	Host string
 	// Class is the fixed class code of the finding (lowercase letters,
 	// digits and '_', starting with a letter).
@@ -94,8 +107,9 @@ type IntegrityEvent struct {
 	Severity Severity
 	// Count is the number of findings the event covers.
 	Count int
-	// Link is the NOS UI link for the finding: an http or https URL without
-	// spaces. Empty is allowed.
+	// Link is the NOS UI link for the finding. It must be the configured NOS
+	// base URL followed by the fixed integrity route and a decimal finding
+	// ID, and nothing else. Empty is allowed.
 	Link string
 }
 
@@ -145,68 +159,124 @@ type integrityDedupe struct {
 // events, then sends them through a Notifier. It is safe for concurrent use;
 // messages are sent outside its lock.
 //
+// A submission for a (kind, key) that is still being sent waits for that
+// send to finish, then reports DecisionDuplicate if it was delivered or
+// sends the event itself if it was not. So concurrent submissions of one
+// finding send it at most once.
+//
 // De-duplication state is held in memory: after a restart a finding that is
-// still open notifies once more inside the limit.
+// still open notifies once more inside the limit. Forget clears the state of
+// a finding when it closes or its baseline is approved.
 type IntegrityGate struct {
-	n   *Notifier
-	now func() time.Time
+	n         *Notifier
+	now       func() time.Time
+	linkStart string // NOS base URL plus the integrity route
 
 	mu        sync.Mutex
 	sent      []time.Time // delivery times (and reserved slots) inside the window
 	notified  map[integrityDedupe]bool
-	order     []integrityDedupe // insertion order for eviction
+	inflight  map[integrityDedupe]chan struct{} // closed when the send ends
+	order     []integrityDedupe                 // insertion order for eviction
 	held      map[IntegrityKind]int
 	heldSince time.Time
 }
 
-// NewIntegrityGate returns a gate that sends through n. now defaults to
-// time.Now.
-func NewIntegrityGate(n *Notifier, now func() time.Time) *IntegrityGate {
+// NewIntegrityGate returns a gate that sends through n. nosBase is the
+// configured NOS base URL that finding links must start with, for example
+// "https://nos.example.net". now defaults to time.Now.
+func NewIntegrityGate(n *Notifier, nosBase string, now func() time.Time) (*IntegrityGate, error) {
 	if now == nil {
 		now = time.Now
 	}
-	return &IntegrityGate{n: n, now: now, notified: map[integrityDedupe]bool{}, held: map[IntegrityKind]int{}}
+	u, err := url.Parse(nosBase)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" ||
+		u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+		return nil, fmt.Errorf("%w: %q", ErrInvalidNOSBase, nosBase)
+	}
+	return &IntegrityGate{
+		n:         n,
+		now:       now,
+		linkStart: strings.TrimSuffix(nosBase, "/") + integrityLinkRoute,
+		notified:  map[integrityDedupe]bool{},
+		inflight:  map[integrityDedupe]chan struct{}{},
+		held:      map[IntegrityKind]int{},
+	}, nil
 }
 
 // Submit validates ev and, unless it is a duplicate, sends it inside the
 // hourly limit or holds it for the digest. A due digest is sent first.
 func (g *IntegrityGate) Submit(ctx context.Context, ev IntegrityEvent, key IntegrityKey) (Decision, error) {
-	if err := ev.validate(); err != nil {
+	if err := ev.validate(g.linkStart); err != nil {
 		return DecisionNone, err
 	}
-	now := g.now()
 	dk := integrityDedupe{kind: ev.Kind, key: key}
-
-	g.mu.Lock()
-	due := g.digestLocked(now)
-	if g.notified[dk] {
+	for {
+		g.mu.Lock()
+		now := g.now()
+		due := g.digestLocked(now)
+		if g.notified[dk] {
+			g.mu.Unlock()
+			g.deliverDigest(ctx, due)
+			return DecisionDuplicate, nil
+		}
+		if busy, ok := g.inflight[dk]; ok {
+			// Another submission is sending this finding. Wait for its outcome.
+			g.mu.Unlock()
+			g.deliverDigest(ctx, due)
+			select {
+			case <-busy:
+				continue
+			case <-ctx.Done():
+				return DecisionNone, ctx.Err()
+			}
+		}
+		g.prune(now)
+		if len(g.sent) >= MaxIntegrityPerHour {
+			// Held messages count as notified: the digest reports them.
+			g.holdLocked(ev.Kind, now)
+			g.markLocked(dk)
+			g.mu.Unlock()
+			g.deliverDigest(ctx, due)
+			return DecisionHeld, nil
+		}
+		g.sent = append(g.sent, now)
+		done := make(chan struct{})
+		g.inflight[dk] = done
 		g.mu.Unlock()
+
 		g.deliverDigest(ctx, due)
-		return DecisionDuplicate, nil
-	}
-	g.prune(now)
-	if len(g.sent) >= MaxIntegrityPerHour {
-		// Held messages count as notified: the digest reports them.
-		g.holdLocked(ev.Kind, now)
+		ok := g.n.Notify(ctx, ev.message(now)) > 0
+
+		g.mu.Lock()
+		delete(g.inflight, dk)
+		close(done)
+		if !ok {
+			g.releaseLocked(now)
+			g.mu.Unlock()
+			return DecisionUndelivered, nil
+		}
 		g.markLocked(dk)
 		g.mu.Unlock()
-		g.deliverDigest(ctx, due)
-		return DecisionHeld, nil
+		return DecisionSent, nil
 	}
-	g.sent = append(g.sent, now)
-	g.mu.Unlock()
+}
 
-	g.deliverDigest(ctx, due)
-	ok := g.n.Notify(ctx, ev.message(now)) > 0
-
+// Forget drops the de-duplication state of key for every integrity kind, so
+// a later event for the same finding notifies again. Call it when the finding
+// closes or its baseline is approved. A send already in flight for key is not
+// cancelled; it records its key when it ends.
+func (g *IntegrityGate) Forget(key IntegrityKey) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if !ok {
-		g.releaseLocked(now)
-		return DecisionUndelivered, nil
+	kept := g.order[:0]
+	for _, dk := range g.order {
+		if dk.key == key {
+			delete(g.notified, dk)
+			continue
+		}
+		kept = append(kept, dk)
 	}
-	g.markLocked(dk)
-	return DecisionSent, nil
+	g.order = kept
 }
 
 // Flush sends the digest if its hour has ended and reports whether a digest
@@ -224,7 +294,7 @@ func (ev IntegrityEvent) message(now time.Time) Event {
 		Reason: fmt.Sprintf("Class: %s, count: %d", ev.Class, ev.Count), Link: ev.Link, Time: now}
 }
 
-func (ev IntegrityEvent) validate() error {
+func (ev IntegrityEvent) validate(linkStart string) error {
 	switch ev.Kind {
 	case IntegrityNOSMismatch, IntegrityHostChange, IntegrityScanIncomplete, IntegrityBaselineTamper, IntegrityReferenceConflict:
 	default:
@@ -241,7 +311,7 @@ func (ev IntegrityEvent) validate() error {
 	if ev.Count < 0 {
 		return fmt.Errorf("%w: negative count", ErrInvalidIntegrityEvent)
 	}
-	if ev.Link != "" && !validLink(ev.Link) {
+	if ev.Link != "" && !validLink(ev.Link, linkStart) {
 		return fmt.Errorf("%w: link", ErrInvalidIntegrityEvent)
 	}
 	return nil
@@ -262,34 +332,37 @@ func validClass(s string) bool {
 	return true
 }
 
-// validLink accepts an absolute http or https URL with a host and only
-// printable ASCII without spaces.
-func validLink(s string) bool {
-	if len(s) > maxIntegrityLink {
+// validLink accepts only linkStart (the configured NOS base URL and the fixed
+// integrity route) followed by a decimal finding ID of 1 to maxIntegrityLinkID
+// digits. Nothing else can follow: no path segment, query, fragment or
+// host-supplied text.
+func validLink(s, linkStart string) bool {
+	if len(s) > maxIntegrityLink || !strings.HasPrefix(s, linkStart) {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
-		if s[i] <= 0x20 || s[i] > 0x7e {
+	id := s[len(linkStart):]
+	if id == "" || len(id) > maxIntegrityLinkID {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		if id[i] < '0' || id[i] > '9' {
 			return false
 		}
 	}
-	u, err := url.Parse(s)
-	if err != nil {
-		return false
-	}
-	return (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+	return true
 }
 
 // integrityLabel reduces a host label to plain text: the shared clean rules
 // (control and bidi characters, one line, length bound), then only letters,
-// digits, spaces and '-', '_', '.'. Everything else, including Markdown
-// link syntax, URLs and mentions, becomes '?'.
+// digits, spaces and '-', '_'. Everything else, including '.', Markdown
+// link syntax, URLs and mentions, becomes '?'. Dropping '.' keeps a label
+// from forming a domain that a chat client would link.
 func integrityLabel(s string) string {
 	s = clean(s, maxIntegrityLabel)
 	var b strings.Builder
 	for _, r := range s {
 		switch {
-		case unicode.IsLetter(r) || unicode.IsDigit(r) || r == ' ' || r == '-' || r == '_' || r == '.':
+		case unicode.IsLetter(r) || unicode.IsDigit(r) || r == ' ' || r == '-' || r == '_':
 			b.WriteRune(r)
 		default:
 			b.WriteRune('?')
