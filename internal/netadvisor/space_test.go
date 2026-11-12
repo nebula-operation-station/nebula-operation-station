@@ -64,6 +64,48 @@ func TestIntervalSetOpsMatchBruteForce(t *testing.T) {
 	}
 }
 
+// sparsePorts returns n single, non-adjacent ports from 10 upwards.
+func sparsePorts(n int) iset[port] {
+	l := make(iset[port], 0, n)
+	for k := range n {
+		p := port(2*k + 10)
+		l = append(l, ival[port]{p, p})
+	}
+	return l
+}
+
+// TestSubtractChargesCopiedIntervals: a set with many intervals minus a
+// set with one early interval must not be copied for free; every copied
+// interval is charged, so a small budget is exhausted.
+func TestSubtractChargesCopiedIntervals(t *testing.T) {
+	const n = 1000
+	w := &work{max: n / 2}
+	got := subtract(sparsePorts(n), iset[port]{{1, 1}}, w)
+	if len(got) != n {
+		t.Fatalf("subtract kept %d intervals, want %d", len(got), n)
+	}
+	if !w.exhausted() {
+		t.Errorf("subtract of %d intervals charged %d, want more than %d", n, w.n, n/2)
+	}
+}
+
+// TestCoversLargePieceSmallRuleExhausts: a piece with many service
+// intervals against a small covering rule (one early interval) hits the
+// work limit (coverLimit) instead of copying the intervals for free; with
+// enough budget it is decided.
+func TestCoversLargePieceSmallRuleExhausts(t *testing.T) {
+	const n = 1000
+	target := box{from: s("a"), to: s("b"), src: addrUniverse, dst: addrUniverse, svc: svcSet{protoTCP: sparsePorts(n)}}
+	cover := target
+	cover.svc = svcSet{protoTCP: iset[port]{{1, 10}}}
+	if got := covers(target, []box{cover}, &work{max: n / 2}); got != coverLimit {
+		t.Errorf("covers = %v, want coverLimit", got)
+	}
+	if got := covers(target, []box{cover}, &work{max: 10 * n}); got != notCovered {
+		t.Errorf("enough budget: covers = %v, want notCovered", got)
+	}
+}
+
 func TestAddressSetFamilyBoundaries(t *testing.T) {
 	a := netip.MustParseAddr
 	w := &work{max: 1 << 20}

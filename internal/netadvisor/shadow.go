@@ -30,6 +30,10 @@ import (
 // addresses are matched by no earlier rule on any port, and otherwise
 // StateCannotDecide.
 //
+// A zone list with "any" next to other zones is treated like an
+// unevaluable rule, as resolveZones does: it may mean every zone or a
+// snapshot zone named "any".
+//
 // Fail-safe (ADR 0012 D2): the rule itself unevaluable, an earlier rule
 // that is unevaluable and may match the rule's traffic, a covering set
 // that needs a rule whose conditions cannot be compared, unknown
@@ -66,38 +70,10 @@ func (c ShadowCheck) Run(in *Input) Report {
 	if c.workPerSnapshot != 0 {
 		perSnapshot = c.workPerSnapshot
 	}
-	var allZones []string
-	for _, z := range in.Snapshot.Zones {
-		allZones = append(allZones, z.Name)
-	}
-	sh := shadowState{
-		views:    in.Index.SecurityRules(),
-		raws:     in.Snapshot.SecurityRules,
-		allZones: sortedUnique(allZones),
-		fullSvc:  fullService(),
-		shared:   perSnapshot,
-	}
-	// Match spaces, condition sets and clean names are built once per
-	// rule (linear in the snapshot) and charged to the shared budget. The
-	// candidate and box buffers are reused for every rule, so the memory
-	// of a run grows with the rules, not with the pairs of rules.
-	prep := &work{max: perSnapshot, shared: &sh.shared}
-	n := len(sh.views)
-	sh.boxes = make([]box, n)
-	sh.conds = make([]ruleConds, n)
-	sh.names = make([]string, n)
-	sh.definite = make([]candidate, 0, n)
-	sh.possible = make([]candidate, 0, n)
-	sh.all = make([]box, 0, n)
-	for i, v := range sh.views {
-		prep.add(len(sh.raws[i].Name))
-		sh.names[i] = clean(sh.raws[i].Name)
-		if v.Disabled || !v.Evaluable() {
-			continue
-		}
-		sh.boxes[i] = ruleBox(v, sh.allZones, prep)
-		sh.conds[i] = newRuleConds(&sh.raws[i], prep)
-	}
+	// When the prep runs out of budget the shared budget stays negative,
+	// so sh.rule returns "limit reached" for every enabled usable rule
+	// before it reads a match space that was not built.
+	sh, _ := newShadowState(in, perSnapshot)
 
 	shadowed := make([]Finding, len(sh.views))
 	overlap := make([]Finding, len(sh.views))
@@ -112,6 +88,77 @@ func (c ShadowCheck) Run(in *Input) Report {
 		State:        StateOK,
 		Findings:     append(shadowed, overlap...),
 	}
+}
+
+// newShadowState builds the per-run state. Match spaces, condition sets
+// and clean names are built once per rule (linear in the snapshot) and
+// charged to the shared budget perSnapshot; the budget is checked after
+// every rule, and once it is gone no further match spaces are built and
+// ok is false. The candidate and box buffers are reused for every rule,
+// so the memory of a run grows with the rules, not with the pairs of
+// rules.
+func newShadowState(in *Input, perSnapshot int) (*shadowState, bool) {
+	var allZones []string
+	for _, z := range in.Snapshot.Zones {
+		allZones = append(allZones, z.Name)
+	}
+	sh := &shadowState{
+		views:    in.Index.SecurityRules(),
+		raws:     in.Snapshot.SecurityRules,
+		allZones: sortedUnique(allZones),
+		fullSvc:  fullService(),
+		shared:   perSnapshot,
+	}
+	prep := &work{max: perSnapshot, shared: &sh.shared}
+	n := len(sh.views)
+	sh.boxes = make([]box, n)
+	sh.conds = make([]ruleConds, n)
+	sh.names = make([]string, n)
+	sh.why = make([]string, n)
+	sh.definite = make([]candidate, 0, n)
+	sh.possible = make([]candidate, 0, n)
+	sh.all = make([]box, 0, n)
+	for i, v := range sh.views {
+		prep.add(len(sh.raws[i].Name))
+		if prep.exhausted() {
+			return sh, false
+		}
+		sh.names[i] = clean(sh.raws[i].Name)
+		if v.Disabled {
+			continue
+		}
+		if !v.Evaluable() {
+			sh.why[i] = v.Reason()
+			continue
+		}
+		prep.add(len(v.From) + len(v.To))
+		if why := ambiguousZones(v); why != "" {
+			sh.why[i] = why
+			continue
+		}
+		sh.boxes[i] = ruleBox(v, sh.allZones, prep)
+		sh.conds[i] = newRuleConds(&sh.raws[i], prep)
+		if prep.exhausted() {
+			return sh, false
+		}
+	}
+	return sh, true
+}
+
+// ambiguousZones returns why a zone list of an evaluable rule cannot be
+// modelled, like resolveZones: "any" next to other zones may mean every
+// zone (as netreach evaluates it) or a snapshot zone named "any", so the
+// rule is treated as unevaluable. It returns "" for usable lists.
+func ambiguousZones(v netreach.RuleView) string {
+	for _, f := range []struct {
+		name string
+		l    []string
+	}{{"from", v.From}, {"to", v.To}} {
+		if len(f.l) > 1 && slices.Contains(f.l, "any") {
+			return f.name + " has any next to other zones"
+		}
+	}
+	return ""
 }
 
 // candidate is an earlier rule that may take part in covering a rule.
@@ -132,6 +179,7 @@ type shadowState struct {
 	boxes    []box
 	conds    []ruleConds
 	names    []string
+	why      []string // why an enabled rule cannot be modelled ("" when it can)
 	definite []candidate
 	possible []candidate
 	all      []box
@@ -190,8 +238,8 @@ func (sh *shadowState) rule(i int, w *work) (Finding, Finding) {
 	switch {
 	case v.Disabled:
 		return both(StateOK, "rule disabled")
-	case !v.Evaluable():
-		return both(StateCannotDecide, "cannot decide: "+v.Reason())
+	case sh.why[i] != "":
+		return both(StateCannotDecide, "cannot decide: "+sh.why[i])
 	case w.exhausted():
 		return limit()
 	}
@@ -218,7 +266,7 @@ func (sh *shadowState) rule(i int, w *work) (Finding, Finding) {
 		if cv.Disabled {
 			continue
 		}
-		if !cv.Evaluable() {
+		if sh.why[j] != "" {
 			w.add(len(raws[j].From.Value) + len(raws[j].To.Value))
 			if w.exhausted() {
 				return limit()
@@ -227,7 +275,7 @@ func (sh *shadowState) rule(i int, w *work) (Finding, Finding) {
 				continue
 			}
 			if firstUneval == "" {
-				firstUneval = cv.Reason()
+				firstUneval = sh.why[j]
 			}
 			continue
 		}
