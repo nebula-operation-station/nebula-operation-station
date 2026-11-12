@@ -25,6 +25,8 @@ type matcher struct {
 	gaps    map[Gap]struct{}
 	held    []Withheld
 	feedCut int
+	// vendor caches the indexed CSAF advisories per feed (vendorDocs).
+	vendor map[string][]indexedAdvisory
 }
 
 // Match matches subjects against db and returns the findings in the D5

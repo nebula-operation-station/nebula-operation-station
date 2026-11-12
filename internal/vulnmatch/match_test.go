@@ -650,6 +650,35 @@ func TestVendorTrains(t *testing.T) {
 	}
 }
 
+// TestVendorIndexBuiltOncePerMatch: the CSAF advisories of a feed are
+// indexed once and reused for every device subject, and each device still
+// gets its own findings.
+func TestVendorIndexBuiltOncePerMatch(t *testing.T) {
+	const panos = "vendor:paloalto:panos"
+	db := newDB(t)
+	for _, id := range []string{"PAN-SA-2024-0002", "PAN-SA-2024-0001"} {
+		adv := vulnfeed.CSAFAdvisory{TrackingID: id, Version: "1",
+			Products:        []vulnfeed.CSAFProduct{csafProduct("a", panos, "10.2.9", "10.2"), csafProduct("b", panos, "10.2.10", "10.2")},
+			Vulnerabilities: []vulnfeed.CSAFVulnerability{{CVE: "CVE-2024-" + id[len(id)-4:], Affected: []string{"a"}, Fixed: []string{"b"}}}}
+		if err := db.AddCSAF(FeedPaloAltoCSAF, adv); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m := &matcher{db: db, found: map[vulnfinding.Key]*Finding{}, gaps: map[Gap]struct{}{}}
+	first := m.vendorDocs(FeedPaloAltoCSAF)
+	second := m.vendorDocs(FeedPaloAltoCSAF)
+	if len(first) != 2 || &first[0] != &second[0] || first[0].adv.TrackingID != "PAN-SA-2024-0001" {
+		t.Fatalf("index not reused or not sorted: %+v", first)
+	}
+	dev := func(id string) Subject {
+		return Subject{Kind: vulnfinding.SubjectDevice, Ref: vulnfinding.SubjectRef{ID: id}, Ecosystem: panos, Device: &Device{Model: "PA-440", Firmware: "10.2.9"}}
+	}
+	r := mustMatch(t, db, dev("d1"), dev("d2"))
+	if len(r.Findings) != 4 {
+		t.Fatalf("findings = %d, want 2 per device: %+v", len(r.Findings), r.Findings)
+	}
+}
+
 // TestVendorContradictingStatusIsUnknown: a firmware listed as affected and
 // fixed for one vulnerability is a gap, not a record.
 func TestVendorContradictingStatusIsUnknown(t *testing.T) {

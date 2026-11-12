@@ -44,24 +44,46 @@ func (m *matcher) device(s Subject) {
 		m.gap(s, "", "", GapFeedMissing)
 		return
 	}
-	docs := make([]*vulnfeed.CSAFAdvisory, 0, len(m.db.csaf))
-	for i := range m.db.csaf {
-		if m.db.csaf[i].feed == feed {
-			docs = append(docs, &m.db.csaf[i].adv)
+	for _, d := range m.vendorDocs(feed) {
+		for _, v := range d.adv.Vulnerabilities {
+			m.deviceVuln(s, feed, d.adv, d.byID, v)
 		}
 	}
-	slices.SortStableFunc(docs, func(a, b *vulnfeed.CSAFAdvisory) int {
-		return cmp.Or(strings.Compare(a.TrackingID, b.TrackingID), strings.Compare(a.Version, b.Version))
-	})
-	for _, adv := range docs {
+}
+
+// indexedAdvisory is a CSAF advisory with its products by ID.
+type indexedAdvisory struct {
+	adv  *vulnfeed.CSAFAdvisory
+	byID map[string]vulnfeed.CSAFProduct
+}
+
+// vendorDocs returns the advisories of feed in (tracking ID, version)
+// order with their product maps. It builds them once per Match and feed,
+// so the work does not grow with the number of device subjects.
+func (m *matcher) vendorDocs(feed string) []indexedAdvisory {
+	if docs, ok := m.vendor[feed]; ok {
+		return docs
+	}
+	var docs []indexedAdvisory
+	for i := range m.db.csaf {
+		if m.db.csaf[i].feed != feed {
+			continue
+		}
+		adv := &m.db.csaf[i].adv
 		byID := make(map[string]vulnfeed.CSAFProduct, len(adv.Products))
 		for _, p := range adv.Products {
 			byID[p.ProductID] = p
 		}
-		for _, v := range adv.Vulnerabilities {
-			m.deviceVuln(s, feed, adv, byID, v)
-		}
+		docs = append(docs, indexedAdvisory{adv: adv, byID: byID})
 	}
+	slices.SortStableFunc(docs, func(a, b indexedAdvisory) int {
+		return cmp.Or(strings.Compare(a.adv.TrackingID, b.adv.TrackingID), strings.Compare(a.adv.Version, b.adv.Version))
+	})
+	if m.vendor == nil {
+		m.vendor = map[string][]indexedAdvisory{}
+	}
+	m.vendor[feed] = docs
+	return docs
 }
 
 func (m *matcher) deviceVuln(s Subject, feed string, adv *vulnfeed.CSAFAdvisory, byID map[string]vulnfeed.CSAFProduct, v vulnfeed.CSAFVulnerability) {
