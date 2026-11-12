@@ -110,7 +110,10 @@ History:
   confirmation rerun starts with fresh recorders, a fresh fake executor
   and a fresh working directory like every canary form (previously not
   stated, so the first run's recorded final request could make the
-  rerun accepted).
+  rerun accepted). The `--identity` control run uses the same fixture
+  inputs as the canary run of its form but its own fresh recorders
+  (previously the same recorders, so its "no `backup.System` call"
+  check depended on run order).
 
 ## Context
 
@@ -890,10 +893,22 @@ does NOS connect **from** (`--from`)?
   archive that is not sealed to an X25519 recipient cannot satisfy the
   check (previously "a decrypt error", so any error passed).
   In addition one *control run* per `--identity` form writes the
-  control identity to the run's path, with the same `ARCHIVE`, stdin
-  lines, pinned `hostname` and recorders as the canary run of that
-  form; it must return an error that `errors.As` matches as
-  `*age.NoIdentityMatchError` and record no `backup.System` call
+  control identity to the run's path, with the same fixture inputs as
+  the canary run of that form (the form's `--identity` value and the
+  sealed `ARCHIVE` at its fixture path, both created inside the control
+  run's own working directory, stdin lines, pinned `hostname`, fixed
+  time and `isRoot`), but with its own fresh recorders (a fresh
+  recording fake `backup.System`), fresh fake executor and fresh
+  working directory, never those of the canary run (previously "the
+  same … recorders as the canary run", which contradicted the
+  fresh-recorders rule and made the check depend on order: run after
+  the canary run on a shared recorder it saw that run's `Stop` and
+  `Start` and failed a correct harness; run before, the canary run saw
+  the control run's calls). The control run and the canary run of a
+  form may therefore run in either order with the same result. It
+  must return an error that `errors.As` matches as
+  `*age.NoIdentityMatchError` and its own recorder must hold no
+  `backup.System` call
   (previously "must return an error", so a missing stdin line, an
   unpinned `hostname`, a control identity that does not parse or a
   missing archive satisfied it). `restoreWith` parses the identity file
