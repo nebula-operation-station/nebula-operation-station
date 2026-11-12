@@ -1357,6 +1357,12 @@ func TestNetDevCompromisedServerCannotWidenOrExtendLeases(t *testing.T) {
 	// still refuse a sloppier document.
 	day := int64(24 * time.Hour / time.Second)
 	maxLife := int64(permit.ReadGrantMaxLifetime / time.Second)
+	minIntervalS := int64(schedgrant.NetDeviceMinInterval / time.Second)
+	if maxLife != 30*day || minIntervalS != 900 {
+		t.Fatalf("lease bounds moved: max lifetime %ds, interval floor %ds; want 30 days, 900s", maxLife, minIntervalS)
+	}
+	// The device-count bound names its own range, not just "devices".
+	devicesReason := fmt.Sprintf("1 to %d devices", permit.MaxNetDeviceTargets)
 	distinctTargets := func(n int) []permit.NetDeviceTarget {
 		out := make([]permit.NetDeviceTarget, n)
 		for i := range out {
@@ -1383,6 +1389,17 @@ func TestNetDevCompromisedServerCannotWidenOrExtendLeases(t *testing.T) {
 			d.CreatedUnix += 365 * day
 			d.ExpiryUnix = d.CreatedUnix + 3600
 		}},
+		// Exact boundaries: one second past each bound is refused.
+		{"created_unix one second ahead", "future", func(d *permit.ReadGrantDoc) {
+			d.CreatedUnix++
+			d.ExpiryUnix = d.CreatedUnix + 3600
+		}},
+		{"expiry one second beyond 30 days", "30 days", func(d *permit.ReadGrantDoc) {
+			d.ExpiryUnix = d.CreatedUnix + maxLife + 1
+		}},
+		{"min_interval_s one below the floor", "min_interval_s", func(d *permit.ReadGrantDoc) { d.MinIntervalS = minIntervalS - 1 }},
+		{"credential_version 1<<53", "credential_version", func(d *permit.ReadGrantDoc) { d.NetDeviceTargets[0].CredentialVersion = 1 << 53 }},
+		{"trust_generation (1<<48)+1", "trust_generation", func(d *permit.ReadGrantDoc) { d.NetDeviceTargets[0].TrustGeneration = 1<<48 + 1 }},
 		// Target merging: the same device twice, identical or with other
 		// reads, must not add up to wider reads.
 		{"same target twice", "listed twice", func(d *permit.ReadGrantDoc) {
@@ -1394,10 +1411,10 @@ func TestNetDevCompromisedServerCannotWidenOrExtendLeases(t *testing.T) {
 		{"same read twice in a target", "listed twice", func(d *permit.ReadGrantDoc) {
 			d.NetDeviceTargets[0].Reads = []string{schedgrant.NetDeviceReadCBSVersion, schedgrant.NetDeviceReadCBSVersion}
 		}},
-		{"more than MaxNetDeviceTargets devices", "devices", func(d *permit.ReadGrantDoc) {
+		{"more than MaxNetDeviceTargets devices", devicesReason, func(d *permit.ReadGrantDoc) {
 			d.NetDeviceTargets = distinctTargets(permit.MaxNetDeviceTargets + 1)
 		}},
-		{"no device", "devices", func(d *permit.ReadGrantDoc) { d.NetDeviceTargets = []permit.NetDeviceTarget{} }},
+		{"no device", devicesReason, func(d *permit.ReadGrantDoc) { d.NetDeviceTargets = []permit.NetDeviceTarget{} }},
 		// Lower bounds of the budget and the interval.
 		{"zero run_budget", "run_budget", func(d *permit.ReadGrantDoc) { d.RunBudget = 0 }},
 		{"negative run_budget", "run_budget", func(d *permit.ReadGrantDoc) { d.RunBudget = -1 }},
@@ -1423,12 +1440,16 @@ func TestNetDevCompromisedServerCannotWidenOrExtendLeases(t *testing.T) {
 	}
 	// Controls: the bounds sit exactly where the edge cases put them. A
 	// lease created now with the full 30 days, one with exactly
-	// MaxNetDeviceTargets devices and one with the smallest budget are
+	// MaxNetDeviceTargets devices, the smallest budget, the interval floor
+	// itself and the largest credential version and trust generation are
 	// valid proposals (they stay proposals; none is approved).
 	for name, edit := range map[string]func(*permit.ReadGrantDoc){
 		"created now, 30 days":        func(d *permit.ReadGrantDoc) { d.ExpiryUnix = d.CreatedUnix + maxLife },
 		"MaxNetDeviceTargets devices": func(d *permit.ReadGrantDoc) { d.NetDeviceTargets = distinctTargets(permit.MaxNetDeviceTargets) },
 		"run_budget 1":                func(d *permit.ReadGrantDoc) { d.RunBudget = 1 },
+		"min_interval_s at the floor": func(d *permit.ReadGrantDoc) { d.MinIntervalS = minIntervalS },
+		"credential_version 1<<53-1":  func(d *permit.ReadGrantDoc) { d.NetDeviceTargets[0].CredentialVersion = 1<<53 - 1 },
+		"trust_generation 1<<48":      func(d *permit.ReadGrantDoc) { d.NetDeviceTargets[0].TrustGeneration = 1 << 48 },
 	} {
 		d := valid()
 		edit(&d)
