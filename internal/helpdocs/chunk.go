@@ -191,28 +191,9 @@ func splitSource(s Source) ([]Chunk, error) {
 	lines := strings.Split(text, "\n")
 	fences := scanFences(lines)
 	heads := findHeadings(lines, fences)
-	if err := checkOutline(heads, rendered.Headings); err != nil {
-		return nil, fmt.Errorf("source %s: %w", s.File, err)
+	if err := checkOutline(lines, fences, heads, rendered); err != nil {
+		return nil, err
 	}
 	sp := newSplitter(s, lines, fences, heads, rendered.Headings)
 	return sp.run()
-}
-
-// checkOutline verifies that the headings this package found are the
-// headings the renderer found, in the same order and with the same
-// levels. Every H1 to H3 heading used as an anchor must also have a
-// non-empty slug.
-func checkOutline(heads []heading, rendered []mdsafe.Heading) error {
-	if len(heads) != len(rendered) {
-		return fmt.Errorf("%d headings, renderer found %d: %w", len(heads), len(rendered), ErrOutlineMismatch)
-	}
-	for i, h := range heads {
-		if h.level != rendered[i].Level {
-			return fmt.Errorf("heading %d at line %d: level %d, renderer %d: %w", i, h.line+1, h.level, rendered[i].Level, ErrOutlineMismatch)
-		}
-		if h.level <= 3 && mdsafe.Slug(rendered[i].Text) == "" {
-			return fmt.Errorf("heading %q at line %d: %w", rendered[i].Text, h.line+1, ErrNoAnchor)
-		}
-	}
-	return nil
 }

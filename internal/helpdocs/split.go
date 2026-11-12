@@ -4,6 +4,8 @@ package helpdocs
 
 import (
 	"fmt"
+	"slices"
+	"sort"
 	"strings"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/docsembed/mdsafe"
@@ -27,6 +29,7 @@ type fence struct {
 type heading struct {
 	line  int
 	level int
+	text  string // heading text as the renderer parses it, before inline markup
 }
 
 // splitter holds one source's lines and cuts it into chunks.
@@ -95,6 +98,7 @@ func scanFences(lines []string) []fence {
 }
 
 // fenceOpen parses an opening fence line: three or more "`" or "~".
+// It mirrors mdsafe.fenceOf, which accepts a backtick in the info string.
 func fenceOpen(line string) (marker byte, run int, info string, ok bool) {
 	ind := indentOf(line)
 	if ind > maxFenceIndent {
@@ -111,26 +115,20 @@ func fenceOpen(line string) (marker byte, run int, info string, ok bool) {
 	if run < 3 {
 		return 0, 0, "", false
 	}
-	info = strings.TrimSpace(t[run:])
-	if marker == '`' && strings.ContainsRune(info, '`') {
-		return 0, 0, "", false
-	}
-	return marker, run, info, true
+	return marker, run, strings.TrimSpace(t[run:]), true
 }
 
 // fenceClose reports whether line closes a fence opened with marker and
-// run: the same marker, at least run long, nothing else on the line.
+// run. It mirrors the renderer's codeBlock: the line starts with the
+// opening run and holds nothing but marker characters and spaces.
 func fenceClose(line string, marker byte, run int) bool {
 	ind := indentOf(line)
 	if ind > maxFenceIndent {
 		return false
 	}
 	t := line[ind:]
-	n := 0
-	for n < len(t) && t[n] == marker {
-		n++
-	}
-	return n >= run && strings.TrimSpace(t[n:]) == ""
+	return strings.HasPrefix(t, strings.Repeat(string(marker), run)) &&
+		strings.Trim(t, string(marker)+" ") == ""
 }
 
 // findHeadings lists the ATX headings that are not inside a fence.
@@ -146,18 +144,20 @@ func findHeadings(lines []string, fences []fence) []heading {
 		if inFence[i] {
 			continue
 		}
-		if lvl := headingLevel(l); lvl > 0 {
-			out = append(out, heading{line: i, level: lvl})
+		if lvl, text := parseHeading(l); lvl > 0 {
+			out = append(out, heading{line: i, level: lvl, text: text})
 		}
 	}
 	return out
 }
 
-// headingLevel returns the ATX level of a heading line, or 0.
-func headingLevel(line string) int {
+// parseHeading returns the ATX level and text of a heading line, or
+// level 0. It mirrors mdsafe.headingOf: an optional closing run of "#"
+// is dropped.
+func parseHeading(line string) (int, string) {
 	ind := indentOf(line)
 	if ind > maxFenceIndent {
-		return 0
+		return 0, ""
 	}
 	t := line[ind:]
 	n := 0
@@ -165,9 +165,13 @@ func headingLevel(line string) int {
 		n++
 	}
 	if n == 0 || n > 6 || (n < len(t) && t[n] != ' ' && t[n] != '\t') {
-		return 0
+		return 0, ""
 	}
-	return n
+	text := strings.TrimSpace(t[n:])
+	if trimmed := strings.TrimRight(text, "#"); trimmed != text && (trimmed == "" || strings.HasSuffix(trimmed, " ")) {
+		text = strings.TrimSpace(trimmed)
+	}
+	return n, text
 }
 
 func indentOf(line string) int { return len(line) - len(strings.TrimLeft(line, " ")) }
@@ -194,11 +198,16 @@ func (sp *splitter) run() ([]Chunk, error) {
 	if len(h2) > 0 {
 		first = sp.heads[h2[0]].line
 	}
-	if sp.hasText(0, first) {
-		if h1 < 0 || sp.heads[h1].line >= first {
-			return nil, fmt.Errorf("text before the first H2 but no H1 to anchor it: %w", ErrNoAnchor)
+	// The preamble before the first H2 is anchored at the H1, so text
+	// above that H1 (or any text when there is no H1 before the first
+	// H2) has no anchor to be cited by.
+	if h1 >= 0 && sp.heads[h1].line < first {
+		if sp.hasText(0, sp.heads[h1].line) {
+			return nil, fmt.Errorf("text before the first H1: %w", ErrNoAnchor)
 		}
 		out = append(out, sp.emit(0, first, sp.hd[h1].ID, sp.path(-1, h1))...)
+	} else if sp.hasText(0, first) {
+		return nil, fmt.Errorf("text before the first H1: %w", ErrNoAnchor)
 	}
 	for n, k := range h2 {
 		start := sp.heads[k].line
@@ -334,21 +343,22 @@ func (sp *splitter) path(h1 int, ks ...int) []string {
 }
 
 // chunk builds the chunk for lines [start, end) with the given anchor.
+// The fences are sorted by opening line, so the chunk's own fences are
+// found by binary search rather than by scanning every fence.
 func (sp *splitter) chunk(start, end int, anchor string, path []string) Chunk {
 	c := Chunk{
 		ID:        sp.src.Slug + "#" + anchor,
 		Slug:      sp.src.Slug,
 		File:      sp.src.File,
 		Anchor:    anchor,
-		Path:      path,
+		Path:      slices.Clone(path),
 		StartLine: start + 1,
 		EndLine:   end,
 		Text:      strings.Join(sp.lines[start:end], "\n"),
 	}
-	for _, f := range sp.fences {
-		if f.open >= start && f.open < end {
-			c.Code = append(c.Code, sp.codeBlock(f))
-		}
+	first := sort.Search(len(sp.fences), func(k int) bool { return sp.fences[k].open >= start })
+	for k := first; k < len(sp.fences) && sp.fences[k].open < end; k++ {
+		c.Code = append(c.Code, sp.codeBlock(sp.fences[k]))
 	}
 	return c
 }
