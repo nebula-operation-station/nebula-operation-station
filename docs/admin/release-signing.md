@@ -2,7 +2,25 @@
 
 This is the maintainer procedure for the owner-approved 2026-10-30 decision within [ADR 0001](../adr/0001-frozen-decisions-v2.2.md). The normative schemas, limits, rotation rules and retention policy are in [spec 10](../spec/10-modules.md#release-signing). Only public keys belong in the repository and binaries. Signing secrets stay on the YubiKeys; key handle files, PINs and passphrases stay out of CI, releases, the executor and managed hosts.
 
-**Implementation gate.** This workflow is not implemented end to end yet. `internal/sshsig` already handles the SSHSIG envelope, but its current verifier accepts only plain Ed25519, not `sk-ssh-ed25519@openssh.com`. Before enabling releases under this policy, implement and test security-key signature verification with an explicit user-presence check, the release/rotation schemas and durable root state, strict bounded bundle validation, and executor retention/admission. The commands below perform the maintainer's offline OpenSSH signing step; they do not establish executor support. Do not use a software root or omit FIDO checks to bypass this gate.
+**Implementation status** (state of `main`, 2026-11-12; previously: "Implementation gate", which said that `internal/sshsig` accepted only plain Ed25519). The verifying side is implemented; the producing side (build tooling, release workflow) and several admission paths are not. The commands below perform the maintainer's offline OpenSSH signing step. Do not use a software root or omit FIDO checks to work around a missing piece.
+
+Implemented and tested on `main`:
+
+- **Security-key signatures.** `internal/sshsig.VerifySecurityKey` accepts only a plain (non-certificate) `sk-ssh-ed25519@openssh.com` key bound to the expected application, requires the envelope to carry exactly that key, checks the user-presence flag (`flags & 0x01`, otherwise `ErrUserPresence`) and lets `golang.org/x/crypto/ssh` verify the whole FIDO signature including flags and counter; the wrapper is never stripped and the counter is informational. `Verify` (plain Ed25519) rejects security keys. Tests (`internal/sshsig/securitykey_test.go`) sign with a software stand-in in the OpenSSH encoding and check that the real root-1 public key parses; no signature made by the real token is in the test suite.
+- **Release documents** (`internal/release`): the compiled anchors `rootkeys.txt` (root-1 set, root-2 an explicit empty placeholder); the strict `nebula-release-v1` manifest parser and verifier (`ParseManifest`, `VerifyManifest`; namespace `nebula-release`, application `ssh:`); root rotation `nebula-root-rotation-v1` (`RootState.ApplyRotation`, at most four active roots); the bounded `builtins.tar` validator (`ReadBundleDir`, `VerifyBundle`, `ParseModuleTar`); `installed-files.json` (`ParseInstalledFiles`, `VerifyInstalledFiles`, `VerifyPublishedInstalledFiles`, `GenerateInstalledFiles`); and the signed image catalog `nebula-image-catalog-v1` (`VerifyCatalog`).
+- **Executor admission of built-ins.** `internal/executor/trust` keeps the durable root state (bootstrapped from the compiled anchors), the retained module bytes with their signed provenance, the 90-day floor, version tombstones and the storage ceilings. `nebula artifact trust-builtins` reviews the bundle in `/usr/share/nebula/release` (verified against that durable root state) and commits it after a digest-bound confirmation. `deploy/install.sh` provisions the three bundle files there (adjacent attachments or `--release-bundle-dir`).
+- **Not release roots.** `internal/executordb` `trusted_signers` and `nebula signer add|list|remove` (`cmd/nebula/signer.go`) manage third-party *module* signers: plain `ssh-ed25519` keys, namespace `nebula-module`. Release roots never go there and are never added at runtime.
+
+Missing (open before or with the first signed release):
+
+1. **`builtins.tar` builder.** Nothing in the repository produces `builtins.tar` or its nested `modules/<name>/<version>.tar` objects; `.goreleaser.yaml` does not. It has to be built by hand or by new tooling, and validated with the strict validator before signing.
+2. **`installed-files.json` producer.** `GenerateInstalledFiles` is a library function only: no command wraps it and nothing stages the per-flavour trees from the `.deb`, the tarball or the container image.
+3. **Release workflow.** `.github/workflows/ci.yml` has no release job and runs no GoReleaser; `.goreleaser.yaml` disables publishing and image push. Building, publishing and the GitHub asset upload are manual.
+4. **Maintainer-side verifier.** `ssh-keygen -Y verify` does not enforce user presence (below), and no command outside the executor runs `VerifyManifest` on a staged release. Until a dedicated tool exists, the only security-key-aware check is the executor's review in `nebula artifact trust-builtins` on a test installation.
+5. **Manifest completeness.** Spec 10 makes `installed-files.json` a mandatory artifact, but `ParseManifest` only requires exactly one `builtins.tar`, and so does `make-manifest.py` below; the list is enforced only where it is verified (`VerifyInstalledFiles`). Check its presence by hand.
+6. **Rotation admission.** `trust.Store.ApplyRotation` exists, but no RPC or command calls it, so an installation cannot admit a `root-rotation.json` yet. Root-2 is not generated or enrolled (below).
+7. **Integrity checks.** `internal/integrity` (I1 self-check, ADR 0015 IG-03) is a library that no process calls yet; admission of `installed-files.json` during upgrade and `nebula verify` (IG-04) do not exist. Reproducible builds (IG-11) are open.
+8. **Signed image catalog.** `PveImageCatalog.LoadSigned` is not called by any process, and there is no catalog signing procedure; releases currently ship no catalog.
 
 ## Prepare the signing station
 
@@ -25,10 +43,10 @@ cd "$HOME/nebula-release-offline"
 
 ## Primary root and second-key enrollment
 
-**Do not regenerate root-1.** Axel generated it on 2026-10-30 on YubiKey 34718658, a YubiKey 5C NFC running firmware 5.7.4. It is a non-resident FIDO2 key with touch required. The canonical primary fingerprint is `SHA256:DMcoE6ngofND0L6+vT1OIPrvzDFSRmBNDPrR3hpy1MY` and the recorded public key is:
+**Do not regenerate root-1.** Axel generated it on 2026-10-30 on a YubiKey. It is a non-resident FIDO2 key with touch required. The canonical primary fingerprint is `SHA256:DMcoE6ngofND0L6+vT1OIPrvzDFSRmBNDPrR3hpy1MY`. Its compiled anchor line in `internal/release/rootkeys.txt` (the public key prefixed with the slot ID `root-1`) is:
 
 ```text
-sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIH6DVvY6q6jDyLGQeYjKhNufFKi2jzFHzFO04+ng5mkoAAAABHNzaDo= nebula-release-root-1 (Axel, YubiKey 34718658)
+root-1 sk-ssh-ed25519@openssh.com AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIH6DVvY6q6jDyLGQeYjKhNufFKi2jzFHzFO04+ng5mkoAAAABHNzaDo= nebula-release-root-1 (Axel)
 ```
 
 The original resident-key proposal did not work on this setup: both `-O resident` and `-O verify-required` failed with `invalid format`. The working generation form was equivalent to the following (shown for documentation, not as a command to rerun over the existing key):
@@ -249,7 +267,7 @@ cat root-1.pub >> allowed-signers
 
 Before publication of any release or rotation, a security-key-aware verifier must cryptographically authenticate the FIDO flags/counter and explicitly require `(flags & 0x01) != 0`. If that check is unavailable, do not publish. The production verifier must additionally enforce the spec's canonical/schema/bundle/root-state policy and match the security-key application `ssh:`. It must not strip the wrapper or substitute plain Ed25519 verification. The FIDO counter is not an anti-replay release number and must not prevent verification of older signed releases. See [OpenSSH SSHSIG](https://raw.githubusercontent.com/openssh/openssh-portable/master/PROTOCOL.sshsig), [security-key encoding](https://raw.githubusercontent.com/openssh/openssh-portable/master/PROTOCOL.u2f) and [ssh-keygen](https://man.openbsd.org/ssh-keygen.1).
 
-Disconnect the token. Transfer only the public manifest/signature and reviewed payloads to the publication machine. Attach `release-manifest.json`, `release-manifest.json.sig` and all listed artifacts to the release; verify the downloaded bytes again. Signing secrets and key handles never enter the publication machine or CI. Installation verifies each consumed artifact; built-in trust review copies only the manifest, signature and `builtins.tar` to an executor-local directory and verifies current root state. Signing establishes provenance; a local administrator must still review/confirm `nebula artifact trust-builtins` once that specified interface is implemented. It does not approve a host operation or update an existing grant.
+Disconnect the token. Transfer only the public manifest/signature and reviewed payloads to the publication machine. Attach `release-manifest.json`, `release-manifest.json.sig` and all listed artifacts to the release; verify the downloaded bytes again. Signing secrets and key handles never enter the publication machine or CI. Installation verifies each consumed artifact; built-in trust review copies only the manifest, signature and `builtins.tar` to an executor-local directory and verifies current root state. Signing establishes provenance; a local administrator must still review and confirm the bundle with `nebula artifact trust-builtins` (previously: "once that specified interface is implemented"). It does not approve a host operation or update an existing grant.
 
 ## Publish manifest, signature and installed-files.json on GitHub
 
