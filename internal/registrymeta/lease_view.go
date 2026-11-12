@@ -22,7 +22,8 @@ import (
 // Registry read leases as the lease pages show them. The executor's grant
 // list is untrusted input: a document is a registry lease view only when it
 // re-verifies exactly like the executor's own check (permit.ParseReadGrant
-// at its creation time, the same digest, id and expiry) and has the
+// at its stored creation time, the same digest, id and expiry, approved
+// within [created_unix, expiry)) and has the
 // registry rate profile. It names registries, repositories and methods,
 // never a credential.
 
@@ -75,10 +76,16 @@ func DecodeRegistryLease(g *pb.ReadGrant, now time.Time) (LeaseView, bool) {
 		!validApprover(g.GetApprovedBy()) || g.GetCreatedUnix() <= 0 || g.GetRevokedUnix() < 0 {
 		return LeaseView{}, false
 	}
+	// The executor stamps a stored grant with its approval clock, not the
+	// document's created_unix: a lease approved in a later second than it
+	// was proposed has a later CreatedUnix. Like the executor's own check
+	// (the document parsed at the stored creation time), the approval must
+	// lie in [created_unix, expiry); ParseReadGrant enforces both bounds and
+	// the explicit comparison below keeps the first one visible.
 	created := time.Unix(g.GetCreatedUnix(), 0).UTC()
 	doc, _, digest, err := permit.ParseReadGrant(raw, created)
 	if err != nil || digest != g.GetGrantDigest() || doc.ID != g.GetGrantId() || doc.ExpiryUnix != g.GetExpiryUnix() ||
-		doc.CreatedUnix != g.GetCreatedUnix() || doc.Grant != permit.ReadGrantFormat ||
+		g.GetCreatedUnix() < doc.CreatedUnix || g.GetCreatedUnix() >= doc.ExpiryUnix || doc.Grant != permit.ReadGrantFormat ||
 		doc.RateProfile != schedgrant.RegistryReadProfile || len(doc.RegistryTargets) == 0 ||
 		len(doc.Targets) != 0 || len(doc.ProviderTargets) != 0 {
 		return LeaseView{}, false

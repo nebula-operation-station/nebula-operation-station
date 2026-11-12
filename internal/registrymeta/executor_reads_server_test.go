@@ -142,14 +142,24 @@ func TestDecodeRegistryLease(t *testing.T) {
 	if v, ok := DecodeRegistryLease(g, now.Add(time.Hour)); !ok || v.State != "revoked" {
 		t.Fatalf("revoked = %+v %v", v, ok)
 	}
+	// The executor stamps a grant with its approval clock, which is later
+	// than the document's created_unix when the approval came in a later
+	// second; the lease is still the same active lease.
+	g = grant()
+	g.CreatedUnix = now.Add(90 * time.Second).Unix()
+	if v, ok := DecodeRegistryLease(g, now.Add(time.Hour)); !ok || v.State != "active" || !v.Created.Equal(now.Add(90*time.Second)) {
+		t.Fatalf("approved later = %+v %v", v, ok)
+	}
 	for name, mutate := range map[string]func(*pb.ReadGrant){
-		"digest":   func(g *pb.ReadGrant) { g.GrantDigest = strings.Repeat("0", 64) },
-		"id":       func(g *pb.ReadGrant) { g.GrantId = "00000000-0000-4000-8000-000000000001" },
-		"expiry":   func(g *pb.ReadGrant) { g.ExpiryUnix++ },
-		"created":  func(g *pb.ReadGrant) { g.CreatedUnix = now.Unix() - 1 },
-		"approver": func(g *pb.ReadGrant) { g.ApprovedBy = "x" + string(rune(0x202e)) + "y" },
-		"unknown":  func(g *pb.ReadGrant) { g.CanonicalGrant = append([]byte(`{"zz":1,`), g.CanonicalGrant[1:]...) },
-		"not utf8": func(g *pb.ReadGrant) { g.CanonicalGrant = append(g.CanonicalGrant, 0xff) },
+		"approved at expiry": func(g *pb.ReadGrant) { g.CreatedUnix = p.Doc.ExpiryUnix },
+		"approved after":     func(g *pb.ReadGrant) { g.CreatedUnix = p.Doc.ExpiryUnix + 1 },
+		"digest":             func(g *pb.ReadGrant) { g.GrantDigest = strings.Repeat("0", 64) },
+		"id":                 func(g *pb.ReadGrant) { g.GrantId = "00000000-0000-4000-8000-000000000001" },
+		"expiry":             func(g *pb.ReadGrant) { g.ExpiryUnix++ },
+		"created":            func(g *pb.ReadGrant) { g.CreatedUnix = now.Unix() - 1 },
+		"approver":           func(g *pb.ReadGrant) { g.ApprovedBy = "x" + string(rune(0x202e)) + "y" },
+		"unknown":            func(g *pb.ReadGrant) { g.CanonicalGrant = append([]byte(`{"zz":1,`), g.CanonicalGrant[1:]...) },
+		"not utf8":           func(g *pb.ReadGrant) { g.CanonicalGrant = append(g.CanonicalGrant, 0xff) },
 		"other grant": func(g *pb.ReadGrant) {
 			g.CanonicalGrant = []byte(strings.Replace(string(canon), `"registry"`, `"ordinary"`, 1))
 		},
@@ -178,6 +188,11 @@ func TestListRegistryLeases(t *testing.T) {
 	got, err := ListRegistryLeases(context.Background(), f, now)
 	if err != nil || len(got) != 1 || got[0].ID != fakeLeaseID {
 		t.Fatalf("got %+v, %v", got, err)
+	}
+	// Approved a second after it was proposed: still listed.
+	f.grants[0].CreatedUnix = now.Unix() + 1
+	if got, err := ListRegistryLeases(context.Background(), f, now.Add(time.Second)); err != nil || len(got) != 1 || got[0].State != "active" {
+		t.Fatalf("approved a second later: %+v, %v", got, err)
 	}
 	f.listGrantsErr = status.Error(codes.Unavailable, "down")
 	if _, err := ListRegistryLeases(context.Background(), f, now); !errors.Is(err, ErrLeaseListFailed) {
