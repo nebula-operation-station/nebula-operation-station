@@ -11,7 +11,7 @@
 //	nebula batch review|approve|stage|skip
 //	nebula read-grant pending|approve <digest>
 //	nebula artifact trust|untrust|list|trust-builtins|unpin
-//	nebula host probe|pin|unpin|keys|test|criticality|clear|list
+//	nebula host probe|pin|unpin|keys|test|criticality|clear|list|offers|offer-revoke
 //	nebula webauthn code|list|remove
 //	nebula totp setup|status|remove
 //	nebula pve remote add|rotate-token|remove|repin|list
@@ -96,6 +96,12 @@ commands:
                       set the executor's criticality of a host, bound to its key
   host clear HOST     remove a host record (unrecorded hosts count as HIGH)
   host list           list host criticality records
+  host offers [--json]
+                      one-step enrollment offers: state, host, expiry, script hash,
+                      download address, possible orphan NetBird peers (admin UID)
+  host offer-revoke OFFER
+                      revoke an offer in any non-final state, awaiting_approval
+                      included; OFFER is the hash from host offers (admin UID)
   webauthn code [--user NAME] [--label TEXT]
                       one-time code to register a security key in the web UI
   webauthn list       list registered WebAuthn credentials
