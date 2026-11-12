@@ -68,7 +68,7 @@ type VulnSnapshot struct {
 	Generation int64
 	// TakenAt is when the snapshot was taken.
 	TakenAt time.Time
-	// Subjects are hosts and images. Devices follow with VU-15.
+	// Subjects are hosts, images and network devices.
 	Subjects []VulnSubject
 }
 
@@ -86,8 +86,27 @@ type VulnSubject struct {
 	// Complete is the D3 completeness of NOS's package read. A partial
 	// read can add findings but never lets a run cover the subject.
 	Complete bool
-	// Components are the installed source packages.
+	// Components are the installed source packages. A device has none.
 	Components []VulnComponent
+	// Device is the model and firmware of a network device (ADR 0010);
+	// required for a device subject, nil for hosts and images.
+	Device *VulnDevice
+}
+
+// VulnDevice is what the export states about a network device (ADR 0011
+// D3): vendor, model and firmware version, nothing else. No label, address,
+// name or configuration field exists here, so none can be exported.
+type VulnDevice struct {
+	// Vendor is the lowercase vendor slug ("cisco", "paloalto").
+	Vendor string
+	// Model is the model designation as the device reports it.
+	Model string
+	// FirmwareVersion is the firmware version as the device reports it.
+	FirmwareVersion string
+	// Current is true only for a complete, not stale record. Otherwise the
+	// export states model and firmware version as "unknown" and the device
+	// is never covered by a run.
+	Current bool
 }
 
 // VulnKernel is the running kernel and its D4 version basis.
@@ -126,7 +145,15 @@ var (
 	exportVersionRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+~:_-]{0,127}$`)
 	exportArchRe       = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
 	exportReleaseRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+_~-]{0,127}$`)
+	// exportVendorRe and exportModelRe are the D2 device patterns
+	// (vendor:* ecosystems, component.model); firmware uses exportVersionRe.
+	exportVendorRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+	exportModelRe  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`)
 )
+
+// exportUnknown is what the export states for a device value it cannot
+// vouch for (ADR 0011 D3).
+const exportUnknown = "unknown"
 
 // Export JSON. Every string in it has passed a strict pattern above.
 type exportBinaryJSON struct {
@@ -148,11 +175,18 @@ type exportKernelJSON struct {
 	SourceVersion string `json:"source_version,omitempty"`
 }
 
+type exportDeviceJSON struct {
+	Vendor          string `json:"vendor"`
+	Model           string `json:"model"`
+	FirmwareVersion string `json:"firmware_version"`
+}
+
 type exportSubjectJSON struct {
 	SubjectKind vulnfinding.SubjectKind `json:"subject_kind"`
 	SubjectRef  vulnfinding.SubjectRef  `json:"subject_ref"`
 	Ecosystem   string                  `json:"ecosystem,omitempty"`
 	Kernel      *exportKernelJSON       `json:"running_kernel,omitempty"`
+	Device      *exportDeviceJSON       `json:"device,omitempty"`
 	// Complete: NOS's read was complete and nothing was dropped; only
 	// then can a run cover the subject.
 	Complete   bool                  `json:"complete"`
@@ -255,6 +289,9 @@ func subjectKey(kind vulnfinding.SubjectKind, ref vulnfinding.SubjectRef) string
 }
 
 func prepareSubject(sub VulnSubject) (preparedSubject, bool) {
+	if sub.Kind == vulnfinding.SubjectDevice {
+		return prepareDevice(sub)
+	}
 	limit := MaxHostPackages
 	switch sub.Kind {
 	case vulnfinding.SubjectHost:
@@ -267,7 +304,7 @@ func prepareSubject(sub VulnSubject) (preparedSubject, bool) {
 		}
 		limit = MaxImagePackages
 	default:
-		// Devices follow with VU-15; nothing else is exported.
+		// Nothing else is exported.
 		return preparedSubject{}, false
 	}
 	if !exportSubjectIDRe.MatchString(sub.Ref.ID) || !notAddress(sub.Ref.ID) {
@@ -319,6 +356,43 @@ func prepareSubject(sub VulnSubject) (preparedSubject, bool) {
 	}
 	ps.head.Complete = ps.coverable
 	return ps, true
+}
+
+// prepareDevice validates a network device subject (ADR 0011 D2, D3). Only
+// the device ID and the model and firmware version are exported. A value
+// that is missing, invalid or from a stale or incomplete record is exported
+// as "unknown", and the device is then never coverable. Packages, kernel
+// and ecosystem do not apply to a device; if one is set, the device is
+// incomplete and that data is left out.
+func prepareDevice(sub VulnSubject) (preparedSubject, bool) {
+	d := sub.Device
+	if d == nil || sub.Ref.ImageDigest != "" || !exportSubjectIDRe.MatchString(sub.Ref.ID) || !notAddress(sub.Ref.ID) {
+		return preparedSubject{}, false
+	}
+	coverable := sub.Complete && d.Current && len(sub.Components) == 0 && sub.Ecosystem == "" && sub.Kernel == nil
+	out := exportDeviceJSON{Vendor: exportUnknown, Model: exportUnknown, FirmwareVersion: exportUnknown}
+	if exportVendorRe.MatchString(d.Vendor) {
+		out.Vendor = d.Vendor
+	} else {
+		coverable = false
+	}
+	// A model that parses as an address is refused too (D3: no addresses).
+	if d.Current && exportModelRe.MatchString(d.Model) && notAddress(d.Model) {
+		out.Model = d.Model
+	} else {
+		coverable = false
+	}
+	if d.Current && exportVersionRe.MatchString(d.FirmwareVersion) {
+		out.FirmwareVersion = d.FirmwareVersion
+	} else {
+		coverable = false
+	}
+	return preparedSubject{
+		key:       subjectKey(sub.Kind, sub.Ref),
+		head:      exportSubjectJSON{SubjectKind: sub.Kind, SubjectRef: vulnfinding.SubjectRef{ID: sub.Ref.ID}, Device: &out, Complete: coverable},
+		basis:     map[string]string{},
+		coverable: coverable,
+	}, true
 }
 
 func exportComponent(c VulnComponent) (exportComponentJSON, bool) {
