@@ -103,17 +103,17 @@ func TestEscapePath(t *testing.T) {
 		in, want string
 	}{
 		{"/etc/passwd", "/etc/passwd"},
-		{"/etc/grüße", "/etc/grüße"},
+		{"/etc/gr\xc3\xbc\xc3\x9fe", "/etc/gr\xc3\xbc\xc3\x9fe"}, // printable UTF-8 stays
 		{"/etc/a b", "/etc/a b"},
 		{"/etc/\xff\xfe", `/etc/\xff\xfe`},
 		{"/etc/a\nb", `/etc/a\x0ab`},
 		{"/etc/a\x1b[31m", `/etc/a\x1b[31m`},
 		{"/etc/a\\x41", `/etc/a\x5cx41`},
-		{"/etc/‮evil", `/etc/\xe2\x80\xaeevil`},             // RIGHT-TO-LEFT OVERRIDE
-		{"/etc/⁦x⁩", `/etc/\xe2\x81\xa6x\xe2\x81\xa9`}, // isolates
-		{"/etc/a​b", `/etc/a\xe2\x80\x8bb`},                  // zero width space
-		{"/etc/a b", `/etc/a\xc2\xa0b`},                      // no-break space
-		{"/etc/\xed\xa0\x80", `/etc/\xed\xa0\x80`},                // surrogate half
+		{"/etc/\xe2\x80\xaeevil", `/etc/\xe2\x80\xaeevil`},                   // RIGHT-TO-LEFT OVERRIDE
+		{"/etc/\xe2\x81\xa6x\xe2\x81\xa9", `/etc/\xe2\x81\xa6x\xe2\x81\xa9`}, // isolates
+		{"/etc/a\xe2\x80\x8bb", `/etc/a\xe2\x80\x8bb`},                       // zero width space
+		{"/etc/a\xc2\xa0b", `/etc/a\xc2\xa0b`},                               // no-break space
+		{"/etc/\xed\xa0\x80", `/etc/\xed\xa0\x80`},                           // surrogate half
 		{"/etc/\x7f", `/etc/\x7f`},
 	}
 	for _, tt := range tests {

@@ -53,6 +53,10 @@ func mutate(t testing.TB, doc, old, repl string) string {
 
 func b64(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 
+// jsonU returns the JSON escape for code point hex, built so the source
+// file stays ASCII-only.
+func jsonU(hex string) string { return `\` + "u" + hex }
+
 func parseString(t testing.TB, doc string) (*Result, error) {
 	t.Helper()
 	return Parse(context.Background(), strings.NewReader(doc), testOpts())
@@ -201,7 +205,9 @@ func TestInvalidDocumentRejectedAsWhole(t *testing.T) {
 		{"duplicate member", mutate(t, doc, `"mode": "full",`, `"mode": "full", "mode": "full",`)},
 		{"case variant member", mutate(t, doc, `"mode": "full",`, `"mode": "full", "MODE": "full",`)},
 		{"case variant instead of name", mutate(t, doc, `"format":`, `"Format":`)},
-		{"kelvin sign member", mutate(t, doc, `"truncated": false,`, `"truncated": false, "K": 1,`)},
+		{"kelvin sign member", mutate(t, doc, `"truncated": false,`, `"truncated": false, "`+jsonU("212a")+`": 1,`)},
+		{"raw kelvin sign member", mutate(t, doc, `"truncated": false,`, "\"truncated\": false, \"\xe2\x84\xaa\": 1,")},
+		{"long s in schema name", mutate(t, doc, `"truncated": false,`, `"truncated": false, "record`+jsonU("017f")+`": 1,`)},
 		{"raw non-ASCII member", mutate(t, doc, `"truncated": false,`, "\"truncated\": false, \"\xff\": 1,")},
 		{"wrong format", mutate(t, doc, `"fim-scan-v1"`, `"fim-scan-v2"`)},
 		{"wrong profile", mutate(t, doc, `"fim-test-v1"`, `"fim-default-v1"`)},
@@ -270,7 +276,9 @@ func TestInvalidRecordDroppedAndCounted(t *testing.T) {
 		{"unknown member", rec(`, "owner": "root"`), DropBadMember},
 		{"case variant member", rec(`, "PATH": "L2V0Yw=="`), DropBadMember},
 		{"duplicate member", rec(`, "size": 4096`), DropBadMember},
-		{"non-ASCII member", rec(`, "sſize": 1`), DropBadMember},
+		{"escaped long s member", rec(`, "` + jsonU("017f") + `ize": 1`), DropBadMember},
+		{"raw long s member", rec(", \"\xc5\xbfize\": 1"), DropBadMember},
+		{"escaped kelvin link member", rec(`, "lin` + jsonU("212a") + `": "ZGFzaA=="`), DropBadMember},
 		{"missing ctime", `{"path": "L2V0Yw==", "type": "dir", "size": 1, "mode": 493, "uid": 0, "gid": 0, "inode": 2, "mtime": 1}`, DropMissingMember},
 		{"path not base64", withPath(`/etc`), DropBadPath},
 		{"path unpadded", withPath(`L2V0Yy9zc2g`), DropBadPath},
