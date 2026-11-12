@@ -118,6 +118,20 @@ History:
   and replace conditions 1 and 2 with the distinctive check; a rejected
   one is a stale `canary-range` (previously an accepted run went
   through conditions 1 to 3 and a rejected one passed on its own).
+- 2026-11-12 (as00ii, follow-up to PR #529): **Class-rule tests** name
+  one meta-test per Run classes rule, among them a fake
+  `host pin --known-hosts` and `pve remote add --ca-file` entry that
+  exits cleanly without sending (harness error), a confirmation rerun
+  that returns no error and sends nothing (harness error, which a
+  reused-recorder harness classifies as accepted), and the
+  `--identity` control run before and after the canary run (previously
+  none of these rules had a named test). The `canary-range` rejection
+  checks start with fresh recorders (previously not stated). The
+  "rejected form passes on its own" rule names the `canary-range`
+  `MAX`/`MAX − 1` runs as its exception (previously only Range checks
+  did). `hostname` is a function variable, replaced by a function
+  returning `nos-fixture-host` (previously written as if it were a
+  string).
 
 ## Context
 
@@ -629,8 +643,11 @@ does NOS connect **from** (`--from`)?
     top-level parallel tests only after the sequential ones have
     returned);
   - each run sets the values it needs itself (its working directory as
-    `nebulaRoot`, the fixture host name `nos-fixture-host` as
-    `hostname`) and never relies on what an earlier run left behind.
+    `nebulaRoot`; `hostname`, a function variable defaulting to
+    `os.Hostname` (`cmd/nebula/backup.go`), replaced by a function that
+    returns `"nos-fixture-host", nil`; previously "`nos-fixture-host` as
+    `hostname`", as if it were a string) and never relies on what an
+    earlier run left behind.
   Existing tests are not changed by this rule (today none of them in
   `cmd/nebula/` calls `t.Parallel`).
 
@@ -744,7 +761,7 @@ does NOS connect **from** (`--from`)?
   | --- | --- |
   | "Type 'yes' …" (`batch approve`/`stage`/`skip`, `approve`, `approve --stage`/`--skip`, `schedule`, read grants, `host pin`/`unpin`, `container … remove`, `secret rm`, `webauthn remove`, `totp remove`, `artifact trust`, `netdev` register/re-pin/state change, `pve remote remove`/`site`; catalog paths, previously written `host … remove`, `vault` delete and `risk` trust) | `yes` |
   | "CRITICAL: type the number of targets" (`approve`, `cmd/nebula/main.go`) | not reached: the pending-permit fixture is not `CRITICAL`, so the `yes` prompt applies |
-  | `Type "unencrypted"`, `Type "restore"`, `Type "<machine>"` (`backup`, `cmd/nebula/backup.go`) | the word the prompt names; the harness pins `backup.go`'s overridable `hostname` variable to the fixed fixture host name `nos-fixture-host` (no needle), and the restore fixture's manifest names that host, so the foreign-machine prompt of `restore` is not reached and the restore run does not depend on the test machine (previously the fixture followed the real `os.Hostname()`). `backup` (create) does not use that variable: it writes the manifest's `host` and `created_at` from `os.Hostname()` and `time.Now()` directly (`backupWith`), and AS-05 adds no seam for them (the create seam injects only the admin identity, `drop` and `dial`, **Test seams** above). Both are excluded from needle matching and from the differential check: they are written only into the archive, which is no recorded request, and the archive content is not searched; for the create run the harness checks only the recorded `BackupExecutor` traffic and the path the archive is written to (the `--out` value). Previously the row claimed the pinned variable made every `backup` run independent of the test machine |
+  | `Type "unencrypted"`, `Type "restore"`, `Type "<machine>"` (`backup`, `cmd/nebula/backup.go`) | the word the prompt names; the harness replaces `backup.go`'s function variable `hostname` (default `os.Hostname`) with a function returning the fixed fixture host name `nos-fixture-host` and no error (no needle; **Package globals** below), and the restore fixture's manifest names that host, so the foreign-machine prompt of `restore` is not reached and the restore run does not depend on the test machine (previously the fixture followed the real `os.Hostname()`). `backup` (create) does not use that variable: it writes the manifest's `host` and `created_at` from `os.Hostname()` and `time.Now()` directly (`backupWith`), and AS-05 adds no seam for them (the create seam injects only the admin identity, `drop` and `dial`, **Test seams** above). Both are excluded from needle matching and from the differential check: they are written only into the archive, which is no recorded request, and the archive content is not searched; for the create run the harness checks only the recorded `BackupExecutor` traffic and the path the archive is written to (the `--out` value). Previously the row claimed the pinned variable made every `backup` run independent of the test machine |
   | "Type the current pin from the registry:" (`pve remote repin`, `cmd/nebula/pve.go`) | the `trust_pin` stored for the remote in the fake executor's `ListPVEAdminRemotes` answer (the registry fixture), so it matches the `old_pin` the fake `ProposePVERepin` expects; the next prompt, "Type the new trust fingerprint to confirm:", is the typed-fingerprint row below |
   | typed fingerprint (`pve remote add`/`repin`, `module` signer add/rotate in `cmd/nebula/signer.go`) | the fingerprint the command shows for that run (from the fake executor's probe answer or the run's fixture key) |
   | "type the manifest digest to commit" (`cmd/nebula/trust_builtins.go`) | the digest of the fake review answer; `retain … or retire` prompts get `r` |
@@ -802,6 +819,45 @@ does NOS connect **from** (`--from`)?
   and never covered by `canary-rejects` or `canary-range`. An accepted
   run then goes through the needle conditions 1 to 3 below, and only a
   rejected run counts toward "every form rejected" (`canary-rejects`).
+  **Class-rule tests** (as00ii; previously rule (a) and the fresh
+  recorders of reruns and control runs had no named test, so a harness
+  that counted a clean exit without sending as rejected or accepted, or
+  that reused a recorder, passed every listed test). AS-05 adds one
+  meta-test per rule, each with a fake harness entry or fake argument
+  whose expected outcome a wrong harness does not produce:
+  - rule (a): a fake `host pin --known-hosts` entry and a fake
+    `pve remote add --ca-file` entry whose command returns no error and
+    sends nothing (exits cleanly before the pin or add request) must
+    fail the test as a harness error naming the harness entry; a
+    harness that classifies them as rejected (counting toward
+    `canary-rejects`) or as accepted fails the meta-test;
+  - rule (b): a fake argument that records a request and then returns
+    an error must fail as a harness error, never as rejected;
+  - rule (c): a fake `in-path` argument that returns an error before
+    any traffic for one form only must fail as a harness error, never
+    as a per-form rejection;
+  - rejected: a fake non-path argument that returns an error without
+    traffic for one form and is accepted for the others passes; one
+    that rejects every form without `canary-rejects` fails (the
+    `canary-rejects` rule below);
+  - range checks: a fake `canary-range` entry whose `MAX` run is
+    rejected must fail as a stale `canary-range`, never pass and never
+    count toward `canary-rejects`;
+  - confirmation rerun: a fake `number` argument whose first run is
+    accepted with a `47000 + m` hit, and whose rerun with `48000 + m`
+    returns **no error and sends nothing**, must fail as a harness
+    error naming harness entry and argument; a harness that reuses the
+    first run's recorder sees that run's final request, classifies the
+    rerun as accepted and lists a chance match, and so fails the
+    meta-test (a rerun that returns an error is a harness error with or
+    without reused recorders and does not test this rule);
+  - control run: for every `--identity` form the test runs the control
+    run once **before** and once **after** the canary run of that form
+    and requires the same result both times (control:
+    `*age.NoIdentityMatchError` and no `backup.System` call on its own
+    recorder; canary: accepted), so a harness that shares a recorder
+    between them fails in one of the two orders (**Restore runs**
+    below).
   **Range checks** (previously Run classes sent every accepted run
   through conditions 1 to 3 and let a rejected run pass on its own,
   while **Bounded numbers** below replaces conditions 1 and 2 for
@@ -821,7 +877,12 @@ does NOS connect **from** (`--from`)?
   Harness checks that are not canary runs (the restore fixture checks
   and control runs, the `canary-range` rejection checks of `MAX + 1`,
   `47000 + m` and `MIN − 1`, the confirmation reruns) have their own
-  expected result, stated next to them; any other result fails the test
+  expected result, stated next to them; every one of them that runs the
+  command starts, like a canary run, with fresh recorders, a fresh fake
+  executor and a fresh working directory (previously stated only for
+  range runs, reruns and control runs, so the "nothing recorded" of a
+  rejection check depended on how the harness isolated recorders); any
+  other result fails the test
   with the failure named there (such as a stale `canary-range`) or, where
   none is named, as a harness error.
 
@@ -925,7 +986,9 @@ does NOS connect **from** (`--from`)?
   the canary run on a shared recorder it saw that run's `Stop` and
   `Start` and failed a correct harness; run before, the canary run saw
   the control run's calls). The control run and the canary run of a
-  form may therefore run in either order with the same result. It
+  form may therefore run in either order with the same result; the test
+  runs the control run both before and after the canary run of each
+  form and requires that (**Class-rule tests** above). It
   must return an error that `errors.As` matches as
   `*age.NoIdentityMatchError` and its own recorder must hold no
   `backup.System` call
@@ -977,7 +1040,12 @@ does NOS connect **from** (`--from`)?
   runs with the values `MAX`, `MAX` again and `MAX − 1` (the catalog
   test fails when `MAX − 1 < MIN`), each with fresh recorders, and by
   rejection checks: `MAX + 1`, `47000 + m` and, when `MIN > 0`,
-  `MIN − 1` must each be rejected (error, nothing recorded). The
+  `MIN − 1` must each be rejected (error, nothing recorded), each with
+  fresh recorders, a fresh fake executor and a fresh working directory
+  (previously not stated, so a harness reusing the `MAX − 1` run's
+  recorder saw its traffic; the test "both entries green on today's
+  tree" fails such a harness, because `21` and `1001` are rejected
+  before any request). The
   host-shaped forms and condition 3 apply as for every argument. Instead
   of the needle search of conditions 1 and 2, which a small value cannot
   pass reliably, the runs get a **distinctive check**:
@@ -1271,7 +1339,11 @@ does NOS connect **from** (`--from`)?
   admit most of them for a non-host kind, but they show what the
   argument **does** with a host value. A form is **rejected** when the
   command returns an error and the fake executor, dialer and transport
-  recorded nothing; a rejected form passes on its own. This class does
+  recorded nothing; a rejected form passes on its own, except a
+  `canary-range` run of `MAX` or `MAX − 1`, which must be accepted and
+  fails as a stale `canary-range` when rejected (**Range checks** above;
+  previously this sentence named no exception, so the range runs were
+  in two classes at once). This class does
   not exist for `in-path` and `trust-path` arguments, whose every error
   is a harness error (**Errors before traffic in path-kind runs**
   above). The **argument
