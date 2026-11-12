@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -134,42 +135,164 @@ func TestSelfCheckTamperedFileIsDeviation(t *testing.T) {
 	}
 }
 
-func TestSelfCheckMissingListIsNotCheckable(t *testing.T) {
+// TestSelfCheckReleaseWithoutListIsIncomplete: for a release version a
+// missing installed-files.json or reference directory (corruption,
+// partial upgrade) is ADR 0015 D4 "check could not run completely":
+// incomplete at ERROR, never a milder state.
+func TestSelfCheckReleaseWithoutListIsIncomplete(t *testing.T) {
 	f := newFixture(t, defaultTree())
 	dir := f.writeReferenceDir(t)
-	// A version shipped without installed-files.json: manifest and
-	// signature are present (install.sh copies them), the list is not.
 	if err := os.Remove(filepath.Join(dir, release.InstalledFilesArtifact)); err != nil {
 		t.Fatal(err)
 	}
 	empty := t.TempDir()
 	for _, tc := range []struct {
-		name, dir, version, reason string
+		name, dir string
 	}{
-		{"list missing", dir, testVersion, CauseNoList},
-		{"empty directory", empty, testVersion, CauseNoList},
-		{"directory missing", filepath.Join(empty, "nope"), testVersion, CauseNoList},
-		{"development build", dir, "dev", CauseDevelopmentBuild},
+		{"list missing", dir},
+		{"empty directory", empty},
+		{"directory missing", filepath.Join(empty, "nope")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			m, _ := newTestMonitor(t, f, tc.dir, &buf)
-			state := f.k.state(t)
-			m.Load = func(context.Context) (Reference, error) { return LoadReference(state, tc.version, tc.dir) }
 			st := m.RunOnce(context.Background())
-			if st.State != StateNotCheckable || st.Cause != tc.reason {
-				t.Fatalf("state %q cause %q, want not-checkable/%s", st.State, st.Cause, tc.reason)
+			if st.State != StateIncomplete || st.Cause != CauseNoList {
+				t.Fatalf("state %q cause %q, want incomplete/%s", st.State, st.Cause, CauseNoList)
 			}
-			if st.State == StateOK || st.Files != 0 {
-				t.Fatalf("not-checkable reported as checked: %+v", st)
+			if st.Files != 0 {
+				t.Fatalf("reported as checked: %+v", st)
 			}
-			if !strings.Contains(buf.String(), `"state":"not-checkable"`) {
-				t.Fatalf("log: %s", buf.String())
+			logged := buf.String()
+			if !strings.Contains(logged, `"state":"incomplete"`) || !strings.Contains(logged, `"level":"ERROR"`) {
+				t.Fatalf("log: %s", logged)
+			}
+			_, err := LoadReference(f.k.state(t), testVersion, tc.dir)
+			if !errors.Is(err, ErrNoInstalledFiles) || errors.Is(err, ErrNotCheckable) {
+				t.Fatalf("LoadReference error %v, want ErrNoInstalledFiles and not ErrNotCheckable", err)
 			}
 		})
 	}
-	if _, err := LoadReference(f.k.state(t), testVersion, dir); !errors.Is(err, ErrNotCheckable) {
-		t.Fatalf("LoadReference error %v, want ErrNotCheckable", err)
+}
+
+// TestSelfCheckDevelopmentBuildIsNotCheckable: only a version that is not
+// a release has no list to check against.
+func TestSelfCheckDevelopmentBuildIsNotCheckable(t *testing.T) {
+	f := newFixture(t, defaultTree())
+	dir := f.writeReferenceDir(t)
+	var buf bytes.Buffer
+	m, _ := newTestMonitor(t, f, dir, &buf)
+	state := f.k.state(t)
+	m.Load = func(context.Context) (Reference, error) { return LoadReference(state, "dev", dir) }
+	st := m.RunOnce(context.Background())
+	if st.State != StateNotCheckable || st.Cause != CauseDevelopmentBuild || st.Files != 0 {
+		t.Fatalf("%+v, want not-checkable/%s", st, CauseDevelopmentBuild)
+	}
+	if !strings.Contains(buf.String(), `"state":"not-checkable"`) {
+		t.Fatalf("log: %s", buf.String())
+	}
+}
+
+// TestSelfCheckUnreadableFilesAreIncompleteNeverOK: a complete run with
+// files that could not be checked is never clean (ADR 0015 D4).
+func TestSelfCheckUnreadableFilesAreIncompleteNeverOK(t *testing.T) {
+	f := newFixture(t, defaultTree())
+	var buf bytes.Buffer
+	m, _ := newTestMonitor(t, f, f.writeReferenceDir(t), &buf)
+	// Every file matches in type, size and mode, but the listed owner
+	// cannot be resolved: the run completes and no file is checked ok.
+	m.Options.Owners = func(string) (uint32, uint32, error) { return 0, 0, errors.New("no such user") }
+	st := m.RunOnce(context.Background())
+	if st.State != StateIncomplete || st.Cause != CauseUnreadable {
+		t.Fatalf("state %q cause %q, want incomplete/%s", st.State, st.Cause, CauseUnreadable)
+	}
+	if st.Unreadable == 0 || st.OK+st.Unreadable != st.Files || st.NotChecked != 0 {
+		t.Fatalf("counts: %+v", st)
+	}
+	for _, d := range st.Deviations {
+		if d.Status != StatusUnreadable || d.Reason != ReasonOwnerUnknown {
+			t.Fatalf("deviation %+v", d)
+		}
+	}
+	if !strings.Contains(buf.String(), `"level":"ERROR"`) {
+		t.Fatalf("log: %s", buf.String())
+	}
+}
+
+// TestSelfCheckShutdownIsNotRecordedIncomplete: a run ended by the
+// server's shutdown is not a "check incomplete" result; the previous
+// result stays and nothing is logged at ERROR.
+func TestSelfCheckShutdownIsNotRecordedIncomplete(t *testing.T) {
+	f := newFixture(t, defaultTree())
+	for _, tc := range []struct {
+		name  string
+		cause func(m *Monitor, cancel context.CancelFunc)
+	}{
+		{"canceled before the run", func(_ *Monitor, cancel context.CancelFunc) { cancel() }},
+		{"canceled while loading", func(m *Monitor, cancel context.CancelFunc) {
+			m.Load = func(ctx context.Context) (Reference, error) {
+				cancel()
+				return Reference{}, fmt.Errorf("load reference: %w", ctx.Err())
+			}
+		}},
+		{"canceled while checking", func(m *Monitor, cancel context.CancelFunc) {
+			resolve := m.Options.Owners
+			m.Options.Owners = func(owner string) (uint32, uint32, error) {
+				cancel()
+				return resolve(owner)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			m, _ := newTestMonitor(t, f, f.writeReferenceDir(t), &buf)
+			if st := m.RunOnce(context.Background()); st.State != StateOK {
+				t.Fatalf("first run: %+v", st)
+			}
+			buf.Reset()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			tc.cause(m, cancel)
+			st := m.RunOnce(ctx)
+			if st.State != StateOK || st.Runs != 1 {
+				t.Fatalf("returned %+v, want the previous ok result", st)
+			}
+			if got := m.Status(); got.State != StateOK || got.Runs != 1 {
+				t.Fatalf("stored %+v, want the previous ok result", got)
+			}
+			logged := buf.String()
+			if strings.Contains(logged, `"level":"ERROR"`) || strings.Contains(logged, `"state":"incomplete"`) {
+				t.Fatalf("shutdown logged as a failed check: %s", logged)
+			}
+			if !strings.Contains(logged, `"kind":"integrity_self_check"`) {
+				t.Fatalf("shutdown not logged: %s", logged)
+			}
+		})
+	}
+}
+
+// TestSelfCheckDeviationsSurviveShutdown: deviations found before the
+// shutdown are real and still reported.
+func TestSelfCheckDeviationsSurviveShutdown(t *testing.T) {
+	f := newFixture(t, defaultTree())
+	// The first listed file differs in size (found before any owner
+	// lookup); the shutdown arrives while the second file is checked.
+	writeFile(t, f.path("/lib/systemd/system/nebula-server.service"), "[Unit]\nreplaced\n", 0o644)
+	var buf bytes.Buffer
+	m, _ := newTestMonitor(t, f, f.writeReferenceDir(t), &buf)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	resolve := m.Options.Owners
+	m.Options.Owners = func(owner string) (uint32, uint32, error) {
+		cancel()
+		return resolve(owner)
+	}
+	st := m.RunOnce(ctx)
+	if st.State != StateDeviations || st.Different != 1 || st.NotChecked == 0 || st.Runs != 1 {
+		t.Fatalf("%+v, want the deviation reported", st)
+	}
+	if got := m.Status(); got.State != StateDeviations {
+		t.Fatalf("stored %+v", got)
 	}
 }
 

@@ -60,7 +60,11 @@ func TestIntegrityInstallFlavour(t *testing.T) {
 	}
 }
 
-func TestIntegrityServerWithoutListIsNotCheckable(t *testing.T) {
+// TestIntegrityServerWithoutListIsIncompleteOrNotCheckable: a release
+// without its installed-files list is ADR 0015 D4 "check could not run
+// completely" (incomplete, ERROR); only a development build has no list
+// to check against.
+func TestIntegrityServerWithoutListIsIncompleteOrNotCheckable(t *testing.T) {
 	releaseDir := t.TempDir()
 	// What install.sh provides today: manifest and signature, no list.
 	for _, name := range []string{release.ManifestFile, release.SignatureFile} {
@@ -69,10 +73,12 @@ func TestIntegrityServerWithoutListIsNotCheckable(t *testing.T) {
 		}
 	}
 	for _, tc := range []struct {
-		name, version, cause string
+		name, version string
+		state         integrity.State
+		cause, level  string
 	}{
-		{"release without list", "v1.2.3", integrity.CauseNoList},
-		{"development build", "dev", integrity.CauseDevelopmentBuild},
+		{"release without list", "v1.2.3", integrity.StateIncomplete, integrity.CauseNoList, "ERROR"},
+		{"development build", "dev", integrity.StateNotCheckable, integrity.CauseDevelopmentBuild, "WARN"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var logBuf bytes.Buffer
@@ -85,13 +91,14 @@ func TestIntegrityServerWithoutListIsNotCheckable(t *testing.T) {
 			}
 			m.RunOnce(context.Background())
 			got := getIntegrityStatus(t, mux)
-			if got.State != integrity.StateNotCheckable || got.Cause != tc.cause || got.Runs != 1 {
-				t.Fatalf("status %+v, want not-checkable/%s", got, tc.cause)
+			if got.State != tc.state || got.Cause != tc.cause || got.Runs != 1 {
+				t.Fatalf("status %+v, want %s/%s", got, tc.state, tc.cause)
 			}
 			if got.Note != integrity.RootCompromiseNote {
 				t.Fatalf("note %q", got.Note)
 			}
-			if !strings.Contains(logBuf.String(), `"state":"not-checkable"`) {
+			if !strings.Contains(logBuf.String(), `"state":"`+string(tc.state)+`"`) ||
+				!strings.Contains(logBuf.String(), `"level":"`+tc.level+`"`) {
 				t.Fatalf("log: %s", logBuf.String())
 			}
 		})

@@ -32,13 +32,17 @@ const RootCompromiseNote = "NOS checks cannot detect a root compromise of the NO
 
 // Sentinel errors of LoadReference.
 var (
-	// ErrNotCheckable is an installation without an installed-files list
-	// to check against: a development build or a release that did not
-	// ship installed-files.json. It is never reported as ok.
+	// ErrNotCheckable is an installation without any installed-files
+	// list to check against. It is never reported as ok.
 	ErrNotCheckable = errors.New("integrity: no installed-files list, check not possible")
 	// ErrDevelopmentBuild is a running version that is not a release
 	// version. It wraps ErrNotCheckable.
 	ErrDevelopmentBuild = fmt.Errorf("%w: development build", ErrNotCheckable)
+	// ErrNoInstalledFiles is a release version whose installed-files.json
+	// or reference directory is missing (corruption, partial upgrade).
+	// The check could not run completely (ADR 0015 D4), so it does not
+	// wrap ErrNotCheckable.
+	ErrNoInstalledFiles = errors.New("integrity: installed-files list of the release is missing")
 )
 
 // State is the overall outcome of the latest self-check.
@@ -56,14 +60,16 @@ const (
 	// StateIncomplete: the check could not run or not run completely
 	// (rejected reference, I/O error, limit). Never clean (ADR 0015 D4).
 	StateIncomplete State = "incomplete"
-	// StateNotCheckable: there is no list to check against.
+	// StateNotCheckable: a development build, which has no list to
+	// check against. A release without its list is StateIncomplete.
 	StateNotCheckable State = "not-checkable"
 )
 
 // Fixed causes in SelfCheck.Cause; a run stopped by a limit uses its
 // Incomplete value instead.
 const (
-	// CauseNoList: installed-files.json is not installed.
+	// CauseNoList: the release's installed-files.json or the reference
+	// directory is missing (StateIncomplete).
 	CauseNoList = "no-installed-files-list"
 	// CauseDevelopmentBuild: the running version is not a release.
 	CauseDevelopmentBuild = "development-build"
@@ -138,7 +144,7 @@ type SelfCheck struct {
 type Monitor struct {
 	// Load returns the admitted reference; it is called on every run so
 	// the reference is re-verified each time. An error wrapping
-	// ErrNotCheckable makes the run not-checkable, any other error
+	// ErrDevelopmentBuild makes the run not-checkable, any other error
 	// incomplete.
 	Load func(ctx context.Context) (Reference, error)
 	// Options configures Check. Options.Now defaults to Now.
@@ -195,6 +201,10 @@ func (m *Monitor) Run(ctx context.Context) {
 }
 
 // RunOnce runs one check, logs it, stores and returns its SelfCheck.
+//
+// A run that ctx ended (server shutdown) is not a failed check: unless it
+// already found deviations, its result is dropped, logged at INFO and the
+// previous result is returned unchanged.
 func (m *Monitor) RunOnce(ctx context.Context) SelfCheck {
 	now := m.Now
 	if now == nil {
@@ -206,6 +216,13 @@ func (m *Monitor) RunOnce(ctx context.Context) SelfCheck {
 	}
 	start := now()
 	st, err := m.check(ctx, now)
+	if ctx.Err() != nil && st.State != StateDeviations {
+		log.LogAttrs(context.WithoutCancel(ctx), slog.LevelInfo, "integrity self-check stopped by shutdown",
+			slog.String("kind", "integrity_self_check"),
+			slog.Duration("took", now().Sub(start)),
+		)
+		return m.Status()
+	}
 	st.Checked = now()
 	st.Note = RootCompromiseNote
 
@@ -227,8 +244,8 @@ func (m *Monitor) check(ctx context.Context, now func() time.Time) (SelfCheck, e
 	switch {
 	case errors.Is(err, ErrDevelopmentBuild):
 		return SelfCheck{State: StateNotCheckable, Cause: CauseDevelopmentBuild}, err
-	case errors.Is(err, ErrNotCheckable):
-		return SelfCheck{State: StateNotCheckable, Cause: CauseNoList}, err
+	case errors.Is(err, ErrNoInstalledFiles):
+		return SelfCheck{State: StateIncomplete, Cause: CauseNoList}, err
 	case err != nil:
 		return SelfCheck{State: StateIncomplete, Cause: CauseReferenceRejected}, err
 	}
@@ -336,16 +353,16 @@ func logSelfCheck(ctx context.Context, log *slog.Logger, st SelfCheck, took time
 // the release limits) and admits them with Admit against state.
 //
 // A version that is not a release version returns ErrDevelopmentBuild; a
-// missing installed-files.json (or directory) returns ErrNotCheckable.
-// A present list with a missing or invalid manifest or signature is a
-// rejected reference, never "not checkable".
+// missing installed-files.json (or directory) of a release returns
+// ErrNoInstalledFiles. A present list with a missing or invalid manifest
+// or signature is a rejected reference. Neither is ever "not checkable".
 func LoadReference(state release.RootState, version, dir string) (Reference, error) {
 	if !release.ValidReleaseVersion(version) {
 		return Reference{}, ErrDevelopmentBuild
 	}
 	root, err := os.OpenRoot(dir)
 	if errors.Is(err, fs.ErrNotExist) {
-		return Reference{}, fmt.Errorf("%w: %s does not exist", ErrNotCheckable, dir)
+		return Reference{}, fmt.Errorf("%w: %s does not exist", ErrNoInstalledFiles, dir)
 	}
 	if err != nil {
 		return Reference{}, fmt.Errorf("open reference directory %s: %w", dir, err)
@@ -353,7 +370,7 @@ func LoadReference(state release.RootState, version, dir string) (Reference, err
 	defer root.Close()
 	list, err := readBounded(root, release.InstalledFilesArtifact, release.MaxInstalledFilesDocument)
 	if errors.Is(err, fs.ErrNotExist) {
-		return Reference{}, fmt.Errorf("%w: no %s in %s", ErrNotCheckable, release.InstalledFilesArtifact, dir)
+		return Reference{}, fmt.Errorf("%w: no %s in %s", ErrNoInstalledFiles, release.InstalledFilesArtifact, dir)
 	}
 	if err != nil {
 		return Reference{}, err
