@@ -150,7 +150,7 @@ func TestSubmitAssessmentSchema(t *testing.T) {
 		"rationale long":    `{"text":"t","backport_checked":true,"likely_false_positive":false,"exploit_public":true,"rationale":"` + strings.Repeat("y", MaxRationaleBytes+1) + `"}`,
 		"control char":      `{"text":"a\u0007b","backport_checked":true,"likely_false_positive":false,"exploit_public":true,"rationale":""}`,
 		"escape sequence":   `{"text":"\u001b[31mred","backport_checked":true,"likely_false_positive":false,"exploit_public":true,"rationale":""}`,
-		"bidi override":     `{"text":"a‮b","backport_checked":true,"likely_false_positive":false,"exploit_public":true,"rationale":""}`,
+		"bidi override":     `{"text":"a` + string(rune(0x202e)) + `b","backport_checked":true,"likely_false_positive":false,"exploit_public":true,"rationale":""}`,
 		"lone surrogate":    `{"text":"a\ud800b","backport_checked":true,"likely_false_positive":false,"exploit_public":true,"rationale":""}`,
 		"unknown field":     `{"text":"t","backport_checked":true,"likely_false_positive":false,"exploit_public":true,"rationale":"","state":"fixed"}`,
 		"missing flag":      `{"text":"t","backport_checked":true,"likely_false_positive":false,"rationale":""}`,

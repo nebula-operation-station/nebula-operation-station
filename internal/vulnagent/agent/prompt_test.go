@@ -56,7 +56,7 @@ func TestPromptRejectsInvalidOperatorTextAndLanguage(t *testing.T) {
 	for name, op := range map[string]string{
 		"too long": strings.Repeat("x", MaxOperatorInstructionsBytes+1),
 		"control":  "a\x1bb",
-		"bidi":     "a‮b",
+		"bidi":     "a" + string(rune(0x202e)) + "b",
 		"bad utf8": "a\xffb",
 	} {
 		if _, err := NewPrompt(op, LanguageDE); !errors.Is(err, ErrInvalidText) {
