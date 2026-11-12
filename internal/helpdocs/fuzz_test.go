@@ -3,6 +3,7 @@
 package helpdocs
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -18,6 +19,8 @@ func FuzzBuild(f *testing.F) {
 		"~~~~\n```\n~~~~\n## after\n",
 		"# T\n\n## A\n\n\n\n## A\n",
 		"\x00\r\n\t## tab\r\n",
+		"````````````````````````````````\n## after\n```` \n## closed\n",
+		"```" + strings.Repeat("`", 4096) + "\n" + strings.Repeat("a\n", 64),
 	} {
 		f.Add([]byte(seed))
 	}

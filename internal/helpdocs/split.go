@@ -121,14 +121,26 @@ func fenceOpen(line string) (marker byte, run int, info string, ok bool) {
 // fenceClose reports whether line closes a fence opened with marker and
 // run. It mirrors the renderer's codeBlock: the line starts with the
 // opening run and holds nothing but marker characters and spaces.
+// It does not allocate, so a long opening run costs nothing per line.
 func fenceClose(line string, marker byte, run int) bool {
 	ind := indentOf(line)
 	if ind > maxFenceIndent {
 		return false
 	}
 	t := line[ind:]
-	return strings.HasPrefix(t, strings.Repeat(string(marker), run)) &&
-		strings.Trim(t, string(marker)+" ") == ""
+	n := 0
+	for n < len(t) && t[n] == marker {
+		n++
+	}
+	if n < run {
+		return false
+	}
+	for i := n; i < len(t); i++ {
+		if t[i] != marker && t[i] != ' ' {
+			return false
+		}
+	}
+	return true
 }
 
 // findHeadings lists the ATX headings that are not inside a fence.
