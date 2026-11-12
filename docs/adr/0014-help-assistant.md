@@ -91,6 +91,33 @@ History:
   `host pin --known-hosts` and `pve remote add`/`repin --ca-file`
   (previously only for `restore`); the wrapper rejection test restores
   `nebulaRoot` in `t.Cleanup` and runs without `t.Parallel`.
+- 2026-11-12 (as00ih, follow-up to PR #524): **Run classes** put every
+  canary run into exactly one of harness error, accepted and rejected;
+  a run without error that records no final request is a harness error
+  for every argument (previously only for `restore`, so such a run of
+  `host pin --known-hosts` or `pve remote add --ca-file` was
+  unclassified). **Package globals**: every AS-05 test that changes
+  `nebulaRoot` or `hostname`, including the restore and backup canary
+  runs, restores them in a `t.Cleanup` and calls no `t.Parallel`
+  (previously only the wrapper rejection test). The restore fixture
+  check and the `--identity` control run require
+  `*age.NoIdentityMatchError` after `backup.ParseIdentities` accepted
+  the control identity (previously any error). Round 1 of PR #529
+  (as00ihf): a confirmation rerun (`48000 + m` or leading `8`) must be
+  accepted; one that errors, records nothing or records no final
+  request is a harness error, never a chance match (previously the
+  rerun had no stated expected result). Round 2 (as00ihf2): the
+  confirmation rerun starts with fresh recorders, a fresh fake executor
+  and a fresh working directory like every canary form (previously not
+  stated, so the first run's recorded final request could make the
+  rerun accepted). The `--identity` control run uses the same fixture
+  inputs as the canary run of its form but its own fresh recorders
+  (previously the same recorders, so its "no `backup.System` call"
+  check depended on run order). Run classes name the `canary-range`
+  runs `MAX`, `MAX`, `MAX − 1` as range checks that must be accepted
+  and replace conditions 1 and 2 with the distinctive check; a rejected
+  one is a stale `canary-range` (previously an accepted run went
+  through conditions 1 to 3 and a rejected one passed on its own).
 
 ## Context
 
@@ -582,6 +609,31 @@ does NOS connect **from** (`--from`)?
      `go test`. The manifest's `host` and `created_at` stay
      `os.Hostname()` and `time.Now()` (no seam; prompt table below).
 
+  **Package globals** (previously only the wrapper rejection test below
+  had to restore `nebulaRoot` and avoid `t.Parallel`, while the restore
+  and backup canary runs repoint `nebulaRoot` per fresh working
+  directory and the restore runs pin `hostname` without such a rule, so
+  a later or parallel test could see a stale root or host name). The
+  package variables `nebulaRoot` and `hostname` of `cmd/nebula/backup.go`
+  are process-wide. Every test that AS-05 adds and that changes either
+  of them (the wrapper rejection test, the restore and backup canary
+  runs, the restore fixture checks and control runs, and any other)
+  follows the same rule:
+  - it saves the previous value and restores it in a `t.Cleanup`
+    registered **before** the first change, in the top-level test (one
+    per variable, so per-run changes in subtests are undone too and a
+    failing or aborted run cannot leak its value);
+  - neither the test nor any of its subtests calls `t.Parallel`, so no
+    two runs that repoint the variables overlap and no parallel test of
+    the package runs while they hold a test value (Go starts the
+    top-level parallel tests only after the sequential ones have
+    returned);
+  - each run sets the values it needs itself (its working directory as
+    `nebulaRoot`, the fixture host name `nos-fixture-host` as
+    `hostname`) and never relies on what an earlier run left behind.
+  Existing tests are not changed by this rule (today none of them in
+  `cmd/nebula/` calls `t.Parallel`).
+
   **Wrapper tests** (previously the ADR required no behaviour change of
   the production path but named no test that would catch a wrong
   wrapper: under the non-root `go test` of CI, a `restoreCmd` passing an
@@ -595,13 +647,11 @@ does NOS connect **from** (`--from`)?
     empty string via `t.Setenv` (restored after the test; never
     `os.Unsetenv`), which `adminFromSudo` treats like unset (previously
     "unset (`t.Setenv`)", which `t.Setenv` cannot do), `nebulaRoot`
-    pointed at an empty `t.TempDir()` (the test saves the previous
-    value of the package variable `nebulaRoot` and restores it in a
-    `t.Cleanup` registered before the change, so no later test of
-    `cmd/nebula/` sees the temporary root; previously the ADR required
-    a restore only for `SUDO_UID`), the test and its subtests calling no
-    `t.Parallel` (which `t.Setenv` forbids as well, and which would let
-    a parallel test see the changed global) and
+    pointed at an empty `t.TempDir()` (restored per **Package globals**
+    above, so no later test of `cmd/nebula/` sees the temporary root;
+    previously the ADR required a restore only for `SUDO_UID`), the
+    test and its subtests calling no `t.Parallel` (**Package globals**;
+    `t.Setenv` forbids it as well) and
     `NEBULA_EXECUTOR_SOCKET` naming a path in that directory where
     nothing listens (no socket file is created). Each case asserts the
     exact error text of today's tree, and an error of another type or
@@ -721,6 +771,60 @@ does NOS connect **from** (`--from`)?
   argument result), so a missing or too small fixture or a missing stdin
   line cannot turn into a pass or into a silent `canary-rejects`.
 
+  **Run classes** (previously the classes were defined by separate
+  rules, and a run that returned no error but recorded no final request,
+  for example an `in-path` run of `host pin --known-hosts` or a
+  `trust-path` run of `pve remote add --ca-file` that exits cleanly
+  without sending, fell into none of them; only `restore` named it a
+  harness error). Every canary run of every argument and form lands in
+  exactly one of three classes, decided after the run from its error
+  result and its recording alone, in this order:
+  1. **harness error** if any of these holds: (a) the run returned no
+     error and did not record the final request of its harness entry
+     (for `restore` the final request counts as recorded only when the
+     first recorded call is `Stop(backup.StopUnits)` and the last is
+     the final action, **Restore runs** below), whatever else it
+     recorded; (b) the run returned an error
+     after recording traffic; (c) the run belongs to an `in-path` or
+     `trust-path` argument (including both `restore` arguments) and
+     returned an error, with or without recorded traffic (**Errors
+     before traffic in path-kind runs** below);
+  2. **accepted** if the run returned no error and recorded the final
+     request in the sense of (a);
+  3. **rejected** otherwise, which leaves exactly: the run returned an
+     error, recorded nothing, and its argument is neither `in-path` nor
+     `trust-path`.
+  The three conditions are disjoint and together cover every
+  combination of "error or not", "anything recorded or not", "final
+  request recorded or not" and "path kind or not", so no run is left
+  unclassified and none counts twice. A harness error fails the test and
+  names the harness entry; it is never an argument result, never a pass
+  and never covered by `canary-rejects` or `canary-range`. An accepted
+  run then goes through the needle conditions 1 to 3 below, and only a
+  rejected run counts toward "every form rejected" (`canary-rejects`).
+  **Range checks** (previously Run classes sent every accepted run
+  through conditions 1 to 3 and let a rejected run pass on its own,
+  while **Bounded numbers** below replaces conditions 1 and 2 for
+  these runs and calls a rejected `MAX` a stale annotation): for an
+  argument with `canary-range: MIN..MAX` the runs with `MAX`, `MAX`
+  and `MAX − 1`, each with fresh recorders, a fresh fake executor and
+  a fresh working directory, take the place of the kind-canary run and
+  are classified by the three classes above, with their own expected
+  result: each must be **accepted**. An accepted range run goes through
+  the distinctive check (positive and differential, **Bounded
+  numbers**) and condition 3, never through the needle search of
+  conditions 1 and 2. A **rejected** range run is not a pass and never
+  counts toward `canary-rejects`: the test fails naming a stale
+  `canary-range` annotation. A range run in class **harness error**
+  fails as a harness error, as every run. The host-shaped forms of such
+  an argument are ordinary canary runs.
+  Harness checks that are not canary runs (the restore fixture checks
+  and control runs, the `canary-range` rejection checks of `MAX + 1`,
+  `47000 + m` and `MIN − 1`, the confirmation reruns) have their own
+  expected result, stated next to them; any other result fails the test
+  with the failure named there (such as a stale `canary-range`) or, where
+  none is named, as a harness error.
+
   **Restore runs** (previously the harness entry of `restore` had to
   name a final request and an accepted run had to record it, but
   `restoreWith` makes no RPC, dial or HTTP request: it reads the
@@ -740,10 +844,11 @@ does NOS connect **from** (`--from`)?
   - **rejected**: never; a `restore` form cannot be rejected;
   - **harness error**: every error `restoreWith` returns, with or
     without a recorded call (including the rollback `Start` that
-    `backup.Restore` makes when a step fails after `Stop`), and no
-    error without the final action as last call; the test fails and
-    names the harness entry, never the argument, and no
-    `canary-rejects` covers it.
+    `backup.Restore` makes when a step fails after `Stop`), and every
+    run without error that does not have `Stop` with exactly
+    `backup.StopUnits` as first and the final action as last call
+    (**Run classes** (a) above); the test fails and names the harness
+    entry, never the argument, and no `canary-rejects` covers it.
   Previously an error with no recorded call counted as rejected (for
   example an `ARCHIVE` or `--identity` form whose file did not parse as
   the minimal valid restore input). That class also caught every
@@ -791,16 +896,50 @@ does NOS connect **from** (`--from`)?
   the command decrypted with the file at the run's path. Before the
   first `restore` run the test checks the fixtures themselves and
   reports any deviation as a harness error, never as an argument
-  result: `backup.Read` of the sealed archive returns
-  `backup.ErrEncrypted` with no identity, a decrypt error with the
-  control identity and the fixture manifest with the fixture identity;
-  `backup.Read` of the plain archive returns the fixture manifest with
-  no identity. In addition one *control run* per `--identity` form
-  writes the control identity to the run's path; it must return an
-  error and record no `backup.System` call, and an accepted control run
-  fails the test (the identity file was not used). A control run is a
-  check of the harness, not a canary run: its error never counts as a
-  rejection of the argument.
+  result: `backup.ParseIdentities` accepts the fixture identity file and
+  the control identity file and returns exactly one identity for each;
+  `backup.Read` of the sealed archive returns `backup.ErrEncrypted` with
+  no identity, the **no-identity-matched error** (below) with the
+  parsed control identity and the fixture manifest with the fixture
+  identity; `backup.Read` of the plain archive returns the fixture
+  manifest with no identity. The no-identity-matched error is the error
+  `age.Decrypt` (`filippo.io/age`, the version in `go.mod`) returns when
+  none of the given identities unwraps a recipient stanza, the type
+  `*age.NoIdentityMatchError`, which `backup.Read` wraps as
+  `backup: decrypt: …`; the check matches it with `errors.As` and
+  nothing else. Any other error, also another decrypt error such as a
+  malformed header, and any parse error of the control identity is a
+  harness error, so a control identity that does not parse or an
+  archive that is not sealed to an X25519 recipient cannot satisfy the
+  check (previously "a decrypt error", so any error passed).
+  In addition one *control run* per `--identity` form writes the
+  control identity to the run's path, with the same fixture inputs as
+  the canary run of that form (the form's `--identity` value and the
+  sealed `ARCHIVE` at its fixture path, both created inside the control
+  run's own working directory, stdin lines, pinned `hostname`, fixed
+  time and `isRoot`), but with its own fresh recorders (a fresh
+  recording fake `backup.System`), fresh fake executor and fresh
+  working directory, never those of the canary run (previously "the
+  same … recorders as the canary run", which contradicted the
+  fresh-recorders rule and made the check depend on order: run after
+  the canary run on a shared recorder it saw that run's `Stop` and
+  `Start` and failed a correct harness; run before, the canary run saw
+  the control run's calls). The control run and the canary run of a
+  form may therefore run in either order with the same result. It
+  must return an error that `errors.As` matches as
+  `*age.NoIdentityMatchError` and its own recorder must hold no
+  `backup.System` call
+  (previously "must return an error", so a missing stdin line, an
+  unpinned `hostname`, a control identity that does not parse or a
+  missing archive satisfied it). `restoreWith` parses the identity file
+  with `backup.ParseIdentities` and decrypts in `backup.Read` before it
+  reads stdin, checks the host name or calls `backup.System`, so that
+  error is reached only when the run used the file at the run's path,
+  parsed it and tried it against the sealed archive. An accepted control
+  run, a control run with any other error and a control run that
+  recorded a call fail the test (the identity file was not used, or the
+  harness is broken). A control run is a check of the harness, not a
+  canary run: its error never counts as a rejection of the argument.
   The `restore` arguments are `in-path` values that are read, not sent:
   their expected-fields entry lists no field. The needle search of
   conditions 1 and 2 covers the recorded `backup.System` calls (unit
@@ -898,11 +1037,35 @@ does NOS connect **from** (`--from`)?
     **confirmation run**: when condition 1 or 2 finds a `number` or
     `duration` needle, the test repeats the same run once with the
     confirmation canary (`48000 + m` for `number`, the duration canary
-    with the leading `7` replaced by `8`) and its needles. The argument
-    fails when the confirmation needle appears at the same place (same
-    field path, dial address, TLS server name, URL or header, text or
-    binary form); otherwise the hit followed no argument value, was a
-    chance match with a run-time value and is listed in the output. A
+    with the leading `7` replaced by `8`) and its needles. The rerun is
+    a run of its own: like every canary form it starts with fresh
+    recorders (recording dialer, HTTP transport and, for `restore`, a
+    fresh recording fake `backup.System`), a fresh fake executor and a
+    fresh working directory, whose path is checked against the rerun's
+    needles and whose fixture and canary files are created anew as for
+    the first run; nothing recorded by the first run is visible to it,
+    so "records the final request" and the first-`Stop`/last-`Start`
+    check of **Restore runs** are decided from the rerun's own traffic
+    alone (previously not stated, so a harness that reused the first
+    run's recorder saw that run's final request and classified a rerun
+    as accepted that never reached it). Expected
+    result: the rerun is classified by the **Run classes** above, with
+    the same inputs except the canary, and must be accepted, because
+    the run it confirms was accepted (only accepted runs reach the
+    needle conditions). A rerun that returns an error, records
+    nothing, or records no final request (for `restore`, not `Stop`
+    with exactly `backup.StopUnits` first and the final action last) is
+    a harness error: the test fails and names the harness entry and the
+    argument, the hit is never listed as a chance match, and the rerun
+    never counts as a rejection or toward `canary-rejects`
+    (previously no expected result was stated, so a rerun that failed
+    or recorded nothing never showed the confirmation needle and a real
+    `number`/`duration` leak was listed as a chance match). Only for an
+    accepted rerun: the argument fails when the confirmation needle
+    appears at the same place (same field path, dial address, TLS
+    server name, URL or header, text or binary form); otherwise the hit
+    followed no argument value, was a chance match with a run-time
+    value and is listed in the output. A
     confirmation run never applies to the `c<n>-canary`,
     `c<n>.canary.invalid` and `192.0.2.1` needles, which no run-time
     value can contain by chance; any hit of those fails at once.
@@ -941,8 +1104,14 @@ does NOS connect **from** (`--from`)?
   is a path, and the test has created the file at that path with the
   minimal valid content. So for every run of an `in-path` or
   `trust-path` argument an error, with or without recorded traffic, is
-  a **harness error** that fails the test and names the harness entry;
-  such a run is never rejected, and these arguments never carry
+  a **harness error** that fails the test and names the harness entry,
+  and so is a run that returns no error without recording the final
+  request of its harness entry (**Run classes** (a) above, which holds
+  for every argument; for example a `host pin --known-hosts` or
+  `pve remote add --ca-file` run whose fixture makes the command exit
+  cleanly before the pin or add request is sent; previously
+  unclassified for these arguments); such a run is never rejected or
+  accepted, and these arguments never carry
   `canary-rejects` (the test fails when one does). An argument whose
   parser rejects some path shapes would need a reviewed change of this
   rule; it fails until then and never passes. The minimal valid content
