@@ -119,6 +119,9 @@ type Service struct {
 	// registry holds private registry administration, read authority and
 	// clients (ADR 0006, P1-32).
 	registry privateRegistryState
+	// transfer configures private image transfer (cu06,
+	// registry_transfer.go).
+	transfer transferState
 	// previewKeep is the newest retained docker.update_preview result per
 	// host (update_preview.go).
 	previewKeep previewRetention
