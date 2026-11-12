@@ -863,6 +863,62 @@ func TestWriteCapCountsAndDeletesOnlyTheWrittenDevice(t *testing.T) {
 	}
 }
 
+// TestWriteCapProtectsNewestOfTheWrittenDevice gives another device the
+// globally newest running and startup versions, so a newest-per-config
+// lookup without the device filter protects that device's versions instead
+// of the written device's newest version of the other config, which is
+// older than every filler and would be deleted first. Both configs are
+// written in turn, so each half of the lookup is exercised.
+func TestWriteCapProtectsNewestOfTheWrittenDevice(t *testing.T) {
+	for _, tc := range []struct{ written, other ConfigKind }{
+		{ConfigRunning, ConfigStartup},
+		{ConfigStartup, ConfigRunning},
+	} {
+		t.Run(string(tc.written), func(t *testing.T) {
+			s, db, _ := newTestStore(t)
+			addDevice(t, s, cbsDevice())
+			b := cbsDevice()
+			b.DeviceID, b.Name = "sw-access", "Access switch"
+			b.Endpoints = []netdevcontract.Endpoint{{Address: "192.168.1.3", Port: 22}}
+			addDevice(t, s, b)
+
+			otherNewest := record(t, s, "sw-core", tc.other, testBase.Add(-60*24*time.Hour), snap('1', "v1"))
+			// Device B: the globally newest version of each config, newer than
+			// anything of sw-core.
+			fillVersions(t, db, "sw-access", ConfigRunning, testBase.Add(2*time.Hour), 1, 1<<28)
+			fillVersions(t, db, "sw-access", ConfigStartup, testBase.Add(2*time.Hour), 1, 1<<28+1)
+			bIDs := []int64{configMaxID(t, db) - 1, configMaxID(t, db)}
+
+			// sw-core: 1 + (cap-1) + 1 versions, 2 protected (the other
+			// config's newest and the new version): exactly the oldest filler
+			// goes.
+			firstFiller := configMaxID(t, db) + 1
+			fillVersions(t, db, "sw-core", tc.written, testBase, MaxConfigVersionsPerDevice-1, 1<<20)
+			w := record(t, s, "sw-core", tc.written, testBase, snap('e', "new"))
+
+			ids := configIDs(t, db)
+			if n := countRows(t, db, `SELECT COUNT(*) FROM netdev_config_versions WHERE device_id = 'sw-core'`); n != MaxConfigVersionsPerDevice {
+				t.Fatalf("sw-core keeps %d versions, want %d", n, MaxConfigVersionsPerDevice)
+			}
+			for name, c := range map[string]struct {
+				id   int64
+				kept bool
+			}{
+				"newest of other config": {otherNewest.VersionID, true},
+				"new version":            {w.VersionID, true},
+				"other device running":   {bIDs[0], true},
+				"other device startup":   {bIDs[1], true},
+				"oldest filler":          {firstFiller + MaxConfigVersionsPerDevice - 2, false},
+				"second oldest filler":   {firstFiller + MaxConfigVersionsPerDevice - 3, true},
+			} {
+				if ids[c.id] != c.kept {
+					t.Errorf("%s (version %d) kept = %v, want %v", name, c.id, ids[c.id], c.kept)
+				}
+			}
+		})
+	}
+}
+
 // TestWriteCapChangeBindingBoundaryIsInclusive pins the change-binding
 // cutoff of the write-path cap to Prune's configProtected: a binding exactly
 // ConfigVersionRetention old protects its version, one a second older does
