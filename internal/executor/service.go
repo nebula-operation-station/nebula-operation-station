@@ -125,6 +125,9 @@ type Service struct {
 	// open run gets one try at startup.
 	reconcileBackoffMu sync.Mutex
 	reconcileBackoff   map[string]*reconcileBackoffState
+	// offers holds the one-step enrollment configuration and the render
+	// inputs of the offers (enroll_offer.go).
+	offers enrollOfferState
 }
 
 func (s *Service) clock() time.Time {

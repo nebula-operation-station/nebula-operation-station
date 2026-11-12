@@ -1,0 +1,1 @@
+{"format": "fim-scan-v1", "profile": "fim-test-v1", "mode": "full", "started": 1, "ended": 2, "truncated": true, "counters": {"records": 0, "mounts": 0, "ssh_config": 0, "unreadable": 3}, "roots": [{"root": "/etc", "status": "error"}], "records": [], "mounts": [{"path": "L2V0Yy9zc2g=", "fstype": "tmpfs"}]}
