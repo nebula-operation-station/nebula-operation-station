@@ -154,6 +154,17 @@ func TestParseManifestRejects(t *testing.T) {
 		"artifact too big": func(m map[string]any) {
 			m["artifacts"].([]any)[1].(map[string]any)["size"] = int64(MaxArtifactSize) + 1
 		},
+		"no installed files": func(m map[string]any) { withoutArtifact(m, InstalledFilesArtifact) },
+		"two installed files": func(m map[string]any) {
+			a := m["artifacts"].([]any)
+			m["artifacts"] = []any{a[0], a[1], a[1], a[2]}
+		},
+		"installed files name case": func(m map[string]any) {
+			m["artifacts"].([]any)[1].(map[string]any)["name"] = "Installed-Files.json"
+		},
+		"installed files too big": func(m map[string]any) {
+			m["artifacts"].([]any)[1].(map[string]any)["size"] = MaxInstalledFilesDocument + 1
+		},
 		"bundle too big":    func(m map[string]any) { art(m)["size"] = MaxBundle + 1 },
 		"sha upper":         func(m map[string]any) { art(m)["sha256"] = strings.ToUpper(hexSum(nil)) },
 		"sha short":         func(m map[string]any) { art(m)["sha256"] = "abc" },
@@ -175,6 +186,44 @@ func TestParseManifestRejects(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A manifest must list exactly one installed-files.json (spec 10). The
+// rejection carries the ErrManifestInstalledFiles sentinel and ErrFormat.
+func TestParseManifestRequiresExactlyOneInstalledFiles(t *testing.T) {
+	cases := map[string]func(m map[string]any){
+		"no list": func(m map[string]any) { withoutArtifact(m, InstalledFilesArtifact) },
+		"two lists": func(m map[string]any) {
+			a := m["artifacts"].([]any)
+			m["artifacts"] = []any{a[0], a[1], a[1], a[2]}
+		},
+	}
+	for name, edit := range cases {
+		t.Run(name, func(t *testing.T) {
+			man, _ := defaultRelease(t)
+			edit(man)
+			_, err := ParseManifest(canon(t, man))
+			if !errors.Is(err, ErrManifestInstalledFiles) || !errors.Is(err, ErrFormat) {
+				t.Fatalf("err = %v, want ErrManifestInstalledFiles and ErrFormat", err)
+			}
+		})
+	}
+	t.Run("exactly one list", func(t *testing.T) {
+		man, _ := defaultRelease(t)
+		m, err := ParseManifest(canon(t, man))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var n int
+		for _, a := range m.Artifacts {
+			if a.Name == InstalledFilesArtifact {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Fatalf("parsed %d installed-files entries, want 1", n)
+		}
+	})
 }
 
 func TestParseManifestRejectsNoncanonicalBytes(t *testing.T) {

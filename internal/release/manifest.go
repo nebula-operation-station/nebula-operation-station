@@ -5,6 +5,7 @@ package release
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -16,6 +17,11 @@ const ManifestFormat = "nebula-release-v1"
 
 // BundleArtifact is the artifact name of the built-in bundle.
 const BundleArtifact = "builtins.tar"
+
+// ErrManifestInstalledFiles is a manifest that does not list exactly one
+// installed-files.json (spec 10, ADR 0015 D2). ParseManifest wraps it
+// together with ErrFormat.
+var ErrManifestInstalledFiles = errors.New("release: manifest must list exactly one installed-files.json")
 
 // Manifest limits (spec 10, hard limits).
 const (
@@ -68,7 +74,8 @@ type Module struct {
 type Manifest struct {
 	// ReleaseVersion is the release SemVer.
 	ReleaseVersion string
-	// Artifacts are sorted by name; exactly one is builtins.tar.
+	// Artifacts are sorted by name; exactly one is builtins.tar and
+	// exactly one is installed-files.json.
 	Artifacts []Artifact
 	// Modules are sorted by name, one per family.
 	Modules []Module
@@ -115,6 +122,9 @@ func ParseManifest(raw []byte) (Manifest, error) {
 		return Manifest{}, err
 	}
 	m, err := parseManifest(doc)
+	if errors.Is(err, ErrManifestInstalledFiles) {
+		return Manifest{}, fmt.Errorf("%w: manifest: %w", ErrFormat, err)
+	}
 	if err != nil {
 		return Manifest{}, fmt.Errorf("%w: manifest: %v", ErrFormat, err)
 	}
@@ -144,7 +154,7 @@ func parseManifest(doc map[string]any) (Manifest, error) {
 	}
 	var total int64
 	names := make([]string, 0, len(arts))
-	bundles := 0
+	bundles, lists := 0, 0
 	for i, v := range arts {
 		o, err := fields(v, "name", "size", "sha256")
 		if err != nil {
@@ -169,8 +179,17 @@ func parseManifest(doc map[string]any) (Manifest, error) {
 				return Manifest{}, fmt.Errorf("%s exceeds %d bytes", BundleArtifact, MaxBundle)
 			}
 		}
+		if a.Name == InstalledFilesArtifact {
+			lists++
+			if a.Size > MaxInstalledFilesDocument {
+				return Manifest{}, fmt.Errorf("%s exceeds %d bytes", InstalledFilesArtifact, MaxInstalledFilesDocument)
+			}
+		}
 		names = append(names, a.Name)
 		m.Artifacts = append(m.Artifacts, a)
+	}
+	if lists != 1 {
+		return Manifest{}, ErrManifestInstalledFiles
 	}
 	if !sortedUnique(names) {
 		return Manifest{}, fmt.Errorf("artifacts must be sorted by name without duplicates")

@@ -187,11 +187,39 @@ func release(t testing.TB, mods ...testModule) (map[string]any, []byte) {
 		"release_version": "1.4.0",
 		"artifacts": []any{
 			map[string]any{"name": BundleArtifact, "size": len(bundle), "sha256": hexSum(bundle)},
+			// Placeholder entry: parsing does not look at the list's bytes.
+			// Tests that verify the list use setInstalledFiles.
+			map[string]any{"name": InstalledFilesArtifact, "size": 1, "sha256": hexSum([]byte("placeholder"))},
 			map[string]any{"name": "nebula-server_1.4.0_amd64.deb", "size": 1234, "sha256": hexSum([]byte("deb"))},
 		},
 		"modules": mm,
 	}
 	return man, bundle
+}
+
+// setInstalledFiles sets the size and SHA-256 of the installed-files.json
+// entry of man to those of list. The entry must already exist.
+func setInstalledFiles(t testing.TB, man map[string]any, list []byte) {
+	t.Helper()
+	for _, a := range man["artifacts"].([]any) {
+		if o := a.(map[string]any); o["name"] == InstalledFilesArtifact {
+			o["size"] = len(list)
+			o["sha256"] = hexSum(list)
+			return
+		}
+	}
+	t.Fatalf("manifest has no %s entry", InstalledFilesArtifact)
+}
+
+// withoutArtifact removes every artifact entry named name from man.
+func withoutArtifact(man map[string]any, name string) {
+	var keep []any
+	for _, a := range man["artifacts"].([]any) {
+		if a.(map[string]any)["name"] != name {
+			keep = append(keep, a)
+		}
+	}
+	man["artifacts"] = keep
 }
 
 func defaultRelease(t testing.TB) (map[string]any, []byte) {
