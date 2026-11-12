@@ -183,6 +183,10 @@ func runScriptPath(t *testing.T, shell, root string, params []byte, path string,
 		// A here-document or temporary file would need TMPDIR.
 		"TMPDIR=" + filepath.Join(work, "no-such-dir"),
 		"HOME=" + filepath.Join(work, "no-such-home"),
+		// The tree is written just before the run: without this, every
+		// home SSH file would be too recent to keep its hash.
+		// TestScriptHomeRacyHashIsUnknown runs with the production margin.
+		"NEBULA_FIM_TEST_RACY_SECONDS=-1",
 	}
 	cmd.Env = append(cmd.Env, env...)
 	var stdout, stderr bytes.Buffer

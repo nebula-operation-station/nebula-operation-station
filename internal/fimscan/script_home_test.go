@@ -111,28 +111,41 @@ func TestScriptUnlookedHomesAreUnreadableNotMissing(t *testing.T) {
 }
 
 // TestScriptHomeHashBoundToInode: a home SSH hash comes with the
-// device:inode:ctime it was read from, and the record keeps it only if the
-// meta pass saw the same file in the same state. A file swapped (another
-// inode) or changed in place (another ctime) between the passes has no
-// hash and makes the run truncated, not unreadable; the old content's hash
-// never stands for it.
+// device:inode:ctime it was read from and a cutoff second (the hash start
+// less the timestamp granularity), and the record keeps it only if the
+// meta pass saw the same file in the same state and its ctime and mtime
+// lie before the cutoff. A file swapped (another inode) or changed in
+// place (another ctime) between the passes, or one whose timestamps are
+// too close to the hash start to prove the content unchanged (a write in
+// the same timestamp tick keeps the ctime), has no hash and makes the run
+// truncated, not unreadable; the old content's hash never stands for it.
 func TestScriptHomeHashBoundToInode(t *testing.T) {
 	const p = "/home/alice/.ssh/authorized_keys"
 	h := strings.Repeat("a", 64)
-	meta := func(ino, ctime string) string {
-		return "M1 f 1 600 1000 1000 " + ino + " 1700000000.5 " + ctime + " 2049\x00" + p + "\x00\x00"
+	metaT := func(ino, mtime, ctime string) string {
+		return "M1 f 1 600 1000 1000 " + ino + " " + mtime + " " + ctime + " 2049\x00" + p + "\x00\x00"
 	}
+	meta := func(ino, ctime string) string { return metaT(ino, "1700000000.5", ctime) }
+	hash := func(hrec string) string { return hrec + "\x00" + h + "  " + p + "\x00" }
 	head := "B1700000000\x00Rscanned /home/*/.ssh/authorized_keys*\x00"
 	for _, c := range []struct {
 		name   string
 		stream string
 		hashed bool
 	}{
-		{"same file", "H2049:7:1700000000.5\x00" + h + "  " + p + "\x00" + meta("7", "1700000000.5"), true},
-		{"swapped between the passes", "H2049:7:1700000000.5\x00" + h + "  " + p + "\x00" + meta("8", "1700000000.5"), false},
-		{"changed in place between the passes", "H2049:7:1700000000.5\x00" + h + "  " + p + "\x00" + meta("7", "1700000001.25"), false},
-		{"other device", "H2050:7:1700000000.5\x00" + h + "  " + p + "\x00" + meta("7", "1700000000.5"), false},
-		{"malformed id", "H2049:7:x\x00" + h + "  " + p + "\x00" + meta("7", "1700000000.5"), false},
+		{"same file", hash("H2049:7:1700000000.5 1700000001") + meta("7", "1700000000.5"), true},
+		{"swapped between the passes", hash("H2049:7:1700000000.5 1700000001") + meta("8", "1700000000.5"), false},
+		{"changed in place between the passes", hash("H2049:7:1700000000.5 1700000001") + meta("7", "1700000001.25"), false},
+		{"other device", hash("H2050:7:1700000000.5 1700000001") + meta("7", "1700000000.5"), false},
+		{"malformed id", hash("H2049:7:x 1700000001") + meta("7", "1700000000.5"), false},
+		{"racy ctime", hash("H2049:7:1700000000.5 1700000000") + meta("7", "1700000000.5"), false},
+		{"ctime after the cutoff", hash("H2049:7:1700000005 1700000001") + meta("7", "1700000005"), false},
+		{"racy mtime", hash("H2049:7:1700000000.5 1700000001") + metaT("7", "1700000001", "1700000000.5"), false},
+		{"mtime in the future", hash("H2049:7:1700000000.5 1700000001") + metaT("7", "1900000000", "1700000000.5"), false},
+		{"no cutoff", hash("H2049:7:1700000000.5") + meta("7", "1700000000.5"), false},
+		{"malformed cutoff", hash("H2049:7:1700000000.5 17x") + meta("7", "1700000000.5"), false},
+		{"fractional cutoff", hash("H2049:7:1700000000.5 1700000001.5") + meta("7", "1700000000.5"), false},
+		{"extra field", hash("H2049:7:1700000000.5 1700000001 1") + meta("7", "1700000000.5"), false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			res := runAwk(t, head+c.stream+"E1700000001\x00")
@@ -150,6 +163,49 @@ func TestScriptHomeHashBoundToInode(t *testing.T) {
 				t.Errorf("partial %v, host %+v", res.Partial, res.Host)
 			}
 		})
+	}
+}
+
+// TestScriptHomeRacyHashIsUnknown: with the production timestamp margin, a
+// home SSH file written within the margin before the hash start keeps no
+// hash (its ctime cannot prove that the content did not change after the
+// read): the run is truncated, not unreadable, and other files are still
+// hashed. Once the margin has passed, the same files are hashed.
+func TestScriptHomeRacyHashIsUnknown(t *testing.T) {
+	root := buildTree(t, treeOpts{})
+	homes := []string{"/root/.ssh/authorized_keys", "/home/alice/.ssh/authorized_keys", "/home/alice/.k5login"}
+	// An empty setting selects the production margin.
+	res := runWith(t, root, ModeFull, os.Getenv("PATH"), "NEBULA_FIM_TEST_RACY_SECONDS=")
+	for _, p := range homes {
+		if r := findRecord(t, res, p); r.Hash.Kind != HashNone {
+			t.Errorf("%s written just before the scan carries a hash", p)
+		}
+	}
+	if r := findRecord(t, res, "/etc/hostname"); r.Hash.Kind == HashNone {
+		t.Error("/etc/hostname not hashed")
+	}
+	if !slices.Contains(res.Partial, ReasonHostTruncated) || res.Host.Unreadable != 0 {
+		t.Errorf("partial %v, host %+v", res.Partial, res.Host)
+	}
+
+	time.Sleep(3100 * time.Millisecond)
+	res = runWith(t, root, ModeFull, os.Getenv("PATH"), "NEBULA_FIM_TEST_RACY_SECONDS=")
+	want, sums := expectedRecords(t, root)
+	compareRecords(t, res, want, sums, nil)
+	if !res.Complete() {
+		t.Errorf("partial %v, host %+v", res.Partial, res.Host)
+	}
+}
+
+// TestScriptRacyMarginSettingValidated: the test margin setting accepts an
+// optional minus sign and digits only.
+func TestScriptRacyMarginSettingValidated(t *testing.T) {
+	root := buildTree(t, treeOpts{})
+	for _, v := range []string{"-", "x", "1-", "--1", "1 2", "-1x"} {
+		_, _, err := runScriptPath(t, "/bin/sh", root, scanParams(t, ModeFull), os.Getenv("PATH"), "NEBULA_FIM_TEST_RACY_SECONDS="+v)
+		if err == nil {
+			t.Errorf("setting %q accepted", v)
+		}
 	}
 }
 

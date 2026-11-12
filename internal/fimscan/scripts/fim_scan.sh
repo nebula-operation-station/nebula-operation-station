@@ -83,17 +83,30 @@ SSH_MAX_QUEUE=256       # Include matches waiting to be read
 SSH_MAX_SEEN=1024       # Include matches looked at in total
 HOME_MAX_MATCHES=16     # start points per home and glob (.ssh/authorized_keys*)
 HOME_OPEN_SECONDS=5     # a home SSH file not opened (and checked) within this is not hashed
+# A home SSH hash is kept only if the file's ctime and mtime (whole
+# seconds) lie more than RACY_SECONDS before the second the hash started.
+# File timestamps are coarse (the kernel's tick-based clock, whole seconds
+# on some file systems, two on FAT), so a write during or after the read
+# can leave dev:inode:ctime unchanged; such a write still gets a timestamp
+# no earlier than RACY_SECONDS before the hash start, so its record keeps
+# no hash (unknown, as git treats a racily clean index entry).
+RACY_SECONDS=2
 MOUNTINFO="$P/proc/self/mountinfo"
 AM_ROOT=0
 [ "$(id -u)" = 0 ] && AM_ROOT=1
-# Tests only (with NEBULA_FIM_TEST_ROOT): shorter window, deadline, budget.
+# Tests only (with NEBULA_FIM_TEST_ROOT): shorter window, deadline, budget;
+# a smaller (or negative) timestamp margin for trees written just before.
 if [ -n "$P" ]; then
 	for v in "${NEBULA_FIM_TEST_WINDOW:-}" "${NEBULA_FIM_TEST_HASH_SECONDS:-}" "${NEBULA_FIM_TEST_HASH_BUDGET:-}"; do
 		case $v in *[!0-9]*) fail "invalid test setting" ;; esac
 	done
+	case ${NEBULA_FIM_TEST_RACY_SECONDS:-0} in
+	- | -*[!0-9]* | [!-]*[!0-9]* | [!-0-9]) fail "invalid test setting" ;;
+	esac
 	WIN=${NEBULA_FIM_TEST_WINDOW:-$WIN}
 	HASH_SECONDS=${NEBULA_FIM_TEST_HASH_SECONDS:-$HASH_SECONDS}
 	HASH_BUDGET=${NEBULA_FIM_TEST_HASH_BUDGET:-$HASH_BUDGET}
+	RACY_SECONDS=${NEBULA_FIM_TEST_RACY_SECONDS:-$RACY_SECONDS}
 fi
 
 LOW=""
@@ -363,6 +376,10 @@ find_scan() {
 			set -- "$@" -printf '%D:%i:%C@\n' ")"
 			id=$(find "$@" 2>/dev/null)
 			if [ -n "$id" ] && open_user; then
+				# Taken before the holder opens the file: any write the
+				# hash may have missed has a later timestamp than
+				# this less RACY_SECONDS.
+				cut=$(($(date +%s) - RACY_SECONDS))
 				if [ -n "$TIMEOUT" ]; then
 					h=$($TIMEOUT "$left" /bin/sh -c "$HASH_FD" sh "$sp" "$id" "$HOLD" "$OPEN_USER" "$HOME_OPEN_SECONDS")
 				else
@@ -373,10 +390,11 @@ find_scan() {
 				if [ "${#hx}" -eq 64 ]; then
 					case $hx in
 					*[!0-9a-f]*) ;;
-					# After the device:inode:ctime it was read from:
-					# the meta pass keeps it only for a record with
-					# the same.
-					*) printf 'H%s\0%s  %s\0' "$id" "$hx" "$P$start" ;;
+					# After the device:inode:ctime it was read from
+					# and the cutoff second: the meta pass keeps it
+					# only for a record with the same id whose ctime
+					# and mtime lie before the cutoff.
+					*) printf 'H%s %s\0%s  %s\0' "$id" "$cut" "$hx" "$P$start" ;;
 					esac
 				fi
 			fi
@@ -889,8 +907,12 @@ function field(   s, c, k, from, ph, hid) {
 		else if (c == "M") { open_records(); META = s; st = "mpath" }
 		else if (c == "U") unread++
 		# H: the device:inode:ctime the next hash (a home SSH file) was
-		# read from; an id of another form never matches a record.
-		else if (c == "H") { HID1 = substr(s, 2); if (HID1 !~ /^[0-9]+:[0-9]+:[0-9]+(\.[0-9]+)?$/) HID1 = "-" }
+		# read from and the cutoff second its ctime and mtime must lie
+		# before; an H of another form never matches a record.
+		else if (c == "H") {
+			HID1 = substr(s, 2)
+			if (HID1 !~ /^[0-9]+:[0-9]+:[0-9]+(\.[0-9]+)? -?[0-9]+$/ || length(HID1) > 80) HID1 = "- 0"
+		}
 		else if (c == "T") {
 			# The field before a T may be a hash record cut by a killed
 			# hash pass, its path a prefix of another path: drop it.
@@ -938,7 +960,7 @@ function hashline(id,   k, from, hex) {
 	HS[LASTH] = hex
 	if (id != "") HID[LASTH] = id; else delete HID[LASTH]
 }
-function record(   f, t, rec, m, mt, ct, hash, moved) {
+function record(   f, t, rec, m, mt, ct, hash, moved, k, cut) {
 	if (split(META, f, " ") != 10 || MPATH == "" || MLINKBAD) { unread++; return }
 	t = f[2] == "f" ? "file" : f[2] == "d" ? "dir" : f[2] == "l" ? "symlink" : "other"
 	m = oct(f[4]); mt = etime(f[8]); ct = etime(f[9])
@@ -947,10 +969,15 @@ function record(   f, t, rec, m, mt, ct, hash, moved) {
 	# A hash bound to a device:inode:ctime (a home SSH file) belongs to this
 	# record only if the meta pass saw the same: a file swapped or changed
 	# between the passes keeps no hash (unknown; the run is truncated), so
-	# the hash of the old content never stands for the new file.
+	# the hash of the old content never stands for the new file. An equal
+	# ctime proves nothing for a file whose ctime or mtime is not older
+	# than the cutoff (coarse timestamps: a write in the same tick keeps
+	# them): no hash either.
 	moved = 0
 	if (MPATH in HID) {
-		if (HID[MPATH] != f[10] ":" f[7] ":" f[9]) { delete HS[MPATH]; moved = 1; trunc = 1 }
+		k = index(HID[MPATH], " ")
+		cut = substr(HID[MPATH], k + 1) + 0
+		if (substr(HID[MPATH], 1, k - 1) != f[10] ":" f[7] ":" f[9] || !(ct + 0 < cut && mt + 0 < cut)) { delete HS[MPATH]; moved = 1; trunc = 1 }
 		delete HID[MPATH]
 	}
 	if (t == "file" && (MPATH in HS)) {
