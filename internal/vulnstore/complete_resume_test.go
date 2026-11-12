@@ -134,7 +134,7 @@ func TestCompleteCancelledDuringApplyResumesToTheSameResult(t *testing.T) {
 				t.Fatalf("reference completion = %+v", want)
 			}
 			wantStates := states(t, ref, refKeys)
-			total := counter.calls
+			total := counter.Calls()
 
 			// Cut points: by statement count (planning makes most of the
 			// statements, so these fall into planning or the first apply
