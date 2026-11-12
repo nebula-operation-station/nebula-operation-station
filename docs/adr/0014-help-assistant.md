@@ -853,16 +853,38 @@ does NOS connect **from** (`--from`)?
   the command decrypted with the file at the run's path. Before the
   first `restore` run the test checks the fixtures themselves and
   reports any deviation as a harness error, never as an argument
-  result: `backup.Read` of the sealed archive returns
-  `backup.ErrEncrypted` with no identity, a decrypt error with the
-  control identity and the fixture manifest with the fixture identity;
-  `backup.Read` of the plain archive returns the fixture manifest with
-  no identity. In addition one *control run* per `--identity` form
-  writes the control identity to the run's path; it must return an
-  error and record no `backup.System` call, and an accepted control run
-  fails the test (the identity file was not used). A control run is a
-  check of the harness, not a canary run: its error never counts as a
-  rejection of the argument.
+  result: `backup.ParseIdentities` accepts the fixture identity file and
+  the control identity file and returns exactly one identity for each;
+  `backup.Read` of the sealed archive returns `backup.ErrEncrypted` with
+  no identity, the **no-identity-matched error** (below) with the
+  parsed control identity and the fixture manifest with the fixture
+  identity; `backup.Read` of the plain archive returns the fixture
+  manifest with no identity. The no-identity-matched error is the error
+  `age.Decrypt` (`filippo.io/age`, the version in `go.mod`) returns when
+  none of the given identities unwraps a recipient stanza, the type
+  `*age.NoIdentityMatchError`, which `backup.Read` wraps as
+  `backup: decrypt: …`; the check matches it with `errors.As` and
+  nothing else. Any other error, also another decrypt error such as a
+  malformed header, and any parse error of the control identity is a
+  harness error, so a control identity that does not parse or an
+  archive that is not sealed to an X25519 recipient cannot satisfy the
+  check (previously "a decrypt error", so any error passed).
+  In addition one *control run* per `--identity` form writes the
+  control identity to the run's path, with the same `ARCHIVE`, stdin
+  lines, pinned `hostname` and recorders as the canary run of that
+  form; it must return an error that `errors.As` matches as
+  `*age.NoIdentityMatchError` and record no `backup.System` call
+  (previously "must return an error", so a missing stdin line, an
+  unpinned `hostname`, a control identity that does not parse or a
+  missing archive satisfied it). `restoreWith` parses the identity file
+  with `backup.ParseIdentities` and decrypts in `backup.Read` before it
+  reads stdin, checks the host name or calls `backup.System`, so that
+  error is reached only when the run used the file at the run's path,
+  parsed it and tried it against the sealed archive. An accepted control
+  run, a control run with any other error and a control run that
+  recorded a call fail the test (the identity file was not used, or the
+  harness is broken). A control run is a check of the harness, not a
+  canary run: its error never counts as a rejection of the argument.
   The `restore` arguments are `in-path` values that are read, not sent:
   their expected-fields entry lists no field. The needle search of
   conditions 1 and 2 covers the recorded `backup.System` calls (unit
