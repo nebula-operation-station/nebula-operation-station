@@ -214,6 +214,7 @@ jobs:
           TAG: ${{ needs.build.outputs.tag }}
           VERSION: ${{ needs.build.outputs.version }}
           COMMIT: ${{ needs.build.outputs.commit }}
+          GO_BUILD_VERSION: ${{ needs.build.outputs.go_version }}
         run: |
           set -euo pipefail
           fail() { echo "::error::$*" >&2; exit 1; }
@@ -233,9 +234,22 @@ jobs:
           [ "${#files[@]}" -gt 0 ] || fail "no payloads"
           names=$(printf '%s\n' "${files[@]##*/}" | sort)
 
-          # The tag must still point at the commit that was built.
-          tagged=$(gh api "repos/$REPO/commits/$TAG" --jq .sha)
-          [ "$tagged" = "$COMMIT" ] || fail "tag $TAG moved: built $COMMIT, now $tagged"
+          # The tag must still point at the commit that was built. Resolve
+          # refs/tags/$TAG exactly (git/ref, not commits/{ref}, which would
+          # also accept a branch of the same name) and dereference
+          # annotated tag objects down to the commit.
+          ref=$(gh api "repos/$REPO/git/ref/tags/$TAG")
+          [ "$(jq -r .ref <<<"$ref")" = "refs/tags/$TAG" ] || fail "tag ref $TAG not found"
+          otype=$(jq -r .object.type <<<"$ref")
+          osha=$(jq -r .object.sha <<<"$ref")
+          for _ in 1 2 3 4 5; do
+            [ "$otype" = tag ] || break
+            obj=$(gh api "repos/$REPO/git/tags/$osha")
+            otype=$(jq -r .object.type <<<"$obj")
+            osha=$(jq -r .object.sha <<<"$obj")
+          done
+          [ "$otype" = commit ] || fail "tag $TAG does not resolve to a commit ($otype)"
+          [ "$osha" = "$COMMIT" ] || fail "tag $TAG moved: built $COMMIT, now $osha"
 
           # The tags endpoint does not return drafts, so list every release.
           find_release() {
@@ -245,38 +259,64 @@ jobs:
           rel=$(find_release)
           count=$(jq length <<<"$rel")
 
-          notes="Unsigned draft staged by $SERVER_URL/$REPO/actions/runs/$RUN_ID from $COMMIT. Not a release: release-manifest.json and its signature are added after offline review and signing (docs/admin/release-signing.md)."
+          notes="Unsigned draft staged by $SERVER_URL/$REPO/actions/runs/$RUN_ID from $COMMIT with $GO_BUILD_VERSION. Not a release: release-manifest.json and its signature are added after offline review and signing (docs/admin/release-signing.md)."
 
           if [ "$count" -eq 0 ]; then
+            # Create the empty draft first; the payloads go through the
+            # same per-asset draft check below as for an existing draft.
             gh release create "$TAG" --repo "$REPO" --draft --verify-tag \
-              --title "$TAG" --notes "$notes" "${files[@]}"
-          elif [ "$count" -eq 1 ]; then
-            [ "$(jq -r '.[0].draft' <<<"$rel")" = true ] \
-              || fail "release $TAG is published; it is never modified (a fix is a new version)"
-            id=$(jq -r '.[0].id' <<<"$rel")
-            # Refuse extra assets: a manifest or signature means signing
-            # already happened, and anything else would be a stale payload.
-            extra=$(comm -13 <(printf '%s\n' "$names") <(jq -r '.[0].assets[].name' <<<"$rel" | sort))
-            [ -z "$extra" ] || fail "draft $TAG has assets this build does not produce (remove them by hand): ${extra//$'\n'/ }"
-            [ "$(gh api "repos/$REPO/releases/$id" --jq .draft)" = true ] \
-              || fail "release $TAG was published meanwhile; not modified"
-            gh release upload "$TAG" --repo "$REPO" --clobber "${files[@]}"
-          else
+              --title "$TAG" --notes "$notes"
+            rel=$(find_release)
+            [ "$(jq length <<<"$rel")" -eq 1 ] || fail "draft $TAG not found after create"
+          elif [ "$count" -ne 1 ]; then
             fail "$count releases carry tag $TAG"
           fi
+          [ "$(jq -r '.[0].draft' <<<"$rel")" = true ] \
+            || fail "release $TAG is published; it is never modified (a fix is a new version)"
+          id=$(jq -r '.[0].id' <<<"$rel")
+          [[ "$id" =~ ^[0-9]+$ ]] || fail "unexpected release id for $TAG"
+          # Refuse extra assets: a manifest or signature means signing
+          # already happened, and anything else would be a stale payload.
+          extra=$(comm -13 <(printf '%s\n' "$names") <(jq -r '.[0].assets[].name' <<<"$rel" | sort))
+          [ -z "$extra" ] || fail "draft $TAG has assets this build does not produce (remove them by hand): ${extra//$'\n'/ }"
 
-          # Afterwards: still exactly one draft, with exactly our bytes.
+          # One asset at a time, each directly after a fresh draft check, so
+          # a release published meanwhile gets at most the asset in flight
+          # replaced and the run stops there. A failed or cancelled run
+          # leaves a partly updated draft: re-run before any review
+          # (docs/admin/release-signing.md, "Release workflow").
+          for f in "${files[@]}"; do
+            [ "$(gh api "repos/$REPO/releases/$id" --jq .draft)" = true ] \
+              || fail "release $TAG was published meanwhile; stopped before ${f##*/}"
+            gh release upload "$TAG" --repo "$REPO" --clobber "$f"
+          done
+
+          # Afterwards: still exactly one draft, the same one, with exactly
+          # our bytes. Every asset is downloaded and hashed; a missing or
+          # differing digest or size fails the run (fail closed).
           rel=$(find_release)
           [ "$(jq length <<<"$rel")" -eq 1 ] || fail "release $TAG not found after upload"
+          [ "$(jq -r '.[0].id' <<<"$rel")" = "$id" ] || fail "release $TAG was replaced during upload"
           [ "$(jq -r '.[0].draft' <<<"$rel")" = true ] || fail "release $TAG is no longer a draft"
           [ "$(jq -r '.[0].assets[].name' <<<"$rel" | sort)" = "$names" ] || fail "draft assets differ from payloads/"
+          mkdir "$work/check"
           for f in "${files[@]}"; do
             n=${f##*/}
-            size=$(jq -r --arg n "$n" '.[0].assets[] | select(.name == $n) | .size' <<<"$rel")
-            [ "$size" = "$(stat -c %s "$f")" ] || fail "size of $n differs on the draft"
-            digest=$(jq -r --arg n "$n" '.[0].assets[] | select(.name == $n) | .digest // ""' <<<"$rel")
-            if [ -n "$digest" ]; then
-              [ "$digest" = "sha256:$(sha256sum "$f" | cut -d' ' -f1)" ] || fail "digest of $n differs on the draft"
+            want="sha256:$(sha256sum "$f" | cut -d' ' -f1)"
+            asset=$(jq -c --arg n "$n" '[.[0].assets[] | select(.name == $n)]' <<<"$rel")
+            [ "$(jq length <<<"$asset")" -eq 1 ] || fail "draft has not exactly one asset $n"
+            [ "$(jq -r '.[0].size' <<<"$asset")" = "$(stat -c %s "$f")" ] || fail "size of $n differs on the draft"
+            digest=$(jq -r '.[0].digest // ""' <<<"$asset")
+            if [ -n "$digest" ] && [ "$digest" != "$want" ]; then
+              fail "GitHub digest of $n differs from payloads/"
             fi
+            aid=$(jq -r '.[0].id' <<<"$asset")
+            [[ "$aid" =~ ^[0-9]+$ ]] || fail "unexpected asset id for $n"
+            gh api -H "Accept: application/octet-stream" \
+              "repos/$REPO/releases/assets/$aid" > "$work/check/asset" \
+              || fail "download of $n from the draft failed"
+            got="sha256:$(sha256sum "$work/check/asset" | cut -d' ' -f1)"
+            [ "$got" = "$want" ] || fail "downloaded $n differs from payloads/"
+            rm -f "$work/check/asset"
           done
-          echo "draft $TAG holds ${#files[@]} unsigned payloads"
+          echo "draft $TAG holds ${#files[@]} unsigned payloads (built with $GO_BUILD_VERSION)"
