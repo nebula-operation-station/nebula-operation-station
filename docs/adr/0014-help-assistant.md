@@ -153,8 +153,9 @@ History:
   has one `trust-path` fake per command (previously one fake for
   `pve remote add`/`repin --ca-file`). Fake entries that check their
   recorders, fake executor and working directory at the start of each
-  run test the isolation of the `canary-range` runs in every order and
-  catch a fake executor or working directory shared between the
+  run catch a `canary-range` run that gets a working directory of any
+  earlier run, or a recorder or fake executor of an earlier accepted
+  run, and catch a fake executor or working directory shared between the
   `--identity` control and canary run in both orders (previously the
   range rejection checks had no fake-based test, and the control-run
   check caught no shared fake executor or working directory); a
@@ -927,11 +928,13 @@ does NOS connect **from** (`--from`)?
     request by exactly one call to its fake executor that sends that
     request, so after an accepted run both its recorders and its fake
     executor hold a call, and a rejection value calls neither. It must
-    pass. A harness that
-    hands a run a recorder or fake executor an earlier accepted run
-    used, or a working directory any earlier run used, fails it in
-    every run order (a later accepted run becomes a harness error, a
-    later rejection check records traffic); a fake `number` argument whose first run is
+    pass. A harness that hands a run a recorder or fake executor an
+    earlier accepted run used, or a working directory any earlier run
+    used, fails it (a later accepted run becomes a harness error, a
+    later rejection check records traffic); a recorder or fake
+    executor shared only with earlier rejection checks is not caught,
+    because a rejection value calls neither;
+  - confirmation rerun: a fake `number` argument whose first run is
     accepted with a `47000 + m` hit, and whose rerun with `48000 + m`
     returns **no error and sends nothing**, must fail as a harness
     error naming harness entry and argument; a harness that reuses the
@@ -1151,9 +1154,9 @@ does NOS connect **from** (`--from`)?
   fresh recorders, a fresh fake executor and a fresh working directory
   (previously not stated, so a harness reusing the `MAX − 1` run's
   recorder saw its traffic; the range-check isolation meta-test of
-  **Class-rule tests** fails such a harness in every run order, while
-  "both entries green on today's tree" catches it only when the
-  rejection checks run after `MAX − 1`). The
+  **Class-rule tests** fails a harness that hands a run a recorder or
+  fake executor an earlier accepted run used, or a working directory
+  any earlier run used). The
   host-shaped forms and condition 3 apply as for every argument. Instead
   of the needle search of conditions 1 and 2, which a small value cannot
   pass reliably, the runs get a **distinctive check**:
