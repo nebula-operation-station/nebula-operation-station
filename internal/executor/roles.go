@@ -76,6 +76,10 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_DownloadEnrollScript_FullMethodName: {server},
 		pb.ExecutorService_RevokeEnrollOffer_FullMethodName:    {server, admin},
 		pb.ExecutorService_ListEnrollOffers_FullMethodName:     {admin},
+		// Pairing and paired commit: only for the creating web session,
+		// checked in the handler (ADR 0013 D2 "Binding").
+		pb.ExecutorService_SubmitPairingCode_FullMethodName:  {server},
+		pb.ExecutorService_CommitPairedEnroll_FullMethodName: {server},
 		// Join of a provisioned PVE guest (ADR 0008 section 4, PV-06): the
 		// normal enrollment approval, proposed and committed by the server.
 		pb.ExecutorService_ProposeGuestJoin_FullMethodName: {server},

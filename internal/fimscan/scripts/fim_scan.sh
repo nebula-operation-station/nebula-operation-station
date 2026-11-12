@@ -28,8 +28,14 @@
 # /home/* lie in directories their users own and can change at any time:
 # each is scanned from inside its directory, entered once and checked by
 # its physical path, as a single entry (a directory there is reported, not
-# walked), and hashed through one descriptor checked to be the regular
-# file find saw; at most 16 authorized_keys* files per home are scanned.
+# walked); it is opened and hashed only by a holder process dropped to the
+# owner of the directory (root never opens it, by name or through the
+# holder's descriptor), bounded in time, through one descriptor checked to
+# be the regular file find saw, before and after the read. Its hash
+# carries that device:inode:ctime and is kept only for a record of the
+# same whose ctime and mtime are older than the hash start by more than
+# the timestamp granularity (a racy timestamp cannot prove the content
+# unchanged). At most 16 authorized_keys* files per home are scanned.
 #
 # NEBULA_FIM_TEST_ROOT is for tests only: it prefixes every path the script
 # reads (the reported paths stay host paths), suppresses the sudo
@@ -76,15 +82,31 @@ SSH_MAX_BYTES=262144    # spec 09: at most 256 KiB decoded in total
 SSH_MAX_QUEUE=256       # Include matches waiting to be read
 SSH_MAX_SEEN=1024       # Include matches looked at in total
 HOME_MAX_MATCHES=16     # start points per home and glob (.ssh/authorized_keys*)
+HOME_OPEN_SECONDS=5     # a home SSH file not opened (and checked) within this is not hashed
+# A home SSH hash is kept only if the file's ctime and mtime (whole
+# seconds) lie more than RACY_SECONDS before the second the hash started.
+# File timestamps are coarse (the kernel's tick-based clock, whole seconds
+# on some file systems, two on FAT), so a write during or after the read
+# can leave dev:inode:ctime unchanged; such a write still gets a timestamp
+# no earlier than RACY_SECONDS before the hash start, so its record keeps
+# no hash (unknown, as git treats a racily clean index entry).
+RACY_SECONDS=2
 MOUNTINFO="$P/proc/self/mountinfo"
-# Tests only (with NEBULA_FIM_TEST_ROOT): shorter window, deadline, budget.
+AM_ROOT=0
+[ "$(id -u)" = 0 ] && AM_ROOT=1
+# Tests only (with NEBULA_FIM_TEST_ROOT): shorter window, deadline, budget;
+# a smaller (or negative) timestamp margin for trees written just before.
 if [ -n "$P" ]; then
 	for v in "${NEBULA_FIM_TEST_WINDOW:-}" "${NEBULA_FIM_TEST_HASH_SECONDS:-}" "${NEBULA_FIM_TEST_HASH_BUDGET:-}"; do
 		case $v in *[!0-9]*) fail "invalid test setting" ;; esac
 	done
+	case ${NEBULA_FIM_TEST_RACY_SECONDS:-0} in
+	- | -*[!0-9]* | [!-]*[!0-9]* | [!-0-9]) fail "invalid test setting" ;;
+	esac
 	WIN=${NEBULA_FIM_TEST_WINDOW:-$WIN}
 	HASH_SECONDS=${NEBULA_FIM_TEST_HASH_SECONDS:-$HASH_SECONDS}
 	HASH_BUDGET=${NEBULA_FIM_TEST_HASH_BUDGET:-$HASH_BUDGET}
+	RACY_SECONDS=${NEBULA_FIM_TEST_RACY_SECONDS:-$RACY_SECONDS}
 fi
 
 LOW=""
@@ -240,17 +262,62 @@ fmt_path() {
 	printf '%s' "$1" | sed 's/\\/\\\\/g; s/%/%%/g'
 }
 
-# HASH_FD runs as /bin/sh -c "$HASH_FD" sh NAME ID in the checked home
-# directory: it opens NAME once, checks with find -H on /proc/self/fd/3
-# that the open file is the regular file ID (device:inode) that find saw
-# at NAME without following it, and hashes it through that descriptor. A
-# symlink or another file swapped in between fails the check: no hash. It
-# runs under the deadline (timeout or the watchdog), which also ends an
-# open blocked on a FIFO swapped in.
+# HOLD runs as /bin/sh -c "$HOLD" sh NAME ID SECONDS in the checked home
+# directory, as the user the open drops to (HASH_FD). It opens NAME as
+# descriptor 3, killed by its own watchdog if the open takes more than
+# SECONDS (a FIFO swapped in cannot stall the run; no timeout tool is
+# needed). It goes on only if the descriptor is the regular file ID
+# (device:inode:ctime) find saw at NAME, hashes through it, checks the
+# descriptor again (a file changed or replaced while it was read keeps no
+# hash) and prints the hash. A symlink or FIFO swapped in fails a check
+# before a byte is read. The holder runs with group 65534, which no
+# process of the user has, so the user cannot ptrace it (or read its
+# memory) to change what it opens or prints.
 # shellcheck disable=SC2016 # expanded by the inner shell
-HASH_FD='exec 2>/dev/null 3<"$1" || exit 1
-[ "$(find -H /proc/self/fd/3 -maxdepth 0 -type f -printf "%D:%i\n")" = "$2" ] || exit 1
-exec sha256sum <&3'
+HOLD='exec 2>/dev/null
+n=$1 id=$2 s=$3
+(sleep "$s"; kill -TERM $$) >/dev/null </dev/null &
+w=$!
+exec 3<"$n" || exit 1
+kill "$w"
+c() { find -H /proc/self/fd/3 -maxdepth 0 -type f -printf "%D:%i:%C@\n"; }
+[ "$(c)" = "$id" ] || exit 1
+h=$(sha256sum <&3) || exit 1
+[ "$(c)" = "$id" ] || exit 1
+printf "%s\n" "$h"'
+
+# HASH_FD runs as /bin/sh -c "$HASH_FD" sh NAME ID HOLD USER SECONDS in the
+# checked home directory. The user owning that directory can swap NAME for
+# a symlink, a FIFO or another file after find looked at it, so root
+# never opens NAME, nor anything a process of the user holds (no
+# /proc/PID/fd): HOLD opens, checks and hashes it, dropped to USER
+# (setpriv; "" when the scan does not run as root or no one but root can
+# change the directory), and only its printed hash comes back. A symlink
+# there is followed with the rights of USER only.
+# shellcheck disable=SC2016 # expanded by the inner shell
+HASH_FD='exec 2>/dev/null
+n=$1 id=$2 hold=$3 u=$4 s=$5
+set -- /bin/sh -c "$hold" sh "$n" "$id" "$s"
+[ -n "$u" ] && set -- setpriv --reuid="$u" --regid=65534 --clear-groups -- "$@"
+exec "$@" </dev/null'
+
+# open_user: the user HOLD drops to for the working directory (a checked
+# home or .ssh directory), in OPEN_USER: none ("") when the scan does not
+# run as root, or the directory is root's and only root can change it;
+# its owner when that is another user; nobody (65534) for a root-owned
+# directory others can write. False when the open would need to drop but
+# cannot (no setpriv): the file is not hashed.
+open_user() {
+	OPEN_USER=""
+	[ "$AM_ROOT" = 1 ] || return 0
+	ou=$(find . -maxdepth 0 -printf '%U %m\n' 2>/dev/null)
+	case $ou in
+	"" | *[!0-9\ ]* | *" "*" "* | " "* | *" ") return 1 ;;
+	"0 "*) [ $((0${ou#* } & 18)) -eq 0 ] || OPEN_USER=65534 ;;
+	*) OPEN_USER=${ou%% *} ;;
+	esac
+	[ -z "$OPEN_USER" ] || command -v setpriv >/dev/null 2>&1
+}
 
 # bounded SECONDS CMD...: run CMD and stop it, and a tool it runs, after
 # SECONDS (the watchdog, for hosts without the timeout tool).
@@ -306,20 +373,28 @@ find_scan() {
 			return 3
 		fi
 		if [ "$one" = 1 ]; then
-			set -- "$@" -printf '%D:%i\n' ")"
+			set -- "$@" -printf '%D:%i:%C@\n' ")"
 			id=$(find "$@" 2>/dev/null)
-			if [ -n "$id" ]; then
+			if [ -n "$id" ] && open_user; then
+				# Taken before the holder opens the file: any write the
+				# hash may have missed has a later timestamp than
+				# this less RACY_SECONDS.
+				cut=$(($(date +%s) - RACY_SECONDS))
 				if [ -n "$TIMEOUT" ]; then
-					h=$($TIMEOUT "$left" /bin/sh -c "$HASH_FD" sh "$sp" "$id")
+					h=$($TIMEOUT "$left" /bin/sh -c "$HASH_FD" sh "$sp" "$id" "$HOLD" "$OPEN_USER" "$HOME_OPEN_SECONDS")
 				else
-					h=$(bounded "$left" /bin/sh -c "$HASH_FD" sh "$sp" "$id")
+					h=$(bounded "$left" /bin/sh -c "$HASH_FD" sh "$sp" "$id" "$HOLD" "$OPEN_USER" "$HOME_OPEN_SECONDS")
 				fi
 				# Written whole, only for a complete hash.
 				hx=${h%% *}
 				if [ "${#hx}" -eq 64 ]; then
 					case $hx in
 					*[!0-9a-f]*) ;;
-					*) printf '%s  %s\0' "$hx" "$P$start" ;;
+					# After the device:inode:ctime it was read from
+					# and the cutoff second: the meta pass keeps it
+					# only for a record with the same id whose ctime
+					# and mtime lie before the cutoff.
+					*) printf 'H%s %s\0%s  %s\0' "$id" "$cut" "$hx" "$P$start" ;;
 					esac
 				fi
 			fi
@@ -335,7 +410,7 @@ find_scan() {
 		fi
 		;;
 	meta)
-		set -- "$@" -printf 'M1 %y %s %m %U %G %i %T@ %C@\0'"$pf"'\0%l\0' ")" -o -printf 'M0 %y %s %m %U %G %i %T@ %C@\0'"$pf"'\0%l\0'
+		set -- "$@" -printf 'M1 %y %s %m %U %G %i %T@ %C@ %D\0'"$pf"'\0%l\0' ")" -o -printf 'M0 %y %s %m %U %G %i %T@ %C@ %D\0'"$pf"'\0%l\0'
 		# shellcheck disable=SC2086
 		$LOW find "$@" 2>/dev/null || printf 'U\0'
 		;;
@@ -372,9 +447,13 @@ hash_pass() {
 # homes CALLBACK: call CALLBACK with every home directory (/root, /home/*)
 # that is a real directory. Symlinked homes, and /home when it is a
 # symlink or cannot be listed, are never followed (report_links counts
-# them as unreadable).
+# them as unreadable); each one not looked into calls home_skip, so that
+# the patterns that could match behind it are unknown, never missing.
 homes() {
 	if [ -L "$P/home" ] || [ ! -d "$P/home" ] || [ ! -r "$P/home" ] || [ ! -x "$P/home" ]; then
+		if [ -e "$P/home" ] || [ -L "$P/home" ]; then
+			home_skip /home
+		fi
 		set -- "$1" "$P/root"
 	else
 		set -- "$1" "$P/root" "$P"/home/*
@@ -382,14 +461,31 @@ homes() {
 	cb=$1
 	shift
 	for h; do
-		if [ -L "$h" ] || [ ! -d "$h" ]; then
+		if [ -L "$h" ]; then
+			home_skip "${h#"$P"}"
 			continue
 		fi
+		[ -d "$h" ] || continue
 		h=${h#"$P"}
 		case $h in *"
-"*) continue ;; esac
+"*)
+			home_skip "$h"
+			continue
+			;;
+		esac
 		"$cb" "$h"
 	done
+}
+
+# home_skip HOME: HOME (or all of /home) was not looked into; the patterns
+# of BASE that could match there are unknown (SKIP=1). report_links counts
+# it as unreadable once.
+home_skip() {
+	case $1 in
+	/root) [ "$BASE" = /root ] && SKIP=1 ;;
+	*) [ "$BASE" = /root ] || SKIP=1 ;;
+	esac
+	return 0
 }
 
 # report_links: a symlinked or unlistable /home, every symlinked home or
@@ -439,7 +535,10 @@ home_file() {
 		return 0
 	fi
 	case $REL in .ssh/*)
-		[ -L "$hd/.ssh" ] && return 0
+		if [ -L "$hd/.ssh" ]; then
+			SKIP=1
+			return 0
+		fi
 		[ -d "$hd/.ssh" ] || return 0
 		hd="$hd/.ssh"
 		if [ ! -x "$hd" ]; then
@@ -468,7 +567,12 @@ home_file() {
 		fi
 		f=${f#"$P"}
 		case $f in *"
-"*) continue ;; esac
+"*)
+			# Not scanned: its name cannot be a start point.
+			UNL=1
+			continue
+			;;
+		esac
 		"$FILE_CB" "$f"
 	done
 }
@@ -645,14 +749,19 @@ ssh_collect() {
 }
 
 # pattern_state BASE REL: the roots summary entry of one home pattern.
+# UNL=1 (a directory that cannot be searched) counts as unreadable here;
+# SKIP=1 (a symlinked or newline-named home, /home or .ssh directory) is
+# counted once by report_links. Both make the pattern unknown, never
+# missing.
 pattern_state() {
 	FOUND=0
 	UNL=0
+	SKIP=0
 	each_home_file "$1" "$2" found
 	if [ "$1" = /root ]; then pat="/root/$2"; else pat="/home/*/$2"; fi
 	if [ "$FOUND" = 1 ]; then
 		printf 'R%s %s\0' scanned "$pat"
-	elif [ "$UNL" = 1 ]; then
+	elif [ "$UNL" = 1 ] || [ "$SKIP" = 1 ]; then
 		printf 'R%s %s\0' error "$pat"
 	else
 		printf 'R%s %s\0' missing "$pat"
@@ -778,12 +887,13 @@ function open_records(   k) {
 	for (k = 1; k <= nroots; k++) printf "%s{\"root\":\"%s\",\"status\":\"%s\"}", (k > 1 ? "," : ""), ROOTN[k], ROOTS[k]
 	printf "],\"records\":["
 }
-function field(   s, c, k, from, ph) {
+function field(   s, c, k, from, ph, hid) {
 	ph = LASTH; LASTH = ""
+	hid = HID1; HID1 = ""
 	if (st == "tag") {
 		if (n == 0) { trunc = 1; return }
 		c = B[1]
-		if ((c >= 48 && c <= 57) || (c >= 97 && c <= 102)) { hashline(); return }
+		if ((c >= 48 && c <= 57) || (c >= 97 && c <= 102)) { hashline(hid); return }
 		s = asc(1, n)
 		c = substr(s, 1, 1)
 		if (c == "B") { started = etime(substr(s, 2)); if (started == "") started = 0 }
@@ -796,6 +906,13 @@ function field(   s, c, k, from, ph) {
 		}
 		else if (c == "M") { open_records(); META = s; st = "mpath" }
 		else if (c == "U") unread++
+		# H: the device:inode:ctime the next hash (a home SSH file) was
+		# read from and the cutoff second its ctime and mtime must lie
+		# before; an H of another form never matches a record.
+		else if (c == "H") {
+			HID1 = substr(s, 2)
+			if (HID1 !~ /^[0-9]+:[0-9]+:[0-9]+(\.[0-9]+)? -?[0-9]+$/ || length(HID1) > 80) HID1 = "- 0"
+		}
 		else if (c == "T") {
 			# The field before a T may be a hash record cut by a killed
 			# hash pass, its path a prefix of another path: drop it.
@@ -831,7 +948,7 @@ function field(   s, c, k, from, ph) {
 		st = "tag"; return
 	}
 }
-function hashline(   k, from, hex) {
+function hashline(id,   k, from, hex) {
 	if (n < 67 || B[65] != 32 || (B[66] != 32 && B[66] != 42)) return
 	hex = asc(1, 64)
 	if (hex !~ /^[0-9a-f]+$/ || length(hex) != 64) return
@@ -841,18 +958,33 @@ function hashline(   k, from, hex) {
 	LASTHAD = LASTH in HS
 	if (LASTHAD) LASTOLD = HS[LASTH]
 	HS[LASTH] = hex
+	if (id != "") HID[LASTH] = id; else delete HID[LASTH]
 }
-function record(   f, t, rec, m, mt, ct, hash) {
-	if (split(META, f, " ") != 9 || MPATH == "" || MLINKBAD) { unread++; return }
+function record(   f, t, rec, m, mt, ct, hash, moved, k, cut) {
+	if (split(META, f, " ") != 10 || MPATH == "" || MLINKBAD) { unread++; return }
 	t = f[2] == "f" ? "file" : f[2] == "d" ? "dir" : f[2] == "l" ? "symlink" : "other"
 	m = oct(f[4]); mt = etime(f[8]); ct = etime(f[9])
 	if (!uint(f[3]) || m < 0 || m > 4095 || !uint(f[5]) || !uint(f[6]) || !uint(f[7]) || mt == "" || ct == "" || (t == "symlink" && MLINK == "")) { unread++; return }
 	hash = ""
+	# A hash bound to a device:inode:ctime (a home SSH file) belongs to this
+	# record only if the meta pass saw the same: a file swapped or changed
+	# between the passes keeps no hash (unknown; the run is truncated), so
+	# the hash of the old content never stands for the new file. An equal
+	# ctime proves nothing for a file whose ctime or mtime is not older
+	# than the cutoff (coarse timestamps: a write in the same tick keeps
+	# them): no hash either.
+	moved = 0
+	if (MPATH in HID) {
+		k = index(HID[MPATH], " ")
+		cut = substr(HID[MPATH], k + 1) + 0
+		if (substr(HID[MPATH], 1, k - 1) != f[10] ":" f[7] ":" f[9] || !(ct + 0 < cut && mt + 0 < cut)) { delete HS[MPATH]; moved = 1; trunc = 1 }
+		delete HID[MPATH]
+	}
 	if (t == "file" && (MPATH in HS)) {
 		if (hashed + f[3] > HASHBUDGET) trunc = 1
 		else { hashed += f[3]; hash = HS[MPATH] }
 		delete HS[MPATH]
-	} else if (t == "file" && f[1] == "M1") unread++
+	} else if (t == "file" && f[1] == "M1" && !moved) unread++
 	if (nrec >= MAXREC || recbytes > RECBUDGET) { trunc = 1; return }
 	rec = "{\"path\":\"" MPATH "\",\"type\":\"" t "\",\"size\":" f[3] ",\"mode\":" m ",\"uid\":" f[5] ",\"gid\":" f[6] ",\"inode\":" f[7] ",\"mtime\":" mt ",\"ctime\":" ct
 	if (hash != "") rec = rec ",\"sha256\":\"" hash "\""
