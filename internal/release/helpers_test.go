@@ -29,9 +29,9 @@ type testSK struct {
 	pub  ssh.PublicKey
 }
 
-func newTestSK(t *testing.T) *testSK { return newTestSKApp(t, Application) }
+func newTestSK(t testing.TB) *testSK { return newTestSKApp(t, Application) }
 
-func newTestSKApp(t *testing.T, app string) *testSK {
+func newTestSKApp(t testing.TB, app string) *testSK {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -51,7 +51,7 @@ func newTestSKApp(t *testing.T, app string) *testSK {
 func (k *testSK) root(id string) Root { return Root{ID: id, Key: k.pub} }
 
 // signNS signs msg in namespace ns with the given FIDO flags.
-func (k *testSK) signNS(t *testing.T, ns string, flags byte, msg []byte) []byte {
+func (k *testSK) signNS(t testing.TB, ns string, flags byte, msg []byte) []byte {
 	t.Helper()
 	h := sha512.Sum512(msg)
 	var m [6]byte
@@ -88,10 +88,10 @@ func (k *testSK) signNS(t *testing.T, ns string, flags byte, msg []byte) []byte 
 	return []byte("-----BEGIN SSH SIGNATURE-----\n" + base64.StdEncoding.EncodeToString(raw) + "\n-----END SSH SIGNATURE-----\n")
 }
 
-func (k *testSK) sign(t *testing.T, msg []byte) []byte { return k.signNS(t, Namespace, 0x01, msg) }
+func (k *testSK) sign(t testing.TB, msg []byte) []byte { return k.signNS(t, Namespace, 0x01, msg) }
 
 // canon returns the JCS form of v.
-func canon(t *testing.T, v any) []byte {
+func canon(t testing.TB, v any) []byte {
 	t.Helper()
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -114,7 +114,7 @@ type tarFile struct {
 }
 
 // buildTar writes a POSIX ustar archive with archive/tar.
-func buildTar(t *testing.T, files []tarFile) []byte {
+func buildTar(t testing.TB, files []tarFile) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	w := tar.NewWriter(&buf)
@@ -147,7 +147,7 @@ func buildTar(t *testing.T, files []tarFile) []byte {
 
 var testScript = []byte("#!/bin/sh\nsystemctl restart docker\n")
 
-func testLock(t *testing.T, name, version string) []byte {
+func testLock(t testing.TB, name, version string) []byte {
 	t.Helper()
 	l := modulelock.Lock{Format: modulelock.Format, Name: name, Version: version, Title: "Docker", Description: "Built-in.",
 		Actions: map[string]modulelock.Action{"restart": {Title: "Restart", Script: "actions/restart.sh", SHA256: hexSum(testScript),
@@ -156,7 +156,7 @@ func testLock(t *testing.T, name, version string) []byte {
 }
 
 // moduleTar builds a valid module tar for name/version.
-func moduleTar(t *testing.T, name, version string) []byte {
+func moduleTar(t testing.TB, name, version string) []byte {
 	return buildTar(t, []tarFile{
 		{name: "actions/restart.sh", data: testScript},
 		{name: LockFile, data: testLock(t, name, version)},
@@ -170,7 +170,7 @@ type testModule struct {
 
 // release builds a manifest (as a map, for mutation), builtins.tar and
 // the module list for the given modules.
-func release(t *testing.T, mods ...testModule) (map[string]any, []byte) {
+func release(t testing.TB, mods ...testModule) (map[string]any, []byte) {
 	t.Helper()
 	var entries []tarFile
 	var mm []any
@@ -194,6 +194,6 @@ func release(t *testing.T, mods ...testModule) (map[string]any, []byte) {
 	return man, bundle
 }
 
-func defaultRelease(t *testing.T) (map[string]any, []byte) {
+func defaultRelease(t testing.TB) (map[string]any, []byte) {
 	return release(t, testModule{name: "docker", version: "1.2.0"}, testModule{name: "os-debian", version: "2.0.1"})
 }
