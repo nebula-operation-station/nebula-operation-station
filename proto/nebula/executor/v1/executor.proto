@@ -231,6 +231,39 @@ service ExecutorService {
   // unlocked.
   rpc CommitEnroll(CommitEnrollRequest) returns (CommitEnrollResponse);
 
+  // One-step enrollment offers (ADR 0013 D1, D2, D7; spec 03 v25-03-02).
+  // Role: server. Creates an offer for an inventory host that is neither
+  // pinned nor blocked; needs an open privileged session. The offer is
+  // bound to the creating web session (session_binding). An offer without
+  // NetBird is open at once; a NetBird offer starts awaiting_approval,
+  // without setup key and without download hash, and the executor proposes
+  // its NetBird offer permit (HIGH, user verification).
+  rpc CreateEnrollOffer(CreateEnrollOfferRequest) returns (CreateEnrollOfferResponse);
+
+  // Role: server. The download route GET /enroll/<offer-id>: releases the
+  // full script of an open offer exactly once. Every refusal is the same
+  // NotFound, whatever the reason.
+  rpc FetchEnrollScript(FetchEnrollScriptRequest) returns (FetchEnrollScriptResponse);
+
+  // Role: server, creating web session only. "Show script": the
+  // placeholder render (the setup key replaced by
+  // <netbird-setup-key-withheld>). Never consumes the offer, never changes
+  // its state, never reads the setup key; repeatable.
+  rpc ShowEnrollScript(ShowEnrollScriptRequest) returns (ShowEnrollScriptResponse);
+
+  // Role: server, creating web session only. "Download in browser":
+  // consumes the offer exactly like FetchEnrollScript; refused without
+  // consuming for an offer with NetBird.
+  rpc DownloadEnrollScript(DownloadEnrollScriptRequest) returns (DownloadEnrollScriptResponse);
+
+  // Role: server (any web session) and admin. Revokes an offer in any
+  // non-final state, including awaiting_approval.
+  rpc RevokeEnrollOffer(RevokeEnrollOfferRequest) returns (RevokeEnrollOfferResponse);
+
+  // Role: admin (nebula host offers). Lists the stored offers, without
+  // offer ID, salt, script or setup key.
+  rpc ListEnrollOffers(ListEnrollOffersRequest) returns (ListEnrollOffersResponse);
+
   // Role: server. Join of a provisioned PVE guest (ADR 0008 section 4,
   // PV-06): proposes the guest's enrollment with the normal enrollment
   // approval (at least HIGH). The executor checks the live guest, tries a
@@ -1269,6 +1302,124 @@ message EnrollResult {
 
 message CommitEnrollResponse {
   repeated EnrollResult results = 1;
+}
+
+message CreateEnrollOfferRequest {
+  // Inventory host ID; the host must be neither pinned nor blocked.
+  string host_id = 1;
+  // Default "nebula"; a valid non-root user name.
+  string ssh_user = 2;
+  // Default "nebula-default"; must be loaded in the keyring.
+  string credential_ref = 3;
+  // Grant the user NOPASSWD sudo.
+  bool sudo = 4;
+  // Join NetBird (only when the executor has NetBird configured).
+  bool netbird = 5;
+  // NetBird peers joining with the setup key are ephemeral.
+  bool netbird_ephemeral = 6;
+  // Opaque token of the creating web session, 16 to 64 bytes. The executor
+  // stores only a digest of it; show and browser download need the same
+  // token.
+  bytes session_binding = 7;
+}
+
+// The NetBird offer permit a NetBird offer waits for.
+message NetBirdOfferPermitInfo {
+  string digest = 1;
+  bytes challenge = 2;
+  // RFC 8785 form of the binding the approval covers.
+  bytes canonical = 3;
+  int64 approval_expiry_unix = 4;
+}
+
+message CreateEnrollOfferResponse {
+  // The offer ID: the download capability. Returned only here; the
+  // executor keeps only its SHA-256.
+  string offer_id = 1;
+  // Lowercase hex SHA-256 of the offer ID.
+  string offer_id_hash = 2;
+  string state = 3;
+  int64 expires_unix = 4;
+  // Lowercase hex SHA-256 of the downloaded script; empty for a NetBird
+  // offer until its setup key is recorded.
+  string script_sha256 = 5;
+  // Set for NetBird offers.
+  NetBirdOfferPermitInfo netbird_permit = 6;
+}
+
+message FetchEnrollScriptRequest {
+  string offer_id = 1;
+  // Client address as determined by the server (spec 03 v25-03-06) and
+  // the direct peer address: IP literals without zone.
+  string client_addr = 2;
+  string peer_addr = 3;
+}
+
+message ShowEnrollScriptRequest {
+  string offer_id = 1;
+  bytes session_binding = 2;
+}
+
+message DownloadEnrollScriptRequest {
+  string offer_id = 1;
+  bytes session_binding = 2;
+  string client_addr = 3;
+  string peer_addr = 4;
+}
+
+// The full script, at most 64 KiB, with the lowercase hex SHA-256 of it.
+message FetchEnrollScriptResponse {
+  bytes script = 1;
+  string script_sha256 = 2;
+}
+
+// The placeholder render, at most 64 KiB; script_sha256 is the hash of the
+// downloaded script, empty for a NetBird offer still awaiting approval.
+message ShowEnrollScriptResponse {
+  bytes script = 1;
+  string script_sha256 = 2;
+}
+
+// The full script, at most 64 KiB, with the lowercase hex SHA-256 of it.
+message DownloadEnrollScriptResponse {
+  bytes script = 1;
+  string script_sha256 = 2;
+}
+
+message RevokeEnrollOfferRequest {
+  // Lowercase hex SHA-256 of the offer ID (as listed).
+  string offer_id_hash = 1;
+}
+
+message RevokeEnrollOfferResponse {
+  string state = 1;
+}
+
+message ListEnrollOffersRequest {}
+
+message EnrollOfferInfo {
+  string offer_id_hash = 1;
+  string host_id = 2;
+  string ssh_user = 3;
+  string credential_ref = 4;
+  bool netbird = 5;
+  string state = 6;
+  int64 created_unix = 7;
+  int64 expires_unix = 8;
+  string script_sha256 = 9;
+  int64 downloaded_unix = 10;
+  string client_addr = 11;
+  string peer_addr = 12;
+  int32 probes = 13;
+  int32 rejected_codes = 14;
+  // NetBird setup-key record status: none, pending or created.
+  string setup_key_record = 15;
+  // "Show script" placeholder-hash mismatches seen for this offer.
+  int32 show_mismatches = 16;
+}
+
+message ListEnrollOffersResponse {
+  repeated EnrollOfferInfo offers = 1;
 }
 
 // GuestJoinTarget is the provisioned guest a join enrolls (ADR 0008
