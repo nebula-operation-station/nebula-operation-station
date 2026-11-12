@@ -588,3 +588,104 @@ func TestVulnAgentBuiltIntoTheTarball(t *testing.T) {
 		t.Errorf("the NOS package must not carry the vulnerability agent")
 	}
 }
+
+// The agent is packaged like the collectors: an nfpm .deb with its binary in
+// /usr/bin, its unit and timer in /lib/systemd/system and the guide, built
+// from the same release, with the tested maintainer scripts. It is its own
+// package (nebula-vuln-agent), carrying only its own binary, so it can be
+// installed on nos-vuln without the NOS package.
+func TestVulnAgentPackagedLikeTheCollectors(t *testing.T) {
+	pkg := goreleaserSection(t, "nfpms", "nebula-vuln-agent")
+	main := goreleaserSection(t, "nfpms", "nebula")
+	for _, want := range []string{
+		"    package_name: nebula-vuln-agent\n",
+		"    ids: [nebula-vuln-agent]\n",
+		"    formats: [deb]\n",
+		"    bindir: /usr/bin\n",
+		"      - src: deploy/systemd/nebula-vuln-agent.service\n        dst: /lib/systemd/system/nebula-vuln-agent.service\n",
+		"      - src: deploy/systemd/nebula-vuln-agent.timer\n        dst: /lib/systemd/system/nebula-vuln-agent.timer\n",
+		"      - src: docs/admin/guide.md\n        dst: /usr/share/doc/nebula-vuln-agent/guide.md\n",
+		"    scripts:\n      postinstall: deploy/deb/vuln-agent/postinst\n      preremove: deploy/deb/vuln-agent/prerm\n",
+	} {
+		if !strings.Contains(pkg, want) {
+			t.Errorf("nebula-vuln-agent package lacks %q", want)
+		}
+	}
+	// Like the collectors' units in the NOS package: the same install path
+	// and the same file metadata defaults (root, 0644).
+	if !strings.Contains(main, "        dst: /lib/systemd/system/nebula-pve-collector.service\n") {
+		t.Errorf("NOS package no longer installs the collector unit to /lib/systemd/system; update this test")
+	}
+	for _, field := range []string{"vendor:", "homepage:", "maintainer:", "license: AGPL-3.0-or-later", "section: admin"} {
+		if !strings.Contains(pkg, "    "+field) {
+			t.Errorf("nebula-vuln-agent package lacks %q", field)
+		}
+	}
+	// Only its own binary, nothing of the NOS install, no secret or config:
+	// the postinst writes the skeleton, the admin the token.
+	for _, bad := range []string{"install.sh", "binaries.txt", "nebula-server", "nebula-executor", "/etc/nebula-vuln-agent", "file_info: {mode: 06"} {
+		if strings.Contains(pkg, bad) {
+			t.Errorf("nebula-vuln-agent package must not carry %q", bad)
+		}
+	}
+	// The docker image stays without the agent.
+	if strings.Contains(goreleaserSection(t, "dockers", "nebula"), "vuln-agent") {
+		t.Errorf("the image must not carry the vulnerability agent")
+	}
+}
+
+// The maintainer scripts describe the package as built, so the admin does
+// not read a stale "not built yet".
+func TestVulnAgentScriptsDoNotClaimUnbuilt(t *testing.T) {
+	for _, p := range []string{vulnPostinst, vulnPrerm, "../install.sh"} {
+		if s := strings.ToLower(readFile(t, p)); strings.Contains(s, "not built") || strings.Contains(s, "not yet built") {
+			t.Errorf("%s still says the package is not built", p)
+		}
+	}
+}
+
+// guideVulnSection returns section 10.5 of the admin guide.
+func guideVulnSection(t *testing.T) string {
+	t.Helper()
+	g := readFile(t, "../../docs/admin/guide.md")
+	_, rest, ok := strings.Cut(g, "\n### 10.5 Vulnerability agent\n")
+	if !ok {
+		t.Fatal("guide has no section 10.5 Vulnerability agent")
+	}
+	if i := strings.Index(rest, "\n## "); i >= 0 {
+		rest = rest[:i]
+	}
+	return rest
+}
+
+// Removing by hand must stop a run that is already active, like prerm does,
+// before the binary and the unit are deleted under it.
+func TestVulnAgentGuideRemovalStopsTheService(t *testing.T) {
+	s := guideVulnSection(t)
+	_, rm, ok := strings.Cut(s, "**Removing**")
+	if !ok {
+		t.Fatal("guide 10.5 has no **Removing** paragraph")
+	}
+	disable := "sudo systemctl disable --now nebula-vuln-agent.timer nebula-vuln-agent.service\n"
+	di := strings.Index(rm, disable)
+	ri := strings.Index(rm, "sudo rm ")
+	if di < 0 || ri < 0 || di > ri {
+		t.Errorf("guide removal must run %q before deleting the files", strings.TrimSpace(disable))
+	}
+	if !strings.Contains(rm, "sudo apt remove nebula-vuln-agent") {
+		t.Errorf("guide removal lacks the package removal")
+	}
+}
+
+// The guide installs the package, not only the tarball.
+func TestVulnAgentGuideInstallsThePackage(t *testing.T) {
+	s := guideVulnSection(t)
+	for _, want := range []string{"nebula-vuln-agent_", "sudo apt install ./nebula-vuln-agent_", "/lib/systemd/system"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("guide 10.5 lacks %q", want)
+		}
+	}
+	if strings.Contains(s, "no\nseparate Debian package") || strings.Contains(s, "has no separate Debian package") {
+		t.Errorf("guide 10.5 still says there is no package")
+	}
+}

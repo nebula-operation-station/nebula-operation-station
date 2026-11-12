@@ -153,8 +153,8 @@ done
 # binary from the tarball, its unit and timer, and provisions its user, data
 # dir and config skeleton, then stops. It never enables or starts anything:
 # the agent needs a NOS token and URL first (guide, "Vulnerability agent").
-# The (not yet built) nebula-vuln-agent package's postinst,
-# deploy/deb/vuln-agent/postinst, must render the same skeleton.
+# The nebula-vuln-agent package's postinst, deploy/deb/vuln-agent/postinst,
+# must render the same skeleton.
 # begin: vuln agent install
 if [[ ${vuln_agent} -eq 1 ]]; then
   if [[ -n "$admin_users" || -n "$rp_id" || ${from_package} -eq 1 || ${bundle_dir_option} -eq 1 ]]; then

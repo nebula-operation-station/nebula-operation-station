@@ -2024,15 +2024,27 @@ rules below to its user (`meta skuid nebula-vuln-agent` in nftables).
 
 #### Install
 
-Copy the release tarball to `nos-vuln`, extract it, and run
-`sudo ./deploy/install.sh --vuln-agent` from the extracted directory.
-The command takes no other option. It installs only the agent, its unit
-and its timer, nothing of the server or the executor. On the Nebula
-machine it runs next to the normal install. This release has no
-separate Debian package for the agent, and `nebula-operation-station`
-does not contain it.
+The agent has its own Debian package, `nebula-vuln-agent`, built with
+the release like the collectors' package. `nebula-operation-station`
+does not contain it, and it contains nothing of the server or the
+executor. The APT repository of section 3.2 does not carry it yet, so
+copy `nebula-vuln-agent_<version>_<arch>.deb` from the release to
+`nos-vuln`, compare its SHA-256 with the release's checksums file, and
+install it:
 
-The install creates this setup, and it enables or starts nothing:
+```
+sudo apt install ./nebula-vuln-agent_<version>_<arch>.deb
+```
+
+Its unit and timer go to `/lib/systemd/system`. Without Debian, copy the
+release tarball to `nos-vuln`, extract it, and run
+`sudo ./deploy/install.sh --vuln-agent` from the extracted directory.
+That command takes no other option, installs only the agent, and puts
+its unit and timer in `/etc/systemd/system`. Use one of the two ways,
+not both: units in `/etc/systemd/system` override the package's. On the
+Nebula machine either way runs next to the normal install.
+
+Both ways create this setup, and they enable or start nothing:
 
 | Path | Owner, mode | Content |
 | --- | --- | --- |
@@ -2042,7 +2054,7 @@ The install creates this setup, and it enables or starts nothing:
 | `/etc/nebula-vuln-agent/config.json` | `root:nebula-vuln-agent`, 0640 | written once from a skeleton, never overwritten |
 | `/etc/nebula-vuln-agent/token` | `nebula-vuln-agent`, 0600 | the NOS token; **you** create it |
 | `/usr/bin/nebula-vuln-agent` | root, 0755 | the agent |
-| `/etc/systemd/system/` | root, 0644 | `nebula-vuln-agent.service`, `nebula-vuln-agent.timer` |
+| `/lib/systemd/system/` (package) or `/etc/systemd/system/` (tarball) | root, 0644 | `nebula-vuln-agent.service`, `nebula-vuln-agent.timer` |
 
 The installer refuses a symlink or a file where one of these directories
 or the configuration belongs. The agent refuses a NOS token or LLM key
@@ -2209,22 +2221,26 @@ upgrade (with a warning from `install.sh`). Put your own changes in a
 drop-in under `/etc/systemd/system/nebula-vuln-agent.service.d/`
 instead.
 
-**Upgrades**: run `install.sh --vuln-agent` from the new tarball. It
+**Upgrades**: install the new package with `apt install`, or run
+`install.sh --vuln-agent` from the new tarball. The tarball install
 replaces the binary and the units you have not edited. Nothing is
 restarted; the next timer run uses the new version. `config.json` and
 the token stay as they are.
 
-**Removing**: `uninstall.sh` (section 16) does not know the agent yet.
-Run these commands by hand, then revoke the token on the Nebula machine
-(section 10.4):
+**Removing**: with the package, run `sudo apt remove nebula-vuln-agent`.
+Its prerm stops and disables the timer and the service first.
+`uninstall.sh` (section 16) does not know the agent yet. For a tarball
+install, run these commands by hand. The first one stops a run that is
+still active, so the binary and the unit are not deleted under it:
 
 ```
-sudo systemctl disable --now nebula-vuln-agent.timer
+sudo systemctl disable --now nebula-vuln-agent.timer nebula-vuln-agent.service
 sudo rm /etc/systemd/system/nebula-vuln-agent.service \
   /etc/systemd/system/nebula-vuln-agent.timer /usr/bin/nebula-vuln-agent
 sudo systemctl daemon-reload
 ```
 
+Either way, then revoke the token on the Nebula machine (section 10.4).
 `/var/lib/nebula-vuln-agent`, `/etc/nebula-vuln-agent` and the user stay
 until you delete them.
 
