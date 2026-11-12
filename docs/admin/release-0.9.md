@@ -24,8 +24,9 @@ The payloads come from the release workflow `.github/workflows/release.yml` (see
 
 Flow: tag → workflow → artifact checked offline, hashes recomputed → `make-manifest.py` → signature with the YubiKey → `release-manifest.json` and `.sig` attached to the draft → publish.
 
-- [ ] The release workflow run for `v0.9.0-beta.1` is green (both jobs). If it fails, fix on `main` and tag a new version, or re-run it by hand (`workflow_dispatch` with the tag) only while the draft holds no manifest or signature.
-- [ ] Record the workflow run URL and the GoReleaser version (`GORELEASER_VERSION` in the workflow, also in the build log).
+- [ ] The release workflow run for `v0.9.0-beta.1` is green (both jobs). If it fails, fix on `main` and tag a new version, or re-run it by hand (`workflow_dispatch` with the tag) only while the draft holds no manifest or signature. If the draft job failed or was cancelled, the draft may be partly updated: do not review it, re-run until the draft job is green (see [Release workflow](release-signing.md#release-workflow-source-of-the-payloads)).
+- [ ] Record the workflow run URL, the GoReleaser version (`GORELEASER_VERSION` in the workflow, also in the build log) and the Go version (`GO_VERSION` in the workflow, pinned exactly; the build job's `go_version` output, run summary and draft notes show it, e.g. `go1.26.9`). Previously the Go version was not pinned or recorded.
+- [ ] The build job ran on a GitHub-hosted runner (`ubuntu-24.04`, fresh VM, no caches), not on a self-hosted runner.
 - [ ] Check in the build log and the artifact that GoReleaser produced these files (previously: checked in a local `dist/`):
   - `nebula_0.9.0-beta.1_linux_amd64.tar.gz` and `nebula_0.9.0-beta.1_linux_arm64.tar.gz`: the six binaries (`nebula`, `nebula-server`, `nebula-executor`, `nebula-discovery`, `nebula-pve-collector`, `nebula-netdev-collector`) plus the allowlisted `deploy/` files;
   - `nebula-operation-station_0.9.0-beta.1_amd64.deb` and `..._arm64.deb`;
@@ -69,7 +70,7 @@ Follow "Build and review the release manifest" in `release-signing.md`. The stag
 
 Follow "Publish manifest, signature and installed-files.json on GitHub" in `release-signing.md`.
 
-- [ ] The release workflow already attached every payload from `payloads/` to the draft `v0.9.0-beta.1` (previously: uploaded by hand). Check that the draft's assets are exactly the reviewed bytes (names, sizes, SHA-256), then upload `release-manifest.json` and `release-manifest.json.sig` by hand. Never rebuild or re-sign on the publication machine, and do not re-run the workflow for this tag after signing.
+- [ ] The release workflow already attached every payload from `payloads/` to the draft `v0.9.0-beta.1` (previously: uploaded by hand). The draft job already downloaded and hashed every asset; still check yourself that the draft's assets are exactly the reviewed bytes (names, sizes, SHA-256), then upload `release-manifest.json` and `release-manifest.json.sig` by hand. Never rebuild or re-sign on the publication machine, and do not re-run the workflow for this tag after signing.
 - [ ] Per-version hash manifest (ADR 0015 D2): `release-manifest.json`, `release-manifest.json.sig` and `installed-files.json` are attached to this version's release. They are attached for **every** later version too.
 - [ ] Mark the release as a pre-release (beta).
 - [ ] Release notes: what is in the beta, the open items that ship unresolved (at least root-2, rotation admission, integrity checks, `nebula verify`), and that GitHub, checksums and keys shown beside the files establish no trust; only the signature against the root compiled into the binaries does.
