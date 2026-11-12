@@ -153,10 +153,16 @@ History:
   has one `trust-path` fake per command (previously one fake for
   `pve remote add`/`repin --ca-file`). Fake entries that check their
   recorders, fake executor and working directory at the start of each
-  run test the isolation of the `canary-range` runs and of the
-  `--identity` control run in every order (previously the range
-  rejection checks had no fake-based test, and the control-run check
-  caught only a shared `backup.System` recorder in the after order).
+  run test the isolation of the `canary-range` runs in every order and
+  catch a fake executor or working directory shared between the
+  `--identity` control and canary run in both orders (previously the
+  range rejection checks had no fake-based test, and the control-run
+  check caught no shared fake executor or working directory); a
+  shared `backup.System` recorder is still caught only in the after
+  order, because a correct control run makes no `backup.System` call.
+  The range-check fake records its final request by one call to its
+  fake executor (previously not stated, so whether it caught a harness
+  sharing only the fake executor was open).
 
 ## Context
 
@@ -917,7 +923,11 @@ does NOS connect **from** (`--from`)?
     then, for `MAX`, `MAX` and `MAX − 1`, returns no error after
     recording the final request with the value in its expected field
     (passing the distinctive check) and, for the rejection values,
-    returns an error without traffic. It must pass. A harness that
+    returns an error without traffic. The fake records the final
+    request by exactly one call to its fake executor that sends that
+    request, so after an accepted run both its recorders and its fake
+    executor hold a call, and a rejection value calls neither. It must
+    pass. A harness that
     hands a run a recorder or fake executor an earlier accepted run
     used, or a working directory any earlier run used, fails it in
     every run order (a later accepted run becomes a harness error, a
@@ -947,8 +957,14 @@ does NOS connect **from** (`--from`)?
     one call to its fake executor, and then behaves like the real
     entry (canary: `Stop`, final `Start`, no error; control:
     `*age.NoIdentityMatchError`, no `backup.System` call). It must pass
-    in both orders; a harness that shares any of the three between
-    control and canary run fails it in both orders.
+    in both orders. A harness that shares the fake executor or the
+    working directory between control and canary run fails it in both
+    orders. One that shares only the `backup.System` recorder (fresh
+    fake executor and working directory) fails it only in the after
+    order: a correct control run makes no `backup.System` call, so in
+    the before order the canary run finds that recorder empty and
+    passes; the before/after check above catches that harness in the
+    same after order, and no meta-test catches it in the before order.
   **Range checks** (previously Run classes sent every accepted run
   through conditions 1 to 3 and let a rejected run pass on its own,
   while **Bounded numbers** below replaces conditions 1 and 2 for
