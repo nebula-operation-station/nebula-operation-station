@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"testing"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevcontract"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vault"
 )
@@ -33,14 +35,48 @@ type netDevBaselineEnv struct {
 	dev  executordb.NetDevice
 }
 
+// testRawDigestUnverified is a raw_digest the test verifier never
+// confirms as executor-computed.
+var testRawDigestUnverified = strings.Repeat("c3", 32)
+
+// testBaselineVerifier stands in for the ND-14 executor-computed digest
+// check: it confirms every digest except testRawDigestUnverified.
+func testBaselineVerifier(_ context.Context, _ string, _ int64, raw string) error {
+	if raw == testRawDigestUnverified {
+		return errors.New("digest not computed by the executor")
+	}
+	return nil
+}
+
 func newNetDevBaselineEnv(t *testing.T) *netDevBaselineEnv {
+	t.Helper()
+	return newNetDevBaselineEnvFor(t, "core-sw")
+}
+
+func newNetDevBaselineEnvFor(t *testing.T, deviceID string) *netDevBaselineEnv {
 	t.Helper()
 	e := newNetDevTestEnv(t)
 	svc := newReconcileEnv(t).svc
 	logs := &syncBuffer{}
 	svc.db, svc.vault, svc.log = e.db, e.vault, slog.New(slog.NewJSONHandler(logs, nil))
-	dev := registerTestNetDev(t, e, "core-sw", "10.20.0.2", testNetDevPin)
+	svc.netDevBaselineDigest = testBaselineVerifier
+	dev := registerTestNetDev(t, e, deviceID, "10.20.0.2", testNetDevPin)
 	return &netDevBaselineEnv{e: e, svc: svc, logs: logs, dev: dev}
+}
+
+// auditEvents returns the netdev_admin audit records of the given action.
+func (b *netDevBaselineEnv) auditEvents(action string) []map[string]any {
+	var out []map[string]any
+	for line := range strings.SplitSeq(strings.TrimSpace(b.logs.String()), "\n") {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil || rec["msg"] != "audit" || rec["kind"] != "netdev_admin" {
+			continue
+		}
+		if rec["action"] == action {
+			out = append(out, rec)
+		}
+	}
+	return out
 }
 
 // propose proposes a baseline and returns the permit digest.
@@ -300,24 +336,210 @@ func TestNetDevBaselineRequestRefusals(t *testing.T) {
 		t.Errorf("malformed device id read: %v", err)
 	}
 
-	// A blocked device gets no baseline.
+	// A blocked device gets no baseline, even under a permit approved
+	// before it was blocked.
+	blockedPermit := env.propose(t, 7, testRawDigestA)
+	env.approve(t, blockedPermit.ExecutionDigest)
 	if _, err := env.e.db.BlockNetDevice(env.dev.ID, "test"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := env.svc.ProposeNetDeviceBaseline(ctx, env.dev.ID, 7, testRawDigestA); status.Code(err) != codes.FailedPrecondition {
 		t.Errorf("blocked device propose: %v", err)
 	}
+	if _, err := env.svc.CommitNetDeviceBaseline(ctx, env.dev.ID, 7, testRawDigestA, blockedPermit.ExecutionDigest); status.Code(err) != codes.FailedPrecondition {
+		t.Errorf("blocked device commit: %v", err)
+	}
 	if _, err := env.e.db.UnblockNetDevice(env.dev.ID); err != nil {
 		t.Fatal(err)
 	}
+	requireNoBaseline(t, env.svc, env.dev.ID)
 
-	// A locked vault refuses reads and writes.
+	// A locked vault refuses reads and writes, even under an approved
+	// permit.
+	lockedPermit := env.propose(t, 8, testRawDigestB)
+	env.approve(t, lockedPermit.ExecutionDigest)
 	env.e.vault.Lock()
 	if _, _, err := env.svc.GetNetDeviceBaseline(ctx, env.dev.ID); status.Code(err) != codes.FailedPrecondition {
 		t.Errorf("locked vault read: %v", err)
 	}
 	if _, err := env.svc.ProposeNetDeviceBaseline(ctx, env.dev.ID, 7, testRawDigestA); status.Code(err) != codes.FailedPrecondition {
 		t.Errorf("locked vault propose: %v", err)
+	}
+	if _, err := env.svc.CommitNetDeviceBaseline(ctx, env.dev.ID, 8, testRawDigestB, lockedPermit.ExecutionDigest); status.Code(err) != codes.FailedPrecondition {
+		t.Errorf("locked vault commit: %v", err)
+	}
+	if _, _, err := env.e.vault.OpenVersion(netDevBaselineRef(env.dev.ID)); err == nil {
+		t.Error("locked vault opened")
+	}
+	if err := env.e.vault.Unlock([]byte(strings.Repeat("correct-horse-battery-staple-", 4))); err != nil {
+		t.Fatal(err)
+	}
+	requireNoBaseline(t, env.svc, env.dev.ID)
+}
+
+// TestNetDevBaselineCommitChecksRaceAfterAuthorization drives a change in
+// between the permit check (AuthorizeBaseline) and the vault commit: the
+// checks inside the PutWithCommit callback must refuse it, store nothing
+// and audit the refused commit of the consumed permit.
+func TestNetDevBaselineCommitChecksRaceAfterAuthorization(t *testing.T) {
+	for name, race := range map[string]func(t *testing.T, env *netDevBaselineEnv){
+		"re-pin": func(t *testing.T, env *netDevBaselineEnv) {
+			if _, err := env.e.db.BumpTrustGeneration(env.dev.ID, testNetDevPin2); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"block": func(t *testing.T, env *netDevBaselineEnv) {
+			if _, err := env.e.db.BlockNetDevice(env.dev.ID, "test"); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"concurrent baseline": func(t *testing.T, env *netDevBaselineEnv) {
+			v, err := encodeNetDevBaseline(NetDevBaseline{DeviceID: env.dev.ID, VersionID: 9, RawDigest: testRawDigestB, TrustGeneration: env.dev.TrustGeneration,
+				ExecutionDigest: strings.Repeat("d4", 32), CommittedBy: "other", ApprovedAtUnix: 1700000000})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := env.e.vault.Put(netDevBaselineRef(env.dev.ID), v, "other"); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			env := newNetDevBaselineEnv(t)
+			ctx := context.Background()
+			p := env.propose(t, 7, testRawDigestA)
+			env.approve(t, p.ExecutionDigest)
+			a := env.svc.netDevAdmin()
+			authorize := a.AuthorizeBaseline
+			raced := false
+			a.AuthorizeBaseline = func(ctx context.Context, b NetDevBaselineBinding, digest string) error {
+				if err := authorize(ctx, b, digest); err != nil {
+					return err
+				}
+				race(t, env)
+				raced = true
+				return nil
+			}
+			if _, err := a.ApproveBaseline(ctx, env.dev.ID, 7, testRawDigestA, p.ExecutionDigest, "admin:uid1000"); !errors.Is(err, ErrNetDevBaselineConcurrent) {
+				t.Fatalf("raced commit: %v, want ErrNetDevBaselineConcurrent", err)
+			}
+			if !raced {
+				t.Fatal("permit was not consumed before the race")
+			}
+			got, rev, err := env.e.vault.OpenVersion(netDevBaselineRef(env.dev.ID))
+			if name == "concurrent baseline" {
+				b, derr := decodeNetDevBaseline(env.dev.ID, got)
+				if err != nil || rev != 1 || derr != nil || b.VersionID != 9 {
+					t.Fatalf("concurrent baseline overwritten: %+v rev %d %v %v", b, rev, err, derr)
+				}
+			} else if !errors.Is(err, vault.ErrNotFound) {
+				t.Fatalf("baseline stored across the race: %v", err)
+			}
+			refused := env.auditEvents("baseline_commit_refused")
+			if len(refused) != 1 || refused[0]["device"] != env.dev.ID || refused[0]["execution_digest"] != p.ExecutionDigest || refused[0]["reason"] != "concurrent_change" {
+				t.Fatalf("refused commit audit %v", refused)
+			}
+			if n := len(env.auditEvents("baseline_approved")); n != 0 {
+				t.Fatalf("%d approval events for a refused commit", n)
+			}
+		})
+	}
+}
+
+// TestNetDevBaselineRequiresExecutorComputedDigest: without the
+// executor-side digest check (production until ND-14) no baseline can be
+// proposed or committed, and a digest the executor did not compute is
+// refused at propose and at commit (ADR 0010 D4).
+func TestNetDevBaselineRequiresExecutorComputedDigest(t *testing.T) {
+	env := newNetDevBaselineEnv(t)
+	ctx := context.Background()
+	p := env.propose(t, 7, testRawDigestA)
+	env.approve(t, p.ExecutionDigest)
+
+	// Production wiring: no verifier.
+	env.svc.netDevBaselineDigest = nil
+	if a := env.svc.netDevAdmin(); a.VerifyBaselineDigest != nil {
+		t.Fatal("production netDevAdmin has a baseline digest verifier")
+	}
+	if _, err := env.svc.ProposeNetDeviceBaseline(ctx, env.dev.ID, 7, testRawDigestA); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("propose without executor-computed digest: %v", err)
+	}
+	if _, err := env.svc.CommitNetDeviceBaseline(ctx, env.dev.ID, 7, testRawDigestA, p.ExecutionDigest); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("commit without executor-computed digest: %v", err)
+	}
+	if _, err := env.svc.netDevAdmin().BaselineBinding(ctx, env.dev.ID, 7, testRawDigestA); !errors.Is(err, ErrNetDevBaselineUnverified) {
+		t.Fatalf("binding without verifier: %v", err)
+	}
+	requireNoBaseline(t, env.svc, env.dev.ID)
+
+	// With a verifier, a server-chosen digest it does not confirm is
+	// refused before any permit exists.
+	env.svc.netDevBaselineDigest = testBaselineVerifier
+	if _, err := env.svc.ProposeNetDeviceBaseline(ctx, env.dev.ID, 7, testRawDigestUnverified); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("propose of unverified digest: %v", err)
+	}
+	// Commit checks again: the verifier withdraws the digest after approval.
+	env.svc.netDevBaselineDigest = func(context.Context, string, int64, string) error { return errors.New("withdrawn") }
+	if _, err := env.svc.CommitNetDeviceBaseline(ctx, env.dev.ID, 7, testRawDigestA, p.ExecutionDigest); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("commit of withdrawn digest: %v", err)
+	}
+	requireNoBaseline(t, env.svc, env.dev.ID)
+	// The permit was not consumed by the refused commits.
+	env.svc.netDevBaselineDigest = testBaselineVerifier
+	if _, err := env.svc.CommitNetDeviceBaseline(ctx, env.dev.ID, 7, testRawDigestA, p.ExecutionDigest); err != nil {
+		t.Fatalf("verified commit: %v", err)
+	}
+}
+
+// TestNetDevBaselineRPCNotWired pins that the baseline handlers have no
+// gRPC method and no role entry: they may only be wired together with the
+// executor-computed digest check of ND-14 (see netdev_baseline.go).
+func TestNetDevBaselineRPCNotWired(t *testing.T) {
+	for _, m := range allServiceMethods(t) {
+		if strings.Contains(strings.ToLower(m), "baseline") {
+			t.Errorf("baseline RPC %s is wired before ND-14", m)
+		}
+	}
+	for m := range MethodRoles() {
+		if strings.Contains(strings.ToLower(m), "baseline") {
+			t.Errorf("baseline method %s has a role before ND-14", m)
+		}
+	}
+}
+
+// TestNetDevBaselineTargetIsCanonical: every valid device id, up to the
+// maximum length, yields a permit host id canonical accepts, distinct per
+// device.
+func TestNetDevBaselineTargetIsCanonical(t *testing.T) {
+	seen := map[string]string{}
+	for n := 1; n <= netdevcontract.MaxDeviceIDBytes; n++ {
+		for _, id := range []string{strings.Repeat("a", n), "b" + strings.Repeat("-c", (n-1)/2) + strings.Repeat("d", (n-1)%2)} {
+			if !netdevcontract.ValidDeviceID(id) {
+				t.Fatalf("test id %q invalid", id)
+			}
+			target := netDevBaselineTarget(id)
+			if !canonical.ValidHostID(target) {
+				t.Errorf("device id of %d bytes: target %q (%d chars) rejected by canonical", len(id), target, len(target))
+			}
+			if prev, ok := seen[target]; ok && prev != id {
+				t.Errorf("target %q shared by %q and %q", target, prev, id)
+			}
+			seen[target] = id
+		}
+	}
+}
+
+// TestNetDevBaselineMaxLengthDeviceID approves a baseline end to end for
+// device ids at the boundaries of the target and vault ref scoping.
+func TestNetDevBaselineMaxLengthDeviceID(t *testing.T) {
+	for _, n := range []int{47, 48, 54, 55, netdevcontract.MaxDeviceIDBytes} {
+		t.Run(fmt.Sprint(n), func(t *testing.T) {
+			env := newNetDevBaselineEnvFor(t, strings.Repeat("s", n))
+			got := env.commitApproved(t, 7, testRawDigestA)
+			if got.DeviceID != env.dev.ID || got.Revision != 1 {
+				t.Fatalf("baseline %+v", got)
+			}
+		})
 	}
 }
 

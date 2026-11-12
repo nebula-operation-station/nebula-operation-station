@@ -5,6 +5,7 @@ package executor
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -44,10 +45,17 @@ import (
 // (NetDevBaselineDrift); a compromised server cannot make drift disappear
 // in the executor's view.
 //
-// TODO(ND-14): once the executor reads device configs itself, commit must
-// also require that the bound raw_digest is one the executor computed for
-// the device; until then the permit (which shows the digest to the
-// approver) is the only binding.
+// The raw_digest must not be chosen by the server alone (ADR 0010 D4):
+// propose and commit require NetDevAdmin.VerifyBaselineDigest to confirm
+// that the executor itself computed rawDigest for that device and version.
+// The executor does not read device configs yet, so production leaves the
+// verifier nil and every baseline proposal and commit is refused with
+// ErrNetDevBaselineUnverified: the handlers below are deliberately
+// unwirable (no proto method, no MethodRoles entry, guarded by
+// TestNetDevBaselineRPCNotWired) until ND-14 lands.
+//
+// TODO(ND-14): set VerifyBaselineDigest from the executor's own config
+// reads, then add the proto messages and admin-only MethodRoles entries.
 
 const (
 	// netDevBaselineAction is the reserved action id of a baseline
@@ -61,6 +69,9 @@ const (
 	netDevBaselineMagic = "NOSNDBL1"
 	// maxNetDevBaselineRecord bounds a stored baseline record.
 	maxNetDevBaselineRecord = 1 << 10
+	// maxNetDevBaselineTarget bounds the permit host id of a baseline
+	// approval (canonical hostIDRe: at most 63 characters).
+	maxNetDevBaselineTarget = 63
 )
 
 // netDevBaselineArtifact is the fixed "script" of a baseline approval:
@@ -93,6 +104,10 @@ var (
 	// ErrNetDevNoBaseline is returned when a device has no approved
 	// baseline.
 	ErrNetDevNoBaseline = errors.New("executor: network device has no approved baseline")
+	// ErrNetDevBaselineUnverified is returned when the executor cannot
+	// confirm that it computed the raw_digest itself (ADR 0010 D4); until
+	// ND-14 this refuses every baseline.
+	ErrNetDevBaselineUnverified = errors.New("executor: network device baseline digest is not executor-verified")
 	// ErrNetDevBaselineBlocked is returned for a baseline on a blocked
 	// device: its trust is in question.
 	ErrNetDevBaselineBlocked = errors.New("executor: network device is blocked")
@@ -149,9 +164,18 @@ func netDevBaselineRef(id string) string {
 	return strings.TrimSuffix(dk, "-dk") + "-bl"
 }
 
-// netDevBaselineTarget is the permit host id of a baseline approval.
+// netDevBaselineTarget is the permit host id of a baseline approval:
+// "netdev-<id>-baseline" while that fits canonical's host id limit, else
+// "netdev--<first 16 bytes of sha256(id), hex>-baseline". Device ids never
+// start with a hyphen, so the two forms cannot collide.
 func netDevBaselineTarget(id string) string {
-	return strings.TrimSuffix(netDevBaselineRef(id), "-bl") + "-baseline"
+	const prefix, suffix = "netdev-", "-baseline"
+	scope := id
+	if len(prefix)+len(id)+len(suffix) > maxNetDevBaselineTarget {
+		sum := sha256.Sum256([]byte(id))
+		scope = "-" + hex.EncodeToString(sum[:16])
+	}
+	return prefix + scope + suffix
 }
 
 func encodeNetDevBaseline(b NetDevBaseline) ([]byte, error) {
@@ -250,7 +274,7 @@ func (a *NetDevAdmin) storedBaseline(id string) (NetDevBaseline, bool, error) {
 
 // BaselineBinding returns the binding of approving version versionID with
 // rawDigest as the baseline of a live, unblocked device.
-func (a *NetDevAdmin) BaselineBinding(_ context.Context, id string, versionID int64, rawDigest string) (NetDevBaselineBinding, error) {
+func (a *NetDevAdmin) BaselineBinding(ctx context.Context, id string, versionID int64, rawDigest string) (NetDevBaselineBinding, error) {
 	if err := checkBaselineRequest(versionID, rawDigest); err != nil {
 		return NetDevBaselineBinding{}, err
 	}
@@ -263,6 +287,12 @@ func (a *NetDevAdmin) BaselineBinding(_ context.Context, id string, versionID in
 	}
 	if dev.Blocked {
 		return NetDevBaselineBinding{}, fmt.Errorf("baseline of network device %s: %w", id, ErrNetDevBaselineBlocked)
+	}
+	if a.VerifyBaselineDigest == nil {
+		return NetDevBaselineBinding{}, fmt.Errorf("baseline of network device %s: %w", id, ErrNetDevBaselineUnverified)
+	}
+	if err := a.VerifyBaselineDigest(ctx, dev.ID, versionID, rawDigest); err != nil {
+		return NetDevBaselineBinding{}, fmt.Errorf("baseline of network device %s: %w: %w", id, ErrNetDevBaselineUnverified, err)
 	}
 	cur, _, err := a.storedBaseline(dev.ID)
 	if err != nil {
@@ -298,6 +328,7 @@ func (a *NetDevAdmin) ApproveBaseline(ctx context.Context, id string, versionID 
 		ExecutionDigest: digest, CommittedBy: by, ApprovedAtUnix: a.now().Unix()}
 	value, err := encodeNetDevBaseline(rec)
 	if err != nil {
+		a.commitRefused(b.DeviceID, digest, "encode")
 		return NetDevBaseline{}, fmt.Errorf("baseline of network device %s: %w", id, err)
 	}
 	want := b.PreviousRevision + 1
@@ -316,6 +347,11 @@ func (a *NetDevAdmin) ApproveBaseline(ctx context.Context, id string, versionID 
 		return a.Store.PutSecret(s)
 	})
 	if err != nil {
+		reason := "store"
+		if errors.Is(err, ErrNetDevBaselineConcurrent) {
+			reason = "concurrent_change"
+		}
+		a.commitRefused(b.DeviceID, digest, reason)
 		return NetDevBaseline{}, fmt.Errorf("store baseline of network device %s: %w", id, err)
 	}
 	rec.Revision = rev
@@ -323,6 +359,14 @@ func (a *NetDevAdmin) ApproveBaseline(ctx context.Context, id string, versionID 
 		"version_id", versionID, "raw_digest", rawDigest, "previous_version_id", b.PreviousVersionID,
 		"previous_raw_digest", b.PreviousRawDigest, "revision", rev, "execution_digest", digest, "by", by)
 	return rec, nil
+}
+
+// commitRefused audits a commit refused after its single-use permit was
+// consumed: the approval is burnt and nothing was stored. reason is a
+// fixed word, never error text.
+func (a *NetDevAdmin) commitRefused(deviceID, digest, reason string) {
+	a.log().Info("audit", "kind", "netdev_admin", "action", "baseline_commit_refused", "device", deviceID,
+		"execution_digest", digest, "reason", reason)
 }
 
 func (a *NetDevAdmin) now() time.Time {

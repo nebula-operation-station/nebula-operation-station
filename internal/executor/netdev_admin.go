@@ -185,6 +185,11 @@ type NetDevAdmin struct {
 	// AuthorizeBaseline consumes the approved permit of exactly this
 	// baseline approval. Nil refuses every baseline approval.
 	AuthorizeBaseline func(ctx context.Context, b NetDevBaselineBinding, digest string) error
+	// VerifyBaselineDigest confirms that the executor itself computed
+	// rawDigest for the device's config version versionID (ADR 0010 D4).
+	// Nil refuses every baseline proposal and commit; production leaves it
+	// nil until ND-14.
+	VerifyBaselineDigest func(ctx context.Context, deviceID string, versionID int64, rawDigest string) error
 	// Now returns the current time. Nil uses time.Now.
 	Now func() time.Time
 	// Log receives non-secret audit events. Default: discarded.
@@ -996,6 +1001,9 @@ func (s *Service) netDevAdmin() *NetDevAdmin {
 		a.AuthorizeRepin = s.authorizeNetDevRepin
 		a.AuthorizeBaseline = s.authorizeNetDevBaseline
 	}
+	// Nil in production until ND-14: the executor cannot yet compute a
+	// device's raw_digest itself, so no baseline can be approved.
+	a.VerifyBaselineDigest = s.netDevBaselineDigest
 	return a
 }
 
@@ -1039,6 +1047,8 @@ func (s *Service) netDevRPCError(method string, err error) error {
 		code, msg = codes.InvalidArgument, "invalid network device baseline request"
 	case errors.Is(err, ErrNetDevBaselineApproval):
 		code, msg = codes.FailedPrecondition, "network device baseline requires an approved permit for exactly this version"
+	case errors.Is(err, ErrNetDevBaselineUnverified):
+		code, msg = codes.FailedPrecondition, "network device baseline digest is not computed by the executor; baseline approval is unavailable"
 	case errors.Is(err, ErrNetDevBaselineBlocked):
 		code, msg = codes.FailedPrecondition, "network device is blocked; no baseline can be approved"
 	case errors.Is(err, ErrNetDevConfirm):
