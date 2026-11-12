@@ -121,7 +121,8 @@ const (
 var ErrInvalidInput = errors.New("invalid advisor input")
 
 // NewInput checks the snapshot, builds its index and returns the input of
-// one advisor run. classes and profiles are copied by reference and must
+// one advisor run. Every rule UUID, profile, group and marker name of the
+// profile settings must be valid UTF-8 of at most netreach.MaxNameBytes. classes and profiles are copied by reference and must
 // not change afterwards.
 func NewInput(s *netreach.Snapshot, classes map[string]TrustClass, profiles netreach.Field[map[string]ProfileSetting]) (*Input, error) {
 	if err := netreach.CheckLimits(s); err != nil {
@@ -137,12 +138,30 @@ func NewInput(s *netreach.Snapshot, classes map[string]TrustClass, profiles netr
 		if len(p.Profiles) > MaxProfilesPerRule || len(p.Dropped) > netreach.MaxMarkers {
 			return nil, fmt.Errorf("new advisor input: %w: profile setting of rule %s over limit", ErrInvalidInput, clean(uuid))
 		}
+		if !validName(uuid) || !validName(p.Group) || !allValidNames(p.Profiles) || !allValidNames(p.Dropped) {
+			return nil, fmt.Errorf("new advisor input: %w: profile setting of rule %s: name not valid UTF-8 or over %d bytes", ErrInvalidInput, clean(uuid), netreach.MaxNameBytes)
+		}
 	}
 	x, err := netreach.NewIndex(s)
 	if err != nil {
 		return nil, fmt.Errorf("new advisor input: %w: %w", ErrInvalidInput, err)
 	}
 	return &Input{Snapshot: s, Index: x, ZoneClasses: classes, Profiles: profiles}, nil
+}
+
+// validName reports whether a device name (rule UUID, profile, group,
+// marker) is valid UTF-8 and at most netreach.MaxNameBytes long.
+func validName(s string) bool {
+	return len(s) <= netreach.MaxNameBytes && utf8.ValidString(s)
+}
+
+func allValidNames(l []string) bool {
+	for _, s := range l {
+		if !validName(s) {
+			return false
+		}
+	}
+	return true
 }
 
 // Finding is the result of one check for one rule. RuleIndex is the
