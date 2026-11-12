@@ -335,6 +335,9 @@ func TestPANOSNormalizationKeepsSignificantOrderAndAttributes(t *testing.T) {
 		return `<config><shared><authentication-sequence><entry name="s"><authentication-profiles>` + m +
 			`</authentication-profiles></entry></authentication-sequence></shared></config>`
 	}
+	defaultNS := func(x string) string {
+		return strings.Replace(x, `<config>`, `<config xmlns="urn:x">`, 1)
+	}
 	attr := func(a string) string {
 		return `<config><devices><entry name="localhost"><address><entry name="web"` + a +
 			`><ip-netmask>10.0.0.1/32</ip-netmask></entry></address></entry></devices></config>`
@@ -348,6 +351,25 @@ func TestPANOSNormalizationKeepsSignificantOrderAndAttributes(t *testing.T) {
 		{"loc attribute", attr(``), attr(` loc="vsys1"`)},
 		{"ptpl attribute", attr(``), attr(` ptpl="tpl-a"`)},
 		{"src attribute", attr(` src="tpl"`), attr(``)},
+		{"unlisted attribute added", attr(``), attr(` disable-override="yes"`)},
+		{"unlisted attribute value", attr(` overrides="a"`), attr(` overrides="b"`)},
+		{"volatile name with other case", attr(` Admin="a"`), attr(` Admin="b"`)},
+		{"volatile name prefix", attr(` timestamp="1"`), attr(` timestamp="2"`)},
+		{"namespaced attribute", attr(` xmlns:x="urn:x" x:mode="a"`), attr(` xmlns:x="urn:x" x:mode="b"`)},
+		{"namespaced volatile name", attr(` xmlns:x="urn:x" x:admin="a"`), attr(` xmlns:x="urn:x" x:admin="b"`)},
+		{"attribute namespace", attr(` xmlns:x="urn:x" xmlns:y="urn:y" x:mode="a"`), attr(` xmlns:x="urn:x" xmlns:y="urn:y" y:mode="a"`)},
+		{"element namespace", `<config xmlns:x="urn:x" xmlns:y="urn:y"><x:a/></config>`, `<config xmlns:x="urn:x" xmlns:y="urn:y"><y:a/></config>`},
+		// An ordered container in a namespace keeps its order: a default
+		// namespace on the root puts every element in it.
+		{"ike encryption order, default namespace", defaultNS(ike(`<member>aes-256-cbc</member><member>3des</member>`)),
+			defaultNS(ike(`<member>3des</member><member>aes-256-cbc</member>`))},
+		{"ipsec authentication order, default namespace", defaultNS(ipsec(`<member>sha256</member><member>sha1</member>`)),
+			defaultNS(ipsec(`<member>sha1</member><member>sha256</member>`))},
+		{"authentication sequence order, default namespace", defaultNS(seq(`<member>ldap</member><member>local</member>`)),
+			defaultNS(seq(`<member>local</member><member>ldap</member>`))},
+		{"rule order, prefixed namespace",
+			`<x:config xmlns:x="urn:x"><x:rules><x:entry name="a"/><x:entry name="b"/></x:rules></x:config>`,
+			`<x:config xmlns:x="urn:x"><x:rules><x:entry name="b"/><x:entry name="a"/></x:rules></x:config>`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -375,6 +397,48 @@ func TestPANOSNormalizationKeepsSignificantOrderAndAttributes(t *testing.T) {
 		return l.Op == textdiff.Insert && strings.Contains(l.Text, `loc="vsys1"`)
 	}) {
 		t.Fatalf("loc change hidden next to a visible change: %+v", d)
+	}
+	// So is an attribute normalization does not know.
+	z := record(t, s, "fw-edge", ConfigRunning, testBase,
+		snap('c', strings.Replace(attr(` loc="vsys1" disable-override="yes"`), "10.0.0.1", "10.0.0.8", 1)))
+	d, err = s.DiffConfigVersions(context.Background(), "fw-edge", y.VersionID, z.VersionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.Normalized || d.NotDisplayed || !slices.ContainsFunc(d.Lines, func(l textdiff.Line) bool {
+		return l.Op == textdiff.Insert && strings.Contains(l.Text, `disable-override="yes"`)
+	}) {
+		t.Fatalf("unlisted attribute change hidden next to a visible change: %+v", d)
+	}
+}
+
+// TestPANOSNormalizationDropsOnlyVolatileAttributes pins the deny-list:
+// exactly admin, dirtyId and time (without a namespace) are dropped, alone
+// or together, and every other attribute is rendered in a stable order.
+func TestPANOSNormalizationDropsOnlyVolatileAttributes(t *testing.T) {
+	norm := func(a string) []string {
+		t.Helper()
+		lines, ok := NormalizePANOSConfig(`<config><entry name="web"` + a + `/></config>`)
+		if !ok {
+			t.Fatalf("not normalized: %q", a)
+		}
+		return lines
+	}
+	plain := norm(``)
+	for _, a := range []string{` admin="x"`, ` dirtyId="7"`, ` time="2026/11/10 11:11:11"`,
+		` time="1" admin="y" dirtyId="2"`} {
+		if got := norm(a); !slices.Equal(got, plain) {
+			t.Errorf("volatile %q rendered: %q", a, got)
+		}
+	}
+	got := norm(` zeta="1" uuid="u" loc="l" admin="x" xmlns:p="urn:p" p:time="t"`)
+	want := []string{`config`, `  entry[name="web" uuid="u" loc="l" zeta="1" {"urn:p"}time="t" {"xmlns"}p="urn:p"]`}
+	if !slices.Equal(got, want) {
+		t.Fatalf("lines = %q, want %q", got, want)
+	}
+	// Attribute order in the document does not matter.
+	if got2 := norm(` p:time="t" xmlns:p="urn:p" loc="l" zeta="1" uuid="u"`); !slices.Equal(got2, want) {
+		t.Fatalf("reordered attributes = %q, want %q", got2, want)
 	}
 }
 
@@ -758,6 +822,286 @@ func TestWriteCapKeepsOldProtectedOverNewerUnprotected(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestWriteCapCountsAndDeletesOnlyTheWrittenDevice writes one version over
+// the cap of device A while device B holds older versions, protected and
+// not: the cap deletes exactly A's oldest unprotected version, and B's
+// versions are neither deleted nor counted against A's cap.
+func TestWriteCapCountsAndDeletesOnlyTheWrittenDevice(t *testing.T) {
+	s, db, _ := newTestStore(t)
+	addDevice(t, s, cbsDevice())
+	addDevice(t, s, panosDevice())
+	start := testBase.Add(-60 * 24 * time.Hour)
+	// Device B: older than every version of A, so an unscoped cap would
+	// delete them first.
+	bBase := record(t, s, "fw-edge", ConfigRunning, start, snap('1', "<b1/>"))
+	bBound := record(t, s, "fw-edge", ConfigRunning, start.Add(time.Minute), snap('2', "<b2/>"))
+	bPlain := record(t, s, "fw-edge", ConfigRunning, start.Add(2*time.Minute), snap('3', "<b3/>"))
+	bNewest := record(t, s, "fw-edge", ConfigRunning, start.Add(3*time.Minute), snap('4', "<b4/>"))
+	markProtected(t, db, bBase.VersionID, true, nil)
+	recent := testBase.Add(-24 * time.Hour)
+	markProtected(t, db, bBound.VersionID, false, &recent)
+
+	// Device A: exactly the cap of unprotected history, then one new version.
+	firstFiller := configMaxID(t, db) + 1
+	fillVersions(t, db, "sw-core", ConfigRunning, testBase.Add(-time.Hour), MaxConfigVersionsPerDevice, 1<<20)
+	w := record(t, s, "sw-core", ConfigRunning, testBase, snap('e', "new"))
+
+	ids := configIDs(t, db)
+	for _, id := range []int64{bBase.VersionID, bBound.VersionID, bPlain.VersionID, bNewest.VersionID} {
+		if !ids[id] {
+			t.Errorf("version %d of the other device deleted by a write to sw-core", id)
+		}
+	}
+	if n := countRows(t, db, `SELECT COUNT(*) FROM netdev_config_versions WHERE device_id = 'sw-core'`); n != MaxConfigVersionsPerDevice {
+		t.Fatalf("sw-core keeps %d versions, want %d", n, MaxConfigVersionsPerDevice)
+	}
+	if !ids[w.VersionID] || ids[firstFiller+MaxConfigVersionsPerDevice-1] || !ids[firstFiller+MaxConfigVersionsPerDevice-2] {
+		t.Fatal("write did not delete exactly the oldest unprotected version of sw-core")
+	}
+}
+
+// TestWriteCapProtectsNewestOfTheWrittenDevice gives another device the
+// globally newest running and startup versions, so a newest-per-config
+// lookup without the device filter protects that device's versions instead
+// of the written device's newest version of the other config, which is
+// older than every filler and would be deleted first. Both configs are
+// written in turn, so each half of the lookup is exercised.
+func TestWriteCapProtectsNewestOfTheWrittenDevice(t *testing.T) {
+	for _, tc := range []struct{ written, other ConfigKind }{
+		{ConfigRunning, ConfigStartup},
+		{ConfigStartup, ConfigRunning},
+	} {
+		t.Run(string(tc.written), func(t *testing.T) {
+			s, db, _ := newTestStore(t)
+			addDevice(t, s, cbsDevice())
+			b := cbsDevice()
+			b.DeviceID, b.Name = "sw-access", "Access switch"
+			b.Endpoints = []netdevcontract.Endpoint{{Address: "192.168.1.3", Port: 22}}
+			addDevice(t, s, b)
+
+			otherNewest := record(t, s, "sw-core", tc.other, testBase.Add(-60*24*time.Hour), snap('1', "v1"))
+			// Device B: the globally newest version of each config, newer than
+			// anything of sw-core.
+			fillVersions(t, db, "sw-access", ConfigRunning, testBase.Add(2*time.Hour), 1, 1<<28)
+			fillVersions(t, db, "sw-access", ConfigStartup, testBase.Add(2*time.Hour), 1, 1<<28+1)
+			bIDs := []int64{configMaxID(t, db) - 1, configMaxID(t, db)}
+
+			// sw-core: 1 + (cap-1) + 1 versions, 2 protected (the other
+			// config's newest and the new version): exactly the oldest filler
+			// goes.
+			firstFiller := configMaxID(t, db) + 1
+			fillVersions(t, db, "sw-core", tc.written, testBase, MaxConfigVersionsPerDevice-1, 1<<20)
+			w := record(t, s, "sw-core", tc.written, testBase, snap('e', "new"))
+
+			ids := configIDs(t, db)
+			if n := countRows(t, db, `SELECT COUNT(*) FROM netdev_config_versions WHERE device_id = 'sw-core'`); n != MaxConfigVersionsPerDevice {
+				t.Fatalf("sw-core keeps %d versions, want %d", n, MaxConfigVersionsPerDevice)
+			}
+			for name, c := range map[string]struct {
+				id   int64
+				kept bool
+			}{
+				"newest of other config": {otherNewest.VersionID, true},
+				"new version":            {w.VersionID, true},
+				"other device running":   {bIDs[0], true},
+				"other device startup":   {bIDs[1], true},
+				"oldest filler":          {firstFiller + MaxConfigVersionsPerDevice - 2, false},
+				"second oldest filler":   {firstFiller + MaxConfigVersionsPerDevice - 3, true},
+			} {
+				if ids[c.id] != c.kept {
+					t.Errorf("%s (version %d) kept = %v, want %v", name, c.id, ids[c.id], c.kept)
+				}
+			}
+		})
+	}
+}
+
+// TestWriteCapChangeBindingBoundaryIsInclusive pins the change-binding
+// cutoff of the write-path cap to Prune's configProtected: a binding exactly
+// ConfigVersionRetention old protects its version, one a second older does
+// not.
+func TestWriteCapChangeBindingBoundaryIsInclusive(t *testing.T) {
+	s, db, now := newTestStore(t)
+	addDevice(t, s, cbsDevice())
+	start := testBase.Add(-60 * 24 * time.Hour)
+	atCutoff := record(t, s, "sw-core", ConfigRunning, start, snap('1', "v1"))
+	before := record(t, s, "sw-core", ConfigRunning, start.Add(time.Minute), snap('2', "v2"))
+	cutoff := now.Add(-ConfigVersionRetention)
+	markProtected(t, db, atCutoff.VersionID, false, &cutoff)
+	beforeCutoff := cutoff.Add(-time.Second)
+	markProtected(t, db, before.VersionID, false, &beforeCutoff)
+
+	firstFiller := configMaxID(t, db) + 1
+	fillVersions(t, db, "sw-core", ConfigRunning, testBase.Add(-time.Hour), MaxConfigVersionsPerDevice-1, 1<<20)
+	w := record(t, s, "sw-core", ConfigRunning, testBase, snap('e', "new"))
+
+	// 2 + 999 + 1 versions, 2 protected (atCutoff, new): the 2 oldest
+	// unprotected go, which are the expired binding and the oldest filler.
+	ids := configIDs(t, db)
+	if len(ids) != MaxConfigVersionsPerDevice {
+		t.Fatalf("kept %d versions, want %d", len(ids), MaxConfigVersionsPerDevice)
+	}
+	for name, c := range map[string]struct {
+		id   int64
+		kept bool
+	}{
+		"binding at cutoff":    {atCutoff.VersionID, true},
+		"binding 1s before":    {before.VersionID, false},
+		"new version":          {w.VersionID, true},
+		"oldest filler":        {firstFiller + MaxConfigVersionsPerDevice - 2, false},
+		"second oldest filler": {firstFiller + MaxConfigVersionsPerDevice - 3, true},
+	} {
+		if ids[c.id] != c.kept {
+			t.Errorf("%s (version %d) kept = %v, want %v", name, c.id, ids[c.id], c.kept)
+		}
+	}
+}
+
+// pruneProtectedIDs returns the versions of dev that Prune's configProtected
+// keeps at now, so write-cap tests can check that the cap protects the same
+// versions as Prune.
+func pruneProtectedIDs(t *testing.T, db *sql.DB, dev string, now time.Time) map[int64]bool {
+	t.Helper()
+	rs, err := db.Query(`SELECT v.id FROM netdev_config_versions v WHERE v.device_id = ? AND `+configProtected,
+		dev, micros(now.Add(-ConfigVersionRetention)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rs.Close()
+	out := map[int64]bool{}
+	for rs.Next() {
+		var id int64
+		if err := rs.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		out[id] = true
+	}
+	if err := rs.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func setLastSeen(t *testing.T, db *sql.DB, id int64, at int64) {
+	t.Helper()
+	if _, err := db.Exec(`UPDATE netdev_config_versions SET last_seen = ? WHERE id = ?`, at, id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func lastSeenOf(t *testing.T, db *sql.DB, id int64) int64 {
+	t.Helper()
+	var ls int64
+	if err := db.QueryRow(`SELECT last_seen FROM netdev_config_versions WHERE id = ?`, id).Scan(&ls); err != nil {
+		t.Fatal(err)
+	}
+	return ls
+}
+
+// TestWriteCapNewestOfOtherConfigFollowsReadNotID makes an older version of
+// the other config its newest by reading it again (RecordConfig bumps its
+// last_seen), so the newest has the lower id. The write cap must protect it,
+// as Prune's configProtected does, and treat the higher-id version as the
+// oldest unprotected one; a newest lookup ordered by id would delete the
+// version the device last reported instead.
+func TestWriteCapNewestOfOtherConfigFollowsReadNotID(t *testing.T) {
+	for _, tc := range []struct{ written, other ConfigKind }{
+		{ConfigRunning, ConfigStartup},
+		{ConfigStartup, ConfigRunning},
+	} {
+		t.Run(string(tc.written), func(t *testing.T) {
+			s, db, now := newTestStore(t)
+			addDevice(t, s, cbsDevice())
+			start := testBase.Add(-60 * 24 * time.Hour)
+			reread := record(t, s, "sw-core", tc.other, start, snap('1', "v1"))
+			replaced := record(t, s, "sw-core", tc.other, start.Add(time.Minute), snap('2', "v2"))
+			again := record(t, s, "sw-core", tc.other, start.Add(2*time.Minute), snap('1', "v1"))
+			if again.New || again.VersionID != reread.VersionID || reread.VersionID >= replaced.VersionID {
+				t.Fatalf("re-read = %+v, want existing version %d below %d", again, reread.VersionID, replaced.VersionID)
+			}
+			if p := pruneProtectedIDs(t, db, "sw-core", *now); !p[reread.VersionID] || p[replaced.VersionID] {
+				t.Fatalf("Prune protects %v; want re-read version %d, not %d", p, reread.VersionID, replaced.VersionID)
+			}
+
+			// 2 + (cap-2) + 1 versions, 2 protected (re-read, new): exactly the
+			// oldest unprotected goes, which is the replaced version.
+			firstFiller := configMaxID(t, db) + 1
+			fillVersions(t, db, "sw-core", tc.written, testBase.Add(-time.Hour), MaxConfigVersionsPerDevice-2, 1<<20)
+			w := record(t, s, "sw-core", tc.written, testBase, snap('e', "new"))
+
+			ids := configIDs(t, db)
+			if len(ids) != MaxConfigVersionsPerDevice {
+				t.Fatalf("kept %d versions, want %d", len(ids), MaxConfigVersionsPerDevice)
+			}
+			for name, c := range map[string]struct {
+				id   int64
+				kept bool
+			}{
+				"re-read newest of other config": {reread.VersionID, true},
+				"replaced version (higher id)":   {replaced.VersionID, false},
+				"new version":                    {w.VersionID, true},
+				"oldest filler":                  {firstFiller + MaxConfigVersionsPerDevice - 3, true},
+			} {
+				if ids[c.id] != c.kept {
+					t.Errorf("%s (version %d) kept = %v, want %v", name, c.id, ids[c.id], c.kept)
+				}
+			}
+		})
+	}
+}
+
+// TestWriteCapNewestTieGoesToHigherID gives the two versions of the other
+// config the same last_seen: as in Prune's configProtected, the one with the
+// higher id is the newest and protected, and the lower one is the oldest
+// unprotected version and goes first.
+func TestWriteCapNewestTieGoesToHigherID(t *testing.T) {
+	s, db, now := newTestStore(t)
+	addDevice(t, s, cbsDevice())
+	start := testBase.Add(-60 * 24 * time.Hour)
+	low := record(t, s, "sw-core", ConfigStartup, start, snap('1', "v1"))
+	high := record(t, s, "sw-core", ConfigStartup, start.Add(time.Minute), snap('2', "v2"))
+	setLastSeen(t, db, low.VersionID, lastSeenOf(t, db, high.VersionID))
+	if p := pruneProtectedIDs(t, db, "sw-core", *now); !p[high.VersionID] || p[low.VersionID] {
+		t.Fatalf("Prune protects %v; want %d, not %d", p, high.VersionID, low.VersionID)
+	}
+
+	fillVersions(t, db, "sw-core", ConfigRunning, testBase.Add(-time.Hour), MaxConfigVersionsPerDevice-2, 1<<20)
+	w := record(t, s, "sw-core", ConfigRunning, testBase, snap('e', "new"))
+
+	ids := configIDs(t, db)
+	if len(ids) != MaxConfigVersionsPerDevice {
+		t.Fatalf("kept %d versions, want %d", len(ids), MaxConfigVersionsPerDevice)
+	}
+	if !ids[high.VersionID] || ids[low.VersionID] || !ids[w.VersionID] {
+		t.Fatalf("kept high %d = %v, low %d = %v, new = %v; want only the higher id of the tie kept",
+			high.VersionID, ids[high.VersionID], low.VersionID, ids[low.VersionID], ids[w.VersionID])
+	}
+}
+
+// TestWriteCapDeletionTieGoesToLowerID gives the two oldest unprotected
+// versions the same last_seen with one slot to free: as in Prune's
+// ROW_NUMBER order (last_seen DESC, id DESC), the lower id goes.
+func TestWriteCapDeletionTieGoesToLowerID(t *testing.T) {
+	s, db, _ := newTestStore(t)
+	addDevice(t, s, cbsDevice())
+	fillVersions(t, db, "sw-core", ConfigRunning, testBase.Add(-time.Hour), MaxConfigVersionsPerDevice, 1<<20)
+	// Fillers get older with their id; the two oldest are the last two ids.
+	tieHigh := configMaxID(t, db)
+	tieLow := tieHigh - 1
+	setLastSeen(t, db, tieHigh, lastSeenOf(t, db, tieLow))
+	w := record(t, s, "sw-core", ConfigRunning, testBase, snap('e', "new"))
+
+	// cap + 1 versions, 1 protected (new): exactly one of the tie goes.
+	ids := configIDs(t, db)
+	if len(ids) != MaxConfigVersionsPerDevice {
+		t.Fatalf("kept %d versions, want %d", len(ids), MaxConfigVersionsPerDevice)
+	}
+	if ids[tieLow] || !ids[tieHigh] || !ids[w.VersionID] {
+		t.Fatalf("kept tie low %d = %v, tie high %d = %v, new = %v; want the lower id deleted",
+			tieLow, ids[tieLow], tieHigh, ids[tieHigh], ids[w.VersionID])
 	}
 }
 
