@@ -24,6 +24,10 @@ type Subject struct {
 	Components []Component
 	// Device is a device's model and firmware; nil for hosts and images.
 	Device *Device
+	// Incomplete is true when NOS reported the subject's inventory as not
+	// complete (D3 export "complete": false). Its findings still count,
+	// but the subject is a coverage gap, never clean.
+	Incomplete bool
 }
 
 // Kernel is a host's running kernel and its D4 version basis as NOS mapped
@@ -125,6 +129,12 @@ const (
 	GapVendorRange GapReason = "vendor_status_unknown"
 	// GapNoValidID: a feed record without a pattern-valid ID.
 	GapNoValidID GapReason = "no_valid_id"
+	// GapFeedMissing: the subject's ecosystem is covered, but the DB holds
+	// no snapshot of the feed that covers it.
+	GapFeedMissing GapReason = "feed_snapshot_missing"
+	// GapInventoryIncomplete: NOS reported the subject's inventory as not
+	// complete.
+	GapInventoryIncomplete GapReason = "inventory_incomplete"
 )
 
 // Gap is one coverage gap. Package and VulnID are empty when the gap is

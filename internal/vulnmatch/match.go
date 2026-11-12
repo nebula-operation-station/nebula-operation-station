@@ -50,6 +50,9 @@ func (m *matcher) gap(s Subject, pkg, id string, r GapReason) {
 }
 
 func (m *matcher) subject(s Subject) {
+	if s.Incomplete {
+		m.gap(s, "", "", GapInventoryIncomplete)
+	}
 	if s.Kind == vulnfinding.SubjectDevice {
 		m.device(s)
 		return
