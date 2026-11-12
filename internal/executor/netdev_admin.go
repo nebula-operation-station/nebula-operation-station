@@ -995,6 +995,12 @@ func (s *Service) netDevAdmin() *NetDevAdmin {
 	}
 	if s.auth != nil {
 		a.Revoke = func(id, reason string) error {
+			// Device read leases first (ADR 0010 D1/D2: every lease of the
+			// device, including one approved ahead of the registry), then
+			// any provider grant naming the same identifier as before.
+			if _, err := s.auth.RevokeNetDeviceGrants(id, reason); err != nil {
+				return err
+			}
 			_, err := s.auth.RevokeProviderGrants(id, reason)
 			return err
 		}

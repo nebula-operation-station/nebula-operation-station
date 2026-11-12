@@ -801,6 +801,46 @@ func (a *Authority) RevokeReadGrant(id, who string) error {
 	return nil
 }
 
+// RevokeNetDeviceGrants revokes every active device read lease that names
+// deviceID, whatever trust generation or credential version it binds
+// (device rotated, blocked, re-pinned or removed; ADR 0010 D1/D2), so a
+// lease approved ahead of the registry cannot go live after a later
+// lifecycle change. It needs no approval and returns the number of leases
+// revoked.
+func (a *Authority) RevokeNetDeviceGrants(deviceID, who string) (int, error) {
+	if a.leases == nil {
+		return 0, nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	grants, err := a.leases.ReadGrants()
+	if err != nil {
+		return 0, a.storageFailure("netdevice:"+deviceID, err)
+	}
+	n := 0
+	for _, g := range grants {
+		if !g.RevokedAt.IsZero() {
+			continue
+		}
+		doc, _, err := readGrantScope(g)
+		if err != nil || doc.RateProfile != schedgrant.NetDeviceReadProfile {
+			continue
+		}
+		if _, ok := doc.NetDeviceTarget(deviceID); !ok {
+			continue
+		}
+		ok, err := a.leases.RevokeReadGrant(g.ID, a.now())
+		if err != nil {
+			return n, a.storageFailure("readgrant:"+g.ID, err)
+		}
+		if ok {
+			n++
+			a.emit(Event{Kind: "read_grant_revoked", Detail: g.ID + " by " + who + " (network device " + deviceID + ")"})
+		}
+	}
+	return n, nil
+}
+
 // ReadGrants returns the stored read grants.
 func (a *Authority) ReadGrants() ([]StoredReadGrant, error) {
 	if a.leases == nil {
