@@ -206,7 +206,12 @@ type Finding struct {
 // Report is the result of one check over one snapshot. State is StateOK
 // when the check could run on every rule; otherwise it is the state of
 // the precondition that failed (every rule then carries that state too),
-// with Reason.
+// with Reason. Checks whose results concern no single rule
+// (mgmt-from-untrusted, model-contradiction) carry no results in a failed
+// report. A report whose State is not StateOK resolves nothing; results
+// that only list what fires (the dns-bypass flow part,
+// model-contradiction) mean "no longer fires" for an absent key only in a
+// report with State StateOK.
 type Report struct {
 	CheckID      string
 	CheckVersion string
