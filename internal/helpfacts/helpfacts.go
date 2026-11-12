@@ -3,12 +3,12 @@
 // Package helpfacts projects the minimised, fixed set of inventory facts
 // the help assistant may put into a prompt (ADR 0014 D3, AS-06).
 //
-// Only hosts that the question names by a literal (IP address, CIDR,
-// host name or ID) and that the caller's Visibility check admits are
-// projected. The output is the fixed struct Fact and nothing else; no
-// other store is reachable from this package. Every host value is
-// untrusted: text is cleaned and marked, enums are validated, and the
-// total size is bounded by MaxFactBytes.
+// Only hosts that the question names (an address or CIDR literal of an
+// endpoint, or a name or ID literal) and that the caller's Visibility
+// check admits are projected. The output is the fixed struct Fact and
+// nothing else; no other store is reachable from this package. Every
+// host value is untrusted: text is cleaned and marked, enums are
+// validated, and the total size is bounded by MaxFactBytes.
 package helpfacts
 
 import (
@@ -18,7 +18,7 @@ import (
 	"net"
 	"regexp"
 	"sort"
-	"strings"
+	"strconv"
 	"time"
 )
 
@@ -26,12 +26,14 @@ import (
 const (
 	// MaxFactHosts is the maximum number of hosts in one projection.
 	MaxFactHosts = 10
-	// MaxFactBytes is the maximum payload of one projection, counted
-	// as the text bytes of every field (not including JSON overhead).
+	// MaxFactBytes is the maximum payload of one projection. It counts the
+	// text of every field, the port digits and the enrollment date as
+	// RFC 3339 (the default JSON encoding of the date), but not JSON keys
+	// or punctuation.
 	MaxFactBytes = 4 << 10
 	// MaxQuestionBytes is the largest question Project scans.
 	MaxQuestionBytes = 2 << 10
-	// MaxEndpoints is the maximum number of endpoints per host.
+	// MaxEndpoints is the maximum number of endpoints shown per host.
 	MaxEndpoints = 4
 	// MaxSourceAddresses is the maximum number of NOS source addresses.
 	MaxSourceAddresses = 4
@@ -43,7 +45,13 @@ const (
 	MaxLabelBytes = 16
 	// MaxOSBytes bounds the OS family and release (ADR 0014 D3: ≤ 32 bytes).
 	MaxOSBytes = 32
+	// MaxAddressBytes bounds an endpoint address: a canonical IP or a DNS
+	// name (DNS limit).
+	MaxAddressBytes = 253
 )
+
+// minEnrollmentYear is the earliest enrollment year Project accepts.
+const minEnrollmentYear = 2000
 
 // Sentinel errors callers branch on.
 var (
@@ -77,15 +85,18 @@ const (
 )
 
 // Text is a value taken from inventory or host data. Altered reports
-// that the value was cleaned (control or format characters replaced,
-// whitespace collapsed, cut to length, or dropped as invalid). Text is
-// data: it is never an instruction and is rendered as plain text only.
+// that the value was cleaned (non-printable characters replaced, whitespace
+// collapsed, bytes dropped, cut to length, or the input was too long to
+// scan). Text is data: it is never an instruction and is rendered as plain
+// text only.
 type Text struct {
 	Value   string
 	Altered bool
 }
 
-// Endpoint is one validated address of a host.
+// Endpoint is one validated address of a host. Port 0 means the stored
+// port was not a valid port number; the address itself is still in the
+// inventory.
 type Endpoint struct {
 	Address string
 	Port    int
@@ -93,17 +104,20 @@ type Endpoint struct {
 }
 
 // Fact is the fixed projection of one host. It has no other fields.
+// InventoryCriticality and ExecutorCriticality are the two values of
+// ADR 0014 D3, each labelled by its field: they may differ. An empty value
+// means not set or not a known class.
 type Fact struct {
-	ID                Text
-	Name              Text
-	Endpoints         []Endpoint
-	EndpointsDropped  int
-	Criticality       string
-	CriticalitySource Text
-	Enrollment        EnrollmentState
-	EnrollmentSince   time.Time
-	OSFamily          Text
-	OSRelease         Text
+	ID                   Text
+	Name                 Text
+	Endpoints            []Endpoint
+	EndpointsDropped     int
+	InventoryCriticality string
+	ExecutorCriticality  string
+	Enrollment           EnrollmentState
+	EnrollmentSince      time.Time
+	OSFamily             Text
+	OSRelease            Text
 }
 
 // RawEndpoint is an endpoint as stored, before validation.
@@ -116,15 +130,15 @@ type RawEndpoint struct {
 // Record is a host as the caller supplies it. All fields are untrusted
 // input and are validated by Project before use.
 type Record struct {
-	ID                string
-	DisplayName       string
-	Endpoints         []RawEndpoint
-	Criticality       string
-	CriticalitySource string
-	Enrollment        EnrollmentState
-	EnrollmentSince   time.Time
-	OSFamily          string
-	OSRelease         string
+	ID                   string
+	DisplayName          string
+	Endpoints            []RawEndpoint
+	InventoryCriticality string
+	ExecutorCriticality  string
+	Enrollment           EnrollmentState
+	EnrollmentSince      time.Time
+	OSFamily             string
+	OSRelease            string
 }
 
 // Source lists the hosts of the inventory. It is the only I/O of this
@@ -151,6 +165,9 @@ type Request struct {
 	// SourceAddresses are the admin-set NOS source addresses (ADR 0014
 	// Q6). They are included only when the question names a host.
 	SourceAddresses []string
+	// Now is the clock used to reject future enrollment dates. Nil means
+	// time.Now.
+	Now func() time.Time
 }
 
 // Result is the projection. Hosts are sorted by ID.
@@ -166,9 +183,10 @@ type Result struct {
 }
 
 // Project selects the hosts the question names and returns their fixed
-// facts. A host the Visibility check rejects is never read further and
-// never appears; for a question that names only hidden hosts the result
-// is the same as for a question naming hosts that do not exist.
+// facts. Visible is called only for hosts the question names. A host the
+// Visibility check rejects contributes nothing to the result: for a
+// question that names only hidden hosts the result is the same as for a
+// question naming hosts that do not exist.
 func Project(ctx context.Context, req Request) (Result, error) {
 	if req.Visible == nil {
 		return Result{}, ErrNoVisibility
@@ -185,34 +203,44 @@ func Project(ctx context.Context, req Request) (Result, error) {
 	}
 	lits, litTruncated := parseLiterals(req.Question)
 	if len(lits) == 0 {
-		return Result{}, nil
+		return Result{Truncated: litTruncated}, nil
 	}
+	now := time.Now
+	if req.Now != nil {
+		now = req.Now
+	}
+	ms := newMatchSet(lits)
 	records, err := req.Source.Hosts(ctx)
 	if err != nil {
 		return Result{}, fmt.Errorf("helpfacts: list hosts: %w", err)
 	}
-	var visible []Record
+
+	// Only hosts the question names are checked: a host that no literal
+	// selects is never visible to Visible and never projected.
+	var matched []Record
 	for i, r := range records {
+		if !ms.selectsHost(r) {
+			continue
+		}
 		ok, err := req.Visible(ctx, r.ID)
 		if err != nil {
-			return Result{}, fmt.Errorf("helpfacts: check visibility of host %d: %w", i, err)
+			return Result{}, fmt.Errorf("helpfacts: check visibility of named host %d: %w", i, err)
 		}
 		if ok {
-			visible = append(visible, r)
+			matched = append(matched, r)
 		}
 	}
-
-	matched, notFound := match(visible, lits)
 	sort.SliceStable(matched, func(i, j int) bool { return matched[i].ID < matched[j].ID })
 
 	var res Result
+	res.Truncated = litTruncated
 	used := 0
 	for _, r := range matched {
 		if len(res.Hosts) == MaxFactHosts {
 			res.Truncated = true
 			break
 		}
-		f := buildFact(r)
+		f := buildFact(r, ms, now().UTC())
 		n := factBytes(f)
 		if used+n > MaxFactBytes {
 			res.Truncated = true
@@ -221,7 +249,7 @@ func Project(ctx context.Context, req Request) (Result, error) {
 		used += n
 		res.Hosts = append(res.Hosts, f)
 	}
-	for _, s := range notFound {
+	for _, s := range ms.addressesNotIn(matched) {
 		if len(res.NotInInventory) == MaxFactHosts || used+len(s) > MaxFactBytes {
 			res.Truncated = true
 			break
@@ -232,9 +260,8 @@ func Project(ctx context.Context, req Request) (Result, error) {
 	if len(res.Hosts) == 0 && len(res.NotInInventory) == 0 {
 		// Nothing the user may see or that the question names as absent:
 		// no facts at all, not even the NOS source addresses.
-		return Result{Truncated: res.Truncated || litTruncated}, nil
+		return Result{Truncated: res.Truncated}, nil
 	}
-	res.Truncated = res.Truncated || litTruncated
 	for _, s := range sources {
 		if used+len(s) > MaxFactBytes {
 			res.Truncated = true
@@ -246,109 +273,156 @@ func Project(ctx context.Context, req Request) (Result, error) {
 	return res, nil
 }
 
-// match returns the visible hosts that a literal selects, and the
-// distinct canonical addresses of the question that no visible host has.
-func match(visible []Record, lits []literal) (matched []Record, notFound []string) {
-	seen := make(map[string]bool)
+// matchSet is the question's literals indexed for matching.
+type matchSet struct {
+	addrs map[string]bool // canonical IP strings
+	order []string        // canonical IP strings in order of appearance
+	cidrs []*net.IPNet
+	names map[string]bool // ASCII-lowercased names and IDs
+}
+
+// newMatchSet indexes the literals of a question.
+func newMatchSet(lits []literal) *matchSet {
+	ms := &matchSet{addrs: map[string]bool{}, names: map[string]bool{}}
 	for _, l := range lits {
-		if l.kind != litAddress || seen[l.key()] {
-			continue
-		}
-		seen[l.key()] = true
-		found := false
-		for _, r := range visible {
-			if hasAddress(r, l.ip) {
-				found = true
-				break
+		switch l.kind {
+		case litAddress:
+			s := l.ip.String()
+			if !ms.addrs[s] {
+				ms.addrs[s] = true
+				ms.order = append(ms.order, s)
 			}
-		}
-		if !found {
-			notFound = append(notFound, l.ip.String())
+		case litCIDR:
+			ms.cidrs = append(ms.cidrs, l.network)
+		default:
+			ms.names[asciiLower(l.name)] = true
 		}
 	}
-	for _, r := range visible {
-		for _, l := range lits {
-			if selects(r, l) {
-				matched = append(matched, r)
-				break
-			}
-		}
-	}
-	return matched, notFound
+	return ms
 }
 
-// selects reports whether a literal selects a record.
-func selects(r Record, l literal) bool {
-	switch l.kind {
-	case litAddress:
-		return hasAddress(r, l.ip)
-	case litCIDR:
-		for _, ep := range r.Endpoints {
-			if ip := net.ParseIP(ep.Address); ip != nil && l.network.Contains(ip) {
-				return true
-			}
-		}
-		return false
-	default:
-		return strings.EqualFold(r.ID, l.name) || strings.EqualFold(r.DisplayName, l.name)
+// addressSelected reports whether a literal selects the IP address ip.
+func (ms *matchSet) addressSelected(ip net.IP) bool {
+	if ms.addrs[ip.String()] {
+		return true
 	}
-}
-
-// hasAddress reports whether one endpoint of r is ip.
-func hasAddress(r Record, ip net.IP) bool {
-	for _, ep := range r.Endpoints {
-		if e := net.ParseIP(ep.Address); e != nil && e.Equal(ip) {
+	for _, n := range ms.cidrs {
+		if n.Contains(ip) {
 			return true
 		}
 	}
 	return false
 }
 
-// buildFact turns a visible record into the fixed struct, validating
-// every field.
-func buildFact(r Record) Fact {
-	f := Fact{
-		ID:                cleanText(r.ID, MaxIDBytes),
-		Name:              cleanText(r.DisplayName, MaxNameBytes),
-		Criticality:       validCriticality(r.Criticality),
-		CriticalitySource: validCriticalitySource(r.CriticalitySource),
-		Enrollment:        validEnrollment(r.Enrollment),
-		EnrollmentSince:   r.EnrollmentSince,
-		OSFamily:          cleanOS(r.OSFamily),
-		OSRelease:         cleanOS(r.OSRelease),
-	}
+// nameSelected reports whether a name literal equals s. Only ASCII
+// letters are folded, and s must be ASCII.
+func (ms *matchSet) nameSelected(s string) bool {
+	folded, ok := asciiName(s)
+	return ok && ms.names[folded]
+}
+
+// selectsHost reports whether a literal selects the host. It reads only
+// the endpoint addresses and the ID and display name needed for matching;
+// the result is a boolean and no other host field leaves this function.
+func (ms *matchSet) selectsHost(r Record) bool {
 	for _, ep := range r.Endpoints {
-		if len(f.Endpoints) == MaxEndpoints {
-			f.EndpointsDropped++
-			continue
+		if ip := net.ParseIP(ep.Address); ip != nil && ms.addressSelected(ip) {
+			return true
 		}
-		addr, ok := canonicalAddress(ep.Address)
-		if !ok || ep.Port < 1 || ep.Port > 65535 {
-			f.EndpointsDropped++
-			continue
-		}
-		f.Endpoints = append(f.Endpoints, Endpoint{
-			Address: addr,
-			Port:    ep.Port,
-			Label:   cleanText(ep.Label, MaxLabelBytes),
-		})
 	}
+	return ms.nameSelected(r.ID) || ms.nameSelected(r.DisplayName)
+}
+
+// addressesNotIn returns the question's address literals that no host in
+// visible has as an endpoint, in order of appearance. CIDR literals never
+// appear here.
+func (ms *matchSet) addressesNotIn(visible []Record) []string {
+	have := make(map[string]bool)
+	for _, r := range visible {
+		for _, ep := range r.Endpoints {
+			if ip := net.ParseIP(ep.Address); ip != nil {
+				have[ip.String()] = true
+			}
+		}
+	}
+	var out []string
+	for _, s := range ms.order {
+		if !have[s] {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// buildFact turns a visible record into the fixed struct, validating
+// every field. Endpoints that the question names come first, so the
+// address the user asked about is shown; the rest follow in stored order.
+func buildFact(r Record, ms *matchSet, now time.Time) Fact {
+	f := Fact{
+		ID:                   cleanText(r.ID, MaxIDBytes),
+		Name:                 cleanText(r.DisplayName, MaxNameBytes),
+		InventoryCriticality: validCriticality(r.InventoryCriticality),
+		ExecutorCriticality:  validCriticality(r.ExecutorCriticality),
+		Enrollment:           validEnrollment(r.Enrollment),
+		EnrollmentSince:      validDate(r.EnrollmentSince, now),
+		OSFamily:             cleanOS(r.OSFamily),
+		OSRelease:            cleanOS(r.OSRelease),
+	}
+	var selected, rest []Endpoint
+	for _, ep := range r.Endpoints {
+		addr, ok := canonicalAddress(ep.Address)
+		if !ok {
+			f.EndpointsDropped++
+			continue
+		}
+		port := ep.Port
+		if port < 1 || port > 65535 {
+			port = 0
+		}
+		e := Endpoint{Address: addr, Port: port, Label: cleanText(ep.Label, MaxLabelBytes)}
+		if ip := net.ParseIP(addr); ip != nil && ms.addressSelected(ip) {
+			selected = append(selected, e)
+		} else {
+			rest = append(rest, e)
+		}
+	}
+	all := append(selected, rest...)
+	if len(all) > MaxEndpoints {
+		f.EndpointsDropped += len(all) - MaxEndpoints
+		all = all[:MaxEndpoints]
+	}
+	f.Endpoints = all
 	return f
 }
 
 // factBytes is the text payload of one fact, the unit MaxFactBytes counts.
+// It counts the bytes each value has in its default encoding.
 func factBytes(f Fact) int {
-	const dateLen = len("2006-01-02")
-	n := len(f.ID.Value) + len(f.Name.Value) + len(f.Criticality) +
-		len(f.CriticalitySource.Value) + len(f.Enrollment) +
+	n := len(f.ID.Value) + len(f.Name.Value) +
+		len(f.InventoryCriticality) + len(f.ExecutorCriticality) + len(f.Enrollment) +
 		len(f.OSFamily.Value) + len(f.OSRelease.Value)
 	for _, e := range f.Endpoints {
-		n += len(e.Address) + len(e.Label.Value) + len("65535")
+		n += len(e.Address) + len(e.Label.Value) + len(strconv.Itoa(e.Port))
 	}
 	if !f.EnrollmentSince.IsZero() {
-		n += dateLen
+		n += len(f.EnrollmentSince.Format(time.RFC3339))
 	}
 	return n
+}
+
+// validDate keeps an enrollment date only when it is a real past date:
+// at or after minEnrollmentYear and not after now. The result is the UTC
+// midnight of that day, so its encoding is fixed. Otherwise it is zero.
+func validDate(t time.Time, now time.Time) time.Time {
+	if t.IsZero() {
+		return time.Time{}
+	}
+	u := t.UTC()
+	d := time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
+	if d.Year() < minEnrollmentYear || d.After(now) {
+		return time.Time{}
+	}
+	return d
 }
 
 // normaliseSourceAddresses validates the admin-set NOS source addresses
@@ -369,19 +443,16 @@ func normaliseSourceAddresses(in []string) ([]string, error) {
 }
 
 // canonicalAddress validates an endpoint address: an IP literal in
-// canonical form or a DNS host name.
+// canonical form or a DNS host name, at most MaxAddressBytes long.
 func canonicalAddress(s string) (string, bool) {
 	if ip := net.ParseIP(s); ip != nil {
 		return ip.String(), true
 	}
-	if len(s) <= maxHostnameBytes && hostnameRe.MatchString(s) {
-		return strings.ToLower(s), true
+	if len(s) <= MaxAddressBytes && hostnameRe.MatchString(s) {
+		return asciiLower(s), true
 	}
 	return "", false
 }
-
-// maxHostnameBytes is the DNS limit for a host name.
-const maxHostnameBytes = 253
 
 var hostnameRe = regexp.MustCompile(`(?i)^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$`)
 
@@ -392,17 +463,6 @@ func validCriticality(s string) string {
 		return s
 	}
 	return ""
-}
-
-// validCriticalitySource accepts the two sources of a criticality value.
-func validCriticalitySource(s string) Text {
-	switch s {
-	case "inventory", "executor":
-		return Text{Value: s}
-	case "":
-		return Text{}
-	}
-	return Text{Altered: true}
 }
 
 // validEnrollment maps any value that is not an ADR 0014 D3 state to

@@ -34,14 +34,14 @@ func lanEndpoint(addr string) RawEndpoint { return RawEndpoint{Address: addr, Po
 
 func baseRecord(id, name string, addrs ...string) Record {
 	r := Record{
-		ID:                id,
-		DisplayName:       name,
-		Criticality:       "HIGH",
-		CriticalitySource: "inventory",
-		Enrollment:        EnrollmentHostKeyPinned,
-		EnrollmentSince:   time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC),
-		OSFamily:          "Debian",
-		OSRelease:         "12",
+		ID:                   id,
+		DisplayName:          name,
+		InventoryCriticality: "HIGH",
+		ExecutorCriticality:  "CRITICAL",
+		Enrollment:           EnrollmentHostKeyPinned,
+		EnrollmentSince:      time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC),
+		OSFamily:             "Debian",
+		OSRelease:            "12",
 	}
 	for _, a := range addrs {
 		r.Endpoints = append(r.Endpoints, lanEndpoint(a))
@@ -73,8 +73,8 @@ func hostIDs(res Result) []string {
 // TestFactHasOnlyTheFixedFields guards the fixed struct of AS-06: no field
 // may be added without changing this list and the reviewed ADR D3 table.
 func TestFactHasOnlyTheFixedFields(t *testing.T) {
-	want := []string{"ID", "Name", "Endpoints", "EndpointsDropped", "Criticality",
-		"CriticalitySource", "Enrollment", "EnrollmentSince", "OSFamily", "OSRelease"}
+	want := []string{"ID", "Name", "Endpoints", "EndpointsDropped", "InventoryCriticality",
+		"ExecutorCriticality", "Enrollment", "EnrollmentSince", "OSFamily", "OSRelease"}
 	typ := reflect.TypeOf(Fact{})
 	var got []string
 	for i := 0; i < typ.NumField(); i++ {
@@ -275,23 +275,61 @@ func TestFactBytesStayWithinLimit(t *testing.T) {
 		ids = append(ids, id)
 		question.WriteString(" " + id)
 	}
-	for i := 0; i < 20; i++ {
-		question.WriteString(fmt.Sprintf(" 10.7.0.%d", i+1))
-	}
 	res := mustProject(t, request(question.String(), fakeSource{hosts: recs}, visibleOnly(ids...)))
-	total := 0
-	for _, f := range res.Hosts {
-		total += factBytes(f)
-	}
+	// The payload is measured from the values' encodings, not with factBytes.
+	total := wireBytes(t, res.Hosts)
 	for _, s := range res.NotInInventory {
 		total += len(s)
 	}
 	if total > MaxFactBytes {
 		t.Fatalf("fact payload = %d bytes, limit %d", total, MaxFactBytes)
 	}
+	if len(res.Hosts) == 0 || len(res.Hosts) >= MaxFactHosts {
+		t.Fatalf("got %d hosts; the byte budget must cut some but not all", len(res.Hosts))
+	}
 	if !res.Truncated {
 		t.Fatal("Truncated = false although the byte budget forced drops")
 	}
+}
+
+// wireBytes sums the text of every string-valued and time-valued field of
+// the facts, reflectively, using each time's JSON encoding without quotes.
+// It is an independent measure of MaxFactBytes; it does not call factBytes.
+func wireBytes(t *testing.T, v any) int {
+	t.Helper()
+	var sum func(reflect.Value) int
+	sum = func(v reflect.Value) int {
+		if v.Type() == reflect.TypeOf(time.Time{}) {
+			if v.Interface().(time.Time).IsZero() {
+				return 0
+			}
+			b, err := v.Interface().(time.Time).MarshalJSON()
+			if err != nil {
+				t.Fatalf("marshal time: %v", err)
+			}
+			return len(b) - 2
+		}
+		switch v.Kind() {
+		case reflect.String:
+			return len(v.String())
+		case reflect.Int:
+			return len(fmt.Sprint(v.Int()))
+		case reflect.Struct:
+			n := 0
+			for i := 0; i < v.NumField(); i++ {
+				n += sum(v.Field(i))
+			}
+			return n
+		case reflect.Slice:
+			n := 0
+			for i := 0; i < v.Len(); i++ {
+				n += sum(v.Index(i))
+			}
+			return n
+		}
+		return 0
+	}
+	return sum(reflect.ValueOf(v))
 }
 
 func TestEndpointsAreLimitedToFour(t *testing.T) {
@@ -316,11 +354,39 @@ func TestInvalidEndpointsAreDropped(t *testing.T) {
 	}
 	res := mustProject(t, request("odd", fakeSource{hosts: []Record{r}}, visibleOnly("odd")))
 	f := res.Hosts[0]
-	if len(f.Endpoints) != 2 || f.EndpointsDropped != 2 {
-		t.Fatalf("endpoints = %+v dropped %d, want 2 kept and 2 dropped", f.Endpoints, f.EndpointsDropped)
+	// A bad address is dropped; a bad port keeps the address with Port 0.
+	if len(f.Endpoints) != 3 || f.EndpointsDropped != 1 {
+		t.Fatalf("endpoints = %+v dropped %d, want 3 kept and 1 dropped", f.Endpoints, f.EndpointsDropped)
 	}
-	if f.Endpoints[0].Address != "10.0.0.1" || f.Endpoints[1].Address != "edge.example" {
+	if f.Endpoints[0].Address != "10.0.0.1" || f.Endpoints[1].Address != "10.0.0.3" ||
+		f.Endpoints[1].Port != 0 || f.Endpoints[2].Address != "edge.example" {
 		t.Fatalf("kept endpoints = %+v", f.Endpoints)
+	}
+}
+
+func TestEndpointNamedByQuestionIsShownEvenBeyondFour(t *testing.T) {
+	r := baseRecord("many", "many", "10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4", "10.0.0.5")
+	res := mustProject(t, request("is 10.0.0.5 up on many?", fakeSource{hosts: []Record{r}}, visibleOnly("many")))
+	if len(res.Hosts) != 1 {
+		t.Fatalf("hosts = %d, want 1", len(res.Hosts))
+	}
+	if got := res.Hosts[0].Endpoints[0].Address; got != "10.0.0.5" {
+		t.Fatalf("first endpoint = %s, want the named 10.0.0.5", got)
+	}
+	if len(res.NotInInventory) != 0 {
+		t.Fatalf("named endpoint reported not in inventory: %v", res.NotInInventory)
+	}
+}
+
+func TestAddressWithBadPortIsStillInInventory(t *testing.T) {
+	r := baseRecord("odd", "odd")
+	r.Endpoints = []RawEndpoint{{Address: "10.0.0.9", Port: 99999, Label: "lan"}}
+	res := mustProject(t, request("is 10.0.0.9 up?", fakeSource{hosts: []Record{r}}, visibleOnly("odd")))
+	if len(res.Hosts) != 1 || res.Hosts[0].Endpoints[0].Address != "10.0.0.9" {
+		t.Fatalf("hosts = %+v, want odd with 10.0.0.9", res.Hosts)
+	}
+	if len(res.NotInInventory) != 0 {
+		t.Fatalf("NotInInventory = %v, want none", res.NotInInventory)
 	}
 }
 
@@ -392,13 +458,13 @@ func TestOSFieldsRestrictedToSafeCharset(t *testing.T) {
 
 func TestUnknownEnumValuesBecomeUnknown(t *testing.T) {
 	r := baseRecord("h", "h")
-	r.Criticality = "PWNED"
-	r.CriticalitySource = "shell"
+	r.InventoryCriticality = "PWNED"
+	r.ExecutorCriticality = "shell"
 	r.Enrollment = EnrollmentState("ignore rules")
 	res := mustProject(t, request("h", fakeSource{hosts: []Record{r}}, visibleOnly("h")))
 	f := res.Hosts[0]
-	if f.Criticality != "" || f.CriticalitySource.Value != "" {
-		t.Fatalf("criticality = %q source = %+v, want empty", f.Criticality, f.CriticalitySource)
+	if f.InventoryCriticality != "" || f.ExecutorCriticality != "" {
+		t.Fatalf("criticality inventory=%q executor=%q, want both empty", f.InventoryCriticality, f.ExecutorCriticality)
 	}
 	if f.Enrollment != EnrollmentUnknown {
 		t.Fatalf("enrollment = %q, want %q", f.Enrollment, EnrollmentUnknown)

@@ -14,37 +14,75 @@ import (
 // underscore, space and hyphen, at most MaxOSBytes bytes.
 var osRe = regexp.MustCompile("^[A-Za-z0-9._ -]{1," + strconv.Itoa(MaxOSBytes) + "}$")
 
-// cleanText makes an untrusted text value safe to show as plain text:
-// invalid UTF-8 is dropped, control and format characters become spaces,
-// whitespace is collapsed, and the value is cut to max bytes at a rune
+// textScanFactor bounds the input that cleanText reads: at most this many
+// times the output limit. Work is therefore proportional to the output
+// size, not to the stored size of an untrusted value.
+const textScanFactor = 8
+
+// printable reports whether r is a letter, mark, number, punctuation or
+// symbol. Control, format, private-use, surrogate, unassigned and
+// noncharacter code points are not printable.
+func printable(r rune) bool {
+	return unicode.In(r, unicode.L, unicode.M, unicode.N, unicode.P, unicode.S)
+}
+
+// cleanText makes an untrusted text value safe to show as plain text.
+// Invalid UTF-8 bytes are dropped; whitespace and every non-printable rune
+// become one separating space; runs of separators collapse; leading and
+// trailing separators go; the value is cut to max bytes at a rune
 // boundary. Every change sets Altered. Instruction-like wording is not
 // removed; it stays data.
 func cleanText(s string, max int) Text {
 	var t Text
-	if !utf8.ValidString(s) {
-		s = strings.ToValidUTF8(s, "")
+	if limit := max * textScanFactor; len(s) > limit {
+		s = s[:runeCut(s, limit)]
 		t.Altered = true
 	}
-	mapped := strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
-			return ' '
+	var b strings.Builder
+	pending := false // a separator follows the last written rune
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		i += size
+		switch {
+		case r == utf8.RuneError && size == 1:
+			t.Altered = true // invalid byte, dropped
+		case unicode.IsSpace(r) || !printable(r):
+			if r != ' ' || pending || b.Len() == 0 {
+				t.Altered = true
+			}
+			if b.Len() > 0 {
+				pending = true
+			}
+		default:
+			if pending {
+				b.WriteByte(' ')
+				pending = false
+			}
+			b.WriteRune(r)
 		}
-		return r
-	}, s)
-	norm := strings.Join(strings.Fields(mapped), " ")
-	if norm != s {
+	}
+	if pending {
+		t.Altered = true // trailing separator
+	}
+	out := b.String()
+	if len(out) > max {
+		out = strings.TrimRight(out[:runeCut(out, max)], " ")
 		t.Altered = true
 	}
-	if len(norm) > max {
-		cut := max
-		for cut > 0 && !utf8.RuneStart(norm[cut]) {
-			cut--
-		}
-		norm = strings.TrimRight(norm[:cut], " ")
-		t.Altered = true
-	}
-	t.Value = norm
+	t.Value = out
 	return t
+}
+
+// runeCut returns the largest index ≤ n that starts a rune of s, or
+// len(s) when n is past the end.
+func runeCut(s string, n int) int {
+	if n >= len(s) {
+		return len(s)
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return n
 }
 
 // cleanOS accepts an OS family or release only from osRe; anything else
