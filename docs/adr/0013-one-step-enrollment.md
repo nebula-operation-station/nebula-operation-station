@@ -1388,7 +1388,9 @@ section "NetBird without Management API (2026-11-12)".
   cache, no access log), the trusted-proxies settings (single addresses,
   proxy-only networks), the client-address rule and the bounded rate-limit
   table, the offer table
-  (executor), executor egress to the NetBird management URL.
+  (executor). No executor egress to the NetBird management URL (amended
+  2026-11-12, D6 "Precondition"; previously this bullet listed "executor
+  egress to the NetBird management URL").
 - `docs/spec/09-untrusted-host-data.md`: script-printed addresses are
   operator hints; endpoint validation; forwarded headers are untrusted
   unless from a configured trusted proxy.
