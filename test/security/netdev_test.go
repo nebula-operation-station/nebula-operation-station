@@ -24,7 +24,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"log/slog"
 	"net/http"
@@ -33,6 +37,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -108,6 +113,7 @@ type ndEnv struct {
 
 func newNDEnv(t *testing.T, roles ...peercred.Role) *ndEnv {
 	t.Helper()
+	requireNoNetDevReadIO(t)
 	dir := privateDir(t)
 	db, err := executordb.Open(dir)
 	if err != nil {
@@ -322,16 +328,190 @@ func (e *ndEnv) authorizedReads() int {
 
 // wantAuthorized asserts that a read passed every authority check: the
 // executor recorded the spend. Device I/O itself is not implemented yet
-// (ND-14), so the reply is Unimplemented; later it may be Unavailable for
-// the absent test device. Neither is a refusal by authority.
+// (ND-14), so the reply must be Unimplemented. Any other code means the
+// read path changed; requireNoNetDevReadIO stops every ndEnv before that
+// path could dial the registered address.
 func (e *ndEnv) wantAuthorized(before int, err error) {
 	e.t.Helper()
-	if c := status.Code(err); c != codes.Unimplemented && c != codes.Unavailable {
-		e.t.Fatalf("authorized read: want Unimplemented or Unavailable after the authority checks, got %v", err)
+	if c := status.Code(err); c != codes.Unimplemented {
+		e.t.Fatalf("authorized read: want Unimplemented after the authority checks (no device I/O in tests), got %v", err)
 	}
 	if got := e.authorizedReads(); got != before+1 {
 		e.t.Fatalf("authorized read: %d netdev_read_authorized audit lines, want %d", got, before+1)
 	}
+}
+
+// ndExecutorSrc is the executor package source, relative to this test.
+const ndExecutorSrc = "../../internal/executor"
+
+// ndIOImports are packages whose use on the read path means the executor
+// can open a connection.
+var ndIOImports = map[string]bool{
+	"net": true, "net/http": true, "crypto/tls": true, "os/exec": true, "syscall": true,
+	"golang.org/x/crypto/ssh": true,
+	"github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport": true,
+	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun":      true,
+}
+
+// ndReadPathImports are the packages the read path may use: those it uses
+// before device I/O exists, none of which opens a connection. A package
+// outside this list (a device client, a new transport) fails the guard
+// until a reviewer has checked it and the tests inject a dialer.
+var ndReadPathImports = map[string]bool{
+	"context": true, "crypto/sha256": true, "encoding/binary": true, "encoding/hex": true, "encoding/json": true,
+	"errors": true, "fmt": true, "io": true, "log/slog": true, "slices": true, "strings": true, "time": true,
+	"google.golang.org/grpc/codes": true, "google.golang.org/grpc/status": true,
+	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical":      true,
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb":     true,
+	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevcontract": true,
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit":         true,
+	"github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1": true,
+	"github.com/nebula-operation-station/nebula-operation-station/internal/schedgrant":     true,
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vault":          true,
+}
+
+// ndIOName matches identifiers on the read path that name a connection,
+// a dialer or the device lifecycle that probes.
+var ndIOName = regexp.MustCompile(`(?i)dial|transport|probe|netdevadmin|conn$|^conn|sshclient`)
+
+// ndReadIOFindings walks the executor sources from ReadNetDevice through
+// every package function or method it names (by name, so it
+// over-approximates) and returns each use of an I/O package or a dial-like
+// identifier, plus the visited function names.
+func ndReadIOFindings(dir string) (findings, visited []string, err error) {
+	fset := token.NewFileSet()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	type fn struct {
+		decl    *ast.FuncDecl
+		imports map[string]string
+	}
+	funcs := map[string][]fn{}
+	for _, ent := range entries {
+		name := ent.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, parser.SkipObjectResolution)
+		if err != nil {
+			return nil, nil, err
+		}
+		imports := map[string]string{}
+		for _, imp := range f.Imports {
+			p := strings.Trim(imp.Path.Value, `"`)
+			alias := p[strings.LastIndex(p, "/")+1:]
+			if imp.Name != nil {
+				alias = imp.Name.Name
+			}
+			imports[alias] = p
+		}
+		for _, d := range f.Decls {
+			if fd, ok := d.(*ast.FuncDecl); ok && fd.Body != nil {
+				funcs[fd.Name.Name] = append(funcs[fd.Name.Name], fn{fd, imports})
+			}
+		}
+	}
+	if len(funcs["ReadNetDevice"]) == 0 {
+		return nil, nil, fmt.Errorf("ReadNetDevice not found in %s", dir)
+	}
+	seen := map[string]bool{"ReadNetDevice": true}
+	queue := []string{"ReadNetDevice"}
+	for len(queue) > 0 {
+		cur := queue[0]
+		queue = queue[1:]
+		visited = append(visited, cur)
+		for _, f := range funcs[cur] {
+			ast.Inspect(f.decl.Body, func(n ast.Node) bool {
+				var id *ast.Ident
+				switch x := n.(type) {
+				case *ast.SelectorExpr:
+					if pkg, ok := x.X.(*ast.Ident); ok {
+						if p, ok := f.imports[pkg.Name]; ok && (ndIOImports[p] || !ndReadPathImports[p]) {
+							findings = append(findings, fmt.Sprintf("%s: uses %s.%s (%s)", fset.Position(x.Pos()), pkg.Name, x.Sel.Name, p))
+						}
+					}
+					id = x.Sel
+				case *ast.Ident:
+					id = x
+				default:
+					return true
+				}
+				if ndIOName.MatchString(id.Name) {
+					findings = append(findings, fmt.Sprintf("%s: names %s", fset.Position(id.Pos()), id.Name))
+				}
+				if _, ok := funcs[id.Name]; ok && !seen[id.Name] {
+					seen[id.Name] = true
+					queue = append(queue, id.Name)
+				}
+				return true
+			})
+		}
+	}
+	return findings, visited, nil
+}
+
+// requireNoNetDevReadIO stops the test before any read when the
+// executor's read path could open a connection. The registered device
+// sits at a real private address (registration refuses loopback) and the
+// executor has no dialer hook yet, so once ND-14 adds device I/O these
+// tests must inject a loopback or failing dialer first; until then this
+// guard keeps every read in this file off the network.
+func requireNoNetDevReadIO(t *testing.T) {
+	t.Helper()
+	findings, visited, err := ndReadIOFindings(ndExecutorSrc)
+	if err != nil {
+		t.Fatalf("scan the executor read path: %v", err)
+	}
+	if len(findings) > 0 {
+		t.Fatalf("ReadNetDevice can reach device I/O; inject a loopback or test-failing dialer into ndEnv before reading %s at %s (functions on the path: %v):\n%s",
+			ndDevice, ndEndpoint, visited, strings.Join(findings, "\n"))
+	}
+}
+
+// TestNetDevReadIOGuardDetectsDial proves the guard is not vacuous: a
+// read path that names a dialer or the net package is reported.
+func TestNetDevReadIOGuardDetectsDial(t *testing.T) {
+	for name, src := range map[string]string{
+		"net package": `package x
+import "net"
+func (s *S) ReadNetDevice() { helper() }
+func helper() { _, _ = net.Dial("tcp", "10.20.0.2:22") }`,
+		"transport dialer": `package x
+func (s *S) ReadNetDevice() { s.open() }
+func (s *S) open() { s.transport.DialContext(nil, "tcp", "") }`,
+		"aliased sshtransport": `package x
+import st "github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport"
+func (s *S) ReadNetDevice() { var c st.Config; _ = c }`,
+		"unreviewed device client package": `package x
+import "github.com/nebula-operation-station/nebula-operation-station/internal/netdevcbs"
+func (s *S) ReadNetDevice() { s.run() }
+func (s *S) run() { _ = netdevcbs.Collect(s.target) }`,
+	} {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "x.go"), []byte(src), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		findings, _, err := ndReadIOFindings(dir)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if len(findings) == 0 {
+			t.Errorf("%s: guard found no I/O", name)
+		}
+	}
+	// The walk follows the real read path into the lease check, and that
+	// path is I/O-free today.
+	_, visited, err := ndReadIOFindings(ndExecutorSrc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("read path: %v", visited)
+	if !slices.Contains(visited, "checkNetDeviceGrant") {
+		t.Errorf("guard did not follow ReadNetDevice into checkNetDeviceGrant: %v", visited)
+	}
+	requireNoNetDevReadIO(t)
 }
 
 // wantRefused asserts code c and that no read was authorized.
@@ -1096,6 +1276,60 @@ func TestNetDevDialAddressesArePrivateLiterals(t *testing.T) {
 			t.Errorf("CheckDeviceAddr(%s): %v, want accepted", s, err)
 		}
 	}
+	// Mapped and zoned forms of otherwise private addresses are refused.
+	for _, s := range []string{"::ffff:10.20.0.2", "::ffff:192.168.1.1", "fd00::1%eth0", "fe80::1%eth0"} {
+		if err := executor.CheckDeviceAddr(mustAddr(t, s)); !errors.Is(err, executor.ErrNetDeviceAddress) {
+			t.Errorf("CheckDeviceAddr(%s): %v, want ErrNetDeviceAddress", s, err)
+		}
+	}
+
+	// DialAddr re-checks the stored row at every dial: a row that a
+	// compromised writer or a bug left with another endpoint, a zero port
+	// or a lifecycle state that forbids dialing yields no address at all.
+	tomb := time.Unix(1700000000, 0)
+	for _, tc := range []struct {
+		name string
+		edit func(*executordb.NetDevice)
+		want error
+	}{
+		{"public endpoint", func(d *executordb.NetDevice) { d.EndpointIP = "203.0.113.9" }, executor.ErrNetDeviceAddress},
+		{"public IPv6 endpoint", func(d *executordb.NetDevice) { d.EndpointIP = "2001:db8::1" }, executor.ErrNetDeviceAddress},
+		{"loopback endpoint", func(d *executordb.NetDevice) { d.EndpointIP = "127.0.0.1" }, executor.ErrNetDeviceAddress},
+		{"link-local endpoint", func(d *executordb.NetDevice) { d.EndpointIP = "169.254.1.1" }, executor.ErrNetDeviceAddress},
+		{"unspecified endpoint", func(d *executordb.NetDevice) { d.EndpointIP = "0.0.0.0" }, executor.ErrNetDeviceAddress},
+		{"IPv4-mapped endpoint", func(d *executordb.NetDevice) { d.EndpointIP = "::ffff:10.20.0.2" }, executor.ErrNetDeviceAddress},
+		{"zoned endpoint", func(d *executordb.NetDevice) { d.EndpointIP = "fd00::1%eth0" }, executor.ErrNetDeviceAddress},
+		{"non-canonical IPv6", func(d *executordb.NetDevice) { d.EndpointIP = "fd00:0:0::0001" }, executor.ErrNetDeviceAddress},
+		{"upper-case IPv6", func(d *executordb.NetDevice) { d.EndpointIP = "FD00::1" }, executor.ErrNetDeviceAddress},
+		{"leading zero IPv4", func(d *executordb.NetDevice) { d.EndpointIP = "10.20.0.02" }, executor.ErrNetDeviceAddress},
+		{"padded endpoint", func(d *executordb.NetDevice) { d.EndpointIP = " 10.20.0.2" }, executor.ErrNetDeviceAddress},
+		{"endpoint with port", func(d *executordb.NetDevice) { d.EndpointIP = "10.20.0.2:22" }, executor.ErrNetDeviceAddress},
+		{"host name", func(d *executordb.NetDevice) { d.EndpointIP = "core-sw.lan" }, executor.ErrNetDeviceAddress},
+		{"rogue private endpoint as a name", func(d *executordb.NetDevice) { d.EndpointIP = "10.66.0.9.nip.io" }, executor.ErrNetDeviceAddress},
+		{"empty endpoint", func(d *executordb.NetDevice) { d.EndpointIP = "" }, executor.ErrNetDeviceAddress},
+		{"port 0", func(d *executordb.NetDevice) { d.Port = 0 }, executor.ErrNetDeviceAddress},
+		{"blocked", func(d *executordb.NetDevice) { d.Blocked, d.BlockReason = true, "maintenance" }, executor.ErrNetDeviceNotDialable},
+		{"tombstoned", func(d *executordb.NetDevice) { d.TombstonedAt = &tomb }, executor.ErrNetDeviceNotDialable},
+		{"blocked with a public endpoint", func(d *executordb.NetDevice) {
+			d.Blocked, d.BlockReason, d.EndpointIP = true, "maintenance", "8.8.8.8"
+		}, executor.ErrNetDeviceNotDialable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tampered := dev
+			tc.edit(&tampered)
+			ap, err := executor.DialAddr(tampered)
+			if !errors.Is(err, tc.want) {
+				t.Errorf("DialAddr(%q port %d) = %v, %v; want %v", tampered.EndpointIP, tampered.Port, ap, err, tc.want)
+			}
+			if ap.IsValid() {
+				t.Errorf("DialAddr returned an address %v with the refusal", ap)
+			}
+		})
+	}
+	// The untampered row still dials only the approved endpoint.
+	if ap, err := executor.DialAddr(dev); err != nil || ap.String() != ndEndpoint+":22" {
+		t.Fatalf("DialAddr after the table = %v, %v; want %s:22", ap, err, ndEndpoint)
+	}
 }
 
 // TestNetDevBaselineNotSettableByServer (ND-21 4): the approved config
@@ -1170,15 +1404,47 @@ var ndHostileMarkup = []string{
 	`javascript:alert(4)`,
 }
 
-// ndHostileControl are device texts with control or format characters:
-// terminal escapes, NUL, line breaks, a bidi override.
-var ndHostileControl = []string{
-	"sw\x1b[2J\x1b[31mpwned",
-	"sw\x00hidden",
-	"sw\r\nSet-Cookie: x=1",
-	"evil" + ndRLO + "gnp.exe",
-	"bell\x07",
+// ndFormatRunes are the C1 controls and bidi format characters a device
+// text may try to smuggle: U+0085 NEL, U+009B CSI (the one-byte terminal
+// escape), U+200E/U+200F LRM/RLM, U+202A-U+202E embeddings and overrides,
+// U+2066-U+2069 isolates. They are built from code points so that this
+// source holds none of them.
+var ndFormatRunes = []rune{0x0085, 0x009b, 0x200e, 0x200f, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e, 0x2066, 0x2067, 0x2068, 0x2069}
+
+// ndIsControlOrFormat reports whether r must never reach a page: a C0
+// control other than tab and line breaks, DEL, a C1 control, or one of
+// ndFormatRunes.
+func ndIsControlOrFormat(r rune) bool {
+	if (r < 0x20 && r != '\n' && r != '\r' && r != '\t') || (r >= 0x7f && r <= 0x9f) {
+		return true
+	}
+	for _, f := range ndFormatRunes {
+		if r == f {
+			return true
+		}
+	}
+	return false
 }
+
+// ndHostileControl are device texts with control or format characters:
+// terminal escapes (7-bit and the C1 CSI), NUL, line breaks (CR LF and
+// NEL), bidi overrides, marks and isolates.
+var ndHostileControl = func() []string {
+	out := []string{
+		"sw\x1b[2J\x1b[31mpwned",
+		"sw\x00hidden",
+		"sw\r\nSet-Cookie: x=1",
+		"evil" + ndRLO + "gnp.exe",
+		"bell\x07",
+		"sw" + string(rune(0x009b)) + "2Jpwned",
+		"sw" + string(rune(0x0085)) + "Set-Cookie: x=1",
+		"admin" + string(rune(0x2067)) + "nimda" + string(rune(0x2069)),
+	}
+	for _, r := range ndFormatRunes {
+		out = append(out, "sw"+string(r)+"x")
+	}
+	return out
+}()
 
 func ndPayload(t *testing.T, m proto.Message) []byte {
 	t.Helper()
@@ -1307,7 +1573,7 @@ func requireInert(t *testing.T, path, body string) {
 		}
 	}
 	for _, r := range body {
-		if (r < 0x20 && r != '\n' && r != '\r' && r != '\t') || r == 0x7f || r == 0x202e {
+		if ndIsControlOrFormat(r) {
 			t.Errorf("%s: page contains control or format character %U", path, r)
 			break
 		}
