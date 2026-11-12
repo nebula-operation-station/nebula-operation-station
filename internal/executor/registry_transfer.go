@@ -48,7 +48,14 @@ import (
 // the vault lock generation, the credential expiry and every read grant
 // claim, before the transfer and after it. Any change stops the member;
 // nothing is retried. A lock during the stream also cuts the stream at the
-// next write, so `docker load` never sees manifest.json.
+// next write, and the archive's tail is held back until the vault is
+// rechecked after the last byte (lockGuard), so `docker load` never sees
+// manifest.json, oci-layout or index.json across a lock.
+//
+// The archive is a docker-archive and an OCI image layout at once
+// (registrypull): index.json names the registry's own platform manifest,
+// stored byte for byte, so the containerd image store keeps the registry
+// manifest digest as the loaded image's target.
 //
 // `docker load` records no repository digest, so the evidence that the
 // loaded image is the approved one is defined per image store
@@ -150,16 +157,20 @@ type storeEvidence struct {
 
 // imageStoreEvidence defines the evidence per store:
 //
-//   - containerd: the image store keeps the imported manifest as the
-//     image's target, so `docker image inspect repository@platform-digest`
-//     must find an image whose Id is the bound platform digest, whose
-//     RepoDigests list repository@platform-digest, whose RepoTags hold the
-//     transfer tag and whose platform is the bound one. That reference is
-//     exactly what `repository:tag@digest` with `--pull never`, phase 1's
-//     digest check and a retained reference resolve, so the store is
-//     available. The check fails closed when the engine rewrote the
-//     manifest on import (a docker-archive without the registry manifest):
-//     the image is then not found by digest, or has another Id.
+//   - containerd: the import of the archive's OCI layout makes the
+//     index.json descriptor, the registry's platform manifest (bytes in
+//     the archive, digest-checked by the content store), the image's
+//     target. The image Id is the target digest and every image name gets
+//     the repository digest name@target. So `docker image inspect
+//     repository@platform-digest` must find an image whose Id is the bound
+//     platform digest, whose RepoDigests list repository@platform-digest,
+//     whose RepoTags hold the transfer tag and whose platform is the bound
+//     one. That reference is exactly what `repository:tag@digest` with
+//     `--pull never`, phase 1's digest check and a retained reference
+//     resolve, so the store is available. The check fails closed when the
+//     engine imported only manifest.json (it then generates a manifest of
+//     its own) or rewrote the manifest: the image is then not found by
+//     digest, or has another Id.
 //   - classic: `docker load` records no digest reference, and no command
 //     can add one, so `repository@digest` and `repository:tag@digest` are
 //     never found with `--pull never`. The evidence is the image Id, which
@@ -243,6 +254,9 @@ type transferHooks struct {
 	// duringStream runs once after the first archive bytes reached the
 	// target.
 	duringStream func()
+	// beforeClose runs after registrypull finished the archive, before the
+	// held-back tail is sent and the stream is closed.
+	beforeClose func()
 }
 
 // transferState is the Service's private transfer configuration.
@@ -437,7 +451,7 @@ func (s *Service) transferPrivateImages(ctx context.Context, client *ssh.Client,
 		if img.indexDigest != "" {
 			req.Digest = img.indexDigest
 		}
-		res, err := s.loadOverSSH(ctx, client, puller, cred, req, epoch, hooks.duringStream)
+		res, err := s.loadOverSSH(ctx, client, puller, cred, req, epoch, hooks)
 		// Recheck after every stream, also a failed one: a change during
 		// the transfer is reported as that change.
 		if rerr := s.recheckTransfer(ctx, epoch, l, b, claims); rerr != nil {
@@ -598,6 +612,14 @@ func detectImageStore(ctx context.Context, client *ssh.Client, sudo bool) (strin
 	return imageStoreClassic, nil
 }
 
+// inspectEvidenceFormat is the narrow `docker image inspect` template of
+// the evidence: only the fields inspectedImage reads, so a legitimate image
+// with a large configuration or many labels stays far below
+// maxTransferHostOutput and less untrusted data is parsed. It holds no
+// single quote (it is single-quoted in the command).
+const inspectEvidenceFormat = `{"Id":{{json .Id}},"RepoTags":{{json .RepoTags}},"RepoDigests":{{json .RepoDigests}},` +
+	`"Os":{{json .Os}},"Architecture":{{json .Architecture}},"Variant":{{json .Variant}}}`
+
 // inspectLoadedImage inspects ref on the target. ref is built from bound,
 // validated values only and single-quoted.
 func inspectLoadedImage(ctx context.Context, client *ssh.Client, sudo bool, ref string) (inspectedImage, error) {
@@ -618,7 +640,7 @@ func inspectLoadedImage(ctx context.Context, client *ssh.Client, sudo bool, ref 
 	}
 	cctx, cancel := context.WithTimeout(ctx, transferHostCommandTimeout)
 	defer cancel()
-	out, err := hostCommand(cctx, client, sudoPrefix(sudo)+"docker image inspect --format '{{json .}}' -- '"+ref+"'", nil, maxTransferHostOutput)
+	out, err := hostCommand(cctx, client, sudoPrefix(sudo)+"docker image inspect --format '"+inspectEvidenceFormat+"' -- '"+ref+"'", nil, maxTransferHostOutput)
 	if err != nil || !utf8.Valid(out) {
 		return inspectedImage{}, errTransferEvidence
 	}
@@ -629,26 +651,72 @@ func inspectLoadedImage(ctx context.Context, client *ssh.Client, sudo bool, ref 
 	return got, nil
 }
 
+// transferHoldBack is how many of the newest archive bytes lockGuard keeps
+// back until registrypull has finished the archive and the vault is
+// rechecked. Everything registrypull writes after the platform manifest
+// blob (manifest.json with at most registrypull.MaxLayers layer paths,
+// repositories, oci-layout, index.json and the trailer) is far below this
+// (under 16 KiB), so none of the entries that make the archive loadable
+// leaves the executor before that check.
+const transferHoldBack = 64 << 10
+
 // lockGuard cuts the stream at the next write once the vault is locked or
-// its lock generation moved, so the target never gets a complete archive
-// across a lock. hook runs once after the first write.
+// its lock generation moved, and holds back the archive's last
+// transferHoldBack bytes until finish rechecks the vault, so the target
+// never gets a loadable archive across a lock. A cut stream reaches
+// `docker load` as a truncated tar without manifest.json, oci-layout and
+// index.json, which every image store refuses. hook runs once after the
+// first bytes were sent.
 type lockGuard struct {
 	w     io.Writer
 	s     *Service
 	epoch uint64
 	hook  func()
 	once  sync.Once
+	held  []byte
+}
+
+func (g *lockGuard) locked() bool {
+	st, err := g.s.vault.State()
+	return err != nil || st != vault.StateUnlocked || g.s.vault.LockGeneration() != g.epoch
 }
 
 func (g *lockGuard) Write(p []byte) (int, error) {
-	if st, err := g.s.vault.State(); err != nil || st != vault.StateUnlocked || g.s.vault.LockGeneration() != g.epoch {
+	if g.locked() {
 		return 0, errTransferLocked
 	}
-	n, err := g.w.Write(p)
+	g.held = append(g.held, p...)
+	if len(g.held) < 2*transferHoldBack {
+		return len(p), nil
+	}
+	n := len(g.held) - transferHoldBack
+	if err := g.send(g.held[:n]); err != nil {
+		return 0, err
+	}
+	g.held = g.held[:copy(g.held, g.held[n:])]
+	return len(p), nil
+}
+
+// send writes b downstream after a lock check.
+func (g *lockGuard) send(b []byte) error {
+	if g.locked() {
+		return errTransferLocked
+	}
+	if _, err := g.w.Write(b); err != nil {
+		return err
+	}
 	if g.hook != nil {
 		g.once.Do(g.hook)
 	}
-	return n, err
+	return nil
+}
+
+// finish rechecks the vault and sends the held-back tail. The caller
+// closes the stream only when it returns nil.
+func (g *lockGuard) finish() error {
+	err := g.send(g.held)
+	g.held = nil
+	return err
 }
 
 // loadOverSSH streams one verified archive into `docker load` on the
@@ -656,7 +724,7 @@ func (g *lockGuard) Write(p []byte) (int, error) {
 // command is fixed. Success needs both a complete, verified pull and exit
 // status 0 of `docker load`.
 func (s *Service) loadOverSSH(ctx context.Context, client *ssh.Client, puller *registrypull.Puller, cred registrymeta.Credential,
-	req registrypull.Request, epoch uint64, hook func()) (registrypull.Result, error) {
+	req registrypull.Request, epoch uint64, hooks transferHooks) (registrypull.Result, error) {
 	sess, err := client.NewSession()
 	if err != nil {
 		return registrypull.Result{}, errTransferLoad
@@ -678,10 +746,20 @@ func (s *Service) loadOverSSH(ctx context.Context, client *ssh.Client, puller *r
 	defer pcancel()
 	pullDone := make(chan pulled, 1)
 	go func() {
-		res, err := puller.Pull(pctx, cred, req, &lockGuard{w: pw, s: s, epoch: epoch, hook: hook})
+		guard := &lockGuard{w: pw, s: s, epoch: epoch, hook: hooks.duringStream}
+		res, err := puller.Pull(pctx, cred, req, guard)
+		if err == nil {
+			if hooks.beforeClose != nil {
+				hooks.beforeClose()
+			}
+			// The vault is rechecked before the tail that completes the
+			// archive is sent and before the stream is closed.
+			err = guard.finish()
+		}
 		if err != nil {
-			// Without manifest.json and trailer `docker load` refuses the
-			// stream; it never held an unverified byte.
+			// Without manifest.json, oci-layout, index.json and trailer
+			// `docker load` refuses the stream; it never held an
+			// unverified byte.
 			pw.CloseWithError(err)
 		} else {
 			_ = pw.Close()
@@ -700,12 +778,20 @@ func (s *Service) loadOverSSH(ctx context.Context, client *ssh.Client, puller *r
 			werr = ctx.Err()
 		}
 	}
-	// The load ended: a pull still writing must not block on the pipe.
+	// The load ended: a pull still writing must not block on the pipe, and
+	// a pull still fetching stops.
 	_ = pr.CloseWithError(errTransferLoad)
+	pcancel()
 	p := <-pullDone
+	// A pull that failed only because the load ended first (its write hit
+	// the closed pipe, or it was cancelled here) is a load failure.
+	loadEndedFirst := werr != nil && (errors.Is(p.err, errTransferLoad) ||
+		(errors.Is(p.err, context.Canceled) && ctx.Err() == nil))
 	switch {
 	case errors.Is(p.err, errTransferLocked):
 		return registrypull.Result{}, errTransferLocked
+	case loadEndedFirst:
+		return registrypull.Result{}, errTransferLoad
 	case p.err != nil:
 		return registrypull.Result{}, fmt.Errorf("%w: %s", errTransferPull, pullReason(p.err))
 	case werr != nil:

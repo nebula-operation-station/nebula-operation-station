@@ -48,7 +48,14 @@ type testImage struct {
 
 func newTestImage(t *testing.T) testImage {
 	t.Helper()
-	layer := []byte("layer-bytes-of-the-approved-image")
+	return newTestImageWith(t, "layer-bytes-of-the-approved-image")
+}
+
+// newTestImageWith builds an image whose one layer repeats seed to 256 KiB,
+// larger than the stream's hold-back, so a transfer streams before it ends.
+func newTestImageWith(t *testing.T, seed string) testImage {
+	t.Helper()
+	layer := []byte(strings.Repeat(seed, (256<<10)/len(seed)+1))
 	config, _ := json.Marshal(map[string]any{"os": "linux", "architecture": "amd64",
 		"rootfs": map[string]any{"type": "layers", "diff_ids": []string{sha([]byte("diff"))}}})
 	man, _ := json.Marshal(map[string]any{"schemaVersion": 2, "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
@@ -132,17 +139,30 @@ func (r *pullRegistry) blobRequests() int {
 	return n
 }
 
+// Import behaviours of the emulated containerd store.
+const (
+	// importFaithful imports like containerd: an OCI layout by its
+	// index.json, else a docker-archive under a generated manifest.
+	importFaithful = ""
+	// importDockerArchiveOnly ignores oci-layout and index.json, as an
+	// engine that reads only manifest.json would.
+	importDockerArchiveOnly = "docker-archive-only"
+	// importRewriteManifest re-encodes the manifest on import.
+	importRewriteManifest = "rewrite-manifest"
+)
+
 // fakeTarget is an SSH target emulating the Docker CLI of one image store.
+// Everything `docker image inspect` reports is derived from the archive
+// `docker load` received, never from the digest the test expects.
 type fakeTarget struct {
 	store string // imageStoreClassic or imageStoreContainerd
-	// loadedID overrides the Id the containerd store reports (a rewritten
-	// manifest on import).
-	loadedID string
-	// loadFails makes `docker load` exit 1.
+	// importMode changes the containerd import (importFaithful default).
+	importMode string
+	// loadFails makes `docker load` exit 1 after reading all of stdin.
 	loadFails bool
-	// wantManifest is the manifest digest an import that keeps the
-	// registry manifest reports.
-	wantManifest string
+	// loadExitsEarly makes `docker load` exit 1 after the first bytes,
+	// without reading the rest of stdin.
+	loadExitsEarly bool
 
 	mu       sync.Mutex
 	commands []string
@@ -175,6 +195,10 @@ func (f *fakeTarget) run(cmd string, stdin io.Reader, stdout io.Writer) uint32 {
 			_, _ = io.WriteString(stdout, `[["Backing Filesystem","extfs"],["Supports d_type","true"]]`+"\n")
 		}
 		return 0
+	case cmd == "docker load -q" && f.loadExitsEarly:
+		buf := make([]byte, 512)
+		_, _ = io.ReadFull(stdin, buf)
+		return 1
 	case cmd == "docker load -q":
 		raw, _ := io.ReadAll(stdin)
 		f.mu.Lock()
@@ -184,8 +208,8 @@ func (f *fakeTarget) run(cmd string, stdin io.Reader, stdout io.Writer) uint32 {
 			return 1
 		}
 		return f.load(raw)
-	case strings.HasPrefix(cmd, "docker image inspect --format '{{json .}}' -- '"):
-		ref := strings.TrimSuffix(strings.TrimPrefix(cmd, "docker image inspect --format '{{json .}}' -- '"), "'")
+	case strings.HasPrefix(cmd, wantInspectPrefix):
+		ref := strings.TrimSuffix(strings.TrimPrefix(cmd, wantInspectPrefix), "'")
 		f.mu.Lock()
 		img, ok := f.images[ref]
 		f.mu.Unlock()
@@ -198,64 +222,242 @@ func (f *fakeTarget) run(cmd string, stdin io.Reader, stdout io.Writer) uint32 {
 	return 127
 }
 
-// load emulates `docker load` of a docker-archive: it needs manifest.json
-// and a complete tar stream.
-func (f *fakeTarget) load(raw []byte) uint32 {
+// wantInspectPrefix is the evidence inspect command up to the reference:
+// a narrow template, never '{{json .}}'.
+const wantInspectPrefix = `docker image inspect --format '{"Id":{{json .Id}},"RepoTags":{{json .RepoTags}},` +
+	`"RepoDigests":{{json .RepoDigests}},"Os":{{json .Os}},"Architecture":{{json .Architecture}},"Variant":{{json .Variant}}}' -- '`
+
+// imageConfig is the part of an image configuration the store reports.
+type imageConfig struct {
+	OS           string `json:"os"`
+	Architecture string `json:"architecture"`
+	Variant      string `json:"variant"`
+}
+
+// readTarFiles reads every regular file of a tar stream the way
+// containerd's importer does: entries until the end of the stream (a
+// missing trailer is not an error, a broken entry is).
+func readTarFiles(raw []byte) (map[string][]byte, bool) {
 	tr := tar.NewReader(strings.NewReader(string(raw)))
 	files := map[string][]byte{}
 	for {
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
-			break
+			return files, true
 		}
 		if err != nil {
-			return 1
+			return nil, false
+		}
+		if h.Typeflag != tar.TypeReg {
+			continue
 		}
 		b, err := io.ReadAll(tr)
 		if err != nil {
-			return 1
+			return nil, false
 		}
 		files[h.Name] = b
 	}
-	var man []struct {
-		Config   string
-		RepoTags []string
+}
+
+// blobOf returns the archive blob of digest d after checking its bytes
+// against d, as a content store does on ingest.
+func blobOf(files map[string][]byte, d string, size int64) ([]byte, bool) {
+	hexPart, ok := strings.CutPrefix(d, "sha256:")
+	if !ok {
+		return nil, false
 	}
-	if json.Unmarshal(files["manifest.json"], &man) != nil || len(man) != 1 || len(man[0].RepoTags) != 1 {
+	b, ok := files["blobs/sha256/"+hexPart]
+	if !ok || sha(b) != d || (size >= 0 && int64(len(b)) != size) {
+		return nil, false
+	}
+	return b, true
+}
+
+// imageFromManifest checks that every blob of manifest body is in the
+// archive and returns the platform of its configuration.
+func imageFromManifest(files map[string][]byte, body []byte) (imageConfig, bool) {
+	var m struct {
+		Config struct {
+			Digest string `json:"digest"`
+			Size   int64  `json:"size"`
+		} `json:"config"`
+		Layers []struct {
+			Digest string `json:"digest"`
+			Size   int64  `json:"size"`
+		} `json:"layers"`
+	}
+	if json.Unmarshal(body, &m) != nil {
+		return imageConfig{}, false
+	}
+	for _, l := range m.Layers {
+		if _, ok := blobOf(files, l.Digest, l.Size); !ok {
+			return imageConfig{}, false
+		}
+	}
+	cfgBytes, ok := blobOf(files, m.Config.Digest, m.Config.Size)
+	var cfg imageConfig
+	if !ok || json.Unmarshal(cfgBytes, &cfg) != nil {
+		return imageConfig{}, false
+	}
+	return cfg, true
+}
+
+// load emulates `docker load` of the received bytes in the target's store.
+func (f *fakeTarget) load(raw []byte) uint32 {
+	files, ok := readTarFiles(raw)
+	if !ok {
 		return 1
 	}
-	cfg := files[man[0].Config]
-	repoTag := man[0].RepoTags[0]
-	repo := repoTag[:strings.LastIndex(repoTag, ":")]
+	var loaded []inspectedImage
+	switch f.store {
+	case imageStoreClassic:
+		loaded, ok = loadDockerArchiveClassic(files)
+	case imageStoreContainerd:
+		loaded, ok = f.loadContainerd(files)
+	}
+	if !ok {
+		return 1
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.images == nil {
 		f.images = map[string]inspectedImage{}
 	}
-	base := inspectedImage{RepoTags: []string{repoTag}, OS: "linux", Architecture: "amd64"}
-	switch f.store {
-	case imageStoreClassic:
-		// Id is the configuration digest; no repository digest.
-		base.ID = sha(cfg)
-		f.images[repoTag] = base
-	case imageStoreContainerd:
-		// The test's manifest digest is what an import that keeps the
-		// registry manifest reports; loadedID simulates a rewrite.
-		id := f.loadedID
-		if id == "" {
-			id = f.wantManifest
+	for _, img := range loaded {
+		for _, ref := range append(append([]string(nil), img.RepoTags...), img.RepoDigests...) {
+			f.images[ref] = img
 		}
-		base.ID = id
-		base.RepoDigests = []string{repo + "@" + id}
-		f.images[repoTag] = base
-		f.images[repo+"@"+id] = base
 	}
 	return 0
 }
 
-// fakeTarget.wantManifest is the manifest digest the emulated containerd
-// import keeps.
-func (f *fakeTarget) setManifest(d string) { f.wantManifest = d }
+// dockerArchiveManifest is one manifest.json entry.
+type dockerArchiveManifest struct {
+	Config   string
+	RepoTags []string
+	Layers   []string
+}
+
+// loadDockerArchiveClassic is the classic store: manifest.json names the
+// config and layers; the Id is the configuration digest and no repository
+// digest is recorded.
+func loadDockerArchiveClassic(files map[string][]byte) ([]inspectedImage, bool) {
+	var man []dockerArchiveManifest
+	if json.Unmarshal(files["manifest.json"], &man) != nil || len(man) == 0 {
+		return nil, false
+	}
+	var out []inspectedImage
+	for _, m := range man {
+		cfgBytes, ok := files[m.Config]
+		var cfg imageConfig
+		if !ok || json.Unmarshal(cfgBytes, &cfg) != nil {
+			return nil, false
+		}
+		for _, l := range m.Layers {
+			if _, ok := files[l]; !ok {
+				return nil, false
+			}
+		}
+		out = append(out, inspectedImage{ID: sha(cfgBytes), RepoTags: m.RepoTags, OS: cfg.OS, Architecture: cfg.Architecture,
+			Variant: cfg.Variant})
+	}
+	return out, true
+}
+
+// loadContainerd is the containerd store. With oci-layout the image
+// targets are index.json's descriptors (the manifest bytes in the archive,
+// digest-checked); without it a manifest is generated from manifest.json,
+// as containerd's importer does for a docker-archive. The Id is the target
+// digest and every image name gets a repository digest of that target.
+func (f *fakeTarget) loadContainerd(files map[string][]byte) ([]inspectedImage, bool) {
+	type target struct {
+		name   string
+		digest string
+		body   []byte
+	}
+	var targets []target
+	var layout struct {
+		Version string `json:"imageLayoutVersion"`
+	}
+	useOCI := f.importMode != importDockerArchiveOnly && files["oci-layout"] != nil
+	if useOCI {
+		if json.Unmarshal(files["oci-layout"], &layout) != nil || layout.Version != "1.0.0" {
+			return nil, false
+		}
+		var idx struct {
+			Manifests []struct {
+				Digest      string            `json:"digest"`
+				Size        int64             `json:"size"`
+				Annotations map[string]string `json:"annotations"`
+			} `json:"manifests"`
+		}
+		if json.Unmarshal(files["index.json"], &idx) != nil || len(idx.Manifests) == 0 {
+			return nil, false
+		}
+		for _, d := range idx.Manifests {
+			body, ok := blobOf(files, d.Digest, d.Size)
+			if !ok {
+				return nil, false
+			}
+			targets = append(targets, target{name: d.Annotations["io.containerd.image.name"], digest: d.Digest, body: body})
+		}
+	} else {
+		var man []dockerArchiveManifest
+		if json.Unmarshal(files["manifest.json"], &man) != nil || len(man) == 0 {
+			return nil, false
+		}
+		for _, m := range man {
+			cfgBytes := files[m.Config]
+			gen := map[string]any{"schemaVersion": 2, "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+				"config": map[string]any{"mediaType": "application/vnd.docker.container.image.v1+json", "digest": sha(cfgBytes), "size": len(cfgBytes)}}
+			var layers []any
+			for _, l := range m.Layers {
+				b := files[l]
+				layers = append(layers, map[string]any{"mediaType": "application/vnd.docker.image.rootfs.diff.tar", "digest": sha(b), "size": len(b)})
+			}
+			gen["layers"] = layers
+			body, _ := json.Marshal(gen)
+			for _, name := range m.RepoTags {
+				targets = append(targets, target{name: name, digest: sha(body), body: body})
+			}
+		}
+	}
+	var out []inspectedImage
+	for _, t := range targets {
+		if f.importMode == importRewriteManifest {
+			var v any
+			_ = json.Unmarshal(t.body, &v)
+			t.body, _ = json.MarshalIndent(v, "", " ")
+			t.digest = sha(t.body)
+		}
+		// The manifest's own blobs must be there, digest-checked; for a
+		// generated manifest they were addressed by path.
+		var cfg imageConfig
+		if useOCI {
+			c, ok := imageFromManifest(files, t.body)
+			if !ok {
+				return nil, false
+			}
+			cfg = c
+		} else {
+			var m struct {
+				Config struct{ Digest string } `json:"config"`
+			}
+			_ = json.Unmarshal(t.body, &m)
+			hexPart := strings.TrimPrefix(m.Config.Digest, "sha256:")
+			if json.Unmarshal(files["blobs/sha256/"+hexPart], &cfg) != nil {
+				return nil, false
+			}
+		}
+		img := inspectedImage{ID: t.digest, OS: cfg.OS, Architecture: cfg.Architecture, Variant: cfg.Variant}
+		if i := strings.LastIndex(t.name, ":"); t.name != "" && i > strings.LastIndex(t.name, "/") {
+			img.RepoTags = []string{t.name}
+			img.RepoDigests = []string{t.name[:i] + "@" + t.digest}
+		}
+		out = append(out, img)
+	}
+	return out, true
+}
 
 // serve starts the fake target and returns a client connected to it.
 func (f *fakeTarget) serve(t *testing.T) *ssh.Client {
@@ -354,7 +556,6 @@ func newTransferEnv(t *testing.T, store string) *transferEnv {
 	}
 	e.svc.SetPrivateTransferTempDir(t.TempDir())
 	tg := &fakeTarget{store: store}
-	tg.setManifest(pr.img.manifestDigest)
 	return &transferEnv{registryEnv: e, pull: pr, target: tg, client: tg.serve(t), info: resp.GetRegistry()}
 }
 
@@ -418,7 +619,7 @@ func TestPrivateTransferContainerdLoadsImageBytesOnly(t *testing.T) {
 		t.Fatalf("evidence: %+v", out)
 	}
 	want := []string{"docker info --format '{{json .DriverStatus}}'", "docker load -q",
-		"docker image inspect --format '{{json .}}' -- '" + e.repository() + "@" + e.pull.img.manifestDigest + "'"}
+		wantInspectPrefix + e.repository() + "@" + e.pull.img.manifestDigest + "'"}
 	if got := e.target.cmds(); fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("target commands:\n got %q\nwant %q", got, want)
 	}
@@ -500,19 +701,163 @@ func TestClassicStoreEvidenceIsTheConfigDigest(t *testing.T) {
 	}
 }
 
+// A store that does not keep the registry manifest (it imports only
+// manifest.json, or re-encodes the manifest) shows another Id and no
+// repository@platform-digest: the evidence fails.
 func TestPrivateTransferWrongDigestAfterLoadStops(t *testing.T) {
-	for name, id := range map[string]string{
-		"rewritten manifest": sha([]byte("locally rewritten manifest")),
-	} {
-		t.Run(name, func(t *testing.T) {
+	for _, mode := range []string{importDockerArchiveOnly, importRewriteManifest} {
+		t.Run(mode, func(t *testing.T) {
 			e := newTransferEnv(t, imageStoreContainerd)
-			e.target.loadedID = id
+			e.target.importMode = mode
 			_, err := e.transfer(e.binding())
 			if !errors.Is(err, errTransferEvidence) {
 				t.Fatalf("wrong digest after load: %v", err)
 			}
+			e.target.mu.Lock()
+			_, found := e.target.images[e.repository()+"@"+e.pull.img.manifestDigest]
+			e.target.mu.Unlock()
+			if found {
+				t.Fatal("the emulated store kept the registry digest despite the rewrite")
+			}
 			e.assertNoCredentialOnTarget(t, err)
 		})
+	}
+}
+
+// ociArchive builds a valid OCI layout archive of img named name.
+func ociArchive(t *testing.T, img testImage, name string) []byte {
+	t.Helper()
+	var sb strings.Builder
+	tw := tar.NewWriter(&sb)
+	put := func(n string, b []byte) {
+		if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: n, Size: int64(len(b)), Mode: 0o644}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write(b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, b := range [][]byte{img.layer, img.config, img.manifest} {
+		put("blobs/sha256/"+strings.TrimPrefix(sha(b), "sha256:"), b)
+	}
+	idx, _ := json.Marshal(map[string]any{"schemaVersion": 2, "manifests": []any{map[string]any{
+		"mediaType": "application/vnd.docker.distribution.manifest.v2+json", "digest": img.manifestDigest, "size": len(img.manifest),
+		"annotations": map[string]string{"io.containerd.image.name": name}}}})
+	put("oci-layout", []byte(`{"imageLayoutVersion":"1.0.0"}`))
+	put("index.json", idx)
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return []byte(sb.String())
+}
+
+// The containerd evidence is what the store derives from the archive
+// registrypull streams: the real archive passes; a valid archive of
+// another image under the same name, a docker-archive and a re-encoded
+// manifest do not.
+func TestContainerdEvidenceComesFromTheStreamedArchive(t *testing.T) {
+	e := newTransferEnv(t, imageStoreContainerd)
+	img := transferImage{repository: e.repository(), platformDigest: e.pull.img.manifestDigest,
+		platform: registrypull.Platform{OS: "linux", Architecture: "amd64"}}
+	ev := imageStoreEvidence[imageStoreContainerd]
+	l, err := e.svc.loadRegistry("corp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.wipe()
+	pl, err := registrypull.New(registrypull.Options{Registry: l.rec.meta(), RootCAs: l.roots, AllowLoopback: true, TempDir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sb strings.Builder
+	res, err := pl.Pull(context.Background(), registrymeta.Credential{Username: l.cred.Username, Secret: l.cred.Secret},
+		registrypull.Request{Repository: "team/app", Digest: img.platformDigest, Tag: img.transferTag(), Platform: img.platform}, &sb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamed := []byte(sb.String())
+	name := img.repository + ":" + img.transferTag()
+	other := newTestImageWith(t, "a-different-image")
+	for _, c := range []struct {
+		name    string
+		mode    string
+		archive []byte
+		ok      bool
+	}{
+		{"streamed archive", importFaithful, streamed, true},
+		{"streamed archive, docker-archive import", importDockerArchiveOnly, streamed, false},
+		{"streamed archive, manifest re-encoded", importRewriteManifest, streamed, false},
+		{"another image under the transfer tag", importFaithful, ociArchive(t, other, name), false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			tg := &fakeTarget{store: imageStoreContainerd, importMode: c.mode}
+			if code := tg.load(c.archive); code != 0 {
+				t.Fatal("containerd load failed")
+			}
+			got := tg.images[ev.ref(img)]
+			err := ev.verify(img, res, got)
+			if c.ok && (err != nil || got.ID != e.pull.img.manifestDigest) {
+				t.Fatalf("evidence of the streamed archive: %+v, %v", got, err)
+			}
+			if !c.ok && !errors.Is(err, errTransferEvidence) {
+				t.Fatalf("evidence passed for %s: %+v", c.name, got)
+			}
+			// Phase 5 resolves repository:tag@digest by the digest; it is
+			// found exactly when the evidence passes.
+			if _, found := tg.images[img.repository+"@"+img.platformDigest]; found != c.ok {
+				t.Fatalf("repository@digest found = %v", found)
+			}
+		})
+	}
+}
+
+// A lock after the last archive byte left registrypull but before the
+// stream is closed still stops the member, and `docker load` never gets
+// the entries that complete the archive.
+func TestPrivateTransferLockBeforeCloseStops(t *testing.T) {
+	e := newTransferEnv(t, imageStoreContainerd)
+	pass := []byte(strings.Repeat("correct-horse-battery-staple-", 4))
+	e.svc.transfer.hooks.beforeClose = func() {
+		e.svc.vault.Lock()
+		_ = e.svc.vault.Unlock(pass)
+	}
+	_, err := e.transfer(e.binding())
+	if !errors.Is(err, errTransferLocked) {
+		t.Fatalf("lock before close: %v", err)
+	}
+	e.target.mu.Lock()
+	defer e.target.mu.Unlock()
+	if len(e.target.stdin) != 1 {
+		t.Fatalf("docker load ran %d times", len(e.target.stdin))
+	}
+	for _, entry := range []string{"manifest.json", "index.json", "oci-layout"} {
+		if strings.Contains(string(e.target.stdin[0]), entry) {
+			t.Fatalf("docker load got %s across a lock", entry)
+		}
+	}
+	if len(e.target.images) != 0 {
+		t.Fatal("an image was loaded across a lock")
+	}
+	for _, c := range e.target.commands {
+		if strings.Contains(c, "inspect") {
+			t.Fatal("a transfer across a lock was verified")
+		}
+	}
+}
+
+// `docker load` exiting before the archive ended is a load failure, not a
+// registry failure.
+func TestPrivateTransferEarlyLoadExitIsALoadFailure(t *testing.T) {
+	e := newTransferEnv(t, imageStoreContainerd)
+	e.target.loadExitsEarly = true
+	_, err := e.transfer(e.binding())
+	if !errors.Is(err, errTransferLoad) || errors.Is(err, errTransferPull) {
+		t.Fatalf("early load exit: %v", err)
+	}
+	for _, c := range e.target.cmds() {
+		if strings.Contains(c, "inspect") {
+			t.Fatal("a failed load was verified")
+		}
 	}
 }
 
@@ -532,7 +877,8 @@ func TestPrivateTransferLockMidStreamStops(t *testing.T) {
 	}
 	// The stream was cut: docker load never saw manifest.json and nothing
 	// was inspected.
-	if len(e.target.stdin) != 1 || strings.Contains(string(e.target.stdin[0]), "manifest.json") {
+	if len(e.target.stdin) != 1 || strings.Contains(string(e.target.stdin[0]), "manifest.json") ||
+		strings.Contains(string(e.target.stdin[0]), "index.json") || len(e.target.images) != 0 {
 		t.Fatal("the archive was completed across a lock")
 	}
 	for _, c := range e.target.cmds() {
