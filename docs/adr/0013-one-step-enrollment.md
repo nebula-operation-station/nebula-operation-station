@@ -279,13 +279,17 @@ the other direction). The only channel host → NOS is the operator.
   only its SHA-256, never the ID itself, and logs only the first 8 hex
   characters of that hash.
 - **States:** `open` → `downloaded` → `pairing_proposed` → `enrolled`;
-  NetBird offers start in `awaiting_approval` and move to `open` only after
-  the NetBird offer permit is approved and the full render's hash is
-  stored (D1 step 2, D6 "Supply order"; amended 2026-11-12, previously
-  "and the setup key is recorded", D6 "Creation order"); a NetBird offer
-  whose key is entered with the executor-local CLI starts one step
-  earlier in `awaiting_key` → `awaiting_approval` (D6 "Entry"; added
-  2026-11-12); from any non-final state → `expired`,
+  until open question Q11 is decided, every NetBird offer starts in
+  `awaiting_key`, moves to `awaiting_approval` when the key is sealed at
+  CLI entry, and moves to `open` only after the NetBird offer permit is
+  approved and the full render's hash is stored (D1 step 2, D6 "Entry",
+  D6 "Supply order"; fix round 6; previously "NetBird offers start in
+  `awaiting_approval`" and only a NetBird offer whose key is entered with
+  the executor-local CLI "starts one step earlier in `awaiting_key`",
+  added 2026-11-12, and before that "and the setup key is recorded", D6
+  "Creation order"). Only once the Q11 decision enables dialog entry
+  does a NetBird offer whose key was typed into the dialog start directly
+  in `awaiting_approval` (D1 step 2); from any non-final state → `expired`,
   `revoked` or `failed`. Final states never return to `open`. Every state
   change is one atomic compare-and-set on the offer row (expected old state
   → new state); a transition whose expected state no longer holds fails and
@@ -1783,7 +1787,7 @@ the dialog stays the only entry path's residual.
 | D1 step 2 | Offer without key until approval; on approval the executor creates the key through the API; permit binds managed group, ephemeral flag, setup-key expiry | Supplied key sealed before any touch: until Q11 is decided every NetBird offer starts in `awaiting_key` and the key is sealed only at CLI entry, with the move to `awaiting_approval`, while `CreateEnrollOffer` refuses a key (fix round 5; previously "sealed at creation", which holds only for dialog entry once Q11 enables it); permit binds its check value, which detects substitution only against a reference the server cannot forge (fix round 2); on approval the script is rendered and hashed |
 | D1 step 3 (residual after `SIGKILL`, disk and swap residuals) | Key "one-off, at most 1 hour valid and revoked when the offer becomes final" | One-off and short-lived only as created by the operator; NOS advises revoking in every final state, `enrolled` included (fix round 3) |
 | D1 step 3 ("Show script" in `awaiting_approval`) | No setup key yet | Key sealed already; "Show script" never reads it |
-| D2 "States" | `open` after "the setup key is recorded" (Creation order) | `open` after approval and the stored full-render hash (Supply order); `awaiting_key` before `awaiting_approval` for CLI key entry |
+| D2 "States" | `open` after "the setup key is recorded" (Creation order) | `open` after approval and the stored full-render hash (Supply order); until Q11 is decided every NetBird offer starts in `awaiting_key` and moves to `awaiting_approval` at CLI key entry; only dialog entry, once Q11 enables it, starts in `awaiting_approval` (fix round 6; previously "`awaiting_key` before `awaiting_approval` for CLI key entry") |
 | D2 "Binding" | Creating web session only (no key entry outside it) | Unchanged; the executor-local CLI only supplies the key of an `awaiting_key` offer and never becomes a binding (Q10) |
 | D2 "Revocation" | Revoking an offer revokes the setup key through the API, unconditionally | Wipe plus unconditional revoke advice in UI, CLI and audit, given in every final state including `enrolled` (fix round 3) |
 | D2 "Limits" | 5 setup keys created per hour | 5 NetBird offers (supplied keys) per hour; 2 open NetBird offers unchanged; refused keys limited to `NetBirdSetupKeyRejectsPerHour` = 10 per executor and hour (fix round 3), in separate budgets for keys sent through the server and for the CLI entry (fix round 4) |
