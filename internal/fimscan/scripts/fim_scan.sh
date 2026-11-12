@@ -116,8 +116,11 @@ scan() {
 		set -- "$@" -exec sha256sum -z -- "{}" + ")"
 		now=$(date +%s)
 		left=$((DEADLINE - now))
+		# Every T of the hash pass has a leading NUL: a killed pass may end in
+		# a record cut mid-path, and the NUL ends that fragment as a field of
+		# its own (the awk program drops the hash just before a T).
 		if [ "$left" -le 0 ]; then
-			printf 'T\0'
+			printf '\0T\0'
 			return
 		fi
 		if [ -n "$TIMEOUT" ]; then
@@ -127,7 +130,7 @@ scan() {
 			# shellcheck disable=SC2086
 			$LOW find "$@" 2>/dev/null
 		fi
-		[ $? -eq 124 ] && printf 'T\0'
+		[ $? -eq 124 ] && printf '\0T\0'
 	else
 		set -- "$@" -printf 'M1 %y %s %m %U %G %i %T@ %C@\0%p\0%l\0' ")" -o -printf 'M0 %y %s %m %U %G %i %T@ %C@\0%p\0%l\0'
 		# shellcheck disable=SC2086
@@ -383,7 +386,8 @@ function open_records(   k) {
 	for (k = 1; k <= nroots; k++) printf "%s{\"root\":\"%s\",\"status\":\"%s\"}", (k > 1 ? "," : ""), ROOTN[k], ROOTS[k]
 	printf "],\"records\":["
 }
-function field(   s, c, k, from) {
+function field(   s, c, k, from, ph) {
+	ph = LASTH; LASTH = ""
 	if (st == "tag") {
 		if (n == 0) { trunc = 1; return }
 		c = B[1]
@@ -400,7 +404,12 @@ function field(   s, c, k, from) {
 		}
 		else if (c == "M") { open_records(); META = s; st = "mpath" }
 		else if (c == "U") unread++
-		else if (c == "T") trunc = 1
+		else if (c == "T") {
+			# The field before a T may be a hash record cut by a killed
+			# hash pass, its path a prefix of another path: drop it.
+			trunc = 1
+			if (ph != "") { if (LASTHAD) HS[ph] = LASTOLD; else delete HS[ph] }
+		}
 		else if (c == "I") st = "mountinfo"
 		else if (c == "C") st = "cpath"
 		else trunc = 1
@@ -436,7 +445,10 @@ function hashline(   k, from, hex) {
 	if (hex !~ /^[0-9a-f]+$/ || length(hex) != 64) return
 	from = strip(67)
 	if (from == 0 || !pathok(from, n)) return
-	HS[b64(from, n)] = hex
+	LASTH = b64(from, n)
+	LASTHAD = LASTH in HS
+	if (LASTHAD) LASTOLD = HS[LASTH]
+	HS[LASTH] = hex
 }
 function record(   f, t, rec, m, mt, ct, hash) {
 	if (split(META, f, " ") != 9 || MPATH == "" || MLINKBAD) { unread++; return }

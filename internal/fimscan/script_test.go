@@ -597,6 +597,71 @@ func splitScript(t *testing.T) (shell, awk string) {
 	return s[:i], s[i:]
 }
 
+// runAwk feeds stream, a hand-made producer stream, through the script's
+// own od | awk stage in full mode and parses the document.
+func runAwk(t *testing.T, stream string) *Result {
+	t.Helper()
+	_, awk := splitScript(t)
+	cmd := exec.Command("/bin/sh", "-c", "od -An -v -tx1 "+awk)
+	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "MODE=full"}
+	cmd.Stdin = strings.NewReader(stream)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("awk: %v", err)
+	}
+	res, err := Parse(context.Background(), bytes.NewReader(out), Options{Profile: DefaultProfile(), Mode: ModeFull, HostKey: scriptTestKey})
+	if err != nil {
+		t.Fatalf("parse: %v\n%s", err, out)
+	}
+	return res
+}
+
+// TestScriptCutHashStreamNeverMisattributes: a hash pass killed by the
+// time bound may end in a record cut mid-path ("/etc/a" of "/etc/abc").
+// The '\0T\0' marker ends that fragment as its own field and its hash is
+// dropped, so it never lands on another file; a complete record before
+// the marker keeps its hash, and an earlier hash of the same path is kept.
+func TestScriptCutHashStreamNeverMisattributes(t *testing.T) {
+	hA := strings.Repeat("a", 64)
+	hB := strings.Repeat("b", 64)
+	hC := strings.Repeat("c", 64)
+	meta := func(p string, ino int) string {
+		return "M1 f 1 644 0 0 " + strconv.Itoa(ino) + " 1700000000.5 1700000000.5\x00" + p + "\x00\x00"
+	}
+	head := "B1700000000\x00Rscanned /etc\x00"
+	tail := meta("/etc/a", 1) + meta("/etc/ab", 2) + "E1700000001\x00"
+	for _, c := range []struct {
+		name   string
+		hashes string
+		want   map[string]string // path -> plain hex, "" for no hash
+	}{
+		{"fragment after complete record", hB + "  /etc/ab\x00" + hA + "  /etc/a" + "\x00T\x00",
+			map[string]string{"/etc/a": "", "/etc/ab": hB}},
+		{"fragment cut in the hash", hB + "  /etc/ab\x00" + hA[:20] + "\x00T\x00",
+			map[string]string{"/etc/a": "", "/etc/ab": hB}},
+		{"complete record before marker", hB + "  /etc/ab\x00" + hA + "  /etc/a\x00" + "\x00T\x00",
+			map[string]string{"/etc/a": hA, "/etc/ab": hB}},
+		{"fragment over an earlier hash", hC + "  /etc/a\x00" + hB + "  /etc/ab\x00" + hA + "  /etc/a" + "\x00T\x00",
+			map[string]string{"/etc/a": hC, "/etc/ab": hB}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			res := runAwk(t, head+c.hashes+tail)
+			if !slices.Contains(res.Partial, ReasonHostTruncated) {
+				t.Error("cut hash pass not reported as truncated")
+			}
+			for p, h := range c.want {
+				want := Hash{}
+				if h != "" {
+					want = sealHash(scriptTestKey, []byte(p), mustHex(t, h))
+				}
+				if got := findRecord(t, res, p).Hash; got != want {
+					t.Errorf("%s: hash %+v, want %+v", p, got, want)
+				}
+			}
+		})
+	}
+}
+
 // TestScriptIsReadOnly: the script text has no write operation: no output
 // redirection except to /dev/null and stderr, no here-document, no file
 // changing command, one -exec (the hash tool) and an awk program that
