@@ -24,7 +24,10 @@ import (
 // the executor again. A cached digest is served only while the reader's
 // latest list of the executor's registry read leases shows an active,
 // unexpired lease covering that identity and repository; a refresh that
-// no longer shows one drops the entries. An expired lease stops answering
+// no longer shows one drops the entries. A refresh whose lease listing
+// fails keeps the previously listed leases (and so the cached digests) for
+// at most maxLeaseStaleness after that listing and retries it after
+// leaseRetryInterval. An expired lease stops answering
 // at once; a revoked one at the next listing, which a render with a
 // snapshot older than snapshotTTL starts in the background (stale while
 // revalidate, see cachedDigests), never later than the digest's interval.
@@ -83,6 +86,14 @@ const (
 	// snapshotTTL is how long a cache-only render trusts the listed
 	// registries and leases.
 	snapshotTTL = time.Minute
+	// leaseRetryInterval is how soon a cache-only render queues a new
+	// listing after one whose lease list failed.
+	leaseRetryInterval = 10 * time.Second
+	// maxLeaseStaleness is how long after their last successful listing
+	// leases still vouch for cached digests (kept across failed listings).
+	// It is the digest interval, so a revocation that failed listings hide
+	// is honoured no later than a fresh read would be refused.
+	maxLeaseStaleness = schedgrant.RegistryMinInterval
 	// maxPendingReads bounds the background queue.
 	maxPendingReads = 256
 	// backgroundBatchTimeout bounds one background batch (listing and all
@@ -166,11 +177,18 @@ type heldFailure struct {
 
 // readerSnapshot is the executor's registries and registry read leases as
 // last listed.
+//
+// leases were listed at leasesAt; when the latest refresh could not list
+// them (leasesFailed), they are the previous listing's, kept for at most
+// maxLeaseStaleness after it so a transient failure does not drop valid
+// cached digests.
 type readerSnapshot struct {
-	regs     []PrivateIdentity
-	leases   []LeaseView
-	leasesOK bool
-	at       time.Time
+	regs         []PrivateIdentity
+	leases       []LeaseView
+	leasesOK     bool
+	leasesAt     time.Time
+	leasesFailed bool
+	at           time.Time
 }
 
 type hostRegistry struct{ host, registry string }
@@ -235,8 +253,14 @@ func (r *DigestReader) PrivateDigests(ctx context.Context, images []string) (map
 }
 
 // cachedDigests answers images from memory only and queues the misses.
-// Without any snapshot nothing is known to be private: every image is
-// queued, and the background worker lists before it reads.
+// Without any snapshot it is not yet known which registries are private:
+// every image naming a registry host (the only ones that can be private)
+// is marked ErrPrivateReadPending rather than shown as a public "unknown",
+// and queued; the background worker lists before it reads, and later
+// renders drop the images on no private registry. Nothing waits.
+//
+// A snapshot whose lease listing failed is revalidated after
+// leaseRetryInterval; it keeps the previous leases (see refresh).
 //
 // A snapshot older than snapshotTTL is still served (stale while
 // revalidate): private images keep their Private flag and pending note and
@@ -256,12 +280,16 @@ func (r *DigestReader) cachedDigests(host string, images []string) (map[string]P
 	snap, has := r.snap, r.hasSnap
 	r.mu.Unlock()
 	if !has {
+		errs := map[string]error{}
 		for _, img := range images {
-			r.enqueue(host, img)
+			if _, _, ok := registryHostOf(img); ok {
+				errs[img] = ErrPrivateReadPending
+				r.enqueue(host, img)
+			}
 		}
-		return map[string]PrivateDigest{}, map[string]error{}
+		return map[string]PrivateDigest{}, errs
 	}
-	if now.Before(snap.at) || now.Sub(snap.at) >= snapshotTTL {
+	if now.Before(snap.at) || now.Sub(snap.at) >= snapshotTTL || (snap.leasesFailed && now.Sub(snap.at) >= leaseRetryInterval) {
 		// Stale: revalidate in the background, answer from the snapshot.
 		for _, img := range images {
 			r.enqueue(host, img)
@@ -286,22 +314,46 @@ func keyOf(pi privateRef) digestKey {
 }
 
 // refresh lists the executor's registries (an error fails the call) and,
-// when the executor lists read grants, its registry read leases (an error
-// only leaves them unknown), then drops the cached digests no active
-// lease covers any more.
+// when the executor lists read grants, its registry read leases, then
+// drops the cached digests no active lease covers any more.
+//
+// A failed lease listing is treated as transient: the snapshot keeps the
+// leases of the previous successful listing (marked leasesFailed, so a
+// render retries after leaseRetryInterval) while they are younger than
+// maxLeaseStaleness, and the cached digests they cover survive. Without
+// such a listing the leases are unknown and nothing is served.
 func (r *DigestReader) refresh(ctx context.Context, now time.Time) (readerSnapshot, error) {
 	regs, err := ListPrivateIdentities(ctx, r.exec)
 	if err != nil {
 		return readerSnapshot{}, err
 	}
 	s := readerSnapshot{regs: regs, at: now}
+	var leases []LeaseView
+	var leaseErr error
 	if r.leases != nil {
-		if l, err := ListRegistryLeases(ctx, r.leases, now); err == nil {
-			s.leases, s.leasesOK = l, true
-		}
+		leases, leaseErr = ListRegistryLeases(ctx, r.leases, now)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	switch {
+	case r.leases == nil:
+	case leaseErr == nil:
+		s.leases, s.leasesOK, s.leasesAt = leases, true, now
+	default:
+		// Read the previous snapshot under the same lock that replaces
+		// it, so a concurrent successful listing (say, of a revocation)
+		// is never overwritten by older leases. A failed listing never
+		// replaces a snapshot a concurrent refresh took after it began
+		// (it would find those leases "from the future" and drop the
+		// cache they cover).
+		if r.hasSnap && now.Before(r.snap.at) {
+			return r.snap, nil
+		}
+		s.leasesFailed = true
+		if prev := r.snap; r.hasSnap && prev.leasesOK && leasesFresh(prev.leasesAt, now) {
+			s.leases, s.leasesOK, s.leasesAt = prev.leases, true, prev.leasesAt
+		}
+	}
 	r.snap, r.hasSnap = s, true
 	for k := range r.cache {
 		id := PrivateIdentity{ID: k.registry, ConfigDigest: k.configDigest, ConfigVersion: k.configVersion,
@@ -313,11 +365,18 @@ func (r *DigestReader) refresh(ctx context.Context, now time.Time) (readerSnapsh
 	return s, nil
 }
 
+// leasesFresh reports whether leases listed at listedAt may still vouch
+// for cached digests at now. A listing from the future (clock rollback)
+// does not.
+func leasesFresh(listedAt, now time.Time) bool {
+	return !now.Before(listedAt) && now.Sub(listedAt) < maxLeaseStaleness
+}
+
 // covered reports whether the snapshot shows an active, unexpired,
 // unrevoked registry read lease whose frozen target is exactly id and
-// allows tag_digest reads of repo.
+// allows tag_digest reads of repo, listed less than maxLeaseStaleness ago.
 func covered(s readerSnapshot, id PrivateIdentity, repo string, now time.Time) bool {
-	if !s.leasesOK {
+	if !s.leasesOK || !leasesFresh(s.leasesAt, now) {
 		return false
 	}
 	for _, l := range s.leases {
