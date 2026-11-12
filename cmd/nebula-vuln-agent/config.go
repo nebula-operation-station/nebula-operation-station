@@ -63,6 +63,12 @@ type llmConfig struct {
 	Language             string    `json:"language"`
 	OperatorInstructions string    `json:"operator_instructions"`
 	Limits               llmLimits `json:"limits"`
+	// AllowedNetworks are extra lab networks for the LLM endpoint
+	// (subnets of loopback, RFC 1918, ULA or 100.64.0.0/10 only).
+	AllowedNetworks []string `json:"allowed_networks"`
+	// UnixSocket is an absolute path of a Unix socket on this host that
+	// every LLM connection goes to.
+	UnixSocket string `json:"unix_socket"`
 }
 
 // llmLimits are optional; zero keeps the default. Values above the hard
@@ -229,7 +235,8 @@ func (c fileConfig) llm() run.LLMConfig {
 	}
 	return run.LLMConfig{Enabled: c.LLM.Enabled, BaseURL: c.LLM.BaseURL, Model: c.LLM.Model, APIKeyFile: c.LLM.APIKeyFile,
 		AllowPlainHTTP: c.LLM.AllowPlainHTTP, ContextWindow: c.LLM.ContextWindow, Language: lang,
-		OperatorInstructions: c.LLM.OperatorInstructions, Limits: c.LLM.Limits.limits()}
+		OperatorInstructions: c.LLM.OperatorInstructions, Limits: c.LLM.Limits.limits(),
+		AllowedNetworks: c.LLM.AllowedNetworks, UnixSocket: c.LLM.UnixSocket}
 }
 
 func csafVendor(feed string) (vulnfeed.CSAFVendor, error) {

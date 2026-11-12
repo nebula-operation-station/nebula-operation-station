@@ -89,6 +89,9 @@ func TestConfigRefusedBeforeAnyNetwork(t *testing.T) {
 		"llm url userinfo":    {`{"data_dir":"` + data + `","llm":{"base_url":"https://u:p@llm.lab/v1"}}`, []string{"sync-only"}},
 		"llm limits over max": {`{"data_dir":"` + data + `","llm":{"limits":{"max_tool_steps":99}}}`, []string{"sync-only"}},
 		"llm relative key":    {`{"data_dir":"` + data + `","llm":{"api_key_file":"key"}}`, []string{"sync-only"}},
+		"llm public network":  {`{"data_dir":"` + data + `","llm":{"allowed_networks":["203.0.113.0/24"]}}`, []string{"sync-only"}},
+		"llm nat64 network":   {`{"data_dir":"` + data + `","llm":{"allowed_networks":["64:ff9b::/96"]}}`, []string{"sync-only"}},
+		"llm relative socket": {`{"data_dir":"` + data + `","llm":{"unix_socket":"llm.sock"}}`, []string{"sync-only"}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -147,6 +150,18 @@ func TestLimitsFromConfig(t *testing.T) {
 	}
 }
 
+func TestLLMNetworkSettingsFromConfig(t *testing.T) {
+	cfg, err := loadConfig(writeFile(t, "c.json", `{"data_dir":"/d","llm":{"allowed_networks":["100.64.0.0/16"],`+
+		`"unix_socket":"/run/llm.sock"}}`, 0o600), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := cfg.llm()
+	if len(l.AllowedNetworks) != 1 || l.AllowedNetworks[0] != "100.64.0.0/16" || l.UnixSocket != "/run/llm.sock" {
+		t.Errorf("llm network settings = %+v %q", l.AllowedNetworks, l.UnixSocket)
+	}
+}
+
 func TestMissingDefaultConfigIsAllowed(t *testing.T) {
 	cfg, err := loadConfig(filepath.Join(t.TempDir(), "absent.json"), false)
 	if err != nil || cfg.DataDir != "" {
@@ -169,6 +184,7 @@ func TestExitCodes(t *testing.T) {
 		"degraded": {failed, nil, exitDegraded},
 		"withheld": {&run.Report{Withheld: 1}, nil, exitDegraded},
 		"rejected": {&run.Report{Rejected: 2}, nil, exitDegraded},
+		"llm off":  {&run.Report{LLM: run.LLMEvidence{Failed: true}}, nil, exitDegraded},
 		"failed":   {&run.Report{}, run.ErrUpload, exitFailed},
 		"export":   {nil, run.ErrExport, exitFailed},
 		"config":   {nil, run.ErrConfig, exitUsage},
