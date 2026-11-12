@@ -92,12 +92,23 @@ Constraints that shape every decision below:
    that created it. Without NetBird the executor renders the script (D5) at
    once in memory and stores only its SHA-256, never the bytes (D2
    "Retention"). Audit `enroll_offer_created`.
-   - **With NetBird** the offer starts in `awaiting_approval`. The executor
-     validates the operator-supplied setup key (D6), seals it into the
-     vault at once and records only the vault reference; the offer has no
-     stored download hash and cannot be downloaded yet; its render inputs
-     are fixed and "Show script" already renders the placeholder variant
-     (step 3, D2). The executor proposes a **NetBird offer permit** (HIGH,
+   - **With NetBird**, until open question Q11 is decided, every offer
+     starts in `awaiting_key`: `CreateEnrollOffer` carries no key, the
+     executor refuses a create that carries one (D6 "Entry", reason class
+     `dialog_entry_disabled`), and the operator enters the key with the
+     executor-local CLI, which validates it (D6), seals it into the vault
+     and moves the offer to `awaiting_approval` in one commit (D6 "Link to
+     the offer"); the web session that created the offer stays its only
+     binding (D2). Only once the Q11 decision enables dialog entry does an
+     offer whose key was typed into the dialog start directly in
+     `awaiting_approval`, with the key validated and sealed at creation
+     (fix round 5; previously this step described dialog
+     entry as the main path and the CLI entry as the operator's
+     alternative). In `awaiting_approval` the offer holds only the vault
+     reference of the key; it has no stored download hash and cannot be
+     downloaded yet; its render inputs are fixed and "Show script" already
+     renders the placeholder variant, as in `awaiting_key` (step 3, D2).
+     The executor proposes a **NetBird offer permit** (HIGH,
      user verification; binds offer ID hash, host ID, SSH user, credential
      reference and the setup-key check value of D6). Only after the
      operator approves it with the security key does the executor render
@@ -114,12 +125,9 @@ Constraints that shape every decision below:
      server forwarded, so substitution is not detected (D6 "Compromised
      server"; fix round 2, previously this sentence claimed protection
      against substitution for both entry paths; Q11 options (b) and (c)
-     close this gap, fix round 3). NetBird offers also
-     have their own lower limits (D2). If the operator chooses to enter
-     the key with the executor-local CLI instead of the dialog, the offer
-     starts in `awaiting_key` and moves to `awaiting_approval` only when the
-     CLI has sealed the key (D6 "Entry"); the web session that created the
-     offer stays its only binding (D2). (Amended 2026-11-12; previously:
+     close this gap, fix round 3; until Q11 is decided only the CLI entry
+     exists, fix round 4). NetBird offers also
+     have their own lower limits (D2). (Amended 2026-11-12; previously:
      the offer had no setup key until approval, the permit bound managed
      group, ephemeral flag and setup-key expiry, and on approval the
      executor created the key through the NetBird Management API under a
@@ -687,7 +695,12 @@ through the API, with expiry offer expiry plus 45 minutes, at most 1 hour.)
   or echoed, and `netbird_setup_key_rejected` is audited with reason
   class `dialog_entry_disabled` and source `server` ("Rejection limit"),
   without the value; the refusal counts against the server budget of
-  "Rejection limit". Whether dialog entry is enabled is a compile-time constant of
+  "Rejection limit". The server budget is checked first: while it is
+  reached, a key-carrying create is refused as `rate_limited` ("Rejection
+  limit") and this gate is not reached, so no `dialog_entry_disabled`
+  record is written for it; otherwise this gate comes next, still before
+  anything else looks at the key (fix round 5; previously the order of
+  the two checks was not stated). Whether dialog entry is enabled is a compile-time constant of
   the executor (`NetBirdDialogKeyEntryEnabled`, `false` until Q11 is
   decided), not a setting and not a request field, so neither the server
   nor any RPC caller can switch it on. The server refuses such a create
@@ -799,7 +812,9 @@ decided, for an hour):
   every key that arrived through the server, for any reason class,
   `dialog_entry_disabled` included. While it is reached, every
   `CreateEnrollOffer` that carries a key is refused before the key is
-  looked at, valid keys included. CLI entries are not affected.
+  looked at, valid keys included; this check is the first one
+  `CreateEnrollOffer` makes on a key-carrying request, before the Q11
+  gate of "Entry" (fix round 5). CLI entries are not affected.
 - *CLI budget:* every key refused in the executor-local CLI entry, for
   any reason class. While it is reached, every CLI key entry is refused
   before the key is read, valid keys included. Creates through the server
@@ -808,15 +823,39 @@ decided, for an hour):
 The source is the path the key took into the executor (the
 `CreateEnrollOffer` RPC or the local CLI), never a value the caller
 names, so a key sent through the server cannot be counted against the
-CLI budget. For each budget the executor audits one
-`netbird_setup_key_rejected` with reason class `rate_limited` and the
-source when that budget is reached and none for the further refusals in
-that hour, and shows a dashboard notice naming the source. So each source
-can create at most 11 such audit records per hour, 22 together, and none
-of them carries the value. "Hour" is a sliding window of the last 60
-minutes, measured with the executor's injected clock; the counters are
-kept in memory, so a restart of the executor resets them (a restart
-needs the executor host, not the server).
+CLI budget.
+
+*Window and records* (fix round 5; previously "at most 11 such audit
+records per hour", which the sliding window did not guarantee, and it was
+open whether refusals while a budget is reached extend the window):
+
+- "Hour" is a sliding window: a budget is reached when it holds 10
+  counted refusals whose times lie within the last 60 minutes, measured
+  with the executor's injected clock.
+- Only refusals made while the budget is not reached are counted; each
+  is audited as `netbird_setup_key_rejected` with its reason class and
+  source. A refusal because the budget is reached is not counted and
+  does not extend the window, so the budget frees up 60 minutes after
+  the oldest counted refusal in it.
+- A refusal because the budget is reached is audited as
+  `netbird_setup_key_rejected` with reason class `rate_limited` and the
+  source only if no `rate_limited` record for that source was written in
+  the last 60 minutes; otherwise it is not audited. The dashboard notice
+  naming the source is shown while the budget is reached.
+- So any 60 minutes hold at most 10 counted-refusal records and one
+  `rate_limited` record per source, 11 per source and 22 together, and
+  none of them carries the value.
+
+The counted refusal times and the time of the last `rate_limited`
+record are kept per source in the executor database (EN-16d), at most 10
+times and one time per source, older ones pruned, never the value, a
+part of it, the check value or the client; a restart of the executor
+does not reset a budget (fix round 5; fix round 4 kept the counters in
+memory, so a restart reset them, which contradicted EN-16d). If the
+executor cannot read or write this record, it refuses the key entry of
+that source without looking at the key (fail closed) and reports the
+store error without the key; such a refusal is neither counted nor
+audited as a key refusal.
 
 Availability residuals (fix round 4): a compromised server or any open
 privileged session can exhaust the server budget and the NetBird offer
@@ -824,7 +863,9 @@ limits of D2 (2 non-final, 5 per hour), which both serve the web create
 that every NetBird offer, CLI entry included, starts with; that is the
 existing residual of a compromised server with an open privileged
 session, which can also revoke any offer (threat table, "Compromised
-server"). It cannot exhaust the CLI budget, and it cannot make the CLI
+server"); a restart of the executor does not end it, the budget frees up
+60 minutes after its oldest counted refusal (fix round 5). It cannot
+exhaust the CLI budget, and it cannot make the CLI
 refuse a key for an offer that a web session created in `awaiting_key`
 other than by revoking that offer. Only a process running as
 the admin UID on the executor host can exhaust the CLI budget; that
@@ -1739,7 +1780,7 @@ the dialog stays the only entry path's residual.
 | --- | --- | --- |
 | Context, constraints | Provider tokens executor-held (applied to a NetBird token) | No NetBird token, no NetBird API call |
 | D1 step 1 | NetBird option shown when a NetBird token is configured | Shown when a NetBird management URL is configured; operator enters the setup key (by the CLI entry only until Q11 is decided; fix round 3; enforced by the executor too, fix round 4) |
-| D1 step 2 | Offer without key until approval; on approval the executor creates the key through the API; permit binds managed group, ephemeral flag, setup-key expiry | Supplied key sealed at creation (before any touch); permit binds its check value, which detects substitution only against a reference the server cannot forge (fix round 2); on approval the script is rendered and hashed |
+| D1 step 2 | Offer without key until approval; on approval the executor creates the key through the API; permit binds managed group, ephemeral flag, setup-key expiry | Supplied key sealed before any touch: until Q11 is decided every NetBird offer starts in `awaiting_key` and the key is sealed only at CLI entry, with the move to `awaiting_approval`, while `CreateEnrollOffer` refuses a key (fix round 5; previously "sealed at creation", which holds only for dialog entry once Q11 enables it); permit binds its check value, which detects substitution only against a reference the server cannot forge (fix round 2); on approval the script is rendered and hashed |
 | D1 step 3 (residual after `SIGKILL`, disk and swap residuals) | Key "one-off, at most 1 hour valid and revoked when the offer becomes final" | One-off and short-lived only as created by the operator; NOS advises revoking in every final state, `enrolled` included (fix round 3) |
 | D1 step 3 ("Show script" in `awaiting_approval`) | No setup key yet | Key sealed already; "Show script" never reads it |
 | D2 "States" | `open` after "the setup key is recorded" (Creation order) | `open` after approval and the stored full-render hash (Supply order); `awaiting_key` before `awaiting_approval` for CLI key entry |
@@ -1752,7 +1793,7 @@ the dialog stays the only entry path's residual.
 | D5 `from=` addresses | NOS NetBird address read from the NetBird API | Executor-local source address set by the operator |
 | D5 key passing | Script only | Also an SSH step: key on standard input, never in the remote command line |
 | D6 "Precondition" | Service-user token in the vault, typed calls, TLS trust for the management API | Management URL only as a render input; no token, no egress |
-| D6 "Per-offer setup key" | Executor creates key: usage 1, ≤ 1 h, auto group, not ephemeral, name `nos-offer-…`; offer row holds NetBird key ID | Operator creates the key; same properties as recommendation; entry, input bounds (`SetupKeyInputMaxBytes`, `onestepFormMax`), validation, rejection limit, check value, storage rules (input bounds and rejection limit added in fix round 3, per-source rejection budgets in fix round 4); dialog entry not enabled before Q11 is decided (fix round 3), enforced in `CreateEnrollOffer` by the compile-time constant `NetBirdDialogKeyEntryEnabled` (fix round 4) |
+| D6 "Per-offer setup key" | Executor creates key: usage 1, ≤ 1 h, auto group, not ephemeral, name `nos-offer-…`; offer row holds NetBird key ID | Operator creates the key; same properties as recommendation; entry, input bounds (`SetupKeyInputMaxBytes`, `onestepFormMax`), validation, rejection limit, check value, storage rules (input bounds and rejection limit added in fix round 3, per-source rejection budgets in fix round 4, budget checked before the Q11 gate, sliding-window record bound and budgets kept in the executor database across restarts in fix round 5); dialog entry not enabled before Q11 is decided (fix round 3), enforced in `CreateEnrollOffer` by the compile-time constant `NetBirdDialogKeyEntryEnabled` (fix round 4) |
 | D6 "Creation order" steps 1–5 incl. reconcile, list limits, residuals R1–R3 | Pending record, create call, response validation, reconcile by key name | Replaced by "Supply order"; no create, no pending record, no reconcile |
 | D6 "Revocation at the final state" | Revoke call, retries, `revoke_failed`, `expired_unrevoked` | "Final state": wipe after use, revoke advice in every final state, `enrolled` included (fix round 3; previously not for `enrolled`) |
 | D6 "Peers from offers that did not enrol" (now "…, or not only the enrolled host") | API lookup, orphan record, delete/keep, NetBird peer delete permit | Possible-orphan notice for every downloaded offer in every final state, `enrolled` included (fix round 3); operator acts in NetBird; peer delete permit unused |
@@ -1794,7 +1835,9 @@ section "NetBird without Management API (2026-11-12)".
   of orphan-peer records. Also (fix round 3): the named input bounds
   `SetupKeyInputMaxBytes` (128 bytes) and `onestepFormMax` (8 KiB) with
   their values, the rejection limit `NetBirdSetupKeyRejectsPerHour` (10)
-  with its separate server and CLI budgets (fix round 4), the executor's
+  with its separate server and CLI budgets (fix round 4), kept across
+  executor restarts and checked before the Q11 gate (fix round 5), the
+  executor's
   refusal of a key sent with `CreateEnrollOffer` while dialog entry is
   not enabled (reason class `dialog_entry_disabled`; fix round 4), and
   revoke advice and possible-orphan notice in every final state,
