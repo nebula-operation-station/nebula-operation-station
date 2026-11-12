@@ -37,7 +37,7 @@ offers that may have left a peer behind (check those in NetBird and delete
 them there if the host did not enroll). OFFER is the offer hash from the list
 (64 lowercase hex characters, or a unique prefix of at least 8). An offer can
 be revoked in every state that is not final, awaiting_approval included.
-Both commands need the executor's admin UID.`
+Both commands need the executor's admin UID`
 
 const (
 	// offerHashLen is the length of a listed offer hash (hex SHA-256).
