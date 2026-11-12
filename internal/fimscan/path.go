@@ -21,7 +21,6 @@ var (
 	errPathRelative  = errors.New("path is not absolute")
 	errPathComponent = errors.New("path has an empty, . or .. component")
 	errPathDepth     = errors.New("path too deep")
-	errPathRoot      = errors.New("path is not below a profile root")
 	errLinkEmpty     = errors.New("empty symlink target")
 	errLinkTooLong   = errors.New("symlink target too long")
 	errLinkNUL       = errors.New("symlink target contains NUL")
