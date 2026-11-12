@@ -62,6 +62,14 @@ Dedupe per `(finding_key, event type)`; a re-opened finding starts a new episode
 
 Messages carry **structured fields only**: host label, class, severity, count and a NOS link. **No host-supplied path or content is put into a notification**, because chat clients render Markdown and links; the path is shown only in the NOS UI under the rules of [09-untrusted-host-data.md](09-untrusted-host-data.md#v26-09-01). Dedupe per `(subject, class, path)`; at most 10 integrity messages per hour, then an hourly digest. A notification never triggers an execution, a restore or any other mutation.
 
+<a id="v27-13-01"></a>
+<!-- Spec revision (ADR 0014, AS-02): v27-13-01 -->
+**Help assistant settings event (ADR 0014 D5, D6 T3).** Sent through the existing webhook, ntfy and Telegram senders (previously: no assistant events):
+
+- `assistant.settings_changed`: an admin changed an assistant setting: the LLM base URL, the model name, the credential reference, `allow_plain_http` or `assistant.enabled` ([01-product.md](01-product.md#v27-01-01), [02-architecture.md](02-architecture.md#v27-02-01)). One message per change: a changed URL is how an attacker with an admin session would redirect questions and inventory facts to their own endpoint (T3). ADR 0014 does not decide whether a change of the NOS source addresses (Q6) raises this event; until it does, it does not.
+
+The message carries structured fields only: the admin, the time, which settings changed, the old and new URL **host** and model name, and the enabled state. It never carries the credential, a question, an answer or any inventory fact. The same fields go into the audit entry, which is written for every change. The event is informational: it triggers nothing, and the assistant has no API scope (it is reachable only from the web UI panel).
+
 **Findings export (ADR 0011 D9).** Findings can be exported as CSV or JSON with structured fields only; admin only, and every export is audited before any data is written. CSV cells are prefixed against formula injection ([09-untrusted-host-data.md](09-untrusted-host-data.md#v24-09-02)). D9 excludes the assessment text from CSV by default; the merged export (`internal/vulnnotify`) carries no assessment text, admin reasons, host labels or addresses in either format (implementation choice).
 
 **Later (1.1).** An OpenMetrics endpoint behind the same scopes, so Prometheus or Telegraf can scrape Ops State and update counts into an existing monitoring stack.
