@@ -22,6 +22,7 @@ func TestNewInputRejects(t *testing.T) {
 		atLimitClasses[fmt.Sprint("z", i)] = TrustGuest
 	}
 	tooManyProfiles := ProfileSetting{Profiles: make([]string, MaxProfilesPerRule+1)}
+	longName := strings.Repeat("n", nr.MaxNameBytes)
 	tests := []struct {
 		name    string
 		snap    *nr.Snapshot
@@ -38,6 +39,26 @@ func TestNewInputRejects(t *testing.T) {
 			prof: nr.Collected(map[string]ProfileSetting{"u": {Profiles: make([]string, MaxProfilesPerRule)}})},
 		{name: "profiles per rule over limit", snap: labSnapshot(),
 			prof: nr.Collected(map[string]ProfileSetting{"u": tooManyProfiles})},
+		{name: "profile name at byte limit", snap: labSnapshot(), ok: true,
+			prof: nr.Collected(map[string]ProfileSetting{"u": {Profiles: s(longName)}})},
+		{name: "profile name over byte limit", snap: labSnapshot(),
+			prof: nr.Collected(map[string]ProfileSetting{"u": {Profiles: s(longName + "x")}})},
+		{name: "profile name invalid UTF-8", snap: labSnapshot(),
+			prof: nr.Collected(map[string]ProfileSetting{"u": {Profiles: s("av\xff")}})},
+		{name: "group at byte limit", snap: labSnapshot(), ok: true,
+			prof: nr.Collected(map[string]ProfileSetting{"u": {Group: longName}})},
+		{name: "group over byte limit", snap: labSnapshot(),
+			prof: nr.Collected(map[string]ProfileSetting{"u": {Group: longName + "x"}})},
+		{name: "group invalid UTF-8", snap: labSnapshot(),
+			prof: nr.Collected(map[string]ProfileSetting{"u": {Group: "\xc3"}})},
+		{name: "dropped marker over byte limit", snap: labSnapshot(),
+			prof: nr.Collected(map[string]ProfileSetting{"u": {Dropped: s("<dropped:" + longName + ">")}})},
+		{name: "dropped marker invalid UTF-8", snap: labSnapshot(),
+			prof: nr.Collected(map[string]ProfileSetting{"u": {Dropped: s("<dropped:\xff>")}})},
+		{name: "rule UUID over byte limit", snap: labSnapshot(),
+			prof: nr.Collected(map[string]ProfileSetting{longName + "x": {Group: "g"}})},
+		{name: "rule UUID invalid UTF-8", snap: labSnapshot(),
+			prof: nr.Collected(map[string]ProfileSetting{"u\xff": {Group: "g"}})},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

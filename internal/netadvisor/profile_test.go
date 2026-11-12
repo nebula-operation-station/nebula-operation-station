@@ -79,6 +79,24 @@ func TestProfileCheck(t *testing.T) {
 			state:    StateCannotDecide, reason: "<dropped:profiles>",
 		},
 		{
+			name: "only empty profile names", r: guestToLAN(),
+			profiles: collected(map[string]ProfileSetting{"uuid-r": {Profiles: s("")}}),
+			state:    StateCannotDecide, reason: "empty profile name",
+		},
+		{
+			name: "several empty profile names", r: guestToLAN(),
+			profiles: collected(map[string]ProfileSetting{"uuid-r": {Profiles: s("", "")}}),
+			state:    StateCannotDecide, reason: "empty profile name",
+		},
+		{
+			name: "empty profile name next to a named one", r: guestToLAN(), state: StateOK,
+			profiles: collected(map[string]ProfileSetting{"uuid-r": {Profiles: s("", "av")}}),
+		},
+		{
+			name: "empty profile names with a group", r: guestToLAN(), state: StateOK,
+			profiles: collected(map[string]ProfileSetting{"uuid-r": {Profiles: s(""), Group: "strict"}}),
+		},
+		{
 			name: "dropped marker as profile name", r: guestToLAN(),
 			profiles: collected(map[string]ProfileSetting{"uuid-r": {Profiles: s("<dropped:av>")}}),
 			state:    StateCannotDecide, reason: "<dropped:av>",
