@@ -259,21 +259,56 @@ func encodedCallBytes(c ToolCall) int {
 	return len(b)
 }
 
+// maxTokens is the largest token count; satAdd saturates at it.
+const maxTokens = int64(^uint64(0) >> 1)
+
+// satAdd adds two non-negative token counts, saturating at maxTokens
+// instead of wrapping negative.
+func satAdd(a, b int64) int64 {
+	if a > maxTokens-b {
+		return maxTokens
+	}
+	return a + b
+}
+
+// responseBytes is the size NOS measured of a response: the returned text
+// and the name and arguments of every returned tool call.
+func responseBytes(resp Response) int64 {
+	n := int64(len(resp.Content))
+	for _, c := range resp.ToolCalls {
+		n = satAdd(n, int64(len(c.Name))+int64(len(c.Arguments)))
+	}
+	return n
+}
+
+// callCharge is the run-budget charge of one call. A failed call is
+// charged its reserve (estimate + max_tokens). A call answered without
+// usage is charged at least the reserve and at least the estimate plus the
+// bytes actually returned, so an endpoint that omits usage cannot return
+// more than it pays for. A call with usage is charged by chargeUsage. The
+// charge never exceeds maxRun.
+func callCharge(est, reserve int64, resp Response, err error, maxRun int64) int64 {
+	switch {
+	case err != nil:
+		return min(reserve, maxRun)
+	case resp.Usage == nil:
+		return min(max(reserve, satAdd(est, responseBytes(resp))), maxRun)
+	default:
+		return chargeUsage(est, *resp.Usage, resp, maxRun)
+	}
+}
+
 // chargeUsage is the run-budget charge of one answered call. The reported
 // usage is untrusted: each part is floored at what NOS measured itself
-// (the prompt estimate, the bytes of the returned text and tool calls)
-// and the charge is capped at maxRun, so a huge, negative or understated
-// report can neither overflow the run total nor lower the charge below
-// the measured size. Before the call st.tokens+reserve <= maxRun held, so
-// the sum stays below 2 × HardMaxRunTokens.
+// (the prompt estimate, the bytes of the returned text and tool calls),
+// the sum saturates instead of wrapping and the charge is capped at
+// maxRun, so a huge, negative or understated report can neither overflow
+// the run total nor lower the charge below the measured size, whatever
+// maxRun is.
 func chargeUsage(est int64, u Usage, resp Response, maxRun int64) int64 {
-	seen := int64(len(resp.Content))
-	for _, c := range resp.ToolCalls {
-		seen += int64(len(c.Name)) + int64(len(c.Arguments))
-	}
-	prompt := min(max(est, u.PromptTokens), maxRun)
-	completion := min(max(seen, u.CompletionTokens), maxRun)
-	return min(prompt+completion, maxRun)
+	prompt := min(max(est, u.PromptTokens, 0), maxRun)
+	completion := min(max(responseBytes(resp), u.CompletionTokens, 0), maxRun)
+	return min(satAdd(prompt, completion), maxRun)
 }
 
 // assess runs the loop for one finding.
@@ -326,11 +361,7 @@ func (a *Agent) assess(ctx context.Context, f FindingFacts, st *runState) Findin
 		ccancel()
 		st.calls++
 		res.Calls++
-		if err != nil || resp.Usage == nil {
-			st.tokens += reserve
-		} else {
-			st.tokens += chargeUsage(est, *resp.Usage, resp, l.MaxRunTokens)
-		}
+		st.tokens = satAdd(st.tokens, callCharge(est, reserve, resp, err, l.MaxRunTokens))
 		if err != nil {
 			switch {
 			case ctx.Err() != nil:

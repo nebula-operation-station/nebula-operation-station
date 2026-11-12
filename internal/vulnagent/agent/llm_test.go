@@ -76,6 +76,21 @@ func TestHTTPClientSendsToolRequestAndParsesToolCalls(t *testing.T) {
 	}
 }
 
+func TestNegativeWireUsageIsClampedToZero(t *testing.T) {
+	resp, err := decodeResponse([]byte(`{"choices":[{"message":{"content":"x"}}],
+		"usage":{"prompt_tokens":-9223372036854775808,"completion_tokens":-5}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Usage == nil || resp.Usage.PromptTokens != 0 || resp.Usage.CompletionTokens != 0 {
+		t.Fatalf("usage: %+v", resp.Usage)
+	}
+	resp, err = decodeResponse([]byte(`{"choices":[{"message":{"content":"x"}}]}`))
+	if err != nil || resp.Usage != nil {
+		t.Fatalf("missing usage decoded as %+v, %v", resp.Usage, err)
+	}
+}
+
 func TestHTTPClientFailuresHideKeyAndBody(t *testing.T) {
 	handlers := map[string]http.HandlerFunc{
 		"status": func(w http.ResponseWriter, _ *http.Request) {

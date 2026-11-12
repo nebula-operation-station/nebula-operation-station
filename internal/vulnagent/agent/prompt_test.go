@@ -83,13 +83,32 @@ func TestLimitsValidate(t *testing.T) {
 		"run below one call": mod(func(l *Limits) {
 			l.MaxRunTokens = PromptBaseMaxBytes + 2*MessageOverheadTokens + int64(l.MaxOutputTokens) - 1
 		}),
-		"output tokens max":   mod(func(l *Limits) { l.MaxOutputTokens = HardMaxOutputTokens + 1 }),
-		"finding timeout neg": mod(func(l *Limits) { l.FindingTimeout = -1 }),
-		"result below min":    mod(func(l *Limits) { l.MaxToolResultBytes = MinToolResultBytes - 1 }),
+		"output tokens max":      mod(func(l *Limits) { l.MaxOutputTokens = HardMaxOutputTokens + 1 }),
+		"finding timeout neg":    mod(func(l *Limits) { l.FindingTimeout = -1 }),
+		"result below min":       mod(func(l *Limits) { l.MaxToolResultBytes = MinToolResultBytes - 1 }),
+		"run tokens over max":    mod(func(l *Limits) { l.MaxRunTokens = HardMaxRunTokens + 1 }),
+		"run tokens max int64":   mod(func(l *Limits) { l.MaxRunTokens = int64(^uint64(0) >> 1) }),
+		"prompt tokens over max": mod(func(l *Limits) { l.MaxPromptTokens = HardMaxPromptTokens + 1 }),
+		"run calls over max":     mod(func(l *Limits) { l.MaxRunCalls = HardMaxRunCalls + 1 }),
+		"result over max":        mod(func(l *Limits) { l.MaxToolResultBytes = HardMaxToolResultBytes + 1 }),
+		"finding timeout max":    mod(func(l *Limits) { l.FindingTimeout = HardMaxFindingTimeout + 1 }),
 	}
 	for name, l := range bad {
 		if err := l.Validate(); !errors.Is(err, ErrInvalidConfig) {
 			t.Errorf("%s: err = %v", name, err)
+		}
+	}
+	// Each hard maximum itself is accepted, so the rejections above come
+	// from the range checks and not from another rule.
+	good := map[string]Limits{
+		"run tokens max":    mod(func(l *Limits) { l.MaxRunTokens = HardMaxRunTokens }),
+		"prompt tokens max": mod(func(l *Limits) { l.MaxPromptTokens = HardMaxPromptTokens }),
+		"run calls max":     mod(func(l *Limits) { l.MaxRunCalls = HardMaxRunCalls }),
+		"finding timeout":   mod(func(l *Limits) { l.FindingTimeout = HardMaxFindingTimeout }),
+	}
+	for name, l := range good {
+		if err := l.Validate(); err != nil {
+			t.Errorf("%s rejected: %v", name, err)
 		}
 	}
 }

@@ -470,6 +470,83 @@ func TestHostileUsageCannotDisableRunTokenBudget(t *testing.T) {
 	}
 }
 
+// An endpoint that omits usage is charged at least the bytes it actually
+// returned, not only estimate + max_tokens; a failed call is charged its
+// full reserve.
+func TestMissingUsageIsChargedReturnedBytes(t *testing.T) {
+	bigArgs := `{"text":"` + strings.Repeat("y", 3000) + `","backport_checked":true,"likely_false_positive":false,"exploit_public":true,"rationale":""}`
+	cases := []struct {
+		name    string
+		content string
+		submit  string
+		err     error
+		mod     func(*Limits)
+		// want is the charge of the call given its estimate and limits.
+		want    func(est int64, l Limits) int64
+		outcome Outcome
+	}{
+		{"small answer is charged the reserve", "", validSubmit, nil, nil,
+			func(est int64, l Limits) int64 { return est + int64(l.MaxOutputTokens) }, OutcomeAssessed},
+		{"large content is charged its bytes", strings.Repeat("z", 200<<10), validSubmit, nil, nil,
+			func(est int64, _ Limits) int64 {
+				return est + 200<<10 + int64(len(ToolSubmitAssessment)+len(validSubmit))
+			}, OutcomeAssessed},
+		{"large tool call is charged its bytes", "", bigArgs, nil, nil,
+			func(est int64, _ Limits) int64 { return est + int64(len(ToolSubmitAssessment)+len(bigArgs)) }, OutcomeAssessed},
+		{"content above the budget exhausts it", strings.Repeat("z", MaxLLMResponseBytes-1024), validSubmit, nil,
+			func(l *Limits) {
+				l.MaxRunTokens = PromptBaseMaxBytes + 2*MessageOverheadTokens + int64(l.MaxOutputTokens)
+			},
+			func(_ int64, l Limits) int64 { return l.MaxRunTokens }, OutcomeAssessed},
+		{"failed call is charged the reserve", "", validSubmit, ErrLLM, nil,
+			func(est int64, l Limits) int64 { return est + int64(l.MaxOutputTokens) }, OutcomeLLMError},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			llm := &scriptedLLM{step: func(int, Request) (Response, error) {
+				if c.err != nil {
+					return Response{}, c.err
+				}
+				r := respond(call(ToolSubmitAssessment, c.submit))
+				r.Content = c.content
+				return r, nil
+			}}
+			a := newTestAgent(t, llm, "", c.mod)
+			rep := a.Run(context.Background(), []FindingFacts{factsA()})
+			if rep.Results[0].Outcome != c.outcome || llm.calls() != 1 {
+				t.Fatalf("result %+v calls %d", rep.Results[0], llm.calls())
+			}
+			want := c.want(a.estimate(llm.reqs[0].Messages), a.limits)
+			if rep.TokensCharged != want {
+				t.Fatalf("charged %d, want %d", rep.TokensCharged, want)
+			}
+		})
+	}
+}
+
+// chargeUsage and the run total saturate on their own, independent of the
+// HardMaxRunTokens bound in Limits.Validate.
+func TestChargeIsOverflowSafeWithoutValidate(t *testing.T) {
+	const maxInt64 = int64(^uint64(0) >> 1)
+	huge := Response{ToolCalls: []ToolCall{call(ToolSubmitAssessment, validSubmit)}}
+	if got := chargeUsage(1, Usage{maxInt64, maxInt64}, huge, maxInt64); got != maxInt64 {
+		t.Fatalf("chargeUsage = %d, want %d", got, maxInt64)
+	}
+	if got := chargeUsage(maxInt64, Usage{-maxInt64, maxInt64}, huge, maxInt64); got != maxInt64 {
+		t.Fatalf("chargeUsage with max estimate = %d, want %d", got, maxInt64)
+	}
+	if got := callCharge(maxInt64, maxInt64, Response{Content: "x"}, nil, maxInt64); got != maxInt64 {
+		t.Fatalf("callCharge without usage = %d, want %d", got, maxInt64)
+	}
+	for _, c := range []struct{ a, b, want int64 }{
+		{maxInt64, maxInt64, maxInt64}, {maxInt64 - 1, 1, maxInt64}, {maxInt64 - 1, 2, maxInt64}, {3, 4, 7}, {0, 0, 0},
+	} {
+		if got := satAdd(c.a, c.b); got != c.want {
+			t.Errorf("satAdd(%d, %d) = %d, want %d", c.a, c.b, got, c.want)
+		}
+	}
+}
+
 // Limits.Validate makes OutcomePromptLimit unreachable with valid limits;
 // the guard is a second line of defence and is exercised by lowering the
 // validated limit after New.
