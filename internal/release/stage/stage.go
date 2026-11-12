@@ -126,7 +126,7 @@ func stageAll(ctx context.Context, o Options, out *os.Root) (Result, error) {
 		return Result{}, fmt.Errorf("%w: %s is missing from dist", ErrChecksums, checksumsName(o.Version))
 	}
 
-	b, err := BuildBuiltins(o.Modules)
+	b, err := BuildBuiltins(ctx, o.Modules)
 	if err != nil {
 		return Result{}, err
 	}
@@ -158,7 +158,7 @@ func stageAll(ctx context.Context, o Options, out *os.Root) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("open %s: %w", InstalledDir, err)
 	}
-	err = stageFlavours(dist, installed, flavours)
+	err = stageFlavours(ctx, dist, installed, flavours)
 	installed.Close()
 	if err != nil {
 		return Result{}, err

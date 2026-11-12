@@ -6,6 +6,7 @@ import (
 	"archive/tar"
 	"bufio"
 	"compress/gzip"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -138,9 +139,12 @@ func openDist(dist *os.Root, name string) (*os.File, os.FileInfo, error) {
 // stageFlavours extracts every flavour's installed file tree into
 // installed/<flavour>/. Every flavour must install each binary of the
 // list the tarballs carry (all equal) as /usr/bin/<name>.
-func stageFlavours(dist, installed *os.Root, flavours []flavourSource) error {
+func stageFlavours(ctx context.Context, dist, installed *os.Root, flavours []flavourSource) error {
 	var binaries []string
 	for _, f := range flavours {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if f.kind != kindTarball {
 			continue
 		}
@@ -158,6 +162,9 @@ func stageFlavours(dist, installed *os.Root, flavours []flavourSource) error {
 		return fmt.Errorf("%w: no tarball flavour carries %s", ErrPackage, binariesListPath)
 	}
 	for _, f := range flavours {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := stageFlavour(dist, installed, f, binaries); err != nil {
 			return fmt.Errorf("flavour %s: %w", f.name, err)
 		}
@@ -292,7 +299,10 @@ type stager struct {
 	entries int
 	// regularOnly rejects symlinks (install(1) would copy their target).
 	regularOnly bool
-	content     int64
+	// anyOwner skips the root ownership check: install(1) -o root -g root
+	// sets the owner, so the archive's (the build user's) is irrelevant.
+	anyOwner bool
+	content  int64
 }
 
 // selectFunc maps an archive entry (normalized path) to its installed
@@ -361,7 +371,7 @@ func (s *stager) walk(r io.Reader, sel selectFunc) error {
 
 // add stages one entry at dst.
 func (s *stager) add(dst string, h *tar.Header, mode int64, data io.Reader) error {
-	if h.Uid != 0 || h.Gid != 0 {
+	if !s.anyOwner && (h.Uid != 0 || h.Gid != 0) {
 		return fmt.Errorf("%w: %s is not owned by root:root", ErrPackage, h.Name)
 	}
 	if s.seen[dst] {
@@ -518,6 +528,7 @@ func (s *stager) stageTarball(f *os.File, binaries []string) error {
 	}
 	// install(1) copies a symlink's target; the tarball must ship files.
 	s.regularOnly = true
+	s.anyOwner = true
 	err = s.walk(zr, func(p string, h *tar.Header) (string, int64, bool) {
 		dst, ok := want[p]
 		if !ok {

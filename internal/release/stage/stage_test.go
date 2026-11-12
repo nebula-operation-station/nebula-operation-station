@@ -352,6 +352,31 @@ func TestInstalledFilesComeFromThePackages(t *testing.T) {
 	}
 }
 
+func TestTarballOwnerIsSetByInstallNotArchive(t *testing.T) {
+	// goreleaser writes the build user's uid/gid into the tarball;
+	// install.sh installs with -o root -g root, so the list says root:root.
+	ds := newDist(t)
+	files := tarballData("amd64")
+	for i := range files {
+		files[i].uid, files[i].gid = 1001, 1001
+	}
+	ds.files["nebula_0.1.0_linux_amd64.tar.gz"] = gz(t, tarBytes(t, files))
+	out := filepath.Join(t.TempDir(), "out")
+	if _, err := run(t, ds.write(t), out); err != nil {
+		t.Fatal(err)
+	}
+	l, err := release.ParseInstalledFiles(readFile(t, filepath.Join(out, "payloads", "installed-files.json")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, _ := l.Flavour("tarball:amd64")
+	for _, e := range f.Files {
+		if e.Owner != release.GeneratedOwner {
+			t.Errorf("%s owner %s", e.Path, e.Owner)
+		}
+	}
+}
+
 func TestStageRejectsBadPackages(t *testing.T) {
 	amd := "nebula-operation-station_0.1.0_amd64.deb"
 	tgz := "nebula_0.1.0_linux_amd64.tar.gz"

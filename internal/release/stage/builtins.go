@@ -5,6 +5,7 @@ package stage
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -65,7 +66,7 @@ type tarFile struct {
 // file contents. The result is checked with release.VerifyBundle and
 // release.ParseModuleTar against an unsigned in-memory manifest before it
 // is returned.
-func BuildBuiltins(dir string) (Builtins, error) {
+func BuildBuiltins(ctx context.Context, dir string) (Builtins, error) {
 	root, err := os.OpenRoot(dir)
 	if err != nil {
 		return Builtins{}, fmt.Errorf("%w: open module tree: %v", ErrModules, err)
@@ -95,6 +96,9 @@ func BuildBuiltins(dir string) (Builtins, error) {
 	seen := map[string]string{}
 	var nested int64
 	for _, d := range lockDirs {
+		if err := ctx.Err(); err != nil {
+			return Builtins{}, err
+		}
 		mt, err := buildModule(root, d)
 		if err != nil {
 			return Builtins{}, fmt.Errorf("%w: %s: %v", ErrModules, d, err)

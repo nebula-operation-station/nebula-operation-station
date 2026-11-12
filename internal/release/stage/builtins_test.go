@@ -15,7 +15,7 @@ import (
 )
 
 func TestBuiltinsPassBundleVerification(t *testing.T) {
-	b, err := BuildBuiltins(repoModules)
+	b, err := BuildBuiltins(t.Context(), repoModules)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +44,7 @@ func TestBuiltinsPassBundleVerification(t *testing.T) {
 }
 
 func TestBuiltinsHeadersAreFixed(t *testing.T) {
-	b, err := BuildBuiltins(repoModules)
+	b, err := BuildBuiltins(t.Context(), repoModules)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,11 +89,11 @@ func TestBuiltinsIgnoreFilesTheLockDoesNotReference(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(m, "actions", "stray.sh"), []byte("echo hi\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	b, err := BuildBuiltins(dst)
+	b, err := BuildBuiltins(t.Context(), dst)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref, err := BuildBuiltins(repoModules)
+	ref, err := BuildBuiltins(t.Context(), repoModules)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestBuiltinsRejectBadModules(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			dst := t.TempDir()
 			setup(t, dst)
-			if _, err := BuildBuiltins(dst); !errors.Is(err, ErrModules) {
+			if _, err := BuildBuiltins(t.Context(), dst); !errors.Is(err, ErrModules) {
 				t.Fatalf("err = %v, want ErrModules", err)
 			}
 		})
