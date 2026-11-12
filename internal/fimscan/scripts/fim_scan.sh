@@ -20,12 +20,16 @@
 # 26-hour look-back window and are at most 512 MiB, plus every file under
 # /etc/ssh, every SSH configuration file and the whole /boot/efi root; other
 # files appear by metadata only. Full runs hash every file. Hashing stops
-# after 30 minutes; a run hashes at most 8 GiB (the rest is metadata only).
-# A run cut at any of these limits says "truncated":true.
+# after 30 minutes (timeout, or a watchdog without it); a run hashes at most
+# 8 GiB: before a start point is read, the sizes of its files are summed and
+# larger files are left out (metadata only) once the budget would be passed.
+# A run cut at any of these limits says "truncated":true. Paths are never
+# opened through a symlink in any component.
 #
 # NEBULA_FIM_TEST_ROOT is for tests only: it prefixes every path the script
-# reads (the reported paths stay host paths) and suppresses the sudo
-# re-execution. It does not widen what is read.
+# reads (the reported paths stay host paths), suppresses the sudo
+# re-execution and enables the NEBULA_FIM_TEST_* window, deadline and budget
+# settings. It does not widen what is read.
 set -u
 LC_ALL=C
 export LC_ALL
@@ -54,11 +58,21 @@ fi
 WIN=1560                # look-back window of fim-default-v1 in minutes (26 h)
 MAXSIZE_INC=536870913   # find -size -Nc: at most 512 MiB in incremental runs
 HASH_SECONDS=1800       # hashing stops after 30 minutes
+HASH_BUDGET=8589934592  # a run hashes at most 8 GiB
 SSH_MAX_FILES=64        # spec 09: at most 64 SSH configuration files
 SSH_MAX_BYTES=262144    # spec 09: at most 256 KiB decoded in total
 SSH_MAX_QUEUE=256       # Include matches waiting to be read
 SSH_MAX_SEEN=1024       # Include matches looked at in total
 MOUNTINFO="$P/proc/self/mountinfo"
+# Tests only (with NEBULA_FIM_TEST_ROOT): shorter window, deadline, budget.
+if [ -n "$P" ]; then
+	for v in "${NEBULA_FIM_TEST_WINDOW:-}" "${NEBULA_FIM_TEST_HASH_SECONDS:-}" "${NEBULA_FIM_TEST_HASH_BUDGET:-}"; do
+		case $v in *[!0-9]*) fail "invalid test setting" ;; esac
+	done
+	WIN=${NEBULA_FIM_TEST_WINDOW:-$WIN}
+	HASH_SECONDS=${NEBULA_FIM_TEST_HASH_SECONDS:-$HASH_SECONDS}
+	HASH_BUDGET=${NEBULA_FIM_TEST_HASH_BUDGET:-$HASH_BUDGET}
+fi
 
 LOW=""
 command -v nice >/dev/null 2>&1 && LOW="nice -n 19"
@@ -121,13 +135,43 @@ nested_mount() {
 	return 1
 }
 
-# scan START KIND ALL: walk one start point. KIND hash runs sha256sum on the
+# SIZE_AWK reads the sizes of the files a start point would hash and the
+# budget left, and prints the bytes it will hash and the size cap: "-" when
+# all fit, else the largest power of two such that all files below it fit.
+# shellcheck disable=SC2016 # an awk program, not shell
+SIZE_AWK='{ s = $1 + 0; t += s; k = 0; c = 1; while (c <= s) { c += c; k++ } B[k] += s }
+END {
+	if (t <= left) { printf "%.0f -\n", t; exit }
+	u = 0; best = 0
+	for (k = 0; k <= 64; k++) { if (left < u + B[k]) break; u += B[k]; best = k }
+	c = 1
+	for (k = 0; k < best; k++) c += c
+	printf "%.0f %.0f\n", u, c
+}'
+
+# watchdog SECONDS PID: without the timeout tool, stop find (PID) and the
+# hash tool it runs once SECONDS have passed.
+watchdog() {
+	trap 'kill "$ws" 2>/dev/null; exit 0' TERM
+	sleep "$1" &
+	ws=$!
+	wait "$ws"
+	kids=$(cat "/proc/$2/task/$2/children" 2>/dev/null)
+	kill -TERM "$2" 2>/dev/null
+	# shellcheck disable=SC2086 # a list of process ids
+	[ -n "$kids" ] && kill -TERM $kids 2>/dev/null
+}
+
+# scan START KIND ALL CAP: walk one start point. KIND size prints the bytes
+# and cap of the files to hash (SIZE_AWK), KIND hash runs sha256sum on the
 # files to hash, KIND meta prints one metadata entry per path ("M1" for a
-# file that should have a hash, "M0" otherwise). ALL=1 hashes every file.
+# file that should have a hash, "M0" otherwise). ALL=1 hashes every file;
+# CAP ("-" for none) leaves files of CAP bytes or more unhashed.
 scan() {
 	start=$1
 	kind=$2
 	all=$3
+	cap=$4
 	set -- -P "$P$start" -xdev "(" -path "$P/etc/pve" -o -path "$P/usr/lib/python3*/__pycache__" -o -path "$P/usr/local/lib/python3*/__pycache__"
 	for n in $NESTED_MOUNTS; do
 		case $n in "$start"/*) set -- "$@" -o -path "$P$n" ;; esac
@@ -140,10 +184,16 @@ scan() {
 	else
 		set -- "$@" "(" -type f -size "-${MAXSIZE_INC}c" "(" -cmin "-$WIN" -o -mmin "-$WIN" -o -path "$P/etc/ssh/*" ")"
 	fi
-	if [ "$kind" = hash ]; then
+	[ "$cap" = - ] || set -- "$@" -size "-${cap}c"
+	case $kind in
+	size)
+		set -- "$@" -printf '%s\n' ")"
+		# shellcheck disable=SC2086 # LOW is a word list
+		$LOW find "$@" 2>/dev/null | awk -v left="$HASH_LEFT" "$SIZE_AWK"
+		;;
+	hash)
 		set -- "$@" -exec sha256sum -z -- "{}" + ")"
-		now=$(date +%s)
-		left=$((DEADLINE - now))
+		left=$((DEADLINE - $(date +%s)))
 		# Every T of the hash pass has a leading NUL: a killed pass may end in
 		# a record cut mid-path, and the NUL ends that fragment as a field of
 		# its own (the awk program drops the hash just before a T).
@@ -152,18 +202,32 @@ scan() {
 			return
 		fi
 		if [ -n "$TIMEOUT" ]; then
-			# shellcheck disable=SC2086 # LOW is a word list
-			$TIMEOUT "$left" $LOW find "$@" 2>/dev/null
-		else
+			# timeout signals its whole process group: find and sha256sum.
 			# shellcheck disable=SC2086
-			$LOW find "$@" 2>/dev/null
+			$TIMEOUT "$left" $LOW find "$@" 2>/dev/null
+			[ $? -eq 124 ] && printf '\0T\0'
+		else
+			# The watchdog stops find and its sha256sum at the deadline; cat
+			# ends only when both have closed the pipe, so the marker is
+			# never written between hash records.
+			{
+				# shellcheck disable=SC2086
+				$LOW find "$@" 2>/dev/null &
+				fp=$!
+				watchdog "$left" "$fp" >/dev/null 2>&1 &
+				wp=$!
+				wait "$fp"
+				kill "$wp" 2>/dev/null
+			} | cat
+			[ "$(date +%s)" -lt "$DEADLINE" ] || printf '\0T\0'
 		fi
-		[ $? -eq 124 ] && printf '\0T\0'
-	else
+		;;
+	meta)
 		set -- "$@" -printf 'M1 %y %s %m %U %G %i %T@ %C@\0%p\0%l\0' ")" -o -printf 'M0 %y %s %m %U %G %i %T@ %C@\0%p\0%l\0'
 		# shellcheck disable=SC2086
 		$LOW find "$@" 2>/dev/null || printf 'U\0'
-	fi
+		;;
+	esac
 }
 
 # homes CALLBACK: call CALLBACK with every home directory (/root, /home/*)
@@ -263,8 +327,40 @@ home_file() {
 
 FOUND=0
 found() { FOUND=1; }
-scan_hash() { scan "$1" hash 0; }
-scan_meta() { scan "$1" meta 0; }
+scan_hash() { visit hash "$1" 0; }
+scan_meta() { visit meta "$1" 0; }
+
+# visit KIND START ALL: the hash or meta pass of one start point. Before the
+# hash pass reads a byte, the sizes of the files it would hash are summed
+# (metadata only) and, when they exceed the budget left, the file size is
+# capped so the run hashes at most HASH_BUDGET bytes. The cap is kept for
+# the meta pass: a file left out by it, or by the deadline before its start
+# point, is truncated, not unreadable.
+CAPS=""
+BUDGET_CUT=0
+visit() {
+	if [ "$1" = meta ]; then
+		CAPS=${CAPS# }
+		vcap=${CAPS%% *}
+		CAPS=${CAPS#"$vcap"}
+		scan "$2" meta "$3" "${vcap:--}"
+		return
+	fi
+	if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+		CAPS="$CAPS 0"
+		printf '\0T\0'
+		return
+	fi
+	vstart=$2
+	vall=$3
+	# shellcheck disable=SC2046 # two numbers
+	set -- $(scan "$vstart" size "$vall" -)
+	vcap=${2:--}
+	[ "$vcap" = - ] || BUDGET_CUT=1
+	HASH_LEFT=$((HASH_LEFT - ${1:-0}))
+	CAPS="$CAPS $vcap"
+	scan "$vstart" hash "$vall" "$vcap"
+}
 
 # walk KIND: every start point of the profile.
 walk() {
@@ -275,7 +371,7 @@ walk() {
 		[ "$(root_state "$r")" = scanned ] || continue
 		all=0
 		[ "$r" = /boot/efi ] && all=1
-		scan "$r" "$1" "$all"
+		visit "$1" "$r" "$all"
 	done
 	for base in /root /home; do
 		for rel in $HOME_FILES; do
@@ -393,7 +489,9 @@ produce() {
 	# the record it belongs to.
 	ssh_collect
 	DEADLINE=$(($(date +%s) + HASH_SECONDS))
+	HASH_LEFT=$HASH_BUDGET
 	walk hash
+	[ "$BUDGET_CUT" = 1 ] && printf '\0T\0'
 	for f in $SSH_FILES; do
 		sha256sum -z -- "$P$f" 2>/dev/null
 	done

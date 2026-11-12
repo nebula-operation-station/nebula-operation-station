@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -158,7 +159,7 @@ func runScript(t *testing.T, shell, root string, params []byte) ([]byte, []byte,
 	return runScriptPath(t, shell, root, params, os.Getenv("PATH"))
 }
 
-func runScriptPath(t *testing.T, shell, root string, params []byte, path string) ([]byte, []byte, error) {
+func runScriptPath(t *testing.T, shell, root string, params []byte, path string, env ...string) ([]byte, []byte, error) {
 	t.Helper()
 	work := t.TempDir()
 	scriptPath := filepath.Join(work, "action.sh")
@@ -182,6 +183,7 @@ func runScriptPath(t *testing.T, shell, root string, params []byte, path string)
 		"TMPDIR=" + filepath.Join(work, "no-such-dir"),
 		"HOME=" + filepath.Join(work, "no-such-home"),
 	}
+	cmd.Env = append(cmd.Env, env...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
@@ -676,6 +678,201 @@ func TestScriptIncrementalSkipsLargeFiles(t *testing.T) {
 	compareRecords(t, res, want, sums, map[string]bool{"/opt/big": true})
 	if r := findRecord(t, res, "/opt/big"); r.Size != 600<<20 || r.Hash.Kind != HashNone {
 		t.Errorf("/opt/big %+v", r)
+	}
+}
+
+// runWith runs the script in mode with extra environment and PATH and
+// parses the document.
+func runWith(t *testing.T, root string, mode Mode, path string, env ...string) *Result {
+	t.Helper()
+	out, stderr, err := runScriptPath(t, "/bin/sh", root, scanParams(t, mode), path, env...)
+	if err != nil {
+		t.Fatalf("script: %v\nstderr: %s", err, stderr)
+	}
+	res, err := Parse(context.Background(), bytes.NewReader(out), Options{Profile: DefaultProfile(), Mode: mode, HostKey: scriptTestKey})
+	if err != nil {
+		t.Fatalf("parse: %v\ndocument: %.4000s", err, out)
+	}
+	return res
+}
+
+// TestScriptIncrementalWindow: an incremental run hashes only files whose
+// ctime or mtime lies in the look-back window, plus /etc/ssh and /boot/efi.
+// With a window of 0 minutes no file is recent, so every other file is
+// reported by metadata only, and the run is still complete.
+func TestScriptIncrementalWindow(t *testing.T) {
+	root := buildTree(t, treeOpts{})
+	res := runWith(t, root, ModeIncremental, os.Getenv("PATH"), "NEBULA_FIM_TEST_WINDOW=0")
+	if !res.Complete() {
+		t.Fatalf("partial %v, dropped %v, host %+v", res.Partial, res.Dropped, res.Host)
+	}
+	want, sums := expectedRecords(t, root)
+	unhashed := map[string]bool{}
+	for p := range sums {
+		if !strings.HasPrefix(p, "/etc/ssh/") && !strings.HasPrefix(p, "/boot/efi/") {
+			unhashed[p] = true
+		}
+	}
+	compareRecords(t, res, want, sums, unhashed)
+	if r := findRecord(t, res, "/etc/ssh/ssh_host_ed25519_key"); r.Hash.Kind == HashNone {
+		t.Error("/etc/ssh is hashed in every incremental run")
+	}
+}
+
+// hashedRecordsAreRight checks every hash in res against the file in the
+// tree (zeros for the sparse files named in sparse) and returns the bytes
+// hashed and the number of files left unhashed.
+func hashedRecordsAreRight(t *testing.T, res *Result, root string, sparse map[string]bool) (hashed int64, unhashed int) {
+	t.Helper()
+	zero := map[int64][sha256.Size]byte{}
+	for _, r := range res.Records {
+		if r.Type != TypeFile {
+			continue
+		}
+		if r.Hash.Kind == HashNone {
+			unhashed++
+			continue
+		}
+		p := string(r.Path)
+		var sum [sha256.Size]byte
+		if sparse[p] {
+			if s, ok := zero[r.Size]; ok {
+				sum = s
+			} else {
+				h := sha256.New()
+				if _, err := io.CopyN(h, zeroReader{}, r.Size); err != nil {
+					t.Fatal(err)
+				}
+				copy(sum[:], h.Sum(nil))
+				zero[r.Size] = sum
+			}
+		} else {
+			b, err := os.ReadFile(filepath.Join(root, p))
+			if err != nil {
+				t.Fatal(err)
+			}
+			sum = sha256.Sum256(b)
+		}
+		if want := sealHash(scriptTestKey, r.Path, sum); r.Hash != want {
+			t.Errorf("%s: hash does not belong to the file", EscapePath(r.Path))
+		}
+		hashed += r.Size
+	}
+	return hashed, unhashed
+}
+
+type zeroReader struct{}
+
+func (zeroReader) Read(p []byte) (int, error) {
+	clear(p)
+	return len(p), nil
+}
+
+// TestScriptHashBudgetCapsBeforeReading: with a budget below the tree's
+// size, the files too large for the budget are left out before sha256sum
+// reads them: the hashed bytes stay within the budget (the SSH
+// configuration aside), the run is truncated, and a file left out is not
+// counted unreadable.
+func TestScriptHashBudgetCapsBeforeReading(t *testing.T) {
+	const budget = 64
+	root := buildTree(t, treeOpts{})
+	res := runWith(t, root, ModeFull, os.Getenv("PATH"), "NEBULA_FIM_TEST_HASH_BUDGET="+strconv.Itoa(budget))
+	if !slices.Contains(res.Partial, ReasonHostTruncated) || res.Host.Unreadable != 0 {
+		t.Fatalf("partial %v, host %+v", res.Partial, res.Host)
+	}
+	ssh := map[string]bool{}
+	var sshBytes int64
+	for _, f := range res.SSHConfig {
+		ssh[string(f.Path)] = true
+		sshBytes += int64(len(f.Content))
+	}
+	hashed, unhashed := hashedRecordsAreRight(t, res, root, nil)
+	if hashed-sshBytes > budget || unhashed == 0 {
+		t.Errorf("hashed %d bytes (%d of SSH configuration), %d files unhashed; budget %d", hashed, sshBytes, unhashed, budget)
+	}
+	if r := findRecord(t, res, "/etc/hostname"); r.Hash.Kind == HashNone {
+		t.Error("a small file within the budget is not hashed")
+	}
+}
+
+// pathWithout returns a PATH directory holding the tools the script uses,
+// without the timeout tool.
+func pathWithout(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, tool := range []string{"sed", "awk", "od", "find", "sha256sum", "date", "id", "base64", "wc", "cat", "sleep", "nice", "ionice"} {
+		bin, err := exec.LookPath(tool)
+		if err != nil {
+			if tool == "ionice" {
+				continue
+			}
+			t.Fatalf("%s: %v", tool, err)
+		}
+		if err := os.Symlink(bin, filepath.Join(dir, tool)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
+
+// TestScriptTimeBoundStopsHashing: hashing stops at the deadline with the
+// timeout tool and, without it, with the watchdog; the run is truncated,
+// no hash is attributed to the wrong file and the script returns well
+// before it would have hashed everything.
+func TestScriptTimeBoundStopsHashing(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		path func(t *testing.T) string
+	}{
+		{"timeout", func(*testing.T) string { return os.Getenv("PATH") }},
+		{"watchdog", pathWithout},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			root := buildTree(t, treeOpts{})
+			sparse := map[string]bool{}
+			// 7 GiB: within the 8 GiB budget, far more than 2 s of hashing.
+			for i := range 7 {
+				p := "/etc/big-" + strconv.Itoa(i)
+				f, err := os.Create(filepath.Join(root, p))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := f.Truncate(1 << 30); err != nil {
+					t.Fatal(err)
+				}
+				if err := f.Close(); err != nil {
+					t.Fatal(err)
+				}
+				sparse[p] = true
+			}
+			path := c.path(t)
+			if c.name == "watchdog" {
+				if _, err := exec.LookPath(filepath.Join(path, "timeout")); err == nil {
+					t.Fatal("timeout still on PATH")
+				}
+			}
+			start := time.Now()
+			res := runWith(t, root, ModeFull, path, "NEBULA_FIM_TEST_HASH_SECONDS=2")
+			d := time.Since(start)
+			if !slices.Contains(res.Partial, ReasonHostTruncated) {
+				t.Errorf("run past the deadline not truncated: partial %v", res.Partial)
+			}
+			_, unhashed := hashedRecordsAreRight(t, res, root, sparse)
+			bigUnhashed := 0
+			for p := range sparse {
+				if findRecord(t, res, p).Hash.Kind == HashNone {
+					bigUnhashed++
+				}
+			}
+			if unhashed == 0 || bigUnhashed == 0 {
+				t.Errorf("%d files, %d large files unhashed despite the deadline", unhashed, bigUnhashed)
+			}
+			// Hashing ran until it was stopped (at least one second), and
+			// the script returned soon after.
+			if d < time.Second || d > time.Minute {
+				t.Errorf("script ran %v", d)
+			}
+		})
 	}
 }
 
