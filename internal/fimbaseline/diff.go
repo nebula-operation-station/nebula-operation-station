@@ -44,7 +44,9 @@ const (
 	// ChangeContent: both records carry a content hash and they differ.
 	ChangeContent Change = 1 << iota
 	// ChangeNotHashed: the new record is a file without a content hash and
-	// its metadata differs or it is new ("changed, not yet hashed", D9).
+	// its metadata differs or it is new ("changed, not yet hashed", D9), or
+	// it lies under a vfat /boot/efi root, where every file must be hashed
+	// (D5).
 	ChangeNotHashed
 	// ChangeType: the file type differs.
 	ChangeType
@@ -105,6 +107,9 @@ func Diff(b *Baseline, scan *fimscan.Result, opts Options) (*Report, error) {
 	}
 	if scan.ProfileID != b.profileID {
 		return nil, fmt.Errorf("diff: %w", ErrProfileMismatch)
+	}
+	if err := checkLatest(b, opts.LatestComplete); err != nil {
+		return nil, fmt.Errorf("diff: latest complete run: %w", err)
 	}
 	cur, err := sortedRecords(scan.Records)
 	if err != nil {
@@ -226,8 +231,11 @@ func compare(old, cur *fimscan.Record, relax bool) Change {
 	switch {
 	case cur.Type == fimscan.TypeFile && cur.Hash.Kind == fimscan.HashNone:
 		// Incremental run: content unknown. Any metadata change of a file
-		// that was not hashed is "changed, not yet hashed" (D9).
-		if ch != 0 {
+		// that was not hashed is "changed, not yet hashed" (D9). Under the
+		// vfat relaxation every file is hashed in every run (D5), so an
+		// unhashed record there is a deviation even without a metadata
+		// change (fail closed).
+		if ch != 0 || relax {
 			ch |= ChangeNotHashed
 		}
 	case old.Type == fimscan.TypeFile && cur.Type == fimscan.TypeFile && old.Hash != cur.Hash:
@@ -243,6 +251,30 @@ func mountType(ms []fimscan.Mount, p string) string {
 		}
 	}
 	return ""
+}
+
+// checkLatest validates the latest complete run given in Options: it must
+// be complete, of the baseline's profile and within the limits. Only its
+// records are used, for the D7 (c) shadowing set.
+func checkLatest(b *Baseline, latest *fimscan.Result) error {
+	if latest == nil {
+		return nil
+	}
+	if !latest.Complete() {
+		return fmt.Errorf("%w: partial scan", ErrInvalidInput)
+	}
+	if latest.ProfileID != b.profileID {
+		return ErrProfileMismatch
+	}
+	if len(latest.Records) > MaxEntries {
+		return fmt.Errorf("%w: %d records", ErrLimit, len(latest.Records))
+	}
+	for i := range latest.Records {
+		if err := checkRecord(&latest.Records[i]); err != nil {
+			return fmt.Errorf("record %d: %w", i, err)
+		}
+	}
+	return nil
 }
 
 func rootScanned(scan *fimscan.Result, pattern string) bool {

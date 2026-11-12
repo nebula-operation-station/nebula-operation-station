@@ -114,6 +114,48 @@ func TestDiffClasses(t *testing.T) {
 	}
 }
 
+func TestDiffShadowUsesLatestCompleteRun(t *testing.T) {
+	// The baseline has no ls; the latest complete run has /usr/bin/ls, which
+	// the partial scan (with /usr/bin skipped) does not report (D7 (c)).
+	b := mustBaseline(t, result(file("/etc/motd", 1)))
+	scan := partial(file("/etc/motd", 1), file("/usr/local/bin/ls", 1))
+	without := mustDiff(t, b, scan, usable())
+	if len(without.Deviations) != 1 || without.Deviations[0].Class != ClassNormal {
+		t.Fatalf("without latest run: %+v", without.Deviations)
+	}
+	latest := Options{SSH: stubSSH{}, LatestComplete: result(file("/usr/bin/ls", 1))}
+	rep := mustDiff(t, b, scan, latest)
+	if len(rep.Deviations) != 1 || rep.Deviations[0].Class != ClassCritical || rep.Deviations[0].Rules != RuleShadow {
+		t.Fatalf("with latest run: %+v", rep.Deviations)
+	}
+}
+
+func TestDiffRejectsLatestComplete(t *testing.T) {
+	b := mustBaseline(t, result(file("/etc/a", 1)))
+	other := result(file("/usr/bin/ls", 1))
+	other.ProfileID = "fim-other-v1"
+	big := result()
+	big.Records = make([]fimscan.Record, MaxEntries+1)
+	tests := []struct {
+		name   string
+		latest *fimscan.Result
+		want   error
+	}{
+		{"partial", partial(file("/usr/bin/ls", 1)), ErrInvalidInput},
+		{"profile", other, ErrProfileMismatch},
+		{"records over limit", big, ErrLimit},
+		{"bad record", result(file("/usr//ls", 1)), ErrInvalidInput},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := Options{SSH: stubSSH{}, LatestComplete: tc.latest}
+			if rep, err := Diff(b, result(file("/etc/a", 1)), opts); !errors.Is(err, tc.want) || rep != nil {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}
+
 func TestDiffPartialScanHasNoRemoved(t *testing.T) {
 	b := mustBaseline(t, result(file("/etc/a", 1), file("/etc/b", 1), file("/usr/bin/c", 1)))
 	rep := mustDiff(t, b, partial(file("/etc/a", 2), file("/etc/new", 1)), usable())
@@ -176,6 +218,7 @@ func TestDiffVfatRelaxation(t *testing.T) {
 	grub := file("/boot/grub/grub.cfg", 1)
 	b := mustBaseline(t, efiResult("vfat", dir("/boot/efi"), shim, grub))
 	meta := func(r *fimscan.Record) { r.UID, r.GID, r.Mode, r.Inode, r.Mtime, r.Ctime = 1000, 1000, 0o700, 9, 5, 5 }
+	unhash := func(r *fimscan.Record) { r.Hash = fimscan.Hash{} }
 	tests := []struct {
 		name    string
 		scan    *fimscan.Result
@@ -187,6 +230,11 @@ func TestDiffVfatRelaxation(t *testing.T) {
 		{"content still compared", efiResult("vfat", dir("/boot/efi"), file("/boot/efi/EFI/debian/shimx64.efi", 2), grub), "/boot/efi/EFI/debian/shimx64.efi", ChangeContent},
 		{"outside efi not relaxed", efiResult("vfat", dir("/boot/efi"), shim, with(grub, meta)), "/boot/grub/grub.cfg", ChangeMode | ChangeOwner | ChangeInode | ChangeTimes},
 		{"fstype change not relaxed", efiResult("ext4", dir("/boot/efi"), with(shim, meta), grub), "", 0},
+		// D5: every file under a vfat /boot/efi root is hashed in every run,
+		// so an unhashed record there is a deviation even when the size,
+		// type and mode are unchanged (fail closed).
+		{"unhashed efi file same metadata", efiResult("vfat", dir("/boot/efi"), with(shim, unhash), grub), "/boot/efi/EFI/debian/shimx64.efi", ChangeNotHashed},
+		{"unhashed efi file, owner and times only", efiResult("vfat", dir("/boot/efi"), with(shim, func(r *fimscan.Record) { meta(r); unhash(r) }), grub), "/boot/efi/EFI/debian/shimx64.efi", ChangeNotHashed},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -214,6 +262,25 @@ func TestDiffVfatRelaxation(t *testing.T) {
 				t.Fatalf("got %+v", rep.Deviations)
 			}
 		})
+	}
+}
+
+func TestDiffVfatRelaxationNeedsScannedRoot(t *testing.T) {
+	shim := file("/boot/efi/EFI/debian/shimx64.efi", 1)
+	b := mustBaseline(t, efiResult("vfat", dir("/boot/efi"), shim))
+	meta := func(r *fimscan.Record) { r.UID, r.GID, r.Mode, r.Inode, r.Mtime, r.Ctime = 1000, 1000, 0o700, 9, 5, 5 }
+	// The same metadata change as "owner, perms, inode, times ignored", but
+	// /boot/efi is not a scanned root: D5 does not relax it.
+	scan := efiResult("vfat", dir("/boot/efi"), with(shim, meta))
+	for i := range scan.Roots {
+		if scan.Roots[i].Pattern == efiRoot {
+			scan.Roots[i].State = fimscan.RootSkipped
+		}
+	}
+	rep := mustDiff(t, b, scan, usable())
+	want := ChangeMode | ChangeOwner | ChangeInode | ChangeTimes
+	if len(rep.Deviations) != 1 || rep.Deviations[0].Changes != want {
+		t.Fatalf("got %+v, want changes %b", rep.Deviations, want)
 	}
 }
 

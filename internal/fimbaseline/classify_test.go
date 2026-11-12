@@ -95,6 +95,14 @@ func TestClassifyRules(t *testing.T) {
 	rootLink := symlink("/root", "/srv/root")
 	etcLink := symlink("/etc/ssh", "/srv/ssh")
 	optLink := symlink("/opt/app", "/srv/app")
+	// Outside the fixed trees, so only the SSH position rule applies.
+	wantsLink := symlink("/usr/local/lib/systemd/system/multi-user.target.wants", "/srv/wants")
+	requiresLink := symlink("/etc/systemd/system.control/x.requires", "/srv/req")
+	unitWantsLink := symlink("/lib/systemd/system/graphical.target.wants", "/srv/gwants")
+	homeUserLink := symlink("/home/bob", "/srv/bob")
+	homeUserSSHLink := symlink("/home/bob/.ssh", "/srv/bobssh")
+	homeProjectLink := symlink("/home/bob/projects", "/srv/projects")
+	usrLink := symlink("/usr", "/srv/usr")
 	derived := file("/etc/ssh/sshd_config.d/10.conf", 1)
 	akDir := dir("/srv/keys")
 	akDirLink := symlink("/srv/keys", "/data/keys")
@@ -121,6 +129,13 @@ func TestClassifyRules(t *testing.T) {
 		{"symlink /root", nil, &rootLink, nil, usable(), ClassCritical, RuleSSHSymlink},
 		{"symlink /etc/ssh", nil, nil, &etcLink, usable(), ClassCritical, RuleSSHSymlink},
 		{"symlink elsewhere", nil, nil, &optLink, usable(), ClassNormal, 0},
+		{"symlink /usr", nil, nil, &usrLink, usable(), ClassCritical, RuleSSHSymlink},
+		{"symlink *.wants in local unit path", nil, nil, &wantsLink, usable(), ClassCritical, RuleSSHSymlink},
+		{"symlink *.requires in control unit path", nil, nil, &requiresLink, usable(), ClassCritical, RuleSSHSymlink},
+		{"symlink *.wants in lib unit path", nil, nil, &unitWantsLink, usable(), ClassCritical, RuleSSHSymlink},
+		{"symlink home user", nil, nil, &homeUserLink, usable(), ClassCritical, RuleSSHSymlink},
+		{"symlink home user .ssh", nil, nil, &homeUserSSHLink, usable(), ClassCritical, RuleSSHSymlink},
+		{"symlink home project dir", nil, nil, &homeProjectLink, usable(), ClassNormal, 0},
 		{"derived include", nil, nil, &derived, ssh, ClassCritical, RuleSSHDerived},
 		{"derived position dir", nil, &akDir, &akDir, ssh, ClassNormal, 0},
 		{"derived position symlink", nil, &akDir, &akDirLink, ssh, ClassCritical, RuleSSHSymlink},

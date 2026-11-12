@@ -41,7 +41,8 @@ const (
 	// RuleSetID: a setuid or setgid bit before or after the change (D7 (b)).
 	RuleSetID
 	// RuleShadow: a /usr/local/{bin,sbin} entry whose name is a command in
-	// /usr/bin or /usr/sbin of the baseline or the scan (D7 (c)).
+	// /usr/bin or /usr/sbin of the baseline, the scan or the latest complete
+	// run (D7 (c)).
 	RuleShadow
 	// RuleSSHDerived: a path the derived SSH set (D7 (d)) names.
 	RuleSSHDerived
@@ -86,6 +87,13 @@ type Options struct {
 	// complete run supplied one, it overflowed, or it is not implemented
 	// yet); then every deviation is critical-class (D7).
 	SSH SSHSet
+	// LatestComplete is the host's latest complete run, or nil if there is
+	// none. Its /usr/bin and /usr/sbin names join the shadowing set (D7
+	// (c): the union of the approved baseline and the latest complete
+	// run), so a partial scan that skips those directories classifies the
+	// same way as a complete one. It must be complete and of the
+	// baseline's profile; Diff rejects it otherwise.
+	LatestComplete *fimscan.Result
 }
 
 // fixedExact are D9 critical-class paths named literally.
@@ -301,7 +309,12 @@ type classifier struct {
 
 func newClassifier(old, cur []fimscan.Record, opts Options) *classifier {
 	c := &classifier{shadowed: map[string]bool{}, ssh: opts.SSH}
-	for _, recs := range [][]fimscan.Record{old, cur} {
+	sets := [][]fimscan.Record{old, cur}
+	if opts.LatestComplete != nil {
+		// Validated by Diff (checkLatest).
+		sets = append(sets, opts.LatestComplete.Records)
+	}
+	for _, recs := range sets {
 		for i := range recs {
 			dir, name := split(string(recs[i].Path))
 			if containsString(shadowedDirs, dir) {
