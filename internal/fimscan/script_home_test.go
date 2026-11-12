@@ -239,17 +239,18 @@ func fileID(t *testing.T, p string) string {
 	return string(out)
 }
 
-// TestScriptHashFDNeverBlocksOrFollows: the home hash helper opens the file
-// in a holder process (as the owner of the directory when the scan runs as
-// root) and hashes only a regular file whose device:inode:ctime is the one
-// find saw. A FIFO (directly or behind a symlink) swapped in does not stall
-// it past the open bound, and a symlink or another file swapped in yields
-// no hash.
+// TestScriptHashFDNeverBlocksOrFollows: the home hash helper opens and
+// hashes the file in a holder process (as the owner of the directory when
+// the scan runs as root) and returns a hash only for a regular file whose
+// device:inode:ctime is the one find saw, before and after the read. A FIFO
+// (directly or behind a symlink) swapped in does not stall it past the open
+// bound, which needs no timeout tool, and a symlink or another file swapped
+// in yields no hash. The root side never opens the file: it has no path
+// into /proc and no input redirection of its own.
 func TestScriptHashFDNeverBlocksOrFollows(t *testing.T) {
 	hashFD, hold := scriptVar(t, "HASH_FD"), scriptVar(t, "HOLD")
-	timeout, err := exec.LookPath("timeout")
-	if err != nil {
-		t.Fatalf("timeout: %v", err)
+	if strings.Contains(hashFD, "/proc") || strings.Contains(hashFD, "3<") || strings.Contains(hashFD, "sha256sum") {
+		t.Errorf("the root side of the home hash opens or reads the file itself:\n%s", hashFD)
 	}
 	const content = "ssh-ed25519 AAAA alice\n"
 	for _, c := range []struct {
@@ -296,31 +297,23 @@ func TestScriptHashFDNeverBlocksOrFollows(t *testing.T) {
 				t.Fatal(err)
 			}
 			id := c.setup(t, dir)
-			for _, to := range []string{timeout, ""} {
-				if to == "" && strings.Contains(c.name, "fifo") {
-					// Without the timeout tool the open is bounded by the
-					// deadline of the whole hash pass only.
-					continue
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, "/bin/sh", "-c", hashFD, "sh", "./authorized_keys", id, hold, "", "1")
+			cmd.Dir = dir
+			cmd.WaitDelay = time.Second
+			start := time.Now()
+			out, _ := cmd.Output()
+			if d := time.Since(start); d > 10*time.Second {
+				t.Errorf("took %v", d)
+			}
+			got := strings.Fields(string(out))
+			if c.want == "" {
+				if len(got) != 0 {
+					t.Errorf("hash %q of a swapped-in file", out)
 				}
-				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-				cmd := exec.CommandContext(ctx, "/bin/sh", "-c", hashFD, "sh", "./authorized_keys", id, hold, "", "1", to)
-				cmd.Dir = dir
-				cmd.WaitDelay = time.Second
-				start := time.Now()
-				out, _ := cmd.Output()
-				d := time.Since(start)
-				cancel()
-				if d > 10*time.Second {
-					t.Errorf("timeout %q: took %v", to, d)
-				}
-				got := strings.Fields(string(out))
-				if c.want == "" {
-					if len(got) != 0 {
-						t.Errorf("timeout %q: hash %q of a swapped-in file", to, out)
-					}
-				} else if len(got) == 0 || got[0] != c.want {
-					t.Errorf("timeout %q: output %q, want hash %s", to, out, c.want)
-				}
+			} else if len(got) == 0 || got[0] != c.want {
+				t.Errorf("output %q, want hash %s", out, c.want)
 			}
 		})
 	}
@@ -345,7 +338,9 @@ func sha(s string) []byte {
 
 // fakeRootPath returns a PATH whose id says root and, with setpriv, whose
 // setpriv logs its options to log and runs the command after "--" as is
-// (a test cannot change users).
+// (a test cannot change users), marked as dropped: every sha256sum that
+// reads its standard input (a home SSH file) logs "dropped" or "root" to
+// log.sum.
 func fakeRootPath(t *testing.T, setpriv bool, log string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -356,7 +351,12 @@ func fakeRootPath(t *testing.T, setpriv bool, log string) string {
 	}
 	write("id", "[ \"$1\" = -u ] && { echo 0; exit 0; }\nexec /usr/bin/id \"$@\"\n")
 	if setpriv {
-		write("setpriv", "while [ \"$1\" != -- ]; do printf '%s ' \"$1\" >>'"+log+"'; shift; done\necho >>'"+log+"'\nshift\nexec \"$@\"\n")
+		sum, err := exec.LookPath("sha256sum")
+		if err != nil {
+			t.Fatal(err)
+		}
+		write("setpriv", "while [ \"$1\" != -- ]; do printf '%s ' \"$1\" >>'"+log+"'; shift; done\necho >>'"+log+"'\nshift\nNEBULA_TEST_DROPPED=1 exec \"$@\"\n")
+		write("sha256sum", "w=root\n[ -n \"${NEBULA_TEST_DROPPED:-}\" ] && w=dropped\n[ $# -eq 0 ] && echo \"$w\" >>'"+log+".sum'\nexec '"+sum+"' \"$@\"\n")
 		return dir + ":" + os.Getenv("PATH")
 	}
 	// A PATH without setpriv: the tools the script uses, linked one by one.
@@ -403,6 +403,15 @@ func TestScriptRootOpensHomeFilesAsOwner(t *testing.T) {
 			if strings.TrimSpace(l) != "--reuid="+uid+" --regid=65534 --clear-groups" {
 				t.Errorf("setpriv options %q", l)
 			}
+		}
+		// Every home SSH file is read and hashed by the dropped holder;
+		// root never opens or reads one.
+		b, err = os.ReadFile(log + ".sum")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Fields(string(b)); len(got) != 5 || slices.ContainsFunc(got, func(s string) bool { return s != "dropped" }) {
+			t.Errorf("home files hashed by %q, want 5 times by the dropped holder", got)
 		}
 	})
 	t.Run("no setpriv", func(t *testing.T) {

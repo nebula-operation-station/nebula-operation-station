@@ -28,11 +28,14 @@
 # /home/* lie in directories their users own and can change at any time:
 # each is scanned from inside its directory, entered once and checked by
 # its physical path, as a single entry (a directory there is reported, not
-# walked); it is opened only by a holder process dropped to the owner of
-# the directory (root never opens it by name) and bounded in time, and
-# hashed through one descriptor checked to be the regular file find saw.
-# Its hash carries that device:inode:ctime and is kept only for a record
-# of the same. At most 16 authorized_keys* files per home are scanned.
+# walked); it is opened and hashed only by a holder process dropped to the
+# owner of the directory (root never opens it, by name or through the
+# holder's descriptor), bounded in time, through one descriptor checked to
+# be the regular file find saw, before and after the read. Its hash
+# carries that device:inode:ctime and is kept only for a record of the
+# same whose ctime and mtime are older than the hash start by more than
+# the timestamp granularity (a racy timestamp cannot prove the content
+# unchanged). At most 16 authorized_keys* files per home are scanned.
 #
 # NEBULA_FIM_TEST_ROOT is for tests only: it prefixes every path the script
 # reads (the reported paths stay host paths), suppresses the sudo
@@ -246,43 +249,44 @@ fmt_path() {
 	printf '%s' "$1" | sed 's/\\/\\\\/g; s/%/%%/g'
 }
 
-# HOLD runs as /bin/sh -c "$HOLD" sh NAME in the checked home directory,
-# as the user the open drops to (HASH_FD): it prints its process id, opens
-# NAME as descriptor 3, prints "o" and then keeps writing (holding the
-# descriptor) until its reader is gone.
+# HOLD runs as /bin/sh -c "$HOLD" sh NAME ID SECONDS in the checked home
+# directory, as the user the open drops to (HASH_FD). It opens NAME as
+# descriptor 3, killed by its own watchdog if the open takes more than
+# SECONDS (a FIFO swapped in cannot stall the run; no timeout tool is
+# needed). It goes on only if the descriptor is the regular file ID
+# (device:inode:ctime) find saw at NAME, hashes through it, checks the
+# descriptor again (a file changed or replaced while it was read keeps no
+# hash) and prints the hash. A symlink or FIFO swapped in fails a check
+# before a byte is read. The holder runs with group 65534, which no
+# process of the user has, so the user cannot ptrace it (or read its
+# memory) to change what it opens or prints.
 # shellcheck disable=SC2016 # expanded by the inner shell
-HOLD='printf "%s\n" "$$"
-exec 3<"$1" || exit 1
-printf "o\n"
-while printf "%4096s" ""; do :; done'
+HOLD='exec 2>/dev/null
+n=$1 id=$2 s=$3
+(sleep "$s"; kill -TERM $$) >/dev/null </dev/null &
+w=$!
+exec 3<"$n" || exit 1
+kill "$w"
+c() { find -H /proc/self/fd/3 -maxdepth 0 -type f -printf "%D:%i:%C@\n"; }
+[ "$(c)" = "$id" ] || exit 1
+h=$(sha256sum <&3) || exit 1
+[ "$(c)" = "$id" ] || exit 1
+printf "%s\n" "$h"'
 
-# HASH_FD runs as /bin/sh -c "$HASH_FD" sh NAME ID HOLD USER SECONDS TIMEOUT
-# in the checked home directory. The user owning that directory can swap
-# NAME for a symlink or a FIFO after find looked at it, so root never opens
-# NAME: HOLD opens it, dropped to USER (setpriv; "" when the scan does not
-# run as root or no one but root can change the directory) and, with the
-# TIMEOUT tool, stopped after SECONDS, so a FIFO swapped in cannot stall
-# the run (without the tool the deadline of the hash pass bounds it). A
-# symlink there is followed with the rights of USER only. HASH_FD then
-# checks with find -H on /proc/PID/fd/3 that the held file is the regular
-# file ID (device:inode:ctime) that find saw at NAME, opens that same file
-# through the descriptor (never by name; a FIFO never reaches this open),
-# checks its own descriptor again and hashes through it. Anything else
-# swapped in fails a check: no hash.
+# HASH_FD runs as /bin/sh -c "$HASH_FD" sh NAME ID HOLD USER SECONDS in the
+# checked home directory. The user owning that directory can swap NAME for
+# a symlink, a FIFO or another file after find looked at it, so root
+# never opens NAME, nor anything a process of the user holds (no
+# /proc/PID/fd): HOLD opens, checks and hashes it, dropped to USER
+# (setpriv; "" when the scan does not run as root or no one but root can
+# change the directory), and only its printed hash comes back. A symlink
+# there is followed with the rights of USER only.
 # shellcheck disable=SC2016 # expanded by the inner shell
 HASH_FD='exec 2>/dev/null
-n=$1 id=$2 hold=$3 u=$4 s=$5 to=$6
-set -- /bin/sh -c "$hold" sh "$n"
+n=$1 id=$2 hold=$3 u=$4 s=$5
+set -- /bin/sh -c "$hold" sh "$n" "$id" "$s"
 [ -n "$u" ] && set -- setpriv --reuid="$u" --regid=65534 --clear-groups -- "$@"
-[ -n "$to" ] && set -- "$to" "$s" "$@"
-"$@" </dev/null | {
-	read -r p && read -r o && [ "$o" = o ] || exit 1
-	case $p in "" | *[!0-9]*) exit 1 ;; esac
-	[ "$(find -H "/proc/$p/fd/3" -maxdepth 0 -type f -printf "%D:%i:%C@\n")" = "$id" ] || exit 1
-	exec 3<"/proc/$p/fd/3" || exit 1
-	[ "$(find -H /proc/self/fd/3 -maxdepth 0 -type f -printf "%D:%i:%C@\n")" = "$id" ] || exit 1
-	exec sha256sum <&3
-}'
+exec "$@" </dev/null'
 
 # open_user: the user HOLD drops to for the working directory (a checked
 # home or .ssh directory), in OPEN_USER: none ("") when the scan does not
@@ -360,9 +364,9 @@ find_scan() {
 			id=$(find "$@" 2>/dev/null)
 			if [ -n "$id" ] && open_user; then
 				if [ -n "$TIMEOUT" ]; then
-					h=$($TIMEOUT "$left" /bin/sh -c "$HASH_FD" sh "$sp" "$id" "$HOLD" "$OPEN_USER" "$HOME_OPEN_SECONDS" "$TIMEOUT")
+					h=$($TIMEOUT "$left" /bin/sh -c "$HASH_FD" sh "$sp" "$id" "$HOLD" "$OPEN_USER" "$HOME_OPEN_SECONDS")
 				else
-					h=$(bounded "$left" /bin/sh -c "$HASH_FD" sh "$sp" "$id" "$HOLD" "$OPEN_USER" "$HOME_OPEN_SECONDS" "")
+					h=$(bounded "$left" /bin/sh -c "$HASH_FD" sh "$sp" "$id" "$HOLD" "$OPEN_USER" "$HOME_OPEN_SECONDS")
 				fi
 				# Written whole, only for a complete hash.
 				hx=${h%% *}
