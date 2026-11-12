@@ -189,7 +189,7 @@ func release(t testing.TB, mods ...testModule) (map[string]any, []byte) {
 			map[string]any{"name": BundleArtifact, "size": len(bundle), "sha256": hexSum(bundle)},
 			// Placeholder entry: parsing does not look at the list's bytes.
 			// Tests that verify the list use setInstalledFiles.
-			map[string]any{"name": InstalledFilesArtifact, "size": 1, "sha256": hexSum([]byte("placeholder"))},
+			map[string]any{"name": InstalledFilesArtifact, "size": len("placeholder"), "sha256": hexSum([]byte("placeholder"))},
 			map[string]any{"name": "nebula-server_1.4.0_amd64.deb", "size": 1234, "sha256": hexSum([]byte("deb"))},
 		},
 		"modules": mm,
