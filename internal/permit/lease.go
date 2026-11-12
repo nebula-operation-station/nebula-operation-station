@@ -101,6 +101,11 @@ var ReadOnlyAllowlist = []string{
 	// pull, no database refresh. The digest is pinned by the grant's
 	// parameters hash; no own floor beyond the grant's interval.
 	"image.packages",
+	// fim.scan (ADR 0015 D5): fixed read-only integrity scan of the
+	// fim-default-v1 roots, no path parameter. A lease entry must bind the
+	// pinned script and one pinned mode (lease_fimscan.go); its own floors
+	// are FimScanIncrementalMinInterval and FimScanFullMinInterval.
+	FimScanActionID,
 }
 
 // PackageListInstalledMinInterval is package.list_installed's own cost
@@ -111,8 +116,13 @@ const PackageListInstalledMinInterval = 6 * time.Hour
 // ReadActionMinInterval returns an action's own per-host interval floor
 // above the grant's min_interval_s, or 0 if it has none.
 func ReadActionMinInterval(actionID string) time.Duration {
-	if actionID == "package.list_installed" {
+	switch actionID {
+	case "package.list_installed":
 		return PackageListInstalledMinInterval
+	case FimScanActionID:
+		// The lower of its two mode floors; readRunInterval applies the
+		// mode's own floor to each run.
+		return FimScanIncrementalMinInterval
 	}
 	return 0
 }
@@ -405,6 +415,11 @@ func parseReadGrant(raw []byte, now time.Time, stored bool) (ReadGrantDoc, []byt
 			return fail("action %s is not in the approved telemetry contract", a.ActionID)
 		case seen["a:"+a.ActionID+"@"+a.ModuleVersion]:
 			return fail("action %s@%s listed twice", a.ActionID, a.ModuleVersion)
+		}
+		if a.ActionID == FimScanActionID {
+			if err := validateFimScanAction(a); err != nil {
+				return fail("%v", err)
+			}
 		}
 		seen["a:"+a.ActionID+"@"+a.ModuleVersion] = true
 	}
@@ -839,8 +854,12 @@ func (a *Authority) AuthorizeReadRun(grantID, executionID, trigger string, run R
 	if doc.RateProfile == schedgrant.TelemetryReadProfile && trigger == TriggerScheduled {
 		interval = max(interval, schedgrant.TelemetryHistoryInterval)
 	}
-	interval = max(interval, ReadActionMinInterval(run.ActionID))
-	reserved, err := a.leases.ReserveReadRun(grantID, run.ActionID, run.HostID, a.now(), int(doc.RunBudget), interval)
+	key, floor, ok := readRunInterval(run.ActionID, params)
+	if !ok {
+		return Grant{}, fail(CodeParametersMismatch, "parameters are not in the approved contract of %s", run.ActionID)
+	}
+	interval = max(interval, floor)
+	reserved, err := a.leases.ReserveReadRun(grantID, key, run.HostID, a.now(), int(doc.RunBudget), interval)
 	if errors.Is(err, ErrReadGrantInactive) {
 		return Grant{}, fail(CodeLeaseInactive, "the read grant was revoked or has expired")
 	}
