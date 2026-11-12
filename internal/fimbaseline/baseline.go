@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"hash"
 	"slices"
 	"strings"
 
@@ -80,7 +81,7 @@ func NewBaseline(scan *fimscan.Result) (*Baseline, error) {
 		return nil, fmt.Errorf("new baseline: %w", err)
 	}
 	b := &Baseline{profileID: scan.ProfileID, entries: entries, mounts: mounts}
-	b.digest = sha256.Sum256(b.canonical())
+	b.digest = b.digestOf()
 	return b, nil
 }
 
@@ -111,9 +112,10 @@ func (b *Baseline) Mounts() []fimscan.Mount {
 	return out
 }
 
-// canonical returns the canonical byte form the digest is computed over.
-// All integers are big-endian, all byte strings are length-prefixed, the
-// entries and mounts are in raw path byte order:
+// digestOf returns the SHA-256 of the canonical form. The form is written
+// straight into the hash, so memory does not grow with the baseline size.
+//
+// The canonical form, entries and mounts in raw path byte order, is:
 //
 //	domain "\x00" u32 len(profile) profile
 //	u64 n, n × entry:
@@ -122,53 +124,62 @@ func (b *Baseline) Mounts() []fimscan.Mount {
 //	  u8 hash kind, u8 secret, [32] sum (only when kind != none),
 //	  u32 len(link) link
 //	u64 m, m × mount: u32 len(path) path, u32 len(fstype) fstype
-func (b *Baseline) canonical() []byte {
-	var buf bytes.Buffer
-	buf.WriteString(digestDomain)
-	buf.WriteByte(0)
-	putBytes(&buf, []byte(b.profileID))
-	putU64(&buf, uint64(len(b.entries)))
+//
+// All integers are big-endian and all byte strings are length-prefixed.
+func (b *Baseline) digestOf() Digest {
+	h := sha256.New()
+	enc := canonEncoder{h: h}
+	enc.raw([]byte(digestDomain))
+	enc.u8(0)
+	enc.bytes([]byte(b.profileID))
+	enc.u64(uint64(len(b.entries)))
 	for i := range b.entries {
 		e := &b.entries[i]
-		putBytes(&buf, e.Path)
-		buf.WriteByte(byte(e.Type))
-		putU64(&buf, uint64(e.Size))
-		putU32(&buf, e.Mode)
-		putU32(&buf, e.UID)
-		putU32(&buf, e.GID)
-		putU64(&buf, e.Inode)
-		putU64(&buf, uint64(e.Mtime))
-		putU64(&buf, uint64(e.Ctime))
-		buf.WriteByte(byte(e.Hash.Kind))
+		enc.bytes(e.Path)
+		enc.u8(byte(e.Type))
+		enc.u64(uint64(e.Size))
+		enc.u32(e.Mode)
+		enc.u32(e.UID)
+		enc.u32(e.GID)
+		enc.u64(e.Inode)
+		enc.u64(uint64(e.Mtime))
+		enc.u64(uint64(e.Ctime))
+		enc.u8(byte(e.Hash.Kind))
 		if e.Hash.Secret {
-			buf.WriteByte(1)
+			enc.u8(1)
 		} else {
-			buf.WriteByte(0)
+			enc.u8(0)
 		}
 		if e.Hash.Kind != fimscan.HashNone {
-			buf.Write(e.Hash.Sum[:])
+			enc.raw(e.Hash.Sum[:])
 		}
-		putBytes(&buf, e.Link)
+		enc.bytes(e.Link)
 	}
-	putU64(&buf, uint64(len(b.mounts)))
+	enc.u64(uint64(len(b.mounts)))
 	for _, m := range b.mounts {
-		putBytes(&buf, m.Path)
-		putBytes(&buf, []byte(m.FSType))
+		enc.bytes(m.Path)
+		enc.bytes([]byte(m.FSType))
 	}
-	return buf.Bytes()
+	var d Digest
+	h.Sum(d[:0])
+	return d
 }
 
-func putU32(buf *bytes.Buffer, v uint32) {
-	buf.Write(binary.BigEndian.AppendUint32(nil, v))
-}
+// canonEncoder writes the canonical form into a hash. hash.Hash.Write never
+// returns an error, so the encoder keeps none.
+type canonEncoder struct{ h hash.Hash }
 
-func putU64(buf *bytes.Buffer, v uint64) {
-	buf.Write(binary.BigEndian.AppendUint64(nil, v))
-}
+func (e canonEncoder) raw(p []byte) { _, _ = e.h.Write(p) }
 
-func putBytes(buf *bytes.Buffer, b []byte) {
-	putU32(buf, uint32(len(b)))
-	buf.Write(b)
+func (e canonEncoder) u8(v byte) { e.raw([]byte{v}) }
+
+func (e canonEncoder) u32(v uint32) { e.raw(binary.BigEndian.AppendUint32(nil, v)) }
+
+func (e canonEncoder) u64(v uint64) { e.raw(binary.BigEndian.AppendUint64(nil, v)) }
+
+func (e canonEncoder) bytes(p []byte) {
+	e.u32(uint32(len(p)))
+	e.raw(p)
 }
 
 func checkProfileID(id string) error {
