@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/schedgrant"
@@ -179,8 +181,8 @@ func TestDigestReaderCacheOnlyHoldsFailures(t *testing.T) {
 	clock := now
 	r := NewDigestReader(f, func() time.Time { return clock })
 	ctx := WithCacheOnly(context.Background())
-	if _, errs, _ := r.PrivateDigests(ctx, []string{privateImage}); len(errs) != 0 {
-		t.Fatalf("without a snapshot nothing is known: %v", errs)
+	if _, errs, _ := r.PrivateDigests(ctx, []string{privateImage}); !errors.Is(errs[privateImage], ErrPrivateReadPending) {
+		t.Fatalf("without a snapshot a registry-host image is pending: %v", errs)
 	}
 	drain(t, r)
 	for range 3 {
@@ -425,6 +427,256 @@ func TestDigestReaderStaleSnapshotServesWhileRevalidating(t *testing.T) {
 	got, errs, _ = r.PrivateDigests(ctx, []string{privateImage, pendingImage})
 	if len(got) != 2 || len(errs) != 0 {
 		t.Fatalf("render after the refresh: got=%v errs=%v", got, errs)
+	}
+	drain(t, r)
+}
+
+// setListGrantsErr makes the fake's ListReadGrants fail (nil: answer).
+func setListGrantsErr(f *fakeExecutor, err error) {
+	f.mu.Lock()
+	f.listGrantsErr = err
+	f.mu.Unlock()
+}
+
+func cacheLen(r *DigestReader) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.cache)
+}
+
+// TestDigestReaderLeaseListFailureKeepsCache: a background refresh whose
+// ListReadGrants fails (transient) keeps the cached digests and the leases
+// last listed instead of dropping them: renders still show the digest and
+// keep the Private flag of every private image, no tag is read again, and
+// the lease listing is retried after leaseRetryInterval rather than
+// snapshotTTL. Once it answers again the snapshot is fresh.
+func TestDigestReaderLeaseListFailureKeepsCache(t *testing.T) {
+	f, r, clock := leasedReader(t)
+	const pendingImage = "registry.corp.example/team/app:2.0.0"
+	const publicImage = "docker.io/library/nginx:1"
+	if got, errs, err := r.PrivateDigests(context.Background(), []string{privateImage}); err != nil || len(errs) != 0 || len(got) != 1 {
+		t.Fatalf("setup read: got=%v errs=%v err=%v", got, errs, err)
+	}
+	listedAt := *clock
+	readsBefore := f.readCount()
+
+	setListGrantsErr(f, status.Error(codes.Unavailable, "down"))
+	*clock = clock.Add(snapshotTTL + time.Second) // stale: the render revalidates
+	ctx := WithReadHost(WithCacheOnly(context.Background()), "web-1")
+	images := []string{privateImage, pendingImage, publicImage}
+	r.PrivateDigests(ctx, images)
+	drain(t, r) // background refresh: registries list, leases fail
+
+	r.mu.Lock()
+	snap := r.snap
+	r.mu.Unlock()
+	if !snap.at.Equal(*clock) || !snap.leasesFailed || !snap.leasesOK || !snap.leasesAt.Equal(listedAt) {
+		t.Fatalf("snapshot after a lease-list failure: at=%v failed=%v ok=%v leasesAt=%v", snap.at, snap.leasesFailed, snap.leasesOK, snap.leasesAt)
+	}
+	if n := cacheLen(r); n == 0 {
+		t.Fatal("a transient lease-list failure deleted the cached digests")
+	}
+	got, errs, err := r.PrivateDigests(ctx, images)
+	if err != nil || got[privateImage].Digest != fakeDigest {
+		t.Fatalf("cached digest lost on a lease-list failure: got=%v errs=%v err=%v", got, errs, err)
+	}
+	// The pending tag was read by the background batch and is served from
+	// the cache too: both private images keep their Private flag.
+	if got[pendingImage].Digest != fakeDigest || len(errs) != 0 {
+		t.Fatalf("private image lost its Private flag on a lease-list failure: got=%v errs=%v", got, errs)
+	}
+	if _, ok := got[publicImage]; ok {
+		t.Fatal("public image answered as private")
+	}
+	if _, ok := errs[publicImage]; ok {
+		t.Fatal("public image answered as private")
+	}
+	drain(t, r)
+	// A synchronous call during the outage also answers the cached tag
+	// without a new executor read.
+	if got, _, err := r.PrivateDigests(context.Background(), []string{privateImage}); err != nil || got[privateImage].Digest != fakeDigest {
+		t.Fatalf("synchronous call during the outage: got=%v err=%v", got, err)
+	}
+	if n := f.readCount(); n != readsBefore+1 { // only the pending tag
+		t.Fatalf("executor reads during the outage = %d, want 1 (the pending tag)", n-readsBefore)
+	}
+	// A tag not read yet is still marked private (pending) on the snapshot
+	// built while the lease listing fails.
+	const newTag = "registry.corp.example/team/app:3.0.0"
+	if _, errs, _ := r.PrivateDigests(ctx, []string{newTag}); !errors.Is(errs[newTag], ErrPrivateReadPending) {
+		t.Fatalf("new private tag during the outage: %v", errs)
+	}
+	drain(t, r)
+
+	// The listing answers again: a render after leaseRetryInterval (well
+	// within snapshotTTL) retries it.
+	setListGrantsErr(f, nil)
+	*clock = clock.Add(leaseRetryInterval)
+	if leaseRetryInterval >= snapshotTTL {
+		t.Fatal("test assumes leaseRetryInterval is shorter than snapshotTTL")
+	}
+	r.PrivateDigests(ctx, images)
+	drain(t, r)
+	r.mu.Lock()
+	snap = r.snap
+	r.mu.Unlock()
+	if snap.leasesFailed || !snap.leasesOK || !snap.leasesAt.Equal(*clock) {
+		t.Fatalf("lease listing not retried: failed=%v ok=%v leasesAt=%v", snap.leasesFailed, snap.leasesOK, snap.leasesAt)
+	}
+	if got, _, _ := r.PrivateDigests(ctx, images); got[privateImage].Digest != fakeDigest {
+		t.Fatalf("digest lost after the recovery: %v", got)
+	}
+	drain(t, r)
+}
+
+// TestDigestReaderLeaseListFailureKeepsNewerSnapshot: a refresh that began
+// before a concurrent one committed and then fails its lease listing keeps
+// the newer snapshot and its cached digests instead of replacing them.
+func TestDigestReaderLeaseListFailureKeepsNewerSnapshot(t *testing.T) {
+	f, r, clock := leasedReader(t)
+	began := *clock
+	*clock = clock.Add(time.Second)
+	if got, _, _ := r.PrivateDigests(context.Background(), []string{privateImage}); len(got) != 1 {
+		t.Fatal("setup read failed") // the concurrent refresh, committed first
+	}
+	r.mu.Lock()
+	newer := r.snap
+	r.mu.Unlock()
+	setListGrantsErr(f, status.Error(codes.Unavailable, "down"))
+	s, err := r.refresh(context.Background(), began) // the older one, failing
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.mu.Lock()
+	cur := r.snap
+	r.mu.Unlock()
+	if !s.at.Equal(newer.at) || !cur.at.Equal(newer.at) || !cur.leasesOK || cur.leasesFailed {
+		t.Fatalf("older failed refresh replaced the newer snapshot: returned at=%v, now at=%v ok=%v failed=%v", s.at, cur.at, cur.leasesOK, cur.leasesFailed)
+	}
+	if n := cacheLen(r); n != 1 {
+		t.Fatalf("older failed refresh dropped the cache: %d entries", n)
+	}
+	if got, _, _ := r.PrivateDigests(WithCacheOnly(context.Background()), []string{privateImage}); got[privateImage].Digest != fakeDigest {
+		t.Fatalf("cached digest lost: %v", got)
+	}
+	drain(t, r)
+}
+
+// TestDigestReaderLeaseListFailureFailsClosed: leases kept across failed
+// listings vouch for cached digests only for maxLeaseStaleness after they
+// were last listed; a reader that never listed them serves nothing, and a
+// failure never resurrects leases a successful listing dropped.
+func TestDigestReaderLeaseListFailureFailsClosed(t *testing.T) {
+	t.Run("kept leases age out", func(t *testing.T) {
+		f, r, clock := leasedReader(t)
+		const later = "registry.corp.example/team/app:2.0.0"
+		if got, _, _ := r.PrivateDigests(context.Background(), []string{privateImage}); len(got) != 1 {
+			t.Fatal("setup read failed")
+		}
+		listedAt := *clock
+		setListGrantsErr(f, status.Error(codes.Unavailable, "down"))
+		// A tag read late in the outage would be cached past the leases'
+		// last listing plus the interval.
+		*clock = listedAt.Add(maxLeaseStaleness - time.Minute)
+		if got, _, _ := r.PrivateDigests(context.Background(), []string{later}); len(got) != 1 {
+			t.Fatal("read during the outage failed")
+		}
+		*clock = listedAt.Add(maxLeaseStaleness)
+		ctx := WithCacheOnly(context.Background())
+		if got, _, _ := r.PrivateDigests(ctx, []string{later}); len(got) != 0 {
+			t.Fatalf("leases older than maxLeaseStaleness still vouch: %v", got)
+		}
+		drain(t, r) // the refresh finds no usable leases: unknown
+		r.mu.Lock()
+		ok := r.snap.leasesOK
+		r.mu.Unlock()
+		if ok {
+			t.Fatal("leases older than maxLeaseStaleness kept as known")
+		}
+		if got, _, _ := r.PrivateDigests(ctx, []string{privateImage, later}); len(got) != 0 {
+			t.Fatalf("served from cache without usable leases: %v", got)
+		}
+		drain(t, r)
+	})
+	t.Run("never listed", func(t *testing.T) {
+		f, r, _ := leasedReader(t)
+		setListGrantsErr(f, status.Error(codes.Unavailable, "down"))
+		for range 2 {
+			if _, _, err := r.PrivateDigests(context.Background(), []string{privateImage}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if n := f.readCount(); n != 2 {
+			t.Fatalf("reads = %d, want 2 (no cache without any lease listing)", n)
+		}
+	})
+	t.Run("revocation listed before the failure", func(t *testing.T) {
+		f, r, clock := leasedReader(t)
+		if got, _, _ := r.PrivateDigests(context.Background(), []string{privateImage}); len(got) != 1 {
+			t.Fatal("setup read failed")
+		}
+		f.revoke(fakeLeaseID, *clock)
+		*clock = clock.Add(time.Minute)
+		r.PrivateDigests(context.Background(), []string{privateImage}) // lists the revocation
+		setListGrantsErr(f, status.Error(codes.Unavailable, "down"))
+		*clock = clock.Add(time.Minute)
+		r.mu.Lock()
+		r.cache[digestKeyFor(t, r, privateImage)] = cachedDigest{d: PrivateDigest{Digest: fakeDigest}, expires: clock.Add(time.Minute)}
+		r.mu.Unlock()
+		if got, _, _ := r.PrivateDigests(WithCacheOnly(context.Background()), []string{privateImage}); len(got) != 0 {
+			t.Fatalf("revoked lease served after a lease-list failure: %v", got)
+		}
+		drain(t, r)
+	})
+}
+
+// TestDigestReaderFirstRenderMarksPrivateLookingPending: before the first
+// snapshot a cache-only render cannot know which registries are private,
+// so every image that names a registry host is shown as pending (never as
+// a public "unknown"), without waiting on the executor; images without a
+// registry host cannot be private and appear in neither result. After the
+// first listing, images on no private registry drop out.
+func TestDigestReaderFirstRenderMarksPrivateLookingPending(t *testing.T) {
+	f, _, clock := leasedReader(t)
+	g := &gatedExecutor{fakeExecutor: f, open: make(chan struct{})}
+	r := NewDigestReader(g, func() time.Time { return *clock })
+	ctx := WithReadHost(WithCacheOnly(context.Background()), "web-1")
+	const otherHost = "ghcr.io/acme/tool:3"
+	images := []string{privateImage, otherHost, "nginx:1", "library/redis:7", "localhost/app:1", "registry.corp.example/team/app@sha256:" + strings.Repeat("1", 64)}
+	done := make(chan struct{})
+	var got map[string]PrivateDigest
+	var errs map[string]error
+	go func() {
+		defer close(done)
+		got, errs, _ = r.PrivateDigests(ctx, images)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		close(g.open)
+		t.Fatal("first render waited on the executor")
+	}
+	if len(got) != 0 {
+		t.Fatalf("digests before any read: %v", got)
+	}
+	for _, img := range []string{privateImage, otherHost, "localhost/app:1"} {
+		if !errors.Is(errs[img], ErrPrivateReadPending) {
+			t.Fatalf("%s before the first snapshot: %v, want pending", img, errs[img])
+		}
+	}
+	for _, img := range []string{"nginx:1", "library/redis:7", images[5]} {
+		if _, ok := errs[img]; ok {
+			t.Fatalf("%s cannot be a private tag but is marked: %v", img, errs[img])
+		}
+	}
+	close(g.open)
+	drain(t, r)
+	got, errs, _ = r.PrivateDigests(ctx, images)
+	if got[privateImage].Digest != fakeDigest || len(got) != 1 {
+		t.Fatalf("render after the first snapshot: got=%v errs=%v", got, errs)
+	}
+	if _, ok := errs[otherHost]; ok {
+		t.Fatalf("image on no private registry still marked after the first snapshot: %v", errs)
 	}
 	drain(t, r)
 }

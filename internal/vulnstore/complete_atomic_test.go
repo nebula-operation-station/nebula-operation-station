@@ -176,6 +176,15 @@ func (c *cutCtx) Done() <-chan struct{} {
 	return c.done
 }
 
+// Calls returns how often Done has been called so far. The database driver
+// may still call Done from its own goroutine after Complete returned, so
+// calls is only ever read under the mutex.
+func (c *cutCtx) Calls() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.calls
+}
+
 func (c *cutCtx) Err() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -196,7 +205,7 @@ func TestCompleteCancelledAtAnyPointAppliesNothing(t *testing.T) {
 		t.Fatalf("reference completion = %+v, %v", want, err)
 	}
 	wantStates := states(t, ref, refKeys)
-	total := counter.calls
+	total := counter.Calls()
 	if total < 50 {
 		t.Fatalf("only %d context checks in a complete; the cut points would not spread", total)
 	}
