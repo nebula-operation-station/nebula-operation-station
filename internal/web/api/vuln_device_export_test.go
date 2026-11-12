@@ -148,10 +148,50 @@ func TestVulnExportDeviceFirmwareAddressLiteralsAreUnknown(t *testing.T) {
 	}
 }
 
+// TestVulnExportDeviceNonPublicIPv4FirmwareIsUnknown: an IPv4 address from a
+// range that is not public (CGNAT and overlay peers such as NetBird, benchmark,
+// documentation, reserved, "this network", broadcast) is never a firmware
+// version, so the export never carries such an address.
+func TestVulnExportDeviceNonPublicIPv4FirmwareIsUnknown(t *testing.T) {
+	cases := map[string]string{
+		"cgnat low":      "100.64.0.1",
+		"cgnat netbird":  "100.110.12.7",
+		"cgnat high":     "100.127.255.254",
+		"benchmark low":  "198.18.0.1",
+		"benchmark high": "198.19.255.1",
+		"test-net-1":     "192.0.2.10",
+		"test-net-2":     "198.51.100.7",
+		"test-net-3":     "203.0.113.9",
+		"ietf protocol":  "192.0.0.8",
+		"reserved 240/4": "240.0.0.1",
+		"broadcast":      "255.255.255.255",
+		"this network":   "0.1.2.3",
+		"private 172.16": "172.16.5.4",
+		"link-local":     "169.254.1.1",
+		"multicast":      "224.0.0.9",
+	}
+	for name, fw := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := newVulnEnv(t)
+			e.inv.set(deviceSnapshot("fw12", &api.VulnDevice{Vendor: "cisco", Model: "CBS350", FirmwareVersion: fw, Current: true}))
+			d := exportedDevice(t, e)
+			dev := d["device"].(map[string]any)
+			if dev["firmware_version"] != "unknown" || d["complete"] != false {
+				t.Fatalf("non-public address %q exported as firmware: %v complete %v", fw, dev, d["complete"])
+			}
+			if r := e.do(t, "GET", "/api/v1/vuln/inventory", vulnTok, nil); strings.Contains(r.body, fw) {
+				t.Fatalf("export contains %q: %s", fw, r.body)
+			}
+		})
+	}
+}
+
 // TestVulnExportDeviceDottedFirmwareIsAVersion: a dotted version, IPv4-shaped
-// or not, is a firmware version and stays exported.
+// or not, is a firmware version and stays exported. A public dotted quad such
+// as "8.8.8.8" cannot be told from a version by its shape; that residual is
+// the documented D3 decision, so it is not asserted here either way.
 func TestVulnExportDeviceDottedFirmwareIsAVersion(t *testing.T) {
-	for _, fw := range []string{"3.1.1.7", "10.2.3", "8.8.8.8"} {
+	for _, fw := range []string{"3.1.1.7", "10.2.3"} {
 		e := newVulnEnv(t)
 		e.inv.set(deviceSnapshot("fw11", &api.VulnDevice{Vendor: "cisco", Model: "CBS350", FirmwareVersion: fw, Current: true}))
 		d := exportedDevice(t, e)

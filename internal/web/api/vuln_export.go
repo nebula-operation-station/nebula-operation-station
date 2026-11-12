@@ -423,12 +423,28 @@ func deviceEcosystemOK(vendor, eco string) bool {
 	return false
 }
 
+// nonPublicIPv4 are the IPv4 ranges that are not public unicast and that
+// netip does not flag on its own: shared address space (CGNAT, and the
+// overlay peers such as NetBird), benchmarking, the documentation ranges, the
+// IETF protocol assignments, the reserved class E range and "this network".
+var nonPublicIPv4 = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+}
+
 // deviceFirmwareOK reports whether v may be exported as a firmware version.
 // Colons are refused (no vendor firmware string needs one, and IPv6 forms
-// use them). An IP address literal is refused unless it is a public dotted
-// quad: a private, loopback, link-local, multicast or unspecified IPv4
-// address is never a firmware version. Public dotted quads such as "3.1.1.7"
-// cannot be told from a version and are accepted; this residual is a
+// use them). An IP address literal is refused unless it is a dotted quad from
+// a public IPv4 range: a private, loopback, link-local, multicast, unspecified,
+// shared (CGNAT), benchmark, documentation, reserved or broadcast IPv4 address
+// is never a firmware version. Public dotted quads such as "3.1.1.7" cannot
+// be told from a version by their shape and are accepted; this residual is a
 // decision (D3), not a guarantee.
 func deviceFirmwareOK(v string) bool {
 	if v == exportUnknown || !exportVersionRe.MatchString(v) || strings.Contains(v, ":") {
@@ -438,7 +454,15 @@ func deviceFirmwareOK(v string) bool {
 	if err != nil {
 		return true
 	}
-	return a.Is4() && !(a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsMulticast() || a.IsUnspecified())
+	if !a.Is4() || !a.IsGlobalUnicast() || a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsMulticast() || a.IsUnspecified() {
+		return false
+	}
+	for _, p := range nonPublicIPv4 {
+		if p.Contains(a) {
+			return false
+		}
+	}
+	return true
 }
 
 func exportComponent(c VulnComponent) (exportComponentJSON, bool) {
