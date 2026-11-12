@@ -419,6 +419,97 @@ func TestOfflineVerifySymlinkedRootIsNotFollowed(t *testing.T) {
 	}
 }
 
+// offRotation returns rotation seq following prev (nil: bootstrap), adding
+// id with key add and revoking revoke, signed by signer.
+func offRotation(t *testing.T, signer *offSigner, seq int, prev []byte, id string, add *offSigner, revoke []string) (doc, sig []byte) {
+	t.Helper()
+	previous := release.ZeroDigest
+	if prev != nil {
+		previous = offHex(prev)
+	}
+	if revoke == nil {
+		revoke = []string{}
+	}
+	raw, err := json.Marshal(map[string]any{
+		"format": release.RotationFormat, "sequence": seq, "previous_sha256": previous,
+		"add":    []any{map[string]any{"id": id, "public_key": release.FormatRootKey(add.pub)}},
+		"revoke": revoke,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc, err = jcs.Transform(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return doc, signer.sign(doc)
+}
+
+func TestOfflineVerifyAppliesRotationChain(t *testing.T) {
+	o := newOffInstall(t, offVersion)
+	k2, k3 := newOffSigner(t), newOffSigner(t)
+	// Rotation 1 (by the compiled root-1) adds root-2; rotation 2 (by
+	// root-2) adds root-3 and revokes root-1.
+	doc1, sig1 := offRotation(t, o.k, 1, nil, "root-2", k2, nil)
+	doc2, sig2 := offRotation(t, k2, 2, doc1, "root-3", k3, []string{"root-1"})
+	offWrite(t, filepath.Join(o.relDir, "root-rotation-1.json"), string(doc1), 0o644)
+	offWrite(t, filepath.Join(o.relDir, "root-rotation-1.json.sig"), string(sig1), 0o644)
+	offWrite(t, filepath.Join(o.relDir, "root-rotation-2.json"), string(doc2), 0o644)
+	offWrite(t, filepath.Join(o.relDir, "root-rotation-2.json.sig"), string(sig2), 0o644)
+	manifest, err := os.ReadFile(filepath.Join(o.relDir, release.ManifestFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sigPath := filepath.Join(o.relDir, release.SignatureFile)
+
+	offWrite(t, sigPath, string(k3.sign(manifest)), 0o644)
+	out, err := o.run(t, o.cfg())
+	if err != nil || !strings.Contains(out, "signed by root-3") || !strings.Contains(out, "2 signed root rotations applied") || !strings.Contains(out, "result: clean") {
+		t.Fatalf("release by root-3 after two rotations: %v\n%s", err, out)
+	}
+
+	// The compiled root-1 was revoked in rotation 2.
+	offWrite(t, sigPath, string(o.k.sign(manifest)), 0o644)
+	out, err = o.run(t, o.cfg())
+	if !errors.Is(err, release.ErrUntrusted) || exitCode(err) == 0 || out != "" {
+		t.Fatalf("release by revoked root-1: %v (exit %d)\n%s", err, exitCode(err), out)
+	}
+
+	// Without rotation 1 the chain has a gap and nothing is checked.
+	offWrite(t, sigPath, string(k3.sign(manifest)), 0o644)
+	if err := os.Remove(filepath.Join(o.relDir, "root-rotation-1.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(o.relDir, "root-rotation-1.json.sig")); err != nil {
+		t.Fatal(err)
+	}
+	out, err = o.run(t, o.cfg())
+	if !errors.Is(err, integrity.ErrRelease) || exitCode(err) == 0 || out != "" {
+		t.Fatalf("rotation chain with a gap: %v (exit %d)\n%s", err, exitCode(err), out)
+	}
+}
+
+func TestOfflineVerifySymlinkedParentIsNotFollowed(t *testing.T) {
+	o := newOffInstall(t, offVersion)
+	via := func(target string) string {
+		link := filepath.Join(t.TempDir(), "link")
+		if err := os.Symlink(filepath.Dir(target), link); err != nil {
+			t.Fatal(err)
+		}
+		return filepath.Join(link, filepath.Base(target))
+	}
+	cfg := o.cfg()
+	cfg.root = via(o.root)
+	if _, err := o.run(t, cfg); exitCode(err) != ExitIntegrityIncomplete {
+		t.Fatalf("root under a symlinked parent: %v", err)
+	}
+	cfg = o.cfg()
+	cfg.releaseDir = via(o.relDir)
+	if out, err := o.run(t, cfg); !errors.Is(err, integrity.ErrRelease) || out != "" {
+		t.Fatalf("release directory under a symlinked parent: %v\n%s", err, out)
+	}
+}
+
 func TestIntegrityVerifyArguments(t *testing.T) {
 	cases := [][]string{
 		nil,

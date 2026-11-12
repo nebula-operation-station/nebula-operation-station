@@ -65,8 +65,8 @@ func parseOfflineArgs(args []string) (offlineConfig, error) {
 	fs := flag.NewFlagSet("integrity verify", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	var cfg offlineConfig
-	fs.StringVar(&cfg.releaseDir, "offline", "", "directory with release-manifest.json, its .sig and installed-files.json, fetched and kept on another machine")
-	fs.StringVar(&cfg.root, "root", "", "mount point of the NOS installation to check")
+	fs.StringVar(&cfg.releaseDir, "offline", "", "directory with release-manifest.json, its .sig, installed-files.json and every published root-rotation-<n>.json with its .sig, fetched and kept on another machine; no symlink in the path")
+	fs.StringVar(&cfg.root, "root", "", "mount point of the NOS installation to check; no symlink in the path")
 	fs.StringVar(&cfg.version, "version", "", "release version the installation must be (never taken from the installation)")
 	fs.StringVar(&cfg.flavour, "flavour", "", "install flavour, for example deb:amd64")
 	if err := fs.Parse(args); err != nil {
@@ -112,13 +112,15 @@ func runOffline(ctx context.Context, cfg offlineConfig, anchors func() ([]releas
 	if err != nil {
 		return &exitError{code: ExitIntegrityIncomplete, msg: "integrity verify: INCOMPLETE, nothing checked: " + err.Error(), err: err}
 	}
-	return printOffline(w, cfg, ref, rep)
+	return printOffline(w, cfg, ref, len(rel.Rotations), rep)
 }
 
-func printOffline(w io.Writer, cfg offlineConfig, ref integrity.Reference, rep integrity.Report) error {
+// printOffline prints the report. rotations is the number of signed root
+// rotations applied to the compiled anchors before admission.
+func printOffline(w io.Writer, cfg offlineConfig, ref integrity.Reference, rotations int, rep integrity.Report) error {
 	fmt.Fprintf(w, "offline integrity check (ADR 0015 D4)\n")
-	fmt.Fprintf(w, "release %s, flavour %s, signed by %s (compiled release anchors)\n",
-		safeText(rep.ReleaseVersion), safeText(rep.Flavour), safeText(ref.SignedBy()))
+	fmt.Fprintf(w, "release %s, flavour %s, signed by %s (compiled release anchors, %d signed root rotations applied)\n",
+		safeText(rep.ReleaseVersion), safeText(rep.Flavour), safeText(ref.SignedBy()), rotations)
 	fmt.Fprintf(w, "manifest sha256:%s\nlist     sha256:%s\nroot     %s\n",
 		safeText(rep.ManifestDigest), safeText(rep.ListDigest), safeText(cfg.root))
 	counts := map[integrity.Status]int{}
