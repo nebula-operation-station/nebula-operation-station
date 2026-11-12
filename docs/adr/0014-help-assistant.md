@@ -113,7 +113,11 @@ History:
   rerun accepted). The `--identity` control run uses the same fixture
   inputs as the canary run of its form but its own fresh recorders
   (previously the same recorders, so its "no `backup.System` call"
-  check depended on run order).
+  check depended on run order). Run classes name the `canary-range`
+  runs `MAX`, `MAX`, `MAX − 1` as range checks that must be accepted
+  and replace conditions 1 and 2 with the distinctive check; a rejected
+  one is a stale `canary-range` (previously an accepted run went
+  through conditions 1 to 3 and a rejected one passed on its own).
 
 ## Context
 
@@ -798,6 +802,22 @@ does NOS connect **from** (`--from`)?
   and never covered by `canary-rejects` or `canary-range`. An accepted
   run then goes through the needle conditions 1 to 3 below, and only a
   rejected run counts toward "every form rejected" (`canary-rejects`).
+  **Range checks** (previously Run classes sent every accepted run
+  through conditions 1 to 3 and let a rejected run pass on its own,
+  while **Bounded numbers** below replaces conditions 1 and 2 for
+  these runs and calls a rejected `MAX` a stale annotation): for an
+  argument with `canary-range: MIN..MAX` the runs with `MAX`, `MAX`
+  and `MAX − 1`, each with fresh recorders, a fresh fake executor and
+  a fresh working directory, take the place of the kind-canary run and
+  are classified by the three classes above, with their own expected
+  result: each must be **accepted**. An accepted range run goes through
+  the distinctive check (positive and differential, **Bounded
+  numbers**) and condition 3, never through the needle search of
+  conditions 1 and 2. A **rejected** range run is not a pass and never
+  counts toward `canary-rejects`: the test fails naming a stale
+  `canary-range` annotation. A range run in class **harness error**
+  fails as a harness error, as every run. The host-shaped forms of such
+  an argument are ordinary canary runs.
   Harness checks that are not canary runs (the restore fixture checks
   and control runs, the `canary-range` rejection checks of `MAX + 1`,
   `47000 + m` and `MIN − 1`, the confirmation reruns) have their own
