@@ -22,6 +22,7 @@ Missing (open before or with the first signed release):
 1. **Rotation admission.** `trust.Store.ApplyRotation` exists, but no RPC or command calls it, so an installation cannot admit a `root-rotation.json` yet. Root-2 is not generated or enrolled (below).
 2. **Integrity checks.** `internal/integrity` (I1 self-check, ADR 0015 IG-03) is a library that no process calls yet; admission of `installed-files.json` during upgrade and `nebula verify` (IG-04) do not exist. Reproducible builds (IG-11) are open.
 3. **Signed image catalog.** `PveImageCatalog.LoadSigned` is not called by any process, and there is no catalog signing procedure; releases currently ship no catalog.
+4. **Manifest completeness (partly closed).** `ParseManifest` requires exactly one `installed-files.json` (tested, see above). `make-manifest.py` below still requires only `builtins.tar`, so the list is not enforced at signing time; check its presence by hand. The list itself is verified where it is checked (`VerifyInstalledFiles`).
 
 ## Prepare the signing station
 
@@ -104,7 +105,7 @@ CI builds the release payloads and the uncompressed `builtins.tar`, without a ro
 - `payloads/`: exactly every payload attachment to publish, including `builtins.tar`, binaries, packages and any published source/checksum files. Exclude the manifest, signatures and separately authenticated rotations.
 - `module-bytes/<name>/<version>.tar`: the exact nested module tar objects from the reviewed `builtins.tar`. Use the strict bounded bundle validator required by spec 10; do not extract untrusted CI archives with an unrestricted `tar -xf`. Validate the lock, file set and contents, and compare built-ins across all packages/architectures.
 
-The following offline Python 3 recipe constructs the specified manifest from that reviewed staging. Set the actual release version on invocation; the example `0.1.0` is illustrative. It checks manifest-level bounds, including that `installed-files.json` is among the artifacts (it refuses the staging otherwise); it does not replace the required bundle/lock validator or build review. Every emitted string is restricted ASCII and every integer is at most 4 GiB, so Python's sorted-key compact serialization here equals RFC 8785 JCS for this schema. This recipe is not a general-purpose JCS encoder; do not use `jq -S` or a generic JSON pretty-printer as a substitute.
+The following offline Python 3 recipe constructs the specified manifest from that reviewed staging. Set the actual release version on invocation; the example `0.1.0` is illustrative. It checks manifest-level bounds; it does not replace the required bundle/lock validator or build review. Every emitted string is restricted ASCII and every integer is at most 4 GiB, so Python's sorted-key compact serialization here equals RFC 8785 JCS for this schema. This recipe is not a general-purpose JCS encoder; do not use `jq -S` or a generic JSON pretty-printer as a substitute.
 
 Save this as `make-manifest.py` on the offline station:
 
@@ -153,10 +154,6 @@ require(1 <= len(artifacts) <= 128, "artifact count out of bounds")
 require(sum(a["size"] for a in artifacts) <= 8 << 30, "release too large")
 require(any(a["name"] == "builtins.tar" and a["size"] <= 80 << 20
             for a in artifacts), "missing/oversized builtins.tar")
-require(sum(a["name"] == "installed-files.json" for a in artifacts) == 1,
-        "installed-files.json must be listed exactly once")
-require(any(a["name"] == "installed-files.json" and a["size"] <= 4 << 20
-            for a in artifacts), "oversized installed-files.json")
 
 modules = []
 for family in sorted(Path("module-bytes").iterdir()):

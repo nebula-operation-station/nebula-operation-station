@@ -50,7 +50,7 @@ Follow "Build and review the release manifest" in `release-signing.md`. The stag
 
 - [ ] On the offline station: `python3 make-manifest.py 0.9.0-beta.1` (script in `release-signing.md`). It writes `release-manifest.json` (JCS, no trailing newline) and refuses an existing file.
 - [ ] `python3 check-installed-files.py 0.9.0-beta.1` must report a match.
-- [ ] `artifacts` lists `installed-files.json` exactly once. `make-manifest.py` refuses a staging without it, and `internal/release.ParseManifest` requires exactly one (previously: neither enforced it, and it had to be checked by hand).
+- [ ] Check by hand that `artifacts` lists `installed-files.json` exactly once: `internal/release.ParseManifest` requires exactly one (tested), but `make-manifest.py` does not enforce it (it only requires `builtins.tar`).
 - [ ] Read the whole manifest as text: names, sizes, hashes, every built-in module once, `release_version` `0.9.0-beta.1`.
 
 ## 6. Signature (Axel, root-1)
