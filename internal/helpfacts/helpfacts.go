@@ -31,6 +31,12 @@ const (
 	// RFC 3339 (the default JSON encoding of the date), but not JSON keys
 	// or punctuation.
 	MaxFactBytes = 4 << 10
+	// MaxNamedCandidates bounds the hosts one question may select before the
+	// Visibility check runs: MaxFactHosts plus a small slack. Each candidate
+	// costs one authorisation lookup, so a /16 or a common word cannot cause
+	// unbounded lookups. Candidates beyond the bound are not checked and set
+	// Truncated.
+	MaxNamedCandidates = MaxFactHosts + 10
 	// MaxQuestionBytes is the largest question Project scans.
 	MaxQuestionBytes = 2 << 10
 	// MaxEndpoints is the maximum number of endpoints shown per host.
@@ -216,12 +222,24 @@ func Project(ctx context.Context, req Request) (Result, error) {
 	}
 
 	// Only hosts the question names are checked: a host that no literal
-	// selects is never visible to Visible and never projected.
-	var matched []Record
-	for i, r := range records {
-		if !ms.selectsHost(r) {
-			continue
+	// selects is never visible to Visible and never projected. Candidates
+	// are taken in ID order, so the bound does not depend on inventory order.
+	var candidates []Record
+	for _, r := range records {
+		if ms.selectsHost(r) {
+			candidates = append(candidates, r)
 		}
+	}
+	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
+	var res Result
+	res.Truncated = litTruncated
+	capped := len(candidates) > MaxNamedCandidates
+	if capped {
+		candidates = candidates[:MaxNamedCandidates]
+		res.Truncated = true
+	}
+	var matched []Record
+	for i, r := range candidates {
 		ok, err := req.Visible(ctx, r.ID)
 		if err != nil {
 			return Result{}, fmt.Errorf("helpfacts: check visibility of named host %d: %w", i, err)
@@ -230,10 +248,7 @@ func Project(ctx context.Context, req Request) (Result, error) {
 			matched = append(matched, r)
 		}
 	}
-	sort.SliceStable(matched, func(i, j int) bool { return matched[i].ID < matched[j].ID })
 
-	var res Result
-	res.Truncated = litTruncated
 	used := 0
 	for _, r := range matched {
 		if len(res.Hosts) == MaxFactHosts {
@@ -249,13 +264,17 @@ func Project(ctx context.Context, req Request) (Result, error) {
 		used += n
 		res.Hosts = append(res.Hosts, f)
 	}
-	for _, s := range ms.addressesNotIn(matched) {
-		if len(res.NotInInventory) == MaxFactHosts || used+len(s) > MaxFactBytes {
-			res.Truncated = true
-			break
+	// NotInInventory needs every candidate checked: when the bound cut the
+	// list, an address may be held by an unchecked host, so nothing is said.
+	if !capped {
+		for _, s := range ms.addressesNotIn(matched) {
+			if len(res.NotInInventory) == MaxFactHosts || used+len(s) > MaxFactBytes {
+				res.Truncated = true
+				break
+			}
+			used += len(s)
+			res.NotInInventory = append(res.NotInInventory, s)
 		}
-		used += len(s)
-		res.NotInInventory = append(res.NotInInventory, s)
 	}
 	if len(res.Hosts) == 0 && len(res.NotInInventory) == 0 {
 		// Nothing the user may see or that the question names as absent:
