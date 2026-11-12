@@ -135,7 +135,7 @@ func newVTEnv(t *testing.T) *vtEnv {
 	tok := serverconfig.APIToken{Name: serverconfig.DefaultVulnTokenName, SHA256: api.HashToken(vtToken),
 		Scopes:          []string{serverconfig.ScopeVulnInventoryRead, serverconfig.ScopeVulnFindingsWrite},
 		SourceAddresses: []string{"192.0.2.10"}}
-	vh, err := newVulnAPI(serverconfig.APIConfig{Enabled: true, Tokens: []serverconfig.APIToken{tok}}, svc, vtInventory{at: clk.Now().Add(-time.Minute)}, log)
+	vh, err := newVulnAPI(serverconfig.APIConfig{Enabled: true, Tokens: []serverconfig.APIToken{tok}}, svc, vtInventory{at: clk.Now().Add(-time.Minute)}, vtAgentCfg{}, log)
 	if err != nil || vh == nil {
 		t.Fatalf("newVulnAPI = %v, %v", vh, err)
 	}
@@ -265,7 +265,7 @@ func TestVulnAgentAPIMountedBehindTokenScopesAndAllowlist(t *testing.T) {
 	// A token holding only the read scope cannot write.
 	readOnly := serverconfig.APIToken{Name: serverconfig.DefaultVulnTokenName, SHA256: api.HashToken(vtToken),
 		Scopes: []string{serverconfig.ScopeVulnInventoryRead}}
-	vh, err := newVulnAPI(serverconfig.APIConfig{Enabled: true, Tokens: []serverconfig.APIToken{readOnly}}, e.svc, vtInventory{at: e.clk.Now()}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	vh, err := newVulnAPI(serverconfig.APIConfig{Enabled: true, Tokens: []serverconfig.APIToken{readOnly}}, e.svc, vtInventory{at: e.clk.Now()}, vtAgentCfg{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestVulnAgentAPIMountedBehindTokenScopesAndAllowlist(t *testing.T) {
 func TestVulnAgentAPINotMountedWithoutVulnToken(t *testing.T) {
 	e := newVTEnv(t)
 	other := serverconfig.APIToken{Name: "dash", SHA256: api.HashToken("nos_dash"), Scopes: []string{"hosts.read"}}
-	vh, err := newVulnAPI(serverconfig.APIConfig{Enabled: true, Tokens: []serverconfig.APIToken{other}}, e.svc, vtInventory{}, slog.Default())
+	vh, err := newVulnAPI(serverconfig.APIConfig{Enabled: true, Tokens: []serverconfig.APIToken{other}}, e.svc, vtInventory{}, vtAgentCfg{}, slog.Default())
 	if err != nil || vh != nil {
 		t.Fatalf("newVulnAPI without vuln token = %v, %v; want nil, nil", vh, err)
 	}
