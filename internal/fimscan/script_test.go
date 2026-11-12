@@ -648,6 +648,67 @@ func TestScriptUnlistableHomeIsUnreadableNotMissing(t *testing.T) {
 	}
 }
 
+// TestScriptUnsearchableParentIsUnreadableNotMissing: a literal root below
+// a directory the scan cannot search (/var/spool/cron of mode 0700 without
+// sudo) is unknown: "error" and counted unreadable, never "missing". Needs
+// an unprivileged user, like TestScriptUnlistableHomeIsUnreadableNotMissing.
+func TestScriptUnsearchableParentIsUnreadableNotMissing(t *testing.T) {
+	root := buildTree(t, treeOpts{})
+	locked := filepath.Join(root, "var/spool/cron")
+	if err := os.Chmod(locked, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+	res := runAndParse(t, "/bin/sh", root, ModeFull)
+	if s := rootStates(res)["/var/spool/cron/crontabs"]; s != RootSkipped {
+		t.Errorf("root below an unsearchable directory: state %v, want skipped (error)", s)
+	}
+	if res.Complete() || !slices.Contains(res.Partial, ReasonUnreadable) || res.Host.Unreadable != 1 {
+		t.Errorf("partial %v, host %+v", res.Partial, res.Host)
+	}
+	// A root that is really absent stays missing (optional: absent).
+	if err := os.Chmod(locked, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(locked); err != nil {
+		t.Fatal(err)
+	}
+	res = runAndParse(t, "/bin/sh", root, ModeFull)
+	if s := rootStates(res)["/var/spool/cron/crontabs"]; s != RootAbsent || res.Host.Unreadable != 0 {
+		t.Errorf("missing root: state %v, host %+v", s, res.Host)
+	}
+}
+
+// TestScriptBoundsUserControlledKeyFiles: a user decides how many files
+// match ~/.ssh/authorized_keys*; at most HOME_MAX_MATCHES of them are
+// scanned per home, and the run says truncated (not unreadable).
+func TestScriptBoundsUserControlledKeyFiles(t *testing.T) {
+	const limit = 16 // HOME_MAX_MATCHES
+	root := buildTree(t, treeOpts{})
+	for i := range 3 * limit {
+		p := filepath.Join(root, "home/alice/.ssh", "authorized_keys"+strconv.Itoa(100+i))
+		if err := os.WriteFile(p, []byte("k\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res := runAndParse(t, "/bin/sh", root, ModeFull)
+	n := 0
+	for _, r := range res.Records {
+		if strings.HasPrefix(string(r.Path), "/home/alice/.ssh/authorized_keys") {
+			n++
+		}
+	}
+	if n != limit {
+		t.Errorf("%d authorized_keys* records of alice, want %d", n, limit)
+	}
+	if !slices.Contains(res.Partial, ReasonHostTruncated) || res.Host.Unreadable != 0 {
+		t.Errorf("partial %v, host %+v", res.Partial, res.Host)
+	}
+	if !strings.Contains(string(Script), "HOME_MAX_MATCHES="+strconv.Itoa(limit)+" ") {
+		t.Error("HOME_MAX_MATCHES changed: update the test")
+	}
+}
+
 // TestScriptUnreadableFileIsPartial: a file the scan cannot hash is
 // reported by metadata, counted as unreadable, and the run is partial.
 func TestScriptUnreadableFileIsPartial(t *testing.T) {

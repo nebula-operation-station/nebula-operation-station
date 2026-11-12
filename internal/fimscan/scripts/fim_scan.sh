@@ -63,6 +63,7 @@ SSH_MAX_FILES=64        # spec 09: at most 64 SSH configuration files
 SSH_MAX_BYTES=262144    # spec 09: at most 256 KiB decoded in total
 SSH_MAX_QUEUE=256       # Include matches waiting to be read
 SSH_MAX_SEEN=1024       # Include matches looked at in total
+HOME_MAX_MATCHES=16     # start points per home and glob (.ssh/authorized_keys*)
 MOUNTINFO="$P/proc/self/mountinfo"
 # Tests only (with NEBULA_FIM_TEST_ROOT): shorter window, deadline, budget.
 if [ -n "$P" ]; then
@@ -113,13 +114,26 @@ nolink() {
 	return 0
 }
 
-# root_state ROOT: scanned, missing, or error when a directory above the
-# root is a symlink (find would resolve it; the root is not scanned).
+# root_state ROOT: scanned; error when a directory above the root is a
+# symlink (find would resolve it; the root is not scanned) or when the
+# nearest existing directory above it cannot be searched (EACCES: whether
+# the root exists is unknown, so it is unreadable, never missing); else
+# missing.
 root_state() {
 	if ! nolink "${1%/*}"; then
 		echo error
-	elif exists "$1"; then
+		return
+	fi
+	if exists "$1"; then
 		echo scanned
+		return
+	fi
+	rs_d=${1%/*}
+	while [ -n "$rs_d" ] && ! exists "$rs_d"; do
+		rs_d=${rs_d%/*}
+	done
+	if [ -d "$P${rs_d:-/}" ] && [ ! -x "$P${rs_d:-/}" ]; then
+		echo error
 	else
 		echo missing
 	fi
@@ -326,8 +340,17 @@ home_file() {
 		fi
 		;;
 	esac
+	# The user owning the home chooses how many files match a glob: at
+	# most HOME_MAX_MATCHES of them (in glob order) are start points, the
+	# others make the run truncated.
+	hf_n=0
 	for f in "$P$1"/$REL; do
 		[ -e "$f" ] || [ -L "$f" ] || continue
+		hf_n=$((hf_n + 1))
+		if [ "$hf_n" -gt "$HOME_MAX_MATCHES" ]; then
+			HOME_CUT=1
+			break
+		fi
 		f=${f#"$P"}
 		case $f in *"
 "*) continue ;; esac
@@ -335,6 +358,7 @@ home_file() {
 	done
 }
 
+HOME_CUT=0
 FOUND=0
 found() { FOUND=1; }
 scan_hash() { visit hash "$1" 0; }
@@ -506,6 +530,7 @@ produce() {
 	HASH_LEFT=$HASH_BUDGET
 	walk hash
 	[ "$BUDGET_CUT" = 1 ] && printf '\0T\0'
+	[ "$HOME_CUT" = 1 ] && printf '\0T\0'
 	for f in $SSH_FILES; do
 		sha256sum -z -- "$P$f" 2>/dev/null
 	done
