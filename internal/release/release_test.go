@@ -266,6 +266,8 @@ func TestDecodeCanonicalBoundsDepth(t *testing.T) {
 func FuzzParseManifest(f *testing.F) {
 	f.Add([]byte(`{"artifacts":[],"format":"nebula-release-v1","modules":[],"release_version":"1.0.0"}`))
 	f.Add([]byte(`{"a":[[[[[[`))
+	// Reaches the installed-files.json count check.
+	f.Add([]byte(`{"artifacts":[{"name":"builtins.tar","sha256":"0000000000000000000000000000000000000000000000000000000000000000","size":1},{"name":"installed-files.json","sha256":"0000000000000000000000000000000000000000000000000000000000000000","size":1}],"format":"nebula-release-v1","modules":[{"name":"docker","sha256":"0000000000000000000000000000000000000000000000000000000000000000","size":1,"version":"1.0.0"}],"release_version":"1.0.0"}`))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		_, _ = ParseManifest(b)
 	})
