@@ -51,14 +51,28 @@ type Kernel struct {
 	SourceVersion string `json:"source_version,omitempty"`
 }
 
+// Device is a network device's vendor, model and firmware version as the
+// export states them (ADR 0011 D3). A value NOS cannot vouch for is the
+// string "unknown".
+type Device struct {
+	Vendor          string `json:"vendor"`
+	Model           string `json:"model"`
+	FirmwareVersion string `json:"firmware_version"`
+}
+
+// MaxDeviceFieldBytes bounds each device value on an export page.
+const MaxDeviceFieldBytes = 128
+
 // SubjectPart is one part of a subject on an export page. A subject whose
 // components do not fit on one page continues on the next as its next
-// part; it is covered only after its LastPart.
+// part; it is covered only after its LastPart. A device subject carries
+// Device and no components or kernel.
 type SubjectPart struct {
 	Kind       vulnfinding.SubjectKind `json:"subject_kind"`
 	Ref        vulnfinding.SubjectRef  `json:"subject_ref"`
 	Ecosystem  string                  `json:"ecosystem,omitempty"`
 	Kernel     *Kernel                 `json:"running_kernel,omitempty"`
+	Device     *Device                 `json:"device,omitempty"`
 	Complete   bool                    `json:"complete"`
 	Part       int                     `json:"part"`
 	LastPart   bool                    `json:"last_part"`
@@ -244,8 +258,21 @@ func (st *exportState) part(s SubjectPart) error {
 		if s.Kernel != nil {
 			return fmt.Errorf("image with a running kernel: %w", ErrProtocol)
 		}
+	case vulnfinding.SubjectDevice:
+		// A device has no digest, kernel or packages (ADR 0011 D2, D3); its
+		// model and firmware version are its only components.
+		if s.Ref.ImageDigest != "" || s.Kernel != nil {
+			return fmt.Errorf("device with an image digest or a kernel: %w", ErrProtocol)
+		}
+		if err := checkDevice(s.Device); err != nil {
+			return err
+		}
+		limit = 0
 	default:
 		return fmt.Errorf("unknown subject kind: %w", ErrProtocol)
+	}
+	if s.Kind != vulnfinding.SubjectDevice && s.Device != nil {
+		return fmt.Errorf("%s subject with device data: %w", s.Kind, ErrProtocol)
 	}
 	if !subjectIDRe.MatchString(s.Ref.ID) {
 		return fmt.Errorf("malformed subject ID: %w", ErrProtocol)
@@ -296,8 +323,24 @@ func (st *exportState) part(s SubjectPart) error {
 	return nil
 }
 
+// checkDevice validates the device data of a device subject part.
+func checkDevice(d *Device) error {
+	if d == nil {
+		return fmt.Errorf("device subject without device data: %w", ErrProtocol)
+	}
+	for _, v := range []string{d.Vendor, d.Model, d.FirmwareVersion} {
+		if v == "" || len(v) > MaxDeviceFieldBytes {
+			return fmt.Errorf("device field empty or over %d bytes: %w", MaxDeviceFieldBytes, ErrProtocol)
+		}
+	}
+	return nil
+}
+
 func sameHead(a, b SubjectPart) bool {
 	if a.Ecosystem != b.Ecosystem || a.Complete != b.Complete || (a.Kernel == nil) != (b.Kernel == nil) {
+		return false
+	}
+	if (a.Device == nil) != (b.Device == nil) || (a.Device != nil && *a.Device != *b.Device) {
 		return false
 	}
 	return a.Kernel == nil || *a.Kernel == *b.Kernel

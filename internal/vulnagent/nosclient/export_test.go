@@ -209,3 +209,61 @@ func TestExportAcceptsAValidHandWrittenExport(t *testing.T) {
 		t.Fatalf("%+v", snap)
 	}
 }
+
+// devicePart is one device subject part as the server exports it (ADR 0011
+// D3): vendor, model, firmware version and the vendor ecosystem, no packages.
+func devicePart(id string, complete bool) map[string]any {
+	return map[string]any{"subject_kind": "device", "subject_ref": map[string]any{"id": id}, "ecosystem": "vendor:cisco:iosxe",
+		"device": map[string]any{"vendor": "cisco", "model": "CBS350-24P-4G", "firmware_version": "3.1.1.7"},
+		"complete": complete, "part": 1, "last_part": true, "components": []any{}}
+}
+
+func TestExportAcceptsADeviceSubjectAndKeepsItsCompleteness(t *testing.T) {
+	c, err := New(pageSrv(t, page("s1", 0, 1, hostPart("a", 1, true), devicePart("sw01", true), devicePart("sw02", false))))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := c.Export(context.Background(), func(Page) error { return nil })
+	if err != nil {
+		t.Fatalf("export with a device subject: %v", err)
+	}
+	sw01, ok := snap.Subject(vulnfinding.SubjectDevice, vulnfinding.SubjectRef{ID: "sw01"})
+	if !ok || sw01.Parts != 1 || !sw01.Complete {
+		t.Fatalf("sw01: %+v", sw01)
+	}
+	sw02, ok := snap.Subject(vulnfinding.SubjectDevice, vulnfinding.SubjectRef{ID: "sw02"})
+	if !ok || sw02.Complete {
+		t.Fatalf("incomplete device is covered: %+v", sw02)
+	}
+}
+
+func TestExportRefusesADeviceSubjectThatBreaksTheContract(t *testing.T) {
+	noData := devicePart("sw03", true)
+	delete(noData, "device")
+	withComponents := devicePart("sw04", true)
+	withComponents["components"] = []any{map[string]any{"source_package": "openssl", "source_version": "3.0.15-1"}}
+	withKernel := devicePart("sw05", true)
+	withKernel["running_kernel"] = map[string]any{"release": "6.1.0", "mapped": false}
+	withDigest := devicePart("sw06", true)
+	withDigest["subject_ref"] = map[string]any{"id": "sw06", "image_digest": "sha256:" + strings.Repeat("a", 64)}
+	hostWithDevice := hostPart("h01", 1, true)
+	hostWithDevice["device"] = map[string]any{"vendor": "cisco", "model": "CBS350", "firmware_version": "3.1.1.7"}
+	hugeField := devicePart("sw07", true)
+	hugeField["device"] = map[string]any{"vendor": "cisco", "model": strings.Repeat("A", MaxDeviceFieldBytes+1), "firmware_version": "3.1.1.7"}
+	cases := map[string]map[string]any{
+		"no device data": noData, "packages on a device": withComponents, "kernel on a device": withKernel,
+		"digest on a device": withDigest, "device data on a host": hostWithDevice, "oversized device field": hugeField,
+	}
+	for name, part := range cases {
+		t.Run(name, func(t *testing.T) {
+			c, err := New(pageSrv(t, page("s1", 0, 1, part)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = c.Export(context.Background(), func(Page) error { return nil })
+			if !errors.Is(err, ErrProtocol) {
+				t.Fatalf("got %v, want ErrProtocol", err)
+			}
+		})
+	}
+}
