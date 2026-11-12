@@ -162,11 +162,8 @@ type privateRef struct {
 // is not a private tag reference. A repository outside the record's
 // approved scope is ErrOutOfScope (no read is attempted).
 func matchPrivateImage(image string, regs []PrivateIdentity) (privateRef, error) {
-	if image == "" || len(image) > MaxImageLen || strings.Contains(image, "://") || strings.Contains(image, "@") {
-		return privateRef{}, ErrNotPrivate
-	}
-	host, rest, ok := strings.Cut(image, "/")
-	if !ok || !privateRefHostRe.MatchString(host) || (!strings.ContainsAny(host, ".:") && host != "localhost") {
+	host, rest, ok := registryHostOf(image)
+	if !ok {
 		return privateRef{}, ErrNotPrivate
 	}
 	origin := "https://" + strings.ToLower(host)
@@ -185,6 +182,21 @@ func matchPrivateImage(image string, regs []PrivateIdentity) (privateRef, error)
 		return privateRef{}, ErrOutOfScope
 	}
 	return privateRef{registry: regs[k], repository: rest, tag: tag}, nil
+}
+
+// registryHostOf splits a tag reference that names a registry host
+// ("host[:port]/repository[:tag]") into host and the rest. Only such a
+// reference can be on a private registry: one without a registry host,
+// with a scheme, pinned by digest or over MaxImageLen reports false.
+func registryHostOf(image string) (host, rest string, ok bool) {
+	if image == "" || len(image) > MaxImageLen || strings.Contains(image, "://") || strings.Contains(image, "@") {
+		return "", "", false
+	}
+	host, rest, ok = strings.Cut(image, "/")
+	if !ok || !privateRefHostRe.MatchString(host) || (!strings.ContainsAny(host, ".:") && host != "localhost") {
+		return "", "", false
+	}
+	return host, rest, true
 }
 
 // PrivateDigest is the registry's current manifest digest of one private
@@ -208,20 +220,27 @@ type PrivateDigest struct {
 // in neither. An error is returned only when the registries cannot be
 // listed. It reads every time; DigestReader caches answers across renders.
 func PrivateDigests(ctx context.Context, exec ExecutorRegistry, images []string) (map[string]PrivateDigest, map[string]error, error) {
-	return privateDigests(ctx, exec, images, nil)
-}
-
-func privateDigests(ctx context.Context, exec ExecutorRegistry, images []string, r *DigestReader) (map[string]PrivateDigest, map[string]error, error) {
-	if len(images) > MaxPrivateDigestImages {
-		images = images[:MaxPrivateDigestImages]
-	}
 	regs, err := ListPrivateIdentities(ctx, exec)
 	if err != nil {
 		return nil, nil, err
 	}
+	out, errs := resolveImages(images, regs, func(_ string, pi privateRef) (PrivateDigest, error) {
+		return readPrivateDigest(ctx, exec, pi)
+	})
+	return out, errs, nil
+}
+
+// resolveImages maps the first MaxPrivateDigestImages images onto regs and
+// calls read once per distinct registry, repository and tag (with the
+// first image naming it); images on no private registry appear in neither
+// result.
+func resolveImages(images []string, regs []PrivateIdentity, read func(image string, pi privateRef) (PrivateDigest, error)) (map[string]PrivateDigest, map[string]error) {
+	if len(images) > MaxPrivateDigestImages {
+		images = images[:MaxPrivateDigestImages]
+	}
 	out, errs := map[string]PrivateDigest{}, map[string]error{}
 	if len(regs) == 0 {
-		return out, errs, nil
+		return out, errs
 	}
 	type key struct{ reg, repo, tag string }
 	type answer struct {
@@ -241,11 +260,7 @@ func privateDigests(ctx context.Context, exec ExecutorRegistry, images []string,
 		k := key{pi.registry.ID, pi.repository, pi.tag}
 		a, ok := done[k]
 		if !ok {
-			if r != nil {
-				a.d, a.err = r.read(ctx, exec, pi)
-			} else {
-				a.d, a.err = readPrivateDigest(ctx, exec, pi)
-			}
+			a.d, a.err = read(img, pi)
 			done[k] = a
 		}
 		if a.err != nil {
@@ -254,7 +269,7 @@ func privateDigests(ctx context.Context, exec ExecutorRegistry, images []string,
 		}
 		out[img] = a.d
 	}
-	return out, errs, nil
+	return out, errs
 }
 
 // readPrivateDigest asks the executor for one tag_digest read and checks

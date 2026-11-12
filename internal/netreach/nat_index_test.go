@@ -5,6 +5,7 @@ package netreach
 import (
 	"fmt"
 	"net/netip"
+	"slices"
 	"testing"
 )
 
@@ -63,14 +64,14 @@ func TestPostNATZonePlacedOncePerIndex(t *testing.T) {
 	}
 	for range 20 {
 		for _, q := range queries {
-			x.Evaluate(q)
+			x.Evaluate(t.Context(), q)
 		}
 	}
 	if c.total != built {
 		t.Fatalf("queries placed translated addresses %d more times", c.total-built)
 	}
 	// The cached zone still decides: the forward to the DMZ is allowed.
-	wantVerdict(t, x.Evaluate(internetQuery(wanAddr, 443)), VerdictAllowed, "allow-web")
+	wantVerdict(t, x.Evaluate(t.Context(), internetQuery(wanAddr, 443)), VerdictAllowed, "allow-web")
 }
 
 // TestPostNATZonePlacementBudget: a hostile snapshot with more distinct
@@ -112,7 +113,7 @@ func TestPostNATZonePlacementBudget(t *testing.T) {
 		s.NATRules = append(s.NATRules, r)
 	}
 	x, _ := countingIndex(t, s, max)
-	r := x.Evaluate(internetQuery(wanAddr, 443))
+	r := x.Evaluate(t.Context(), internetQuery(wanAddr, 443))
 	wantVerdict(t, r, VerdictUnknown, "NAT rule fwd-3: post-NAT zone: limit reached")
 	wantStep(t, r, StepNAT, "fwd-3", OutcomeUnknown, "post-NAT zone: limit reached")
 	if d := MaxNATPlacementsPerSnapshot; d <= 0 {
@@ -137,6 +138,59 @@ func TestPostNATZoneNotInSnapshotNamesCause(t *testing.T) {
 		}
 	}
 	t.Fatalf("chain lacks the NAT step naming the cause\n%s", r.Text())
+}
+
+// TestServicePortsMergedAtBuild: the service field of every security and
+// NAT rule is held per protocol, sorted and merged, when the Index is
+// built; matching a query against it neither sorts nor allocates, however
+// many port spans the field has.
+func TestServicePortsMergedAtBuild(t *testing.T) {
+	s := labSnapshot()
+	// A wide service field given in reverse order with touching spans.
+	const n = MaxPortRangesPerField/2 - 1 // two spans each, plus svc-dns
+	var members []string
+	for i := range n {
+		p := 60000 - 4*i
+		s.Services = append(s.Services, ServiceObject{
+			Name: fmt.Sprintf("w%d", i), Protocol: "tcp", Ports: fmt.Sprintf("%d-%d,%d", p, p+1, p+2), SourcePorts: Collected(""),
+		})
+		members = append(members, fmt.Sprintf("w%d", i))
+	}
+	s.ServiceGroups = append(s.ServiceGroups, Group{Name: "wide", Static: append(members, "svc-dns")})
+	s.SecurityRules[1].Service = list("wide")
+	s.NATRules[0].Service = Collected("wide")
+	x := mustIndex(t, s)
+	if !x.rules[1].Evaluable() || !x.nat[0].Evaluable() {
+		t.Fatalf("wide service unevaluable: %v / %v", x.rules[1].Reason(), x.nat[0].Reason())
+	}
+	byFrom := func(a, b portSpan) int { return a.from - b.from }
+	for name, svc := range map[string]mergedService{"rule": x.ruleAddrs[1].svc, "nat": x.natAddrs[0].svc} {
+		tcp := svc.ports["tcp"]
+		if len(tcp) != n || !slices.IsSortedFunc(tcp, byFrom) {
+			t.Fatalf("%s: %d tcp spans, sorted %v; want %d sorted", name, len(tcp), slices.IsSortedFunc(tcp, byFrom), n)
+		}
+		if tcp[0] != (portSpan{60000 - 4*(n-1), 60002 - 4*(n-1)}) {
+			t.Fatalf("%s: first span %v, want touching spans merged", name, tcp[0])
+		}
+		if u := svc.ports["udp"]; len(u) != 1 || u[0] != (portSpan{53, 53}) {
+			t.Fatalf("%s: udp spans %v", name, u)
+		}
+	}
+	// The exported view is unchanged.
+	if got := len(x.rules[1].Service.Ports); got != 2*n+1 {
+		t.Fatalf("exported view has %d ports, want %d", got, 2*n+1)
+	}
+	svc := x.ruleAddrs[1].svc
+	x1 := []portSpan{{60001, 60001}}
+	if svc.match("tcp", x1, nil) != matchFull || svc.match("tcp", []portSpan{{60003, 60003}}, nil) != matchNone {
+		t.Fatal("merged service decides wrongly")
+	}
+	if n := testing.AllocsPerRun(100, func() { svc.match("tcp", x1, nil) }); n != 0 {
+		t.Fatalf("matching a merged service allocates %.0f times per call", n)
+	}
+	// One query through both rules: the rule match uses the merged field.
+	r := x.Evaluate(t.Context(), addrQuery(lanHost, "192.168.99.1", 60001))
+	wantVerdict(t, r, VerdictDenied, "deny-lan-mgmt")
 }
 
 // TestRuleAddressSetsMergedAtBuild: every address field of the Index is
@@ -170,7 +224,7 @@ func TestRuleAddressSetsMergedAtBuild(t *testing.T) {
 		{AddrRange{From: addr("10.0.1.5"), To: addr("10.0.1.12")}, matchPartial},
 		{AddrRange{From: addr("10.0.1.22"), To: addr("10.0.1.30")}, matchNone},
 	} {
-		if got := x.ruleAddrs[1].src.match(false, []AddrRange{c.x}); got != c.want {
+		if got := x.ruleAddrs[1].src.match(false, []AddrRange{c.x}, nil); got != c.want {
 			t.Errorf("match %v = %d, want %d", c.x, got, c.want)
 		}
 	}

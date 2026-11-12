@@ -453,6 +453,20 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		bg.Go(func() { vuln.runNotify(connCtx, notifyEvery) })
 	}
 	isAdmin := vulnAdmin(exec)
+	// Vulnerability agent LLM settings (ADR 0011 A1.8): the settings
+	// section (maintainer, fresh assertion, audited in the write
+	// transaction) and the agent's read under /api/v1/vuln/agent-config.
+	agentCfg, vulnAgent, err := newVulnAgentWiring(db, audit, isAdmin, exec, log)
+	if err != nil {
+		return err
+	}
+
+	// Private registry reads (G13). The digest reader's background worker
+	// lives as long as the server: when connCtx ends it is closed (its
+	// batch in flight cancelled, the worker drained), and bg waits for
+	// that before the executor connection closes.
+	registryReads := newServerRegistryReads(exec, time.Now, log)
+	bg.Go(func() { closeRegistryReads(connCtx, registryReads, shutdownTimeout, log) })
 
 	h, err := ui.New(withBatchPlanner(ui.Options{
 		PublicOrigin:   cfg.PublicOrigin,
@@ -500,12 +514,13 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		SecurityKeys: securityKeys,
 		TOTPStatus:   totpStatus,
 		// Findings pages over the real store.
-		Vuln: vulnPages{v: vuln, admin: isAdmin},
+		Vuln:      vulnPages{v: vuln, admin: isAdmin},
+		VulnAgent: vulnAgent,
 		// Private registry reads (ADR 0006, cu06 part 1, G13): registry
 		// read leases on the lease pages and executor-read digests of
 		// private images in docker.check_updates results. The credential
 		// stays in the executor.
-		RegistryReads: newServerRegistryReads(exec, time.Now, log),
+		RegistryReads: registryReads,
 		Log:           log,
 	}, batches))
 	if err != nil {
@@ -565,7 +580,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		log.Info("read-only API enabled", "tokens", len(cfg.API.Tokens))
 		// Vulnerability agent API (ADR 0011 D3, D5) under /api/v1/vuln/,
 		// only for the one vuln token, from its allowed addresses.
-		vh, err := newVulnAPI(cfg.API, vuln, vulnInventory{now: time.Now}, log)
+		vh, err := newVulnAPI(cfg.API, vuln, vulnInventory{now: time.Now}, agentCfg, log)
 		if err != nil {
 			return err
 		}

@@ -540,8 +540,9 @@ func (s vulnAPIStore) ResumeComplete(ctx context.Context, runID, tokenID string)
 
 // newVulnAPI returns the agent API handler when the configuration has a
 // vuln token, nil otherwise. api.NewVuln takes the token, its scopes and
-// its source-address allowlist from the configuration.
-func newVulnAPI(cfg serverconfig.APIConfig, v *vulnService, inv api.VulnInventory, log *slog.Logger) (http.Handler, error) {
+// its source-address allowlist from the configuration. agentCfg serves
+// the agent's LLM settings at api.AgentConfigPath (ADR 0011 A1.8).
+func newVulnAPI(cfg serverconfig.APIConfig, v *vulnService, inv api.VulnInventory, agentCfg api.AgentConfigSource, log *slog.Logger) (http.Handler, error) {
 	if _, ok := cfg.VulnToken(); !ok {
 		return nil, nil
 	}
@@ -550,7 +551,7 @@ func newVulnAPI(cfg serverconfig.APIConfig, v *vulnService, inv api.VulnInventor
 	if err != nil {
 		return nil, err
 	}
-	return h, nil
+	return h.WithAgentConfig(api.AgentConfigOptions{Source: agentCfg, CorePrompt: vulnAgentCorePrompt})
 }
 
 // vulnAdmin reports whether the request's session holds the executor's

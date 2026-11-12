@@ -21,6 +21,10 @@ Nebula backs itself up with one CLI command, and a backup never contains anythin
 1. Pre-upgrade backup: the `.deb` runs `nebula backup --pre-upgrade`; the container entrypoint does the same before migrating.
 2. Stop services, replace binaries.
 3. Run versioned, forward-only migrations, each in a transaction; any failure rolls back and aborts the start.
-4. Start and run a self-check.
+4. Start and run a self-check: the I1 integrity check of every covered file against the admitted `installed-files.json` of the new release ([v26-15-01](#v26-15-01); previously: "a self-check" without a defined reference).
+
+<a id="v26-15-01"></a>
+<!-- Spec revision (ADR 0015, IG-01): v26-15-01 -->
+**Upgrade integrity reference (ADR 0015 D2, D4).** Every update bundle, so that offline installations have them too, carries the signed `release-manifest.json`, its `release-manifest.json.sig` and `installed-files.json` ([10-modules.md](10-modules.md#v26-10-01)) (previously: no such files in the bundle). Before installing, the upgrade admits them into executor-owned storage (signature against the executor's root state, artifact SHA-256 against the manifest, no lower `release_version` than the last admitted one); every later I1 check uses that local copy. The NOS machine never fetches them from GitHub itself. Step 4 is this I1 check: a mismatch of a covered binary, unit, built-in module file or root key is a critical finding and the executor refuses `nebula unlock` and all mutation and read-grant dispatch until `nebula integrity ack` ([06-credentials.md](06-credentials.md#v26-06-01)); nothing is rolled back automatically, and going back still uses the pre-upgrade backup.
 
 An automatic downgrade is not provided; the pre-upgrade backup is the way back. Remote job files carry a `schema_version`, so a newer executor can still reconcile jobs started by the previous version.
