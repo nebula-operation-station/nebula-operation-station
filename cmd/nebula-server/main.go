@@ -315,6 +315,10 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 			return st.GetUnlocked(), nil
 		}}
 	bg.Go(func() { lockWatcher.Run(connCtx) })
+	// I1 self-check (ADR 0015 D4): at start and every 60 minutes, logged
+	// and shown under /integrity/status; no reaction here (IG-04).
+	selfCheck := newIntegrityMonitor(log, version.Version, integrityReferenceDir, "/")
+	bg.Go(func() { selfCheck.Run(connCtx) })
 
 	// Operations (M4): planned here, decided and run by the executor.
 	ops = executions.New(connCtx, exec, db, store, log)
@@ -563,6 +567,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	batchPages.Register(pages)
 	softwarePages.Register(pages)
 	connPages.Register(pages)
+	mountIntegrityStatus(pages, selfCheck)
 	// Findings export (ADR 0011 D9): admin only, audited, streamed.
 	pages.Handle("GET "+vulnExportPath, vulnExport{v: vuln, admin: isAdmin, audit: audit, log: log})
 	// Attack-path pages (ADR 0011 D10): admin only by the export's rule.
