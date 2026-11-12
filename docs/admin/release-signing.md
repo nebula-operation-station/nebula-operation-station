@@ -2,7 +2,7 @@
 
 This is the maintainer procedure for the owner-approved 2026-10-30 decision within [ADR 0001](../adr/0001-frozen-decisions-v2.2.md). The normative schemas, limits, rotation rules and retention policy are in [spec 10](../spec/10-modules.md#release-signing). Only public keys belong in the repository and binaries. Signing secrets stay on the YubiKeys; key handle files, PINs and passphrases stay out of CI, releases, the executor and managed hosts.
 
-**Implementation status** (state of `main`, 2026-11-12; previously: "Implementation gate", which said that `internal/sshsig` accepted only plain Ed25519). The verifying side is implemented; the producing side (build tooling, release workflow) and several admission paths are not. The commands below perform the maintainer's offline OpenSSH signing step. Do not use a software root or omit FIDO checks to work around a missing piece.
+**Implementation status** (state of `main`, 2026-11-12; previously: "Implementation gate", which said that `internal/sshsig` accepted only plain Ed25519). The verifying side is implemented, and the release workflow builds the unsigned payloads on a version tag; the rest of the producing side and several admission paths are not (previously: "the producing side (build tooling, release workflow) and several admission paths are not"). The commands below perform the maintainer's offline OpenSSH signing step. Do not use a software root or omit FIDO checks to work around a missing piece.
 
 Implemented and tested on `main`:
 
@@ -15,7 +15,7 @@ Missing (open before or with the first signed release):
 
 1. **`builtins.tar` builder.** Nothing in the repository produces `builtins.tar` or its nested `modules/<name>/<version>.tar` objects; `.goreleaser.yaml` does not. It has to be built by hand or by new tooling, and validated with the strict validator before signing.
 2. **`installed-files.json` producer.** `GenerateInstalledFiles` is a library function only: no command wraps it and nothing stages the per-flavour trees from the `.deb`, the tarball or the container image.
-3. **Release workflow.** `.github/workflows/ci.yml` has no release job and runs no GoReleaser; `.goreleaser.yaml` disables publishing and image push. Building, publishing and the GitHub asset upload are manual.
+3. **Release workflow: closed** (previously: "`.github/workflows/ci.yml` has no release job and runs no GoReleaser; `.goreleaser.yaml` disables publishing and image push. Building, publishing and the GitHub asset upload are manual."). `.github/workflows/release.yml` builds the unsigned staging on every `v*` tag and attaches `payloads/` to a **draft** release; see [Release workflow](#release-workflow-source-of-the-payloads). Manifest, signature, the container image push and publication stay manual.
 4. **Maintainer-side verifier.** `ssh-keygen -Y verify` does not enforce user presence (below), and no command outside the executor runs `VerifyManifest` on a staged release. Until a dedicated tool exists, the only security-key-aware check is the executor's review in `nebula artifact trust-builtins` on a test installation.
 5. **Manifest completeness.** Spec 10 makes `installed-files.json` a mandatory artifact, but `ParseManifest` only requires exactly one `builtins.tar`, and so does `make-manifest.py` below; the list is enforced only where it is verified (`VerifyInstalledFiles`). Check its presence by hand.
 6. **Rotation admission.** `trust.Store.ApplyRotation` exists, but no RPC or command calls it, so an installation cannot admit a `root-rotation.json` yet. Root-2 is not generated or enrolled (below).
@@ -76,9 +76,27 @@ Compare root-1 to the fingerprint above, and independently record root-2's finge
 
 Enroll root-2 with root-1 before claiming recovery coverage. Publish its public key only after checking and signing enrollment; compile public trust metadata into subsequent binaries with the signed chain from the original bootstrap root. Do not add an unsigned public key as independent authority for existing installations. Until enrollment, losing root-1 or its handle has no backup-key recovery path.
 
+## Release workflow (source of the payloads)
+
+`.github/workflows/release.yml` is the source of the release payloads. It runs when a maintainer pushes a `v*` tag, or by hand (`workflow_dispatch`) for an existing tag. It signs nothing, writes no manifest, has no access to any key and uses no secret except the automatic `GITHUB_TOKEN`, which is read-only except in the draft job. Its actions are pinned by commit SHA.
+
+1. **Build job** (self-hosted `nos` runner, `contents: read`): checks out the tag, verifies that `HEAD` is the tagged commit, installs the newest patch release of the Go minor version named in `go.mod`, runs `make check`, then `make release-stage VERSION=<tag without v> RELEASE_STAGE=staging` with a pinned GoReleaser, and checks `staging/SHA256SUMS`. The whole `staging/` tree (`payloads/`, `module-bytes/`, `installed/`, `SHA256SUMS`) is kept as the workflow artifact `nebula-release-staging-<version>` for 30 days.
+2. **Draft job** (GitHub-hosted, `contents: write`, `actions: read`; runs no repository code): downloads the artifact, rechecks `SHA256SUMS`, checks that the tag still points at the built commit, and attaches exactly the files of `payloads/` to the tag's GitHub release as a **draft**. Without a release it creates the draft; an existing draft is updated (same-named assets replaced). It fails, and changes nothing, when the release is already published, when more than one release carries the tag, or when the draft holds an asset this build does not produce (for example a `release-manifest.json` or `.sig` from an earlier signing: delete it by hand only if that signing is abandoned). Afterwards it checks that the draft holds exactly the payload names, sizes and (where GitHub reports them) SHA-256 digests.
+
+GitHub, the artifact and its `SHA256SUMS` are a transport, not a trust anchor: the CI runner is trusted only to build. The release then proceeds:
+
+1. Tag (human) → workflow → draft release with the unsigned payloads, plus the `staging/` artifact.
+2. Download the artifact, copy it to removable media and, on the disconnected station, recompute every SHA-256 independently and compare with the build job log and the draft's assets. Check `builtins.tar`, `module-bytes/` and `installed/` as described below.
+3. `python3 make-manifest.py <version>` and `python3 check-installed-files.py <version>` (below).
+4. Sign `release-manifest.json` with the root YubiKey ([Sign offline and verify](#sign-offline-and-verify)).
+5. Attach `release-manifest.json` and `release-manifest.json.sig` to the draft by hand; never re-run the workflow for that tag after signing (it refuses a draft that carries them).
+6. Publish the draft ([Publish manifest, signature and installed-files.json on GitHub](#publish-manifest-signature-and-installed-filesjson-on-github)).
+
+Prerequisites on the build runner: docker (the GoReleaser image and the container flavour of `make release-stage`), python3, and network access to the Go module proxy. The container image is built locally and not pushed.
+
 ## Build and review the release manifest
 
-CI builds the release payloads and the uncompressed `builtins.tar`, without a root token, key handle, PIN or passphrase. Transfer the outputs to the disconnected station. For this procedure stage:
+CI builds the release payloads and the uncompressed `builtins.tar`, without a root token, key handle, PIN or passphrase (the release workflow below). Transfer the outputs to the disconnected station. For this procedure stage:
 
 - `payloads/`: exactly every payload attachment to publish, including `builtins.tar`, binaries, packages and any published source/checksum files. Exclude the manifest, signatures and separately authenticated rotations.
 - `module-bytes/<name>/<version>.tar`: the exact nested module tar objects from the reviewed `builtins.tar`. Use the strict bounded bundle validator required by spec 10; do not extract untrusted CI archives with an unrestricted `tar -xf`. Validate the lock, file set and contents, and compare built-ins across all packages/architectures.
@@ -277,7 +295,7 @@ For **every** version, attach `release-manifest.json`, `release-manifest.json.si
 
 After the upload, download the three assets on a different machine and compare their SHA-256 with the reviewed offline copies. Never replace an asset of a published version: two validly signed but different manifests for the same `release_version` mean misuse of a root key or a broken release process, and verifiers report that as critical. A corrected build is a new version.
 
-Offline installations get the same three files inside the update bundle; the NOS machine never fetches from GitHub itself. Admitting them into executor-owned storage during upgrade (ADR 0015 IG-03), the checks on the NOS machine and `nebula verify` from an admin machine (IG-04), and the release workflow that uploads the assets are separate changes; this section describes the maintainer procedure they implement.
+Offline installations get the same three files inside the update bundle; the NOS machine never fetches from GitHub itself. Admitting them into executor-owned storage during upgrade (ADR 0015 IG-03), and the checks on the NOS machine and `nebula verify` from an admin machine (IG-04) are separate changes; this section describes the maintainer procedure they implement. The release workflow attaches only the unsigned payloads (including `installed-files.json`) to the draft; the manifest and its signature are always uploaded by hand (previously: "and the release workflow that uploads the assets are separate changes").
 
 ## Enroll, rotate and recover
 

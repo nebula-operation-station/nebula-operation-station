@@ -15,32 +15,35 @@ Names used below: the tag is `v0.9.0-beta.1`; GoReleaser strips the `v`, so the 
 
 ## 2. Tag
 
-- [ ] Create the annotated tag `v0.9.0-beta.1` on the reviewed release commit. A human creates and pushes it; agents never push.
-- [ ] A GitHub draft release `v0.9.0-beta.1` already exists (maintainer information; it is not visible from the repository). Make sure it points at this tag before anything is uploaded.
+- [ ] A GitHub draft release `v0.9.0-beta.1` already exists (maintainer information; it is not visible from the repository). Make sure it points at this tag and holds no assets the workflow does not produce (the release workflow refuses such a draft).
+- [ ] Create the annotated tag `v0.9.0-beta.1` on the reviewed release commit. A human creates and pushes it; agents never push. Pushing the tag starts the release workflow.
 
 ## 3. Build
 
-`.goreleaser.yaml` (GoReleaser config `version: 2`) is the release build. `make build` only builds `bin/` for development and produces no release artifacts.
+The payloads come from the release workflow `.github/workflows/release.yml` (see [Release workflow](release-signing.md#release-workflow-source-of-the-payloads)); previously they were built on a maintainer machine. It runs `make check` and `make release-stage VERSION=0.9.0-beta.1` (GoReleaser with `.goreleaser.yaml`, config `version: 2`, plus `nebula-release-stage`) on the tag, keeps `staging/` as the workflow artifact `nebula-release-staging-0.9.0-beta.1` (30 days) and attaches `payloads/` to the draft. It never signs and never publishes. `make build` only builds `bin/` for development and produces no release artifacts.
 
-- [ ] On the tagged commit, with a clean tree, run `goreleaser release --clean`. Publishing is disabled in the config (`release.disable: true`) and the image has `skip_push: true`, so nothing leaves the machine.
-- [ ] Check that `dist/` holds exactly these payloads:
+Flow: tag → workflow → artifact checked offline, hashes recomputed → `make-manifest.py` → signature with the YubiKey → `release-manifest.json` and `.sig` attached to the draft → publish.
+
+- [ ] The release workflow run for `v0.9.0-beta.1` is green (both jobs). If it fails, fix on `main` and tag a new version, or re-run it by hand (`workflow_dispatch` with the tag) only while the draft holds no manifest or signature.
+- [ ] Record the workflow run URL and the GoReleaser version (`GORELEASER_VERSION` in the workflow, also in the build log).
+- [ ] Check in the build log and the artifact that GoReleaser produced these files (previously: checked in a local `dist/`):
   - `nebula_0.9.0-beta.1_linux_amd64.tar.gz` and `nebula_0.9.0-beta.1_linux_arm64.tar.gz`: the six binaries (`nebula`, `nebula-server`, `nebula-executor`, `nebula-discovery`, `nebula-pve-collector`, `nebula-netdev-collector`) plus the allowlisted `deploy/` files;
   - `nebula-operation-station_0.9.0-beta.1_amd64.deb` and `..._arm64.deb`;
   - `nebula_0.9.0-beta.1_checksums.txt` (a convenience file; it establishes no trust);
   - the local image `ghcr.io/nebula-operation-station/nebula:0.9.0-beta.1` (amd64 only; not a file, not pushed).
-- [ ] **OPEN: release workflow.** `.github/workflows/ci.yml` has no release job and runs no GoReleaser; the build runs on a maintainer machine. The GoReleaser version is not pinned in the repository: record the version used. Reproducible builds are ADR 0015 IG-11 and not done.
+- [x] Release workflow: done (previously **OPEN**: "`.github/workflows/ci.yml` has no release job and runs no GoReleaser; the build runs on a maintainer machine. The GoReleaser version is not pinned in the repository"). `.github/workflows/release.yml` builds on the tag with a pinned GoReleaser. Reproducible builds are ADR 0015 IG-11 and still not done.
 - [ ] **OPEN: `builtins.tar`.** No tool on `main` builds it, and GoReleaser does not. Spec 10 requires an uncompressed ustar with exactly one `modules/<name>/<version>.tar` per built-in module (each a nested ustar of `module.lock.json` and the files it references), at most 80 MiB. Until a builder exists it must be produced by hand and checked module by module with `internal/release.ParseModuleTar` before signing.
 - [ ] **OPEN: `installed-files.json`.** `internal/release.GenerateInstalledFiles` exists as a library function only; there is no command and no staging of the flavour trees. For each flavour (`deb:amd64`, `deb:arm64`, `tarball:amd64`, `tarball:arm64`, and `container:amd64` if the image is published) stage the installed tree under `installed/<flavour>/` as described in `release-signing.md` and generate the list with release version `0.9.0-beta.1`. How to stage the tarball and container trees is not written down yet.
 - [ ] **OPEN question:** `install.sh` copies `release-manifest.json`, its signature and `builtins.tar` into `/usr/share/nebula/release`, a covered prefix. `installed-files.json` cannot list the manifest or the signature (the manifest records the list's hash), so decide how those two files are treated before the I1 checks are switched on.
 
 ## 4. Staging for the offline station
 
-Follow "Build and review the release manifest" in `release-signing.md`.
+Follow "Build and review the release manifest" in `release-signing.md`. The staging is the workflow artifact `nebula-release-staging-0.9.0-beta.1` (previously: assembled by hand on the build machine); download it before it expires after 30 days.
 
 - [ ] `payloads/`: exactly the files to publish: both tarballs, both `.deb`, the checksums file if it is published, `builtins.tar` and `installed-files.json`. Nothing else: no manifest, no signature, no rotation documents.
 - [ ] `module-bytes/<name>/<version>.tar`: the exact nested module tars from the reviewed `builtins.tar`, extracted with the strict validator, never with plain `tar -xf`.
 - [ ] `installed/<flavour>/`: the staged trees for the offline recheck of `installed-files.json`.
-- [ ] Copy the staging to removable media; on the disconnected station recompute every SHA-256 and compare with the build machine. Keep the staging read-only from here on.
+- [ ] Copy the staging to removable media; on the disconnected station recompute every SHA-256 independently and compare with the workflow's build log and the draft's assets (the artifact's `SHA256SUMS` is a transfer check, not a trust anchor). Keep the staging read-only from here on.
 
 ## 5. Manifest
 
@@ -66,7 +69,7 @@ Follow "Build and review the release manifest" in `release-signing.md`.
 
 Follow "Publish manifest, signature and installed-files.json on GitHub" in `release-signing.md`.
 
-- [ ] Upload to the draft `v0.9.0-beta.1` the exact reviewed bytes: every payload from `payloads/`, plus `release-manifest.json` and `release-manifest.json.sig`. Never rebuild or re-sign on the publication machine.
+- [ ] The release workflow already attached every payload from `payloads/` to the draft `v0.9.0-beta.1` (previously: uploaded by hand). Check that the draft's assets are exactly the reviewed bytes (names, sizes, SHA-256), then upload `release-manifest.json` and `release-manifest.json.sig` by hand. Never rebuild or re-sign on the publication machine, and do not re-run the workflow for this tag after signing.
 - [ ] Per-version hash manifest (ADR 0015 D2): `release-manifest.json`, `release-manifest.json.sig` and `installed-files.json` are attached to this version's release. They are attached for **every** later version too.
 - [ ] Mark the release as a pre-release (beta).
 - [ ] Release notes: what is in the beta, the open items that ship unresolved (at least root-2, rotation admission, integrity checks, `nebula verify`), and that GitHub, checksums and keys shown beside the files establish no trust; only the signature against the root compiled into the binaries does.
