@@ -81,6 +81,16 @@ History:
   behaviour change in the production path (previously "AS-05 changes no
   production code", which left `backup`/`restore` unreachable under a
   non-root test).
+- 2026-11-12 (as00igf2, second review of PR #524): the `restore` canary
+  fixtures and their pairing are defined (`--identity` runs with an
+  archive sealed to the fixture identity only, `ARCHIVE` runs with an
+  unencrypted archive, plus fixture checks and a control run with an
+  unrelated identity; previously "minimal valid restore input",
+  undefined, so a wrong identity could pass); every error of an
+  `in-path`/`trust-path` run is a harness error, also for
+  `host pin --known-hosts` and `pve remote add`/`repin --ca-file`
+  (previously only for `restore`); the wrapper rejection test restores
+  `nebulaRoot` in `t.Cleanup` and runs without `t.Parallel`.
 
 ## Context
 
@@ -585,7 +595,13 @@ does NOS connect **from** (`--from`)?
     empty string via `t.Setenv` (restored after the test; never
     `os.Unsetenv`), which `adminFromSudo` treats like unset (previously
     "unset (`t.Setenv`)", which `t.Setenv` cannot do), `nebulaRoot`
-    pointed at an empty `t.TempDir()` and
+    pointed at an empty `t.TempDir()` (the test saves the previous
+    value of the package variable `nebulaRoot` and restores it in a
+    `t.Cleanup` registered before the change, so no later test of
+    `cmd/nebula/` sees the temporary root; previously the ADR required
+    a restore only for `SUDO_UID`), the test and its subtests calling no
+    `t.Parallel` (which `t.Setenv` forbids as well, and which would let
+    a parallel test see the changed global) and
     `NEBULA_EXECUTOR_SOCKET` naming a path in that directory where
     nothing listens (no socket file is created). Each case asserts the
     exact error text of today's tree, and an error of another type or
@@ -743,6 +759,48 @@ does NOS connect **from** (`--from`)?
   below), so a file that is missing or does not parse is itself a
   harness error. The `restore` arguments therefore never carry
   `canary-rejects`; the test fails when one does.
+
+  **Minimal valid restore input and run pairing** (previously "the
+  minimal valid restore input" was not defined per argument and the
+  pairing of the two arguments was open; `backup.Read`
+  (`internal/backup/backup.go`) decrypts only an archive that starts
+  with the age header and ignores the identities for an unencrypted
+  archive, so an `--identity` run paired with an unencrypted archive
+  was accepted whatever identity file the harness had written, and an
+  `ARCHIVE` run paired with an encrypted archive failed with
+  `backup.ErrEncrypted`). The `restore` harness entry defines these
+  fixtures, none of which holds a needle:
+  - *fixture identity*: one age X25519 identity (`AGE-SECRET-KEY-1…`
+    line) as `backup.ParseIdentities` accepts it, generated once per
+    test process; and a second, unrelated *control identity* generated
+    the same way;
+  - *plain archive*: written with `backup.Write` and no recipient
+    (unencrypted) from the fixture server tree, manifest host
+    `nos-fixture-host`, schemas of today's tree;
+  - *sealed archive*: the same content written with `backup.Write` to
+    exactly one recipient, the public key of the fixture identity, so
+    only the fixture identity decrypts it.
+  Pairing, the only two forms the test runs:
+  - a run of `--identity` (value = the run's canary form): the file at
+    that path holds the fixture identity, and `ARCHIVE` is the sealed
+    archive at a fixed fixture path in the working directory;
+  - a run of `ARCHIVE` (value = the run's canary form): no
+    `--identity`, and the file at that path holds the plain archive.
+  The plain archive is never paired with `--identity` and the sealed
+  archive never without it, so an accepted `--identity` run proves that
+  the command decrypted with the file at the run's path. Before the
+  first `restore` run the test checks the fixtures themselves and
+  reports any deviation as a harness error, never as an argument
+  result: `backup.Read` of the sealed archive returns
+  `backup.ErrEncrypted` with no identity, a decrypt error with the
+  control identity and the fixture manifest with the fixture identity;
+  `backup.Read` of the plain archive returns the fixture manifest with
+  no identity. In addition one *control run* per `--identity` form
+  writes the control identity to the run's path; it must return an
+  error and record no `backup.System` call, and an accepted control run
+  fails the test (the identity file was not used). A control run is a
+  check of the harness, not a canary run: its error never counts as a
+  rejection of the argument.
   The `restore` arguments are `in-path` values that are read, not sent:
   their expected-fields entry lists no field. The needle search of
   conditions 1 and 2 covers the recorded `backup.System` calls (unit
@@ -870,7 +928,44 @@ does NOS connect **from** (`--from`)?
   directories, so the command writes the file itself. A file-reading
   argument therefore reaches the code that sends what it read, and
   `canary-rejects` stays for arguments that cannot accept any form even
-  with the file present (such as `--secret-fd`).
+  with the file present (such as `--secret-fd`, which is no path kind).
+
+  **Errors before traffic in path-kind runs** (previously only the
+  `restore` arguments treated an error before any recorded traffic as a
+  harness error; for `host pin --known-hosts` and `pve remote add`/
+  `repin --ca-file` it still counted as a rejection of the form, so a
+  fixture defect hit by only some forms, such as a `known_hosts` line
+  that does not parse or a CA PEM outside its validity, passed as a
+  per-form rejection). The same reasoning applies to every `in-path`
+  and `trust-path` argument: the only property a form gives the command
+  is a path, and the test has created the file at that path with the
+  minimal valid content. So for every run of an `in-path` or
+  `trust-path` argument an error, with or without recorded traffic, is
+  a **harness error** that fails the test and names the harness entry;
+  such a run is never rejected, and these arguments never carry
+  `canary-rejects` (the test fails when one does). An argument whose
+  parser rejects some path shapes would need a reviewed change of this
+  rule; it fails until then and never passes. The minimal valid content
+  is defined per argument so that a correct command accepts it:
+  - `host pin --known-hosts`: one `known_hosts` line with a fixture
+    ed25519 public key whose host field names exactly the fixture
+    endpoint the harness entry passes as `ENDPOINT` in that run
+    (`sshtransport.ImportKnownHosts` refuses a file with no usable
+    entry for the given endpoints); a run of the `ENDPOINT` argument
+    itself passes no `--known-hosts`;
+  - `pve remote add`/`repin --ca-file`: one self-signed CA certificate
+    in PEM, nothing else, generated once per test process with a
+    validity window that contains the real time of the whole test run
+    (`readPveCAFile` checks it against `time.Now()`, and no seam
+    injects the time), and the fake executor's probe answer derives the
+    same CA fingerprint;
+  - `restore --identity` and `ARCHIVE`: **Minimal valid restore input
+    and run pairing** above.
+  Before the first run of such an argument the test parses its fixture
+  with the same function the command uses (`ImportKnownHosts` with the
+  fixture endpoint, `executor.ParsePveSuppliedCA` with `time.Now()`,
+  the restore checks above) and fails as a harness error if it does
+  not parse.
 
   Because the executor is faked, nothing is dialed for
   most commands, so the test inspects **every outgoing request in full**
@@ -1007,7 +1102,10 @@ does NOS connect **from** (`--from`)?
   admit most of them for a non-host kind, but they show what the
   argument **does** with a host value. A form is **rejected** when the
   command returns an error and the fake executor, dialer and transport
-  recorded nothing; a rejected form passes on its own. The **argument
+  recorded nothing; a rejected form passes on its own. This class does
+  not exist for `in-path` and `trust-path` arguments, whose every error
+  is a harness error (**Errors before traffic in path-kind runs**
+  above). The **argument
   fails** when every form is rejected, unless its catalog entry carries
   the reviewed annotation `canary-rejects: <reason>` (for example an
   argument that must name an open file descriptor, such as
