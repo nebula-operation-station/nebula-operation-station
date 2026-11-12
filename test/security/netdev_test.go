@@ -671,6 +671,8 @@ var serverBytesFields = map[protoreflect.FullName]string{
 	"nebula.executor.v1.ListEventsResponse.public_key":                        "event public key",
 	"nebula.executor.v1.NetBirdOfferPermitInfo.canonical":                     "canonical permit document",
 	"nebula.executor.v1.NetBirdOfferPermitInfo.challenge":                     "WebAuthn challenge",
+	"nebula.executor.v1.PairedPermitInfo.canonical":                           "canonical permit document",
+	"nebula.executor.v1.PairedPermitInfo.challenge":                           "WebAuthn challenge",
 	"nebula.executor.v1.ProposeBatchResponse.canonical_batch":                 "canonical batch document",
 	"nebula.executor.v1.ProposeBatchResponse.challenge":                       "WebAuthn challenge",
 	"nebula.executor.v1.ProposeBatchResponse.request_options_json":            "WebAuthn options",
