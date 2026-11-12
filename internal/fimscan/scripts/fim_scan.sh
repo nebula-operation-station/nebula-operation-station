@@ -28,8 +28,11 @@
 # /home/* lie in directories their users own and can change at any time:
 # each is scanned from inside its directory, entered once and checked by
 # its physical path, as a single entry (a directory there is reported, not
-# walked), and hashed through one descriptor checked to be the regular
-# file find saw; at most 16 authorized_keys* files per home are scanned.
+# walked); it is opened only by a holder process dropped to the owner of
+# the directory (root never opens it by name) and bounded in time, and
+# hashed through one descriptor checked to be the regular file find saw.
+# Its hash carries that device:inode:ctime and is kept only for a record
+# of the same. At most 16 authorized_keys* files per home are scanned.
 #
 # NEBULA_FIM_TEST_ROOT is for tests only: it prefixes every path the script
 # reads (the reported paths stay host paths), suppresses the sudo
@@ -76,7 +79,10 @@ SSH_MAX_BYTES=262144    # spec 09: at most 256 KiB decoded in total
 SSH_MAX_QUEUE=256       # Include matches waiting to be read
 SSH_MAX_SEEN=1024       # Include matches looked at in total
 HOME_MAX_MATCHES=16     # start points per home and glob (.ssh/authorized_keys*)
+HOME_OPEN_SECONDS=5     # a home SSH file not opened (and checked) within this is not hashed
 MOUNTINFO="$P/proc/self/mountinfo"
+AM_ROOT=0
+[ "$(id -u)" = 0 ] && AM_ROOT=1
 # Tests only (with NEBULA_FIM_TEST_ROOT): shorter window, deadline, budget.
 if [ -n "$P" ]; then
 	for v in "${NEBULA_FIM_TEST_WINDOW:-}" "${NEBULA_FIM_TEST_HASH_SECONDS:-}" "${NEBULA_FIM_TEST_HASH_BUDGET:-}"; do
@@ -240,17 +246,61 @@ fmt_path() {
 	printf '%s' "$1" | sed 's/\\/\\\\/g; s/%/%%/g'
 }
 
-# HASH_FD runs as /bin/sh -c "$HASH_FD" sh NAME ID in the checked home
-# directory: it opens NAME once, checks with find -H on /proc/self/fd/3
-# that the open file is the regular file ID (device:inode) that find saw
-# at NAME without following it, and hashes it through that descriptor. A
-# symlink or another file swapped in between fails the check: no hash. It
-# runs under the deadline (timeout or the watchdog), which also ends an
-# open blocked on a FIFO swapped in.
+# HOLD runs as /bin/sh -c "$HOLD" sh NAME in the checked home directory,
+# as the user the open drops to (HASH_FD): it prints its process id, opens
+# NAME as descriptor 3, prints "o" and then keeps writing (holding the
+# descriptor) until its reader is gone.
 # shellcheck disable=SC2016 # expanded by the inner shell
-HASH_FD='exec 2>/dev/null 3<"$1" || exit 1
-[ "$(find -H /proc/self/fd/3 -maxdepth 0 -type f -printf "%D:%i:%C@\n")" = "$2" ] || exit 1
-exec sha256sum <&3'
+HOLD='printf "%s\n" "$$"
+exec 3<"$1" || exit 1
+printf "o\n"
+while printf "%4096s" ""; do :; done'
+
+# HASH_FD runs as /bin/sh -c "$HASH_FD" sh NAME ID HOLD USER SECONDS TIMEOUT
+# in the checked home directory. The user owning that directory can swap
+# NAME for a symlink or a FIFO after find looked at it, so root never opens
+# NAME: HOLD opens it, dropped to USER (setpriv; "" when the scan does not
+# run as root or no one but root can change the directory) and, with the
+# TIMEOUT tool, stopped after SECONDS, so a FIFO swapped in cannot stall
+# the run (without the tool the deadline of the hash pass bounds it). A
+# symlink there is followed with the rights of USER only. HASH_FD then
+# checks with find -H on /proc/PID/fd/3 that the held file is the regular
+# file ID (device:inode:ctime) that find saw at NAME, opens that same file
+# through the descriptor (never by name; a FIFO never reaches this open),
+# checks its own descriptor again and hashes through it. Anything else
+# swapped in fails a check: no hash.
+# shellcheck disable=SC2016 # expanded by the inner shell
+HASH_FD='exec 2>/dev/null
+n=$1 id=$2 hold=$3 u=$4 s=$5 to=$6
+set -- /bin/sh -c "$hold" sh "$n"
+[ -n "$u" ] && set -- setpriv --reuid="$u" --regid=65534 --clear-groups -- "$@"
+[ -n "$to" ] && set -- "$to" "$s" "$@"
+"$@" </dev/null | {
+	read -r p && read -r o && [ "$o" = o ] || exit 1
+	case $p in "" | *[!0-9]*) exit 1 ;; esac
+	[ "$(find -H "/proc/$p/fd/3" -maxdepth 0 -type f -printf "%D:%i:%C@\n")" = "$id" ] || exit 1
+	exec 3<"/proc/$p/fd/3" || exit 1
+	[ "$(find -H /proc/self/fd/3 -maxdepth 0 -type f -printf "%D:%i:%C@\n")" = "$id" ] || exit 1
+	exec sha256sum <&3
+}'
+
+# open_user: the user HOLD drops to for the working directory (a checked
+# home or .ssh directory), in OPEN_USER: none ("") when the scan does not
+# run as root, or the directory is root's and only root can change it;
+# its owner when that is another user; nobody (65534) for a root-owned
+# directory others can write. False when the open would need to drop but
+# cannot (no setpriv): the file is not hashed.
+open_user() {
+	OPEN_USER=""
+	[ "$AM_ROOT" = 1 ] || return 0
+	ou=$(find . -maxdepth 0 -printf '%U %m\n' 2>/dev/null)
+	case $ou in
+	"" | *[!0-9\ ]* | *" "*" "* | " "* | *" ") return 1 ;;
+	"0 "*) [ $((0${ou#* } & 18)) -eq 0 ] || OPEN_USER=65534 ;;
+	*) OPEN_USER=${ou%% *} ;;
+	esac
+	[ -z "$OPEN_USER" ] || command -v setpriv >/dev/null 2>&1
+}
 
 # bounded SECONDS CMD...: run CMD and stop it, and a tool it runs, after
 # SECONDS (the watchdog, for hosts without the timeout tool).
@@ -308,11 +358,11 @@ find_scan() {
 		if [ "$one" = 1 ]; then
 			set -- "$@" -printf '%D:%i:%C@\n' ")"
 			id=$(find "$@" 2>/dev/null)
-			if [ -n "$id" ]; then
+			if [ -n "$id" ] && open_user; then
 				if [ -n "$TIMEOUT" ]; then
-					h=$($TIMEOUT "$left" /bin/sh -c "$HASH_FD" sh "$sp" "$id")
+					h=$($TIMEOUT "$left" /bin/sh -c "$HASH_FD" sh "$sp" "$id" "$HOLD" "$OPEN_USER" "$HOME_OPEN_SECONDS" "$TIMEOUT")
 				else
-					h=$(bounded "$left" /bin/sh -c "$HASH_FD" sh "$sp" "$id")
+					h=$(bounded "$left" /bin/sh -c "$HASH_FD" sh "$sp" "$id" "$HOLD" "$OPEN_USER" "$HOME_OPEN_SECONDS" "")
 				fi
 				# Written whole, only for a complete hash.
 				hx=${h%% *}
