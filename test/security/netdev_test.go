@@ -31,8 +31,10 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"html"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -1364,7 +1366,7 @@ func TestNetDevCompromisedCollectorBoundary(t *testing.T) {
 		pb.ExecutorService_ListNetDevices_FullMethodName: true,
 		pb.ExecutorService_ReadNetDevice_FullMethodName:  true,
 	}
-	if got := rolesOf(peercred.RoleNetDevCollector); len(got) != len(allowed) {
+	if got := rolesOf(peercred.RoleNetDevCollector); !maps.Equal(got, allowed) {
 		t.Errorf("netdev-collector role grants %v, want exactly %v", got, allowed)
 	}
 	for method := range executor.MethodRoles() {
@@ -1697,6 +1699,7 @@ type ndUIStore struct {
 	vlans  map[string][]netdevcontract.VLAN
 	ports  map[string][]netdevcontract.Port
 	lldp   map[string][]netdevcontract.LLDPNeighbor
+	macs   map[string][]netdevcontract.MACEntry
 	policy map[string]netdevcontract.FirewallPolicy
 }
 
@@ -1732,14 +1735,25 @@ func (s *ndUIStore) VLANs(_ context.Context, id string) ([]netdevcontract.VLAN, 
 func (s *ndUIStore) Ports(_ context.Context, id string) ([]netdevcontract.Port, error) {
 	return ndRowsOf(s.ports, id)
 }
-func (s *ndUIStore) MACEntries(context.Context, string, int, int) ([]netdevcontract.MACEntry, int, error) {
-	return nil, 0, netdevinventory.ErrDatasetNotFound
+func (s *ndUIStore) MACEntries(_ context.Context, id string, offset, limit int) ([]netdevcontract.MACEntry, int, error) {
+	all, err := ndRowsOf(s.macs, id)
+	if err != nil {
+		return nil, 0, err
+	}
+	offset = min(max(offset, 0), len(all))
+	return all[offset:min(offset+max(limit, 0), len(all))], len(all), nil
 }
 func (s *ndUIStore) LLDPNeighbors(_ context.Context, id string) ([]netdevcontract.LLDPNeighbor, error) {
 	return ndRowsOf(s.lldp, id)
 }
 func (s *ndUIStore) FirewallPolicy(_ context.Context, id string) (netdevcontract.FirewallPolicy, error) {
 	return ndRowsOf(s.policy, id)
+}
+
+// HitCounts serves no hit counts: the firewall page under test shows the
+// rules only.
+func (s *ndUIStore) HitCounts(context.Context, string) ([]netdevcontract.HitCount, error) {
+	return nil, netdevinventory.ErrDatasetNotFound
 }
 
 // ndAuthExec is the executor client of the web login; the pages under
@@ -1822,8 +1836,11 @@ func requireInert(t *testing.T, path, body string) {
 // names and firewall rule descriptions passes the strict ingest only as
 // text and renders escaped; the same fields with terminal escapes, NUL,
 // line breaks or a bidi override are refused at ingest; structured names
-// (interface names, PAN-OS rule and zone names) refuse markup outright.
-// Nothing hostile reaches the page as markup.
+// (interface names, PAN-OS rule and zone names, MAC addresses and MAC
+// table ports) refuse markup outright. PAN-OS rule list members refuse
+// control characters in every list; a list that accepts markup as a member
+// shows it escaped on the firewall view. Nothing hostile reaches the device
+// list, detail or firewall page as markup.
 func TestNetDevHostileDeviceOutputIsInertText(t *testing.T) {
 	ctx := context.Background()
 	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
@@ -1853,6 +1870,7 @@ func TestNetDevHostileDeviceOutputIsInertText(t *testing.T) {
 	}
 
 	up, access := pb.NetDevLinkState_NET_DEV_LINK_STATE_UP, pb.NetDevPortMode_NET_DEV_PORT_MODE_ACCESS
+	macDynamic := pb.NetDevMACType_NET_DEV_MAC_TYPE_DYNAMIC
 	cbsPayloads := func(s string) map[pb.NetDeviceRead][]byte {
 		return map[pb.NetDeviceRead][]byte{
 			pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION: ndPayload(t, &pb.NetDevCBSVersion{Model: s, Firmware: "1.0", Serial: "SN1"}),
@@ -1889,11 +1907,54 @@ func TestNetDevHostileDeviceOutputIsInertText(t *testing.T) {
 		if _, err := ndIngest(ctx, inv, fw.DeviceID, 1, now, pb.NetDeviceRead_NET_DEVICE_READ_PANOS_SECURITY_RULES, fwPayload(s, "")); err == nil {
 			t.Errorf("rule name %q: accepted at ingest", s)
 		}
+		// The MAC table has no free text: a hostile MAC address or port
+		// name is refused outright.
+		for field, entry := range map[string]*pb.NetDevMACEntry{
+			"mac":  {Vlan: 10, Mac: s, Port: "gi1/0/1", Type: macDynamic},
+			"port": {Vlan: 10, Mac: "00:11:22:33:44:55", Port: s, Type: macDynamic},
+		} {
+			if _, err := ndIngest(ctx, inv, sw.DeviceID, 1, now, pb.NetDeviceRead_NET_DEVICE_READ_CBS_MAC_TABLE,
+				ndPayload(t, &pb.NetDevMACTable{Entries: []*pb.NetDevMACEntry{entry}})); err == nil {
+				t.Errorf("MAC table %s %q: accepted at ingest", field, s)
+			}
+		}
+	}
+
+	// PAN-OS list members (zones, addresses, users, applications,
+	// services, URL categories, tags): a control or format character is
+	// refused at ingest in every list; markup is either refused or, if a
+	// list accepts it as a name, rendered inert below.
+	ruleLists := map[string]func(*pb.NetDevSecurityRule, string){
+		"from_zones":  func(r *pb.NetDevSecurityRule, s string) { r.FromZones = []string{"trust", s} },
+		"to_zones":    func(r *pb.NetDevSecurityRule, s string) { r.ToZones = []string{s} },
+		"source":      func(r *pb.NetDevSecurityRule, s string) { r.Source = []string{"10.0.0.0/8", s} },
+		"destination": func(r *pb.NetDevSecurityRule, s string) { r.Destination = []string{s} },
+		"source_user": func(r *pb.NetDevSecurityRule, s string) { r.SourceUser = []string{s} },
+		"application": func(r *pb.NetDevSecurityRule, s string) { r.Application = []string{"dns", s} },
+		"service":     func(r *pb.NetDevSecurityRule, s string) { r.Service = []string{s} },
+		"category":    func(r *pb.NetDevSecurityRule, s string) { r.Category = []string{s} },
+		"tags":        func(r *pb.NetDevSecurityRule, s string) { r.Tags = []string{s} },
+	}
+	listPayload := func(field, s string) []byte {
+		var rs pb.NetDevSecurityRules
+		if err := protojson.Unmarshal(fwPayload("allow-dns", ""), &rs); err != nil {
+			t.Fatal(err)
+		}
+		ruleLists[field](rs.Rules[0], s)
+		return ndPayload(t, &rs)
+	}
+	for field := range ruleLists {
+		for _, s := range ndHostileControl {
+			if _, err := ndIngest(ctx, inv, fw.DeviceID, 1, now, pb.NetDeviceRead_NET_DEVICE_READ_PANOS_SECURITY_RULES, listPayload(field, s)); err == nil {
+				t.Errorf("rule %s member %q: accepted at ingest", field, s)
+			}
+		}
 	}
 
 	// Markup in free text passes ingest as text; one page per payload.
 	store := &ndUIStore{Store: inv, facts: map[string]netdevcontract.Facts{}, vlans: map[string][]netdevcontract.VLAN{},
-		ports: map[string][]netdevcontract.Port{}, lldp: map[string][]netdevcontract.LLDPNeighbor{}, policy: map[string]netdevcontract.FirewallPolicy{}}
+		ports: map[string][]netdevcontract.Port{}, lldp: map[string][]netdevcontract.LLDPNeighbor{}, macs: map[string][]netdevcontract.MACEntry{},
+		policy: map[string]netdevcontract.FirewallPolicy{}}
 	for i, s := range ndHostileMarkup {
 		id := fmt.Sprintf("sw-hostile-%d", i)
 		d := sw
@@ -1931,6 +1992,53 @@ func TestNetDevHostileDeviceOutputIsInertText(t *testing.T) {
 	}
 	store.policy[fw.DeviceID] = part.Policy
 
+	// A MAC table that passed ingest is shown on the switch page.
+	macRows, err := ndIngest(ctx, inv, "sw-hostile-0", 1, now, pb.NetDeviceRead_NET_DEVICE_READ_CBS_MAC_TABLE,
+		ndPayload(t, &pb.NetDevMACTable{Entries: []*pb.NetDevMACEntry{{Vlan: 10, Mac: "00:11:22:33:44:55", Port: "gi1/0/1", Type: macDynamic}}}))
+	if err != nil {
+		t.Fatalf("valid MAC table refused at ingest: %v", err)
+	}
+	macs, ok := macRows.(netdevinventory.MACRows)
+	if !ok {
+		t.Fatalf("MAC table decodes to %T", macRows)
+	}
+	store.macs["sw-hostile-0"] = macs
+
+	// Markup in PAN-OS list members: refused at ingest, or accepted and
+	// then served on its own firewall page, which must be inert.
+	// fw-probe takes the full ingest of each candidate; it is not served.
+	probe := fw
+	probe.DeviceID, probe.TrustPin = "fw-probe", strings.Repeat("c", 64)
+	probe.Endpoints = []netdevcontract.Endpoint{{Address: "10.20.2.250", Port: 443}}
+	if err := inv.UpsertDevice(ctx, probe); err != nil {
+		t.Fatalf("upsert fw-probe: %v", err)
+	}
+	type hostileMember struct{ id, field, value string }
+	var hostileFW []hostileMember
+	for _, field := range slices.Sorted(maps.Keys(ruleLists)) {
+		for _, s := range ndHostileMarkup {
+			payload := listPayload(field, s)
+			if _, err := ndIngest(ctx, inv, probe.DeviceID, 1, now, pb.NetDeviceRead_NET_DEVICE_READ_PANOS_SECURITY_RULES, payload); err != nil {
+				continue
+			}
+			id := fmt.Sprintf("fw-hostile-%d", len(hostileFW))
+			d := fw
+			d.DeviceID, d.TrustPin = id, fmt.Sprintf("%064x", 0x100+len(hostileFW))
+			d.Endpoints = []netdevcontract.Endpoint{{Address: fmt.Sprintf("10.20.2.%d", len(hostileFW)+1), Port: 443}}
+			if err := inv.UpsertDevice(ctx, d); err != nil {
+				t.Fatalf("upsert %s: %v", id, err)
+			}
+			rows, err := ndIngest(ctx, inv, id, 1, now, pb.NetDeviceRead_NET_DEVICE_READ_PANOS_SECURITY_RULES, payload)
+			if err != nil {
+				t.Fatalf("rule %s member %q: accepted on fw-probe, refused on %s: %v", field, s, id, err)
+			}
+			store.policy[id] = rows.(netdevinventory.PolicyPartRows).Policy
+			store.ids = append(store.ids, id)
+			hostileFW = append(hostileFW, hostileMember{id, field, s})
+			t.Logf("rule %s accepts %q as a list member; %s renders it", field, s, id)
+		}
+	}
+
 	// The real pages behind the real session and security middleware.
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	u, err := ui.New(ui.Options{PublicOrigin: origin, Log: log, Now: func() time.Time { return now }})
@@ -1941,9 +2049,14 @@ func TestNetDevHostileDeviceOutputIsInertText(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NetDevPages: %v", err)
 	}
+	fwPage, err := u.NetDevFirewallPage(ui.NetDevFirewallOptions{Store: store, IsAdmin: func(_ context.Context, user string) (bool, error) { return user == "alice", nil }})
+	if err != nil {
+		t.Fatalf("NetDevFirewallPage: %v", err)
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/", u.Handler())
 	pages.Register(mux)
+	fwPage.Register(mux)
 	sessions := auth.NewStore(db, time.Now)
 	a, err := auth.New(auth.Options{Executor: ndAuthExec{}, Sessions: sessions, Log: log})
 	if err != nil {
@@ -1992,8 +2105,26 @@ func TestNetDevHostileDeviceOutputIsInertText(t *testing.T) {
 		if i == 0 && !strings.Contains(body, "&lt;script&gt;alert(1)&lt;/script&gt;") {
 			t.Errorf("%s: the hostile text is not shown as escaped text", path)
 		}
+		if i == 0 && !strings.Contains(body, "00:11:22:33:44:55") {
+			t.Errorf("%s: the MAC table is not shown", path)
+		}
 	}
 	requireInert(t, "/netdev/fw-edge", get("/netdev/fw-edge"))
+	// The firewall view shows the rules: the rule description with markup
+	// is there as escaped text.
+	fwBody := get("/netdev/fw-edge/firewall")
+	requireInert(t, "/netdev/fw-edge/firewall", fwBody)
+	if !strings.Contains(fwBody, "allow-dns") || !strings.Contains(fwBody, html.EscapeString(ndHostileMarkup[0])) {
+		t.Error("/netdev/fw-edge/firewall: the rule or its hostile description is not shown as escaped text")
+	}
+	for _, h := range hostileFW {
+		path := "/netdev/" + h.id + "/firewall"
+		body := get(path)
+		requireInert(t, path, body)
+		if !strings.Contains(body, html.EscapeString(h.value)) {
+			t.Errorf("/netdev/%s: rule %s member %q is not shown as escaped text", h.id, h.field, h.value)
+		}
+	}
 	if !bytes.Contains([]byte(list), []byte("&lt;script&gt;")) {
 		t.Error("/netdev: the hostile label is not shown as escaped text")
 	}
