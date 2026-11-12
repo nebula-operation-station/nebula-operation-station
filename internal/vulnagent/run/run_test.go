@@ -507,6 +507,49 @@ func TestDryRunPrintsRecordsAndSubmitsNothing(t *testing.T) {
 	e.assertNoSecrets(t)
 }
 
+func TestDryRunPacksLikeUpload(t *testing.T) {
+	e := newEnv(t)
+	r := e.runner(t)
+	if _, err := r.Run(context.Background(), ModeDryRun); err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	f, err := vulnfinding.ParseRecord([]byte(strings.TrimSpace(e.out.String())))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := f.Record
+	snap, err := r.cfg.NOS.Export(context.Background(), func(nosclient.Page) error { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	subj := subjectKey(base.SubjectKind, base.SubjectRef)
+	long := base
+	long.Assessment = vulnfinding.Assessment{Text: strings.Repeat("a", MaxRecordBytes)}
+	huge := base
+	huge.Component.SourcePackage = strings.Repeat("p", MaxRecordBytes)
+	m := &matched{uncovered: map[string]bool{}, findings: []prepared{
+		{rec: long, key: "long", subject: subj},
+		{rec: huge, key: "huge", subject: subj},
+		{rec: base, key: "missing", subject: subjectKey(base.SubjectKind, vulnfinding.SubjectRef{ID: "not-in-snapshot"})},
+	}}
+	out := &bytes.Buffer{}
+	r.cfg.Out = out
+	rep := &Report{}
+	if err := r.printRecords(snap, m, rep); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if rep.Printed != 1 || len(lines) != 1 {
+		t.Fatalf("printed %d (%d lines), want only the record within MaxRecordBytes", rep.Printed, len(lines))
+	}
+	if len(lines[0])+1 > MaxRecordBytes || strings.Contains(lines[0], `"text"`) {
+		t.Error("oversized record printed with its assessment text")
+	}
+	if rep.Withheld != 2 || !rep.Degraded() {
+		t.Errorf("withheld = %d, degraded %v; want 2 (too large, subject missing)", rep.Withheld, rep.Degraded())
+	}
+}
+
 func TestSyncOnlyNeverContactsNOS(t *testing.T) {
 	e := newEnv(t)
 	rep, err := e.runner(t).Run(context.Background(), ModeSyncOnly)
@@ -716,6 +759,42 @@ func TestTamperedSnapshotIsLeftOut(t *testing.T) {
 	}
 	if recs := e.nos.sentRecords(t); len(recs) != 1 || recs[0].Scores.KEV != nil {
 		t.Errorf("tampered KEV data used: %+v", recs)
+	}
+}
+
+func TestUnreadableCSAFStateMarksSourceFailed(t *testing.T) {
+	for name, content := range map[string]string{
+		"not json":      "{",
+		"unknown field": `{"bogus":1}`,
+		"too large":     strings.Repeat(" ", MaxCSAFStateBytes+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			feed := vulnfeed.Feed{Name: "csaf-test", SourceID: "csaf-test", Integrity: vulnfinding.IntegritySigned}
+			r := e.runner(t, func(c *Config) {
+				c.CSAF = []CSAFProvider{{Feed: feed, Keys: &vulnfeed.CSAFKeyring{}}}
+			})
+			if err := os.MkdirAll(filepath.Join(e.dir, csafDir), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(r.csafStatePath(feed.Name), []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			rep := &Report{Sources: []SourceEvidence{{Feed: feed.Name, SourceID: feed.SourceID, Status: SourceNotModified, SnapshotID: "sha256:x"}}}
+			_, loaded, err := r.loadDB(context.Background(), newSnapshotView(nil), rep)
+			if err != nil {
+				t.Fatalf("loadDB: %v", err)
+			}
+			for _, l := range loaded {
+				if l.feed.Name == feed.Name {
+					t.Error("unreadable CSAF state loaded")
+				}
+			}
+			s := rep.Sources[0]
+			if s.Status != SourceFailed || s.Error == "" || s.SnapshotID != "" || !rep.Degraded() {
+				t.Errorf("source evidence = %+v, degraded %v", s, rep.Degraded())
+			}
+		})
 	}
 }
 

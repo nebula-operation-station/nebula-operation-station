@@ -31,20 +31,25 @@ func encodeRecord(rec vulnfinding.Record) ([]byte, error) {
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
-// printRecords is the dry run's phase 5: every record exactly as it
-// would be sent, one JSON object per line, and no NOS write.
-func (r *Runner) printRecords(m *matched, rep *Report) error {
-	for _, p := range m.findings {
-		b, err := encodeRecord(p.rec)
-		if err != nil {
-			return err
-		}
-		if _, err := r.cfg.Out.Write(append(b, '\n')); err != nil {
-			return fmt.Errorf("print records: %w", err)
-		}
-		rep.Printed++
+// printRecords is the dry run's phase 5: the records packed exactly as
+// they would be sent (pack applies MaxRecordBytes, withholding and the
+// drop of subjects missing from the snapshot), one JSON object per line,
+// and no NOS write. Withheld records count as in a real run.
+func (r *Runner) printRecords(snap *nosclient.Snapshot, m *matched, rep *Report) error {
+	batches, withheld, _, err := pack(snap, m)
+	if err != nil {
+		return fmt.Errorf("print records: %w", err)
 	}
-	r.log.Info("dry run: records printed, nothing submitted", "records", rep.Printed)
+	rep.Withheld += withheld
+	for _, b := range batches {
+		for _, rec := range b.Findings {
+			if _, err := r.cfg.Out.Write(append(append([]byte(nil), rec...), '\n')); err != nil {
+				return fmt.Errorf("print records: %w", err)
+			}
+			rep.Printed++
+		}
+	}
+	r.log.Info("dry run: records printed, nothing submitted", "records", rep.Printed, "withheld", withheld)
 	return nil
 }
 

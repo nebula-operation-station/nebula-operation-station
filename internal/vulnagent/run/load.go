@@ -94,12 +94,19 @@ func (r *Runner) loadDB(ctx context.Context, view *snapshotView, rep *Report) (*
 		loaded = append(loaded, loadedFeed{feed: f, manifest: m, snapshotID: m.SnapshotID(), contentDate: m.ContentDate})
 	}
 	for _, p := range r.cfg.CSAF {
+		// A state that cannot be read leaves the signed source out of
+		// matching; the source is marked failed so the run is degraded.
 		st, err := r.loadCSAFState(p.Feed.Name)
-		if err != nil || len(st.Documents) == 0 {
+		if err != nil {
+			r.markUnusable(rep, p.Feed.Name, err)
+			continue
+		}
+		if len(st.Documents) == 0 {
 			continue
 		}
 		id, err := csafSnapshotID(st)
 		if err != nil {
+			r.markUnusable(rep, p.Feed.Name, err)
 			continue
 		}
 		if err := db.SetFeed(p.Feed.Name, vulnmatch.FeedRef{SourceID: p.Feed.SourceID, SnapshotID: id, Integrity: p.Feed.Integrity}); err != nil {

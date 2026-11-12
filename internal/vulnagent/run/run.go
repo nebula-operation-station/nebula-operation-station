@@ -285,7 +285,7 @@ func (r *Runner) run(ctx context.Context, mode Mode, rep *Report) error {
 	r.assess(ctx, m, rep)
 	// Phase 5: run protocol, or the printout of a dry run.
 	if mode == ModeDryRun {
-		return r.printRecords(m, rep)
+		return r.printRecords(snap, m, rep)
 	}
 	return r.upload(ctx, snap, m, rep)
 }
