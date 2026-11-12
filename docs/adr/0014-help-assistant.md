@@ -1,7 +1,9 @@
 # ADR 0014: In-app help assistant (LLM, advisory, never executes)
 
-Status: **Proposed, 2026-11-11.** Awaiting the maintainer's answers to the
-open questions below; do not merge before that discussion. Ticket plan:
+Status: **Accepted, 2026-11-12** (previously: proposed, 2026-11-11,
+awaiting the maintainer's answers to the open questions). The maintainer
+accepted the recommendations to Q1–Q12; see "Maintainer decisions
+2026-11-12". Ticket plan:
 [`docs/implementation/help-assistant.md`](../implementation/help-assistant.md).
 
 History:
@@ -146,6 +148,9 @@ History:
   rejected first `MAX`). The AS-05 plan row lists the "rejected"
   meta-test next to the class-rule tests (previously only its
   every-form-rejected failure).
+- 2026-11-12 (as01d, maintainer decision of the same day): status
+  Accepted; Q1–Q12 decided as recommended, see "Maintainer decisions
+  2026-11-12" (previously proposed with open questions).
 
 ## Context
 
@@ -1725,7 +1730,7 @@ assistant reduces typing, not responsibility.
 - Threat model: T1–T10 as new items under "LLM output", with the residual
   risk.
 
-## Open questions for the maintainer
+## Open questions for the maintainer (decided 2026-11-12, see below)
 
 | # | Question | Recommendation |
 | --- | --- | --- |
@@ -1741,6 +1746,31 @@ assistant reduces typing, not responsibility.
 | Q10 | Conversation storage opt-in: allowed at all; may admins read others' conversations? | Allowed per user, 30 days, 50 conversations; admins cannot read them |
 | Q11 | Release placement | After hb01 (embedded docs) and va09 (LLM settings) |
 | Q12 | Add the assistant corpus (`docs/handbook/`, `docs/admin/guide.md`) to `.github/protected-paths.txt`, so every change to the trusted prompt content and the allowed command shapes gets the maintainer review (T2)? `.github/` is protected, so only a maintainer can make this change | Yes, before `assistant.enabled` can be switched on in a release; until then T2 states the mitigation as not enforced |
+
+## Maintainer decisions 2026-11-12
+
+The maintainer accepted the recommendation to each question on
+2026-11-12; each recommendation is now the decision. The table above is
+kept as history.
+
+- **Q1:** Own values, same form and rules, "copy from vulnerability
+  agent" button.
+- **Q2:** Answer in the question's language from the English corpus with
+  the synonym table; a German handbook is a separate docs ticket.
+- **Q3:** Lexical (BM25) first: deterministic, testable, no extra calls;
+  revisit if recall is poor.
+- **Q4:** Handbook, FAQ and admin guide only.
+- **Q5:** Per-question opt-in, default off.
+- **Q6:** Yes, from an admin-set server setting "NOS source addresses";
+  never inferred.
+- **Q7:** Disabled; amber flags allow copy.
+- **Q8:** No: same lab-only rule as A1.4 for both features.
+- **Q9:** All logged-in users, 20/h per user, 300/day global.
+- **Q10:** Allowed per user, 30 days, 50 conversations; admins cannot
+  read them.
+- **Q11:** After hb01 (embedded docs) and va09 (LLM settings).
+- **Q12:** Yes, before `assistant.enabled` can be switched on in a
+  release; until then T2 states the mitigation as not enforced.
 
 ## Consequences
 
