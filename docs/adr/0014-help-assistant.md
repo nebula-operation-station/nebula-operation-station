@@ -148,6 +148,24 @@ History:
   rejected first `MAX`). The AS-05 plan row lists the "rejected"
   meta-test next to the class-rule tests (previously only its
   every-form-rejected failure).
+- 2026-11-12 (as00ij, follow-up to PR #531): the rule (b) meta-test
+  fake records the entry's final request before its error and must be
+  neither rejected nor accepted (previously "records a request … never
+  as rejected", which a harness ignoring the error passed). Rule (c)
+  has one `trust-path` fake per command (previously one fake for
+  `pve remote add`/`repin --ca-file`). Fake entries that check their
+  recorders, fake executor and working directory at the start of each
+  run catch a `canary-range` run that gets a working directory of any
+  earlier run, or a recorder or fake executor of an earlier accepted
+  run, and catch a fake executor or working directory shared between the
+  `--identity` control and canary run in both orders (previously the
+  range rejection checks had no fake-based test, and the control-run
+  check caught no shared fake executor or working directory); a
+  shared `backup.System` recorder is still caught only in the after
+  order, because a correct control run makes no `backup.System` call.
+  The range-check fake records its final request by one call to its
+  fake executor (previously not stated, so whether it caught a harness
+  sharing only the fake executor was open).
 - 2026-11-12 (as01d, maintainer decision of the same day): status
   Accepted; Q1–Q12 decided as recommended, see "Maintainer decisions
   2026-11-12" (previously proposed with open questions). Round 1 of PR
@@ -875,15 +893,23 @@ does NOS connect **from** (`--from`)?
       `Start(backup.StartUnits)`, `Chown` (final action not last); a
       harness that checks only that both calls occur, or skips the
       `Stop`-first or the `Start`-last check, accepts one of them;
-  - rule (b): a fake argument that records a request and then returns
-    an error must fail as a harness error, never as rejected;
-  - rule (c): a fake `in-path` argument and a fake `trust-path`
-    argument (`pve remote add --ca-file` and
-    `pve remote repin --ca-file`) that each return an error before any
+  - rule (b) (as00ij; previously "records a request and then returns
+    an error … never as rejected", so a harness that decided accepted
+    from "final request recorded" and ignored the returned error
+    passed): a fake non-path argument (kind `id`) whose run records
+    the entry's **final request** and then returns an error must fail
+    as a harness error naming harness entry and argument, never as
+    rejected and never as accepted; a harness that classifies it as
+    accepted (final request recorded, error ignored) or as rejected
+    (error, recorder not consulted) fails the meta-test;
+  - rule (c): a fake `in-path` argument and two fake `trust-path`
+    arguments, one for `pve remote add --ca-file` and one for
+    `pve remote repin --ca-file`, that each return an error before any
     traffic for one form only must fail as a harness error, never as a
     per-form rejection (as00iif2; previously only the `in-path` fake,
     so a harness that exempted only `in-path` from per-form rejection
-    passed);
+    passed; as00ij: one fake per command, previously "a fake
+    `trust-path` argument" for both);
   - rejected: a fake non-path argument that returns an error without
     traffic for one form and is accepted for the others passes; one
     that rejects every form without `canary-rejects` fails (the
@@ -896,6 +922,28 @@ does NOS connect **from** (`--from`)?
     `MAX − 1` run is rejected (as00iif2; previously only the first,
     so a harness that applied the range-check class to the first `MAX`
     run only and let a rejected later run pass on its own passed);
+  - range-check isolation (as00ij; previously only "both entries green
+    on today's tree", which catches a reused recorder only when the
+    harness runs the rejection checks after the `MAX − 1` run): a fake
+    `canary-range` entry whose every run (`MAX`, `MAX`, `MAX − 1` and
+    the rejection checks `MAX + 1`, `47000 + m`, `MIN − 1`) first
+    looks at the objects the harness handed it and, if its recorders
+    or fake executor hold a call or its working directory holds a
+    marker file, records the final request and returns an error;
+    otherwise it creates a marker file in its working directory and
+    then, for `MAX`, `MAX` and `MAX − 1`, returns no error after
+    recording the final request with the value in its expected field
+    (passing the distinctive check) and, for the rejection values,
+    returns an error without traffic. The fake records the final
+    request by exactly one call to its fake executor that sends that
+    request, so after an accepted run both its recorders and its fake
+    executor hold a call, and a rejection value calls neither. It must
+    pass. A harness that hands a run a recorder or fake executor an
+    earlier accepted run used, or a working directory any earlier run
+    used, fails it (a later accepted run becomes a harness error, a
+    later rejection check records traffic); a recorder or fake
+    executor shared only with earlier rejection checks is not caught,
+    because a rejection value calls neither;
   - confirmation rerun: a fake `number` argument whose first run is
     accepted with a `47000 + m` hit, and whose rerun with `48000 + m`
     returns **no error and sends nothing**, must fail as a harness
@@ -910,7 +958,26 @@ does NOS connect **from** (`--from`)?
     `*age.NoIdentityMatchError` and no `backup.System` call on its own
     recorder; canary: accepted), so a harness that shares a recorder
     between them fails in one of the two orders (**Restore runs**
-    below).
+    below); in addition (as00ij; previously only that check, which
+    catches a shared `backup.System` recorder only in the after order,
+    because a correct control run records no call, and never a shared
+    fake executor or working directory) a fake `restore --identity`
+    harness entry whose every run (canary and control) first looks at
+    its fake `backup.System`, fake executor and working directory and,
+    if any of them holds a call or a marker file, returns an error
+    other than `*age.NoIdentityMatchError` after a `Stop` call;
+    otherwise it creates a marker file in its working directory, makes
+    one call to its fake executor, and then behaves like the real
+    entry (canary: `Stop`, final `Start`, no error; control:
+    `*age.NoIdentityMatchError`, no `backup.System` call). It must pass
+    in both orders. A harness that shares the fake executor or the
+    working directory between control and canary run fails it in both
+    orders. One that shares only the `backup.System` recorder (fresh
+    fake executor and working directory) fails it only in the after
+    order: a correct control run makes no `backup.System` call, so in
+    the before order the canary run finds that recorder empty and
+    passes; the before/after check above catches that harness in the
+    same after order, and no meta-test catches it in the before order.
   **Range checks** (previously Run classes sent every accepted run
   through conditions 1 to 3 and let a rejected run pass on its own,
   while **Bounded numbers** below replaces conditions 1 and 2 for
@@ -1096,9 +1163,10 @@ does NOS connect **from** (`--from`)?
   `MIN − 1` must each be rejected (error, nothing recorded), each with
   fresh recorders, a fresh fake executor and a fresh working directory
   (previously not stated, so a harness reusing the `MAX − 1` run's
-  recorder saw its traffic; the test "both entries green on today's
-  tree" fails such a harness, because `21` and `1001` are rejected
-  before any request). The
+  recorder saw its traffic; the range-check isolation meta-test of
+  **Class-rule tests** fails a harness that hands a run a recorder or
+  fake executor an earlier accepted run used, or a working directory
+  any earlier run used). The
   host-shaped forms and condition 3 apply as for every argument. Instead
   of the needle search of conditions 1 and 2, which a small value cannot
   pass reliably, the runs get a **distinctive check**:

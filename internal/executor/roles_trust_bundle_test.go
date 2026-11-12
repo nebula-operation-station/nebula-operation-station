@@ -147,9 +147,15 @@ func writeDockerBundle(t *testing.T, k *bundleSK, dir, releaseVersion, moduleVer
 	mod := bundleTar(t, map[string][]byte{"actions/restart.sh": []byte(script), release.LockFile: bundleCanon(t, l)})
 	modPath := "modules/docker/" + moduleVersion + ".tar"
 	bundle := bundleTar(t, map[string][]byte{modPath: mod})
+	// The manifest must list installed-files.json (spec 10). ReadBundleDir
+	// does not read it from dir, so only its digest is needed here.
+	list := []byte("placeholder")
 	man := bundleCanon(t, map[string]any{"format": release.ManifestFormat, "release_version": releaseVersion,
-		"artifacts": []any{map[string]any{"name": release.BundleArtifact, "size": len(bundle), "sha256": bundleSum(bundle)}},
-		"modules":   []any{map[string]any{"name": "docker", "version": moduleVersion, "size": len(mod), "sha256": bundleSum(mod)}}})
+		"artifacts": []any{
+			map[string]any{"name": release.BundleArtifact, "size": len(bundle), "sha256": bundleSum(bundle)},
+			map[string]any{"name": release.InstalledFilesArtifact, "size": len(list), "sha256": bundleSum(list)},
+		},
+		"modules": []any{map[string]any{"name": "docker", "version": moduleVersion, "size": len(mod), "sha256": bundleSum(mod)}}})
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
