@@ -992,3 +992,95 @@ func TestCanceledContextStopsPull(t *testing.T) {
 		t.Fatal("output written")
 	}
 }
+
+// testIndexEntry is one index.json entry as a containerd import reads it.
+type testIndexEntry struct {
+	MediaType   string            `json:"mediaType"`
+	Digest      string            `json:"digest"`
+	Size        int64             `json:"size"`
+	Platform    map[string]string `json:"platform"`
+	Annotations map[string]string `json:"annotations"`
+}
+
+// The archive is also an OCI image layout that holds the registry's own
+// platform manifest byte for byte, so a containerd-store `docker load`
+// keeps the registry manifest digest as the image target instead of
+// generating its own manifest from manifest.json.
+func TestPullWritesOCILayoutWithTheRegistryManifest(t *testing.T) {
+	for name, byIndex := range map[string]bool{"index": true, "manifest": false} {
+		t.Run(name, func(t *testing.T) {
+			var log []reqLog
+			f := newFakeRegistry(t, registrymeta.AuthBasic, &log)
+			img := f.addImage(t, []byte("oci-layer"))
+			p := newTestPuller(t, f, nil)
+			d := img.manifestDigest()
+			if byIndex {
+				d = img.indexDigest()
+			}
+			var out bytes.Buffer
+			if _, err := p.Pull(context.Background(), testCred(), request(d), &out); err != nil {
+				t.Fatalf("Pull: %v", err)
+			}
+			files, complete := readArchive(t, out.Bytes())
+			if !complete {
+				t.Fatal("archive is not complete")
+			}
+			var layout struct {
+				Version string `json:"imageLayoutVersion"`
+			}
+			if err := json.Unmarshal(files["oci-layout"], &layout); err != nil || layout.Version != "1.0.0" {
+				t.Fatalf("oci-layout = %q", files["oci-layout"])
+			}
+			var idx struct {
+				SchemaVersion int              `json:"schemaVersion"`
+				MediaType     string           `json:"mediaType"`
+				Manifests     []testIndexEntry `json:"manifests"`
+			}
+			if err := json.Unmarshal(files["index.json"], &idx); err != nil {
+				t.Fatal(err)
+			}
+			host := strings.TrimPrefix(f.srv.URL, "https://")
+			if idx.SchemaVersion != 2 || idx.MediaType != mtOCIIndex || len(idx.Manifests) != 1 {
+				t.Fatalf("index.json = %s", files["index.json"])
+			}
+			m := idx.Manifests[0]
+			if m.Digest != img.manifestDigest() || m.Size != int64(len(img.manifest)) || m.MediaType != mtOCIManifest ||
+				m.Platform["os"] != "linux" || m.Platform["architecture"] != "amd64" ||
+				m.Annotations["io.containerd.image.name"] != host+"/team/app:1.2.3" ||
+				m.Annotations["org.opencontainers.image.ref.name"] != "1.2.3" {
+				t.Fatalf("index.json entry = %+v", m)
+			}
+			// The platform manifest blob is the registry's bytes, not a
+			// re-encoding; the registry index is not part of the layout.
+			if !bytes.Equal(files[digestPath(img.manifestDigest())], img.manifest) {
+				t.Fatal("the registry manifest is missing or altered")
+			}
+			if _, ok := files[digestPath(img.indexDigest())]; ok {
+				t.Fatal("the registry index was written")
+			}
+			// manifest.json stays for docker-archive loaders.
+			if files["manifest.json"] == nil || files["repositories"] == nil {
+				t.Fatal("docker-archive entries are missing")
+			}
+		})
+	}
+}
+
+// A failed pull never writes index.json, oci-layout or the manifest blob.
+func TestFailedPullWritesNoOCILayout(t *testing.T) {
+	var log []reqLog
+	f := newFakeRegistry(t, registrymeta.AuthBasic, &log)
+	img := f.addImage(t, []byte("good-layer"))
+	f.blobs[sha([]byte("good-layer"))] = []byte("evil-layer")
+	p := newTestPuller(t, f, nil)
+	var out bytes.Buffer
+	if _, err := p.Pull(context.Background(), testCred(), request(img.manifestDigest()), &out); !errors.Is(err, ErrDigestMismatch) {
+		t.Fatalf("Pull: %v", err)
+	}
+	files, _ := readArchive(t, out.Bytes())
+	for _, name := range []string{"index.json", "oci-layout", digestPath(img.manifestDigest())} {
+		if _, ok := files[name]; ok {
+			t.Fatalf("failed pull wrote %s", name)
+		}
+	}
+}
