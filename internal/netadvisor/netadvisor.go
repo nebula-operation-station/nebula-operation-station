@@ -37,6 +37,10 @@ const (
 	CheckOverlap             = "overlap"
 	CheckAnyAny              = "any-any"
 	CheckAllowWithoutProfile = "allow-without-profile"
+	CheckZeroHits            = "zero-hits"
+	CheckDNSBypass           = "dns-bypass"
+	CheckMgmtFromUntrusted   = "mgmt-from-untrusted"
+	CheckModelContradiction  = "model-contradiction"
 )
 
 // State is the outcome of one check for one rule.
@@ -99,6 +103,12 @@ type Input struct {
 	Index       *netreach.Index
 	ZoneClasses map[string]TrustClass
 	Profiles    netreach.Field[map[string]ProfileSetting]
+
+	// obs holds the observations of the checks zero-hits, dns-bypass,
+	// mgmt-from-untrusted and model-contradiction. Only SetObservations
+	// sets it, after validation; the zero value has every observation
+	// missing, so those checks report StateDataNotCollected.
+	obs Observations
 }
 
 // Limits of the advisor input.
@@ -165,12 +175,16 @@ func allValidNames(l []string) bool {
 }
 
 // Finding is the result of one check for one rule. RuleIndex is the
-// position in rule order (-1 for a result that concerns no single rule).
+// position in rule order (-1 for a result that concerns no single rule:
+// the flow part of dns-bypass, mgmt-from-untrusted, model-contradiction).
 // Reason says why, in one sentence. Covering lists the covering rules of
 // shadowed-rule and overlap, at most MaxCoveringNames of them in rule
 // order; CoveringTotal is the number of covering rules, listed or not.
 // Fields lists the fields that are "any" (any-any); Zones the zones that
-// made the rule relevant (any-any, allow-without-profile).
+// made the rule relevant (any-any, allow-without-profile, dns-bypass).
+// Hits, Flow and Mgmt carry the evidence of zero-hits, of the flow-based
+// results (dns-bypass flow part, model-contradiction) and of
+// mgmt-from-untrusted; they are nil for every other check.
 type Finding struct {
 	CheckID       string
 	CheckVersion  string
@@ -184,6 +198,7 @@ type Finding struct {
 	CoveringTotal int
 	Fields        []string
 	Zones         []string
+	Hits          *HitEvidence
 }
 
 // Report is the result of one check over one snapshot. State is StateOK
@@ -207,7 +222,7 @@ type Check interface {
 
 // Checks returns the checks of this package in a fixed order.
 func Checks() []Check {
-	return []Check{ShadowCheck{}, AnyAnyCheck{}, ProfileCheck{}}
+	return []Check{ShadowCheck{}, AnyAnyCheck{}, ProfileCheck{}, HitsCheck{}}
 }
 
 // precondition returns the state and reason when the snapshot as a whole
