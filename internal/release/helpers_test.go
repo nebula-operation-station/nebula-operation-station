@@ -222,6 +222,26 @@ func withoutArtifact(man map[string]any, name string) {
 	man["artifacts"] = keep
 }
 
+// setArtifactSize sets the size of the artifact called name in man.
+func setArtifactSize(man map[string]any, name string, size int64) {
+	for _, a := range man["artifacts"].([]any) {
+		if o := a.(map[string]any); o["name"] == name {
+			o["size"] = size
+			return
+		}
+	}
+}
+
+// setArtifactName renames the artifact called name in man to to.
+func setArtifactName(man map[string]any, name, to string) {
+	for _, a := range man["artifacts"].([]any) {
+		if o := a.(map[string]any); o["name"] == name {
+			o["name"] = to
+			return
+		}
+	}
+}
+
 func defaultRelease(t testing.TB) (map[string]any, []byte) {
 	return release(t, testModule{name: "docker", version: "1.2.0"}, testModule{name: "os-debian", version: "2.0.1"})
 }

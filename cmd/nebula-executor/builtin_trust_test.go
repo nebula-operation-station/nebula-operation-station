@@ -156,8 +156,14 @@ func writeBundle(t *testing.T, k *testRoot, dir string) {
 			Risk: "LOW", TimeoutS: 60, Params: []prelude.Param{}, Secrets: []string{}, Declares: []string{}}}}
 	mod := tarOf(t, map[string][]byte{"actions/restart.sh": script, release.LockFile: canon(t, l)})
 	bundle := tarOf(t, map[string][]byte{"modules/docker/1.0.0.tar": mod})
+	// The manifest must list installed-files.json (spec 10). ReadBundleDir
+	// does not read it from dir, so only its digest is needed here.
+	list := []byte("placeholder")
 	man := canon(t, map[string]any{"format": release.ManifestFormat, "release_version": "2026.11.0",
-		"artifacts": []any{map[string]any{"name": release.BundleArtifact, "size": len(bundle), "sha256": sum(bundle)}},
+		"artifacts": []any{
+			map[string]any{"name": release.BundleArtifact, "size": len(bundle), "sha256": sum(bundle)},
+			map[string]any{"name": release.InstalledFilesArtifact, "size": len(list), "sha256": sum(list)},
+		},
 		"modules":   []any{map[string]any{"name": "docker", "version": "1.0.0", "size": len(mod), "sha256": sum(mod)}}})
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)

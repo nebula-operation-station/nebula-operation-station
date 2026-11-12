@@ -152,18 +152,15 @@ func TestParseManifestRejects(t *testing.T) {
 		"size float":      func(m map[string]any) { art(m)["size"] = 1.5 },
 		"size string":     func(m map[string]any) { art(m)["size"] = "1" },
 		"artifact too big": func(m map[string]any) {
-			m["artifacts"].([]any)[1].(map[string]any)["size"] = int64(MaxArtifactSize) + 1
+			m["artifacts"] = append(m["artifacts"].([]any), map[string]any{"name": "payload.bin", "size": int64(MaxArtifactSize) + 1, "sha256": hexSum(nil)})
 		},
 		"no installed files": func(m map[string]any) { withoutArtifact(m, InstalledFilesArtifact) },
 		"two installed files": func(m map[string]any) {
 			a := m["artifacts"].([]any)
 			m["artifacts"] = []any{a[0], a[1], a[1], a[2]}
 		},
-		"installed files name case": func(m map[string]any) {
-			m["artifacts"].([]any)[1].(map[string]any)["name"] = "Installed-Files.json"
-		},
 		"installed files too big": func(m map[string]any) {
-			m["artifacts"].([]any)[1].(map[string]any)["size"] = MaxInstalledFilesDocument + 1
+			setArtifactSize(m, InstalledFilesArtifact, MaxInstalledFilesDocument+1)
 		},
 		"bundle too big":    func(m map[string]any) { art(m)["size"] = MaxBundle + 1 },
 		"sha upper":         func(m map[string]any) { art(m)["sha256"] = strings.ToUpper(hexSum(nil)) },
@@ -196,6 +193,10 @@ func TestParseManifestRequiresExactlyOneInstalledFiles(t *testing.T) {
 		"two lists": func(m map[string]any) {
 			a := m["artifacts"].([]any)
 			m["artifacts"] = []any{a[0], a[1], a[1], a[2]}
+		},
+		// Sorts before builtins.tar, so only the count check rejects it.
+		"name case": func(m map[string]any) {
+			setArtifactName(m, InstalledFilesArtifact, "Installed-Files.json")
 		},
 	}
 	for name, edit := range cases {
