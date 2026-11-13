@@ -14,6 +14,11 @@ with its code evidence (file:line) and, where `git log` shows it, the PR. A
 finding without such evidence stays `open` or `not verified`. The original GAP
 text is kept as history ("previously: GAP").
 
+The `GAP` markers in the body tables below (sections "Peercred roles" to "Install
+paths") are the state at `ff1aa11`, unless a row says otherwise. For the state
+at the re-check commit, read the Summary table, the "Findings in detail" status
+lines and the Fix tickets.
+
 ## How to read this
 
 - **OK**: production code path traced, no gap.
@@ -35,13 +40,13 @@ or tarball install paths have their own stoppers.
 | WA-01 | blocker | all | The server never imports the PVE spool: no production caller of the importers | fixed: `cmd/nebula-server/main.go:419,423`, `pveimport.go:53-84`; PR #327 (previously: GAP) |
 | WA-02 | blocker | all | The server calls admin-only `ListPVEAdminRemotes`, so no PVE read grant can be proposed | fixed: `internal/executions/readgrants_provider.go:152` calls `ListPVERemotes`; no caller of `ListPVEAdminRemotes` left in `internal/executions`; PR #317 (previously: GAP) |
 | WA-03 | blocker | quickstart | `setup-nebula.sh` does not copy `nebula-pve-collector`; `install.sh` stops | fixed: `deploy/quickstart/setup-nebula.sh:199-201` copies every name in `deploy/quickstart/binaries.txt:11`; PR #318 (previously: GAP) |
-| WA-04 | high | tarball, quickstart | `install.sh` installs and enables the unprovisioned iconfetch units | fixed: `deploy/install.sh:733-738` leaves them out, `:998-1003` removes leftovers; PR #320 (previously: GAP) |
-| WA-05 | medium | all | Typed guest power and snapshots have no production client | decision needed: wired at `cmd/nebula-server/main.go:505-506`, server role may commit (`internal/executor/roles.go:198-203`); the decision cited in the comment at `main.go:500-504` must be confirmed; PR #356 (previously: GAP) |
+| WA-04 | high | tarball, quickstart | `install.sh` installs and enables the unprovisioned iconfetch units | fixed: the explicit `tarball_units` and `package_units` lists (`deploy/install.sh:760-775`) leave them out (comment `:733-738`), `:998-1003` removes leftovers; PR #320 (previously: GAP) |
+| WA-05 | medium | all | Typed guest power and snapshots have no production client | decision needed: wired at `cmd/nebula-server/main.go:505-506`, server role may commit (`internal/executor/roles.go:198-203`), UI routes pass their gate (`internal/web/ui/guestactions.go:708`); the decision cited in the comment at `main.go:500-504` has no record in `docs/`; chart visibility not verified; PR #356 (previously: GAP) |
 | WA-06 | medium | container | Discovery relies on a file capability under `no-new-privileges` | open: `deploy/container/compose.yaml:77-80` and `deploy/container/Dockerfile:11-15` unchanged; `compose.yaml:15` still sets `no-new-privileges` |
-| WA-07 | medium | all | No install path provides the built-in release bundle directory | open (partly): `.deb` creates it, `.goreleaser.yaml:181-183`; image, `deploy/container/Dockerfile:35`; tarball still missing (`install.sh` has no reference); PR #369 (previously: GAP) |
+| WA-07 | medium | all | No install path provides the built-in release bundle directory | open (partly): the directory is now created by the `.deb` (`.goreleaser.yaml:181-183`), the image (`deploy/container/Dockerfile:35`) and the tarball installer (`deploy/install.sh:465`, called at `:509`); the bundle files and the compose volume are still missing; PR #369 (previously: GAP) |
 | WA-08 | medium | tarball, `.deb` | Upgrades do not restart `nebula-pve-collector` | fixed: `deploy/install.sh:665-670` (restart list) and `:1225-1244`; `.deb` hint `deploy/deb/postinst:196`; PR #329 (previously: GAP) |
 | WA-09 | medium | tarball, quickstart | Upgrades never refresh changed unit files | fixed: `deploy/install.sh:778-791` (`units_manifest`), `:889` (`refresh_units`), called at `:990`; PR #332 (previously: GAP) |
-| WA-10 | low | all | Private registry reads: authorizer unset, no client | decision needed: authorizer wired at `cmd/nebula-executor/registry_reads.go:28,47`, server client at `cmd/nebula-server/executor.go:482`; profile decision cited at `registry_reads.go:38-41`; PR #452 (previously: GAP) |
+| WA-10 | low | all | Private registry reads: authorizer unset, no client | open: keep option decided (Q6 answered 2026-11-11, option (a), `docs/implementation/container-updates.md:1195-1197`); authorizer wired at `cmd/nebula-executor/registry_reads.go:28,47`, server client at `cmd/nebula-server/executor.go:482`; the reviewed profile is still open; PR #452 (previously: GAP) |
 | WA-11 | low | tarball, quickstart | `uninstall.sh` leaves the collector binary and does not mention its user | fixed: binary list from `deploy/quickstart/binaries.txt` (`deploy/uninstall.sh:41,48`), user named at `:20,114`; PR #357 (previously: GAP) |
 | WA-12 | low | tarball, `.deb`, quickstart | `install.sh` accepts NSS-only admin users the static executor cannot resolve | fixed: `deploy/install.sh:332-358` checks `/etc/passwd`; PR #360 (previously: GAP) |
 | WA-13 | low | container | The collector container has a network, unlike its unit | fixed: `deploy/container/compose.yaml:97` (pve-collector `network_mode: none`); PR #357 (previously: GAP) |
@@ -86,7 +91,7 @@ completeness.
 | `SetPveGuestPowerBindings` | Engine's own bindings | `main.go:183` | OK |
 | `SetEventKey` | FailedPrecondition (`internal/executor/events.go:28`) | `main.go:184` | OK |
 | `SetBackupDirs` | FailedPrecondition (`backup.go:39`); no provisioner (`pve_rpc.go:342`); batch members refused (`batch_hold.go:211`) | `main.go:185`, before `setupBatchAuthority` at `:195` | OK |
-| `SetBuiltinTrust` | Unimplemented (`roles_trust.go:165`) | `builtin_trust.go:42`; failure is logged, not fatal (`:59-61`). Anchor `root-1` is real (`internal/release/rootkeys.txt:15`) | OK; bundle: **GAP WA-07** |
+| `SetBuiltinTrust` | Unimplemented (`roles_trust.go:165`) | `builtin_trust.go:42`; failure is logged, not fatal (`:59-61`). Anchor `root-1` is real (`internal/release/rootkeys.txt:15`) | OK; bundle: **GAP WA-07** (at `ff1aa11`; the directory now exists on all three paths, the files are still open, see WA-07) |
 | `SetBatchAuthority` | Unimplemented (`roles_batch.go:29`) | `cmd/nebula-executor/batch.go:55` | OK |
 | `EnableBatchExecution` | Unimplemented (`batch_dispatch.go:58`) | `batch.go:56` | OK |
 | PVE mutation client and provisioner | FailedPrecondition (`pve_rpc.go:801,1146`) | Built lazily, never nil once data dir is set (`pve_rpc.go:93-96,341-352`) | OK |
@@ -138,7 +143,7 @@ The `.deb` ships only executor, server, discovery and collector units
 | `.../pve/live` | `install.sh:261`, `Dockerfile:42` | collector:rpc 2750 | `live_spool.go:26` exact | OK |
 | `/run/nebula` | `RuntimeDirectory`; `Dockerfile:43` | executor 0755 / 0750 group rpc | `peercred.go:289-294` | OK |
 | `/var/lib/nebula/iconfetch` | Nobody | none | `nebula-iconfetch.service:10-12` | **GAP WA-04** |
-| `/usr/share/nebula/release` | Nobody | none | `cmd/nebula-executor/builtin_trust.go:19` | **GAP WA-07** |
+| `/usr/share/nebula/release` | Nobody at `ff1aa11`; now `.deb`, image and tarball installer (`install.sh:465`) | none (directory) | `cmd/nebula-executor/builtin_trust.go:19` | **GAP WA-07** at `ff1aa11`; directory fixed, bundle files open (see WA-07) |
 
 The `install_test.sh` provisioning checks are static (`:172-177`), and its real
 runs need root, systemd and the tarball layout (`:207`), so CI exercises neither
@@ -149,7 +154,7 @@ WA-03 nor WA-04. CI does not call `install_test.sh` at all: `make test-deploy`
 
 | Service | UID, groups | Volumes vs. code | Status |
 |---|---|---|---|
-| `executor` | 10001, `group_add` 10010 (`compose.yaml:23-24`) | Data and socket volumes match. No path for the release bundle on a read-only root | OK; **GAP WA-07** |
+| `executor` | 10001, `group_add` 10010 (`compose.yaml:23-24`) | Data and socket volumes match. No path for the release bundle on a read-only root | OK; **GAP WA-07** at `ff1aa11` (image creates the directory; no active bundle volume, see WA-07) |
 | `server` | 10002, 10010 | Jobs, results `:ro`, requests, live `:ro`. **No `pve/results` or `guestnet` volume** (`:49-59`) | OK today; WA-01 needs them |
 | `discovery` | 10003, `cap_add: [NET_RAW]` (`:64-68`) | Spool matches, `-watch` polling | **GAP WA-06** |
 | `pve-collector` | 10004, 10010 (`:78-79`) | `ensureDirMode` group resolves to 10010 through `group_add` (`spool.go:490-505`) and matches the image | OK; **GAP WA-13** |
@@ -164,7 +169,7 @@ WA-03 nor WA-04. CI does not call `install_test.sh` at all: `make test-deploy`
 | Tarball upgrade | Units skipped if present; collector not restarted | **GAP WA-08, WA-09** |
 | Quickstart | Copies four of five binaries | **GAP WA-03** |
 | Container image | All five binaries (`Dockerfile:45`, `.goreleaser.yaml:147`) | OK |
-| Uninstall | Collector binary left behind | **GAP WA-11** |
+| Uninstall | Collector binary left behind | **GAP WA-11** at `ff1aa11`; fixed 2026-11-13, see WA-11 |
 
 ## Findings in detail
 
@@ -298,13 +303,22 @@ start, not that a scan runs.
 
 ### WA-07: no install path provides the built-in bundle
 
-**Status (2026-11-13): open (partly fixed).** The `.deb` creates
-`/usr/share/nebula/release` (`.goreleaser.yaml:181-183`, PR #369); the container
-image creates it (`deploy/container/Dockerfile:35`), and `compose.yaml:37-39`
-documents a bind mount for it. The tarball path is still missing: `install.sh`
-has no reference to `/usr/share/nebula/release`. previously: GAP.
+**Status (2026-11-13): open (partly fixed).** The directory
+`/usr/share/nebula/release` now exists on all three paths: the `.deb` creates it
+(`.goreleaser.yaml:181-183`, PR #369), the image creates it
+(`deploy/container/Dockerfile:35`), and the tarball installer creates it
+(`deploy/install.sh:455-465`, `provision_release_bundle`, called unconditionally
+at `:509`; the dry-run message at `:380` only prints the path). The earlier
+claim "tarball still missing, `install.sh` has no reference" was wrong.
 
-Evidence: `-builtin-bundle-dir` defaults to `/usr/share/nebula/release`
+Still open: no path ships the three bundle files (`release-manifest.json`,
+`release-manifest.json.sig`, `builtins.tar`). The tarball copies them only from
+`--release-bundle-dir` or from beside `install.sh` (`install.sh:466-505`), and
+the `.deb` ships an empty directory (`.goreleaser.yaml:181`). The compose
+executor's bind for the directory is only a comment (`compose.yaml:37-39`), so
+its volume is not active and its root is read-only. previously: GAP.
+
+Evidence (at `ff1aa11`): `-builtin-bundle-dir` defaults to `/usr/share/nebula/release`
 (`cmd/nebula-executor/builtin_trust.go:19`). `.goreleaser.yaml:115-137`,
 `install.sh` and `Dockerfile` do not create it. `docs/admin/guide.md:630-636`
 requires the directory, and when it is missing the command fails and the web
@@ -409,7 +423,7 @@ behaviour this audit could not observe.
 | WA-04 | Install and enable an explicit unit list without iconfetch until the icon service is wired | `deploy/install.sh`, `deploy/install_test.sh` | no | S | fixed: `deploy/install.sh:733-738`, `:998-1003`; PR #320 |
 | WA-05 | Decide commit path, then wire | `cmd/nebula-server/`, `internal/web/ui/`, plus `cmd/nebula/` or `internal/executor/roles.go` | **yes** | M | decision needed: wired at `cmd/nebula-server/main.go:505-506`, `roles.go:198-203`; decision to be confirmed (see Findings) |
 | WA-06 | Scan-capable discovery container; correct the comment; threat model note | `deploy/container/`, `docs/threat-model.md` | **yes** (threat model) | S | open: `deploy/container/compose.yaml:77-80` unchanged |
-| WA-07 | Ship or provision the bundle; add a compose volume | `.goreleaser.yaml`, `deploy/container/compose.yaml`, `docs/admin/guide.md` | no | M | open (partly): `.goreleaser.yaml:181-183`, `deploy/container/Dockerfile:35`; tarball missing |
+| WA-07 | Ship or provision the bundle; add a compose volume | `.goreleaser.yaml`, `deploy/container/compose.yaml`, `docs/admin/guide.md` | no | M | open (partly): directory created by `.goreleaser.yaml:181-183`, `deploy/container/Dockerfile:35`, `deploy/install.sh:465,509`; bundle files and the compose volume (`compose.yaml:37-39`, comment only) still missing |
 | WA-08 | Restart the collector when binaries changed; extend the postinst hint | `deploy/install.sh`, `deploy/deb/postinst` | no | S | fixed: `deploy/install.sh:665-670`, `:1225-1244`; `deploy/deb/postinst:196`; PR #329 |
 | WA-09 | Refresh unmodified units (compare against a stored checksum), or warn on drift | `deploy/install.sh` | no | M | fixed: `deploy/install.sh:778-791`, `:889`; PR #332 |
 | WA-10 | Decide: wire a read-grant profile with a client, or remove the RPCs | `cmd/nebula-executor/`, `internal/executor/` | **yes** | M | decision needed: `cmd/nebula-executor/registry_reads.go:47` wires the authorizer, `cmd/nebula-server/executor.go:482` is the client; keep-or-remove still open; PR #452 |
