@@ -296,7 +296,8 @@ func (r Report) Clean() bool {
 type Options struct {
 	// Root is the absolute directory the listed absolute paths are
 	// resolved under; "" means "/". Tests and an offline check of a
-	// mounted disk use another root.
+	// mounted disk use another root. A symlink as Root or as any of its
+	// parent directories is refused (openat2 RESOLVE_NO_SYMLINKS).
 	Root string
 	// Flavour is the install flavour of this installation, for example
 	// "deb:amd64". It must be in the admitted list.

@@ -65,6 +65,35 @@ func otherCode(t *testing.T) string {
 	return ""
 }
 
+// IsPaired tells the executor which approval path a digest takes: true for
+// a pending, approved or consumed paired permit, false for an execution
+// permit and an unknown digest.
+func TestIsPairedRoutesOnlyPairedDigests(t *testing.T) {
+	e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
+	e.openSession()
+	pending := e.proposePaired(e.pairedBinding())
+	b := e.pairedBinding()
+	approved := e.approvedPaired(b)
+	if !e.auth.IsPaired(pending.Digest) || !e.auth.IsPaired(approved.Digest) {
+		t.Fatal("live paired permit not recognised")
+	}
+	if _, err := e.auth.ConsumePaired(approved.Digest, approved.Binding); err != nil {
+		t.Fatal(err)
+	}
+	if !e.auth.IsPaired(approved.Digest) {
+		t.Fatal("consumed paired permit not recognised")
+	}
+	var unknown canonical.Digest
+	unknown[0] = 1
+	if e.auth.IsPaired(unknown) {
+		t.Fatal("unknown digest reported as paired")
+	}
+	exec := e.propose(e.request(canonical.RiskHigh))
+	if e.auth.IsPaired(exec.Digest) {
+		t.Fatal("execution permit reported as paired")
+	}
+}
+
 func TestPairedPermitIsHighWithUserVerification(t *testing.T) {
 	e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
 	e.openSession()
