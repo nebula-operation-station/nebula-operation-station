@@ -73,6 +73,9 @@ type Service struct {
 	// builtinTrust is the local built-in trust transaction (ADR 0007, E19c);
 	// nil until SetBuiltinTrust wires it.
 	builtinTrust BuiltinTrust
+	// rootRotation is the local release root rotation admission (spec 10);
+	// nil until SetBuiltinTrust wires a transaction that provides it.
+	rootRotation RootRotation
 	// integrityRef is the admitted installed-files reference (ADR 0015
 	// D4 "Reference"); admitted when SetBuiltinTrust wires the store.
 	integrityRef integrityRefState

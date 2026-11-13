@@ -235,8 +235,16 @@ type BuiltinTrust interface {
 // start) it also admits the release's installed-files reference into the
 // executor database against the store's durable root state (ADR 0015 D4
 // "Reference"); see admitIntegrityReferenceAtStart.
+//
+// A transaction that also implements RootRotation (the directory-backed
+// one does, over the same store and release directory) wires the local
+// root rotation admission; otherwise rotation stays Unimplemented.
 func (s *Service) SetBuiltinTrust(t BuiltinTrust) {
 	s.builtinTrust = t
+	s.rootRotation = nil
+	if r, ok := t.(RootRotation); ok {
+		s.rootRotation = r
+	}
 	if d, ok := t.(*dirBuiltinTrust); ok {
 		s.admitIntegrityReferenceAtStart(d)
 	}
@@ -258,6 +266,9 @@ type dirBuiltinTrust struct {
 	pending *builtinReviewBinding
 	// reviewed binds Commit to the last confirmed admin Review.
 	reviewed *builtinReviewBinding
+	// rotationPending and rotationReviewed are the same bindings for the
+	// root rotation review (digest is the rotation digest).
+	rotationPending, rotationReviewed *builtinReviewBinding
 	// status caches the last status dry run under statusKey.
 	status    *trust.BulkAdmitResult
 	statusKey string
