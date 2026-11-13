@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -37,10 +38,16 @@ var (
 	deviceMACRe        = regexp.MustCompile(`^[0-9A-Fa-f]{2}(-[0-9A-Fa-f]{2}){5}$`)
 	deviceFirmwareRe   = regexp.MustCompile(`^[0-9][A-Za-z0-9.+~_-]{0,63}$`)
 	deviceDigitsRe     = regexp.MustCompile(`^[0-9]+$`)
-	deviceDottedMACRe  = regexp.MustCompile(`^[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}$`)
-	deviceBareMACRe    = regexp.MustCompile(`^[0-9A-Fa-f]{12}$`)
-	// deviceDottedPairsRe is a MAC as six dot-separated octets.
-	deviceDottedPairsRe = regexp.MustCompile(`^[0-9A-Fa-f]{2}(\.[0-9A-Fa-f]{2}){5}$`)
+	// deviceMACQuadsRe and deviceMACPairsRe are a MAC as three four-digit or
+	// six two-digit groups, each separator "." or "-", mixed or not; they
+	// mirror the server's exportMACQuadsRe and exportMACPairsRe.
+	deviceMACQuadsRe = regexp.MustCompile(`^[0-9A-Fa-f]{4}([.-][0-9A-Fa-f]{4}){2}$`)
+	deviceMACPairsRe = regexp.MustCompile(`^[0-9A-Fa-f]{2}([.-][0-9A-Fa-f]{2}){5}$`)
+	deviceBareMACRe  = regexp.MustCompile(`^[0-9A-Fa-f]{12}$`)
+	// deviceIPv4PrefixRe mirrors the server's exportIPv4PrefixRe: four
+	// decimal octets with any leading zeros at the start of the value,
+	// followed by the end or a non-digit.
+	deviceIPv4PrefixRe = regexp.MustCompile(`^([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)(?:[^0-9]|$)`)
 	// deviceFirmwareSepRe and deviceFirmwarePartRe mirror the server's
 	// per-part firmware grammar: a number with at most one letter suffix, or
 	// a version qualifier word with an optional number.
@@ -403,15 +410,26 @@ var deviceNonPublicIPv4 = []netip.Prefix{
 	netip.MustParsePrefix("240.0.0.0/4"),
 }
 
-// deviceAddressOK reports whether v, read as an address literal, is a public
-// dotted IPv4 quad. A value that is not an address literal passes. It mirrors
-// the server's address check in deviceFirmwareOK.
+// deviceAddressOK reports whether v does not start with a non-public IPv4
+// address. A value with four decimal octets at its start (any leading zeros, an
+// optional suffix) that forms a private, shared, loopback or otherwise
+// non-public address is refused; a dotted quad from a public range passes. It
+// mirrors the server's nonPublicIPv4Prefix.
 func deviceAddressOK(v string) bool {
-	a, err := netip.ParseAddr(v)
-	if err != nil {
+	m := deviceIPv4PrefixRe.FindStringSubmatch(v)
+	if m == nil {
 		return true
 	}
-	if !a.Is4() || !a.IsGlobalUnicast() || a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsMulticast() || a.IsUnspecified() {
+	var b [4]byte
+	for i := range b {
+		n, ok := deviceParseOctet(m[i+1])
+		if !ok {
+			return true
+		}
+		b[i] = n
+	}
+	a := netip.AddrFrom4(b)
+	if !a.IsGlobalUnicast() || a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsMulticast() || a.IsUnspecified() {
 		return false
 	}
 	for _, p := range deviceNonPublicIPv4 {
@@ -422,8 +440,26 @@ func deviceAddressOK(v string) bool {
 	return true
 }
 
-// deviceVendorOK mirrors the server's vendor rule: the slug pattern, and one of
-// the covered vendors. The slug pattern alone also matches a host label.
+// deviceParseOctet reads a decimal IPv4 octet with any leading zeros. It
+// reports false when the value is over 255.
+func deviceParseOctet(s string) (byte, bool) {
+	s = strings.TrimLeft(s, "0")
+	if s == "" {
+		return 0, true
+	}
+	if len(s) > 3 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n > 255 {
+		return 0, false
+	}
+	return byte(n), true
+}
+
+// deviceVendorOK mirrors the server's vendor rule (vendorOK): the slug pattern,
+// and one of the covered vendors. The slug pattern alone also matches a host
+// label.
 func deviceVendorOK(v string) bool {
 	return deviceVendorRe.MatchString(v) && (v == "cisco" || v == "paloalto")
 }
@@ -431,9 +467,9 @@ func deviceVendorOK(v string) bool {
 // deviceFirmwareOK mirrors the server's firmware allowlist (deviceFirmwareOK in
 // vuln_export.go): the pattern, the first dot-separated label all digits, every
 // later label split at "-+~_" into parts that are numbers or version
-// qualifiers, and none of the dotted, six-octet dotted or bare MAC forms.
+// qualifiers, none of the MAC forms, and no non-public IPv4 address prefix.
 func deviceFirmwareOK(v string) bool {
-	if !deviceFirmwareRe.MatchString(v) || deviceDottedMACRe.MatchString(v) || deviceDottedPairsRe.MatchString(v) || deviceBareMACRe.MatchString(v) {
+	if !deviceFirmwareRe.MatchString(v) || deviceMACQuadsRe.MatchString(v) || deviceMACPairsRe.MatchString(v) || deviceBareMACRe.MatchString(v) {
 		return false
 	}
 	labels := strings.Split(v, ".")
