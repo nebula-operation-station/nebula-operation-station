@@ -818,21 +818,31 @@ func (s *Service) loadOverSSH(ctx context.Context, client *ssh.Client, puller *r
 	_ = pr.CloseWithError(errTransferLoad)
 	pcancel()
 	p := <-pullDone
-	// A pull that failed only because the load ended first (its write hit
-	// the closed pipe, or it was cancelled here) is a load failure.
-	loadEndedFirst := werr != nil && (errors.Is(p.err, errTransferLoad) ||
-		(errors.Is(p.err, context.Canceled) && ctx.Err() == nil))
-	switch {
-	case errors.Is(p.err, errTransferLocked):
-		return registrypull.Result{}, errTransferLocked
-	case loadEndedFirst:
-		return registrypull.Result{}, errTransferLoad
-	case p.err != nil:
-		return registrypull.Result{}, fmt.Errorf("%w: %s", errTransferPull, pullReason(p.err))
-	case werr != nil:
-		return registrypull.Result{}, errTransferLoad
+	if err := loadStreamOutcome(werr, p.err, ctx.Err()); err != nil {
+		return registrypull.Result{}, err
 	}
 	return p.res, nil
+}
+
+// loadStreamOutcome classifies one stream from the load's end werr, the
+// pull's error perr and the caller's context error ctxErr. A pull that
+// failed only because the load ended first (its write hit the pipe closed
+// with errTransferLoad, or it was cancelled after the load ended) is a load
+// failure, also when `docker load` exited 0 before it read the archive:
+// the registry is not to blame.
+func loadStreamOutcome(werr, perr, ctxErr error) error {
+	loadEndedFirst := errors.Is(perr, errTransferLoad) || (errors.Is(perr, context.Canceled) && ctxErr == nil)
+	switch {
+	case errors.Is(perr, errTransferLocked):
+		return errTransferLocked
+	case loadEndedFirst:
+		return errTransferLoad
+	case perr != nil:
+		return fmt.Errorf("%w: %s", errTransferPull, pullReason(perr))
+	case werr != nil:
+		return errTransferLoad
+	}
+	return nil
 }
 
 // pullReason maps a registrypull error to a fixed reason: no registry

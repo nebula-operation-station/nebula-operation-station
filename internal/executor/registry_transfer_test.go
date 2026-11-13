@@ -171,9 +171,11 @@ type fakeTarget struct {
 	importMode string
 	// loadFails makes `docker load` exit 1 after reading all of stdin.
 	loadFails bool
-	// loadExitsEarly makes `docker load` exit 1 after the first bytes,
-	// without reading the rest of stdin.
+	// loadExitsEarly makes `docker load` exit with earlyExitStatus after
+	// the first bytes, without reading the rest of stdin.
 	loadExitsEarly bool
+	// earlyExitStatus is the exit status of that early exit.
+	earlyExitStatus uint32
 	// engineVariant, when set, is the variant `docker image inspect`
 	// reports for a loaded image of the configuration's architecture and
 	// variant (an engine's own spelling of it).
@@ -213,7 +215,7 @@ func (f *fakeTarget) run(cmd string, stdin io.Reader, stdout io.Writer) uint32 {
 	case cmd == "docker load -q" && f.loadExitsEarly:
 		buf := make([]byte, 512)
 		_, _ = io.ReadFull(stdin, buf)
-		return 1
+		return f.earlyExitStatus
 	case cmd == "docker load -q":
 		raw, _ := io.ReadAll(stdin)
 		f.mu.Lock()
@@ -875,17 +877,24 @@ func TestPrivateTransferLockBeforeCloseStops(t *testing.T) {
 
 // `docker load` exiting before the archive ended is a load failure, not a
 // registry failure.
+// A `docker load` that ends before it read the archive is a load failure,
+// whatever its exit status: the pull's write into the closed pipe never
+// reads as a registry failure.
 func TestPrivateTransferEarlyLoadExitIsALoadFailure(t *testing.T) {
-	e := newTransferEnv(t, imageStoreContainerd)
-	e.target.loadExitsEarly = true
-	_, err := e.transfer(e.binding())
-	if !errors.Is(err, errTransferLoad) || errors.Is(err, errTransferPull) {
-		t.Fatalf("early load exit: %v", err)
-	}
-	for _, c := range e.target.cmds() {
-		if strings.Contains(c, "inspect") {
-			t.Fatal("a failed load was verified")
-		}
+	for _, status := range []uint32{1, 0} {
+		t.Run(fmt.Sprintf("exit %d", status), func(t *testing.T) {
+			e := newTransferEnv(t, imageStoreContainerd)
+			e.target.loadExitsEarly, e.target.earlyExitStatus = true, status
+			_, err := e.transfer(e.binding())
+			if !errors.Is(err, errTransferLoad) || errors.Is(err, errTransferPull) {
+				t.Fatalf("early load exit: %v", err)
+			}
+			for _, c := range e.target.cmds() {
+				if strings.Contains(c, "inspect") {
+					t.Fatal("a failed load was verified")
+				}
+			}
+		})
 	}
 }
 
@@ -1083,6 +1092,35 @@ func TestNormalPlatformVariants(t *testing.T) {
 		got := normalPlatform(registrypull.Platform{OS: "linux", Architecture: c.arch, Variant: c.in})
 		if got.Variant != c.want || got.OS != "linux" || got.Architecture != c.arch {
 			t.Errorf("%s/%q: %+v, want variant %q", c.arch, c.in, got, c.want)
+		}
+	}
+}
+
+// The stream's outcome blames the side that ended it: a pull cut by the
+// load's end is a load failure even when `docker load` exited 0 first.
+func TestLoadStreamOutcome(t *testing.T) {
+	pipeClosed := fmt.Errorf("registrypull: write archive: %w", errTransferLoad)
+	cases := []struct {
+		name               string
+		werr, perr, ctxErr error
+		want               error
+	}{
+		{"both fine", nil, nil, nil, nil},
+		{"load exit 0, pull hit the closed pipe", nil, pipeClosed, nil, errTransferLoad},
+		{"load exit 0, pull cancelled after it", nil, context.Canceled, nil, errTransferLoad},
+		{"load failed, pull hit the closed pipe", errors.New("exit 1"), pipeClosed, nil, errTransferLoad},
+		{"load failed, pull fine", errors.New("exit 1"), nil, nil, errTransferLoad},
+		{"caller cancelled", errors.New("closed"), context.Canceled, context.Canceled, errTransferPull},
+		{"registry failure", errors.New("exit 1"), registrypull.ErrDigestMismatch, nil, errTransferPull},
+		{"vault locked", errors.New("exit 1"), errTransferLocked, nil, errTransferLocked},
+	}
+	for _, c := range cases {
+		err := loadStreamOutcome(c.werr, c.perr, c.ctxErr)
+		if (c.want == nil && err != nil) || (c.want != nil && !errors.Is(err, c.want)) {
+			t.Errorf("%s: %v, want %v", c.name, err, c.want)
+		}
+		if errors.Is(c.want, errTransferLoad) && errors.Is(err, errTransferPull) {
+			t.Errorf("%s: a load failure blamed the registry: %v", c.name, err)
 		}
 	}
 }
