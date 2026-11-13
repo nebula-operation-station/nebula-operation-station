@@ -94,12 +94,26 @@ func (s *Store) CurrentLLDPTables(ctx context.Context) ([]CurrentTable[netdevcon
 		})
 }
 
+// hookCurrentBetween names the test hook stage between the dataset query
+// and the row query of currentTables.
+const hookCurrentBetween = "current:between"
+
 // currentTables reads the current dataset of every device for one read and
 // the rows present in them. scan reads one row of t: its dataset ID first,
 // then the columns of t in order.
 func currentTables[T any](ctx context.Context, s *Store, read Read, t *table, limit int,
 	scan func(rowScanner) (int64, T, error)) ([]CurrentTable[T], error) {
-	dsRows, err := s.db.QueryContext(ctx, `SELECT id, device_id, observed_at, state FROM netdev_datasets
+	// Both queries run in one read transaction: on a WAL database each
+	// statement otherwise sees its own snapshot, and a replacement between
+	// them would either fail the list ("row of unknown dataset") or show a
+	// table under its superseded state with no rows.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("netdevinventory: begin current %s read: %w", read, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	dsRows, err := tx.QueryContext(ctx, `SELECT id, device_id, observed_at, state FROM netdev_datasets
 		WHERE read = ? AND current = 1 ORDER BY device_id`, string(read))
 	if err != nil {
 		return nil, fmt.Errorf("netdevinventory: list current %s datasets: %w", read, err)
@@ -125,6 +139,9 @@ func currentTables[T any](ctx context.Context, s *Store, read Read, t *table, li
 	if len(out) == 0 {
 		return nil, nil
 	}
+	if err := s.runHook(hookCurrentBetween); err != nil {
+		return nil, err
+	}
 	now := s.now()
 	for i := range out {
 		// The same staleness rule as GetDataset.
@@ -134,13 +151,16 @@ func currentTables[T any](ctx context.Context, s *Store, read Read, t *table, li
 	}
 
 	cols := strings.Join(t.cols, ", ")
-	rows, err := s.db.QueryContext(ctx, `SELECT dataset_id, `+cols+` FROM `+t.name+`
+	rows, err := tx.QueryContext(ctx, `SELECT dataset_id, `+cols+` FROM `+t.name+`
 		WHERE absent = 0 AND dataset_id IN (SELECT id FROM netdev_datasets WHERE read = ? AND current = 1)
 		ORDER BY dataset_id, row_key`, string(read))
 	if err != nil {
 		return nil, fmt.Errorf("netdevinventory: read current %s rows: %w", read, err)
 	}
 	defer rows.Close()
+	// overflow marks the tables with more rows than limit. Rows beyond the
+	// limit are not appended, so a table never holds more than limit rows.
+	overflow := make([]bool, len(out))
 	for rows.Next() {
 		id, v, err := scan(rows)
 		if err != nil {
@@ -150,20 +170,21 @@ func currentTables[T any](ctx context.Context, s *Store, read Read, t *table, li
 		if !ok {
 			return nil, fmt.Errorf("netdevinventory: %s row of unknown dataset %d", read, id)
 		}
+		if len(out[i].Rows) >= limit {
+			overflow[i] = true
+			continue
+		}
 		out[i].Rows = append(out[i].Rows, v)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("netdevinventory: read current %s rows: %w", read, err)
 	}
 	for i := range out {
-		if len(out[i].Rows) > limit {
+		if overflow[i] && out[i].State == StateFresh {
 			// More rows than the contract allows (carried rows of an
 			// incomplete read add to the rows of the latest one): cut and
 			// say so. A stale table keeps its state, which is the worse one.
-			out[i].Rows = out[i].Rows[:limit]
-			if out[i].State == StateFresh {
-				out[i].State = StatePartial
-			}
+			out[i].State = StatePartial
 		}
 	}
 	return out, nil
