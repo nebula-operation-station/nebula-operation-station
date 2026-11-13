@@ -29,6 +29,43 @@ func okParam() Param {
 	return Param{Name: "unit", Label: "Unit", Type: TypeName}
 }
 
+// refusal is one row of TestCheckRefuses: the input and the substring the
+// reason must contain, so that a row fails if Check refuses it for some
+// other reason.
+type refusal struct {
+	name    string
+	params  []Param
+	secrets []string
+	want    string
+}
+
+// Reason substrings, one per refusal kind in Check.
+const (
+	reasonParams     = "at most 10 parameters"
+	reasonSlots      = "at most 8 secret slots"
+	reasonSlotName   = "secret slots are distinct names"
+	reasonParamName  = "parameter names are"
+	reasonTwice      = "appears twice or is also a secret slot"
+	reasonLabel      = "needs a label of 1 to 100 characters"
+	reasonChoiceOnly = "only a choice has choices"
+	reasonChoiceSize = "a choice has 1 to 20 values"
+	reasonChoiceVal  = "choices are distinct lowercase words"
+	reasonType       = "the type must be name, int, path or choice"
+)
+
+// shellMeta are the characters that matter to the shell and to ERE in an
+// unquoted name, slot or choice value. Each must be refused in all three.
+var shellMeta = []string{"$", "`", ";", "&", "\\", "*", "[", "]", ",", "|", "(", ")", "'", "\"", " ", "\t", "\n", "<", ">", "{", "}", "?", "!", "#", "~", "%", "^", "+", ".", "/", "@", ":", "="}
+
+// metaRows refuses shell and ERE metacharacters in each position.
+func metaRows(c string) []refusal {
+	return []refusal{
+		{"parameter name with " + c, []Param{{Name: "u" + c + "x", Label: "L", Type: TypeName}}, nil, reasonParamName},
+		{"choice value with " + c, []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"a" + c + "b"}}}, nil, reasonChoiceVal},
+		{"secret slot with " + c, nil, []string{"s" + c + "x"}, reasonSlotName},
+	}
+}
+
 func TestCheckRefuses(t *testing.T) {
 	ps := func(n int) []Param {
 		out := make([]Param, n)
@@ -37,48 +74,52 @@ func TestCheckRefuses(t *testing.T) {
 		}
 		return out
 	}
-	tests := []struct {
-		name    string
-		params  []Param
-		secrets []string
-	}{
-		{"too many params", ps(MaxParams + 1), nil},
-		{"too many secret slots", nil, names("s", MaxSecrets+1)},
-		{"name with nebula prefix", []Param{{Name: "nebula_x", Label: "L", Type: TypeName}}, nil},
-		{"slot with nebula prefix", nil, []string{"nebula"}},
-		{"name too long", []Param{{Name: "a" + strings.Repeat("b", 32), Label: "L", Type: TypeName}}, nil},
-		{"name uppercase", []Param{{Name: "Unit", Label: "L", Type: TypeName}}, nil},
-		{"name with quote", []Param{{Name: "u'x", Label: "L", Type: TypeName}}, nil},
-		{"name starts with digit", []Param{{Name: "1unit", Label: "L", Type: TypeName}}, nil},
-		{"empty name", []Param{{Name: "", Label: "L", Type: TypeName}}, nil},
+	tests := []refusal{
+		{"too many params", ps(MaxParams + 1), nil, reasonParams},
+		{"too many secret slots", nil, names("s", MaxSecrets+1), reasonSlots},
+		{"name with nebula prefix", []Param{{Name: "nebula_x", Label: "L", Type: TypeName}}, nil, reasonParamName},
+		{"slot with nebula prefix", nil, []string{"nebula"}, reasonSlotName},
+		{"name too long", []Param{{Name: "a" + strings.Repeat("b", 32), Label: "L", Type: TypeName}}, nil, reasonParamName},
+		{"name uppercase", []Param{{Name: "Unit", Label: "L", Type: TypeName}}, nil, reasonParamName},
+		{"name with quote", []Param{{Name: "u'x", Label: "L", Type: TypeName}}, nil, reasonParamName},
+		{"name starts with digit", []Param{{Name: "1unit", Label: "L", Type: TypeName}}, nil, reasonParamName},
+		{"empty name", []Param{{Name: "", Label: "L", Type: TypeName}}, nil, reasonParamName},
+		{"name with newline", []Param{{Name: "unit\n", Label: "L", Type: TypeName}}, nil, reasonParamName},
 		{"duplicate param name", []Param{
 			{Name: "unit", Label: "A", Type: TypeName},
 			{Name: "unit", Label: "B", Type: TypeInt},
-		}, nil},
-		{"param name equals secret slot", []Param{okParam()}, []string{"unit"}},
-		{"duplicate secret slot", nil, []string{"token", "token"}},
-		{"empty label", []Param{{Name: "unit", Label: "", Type: TypeName}}, nil},
-		{"label over MaxLabel", []Param{{Name: "unit", Label: strings.Repeat("a", MaxLabel+1), Type: TypeName}}, nil},
-		{"label with control character", []Param{{Name: "unit", Label: "a\x07b", Type: TypeName}}, nil},
-		{"label with newline", []Param{{Name: "unit", Label: "a\nb", Type: TypeName}}, nil},
-		{"label with bidi override", []Param{{Name: "unit", Label: around(0x202e), Type: TypeName}}, nil},
-		{"label with invalid UTF-8", []Param{{Name: "unit", Label: "a\xffb", Type: TypeName}}, nil},
-		{"unknown type", []Param{{Name: "unit", Label: "L", Type: "string"}}, nil},
-		{"empty type", []Param{{Name: "unit", Label: "L", Type: ""}}, nil},
-		{"choices on name", []Param{{Name: "unit", Label: "L", Type: TypeName, Choices: []string{"a"}}}, nil},
-		{"choices on int", []Param{{Name: "unit", Label: "L", Type: TypeInt, Choices: []string{"a"}}}, nil},
-		{"choices on path", []Param{{Name: "unit", Label: "L", Type: TypePath, Choices: []string{"a"}}}, nil},
-		{"choice without values", []Param{{Name: "unit", Label: "L", Type: TypeChoice}}, nil},
-		{"choice with more than MaxChoices values", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: names("c", MaxChoices+1)}}, nil},
-		{"choice with duplicate value", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"a", "a"}}}, nil},
-		{"choice value with quote", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"a'b"}}}, nil},
-		{"choice value with pipe", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"a|b"}}}, nil},
-		{"choice value with parenthesis", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"a)"}}}, nil},
-		{"choice value with space", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"a b"}}}, nil},
-		{"choice value with uppercase", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"Soft"}}}, nil},
-		{"choice value with dot", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"a.b"}}}, nil},
-		{"choice value with newline", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"a\nb"}}}, nil},
-		{"choice value empty", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{""}}}, nil},
+		}, nil, reasonTwice},
+		{"param name equals secret slot", []Param{okParam()}, []string{"unit"}, reasonTwice},
+		{"duplicate secret slot", nil, []string{"token", "token"}, reasonSlotName},
+		{"empty secret slot", nil, []string{""}, reasonSlotName},
+		{"empty label", []Param{{Name: "unit", Label: "", Type: TypeName}}, nil, reasonLabel},
+		{"label over MaxLabel", []Param{{Name: "unit", Label: strings.Repeat("a", MaxLabel+1), Type: TypeName}}, nil, reasonLabel},
+		{"label with control character", []Param{{Name: "unit", Label: "a\x07b", Type: TypeName}}, nil, reasonLabel},
+		{"label with newline", []Param{{Name: "unit", Label: "a\nb", Type: TypeName}}, nil, reasonLabel},
+		{"label with bidi override", []Param{{Name: "unit", Label: around(0x202e), Type: TypeName}}, nil, reasonLabel},
+		{"label with invalid UTF-8", []Param{{Name: "unit", Label: "a\xffb", Type: TypeName}}, nil, reasonLabel},
+		{"unknown type", []Param{{Name: "unit", Label: "L", Type: "string"}}, nil, reasonType},
+		{"empty type", []Param{{Name: "unit", Label: "L", Type: ""}}, nil, reasonType},
+		{"choices on name", []Param{{Name: "unit", Label: "L", Type: TypeName, Choices: []string{"a"}}}, nil, reasonChoiceOnly},
+		{"choices on int", []Param{{Name: "unit", Label: "L", Type: TypeInt, Choices: []string{"a"}}}, nil, reasonChoiceOnly},
+		{"choices on path", []Param{{Name: "unit", Label: "L", Type: TypePath, Choices: []string{"a"}}}, nil, reasonChoiceOnly},
+		{"choice without values", []Param{{Name: "unit", Label: "L", Type: TypeChoice}}, nil, reasonChoiceSize},
+		{"choice with more than MaxChoices values", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: names("c", MaxChoices+1)}}, nil, reasonChoiceSize},
+		{"choice with duplicate value", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"a", "a"}}}, nil, reasonChoiceVal},
+		{"choice value with quote", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"a'b"}}}, nil, reasonChoiceVal},
+		{"choice value with pipe", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"a|b"}}}, nil, reasonChoiceVal},
+		{"choice value with parenthesis", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"a)"}}}, nil, reasonChoiceVal},
+		{"choice value with ERE group and alternation", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"x)|(.*"}}}, nil, reasonChoiceVal},
+		{"choice value with command substitution", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"$(id)"}}}, nil, reasonChoiceVal},
+		{"choice value with backticks", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"`id`"}}}, nil, reasonChoiceVal},
+		{"choice value with space", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"a b"}}}, nil, reasonChoiceVal},
+		{"choice value with uppercase", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"Soft"}}}, nil, reasonChoiceVal},
+		{"choice value with dot", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"a.b"}}}, nil, reasonChoiceVal},
+		{"choice value with newline", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"a\nb"}}}, nil, reasonChoiceVal},
+		{"choice value empty", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{""}}}, nil, reasonChoiceVal},
+	}
+	for _, c := range shellMeta {
+		tests = append(tests, metaRows(c)...)
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -86,8 +127,8 @@ func TestCheckRefuses(t *testing.T) {
 			if ok {
 				t.Fatalf("accepted, want refused")
 			}
-			if reason == "" {
-				t.Fatalf("refused without a reason")
+			if !strings.Contains(reason, tc.want) {
+				t.Fatalf("refused for the wrong reason %q, want it to contain %q", reason, tc.want)
 			}
 		})
 	}
