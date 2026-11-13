@@ -16,8 +16,10 @@ var (
 	// allowName is what a parameter name and a secret slot may contain in
 	// the generated shell: nothing that the shell would interpret.
 	allowName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
-	// allowChoice is the character set of a choice value.
-	allowChoice = regexp.MustCompile(`^[a-z0-9_-]{1,63}$`)
+	// allowChoice is the character set of a choice value: a leading letter
+	// or digit (never "-" or "_", so a value cannot be read as an option),
+	// then letters, digits, "_" and "-", at most 63 characters in all.
+	allowChoice = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,62}$`)
 	// allowChoicePattern is the set of characters a choice pattern may use:
 	// the value characters plus the group and alternation operators.
 	allowChoicePattern = regexp.MustCompile(`^[a-z0-9_|()-]+$`)
@@ -46,6 +48,7 @@ func FuzzCheckBuild(f *testing.F) {
 	f.Add("count", "Count", "int", "", "a1", uint8(1))
 	f.Add("dir", "Dir", "path", "", "tls_key", uint8(2))
 	f.Add("mode", "Mode", "choice", "soft,hard-reset", "x", uint8(3))
+	f.Add("mode", "Mode", "choice", "-rf,soft", "x", uint8(3))
 	f.Add("mode", "Mode", "choice", "a'b", "x", uint8(4))
 	f.Add("mode", "Mode", "choice", "a|b,c)", "token", uint8(0))
 	f.Add("mode", "Mode", "choice", "x)|(.*,a", "token", uint8(5))
