@@ -494,14 +494,19 @@ func TestNetDevBaselineRequiresExecutorComputedDigest(t *testing.T) {
 // TestNetDevBaselineRPCNotWired pins that the baseline handlers have no
 // gRPC method and no role entry: they may only be wired together with the
 // executor-computed digest check of ND-14 (see netdev_baseline.go).
+//
+// The one exempt method is the read-only I2 host baseline digest
+// comparison (ADR 0015 D7 item 2, IG-06), which is not a network device
+// baseline and writes nothing; integrity_baseline_test.go pins it.
 func TestNetDevBaselineRPCNotWired(t *testing.T) {
+	const i2Compare = pb.ExecutorService_CompareBaselineList_FullMethodName
 	for _, m := range allServiceMethods(t) {
-		if strings.Contains(strings.ToLower(m), "baseline") {
+		if m != i2Compare && strings.Contains(strings.ToLower(m), "baseline") {
 			t.Errorf("baseline RPC %s is wired before ND-14", m)
 		}
 	}
 	for m := range MethodRoles() {
-		if strings.Contains(strings.ToLower(m), "baseline") {
+		if m != i2Compare && strings.Contains(strings.ToLower(m), "baseline") {
 			t.Errorf("baseline method %s has a role before ND-14", m)
 		}
 	}

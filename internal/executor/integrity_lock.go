@@ -448,6 +448,7 @@ var integrityLockedMethods = map[string]bool{
 	pb.ExecutorService_ListNetDevices_FullMethodName:                  false,
 	pb.ExecutorService_GetIntegrityStatus_FullMethodName:              false,
 	pb.ExecutorService_AckIntegrityFinding_FullMethodName:             false,
+	pb.ExecutorService_CompareBaselineList_FullMethodName:             false,
 }
 
 // IntegrityLockRefuses reports whether method is refused right now
@@ -503,6 +504,18 @@ func (s *Service) GetIntegrityStatus(_ context.Context, _ *pb.GetIntegrityStatus
 	}
 	for _, f := range st.Lock.Findings {
 		out.Findings = append(out.Findings, integrityFindingToProto(f))
+	}
+	// I2 baseline tamper findings are held by the executor (ADR 0015 D7);
+	// a status that cannot show them is refused rather than shown clean.
+	if s.db != nil {
+		tamper, err := s.db.BaselineTamperFindings()
+		if err != nil {
+			s.auditLog(slog.LevelError, "integrity_baseline_tamper_unreadable", slog.String("detail", err.Error()))
+			return nil, status.Error(codes.Internal, "integrity status: the baseline tamper findings could not be read")
+		}
+		for _, f := range tamper {
+			out.BaselineTamperFindings = append(out.BaselineTamperFindings, baselineTamperToProto(f))
+		}
 	}
 	return out, nil
 }
