@@ -24,7 +24,7 @@ func FuzzCheckBuild(f *testing.F) {
 	f.Add("mode", "Mode", "choice", "a|b,c)", "")
 	f.Add("nebula_x", "L", "name", "", "nebula")
 	f.Add("u", "L", "name", "", "u")
-	f.Add("unit", "a‮b", "name", "", "")
+	f.Add("unit", "a"+string(rune(0x202e))+"b", "name", "", "")
 	f.Add("", "", "", "", "")
 
 	f.Fuzz(func(t *testing.T, name, label, typ, choices, slot string) {

@@ -18,6 +18,12 @@ func names(prefix string, n int) []string {
 	return out
 }
 
+// around returns "a" + the rune r + "b", so that the format and separator
+// characters in the tests are written as code points, not as literal text.
+func around(r rune) string {
+	return "a" + string(r) + "b"
+}
+
 // okParam is a valid name parameter; tests change one field at a time.
 func okParam() Param {
 	return Param{Name: "unit", Label: "Unit", Type: TypeName}
@@ -55,7 +61,7 @@ func TestCheckRefuses(t *testing.T) {
 		{"label over MaxLabel", []Param{{Name: "unit", Label: strings.Repeat("a", MaxLabel+1), Type: TypeName}}, nil},
 		{"label with control character", []Param{{Name: "unit", Label: "a\x07b", Type: TypeName}}, nil},
 		{"label with newline", []Param{{Name: "unit", Label: "a\nb", Type: TypeName}}, nil},
-		{"label with bidi override", []Param{{Name: "unit", Label: "a‮b", Type: TypeName}}, nil},
+		{"label with bidi override", []Param{{Name: "unit", Label: around(0x202e), Type: TypeName}}, nil},
 		{"label with invalid UTF-8", []Param{{Name: "unit", Label: "a\xffb", Type: TypeName}}, nil},
 		{"unknown type", []Param{{Name: "unit", Label: "L", Type: "string"}}, nil},
 		{"empty type", []Param{{Name: "unit", Label: "L", Type: ""}}, nil},
@@ -144,11 +150,11 @@ func TestClean(t *testing.T) {
 		{"escape", "a\x1b[2Jb", false, false},
 		{"DEL", "a\x7fb", true, false},
 		{"BEL", "a\x07b", false, false},
-		{"bidi override U+202E (Cf)", "a‮b", false, false},
-		{"zero width space U+200B (Cf)", "a​b", false, false},
-		{"line separator U+2028", "a b", false, false},
-		{"paragraph separator U+2029", "a b", false, false},
-		{"line separator U+2028 multiline", "a b", true, false},
+		{"bidi override U+202E (Cf)", around(0x202e), false, false},
+		{"zero width space U+200B (Cf)", around(0x200b), false, false},
+		{"line separator U+2028", around(0x2028), false, false},
+		{"paragraph separator U+2029", around(0x2029), false, false},
+		{"line separator U+2028 multiline", around(0x2028), true, false},
 		{"newline without multiline", "a\nb", false, false},
 		{"newline with multiline", "a\nb", true, true},
 		{"tab without multiline", "a\tb", false, false},
