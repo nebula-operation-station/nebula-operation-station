@@ -121,7 +121,7 @@ func deviceExport(id string, complete bool, firmware string) nosclient.SubjectPa
 // firmware reach the matcher; "unknown" reaches it as an empty value.
 func TestSubjectsFromExportCarriesDeviceModelAndFirmware(t *testing.T) {
 	subs, err := SubjectsFromExport(exportThroughClient(t,
-		[]nosclient.SubjectPart{deviceExport("sw01", true, "3.1.1.7"), deviceExport("sw02", true, "unknown")}))
+		[]nosclient.SubjectPart{deviceExport("sw01", true, "3.1.1.7"), deviceExport("sw02", false, "unknown")}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestSubjectsFromExportCarriesDeviceModelAndFirmware(t *testing.T) {
 // clean result.
 func TestDeviceWithoutKnownFirmwareIsNeverClean(t *testing.T) {
 	subs, err := SubjectsFromExport(exportThroughClient(t,
-		[]nosclient.SubjectPart{deviceExport("sw01", true, "unknown"), deviceExport("sw02", false, "3.1.1.7")}))
+		[]nosclient.SubjectPart{deviceExport("sw01", false, "unknown"), deviceExport("sw02", false, "3.1.1.7")}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,6 +151,22 @@ func TestDeviceWithoutKnownFirmwareIsNeverClean(t *testing.T) {
 	}
 	if !hasGap(r, "", GapInventoryIncomplete) {
 		t.Fatalf("incomplete device is not an inventory gap: %+v", r.Gaps)
+	}
+}
+
+// TestDeviceWithoutKnownModelIsNeverClean: the matcher does not trust the
+// client alone. A device part reaching it with no model, even one marked
+// complete, is an inventory gap, never a clean result.
+func TestDeviceWithoutKnownModelIsNeverClean(t *testing.T) {
+	p := deviceExport("sw01", true, "3.1.1.7")
+	p.Device.Model = "unknown"
+	subs, err := SubjectsFromExport([]nosclient.SubjectPart{p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := mustMatch(t, newDB(t), subs...)
+	if !hasGap(r, "", GapInventoryIncomplete) {
+		t.Fatalf("device without a model is not an inventory gap: %+v", r.Gaps)
 	}
 }
 
