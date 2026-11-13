@@ -161,16 +161,20 @@ var (
 	// exportFirmwareRe is the allowlist of a firmware version's characters
 	// and shape: a digit first, then letters, digits and the separators of a
 	// vendor version string, at most 64 bytes. Shape checks that the pattern
-	// cannot express are in deviceFirmwareOK. exportMACDottedRe,
-	// exportMACDottedPairsRe and exportMACBareRe refuse the Cisco dotted, the
-	// dotted octet and the unseparated MAC forms, which the allowlist would
+	// cannot express are in deviceFirmwareOK. exportMACQuadsRe, exportMACPairsRe
+	// and exportMACBareRe refuse the MAC forms, which the allowlist would
 	// otherwise pass.
-	exportFirmwareRe  = regexp.MustCompile(`^[0-9][A-Za-z0-9.+~_-]{0,63}$`)
-	exportDigitsRe    = regexp.MustCompile(`^[0-9]+$`)
-	exportMACDottedRe = regexp.MustCompile(`^[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}$`)
-	exportMACBareRe   = regexp.MustCompile(`^[0-9A-Fa-f]{12}$`)
-	// exportMACDottedPairsRe is a MAC written as six dot-separated octets.
-	exportMACDottedPairsRe = regexp.MustCompile(`^[0-9A-Fa-f]{2}(\.[0-9A-Fa-f]{2}){5}$`)
+	exportFirmwareRe = regexp.MustCompile(`^[0-9][A-Za-z0-9.+~_-]{0,63}$`)
+	exportDigitsRe   = regexp.MustCompile(`^[0-9]+$`)
+	// exportMACQuadsRe is a MAC written as three four-digit groups and
+	// exportMACPairsRe as six two-digit octets. They match the normalised
+	// value (firmwareSeparators), where every separator is ".".
+	exportMACQuadsRe = regexp.MustCompile(`^[0-9A-Fa-f]{4}(\.[0-9A-Fa-f]{4}){2}$`)
+	exportMACBareRe  = regexp.MustCompile(`^[0-9A-Fa-f]{12}$`)
+	exportMACPairsRe = regexp.MustCompile(`^[0-9A-Fa-f]{2}(\.[0-9A-Fa-f]{2}){5}$`)
+	// firmwareSeparators maps each separator of the firmware grammar (". - _
+	// + ~") to ".", so the MAC and address checks see one separator form.
+	firmwareSeparators = strings.NewReplacer("-", ".", "_", ".", "+", ".", "~", ".")
 	// exportFirmwareSepRe splits a dot-separated firmware label into its
 	// parts; exportFirmwarePartRe is what one part may be: a number with at
 	// most one letter suffix ("4a") or one of the version qualifier words
@@ -409,7 +413,7 @@ func prepareDevice(sub VulnSubject) (preparedSubject, bool) {
 	coverable := sub.Complete && d.Current && len(sub.Components) == 0 && sub.Kernel == nil
 	out := exportDeviceJSON{Vendor: exportUnknown, Model: exportUnknown, FirmwareVersion: exportUnknown}
 	eco := ""
-	if exportVendorRe.MatchString(d.Vendor) && coveredVendor(d.Vendor) {
+	if vendorOK(d.Vendor) {
 		out.Vendor = d.Vendor
 	} else {
 		coverable = false
@@ -446,9 +450,15 @@ func modelCodeOK(m string) bool {
 	return exportModelRe.MatchString(m) && exportModelUpperRe.MatchString(m) && exportDigitRe.MatchString(m) && notAddress(m) && !exportMACRe.MatchString(m)
 }
 
+// vendorOK reports whether vendor may be exported (D2): the slug pattern and
+// a covered vendor. The slug pattern also matches a bare host label
+// ("core-sw"), so a vendor outside the covered set would export a host name.
+func vendorOK(vendor string) bool {
+	return exportVendorRe.MatchString(vendor) && coveredVendor(vendor)
+}
+
 // coveredVendor reports whether vendor is a vendor the matcher covers (D2):
-// only these are exported. The slug pattern also matches a bare host label
-// ("core-sw"), so a vendor outside this set would export a host name.
+// only these are exported.
 func coveredVendor(vendor string) bool {
 	return vendor == "cisco" || vendor == "paloalto"
 }
@@ -492,7 +502,8 @@ var nonPublicIPv4 = []netip.Prefix{
 // including "3.1.1.7-core-sw01", "17.3.4+sw1" and "10.sw1.lab2.ex3". The
 // dotted, the six-octet dotted and the bare MAC forms are refused. An IP
 // address literal is refused unless it is a dotted quad from a public IPv4
-// range: a private, loopback, link-local, multicast, unspecified, shared
+// range, anywhere in the value (after a version prefix or a separator as well
+// as on its own): a private, loopback, link-local, multicast, unspecified, shared
 // (CGNAT), benchmark, documentation, reserved or broadcast IPv4 address is
 // never a firmware version. Public dotted quads such as "3.1.1.7" cannot be
 // told from a version by their shape and are accepted. The qualifier words
@@ -502,7 +513,13 @@ var nonPublicIPv4 = []netip.Prefix{
 // ("1.dev-build", "1.sp1") are refused. These residuals are a decision (D3),
 // not a guarantee.
 func deviceFirmwareOK(v string) bool {
-	if !exportFirmwareRe.MatchString(v) || exportMACDottedRe.MatchString(v) || exportMACDottedPairsRe.MatchString(v) || exportMACBareRe.MatchString(v) {
+	if !exportFirmwareRe.MatchString(v) {
+		return false
+	}
+	// n is v with every separator as "."; the MAC and address checks run on n,
+	// so no separator mix can evade them.
+	n := firmwareSeparators.Replace(v)
+	if exportMACQuadsRe.MatchString(n) || exportMACPairsRe.MatchString(n) || exportMACBareRe.MatchString(n) {
 		return false
 	}
 	labels := strings.Split(v, ".")
@@ -516,19 +533,86 @@ func deviceFirmwareOK(v string) bool {
 			}
 		}
 	}
-	a, err := netip.ParseAddr(v)
-	if err != nil {
-		return true
+	return !nonPublicIPv4Embedded(n)
+}
+
+// nonPublicIPv4Embedded reports whether v contains, at any position and after
+// any separator or prefix, four decimal octets that form a non-public IPv4
+// address (see nonPublicIPv4). v must be normalised by firmwareSeparators, so
+// its only separator is "." and an octet run is never split by "-", "_", "+"
+// or "~". A quad starts at a digit that does not follow
+// another digit, so "1.10.0.0.7" is tested as "1.10.0.0" and as "10.0.0.7".
+// Each octet is a maximal run of digits with any number of leading zeros, so
+// an address with a suffix ("192.168.10.5-1") or with leading zeros
+// ("17.3.4-192.168.001.010") is found. A quad with an octet over 255 is not an
+// address and is skipped; a private quad elsewhere in the value still counts.
+func nonPublicIPv4Embedded(v string) bool {
+	for i := 0; i < len(v); i++ {
+		if !isASCIIDigit(v[i]) || (i > 0 && isASCIIDigit(v[i-1])) {
+			continue
+		}
+		if nonPublicIPv4At(v, i) {
+			return true
+		}
 	}
-	if !a.Is4() || !a.IsGlobalUnicast() || a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsMulticast() || a.IsUnspecified() {
-		return false
+	return false
+}
+
+// nonPublicIPv4At reports whether the four octets that start at v[i] form a
+// non-public IPv4 address. It reports false when they are not four dot-separated
+// octets or an octet is over 255.
+func nonPublicIPv4At(v string, i int) bool {
+	var b [4]byte
+	for k := range b {
+		end := i
+		for end < len(v) && isASCIIDigit(v[end]) {
+			end++
+		}
+		n, ok := parseOctet(v[i:end])
+		if !ok || end == i {
+			return false
+		}
+		b[k] = n
+		if k < len(b)-1 {
+			if end >= len(v) || v[end] != '.' {
+				return false
+			}
+			end++
+		}
+		i = end
+	}
+	a := netip.AddrFrom4(b)
+	if !a.IsGlobalUnicast() || a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsMulticast() || a.IsUnspecified() {
+		return true
 	}
 	for _, p := range nonPublicIPv4 {
 		if p.Contains(a) {
-			return false
+			return true
 		}
 	}
-	return true
+	return false
+}
+
+// isASCIIDigit reports whether c is a decimal digit.
+func isASCIIDigit(c byte) bool {
+	return c >= '0' && c <= '9'
+}
+
+// parseOctet reads a decimal IPv4 octet with any number of leading zeros. It
+// reports false when the value is over 255.
+func parseOctet(s string) (byte, bool) {
+	s = strings.TrimLeft(s, "0")
+	if s == "" {
+		return 0, true
+	}
+	if len(s) > 3 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n > 255 {
+		return 0, false
+	}
+	return byte(n), true
 }
 
 func exportComponent(c VulnComponent) (exportComponentJSON, bool) {
