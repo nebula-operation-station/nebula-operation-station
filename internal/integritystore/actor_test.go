@@ -10,8 +10,12 @@ import (
 
 // TestAcceptRefusesActorsThatDisplayUnsafely: the actor name is stored and
 // shown as text, so control, invisible and bidi characters are refused, as
-// paths are escaped for display.
+// paths are escaped for display. The format characters are built from code
+// points so that the source holds no invisible characters.
 func TestAcceptRefusesActorsThatDisplayUnsafely(t *testing.T) {
+	bidiOverride := string(rune(0x202E))
+	zeroWidth := string(rune(0x200B))
+	noBreak := string(rune(0x00A0))
 	cases := []struct {
 		name  string
 		actor string
@@ -24,9 +28,9 @@ func TestAcceptRefusesActorsThatDisplayUnsafely(t *testing.T) {
 		{"nul", "ops\x00admin", false},
 		{"newline", "ops\nadmin", false},
 		{"escape sequence", "ops\x1b[2Jadmin", false},
-		{"bidi override", "ops‮admin", false},
-		{"zero width space", "ops​admin", false},
-		{"no-break space", "ops admin", false},
+		{"bidi override", "ops" + bidiOverride + "admin", false},
+		{"zero width space", "ops" + zeroWidth + "admin", false},
+		{"no-break space", "ops" + noBreak + "admin", false},
 		{"invalid utf-8", "ops\xffadmin", false},
 		{"too long", strings.Repeat("a", MaxActorBytes+1), false},
 	}
