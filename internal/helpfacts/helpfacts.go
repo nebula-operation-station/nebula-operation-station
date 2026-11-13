@@ -31,12 +31,6 @@ const (
 	// RFC 3339 (the default JSON encoding of the date), but not JSON keys
 	// or punctuation.
 	MaxFactBytes = 4 << 10
-	// MaxNamedCandidates bounds the hosts one question may select before the
-	// Visibility check runs: MaxFactHosts plus a small slack. Each candidate
-	// costs one authorisation lookup, so a /16 or a common word cannot cause
-	// unbounded lookups. Candidates beyond the bound are not checked and set
-	// Truncated.
-	MaxNamedCandidates = MaxFactHosts + 10
 	// MaxQuestionBytes is the largest question Project scans.
 	MaxQuestionBytes = 2 << 10
 	// MaxEndpoints is the maximum number of endpoints shown per host.
@@ -231,22 +225,29 @@ func Project(ctx context.Context, req Request) (Result, error) {
 		}
 	}
 	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].ID < candidates[j].ID })
-	var res Result
-	res.Truncated = litTruncated
-	capped := len(candidates) > MaxNamedCandidates
-	if capped {
-		candidates = candidates[:MaxNamedCandidates]
-		res.Truncated = true
-	}
+	// Visibility decides which candidates count. Hidden candidates take no
+	// slot and set no flag, so the result depends only on the hosts the user
+	// may see. The scan stops once MaxFactHosts+1 visible hosts are known: the
+	// extra one proves truncation, and NotInInventory is then not decided.
 	var matched []Record
 	for i, r := range candidates {
 		ok, err := req.Visible(ctx, r.ID)
 		if err != nil {
 			return Result{}, fmt.Errorf("helpfacts: check visibility of named host %d: %w", i, err)
 		}
-		if ok {
-			matched = append(matched, r)
+		if !ok {
+			continue
 		}
+		matched = append(matched, r)
+		if len(matched) > MaxFactHosts {
+			break
+		}
+	}
+	var res Result
+	res.Truncated = litTruncated
+	capped := len(matched) > MaxFactHosts
+	if capped {
+		res.Truncated = true
 	}
 
 	used := 0

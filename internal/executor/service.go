@@ -76,6 +76,9 @@ type Service struct {
 	// integrityRef is the admitted installed-files reference (ADR 0015
 	// D4 "Reference"); admitted when SetBuiltinTrust wires the store.
 	integrityRef integrityRefState
+	// integrityCheck is the periodic I1 check (ADR 0015 D4 "When");
+	// wired by SetIntegrityCheck.
+	integrityCheck integrityCheckState
 	// runningVersion overrides version.Version in tests; empty in
 	// production.
 	runningVersion string
