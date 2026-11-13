@@ -210,6 +210,29 @@ func TestExportAcceptsAValidHandWrittenExport(t *testing.T) {
 	}
 }
 
+// TestExportAcceptsFirmwareAtTheLengthLimit: a firmware version of exactly 64
+// bytes is accepted; 65 bytes is refused (ADR 0011 D3).
+func TestExportAcceptsFirmwareAtTheLengthLimit(t *testing.T) {
+	for _, c := range []struct {
+		fw string
+		ok bool
+	}{
+		{"1." + strings.Repeat("1", 62), true},
+		{"1." + strings.Repeat("1", 63), false},
+	} {
+		p := devicePart("sw11", true)
+		p["device"] = map[string]any{"vendor": "cisco", "model": "CBS350", "firmware_version": c.fw}
+		cl, err := New(pageSrv(t, page("s1", 0, 1, p)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = cl.Export(context.Background(), func(Page) error { return nil })
+		if got := err == nil; got != c.ok {
+			t.Fatalf("firmware of %d bytes accepted=%v, want %v: %v", len(c.fw), got, c.ok, err)
+		}
+	}
+}
+
 // devicePart is one device subject part as the server exports it (ADR 0011
 // D3): vendor, model, firmware version and the vendor ecosystem, no packages.
 func devicePart(id string, complete bool) map[string]any {
@@ -281,6 +304,9 @@ func TestExportRefusesDeviceFieldsOutsideTheServerPattern(t *testing.T) {
 		"model ipv4 address":   {"cisco", "10.0.0.7", "3.1.1.7"},
 		"model ipv6 address":   {"cisco", "fe80::1", "3.1.1.7"},
 		"model host label":     {"cisco", "core-sw.lab", "3.1.1.7"},
+		"model bare host core": {"cisco", "core-sw01", "3.1.1.7"},
+		"model bare host fw":   {"paloalto", "fw-lab2", "10.2.3"},
+		"model lowercase only": {"cisco", "cbs350", "3.1.1.7"},
 		"vendor uppercase":     {"Cisco", "CBS350", "3.1.1.7"},
 		"vendor space":         {"cisco systems", "CBS350", "3.1.1.7"},
 		"firmware control":     {"cisco", "CBS350", "3.1.1\x00"},
@@ -306,18 +332,117 @@ func TestExportRefusesDeviceFieldsOutsideTheServerPattern(t *testing.T) {
 	}
 }
 
-// TestExportAcceptsUnknownAndDottedDeviceValues: the server states "unknown"
-// for a value it does not export, and a dotted firmware version is a version.
-func TestExportAcceptsUnknownAndDottedDeviceValues(t *testing.T) {
+// TestExportRefusesHostileDeviceValuesInTheServerAllowlist: a host label, an
+// FQDN or a MAC in any device field is refused, as the server refuses it
+// (ADR 0011 D2/D3); the firmware field takes version shapes only.
+func TestExportRefusesHostileDeviceValuesInTheServerAllowlist(t *testing.T) {
 	cases := map[string]struct{ vendor, model, fw string }{
-		"all unknown":   {"unknown", "unknown", "unknown"},
-		"dotted quad":   {"cisco", "CBS350-24P-4G", "3.1.1.7"},
-		"three parts":   {"paloalto", "PA-220", "10.2.3"},
-		"plus and tild": {"cisco", "C9300_48U+", "17.3.4~rc1"},
+		"firmware fqdn":                          {"cisco", "CBS350", "core-sw.lab.example"},
+		"firmware fqdn with digit":               {"cisco", "CBS350", "10.core-sw.lab.example"},
+		"firmware hyphenated mac":                {"cisco", "CBS350", "00-11-22-33-44-55"},
+		"firmware dotted mac":                    {"cisco", "CBS350", "0011.2233.4455"},
+		"firmware bare mac":                      {"cisco", "CBS350", "001122334455"},
+		"firmware host label":                    {"cisco", "CBS350", "core-sw"},
+		"firmware letter start":                  {"cisco", "CBS350", "v1.2"},
+		"firmware hyphen digits":                 {"cisco", "CBS350", "1-2-3"},
+		"firmware too long":                      {"cisco", "CBS350", "1." + strings.Repeat("1", 64)},
+		"firmware host label, digits after dash": {"cisco", "CBS350", "3.1.1.7-core-sw01"},
+		"firmware host label, digits after plus": {"cisco", "CBS350", "17.3.4+sw1"},
+		"firmware host label, first label":       {"cisco", "CBS350", "1.core-sw01"},
+		"firmware host name, four labels":        {"cisco", "CBS350", "10.sw1.lab2.ex3"},
+		"firmware dotted mac, six octets":        {"cisco", "CBS350", "00.11.22.33.44.55"},
+		"firmware dotted mac, six hex pairs":     {"cisco", "CBS350", "00.1a.2b.3c.4d.5e"},
+		"model hyphenated mac":                   {"cisco", "00-11-22-33-44-55", "3.1.1.7"},
+		"vendor fqdn":                            {"core-sw.lab.example", "CBS350", "3.1.1.7"},
+		"vendor bare host label":                 {"core-sw", "CBS350", "3.1.1.7"},
+		"vendor uncovered":                       {"juniper", "CBS350", "3.1.1.7"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			p := devicePart("sw09", true)
+			p := devicePart("sw10", true)
+			p["device"] = map[string]any{"vendor": c.vendor, "model": c.model, "firmware_version": c.fw}
+			cl, err := New(pageSrv(t, page("s1", 0, 1, p)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = cl.Export(context.Background(), func(Page) error { return nil })
+			if !errors.Is(err, ErrProtocol) {
+				t.Fatalf("got %v, want ErrProtocol", err)
+			}
+		})
+	}
+}
+
+// TestExportRefusesACompleteDeviceWithAnUnknownValue: the server states
+// "unknown" only for a device it does not cover, so a part marked complete
+// with any unknown device value is a contract break, whichever field it is.
+func TestExportRefusesACompleteDeviceWithAnUnknownValue(t *testing.T) {
+	cases := map[string]struct{ vendor, model, fw string }{
+		"unknown vendor":   {"unknown", "CBS350", "3.1.1.7"},
+		"unknown model":    {"cisco", "unknown", "3.1.1.7"},
+		"unknown firmware": {"cisco", "CBS350", "unknown"},
+		"all unknown":      {"unknown", "unknown", "unknown"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := devicePart("sw11", true)
+			p["device"] = map[string]any{"vendor": c.vendor, "model": c.model, "firmware_version": c.fw}
+			cl, err := New(pageSrv(t, page("s1", 0, 1, p)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = cl.Export(context.Background(), func(Page) error { return nil })
+			if !errors.Is(err, ErrProtocol) {
+				t.Fatalf("got %v, want ErrProtocol", err)
+			}
+		})
+	}
+}
+
+// TestExportRefusesNonPublicIPv4Firmware: the client refuses an IPv4 address
+// from a non-public range as a firmware version, as the server does (ADR 0011
+// D3). A dotted quad from a public range is still a version.
+func TestExportRefusesNonPublicIPv4Firmware(t *testing.T) {
+	refused := []string{"10.0.0.7", "192.168.1.1", "172.16.5.4", "100.110.12.7", "198.18.0.1", "192.0.2.10", "169.254.1.1", "224.0.0.9", "240.0.0.1", "255.255.255.255", "0.1.2.3", "127.0.0.1"}
+	for _, fw := range refused {
+		for _, complete := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s complete=%v", fw, complete), func(t *testing.T) {
+				p := devicePart("sw12", complete)
+				p["device"] = map[string]any{"vendor": "cisco", "model": "CBS350", "firmware_version": fw}
+				cl, err := New(pageSrv(t, page("s1", 0, 1, p)))
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = cl.Export(context.Background(), func(Page) error { return nil })
+				if !errors.Is(err, ErrProtocol) {
+					t.Fatalf("non-public address %q accepted as firmware: %v", fw, err)
+				}
+			})
+		}
+	}
+	if !deviceFirmwareOK("8.8.8.8") || !deviceFirmwareOK("3.1.1.7") {
+		t.Fatal("a public dotted quad is refused as firmware")
+	}
+}
+
+// TestExportAcceptsUnknownAndDottedDeviceValues: the server states "unknown"
+// for a value it does not export on an incomplete device, and a dotted
+// firmware version is a version.
+func TestExportAcceptsUnknownAndDottedDeviceValues(t *testing.T) {
+	cases := map[string]struct {
+		vendor, model, fw string
+		complete          bool
+	}{
+		"all unknown":   {"unknown", "unknown", "unknown", false},
+		"unknown fw":    {"cisco", "CBS350", "unknown", false},
+		"dotted quad":   {"cisco", "CBS350-24P-4G", "3.1.1.7", true},
+		"three parts":   {"paloalto", "PA-220", "10.2.3", true},
+		"dash build":    {"paloalto", "PA-220", "10.2.3-h1", true},
+		"plus and tild": {"cisco", "C9300_48U+", "17.3.4~rc1", true},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := devicePart("sw09", c.complete)
 			p["device"] = map[string]any{"vendor": c.vendor, "model": c.model, "firmware_version": c.fw}
 			cl, err := New(pageSrv(t, page("s1", 0, 1, p)))
 			if err != nil {

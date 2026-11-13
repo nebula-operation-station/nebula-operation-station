@@ -34,7 +34,12 @@ func (m *matcher) device(s Subject) {
 		m.gap(s, "", "", GapEcosystemUnknown)
 		return
 	}
-	if s.Device == nil || s.Device.Firmware == "" || !versionRe.MatchString(s.Device.Firmware) {
+	if s.Device == nil || s.Device.Model == "" {
+		// A device without a model is not identified; it is never clean.
+		m.gap(s, "", "", GapInventoryIncomplete)
+		return
+	}
+	if s.Device.Firmware == "" || !versionRe.MatchString(s.Device.Firmware) {
 		m.gap(s, "", "", GapVersionUnknown)
 		return
 	}
