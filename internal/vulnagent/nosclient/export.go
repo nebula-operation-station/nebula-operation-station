@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strings"
@@ -29,20 +30,22 @@ var (
 	// without dot or colon and not a hyphenated MAC, and a firmware version
 	// from the allowlist that starts with a digit. deviceUnknown is the
 	// server's placeholder for a value it does not export.
-	deviceVendorRe    = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
-	deviceModelRe     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_+-]{0,63}$`)
-	deviceMACRe       = regexp.MustCompile(`^[0-9A-Fa-f]{2}(-[0-9A-Fa-f]{2}){5}$`)
-	deviceFirmwareRe  = regexp.MustCompile(`^[0-9][A-Za-z0-9.+~_-]{0,63}$`)
-	deviceDigitsRe    = regexp.MustCompile(`^[0-9]+$`)
-	deviceDottedMACRe = regexp.MustCompile(`^[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}$`)
-	deviceBareMACRe   = regexp.MustCompile(`^[0-9A-Fa-f]{12}$`)
+	deviceVendorRe     = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+	deviceModelRe      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_+-]{0,63}$`)
+	deviceModelUpperRe = regexp.MustCompile(`[A-Z]`)
+	deviceDigitRe      = regexp.MustCompile(`[0-9]`)
+	deviceMACRe        = regexp.MustCompile(`^[0-9A-Fa-f]{2}(-[0-9A-Fa-f]{2}){5}$`)
+	deviceFirmwareRe   = regexp.MustCompile(`^[0-9][A-Za-z0-9.+~_-]{0,63}$`)
+	deviceDigitsRe     = regexp.MustCompile(`^[0-9]+$`)
+	deviceDottedMACRe  = regexp.MustCompile(`^[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}$`)
+	deviceBareMACRe    = regexp.MustCompile(`^[0-9A-Fa-f]{12}$`)
 	// deviceDottedPairsRe is a MAC as six dot-separated octets.
 	deviceDottedPairsRe = regexp.MustCompile(`^[0-9A-Fa-f]{2}(\.[0-9A-Fa-f]{2}){5}$`)
 	// deviceFirmwareSepRe and deviceFirmwarePartRe mirror the server's
 	// per-part firmware grammar: a number with at most one letter suffix, or
 	// a version qualifier word with an optional number.
 	deviceFirmwareSepRe  = regexp.MustCompile(`[-+~_]`)
-	deviceFirmwarePartRe = regexp.MustCompile(`^(?:[0-9]+[a-z]?|(?:build|beta|alpha|rc|dev|pre|h|sp)[0-9]*)$`)
+	deviceFirmwarePartRe = regexp.MustCompile(`^(?:[0-9]+[a-z]?|(?:build|beta|alpha|rc|pre|h)[0-9]*)$`)
 )
 
 // ErrIncompleteExport: the export ended while a subject still lacked its
@@ -381,10 +384,42 @@ func checkDevice(d *Device, complete bool) error {
 	return nil
 }
 
-// deviceModelOK mirrors the server's model check: the model pattern, and not a
-// hyphenated MAC.
+// deviceModelOK mirrors the server's model check (modelCodeOK): the model
+// pattern, an upper-case letter and a digit, and not a hyphenated MAC.
 func deviceModelOK(v string) bool {
-	return deviceModelRe.MatchString(v) && !deviceMACRe.MatchString(v)
+	return deviceModelRe.MatchString(v) && deviceModelUpperRe.MatchString(v) && deviceDigitRe.MatchString(v) && !deviceMACRe.MatchString(v)
+}
+
+// deviceNonPublicIPv4 mirrors the server's nonPublicIPv4 ranges: the IPv4
+// ranges that netip does not flag and that are not public unicast.
+var deviceNonPublicIPv4 = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+}
+
+// deviceAddressOK reports whether v, read as an address literal, is a public
+// dotted IPv4 quad. A value that is not an address literal passes. It mirrors
+// the server's address check in deviceFirmwareOK.
+func deviceAddressOK(v string) bool {
+	a, err := netip.ParseAddr(v)
+	if err != nil {
+		return true
+	}
+	if !a.Is4() || !a.IsGlobalUnicast() || a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsMulticast() || a.IsUnspecified() {
+		return false
+	}
+	for _, p := range deviceNonPublicIPv4 {
+		if p.Contains(a) {
+			return false
+		}
+	}
+	return true
 }
 
 // deviceVendorOK mirrors the server's vendor rule: the slug pattern, and one of
@@ -412,7 +447,7 @@ func deviceFirmwareOK(v string) bool {
 			}
 		}
 	}
-	return true
+	return deviceAddressOK(v)
 }
 
 func sameHead(a, b SubjectPart) bool {

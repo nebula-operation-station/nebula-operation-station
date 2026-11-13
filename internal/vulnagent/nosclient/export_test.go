@@ -304,6 +304,9 @@ func TestExportRefusesDeviceFieldsOutsideTheServerPattern(t *testing.T) {
 		"model ipv4 address":   {"cisco", "10.0.0.7", "3.1.1.7"},
 		"model ipv6 address":   {"cisco", "fe80::1", "3.1.1.7"},
 		"model host label":     {"cisco", "core-sw.lab", "3.1.1.7"},
+		"model bare host core": {"cisco", "core-sw01", "3.1.1.7"},
+		"model bare host fw":   {"paloalto", "fw-lab2", "10.2.3"},
+		"model lowercase only": {"cisco", "cbs350", "3.1.1.7"},
 		"vendor uppercase":     {"Cisco", "CBS350", "3.1.1.7"},
 		"vendor space":         {"cisco systems", "CBS350", "3.1.1.7"},
 		"firmware control":     {"cisco", "CBS350", "3.1.1\x00"},
@@ -393,6 +396,32 @@ func TestExportRefusesACompleteDeviceWithAnUnknownValue(t *testing.T) {
 				t.Fatalf("got %v, want ErrProtocol", err)
 			}
 		})
+	}
+}
+
+// TestExportRefusesNonPublicIPv4Firmware: the client refuses an IPv4 address
+// from a non-public range as a firmware version, as the server does (ADR 0011
+// D3). A dotted quad from a public range is still a version.
+func TestExportRefusesNonPublicIPv4Firmware(t *testing.T) {
+	refused := []string{"10.0.0.7", "192.168.1.1", "172.16.5.4", "100.110.12.7", "198.18.0.1", "192.0.2.10", "169.254.1.1", "224.0.0.9", "240.0.0.1", "255.255.255.255", "0.1.2.3", "127.0.0.1"}
+	for _, fw := range refused {
+		for _, complete := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s complete=%v", fw, complete), func(t *testing.T) {
+				p := devicePart("sw12", complete)
+				p["device"] = map[string]any{"vendor": "cisco", "model": "CBS350", "firmware_version": fw}
+				cl, err := New(pageSrv(t, page("s1", 0, 1, p)))
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = cl.Export(context.Background(), func(Page) error { return nil })
+				if !errors.Is(err, ErrProtocol) {
+					t.Fatalf("non-public address %q accepted as firmware: %v", fw, err)
+				}
+			})
+		}
+	}
+	if !deviceFirmwareOK("8.8.8.8") || !deviceFirmwareOK("3.1.1.7") {
+		t.Fatal("a public dotted quad is refused as firmware")
 	}
 }
 

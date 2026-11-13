@@ -191,7 +191,7 @@ func TestVulnExportDeviceNonPublicIPv4FirmwareIsUnknown(t *testing.T) {
 // as "8.8.8.8" cannot be told from a version by its shape; that residual is
 // the documented D3 decision, so it is not asserted here either way.
 func TestVulnExportDeviceDottedFirmwareIsAVersion(t *testing.T) {
-	for _, fw := range []string{"3.1.1.7", "10.2.3", "10.2.3-h1", "17.06.05", "7.0.3+build.4", "16.9.4a", "21.4-rc2"} {
+	for _, fw := range []string{"3.1.1.7", "10.2.3", "10.2.3-h1", "17.06.05", "7.0.3+build.4", "16.9.4a", "21.4-rc2", "11.0.0-beta1", "9.3.8-pre2", "1.0.0-alpha3"} {
 		e := newVulnEnv(t)
 		e.inv.set(deviceSnapshot("fw11", &api.VulnDevice{Vendor: "cisco", Model: "CBS350", FirmwareVersion: fw, Current: true}))
 		d := exportedDevice(t, e)
@@ -236,6 +236,11 @@ func TestVulnExportRejectsHostileFirmwareFields(t *testing.T) {
 		"dotted mac, 6 groups":    "00.11.22.33.44.55",
 		"dotted mac, 6 hex pairs": "00.1a.2b.3c.4d.5e",
 		"empty part":              "3.1.-4",
+		// The qualifier words "dev" and "sp" are not version qualifiers, so
+		// a host-like label built on them is refused (ADR 0011 D3).
+		"dev qualifier build": "1.dev-build",
+		"sp qualifier":        "1.sp1",
+		"dev qualifier":       "10.2.3-dev1",
 	}
 	for name, fw := range hostile {
 		t.Run(name, func(t *testing.T) {
@@ -253,6 +258,32 @@ func TestVulnExportRejectsHostileFirmwareFields(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestVulnExportModelIsAModelCode: a model must carry an upper-case letter
+// and a digit, like the vendor's model codes ("CBS350", "PA-220"). A value
+// with neither, such as a bare host label, is never exported as the subject
+// (ADR 0011 D2). The remaining residual, an upper-case host label, is decided
+// in D2 and not asserted here.
+func TestVulnExportModelIsAModelCode(t *testing.T) {
+	accepted := []string{"CBS350", "PA-220", "CBS350-24P-4G", "ISR4451-X", "C9300_48U+", "FPR-2110"}
+	for _, m := range accepted {
+		e := newVulnEnv(t)
+		e.inv.set(deviceSnapshot("md01", &api.VulnDevice{Vendor: "cisco", Model: m, FirmwareVersion: "3.1.1.7", Current: true}))
+		d := exportedDevice(t, e)
+		if dev := d["device"].(map[string]any); dev["model"] != m || d["complete"] != true {
+			t.Fatalf("model code %q refused: %v complete %v", m, dev, d["complete"])
+		}
+	}
+	refused := []string{"core-sw01", "fw-lab2", "sw01", "lab2", "routerlab", "cbs350-"}
+	for _, m := range refused {
+		e := newVulnEnv(t)
+		e.inv.set(deviceSnapshot("md02", &api.VulnDevice{Vendor: "cisco", Model: m, FirmwareVersion: "3.1.1.7", Current: true}))
+		d := exportedDevice(t, e)
+		if dev := d["device"].(map[string]any); dev["model"] != "unknown" || d["complete"] != false {
+			t.Fatalf("host label %q exported as model: %v complete %v", m, dev, d["complete"])
+		}
 	}
 }
 
@@ -346,6 +377,11 @@ func TestVulnExportRejectsHostileDeviceFields(t *testing.T) {
 		"hyphenated mac":  "00-11-22-33-44-55",
 		"ipv6 address":    "fe80::1",
 		"ipv4 with port":  "10.0.0.7:22",
+		// A bare host label is a host name, not a model code (ADR 0011 D2).
+		"host label core-sw01": "core-sw01",
+		"host label fw-lab2":   "fw-lab2",
+		"host label sw01":      "sw01",
+		"host label lowercase": "routerlab",
 	}
 	for name, model := range hostile {
 		t.Run(name, func(t *testing.T) {
