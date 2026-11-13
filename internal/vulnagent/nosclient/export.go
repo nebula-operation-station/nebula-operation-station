@@ -35,15 +35,15 @@ var (
 	deviceModelRe      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_+-]{0,63}$`)
 	deviceModelUpperRe = regexp.MustCompile(`[A-Z]`)
 	deviceDigitRe      = regexp.MustCompile(`[0-9]`)
-	deviceMACRe        = regexp.MustCompile(`^[0-9A-Fa-f]{2}(-[0-9A-Fa-f]{2}){5}$`)
 	deviceFirmwareRe   = regexp.MustCompile(`^[0-9][A-Za-z0-9.+~_-]{0,63}$`)
 	deviceDigitsRe     = regexp.MustCompile(`^[0-9]+$`)
 	// deviceMACQuadsRe and deviceMACPairsRe are a MAC as three four-digit or
-	// six two-digit groups; they mirror the server's exportMACQuadsRe and
-	// exportMACPairsRe and match the value after deviceSeparators.
-	deviceMACQuadsRe = regexp.MustCompile(`^[0-9A-Fa-f]{4}(\.[0-9A-Fa-f]{4}){2}$`)
-	deviceMACPairsRe = regexp.MustCompile(`^[0-9A-Fa-f]{2}(\.[0-9A-Fa-f]{2}){5}$`)
-	deviceBareMACRe  = regexp.MustCompile(`^[0-9A-Fa-f]{12}$`)
+	// six two-digit groups, and deviceBareMACRe 12 hex digits. They are
+	// unanchored, as the server's exportMACQuadsRe, exportMACPairsRe and
+	// exportMACBareRe are, and match the value after deviceSeparators.
+	deviceMACQuadsRe = regexp.MustCompile(`(?:^|\.)[0-9A-Fa-f]{4}(?:\.[0-9A-Fa-f]{4}){2}(?:\.|$)`)
+	deviceMACPairsRe = regexp.MustCompile(`(?:^|\.)[0-9A-Fa-f]{2}(?:\.[0-9A-Fa-f]{2}){5}(?:\.|$)`)
+	deviceBareMACRe  = regexp.MustCompile(`(?:^|[^0-9A-Fa-f])[0-9A-Fa-f]{12}(?:[^0-9A-Fa-f]|$)`)
 	// deviceSeparators maps each firmware separator (". - _ + ~") to "." as
 	// the server's firmwareSeparators does.
 	deviceSeparators = strings.NewReplacer("-", ".", "_", ".", "+", ".", "~", ".")
@@ -391,9 +391,20 @@ func checkDevice(d *Device, complete bool) error {
 }
 
 // deviceModelOK mirrors the server's model check (modelCodeOK): the model
-// pattern, an upper-case letter and a digit, and not a hyphenated MAC.
+// pattern, an upper-case letter and a digit, no MAC and no non-public IPv4
+// address at any position of the normalised value.
 func deviceModelOK(v string) bool {
-	return deviceModelRe.MatchString(v) && deviceModelUpperRe.MatchString(v) && deviceDigitRe.MatchString(v) && !deviceMACRe.MatchString(v)
+	if !deviceModelRe.MatchString(v) || !deviceModelUpperRe.MatchString(v) || !deviceDigitRe.MatchString(v) {
+		return false
+	}
+	n := deviceSeparators.Replace(v)
+	return !deviceEmbeddedMAC(n) && deviceAddressOK(n)
+}
+
+// deviceEmbeddedMAC mirrors the server's embeddedMAC: a MAC at any position of
+// n, a value normalised by deviceSeparators.
+func deviceEmbeddedMAC(n string) bool {
+	return deviceMACQuadsRe.MatchString(n) || deviceMACPairsRe.MatchString(n) || deviceBareMACRe.MatchString(n)
 }
 
 // deviceNonPublicIPv4 mirrors the server's nonPublicIPv4 ranges: the IPv4
@@ -499,7 +510,7 @@ func deviceFirmwareOK(v string) bool {
 	}
 	// n is v with every separator as "."; the MAC and address checks run on n.
 	n := deviceSeparators.Replace(v)
-	if deviceMACQuadsRe.MatchString(n) || deviceMACPairsRe.MatchString(n) || deviceBareMACRe.MatchString(n) {
+	if deviceEmbeddedMAC(n) {
 		return false
 	}
 	labels := strings.Split(v, ".")
