@@ -209,3 +209,53 @@ after checking the host. Never edit `batch-held-targets.json` by hand.
 **Fix:** fix the admin list and run `install.sh` again. For a missing
 database, restore a backup (`sudo nebula restore`); remove the marker file
 named in the message only if you deliberately want to start empty.
+
+## After an I1 integrity alarm
+
+**Symptom:** `nebula integrity status` lists an open I1 finding, or
+`nebula unlock` is refused.
+
+**What it means:** NOS found that its own files on the NOS machine differ
+from the signed list of the installed release, that a covered file is
+missing, or that an unlisted `/usr/bin/nebula*` executable exists. A changed
+or missing NOS binary, systemd unit, built-in module file or root key, or an
+unlisted executable, locks the executor. A changed web asset is refused by the
+server. A changed configuration file is a finding without a lock. An incomplete
+check is never reported as clean.
+
+**What is locked:** while a locking finding is open, the executor refuses
+`nebula unlock` and all mutation and read-grant dispatch.
+
+**What does not happen:** NOS does not delete, restore or roll back any file.
+The lock only withholds authority. Repairing the files is your job.
+
+**Fix:**
+
+1. `nebula integrity status` shows the lock, the last run and the open
+   findings with their IDs.
+2. Verify offline, from another machine or from read-only boot media with the
+   NOS disk mounted elsewhere, against release files that you fetched and
+   checked there:
+
+   ```
+   nebula integrity verify --offline RELEASE-DIR --root MOUNT --version X.Y.Z --flavour FLAVOUR
+   ```
+
+   Both paths must be absolute. `--version` is the version you expect this
+   machine to run. Exit status 0 means clean, 5 means deviations were found,
+   6 means the check was incomplete. Never treat 6 as clean.
+3. Reinstall NOS from its package, or install a new signed release.
+4. For each open finding, run `nebula integrity ack FINDING`. It shows the
+   finding, asks you to type `yes`, and clears only that finding. A later
+   check that finds the same deviation locks again. While other locking
+   findings are open, unlock and dispatch stay refused.
+
+**Limit:** NOS checks cannot detect a root compromise of the NOS machine;
+see ADR 0015. The unlock refusal only withholds authority; it cannot help
+when the executor binary itself is the replaced one. Only the offline check
+in step 2 does not depend on software on the NOS machine, which is why it is
+the check to run after any I1 alarm.
+
+**Distribution:** GitHub is only a distribution channel, never a trust anchor.
+Release files are trusted only after `release-manifest.json.sig` verifies
+against the root public keys built into the NOS binaries.
