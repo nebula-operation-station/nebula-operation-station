@@ -230,7 +230,17 @@ type BuiltinTrust interface {
 // SetBuiltinTrust wires the built-in trust transaction. It must be called
 // before the server starts serving. A nil transaction leaves review and
 // commit Unimplemented and status UNAVAILABLE.
-func (s *Service) SetBuiltinTrust(t BuiltinTrust) { s.builtinTrust = t }
+//
+// With the directory-backed transaction (NewDirBuiltinTrust, the executor
+// start) it also admits the release's installed-files reference into the
+// executor database against the store's durable root state (ADR 0015 D4
+// "Reference"); see admitIntegrityReferenceAtStart.
+func (s *Service) SetBuiltinTrust(t BuiltinTrust) {
+	s.builtinTrust = t
+	if d, ok := t.(*dirBuiltinTrust); ok {
+		s.admitIntegrityReferenceAtStart(d)
+	}
+}
 
 // dirBuiltinTrust is the directory-backed BuiltinTrust: the store and the
 // bundle directory are fixed at construction from executor-local

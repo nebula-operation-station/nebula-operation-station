@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -27,9 +28,9 @@ const (
 	// integrityCheckInterval is the period after the start check (ADR
 	// 0015 D4 "When", Q2: every 60 minutes).
 	integrityCheckInterval = integrity.DefaultInterval
-	// integrityReferenceDir holds release-manifest.json, its signature
-	// and installed-files.json as install.sh and the upgrade place them.
-	integrityReferenceDir = "/usr/share/nebula/release"
+	// integrityInstallRoot is the root of the installed NOS files the
+	// server checks.
+	integrityInstallRoot = "/"
 	// integrityStatusPath serves the latest result as JSON behind the
 	// session, like the other server pages.
 	integrityStatusPath = "/integrity/status"
@@ -41,79 +42,76 @@ const (
 var containerMarkers = []string{".dockerenv", "run/.containerenv"}
 
 // newIntegrityMonitor returns the server's I1 monitor for the running
-// version, reading the signed reference from dir and checking the files
-// under root.
+// version, checking the installed files under integrityInstallRoot.
+func newIntegrityMonitor(log *slog.Logger, version string) *integrity.Monitor {
+	return newIntegrityMonitorAt(log, version, integrityInstallRoot)
+}
+
+// newIntegrityMonitorAt is newIntegrityMonitor for the installation under
+// root.
 //
-// Interim reference, deviating from ADR 0015 D4 "Reference" (open for a
-// maintainer decision, see docs/implementation/m0.md): the ADR wants later
-// checks against the copy the executor admitted into its own storage,
-// never against the copy in /usr/share, with the rollback rule. No
-// process admits that copy yet (IG-04), and the server cannot read
-// executor storage. So each run re-admits the /usr/share copy against the
-// root anchors compiled into this binary, and every status and log record
-// says so (integrity.SourceReleaseDirBuiltinAnchors). Rotations are not
-// applied: no installation can admit one yet either, so today this is
-// the same root state the executor has. A list signed by a root this
-// binary does not know is incomplete (reference-root-not-trusted), never
-// accepted from keys beside the files.
-func newIntegrityMonitor(log *slog.Logger, version, dir, root string) *integrity.Monitor {
+// Reference (ADR 0015 D4 "Reference"): checks run only against the
+// installed-files list the executor admitted into its own storage, never
+// against the copy in /usr/share. Nothing admits that list yet and the
+// server cannot read executor storage (both IG-04), so a release build
+// reports every run as incomplete (no-admitted-reference) at ERROR and
+// hashes nothing; a development build stays not-checkable. The server
+// does not react to either (IG-04). Previously the server re-admitted the
+// /usr/share copy against its built-in anchors on every run; that
+// deviation from D4 is removed.
+//
+// The install flavour is detected on every run (Monitor.Flavour), so a
+// marker that could not be inspected once does not stick until restart.
+func newIntegrityMonitorAt(log *slog.Logger, version, root string) *integrity.Monitor {
 	v := strings.TrimPrefix(version, "v")
 	return &integrity.Monitor{
 		Load: func(context.Context) (integrity.Reference, error) {
-			state, err := compiledRootState()
-			if err != nil {
-				return integrity.Reference{}, err
+			if !release.ValidReleaseVersion(v) {
+				return integrity.Reference{}, integrity.ErrDevelopmentBuild
 			}
-			return integrity.LoadReference(state, v, dir)
+			return integrity.Reference{}, fmt.Errorf("%w: the server cannot read it yet (IG-04)",
+				integrity.ErrNoAdmittedReference)
 		},
-		ReferenceSource: integrity.SourceReleaseDirBuiltinAnchors,
-		Options:         integrity.Options{Root: root, Flavour: installFlavour(root)},
+		ReferenceSource: integrity.SourceExecutorAdmitted,
+		Options:         integrity.Options{Root: root},
+		Flavour:         func(context.Context) (string, error) { return installFlavour(root) },
 		Interval:        integrityCheckInterval,
 		Log:             log,
 	}
 }
 
-func compiledRootState() (release.RootState, error) {
-	anchors, err := release.Anchors()
-	if err != nil {
-		return release.RootState{}, err
-	}
-	return release.Bootstrap(anchors)
-}
-
 // installFlavour names the install flavour of the installation under
-// root: container, deb or tarball, on this architecture. When a marker
-// cannot be inspected it returns "", which the check reports as
-// incomplete instead of checking against a guessed flavour.
-func installFlavour(root string) string {
-	exists := func(rel string) (bool, bool) {
+// root: container, deb or tarball, on this architecture. A marker that
+// cannot be inspected is an error, never a guessed flavour.
+func installFlavour(root string) (string, error) {
+	exists := func(rel string) (bool, error) {
 		_, err := os.Lstat(filepath.Join(root, rel))
 		switch {
 		case err == nil:
-			return true, true
+			return true, nil
 		case errors.Is(err, fs.ErrNotExist):
-			return false, true
+			return false, nil
 		default:
-			return false, false
+			return false, fmt.Errorf("inspect flavour marker %s: %w", rel, err)
 		}
 	}
 	for _, m := range containerMarkers {
-		found, ok := exists(m)
-		if !ok {
-			return ""
+		found, err := exists(m)
+		if err != nil {
+			return "", err
 		}
 		if found {
-			return "container:" + runtime.GOARCH
+			return "container:" + runtime.GOARCH, nil
 		}
 	}
-	found, ok := exists(debPackageList)
+	found, err := exists(debPackageList)
 	switch {
-	case !ok:
-		return ""
+	case err != nil:
+		return "", err
 	case found:
-		return "deb:" + runtime.GOARCH
+		return "deb:" + runtime.GOARCH, nil
 	}
-	return "tarball:" + runtime.GOARCH
+	return "tarball:" + runtime.GOARCH, nil
 }
 
 // mountIntegrityStatus serves the monitor's latest result.

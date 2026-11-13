@@ -465,6 +465,62 @@ func TestSelfCheckNamesReferenceSource(t *testing.T) {
 	}
 }
 
+// TestSelfCheckWithoutAdmittedReferenceIsIncomplete: a loader that has no
+// executor-admitted reference (ADR 0015 D4 "Reference") makes the run
+// incomplete at ERROR, never ok and never not-checkable.
+func TestSelfCheckWithoutAdmittedReferenceIsIncomplete(t *testing.T) {
+	f := newFixture(t, defaultTree())
+	var buf bytes.Buffer
+	m, _ := newTestMonitor(t, f, f.writeReferenceDir(t), &buf)
+	m.Load = func(context.Context) (Reference, error) {
+		return Reference{}, fmt.Errorf("server: %w", ErrNoAdmittedReference)
+	}
+	st := m.RunOnce(context.Background())
+	if st.State != StateIncomplete || st.Cause != CauseNoAdmittedReference {
+		t.Fatalf("state %q cause %q, want incomplete/%s", st.State, st.Cause, CauseNoAdmittedReference)
+	}
+	if errors.Is(ErrNoAdmittedReference, ErrNotCheckable) {
+		t.Fatal("ErrNoAdmittedReference must not be not-checkable")
+	}
+	if st.Files != 0 || st.BytesHashed != 0 {
+		t.Fatalf("a run without reference hashed files: %+v", st)
+	}
+	if !strings.Contains(buf.String(), `"level":"ERROR"`) {
+		t.Fatalf("log: %s", buf.String())
+	}
+}
+
+// TestSelfCheckDetectsFlavourEveryRun: Monitor.Flavour is asked on every
+// run, so a failure to detect it makes only that run incomplete and the
+// next run recovers without a restart.
+func TestSelfCheckDetectsFlavourEveryRun(t *testing.T) {
+	f := newFixture(t, defaultTree())
+	var buf bytes.Buffer
+	m, _ := newTestMonitor(t, f, f.writeReferenceDir(t), &buf)
+	m.Options.Flavour = ""
+	calls := 0
+	m.Flavour = func(context.Context) (string, error) {
+		calls++
+		if calls == 1 {
+			return "", errors.New("lstat marker: input/output error")
+		}
+		return testFlavour, nil
+	}
+	if st := m.RunOnce(context.Background()); st.State != StateIncomplete || st.Cause != CauseCheckFailed {
+		t.Fatalf("first run %+v, want incomplete/%s", st, CauseCheckFailed)
+	}
+	if !strings.Contains(buf.String(), "input/output error") {
+		t.Fatalf("flavour error not logged: %s", buf.String())
+	}
+	st := m.RunOnce(context.Background())
+	if st.State != StateOK || st.Flavour != testFlavour || st.Runs != 2 {
+		t.Fatalf("second run %+v, want ok with %s", st, testFlavour)
+	}
+	if calls != 2 {
+		t.Fatalf("flavour detected %d times, want once per run", calls)
+	}
+}
+
 func mustWrite(t *testing.T, p string, b []byte) {
 	t.Helper()
 	if err := os.WriteFile(p, b, 0o644); err != nil {
