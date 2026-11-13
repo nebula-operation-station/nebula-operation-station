@@ -55,13 +55,28 @@ const (
 
 // shellMeta are the characters that matter to the shell and to ERE in an
 // unquoted name, slot or choice value. Each must be refused in all three.
-var shellMeta = []string{"$", "`", ";", "&", "\\", "*", "[", "]", ",", "|", "(", ")", "'", "\"", " ", "\t", "\n", "<", ">", "{", "}", "?", "!", "#", "~", "%", "^", "+", ".", "/", "@", ":", "="}
+// Non-ASCII and NUL are here too: no position allows them, so they must be
+// refused by the pattern, not by chance.
+var shellMeta = []string{"$", "`", ";", "&", "\\", "*", "[", "]", ",", "|", "(", ")", "'", "\"", " ", "\t", "\n", "<", ">", "{", "}", "?", "!", "#", "~", "%", "^", "+", ".", "/", "@", ":", "=", "ü", "\x00"}
+
+// dashMeta is "-". It is allowed inside a choice value (hard-reset), so it
+// is refused only in the names and slots, where it would break the
+// NEBULA_P_ / NEBULA_SECRET_ assignment.
+var dashMeta = []string{"-"}
 
 // metaRows refuses shell and ERE metacharacters in each position.
 func metaRows(c string) []refusal {
 	return []refusal{
 		{"parameter name with " + c, []Param{{Name: "u" + c + "x", Label: "L", Type: TypeName}}, nil, reasonParamName},
 		{"choice value with " + c, []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"a" + c + "b"}}}, nil, reasonChoiceVal},
+		{"secret slot with " + c, nil, []string{"s" + c + "x"}, reasonSlotName},
+	}
+}
+
+// nameSlotRows refuses c in a parameter name and a secret slot only.
+func nameSlotRows(c string) []refusal {
+	return []refusal{
+		{"parameter name with " + c, []Param{{Name: "u" + c + "x", Label: "L", Type: TypeName}}, nil, reasonParamName},
 		{"secret slot with " + c, nil, []string{"s" + c + "x"}, reasonSlotName},
 	}
 }
@@ -117,9 +132,22 @@ func TestCheckRefuses(t *testing.T) {
 		{"choice value with dot", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"a.b"}}}, nil, reasonChoiceVal},
 		{"choice value with newline", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"a\nb"}}}, nil, reasonChoiceVal},
 		{"choice value empty", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{""}}}, nil, reasonChoiceVal},
+		{"choice value starting with dash", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"-rf"}}}, nil, reasonChoiceVal},
+		{"choice value starting with double dash", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"--force"}}}, nil, reasonChoiceVal},
+		{"choice value that is a lone dash", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"-"}}}, nil, reasonChoiceVal},
+		{"choice value starting with underscore", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"_a"}}}, nil, reasonChoiceVal},
+		{"choice value that is a lone underscore", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"_"}}}, nil, reasonChoiceVal},
+		{"choice value starting with dash among valid ones", []Param{{Name: "unit", Label: "L", Type: TypeChoice, Choices: []string{"soft", "-rf"}}}, nil, reasonChoiceVal},
+		{"parameter name starting with dash", []Param{{Name: "-unit", Label: "L", Type: TypeName}}, nil, reasonParamName},
+		{"secret slot starting with dash", nil, []string{"-token"}, reasonSlotName},
+		{"parameter name that is a lone dash", []Param{{Name: "-", Label: "L", Type: TypeName}}, nil, reasonParamName},
+		{"secret slot that is a lone dash", nil, []string{"-"}, reasonSlotName},
 	}
 	for _, c := range shellMeta {
 		tests = append(tests, metaRows(c)...)
+	}
+	for _, c := range dashMeta {
+		tests = append(tests, nameSlotRows(c)...)
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
