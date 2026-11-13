@@ -64,7 +64,7 @@ before a release.
 
 `make fuzz` (`Makefile`, target `fuzz`) runs 13 fuzz functions for 20
 seconds each. It is not run by CI. The table lists every `Fuzz*` function
-in the repository (117, previously: 111, from `grep -rn '^func Fuzz' --include=*_test.go .`)
+in the repository (118, previously: 111, from `grep -rn '^func Fuzz' --include=*_test.go .`)
 with its package and whether `make fuzz` runs it. Functions marked "no"
 are not run by `make fuzz`; their seed corpora still run in `make test`
 like every other test.
@@ -100,6 +100,7 @@ like every other test.
 | `internal/registrymeta` | `FuzzLatestStable` | no |
 | `internal/release` | `FuzzParseInstalledFiles`, `FuzzVerifyInstalledFiles`, `FuzzReadUstar`, `FuzzParseManifest` | no |
 | `internal/scanner` | `FuzzScan` | yes |
+| `internal/schedgrant` | `FuzzParse` | no |
 | `internal/softwarecat` | `FuzzNormalizers` | no |
 | `internal/sshsig` | `FuzzParse` | yes |
 | `internal/stageplan` | `FuzzParse` | no |
@@ -120,7 +121,7 @@ package is a protected path.
 Before a release, run each `make fuzz` target for at least an hour
 (`go test -run='^$' -fuzz=NAME -fuzztime=1h ./PKG`).
 
-**Open:** 104 fuzz functions (the "no" rows; previously: 98) are not run by `make fuzz`,
+**Open:** 105 fuzz functions (the "no" rows; previously: 98) are not run by `make fuzz`,
 and CI runs no fuzz target at all, although the M10-3 plan in
 `docs/implementation/m10-plan.md` expects CI to run them briefly. Proposal
 for a separate ticket on the protected `Makefile` (not done here): add the
