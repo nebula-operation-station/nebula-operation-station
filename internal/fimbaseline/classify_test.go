@@ -334,6 +334,8 @@ func TestNonStandardSymlinkAtUnitPositionIsRunWide(t *testing.T) {
 		{"/etc/systemd/system/multi-user.target.wants/ssh.service", "/opt/x/ssh.service"},
 		{"/etc/systemd/system/multi-user.target.wants/ssh.service", "/lib/systemd/system/sshd.socket"},
 		{"/etc/systemd/system/sshd.service", "../../../lib/systemd/system/ssh.service"},
+		{"/lib/systemd/system/sshd.service", "ssh.service"},
+		{"/etc/systemd/system/multi-user.target.wants/ssh.service", "../ssh.service"},
 		{"/lib/systemd", "/opt/x"},
 		{"/usr", "/srv/usr"},
 		{"/usr/lib", "/srv/usr/lib"},

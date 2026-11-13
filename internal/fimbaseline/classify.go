@@ -237,6 +237,11 @@ func standardUnitLink(s, t string) bool {
 	if standardUsrmergeLink(s, t) {
 		return true
 	}
+	// A relative target is not a standard link: the default layout uses
+	// absolute targets, and a relative one would need resolution first.
+	if !strings.HasPrefix(t, "/") {
+		return false
+	}
 	dir, name := split(s)
 	tdir, tname := split(t)
 	if !sshdUnitNames[name] || !sshdUnitNames[tname] || !containsString(standardUnitDirs, tdir) {
@@ -270,6 +275,10 @@ func isUnitListDir(s string) bool {
 // absolute path checked by checkPath.
 func split(s string) (dir, name string) {
 	i := strings.LastIndexByte(s, '/')
+	if i < 0 {
+		// Not an absolute path; never panic on hostile input.
+		return "", s
+	}
 	if i == 0 {
 		return "/", s[1:]
 	}
