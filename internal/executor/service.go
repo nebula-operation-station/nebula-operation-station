@@ -197,8 +197,10 @@ func NewGRPCServer(svc *Service, policy *peercred.Policy, log *slog.Logger) *grp
 			log.Warn("audit", "kind", "connection_rejected", "uid", uid, "pid", pid)
 		}}),
 		grpc.MaxConcurrentStreams(MaxConcurrentStreams),
-		grpc.UnaryInterceptor(policy.UnaryInterceptor(denied)),
-		grpc.StreamInterceptor(policy.StreamInterceptor(denied)),
+		// The I1 lock (integrity_lock.go) is checked after the role check,
+		// so an unauthorized caller learns nothing about it.
+		grpc.ChainUnaryInterceptor(policy.UnaryInterceptor(denied), svc.integrityUnaryInterceptor),
+		grpc.ChainStreamInterceptor(policy.StreamInterceptor(denied), svc.integrityStreamInterceptor),
 		grpc.MaxRecvMsgSize(MaxMessageSize),
 		grpc.MaxSendMsgSize(MaxResponseSize),
 	)
