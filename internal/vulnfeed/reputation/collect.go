@@ -89,14 +89,22 @@ func ForEachRecord(r io.Reader, comment byte, fn func(rec string) error) error {
 	return nil
 }
 
+// ErrCollectorFailed is returned by Add and Finish once the collector has
+// failed. A failed collector never produces a snapshot; the cause is wrapped
+// alongside this sentinel, so errors.Is finds both.
+var ErrCollectorFailed = errors.New("reputation: feed collection failed")
+
 // Collector gathers the entries of one feed. It enforces MaxEntriesPerFeed
-// and removes duplicates. A malformed entry fails the feed (fail closed):
-// the caller must discard the collector.
+// and removes duplicates. A malformed entry or an exceeded entry limit fails
+// the feed (fail closed). The failure is sticky: every later Add and Finish
+// returns ErrCollectorFailed, so no partial snapshot can be produced even by
+// a caller that keeps the collector after an error.
 type Collector struct {
-	feed FeedID
-	cat  Category
-	seen map[netip.Prefix]struct{}
-	dups int
+	feed   FeedID
+	cat    Category
+	seen   map[netip.Prefix]struct{}
+	dups   int
+	failed error
 }
 
 // NewCollector starts a collector for a registered feed.
@@ -108,13 +116,23 @@ func NewCollector(feed FeedID) (*Collector, error) {
 	return &Collector{feed: feed, cat: cat, seen: map[netip.Prefix]struct{}{}}, nil
 }
 
+// failedErr wraps the stored failure cause with ErrCollectorFailed.
+func (c *Collector) failedErr() error {
+	return fmt.Errorf("%w: %w", ErrCollectorFailed, c.failed)
+}
+
 // Add normalises one entry text and stores it. A repeat of a stored entry is
 // counted and kept once. A new entry beyond MaxEntriesPerFeed returns
 // ErrEntryLimit. A malformed entry returns an error wrapping
-// ErrMalformedEntry.
+// ErrMalformedEntry. Either failure fails the collector: the first failing
+// call returns the cause, and every later call returns ErrCollectorFailed.
 func (c *Collector) Add(text string) error {
+	if c.failed != nil {
+		return c.failedErr()
+	}
 	p, err := ParseEntry(text)
 	if err != nil {
+		c.failed = err
 		return err
 	}
 	if _, dup := c.seen[p]; dup {
@@ -122,16 +140,21 @@ func (c *Collector) Add(text string) error {
 		return nil
 	}
 	if len(c.seen) >= MaxEntriesPerFeed {
+		c.failed = ErrEntryLimit
 		return ErrEntryLimit
 	}
 	c.seen[p] = struct{}{}
 	return nil
 }
 
-// Finish returns the snapshot. date is used only when dated is true and it is
-// a year in the accepted range; otherwise the snapshot is undated. Finish
-// never reads a clock.
-func (c *Collector) Finish(date time.Time, dated bool) Snapshot {
+// Finish returns the snapshot. It returns ErrCollectorFailed (with the cause)
+// if any earlier Add failed, and then no entries. date is used only when
+// dated is true and it is a year in the accepted range; otherwise the
+// snapshot is undated. Finish never reads a clock.
+func (c *Collector) Finish(date time.Time, dated bool) (Snapshot, error) {
+	if c.failed != nil {
+		return Snapshot{}, c.failedErr()
+	}
 	entries := make([]Entry, 0, len(c.seen))
 	for p := range c.seen {
 		entries = append(entries, Entry{Prefix: p, Category: c.cat})
@@ -147,7 +170,7 @@ func (c *Collector) Finish(date time.Time, dated bool) Snapshot {
 		snap.Dated = true
 		snap.ContentDate = date
 	}
-	return snap
+	return snap, nil
 }
 
 // validContentDate reports whether a date is in the accepted year range.

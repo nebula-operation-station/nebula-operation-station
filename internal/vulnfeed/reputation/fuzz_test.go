@@ -63,7 +63,8 @@ func FuzzParseEntry(f *testing.F) {
 			}
 			return
 		}
-		if len(strings.TrimSpace(s)) > maxEntryTextBytes {
+		// Same trim as ParseEntry: only space and tab are blanks here.
+		if len(strings.Trim(s, " \t")) > maxEntryTextBytes {
 			t.Fatalf("ParseEntry(%q) accepted text longer than the limit", s)
 		}
 		if !p.IsValid() || p.Masked() != p || p.Addr().Is4In6() || p.Bits() == 0 {

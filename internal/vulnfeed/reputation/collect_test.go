@@ -117,7 +117,7 @@ func TestForEachRecordSizeLimit(t *testing.T) {
 func TestForEachRecordLineLimit(t *testing.T) {
 	for _, prefix := range []string{"#", ""} {
 		atLimit := []byte(prefix + strings.Repeat("a", MaxLineBytes-len(prefix)) + "\n")
-		if _, err := collectRecords(atLimit, '#'); err != nil && !errors.Is(err, ErrMalformedEntry) {
+		if _, err := collectRecords(atLimit, '#'); err != nil {
 			t.Errorf("line of %d bytes (prefix %q): %v", MaxLineBytes, prefix, err)
 		}
 		over := []byte(prefix + strings.Repeat("a", MaxLineBytes+1-len(prefix)) + "\n")
@@ -153,7 +153,10 @@ func TestCollectorNormalisesAndDeduplicates(t *testing.T) {
 			t.Fatalf("Add(%q): %v", r, err)
 		}
 	}
-	snap := c.Finish(time.Time{}, false)
+	snap, err := c.Finish(time.Time{}, false)
+	if err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
 	if snap.Feed != FeedFeodo || snap.Category != CategoryBotnetC2 {
 		t.Errorf("snapshot feed/category = %s/%s", snap.Feed, snap.Category)
 	}
@@ -215,9 +218,88 @@ func TestCollectorEntryLimit(t *testing.T) {
 	if err := c.Add(addr.String() + "/32"); !errors.Is(err, ErrEntryLimit) {
 		t.Errorf("entry %d: error %v, want ErrEntryLimit", MaxEntriesPerFeed+1, err)
 	}
-	// A repeat of a stored entry is not a new entry and stays allowed.
-	if err := c.Add(base.String() + "/32"); err != nil {
-		t.Errorf("repeat at the entry limit: %v", err)
+	// The limit failed the feed, so even a repeat of a stored entry is refused.
+	if err := c.Add(base.String() + "/32"); !errors.Is(err, ErrCollectorFailed) {
+		t.Errorf("repeat after the entry limit: error %v, want ErrCollectorFailed", err)
+	}
+	if _, err := c.Finish(time.Time{}, false); !errors.Is(err, ErrCollectorFailed) {
+		t.Errorf("Finish after the entry limit: error %v, want ErrCollectorFailed", err)
+	}
+}
+
+// TestCollectorEntryLimitAcceptsRepeatsWithinLimit checks that repeats of
+// stored entries do not count against the cap while the feed is still
+// under it.
+func TestCollectorEntryLimitAcceptsRepeatsWithinLimit(t *testing.T) {
+	c, err := NewCollector(FeedSpamhausDROP)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := c.Add("10.0.0.1/32"); err != nil {
+			t.Fatalf("repeat %d: %v", i+1, err)
+		}
+	}
+	snap, err := c.Finish(time.Time{}, false)
+	if err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	if snap.Duplicates != 2 || len(snap.Entries) != 1 {
+		t.Errorf("Duplicates = %d, Entries = %d; want 2 and 1", snap.Duplicates, len(snap.Entries))
+	}
+}
+
+// TestCollectorFailureIsSticky checks fail-closed behaviour at the collector
+// itself, not only in the caller: after one failed Add, every later Add and
+// Finish is refused, so a partial snapshot can never be produced.
+func TestCollectorFailureIsSticky(t *testing.T) {
+	cases := []struct {
+		name  string
+		entry string
+		cause error
+	}{
+		{"malformed entry", "not-an-address", ErrMalformedEntry},
+		{"default route", "0.0.0.0/0", ErrMalformedEntry},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := NewCollector(FeedFeodo)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.Add("192.0.2.1"); err != nil {
+				t.Fatalf("valid Add before the failure: %v", err)
+			}
+			if err := c.Add(tc.entry); !errors.Is(err, tc.cause) {
+				t.Fatalf("Add(%q): error %v, want %v", tc.entry, err, tc.cause)
+			}
+			if err := c.Add("198.51.100.1"); !errors.Is(err, ErrCollectorFailed) {
+				t.Errorf("Add after the failure: error %v, want ErrCollectorFailed", err)
+			}
+			snap, err := c.Finish(time.Time{}, false)
+			if !errors.Is(err, ErrCollectorFailed) {
+				t.Errorf("Finish after the failure: error %v, want ErrCollectorFailed", err)
+			}
+			if len(snap.Entries) != 0 {
+				t.Errorf("Finish after the failure returned %d entries", len(snap.Entries))
+			}
+		})
+	}
+}
+
+// TestCollectorFinishErrorKeepsCause checks that the refusal from Finish and
+// the refusal from Add both carry ErrCollectorFailed, and that the original
+// cause is still visible to errors.Is.
+func TestCollectorFinishErrorKeepsCause(t *testing.T) {
+	c, err := NewCollector(FeedFeodo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Add("bogus"); !errors.Is(err, ErrMalformedEntry) {
+		t.Fatalf("Add(bogus): error %v, want ErrMalformedEntry", err)
+	}
+	if _, err := c.Finish(time.Time{}, false); !errors.Is(err, ErrCollectorFailed) || !errors.Is(err, ErrMalformedEntry) {
+		t.Errorf("Finish: error %v, want ErrCollectorFailed wrapping ErrMalformedEntry", err)
 	}
 }
 
@@ -243,7 +325,10 @@ func TestFinishContentDate(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			snap := c.Finish(tc.date, tc.ok)
+			snap, err := c.Finish(tc.date, tc.ok)
+			if err != nil {
+				t.Fatalf("Finish: %v", err)
+			}
 			if snap.Dated != tc.dated {
 				t.Fatalf("Dated = %v, want %v", snap.Dated, tc.dated)
 			}
