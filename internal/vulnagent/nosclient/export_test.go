@@ -306,18 +306,83 @@ func TestExportRefusesDeviceFieldsOutsideTheServerPattern(t *testing.T) {
 	}
 }
 
-// TestExportAcceptsUnknownAndDottedDeviceValues: the server states "unknown"
-// for a value it does not export, and a dotted firmware version is a version.
-func TestExportAcceptsUnknownAndDottedDeviceValues(t *testing.T) {
+// TestExportRefusesHostileDeviceValuesInTheServerAllowlist: a host label, an
+// FQDN or a MAC in any device field is refused, as the server refuses it
+// (ADR 0011 D2/D3); the firmware field takes version shapes only.
+func TestExportRefusesHostileDeviceValuesInTheServerAllowlist(t *testing.T) {
 	cases := map[string]struct{ vendor, model, fw string }{
-		"all unknown":   {"unknown", "unknown", "unknown"},
-		"dotted quad":   {"cisco", "CBS350-24P-4G", "3.1.1.7"},
-		"three parts":   {"paloalto", "PA-220", "10.2.3"},
-		"plus and tild": {"cisco", "C9300_48U+", "17.3.4~rc1"},
+		"firmware fqdn":            {"cisco", "CBS350", "core-sw.lab.example"},
+		"firmware fqdn with digit": {"cisco", "CBS350", "10.core-sw.lab.example"},
+		"firmware hyphenated mac":  {"cisco", "CBS350", "00-11-22-33-44-55"},
+		"firmware dotted mac":      {"cisco", "CBS350", "0011.2233.4455"},
+		"firmware bare mac":        {"cisco", "CBS350", "001122334455"},
+		"firmware host label":      {"cisco", "CBS350", "core-sw"},
+		"firmware letter start":    {"cisco", "CBS350", "v1.2"},
+		"firmware hyphen digits":   {"cisco", "CBS350", "1-2-3"},
+		"firmware too long":        {"cisco", "CBS350", "1." + strings.Repeat("1", 64)},
+		"model hyphenated mac":     {"cisco", "00-11-22-33-44-55", "3.1.1.7"},
+		"vendor fqdn":              {"core-sw.lab.example", "CBS350", "3.1.1.7"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
-			p := devicePart("sw09", true)
+			p := devicePart("sw10", true)
+			p["device"] = map[string]any{"vendor": c.vendor, "model": c.model, "firmware_version": c.fw}
+			cl, err := New(pageSrv(t, page("s1", 0, 1, p)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = cl.Export(context.Background(), func(Page) error { return nil })
+			if !errors.Is(err, ErrProtocol) {
+				t.Fatalf("got %v, want ErrProtocol", err)
+			}
+		})
+	}
+}
+
+// TestExportRefusesACompleteDeviceWithAnUnknownValue: the server states
+// "unknown" only for a device it does not cover, so a part marked complete
+// with any unknown device value is a contract break, whichever field it is.
+func TestExportRefusesACompleteDeviceWithAnUnknownValue(t *testing.T) {
+	cases := map[string]struct{ vendor, model, fw string }{
+		"unknown vendor":   {"unknown", "CBS350", "3.1.1.7"},
+		"unknown model":    {"cisco", "unknown", "3.1.1.7"},
+		"unknown firmware": {"cisco", "CBS350", "unknown"},
+		"all unknown":      {"unknown", "unknown", "unknown"},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := devicePart("sw11", true)
+			p["device"] = map[string]any{"vendor": c.vendor, "model": c.model, "firmware_version": c.fw}
+			cl, err := New(pageSrv(t, page("s1", 0, 1, p)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = cl.Export(context.Background(), func(Page) error { return nil })
+			if !errors.Is(err, ErrProtocol) {
+				t.Fatalf("got %v, want ErrProtocol", err)
+			}
+		})
+	}
+}
+
+// TestExportAcceptsUnknownAndDottedDeviceValues: the server states "unknown"
+// for a value it does not export on an incomplete device, and a dotted
+// firmware version is a version.
+func TestExportAcceptsUnknownAndDottedDeviceValues(t *testing.T) {
+	cases := map[string]struct {
+		vendor, model, fw string
+		complete          bool
+	}{
+		"all unknown":   {"unknown", "unknown", "unknown", false},
+		"unknown fw":    {"cisco", "CBS350", "unknown", false},
+		"dotted quad":   {"cisco", "CBS350-24P-4G", "3.1.1.7", true},
+		"three parts":   {"paloalto", "PA-220", "10.2.3", true},
+		"dash build":    {"paloalto", "PA-220", "10.2.3-h1", true},
+		"plus and tild": {"cisco", "C9300_48U+", "17.3.4~rc1", true},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			p := devicePart("sw09", c.complete)
 			p["device"] = map[string]any{"vendor": c.vendor, "model": c.model, "firmware_version": c.fw}
 			cl, err := New(pageSrv(t, page("s1", 0, 1, p)))
 			if err != nil {

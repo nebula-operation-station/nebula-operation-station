@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
@@ -23,13 +24,18 @@ var (
 	subjectIDRe  = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 	digestRe     = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	cursorRe     = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
-	// deviceVendorRe, deviceModelRe and deviceFirmwareRe mirror the server's
-	// device patterns (vuln_export.go): a vendor slug, a model without dot or
-	// colon, and a version without colon. deviceUnknown is the server's
-	// placeholder for a value it does not export.
-	deviceVendorRe   = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
-	deviceModelRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_+-]{0,63}$`)
-	deviceFirmwareRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+~-]{0,127}$`)
+	// deviceVendorRe, deviceModelRe, deviceMACRe and deviceFirmwareRe mirror
+	// the server's device patterns (vuln_export.go): a vendor slug, a model
+	// without dot or colon and not a hyphenated MAC, and a firmware version
+	// from the allowlist that starts with a digit. deviceUnknown is the
+	// server's placeholder for a value it does not export.
+	deviceVendorRe    = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+	deviceModelRe     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_+-]{0,63}$`)
+	deviceMACRe       = regexp.MustCompile(`^[0-9A-Fa-f]{2}(-[0-9A-Fa-f]{2}){5}$`)
+	deviceFirmwareRe  = regexp.MustCompile(`^[0-9][A-Za-z0-9.+~_-]{0,63}$`)
+	deviceDigitsRe    = regexp.MustCompile(`^[0-9]+$`)
+	deviceDottedMACRe = regexp.MustCompile(`^[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}$`)
+	deviceBareMACRe   = regexp.MustCompile(`^[0-9A-Fa-f]{12}$`)
 )
 
 // ErrIncompleteExport: the export ended while a subject still lacked its
@@ -275,7 +281,7 @@ func (st *exportState) part(s SubjectPart) error {
 		if s.Ref.ImageDigest != "" || s.Kernel != nil {
 			return fmt.Errorf("device with an image digest or a kernel: %w", ErrProtocol)
 		}
-		if err := checkDevice(s.Device); err != nil {
+		if err := checkDevice(s.Device, s.Complete); err != nil {
 			return err
 		}
 		limit = 0
@@ -337,28 +343,60 @@ func (st *exportState) part(s SubjectPart) error {
 // checkDevice validates the device data of a device subject part. Each value
 // must match the server's pattern for its field (ADR 0011 D2/D3) or be the
 // server's "unknown" placeholder; a value outside the pattern never reaches
-// the matcher.
-func checkDevice(d *Device) error {
+// the matcher. The server marks a device complete only when it can vouch for
+// every value, so a complete part with an "unknown" value is refused.
+func checkDevice(d *Device, complete bool) error {
 	if d == nil {
 		return fmt.Errorf("device subject without device data: %w", ErrProtocol)
 	}
 	fields := []struct {
 		name, value string
-		re          *regexp.Regexp
+		ok          func(string) bool
 	}{
-		{"vendor", d.Vendor, deviceVendorRe},
-		{"model", d.Model, deviceModelRe},
-		{"firmware_version", d.FirmwareVersion, deviceFirmwareRe},
+		{"vendor", d.Vendor, func(v string) bool { return deviceVendorRe.MatchString(v) }},
+		{"model", d.Model, deviceModelOK},
+		{"firmware_version", d.FirmwareVersion, deviceFirmwareOK},
 	}
 	for _, f := range fields {
 		if f.value == "" || len(f.value) > MaxDeviceFieldBytes {
 			return fmt.Errorf("device %s empty or over %d bytes: %w", f.name, MaxDeviceFieldBytes, ErrProtocol)
 		}
-		if f.value != deviceUnknown && !f.re.MatchString(f.value) {
+		if f.value == deviceUnknown {
+			if complete {
+				return fmt.Errorf("complete device with unknown %s: %w", f.name, ErrProtocol)
+			}
+			continue
+		}
+		if !f.ok(f.value) {
 			return fmt.Errorf("device %s outside the export pattern: %w", f.name, ErrProtocol)
 		}
 	}
 	return nil
+}
+
+// deviceModelOK mirrors the server's model check: the model pattern, and not a
+// hyphenated MAC.
+func deviceModelOK(v string) bool {
+	return deviceModelRe.MatchString(v) && !deviceMACRe.MatchString(v)
+}
+
+// deviceFirmwareOK mirrors the server's firmware allowlist (deviceFirmwareOK in
+// vuln_export.go): the pattern, the first dot-separated label all digits, every
+// later label holding a digit, and neither a dotted nor a bare MAC.
+func deviceFirmwareOK(v string) bool {
+	if !deviceFirmwareRe.MatchString(v) || deviceDottedMACRe.MatchString(v) || deviceBareMACRe.MatchString(v) {
+		return false
+	}
+	labels := strings.Split(v, ".")
+	if !deviceDigitsRe.MatchString(labels[0]) {
+		return false
+	}
+	for _, l := range labels[1:] {
+		if !strings.ContainsAny(l, "0123456789") {
+			return false
+		}
+	}
+	return true
 }
 
 func sameHead(a, b SubjectPart) bool {
