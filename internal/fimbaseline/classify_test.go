@@ -303,10 +303,172 @@ func TestStandardSystemdLayoutKeepsClassification(t *testing.T) {
 			t.Errorf("%s: got %v/%b, want critical without unclassifiable", p, c, r)
 		}
 	}
-	// A retargeted usrmerge link is itself a per-entry critical deviation.
+	// A retargeted usrmerge link is itself a per-entry critical deviation, and
+	// the new record is not a standard link, so it is also run-wide.
 	libOld, libNew := symlink("/lib", "usr/lib"), symlink("/lib", "/tmp/evil")
-	if c, r := cl.classify([]byte("/lib"), &libOld, &libNew); c != ClassCritical || r&RuleSSHSymlink == 0 || r&RuleUnclassifiable != 0 {
-		t.Errorf("/lib retargeted: got %v/%b, want critical with RuleSSHSymlink and without unclassifiable", c, r)
+	retargeted := newClassifier(append([]fimscan.Record{app1, libOld}, layout[1:]...), append([]fimscan.Record{app2, libNew}, layout[1:]...), usable())
+	if c, r := retargeted.classify([]byte("/lib"), &libOld, &libNew); c != ClassCritical || r&RuleSSHSymlink == 0 || r&RuleUnclassifiable == 0 {
+		t.Errorf("/lib retargeted: got %v/%b, want critical with RuleSSHSymlink and RuleUnclassifiable", c, r)
+	}
+}
+
+// TestNonStandardSymlinkAtUnitPositionIsRunWide pins the narrow exemption of
+// ADR 0015 D9 (round 2). A symlink at a systemd unit position (unit search
+// paths, unit drop-in directories, *.wants and *.requires, sshd unit
+// entries) or at a usrmerge link (/lib, /lib64, /bin, /sbin) that is not the
+// standard link makes every deviation of the run unclassifiable: the files
+// behind it are not in the run, so none of them may be approved as normal.
+// The classification of the entry itself stays critical.
+func TestNonStandardSymlinkAtUnitPositionIsRunWide(t *testing.T) {
+	tests := []struct{ path, target string }{
+		{"/etc/systemd/system", "/opt/x"},
+		{"/usr/local/lib/systemd", "/opt/x"},
+		{"/usr/local/lib/systemd/system", "/opt/x"},
+		{"/etc/systemd/system/ssh.service.d", "/opt/x"},
+		{"/usr/local/lib/systemd/system/ssh.service.d", "/opt/x"},
+		{"/etc/systemd/system/sshd@x.service.d", "/opt/x"},
+		{"/etc/systemd/system/ssh.service", "/opt/x/ssh.service"},
+		{"/etc/systemd/system/sshd.socket", "/dev/null"},
+		{"/usr/lib/systemd/system/ssh.service", "/opt/x/ssh.service"},
+		{"/etc/systemd/system/multi-user.target.wants", "/opt/x"},
+		{"/etc/systemd/system/multi-user.target.wants/ssh.service", "/opt/x/ssh.service"},
+		{"/etc/systemd/system/multi-user.target.wants/ssh.service", "/lib/systemd/system/sshd.socket"},
+		{"/etc/systemd/system/sshd.service", "../../../lib/systemd/system/ssh.service"},
+		{"/lib/systemd", "/opt/x"},
+		{"/usr", "/srv/usr"},
+		{"/usr/lib", "/srv/usr/lib"},
+		{"/lib", "/tmp/evil"},
+		{"/lib", "usr/lib2"},
+		{"/lib", "/usr/lib/../../tmp"},
+		{"/lib64", "/opt/lib64"},
+		{"/bin", "/tmp/bin"},
+		{"/sbin", "usr/bin"},
+	}
+	app1, app2 := file("/opt/app/bin/run", 1), file("/opt/app/bin/run", 2)
+	for _, tc := range tests {
+		t.Run(tc.path+" -> "+tc.target, func(t *testing.T) {
+			link := symlink(tc.path, tc.target)
+			cl := newClassifier([]fimscan.Record{app1, link}, []fimscan.Record{app2, link}, usable())
+			if c, r := cl.classify([]byte("/opt/app/bin/run"), &app1, &app2); c != ClassCritical || r != RuleUnclassifiable {
+				t.Fatalf("unrelated change: got %v/%b, want critical/unclassifiable", c, r)
+			}
+			if c, r := cl.classify([]byte(tc.path), &link, &link); c != ClassCritical || r&(RuleSSHSymlink|RuleUnclassifiable) != RuleSSHSymlink|RuleUnclassifiable {
+				t.Fatalf("the link itself: got %v/%b", c, r)
+			}
+		})
+	}
+}
+
+// TestStandardUsrmergeAndUnitLinksAreNotRunWide pins the exemption from the
+// other side: exactly the standard usrmerge links (/lib, /lib64, /bin, /sbin
+// to usr/...) and the standard sshd unit enablement and alias links to
+// /lib/systemd/system or /usr/lib/systemd/system do not make the run
+// unclassifiable. The links themselves stay per-entry critical.
+func TestStandardUsrmergeAndUnitLinksAreNotRunWide(t *testing.T) {
+	tests := []struct{ path, target string }{
+		{"/lib", "usr/lib"}, {"/lib", "/usr/lib"},
+		{"/lib64", "usr/lib64"}, {"/bin", "usr/bin"}, {"/sbin", "/usr/sbin"},
+		{"/etc/systemd/system/ssh.service", "/lib/systemd/system/ssh.service"},
+		{"/etc/systemd/system/sshd.service", "/usr/lib/systemd/system/ssh.service"},
+		{"/etc/systemd/system/multi-user.target.wants/ssh.service", "/lib/systemd/system/ssh.service"},
+		{"/etc/systemd/system/multi-user.target.wants/sshd.service", "/usr/lib/systemd/system/sshd.service"},
+		{"/etc/systemd/system/sshd.socket", "/lib/systemd/system/sshd.socket"},
+	}
+	app1, app2 := file("/opt/app/bin/run", 1), file("/opt/app/bin/run", 2)
+	for _, tc := range tests {
+		t.Run(tc.path+" -> "+tc.target, func(t *testing.T) {
+			link := symlink(tc.path, tc.target)
+			cl := newClassifier([]fimscan.Record{app1, link}, []fimscan.Record{app2, link}, usable())
+			if c, r := cl.classify([]byte("/opt/app/bin/run"), &app1, &app2); c != ClassNormal || r != 0 {
+				t.Fatalf("unrelated change: got %v/%b, want normal/0", c, r)
+			}
+			if c, r := cl.classify([]byte(tc.path), &link, &link); c != ClassCritical || r&RuleUnclassifiable != 0 {
+				t.Fatalf("the link itself: got %v/%b, want critical without unclassifiable", c, r)
+			}
+		})
+	}
+}
+
+// TestDirectoryNamedAuthorizedKeysIsNotAFixedPosition pins the fix for
+// AuthorizedKeysFile /etc/ssh/authorized_keys/%u. The directory is only an SSH
+// position through the derived set, so it does not make every deviation of
+// the run unclassifiable, and the file behind it is classified per entry.
+func TestDirectoryNamedAuthorizedKeysIsNotAFixedPosition(t *testing.T) {
+	ssh := Options{SSH: stubSSH{
+		files:     map[string]bool{"/etc/ssh/authorized_keys/bob": true},
+		positions: map[string]bool{"/etc/ssh/authorized_keys": true},
+	}}
+	keysDir := dir("/etc/ssh/authorized_keys")
+	bob1, bob2 := file("/etc/ssh/authorized_keys/bob", 1), file("/etc/ssh/authorized_keys/bob", 2)
+	app1, app2 := file("/opt/app/bin/run", 1), file("/opt/app/bin/run", 2)
+	cl := newClassifier([]fimscan.Record{keysDir, bob1, app1}, []fimscan.Record{keysDir, bob2, app2}, ssh)
+	if c, r := cl.classify([]byte("/opt/app/bin/run"), &app1, &app2); c != ClassNormal || r != 0 {
+		t.Fatalf("unrelated change: got %v/%b, want normal/0", c, r)
+	}
+	if c, r := cl.classify([]byte("/etc/ssh/authorized_keys/bob"), &bob1, &bob2); c != ClassCritical || r&RuleSSHDerived == 0 || r&RuleUnclassifiable != 0 {
+		t.Fatalf("key file behind the directory: got %v/%b, want critical/RuleSSHDerived", c, r)
+	}
+	if c, r := cl.classify([]byte("/etc/ssh/authorized_keys"), &keysDir, &keysDir); c != ClassCritical || r&RuleUnclassifiable != 0 {
+		t.Fatalf("the directory itself: got %v/%b, want critical without unclassifiable", c, r)
+	}
+	// A symlink at the derived directory position still fails closed.
+	link := symlink("/etc/ssh/authorized_keys", "/srv/keys")
+	cl = newClassifier([]fimscan.Record{link, app1}, []fimscan.Record{link, app2}, ssh)
+	if c, r := cl.classify([]byte("/opt/app/bin/run"), &app1, &app2); c != ClassCritical || r != RuleUnclassifiable {
+		t.Fatalf("symlink at the derived position: got %v/%b, want critical/unclassifiable", c, r)
+	}
+}
+
+// TestConfigSSHFileFixedPositions pins the fixed configuration and login file
+// positions: only the literal list and the home-relative login files, not any
+// name that merely starts with authorized_keys.
+func TestConfigSSHFileFixedPositions(t *testing.T) {
+	yes := []string{"/etc/ssh/sshd_config", "/root/.ssh/authorized_keys", "/home/bob/.ssh/authorized_keys2", "/home/bob/.shosts"}
+	no := []string{"/etc/ssh/authorized_keys", "/etc/ssh/authorized_keys/bob", "/etc/ssh/authorized_keys_extra", "/srv/authorized_keys"}
+	for _, p := range yes {
+		if !configSSHFile(p) {
+			t.Errorf("%s: not a fixed SSH file position", p)
+		}
+	}
+	for _, p := range no {
+		if configSSHFile(p) {
+			t.Errorf("%s: fixed SSH file position, want only the derived set to name it", p)
+		}
+	}
+}
+
+// countingSSH counts the Match calls per path.
+type countingSSH struct {
+	inner SSHSet
+	calls map[string]int
+}
+
+func (c countingSSH) Match(p []byte) SSHMatch {
+	c.calls[string(p)]++
+	return c.inner.Match(p)
+}
+
+// TestDerivedSetQueriedOncePerPath pins the cost bound of newClassifier: the
+// derived set is asked at most once per distinct path, even though the same
+// records appear in the baseline, the scan and the latest complete run.
+func TestDerivedSetQueriedOncePerPath(t *testing.T) {
+	var base, cur []fimscan.Record
+	for _, p := range []string{"/srv", "/srv/a", "/srv/a/b", "/srv/c", "/opt", "/opt/x"} {
+		base = append(base, dir(p))
+		cur = append(cur, dir(p))
+	}
+	cur = append(cur, file("/srv/a/b/new", 1))
+	latest := result(append(append([]fimscan.Record{}, base...), cur...)...)
+	counter := countingSSH{inner: stubSSH{}, calls: map[string]int{}}
+	opts := Options{SSH: counter, LatestComplete: latest}
+	cl := newClassifier(base, cur, opts)
+	for _, rec := range cur {
+		cl.classify(rec.Path, nil, &rec)
+	}
+	for p, n := range counter.calls {
+		if n > 1 {
+			t.Errorf("%s: derived set queried %d times, want at most 1", p, n)
+		}
 	}
 }
 
