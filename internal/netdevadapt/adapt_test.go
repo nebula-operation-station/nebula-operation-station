@@ -327,9 +327,13 @@ func TestMACTableAboveLimitIsCappedAndPartial(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %d tables, want 1", len(got))
 	}
-	if len(got[0].Entries) > limit {
-		t.Fatalf("%d entries, above the per-device limit %d", len(got[0].Entries), limit)
+	// The cut keeps exactly the limit, not merely no more than it.
+	if len(got[0].Entries) != limit {
+		t.Fatalf("%d entries, want the cut at the per-device limit %d", len(got[0].Entries), limit)
 	}
+	// The read itself is incomplete, so partial here does not show the cut
+	// set it; the fresh-to-partial branch of the cut is pinned in
+	// netdevinventory (TestCurrentTableFreshOverLimitIsCutAndPartial).
 	if got[0].State != netdevinventory.StatePartial {
 		t.Errorf("state %s, want partial when rows were cut at the limit", got[0].State)
 	}
