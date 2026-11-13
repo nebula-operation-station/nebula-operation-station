@@ -2416,6 +2416,202 @@ if [[ -n "$start_block" ]]; then
   install_units=("${saved_install_units[@]}")
 fi
 
+# --- Vulnerability agent (ADR 0011 Amendment 1, va08) -------------------------
+# install.sh --vuln-agent installs only the agent: no admin users, no rp-id,
+# no other option. It provisions the agent's own user (not in nebula-rpc),
+# its data dir 0700, the root-owned config dir 0750 and the skeleton 0640
+# (never overwritten), installs the unit and timer and enables nothing.
+run_rc 0 "--vuln-agent alone parses (dry run)" -- --vuln-agent
+run_msg 0 "--vuln-agent dry run names what it would do" "would install nebula-vuln-agent" -- --vuln-agent
+run_rc 2 "--vuln-agent with --admin-users and --rp-id" -- --vuln-agent --admin-users "$test_user" --rp-id nebula.example.org
+run_rc 2 "--vuln-agent with --from-package" -- --vuln-agent --from-package
+run_rc 2 "--vuln-agent with --release-bundle-dir" -- --vuln-agent --release-bundle-dir /tmp/attachments
+run_rc 1 "nebula-vuln-agent rejected as admin user" -- --admin-users nebula-vuln-agent --rp-id nebula.example.org
+out=$(NEBULA_INSTALL_DRY_RUN=1 bash "$install_sh" --vuln-agent 2>&1)
+if [[ "$out" != *"options valid"* ]]; then
+  echo "ok   --vuln-agent dry run stops before the NOS install"
+  pass=$((pass + 1))
+else
+  echo "FAIL --vuln-agent dry run went on to the NOS install"
+  fail=$((fail + 1))
+fi
+vuln_region=$(sed -n '/^# begin: vuln agent install/,/^# end: vuln agent install/p' "$install_sh")
+if [[ -n "$vuln_region" ]] &&
+   ! printf '%s\n' "$vuln_region" | grep -E '^[[:space:]]*systemctl ' | grep -qvxE '[[:space:]]*systemctl daemon-reload' &&
+   printf '%s\n' "$vuln_region" | grep -qE '^  exit 0$'; then
+  echo "ok   --vuln-agent runs no systemctl but daemon-reload (nothing enabled or started) and exits on its own"
+  pass=$((pass + 1))
+else
+  echo "FAIL --vuln-agent region enables/starts a unit or falls through into the NOS install"
+  fail=$((fail + 1))
+fi
+vuln_useradd=$(printf '%s\n' "$vuln_region" | grep -E '^[[:space:]]*useradd ')
+if [[ $(printf '%s\n' "$vuln_useradd" | grep -c .) != 1 ]] ||
+   printf '%s\n' "$vuln_useradd" | grep -qE 'nebula-rpc|-G |--groups'; then
+  echo "FAIL --vuln-agent puts the agent into a supplementary group"
+  fail=$((fail + 1))
+else
+  echo "ok   --vuln-agent gives the agent user no supplementary group"
+  pass=$((pass + 1))
+fi
+
+# Functional, no root needed: the real provisioning block with stubbed
+# getent, useradd, install and mktemp, run twice; then a file or link at
+# each path is refused before install follows it.
+vuln_block=$(sed -n '/^  # begin: vuln agent provisioning/,/^  # end: vuln agent provisioning/p' "$install_sh")
+vuln_sb=$(mktemp -d)
+trap 'rm -rf "$refresh_sb" "$pve_sb" "$netdev_sb" "$vuln_sb"' EXIT
+run_vuln_block() {
+  vuln_out=$(
+    exec 2>&1
+    set -euo pipefail
+    getent() { grep -qxF "$2" "$vuln_sb/users"; }
+    useradd() {
+      printf 'useradd %s\n' "$*" >> "$vuln_sb/calls"
+      printf '%s\n' "${*: -1}" >> "$vuln_sb/users"
+    }
+    mktemp() { printf '%s\n' "$vuln_sb/tmpfile"; }
+    install() {
+      local mode="" dir=0 prev="" a
+      printf 'install %s\n' "$*" >> "$vuln_sb/calls"
+      for a in "$@"; do
+        [[ "$prev" == -m ]] && mode="$a"
+        [[ "$a" == -d ]] && dir=1
+        prev="$a"
+      done
+      if [[ $dir -eq 1 ]]; then
+        mkdir -p "${*: -1}"
+      else
+        cp "${@: -2:1}" "${*: -1}"
+      fi
+      chmod "$mode" "${*: -1}"
+    }
+    vuln_data_dir="$vuln_sb/var-lib-nebula-vuln-agent"
+    vuln_etc_dir="$vuln_sb/etc-nebula-vuln-agent"
+    eval "$vuln_block"
+    echo "END"
+  )
+  vuln_rc=$?
+  refresh_out="$vuln_out" # expect prints it on a failure
+}
+vuln_reset() {
+  rm -rf "$vuln_sb/var-lib-nebula-vuln-agent" "$vuln_sb/etc-nebula-vuln-agent" "$vuln_sb/target" "$vuln_sb/tmpfile"
+  : > "$vuln_sb/users"
+  : > "$vuln_sb/calls"
+}
+vuln_rc_is() { [[ "$vuln_rc" -eq "$1" ]]; }
+vuln_mode_is() { [[ "$(stat -c '%a' "$1")" == "$2" ]]; }
+vuln_called() { grep -qxF -- "$1" "$vuln_sb/calls"; }
+vuln_out_has() { [[ "$vuln_out" == *"$1"* ]]; }
+if [[ -z "$vuln_block" ]]; then
+  echo "FAIL install.sh has no vuln agent provisioning block"
+  fail=$((fail + 1))
+else
+  vd="$vuln_sb/var-lib-nebula-vuln-agent"
+  ve="$vuln_sb/etc-nebula-vuln-agent"
+  vuln_reset
+  run_vuln_block
+  expect "vuln provisioning: a fresh host succeeds" vuln_rc_is 0
+  expect "vuln provisioning: own system user, no supplementary group" \
+    vuln_called "useradd --system --home-dir $vd --shell /usr/sbin/nologin nebula-vuln-agent"
+  expect "vuln provisioning: data dir 0700 nebula-vuln-agent" \
+    vuln_called "install -d -m 0700 -o nebula-vuln-agent -g nebula-vuln-agent $vd"
+  expect "vuln provisioning: config dir 0750 root:nebula-vuln-agent" \
+    vuln_called "install -d -m 0750 -o root -g nebula-vuln-agent $ve"
+  expect "vuln provisioning: skeleton 0640 root:nebula-vuln-agent" \
+    vuln_called "install -m 0640 -o root -g nebula-vuln-agent $vuln_sb/tmpfile $ve/config.json"
+  expect "vuln provisioning: data dir mode 700" vuln_mode_is "$vd" 700
+  expect "vuln provisioning: config dir mode 750" vuln_mode_is "$ve" 750
+  expect "vuln provisioning: config mode 640" vuln_mode_is "$ve/config.json" 640
+  expect "vuln provisioning: the skeleton is valid JSON with an empty NOS URL" \
+    python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); sys.exit(0 if c["nos"]["url"]=="" and c["data_dir"]=="/var/lib/nebula-vuln-agent" and c["llm"]["enabled"] is False else 1)' "$ve/config.json"
+  expect "vuln provisioning: no token or other secret is created" \
+    eval '[[ "$(ls -A "$ve")" == config.json ]]'
+  printf '{"admin": true}\n' > "$ve/config.json"
+  chmod 0755 "$vd"
+  : > "$vuln_sb/calls"
+  run_vuln_block
+  expect "vuln provisioning re-run: succeeds" vuln_rc_is 0
+  expect "vuln provisioning re-run: no second user" eval '! grep -q "^useradd" "$vuln_sb/calls"'
+  expect "vuln provisioning re-run: the admin's config is kept" has_content "$ve/config.json" '{"admin": true}'
+  expect "vuln provisioning re-run: a drifted data dir mode is repaired to 0700" vuln_mode_is "$vd" 700
+  for how in data-link data-file etc-link config-link; do
+    vuln_reset
+    mkdir -p "$vuln_sb/target"
+    case "$how" in
+      data-link) ln -s "$vuln_sb/target" "$vd"; bad="$vd" ;;
+      data-file) printf 'x\n' > "$vd"; bad="$vd" ;;
+      etc-link) ln -s "$vuln_sb/target" "$ve"; bad="$ve" ;;
+      config-link) mkdir -p "$ve"; ln -s "$vuln_sb/target/c.json" "$ve/config.json"; bad="$ve/config.json" ;;
+    esac
+    run_vuln_block
+    expect "vuln provisioning: a ${how} is refused" vuln_rc_is 1
+    expect "vuln provisioning: a ${how} is named" vuln_out_has "$bad"
+    expect "vuln provisioning: a ${how} gets no install" eval '! grep -q "^install " "$vuln_sb/calls"'
+    expect "vuln provisioning: a ${how} leaves the link target alone" \
+      eval '[[ -z "$(ls -A "$vuln_sb/target")" ]]'
+  done
+fi
+
+# Functional: the real unit block. A fresh host gets both units; an unedited
+# unit follows the shipped version; an edited one or a symlink (mask) stays,
+# with a warning; nothing is enabled.
+vuln_units_block=$(sed -n '/^  # begin: vuln agent units/,/^  # end: vuln agent units/p' "$install_sh")
+run_vuln_units() {
+  vuln_out=$(
+    exec 2>&1
+    set -euo pipefail
+    install() {
+      printf 'install %s\n' "$*" >> "$vuln_sb/calls"
+      cp "${@: -2:1}" "${*: -1}"
+    }
+    mktemp() { printf '%s\n' "$vuln_sb/tmpfile"; }
+    systemctl() { printf 'systemctl %s\n' "$*" >> "$vuln_sb/calls"; }
+    script_dir="$vuln_sb/ship"
+    vuln_units=(nebula-vuln-agent.service nebula-vuln-agent.timer)
+    vuln_unit_dir="$vuln_sb/units"
+    vuln_etc_dir="$vuln_sb/etc"
+    eval "$vuln_units_block"
+    echo "END"
+  )
+  vuln_rc=$?
+  refresh_out="$vuln_out"
+}
+vuln_ship() { printf '%s\n' "$2" > "$vuln_sb/ship/systemd/$1"; }
+if [[ -z "$vuln_units_block" ]]; then
+  echo "FAIL install.sh has no vuln agent units block"
+  fail=$((fail + 1))
+else
+  rm -rf "$vuln_sb/ship" "$vuln_sb/units" "$vuln_sb/etc"
+  mkdir -p "$vuln_sb/ship/systemd" "$vuln_sb/units" "$vuln_sb/etc"
+  : > "$vuln_sb/calls"
+  vs=nebula-vuln-agent.service
+  vt=nebula-vuln-agent.timer
+  vuln_ship "$vs" "$vs v1"
+  vuln_ship "$vt" "$vt v1"
+  run_vuln_units
+  expect "vuln units: a fresh host succeeds" vuln_rc_is 0
+  expect "vuln units: the service is installed" has_content "$vuln_sb/units/$vs" "$vs v1"
+  expect "vuln units: the timer is installed" has_content "$vuln_sb/units/$vt" "$vt v1"
+  expect "vuln units: only daemon-reload, nothing enabled or started" \
+    eval '[[ "$(grep "^systemctl" "$vuln_sb/calls")" == "systemctl daemon-reload" ]]'
+  # Unedited service follows; edited timer stays.
+  vuln_ship "$vs" "$vs v2"
+  vuln_ship "$vt" "$vt v2"
+  printf 'admin edit\n' > "$vuln_sb/units/$vt"
+  run_vuln_units
+  expect "vuln units upgrade: succeeds" vuln_rc_is 0
+  expect "vuln units upgrade: the unedited service follows the shipped version" has_content "$vuln_sb/units/$vs" "$vs v2"
+  expect "vuln units upgrade: the edited timer is kept" has_content "$vuln_sb/units/$vt" 'admin edit'
+  expect "vuln units upgrade: the kept timer is named" vuln_out_has "$vuln_sb/units/$vt differs"
+  # A mask (symlink to /dev/null) stays.
+  rm -f "$vuln_sb/units/$vt"
+  ln -s /dev/null "$vuln_sb/units/$vt"
+  vuln_ship "$vt" "$vt v3"
+  run_vuln_units
+  expect "vuln units: a masked timer stays masked" is_mask_link "$vuln_sb/units/$vt"
+fi
+
 # --- Root-gated: real runs of install.sh and uninstall.sh -------------------
 # These two cases exercise the systemd handling, which the dry-run mode
 # exits before reaching. They need root and a running systemd; the first

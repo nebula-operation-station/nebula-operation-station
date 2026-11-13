@@ -317,7 +317,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	bg.Go(func() { lockWatcher.Run(connCtx) })
 	// I1 self-check (ADR 0015 D4): at start and every 60 minutes, logged
 	// and shown under /integrity/status; no reaction here (IG-04).
-	selfCheck := newIntegrityMonitor(log, version.Version, integrityReferenceDir, "/")
+	selfCheck := newIntegrityMonitor(log, version.Version)
 	bg.Go(func() { selfCheck.Run(connCtx) })
 
 	// Operations (M4): planned here, decided and run by the executor.

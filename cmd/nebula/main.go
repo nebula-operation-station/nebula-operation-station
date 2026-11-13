@@ -16,6 +16,7 @@
 //	nebula totp setup|status|remove
 //	nebula pve remote add|rotate-token|remove|repin|list
 //	nebula container definition put|remove|list
+//	nebula integrity verify --offline DIR --root MOUNT --version V --flavour F
 package main
 
 import (
@@ -141,6 +142,10 @@ commands:
                       remove a definition, or one older version (refused inside a rollback window)
   container definition list [HOST]
                       definition metadata (version, author, time; never content)
+  integrity verify --offline RELEASE-DIR --root MOUNT --version X.Y.Z --flavour FLAVOUR
+                      check a mounted NOS installation (read-only) against a release fetched
+                      and kept on another machine, verified with the compiled release roots;
+                      exit 0 clean, 5 deviations, 6 incomplete (never clean)
   version             print version
 
 environment:
@@ -184,6 +189,10 @@ func run(cmd string, args []string) error {
 		return pveCmd(args, os.Stdin, ttyPrompter, os.Stdout)
 	case "netdev":
 		return netdevCmd(args, defaultNetdevEnv())
+	case "integrity":
+		// The offline check trusts only the compiled release anchors and
+		// never talks to an executor.
+		return integrityCmd(args, os.Stdout)
 	}
 	conn, err := dialExecutor()
 	if err != nil {
