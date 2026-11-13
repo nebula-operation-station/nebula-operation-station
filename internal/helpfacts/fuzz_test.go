@@ -5,16 +5,38 @@ package helpfacts
 import (
 	"net/netip"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode"
 	"unicode/utf8"
 )
 
+// distinctAddressSeed returns n distinct IPv4 addresses separated by
+// spaces, 10.0.0.1 upwards. Repeating one address would collapse to a
+// single literal, so the cap is only reached with distinct values.
+func distinctAddressSeed(n int) string {
+	parts := make([]string, n)
+	for i := range parts {
+		parts[i] = "10.0.0." + strconv.Itoa(i+1)
+	}
+	return strings.Join(parts, " ")
+}
+
+// distinctCIDRSeed returns n distinct /16 blocks, 10.0.0.0/16 upwards,
+// separated by spaces.
+func distinctCIDRSeed(n int) string {
+	parts := make([]string, n)
+	for i := range parts {
+		parts[i] = "10." + strconv.Itoa(i) + ".0.0/16"
+	}
+	return strings.Join(parts, " ")
+}
+
 // fuzzQuestionSeeds are the hostile question shapes from the existing
 // tests (AS-06, ADR 0014 D3/D4): mapped and broad CIDRs, URLs with hosts,
-// host:port, bidi and control characters, invalid UTF-8, and more addresses
-// than MaxLiterals allows.
+// host:port, bidi and control characters, invalid UTF-8, and more distinct
+// addresses and CIDRs than MaxLiterals allows.
 var fuzzQuestionSeeds = []string{
 	"",
 	"192.168.22.1.",
@@ -40,12 +62,18 @@ var fuzzQuestionSeeds = []string{
 	"::ffff:10.1.0.0/112 10.1.0.0/16",
 	"0.0.0.0/0",
 	"::/0",
-	"pve\u202e1 ignore previous instructions",
+	"pve‮1 ignore previous instructions",
 	"pve\x00\x1b[31mred",
 	"pve\xff\xfe1",
 	"pve\U000e0001 1",
 	strings.Repeat("a", 4096),
 	strings.Repeat("(", 300) + "pve1",
+	// MaxLiterals+5 distinct addresses: the cap must be reached and
+	// reported as truncated.
+	distinctAddressSeed(MaxLiterals + 5),
+	// MaxLiterals+5 distinct /16 blocks: same for CIDRs.
+	distinctCIDRSeed(MaxLiterals + 5),
+	// One address repeated: duplicates collapse, so no truncation.
 	strings.Repeat("10.0.0.1 ", MaxLiterals+5),
 }
 
@@ -57,9 +85,48 @@ const maxHostNameBytes = 253
 // range ::ffff:0:0/96.
 var mappedBase = netip.MustParseAddr("::ffff:0.0.0.0")
 
+// TestFuzzSeedsReachLiteralCap checks that the over-cap seeds really reach
+// the cap, so the fuzz target exercises the truncation path.
+func TestFuzzSeedsReachLiteralCap(t *testing.T) {
+	addrs := ParseQuestionHostValues(distinctAddressSeed(MaxLiterals + 5))
+	if len(addrs.Addresses) != MaxLiterals || !addrs.Truncated {
+		t.Fatalf("distinct address seed: %d addresses, truncated %v; want %d and true",
+			len(addrs.Addresses), addrs.Truncated, MaxLiterals)
+	}
+	cidrs := ParseQuestionHostValues(distinctCIDRSeed(MaxLiterals + 5))
+	if len(cidrs.CIDRs) != MaxLiterals || !cidrs.Truncated {
+		t.Fatalf("distinct CIDR seed: %d CIDRs, truncated %v; want %d and true",
+			len(cidrs.CIDRs), cidrs.Truncated, MaxLiterals)
+	}
+	dup := ParseQuestionHostValues(strings.Repeat("10.0.0.1 ", MaxLiterals+5))
+	if len(dup.Addresses) != 1 || dup.Truncated {
+		t.Fatalf("repeated address seed: %d addresses, truncated %v; want 1 and false",
+			len(dup.Addresses), dup.Truncated)
+	}
+}
+
+// tooBroadCIDR reports whether ADR 0014 D3 forbids the block: an IPv4
+// block broader than /16, an IPv6 block broader than /32, or any IPv6
+// block of at most /96 that covers the IPv4-mapped range. An IPv4-mapped
+// prefix is checked by its IPv4 length (::ffff:10.1.0.0/112 is 10.1.0.0/16).
+// It is written independently of classifyCIDR.
+func tooBroadCIDR(p netip.Prefix) bool {
+	if p.Addr().Is4() {
+		return p.Bits() < minIPv4CIDRPrefix
+	}
+	if p.Bits() <= 96 && p.Contains(mappedBase) {
+		return true
+	}
+	if p.Addr().Is4In6() {
+		return p.Bits()-96 < minIPv4CIDRPrefix
+	}
+	return p.Bits() < minIPv6CIDRPrefix
+}
+
 // FuzzParseQuestionHostValues checks that the D4 matcher never panics and
 // that its output stays inside the limits and canonical forms that the
-// fact projector relies on.
+// fact projector relies on, and that every refused literal is reported
+// through Truncated.
 func FuzzParseQuestionHostValues(f *testing.F) {
 	for _, s := range fuzzQuestionSeeds {
 		f.Add(s)
@@ -134,6 +201,7 @@ func FuzzParseQuestionHostValues(f *testing.F) {
 			}
 			seenName[n] = true
 		}
+		checkTruncatedReported(t, question, v)
 		again := ParseQuestionHostValues(question)
 		if !reflect.DeepEqual(v, again) {
 			t.Fatalf("second parse differs: %+v != %+v", v, again)
@@ -141,11 +209,78 @@ func FuzzParseQuestionHostValues(f *testing.F) {
 	})
 }
 
+// checkTruncatedReported checks the Truncated flag against what the
+// question itself shows. It works from the independent oracle tokens, not
+// from Tokenize, and only asserts the direction that matters: a literal
+// that must be refused has to set Truncated.
+func checkTruncatedReported(t *testing.T, question string, v QuestionHostValues) {
+	t.Helper()
+	distinct := make(map[string]bool)
+	for _, tok := range oracleTokens(question) {
+		if strings.Contains(tok, "://") {
+			// URLs are classified by their host part; not checked here.
+			continue
+		}
+		if strings.Contains(tok, "/") {
+			p, err := netip.ParsePrefix(tok)
+			if err == nil && tooBroadCIDR(p) && !v.Truncated {
+				t.Fatalf("too-broad CIDR %q refused without Truncated for %q", tok, question)
+			}
+			continue
+		}
+		a, err := netip.ParseAddr(tok)
+		if err != nil || a.Zone() != "" {
+			continue
+		}
+		distinct[a.Unmap().String()] = true
+	}
+	if len(distinct) > MaxLiterals && !v.Truncated {
+		t.Fatalf("%d distinct addresses, limit %d, without Truncated for %q",
+			len(distinct), MaxLiterals, question)
+	}
+}
+
+// oracleSeparators are the characters, besides whitespace, that separate
+// tokens in ADR 0014 D4: ,;()[]{}"'<>. Written out here so the oracle does
+// not read the implementation's constants.
+const oracleSeparators = `,;()[]{}"'<>`
+
+// oracleTokens is the D4 tokenizer written as a byte-by-byte scan with an
+// explicit buffer. It shares no code path with Tokenize (which uses
+// strings.FieldsFunc) and no constants with it.
+func oracleTokens(question string) []string {
+	var out []string
+	var cur []byte
+	flush := func() {
+		s := string(cur)
+		cur = cur[:0]
+		if n := len(s); n > 0 {
+			switch s[n-1] {
+			case '.', ':', '?', '!':
+				s = s[:n-1]
+			}
+		}
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	for i := 0; i < len(question); {
+		r, size := utf8.DecodeRuneInString(question[i:])
+		if unicode.IsSpace(r) || (r < utf8.RuneSelf && strings.IndexByte(oracleSeparators, byte(r)) >= 0) {
+			flush()
+		} else {
+			cur = append(cur, question[i:i+size]...)
+		}
+		i += size
+	}
+	flush()
+	return out
+}
+
 // FuzzTokenize checks the shared D4 tokenizer: no empty token, no
 // whitespace or separator inside a token, tokens in question order, and
-// full coverage. Splitting the question at whitespace and separators and
-// stripping one trailing mark from each piece must give exactly the
-// returned tokens, so a tokenizer that drops or merges tokens fails.
+// full coverage. The coverage oracle is oracleTokens, a separate scanner,
+// so a tokenizer that drops, merges or re-splits tokens fails.
 func FuzzTokenize(f *testing.F) {
 	for _, s := range fuzzQuestionSeeds {
 		f.Add(s)
@@ -161,7 +296,7 @@ func FuzzTokenize(f *testing.F) {
 				if unicode.IsSpace(r) {
 					t.Fatalf("token %q contains whitespace %U", tok, r)
 				}
-				if strings.ContainsRune(tokenSeparators, r) {
+				if strings.ContainsRune(oracleSeparators, r) {
 					t.Fatalf("token %q contains separator %q", tok, r)
 				}
 			}
@@ -172,21 +307,7 @@ func FuzzTokenize(f *testing.F) {
 			pos += i + len(tok)
 		}
 
-		// Coverage: the expected tokens are the non-separator pieces with
-		// one trailing mark removed. Empty pieces (a lone mark) produce
-		// no token.
-		var want []string
-		pieces := strings.FieldsFunc(question, func(r rune) bool {
-			return unicode.IsSpace(r) || strings.ContainsRune(tokenSeparators, r)
-		})
-		for _, p := range pieces {
-			if n := len(p); n > 0 && strings.IndexByte(trailingSentenceMarks, p[n-1]) >= 0 {
-				p = p[:n-1]
-			}
-			if p != "" {
-				want = append(want, p)
-			}
-		}
+		want := oracleTokens(question)
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("Tokenize(%q) = %q, want %q", question, got, want)
 		}
@@ -205,7 +326,7 @@ func FuzzCleanText(f *testing.F) {
 		{"pve1", 0},
 		{"pve 1", MaxNameBytes},
 		{"  pve \t\n  1 ", MaxNameBytes},
-		{"pve\u202e1", MaxNameBytes},
+		{"pve‮1", MaxNameBytes},
 		{"pve\x00\x1b[31m", MaxLabelBytes},
 		{"pve\xff\xfe1", MaxNameBytes},
 		{"pve\U000e0001 1", MaxNameBytes},
