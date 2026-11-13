@@ -43,6 +43,13 @@ var (
 	// The check could not run completely (ADR 0015 D4), so it does not
 	// wrap ErrNotCheckable.
 	ErrNoInstalledFiles = errors.New("integrity: installed-files list of the release is missing")
+	// ErrNoAdmittedReference is a release whose installed-files list has
+	// not been admitted into executor-owned storage, or a checker that
+	// cannot read that copy. ADR 0015 D4 "Reference" allows checks only
+	// against the admitted copy, never against the copy in /usr/share, so
+	// the check could not run (incomplete, never ok). It does not wrap
+	// ErrNotCheckable.
+	ErrNoAdmittedReference = errors.New("integrity: no executor-admitted installed-files list")
 )
 
 // State is the overall outcome of the latest self-check.
@@ -71,6 +78,9 @@ const (
 	// CauseNoList: the release's installed-files.json or the reference
 	// directory is missing (StateIncomplete).
 	CauseNoList = "no-installed-files-list"
+	// CauseNoAdmittedReference: there is no executor-admitted reference
+	// to check against (ErrNoAdmittedReference, StateIncomplete).
+	CauseNoAdmittedReference = "no-admitted-reference"
 	// CauseDevelopmentBuild: the running version is not a release.
 	CauseDevelopmentBuild = "development-build"
 	// CauseReferenceRejected: the list, manifest or signature is
@@ -90,14 +100,14 @@ const (
 
 // Reference sources named in SelfCheck.ReferenceSource.
 const (
-	// SourceReleaseDirBuiltinAnchors: the caller re-admits the
-	// installed-files list from the release directory in /usr/share on
-	// every run, verified only against the root anchors built into its
-	// binary (no rotations). This is an interim source: ADR 0015 D4
-	// "Reference" wants later checks against the executor-admitted copy,
-	// never against the copy in /usr/share, with the rollback rule. That
-	// copy does not exist yet (admission during upgrade is IG-04).
-	SourceReleaseDirBuiltinAnchors = "usr-share-builtin-anchors"
+	// SourceExecutorAdmitted: the copy of installed-files.json that the
+	// executor admitted into its own storage (ADR 0015 D4 "Reference"),
+	// never the copy in /usr/share. Until that admission exists (IG-04),
+	// a loader with this source returns ErrNoAdmittedReference.
+	// (Previously the server used an interim source
+	// "usr-share-builtin-anchors" that re-admitted the /usr/share copy;
+	// removed because D4 forbids it.)
+	SourceExecutorAdmitted = "executor-admitted"
 )
 
 // Deviation is one file whose status is not ok. It never holds file
@@ -173,6 +183,11 @@ type Monitor struct {
 	ReferenceSource string
 	// Options configures Check. Options.Now defaults to Now.
 	Options Options
+	// Flavour, when set, detects the install flavour on every run after
+	// the reference loaded and replaces Options.Flavour for that run. An
+	// error makes only that run incomplete (CauseCheckFailed); the next
+	// run detects again.
+	Flavour func(ctx context.Context) (string, error)
 	// Interval is the period after the start check; 0 means
 	// DefaultInterval.
 	Interval time.Duration
@@ -269,6 +284,8 @@ func (m *Monitor) check(ctx context.Context, now func() time.Time) (SelfCheck, e
 	switch {
 	case errors.Is(err, ErrDevelopmentBuild):
 		return SelfCheck{State: StateNotCheckable, Cause: CauseDevelopmentBuild}, err
+	case errors.Is(err, ErrNoAdmittedReference):
+		return SelfCheck{State: StateIncomplete, Cause: CauseNoAdmittedReference}, err
 	case errors.Is(err, ErrNoInstalledFiles):
 		return SelfCheck{State: StateIncomplete, Cause: CauseNoList}, err
 	case errors.Is(err, release.ErrUntrusted):
@@ -279,6 +296,14 @@ func (m *Monitor) check(ctx context.Context, now func() time.Time) (SelfCheck, e
 	opts := m.Options
 	if opts.Now == nil {
 		opts.Now = now
+	}
+	if m.Flavour != nil {
+		flavour, err := m.Flavour(ctx)
+		if err != nil {
+			return SelfCheck{State: StateIncomplete, Cause: CauseCheckFailed, ReleaseVersion: ref.ReleaseVersion(),
+				ListDigest: ref.ListDigest()}, fmt.Errorf("detect install flavour: %w", err)
+		}
+		opts.Flavour = flavour
 	}
 	rep, err := Check(ctx, ref, opts)
 	if err != nil {
