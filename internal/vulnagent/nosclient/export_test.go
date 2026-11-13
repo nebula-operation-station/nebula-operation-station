@@ -210,6 +210,29 @@ func TestExportAcceptsAValidHandWrittenExport(t *testing.T) {
 	}
 }
 
+// TestExportAcceptsFirmwareAtTheLengthLimit: a firmware version of exactly 64
+// bytes is accepted; 65 bytes is refused (ADR 0011 D3).
+func TestExportAcceptsFirmwareAtTheLengthLimit(t *testing.T) {
+	for _, c := range []struct {
+		fw string
+		ok bool
+	}{
+		{"1." + strings.Repeat("1", 62), true},
+		{"1." + strings.Repeat("1", 63), false},
+	} {
+		p := devicePart("sw11", true)
+		p["device"] = map[string]any{"vendor": "cisco", "model": "CBS350", "firmware_version": c.fw}
+		cl, err := New(pageSrv(t, page("s1", 0, 1, p)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = cl.Export(context.Background(), func(Page) error { return nil })
+		if got := err == nil; got != c.ok {
+			t.Fatalf("firmware of %d bytes accepted=%v, want %v: %v", len(c.fw), got, c.ok, err)
+		}
+	}
+}
+
 // devicePart is one device subject part as the server exports it (ADR 0011
 // D3): vendor, model, firmware version and the vendor ecosystem, no packages.
 func devicePart(id string, complete bool) map[string]any {
@@ -311,17 +334,25 @@ func TestExportRefusesDeviceFieldsOutsideTheServerPattern(t *testing.T) {
 // (ADR 0011 D2/D3); the firmware field takes version shapes only.
 func TestExportRefusesHostileDeviceValuesInTheServerAllowlist(t *testing.T) {
 	cases := map[string]struct{ vendor, model, fw string }{
-		"firmware fqdn":            {"cisco", "CBS350", "core-sw.lab.example"},
-		"firmware fqdn with digit": {"cisco", "CBS350", "10.core-sw.lab.example"},
-		"firmware hyphenated mac":  {"cisco", "CBS350", "00-11-22-33-44-55"},
-		"firmware dotted mac":      {"cisco", "CBS350", "0011.2233.4455"},
-		"firmware bare mac":        {"cisco", "CBS350", "001122334455"},
-		"firmware host label":      {"cisco", "CBS350", "core-sw"},
-		"firmware letter start":    {"cisco", "CBS350", "v1.2"},
-		"firmware hyphen digits":   {"cisco", "CBS350", "1-2-3"},
-		"firmware too long":        {"cisco", "CBS350", "1." + strings.Repeat("1", 64)},
-		"model hyphenated mac":     {"cisco", "00-11-22-33-44-55", "3.1.1.7"},
-		"vendor fqdn":              {"core-sw.lab.example", "CBS350", "3.1.1.7"},
+		"firmware fqdn":                          {"cisco", "CBS350", "core-sw.lab.example"},
+		"firmware fqdn with digit":               {"cisco", "CBS350", "10.core-sw.lab.example"},
+		"firmware hyphenated mac":                {"cisco", "CBS350", "00-11-22-33-44-55"},
+		"firmware dotted mac":                    {"cisco", "CBS350", "0011.2233.4455"},
+		"firmware bare mac":                      {"cisco", "CBS350", "001122334455"},
+		"firmware host label":                    {"cisco", "CBS350", "core-sw"},
+		"firmware letter start":                  {"cisco", "CBS350", "v1.2"},
+		"firmware hyphen digits":                 {"cisco", "CBS350", "1-2-3"},
+		"firmware too long":                      {"cisco", "CBS350", "1." + strings.Repeat("1", 64)},
+		"firmware host label, digits after dash": {"cisco", "CBS350", "3.1.1.7-core-sw01"},
+		"firmware host label, digits after plus": {"cisco", "CBS350", "17.3.4+sw1"},
+		"firmware host label, first label":       {"cisco", "CBS350", "1.core-sw01"},
+		"firmware host name, four labels":        {"cisco", "CBS350", "10.sw1.lab2.ex3"},
+		"firmware dotted mac, six octets":        {"cisco", "CBS350", "00.11.22.33.44.55"},
+		"firmware dotted mac, six hex pairs":     {"cisco", "CBS350", "00.1a.2b.3c.4d.5e"},
+		"model hyphenated mac":                   {"cisco", "00-11-22-33-44-55", "3.1.1.7"},
+		"vendor fqdn":                            {"core-sw.lab.example", "CBS350", "3.1.1.7"},
+		"vendor bare host label":                 {"core-sw", "CBS350", "3.1.1.7"},
+		"vendor uncovered":                       {"juniper", "CBS350", "3.1.1.7"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

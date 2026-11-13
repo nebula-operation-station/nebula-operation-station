@@ -191,7 +191,7 @@ func TestVulnExportDeviceNonPublicIPv4FirmwareIsUnknown(t *testing.T) {
 // as "8.8.8.8" cannot be told from a version by its shape; that residual is
 // the documented D3 decision, so it is not asserted here either way.
 func TestVulnExportDeviceDottedFirmwareIsAVersion(t *testing.T) {
-	for _, fw := range []string{"3.1.1.7", "10.2.3", "10.2.3-h1", "17.06.05", "7.0.3+build.4"} {
+	for _, fw := range []string{"3.1.1.7", "10.2.3", "10.2.3-h1", "17.06.05", "7.0.3+build.4", "16.9.4a", "21.4-rc2"} {
 		e := newVulnEnv(t)
 		e.inv.set(deviceSnapshot("fw11", &api.VulnDevice{Vendor: "cisco", Model: "CBS350", FirmwareVersion: fw, Current: true}))
 		d := exportedDevice(t, e)
@@ -226,6 +226,16 @@ func TestVulnExportRejectsHostileFirmwareFields(t *testing.T) {
 		"too long":           "1." + strings.Repeat("1", 64),
 		"leading hyphen":     "-3.1.1",
 		"hyphen digit label": "1-2-3",
+		// A host name with digits in a later label or after a separator is
+		// a host label, not a version part (ADR 0011 D3).
+		"version then host label": "3.1.1.7-core-sw01",
+		"version then plus label": "17.3.4+sw1",
+		"digit then host label":   "1.core-sw01",
+		"digit host name, 4 dots": "10.sw1.lab2.ex3",
+		"host label after tilde":  "2.0~lab3",
+		"dotted mac, 6 groups":    "00.11.22.33.44.55",
+		"dotted mac, 6 hex pairs": "00.1a.2b.3c.4d.5e",
+		"empty part":              "3.1.-4",
 	}
 	for name, fw := range hostile {
 		t.Run(name, func(t *testing.T) {
@@ -256,6 +266,10 @@ func TestVulnExportRejectsHostileVendorFields(t *testing.T) {
 		"ipv4":             "10.0.0.7",
 		"upper case":       "Cisco",
 		"space":            "cisco ios",
+		// A bare host label matches the slug pattern; only a covered vendor
+		// is exported (ADR 0011 D2).
+		"bare host label":  "core-sw",
+		"uncovered vendor": "juniper",
 	}
 	for name, vendor := range hostile {
 		t.Run(name, func(t *testing.T) {
@@ -294,6 +308,26 @@ func TestVulnExportDeviceWithImageDigestOrAddressIDIsDropped(t *testing.T) {
 				t.Fatalf("%d subjects exported: %s", n, r.body)
 			}
 		})
+	}
+}
+
+// TestVulnExportDeviceFirmwareLengthLimitIs64Bytes: a firmware version of
+// exactly 64 bytes is exported; one byte more is refused.
+func TestVulnExportDeviceFirmwareLengthLimitIs64Bytes(t *testing.T) {
+	for _, c := range []struct {
+		fw string
+		ok bool
+	}{
+		{"1." + strings.Repeat("1", 62), true},
+		{"1." + strings.Repeat("1", 63), false},
+	} {
+		e := newVulnEnv(t)
+		e.inv.set(deviceSnapshot("fw14", &api.VulnDevice{Vendor: "cisco", Model: "CBS350", FirmwareVersion: c.fw, Current: true}))
+		d := exportedDevice(t, e)
+		dev := d["device"].(map[string]any)
+		if got := dev["firmware_version"] == c.fw; got != c.ok {
+			t.Fatalf("firmware of %d bytes exported=%v, want %v: %v", len(c.fw), got, c.ok, dev)
+		}
 	}
 }
 

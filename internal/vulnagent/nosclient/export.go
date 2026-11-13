@@ -36,6 +36,13 @@ var (
 	deviceDigitsRe    = regexp.MustCompile(`^[0-9]+$`)
 	deviceDottedMACRe = regexp.MustCompile(`^[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}$`)
 	deviceBareMACRe   = regexp.MustCompile(`^[0-9A-Fa-f]{12}$`)
+	// deviceDottedPairsRe is a MAC as six dot-separated octets.
+	deviceDottedPairsRe = regexp.MustCompile(`^[0-9A-Fa-f]{2}(\.[0-9A-Fa-f]{2}){5}$`)
+	// deviceFirmwareSepRe and deviceFirmwarePartRe mirror the server's
+	// per-part firmware grammar: a number with at most one letter suffix, or
+	// a version qualifier word with an optional number.
+	deviceFirmwareSepRe  = regexp.MustCompile(`[-+~_]`)
+	deviceFirmwarePartRe = regexp.MustCompile(`^(?:[0-9]+[a-z]?|(?:build|beta|alpha|rc|dev|pre|h|sp)[0-9]*)$`)
 )
 
 // ErrIncompleteExport: the export ended while a subject still lacked its
@@ -353,7 +360,7 @@ func checkDevice(d *Device, complete bool) error {
 		name, value string
 		ok          func(string) bool
 	}{
-		{"vendor", d.Vendor, func(v string) bool { return deviceVendorRe.MatchString(v) }},
+		{"vendor", d.Vendor, deviceVendorOK},
 		{"model", d.Model, deviceModelOK},
 		{"firmware_version", d.FirmwareVersion, deviceFirmwareOK},
 	}
@@ -380,11 +387,18 @@ func deviceModelOK(v string) bool {
 	return deviceModelRe.MatchString(v) && !deviceMACRe.MatchString(v)
 }
 
+// deviceVendorOK mirrors the server's vendor rule: the slug pattern, and one of
+// the covered vendors. The slug pattern alone also matches a host label.
+func deviceVendorOK(v string) bool {
+	return deviceVendorRe.MatchString(v) && (v == "cisco" || v == "paloalto")
+}
+
 // deviceFirmwareOK mirrors the server's firmware allowlist (deviceFirmwareOK in
 // vuln_export.go): the pattern, the first dot-separated label all digits, every
-// later label holding a digit, and neither a dotted nor a bare MAC.
+// later label split at "-+~_" into parts that are numbers or version
+// qualifiers, and none of the dotted, six-octet dotted or bare MAC forms.
 func deviceFirmwareOK(v string) bool {
-	if !deviceFirmwareRe.MatchString(v) || deviceDottedMACRe.MatchString(v) || deviceBareMACRe.MatchString(v) {
+	if !deviceFirmwareRe.MatchString(v) || deviceDottedMACRe.MatchString(v) || deviceDottedPairsRe.MatchString(v) || deviceBareMACRe.MatchString(v) {
 		return false
 	}
 	labels := strings.Split(v, ".")
@@ -392,8 +406,10 @@ func deviceFirmwareOK(v string) bool {
 		return false
 	}
 	for _, l := range labels[1:] {
-		if !strings.ContainsAny(l, "0123456789") {
-			return false
+		for _, part := range deviceFirmwareSepRe.Split(l, -1) {
+			if !deviceFirmwarePartRe.MatchString(strings.ToLower(part)) {
+				return false
+			}
 		}
 	}
 	return true
