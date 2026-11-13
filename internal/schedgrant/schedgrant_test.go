@@ -30,28 +30,9 @@ func raw(t *testing.T, d Doc) []byte {
 	return b
 }
 
-func TestParseAcceptsAValidGrant(t *testing.T) {
-	d, canon, hash, err := Parse(raw(t, valid()), now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want, _ := canonical.HashParameters(canon)
-	if hash != want || len(d.Actions) != 1 {
-		t.Fatalf("%+v %s", d, hash)
-	}
-	if _, ok := d.Action("package.list_updates", "1.0.0"); !ok {
-		t.Fatal("action not found")
-	}
-	if _, ok := d.Action("package.list_updates", "2.0.0"); ok {
-		t.Fatal("other version found")
-	}
-	if _, ok := d.Target("web"); !ok {
-		t.Fatal("target not found")
-	}
-}
-
-func TestParseRefusesGrantsOutsideTheLimits(t *testing.T) {
-	cases := map[string]func(*Doc){
+// refusedDocCases maps a name to a mutation of valid() that Parse must refuse.
+func refusedDocCases() map[string]func(*Doc) {
+	return map[string]func(*Doc){
 		"format":         func(d *Doc) { d.Grant = "other" },
 		"id":             func(d *Doc) { d.ID = "x" },
 		"no actions":     func(d *Doc) { d.Actions = nil },
@@ -74,19 +55,52 @@ func TestParseRefusesGrantsOutsideTheLimits(t *testing.T) {
 			}
 		},
 	}
-	for name, mutate := range cases {
+}
+
+// refusedRawCases maps a name to a document text that Parse must refuse.
+func refusedRawCases(tb testing.TB) map[string]string {
+	tb.Helper()
+	b, err := json.Marshal(valid())
+	if err != nil {
+		tb.Fatal(err)
+	}
+	return map[string]string{
+		"unknown member": strings.Replace(string(b), `"id":`, `"extra":1,"id":`, 1),
+		"upper case":     strings.Replace(string(b), `"min_interval_s":3600`, `"min_interval_s":3600,"MIN_INTERVAL_S":900`, 1),
+		"member missing": strings.Replace(string(b), `"min_interval_s":3600,`, ``, 1),
+		"not an object":  `[]`,
+	}
+}
+
+func TestParseAcceptsAValidGrant(t *testing.T) {
+	d, canon, hash, err := Parse(raw(t, valid()), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := canonical.HashParameters(canon)
+	if hash != want || len(d.Actions) != 1 {
+		t.Fatalf("%+v %s", d, hash)
+	}
+	if _, ok := d.Action("package.list_updates", "1.0.0"); !ok {
+		t.Fatal("action not found")
+	}
+	if _, ok := d.Action("package.list_updates", "2.0.0"); ok {
+		t.Fatal("other version found")
+	}
+	if _, ok := d.Target("web"); !ok {
+		t.Fatal("target not found")
+	}
+}
+
+func TestParseRefusesGrantsOutsideTheLimits(t *testing.T) {
+	for name, mutate := range refusedDocCases() {
 		d := valid()
 		mutate(&d)
 		if _, _, _, err := Parse(raw(t, d), now); !errors.Is(err, ErrInvalid) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	for name, s := range map[string]string{
-		"unknown member": strings.Replace(string(raw(t, valid())), `"id":`, `"extra":1,"id":`, 1),
-		"upper case":     strings.Replace(string(raw(t, valid())), `"min_interval_s":3600`, `"min_interval_s":3600,"MIN_INTERVAL_S":900`, 1),
-		"member missing": strings.Replace(string(raw(t, valid())), `"min_interval_s":3600,`, ``, 1),
-		"not an object":  `[]`,
-	} {
+	for name, s := range refusedRawCases(t) {
 		if _, _, _, err := Parse([]byte(s), now); !errors.Is(err, ErrInvalid) {
 			t.Errorf("%s: %v", name, err)
 		}
