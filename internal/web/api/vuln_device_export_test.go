@@ -191,13 +191,85 @@ func TestVulnExportDeviceNonPublicIPv4FirmwareIsUnknown(t *testing.T) {
 // as "8.8.8.8" cannot be told from a version by its shape; that residual is
 // the documented D3 decision, so it is not asserted here either way.
 func TestVulnExportDeviceDottedFirmwareIsAVersion(t *testing.T) {
-	for _, fw := range []string{"3.1.1.7", "10.2.3"} {
+	for _, fw := range []string{"3.1.1.7", "10.2.3", "10.2.3-h1", "17.06.05", "7.0.3+build.4"} {
 		e := newVulnEnv(t)
 		e.inv.set(deviceSnapshot("fw11", &api.VulnDevice{Vendor: "cisco", Model: "CBS350", FirmwareVersion: fw, Current: true}))
 		d := exportedDevice(t, e)
 		if dev := d["device"].(map[string]any); dev["firmware_version"] != fw || d["complete"] != true {
 			t.Fatalf("version %q not exported: %v complete %v", fw, dev, d["complete"])
 		}
+	}
+}
+
+// TestVulnExportRejectsHostileFirmwareFields: a firmware version is an
+// allowlisted version shape. A host label, an FQDN, a MAC in either hyphen or
+// dotted form, a bare word, an IPv6 form or anything that is not a version
+// is exported as "unknown" and the device is never complete. Only the model
+// and firmware version are the subject (ADR 0011 D3).
+func TestVulnExportRejectsHostileFirmwareFields(t *testing.T) {
+	hostile := map[string]string{
+		"fqdn":               "core-sw.lab.example",
+		"fqdn with version":  "10.core-sw.lab.example",
+		"digit fqdn":         "10.lab2.example",
+		"hyphenated mac":     "00-11-22-33-44-55",
+		"cisco dotted mac":   "0011.2233.4455",
+		"bare 12-hex mac":    "001122334455",
+		"bare host label":    "core-sw",
+		"letter start":       "v1.2",
+		"ipv6 address":       "2001:db8::1",
+		"ipv4 with port":     "10.0.0.7:22",
+		"quote and json":     `3.1.1"}{"x":"y`,
+		"space":              "3.1 PASSWORD=hunter2",
+		"newline":            "3.1\nX",
+		"path":               "../../etc/passwd",
+		"html":               "<script>x</script>",
+		"too long":           "1." + strings.Repeat("1", 64),
+		"leading hyphen":     "-3.1.1",
+		"hyphen digit label": "1-2-3",
+	}
+	for name, fw := range hostile {
+		t.Run(name, func(t *testing.T) {
+			e := newVulnEnv(t)
+			e.inv.set(deviceSnapshot("fw13", &api.VulnDevice{Vendor: "cisco", Model: "CBS350", FirmwareVersion: fw, Current: true}))
+			d := exportedDevice(t, e)
+			dev := d["device"].(map[string]any)
+			if dev["firmware_version"] != "unknown" || d["complete"] != false {
+				t.Fatalf("hostile firmware %q exported: %v complete %v", fw, dev, d["complete"])
+			}
+			r := e.do(t, "GET", "/api/v1/vuln/inventory", vulnTok, nil)
+			for _, bad := range []string{fw, "hunter2", "PASSWORD", "etc/passwd", "<script>"} {
+				if strings.Contains(r.body, bad) {
+					t.Fatalf("export contains %q: %s", bad, r.body)
+				}
+			}
+		})
+	}
+}
+
+// TestVulnExportRejectsHostileVendorFields: the vendor slug is refused for a
+// host label, an FQDN or a MAC, as well as for a value outside the slug.
+func TestVulnExportRejectsHostileVendorFields(t *testing.T) {
+	hostile := map[string]string{
+		"fqdn":             "core-sw.lab.example",
+		"hyphenated mac":   "00-11-22-33-44-55",
+		"cisco dotted mac": "0011.2233.4455",
+		"ipv4":             "10.0.0.7",
+		"upper case":       "Cisco",
+		"space":            "cisco ios",
+	}
+	for name, vendor := range hostile {
+		t.Run(name, func(t *testing.T) {
+			e := newVulnEnv(t)
+			e.inv.set(deviceSnapshot("hv01", &api.VulnDevice{Vendor: vendor, Model: "CBS350", FirmwareVersion: "3.1.1.7", Current: true}))
+			d := exportedDevice(t, e)
+			dev := d["device"].(map[string]any)
+			if dev["vendor"] != "unknown" || d["complete"] != false {
+				t.Fatalf("hostile vendor %q exported: %v complete %v", vendor, dev, d["complete"])
+			}
+			if r := e.do(t, "GET", "/api/v1/vuln/inventory", vulnTok, nil); strings.Contains(r.body, vendor) {
+				t.Fatalf("export contains vendor %q: %s", vendor, r.body)
+			}
+		})
 	}
 }
 

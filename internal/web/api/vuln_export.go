@@ -148,11 +148,20 @@ var (
 	// exportVendorRe and exportModelRe are the D2 device patterns. The model
 	// has no dot and no colon, so a host name ("core-sw.lab.example"), an
 	// IP address and an IPv6 address are not models; exportMACRe refuses the
-	// hyphenated MAC form that the pattern would allow. Firmware uses
-	// exportVersionRe, plus the checks in deviceFirmwareOK.
+	// hyphenated MAC form that the pattern would allow.
 	exportVendorRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 	exportModelRe  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_+-]{0,63}$`)
 	exportMACRe    = regexp.MustCompile(`^[0-9A-Fa-f]{2}(-[0-9A-Fa-f]{2}){5}$`)
+	// exportFirmwareRe is the allowlist of a firmware version's characters
+	// and shape: a digit first, then letters, digits and the separators of a
+	// vendor version string, at most 64 bytes. Shape checks that the pattern
+	// cannot express are in deviceFirmwareOK. exportMACDottedRe and
+	// exportMACBareRe refuse the Cisco dotted and the unseparated MAC forms,
+	// which the allowlist would otherwise pass.
+	exportFirmwareRe  = regexp.MustCompile(`^[0-9][A-Za-z0-9.+~_-]{0,63}$`)
+	exportDigitsRe    = regexp.MustCompile(`^[0-9]+$`)
+	exportMACDottedRe = regexp.MustCompile(`^[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}\.[0-9A-Fa-f]{4}$`)
+	exportMACBareRe   = regexp.MustCompile(`^[0-9A-Fa-f]{12}$`)
 	// exportCiscoEcoRe is the vendor ecosystem of a Cisco device: the OS
 	// train the matcher's CSAF feed is keyed by (vendorFeed). The Palo Alto
 	// ecosystem is fixed.
@@ -438,17 +447,31 @@ var nonPublicIPv4 = []netip.Prefix{
 	netip.MustParsePrefix("240.0.0.0/4"),
 }
 
-// deviceFirmwareOK reports whether v may be exported as a firmware version.
-// Colons are refused (no vendor firmware string needs one, and IPv6 forms
-// use them). An IP address literal is refused unless it is a dotted quad from
-// a public IPv4 range: a private, loopback, link-local, multicast, unspecified,
-// shared (CGNAT), benchmark, documentation, reserved or broadcast IPv4 address
-// is never a firmware version. Public dotted quads such as "3.1.1.7" cannot
-// be told from a version by their shape and are accepted; this residual is a
-// decision (D3), not a guarantee.
+// deviceFirmwareOK reports whether v may be exported as a firmware version (D3,
+// allowlist). It must match exportFirmwareRe, which refuses colons (IPv6
+// forms), hyphenated MACs, FQDNs and bare words, since a letter cannot start
+// it. The first dot-separated label must be all digits, and every later label
+// must contain a digit, so a dotted host name such as "10.core-sw.lab.example"
+// is refused. The dotted and bare MAC forms are refused. An IP address literal
+// is refused unless it is a dotted quad from a public IPv4 range: a private,
+// loopback, link-local, multicast, unspecified, shared (CGNAT), benchmark,
+// documentation, reserved or broadcast IPv4 address is never a firmware
+// version. Public dotted quads such as "3.1.1.7" cannot be told from a version
+// by their shape and are accepted; a digit-bearing dotted host name that starts
+// with a digit ("10.sw1.lab2.ex3") passes the shape rules too. These residuals
+// are a decision (D3), not a guarantee.
 func deviceFirmwareOK(v string) bool {
-	if v == exportUnknown || !exportVersionRe.MatchString(v) || strings.Contains(v, ":") {
+	if !exportFirmwareRe.MatchString(v) || exportMACDottedRe.MatchString(v) || exportMACBareRe.MatchString(v) {
 		return false
+	}
+	labels := strings.Split(v, ".")
+	if !exportDigitsRe.MatchString(labels[0]) {
+		return false
+	}
+	for _, l := range labels[1:] {
+		if !strings.ContainsAny(l, "0123456789") {
+			return false
+		}
 	}
 	a, err := netip.ParseAddr(v)
 	if err != nil {
