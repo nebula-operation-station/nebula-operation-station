@@ -141,10 +141,10 @@ func (a *baselineListAcc) add(c *pb.CompareBaselineListRequest) error {
 	return nil
 }
 
-// digest checks the counts and computes the digest the same way an
-// approval does (fimbaseline.NewBaseline), which also enforces the path,
-// link, uniqueness and hash rules.
-func (a *baselineListAcc) digest() (string, error) {
+// recomputeDigest checks the counts and computes the digest the same way
+// an approval does (fimbaseline.NewBaseline), which also enforces the
+// path, link, uniqueness and hash rules.
+func (a *baselineListAcc) recomputeDigest() (string, error) {
 	if a.gotEntries != a.wantEntries || a.gotMounts != a.wantMounts {
 		return "", invalidList("fewer entries or mounts than declared")
 	}
@@ -240,7 +240,7 @@ func (s *Service) approvedBaselineDigest(hostID, by string) (executordb.Baseline
 
 func (s *Service) finishBaselineCompare(acc *baselineListAcc, by string) (baselineResult, error) {
 	host := acc.header.GetHostId()
-	computed, err := acc.digest()
+	computed, err := acc.recomputeDigest()
 	if err != nil {
 		return baselineResult{}, err
 	}
