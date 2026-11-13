@@ -86,3 +86,22 @@ CREATE TABLE fim_baseline_proposal_entries (
     CHECK ((hash_kind = 0) = (hash_sum IS NULL)),
     CHECK ((type = 3) = (link IS NOT NULL))
 ) WITHOUT ROWID;
+
+-- The mount points of the run that produced the baseline or the proposal.
+-- fimbaseline's digest covers them and Diff compares the /boot/efi file
+-- system type (D5), so they are stored with the entries; without them the
+-- digest cannot be recomputed from the stored rows. At most 256 per host
+-- (fimbaseline.MaxMounts) is enforced in Go before any row is written.
+CREATE TABLE fim_baseline_mounts (
+    host_id     INTEGER NOT NULL REFERENCES fim_baselines(host_id) ON DELETE CASCADE,
+    path        BLOB NOT NULL CHECK (length(path) BETWEEN 1 AND 4096),
+    fstype      TEXT NOT NULL CHECK (length(CAST(fstype AS BLOB)) BETWEEN 1 AND 64),
+    PRIMARY KEY (host_id, path)
+) WITHOUT ROWID;
+
+CREATE TABLE fim_baseline_proposal_mounts (
+    host_id     INTEGER NOT NULL REFERENCES fim_baseline_proposals(host_id) ON DELETE CASCADE,
+    path        BLOB NOT NULL CHECK (length(path) BETWEEN 1 AND 4096),
+    fstype      TEXT NOT NULL CHECK (length(CAST(fstype AS BLOB)) BETWEEN 1 AND 64),
+    PRIMARY KEY (host_id, path)
+) WITHOUT ROWID;

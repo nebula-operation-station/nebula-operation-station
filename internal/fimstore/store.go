@@ -136,11 +136,14 @@ func (s *Store) Propose(ctx context.Context, host HostID, res *fimscan.Result) (
 		return Proposal{}, fmt.Errorf("propose: %w: %d records, the limit is %d per host",
 			fimbaseline.ErrLimit, len(res.Records), MaxRecordsPerHost)
 	}
+	// NewBaseline validates and deep-copies res. The rows are written from
+	// res.Records, which NewBaseline has just validated and does not change,
+	// so the record list is not copied a second time; base keeps the only
+	// copy that is hashed.
 	base, err := fimbaseline.NewBaseline(res)
 	if err != nil {
 		return Proposal{}, fmt.Errorf("propose: %w", err)
 	}
-	entries := base.Entries()
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -179,7 +182,14 @@ func (s *Store) Propose(ctx context.Context, host HostID, res *fimscan.Result) (
 		host, p.BaseVersion, baseDigest, p.Digest[:], p.ProfileID, p.Entries, now.Unix()); err != nil {
 		return Proposal{}, fmt.Errorf("propose: insert proposal: %w", err)
 	}
-	if _, err := insertEntries(ctx, tx, proposalEntries, host, entries); err != nil {
+	n, err := insertEntries(ctx, tx, proposalEntries, host, res.Records)
+	if err != nil {
+		return Proposal{}, fmt.Errorf("propose: %w", err)
+	}
+	if n != int64(base.Len()) {
+		return Proposal{}, fmt.Errorf("propose: wrote %d entries, the digest covers %d", n, base.Len())
+	}
+	if _, err := insertMounts(ctx, tx, proposalMounts, host, base.Mounts()); err != nil {
 		return Proposal{}, fmt.Errorf("propose: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -226,6 +236,11 @@ func (s *Store) Approve(ctx context.Context, host HostID, ap Approval) (Approved
 	if prop.BaseVersion != versionOf(cur) || !sameDigest(prop.BaseDigest, cur) {
 		return Approved{}, fmt.Errorf("approve: %w", ErrStaleProposal)
 	}
+	// The approval promotes the stored rows, not the digest: recompute it
+	// over those rows and refuse if they do not hash to the approved one.
+	if err := verifyProposal(ctx, tx, host, prop); err != nil {
+		return Approved{}, fmt.Errorf("approve: %w", err)
+	}
 	next := Approved{
 		Version:    versionOf(cur) + 1,
 		Digest:     prop.Digest,
@@ -246,6 +261,12 @@ func (s *Store) Approve(ctx context.Context, host HostID, ap Approval) (Approved
 	}
 	if _, err := tx.ExecContext(ctx, copyEntriesSQL, host); err != nil {
 		return Approved{}, fmt.Errorf("approve: copy entries: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM fim_baseline_mounts WHERE host_id = ?`, host); err != nil {
+		return Approved{}, fmt.Errorf("approve: replace mounts: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, copyMountsSQL, host); err != nil {
+		return Approved{}, fmt.Errorf("approve: copy mounts: %w", err)
 	}
 	var copied int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM fim_baseline_entries WHERE host_id = ?`, host).Scan(&copied); err != nil {
@@ -304,6 +325,32 @@ func (s *Store) GetApproved(ctx context.Context, host HostID) (Approved, error) 
 		return Approved{}, fmt.Errorf("get baseline: %w", ErrNoBaseline)
 	}
 	return *a, nil
+}
+
+// ApprovedMounts returns the mount entries of the approved baseline of host,
+// sorted by raw path bytes, or ErrNoBaseline. Together with ForEachApproved
+// they hold everything fimbaseline needs to rebuild the baseline and its digest.
+func (s *Store) ApprovedMounts(ctx context.Context, host HostID) ([]fimscan.Mount, error) {
+	if err := host.validate(); err != nil {
+		return nil, fmt.Errorf("get baseline mounts: %w", err)
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, fmt.Errorf("get baseline mounts: begin: %w", err)
+	}
+	defer tx.Rollback()
+	cur, err := readApproved(ctx, tx, host)
+	if err != nil {
+		return nil, fmt.Errorf("get baseline mounts: %w", err)
+	}
+	if cur == nil {
+		return nil, fmt.Errorf("get baseline mounts: %w", ErrNoBaseline)
+	}
+	ms, err := readMounts(ctx, tx, approvedMounts, host)
+	if err != nil {
+		return nil, fmt.Errorf("get baseline mounts: %w", err)
+	}
+	return ms, nil
 }
 
 // GetProposal returns the open proposal of host, or ErrNoProposal.
@@ -471,4 +518,35 @@ func sameDigest(base *fimbaseline.Digest, cur *Approved) bool {
 		return base == nil
 	}
 	return base != nil && *base == cur.Digest
+}
+
+// verifyProposal recomputes the digest of the proposal rows of host, the rows
+// an approval promotes, and checks it against prop. The stored rows must hash
+// to the digest the proposal was built with, or the approval is refused with
+// ErrDigestMismatch. It runs inside the write transaction tx.
+func verifyProposal(ctx context.Context, tx *sql.Tx, host HostID, prop Proposal) error {
+	recs, err := readEntries(ctx, tx, proposalEntries, host)
+	if err != nil {
+		return fmt.Errorf("stored proposal: %w", err)
+	}
+	ms, err := readMounts(ctx, tx, proposalMounts, host)
+	if err != nil {
+		return fmt.Errorf("stored proposal: %w", err)
+	}
+	scan := &fimscan.Result{
+		ProfileID:      prop.ProfileID,
+		Mode:           fimscan.ModeFull,
+		Records:        recs,
+		Mounts:         ms,
+		SSHConfigState: fimscan.SSHConfigValid,
+	}
+	b, err := fimbaseline.NewBaseline(scan)
+	if err != nil {
+		return fmt.Errorf("stored proposal: %w", err)
+	}
+	if b.Digest() != prop.Digest || b.Len() != prop.Entries {
+		return fmt.Errorf("%w: stored rows hash to %s with %d entries, the proposal is %s with %d",
+			ErrDigestMismatch, b.Digest(), b.Len(), prop.Digest, prop.Entries)
+	}
+	return nil
 }

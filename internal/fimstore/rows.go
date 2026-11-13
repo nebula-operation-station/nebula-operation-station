@@ -15,7 +15,10 @@ import (
 // names are constants, never input.
 const (
 	proposalEntries  = "fim_baseline_proposal_entries"
+	proposalMounts   = "fim_baseline_proposal_mounts"
+	approvedMounts   = "fim_baseline_mounts"
 	entryColumns     = "host_id, path, type, size, mode, uid, gid, inode, mtime, ctime, hash_kind, hash_secret, hash_sum, link"
+	entryReadColumns = "path, type, size, mode, uid, gid, inode, mtime, ctime, hash_kind, hash_secret, hash_sum, link"
 	entryPlaceholder = "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?"
 )
 
@@ -24,6 +27,71 @@ const (
 // memory. It takes the host ID once.
 const copyEntriesSQL = `INSERT INTO fim_baseline_entries (` + entryColumns + `)
 	SELECT ` + entryColumns + ` FROM fim_baseline_proposal_entries WHERE host_id = ?`
+
+// copyMountsSQL copies the proposal mounts of one host to the approved mounts.
+// It takes the host ID once.
+const copyMountsSQL = `INSERT INTO fim_baseline_mounts (host_id, path, fstype)
+	SELECT host_id, path, fstype FROM fim_baseline_proposal_mounts WHERE host_id = ?`
+
+// insertMounts writes the mount entries of host into table. It returns the
+// number of rows written.
+func insertMounts(ctx context.Context, tx *sql.Tx, table string, host HostID, ms []fimscan.Mount) (int64, error) {
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO `+table+` (host_id, path, fstype) VALUES (?, ?, ?)`)
+	if err != nil {
+		return 0, fmt.Errorf("prepare mounts: %w", err)
+	}
+	defer stmt.Close()
+	for i := range ms {
+		if _, err := stmt.ExecContext(ctx, host, ms[i].Path, ms[i].FSType); err != nil {
+			return 0, fmt.Errorf("write mount %d: %w", i, err)
+		}
+	}
+	return int64(len(ms)), nil
+}
+
+// readMounts returns the mount entries of host in table, sorted by raw path
+// bytes. The strings and byte slices it returns are owned by the caller.
+func readMounts(ctx context.Context, q queryer, table string, host HostID) ([]fimscan.Mount, error) {
+	rows, err := q.QueryContext(ctx, `SELECT path, fstype FROM `+table+` WHERE host_id = ? ORDER BY path`, host)
+	if err != nil {
+		return nil, fmt.Errorf("query mounts: %w", err)
+	}
+	defer rows.Close()
+	var out []fimscan.Mount
+	for rows.Next() {
+		var m fimscan.Mount
+		if err := rows.Scan(&m.Path, &m.FSType); err != nil {
+			return nil, fmt.Errorf("scan mount: %w", err)
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read mounts: %w", err)
+	}
+	return out, nil
+}
+
+// readEntries returns every entry of host in table, sorted by raw path bytes.
+// It reads the whole list into memory; callers hold it only for one check.
+func readEntries(ctx context.Context, q queryer, table string, host HostID) ([]fimscan.Record, error) {
+	rows, err := q.QueryContext(ctx, `SELECT `+entryReadColumns+` FROM `+table+` WHERE host_id = ? ORDER BY path`, host)
+	if err != nil {
+		return nil, fmt.Errorf("query entries: %w", err)
+	}
+	defer rows.Close()
+	var out []fimscan.Record
+	for rows.Next() {
+		rec, err := scanEntry(rows)
+		if err != nil {
+			return nil, fmt.Errorf("read entries: %w", err)
+		}
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read entries: %w", err)
+	}
+	return out, nil
+}
 
 // insertEntries writes entries, already sorted by raw path bytes, into table
 // for host. It returns the number of rows written.
