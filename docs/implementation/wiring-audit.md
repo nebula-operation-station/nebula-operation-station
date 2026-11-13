@@ -246,9 +246,10 @@ nebula-executor nebula-discovery`. `install.sh:191-197` requires
 
 ### WA-04: install.sh enables the unprovisioned iconfetch units
 
-**Status (2026-11-13): fixed.** `deploy/install.sh:733-738` leaves the iconfetch
-units out of the install and enable lists; `:998-1003` removes leftovers from
-an earlier install. PR #320. previously: GAP.
+**Status (2026-11-13): fixed.** The explicit `tarball_units` and `package_units`
+lists (`deploy/install.sh:760-775`) leave the iconfetch units out of the install
+and enable lists; the comment at `:733-738` explains why; `:998-1003` removes
+leftovers from an earlier install. PR #320. previously: GAP.
 
 Evidence: the unit loop globs all of `deploy/systemd/` (`install.sh:308-316`), so
 the iconfetch units are installed, and the tarball carries them (`deploy/**`,
@@ -272,11 +273,15 @@ use yet.
 ### WA-05: typed guest power and snapshots have no production client
 
 **Status (2026-11-13): decision needed.** Wired: `cmd/nebula-server/main.go:505-506`
-sets `GuestPower` and `GuestSnapshot`; `cmd/nebula-server/executor.go:179-199`
-has the lazy methods; `internal/executor/roles.go:198-203` lets `server` commit.
-The comment at `main.go:500-504` cites "decision WA-05 variant (a), 2026-11-07".
-That decision record was not found in this check, so the status stays
-`decision needed` until it is confirmed. PR #356. previously: GAP.
+sets `GuestPower` and `GuestSnapshot` in the UI options; `cmd/nebula-server/executor.go:179-212`
+has the four lazy methods; `internal/executor/roles.go:198-203` lets `server` commit.
+The UI routes are registered (`internal/web/ui/ui.go:660-668`), and their gate
+(`internal/web/ui/guestactions.go:707-713`, 404 when the executor is nil) now
+passes. Not verified: whether the chart shows the controls; no file:line for the
+hide condition was found (see Not verified, item 4). The comment at `main.go:500-504`
+cites "decision WA-05 variant (a), 2026-11-07". No such record was found in
+`docs/` (a search for `variant (a)` and `WA-05` matches only this audit), so the
+status stays `decision needed` until it is confirmed. PR #356. previously: GAP.
 
 Evidence: `main.go:387-427` sets neither `GuestPower` nor `GuestSnapshot`.
 `lazyExecutor` has neither set of methods, and `cmd/` has no reference to them.
@@ -352,13 +357,17 @@ collector's `RestartSec=5s`. The `.deb` is not affected: it replaces the units i
 
 ### WA-10: private registry reads
 
-**Status (2026-11-13): decision needed.** The authorizer is wired:
-`cmd/nebula-executor/registry_reads.go:28,47` (`setupRegistryReads`). A server
-client exists: `cmd/nebula-server/executor.go:482` (`ReadPrivateRegistry`) and
-`internal/registrymeta/executor_reads.go`. The profile decision is cited at
-`registry_reads.go:38-41`. The "never called" statement below is stale. The
-open question is the one in the fix ticket: keep the RPCs with the profile, or
-remove them. PR #452. previously: GAP.
+**Status (2026-11-13): open; keep is decided, profile review open.** The
+authorizer is wired: `cmd/nebula-executor/registry_reads.go:28` calls
+`setupRegistryReads` from `wireServedService`, which `main.go:190` calls, and
+`:47` sets the authorizer. A server client exists: `cmd/nebula-server/executor.go:482`
+(`ReadPrivateRegistry`). The decision record is found: "Q6 answered 2026-11-11
+(recommended profile)", option (a), in `docs/implementation/container-updates.md:1195-1197`
+(cu06). Its contract (`:1209-1215`) keeps the registry path with the executor-side
+profile and the same rules as `ReadPrivateRegistry` (`:1215`), so it does not call for removing the RPCs.
+The record also says a reviewed profile is still required before the transfer is
+enabled, so that review stays open. The "never called" statement below is stale.
+PR #452. previously: GAP.
 
 Evidence: no production call of `SetRegistryReadAuthorizer`, no client in
 `cmd/` or `internal/executorclient/client.go`. Fails closed, and the guide says
@@ -412,6 +421,9 @@ behaviour this audit could not observe.
    (want `2750 nebula-server:nebula-discovery`).
 2. **WA-04 outcome** on Debian 12's systemd: abort or failed units.
 3. **WA-06** with one ARP or SYN scan in the discovery container.
+4. **WA-05 controls.** Whether the guest chart shows the power and snapshot
+   controls now that `main.go:505-506` sets both options. Routes and gates are
+   verified (`internal/web/ui/guestactions.go:707-713`); the rendering is not.
 
 ## Fix tickets
 
@@ -420,13 +432,13 @@ behaviour this audit could not observe.
 | WA-01 | Start `Importer` and `GuestNetImporter` in the server; add a spool setting; grant unlink on `results/` and `guestnet/`; add compose volumes; correct `proxmox.md` | `cmd/nebula-server/`, `internal/serverconfig/`, `deploy/install.sh`, `deploy/install_test.sh`, `deploy/container/`, `docs/operator/proxmox.md` | no | M | fixed: `cmd/nebula-server/main.go:419,423`, `compose.yaml:65-66`; `docs/operator/proxmox.md:29-30,422-425` describes the import; PR #327 |
 | WA-02 | Read remotes through `ListPVERemotes`; drop `lazyExecutor.ListPVEAdminRemotes`; add a test through the real role table | `internal/executions/readgrants_*.go`, `cmd/nebula-server/executor*.go` | no | S | fixed: `internal/executions/readgrants_provider.go:152`; PR #317 |
 | WA-03 | Copy all five binaries, or take the list from one place | `deploy/quickstart/setup-nebula.sh` | no | S | fixed: `deploy/quickstart/setup-nebula.sh:199-201` reads `binaries.txt`; PR #318 |
-| WA-04 | Install and enable an explicit unit list without iconfetch until the icon service is wired | `deploy/install.sh`, `deploy/install_test.sh` | no | S | fixed: `deploy/install.sh:733-738`, `:998-1003`; PR #320 |
+| WA-04 | Install and enable an explicit unit list without iconfetch until the icon service is wired | `deploy/install.sh`, `deploy/install_test.sh` | no | S | fixed: `deploy/install.sh:760-775` (lists), `:998-1003`; PR #320 |
 | WA-05 | Decide commit path, then wire | `cmd/nebula-server/`, `internal/web/ui/`, plus `cmd/nebula/` or `internal/executor/roles.go` | **yes** | M | decision needed: wired at `cmd/nebula-server/main.go:505-506`, `roles.go:198-203`; decision to be confirmed (see Findings) |
 | WA-06 | Scan-capable discovery container; correct the comment; threat model note | `deploy/container/`, `docs/threat-model.md` | **yes** (threat model) | S | open: `deploy/container/compose.yaml:77-80` unchanged |
 | WA-07 | Ship or provision the bundle; add a compose volume | `.goreleaser.yaml`, `deploy/container/compose.yaml`, `docs/admin/guide.md` | no | M | open (partly): directory created by `.goreleaser.yaml:181-183`, `deploy/container/Dockerfile:35`, `deploy/install.sh:465,509`; bundle files and the compose volume (`compose.yaml:37-39`, comment only) still missing |
 | WA-08 | Restart the collector when binaries changed; extend the postinst hint | `deploy/install.sh`, `deploy/deb/postinst` | no | S | fixed: `deploy/install.sh:665-670`, `:1225-1244`; `deploy/deb/postinst:196`; PR #329 |
 | WA-09 | Refresh unmodified units (compare against a stored checksum), or warn on drift | `deploy/install.sh` | no | M | fixed: `deploy/install.sh:778-791`, `:889`; PR #332 |
-| WA-10 | Decide: wire a read-grant profile with a client, or remove the RPCs | `cmd/nebula-executor/`, `internal/executor/` | **yes** | M | decision needed: `cmd/nebula-executor/registry_reads.go:47` wires the authorizer, `cmd/nebula-server/executor.go:482` is the client; keep-or-remove still open; PR #452 |
+| WA-10 | Decide: wire a read-grant profile with a client, or remove the RPCs | `cmd/nebula-executor/`, `internal/executor/` | **yes** | M | open: keep is decided (Q6 answered 2026-11-11, option (a), `docs/implementation/container-updates.md:1195-1197`); `cmd/nebula-executor/registry_reads.go:47` wires the authorizer, `cmd/nebula-server/executor.go:482` is the client; reviewed profile still open; PR #452 |
 | WA-11 | Add the binary and the user | `deploy/uninstall.sh` | no | S | fixed: `deploy/uninstall.sh:41,48`, `:20,114`; PR #357 |
 | WA-12 | Validate admin users against `/etc/passwd`, like the executor | `deploy/install.sh`, `deploy/install_test.sh` | no | S | fixed: `deploy/install.sh:332-358`; PR #360 |
 | WA-13 | `network_mode: none` for the collector | `deploy/container/compose.yaml` | no | S | fixed: `deploy/container/compose.yaml:97`; PR #357 |
