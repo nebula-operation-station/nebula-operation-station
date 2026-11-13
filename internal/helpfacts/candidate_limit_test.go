@@ -21,8 +21,9 @@ func manyHostsInBlock(n int) []Record {
 
 // TestVisibilityIsCheckedAtMostNamedCandidateLimit checks that one question
 // cannot trigger an unbounded number of authorisation checks or fact builds:
-// a /16 names hundreds of hosts, but at most MaxNamedCandidates are checked.
-func TestVisibilityIsCheckedAtMostNamedCandidateLimit(t *testing.T) {
+// a /16 names hundreds of hosts, but the check stops once one more visible
+// host than a projection shows has been found, which proves truncation.
+func TestVisibilityIsCheckedOnlyUntilTruncationIsKnown(t *testing.T) {
 	calls := 0
 	vis := func(context.Context, string) (bool, error) {
 		calls++
@@ -31,8 +32,8 @@ func TestVisibilityIsCheckedAtMostNamedCandidateLimit(t *testing.T) {
 	src := fakeSource{hosts: manyHostsInBlock(500)}
 
 	res := mustProject(t, request("which hosts are in 10.0.0.0/16?", src, vis))
-	if calls > MaxNamedCandidates {
-		t.Fatalf("visibility checked %d times, limit is %d", calls, MaxNamedCandidates)
+	if want := MaxFactHosts + 1; calls != want {
+		t.Fatalf("visibility checked %d times, want %d", calls, want)
 	}
 	if len(res.Hosts) != MaxFactHosts {
 		t.Fatalf("projected %d hosts, want %d", len(res.Hosts), MaxFactHosts)
