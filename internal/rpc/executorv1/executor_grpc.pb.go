@@ -545,8 +545,9 @@ type ExecutorServiceClient interface {
 	// script bytes, no scanner excerpts, no paths. Grants nothing.
 	GetBuiltinTrustStatus(ctx context.Context, in *GetBuiltinTrustStatusRequest, opts ...grpc.CallOption) (*GetBuiltinTrustStatusResponse, error)
 	// Release root rotation (spec 10, root rotation and revocation). The
-	// executor reads root-rotation.json and its signature from the same
-	// locally configured release directory as the built-in bundle; no request
+	// executor reads root-rotation.json and its signature from the local
+	// rotation directory beside its configured release directory (the
+	// release directory itself holds exactly the bundle files); no request
 	// names a path or bytes. There is no server or browser rotation method.
 	// Role: admin only. Verifies the rotation against the executor's durable
 	// root state and returns the old and resulting roots with fingerprints.
@@ -2525,8 +2526,9 @@ type ExecutorServiceServer interface {
 	// script bytes, no scanner excerpts, no paths. Grants nothing.
 	GetBuiltinTrustStatus(context.Context, *GetBuiltinTrustStatusRequest) (*GetBuiltinTrustStatusResponse, error)
 	// Release root rotation (spec 10, root rotation and revocation). The
-	// executor reads root-rotation.json and its signature from the same
-	// locally configured release directory as the built-in bundle; no request
+	// executor reads root-rotation.json and its signature from the local
+	// rotation directory beside its configured release directory (the
+	// release directory itself holds exactly the bundle files); no request
 	// names a path or bytes. There is no server or browser rotation method.
 	// Role: admin only. Verifies the rotation against the executor's durable
 	// root state and returns the old and resulting roots with fingerprints.
