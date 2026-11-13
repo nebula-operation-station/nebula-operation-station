@@ -459,15 +459,14 @@ func (f *fakeTarget) loadContainerd(files map[string][]byte) ([]inspectedImage, 
 	return out, true
 }
 
-// serve starts the fake target and returns a client connected to it.
-func (f *fakeTarget) serve(t *testing.T) *ssh.Client {
+// listen starts the fake target for the user key user and returns its
+// address and host key.
+func (f *fakeTarget) listen(t *testing.T, user ssh.PublicKey) (string, ssh.Signer) {
 	t.Helper()
 	_, hostPriv, _ := ed25519.GenerateKey(rand.Reader)
 	hostSigner, _ := ssh.NewSignerFromKey(hostPriv)
-	_, userPriv, _ := ed25519.GenerateKey(rand.Reader)
-	userSigner, _ := ssh.NewSignerFromKey(userPriv)
 	cfg := &ssh.ServerConfig{PublicKeyCallback: func(_ ssh.ConnMetadata, k ssh.PublicKey) (*ssh.Permissions, error) {
-		if string(k.Marshal()) == string(userSigner.PublicKey().Marshal()) {
+		if string(k.Marshal()) == string(user.Marshal()) {
 			return &ssh.Permissions{}, nil
 		}
 		return nil, errors.New("denied")
@@ -487,7 +486,16 @@ func (f *fakeTarget) serve(t *testing.T) *ssh.Client {
 			go f.handleConn(nc, cfg)
 		}
 	}()
-	c, err := ssh.Dial("tcp", ln.Addr().String(), &ssh.ClientConfig{User: "nos", Auth: []ssh.AuthMethod{ssh.PublicKeys(userSigner)},
+	return ln.Addr().String(), hostSigner
+}
+
+// serve starts the fake target and returns a client connected to it.
+func (f *fakeTarget) serve(t *testing.T) *ssh.Client {
+	t.Helper()
+	_, userPriv, _ := ed25519.GenerateKey(rand.Reader)
+	userSigner, _ := ssh.NewSignerFromKey(userPriv)
+	addr, hostSigner := f.listen(t, userSigner.PublicKey())
+	c, err := ssh.Dial("tcp", addr, &ssh.ClientConfig{User: "nos", Auth: []ssh.AuthMethod{ssh.PublicKeys(userSigner)},
 		HostKeyCallback: ssh.FixedHostKey(hostSigner.PublicKey()), Timeout: 5 * time.Second})
 	if err != nil {
 		t.Fatal(err)
