@@ -10,7 +10,7 @@
 //	nebula approve <digest-prefix>
 //	nebula batch review|approve|stage|skip
 //	nebula read-grant pending|approve <digest>
-//	nebula artifact trust|untrust|list|trust-builtins|unpin
+//	nebula artifact trust|untrust|list|trust-builtins|trust-rotation|unpin
 //	nebula host probe|pin|unpin|keys|test|criticality|clear|list|offers|offer-revoke
 //	nebula webauthn code|list|remove
 //	nebula totp setup|status|remove
@@ -69,6 +69,8 @@ commands:
   artifact list       list trusted artifacts (anything else needs at least HIGH)
   artifact trust-builtins [--yes-digest DIGEST [--pin name@ver] [--retire name@ver]]
                       review and trust the executor's release built-ins; --pin keeps an old version
+  artifact trust-rotation [--yes-digest DIGEST]
+                      review and apply a signed release root rotation (compare fingerprints)
   artifact unpin MODULE@VERSION
                       clear a saved --pin (deletes nothing; normal retention applies again)
   signer add --name NAME FILE | list | remove SHA256:FINGERPRINT
