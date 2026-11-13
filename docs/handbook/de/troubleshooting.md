@@ -312,6 +312,10 @@ Ihre Aufgabe.
    Maschine laufen soll. Exit-Status 0 bedeutet sauber, 5 bedeutet
    Abweichungen gefunden, 6 bedeutet unvollständige Prüfung. Behandeln Sie
    6 nie als sauber.
+   Verwenden Sie ein `nebula` von der anderen Maschine oder dem Boot-Medium,
+   aus den geprüften Release-Dateien, nie `MOUNT/usr/bin/nebula` oder ein
+   anderes Programm von der geprüften Platte: ein ersetztes Programm kann
+   „sauber“ melden.
 3. NOS aus dem Paket neu installieren oder ein neues signiertes Release
    einspielen.
 4. Für jeden offenen Befund `nebula integrity ack FINDING` ausführen. Es

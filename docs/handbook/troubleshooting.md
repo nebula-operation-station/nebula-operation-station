@@ -244,6 +244,9 @@ The lock only withholds authority. Repairing the files is your job.
    Both paths must be absolute. `--version` is the version you expect this
    machine to run. Exit status 0 means clean, 5 means deviations were found,
    6 means the check was incomplete. Never treat 6 as clean.
+   Run a `nebula` binary from that other machine or boot medium, taken from
+   the verified release files, never `MOUNT/usr/bin/nebula` or any other
+   binary from the checked disk: a replaced binary can report clean.
 3. Reinstall NOS from its package, or install a new signed release.
 4. For each open finding, run `nebula integrity ack FINDING`. It shows the
    finding, asks you to type `yes`, and clears only that finding. A later
