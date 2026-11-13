@@ -7,6 +7,13 @@ import (
 	"testing"
 )
 
+// Unicode format characters built from code points, so that no literal
+// format character sits in the source (staticcheck ST1018).
+var (
+	zeroWidthSpace = string(rune(0x200b))
+	rightToLeftOvr = string(rune(0x202e))
+)
+
 // promptSeeds are the seed tails shared by both fuzz targets: the table cases
 // of prompt_test.go plus hostile shapes (control bytes, ANSI sequences, bad
 // UTF-8, long and embedded-newline lines, pager and password prompts).
@@ -48,8 +55,8 @@ func promptSeeds() []string {
 		"\xff\xfeswitch#",
 		"sw\xc3#",
 		"swîtch#",
-		"sw​#",
-		"sw‮#",
+		"sw" + zeroWidthSpace + "#",
+		"sw" + rightToLeftOvr + "#",
 		"switch\x7f#",
 		strings.Repeat("h", MaxHostnameBytes) + "#",
 		strings.Repeat("h", MaxHostnameBytes+1) + "#",
