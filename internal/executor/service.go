@@ -73,6 +73,12 @@ type Service struct {
 	// builtinTrust is the local built-in trust transaction (ADR 0007, E19c);
 	// nil until SetBuiltinTrust wires it.
 	builtinTrust BuiltinTrust
+	// integrityRef is the admitted installed-files reference (ADR 0015
+	// D4 "Reference"); admitted when SetBuiltinTrust wires the store.
+	integrityRef integrityRefState
+	// runningVersion overrides version.Version in tests; empty in
+	// production.
+	runningVersion string
 	// transport is the SSH client configuration (spec 08 defaults).
 	transport sshtransport.Config
 	// recovery limits wrong TOTP recovery codes.
