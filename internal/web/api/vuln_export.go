@@ -167,11 +167,14 @@ var (
 	exportFirmwareRe = regexp.MustCompile(`^[0-9][A-Za-z0-9.+~_-]{0,63}$`)
 	exportDigitsRe   = regexp.MustCompile(`^[0-9]+$`)
 	// exportMACQuadsRe is a MAC written as three four-digit groups and
-	// exportMACPairsRe as six two-digit octets; each separator may be "." or
-	// "-" and the two may be mixed ("00.11-22-33-44-55").
-	exportMACQuadsRe = regexp.MustCompile(`^[0-9A-Fa-f]{4}([.-][0-9A-Fa-f]{4}){2}$`)
+	// exportMACPairsRe as six two-digit octets. They match the normalised
+	// value (firmwareSeparators), where every separator is ".".
+	exportMACQuadsRe = regexp.MustCompile(`^[0-9A-Fa-f]{4}(\.[0-9A-Fa-f]{4}){2}$`)
 	exportMACBareRe  = regexp.MustCompile(`^[0-9A-Fa-f]{12}$`)
-	exportMACPairsRe = regexp.MustCompile(`^[0-9A-Fa-f]{2}([.-][0-9A-Fa-f]{2}){5}$`)
+	exportMACPairsRe = regexp.MustCompile(`^[0-9A-Fa-f]{2}(\.[0-9A-Fa-f]{2}){5}$`)
+	// firmwareSeparators maps each separator of the firmware grammar (". - _
+	// + ~") to ".", so the MAC and address checks see one separator form.
+	firmwareSeparators = strings.NewReplacer("-", ".", "_", ".", "+", ".", "~", ".")
 	// exportFirmwareSepRe splits a dot-separated firmware label into its
 	// parts; exportFirmwarePartRe is what one part may be: a number with at
 	// most one letter suffix ("4a") or one of the version qualifier words
@@ -510,7 +513,13 @@ var nonPublicIPv4 = []netip.Prefix{
 // ("1.dev-build", "1.sp1") are refused. These residuals are a decision (D3),
 // not a guarantee.
 func deviceFirmwareOK(v string) bool {
-	if !exportFirmwareRe.MatchString(v) || exportMACQuadsRe.MatchString(v) || exportMACPairsRe.MatchString(v) || exportMACBareRe.MatchString(v) {
+	if !exportFirmwareRe.MatchString(v) {
+		return false
+	}
+	// n is v with every separator as "."; the MAC and address checks run on n,
+	// so no separator mix can evade them.
+	n := firmwareSeparators.Replace(v)
+	if exportMACQuadsRe.MatchString(n) || exportMACPairsRe.MatchString(n) || exportMACBareRe.MatchString(n) {
 		return false
 	}
 	labels := strings.Split(v, ".")
@@ -524,12 +533,14 @@ func deviceFirmwareOK(v string) bool {
 			}
 		}
 	}
-	return !nonPublicIPv4Embedded(v)
+	return !nonPublicIPv4Embedded(n)
 }
 
 // nonPublicIPv4Embedded reports whether v contains, at any position and after
 // any separator or prefix, four decimal octets that form a non-public IPv4
-// address (see nonPublicIPv4). A quad starts at a digit that does not follow
+// address (see nonPublicIPv4). v must be normalised by firmwareSeparators, so
+// its only separator is "." and an octet run is never split by "-", "_", "+"
+// or "~". A quad starts at a digit that does not follow
 // another digit, so "1.10.0.0.7" is tested as "1.10.0.0" and as "10.0.0.7".
 // Each octet is a maximal run of digits with any number of leading zeros, so
 // an address with a suffix ("192.168.10.5-1") or with leading zeros

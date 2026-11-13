@@ -100,4 +100,35 @@ var Firmware = []Case{
 	{"host label", "sw01", false},
 	{"host label after version", "3.1.1.7-core-sw01", false},
 	{"empty firmware", "", false},
+
+	// Every allowed separator (. - _ + ~) is one separator for the MAC and
+	// address checks, so each mix below is refused like its dotted form.
+	{"six-octet MAC with underscores", "00_11_22_33_44_55", false},
+	{"six-octet MAC with plus", "00+11+22+33+44+55", false},
+	{"six-octet MAC with tilde", "00~11~22~33~44~55", false},
+	{"six-octet MAC with dot and underscore", "00.11_22_33_44_55", false},
+	{"six-octet MAC with dot and plus", "00.11+22+33+44+55", false},
+	{"six-octet MAC with dot and tilde", "00.11~22~33~44~55", false},
+	{"six-octet MAC with hyphen and underscore", "00-11_22-33_44-55", false},
+	{"three-quad MAC with underscore", "0011_2233_4455", false},
+	{"three-quad MAC with dot and underscore", "0011.2233_4455", false},
+	{"three-quad MAC with plus", "0011+2233+4455", false},
+	{"three-quad MAC with tilde", "0011~2233~4455", false},
+
+	// A private or shared address written with each separator, after a
+	// version prefix or a host-name prefix, is an address and is refused.
+	{"private address with underscores after prefix", "1.10_0_0_7", false},
+	{"private address with dashes after prefix", "17.3.4-10-0-0-7", false},
+	{"private address with plus after prefix", "17.3.4+172+16+5+4", false},
+	{"private address with tilde after prefix", "17.3.4~192~168~1~1", false},
+	{"private address with underscores after public quad", "3.1.1.7_10_0_0_7", false},
+	{"private address with underscore suffix", "192.168.10.5_1", false},
+	{"private address with underscore leading zeros", "17.3.4_192_168_001_010", false},
+	{"shared address space with dashes after prefix", "17.3.4-100-110-12-7", false},
+	{"loopback with plus after prefix", "17.3.4+127+0+0+1", false},
+	{"host-name style address", "ip-10-0-0-7", false},
+	{"bare private address with underscores", "10_0_0_7", false},
+
+	// A public quad written with underscores is a version, not an address.
+	{"public quad after prefix with underscores", "17.3.4_8_8_8", true},
 }

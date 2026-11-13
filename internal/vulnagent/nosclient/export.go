@@ -39,11 +39,14 @@ var (
 	deviceFirmwareRe   = regexp.MustCompile(`^[0-9][A-Za-z0-9.+~_-]{0,63}$`)
 	deviceDigitsRe     = regexp.MustCompile(`^[0-9]+$`)
 	// deviceMACQuadsRe and deviceMACPairsRe are a MAC as three four-digit or
-	// six two-digit groups, each separator "." or "-", mixed or not; they
-	// mirror the server's exportMACQuadsRe and exportMACPairsRe.
-	deviceMACQuadsRe = regexp.MustCompile(`^[0-9A-Fa-f]{4}([.-][0-9A-Fa-f]{4}){2}$`)
-	deviceMACPairsRe = regexp.MustCompile(`^[0-9A-Fa-f]{2}([.-][0-9A-Fa-f]{2}){5}$`)
+	// six two-digit groups; they mirror the server's exportMACQuadsRe and
+	// exportMACPairsRe and match the value after deviceSeparators.
+	deviceMACQuadsRe = regexp.MustCompile(`^[0-9A-Fa-f]{4}(\.[0-9A-Fa-f]{4}){2}$`)
+	deviceMACPairsRe = regexp.MustCompile(`^[0-9A-Fa-f]{2}(\.[0-9A-Fa-f]{2}){5}$`)
 	deviceBareMACRe  = regexp.MustCompile(`^[0-9A-Fa-f]{12}$`)
+	// deviceSeparators maps each firmware separator (". - _ + ~") to "." as
+	// the server's firmwareSeparators does.
+	deviceSeparators = strings.NewReplacer("-", ".", "_", ".", "+", ".", "~", ".")
 	// deviceFirmwareSepRe and deviceFirmwarePartRe mirror the server's
 	// per-part firmware grammar: a number with at most one letter suffix, or
 	// a version qualifier word with an optional number.
@@ -488,10 +491,15 @@ func deviceVendorOK(v string) bool {
 // deviceFirmwareOK mirrors the server's firmware allowlist (deviceFirmwareOK in
 // vuln_export.go): the pattern, the first dot-separated label all digits, every
 // later label split at "-+~_" into parts that are numbers or version
-// qualifiers, none of the MAC forms, and no non-public IPv4 address anywhere
-// in the value.
+// qualifiers, none of the MAC forms in any separator mix, and no non-public
+// IPv4 address anywhere in the value.
 func deviceFirmwareOK(v string) bool {
-	if !deviceFirmwareRe.MatchString(v) || deviceMACQuadsRe.MatchString(v) || deviceMACPairsRe.MatchString(v) || deviceBareMACRe.MatchString(v) {
+	if !deviceFirmwareRe.MatchString(v) {
+		return false
+	}
+	// n is v with every separator as "."; the MAC and address checks run on n.
+	n := deviceSeparators.Replace(v)
+	if deviceMACQuadsRe.MatchString(n) || deviceMACPairsRe.MatchString(n) || deviceBareMACRe.MatchString(n) {
 		return false
 	}
 	labels := strings.Split(v, ".")
@@ -505,7 +513,7 @@ func deviceFirmwareOK(v string) bool {
 			}
 		}
 	}
-	return deviceAddressOK(v)
+	return deviceAddressOK(n)
 }
 
 func sameHead(a, b SubjectPart) bool {
