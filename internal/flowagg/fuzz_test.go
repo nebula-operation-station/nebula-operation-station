@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"math/big"
+	"net/netip"
 	"reflect"
 	"slices"
 	"testing"
@@ -159,14 +160,17 @@ var fuzzSeeds = [][]byte{
 	{0, 0, 0, 0, 0, 1, 2,
 		2, 0, 3, 5, 3, 5, 2, 3, 7, 3, 7, 0,
 		1, 0, 3, 9, 3, 9, 0},
-	// IPv6 with zone, UDP and an IPv4-mapped listener.
+	// IPv6 with zone (tuple 4), UDP (tuple 3), an IPv4-mapped flow (tuple 5)
+	// and the dual-stack [::]:22 listener (index 2).
 	{0, 0, 0, 0, 0, 1, 2,
 		3, 4, 3, 1, 3, 1, 3, 3, 2, 3, 2, 5, 3, 1, 3, 1, 0,
 		3, 4, 3, 4, 3, 9, 3, 3, 5, 3, 9, 5, 3, 4, 3, 9, 1, 2},
-	// Saturation: two client sockets of one flow with maximal counters.
+	// Saturation: two client sockets of one flow with maximal counters. The
+	// listener 10.0.0.2:22 (index 1) makes both sockets one flow key, so their
+	// sums exceed MaxUint64.
 	{0, 0, 0, 0, 0, 1, 2,
 		1, 0, 0, 0, 0,
-		2, 0, 1, 1, 2, 1, 1, 0},
+		2, 0, 1, 1, 2, 1, 1, 1, 1},
 	// Baseline: first snapshot of the host, prev is nil.
 	{1, 0, 0, 0, 0, 1, 2,
 		1, 0, 3, 1, 3, 1, 0,
@@ -183,10 +187,26 @@ var fuzzSeeds = [][]byte{
 	{0, 0, 0, 0, 3, 1, 2,
 		0, 0,
 		0, 0},
-	// Listener on port 0 and an invalid listener protocol.
+	// Listener with an unsupported protocol (index 5): rejected as invalid.
 	{0, 0, 0, 0, 0, 1, 2,
 		0, 0,
-		1, 0, 3, 1, 3, 1, 2, 4, 5},
+		1, 0, 3, 1, 3, 1, 1, 5},
+	// Listener on port 0 (index 4): rejected as invalid.
+	{0, 0, 0, 0, 0, 1, 2,
+		0, 0,
+		1, 0, 3, 1, 3, 1, 1, 4},
+}
+
+// socketEnds is the normalized identity of a socket without its counters,
+// used to look up a host-internal peer of a socket.
+type socketEnds struct {
+	proto         Proto
+	local, remote netip.AddrPort
+}
+
+func endsOf(s Socket) socketEnds {
+	s = normalizeSocket(s)
+	return socketEnds{proto: s.Proto, local: s.Local, remote: s.Remote}
 }
 
 // checkDelta asserts the invariants of a successful Diff.
@@ -248,9 +268,12 @@ func checkDelta(t *testing.T, prev, cur *Snapshot, d Delta) {
 		ps, existed := prevByID[id]
 		switch {
 		case sd.Reset:
-			// Reset counts the current value; nothing to compare.
+			// A reset counts the current counters as the delta.
 			if !existed || cs.BytesSent >= ps.BytesSent && cs.BytesReceived >= ps.BytesReceived {
 				t.Fatalf("socket %d marked reset without a decreasing counter", i)
+			}
+			if sd.Sent != cs.BytesSent || sd.Received != cs.BytesReceived {
+				t.Fatalf("reset socket %d: delta %d/%d, want current counters %d/%d", i, sd.Sent, sd.Received, cs.BytesSent, cs.BytesReceived)
 			}
 		case sd.New:
 			if existed {
@@ -279,6 +302,17 @@ func checkDelta(t *testing.T, prev, cur *Snapshot, d Delta) {
 		if _, ok := curByID[id]; ok {
 			t.Fatalf("vanished socket %d is still in cur", i)
 		}
+	}
+	// Every prev socket missing from cur must be listed; the entries above
+	// are each in prev and not in cur, so equal counts make the list complete.
+	missing := 0
+	for id := range prevByID {
+		if _, ok := curByID[id]; !ok {
+			missing++
+		}
+	}
+	if len(d.Vanished) != missing {
+		t.Fatalf("Vanished lists %d sockets, %d prev sockets are missing from cur", len(d.Vanished), missing)
 	}
 	if len(d.Vanished) > 0 && !d.LowerBound {
 		t.Fatal("vanished sockets without LowerBound")
@@ -333,8 +367,123 @@ func reversedSnapshot(s *Snapshot) *Snapshot {
 	return c
 }
 
-// checkReport asserts the invariants of a classified report.
-func checkReport(t *testing.T, prev *Snapshot, d Delta, r Report) {
+// keyTotals is what Classify must report for one flow key, derived from the
+// delta alone. Classify drops a socket only when its host-internal peer is in
+// the same delta. Sockets without such a peer are therefore certainly counted
+// (the lo bounds); every socket of the key is at most counted (the hi bounds).
+// A counter must lie between its saturated lo and hi sums.
+type keyTotals struct {
+	abLo, abHi, baLo, baHi, connLo, connHi *big.Int
+	// certain is set when a certainly counted socket or vanished socket
+	// belongs to the key, so the key must be reported.
+	certain    bool
+	lbLo, lbHi bool
+}
+
+func addU64(dst *big.Int, v uint64) { dst.Add(dst, new(big.Int).SetUint64(v)) }
+
+// flowTotals computes the keyTotals of every flow key the delta touches. It
+// uses flowOf, the same mapping Classify uses, so the expected keys agree with
+// the report; the byte and flag bounds are computed independently of Classify.
+func flowTotals(d Delta, listeners []Listener) (map[FlowKey]*keyTotals, error) {
+	set, err := listenerSet(listeners)
+	if err != nil {
+		return nil, err
+	}
+	ends := make(map[socketEnds]bool, len(d.Sockets)+len(d.Vanished))
+	for _, sd := range d.Sockets {
+		ends[endsOf(sd.Socket)] = true
+	}
+	for _, s := range d.Vanished {
+		ends[endsOf(s)] = true
+	}
+	hasPeer := func(s Socket) bool {
+		e := endsOf(s)
+		return ends[socketEnds{proto: e.proto, local: e.remote, remote: e.local}]
+	}
+	totals := make(map[FlowKey]*keyTotals)
+	get := func(k FlowKey) *keyTotals {
+		t := totals[k]
+		if t == nil {
+			t = &keyTotals{
+				abLo: new(big.Int), abHi: new(big.Int), baLo: new(big.Int), baHi: new(big.Int),
+				connLo: new(big.Int), connHi: new(big.Int),
+			}
+			totals[k] = t
+		}
+		return t
+	}
+	for _, sd := range d.Sockets {
+		k, _, localIsA, ok := flowOf(sd.Socket, d.Tier, set)
+		if !ok {
+			continue
+		}
+		t := get(k)
+		ab, ba := sd.Received, sd.Sent
+		if localIsA {
+			ab, ba = sd.Sent, sd.Received
+		}
+		addU64(t.abHi, ab)
+		addU64(t.baHi, ba)
+		if sd.New {
+			addU64(t.connHi, 1)
+		}
+		if sd.Reset {
+			t.lbHi = true
+		}
+		if hasPeer(sd.Socket) {
+			continue
+		}
+		t.certain = true
+		addU64(t.abLo, ab)
+		addU64(t.baLo, ba)
+		if sd.New {
+			addU64(t.connLo, 1)
+		}
+		if sd.Reset {
+			t.lbLo = true
+		}
+	}
+	for _, s := range d.Vanished {
+		k, _, _, ok := flowOf(s, d.Tier, set)
+		if !ok {
+			continue
+		}
+		t := get(k)
+		t.lbHi = true
+		if !hasPeer(s) {
+			t.certain = true
+			t.lbLo = true
+		}
+	}
+	return totals, nil
+}
+
+// saturate returns v capped at math.MaxUint64, the value of a saturating sum.
+func saturate(v *big.Int) uint64 {
+	if !v.IsUint64() {
+		return math.MaxUint64
+	}
+	return v.Uint64()
+}
+
+// checkCounter asserts that got lies between the saturated certainly-counted
+// sum and the saturated possibly-counted sum. A wrapping add fails the lower
+// bound whenever the true sum exceeds MaxUint64.
+func checkCounter(t *testing.T, key FlowKey, name string, got uint64, lo, hi *big.Int) {
+	t.Helper()
+	if l := saturate(lo); got < l {
+		t.Fatalf("key %+v: %s = %d, below the %d certainly counted", key, name, got, l)
+	}
+	if h := saturate(hi); got > h {
+		t.Fatalf("key %+v: %s = %d, above the %d possibly counted", key, name, got, h)
+	}
+}
+
+// checkReport asserts the invariants of a classified report. Every counter is
+// bounded by the per-key sums of the delta, LowerBound follows the reset and
+// vanished sockets of each key, and ServerReported names a listener of cur.
+func checkReport(t *testing.T, cur, prev *Snapshot, d Delta, r Report) {
 	t.Helper()
 	if r.Host != d.Host || r.Tier != d.Tier || r.LowerBound != d.LowerBound || !r.To.Equal(d.To) || !r.From.Equal(d.From) {
 		t.Fatalf("report header does not match delta: %+v", r)
@@ -342,15 +491,15 @@ func checkReport(t *testing.T, prev *Snapshot, d Delta, r Report) {
 	if prev == nil && len(r.Observations) != 0 {
 		t.Fatalf("baseline produced %d observations", len(r.Observations))
 	}
-	sumIn, sumOut, news := new(big.Int), new(big.Int), uint64(0)
-	for _, sd := range d.Sockets {
-		sumIn.Add(sumIn, new(big.Int).SetUint64(sd.Sent))
-		sumIn.Add(sumIn, new(big.Int).SetUint64(sd.Received))
-		if sd.New {
-			news++
-		}
+	totals, err := flowTotals(d, cur.Listeners)
+	if err != nil {
+		t.Fatalf("flow totals: %v", err)
 	}
-	var conns uint64
+	set, err := listenerSet(cur.Listeners)
+	if err != nil {
+		t.Fatalf("listeners: %v", err)
+	}
+	seen := make(map[FlowKey]bool, len(r.Observations))
 	for i, o := range r.Observations {
 		if err := o.Key.validate(); err != nil {
 			t.Fatalf("observation %d has invalid key: %v", i, err)
@@ -358,16 +507,31 @@ func checkReport(t *testing.T, prev *Snapshot, d Delta, r Report) {
 		if i > 0 && compareKey(r.Observations[i-1].Key, o.Key) >= 0 {
 			t.Fatalf("observations not strictly sorted at %d", i)
 		}
-		sumOut.Add(sumOut, new(big.Int).SetUint64(o.BytesAB))
-		sumOut.Add(sumOut, new(big.Int).SetUint64(o.BytesBA))
-		conns += o.Connections
+		tot := totals[o.Key]
+		if tot == nil {
+			t.Fatalf("observation %d for key %+v has no socket in the delta", i, o.Key)
+		}
+		seen[o.Key] = true
+		checkCounter(t, o.Key, "BytesAB", o.BytesAB, tot.abLo, tot.abHi)
+		checkCounter(t, o.Key, "BytesBA", o.BytesBA, tot.baLo, tot.baHi)
+		checkCounter(t, o.Key, "Connections", o.Connections, tot.connLo, tot.connHi)
+		if tot.lbLo && !o.LowerBound {
+			t.Fatalf("key %+v drops LowerBound of a reset or vanished socket", o.Key)
+		}
+		if o.LowerBound && !tot.lbHi {
+			t.Fatalf("key %+v has LowerBound without a reset or vanished socket", o.Key)
+		}
+		if o.LowerBound && !r.LowerBound {
+			t.Fatalf("key %+v has LowerBound but the report does not", o.Key)
+		}
+		if o.ServerReported && !isListening(set, o.Key.Proto, netip.AddrPortFrom(o.Key.ServerAddr(), o.Key.ServerPort)) {
+			t.Fatalf("key %+v is ServerReported but its server end is not a listener", o.Key)
+		}
 	}
-	// Saturation may lose bytes, never invent them.
-	if sumOut.Cmp(sumIn) > 0 {
-		t.Fatalf("observations carry %v bytes, deltas only %v", sumOut, sumIn)
-	}
-	if conns > news {
-		t.Fatalf("observations count %d connections, only %d sockets are new", conns, news)
+	for k, tot := range totals {
+		if tot.certain && !seen[k] {
+			t.Fatalf("key %+v has certainly counted sockets but no observation", k)
+		}
 	}
 }
 
@@ -409,21 +573,23 @@ func FuzzObserve(f *testing.F) {
 			t.Fatalf("Diff failed where Observe succeeded: %v", err)
 		}
 		checkDelta(t, prev, cur, d)
+		// Observe is wired to the listeners of cur. The equality only checks
+		// that wiring; the correctness of the report is checked by checkReport.
 		rc, err := Classify(d, cur.Listeners)
 		if err != nil {
 			t.Fatalf("Classify failed on a valid delta: %v", err)
 		}
 		if !reflect.DeepEqual(rc, r1) {
-			t.Fatal("Observe differs from Diff followed by Classify")
+			t.Fatal("Observe is not Diff followed by Classify with the listeners of cur")
 		}
-		checkReport(t, prev, d, r1)
+		checkReport(t, cur, prev, d, r1)
 	})
 }
 
 // TestFuzzSeedsReachCases checks that the seed corpus still decodes into the
 // cases it is meant to cover, so the fuzzers start from useful inputs.
 func TestFuzzSeedsReachCases(t *testing.T) {
-	var sawReset, sawVanished, sawSaturated, sawBaseline, sawMismatch, sawInvalid, sawIPv6UDP bool
+	var sawReset, sawVanished, sawSaturated, sawBaseline, sawMismatch, sawInvalid, sawIPv6, sawUDP bool
 	for _, seed := range fuzzSeeds {
 		prev, cur := decodeFuzzInput(seed)
 		d, err := Diff(prev, cur)
@@ -447,24 +613,33 @@ func TestFuzzSeedsReachCases(t *testing.T) {
 			if sd.Reset {
 				sawReset = true
 			}
-			if sd.Socket.Proto == UDP || sd.Socket.Local.Addr().Is6() {
-				sawIPv6UDP = true
+			if sd.Socket.Proto == UDP {
+				sawUDP = true
+			}
+			if sd.Socket.Local.Addr().Is6() || sd.Socket.Remote.Addr().Is6() {
+				sawIPv6 = true
+			}
+		}
+		totals, err := flowTotals(d, cur.Listeners)
+		if err != nil {
+			t.Fatalf("seed: flow totals: %v", err)
+		}
+		for _, tot := range totals {
+			// A flow whose true sum exceeds MaxUint64 is saturated by Classify.
+			if !tot.abHi.IsUint64() || !tot.baHi.IsUint64() {
+				sawSaturated = true
 			}
 		}
 		r, err := Observe(prev, cur)
 		if err != nil {
 			t.Fatalf("seed: Observe: %v", err)
 		}
-		for _, o := range r.Observations {
-			if o.BytesAB == math.MaxUint64 || o.BytesBA == math.MaxUint64 {
-				sawSaturated = true
-			}
-		}
+		checkReport(t, cur, prev, d, r)
 	}
 	for name, ok := range map[string]bool{
 		"reset": sawReset, "vanished socket": sawVanished, "saturation": sawSaturated,
 		"baseline": sawBaseline, "time mismatch": sawMismatch, "invalid snapshot": sawInvalid,
-		"IPv6 or UDP": sawIPv6UDP,
+		"IPv6": sawIPv6, "UDP": sawUDP,
 	} {
 		if !ok {
 			t.Errorf("seed corpus does not reach case %q", name)
