@@ -49,6 +49,14 @@ var fuzzQuestionSeeds = []string{
 	strings.Repeat("10.0.0.1 ", MaxLiterals+5),
 }
 
+// maxHostNameBytes is the longest name literal the D4 matcher may return
+// (ADR 0014 D4: a DNS name is at most 253 bytes).
+const maxHostNameBytes = 253
+
+// mappedBase is ::ffff:0.0.0.0, the first address of the IPv4-mapped
+// range ::ffff:0:0/96.
+var mappedBase = netip.MustParseAddr("::ffff:0.0.0.0")
+
 // FuzzParseQuestionHostValues checks that the D4 matcher never panics and
 // that its output stays inside the limits and canonical forms that the
 // fact projector relies on.
@@ -84,6 +92,21 @@ func FuzzParseQuestionHostValues(f *testing.F) {
 			if p.Masked() != p {
 				t.Fatalf("CIDR %q is not masked", c)
 			}
+			// ADR 0014 D3: no all-hosts mode. IPv4 blocks keep at least
+			// a /16, IPv6 blocks at least a /32, and no IPv6 block may
+			// cover the IPv4-mapped range ::ffff:0:0/96.
+			if p.Addr().Is4() {
+				if p.Bits() < minIPv4CIDRPrefix {
+					t.Fatalf("IPv4 CIDR %q is broader than /%d", c, minIPv4CIDRPrefix)
+				}
+			} else {
+				if p.Bits() < minIPv6CIDRPrefix {
+					t.Fatalf("IPv6 CIDR %q is broader than /%d", c, minIPv6CIDRPrefix)
+				}
+				if p.Bits() <= 96 && p.Contains(mappedBase) {
+					t.Fatalf("IPv6 CIDR %q covers the IPv4-mapped range ::ffff:0:0/96", c)
+				}
+			}
 			if seenCIDR[c] {
 				t.Fatalf("duplicate CIDR %q", c)
 			}
@@ -94,13 +117,17 @@ func FuzzParseQuestionHostValues(f *testing.F) {
 			if n == "" {
 				t.Fatal("empty name literal")
 			}
-			for i := 0; i < len(n); i++ {
-				if n[i] >= utf8.RuneSelf {
-					t.Fatalf("non-ASCII name %q", n)
-				}
-				if n[i] >= 'A' && n[i] <= 'Z' {
-					t.Fatalf("name %q is not lower case", n)
-				}
+			// The name charset is nameRe: ASCII letters, digits, dot,
+			// underscore and hyphen. That rules out control bytes, spaces,
+			// separators, '/' and ':', and non-ASCII bytes.
+			if !nameRe.MatchString(n) {
+				t.Fatalf("name %q is outside the name charset", n)
+			}
+			if len(n) > maxHostNameBytes {
+				t.Fatalf("name of %d bytes, limit %d", len(n), maxHostNameBytes)
+			}
+			if n != asciiLower(n) {
+				t.Fatalf("name %q is not lower case", n)
 			}
 			if seenName[n] {
 				t.Fatalf("duplicate name %q", n)
@@ -115,14 +142,18 @@ func FuzzParseQuestionHostValues(f *testing.F) {
 }
 
 // FuzzTokenize checks the shared D4 tokenizer: no empty token, no
-// whitespace or separator inside a token, and tokens in question order.
+// whitespace or separator inside a token, tokens in question order, and
+// full coverage. Splitting the question at whitespace and separators and
+// stripping one trailing mark from each piece must give exactly the
+// returned tokens, so a tokenizer that drops or merges tokens fails.
 func FuzzTokenize(f *testing.F) {
 	for _, s := range fuzzQuestionSeeds {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, question string) {
+		got := Tokenize(question)
 		pos := 0
-		for _, tok := range Tokenize(question) {
+		for _, tok := range got {
 			if tok == "" {
 				t.Fatal("empty token")
 			}
@@ -139,6 +170,25 @@ func FuzzTokenize(f *testing.F) {
 				t.Fatalf("token %q is not found in order after byte %d of %q", tok, pos, question)
 			}
 			pos += i + len(tok)
+		}
+
+		// Coverage: the expected tokens are the non-separator pieces with
+		// one trailing mark removed. Empty pieces (a lone mark) produce
+		// no token.
+		var want []string
+		pieces := strings.FieldsFunc(question, func(r rune) bool {
+			return unicode.IsSpace(r) || strings.ContainsRune(tokenSeparators, r)
+		})
+		for _, p := range pieces {
+			if n := len(p); n > 0 && strings.IndexByte(trailingSentenceMarks, p[n-1]) >= 0 {
+				p = p[:n-1]
+			}
+			if p != "" {
+				want = append(want, p)
+			}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("Tokenize(%q) = %q, want %q", question, got, want)
 		}
 	})
 }
@@ -180,6 +230,14 @@ func FuzzCleanText(f *testing.F) {
 			if r != ' ' && !printable(r) {
 				t.Fatalf("non-printable %U in output %q", r, got.Value)
 			}
+		}
+		// Separator collapsing: one space at most between runes, and no
+		// leading or trailing space.
+		if strings.HasPrefix(got.Value, " ") || strings.HasSuffix(got.Value, " ") {
+			t.Fatalf("output %q has a leading or trailing space", got.Value)
+		}
+		if strings.Contains(got.Value, "  ") {
+			t.Fatalf("output %q has a run of spaces", got.Value)
 		}
 		if got.Altered != (got.Value != s) {
 			t.Fatalf("Altered = %v for input %q, output %q", got.Altered, s, got.Value)
