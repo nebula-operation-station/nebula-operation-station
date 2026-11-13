@@ -458,13 +458,17 @@ release_dir=/usr/share/nebula/release
 provision_release_bundle() (
   set -euo pipefail
   names=(release-manifest.json release-manifest.json.sig builtins.tar)
+  # installed-files.json (ADR 0015 D2) is handled like the others when present.
+  # A release that predates it has no list: that is reported, not fatal, and a
+  # stale list from an earlier release is removed so the executor never sees one.
+  list_name=installed-files.json
   if [[ -L "$release_dir" || ( -e "$release_dir" && ! -d "$release_dir" ) ]]; then
     echo "install.sh: release bundle destination must be a real directory: $release_dir" >&2
     exit 1
   fi
   install -d -m 0755 -o root -g root -- "$release_dir"
   if [[ -z "$bundle_source_dir" ]]; then
-    for name in "${names[@]}"; do
+    for name in "${names[@]}" "$list_name"; do
       if [[ -e "$script_dir/$name" || -L "$script_dir/$name" ]]; then
         bundle_source_dir="$script_dir"
         break
@@ -481,9 +485,13 @@ provision_release_bundle() (
     fi
     stage=$(mktemp -d "$release_dir/.bundle.XXXXXXXX")
     trap 'rm -rf -- "$stage"' EXIT
-    for name in "${names[@]}"; do
+    staged=()
+    for name in "${names[@]}" "$list_name"; do
+      if [[ "$name" == "$list_name" && ! -e "$bundle_source_dir/$name" && ! -L "$bundle_source_dir/$name" ]]; then
+        continue
+      fi
       if [[ -L "$bundle_source_dir/$name" || ! -f "$bundle_source_dir/$name" ]]; then
-        echo "install.sh: release bundle requires three regular files; refusing $bundle_source_dir/$name" >&2
+        echo "install.sh: release bundle requires regular files; refusing $bundle_source_dir/$name" >&2
         exit 1
       fi
       # cp -P preserves a link swapped in after the check, rather than reading
@@ -494,14 +502,19 @@ provision_release_bundle() (
         exit 1
       fi
       install -m 0644 -o root -g root -- "$stage/$name" "$stage/$name.ready"
+      staged+=("$name")
     done
-    for name in "${names[@]}"; do
+    for name in "${staged[@]}"; do
       # Rename replaces a destination symlink without touching its target.
       mv -fT -- "$stage/$name.ready" "$release_dir/$name"
     done
-    echo "install.sh: copied three release attachments to $release_dir; the executor verifies trust"
+    echo "install.sh: copied ${#staged[@]} release attachments to $release_dir; the executor verifies trust"
+    if [[ ! -e "$bundle_source_dir/$list_name" && ! -L "$bundle_source_dir/$list_name" ]]; then
+      rm -f -- "$release_dir/$list_name"
+      echo "install.sh: $bundle_source_dir has no $list_name (release predates ADR 0015); the executor has no installed-files list to admit until one is supplied."
+    fi
   fi
-  if [[ ! -e "$release_dir/release-manifest.json" && ! -e "$release_dir/release-manifest.json.sig" && ! -e "$release_dir/builtins.tar" ]]; then
+  if [[ ! -e "$release_dir/release-manifest.json" && ! -e "$release_dir/release-manifest.json.sig" && ! -e "$release_dir/builtins.tar" && ! -e "$release_dir/$list_name" ]]; then
     echo "install.sh: $release_dir is empty; built-in release provenance is not provisioned (expected for source/quickstart installs)."
     echo "install.sh: the web banner 'Built-in trust status is unreachable' remains until the three matching release attachments are supplied. See guide section 8.2."
   fi

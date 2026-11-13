@@ -36,9 +36,9 @@ import (
 // everything is "incomplete", never clean.
 //
 // A deviation in a class that integrity.Class.Locks opens the "open
-// locking deviation" state. It survives restarts and is only set and
-// audited here; refusing unlock and dispatch while it is open, and the
-// executor-local ack that clears it, are IG-04a.
+// locking deviation" state. It survives restarts; refusing unlock and
+// dispatch while it is open, and the executor-local ack that clears one
+// finding, are in integrity_lock.go.
 
 // IntegrityCheckStateFile is the state file name in the executor's data
 // directory.
@@ -112,6 +112,9 @@ const (
 	// IntegrityLockStateUnreadable: the stored state could not be read
 	// at start; an earlier open lock cannot be ruled out (fail closed).
 	IntegrityLockStateUnreadable IntegrityLockCause = "state-unreadable"
+	// IntegrityLockOmitted: locking deviations that did not fit into the
+	// stored deviations or findings, folded into one finding.
+	IntegrityLockOmitted IntegrityLockCause = "deviations-omitted"
 )
 
 // IntegrityDeviation is one file whose status is not ok. It never holds
@@ -175,17 +178,21 @@ type IntegrityRun struct {
 	DeviationsOmitted int `json:"deviations_omitted,omitempty"`
 }
 
-// IntegrityLock is the open locking-deviation state. Only IG-04a's
-// executor-local ack closes it; a later clean run does not.
+// IntegrityLock is the open locking-deviation state. It is open exactly
+// while at least one finding is open; only the executor-local ack
+// (AckIntegrityFinding) closes a finding, a later clean run does not.
 type IntegrityLock struct {
 	// Open says a locking deviation is open.
 	Open bool `json:"open"`
-	// Cause says why.
+	// Cause says why the lock opened.
 	Cause IntegrityLockCause `json:"cause,omitempty"`
 	// Since is when the lock opened (the run's start).
 	Since time.Time `json:"since,omitzero"`
 	// Deviations counts the locking deviations of the opening run.
 	Deviations int `json:"deviations,omitempty"`
+	// Findings are the open locking findings, at most
+	// maxIntegrityLockFindings; each is acked on its own.
+	Findings []IntegrityFinding `json:"findings,omitempty"`
 }
 
 // IntegrityCheckState is the stored check state.
@@ -300,7 +307,9 @@ func (s *Service) SetIntegrityCheck(cfg IntegrityCheckConfig) error {
 	defer s.integrityCheck.running.Store(false)
 	st, ok, err := loadIntegrityCheckState(c.StatePath)
 	if err != nil {
-		st = IntegrityCheckState{Lock: IntegrityLock{Open: true, Cause: IntegrityLockStateUnreadable, Since: c.Now()}}
+		now := c.Now()
+		st = IntegrityCheckState{Lock: IntegrityLock{Open: true, Cause: IntegrityLockStateUnreadable, Since: now,
+			Findings: []IntegrityFinding{newIntegrityFinding(IntegrityLockStateUnreadable, IntegrityDeviation{}, now)}}}
 		s.auditLog(slog.LevelError, "integrity_check_state_unreadable", slog.String("detail", err.Error()))
 	} else if !ok {
 		st = IntegrityCheckState{}
@@ -385,11 +394,9 @@ func (s *Service) RunIntegrityCheckOnce(ctx context.Context) (IntegrityRun, erro
 	if n := len(st.Runs) - maxIntegrityRuns; n > 0 {
 		st.Runs = append([]IntegrityRun(nil), st.Runs[n:]...)
 	}
-	opened := false
-	if run.Locking > 0 && !st.Lock.Open {
-		st.Lock = IntegrityLock{Open: true, Cause: IntegrityLockDeviation, Since: run.Started, Deviations: run.Locking}
-		opened = true
-	}
+	wasOpen := st.Lock.Open
+	added := mergeIntegrityFindings(&st.Lock, run)
+	opened := !wasOpen && st.Lock.Open
 	lock := st.Lock
 	snapshot := copyIntegrityState(*st)
 	s.integrityCheck.mu.Unlock()
@@ -399,6 +406,9 @@ func (s *Service) RunIntegrityCheckOnce(ctx context.Context) (IntegrityRun, erro
 		s.auditLog(slog.LevelError, "integrity_lock_opened",
 			slog.Time("since", lock.Since), slog.Int("locking", lock.Deviations),
 			slog.String("manifest_sha256", run.ManifestSHA256))
+	}
+	for _, f := range added {
+		s.auditLog(slog.LevelError, "integrity_finding_opened", integrityFindingAttrs(f)...)
 	}
 	if err := storeIntegrityCheckState(cfg.StatePath, snapshot); err != nil {
 		s.auditLog(slog.LevelError, "integrity_check_state_failed", slog.String("detail", err.Error()))
@@ -586,6 +596,7 @@ func copyIntegrityState(st IntegrityCheckState) IntegrityCheckState {
 		runs[i] = r
 	}
 	st.Runs = runs
+	st.Lock.Findings = append([]IntegrityFinding(nil), st.Lock.Findings...)
 	return st
 }
 
@@ -618,6 +629,7 @@ func loadIntegrityCheckState(path string) (IntegrityCheckState, bool, error) {
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return IntegrityCheckState{}, false, errors.New("decode integrity check state: trailing data")
 	}
+	migrateIntegrityLock(&st.Lock)
 	if err := validateIntegrityState(st); err != nil {
 		return IntegrityCheckState{}, false, fmt.Errorf("decode integrity check state: %w", err)
 	}
@@ -635,6 +647,9 @@ func validateIntegrityState(st IntegrityCheckState) error {
 		return errors.New("closed lock with a cause")
 	case st.Lock.Deviations < 0:
 		return errors.New("negative lock count")
+	}
+	if err := validateIntegrityFindings(st.Lock); err != nil {
+		return err
 	}
 	for _, r := range st.Runs {
 		switch r.State {
