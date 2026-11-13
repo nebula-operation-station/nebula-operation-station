@@ -268,7 +268,7 @@ type integrityRefState struct {
 	roots func() (release.RootState, error)
 }
 
-func (s *Service) version() string {
+func (s *Service) runningReleaseVersion() string {
 	if s.runningVersion != "" {
 		return s.runningVersion
 	}
@@ -294,7 +294,7 @@ func (s *Service) admitIntegrityReferenceAtStart(d *dirBuiltinTrust) {
 	a := ReferenceAdmission{Outcome: ReferenceFailed}
 	state, err := roots()
 	if err == nil {
-		a, err = AdmitInstalledFiles(s.db, state, s.version(), d.bundleDir)
+		a, err = AdmitInstalledFiles(s.db, state, s.runningReleaseVersion(), d.bundleDir)
 	}
 	if err != nil {
 		a = ReferenceAdmission{Outcome: ReferenceFailed, Err: err}
@@ -358,5 +358,5 @@ func (s *Service) AdmittedIntegrityReference(_ context.Context) (integrity.Refer
 	if err != nil {
 		return integrity.Reference{}, err
 	}
-	return LoadAdmittedReference(s.db, state, s.version())
+	return LoadAdmittedReference(s.db, state, s.runningReleaseVersion())
 }
