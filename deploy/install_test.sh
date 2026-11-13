@@ -2749,6 +2749,122 @@ else
   echo "skip uninstall drop-in cases (needs root and systemd)"
 fi
 
+# --- Release bundle: installed-files.json (ADR 0015 D2, spec 15) -----------
+# These cases run the real release bundle block of install.sh with a stub
+# install(1) that drops the root ownership flags (no root needed). They check
+# the optional installed-files.json next to the three required attachments.
+bundle_result() {
+  local name="$1" status="$2"
+  if [[ "$status" -eq 0 ]]; then
+    echo "ok   ${name}"
+    pass=$((pass + 1))
+  else
+    echo "FAIL ${name}"
+    fail=$((fail + 1))
+  fi
+}
+bundle_base=$(mktemp -d)
+bundle_names=(release-manifest.json release-manifest.json.sig builtins.tar installed-files.json)
+bundle_block=$(sed -n '/^# begin: release bundle$/,/^# end: release bundle$/p' "$install_sh")
+if ! grep -qxF 'release_dir=/usr/share/nebula/release' <<< "$bundle_block"; then
+  echo "FAIL release bundle block has no release_dir line to redirect"
+  fail=$((fail + 1))
+fi
+bundle_block=$(sed 's|^release_dir=/usr/share/nebula/release$|release_dir="$TEST_RELEASE_DIR"|' <<< "$bundle_block")
+
+# bundle_fill <dir> <tag>: writes the four attachments with recognisable bytes.
+bundle_fill() {
+  local name
+  for name in "${bundle_names[@]}"; do
+    printf 'fixture %s %s\n' "$2" "$name" > "$1/$name"
+  done
+}
+
+# bundle_run <root>: provisions <root>/sidecars into <root>/release. Sets
+# bundle_rc and bundle_out. <root>/release must not exist yet or be a prior run.
+bundle_run() {
+  local root="$1" stubdir="$1/bin"
+  mkdir -p "$stubdir" "$root/deploy"
+  cat > "$stubdir/install" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$INSTALL_LOG"
+args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o|-g) shift 2 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+exec /usr/bin/install "${args[@]}"
+STUB
+  chmod 0755 "$stubdir/install"
+  {
+    printf 'set -euo pipefail\nscript_dir="$TEST_SCRIPT_DIR"\nbundle_source_dir="$TEST_SOURCE_DIR"\n'
+    printf '%s\n' "$bundle_block"
+  } > "$root/run-bundle.sh"
+  bundle_out=$(env PATH="$stubdir:$PATH" INSTALL_LOG="$root/install.log" \
+    TEST_RELEASE_DIR="$root/release" TEST_SCRIPT_DIR="$root/deploy" \
+    TEST_SOURCE_DIR="$root/sidecars" bash "$root/run-bundle.sh" 2>&1)
+  bundle_rc=$?
+}
+
+# Install: the list lands with the same owner and mode as the other attachments.
+c="${bundle_base}/install"
+mkdir -p "$c/sidecars" && bundle_fill "$c/sidecars" v1
+bundle_run "$c"
+[[ "$bundle_rc" -eq 0 ]]; bundle_result "bundle with installed-files.json is provisioned" $?
+cmp -s "$c/sidecars/installed-files.json" "$c/release/installed-files.json"; bundle_result "installed-files.json bytes equal the source" $?
+[[ -f "$c/release/installed-files.json" && ! -L "$c/release/installed-files.json" \
+  && "$(stat -c %a "$c/release/installed-files.json")" == 644 ]]
+bundle_result "installed-files.json is a regular file, mode 0644" $?
+grep 'installed-files.json' "$c/install.log" | grep -q -- '-m 0644 -o root -g root'
+bundle_result "installed-files.json is installed root:root like the other attachments" $?
+[[ "$(stat -c %a "$c/release")" == 755 ]]; bundle_result "release directory stays 0755" $?
+
+# Symlink source: refused like the other files; the target is never read or changed.
+c="${bundle_base}/symlink"
+mkdir -p "$c/sidecars" && bundle_fill "$c/sidecars" v1
+printf 'untouched\n' > "$c/target"
+rm -f "$c/sidecars/installed-files.json" && ln -s -- "$c/target" "$c/sidecars/installed-files.json"
+bundle_run "$c"
+[[ "$bundle_rc" -ne 0 && "$bundle_out" == *"refusing"*installed-files.json* ]]
+bundle_result "symlinked installed-files.json is refused" $?
+[[ "$(cat "$c/target")" == untouched ]]; bundle_result "symlink target is untouched" $?
+[[ ! -e "$c/release/release-manifest.json" && ! -e "$c/release/installed-files.json" ]]
+bundle_result "a refused bundle changes nothing in the release directory" $?
+
+# Upgrade: a newer list replaces the older one.
+c="${bundle_base}/upgrade"
+mkdir -p "$c/sidecars" && bundle_fill "$c/sidecars" v1
+bundle_run "$c"
+bundle_fill "$c/sidecars" v2
+bundle_run "$c"
+[[ "$bundle_rc" -eq 0 ]]; bundle_result "upgrade run succeeds" $?
+cmp -s "$c/sidecars/installed-files.json" "$c/release/installed-files.json"
+bundle_result "upgrade replaces the older installed-files.json" $?
+
+# Older release without the list: no abort, a clear message, and no stale list.
+c="${bundle_base}/old-release"
+mkdir -p "$c/sidecars" && bundle_fill "$c/sidecars" v1 && rm -f "$c/sidecars/installed-files.json"
+bundle_run "$c"
+[[ "$bundle_rc" -eq 0 && "$bundle_out" == *"installed-files.json"* ]]
+bundle_result "bundle without installed-files.json succeeds and says so" $?
+[[ ! -e "$c/release/installed-files.json" && -f "$c/release/release-manifest.json" \
+  && -f "$c/release/builtins.tar" ]]
+bundle_result "bundle without installed-files.json provisions the three attachments" $?
+printf 'stale list\n' > "$c/release/installed-files.json"
+bundle_run "$c"
+[[ "$bundle_rc" -eq 0 && ! -e "$c/release/installed-files.json" ]]
+bundle_result "a stale installed-files.json from an earlier release is removed" $?
+
+# A required attachment still stops the install when the list is absent.
+c="${bundle_base}/missing-manifest"
+mkdir -p "$c/sidecars" && bundle_fill "$c/sidecars" v1 && rm -f "$c/sidecars/release-manifest.json"
+bundle_run "$c"
+[[ "$bundle_rc" -ne 0 ]]; bundle_result "missing release-manifest.json still refuses the bundle" $?
+
+rm -rf -- "$bundle_base"
+
 echo
 echo "install_test.sh: ${pass} passed, ${fail} failed"
 if [[ "$fail" -gt 0 ]]; then
