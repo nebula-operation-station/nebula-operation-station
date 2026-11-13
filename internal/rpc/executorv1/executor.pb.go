@@ -1560,13 +1560,121 @@ func (NetDevRuleAction) EnumDescriptor() ([]byte, []int) {
 	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{26}
 }
 
+type BaselineEntryType int32
+
+const (
+	BaselineEntryType_BASELINE_ENTRY_TYPE_UNSPECIFIED BaselineEntryType = 0
+	BaselineEntryType_BASELINE_ENTRY_TYPE_FILE        BaselineEntryType = 1
+	BaselineEntryType_BASELINE_ENTRY_TYPE_DIR         BaselineEntryType = 2
+	BaselineEntryType_BASELINE_ENTRY_TYPE_SYMLINK     BaselineEntryType = 3
+	BaselineEntryType_BASELINE_ENTRY_TYPE_OTHER       BaselineEntryType = 4
+)
+
+// Enum value maps for BaselineEntryType.
+var (
+	BaselineEntryType_name = map[int32]string{
+		0: "BASELINE_ENTRY_TYPE_UNSPECIFIED",
+		1: "BASELINE_ENTRY_TYPE_FILE",
+		2: "BASELINE_ENTRY_TYPE_DIR",
+		3: "BASELINE_ENTRY_TYPE_SYMLINK",
+		4: "BASELINE_ENTRY_TYPE_OTHER",
+	}
+	BaselineEntryType_value = map[string]int32{
+		"BASELINE_ENTRY_TYPE_UNSPECIFIED": 0,
+		"BASELINE_ENTRY_TYPE_FILE":        1,
+		"BASELINE_ENTRY_TYPE_DIR":         2,
+		"BASELINE_ENTRY_TYPE_SYMLINK":     3,
+		"BASELINE_ENTRY_TYPE_OTHER":       4,
+	}
+)
+
+func (x BaselineEntryType) Enum() *BaselineEntryType {
+	p := new(BaselineEntryType)
+	*p = x
+	return p
+}
+
+func (x BaselineEntryType) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (BaselineEntryType) Descriptor() protoreflect.EnumDescriptor {
+	return file_nebula_executor_v1_executor_proto_enumTypes[27].Descriptor()
+}
+
+func (BaselineEntryType) Type() protoreflect.EnumType {
+	return &file_nebula_executor_v1_executor_proto_enumTypes[27]
+}
+
+func (x BaselineEntryType) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use BaselineEntryType.Descriptor instead.
+func (BaselineEntryType) EnumDescriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{27}
+}
+
+type BaselineHashKind int32
+
+const (
+	// Rejected: every entry names its hash kind.
+	BaselineHashKind_BASELINE_HASH_KIND_UNSPECIFIED BaselineHashKind = 0
+	BaselineHashKind_BASELINE_HASH_KIND_NONE        BaselineHashKind = 1
+	BaselineHashKind_BASELINE_HASH_KIND_PLAIN       BaselineHashKind = 2
+	BaselineHashKind_BASELINE_HASH_KIND_KEYED       BaselineHashKind = 3
+)
+
+// Enum value maps for BaselineHashKind.
+var (
+	BaselineHashKind_name = map[int32]string{
+		0: "BASELINE_HASH_KIND_UNSPECIFIED",
+		1: "BASELINE_HASH_KIND_NONE",
+		2: "BASELINE_HASH_KIND_PLAIN",
+		3: "BASELINE_HASH_KIND_KEYED",
+	}
+	BaselineHashKind_value = map[string]int32{
+		"BASELINE_HASH_KIND_UNSPECIFIED": 0,
+		"BASELINE_HASH_KIND_NONE":        1,
+		"BASELINE_HASH_KIND_PLAIN":       2,
+		"BASELINE_HASH_KIND_KEYED":       3,
+	}
+)
+
+func (x BaselineHashKind) Enum() *BaselineHashKind {
+	p := new(BaselineHashKind)
+	*p = x
+	return p
+}
+
+func (x BaselineHashKind) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (BaselineHashKind) Descriptor() protoreflect.EnumDescriptor {
+	return file_nebula_executor_v1_executor_proto_enumTypes[28].Descriptor()
+}
+
+func (BaselineHashKind) Type() protoreflect.EnumType {
+	return &file_nebula_executor_v1_executor_proto_enumTypes[28]
+}
+
+func (x BaselineHashKind) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use BaselineHashKind.Descriptor instead.
+func (BaselineHashKind) EnumDescriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{28}
+}
+
 type BaselineDigestComparison int32
 
 const (
 	BaselineDigestComparison_BASELINE_DIGEST_COMPARISON_UNSPECIFIED BaselineDigestComparison = 0
-	// The digest equals the executor's approved digest.
+	// The recomputed digest equals the executor's approved digest.
 	BaselineDigestComparison_BASELINE_DIGEST_COMPARISON_MATCH BaselineDigestComparison = 1
-	// The digest differs: `integrity.baseline_tamper`.
+	// The recomputed digest differs: `integrity.baseline_tamper`.
 	BaselineDigestComparison_BASELINE_DIGEST_COMPARISON_MISMATCH BaselineDigestComparison = 2
 	// The executor holds no approved digest for the host.
 	BaselineDigestComparison_BASELINE_DIGEST_COMPARISON_NONE BaselineDigestComparison = 3
@@ -1599,11 +1707,11 @@ func (x BaselineDigestComparison) String() string {
 }
 
 func (BaselineDigestComparison) Descriptor() protoreflect.EnumDescriptor {
-	return file_nebula_executor_v1_executor_proto_enumTypes[27].Descriptor()
+	return file_nebula_executor_v1_executor_proto_enumTypes[29].Descriptor()
 }
 
 func (BaselineDigestComparison) Type() protoreflect.EnumType {
-	return &file_nebula_executor_v1_executor_proto_enumTypes[27]
+	return &file_nebula_executor_v1_executor_proto_enumTypes[29]
 }
 
 func (x BaselineDigestComparison) Number() protoreflect.EnumNumber {
@@ -1612,7 +1720,7 @@ func (x BaselineDigestComparison) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use BaselineDigestComparison.Descriptor instead.
 func (BaselineDigestComparison) EnumDescriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{27}
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{29}
 }
 
 type Target struct {
@@ -28060,9 +28168,11 @@ type GetIntegrityStatusResponse struct {
 	Findings        []*IntegrityFinding `protobuf:"bytes,7,rep,name=findings,proto3" json:"findings,omitempty"`
 	// "NOS checks cannot detect a root compromise of the NOS machine; see
 	// ADR 0015".
-	Note          string `protobuf:"bytes,8,opt,name=note,proto3" json:"note,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Note string `protobuf:"bytes,8,opt,name=note,proto3" json:"note,omitempty"`
+	// Open I2 baseline tamper findings, held by the executor (ADR 0015 D7).
+	BaselineTamperFindings []*BaselineTamperFinding `protobuf:"bytes,9,rep,name=baseline_tamper_findings,json=baselineTamperFindings,proto3" json:"baseline_tamper_findings,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *GetIntegrityStatusResponse) Reset() {
@@ -28149,6 +28259,13 @@ func (x *GetIntegrityStatusResponse) GetNote() string {
 		return x.Note
 	}
 	return ""
+}
+
+func (x *GetIntegrityStatusResponse) GetBaselineTamperFindings() []*BaselineTamperFinding {
+	if x != nil {
+		return x.BaselineTamperFindings
+	}
+	return nil
 }
 
 type AckIntegrityFindingRequest struct {
@@ -28258,30 +28375,32 @@ func (x *AckIntegrityFindingResponse) GetLocked() bool {
 	return false
 }
 
-type CompareBaselineDigestRequest struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// canonical host_id.
-	HostId string `protobuf:"bytes,1,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
-	// Lowercase hex SHA-256 of the caller's baseline list for the host.
-	Digest        string `protobuf:"bytes,2,opt,name=digest,proto3" json:"digest,omitempty"`
+// One message of the CompareBaselineList stream. The first message carries
+// the header and nothing else; every later one carries entries and/or
+// mounts and no header.
+type CompareBaselineListRequest struct {
+	state         protoimpl.MessageState     `protogen:"open.v1"`
+	Header        *CompareBaselineListHeader `protobuf:"bytes,1,opt,name=header,proto3" json:"header,omitempty"`
+	Entries       []*BaselineListEntry       `protobuf:"bytes,2,rep,name=entries,proto3" json:"entries,omitempty"`
+	Mounts        []*BaselineListMount       `protobuf:"bytes,3,rep,name=mounts,proto3" json:"mounts,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *CompareBaselineDigestRequest) Reset() {
-	*x = CompareBaselineDigestRequest{}
+func (x *CompareBaselineListRequest) Reset() {
+	*x = CompareBaselineListRequest{}
 	mi := &file_nebula_executor_v1_executor_proto_msgTypes[406]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *CompareBaselineDigestRequest) String() string {
+func (x *CompareBaselineListRequest) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*CompareBaselineDigestRequest) ProtoMessage() {}
+func (*CompareBaselineListRequest) ProtoMessage() {}
 
-func (x *CompareBaselineDigestRequest) ProtoReflect() protoreflect.Message {
+func (x *CompareBaselineListRequest) ProtoReflect() protoreflect.Message {
 	mi := &file_nebula_executor_v1_executor_proto_msgTypes[406]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -28293,49 +28412,141 @@ func (x *CompareBaselineDigestRequest) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use CompareBaselineDigestRequest.ProtoReflect.Descriptor instead.
-func (*CompareBaselineDigestRequest) Descriptor() ([]byte, []int) {
+// Deprecated: Use CompareBaselineListRequest.ProtoReflect.Descriptor instead.
+func (*CompareBaselineListRequest) Descriptor() ([]byte, []int) {
 	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{406}
 }
 
-func (x *CompareBaselineDigestRequest) GetHostId() string {
+func (x *CompareBaselineListRequest) GetHeader() *CompareBaselineListHeader {
+	if x != nil {
+		return x.Header
+	}
+	return nil
+}
+
+func (x *CompareBaselineListRequest) GetEntries() []*BaselineListEntry {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
+func (x *CompareBaselineListRequest) GetMounts() []*BaselineListMount {
+	if x != nil {
+		return x.Mounts
+	}
+	return nil
+}
+
+type CompareBaselineListHeader struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// canonical host_id.
+	HostId string `protobuf:"bytes,1,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	// The fim profile the baseline was taken with.
+	ProfileId string `protobuf:"bytes,2,opt,name=profile_id,json=profileId,proto3" json:"profile_id,omitempty"`
+	// Exact numbers of entries and mounts that follow.
+	EntryCount    uint32 `protobuf:"varint,3,opt,name=entry_count,json=entryCount,proto3" json:"entry_count,omitempty"`
+	MountCount    uint32 `protobuf:"varint,4,opt,name=mount_count,json=mountCount,proto3" json:"mount_count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CompareBaselineListHeader) Reset() {
+	*x = CompareBaselineListHeader{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[407]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CompareBaselineListHeader) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CompareBaselineListHeader) ProtoMessage() {}
+
+func (x *CompareBaselineListHeader) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[407]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CompareBaselineListHeader.ProtoReflect.Descriptor instead.
+func (*CompareBaselineListHeader) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{407}
+}
+
+func (x *CompareBaselineListHeader) GetHostId() string {
 	if x != nil {
 		return x.HostId
 	}
 	return ""
 }
 
-func (x *CompareBaselineDigestRequest) GetDigest() string {
+func (x *CompareBaselineListHeader) GetProfileId() string {
 	if x != nil {
-		return x.Digest
+		return x.ProfileId
 	}
 	return ""
 }
 
-type CompareBaselineDigestResponse struct {
-	state  protoimpl.MessageState   `protogen:"open.v1"`
-	Result BaselineDigestComparison `protobuf:"varint,1,opt,name=result,proto3,enum=nebula.executor.v1.BaselineDigestComparison" json:"result,omitempty"`
-	// "integrity.baseline_tamper" on MISMATCH, empty otherwise.
-	FindingKind   string `protobuf:"bytes,2,opt,name=finding_kind,json=findingKind,proto3" json:"finding_kind,omitempty"`
+func (x *CompareBaselineListHeader) GetEntryCount() uint32 {
+	if x != nil {
+		return x.EntryCount
+	}
+	return 0
+}
+
+func (x *CompareBaselineListHeader) GetMountCount() uint32 {
+	if x != nil {
+		return x.MountCount
+	}
+	return 0
+}
+
+// One baseline record in its stored form (ADR 0015 D6 record fields,
+// content hashes keyed except on the plain-hash allowlist).
+type BaselineListEntry struct {
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Path       []byte                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	Type       BaselineEntryType      `protobuf:"varint,2,opt,name=type,proto3,enum=nebula.executor.v1.BaselineEntryType" json:"type,omitempty"`
+	Size       int64                  `protobuf:"varint,3,opt,name=size,proto3" json:"size,omitempty"`
+	Mode       uint32                 `protobuf:"varint,4,opt,name=mode,proto3" json:"mode,omitempty"`
+	Uid        uint32                 `protobuf:"varint,5,opt,name=uid,proto3" json:"uid,omitempty"`
+	Gid        uint32                 `protobuf:"varint,6,opt,name=gid,proto3" json:"gid,omitempty"`
+	Inode      uint64                 `protobuf:"varint,7,opt,name=inode,proto3" json:"inode,omitempty"`
+	Mtime      int64                  `protobuf:"varint,8,opt,name=mtime,proto3" json:"mtime,omitempty"`
+	Ctime      int64                  `protobuf:"varint,9,opt,name=ctime,proto3" json:"ctime,omitempty"`
+	HashKind   BaselineHashKind       `protobuf:"varint,10,opt,name=hash_kind,json=hashKind,proto3,enum=nebula.executor.v1.BaselineHashKind" json:"hash_kind,omitempty"`
+	HashSecret bool                   `protobuf:"varint,11,opt,name=hash_secret,json=hashSecret,proto3" json:"hash_secret,omitempty"`
+	// 32 bytes when hash_kind is not NONE, empty otherwise.
+	HashSum []byte `protobuf:"bytes,12,opt,name=hash_sum,json=hashSum,proto3" json:"hash_sum,omitempty"`
+	// Symlink target; empty for every other type.
+	Link          []byte `protobuf:"bytes,13,opt,name=link,proto3" json:"link,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *CompareBaselineDigestResponse) Reset() {
-	*x = CompareBaselineDigestResponse{}
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[407]
+func (x *BaselineListEntry) Reset() {
+	*x = BaselineListEntry{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[408]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *CompareBaselineDigestResponse) String() string {
+func (x *BaselineListEntry) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*CompareBaselineDigestResponse) ProtoMessage() {}
+func (*BaselineListEntry) ProtoMessage() {}
 
-func (x *CompareBaselineDigestResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_nebula_executor_v1_executor_proto_msgTypes[407]
+func (x *BaselineListEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[408]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -28346,23 +28557,301 @@ func (x *CompareBaselineDigestResponse) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use CompareBaselineDigestResponse.ProtoReflect.Descriptor instead.
-func (*CompareBaselineDigestResponse) Descriptor() ([]byte, []int) {
-	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{407}
+// Deprecated: Use BaselineListEntry.ProtoReflect.Descriptor instead.
+func (*BaselineListEntry) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{408}
 }
 
-func (x *CompareBaselineDigestResponse) GetResult() BaselineDigestComparison {
+func (x *BaselineListEntry) GetPath() []byte {
+	if x != nil {
+		return x.Path
+	}
+	return nil
+}
+
+func (x *BaselineListEntry) GetType() BaselineEntryType {
+	if x != nil {
+		return x.Type
+	}
+	return BaselineEntryType_BASELINE_ENTRY_TYPE_UNSPECIFIED
+}
+
+func (x *BaselineListEntry) GetSize() int64 {
+	if x != nil {
+		return x.Size
+	}
+	return 0
+}
+
+func (x *BaselineListEntry) GetMode() uint32 {
+	if x != nil {
+		return x.Mode
+	}
+	return 0
+}
+
+func (x *BaselineListEntry) GetUid() uint32 {
+	if x != nil {
+		return x.Uid
+	}
+	return 0
+}
+
+func (x *BaselineListEntry) GetGid() uint32 {
+	if x != nil {
+		return x.Gid
+	}
+	return 0
+}
+
+func (x *BaselineListEntry) GetInode() uint64 {
+	if x != nil {
+		return x.Inode
+	}
+	return 0
+}
+
+func (x *BaselineListEntry) GetMtime() int64 {
+	if x != nil {
+		return x.Mtime
+	}
+	return 0
+}
+
+func (x *BaselineListEntry) GetCtime() int64 {
+	if x != nil {
+		return x.Ctime
+	}
+	return 0
+}
+
+func (x *BaselineListEntry) GetHashKind() BaselineHashKind {
+	if x != nil {
+		return x.HashKind
+	}
+	return BaselineHashKind_BASELINE_HASH_KIND_UNSPECIFIED
+}
+
+func (x *BaselineListEntry) GetHashSecret() bool {
+	if x != nil {
+		return x.HashSecret
+	}
+	return false
+}
+
+func (x *BaselineListEntry) GetHashSum() []byte {
+	if x != nil {
+		return x.HashSum
+	}
+	return nil
+}
+
+func (x *BaselineListEntry) GetLink() []byte {
+	if x != nil {
+		return x.Link
+	}
+	return nil
+}
+
+type BaselineListMount struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          []byte                 `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	FsType        string                 `protobuf:"bytes,2,opt,name=fs_type,json=fsType,proto3" json:"fs_type,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *BaselineListMount) Reset() {
+	*x = BaselineListMount{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[409]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BaselineListMount) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BaselineListMount) ProtoMessage() {}
+
+func (x *BaselineListMount) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[409]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BaselineListMount.ProtoReflect.Descriptor instead.
+func (*BaselineListMount) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{409}
+}
+
+func (x *BaselineListMount) GetPath() []byte {
+	if x != nil {
+		return x.Path
+	}
+	return nil
+}
+
+func (x *BaselineListMount) GetFsType() string {
+	if x != nil {
+		return x.FsType
+	}
+	return ""
+}
+
+type CompareBaselineListResponse struct {
+	state  protoimpl.MessageState   `protogen:"open.v1"`
+	Result BaselineDigestComparison `protobuf:"varint,1,opt,name=result,proto3,enum=nebula.executor.v1.BaselineDigestComparison" json:"result,omitempty"`
+	// "integrity.baseline_tamper" on MISMATCH, empty otherwise.
+	FindingKind string `protobuf:"bytes,2,opt,name=finding_kind,json=findingKind,proto3" json:"finding_kind,omitempty"`
+	// The digest the executor computed from the streamed list.
+	ComputedDigest string `protobuf:"bytes,3,opt,name=computed_digest,json=computedDigest,proto3" json:"computed_digest,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *CompareBaselineListResponse) Reset() {
+	*x = CompareBaselineListResponse{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[410]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CompareBaselineListResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CompareBaselineListResponse) ProtoMessage() {}
+
+func (x *CompareBaselineListResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[410]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CompareBaselineListResponse.ProtoReflect.Descriptor instead.
+func (*CompareBaselineListResponse) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{410}
+}
+
+func (x *CompareBaselineListResponse) GetResult() BaselineDigestComparison {
 	if x != nil {
 		return x.Result
 	}
 	return BaselineDigestComparison_BASELINE_DIGEST_COMPARISON_UNSPECIFIED
 }
 
-func (x *CompareBaselineDigestResponse) GetFindingKind() string {
+func (x *CompareBaselineListResponse) GetFindingKind() string {
 	if x != nil {
 		return x.FindingKind
 	}
 	return ""
+}
+
+func (x *CompareBaselineListResponse) GetComputedDigest() string {
+	if x != nil {
+		return x.ComputedDigest
+	}
+	return ""
+}
+
+// An executor-held I2 baseline digest mismatch of one host.
+type BaselineTamperFinding struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	HostId string                 `protobuf:"bytes,1,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
+	// The executor's approved digest and the digest it recomputed from the
+	// server's list, both at the latest mismatch.
+	ApprovedDigest  string `protobuf:"bytes,2,opt,name=approved_digest,json=approvedDigest,proto3" json:"approved_digest,omitempty"`
+	PresentedDigest string `protobuf:"bytes,3,opt,name=presented_digest,json=presentedDigest,proto3" json:"presented_digest,omitempty"`
+	FirstSeenUnix   int64  `protobuf:"varint,4,opt,name=first_seen_unix,json=firstSeenUnix,proto3" json:"first_seen_unix,omitempty"`
+	LastSeenUnix    int64  `protobuf:"varint,5,opt,name=last_seen_unix,json=lastSeenUnix,proto3" json:"last_seen_unix,omitempty"`
+	Count           int64  `protobuf:"varint,6,opt,name=count,proto3" json:"count,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *BaselineTamperFinding) Reset() {
+	*x = BaselineTamperFinding{}
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[411]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *BaselineTamperFinding) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*BaselineTamperFinding) ProtoMessage() {}
+
+func (x *BaselineTamperFinding) ProtoReflect() protoreflect.Message {
+	mi := &file_nebula_executor_v1_executor_proto_msgTypes[411]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use BaselineTamperFinding.ProtoReflect.Descriptor instead.
+func (*BaselineTamperFinding) Descriptor() ([]byte, []int) {
+	return file_nebula_executor_v1_executor_proto_rawDescGZIP(), []int{411}
+}
+
+func (x *BaselineTamperFinding) GetHostId() string {
+	if x != nil {
+		return x.HostId
+	}
+	return ""
+}
+
+func (x *BaselineTamperFinding) GetApprovedDigest() string {
+	if x != nil {
+		return x.ApprovedDigest
+	}
+	return ""
+}
+
+func (x *BaselineTamperFinding) GetPresentedDigest() string {
+	if x != nil {
+		return x.PresentedDigest
+	}
+	return ""
+}
+
+func (x *BaselineTamperFinding) GetFirstSeenUnix() int64 {
+	if x != nil {
+		return x.FirstSeenUnix
+	}
+	return 0
+}
+
+func (x *BaselineTamperFinding) GetLastSeenUnix() int64 {
+	if x != nil {
+		return x.LastSeenUnix
+	}
+	return 0
+}
+
+func (x *BaselineTamperFinding) GetCount() int64 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
 }
 
 var File_nebula_executor_v1_executor_proto protoreflect.FileDescriptor
@@ -30360,7 +30849,7 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\x06reason\x18\x06 \x01(\tR\x06reason\x12&\n" +
 	"\x0ffirst_seen_unix\x18\a \x01(\x03R\rfirstSeenUnix\x12$\n" +
 	"\x0elast_seen_unix\x18\b \x01(\x03R\flastSeenUnix\x12\x14\n" +
-	"\x05count\x18\t \x01(\x05R\x05count\"\xcc\x02\n" +
+	"\x05count\x18\t \x01(\x05R\x05count\"\xb1\x03\n" +
 	"\x1aGetIntegrityStatusResponse\x12\x1e\n" +
 	"\n" +
 	"configured\x18\x01 \x01(\bR\n" +
@@ -30372,20 +30861,57 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\x06locked\x18\x05 \x01(\bR\x06locked\x12*\n" +
 	"\x11locked_since_unix\x18\x06 \x01(\x03R\x0flockedSinceUnix\x12@\n" +
 	"\bfindings\x18\a \x03(\v2$.nebula.executor.v1.IntegrityFindingR\bfindings\x12\x12\n" +
-	"\x04note\x18\b \x01(\tR\x04note\";\n" +
+	"\x04note\x18\b \x01(\tR\x04note\x12c\n" +
+	"\x18baseline_tamper_findings\x18\t \x03(\v2).nebula.executor.v1.BaselineTamperFindingR\x16baselineTamperFindings\";\n" +
 	"\x1aAckIntegrityFindingRequest\x12\x1d\n" +
 	"\n" +
 	"finding_id\x18\x01 \x01(\tR\tfindingId\"\x93\x01\n" +
 	"\x1bAckIntegrityFindingResponse\x12>\n" +
 	"\afinding\x18\x01 \x01(\v2$.nebula.executor.v1.IntegrityFindingR\afinding\x12\x1c\n" +
 	"\tremaining\x18\x02 \x01(\x05R\tremaining\x12\x16\n" +
-	"\x06locked\x18\x03 \x01(\bR\x06locked\"O\n" +
-	"\x1cCompareBaselineDigestRequest\x12\x17\n" +
-	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x16\n" +
-	"\x06digest\x18\x02 \x01(\tR\x06digest\"\x88\x01\n" +
-	"\x1dCompareBaselineDigestResponse\x12D\n" +
+	"\x06locked\x18\x03 \x01(\bR\x06locked\"\xe3\x01\n" +
+	"\x1aCompareBaselineListRequest\x12E\n" +
+	"\x06header\x18\x01 \x01(\v2-.nebula.executor.v1.CompareBaselineListHeaderR\x06header\x12?\n" +
+	"\aentries\x18\x02 \x03(\v2%.nebula.executor.v1.BaselineListEntryR\aentries\x12=\n" +
+	"\x06mounts\x18\x03 \x03(\v2%.nebula.executor.v1.BaselineListMountR\x06mounts\"\x95\x01\n" +
+	"\x19CompareBaselineListHeader\x12\x17\n" +
+	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12\x1d\n" +
+	"\n" +
+	"profile_id\x18\x02 \x01(\tR\tprofileId\x12\x1f\n" +
+	"\ventry_count\x18\x03 \x01(\rR\n" +
+	"entryCount\x12\x1f\n" +
+	"\vmount_count\x18\x04 \x01(\rR\n" +
+	"mountCount\"\x83\x03\n" +
+	"\x11BaselineListEntry\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\fR\x04path\x129\n" +
+	"\x04type\x18\x02 \x01(\x0e2%.nebula.executor.v1.BaselineEntryTypeR\x04type\x12\x12\n" +
+	"\x04size\x18\x03 \x01(\x03R\x04size\x12\x12\n" +
+	"\x04mode\x18\x04 \x01(\rR\x04mode\x12\x10\n" +
+	"\x03uid\x18\x05 \x01(\rR\x03uid\x12\x10\n" +
+	"\x03gid\x18\x06 \x01(\rR\x03gid\x12\x14\n" +
+	"\x05inode\x18\a \x01(\x04R\x05inode\x12\x14\n" +
+	"\x05mtime\x18\b \x01(\x03R\x05mtime\x12\x14\n" +
+	"\x05ctime\x18\t \x01(\x03R\x05ctime\x12A\n" +
+	"\thash_kind\x18\n" +
+	" \x01(\x0e2$.nebula.executor.v1.BaselineHashKindR\bhashKind\x12\x1f\n" +
+	"\vhash_secret\x18\v \x01(\bR\n" +
+	"hashSecret\x12\x19\n" +
+	"\bhash_sum\x18\f \x01(\fR\ahashSum\x12\x12\n" +
+	"\x04link\x18\r \x01(\fR\x04link\"@\n" +
+	"\x11BaselineListMount\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\fR\x04path\x12\x17\n" +
+	"\afs_type\x18\x02 \x01(\tR\x06fsType\"\xaf\x01\n" +
+	"\x1bCompareBaselineListResponse\x12D\n" +
 	"\x06result\x18\x01 \x01(\x0e2,.nebula.executor.v1.BaselineDigestComparisonR\x06result\x12!\n" +
-	"\ffinding_kind\x18\x02 \x01(\tR\vfindingKind*\x80\x01\n" +
+	"\ffinding_kind\x18\x02 \x01(\tR\vfindingKind\x12'\n" +
+	"\x0fcomputed_digest\x18\x03 \x01(\tR\x0ecomputedDigest\"\xe8\x01\n" +
+	"\x15BaselineTamperFinding\x12\x17\n" +
+	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12'\n" +
+	"\x0fapproved_digest\x18\x02 \x01(\tR\x0eapprovedDigest\x12)\n" +
+	"\x10presented_digest\x18\x03 \x01(\tR\x0fpresentedDigest\x12&\n" +
+	"\x0ffirst_seen_unix\x18\x04 \x01(\x03R\rfirstSeenUnix\x12$\n" +
+	"\x0elast_seen_unix\x18\x05 \x01(\x03R\flastSeenUnix\x12\x14\n" +
+	"\x05count\x18\x06 \x01(\x03R\x05count*\x80\x01\n" +
 	"\tRiskClass\x12\x1a\n" +
 	"\x16RISK_CLASS_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eRISK_CLASS_LOW\x10\x01\x12\x15\n" +
@@ -30546,12 +31072,23 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\x18NET_DEV_RULE_ACTION_DROP\x10\x03\x12$\n" +
 	" NET_DEV_RULE_ACTION_RESET_CLIENT\x10\x04\x12$\n" +
 	" NET_DEV_RULE_ACTION_RESET_SERVER\x10\x05\x12\"\n" +
-	"\x1eNET_DEV_RULE_ACTION_RESET_BOTH\x10\x06*\xba\x01\n" +
+	"\x1eNET_DEV_RULE_ACTION_RESET_BOTH\x10\x06*\xb3\x01\n" +
+	"\x11BaselineEntryType\x12#\n" +
+	"\x1fBASELINE_ENTRY_TYPE_UNSPECIFIED\x10\x00\x12\x1c\n" +
+	"\x18BASELINE_ENTRY_TYPE_FILE\x10\x01\x12\x1b\n" +
+	"\x17BASELINE_ENTRY_TYPE_DIR\x10\x02\x12\x1f\n" +
+	"\x1bBASELINE_ENTRY_TYPE_SYMLINK\x10\x03\x12\x1d\n" +
+	"\x19BASELINE_ENTRY_TYPE_OTHER\x10\x04*\x8f\x01\n" +
+	"\x10BaselineHashKind\x12\"\n" +
+	"\x1eBASELINE_HASH_KIND_UNSPECIFIED\x10\x00\x12\x1b\n" +
+	"\x17BASELINE_HASH_KIND_NONE\x10\x01\x12\x1c\n" +
+	"\x18BASELINE_HASH_KIND_PLAIN\x10\x02\x12\x1c\n" +
+	"\x18BASELINE_HASH_KIND_KEYED\x10\x03*\xba\x01\n" +
 	"\x18BaselineDigestComparison\x12*\n" +
 	"&BASELINE_DIGEST_COMPARISON_UNSPECIFIED\x10\x00\x12$\n" +
 	" BASELINE_DIGEST_COMPARISON_MATCH\x10\x01\x12'\n" +
 	"#BASELINE_DIGEST_COMPARISON_MISMATCH\x10\x02\x12#\n" +
-	"\x1fBASELINE_DIGEST_COMPARISON_NONE\x10\x032\xe1{\n" +
+	"\x1fBASELINE_DIGEST_COMPARISON_NONE\x10\x032\xdd{\n" +
 	"\x0fExecutorService\x12X\n" +
 	"\tGetStatus\x12$.nebula.executor.v1.GetStatusRequest\x1a%.nebula.executor.v1.GetStatusResponse\x12m\n" +
 	"\x10ProposeExecution\x12+.nebula.executor.v1.ProposeExecutionRequest\x1a,.nebula.executor.v1.ProposeExecutionResponse\x12j\n" +
@@ -30700,8 +31237,8 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\x0eListNetDevices\x12).nebula.executor.v1.ListNetDevicesRequest\x1a*.nebula.executor.v1.ListNetDevicesResponse\x12d\n" +
 	"\rReadNetDevice\x12(.nebula.executor.v1.ReadNetDeviceRequest\x1a).nebula.executor.v1.ReadNetDeviceResponse\x12s\n" +
 	"\x12GetIntegrityStatus\x12-.nebula.executor.v1.GetIntegrityStatusRequest\x1a..nebula.executor.v1.GetIntegrityStatusResponse\x12v\n" +
-	"\x13AckIntegrityFinding\x12..nebula.executor.v1.AckIntegrityFindingRequest\x1a/.nebula.executor.v1.AckIntegrityFindingResponse\x12|\n" +
-	"\x15CompareBaselineDigest\x120.nebula.executor.v1.CompareBaselineDigestRequest\x1a1.nebula.executor.v1.CompareBaselineDigestResponseBaZ_github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1;executorv1b\x06proto3"
+	"\x13AckIntegrityFinding\x12..nebula.executor.v1.AckIntegrityFindingRequest\x1a/.nebula.executor.v1.AckIntegrityFindingResponse\x12x\n" +
+	"\x13CompareBaselineList\x12..nebula.executor.v1.CompareBaselineListRequest\x1a/.nebula.executor.v1.CompareBaselineListResponse(\x01BaZ_github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1;executorv1b\x06proto3"
 
 var (
 	file_nebula_executor_v1_executor_proto_rawDescOnce sync.Once
@@ -30715,8 +31252,8 @@ func file_nebula_executor_v1_executor_proto_rawDescGZIP() []byte {
 	return file_nebula_executor_v1_executor_proto_rawDescData
 }
 
-var file_nebula_executor_v1_executor_proto_enumTypes = make([]protoimpl.EnumInfo, 28)
-var file_nebula_executor_v1_executor_proto_msgTypes = make([]protoimpl.MessageInfo, 409)
+var file_nebula_executor_v1_executor_proto_enumTypes = make([]protoimpl.EnumInfo, 30)
+var file_nebula_executor_v1_executor_proto_msgTypes = make([]protoimpl.MessageInfo, 413)
 var file_nebula_executor_v1_executor_proto_goTypes = []any{
 	(RiskClass)(0),                                  // 0: nebula.executor.v1.RiskClass
 	(ApprovalRequirement)(0),                        // 1: nebula.executor.v1.ApprovalRequirement
@@ -30745,981 +31282,993 @@ var file_nebula_executor_v1_executor_proto_goTypes = []any{
 	(NetDevZoneType)(0),                             // 24: nebula.executor.v1.NetDevZoneType
 	(NetDevAddressType)(0),                          // 25: nebula.executor.v1.NetDevAddressType
 	(NetDevRuleAction)(0),                           // 26: nebula.executor.v1.NetDevRuleAction
-	(BaselineDigestComparison)(0),                   // 27: nebula.executor.v1.BaselineDigestComparison
-	(*Target)(nil),                                  // 28: nebula.executor.v1.Target
-	(*ExecutionRequest)(nil),                        // 29: nebula.executor.v1.ExecutionRequest
-	(*GetStatusRequest)(nil),                        // 30: nebula.executor.v1.GetStatusRequest
-	(*GetStatusResponse)(nil),                       // 31: nebula.executor.v1.GetStatusResponse
-	(*ProposeExecutionRequest)(nil),                 // 32: nebula.executor.v1.ProposeExecutionRequest
-	(*ProposeExecutionResponse)(nil),                // 33: nebula.executor.v1.ProposeExecutionResponse
-	(*SubmitAssertionRequest)(nil),                  // 34: nebula.executor.v1.SubmitAssertionRequest
-	(*SubmitAssertionResponse)(nil),                 // 35: nebula.executor.v1.SubmitAssertionResponse
-	(*BeginPrivilegedSessionRequest)(nil),           // 36: nebula.executor.v1.BeginPrivilegedSessionRequest
-	(*BeginPrivilegedSessionResponse)(nil),          // 37: nebula.executor.v1.BeginPrivilegedSessionResponse
-	(*CompletePrivilegedSessionRequest)(nil),        // 38: nebula.executor.v1.CompletePrivilegedSessionRequest
-	(*CompletePrivilegedSessionResponse)(nil),       // 39: nebula.executor.v1.CompletePrivilegedSessionResponse
-	(*GetSessionStateRequest)(nil),                  // 40: nebula.executor.v1.GetSessionStateRequest
-	(*GetSessionStateResponse)(nil),                 // 41: nebula.executor.v1.GetSessionStateResponse
-	(*AuthorizeRunRequest)(nil),                     // 42: nebula.executor.v1.AuthorizeRunRequest
-	(*AuthorizeRunResponse)(nil),                    // 43: nebula.executor.v1.AuthorizeRunResponse
-	(*UnlockRequest)(nil),                           // 44: nebula.executor.v1.UnlockRequest
-	(*UnlockResponse)(nil),                          // 45: nebula.executor.v1.UnlockResponse
-	(*LockRequest)(nil),                             // 46: nebula.executor.v1.LockRequest
-	(*LockResponse)(nil),                            // 47: nebula.executor.v1.LockResponse
-	(*ListPendingRequest)(nil),                      // 48: nebula.executor.v1.ListPendingRequest
-	(*PendingPermit)(nil),                           // 49: nebula.executor.v1.PendingPermit
-	(*ScannerFinding)(nil),                          // 50: nebula.executor.v1.ScannerFinding
-	(*PlanStage)(nil),                               // 51: nebula.executor.v1.PlanStage
-	(*Gate)(nil),                                    // 52: nebula.executor.v1.Gate
-	(*HostOutcome)(nil),                             // 53: nebula.executor.v1.HostOutcome
-	(*StageStatus)(nil),                             // 54: nebula.executor.v1.StageStatus
-	(*Rollout)(nil),                                 // 55: nebula.executor.v1.Rollout
-	(*BeginGateRequest)(nil),                        // 56: nebula.executor.v1.BeginGateRequest
-	(*BeginGateResponse)(nil),                       // 57: nebula.executor.v1.BeginGateResponse
-	(*CommitGateRequest)(nil),                       // 58: nebula.executor.v1.CommitGateRequest
-	(*CommitGateResponse)(nil),                      // 59: nebula.executor.v1.CommitGateResponse
-	(*AbortRolloutRequest)(nil),                     // 60: nebula.executor.v1.AbortRolloutRequest
-	(*AbortRolloutResponse)(nil),                    // 61: nebula.executor.v1.AbortRolloutResponse
-	(*GetRolloutRequest)(nil),                       // 62: nebula.executor.v1.GetRolloutRequest
-	(*GetRolloutResponse)(nil),                      // 63: nebula.executor.v1.GetRolloutResponse
-	(*ApproveGateCLIRequest)(nil),                   // 64: nebula.executor.v1.ApproveGateCLIRequest
-	(*ApproveGateCLIResponse)(nil),                  // 65: nebula.executor.v1.ApproveGateCLIResponse
-	(*ListPendingResponse)(nil),                     // 66: nebula.executor.v1.ListPendingResponse
-	(*ApproveCLIRequest)(nil),                       // 67: nebula.executor.v1.ApproveCLIRequest
-	(*ApproveCLIResponse)(nil),                      // 68: nebula.executor.v1.ApproveCLIResponse
-	(*GetPermitStateRequest)(nil),                   // 69: nebula.executor.v1.GetPermitStateRequest
-	(*GetPermitStateResponse)(nil),                  // 70: nebula.executor.v1.GetPermitStateResponse
-	(*TrustArtifactRequest)(nil),                    // 71: nebula.executor.v1.TrustArtifactRequest
-	(*TrustArtifactResponse)(nil),                   // 72: nebula.executor.v1.TrustArtifactResponse
-	(*UntrustArtifactRequest)(nil),                  // 73: nebula.executor.v1.UntrustArtifactRequest
-	(*UntrustArtifactResponse)(nil),                 // 74: nebula.executor.v1.UntrustArtifactResponse
-	(*ListTrustedArtifactsRequest)(nil),             // 75: nebula.executor.v1.ListTrustedArtifactsRequest
-	(*TrustedArtifact)(nil),                         // 76: nebula.executor.v1.TrustedArtifact
-	(*ListTrustedArtifactsResponse)(nil),            // 77: nebula.executor.v1.ListTrustedArtifactsResponse
-	(*SetHostCriticalityRequest)(nil),               // 78: nebula.executor.v1.SetHostCriticalityRequest
-	(*SetHostCriticalityResponse)(nil),              // 79: nebula.executor.v1.SetHostCriticalityResponse
-	(*ListHostCriticalityRequest)(nil),              // 80: nebula.executor.v1.ListHostCriticalityRequest
-	(*HostCriticality)(nil),                         // 81: nebula.executor.v1.HostCriticality
-	(*ListHostCriticalityResponse)(nil),             // 82: nebula.executor.v1.ListHostCriticalityResponse
-	(*CreateRegistrationCodeRequest)(nil),           // 83: nebula.executor.v1.CreateRegistrationCodeRequest
-	(*CreateRegistrationCodeResponse)(nil),          // 84: nebula.executor.v1.CreateRegistrationCodeResponse
-	(*BeginRegistrationRequest)(nil),                // 85: nebula.executor.v1.BeginRegistrationRequest
-	(*BeginRegistrationResponse)(nil),               // 86: nebula.executor.v1.BeginRegistrationResponse
-	(*FinishRegistrationRequest)(nil),               // 87: nebula.executor.v1.FinishRegistrationRequest
-	(*FinishRegistrationResponse)(nil),              // 88: nebula.executor.v1.FinishRegistrationResponse
-	(*ListWebAuthnCredentialsRequest)(nil),          // 89: nebula.executor.v1.ListWebAuthnCredentialsRequest
-	(*WebAuthnCredential)(nil),                      // 90: nebula.executor.v1.WebAuthnCredential
-	(*ListWebAuthnCredentialsResponse)(nil),         // 91: nebula.executor.v1.ListWebAuthnCredentialsResponse
-	(*RemoveWebAuthnCredentialRequest)(nil),         // 92: nebula.executor.v1.RemoveWebAuthnCredentialRequest
-	(*RemoveWebAuthnCredentialResponse)(nil),        // 93: nebula.executor.v1.RemoveWebAuthnCredentialResponse
-	(*ProbeHostKeyRequest)(nil),                     // 94: nebula.executor.v1.ProbeHostKeyRequest
-	(*ProbeHostKeyResponse)(nil),                    // 95: nebula.executor.v1.ProbeHostKeyResponse
-	(*PinHostKeyRequest)(nil),                       // 96: nebula.executor.v1.PinHostKeyRequest
-	(*HostKeyPin)(nil),                              // 97: nebula.executor.v1.HostKeyPin
-	(*PinHostKeyResponse)(nil),                      // 98: nebula.executor.v1.PinHostKeyResponse
-	(*UnpinHostKeyRequest)(nil),                     // 99: nebula.executor.v1.UnpinHostKeyRequest
-	(*UnpinHostKeyResponse)(nil),                    // 100: nebula.executor.v1.UnpinHostKeyResponse
-	(*ListHostKeysRequest)(nil),                     // 101: nebula.executor.v1.ListHostKeysRequest
-	(*ListHostKeysResponse)(nil),                    // 102: nebula.executor.v1.ListHostKeysResponse
-	(*ProposeRepinRequest)(nil),                     // 103: nebula.executor.v1.ProposeRepinRequest
-	(*ProposeRepinResponse)(nil),                    // 104: nebula.executor.v1.ProposeRepinResponse
-	(*CommitRepinRequest)(nil),                      // 105: nebula.executor.v1.CommitRepinRequest
-	(*CommitRepinResponse)(nil),                     // 106: nebula.executor.v1.CommitRepinResponse
-	(*EnrollHost)(nil),                              // 107: nebula.executor.v1.EnrollHost
-	(*ProposeEnrollRequest)(nil),                    // 108: nebula.executor.v1.ProposeEnrollRequest
-	(*ProposeEnrollResponse)(nil),                   // 109: nebula.executor.v1.ProposeEnrollResponse
-	(*CommitEnrollRequest)(nil),                     // 110: nebula.executor.v1.CommitEnrollRequest
-	(*EnrollResult)(nil),                            // 111: nebula.executor.v1.EnrollResult
-	(*CommitEnrollResponse)(nil),                    // 112: nebula.executor.v1.CommitEnrollResponse
-	(*CreateEnrollOfferRequest)(nil),                // 113: nebula.executor.v1.CreateEnrollOfferRequest
-	(*NetBirdOfferPermitInfo)(nil),                  // 114: nebula.executor.v1.NetBirdOfferPermitInfo
-	(*CreateEnrollOfferResponse)(nil),               // 115: nebula.executor.v1.CreateEnrollOfferResponse
-	(*FetchEnrollScriptRequest)(nil),                // 116: nebula.executor.v1.FetchEnrollScriptRequest
-	(*ShowEnrollScriptRequest)(nil),                 // 117: nebula.executor.v1.ShowEnrollScriptRequest
-	(*DownloadEnrollScriptRequest)(nil),             // 118: nebula.executor.v1.DownloadEnrollScriptRequest
-	(*FetchEnrollScriptResponse)(nil),               // 119: nebula.executor.v1.FetchEnrollScriptResponse
-	(*ShowEnrollScriptResponse)(nil),                // 120: nebula.executor.v1.ShowEnrollScriptResponse
-	(*DownloadEnrollScriptResponse)(nil),            // 121: nebula.executor.v1.DownloadEnrollScriptResponse
-	(*RevokeEnrollOfferRequest)(nil),                // 122: nebula.executor.v1.RevokeEnrollOfferRequest
-	(*RevokeEnrollOfferResponse)(nil),               // 123: nebula.executor.v1.RevokeEnrollOfferResponse
-	(*ListEnrollOffersRequest)(nil),                 // 124: nebula.executor.v1.ListEnrollOffersRequest
-	(*EnrollOfferInfo)(nil),                         // 125: nebula.executor.v1.EnrollOfferInfo
-	(*ListEnrollOffersResponse)(nil),                // 126: nebula.executor.v1.ListEnrollOffersResponse
-	(*SubmitPairingCodeRequest)(nil),                // 127: nebula.executor.v1.SubmitPairingCodeRequest
-	(*PairedPermitInfo)(nil),                        // 128: nebula.executor.v1.PairedPermitInfo
-	(*SubmitPairingCodeResponse)(nil),               // 129: nebula.executor.v1.SubmitPairingCodeResponse
-	(*CommitPairedEnrollRequest)(nil),               // 130: nebula.executor.v1.CommitPairedEnrollRequest
-	(*CommitPairedEnrollResponse)(nil),              // 131: nebula.executor.v1.CommitPairedEnrollResponse
-	(*GuestJoinTarget)(nil),                         // 132: nebula.executor.v1.GuestJoinTarget
-	(*ProposeGuestJoinRequest)(nil),                 // 133: nebula.executor.v1.ProposeGuestJoinRequest
-	(*ProposeGuestJoinResponse)(nil),                // 134: nebula.executor.v1.ProposeGuestJoinResponse
-	(*CommitGuestJoinRequest)(nil),                  // 135: nebula.executor.v1.CommitGuestJoinRequest
-	(*CommitGuestJoinResponse)(nil),                 // 136: nebula.executor.v1.CommitGuestJoinResponse
-	(*TestConnectionRequest)(nil),                   // 137: nebula.executor.v1.TestConnectionRequest
-	(*ConnectionAttempt)(nil),                       // 138: nebula.executor.v1.ConnectionAttempt
-	(*TestConnectionResponse)(nil),                  // 139: nebula.executor.v1.TestConnectionResponse
-	(*BeginLoginRequest)(nil),                       // 140: nebula.executor.v1.BeginLoginRequest
-	(*BeginLoginResponse)(nil),                      // 141: nebula.executor.v1.BeginLoginResponse
-	(*FinishLoginRequest)(nil),                      // 142: nebula.executor.v1.FinishLoginRequest
-	(*FinishLoginResponse)(nil),                     // 143: nebula.executor.v1.FinishLoginResponse
-	(*CheckCredentialRequest)(nil),                  // 144: nebula.executor.v1.CheckCredentialRequest
-	(*CheckCredentialResponse)(nil),                 // 145: nebula.executor.v1.CheckCredentialResponse
-	(*BeginTOTPSetupRequest)(nil),                   // 146: nebula.executor.v1.BeginTOTPSetupRequest
-	(*BeginTOTPSetupResponse)(nil),                  // 147: nebula.executor.v1.BeginTOTPSetupResponse
-	(*ConfirmTOTPSetupRequest)(nil),                 // 148: nebula.executor.v1.ConfirmTOTPSetupRequest
-	(*ConfirmTOTPSetupResponse)(nil),                // 149: nebula.executor.v1.ConfirmTOTPSetupResponse
-	(*RemoveTOTPRequest)(nil),                       // 150: nebula.executor.v1.RemoveTOTPRequest
-	(*RemoveTOTPResponse)(nil),                      // 151: nebula.executor.v1.RemoveTOTPResponse
-	(*GetTOTPStatusRequest)(nil),                    // 152: nebula.executor.v1.GetTOTPStatusRequest
-	(*GetTOTPStatusResponse)(nil),                   // 153: nebula.executor.v1.GetTOTPStatusResponse
-	(*RecoveryLoginRequest)(nil),                    // 154: nebula.executor.v1.RecoveryLoginRequest
-	(*RecoveryLoginResponse)(nil),                   // 155: nebula.executor.v1.RecoveryLoginResponse
-	(*FinishRecoveryRequest)(nil),                   // 156: nebula.executor.v1.FinishRecoveryRequest
-	(*FinishRecoveryResponse)(nil),                  // 157: nebula.executor.v1.FinishRecoveryResponse
-	(*GetSSHPublicKeyRequest)(nil),                  // 158: nebula.executor.v1.GetSSHPublicKeyRequest
-	(*GetSSHPublicKeyResponse)(nil),                 // 159: nebula.executor.v1.GetSSHPublicKeyResponse
-	(*InitVaultRequest)(nil),                        // 160: nebula.executor.v1.InitVaultRequest
-	(*InitVaultResponse)(nil),                       // 161: nebula.executor.v1.InitVaultResponse
-	(*SetSecretRequest)(nil),                        // 162: nebula.executor.v1.SetSecretRequest
-	(*SetSecretResponse)(nil),                       // 163: nebula.executor.v1.SetSecretResponse
-	(*ListSecretsRequest)(nil),                      // 164: nebula.executor.v1.ListSecretsRequest
-	(*SecretInfo)(nil),                              // 165: nebula.executor.v1.SecretInfo
-	(*ListSecretsResponse)(nil),                     // 166: nebula.executor.v1.ListSecretsResponse
-	(*DeleteSecretRequest)(nil),                     // 167: nebula.executor.v1.DeleteSecretRequest
-	(*DeleteSecretResponse)(nil),                    // 168: nebula.executor.v1.DeleteSecretResponse
-	(*RunAttachedRequest)(nil),                      // 169: nebula.executor.v1.RunAttachedRequest
-	(*RunAttachedResponse)(nil),                     // 170: nebula.executor.v1.RunAttachedResponse
-	(*StartDurableRequest)(nil),                     // 171: nebula.executor.v1.StartDurableRequest
-	(*StartDurableResponse)(nil),                    // 172: nebula.executor.v1.StartDurableResponse
-	(*GetRunResponse)(nil),                          // 173: nebula.executor.v1.GetRunResponse
-	(*GetRunRequest)(nil),                           // 174: nebula.executor.v1.GetRunRequest
-	(*RunStatus)(nil),                               // 175: nebula.executor.v1.RunStatus
-	(*ProposeScheduleGrantRequest)(nil),             // 176: nebula.executor.v1.ProposeScheduleGrantRequest
-	(*ProposeScheduleGrantResponse)(nil),            // 177: nebula.executor.v1.ProposeScheduleGrantResponse
-	(*CommitScheduleGrantRequest)(nil),              // 178: nebula.executor.v1.CommitScheduleGrantRequest
-	(*ScheduleGrant)(nil),                           // 179: nebula.executor.v1.ScheduleGrant
-	(*CommitScheduleGrantResponse)(nil),             // 180: nebula.executor.v1.CommitScheduleGrantResponse
-	(*ListPendingScheduleGrantsRequest)(nil),        // 181: nebula.executor.v1.ListPendingScheduleGrantsRequest
-	(*PendingScheduleGrant)(nil),                    // 182: nebula.executor.v1.PendingScheduleGrant
-	(*ListPendingScheduleGrantsResponse)(nil),       // 183: nebula.executor.v1.ListPendingScheduleGrantsResponse
-	(*ApproveScheduleGrantCLIRequest)(nil),          // 184: nebula.executor.v1.ApproveScheduleGrantCLIRequest
-	(*ApproveScheduleGrantCLIResponse)(nil),         // 185: nebula.executor.v1.ApproveScheduleGrantCLIResponse
-	(*ListScheduleGrantsRequest)(nil),               // 186: nebula.executor.v1.ListScheduleGrantsRequest
-	(*ListScheduleGrantsResponse)(nil),              // 187: nebula.executor.v1.ListScheduleGrantsResponse
-	(*RevokeScheduleGrantRequest)(nil),              // 188: nebula.executor.v1.RevokeScheduleGrantRequest
-	(*RevokeScheduleGrantResponse)(nil),             // 189: nebula.executor.v1.RevokeScheduleGrantResponse
-	(*RunScheduledRequest)(nil),                     // 190: nebula.executor.v1.RunScheduledRequest
-	(*RunScheduledResponse)(nil),                    // 191: nebula.executor.v1.RunScheduledResponse
-	(*BeginTrustArtifactRequest)(nil),               // 192: nebula.executor.v1.BeginTrustArtifactRequest
-	(*BeginTrustArtifactResponse)(nil),              // 193: nebula.executor.v1.BeginTrustArtifactResponse
-	(*CommitTrustArtifactRequest)(nil),              // 194: nebula.executor.v1.CommitTrustArtifactRequest
-	(*CommitTrustArtifactResponse)(nil),             // 195: nebula.executor.v1.CommitTrustArtifactResponse
-	(*GetArtifactTrustRequest)(nil),                 // 196: nebula.executor.v1.GetArtifactTrustRequest
-	(*GetArtifactTrustResponse)(nil),                // 197: nebula.executor.v1.GetArtifactTrustResponse
-	(*RegisterModuleRequest)(nil),                   // 198: nebula.executor.v1.RegisterModuleRequest
-	(*ModuleAction)(nil),                            // 199: nebula.executor.v1.ModuleAction
-	(*RegisterModuleResponse)(nil),                  // 200: nebula.executor.v1.RegisterModuleResponse
-	(*AddSignerRequest)(nil),                        // 201: nebula.executor.v1.AddSignerRequest
-	(*AddSignerResponse)(nil),                       // 202: nebula.executor.v1.AddSignerResponse
-	(*RemoveSignerRequest)(nil),                     // 203: nebula.executor.v1.RemoveSignerRequest
-	(*RemoveSignerResponse)(nil),                    // 204: nebula.executor.v1.RemoveSignerResponse
-	(*ConfirmModuleSignerRequest)(nil),              // 205: nebula.executor.v1.ConfirmModuleSignerRequest
-	(*ConfirmModuleSignerResponse)(nil),             // 206: nebula.executor.v1.ConfirmModuleSignerResponse
-	(*ListSignersRequest)(nil),                      // 207: nebula.executor.v1.ListSignersRequest
-	(*Signer)(nil),                                  // 208: nebula.executor.v1.Signer
-	(*ModuleSigner)(nil),                            // 209: nebula.executor.v1.ModuleSigner
-	(*ListSignersResponse)(nil),                     // 210: nebula.executor.v1.ListSignersResponse
-	(*ListEventsRequest)(nil),                       // 211: nebula.executor.v1.ListEventsRequest
-	(*Event)(nil),                                   // 212: nebula.executor.v1.Event
-	(*ListEventsResponse)(nil),                      // 213: nebula.executor.v1.ListEventsResponse
-	(*EventKey)(nil),                                // 214: nebula.executor.v1.EventKey
-	(*BackupExecutorRequest)(nil),                   // 215: nebula.executor.v1.BackupExecutorRequest
-	(*BackupFile)(nil),                              // 216: nebula.executor.v1.BackupFile
-	(*BackupExecutorResponse)(nil),                  // 217: nebula.executor.v1.BackupExecutorResponse
-	(*PVEEndpoint)(nil),                             // 218: nebula.executor.v1.PVEEndpoint
-	(*PVERemoteInfo)(nil),                           // 219: nebula.executor.v1.PVERemoteInfo
-	(*ListPVERemotesRequest)(nil),                   // 220: nebula.executor.v1.ListPVERemotesRequest
-	(*ListPVERemotesResponse)(nil),                  // 221: nebula.executor.v1.ListPVERemotesResponse
-	(*PVEReadNodeParams)(nil),                       // 222: nebula.executor.v1.PVEReadNodeParams
-	(*PVEReadGuestParams)(nil),                      // 223: nebula.executor.v1.PVEReadGuestParams
-	(*PVEReadMetricsParams)(nil),                    // 224: nebula.executor.v1.PVEReadMetricsParams
-	(*ReadPVERequest)(nil),                          // 225: nebula.executor.v1.ReadPVERequest
-	(*ReadPVEResponse)(nil),                         // 226: nebula.executor.v1.ReadPVEResponse
-	(*PVENodes)(nil),                                // 227: nebula.executor.v1.PVENodes
-	(*PVENode)(nil),                                 // 228: nebula.executor.v1.PVENode
-	(*PVENodeDetails)(nil),                          // 229: nebula.executor.v1.PVENodeDetails
-	(*PVEGuests)(nil),                               // 230: nebula.executor.v1.PVEGuests
-	(*PVEGuest)(nil),                                // 231: nebula.executor.v1.PVEGuest
-	(*PVEGuestConfig)(nil),                          // 232: nebula.executor.v1.PVEGuestConfig
-	(*PVEGuestNIC)(nil),                             // 233: nebula.executor.v1.PVEGuestNIC
-	(*PVEDisk)(nil),                                 // 234: nebula.executor.v1.PVEDisk
-	(*PVEHostPCI)(nil),                              // 235: nebula.executor.v1.PVEHostPCI
-	(*PVECloudInitIP)(nil),                          // 236: nebula.executor.v1.PVECloudInitIP
-	(*PVEGuestCapabilities)(nil),                    // 237: nebula.executor.v1.PVEGuestCapabilities
-	(*PVEGuestAgent)(nil),                           // 238: nebula.executor.v1.PVEGuestAgent
-	(*PVEFilesystem)(nil),                           // 239: nebula.executor.v1.PVEFilesystem
-	(*PVEStorages)(nil),                             // 240: nebula.executor.v1.PVEStorages
-	(*PVEStorage)(nil),                              // 241: nebula.executor.v1.PVEStorage
-	(*PVESnapshots)(nil),                            // 242: nebula.executor.v1.PVESnapshots
-	(*PVESnapshot)(nil),                             // 243: nebula.executor.v1.PVESnapshot
-	(*PVECluster)(nil),                              // 244: nebula.executor.v1.PVECluster
-	(*PVEClusterNode)(nil),                          // 245: nebula.executor.v1.PVEClusterNode
-	(*PVEHAResource)(nil),                           // 246: nebula.executor.v1.PVEHAResource
-	(*PVETasks)(nil),                                // 247: nebula.executor.v1.PVETasks
-	(*PVETask)(nil),                                 // 248: nebula.executor.v1.PVETask
-	(*PVEBackups)(nil),                              // 249: nebula.executor.v1.PVEBackups
-	(*PVEBackupEvidence)(nil),                       // 250: nebula.executor.v1.PVEBackupEvidence
-	(*PVEMetrics)(nil),                              // 251: nebula.executor.v1.PVEMetrics
-	(*PVEMetric)(nil),                               // 252: nebula.executor.v1.PVEMetric
-	(*ProbePVERemoteRequest)(nil),                   // 253: nebula.executor.v1.ProbePVERemoteRequest
-	(*PVEProbeEndpoint)(nil),                        // 254: nebula.executor.v1.PVEProbeEndpoint
-	(*ProbePVERemoteResponse)(nil),                  // 255: nebula.executor.v1.ProbePVERemoteResponse
-	(*PVEAdminRemote)(nil),                          // 256: nebula.executor.v1.PVEAdminRemote
-	(*AddPVERemoteRequest)(nil),                     // 257: nebula.executor.v1.AddPVERemoteRequest
-	(*RotatePVETokenRequest)(nil),                   // 258: nebula.executor.v1.RotatePVETokenRequest
-	(*RemovePVERemoteRequest)(nil),                  // 259: nebula.executor.v1.RemovePVERemoteRequest
-	(*ListPVEAdminRemotesRequest)(nil),              // 260: nebula.executor.v1.ListPVEAdminRemotesRequest
-	(*SetPVERemoteSiteRequest)(nil),                 // 261: nebula.executor.v1.SetPVERemoteSiteRequest
-	(*SetPVERemoteSiteResponse)(nil),                // 262: nebula.executor.v1.SetPVERemoteSiteResponse
-	(*ListPVEAdminRemotesResponse)(nil),             // 263: nebula.executor.v1.ListPVEAdminRemotesResponse
-	(*ProposePVERepinRequest)(nil),                  // 264: nebula.executor.v1.ProposePVERepinRequest
-	(*CommitPVERepinRequest)(nil),                   // 265: nebula.executor.v1.CommitPVERepinRequest
-	(*AddPVERemoteResponse)(nil),                    // 266: nebula.executor.v1.AddPVERemoteResponse
-	(*RotatePVETokenResponse)(nil),                  // 267: nebula.executor.v1.RotatePVETokenResponse
-	(*RemovePVERemoteResponse)(nil),                 // 268: nebula.executor.v1.RemovePVERemoteResponse
-	(*CommitPVERepinResponse)(nil),                  // 269: nebula.executor.v1.CommitPVERepinResponse
-	(*ProposePVERepinResponse)(nil),                 // 270: nebula.executor.v1.ProposePVERepinResponse
-	(*PVEGuestPowerTarget)(nil),                     // 271: nebula.executor.v1.PVEGuestPowerTarget
-	(*ProposePVEGuestPowerRequest)(nil),             // 272: nebula.executor.v1.ProposePVEGuestPowerRequest
-	(*ProposePVEGuestPowerResponse)(nil),            // 273: nebula.executor.v1.ProposePVEGuestPowerResponse
-	(*CommitPVEGuestPowerRequest)(nil),              // 274: nebula.executor.v1.CommitPVEGuestPowerRequest
-	(*PVEGuestPowerStep)(nil),                       // 275: nebula.executor.v1.PVEGuestPowerStep
-	(*CommitPVEGuestPowerResponse)(nil),             // 276: nebula.executor.v1.CommitPVEGuestPowerResponse
-	(*PVEGuestSnapshotTarget)(nil),                  // 277: nebula.executor.v1.PVEGuestSnapshotTarget
-	(*PVESnapshotIdentity)(nil),                     // 278: nebula.executor.v1.PVESnapshotIdentity
-	(*ProposePVEGuestSnapshotRequest)(nil),          // 279: nebula.executor.v1.ProposePVEGuestSnapshotRequest
-	(*ProposePVEGuestSnapshotResponse)(nil),         // 280: nebula.executor.v1.ProposePVEGuestSnapshotResponse
-	(*CommitPVEGuestSnapshotRequest)(nil),           // 281: nebula.executor.v1.CommitPVEGuestSnapshotRequest
-	(*CommitPVEGuestSnapshotResponse)(nil),          // 282: nebula.executor.v1.CommitPVEGuestSnapshotResponse
-	(*PVETemplateRef)(nil),                          // 283: nebula.executor.v1.PVETemplateRef
-	(*PVEProvisionNIC)(nil),                         // 284: nebula.executor.v1.PVEProvisionNIC
-	(*PVEIPAMBinding)(nil),                          // 285: nebula.executor.v1.PVEIPAMBinding
-	(*PVEGuestProvisionSpec)(nil),                   // 286: nebula.executor.v1.PVEGuestProvisionSpec
-	(*ProposePVEGuestProvisionRequest)(nil),         // 287: nebula.executor.v1.ProposePVEGuestProvisionRequest
-	(*ProposePVEGuestProvisionResponse)(nil),        // 288: nebula.executor.v1.ProposePVEGuestProvisionResponse
-	(*CommitPVEGuestProvisionRequest)(nil),          // 289: nebula.executor.v1.CommitPVEGuestProvisionRequest
-	(*CommitPVEGuestProvisionResponse)(nil),         // 290: nebula.executor.v1.CommitPVEGuestProvisionResponse
-	(*ProposeReadGrantRequest)(nil),                 // 291: nebula.executor.v1.ProposeReadGrantRequest
-	(*ProposeReadGrantResponse)(nil),                // 292: nebula.executor.v1.ProposeReadGrantResponse
-	(*CommitReadGrantRequest)(nil),                  // 293: nebula.executor.v1.CommitReadGrantRequest
-	(*ReadGrant)(nil),                               // 294: nebula.executor.v1.ReadGrant
-	(*CommitReadGrantResponse)(nil),                 // 295: nebula.executor.v1.CommitReadGrantResponse
-	(*ListPendingReadGrantsRequest)(nil),            // 296: nebula.executor.v1.ListPendingReadGrantsRequest
-	(*PendingReadGrant)(nil),                        // 297: nebula.executor.v1.PendingReadGrant
-	(*ListPendingReadGrantsResponse)(nil),           // 298: nebula.executor.v1.ListPendingReadGrantsResponse
-	(*ApproveReadGrantCLIRequest)(nil),              // 299: nebula.executor.v1.ApproveReadGrantCLIRequest
-	(*ApproveReadGrantCLIResponse)(nil),             // 300: nebula.executor.v1.ApproveReadGrantCLIResponse
-	(*ListReadGrantsRequest)(nil),                   // 301: nebula.executor.v1.ListReadGrantsRequest
-	(*ListReadGrantsResponse)(nil),                  // 302: nebula.executor.v1.ListReadGrantsResponse
-	(*RevokeReadGrantRequest)(nil),                  // 303: nebula.executor.v1.RevokeReadGrantRequest
-	(*RevokeReadGrantResponse)(nil),                 // 304: nebula.executor.v1.RevokeReadGrantResponse
-	(*RunReadGrantRequest)(nil),                     // 305: nebula.executor.v1.RunReadGrantRequest
-	(*RunReadGrantResponse)(nil),                    // 306: nebula.executor.v1.RunReadGrantResponse
-	(*BatchPlan)(nil),                               // 307: nebula.executor.v1.BatchPlan
-	(*BatchMember)(nil),                             // 308: nebula.executor.v1.BatchMember
-	(*BatchStage)(nil),                              // 309: nebula.executor.v1.BatchStage
-	(*BatchDependency)(nil),                         // 310: nebula.executor.v1.BatchDependency
-	(*BatchFinding)(nil),                            // 311: nebula.executor.v1.BatchFinding
-	(*BatchMemberFindings)(nil),                     // 312: nebula.executor.v1.BatchMemberFindings
-	(*BatchMemberInput)(nil),                        // 313: nebula.executor.v1.BatchMemberInput
-	(*ProposeBatchRequest)(nil),                     // 314: nebula.executor.v1.ProposeBatchRequest
-	(*ProposeBatchResponse)(nil),                    // 315: nebula.executor.v1.ProposeBatchResponse
-	(*CommitBatchRequest)(nil),                      // 316: nebula.executor.v1.CommitBatchRequest
-	(*CommitBatchResponse)(nil),                     // 317: nebula.executor.v1.CommitBatchResponse
-	(*ReviewBatchRequest)(nil),                      // 318: nebula.executor.v1.ReviewBatchRequest
-	(*ReviewBatchResponse)(nil),                     // 319: nebula.executor.v1.ReviewBatchResponse
-	(*ApproveBatchCLIRequest)(nil),                  // 320: nebula.executor.v1.ApproveBatchCLIRequest
-	(*ApproveBatchCLIResponse)(nil),                 // 321: nebula.executor.v1.ApproveBatchCLIResponse
-	(*GetBatchStatusRequest)(nil),                   // 322: nebula.executor.v1.GetBatchStatusRequest
-	(*GetBatchStatusResponse)(nil),                  // 323: nebula.executor.v1.GetBatchStatusResponse
-	(*GetBatchCredentialVersionsRequest)(nil),       // 324: nebula.executor.v1.GetBatchCredentialVersionsRequest
-	(*BatchCredentialVersion)(nil),                  // 325: nebula.executor.v1.BatchCredentialVersion
-	(*GetBatchCredentialVersionsResponse)(nil),      // 326: nebula.executor.v1.GetBatchCredentialVersionsResponse
-	(*RunBatchMemberRequest)(nil),                   // 327: nebula.executor.v1.RunBatchMemberRequest
-	(*RunBatchMemberResponse)(nil),                  // 328: nebula.executor.v1.RunBatchMemberResponse
-	(*BuiltinDiffLine)(nil),                         // 329: nebula.executor.v1.BuiltinDiffLine
-	(*BuiltinScanFinding)(nil),                      // 330: nebula.executor.v1.BuiltinScanFinding
-	(*BuiltinActionReview)(nil),                     // 331: nebula.executor.v1.BuiltinActionReview
-	(*BuiltinModuleReview)(nil),                     // 332: nebula.executor.v1.BuiltinModuleReview
-	(*ReviewBuiltinTrustRequest)(nil),               // 333: nebula.executor.v1.ReviewBuiltinTrustRequest
-	(*ReviewBuiltinTrustResponse)(nil),              // 334: nebula.executor.v1.ReviewBuiltinTrustResponse
-	(*CommitBuiltinTrustRequest)(nil),               // 335: nebula.executor.v1.CommitBuiltinTrustRequest
-	(*BuiltinTrustTuple)(nil),                       // 336: nebula.executor.v1.BuiltinTrustTuple
-	(*UnpinBuiltinVersionRequest)(nil),              // 337: nebula.executor.v1.UnpinBuiltinVersionRequest
-	(*UnpinBuiltinVersionResponse)(nil),             // 338: nebula.executor.v1.UnpinBuiltinVersionResponse
-	(*CommitBuiltinTrustResponse)(nil),              // 339: nebula.executor.v1.CommitBuiltinTrustResponse
-	(*GetBuiltinTrustStatusRequest)(nil),            // 340: nebula.executor.v1.GetBuiltinTrustStatusRequest
-	(*BuiltinTrustEntry)(nil),                       // 341: nebula.executor.v1.BuiltinTrustEntry
-	(*GetBuiltinTrustStatusResponse)(nil),           // 342: nebula.executor.v1.GetBuiltinTrustStatusResponse
-	(*ReleaseRoot)(nil),                             // 343: nebula.executor.v1.ReleaseRoot
-	(*ReviewRootRotationRequest)(nil),               // 344: nebula.executor.v1.ReviewRootRotationRequest
-	(*ReviewRootRotationResponse)(nil),              // 345: nebula.executor.v1.ReviewRootRotationResponse
-	(*CommitRootRotationRequest)(nil),               // 346: nebula.executor.v1.CommitRootRotationRequest
-	(*CommitRootRotationResponse)(nil),              // 347: nebula.executor.v1.CommitRootRotationResponse
-	(*AddPrivateRegistryRequest)(nil),               // 348: nebula.executor.v1.AddPrivateRegistryRequest
-	(*AddPrivateRegistryResponse)(nil),              // 349: nebula.executor.v1.AddPrivateRegistryResponse
-	(*RotatePrivateRegistryCredentialRequest)(nil),  // 350: nebula.executor.v1.RotatePrivateRegistryCredentialRequest
-	(*RotatePrivateRegistryCredentialResponse)(nil), // 351: nebula.executor.v1.RotatePrivateRegistryCredentialResponse
-	(*RemovePrivateRegistryRequest)(nil),            // 352: nebula.executor.v1.RemovePrivateRegistryRequest
-	(*RemovePrivateRegistryResponse)(nil),           // 353: nebula.executor.v1.RemovePrivateRegistryResponse
-	(*ListPrivateRegistriesRequest)(nil),            // 354: nebula.executor.v1.ListPrivateRegistriesRequest
-	(*ListPrivateRegistriesResponse)(nil),           // 355: nebula.executor.v1.ListPrivateRegistriesResponse
-	(*PrivateRegistryInfo)(nil),                     // 356: nebula.executor.v1.PrivateRegistryInfo
-	(*ReadPrivateRegistryRequest)(nil),              // 357: nebula.executor.v1.ReadPrivateRegistryRequest
-	(*ReadPrivateRegistryResponse)(nil),             // 358: nebula.executor.v1.ReadPrivateRegistryResponse
-	(*PutContainerDefinitionRequest)(nil),           // 359: nebula.executor.v1.PutContainerDefinitionRequest
-	(*ContainerDefinitionEnv)(nil),                  // 360: nebula.executor.v1.ContainerDefinitionEnv
-	(*PutContainerDefinitionResponse)(nil),          // 361: nebula.executor.v1.PutContainerDefinitionResponse
-	(*RemoveContainerDefinitionRequest)(nil),        // 362: nebula.executor.v1.RemoveContainerDefinitionRequest
-	(*RemoveContainerDefinitionResponse)(nil),       // 363: nebula.executor.v1.RemoveContainerDefinitionResponse
-	(*ListContainerDefinitionsRequest)(nil),         // 364: nebula.executor.v1.ListContainerDefinitionsRequest
-	(*ListContainerDefinitionsResponse)(nil),        // 365: nebula.executor.v1.ListContainerDefinitionsResponse
-	(*ContainerDefinitionInfo)(nil),                 // 366: nebula.executor.v1.ContainerDefinitionInfo
-	(*ListContainerRecreationsRequest)(nil),         // 367: nebula.executor.v1.ListContainerRecreationsRequest
-	(*ListContainerRecreationsResponse)(nil),        // 368: nebula.executor.v1.ListContainerRecreationsResponse
-	(*ContainerRecreationInfo)(nil),                 // 369: nebula.executor.v1.ContainerRecreationInfo
-	(*ContainerRecreationVerdict)(nil),              // 370: nebula.executor.v1.ContainerRecreationVerdict
-	(*ContainerRecreationImage)(nil),                // 371: nebula.executor.v1.ContainerRecreationImage
-	(*ContainerRecreationTarget)(nil),               // 372: nebula.executor.v1.ContainerRecreationTarget
-	(*ContainerRecreationDependency)(nil),           // 373: nebula.executor.v1.ContainerRecreationDependency
-	(*ContainerRecreationDependencyMember)(nil),     // 374: nebula.executor.v1.ContainerRecreationDependencyMember
-	(*ContainerRecoveryPlanInfo)(nil),               // 375: nebula.executor.v1.ContainerRecoveryPlanInfo
-	(*SetContainerRecoveryPlanRequest)(nil),         // 376: nebula.executor.v1.SetContainerRecoveryPlanRequest
-	(*SetContainerRecoveryPlanResponse)(nil),        // 377: nebula.executor.v1.SetContainerRecoveryPlanResponse
-	(*ClearContainerRecoveryPlanRequest)(nil),       // 378: nebula.executor.v1.ClearContainerRecoveryPlanRequest
-	(*ClearContainerRecoveryPlanResponse)(nil),      // 379: nebula.executor.v1.ClearContainerRecoveryPlanResponse
-	(*ResolveContainerRecreationRequest)(nil),       // 380: nebula.executor.v1.ResolveContainerRecreationRequest
-	(*ResolveContainerRecreationResponse)(nil),      // 381: nebula.executor.v1.ResolveContainerRecreationResponse
-	(*NetDeviceInfo)(nil),                           // 382: nebula.executor.v1.NetDeviceInfo
-	(*NetDeviceProbeFacts)(nil),                     // 383: nebula.executor.v1.NetDeviceProbeFacts
-	(*ProbeNetDeviceRequest)(nil),                   // 384: nebula.executor.v1.ProbeNetDeviceRequest
-	(*ProbeNetDeviceResponse)(nil),                  // 385: nebula.executor.v1.ProbeNetDeviceResponse
-	(*RegisterNetDeviceRequest)(nil),                // 386: nebula.executor.v1.RegisterNetDeviceRequest
-	(*RegisterNetDeviceResponse)(nil),               // 387: nebula.executor.v1.RegisterNetDeviceResponse
-	(*SetNetDeviceCredentialRequest)(nil),           // 388: nebula.executor.v1.SetNetDeviceCredentialRequest
-	(*SetNetDeviceCredentialResponse)(nil),          // 389: nebula.executor.v1.SetNetDeviceCredentialResponse
-	(*RotateNetDeviceCredentialRequest)(nil),        // 390: nebula.executor.v1.RotateNetDeviceCredentialRequest
-	(*RotateNetDeviceCredentialResponse)(nil),       // 391: nebula.executor.v1.RotateNetDeviceCredentialResponse
-	(*ProposeNetDeviceRepinRequest)(nil),            // 392: nebula.executor.v1.ProposeNetDeviceRepinRequest
-	(*ProposeNetDeviceRepinResponse)(nil),           // 393: nebula.executor.v1.ProposeNetDeviceRepinResponse
-	(*CommitNetDeviceRepinRequest)(nil),             // 394: nebula.executor.v1.CommitNetDeviceRepinRequest
-	(*CommitNetDeviceRepinResponse)(nil),            // 395: nebula.executor.v1.CommitNetDeviceRepinResponse
-	(*BlockNetDeviceRequest)(nil),                   // 396: nebula.executor.v1.BlockNetDeviceRequest
-	(*BlockNetDeviceResponse)(nil),                  // 397: nebula.executor.v1.BlockNetDeviceResponse
-	(*UnblockNetDeviceRequest)(nil),                 // 398: nebula.executor.v1.UnblockNetDeviceRequest
-	(*UnblockNetDeviceResponse)(nil),                // 399: nebula.executor.v1.UnblockNetDeviceResponse
-	(*RemoveNetDeviceRequest)(nil),                  // 400: nebula.executor.v1.RemoveNetDeviceRequest
-	(*RemoveNetDeviceResponse)(nil),                 // 401: nebula.executor.v1.RemoveNetDeviceResponse
-	(*ListNetDevicesRequest)(nil),                   // 402: nebula.executor.v1.ListNetDevicesRequest
-	(*ListNetDevicesResponse)(nil),                  // 403: nebula.executor.v1.ListNetDevicesResponse
-	(*ReadNetDeviceRequest)(nil),                    // 404: nebula.executor.v1.ReadNetDeviceRequest
-	(*ReadNetDeviceResponse)(nil),                   // 405: nebula.executor.v1.ReadNetDeviceResponse
-	(*NetDevCBSVersion)(nil),                        // 406: nebula.executor.v1.NetDevCBSVersion
-	(*NetDevVLAN)(nil),                              // 407: nebula.executor.v1.NetDevVLAN
-	(*NetDevVLANs)(nil),                             // 408: nebula.executor.v1.NetDevVLANs
-	(*NetDevPort)(nil),                              // 409: nebula.executor.v1.NetDevPort
-	(*NetDevPorts)(nil),                             // 410: nebula.executor.v1.NetDevPorts
-	(*NetDevMACEntry)(nil),                          // 411: nebula.executor.v1.NetDevMACEntry
-	(*NetDevMACTable)(nil),                          // 412: nebula.executor.v1.NetDevMACTable
-	(*NetDevLLDPNeighbor)(nil),                      // 413: nebula.executor.v1.NetDevLLDPNeighbor
-	(*NetDevLLDPNeighbors)(nil),                     // 414: nebula.executor.v1.NetDevLLDPNeighbors
-	(*NetDevZone)(nil),                              // 415: nebula.executor.v1.NetDevZone
-	(*NetDevZones)(nil),                             // 416: nebula.executor.v1.NetDevZones
-	(*NetDevAddressObject)(nil),                     // 417: nebula.executor.v1.NetDevAddressObject
-	(*NetDevServiceObject)(nil),                     // 418: nebula.executor.v1.NetDevServiceObject
-	(*NetDevGroup)(nil),                             // 419: nebula.executor.v1.NetDevGroup
-	(*NetDevObjects)(nil),                           // 420: nebula.executor.v1.NetDevObjects
-	(*NetDevSecurityRule)(nil),                      // 421: nebula.executor.v1.NetDevSecurityRule
-	(*NetDevSecurityRules)(nil),                     // 422: nebula.executor.v1.NetDevSecurityRules
-	(*NetDevNATRule)(nil),                           // 423: nebula.executor.v1.NetDevNATRule
-	(*NetDevNATRules)(nil),                          // 424: nebula.executor.v1.NetDevNATRules
-	(*NetDevRuleHitCount)(nil),                      // 425: nebula.executor.v1.NetDevRuleHitCount
-	(*NetDevRuleHitCounts)(nil),                     // 426: nebula.executor.v1.NetDevRuleHitCounts
-	(*GetIntegrityStatusRequest)(nil),               // 427: nebula.executor.v1.GetIntegrityStatusRequest
-	(*IntegrityDeviation)(nil),                      // 428: nebula.executor.v1.IntegrityDeviation
-	(*IntegrityRun)(nil),                            // 429: nebula.executor.v1.IntegrityRun
-	(*IntegrityFinding)(nil),                        // 430: nebula.executor.v1.IntegrityFinding
-	(*GetIntegrityStatusResponse)(nil),              // 431: nebula.executor.v1.GetIntegrityStatusResponse
-	(*AckIntegrityFindingRequest)(nil),              // 432: nebula.executor.v1.AckIntegrityFindingRequest
-	(*AckIntegrityFindingResponse)(nil),             // 433: nebula.executor.v1.AckIntegrityFindingResponse
-	(*CompareBaselineDigestRequest)(nil),            // 434: nebula.executor.v1.CompareBaselineDigestRequest
-	(*CompareBaselineDigestResponse)(nil),           // 435: nebula.executor.v1.CompareBaselineDigestResponse
-	nil,                                             // 436: nebula.executor.v1.RegisterModuleRequest.ScriptsEntry
+	(BaselineEntryType)(0),                          // 27: nebula.executor.v1.BaselineEntryType
+	(BaselineHashKind)(0),                           // 28: nebula.executor.v1.BaselineHashKind
+	(BaselineDigestComparison)(0),                   // 29: nebula.executor.v1.BaselineDigestComparison
+	(*Target)(nil),                                  // 30: nebula.executor.v1.Target
+	(*ExecutionRequest)(nil),                        // 31: nebula.executor.v1.ExecutionRequest
+	(*GetStatusRequest)(nil),                        // 32: nebula.executor.v1.GetStatusRequest
+	(*GetStatusResponse)(nil),                       // 33: nebula.executor.v1.GetStatusResponse
+	(*ProposeExecutionRequest)(nil),                 // 34: nebula.executor.v1.ProposeExecutionRequest
+	(*ProposeExecutionResponse)(nil),                // 35: nebula.executor.v1.ProposeExecutionResponse
+	(*SubmitAssertionRequest)(nil),                  // 36: nebula.executor.v1.SubmitAssertionRequest
+	(*SubmitAssertionResponse)(nil),                 // 37: nebula.executor.v1.SubmitAssertionResponse
+	(*BeginPrivilegedSessionRequest)(nil),           // 38: nebula.executor.v1.BeginPrivilegedSessionRequest
+	(*BeginPrivilegedSessionResponse)(nil),          // 39: nebula.executor.v1.BeginPrivilegedSessionResponse
+	(*CompletePrivilegedSessionRequest)(nil),        // 40: nebula.executor.v1.CompletePrivilegedSessionRequest
+	(*CompletePrivilegedSessionResponse)(nil),       // 41: nebula.executor.v1.CompletePrivilegedSessionResponse
+	(*GetSessionStateRequest)(nil),                  // 42: nebula.executor.v1.GetSessionStateRequest
+	(*GetSessionStateResponse)(nil),                 // 43: nebula.executor.v1.GetSessionStateResponse
+	(*AuthorizeRunRequest)(nil),                     // 44: nebula.executor.v1.AuthorizeRunRequest
+	(*AuthorizeRunResponse)(nil),                    // 45: nebula.executor.v1.AuthorizeRunResponse
+	(*UnlockRequest)(nil),                           // 46: nebula.executor.v1.UnlockRequest
+	(*UnlockResponse)(nil),                          // 47: nebula.executor.v1.UnlockResponse
+	(*LockRequest)(nil),                             // 48: nebula.executor.v1.LockRequest
+	(*LockResponse)(nil),                            // 49: nebula.executor.v1.LockResponse
+	(*ListPendingRequest)(nil),                      // 50: nebula.executor.v1.ListPendingRequest
+	(*PendingPermit)(nil),                           // 51: nebula.executor.v1.PendingPermit
+	(*ScannerFinding)(nil),                          // 52: nebula.executor.v1.ScannerFinding
+	(*PlanStage)(nil),                               // 53: nebula.executor.v1.PlanStage
+	(*Gate)(nil),                                    // 54: nebula.executor.v1.Gate
+	(*HostOutcome)(nil),                             // 55: nebula.executor.v1.HostOutcome
+	(*StageStatus)(nil),                             // 56: nebula.executor.v1.StageStatus
+	(*Rollout)(nil),                                 // 57: nebula.executor.v1.Rollout
+	(*BeginGateRequest)(nil),                        // 58: nebula.executor.v1.BeginGateRequest
+	(*BeginGateResponse)(nil),                       // 59: nebula.executor.v1.BeginGateResponse
+	(*CommitGateRequest)(nil),                       // 60: nebula.executor.v1.CommitGateRequest
+	(*CommitGateResponse)(nil),                      // 61: nebula.executor.v1.CommitGateResponse
+	(*AbortRolloutRequest)(nil),                     // 62: nebula.executor.v1.AbortRolloutRequest
+	(*AbortRolloutResponse)(nil),                    // 63: nebula.executor.v1.AbortRolloutResponse
+	(*GetRolloutRequest)(nil),                       // 64: nebula.executor.v1.GetRolloutRequest
+	(*GetRolloutResponse)(nil),                      // 65: nebula.executor.v1.GetRolloutResponse
+	(*ApproveGateCLIRequest)(nil),                   // 66: nebula.executor.v1.ApproveGateCLIRequest
+	(*ApproveGateCLIResponse)(nil),                  // 67: nebula.executor.v1.ApproveGateCLIResponse
+	(*ListPendingResponse)(nil),                     // 68: nebula.executor.v1.ListPendingResponse
+	(*ApproveCLIRequest)(nil),                       // 69: nebula.executor.v1.ApproveCLIRequest
+	(*ApproveCLIResponse)(nil),                      // 70: nebula.executor.v1.ApproveCLIResponse
+	(*GetPermitStateRequest)(nil),                   // 71: nebula.executor.v1.GetPermitStateRequest
+	(*GetPermitStateResponse)(nil),                  // 72: nebula.executor.v1.GetPermitStateResponse
+	(*TrustArtifactRequest)(nil),                    // 73: nebula.executor.v1.TrustArtifactRequest
+	(*TrustArtifactResponse)(nil),                   // 74: nebula.executor.v1.TrustArtifactResponse
+	(*UntrustArtifactRequest)(nil),                  // 75: nebula.executor.v1.UntrustArtifactRequest
+	(*UntrustArtifactResponse)(nil),                 // 76: nebula.executor.v1.UntrustArtifactResponse
+	(*ListTrustedArtifactsRequest)(nil),             // 77: nebula.executor.v1.ListTrustedArtifactsRequest
+	(*TrustedArtifact)(nil),                         // 78: nebula.executor.v1.TrustedArtifact
+	(*ListTrustedArtifactsResponse)(nil),            // 79: nebula.executor.v1.ListTrustedArtifactsResponse
+	(*SetHostCriticalityRequest)(nil),               // 80: nebula.executor.v1.SetHostCriticalityRequest
+	(*SetHostCriticalityResponse)(nil),              // 81: nebula.executor.v1.SetHostCriticalityResponse
+	(*ListHostCriticalityRequest)(nil),              // 82: nebula.executor.v1.ListHostCriticalityRequest
+	(*HostCriticality)(nil),                         // 83: nebula.executor.v1.HostCriticality
+	(*ListHostCriticalityResponse)(nil),             // 84: nebula.executor.v1.ListHostCriticalityResponse
+	(*CreateRegistrationCodeRequest)(nil),           // 85: nebula.executor.v1.CreateRegistrationCodeRequest
+	(*CreateRegistrationCodeResponse)(nil),          // 86: nebula.executor.v1.CreateRegistrationCodeResponse
+	(*BeginRegistrationRequest)(nil),                // 87: nebula.executor.v1.BeginRegistrationRequest
+	(*BeginRegistrationResponse)(nil),               // 88: nebula.executor.v1.BeginRegistrationResponse
+	(*FinishRegistrationRequest)(nil),               // 89: nebula.executor.v1.FinishRegistrationRequest
+	(*FinishRegistrationResponse)(nil),              // 90: nebula.executor.v1.FinishRegistrationResponse
+	(*ListWebAuthnCredentialsRequest)(nil),          // 91: nebula.executor.v1.ListWebAuthnCredentialsRequest
+	(*WebAuthnCredential)(nil),                      // 92: nebula.executor.v1.WebAuthnCredential
+	(*ListWebAuthnCredentialsResponse)(nil),         // 93: nebula.executor.v1.ListWebAuthnCredentialsResponse
+	(*RemoveWebAuthnCredentialRequest)(nil),         // 94: nebula.executor.v1.RemoveWebAuthnCredentialRequest
+	(*RemoveWebAuthnCredentialResponse)(nil),        // 95: nebula.executor.v1.RemoveWebAuthnCredentialResponse
+	(*ProbeHostKeyRequest)(nil),                     // 96: nebula.executor.v1.ProbeHostKeyRequest
+	(*ProbeHostKeyResponse)(nil),                    // 97: nebula.executor.v1.ProbeHostKeyResponse
+	(*PinHostKeyRequest)(nil),                       // 98: nebula.executor.v1.PinHostKeyRequest
+	(*HostKeyPin)(nil),                              // 99: nebula.executor.v1.HostKeyPin
+	(*PinHostKeyResponse)(nil),                      // 100: nebula.executor.v1.PinHostKeyResponse
+	(*UnpinHostKeyRequest)(nil),                     // 101: nebula.executor.v1.UnpinHostKeyRequest
+	(*UnpinHostKeyResponse)(nil),                    // 102: nebula.executor.v1.UnpinHostKeyResponse
+	(*ListHostKeysRequest)(nil),                     // 103: nebula.executor.v1.ListHostKeysRequest
+	(*ListHostKeysResponse)(nil),                    // 104: nebula.executor.v1.ListHostKeysResponse
+	(*ProposeRepinRequest)(nil),                     // 105: nebula.executor.v1.ProposeRepinRequest
+	(*ProposeRepinResponse)(nil),                    // 106: nebula.executor.v1.ProposeRepinResponse
+	(*CommitRepinRequest)(nil),                      // 107: nebula.executor.v1.CommitRepinRequest
+	(*CommitRepinResponse)(nil),                     // 108: nebula.executor.v1.CommitRepinResponse
+	(*EnrollHost)(nil),                              // 109: nebula.executor.v1.EnrollHost
+	(*ProposeEnrollRequest)(nil),                    // 110: nebula.executor.v1.ProposeEnrollRequest
+	(*ProposeEnrollResponse)(nil),                   // 111: nebula.executor.v1.ProposeEnrollResponse
+	(*CommitEnrollRequest)(nil),                     // 112: nebula.executor.v1.CommitEnrollRequest
+	(*EnrollResult)(nil),                            // 113: nebula.executor.v1.EnrollResult
+	(*CommitEnrollResponse)(nil),                    // 114: nebula.executor.v1.CommitEnrollResponse
+	(*CreateEnrollOfferRequest)(nil),                // 115: nebula.executor.v1.CreateEnrollOfferRequest
+	(*NetBirdOfferPermitInfo)(nil),                  // 116: nebula.executor.v1.NetBirdOfferPermitInfo
+	(*CreateEnrollOfferResponse)(nil),               // 117: nebula.executor.v1.CreateEnrollOfferResponse
+	(*FetchEnrollScriptRequest)(nil),                // 118: nebula.executor.v1.FetchEnrollScriptRequest
+	(*ShowEnrollScriptRequest)(nil),                 // 119: nebula.executor.v1.ShowEnrollScriptRequest
+	(*DownloadEnrollScriptRequest)(nil),             // 120: nebula.executor.v1.DownloadEnrollScriptRequest
+	(*FetchEnrollScriptResponse)(nil),               // 121: nebula.executor.v1.FetchEnrollScriptResponse
+	(*ShowEnrollScriptResponse)(nil),                // 122: nebula.executor.v1.ShowEnrollScriptResponse
+	(*DownloadEnrollScriptResponse)(nil),            // 123: nebula.executor.v1.DownloadEnrollScriptResponse
+	(*RevokeEnrollOfferRequest)(nil),                // 124: nebula.executor.v1.RevokeEnrollOfferRequest
+	(*RevokeEnrollOfferResponse)(nil),               // 125: nebula.executor.v1.RevokeEnrollOfferResponse
+	(*ListEnrollOffersRequest)(nil),                 // 126: nebula.executor.v1.ListEnrollOffersRequest
+	(*EnrollOfferInfo)(nil),                         // 127: nebula.executor.v1.EnrollOfferInfo
+	(*ListEnrollOffersResponse)(nil),                // 128: nebula.executor.v1.ListEnrollOffersResponse
+	(*SubmitPairingCodeRequest)(nil),                // 129: nebula.executor.v1.SubmitPairingCodeRequest
+	(*PairedPermitInfo)(nil),                        // 130: nebula.executor.v1.PairedPermitInfo
+	(*SubmitPairingCodeResponse)(nil),               // 131: nebula.executor.v1.SubmitPairingCodeResponse
+	(*CommitPairedEnrollRequest)(nil),               // 132: nebula.executor.v1.CommitPairedEnrollRequest
+	(*CommitPairedEnrollResponse)(nil),              // 133: nebula.executor.v1.CommitPairedEnrollResponse
+	(*GuestJoinTarget)(nil),                         // 134: nebula.executor.v1.GuestJoinTarget
+	(*ProposeGuestJoinRequest)(nil),                 // 135: nebula.executor.v1.ProposeGuestJoinRequest
+	(*ProposeGuestJoinResponse)(nil),                // 136: nebula.executor.v1.ProposeGuestJoinResponse
+	(*CommitGuestJoinRequest)(nil),                  // 137: nebula.executor.v1.CommitGuestJoinRequest
+	(*CommitGuestJoinResponse)(nil),                 // 138: nebula.executor.v1.CommitGuestJoinResponse
+	(*TestConnectionRequest)(nil),                   // 139: nebula.executor.v1.TestConnectionRequest
+	(*ConnectionAttempt)(nil),                       // 140: nebula.executor.v1.ConnectionAttempt
+	(*TestConnectionResponse)(nil),                  // 141: nebula.executor.v1.TestConnectionResponse
+	(*BeginLoginRequest)(nil),                       // 142: nebula.executor.v1.BeginLoginRequest
+	(*BeginLoginResponse)(nil),                      // 143: nebula.executor.v1.BeginLoginResponse
+	(*FinishLoginRequest)(nil),                      // 144: nebula.executor.v1.FinishLoginRequest
+	(*FinishLoginResponse)(nil),                     // 145: nebula.executor.v1.FinishLoginResponse
+	(*CheckCredentialRequest)(nil),                  // 146: nebula.executor.v1.CheckCredentialRequest
+	(*CheckCredentialResponse)(nil),                 // 147: nebula.executor.v1.CheckCredentialResponse
+	(*BeginTOTPSetupRequest)(nil),                   // 148: nebula.executor.v1.BeginTOTPSetupRequest
+	(*BeginTOTPSetupResponse)(nil),                  // 149: nebula.executor.v1.BeginTOTPSetupResponse
+	(*ConfirmTOTPSetupRequest)(nil),                 // 150: nebula.executor.v1.ConfirmTOTPSetupRequest
+	(*ConfirmTOTPSetupResponse)(nil),                // 151: nebula.executor.v1.ConfirmTOTPSetupResponse
+	(*RemoveTOTPRequest)(nil),                       // 152: nebula.executor.v1.RemoveTOTPRequest
+	(*RemoveTOTPResponse)(nil),                      // 153: nebula.executor.v1.RemoveTOTPResponse
+	(*GetTOTPStatusRequest)(nil),                    // 154: nebula.executor.v1.GetTOTPStatusRequest
+	(*GetTOTPStatusResponse)(nil),                   // 155: nebula.executor.v1.GetTOTPStatusResponse
+	(*RecoveryLoginRequest)(nil),                    // 156: nebula.executor.v1.RecoveryLoginRequest
+	(*RecoveryLoginResponse)(nil),                   // 157: nebula.executor.v1.RecoveryLoginResponse
+	(*FinishRecoveryRequest)(nil),                   // 158: nebula.executor.v1.FinishRecoveryRequest
+	(*FinishRecoveryResponse)(nil),                  // 159: nebula.executor.v1.FinishRecoveryResponse
+	(*GetSSHPublicKeyRequest)(nil),                  // 160: nebula.executor.v1.GetSSHPublicKeyRequest
+	(*GetSSHPublicKeyResponse)(nil),                 // 161: nebula.executor.v1.GetSSHPublicKeyResponse
+	(*InitVaultRequest)(nil),                        // 162: nebula.executor.v1.InitVaultRequest
+	(*InitVaultResponse)(nil),                       // 163: nebula.executor.v1.InitVaultResponse
+	(*SetSecretRequest)(nil),                        // 164: nebula.executor.v1.SetSecretRequest
+	(*SetSecretResponse)(nil),                       // 165: nebula.executor.v1.SetSecretResponse
+	(*ListSecretsRequest)(nil),                      // 166: nebula.executor.v1.ListSecretsRequest
+	(*SecretInfo)(nil),                              // 167: nebula.executor.v1.SecretInfo
+	(*ListSecretsResponse)(nil),                     // 168: nebula.executor.v1.ListSecretsResponse
+	(*DeleteSecretRequest)(nil),                     // 169: nebula.executor.v1.DeleteSecretRequest
+	(*DeleteSecretResponse)(nil),                    // 170: nebula.executor.v1.DeleteSecretResponse
+	(*RunAttachedRequest)(nil),                      // 171: nebula.executor.v1.RunAttachedRequest
+	(*RunAttachedResponse)(nil),                     // 172: nebula.executor.v1.RunAttachedResponse
+	(*StartDurableRequest)(nil),                     // 173: nebula.executor.v1.StartDurableRequest
+	(*StartDurableResponse)(nil),                    // 174: nebula.executor.v1.StartDurableResponse
+	(*GetRunResponse)(nil),                          // 175: nebula.executor.v1.GetRunResponse
+	(*GetRunRequest)(nil),                           // 176: nebula.executor.v1.GetRunRequest
+	(*RunStatus)(nil),                               // 177: nebula.executor.v1.RunStatus
+	(*ProposeScheduleGrantRequest)(nil),             // 178: nebula.executor.v1.ProposeScheduleGrantRequest
+	(*ProposeScheduleGrantResponse)(nil),            // 179: nebula.executor.v1.ProposeScheduleGrantResponse
+	(*CommitScheduleGrantRequest)(nil),              // 180: nebula.executor.v1.CommitScheduleGrantRequest
+	(*ScheduleGrant)(nil),                           // 181: nebula.executor.v1.ScheduleGrant
+	(*CommitScheduleGrantResponse)(nil),             // 182: nebula.executor.v1.CommitScheduleGrantResponse
+	(*ListPendingScheduleGrantsRequest)(nil),        // 183: nebula.executor.v1.ListPendingScheduleGrantsRequest
+	(*PendingScheduleGrant)(nil),                    // 184: nebula.executor.v1.PendingScheduleGrant
+	(*ListPendingScheduleGrantsResponse)(nil),       // 185: nebula.executor.v1.ListPendingScheduleGrantsResponse
+	(*ApproveScheduleGrantCLIRequest)(nil),          // 186: nebula.executor.v1.ApproveScheduleGrantCLIRequest
+	(*ApproveScheduleGrantCLIResponse)(nil),         // 187: nebula.executor.v1.ApproveScheduleGrantCLIResponse
+	(*ListScheduleGrantsRequest)(nil),               // 188: nebula.executor.v1.ListScheduleGrantsRequest
+	(*ListScheduleGrantsResponse)(nil),              // 189: nebula.executor.v1.ListScheduleGrantsResponse
+	(*RevokeScheduleGrantRequest)(nil),              // 190: nebula.executor.v1.RevokeScheduleGrantRequest
+	(*RevokeScheduleGrantResponse)(nil),             // 191: nebula.executor.v1.RevokeScheduleGrantResponse
+	(*RunScheduledRequest)(nil),                     // 192: nebula.executor.v1.RunScheduledRequest
+	(*RunScheduledResponse)(nil),                    // 193: nebula.executor.v1.RunScheduledResponse
+	(*BeginTrustArtifactRequest)(nil),               // 194: nebula.executor.v1.BeginTrustArtifactRequest
+	(*BeginTrustArtifactResponse)(nil),              // 195: nebula.executor.v1.BeginTrustArtifactResponse
+	(*CommitTrustArtifactRequest)(nil),              // 196: nebula.executor.v1.CommitTrustArtifactRequest
+	(*CommitTrustArtifactResponse)(nil),             // 197: nebula.executor.v1.CommitTrustArtifactResponse
+	(*GetArtifactTrustRequest)(nil),                 // 198: nebula.executor.v1.GetArtifactTrustRequest
+	(*GetArtifactTrustResponse)(nil),                // 199: nebula.executor.v1.GetArtifactTrustResponse
+	(*RegisterModuleRequest)(nil),                   // 200: nebula.executor.v1.RegisterModuleRequest
+	(*ModuleAction)(nil),                            // 201: nebula.executor.v1.ModuleAction
+	(*RegisterModuleResponse)(nil),                  // 202: nebula.executor.v1.RegisterModuleResponse
+	(*AddSignerRequest)(nil),                        // 203: nebula.executor.v1.AddSignerRequest
+	(*AddSignerResponse)(nil),                       // 204: nebula.executor.v1.AddSignerResponse
+	(*RemoveSignerRequest)(nil),                     // 205: nebula.executor.v1.RemoveSignerRequest
+	(*RemoveSignerResponse)(nil),                    // 206: nebula.executor.v1.RemoveSignerResponse
+	(*ConfirmModuleSignerRequest)(nil),              // 207: nebula.executor.v1.ConfirmModuleSignerRequest
+	(*ConfirmModuleSignerResponse)(nil),             // 208: nebula.executor.v1.ConfirmModuleSignerResponse
+	(*ListSignersRequest)(nil),                      // 209: nebula.executor.v1.ListSignersRequest
+	(*Signer)(nil),                                  // 210: nebula.executor.v1.Signer
+	(*ModuleSigner)(nil),                            // 211: nebula.executor.v1.ModuleSigner
+	(*ListSignersResponse)(nil),                     // 212: nebula.executor.v1.ListSignersResponse
+	(*ListEventsRequest)(nil),                       // 213: nebula.executor.v1.ListEventsRequest
+	(*Event)(nil),                                   // 214: nebula.executor.v1.Event
+	(*ListEventsResponse)(nil),                      // 215: nebula.executor.v1.ListEventsResponse
+	(*EventKey)(nil),                                // 216: nebula.executor.v1.EventKey
+	(*BackupExecutorRequest)(nil),                   // 217: nebula.executor.v1.BackupExecutorRequest
+	(*BackupFile)(nil),                              // 218: nebula.executor.v1.BackupFile
+	(*BackupExecutorResponse)(nil),                  // 219: nebula.executor.v1.BackupExecutorResponse
+	(*PVEEndpoint)(nil),                             // 220: nebula.executor.v1.PVEEndpoint
+	(*PVERemoteInfo)(nil),                           // 221: nebula.executor.v1.PVERemoteInfo
+	(*ListPVERemotesRequest)(nil),                   // 222: nebula.executor.v1.ListPVERemotesRequest
+	(*ListPVERemotesResponse)(nil),                  // 223: nebula.executor.v1.ListPVERemotesResponse
+	(*PVEReadNodeParams)(nil),                       // 224: nebula.executor.v1.PVEReadNodeParams
+	(*PVEReadGuestParams)(nil),                      // 225: nebula.executor.v1.PVEReadGuestParams
+	(*PVEReadMetricsParams)(nil),                    // 226: nebula.executor.v1.PVEReadMetricsParams
+	(*ReadPVERequest)(nil),                          // 227: nebula.executor.v1.ReadPVERequest
+	(*ReadPVEResponse)(nil),                         // 228: nebula.executor.v1.ReadPVEResponse
+	(*PVENodes)(nil),                                // 229: nebula.executor.v1.PVENodes
+	(*PVENode)(nil),                                 // 230: nebula.executor.v1.PVENode
+	(*PVENodeDetails)(nil),                          // 231: nebula.executor.v1.PVENodeDetails
+	(*PVEGuests)(nil),                               // 232: nebula.executor.v1.PVEGuests
+	(*PVEGuest)(nil),                                // 233: nebula.executor.v1.PVEGuest
+	(*PVEGuestConfig)(nil),                          // 234: nebula.executor.v1.PVEGuestConfig
+	(*PVEGuestNIC)(nil),                             // 235: nebula.executor.v1.PVEGuestNIC
+	(*PVEDisk)(nil),                                 // 236: nebula.executor.v1.PVEDisk
+	(*PVEHostPCI)(nil),                              // 237: nebula.executor.v1.PVEHostPCI
+	(*PVECloudInitIP)(nil),                          // 238: nebula.executor.v1.PVECloudInitIP
+	(*PVEGuestCapabilities)(nil),                    // 239: nebula.executor.v1.PVEGuestCapabilities
+	(*PVEGuestAgent)(nil),                           // 240: nebula.executor.v1.PVEGuestAgent
+	(*PVEFilesystem)(nil),                           // 241: nebula.executor.v1.PVEFilesystem
+	(*PVEStorages)(nil),                             // 242: nebula.executor.v1.PVEStorages
+	(*PVEStorage)(nil),                              // 243: nebula.executor.v1.PVEStorage
+	(*PVESnapshots)(nil),                            // 244: nebula.executor.v1.PVESnapshots
+	(*PVESnapshot)(nil),                             // 245: nebula.executor.v1.PVESnapshot
+	(*PVECluster)(nil),                              // 246: nebula.executor.v1.PVECluster
+	(*PVEClusterNode)(nil),                          // 247: nebula.executor.v1.PVEClusterNode
+	(*PVEHAResource)(nil),                           // 248: nebula.executor.v1.PVEHAResource
+	(*PVETasks)(nil),                                // 249: nebula.executor.v1.PVETasks
+	(*PVETask)(nil),                                 // 250: nebula.executor.v1.PVETask
+	(*PVEBackups)(nil),                              // 251: nebula.executor.v1.PVEBackups
+	(*PVEBackupEvidence)(nil),                       // 252: nebula.executor.v1.PVEBackupEvidence
+	(*PVEMetrics)(nil),                              // 253: nebula.executor.v1.PVEMetrics
+	(*PVEMetric)(nil),                               // 254: nebula.executor.v1.PVEMetric
+	(*ProbePVERemoteRequest)(nil),                   // 255: nebula.executor.v1.ProbePVERemoteRequest
+	(*PVEProbeEndpoint)(nil),                        // 256: nebula.executor.v1.PVEProbeEndpoint
+	(*ProbePVERemoteResponse)(nil),                  // 257: nebula.executor.v1.ProbePVERemoteResponse
+	(*PVEAdminRemote)(nil),                          // 258: nebula.executor.v1.PVEAdminRemote
+	(*AddPVERemoteRequest)(nil),                     // 259: nebula.executor.v1.AddPVERemoteRequest
+	(*RotatePVETokenRequest)(nil),                   // 260: nebula.executor.v1.RotatePVETokenRequest
+	(*RemovePVERemoteRequest)(nil),                  // 261: nebula.executor.v1.RemovePVERemoteRequest
+	(*ListPVEAdminRemotesRequest)(nil),              // 262: nebula.executor.v1.ListPVEAdminRemotesRequest
+	(*SetPVERemoteSiteRequest)(nil),                 // 263: nebula.executor.v1.SetPVERemoteSiteRequest
+	(*SetPVERemoteSiteResponse)(nil),                // 264: nebula.executor.v1.SetPVERemoteSiteResponse
+	(*ListPVEAdminRemotesResponse)(nil),             // 265: nebula.executor.v1.ListPVEAdminRemotesResponse
+	(*ProposePVERepinRequest)(nil),                  // 266: nebula.executor.v1.ProposePVERepinRequest
+	(*CommitPVERepinRequest)(nil),                   // 267: nebula.executor.v1.CommitPVERepinRequest
+	(*AddPVERemoteResponse)(nil),                    // 268: nebula.executor.v1.AddPVERemoteResponse
+	(*RotatePVETokenResponse)(nil),                  // 269: nebula.executor.v1.RotatePVETokenResponse
+	(*RemovePVERemoteResponse)(nil),                 // 270: nebula.executor.v1.RemovePVERemoteResponse
+	(*CommitPVERepinResponse)(nil),                  // 271: nebula.executor.v1.CommitPVERepinResponse
+	(*ProposePVERepinResponse)(nil),                 // 272: nebula.executor.v1.ProposePVERepinResponse
+	(*PVEGuestPowerTarget)(nil),                     // 273: nebula.executor.v1.PVEGuestPowerTarget
+	(*ProposePVEGuestPowerRequest)(nil),             // 274: nebula.executor.v1.ProposePVEGuestPowerRequest
+	(*ProposePVEGuestPowerResponse)(nil),            // 275: nebula.executor.v1.ProposePVEGuestPowerResponse
+	(*CommitPVEGuestPowerRequest)(nil),              // 276: nebula.executor.v1.CommitPVEGuestPowerRequest
+	(*PVEGuestPowerStep)(nil),                       // 277: nebula.executor.v1.PVEGuestPowerStep
+	(*CommitPVEGuestPowerResponse)(nil),             // 278: nebula.executor.v1.CommitPVEGuestPowerResponse
+	(*PVEGuestSnapshotTarget)(nil),                  // 279: nebula.executor.v1.PVEGuestSnapshotTarget
+	(*PVESnapshotIdentity)(nil),                     // 280: nebula.executor.v1.PVESnapshotIdentity
+	(*ProposePVEGuestSnapshotRequest)(nil),          // 281: nebula.executor.v1.ProposePVEGuestSnapshotRequest
+	(*ProposePVEGuestSnapshotResponse)(nil),         // 282: nebula.executor.v1.ProposePVEGuestSnapshotResponse
+	(*CommitPVEGuestSnapshotRequest)(nil),           // 283: nebula.executor.v1.CommitPVEGuestSnapshotRequest
+	(*CommitPVEGuestSnapshotResponse)(nil),          // 284: nebula.executor.v1.CommitPVEGuestSnapshotResponse
+	(*PVETemplateRef)(nil),                          // 285: nebula.executor.v1.PVETemplateRef
+	(*PVEProvisionNIC)(nil),                         // 286: nebula.executor.v1.PVEProvisionNIC
+	(*PVEIPAMBinding)(nil),                          // 287: nebula.executor.v1.PVEIPAMBinding
+	(*PVEGuestProvisionSpec)(nil),                   // 288: nebula.executor.v1.PVEGuestProvisionSpec
+	(*ProposePVEGuestProvisionRequest)(nil),         // 289: nebula.executor.v1.ProposePVEGuestProvisionRequest
+	(*ProposePVEGuestProvisionResponse)(nil),        // 290: nebula.executor.v1.ProposePVEGuestProvisionResponse
+	(*CommitPVEGuestProvisionRequest)(nil),          // 291: nebula.executor.v1.CommitPVEGuestProvisionRequest
+	(*CommitPVEGuestProvisionResponse)(nil),         // 292: nebula.executor.v1.CommitPVEGuestProvisionResponse
+	(*ProposeReadGrantRequest)(nil),                 // 293: nebula.executor.v1.ProposeReadGrantRequest
+	(*ProposeReadGrantResponse)(nil),                // 294: nebula.executor.v1.ProposeReadGrantResponse
+	(*CommitReadGrantRequest)(nil),                  // 295: nebula.executor.v1.CommitReadGrantRequest
+	(*ReadGrant)(nil),                               // 296: nebula.executor.v1.ReadGrant
+	(*CommitReadGrantResponse)(nil),                 // 297: nebula.executor.v1.CommitReadGrantResponse
+	(*ListPendingReadGrantsRequest)(nil),            // 298: nebula.executor.v1.ListPendingReadGrantsRequest
+	(*PendingReadGrant)(nil),                        // 299: nebula.executor.v1.PendingReadGrant
+	(*ListPendingReadGrantsResponse)(nil),           // 300: nebula.executor.v1.ListPendingReadGrantsResponse
+	(*ApproveReadGrantCLIRequest)(nil),              // 301: nebula.executor.v1.ApproveReadGrantCLIRequest
+	(*ApproveReadGrantCLIResponse)(nil),             // 302: nebula.executor.v1.ApproveReadGrantCLIResponse
+	(*ListReadGrantsRequest)(nil),                   // 303: nebula.executor.v1.ListReadGrantsRequest
+	(*ListReadGrantsResponse)(nil),                  // 304: nebula.executor.v1.ListReadGrantsResponse
+	(*RevokeReadGrantRequest)(nil),                  // 305: nebula.executor.v1.RevokeReadGrantRequest
+	(*RevokeReadGrantResponse)(nil),                 // 306: nebula.executor.v1.RevokeReadGrantResponse
+	(*RunReadGrantRequest)(nil),                     // 307: nebula.executor.v1.RunReadGrantRequest
+	(*RunReadGrantResponse)(nil),                    // 308: nebula.executor.v1.RunReadGrantResponse
+	(*BatchPlan)(nil),                               // 309: nebula.executor.v1.BatchPlan
+	(*BatchMember)(nil),                             // 310: nebula.executor.v1.BatchMember
+	(*BatchStage)(nil),                              // 311: nebula.executor.v1.BatchStage
+	(*BatchDependency)(nil),                         // 312: nebula.executor.v1.BatchDependency
+	(*BatchFinding)(nil),                            // 313: nebula.executor.v1.BatchFinding
+	(*BatchMemberFindings)(nil),                     // 314: nebula.executor.v1.BatchMemberFindings
+	(*BatchMemberInput)(nil),                        // 315: nebula.executor.v1.BatchMemberInput
+	(*ProposeBatchRequest)(nil),                     // 316: nebula.executor.v1.ProposeBatchRequest
+	(*ProposeBatchResponse)(nil),                    // 317: nebula.executor.v1.ProposeBatchResponse
+	(*CommitBatchRequest)(nil),                      // 318: nebula.executor.v1.CommitBatchRequest
+	(*CommitBatchResponse)(nil),                     // 319: nebula.executor.v1.CommitBatchResponse
+	(*ReviewBatchRequest)(nil),                      // 320: nebula.executor.v1.ReviewBatchRequest
+	(*ReviewBatchResponse)(nil),                     // 321: nebula.executor.v1.ReviewBatchResponse
+	(*ApproveBatchCLIRequest)(nil),                  // 322: nebula.executor.v1.ApproveBatchCLIRequest
+	(*ApproveBatchCLIResponse)(nil),                 // 323: nebula.executor.v1.ApproveBatchCLIResponse
+	(*GetBatchStatusRequest)(nil),                   // 324: nebula.executor.v1.GetBatchStatusRequest
+	(*GetBatchStatusResponse)(nil),                  // 325: nebula.executor.v1.GetBatchStatusResponse
+	(*GetBatchCredentialVersionsRequest)(nil),       // 326: nebula.executor.v1.GetBatchCredentialVersionsRequest
+	(*BatchCredentialVersion)(nil),                  // 327: nebula.executor.v1.BatchCredentialVersion
+	(*GetBatchCredentialVersionsResponse)(nil),      // 328: nebula.executor.v1.GetBatchCredentialVersionsResponse
+	(*RunBatchMemberRequest)(nil),                   // 329: nebula.executor.v1.RunBatchMemberRequest
+	(*RunBatchMemberResponse)(nil),                  // 330: nebula.executor.v1.RunBatchMemberResponse
+	(*BuiltinDiffLine)(nil),                         // 331: nebula.executor.v1.BuiltinDiffLine
+	(*BuiltinScanFinding)(nil),                      // 332: nebula.executor.v1.BuiltinScanFinding
+	(*BuiltinActionReview)(nil),                     // 333: nebula.executor.v1.BuiltinActionReview
+	(*BuiltinModuleReview)(nil),                     // 334: nebula.executor.v1.BuiltinModuleReview
+	(*ReviewBuiltinTrustRequest)(nil),               // 335: nebula.executor.v1.ReviewBuiltinTrustRequest
+	(*ReviewBuiltinTrustResponse)(nil),              // 336: nebula.executor.v1.ReviewBuiltinTrustResponse
+	(*CommitBuiltinTrustRequest)(nil),               // 337: nebula.executor.v1.CommitBuiltinTrustRequest
+	(*BuiltinTrustTuple)(nil),                       // 338: nebula.executor.v1.BuiltinTrustTuple
+	(*UnpinBuiltinVersionRequest)(nil),              // 339: nebula.executor.v1.UnpinBuiltinVersionRequest
+	(*UnpinBuiltinVersionResponse)(nil),             // 340: nebula.executor.v1.UnpinBuiltinVersionResponse
+	(*CommitBuiltinTrustResponse)(nil),              // 341: nebula.executor.v1.CommitBuiltinTrustResponse
+	(*GetBuiltinTrustStatusRequest)(nil),            // 342: nebula.executor.v1.GetBuiltinTrustStatusRequest
+	(*BuiltinTrustEntry)(nil),                       // 343: nebula.executor.v1.BuiltinTrustEntry
+	(*GetBuiltinTrustStatusResponse)(nil),           // 344: nebula.executor.v1.GetBuiltinTrustStatusResponse
+	(*ReleaseRoot)(nil),                             // 345: nebula.executor.v1.ReleaseRoot
+	(*ReviewRootRotationRequest)(nil),               // 346: nebula.executor.v1.ReviewRootRotationRequest
+	(*ReviewRootRotationResponse)(nil),              // 347: nebula.executor.v1.ReviewRootRotationResponse
+	(*CommitRootRotationRequest)(nil),               // 348: nebula.executor.v1.CommitRootRotationRequest
+	(*CommitRootRotationResponse)(nil),              // 349: nebula.executor.v1.CommitRootRotationResponse
+	(*AddPrivateRegistryRequest)(nil),               // 350: nebula.executor.v1.AddPrivateRegistryRequest
+	(*AddPrivateRegistryResponse)(nil),              // 351: nebula.executor.v1.AddPrivateRegistryResponse
+	(*RotatePrivateRegistryCredentialRequest)(nil),  // 352: nebula.executor.v1.RotatePrivateRegistryCredentialRequest
+	(*RotatePrivateRegistryCredentialResponse)(nil), // 353: nebula.executor.v1.RotatePrivateRegistryCredentialResponse
+	(*RemovePrivateRegistryRequest)(nil),            // 354: nebula.executor.v1.RemovePrivateRegistryRequest
+	(*RemovePrivateRegistryResponse)(nil),           // 355: nebula.executor.v1.RemovePrivateRegistryResponse
+	(*ListPrivateRegistriesRequest)(nil),            // 356: nebula.executor.v1.ListPrivateRegistriesRequest
+	(*ListPrivateRegistriesResponse)(nil),           // 357: nebula.executor.v1.ListPrivateRegistriesResponse
+	(*PrivateRegistryInfo)(nil),                     // 358: nebula.executor.v1.PrivateRegistryInfo
+	(*ReadPrivateRegistryRequest)(nil),              // 359: nebula.executor.v1.ReadPrivateRegistryRequest
+	(*ReadPrivateRegistryResponse)(nil),             // 360: nebula.executor.v1.ReadPrivateRegistryResponse
+	(*PutContainerDefinitionRequest)(nil),           // 361: nebula.executor.v1.PutContainerDefinitionRequest
+	(*ContainerDefinitionEnv)(nil),                  // 362: nebula.executor.v1.ContainerDefinitionEnv
+	(*PutContainerDefinitionResponse)(nil),          // 363: nebula.executor.v1.PutContainerDefinitionResponse
+	(*RemoveContainerDefinitionRequest)(nil),        // 364: nebula.executor.v1.RemoveContainerDefinitionRequest
+	(*RemoveContainerDefinitionResponse)(nil),       // 365: nebula.executor.v1.RemoveContainerDefinitionResponse
+	(*ListContainerDefinitionsRequest)(nil),         // 366: nebula.executor.v1.ListContainerDefinitionsRequest
+	(*ListContainerDefinitionsResponse)(nil),        // 367: nebula.executor.v1.ListContainerDefinitionsResponse
+	(*ContainerDefinitionInfo)(nil),                 // 368: nebula.executor.v1.ContainerDefinitionInfo
+	(*ListContainerRecreationsRequest)(nil),         // 369: nebula.executor.v1.ListContainerRecreationsRequest
+	(*ListContainerRecreationsResponse)(nil),        // 370: nebula.executor.v1.ListContainerRecreationsResponse
+	(*ContainerRecreationInfo)(nil),                 // 371: nebula.executor.v1.ContainerRecreationInfo
+	(*ContainerRecreationVerdict)(nil),              // 372: nebula.executor.v1.ContainerRecreationVerdict
+	(*ContainerRecreationImage)(nil),                // 373: nebula.executor.v1.ContainerRecreationImage
+	(*ContainerRecreationTarget)(nil),               // 374: nebula.executor.v1.ContainerRecreationTarget
+	(*ContainerRecreationDependency)(nil),           // 375: nebula.executor.v1.ContainerRecreationDependency
+	(*ContainerRecreationDependencyMember)(nil),     // 376: nebula.executor.v1.ContainerRecreationDependencyMember
+	(*ContainerRecoveryPlanInfo)(nil),               // 377: nebula.executor.v1.ContainerRecoveryPlanInfo
+	(*SetContainerRecoveryPlanRequest)(nil),         // 378: nebula.executor.v1.SetContainerRecoveryPlanRequest
+	(*SetContainerRecoveryPlanResponse)(nil),        // 379: nebula.executor.v1.SetContainerRecoveryPlanResponse
+	(*ClearContainerRecoveryPlanRequest)(nil),       // 380: nebula.executor.v1.ClearContainerRecoveryPlanRequest
+	(*ClearContainerRecoveryPlanResponse)(nil),      // 381: nebula.executor.v1.ClearContainerRecoveryPlanResponse
+	(*ResolveContainerRecreationRequest)(nil),       // 382: nebula.executor.v1.ResolveContainerRecreationRequest
+	(*ResolveContainerRecreationResponse)(nil),      // 383: nebula.executor.v1.ResolveContainerRecreationResponse
+	(*NetDeviceInfo)(nil),                           // 384: nebula.executor.v1.NetDeviceInfo
+	(*NetDeviceProbeFacts)(nil),                     // 385: nebula.executor.v1.NetDeviceProbeFacts
+	(*ProbeNetDeviceRequest)(nil),                   // 386: nebula.executor.v1.ProbeNetDeviceRequest
+	(*ProbeNetDeviceResponse)(nil),                  // 387: nebula.executor.v1.ProbeNetDeviceResponse
+	(*RegisterNetDeviceRequest)(nil),                // 388: nebula.executor.v1.RegisterNetDeviceRequest
+	(*RegisterNetDeviceResponse)(nil),               // 389: nebula.executor.v1.RegisterNetDeviceResponse
+	(*SetNetDeviceCredentialRequest)(nil),           // 390: nebula.executor.v1.SetNetDeviceCredentialRequest
+	(*SetNetDeviceCredentialResponse)(nil),          // 391: nebula.executor.v1.SetNetDeviceCredentialResponse
+	(*RotateNetDeviceCredentialRequest)(nil),        // 392: nebula.executor.v1.RotateNetDeviceCredentialRequest
+	(*RotateNetDeviceCredentialResponse)(nil),       // 393: nebula.executor.v1.RotateNetDeviceCredentialResponse
+	(*ProposeNetDeviceRepinRequest)(nil),            // 394: nebula.executor.v1.ProposeNetDeviceRepinRequest
+	(*ProposeNetDeviceRepinResponse)(nil),           // 395: nebula.executor.v1.ProposeNetDeviceRepinResponse
+	(*CommitNetDeviceRepinRequest)(nil),             // 396: nebula.executor.v1.CommitNetDeviceRepinRequest
+	(*CommitNetDeviceRepinResponse)(nil),            // 397: nebula.executor.v1.CommitNetDeviceRepinResponse
+	(*BlockNetDeviceRequest)(nil),                   // 398: nebula.executor.v1.BlockNetDeviceRequest
+	(*BlockNetDeviceResponse)(nil),                  // 399: nebula.executor.v1.BlockNetDeviceResponse
+	(*UnblockNetDeviceRequest)(nil),                 // 400: nebula.executor.v1.UnblockNetDeviceRequest
+	(*UnblockNetDeviceResponse)(nil),                // 401: nebula.executor.v1.UnblockNetDeviceResponse
+	(*RemoveNetDeviceRequest)(nil),                  // 402: nebula.executor.v1.RemoveNetDeviceRequest
+	(*RemoveNetDeviceResponse)(nil),                 // 403: nebula.executor.v1.RemoveNetDeviceResponse
+	(*ListNetDevicesRequest)(nil),                   // 404: nebula.executor.v1.ListNetDevicesRequest
+	(*ListNetDevicesResponse)(nil),                  // 405: nebula.executor.v1.ListNetDevicesResponse
+	(*ReadNetDeviceRequest)(nil),                    // 406: nebula.executor.v1.ReadNetDeviceRequest
+	(*ReadNetDeviceResponse)(nil),                   // 407: nebula.executor.v1.ReadNetDeviceResponse
+	(*NetDevCBSVersion)(nil),                        // 408: nebula.executor.v1.NetDevCBSVersion
+	(*NetDevVLAN)(nil),                              // 409: nebula.executor.v1.NetDevVLAN
+	(*NetDevVLANs)(nil),                             // 410: nebula.executor.v1.NetDevVLANs
+	(*NetDevPort)(nil),                              // 411: nebula.executor.v1.NetDevPort
+	(*NetDevPorts)(nil),                             // 412: nebula.executor.v1.NetDevPorts
+	(*NetDevMACEntry)(nil),                          // 413: nebula.executor.v1.NetDevMACEntry
+	(*NetDevMACTable)(nil),                          // 414: nebula.executor.v1.NetDevMACTable
+	(*NetDevLLDPNeighbor)(nil),                      // 415: nebula.executor.v1.NetDevLLDPNeighbor
+	(*NetDevLLDPNeighbors)(nil),                     // 416: nebula.executor.v1.NetDevLLDPNeighbors
+	(*NetDevZone)(nil),                              // 417: nebula.executor.v1.NetDevZone
+	(*NetDevZones)(nil),                             // 418: nebula.executor.v1.NetDevZones
+	(*NetDevAddressObject)(nil),                     // 419: nebula.executor.v1.NetDevAddressObject
+	(*NetDevServiceObject)(nil),                     // 420: nebula.executor.v1.NetDevServiceObject
+	(*NetDevGroup)(nil),                             // 421: nebula.executor.v1.NetDevGroup
+	(*NetDevObjects)(nil),                           // 422: nebula.executor.v1.NetDevObjects
+	(*NetDevSecurityRule)(nil),                      // 423: nebula.executor.v1.NetDevSecurityRule
+	(*NetDevSecurityRules)(nil),                     // 424: nebula.executor.v1.NetDevSecurityRules
+	(*NetDevNATRule)(nil),                           // 425: nebula.executor.v1.NetDevNATRule
+	(*NetDevNATRules)(nil),                          // 426: nebula.executor.v1.NetDevNATRules
+	(*NetDevRuleHitCount)(nil),                      // 427: nebula.executor.v1.NetDevRuleHitCount
+	(*NetDevRuleHitCounts)(nil),                     // 428: nebula.executor.v1.NetDevRuleHitCounts
+	(*GetIntegrityStatusRequest)(nil),               // 429: nebula.executor.v1.GetIntegrityStatusRequest
+	(*IntegrityDeviation)(nil),                      // 430: nebula.executor.v1.IntegrityDeviation
+	(*IntegrityRun)(nil),                            // 431: nebula.executor.v1.IntegrityRun
+	(*IntegrityFinding)(nil),                        // 432: nebula.executor.v1.IntegrityFinding
+	(*GetIntegrityStatusResponse)(nil),              // 433: nebula.executor.v1.GetIntegrityStatusResponse
+	(*AckIntegrityFindingRequest)(nil),              // 434: nebula.executor.v1.AckIntegrityFindingRequest
+	(*AckIntegrityFindingResponse)(nil),             // 435: nebula.executor.v1.AckIntegrityFindingResponse
+	(*CompareBaselineListRequest)(nil),              // 436: nebula.executor.v1.CompareBaselineListRequest
+	(*CompareBaselineListHeader)(nil),               // 437: nebula.executor.v1.CompareBaselineListHeader
+	(*BaselineListEntry)(nil),                       // 438: nebula.executor.v1.BaselineListEntry
+	(*BaselineListMount)(nil),                       // 439: nebula.executor.v1.BaselineListMount
+	(*CompareBaselineListResponse)(nil),             // 440: nebula.executor.v1.CompareBaselineListResponse
+	(*BaselineTamperFinding)(nil),                   // 441: nebula.executor.v1.BaselineTamperFinding
+	nil,                                             // 442: nebula.executor.v1.RegisterModuleRequest.ScriptsEntry
 }
 var file_nebula_executor_v1_executor_proto_depIdxs = []int32{
 	0,   // 0: nebula.executor.v1.ExecutionRequest.risk_class:type_name -> nebula.executor.v1.RiskClass
-	28,  // 1: nebula.executor.v1.ExecutionRequest.resolved_targets:type_name -> nebula.executor.v1.Target
+	30,  // 1: nebula.executor.v1.ExecutionRequest.resolved_targets:type_name -> nebula.executor.v1.Target
 	4,   // 2: nebula.executor.v1.GetStatusResponse.vault_state:type_name -> nebula.executor.v1.VaultState
-	29,  // 3: nebula.executor.v1.ProposeExecutionRequest.request:type_name -> nebula.executor.v1.ExecutionRequest
+	31,  // 3: nebula.executor.v1.ProposeExecutionRequest.request:type_name -> nebula.executor.v1.ExecutionRequest
 	1,   // 4: nebula.executor.v1.ProposeExecutionResponse.approval_requirement:type_name -> nebula.executor.v1.ApprovalRequirement
 	2,   // 5: nebula.executor.v1.ProposeExecutionResponse.state:type_name -> nebula.executor.v1.PermitState
 	0,   // 6: nebula.executor.v1.ProposeExecutionResponse.risk_class:type_name -> nebula.executor.v1.RiskClass
 	2,   // 7: nebula.executor.v1.SubmitAssertionResponse.state:type_name -> nebula.executor.v1.PermitState
 	3,   // 8: nebula.executor.v1.UnlockRequest.scope:type_name -> nebula.executor.v1.UnlockScope
 	4,   // 9: nebula.executor.v1.UnlockResponse.vault_state:type_name -> nebula.executor.v1.VaultState
-	29,  // 10: nebula.executor.v1.PendingPermit.request:type_name -> nebula.executor.v1.ExecutionRequest
+	31,  // 10: nebula.executor.v1.PendingPermit.request:type_name -> nebula.executor.v1.ExecutionRequest
 	1,   // 11: nebula.executor.v1.PendingPermit.approval_requirement:type_name -> nebula.executor.v1.ApprovalRequirement
-	51,  // 12: nebula.executor.v1.PendingPermit.stage_plan:type_name -> nebula.executor.v1.PlanStage
-	50,  // 13: nebula.executor.v1.PendingPermit.scanner_findings:type_name -> nebula.executor.v1.ScannerFinding
+	53,  // 12: nebula.executor.v1.PendingPermit.stage_plan:type_name -> nebula.executor.v1.PlanStage
+	52,  // 13: nebula.executor.v1.PendingPermit.scanner_findings:type_name -> nebula.executor.v1.ScannerFinding
 	5,   // 14: nebula.executor.v1.Gate.kind:type_name -> nebula.executor.v1.GateKind
-	51,  // 15: nebula.executor.v1.StageStatus.stage:type_name -> nebula.executor.v1.PlanStage
-	53,  // 16: nebula.executor.v1.StageStatus.outcomes:type_name -> nebula.executor.v1.HostOutcome
-	54,  // 17: nebula.executor.v1.Rollout.stages:type_name -> nebula.executor.v1.StageStatus
+	53,  // 15: nebula.executor.v1.StageStatus.stage:type_name -> nebula.executor.v1.PlanStage
+	55,  // 16: nebula.executor.v1.StageStatus.outcomes:type_name -> nebula.executor.v1.HostOutcome
+	56,  // 17: nebula.executor.v1.Rollout.stages:type_name -> nebula.executor.v1.StageStatus
 	1,   // 18: nebula.executor.v1.Rollout.gate_requirement:type_name -> nebula.executor.v1.ApprovalRequirement
-	52,  // 19: nebula.executor.v1.BeginGateRequest.gate:type_name -> nebula.executor.v1.Gate
+	54,  // 19: nebula.executor.v1.BeginGateRequest.gate:type_name -> nebula.executor.v1.Gate
 	1,   // 20: nebula.executor.v1.BeginGateResponse.approval_requirement:type_name -> nebula.executor.v1.ApprovalRequirement
-	52,  // 21: nebula.executor.v1.CommitGateRequest.gate:type_name -> nebula.executor.v1.Gate
-	55,  // 22: nebula.executor.v1.CommitGateResponse.rollout:type_name -> nebula.executor.v1.Rollout
-	55,  // 23: nebula.executor.v1.AbortRolloutResponse.rollout:type_name -> nebula.executor.v1.Rollout
-	55,  // 24: nebula.executor.v1.GetRolloutResponse.rollout:type_name -> nebula.executor.v1.Rollout
-	52,  // 25: nebula.executor.v1.ApproveGateCLIRequest.gate:type_name -> nebula.executor.v1.Gate
-	55,  // 26: nebula.executor.v1.ApproveGateCLIResponse.rollout:type_name -> nebula.executor.v1.Rollout
-	49,  // 27: nebula.executor.v1.ListPendingResponse.permits:type_name -> nebula.executor.v1.PendingPermit
+	54,  // 21: nebula.executor.v1.CommitGateRequest.gate:type_name -> nebula.executor.v1.Gate
+	57,  // 22: nebula.executor.v1.CommitGateResponse.rollout:type_name -> nebula.executor.v1.Rollout
+	57,  // 23: nebula.executor.v1.AbortRolloutResponse.rollout:type_name -> nebula.executor.v1.Rollout
+	57,  // 24: nebula.executor.v1.GetRolloutResponse.rollout:type_name -> nebula.executor.v1.Rollout
+	54,  // 25: nebula.executor.v1.ApproveGateCLIRequest.gate:type_name -> nebula.executor.v1.Gate
+	57,  // 26: nebula.executor.v1.ApproveGateCLIResponse.rollout:type_name -> nebula.executor.v1.Rollout
+	51,  // 27: nebula.executor.v1.ListPendingResponse.permits:type_name -> nebula.executor.v1.PendingPermit
 	2,   // 28: nebula.executor.v1.ApproveCLIResponse.state:type_name -> nebula.executor.v1.PermitState
 	2,   // 29: nebula.executor.v1.GetPermitStateResponse.state:type_name -> nebula.executor.v1.PermitState
 	0,   // 30: nebula.executor.v1.TrustArtifactRequest.risk_class:type_name -> nebula.executor.v1.RiskClass
 	0,   // 31: nebula.executor.v1.TrustedArtifact.risk_class:type_name -> nebula.executor.v1.RiskClass
-	76,  // 32: nebula.executor.v1.ListTrustedArtifactsResponse.artifacts:type_name -> nebula.executor.v1.TrustedArtifact
+	78,  // 32: nebula.executor.v1.ListTrustedArtifactsResponse.artifacts:type_name -> nebula.executor.v1.TrustedArtifact
 	0,   // 33: nebula.executor.v1.SetHostCriticalityRequest.criticality:type_name -> nebula.executor.v1.RiskClass
 	0,   // 34: nebula.executor.v1.HostCriticality.criticality:type_name -> nebula.executor.v1.RiskClass
-	81,  // 35: nebula.executor.v1.ListHostCriticalityResponse.hosts:type_name -> nebula.executor.v1.HostCriticality
-	90,  // 36: nebula.executor.v1.ListWebAuthnCredentialsResponse.credentials:type_name -> nebula.executor.v1.WebAuthnCredential
+	83,  // 35: nebula.executor.v1.ListHostCriticalityResponse.hosts:type_name -> nebula.executor.v1.HostCriticality
+	92,  // 36: nebula.executor.v1.ListWebAuthnCredentialsResponse.credentials:type_name -> nebula.executor.v1.WebAuthnCredential
 	6,   // 37: nebula.executor.v1.PinHostKeyRequest.source:type_name -> nebula.executor.v1.HostKeySource
 	6,   // 38: nebula.executor.v1.HostKeyPin.source:type_name -> nebula.executor.v1.HostKeySource
-	97,  // 39: nebula.executor.v1.PinHostKeyResponse.pin:type_name -> nebula.executor.v1.HostKeyPin
-	97,  // 40: nebula.executor.v1.ListHostKeysResponse.hosts:type_name -> nebula.executor.v1.HostKeyPin
-	33,  // 41: nebula.executor.v1.ProposeRepinResponse.permit:type_name -> nebula.executor.v1.ProposeExecutionResponse
-	97,  // 42: nebula.executor.v1.ProposeRepinResponse.pin:type_name -> nebula.executor.v1.HostKeyPin
-	97,  // 43: nebula.executor.v1.CommitRepinResponse.pin:type_name -> nebula.executor.v1.HostKeyPin
-	107, // 44: nebula.executor.v1.ProposeEnrollRequest.hosts:type_name -> nebula.executor.v1.EnrollHost
-	33,  // 45: nebula.executor.v1.ProposeEnrollResponse.permit:type_name -> nebula.executor.v1.ProposeExecutionResponse
-	107, // 46: nebula.executor.v1.ProposeEnrollResponse.hosts:type_name -> nebula.executor.v1.EnrollHost
-	107, // 47: nebula.executor.v1.CommitEnrollRequest.hosts:type_name -> nebula.executor.v1.EnrollHost
-	111, // 48: nebula.executor.v1.CommitEnrollResponse.results:type_name -> nebula.executor.v1.EnrollResult
-	114, // 49: nebula.executor.v1.CreateEnrollOfferResponse.netbird_permit:type_name -> nebula.executor.v1.NetBirdOfferPermitInfo
-	125, // 50: nebula.executor.v1.ListEnrollOffersResponse.offers:type_name -> nebula.executor.v1.EnrollOfferInfo
+	99,  // 39: nebula.executor.v1.PinHostKeyResponse.pin:type_name -> nebula.executor.v1.HostKeyPin
+	99,  // 40: nebula.executor.v1.ListHostKeysResponse.hosts:type_name -> nebula.executor.v1.HostKeyPin
+	35,  // 41: nebula.executor.v1.ProposeRepinResponse.permit:type_name -> nebula.executor.v1.ProposeExecutionResponse
+	99,  // 42: nebula.executor.v1.ProposeRepinResponse.pin:type_name -> nebula.executor.v1.HostKeyPin
+	99,  // 43: nebula.executor.v1.CommitRepinResponse.pin:type_name -> nebula.executor.v1.HostKeyPin
+	109, // 44: nebula.executor.v1.ProposeEnrollRequest.hosts:type_name -> nebula.executor.v1.EnrollHost
+	35,  // 45: nebula.executor.v1.ProposeEnrollResponse.permit:type_name -> nebula.executor.v1.ProposeExecutionResponse
+	109, // 46: nebula.executor.v1.ProposeEnrollResponse.hosts:type_name -> nebula.executor.v1.EnrollHost
+	109, // 47: nebula.executor.v1.CommitEnrollRequest.hosts:type_name -> nebula.executor.v1.EnrollHost
+	113, // 48: nebula.executor.v1.CommitEnrollResponse.results:type_name -> nebula.executor.v1.EnrollResult
+	116, // 49: nebula.executor.v1.CreateEnrollOfferResponse.netbird_permit:type_name -> nebula.executor.v1.NetBirdOfferPermitInfo
+	127, // 50: nebula.executor.v1.ListEnrollOffersResponse.offers:type_name -> nebula.executor.v1.EnrollOfferInfo
 	7,   // 51: nebula.executor.v1.SubmitPairingCodeResponse.outcome:type_name -> nebula.executor.v1.PairingOutcome
-	128, // 52: nebula.executor.v1.SubmitPairingCodeResponse.permit:type_name -> nebula.executor.v1.PairedPermitInfo
-	132, // 53: nebula.executor.v1.ProposeGuestJoinRequest.guest:type_name -> nebula.executor.v1.GuestJoinTarget
-	107, // 54: nebula.executor.v1.ProposeGuestJoinRequest.host:type_name -> nebula.executor.v1.EnrollHost
-	107, // 55: nebula.executor.v1.ProposeGuestJoinResponse.host:type_name -> nebula.executor.v1.EnrollHost
-	132, // 56: nebula.executor.v1.ProposeGuestJoinResponse.guest:type_name -> nebula.executor.v1.GuestJoinTarget
-	33,  // 57: nebula.executor.v1.ProposeGuestJoinResponse.permit:type_name -> nebula.executor.v1.ProposeExecutionResponse
-	132, // 58: nebula.executor.v1.CommitGuestJoinRequest.guest:type_name -> nebula.executor.v1.GuestJoinTarget
-	107, // 59: nebula.executor.v1.CommitGuestJoinRequest.host:type_name -> nebula.executor.v1.EnrollHost
-	111, // 60: nebula.executor.v1.CommitGuestJoinResponse.result:type_name -> nebula.executor.v1.EnrollResult
-	132, // 61: nebula.executor.v1.CommitGuestJoinResponse.guest:type_name -> nebula.executor.v1.GuestJoinTarget
-	107, // 62: nebula.executor.v1.CommitGuestJoinResponse.host:type_name -> nebula.executor.v1.EnrollHost
-	138, // 63: nebula.executor.v1.TestConnectionResponse.attempts:type_name -> nebula.executor.v1.ConnectionAttempt
-	165, // 64: nebula.executor.v1.ListSecretsResponse.secrets:type_name -> nebula.executor.v1.SecretInfo
+	130, // 52: nebula.executor.v1.SubmitPairingCodeResponse.permit:type_name -> nebula.executor.v1.PairedPermitInfo
+	134, // 53: nebula.executor.v1.ProposeGuestJoinRequest.guest:type_name -> nebula.executor.v1.GuestJoinTarget
+	109, // 54: nebula.executor.v1.ProposeGuestJoinRequest.host:type_name -> nebula.executor.v1.EnrollHost
+	109, // 55: nebula.executor.v1.ProposeGuestJoinResponse.host:type_name -> nebula.executor.v1.EnrollHost
+	134, // 56: nebula.executor.v1.ProposeGuestJoinResponse.guest:type_name -> nebula.executor.v1.GuestJoinTarget
+	35,  // 57: nebula.executor.v1.ProposeGuestJoinResponse.permit:type_name -> nebula.executor.v1.ProposeExecutionResponse
+	134, // 58: nebula.executor.v1.CommitGuestJoinRequest.guest:type_name -> nebula.executor.v1.GuestJoinTarget
+	109, // 59: nebula.executor.v1.CommitGuestJoinRequest.host:type_name -> nebula.executor.v1.EnrollHost
+	113, // 60: nebula.executor.v1.CommitGuestJoinResponse.result:type_name -> nebula.executor.v1.EnrollResult
+	134, // 61: nebula.executor.v1.CommitGuestJoinResponse.guest:type_name -> nebula.executor.v1.GuestJoinTarget
+	109, // 62: nebula.executor.v1.CommitGuestJoinResponse.host:type_name -> nebula.executor.v1.EnrollHost
+	140, // 63: nebula.executor.v1.TestConnectionResponse.attempts:type_name -> nebula.executor.v1.ConnectionAttempt
+	167, // 64: nebula.executor.v1.ListSecretsResponse.secrets:type_name -> nebula.executor.v1.SecretInfo
 	4,   // 65: nebula.executor.v1.ListSecretsResponse.vault_state:type_name -> nebula.executor.v1.VaultState
-	42,  // 66: nebula.executor.v1.RunAttachedRequest.run:type_name -> nebula.executor.v1.AuthorizeRunRequest
-	42,  // 67: nebula.executor.v1.StartDurableRequest.run:type_name -> nebula.executor.v1.AuthorizeRunRequest
-	175, // 68: nebula.executor.v1.StartDurableResponse.run:type_name -> nebula.executor.v1.RunStatus
-	175, // 69: nebula.executor.v1.GetRunResponse.run:type_name -> nebula.executor.v1.RunStatus
+	44,  // 66: nebula.executor.v1.RunAttachedRequest.run:type_name -> nebula.executor.v1.AuthorizeRunRequest
+	44,  // 67: nebula.executor.v1.StartDurableRequest.run:type_name -> nebula.executor.v1.AuthorizeRunRequest
+	177, // 68: nebula.executor.v1.StartDurableResponse.run:type_name -> nebula.executor.v1.RunStatus
+	177, // 69: nebula.executor.v1.GetRunResponse.run:type_name -> nebula.executor.v1.RunStatus
 	1,   // 70: nebula.executor.v1.ProposeScheduleGrantResponse.approval_requirement:type_name -> nebula.executor.v1.ApprovalRequirement
-	179, // 71: nebula.executor.v1.CommitScheduleGrantResponse.grant:type_name -> nebula.executor.v1.ScheduleGrant
-	182, // 72: nebula.executor.v1.ListPendingScheduleGrantsResponse.grants:type_name -> nebula.executor.v1.PendingScheduleGrant
-	179, // 73: nebula.executor.v1.ApproveScheduleGrantCLIResponse.grant:type_name -> nebula.executor.v1.ScheduleGrant
-	179, // 74: nebula.executor.v1.ListScheduleGrantsResponse.grants:type_name -> nebula.executor.v1.ScheduleGrant
-	42,  // 75: nebula.executor.v1.RunScheduledRequest.run:type_name -> nebula.executor.v1.AuthorizeRunRequest
-	170, // 76: nebula.executor.v1.RunScheduledResponse.result:type_name -> nebula.executor.v1.RunAttachedResponse
+	181, // 71: nebula.executor.v1.CommitScheduleGrantResponse.grant:type_name -> nebula.executor.v1.ScheduleGrant
+	184, // 72: nebula.executor.v1.ListPendingScheduleGrantsResponse.grants:type_name -> nebula.executor.v1.PendingScheduleGrant
+	181, // 73: nebula.executor.v1.ApproveScheduleGrantCLIResponse.grant:type_name -> nebula.executor.v1.ScheduleGrant
+	181, // 74: nebula.executor.v1.ListScheduleGrantsResponse.grants:type_name -> nebula.executor.v1.ScheduleGrant
+	44,  // 75: nebula.executor.v1.RunScheduledRequest.run:type_name -> nebula.executor.v1.AuthorizeRunRequest
+	172, // 76: nebula.executor.v1.RunScheduledResponse.result:type_name -> nebula.executor.v1.RunAttachedResponse
 	0,   // 77: nebula.executor.v1.BeginTrustArtifactRequest.risk_class:type_name -> nebula.executor.v1.RiskClass
 	0,   // 78: nebula.executor.v1.GetArtifactTrustResponse.risk_class:type_name -> nebula.executor.v1.RiskClass
-	436, // 79: nebula.executor.v1.RegisterModuleRequest.scripts:type_name -> nebula.executor.v1.RegisterModuleRequest.ScriptsEntry
+	442, // 79: nebula.executor.v1.RegisterModuleRequest.scripts:type_name -> nebula.executor.v1.RegisterModuleRequest.ScriptsEntry
 	0,   // 80: nebula.executor.v1.ModuleAction.risk_class:type_name -> nebula.executor.v1.RiskClass
-	199, // 81: nebula.executor.v1.RegisterModuleResponse.actions:type_name -> nebula.executor.v1.ModuleAction
-	208, // 82: nebula.executor.v1.ListSignersResponse.signers:type_name -> nebula.executor.v1.Signer
-	209, // 83: nebula.executor.v1.ListSignersResponse.modules:type_name -> nebula.executor.v1.ModuleSigner
-	212, // 84: nebula.executor.v1.ListEventsResponse.events:type_name -> nebula.executor.v1.Event
-	214, // 85: nebula.executor.v1.ListEventsResponse.keys:type_name -> nebula.executor.v1.EventKey
-	216, // 86: nebula.executor.v1.BackupExecutorResponse.files:type_name -> nebula.executor.v1.BackupFile
+	201, // 81: nebula.executor.v1.RegisterModuleResponse.actions:type_name -> nebula.executor.v1.ModuleAction
+	210, // 82: nebula.executor.v1.ListSignersResponse.signers:type_name -> nebula.executor.v1.Signer
+	211, // 83: nebula.executor.v1.ListSignersResponse.modules:type_name -> nebula.executor.v1.ModuleSigner
+	214, // 84: nebula.executor.v1.ListEventsResponse.events:type_name -> nebula.executor.v1.Event
+	216, // 85: nebula.executor.v1.ListEventsResponse.keys:type_name -> nebula.executor.v1.EventKey
+	218, // 86: nebula.executor.v1.BackupExecutorResponse.files:type_name -> nebula.executor.v1.BackupFile
 	8,   // 87: nebula.executor.v1.PVERemoteInfo.kind:type_name -> nebula.executor.v1.PVERemoteKind
-	218, // 88: nebula.executor.v1.PVERemoteInfo.endpoints:type_name -> nebula.executor.v1.PVEEndpoint
+	220, // 88: nebula.executor.v1.PVERemoteInfo.endpoints:type_name -> nebula.executor.v1.PVEEndpoint
 	9,   // 89: nebula.executor.v1.PVERemoteInfo.state:type_name -> nebula.executor.v1.PVERemoteState
-	219, // 90: nebula.executor.v1.ListPVERemotesResponse.remotes:type_name -> nebula.executor.v1.PVERemoteInfo
+	221, // 90: nebula.executor.v1.ListPVERemotesResponse.remotes:type_name -> nebula.executor.v1.PVERemoteInfo
 	10,  // 91: nebula.executor.v1.ReadPVERequest.method:type_name -> nebula.executor.v1.PVEReadMethod
-	222, // 92: nebula.executor.v1.ReadPVERequest.node:type_name -> nebula.executor.v1.PVEReadNodeParams
-	223, // 93: nebula.executor.v1.ReadPVERequest.guest:type_name -> nebula.executor.v1.PVEReadGuestParams
-	224, // 94: nebula.executor.v1.ReadPVERequest.metrics:type_name -> nebula.executor.v1.PVEReadMetricsParams
-	227, // 95: nebula.executor.v1.ReadPVEResponse.nodes:type_name -> nebula.executor.v1.PVENodes
-	230, // 96: nebula.executor.v1.ReadPVEResponse.guests:type_name -> nebula.executor.v1.PVEGuests
-	232, // 97: nebula.executor.v1.ReadPVEResponse.guest_config:type_name -> nebula.executor.v1.PVEGuestConfig
-	238, // 98: nebula.executor.v1.ReadPVEResponse.guest_agent:type_name -> nebula.executor.v1.PVEGuestAgent
-	240, // 99: nebula.executor.v1.ReadPVEResponse.storages:type_name -> nebula.executor.v1.PVEStorages
-	242, // 100: nebula.executor.v1.ReadPVEResponse.snapshots:type_name -> nebula.executor.v1.PVESnapshots
-	244, // 101: nebula.executor.v1.ReadPVEResponse.cluster:type_name -> nebula.executor.v1.PVECluster
-	247, // 102: nebula.executor.v1.ReadPVEResponse.tasks:type_name -> nebula.executor.v1.PVETasks
-	249, // 103: nebula.executor.v1.ReadPVEResponse.backups:type_name -> nebula.executor.v1.PVEBackups
-	251, // 104: nebula.executor.v1.ReadPVEResponse.metrics:type_name -> nebula.executor.v1.PVEMetrics
+	224, // 92: nebula.executor.v1.ReadPVERequest.node:type_name -> nebula.executor.v1.PVEReadNodeParams
+	225, // 93: nebula.executor.v1.ReadPVERequest.guest:type_name -> nebula.executor.v1.PVEReadGuestParams
+	226, // 94: nebula.executor.v1.ReadPVERequest.metrics:type_name -> nebula.executor.v1.PVEReadMetricsParams
+	229, // 95: nebula.executor.v1.ReadPVEResponse.nodes:type_name -> nebula.executor.v1.PVENodes
+	232, // 96: nebula.executor.v1.ReadPVEResponse.guests:type_name -> nebula.executor.v1.PVEGuests
+	234, // 97: nebula.executor.v1.ReadPVEResponse.guest_config:type_name -> nebula.executor.v1.PVEGuestConfig
+	240, // 98: nebula.executor.v1.ReadPVEResponse.guest_agent:type_name -> nebula.executor.v1.PVEGuestAgent
+	242, // 99: nebula.executor.v1.ReadPVEResponse.storages:type_name -> nebula.executor.v1.PVEStorages
+	244, // 100: nebula.executor.v1.ReadPVEResponse.snapshots:type_name -> nebula.executor.v1.PVESnapshots
+	246, // 101: nebula.executor.v1.ReadPVEResponse.cluster:type_name -> nebula.executor.v1.PVECluster
+	249, // 102: nebula.executor.v1.ReadPVEResponse.tasks:type_name -> nebula.executor.v1.PVETasks
+	251, // 103: nebula.executor.v1.ReadPVEResponse.backups:type_name -> nebula.executor.v1.PVEBackups
+	253, // 104: nebula.executor.v1.ReadPVEResponse.metrics:type_name -> nebula.executor.v1.PVEMetrics
 	11,  // 105: nebula.executor.v1.PVENodes.state:type_name -> nebula.executor.v1.PVEDatasetState
-	228, // 106: nebula.executor.v1.PVENodes.nodes:type_name -> nebula.executor.v1.PVENode
-	229, // 107: nebula.executor.v1.PVENode.details:type_name -> nebula.executor.v1.PVENodeDetails
+	230, // 106: nebula.executor.v1.PVENodes.nodes:type_name -> nebula.executor.v1.PVENode
+	231, // 107: nebula.executor.v1.PVENode.details:type_name -> nebula.executor.v1.PVENodeDetails
 	11,  // 108: nebula.executor.v1.PVENodeDetails.state:type_name -> nebula.executor.v1.PVEDatasetState
 	11,  // 109: nebula.executor.v1.PVEGuests.state:type_name -> nebula.executor.v1.PVEDatasetState
-	231, // 110: nebula.executor.v1.PVEGuests.guests:type_name -> nebula.executor.v1.PVEGuest
+	233, // 110: nebula.executor.v1.PVEGuests.guests:type_name -> nebula.executor.v1.PVEGuest
 	11,  // 111: nebula.executor.v1.PVEGuestConfig.state:type_name -> nebula.executor.v1.PVEDatasetState
-	234, // 112: nebula.executor.v1.PVEGuestConfig.disks:type_name -> nebula.executor.v1.PVEDisk
-	235, // 113: nebula.executor.v1.PVEGuestConfig.hostpci:type_name -> nebula.executor.v1.PVEHostPCI
-	236, // 114: nebula.executor.v1.PVEGuestConfig.cloud_init_ip:type_name -> nebula.executor.v1.PVECloudInitIP
-	237, // 115: nebula.executor.v1.PVEGuestConfig.capabilities:type_name -> nebula.executor.v1.PVEGuestCapabilities
-	233, // 116: nebula.executor.v1.PVEGuestConfig.nics:type_name -> nebula.executor.v1.PVEGuestNIC
+	236, // 112: nebula.executor.v1.PVEGuestConfig.disks:type_name -> nebula.executor.v1.PVEDisk
+	237, // 113: nebula.executor.v1.PVEGuestConfig.hostpci:type_name -> nebula.executor.v1.PVEHostPCI
+	238, // 114: nebula.executor.v1.PVEGuestConfig.cloud_init_ip:type_name -> nebula.executor.v1.PVECloudInitIP
+	239, // 115: nebula.executor.v1.PVEGuestConfig.capabilities:type_name -> nebula.executor.v1.PVEGuestCapabilities
+	235, // 116: nebula.executor.v1.PVEGuestConfig.nics:type_name -> nebula.executor.v1.PVEGuestNIC
 	11,  // 117: nebula.executor.v1.PVEGuestAgent.state:type_name -> nebula.executor.v1.PVEDatasetState
-	239, // 118: nebula.executor.v1.PVEGuestAgent.filesystems:type_name -> nebula.executor.v1.PVEFilesystem
+	241, // 118: nebula.executor.v1.PVEGuestAgent.filesystems:type_name -> nebula.executor.v1.PVEFilesystem
 	11,  // 119: nebula.executor.v1.PVEStorages.state:type_name -> nebula.executor.v1.PVEDatasetState
-	241, // 120: nebula.executor.v1.PVEStorages.storages:type_name -> nebula.executor.v1.PVEStorage
+	243, // 120: nebula.executor.v1.PVEStorages.storages:type_name -> nebula.executor.v1.PVEStorage
 	11,  // 121: nebula.executor.v1.PVESnapshots.state:type_name -> nebula.executor.v1.PVEDatasetState
-	243, // 122: nebula.executor.v1.PVESnapshots.snapshots:type_name -> nebula.executor.v1.PVESnapshot
+	245, // 122: nebula.executor.v1.PVESnapshots.snapshots:type_name -> nebula.executor.v1.PVESnapshot
 	11,  // 123: nebula.executor.v1.PVECluster.state:type_name -> nebula.executor.v1.PVEDatasetState
-	245, // 124: nebula.executor.v1.PVECluster.nodes:type_name -> nebula.executor.v1.PVEClusterNode
-	246, // 125: nebula.executor.v1.PVECluster.ha_resources:type_name -> nebula.executor.v1.PVEHAResource
+	247, // 124: nebula.executor.v1.PVECluster.nodes:type_name -> nebula.executor.v1.PVEClusterNode
+	248, // 125: nebula.executor.v1.PVECluster.ha_resources:type_name -> nebula.executor.v1.PVEHAResource
 	11,  // 126: nebula.executor.v1.PVETasks.state:type_name -> nebula.executor.v1.PVEDatasetState
-	248, // 127: nebula.executor.v1.PVETasks.tasks:type_name -> nebula.executor.v1.PVETask
+	250, // 127: nebula.executor.v1.PVETasks.tasks:type_name -> nebula.executor.v1.PVETask
 	11,  // 128: nebula.executor.v1.PVEBackups.state:type_name -> nebula.executor.v1.PVEDatasetState
-	250, // 129: nebula.executor.v1.PVEBackups.backups:type_name -> nebula.executor.v1.PVEBackupEvidence
+	252, // 129: nebula.executor.v1.PVEBackups.backups:type_name -> nebula.executor.v1.PVEBackupEvidence
 	11,  // 130: nebula.executor.v1.PVEBackups.catalog_state:type_name -> nebula.executor.v1.PVEDatasetState
 	11,  // 131: nebula.executor.v1.PVEMetrics.state:type_name -> nebula.executor.v1.PVEDatasetState
-	252, // 132: nebula.executor.v1.PVEMetrics.metrics:type_name -> nebula.executor.v1.PVEMetric
-	218, // 133: nebula.executor.v1.ProbePVERemoteRequest.endpoints:type_name -> nebula.executor.v1.PVEEndpoint
-	254, // 134: nebula.executor.v1.ProbePVERemoteResponse.endpoints:type_name -> nebula.executor.v1.PVEProbeEndpoint
-	218, // 135: nebula.executor.v1.PVEAdminRemote.endpoints:type_name -> nebula.executor.v1.PVEEndpoint
-	218, // 136: nebula.executor.v1.AddPVERemoteRequest.endpoints:type_name -> nebula.executor.v1.PVEEndpoint
-	256, // 137: nebula.executor.v1.SetPVERemoteSiteResponse.remote:type_name -> nebula.executor.v1.PVEAdminRemote
-	256, // 138: nebula.executor.v1.ListPVEAdminRemotesResponse.remotes:type_name -> nebula.executor.v1.PVEAdminRemote
-	256, // 139: nebula.executor.v1.AddPVERemoteResponse.remote:type_name -> nebula.executor.v1.PVEAdminRemote
-	256, // 140: nebula.executor.v1.RotatePVETokenResponse.remote:type_name -> nebula.executor.v1.PVEAdminRemote
-	256, // 141: nebula.executor.v1.RemovePVERemoteResponse.remote:type_name -> nebula.executor.v1.PVEAdminRemote
-	256, // 142: nebula.executor.v1.CommitPVERepinResponse.remote:type_name -> nebula.executor.v1.PVEAdminRemote
-	33,  // 143: nebula.executor.v1.ProposePVERepinResponse.permit:type_name -> nebula.executor.v1.ProposeExecutionResponse
-	271, // 144: nebula.executor.v1.ProposePVEGuestPowerRequest.target:type_name -> nebula.executor.v1.PVEGuestPowerTarget
-	33,  // 145: nebula.executor.v1.ProposePVEGuestPowerResponse.permit:type_name -> nebula.executor.v1.ProposeExecutionResponse
-	271, // 146: nebula.executor.v1.CommitPVEGuestPowerRequest.target:type_name -> nebula.executor.v1.PVEGuestPowerTarget
-	275, // 147: nebula.executor.v1.CommitPVEGuestPowerResponse.steps:type_name -> nebula.executor.v1.PVEGuestPowerStep
-	278, // 148: nebula.executor.v1.PVEGuestSnapshotTarget.expect:type_name -> nebula.executor.v1.PVESnapshotIdentity
-	277, // 149: nebula.executor.v1.ProposePVEGuestSnapshotRequest.target:type_name -> nebula.executor.v1.PVEGuestSnapshotTarget
-	33,  // 150: nebula.executor.v1.ProposePVEGuestSnapshotResponse.permit:type_name -> nebula.executor.v1.ProposeExecutionResponse
-	278, // 151: nebula.executor.v1.ProposePVEGuestSnapshotResponse.snapshot:type_name -> nebula.executor.v1.PVESnapshotIdentity
-	277, // 152: nebula.executor.v1.CommitPVEGuestSnapshotRequest.target:type_name -> nebula.executor.v1.PVEGuestSnapshotTarget
-	275, // 153: nebula.executor.v1.CommitPVEGuestSnapshotResponse.steps:type_name -> nebula.executor.v1.PVEGuestPowerStep
-	283, // 154: nebula.executor.v1.PVEGuestProvisionSpec.template:type_name -> nebula.executor.v1.PVETemplateRef
-	284, // 155: nebula.executor.v1.PVEGuestProvisionSpec.nic:type_name -> nebula.executor.v1.PVEProvisionNIC
-	285, // 156: nebula.executor.v1.PVEGuestProvisionSpec.ipam:type_name -> nebula.executor.v1.PVEIPAMBinding
-	286, // 157: nebula.executor.v1.ProposePVEGuestProvisionRequest.spec:type_name -> nebula.executor.v1.PVEGuestProvisionSpec
-	33,  // 158: nebula.executor.v1.ProposePVEGuestProvisionResponse.permit:type_name -> nebula.executor.v1.ProposeExecutionResponse
-	286, // 159: nebula.executor.v1.CommitPVEGuestProvisionRequest.spec:type_name -> nebula.executor.v1.PVEGuestProvisionSpec
-	275, // 160: nebula.executor.v1.CommitPVEGuestProvisionResponse.steps:type_name -> nebula.executor.v1.PVEGuestPowerStep
+	254, // 132: nebula.executor.v1.PVEMetrics.metrics:type_name -> nebula.executor.v1.PVEMetric
+	220, // 133: nebula.executor.v1.ProbePVERemoteRequest.endpoints:type_name -> nebula.executor.v1.PVEEndpoint
+	256, // 134: nebula.executor.v1.ProbePVERemoteResponse.endpoints:type_name -> nebula.executor.v1.PVEProbeEndpoint
+	220, // 135: nebula.executor.v1.PVEAdminRemote.endpoints:type_name -> nebula.executor.v1.PVEEndpoint
+	220, // 136: nebula.executor.v1.AddPVERemoteRequest.endpoints:type_name -> nebula.executor.v1.PVEEndpoint
+	258, // 137: nebula.executor.v1.SetPVERemoteSiteResponse.remote:type_name -> nebula.executor.v1.PVEAdminRemote
+	258, // 138: nebula.executor.v1.ListPVEAdminRemotesResponse.remotes:type_name -> nebula.executor.v1.PVEAdminRemote
+	258, // 139: nebula.executor.v1.AddPVERemoteResponse.remote:type_name -> nebula.executor.v1.PVEAdminRemote
+	258, // 140: nebula.executor.v1.RotatePVETokenResponse.remote:type_name -> nebula.executor.v1.PVEAdminRemote
+	258, // 141: nebula.executor.v1.RemovePVERemoteResponse.remote:type_name -> nebula.executor.v1.PVEAdminRemote
+	258, // 142: nebula.executor.v1.CommitPVERepinResponse.remote:type_name -> nebula.executor.v1.PVEAdminRemote
+	35,  // 143: nebula.executor.v1.ProposePVERepinResponse.permit:type_name -> nebula.executor.v1.ProposeExecutionResponse
+	273, // 144: nebula.executor.v1.ProposePVEGuestPowerRequest.target:type_name -> nebula.executor.v1.PVEGuestPowerTarget
+	35,  // 145: nebula.executor.v1.ProposePVEGuestPowerResponse.permit:type_name -> nebula.executor.v1.ProposeExecutionResponse
+	273, // 146: nebula.executor.v1.CommitPVEGuestPowerRequest.target:type_name -> nebula.executor.v1.PVEGuestPowerTarget
+	277, // 147: nebula.executor.v1.CommitPVEGuestPowerResponse.steps:type_name -> nebula.executor.v1.PVEGuestPowerStep
+	280, // 148: nebula.executor.v1.PVEGuestSnapshotTarget.expect:type_name -> nebula.executor.v1.PVESnapshotIdentity
+	279, // 149: nebula.executor.v1.ProposePVEGuestSnapshotRequest.target:type_name -> nebula.executor.v1.PVEGuestSnapshotTarget
+	35,  // 150: nebula.executor.v1.ProposePVEGuestSnapshotResponse.permit:type_name -> nebula.executor.v1.ProposeExecutionResponse
+	280, // 151: nebula.executor.v1.ProposePVEGuestSnapshotResponse.snapshot:type_name -> nebula.executor.v1.PVESnapshotIdentity
+	279, // 152: nebula.executor.v1.CommitPVEGuestSnapshotRequest.target:type_name -> nebula.executor.v1.PVEGuestSnapshotTarget
+	277, // 153: nebula.executor.v1.CommitPVEGuestSnapshotResponse.steps:type_name -> nebula.executor.v1.PVEGuestPowerStep
+	285, // 154: nebula.executor.v1.PVEGuestProvisionSpec.template:type_name -> nebula.executor.v1.PVETemplateRef
+	286, // 155: nebula.executor.v1.PVEGuestProvisionSpec.nic:type_name -> nebula.executor.v1.PVEProvisionNIC
+	287, // 156: nebula.executor.v1.PVEGuestProvisionSpec.ipam:type_name -> nebula.executor.v1.PVEIPAMBinding
+	288, // 157: nebula.executor.v1.ProposePVEGuestProvisionRequest.spec:type_name -> nebula.executor.v1.PVEGuestProvisionSpec
+	35,  // 158: nebula.executor.v1.ProposePVEGuestProvisionResponse.permit:type_name -> nebula.executor.v1.ProposeExecutionResponse
+	288, // 159: nebula.executor.v1.CommitPVEGuestProvisionRequest.spec:type_name -> nebula.executor.v1.PVEGuestProvisionSpec
+	277, // 160: nebula.executor.v1.CommitPVEGuestProvisionResponse.steps:type_name -> nebula.executor.v1.PVEGuestPowerStep
 	1,   // 161: nebula.executor.v1.ProposeReadGrantResponse.approval_requirement:type_name -> nebula.executor.v1.ApprovalRequirement
-	294, // 162: nebula.executor.v1.CommitReadGrantResponse.grant:type_name -> nebula.executor.v1.ReadGrant
-	297, // 163: nebula.executor.v1.ListPendingReadGrantsResponse.grants:type_name -> nebula.executor.v1.PendingReadGrant
-	294, // 164: nebula.executor.v1.ApproveReadGrantCLIResponse.grant:type_name -> nebula.executor.v1.ReadGrant
-	294, // 165: nebula.executor.v1.ListReadGrantsResponse.grants:type_name -> nebula.executor.v1.ReadGrant
-	42,  // 166: nebula.executor.v1.RunReadGrantRequest.run:type_name -> nebula.executor.v1.AuthorizeRunRequest
+	296, // 162: nebula.executor.v1.CommitReadGrantResponse.grant:type_name -> nebula.executor.v1.ReadGrant
+	299, // 163: nebula.executor.v1.ListPendingReadGrantsResponse.grants:type_name -> nebula.executor.v1.PendingReadGrant
+	296, // 164: nebula.executor.v1.ApproveReadGrantCLIResponse.grant:type_name -> nebula.executor.v1.ReadGrant
+	296, // 165: nebula.executor.v1.ListReadGrantsResponse.grants:type_name -> nebula.executor.v1.ReadGrant
+	44,  // 166: nebula.executor.v1.RunReadGrantRequest.run:type_name -> nebula.executor.v1.AuthorizeRunRequest
 	12,  // 167: nebula.executor.v1.RunReadGrantRequest.trigger:type_name -> nebula.executor.v1.ReadGrantTrigger
-	170, // 168: nebula.executor.v1.RunReadGrantResponse.result:type_name -> nebula.executor.v1.RunAttachedResponse
-	308, // 169: nebula.executor.v1.BatchPlan.members:type_name -> nebula.executor.v1.BatchMember
-	309, // 170: nebula.executor.v1.BatchPlan.stages:type_name -> nebula.executor.v1.BatchStage
-	310, // 171: nebula.executor.v1.BatchPlan.dependencies:type_name -> nebula.executor.v1.BatchDependency
+	172, // 168: nebula.executor.v1.RunReadGrantResponse.result:type_name -> nebula.executor.v1.RunAttachedResponse
+	310, // 169: nebula.executor.v1.BatchPlan.members:type_name -> nebula.executor.v1.BatchMember
+	311, // 170: nebula.executor.v1.BatchPlan.stages:type_name -> nebula.executor.v1.BatchStage
+	312, // 171: nebula.executor.v1.BatchPlan.dependencies:type_name -> nebula.executor.v1.BatchDependency
 	0,   // 172: nebula.executor.v1.BatchMember.risk:type_name -> nebula.executor.v1.RiskClass
 	0,   // 173: nebula.executor.v1.BatchFinding.risk:type_name -> nebula.executor.v1.RiskClass
-	311, // 174: nebula.executor.v1.BatchMemberFindings.findings:type_name -> nebula.executor.v1.BatchFinding
-	313, // 175: nebula.executor.v1.ProposeBatchRequest.members:type_name -> nebula.executor.v1.BatchMemberInput
-	307, // 176: nebula.executor.v1.ProposeBatchResponse.plan:type_name -> nebula.executor.v1.BatchPlan
+	313, // 174: nebula.executor.v1.BatchMemberFindings.findings:type_name -> nebula.executor.v1.BatchFinding
+	315, // 175: nebula.executor.v1.ProposeBatchRequest.members:type_name -> nebula.executor.v1.BatchMemberInput
+	309, // 176: nebula.executor.v1.ProposeBatchResponse.plan:type_name -> nebula.executor.v1.BatchPlan
 	0,   // 177: nebula.executor.v1.ProposeBatchResponse.risk:type_name -> nebula.executor.v1.RiskClass
 	1,   // 178: nebula.executor.v1.ProposeBatchResponse.approval_requirement:type_name -> nebula.executor.v1.ApprovalRequirement
 	2,   // 179: nebula.executor.v1.ProposeBatchResponse.state:type_name -> nebula.executor.v1.PermitState
 	2,   // 180: nebula.executor.v1.CommitBatchResponse.state:type_name -> nebula.executor.v1.PermitState
-	307, // 181: nebula.executor.v1.ReviewBatchResponse.plan:type_name -> nebula.executor.v1.BatchPlan
+	309, // 181: nebula.executor.v1.ReviewBatchResponse.plan:type_name -> nebula.executor.v1.BatchPlan
 	0,   // 182: nebula.executor.v1.ReviewBatchResponse.risk:type_name -> nebula.executor.v1.RiskClass
 	2,   // 183: nebula.executor.v1.ReviewBatchResponse.state:type_name -> nebula.executor.v1.PermitState
-	312, // 184: nebula.executor.v1.ReviewBatchResponse.member_findings:type_name -> nebula.executor.v1.BatchMemberFindings
+	314, // 184: nebula.executor.v1.ReviewBatchResponse.member_findings:type_name -> nebula.executor.v1.BatchMemberFindings
 	2,   // 185: nebula.executor.v1.ApproveBatchCLIResponse.state:type_name -> nebula.executor.v1.PermitState
 	2,   // 186: nebula.executor.v1.GetBatchStatusResponse.state:type_name -> nebula.executor.v1.PermitState
 	0,   // 187: nebula.executor.v1.GetBatchStatusResponse.risk:type_name -> nebula.executor.v1.RiskClass
-	325, // 188: nebula.executor.v1.GetBatchCredentialVersionsResponse.versions:type_name -> nebula.executor.v1.BatchCredentialVersion
+	327, // 188: nebula.executor.v1.GetBatchCredentialVersionsResponse.versions:type_name -> nebula.executor.v1.BatchCredentialVersion
 	13,  // 189: nebula.executor.v1.RunBatchMemberResponse.outcome:type_name -> nebula.executor.v1.BatchMemberOutcome
 	16,  // 190: nebula.executor.v1.BuiltinDiffLine.op:type_name -> nebula.executor.v1.BuiltinDiffOp
 	0,   // 191: nebula.executor.v1.BuiltinScanFinding.risk:type_name -> nebula.executor.v1.RiskClass
 	14,  // 192: nebula.executor.v1.BuiltinActionReview.change:type_name -> nebula.executor.v1.BuiltinTrustChange
-	329, // 193: nebula.executor.v1.BuiltinActionReview.diff:type_name -> nebula.executor.v1.BuiltinDiffLine
-	330, // 194: nebula.executor.v1.BuiltinActionReview.findings:type_name -> nebula.executor.v1.BuiltinScanFinding
+	331, // 193: nebula.executor.v1.BuiltinActionReview.diff:type_name -> nebula.executor.v1.BuiltinDiffLine
+	332, // 194: nebula.executor.v1.BuiltinActionReview.findings:type_name -> nebula.executor.v1.BuiltinScanFinding
 	0,   // 195: nebula.executor.v1.BuiltinActionReview.scanner_floor:type_name -> nebula.executor.v1.RiskClass
 	14,  // 196: nebula.executor.v1.BuiltinModuleReview.change:type_name -> nebula.executor.v1.BuiltinTrustChange
-	331, // 197: nebula.executor.v1.BuiltinModuleReview.actions:type_name -> nebula.executor.v1.BuiltinActionReview
-	332, // 198: nebula.executor.v1.ReviewBuiltinTrustResponse.modules:type_name -> nebula.executor.v1.BuiltinModuleReview
+	333, // 197: nebula.executor.v1.BuiltinModuleReview.actions:type_name -> nebula.executor.v1.BuiltinActionReview
+	334, // 198: nebula.executor.v1.ReviewBuiltinTrustResponse.modules:type_name -> nebula.executor.v1.BuiltinModuleReview
 	14,  // 199: nebula.executor.v1.BuiltinTrustTuple.change:type_name -> nebula.executor.v1.BuiltinTrustChange
-	336, // 200: nebula.executor.v1.CommitBuiltinTrustResponse.tuples:type_name -> nebula.executor.v1.BuiltinTrustTuple
+	338, // 200: nebula.executor.v1.CommitBuiltinTrustResponse.tuples:type_name -> nebula.executor.v1.BuiltinTrustTuple
 	14,  // 201: nebula.executor.v1.BuiltinTrustEntry.change:type_name -> nebula.executor.v1.BuiltinTrustChange
 	15,  // 202: nebula.executor.v1.GetBuiltinTrustStatusResponse.state:type_name -> nebula.executor.v1.BuiltinTrustState
-	341, // 203: nebula.executor.v1.GetBuiltinTrustStatusResponse.modules:type_name -> nebula.executor.v1.BuiltinTrustEntry
-	343, // 204: nebula.executor.v1.ReviewRootRotationResponse.signed_by:type_name -> nebula.executor.v1.ReleaseRoot
-	343, // 205: nebula.executor.v1.ReviewRootRotationResponse.old_roots:type_name -> nebula.executor.v1.ReleaseRoot
-	343, // 206: nebula.executor.v1.ReviewRootRotationResponse.new_roots:type_name -> nebula.executor.v1.ReleaseRoot
-	343, // 207: nebula.executor.v1.ReviewRootRotationResponse.added:type_name -> nebula.executor.v1.ReleaseRoot
-	343, // 208: nebula.executor.v1.CommitRootRotationResponse.signed_by:type_name -> nebula.executor.v1.ReleaseRoot
-	343, // 209: nebula.executor.v1.CommitRootRotationResponse.roots:type_name -> nebula.executor.v1.ReleaseRoot
+	343, // 203: nebula.executor.v1.GetBuiltinTrustStatusResponse.modules:type_name -> nebula.executor.v1.BuiltinTrustEntry
+	345, // 204: nebula.executor.v1.ReviewRootRotationResponse.signed_by:type_name -> nebula.executor.v1.ReleaseRoot
+	345, // 205: nebula.executor.v1.ReviewRootRotationResponse.old_roots:type_name -> nebula.executor.v1.ReleaseRoot
+	345, // 206: nebula.executor.v1.ReviewRootRotationResponse.new_roots:type_name -> nebula.executor.v1.ReleaseRoot
+	345, // 207: nebula.executor.v1.ReviewRootRotationResponse.added:type_name -> nebula.executor.v1.ReleaseRoot
+	345, // 208: nebula.executor.v1.CommitRootRotationResponse.signed_by:type_name -> nebula.executor.v1.ReleaseRoot
+	345, // 209: nebula.executor.v1.CommitRootRotationResponse.roots:type_name -> nebula.executor.v1.ReleaseRoot
 	17,  // 210: nebula.executor.v1.AddPrivateRegistryRequest.auth_mode:type_name -> nebula.executor.v1.PrivateRegistryAuthMode
-	356, // 211: nebula.executor.v1.AddPrivateRegistryResponse.registry:type_name -> nebula.executor.v1.PrivateRegistryInfo
-	356, // 212: nebula.executor.v1.RotatePrivateRegistryCredentialResponse.registry:type_name -> nebula.executor.v1.PrivateRegistryInfo
-	356, // 213: nebula.executor.v1.ListPrivateRegistriesResponse.registries:type_name -> nebula.executor.v1.PrivateRegistryInfo
+	358, // 211: nebula.executor.v1.AddPrivateRegistryResponse.registry:type_name -> nebula.executor.v1.PrivateRegistryInfo
+	358, // 212: nebula.executor.v1.RotatePrivateRegistryCredentialResponse.registry:type_name -> nebula.executor.v1.PrivateRegistryInfo
+	358, // 213: nebula.executor.v1.ListPrivateRegistriesResponse.registries:type_name -> nebula.executor.v1.PrivateRegistryInfo
 	17,  // 214: nebula.executor.v1.PrivateRegistryInfo.auth_mode:type_name -> nebula.executor.v1.PrivateRegistryAuthMode
 	18,  // 215: nebula.executor.v1.ReadPrivateRegistryRequest.method:type_name -> nebula.executor.v1.PrivateRegistryReadMethod
-	360, // 216: nebula.executor.v1.PutContainerDefinitionRequest.env:type_name -> nebula.executor.v1.ContainerDefinitionEnv
-	366, // 217: nebula.executor.v1.PutContainerDefinitionResponse.definition:type_name -> nebula.executor.v1.ContainerDefinitionInfo
-	366, // 218: nebula.executor.v1.ListContainerDefinitionsResponse.definitions:type_name -> nebula.executor.v1.ContainerDefinitionInfo
-	369, // 219: nebula.executor.v1.ListContainerRecreationsResponse.recreations:type_name -> nebula.executor.v1.ContainerRecreationInfo
-	370, // 220: nebula.executor.v1.ContainerRecreationInfo.verdict:type_name -> nebula.executor.v1.ContainerRecreationVerdict
-	371, // 221: nebula.executor.v1.ContainerRecreationInfo.images:type_name -> nebula.executor.v1.ContainerRecreationImage
-	372, // 222: nebula.executor.v1.ContainerRecreationInfo.targets:type_name -> nebula.executor.v1.ContainerRecreationTarget
-	373, // 223: nebula.executor.v1.ContainerRecreationInfo.dependencies:type_name -> nebula.executor.v1.ContainerRecreationDependency
-	375, // 224: nebula.executor.v1.ContainerRecreationInfo.recovery_plan:type_name -> nebula.executor.v1.ContainerRecoveryPlanInfo
-	374, // 225: nebula.executor.v1.ContainerRecreationDependency.containers:type_name -> nebula.executor.v1.ContainerRecreationDependencyMember
-	375, // 226: nebula.executor.v1.SetContainerRecoveryPlanResponse.plan:type_name -> nebula.executor.v1.ContainerRecoveryPlanInfo
-	369, // 227: nebula.executor.v1.ResolveContainerRecreationResponse.recreation:type_name -> nebula.executor.v1.ContainerRecreationInfo
-	383, // 228: nebula.executor.v1.ProbeNetDeviceResponse.facts:type_name -> nebula.executor.v1.NetDeviceProbeFacts
-	382, // 229: nebula.executor.v1.RegisterNetDeviceResponse.device:type_name -> nebula.executor.v1.NetDeviceInfo
-	382, // 230: nebula.executor.v1.SetNetDeviceCredentialResponse.device:type_name -> nebula.executor.v1.NetDeviceInfo
-	382, // 231: nebula.executor.v1.RotateNetDeviceCredentialResponse.device:type_name -> nebula.executor.v1.NetDeviceInfo
-	33,  // 232: nebula.executor.v1.ProposeNetDeviceRepinResponse.permit:type_name -> nebula.executor.v1.ProposeExecutionResponse
-	382, // 233: nebula.executor.v1.CommitNetDeviceRepinResponse.device:type_name -> nebula.executor.v1.NetDeviceInfo
-	382, // 234: nebula.executor.v1.BlockNetDeviceResponse.device:type_name -> nebula.executor.v1.NetDeviceInfo
-	382, // 235: nebula.executor.v1.UnblockNetDeviceResponse.device:type_name -> nebula.executor.v1.NetDeviceInfo
-	382, // 236: nebula.executor.v1.RemoveNetDeviceResponse.device:type_name -> nebula.executor.v1.NetDeviceInfo
-	382, // 237: nebula.executor.v1.ListNetDevicesResponse.devices:type_name -> nebula.executor.v1.NetDeviceInfo
+	362, // 216: nebula.executor.v1.PutContainerDefinitionRequest.env:type_name -> nebula.executor.v1.ContainerDefinitionEnv
+	368, // 217: nebula.executor.v1.PutContainerDefinitionResponse.definition:type_name -> nebula.executor.v1.ContainerDefinitionInfo
+	368, // 218: nebula.executor.v1.ListContainerDefinitionsResponse.definitions:type_name -> nebula.executor.v1.ContainerDefinitionInfo
+	371, // 219: nebula.executor.v1.ListContainerRecreationsResponse.recreations:type_name -> nebula.executor.v1.ContainerRecreationInfo
+	372, // 220: nebula.executor.v1.ContainerRecreationInfo.verdict:type_name -> nebula.executor.v1.ContainerRecreationVerdict
+	373, // 221: nebula.executor.v1.ContainerRecreationInfo.images:type_name -> nebula.executor.v1.ContainerRecreationImage
+	374, // 222: nebula.executor.v1.ContainerRecreationInfo.targets:type_name -> nebula.executor.v1.ContainerRecreationTarget
+	375, // 223: nebula.executor.v1.ContainerRecreationInfo.dependencies:type_name -> nebula.executor.v1.ContainerRecreationDependency
+	377, // 224: nebula.executor.v1.ContainerRecreationInfo.recovery_plan:type_name -> nebula.executor.v1.ContainerRecoveryPlanInfo
+	376, // 225: nebula.executor.v1.ContainerRecreationDependency.containers:type_name -> nebula.executor.v1.ContainerRecreationDependencyMember
+	377, // 226: nebula.executor.v1.SetContainerRecoveryPlanResponse.plan:type_name -> nebula.executor.v1.ContainerRecoveryPlanInfo
+	371, // 227: nebula.executor.v1.ResolveContainerRecreationResponse.recreation:type_name -> nebula.executor.v1.ContainerRecreationInfo
+	385, // 228: nebula.executor.v1.ProbeNetDeviceResponse.facts:type_name -> nebula.executor.v1.NetDeviceProbeFacts
+	384, // 229: nebula.executor.v1.RegisterNetDeviceResponse.device:type_name -> nebula.executor.v1.NetDeviceInfo
+	384, // 230: nebula.executor.v1.SetNetDeviceCredentialResponse.device:type_name -> nebula.executor.v1.NetDeviceInfo
+	384, // 231: nebula.executor.v1.RotateNetDeviceCredentialResponse.device:type_name -> nebula.executor.v1.NetDeviceInfo
+	35,  // 232: nebula.executor.v1.ProposeNetDeviceRepinResponse.permit:type_name -> nebula.executor.v1.ProposeExecutionResponse
+	384, // 233: nebula.executor.v1.CommitNetDeviceRepinResponse.device:type_name -> nebula.executor.v1.NetDeviceInfo
+	384, // 234: nebula.executor.v1.BlockNetDeviceResponse.device:type_name -> nebula.executor.v1.NetDeviceInfo
+	384, // 235: nebula.executor.v1.UnblockNetDeviceResponse.device:type_name -> nebula.executor.v1.NetDeviceInfo
+	384, // 236: nebula.executor.v1.RemoveNetDeviceResponse.device:type_name -> nebula.executor.v1.NetDeviceInfo
+	384, // 237: nebula.executor.v1.ListNetDevicesResponse.devices:type_name -> nebula.executor.v1.NetDeviceInfo
 	19,  // 238: nebula.executor.v1.ReadNetDeviceRequest.read:type_name -> nebula.executor.v1.NetDeviceRead
-	406, // 239: nebula.executor.v1.ReadNetDeviceResponse.cbs_version:type_name -> nebula.executor.v1.NetDevCBSVersion
-	408, // 240: nebula.executor.v1.ReadNetDeviceResponse.cbs_vlans:type_name -> nebula.executor.v1.NetDevVLANs
-	410, // 241: nebula.executor.v1.ReadNetDeviceResponse.cbs_interfaces:type_name -> nebula.executor.v1.NetDevPorts
-	412, // 242: nebula.executor.v1.ReadNetDeviceResponse.cbs_mac_table:type_name -> nebula.executor.v1.NetDevMACTable
-	414, // 243: nebula.executor.v1.ReadNetDeviceResponse.cbs_lldp:type_name -> nebula.executor.v1.NetDevLLDPNeighbors
-	416, // 244: nebula.executor.v1.ReadNetDeviceResponse.panos_zones:type_name -> nebula.executor.v1.NetDevZones
-	420, // 245: nebula.executor.v1.ReadNetDeviceResponse.panos_objects:type_name -> nebula.executor.v1.NetDevObjects
-	422, // 246: nebula.executor.v1.ReadNetDeviceResponse.panos_security_rules:type_name -> nebula.executor.v1.NetDevSecurityRules
-	424, // 247: nebula.executor.v1.ReadNetDeviceResponse.panos_nat_rules:type_name -> nebula.executor.v1.NetDevNATRules
-	426, // 248: nebula.executor.v1.ReadNetDeviceResponse.panos_rule_hit_counts:type_name -> nebula.executor.v1.NetDevRuleHitCounts
-	407, // 249: nebula.executor.v1.NetDevVLANs.vlans:type_name -> nebula.executor.v1.NetDevVLAN
+	408, // 239: nebula.executor.v1.ReadNetDeviceResponse.cbs_version:type_name -> nebula.executor.v1.NetDevCBSVersion
+	410, // 240: nebula.executor.v1.ReadNetDeviceResponse.cbs_vlans:type_name -> nebula.executor.v1.NetDevVLANs
+	412, // 241: nebula.executor.v1.ReadNetDeviceResponse.cbs_interfaces:type_name -> nebula.executor.v1.NetDevPorts
+	414, // 242: nebula.executor.v1.ReadNetDeviceResponse.cbs_mac_table:type_name -> nebula.executor.v1.NetDevMACTable
+	416, // 243: nebula.executor.v1.ReadNetDeviceResponse.cbs_lldp:type_name -> nebula.executor.v1.NetDevLLDPNeighbors
+	418, // 244: nebula.executor.v1.ReadNetDeviceResponse.panos_zones:type_name -> nebula.executor.v1.NetDevZones
+	422, // 245: nebula.executor.v1.ReadNetDeviceResponse.panos_objects:type_name -> nebula.executor.v1.NetDevObjects
+	424, // 246: nebula.executor.v1.ReadNetDeviceResponse.panos_security_rules:type_name -> nebula.executor.v1.NetDevSecurityRules
+	426, // 247: nebula.executor.v1.ReadNetDeviceResponse.panos_nat_rules:type_name -> nebula.executor.v1.NetDevNATRules
+	428, // 248: nebula.executor.v1.ReadNetDeviceResponse.panos_rule_hit_counts:type_name -> nebula.executor.v1.NetDevRuleHitCounts
+	409, // 249: nebula.executor.v1.NetDevVLANs.vlans:type_name -> nebula.executor.v1.NetDevVLAN
 	20,  // 250: nebula.executor.v1.NetDevPort.admin_state:type_name -> nebula.executor.v1.NetDevLinkState
 	20,  // 251: nebula.executor.v1.NetDevPort.oper_state:type_name -> nebula.executor.v1.NetDevLinkState
 	21,  // 252: nebula.executor.v1.NetDevPort.mode:type_name -> nebula.executor.v1.NetDevPortMode
-	409, // 253: nebula.executor.v1.NetDevPorts.ports:type_name -> nebula.executor.v1.NetDevPort
+	411, // 253: nebula.executor.v1.NetDevPorts.ports:type_name -> nebula.executor.v1.NetDevPort
 	22,  // 254: nebula.executor.v1.NetDevMACEntry.type:type_name -> nebula.executor.v1.NetDevMACType
-	411, // 255: nebula.executor.v1.NetDevMACTable.entries:type_name -> nebula.executor.v1.NetDevMACEntry
+	413, // 255: nebula.executor.v1.NetDevMACTable.entries:type_name -> nebula.executor.v1.NetDevMACEntry
 	23,  // 256: nebula.executor.v1.NetDevLLDPNeighbor.capabilities:type_name -> nebula.executor.v1.NetDevLLDPCapability
-	413, // 257: nebula.executor.v1.NetDevLLDPNeighbors.neighbors:type_name -> nebula.executor.v1.NetDevLLDPNeighbor
+	415, // 257: nebula.executor.v1.NetDevLLDPNeighbors.neighbors:type_name -> nebula.executor.v1.NetDevLLDPNeighbor
 	24,  // 258: nebula.executor.v1.NetDevZone.type:type_name -> nebula.executor.v1.NetDevZoneType
-	415, // 259: nebula.executor.v1.NetDevZones.zones:type_name -> nebula.executor.v1.NetDevZone
+	417, // 259: nebula.executor.v1.NetDevZones.zones:type_name -> nebula.executor.v1.NetDevZone
 	25,  // 260: nebula.executor.v1.NetDevAddressObject.type:type_name -> nebula.executor.v1.NetDevAddressType
-	417, // 261: nebula.executor.v1.NetDevObjects.addresses:type_name -> nebula.executor.v1.NetDevAddressObject
-	419, // 262: nebula.executor.v1.NetDevObjects.address_groups:type_name -> nebula.executor.v1.NetDevGroup
-	418, // 263: nebula.executor.v1.NetDevObjects.services:type_name -> nebula.executor.v1.NetDevServiceObject
-	419, // 264: nebula.executor.v1.NetDevObjects.service_groups:type_name -> nebula.executor.v1.NetDevGroup
+	419, // 261: nebula.executor.v1.NetDevObjects.addresses:type_name -> nebula.executor.v1.NetDevAddressObject
+	421, // 262: nebula.executor.v1.NetDevObjects.address_groups:type_name -> nebula.executor.v1.NetDevGroup
+	420, // 263: nebula.executor.v1.NetDevObjects.services:type_name -> nebula.executor.v1.NetDevServiceObject
+	421, // 264: nebula.executor.v1.NetDevObjects.service_groups:type_name -> nebula.executor.v1.NetDevGroup
 	26,  // 265: nebula.executor.v1.NetDevSecurityRule.action:type_name -> nebula.executor.v1.NetDevRuleAction
-	421, // 266: nebula.executor.v1.NetDevSecurityRules.rules:type_name -> nebula.executor.v1.NetDevSecurityRule
-	423, // 267: nebula.executor.v1.NetDevNATRules.rules:type_name -> nebula.executor.v1.NetDevNATRule
-	425, // 268: nebula.executor.v1.NetDevRuleHitCounts.entries:type_name -> nebula.executor.v1.NetDevRuleHitCount
-	428, // 269: nebula.executor.v1.IntegrityRun.deviations:type_name -> nebula.executor.v1.IntegrityDeviation
-	429, // 270: nebula.executor.v1.GetIntegrityStatusResponse.last_run:type_name -> nebula.executor.v1.IntegrityRun
-	430, // 271: nebula.executor.v1.GetIntegrityStatusResponse.findings:type_name -> nebula.executor.v1.IntegrityFinding
-	430, // 272: nebula.executor.v1.AckIntegrityFindingResponse.finding:type_name -> nebula.executor.v1.IntegrityFinding
-	27,  // 273: nebula.executor.v1.CompareBaselineDigestResponse.result:type_name -> nebula.executor.v1.BaselineDigestComparison
-	30,  // 274: nebula.executor.v1.ExecutorService.GetStatus:input_type -> nebula.executor.v1.GetStatusRequest
-	32,  // 275: nebula.executor.v1.ExecutorService.ProposeExecution:input_type -> nebula.executor.v1.ProposeExecutionRequest
-	34,  // 276: nebula.executor.v1.ExecutorService.SubmitAssertion:input_type -> nebula.executor.v1.SubmitAssertionRequest
-	36,  // 277: nebula.executor.v1.ExecutorService.BeginPrivilegedSession:input_type -> nebula.executor.v1.BeginPrivilegedSessionRequest
-	38,  // 278: nebula.executor.v1.ExecutorService.CompletePrivilegedSession:input_type -> nebula.executor.v1.CompletePrivilegedSessionRequest
-	40,  // 279: nebula.executor.v1.ExecutorService.GetSessionState:input_type -> nebula.executor.v1.GetSessionStateRequest
-	42,  // 280: nebula.executor.v1.ExecutorService.AuthorizeRun:input_type -> nebula.executor.v1.AuthorizeRunRequest
-	169, // 281: nebula.executor.v1.ExecutorService.RunAttached:input_type -> nebula.executor.v1.RunAttachedRequest
-	171, // 282: nebula.executor.v1.ExecutorService.StartDurable:input_type -> nebula.executor.v1.StartDurableRequest
-	174, // 283: nebula.executor.v1.ExecutorService.GetRun:input_type -> nebula.executor.v1.GetRunRequest
-	44,  // 284: nebula.executor.v1.ExecutorService.Unlock:input_type -> nebula.executor.v1.UnlockRequest
-	46,  // 285: nebula.executor.v1.ExecutorService.Lock:input_type -> nebula.executor.v1.LockRequest
-	48,  // 286: nebula.executor.v1.ExecutorService.ListPending:input_type -> nebula.executor.v1.ListPendingRequest
-	67,  // 287: nebula.executor.v1.ExecutorService.ApproveCLI:input_type -> nebula.executor.v1.ApproveCLIRequest
-	69,  // 288: nebula.executor.v1.ExecutorService.GetPermitState:input_type -> nebula.executor.v1.GetPermitStateRequest
-	71,  // 289: nebula.executor.v1.ExecutorService.TrustArtifact:input_type -> nebula.executor.v1.TrustArtifactRequest
-	73,  // 290: nebula.executor.v1.ExecutorService.UntrustArtifact:input_type -> nebula.executor.v1.UntrustArtifactRequest
-	75,  // 291: nebula.executor.v1.ExecutorService.ListTrustedArtifacts:input_type -> nebula.executor.v1.ListTrustedArtifactsRequest
-	78,  // 292: nebula.executor.v1.ExecutorService.SetHostCriticality:input_type -> nebula.executor.v1.SetHostCriticalityRequest
-	80,  // 293: nebula.executor.v1.ExecutorService.ListHostCriticality:input_type -> nebula.executor.v1.ListHostCriticalityRequest
-	83,  // 294: nebula.executor.v1.ExecutorService.CreateRegistrationCode:input_type -> nebula.executor.v1.CreateRegistrationCodeRequest
-	85,  // 295: nebula.executor.v1.ExecutorService.BeginRegistration:input_type -> nebula.executor.v1.BeginRegistrationRequest
-	87,  // 296: nebula.executor.v1.ExecutorService.FinishRegistration:input_type -> nebula.executor.v1.FinishRegistrationRequest
-	89,  // 297: nebula.executor.v1.ExecutorService.ListWebAuthnCredentials:input_type -> nebula.executor.v1.ListWebAuthnCredentialsRequest
-	92,  // 298: nebula.executor.v1.ExecutorService.RemoveWebAuthnCredential:input_type -> nebula.executor.v1.RemoveWebAuthnCredentialRequest
-	140, // 299: nebula.executor.v1.ExecutorService.BeginLogin:input_type -> nebula.executor.v1.BeginLoginRequest
-	142, // 300: nebula.executor.v1.ExecutorService.FinishLogin:input_type -> nebula.executor.v1.FinishLoginRequest
-	144, // 301: nebula.executor.v1.ExecutorService.CheckCredential:input_type -> nebula.executor.v1.CheckCredentialRequest
-	146, // 302: nebula.executor.v1.ExecutorService.BeginTOTPSetup:input_type -> nebula.executor.v1.BeginTOTPSetupRequest
-	148, // 303: nebula.executor.v1.ExecutorService.ConfirmTOTPSetup:input_type -> nebula.executor.v1.ConfirmTOTPSetupRequest
-	150, // 304: nebula.executor.v1.ExecutorService.RemoveTOTP:input_type -> nebula.executor.v1.RemoveTOTPRequest
-	152, // 305: nebula.executor.v1.ExecutorService.GetTOTPStatus:input_type -> nebula.executor.v1.GetTOTPStatusRequest
-	154, // 306: nebula.executor.v1.ExecutorService.RecoveryLogin:input_type -> nebula.executor.v1.RecoveryLoginRequest
-	156, // 307: nebula.executor.v1.ExecutorService.FinishRecovery:input_type -> nebula.executor.v1.FinishRecoveryRequest
-	94,  // 308: nebula.executor.v1.ExecutorService.ProbeHostKey:input_type -> nebula.executor.v1.ProbeHostKeyRequest
-	96,  // 309: nebula.executor.v1.ExecutorService.PinHostKey:input_type -> nebula.executor.v1.PinHostKeyRequest
-	99,  // 310: nebula.executor.v1.ExecutorService.UnpinHostKey:input_type -> nebula.executor.v1.UnpinHostKeyRequest
-	101, // 311: nebula.executor.v1.ExecutorService.ListHostKeys:input_type -> nebula.executor.v1.ListHostKeysRequest
-	103, // 312: nebula.executor.v1.ExecutorService.ProposeRepin:input_type -> nebula.executor.v1.ProposeRepinRequest
-	105, // 313: nebula.executor.v1.ExecutorService.CommitRepin:input_type -> nebula.executor.v1.CommitRepinRequest
-	108, // 314: nebula.executor.v1.ExecutorService.ProposeEnroll:input_type -> nebula.executor.v1.ProposeEnrollRequest
-	110, // 315: nebula.executor.v1.ExecutorService.CommitEnroll:input_type -> nebula.executor.v1.CommitEnrollRequest
-	113, // 316: nebula.executor.v1.ExecutorService.CreateEnrollOffer:input_type -> nebula.executor.v1.CreateEnrollOfferRequest
-	116, // 317: nebula.executor.v1.ExecutorService.FetchEnrollScript:input_type -> nebula.executor.v1.FetchEnrollScriptRequest
-	117, // 318: nebula.executor.v1.ExecutorService.ShowEnrollScript:input_type -> nebula.executor.v1.ShowEnrollScriptRequest
-	118, // 319: nebula.executor.v1.ExecutorService.DownloadEnrollScript:input_type -> nebula.executor.v1.DownloadEnrollScriptRequest
-	122, // 320: nebula.executor.v1.ExecutorService.RevokeEnrollOffer:input_type -> nebula.executor.v1.RevokeEnrollOfferRequest
-	124, // 321: nebula.executor.v1.ExecutorService.ListEnrollOffers:input_type -> nebula.executor.v1.ListEnrollOffersRequest
-	127, // 322: nebula.executor.v1.ExecutorService.SubmitPairingCode:input_type -> nebula.executor.v1.SubmitPairingCodeRequest
-	130, // 323: nebula.executor.v1.ExecutorService.CommitPairedEnroll:input_type -> nebula.executor.v1.CommitPairedEnrollRequest
-	133, // 324: nebula.executor.v1.ExecutorService.ProposeGuestJoin:input_type -> nebula.executor.v1.ProposeGuestJoinRequest
-	135, // 325: nebula.executor.v1.ExecutorService.CommitGuestJoin:input_type -> nebula.executor.v1.CommitGuestJoinRequest
-	158, // 326: nebula.executor.v1.ExecutorService.GetSSHPublicKey:input_type -> nebula.executor.v1.GetSSHPublicKeyRequest
-	137, // 327: nebula.executor.v1.ExecutorService.TestConnection:input_type -> nebula.executor.v1.TestConnectionRequest
-	160, // 328: nebula.executor.v1.ExecutorService.InitVault:input_type -> nebula.executor.v1.InitVaultRequest
-	162, // 329: nebula.executor.v1.ExecutorService.SetSecret:input_type -> nebula.executor.v1.SetSecretRequest
-	164, // 330: nebula.executor.v1.ExecutorService.ListSecrets:input_type -> nebula.executor.v1.ListSecretsRequest
-	167, // 331: nebula.executor.v1.ExecutorService.DeleteSecret:input_type -> nebula.executor.v1.DeleteSecretRequest
-	56,  // 332: nebula.executor.v1.ExecutorService.BeginGate:input_type -> nebula.executor.v1.BeginGateRequest
-	58,  // 333: nebula.executor.v1.ExecutorService.CommitGate:input_type -> nebula.executor.v1.CommitGateRequest
-	60,  // 334: nebula.executor.v1.ExecutorService.AbortRollout:input_type -> nebula.executor.v1.AbortRolloutRequest
-	62,  // 335: nebula.executor.v1.ExecutorService.GetRollout:input_type -> nebula.executor.v1.GetRolloutRequest
-	64,  // 336: nebula.executor.v1.ExecutorService.ApproveGateCLI:input_type -> nebula.executor.v1.ApproveGateCLIRequest
-	192, // 337: nebula.executor.v1.ExecutorService.BeginTrustArtifact:input_type -> nebula.executor.v1.BeginTrustArtifactRequest
-	194, // 338: nebula.executor.v1.ExecutorService.CommitTrustArtifact:input_type -> nebula.executor.v1.CommitTrustArtifactRequest
-	196, // 339: nebula.executor.v1.ExecutorService.GetArtifactTrust:input_type -> nebula.executor.v1.GetArtifactTrustRequest
-	198, // 340: nebula.executor.v1.ExecutorService.RegisterModule:input_type -> nebula.executor.v1.RegisterModuleRequest
-	201, // 341: nebula.executor.v1.ExecutorService.AddSigner:input_type -> nebula.executor.v1.AddSignerRequest
-	203, // 342: nebula.executor.v1.ExecutorService.RemoveSigner:input_type -> nebula.executor.v1.RemoveSignerRequest
-	205, // 343: nebula.executor.v1.ExecutorService.ConfirmModuleSigner:input_type -> nebula.executor.v1.ConfirmModuleSignerRequest
-	207, // 344: nebula.executor.v1.ExecutorService.ListSigners:input_type -> nebula.executor.v1.ListSignersRequest
-	176, // 345: nebula.executor.v1.ExecutorService.ProposeScheduleGrant:input_type -> nebula.executor.v1.ProposeScheduleGrantRequest
-	178, // 346: nebula.executor.v1.ExecutorService.CommitScheduleGrant:input_type -> nebula.executor.v1.CommitScheduleGrantRequest
-	181, // 347: nebula.executor.v1.ExecutorService.ListPendingScheduleGrants:input_type -> nebula.executor.v1.ListPendingScheduleGrantsRequest
-	184, // 348: nebula.executor.v1.ExecutorService.ApproveScheduleGrantCLI:input_type -> nebula.executor.v1.ApproveScheduleGrantCLIRequest
-	186, // 349: nebula.executor.v1.ExecutorService.ListScheduleGrants:input_type -> nebula.executor.v1.ListScheduleGrantsRequest
-	188, // 350: nebula.executor.v1.ExecutorService.RevokeScheduleGrant:input_type -> nebula.executor.v1.RevokeScheduleGrantRequest
-	190, // 351: nebula.executor.v1.ExecutorService.RunScheduled:input_type -> nebula.executor.v1.RunScheduledRequest
-	291, // 352: nebula.executor.v1.ExecutorService.ProposeReadGrant:input_type -> nebula.executor.v1.ProposeReadGrantRequest
-	293, // 353: nebula.executor.v1.ExecutorService.CommitReadGrant:input_type -> nebula.executor.v1.CommitReadGrantRequest
-	296, // 354: nebula.executor.v1.ExecutorService.ListPendingReadGrants:input_type -> nebula.executor.v1.ListPendingReadGrantsRequest
-	299, // 355: nebula.executor.v1.ExecutorService.ApproveReadGrantCLI:input_type -> nebula.executor.v1.ApproveReadGrantCLIRequest
-	301, // 356: nebula.executor.v1.ExecutorService.ListReadGrants:input_type -> nebula.executor.v1.ListReadGrantsRequest
-	303, // 357: nebula.executor.v1.ExecutorService.RevokeReadGrant:input_type -> nebula.executor.v1.RevokeReadGrantRequest
-	305, // 358: nebula.executor.v1.ExecutorService.RunReadGrant:input_type -> nebula.executor.v1.RunReadGrantRequest
-	314, // 359: nebula.executor.v1.ExecutorService.ProposeBatch:input_type -> nebula.executor.v1.ProposeBatchRequest
-	316, // 360: nebula.executor.v1.ExecutorService.CommitBatch:input_type -> nebula.executor.v1.CommitBatchRequest
-	318, // 361: nebula.executor.v1.ExecutorService.ReviewBatch:input_type -> nebula.executor.v1.ReviewBatchRequest
-	320, // 362: nebula.executor.v1.ExecutorService.ApproveBatchCLI:input_type -> nebula.executor.v1.ApproveBatchCLIRequest
-	322, // 363: nebula.executor.v1.ExecutorService.GetBatchStatus:input_type -> nebula.executor.v1.GetBatchStatusRequest
-	324, // 364: nebula.executor.v1.ExecutorService.GetBatchCredentialVersions:input_type -> nebula.executor.v1.GetBatchCredentialVersionsRequest
-	327, // 365: nebula.executor.v1.ExecutorService.RunBatchMember:input_type -> nebula.executor.v1.RunBatchMemberRequest
-	333, // 366: nebula.executor.v1.ExecutorService.ReviewBuiltinTrust:input_type -> nebula.executor.v1.ReviewBuiltinTrustRequest
-	335, // 367: nebula.executor.v1.ExecutorService.CommitBuiltinTrust:input_type -> nebula.executor.v1.CommitBuiltinTrustRequest
-	337, // 368: nebula.executor.v1.ExecutorService.UnpinBuiltinVersion:input_type -> nebula.executor.v1.UnpinBuiltinVersionRequest
-	340, // 369: nebula.executor.v1.ExecutorService.GetBuiltinTrustStatus:input_type -> nebula.executor.v1.GetBuiltinTrustStatusRequest
-	344, // 370: nebula.executor.v1.ExecutorService.ReviewRootRotation:input_type -> nebula.executor.v1.ReviewRootRotationRequest
-	346, // 371: nebula.executor.v1.ExecutorService.CommitRootRotation:input_type -> nebula.executor.v1.CommitRootRotationRequest
-	211, // 372: nebula.executor.v1.ExecutorService.ListEvents:input_type -> nebula.executor.v1.ListEventsRequest
-	215, // 373: nebula.executor.v1.ExecutorService.BackupExecutor:input_type -> nebula.executor.v1.BackupExecutorRequest
-	253, // 374: nebula.executor.v1.ExecutorService.ProbePVERemote:input_type -> nebula.executor.v1.ProbePVERemoteRequest
-	257, // 375: nebula.executor.v1.ExecutorService.AddPVERemote:input_type -> nebula.executor.v1.AddPVERemoteRequest
-	258, // 376: nebula.executor.v1.ExecutorService.RotatePVEToken:input_type -> nebula.executor.v1.RotatePVETokenRequest
-	259, // 377: nebula.executor.v1.ExecutorService.RemovePVERemote:input_type -> nebula.executor.v1.RemovePVERemoteRequest
-	260, // 378: nebula.executor.v1.ExecutorService.ListPVEAdminRemotes:input_type -> nebula.executor.v1.ListPVEAdminRemotesRequest
-	261, // 379: nebula.executor.v1.ExecutorService.SetPVERemoteSite:input_type -> nebula.executor.v1.SetPVERemoteSiteRequest
-	264, // 380: nebula.executor.v1.ExecutorService.ProposePVERepin:input_type -> nebula.executor.v1.ProposePVERepinRequest
-	265, // 381: nebula.executor.v1.ExecutorService.CommitPVERepin:input_type -> nebula.executor.v1.CommitPVERepinRequest
-	272, // 382: nebula.executor.v1.ExecutorService.ProposePVEGuestPower:input_type -> nebula.executor.v1.ProposePVEGuestPowerRequest
-	274, // 383: nebula.executor.v1.ExecutorService.CommitPVEGuestPower:input_type -> nebula.executor.v1.CommitPVEGuestPowerRequest
-	279, // 384: nebula.executor.v1.ExecutorService.ProposePVEGuestSnapshot:input_type -> nebula.executor.v1.ProposePVEGuestSnapshotRequest
-	281, // 385: nebula.executor.v1.ExecutorService.CommitPVEGuestSnapshot:input_type -> nebula.executor.v1.CommitPVEGuestSnapshotRequest
-	287, // 386: nebula.executor.v1.ExecutorService.ProposePVEGuestProvision:input_type -> nebula.executor.v1.ProposePVEGuestProvisionRequest
-	289, // 387: nebula.executor.v1.ExecutorService.CommitPVEGuestProvision:input_type -> nebula.executor.v1.CommitPVEGuestProvisionRequest
-	220, // 388: nebula.executor.v1.ExecutorService.ListPVERemotes:input_type -> nebula.executor.v1.ListPVERemotesRequest
-	225, // 389: nebula.executor.v1.ExecutorService.ReadPVE:input_type -> nebula.executor.v1.ReadPVERequest
-	348, // 390: nebula.executor.v1.ExecutorService.AddPrivateRegistry:input_type -> nebula.executor.v1.AddPrivateRegistryRequest
-	350, // 391: nebula.executor.v1.ExecutorService.RotatePrivateRegistryCredential:input_type -> nebula.executor.v1.RotatePrivateRegistryCredentialRequest
-	352, // 392: nebula.executor.v1.ExecutorService.RemovePrivateRegistry:input_type -> nebula.executor.v1.RemovePrivateRegistryRequest
-	354, // 393: nebula.executor.v1.ExecutorService.ListPrivateRegistries:input_type -> nebula.executor.v1.ListPrivateRegistriesRequest
-	357, // 394: nebula.executor.v1.ExecutorService.ReadPrivateRegistry:input_type -> nebula.executor.v1.ReadPrivateRegistryRequest
-	359, // 395: nebula.executor.v1.ExecutorService.PutContainerDefinition:input_type -> nebula.executor.v1.PutContainerDefinitionRequest
-	362, // 396: nebula.executor.v1.ExecutorService.RemoveContainerDefinition:input_type -> nebula.executor.v1.RemoveContainerDefinitionRequest
-	364, // 397: nebula.executor.v1.ExecutorService.ListContainerDefinitions:input_type -> nebula.executor.v1.ListContainerDefinitionsRequest
-	367, // 398: nebula.executor.v1.ExecutorService.ListContainerRecreations:input_type -> nebula.executor.v1.ListContainerRecreationsRequest
-	376, // 399: nebula.executor.v1.ExecutorService.SetContainerRecoveryPlan:input_type -> nebula.executor.v1.SetContainerRecoveryPlanRequest
-	378, // 400: nebula.executor.v1.ExecutorService.ClearContainerRecoveryPlan:input_type -> nebula.executor.v1.ClearContainerRecoveryPlanRequest
-	380, // 401: nebula.executor.v1.ExecutorService.ResolveContainerRecreation:input_type -> nebula.executor.v1.ResolveContainerRecreationRequest
-	384, // 402: nebula.executor.v1.ExecutorService.ProbeNetDevice:input_type -> nebula.executor.v1.ProbeNetDeviceRequest
-	386, // 403: nebula.executor.v1.ExecutorService.RegisterNetDevice:input_type -> nebula.executor.v1.RegisterNetDeviceRequest
-	388, // 404: nebula.executor.v1.ExecutorService.SetNetDeviceCredential:input_type -> nebula.executor.v1.SetNetDeviceCredentialRequest
-	390, // 405: nebula.executor.v1.ExecutorService.RotateNetDeviceCredential:input_type -> nebula.executor.v1.RotateNetDeviceCredentialRequest
-	392, // 406: nebula.executor.v1.ExecutorService.ProposeNetDeviceRepin:input_type -> nebula.executor.v1.ProposeNetDeviceRepinRequest
-	394, // 407: nebula.executor.v1.ExecutorService.CommitNetDeviceRepin:input_type -> nebula.executor.v1.CommitNetDeviceRepinRequest
-	396, // 408: nebula.executor.v1.ExecutorService.BlockNetDevice:input_type -> nebula.executor.v1.BlockNetDeviceRequest
-	398, // 409: nebula.executor.v1.ExecutorService.UnblockNetDevice:input_type -> nebula.executor.v1.UnblockNetDeviceRequest
-	400, // 410: nebula.executor.v1.ExecutorService.RemoveNetDevice:input_type -> nebula.executor.v1.RemoveNetDeviceRequest
-	402, // 411: nebula.executor.v1.ExecutorService.ListNetDevices:input_type -> nebula.executor.v1.ListNetDevicesRequest
-	404, // 412: nebula.executor.v1.ExecutorService.ReadNetDevice:input_type -> nebula.executor.v1.ReadNetDeviceRequest
-	427, // 413: nebula.executor.v1.ExecutorService.GetIntegrityStatus:input_type -> nebula.executor.v1.GetIntegrityStatusRequest
-	432, // 414: nebula.executor.v1.ExecutorService.AckIntegrityFinding:input_type -> nebula.executor.v1.AckIntegrityFindingRequest
-	434, // 415: nebula.executor.v1.ExecutorService.CompareBaselineDigest:input_type -> nebula.executor.v1.CompareBaselineDigestRequest
-	31,  // 416: nebula.executor.v1.ExecutorService.GetStatus:output_type -> nebula.executor.v1.GetStatusResponse
-	33,  // 417: nebula.executor.v1.ExecutorService.ProposeExecution:output_type -> nebula.executor.v1.ProposeExecutionResponse
-	35,  // 418: nebula.executor.v1.ExecutorService.SubmitAssertion:output_type -> nebula.executor.v1.SubmitAssertionResponse
-	37,  // 419: nebula.executor.v1.ExecutorService.BeginPrivilegedSession:output_type -> nebula.executor.v1.BeginPrivilegedSessionResponse
-	39,  // 420: nebula.executor.v1.ExecutorService.CompletePrivilegedSession:output_type -> nebula.executor.v1.CompletePrivilegedSessionResponse
-	41,  // 421: nebula.executor.v1.ExecutorService.GetSessionState:output_type -> nebula.executor.v1.GetSessionStateResponse
-	43,  // 422: nebula.executor.v1.ExecutorService.AuthorizeRun:output_type -> nebula.executor.v1.AuthorizeRunResponse
-	170, // 423: nebula.executor.v1.ExecutorService.RunAttached:output_type -> nebula.executor.v1.RunAttachedResponse
-	172, // 424: nebula.executor.v1.ExecutorService.StartDurable:output_type -> nebula.executor.v1.StartDurableResponse
-	173, // 425: nebula.executor.v1.ExecutorService.GetRun:output_type -> nebula.executor.v1.GetRunResponse
-	45,  // 426: nebula.executor.v1.ExecutorService.Unlock:output_type -> nebula.executor.v1.UnlockResponse
-	47,  // 427: nebula.executor.v1.ExecutorService.Lock:output_type -> nebula.executor.v1.LockResponse
-	66,  // 428: nebula.executor.v1.ExecutorService.ListPending:output_type -> nebula.executor.v1.ListPendingResponse
-	68,  // 429: nebula.executor.v1.ExecutorService.ApproveCLI:output_type -> nebula.executor.v1.ApproveCLIResponse
-	70,  // 430: nebula.executor.v1.ExecutorService.GetPermitState:output_type -> nebula.executor.v1.GetPermitStateResponse
-	72,  // 431: nebula.executor.v1.ExecutorService.TrustArtifact:output_type -> nebula.executor.v1.TrustArtifactResponse
-	74,  // 432: nebula.executor.v1.ExecutorService.UntrustArtifact:output_type -> nebula.executor.v1.UntrustArtifactResponse
-	77,  // 433: nebula.executor.v1.ExecutorService.ListTrustedArtifacts:output_type -> nebula.executor.v1.ListTrustedArtifactsResponse
-	79,  // 434: nebula.executor.v1.ExecutorService.SetHostCriticality:output_type -> nebula.executor.v1.SetHostCriticalityResponse
-	82,  // 435: nebula.executor.v1.ExecutorService.ListHostCriticality:output_type -> nebula.executor.v1.ListHostCriticalityResponse
-	84,  // 436: nebula.executor.v1.ExecutorService.CreateRegistrationCode:output_type -> nebula.executor.v1.CreateRegistrationCodeResponse
-	86,  // 437: nebula.executor.v1.ExecutorService.BeginRegistration:output_type -> nebula.executor.v1.BeginRegistrationResponse
-	88,  // 438: nebula.executor.v1.ExecutorService.FinishRegistration:output_type -> nebula.executor.v1.FinishRegistrationResponse
-	91,  // 439: nebula.executor.v1.ExecutorService.ListWebAuthnCredentials:output_type -> nebula.executor.v1.ListWebAuthnCredentialsResponse
-	93,  // 440: nebula.executor.v1.ExecutorService.RemoveWebAuthnCredential:output_type -> nebula.executor.v1.RemoveWebAuthnCredentialResponse
-	141, // 441: nebula.executor.v1.ExecutorService.BeginLogin:output_type -> nebula.executor.v1.BeginLoginResponse
-	143, // 442: nebula.executor.v1.ExecutorService.FinishLogin:output_type -> nebula.executor.v1.FinishLoginResponse
-	145, // 443: nebula.executor.v1.ExecutorService.CheckCredential:output_type -> nebula.executor.v1.CheckCredentialResponse
-	147, // 444: nebula.executor.v1.ExecutorService.BeginTOTPSetup:output_type -> nebula.executor.v1.BeginTOTPSetupResponse
-	149, // 445: nebula.executor.v1.ExecutorService.ConfirmTOTPSetup:output_type -> nebula.executor.v1.ConfirmTOTPSetupResponse
-	151, // 446: nebula.executor.v1.ExecutorService.RemoveTOTP:output_type -> nebula.executor.v1.RemoveTOTPResponse
-	153, // 447: nebula.executor.v1.ExecutorService.GetTOTPStatus:output_type -> nebula.executor.v1.GetTOTPStatusResponse
-	155, // 448: nebula.executor.v1.ExecutorService.RecoveryLogin:output_type -> nebula.executor.v1.RecoveryLoginResponse
-	157, // 449: nebula.executor.v1.ExecutorService.FinishRecovery:output_type -> nebula.executor.v1.FinishRecoveryResponse
-	95,  // 450: nebula.executor.v1.ExecutorService.ProbeHostKey:output_type -> nebula.executor.v1.ProbeHostKeyResponse
-	98,  // 451: nebula.executor.v1.ExecutorService.PinHostKey:output_type -> nebula.executor.v1.PinHostKeyResponse
-	100, // 452: nebula.executor.v1.ExecutorService.UnpinHostKey:output_type -> nebula.executor.v1.UnpinHostKeyResponse
-	102, // 453: nebula.executor.v1.ExecutorService.ListHostKeys:output_type -> nebula.executor.v1.ListHostKeysResponse
-	104, // 454: nebula.executor.v1.ExecutorService.ProposeRepin:output_type -> nebula.executor.v1.ProposeRepinResponse
-	106, // 455: nebula.executor.v1.ExecutorService.CommitRepin:output_type -> nebula.executor.v1.CommitRepinResponse
-	109, // 456: nebula.executor.v1.ExecutorService.ProposeEnroll:output_type -> nebula.executor.v1.ProposeEnrollResponse
-	112, // 457: nebula.executor.v1.ExecutorService.CommitEnroll:output_type -> nebula.executor.v1.CommitEnrollResponse
-	115, // 458: nebula.executor.v1.ExecutorService.CreateEnrollOffer:output_type -> nebula.executor.v1.CreateEnrollOfferResponse
-	119, // 459: nebula.executor.v1.ExecutorService.FetchEnrollScript:output_type -> nebula.executor.v1.FetchEnrollScriptResponse
-	120, // 460: nebula.executor.v1.ExecutorService.ShowEnrollScript:output_type -> nebula.executor.v1.ShowEnrollScriptResponse
-	121, // 461: nebula.executor.v1.ExecutorService.DownloadEnrollScript:output_type -> nebula.executor.v1.DownloadEnrollScriptResponse
-	123, // 462: nebula.executor.v1.ExecutorService.RevokeEnrollOffer:output_type -> nebula.executor.v1.RevokeEnrollOfferResponse
-	126, // 463: nebula.executor.v1.ExecutorService.ListEnrollOffers:output_type -> nebula.executor.v1.ListEnrollOffersResponse
-	129, // 464: nebula.executor.v1.ExecutorService.SubmitPairingCode:output_type -> nebula.executor.v1.SubmitPairingCodeResponse
-	131, // 465: nebula.executor.v1.ExecutorService.CommitPairedEnroll:output_type -> nebula.executor.v1.CommitPairedEnrollResponse
-	134, // 466: nebula.executor.v1.ExecutorService.ProposeGuestJoin:output_type -> nebula.executor.v1.ProposeGuestJoinResponse
-	136, // 467: nebula.executor.v1.ExecutorService.CommitGuestJoin:output_type -> nebula.executor.v1.CommitGuestJoinResponse
-	159, // 468: nebula.executor.v1.ExecutorService.GetSSHPublicKey:output_type -> nebula.executor.v1.GetSSHPublicKeyResponse
-	139, // 469: nebula.executor.v1.ExecutorService.TestConnection:output_type -> nebula.executor.v1.TestConnectionResponse
-	161, // 470: nebula.executor.v1.ExecutorService.InitVault:output_type -> nebula.executor.v1.InitVaultResponse
-	163, // 471: nebula.executor.v1.ExecutorService.SetSecret:output_type -> nebula.executor.v1.SetSecretResponse
-	166, // 472: nebula.executor.v1.ExecutorService.ListSecrets:output_type -> nebula.executor.v1.ListSecretsResponse
-	168, // 473: nebula.executor.v1.ExecutorService.DeleteSecret:output_type -> nebula.executor.v1.DeleteSecretResponse
-	57,  // 474: nebula.executor.v1.ExecutorService.BeginGate:output_type -> nebula.executor.v1.BeginGateResponse
-	59,  // 475: nebula.executor.v1.ExecutorService.CommitGate:output_type -> nebula.executor.v1.CommitGateResponse
-	61,  // 476: nebula.executor.v1.ExecutorService.AbortRollout:output_type -> nebula.executor.v1.AbortRolloutResponse
-	63,  // 477: nebula.executor.v1.ExecutorService.GetRollout:output_type -> nebula.executor.v1.GetRolloutResponse
-	65,  // 478: nebula.executor.v1.ExecutorService.ApproveGateCLI:output_type -> nebula.executor.v1.ApproveGateCLIResponse
-	193, // 479: nebula.executor.v1.ExecutorService.BeginTrustArtifact:output_type -> nebula.executor.v1.BeginTrustArtifactResponse
-	195, // 480: nebula.executor.v1.ExecutorService.CommitTrustArtifact:output_type -> nebula.executor.v1.CommitTrustArtifactResponse
-	197, // 481: nebula.executor.v1.ExecutorService.GetArtifactTrust:output_type -> nebula.executor.v1.GetArtifactTrustResponse
-	200, // 482: nebula.executor.v1.ExecutorService.RegisterModule:output_type -> nebula.executor.v1.RegisterModuleResponse
-	202, // 483: nebula.executor.v1.ExecutorService.AddSigner:output_type -> nebula.executor.v1.AddSignerResponse
-	204, // 484: nebula.executor.v1.ExecutorService.RemoveSigner:output_type -> nebula.executor.v1.RemoveSignerResponse
-	206, // 485: nebula.executor.v1.ExecutorService.ConfirmModuleSigner:output_type -> nebula.executor.v1.ConfirmModuleSignerResponse
-	210, // 486: nebula.executor.v1.ExecutorService.ListSigners:output_type -> nebula.executor.v1.ListSignersResponse
-	177, // 487: nebula.executor.v1.ExecutorService.ProposeScheduleGrant:output_type -> nebula.executor.v1.ProposeScheduleGrantResponse
-	180, // 488: nebula.executor.v1.ExecutorService.CommitScheduleGrant:output_type -> nebula.executor.v1.CommitScheduleGrantResponse
-	183, // 489: nebula.executor.v1.ExecutorService.ListPendingScheduleGrants:output_type -> nebula.executor.v1.ListPendingScheduleGrantsResponse
-	185, // 490: nebula.executor.v1.ExecutorService.ApproveScheduleGrantCLI:output_type -> nebula.executor.v1.ApproveScheduleGrantCLIResponse
-	187, // 491: nebula.executor.v1.ExecutorService.ListScheduleGrants:output_type -> nebula.executor.v1.ListScheduleGrantsResponse
-	189, // 492: nebula.executor.v1.ExecutorService.RevokeScheduleGrant:output_type -> nebula.executor.v1.RevokeScheduleGrantResponse
-	191, // 493: nebula.executor.v1.ExecutorService.RunScheduled:output_type -> nebula.executor.v1.RunScheduledResponse
-	292, // 494: nebula.executor.v1.ExecutorService.ProposeReadGrant:output_type -> nebula.executor.v1.ProposeReadGrantResponse
-	295, // 495: nebula.executor.v1.ExecutorService.CommitReadGrant:output_type -> nebula.executor.v1.CommitReadGrantResponse
-	298, // 496: nebula.executor.v1.ExecutorService.ListPendingReadGrants:output_type -> nebula.executor.v1.ListPendingReadGrantsResponse
-	300, // 497: nebula.executor.v1.ExecutorService.ApproveReadGrantCLI:output_type -> nebula.executor.v1.ApproveReadGrantCLIResponse
-	302, // 498: nebula.executor.v1.ExecutorService.ListReadGrants:output_type -> nebula.executor.v1.ListReadGrantsResponse
-	304, // 499: nebula.executor.v1.ExecutorService.RevokeReadGrant:output_type -> nebula.executor.v1.RevokeReadGrantResponse
-	306, // 500: nebula.executor.v1.ExecutorService.RunReadGrant:output_type -> nebula.executor.v1.RunReadGrantResponse
-	315, // 501: nebula.executor.v1.ExecutorService.ProposeBatch:output_type -> nebula.executor.v1.ProposeBatchResponse
-	317, // 502: nebula.executor.v1.ExecutorService.CommitBatch:output_type -> nebula.executor.v1.CommitBatchResponse
-	319, // 503: nebula.executor.v1.ExecutorService.ReviewBatch:output_type -> nebula.executor.v1.ReviewBatchResponse
-	321, // 504: nebula.executor.v1.ExecutorService.ApproveBatchCLI:output_type -> nebula.executor.v1.ApproveBatchCLIResponse
-	323, // 505: nebula.executor.v1.ExecutorService.GetBatchStatus:output_type -> nebula.executor.v1.GetBatchStatusResponse
-	326, // 506: nebula.executor.v1.ExecutorService.GetBatchCredentialVersions:output_type -> nebula.executor.v1.GetBatchCredentialVersionsResponse
-	328, // 507: nebula.executor.v1.ExecutorService.RunBatchMember:output_type -> nebula.executor.v1.RunBatchMemberResponse
-	334, // 508: nebula.executor.v1.ExecutorService.ReviewBuiltinTrust:output_type -> nebula.executor.v1.ReviewBuiltinTrustResponse
-	339, // 509: nebula.executor.v1.ExecutorService.CommitBuiltinTrust:output_type -> nebula.executor.v1.CommitBuiltinTrustResponse
-	338, // 510: nebula.executor.v1.ExecutorService.UnpinBuiltinVersion:output_type -> nebula.executor.v1.UnpinBuiltinVersionResponse
-	342, // 511: nebula.executor.v1.ExecutorService.GetBuiltinTrustStatus:output_type -> nebula.executor.v1.GetBuiltinTrustStatusResponse
-	345, // 512: nebula.executor.v1.ExecutorService.ReviewRootRotation:output_type -> nebula.executor.v1.ReviewRootRotationResponse
-	347, // 513: nebula.executor.v1.ExecutorService.CommitRootRotation:output_type -> nebula.executor.v1.CommitRootRotationResponse
-	213, // 514: nebula.executor.v1.ExecutorService.ListEvents:output_type -> nebula.executor.v1.ListEventsResponse
-	217, // 515: nebula.executor.v1.ExecutorService.BackupExecutor:output_type -> nebula.executor.v1.BackupExecutorResponse
-	255, // 516: nebula.executor.v1.ExecutorService.ProbePVERemote:output_type -> nebula.executor.v1.ProbePVERemoteResponse
-	266, // 517: nebula.executor.v1.ExecutorService.AddPVERemote:output_type -> nebula.executor.v1.AddPVERemoteResponse
-	267, // 518: nebula.executor.v1.ExecutorService.RotatePVEToken:output_type -> nebula.executor.v1.RotatePVETokenResponse
-	268, // 519: nebula.executor.v1.ExecutorService.RemovePVERemote:output_type -> nebula.executor.v1.RemovePVERemoteResponse
-	263, // 520: nebula.executor.v1.ExecutorService.ListPVEAdminRemotes:output_type -> nebula.executor.v1.ListPVEAdminRemotesResponse
-	262, // 521: nebula.executor.v1.ExecutorService.SetPVERemoteSite:output_type -> nebula.executor.v1.SetPVERemoteSiteResponse
-	270, // 522: nebula.executor.v1.ExecutorService.ProposePVERepin:output_type -> nebula.executor.v1.ProposePVERepinResponse
-	269, // 523: nebula.executor.v1.ExecutorService.CommitPVERepin:output_type -> nebula.executor.v1.CommitPVERepinResponse
-	273, // 524: nebula.executor.v1.ExecutorService.ProposePVEGuestPower:output_type -> nebula.executor.v1.ProposePVEGuestPowerResponse
-	276, // 525: nebula.executor.v1.ExecutorService.CommitPVEGuestPower:output_type -> nebula.executor.v1.CommitPVEGuestPowerResponse
-	280, // 526: nebula.executor.v1.ExecutorService.ProposePVEGuestSnapshot:output_type -> nebula.executor.v1.ProposePVEGuestSnapshotResponse
-	282, // 527: nebula.executor.v1.ExecutorService.CommitPVEGuestSnapshot:output_type -> nebula.executor.v1.CommitPVEGuestSnapshotResponse
-	288, // 528: nebula.executor.v1.ExecutorService.ProposePVEGuestProvision:output_type -> nebula.executor.v1.ProposePVEGuestProvisionResponse
-	290, // 529: nebula.executor.v1.ExecutorService.CommitPVEGuestProvision:output_type -> nebula.executor.v1.CommitPVEGuestProvisionResponse
-	221, // 530: nebula.executor.v1.ExecutorService.ListPVERemotes:output_type -> nebula.executor.v1.ListPVERemotesResponse
-	226, // 531: nebula.executor.v1.ExecutorService.ReadPVE:output_type -> nebula.executor.v1.ReadPVEResponse
-	349, // 532: nebula.executor.v1.ExecutorService.AddPrivateRegistry:output_type -> nebula.executor.v1.AddPrivateRegistryResponse
-	351, // 533: nebula.executor.v1.ExecutorService.RotatePrivateRegistryCredential:output_type -> nebula.executor.v1.RotatePrivateRegistryCredentialResponse
-	353, // 534: nebula.executor.v1.ExecutorService.RemovePrivateRegistry:output_type -> nebula.executor.v1.RemovePrivateRegistryResponse
-	355, // 535: nebula.executor.v1.ExecutorService.ListPrivateRegistries:output_type -> nebula.executor.v1.ListPrivateRegistriesResponse
-	358, // 536: nebula.executor.v1.ExecutorService.ReadPrivateRegistry:output_type -> nebula.executor.v1.ReadPrivateRegistryResponse
-	361, // 537: nebula.executor.v1.ExecutorService.PutContainerDefinition:output_type -> nebula.executor.v1.PutContainerDefinitionResponse
-	363, // 538: nebula.executor.v1.ExecutorService.RemoveContainerDefinition:output_type -> nebula.executor.v1.RemoveContainerDefinitionResponse
-	365, // 539: nebula.executor.v1.ExecutorService.ListContainerDefinitions:output_type -> nebula.executor.v1.ListContainerDefinitionsResponse
-	368, // 540: nebula.executor.v1.ExecutorService.ListContainerRecreations:output_type -> nebula.executor.v1.ListContainerRecreationsResponse
-	377, // 541: nebula.executor.v1.ExecutorService.SetContainerRecoveryPlan:output_type -> nebula.executor.v1.SetContainerRecoveryPlanResponse
-	379, // 542: nebula.executor.v1.ExecutorService.ClearContainerRecoveryPlan:output_type -> nebula.executor.v1.ClearContainerRecoveryPlanResponse
-	381, // 543: nebula.executor.v1.ExecutorService.ResolveContainerRecreation:output_type -> nebula.executor.v1.ResolveContainerRecreationResponse
-	385, // 544: nebula.executor.v1.ExecutorService.ProbeNetDevice:output_type -> nebula.executor.v1.ProbeNetDeviceResponse
-	387, // 545: nebula.executor.v1.ExecutorService.RegisterNetDevice:output_type -> nebula.executor.v1.RegisterNetDeviceResponse
-	389, // 546: nebula.executor.v1.ExecutorService.SetNetDeviceCredential:output_type -> nebula.executor.v1.SetNetDeviceCredentialResponse
-	391, // 547: nebula.executor.v1.ExecutorService.RotateNetDeviceCredential:output_type -> nebula.executor.v1.RotateNetDeviceCredentialResponse
-	393, // 548: nebula.executor.v1.ExecutorService.ProposeNetDeviceRepin:output_type -> nebula.executor.v1.ProposeNetDeviceRepinResponse
-	395, // 549: nebula.executor.v1.ExecutorService.CommitNetDeviceRepin:output_type -> nebula.executor.v1.CommitNetDeviceRepinResponse
-	397, // 550: nebula.executor.v1.ExecutorService.BlockNetDevice:output_type -> nebula.executor.v1.BlockNetDeviceResponse
-	399, // 551: nebula.executor.v1.ExecutorService.UnblockNetDevice:output_type -> nebula.executor.v1.UnblockNetDeviceResponse
-	401, // 552: nebula.executor.v1.ExecutorService.RemoveNetDevice:output_type -> nebula.executor.v1.RemoveNetDeviceResponse
-	403, // 553: nebula.executor.v1.ExecutorService.ListNetDevices:output_type -> nebula.executor.v1.ListNetDevicesResponse
-	405, // 554: nebula.executor.v1.ExecutorService.ReadNetDevice:output_type -> nebula.executor.v1.ReadNetDeviceResponse
-	431, // 555: nebula.executor.v1.ExecutorService.GetIntegrityStatus:output_type -> nebula.executor.v1.GetIntegrityStatusResponse
-	433, // 556: nebula.executor.v1.ExecutorService.AckIntegrityFinding:output_type -> nebula.executor.v1.AckIntegrityFindingResponse
-	435, // 557: nebula.executor.v1.ExecutorService.CompareBaselineDigest:output_type -> nebula.executor.v1.CompareBaselineDigestResponse
-	416, // [416:558] is the sub-list for method output_type
-	274, // [274:416] is the sub-list for method input_type
-	274, // [274:274] is the sub-list for extension type_name
-	274, // [274:274] is the sub-list for extension extendee
-	0,   // [0:274] is the sub-list for field type_name
+	423, // 266: nebula.executor.v1.NetDevSecurityRules.rules:type_name -> nebula.executor.v1.NetDevSecurityRule
+	425, // 267: nebula.executor.v1.NetDevNATRules.rules:type_name -> nebula.executor.v1.NetDevNATRule
+	427, // 268: nebula.executor.v1.NetDevRuleHitCounts.entries:type_name -> nebula.executor.v1.NetDevRuleHitCount
+	430, // 269: nebula.executor.v1.IntegrityRun.deviations:type_name -> nebula.executor.v1.IntegrityDeviation
+	431, // 270: nebula.executor.v1.GetIntegrityStatusResponse.last_run:type_name -> nebula.executor.v1.IntegrityRun
+	432, // 271: nebula.executor.v1.GetIntegrityStatusResponse.findings:type_name -> nebula.executor.v1.IntegrityFinding
+	441, // 272: nebula.executor.v1.GetIntegrityStatusResponse.baseline_tamper_findings:type_name -> nebula.executor.v1.BaselineTamperFinding
+	432, // 273: nebula.executor.v1.AckIntegrityFindingResponse.finding:type_name -> nebula.executor.v1.IntegrityFinding
+	437, // 274: nebula.executor.v1.CompareBaselineListRequest.header:type_name -> nebula.executor.v1.CompareBaselineListHeader
+	438, // 275: nebula.executor.v1.CompareBaselineListRequest.entries:type_name -> nebula.executor.v1.BaselineListEntry
+	439, // 276: nebula.executor.v1.CompareBaselineListRequest.mounts:type_name -> nebula.executor.v1.BaselineListMount
+	27,  // 277: nebula.executor.v1.BaselineListEntry.type:type_name -> nebula.executor.v1.BaselineEntryType
+	28,  // 278: nebula.executor.v1.BaselineListEntry.hash_kind:type_name -> nebula.executor.v1.BaselineHashKind
+	29,  // 279: nebula.executor.v1.CompareBaselineListResponse.result:type_name -> nebula.executor.v1.BaselineDigestComparison
+	32,  // 280: nebula.executor.v1.ExecutorService.GetStatus:input_type -> nebula.executor.v1.GetStatusRequest
+	34,  // 281: nebula.executor.v1.ExecutorService.ProposeExecution:input_type -> nebula.executor.v1.ProposeExecutionRequest
+	36,  // 282: nebula.executor.v1.ExecutorService.SubmitAssertion:input_type -> nebula.executor.v1.SubmitAssertionRequest
+	38,  // 283: nebula.executor.v1.ExecutorService.BeginPrivilegedSession:input_type -> nebula.executor.v1.BeginPrivilegedSessionRequest
+	40,  // 284: nebula.executor.v1.ExecutorService.CompletePrivilegedSession:input_type -> nebula.executor.v1.CompletePrivilegedSessionRequest
+	42,  // 285: nebula.executor.v1.ExecutorService.GetSessionState:input_type -> nebula.executor.v1.GetSessionStateRequest
+	44,  // 286: nebula.executor.v1.ExecutorService.AuthorizeRun:input_type -> nebula.executor.v1.AuthorizeRunRequest
+	171, // 287: nebula.executor.v1.ExecutorService.RunAttached:input_type -> nebula.executor.v1.RunAttachedRequest
+	173, // 288: nebula.executor.v1.ExecutorService.StartDurable:input_type -> nebula.executor.v1.StartDurableRequest
+	176, // 289: nebula.executor.v1.ExecutorService.GetRun:input_type -> nebula.executor.v1.GetRunRequest
+	46,  // 290: nebula.executor.v1.ExecutorService.Unlock:input_type -> nebula.executor.v1.UnlockRequest
+	48,  // 291: nebula.executor.v1.ExecutorService.Lock:input_type -> nebula.executor.v1.LockRequest
+	50,  // 292: nebula.executor.v1.ExecutorService.ListPending:input_type -> nebula.executor.v1.ListPendingRequest
+	69,  // 293: nebula.executor.v1.ExecutorService.ApproveCLI:input_type -> nebula.executor.v1.ApproveCLIRequest
+	71,  // 294: nebula.executor.v1.ExecutorService.GetPermitState:input_type -> nebula.executor.v1.GetPermitStateRequest
+	73,  // 295: nebula.executor.v1.ExecutorService.TrustArtifact:input_type -> nebula.executor.v1.TrustArtifactRequest
+	75,  // 296: nebula.executor.v1.ExecutorService.UntrustArtifact:input_type -> nebula.executor.v1.UntrustArtifactRequest
+	77,  // 297: nebula.executor.v1.ExecutorService.ListTrustedArtifacts:input_type -> nebula.executor.v1.ListTrustedArtifactsRequest
+	80,  // 298: nebula.executor.v1.ExecutorService.SetHostCriticality:input_type -> nebula.executor.v1.SetHostCriticalityRequest
+	82,  // 299: nebula.executor.v1.ExecutorService.ListHostCriticality:input_type -> nebula.executor.v1.ListHostCriticalityRequest
+	85,  // 300: nebula.executor.v1.ExecutorService.CreateRegistrationCode:input_type -> nebula.executor.v1.CreateRegistrationCodeRequest
+	87,  // 301: nebula.executor.v1.ExecutorService.BeginRegistration:input_type -> nebula.executor.v1.BeginRegistrationRequest
+	89,  // 302: nebula.executor.v1.ExecutorService.FinishRegistration:input_type -> nebula.executor.v1.FinishRegistrationRequest
+	91,  // 303: nebula.executor.v1.ExecutorService.ListWebAuthnCredentials:input_type -> nebula.executor.v1.ListWebAuthnCredentialsRequest
+	94,  // 304: nebula.executor.v1.ExecutorService.RemoveWebAuthnCredential:input_type -> nebula.executor.v1.RemoveWebAuthnCredentialRequest
+	142, // 305: nebula.executor.v1.ExecutorService.BeginLogin:input_type -> nebula.executor.v1.BeginLoginRequest
+	144, // 306: nebula.executor.v1.ExecutorService.FinishLogin:input_type -> nebula.executor.v1.FinishLoginRequest
+	146, // 307: nebula.executor.v1.ExecutorService.CheckCredential:input_type -> nebula.executor.v1.CheckCredentialRequest
+	148, // 308: nebula.executor.v1.ExecutorService.BeginTOTPSetup:input_type -> nebula.executor.v1.BeginTOTPSetupRequest
+	150, // 309: nebula.executor.v1.ExecutorService.ConfirmTOTPSetup:input_type -> nebula.executor.v1.ConfirmTOTPSetupRequest
+	152, // 310: nebula.executor.v1.ExecutorService.RemoveTOTP:input_type -> nebula.executor.v1.RemoveTOTPRequest
+	154, // 311: nebula.executor.v1.ExecutorService.GetTOTPStatus:input_type -> nebula.executor.v1.GetTOTPStatusRequest
+	156, // 312: nebula.executor.v1.ExecutorService.RecoveryLogin:input_type -> nebula.executor.v1.RecoveryLoginRequest
+	158, // 313: nebula.executor.v1.ExecutorService.FinishRecovery:input_type -> nebula.executor.v1.FinishRecoveryRequest
+	96,  // 314: nebula.executor.v1.ExecutorService.ProbeHostKey:input_type -> nebula.executor.v1.ProbeHostKeyRequest
+	98,  // 315: nebula.executor.v1.ExecutorService.PinHostKey:input_type -> nebula.executor.v1.PinHostKeyRequest
+	101, // 316: nebula.executor.v1.ExecutorService.UnpinHostKey:input_type -> nebula.executor.v1.UnpinHostKeyRequest
+	103, // 317: nebula.executor.v1.ExecutorService.ListHostKeys:input_type -> nebula.executor.v1.ListHostKeysRequest
+	105, // 318: nebula.executor.v1.ExecutorService.ProposeRepin:input_type -> nebula.executor.v1.ProposeRepinRequest
+	107, // 319: nebula.executor.v1.ExecutorService.CommitRepin:input_type -> nebula.executor.v1.CommitRepinRequest
+	110, // 320: nebula.executor.v1.ExecutorService.ProposeEnroll:input_type -> nebula.executor.v1.ProposeEnrollRequest
+	112, // 321: nebula.executor.v1.ExecutorService.CommitEnroll:input_type -> nebula.executor.v1.CommitEnrollRequest
+	115, // 322: nebula.executor.v1.ExecutorService.CreateEnrollOffer:input_type -> nebula.executor.v1.CreateEnrollOfferRequest
+	118, // 323: nebula.executor.v1.ExecutorService.FetchEnrollScript:input_type -> nebula.executor.v1.FetchEnrollScriptRequest
+	119, // 324: nebula.executor.v1.ExecutorService.ShowEnrollScript:input_type -> nebula.executor.v1.ShowEnrollScriptRequest
+	120, // 325: nebula.executor.v1.ExecutorService.DownloadEnrollScript:input_type -> nebula.executor.v1.DownloadEnrollScriptRequest
+	124, // 326: nebula.executor.v1.ExecutorService.RevokeEnrollOffer:input_type -> nebula.executor.v1.RevokeEnrollOfferRequest
+	126, // 327: nebula.executor.v1.ExecutorService.ListEnrollOffers:input_type -> nebula.executor.v1.ListEnrollOffersRequest
+	129, // 328: nebula.executor.v1.ExecutorService.SubmitPairingCode:input_type -> nebula.executor.v1.SubmitPairingCodeRequest
+	132, // 329: nebula.executor.v1.ExecutorService.CommitPairedEnroll:input_type -> nebula.executor.v1.CommitPairedEnrollRequest
+	135, // 330: nebula.executor.v1.ExecutorService.ProposeGuestJoin:input_type -> nebula.executor.v1.ProposeGuestJoinRequest
+	137, // 331: nebula.executor.v1.ExecutorService.CommitGuestJoin:input_type -> nebula.executor.v1.CommitGuestJoinRequest
+	160, // 332: nebula.executor.v1.ExecutorService.GetSSHPublicKey:input_type -> nebula.executor.v1.GetSSHPublicKeyRequest
+	139, // 333: nebula.executor.v1.ExecutorService.TestConnection:input_type -> nebula.executor.v1.TestConnectionRequest
+	162, // 334: nebula.executor.v1.ExecutorService.InitVault:input_type -> nebula.executor.v1.InitVaultRequest
+	164, // 335: nebula.executor.v1.ExecutorService.SetSecret:input_type -> nebula.executor.v1.SetSecretRequest
+	166, // 336: nebula.executor.v1.ExecutorService.ListSecrets:input_type -> nebula.executor.v1.ListSecretsRequest
+	169, // 337: nebula.executor.v1.ExecutorService.DeleteSecret:input_type -> nebula.executor.v1.DeleteSecretRequest
+	58,  // 338: nebula.executor.v1.ExecutorService.BeginGate:input_type -> nebula.executor.v1.BeginGateRequest
+	60,  // 339: nebula.executor.v1.ExecutorService.CommitGate:input_type -> nebula.executor.v1.CommitGateRequest
+	62,  // 340: nebula.executor.v1.ExecutorService.AbortRollout:input_type -> nebula.executor.v1.AbortRolloutRequest
+	64,  // 341: nebula.executor.v1.ExecutorService.GetRollout:input_type -> nebula.executor.v1.GetRolloutRequest
+	66,  // 342: nebula.executor.v1.ExecutorService.ApproveGateCLI:input_type -> nebula.executor.v1.ApproveGateCLIRequest
+	194, // 343: nebula.executor.v1.ExecutorService.BeginTrustArtifact:input_type -> nebula.executor.v1.BeginTrustArtifactRequest
+	196, // 344: nebula.executor.v1.ExecutorService.CommitTrustArtifact:input_type -> nebula.executor.v1.CommitTrustArtifactRequest
+	198, // 345: nebula.executor.v1.ExecutorService.GetArtifactTrust:input_type -> nebula.executor.v1.GetArtifactTrustRequest
+	200, // 346: nebula.executor.v1.ExecutorService.RegisterModule:input_type -> nebula.executor.v1.RegisterModuleRequest
+	203, // 347: nebula.executor.v1.ExecutorService.AddSigner:input_type -> nebula.executor.v1.AddSignerRequest
+	205, // 348: nebula.executor.v1.ExecutorService.RemoveSigner:input_type -> nebula.executor.v1.RemoveSignerRequest
+	207, // 349: nebula.executor.v1.ExecutorService.ConfirmModuleSigner:input_type -> nebula.executor.v1.ConfirmModuleSignerRequest
+	209, // 350: nebula.executor.v1.ExecutorService.ListSigners:input_type -> nebula.executor.v1.ListSignersRequest
+	178, // 351: nebula.executor.v1.ExecutorService.ProposeScheduleGrant:input_type -> nebula.executor.v1.ProposeScheduleGrantRequest
+	180, // 352: nebula.executor.v1.ExecutorService.CommitScheduleGrant:input_type -> nebula.executor.v1.CommitScheduleGrantRequest
+	183, // 353: nebula.executor.v1.ExecutorService.ListPendingScheduleGrants:input_type -> nebula.executor.v1.ListPendingScheduleGrantsRequest
+	186, // 354: nebula.executor.v1.ExecutorService.ApproveScheduleGrantCLI:input_type -> nebula.executor.v1.ApproveScheduleGrantCLIRequest
+	188, // 355: nebula.executor.v1.ExecutorService.ListScheduleGrants:input_type -> nebula.executor.v1.ListScheduleGrantsRequest
+	190, // 356: nebula.executor.v1.ExecutorService.RevokeScheduleGrant:input_type -> nebula.executor.v1.RevokeScheduleGrantRequest
+	192, // 357: nebula.executor.v1.ExecutorService.RunScheduled:input_type -> nebula.executor.v1.RunScheduledRequest
+	293, // 358: nebula.executor.v1.ExecutorService.ProposeReadGrant:input_type -> nebula.executor.v1.ProposeReadGrantRequest
+	295, // 359: nebula.executor.v1.ExecutorService.CommitReadGrant:input_type -> nebula.executor.v1.CommitReadGrantRequest
+	298, // 360: nebula.executor.v1.ExecutorService.ListPendingReadGrants:input_type -> nebula.executor.v1.ListPendingReadGrantsRequest
+	301, // 361: nebula.executor.v1.ExecutorService.ApproveReadGrantCLI:input_type -> nebula.executor.v1.ApproveReadGrantCLIRequest
+	303, // 362: nebula.executor.v1.ExecutorService.ListReadGrants:input_type -> nebula.executor.v1.ListReadGrantsRequest
+	305, // 363: nebula.executor.v1.ExecutorService.RevokeReadGrant:input_type -> nebula.executor.v1.RevokeReadGrantRequest
+	307, // 364: nebula.executor.v1.ExecutorService.RunReadGrant:input_type -> nebula.executor.v1.RunReadGrantRequest
+	316, // 365: nebula.executor.v1.ExecutorService.ProposeBatch:input_type -> nebula.executor.v1.ProposeBatchRequest
+	318, // 366: nebula.executor.v1.ExecutorService.CommitBatch:input_type -> nebula.executor.v1.CommitBatchRequest
+	320, // 367: nebula.executor.v1.ExecutorService.ReviewBatch:input_type -> nebula.executor.v1.ReviewBatchRequest
+	322, // 368: nebula.executor.v1.ExecutorService.ApproveBatchCLI:input_type -> nebula.executor.v1.ApproveBatchCLIRequest
+	324, // 369: nebula.executor.v1.ExecutorService.GetBatchStatus:input_type -> nebula.executor.v1.GetBatchStatusRequest
+	326, // 370: nebula.executor.v1.ExecutorService.GetBatchCredentialVersions:input_type -> nebula.executor.v1.GetBatchCredentialVersionsRequest
+	329, // 371: nebula.executor.v1.ExecutorService.RunBatchMember:input_type -> nebula.executor.v1.RunBatchMemberRequest
+	335, // 372: nebula.executor.v1.ExecutorService.ReviewBuiltinTrust:input_type -> nebula.executor.v1.ReviewBuiltinTrustRequest
+	337, // 373: nebula.executor.v1.ExecutorService.CommitBuiltinTrust:input_type -> nebula.executor.v1.CommitBuiltinTrustRequest
+	339, // 374: nebula.executor.v1.ExecutorService.UnpinBuiltinVersion:input_type -> nebula.executor.v1.UnpinBuiltinVersionRequest
+	342, // 375: nebula.executor.v1.ExecutorService.GetBuiltinTrustStatus:input_type -> nebula.executor.v1.GetBuiltinTrustStatusRequest
+	346, // 376: nebula.executor.v1.ExecutorService.ReviewRootRotation:input_type -> nebula.executor.v1.ReviewRootRotationRequest
+	348, // 377: nebula.executor.v1.ExecutorService.CommitRootRotation:input_type -> nebula.executor.v1.CommitRootRotationRequest
+	213, // 378: nebula.executor.v1.ExecutorService.ListEvents:input_type -> nebula.executor.v1.ListEventsRequest
+	217, // 379: nebula.executor.v1.ExecutorService.BackupExecutor:input_type -> nebula.executor.v1.BackupExecutorRequest
+	255, // 380: nebula.executor.v1.ExecutorService.ProbePVERemote:input_type -> nebula.executor.v1.ProbePVERemoteRequest
+	259, // 381: nebula.executor.v1.ExecutorService.AddPVERemote:input_type -> nebula.executor.v1.AddPVERemoteRequest
+	260, // 382: nebula.executor.v1.ExecutorService.RotatePVEToken:input_type -> nebula.executor.v1.RotatePVETokenRequest
+	261, // 383: nebula.executor.v1.ExecutorService.RemovePVERemote:input_type -> nebula.executor.v1.RemovePVERemoteRequest
+	262, // 384: nebula.executor.v1.ExecutorService.ListPVEAdminRemotes:input_type -> nebula.executor.v1.ListPVEAdminRemotesRequest
+	263, // 385: nebula.executor.v1.ExecutorService.SetPVERemoteSite:input_type -> nebula.executor.v1.SetPVERemoteSiteRequest
+	266, // 386: nebula.executor.v1.ExecutorService.ProposePVERepin:input_type -> nebula.executor.v1.ProposePVERepinRequest
+	267, // 387: nebula.executor.v1.ExecutorService.CommitPVERepin:input_type -> nebula.executor.v1.CommitPVERepinRequest
+	274, // 388: nebula.executor.v1.ExecutorService.ProposePVEGuestPower:input_type -> nebula.executor.v1.ProposePVEGuestPowerRequest
+	276, // 389: nebula.executor.v1.ExecutorService.CommitPVEGuestPower:input_type -> nebula.executor.v1.CommitPVEGuestPowerRequest
+	281, // 390: nebula.executor.v1.ExecutorService.ProposePVEGuestSnapshot:input_type -> nebula.executor.v1.ProposePVEGuestSnapshotRequest
+	283, // 391: nebula.executor.v1.ExecutorService.CommitPVEGuestSnapshot:input_type -> nebula.executor.v1.CommitPVEGuestSnapshotRequest
+	289, // 392: nebula.executor.v1.ExecutorService.ProposePVEGuestProvision:input_type -> nebula.executor.v1.ProposePVEGuestProvisionRequest
+	291, // 393: nebula.executor.v1.ExecutorService.CommitPVEGuestProvision:input_type -> nebula.executor.v1.CommitPVEGuestProvisionRequest
+	222, // 394: nebula.executor.v1.ExecutorService.ListPVERemotes:input_type -> nebula.executor.v1.ListPVERemotesRequest
+	227, // 395: nebula.executor.v1.ExecutorService.ReadPVE:input_type -> nebula.executor.v1.ReadPVERequest
+	350, // 396: nebula.executor.v1.ExecutorService.AddPrivateRegistry:input_type -> nebula.executor.v1.AddPrivateRegistryRequest
+	352, // 397: nebula.executor.v1.ExecutorService.RotatePrivateRegistryCredential:input_type -> nebula.executor.v1.RotatePrivateRegistryCredentialRequest
+	354, // 398: nebula.executor.v1.ExecutorService.RemovePrivateRegistry:input_type -> nebula.executor.v1.RemovePrivateRegistryRequest
+	356, // 399: nebula.executor.v1.ExecutorService.ListPrivateRegistries:input_type -> nebula.executor.v1.ListPrivateRegistriesRequest
+	359, // 400: nebula.executor.v1.ExecutorService.ReadPrivateRegistry:input_type -> nebula.executor.v1.ReadPrivateRegistryRequest
+	361, // 401: nebula.executor.v1.ExecutorService.PutContainerDefinition:input_type -> nebula.executor.v1.PutContainerDefinitionRequest
+	364, // 402: nebula.executor.v1.ExecutorService.RemoveContainerDefinition:input_type -> nebula.executor.v1.RemoveContainerDefinitionRequest
+	366, // 403: nebula.executor.v1.ExecutorService.ListContainerDefinitions:input_type -> nebula.executor.v1.ListContainerDefinitionsRequest
+	369, // 404: nebula.executor.v1.ExecutorService.ListContainerRecreations:input_type -> nebula.executor.v1.ListContainerRecreationsRequest
+	378, // 405: nebula.executor.v1.ExecutorService.SetContainerRecoveryPlan:input_type -> nebula.executor.v1.SetContainerRecoveryPlanRequest
+	380, // 406: nebula.executor.v1.ExecutorService.ClearContainerRecoveryPlan:input_type -> nebula.executor.v1.ClearContainerRecoveryPlanRequest
+	382, // 407: nebula.executor.v1.ExecutorService.ResolveContainerRecreation:input_type -> nebula.executor.v1.ResolveContainerRecreationRequest
+	386, // 408: nebula.executor.v1.ExecutorService.ProbeNetDevice:input_type -> nebula.executor.v1.ProbeNetDeviceRequest
+	388, // 409: nebula.executor.v1.ExecutorService.RegisterNetDevice:input_type -> nebula.executor.v1.RegisterNetDeviceRequest
+	390, // 410: nebula.executor.v1.ExecutorService.SetNetDeviceCredential:input_type -> nebula.executor.v1.SetNetDeviceCredentialRequest
+	392, // 411: nebula.executor.v1.ExecutorService.RotateNetDeviceCredential:input_type -> nebula.executor.v1.RotateNetDeviceCredentialRequest
+	394, // 412: nebula.executor.v1.ExecutorService.ProposeNetDeviceRepin:input_type -> nebula.executor.v1.ProposeNetDeviceRepinRequest
+	396, // 413: nebula.executor.v1.ExecutorService.CommitNetDeviceRepin:input_type -> nebula.executor.v1.CommitNetDeviceRepinRequest
+	398, // 414: nebula.executor.v1.ExecutorService.BlockNetDevice:input_type -> nebula.executor.v1.BlockNetDeviceRequest
+	400, // 415: nebula.executor.v1.ExecutorService.UnblockNetDevice:input_type -> nebula.executor.v1.UnblockNetDeviceRequest
+	402, // 416: nebula.executor.v1.ExecutorService.RemoveNetDevice:input_type -> nebula.executor.v1.RemoveNetDeviceRequest
+	404, // 417: nebula.executor.v1.ExecutorService.ListNetDevices:input_type -> nebula.executor.v1.ListNetDevicesRequest
+	406, // 418: nebula.executor.v1.ExecutorService.ReadNetDevice:input_type -> nebula.executor.v1.ReadNetDeviceRequest
+	429, // 419: nebula.executor.v1.ExecutorService.GetIntegrityStatus:input_type -> nebula.executor.v1.GetIntegrityStatusRequest
+	434, // 420: nebula.executor.v1.ExecutorService.AckIntegrityFinding:input_type -> nebula.executor.v1.AckIntegrityFindingRequest
+	436, // 421: nebula.executor.v1.ExecutorService.CompareBaselineList:input_type -> nebula.executor.v1.CompareBaselineListRequest
+	33,  // 422: nebula.executor.v1.ExecutorService.GetStatus:output_type -> nebula.executor.v1.GetStatusResponse
+	35,  // 423: nebula.executor.v1.ExecutorService.ProposeExecution:output_type -> nebula.executor.v1.ProposeExecutionResponse
+	37,  // 424: nebula.executor.v1.ExecutorService.SubmitAssertion:output_type -> nebula.executor.v1.SubmitAssertionResponse
+	39,  // 425: nebula.executor.v1.ExecutorService.BeginPrivilegedSession:output_type -> nebula.executor.v1.BeginPrivilegedSessionResponse
+	41,  // 426: nebula.executor.v1.ExecutorService.CompletePrivilegedSession:output_type -> nebula.executor.v1.CompletePrivilegedSessionResponse
+	43,  // 427: nebula.executor.v1.ExecutorService.GetSessionState:output_type -> nebula.executor.v1.GetSessionStateResponse
+	45,  // 428: nebula.executor.v1.ExecutorService.AuthorizeRun:output_type -> nebula.executor.v1.AuthorizeRunResponse
+	172, // 429: nebula.executor.v1.ExecutorService.RunAttached:output_type -> nebula.executor.v1.RunAttachedResponse
+	174, // 430: nebula.executor.v1.ExecutorService.StartDurable:output_type -> nebula.executor.v1.StartDurableResponse
+	175, // 431: nebula.executor.v1.ExecutorService.GetRun:output_type -> nebula.executor.v1.GetRunResponse
+	47,  // 432: nebula.executor.v1.ExecutorService.Unlock:output_type -> nebula.executor.v1.UnlockResponse
+	49,  // 433: nebula.executor.v1.ExecutorService.Lock:output_type -> nebula.executor.v1.LockResponse
+	68,  // 434: nebula.executor.v1.ExecutorService.ListPending:output_type -> nebula.executor.v1.ListPendingResponse
+	70,  // 435: nebula.executor.v1.ExecutorService.ApproveCLI:output_type -> nebula.executor.v1.ApproveCLIResponse
+	72,  // 436: nebula.executor.v1.ExecutorService.GetPermitState:output_type -> nebula.executor.v1.GetPermitStateResponse
+	74,  // 437: nebula.executor.v1.ExecutorService.TrustArtifact:output_type -> nebula.executor.v1.TrustArtifactResponse
+	76,  // 438: nebula.executor.v1.ExecutorService.UntrustArtifact:output_type -> nebula.executor.v1.UntrustArtifactResponse
+	79,  // 439: nebula.executor.v1.ExecutorService.ListTrustedArtifacts:output_type -> nebula.executor.v1.ListTrustedArtifactsResponse
+	81,  // 440: nebula.executor.v1.ExecutorService.SetHostCriticality:output_type -> nebula.executor.v1.SetHostCriticalityResponse
+	84,  // 441: nebula.executor.v1.ExecutorService.ListHostCriticality:output_type -> nebula.executor.v1.ListHostCriticalityResponse
+	86,  // 442: nebula.executor.v1.ExecutorService.CreateRegistrationCode:output_type -> nebula.executor.v1.CreateRegistrationCodeResponse
+	88,  // 443: nebula.executor.v1.ExecutorService.BeginRegistration:output_type -> nebula.executor.v1.BeginRegistrationResponse
+	90,  // 444: nebula.executor.v1.ExecutorService.FinishRegistration:output_type -> nebula.executor.v1.FinishRegistrationResponse
+	93,  // 445: nebula.executor.v1.ExecutorService.ListWebAuthnCredentials:output_type -> nebula.executor.v1.ListWebAuthnCredentialsResponse
+	95,  // 446: nebula.executor.v1.ExecutorService.RemoveWebAuthnCredential:output_type -> nebula.executor.v1.RemoveWebAuthnCredentialResponse
+	143, // 447: nebula.executor.v1.ExecutorService.BeginLogin:output_type -> nebula.executor.v1.BeginLoginResponse
+	145, // 448: nebula.executor.v1.ExecutorService.FinishLogin:output_type -> nebula.executor.v1.FinishLoginResponse
+	147, // 449: nebula.executor.v1.ExecutorService.CheckCredential:output_type -> nebula.executor.v1.CheckCredentialResponse
+	149, // 450: nebula.executor.v1.ExecutorService.BeginTOTPSetup:output_type -> nebula.executor.v1.BeginTOTPSetupResponse
+	151, // 451: nebula.executor.v1.ExecutorService.ConfirmTOTPSetup:output_type -> nebula.executor.v1.ConfirmTOTPSetupResponse
+	153, // 452: nebula.executor.v1.ExecutorService.RemoveTOTP:output_type -> nebula.executor.v1.RemoveTOTPResponse
+	155, // 453: nebula.executor.v1.ExecutorService.GetTOTPStatus:output_type -> nebula.executor.v1.GetTOTPStatusResponse
+	157, // 454: nebula.executor.v1.ExecutorService.RecoveryLogin:output_type -> nebula.executor.v1.RecoveryLoginResponse
+	159, // 455: nebula.executor.v1.ExecutorService.FinishRecovery:output_type -> nebula.executor.v1.FinishRecoveryResponse
+	97,  // 456: nebula.executor.v1.ExecutorService.ProbeHostKey:output_type -> nebula.executor.v1.ProbeHostKeyResponse
+	100, // 457: nebula.executor.v1.ExecutorService.PinHostKey:output_type -> nebula.executor.v1.PinHostKeyResponse
+	102, // 458: nebula.executor.v1.ExecutorService.UnpinHostKey:output_type -> nebula.executor.v1.UnpinHostKeyResponse
+	104, // 459: nebula.executor.v1.ExecutorService.ListHostKeys:output_type -> nebula.executor.v1.ListHostKeysResponse
+	106, // 460: nebula.executor.v1.ExecutorService.ProposeRepin:output_type -> nebula.executor.v1.ProposeRepinResponse
+	108, // 461: nebula.executor.v1.ExecutorService.CommitRepin:output_type -> nebula.executor.v1.CommitRepinResponse
+	111, // 462: nebula.executor.v1.ExecutorService.ProposeEnroll:output_type -> nebula.executor.v1.ProposeEnrollResponse
+	114, // 463: nebula.executor.v1.ExecutorService.CommitEnroll:output_type -> nebula.executor.v1.CommitEnrollResponse
+	117, // 464: nebula.executor.v1.ExecutorService.CreateEnrollOffer:output_type -> nebula.executor.v1.CreateEnrollOfferResponse
+	121, // 465: nebula.executor.v1.ExecutorService.FetchEnrollScript:output_type -> nebula.executor.v1.FetchEnrollScriptResponse
+	122, // 466: nebula.executor.v1.ExecutorService.ShowEnrollScript:output_type -> nebula.executor.v1.ShowEnrollScriptResponse
+	123, // 467: nebula.executor.v1.ExecutorService.DownloadEnrollScript:output_type -> nebula.executor.v1.DownloadEnrollScriptResponse
+	125, // 468: nebula.executor.v1.ExecutorService.RevokeEnrollOffer:output_type -> nebula.executor.v1.RevokeEnrollOfferResponse
+	128, // 469: nebula.executor.v1.ExecutorService.ListEnrollOffers:output_type -> nebula.executor.v1.ListEnrollOffersResponse
+	131, // 470: nebula.executor.v1.ExecutorService.SubmitPairingCode:output_type -> nebula.executor.v1.SubmitPairingCodeResponse
+	133, // 471: nebula.executor.v1.ExecutorService.CommitPairedEnroll:output_type -> nebula.executor.v1.CommitPairedEnrollResponse
+	136, // 472: nebula.executor.v1.ExecutorService.ProposeGuestJoin:output_type -> nebula.executor.v1.ProposeGuestJoinResponse
+	138, // 473: nebula.executor.v1.ExecutorService.CommitGuestJoin:output_type -> nebula.executor.v1.CommitGuestJoinResponse
+	161, // 474: nebula.executor.v1.ExecutorService.GetSSHPublicKey:output_type -> nebula.executor.v1.GetSSHPublicKeyResponse
+	141, // 475: nebula.executor.v1.ExecutorService.TestConnection:output_type -> nebula.executor.v1.TestConnectionResponse
+	163, // 476: nebula.executor.v1.ExecutorService.InitVault:output_type -> nebula.executor.v1.InitVaultResponse
+	165, // 477: nebula.executor.v1.ExecutorService.SetSecret:output_type -> nebula.executor.v1.SetSecretResponse
+	168, // 478: nebula.executor.v1.ExecutorService.ListSecrets:output_type -> nebula.executor.v1.ListSecretsResponse
+	170, // 479: nebula.executor.v1.ExecutorService.DeleteSecret:output_type -> nebula.executor.v1.DeleteSecretResponse
+	59,  // 480: nebula.executor.v1.ExecutorService.BeginGate:output_type -> nebula.executor.v1.BeginGateResponse
+	61,  // 481: nebula.executor.v1.ExecutorService.CommitGate:output_type -> nebula.executor.v1.CommitGateResponse
+	63,  // 482: nebula.executor.v1.ExecutorService.AbortRollout:output_type -> nebula.executor.v1.AbortRolloutResponse
+	65,  // 483: nebula.executor.v1.ExecutorService.GetRollout:output_type -> nebula.executor.v1.GetRolloutResponse
+	67,  // 484: nebula.executor.v1.ExecutorService.ApproveGateCLI:output_type -> nebula.executor.v1.ApproveGateCLIResponse
+	195, // 485: nebula.executor.v1.ExecutorService.BeginTrustArtifact:output_type -> nebula.executor.v1.BeginTrustArtifactResponse
+	197, // 486: nebula.executor.v1.ExecutorService.CommitTrustArtifact:output_type -> nebula.executor.v1.CommitTrustArtifactResponse
+	199, // 487: nebula.executor.v1.ExecutorService.GetArtifactTrust:output_type -> nebula.executor.v1.GetArtifactTrustResponse
+	202, // 488: nebula.executor.v1.ExecutorService.RegisterModule:output_type -> nebula.executor.v1.RegisterModuleResponse
+	204, // 489: nebula.executor.v1.ExecutorService.AddSigner:output_type -> nebula.executor.v1.AddSignerResponse
+	206, // 490: nebula.executor.v1.ExecutorService.RemoveSigner:output_type -> nebula.executor.v1.RemoveSignerResponse
+	208, // 491: nebula.executor.v1.ExecutorService.ConfirmModuleSigner:output_type -> nebula.executor.v1.ConfirmModuleSignerResponse
+	212, // 492: nebula.executor.v1.ExecutorService.ListSigners:output_type -> nebula.executor.v1.ListSignersResponse
+	179, // 493: nebula.executor.v1.ExecutorService.ProposeScheduleGrant:output_type -> nebula.executor.v1.ProposeScheduleGrantResponse
+	182, // 494: nebula.executor.v1.ExecutorService.CommitScheduleGrant:output_type -> nebula.executor.v1.CommitScheduleGrantResponse
+	185, // 495: nebula.executor.v1.ExecutorService.ListPendingScheduleGrants:output_type -> nebula.executor.v1.ListPendingScheduleGrantsResponse
+	187, // 496: nebula.executor.v1.ExecutorService.ApproveScheduleGrantCLI:output_type -> nebula.executor.v1.ApproveScheduleGrantCLIResponse
+	189, // 497: nebula.executor.v1.ExecutorService.ListScheduleGrants:output_type -> nebula.executor.v1.ListScheduleGrantsResponse
+	191, // 498: nebula.executor.v1.ExecutorService.RevokeScheduleGrant:output_type -> nebula.executor.v1.RevokeScheduleGrantResponse
+	193, // 499: nebula.executor.v1.ExecutorService.RunScheduled:output_type -> nebula.executor.v1.RunScheduledResponse
+	294, // 500: nebula.executor.v1.ExecutorService.ProposeReadGrant:output_type -> nebula.executor.v1.ProposeReadGrantResponse
+	297, // 501: nebula.executor.v1.ExecutorService.CommitReadGrant:output_type -> nebula.executor.v1.CommitReadGrantResponse
+	300, // 502: nebula.executor.v1.ExecutorService.ListPendingReadGrants:output_type -> nebula.executor.v1.ListPendingReadGrantsResponse
+	302, // 503: nebula.executor.v1.ExecutorService.ApproveReadGrantCLI:output_type -> nebula.executor.v1.ApproveReadGrantCLIResponse
+	304, // 504: nebula.executor.v1.ExecutorService.ListReadGrants:output_type -> nebula.executor.v1.ListReadGrantsResponse
+	306, // 505: nebula.executor.v1.ExecutorService.RevokeReadGrant:output_type -> nebula.executor.v1.RevokeReadGrantResponse
+	308, // 506: nebula.executor.v1.ExecutorService.RunReadGrant:output_type -> nebula.executor.v1.RunReadGrantResponse
+	317, // 507: nebula.executor.v1.ExecutorService.ProposeBatch:output_type -> nebula.executor.v1.ProposeBatchResponse
+	319, // 508: nebula.executor.v1.ExecutorService.CommitBatch:output_type -> nebula.executor.v1.CommitBatchResponse
+	321, // 509: nebula.executor.v1.ExecutorService.ReviewBatch:output_type -> nebula.executor.v1.ReviewBatchResponse
+	323, // 510: nebula.executor.v1.ExecutorService.ApproveBatchCLI:output_type -> nebula.executor.v1.ApproveBatchCLIResponse
+	325, // 511: nebula.executor.v1.ExecutorService.GetBatchStatus:output_type -> nebula.executor.v1.GetBatchStatusResponse
+	328, // 512: nebula.executor.v1.ExecutorService.GetBatchCredentialVersions:output_type -> nebula.executor.v1.GetBatchCredentialVersionsResponse
+	330, // 513: nebula.executor.v1.ExecutorService.RunBatchMember:output_type -> nebula.executor.v1.RunBatchMemberResponse
+	336, // 514: nebula.executor.v1.ExecutorService.ReviewBuiltinTrust:output_type -> nebula.executor.v1.ReviewBuiltinTrustResponse
+	341, // 515: nebula.executor.v1.ExecutorService.CommitBuiltinTrust:output_type -> nebula.executor.v1.CommitBuiltinTrustResponse
+	340, // 516: nebula.executor.v1.ExecutorService.UnpinBuiltinVersion:output_type -> nebula.executor.v1.UnpinBuiltinVersionResponse
+	344, // 517: nebula.executor.v1.ExecutorService.GetBuiltinTrustStatus:output_type -> nebula.executor.v1.GetBuiltinTrustStatusResponse
+	347, // 518: nebula.executor.v1.ExecutorService.ReviewRootRotation:output_type -> nebula.executor.v1.ReviewRootRotationResponse
+	349, // 519: nebula.executor.v1.ExecutorService.CommitRootRotation:output_type -> nebula.executor.v1.CommitRootRotationResponse
+	215, // 520: nebula.executor.v1.ExecutorService.ListEvents:output_type -> nebula.executor.v1.ListEventsResponse
+	219, // 521: nebula.executor.v1.ExecutorService.BackupExecutor:output_type -> nebula.executor.v1.BackupExecutorResponse
+	257, // 522: nebula.executor.v1.ExecutorService.ProbePVERemote:output_type -> nebula.executor.v1.ProbePVERemoteResponse
+	268, // 523: nebula.executor.v1.ExecutorService.AddPVERemote:output_type -> nebula.executor.v1.AddPVERemoteResponse
+	269, // 524: nebula.executor.v1.ExecutorService.RotatePVEToken:output_type -> nebula.executor.v1.RotatePVETokenResponse
+	270, // 525: nebula.executor.v1.ExecutorService.RemovePVERemote:output_type -> nebula.executor.v1.RemovePVERemoteResponse
+	265, // 526: nebula.executor.v1.ExecutorService.ListPVEAdminRemotes:output_type -> nebula.executor.v1.ListPVEAdminRemotesResponse
+	264, // 527: nebula.executor.v1.ExecutorService.SetPVERemoteSite:output_type -> nebula.executor.v1.SetPVERemoteSiteResponse
+	272, // 528: nebula.executor.v1.ExecutorService.ProposePVERepin:output_type -> nebula.executor.v1.ProposePVERepinResponse
+	271, // 529: nebula.executor.v1.ExecutorService.CommitPVERepin:output_type -> nebula.executor.v1.CommitPVERepinResponse
+	275, // 530: nebula.executor.v1.ExecutorService.ProposePVEGuestPower:output_type -> nebula.executor.v1.ProposePVEGuestPowerResponse
+	278, // 531: nebula.executor.v1.ExecutorService.CommitPVEGuestPower:output_type -> nebula.executor.v1.CommitPVEGuestPowerResponse
+	282, // 532: nebula.executor.v1.ExecutorService.ProposePVEGuestSnapshot:output_type -> nebula.executor.v1.ProposePVEGuestSnapshotResponse
+	284, // 533: nebula.executor.v1.ExecutorService.CommitPVEGuestSnapshot:output_type -> nebula.executor.v1.CommitPVEGuestSnapshotResponse
+	290, // 534: nebula.executor.v1.ExecutorService.ProposePVEGuestProvision:output_type -> nebula.executor.v1.ProposePVEGuestProvisionResponse
+	292, // 535: nebula.executor.v1.ExecutorService.CommitPVEGuestProvision:output_type -> nebula.executor.v1.CommitPVEGuestProvisionResponse
+	223, // 536: nebula.executor.v1.ExecutorService.ListPVERemotes:output_type -> nebula.executor.v1.ListPVERemotesResponse
+	228, // 537: nebula.executor.v1.ExecutorService.ReadPVE:output_type -> nebula.executor.v1.ReadPVEResponse
+	351, // 538: nebula.executor.v1.ExecutorService.AddPrivateRegistry:output_type -> nebula.executor.v1.AddPrivateRegistryResponse
+	353, // 539: nebula.executor.v1.ExecutorService.RotatePrivateRegistryCredential:output_type -> nebula.executor.v1.RotatePrivateRegistryCredentialResponse
+	355, // 540: nebula.executor.v1.ExecutorService.RemovePrivateRegistry:output_type -> nebula.executor.v1.RemovePrivateRegistryResponse
+	357, // 541: nebula.executor.v1.ExecutorService.ListPrivateRegistries:output_type -> nebula.executor.v1.ListPrivateRegistriesResponse
+	360, // 542: nebula.executor.v1.ExecutorService.ReadPrivateRegistry:output_type -> nebula.executor.v1.ReadPrivateRegistryResponse
+	363, // 543: nebula.executor.v1.ExecutorService.PutContainerDefinition:output_type -> nebula.executor.v1.PutContainerDefinitionResponse
+	365, // 544: nebula.executor.v1.ExecutorService.RemoveContainerDefinition:output_type -> nebula.executor.v1.RemoveContainerDefinitionResponse
+	367, // 545: nebula.executor.v1.ExecutorService.ListContainerDefinitions:output_type -> nebula.executor.v1.ListContainerDefinitionsResponse
+	370, // 546: nebula.executor.v1.ExecutorService.ListContainerRecreations:output_type -> nebula.executor.v1.ListContainerRecreationsResponse
+	379, // 547: nebula.executor.v1.ExecutorService.SetContainerRecoveryPlan:output_type -> nebula.executor.v1.SetContainerRecoveryPlanResponse
+	381, // 548: nebula.executor.v1.ExecutorService.ClearContainerRecoveryPlan:output_type -> nebula.executor.v1.ClearContainerRecoveryPlanResponse
+	383, // 549: nebula.executor.v1.ExecutorService.ResolveContainerRecreation:output_type -> nebula.executor.v1.ResolveContainerRecreationResponse
+	387, // 550: nebula.executor.v1.ExecutorService.ProbeNetDevice:output_type -> nebula.executor.v1.ProbeNetDeviceResponse
+	389, // 551: nebula.executor.v1.ExecutorService.RegisterNetDevice:output_type -> nebula.executor.v1.RegisterNetDeviceResponse
+	391, // 552: nebula.executor.v1.ExecutorService.SetNetDeviceCredential:output_type -> nebula.executor.v1.SetNetDeviceCredentialResponse
+	393, // 553: nebula.executor.v1.ExecutorService.RotateNetDeviceCredential:output_type -> nebula.executor.v1.RotateNetDeviceCredentialResponse
+	395, // 554: nebula.executor.v1.ExecutorService.ProposeNetDeviceRepin:output_type -> nebula.executor.v1.ProposeNetDeviceRepinResponse
+	397, // 555: nebula.executor.v1.ExecutorService.CommitNetDeviceRepin:output_type -> nebula.executor.v1.CommitNetDeviceRepinResponse
+	399, // 556: nebula.executor.v1.ExecutorService.BlockNetDevice:output_type -> nebula.executor.v1.BlockNetDeviceResponse
+	401, // 557: nebula.executor.v1.ExecutorService.UnblockNetDevice:output_type -> nebula.executor.v1.UnblockNetDeviceResponse
+	403, // 558: nebula.executor.v1.ExecutorService.RemoveNetDevice:output_type -> nebula.executor.v1.RemoveNetDeviceResponse
+	405, // 559: nebula.executor.v1.ExecutorService.ListNetDevices:output_type -> nebula.executor.v1.ListNetDevicesResponse
+	407, // 560: nebula.executor.v1.ExecutorService.ReadNetDevice:output_type -> nebula.executor.v1.ReadNetDeviceResponse
+	433, // 561: nebula.executor.v1.ExecutorService.GetIntegrityStatus:output_type -> nebula.executor.v1.GetIntegrityStatusResponse
+	435, // 562: nebula.executor.v1.ExecutorService.AckIntegrityFinding:output_type -> nebula.executor.v1.AckIntegrityFindingResponse
+	440, // 563: nebula.executor.v1.ExecutorService.CompareBaselineList:output_type -> nebula.executor.v1.CompareBaselineListResponse
+	422, // [422:564] is the sub-list for method output_type
+	280, // [280:422] is the sub-list for method input_type
+	280, // [280:280] is the sub-list for extension type_name
+	280, // [280:280] is the sub-list for extension extendee
+	0,   // [0:280] is the sub-list for field type_name
 }
 
 func init() { file_nebula_executor_v1_executor_proto_init() }
@@ -31767,8 +32316,8 @@ func file_nebula_executor_v1_executor_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_nebula_executor_v1_executor_proto_rawDesc), len(file_nebula_executor_v1_executor_proto_rawDesc)),
-			NumEnums:      28,
-			NumMessages:   409,
+			NumEnums:      30,
+			NumMessages:   413,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

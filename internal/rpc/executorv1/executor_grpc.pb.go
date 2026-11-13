@@ -162,7 +162,7 @@ const (
 	ExecutorService_ReadNetDevice_FullMethodName                   = "/nebula.executor.v1.ExecutorService/ReadNetDevice"
 	ExecutorService_GetIntegrityStatus_FullMethodName              = "/nebula.executor.v1.ExecutorService/GetIntegrityStatus"
 	ExecutorService_AckIntegrityFinding_FullMethodName             = "/nebula.executor.v1.ExecutorService/AckIntegrityFinding"
-	ExecutorService_CompareBaselineDigest_FullMethodName           = "/nebula.executor.v1.ExecutorService/CompareBaselineDigest"
+	ExecutorService_CompareBaselineList_FullMethodName             = "/nebula.executor.v1.ExecutorService/CompareBaselineList"
 )
 
 // ExecutorServiceClient is the client API for ExecutorService service.
@@ -726,15 +726,16 @@ type ExecutorServiceClient interface {
 	// credentials. Deletes, restores and rolls back nothing; a later check
 	// that finds the same deviation opens it again.
 	AckIntegrityFinding(ctx context.Context, in *AckIntegrityFindingRequest, opts ...grpc.CallOption) (*AckIntegrityFindingResponse, error)
-	// I2 baseline digest comparison (ADR 0015 D7 item 2, D9; spec 13
-	// `integrity.baseline_tamper`). Role: server, admin. The caller names a
-	// host and the digest of the baseline list it holds; the executor
-	// compares it with its own stored approved digest and answers match,
-	// mismatch or none. A mismatch is audited in the executor and returned
-	// as `integrity.baseline_tamper`; it never changes the stored digest.
-	// There is deliberately no RPC that sets a baseline digest: only the
-	// executor's own approval paths write it.
-	CompareBaselineDigest(ctx context.Context, in *CompareBaselineDigestRequest, opts ...grpc.CallOption) (*CompareBaselineDigestResponse, error)
+	// I2 baseline list comparison (ADR 0015 D7 "Server compromise", D9;
+	// spec 13 `integrity.baseline_tamper`). Role: server, admin. The caller
+	// streams the baseline list it holds for one host (a header first, then
+	// entries and mounts); the executor rebuilds the list, recomputes its
+	// digest itself and compares that with its own stored approved digest.
+	// The caller never supplies a digest. A mismatch opens or updates an
+	// executor-held `integrity.baseline_tamper` finding (GetIntegrityStatus)
+	// and never changes the stored digest. There is deliberately no RPC that
+	// sets a baseline digest: only the executor's own approval paths write it.
+	CompareBaselineList(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[CompareBaselineListRequest, CompareBaselineListResponse], error)
 }
 
 type executorServiceClient struct {
@@ -2155,15 +2156,18 @@ func (c *executorServiceClient) AckIntegrityFinding(ctx context.Context, in *Ack
 	return out, nil
 }
 
-func (c *executorServiceClient) CompareBaselineDigest(ctx context.Context, in *CompareBaselineDigestRequest, opts ...grpc.CallOption) (*CompareBaselineDigestResponse, error) {
+func (c *executorServiceClient) CompareBaselineList(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[CompareBaselineListRequest, CompareBaselineListResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(CompareBaselineDigestResponse)
-	err := c.cc.Invoke(ctx, ExecutorService_CompareBaselineDigest_FullMethodName, in, out, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &ExecutorService_ServiceDesc.Streams[0], ExecutorService_CompareBaselineList_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	x := &grpc.GenericClientStream[CompareBaselineListRequest, CompareBaselineListResponse]{ClientStream: stream}
+	return x, nil
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ExecutorService_CompareBaselineListClient = grpc.ClientStreamingClient[CompareBaselineListRequest, CompareBaselineListResponse]
 
 // ExecutorServiceServer is the server API for ExecutorService service.
 // All implementations must embed UnimplementedExecutorServiceServer
@@ -2726,15 +2730,16 @@ type ExecutorServiceServer interface {
 	// credentials. Deletes, restores and rolls back nothing; a later check
 	// that finds the same deviation opens it again.
 	AckIntegrityFinding(context.Context, *AckIntegrityFindingRequest) (*AckIntegrityFindingResponse, error)
-	// I2 baseline digest comparison (ADR 0015 D7 item 2, D9; spec 13
-	// `integrity.baseline_tamper`). Role: server, admin. The caller names a
-	// host and the digest of the baseline list it holds; the executor
-	// compares it with its own stored approved digest and answers match,
-	// mismatch or none. A mismatch is audited in the executor and returned
-	// as `integrity.baseline_tamper`; it never changes the stored digest.
-	// There is deliberately no RPC that sets a baseline digest: only the
-	// executor's own approval paths write it.
-	CompareBaselineDigest(context.Context, *CompareBaselineDigestRequest) (*CompareBaselineDigestResponse, error)
+	// I2 baseline list comparison (ADR 0015 D7 "Server compromise", D9;
+	// spec 13 `integrity.baseline_tamper`). Role: server, admin. The caller
+	// streams the baseline list it holds for one host (a header first, then
+	// entries and mounts); the executor rebuilds the list, recomputes its
+	// digest itself and compares that with its own stored approved digest.
+	// The caller never supplies a digest. A mismatch opens or updates an
+	// executor-held `integrity.baseline_tamper` finding (GetIntegrityStatus)
+	// and never changes the stored digest. There is deliberately no RPC that
+	// sets a baseline digest: only the executor's own approval paths write it.
+	CompareBaselineList(grpc.ClientStreamingServer[CompareBaselineListRequest, CompareBaselineListResponse]) error
 	mustEmbedUnimplementedExecutorServiceServer()
 }
 
@@ -3168,8 +3173,8 @@ func (UnimplementedExecutorServiceServer) GetIntegrityStatus(context.Context, *G
 func (UnimplementedExecutorServiceServer) AckIntegrityFinding(context.Context, *AckIntegrityFindingRequest) (*AckIntegrityFindingResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method AckIntegrityFinding not implemented")
 }
-func (UnimplementedExecutorServiceServer) CompareBaselineDigest(context.Context, *CompareBaselineDigestRequest) (*CompareBaselineDigestResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method CompareBaselineDigest not implemented")
+func (UnimplementedExecutorServiceServer) CompareBaselineList(grpc.ClientStreamingServer[CompareBaselineListRequest, CompareBaselineListResponse]) error {
+	return status.Error(codes.Unimplemented, "method CompareBaselineList not implemented")
 }
 func (UnimplementedExecutorServiceServer) mustEmbedUnimplementedExecutorServiceServer() {}
 func (UnimplementedExecutorServiceServer) testEmbeddedByValue()                         {}
@@ -5730,23 +5735,12 @@ func _ExecutorService_AckIntegrityFinding_Handler(srv interface{}, ctx context.C
 	return interceptor(ctx, in, info, handler)
 }
 
-func _ExecutorService_CompareBaselineDigest_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(CompareBaselineDigestRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(ExecutorServiceServer).CompareBaselineDigest(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: ExecutorService_CompareBaselineDigest_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(ExecutorServiceServer).CompareBaselineDigest(ctx, req.(*CompareBaselineDigestRequest))
-	}
-	return interceptor(ctx, in, info, handler)
+func _ExecutorService_CompareBaselineList_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(ExecutorServiceServer).CompareBaselineList(&grpc.GenericServerStream[CompareBaselineListRequest, CompareBaselineListResponse]{ServerStream: stream})
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type ExecutorService_CompareBaselineListServer = grpc.ClientStreamingServer[CompareBaselineListRequest, CompareBaselineListResponse]
 
 // ExecutorService_ServiceDesc is the grpc.ServiceDesc for ExecutorService service.
 // It's only intended for direct use with grpc.RegisterService,
@@ -6319,11 +6313,13 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "AckIntegrityFinding",
 			Handler:    _ExecutorService_AckIntegrityFinding_Handler,
 		},
+	},
+	Streams: []grpc.StreamDesc{
 		{
-			MethodName: "CompareBaselineDigest",
-			Handler:    _ExecutorService_CompareBaselineDigest_Handler,
+			StreamName:    "CompareBaselineList",
+			Handler:       _ExecutorService_CompareBaselineList_Handler,
+			ClientStreams: true,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
 	Metadata: "nebula/executor/v1/executor.proto",
 }

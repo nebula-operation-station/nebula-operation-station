@@ -499,7 +499,7 @@ func TestNetDevBaselineRequiresExecutorComputedDigest(t *testing.T) {
 // comparison (ADR 0015 D7 item 2, IG-06), which is not a network device
 // baseline and writes nothing; integrity_baseline_test.go pins it.
 func TestNetDevBaselineRPCNotWired(t *testing.T) {
-	const i2Compare = pb.ExecutorService_CompareBaselineDigest_FullMethodName
+	const i2Compare = pb.ExecutorService_CompareBaselineList_FullMethodName
 	for _, m := range allServiceMethods(t) {
 		if m != i2Compare && strings.Contains(strings.ToLower(m), "baseline") {
 			t.Errorf("baseline RPC %s is wired before ND-14", m)

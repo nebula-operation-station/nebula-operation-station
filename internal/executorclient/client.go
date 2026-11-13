@@ -900,14 +900,14 @@ func (c *Client) AckIntegrityFinding(ctx context.Context, in *pb.AckIntegrityFin
 	return resp, mapCallError(ctx, err)
 }
 
-// CompareBaselineDigest compares the server's I2 baseline list digest for a
-// host with the executor-held approved digest (read-only; a mismatch is
-// `integrity.baseline_tamper`).
-func (c *Client) CompareBaselineDigest(ctx context.Context, in *pb.CompareBaselineDigestRequest, opts ...grpc.CallOption) (*pb.CompareBaselineDigestResponse, error) {
-	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
-	defer cancel()
-	resp, err := c.rpc.CompareBaselineDigest(ctx, in, opts...)
-	return resp, mapCallError(ctx, err)
+// CompareBaselineList opens the stream that sends the server's I2 baseline
+// list for one host to the executor, which recomputes its digest and
+// compares it with the executor-held approved digest (a mismatch is an
+// executor-held `integrity.baseline_tamper` finding). The stream lives as
+// long as ctx; the caller bounds it, since a list may be large.
+func (c *Client) CompareBaselineList(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[pb.CompareBaselineListRequest, pb.CompareBaselineListResponse], error) {
+	st, err := c.rpc.CompareBaselineList(ctx, opts...)
+	return st, mapCallError(ctx, err)
 }
 
 // Compile-time check: the client must implement the generated interface so

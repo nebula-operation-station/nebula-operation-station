@@ -82,6 +82,10 @@ type Service struct {
 	// integrityCheck is the periodic I1 check (ADR 0015 D4 "When");
 	// wired by SetIntegrityCheck.
 	integrityCheck integrityCheckState
+	// baselineCompareMu admits one I2 baseline list comparison at a time,
+	// so the buffered lists of concurrent callers cannot add up
+	// (integrity_baseline.go).
+	baselineCompareMu sync.Mutex
 	// runningVersion overrides version.Version in tests; empty in
 	// production.
 	runningVersion string
