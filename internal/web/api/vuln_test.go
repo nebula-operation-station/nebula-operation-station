@@ -464,6 +464,7 @@ var allowedExportKeys = map[string]bool{
 	"subject_kind": true, "subject_ref": true, "id": true, "image_digest": true, "ecosystem": true, "running_kernel": true, "release": true,
 	"mapped": true, "source_package": true, "source_version": true, "complete": true, "part": true, "last_part": true, "components": true,
 	"binaries": true, "name": true, "version": true, "arch": true,
+	"device": true, "vendor": true, "model": true, "firmware_version": true,
 }
 
 func walkKeys(t *testing.T, v any) {
@@ -489,8 +490,9 @@ func TestVulnExportCarriesNoAddressesNamesOrSecrets(t *testing.T) {
 	s.Subjects = append(s.Subjects,
 		// An ID that is an address is left out.
 		api.VulnSubject{Kind: vulnfinding.SubjectHost, Ref: vulnfinding.SubjectRef{ID: "10.0.0.5"}, Complete: true},
-		// A device is not exported before VU-15.
-		api.VulnSubject{Kind: vulnfinding.SubjectDevice, Ref: vulnfinding.SubjectRef{ID: "fw01"}, Complete: true},
+		// A device is exported with its model and firmware only (ADR 0011 D3).
+		api.VulnSubject{Kind: vulnfinding.SubjectDevice, Ref: vulnfinding.SubjectRef{ID: "fw01"}, Ecosystem: "vendor:paloalto:panos", Complete: true,
+			Device: &api.VulnDevice{Vendor: "paloalto", Model: "PA-220", FirmwareVersion: "10.2.3-h1", Current: true}},
 		// Free text in a package field is left out and the subject is not
 		// complete any more.
 		api.VulnSubject{Kind: vulnfinding.SubjectHost, Ref: vulnfinding.SubjectRef{ID: "app01"}, Ecosystem: "debian:bookworm", Complete: true,
@@ -502,7 +504,7 @@ func TestVulnExportCarriesNoAddressesNamesOrSecrets(t *testing.T) {
 	if r.code != http.StatusOK {
 		t.Fatalf("%d %s", r.code, r.body)
 	}
-	for _, bad := range []string{"10.0.0.5", "fw01", "hunter2", "PASSWORD", "x y"} {
+	for _, bad := range []string{"10.0.0.5", "hunter2", "PASSWORD", "x y"} {
 		if strings.Contains(r.body, bad) {
 			t.Errorf("export contains %q", bad)
 		}
@@ -513,7 +515,7 @@ func TestVulnExportCarriesNoAddressesNamesOrSecrets(t *testing.T) {
 		t.Fatalf("envelope %v", v)
 	}
 	subs := v["subjects"].([]any)
-	if len(subs) != 4 {
+	if len(subs) != 5 {
 		t.Fatalf("%d subjects: %s", len(subs), r.body)
 	}
 	byID := map[string]map[string]any{}
@@ -521,6 +523,9 @@ func TestVulnExportCarriesNoAddressesNamesOrSecrets(t *testing.T) {
 		m := x.(map[string]any)
 		ref := m["subject_ref"].(map[string]any)
 		byID[m["subject_kind"].(string)+"/"+ref["id"].(string)] = m
+	}
+	if fw := byID["device/fw01"]; fw["complete"] != true || fw["device"].(map[string]any)["model"] != "PA-220" {
+		t.Fatalf("fw01 %v", fw)
 	}
 	if app := byID["host/app01"]; app["complete"] != false || len(app["components"].([]any)) != 1 {
 		t.Fatalf("app01 %v", app)
