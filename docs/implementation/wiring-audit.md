@@ -6,6 +6,14 @@ and the container image with `compose.yaml`. It looks for the gap class of
 #278/#285: code that only ever ran with injected test policies or permissive
 temp directories. Audited at commit `ff1aa11`.
 
+**Status re-check: 2026-11-13, commit `6db6672c`.** The findings below
+(WA-01 to WA-13, sections "Summary", "Findings in detail" and "Fix tickets")
+describe the state at `ff1aa11`. The added Status column and the
+"Status" lines under each finding give the state at the re-check commit, each
+with its code evidence (file:line) and, where `git log` shows it, the PR. A
+finding without such evidence stays `open` or `not verified`. The original GAP
+text is kept as history ("previously: GAP").
+
 ## How to read this
 
 - **OK**: production code path traced, no gap.
@@ -22,21 +30,21 @@ temp directories. Audited at commit `ff1aa11`.
 The PVE path does not work end to end on any install, and the two git-checkout
 or tarball install paths have their own stoppers.
 
-| Ticket | Severity | Affects | One line |
-|---|---|---|---|
-| WA-01 | blocker | all | The server never imports the PVE spool: no production caller of the importers |
-| WA-02 | blocker | all | The server calls admin-only `ListPVEAdminRemotes`, so no PVE read grant can be proposed |
-| WA-03 | blocker | quickstart | `setup-nebula.sh` does not copy `nebula-pve-collector`; `install.sh` stops |
-| WA-04 | high | tarball, quickstart | `install.sh` installs and enables the unprovisioned iconfetch units |
-| WA-05 | medium | all | Typed guest power and snapshots have no production client |
-| WA-06 | medium | container | Discovery relies on a file capability under `no-new-privileges` |
-| WA-07 | medium | all | No install path provides the built-in release bundle directory |
-| WA-08 | medium | tarball, `.deb` | Upgrades do not restart `nebula-pve-collector` |
-| WA-09 | medium | tarball, quickstart | Upgrades never refresh changed unit files |
-| WA-10 | low | all | Private registry reads: authorizer unset, no client |
-| WA-11 | low | tarball, quickstart | `uninstall.sh` leaves the collector binary and does not mention its user |
-| WA-12 | low | tarball, `.deb`, quickstart | `install.sh` accepts NSS-only admin users the static executor cannot resolve |
-| WA-13 | low | container | The collector container has a network, unlike its unit |
+| Ticket | Severity | Affects | One line | Status (2026-11-13) |
+|---|---|---|---|---|
+| WA-01 | blocker | all | The server never imports the PVE spool: no production caller of the importers | fixed: `cmd/nebula-server/main.go:419,423`, `pveimport.go:53-84`; PR #327 (previously: GAP) |
+| WA-02 | blocker | all | The server calls admin-only `ListPVEAdminRemotes`, so no PVE read grant can be proposed | fixed: `internal/executions/readgrants_provider.go:152` calls `ListPVERemotes`; no caller of `ListPVEAdminRemotes` left in `internal/executions`; PR #317 (previously: GAP) |
+| WA-03 | blocker | quickstart | `setup-nebula.sh` does not copy `nebula-pve-collector`; `install.sh` stops | fixed: `deploy/quickstart/setup-nebula.sh:199-201` copies every name in `deploy/quickstart/binaries.txt:11`; PR #318 (previously: GAP) |
+| WA-04 | high | tarball, quickstart | `install.sh` installs and enables the unprovisioned iconfetch units | fixed: `deploy/install.sh:733-738` leaves them out, `:998-1003` removes leftovers; PR #320 (previously: GAP) |
+| WA-05 | medium | all | Typed guest power and snapshots have no production client | decision needed: wired at `cmd/nebula-server/main.go:505-506`, server role may commit (`internal/executor/roles.go:198-203`); the decision cited in the comment at `main.go:500-504` must be confirmed; PR #356 (previously: GAP) |
+| WA-06 | medium | container | Discovery relies on a file capability under `no-new-privileges` | open: `deploy/container/compose.yaml:77-80` and `deploy/container/Dockerfile:11-15` unchanged; `compose.yaml:15` still sets `no-new-privileges` |
+| WA-07 | medium | all | No install path provides the built-in release bundle directory | open (partly): `.deb` creates it, `.goreleaser.yaml:181-183`; image, `deploy/container/Dockerfile:35`; tarball still missing (`install.sh` has no reference); PR #369 (previously: GAP) |
+| WA-08 | medium | tarball, `.deb` | Upgrades do not restart `nebula-pve-collector` | fixed: `deploy/install.sh:665-670` (restart list) and `:1225-1244`; `.deb` hint `deploy/deb/postinst:196`; PR #329 (previously: GAP) |
+| WA-09 | medium | tarball, quickstart | Upgrades never refresh changed unit files | fixed: `deploy/install.sh:778-791` (`units_manifest`), `:889` (`refresh_units`), called at `:990`; PR #332 (previously: GAP) |
+| WA-10 | low | all | Private registry reads: authorizer unset, no client | decision needed: authorizer wired at `cmd/nebula-executor/registry_reads.go:28,47`, server client at `cmd/nebula-server/executor.go:482`; profile decision cited at `registry_reads.go:38-41`; PR #452 (previously: GAP) |
+| WA-11 | low | tarball, quickstart | `uninstall.sh` leaves the collector binary and does not mention its user | fixed: binary list from `deploy/quickstart/binaries.txt` (`deploy/uninstall.sh:41,48`), user named at `:20,114`; PR #357 (previously: GAP) |
+| WA-12 | low | tarball, `.deb`, quickstart | `install.sh` accepts NSS-only admin users the static executor cannot resolve | fixed: `deploy/install.sh:332-358` checks `/etc/passwd`; PR #360 (previously: GAP) |
+| WA-13 | low | container | The collector container has a network, unlike its unit | fixed: `deploy/container/compose.yaml:97` (pve-collector `network_mode: none`); PR #357 (previously: GAP) |
 
 WA-01 and WA-02 are one chain. Without WA-02 no grant exists, so `ReadPVE` is
 refused and the collector has nothing to spool. Without WA-01 nothing it spools
@@ -162,6 +170,11 @@ WA-03 nor WA-04. CI does not call `install_test.sh` at all: `make test-deploy`
 
 ### WA-01: the server never imports the PVE spool
 
+**Status (2026-11-13): fixed.** `cmd/nebula-server/main.go:419,423` starts
+`newPVEImport` in the background; `pveimport.go:53-84` runs the `Importer` and
+the `GuestNetImporter`; `compose.yaml:65-66` mounts server `results` and
+`guestnet` writable. PR #327. previously: GAP.
+
 Evidence: `pvecollect.OpenSpool` (`internal/pvecollect/spool.go:76`), `NewImporter`
 (`importer.go:75`) and `NewGuestNetImporter` (`guestnet_import.go:64`) are called
 only from tests. `IngestObservation` has one production caller, `importer.go:158`.
@@ -185,6 +198,11 @@ The fix needs more than a goroutine in `main.go`:
   is out of date (`internal/executor/pve_read.go`).
 
 ### WA-02: PVE read grants cannot be proposed
+
+**Status (2026-11-13): fixed.** `internal/executions/readgrants_provider.go:152`
+reads remotes through `ListPVERemotes`; `ListPVEAdminRemotes` has no caller
+left in `internal/executions` (`grep`). `roles.go:162` still makes it admin-only,
+as intended. PR #317. previously: GAP.
 
 Evidence: `ProposeProviderReadGrant` (`internal/executions/readgrants_provider.go:212`),
 `ProposeProviderTelemetryGrant` (`readgrants_telemetry.go:256`) and the binding
@@ -211,6 +229,10 @@ already covers (`roles.go:262-267`).
 
 ### WA-03: quickstart cannot reach a running install
 
+**Status (2026-11-13): fixed.** `deploy/quickstart/setup-nebula.sh:199-201`
+copies every name listed in `deploy/quickstart/binaries.txt` (line 11 is
+`nebula-pve-collector`). PR #318. previously: GAP.
+
 Evidence: `deploy/quickstart/setup-nebula.sh:185` copies `nebula nebula-server
 nebula-executor nebula-discovery`. `install.sh:191-197` requires
 `nebula-pve-collector` beside `deploy/` as well. `make build` puts it only in
@@ -218,6 +240,10 @@ nebula-executor nebula-discovery`. `install.sh:191-197` requires
 `install.sh: .../nebula-pve-collector not found`.
 
 ### WA-04: install.sh enables the unprovisioned iconfetch units
+
+**Status (2026-11-13): fixed.** `deploy/install.sh:733-738` leaves the iconfetch
+units out of the install and enable lists; `:998-1003` removes leftovers from
+an earlier install. PR #320. previously: GAP.
 
 Evidence: the unit loop globs all of `deploy/systemd/` (`install.sh:308-316`), so
 the iconfetch units are installed, and the tarball carries them (`deploy/**`,
@@ -240,6 +266,13 @@ use yet.
 
 ### WA-05: typed guest power and snapshots have no production client
 
+**Status (2026-11-13): decision needed.** Wired: `cmd/nebula-server/main.go:505-506`
+sets `GuestPower` and `GuestSnapshot`; `cmd/nebula-server/executor.go:179-199`
+has the lazy methods; `internal/executor/roles.go:198-203` lets `server` commit.
+The comment at `main.go:500-504` cites "decision WA-05 variant (a), 2026-11-07".
+That decision record was not found in this check, so the status stays
+`decision needed` until it is confirmed. PR #356. previously: GAP.
+
 Evidence: `main.go:387-427` sets neither `GuestPower` nor `GuestSnapshot`.
 `lazyExecutor` has neither set of methods, and `cmd/` has no reference to them.
 Controls are hidden and `POST /pve/guests/power*` answers 404. Wiring the UI alone
@@ -249,6 +282,10 @@ a decision before the code: CLI commit, or a role change like provisioning
 (`roles.go:161-168`).
 
 ### WA-06: discovery in a container
+
+**Status (2026-11-13): open.** `deploy/container/compose.yaml:77-80` still claims
+that `NET_RAW` makes the file capability work under `no-new-privileges`, and
+`compose.yaml:15` still sets `no-new-privileges`. Not changed. previously: GAP.
 
 Evidence: `compose.yaml:65-67` says `NET_RAW` makes the file capability work under
 `no-new-privileges`, and `Dockerfile:15` sets it. `prctl(2)` documents the opposite:
@@ -261,6 +298,12 @@ start, not that a scan runs.
 
 ### WA-07: no install path provides the built-in bundle
 
+**Status (2026-11-13): open (partly fixed).** The `.deb` creates
+`/usr/share/nebula/release` (`.goreleaser.yaml:181-183`, PR #369); the container
+image creates it (`deploy/container/Dockerfile:35`), and `compose.yaml:37-39`
+documents a bind mount for it. The tarball path is still missing: `install.sh`
+has no reference to `/usr/share/nebula/release`. previously: GAP.
+
 Evidence: `-builtin-bundle-dir` defaults to `/usr/share/nebula/release`
 (`cmd/nebula-executor/builtin_trust.go:19`). `.goreleaser.yaml:115-137`,
 `install.sh` and `Dockerfile` do not create it. `docs/admin/guide.md:630-636`
@@ -272,11 +315,21 @@ read-only with no volume there (`compose.yaml:13,37-39`). Per-action
 
 ### WA-08: collector not restarted on upgrade
 
+**Status (2026-11-13): fixed.** `deploy/install.sh:665-670` lists
+`nebula-pve-collector.service` among the restart units, and `:1225-1244`
+restarts it when binaries or the unit changed. The `.deb` hint at
+`deploy/deb/postinst:196` names `nebula-pve-collector`. PR #329, follow-up #345.
+previously: GAP.
+
 Evidence: `install.sh:405-425` restarts only the server and executor. The postinst
 hint names the same two (`deploy/deb/postinst:30`). The collector exits only on
 failure, so it keeps running the old binary against the new executor.
 
 ### WA-09: tarball upgrades keep old units
+
+**Status (2026-11-13): fixed.** `deploy/install.sh:778-791` keeps `units_manifest`
+(shipped checksums); `:889` `refresh_units` replaces unedited units and keeps
+edited ones with a warning; called at `:990`. PR #332. previously: GAP.
 
 Evidence: `install.sh:310-311` skips any existing unit. That protects admin edits,
 as documented (`:27-30`), but a shipped fix never arrives, for example the
@@ -285,6 +338,14 @@ collector's `RestartSec=5s`. The `.deb` is not affected: it replaces the units i
 
 ### WA-10: private registry reads
 
+**Status (2026-11-13): decision needed.** The authorizer is wired:
+`cmd/nebula-executor/registry_reads.go:28,47` (`setupRegistryReads`). A server
+client exists: `cmd/nebula-server/executor.go:482` (`ReadPrivateRegistry`) and
+`internal/registrymeta/executor_reads.go`. The profile decision is cited at
+`registry_reads.go:38-41`. The "never called" statement below is stale. The
+open question is the one in the fix ticket: keep the RPCs with the profile, or
+remove them. PR #452. previously: GAP.
+
 Evidence: no production call of `SetRegistryReadAuthorizer`, no client in
 `cmd/` or `internal/executorclient/client.go`. Fails closed, and the guide says
 credentialed registries show as "unknown" (`docs/admin/guide.md:869-870`), so
@@ -292,10 +353,19 @@ nothing breaks on a real install. The RPCs are unreachable.
 
 ### WA-11: uninstall leaves collector behind
 
+**Status (2026-11-13): fixed.** The binary list comes from
+`deploy/quickstart/binaries.txt` (`deploy/uninstall.sh:41,48`), which includes
+`nebula-pve-collector`; the header and the closing message name its user
+(`:20,114`). PR #357. previously: GAP.
+
 Evidence: the binary loop has four names (`deploy/uninstall.sh:74`); the header and
 closing message omit the `nebula-pve-collector` user (`:17-20,81`).
 
 ### WA-12: NSS-only admin users
+
+**Status (2026-11-13): fixed.** `deploy/install.sh:332-358` requires each admin
+user to match a line in `/etc/passwd` (`grep`), and rejects NSS-only users.
+PR #360. previously: GAP.
 
 Evidence: `install.sh:143` validates with `getent`, which uses NSS. The executor
 uses `user.Lookup` (`internal/peercred/peercred.go:332`), and all builds are
@@ -304,6 +374,10 @@ uses `user.Lookup` (`internal/peercred/peercred.go:332`), and all builds are
 with `admin user "x": ...` and the start-limit stops it.
 
 ### WA-13: collector container network
+
+**Status (2026-11-13): fixed.** `deploy/container/compose.yaml:97` sets
+`network_mode: none` for `pve-collector` (also `:130` for `netdev-collector`).
+PR #357. previously: GAP.
 
 Evidence: `compose.yaml:81-83` says the default bridge is "unused", but it is still
 attached. The unit grants `AF_UNIX` only (`nebula-pve-collector.service:58-60`) on
@@ -327,21 +401,21 @@ behaviour this audit could not observe.
 
 ## Fix tickets
 
-| ID | Change | Paths | Protected | Size |
-|---|---|---|---|---|
-| WA-01 | Start `Importer` and `GuestNetImporter` in the server; add a spool setting; grant unlink on `results/` and `guestnet/`; add compose volumes; correct `proxmox.md` | `cmd/nebula-server/`, `internal/serverconfig/`, `deploy/install.sh`, `deploy/install_test.sh`, `deploy/container/`, `docs/operator/proxmox.md` | no | M |
-| WA-02 | Read remotes through `ListPVERemotes`; drop `lazyExecutor.ListPVEAdminRemotes`; add a test through the real role table | `internal/executions/readgrants_*.go`, `cmd/nebula-server/executor*.go` | no | S |
-| WA-03 | Copy all five binaries, or take the list from one place | `deploy/quickstart/setup-nebula.sh` | no | S |
-| WA-04 | Install and enable an explicit unit list without iconfetch until the icon service is wired | `deploy/install.sh`, `deploy/install_test.sh` | no | S |
-| WA-05 | Decide commit path, then wire | `cmd/nebula-server/`, `internal/web/ui/`, plus `cmd/nebula/` or `internal/executor/roles.go` | **yes** | M |
-| WA-06 | Scan-capable discovery container; correct the comment; threat model note | `deploy/container/`, `docs/threat-model.md` | **yes** (threat model) | S |
-| WA-07 | Ship or provision the bundle; add a compose volume | `.goreleaser.yaml`, `deploy/container/compose.yaml`, `docs/admin/guide.md` | no | M |
-| WA-08 | Restart the collector when binaries changed; extend the postinst hint | `deploy/install.sh`, `deploy/deb/postinst` | no | S |
-| WA-09 | Refresh unmodified units (compare against a stored checksum), or warn on drift | `deploy/install.sh` | no | M |
-| WA-10 | Decide: wire a read-grant profile with a client, or remove the RPCs | `cmd/nebula-executor/`, `internal/executor/` | **yes** | M |
-| WA-11 | Add the binary and the user | `deploy/uninstall.sh` | no | S |
-| WA-12 | Validate admin users against `/etc/passwd`, like the executor | `deploy/install.sh`, `deploy/install_test.sh` | no | S |
-| WA-13 | `network_mode: none` for the collector | `deploy/container/compose.yaml` | no | S |
+| ID | Change | Paths | Protected | Size | Status (2026-11-13) |
+|---|---|---|---|---|---|
+| WA-01 | Start `Importer` and `GuestNetImporter` in the server; add a spool setting; grant unlink on `results/` and `guestnet/`; add compose volumes; correct `proxmox.md` | `cmd/nebula-server/`, `internal/serverconfig/`, `deploy/install.sh`, `deploy/install_test.sh`, `deploy/container/`, `docs/operator/proxmox.md` | no | M | fixed: `cmd/nebula-server/main.go:419,423`, `compose.yaml:65-66`; `docs/operator/proxmox.md:29-30,422-425` describes the import; PR #327 |
+| WA-02 | Read remotes through `ListPVERemotes`; drop `lazyExecutor.ListPVEAdminRemotes`; add a test through the real role table | `internal/executions/readgrants_*.go`, `cmd/nebula-server/executor*.go` | no | S | fixed: `internal/executions/readgrants_provider.go:152`; PR #317 |
+| WA-03 | Copy all five binaries, or take the list from one place | `deploy/quickstart/setup-nebula.sh` | no | S | fixed: `deploy/quickstart/setup-nebula.sh:199-201` reads `binaries.txt`; PR #318 |
+| WA-04 | Install and enable an explicit unit list without iconfetch until the icon service is wired | `deploy/install.sh`, `deploy/install_test.sh` | no | S | fixed: `deploy/install.sh:733-738`, `:998-1003`; PR #320 |
+| WA-05 | Decide commit path, then wire | `cmd/nebula-server/`, `internal/web/ui/`, plus `cmd/nebula/` or `internal/executor/roles.go` | **yes** | M | decision needed: wired at `cmd/nebula-server/main.go:505-506`, `roles.go:198-203`; decision to be confirmed (see Findings) |
+| WA-06 | Scan-capable discovery container; correct the comment; threat model note | `deploy/container/`, `docs/threat-model.md` | **yes** (threat model) | S | open: `deploy/container/compose.yaml:77-80` unchanged |
+| WA-07 | Ship or provision the bundle; add a compose volume | `.goreleaser.yaml`, `deploy/container/compose.yaml`, `docs/admin/guide.md` | no | M | open (partly): `.goreleaser.yaml:181-183`, `deploy/container/Dockerfile:35`; tarball missing |
+| WA-08 | Restart the collector when binaries changed; extend the postinst hint | `deploy/install.sh`, `deploy/deb/postinst` | no | S | fixed: `deploy/install.sh:665-670`, `:1225-1244`; `deploy/deb/postinst:196`; PR #329 |
+| WA-09 | Refresh unmodified units (compare against a stored checksum), or warn on drift | `deploy/install.sh` | no | M | fixed: `deploy/install.sh:778-791`, `:889`; PR #332 |
+| WA-10 | Decide: wire a read-grant profile with a client, or remove the RPCs | `cmd/nebula-executor/`, `internal/executor/` | **yes** | M | decision needed: `cmd/nebula-executor/registry_reads.go:47` wires the authorizer, `cmd/nebula-server/executor.go:482` is the client; keep-or-remove still open; PR #452 |
+| WA-11 | Add the binary and the user | `deploy/uninstall.sh` | no | S | fixed: `deploy/uninstall.sh:41,48`, `:20,114`; PR #357 |
+| WA-12 | Validate admin users against `/etc/passwd`, like the executor | `deploy/install.sh`, `deploy/install_test.sh` | no | S | fixed: `deploy/install.sh:332-358`; PR #360 |
+| WA-13 | `network_mode: none` for the collector | `deploy/container/compose.yaml` | no | S | fixed: `deploy/container/compose.yaml:97`; PR #357 |
 
 Order for the lab run: WA-02 and WA-01 first, as PVE depends on both, then WA-03,
 WA-04 and WA-06, then the rest. Add `install_test.sh` to CI with whichever of them
