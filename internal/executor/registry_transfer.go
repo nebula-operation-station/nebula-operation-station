@@ -202,13 +202,43 @@ type inspectedImage struct {
 	Variant      string   `json:"Variant"`
 }
 
-func (got inspectedImage) platformIs(p registrypull.Platform) bool {
-	return got.OS == p.OS && got.Architecture == p.Architecture && got.Variant == p.Variant
+// platformIs reports whether the store's platform is want, an already
+// normalised platform (normalPlatform): engines report the variant in
+// their own form (containerd fills in "v8" for arm64, an image config may
+// leave it empty), so the store's platform is normalised the same way.
+func (got inspectedImage) platformIs(want registrypull.Platform) bool {
+	return normalPlatform(registrypull.Platform{OS: got.OS, Architecture: got.Architecture, Variant: got.Variant}) == want
+}
+
+// normalPlatform is p with the CPU variant in the canonical form of its
+// architecture, as containerd's platform normalisation writes it: arm64
+// has variant "v8" whether empty, "8" or "v8"; arm defaults to "v7" and
+// spells a bare number "v<n>"; amd64 "v1" is empty. Other variants are
+// kept as they are, so they must match exactly.
+func normalPlatform(p registrypull.Platform) registrypull.Platform {
+	switch p.Architecture {
+	case "arm64":
+		if p.Variant == "" || p.Variant == "8" {
+			p.Variant = "v8"
+		}
+	case "arm":
+		switch p.Variant {
+		case "":
+			p.Variant = "v7"
+		case "5", "6", "7", "8":
+			p.Variant = "v" + p.Variant
+		}
+	case "amd64":
+		if p.Variant == "v1" {
+			p.Variant = ""
+		}
+	}
+	return p
 }
 
 func verifyContainerdEvidence(img transferImage, _ registrypull.Result, got inspectedImage) error {
 	if got.ID != img.platformDigest || !slices.Contains(got.RepoDigests, img.repository+"@"+img.platformDigest) ||
-		!slices.Contains(got.RepoTags, img.repository+":"+img.transferTag()) || !got.platformIs(img.platform) {
+		!slices.Contains(got.RepoTags, img.repository+":"+img.transferTag()) || !got.platformIs(img.evidence) {
 		return errTransferEvidence
 	}
 	return nil
@@ -216,7 +246,7 @@ func verifyContainerdEvidence(img transferImage, _ registrypull.Result, got insp
 
 func verifyClassicEvidence(img transferImage, res registrypull.Result, got inspectedImage) error {
 	if res.ImageID == "" || got.ID != res.ImageID || !slices.Contains(got.RepoTags, img.repository+":"+img.transferTag()) ||
-		!got.platformIs(img.platform) {
+		!got.platformIs(img.evidence) {
 		return errTransferEvidence
 	}
 	return nil
@@ -229,7 +259,12 @@ type transferImage struct {
 	newTag         string
 	indexDigest    string
 	platformDigest string
-	platform       registrypull.Platform
+	// platform is the bound platform, which the registry's index entry and
+	// configuration must equal exactly (registrypull, before any layer).
+	platform registrypull.Platform
+	// evidence is platform normalised (normalPlatform), fixed before the
+	// transfer: what the store must report after the load.
+	evidence registrypull.Platform
 }
 
 // transferTag is the tag the archive records for img.
@@ -307,7 +342,7 @@ func transferImages(u canonical.BatchContainerUpdate, l *loadedRegistry) ([]tran
 			return nil, errTransferScope
 		}
 		t := transferImage{repository: img.Repository, path: path, newTag: img.NewTag, indexDigest: img.NewIndexDigest,
-			platformDigest: img.NewPlatformDigest, platform: pl}
+			platformDigest: img.NewPlatformDigest, platform: pl, evidence: normalPlatform(pl)}
 		if i := slices.IndexFunc(out, func(o transferImage) bool {
 			return o.repository == t.repository && o.platformDigest == t.platformDigest
 		}); i >= 0 {

@@ -55,9 +55,20 @@ func newTestImage(t *testing.T) testImage {
 // larger than the stream's hold-back, so a transfer streams before it ends.
 func newTestImageWith(t *testing.T, seed string) testImage {
 	t.Helper()
+	return newTestImageFor(t, seed, "amd64", "")
+}
+
+// newTestImageFor is newTestImageWith for a linux image of arch and
+// variant (omitted from the configuration when empty).
+func newTestImageFor(t *testing.T, seed, arch, variant string) testImage {
+	t.Helper()
 	layer := []byte(strings.Repeat(seed, (256<<10)/len(seed)+1))
-	config, _ := json.Marshal(map[string]any{"os": "linux", "architecture": "amd64",
-		"rootfs": map[string]any{"type": "layers", "diff_ids": []string{sha([]byte("diff"))}}})
+	cfg := map[string]any{"os": "linux", "architecture": arch,
+		"rootfs": map[string]any{"type": "layers", "diff_ids": []string{sha([]byte("diff"))}}}
+	if variant != "" {
+		cfg["variant"] = variant
+	}
+	config, _ := json.Marshal(cfg)
 	man, _ := json.Marshal(map[string]any{"schemaVersion": 2, "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
 		"config": map[string]any{"mediaType": "application/vnd.docker.container.image.v1+json", "digest": sha(config), "size": len(config)},
 		"layers": []any{map[string]any{"mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip", "digest": sha(layer), "size": len(layer)}}})
@@ -163,6 +174,10 @@ type fakeTarget struct {
 	// loadExitsEarly makes `docker load` exit 1 after the first bytes,
 	// without reading the rest of stdin.
 	loadExitsEarly bool
+	// engineVariant, when set, is the variant `docker image inspect`
+	// reports for a loaded image of the configuration's architecture and
+	// variant (an engine's own spelling of it).
+	engineVariant func(arch, variant string) string
 
 	mu       sync.Mutex
 	commands []string
@@ -320,6 +335,11 @@ func (f *fakeTarget) load(raw []byte) uint32 {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.engineVariant != nil {
+		for i := range loaded {
+			loaded[i].Variant = f.engineVariant(loaded[i].Architecture, loaded[i].Variant)
+		}
+	}
 	if f.images == nil {
 		f.images = map[string]inspectedImage{}
 	}
@@ -672,7 +692,7 @@ func TestPrivateTransferClassicStoreRefusedBeforeAnyBlob(t *testing.T) {
 func TestClassicStoreEvidenceIsTheConfigDigest(t *testing.T) {
 	e := newTransferEnv(t, imageStoreClassic)
 	img := transferImage{repository: e.repository(), platformDigest: e.pull.img.manifestDigest,
-		platform: registrypull.Platform{OS: "linux", Architecture: "amd64"}}
+		platform: registrypull.Platform{OS: "linux", Architecture: "amd64"}, evidence: registrypull.Platform{OS: "linux", Architecture: "amd64"}}
 	ev := imageStoreEvidence[imageStoreClassic]
 	if ev.available {
 		t.Fatal("the classic store must stay unavailable")
@@ -766,7 +786,7 @@ func ociArchive(t *testing.T, img testImage, name string) []byte {
 func TestContainerdEvidenceComesFromTheStreamedArchive(t *testing.T) {
 	e := newTransferEnv(t, imageStoreContainerd)
 	img := transferImage{repository: e.repository(), platformDigest: e.pull.img.manifestDigest,
-		platform: registrypull.Platform{OS: "linux", Architecture: "amd64"}}
+		platform: registrypull.Platform{OS: "linux", Architecture: "amd64"}, evidence: registrypull.Platform{OS: "linux", Architecture: "amd64"}}
 	ev := imageStoreEvidence[imageStoreContainerd]
 	l, err := e.svc.loadRegistry("corp")
 	if err != nil {
@@ -1019,6 +1039,50 @@ func TestPrivateTransferLoadFailureStops(t *testing.T) {
 	for _, c := range e.target.cmds() {
 		if strings.Contains(c, "inspect") {
 			t.Fatal("a failed load was verified")
+		}
+	}
+}
+
+// The store's variant is compared in the normalised form fixed before the
+// transfer: an arm64 image the engine reports as "v8" while the binding
+// and configuration leave it empty (or the other way round) is the bound
+// image; another variant is not.
+func TestPrivateTransferVariantComparedNormalised(t *testing.T) {
+	cases := []struct {
+		name, platform, cfgVariant string
+		engine                     func(arch, variant string) string
+		want                       error
+	}{
+		{"engine fills in v8", "linux/arm64", "", func(string, string) string { return "v8" }, nil},
+		{"engine leaves v8 empty", "linux/arm64/v8", "v8", func(string, string) string { return "" }, nil},
+		{"engine reports as configured", "linux/arm64/v8", "v8", nil, nil},
+		{"engine reports another variant", "linux/arm64", "", func(string, string) string { return "v9" }, errTransferEvidence},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newTransferEnv(t, imageStoreContainerd)
+			e.pull.img = newTestImageFor(t, "arm64-layer-bytes", "arm64", c.cfgVariant)
+			e.target.engineVariant = c.engine
+			u := e.binding()
+			u.Images[0].Platform, u.Images[0].NewPlatformDigest = c.platform, e.pull.img.manifestDigest
+			out, err := e.transfer(u)
+			if !errors.Is(err, c.want) || (c.want == nil && len(out) != 1) {
+				t.Fatalf("transfer: %+v %v, want %v", out, err, c.want)
+			}
+		})
+	}
+}
+
+func TestNormalPlatformVariants(t *testing.T) {
+	for _, c := range []struct{ arch, in, want string }{
+		{"arm64", "", "v8"}, {"arm64", "8", "v8"}, {"arm64", "v8", "v8"}, {"arm64", "v9", "v9"},
+		{"arm", "", "v7"}, {"arm", "6", "v6"}, {"arm", "v6", "v6"},
+		{"amd64", "", ""}, {"amd64", "v1", ""}, {"amd64", "v3", "v3"},
+		{"riscv64", "", ""},
+	} {
+		got := normalPlatform(registrypull.Platform{OS: "linux", Architecture: c.arch, Variant: c.in})
+		if got.Variant != c.want || got.OS != "linux" || got.Architecture != c.arch {
+			t.Errorf("%s/%q: %+v, want variant %q", c.arch, c.in, got, c.want)
 		}
 	}
 }
