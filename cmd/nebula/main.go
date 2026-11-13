@@ -146,6 +146,11 @@ commands:
                       check a mounted NOS installation (read-only) against a release fetched
                       and kept on another machine, verified with the compiled release roots;
                       exit 0 clean, 5 deviations, 6 incomplete (never clean)
+  integrity status    last I1 check, open locking findings (unlock and dispatch are refused
+                      while any is open) and the root-compromise note
+  integrity ack FINDING
+                      show one open finding and clear exactly it after confirmation
+                      (admin UID, audited); deletes and rolls back nothing
   version             print version
 
 environment:
@@ -191,8 +196,10 @@ func run(cmd string, args []string) error {
 		return netdevCmd(args, defaultNetdevEnv())
 	case "integrity":
 		// The offline check trusts only the compiled release anchors and
-		// never talks to an executor.
-		return integrityCmd(args, os.Stdout)
+		// never talks to an executor; status and ack do (below).
+		if isOfflineIntegrityCmd(args) {
+			return integrityCmd(args, os.Stdout)
+		}
 	}
 	conn, err := dialExecutor()
 	if err != nil {
@@ -248,6 +255,8 @@ func run(cmd string, args []string) error {
 		return vaultCmd(ctx, c, args, ttyPrompter, os.Stdout)
 	case "container":
 		return containerCmd(ctx, c, args, os.Stdin, openDefinitionFile, os.Stdout)
+	case "integrity":
+		return integrityExecutorCmd(ctx, c, args, os.Stdin, os.Stdout)
 	case "secret":
 		return secretCmd(ctx, c, args, func() ([]byte, error) { return readSecretValue(os.Stdin, ttyPrompter) }, os.Stdin, os.Stdout)
 	default:
