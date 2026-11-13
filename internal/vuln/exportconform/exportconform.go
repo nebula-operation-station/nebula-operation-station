@@ -73,6 +73,23 @@ var Firmware = []Case{
 	{"multicast", "224.0.0.9", false},
 	{"class E", "240.0.0.1", false},
 
+	// A non-public address anywhere in the value, after a version prefix or
+	// a separator, is an address and never a version (D3).
+	{"private address after dash", "17.3.4-10.0.0.7", false},
+	{"private address after underscore", "17.3.4_192.168.1.1", false},
+	{"private address after plus", "17.3.4+172.16.5.4", false},
+	{"private address after public leading quad", "1.10.0.0.7", false},
+	{"private address after public leading quad with leading zeros", "1.010.000.000.007", false},
+	{"private address after public quad with suffix", "3.1.1.7-10.0.0.7", false},
+	{"shared address space after prefix", "17.3.4-100.110.12.7", false},
+	{"loopback after dash", "17.3.4-127.0.0.1", false},
+	{"public quad after prefix", "17.3.4-8.8.8.8", true},
+	// An octet over 255 is not an address, so the quad alone is not
+	// refused; a private quad elsewhere in the value still is.
+	{"out-of-range quad is not an address", "300.0.0.1", true},
+	{"out-of-range octet of four digits", "1000.10.0.0.1", false},
+	{"out-of-range leading octet before private quad", "300.10.0.0.1", false},
+
 	{"IPv6 literal", "2001:db8::1", false},
 	{"hyphenated six-octet MAC", "00-11-22-33-44-55", false},
 	{"dotted six-octet MAC", "00.11.22.33.44.55", false},

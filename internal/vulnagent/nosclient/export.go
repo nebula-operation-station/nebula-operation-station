@@ -44,10 +44,6 @@ var (
 	deviceMACQuadsRe = regexp.MustCompile(`^[0-9A-Fa-f]{4}([.-][0-9A-Fa-f]{4}){2}$`)
 	deviceMACPairsRe = regexp.MustCompile(`^[0-9A-Fa-f]{2}([.-][0-9A-Fa-f]{2}){5}$`)
 	deviceBareMACRe  = regexp.MustCompile(`^[0-9A-Fa-f]{12}$`)
-	// deviceIPv4PrefixRe mirrors the server's exportIPv4PrefixRe: four
-	// decimal octets with any leading zeros at the start of the value,
-	// followed by the end or a non-digit.
-	deviceIPv4PrefixRe = regexp.MustCompile(`^([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)(?:[^0-9]|$)`)
 	// deviceFirmwareSepRe and deviceFirmwarePartRe mirror the server's
 	// per-part firmware grammar: a number with at most one letter suffix, or
 	// a version qualifier word with an optional number.
@@ -410,34 +406,59 @@ var deviceNonPublicIPv4 = []netip.Prefix{
 	netip.MustParsePrefix("240.0.0.0/4"),
 }
 
-// deviceAddressOK reports whether v does not start with a non-public IPv4
-// address. A value with four decimal octets at its start (any leading zeros, an
-// optional suffix) that forms a private, shared, loopback or otherwise
-// non-public address is refused; a dotted quad from a public range passes. It
-// mirrors the server's nonPublicIPv4Prefix.
+// deviceAddressOK reports whether v holds no non-public IPv4 address. It
+// mirrors the server's nonPublicIPv4Embedded: a dotted quad at any position,
+// after any prefix or separator, that forms a private, shared, loopback or
+// otherwise non-public address is refused; a quad from a public range passes.
 func deviceAddressOK(v string) bool {
-	m := deviceIPv4PrefixRe.FindStringSubmatch(v)
-	if m == nil {
-		return true
-	}
-	var b [4]byte
-	for i := range b {
-		n, ok := deviceParseOctet(m[i+1])
-		if !ok {
-			return true
+	for i := 0; i < len(v); i++ {
+		if !deviceIsDigit(v[i]) || (i > 0 && deviceIsDigit(v[i-1])) {
+			continue
 		}
-		b[i] = n
-	}
-	a := netip.AddrFrom4(b)
-	if !a.IsGlobalUnicast() || a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsMulticast() || a.IsUnspecified() {
-		return false
-	}
-	for _, p := range deviceNonPublicIPv4 {
-		if p.Contains(a) {
+		if deviceNonPublicIPv4At(v, i) {
 			return false
 		}
 	}
 	return true
+}
+
+// deviceNonPublicIPv4At reports whether the four octets that start at v[i]
+// form a non-public IPv4 address. It mirrors the server's nonPublicIPv4At.
+func deviceNonPublicIPv4At(v string, i int) bool {
+	var b [4]byte
+	for k := range b {
+		end := i
+		for end < len(v) && deviceIsDigit(v[end]) {
+			end++
+		}
+		n, ok := deviceParseOctet(v[i:end])
+		if !ok || end == i {
+			return false
+		}
+		b[k] = n
+		if k < len(b)-1 {
+			if end >= len(v) || v[end] != '.' {
+				return false
+			}
+			end++
+		}
+		i = end
+	}
+	a := netip.AddrFrom4(b)
+	if !a.IsGlobalUnicast() || a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsMulticast() || a.IsUnspecified() {
+		return true
+	}
+	for _, p := range deviceNonPublicIPv4 {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
+}
+
+// deviceIsDigit reports whether c is a decimal digit.
+func deviceIsDigit(c byte) bool {
+	return c >= '0' && c <= '9'
 }
 
 // deviceParseOctet reads a decimal IPv4 octet with any leading zeros. It
@@ -467,7 +488,8 @@ func deviceVendorOK(v string) bool {
 // deviceFirmwareOK mirrors the server's firmware allowlist (deviceFirmwareOK in
 // vuln_export.go): the pattern, the first dot-separated label all digits, every
 // later label split at "-+~_" into parts that are numbers or version
-// qualifiers, none of the MAC forms, and no non-public IPv4 address prefix.
+// qualifiers, none of the MAC forms, and no non-public IPv4 address anywhere
+// in the value.
 func deviceFirmwareOK(v string) bool {
 	if !deviceFirmwareRe.MatchString(v) || deviceMACQuadsRe.MatchString(v) || deviceMACPairsRe.MatchString(v) || deviceBareMACRe.MatchString(v) {
 		return false

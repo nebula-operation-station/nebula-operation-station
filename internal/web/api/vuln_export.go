@@ -172,10 +172,6 @@ var (
 	exportMACQuadsRe = regexp.MustCompile(`^[0-9A-Fa-f]{4}([.-][0-9A-Fa-f]{4}){2}$`)
 	exportMACBareRe  = regexp.MustCompile(`^[0-9A-Fa-f]{12}$`)
 	exportMACPairsRe = regexp.MustCompile(`^[0-9A-Fa-f]{2}([.-][0-9A-Fa-f]{2}){5}$`)
-	// exportIPv4PrefixRe matches four decimal octets at the start of a
-	// firmware value, each with any number of leading zeros, followed by the
-	// end of the value or a non-digit (a suffix such as "-1" or ".0").
-	exportIPv4PrefixRe = regexp.MustCompile(`^([0-9]+)\.([0-9]+)\.([0-9]+)\.([0-9]+)(?:[^0-9]|$)`)
 	// exportFirmwareSepRe splits a dot-separated firmware label into its
 	// parts; exportFirmwarePartRe is what one part may be: a number with at
 	// most one letter suffix ("4a") or one of the version qualifier words
@@ -503,7 +499,8 @@ var nonPublicIPv4 = []netip.Prefix{
 // including "3.1.1.7-core-sw01", "17.3.4+sw1" and "10.sw1.lab2.ex3". The
 // dotted, the six-octet dotted and the bare MAC forms are refused. An IP
 // address literal is refused unless it is a dotted quad from a public IPv4
-// range: a private, loopback, link-local, multicast, unspecified, shared
+// range, anywhere in the value (after a version prefix or a separator as well
+// as on its own): a private, loopback, link-local, multicast, unspecified, shared
 // (CGNAT), benchmark, documentation, reserved or broadcast IPv4 address is
 // never a firmware version. Public dotted quads such as "3.1.1.7" cannot be
 // told from a version by their shape and are accepted. The qualifier words
@@ -527,26 +524,51 @@ func deviceFirmwareOK(v string) bool {
 			}
 		}
 	}
-	return !nonPublicIPv4Prefix(v)
+	return !nonPublicIPv4Embedded(v)
 }
 
-// nonPublicIPv4Prefix reports whether v starts with four decimal octets, with
-// any leading zeros, that form a non-public IPv4 address (see nonPublicIPv4),
-// and whether the octets end the value or are followed by a non-digit. So an
-// address with a suffix ("192.168.10.5-1", "10.0.0.7.0") or with leading zeros
-// ("192.168.001.010") is an address, and never a firmware version.
-func nonPublicIPv4Prefix(v string) bool {
-	m := exportIPv4PrefixRe.FindStringSubmatch(v)
-	if m == nil {
-		return false
+// nonPublicIPv4Embedded reports whether v contains, at any position and after
+// any separator or prefix, four decimal octets that form a non-public IPv4
+// address (see nonPublicIPv4). A quad starts at a digit that does not follow
+// another digit, so "1.10.0.0.7" is tested as "1.10.0.0" and as "10.0.0.7".
+// Each octet is a maximal run of digits with any number of leading zeros, so
+// an address with a suffix ("192.168.10.5-1") or with leading zeros
+// ("17.3.4-192.168.001.010") is found. A quad with an octet over 255 is not an
+// address and is skipped; a private quad elsewhere in the value still counts.
+func nonPublicIPv4Embedded(v string) bool {
+	for i := 0; i < len(v); i++ {
+		if !isASCIIDigit(v[i]) || (i > 0 && isASCIIDigit(v[i-1])) {
+			continue
+		}
+		if nonPublicIPv4At(v, i) {
+			return true
+		}
 	}
+	return false
+}
+
+// nonPublicIPv4At reports whether the four octets that start at v[i] form a
+// non-public IPv4 address. It reports false when they are not four dot-separated
+// octets or an octet is over 255.
+func nonPublicIPv4At(v string, i int) bool {
 	var b [4]byte
-	for i := range b {
-		n, ok := parseOctet(m[i+1])
-		if !ok {
+	for k := range b {
+		end := i
+		for end < len(v) && isASCIIDigit(v[end]) {
+			end++
+		}
+		n, ok := parseOctet(v[i:end])
+		if !ok || end == i {
 			return false
 		}
-		b[i] = n
+		b[k] = n
+		if k < len(b)-1 {
+			if end >= len(v) || v[end] != '.' {
+				return false
+			}
+			end++
+		}
+		i = end
 	}
 	a := netip.AddrFrom4(b)
 	if !a.IsGlobalUnicast() || a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsMulticast() || a.IsUnspecified() {
@@ -558,6 +580,11 @@ func nonPublicIPv4Prefix(v string) bool {
 		}
 	}
 	return false
+}
+
+// isASCIIDigit reports whether c is a decimal digit.
+func isASCIIDigit(c byte) bool {
+	return c >= '0' && c <= '9'
 }
 
 // parseOctet reads a decimal IPv4 octet with any number of leading zeros. It
