@@ -32,8 +32,9 @@ var Vendor = []Case{
 // Model cases (ADR 0011 D2). A model needs an upper-case letter and a digit;
 // a lower-case host label, an address, an IPv6 literal and a MAC are refused.
 // An address or a MAC embedded in the value, after a prefix or with a suffix,
-// is refused too ("IP-10-0-0-7"). The upper-case host label "SW01" is a documented D2 residual and is
-// not in the table.
+// is refused too ("IP-10-0-0-7"). Unlike firmware, a model refuses an IPv4
+// address of any kind, public ones too ("IP-93-184-216-34"). The upper-case
+// host label "SW01" is a documented D2 residual and is not in the table.
 var Model = []Case{
 	{"Cisco model", "CBS350", true},
 	{"Palo Alto model", "PA-220", true},
@@ -44,7 +45,12 @@ var Model = []Case{
 	{"hyphenated MAC", "AA-BB-CC-DD-EE-FF", false},
 	{"hyphenated MAC after a prefix", "PA-AA-BB-CC-DD-EE-FF", false},
 	{"bare MAC", "AABBCCDDEEFF", false},
+	{"hyphenated MAC with digits", "00-11-22-AA-BB-CC", false},
+	{"hyphenated MAC with digits after a prefix", "X1-00-11-22-AA-BB-CC", false},
+	{"bare MAC with digits", "001122AABBCC", false},
 	{"host-name style address", "IP-10-0-0-7", false},
+	{"public address in a model", "IP-93-184-216-34", false},
+	{"public address with suffix in a model", "PA-93-184-216-34-A", false},
 	{"host-name style private address with underscores", "SW_192_168_1_1", false},
 	{"empty model", "", false},
 }

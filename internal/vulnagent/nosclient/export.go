@@ -391,14 +391,14 @@ func checkDevice(d *Device, complete bool) error {
 }
 
 // deviceModelOK mirrors the server's model check (modelCodeOK): the model
-// pattern, an upper-case letter and a digit, no MAC and no non-public IPv4
-// address at any position of the normalised value.
+// pattern, an upper-case letter and a digit, no MAC at any position and no
+// IPv4 address of any kind in the normalised value.
 func deviceModelOK(v string) bool {
 	if !deviceModelRe.MatchString(v) || !deviceModelUpperRe.MatchString(v) || !deviceDigitRe.MatchString(v) {
 		return false
 	}
 	n := deviceSeparators.Replace(v)
-	return !deviceEmbeddedMAC(n) && deviceAddressOK(n)
+	return !deviceEmbeddedMAC(n) && !deviceAnyIPv4Embedded(n)
 }
 
 // deviceEmbeddedMAC mirrors the server's embeddedMAC: a MAC at any position of
@@ -425,20 +425,33 @@ var deviceNonPublicIPv4 = []netip.Prefix{
 // after any prefix or separator, that forms a private, shared, loopback or
 // otherwise non-public address is refused; a quad from a public range passes.
 func deviceAddressOK(v string) bool {
+	return !deviceIPv4Embedded(v, deviceIsNonPublicIPv4)
+}
+
+// deviceAnyIPv4Embedded mirrors the server's anyIPv4Embedded: any IPv4 address
+// at any position of v, public or not, which a model must not carry.
+func deviceAnyIPv4Embedded(v string) bool {
+	return deviceIPv4Embedded(v, func(netip.Addr) bool { return true })
+}
+
+// deviceIPv4Embedded mirrors the server's ipv4Embedded: it reports whether v
+// contains an IPv4 address at any position for which bad is true.
+func deviceIPv4Embedded(v string, bad func(netip.Addr) bool) bool {
 	for i := 0; i < len(v); i++ {
 		if !deviceIsDigit(v[i]) || (i > 0 && deviceIsDigit(v[i-1])) {
 			continue
 		}
-		if deviceNonPublicIPv4At(v, i) {
-			return false
+		if a, ok := deviceIPv4At(v, i); ok && bad(a) {
+			return true
 		}
 	}
-	return true
+	return false
 }
 
-// deviceNonPublicIPv4At reports whether the four octets that start at v[i]
-// form a non-public IPv4 address. It mirrors the server's nonPublicIPv4At.
-func deviceNonPublicIPv4At(v string, i int) bool {
+// deviceIPv4At mirrors the server's ipv4At: the address of the four octets
+// that start at v[i], and false when they are not four dot-separated octets or
+// an octet is over 255.
+func deviceIPv4At(v string, i int) (netip.Addr, bool) {
 	var b [4]byte
 	for k := range b {
 		end := i
@@ -447,18 +460,22 @@ func deviceNonPublicIPv4At(v string, i int) bool {
 		}
 		n, ok := deviceParseOctet(v[i:end])
 		if !ok || end == i {
-			return false
+			return netip.Addr{}, false
 		}
 		b[k] = n
 		if k < len(b)-1 {
 			if end >= len(v) || v[end] != '.' {
-				return false
+				return netip.Addr{}, false
 			}
 			end++
 		}
 		i = end
 	}
-	a := netip.AddrFrom4(b)
+	return netip.AddrFrom4(b), true
+}
+
+// deviceIsNonPublicIPv4 mirrors the server's isNonPublicIPv4.
+func deviceIsNonPublicIPv4(a netip.Addr) bool {
 	if !a.IsGlobalUnicast() || a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsMulticast() || a.IsUnspecified() {
 		return true
 	}
