@@ -1,0 +1,81 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Reference unit for nebula-vuln-agent (ADR 0011 Amendment 1, va08). One
+# run: sync the vulnerability feeds, match them against the inventory NOS
+# exports, optionally assess the findings with the lab's own LLM, and upload
+# the findings to the NOS API. nebula-vuln-agent.timer starts it every 6
+# hours; this unit has no [Install] section and is never enabled itself.
+#
+# Recommended on its own VM (nos-vuln). It runs as its own system user
+# (nebula-vuln-agent), never as nebula-server or nebula-executor, and is
+# locked down like the collectors: no capabilities, a read-only system, its
+# data dir as the only writable path. Unlike the collectors it needs the
+# network (feed origins, the NOS API, the LLM endpoint): AF_INET and
+# AF_INET6, plus AF_UNIX for local sockets. Which hosts it may reach is
+# decided by the host firewall (guide, "Vulnerability agent") and by the
+# agent's own origin allowlist, not by this unit.
+#
+# It holds the NOS token and, if the LLM is enabled, the LLM key, each in
+# its own file in /etc/nebula-vuln-agent (mode 0600, owned by the agent);
+# the configuration names those files and holds no secret. It is not in
+# nebula-rpc and cannot reach the executor socket. When it shares the host
+# with NOS, the NOS state, configuration and sockets are hidden from it
+# (InaccessiblePaths; "-": absent on a VM of its own).
+[Unit]
+Description=Nebula Operation Station vulnerability agent (one run)
+Documentation=https://github.com/nebula-operation-station/nebula-operation-station/tree/main/docs
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=nebula-vuln-agent
+Group=nebula-vuln-agent
+ExecStart=/usr/bin/nebula-vuln-agent -config /etc/nebula-vuln-agent/config.json run
+# A oneshot has no start timeout by default. The assessment phase is at
+# most 4 h and the upload 1.5 h (ADR 0011 A1.3); 8 h leaves 2.5 h for
+# feed sync, export and matching, so a slow run ends on its own phase
+# budgets (degraded) and only a hung one is stopped here. A timer slot
+# that fires while a run is still active starts nothing; the next run
+# follows at the slot after. Exit 3 (degraded run) and 2 (configuration
+# refused) mark the unit failed, so they show in systemctl --failed.
+TimeoutStartSec=8h
+Nice=10
+IOSchedulingClass=idle
+UMask=0077
+
+# Hardening
+LimitCORE=0
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Outbound HTTPS to the feed origins, the NOS API and the LLM endpoint;
+# AF_UNIX for local sockets (llm.unix_socket, journald). No
+# AF_NETLINK, AF_PACKET or raw sockets.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Co-located with NOS: the server's and executor's state, configuration
+# and sockets do not exist for the agent (ADR 0011 A1.2).
+InaccessiblePaths=-/var/lib/nebula -/etc/nebula -/run/nebula
+# Nor do their processes: /proc shows only the agent's own processes and
+# no kernel or system information beyond the per-process entries.
+ProtectProc=invisible
+ProcSubset=pid
+# Feed snapshots, high-water marks, the last completed run and run
+# evidence. /etc/nebula-vuln-agent (config, token, keys) stays read-only.
+ReadWritePaths=/var/lib/nebula-vuln-agent

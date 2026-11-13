@@ -1,0 +1,15 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# prerm of the nebula-vuln-agent package: stop and disable the timer and
+# the service on removal (not on upgrade). The data in
+# /var/lib/nebula-vuln-agent, the configuration and token in
+# /etc/nebula-vuln-agent and the system user stay.
+set -e
+case "$1" in
+  remove)
+    if [ -d /run/systemd/system ]; then
+      systemctl disable --now nebula-vuln-agent.timer nebula-vuln-agent.service 2>/dev/null || true
+    fi
+    ;;
+esac
+exit 0

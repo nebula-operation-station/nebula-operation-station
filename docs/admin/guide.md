@@ -1996,6 +1996,254 @@ session only.
   The sweep runs every 15 minutes. Feed data itself is never stored in
   Nebula.
 
+### 10.5 Vulnerability agent
+
+`nebula-vuln-agent` replaces Hermes (ADR 0011 Amendment 1). It is a
+separate program that ships with this release. It downloads the
+vulnerability feeds, matches them against the inventory Nebula exports
+and uploads the findings through the API of section 10.4. If you enable
+it, it also asks an LLM in your lab for a short assessment of each
+finding. The protocol, the scopes and the rules of section 10.4 stay the
+same. Only the agent is new.
+
+What the agent holds: its NOS token, its feed snapshots and the record
+of its last run. If the LLM is enabled, it also holds the LLM's API key.
+It holds **no** SSH key, host credential, vault material or Nebula
+secret, and it never talks to the executor.
+
+#### Where it runs
+
+Run it on its own small VM, called **`nos-vuln`** in this guide (the
+name is only a convention; the addresses are yours). It needs no root
+and nothing from the Nebula machine except the API.
+
+Running it on the Nebula machine also works, but it is weaker. In that
+case it runs under its own user, and its unit hides `/var/lib/nebula`,
+`/etc/nebula` and `/run/nebula` from it. You must also apply the egress
+rules below to its user (`meta skuid nebula-vuln-agent` in nftables).
+
+#### Install
+
+The agent has its own Debian package, `nebula-vuln-agent`, built with
+the release like the collectors' package. `nebula-operation-station`
+does not contain it, and it contains nothing of the server or the
+executor. The APT repository of section 3.2 does not carry it yet, so
+copy `nebula-vuln-agent_<version>_<arch>.deb` from the release to
+`nos-vuln`, compare its SHA-256 with the release's checksums file, and
+install it:
+
+```
+sudo apt install ./nebula-vuln-agent_<version>_<arch>.deb
+```
+
+Its unit and timer go to `/lib/systemd/system`. Without Debian, copy the
+release tarball to `nos-vuln`, extract it, and run
+`sudo ./deploy/install.sh --vuln-agent` from the extracted directory.
+That command takes no other option, installs only the agent, and puts
+its unit and timer in `/etc/systemd/system`. Use one of the two ways,
+not both: units in `/etc/systemd/system` override the package's. On the
+Nebula machine either way runs next to the normal install.
+
+Both ways create this setup, and they enable or start nothing:
+
+| Path | Owner, mode | Content |
+| --- | --- | --- |
+| user `nebula-vuln-agent` | system user, no login, no extra group | runs the agent |
+| `/var/lib/nebula-vuln-agent` | `nebula-vuln-agent`, 0700 | feed snapshots, last run, run evidence; the only path the agent may write |
+| `/etc/nebula-vuln-agent` | `root:nebula-vuln-agent`, 0750 | configuration and secrets, read-only for the agent |
+| `/etc/nebula-vuln-agent/config.json` | `root:nebula-vuln-agent`, 0640 | written once from a skeleton, never overwritten |
+| `/etc/nebula-vuln-agent/token` | `nebula-vuln-agent`, 0600 | the NOS token; **you** create it |
+| `/usr/bin/nebula-vuln-agent` | root, 0755 | the agent |
+| `/lib/systemd/system/` (package) or `/etc/systemd/system/` (tarball) | root, 0644 | `nebula-vuln-agent.service`, `nebula-vuln-agent.timer` |
+
+The installer refuses a symlink or a file where one of these directories
+or the configuration belongs. The agent refuses a NOS token or LLM key
+file that is not a regular file or that its group or others can access
+in any way (only 0600 or 0400 is accepted).
+
+#### The token `vuln-agent`
+
+Create the token on the Nebula machine as in section 10.4, but name it
+`vuln-agent`, and give it the address of `nos-vuln` as its only
+`source_addresses` entry:
+
+```
+nebula-server -api-token vuln-agent:vuln.inventory.read,vuln.findings.write
+```
+
+```json
+{"name": "vuln-agent", "sha256": "<printed hash>",
+ "scopes": ["vuln.inventory.read", "vuln.findings.write"],
+ "source_addresses": ["<address of nos-vuln>"]}
+```
+
+If you are replacing a Hermes token (`hermes-vuln`), rename or replace it
+only while no run of that token is open (*Vulnerabilities* page, last
+run). Only one token may hold the vulnerability scopes.
+
+The agent connects only over `https`. If it reaches Nebula through the
+reverse proxy (section 4), Nebula sees the proxy's address, not the
+agent's (section 10.4). In that case, also restrict
+`/api/v1/vuln/` on the proxy to the address of `nos-vuln`.
+
+Put the token on `nos-vuln`. Paste it, then press Ctrl-D:
+
+```
+sudo sh -c 'umask 077; cat > /etc/nebula-vuln-agent/token'
+sudo chown nebula-vuln-agent:nebula-vuln-agent /etc/nebula-vuln-agent/token
+```
+
+#### Configuration
+
+`/etc/nebula-vuln-agent/config.json` is strict JSON; unknown keys are an
+error. The skeleton:
+
+```json
+{
+  "data_dir": "/var/lib/nebula-vuln-agent",
+  "nos": {
+    "url": "",
+    "token_file": "/etc/nebula-vuln-agent/token"
+  },
+  "llm": {
+    "enabled": false
+  }
+}
+```
+
+The agent refuses to run until you set `nos.url` to
+`https://<Nebula host>[:port]`, with no path. If Nebula's certificate
+comes from a lab CA, set `nos.ca_file` to that CA's PEM file. The agent
+then trusts only that CA for Nebula. Keep `data_dir` as it is: the unit
+lets the agent write nowhere else.
+
+#### LLM (optional)
+
+Without an LLM, the agent still finds, matches and uploads every
+finding. The findings just carry no assessment text. The LLM may change
+only that text and its hint flags. It never changes whether a finding
+exists, its fixed version, its scores or its state.
+
+You can set the LLM in the Nebula web UI (settings, "Vulnerability agent
+– LLM"; ADR 0011 A1.8). The agent fetches those settings with its token.
+Or you can set them in `llm` in `config.json`. Settings from the web UI
+win, unless their URL or model is empty.
+
+- **Only a model you run in your lab.** The endpoint must be an
+  OpenAI-compatible API, such as Ollama's `/v1`, on a host you control.
+  Never use a hosted model, and never a gateway that forwards to one: the
+  agent sends finding context (package names, versions, hosts) to it. The
+  agent refuses public addresses. `llm.allowed_networks` may add lab
+  subnets (loopback, RFC 1918, ULA or `100.64.0.0/10` only). Plain `http`
+  works only with `llm.allow_plain_http`, and never with an API key.
+- **API key** (if your endpoint needs one): put it in a file such as
+  `/etc/nebula-vuln-agent/llm.key`, owned by `nebula-vuln-agent`, mode
+  0600 (0400 also works; anything else is refused). Name that file in
+  `llm.api_key_file`. The key never leaves
+  `nos-vuln`, and Nebula never stores it.
+- **Context window.** The model's context (Ollama `num_ctx`) must be at
+  least `max_prompt_tokens + max_output_tokens + 4096`. With the
+  defaults (49,152 + 1,024 + 4,096) that is **54,272**; use 65,536, for
+  example. Set the same value as `llm.context_window`. The agent refuses
+  to start the assessor if `llm.context_window` is missing or too small.
+
+```json
+"llm": {
+  "enabled": true,
+  "base_url": "http://<LLM host>:11434/v1",
+  "model": "<model>",
+  "allow_plain_http": true,
+  "context_window": 65536
+}
+```
+
+(Plain `http`, as here, only works without an API key.)
+
+#### Egress
+
+The unit lets the agent open IPv4, IPv6 and Unix sockets and nothing
+else. Which hosts it may reach is decided by your firewall. The agent's
+own allowlist is only a second layer. Allow `nos-vuln` (or, when
+co-located, the agent's user) to reach exactly:
+
+| Destination | Port | Why |
+| --- | --- | --- |
+| `security-tracker.debian.org` | 443 | Debian security tracker |
+| `salsa.debian.org` | 443 | Debian DSA/DLA lists |
+| `osv-vulnerabilities.storage.googleapis.com` | 443 | OSV (Debian, Ubuntu, Alpine, Go) |
+| `nvd.nist.gov` | 443 | NVD CVSS |
+| `www.cisa.gov` | 443 | CISA KEV |
+| `epss.empiricalsecurity.com` | 443 | EPSS |
+| `www.cisco.com` | 443 | Cisco CSAF (only with `csaf` configured) |
+| `security.paloaltonetworks.com` | 443 | Palo Alto CSAF (only with `csaf` configured) |
+| the Nebula host (or its proxy) | as in `nos.url` | the API |
+| the LLM host | its port | only if the LLM is enabled |
+| your DNS resolver, NTP | 53, 123 | name resolution, a correct clock for TLS and feed dates |
+
+The feed list ships with the agent and cannot be extended in
+`config.json`. Do not put a proxy in between that terminates TLS. The
+agent ignores `HTTP_PROXY`-style variables for the LLM.
+
+#### Start and schedule
+
+Run the agent once by hand, and read its log:
+
+```
+sudo systemctl start nebula-vuln-agent.service
+journalctl -u nebula-vuln-agent.service -n 50
+```
+
+When that run looks right, enable the timer. It runs the agent every 6
+hours (00, 06, 12, 18 o'clock) with a random delay of up to one hour,
+and catches up on a run missed while the VM was down:
+
+```
+sudo systemctl enable --now nebula-vuln-agent.timer
+systemctl list-timers nebula-vuln-agent.timer
+```
+
+A run ends on its own phase limits (assessment at most 4 hours, upload
+1.5 hours) as a degraded run; one that hangs for 8 hours is stopped by
+systemd, and a timer slot that comes while a run is still active starts
+nothing. These exit codes leave
+the unit `failed` (`systemctl --failed`), so they also show in your
+monitoring:
+
+- 2: the configuration was refused. The log names the key.
+- 3: the run was degraded; the log says why.
+- 1: any other failure.
+
+**The unit's sandbox.** The unit runs with no capabilities, under
+`ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `PrivateDevices`,
+`NoNewPrivileges` and a system-call filter, like the collectors. It may
+write only `/var/lib/nebula-vuln-agent`. Edits to the unit are kept on
+upgrade (with a warning from `install.sh`). Put your own changes in a
+drop-in under `/etc/systemd/system/nebula-vuln-agent.service.d/`
+instead.
+
+**Upgrades**: install the new package with `apt install`, or run
+`install.sh --vuln-agent` from the new tarball. The tarball install
+replaces the binary and the units you have not edited. Nothing is
+restarted; the next timer run uses the new version. `config.json` and
+the token stay as they are.
+
+**Removing**: with the package, run `sudo apt remove nebula-vuln-agent`.
+Its prerm stops and disables the timer and the service first.
+`uninstall.sh` (section 16) does not know the agent yet. For a tarball
+install, run these commands by hand. The first one stops a run that is
+still active, so the binary and the unit are not deleted under it:
+
+```
+sudo systemctl disable --now nebula-vuln-agent.timer nebula-vuln-agent.service
+sudo rm /etc/systemd/system/nebula-vuln-agent.service \
+  /etc/systemd/system/nebula-vuln-agent.timer /usr/bin/nebula-vuln-agent
+sudo systemctl daemon-reload
+```
+
+Either way, then revoke the token on the Nebula machine (section 10.4).
+`/var/lib/nebula-vuln-agent`, `/etc/nebula-vuln-agent` and the user stay
+until you delete them.
+
 ## 11. Operating securely
 
 - **Hardened mode** (`-hardened`, section 6.2): HIGH and CRITICAL
