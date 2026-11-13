@@ -143,3 +143,79 @@ func TestParseZonesOutputPassesContract(t *testing.T) {
 	}
 	validatePolicy(t, netdevcontract.FirewallPolicy{Zones: got.Contract()})
 }
+
+// zonesSeedBody returns a <zone> body with n entries named z0..z(n-1), each
+// with one interface.
+func zonesSeedBody(n int) string {
+	var b strings.Builder
+	b.WriteString(`<zone>`)
+	for i := range n {
+		fmt.Fprintf(&b, `<entry name="z%d"><network><layer3><member>ethernet1/%d</member></layer3></network></entry>`, i, i+1)
+	}
+	b.WriteString(`</zone>`)
+	return b.String()
+}
+
+func FuzzParseZones(f *testing.F) {
+	f.Add(readFixture(f, "zones.xml"))
+	f.Add(readFixture(f, "objects.xml"))
+	f.Add(readFixture(f, "status-error.xml"))
+	f.Add([]byte{})
+	f.Add(wrapResult(``))
+	f.Add(wrapResult(`<zone/>`))
+	f.Add(wrapResult(zonesSeedBody(3)))
+	f.Add(wrapResult(`<zone><entry name="` + strings.Repeat("z", MaxNameLength) + `"/></zone>`))
+	f.Add(wrapResult(`<zone><entry name="` + strings.Repeat("z", MaxNameLength+1) + `"/></zone>`))
+	f.Add(wrapResult("<zone><entry name=\"\xff\xfe\"/></zone>"))
+	f.Add(wrapResult(`<zone><entry name="z"/><entry name="z"/></zone>`))
+	f.Add(wrapResult(`<zone><entry name="z"><network><layer3/><layer3/></network></entry></zone>`))
+	f.Add(wrapResult(`<zone><entry name="z"><network><layer3><member>ethernet1/1</member><member>ethernet1/1</member></layer3></network></entry></zone>`))
+	f.Add(wrapResult(`<zone><entry name="z"><network><layer3/><tap/></network></entry></zone>`))
+	f.Add(wrapResult(`<zone><entry name="z">` + strings.Repeat("<e>", 70) + strings.Repeat("</e>", 70) + `</entry></zone>`))
+	f.Add(wrapResult(`<zone><entry name="z"><network><layer3><member>` + strings.Repeat("e", 2*MaxXMLTextBytes) + `</member></layer3></network></entry></zone>`))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		got, err := ParseZones(data)
+		if err != nil {
+			if len(got.List) != 0 || got.Incomplete || got.List != nil {
+				t.Fatalf("error with non-zero result: %v", err)
+			}
+			return
+		}
+		if len(got.List) > netdevcontract.MaxZones {
+			t.Fatalf("%d zones over limit", len(got.List))
+		}
+		names := map[string]struct{}{}
+		owner := map[string]struct{}{}
+		for i, z := range got.List {
+			if ValidateName(z.Name) != nil || len(z.Name) > MaxNameLength {
+				t.Fatalf("zone %d has invalid name", i)
+			}
+			if _, dup := names[z.Name]; dup {
+				t.Fatalf("zone %d duplicated", i)
+			}
+			names[z.Name] = struct{}{}
+			switch z.Type {
+			case "", ZoneLayer3, ZoneLayer2, ZoneVirtualWire, ZoneTap:
+			default:
+				t.Fatalf("zone %d has type %q", i, z.Type)
+			}
+			if z.Type == "" && len(z.Interfaces) != 0 {
+				t.Fatalf("zone %d has interfaces without a type", i)
+			}
+			if len(z.Interfaces) > netdevcontract.MaxFirewallInterfaces {
+				t.Fatalf("zone %d has %d interfaces over limit", i, len(z.Interfaces))
+			}
+			for _, itf := range z.Interfaces {
+				if !netdevcontract.ValidInterfaceName(itf) {
+					t.Fatalf("zone %d has invalid interface %q", i, itf)
+				}
+				if _, dup := owner[itf]; dup {
+					t.Fatalf("interface %q in more than one zone", itf)
+				}
+				owner[itf] = struct{}{}
+			}
+		}
+		// the contract form must pass the netdevcontract validator
+		validatePolicy(t, netdevcontract.FirewallPolicy{Zones: got.Contract()})
+	})
+}
