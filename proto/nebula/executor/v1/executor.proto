@@ -495,6 +495,20 @@ service ExecutorService {
   // script bytes, no scanner excerpts, no paths. Grants nothing.
   rpc GetBuiltinTrustStatus(GetBuiltinTrustStatusRequest) returns (GetBuiltinTrustStatusResponse);
 
+  // Release root rotation (spec 10, root rotation and revocation). The
+  // executor reads root-rotation.json and its signature from the same
+  // locally configured release directory as the built-in bundle; no request
+  // names a path or bytes. There is no server or browser rotation method.
+  // Role: admin only. Verifies the rotation against the executor's durable
+  // root state and returns the old and resulting roots with fingerprints.
+  // Commits nothing.
+  rpc ReviewRootRotation(ReviewRootRotationRequest) returns (ReviewRootRotationResponse);
+
+  // Role: admin only. Applies the reviewed rotation atomically to the
+  // durable root state, bound to the reviewed rotation digest and store
+  // generation. The admin UID comes from peer credentials.
+  rpc CommitRootRotation(CommitRootRotationRequest) returns (CommitRootRotationResponse);
+
   // Signed events (M10-1). Role: server, admin. Read-only: the chain of
   // the executor's audit events with the key to verify it.
   rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
@@ -3275,6 +3289,53 @@ message GetBuiltinTrustStatusResponse {
   int64 generation = 4;
   // Every module of the review, sorted by name.
   repeated BuiltinTrustEntry modules = 5;
+}
+
+// One release root as the review shows it: label, fingerprint and
+// lifecycle. No key material.
+message ReleaseRoot {
+  string id = 1;
+  // SHA256 fingerprint of the complete public-key blob.
+  string fingerprint = 2;
+  // The rotation sequence that enrolled it; 0 for a compiled anchor.
+  int64 added_sequence = 3;
+  // The rotation sequence that revoked it; 0 while active.
+  int64 revoked_sequence = 4;
+}
+
+message ReviewRootRotationRequest {}
+
+message ReviewRootRotationResponse {
+  // SHA-256 of the exact root-rotation.json bytes.
+  string rotation_digest = 1;
+  // The rotation's sequence and the durable sequence it follows.
+  int64 sequence = 2;
+  int64 current_sequence = 3;
+  // The currently trusted root that signed the rotation.
+  ReleaseRoot signed_by = 4;
+  // Every root ever enrolled before and after the rotation, sorted by ID.
+  repeated ReleaseRoot old_roots = 5;
+  repeated ReleaseRoot new_roots = 6;
+  // The roots the rotation adds and the root IDs it revokes.
+  repeated ReleaseRoot added = 7;
+  repeated string revoked = 8;
+  // The trust store generation the commit binds to.
+  int64 generation = 9;
+}
+
+message CommitRootRotationRequest {
+  // The reviewed rotation digest the admin confirmed.
+  string rotation_digest = 1;
+}
+
+message CommitRootRotationResponse {
+  string rotation_digest = 1;
+  int64 sequence = 2;
+  int64 generation = 3;
+  uint32 admin_uid = 4;
+  ReleaseRoot signed_by = 5;
+  // The roots after the rotation, sorted by ID.
+  repeated ReleaseRoot roots = 6;
 }
 
 // Private registries (ADR 0006, P1-32).

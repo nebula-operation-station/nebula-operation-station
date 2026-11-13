@@ -146,8 +146,12 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_CommitBuiltinTrust_FullMethodName:    {admin},
 		pb.ExecutorService_UnpinBuiltinVersion_FullMethodName:   {admin},
 		pb.ExecutorService_GetBuiltinTrustStatus_FullMethodName: {server, admin},
-		pb.ExecutorService_ListEvents_FullMethodName:            {server, admin},
-		pb.ExecutorService_BackupExecutor_FullMethodName:        {admin},
+		// Release root rotation (spec 10): local admin only; the server has
+		// no rotation method at all.
+		pb.ExecutorService_ReviewRootRotation_FullMethodName: {admin},
+		pb.ExecutorService_CommitRootRotation_FullMethodName: {admin},
+		pb.ExecutorService_ListEvents_FullMethodName:         {server, admin},
+		pb.ExecutorService_BackupExecutor_FullMethodName:     {admin},
 		// PVE provider reads (ADR 0006, P1-05). The entries are final:
 		// pve-collector may call ONLY these two methods (plus ListReadGrants,
 		// see the read-grant entries above); server may list the

@@ -117,6 +117,8 @@ const (
 	ExecutorService_CommitBuiltinTrust_FullMethodName              = "/nebula.executor.v1.ExecutorService/CommitBuiltinTrust"
 	ExecutorService_UnpinBuiltinVersion_FullMethodName             = "/nebula.executor.v1.ExecutorService/UnpinBuiltinVersion"
 	ExecutorService_GetBuiltinTrustStatus_FullMethodName           = "/nebula.executor.v1.ExecutorService/GetBuiltinTrustStatus"
+	ExecutorService_ReviewRootRotation_FullMethodName              = "/nebula.executor.v1.ExecutorService/ReviewRootRotation"
+	ExecutorService_CommitRootRotation_FullMethodName              = "/nebula.executor.v1.ExecutorService/CommitRootRotation"
 	ExecutorService_ListEvents_FullMethodName                      = "/nebula.executor.v1.ExecutorService/ListEvents"
 	ExecutorService_BackupExecutor_FullMethodName                  = "/nebula.executor.v1.ExecutorService/BackupExecutor"
 	ExecutorService_ProbePVERemote_FullMethodName                  = "/nebula.executor.v1.ExecutorService/ProbePVERemote"
@@ -542,6 +544,18 @@ type ExecutorServiceClient interface {
 	// built-in versions are trusted and which are untrusted. No diffs, no
 	// script bytes, no scanner excerpts, no paths. Grants nothing.
 	GetBuiltinTrustStatus(ctx context.Context, in *GetBuiltinTrustStatusRequest, opts ...grpc.CallOption) (*GetBuiltinTrustStatusResponse, error)
+	// Release root rotation (spec 10, root rotation and revocation). The
+	// executor reads root-rotation.json and its signature from the same
+	// locally configured release directory as the built-in bundle; no request
+	// names a path or bytes. There is no server or browser rotation method.
+	// Role: admin only. Verifies the rotation against the executor's durable
+	// root state and returns the old and resulting roots with fingerprints.
+	// Commits nothing.
+	ReviewRootRotation(ctx context.Context, in *ReviewRootRotationRequest, opts ...grpc.CallOption) (*ReviewRootRotationResponse, error)
+	// Role: admin only. Applies the reviewed rotation atomically to the
+	// durable root state, bound to the reviewed rotation digest and store
+	// generation. The admin UID comes from peer credentials.
+	CommitRootRotation(ctx context.Context, in *CommitRootRotationRequest, opts ...grpc.CallOption) (*CommitRootRotationResponse, error)
 	// Signed events (M10-1). Role: server, admin. Read-only: the chain of
 	// the executor's audit events with the key to verify it.
 	ListEvents(ctx context.Context, in *ListEventsRequest, opts ...grpc.CallOption) (*ListEventsResponse, error)
@@ -1680,6 +1694,26 @@ func (c *executorServiceClient) GetBuiltinTrustStatus(ctx context.Context, in *G
 	return out, nil
 }
 
+func (c *executorServiceClient) ReviewRootRotation(ctx context.Context, in *ReviewRootRotationRequest, opts ...grpc.CallOption) (*ReviewRootRotationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReviewRootRotationResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ReviewRootRotation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) CommitRootRotation(ctx context.Context, in *CommitRootRotationRequest, opts ...grpc.CallOption) (*CommitRootRotationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommitRootRotationResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_CommitRootRotation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *executorServiceClient) ListEvents(ctx context.Context, in *ListEventsRequest, opts ...grpc.CallOption) (*ListEventsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListEventsResponse)
@@ -2490,6 +2524,18 @@ type ExecutorServiceServer interface {
 	// built-in versions are trusted and which are untrusted. No diffs, no
 	// script bytes, no scanner excerpts, no paths. Grants nothing.
 	GetBuiltinTrustStatus(context.Context, *GetBuiltinTrustStatusRequest) (*GetBuiltinTrustStatusResponse, error)
+	// Release root rotation (spec 10, root rotation and revocation). The
+	// executor reads root-rotation.json and its signature from the same
+	// locally configured release directory as the built-in bundle; no request
+	// names a path or bytes. There is no server or browser rotation method.
+	// Role: admin only. Verifies the rotation against the executor's durable
+	// root state and returns the old and resulting roots with fingerprints.
+	// Commits nothing.
+	ReviewRootRotation(context.Context, *ReviewRootRotationRequest) (*ReviewRootRotationResponse, error)
+	// Role: admin only. Applies the reviewed rotation atomically to the
+	// durable root state, bound to the reviewed rotation digest and store
+	// generation. The admin UID comes from peer credentials.
+	CommitRootRotation(context.Context, *CommitRootRotationRequest) (*CommitRootRotationResponse, error)
 	// Signed events (M10-1). Role: server, admin. Read-only: the chain of
 	// the executor's audit events with the key to verify it.
 	ListEvents(context.Context, *ListEventsRequest) (*ListEventsResponse, error)
@@ -2955,6 +3001,12 @@ func (UnimplementedExecutorServiceServer) UnpinBuiltinVersion(context.Context, *
 }
 func (UnimplementedExecutorServiceServer) GetBuiltinTrustStatus(context.Context, *GetBuiltinTrustStatusRequest) (*GetBuiltinTrustStatusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetBuiltinTrustStatus not implemented")
+}
+func (UnimplementedExecutorServiceServer) ReviewRootRotation(context.Context, *ReviewRootRotationRequest) (*ReviewRootRotationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReviewRootRotation not implemented")
+}
+func (UnimplementedExecutorServiceServer) CommitRootRotation(context.Context, *CommitRootRotationRequest) (*CommitRootRotationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CommitRootRotation not implemented")
 }
 func (UnimplementedExecutorServiceServer) ListEvents(context.Context, *ListEventsRequest) (*ListEventsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListEvents not implemented")
@@ -4834,6 +4886,42 @@ func _ExecutorService_GetBuiltinTrustStatus_Handler(srv interface{}, ctx context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_ReviewRootRotation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReviewRootRotationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ReviewRootRotation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ReviewRootRotation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ReviewRootRotation(ctx, req.(*ReviewRootRotationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_CommitRootRotation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CommitRootRotationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).CommitRootRotation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_CommitRootRotation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).CommitRootRotation(ctx, req.(*CommitRootRotationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ExecutorService_ListEvents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListEventsRequest)
 	if err := dec(in); err != nil {
@@ -5998,6 +6086,14 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetBuiltinTrustStatus",
 			Handler:    _ExecutorService_GetBuiltinTrustStatus_Handler,
+		},
+		{
+			MethodName: "ReviewRootRotation",
+			Handler:    _ExecutorService_ReviewRootRotation_Handler,
+		},
+		{
+			MethodName: "CommitRootRotation",
+			Handler:    _ExecutorService_CommitRootRotation_Handler,
 		},
 		{
 			MethodName: "ListEvents",

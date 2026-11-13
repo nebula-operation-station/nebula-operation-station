@@ -409,6 +409,8 @@ var integrityLockedMethods = map[string]bool{
 	pb.ExecutorService_CommitBuiltinTrust_FullMethodName:              false,
 	pb.ExecutorService_UnpinBuiltinVersion_FullMethodName:             false,
 	pb.ExecutorService_GetBuiltinTrustStatus_FullMethodName:           false,
+	pb.ExecutorService_ReviewRootRotation_FullMethodName:              false,
+	pb.ExecutorService_CommitRootRotation_FullMethodName:              false,
 	pb.ExecutorService_ListEvents_FullMethodName:                      false,
 	pb.ExecutorService_BackupExecutor_FullMethodName:                  false,
 	pb.ExecutorService_ProbePVERemote_FullMethodName:                  false,
