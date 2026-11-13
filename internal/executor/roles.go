@@ -241,6 +241,13 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_ClearContainerRecoveryPlan_FullMethodName: {admin},
 		pb.ExecutorService_ListContainerRecreations_FullMethodName:   {server, admin},
 		pb.ExecutorService_ResolveContainerRecreation_FullMethodName: {server, admin},
+
+		// I1 integrity (ADR 0015 D4, Q4; spec 06). The status is
+		// read-only and grants nothing. Only the local admin may ack an
+		// open locking finding: the server UID can never lift the lock
+		// (there is no browser path).
+		pb.ExecutorService_GetIntegrityStatus_FullMethodName:  {server, admin},
+		pb.ExecutorService_AckIntegrityFinding_FullMethodName: {admin},
 	}
 }
 

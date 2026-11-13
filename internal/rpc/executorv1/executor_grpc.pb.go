@@ -158,6 +158,8 @@ const (
 	ExecutorService_RemoveNetDevice_FullMethodName                 = "/nebula.executor.v1.ExecutorService/RemoveNetDevice"
 	ExecutorService_ListNetDevices_FullMethodName                  = "/nebula.executor.v1.ExecutorService/ListNetDevices"
 	ExecutorService_ReadNetDevice_FullMethodName                   = "/nebula.executor.v1.ExecutorService/ReadNetDevice"
+	ExecutorService_GetIntegrityStatus_FullMethodName              = "/nebula.executor.v1.ExecutorService/GetIntegrityStatus"
+	ExecutorService_AckIntegrityFinding_FullMethodName             = "/nebula.executor.v1.ExecutorService/AckIntegrityFinding"
 )
 
 // ExecutorServiceClient is the client API for ExecutorService service.
@@ -698,6 +700,16 @@ type ExecutorServiceClient interface {
 	// requires a device read lease. Until then every valid read answers
 	// Unimplemented.
 	ReadNetDevice(ctx context.Context, in *ReadNetDeviceRequest, opts ...grpc.CallOption) (*ReadNetDeviceResponse, error)
+	// I1 integrity status (ADR 0015 D4, Q4; spec 06). Role: server, admin.
+	// Read-only: the latest check runs, the open locking findings and the
+	// fixed root-compromise note. Grants and clears nothing.
+	GetIntegrityStatus(ctx context.Context, in *GetIntegrityStatusRequest, opts ...grpc.CallOption) (*GetIntegrityStatusResponse, error)
+	// `nebula integrity ack <finding>` (ADR 0015 D4, Q4; spec 06). Role:
+	// admin only; there is no server or browser path. Clears exactly the
+	// named open locking finding, audited with the admin UID from peer
+	// credentials. Deletes, restores and rolls back nothing; a later check
+	// that finds the same deviation opens it again.
+	AckIntegrityFinding(ctx context.Context, in *AckIntegrityFindingRequest, opts ...grpc.CallOption) (*AckIntegrityFindingResponse, error)
 }
 
 type executorServiceClient struct {
@@ -2078,6 +2090,26 @@ func (c *executorServiceClient) ReadNetDevice(ctx context.Context, in *ReadNetDe
 	return out, nil
 }
 
+func (c *executorServiceClient) GetIntegrityStatus(ctx context.Context, in *GetIntegrityStatusRequest, opts ...grpc.CallOption) (*GetIntegrityStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetIntegrityStatusResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_GetIntegrityStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) AckIntegrityFinding(ctx context.Context, in *AckIntegrityFindingRequest, opts ...grpc.CallOption) (*AckIntegrityFindingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AckIntegrityFindingResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_AckIntegrityFinding_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExecutorServiceServer is the server API for ExecutorService service.
 // All implementations must embed UnimplementedExecutorServiceServer
 // for forward compatibility.
@@ -2616,6 +2648,16 @@ type ExecutorServiceServer interface {
 	// requires a device read lease. Until then every valid read answers
 	// Unimplemented.
 	ReadNetDevice(context.Context, *ReadNetDeviceRequest) (*ReadNetDeviceResponse, error)
+	// I1 integrity status (ADR 0015 D4, Q4; spec 06). Role: server, admin.
+	// Read-only: the latest check runs, the open locking findings and the
+	// fixed root-compromise note. Grants and clears nothing.
+	GetIntegrityStatus(context.Context, *GetIntegrityStatusRequest) (*GetIntegrityStatusResponse, error)
+	// `nebula integrity ack <finding>` (ADR 0015 D4, Q4; spec 06). Role:
+	// admin only; there is no server or browser path. Clears exactly the
+	// named open locking finding, audited with the admin UID from peer
+	// credentials. Deletes, restores and rolls back nothing; a later check
+	// that finds the same deviation opens it again.
+	AckIntegrityFinding(context.Context, *AckIntegrityFindingRequest) (*AckIntegrityFindingResponse, error)
 	mustEmbedUnimplementedExecutorServiceServer()
 }
 
@@ -3036,6 +3078,12 @@ func (UnimplementedExecutorServiceServer) ListNetDevices(context.Context, *ListN
 }
 func (UnimplementedExecutorServiceServer) ReadNetDevice(context.Context, *ReadNetDeviceRequest) (*ReadNetDeviceResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReadNetDevice not implemented")
+}
+func (UnimplementedExecutorServiceServer) GetIntegrityStatus(context.Context, *GetIntegrityStatusRequest) (*GetIntegrityStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetIntegrityStatus not implemented")
+}
+func (UnimplementedExecutorServiceServer) AckIntegrityFinding(context.Context, *AckIntegrityFindingRequest) (*AckIntegrityFindingResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AckIntegrityFinding not implemented")
 }
 func (UnimplementedExecutorServiceServer) mustEmbedUnimplementedExecutorServiceServer() {}
 func (UnimplementedExecutorServiceServer) testEmbeddedByValue()                         {}
@@ -5524,6 +5572,42 @@ func _ExecutorService_ReadNetDevice_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_GetIntegrityStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetIntegrityStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).GetIntegrityStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_GetIntegrityStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).GetIntegrityStatus(ctx, req.(*GetIntegrityStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_AckIntegrityFinding_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AckIntegrityFindingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).AckIntegrityFinding(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_AckIntegrityFinding_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).AckIntegrityFinding(ctx, req.(*AckIntegrityFindingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ExecutorService_ServiceDesc is the grpc.ServiceDesc for ExecutorService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -6078,6 +6162,14 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReadNetDevice",
 			Handler:    _ExecutorService_ReadNetDevice_Handler,
+		},
+		{
+			MethodName: "GetIntegrityStatus",
+			Handler:    _ExecutorService_GetIntegrityStatus_Handler,
+		},
+		{
+			MethodName: "AckIntegrityFinding",
+			Handler:    _ExecutorService_AckIntegrityFinding_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
