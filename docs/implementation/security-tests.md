@@ -64,7 +64,7 @@ before a release.
 
 `make fuzz` (`Makefile`, target `fuzz`) runs 13 fuzz functions for 20
 seconds each. It is not run by CI. The table lists every `Fuzz*` function
-in the repository (111, from `grep -rn '^func Fuzz' --include=*_test.go .`)
+in the repository (117, previously: 111, from `grep -rn '^func Fuzz' --include=*_test.go .`)
 with its package and whether `make fuzz` runs it. Functions marked "no"
 are not run by `make fuzz`; their seed corpora still run in `make test`
 like every other test.
@@ -73,6 +73,7 @@ like every other test.
 | --- | --- | --- |
 | `internal/backup` | `FuzzRead` | yes |
 | `internal/canonical` | `FuzzHashParameters`, `FuzzParseBatch`, `FuzzBatchGraphAndLimits` | yes: `FuzzHashParameters`; no: `FuzzParseBatch`, `FuzzBatchGraphAndLimits` |
+| `internal/cbscli` | `FuzzParsePrompt`, `FuzzLooksInteractive` | no |
 | `internal/cbsparse` | `FuzzParseVLANs`, `FuzzParseLLDPNeighbors`, `FuzzParseLLDPNeighborDetail`, `FuzzParseMACTable`, `FuzzParseInterfaces`, `FuzzParseVersion` | no |
 | `internal/discoveryjob` | `FuzzParseNmapXML`, `FuzzJobArgs` | yes |
 | `internal/executions/actions/netfacts` | `FuzzStrictKeysMatchJSON`, `FuzzDecode` | no |
@@ -93,7 +94,7 @@ like every other test.
 | `internal/netfacts` | `FuzzParseSockets`, `FuzzParseNeighBounds`, `FuzzParseRoutesBounds`, `FuzzParseAddrsBounds`, `FuzzParseLinksBounds`, `FuzzParseBridgeVLANBounds` | no |
 | `internal/netreach` | `FuzzEvaluate`, `FuzzParseLiterals`, `FuzzPlace` | no |
 | `internal/pairing` | `FuzzParse` | no |
-| `internal/panapi` | `FuzzParseNATRules`, `FuzzParseSecurityRules`, `FuzzParseJob`, `FuzzParseObjects`, `FuzzParseRuleHitCounts` | no |
+| `internal/panapi` | `FuzzParseNATRules`, `FuzzParseSecurityRules`, `FuzzParseJob`, `FuzzParseObjects`, `FuzzParseRuleHitCounts`, `FuzzParseZones` | no |
 | `internal/pveapi` | `FuzzListQemu`, `FuzzListLxc`, `FuzzListNodes`, `FuzzGetQemuConfig`, `FuzzGetLxcConfig`, `FuzzClusterStatus`, `FuzzHAStatus`, `FuzzListSnapshots`, `FuzzReadBackups`, `FuzzAgentOSInfo`, `FuzzAgentNetworkInterfaces`, `FuzzAgentFSInfo`, `FuzzNodeTasks`, `FuzzListStorages`, `FuzzNodeStatus`, `FuzzGuestStatus`, `FuzzNodeRRDData`, `FuzzGuestRRDData` | no |
 | `internal/pvecontract` | `FuzzDecodeRemote`, `FuzzDecodeObservation` | no |
 | `internal/registrymeta` | `FuzzLatestStable` | no |
@@ -101,8 +102,10 @@ like every other test.
 | `internal/scanner` | `FuzzScan` | yes |
 | `internal/softwarecat` | `FuzzNormalizers` | no |
 | `internal/sshsig` | `FuzzParse` | yes |
+| `internal/stageplan` | `FuzzParse` | no |
 | `internal/textdiff` | `FuzzDiff` | no |
 | `internal/vulnfeed` | `FuzzParseEPSS`, `FuzzParseOSV`, `FuzzParseOSVArchive`, `FuzzParseDebianTracker`, `FuzzParseDebianAdvisoryList`, `FuzzParseKEV`, `FuzzParseNVD` | no |
+| `internal/vulnfeed/reputation` | `FuzzParseEntry`, `FuzzForEachRecord` | no |
 | `internal/vulnfinding` | `FuzzParseRecord` | no |
 | `internal/vulnmatch` | `FuzzMatchVersions` | no |
 | `internal/vulnprio` | `FuzzCompute` | no |
@@ -117,13 +120,14 @@ package is a protected path.
 Before a release, run each `make fuzz` target for at least an hour
 (`go test -run='^$' -fuzz=NAME -fuzztime=1h ./PKG`).
 
-**Open:** 98 fuzz functions (the "no" rows) are not run by `make fuzz`,
+**Open:** 104 fuzz functions (the "no" rows; previously: 98) are not run by `make fuzz`,
 and CI runs no fuzz target at all, although the M10-3 plan in
 `docs/implementation/m10-plan.md` expects CI to run them briefly. Proposal
 for a separate ticket on the protected `Makefile` (not done here): add the
 parsers of untrusted managed-host and device input first (`internal/pveapi`,
 `internal/panapi`, `internal/netdevcontract`, `internal/netfacts`,
-`internal/cbsparse`, `internal/executions/*` except the `FuzzParsers` ones,
-`internal/vulnfeed`, `internal/release`), then decide with the maintainer
+`internal/cbsparse`, `internal/cbscli`, `internal/executions/*` except the
+`FuzzParsers` ones, `internal/vulnfeed`, `internal/vulnfeed/reputation`,
+`internal/release`), then decide with the maintainer
 whether `make fuzz` should list them all or a nightly CI job should run
 them, since the protected paths include `.github/`.
