@@ -900,6 +900,16 @@ func (c *Client) AckIntegrityFinding(ctx context.Context, in *pb.AckIntegrityFin
 	return resp, mapCallError(ctx, err)
 }
 
+// CompareBaselineDigest compares the server's I2 baseline list digest for a
+// host with the executor-held approved digest (read-only; a mismatch is
+// `integrity.baseline_tamper`).
+func (c *Client) CompareBaselineDigest(ctx context.Context, in *pb.CompareBaselineDigestRequest, opts ...grpc.CallOption) (*pb.CompareBaselineDigestResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.CompareBaselineDigest(ctx, in, opts...)
+	return resp, mapCallError(ctx, err)
+}
+
 // Compile-time check: the client must implement the generated interface so
 // that a generated-code change breaks the build here.
 var _ pb.ExecutorServiceClient = (*Client)(nil)

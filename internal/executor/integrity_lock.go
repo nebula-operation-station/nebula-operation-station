@@ -448,6 +448,7 @@ var integrityLockedMethods = map[string]bool{
 	pb.ExecutorService_ListNetDevices_FullMethodName:                  false,
 	pb.ExecutorService_GetIntegrityStatus_FullMethodName:              false,
 	pb.ExecutorService_AckIntegrityFinding_FullMethodName:             false,
+	pb.ExecutorService_CompareBaselineDigest_FullMethodName:           false,
 }
 
 // IntegrityLockRefuses reports whether method is refused right now
