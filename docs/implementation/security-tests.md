@@ -5,10 +5,14 @@ threat model, with the tests that hold it and where they run. A criterion
 without an automated test says so and names the lab check.
 
 Where: **unit** and **acceptance** run in `make test` (CI, every PR);
-**privileged** in `make test-privileged` (root, CI); **browser** in
-`make test-browser`; **integration** in `make test-integration` against
-the OpenSSH test VMs; **fuzz** in `make fuzz` (the seed corpora also run in
-`make test`); **lab** is the reference lab before a release.
+**deploy** (the shell and Python tests under `deploy/`) in `make test-deploy`
+(CI, every PR; `make check` runs it too); **privileged** in
+`make test-privileged` (root, CI); **browser** in `make test-browser`;
+**integration** in `make test-integration` against the OpenSSH test VMs (not
+in CI; its only test is `TestRealOpenSSH`); **fuzz** in `make fuzz` (13
+targets, not in CI; the seed corpora of all `Fuzz*` functions run in
+`make test`, see [Fuzz targets](#fuzz-targets)); **lab** is the reference lab
+before a release.
 
 ## Spec 16 acceptance criteria
 
@@ -18,13 +22,13 @@ the OpenSSH test VMs; **fuzz** in `make fuzz` (the seed corpora also run in
 | 0 | An unknown UID is rejected | `TestM0_UnknownUIDIsRejected`, `TestM0Privileged_UnknownUIDIsRejectedAcrossProcesses` | acceptance, privileged |
 | 0 | A script, host list or parameter swapped after approval is rejected | `TestM0_SubstitutionAfterApprovalIsRejected`, `TestM0_ChangedRequestNeedsNewApproval`, `TestM0_ParametersAreBoundAtProposal`, `TestM0_ExecutorComputesTheDigestItself` | acceptance |
 | 0 | A replayed assertion is rejected | `TestM0_ReplayedAssertionIsRejected`, `TestH02_SignCountersSurviveRestart`, `TestH02_SpentExecutionIDsSurviveRestart` | acceptance |
-| 1 | A clean install from the tarball starts all services locked | No automated test of a full install. `deploy/install_test.sh` checks `install.sh` in dry-run (options, unit recovery, server.json) and is not run by CI; `TestH02_RestartRevokesPermitsAndStartsLocked` covers the locked start after a restart | lab: full install from the tarball on Debian 12, every service starts locked |
+| 1 | A clean install from the tarball starts all services locked | No automated test of a full install. `deploy/install_test.sh` (run by `make test-deploy`, which `make check` runs; CI job `test`, step `make test-deploy`, as root; previously: not run by CI) runs `install.sh` in dry-run mode for argument parsing and validation, admin users in `/etc/passwd`, and "dry run changes nothing"; it runs the unit refresh block in a temporary directory and checks the live-handoff spool and the server drop-in statically. Its root-only cases (unit recovery and `server.json` on install, drop-ins on uninstall) run only as root with a running systemd and are skipped with a message otherwise. `TestH02_RestartRevokesPermitsAndStartsLocked` covers the locked start after a restart | lab: full install from the tarball on Debian 12, every service starts locked |
 | 2 | After a reboot nothing executes until `nebula unlock` | `TestM0_LockedExecutorAuthorizesNothing`, `TestH02_RestartRevokesPermitsAndStartsLocked`, `TestH05_LockedKeyringConnectsNowhere` | acceptance |
 | 2 | A recovery forces a new WebAuthn registration | `TestM2Recovery_ForcesNewRegistration`, `TestM2Recovery_CodeOnlyKeyNeedsConfirmationOnTheExecutorHost` | acceptance |
-| 3 | A host with LAN and VPN endpoints falls back on TCP failure | `TestH05_PinnedHostFallsBackOnTCPFailure`, `TestH05_AuthFailureTriesNoOtherEndpoint` | acceptance, integration |
+| 3 | A host with LAN and VPN endpoints falls back on TCP failure | `TestH05_PinnedHostFallsBackOnTCPFailure`, `TestH05_AuthFailureTriesNoOtherEndpoint` | acceptance |
 | 3 | A changed host key stops it and notifies | `TestH05_ChangedHostKeyStopsAndBlocksTheHost`, `TestH05_BlockSurvivesRestart`, `TestHostKeyWatcherNotifiesOncePerBlock` | acceptance, unit |
-| 4 | Killing Nebula during a durable job and restarting reconciles without a re-run | `TestM4_DurableJobSurvivesAnExecutorRestart`, `TestM4_DurableJobStartsOncePerHost`, `TestM4_DurableJobThatDiesIsInterruptedNotRerun` | acceptance, integration (`NEBULA_IT_DURABLE=1`) |
-| 5 | Security updates on Debian 12 and Ubuntu 24.04 as a durable job; reboot waits and reports `host_not_returned` | `TestM5_InstallSecurityRunsAsDurableJob`, `TestM5_RebootWaitsForANewBoot`, the `internal/executions/osdebian` parser tests | acceptance, integration, lab (real hosts) |
+| 4 | Killing Nebula during a durable job and restarting reconciles without a re-run | `TestM4_DurableJobSurvivesAnExecutorRestart`, `TestM4_DurableJobStartsOncePerHost`, `TestM4_DurableJobThatDiesIsInterruptedNotRerun` | acceptance; integration: `TestRealOpenSSH` with `NEBULA_IT_DURABLE=1` runs one harmless durable job on the OpenSSH VMs (the restart cases are acceptance only) |
+| 5 | Security updates on Debian 12 and Ubuntu 24.04 as a durable job; reboot waits and reports `host_not_returned` | `TestM5_InstallSecurityRunsAsDurableJob`, `TestM5_RebootWaitsForANewBoot`, the `internal/executions/osdebian` parser tests | acceptance, lab (real hosts) |
 | 5 | A held dpkg lock ends as `precheck_failed`; Proxmox gets `full-upgrade` | No automated test (the host scripts are not executed by any test) | lab: hold `flock /var/lib/dpkg/lock-frontend sleep 600` on a Debian 12 VM and install updates; enroll a Proxmox host and check that the planned command is `apt-get full-upgrade` |
 | 6 | A failing canary stops the rollout | `TestM6_FailingCanaryStopsTheRollout`, `TestM6_AbortStopsTheRollout` | acceptance |
 | 6 | A HIGH gate demands a fresh assertion | `TestM6_HighGateDemandsAFreshAssertion`, `TestM6_StagePlanIsPartOfTheApproval` | acceptance |
