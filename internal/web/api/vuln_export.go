@@ -147,8 +147,8 @@ var (
 	exportReleaseRe    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+_~-]{0,127}$`)
 	// exportVendorRe and exportModelRe are the D2 device patterns. The model
 	// has no dot and no colon, so a host name ("core-sw.lab.example"), an
-	// IP address and an IPv6 address are not models; exportMACRe refuses the
-	// hyphenated MAC form that the pattern would allow.
+	// IP address and an IPv6 address are not models; modelCodeOK refuses a MAC
+	// and an embedded address that the pattern would allow.
 	exportVendorRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 	exportModelRe  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_+-]{0,63}$`)
 	// exportModelUpperRe and exportDigitRe are the shape of a vendor model
@@ -157,7 +157,6 @@ var (
 	// is not a model even though exportModelRe matches it (ADR 0011 D2).
 	exportModelUpperRe = regexp.MustCompile(`[A-Z]`)
 	exportDigitRe      = regexp.MustCompile(`[0-9]`)
-	exportMACRe        = regexp.MustCompile(`^[0-9A-Fa-f]{2}(-[0-9A-Fa-f]{2}){5}$`)
 	// exportFirmwareRe is the allowlist of a firmware version's characters
 	// and shape: a digit first, then letters, digits and the separators of a
 	// vendor version string, at most 64 bytes. Shape checks that the pattern
@@ -169,9 +168,14 @@ var (
 	// exportMACQuadsRe is a MAC written as three four-digit groups and
 	// exportMACPairsRe as six two-digit octets. They match the normalised
 	// value (firmwareSeparators), where every separator is ".".
-	exportMACQuadsRe = regexp.MustCompile(`^[0-9A-Fa-f]{4}(\.[0-9A-Fa-f]{4}){2}$`)
-	exportMACBareRe  = regexp.MustCompile(`^[0-9A-Fa-f]{12}$`)
-	exportMACPairsRe = regexp.MustCompile(`^[0-9A-Fa-f]{2}(\.[0-9A-Fa-f]{2}){5}$`)
+	// The MAC patterns are unanchored (embeddedMAC): a MAC at any position
+	// counts. A dotted MAC must have a "." or the value edge on each side, so
+	// a longer group ("12.34.56.78.90.123") is not a MAC. A bare MAC is a run
+	// of exactly 12 hex digits between non-hex characters or the value edges,
+	// so a longer digit run ("1.0011223344551") is not a MAC.
+	exportMACQuadsRe = regexp.MustCompile(`(?:^|\.)[0-9A-Fa-f]{4}(?:\.[0-9A-Fa-f]{4}){2}(?:\.|$)`)
+	exportMACBareRe  = regexp.MustCompile(`(?:^|[^0-9A-Fa-f])[0-9A-Fa-f]{12}(?:[^0-9A-Fa-f]|$)`)
+	exportMACPairsRe = regexp.MustCompile(`(?:^|\.)[0-9A-Fa-f]{2}(?:\.[0-9A-Fa-f]{2}){5}(?:\.|$)`)
 	// firmwareSeparators maps each separator of the firmware grammar (". - _
 	// + ~") to ".", so the MAC and address checks see one separator form.
 	firmwareSeparators = strings.NewReplacer("-", ".", "_", ".", "+", ".", "~", ".")
@@ -447,7 +451,21 @@ func prepareDevice(sub VulnSubject) (preparedSubject, bool) {
 // label such as "SW01" has the same shape as a model code and is a residual
 // of D2, not a guarantee.
 func modelCodeOK(m string) bool {
-	return exportModelRe.MatchString(m) && exportModelUpperRe.MatchString(m) && exportDigitRe.MatchString(m) && notAddress(m) && !exportMACRe.MatchString(m)
+	if !exportModelRe.MatchString(m) || !exportModelUpperRe.MatchString(m) || !exportDigitRe.MatchString(m) || !notAddress(m) {
+		return false
+	}
+	// The address and MAC scans run on the normalised value, as for firmware,
+	// so "IP-10-0-0-7" is refused like the address "10.0.0.7".
+	n := firmwareSeparators.Replace(m)
+	return !embeddedMAC(n) && !nonPublicIPv4Embedded(n)
+}
+
+// embeddedMAC reports whether n, a value normalised by firmwareSeparators,
+// contains a MAC at any position: three four-digit groups, six two-digit
+// octets (each with a "." or the value edge on both sides), or 12 hex digits
+// as a whole run. A MAC after a version prefix or with a suffix is found.
+func embeddedMAC(n string) bool {
+	return exportMACQuadsRe.MatchString(n) || exportMACPairsRe.MatchString(n) || exportMACBareRe.MatchString(n)
 }
 
 // vendorOK reports whether vendor may be exported (D2): the slug pattern and
@@ -519,7 +537,7 @@ func deviceFirmwareOK(v string) bool {
 	// n is v with every separator as "."; the MAC and address checks run on n,
 	// so no separator mix can evade them.
 	n := firmwareSeparators.Replace(v)
-	if exportMACQuadsRe.MatchString(n) || exportMACPairsRe.MatchString(n) || exportMACBareRe.MatchString(n) {
+	if embeddedMAC(n) {
 		return false
 	}
 	labels := strings.Split(v, ".")
