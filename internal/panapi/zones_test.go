@@ -219,3 +219,85 @@ func FuzzParseZones(f *testing.F) {
 		validatePolicy(t, netdevcontract.FirewallPolicy{Zones: got.Contract()})
 	})
 }
+
+// zoneEntryBody returns one zone entry named z with the given attribute and
+// child fragments inside <entry>.
+func zoneEntryBody(attrs, inner string) []byte {
+	return wrapResult(`<zone><entry name="z"` + attrs + `>` + inner + `</entry></zone>`)
+}
+
+// TestParseZonesLimitBoundaries checks each ADR 0010 D3 zone limit at the
+// limit (accepted) and at limit+1 (refused or incomplete).
+func TestParseZonesLimitBoundaries(t *testing.T) {
+	maxIfaces := func(n int) string {
+		var b strings.Builder
+		b.WriteString(`<zone><entry name="big"><network><layer3>`)
+		for i := range n {
+			fmt.Fprintf(&b, `<member>ethernet1/%d</member>`, i+1)
+		}
+		b.WriteString(`</layer3></network></entry></zone>`)
+		return b.String()
+	}
+	// depth of the wrapped entry is 4 (response, result, zone, entry); each
+	// extra <e> adds one level.
+	nestedInEntry := func(depth int) []byte {
+		return zoneEntryBody("", strings.Repeat("<e>", depth-4)+strings.Repeat("</e>", depth-4))
+	}
+	// the wrapped entry has 4 elements (response, result, zone, entry)
+	manyInEntry := func(elements int) []byte {
+		return zoneEntryBody("", strings.Repeat("<e/>", elements-4))
+	}
+	base := wrapResult(zonesSeedBody(1))
+	padded := func(n int) []byte {
+		return append(append([]byte(nil), base...), strings.Repeat(" ", n-len(base))...)
+	}
+	longName := strings.Repeat("z", netdevcontract.MaxPANOSNameBytes)
+	longIface := "e" + strings.Repeat("a", netdevcontract.MaxInterfaceNameBytes-1)
+
+	cases := []struct {
+		name           string
+		data           []byte
+		wantErr        error
+		wantLen        int
+		wantIncomplete bool
+	}{
+		{"zones at limit", wrapResult(zonesSeedBody(netdevcontract.MaxZones)), nil, netdevcontract.MaxZones, false},
+		{"zones limit+1", wrapResult(zonesSeedBody(netdevcontract.MaxZones + 1)), nil, netdevcontract.MaxZones, true},
+		{"interfaces at limit", wrapResult(maxIfaces(netdevcontract.MaxFirewallInterfaces)), nil, 1, false},
+		{"interfaces limit+1", wrapResult(maxIfaces(netdevcontract.MaxFirewallInterfaces + 1)), nil, 1, true},
+		{"zone name at limit", wrapResult(`<zone><entry name="` + longName + `"/></zone>`), nil, 1, false},
+		{"zone name limit+1", wrapResult(`<zone><entry name="` + longName + `z"/></zone>`), ErrInvalidConfig, 0, false},
+		{"interface name at limit", wrapResult(`<zone><entry name="z"><network><layer3><member>` + longIface + `</member></layer3></network></entry></zone>`), nil, 1, false},
+		{"interface name limit+1", wrapResult(`<zone><entry name="z"><network><layer3><member>` + longIface + `a</member></layer3></network></entry></zone>`), ErrInvalidConfig, 0, false},
+		{"text at limit", zoneEntryBody("", `<description>`+strings.Repeat("x", netdevcontract.MaxXMLTextBytes)+`</description>`), nil, 1, false},
+		{"text limit+1", zoneEntryBody("", `<description>`+strings.Repeat("x", netdevcontract.MaxXMLTextBytes+1)+`</description>`), ErrXMLLimit, 0, false},
+		{"attribute at limit", zoneEntryBody(` comment="`+strings.Repeat("x", netdevcontract.MaxXMLTextBytes)+`"`, ""), nil, 1, false},
+		{"attribute limit+1", zoneEntryBody(` comment="`+strings.Repeat("x", netdevcontract.MaxXMLTextBytes+1)+`"`, ""), ErrXMLLimit, 0, false},
+		{"depth at limit", nestedInEntry(netdevcontract.MaxXMLDepth), nil, 1, false},
+		{"depth limit+1", nestedInEntry(netdevcontract.MaxXMLDepth + 1), ErrXMLLimit, 0, false},
+		{"elements at limit", manyInEntry(netdevcontract.MaxXMLElements), nil, 1, false},
+		{"elements limit+1", manyInEntry(netdevcontract.MaxXMLElements + 1), ErrXMLLimit, 0, false},
+		{"response bytes at limit", padded(MaxParseResponseBytes), nil, 1, false},
+		{"response bytes limit+1", padded(MaxParseResponseBytes + 1), ErrXMLLimit, 0, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := ParseZones(c.data)
+			if c.wantErr != nil {
+				if !errors.Is(err, c.wantErr) {
+					t.Fatalf("err = %v, want %v", err, c.wantErr)
+				}
+				if len(got.List) != 0 || got.Incomplete {
+					t.Fatalf("refused input returned a result: %+v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ParseZones: %v", err)
+			}
+			if len(got.List) != c.wantLen || got.Incomplete != c.wantIncomplete {
+				t.Fatalf("got %d zones, incomplete %v; want %d, %v", len(got.List), got.Incomplete, c.wantLen, c.wantIncomplete)
+			}
+		})
+	}
+}
