@@ -10,8 +10,10 @@ import (
 )
 
 // fuzzAllowlist is a custom allowlist with one upper-case entry, so the
-// fuzzer also exercises the case folding of allow entries.
-var fuzzAllowlist = []string{"ICONS.Example.ORG"}
+// fuzzer also exercises the case folding of allow entries. The IP-literal
+// entries make the no-IP-literal property non-vacuous: allowlist membership
+// alone must not be what refuses them.
+var fuzzAllowlist = []string{"ICONS.Example.ORG", "127.0.0.1", "2130706433", "0x7f.0.0.1"}
 
 // acceptedURLs are URLs the policy must accept; they seed FuzzValidateURL.
 var acceptedURLs = []string{
@@ -22,6 +24,30 @@ var acceptedURLs = []string{
 	"https://avatars.githubusercontent.com",
 	"https://icons.example.org/a.png",
 	"https://ICONS.EXAMPLE.ORG:443/a.png?x=1",
+}
+
+// ipLiteralHost reports whether host is an IP address in any form a URL
+// parser might turn into one: an IPv6 literal, a canonical IPv4 address, or
+// a legacy IPv4 form (decimal, octal, hex or short) whose last label is
+// numeric or hex. No DNS name the allowlist can hold ends in such a label,
+// so the oracle treats these as literals independently of the parser.
+func ipLiteralHost(host string) bool {
+	if strings.Contains(host, ":") {
+		return true
+	}
+	if _, err := netip.ParseAddr(host); err == nil {
+		return true
+	}
+	last := host[strings.LastIndexByte(host, '.')+1:]
+	if strings.HasPrefix(last, "0x") {
+		return true
+	}
+	for i := 0; i < len(last); i++ {
+		if last[i] < '0' || last[i] > '9' {
+			return false
+		}
+	}
+	return last != ""
 }
 
 // checkURLPolicy asserts every property of an accepted URL, and that every
@@ -53,8 +79,19 @@ func checkURLPolicy(t *testing.T, raw string, allow []string) {
 	if u.Host != strings.ToLower(u.Host) {
 		t.Fatalf("ValidateURL(%q): host %q not lower-case", raw, u.Host)
 	}
-	if _, err := netip.ParseAddr(u.Host); err == nil {
+	if ipLiteralHost(u.Host) {
 		t.Fatalf("ValidateURL(%q): IP literal host %q accepted", raw, u.Host)
+	}
+	// The normalised URL is not enough: url.Parse decodes escapes and
+	// ValidateURL rewrites u.Host, so the raw authority must itself be
+	// https://<host>, optionally :443, then the end, "/" or "?".
+	rest, ok := strings.CutPrefix(strings.ToLower(raw), "https://"+u.Host)
+	if !ok {
+		t.Fatalf("ValidateURL(%q): raw authority is not https://%s", raw, u.Host)
+	}
+	rest, _ = strings.CutPrefix(rest, ":443")
+	if rest != "" && rest[0] != '/' && rest[0] != '?' {
+		t.Fatalf("ValidateURL(%q): raw authority continues with %q", raw, rest)
 	}
 	listed := allow
 	if len(listed) == 0 {
@@ -101,6 +138,23 @@ func mappedAddr(a, b, c, d byte) netip.Addr {
 	return netip.AddrFrom16([16]byte{10: 0xff, 11: 0xff, 12: a, 13: b, 14: c, 15: d})
 }
 
+// internalIPv4 reports whether an IPv4 address with the given first two
+// octets lies in a range the dialer must refuse: 0/8, loopback 127/8,
+// RFC 1918 10/8, 172.16/12 and 192.168/16, and link-local 169.254/16.
+func internalIPv4(a, b byte) bool {
+	switch {
+	case a == 0, a == 10, a == 127:
+		return true
+	case a == 169 && b == 254:
+		return true
+	case a == 172 && b&0xf0 == 16:
+		return true
+	case a == 192 && b == 168:
+		return true
+	}
+	return false
+}
+
 // FuzzForbiddenAddr checks the properties documented on forbiddenAddr for
 // IPv4, IPv4-mapped and IPv6 addresses, with and without a zone.
 func FuzzForbiddenAddr(f *testing.F) {
@@ -110,6 +164,10 @@ func FuzzForbiddenAddr(f *testing.F) {
 	}{
 		{[]byte{127, 0, 0, 1}, 0},
 		{[]byte{8, 8, 8, 8}, 0},
+		{[]byte{10, 0, 0, 1}, 0},
+		{[]byte{172, 16, 0, 1}, 2},
+		{[]byte{192, 168, 1, 1}, 0},
+		{[]byte{0, 1, 2, 3}, 2},
 		{[]byte{169, 254, 169, 254}, 2},
 		{[]byte{140, 82, 112, 3}, 2},
 		{[]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}, 1},
@@ -147,6 +205,13 @@ func FuzzForbiddenAddr(f *testing.F) {
 		}
 		if a.Zone() != "" && !bad {
 			t.Fatalf("forbiddenAddr(%s): address with zone allowed", a)
+		}
+		if mode%4 == 0 || mode%4 == 2 {
+			// Correctness, not just consistency: an implementation that
+			// allowed every IPv4 address must fail here.
+			if internalIPv4(v[0], v[1]) && !bad {
+				t.Fatalf("forbiddenAddr(%s): internal IPv4 address allowed", a)
+			}
 		}
 		if mode%4 == 0 {
 			if _, mbad := forbiddenAddr(mappedAddr(v[0], v[1], v[2], v[3])); mbad != bad {
