@@ -577,6 +577,15 @@ func TestSetIntegrityCheckRejectsBadConfig(t *testing.T) {
 			}
 		})
 	}
+	// A short interval without a budget gets a budget that fits it.
+	c, err := IntegrityCheckConfig{StatePath: e.state, Flavour: flavour, Interval: time.Minute}.withDefaults()
+	if err != nil || c.Budget != time.Minute || c.MaxFiles != integrity.MaxFiles || c.MaxBytes != integrity.MaxBytes {
+		t.Fatalf("defaults = %+v, %v", c, err)
+	}
+	if c, err := (IntegrityCheckConfig{StatePath: e.state, Flavour: flavour}).withDefaults(); err != nil ||
+		c.Interval != integrity.DefaultInterval || c.Budget != integrity.DefaultBudget {
+		t.Fatalf("defaults = %+v, %v", c, err)
+	}
 }
 
 func TestIntegrityCheckNotConfigured(t *testing.T) {

@@ -215,8 +215,9 @@ type IntegrityCheckConfig struct {
 	// Interval is the period after the start run; 0 means
 	// integrity.DefaultInterval (60 minutes, Q2).
 	Interval time.Duration
-	// Budget bounds one run; 0 means integrity.DefaultBudget. It may not
-	// exceed Interval or integrity.MaxBudget.
+	// Budget bounds one run; 0 means integrity.DefaultBudget or Interval,
+	// whichever is shorter. It may not exceed Interval or
+	// integrity.MaxBudget.
 	Budget time.Duration
 	// MaxFiles and MaxBytes bound one run; 0 means integrity.MaxFiles
 	// (4,096) and integrity.MaxBytes (1 GiB), which they may not exceed.
@@ -248,7 +249,7 @@ func (c IntegrityCheckConfig) withDefaults() (IntegrityCheckConfig, error) {
 		c.Interval = integrity.DefaultInterval
 	}
 	if c.Budget == 0 {
-		c.Budget = integrity.DefaultBudget
+		c.Budget = min(integrity.DefaultBudget, c.Interval)
 	}
 	if c.MaxFiles == 0 {
 		c.MaxFiles = integrity.MaxFiles
