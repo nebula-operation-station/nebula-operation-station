@@ -29,7 +29,9 @@ const (
 	ExitIntegrityIncomplete = 6
 )
 
-const integrityUsage = "usage: nebula integrity verify --offline RELEASE-DIR --root MOUNT --version X.Y.Z --flavour FLAVOUR"
+const integrityUsage = "usage: nebula integrity verify --offline RELEASE-DIR --root MOUNT --version X.Y.Z --flavour FLAVOUR\n" +
+	"       nebula integrity status\n" +
+	"       nebula integrity ack FINDING"
 
 // offlineConfig is one offline check. The version and flavour come from
 // the admin, never from the checked installation (ADR 0015 D2).
@@ -51,7 +53,7 @@ type offlineConfig struct {
 // installation, trusts only the release anchors compiled into this
 // binary, and writes nothing.
 func integrityCmd(args []string, w io.Writer) error {
-	if len(args) == 0 || args[0] != "verify" {
+	if !isOfflineIntegrityCmd(args) {
 		return errors.New(integrityUsage)
 	}
 	cfg, err := parseOfflineArgs(args[1:])
