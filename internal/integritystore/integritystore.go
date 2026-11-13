@@ -58,6 +58,11 @@ const (
 	// Accept frees a slot; a new finding over the bound is counted in
 	// Result.OverLimit. Accepted findings are only created by Accept.
 	MaxFindingsPerSubject = 10000
+	// MaxResolvedPerSubject bounds the resolved findings kept per subject. A
+	// complete run that closes more deletes the oldest closed ones first, so
+	// a host that rotates its reported paths cannot grow the table until the
+	// retention of Prune.
+	MaxResolvedPerSubject = 10000
 	// ReservedCriticalSlots of MaxFindingsPerSubject are kept for critical
 	// findings: a finding of any lower severity is refused once the subject
 	// has MaxFindingsPerSubject - ReservedCriticalSlots active findings.
@@ -265,6 +270,11 @@ type Store struct {
 	db  *sql.DB
 	now func() time.Time
 	mu  sync.Mutex
+	// lost holds the runs whose Record failed after the batch may have been
+	// lost and whose lost marker could not be written; Finish does not
+	// complete them. Guarded by mu; an entry is removed when its run is
+	// finished.
+	lost map[string]bool
 }
 
 // New returns a store on db, which must carry the serverdb schema.
@@ -276,7 +286,7 @@ func New(db *sql.DB, cfg Config) (*Store, error) {
 	if now == nil {
 		now = time.Now
 	}
-	return &Store{db: db, now: now}, nil
+	return &Store{db: db, now: now, lost: make(map[string]bool)}, nil
 }
 
 // writeTx starts a write transaction that holds the database write lock

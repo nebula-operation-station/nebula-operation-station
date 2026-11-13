@@ -44,3 +44,18 @@ func EscapePath(raw []byte) string {
 func recordOK(s string) bool {
 	return len(s) <= MaxRecordBytes && utf8.ValidString(s) && !strings.ContainsRune(s, 0)
 }
+
+// actorOK reports whether an admin name is storable and safe to show as
+// text: non-empty, at most MaxActorBytes, valid UTF-8, and only printable
+// characters, so no control, invisible or bidi formatting characters.
+func actorOK(actor string) bool {
+	if actor == "" || len(actor) > MaxActorBytes || !utf8.ValidString(actor) {
+		return false
+	}
+	for _, r := range actor {
+		if !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
+}

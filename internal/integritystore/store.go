@@ -6,12 +6,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
-	"unicode/utf8"
 )
 
 // runIDBytes is the random part of a run ID; the ID is its hex form.
@@ -124,55 +124,124 @@ func (s *Store) Record(ctx context.Context, runID string, obs []Observation) (Re
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := unix(s.now())
+	res, lost, err := s.recordTx(ctx, runID, obs, now)
+	if lost {
+		s.markLost(ctx, runID, len(obs))
+	}
+	return res, err
+}
+
+// recordTx writes one batch in one transaction. lost reports that the batch
+// may not have been stored although the run was accessible: the write failed
+// or its outcome is unknown. A refused batch is not lost; it is counted as
+// dropped inside the same transaction.
+func (s *Store) recordTx(ctx context.Context, runID string, obs []Observation, now int64) (res Result, lost bool, err error) {
 	tx, err := s.writeTx(ctx)
 	if err != nil {
-		return Result{}, err
+		return Result{}, true, err
 	}
 	defer tx.Rollback()
 	run, err := loadRun(ctx, tx, runID)
 	if err != nil {
-		return Result{}, err
+		return Result{}, !errors.Is(err, ErrRunNotFound), err
 	}
 	if err := runAccessible(ctx, tx, runID, run, now); err != nil {
 		if errors.Is(err, ErrRunExpired) {
 			if cerr := tx.Commit(); cerr != nil {
-				return Result{}, fmt.Errorf("integritystore: abort run: commit: %w", cerr)
+				return Result{}, true, fmt.Errorf("integritystore: abort run: commit: %w", cerr)
 			}
 		}
-		return Result{}, err
+		return Result{}, !isRunStateErr(err), err
 	}
 	if err := checkBatch(obs); err != nil {
 		if _, uerr := tx.ExecContext(ctx,
 			`UPDATE integrity_runs SET dropped = dropped + ? WHERE id = ?`, len(obs), runID); uerr != nil {
-			return Result{}, fmt.Errorf("integritystore: record: refused batch: %w", uerr)
+			return Result{}, true, fmt.Errorf("integritystore: record: refused batch: %w", uerr)
 		}
 		if cerr := tx.Commit(); cerr != nil {
-			return Result{}, fmt.Errorf("integritystore: record: refused batch: commit: %w", cerr)
+			return Result{}, true, fmt.Errorf("integritystore: record: refused batch: commit: %w", cerr)
 		}
-		return Result{}, err
+		return Result{}, false, err
 	}
 
-	var res Result
 	uniq, dropped := dedupeBatch(obs, &res)
 	n, err := countActive(ctx, tx, run.subject)
 	if err != nil {
-		return Result{}, err
+		return Result{}, true, err
 	}
 	for _, o := range uniq {
 		if err := s.recordOne(ctx, tx, run, runID, o, now, &n, &res, &dropped); err != nil {
-			return Result{}, err
+			return Result{}, true, err
 		}
 	}
 	if dropped > 0 {
 		if _, err := tx.ExecContext(ctx,
 			`UPDATE integrity_runs SET dropped = dropped + ? WHERE id = ?`, dropped, runID); err != nil {
-			return Result{}, fmt.Errorf("integritystore: record: dropped: %w", err)
+			return Result{}, true, fmt.Errorf("integritystore: record: dropped: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		return Result{}, fmt.Errorf("integritystore: record: commit: %w", err)
+		return Result{}, true, fmt.Errorf("integritystore: record: commit: %w", err)
 	}
-	return res, nil
+	return res, false, nil
+}
+
+// isRunStateErr reports whether err says that the run is not running or is
+// past its time limit. Such a run can never be completed, so a batch refused
+// for that reason needs no lost marker.
+func isRunStateErr(err error) bool {
+	return errors.Is(err, ErrRunNotRunning) || errors.Is(err, ErrRunExpired)
+}
+
+// markLost marks a run whose batch of n observations may not have been
+// stored: it adds n to the run's dropped counter in its own transaction, so
+// that the mark survives the failure of the batch's transaction (the context
+// of the failed call may be cancelled, so the write uses a context without
+// cancellation). If that write fails too, the run is remembered in memory
+// and Finish still does not complete it. Called with s.mu held.
+func (s *Store) markLost(ctx context.Context, runID string, n int) {
+	s.lost[runID] = true
+	ctx = context.WithoutCancel(ctx)
+	tx, err := s.writeTx(ctx)
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE integrity_runs SET dropped = dropped + ? WHERE id = ? AND state = 'running'`, n, runID); err != nil {
+		return
+	}
+	_ = tx.Commit()
+}
+
+// trimResolved deletes the oldest resolved findings of subj beyond limit,
+// ordered by closing time. Open, expected_pending and accepted findings are
+// never deleted, so the resolved rows of a subject stay bounded by limit.
+func trimResolved(ctx context.Context, tx *sql.Tx, subj Subject, limit int) error {
+	var n int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM integrity_findings WHERE subject = ? AND state = 'resolved'`,
+		string(subj)).Scan(&n); err != nil {
+		return fmt.Errorf("integritystore: count resolved: %w", err)
+	}
+	excess := n - limit
+	if excess <= 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM integrity_findings WHERE rowid IN (
+			SELECT rowid FROM integrity_findings WHERE subject = ? AND state = 'resolved'
+			ORDER BY closed_at, path LIMIT ?)`,
+		string(subj), excess); err != nil {
+		return fmt.Errorf("integritystore: trim resolved: %w", err)
+	}
+	return nil
+}
+
+// digestOf returns the SHA-256 digest of a raw record text. It is kept with
+// each record so that a stored-empty record still differs from another one.
+func digestOf(rec string) []byte {
+	d := sha256.Sum256([]byte(rec))
+	return d[:]
 }
 
 // dedupeBatch drops observations whose path is invalid and merges repeated
@@ -239,17 +308,19 @@ func countActive(ctx context.Context, tx *sql.Tx, subj Subject) (int, error) {
 
 // findingRow is the stored state of a finding that recordOne decides on.
 type findingRow struct {
-	state          State
-	oldRec, newRec string
-	basisOld       sql.NullString
-	basisNew       sql.NullString
-	expiresAt      sql.NullInt64
+	state     State
+	basisOld  []byte // digest of the old record the human state was decided for
+	basisNew  []byte // digest of the new record the human state was decided for
+	expiresAt sql.NullInt64
 }
 
 // recordOne writes one observation of a run inside tx.
 func (s *Store) recordOne(ctx context.Context, tx *sql.Tx, run runRow, runID string, o Observation, now int64, n *int, res *Result, dropped *int64) error {
 	subj := string(run.subject)
 	oldRec, newRec := o.OldRecord, o.NewRecord
+	// The digests cover the raw text, so a record that is stored empty
+	// (too large or invalid UTF-8) still tells two records apart.
+	oldDig, newDig := digestOf(oldRec), digestOf(newRec)
 	if !recordOK(oldRec) {
 		oldRec = ""
 		res.RecordsDropped++
@@ -264,10 +335,9 @@ func (s *Store) recordOne(ctx context.Context, tx *sql.Tx, run runRow, runID str
 	}
 	var cur findingRow
 	err = tx.QueryRowContext(ctx,
-		`SELECT state, old_record, new_record, basis_old_record, basis_new_record, expires_at
+		`SELECT state, basis_old_digest, basis_new_digest, expires_at
 		FROM integrity_findings WHERE subject = ? AND class = ? AND path = ?`,
-		subj, string(o.Class), o.Path).Scan(&cur.state, &cur.oldRec, &cur.newRec,
-		&cur.basisOld, &cur.basisNew, &cur.expiresAt)
+		subj, string(o.Class), o.Path).Scan(&cur.state, &cur.basisOld, &cur.basisNew, &cur.expiresAt)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		if *n >= limitFor(sev) {
@@ -277,10 +347,11 @@ func (s *Store) recordOne(ctx context.Context, tx *sql.Tx, run runRow, runID str
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO integrity_findings (
 				subject, class, severity, path, path_display, old_record, new_record, state,
-				first_seen_at, last_seen_at, opened_run_id, last_run_id, state_run_id, state_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)`,
+				first_seen_at, last_seen_at, opened_run_id, last_run_id, state_run_id, state_at,
+				old_digest, new_digest)
+			VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?)`,
 			subj, string(o.Class), string(sev), o.Path, EscapePath(o.Path), oldRec, newRec,
-			now, now, runID, runID, runID, now); err != nil {
+			now, now, runID, runID, runID, now, oldDig, newDig); err != nil {
 			return fmt.Errorf("integritystore: insert finding: %w", err)
 		}
 		*n++
@@ -300,9 +371,9 @@ func (s *Store) recordOne(ctx context.Context, tx *sql.Tx, run runRow, runID str
 		if _, err := tx.ExecContext(ctx, `UPDATE integrity_findings SET
 				old_record = ?, new_record = ?, state = 'open', first_seen_at = ?, last_seen_at = ?,
 				opened_run_id = ?, last_run_id = ?, closed_run_id = NULL, closed_at = NULL,
-				state_run_id = ?, state_by = NULL, state_at = ?
+				state_run_id = ?, state_by = NULL, state_at = ?, old_digest = ?, new_digest = ?
 			WHERE subject = ? AND class = ? AND path = ?`,
-			oldRec, newRec, now, now, runID, runID, runID, now,
+			oldRec, newRec, now, now, runID, runID, runID, now, oldDig, newDig,
 			subj, string(o.Class), o.Path); err != nil {
 			return fmt.Errorf("integritystore: reopen finding: %w", err)
 		}
@@ -314,17 +385,19 @@ func (s *Store) recordOne(ctx context.Context, tx *sql.Tx, run runRow, runID str
 		// decided for, and an accepted one only until it expires (ADR 0011
 		// D6). Otherwise the finding reopens as open.
 		expired := cur.state == StateAccepted && cur.expiresAt.Valid && now >= cur.expiresAt.Int64
-		same := cur.basisOld.Valid && cur.basisNew.Valid &&
-			cur.basisOld.String == oldRec && cur.basisNew.String == newRec
+		same := len(cur.basisOld) == sha256.Size && len(cur.basisNew) == sha256.Size &&
+			bytes.Equal(cur.basisOld, oldDig) && bytes.Equal(cur.basisNew, newDig)
 		if !expired && same {
 			break
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE integrity_findings SET
-				old_record = ?, new_record = ?, state = 'open', last_seen_at = ?, last_run_id = ?,
+				old_record = ?, new_record = ?, old_digest = ?, new_digest = ?,
+				state = 'open', last_seen_at = ?, last_run_id = ?,
 				state_run_id = ?, state_by = NULL, state_at = ?,
-				basis_old_record = NULL, basis_new_record = NULL, expires_at = NULL
+				basis_old_record = NULL, basis_new_record = NULL,
+				basis_old_digest = NULL, basis_new_digest = NULL, expires_at = NULL
 			WHERE subject = ? AND class = ? AND path = ?`,
-			oldRec, newRec, now, runID, runID, now,
+			oldRec, newRec, oldDig, newDig, now, runID, runID, now,
 			subj, string(o.Class), o.Path); err != nil {
 			return fmt.Errorf("integritystore: reopen human state: %w", err)
 		}
@@ -338,9 +411,9 @@ func (s *Store) recordOne(ctx context.Context, tx *sql.Tx, run runRow, runID str
 	}
 
 	if _, err := tx.ExecContext(ctx, `UPDATE integrity_findings SET
-			old_record = ?, new_record = ?, last_seen_at = ?, last_run_id = ?
+			old_record = ?, new_record = ?, old_digest = ?, new_digest = ?, last_seen_at = ?, last_run_id = ?
 		WHERE subject = ? AND class = ? AND path = ?`,
-		oldRec, newRec, now, runID, subj, string(o.Class), o.Path); err != nil {
+		oldRec, newRec, oldDig, newDig, now, runID, subj, string(o.Class), o.Path); err != nil {
 		return fmt.Errorf("integritystore: update finding: %w", err)
 	}
 	res.Updated++
@@ -376,12 +449,21 @@ func (s *Store) Finish(ctx context.Context, runID string, complete bool) (Finish
 	if err := tx.QueryRowContext(ctx, `SELECT dropped FROM integrity_runs WHERE id = ?`, runID).Scan(&dropped); err != nil {
 		return FinishResult{}, fmt.Errorf("integritystore: finish: dropped: %w", err)
 	}
+	// lost: a Record of this run failed and its lost marker could not be
+	// written, so the stored counter may still be 0.
+	lost := s.lost[runID]
 	res := FinishResult{Outcome: OutcomeIncomplete, Dropped: int(dropped)}
-	if complete && dropped == 0 {
+	if lost && dropped == 0 {
+		// The size of the lost batch is unknown; report that at least one
+		// observation was dropped.
+		res.Dropped = 1
+	}
+	if complete && dropped == 0 && !lost {
 		res.Outcome = OutcomeComplete
 		r, err := tx.ExecContext(ctx, `UPDATE integrity_findings SET
 				state = 'resolved', closed_run_id = ?, closed_at = ?, state_run_id = ?, state_at = ?,
-				basis_old_record = NULL, basis_new_record = NULL, expires_at = NULL
+				basis_old_record = NULL, basis_new_record = NULL, basis_old_digest = NULL,
+				basis_new_digest = NULL, expires_at = NULL
 			WHERE subject = ? AND state <> 'resolved' AND last_run_id <> ?`,
 			runID, now, runID, now, string(run.subject), runID)
 		if err != nil {
@@ -389,6 +471,9 @@ func (s *Store) Finish(ctx context.Context, runID string, complete bool) (Finish
 		}
 		k, _ := r.RowsAffected()
 		res.Closed = int(k)
+		if err := trimResolved(ctx, tx, run.subject, MaxResolvedPerSubject); err != nil {
+			return FinishResult{}, err
+		}
 	}
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE integrity_runs SET state = ?, ended_at = ? WHERE id = ?`,
@@ -398,6 +483,7 @@ func (s *Store) Finish(ctx context.Context, runID string, complete bool) (Finish
 	if err := tx.Commit(); err != nil {
 		return FinishResult{}, fmt.Errorf("integritystore: finish: commit: %w", err)
 	}
+	delete(s.lost, runID)
 	return res, nil
 }
 
@@ -452,9 +538,10 @@ func (s *Store) transition(ctx context.Context, runID string, key Key, from, to 
 	}
 	// Entering expected_pending binds the state to the current records;
 	// leaving it drops the binding.
-	basis := `basis_old_record = NULL, basis_new_record = NULL`
+	basis := `basis_old_record = NULL, basis_new_record = NULL, basis_old_digest = NULL, basis_new_digest = NULL`
 	if to == StateExpectedPending {
-		basis = `basis_old_record = old_record, basis_new_record = new_record`
+		basis = `basis_old_record = old_record, basis_new_record = new_record,
+			basis_old_digest = old_digest, basis_new_digest = new_digest`
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE integrity_findings SET state = ?, state_run_id = ?, state_at = ?, `+basis+`
 		WHERE subject = ? AND class = ? AND path = ?`,
@@ -487,7 +574,7 @@ func (s *Store) Accept(ctx context.Context, key Key, actor string) error {
 	if err := key.validate(); err != nil {
 		return err
 	}
-	if actor == "" || len(actor) > MaxActorBytes || !utf8.ValidString(actor) {
+	if !actorOK(actor) {
 		return fmt.Errorf("actor: %w", ErrInvalidInput)
 	}
 	s.mu.Lock()
@@ -507,6 +594,7 @@ func (s *Store) Accept(ctx context.Context, key Key, actor string) error {
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE integrity_findings SET state = 'accepted', state_by = ?,
 		state_run_id = NULL, state_at = ?, basis_old_record = old_record, basis_new_record = new_record,
+		basis_old_digest = old_digest, basis_new_digest = new_digest,
 		expires_at = ? WHERE subject = ? AND class = ? AND path = ?`,
 		actor, now, now+int64(AcceptValidity/time.Second), string(key.Subject), string(key.Class), key.Path); err != nil {
 		return fmt.Errorf("integritystore: accept: %w", err)
