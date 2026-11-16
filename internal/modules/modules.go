@@ -50,20 +50,6 @@ const (
 	MaxEntries  = 64
 	MaxUnpacked = 4 << 20
 	maxDetail   = 400
-	// tarBlock is the size of a tar header block and of the padding unit.
-	tarBlock = 512
-	// tarEntryFraming is what one entry may add besides its content: its
-	// header block, up to 511 bytes of padding, and room for one extended
-	// header (PAX or GNU long name) with up to 2 KiB of records.
-	tarEntryFraming = 4 << 10
-	// tarHeaders bounds the bytes of headers, extended headers and padding
-	// of MaxEntries entries; archive/tar reads extended headers without
-	// counting them as entries, so the bytes are counted, not the blocks.
-	tarHeaders = MaxEntries * tarEntryFraming
-	// tarOverhead is tarHeaders plus the two-block end marker. The stream
-	// is cut after MaxUnpacked+tarOverhead bytes, the most a valid archive
-	// can hold.
-	tarOverhead = tarHeaders + 2*tarBlock
 )
 
 // States.
@@ -150,11 +136,11 @@ func unpack(archive []byte) (map[string][]byte, error) {
 	if err != nil {
 		return nil, refuse("not a .tar.gz archive")
 	}
-	// The tar stream holds headers and padding besides the content. The
-	// content total is checked below; the headers are budgeted after each
-	// entry, and the stream is capped to stop reading an endless archive.
-	const streamCap = MaxUnpacked + tarOverhead
-	cr := &countReader{r: zr, limit: streamCap}
+	// The bound applies to the tar stream, which holds headers and padding
+	// besides the content, so the content of a valid archive is a little
+	// less than MaxUnpacked. A stream cut at the bound is refused, not read
+	// as a clean end.
+	cr := &countReader{r: zr, limit: MaxUnpacked + 1}
 	tr := tar.NewReader(cr)
 	files := map[string][]byte{}
 	total, entries := 0, 0
@@ -169,11 +155,6 @@ func unpack(archive []byte) (map[string][]byte, error) {
 		entries++
 		if entries > MaxEntries {
 			return nil, refuse("at most %d entries", MaxEntries)
-		}
-		// Everything read so far that is not content: headers, extended
-		// headers and the padding of earlier entries.
-		if cr.n-int64(total) > tarHeaders {
-			return nil, refuse("the archive's headers are larger than %d KiB", tarHeaders>>10)
 		}
 		name := strings.TrimPrefix(h.Name, "./")
 		switch h.Typeflag {

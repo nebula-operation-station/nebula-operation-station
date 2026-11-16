@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -151,132 +150,47 @@ func TestUnpackEntryCountEdges(t *testing.T) {
 	}
 }
 
-func TestUnpackUnpackedSizeEdges(t *testing.T) {
-	// Zeros compress well, so 4 MiB of content fits into MaxArchive. Sixteen
-	// full files make exactly MaxUnpacked; one byte more in a seventeenth
-	// file exceeds it.
-	full := make([]entry, 0, MaxUnpacked/modulelock.MaxScript+1)
-	for i := 0; i < MaxUnpacked/modulelock.MaxScript; i++ {
-		full = append(full, entry{name: fmt.Sprintf("z%02d.bin", i), body: make([]byte, modulelock.MaxScript)})
-	}
-	if _, err := unpack(gzTar(t, full)); err != nil {
-		t.Errorf("exactly MaxUnpacked: %v", err)
-	}
-	over := append(full, entry{name: "z99.bin", body: []byte{0}})
-	var ie *ImportError
-	if _, err := unpack(gzTar(t, over)); !errors.As(err, &ie) || ie.Reason != "the archive unpacks to more than 4 MiB" {
-		t.Errorf("MaxUnpacked+1: %v", err)
-	}
-}
-
-// rawHeader returns a ustar header block for name, typeflag and size.
-func rawHeader(name string, typeflag byte, size int64) []byte {
-	b := make([]byte, tarBlock)
-	copy(b[0:100], name)
-	copy(b[100:108], "0000644\x00")
-	copy(b[108:116], "0000000\x00")
-	copy(b[116:124], "0000000\x00")
-	copy(b[124:136], fmt.Sprintf("%011o\x00", size))
-	copy(b[136:148], "00000000000\x00")
-	for i := 148; i < 156; i++ {
-		b[i] = ' '
-	}
-	b[156] = typeflag
-	copy(b[257:263], "ustar\x00")
-	copy(b[263:265], "00")
-	sum := 0
-	for _, c := range b {
-		sum += int(c)
-	}
-	copy(b[148:156], fmt.Sprintf("%06o\x00 ", sum))
-	return b
-}
-
-// paxRecord returns exactly n bytes of PAX data: one "comment" record whose
-// length field is n.
-func paxRecord(n int) []byte {
-	prefix := strconv.Itoa(n) + " comment="
-	return []byte(prefix + strings.Repeat("x", n-len(prefix)-1) + "\n")
-}
-
-// headerChain returns a .tar.gz whose single regular file header ends at
-// byte end of the tar stream. Before it sit PAX headers, which archive/tar
-// reads without counting them as entries; each carries at most 1 MiB of
-// data, the most archive/tar accepts for one header.
-func headerChain(t testing.TB, end int) []byte {
+// exactStream returns a .tar.gz whose tar stream is exactly size bytes, with
+// headers, padding and the end marker counted. size must be a multiple of
+// 512. It holds full MaxScript files and then one file that takes the rest.
+// Zeros compress well, so the archive stays within MaxArchive.
+func exactStream(t testing.TB, size int) []byte {
 	t.Helper()
-	const maxPax = 1 << 20
-	var buf bytes.Buffer
-	rest := end - tarBlock
-	for rest > maxPax+tarBlock {
-		buf.Write(rawHeader("PaxHeader", 'x', maxPax))
-		buf.Write(paxRecord(maxPax))
-		rest -= maxPax + tarBlock
+	const block = 512
+	if size%block != 0 || size < 2*block {
+		t.Fatalf("exactStream: %d is not a stream size", size)
 	}
-	if rest <= tarBlock {
-		t.Fatalf("headerChain: %d bytes cannot hold a PAX header", end)
+	rem := size - 2*block // the end marker
+	var es []entry
+	for rem-(block+modulelock.MaxScript) >= block {
+		es = append(es, entry{name: fmt.Sprintf("z%02d.bin", len(es)), body: make([]byte, modulelock.MaxScript)})
+		rem -= block + modulelock.MaxScript
 	}
-	buf.Write(rawHeader("PaxHeader", 'x', int64(rest-tarBlock)))
-	buf.Write(paxRecord(rest - tarBlock))
-	buf.Write(rawHeader("f.bin", tar.TypeReg, 0))
-	if got := buf.Len(); got != end {
-		t.Fatalf("headerChain: file header ends at %d, want %d", got, end)
-	}
-	buf.Write(make([]byte, 2*tarBlock))
-	var gz bytes.Buffer
-	zw := gzip.NewWriter(&gz)
-	if _, err := zw.Write(buf.Bytes()); err != nil {
-		t.Fatal(err)
-	}
-	if err := zw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	return gz.Bytes()
+	// The last file takes the rest; its content is a whole number of blocks,
+	// so it needs no padding.
+	es = append(es, entry{name: "last.bin", body: make([]byte, rem-block)})
+	return gzTar(t, es)
 }
 
-// The stream cap stops reading at tarOverhead beyond MaxUnpacked, and the
-// header budget refuses headers beyond tarHeaders. Both edges are cut with
-// a file header that ends on a block boundary.
-
-// The expected numbers are literals, so that changing a constant in
-// modules.go cannot move the expectation with it.
-const (
-	// 4 MiB of content, 64 entries at 4 KiB each, and the 1 KiB end marker.
-	wantStreamCap = 4<<20 + 64<<12 + 1<<10
-	// 64 entries at 4 KiB each.
-	wantHeaderBudget = 64 << 12
-)
-
-func TestUnpackStreamCapEdges(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		end  int
-		want string
-	}{
-		// The header ends at the cap: the reader still sees it, so the
-		// header budget refuses the archive.
-		{"header ends at the cap", wantStreamCap, "the archive's headers are larger than 256 KiB"},
-		// The header ends one block past the cap: the stream is cut inside it.
-		{"header ends one block past the cap", wantStreamCap + 512, "the archive is damaged or too large"},
-	} {
-		_, err := unpack(headerChain(t, tc.end))
-		var ie *ImportError
-		if !errors.As(err, &ie) || ie.Reason != tc.want {
-			t.Errorf("%s: %v, want %q", tc.name, err, tc.want)
-		}
+// The tar stream is capped at MaxUnpacked+1 bytes, headers included. Tar
+// streams are whole blocks, so the largest stream that can be accepted is
+// MaxUnpacked, and the smallest refused one is MaxUnpacked+512. Content is
+// what is left after the headers and the end marker.
+func TestUnpackUnpackedSizeEdges(t *testing.T) {
+	files, err := unpack(exactStream(t, MaxUnpacked))
+	if err != nil {
+		t.Fatalf("stream of exactly MaxUnpacked: %v", err)
 	}
-}
-
-func TestUnpackHeaderBudgetEdges(t *testing.T) {
-	// A file header that ends exactly at the budget is accepted; one block
-	// more is refused with the reason the limit names.
-	files, err := unpack(headerChain(t, wantHeaderBudget))
-	if err != nil || len(files) != 1 {
-		t.Errorf("headers at the budget: %d files, %v", len(files), err)
+	content := 0
+	for _, b := range files {
+		content += len(b)
+	}
+	if want := MaxUnpacked - (len(files)+2)*512; content != want {
+		t.Errorf("content of a MaxUnpacked stream: %d bytes, want %d", content, want)
 	}
 	var ie *ImportError
-	if _, err := unpack(headerChain(t, wantHeaderBudget+512)); !errors.As(err, &ie) || ie.Reason != "the archive's headers are larger than 256 KiB" {
-		t.Errorf("headers one block past the budget: %v", err)
+	if _, err := unpack(exactStream(t, MaxUnpacked+512)); !errors.As(err, &ie) || ie.Reason != "the archive is damaged or too large" {
+		t.Errorf("stream one block past MaxUnpacked: %v", err)
 	}
 }
 
@@ -291,21 +205,14 @@ func longNamed(n, body, nameLen int) []entry {
 	return es
 }
 
-func TestUnpackAcceptsPAXHeadersNearLimit(t *testing.T) {
-	// 64 entries of 64 KiB make exactly 4 MiB of content; each name needs a
-	// PAX header of about 300 bytes, so the headers stay within the budget.
-	files, err := unpack(gzTar(t, longNamed(MaxEntries, MaxUnpacked/MaxEntries, 300)))
+func TestUnpackAcceptsPAXHeadersWithinStreamBound(t *testing.T) {
+	// 64 entries of 60 KiB each need a PAX header of about 300 bytes. The
+	// headers, one block each for the PAX record and the file header, count
+	// toward the stream bound: 3.75 MiB of content plus about 96 KiB of
+	// headers stays within MaxUnpacked.
+	files, err := unpack(gzTar(t, longNamed(MaxEntries, 60<<10, 300)))
 	if err != nil || len(files) != MaxEntries {
-		t.Errorf("64 PAX entries near 4 MiB: %d files, %v", len(files), err)
-	}
-}
-
-func TestUnpackRefusesPAXHeadersOverBudget(t *testing.T) {
-	// 8 KiB names make the headers alone about 590 KiB: over the budget, and
-	// the refusal names the headers rather than calling the archive damaged.
-	var ie *ImportError
-	if _, err := unpack(gzTar(t, longNamed(MaxEntries, MaxUnpacked/MaxEntries, 8000))); !errors.As(err, &ie) || ie.Reason != "the archive's headers are larger than 256 KiB" {
-		t.Errorf("PAX headers over the budget: %v", err)
+		t.Errorf("64 PAX entries within the stream bound: %d files, %v", len(files), err)
 	}
 }
 
