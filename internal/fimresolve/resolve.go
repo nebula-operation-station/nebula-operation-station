@@ -41,7 +41,14 @@ var (
 // record at that path and whether one exists. Symlinks are followed (ADR
 // 0015 D9); the returned path contains no symlink, "." or ".." component.
 //
-// The returned slice is newly allocated. The path argument is not modified.
+// The slice passed to lookup is a reused buffer, valid only for that call;
+// lookup must not retain it. The returned slice is newly allocated. The
+// path argument is not modified.
+//
+// Work is bounded by the limits below: at most MaxSymlinkFollows+1 passes
+// over a remaining path of fimscan.MaxPathBytes bytes, so at most about
+// 41 * 2,048 lookups per call, with a constant number of allocations plus
+// one per followed symlink.
 func Resolve(lookup func(path []byte) (fimscan.Record, bool), path []byte) ([]byte, error) {
 	if lookup == nil {
 		return nil, ErrNilLookup
@@ -62,6 +69,9 @@ func Resolve(lookup func(path []byte) (fimscan.Record, bool), path []byte) ([]by
 	buf := []byte{'/'}
 	var ends []int
 	follows := 0
+	// scratch holds the child path handed to lookup. It is reused for every
+	// component, so the lookups of one call do not allocate.
+	scratch := make([]byte, 0, fimscan.MaxPathBytes)
 
 	for len(rest) > 0 {
 		name := rest
@@ -85,7 +95,7 @@ func Resolve(lookup func(path []byte) (fimscan.Record, bool), path []byte) ([]by
 			continue
 		}
 
-		child, err := childPath(buf, name)
+		child, err := childPath(scratch, buf, name)
 		if err != nil {
 			return nil, err
 		}
@@ -102,6 +112,8 @@ func Resolve(lookup func(path []byte) (fimscan.Record, bool), path []byte) ([]by
 			if len(rec.Link) == 0 {
 				return nil, ErrEmptyLink
 			}
+			// Guards the allocation of next below. The check on next also
+			// refuses an oversized target, with the same error.
 			if len(rec.Link) > fimscan.MaxPathBytes {
 				return nil, ErrTooLong
 			}
@@ -141,9 +153,10 @@ func Resolve(lookup func(path []byte) (fimscan.Record, bool), path []byte) ([]by
 	return out, nil
 }
 
-// childPath returns the absolute path of name inside the directory dir, or
+// childPath returns the absolute path of name inside the directory dir,
+// written into scratch (which must have capacity fimscan.MaxPathBytes), or
 // ErrTooLong when it would exceed fimscan.MaxPathBytes.
-func childPath(dir, name []byte) ([]byte, error) {
+func childPath(scratch, dir, name []byte) ([]byte, error) {
 	n := len(dir) + len(name)
 	if len(dir) > 1 {
 		n++
@@ -151,7 +164,7 @@ func childPath(dir, name []byte) ([]byte, error) {
 	if n > fimscan.MaxPathBytes {
 		return nil, ErrTooLong
 	}
-	p := make([]byte, 0, n)
+	p := scratch[:0]
 	p = append(p, dir...)
 	if len(dir) > 1 {
 		p = append(p, '/')

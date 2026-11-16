@@ -3,6 +3,7 @@
 package fimresolve
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"strings"
@@ -169,6 +170,122 @@ func TestResolveLinkLimit(t *testing.T) {
 				t.Fatalf("Resolve = %q, %v; want /etc", got, err)
 			}
 		})
+	}
+}
+
+// TestResolveLengthLimitsAlone pins each ADR 0015 D9 length rule with a case
+// in which only that rule is violated. Each case would resolve successfully
+// (to the path named in want) if that rule were removed, so each one fails
+// when its own check is deleted.
+func TestResolveLengthLimitsAlone(t *testing.T) {
+	// Every "/." pair is a component that is dropped, so the target is long
+	// but resolution needs only a few real components.
+	shortResultTarget := "/etc" + strings.Repeat("/.", (fimscan.MaxPathBytes-len("/etc"))/2)
+	if len(shortResultTarget) != fimscan.MaxPathBytes {
+		t.Fatalf("fixture target is %d bytes, want %d", len(shortResultTarget), fimscan.MaxPathBytes)
+	}
+	set := baseSet()
+	set["/etc/x"] = fileRec("/etc/x")
+	set["/etc/ssh/big"] = linkRec("/etc/ssh/big", shortResultTarget)
+	// The input prefix "/" plus "./" pairs; "//" collapses to one slash.
+	input4096 := "/" + strings.Repeat("./", 2042) + "/etc/passwd"
+	input4097 := "/" + strings.Repeat("./", 2042) + "//etc/passwd"
+	if len(input4096) != fimscan.MaxPathBytes || len(input4097) != fimscan.MaxPathBytes+1 {
+		t.Fatalf("fixture inputs are %d and %d bytes", len(input4096), len(input4097))
+	}
+
+	tests := []struct {
+		name    string
+		path    string
+		want    string
+		wantErr error
+	}{
+		{
+			// The remaining path "/x" after the link pushes the path still to
+			// be resolved (target included) to 4,098 bytes, but the result is
+			// /etc/x, which is short.
+			name:    "remaining path with target over MaxPathBytes, short result",
+			path:    "/etc/ssh/big/x",
+			wantErr: ErrTooLong,
+		},
+		{
+			name: "input of exactly MaxPathBytes is accepted",
+			path: input4096,
+			want: "/etc/passwd",
+		},
+		{
+			// Only the input check refuses this: every component after the
+			// dropped "." components fits, and the result is short.
+			name:    "input of MaxPathBytes plus one is refused",
+			path:    input4097,
+			wantErr: ErrTooLong,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := Resolve(set.lookup, []byte(tt.path))
+			if tt.wantErr != nil {
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("Resolve error = %v, want %v", err, tt.wantErr)
+				}
+				if got != nil {
+					t.Fatalf("Resolve returned %q with an error", got)
+				}
+				return
+			}
+			if err != nil || string(got) != tt.want {
+				t.Fatalf("Resolve = %q, %v; want %q", got, err, tt.want)
+			}
+		})
+	}
+}
+
+// TestResolveTargetOverMaxPathBytesAlone checks a link whose own target is
+// 4,097 bytes long. The rule is ADR 0015 D9 "target included": the path
+// still to be resolved may not exceed 4,096 bytes.
+func TestResolveTargetOverMaxPathBytesAlone(t *testing.T) {
+	target := "/etc" + strings.Repeat("/.", (fimscan.MaxPathBytes+1-len("/etc"))/2) + "/"
+	set := baseSet()
+	set["/etc/ssh/huge"] = linkRec("/etc/ssh/huge", target)
+	if _, err := Resolve(set.lookup, []byte("/etc/ssh/huge")); !errors.Is(err, ErrTooLong) {
+		t.Fatalf("Resolve error = %v, want ErrTooLong", err)
+	}
+}
+
+// TestResolveWorkAndAllocationsBounded runs the worst case the limits allow:
+// a 4,002-byte path of 2,000 real directory components and a final link that
+// points back at that same path. Every pass looks up all 2,000 components,
+// so 41 passes make about 82,000 lookups before the 41st symlink is refused.
+// Child paths reuse one buffer, so allocations stay near the number of
+// symlinks instead of growing with the number of lookups.
+func TestResolveWorkAndAllocationsBounded(t *testing.T) {
+	const depth = 2000
+	dirs := strings.Repeat("/d", depth)
+	link := []byte(dirs + "/L")
+	if len(link) > fimscan.MaxPathBytes {
+		t.Fatalf("fixture path is %d bytes", len(link))
+	}
+	lookups := 0
+	lookup := func(p []byte) (fimscan.Record, bool) {
+		lookups++
+		if bytes.HasSuffix(p, []byte("/L")) {
+			return fimscan.Record{Path: p, Type: fimscan.TypeSymlink, Link: link}, true
+		}
+		return fimscan.Record{Path: p, Type: fimscan.TypeDir}, true
+	}
+	var err error
+	allocs := testing.AllocsPerRun(5, func() {
+		lookups = 0
+		_, err = Resolve(lookup, link)
+	})
+	if !errors.Is(err, ErrSymlinkLimit) {
+		t.Fatalf("Resolve error = %v, want ErrSymlinkLimit", err)
+	}
+	if lookups < MaxSymlinkFollows*depth {
+		t.Fatalf("fixture did only %d lookups, want at least %d", lookups, MaxSymlinkFollows*depth)
+	}
+	if allocs > 200 {
+		t.Fatalf("Resolve made %.0f allocations per call, want at most 200", allocs)
 	}
 }
 
