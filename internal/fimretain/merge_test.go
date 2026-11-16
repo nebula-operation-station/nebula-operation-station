@@ -4,6 +4,7 @@ package fimretain
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -50,18 +51,86 @@ func partial(r *fimscan.Result) *fimscan.Result {
 	return r
 }
 
+// TestNonZeroExitWithEmptyPartialKeepsRetainedRecords: a script that exits
+// non-zero can leave Result.Partial empty, because fimscan documents that the
+// caller must still treat a non-zero exit as partial. Such a run must replace
+// nothing, in either mode, whatever the exit status.
+func TestNonZeroExitWithEmptyPartialKeepsRetainedRecords(t *testing.T) {
+	t.Parallel()
+	for _, mode := range []fimscan.Mode{fimscan.ModeFull, fimscan.ModeIncremental} {
+		for _, exit := range []int{1, 2, 124, 143, 255} {
+			t.Run(fmt.Sprintf("%s exit %d", mode, exit), func(t *testing.T) {
+				t.Parallel()
+				prev := []fimscan.Record{fileRec("/etc/a", hashed(1))}
+				got, err := Merge(prev, run(mode, fileRec("/etc/a", hashed(2))), exit)
+				if !errors.Is(err, ErrIncompleteRun) {
+					t.Fatalf("Merge error = %v, want ErrIncompleteRun", err)
+				}
+				if got != nil {
+					t.Fatalf("Merge returned %+v with a non-zero exit; want no records", got)
+				}
+				if !reflect.DeepEqual(prev, []fimscan.Record{fileRec("/etc/a", hashed(1))}) {
+					t.Fatal("Merge changed the previous records")
+				}
+			})
+		}
+	}
+}
+
+// TestMergeZeroExitIsComplete: exit status 0 with an empty Partial is a
+// complete run, so the merge succeeds.
+func TestMergeZeroExitIsComplete(t *testing.T) {
+	t.Parallel()
+	got, err := Merge(nil, run(fimscan.ModeFull, fileRec("/etc/a", hashed(2))), 0)
+	if err != nil {
+		t.Fatalf("Merge: %v", err)
+	}
+	if !reflect.DeepEqual(got, []fimscan.Record{fileRec("/etc/a", hashed(2))}) {
+		t.Fatalf("Merge = %+v", got)
+	}
+}
+
+// TestFullRunIgnoresPreviousRecords: a complete full run does not depend on
+// the previous records, so a corrupt retained set must not block it. The
+// full run is the one that repairs the set.
+func TestFullRunIgnoresPreviousRecords(t *testing.T) {
+	t.Parallel()
+	corrupt := [][]fimscan.Record{
+		{fileRec("/etc/a", hashed(1)), fileRec("/etc/a", hashed(2))},
+		{{Path: []byte("/etc"), Type: fimscan.TypeDir, Hash: hashed(1)}},
+		make([]fimscan.Record, fimscan.MaxRecords+1),
+	}
+	for i, prev := range corrupt {
+		got, err := Merge(prev, run(fimscan.ModeFull, fileRec("/etc/a", hashed(3))), 0)
+		if err != nil {
+			t.Fatalf("case %d: full run rejected because of previous records: %v", i, err)
+		}
+		if !reflect.DeepEqual(got, []fimscan.Record{fileRec("/etc/a", hashed(3))}) {
+			t.Fatalf("case %d: Merge = %+v", i, got)
+		}
+	}
+}
+
 func TestMergeRejectsUnusableInput(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
 		prev    []fimscan.Record
 		run     *fimscan.Result
+		exit    int
 		wantErr error
 	}{
 		{
 			name:    "nil run is rejected",
 			run:     nil,
 			wantErr: ErrNilRun,
+		},
+		{
+			name:    "non-zero exit with empty partial is rejected",
+			prev:    []fimscan.Record{fileRec("/etc/a", hashed(1))},
+			run:     run(fimscan.ModeIncremental, fileRec("/etc/a", fimscan.Hash{})),
+			exit:    1,
+			wantErr: ErrIncompleteRun,
 		},
 		{
 			name:    "incomplete incremental run replaces nothing",
@@ -122,7 +191,7 @@ func TestMergeRejectsUnusableInput(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := Merge(tc.prev, tc.run)
+			got, err := Merge(tc.prev, tc.run, tc.exit)
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("Merge error = %v, want %v", err, tc.wantErr)
 			}
@@ -217,7 +286,7 @@ func TestMergeKeepsRulesOfD7(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := Merge(tc.prev, tc.run)
+			got, err := Merge(tc.prev, tc.run, 0)
 			if err != nil {
 				t.Fatalf("Merge: %v", err)
 			}
@@ -254,7 +323,7 @@ func TestMergeMetadataFieldChangeDropsHash(t *testing.T) {
 			t.Parallel()
 			cur := fileRec("/etc/a", fimscan.Hash{})
 			c.mutate(&cur)
-			got, err := Merge([]fimscan.Record{fileRec("/etc/a", hashed(1))}, run(fimscan.ModeIncremental, cur))
+			got, err := Merge([]fimscan.Record{fileRec("/etc/a", hashed(1))}, run(fimscan.ModeIncremental, cur), 0)
 			if err != nil {
 				t.Fatalf("Merge: %v", err)
 			}
@@ -271,7 +340,7 @@ func TestMergeMetadataFieldChangeDropsHash(t *testing.T) {
 			t.Parallel()
 			old := fileRec("/etc/a", hashed(1))
 			c.mutate(&old)
-			got, err := Merge([]fimscan.Record{old}, run(fimscan.ModeIncremental, fileRec("/etc/a", fimscan.Hash{})))
+			got, err := Merge([]fimscan.Record{old}, run(fimscan.ModeIncremental, fileRec("/etc/a", fimscan.Hash{})), 0)
 			if err != nil {
 				t.Fatalf("Merge: %v", err)
 			}
@@ -282,16 +351,33 @@ func TestMergeMetadataFieldChangeDropsHash(t *testing.T) {
 	}
 }
 
+// TestMergeDoesNotAliasInput: the output shares no bytes with either input.
+// The run record's path and link are the ones that get copied to the output,
+// so an implementation that skipped the copy and returned run.Records
+// directly must fail here.
 func TestMergeDoesNotAliasInput(t *testing.T) {
 	t.Parallel()
 	prev := []fimscan.Record{fileRec("/etc/a", hashed(1))}
 	prev[0].Link = []byte("x")
-	got, err := Merge(prev, run(fimscan.ModeIncremental, fileRec("/etc/a", fimscan.Hash{})))
+	cur := fileRec("/etc/a", fimscan.Hash{})
+	cur.Link = []byte("x")
+	cur.Mtime = 2000
+	res := run(fimscan.ModeIncremental, cur)
+	// The tuples differ (Mtime), so no hash is kept and the output is the
+	// run record alone, copied.
+	got, err := Merge(prev, res, 0)
 	if err != nil {
 		t.Fatalf("Merge: %v", err)
 	}
+	if len(got) != 1 {
+		t.Fatalf("Merge returned %d records, want 1", len(got))
+	}
 	got[0].Path[0] = 'X'
-	if prev[0].Path[0] != '/' {
-		t.Fatal("output path shares memory with the previous records")
+	got[0].Link[0] = 'Y'
+	if res.Records[0].Path[0] != '/' || res.Records[0].Link[0] != 'x' {
+		t.Fatal("output shares memory with the run records")
+	}
+	if prev[0].Path[0] != '/' || prev[0].Link[0] != 'x' {
+		t.Fatal("output shares memory with the previous records")
 	}
 }

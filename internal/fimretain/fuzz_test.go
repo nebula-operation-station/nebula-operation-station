@@ -49,11 +49,12 @@ func decodeFuzzRec(b []byte) fimscan.Record {
 	return r
 }
 
-// decodeFuzz splits data into the previous records and a complete run. The
-// first byte selects the mode (bit 0: full) and bit 1 makes the run partial;
-// the second byte is the number of previous records. Paths are unique within
-// each input, so duplicates do not mask the other rules.
-func decodeFuzz(data []byte) ([]fimscan.Record, *fimscan.Result) {
+// decodeFuzz splits data into the previous records, a run and the script exit
+// status. The first byte selects the mode (bit 0: full), bit 1 makes the run
+// partial and bit 2 gives the script a non-zero exit status; the second byte
+// is the number of previous records. Paths are unique within each input, so
+// duplicates do not mask the other rules.
+func decodeFuzz(data []byte) ([]fimscan.Record, *fimscan.Result, int) {
 	var flags, nPrev byte
 	if len(data) > 0 {
 		flags = data[0]
@@ -80,7 +81,50 @@ func decodeFuzz(data []byte) ([]fimscan.Record, *fimscan.Result) {
 	if flags&2 != 0 {
 		run.Partial = []fimscan.Reason{fimscan.ReasonHostTruncated}
 	}
-	return prev, run
+	exit := 0
+	if flags&4 != 0 {
+		exit = 1
+	}
+	return prev, run, exit
+}
+
+// breaksRule reports whether the inputs break a documented rule for a
+// complete run, written from the rules themselves rather than from Merge.
+// Paths are unique by construction, so only the hash rules can apply. The
+// previous records are checked only for an incremental run, because a full
+// run does not depend on them.
+func breaksRule(prev []fimscan.Record, run *fimscan.Result) bool {
+	hashOnNonFile := func(recs []fimscan.Record) bool {
+		for i := range recs {
+			if recs[i].Hash.Kind != fimscan.HashNone && recs[i].Type != fimscan.TypeFile {
+				return true
+			}
+		}
+		return false
+	}
+	if run.Mode == fimscan.ModeIncremental && hashOnNonFile(prev) {
+		return true
+	}
+	if hashOnNonFile(run.Records) {
+		return true
+	}
+	if run.Mode == fimscan.ModeFull {
+		for i := range run.Records {
+			if run.Records[i].Type == fimscan.TypeFile && run.Records[i].Hash.Kind == fimscan.HashNone {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// cloneRecords returns deep copies of recs.
+func cloneRecords(recs []fimscan.Record) []fimscan.Record {
+	out := make([]fimscan.Record, len(recs))
+	for i := range recs {
+		out[i] = cloneRecord(&recs[i])
+	}
+	return out
 }
 
 // uniquePaths keeps the first record of each path.
@@ -157,10 +201,11 @@ func checkMergeProperties(t *testing.T, prev []fimscan.Record, run *fimscan.Resu
 }
 
 // FuzzMerge checks the rules of Merge on arbitrary inputs: an error is
-// returned only for an input that breaks a documented rule, a successful
-// output is sorted and has one record per run record, and a hash is kept
-// only from a previous record with an identical tuple. The inputs are never
-// modified.
+// returned exactly for an input that breaks a documented rule (checked by
+// breaksRule), a successful output is sorted and has one record per run
+// record, and a hash is kept only from a previous record with an identical
+// tuple. A run that is partial or has a non-zero exit status is rejected.
+// The previous records and the run records are never modified.
 func FuzzMerge(f *testing.F) {
 	// Record bytes: [path index, type-1, hash selector, size, mode, mtime,
 	// ctime, flags]. Type 0 is a regular file, 1 a directory, 2 a symlink
@@ -172,6 +217,11 @@ func FuzzMerge(f *testing.F) {
 	f.Add([]byte{1, 0})
 	// Partial run: must be rejected.
 	f.Add([]byte{2, 0, 0, 0, 1, 0, 0, 0, 0, 0})
+	// Complete-looking incremental run with a non-zero exit status and an
+	// empty partial list: must be rejected.
+	f.Add([]byte{4, 1,
+		1, 0, 1, 0, 0, 0, 0, 0,
+		1, 0, 0, 0, 0, 0, 0, 0})
 	// Incremental run: one previous hashed file, then an unhashed run record
 	// for the same path with an unchanged tuple (the hash is kept).
 	f.Add([]byte{0, 1,
@@ -195,27 +245,31 @@ func FuzzMerge(f *testing.F) {
 		1, 0, 0, 0, 0, 0, 0, 0})
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		prev, run := decodeFuzz(data)
-		snapshot := make([]fimscan.Record, len(prev))
-		for i := range prev {
-			snapshot[i] = cloneRecord(&prev[i])
-		}
+		prev, run, exit := decodeFuzz(data)
+		prevSnap := cloneRecords(prev)
+		runSnap := cloneRecords(run.Records)
 
-		got, err := Merge(prev, run)
-		if !reflect.DeepEqual(prev, snapshot) {
+		got, err := Merge(prev, run, exit)
+		if !reflect.DeepEqual(prev, prevSnap) {
 			t.Fatal("Merge modified the previous records")
 		}
-		if run.Partial != nil {
+		if !reflect.DeepEqual(run.Records, runSnap) {
+			t.Fatal("Merge modified the run records")
+		}
+		if run.Partial != nil || exit != 0 {
 			if !errors.Is(err, ErrIncompleteRun) || got != nil {
-				t.Fatalf("partial run: got %d records, error %v", len(got), err)
+				t.Fatalf("incomplete run (partial %v, exit %d): got %d records, error %v", run.Partial, exit, len(got), err)
+			}
+			return
+		}
+		if breaksRule(prev, run) {
+			if !errors.Is(err, ErrInvalidRecord) || got != nil {
+				t.Fatalf("input breaks a rule: got %d records, error %v", len(got), err)
 			}
 			return
 		}
 		if err != nil {
-			if got != nil {
-				t.Fatalf("error %v returned together with %d records", err, len(got))
-			}
-			return
+			t.Fatalf("input breaks no rule but Merge returned %v", err)
 		}
 		checkMergeProperties(t, prev, run, got)
 	})

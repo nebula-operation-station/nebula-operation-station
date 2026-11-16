@@ -5,7 +5,9 @@
 //
 // It is a pure library: no database, no clock, no I/O. Its contract:
 //
-//   - An incomplete run is rejected and replaces nothing.
+//   - An incomplete run is rejected and replaces nothing. A run is incomplete
+//     when its Partial list is not empty or when the scan script exited with
+//     a non-zero status, which the caller passes to Merge.
 //   - A complete full run replaces every retained record.
 //   - A complete incremental run replaces a retained content hash only for
 //     the paths it hashed. For a path it did not hash, the previous hash is
@@ -50,16 +52,24 @@ var (
 )
 
 // Merge returns the retained records after the run prev is merged with run.
-// prev and run are not modified; the returned records share no memory with
-// them. The result is sorted by raw path bytes and has one record per path
-// in run. On error, Merge returns no records and the caller keeps prev.
+// exitStatus is the exit status of the scan script that produced run. A
+// non-zero status makes the run incomplete, whatever run.Partial says, as
+// fimscan requires. prev and run are not modified; the returned records share
+// no memory with them. The result is sorted by raw path bytes and has one
+// record per path in run. On error, Merge returns no records and the caller
+// keeps prev.
 //
-// A regular file that the run did not hash keeps the content hash of its
+// A complete full run does not depend on prev, so prev is not checked for a
+// full run and a corrupt retained set never blocks the full run that repairs
+// it. A regular file that the run did not hash keeps the content hash of its
 // previous record only when every field of the metadata tuple matches; see
 // the package documentation.
-func Merge(prev []fimscan.Record, run *fimscan.Result) ([]fimscan.Record, error) {
+func Merge(prev []fimscan.Record, run *fimscan.Result, exitStatus int) ([]fimscan.Record, error) {
 	if run == nil {
 		return nil, ErrNilRun
+	}
+	if exitStatus != 0 {
+		return nil, fmt.Errorf("%w: script exit status %d", ErrIncompleteRun, exitStatus)
 	}
 	if !run.Complete() {
 		return nil, ErrIncompleteRun
@@ -67,12 +77,8 @@ func Merge(prev []fimscan.Record, run *fimscan.Result) ([]fimscan.Record, error)
 	if run.Mode != fimscan.ModeFull && run.Mode != fimscan.ModeIncremental {
 		return nil, ErrUnknownMode
 	}
-	if len(prev) > fimscan.MaxRecords || len(run.Records) > fimscan.MaxRecords {
+	if len(run.Records) > fimscan.MaxRecords {
 		return nil, ErrTooManyRecords
-	}
-	prevIdx, err := index(prev)
-	if err != nil {
-		return nil, fmt.Errorf("previous records: %w", err)
 	}
 	if _, err := index(run.Records); err != nil {
 		return nil, fmt.Errorf("run: %w", err)
@@ -84,6 +90,18 @@ func Merge(prev []fimscan.Record, run *fimscan.Result) ([]fimscan.Record, error)
 				return nil, fmt.Errorf("%w: regular file without hash in full run", ErrInvalidRecord)
 			}
 		}
+	}
+
+	var prevIdx map[string]int
+	if run.Mode == fimscan.ModeIncremental {
+		if len(prev) > fimscan.MaxRecords {
+			return nil, ErrTooManyRecords
+		}
+		idx, err := index(prev)
+		if err != nil {
+			return nil, fmt.Errorf("previous records: %w", err)
+		}
+		prevIdx = idx
 	}
 
 	out := make([]fimscan.Record, 0, len(run.Records))
