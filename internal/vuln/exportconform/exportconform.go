@@ -30,9 +30,11 @@ var Vendor = []Case{
 }
 
 // Model cases (ADR 0011 D2). A model needs an upper-case letter and a digit;
-// a lower-case host label, an address, an IPv6 literal and a hyphenated MAC are
-// refused. The upper-case host label "SW01" is a documented D2 residual and is
-// not in the table.
+// a lower-case host label, an address, an IPv6 literal and a MAC are refused.
+// An address or a MAC embedded in the value, after a prefix or with a suffix,
+// is refused too ("IP-10-0-0-7"). Unlike firmware, a model refuses an IPv4
+// address of any kind, public ones too ("IP-93-184-216-34"). The upper-case
+// host label "SW01" is a documented D2 residual and is not in the table.
 var Model = []Case{
 	{"Cisco model", "CBS350", true},
 	{"Palo Alto model", "PA-220", true},
@@ -41,6 +43,16 @@ var Model = []Case{
 	{"IPv4 literal", "10.0.0.7", false},
 	{"IPv6 literal", "2001:DB8::1", false},
 	{"hyphenated MAC", "AA-BB-CC-DD-EE-FF", false},
+	{"hyphenated MAC after a prefix", "PA-AA-BB-CC-DD-EE-FF", false},
+	{"bare MAC", "AABBCCDDEEFF", false},
+	{"hyphenated MAC with digits", "00-11-22-AA-BB-CC", false},
+	{"hyphenated MAC with digits after a prefix", "X1-00-11-22-AA-BB-CC", false},
+	{"bare MAC with digits", "001122AABBCC", false},
+	{"six-octet MAC with digits after a prefix, no address", "X1-00-11-AA-BB-CC-DD", false},
+	{"host-name style address", "IP-10-0-0-7", false},
+	{"public address in a model", "IP-93-184-216-34", false},
+	{"public address with suffix in a model", "PA-93-184-216-34-A", false},
+	{"host-name style private address with underscores", "SW_192_168_1_1", false},
 	{"empty model", "", false},
 }
 
@@ -131,4 +143,19 @@ var Firmware = []Case{
 
 	// A public quad written with underscores is a version, not an address.
 	{"public quad after prefix with underscores", "17.3.4_8_8_8", true},
+
+	// A MAC with a suffix or after a prefix is a MAC and is refused, like
+	// the whole-value form (D3). The MAC is found at any position.
+	{"six-octet MAC with dash suffix", "12.34.56.78.90.12-1", false},
+	{"three-quad MAC with dash suffix", "1234.5678.9012-1", false},
+	{"six-octet MAC after prefix with dashes", "17.3.4-12-34-56-78-90-12", false},
+	{"six-octet MAC after prefix with dots", "17.3.4.12.34.56.78.90.12", false},
+	{"six-octet MAC after single digit label", "1.12.34.56.78.90.12", false},
+	{"three-quad MAC after prefix", "17.3.4-1234.5678.9012", false},
+	{"three-quad MAC after prefix with underscore", "17.3.4_1234_5678_9012", false},
+	{"bare MAC with dash suffix", "001122334455-1", false},
+	{"bare MAC after prefix", "17.3.4-001122334455", false},
+	{"longer digit run is not a bare MAC", "1.0011223344551", true},
+	{"six pairs with a three-digit last label", "12.34.56.78.90.123", true},
+	{"six octets with a one-digit last label are not a MAC", "12.34.56.78.90.1-2", true},
 }

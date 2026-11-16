@@ -31,14 +31,19 @@ func IsHostname(s string) bool {
 
 // Reserved reports whether addr is an internal address that a connection
 // to an operator-supplied destination must not reach without explicit
-// approval, with a fixed reason. IPv4-mapped IPv6 addresses are judged by
-// their IPv4 part; every other IPv6 address is reserved, because IPv6 has
-// too many ranges that embed or route to IPv4 (NAT64, 6to4, Teredo) or are
-// internal (loopback, link-local, unique local, multicast). The invalid
-// zero Addr is reserved too.
+// approval, with a fixed reason. An address with a zone is always reserved,
+// checked before any unmapping, because Unmap drops the zone and would
+// otherwise judge its IPv4 part as if it were a zone-less address.
+// IPv4-mapped IPv6 addresses are judged by their IPv4 part; every other
+// IPv6 address is reserved, because IPv6 has too many ranges that embed or
+// route to IPv4 (NAT64, 6to4, Teredo) or are internal (loopback, link-local,
+// unique local, multicast). The invalid zero Addr is reserved too.
 func Reserved(addr netip.Addr) (string, bool) {
 	if !addr.IsValid() {
 		return "invalid address", true
+	}
+	if addr.Zone() != "" {
+		return "address with zone", true
 	}
 	if addr.Is4In6() {
 		addr = addr.Unmap()
