@@ -1,0 +1,110 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package fimsshd
+
+import (
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/fimbaseline"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/fimscan"
+)
+
+// cfg builds one sshd_config file at /etc/ssh/sshd_config.
+func cfg(content string) []fimscan.SSHConfigFile {
+	return []fimscan.SSHConfigFile{{Path: []byte("/etc/ssh/sshd_config"), Content: []byte(content)}}
+}
+
+// setFor parses content and returns the derived set, failing the test on error.
+func setFor(t *testing.T, content string) *Set {
+	t.Helper()
+	d, err := Parse(cfg(content))
+	if err != nil {
+		t.Fatalf("Parse(%q): %v", content, err)
+	}
+	return d.Set()
+}
+
+// TestParseRejectsUnclassifiableValues checks that anything the parser does
+// not understand fails closed with ErrUnclassifiable (ADR 0015 D7 "Unclassifiable means critical").
+func TestParseRejectsUnclassifiableValues(t *testing.T) {
+	tests := map[string]string{
+		"separator equals":          "AuthorizedKeysFile=.ssh/keys\n",
+		"quoted value":              "AuthorizedKeysFile \".ssh/keys\"\n",
+		"single quote":              "AuthorizedKeysFile '.ssh/keys'\n",
+		"backslash":                 "AuthorizedKeysFile .ssh/a\\b\n",
+		"unknown token":             "AuthorizedKeysFile .ssh/%d\n",
+		"percent at end":            "AuthorizedKeysFile .ssh/%\n",
+		"home token mid component":  "AuthorizedKeysFile x%h/keys\n",
+		"dotdot component":          "AuthorizedKeysFile ../keys\n",
+		"empty component":           "AuthorizedKeysFile /etc//keys\n",
+		"trailing slash":            "AuthorizedKeysFile /etc/keys/\n",
+		"missing value":             "AuthorizedKeysFile\n",
+		"non ASCII":                 "AuthorizedKeysFile .ssh/ü\n",
+		"hash in value":             "AuthorizedKeysFile .ssh/keys # note\n",
+		"daemon tilde name":         "TrustedUserCAKeys ~bob/ca.pub\n",
+		"daemon two values":         "RevokedKeys /etc/a /etc/b\n",
+		"daemon dotdot":             "RevokedKeys ../revoked\n",
+		"include percent":           "Include /etc/ssh/%u.conf\n",
+		"include tilde":             "Include ~/extra.conf\n",
+		"include bad glob":          "Include /etc/ssh/extra/[\n",
+		"command relative":          "AuthorizedKeysCommand bin/keys\n",
+		"command percent":           "AuthorizedKeysCommand /usr/bin/keys%u\n",
+		"command quoted":            "AuthorizedKeysCommand \"/usr/bin/keys\"\n",
+		"command escaped":           "AuthorizedKeysCommand /usr/bin/a\\ b\n",
+		"command principals rel":    "AuthorizedPrincipalsCommand keys\n",
+		"principals file with none": "AuthorizedPrincipalsFile none /etc/x\n",
+	}
+	for name, content := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, err := Parse(cfg(content))
+			if !errors.Is(err, ErrUnclassifiable) {
+				t.Fatalf("Parse: err = %v, want ErrUnclassifiable", err)
+			}
+		})
+	}
+}
+
+// TestParseErrorsNeverContainConfigContent checks that a rejection names the
+// file and the line, never the configuration text (ADR 0015 D6, AGENTS.md rule 7).
+func TestParseErrorsNeverContainConfigContent(t *testing.T) {
+	const secret = "SECRETVALUE42"
+	_, err := Parse(cfg("Port 22\nAuthorizedKeysFile \"" + secret + "\"\n"))
+	if err == nil {
+		t.Fatal("Parse: no error for quoted value")
+	}
+	if strings.Contains(err.Error(), secret) {
+		t.Fatalf("error leaks config content: %v", err)
+	}
+	if !strings.Contains(err.Error(), "line 2") {
+		t.Fatalf("error does not name the line: %v", err)
+	}
+}
+
+// TestKeywordsAreCaseInsensitiveAndApplyInMatch checks that keywords match
+// without regard to case and inside Match blocks (ADR 0015 D7 (d)).
+func TestKeywordsAreCaseInsensitiveAndApplyInMatch(t *testing.T) {
+	s := setFor(t, "Match User bob\n  authorizedkeysfile /srv/keys/%u\n")
+	if got := s.Match([]byte("/srv/keys/bob")); got != fimbaseline.SSHFile {
+		t.Fatalf("Match(/srv/keys/bob) = %v, want SSHFile", got)
+	}
+	if got := s.Match([]byte("/root/.ssh/authorized_keys")); got != fimbaseline.SSHNone {
+		t.Fatalf("default still applied when directive present: %v", got)
+	}
+}
+
+// TestCommentsAndUnrelatedKeywordsAreIgnored checks that comments and other
+// directives do not count as login directives.
+func TestCommentsAndUnrelatedKeywordsAreIgnored(t *testing.T) {
+	s := setFor(t, "# AuthorizedKeysFile /srv/commented\nPort 22\n\n   # RevokedKeys /x\n")
+	if got := s.Match([]byte("/srv/commented")); got == fimbaseline.SSHFile {
+		t.Fatalf("commented directive applied: %v", got)
+	}
+	if got := s.Match([]byte("/x")); got == fimbaseline.SSHFile {
+		t.Fatalf("commented RevokedKeys applied: %v", got)
+	}
+	if got := s.Match([]byte("/root/.ssh/authorized_keys")); got != fimbaseline.SSHFile {
+		t.Fatalf("default AuthorizedKeysFile missing: %v", got)
+	}
+}
