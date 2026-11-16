@@ -571,6 +571,12 @@ func csafProduct(id, eco, version, train string) vulnfeed.CSAFProduct {
 	return vulnfeed.CSAFProduct{ProductID: id, Name: id, Version: version, Train: train, Ecosystem: eco}
 }
 
+// devProduct is a product of a device model's family: its name carries the
+// model, as a model-level CSAF branch does (ADR 0011 D4).
+func devProduct(id, eco, model, version, train string) vulnfeed.CSAFProduct {
+	return vulnfeed.CSAFProduct{ProductID: id, Name: "Cisco " + model + " " + version, Product: model, Version: version, Train: train, Ecosystem: eco}
+}
+
 // TestVendorTrains: devices against CSAF products of their train; only an
 // exact firmware version decides, never an ordering guess.
 func TestVendorTrains(t *testing.T) {
@@ -578,22 +584,22 @@ func TestVendorTrains(t *testing.T) {
 	panAdv := vulnfeed.CSAFAdvisory{
 		TrackingID: "PAN-SA-2024-0015", Version: "1",
 		Products: []vulnfeed.CSAFProduct{
-			csafProduct("p1", panos, "10.2.9", "10.2"),
-			csafProduct("p2", panos, "10.2.10", "10.2"),
-			csafProduct("p3", panos, "11.1.3", "11.1"),
-			csafProduct("p4", panos, "11.1.4", "11.1"),
-			csafProduct("p5", panos, "11.1.5", "11.1"),
-			csafProduct("p6", panos, "9.1.17", "9.1"),
-			{ProductID: "p7", Name: "PAN-OS 11.2", VersionRange: "vers:generic/>=11.2.0|<11.2.4", Train: "11.2", Ecosystem: panos},
+			devProduct("p1", panos, "PA-440", "10.2.9", "10.2"),
+			devProduct("p2", panos, "PA-440", "10.2.10", "10.2"),
+			devProduct("p3", panos, "PA-440", "11.1.3", "11.1"),
+			devProduct("p4", panos, "PA-440", "11.1.4", "11.1"),
+			devProduct("p5", panos, "PA-440", "11.1.5", "11.1"),
+			devProduct("p6", panos, "PA-440", "9.1.17", "9.1"),
+			{ProductID: "p7", Name: "PA-440", Product: "PA-440", VersionRange: "vers:generic/>=11.2.0|<11.2.4", Train: "11.2", Ecosystem: panos},
 		},
 		Vulnerabilities: []vulnfeed.CSAFVulnerability{{CVE: "CVE-2024-3400", Affected: []string{"p1", "p3", "p7"}, Fixed: []string{"p2", "p4", "p5"}, NotAffected: []string{"p6"}}},
 	}
 	cbsAdv := vulnfeed.CSAFAdvisory{
 		TrackingID: "cisco-sa-cbs-xss-2024", Version: "1.0",
 		Products: []vulnfeed.CSAFProduct{
-			csafProduct("c1", cbs, "3.4.0.17", "3.4"),
-			csafProduct("c2", cbs, "3.4.1.3", "3.4"),
-			csafProduct("c3", cbs, "3.3.0.16", "3.3"),
+			devProduct("c1", cbs, "CBS350-24P", "3.4.0.17", "3.4"),
+			devProduct("c2", cbs, "CBS350-24P", "3.4.1.3", "3.4"),
+			devProduct("c3", cbs, "CBS350-24P", "3.3.0.16", "3.3"),
 		},
 		Vulnerabilities: []vulnfeed.CSAFVulnerability{{CVE: "CVE-2024-20430", Affected: []string{"c1", "c3"}, Fixed: []string{"c2"}}},
 	}
@@ -606,15 +612,19 @@ func TestVendorTrains(t *testing.T) {
 		want     vulnfinding.Fix
 		present  bool
 		gap      bool
+		// devGap is the device-level gap expected, "" for none.
+		devGap GapReason
 	}{
-		{"PAN-OS affected, single fixed release of the train", panos, "PA-440", "10.2.9", "CVE-2024-3400", vulnfinding.Fix{State: vulnfinding.FixFixed, Version: "10.2.10"}, true, false},
-		{"PAN-OS fixed release: no record", panos, "PA-440", "10.2.10", "CVE-2024-3400", vulnfinding.Fix{}, false, false},
-		{"PAN-OS train with two fixed releases: no fix version guessed", panos, "PA-440", "11.1.3", "CVE-2024-3400", vulnfinding.Fix{State: vulnfinding.FixNoFixYet}, true, false},
-		{"PAN-OS not affected list", panos, "PA-440", "9.1.17", "CVE-2024-3400", vulnfinding.Fix{State: vulnfinding.FixNotAffected}, true, false},
-		{"PAN-OS only a range covers the firmware: unknown", panos, "PA-440", "11.2.1", "CVE-2024-3400", vulnfinding.Fix{}, false, true},
-		{"CBS firmware affected", cbs, "CBS350-24P", "3.4.0.17", "CVE-2024-20430", vulnfinding.Fix{State: vulnfinding.FixFixed, Version: "3.4.1.3"}, true, false},
-		{"CBS train without fixed release", cbs, "CBS350-24P", "3.3.0.16", "CVE-2024-20430", vulnfinding.Fix{State: vulnfinding.FixNoFixYet}, true, false},
-		{"CBS firmware absent from advisory: nothing", cbs, "CBS350-24P", "3.5.0.1", "CVE-2024-20430", vulnfinding.Fix{}, false, false},
+		{"PAN-OS affected, single fixed release of the train", panos, "PA-440", "10.2.9", "CVE-2024-3400", vulnfinding.Fix{State: vulnfinding.FixFixed, Version: "10.2.10"}, true, false, ""},
+		{"PAN-OS fixed release: a positive hit, no record and no gap", panos, "PA-440", "10.2.10", "CVE-2024-3400", vulnfinding.Fix{}, false, false, ""},
+		{"PAN-OS train with two fixed releases: no fix version guessed", panos, "PA-440", "11.1.3", "CVE-2024-3400", vulnfinding.Fix{State: vulnfinding.FixNoFixYet}, true, false, ""},
+		{"PAN-OS not affected list", panos, "PA-440", "9.1.17", "CVE-2024-3400", vulnfinding.Fix{State: vulnfinding.FixNotAffected}, true, false, ""},
+		{"PAN-OS only a range covers the firmware: unknown", panos, "PA-440", "11.2.1", "CVE-2024-3400", vulnfinding.Fix{}, false, true, GapDeviceVersionUnknown},
+		{"CBS firmware affected", cbs, "CBS350-24P", "3.4.0.17", "CVE-2024-20430", vulnfinding.Fix{State: vulnfinding.FixFixed, Version: "3.4.1.3"}, true, false, ""},
+		{"CBS train without fixed release", cbs, "CBS350-24P", "3.3.0.16", "CVE-2024-20430", vulnfinding.Fix{State: vulnfinding.FixNoFixYet}, true, false, ""},
+		{"CBS firmware absent from every advisory: unknown, never clean", cbs, "CBS350-24P", "3.5.0.1", "CVE-2024-20430", vulnfinding.Fix{}, false, false, GapDeviceVersionUnknown},
+		{"CBS model of another family: no finding, model unknown", cbs, "CBS250-24P", "3.4.0.17", "CVE-2024-20430", vulnfinding.Fix{}, false, false, GapDeviceModelUnknown},
+		{"PA-220 is not PA-440: no finding, model unknown", panos, "PA-220", "10.2.9", "CVE-2024-3400", vulnfinding.Fix{}, false, false, GapDeviceModelUnknown},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -646,6 +656,15 @@ func TestVendorTrains(t *testing.T) {
 			if got := hasGap(r, tc.model, GapVendorRange); got != tc.gap {
 				t.Fatalf("vendor gap = %v want %v", got, tc.gap)
 			}
+			if tc.devGap == "" {
+				for _, g := range []GapReason{GapDeviceModelUnknown, GapDeviceVersionUnknown} {
+					if hasGap(r, tc.model, g) {
+						t.Fatalf("unexpected device gap %s: %+v", g, r.Gaps)
+					}
+				}
+			} else if !hasGap(r, tc.model, tc.devGap) {
+				t.Fatalf("device gap %s missing: %+v", tc.devGap, r.Gaps)
+			}
 		})
 	}
 }
@@ -658,7 +677,7 @@ func TestVendorIndexBuiltOncePerMatch(t *testing.T) {
 	db := newDB(t)
 	for _, id := range []string{"PAN-SA-2024-0002", "PAN-SA-2024-0001"} {
 		adv := vulnfeed.CSAFAdvisory{TrackingID: id, Version: "1",
-			Products:        []vulnfeed.CSAFProduct{csafProduct("a", panos, "10.2.9", "10.2"), csafProduct("b", panos, "10.2.10", "10.2")},
+			Products:        []vulnfeed.CSAFProduct{devProduct("a", panos, "PA-440", "10.2.9", "10.2"), devProduct("b", panos, "PA-440", "10.2.10", "10.2")},
 			Vulnerabilities: []vulnfeed.CSAFVulnerability{{CVE: "CVE-2024-" + id[len(id)-4:], Affected: []string{"a"}, Fixed: []string{"b"}}}}
 		if err := db.AddCSAF(FeedPaloAltoCSAF, adv); err != nil {
 			t.Fatal(err)
@@ -684,7 +703,7 @@ func TestVendorIndexBuiltOncePerMatch(t *testing.T) {
 func TestVendorContradictingStatusIsUnknown(t *testing.T) {
 	db := newDB(t)
 	adv := vulnfeed.CSAFAdvisory{TrackingID: "PAN-SA-2024-0001", Version: "1",
-		Products:        []vulnfeed.CSAFProduct{csafProduct("a", "vendor:paloalto:panos", "10.2.9", "10.2"), csafProduct("b", "vendor:paloalto:panos", "10.2.9", "10.2")},
+		Products:        []vulnfeed.CSAFProduct{devProduct("a", "vendor:paloalto:panos", "PA-440", "10.2.9", "10.2"), devProduct("b", "vendor:paloalto:panos", "PA-440", "10.2.9", "10.2")},
 		Vulnerabilities: []vulnfeed.CSAFVulnerability{{CVE: "CVE-2024-0001", Affected: []string{"a"}, Fixed: []string{"b"}}}}
 	if err := db.AddCSAF(FeedPaloAltoCSAF, adv); err != nil {
 		t.Fatal(err)
@@ -925,7 +944,7 @@ func richFixture(t *testing.T) (*DB, []Subject) {
 		t.Fatal(err)
 	}
 	if err := db.AddCSAF(FeedPaloAltoCSAF, vulnfeed.CSAFAdvisory{TrackingID: "PAN-SA-2024-0015", Version: "1",
-		Products:        []vulnfeed.CSAFProduct{csafProduct("p1", "vendor:paloalto:panos", "10.2.9", "10.2"), csafProduct("p2", "vendor:paloalto:panos", "10.2.10", "10.2")},
+		Products:        []vulnfeed.CSAFProduct{devProduct("p1", "vendor:paloalto:panos", "PA-440", "10.2.9", "10.2"), devProduct("p2", "vendor:paloalto:panos", "PA-440", "10.2.10", "10.2")},
 		Vulnerabilities: []vulnfeed.CSAFVulnerability{{CVE: "CVE-2024-3400", Affected: []string{"p1"}, Fixed: []string{"p2"}}}}); err != nil {
 		t.Fatal(err)
 	}

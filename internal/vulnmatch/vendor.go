@@ -6,6 +6,7 @@ import (
 	"cmp"
 	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfeed"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
@@ -49,11 +50,66 @@ func (m *matcher) device(s Subject) {
 		m.gap(s, "", "", GapFeedMissing)
 		return
 	}
+	keys := modelKeys(s.Device.Model)
+	var modelSeen, firmwareSeen bool
 	for _, d := range m.vendorDocs(feed) {
 		for _, v := range d.adv.Vulnerabilities {
-			m.deviceVuln(s, feed, d.adv, d.byID, v)
+			hit := m.deviceVuln(s, feed, d.adv, d.byID, v, keys)
+			modelSeen = modelSeen || hit.model
+			firmwareSeen = firmwareSeen || hit.firmware
 		}
 	}
+	// A finding needs a unique hit on the model and on the firmware's train
+	// (ADR 0011 D4). Without a hit on both, coverage is unknown, never clean.
+	switch {
+	case !modelSeen:
+		m.gap(s, s.Device.Model, "", GapDeviceModelUnknown)
+	case !firmwareSeen:
+		m.gap(s, s.Device.Model, "", GapDeviceVersionUnknown)
+	}
+}
+
+// deviceHit says which parts of one vulnerability's product lists match the
+// device: a product of its model (model) and an exact product version equal
+// to its firmware (firmware).
+type deviceHit struct {
+	model, firmware bool
+}
+
+// modelKeys returns the token sequences by which a product names the
+// device's model: the whole model, and its family before the first "-" when
+// the family has a letter and a digit ("CBS350" for "CBS350-24P-4G"). A bare
+// word such as "PA" is no key: it would name every Palo Alto product.
+func modelKeys(model string) [][]string {
+	keys := [][]string{modelTokens(model)}
+	if i := strings.IndexByte(model, '-'); i > 0 {
+		fam := model[:i]
+		if strings.IndexFunc(fam, unicode.IsDigit) >= 0 && strings.IndexFunc(fam, unicode.IsLetter) >= 0 {
+			keys = append(keys, modelTokens(fam))
+		}
+	}
+	return keys
+}
+
+// modelTokens splits s into lower-case runs of letters and digits.
+func modelTokens(s string) []string {
+	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+}
+
+// namesModel reports whether text holds one of the model keys as whole
+// tokens, so "CBS35" never names "CBS350".
+func namesModel(text string, keys [][]string) bool {
+	tokens := modelTokens(text)
+	for _, k := range keys {
+		for i := 0; len(k) > 0 && i+len(k) <= len(tokens); i++ {
+			if slices.Equal(tokens[i:i+len(k)], k) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // indexedAdvisory is a CSAF advisory with its products by ID.
@@ -91,16 +147,21 @@ func (m *matcher) vendorDocs(feed string) []indexedAdvisory {
 	return docs
 }
 
-func (m *matcher) deviceVuln(s Subject, feed string, adv *vulnfeed.CSAFAdvisory, byID map[string]vulnfeed.CSAFProduct, v vulnfeed.CSAFVulnerability) {
+func (m *matcher) deviceVuln(s Subject, feed string, adv *vulnfeed.CSAFAdvisory, byID map[string]vulnfeed.CSAFProduct, v vulnfeed.CSAFVulnerability, keys [][]string) deviceHit {
 	fw := s.Device.Firmware
 	var affected []vulnfeed.CSAFProduct
 	var isFixed, isNotAffected, rangeSeen bool
+	var hit deviceHit
 	scan := func(ids []string, f func(p vulnfeed.CSAFProduct)) {
 		for _, id := range ids {
 			p, ok := byID[id]
-			if !ok || p.Ecosystem != s.Ecosystem {
+			// A product counts only when it is the device's ecosystem and
+			// names its model (ADR 0011 D4): firmware of another model is no
+			// hit.
+			if !ok || p.Ecosystem != s.Ecosystem || !namesModel(p.Name+" "+p.Product, keys) {
 				continue
 			}
+			hit.model = true
 			if p.Version == "" {
 				if p.VersionRange != "" {
 					rangeSeen = true
@@ -108,6 +169,7 @@ func (m *matcher) deviceVuln(s Subject, feed string, adv *vulnfeed.CSAFAdvisory,
 				continue
 			}
 			if p.Version == fw {
+				hit.firmware = true
 				f(p)
 			}
 		}
@@ -129,9 +191,8 @@ func (m *matcher) deviceVuln(s Subject, feed string, adv *vulnfeed.CSAFAdvisory,
 	switch {
 	case n > 1:
 		m.gap(s, s.Device.Model, canonicalID(firstID), GapVendorRange)
-		return
 	case isFixed:
-		return // the firmware is a fixed release: no record
+		// The firmware is a fixed release: no record.
 	case isNotAffected:
 		m.emitDevice(s, ids, vulnfinding.Fix{State: vulnfinding.FixNotAffected}, feed)
 	case len(affected) > 0:
@@ -139,6 +200,7 @@ func (m *matcher) deviceVuln(s Subject, feed string, adv *vulnfeed.CSAFAdvisory,
 	case rangeSeen:
 		m.gap(s, s.Device.Model, canonicalID(firstID), GapVendorRange)
 	}
+	return hit
 }
 
 // vendorFix returns the fixed release of the affected firmware's train:

@@ -135,6 +135,12 @@ const (
 	// GapInventoryIncomplete: NOS reported the subject's inventory as not
 	// complete.
 	GapInventoryIncomplete GapReason = "inventory_incomplete"
+	// GapDeviceModelUnknown: no vendor advisory of the device's ecosystem
+	// names the device's model, so the device has no vendor coverage.
+	GapDeviceModelUnknown GapReason = "device_model_unknown"
+	// GapDeviceVersionUnknown: the model is covered, but no advisory lists
+	// the device's firmware version for it (no unique train hit).
+	GapDeviceVersionUnknown GapReason = "device_version_unknown"
 )
 
 // Gap is one coverage gap. Package and VulnID are empty when the gap is
