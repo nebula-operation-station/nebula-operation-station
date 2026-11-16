@@ -23,7 +23,7 @@ func (s *Set) Match(path []byte) fimbaseline.SSHMatch {
 	if s == nil || len(path) == 0 || path[0] != '/' {
 		return fimbaseline.SSHNone
 	}
-	comps, err := splitComps(string(path[1:]))
+	comps, err := splitRecordPath(string(path[1:]))
 	if err != nil {
 		// Record paths are canonical (fimscan validates them). A
 		// non-canonical path is not understood: fail closed as a file.

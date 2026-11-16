@@ -174,6 +174,21 @@ func TestIncludeGlobStarMatchesWithinOneComponent(t *testing.T) {
 	}
 }
 
+// TestDeepRecordPathsAreNotFiles checks that a legitimate deep path (more than
+// the 32 components a value may have) is classified by the set, not treated
+// as a login file, and that a path beyond PATH_MAX is still failed closed.
+func TestDeepRecordPathsAreNotFiles(t *testing.T) {
+	s := setFor(t, "AuthorizedKeysFile /srv/k/%u\n")
+	deep := "/opt" + strings.Repeat("/node_modules", 40) + "/x.js"
+	if got := s.Match([]byte(deep)); got != fimbaseline.SSHNone {
+		t.Errorf("deep unrelated path: got %v, want SSHNone", got)
+	}
+	tooDeep := "/" + strings.Repeat("a/", maxPathComponents) + "a" // one component more than the limit
+	if got := s.Match([]byte(tooDeep)); got != fimbaseline.SSHFile {
+		t.Errorf("path beyond the component limit: got %v, want SSHFile (fail closed)", got)
+	}
+}
+
 // TestCommandProgramIsLiteral checks that a command program matches only its
 // own path, that a quoted-free argument with % is allowed, and that a
 // command program with % is rejected (ADR 0015 D7 (d), D9).

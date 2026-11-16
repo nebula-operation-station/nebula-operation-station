@@ -25,6 +25,10 @@ const maxTokenBytes = 4096
 // work of Match.
 const maxComponents = 32
 
+// maxPathComponents bounds the components of one record path. A path of at
+// most PATH_MAX bytes has at most maxTokenBytes/2 components ("a/a/a…").
+const maxPathComponents = maxTokenBytes / 2
+
 // defaultAuthorizedKeys are the OpenSSH defaults of AuthorizedKeysFile, used
 // when no AuthorizedKeysFile directive exists (ADR 0015 D7 (d)).
 var defaultAuthorizedKeys = []string{".ssh/authorized_keys", ".ssh/authorized_keys2"}

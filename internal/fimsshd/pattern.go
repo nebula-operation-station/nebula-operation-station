@@ -143,15 +143,26 @@ func (e entry) run(comps []string) (full, extendable bool) {
 	return full, extendable
 }
 
-// splitComps splits s (a path without its leading slash) into components.
-// The empty string has none. Empty, "." and ".." components are rejected
-// because sshd does not normalise them.
+// splitComps splits s (a value without its leading slash) into components,
+// at most maxComponents of them. The empty string has none. Empty, "." and
+// ".." components are rejected because sshd does not normalise them.
 func splitComps(s string) ([]string, error) {
+	return splitLimited(s, maxComponents)
+}
+
+// splitRecordPath splits a record path (without its leading slash). Record
+// paths have their own limit, so a deep but real tree is still classified;
+// beyond maxPathComponents the path is refused and Set.Match fails closed.
+func splitRecordPath(s string) ([]string, error) {
+	return splitLimited(s, maxPathComponents)
+}
+
+func splitLimited(s string, limit int) ([]string, error) {
 	if s == "" {
 		return nil, nil
 	}
 	comps := strings.Split(s, "/")
-	if len(comps) > maxComponents {
+	if len(comps) > limit {
 		return nil, errValue
 	}
 	for _, c := range comps {
