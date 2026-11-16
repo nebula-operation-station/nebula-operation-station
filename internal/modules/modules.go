@@ -50,6 +50,9 @@ const (
 	MaxEntries  = 64
 	MaxUnpacked = 4 << 20
 	maxDetail   = 400
+	// tarOverhead allows for MaxEntries files of a 512-byte header and up to
+	// 511 bytes of padding each, plus the two-block end marker.
+	tarOverhead = MaxEntries*(2*512) + 2*512
 )
 
 // States.
@@ -109,7 +112,10 @@ func unpack(archive []byte) (map[string][]byte, error) {
 	if err != nil {
 		return nil, refuse("not a .tar.gz archive")
 	}
-	tr := tar.NewReader(io.LimitReader(zr, MaxUnpacked+1))
+	// The tar stream holds headers and padding besides the content; the
+	// content total is checked below, the stream is capped to stop
+	// reading an endless archive.
+	tr := tar.NewReader(io.LimitReader(zr, MaxUnpacked+tarOverhead+1))
 	files := map[string][]byte{}
 	total, entries := 0, 0
 	for {

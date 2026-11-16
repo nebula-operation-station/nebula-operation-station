@@ -71,9 +71,12 @@ func demo(t testing.TB, version string, sig bool) []byte {
 
 // fakeExec answers RegisterModule like the executor would.
 type fakeExec struct {
-	err      error
-	wrongSum bool
-	calls    int
+	err          error
+	wrongSum     bool
+	dropAction   bool // the answer lists one action too few
+	badLockSum   bool // the answer's lock SHA-256 is not the lock's
+	otherVersion bool // the answer names another module version
+	calls        int
 }
 
 func (f *fakeExec) RegisterModule(_ context.Context, in *pb.RegisterModuleRequest, _ ...grpc.CallOption) (*pb.RegisterModuleResponse, error) {
@@ -84,13 +87,23 @@ func (f *fakeExec) RegisterModule(_ context.Context, in *pb.RegisterModuleReques
 	v := Version{Scripts: in.GetScripts()}
 	l, sum, _ := modulelock.Parse(in.GetLockJson())
 	v.Lock = l
+	if f.badLockSum {
+		sum = strings.Repeat("1", 64)
+	}
 	r := &pb.RegisterModuleResponse{Name: l.Name, Version: l.Version, LockSha256: sum, SignerFingerprint: "SHA256:x", SignerName: "Test"}
 	for _, a := range v.Actions() {
 		s := a.SHA256()
 		if f.wrongSum {
 			s = strings.Repeat("0", 64)
 		}
-		r.Actions = append(r.Actions, &pb.ModuleAction{ActionId: a.ID, ModuleVersion: a.Version, ArtifactSha256: s})
+		mv := a.Version
+		if f.otherVersion {
+			mv = "9.9.9"
+		}
+		r.Actions = append(r.Actions, &pb.ModuleAction{ActionId: a.ID, ModuleVersion: mv, ArtifactSha256: s})
+	}
+	if f.dropAction && len(r.Actions) > 0 {
+		r.Actions = r.Actions[:len(r.Actions)-1]
 	}
 	return r, nil
 }
