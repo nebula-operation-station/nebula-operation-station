@@ -4319,11 +4319,16 @@ message CompareBaselineListResponse {
 }
 
 // An executor-held I2 baseline digest mismatch of one host.
+// GetIntegrityStatus serves the server role too, so the finding never
+// carries the executor's approved digest (ND-21 4: the server sees no
+// baseline); that digest stays in the executor database and its
+// `integrity_baseline_tamper` audit event.
 message BaselineTamperFinding {
+  reserved 2;
+  reserved "approved_digest";
   string host_id = 1;
-  // The executor's approved digest and the digest it recomputed from the
-  // server's list, both at the latest mismatch.
-  string approved_digest = 2;
+  // The digest the executor recomputed from the server's list at the
+  // latest mismatch.
   string presented_digest = 3;
   int64 first_seen_unix = 4;
   int64 last_seen_unix = 5;
