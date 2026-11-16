@@ -14,7 +14,10 @@
 //     descriptions with HTML or control characters) is refused at ingest or
 //     rendered as inert text;
 //   - the approved config baseline (ND-17 part 2) cannot be set by the
-//     server.
+//     server; no executor method or role entry names a baseline except the
+//     compare-only I2 integrity check CompareBaselineList (ADR 0015 D7),
+//     whose answer is a result enum only and which never writes the
+//     executor's stored digest.
 //
 // These tests are protected: a change that weakens or deletes one needs
 // human review (see AGENTS.md).
