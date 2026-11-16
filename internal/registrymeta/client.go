@@ -1012,7 +1012,7 @@ func (c *Client) resolveLink(registry, listPath, raw string) (string, error) {
 		u.Scheme = base.Scheme
 		u.Host = base.Host
 	}
-	if originOf(u) != registry {
+	if originOf(u) != registry || u.User != nil || u.Fragment != "" {
 		return "", fmt.Errorf("%w: %q", ErrRedirectNotAllowed, raw)
 	}
 	if u.Path != listPath {
