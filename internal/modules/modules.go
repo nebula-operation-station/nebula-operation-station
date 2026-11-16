@@ -50,9 +50,20 @@ const (
 	MaxEntries  = 64
 	MaxUnpacked = 4 << 20
 	maxDetail   = 400
-	// tarOverhead allows for MaxEntries files of a 512-byte header and up to
-	// 511 bytes of padding each, plus the two-block end marker.
-	tarOverhead = MaxEntries*(2*512) + 2*512
+	// tarBlock is the size of a tar header block and of the padding unit.
+	tarBlock = 512
+	// tarEntryFraming is what one entry may add besides its content: its
+	// header block, up to 511 bytes of padding, and room for one extended
+	// header (PAX or GNU long name) with up to 2 KiB of records.
+	tarEntryFraming = 4 << 10
+	// tarHeaders bounds the bytes of headers, extended headers and padding
+	// of MaxEntries entries; archive/tar reads extended headers without
+	// counting them as entries, so the bytes are counted, not the blocks.
+	tarHeaders = MaxEntries * tarEntryFraming
+	// tarOverhead is tarHeaders plus the two-block end marker. The stream
+	// is cut after MaxUnpacked+tarOverhead bytes, the most a valid archive
+	// can hold.
+	tarOverhead = tarHeaders + 2*tarBlock
 )
 
 // States.
@@ -103,6 +114,33 @@ type Store struct {
 // unverified).
 func New(db *sql.DB, exec Registrar) *Store { return &Store{db: db, exec: exec, now: time.Now} }
 
+// countReader reads at most limit bytes from r and counts them. Once the
+// limit is reached it returns io.EOF and records that it cut the stream:
+// a stream cut at a block boundary otherwise looks like a clean end of the
+// archive.
+type countReader struct {
+	r      io.Reader
+	n      int64
+	limit  int64
+	capped bool
+}
+
+// Read reads from r, up to the limit, and adds the bytes read to n.
+func (c *countReader) Read(p []byte) (int, error) {
+	if c.n >= c.limit {
+		if len(p) > 0 {
+			c.capped = true
+		}
+		return 0, io.EOF
+	}
+	if rem := c.limit - c.n; int64(len(p)) > rem {
+		p = p[:rem]
+	}
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
 // unpack reads the archive into its files.
 func unpack(archive []byte) (map[string][]byte, error) {
 	if len(archive) == 0 || len(archive) > MaxArchive {
@@ -112,23 +150,30 @@ func unpack(archive []byte) (map[string][]byte, error) {
 	if err != nil {
 		return nil, refuse("not a .tar.gz archive")
 	}
-	// The tar stream holds headers and padding besides the content; the
-	// content total is checked below, the stream is capped to stop
-	// reading an endless archive.
-	tr := tar.NewReader(io.LimitReader(zr, MaxUnpacked+tarOverhead+1))
+	// The tar stream holds headers and padding besides the content. The
+	// content total is checked below; the headers are budgeted after each
+	// entry, and the stream is capped to stop reading an endless archive.
+	const streamCap = MaxUnpacked + tarOverhead
+	cr := &countReader{r: zr, limit: streamCap}
+	tr := tar.NewReader(cr)
 	files := map[string][]byte{}
 	total, entries := 0, 0
 	for {
 		h, err := tr.Next()
-		if errors.Is(err, io.EOF) {
+		if errors.Is(err, io.EOF) && !cr.capped {
 			break
 		}
-		if err != nil {
+		if err != nil || cr.capped {
 			return nil, refuse("the archive is damaged or too large")
 		}
 		entries++
 		if entries > MaxEntries {
 			return nil, refuse("at most %d entries", MaxEntries)
+		}
+		// Everything read so far that is not content: headers, extended
+		// headers and the padding of earlier entries.
+		if cr.n-int64(total) > tarHeaders {
+			return nil, refuse("the archive's headers are larger than %d KiB", tarHeaders>>10)
 		}
 		name := strings.TrimPrefix(h.Name, "./")
 		switch h.Typeflag {
