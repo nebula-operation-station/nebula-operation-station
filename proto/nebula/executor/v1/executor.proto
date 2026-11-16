@@ -4308,12 +4308,14 @@ enum BaselineDigestComparison {
   BASELINE_DIGEST_COMPARISON_NONE = 3;
 }
 
+// The answer is the comparison result only (ND-21 4 pins this): no digest,
+// list or other string or bytes field. MISMATCH is the
+// `integrity.baseline_tamper` finding, which the executor holds and shows
+// through GetIntegrityStatus.
 message CompareBaselineListResponse {
+  reserved 2, 3;
+  reserved "finding_kind", "computed_digest";
   BaselineDigestComparison result = 1;
-  // "integrity.baseline_tamper" on MISMATCH, empty otherwise.
-  string finding_kind = 2;
-  // The digest the executor computed from the streamed list.
-  string computed_digest = 3;
 }
 
 // An executor-held I2 baseline digest mismatch of one host.

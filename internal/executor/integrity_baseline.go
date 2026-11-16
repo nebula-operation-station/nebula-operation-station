@@ -296,13 +296,14 @@ func (s *Service) CompareBaselineList(stream grpc.ClientStreamingServer[pb.Compa
 		}
 		return status.Error(codes.Internal, "compare baseline list: the approved digest could not be read")
 	}
-	out := &pb.CompareBaselineListResponse{ComputedDigest: res.Computed}
+	// The answer is the result enum only; the computed digest stays in the
+	// executor (finding and audit).
+	out := &pb.CompareBaselineListResponse{}
 	switch res.Result {
 	case BaselineMatch:
 		out.Result = pb.BaselineDigestComparison_BASELINE_DIGEST_COMPARISON_MATCH
 	case BaselineTamper:
 		out.Result = pb.BaselineDigestComparison_BASELINE_DIGEST_COMPARISON_MISMATCH
-		out.FindingKind = string(notify.IntegrityBaselineTamper)
 	case BaselineNone:
 		out.Result = pb.BaselineDigestComparison_BASELINE_DIGEST_COMPARISON_NONE
 	}

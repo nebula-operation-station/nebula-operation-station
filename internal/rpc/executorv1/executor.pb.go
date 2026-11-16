@@ -28705,15 +28705,15 @@ func (x *BaselineListMount) GetFsType() string {
 	return ""
 }
 
+// The answer is the comparison result only (ND-21 4 pins this): no digest,
+// list or other string or bytes field. MISMATCH is the
+// `integrity.baseline_tamper` finding, which the executor holds and shows
+// through GetIntegrityStatus.
 type CompareBaselineListResponse struct {
-	state  protoimpl.MessageState   `protogen:"open.v1"`
-	Result BaselineDigestComparison `protobuf:"varint,1,opt,name=result,proto3,enum=nebula.executor.v1.BaselineDigestComparison" json:"result,omitempty"`
-	// "integrity.baseline_tamper" on MISMATCH, empty otherwise.
-	FindingKind string `protobuf:"bytes,2,opt,name=finding_kind,json=findingKind,proto3" json:"finding_kind,omitempty"`
-	// The digest the executor computed from the streamed list.
-	ComputedDigest string `protobuf:"bytes,3,opt,name=computed_digest,json=computedDigest,proto3" json:"computed_digest,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	state         protoimpl.MessageState   `protogen:"open.v1"`
+	Result        BaselineDigestComparison `protobuf:"varint,1,opt,name=result,proto3,enum=nebula.executor.v1.BaselineDigestComparison" json:"result,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CompareBaselineListResponse) Reset() {
@@ -28751,20 +28751,6 @@ func (x *CompareBaselineListResponse) GetResult() BaselineDigestComparison {
 		return x.Result
 	}
 	return BaselineDigestComparison_BASELINE_DIGEST_COMPARISON_UNSPECIFIED
-}
-
-func (x *CompareBaselineListResponse) GetFindingKind() string {
-	if x != nil {
-		return x.FindingKind
-	}
-	return ""
-}
-
-func (x *CompareBaselineListResponse) GetComputedDigest() string {
-	if x != nil {
-		return x.ComputedDigest
-	}
-	return ""
 }
 
 // An executor-held I2 baseline digest mismatch of one host.
@@ -30900,11 +30886,9 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\x04link\x18\r \x01(\fR\x04link\"@\n" +
 	"\x11BaselineListMount\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\fR\x04path\x12\x17\n" +
-	"\afs_type\x18\x02 \x01(\tR\x06fsType\"\xaf\x01\n" +
+	"\afs_type\x18\x02 \x01(\tR\x06fsType\"\x8e\x01\n" +
 	"\x1bCompareBaselineListResponse\x12D\n" +
-	"\x06result\x18\x01 \x01(\x0e2,.nebula.executor.v1.BaselineDigestComparisonR\x06result\x12!\n" +
-	"\ffinding_kind\x18\x02 \x01(\tR\vfindingKind\x12'\n" +
-	"\x0fcomputed_digest\x18\x03 \x01(\tR\x0ecomputedDigest\"\xe8\x01\n" +
+	"\x06result\x18\x01 \x01(\x0e2,.nebula.executor.v1.BaselineDigestComparisonR\x06resultJ\x04\b\x02\x10\x03J\x04\b\x03\x10\x04R\ffinding_kindR\x0fcomputed_digest\"\xe8\x01\n" +
 	"\x15BaselineTamperFinding\x12\x17\n" +
 	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12'\n" +
 	"\x0fapproved_digest\x18\x02 \x01(\tR\x0eapprovedDigest\x12)\n" +

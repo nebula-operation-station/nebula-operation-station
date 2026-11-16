@@ -157,11 +157,8 @@ func TestBaselineListMatchesWhenUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.GetResult() != pb.BaselineDigestComparison_BASELINE_DIGEST_COMPARISON_MATCH || resp.GetFindingKind() != "" {
-		t.Fatalf("result = %v %q", resp.GetResult(), resp.GetFindingKind())
-	}
-	if resp.GetComputedDigest() != e.approved {
-		t.Fatalf("computed = %s, want %s", resp.GetComputedDigest(), e.approved)
+	if resp.GetResult() != pb.BaselineDigestComparison_BASELINE_DIGEST_COMPARISON_MATCH {
+		t.Fatalf("result = %v", resp.GetResult())
 	}
 	if fs := e.tamperFindings(t); len(fs) != 0 || containsKind(e.log.kinds(), "integrity_baseline_tamper") {
 		t.Fatalf("match opened a finding: %v %v", fs, e.log.kinds())
@@ -200,16 +197,16 @@ func TestRewrittenBaselineListIsTamper(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if resp.GetResult() != pb.BaselineDigestComparison_BASELINE_DIGEST_COMPARISON_MISMATCH ||
-				resp.GetFindingKind() != "integrity.baseline_tamper" {
-				t.Fatalf("result = %v %q", resp.GetResult(), resp.GetFindingKind())
+			if resp.GetResult() != pb.BaselineDigestComparison_BASELINE_DIGEST_COMPARISON_MISMATCH {
+				t.Fatalf("result = %v", resp.GetResult())
 			}
-			if resp.GetComputedDigest() == e.approved || resp.GetComputedDigest() != digestOfChunks(t, h, b) {
-				t.Fatalf("computed digest = %s", resp.GetComputedDigest())
+			computed := digestOfChunks(t, h, b)
+			if computed == e.approved {
+				t.Fatalf("rewrite kept the digest %s", computed)
 			}
 			fs := e.tamperFindings(t)
 			if len(fs) != 1 || fs[0].HostID != "web-1" || fs[0].ApprovedDigest != e.approved ||
-				fs[0].PresentedDigest != resp.GetComputedDigest() || fs[0].Count != 1 {
+				fs[0].PresentedDigest != computed || fs[0].Count != 1 {
 				t.Fatalf("findings = %+v", fs)
 			}
 			// No silent correction: the stored digest stays.
