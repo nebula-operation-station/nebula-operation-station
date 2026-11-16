@@ -29,6 +29,10 @@ func vendorFeed(eco string) (string, bool) {
 // product_version equal to the firmware decides. A firmware that only a
 // version range could cover, or that appears in contradicting status
 // lists, is a coverage gap, never fixed or not affected.
+//
+// Every advisory is judged on its own: an advisory that names the device's
+// model but neither lists its firmware nor is silent about it is a gap,
+// whatever other advisories say (ADR 0011 D4).
 func (m *matcher) device(s Subject) {
 	feed, ok := vendorFeed(s.Ecosystem)
 	if !ok {
@@ -50,45 +54,75 @@ func (m *matcher) device(s Subject) {
 		m.gap(s, "", "", GapFeedMissing)
 		return
 	}
-	keys := modelKeys(s.Device.Model)
-	var modelSeen, firmwareSeen bool
+	model := newDeviceModel(s.Device.Model)
+	var exactSeen, firmwareSeen bool
 	for _, d := range m.vendorDocs(feed) {
 		for _, v := range d.adv.Vulnerabilities {
-			hit := m.deviceVuln(s, feed, d.adv, d.byID, v, keys)
-			modelSeen = modelSeen || hit.model
+			hit := m.deviceVuln(s, feed, d, v, model)
+			exactSeen = exactSeen || hit.exact
 			firmwareSeen = firmwareSeen || hit.firmware
 		}
 	}
 	// A finding needs a unique hit on the model and on the firmware's train
 	// (ADR 0011 D4). Without a hit on both, coverage is unknown, never clean.
 	switch {
-	case !modelSeen:
+	case !exactSeen:
 		m.gap(s, s.Device.Model, "", GapDeviceModelUnknown)
 	case !firmwareSeen:
 		m.gap(s, s.Device.Model, "", GapDeviceVersionUnknown)
 	}
 }
 
-// deviceHit says which parts of one vulnerability's product lists match the
-// device: a product of its model (model) and an exact product version equal
-// to its firmware (firmware).
+// deviceHit says which products of one vulnerability name the device: the
+// exact model (exact), only its family (family), and an exact product
+// version equal to its firmware (firmware).
 type deviceHit struct {
-	model, firmware bool
+	exact, family, firmware bool
 }
 
-// modelKeys returns the token sequences by which a product names the
-// device's model: the whole model, and its family before the first "-" when
-// the family has a letter and a digit ("CBS350" for "CBS350-24P-4G"). A bare
-// word such as "PA" is no key: it would name every Palo Alto product.
-func modelKeys(model string) [][]string {
-	keys := [][]string{modelTokens(model)}
+// deviceModel is a device's model as token runs. exact is the whole model.
+// family is the model's family before the first "-" when the family has a
+// letter and a digit ("CBS350" for "CBS350-24P-4G"); it names sibling SKUs
+// and only ever leads to a coverage gap, never to a finding. A bare word
+// such as "PA" is no family: it would name every Palo Alto product.
+type deviceModel struct {
+	exact, family []string
+}
+
+// newDeviceModel tokenizes a device model once per device subject.
+func newDeviceModel(model string) deviceModel {
+	d := deviceModel{exact: modelTokens(model)}
 	if i := strings.IndexByte(model, '-'); i > 0 {
 		fam := model[:i]
 		if strings.IndexFunc(fam, unicode.IsDigit) >= 0 && strings.IndexFunc(fam, unicode.IsLetter) >= 0 {
-			keys = append(keys, modelTokens(fam))
+			d.family = modelTokens(fam)
 		}
 	}
-	return keys
+	return d
+}
+
+// modelNaming says how a product names a device's model.
+type modelNaming int
+
+const (
+	// namesNothing: the product names neither the model nor its family.
+	namesNothing modelNaming = iota
+	// namesFamily: the product names only the family, a sibling SKU.
+	namesFamily
+	// namesExact: the product names the device's whole model.
+	namesExact
+)
+
+// naming reports how a product, given as its name tokens, names the model.
+// The exact model wins over the family key.
+func (d deviceModel) naming(tokens []string) modelNaming {
+	switch {
+	case containsRun(tokens, d.exact):
+		return namesExact
+	case containsRun(tokens, d.family):
+		return namesFamily
+	}
+	return namesNothing
 }
 
 // modelTokens splits s into lower-case runs of letters and digits.
@@ -98,24 +132,27 @@ func modelTokens(s string) []string {
 	})
 }
 
-// namesModel reports whether text holds one of the model keys as whole
-// tokens, so "CBS35" never names "CBS350".
-func namesModel(text string, keys [][]string) bool {
-	tokens := modelTokens(text)
-	for _, k := range keys {
-		for i := 0; len(k) > 0 && i+len(k) <= len(tokens); i++ {
-			if slices.Equal(tokens[i:i+len(k)], k) {
-				return true
-			}
+// containsRun reports whether run occurs in tokens as whole tokens, so
+// "CBS35" never names "CBS350". An empty run names nothing.
+func containsRun(tokens, run []string) bool {
+	for i := 0; len(run) > 0 && i+len(run) <= len(tokens); i++ {
+		if slices.Equal(tokens[i:i+len(run)], run) {
+			return true
 		}
 	}
 	return false
 }
 
+// indexedProduct is a CSAF product with its name tokens, built once.
+type indexedProduct struct {
+	p      vulnfeed.CSAFProduct
+	tokens []string
+}
+
 // indexedAdvisory is a CSAF advisory with its products by ID.
 type indexedAdvisory struct {
 	adv  *vulnfeed.CSAFAdvisory
-	byID map[string]vulnfeed.CSAFProduct
+	byID map[string]indexedProduct
 }
 
 // vendorDocs returns the advisories of feed in (tracking ID, version)
@@ -131,9 +168,9 @@ func (m *matcher) vendorDocs(feed string) []indexedAdvisory {
 			continue
 		}
 		adv := &m.db.csaf[i].adv
-		byID := make(map[string]vulnfeed.CSAFProduct, len(adv.Products))
+		byID := make(map[string]indexedProduct, len(adv.Products))
 		for _, p := range adv.Products {
-			byID[p.ProductID] = p
+			byID[p.ProductID] = indexedProduct{p: p, tokens: modelTokens(p.Name + " " + p.Product)}
 		}
 		docs = append(docs, indexedAdvisory{adv: adv, byID: byID})
 	}
@@ -147,21 +184,32 @@ func (m *matcher) vendorDocs(feed string) []indexedAdvisory {
 	return docs
 }
 
-func (m *matcher) deviceVuln(s Subject, feed string, adv *vulnfeed.CSAFAdvisory, byID map[string]vulnfeed.CSAFProduct, v vulnfeed.CSAFVulnerability, keys [][]string) deviceHit {
+// deviceVuln judges one vulnerability of one advisory for the device. The
+// advisory's own products decide: a model hit without a firmware hit here is
+// a gap for this advisory, whatever other advisories list.
+func (m *matcher) deviceVuln(s Subject, feed string, d indexedAdvisory, v vulnfeed.CSAFVulnerability, model deviceModel) deviceHit {
 	fw := s.Device.Firmware
 	var affected []vulnfeed.CSAFProduct
 	var isFixed, isNotAffected, rangeSeen bool
 	var hit deviceHit
 	scan := func(ids []string, f func(p vulnfeed.CSAFProduct)) {
 		for _, id := range ids {
-			p, ok := byID[id]
-			// A product counts only when it is the device's ecosystem and
-			// names its model (ADR 0011 D4): firmware of another model is no
-			// hit.
-			if !ok || p.Ecosystem != s.Ecosystem || !namesModel(p.Name+" "+p.Product, keys) {
+			ip, ok := d.byID[id]
+			if !ok || ip.p.Ecosystem != s.Ecosystem {
 				continue
 			}
-			hit.model = true
+			// Only the exact model is a hit (ADR 0011 D4). A sibling SKU of
+			// the family never decides a finding or a clean status.
+			switch model.naming(ip.tokens) {
+			case namesFamily:
+				hit.family = true
+				continue
+			case namesExact:
+				hit.exact = true
+			default:
+				continue
+			}
+			p := ip.p
 			if p.Version == "" {
 				if p.VersionRange != "" {
 					rangeSeen = true
@@ -177,10 +225,16 @@ func (m *matcher) deviceVuln(s Subject, feed string, adv *vulnfeed.CSAFAdvisory,
 	scan(v.Affected, func(p vulnfeed.CSAFProduct) { affected = append(affected, p) })
 	scan(v.Fixed, func(vulnfeed.CSAFProduct) { isFixed = true })
 	scan(v.NotAffected, func(vulnfeed.CSAFProduct) { isNotAffected = true })
-	ids := []string{v.CVE, adv.TrackingID}
+	ids := []string{v.CVE, d.adv.TrackingID}
 	firstID := v.CVE
 	if firstID == "" {
-		firstID = adv.TrackingID
+		firstID = d.adv.TrackingID
+	}
+	switch {
+	case hit.family && !hit.exact:
+		m.gap(s, s.Device.Model, canonicalID(firstID), GapDeviceModelUnknown)
+	case hit.exact && !hit.firmware:
+		m.gap(s, s.Device.Model, canonicalID(firstID), GapDeviceVersionUnknown)
 	}
 	n := 0
 	for _, b := range []bool{len(affected) > 0, isFixed, isNotAffected} {
@@ -196,7 +250,7 @@ func (m *matcher) deviceVuln(s Subject, feed string, adv *vulnfeed.CSAFAdvisory,
 	case isNotAffected:
 		m.emitDevice(s, ids, vulnfinding.Fix{State: vulnfinding.FixNotAffected}, feed)
 	case len(affected) > 0:
-		m.emitDevice(s, ids, vendorFix(adv, byID, v, s.Ecosystem, affected, &m.feedCut), feed)
+		m.emitDevice(s, ids, vendorFix(d.byID, v, s.Ecosystem, affected, &m.feedCut), feed)
 	case rangeSeen:
 		m.gap(s, s.Device.Model, canonicalID(firstID), GapVendorRange)
 	}
@@ -207,7 +261,7 @@ func (m *matcher) deviceVuln(s Subject, feed string, adv *vulnfeed.CSAFAdvisory,
 // the single distinct exact fixed version of the same ecosystem and train.
 // None, several or an over-bound version give no_fix_yet; the matcher
 // never picks among fixed releases by ordering them.
-func vendorFix(adv *vulnfeed.CSAFAdvisory, byID map[string]vulnfeed.CSAFProduct, v vulnfeed.CSAFVulnerability, eco string, affected []vulnfeed.CSAFProduct, cut *int) vulnfinding.Fix {
+func vendorFix(byID map[string]indexedProduct, v vulnfeed.CSAFVulnerability, eco string, affected []vulnfeed.CSAFProduct, cut *int) vulnfinding.Fix {
 	trains := map[string]bool{}
 	for _, p := range affected {
 		if p.Train != "" {
@@ -216,9 +270,9 @@ func vendorFix(adv *vulnfeed.CSAFAdvisory, byID map[string]vulnfeed.CSAFProduct,
 	}
 	versions := map[string]bool{}
 	for _, id := range v.Fixed {
-		p, ok := byID[id]
-		if ok && p.Ecosystem == eco && p.Version != "" && trains[p.Train] {
-			versions[p.Version] = true
+		ip, ok := byID[id]
+		if ok && ip.p.Ecosystem == eco && ip.p.Version != "" && trains[ip.p.Train] {
+			versions[ip.p.Version] = true
 		}
 	}
 	if len(versions) != 1 {

@@ -26,8 +26,8 @@ func cbsFixtureAdvisory(cve string) vulnfeed.CSAFAdvisory {
 	return vulnfeed.CSAFAdvisory{
 		TrackingID: "cisco-sa-cbs-e2e", Version: "1.0",
 		Products: []vulnfeed.CSAFProduct{
-			devProduct("c1", "vendor:cisco:cbs", "CBS350-24P", "3.4.0.17", "3.4"),
-			devProduct("c2", "vendor:cisco:cbs", "CBS350-24P", "3.4.1.3", "3.4"),
+			devProduct("c1", "vendor:cisco:cbs", "CBS350-24P-4G", "3.4.0.17", "3.4"),
+			devProduct("c2", "vendor:cisco:cbs", "CBS350-24P-4G", "3.4.1.3", "3.4"),
 		},
 		Vulnerabilities: []vulnfeed.CSAFVulnerability{{CVE: cve, Affected: []string{"c1"}, Fixed: []string{"c2"}}},
 	}
