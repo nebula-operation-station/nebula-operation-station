@@ -73,6 +73,18 @@ type Service struct {
 	// builtinTrust is the local built-in trust transaction (ADR 0007, E19c);
 	// nil until SetBuiltinTrust wires it.
 	builtinTrust BuiltinTrust
+	// rootRotation is the local release root rotation admission (spec 10);
+	// nil until SetBuiltinTrust wires a transaction that provides it.
+	rootRotation RootRotation
+	// integrityRef is the admitted installed-files reference (ADR 0015
+	// D4 "Reference"); admitted when SetBuiltinTrust wires the store.
+	integrityRef integrityRefState
+	// integrityCheck is the periodic I1 check (ADR 0015 D4 "When");
+	// wired by SetIntegrityCheck.
+	integrityCheck integrityCheckState
+	// runningVersion overrides version.Version in tests; empty in
+	// production.
+	runningVersion string
 	// transport is the SSH client configuration (spec 08 defaults).
 	transport sshtransport.Config
 	// recovery limits wrong TOTP recovery codes.
@@ -191,8 +203,10 @@ func NewGRPCServer(svc *Service, policy *peercred.Policy, log *slog.Logger) *grp
 			log.Warn("audit", "kind", "connection_rejected", "uid", uid, "pid", pid)
 		}}),
 		grpc.MaxConcurrentStreams(MaxConcurrentStreams),
-		grpc.UnaryInterceptor(policy.UnaryInterceptor(denied)),
-		grpc.StreamInterceptor(policy.StreamInterceptor(denied)),
+		// The I1 lock (integrity_lock.go) is checked after the role check,
+		// so an unauthorized caller learns nothing about it.
+		grpc.ChainUnaryInterceptor(policy.UnaryInterceptor(denied), svc.integrityUnaryInterceptor),
+		grpc.ChainStreamInterceptor(policy.StreamInterceptor(denied), svc.integrityStreamInterceptor),
 		grpc.MaxRecvMsgSize(MaxMessageSize),
 		grpc.MaxSendMsgSize(MaxResponseSize),
 	)
@@ -302,6 +316,17 @@ func (s *Service) SubmitAssertion(_ context.Context, req *pb.SubmitAssertionRequ
 	}
 	if err := s.checkNotRecovering(); err != nil {
 		return nil, err
+	}
+	// A paired enrollment permit (ADR 0013 D4) is approved through the
+	// same RPC from the one-step approval page; the permit authority
+	// applies its checks (pending, approval window, standard mode, open
+	// privileged session, user-verified assertion over its own challenge).
+	if s.auth.IsPaired(d) {
+		pp, err := s.auth.SubmitPairedAssertion(d, req.GetAssertionJson())
+		if err != nil {
+			return nil, toStatus(err)
+		}
+		return &pb.SubmitAssertionResponse{State: stateToProto(pp.State)}, nil
 	}
 	p, err := s.auth.SubmitAssertion(d, req.GetAssertionJson(), int(req.GetTypedTargetCount()))
 	if err != nil {

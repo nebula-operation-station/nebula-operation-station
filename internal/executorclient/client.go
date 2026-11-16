@@ -883,6 +883,23 @@ func (c *Client) CommitPairedEnroll(ctx context.Context, in *pb.CommitPairedEnro
 	return resp, mapCallError(ctx, err)
 }
 
+// GetIntegrityStatus returns the executor's I1 status (read-only).
+func (c *Client) GetIntegrityStatus(ctx context.Context, in *pb.GetIntegrityStatusRequest, opts ...grpc.CallOption) (*pb.GetIntegrityStatusResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.GetIntegrityStatus(ctx, in, opts...)
+	return resp, mapCallError(ctx, err)
+}
+
+// AckIntegrityFinding is admin-only on the executor; the server role is
+// always refused. It exists so the client implements the interface.
+func (c *Client) AckIntegrityFinding(ctx context.Context, in *pb.AckIntegrityFindingRequest, opts ...grpc.CallOption) (*pb.AckIntegrityFindingResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.AckIntegrityFinding(ctx, in, opts...)
+	return resp, mapCallError(ctx, err)
+}
+
 // Compile-time check: the client must implement the generated interface so
 // that a generated-code change breaks the build here.
 var _ pb.ExecutorServiceClient = (*Client)(nil)

@@ -191,6 +191,9 @@ func run() error {
 	// Built-in trust (ADR 0007 E16): commits record exact artifact trust
 	// in executor.db, the same entries the risk policy reads.
 	setupBuiltinTrust(svc, *dataDir, *trustDir, *bundleDir, db, log)
+	// I1 check (ADR 0015 D4): against the reference just admitted, at
+	// start and every 60 minutes, in the background.
+	integrityLoop := setupIntegrityCheck(svc, *dataDir, integrityInstallRoot, log)
 	// Batch approval (ADR 0007 E19b): the batch RPCs, including the
 	// credential-version read the server binds into every plan, are served
 	// only with an authority wired.
@@ -220,6 +223,9 @@ func run() error {
 	// the task list with the read token while the vault is unlocked; a
 	// step is never redispatched.
 	go svc.ReconcilePVEMutations(ctx, reconcileInterval)
+	if integrityLoop != nil {
+		go integrityLoop(ctx)
+	}
 	go func() {
 		<-ctx.Done()
 		keys.Lock()

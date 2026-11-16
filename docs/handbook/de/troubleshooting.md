@@ -271,3 +271,67 @@ nach Prüfung des Hosts wieder freigeben. Bearbeiten Sie
 erneut aus. Fehlt die Datenbank, stellen Sie ein Backup wieder her
 (`sudo nebula restore`). Entfernen Sie die in der Meldung genannte
 Markierungsdatei nur, wenn Sie bewusst leer starten wollen.
+
+<a id="after-an-i1-integrity-alarm"></a>
+
+## Nach einem I1-Integritätsalarm
+
+**Symptom:** `nebula integrity status` zeigt einen offenen I1-Befund, oder
+`nebula unlock` wird abgelehnt.
+
+**Bedeutung:** NOS hat festgestellt, dass die eigenen Dateien auf der
+NOS-Maschine von der signierten Liste des installierten Releases abweichen,
+dass eine erfasste Datei fehlt oder dass ein nicht gelistetes
+`/usr/bin/nebula*`-Programm existiert. Eine geänderte oder fehlende
+NOS-Binärdatei, Systemd-Unit, eingebaute Modul-Datei oder ein Root-Schlüssel
+sowie ein nicht gelistetes Programm sperrt den Executor. Eine geänderte
+Web-Datei wird vom Server abgelehnt. Eine geänderte Konfigurationsdatei ist
+ein Befund ohne Sperre. Eine unvollständige Prüfung wird nie als sauber
+gemeldet.
+
+**Was gesperrt ist:** Solange ein sperrender Befund offen ist, lehnt der
+Executor `nebula unlock` sowie jede Mutation und jeden Read-Grant-Dispatch ab.
+
+**Was nicht passiert:** NOS löscht, stellt wieder her oder rollt keine Datei
+zurück. Die Sperre entzieht nur Berechtigungen. Die Dateien zu reparieren ist
+Ihre Aufgabe.
+
+**Lösung:**
+
+1. `nebula integrity status` zeigt die Sperre, den letzten Lauf und die
+   offenen Befunde mit ihren IDs.
+2. Offline prüfen, auf einer anderen Maschine oder von schreibgeschütztem
+   Boot-Medium, bei dem die NOS-Platte an anderer Stelle eingehängt ist, gegen
+   Release-Dateien, die Sie dort geholt und geprüft haben:
+
+   ```
+   nebula integrity verify --offline RELEASE-DIR --root MOUNT --version X.Y.Z --flavour FLAVOUR
+   ```
+
+   Beide Pfade müssen absolut sein. `--version` ist die Version, die diese
+   Maschine laufen soll. Exit-Status 0 bedeutet sauber, 5 bedeutet
+   Abweichungen gefunden, 6 bedeutet unvollständige Prüfung. Behandeln Sie
+   6 nie als sauber.
+   Verwenden Sie ein `nebula` von der anderen Maschine oder dem Boot-Medium,
+   aus den geprüften Release-Dateien, nie `MOUNT/usr/bin/nebula` oder ein
+   anderes Programm von der geprüften Platte: ein ersetztes Programm kann
+   „sauber“ melden.
+3. NOS aus dem Paket neu installieren oder ein neues signiertes Release
+   einspielen.
+4. Für jeden offenen Befund `nebula integrity ack FINDING` ausführen. Es
+   zeigt den Befund, fragt nach der Eingabe `yes` und quittiert nur diesen
+   einen Befund. Eine spätere Prüfung, die dieselbe Abweichung findet, sperrt
+   erneut. Solange andere sperrende Befunde offen sind, bleiben Entsperren und
+   Dispatch abgelehnt.
+
+**Grenze:** Der UI-Text lautet wörtlich: „NOS checks cannot detect a root
+compromise of the NOS machine; see ADR 0015“. Auf Deutsch: NOS-Prüfungen
+können eine Root-Kompromittierung der NOS-Maschine nicht erkennen; siehe
+ADR 0015. Die Entsperr-Sperre entzieht nur Berechtigungen; sie hilft nicht,
+wenn der Executor selbst die ersetzte Binärdatei ist. Nur die Offline-Prüfung
+in Schritt 2 hängt nicht von der Software auf der NOS-Maschine ab; deshalb ist
+sie die Prüfung, die nach jedem I1-Alarm laufen sollte.
+
+**Verteilung:** GitHub ist nur ein Verteilweg, nie ein Vertrauensanker.
+Release-Dateien werden erst vertraut, wenn `release-manifest.json.sig` gegen
+die in den NOS-Binärdateien eingebauten Root-Public-Keys geprüft ist.

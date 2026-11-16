@@ -495,6 +495,21 @@ service ExecutorService {
   // script bytes, no scanner excerpts, no paths. Grants nothing.
   rpc GetBuiltinTrustStatus(GetBuiltinTrustStatusRequest) returns (GetBuiltinTrustStatusResponse);
 
+  // Release root rotation (spec 10, root rotation and revocation). The
+  // executor reads root-rotation.json and its signature from the local
+  // rotation directory beside its configured release directory (the
+  // release directory itself holds exactly the bundle files); no request
+  // names a path or bytes. There is no server or browser rotation method.
+  // Role: admin only. Verifies the rotation against the executor's durable
+  // root state and returns the old and resulting roots with fingerprints.
+  // Commits nothing.
+  rpc ReviewRootRotation(ReviewRootRotationRequest) returns (ReviewRootRotationResponse);
+
+  // Role: admin only. Applies the reviewed rotation atomically to the
+  // durable root state, bound to the reviewed rotation digest and store
+  // generation. The admin UID comes from peer credentials.
+  rpc CommitRootRotation(CommitRootRotationRequest) returns (CommitRootRotationResponse);
+
   // Signed events (M10-1). Role: server, admin. Read-only: the chain of
   // the executor's audit events with the key to verify it.
   rpc ListEvents(ListEventsRequest) returns (ListEventsResponse);
@@ -665,6 +680,18 @@ service ExecutorService {
   // requires a device read lease. Until then every valid read answers
   // Unimplemented.
   rpc ReadNetDevice(ReadNetDeviceRequest) returns (ReadNetDeviceResponse);
+
+  // I1 integrity status (ADR 0015 D4, Q4; spec 06). Role: server, admin.
+  // Read-only: the latest check runs, the open locking findings and the
+  // fixed root-compromise note. Grants and clears nothing.
+  rpc GetIntegrityStatus(GetIntegrityStatusRequest) returns (GetIntegrityStatusResponse);
+
+  // `nebula integrity ack <finding>` (ADR 0015 D4, Q4; spec 06). Role:
+  // admin only; there is no server or browser path. Clears exactly the
+  // named open locking finding, audited with the admin UID from peer
+  // credentials. Deletes, restores and rolls back nothing; a later check
+  // that finds the same deviation opens it again.
+  rpc AckIntegrityFinding(AckIntegrityFindingRequest) returns (AckIntegrityFindingResponse);
 }
 
 enum RiskClass {
@@ -3265,6 +3292,53 @@ message GetBuiltinTrustStatusResponse {
   repeated BuiltinTrustEntry modules = 5;
 }
 
+// One release root as the review shows it: label, fingerprint and
+// lifecycle. No key material.
+message ReleaseRoot {
+  string id = 1;
+  // SHA256 fingerprint of the complete public-key blob.
+  string fingerprint = 2;
+  // The rotation sequence that enrolled it; 0 for a compiled anchor.
+  int64 added_sequence = 3;
+  // The rotation sequence that revoked it; 0 while active.
+  int64 revoked_sequence = 4;
+}
+
+message ReviewRootRotationRequest {}
+
+message ReviewRootRotationResponse {
+  // SHA-256 of the exact root-rotation.json bytes.
+  string rotation_digest = 1;
+  // The rotation's sequence and the durable sequence it follows.
+  int64 sequence = 2;
+  int64 current_sequence = 3;
+  // The currently trusted root that signed the rotation.
+  ReleaseRoot signed_by = 4;
+  // Every root ever enrolled before and after the rotation, sorted by ID.
+  repeated ReleaseRoot old_roots = 5;
+  repeated ReleaseRoot new_roots = 6;
+  // The roots the rotation adds and the root IDs it revokes.
+  repeated ReleaseRoot added = 7;
+  repeated string revoked = 8;
+  // The trust store generation the commit binds to.
+  int64 generation = 9;
+}
+
+message CommitRootRotationRequest {
+  // The reviewed rotation digest the admin confirmed.
+  string rotation_digest = 1;
+}
+
+message CommitRootRotationResponse {
+  string rotation_digest = 1;
+  int64 sequence = 2;
+  int64 generation = 3;
+  uint32 admin_uid = 4;
+  ReleaseRoot signed_by = 5;
+  // The roots after the rotation, sorted by ID.
+  repeated ReleaseRoot roots = 6;
+}
+
 // Private registries (ADR 0006, P1-32).
 
 enum PrivateRegistryAuthMode {
@@ -4063,4 +4137,88 @@ message NetDevRuleHitCount {
 
 message NetDevRuleHitCounts {
   repeated NetDevRuleHitCount entries = 1;
+}
+
+// I1 integrity status and ack (ADR 0015 D4, Q4).
+
+message GetIntegrityStatusRequest {}
+
+// One deviation of an I1 run; metadata only, never file content.
+message IntegrityDeviation {
+  // Listed path or unlisted /usr/bin name, escaped to printable ASCII.
+  string path = 1;
+  // ADR 0015 D4 class: binary, unit, module, root-key, web-asset, code.
+  string class = 2;
+  // different, missing, extra or unreadable.
+  string status = 3;
+  string reason = 4;
+  // This deviation opens the lock.
+  bool locks = 5;
+}
+
+// One stored I1 run.
+message IntegrityRun {
+  int64 started_unix = 1;
+  int64 finished_unix = 2;
+  // clean, deviations or incomplete; never clean when incomplete.
+  string state = 3;
+  bool complete = 4;
+  string incomplete = 5;
+  string release_version = 6;
+  string manifest_sha256 = 7;
+  int32 files = 8;
+  int32 different = 9;
+  int32 missing = 10;
+  int32 extra = 11;
+  int32 unreadable = 12;
+  int32 locking = 13;
+  repeated IntegrityDeviation deviations = 14;
+  int32 deviations_omitted = 15;
+}
+
+// One open locking finding. While any is open the executor refuses
+// unlock and all mutation and read-grant dispatch.
+message IntegrityFinding {
+  // Stable ID for `nebula integrity ack`.
+  string id = 1;
+  // deviation, deviations-omitted or state-unreadable.
+  string cause = 2;
+  // Empty unless cause is deviation.
+  string path = 3;
+  string class = 4;
+  string status = 5;
+  string reason = 6;
+  int64 first_seen_unix = 7;
+  int64 last_seen_unix = 8;
+  // Locking deviations folded into a deviations-omitted finding.
+  int32 count = 9;
+}
+
+message GetIntegrityStatusResponse {
+  // The periodic check is wired in this executor.
+  bool configured = 1;
+  bool running = 2;
+  uint64 total_runs = 3;
+  // The latest run; absent before the first.
+  IntegrityRun last_run = 4;
+  // The lock is open: unlock and dispatch are refused.
+  bool locked = 5;
+  int64 locked_since_unix = 6;
+  repeated IntegrityFinding findings = 7;
+  // "NOS checks cannot detect a root compromise of the NOS machine; see
+  // ADR 0015".
+  string note = 8;
+}
+
+message AckIntegrityFindingRequest {
+  // The exact finding ID from GetIntegrityStatus.
+  string finding_id = 1;
+}
+
+message AckIntegrityFindingResponse {
+  // The finding that was cleared.
+  IntegrityFinding finding = 1;
+  // Findings still open; the lock stays open while this is not zero.
+  int32 remaining = 2;
+  bool locked = 3;
 }

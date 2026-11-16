@@ -1,0 +1,4 @@
+# synthetic: documentation ranges only
+192.0.2.1
+not-an-address
+198.51.100.1

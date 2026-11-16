@@ -7,8 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
@@ -23,6 +26,32 @@ var (
 	subjectIDRe  = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 	digestRe     = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 	cursorRe     = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+	// deviceVendorRe, deviceModelRe, deviceMACRe and deviceFirmwareRe mirror
+	// the server's device patterns (vuln_export.go): a vendor slug, a model
+	// without dot or colon and not a hyphenated MAC, and a firmware version
+	// from the allowlist that starts with a digit. deviceUnknown is the
+	// server's placeholder for a value it does not export.
+	deviceVendorRe     = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+	deviceModelRe      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_+-]{0,63}$`)
+	deviceModelUpperRe = regexp.MustCompile(`[A-Z]`)
+	deviceDigitRe      = regexp.MustCompile(`[0-9]`)
+	deviceMACRe        = regexp.MustCompile(`^[0-9A-Fa-f]{2}(-[0-9A-Fa-f]{2}){5}$`)
+	deviceFirmwareRe   = regexp.MustCompile(`^[0-9][A-Za-z0-9.+~_-]{0,63}$`)
+	deviceDigitsRe     = regexp.MustCompile(`^[0-9]+$`)
+	// deviceMACQuadsRe and deviceMACPairsRe are a MAC as three four-digit or
+	// six two-digit groups; they mirror the server's exportMACQuadsRe and
+	// exportMACPairsRe and match the value after deviceSeparators.
+	deviceMACQuadsRe = regexp.MustCompile(`^[0-9A-Fa-f]{4}(\.[0-9A-Fa-f]{4}){2}$`)
+	deviceMACPairsRe = regexp.MustCompile(`^[0-9A-Fa-f]{2}(\.[0-9A-Fa-f]{2}){5}$`)
+	deviceBareMACRe  = regexp.MustCompile(`^[0-9A-Fa-f]{12}$`)
+	// deviceSeparators maps each firmware separator (". - _ + ~") to "." as
+	// the server's firmwareSeparators does.
+	deviceSeparators = strings.NewReplacer("-", ".", "_", ".", "+", ".", "~", ".")
+	// deviceFirmwareSepRe and deviceFirmwarePartRe mirror the server's
+	// per-part firmware grammar: a number with at most one letter suffix, or
+	// a version qualifier word with an optional number.
+	deviceFirmwareSepRe  = regexp.MustCompile(`[-+~_]`)
+	deviceFirmwarePartRe = regexp.MustCompile(`^(?:[0-9]+[a-z]?|(?:build|beta|alpha|rc|pre|h)[0-9]*)$`)
 )
 
 // ErrIncompleteExport: the export ended while a subject still lacked its
@@ -51,14 +80,32 @@ type Kernel struct {
 	SourceVersion string `json:"source_version,omitempty"`
 }
 
+// deviceUnknown is the placeholder the export states for a device value NOS
+// cannot vouch for (ADR 0011 D3).
+const deviceUnknown = "unknown"
+
+// Device is a network device's vendor, model and firmware version as the
+// export states them (ADR 0011 D3). A value NOS cannot vouch for is the
+// string "unknown".
+type Device struct {
+	Vendor          string `json:"vendor"`
+	Model           string `json:"model"`
+	FirmwareVersion string `json:"firmware_version"`
+}
+
+// MaxDeviceFieldBytes bounds each device value on an export page.
+const MaxDeviceFieldBytes = 128
+
 // SubjectPart is one part of a subject on an export page. A subject whose
 // components do not fit on one page continues on the next as its next
-// part; it is covered only after its LastPart.
+// part; it is covered only after its LastPart. A device subject carries
+// Device and no components or kernel.
 type SubjectPart struct {
 	Kind       vulnfinding.SubjectKind `json:"subject_kind"`
 	Ref        vulnfinding.SubjectRef  `json:"subject_ref"`
 	Ecosystem  string                  `json:"ecosystem,omitempty"`
 	Kernel     *Kernel                 `json:"running_kernel,omitempty"`
+	Device     *Device                 `json:"device,omitempty"`
 	Complete   bool                    `json:"complete"`
 	Part       int                     `json:"part"`
 	LastPart   bool                    `json:"last_part"`
@@ -244,8 +291,21 @@ func (st *exportState) part(s SubjectPart) error {
 		if s.Kernel != nil {
 			return fmt.Errorf("image with a running kernel: %w", ErrProtocol)
 		}
+	case vulnfinding.SubjectDevice:
+		// A device has no digest, kernel or packages (ADR 0011 D2, D3); its
+		// model and firmware version are its only components.
+		if s.Ref.ImageDigest != "" || s.Kernel != nil {
+			return fmt.Errorf("device with an image digest or a kernel: %w", ErrProtocol)
+		}
+		if err := checkDevice(s.Device, s.Complete); err != nil {
+			return err
+		}
+		limit = 0
 	default:
 		return fmt.Errorf("unknown subject kind: %w", ErrProtocol)
+	}
+	if s.Kind != vulnfinding.SubjectDevice && s.Device != nil {
+		return fmt.Errorf("%s subject with device data: %w", s.Kind, ErrProtocol)
 	}
 	if !subjectIDRe.MatchString(s.Ref.ID) {
 		return fmt.Errorf("malformed subject ID: %w", ErrProtocol)
@@ -296,8 +356,171 @@ func (st *exportState) part(s SubjectPart) error {
 	return nil
 }
 
+// checkDevice validates the device data of a device subject part. Each value
+// must match the server's pattern for its field (ADR 0011 D2/D3) or be the
+// server's "unknown" placeholder; a value outside the pattern never reaches
+// the matcher. The server marks a device complete only when it can vouch for
+// every value, so a complete part with an "unknown" value is refused.
+func checkDevice(d *Device, complete bool) error {
+	if d == nil {
+		return fmt.Errorf("device subject without device data: %w", ErrProtocol)
+	}
+	fields := []struct {
+		name, value string
+		ok          func(string) bool
+	}{
+		{"vendor", d.Vendor, deviceVendorOK},
+		{"model", d.Model, deviceModelOK},
+		{"firmware_version", d.FirmwareVersion, deviceFirmwareOK},
+	}
+	for _, f := range fields {
+		if f.value == "" || len(f.value) > MaxDeviceFieldBytes {
+			return fmt.Errorf("device %s empty or over %d bytes: %w", f.name, MaxDeviceFieldBytes, ErrProtocol)
+		}
+		if f.value == deviceUnknown {
+			if complete {
+				return fmt.Errorf("complete device with unknown %s: %w", f.name, ErrProtocol)
+			}
+			continue
+		}
+		if !f.ok(f.value) {
+			return fmt.Errorf("device %s outside the export pattern: %w", f.name, ErrProtocol)
+		}
+	}
+	return nil
+}
+
+// deviceModelOK mirrors the server's model check (modelCodeOK): the model
+// pattern, an upper-case letter and a digit, and not a hyphenated MAC.
+func deviceModelOK(v string) bool {
+	return deviceModelRe.MatchString(v) && deviceModelUpperRe.MatchString(v) && deviceDigitRe.MatchString(v) && !deviceMACRe.MatchString(v)
+}
+
+// deviceNonPublicIPv4 mirrors the server's nonPublicIPv4 ranges: the IPv4
+// ranges that netip does not flag and that are not public unicast.
+var deviceNonPublicIPv4 = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+}
+
+// deviceAddressOK reports whether v holds no non-public IPv4 address. It
+// mirrors the server's nonPublicIPv4Embedded: a dotted quad at any position,
+// after any prefix or separator, that forms a private, shared, loopback or
+// otherwise non-public address is refused; a quad from a public range passes.
+func deviceAddressOK(v string) bool {
+	for i := 0; i < len(v); i++ {
+		if !deviceIsDigit(v[i]) || (i > 0 && deviceIsDigit(v[i-1])) {
+			continue
+		}
+		if deviceNonPublicIPv4At(v, i) {
+			return false
+		}
+	}
+	return true
+}
+
+// deviceNonPublicIPv4At reports whether the four octets that start at v[i]
+// form a non-public IPv4 address. It mirrors the server's nonPublicIPv4At.
+func deviceNonPublicIPv4At(v string, i int) bool {
+	var b [4]byte
+	for k := range b {
+		end := i
+		for end < len(v) && deviceIsDigit(v[end]) {
+			end++
+		}
+		n, ok := deviceParseOctet(v[i:end])
+		if !ok || end == i {
+			return false
+		}
+		b[k] = n
+		if k < len(b)-1 {
+			if end >= len(v) || v[end] != '.' {
+				return false
+			}
+			end++
+		}
+		i = end
+	}
+	a := netip.AddrFrom4(b)
+	if !a.IsGlobalUnicast() || a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsMulticast() || a.IsUnspecified() {
+		return true
+	}
+	for _, p := range deviceNonPublicIPv4 {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
+}
+
+// deviceIsDigit reports whether c is a decimal digit.
+func deviceIsDigit(c byte) bool {
+	return c >= '0' && c <= '9'
+}
+
+// deviceParseOctet reads a decimal IPv4 octet with any leading zeros. It
+// reports false when the value is over 255.
+func deviceParseOctet(s string) (byte, bool) {
+	s = strings.TrimLeft(s, "0")
+	if s == "" {
+		return 0, true
+	}
+	if len(s) > 3 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n > 255 {
+		return 0, false
+	}
+	return byte(n), true
+}
+
+// deviceVendorOK mirrors the server's vendor rule (vendorOK): the slug pattern,
+// and one of the covered vendors. The slug pattern alone also matches a host
+// label.
+func deviceVendorOK(v string) bool {
+	return deviceVendorRe.MatchString(v) && (v == "cisco" || v == "paloalto")
+}
+
+// deviceFirmwareOK mirrors the server's firmware allowlist (deviceFirmwareOK in
+// vuln_export.go): the pattern, the first dot-separated label all digits, every
+// later label split at "-+~_" into parts that are numbers or version
+// qualifiers, none of the MAC forms in any separator mix, and no non-public
+// IPv4 address anywhere in the value.
+func deviceFirmwareOK(v string) bool {
+	if !deviceFirmwareRe.MatchString(v) {
+		return false
+	}
+	// n is v with every separator as "."; the MAC and address checks run on n.
+	n := deviceSeparators.Replace(v)
+	if deviceMACQuadsRe.MatchString(n) || deviceMACPairsRe.MatchString(n) || deviceBareMACRe.MatchString(n) {
+		return false
+	}
+	labels := strings.Split(v, ".")
+	if !deviceDigitsRe.MatchString(labels[0]) {
+		return false
+	}
+	for _, l := range labels[1:] {
+		for _, part := range deviceFirmwareSepRe.Split(l, -1) {
+			if !deviceFirmwarePartRe.MatchString(strings.ToLower(part)) {
+				return false
+			}
+		}
+	}
+	return deviceAddressOK(n)
+}
+
 func sameHead(a, b SubjectPart) bool {
 	if a.Ecosystem != b.Ecosystem || a.Complete != b.Complete || (a.Kernel == nil) != (b.Kernel == nil) {
+		return false
+	}
+	if (a.Device == nil) != (b.Device == nil) || (a.Device != nil && *a.Device != *b.Device) {
 		return false
 	}
 	return a.Kernel == nil || *a.Kernel == *b.Kernel

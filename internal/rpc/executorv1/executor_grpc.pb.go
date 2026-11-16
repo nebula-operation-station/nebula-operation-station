@@ -117,6 +117,8 @@ const (
 	ExecutorService_CommitBuiltinTrust_FullMethodName              = "/nebula.executor.v1.ExecutorService/CommitBuiltinTrust"
 	ExecutorService_UnpinBuiltinVersion_FullMethodName             = "/nebula.executor.v1.ExecutorService/UnpinBuiltinVersion"
 	ExecutorService_GetBuiltinTrustStatus_FullMethodName           = "/nebula.executor.v1.ExecutorService/GetBuiltinTrustStatus"
+	ExecutorService_ReviewRootRotation_FullMethodName              = "/nebula.executor.v1.ExecutorService/ReviewRootRotation"
+	ExecutorService_CommitRootRotation_FullMethodName              = "/nebula.executor.v1.ExecutorService/CommitRootRotation"
 	ExecutorService_ListEvents_FullMethodName                      = "/nebula.executor.v1.ExecutorService/ListEvents"
 	ExecutorService_BackupExecutor_FullMethodName                  = "/nebula.executor.v1.ExecutorService/BackupExecutor"
 	ExecutorService_ProbePVERemote_FullMethodName                  = "/nebula.executor.v1.ExecutorService/ProbePVERemote"
@@ -158,6 +160,8 @@ const (
 	ExecutorService_RemoveNetDevice_FullMethodName                 = "/nebula.executor.v1.ExecutorService/RemoveNetDevice"
 	ExecutorService_ListNetDevices_FullMethodName                  = "/nebula.executor.v1.ExecutorService/ListNetDevices"
 	ExecutorService_ReadNetDevice_FullMethodName                   = "/nebula.executor.v1.ExecutorService/ReadNetDevice"
+	ExecutorService_GetIntegrityStatus_FullMethodName              = "/nebula.executor.v1.ExecutorService/GetIntegrityStatus"
+	ExecutorService_AckIntegrityFinding_FullMethodName             = "/nebula.executor.v1.ExecutorService/AckIntegrityFinding"
 )
 
 // ExecutorServiceClient is the client API for ExecutorService service.
@@ -540,6 +544,19 @@ type ExecutorServiceClient interface {
 	// built-in versions are trusted and which are untrusted. No diffs, no
 	// script bytes, no scanner excerpts, no paths. Grants nothing.
 	GetBuiltinTrustStatus(ctx context.Context, in *GetBuiltinTrustStatusRequest, opts ...grpc.CallOption) (*GetBuiltinTrustStatusResponse, error)
+	// Release root rotation (spec 10, root rotation and revocation). The
+	// executor reads root-rotation.json and its signature from the local
+	// rotation directory beside its configured release directory (the
+	// release directory itself holds exactly the bundle files); no request
+	// names a path or bytes. There is no server or browser rotation method.
+	// Role: admin only. Verifies the rotation against the executor's durable
+	// root state and returns the old and resulting roots with fingerprints.
+	// Commits nothing.
+	ReviewRootRotation(ctx context.Context, in *ReviewRootRotationRequest, opts ...grpc.CallOption) (*ReviewRootRotationResponse, error)
+	// Role: admin only. Applies the reviewed rotation atomically to the
+	// durable root state, bound to the reviewed rotation digest and store
+	// generation. The admin UID comes from peer credentials.
+	CommitRootRotation(ctx context.Context, in *CommitRootRotationRequest, opts ...grpc.CallOption) (*CommitRootRotationResponse, error)
 	// Signed events (M10-1). Role: server, admin. Read-only: the chain of
 	// the executor's audit events with the key to verify it.
 	ListEvents(ctx context.Context, in *ListEventsRequest, opts ...grpc.CallOption) (*ListEventsResponse, error)
@@ -698,6 +715,16 @@ type ExecutorServiceClient interface {
 	// requires a device read lease. Until then every valid read answers
 	// Unimplemented.
 	ReadNetDevice(ctx context.Context, in *ReadNetDeviceRequest, opts ...grpc.CallOption) (*ReadNetDeviceResponse, error)
+	// I1 integrity status (ADR 0015 D4, Q4; spec 06). Role: server, admin.
+	// Read-only: the latest check runs, the open locking findings and the
+	// fixed root-compromise note. Grants and clears nothing.
+	GetIntegrityStatus(ctx context.Context, in *GetIntegrityStatusRequest, opts ...grpc.CallOption) (*GetIntegrityStatusResponse, error)
+	// `nebula integrity ack <finding>` (ADR 0015 D4, Q4; spec 06). Role:
+	// admin only; there is no server or browser path. Clears exactly the
+	// named open locking finding, audited with the admin UID from peer
+	// credentials. Deletes, restores and rolls back nothing; a later check
+	// that finds the same deviation opens it again.
+	AckIntegrityFinding(ctx context.Context, in *AckIntegrityFindingRequest, opts ...grpc.CallOption) (*AckIntegrityFindingResponse, error)
 }
 
 type executorServiceClient struct {
@@ -1668,6 +1695,26 @@ func (c *executorServiceClient) GetBuiltinTrustStatus(ctx context.Context, in *G
 	return out, nil
 }
 
+func (c *executorServiceClient) ReviewRootRotation(ctx context.Context, in *ReviewRootRotationRequest, opts ...grpc.CallOption) (*ReviewRootRotationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ReviewRootRotationResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ReviewRootRotation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) CommitRootRotation(ctx context.Context, in *CommitRootRotationRequest, opts ...grpc.CallOption) (*CommitRootRotationResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommitRootRotationResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_CommitRootRotation_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *executorServiceClient) ListEvents(ctx context.Context, in *ListEventsRequest, opts ...grpc.CallOption) (*ListEventsResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListEventsResponse)
@@ -2078,6 +2125,26 @@ func (c *executorServiceClient) ReadNetDevice(ctx context.Context, in *ReadNetDe
 	return out, nil
 }
 
+func (c *executorServiceClient) GetIntegrityStatus(ctx context.Context, in *GetIntegrityStatusRequest, opts ...grpc.CallOption) (*GetIntegrityStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(GetIntegrityStatusResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_GetIntegrityStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) AckIntegrityFinding(ctx context.Context, in *AckIntegrityFindingRequest, opts ...grpc.CallOption) (*AckIntegrityFindingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AckIntegrityFindingResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_AckIntegrityFinding_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExecutorServiceServer is the server API for ExecutorService service.
 // All implementations must embed UnimplementedExecutorServiceServer
 // for forward compatibility.
@@ -2458,6 +2525,19 @@ type ExecutorServiceServer interface {
 	// built-in versions are trusted and which are untrusted. No diffs, no
 	// script bytes, no scanner excerpts, no paths. Grants nothing.
 	GetBuiltinTrustStatus(context.Context, *GetBuiltinTrustStatusRequest) (*GetBuiltinTrustStatusResponse, error)
+	// Release root rotation (spec 10, root rotation and revocation). The
+	// executor reads root-rotation.json and its signature from the local
+	// rotation directory beside its configured release directory (the
+	// release directory itself holds exactly the bundle files); no request
+	// names a path or bytes. There is no server or browser rotation method.
+	// Role: admin only. Verifies the rotation against the executor's durable
+	// root state and returns the old and resulting roots with fingerprints.
+	// Commits nothing.
+	ReviewRootRotation(context.Context, *ReviewRootRotationRequest) (*ReviewRootRotationResponse, error)
+	// Role: admin only. Applies the reviewed rotation atomically to the
+	// durable root state, bound to the reviewed rotation digest and store
+	// generation. The admin UID comes from peer credentials.
+	CommitRootRotation(context.Context, *CommitRootRotationRequest) (*CommitRootRotationResponse, error)
 	// Signed events (M10-1). Role: server, admin. Read-only: the chain of
 	// the executor's audit events with the key to verify it.
 	ListEvents(context.Context, *ListEventsRequest) (*ListEventsResponse, error)
@@ -2616,6 +2696,16 @@ type ExecutorServiceServer interface {
 	// requires a device read lease. Until then every valid read answers
 	// Unimplemented.
 	ReadNetDevice(context.Context, *ReadNetDeviceRequest) (*ReadNetDeviceResponse, error)
+	// I1 integrity status (ADR 0015 D4, Q4; spec 06). Role: server, admin.
+	// Read-only: the latest check runs, the open locking findings and the
+	// fixed root-compromise note. Grants and clears nothing.
+	GetIntegrityStatus(context.Context, *GetIntegrityStatusRequest) (*GetIntegrityStatusResponse, error)
+	// `nebula integrity ack <finding>` (ADR 0015 D4, Q4; spec 06). Role:
+	// admin only; there is no server or browser path. Clears exactly the
+	// named open locking finding, audited with the admin UID from peer
+	// credentials. Deletes, restores and rolls back nothing; a later check
+	// that finds the same deviation opens it again.
+	AckIntegrityFinding(context.Context, *AckIntegrityFindingRequest) (*AckIntegrityFindingResponse, error)
 	mustEmbedUnimplementedExecutorServiceServer()
 }
 
@@ -2914,6 +3004,12 @@ func (UnimplementedExecutorServiceServer) UnpinBuiltinVersion(context.Context, *
 func (UnimplementedExecutorServiceServer) GetBuiltinTrustStatus(context.Context, *GetBuiltinTrustStatusRequest) (*GetBuiltinTrustStatusResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetBuiltinTrustStatus not implemented")
 }
+func (UnimplementedExecutorServiceServer) ReviewRootRotation(context.Context, *ReviewRootRotationRequest) (*ReviewRootRotationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ReviewRootRotation not implemented")
+}
+func (UnimplementedExecutorServiceServer) CommitRootRotation(context.Context, *CommitRootRotationRequest) (*CommitRootRotationResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CommitRootRotation not implemented")
+}
 func (UnimplementedExecutorServiceServer) ListEvents(context.Context, *ListEventsRequest) (*ListEventsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListEvents not implemented")
 }
@@ -3036,6 +3132,12 @@ func (UnimplementedExecutorServiceServer) ListNetDevices(context.Context, *ListN
 }
 func (UnimplementedExecutorServiceServer) ReadNetDevice(context.Context, *ReadNetDeviceRequest) (*ReadNetDeviceResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ReadNetDevice not implemented")
+}
+func (UnimplementedExecutorServiceServer) GetIntegrityStatus(context.Context, *GetIntegrityStatusRequest) (*GetIntegrityStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method GetIntegrityStatus not implemented")
+}
+func (UnimplementedExecutorServiceServer) AckIntegrityFinding(context.Context, *AckIntegrityFindingRequest) (*AckIntegrityFindingResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AckIntegrityFinding not implemented")
 }
 func (UnimplementedExecutorServiceServer) mustEmbedUnimplementedExecutorServiceServer() {}
 func (UnimplementedExecutorServiceServer) testEmbeddedByValue()                         {}
@@ -4786,6 +4888,42 @@ func _ExecutorService_GetBuiltinTrustStatus_Handler(srv interface{}, ctx context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_ReviewRootRotation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ReviewRootRotationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ReviewRootRotation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ReviewRootRotation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ReviewRootRotation(ctx, req.(*ReviewRootRotationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_CommitRootRotation_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CommitRootRotationRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).CommitRootRotation(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_CommitRootRotation_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).CommitRootRotation(ctx, req.(*CommitRootRotationRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ExecutorService_ListEvents_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListEventsRequest)
 	if err := dec(in); err != nil {
@@ -5524,6 +5662,42 @@ func _ExecutorService_ReadNetDevice_Handler(srv interface{}, ctx context.Context
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_GetIntegrityStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(GetIntegrityStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).GetIntegrityStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_GetIntegrityStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).GetIntegrityStatus(ctx, req.(*GetIntegrityStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_AckIntegrityFinding_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AckIntegrityFindingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).AckIntegrityFinding(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_AckIntegrityFinding_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).AckIntegrityFinding(ctx, req.(*AckIntegrityFindingRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ExecutorService_ServiceDesc is the grpc.ServiceDesc for ExecutorService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -5916,6 +6090,14 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _ExecutorService_GetBuiltinTrustStatus_Handler,
 		},
 		{
+			MethodName: "ReviewRootRotation",
+			Handler:    _ExecutorService_ReviewRootRotation_Handler,
+		},
+		{
+			MethodName: "CommitRootRotation",
+			Handler:    _ExecutorService_CommitRootRotation_Handler,
+		},
+		{
 			MethodName: "ListEvents",
 			Handler:    _ExecutorService_ListEvents_Handler,
 		},
@@ -6078,6 +6260,14 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ReadNetDevice",
 			Handler:    _ExecutorService_ReadNetDevice_Handler,
+		},
+		{
+			MethodName: "GetIntegrityStatus",
+			Handler:    _ExecutorService_GetIntegrityStatus_Handler,
+		},
+		{
+			MethodName: "AckIntegrityFinding",
+			Handler:    _ExecutorService_AckIntegrityFinding_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

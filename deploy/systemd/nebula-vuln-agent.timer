@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Runs nebula-vuln-agent.service every 6 hours (ADR 0011 Amendment 1, va08).
+# The random delay spreads the feed downloads, so many labs do not hit the
+# feed origins at the same minute; Persistent= catches up a run missed while
+# the host was down. Off by default: enable it once the agent has its NOS
+# token and URL (guide, "Vulnerability agent"):
+#   systemctl enable --now nebula-vuln-agent.timer
+[Unit]
+Description=Nebula Operation Station vulnerability agent: run every 6 hours
+
+[Timer]
+OnCalendar=*-*-* 00/6:00:00
+RandomizedDelaySec=1h
+Persistent=true
+Unit=nebula-vuln-agent.service
+
+[Install]
+WantedBy=timers.target

@@ -271,11 +271,7 @@ func TestInstalledFilesMarshalRejectsInvalidList(t *testing.T) {
 func signedRelease(t testing.TB, k *testSK, list []byte, edit func(man map[string]any)) (manifest, sig []byte) {
 	t.Helper()
 	man, _ := defaultRelease(t)
-	arts := man["artifacts"].([]any)
-	arts = append(arts, map[string]any{"name": InstalledFilesArtifact, "size": len(list), "sha256": hexSum(list)})
-	// Keep artifacts sorted: builtins.tar < installed-files.json < nebula-server_...
-	arts[1], arts[2] = arts[2], arts[1]
-	man["artifacts"] = arts
+	setInstalledFiles(t, man, list)
 	if edit != nil {
 		edit(man)
 	}
@@ -322,11 +318,22 @@ func TestVerifyInstalledFilesRejections(t *testing.T) {
 	badMan, badSig := signedRelease(t, k, badList, nil)
 
 	noListMan, _ := defaultRelease(t)
+	withoutArtifact(noListMan, InstalledFilesArtifact)
 	noList := canon(t, noListMan)
+
+	twoListsMan, _ := defaultRelease(t)
+	setInstalledFiles(t, twoListsMan, list)
+	twoLists := append(twoListsMan["artifacts"].([]any), twoListsMan["artifacts"].([]any)[1])
+	twoListsMan["artifacts"] = twoLists
+	twoListsRaw := canon(t, twoListsMan)
 
 	tampered := bytes.Replace(list, []byte(`"0755"`), []byte(`"4755"`), 1)
 	sizeMan, sizeSig := signedRelease(t, k, list, func(man map[string]any) {
 		man["artifacts"].([]any)[1].(map[string]any)["size"] = len(list) + 1
+	})
+	// The manifest's SHA-256 names other bytes than the list it arrives with.
+	shaMan, shaSig := signedRelease(t, k, list, func(man map[string]any) {
+		man["artifacts"].([]any)[1].(map[string]any)["sha256"] = hexSum(tampered)
 	})
 
 	_, plainPriv, err := genPlain(t)
@@ -344,7 +351,9 @@ func TestVerifyInstalledFilesRejections(t *testing.T) {
 	}{
 		{"list digest differs", state, man, sig, tampered, ErrInstalledFiles},
 		{"list size differs", state, sizeMan, sizeSig, list, ErrInstalledFiles},
-		{"list missing from manifest", state, noList, k.sign(t, noList), list, ErrInstalledFiles},
+		{"list missing from manifest", state, noList, k.sign(t, noList), list, ErrManifestInstalledFiles},
+		{"two lists in signed manifest", state, twoListsRaw, k.sign(t, twoListsRaw), list, ErrManifestInstalledFiles},
+		{"list digest differs from manifest", state, shaMan, shaSig, list, ErrInstalledFiles},
 		{"list of another manifest", state, wvMan, wvSig, list, ErrInstalledFiles},
 		{"malformed list covered by manifest", state, badMan, badSig, badList, ErrFormat},
 		{"empty list", state, man, sig, nil, ErrInstalledFiles},

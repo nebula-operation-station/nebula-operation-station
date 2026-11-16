@@ -550,6 +550,204 @@ verification. Nebula reads the key again before it pins it; the host's
 criticality stays. On the executor host the same is
 `nebula host unpin web-01`, then `nebula host pin` again.
 
+### 7.4 One-step enrollment from the web UI
+
+The dialog **Add host (one step)** (`/inventory/enroll/onestep`) enrolls a
+host without a separate `known_hosts` step. NOS creates a single-use offer
+that is valid for 15 minutes. You run one command on the new host; the
+script prints a pairing code, which you type into the dialog. The executor
+checks that the key the host presents matches the code, and you approve the
+pin with your security key. Sections 7.1 to 7.3 stay valid for hosts you
+enroll from the command line.
+
+**Status on this release.** The dialog works, but two things are not
+complete yet:
+
+- The command block downloads the script from `GET /enroll/<offer-id>`. The
+  route exists in the code, but `nebula-server` does not serve it yet. Until
+  it does, the command fails with an HTTP error on the host. Use **Download
+  in browser** (below) or `nebula host enroll-script` (section 7.1).
+- NetBird is not offered in the dialog. NetBird for one-step offers follows
+  with EN-12.
+
+**Before you start**
+
+- The executor needs at least one enrollment source address
+  (`-enroll-source`, the IP address or CIDR range the Nebula machine
+  connects from, the same value as `--from` in section 7.1). Without one,
+  the executor refuses to create offers.
+- Open a privileged session on the dashboard with your security key first.
+  The dialog says so when it is missing.
+- The host must be in the inventory without a pinned key. The **Host**
+  list shows only such hosts; otherwise add the host under **Inventory**.
+
+**The steps**
+
+1. Open **Add host (one step)**, pick the **Host**, and check the **SSH
+   user** (prefilled `nebula`) and **Credential** (prefilled
+   `nebula-default`). **Grant the user sudo without password** adds the
+   NOPASSWD sudo rule that section 7.1 describes; without it the user can
+   only run read-only actions, as with `--no-sudo` in section 7.1.
+2. Click **Create offer**. The offer page shows the command, the script's
+   SHA-256 and the time until which the offer is valid.
+3. On the host, run the command for your account (see below). The script
+   prints a pairing code.
+4. Type the code into **Pairing code** and choose the endpoint to probe.
+   Use one of the inventory endpoints, or the address the script printed.
+   Then click **Check code**.
+5. The approval page shows **Code matched**, the endpoint, the key type and
+   the full fingerprint. Compare the fingerprint with the host's own key
+   (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`, run on the host's
+   console), then **Approve with security key**. NOS pins the key, logs in
+   once to test it, and adds a new endpoint to the inventory host if you
+   entered one.
+6. If you stop before step 5, **Revoke offer** ends the offer.
+
+**The command the dialog shows**
+
+Paste the command into a POSIX shell (bash, dash or zsh; in fish, start
+`sh` first). Use the variant for your account:
+
+- **1. Run this on the host**, as a user with sudo (`sudo` variant):
+
+```
+( umask 077
+  for t in /dev/shm "${XDG_RUNTIME_DIR:-}" "${TMPDIR:-/tmp}"; do
+    [ -n "$t" ] && [ -d "$t" ] && [ -w "$t" ] && break; done
+  d=$(mktemp -d "$t/nos-enroll.XXXXXXXX") || exit 1
+  trap 'rm -rf "$d"' EXIT; trap 'exit 130' HUP INT TERM
+  cd "$d" &&
+  printf 'url = "https://<host>/enroll/%s"\noutput = "nos-enroll.sh"\n' \
+    '<offer-id>' |
+    curl --proto '=https' --tlsv1.2 -fsS -K - &&
+  echo '<sha256>  nos-enroll.sh' | sha256sum -c - &&
+  sudo sh nos-enroll.sh )
+```
+
+- **Logged in as root without sudo:** the same block, except that the last
+  line is `  sh nos-enroll.sh )`.
+
+The dialog fills in `<host>` (the host part of `public_origin`),
+`<offer-id>` and `<sha256>`. Do not edit the block. It runs in a private
+directory (`umask 077`, removed on exit or interrupt), downloads the script
+over HTTPS only, checks its SHA-256 and runs it only after the check passed.
+The offer ID goes to `curl` on standard input, not on the command line.
+
+**Show script** displays the script for review and does not use up the
+offer. The setup-key line, if any, reads `<netbird-setup-key-withheld>`.
+
+**Download in browser** is only for hosts that cannot reach NOS, such as a
+remote VPS when NOS is LAN-only. It uses up the offer. Copy the file to the
+host once (scp or paste), check it with `sha256sum nos-enroll.sh` against
+the SHA-256 shown on the offer page, and run it as root with
+`sh nos-enroll.sh`. The browser download is not offered for NetBird offers.
+Hosts that cannot reach NOS and need NetBird join NetBird by hand first;
+the NetBird section follows with EN-12.
+
+**Trust on first use**
+
+The pairing code is derived from the host key that the script reads on the
+host. A matching code shows that the key the executor sees is the key the
+script printed. It does not show that the code reached you unchanged, so
+read the code in a session you trust:
+
+- For a host on your own network, read the code on the host's console.
+- For an internet-facing or remote host, read the code on the provider's
+  web console, or over SSH with a `known_hosts` entry you verified. Do not
+  read it over a first SSH login whose host key you accepted without
+  checking.
+
+**Use `--cacert`, never `-k`**
+
+The dialog's command does not contain `-k`, and you must not add it. `-k`
+turns off certificate checks, so anyone on the path can serve the script.
+If the NOS origin uses a private CA, the download fails with a certificate
+error on the host. Then add the CA to the host's trust store, or, when you
+test the URL by hand, use `curl --cacert <ca.pem>`.
+
+**A code mismatch**
+
+If the key the host presents does not match the code, the offer fails at
+once and the endpoint is not pinned. The dialog shows:
+
+> The host at this endpoint presents a key that does not match the code from
+> the host. Either the endpoint is a different machine, or something is in
+> between. Check the endpoint, then create a new offer.
+
+One well-formed code submission is accepted per offer, and one mismatch ends
+the offer. A probe that fails to connect, for example an endpoint without an
+ed25519 key or a timeout, does not use up the submission; each offer allows
+5 probes. Three codes the executor rejects as malformed (for example a
+mistyped check character) end the offer as well. Create a new offer and run the script again: it is
+safe to run again and prints a new code.
+
+**Reverse proxy for `/enroll/`**
+
+The download route is unauthenticated, so it is the one path on the proxy
+that handles offer IDs. Give it its own location. A specific prefix wins
+over `location /` in section 4.
+
+The route sends these response headers on `200` and on every `404` (the
+`404` body is `not found`), so the proxy must pass them through unchanged:
+
+```
+Content-Type: text/plain; charset=utf-8
+Content-Disposition: attachment; filename="nebula-enroll.sh"
+Cache-Control: no-store
+X-Content-Type-Options: nosniff
+Content-Security-Policy: default-src 'none'; sandbox
+X-Accel-Buffering: no
+```
+
+The browser download of the dialog sends the same headers, with
+`filename="nos-enroll.sh"` in `Content-Disposition`.
+
+
+```
+location /enroll/ {
+    access_log off;                       # the path carries the offer ID
+    proxy_buffering off;                  # no buffering of the script to disk
+    proxy_max_temp_file_size 0;           # the same, if buffering is ever enabled
+    proxy_cache off;                      # never cache the script
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $remote_addr;   # overwrite, never append
+    proxy_pass http://127.0.0.1:8080;
+}
+```
+
+- **No access log for `/enroll/`.** An offer ID in a log is a capability
+  that someone can use. Keep the rule for error logs too: nginx writes the
+  request line into the error log for some errors, so do not raise the
+  error log to `debug`.
+- **`X-Forwarded-For` is overwritten by the proxy.** `$remote_addr` replaces
+  any value the client sent. Do not append to a client-supplied header.
+- **Trusted proxies.** On this release `nebula-server` has no setting for
+  trusted proxies, and it uses the TCP peer as the client address. Behind a
+  reverse proxy, all clients then share the proxy's address, and so one
+  download limit. A trusted-proxies setting follows with the route. When it
+  exists, list only single proxy addresses; a network may be listed only if
+  it contains no clients.
+
+For other proxies, apply the same four points (no access log for the path,
+no buffering to disk, no cache, `X-Forwarded-For` overwritten). This guide
+does not give Caddy directives yet; check them against your Caddy version.
+
+**Offers on the executor host**
+
+```
+nebula host offers                 # state, host, expiry, script SHA-256, download address
+nebula host offers --json          # the same as one JSON object
+nebula host offer-revoke OFFER     # OFFER: the hash from "host offers" (64 hex or a unique prefix of at least 8)
+```
+
+Both commands need the executor's admin UID. `offer-revoke` works in every
+state that is not final, including `awaiting_approval`. The list never shows
+an offer ID, salt, script or setup key.
+
+**NetBird:** the NetBird join for offers follows with EN-12. Until then,
+a host that must join NetBird joins by hand, with a setup key you create in
+NetBird.
+
 ## 8. Trusting actions, signers and modules
 
 The executor treats every script it does not know as at least HIGH. Trust
@@ -1797,6 +1995,254 @@ session only.
 
   The sweep runs every 15 minutes. Feed data itself is never stored in
   Nebula.
+
+### 10.5 Vulnerability agent
+
+`nebula-vuln-agent` replaces Hermes (ADR 0011 Amendment 1). It is a
+separate program that ships with this release. It downloads the
+vulnerability feeds, matches them against the inventory Nebula exports
+and uploads the findings through the API of section 10.4. If you enable
+it, it also asks an LLM in your lab for a short assessment of each
+finding. The protocol, the scopes and the rules of section 10.4 stay the
+same. Only the agent is new.
+
+What the agent holds: its NOS token, its feed snapshots and the record
+of its last run. If the LLM is enabled, it also holds the LLM's API key.
+It holds **no** SSH key, host credential, vault material or Nebula
+secret, and it never talks to the executor.
+
+#### Where it runs
+
+Run it on its own small VM, called **`nos-vuln`** in this guide (the
+name is only a convention; the addresses are yours). It needs no root
+and nothing from the Nebula machine except the API.
+
+Running it on the Nebula machine also works, but it is weaker. In that
+case it runs under its own user, and its unit hides `/var/lib/nebula`,
+`/etc/nebula` and `/run/nebula` from it. You must also apply the egress
+rules below to its user (`meta skuid nebula-vuln-agent` in nftables).
+
+#### Install
+
+The agent has its own Debian package, `nebula-vuln-agent`, built with
+the release like the collectors' package. `nebula-operation-station`
+does not contain it, and it contains nothing of the server or the
+executor. The APT repository of section 3.2 does not carry it yet, so
+copy `nebula-vuln-agent_<version>_<arch>.deb` from the release to
+`nos-vuln`, compare its SHA-256 with the release's checksums file, and
+install it:
+
+```
+sudo apt install ./nebula-vuln-agent_<version>_<arch>.deb
+```
+
+Its unit and timer go to `/lib/systemd/system`. Without Debian, copy the
+release tarball to `nos-vuln`, extract it, and run
+`sudo ./deploy/install.sh --vuln-agent` from the extracted directory.
+That command takes no other option, installs only the agent, and puts
+its unit and timer in `/etc/systemd/system`. Use one of the two ways,
+not both: units in `/etc/systemd/system` override the package's. On the
+Nebula machine either way runs next to the normal install.
+
+Both ways create this setup, and they enable or start nothing:
+
+| Path | Owner, mode | Content |
+| --- | --- | --- |
+| user `nebula-vuln-agent` | system user, no login, no extra group | runs the agent |
+| `/var/lib/nebula-vuln-agent` | `nebula-vuln-agent`, 0700 | feed snapshots, last run, run evidence; the only path the agent may write |
+| `/etc/nebula-vuln-agent` | `root:nebula-vuln-agent`, 0750 | configuration and secrets, read-only for the agent |
+| `/etc/nebula-vuln-agent/config.json` | `root:nebula-vuln-agent`, 0640 | written once from a skeleton, never overwritten |
+| `/etc/nebula-vuln-agent/token` | `nebula-vuln-agent`, 0600 | the NOS token; **you** create it |
+| `/usr/bin/nebula-vuln-agent` | root, 0755 | the agent |
+| `/lib/systemd/system/` (package) or `/etc/systemd/system/` (tarball) | root, 0644 | `nebula-vuln-agent.service`, `nebula-vuln-agent.timer` |
+
+The installer refuses a symlink or a file where one of these directories
+or the configuration belongs. The agent refuses a NOS token or LLM key
+file that is not a regular file or that its group or others can access
+in any way (only 0600 or 0400 is accepted).
+
+#### The token `vuln-agent`
+
+Create the token on the Nebula machine as in section 10.4, but name it
+`vuln-agent`, and give it the address of `nos-vuln` as its only
+`source_addresses` entry:
+
+```
+nebula-server -api-token vuln-agent:vuln.inventory.read,vuln.findings.write
+```
+
+```json
+{"name": "vuln-agent", "sha256": "<printed hash>",
+ "scopes": ["vuln.inventory.read", "vuln.findings.write"],
+ "source_addresses": ["<address of nos-vuln>"]}
+```
+
+If you are replacing a Hermes token (`hermes-vuln`), rename or replace it
+only while no run of that token is open (*Vulnerabilities* page, last
+run). Only one token may hold the vulnerability scopes.
+
+The agent connects only over `https`. If it reaches Nebula through the
+reverse proxy (section 4), Nebula sees the proxy's address, not the
+agent's (section 10.4). In that case, also restrict
+`/api/v1/vuln/` on the proxy to the address of `nos-vuln`.
+
+Put the token on `nos-vuln`. Paste it, then press Ctrl-D:
+
+```
+sudo sh -c 'umask 077; cat > /etc/nebula-vuln-agent/token'
+sudo chown nebula-vuln-agent:nebula-vuln-agent /etc/nebula-vuln-agent/token
+```
+
+#### Configuration
+
+`/etc/nebula-vuln-agent/config.json` is strict JSON; unknown keys are an
+error. The skeleton:
+
+```json
+{
+  "data_dir": "/var/lib/nebula-vuln-agent",
+  "nos": {
+    "url": "",
+    "token_file": "/etc/nebula-vuln-agent/token"
+  },
+  "llm": {
+    "enabled": false
+  }
+}
+```
+
+The agent refuses to run until you set `nos.url` to
+`https://<Nebula host>[:port]`, with no path. If Nebula's certificate
+comes from a lab CA, set `nos.ca_file` to that CA's PEM file. The agent
+then trusts only that CA for Nebula. Keep `data_dir` as it is: the unit
+lets the agent write nowhere else.
+
+#### LLM (optional)
+
+Without an LLM, the agent still finds, matches and uploads every
+finding. The findings just carry no assessment text. The LLM may change
+only that text and its hint flags. It never changes whether a finding
+exists, its fixed version, its scores or its state.
+
+You can set the LLM in the Nebula web UI (settings, "Vulnerability agent
+– LLM"; ADR 0011 A1.8). The agent fetches those settings with its token.
+Or you can set them in `llm` in `config.json`. Settings from the web UI
+win, unless their URL or model is empty.
+
+- **Only a model you run in your lab.** The endpoint must be an
+  OpenAI-compatible API, such as Ollama's `/v1`, on a host you control.
+  Never use a hosted model, and never a gateway that forwards to one: the
+  agent sends finding context (package names, versions, hosts) to it. The
+  agent refuses public addresses. `llm.allowed_networks` may add lab
+  subnets (loopback, RFC 1918, ULA or `100.64.0.0/10` only). Plain `http`
+  works only with `llm.allow_plain_http`, and never with an API key.
+- **API key** (if your endpoint needs one): put it in a file such as
+  `/etc/nebula-vuln-agent/llm.key`, owned by `nebula-vuln-agent`, mode
+  0600 (0400 also works; anything else is refused). Name that file in
+  `llm.api_key_file`. The key never leaves
+  `nos-vuln`, and Nebula never stores it.
+- **Context window.** The model's context (Ollama `num_ctx`) must be at
+  least `max_prompt_tokens + max_output_tokens + 4096`. With the
+  defaults (49,152 + 1,024 + 4,096) that is **54,272**; use 65,536, for
+  example. Set the same value as `llm.context_window`. The agent refuses
+  to start the assessor if `llm.context_window` is missing or too small.
+
+```json
+"llm": {
+  "enabled": true,
+  "base_url": "http://<LLM host>:11434/v1",
+  "model": "<model>",
+  "allow_plain_http": true,
+  "context_window": 65536
+}
+```
+
+(Plain `http`, as here, only works without an API key.)
+
+#### Egress
+
+The unit lets the agent open IPv4, IPv6 and Unix sockets and nothing
+else. Which hosts it may reach is decided by your firewall. The agent's
+own allowlist is only a second layer. Allow `nos-vuln` (or, when
+co-located, the agent's user) to reach exactly:
+
+| Destination | Port | Why |
+| --- | --- | --- |
+| `security-tracker.debian.org` | 443 | Debian security tracker |
+| `salsa.debian.org` | 443 | Debian DSA/DLA lists |
+| `osv-vulnerabilities.storage.googleapis.com` | 443 | OSV (Debian, Ubuntu, Alpine, Go) |
+| `nvd.nist.gov` | 443 | NVD CVSS |
+| `www.cisa.gov` | 443 | CISA KEV |
+| `epss.empiricalsecurity.com` | 443 | EPSS |
+| `www.cisco.com` | 443 | Cisco CSAF (only with `csaf` configured) |
+| `security.paloaltonetworks.com` | 443 | Palo Alto CSAF (only with `csaf` configured) |
+| the Nebula host (or its proxy) | as in `nos.url` | the API |
+| the LLM host | its port | only if the LLM is enabled |
+| your DNS resolver, NTP | 53, 123 | name resolution, a correct clock for TLS and feed dates |
+
+The feed list ships with the agent and cannot be extended in
+`config.json`. Do not put a proxy in between that terminates TLS. The
+agent ignores `HTTP_PROXY`-style variables for the LLM.
+
+#### Start and schedule
+
+Run the agent once by hand, and read its log:
+
+```
+sudo systemctl start nebula-vuln-agent.service
+journalctl -u nebula-vuln-agent.service -n 50
+```
+
+When that run looks right, enable the timer. It runs the agent every 6
+hours (00, 06, 12, 18 o'clock) with a random delay of up to one hour,
+and catches up on a run missed while the VM was down:
+
+```
+sudo systemctl enable --now nebula-vuln-agent.timer
+systemctl list-timers nebula-vuln-agent.timer
+```
+
+A run ends on its own phase limits (assessment at most 4 hours, upload
+1.5 hours) as a degraded run; one that hangs for 8 hours is stopped by
+systemd, and a timer slot that comes while a run is still active starts
+nothing. These exit codes leave
+the unit `failed` (`systemctl --failed`), so they also show in your
+monitoring:
+
+- 2: the configuration was refused. The log names the key.
+- 3: the run was degraded; the log says why.
+- 1: any other failure.
+
+**The unit's sandbox.** The unit runs with no capabilities, under
+`ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `PrivateDevices`,
+`NoNewPrivileges` and a system-call filter, like the collectors. It may
+write only `/var/lib/nebula-vuln-agent`. Edits to the unit are kept on
+upgrade (with a warning from `install.sh`). Put your own changes in a
+drop-in under `/etc/systemd/system/nebula-vuln-agent.service.d/`
+instead.
+
+**Upgrades**: install the new package with `apt install`, or run
+`install.sh --vuln-agent` from the new tarball. The tarball install
+replaces the binary and the units you have not edited. Nothing is
+restarted; the next timer run uses the new version. `config.json` and
+the token stay as they are.
+
+**Removing**: with the package, run `sudo apt remove nebula-vuln-agent`.
+Its prerm stops and disables the timer and the service first.
+`uninstall.sh` (section 16) does not know the agent yet. For a tarball
+install, run these commands by hand. The first one stops a run that is
+still active, so the binary and the unit are not deleted under it:
+
+```
+sudo systemctl disable --now nebula-vuln-agent.timer nebula-vuln-agent.service
+sudo rm /etc/systemd/system/nebula-vuln-agent.service \
+  /etc/systemd/system/nebula-vuln-agent.timer /usr/bin/nebula-vuln-agent
+sudo systemctl daemon-reload
+```
+
+Either way, then revoke the token on the Nebula machine (section 10.4).
+`/var/lib/nebula-vuln-agent`, `/etc/nebula-vuln-agent` and the user stay
+until you delete them.
 
 ## 11. Operating securely
 

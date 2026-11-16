@@ -152,7 +152,15 @@ func TestParseManifestRejects(t *testing.T) {
 		"size float":      func(m map[string]any) { art(m)["size"] = 1.5 },
 		"size string":     func(m map[string]any) { art(m)["size"] = "1" },
 		"artifact too big": func(m map[string]any) {
-			m["artifacts"].([]any)[1].(map[string]any)["size"] = int64(MaxArtifactSize) + 1
+			m["artifacts"] = append(m["artifacts"].([]any), map[string]any{"name": "payload.bin", "size": int64(MaxArtifactSize) + 1, "sha256": hexSum(nil)})
+		},
+		"no installed files": func(m map[string]any) { withoutArtifact(m, InstalledFilesArtifact) },
+		"two installed files": func(m map[string]any) {
+			a := m["artifacts"].([]any)
+			m["artifacts"] = []any{a[0], a[1], a[1], a[2]}
+		},
+		"installed files too big": func(m map[string]any) {
+			setArtifactSize(m, InstalledFilesArtifact, MaxInstalledFilesDocument+1)
 		},
 		"bundle too big":    func(m map[string]any) { art(m)["size"] = MaxBundle + 1 },
 		"sha upper":         func(m map[string]any) { art(m)["sha256"] = strings.ToUpper(hexSum(nil)) },
@@ -175,6 +183,54 @@ func TestParseManifestRejects(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A manifest must list exactly one installed-files.json (spec 10). The
+// rejection carries the ErrManifestInstalledFiles sentinel and ErrFormat.
+func TestParseManifestRequiresExactlyOneInstalledFiles(t *testing.T) {
+	cases := map[string]func(m map[string]any){
+		"no list": func(m map[string]any) { withoutArtifact(m, InstalledFilesArtifact) },
+		"two lists": func(m map[string]any) {
+			a := m["artifacts"].([]any)
+			m["artifacts"] = []any{a[0], a[1], a[1], a[2]}
+		},
+		// Sorts before builtins.tar, so sortedUnique rejects it too. The
+		// count check runs first and decides the error.
+		"name case": func(m map[string]any) {
+			setArtifactName(m, InstalledFilesArtifact, "Installed-Files.json")
+		},
+		// Sorts correctly (after builtins.tar, before the .deb), so the
+		// count check alone rejects it.
+		"name case, sorted": func(m map[string]any) {
+			setArtifactName(m, InstalledFilesArtifact, "installed-files.JSON")
+		},
+	}
+	for name, edit := range cases {
+		t.Run(name, func(t *testing.T) {
+			man, _ := defaultRelease(t)
+			edit(man)
+			_, err := ParseManifest(canon(t, man))
+			if !errors.Is(err, ErrManifestInstalledFiles) || !errors.Is(err, ErrFormat) {
+				t.Fatalf("err = %v, want ErrManifestInstalledFiles and ErrFormat", err)
+			}
+		})
+	}
+	t.Run("exactly one list", func(t *testing.T) {
+		man, _ := defaultRelease(t)
+		m, err := ParseManifest(canon(t, man))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var n int
+		for _, a := range m.Artifacts {
+			if a.Name == InstalledFilesArtifact {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Fatalf("parsed %d installed-files entries, want 1", n)
+		}
+	})
 }
 
 func TestParseManifestRejectsNoncanonicalBytes(t *testing.T) {
@@ -217,6 +273,8 @@ func TestDecodeCanonicalBoundsDepth(t *testing.T) {
 func FuzzParseManifest(f *testing.F) {
 	f.Add([]byte(`{"artifacts":[],"format":"nebula-release-v1","modules":[],"release_version":"1.0.0"}`))
 	f.Add([]byte(`{"a":[[[[[[`))
+	// Reaches the installed-files.json count check.
+	f.Add([]byte(`{"artifacts":[{"name":"builtins.tar","sha256":"0000000000000000000000000000000000000000000000000000000000000000","size":1},{"name":"installed-files.json","sha256":"0000000000000000000000000000000000000000000000000000000000000000","size":1}],"format":"nebula-release-v1","modules":[{"name":"docker","sha256":"0000000000000000000000000000000000000000000000000000000000000000","size":1,"version":"1.0.0"}],"release_version":"1.0.0"}`))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		_, _ = ParseManifest(b)
 	})
