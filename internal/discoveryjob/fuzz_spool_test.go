@@ -27,7 +27,9 @@ func FuzzDecodeResult(f *testing.F) {
 	f.Add([]byte(`{"format":"nebula-discovery-result-v1","job":"` + seedJobID + `","ok":true,"unknown":1}`))
 	f.Add([]byte(`{"format":"nebula-discovery-result-v1","job":"` + seedJobID + `","ok":true,` +
 		`"hosts":[{"address":"192.0.2.10"},{"address":"192.0.2.10","vendor":"x"},{"address":"2001:db8::1%eth0"}]}`))
-	f.Add([]byte(`{"format":"nebula-discovery-result-v1","job":"` + seedJobID + `","ok":false,"error":"a\u0007b​c",` +
+	// A control character (JSON escape) and a zero-width space (built in Go) in the error text.
+	f.Add([]byte(`{"format":"nebula-discovery-result-v1","job":"` + seedJobID + `","ok":false,"error":"a\u0007b` +
+		string(rune(0x200B)) + `c",` +
 		`"hosts":[{"address":"::ffff:198.51.100.7","hostname":"Ünter.example"}]}`))
 	f.Add([]byte(`{"format":"nebula-discovery-result-v1","job":"` + seedJobID + `","hosts":[{"address":"203.0.113.1",` +
 		`"ports":[{"port":0,"protocol":"tcp"},{"port":80,"protocol":"sctp"},{"port":80,"protocol":"tcp"},{"port":80,"protocol":"tcp"}]}]}`))
