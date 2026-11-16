@@ -437,7 +437,8 @@ does NOS connect **from** (`--from`)?
 
   | Program | Allowed forms | Why harmless |
   | --- | --- | --- |
-  | `ls`, `df`, `du`, `free`, `uptime`, `ps` | any options and operands | only stat files or read `/proc`; no option writes, deletes or runs anything |
+  | `ls`, `df`, `free`, `uptime`, `ps` | any options and operands | only stat files or read `/proc`; no option writes, deletes or runs anything |
+  | `du` | the size and display options (`-s`, `-h`, `-d`, `--max-depth`, …); not `--files0-from` or `-X`/`--exclude-from` | only stats files; those two options open a file |
   | `cat`, `head`, `tail`, `wc` | the display options (`-n`, `-c`, `-f`, `-l`, …; not `wc --files0-from`) | read their operands, write only to stdout |
   | `grep` | matching and output options, `-e`, `-m`, `-A`/`-B`/`-C`; not `-r`/`-R`, `-d`, `-D`, `-f` | reads its operands; recursion and device or pattern files are not harmless |
   | `ip` | `ip a`/`addr`/`address` and `ip r`/`ro`/`route`, alone or with `show`/`list` and filters; global options `-4`, `-6`, `-br`, `-brief`, `-c`, `-color`, `-j`, `-json`, `-p`, `-pretty`, `-s`, `-stats`, `-d`, `-details` | listing only; never `-b`/`-batch`, `-n`/`-netns`, `-force` or any other verb |

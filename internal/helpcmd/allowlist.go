@@ -287,9 +287,24 @@ var ipShow = argSpec{operands: true}
 
 // allowlist is the V6 allowlist of ADR 0014, keyed by the bare program name.
 var allowlist = map[string]allowRule{
-	"ls":     {why: "only stats files; no option writes, deletes or runs anything", spec: argSpec{anyArgs: true}},
-	"df":     {why: "only reads file system statistics; no option writes or runs anything", spec: argSpec{anyArgs: true}},
-	"du":     {why: "only stats files; no option writes, deletes or runs anything", spec: argSpec{anyArgs: true}},
+	"ls": {why: "only stats files; no option writes, deletes or runs anything", spec: argSpec{anyArgs: true}},
+	"df": {why: "only reads file system statistics; no option writes or runs anything", spec: argSpec{anyArgs: true}},
+	"du": {
+		why: "only stats files; not --files0-from or -X/--exclude-from, which open a file",
+		spec: argSpec{
+			shortFlags: "abcDhHklLmPsSx0",
+			shortValue: "dBt",
+			long: merge(
+				longs(longFlag, "--all", "--apparent-size", "--bytes", "--total",
+					"--dereference-args", "--human-readable", "--si", "--inodes",
+					"--dereference", "--count-links", "--no-dereference", "--null",
+					"--separate-dirs", "--summarize", "--one-file-system"),
+				longs(longValue, "--max-depth", "--block-size", "--threshold",
+					"--exclude", "--time-style"),
+				longs(longOptional, "--time")),
+			operands: true,
+		},
+	},
 	"free":   {why: "only reads /proc/meminfo; no option writes or runs anything", spec: argSpec{anyArgs: true}},
 	"uptime": {why: "only reads /proc; no option writes or runs anything", spec: argSpec{anyArgs: true}},
 	"ps":     {why: "only reads /proc; no option writes or runs anything", spec: argSpec{anyArgs: true}},
