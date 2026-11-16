@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -99,6 +100,33 @@ type Store struct {
 // unverified).
 func New(db *sql.DB, exec Registrar) *Store { return &Store{db: db, exec: exec, now: time.Now} }
 
+// countReader reads at most limit bytes from r and counts them. Once the
+// limit is reached it returns io.EOF and records that it cut the stream:
+// a stream cut at a block boundary otherwise looks like a clean end of the
+// archive.
+type countReader struct {
+	r      io.Reader
+	n      int64
+	limit  int64
+	capped bool
+}
+
+// Read reads from r, up to the limit, and adds the bytes read to n.
+func (c *countReader) Read(p []byte) (int, error) {
+	if c.n >= c.limit {
+		if len(p) > 0 {
+			c.capped = true
+		}
+		return 0, io.EOF
+	}
+	if rem := c.limit - c.n; int64(len(p)) > rem {
+		p = p[:rem]
+	}
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
 // unpack reads the archive into its files.
 func unpack(archive []byte) (map[string][]byte, error) {
 	if len(archive) == 0 || len(archive) > MaxArchive {
@@ -108,15 +136,20 @@ func unpack(archive []byte) (map[string][]byte, error) {
 	if err != nil {
 		return nil, refuse("not a .tar.gz archive")
 	}
-	tr := tar.NewReader(io.LimitReader(zr, MaxUnpacked+1))
+	// The bound applies to the tar stream, which holds headers and padding
+	// besides the content, so the content of a valid archive is a little
+	// less than MaxUnpacked. A stream cut at the bound is refused, not read
+	// as a clean end.
+	cr := &countReader{r: zr, limit: MaxUnpacked + 1}
+	tr := tar.NewReader(cr)
 	files := map[string][]byte{}
 	total, entries := 0, 0
 	for {
 		h, err := tr.Next()
-		if errors.Is(err, io.EOF) {
+		if errors.Is(err, io.EOF) && !cr.capped {
 			break
 		}
-		if err != nil {
+		if err != nil || cr.capped {
 			return nil, refuse("the archive is damaged or too large")
 		}
 		entries++
@@ -263,12 +296,19 @@ func (s *Store) verify(ctx context.Context, v *Version) error {
 	return nil
 }
 
+// clip returns s, checked by prelude.Clean and cut to at most maxDetail-60
+// bytes. The cut lands on a rune boundary, so the result stays valid UTF-8.
 func clip(s string) string {
 	if !prelude.Clean(s, false) {
 		return "(unprintable text)"
 	}
-	if len(s) > maxDetail-60 {
-		s = s[:maxDetail-60]
+	const limit = maxDetail - 60
+	if len(s) > limit {
+		n := limit
+		for n > 0 && !utf8.RuneStart(s[n]) {
+			n--
+		}
+		s = s[:n]
 	}
 	return s
 }
