@@ -10,20 +10,27 @@ import (
 )
 
 // maxAddressBytes bounds an accepted address: the longest IPv6 text with an
-// embedded IPv4 part is 45 bytes, plus "/128". The code has no named limit,
-// so this is derived from the net parser's grammar, not from the code.
+// embedded IPv4 part is 45 bytes, plus "/" and a prefix of at most three
+// digits (49 bytes). The code has no named limit, so this is derived from
+// the net parser's grammar, not from the code.
 const maxAddressBytes = 49
 
-var addressCharRe = regexp.MustCompile(`^[0-9A-Fa-f.:/]+$`)
+var (
+	addressCharRe = regexp.MustCompile(`^[0-9A-Fa-f.:/]+$`)
+	// prefixLenRe is the prefix length grammar of an accepted CIDR range:
+	// 0, or one to three digits without a leading zero.
+	prefixLenRe = regexp.MustCompile(`^(0|[1-9][0-9]{0,2})$`)
+)
 
 // FuzzValidAddress: an accepted address is only IP/CIDR text (no zone, no
-// space, no quote), and it is short enough for the parser's grammar.
+// space, no quote), it is short enough for the parser's grammar, and an
+// accepted prefix length has no leading zero and at most three digits.
 func FuzzValidAddress(f *testing.F) {
 	for _, s := range []string{
 		"10.0.0.1", "192.168.0.0/24", "2001:db8::10", "fd00:1:2::/64",
 		"fe80::1%eth0/64", "::ffff:255.255.255.255", "10.0.0.1 10.0.0.2",
 		"10.0.0.1\n", "10.0.0.0/33", "10.0.0.1'", `10.0.0.1"`, "$(id)",
-		"nebula.lan", "*", "", "10.0.0.1:22",
+		"nebula.lan", "*", "", "10.0.0.1:22", "10.0.0.0/0",
 	} {
 		f.Add(s)
 	}
@@ -39,6 +46,9 @@ func FuzzValidAddress(f *testing.F) {
 		}
 		if strings.TrimSpace(s) != s {
 			t.Fatalf("ValidAddress(%q) accepted surrounding space", s)
+		}
+		if i := strings.IndexByte(s, '/'); i >= 0 && !prefixLenRe.MatchString(s[i+1:]) {
+			t.Fatalf("ValidAddress(%q) accepted a prefix length with a leading zero or more than three digits", s)
 		}
 	})
 }
@@ -85,8 +95,10 @@ func FuzzValidators(f *testing.F) {
 
 // FuzzRenderCommand: on success Origin and the offer ID each appear exactly
 // once, and the origin has no quote, backslash, percent sign, dollar,
-// backtick or white space. On failure the output is empty, the error wraps
-// ErrInvalidOptions and it does not contain the offer ID. No shell runs.
+// backtick or white space. The offer ID occurs only inside its quotes and
+// inside the origin or hash text, never as a bare argument. On failure the
+// output is empty, the error wraps ErrInvalidOptions and it does not contain
+// the offer ID. No shell runs.
 func FuzzRenderCommand(f *testing.F) {
 	h := strings.Repeat("ab", 32)
 	for _, s := range []struct {
@@ -134,6 +146,13 @@ func FuzzRenderCommand(f *testing.F) {
 		if n := strings.Count(out, "'"+id+"'"); n != 1 {
 			t.Fatalf("quoted offer ID appears %d times in output", n)
 		}
+		// The ID is a run of A-Za-z0-9_- and so cannot match across the
+		// quotes, "https://", "/" or the hex hash around it: every other
+		// occurrence lies inside the origin or the hash. An unquoted copy
+		// in the argument list would make the count one higher.
+		if n, want := strings.Count(out, id), 1+strings.Count(origin, id)+strings.Count(hash, id); n != want {
+			t.Fatalf("offer ID appears %d times in output, want %d (one quoted, none bare)", n, want)
+		}
 		if n := strings.Count(out, "echo '"+hash+"  nos-enroll.sh'"); n != 1 {
 			t.Fatalf("quoted script hash line appears %d times in output", n)
 		}
@@ -143,6 +162,14 @@ func FuzzRenderCommand(f *testing.F) {
 // FuzzRender: with a fixed key, an accepted option set renders a script
 // within MaxScriptBytes that has exactly one from="..." line holding the
 // joined addresses, and a user line that carries the user unchanged.
+//
+// The oracle does not call Validate. On success it requires that the user
+// and key reference match their documented sets, that the user is not root,
+// that every address is IP/CIDR text, and that the script has exactly the
+// quote characters of a reference script rendered from safe values. The
+// three inputs are the only source of quotes beyond the fixed template, so
+// an input that broke out of its quoting would change the quote count, and
+// removing any validation makes one of the seeds below fail.
 func FuzzRender(f *testing.F) {
 	for _, s := range []struct {
 		from, user, ref string
@@ -158,9 +185,18 @@ func FuzzRender(f *testing.F) {
 		{"10.0.0.1", "root", "nebula-default", false},
 		{"10.0.0.1", "nebula", "a'b", false},
 		{"fe80::1%eth0", "nebula", "nebula-default", false},
+		{"10.0.0.1\n", "nebula", "nebula-default", true},
+		{"10.0.0.1", "nebula\n", "nebula-default", true},
+		{"10.0.0.1", "nebula", "nebula-default\n", true},
+		{"10.0.0.1", "$(id)", "nebula-default", false},
+		{"10.0.0.1", "a'b", "nebula-default", false},
+		{"10.0.0.1", "a\"b", "nebula-default", false},
+		{"10.0.0.1/000000024", "nebula", "nebula-default", false},
 	} {
 		f.Add(s.from, s.user, s.ref, s.sudo)
 	}
+	userSet := regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+	refSet := regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 	f.Fuzz(func(t *testing.T, from, user, ref string, sudo bool) {
 		o := Options{
 			From:   strings.Split(from, ","),
@@ -183,6 +219,29 @@ func FuzzRender(f *testing.F) {
 		if len(s) > MaxScriptBytes {
 			t.Fatalf("script has %d bytes, limit %d", len(s), MaxScriptBytes)
 		}
+
+		// Oracle, independent of Validate.
+		if !userSet.MatchString(user) || user == "root" {
+			t.Fatalf("accepted user %q is outside the documented set or root", user)
+		}
+		if !refSet.MatchString(ref) {
+			t.Fatalf("accepted key reference %q is outside the documented set", ref)
+		}
+		for _, a := range o.From {
+			if !addressCharRe.MatchString(a) || len(a) > maxAddressBytes {
+				t.Fatalf("accepted address %q is not IP/CIDR text of at most %d bytes", a, maxAddressBytes)
+			}
+		}
+		safe, err := Render(Options{From: []string{"10.0.0.1"}, User: "nebula", KeyRef: "nebula-default", Key: o.Key, Sudo: sudo})
+		if err != nil {
+			t.Fatalf("reference script: %v", err)
+		}
+		for _, q := range []string{"'", `"`} {
+			if got, want := strings.Count(s, q), strings.Count(string(safe), q); got != want {
+				t.Fatalf("script has %d %s characters, reference has %d: input changed the quoting", got, q, want)
+			}
+		}
+
 		line := `from="` + strings.Join(o.From, ",") + `",no-agent-forwarding`
 		if n := strings.Count(s, `from="`); n != 1 {
 			t.Fatalf("script has %d from=\"...\" lines, want 1", n)
@@ -192,6 +251,9 @@ func FuzzRender(f *testing.F) {
 		}
 		if n := strings.Count(s, "\nuser='"+user+"'\n"); n != 1 {
 			t.Fatalf("script has %d user lines for %q, want 1", n, user)
+		}
+		if n := strings.Count(s, " nebula-"+ref+"'\n"); n != 1 {
+			t.Fatalf("script has %d key lines for reference %q, want 1", n, ref)
 		}
 	})
 }
