@@ -15,6 +15,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protodesc"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/descriptorpb"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/fimbaseline"
@@ -237,7 +240,7 @@ func TestBaselineTamperIsHeldAndShownByExecutor(t *testing.T) {
 		t.Fatal(err)
 	}
 	fs := st.GetBaselineTamperFindings()
-	if len(fs) != 1 || fs[0].GetHostId() != "web-1" || fs[0].GetApprovedDigest() != e.approved ||
+	if len(fs) != 1 || fs[0].GetHostId() != "web-1" ||
 		fs[0].GetPresentedDigest() != digestOfChunks(t, h, b) || fs[0].GetCount() != 1 || fs[0].GetFirstSeenUnix() == 0 {
 		t.Fatalf("status findings = %v", fs)
 	}
@@ -526,5 +529,222 @@ func TestBaselineListCompareIsNotLocked(t *testing.T) {
 	locked, known := integrityLockedMethods[pb.ExecutorService_CompareBaselineList_FullMethodName]
 	if !known || locked {
 		t.Fatalf("CompareBaselineList lock classification = %v, %v; want known and not locked", locked, known)
+	}
+}
+
+// approvedDigestFieldViolations walks every message reachable from msg
+// and names each field that would carry an approved baseline digest: a
+// field whose name says "approved" and "digest", or any field naming
+// "approved" inside a baseline message or field (ND-21 4: the server role
+// sees no baseline; MEDIUM 1 of PR #579).
+func approvedDigestFieldViolations(msg protoreflect.MessageDescriptor) []string {
+	var out []string
+	seen := map[protoreflect.FullName]bool{}
+	var walk func(m protoreflect.MessageDescriptor, underBaseline bool)
+	walk = func(m protoreflect.MessageDescriptor, underBaseline bool) {
+		if seen[m.FullName()] {
+			return
+		}
+		seen[m.FullName()] = true
+		inBaseline := underBaseline || strings.Contains(strings.ToLower(string(m.Name())), "baseline")
+		fs := m.Fields()
+		for i := 0; i < fs.Len(); i++ {
+			f := fs.Get(i)
+			name := strings.ToLower(string(f.Name()))
+			fieldBaseline := inBaseline || strings.Contains(name, "baseline")
+			if strings.Contains(name, "approved") && (strings.Contains(name, "digest") || fieldBaseline) {
+				out = append(out, string(f.FullName()))
+			}
+			if f.Message() != nil {
+				walk(f.Message(), fieldBaseline)
+			}
+		}
+	}
+	walk(msg, false)
+	return out
+}
+
+// TestServerRoleMethodsRevealNoApprovedBaselineDigest pins MEDIUM 1 of PR
+// #579: no answer of any method the server role may call carries the
+// executor's approved baseline digest. GetIntegrityStatus shows the
+// executor-held tamper finding without it; the digest stays in the
+// executor database and its audit log.
+func TestServerRoleMethodsRevealNoApprovedBaselineDigest(t *testing.T) {
+	svc := pb.File_nebula_executor_v1_executor_proto.Services().ByName("ExecutorService")
+	prefix := "/" + string(svc.FullName()) + "/"
+	checked := 0
+	for method, roles := range MethodRoles() {
+		if !slicesContainsRole(roles, peercred.RoleServer) {
+			continue
+		}
+		m := svc.Methods().ByName(protoreflect.Name(strings.TrimPrefix(method, prefix)))
+		if m == nil {
+			t.Errorf("MethodRoles names %s, which the service does not have", method)
+			continue
+		}
+		checked++
+		for _, v := range approvedDigestFieldViolations(m.Output()) {
+			t.Errorf("%s answers the server role with %s", m.Name(), v)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no server-role method checked")
+	}
+	if !(&pb.BaselineTamperFinding{}).ProtoReflect().Descriptor().ReservedNames().Has("approved_digest") {
+		t.Error("BaselineTamperFinding must keep approved_digest reserved")
+	}
+}
+
+// TestApprovedDigestFieldViolationsCatchesTheField: the walker flags the
+// shape PR #579 shipped (a tamper finding with an approved digest nested in
+// a status answer), so the test above cannot pass vacuously.
+func TestApprovedDigestFieldViolationsCatchesTheField(t *testing.T) {
+	str := descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum()
+	msg := descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum()
+	opt := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum()
+	rep := descriptorpb.FieldDescriptorProto_LABEL_REPEATED.Enum()
+	cases := []struct{ name, list, field string }{
+		{"approved digest", "findings", "approved_digest"},
+		{"approved under a baseline field", "baseline_findings", "approved"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fd := &descriptorpb.FileDescriptorProto{
+				Name: proto.String("x/shape.proto"), Package: proto.String("x"), Syntax: proto.String("proto3"),
+				MessageType: []*descriptorpb.DescriptorProto{
+					{Name: proto.String("Status"), Field: []*descriptorpb.FieldDescriptorProto{
+						{Name: proto.String(c.list), Number: proto.Int32(1), Label: rep, Type: msg, TypeName: proto.String(".x.TamperFinding")},
+					}},
+					{Name: proto.String("TamperFinding"), Field: []*descriptorpb.FieldDescriptorProto{
+						{Name: proto.String("host_id"), Number: proto.Int32(1), Label: opt, Type: str},
+						{Name: proto.String(c.field), Number: proto.Int32(2), Label: opt, Type: str},
+					}},
+				},
+			}
+			f, err := protodesc.NewFile(fd, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := approvedDigestFieldViolations(f.Messages().ByName("Status")); len(got) != 1 {
+				t.Fatalf("violations = %v, want the %s field", got, c.field)
+			}
+		})
+	}
+}
+
+// TestServerStatusShowsTamperWithoutApprovedDigest is MEDIUM 1 end to end:
+// after a mismatch, the status read over the socket names the finding, but
+// its encoded answer does not contain the approved digest.
+func TestServerStatusShowsTamperWithoutApprovedDigest(t *testing.T) {
+	e := newBaselineEnv(t)
+	h, b := approvedList()
+	b = cloneChunks(b)
+	b[0].Entries[1].Size++
+	if _, err := e.stream(t, serverRole, append([]*pb.CompareBaselineListRequest{h}, b...)...); err != nil {
+		t.Fatal(err)
+	}
+	for _, roles := range [][]peercred.Role{serverRole, {peercred.RoleAdmin}} {
+		conn := integrityRPCConn(t, e.svc, roles...)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		st, err := pb.NewExecutorServiceClient(conn).GetIntegrityStatus(ctx, &pb.GetIntegrityStatusRequest{})
+		cancel()
+		if err != nil {
+			t.Fatalf("%v: %v", roles, err)
+		}
+		if fs := st.GetBaselineTamperFindings(); len(fs) != 1 || fs[0].GetHostId() != "web-1" {
+			t.Fatalf("%v: findings = %v", roles, fs)
+		}
+		raw, err := proto.Marshal(st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(raw, []byte(e.approved)) {
+			t.Fatalf("%v: GetIntegrityStatus carries the approved digest", roles)
+		}
+	}
+	// The executor still holds it.
+	if fs := e.tamperFindings(t); len(fs) != 1 || fs[0].ApprovedDigest != e.approved {
+		t.Fatalf("executor findings = %+v", fs)
+	}
+}
+
+// shortBaselineCompareTimeout lowers the executor-side comparison deadline
+// for one test.
+func shortBaselineCompareTimeout(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := baselineCompareTimeout
+	baselineCompareTimeout = d
+	t.Cleanup(func() { baselineCompareTimeout = old })
+}
+
+// TestStuckBaselineStreamReleasesCompareAfterDeadline is MEDIUM 2 of PR
+// #579: a caller that sends the header and part of the list and never
+// closes the stream holds the comparison at most until the executor's own
+// deadline; then its stream ends with DeadlineExceeded and later
+// comparisons of the server and the admin run again.
+func TestStuckBaselineStreamReleasesCompareAfterDeadline(t *testing.T) {
+	shortBaselineCompareTimeout(t, 300*time.Millisecond)
+	e := newBaselineEnv(t)
+	h, b := approvedList()
+
+	conn := integrityRPCConn(t, e.svc, serverRole...)
+	// The client allows far longer than the executor's deadline, so the
+	// end of the stream can only come from the executor.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	stuck, err := pb.NewExecutorServiceClient(conn).CompareBaselineList(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := stuck.Send(h); err != nil {
+		t.Fatal(err)
+	}
+	if err := stuck.Send(cloneChunks(b)[0]); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	var resp pb.CompareBaselineListResponse
+	err = stuck.RecvMsg(&resp) // no CloseSend: the caller never finishes
+	if status.Code(err) != codes.DeadlineExceeded || !strings.Contains(status.Convert(err).Message(), "executor deadline") {
+		t.Fatalf("stuck stream err = %v, want the executor's DeadlineExceeded", err)
+	}
+	if waited := time.Since(start); waited > 10*time.Second {
+		t.Fatalf("stuck stream ended after %v", waited)
+	}
+
+	for _, roles := range [][]peercred.Role{serverRole, {peercred.RoleAdmin}} {
+		resp, err := e.stream(t, roles, append([]*pb.CompareBaselineListRequest{h}, b...)...)
+		if err != nil {
+			t.Fatalf("%v after the deadline: %v", roles, err)
+		}
+		if resp.GetResult() != pb.BaselineDigestComparison_BASELINE_DIGEST_COMPARISON_MATCH {
+			t.Fatalf("%v after the deadline: result = %v", roles, resp.GetResult())
+		}
+	}
+	if fs := e.tamperFindings(t); len(fs) != 0 {
+		t.Fatalf("the cut-off list opened a finding: %+v", fs)
+	}
+	e.requireApproved(t)
+}
+
+// TestBaselineStreamWithoutHeaderHoldsNoLock: a caller that opens the
+// stream and sends nothing does not hold the comparison; the server and
+// the admin compare at once.
+func TestBaselineStreamWithoutHeaderHoldsNoLock(t *testing.T) {
+	e := newBaselineEnv(t)
+	conn := integrityRPCConn(t, e.svc, serverRole...)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	idle, err := pb.NewExecutorServiceClient(conn).CompareBaselineList(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = idle.CloseSend() }()
+	h, b := approvedList()
+	for _, roles := range [][]peercred.Role{serverRole, {peercred.RoleAdmin}} {
+		resp, err := e.stream(t, roles, append([]*pb.CompareBaselineListRequest{h}, b...)...)
+		if err != nil || resp.GetResult() != pb.BaselineDigestComparison_BASELINE_DIGEST_COMPARISON_MATCH {
+			t.Fatalf("%v while a stream waits for its header: %v, %v", roles, resp, err)
+		}
 	}
 }
