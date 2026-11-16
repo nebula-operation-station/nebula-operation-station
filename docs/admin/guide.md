@@ -104,6 +104,7 @@ Nebula needs no inbound port other than the one of your reverse proxy.
 | `nebula-server` | Webhook, ntfy, Telegram | HTTPS | Notifications, if configured |
 | `nebula-discovery` | Your known networks | ICMP, TCP, UDP (Nmap) | Discovery scans you queued |
 | Managed hosts | Package mirrors, container registries | HTTPS | Updates, image checks (from the hosts, not from Nebula) |
+| `nebula-executor` | Approved private container registries, their token realms and blob hosts | HTTPS | Only if you enable private registries (section 9.3): digest reads and image transfer with the vault credential |
 
 ### Managed hosts
 
@@ -1202,6 +1203,62 @@ also needs a fresh preview that shows the project exactly as the update
 left it. **Volume and database migrations are not undone** by an update
 or a rollback; back up data that a new version migrates. NOS deletes no
 retained image; remove them on the host when you no longer need them.
+
+**Private registries.** An image from a registry that needs credentials
+is never pulled by the host: the host gets no credential, no token, no
+`docker login` and no Docker configuration. Instead the executor reads
+the registry with the credential from its vault, and for an update it
+fetches the approved digest, verifies every manifest and layer, and
+streams the image over SSH into `docker load` on the host (threat model,
+"Private image transfer"). Enabling it takes four things:
+
+1. **The registry record.** The record names the HTTPS origin (for
+   example `https://registry.example.org`), the auth mode (`basic`, or
+   `token` with the token realm and service the registry's challenge
+   names), the repositories NOS may read (at most 64; nothing else is
+   ever requested), optionally a CA certificate, and whether the
+   registry is on a private network (RFC 1918 or ULA addresses are
+   refused otherwise; loopback and link-local always). It is an admin
+   action on the executor (`AddPrivateRegistry`, admin role only); the
+   server cannot add, change or read a credential. There is no `nebula`
+   command or web page for it yet.
+2. **The credential in the vault.** It is given with the record, needs an
+   initialised and unlocked vault (`nebula vault init`, section 3.5) and
+   an expiry, and is stored only in the
+   vault. Use a read-only (pull-only) account or token scoped to those
+   repositories. `RotatePrivateRegistryCredential` replaces it;
+   rotation, removal, expiry and a vault lock stop every read and
+   transfer that was bound to the old credential, and leases bound to it
+   must be proposed again. No page, result, log, audit line or backup
+   shows the user name or secret; the pages show only the credential's
+   identity, version and expiry.
+3. **A registry read lease.** *Operations → Read leases → New read
+   lease*, scope *Private registry*, proposes a lease for the registry's
+   approved repositories (7 days at most, on demand only, one read per
+   registry, repository, method and tag every 15 minutes, 24 reads per
+   registry and rolling hour by default). Approve it like any lease. It
+   binds the record digest and the credential identity and version, never
+   the credential. Without it, *Check image updates* keeps showing
+   private images as "unknown"; with it the operation page and the chart
+   show the digest the executor read.
+4. **Egress from the executor.** The executor, not the hosts, now needs
+   HTTPS to the registry origin, the token realm and any blob host the
+   registry redirects downloads to (see Network flows in section 2).
+   Allow exactly these from the Nebula machine. The executor spools one
+   layer at a time (at most 8 GiB) in its private `/tmp`, so keep that
+   much free disk.
+
+The target host needs the containerd image store of Docker (`docker info`
+lists `driver-type io.containerd.snapshotter.v1`). The classic image store
+records no repository digest after `docker load`, so NOS cannot check the
+loaded image there and refuses the member before any layer is fetched.
+
+**Current state:** the reads and the transfer are in the executor, but
+batch admission still refuses every member bound to a private registry,
+so the container update page keeps showing such images as "private
+image (not yet supported)". Setting up the record, credential, lease and
+egress now gives you the private digests in *Check image updates*;
+updates follow when a maintainer enables admission.
 
 ### 9.4 Read leases and scheduled checks
 
