@@ -4,9 +4,10 @@ package reputation
 
 import (
 	"errors"
-	"fmt"
+	"math"
 	"net/netip"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -361,7 +362,74 @@ func TestDroppedEntriesCarryReason(t *testing.T) {
 	if len(res.Dropped) != 2 {
 		t.Fatalf("dropped listed = %d, want 2", len(res.Dropped))
 	}
-	if s := fmt.Sprint(ReasonPrivate); s == "" {
-		t.Fatal("Reason has no text")
+}
+
+func TestReasonStringNames(t *testing.T) {
+	tests := []struct {
+		r    Reason
+		want string
+	}{
+		{ReasonNone, "none"},
+		{ReasonInvalid, "invalid"},
+		{ReasonTooBroad, "too-broad"},
+		{ReasonSpecial, "special"},
+		{ReasonPrivate, "private"},
+		{ReasonCGNAT, "cgnat"},
+		{ReasonDocumentation, "documentation"},
+		{ReasonReserved, "reserved"},
+		{ReasonOverlap, "overlap"},
+		{Reason(200), "none"},
+	}
+	for _, tt := range tests {
+		if got := tt.r.String(); got != tt.want {
+			t.Errorf("Reason(%d).String() = %q, want %q", uint8(tt.r), got, tt.want)
+		}
+	}
+}
+
+// TestDroppedInvalidCategoryIsSanitised: a dropped entry whose feed category
+// failed validation must not carry the raw label into the admin listing.
+// Without the fix the oversized, control-byte and non-UTF-8 labels come back
+// verbatim in Dropped[i].Entry.Category.
+func TestDroppedInvalidCategoryIsSanitised(t *testing.T) {
+	bad := []string{strings.Repeat("A", 1<<16), "bad\x00\x1b[2J", "caf\xc3\xa9", "UPPER", ""}
+	in := []Entry{{Prefix: pfx("10.0.0.0/24"), Category: "netblock"}}
+	for _, c := range bad {
+		in = append(in, Entry{Prefix: pfx("8.8.4.0/24"), Category: c})
+	}
+	res, err := Validate(in, Caps{PerFeed: 100, Total: 100}, noOverlap)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if len(res.Dropped) != len(in) {
+		t.Fatalf("dropped = %d, want %d", len(res.Dropped), len(in))
+	}
+	sawPrivate := false
+	for _, d := range res.Dropped {
+		switch d.Reason {
+		case ReasonInvalid:
+			if d.Entry.Category != "" {
+				t.Fatalf("invalid category kept in admin listing (len %d); must be empty", len(d.Entry.Category))
+			}
+		case ReasonPrivate:
+			sawPrivate = true
+			if d.Entry.Category != "netblock" {
+				t.Fatalf("valid category altered: %q", d.Entry.Category)
+			}
+		default:
+			t.Fatalf("unexpected reason %v", d.Reason)
+		}
+	}
+	if !sawPrivate {
+		t.Fatal("private drop missing from listing")
+	}
+}
+
+// TestCheckTotalSumOverflowRefused: two counts whose sum wraps past MaxInt
+// must still be refused. Without the fix the wrapped sum is -2 and passes.
+func TestCheckTotalSumOverflowRefused(t *testing.T) {
+	err := CheckTotal([]int{math.MaxInt, math.MaxInt}, Caps{PerFeed: 1, Total: 10})
+	if !errors.Is(err, ErrTotalCap) {
+		t.Fatalf("overflowing sum: %v, want ErrTotalCap", err)
 	}
 }

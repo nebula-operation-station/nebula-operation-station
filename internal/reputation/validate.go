@@ -68,7 +68,9 @@ type Entry struct {
 	Category string
 }
 
-// Dropped is a rejected entry with the reason, listed for the admin.
+// Dropped is a rejected entry with the reason, listed for the admin. Category
+// is empty when the feed label failed validation (ReasonInvalid), so no
+// untrusted label text reaches the listing.
 type Dropped struct {
 	Entry  Entry
 	Reason Reason
@@ -156,7 +158,13 @@ func Validate(entries []Entry, caps Caps, overlaps func(netip.Prefix) bool) (Res
 	for _, e := range entries {
 		r := classify(e, overlaps)
 		if r != ReasonNone {
-			res.Dropped = append(res.Dropped, Dropped{Entry: e, Reason: r})
+			d := Dropped{Entry: e, Reason: r}
+			if !validCategory(e.Category) {
+				// The raw label is untrusted (possibly oversized or not text), so
+				// the admin listing gets no category for it.
+				d.Entry.Category = ""
+			}
+			res.Dropped = append(res.Dropped, d)
 			res.Counts.add(r)
 			continue
 		}
@@ -181,15 +189,17 @@ func CheckTotal(keptPerFeed []int, caps Caps) error {
 	if caps.Total <= 0 {
 		return ErrInvalidCaps
 	}
+	// The running sum never exceeds caps.Total, so comparing n against the
+	// remaining room cannot overflow, even for very large counts.
 	sum := 0
 	for _, n := range keptPerFeed {
 		if n < 0 {
 			return fmt.Errorf("negative entry count %d: %w", n, ErrInvalidCaps)
 		}
+		if n > caps.Total-sum {
+			return fmt.Errorf("entries exceed cap %d: %w", caps.Total, ErrTotalCap)
+		}
 		sum += n
-	}
-	if sum > caps.Total {
-		return fmt.Errorf("%d entries, cap %d: %w", sum, caps.Total, ErrTotalCap)
 	}
 	return nil
 }
