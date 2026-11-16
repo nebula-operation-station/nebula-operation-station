@@ -88,8 +88,10 @@ hour passed.
 - `internal/web/ui/connections` renders the *Connections* tab of the host
   page (`/hosts/ID/connections`) and the asset page
   (`/network/a/ID/connections`): peer (linked when the peer is a managed
-  host or asset), direction, protocol and port, process name when known,
-  bytes in/out, first and last seen, source tier and the reporting host.
+  host or asset), direction, protocol and port, process name (always empty:
+  no process names are collected, see *Privacy* below; previously: "process
+  name when known"), bytes in/out, first and last seen, source tier and the
+  reporting host.
   Byte counts from socket snapshots are lower bounds and are marked as
   such; flows whose endpoints are not inventory nodes are counted as
   unmapped, not drawn.

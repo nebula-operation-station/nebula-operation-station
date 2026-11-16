@@ -96,13 +96,30 @@ A read grant document:
   `RunReadGrant`). Leases proposed from the Read leases page carry both
   (`internal/executions/readgrants_propose.go`), with `min_interval_s`
   fixed to `schedgrant.MinInterval` (15 minutes; the form has no interval
-  field) and durations of 7 or 30 days. The only `RunReadGrant` caller
-  today is the telemetry collector (`internal/pvecollect`, scheduled
-  history and the on-demand live view), and it skips `ordinary`-profile
-  leases; the server scheduler (`internal/executions/schedules.go`) runs
-  only legacy `read-schedule-v1` grants. Ordinary leases from the Read
-  leases page are therefore not run by anything yet. The trigger only
-  selects which runs are allowed; it grants no other rights. The "Refresh"
+  field) and durations of 7 or 30 days. Who runs ordinary leases:
+  `RunDueReadGrants` (`internal/executions/leaserunner.go`)
+  runs every approved ordinary-profile lease whose trigger is `scheduled` or
+  `both`. `RunSchedules` (`internal/executions/schedules.go`, started from
+  `cmd/nebula-server/main.go`) calls it on every tick, `scheduleTick` = one
+  minute, after the legacy `RunDueSchedules`. An action runs on a target again
+  only once `min_interval_s` has passed since its last stored run (leases from
+  the Read leases page: 15 minutes). A lease may start at most `run_budget`
+  runs per target in a rolling hour; the runs of all its actions on that
+  target count together. Only built-in actions that are read-only, not
+  durable, take no parameters and match the approved version and artifact are
+  run. A missed tick is not caught up: a run is due by interval, not by a
+  count of missed ticks. Telemetry and provider profiles are run by their
+  collectors, not by this loop (comment in `leaserunner.go`). This loop
+  starts no `on_demand`-only lease (its trigger filter in `ordinaryLeases`).
+  The executor re-checks expiry, revocation, lock, scope, credential version
+  and its durable budget on every run.
+  previously: "The only `RunReadGrant` caller today is the telemetry collector
+  (`internal/pvecollect`, scheduled history and the on-demand live view), and
+  it skips `ordinary`-profile leases; the server scheduler
+  (`internal/executions/schedules.go`) runs only legacy `read-schedule-v1`
+  grants. Ordinary leases from the Read leases page are therefore not run by
+  anything yet." (Superseded: `RunDueReadGrants` in `leaserunner.go` runs them.)
+  The trigger only selects which runs are allowed; it grants no other rights. The "Refresh"
   link on the Read leases page is unrelated: it is renewal, opening the
   new-lease form pre-filled with the lease's scope
   (`internal/web/ui/leases_new.go`), and never runs anything.
@@ -113,9 +130,11 @@ A read grant document:
 
 Approval is a user-verified WebAuthn assertion, or `nebula read-grant
 approve <digest>` in hardened mode (full 64-hex digest). The hardened
-proposal page currently prints `nebula lease approve <digest>`
-(`leaseCLICommand` in `internal/web/ui/leases_new.go`), a command the CLI
-does not have. Revoking needs no
+proposal page prints `nebula read-grant approve <digest>`
+(`leaseCLICommand` in `internal/web/ui/leases_new.go`, asserted in
+`leases_new_test.go`). previously: the page printed `nebula lease approve
+<digest>` (`leaseCLICommand`), a command the CLI does not have; corrected
+(Claude). Revoking needs no
 approval. While the executor is locked, read grants are paused (not
 deleted); unlocking resumes any still-valid grant, but elapsed time counts
 toward the expiry.

@@ -2,7 +2,8 @@
 
 Status: **in progress, 2026-11-12.** [ADR 0013](../adr/0013-one-step-enrollment.md)
 is Accepted (2026-11-11, previously Proposed) with the maintainer's decisions
-on Q1–Q9. Merged on `main`: EN-01 to EN-08, EN-10 (without NetBird) and EN-13,
+on Q1–Q9. Merged on `main`: EN-01 to EN-08, EN-10 (without NetBird; the dialog code is merged but not switched on in
+`nebula-server`, see the status table below) and EN-13,
 and EN-09 as a package that is not yet mounted (see the status table below).
 Open: EN-12, EN-14 and EN-15 part 2 (the NetBird parts), now reshaped by
 the ADR amendment of 2026-11-12 (no NetBird Management API; EN-11 dropped;
@@ -42,12 +43,13 @@ below are unchanged.)
 | EN-07 | Done | `internal/permit/` (paired, NetBird offer, NetBird peer delete), `internal/canonical/` |
 | EN-08 | Done for the offer RPCs; its NetBird acceptance points wait for EN-16e (previously "wait for EN-12") | `proto/`, `internal/executor/enroll_offer.go`, `enroll_pairing.go` |
 | EN-09 | Partly: the route package is merged, but nothing mounts it yet. No code on `main` imports `internal/web/enroll`, so `GET /enroll/<offer-id>` is not served by `nebula-server`, and the trusted-proxies resolver (`clientaddr.WarnListener`) is not called | `internal/web/enroll/enroll.go`, `internal/web/clientaddr/clientaddr.go` |
-| EN-10 | Partly: the dialog works without NetBird; the NetBird option and its approval wait for EN-16g (previously "wait for EN-12") | `internal/web/ui/enroll_onestep*.go`, `web/templates/enroll_onestep.html` |
+| EN-10 | Partly: the dialog and its tests exist on `main` and work without NetBird, but `nebula-server` does not switch them on. The dialog is enabled only if the executor client implements `ui.EnrollOffers` (`CreateEnrollOffer`, `ShowEnrollScript`, `DownloadEnrollScript`, `SubmitPairingCode`, `CommitPairedEnroll`). The client in `cmd/nebula-server/executor.go` (`lazyExecutor`) has none of these methods, so the dialog routes answer `404`. The NetBird option and its approval wait for EN-16g (previously: "the dialog works without NetBird; the NetBird option and its approval wait for EN-16g (previously "wait for EN-12")") | `internal/web/ui/enroll_onestep*.go`, `web/templates/enroll_onestep.html`; missing: `cmd/nebula-server/executor.go` |
 | EN-11 | Dropped 2026-11-12 (ADR 0013 amendment; previously "Open") | `internal/netbirdapi/` does not exist and will not be written |
 | EN-12 | Open, reshaped 2026-11-12 into EN-16b to EN-16h (see below; previously "Open") | no NetBird key handling in offers on `main` |
 | EN-13 | Done | `cmd/nebula/enroll_offers.go` (`nebula host offers`, `nebula host offer-revoke`) |
 | EN-14 | Open | no one-step acceptance tests in `test/security/` |
 | EN-15 | Part 1 in progress (`docs/admin/guide.md` §7); part 2 (NetBird section) open until EN-16g (previously "open with EN-12") | `docs/admin/guide.md` |
+| Wiring in `nebula-server` (open; not yet a ticket) | Open: the route `GET /enroll/<offer-id>` is not mounted (EN-09), and the executor client in `cmd/nebula-server/executor.go` has none of the offer methods that `ui.EnrollOffers` requires (EN-10), so the one-step dialog is not switched on there. The solution is not decided here. (Added 2026-11-16, Claude.) | `cmd/nebula-server/executor.go` (no offer methods), `internal/web/ui/enroll_onestep.go` (`EnrollOffers`), `internal/web/enroll/enroll.go` (not imported) |
 
 ## Rules every ticket keeps
 

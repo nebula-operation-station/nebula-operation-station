@@ -28754,12 +28754,15 @@ func (x *CompareBaselineListResponse) GetResult() BaselineDigestComparison {
 }
 
 // An executor-held I2 baseline digest mismatch of one host.
+// GetIntegrityStatus serves the server role too, so the finding never
+// carries the executor's approved digest (ND-21 4: the server sees no
+// baseline); that digest stays in the executor database and its
+// `integrity_baseline_tamper` audit event.
 type BaselineTamperFinding struct {
 	state  protoimpl.MessageState `protogen:"open.v1"`
 	HostId string                 `protobuf:"bytes,1,opt,name=host_id,json=hostId,proto3" json:"host_id,omitempty"`
-	// The executor's approved digest and the digest it recomputed from the
-	// server's list, both at the latest mismatch.
-	ApprovedDigest  string `protobuf:"bytes,2,opt,name=approved_digest,json=approvedDigest,proto3" json:"approved_digest,omitempty"`
+	// The digest the executor recomputed from the server's list at the
+	// latest mismatch.
 	PresentedDigest string `protobuf:"bytes,3,opt,name=presented_digest,json=presentedDigest,proto3" json:"presented_digest,omitempty"`
 	FirstSeenUnix   int64  `protobuf:"varint,4,opt,name=first_seen_unix,json=firstSeenUnix,proto3" json:"first_seen_unix,omitempty"`
 	LastSeenUnix    int64  `protobuf:"varint,5,opt,name=last_seen_unix,json=lastSeenUnix,proto3" json:"last_seen_unix,omitempty"`
@@ -28801,13 +28804,6 @@ func (*BaselineTamperFinding) Descriptor() ([]byte, []int) {
 func (x *BaselineTamperFinding) GetHostId() string {
 	if x != nil {
 		return x.HostId
-	}
-	return ""
-}
-
-func (x *BaselineTamperFinding) GetApprovedDigest() string {
-	if x != nil {
-		return x.ApprovedDigest
 	}
 	return ""
 }
@@ -30888,14 +30884,13 @@ const file_nebula_executor_v1_executor_proto_rawDesc = "" +
 	"\x04path\x18\x01 \x01(\fR\x04path\x12\x17\n" +
 	"\afs_type\x18\x02 \x01(\tR\x06fsType\"\x8e\x01\n" +
 	"\x1bCompareBaselineListResponse\x12D\n" +
-	"\x06result\x18\x01 \x01(\x0e2,.nebula.executor.v1.BaselineDigestComparisonR\x06resultJ\x04\b\x02\x10\x03J\x04\b\x03\x10\x04R\ffinding_kindR\x0fcomputed_digest\"\xe8\x01\n" +
+	"\x06result\x18\x01 \x01(\x0e2,.nebula.executor.v1.BaselineDigestComparisonR\x06resultJ\x04\b\x02\x10\x03J\x04\b\x03\x10\x04R\ffinding_kindR\x0fcomputed_digest\"\xd6\x01\n" +
 	"\x15BaselineTamperFinding\x12\x17\n" +
-	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12'\n" +
-	"\x0fapproved_digest\x18\x02 \x01(\tR\x0eapprovedDigest\x12)\n" +
+	"\ahost_id\x18\x01 \x01(\tR\x06hostId\x12)\n" +
 	"\x10presented_digest\x18\x03 \x01(\tR\x0fpresentedDigest\x12&\n" +
 	"\x0ffirst_seen_unix\x18\x04 \x01(\x03R\rfirstSeenUnix\x12$\n" +
 	"\x0elast_seen_unix\x18\x05 \x01(\x03R\flastSeenUnix\x12\x14\n" +
-	"\x05count\x18\x06 \x01(\x03R\x05count*\x80\x01\n" +
+	"\x05count\x18\x06 \x01(\x03R\x05countJ\x04\b\x02\x10\x03R\x0fapproved_digest*\x80\x01\n" +
 	"\tRiskClass\x12\x1a\n" +
 	"\x16RISK_CLASS_UNSPECIFIED\x10\x00\x12\x12\n" +
 	"\x0eRISK_CLASS_LOW\x10\x01\x12\x15\n" +

@@ -904,7 +904,10 @@ func (c *Client) AckIntegrityFinding(ctx context.Context, in *pb.AckIntegrityFin
 // list for one host to the executor, which recomputes its digest and
 // compares it with the executor-held approved digest (a mismatch is an
 // executor-held `integrity.baseline_tamper` finding). The stream lives as
-// long as ctx; the caller bounds it, since a list may be large.
+// long as ctx; the caller bounds it, since a list may be large. The
+// executor also ends a stream that is not complete within its own
+// deadline (DeadlineExceeded), so a stalled caller cannot hold the
+// comparison.
 func (c *Client) CompareBaselineList(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[pb.CompareBaselineListRequest, pb.CompareBaselineListResponse], error) {
 	st, err := c.rpc.CompareBaselineList(ctx, opts...)
 	return st, mapCallError(ctx, err)
