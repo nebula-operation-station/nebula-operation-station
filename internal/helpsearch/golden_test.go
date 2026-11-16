@@ -77,8 +77,72 @@ var handbookGolden = []goldenQuery{
 	{q: "find a free IP address", want: []string{"network#find-a-free-ip-address"}},
 }
 
+// setupGolden are general set-up questions that contain a verb the
+// synonym table maps ("einrichten", "set up") but are about another
+// topic than enrolling a host. They guard against query drift: the
+// expansion must not pull them onto the enrollment sections. Unlike
+// the other golden sets, want lists the acceptable sections (handbook
+// and admin guide cover the same task): at least one must rank in the
+// top 3, and no enrollment section may rank first
+// (TestSetupQuestionsDoNotDriftToEnrollment).
+var setupGolden = []goldenQuery{
+	{q: "Backup einrichten", want: backupSetup},
+	{q: "how do I set up a backup", want: backupSetup},
+	{q: "Zeitplan für Checks einrichten", want: scheduleSetup},
+	{q: "set up a schedule for read-only checks", want: scheduleSetup},
+	{q: "Benachrichtigungen einrichten", want: notificationSetup},
+	{q: "set up notifications", want: notificationSetup},
+}
+
+var (
+	// admin guide 12.1 "Set up once" is merged into the chapter chunk.
+	backupSetup = []string{
+		"backup-restore#create-the-backup-key-once",
+		"backup-restore#back-up-nebula",
+		adminGuideSlug + "#12-backup-and-restore",
+	}
+	scheduleSetup = []string{
+		"patching-and-services#run-read-only-checks-on-a-schedule-read-lease",
+		adminGuideSlug + "#94-read-leases-and-scheduled-checks",
+		adminGuideSlug + "#94-read-leases-and-scheduled-checks#p1",
+		adminGuideSlug + "#94-read-leases-and-scheduled-checks#p2",
+	}
+	notificationSetup = []string{
+		adminGuideSlug + "#101-notifications",
+		"vulnerabilities#get-notified-about-kev-and-critical-findings",
+	}
+)
+
+// enrollmentSections are the sections about enrolling a host.
+var enrollmentSections = []string{
+	"hosts#run-the-enrollment-script-on-a-new-host",
+	adminGuideSlug + "#71-the-enrollment-script",
+	adminGuideSlug + "#74-one-step-enrollment-from-the-web-ui",
+	"hosts#enroll-a-host-reachable-over-a-vpn-netbird-wireguard-tailscale",
+	"faq#is-there-a-one-step-enrollment",
+}
+
 func allGolden() []goldenQuery {
 	return slices.Concat(as04Golden, handbookGolden)
+}
+
+// checkSetup returns a reason why g fails the set-up check, or "".
+func checkSetup(t *testing.T, s *Index, g goldenQuery) string {
+	t.Helper()
+	hits, err := s.Search(g.q)
+	if err != nil {
+		t.Fatalf("Search(%q): %v", g.q, err)
+	}
+	got := ids(hits)
+	if len(got) > 0 && slices.Contains(enrollmentSections, got[0]) {
+		return "enrollment section " + got[0] + " ranks first; ranking " + strings.Join(got, " ")
+	}
+	for _, id := range got[:min(3, len(got))] {
+		if slices.Contains(g.want, id) {
+			return ""
+		}
+	}
+	return "none of " + strings.Join(g.want, " ") + " in top 3; ranking " + strings.Join(got, " ")
 }
 
 func ids(hits []Hit) []string {
@@ -141,6 +205,19 @@ func TestGoldenHandbookQueriesRankExpectedSectionInTop3(t *testing.T) {
 	}
 }
 
+// TestSetupQuestionsDoNotDriftToEnrollment is the regression test for
+// the "einrichten" row that mapped only to enrollment vocabulary: a
+// general set-up question about backup, schedules or notifications
+// must find its topic, not the enrollment sections.
+func TestSetupQuestionsDoNotDriftToEnrollment(t *testing.T) {
+	s := New(corpus(t))
+	for _, g := range setupGolden {
+		if why := checkSetup(t, s, g); why != "" {
+			t.Errorf("Search(%q): %s", g.q, why)
+		}
+	}
+}
+
 // TestGoldenStableAroundParameters guards against parameters that pass
 // the golden set only at one point: every golden query must also pass
 // with each parameter moved to its neighbours.
@@ -167,6 +244,11 @@ func TestGoldenStableAroundParameters(t *testing.T) {
 	set("title", fieldTitle, []float64{5, 8}, []float64{0.3, 0.75})
 	set("path", fieldPath, []float64{0.5, 2}, []float64{0, 0.6})
 	set("body", fieldBody, nil, []float64{0.6, 0.8})
+	for _, w := range []float64{0.35, 0.7} {
+		p := defaultParams
+		p.synWeight = w
+		variants["synWeight="+ftoa(w)] = p
+	}
 	names := make([]string, 0, len(variants))
 	for n := range variants {
 		names = append(names, n)
@@ -177,6 +259,11 @@ func TestGoldenStableAroundParameters(t *testing.T) {
 		for _, g := range allGolden() {
 			if missing := checkTop3(t, s, g); len(missing) > 0 {
 				t.Errorf("%s: Search(%q): %v not in top 3", n, g.q, missing)
+			}
+		}
+		for _, g := range setupGolden {
+			if why := checkSetup(t, s, g); why != "" {
+				t.Errorf("%s: Search(%q): %s", n, g.q, why)
 			}
 		}
 	}
@@ -195,7 +282,7 @@ func baselineIndex(ix *helpdocs.Index) *Index {
 		c.Text = "\n" + c.Text
 		flat.Chunks = append(flat.Chunks, c)
 	}
-	return newWithParams(flat, params{k1: 1.2, weight: [numFields]float64{0, 0, 1}, b: [numFields]float64{0, 0, 0.75}})
+	return newWithParams(flat, params{k1: 1.2, weight: [numFields]float64{0, 0, 1}, b: [numFields]float64{0, 0, 0.75}, synWeight: 1})
 }
 
 // TestGoldenRankingTable logs the top k before (plain BM25) and after

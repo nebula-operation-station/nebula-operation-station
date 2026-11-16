@@ -18,8 +18,12 @@ type synonym struct {
 // English wordings that the docs spell differently. Rows name general
 // vocabulary, never a single section or test question.
 var synonyms = []synonym{
-	{From: []string{"einrichten", "einrichtung", "anbinden", "aufnehmen"}, To: []string{"enroll", "enroll-script", "setup"},
-		Why: "Setting up a host for Nebula is called enrolling it in the docs; the command is `nebula host enroll-script`."},
+	{From: []string{"einrichten", "einrichtung", "konfigurieren", "konfiguration"}, To: []string{"setup", "set", "configure", "configuration", "enroll"},
+		Why: "General German for set up and configure. The docs write \"set up\", \"setup\" and \"configure\" for backups, schedules and notifications, and \"enroll\" for setting up a host; all are one down-weighted group, so the topic word of the question decides which applies."},
+	{From: []string{"anbinden", "aufnehmen"}, To: []string{"add", "enroll"},
+		Why: "Taking a host into the lab (\"Host anbinden/aufnehmen\") is adding or enrolling it in the docs."},
+	{From: []string{"benachrichtigung", "benachrichtigungen", "benachrichtigen"}, To: []string{"notification", "notify", "notified"},
+		Why: "German for notification and notify."},
 	{From: []string{"enroll", "enrol", "onboard", "onboarding"}, To: []string{"enroll-script"},
 		Why: "Enrolling a host is done with the `enroll-script` command; questions name the verb, sections name the command."},
 	{From: []string{"verbindung", "verbinden", "connection", "connect"}, To: []string{"connect", "login", "ssh"},

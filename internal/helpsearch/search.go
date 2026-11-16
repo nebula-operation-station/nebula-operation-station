@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/netip"
 	"slices"
 	"strings"
 	"unicode/utf8"
@@ -44,7 +45,11 @@ const (
 // its edge: every golden query also passes with any single parameter
 // moved to its neighbour values (TestGoldenStableAroundParameters).
 // The sweep that found the region: k1 3–5, titleWeight 5–8, titleB
-// 0.3–0.75, pathWeight 0.5–2 and bodyB 0.6–0.8 all pass.
+// 0.3–0.75, pathWeight 0.5–2 and bodyB 0.6–0.8 all pass. This is no
+// held-out evaluation: the set is small and was seen while tuning. The
+// six set-up questions (setupGolden) were added afterwards as a drift
+// check and pass in the same neighbourhood, synWeight 0.35–0.7
+// included.
 const (
 	// k1 is the saturation of the weighted term frequency. It is
 	// higher than the BM25 textbook 1.2 because the field weights
@@ -78,6 +83,14 @@ const (
 	// 0.75: a long body mentioning a word once is less about it than a
 	// short one. The heading path is not part of the body length.
 	bodyB = 0.75
+	// synWeight scales one synonym group (all targets added for one
+	// question token, scored as a single pseudo term). Below 1 so a
+	// word the user wrote counts more than vocabulary added for it: an
+	// English question is not pulled off topic by its own expansions,
+	// and in a mixed question the matching own word dominates. A German
+	// question whose words only match through synonyms is scaled
+	// uniformly, so its ranking does not change.
+	synWeight = 0.5
 )
 
 // Sentinel errors. Callers branch on them with errors.Is.
@@ -104,16 +117,18 @@ const (
 
 // params are the scoring parameters of an Index.
 type params struct {
-	k1     float64
-	weight [numFields]float64
-	b      [numFields]float64
+	k1        float64
+	weight    [numFields]float64
+	b         [numFields]float64
+	synWeight float64
 }
 
 // defaultParams are the documented constants above.
 var defaultParams = params{
-	k1:     k1,
-	weight: [numFields]float64{titleWeight, pathWeight, bodyWeight},
-	b:      [numFields]float64{titleB, pathB, bodyB},
+	k1:        k1,
+	weight:    [numFields]float64{titleWeight, pathWeight, bodyWeight},
+	b:         [numFields]float64{titleB, pathB, bodyB},
+	synWeight: synWeight,
 }
 
 // doc is one indexed chunk.
@@ -213,37 +228,27 @@ func atxHeading(line string) bool {
 // scores are ordered by chunk ID. Chunks matching no query term are
 // not returned.
 func (s *Index) Search(q string) ([]Hit, error) {
-	qt, err := queryTerms(q)
+	qr, err := parseQuery(q)
 	if err != nil {
 		return nil, err
 	}
-	n := float64(len(s.docs))
+	gw := make([]float64, len(qr.groups))
+	for i, g := range qr.groups {
+		gw[i] = s.groupWeight(g)
+	}
 	hits := make([]Hit, 0, len(s.docs))
 	for i := range s.docs {
 		d := &s.docs[i]
 		score := 0.0
-		for _, t := range qt {
-			df := s.df[t]
-			if df == 0 {
-				continue
+		for _, t := range qr.terms {
+			score += s.altScore(d, alt{whole: t})
+		}
+		for gi, g := range qr.groups {
+			best := 0.0
+			for _, a := range g.alts {
+				best = max(best, s.altScore(d, a))
 			}
-			w := 0.0
-			for f := range numFields {
-				tf := d.tf[f][t]
-				if tf == 0 {
-					continue
-				}
-				norm := 1 - s.p.b[f]
-				if s.avgLen[f] > 0 {
-					norm += s.p.b[f] * float64(d.len[f]) / s.avgLen[f]
-				}
-				w += s.p.weight[f] * float64(tf) / norm
-			}
-			if w == 0 {
-				continue
-			}
-			idf := math.Log(1 + (n-float64(df)+0.5)/(float64(df)+0.5))
-			score += idf * w / (s.p.k1 + w)
+			score += gw[gi] * best
 		}
 		if score > 0 {
 			hits = append(hits, Hit{Chunk: d.chunk, Score: score})
@@ -261,6 +266,93 @@ func (s *Index) Search(q string) ([]Hit, error) {
 	return limit(hits), nil
 }
 
+// groupWeight is the weight of a synonym group: synWeight when a
+// question word it was added for occurs in the corpus, so the user's
+// own word dominates its expansion; 1 when none does (a German word
+// against the English docs, an address literal), because then the
+// group is the only form in which that word can match: it is a
+// translation, not an addition.
+func (s *Index) groupWeight(g group) float64 {
+	for _, t := range g.own {
+		if s.df[t] > 0 {
+			return s.p.synWeight
+		}
+	}
+	return 1
+}
+
+// altScore is the BM25F score of d for one term or synonym target:
+// per field the occurrences are weighted and length-normalised, summed,
+// and saturated once with k1. A synonym group scores as the best of
+// its targets (a disjunction maximum), so a row adds at most as much
+// as one term, however many targets it lists.
+func (s *Index) altScore(d *doc, a alt) float64 {
+	df := s.altDF(a)
+	if df == 0 {
+		return 0
+	}
+	w := 0.0
+	for f := range numFields {
+		tf := a.tf(d.tf[f])
+		if tf == 0 {
+			continue
+		}
+		norm := 1 - s.p.b[f]
+		if s.avgLen[f] > 0 {
+			norm += s.p.b[f] * float64(d.len[f]) / s.avgLen[f]
+		}
+		w += s.p.weight[f] * float64(tf) / norm
+	}
+	if w == 0 {
+		return 0
+	}
+	n := float64(len(s.docs))
+	idf := math.Log(1 + (n-float64(df)+0.5)/(float64(df)+0.5))
+	return idf * w / (s.p.k1 + w)
+}
+
+// alt is one alternative of a query concept. A joined synonym target
+// ("enroll-script") keeps its parts: it matches the whole token, or
+// all its parts together in the same field ("The enrollment script"),
+// but never one part alone, so "enroll-script" does not turn every
+// mention of "script" into evidence.
+type alt struct {
+	whole string
+	parts []string
+}
+
+// tf is the frequency of a in one field: the whole token's count, or
+// for a joined target, if higher, the count of its rarest part when
+// every part occurs. The maximum (not the sum) avoids counting an
+// occurrence of the whole token twice, as the corpus side also indexes
+// its parts.
+func (a alt) tf(field map[string]int) int {
+	n := field[a.whole]
+	if len(a.parts) < 2 {
+		return n
+	}
+	m := field[a.parts[0]]
+	for _, p := range a.parts[1:] {
+		m = min(m, field[p])
+	}
+	return max(n, m)
+}
+
+// altDF is the document frequency of a: that of the whole token, or
+// for a joined target, if higher, that of its rarest part (an upper
+// bound of the documents holding all parts, so the IDF errs low).
+func (s *Index) altDF(a alt) int {
+	n := s.df[a.whole]
+	if len(a.parts) < 2 {
+		return n
+	}
+	m := s.df[a.parts[0]]
+	for _, p := range a.parts[1:] {
+		m = min(m, s.df[p])
+	}
+	return max(n, m)
+}
+
 // limit applies TopK and MaxContextDocBytes.
 func limit(hits []Hit) []Hit {
 	out := make([]Hit, 0, TopK)
@@ -275,40 +367,127 @@ func limit(hits []Hit) []Hit {
 	return out
 }
 
-// queryTerms validates q and returns its distinct terms, with synonyms
-// and the parts of joined tokens added, in sorted order (so the float
-// sum never depends on map order). Each distinct term counts once.
-func queryTerms(q string) ([]string, error) {
+// query is a parsed question.
+type query struct {
+	// terms are the question's own terms (each token and the parts of
+	// a joined token), distinct and sorted. Each scores at full weight.
+	terms []string
+	// groups are the synonym expansions, one per distinct set of
+	// targets, sorted by their targets. See group.
+	groups []group
+}
+
+// group is the synonym expansion of one question token: the targets of
+// its rows (and, for an address literal, addressTerms), minus terms the
+// question already has. A group scores as its best target (a
+// disjunction maximum), times groupWeight, so one row adds at most as
+// much as one term however many targets it lists.
+type group struct {
+	// alts are the targets, sorted by whole token.
+	alts []alt
+	// own are the terms of the question token(s) the group was added
+	// for, sorted; they decide groupWeight.
+	own []string
+}
+
+// parseQuery validates q and splits it into own terms and synonym
+// groups. Everything is sorted, so the float sum never depends on map
+// order.
+func parseQuery(q string) (query, error) {
 	if len(q) > MaxQueryBytes {
-		return nil, fmt.Errorf("query of %d bytes, limit %d: %w", len(q), MaxQueryBytes, ErrQueryTooLarge)
+		return query{}, fmt.Errorf("query of %d bytes, limit %d: %w", len(q), MaxQueryBytes, ErrQueryTooLarge)
 	}
 	if !utf8.ValidString(q) {
-		return nil, ErrInvalidQuery
+		return query{}, ErrInvalidQuery
 	}
 	raw := rawTokens(q)
 	if len(raw) > MaxQueryTokens {
-		return nil, fmt.Errorf("query of %d tokens, limit %d: %w", len(raw), MaxQueryTokens, ErrQueryTooLarge)
+		return query{}, fmt.Errorf("query of %d tokens, limit %d: %w", len(raw), MaxQueryTokens, ErrQueryTooLarge)
 	}
-	set := map[string]struct{}{}
+	own := map[string]struct{}{}
 	for _, t := range raw {
-		for _, extra := range expand(t) {
-			for _, e := range terms(extra) {
-				set[e] = struct{}{}
-			}
-		}
 		for _, e := range tokenTerms(t) {
-			set[e] = struct{}{}
+			own[e] = struct{}{}
 		}
 	}
-	if len(set) == 0 {
-		return nil, ErrEmptyQuery
+	var qr query
+	byKey := map[string]int{}
+	for _, t := range raw {
+		byWhole := map[string]alt{}
+		for _, to := range expand(t) {
+			// A target is one alternative: its hyphen parts are not
+			// separate terms (see alt).
+			whole, parts := splitToken(to)
+			if _, dup := own[whole]; whole == "" || dup {
+				continue
+			}
+			byWhole[whole] = alt{whole: whole, parts: parts}
+		}
+		if len(byWhole) == 0 {
+			continue
+		}
+		names := make([]string, 0, len(byWhole))
+		for w := range byWhole {
+			names = append(names, w)
+		}
+		slices.Sort(names)
+		key := strings.Join(names, " ")
+		if i, dup := byKey[key]; dup {
+			g := &qr.groups[i]
+			g.own = slices.Compact(slices.Sorted(slices.Values(append(g.own, tokenTerms(t)...))))
+			continue
+		}
+		byKey[key] = len(qr.groups)
+		g := group{alts: make([]alt, len(names))}
+		for i, w := range names {
+			g.alts[i] = byWhole[w]
+		}
+		g.own = slices.Compact(slices.Sorted(slices.Values(tokenTerms(t))))
+		qr.groups = append(qr.groups, g)
 	}
-	out := make([]string, 0, len(set))
-	for t := range set {
-		out = append(out, t)
+	qr.terms = sortedKeys(own)
+	if len(qr.terms) == 0 && len(qr.groups) == 0 {
+		return query{}, ErrEmptyQuery
+	}
+	slices.SortFunc(qr.groups, func(a, b group) int {
+		return slices.CompareFunc(a.alts, b.alts, func(x, y alt) int { return strings.Compare(x.whole, y.whole) })
+	})
+	return qr, nil
+}
+
+// all returns every term of the query, own and synonym targets (whole
+// tokens), distinct and sorted.
+func (qr query) all() []string {
+	set := map[string]struct{}{}
+	for _, t := range qr.terms {
+		set[t] = struct{}{}
+	}
+	for _, g := range qr.groups {
+		for _, a := range g.alts {
+			set[a.whole] = struct{}{}
+		}
+	}
+	return sortedKeys(set)
+}
+
+// groupNames returns the target names of each synonym group (tests).
+func (qr query) groupNames() [][]string {
+	out := make([][]string, len(qr.groups))
+	for i, g := range qr.groups {
+		for _, a := range g.alts {
+			out[i] = append(out[i], a.whole)
+		}
+	}
+	return out
+}
+
+func sortedKeys(m map[string]struct{}) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
 	}
 	slices.Sort(out)
-	return out, nil
+	return out
 }
 
 // synonymIndex maps a From word to its row's To terms.
@@ -322,12 +501,23 @@ var synonymIndex = func() map[string][]string {
 	return m
 }()
 
+// addressTerms are the words the docs use for an IP address. A question
+// naming a concrete address ("192.168.22.1") rarely meets the same
+// literal in the docs, which speak of "IP"/"IPs" and "address"
+// instead.
+var addressTerms = []string{"ip", "address"}
+
 // expand returns the synonym terms for one raw question token, looked
-// up as written and folded.
+// up as written and folded; an IPv4 address literal adds addressTerms
+// (an IPv6 literal never reaches here whole: the tokenizer splits at
+// ':').
 func expand(t string) []string {
 	out := synonymIndex[t]
 	if ft := fold(t); ft != t {
 		out = append(slices.Clone(out), synonymIndex[ft]...)
+	}
+	if _, err := netip.ParseAddr(t); err == nil {
+		out = append(slices.Clone(out), addressTerms...)
 	}
 	return out
 }
