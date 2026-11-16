@@ -6,8 +6,10 @@ import "testing"
 
 // FuzzCommandChecks checks the properties of checks V1 and V6 for arbitrary
 // input: no panic, the same input gives the same verdict, a V1-valid input
-// contains only printable ASCII, and appending `; rm -rf /x` to a V1-valid
-// input always yields a destructive verdict.
+// contains only printable ASCII, and appending a separator and `rm -rf /x` to
+// a V1-valid input always yields a destructive verdict. The separator is
+// ` ; ` rather than `;`: a trailing unquoted backslash would escape a bare
+// `;`, and then bash does not see a separator either.
 func FuzzCommandChecks(f *testing.F) {
 	seeds := []string{
 		"",
@@ -43,8 +45,8 @@ func FuzzCommandChecks(f *testing.F) {
 				t.Fatalf("V1-valid input %q contains byte 0x%02X", s, s[i])
 			}
 		}
-		if v := Assess(s + "; rm -rf /x"); !v.Destructive {
-			t.Fatalf("Assess(%q + %q) = %+v, want destructive", s, "; rm -rf /x", v)
+		if v := Assess(s + " ; rm -rf /x"); !v.Destructive {
+			t.Fatalf("Assess(%q + %q) = %+v, want destructive", s, " ; rm -rf /x", v)
 		}
 	})
 }

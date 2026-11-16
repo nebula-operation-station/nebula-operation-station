@@ -266,7 +266,7 @@ func matchingPattern(u Unit) *destructivePattern {
 // -f in a single-dash cluster, or --recursive or --force.
 func rmRecursiveOrForce(args []string) bool {
 	for _, a := range args {
-		if a == "--recursive" || a == "--force" {
+		if longOptionOf(a, "recursive", "force") {
 			return true
 		}
 		if strings.HasPrefix(a, "--") || len(a) < 2 || a[0] != '-' {
@@ -279,12 +279,34 @@ func rmRecursiveOrForce(args []string) bool {
 	return false
 }
 
+// longOptionOf reports whether arg is a long option, with or without a value,
+// whose name is a prefix of one of the full names. GNU getopt accepts any
+// unambiguous prefix of a long option (`rm --rec` is --recursive, `tar --ext`
+// is --extract). A prefix that is ambiguous is an error that runs nothing, so
+// matching it too is fail closed.
+func longOptionOf(arg string, names ...string) bool {
+	if !strings.HasPrefix(arg, "--") {
+		return false
+	}
+	name, _, _ := strings.Cut(arg[2:], "=")
+	if name == "" {
+		return false
+	}
+	for _, full := range names {
+		if strings.HasPrefix(full, name) {
+			return true
+		}
+	}
+	return false
+}
+
 // tarExtracts reports whether tar extracts: a single-dash option word contains
-// x, --extract or --get is present, or the first argument has no dash and
-// contains x (old-style options such as `tar xzf archive`).
+// x, a long option is --extract or --get (or an abbreviation of them), or the
+// first argument has no dash and contains x (old-style options such as
+// `tar xzf archive`).
 func tarExtracts(args []string) bool {
 	for _, a := range args {
-		if a == "--extract" || a == "--get" {
+		if longOptionOf(a, "extract", "get") {
 			return true
 		}
 		if strings.HasPrefix(a, "--") || len(a) < 2 || a[0] != '-' {

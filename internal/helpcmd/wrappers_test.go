@@ -75,17 +75,16 @@ func TestClusteredCommandOptionCountsAsDashC(t *testing.T) {
 	assertIndeterminate(t, "bash +c 'echo hi'")
 }
 
-// TestBackslashEscapedProgramNameIsUnescaped covers the alias bypass idiom
-// `\rm` and a backslash inside the program word: the shell runs `rm`.
-func TestBackslashEscapedProgramNameIsUnescaped(t *testing.T) {
+// TestBackslashEscapedProgramNameIsIndeterminate covers the alias bypass idiom
+// `\rm` and a backslash inside the program word. The shell runs `rm`, but the
+// scanner does not evaluate the escape, so the unit is indeterminate (fail
+// closed) rather than matched by name. Still destructive.
+func TestBackslashEscapedProgramNameIsIndeterminate(t *testing.T) {
 	t.Parallel()
-	assertUnits(t, `\rm -rf /x`, []string{"rm -rf /x"})
-	assertUnits(t, `r\m -rf /x`, []string{"rm -rf /x"})
-	assertUnits(t, `sudo \userdel a`, []string{"userdel a"})
-	assertUnits(t, `\\rm x`, []string{`\rm x`})
-	assertDestructiveRow(t, `\rm -rf /x`)
-	assertDestructiveRow(t, `r\m -rf /x`)
-	assertDestructiveRow(t, `sudo \userdel a`)
+	assertIndeterminate(t, `\rm -rf /x`)
+	assertIndeterminate(t, `r\m -rf /x`)
+	assertIndeterminate(t, `sudo \userdel a`)
+	assertIndeterminate(t, `\\rm x`)
 }
 
 // TestExpandedProgramWordIsIndeterminate covers program words that the
@@ -107,9 +106,10 @@ func TestExpandedProgramWordIsIndeterminate(t *testing.T) {
 	} {
 		assertIndeterminate(t, in)
 	}
-	// Quoted `$` and escaped `*` are literal, so the program is known.
+	// A quoted `$` is literal, so the program is known. An escaped `*` is
+	// also literal, but an unquoted backslash is not evaluated (fail closed).
 	assertUnits(t, `echo '$X'`, []string{"echo $X"})
-	assertUnits(t, `echo \*`, []string{"echo *"})
+	assertIndeterminate(t, `echo \*`)
 }
 
 // TestDockerContainerRunAndExecUnwrap covers the `docker container` spelling
@@ -145,6 +145,8 @@ func TestStdinAndHereStringShellsAreIndeterminate(t *testing.T) {
 	for _, in := range []string{
 		"echo 'rm -rf /x' | sh",
 		"bash <<< 'rm -rf /x'",
+		"cat <<EOF\nrm -rf /x\nEOF",
+		"cat <<< 'rm -rf /x'",
 		"sh < script.sh",
 		"bash ./script.sh",
 		"bash -s",

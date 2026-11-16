@@ -9,7 +9,8 @@ import "testing"
 var rowCases = map[string]struct{ pos, neg []string }{
 	"`rm` with `-r`/`-R`/`-f` (also inside a single-dash cluster such as `-rf`) or `--recursive`/`--force`": {
 		pos: []string{"rm -rf /x", "rm -fr /x", "rm -R /x", "rm -r /x", "rm -f x",
-			"rm -vrf /x", "rm --recursive /x", "rm --force /x", "/bin/rm -rf x"},
+			"rm -vrf /x", "rm --recursive /x", "rm --force /x", "/bin/rm -rf x",
+			"rm --rec /x", "rm --f /x"},
 		neg: []string{"rm x", "rm -i x", "rm -v x", "rm --interactive=always x",
 			"rm-rf x", "rmdir -p x"},
 	},
@@ -43,7 +44,8 @@ var rowCases = map[string]struct{ pos, neg []string }{
 	},
 	"`tar` extracting (see units below)": {
 		pos: []string{"tar xzf a.tar.gz", "tar --extract -f a.tar", "tar --get -f a.tar",
-			"tar -C /v -xpz", "tar -xf a.tar", "tar xf a.tar", "docker run --rm -i -v v:/v debian:12-slim tar -C /v -xpz"},
+			"tar -C /v -xpz", "tar -xf a.tar", "tar xf a.tar", "docker run --rm -i -v v:/v debian:12-slim tar -C /v -xpz",
+			"tar --ext -f a.tar"},
 		neg: []string{"tar -czf out.tgz dir", "tar -tf a.tar", "tar cf x.tar d", "tar -cf a.tar -C /v ."},
 	},
 	"`docker compose down -v`": {

@@ -39,8 +39,8 @@ func TestUnitsSplitsAtEveryOperator(t *testing.T) {
 		{"newline is never in V1 input but splits anyway", "a\nrm x", []string{"a", "rm x"}},
 		{"no spaces around operators", "a;rm x|dd", []string{"a", "rm x", "dd"}},
 		{"subshell and brace group", "(rm x) ; { dd of=y; }", []string{"rm x", "dd of=y"}},
-		{"command substitution", "echo $(rm x)", []string{"echo", "rm x"}},
-		{"backtick", "echo `rm x`", []string{"echo", "rm x"}},
+		{"command substitution makes the enclosing command dynamic", "echo $(rm x)", []string{"rm x", "!echo"}},
+		{"backtick makes the enclosing command dynamic", "echo `rm x`", []string{"rm x", "!echo"}},
 		{"operator inside double quotes is literal", `echo "a; rm x"`, []string{"echo a; rm x"}},
 	}
 	for _, tc := range cases {
@@ -87,8 +87,10 @@ func TestUnitsHonoursQuotesAndEscapes(t *testing.T) {
 		{`echo "rm -rf /x"`, []string{`echo rm -rf /x`}},
 		{`echo 'a; rm -rf /x'`, []string{`echo a; rm -rf /x`}},
 		{`echo ''`, []string{`echo`}},
-		{`echo a\;b`, []string{`echo a\`, `b`}},
-		{`echo a\ b`, []string{`echo a b`}},
+		// An escaped character makes the command indeterminate; the words of
+		// an indeterminate unit are not rendered, only its program.
+		{`echo a\;b`, []string{`!echo`}},
+		{`echo a\ b`, []string{`!echo`}},
 		{`echo "a\"b"`, []string{`echo a"b`}},
 	}
 	for _, tc := range cases {
@@ -162,7 +164,7 @@ func TestUnitsUnwrapsADRExamples(t *testing.T) {
 		{"keywords before a command", "if rm -rf /x; then echo ok; fi",
 			[]string{"rm -rf /x", "echo ok"}},
 		{"double quoted command substitution", `echo "$(rm -rf /x)"`,
-			[]string{"echo", "rm -rf /x", ""}},
+			[]string{"rm -rf /x", "!echo"}},
 		{"bang negation", "! rm -rf /x", []string{"rm -rf /x"}},
 	}
 	for _, tc := range cases {

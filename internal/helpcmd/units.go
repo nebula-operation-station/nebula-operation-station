@@ -68,7 +68,9 @@ func unitsAt(cmd string, depth int) ([]Unit, error) {
 // shell reads code again, so separators and whitespace have their unquoted
 // meaning until the substitution closes.
 type substitution struct {
-	savedDouble bool // double-quote state before the substitution opened
+	savedDouble bool     // double-quote state before the substitution opened
+	savedCmd    []string // words of the enclosing command so far
+	savedSkip   bool     // the enclosing command had a redirection target pending
 	backtick    bool
 	depth       int // open parentheses inside a $( … ) substitution
 }
@@ -116,23 +118,44 @@ func splitSimple(s string) ([]simpleCmd, error) {
 		inWord = false
 		wordDyn = false
 	}
+	// endCommand ends the current simple command. A command whose program or
+	// arguments come from a substitution is kept even without words: the
+	// output of the substitution may be a program to run.
 	endCommand := func() {
 		flush()
-		if len(cur) > 0 {
+		if len(cur) > 0 || cmdDyn {
 			cmds = append(cmds, simpleCmd{words: cur, dynamic: cmdDyn})
 		}
 		cur = nil
 		cmdDyn = false
 		skipWord = false
 	}
+	// pushSubstitution opens a substitution inside the current command. The
+	// words of the enclosing command are saved, so the substitution's own
+	// commands are split separately; the enclosing command is marked dynamic
+	// when the substitution closes, because its program or argument is the
+	// output of the substitution.
 	pushSubstitution := func(backtick bool) {
-		stack = append(stack, substitution{savedDouble: inDouble, backtick: backtick})
+		flush()
+		stack = append(stack, substitution{
+			savedDouble: inDouble,
+			savedCmd:    cur,
+			savedSkip:   skipWord,
+			backtick:    backtick,
+		})
+		cur = nil
+		cmdDyn = false
+		skipWord = false
 		inDouble = false
 	}
 	popSubstitution := func() {
+		endCommand()
 		top := stack[len(stack)-1]
 		stack = stack[:len(stack)-1]
 		inDouble = top.savedDouble
+		cur = top.savedCmd
+		cmdDyn = true
+		skipWord = top.savedSkip
 	}
 
 	for i := 0; i < len(s); i++ {
@@ -145,31 +168,31 @@ func splitSimple(s string) ([]simpleCmd, error) {
 			}
 			continue
 		}
-		if c == '\\' && i+1 < len(s) {
-			n := s[i+1]
-			if inDouble {
-				if n == '"' || n == '\\' || n == '$' || n == '`' {
-					word = append(word, n)
-					inWord = true
-					i++
-					continue
-				}
-			} else if n == '\n' {
-				// Line continuation: a backslash-newline is removed.
-				i++
-				continue
-			} else if strings.IndexByte(";&|()<>{}\r", n) < 0 {
-				// An escaped ordinary character is that character, so `\rm`
-				// and `r\m` are the program rm. Escaped separators stay
-				// separators (below), which keeps the split fail-closed.
+		if c == '\\' && inDouble && i+1 < len(s) {
+			// Inside double quotes a backslash escapes only these characters;
+			// before any other character it is literal.
+			if n := s[i+1]; n == '"' || n == '\\' || n == '$' || n == '`' {
 				word = append(word, n)
 				inWord = true
 				i++
 				continue
 			}
 		}
+		if c == '\\' && !inDouble {
+			// An unquoted backslash escapes the next character, which the
+			// scanner does not evaluate: `\rm`, `\;` and `\<newline>` are not
+			// split the way the shell reads them. The word is dynamic, so the
+			// command is indeterminate (fail closed).
+			wordDyn, inWord = true, true
+			if i+1 < len(s) {
+				word = append(word, s[i+1])
+				i++
+			} else {
+				word = append(word, c)
+			}
+			continue
+		}
 		if c == '$' && i+1 < len(s) && s[i+1] == '(' {
-			endCommand()
 			pushSubstitution(false)
 			i++
 			continue
@@ -180,7 +203,6 @@ func splitSimple(s string) ([]simpleCmd, error) {
 			wordDyn, inWord = true, true
 		}
 		if c == '`' {
-			endCommand()
 			if n := len(stack); n > 0 && stack[n-1].backtick {
 				popSubstitution()
 			} else {
@@ -218,11 +240,34 @@ func splitSimple(s string) ([]simpleCmd, error) {
 					stack[n-1].depth--
 				}
 			}
-		case ';', '&', '|', '{', '}', '\n', '\r':
+		case ';', '&', '|', '\n', '\r':
 			endCommand()
+		case '{', '}':
+			// A brace at the start of a command followed by a blank (or, for
+			// `}`, by an operator or the end) is the reserved word of a brace
+			// group. Anywhere else an unquoted brace may be brace expansion,
+			// which rewrites the word, so the word is dynamic.
+			if isBraceKeyword(s, i) && !inWord && !skipWord && len(cur) == 0 {
+				break
+			}
+			wordDyn = true
+			word = append(word, c)
+			inWord = true
 		case ' ', '\t':
 			flush()
 		case '>', '<':
+			if i+1 < len(s) && s[i+1] == '(' {
+				// Process substitution <(…) or >(…): the enclosing command is
+				// indeterminate once the substitution closes.
+				pushSubstitution(false)
+				i++
+				break
+			}
+			if c == '<' && i+1 < len(s) && s[i+1] == '<' {
+				// A here-document or here-string feeds the command text on
+				// stdin, which the scanner does not read: indeterminate.
+				cmdDyn = true
+			}
 			if inWord && allDigits(word) {
 				word = word[:0]
 				inWord = false
@@ -252,6 +297,16 @@ func splitSimple(s string) ([]simpleCmd, error) {
 	return cmds, nil
 }
 
+// isBraceKeyword reports whether the brace at s[i] is a brace-group reserved
+// word: `{` followed by a blank, or `}` followed by a blank, an operator or
+// the end. Callers check that the brace starts a command.
+func isBraceKeyword(s string, i int) bool {
+	if s[i] == '{' {
+		return i+1 < len(s) && strings.IndexByte(" \t\n", s[i+1]) >= 0
+	}
+	return i+1 >= len(s) || strings.IndexByte(" \t\n;&|)", s[i+1]) >= 0
+}
+
 func allDigits(b []byte) bool {
 	for _, c := range b {
 		if c < '0' || c > '9' {
@@ -261,16 +316,33 @@ func allDigits(b []byte) bool {
 	return true
 }
 
-// unnamedWrappers are programs that run another program but are not named in
-// ADR 0014. Their unit is indeterminate, so it fails closed (V6 cannot see
-// the program they run). The list is not exhaustive; a program not in it and
-// not named by the ADR is checked as itself.
-var unnamedWrappers = map[string]bool{
+// programRunners are programs that run another program, a shell command or
+// a `-exec` argument, and that ADR 0014 does not unwrap. Their unit is
+// indeterminate, so it fails closed: V6 cannot see the program they run. The
+// shells sh, bash and su are not here; their `-c` string is unwrapped (see
+// unwrap). The env, nice, nohup and timeout wrappers are unwrapped too.
+//
+// The rule is a closed list of the programs that run something, not a rule
+// about what they run: a program that runs another one and is missing here is
+// checked as itself. The list therefore names every such program we know of.
+var programRunners = map[string]bool{
 	"command": true, "eval": true, "xargs": true, "doas": true,
 	"docker-compose": true, "runuser": true, "setsid": true, "ionice": true,
 	"stdbuf": true, "flock": true, "watch": true, "chroot": true,
 	"busybox": true,
+	// Other shells: their -c string is not unwrapped, so they fail closed.
+	"zsh": true, "dash": true, "ksh": true, "fish": true,
+	// Namespace, service and remote runners.
+	"nsenter": true, "unshare": true, "systemd-run": true, "pkexec": true,
+	"ssh": true,
+	// `coproc` is a bash keyword that starts a command in the background; the
+	// word after it is not the program. It is listed as a program name.
+	"coproc": true,
 }
+
+// findExecArgs are the find options that run a command: the word after them
+// is a program, so a find unit with one of them is indeterminate.
+var findExecArgs = []string{"-exec", "-execdir", "-ok", "-okdir"}
 
 // unwrap removes the wrappers of one simple command until nothing changes and
 // returns its units. depth counts nested sh -c strings. A dynamic simple
@@ -327,8 +399,13 @@ loop:
 				return indeterminate(words), nil
 			}
 			return unitsAt(str, depth+1)
+		case "find":
+			if containsAny(words[1:], findExecArgs) {
+				return indeterminate(words), nil
+			}
+			break loop
 		default:
-			if unnamedWrappers[name] {
+			if programRunners[name] {
 				return indeterminate(words), nil
 			}
 			break loop
@@ -337,6 +414,12 @@ loop:
 			return indeterminate(words), nil
 		}
 		words = rest
+	}
+	// A program word that is empty or starts with `-` is not a program name:
+	// the unit is an option or argument that a wrapper or an image passed on,
+	// such as the entrypoint of `docker run img -rf /x`. Fail closed.
+	if prog := base(words[0]); prog == "" || prog[0] == '-' {
+		return indeterminate(words), nil
 	}
 	return []Unit{{Program: base(words[0]), Args: words[1:]}}, nil
 }
@@ -569,6 +652,10 @@ type optionSpec struct {
 	boolShort  string // short options without a value
 	valueLong  map[string]bool
 	boolLong   map[string]bool
+	// unsafeLong lists long options that take a value and change the program
+	// that runs (`docker run --entrypoint`). They are never skipped: seeing one
+	// makes the wrapper form unknown, so the unit is indeterminate.
+	unsafeLong map[string]bool
 	// command is set for sh, bash and su: -c (or --command) gives the command
 	// string, which may sit in a short cluster such as -lc.
 	command bool
@@ -594,6 +681,8 @@ func skipOptions(words []string, sp optionSpec) (rest []string, ok bool) {
 		if strings.HasPrefix(w, "--") {
 			name, _, hasValue := strings.Cut(w, "=")
 			switch {
+			case sp.unsafeLong[name]:
+				return nil, false
 			case hasValue && (sp.valueLong[name] || sp.boolLong[name]):
 				words = words[1:]
 			case !hasValue && sp.valueLong[name]:
@@ -698,7 +787,7 @@ var dockerRunSpec = optionSpec{
 		"--cpu-quota", "--cpu-shares", "--cpus", "--cpuset-cpus", "--cpuset-mems",
 		"--detach-keys", "--device", "--device-cgroup-rule", "--device-read-bps",
 		"--device-read-iops", "--device-write-bps", "--device-write-iops",
-		"--dns", "--dns-option", "--dns-search", "--domainname", "--entrypoint",
+		"--dns", "--dns-option", "--dns-search", "--domainname",
 		"--env", "--env-file", "--expose", "--gpus", "--group-add",
 		"--health-cmd", "--health-interval", "--health-retries",
 		"--health-start-period", "--health-timeout", "--hostname", "--ip",
@@ -712,6 +801,7 @@ var dockerRunSpec = optionSpec{
 		"--storage-opt", "--sysctl", "--tmpfs", "--ulimit", "--user", "--userns",
 		"--uts", "--volume", "--volumes-from", "--workdir", "--annotation",
 		"--cgroupns", "--cpu-rt-period", "--cpu-rt-runtime"),
+	unsafeLong: optSet("--entrypoint"),
 	boolLong: optSet("--detach", "--interactive", "--tty", "--rm", "--privileged",
 		"--publish-all", "--read-only", "--init", "--quiet",
 		"--no-healthcheck", "--sig-proxy", "--oom-kill-disable", "--help"),
@@ -742,9 +832,10 @@ var composeExecSpec = optionSpec{
 var composeRunSpec = optionSpec{
 	valueShort: "elpuvw",
 	boolShort:  "dTit",
-	valueLong: optSet("--name", "--entrypoint", "--env", "--label", "--user",
+	valueLong: optSet("--name", "--env", "--label", "--user",
 		"--volume", "--workdir", "--publish", "--cap-add", "--cap-drop",
 		"--pull", "--env-from-file"),
+	unsafeLong: optSet("--entrypoint"),
 	boolLong: optSet("--detach", "--rm", "--no-deps", "--service-ports",
 		"--build", "--quiet-pull", "--remove-orphans", "--no-TTY",
 		"--interactive", "--tty", "--use-aliases", "--no-log-prefix", "--quiet",
