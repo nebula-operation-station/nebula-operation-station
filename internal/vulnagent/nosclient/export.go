@@ -35,15 +35,15 @@ var (
 	deviceModelRe      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_+-]{0,63}$`)
 	deviceModelUpperRe = regexp.MustCompile(`[A-Z]`)
 	deviceDigitRe      = regexp.MustCompile(`[0-9]`)
-	deviceMACRe        = regexp.MustCompile(`^[0-9A-Fa-f]{2}(-[0-9A-Fa-f]{2}){5}$`)
 	deviceFirmwareRe   = regexp.MustCompile(`^[0-9][A-Za-z0-9.+~_-]{0,63}$`)
 	deviceDigitsRe     = regexp.MustCompile(`^[0-9]+$`)
 	// deviceMACQuadsRe and deviceMACPairsRe are a MAC as three four-digit or
-	// six two-digit groups; they mirror the server's exportMACQuadsRe and
-	// exportMACPairsRe and match the value after deviceSeparators.
-	deviceMACQuadsRe = regexp.MustCompile(`^[0-9A-Fa-f]{4}(\.[0-9A-Fa-f]{4}){2}$`)
-	deviceMACPairsRe = regexp.MustCompile(`^[0-9A-Fa-f]{2}(\.[0-9A-Fa-f]{2}){5}$`)
-	deviceBareMACRe  = regexp.MustCompile(`^[0-9A-Fa-f]{12}$`)
+	// six two-digit groups, and deviceBareMACRe 12 hex digits. They are
+	// unanchored, as the server's exportMACQuadsRe, exportMACPairsRe and
+	// exportMACBareRe are, and match the value after deviceSeparators.
+	deviceMACQuadsRe = regexp.MustCompile(`(?:^|\.)[0-9A-Fa-f]{4}(?:\.[0-9A-Fa-f]{4}){2}(?:\.|$)`)
+	deviceMACPairsRe = regexp.MustCompile(`(?:^|\.)[0-9A-Fa-f]{2}(?:\.[0-9A-Fa-f]{2}){5}(?:\.|$)`)
+	deviceBareMACRe  = regexp.MustCompile(`(?:^|[^0-9A-Fa-f])[0-9A-Fa-f]{12}(?:[^0-9A-Fa-f]|$)`)
 	// deviceSeparators maps each firmware separator (". - _ + ~") to "." as
 	// the server's firmwareSeparators does.
 	deviceSeparators = strings.NewReplacer("-", ".", "_", ".", "+", ".", "~", ".")
@@ -391,9 +391,20 @@ func checkDevice(d *Device, complete bool) error {
 }
 
 // deviceModelOK mirrors the server's model check (modelCodeOK): the model
-// pattern, an upper-case letter and a digit, and not a hyphenated MAC.
+// pattern, an upper-case letter and a digit, no MAC at any position and no
+// IPv4 address of any kind in the normalised value.
 func deviceModelOK(v string) bool {
-	return deviceModelRe.MatchString(v) && deviceModelUpperRe.MatchString(v) && deviceDigitRe.MatchString(v) && !deviceMACRe.MatchString(v)
+	if !deviceModelRe.MatchString(v) || !deviceModelUpperRe.MatchString(v) || !deviceDigitRe.MatchString(v) {
+		return false
+	}
+	n := deviceSeparators.Replace(v)
+	return !deviceEmbeddedMAC(n) && !deviceAnyIPv4Embedded(n)
+}
+
+// deviceEmbeddedMAC mirrors the server's embeddedMAC: a MAC at any position of
+// n, a value normalised by deviceSeparators.
+func deviceEmbeddedMAC(n string) bool {
+	return deviceMACQuadsRe.MatchString(n) || deviceMACPairsRe.MatchString(n) || deviceBareMACRe.MatchString(n)
 }
 
 // deviceNonPublicIPv4 mirrors the server's nonPublicIPv4 ranges: the IPv4
@@ -414,20 +425,33 @@ var deviceNonPublicIPv4 = []netip.Prefix{
 // after any prefix or separator, that forms a private, shared, loopback or
 // otherwise non-public address is refused; a quad from a public range passes.
 func deviceAddressOK(v string) bool {
+	return !deviceIPv4Embedded(v, deviceIsNonPublicIPv4)
+}
+
+// deviceAnyIPv4Embedded mirrors the server's anyIPv4Embedded: any IPv4 address
+// at any position of v, public or not, which a model must not carry.
+func deviceAnyIPv4Embedded(v string) bool {
+	return deviceIPv4Embedded(v, func(netip.Addr) bool { return true })
+}
+
+// deviceIPv4Embedded mirrors the server's ipv4Embedded: it reports whether v
+// contains an IPv4 address at any position for which bad is true.
+func deviceIPv4Embedded(v string, bad func(netip.Addr) bool) bool {
 	for i := 0; i < len(v); i++ {
 		if !deviceIsDigit(v[i]) || (i > 0 && deviceIsDigit(v[i-1])) {
 			continue
 		}
-		if deviceNonPublicIPv4At(v, i) {
-			return false
+		if a, ok := deviceIPv4At(v, i); ok && bad(a) {
+			return true
 		}
 	}
-	return true
+	return false
 }
 
-// deviceNonPublicIPv4At reports whether the four octets that start at v[i]
-// form a non-public IPv4 address. It mirrors the server's nonPublicIPv4At.
-func deviceNonPublicIPv4At(v string, i int) bool {
+// deviceIPv4At mirrors the server's ipv4At: the address of the four octets
+// that start at v[i], and false when they are not four dot-separated octets or
+// an octet is over 255.
+func deviceIPv4At(v string, i int) (netip.Addr, bool) {
 	var b [4]byte
 	for k := range b {
 		end := i
@@ -436,18 +460,22 @@ func deviceNonPublicIPv4At(v string, i int) bool {
 		}
 		n, ok := deviceParseOctet(v[i:end])
 		if !ok || end == i {
-			return false
+			return netip.Addr{}, false
 		}
 		b[k] = n
 		if k < len(b)-1 {
 			if end >= len(v) || v[end] != '.' {
-				return false
+				return netip.Addr{}, false
 			}
 			end++
 		}
 		i = end
 	}
-	a := netip.AddrFrom4(b)
+	return netip.AddrFrom4(b), true
+}
+
+// deviceIsNonPublicIPv4 mirrors the server's isNonPublicIPv4.
+func deviceIsNonPublicIPv4(a netip.Addr) bool {
 	if !a.IsGlobalUnicast() || a.IsPrivate() || a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsMulticast() || a.IsUnspecified() {
 		return true
 	}
@@ -499,7 +527,7 @@ func deviceFirmwareOK(v string) bool {
 	}
 	// n is v with every separator as "."; the MAC and address checks run on n.
 	n := deviceSeparators.Replace(v)
-	if deviceMACQuadsRe.MatchString(n) || deviceMACPairsRe.MatchString(n) || deviceBareMACRe.MatchString(n) {
+	if deviceEmbeddedMAC(n) {
 		return false
 	}
 	labels := strings.Split(v, ".")

@@ -55,6 +55,34 @@ func TestReserved(t *testing.T) {
 	}
 }
 
+// zonedAddrs must be refused by Reserved and NonPublic whatever their
+// address part: a zone is never allowed. The IPv4-mapped forms are the
+// regression for FuzzForbiddenAddr, where Unmap dropped the zone and the
+// IPv4 part was judged alone.
+var zonedAddrs = []string{
+	"::ffff:48.0.0.0%eth0",     // fuzz finding: public IPv4 part, zone dropped by Unmap
+	"::ffff:140.82.112.3%eth0", // public IPv4-mapped with zone
+	"::ffff:8.8.8.8%lo",
+	"::ffff:127.0.0.1%eth0",
+	"2606:4700::1111%eth0", // public IPv6 with zone
+	"fe80::1%eth0",
+}
+
+func TestZonedAddressRefused(t *testing.T) {
+	for _, s := range zonedAddrs {
+		a := netip.MustParseAddr(s)
+		if a.Zone() == "" {
+			t.Fatalf("test input %s has no zone", s)
+		}
+		if reason, bad := Reserved(a); !bad || reason == "" {
+			t.Errorf("Reserved(%s) = %q, %v; want refused with reason", s, reason, bad)
+		}
+		if reason, bad := NonPublic(a); !bad || reason == "" {
+			t.Errorf("NonPublic(%s) = %q, %v; want refused with reason", s, reason, bad)
+		}
+	}
+}
+
 func TestNonPublicIsSupersetOfReserved(t *testing.T) {
 	for _, s := range append(append([]string(nil), reservedAddrs...), specialAddrs...) {
 		if reason, bad := NonPublic(netip.MustParseAddr(s)); !bad || reason == "" {
