@@ -7,6 +7,10 @@ import (
 	"testing"
 )
 
+// r returns the character with the given code point. The test sources stay
+// ASCII; the look-alikes are built from their code points on purpose.
+func r(cp rune) string { return string(cp) }
+
 func TestCheckASCIIAcceptsPrintableASCII(t *testing.T) {
 	t.Parallel()
 	cases := []string{
@@ -33,13 +37,13 @@ func TestCheckASCIIRejectsLookAlikesWithCodePoint(t *testing.T) {
 		offset int
 		rune   rune
 	}{
-		{"cyrillic e in nebula", "nеbula status", 1, 0x0435},
-		{"en dash before flag", "nebula netdev list –from x", 19, 0x2013},
-		{"fullwidth n", "ｎebula", 0, 0xff4e},
-		{"no-break space", "nebula status", 6, 0x00a0},
-		{"right-to-left override", "echo ‮abc", 5, 0x202e},
-		{"zero-width space", "nebula​ status", 6, 0x200b},
-		{"zero-width joiner", "rm‍ -rf x", 2, 0x200d},
+		{"cyrillic e in nebula", "n" + r(0x0435) + "bula status", 1, 0x0435},
+		{"en dash before flag", "nebula netdev list " + r(0x2013) + "from x", 19, 0x2013},
+		{"fullwidth n", r(0xff4e) + "ebula", 0, 0xff4e},
+		{"no-break space", "nebula" + r(0x00a0) + "status", 6, 0x00a0},
+		{"right-to-left override", "echo " + r(0x202e) + "abc", 5, 0x202e},
+		{"zero-width space", "nebula" + r(0x200b) + " status", 6, 0x200b},
+		{"zero-width joiner", "rm" + r(0x200d) + " -rf x", 2, 0x200d},
 		{"tab", "a\tb", 1, 0x09},
 		{"DEL", "a\x7fb", 1, 0x7f},
 		{"NUL", "a\x00b", 1, 0x00},
@@ -62,7 +66,7 @@ func TestCheckASCIIRejectsLookAlikesWithCodePoint(t *testing.T) {
 
 func TestCheckASCIIReportsFirstOffendingCharacter(t *testing.T) {
 	t.Parallel()
-	err := CheckASCII("–aе")
+	err := CheckASCII(r(0x2013) + "a" + r(0x0435))
 	var na *NonASCIIError
 	if !errors.As(err, &na) || na.Rune != 0x2013 || na.Offset != 0 {
 		t.Fatalf("got %v, want first offender U+2013 at byte 0", err)
