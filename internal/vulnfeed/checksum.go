@@ -59,9 +59,15 @@ func parseChecksum(b []byte, alg ChecksumAlg, want string) ([]byte, error) {
 	if len(fields) == 0 || len(fields) > 2 {
 		return nil, ErrChecksumMalformed
 	}
-	size := 32
-	if alg == ChecksumSHA512 {
+	var size int
+	switch alg {
+	case ChecksumSHA256:
+		size = 32
+	case ChecksumSHA512:
 		size = 64
+	default:
+		// Unknown algorithms must not fall back to a digest length.
+		return nil, ErrChecksumMalformed
 	}
 	sum, err := hex.DecodeString(fields[0])
 	if err != nil || len(sum) != size {
