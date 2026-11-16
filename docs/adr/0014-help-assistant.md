@@ -182,6 +182,12 @@ History:
   previously "not in `.github/protected-paths.txt`", Q12 open, normal
   review only), and D2, D4 and D5 state the decisions on Q1, Q2, Q7, Q8
   and Q10 (previously "Qn decides" or "is Qn (recommendation: …)").
+- 2026-11-16 (tr06h, maintainer decision Axel, 2026-11-16 22:36): V6 is
+  an allowlist of harmless commands; every command not on it is
+  indeterminate and at least amber, and the destructive-pattern list only
+  chooses the wording (previously V6 was a deny list, bypassed in the
+  reviews of PR #596 through wrappers, shells, aliases and interpreters
+  that were not on the list). See "Maintainer decision 2026-11-16".
 
 ## Context
 
@@ -368,7 +374,7 @@ does NOS connect **from** (`--from`)?
   | V3 | **Every other command** (first word not `nebula`/`sudo nebula`, or any command with an operator, including a `nebula` command with `&&` or `>`): its tokens match the tokens of one **shape** (a logical command line from a code block of a cited chunk, see "Shapes" below) under the matching rules below | No matching shape → red flag "not found in the cited documentation". So `bash -c …`, `python3 -c …`, `nc …`, `tee -a ~/.ssh/authorized_keys`, `base64 -d \| …` or `curl` to another URL are red unless a cited chunk shows exactly that shape |
   | V4 | **Values.** (a) A value for a doc placeholder (V3, and in V2 a token that matches a doc placeholder) matches the fixed shape of that placeholder's **class** (below). (b) A `nebula` argument (V2) matches the shape of its catalog value kind (below) and in any case `[A-Za-z0-9._:/@%+=,-]+`, or (kind `text` only) is one single- or double-quoted string whose content is printable ASCII without `'`, `"`, `$`, backtick, `\` or `!` (free text such as `--reason "maintenance"`; `!` is excluded because interactive bash expands history inside double quotes, so the copied text would run something other than what is shown). (c) A V2 argument of a kind other than `host`, `host-port` or `host-list` that is **host-like** (an IP literal, contains `://` or `@`, or has the form DNS-name`:`port) is not plain, unless it is byte-identical to the value the cited shape shows in that position. All values ≤ 255 bytes | Otherwise red flag "argument is not a plain value" |
   | V5 | **Value origin of hosts.** Every host value comes from the **trusted host set** of this question (defined below: exact tokens of the question, inventory endpoint addresses of the D3 fact hosts, NOS source addresses; inventory endpoints only for the reviewed `inventory-host-ok` catalog commands that send no credential and only for the host named by the command's ID argument, never for a V3 shape or any other command). Host values are: a host-class placeholder value (V3, V2), and in V2 every value of kind `host`, the host part of a `host-port` value and every element of a `host-list` value. **Never** a value that occurs only in another D3 field (display name, inventory ID, OS family/release, enrollment state, endpoint label, criticality) or in the docs (previously: inventory display names and IDs were in the set) | Not in the trusted host set → **red** "host not from your question or inventory", in V2 as in V3. So neither a documented `curl` shape nor a `nebula` command that sends a credential (for example `nebula pve remote add … --endpoint … --action-token`) can be pointed at a host the user did not name or that came from host-controlled data |
-  | V6 | **Destructive shapes.** Any **unit** of the command (V2 or V3, after the checks above passed; units defined below) matches the reviewed **destructive-pattern list** in `internal/helpcmd/`: `rm` with `-r`/`-R`/`-f` (also inside a single-dash cluster such as `-rf`) or `--recursive`/`--force`, `userdel`, `groupdel`, `shred`, `dd`, `mkfs*`, `wipefs`, `truncate`, `tar` extracting (see units below), `docker compose down -v`, `docker volume rm`, `docker system prune`, `apt remove`/`purge`, and the catalog paths `nebula restore`, `nebula netdev remove`, `nebula pve remote remove`, `nebula container definition remove`, `nebula webauthn remove`, `nebula totp remove`, `nebula signer remove`, `nebula secret rm`, `nebula host unpin`, `nebula host clear`, `nebula artifact unpin`, `nebula read-grant revoke`, `nebula schedule revoke`, `nebula netdev repin`, `nebula pve remote repin`, `nebula pve remote rotate-token` (previously only `nebula restore`, the rest deferred as *verify*). The catalog test fails when a catalog path whose last word is `remove`, `rm`, `delete`, `revoke`, `unpin`, `clear`, `repin`, `rotate-token`, `reset`, `purge` or `wipe` is not in this list | At least **amber** "destructive: deletes or replaces data, users or keys; compare with the cited section before running", even when the shape is cited. This covers today's documented `sudo rm -rf /var/lib/nebula /etc/nebula`, `sudo userdel nebula-server; …`, `sudo groupdel nebula-rpc` (admin guide 16) and `shred -u ./nebula-default.key` (admin guide 3.3). An uncited destructive command stays red (V2 unknown or V3 no shape) with the wording "potentially destructive, not from the docs" |
+  | V6 | **Harmless-command allowlist** (maintainer decision 2026-11-16, Axel; previously a deny list: a command was flagged only when a unit matched the destructive-pattern list, which reviews of PR #596 bypassed with `taskset`, `toybox`, `podman`/`pct exec`, `python3 -c`, `trap`, `alias`, `source` and `su` with several `-c`). A command (V2 or V3, after the checks above passed) is **harmless** only when **every** simple command of it (each pipeline member and each `;`, `&&`, `\|\|` and `&` part) is, word for word, a program of the **V6 allowlist** (below) with an allowed subcommand and allowed options. Everything else is **indeterminate**: every other program, every wrapper (`sudo`, `env`, `NAME=value`, `exec`, `nice`, `nohup`, `time`, `timeout`, `taskset`, `xargs`, `find -exec`, `sh`/`bash -c`, `su -c`, interpreters with `-c`/`-e`, `docker run`/`exec`, `pct`/`qm exec`), a program word with a `/`, every redirection (`>` and `>>` included, they are never harmless), `$(…)`, backticks, `$` expansions, globs, escapes, here-documents, groups, function definitions, reserved words and any `!` (interactive bash history expansion). The reviewed **destructive-pattern list** in `internal/helpcmd/`: `rm` with `-r`/`-R`/`-f` (also inside a single-dash cluster such as `-rf`) or `--recursive`/`--force`, `userdel`, `groupdel`, `shred`, `dd`, `mkfs*`, `wipefs`, `truncate`, `tar` extracting (see units below), `docker compose down -v`, `docker volume rm`, `docker system prune`, `apt remove`/`purge`, and the catalog paths `nebula restore`, `nebula netdev remove`, `nebula pve remote remove`, `nebula container definition remove`, `nebula webauthn remove`, `nebula totp remove`, `nebula signer remove`, `nebula secret rm`, `nebula host unpin`, `nebula host clear`, `nebula artifact unpin`, `nebula read-grant revoke`, `nebula schedule revoke`, `nebula netdev repin`, `nebula pve remote repin`, `nebula pve remote rotate-token` (previously only `nebula restore`, the rest deferred as *verify*) is kept, but since 2026-11-16 it only chooses the wording of a command that is not harmless; it never makes a command harmless. The catalog test fails when a catalog path whose last word is `remove`, `rm`, `delete`, `revoke`, `unpin`, `clear`, `repin`, `rotate-token`, `reset`, `purge` or `wipe` is not in this list | Not harmless → at least **amber**, so the user must confirm the command against the cited section before running it, even when the shape is cited: "destructive: deletes or replaces data, users or keys; compare with the cited section before running" when a unit (units below) matches the destructive-pattern list, otherwise "not recognised as harmless; compare with the cited section before running" (previously: no flag unless a unit matched the list). This covers today's documented `sudo rm -rf /var/lib/nebula /etc/nebula`, `sudo userdel nebula-server; …`, `sudo groupdel nebula-rpc` (admin guide 16) and `shred -u ./nebula-default.key` (admin guide 3.3). An uncited destructive command stays red (V2 unknown or V3 no shape) with the wording "potentially destructive, not from the docs" |
 
   **What V6 matches (units).** V6 never looks only at the first word of
   the command (previously undefined). The command is split by the V3
@@ -411,6 +417,49 @@ does NOS connect **from** (`--from`)?
   or `--recursive`/`--force` is present. Further tests: `tar xzf
   a.tar.gz`, `tar --extract -f a.tar`, `rm --recursive /x` and
   `rm --force /x` each hit V6.
+
+  The units above are used only for the destructive wording. The
+  harmless check does **not** unwrap: a wrapper never makes its command
+  harmless, whatever it runs, so an unknown wrapper, runner, shell,
+  alias or interpreter cannot hide a command from V6.
+
+  **V6 allowlist (harmless commands; decision 2026-11-16, Axel).** The
+  list is short on purpose: only programs that read and show state, with
+  the subcommands and options below. Each program is matched by its exact
+  bare name (`ls`, never `/bin/ls` or `./ls`), the subcommand by its exact
+  position right after the program (after the listed global options for
+  `ip`, `systemctl`), and each option by its exact spelling, so a GNU
+  long-option abbreviation (`journalctl --vac…`) or an unlisted option
+  makes the command indeterminate. Programs that open their operands as
+  files (`cat`, `head`, `tail`, `wc`, `grep`) are not harmless when an
+  operand has a path element `dev`, `proc` or `sys` (opening
+  `/dev/watchdog` or reading `/proc/kmsg` has side effects).
+
+  | Program | Allowed forms | Why harmless |
+  | --- | --- | --- |
+  | `ls`, `df`, `du`, `free`, `uptime`, `ps` | any options and operands | only stat files or read `/proc`; no option writes, deletes or runs anything |
+  | `cat`, `head`, `tail`, `wc` | the display options (`-n`, `-c`, `-f`, `-l`, …; not `wc --files0-from`) | read their operands, write only to stdout |
+  | `grep` | matching and output options, `-e`, `-m`, `-A`/`-B`/`-C`; not `-r`/`-R`, `-d`, `-D`, `-f` | reads its operands; recursion and device or pattern files are not harmless |
+  | `ip` | `ip a`/`addr`/`address` and `ip r`/`ro`/`route`, alone or with `show`/`list` and filters; global options `-4`, `-6`, `-br`, `-brief`, `-c`, `-color`, `-j`, `-json`, `-p`, `-pretty`, `-s`, `-stats`, `-d`, `-details` | listing only; never `-b`/`-batch`, `-n`/`-netns`, `-force` or any other verb |
+  | `ss` | listing options (`-t`, `-u`, `-l`, `-n`, `-p`, `-a`, …) and filters | not `-K`/`--kill`, `-D`/`--diag`, `-F`/`--filter`, `-N`/`--net` |
+  | `journalctl` | selection and output options (`-u`, `-b`, `-n`, `-f`, `-e`, `-o`, `--since`, `--until`, `--no-pager`, `--disk-usage`, …) | not `--vacuum-*`, `--rotate`, `--flush`, `--sync`, `--relinquish-var`, `--setup-keys`, `--cursor-file`, `--file`, `-D`, `-M` |
+  | `systemctl` | `status`, `show`, `list-units`, `list-unit-files`, `list-sockets`, `list-timers`, `list-jobs`, `list-dependencies`, `list-machines`, `list-automounts`, `list-paths` with display options | no `-H`/`--host`, `-M`, `--root` |
+  | `docker` | `docker ps`, `docker logs`, `docker inspect` with their display options | no global option, no other subcommand |
+  | `qm`, `pct` | `list`, `config`, `status` | no other subcommand (`pct exec`, `qm destroy` …) |
+  | `zpool` | `list`, `status` (not `status -c`, which runs scripts) | listing only |
+  | `zfs` | `list` | listing only |
+
+  `nebula` is not on the list yet, so every `nebula` command, including
+  `nebula status`, is amber until a reviewed ADR change adds its
+  read-only catalog paths. A change to this list needs an ADR change and
+  a maintainer review. Required tests: every bypass from the reviews of
+  PR #596 is indeterminate (`taskset 1 rm -rf /x`, `toybox rm -rf /x`,
+  `podman run img rm -rf /x`, `pct exec 100 -- rm -rf /x`,
+  `builtin eval 'rm -rf /x'`, `trap 'rm -rf /x' EXIT`,
+  `alias ls='rm -rf /x'; ls`, `source ./x.sh`, `python3 -c …`,
+  `su -c 'echo hi' -c 'userdel bob'`, `PS1='$(rm -rf /x)'`), `ls > x`
+  and `ls >> x` are indeterminate, each allowlist form is harmless, and a
+  fuzz test shows that no input with an unknown program is harmless.
 
   **Trusted host set (V5).** Built per question, before the LLM call, from
   exactly three sources:
@@ -1704,7 +1753,9 @@ does NOS connect **from** (`--from`)?
   list (V6) does not decide whether a command is red; it chooses the
   wording of the red flag ("potentially destructive, not from the docs")
   and gives a cited destructive shape at least amber (previously: only
-  the wording, so a cited `rm -rf` was unflagged).
+  the wording, so a cited `rm -rf` was unflagged). Since 2026-11-16 the
+  V6 allowlist decides amber: every command that is not on it is at least
+  amber, the list only chooses the wording.
 
   **Command catalog (V2).** The catalog is a checked-in table in
   `internal/helpcmd/` (subcommand paths and their flags). It is **never
@@ -1876,6 +1927,16 @@ Q12 is carried out in the same change (as01d): `docs/handbook/` and
 `docs/admin/guide.md` are in `.github/protected-paths.txt`, and T2 states
 the mitigation as enforced. The places in D2, D4 and D5 that left Q1, Q2,
 Q7, Q8 and Q10 open now state the decision.
+
+## Maintainer decision 2026-11-16
+
+- **V6 as an allowlist (Axel, 2026-11-16 22:36):** after two review
+  rounds of PR #596 still found HIGH bypasses of the deny list (`taskset`,
+  `toybox`, `podman`/`pct exec`, `python3 -c`, `trap`, `alias`, `source`,
+  `su` with several `-c`), V6 is turned around: a command is harmless only
+  when every unit is on the short, reasoned V6 allowlist; everything else
+  needs confirmation (amber). Wrappers always make a command
+  indeterminate. V1 is unchanged.
 
 ## Consequences
 
