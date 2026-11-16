@@ -53,6 +53,7 @@ const (
 	dirRevokedKeys
 	dirAuthorizedKeysCommand
 	dirAuthorizedPrincipalsCommand
+	dirMatch
 )
 
 // directives maps the lowercase ASCII keyword to its kind (sshd keywords are
@@ -65,7 +66,20 @@ var directives = map[string]directive{
 	"revokedkeys":                 dirRevokedKeys,
 	"authorizedkeyscommand":       dirAuthorizedKeysCommand,
 	"authorizedprincipalscommand": dirAuthorizedPrincipalsCommand,
+	"match":                       dirMatch,
 }
+
+// lineKind tells Parse what a configuration line means for the default
+// AuthorizedKeysFile.
+type lineKind uint8
+
+const (
+	lineOther lineKind = iota
+	// lineAuthKeysFile is an AuthorizedKeysFile line (including "none").
+	lineAuthKeysFile
+	// lineMatch starts a Match block.
+	lineMatch
+)
 
 // Directives are the login-relevant values of one host's sshd configuration,
 // as compiled entries. Build the matching set with Set.
@@ -87,23 +101,34 @@ func (d Directives) Set() *Set { return &Set{entries: d.entries} }
 // Errors name the file and the line only, never the content.
 func Parse(files []fimscan.SSHConfigFile) (Directives, error) {
 	var d Directives
-	authKeysSeen := false
+	// authKeysGlobal reports an AuthorizedKeysFile outside every Match block
+	// seen so far; inMatch reports that a Match block has started. Once a
+	// Match block starts, its scope runs to the next Match line or the end of
+	// the file, and the array's later files are read after it, so every later
+	// AuthorizedKeysFile is treated as scoped (the default is kept). That
+	// over-includes at worst, which is the fail-closed direction.
+	authKeysGlobal, inMatch := false, false
 	for _, f := range files {
 		for n, line := range bytes.Split(f.Content, []byte{'\n'}) {
-			seen, err := d.addLine(string(line))
+			kind, err := d.addLine(string(line))
 			if err != nil {
 				if errors.Is(err, ErrOverflow) {
 					return Directives{}, err
 				}
 				return Directives{}, fmt.Errorf("sshd config %q line %d: %w", f.Path, n+1, err)
 			}
-			authKeysSeen = authKeysSeen || seen
+			switch kind {
+			case lineMatch:
+				inMatch = true
+			case lineAuthKeysFile:
+				authKeysGlobal = authKeysGlobal || !inMatch
+			}
 			if len(d.entries) > MaxDerivedValues {
 				return Directives{}, ErrOverflow
 			}
 		}
 	}
-	if !authKeysSeen {
+	if !authKeysGlobal {
 		for _, v := range defaultAuthorizedKeys {
 			e, err := userEntry(v)
 			if err != nil {
@@ -118,12 +143,12 @@ func Parse(files []fimscan.SSHConfigFile) (Directives, error) {
 	return d, nil
 }
 
-// addLine parses one line. It reports whether the line is an
-// AuthorizedKeysFile directive (so the default must not apply).
-func (d *Directives) addLine(line string) (bool, error) {
+// addLine parses one line and reports what it means for the default
+// AuthorizedKeysFile (see lineKind).
+func (d *Directives) addLine(line string) (lineKind, error) {
 	s := strings.TrimLeft(line, " \t\r")
 	if s == "" || s[0] == '#' {
-		return false, nil
+		return lineOther, nil
 	}
 	kw, rest := s, ""
 	if i := strings.IndexAny(s, " \t\r="); i >= 0 {
@@ -131,20 +156,20 @@ func (d *Directives) addLine(line string) (bool, error) {
 	}
 	kind, ok := directives[asciiLower(kw)]
 	if !ok {
-		return false, nil
+		return lineOther, nil
 	}
 	rest = strings.TrimLeft(rest, " \t\r")
 	if strings.HasPrefix(rest, "=") {
 		// The "=" separator is not fixed by the ADR: do not guess.
-		return false, ErrUnclassifiable
+		return lineOther, ErrUnclassifiable
 	}
 	toks := strings.FieldsFunc(rest, isSep)
 	if len(toks) == 0 {
-		return false, ErrUnclassifiable
+		return lineOther, ErrUnclassifiable
 	}
 	for _, t := range toks {
 		if !validToken(t) {
-			return false, ErrUnclassifiable
+			return lineOther, ErrUnclassifiable
 		}
 	}
 	switch kind {
@@ -152,49 +177,61 @@ func (d *Directives) addLine(line string) (bool, error) {
 		for _, t := range toks {
 			e, err := includeEntry(t)
 			if err != nil {
-				return false, err
+				return lineOther, err
 			}
 			d.entries = append(d.entries, e)
 		}
 	case dirAuthorizedKeysFile, dirAuthorizedPrincipalsFile:
 		if len(toks) == 1 && toks[0] == "none" {
-			return kind == dirAuthorizedKeysFile, nil
+			return authKeysLine(kind), nil
 		}
 		for _, t := range toks {
 			if t == "none" {
-				return false, ErrUnclassifiable
+				return lineOther, ErrUnclassifiable
 			}
 			e, err := userEntry(t)
 			if err != nil {
-				return false, err
+				return lineOther, err
 			}
 			d.entries = append(d.entries, e)
 		}
-		return kind == dirAuthorizedKeysFile, nil
+		return authKeysLine(kind), nil
+	case dirMatch:
+		return lineMatch, nil
 	case dirTrustedUserCAKeys, dirRevokedKeys:
 		if len(toks) != 1 {
-			return false, ErrUnclassifiable
+			return lineOther, ErrUnclassifiable
 		}
 		e, err := daemonEntry(toks[0])
 		if err != nil {
-			return false, err
+			return lineOther, err
 		}
 		d.entries = append(d.entries, e)
 	case dirAuthorizedKeysCommand, dirAuthorizedPrincipalsCommand:
 		if toks[0] == "none" {
-			return false, nil
+			return lineOther, nil
 		}
 		prog := toks[0]
 		if !strings.HasPrefix(prog, "/") || strings.Contains(prog, "%") {
-			return false, ErrUnclassifiable
+			return lineOther, ErrUnclassifiable
 		}
 		e, err := literalEntry(prog)
 		if err != nil {
-			return false, err
+			return lineOther, err
 		}
 		d.entries = append(d.entries, e)
 	}
-	return false, nil
+	return lineOther, nil
+}
+
+// authKeysLine is the lineKind of a parsed AuthorizedKeysFile or
+// AuthorizedPrincipalsFile directive. Only AuthorizedKeysFile affects the
+// default.
+func authKeysLine(kind directive) lineKind {
+	if kind == dirAuthorizedKeysFile {
+		return lineAuthKeysFile
+	}
+	return lineOther
 }
 
 func isSep(r rune) bool { return r == ' ' || r == '\t' || r == '\r' }

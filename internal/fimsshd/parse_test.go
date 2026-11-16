@@ -93,8 +93,60 @@ func TestKeywordsAreCaseInsensitiveAndApplyInMatch(t *testing.T) {
 	if got := s.Match([]byte("/srv/keys/bob")); got != fimbaseline.SSHFile {
 		t.Fatalf("Match(/srv/keys/bob) = %v, want SSHFile", got)
 	}
-	if got := s.Match([]byte("/root/.ssh/authorized_keys")); got != fimbaseline.SSHNone {
-		t.Fatalf("default still applied when directive present: %v", got)
+	// A Match-scoped AuthorizedKeysFile does not replace the default for users
+	// the Match block does not cover, so the default stays a login file.
+	if got := s.Match([]byte("/root/.ssh/authorized_keys")); got != fimbaseline.SSHFile {
+		t.Fatalf("default dropped for users outside the Match block: %v", got)
+	}
+}
+
+// TestGlobalAuthorizedKeysFileReplacesDefault checks that an AuthorizedKeysFile
+// outside any Match block replaces the OpenSSH default for every user.
+func TestGlobalAuthorizedKeysFileReplacesDefault(t *testing.T) {
+	tests := map[string]string{
+		"values":            "AuthorizedKeysFile /srv/k/%u\n",
+		"none":              "AuthorizedKeysFile none\n",
+		"after other lines": "Port 22\nPasswordAuthentication no\nAuthorizedKeysFile /srv/k/%u\n",
+	}
+	for name, content := range tests {
+		t.Run(name, func(t *testing.T) {
+			s := setFor(t, content)
+			if got := s.Match([]byte("/root/.ssh/authorized_keys")); got != fimbaseline.SSHNone {
+				t.Fatalf("default applied globally: %v", got)
+			}
+		})
+	}
+}
+
+// TestMatchScopeKeepsDefault checks that once a Match block has started, every
+// AuthorizedKeysFile after it is scoped (sshd Match blocks run to the next
+// Match line or the end of the file), so the default stays for other users,
+// also across files of the SSH configuration array.
+func TestMatchScopeKeepsDefault(t *testing.T) {
+	tests := map[string]string{
+		"scoped values": "Match User bob\nAuthorizedKeysFile /srv/k/%u\n",
+		"scoped none":   "Match User bob\nAuthorizedKeysFile none\n",
+		"match all":     "Match all\nAuthorizedKeysFile /srv/k/%u\n",
+		"after match":   "Match User bob\nPort 22\nAuthorizedKeysFile /srv/k/%u\n",
+	}
+	for name, content := range tests {
+		t.Run(name, func(t *testing.T) {
+			s := setFor(t, content)
+			if got := s.Match([]byte("/root/.ssh/authorized_keys")); got != fimbaseline.SSHFile {
+				t.Fatalf("default dropped: %v", got)
+			}
+		})
+	}
+	files := []fimscan.SSHConfigFile{
+		{Path: []byte("/etc/ssh/sshd_config"), Content: []byte("Match User bob\n")},
+		{Path: []byte("/etc/ssh/sshd_config.d/x.conf"), Content: []byte("AuthorizedKeysFile none\n")},
+	}
+	d, err := Parse(files)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := d.Set().Match([]byte("/root/.ssh/authorized_keys")); got != fimbaseline.SSHFile {
+		t.Fatalf("default dropped across files: %v", got)
 	}
 }
 
