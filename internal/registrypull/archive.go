@@ -11,8 +11,9 @@ import (
 	"time"
 )
 
-// archiveWriter writes the docker-archive tar stream: verified blobs under
-// blobs/<alg>/<hex>, then manifest.json and repositories, then the trailer.
+// archiveWriter writes the image tar stream: verified blobs under
+// blobs/<alg>/<hex>, then the verified platform manifest blob,
+// manifest.json, repositories, oci-layout and index.json, then the trailer.
 type archiveWriter struct {
 	tw   *tar.Writer
 	dirs map[string]bool
@@ -62,10 +63,67 @@ type archiveManifest struct {
 	Layers   []string `json:"Layers"`
 }
 
-// finish writes manifest.json and repositories and closes the tar stream.
-func (a *archiveWriter) finish(cfg digest, repoTag, repoName, tag string, layers []string) error {
+// OCI image layout entries (image-spec v1.1 image-layout).
+const (
+	ociLayoutVersion = "1.0.0"
+	// annotationImageName is containerd's image name annotation; a
+	// containerd-store `docker load` names the image after it.
+	annotationImageName = "io.containerd.image.name"
+	// annotationRefName is the OCI reference name annotation (the tag).
+	annotationRefName = "org.opencontainers.image.ref.name"
+)
+
+// ociIndexEntry is the one index.json descriptor: the verified platform
+// manifest with its platform and names.
+type ociIndexEntry struct {
+	MediaType   string            `json:"mediaType"`
+	Digest      string            `json:"digest"`
+	Size        int64             `json:"size"`
+	Platform    ociPlatform       `json:"platform"`
+	Annotations map[string]string `json:"annotations"`
+}
+
+type ociPlatform struct {
+	Architecture string `json:"architecture"`
+	OS           string `json:"os"`
+	Variant      string `json:"variant,omitempty"`
+}
+
+type ociIndex struct {
+	SchemaVersion int             `json:"schemaVersion"`
+	MediaType     string          `json:"mediaType"`
+	Manifests     []ociIndexEntry `json:"manifests"`
+}
+
+// finish writes the verified platform manifest blob, manifest.json,
+// repositories, oci-layout and index.json, and closes the tar stream.
+//
+// The archive is both a docker-archive (manifest.json, read by the classic
+// image store) and an OCI image layout (oci-layout and index.json, read by
+// the containerd image store), as `docker save` writes it. The layout
+// names the registry's own manifest bytes, so a containerd import keeps
+// the registry manifest digest as the image target; from manifest.json
+// alone it would generate a manifest with another digest.
+func (a *archiveWriter) finish(cfg digest, repoTag, repoName, tag string, layers []string, om ociManifest, pl Platform, written map[string]bool) error {
 	if layers == nil {
 		layers = []string{}
+	}
+	// The manifest blob is written once, like a duplicate layer.
+	if !written[om.digest.String()] {
+		if err := a.dir(om.digest.path()); err != nil {
+			return err
+		}
+		if err := a.bytes(om.digest.path(), om.body); err != nil {
+			return err
+		}
+	}
+	idx, err := json.Marshal(ociIndex{SchemaVersion: 2, MediaType: mtOCIIndex, Manifests: []ociIndexEntry{{
+		MediaType: om.mediaType, Digest: om.digest.String(), Size: int64(len(om.body)),
+		Platform:    ociPlatform{Architecture: pl.Architecture, OS: pl.OS, Variant: pl.Variant},
+		Annotations: map[string]string{annotationImageName: repoTag, annotationRefName: tag},
+	}}})
+	if err != nil {
+		return fmt.Errorf("registrypull: encode index.json: %w", err)
 	}
 	man, err := json.Marshal([]archiveManifest{{Config: cfg.path(), RepoTags: []string{repoTag}, Layers: layers}})
 	if err != nil {
@@ -79,6 +137,12 @@ func (a *archiveWriter) finish(cfg digest, repoTag, repoName, tag string, layers
 		return err
 	}
 	if err := a.bytes("repositories", repos); err != nil {
+		return err
+	}
+	if err := a.bytes("oci-layout", []byte(`{"imageLayoutVersion":"`+ociLayoutVersion+`"}`)); err != nil {
+		return err
+	}
+	if err := a.bytes("index.json", idx); err != nil {
 		return err
 	}
 	if err := a.tw.Close(); err != nil {
