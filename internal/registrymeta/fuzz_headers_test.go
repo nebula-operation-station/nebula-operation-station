@@ -236,7 +236,7 @@ func FuzzParseRef(f *testing.F) {
 // whose registry part carries userinfo ("user@host/repo"): ParseRef accepted
 // it and produced a registry "https://user@host".
 func TestParseRefRefusesUserinfoHost(t *testing.T) {
-	for _, in := range []string{"a@b/repo:1", "user:pw@evil.example/repo", "https://u@evil.example/repo"} {
+	for _, in := range []string{"a@b/repo:1", "user:pw@evil.example/repo", "https://u@evil.example/repo", " /0", "ex ample.com/repo"} {
 		if _, err := ParseRef(in); !errors.Is(err, ErrBadRef) {
 			t.Errorf("ParseRef(%q): want ErrBadRef, got %v", in, err)
 		}
