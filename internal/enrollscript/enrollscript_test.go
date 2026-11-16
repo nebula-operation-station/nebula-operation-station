@@ -205,3 +205,16 @@ func TestRenderKeyIsReencoded(t *testing.T) {
 		t.Fatal("fingerprint missing")
 	}
 }
+
+func TestValidAddressRefusesZeroPaddedPrefix(t *testing.T) {
+	for _, a := range []string{"10.0.0.1/024", "2001:db8::/0128", "10.0.0.1/0000000024", "::/00"} {
+		if ValidAddress(a) {
+			t.Errorf("ValidAddress(%q) accepted a zero-padded or over-long prefix", a)
+		}
+	}
+	for _, a := range []string{"10.0.0.0/24", "10.0.0.1/0", "2001:db8::/128", "10.0.0.1"} {
+		if !ValidAddress(a) {
+			t.Errorf("ValidAddress(%q) refused a canonical address", a)
+		}
+	}
+}
