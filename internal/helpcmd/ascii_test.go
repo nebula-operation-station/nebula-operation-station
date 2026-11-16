@@ -13,7 +13,7 @@ func TestCheckASCIIAcceptsPrintableASCII(t *testing.T) {
 		"",
 		"nebula status",
 		"sudo rm -rf /var/lib/nebula",
-		" ~ ",                          // 0x20 and 0x7E are the bounds
+		" ~ ", // 0x20 and 0x7E are the bounds
 		"curl --cacert 'x' 'https://a/b?c=d&e=f'",
 	}
 	for _, s := range cases {
