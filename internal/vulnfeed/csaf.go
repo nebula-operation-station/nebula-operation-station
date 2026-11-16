@@ -140,6 +140,9 @@ func ParseCSAFKeyring(armored ...[]byte) (*CSAFKeyring, error) {
 			}
 		}
 		all = append(all, ents...)
+		if len(all) > MaxCSAFPinnedKeys {
+			return nil, fmt.Errorf("parse keyring: more than %d keys: %w", MaxCSAFPinnedKeys, ErrCSAFKeyring)
+		}
 	}
 	return &CSAFKeyring{entities: all}, nil
 }
