@@ -433,17 +433,32 @@ does NOS connect **from** (`--from`)?
   makes the command indeterminate. Programs that open their operands as
   files (`cat`, `head`, `tail`, `wc`, `grep`) are not harmless when an
   operand has a path element `dev`, `proc` or `sys` (opening
-  `/dev/watchdog` or reading `/proc/kmsg` has side effects).
+  `/dev/watchdog` or reading `/proc/kmsg` has side effects). An option
+  whose value is optional (journalctl `-n`, `-b`) is a flag: its value
+  is the rest of its cluster (`-n20`), and the next word counts as its
+  value only when it has the form the program requires for it (a bare
+  `-n` takes a count `N` or `+N` of at most nine digits, a bare `-b`
+  never takes the next word in the check); otherwise the
+  next word is checked as its own option or operand, as the program
+  reads it, so `journalctl -n --rotate` is indeterminate (previously
+  a bare `-n` always took the next word, so `journalctl -n
+  --vacuum-size=1K` was harmless). Digits are never option letters: only
+  a whole `-NUM` word is accepted for `head` and `tail`, and the obsolete
+  `-5c`/`-5n` forms are indeterminate. `systemctl status`/`show` and
+  `journalctl` without `--no-pager` open a pager on a terminal, from
+  which the user can run commands (`!cmd` in `less`); this needs the
+  user's own keystrokes and is not a command the text runs, so it does
+  not change the verdict.
 
   | Program | Allowed forms | Why harmless |
   | --- | --- | --- |
   | `ls`, `df`, `free`, `uptime`, `ps` | any options and operands | only stat files or read `/proc`; no option writes, deletes or runs anything |
   | `du` | the size and display options (`-s`, `-h`, `-d`, `--max-depth`, …); not `--files0-from` or `-X`/`--exclude-from` | only stats files; those two options open a file |
-  | `cat`, `head`, `tail`, `wc` | the display options (`-n`, `-c`, `-f`, `-l`, …; not `wc --files0-from`) | read their operands, write only to stdout |
+  | `cat`, `head`, `tail`, `wc` | the display options (`-n`, `-c`, `-f`, `-l`, `-NUM`, …; not `wc --files0-from`, not `-5c`) | read their operands, write only to stdout |
   | `grep` | matching and output options, `-e`, `-m`, `-A`/`-B`/`-C`; not `-r`/`-R`, `-d`, `-D`, `-f` | reads its operands; recursion and device or pattern files are not harmless |
   | `ip` | `ip a`/`addr`/`address` and `ip r`/`ro`/`route`, alone or with `show`/`list` and filters; global options `-4`, `-6`, `-br`, `-brief`, `-c`, `-color`, `-j`, `-json`, `-p`, `-pretty`, `-s`, `-stats`, `-d`, `-details` | listing only; never `-b`/`-batch`, `-n`/`-netns`, `-force` or any other verb |
   | `ss` | listing options (`-t`, `-u`, `-l`, `-n`, `-p`, `-a`, …) and filters | not `-K`/`--kill`, `-D`/`--diag`, `-F`/`--filter`, `-N`/`--net` |
-  | `journalctl` | selection and output options (`-u`, `-b`, `-n`, `-f`, `-e`, `-o`, `--since`, `--until`, `--no-pager`, `--disk-usage`, …) | not `--vacuum-*`, `--rotate`, `--flush`, `--sync`, `--relinquish-var`, `--setup-keys`, `--cursor-file`, `--file`, `-D`, `-M` |
+  | `journalctl` | selection and output options (`-u`, `-b`, `-n` (a bare `-n` or `-b` takes the next word only as described above), `-f`, `-e`, `-o`, `--since`, `--until`, `--no-pager`, `--disk-usage`, …) | not `--vacuum-*`, `--rotate`, `--flush`, `--sync`, `--relinquish-var`, `--setup-keys`, `--cursor-file`, `--file`, `-D`, `-M` |
   | `systemctl` | `status`, `show`, `list-units`, `list-unit-files`, `list-sockets`, `list-timers`, `list-jobs`, `list-dependencies`, `list-machines`, `list-automounts`, `list-paths` with display options | no `-H`/`--host`, `-M`, `--root` |
   | `docker` | `docker ps`, `docker logs`, `docker inspect` with their display options | no global option, no other subcommand |
   | `qm`, `pct` | `list`, `config`, `status` | no other subcommand (`pct exec`, `qm destroy` …) |

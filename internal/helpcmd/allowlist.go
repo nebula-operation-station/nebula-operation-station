@@ -38,6 +38,17 @@ type argSpec struct {
 	// shortValue are short options with a value: the rest of the cluster
 	// (`-n20`) or, when last in the cluster, the next word (`-n 20`).
 	shortValue string
+	// shortOptional are short options with an optional value (getopt `n::`):
+	// the rest of the cluster is the value (`-n20`, `-b-1`). A bare option,
+	// last in its cluster, takes the next word only when the form for its
+	// letter accepts that word (journalctl `-n 20`); otherwise, and when the
+	// form is nil, the next word is checked as an option or operand of its
+	// own, as the program reads it (`journalctl -n --rotate`).
+	shortOptional map[byte]func(string) bool
+	// numericWord accepts a whole word `-NUM` (head and tail `-5`). Digits
+	// are never cluster letters: `-5c` is one obsolete count option, not
+	// `-5 -c`, and stays indeterminate.
+	numericWord bool
 	// long maps a long option, with its leading `--`, to its kind.
 	long map[string]longKind
 	// exact are whole option words accepted as written (`ip -br`).
@@ -173,8 +184,9 @@ func (sp argSpec) scan(args []string, stopAtOperand, opensFiles bool) (rest []st
 			default:
 				return nil, false
 			}
+		case sp.numericWord && isNumericOption(w):
 		case len(w) > 1 && w[0] == '-':
-			n, ok := sp.shortCluster(w, len(args)-i-1)
+			n, ok := sp.shortCluster(w, args[i+1:])
 			if !ok {
 				return nil, false
 			}
@@ -191,9 +203,9 @@ func (sp argSpec) scan(args []string, stopAtOperand, opensFiles bool) (rest []st
 	return nil, true
 }
 
-// shortCluster checks the short option cluster w. left is the number of
-// words after w. It returns how many of them are consumed as a value.
-func (sp argSpec) shortCluster(w string, left int) (consumed int, ok bool) {
+// shortCluster checks the short option cluster w. next are the words after w.
+// It returns how many of them are consumed as a value.
+func (sp argSpec) shortCluster(w string, next []string) (consumed int, ok bool) {
 	for k := 1; k < len(w); k++ {
 		ch := w[k]
 		if strings.IndexByte(sp.shortFlags, ch) >= 0 {
@@ -203,14 +215,59 @@ func (sp argSpec) shortCluster(w string, left int) (consumed int, ok bool) {
 			if k < len(w)-1 {
 				return 0, true // value attached: -n20
 			}
-			if left < 1 {
+			if len(next) < 1 {
 				return 0, false
 			}
 			return 1, true
 		}
+		if form, isOpt := sp.shortOptional[ch]; isOpt {
+			if k < len(w)-1 {
+				return 0, true // value attached: -n20
+			}
+			if form != nil && len(next) > 0 && form(next[0]) {
+				return 1, true
+			}
+			return 0, true
+		}
 		return 0, false
 	}
 	return 0, true
+}
+
+// maxCountDigits bounds the digits of a count that the check treats as a
+// number: nine digits always fit a C int, so the program parses the word as
+// a number too and never falls back to reading it as an option or operand.
+const maxCountDigits = 9
+
+// isCount reports whether w is a decimal count without a leading zero (or
+// "0"), at most maxCountDigits long. Base-0 and base-10 parsers read it the
+// same way.
+func isCount(w string) bool {
+	if w == "0" {
+		return true
+	}
+	if len(w) == 0 || len(w) > maxCountDigits || w[0] == '0' {
+		return false
+	}
+	for i := 0; i < len(w); i++ {
+		if w[i] < '0' || w[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// isJournalLines reports whether journalctl takes w as the value of a bare
+// `-n`: a count, optionally with a leading `+`. `all` and other forms it
+// also takes are not needed; they are checked as their own word instead.
+func isJournalLines(w string) bool {
+	return isCount(strings.TrimPrefix(w, "+"))
+}
+
+// isNumericOption reports whether w is `-NUM`, the obsolete line count of
+// head and tail.
+func isNumericOption(w string) bool {
+	return len(w) > 1 && w[0] == '-' && isCount(w[1:])
 }
 
 // operandOK reports whether w may be an operand.
@@ -322,8 +379,9 @@ var allowlist = map[string]allowRule{
 		why:        "reads its operands and writes only to stdout",
 		opensFiles: true,
 		spec: argSpec{
-			shortFlags: "qvz0123456789",
-			shortValue: "nc",
+			shortFlags:  "qvz",
+			shortValue:  "nc",
+			numericWord: true,
 			long: merge(longs(longValue, "--lines", "--bytes"),
 				longs(longFlag, "--quiet", "--silent", "--verbose", "--zero-terminated")),
 			operands: true,
@@ -333,8 +391,9 @@ var allowlist = map[string]allowRule{
 		why:        "reads its operands and writes only to stdout",
 		opensFiles: true,
 		spec: argSpec{
-			shortFlags: "fFqvz0123456789",
-			shortValue: "ncs",
+			shortFlags:  "fFqvz",
+			shortValue:  "ncs",
+			numericWord: true,
 			long: merge(
 				longs(longValue, "--lines", "--bytes", "--sleep-interval", "--pid",
 					"--max-unchanged-stats"),
@@ -408,8 +467,13 @@ var allowlist = map[string]allowRule{
 	"journalctl": {
 		why: "reads the journal; not --vacuum-*, --rotate, --flush, --sync, --relinquish-var, --setup-keys, --cursor-file, --file, -D or -M",
 		spec: argSpec{
-			shortFlags: "fearkxqlmbNh",
-			shortValue: "unpotgSUFc",
+			shortFlags: "fearkxqlmNh",
+			shortValue: "upotgSUFc",
+			// -n and -b take an attached value. A bare -n takes the next
+			// word only when it is a count; a bare -b never takes it here
+			// (journalctl may read a boot id, which is then checked as an
+			// operand or option of its own).
+			shortOptional: map[byte]func(string) bool{'n': isJournalLines, 'b': nil},
 			long: merge(
 				longs(longFlag, "--follow", "--pager-end", "--all", "--reverse",
 					"--dmesg", "--catalog", "--quiet", "--full", "--merge", "--no-pager",

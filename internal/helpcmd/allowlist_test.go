@@ -45,6 +45,20 @@ func TestAllowlistFormsAreHarmless(t *testing.T) {
 		"journalctl --since today",
 		"journalctl -b -e",
 		"journalctl --disk-usage",
+		"journalctl -n 100",
+		"journalctl -n100",
+		"journalctl -n +5 -u x",
+		"journalctl -n",
+		"journalctl -n --no-pager",
+		"journalctl -en 50",
+		"journalctl -fn 20 -u x",
+		"journalctl -en",
+		"journalctl -b",
+		"journalctl -b -u x",
+		"journalctl -b-1",
+		"journalctl -eb",
+		"head -20 x",
+		"tail -20 x",
 		"systemctl status nebula-server",
 		"systemctl status nebula-server --no-pager",
 		"systemctl --no-pager status nebula-server",
@@ -205,6 +219,36 @@ var reviewBypasses = []string{
 	"journalctl -D /x",
 	"journalctl -M c",
 	"journalctl --unit",
+	// tr06h HIGH: journalctl takes the word after a bare -n only when it is
+	// a number, so the word is an option of its own.
+	"journalctl -n --vacuum-size=1K",
+	"journalctl -n --rotate",
+	"journalctl -n --flush",
+	"journalctl -n -D /x",
+	"journalctl -n -M c",
+	"journalctl -en --vacuum-time=1s",
+	"journalctl -fn --vacuum-files=1",
+	"journalctl -n 0x10 --rotate",
+	"journalctl -n -0 --rotate",
+	"journalctl -n 99999999999 --rotate",
+	"journalctl -n all --rotate",
+	"journalctl -n '' --rotate",
+	"journalctl -n ++5 --rotate",
+	// -b takes an attached boot (`-b-1`) or checks the next word; the next
+	// word is never consumed by the check.
+	"journalctl -b --rotate",
+	"journalctl -eb --vacuum-size=1K",
+	"journalctl -b -D /x",
+	// tr06i audit: head and tail read `-5c`, `-5n` as one obsolete count
+	// option; the next word is then a file, not a value.
+	"head -5c /dev/watchdog",
+	"head -5n /proc/kmsg",
+	"tail -5c /dev/watchdog",
+	"tail -5n /proc/kmsg",
+	"tail -5f /dev/x",
+	"head -5v /dev/x",
+	"head -n5 -5c /dev/x",
+	"tail -c 5 -5c /dev/x",
 	"systemctl stop x",
 	"systemctl restart x",
 	"systemctl daemon-reload",
@@ -344,6 +388,33 @@ func TestDestructiveRowStillNamedWhenNotHarmless(t *testing.T) {
 	}
 	if v := Assess("echo hi"); v.Harmless || v.Pattern != "" {
 		t.Errorf("echo: got %+v, want not harmless without a row", v)
+	}
+}
+
+// TestOptionalValueTakesOnlyCounts checks the form that decides whether a
+// bare journalctl -n takes the next word: only a count that every parser
+// reads as a number, so the check never consumes a word the program reads
+// as an option.
+func TestOptionalValueTakesOnlyCounts(t *testing.T) {
+	t.Parallel()
+	for w, want := range map[string]bool{
+		"0": true, "5": true, "+5": true, "123456789": true, "+0": true,
+		"": false, "+": false, "++5": false, "-5": false, "-0": false,
+		"05": false, "089": false, "0x10": false, "1234567890": false,
+		"5k": false, " 5": false, "all": false, "--rotate": false, "-D": false,
+	} {
+		if got := isJournalLines(w); got != want {
+			t.Errorf("isJournalLines(%q) = %v, want %v", w, got, want)
+		}
+	}
+	for w, want := range map[string]bool{
+		"-5": true, "-0": true, "-20": true,
+		"-": false, "-05": false, "-5c": false, "-5n": false, "-c5": false,
+		"--5": false, "-1234567890": false,
+	} {
+		if got := isNumericOption(w); got != want {
+			t.Errorf("isNumericOption(%q) = %v, want %v", w, got, want)
+		}
 	}
 }
 
