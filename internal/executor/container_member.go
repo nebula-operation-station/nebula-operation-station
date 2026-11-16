@@ -53,8 +53,9 @@ import (
 // composeUpdateAction and composeRollbackAction are the container mutations
 // that run: a public compose update (cu02) and its rollback (cu03).
 // standaloneUpdateAction and standaloneRollbackAction are their standalone
-// forms (cu05). Private registry transfer (cu06) is refused here until its
-// executor-side checks exist.
+// forms (cu05). A compose update may name a private registry (cu06): the
+// executor then resolves and loads its images over SSH before the job
+// (registry_transfer.go). Every other action stays public-only.
 const (
 	composeUpdateAction      = "docker.compose_update"
 	composeRollbackAction    = "docker.compose_rollback"
@@ -71,7 +72,7 @@ const (
 	// as embedded in the server's catalog (checked by
 	// TestShippedComposeUpdatePinMatchesEmbeddedScript). Changing it is a
 	// reviewed change of this protected package.
-	composeUpdateArtifactSHA256 = "2b466a5323341bb5012d1417f67c747e0fa0f05fc65748e379356c15df3416f1"
+	composeUpdateArtifactSHA256 = "39ecf0be674988af9c3893ceb23b78f7e7bb18f9d1dff9b92d6ee746c3b7b9ae"
 
 	// composeRollbackVersion is the docker.compose_rollback module version
 	// whose artifact consumes the rollback binding (result
@@ -176,9 +177,9 @@ var (
 	// errContainerBinding: a container member without its update binding,
 	// or with an inspect-derived container binding instead.
 	errContainerBinding = errors.New("container member needs its frozen update binding and no inspect-derived binding")
-	// errContainerUnsupported: private registry members are not executed
-	// yet, and an action carries only its own binding kind and form.
-	errContainerUnsupported = errors.New("only public compose and standalone updates and their rollbacks are executed, each with its own binding kind and form (private registry: cu06)")
+	// errContainerUnsupported: an action carries only its own binding kind
+	// and form, and only a compose update may name a private registry.
+	errContainerUnsupported = errors.New("only compose and standalone updates and their rollbacks are executed, each with its own binding kind and form; only a compose update may name a private registry")
 	// errContainerParameters: the approved parameters are not the
 	// rendering of the frozen binding.
 	errContainerParameters = errors.New("parameters are not the rendering of the frozen binding")
@@ -209,7 +210,7 @@ func checkContainerMember(m canonical.BatchMember, params []byte, pins ...contai
 	}
 	u := *m.ContainerUpdate
 	f, ok := containerMemberForms[m.Request.ActionID]
-	if !ok || u.Kind != f.kind || u.Form != f.form || u.Registry != nil {
+	if !ok || u.Kind != f.kind || u.Form != f.form || (u.Registry != nil && m.Request.ActionID != composeUpdateAction) {
 		return errContainerUnsupported
 	}
 	if !slices.ContainsFunc(pins, func(p containerArtifact) bool {
@@ -259,6 +260,14 @@ func (s *Service) durableMemberTransport(ctx context.Context, x *batchExec, call
 		// A standalone member's definition again, right before the host:
 		// unchanged since the claim and still of an accepted shape.
 		err = s.recheckStandaloneDefinition(run.Member.ContainerUpdate, call.hostID, call.secrets)
+	}
+	if err == nil && run.Member.ContainerUpdate.Registry != nil {
+		// A private image (cu06): phases 2 and 3 run here, over this
+		// member's authenticated session, before the job exists. The host
+		// gets image bytes only; any change of the registry binding, a
+		// lock, an unavailable image store or missing evidence stops the
+		// member without a retry. Containers are untouched until the job.
+		_, err = s.transferPrivateImages(ctx, c.Client, *run.Member.ContainerUpdate)
 	}
 	if err == nil {
 		// The row that keeps the prior image and definition exists before
