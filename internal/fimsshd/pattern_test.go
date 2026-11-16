@@ -136,6 +136,44 @@ func TestIncludeGlobsMatchOneComponentEach(t *testing.T) {
 	}
 }
 
+// TestIncludeGlobQuestionMarkMatchesOneCharacter checks the ? wildcard of an
+// Include glob: exactly one character, one component (ADR 0015 D7 (d)).
+func TestIncludeGlobQuestionMarkMatchesOneCharacter(t *testing.T) {
+	s := setFor(t, "AuthorizedKeysFile none\nInclude sshd_config.d/?.conf\n")
+	tests := map[string]fimbaseline.SSHMatch{
+		"/etc/ssh/sshd_config.d/a.conf":  fimbaseline.SSHFile,
+		"/etc/ssh/sshd_config.d/ab.conf": fimbaseline.SSHNone,
+		"/etc/ssh/sshd_config.d/.conf":   fimbaseline.SSHNone,
+		"/etc/ssh/sshd_config.d/a/conf":  fimbaseline.SSHNone,
+	}
+	for p, want := range tests {
+		if got := s.Match([]byte(p)); got != want {
+			t.Errorf("Match(%q) = %v, want %v", p, got, want)
+		}
+	}
+}
+
+// TestIncludeGlobStarMatchesWithinOneComponent checks that a * in an Include
+// glob matches characters inside one component only and that a leading * may
+// match a leading dot. The second case is conservative: sshd's glob(3) does
+// not load ".x.conf" for "*.conf", so classifying it as a file errs toward
+// critical, which is the fail-closed direction.
+func TestIncludeGlobStarMatchesWithinOneComponent(t *testing.T) {
+	s := setFor(t, "AuthorizedKeysFile none\nInclude sshd_config.d/*-keys.conf\n")
+	tests := map[string]fimbaseline.SSHMatch{
+		"/etc/ssh/sshd_config.d/a-keys.conf":   fimbaseline.SSHFile,
+		"/etc/ssh/sshd_config.d/-keys.conf":    fimbaseline.SSHFile,
+		"/etc/ssh/sshd_config.d/a/b-keys.conf": fimbaseline.SSHNone,
+		"/etc/ssh/sshd_config.d/a-keys.txt":    fimbaseline.SSHNone,
+		"/etc/ssh/sshd_config.d/.x-keys.conf":  fimbaseline.SSHFile,
+	}
+	for p, want := range tests {
+		if got := s.Match([]byte(p)); got != want {
+			t.Errorf("Match(%q) = %v, want %v", p, got, want)
+		}
+	}
+}
+
 // TestCommandProgramIsLiteral checks that a command program matches only its
 // own path, that a quoted-free argument with % is allowed, and that a
 // command program with % is rejected (ADR 0015 D7 (d), D9).

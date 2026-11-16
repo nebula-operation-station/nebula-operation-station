@@ -266,8 +266,14 @@ func daemonEntry(tok string) (entry, error) {
 // includeEntry compiles one Include value. Relative values are resolved
 // against /etc/ssh; glob characters match one component each. Values with %
 // or a leading ~ are not understood (ADR 0015 D7: fail closed).
+//
+// Only the wildcards * and ? are accepted. A bracket expression is not
+// understood: path.Match negates with "^" while glob(3) negates with "!",
+// and the classes differ in other ways too, so no bracket class is compiled
+// (fail closed, ErrUnclassifiable). Backslash and quotes are already
+// rejected by validToken, so no escape semantics can differ either.
 func includeEntry(tok string) (entry, error) {
-	if strings.Contains(tok, "%") || strings.HasPrefix(tok, "~") {
+	if strings.Contains(tok, "%") || strings.HasPrefix(tok, "~") || strings.ContainsRune(tok, '[') {
 		return entry{}, errValue
 	}
 	abs := tok
@@ -280,12 +286,7 @@ func includeEntry(tok string) (entry, error) {
 	}
 	var e entry
 	for _, c := range comps {
-		if strings.ContainsAny(c, "*?[") {
-			if _, err := path.Match(c, ""); err != nil {
-				// A malformed glob is not understood; the library error is not
-				// returned so that error text stays fixed.
-				return entry{}, errValue
-			}
+		if strings.ContainsAny(c, "*?") {
 			e.segs = append(e.segs, seg{kind: segGlob, glob: c})
 			continue
 		}
