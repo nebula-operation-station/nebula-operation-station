@@ -80,18 +80,21 @@ type deviceHit struct {
 	exact, family, firmware bool
 }
 
-// deviceModel is a device's model as token runs. exact is the whole model.
-// family is the model's family before the first "-" when the family has a
-// letter and a digit ("CBS350" for "CBS350-24P-4G"); it names sibling SKUs
-// and only ever leads to a coverage gap, never to a finding. A bare word
-// such as "PA" is no family: it would name every Palo Alto product.
+// deviceModel is a device's model. exact is the normalised model string: a
+// product is the exact model only when its normalised model string is equal
+// (case and whitespace only). family is the model's family before the first
+// "-" when the family has a letter and a digit ("CBS350" for "CBS350-24P-4G");
+// it names sibling SKUs in either direction and only ever leads to a coverage
+// gap, never to a finding. A bare word such as "PA" is no family: it would
+// name every Palo Alto product.
 type deviceModel struct {
-	exact, family []string
+	exact  string
+	family []string
 }
 
-// newDeviceModel tokenizes a device model once per device subject.
+// newDeviceModel normalises a device model once per device subject.
 func newDeviceModel(model string) deviceModel {
-	d := deviceModel{exact: modelTokens(model)}
+	d := deviceModel{exact: normalizeModel(model)}
 	if i := strings.IndexByte(model, '-'); i > 0 {
 		fam := model[:i]
 		if strings.IndexFunc(fam, unicode.IsDigit) >= 0 && strings.IndexFunc(fam, unicode.IsLetter) >= 0 {
@@ -99,6 +102,20 @@ func newDeviceModel(model string) deviceModel {
 		}
 	}
 	return d
+}
+
+// productModel is a CSAF product's model string with its family tokens,
+// built once per product. Only the product's model field (product_name) is
+// used: the full name carries version and vendor words, whose digits must
+// never form a device model.
+type productModel struct {
+	key    string
+	tokens []string
+}
+
+// newProductModel indexes the model field of a CSAF product.
+func newProductModel(product string) productModel {
+	return productModel{key: normalizeModel(product), tokens: modelTokens(product)}
 }
 
 // modelNaming says how a product names a device's model.
@@ -109,20 +126,31 @@ const (
 	namesNothing modelNaming = iota
 	// namesFamily: the product names only the family, a sibling SKU.
 	namesFamily
-	// namesExact: the product names the device's whole model.
+	// namesExact: the product's model string equals the device's model.
 	namesExact
 )
 
-// naming reports how a product, given as its name tokens, names the model.
-// The exact model wins over the family key.
-func (d deviceModel) naming(tokens []string) modelNaming {
+// naming reports how a product names the model. Equality of the normalised
+// model strings is the only exact hit; the family key is a hint at most.
+func (d deviceModel) naming(p productModel) modelNaming {
 	switch {
-	case containsRun(tokens, d.exact):
+	case d.exact != "" && p.key == d.exact:
 		return namesExact
-	case containsRun(tokens, d.family):
+	case containsRun(p.tokens, d.family):
 		return namesFamily
 	}
 	return namesNothing
+}
+
+// normalizeModel lower-cases s and drops all white space: the only
+// normalisation two model strings are compared under.
+func normalizeModel(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsSpace(r) {
+			return -1
+		}
+		return unicode.ToLower(r)
+	}, s)
 }
 
 // modelTokens splits s into lower-case runs of letters and digits.
@@ -143,10 +171,10 @@ func containsRun(tokens, run []string) bool {
 	return false
 }
 
-// indexedProduct is a CSAF product with its name tokens, built once.
+// indexedProduct is a CSAF product with its model string, built once.
 type indexedProduct struct {
-	p      vulnfeed.CSAFProduct
-	tokens []string
+	p     vulnfeed.CSAFProduct
+	model productModel
 }
 
 // indexedAdvisory is a CSAF advisory with its products by ID.
@@ -170,7 +198,7 @@ func (m *matcher) vendorDocs(feed string) []indexedAdvisory {
 		adv := &m.db.csaf[i].adv
 		byID := make(map[string]indexedProduct, len(adv.Products))
 		for _, p := range adv.Products {
-			byID[p.ProductID] = indexedProduct{p: p, tokens: modelTokens(p.Name + " " + p.Product)}
+			byID[p.ProductID] = indexedProduct{p: p, model: newProductModel(p.Product)}
 		}
 		docs = append(docs, indexedAdvisory{adv: adv, byID: byID})
 	}
@@ -200,7 +228,7 @@ func (m *matcher) deviceVuln(s Subject, feed string, d indexedAdvisory, v vulnfe
 			}
 			// Only the exact model is a hit (ADR 0011 D4). A sibling SKU of
 			// the family never decides a finding or a clean status.
-			switch model.naming(ip.tokens) {
+			switch model.naming(ip.model) {
 			case namesFamily:
 				hit.family = true
 				continue
