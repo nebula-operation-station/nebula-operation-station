@@ -64,10 +64,14 @@ func FuzzDecodeRecord(f *testing.F) {
 		if len(rec.Data) > limit {
 			t.Fatalf("payload has %d bytes, limit %d", len(rec.Data), limit)
 		}
-		enc, err := json.Marshal(rec)
-		if err != nil {
+		// Encode like Write does: HTML characters stay verbatim.
+		var buf bytes.Buffer
+		jenc := json.NewEncoder(&buf)
+		jenc.SetEscapeHTML(false)
+		if err := jenc.Encode(rec); err != nil {
 			t.Fatalf("re-encode accepted record: %v", err)
 		}
+		enc := buf.Bytes()
 		again, err := decodeRecord(enc, limit)
 		if err != nil {
 			t.Fatalf("re-decode accepted record: %v", err)
