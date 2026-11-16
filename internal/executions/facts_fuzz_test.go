@@ -106,8 +106,9 @@ func checkDisplayText(t *testing.T, s string) {
 // FuzzDecodeFacts: a malicious host controls every byte of a core.facts result.
 func FuzzDecodeFacts(f *testing.F) {
 	b := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	bidi := string(rune(0x202e)) // RIGHT-TO-LEFT OVERRIDE, written as an escape
 	f.Add([]byte(`{"os_release":"` + b("PRETTY_NAME=\"Debian GNU/Linux 12 (bookworm)\"\nID=debian\nVERSION_ID=\"12\"\n") + `","uname":"` + b("Linux 6.1.0 x86_64\n") +
-		`","hostname":"` + b("web‮01\n") + `","uptime":"` + b("172800.5\n") + `","proxmox":true}`))
+		`","hostname":"` + b("web"+bidi+"01\n") + `","uptime":"` + b("172800.5\n") + `","proxmox":true}`))
 	f.Add(factsDoc("1e308"))
 	f.Add(factsDoc("Inf"))
 	f.Add(factsDoc("NaN"))
