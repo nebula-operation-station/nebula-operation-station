@@ -64,11 +64,20 @@ func ValidKeyRef(r string) bool {
 	return refRe.MatchString(r)
 }
 
+// cidrPrefixRe is the canonical prefix length of a CIDR range: no leading
+// zeros, at most three digits.
+var cidrPrefixRe = regexp.MustCompile(`^(0|[1-9][0-9]{0,2})$`)
+
 // ValidAddress reports whether a is an IP address or a CIDR range, exactly
 // as given (no surrounding space, no host name, no zone).
 func ValidAddress(a string) bool {
 	if net.ParseIP(a) != nil {
 		return true
+	}
+	// net.ParseCIDR accepts leading zeros in the prefix length ("/0000024"),
+	// so the input length would be unbounded; only the canonical form counts.
+	if i := strings.IndexByte(a, '/'); i < 0 || !cidrPrefixRe.MatchString(a[i+1:]) {
+		return false
 	}
 	_, _, err := net.ParseCIDR(a)
 	return err == nil
