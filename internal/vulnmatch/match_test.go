@@ -567,10 +567,6 @@ func TestScoreMapsBoundedInTotal(t *testing.T) {
 	}
 }
 
-func csafProduct(id, eco, version, train string) vulnfeed.CSAFProduct {
-	return vulnfeed.CSAFProduct{ProductID: id, Name: id, Version: version, Train: train, Ecosystem: eco}
-}
-
 // devProduct is a product of a device model's family: its name carries the
 // model, as a model-level CSAF branch does (ADR 0011 D4).
 func devProduct(id, eco, model, version, train string) vulnfeed.CSAFProduct {
