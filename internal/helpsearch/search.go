@@ -175,10 +175,10 @@ func newWithParams(ix *helpdocs.Index, p params) *Index {
 	return s
 }
 
-// fields returns the heading-path terms and the body terms of a chunk.
-// The chunk's own heading line opens its Text and is also the last
-// element of Path; it is counted in the heading field only, so the
-// heading path does not lengthen the body.
+// fields returns the title, parent-path and body terms of a chunk.
+// The chunk's own heading line opens its Text (except for a later
+// paragraph part) and is also the last element of Path; it is counted
+// in the title only, so the heading path does not lengthen the body.
 func fields(c helpdocs.Chunk) [numFields][]string {
 	var f [numFields][]string
 	if n := len(c.Path); n > 0 {
@@ -186,11 +186,26 @@ func fields(c helpdocs.Chunk) [numFields][]string {
 		f[fieldPath] = terms(strings.Join(c.Path[:n-1], "\n"))
 	}
 	text := c.Text
-	if first, rest, _ := strings.Cut(text, "\n"); strings.HasPrefix(first, "#") {
+	if first, rest, _ := strings.Cut(text, "\n"); atxHeading(first) {
 		text = rest
 	}
 	f[fieldBody] = terms(text)
 	return f
+}
+
+// atxHeading reports whether line is a Markdown ATX heading: up to
+// three spaces, one to six '#', then a space, a tab or the line end.
+// A line such as "#hashtag" or "#!/bin/sh" is not a heading.
+func atxHeading(line string) bool {
+	s := strings.TrimLeft(line, " ")
+	if len(line)-len(s) > 3 {
+		return false
+	}
+	n := len(s) - len(strings.TrimLeft(s, "#"))
+	if n < 1 || n > 6 {
+		return false
+	}
+	return n == len(s) || s[n] == ' ' || s[n] == '\t'
 }
 
 // Search ranks the chunks for question q. It returns at most TopK hits

@@ -250,9 +250,36 @@ func TestHeadingLineIsNotCountedInBody(t *testing.T) {
 	if !slices.Contains(f[fieldTitle], "restor") || !slices.Contains(f[fieldPath], "test") {
 		t.Fatalf("fields = %q", f)
 	}
-	// A paragraph part (#p2) has no heading line; its text is all body.
-	c.Text = "restore steps"
-	if f := fields(c); !slices.Contains(f[fieldBody], "restor") {
-		t.Fatalf("body terms %q lost the first line of a part", f[fieldBody])
+	// A paragraph part (#p2) has no heading line; its text is all body,
+	// even when its first line starts with '#' but is not a heading.
+	for _, text := range []string{"restore steps", "#restore steps"} {
+		c.Text = text
+		if f := fields(c); !slices.Contains(f[fieldBody], "restor") {
+			t.Fatalf("body terms %q of %q lost the first line of a part", f[fieldBody], text)
+		}
+	}
+}
+
+func TestATXHeading(t *testing.T) {
+	tests := []struct {
+		line string
+		want bool
+	}{
+		{"# Hosts", true},
+		{"### 7.1 The enrollment script", true},
+		{"   ## indented", true},
+		{"##", true},
+		{"##\ttab", true},
+		{"    # code", false},
+		{"#hashtag", false},
+		{"#!/bin/sh", false},
+		{"####### seven", false},
+		{"text # not", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := atxHeading(tt.line); got != tt.want {
+			t.Errorf("atxHeading(%q) = %v, want %v", tt.line, got, tt.want)
+		}
 	}
 }
