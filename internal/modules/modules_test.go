@@ -191,23 +191,28 @@ func TestImportVerdicts(t *testing.T) {
 // partial rune behind (the text is stored and shown as UTF-8).
 func TestClipKeepsValidUTF8(t *testing.T) {
 	limit := maxDetail - 60
-	cases := map[string]string{
+	// Each case names the exact result: the cut drops the partial rune and
+	// keeps every whole rune before it.
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
 		// "é" is two bytes and starts at byte limit-1: a cut at limit splits it.
-		"two-byte rune across the cut":   strings.Repeat("a", limit-1) + "é" + "b",
-		"three-byte rune across the cut": strings.Repeat("a", limit-1) + "€" + "b",
-		"four-byte rune across the cut":  strings.Repeat("a", limit-2) + "😀" + "b",
-		"ascii only, longer than limit":  strings.Repeat("x", limit+50),
+		{"two-byte rune across the cut", strings.Repeat("a", limit-1) + "é" + "b", strings.Repeat("a", limit-1)},
+		{"three-byte rune across the cut", strings.Repeat("a", limit-1) + "€" + "b", strings.Repeat("a", limit-1)},
+		{"four-byte rune across the cut", strings.Repeat("a", limit-2) + "😀" + "b", strings.Repeat("a", limit-2)},
+		// A rune that ends exactly at the limit is kept whole.
+		{"two-byte rune ending at the limit", strings.Repeat("a", limit-2) + "é" + "b", strings.Repeat("a", limit-2) + "é"},
+		{"ascii only, longer than limit", strings.Repeat("x", limit+50), strings.Repeat("x", limit)},
 	}
-	for name, in := range cases {
-		got := clip(in)
+	for _, tc := range cases {
+		got := clip(tc.in)
+		if got != tc.want {
+			t.Errorf("%s: got %d bytes, want %d bytes", tc.name, len(got), len(tc.want))
+		}
 		if !utf8.ValidString(got) {
-			t.Errorf("%s: result is not valid UTF-8: %q", name, got)
-		}
-		if len(got) > limit {
-			t.Errorf("%s: %d bytes, limit %d", name, len(got), limit)
-		}
-		if !strings.HasPrefix(in, got) {
-			t.Errorf("%s: result is not a prefix of the input", name)
+			t.Errorf("%s: result is not valid UTF-8", tc.name)
 		}
 	}
 	// Text of exactly the limit is kept whole; one byte more is shortened.
