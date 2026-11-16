@@ -252,6 +252,13 @@ func MethodRoles() map[string][]peercred.Role {
 		// (there is no browser path).
 		pb.ExecutorService_GetIntegrityStatus_FullMethodName:  {server, admin},
 		pb.ExecutorService_AckIntegrityFinding_FullMethodName: {admin},
+		// I2 baseline digest (ADR 0015 D7, IG-06): server and admin may
+		// stream a baseline list; the executor recomputes its digest and
+		// compares it with the executor-held approved digest. A mismatch
+		// is an executor-held baseline_tamper finding, never a write of
+		// the digest. No role has a method that sets the digest: only the
+		// executor's own approval paths store it.
+		pb.ExecutorService_CompareBaselineList_FullMethodName: {server, admin},
 	}
 }
 

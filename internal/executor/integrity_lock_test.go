@@ -98,8 +98,13 @@ func TestIntegrityLockClassifiesEveryMethod(t *testing.T) {
 			t.Errorf("%s is not classified for the I1 lock", full)
 		}
 	}
+	// Streams go through integrityStreamInterceptor and need a
+	// classification exactly like unary methods.
 	for _, m := range pb.ExecutorService_ServiceDesc.Streams {
-		t.Errorf("stream %s is not classified for the I1 lock", m.StreamName)
+		full := "/" + pb.ExecutorService_ServiceDesc.ServiceName + "/" + m.StreamName
+		if _, ok := integrityLockedMethods[full]; !ok {
+			t.Errorf("stream %s is not classified for the I1 lock", full)
+		}
 	}
 	for m := range integrityLockedMethods {
 		if _, ok := roles[m]; !ok {
