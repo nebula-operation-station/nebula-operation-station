@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -70,9 +71,12 @@ func demo(t testing.TB, version string, sig bool) []byte {
 
 // fakeExec answers RegisterModule like the executor would.
 type fakeExec struct {
-	err      error
-	wrongSum bool
-	calls    int
+	err          error
+	wrongSum     bool
+	dropAction   bool // the answer lists one action too few
+	badLockSum   bool // the answer's lock SHA-256 is not the lock's
+	otherVersion bool // the answer names another module version
+	calls        int
 }
 
 func (f *fakeExec) RegisterModule(_ context.Context, in *pb.RegisterModuleRequest, _ ...grpc.CallOption) (*pb.RegisterModuleResponse, error) {
@@ -83,13 +87,23 @@ func (f *fakeExec) RegisterModule(_ context.Context, in *pb.RegisterModuleReques
 	v := Version{Scripts: in.GetScripts()}
 	l, sum, _ := modulelock.Parse(in.GetLockJson())
 	v.Lock = l
+	if f.badLockSum {
+		sum = strings.Repeat("1", 64)
+	}
 	r := &pb.RegisterModuleResponse{Name: l.Name, Version: l.Version, LockSha256: sum, SignerFingerprint: "SHA256:x", SignerName: "Test"}
 	for _, a := range v.Actions() {
 		s := a.SHA256()
 		if f.wrongSum {
 			s = strings.Repeat("0", 64)
 		}
-		r.Actions = append(r.Actions, &pb.ModuleAction{ActionId: a.ID, ModuleVersion: a.Version, ArtifactSha256: s})
+		mv := a.Version
+		if f.otherVersion {
+			mv = "9.9.9"
+		}
+		r.Actions = append(r.Actions, &pb.ModuleAction{ActionId: a.ID, ModuleVersion: mv, ArtifactSha256: s})
+	}
+	if f.dropAction && len(r.Actions) > 0 {
+		r.Actions = r.Actions[:len(r.Actions)-1]
 	}
 	return r, nil
 }
@@ -170,6 +184,47 @@ func TestImportVerdicts(t *testing.T) {
 	}
 	if v, err := store(t, nil).Import(ctx, "axel", demo(t, "1.0.0", true)); err != nil || !strings.Contains(v.Detail, "not connected") {
 		t.Fatalf("%+v %v", v, err)
+	}
+}
+
+// clip shortens executor text to maxDetail-60 bytes without leaving a
+// partial rune behind (the text is stored and shown as UTF-8).
+func TestClipKeepsValidUTF8(t *testing.T) {
+	limit := maxDetail - 60
+	// Each case names the exact result: the cut drops the partial rune and
+	// keeps every whole rune before it.
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		// "é" is two bytes and starts at byte limit-1: a cut at limit splits it.
+		{"two-byte rune across the cut", strings.Repeat("a", limit-1) + "é" + "b", strings.Repeat("a", limit-1)},
+		{"three-byte rune across the cut", strings.Repeat("a", limit-1) + "€" + "b", strings.Repeat("a", limit-1)},
+		{"four-byte rune across the cut", strings.Repeat("a", limit-2) + "😀" + "b", strings.Repeat("a", limit-2)},
+		// A rune that ends exactly at the limit is kept whole.
+		{"two-byte rune ending at the limit", strings.Repeat("a", limit-2) + "é" + "b", strings.Repeat("a", limit-2) + "é"},
+		{"ascii only, longer than limit", strings.Repeat("x", limit+50), strings.Repeat("x", limit)},
+	}
+	for _, tc := range cases {
+		got := clip(tc.in)
+		if got != tc.want {
+			t.Errorf("%s: got %d bytes, want %d bytes", tc.name, len(got), len(tc.want))
+		}
+		if !utf8.ValidString(got) {
+			t.Errorf("%s: result is not valid UTF-8", tc.name)
+		}
+	}
+	// Text of exactly the limit is kept whole; one byte more is shortened.
+	if got := clip(strings.Repeat("x", limit)); len(got) != limit {
+		t.Errorf("exact limit: %d bytes", len(got))
+	}
+	if got := clip(strings.Repeat("x", limit+1)); len(got) != limit {
+		t.Errorf("limit+1: %d bytes", len(got))
+	}
+	// Unprintable text is still replaced, not cut.
+	if got := clip("bad\x07text"); got != "(unprintable text)" {
+		t.Errorf("control character: %q", got)
 	}
 }
 
