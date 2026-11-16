@@ -7,6 +7,8 @@ import "strings"
 // destructivePattern is one row of the reviewed destructive-pattern list of
 // ADR 0014 check V6. Each row has the wording of the ADR as its comment (the
 // `adr` field). A row matches a unit when every condition that is set holds.
+// Since 2026-11-16 the list only chooses the wording of a command that is not
+// harmless; whether a command is harmless is decided by the allowlist.
 //
 // The list is exactly the ADR list. Rows are not added here on their own
 // initiative; a change needs an ADR change and a maintainer review.
@@ -217,38 +219,50 @@ var destructivePatterns = []destructivePattern{
 	},
 }
 
-// Verdict is the V6 result for one command.
+// Verdict is the V6 result for one command. The zero Verdict is not harmless,
+// so a Verdict that was never filled in fails closed.
 type Verdict struct {
-	// Destructive is true when the command must be shown at least amber, or
-	// red when no cited shape covers it.
-	Destructive bool
-	// Pattern is the ADR wording of the first matching row. It is empty when
-	// the command is destructive only because it could not be checked.
+	// Harmless is true only when every simple command of the command is on
+	// the V6 allowlist (ADR 0014, decision 2026-11-16). Every other command
+	// is indeterminate and needs confirmation: at least amber, or red when
+	// no cited shape covers it.
+	Harmless bool
+	// Pattern is the ADR wording of the first destructive-pattern row that a
+	// unit matches. It only chooses the wording of a command that is not
+	// harmless; it is empty when no row matches.
 	Pattern string
 }
 
-// Assess applies check V6 of ADR 0014 to cmd. Every unit of the command is
-// checked, not only the first word. A command that cannot be split into units,
-// or a unit with a wrapper option the ADR does not name, is destructive (fail
-// closed).
+// NeedsConfirmation reports whether the command must be confirmed by the
+// user (shown at least amber): true for every command that is not harmless.
+func (v Verdict) NeedsConfirmation() bool {
+	return !v.Harmless
+}
+
+// Assess applies check V6 of ADR 0014 to cmd. The command is harmless only
+// when every simple command of it is on the allowlist (see allowlist.go);
+// wrappers are never unwrapped for that decision. Independently, every unit
+// (after unwrapping) is compared with the destructive-pattern list to choose
+// the wording. Input that cannot be split is not harmless (fail closed).
 func Assess(cmd string) Verdict {
+	v := Verdict{Pattern: destructiveRow(cmd)}
+	v.Harmless = v.Pattern == "" && allowlisted(cmd)
+	return v
+}
+
+// destructiveRow returns the ADR wording of the first destructive-pattern row
+// that a unit of cmd matches, or "" when none matches or cmd cannot be split.
+func destructiveRow(cmd string) string {
 	units, err := Units(cmd)
 	if err != nil {
-		return Verdict{Destructive: true}
+		return ""
 	}
-	indeterminate := false
 	for _, u := range units {
 		if p := matchingPattern(u); p != nil {
-			return Verdict{Destructive: true, Pattern: p.adr}
-		}
-		if u.Indeterminate {
-			indeterminate = true
+			return p.adr
 		}
 	}
-	if indeterminate {
-		return Verdict{Destructive: true}
-	}
-	return Verdict{}
+	return ""
 }
 
 // matchingPattern returns the first row of destructivePatterns that covers u,

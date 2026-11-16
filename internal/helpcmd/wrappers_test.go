@@ -22,7 +22,7 @@ func assertUnits(t *testing.T, in string, want []string) {
 // assertDestructiveRow checks that Assess(in) is destructive by a named row.
 func assertDestructiveRow(t *testing.T, in string) {
 	t.Helper()
-	if v := Assess(in); !v.Destructive || v.Pattern == "" {
+	if v := Assess(in); v.Harmless || v.Pattern == "" {
 		t.Errorf("Assess(%q) = %+v, want destructive with a named row", in, v)
 	}
 }
@@ -42,8 +42,8 @@ func assertIndeterminate(t *testing.T, in string) {
 	if !found {
 		t.Errorf("Units(%q) = %q, want an indeterminate unit", in, unitStrings(us))
 	}
-	if v := Assess(in); !v.Destructive {
-		t.Errorf("Assess(%q) = %+v, want destructive", in, v)
+	if v := Assess(in); v.Harmless {
+		t.Errorf("Assess(%q) = %+v, want not harmless", in, v)
 	}
 }
 

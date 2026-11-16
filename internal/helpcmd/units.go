@@ -9,7 +9,7 @@ import (
 )
 
 // MaxCommandBytes is the longest command text Units accepts. Longer input is
-// rejected with ErrTooLong, and Assess treats it as destructive. The limit is
+// rejected with ErrTooLong, and Assess treats it as not harmless. The limit is
 // an implementation choice of this package; ADR 0014 sets no command length.
 const MaxCommandBytes = 4096
 
@@ -33,14 +33,14 @@ type Unit struct {
 	// Args are the words after the program word, quotes removed.
 	Args []string
 	// Indeterminate is set when the unwrapper met an option or wrapper form
-	// that the ADR does not name. Such a unit counts as destructive.
+	// that the ADR does not name. Such a unit is never harmless.
 	Indeterminate bool
 }
 
 // Units splits cmd at ;, &&, ||, |, & and the other shell syntax that starts
 // a new command, drops redirections and unwraps the wrappers named in ADR
 // 0014. It returns one Unit per simple command that runs something. Input that
-// cannot be split reliably yields an error; Assess treats that as destructive.
+// cannot be split reliably yields an error; Assess treats that as not harmless.
 func Units(cmd string) ([]Unit, error) {
 	if len(cmd) > MaxCommandBytes {
 		return nil, fmt.Errorf("split command: %w", ErrTooLong)
@@ -71,6 +71,8 @@ type substitution struct {
 	savedDouble bool     // double-quote state before the substitution opened
 	savedCmd    []string // words of the enclosing command so far
 	savedSkip   bool     // the enclosing command had a redirection target pending
+	savedRedir  bool     // the enclosing command had a redirection
+	savedGroup  bool     // the enclosing command touched a group or function
 	backtick    bool
 	depth       int // open parentheses inside a $( … ) substitution
 }
@@ -84,6 +86,14 @@ type simpleCmd struct {
 	// character. The shell replaces such a word before it runs, so the
 	// program and the arguments are unknown.
 	dynamic bool
+	// redirected is set when the command has a redirection of any kind
+	// (`>`, `>>`, `<`, `2>&1`, …). The V6 allowlist never treats such a
+	// command as harmless.
+	redirected bool
+	// compound is set when the command touches a parenthesis or a brace
+	// group: a subshell, a function definition (`ls() { … }`) or a group.
+	// The V6 allowlist never treats such a command as harmless.
+	compound bool
 }
 
 // splitSimple splits s into simple commands. Quotes and escapes are removed
@@ -99,6 +109,8 @@ func splitSimple(s string) ([]simpleCmd, error) {
 		inWord   bool
 		wordDyn  bool // the current word has an expansion or a glob
 		cmdDyn   bool // the current simple command has a dynamic word
+		cmdRedir bool // the current simple command has a redirection
+		cmdGroup bool // the current simple command touches a group
 		skipWord bool // the next word is a redirection target
 		inSingle bool
 		inDouble bool
@@ -123,11 +135,16 @@ func splitSimple(s string) ([]simpleCmd, error) {
 	// output of the substitution may be a program to run.
 	endCommand := func() {
 		flush()
-		if len(cur) > 0 || cmdDyn {
-			cmds = append(cmds, simpleCmd{words: cur, dynamic: cmdDyn})
+		// A command made only of a redirection (`> out`) or a group word
+		// still does something, so it is kept too.
+		if len(cur) > 0 || cmdDyn || cmdRedir || cmdGroup {
+			cmds = append(cmds, simpleCmd{words: cur, dynamic: cmdDyn,
+				redirected: cmdRedir, compound: cmdGroup})
 		}
 		cur = nil
 		cmdDyn = false
+		cmdRedir = false
+		cmdGroup = false
 		skipWord = false
 	}
 	// pushSubstitution opens a substitution inside the current command. The
@@ -141,10 +158,14 @@ func splitSimple(s string) ([]simpleCmd, error) {
 			savedDouble: inDouble,
 			savedCmd:    cur,
 			savedSkip:   skipWord,
+			savedRedir:  cmdRedir,
+			savedGroup:  cmdGroup,
 			backtick:    backtick,
 		})
 		cur = nil
 		cmdDyn = false
+		cmdRedir = false
+		cmdGroup = false
 		skipWord = false
 		inDouble = false
 	}
@@ -155,6 +176,8 @@ func splitSimple(s string) ([]simpleCmd, error) {
 		inDouble = top.savedDouble
 		cur = top.savedCmd
 		cmdDyn = true
+		cmdRedir = top.savedRedir
+		cmdGroup = top.savedGroup
 		skipWord = top.savedSkip
 	}
 
@@ -230,8 +253,10 @@ func splitSimple(s string) ([]simpleCmd, error) {
 			if n := len(stack); n > 0 && !stack[n-1].backtick {
 				stack[n-1].depth++
 			}
+			cmdGroup = true
 			endCommand()
 		case ')':
+			cmdGroup = true
 			endCommand()
 			if n := len(stack); n > 0 && !stack[n-1].backtick {
 				if stack[n-1].depth == 0 {
@@ -248,6 +273,7 @@ func splitSimple(s string) ([]simpleCmd, error) {
 			// group. Anywhere else an unquoted brace may be brace expansion,
 			// which rewrites the word, so the word is dynamic.
 			if isBraceKeyword(s, i) && !inWord && !skipWord && len(cur) == 0 {
+				cmdGroup = true
 				break
 			}
 			wordDyn = true
@@ -268,6 +294,7 @@ func splitSimple(s string) ([]simpleCmd, error) {
 				// stdin, which the scanner does not read: indeterminate.
 				cmdDyn = true
 			}
+			cmdRedir = true
 			if inWord && allDigits(word) {
 				word = word[:0]
 				inWord = false
@@ -322,9 +349,9 @@ func allDigits(b []byte) bool {
 // shells sh, bash and su are not here; their `-c` string is unwrapped (see
 // unwrap). The env, nice, nohup and timeout wrappers are unwrapped too.
 //
-// The rule is a closed list of the programs that run something, not a rule
-// about what they run: a program that runs another one and is missing here is
-// checked as itself. The list therefore names every such program we know of.
+// Since the V6 allowlist (ADR 0014, 2026-11-16) this list only affects the
+// wording: a runner that is missing here is still not harmless, because only
+// allowlisted programs are harmless and the allowlist does not unwrap.
 var programRunners = map[string]bool{
 	"command": true, "eval": true, "xargs": true, "doas": true,
 	"docker-compose": true, "runuser": true, "setsid": true, "ionice": true,

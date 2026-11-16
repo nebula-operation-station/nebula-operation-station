@@ -13,10 +13,15 @@
 //     the separators of the shell syntax, redirections dropped, the wrappers
 //     sudo, env, NAME=value, exec, nohup, nice, time, timeout, docker run and
 //     exec, docker compose exec and run, and sh/bash/su -c unwrapped; an option
-//     the ADR does not name makes the unit indeterminate, which is destructive
-//     (fail closed); see Units;
-//   - check V6 (ADR 0014): the reviewed destructive-pattern list, each row
-//     with its ADR wording, and Assess, which applies the list to every unit.
+//     the ADR does not name makes the unit indeterminate; see Units. Units
+//     only choose the destructive wording; the allowlist does not unwrap;
+//   - check V6 (ADR 0014, maintainer decision 2026-11-16): the allowlist of
+//     harmless commands (allowlist.go). Assess calls a command harmless only
+//     when every simple command of it is an allowlisted program with allowed
+//     subcommands and options, without wrapper, redirection, expansion or
+//     group; everything else needs confirmation. The reviewed
+//     destructive-pattern list, each row with its ADR wording, only chooses
+//     the wording of a command that is not harmless.
 //
 // The package is a pure library. It has no command catalog, reads no docs,
 // runs no command, opens no connection and imports only the standard library.

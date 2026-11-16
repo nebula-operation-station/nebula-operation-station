@@ -6,8 +6,10 @@ import "testing"
 
 // FuzzCommandChecks checks the properties of checks V1 and V6 for arbitrary
 // input: no panic, the same input gives the same verdict, a V1-valid input
-// contains only printable ASCII, and appending a separator and `rm -rf /x` to
-// a V1-valid input always yields a destructive verdict. The separator is
+// contains only printable ASCII, appending a separator and `rm -rf /x` to a
+// V1-valid input is never harmless, an unknown program anywhere is never
+// harmless, and a harmless input consists only of allowlisted simple
+// commands without redirection (ADR 0014 V6 allowlist). The separator is
 // ` ; ` rather than `;`: a trailing unquoted backslash would escape a bare
 // `;`, and then bash does not see a separator either.
 func FuzzCommandChecks(f *testing.F) {
@@ -28,6 +30,11 @@ func FuzzCommandChecks(f *testing.F) {
 		"sh -c \"sh -c \\\"rm x\\\"\"",
 		"nebula netdev remove fw-01",
 		"nebulaе status",
+		"ls -la /var/lib/nebula",
+		"journalctl -u nebula-server -n 100 --no-pager | tail -n 5",
+		"ip -br a show dev eth0",
+		"systemctl status x > out",
+		"taskset 1 rm -rf /x",
 	}
 	for _, s := range seeds {
 		f.Add(s)
@@ -45,8 +52,30 @@ func FuzzCommandChecks(f *testing.F) {
 				t.Fatalf("V1-valid input %q contains byte 0x%02X", s, s[i])
 			}
 		}
-		if v := Assess(s + " ; rm -rf /x"); !v.Destructive {
-			t.Fatalf("Assess(%q + %q) = %+v, want destructive", s, " ; rm -rf /x", v)
+		if v := Assess(s + " ; rm -rf /x"); v.Harmless {
+			t.Fatalf("Assess(%q + %q) = %+v, want not harmless", s, " ; rm -rf /x", v)
+		}
+		// An unknown program is never harmless, wherever it sits.
+		for _, cmd := range []string{"zzunknown " + s, s + " ; zzunknown", s + " | zzunknown"} {
+			if v := Assess(cmd); v.Harmless {
+				t.Fatalf("Assess(%q) = %+v, want not harmless (unknown program)", cmd, v)
+			}
+		}
+		// A harmless verdict needs every simple command to start with an
+		// allowlisted program and to have no redirection.
+		if first.Harmless {
+			cmds, err := splitSimple(s)
+			if err != nil || len(cmds) == 0 {
+				t.Fatalf("Assess(%q) is harmless, but splitSimple gives %d commands, %v", s, len(cmds), err)
+			}
+			for _, c := range cmds {
+				if len(c.words) == 0 || c.dynamic || c.redirected || c.compound {
+					t.Fatalf("Assess(%q) is harmless, but a simple command is %+v", s, c)
+				}
+				if _, ok := allowlist[c.words[0]]; !ok {
+					t.Fatalf("Assess(%q) is harmless, but program %q is not allowlisted", s, c.words[0])
+				}
+			}
 		}
 	})
 }

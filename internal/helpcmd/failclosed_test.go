@@ -156,8 +156,8 @@ func TestLongOptionAbbreviationsAreDestructive(t *testing.T) {
 		"rm --verbose x",
 		"tar --list -f a.tar",
 	} {
-		if v := Assess(in); v.Destructive {
-			t.Errorf("Assess(%q) = %+v, want not destructive", in, v)
+		if v := Assess(in); v.Pattern != "" {
+			t.Errorf("Assess(%q) = %+v, want no destructive row", in, v)
 		}
 	}
 }

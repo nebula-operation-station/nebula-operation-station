@@ -160,13 +160,13 @@ func TestEachDestructivePatternRowMatchesItsPositivesOnly(t *testing.T) {
 		}
 		for _, cmd := range c.pos {
 			v := Assess(cmd)
-			if !v.Destructive || v.Pattern != p.adr {
+			if v.Harmless || v.Pattern != p.adr {
 				t.Errorf("%q: got %+v, want destructive by row %q", cmd, v, p.adr)
 			}
 		}
 		for _, cmd := range c.neg {
-			if v := Assess(cmd); v.Destructive {
-				t.Errorf("near miss %q: got %+v, want not destructive", cmd, v)
+			if v := Assess(cmd); v.Pattern != "" {
+				t.Errorf("near miss %q: got %+v, want no destructive row", cmd, v)
 			}
 		}
 	}
@@ -193,7 +193,7 @@ func TestDestructiveADRUnitExamples(t *testing.T) {
 		"sudo groupdel nebula-rpc",
 	}
 	for _, cmd := range destructive {
-		if v := Assess(cmd); !v.Destructive || v.Pattern == "" {
+		if v := Assess(cmd); v.Harmless || v.Pattern == "" {
 			t.Errorf("Assess(%q) = %+v, want destructive with a named row", cmd, v)
 		}
 	}
@@ -214,12 +214,16 @@ func TestDestructiveChecksEveryUnitNotOnlyTheFirstWord(t *testing.T) {
 		"exec nohup nice -n 1 timeout 5s rm -rf /x",
 		"/usr/bin/env -i PATH=/bin sudo -u root rm -rf /x",
 	} {
-		if v := Assess(cmd); !v.Destructive {
-			t.Errorf("Assess(%q) = %+v, want destructive", cmd, v)
+		if v := Assess(cmd); v.Harmless || v.Pattern == "" {
+			t.Errorf("Assess(%q) = %+v, want destructive with a named row", cmd, v)
 		}
 	}
 }
 
+// TestDestructiveRejectsQuotedTextAndHarmlessCommands checks that quoted
+// text and harmless commands get no destructive row. Since the allowlist
+// (ADR 0014 V6, 2026-11-16) only the allowlisted ones are harmless; the
+// others still need confirmation, with the indeterminate wording.
 func TestDestructiveRejectsQuotedTextAndHarmlessCommands(t *testing.T) {
 	t.Parallel()
 	for _, cmd := range []string{
@@ -236,8 +240,18 @@ func TestDestructiveRejectsQuotedTextAndHarmlessCommands(t *testing.T) {
 		"ls -la /var/lib/nebula",
 		"",
 	} {
-		if v := Assess(cmd); v.Destructive {
-			t.Errorf("Assess(%q) = %+v, want not destructive", cmd, v)
+		if v := Assess(cmd); v.Pattern != "" {
+			t.Errorf("Assess(%q) = %+v, want no destructive row", cmd, v)
+		}
+	}
+	for _, cmd := range []string{"cat x.tar.gz", "ls -la /var/lib/nebula"} {
+		if v := Assess(cmd); !v.Harmless {
+			t.Errorf("Assess(%q) = %+v, want harmless", cmd, v)
+		}
+	}
+	for _, cmd := range []string{"echo rm -rf /x", "nebula status", "docker compose down", ""} {
+		if v := Assess(cmd); v.Harmless {
+			t.Errorf("Assess(%q) = %+v, want not harmless (not on the allowlist)", cmd, v)
 		}
 	}
 }
@@ -256,8 +270,8 @@ func TestDestructiveFailsClosedWhenUnchecked(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			v := Assess(cmd)
-			if !v.Destructive {
-				t.Errorf("Assess(%q) = %+v, want destructive", cmd, v)
+			if v.Harmless {
+				t.Errorf("Assess(%q) = %+v, want not harmless", cmd, v)
 			}
 			if v.Pattern != "" {
 				t.Errorf("Assess(%q) names row %q, want none (unchecked, not matched)", cmd, v.Pattern)
