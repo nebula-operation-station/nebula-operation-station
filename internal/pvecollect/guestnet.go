@@ -35,6 +35,13 @@ const (
 // ErrGuestNetInvalid means a guest NIC record failed decoding or validation.
 var ErrGuestNetInvalid = errors.New("pvecollect: invalid guest nic record")
 
+// guestNetRecordKeys and guestNetNICKeys are the exact JSON member names of a
+// record and of each NIC in it (see GuestNetRecord and GuestNIC).
+var (
+	guestNetRecordKeys = []string{"version", "remote", "observed_unix", "nics"}
+	guestNetNICKeys    = []string{"vmid", "kind", "index", "bridge", "vlan", "mac"}
+)
+
 var (
 	guestNetMACRe = regexp.MustCompile(`^[0-9a-f]{2}(?::[0-9a-f]{2}){5}$`)
 )
@@ -174,6 +181,11 @@ func DecodeGuestNet(raw []byte) (GuestNetRecord, error) {
 	}
 	if !utf8.Valid(raw) {
 		return GuestNetRecord{}, fmt.Errorf("%w: not valid UTF-8", ErrGuestNetInvalid)
+	}
+	// Names must match the schema exactly, once each: encoding/json would
+	// otherwise bind "REMOTE" to remote and keep the last of repeated keys.
+	if err := pvecontract.CheckRecordKeys(raw, guestNetRecordKeys, "nics", guestNetNICKeys); err != nil {
+		return GuestNetRecord{}, fmt.Errorf("%w: %v", ErrGuestNetInvalid, err)
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
