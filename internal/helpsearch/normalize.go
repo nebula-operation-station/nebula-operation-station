@@ -130,7 +130,18 @@ func splitToken(t string) (whole string, parts []string) {
 // deliberately few: the same function runs on corpus and query, so a
 // rough stem is fine as long as related forms meet.
 func fold(t string) string {
-	if len(t) < 4 || !plainWord(t) {
+	if !plainWord(t) {
+		return t
+	}
+	if len(t) == 3 {
+		// Plural of an abbreviation: "ips", "vms", "ids". Only after
+		// a consonant, so "nos", "has" and "yes" stay.
+		if t[2] == 's' && !strings.ContainsRune("aeiousy", rune(t[1])) {
+			return t[:2]
+		}
+		return t
+	}
+	if len(t) < 4 {
 		return t
 	}
 	switch {
@@ -141,15 +152,36 @@ func fold(t string) string {
 		t = t[:len(t)-1]
 	}
 	switch {
+	case strings.HasSuffix(t, "ction") && len(t)-3 >= 4:
+		// "connection" → "connect", "restriction" → "restrict".
+		t = t[:len(t)-3]
 	case strings.HasSuffix(t, "ment") && len(t)-4 >= 4:
 		t = t[:len(t)-4]
-	case strings.HasSuffix(t, "ing") && len(t)-3 >= 3:
-		t = undouble(t[:len(t)-3])
-	case strings.HasSuffix(t, "ed") && len(t)-2 >= 3:
-		t = undouble(t[:len(t)-2])
+	case strings.HasSuffix(t, "ing"):
+		t = stripInflection(t, 3)
+	case strings.HasSuffix(t, "ed") && !strings.HasSuffix(t, "eed"):
+		// "-eed" is part of the word: "speed", "exceed", "need".
+		t = stripInflection(t, 2)
 	}
 	if strings.HasSuffix(t, "e") && len(t) >= 5 {
 		t = t[:len(t)-1]
+	}
+	return t
+}
+
+// stripInflection removes an n-byte "-ing"/"-ed" ending from t when
+// what remains is a plausible stem: at least four letters (then a
+// doubled final consonant is undoubled: "pinning" → "pin"), or three
+// letters ending in a doubled consonant, kept as is ("adding" → "add",
+// like "add" itself). A shorter stem means the ending is part of the
+// word ("embed", "string", "thing") and t is returned unchanged.
+func stripInflection(t string, n int) string {
+	stem := t[:len(t)-n]
+	switch {
+	case len(stem) >= 4:
+		return undouble(stem)
+	case len(stem) == 3 && stem[1] == stem[2] && !strings.ContainsRune("aeiou", rune(stem[2])):
+		return stem
 	}
 	return t
 }

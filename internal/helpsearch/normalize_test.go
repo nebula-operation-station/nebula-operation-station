@@ -54,6 +54,14 @@ func TestFoldJoinsRelatedForms(t *testing.T) {
 		{"change", "changed", "changes"},
 		{"restore", "restored"},
 		{"entry", "entries"},
+		{"add", "adds", "added", "adding"},
+		{"embed", "embeds", "embedded", "embedding"},
+		{"run", "running"},
+		{"exceed", "exceeds", "exceeded"},
+		{"connect", "connects", "connection", "connections"},
+		{"restrict", "restriction"},
+		{"ip", "ips"},
+		{"vm", "vms"},
 	}
 	for _, g := range groups {
 		want := fold(g[0])
@@ -74,6 +82,23 @@ func TestFoldLeavesNonWordsAlone(t *testing.T) {
 	for _, w := range []string{"status", "access", "analysis", "ssh"} {
 		if got := fold(w); got != w {
 			t.Errorf("fold(%q) = %q, want unchanged", w, got)
+		}
+	}
+}
+
+// TestFoldKeepsEndingsThatBelongToTheWord covers the over-stripping of
+// "-ed"/"-ing": a stem shorter than four letters means the ending is
+// part of the word, and "-eed" is never an inflection.
+func TestFoldKeepsEndingsThatBelongToTheWord(t *testing.T) {
+	for _, w := range []string{"embed", "speed", "need", "string", "thing", "bring", "nos", "has", "yes"} {
+		if got := fold(w); got != w {
+			t.Errorf("fold(%q) = %q, want unchanged", w, got)
+		}
+	}
+	// Unrelated words must not merge.
+	for _, pair := range [][2]string{{"string", "str"}, {"speed", "spend"}, {"embed", "emblem"}} {
+		if fold(pair[0]) == fold(pair[1]) {
+			t.Errorf("fold(%q) == fold(%q) = %q", pair[0], pair[1], fold(pair[0]))
 		}
 	}
 }
