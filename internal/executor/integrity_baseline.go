@@ -3,10 +3,12 @@
 package executor
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -275,18 +277,86 @@ func (s *Service) finishBaselineCompare(acc *baselineListAcc, by string) (baseli
 	return baselineResult{Result: BaselineTamper, Computed: computed}, nil
 }
 
+// baselineCompareTimeout is the executor's own deadline for one
+// CompareBaselineList call, from the opened stream to the answer. A caller
+// that stalls or never closes its stream is cut off here, so it holds
+// baselineCompareMu at most this long (MEDIUM 2 of PR #579). A full list
+// (fimscan.MaxDocumentBytes) over the local socket takes seconds. A
+// variable only so tests can shorten it.
+var baselineCompareTimeout = 2 * time.Minute
+
+// errBaselineCompareDeadline ends a comparison the caller did not finish
+// within baselineCompareTimeout.
+var errBaselineCompareDeadline = status.Error(codes.DeadlineExceeded,
+	"compare baseline list: the list was not complete within the executor deadline")
+
+// recvResult is one stream.Recv outcome handed from the receiving
+// goroutine.
+type recvResult struct {
+	msg *pb.CompareBaselineListRequest
+	err error
+}
+
+// baselineReceiver reads the stream in its own goroutine so the handler
+// can stop waiting at the executor deadline: grpc's Recv does not return
+// before the stream ends, and the stream ends only when the handler
+// returns. After the deadline the goroutine sees the cancelled stream,
+// stops and drops what it read; it touches nothing but the stream.
+type baselineReceiver struct {
+	ctx    context.Context
+	stream grpc.ClientStreamingServer[pb.CompareBaselineListRequest, pb.CompareBaselineListResponse]
+	out    chan recvResult
+	ask    chan struct{}
+}
+
+func newBaselineReceiver(ctx context.Context, stream grpc.ClientStreamingServer[pb.CompareBaselineListRequest, pb.CompareBaselineListResponse]) *baselineReceiver {
+	r := &baselineReceiver{ctx: ctx, stream: stream, out: make(chan recvResult, 1), ask: make(chan struct{})}
+	go r.loop()
+	return r
+}
+
+func (r *baselineReceiver) loop() {
+	for {
+		select {
+		case <-r.ctx.Done():
+			return
+		case <-r.ask:
+		}
+		m, err := r.stream.Recv()
+		r.out <- recvResult{msg: m, err: err}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// recv is stream.Recv bounded by the receiver's deadline.
+func (r *baselineReceiver) recv() (*pb.CompareBaselineListRequest, error) {
+	select {
+	case r.ask <- struct{}{}:
+	case <-r.ctx.Done():
+		return nil, errBaselineCompareDeadline
+	}
+	select {
+	case res := <-r.out:
+		return res.msg, res.err
+	case <-r.ctx.Done():
+		return nil, errBaselineCompareDeadline
+	}
+}
+
 // CompareBaselineList is the RPC form of compareBaselineList; the method
 // table allows server and admin. The first message is the header; the
 // executor stops reading early when it holds no approved digest for the
-// host. One comparison runs at a time. It never writes the approved
-// digest.
+// host. One comparison runs at a time: baselineCompareMu is taken only
+// once a valid header arrived and is held while the bounded list is read
+// and compared, never longer than baselineCompareTimeout. It never writes
+// the approved digest.
 func (s *Service) CompareBaselineList(stream grpc.ClientStreamingServer[pb.CompareBaselineListRequest, pb.CompareBaselineListResponse]) error {
-	if !s.baselineCompareMu.TryLock() {
-		return status.Error(codes.Unavailable, "compare baseline list: another comparison is running")
-	}
-	defer s.baselineCompareMu.Unlock()
+	ctx, cancel := context.WithTimeout(stream.Context(), baselineCompareTimeout)
+	defer cancel()
 	by := callerName(stream.Context())
-	res, err := s.receiveBaselineList(stream, by)
+	res, err := s.receiveBaselineList(newBaselineReceiver(ctx, stream), by)
 	switch {
 	case errors.Is(err, ErrBaselineListInvalid):
 		return status.Error(codes.InvalidArgument, err.Error())
@@ -310,8 +380,10 @@ func (s *Service) CompareBaselineList(stream grpc.ClientStreamingServer[pb.Compa
 	return stream.SendAndClose(out)
 }
 
-func (s *Service) receiveBaselineList(stream grpc.ClientStreamingServer[pb.CompareBaselineListRequest, pb.CompareBaselineListResponse], by string) (baselineResult, error) {
-	first, err := stream.Recv()
+func (s *Service) receiveBaselineList(stream *baselineReceiver, by string) (baselineResult, error) {
+	// The header is read without the lock: a caller that opens the stream
+	// and sends nothing blocks no other comparison.
+	first, err := stream.recv()
 	if errors.Is(err, io.EOF) {
 		return baselineResult{}, invalidList("no header")
 	}
@@ -325,13 +397,19 @@ func (s *Service) receiveBaselineList(stream grpc.ClientStreamingServer[pb.Compa
 	if err := acc.checkHeader(); err != nil {
 		return baselineResult{}, err
 	}
+	// From here one list is buffered: one at a time, so the lists of
+	// concurrent callers cannot add up; bounded in time by the deadline.
+	if !s.baselineCompareMu.TryLock() {
+		return baselineResult{}, status.Error(codes.Unavailable, "compare baseline list: another comparison is running")
+	}
+	defer s.baselineCompareMu.Unlock()
 	if _, ok, err := s.approvedBaselineDigest(acc.header.GetHostId(), by); err != nil {
 		return baselineResult{}, err
 	} else if !ok {
 		return baselineResult{Result: BaselineNone}, nil
 	}
 	for {
-		c, err := stream.Recv()
+		c, err := stream.recv()
 		if errors.Is(err, io.EOF) {
 			break
 		}
@@ -347,7 +425,8 @@ func (s *Service) receiveBaselineList(stream grpc.ClientStreamingServer[pb.Compa
 
 func baselineTamperToProto(f executordb.BaselineTamperFinding) *pb.BaselineTamperFinding {
 	return &pb.BaselineTamperFinding{
-		HostId: f.HostID, ApprovedDigest: f.ApprovedDigest, PresentedDigest: f.PresentedDigest,
+		// No approved digest: GetIntegrityStatus serves the server role.
+		HostId: f.HostID, PresentedDigest: f.PresentedDigest,
 		FirstSeenUnix: f.FirstSeen.Unix(), LastSeenUnix: f.LastSeen.Unix(), Count: f.Count,
 	}
 }
