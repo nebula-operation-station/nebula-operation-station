@@ -4,10 +4,13 @@ package discoveryjob
 
 import (
 	"encoding/json"
+	"net"
 	"net/netip"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // Seeds use only documentation networks (RFC 5737, RFC 3849).
@@ -17,6 +20,13 @@ const (
 		`"hosts":[{"address":"192.0.2.10","hostname":"Host.example.","os":"Linux 5.x",` +
 		`"ports":[{"port":22,"protocol":"tcp","state":"open","service":"ssh","product":"OpenSSH","version":"9.6"}]}]}`
 )
+
+// allowedStates is the state allowlist of spec 12 (stateWord). Any other
+// state from the unprivileged process must come out as "unknown".
+var allowedStates = map[string]bool{
+	"open": true, "closed": true, "filtered": true, "unfiltered": true,
+	"open|filtered": true, "closed|filtered": true, "unknown": true,
+}
 
 // FuzzDecodeResult: a result file is written by the unprivileged discovery
 // process. After decodeStrict and Clean every bound holds, and Clean is
@@ -33,6 +43,20 @@ func FuzzDecodeResult(f *testing.F) {
 		`"hosts":[{"address":"::ffff:198.51.100.7","hostname":"Ünter.example"}]}`))
 	f.Add([]byte(`{"format":"nebula-discovery-result-v1","job":"` + seedJobID + `","hosts":[{"address":"203.0.113.1",` +
 		`"ports":[{"port":0,"protocol":"tcp"},{"port":80,"protocol":"sctp"},{"port":80,"protocol":"tcp"},{"port":80,"protocol":"tcp"}]}]}`))
+	// Upper-case MAC with dashes must be normalised; an invalid one must be dropped.
+	f.Add([]byte(`{"format":"nebula-discovery-result-v1","job":"` + seedJobID + `","hosts":[{"address":"192.0.2.11",` +
+		`"mac":"00-1A-2B-3C-4D-5E"},{"address":"192.0.2.12","mac":"not a mac"}]}`))
+	// Port states outside the allowlist must become "unknown"; ports arrive out of order.
+	f.Add([]byte(`{"format":"nebula-discovery-result-v1","job":"` + seedJobID + `","hosts":[{"address":"192.0.2.13",` +
+		`"ports":[{"port":443,"protocol":"tcp","state":"OPEN"},{"port":22,"protocol":"tcp","state":"open"},` +
+		`{"port":53,"protocol":"udp","state":"open|filtered"},{"port":9,"protocol":"tcp","state":"<b>"}]}]}`))
+	// U+2028 and U+2029 in vendor and product text (built in Go) must be replaced.
+	f.Add([]byte(`{"format":"nebula-discovery-result-v1","job":"` + seedJobID + `","hosts":[{"address":"192.0.2.14",` +
+		`"vendor":"a` + string(rune(0x2028)) + `b","ports":[{"port":22,"protocol":"tcp","state":"open",` +
+		`"product":"c` + string(rune(0x2029)) + `d"}]}]}`))
+	// A hostname that is not a DNS name must be dropped.
+	f.Add([]byte(`{"format":"nebula-discovery-result-v1","job":"` + seedJobID + `","hosts":[{"address":"192.0.2.15",` +
+		`"hostname":"bad_label.example"}]}`))
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var r Result
 		if err := decodeStrict(data, &r); err != nil {
@@ -43,8 +67,10 @@ func FuzzDecodeResult(f *testing.F) {
 		}
 		checkResult(t, r)
 
-		// A second Clean changes nothing.
-		again := r
+		// A second Clean on a deep copy changes nothing. A shallow copy would
+		// share Hosts and Ports arrays with r, so an in-place rewrite by Clean
+		// would change both values the same way and go unnoticed.
+		again := cloneResult(r)
 		if err := again.Clean(); err != nil {
 			t.Fatalf("second Clean: %v", err)
 		}
@@ -70,6 +96,76 @@ func FuzzDecodeResult(f *testing.F) {
 	})
 }
 
+// cloneResult copies r including the Hosts slice and each Ports slice, so
+// that the copy shares no backing array with r. Nil and empty slices stay
+// as they are, so reflect.DeepEqual compares like with like.
+func cloneResult(r Result) Result {
+	c := r
+	if r.Hosts != nil {
+		c.Hosts = make([]Host, len(r.Hosts))
+		for i, h := range r.Hosts {
+			if h.Ports != nil {
+				h.Ports = append(make([]Port, 0, len(h.Ports)), h.Ports...)
+			}
+			c.Hosts[i] = h
+		}
+	}
+	return c
+}
+
+// checkResultText requires untrusted text to be valid UTF-8, within MaxText,
+// free of control and invisible formatting characters, and free of the
+// Unicode line and paragraph separators that Text replaces.
+func checkResultText(t *testing.T, s string) {
+	t.Helper()
+	checkText(t, s)
+	if !utf8.ValidString(s) {
+		t.Fatalf("invalid UTF-8 in %q", s)
+	}
+	if strings.ContainsRune(s, ' ') || strings.ContainsRune(s, ' ') {
+		t.Fatalf("line or paragraph separator in %q", s)
+	}
+}
+
+// checkMAC requires an empty MAC or the normalised form that mac() produces:
+// six octets, lower-case, colon-separated.
+func checkMAC(t *testing.T, s string) {
+	t.Helper()
+	if s == "" {
+		return
+	}
+	hw, err := net.ParseMAC(s)
+	if err != nil || len(hw) != 6 {
+		t.Fatalf("MAC %q is not six octets", s)
+	}
+	if hw.String() != s {
+		t.Fatalf("MAC %q is not in normalised form %q", s, hw.String())
+	}
+}
+
+// checkHostname requires an empty hostname or a lower-case DNS name without
+// a trailing dot, at most 253 bytes, with labels of 1 to 63 bytes made of
+// [a-z0-9-] that neither start nor end with a hyphen (the hostname rule).
+func checkHostname(t *testing.T, s string) {
+	t.Helper()
+	if s == "" {
+		return
+	}
+	if len(s) > 253 || strings.HasSuffix(s, ".") {
+		t.Fatalf("hostname %q has bad length or trailing dot", s)
+	}
+	for _, label := range strings.Split(s, ".") {
+		if len(label) < 1 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			t.Fatalf("hostname %q has a bad label %q", s, label)
+		}
+		for _, c := range label {
+			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+				t.Fatalf("hostname %q has character %q", s, c)
+			}
+		}
+	}
+}
+
 // checkResult requires every bound of a cleaned result (spec 12, see
 // Result.Clean and the limits in job.go).
 func checkResult(t *testing.T, r Result) {
@@ -80,7 +176,7 @@ func checkResult(t *testing.T, r Result) {
 	if !ValidID(r.Job) {
 		t.Fatalf("job ID %q", r.Job)
 	}
-	checkText(t, r.Error)
+	checkResultText(t, r.Error)
 	if len(r.Hosts) > MaxHosts {
 		t.Fatalf("%d hosts", len(r.Hosts))
 	}
@@ -103,28 +199,38 @@ func checkResult(t *testing.T, r Result) {
 				t.Fatalf("hosts not sorted: %q before %q", prev, a)
 			}
 		}
-		checkText(t, h.Vendor)
-		checkText(t, h.OS)
-		checkText(t, h.Hostname)
+		checkMAC(t, h.MAC)
+		checkResultText(t, h.Vendor)
+		checkResultText(t, h.OS)
+		checkHostname(t, h.Hostname)
 		if len(h.Ports) > MaxPortsPerHost {
 			t.Fatalf("%d ports on %s", len(h.Ports), h.Address)
 		}
 		ports := map[string]bool{}
-		for _, p := range h.Ports {
+		for pi, p := range h.Ports {
 			if p.Port < 1 || p.Port > 65535 {
 				t.Fatalf("port %d", p.Port)
 			}
 			if p.Protocol != "tcp" && p.Protocol != "udp" {
 				t.Fatalf("protocol %q", p.Protocol)
 			}
+			if !allowedStates[p.State] {
+				t.Fatalf("state %q is not on the allowlist", p.State)
+			}
 			key := p.Protocol + "/" + strconv.Itoa(p.Port)
 			if ports[key] {
 				t.Fatalf("duplicate port %d/%s on %s", p.Port, p.Protocol, h.Address)
 			}
 			ports[key] = true
-			checkText(t, p.Service)
-			checkText(t, p.Product)
-			checkText(t, p.Version)
+			if pi > 0 {
+				prev := h.Ports[pi-1]
+				if prev.Protocol > p.Protocol || prev.Protocol == p.Protocol && prev.Port >= p.Port {
+					t.Fatalf("ports not sorted on %s: %s/%d before %s/%d", h.Address, prev.Protocol, prev.Port, p.Protocol, p.Port)
+				}
+			}
+			checkResultText(t, p.Service)
+			checkResultText(t, p.Product)
+			checkResultText(t, p.Version)
 		}
 	}
 }
