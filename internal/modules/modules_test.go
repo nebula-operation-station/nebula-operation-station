@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -170,6 +171,42 @@ func TestImportVerdicts(t *testing.T) {
 	}
 	if v, err := store(t, nil).Import(ctx, "axel", demo(t, "1.0.0", true)); err != nil || !strings.Contains(v.Detail, "not connected") {
 		t.Fatalf("%+v %v", v, err)
+	}
+}
+
+// clip shortens executor text to maxDetail-60 bytes without leaving a
+// partial rune behind (the text is stored and shown as UTF-8).
+func TestClipKeepsValidUTF8(t *testing.T) {
+	limit := maxDetail - 60
+	cases := map[string]string{
+		// "é" is two bytes and starts at byte limit-1: a cut at limit splits it.
+		"two-byte rune across the cut":   strings.Repeat("a", limit-1) + "é" + "b",
+		"three-byte rune across the cut": strings.Repeat("a", limit-1) + "€" + "b",
+		"four-byte rune across the cut":  strings.Repeat("a", limit-2) + "😀" + "b",
+		"ascii only, longer than limit":  strings.Repeat("x", limit+50),
+	}
+	for name, in := range cases {
+		got := clip(in)
+		if !utf8.ValidString(got) {
+			t.Errorf("%s: result is not valid UTF-8: %q", name, got)
+		}
+		if len(got) > limit {
+			t.Errorf("%s: %d bytes, limit %d", name, len(got), limit)
+		}
+		if !strings.HasPrefix(in, got) {
+			t.Errorf("%s: result is not a prefix of the input", name)
+		}
+	}
+	// Text of exactly the limit is kept whole; one byte more is shortened.
+	if got := clip(strings.Repeat("x", limit)); len(got) != limit {
+		t.Errorf("exact limit: %d bytes", len(got))
+	}
+	if got := clip(strings.Repeat("x", limit+1)); len(got) != limit {
+		t.Errorf("limit+1: %d bytes", len(got))
+	}
+	// Unprintable text is still replaced, not cut.
+	if got := clip("bad\x07text"); got != "(unprintable text)" {
+		t.Errorf("control character: %q", got)
 	}
 }
 

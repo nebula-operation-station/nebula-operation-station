@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -263,12 +264,19 @@ func (s *Store) verify(ctx context.Context, v *Version) error {
 	return nil
 }
 
+// clip returns s, checked by prelude.Clean and cut to at most maxDetail-60
+// bytes. The cut lands on a rune boundary, so the result stays valid UTF-8.
 func clip(s string) string {
 	if !prelude.Clean(s, false) {
 		return "(unprintable text)"
 	}
-	if len(s) > maxDetail-60 {
-		s = s[:maxDetail-60]
+	const limit = maxDetail - 60
+	if len(s) > limit {
+		n := limit
+		for n > 0 && !utf8.RuneStart(s[n]) {
+			n--
+		}
+		s = s[:n]
 	}
 	return s
 }
