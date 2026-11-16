@@ -554,9 +554,12 @@ func decodeRecord(raw []byte, limit int) (Record, error) {
 	}
 	seen := make(map[string]bool, len(fields))
 	for dec.More() {
+		// Decoder errors can quote the input (a syntax error quotes a byte,
+		// a time error quotes the whole value), so they are replaced by fixed
+		// reasons and never passed on.
 		tok, err := dec.Token()
 		if err != nil {
-			return rec, invalid("record key: %v", err)
+			return rec, invalid("malformed record key")
 		}
 		key, _ := tok.(string)
 		dst, known := fields[key]
@@ -569,13 +572,13 @@ func decodeRecord(raw []byte, limit int) (Record, error) {
 		seen[key] = true
 		var v json.RawMessage
 		if err := dec.Decode(&v); err != nil {
-			return rec, invalid("record field %s: %v", key, err)
+			return rec, invalid("record field %s is malformed", key)
 		}
 		if string(v) == "null" {
 			return rec, invalid("record field %s is null", key)
 		}
 		if err := json.Unmarshal(v, dst); err != nil {
-			return rec, invalid("record field %s: %v", key, err)
+			return rec, invalid("record field %s has the wrong type or format", key)
 		}
 	}
 	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"strconv"
 	"unicode/utf8"
@@ -190,7 +191,7 @@ func ValidateLiveWant(w LiveWant) (LiveWant, error) {
 // DecodeLiveWant strictly decodes and validates a want-list document.
 func DecodeLiveWant(raw []byte) (LiveWant, error) {
 	var w LiveWant
-	if err := decodeLiveStrict(raw, MaxLiveWantBytes, &w); err != nil {
+	if err := decodeLiveStrict(raw, MaxLiveWantBytes, liveWantKeys, &w); err != nil {
 		return LiveWant{}, err
 	}
 	return ValidateLiveWant(w)
@@ -295,7 +296,7 @@ func (s LiveSamples) CheckClock(nowUnix int64) error {
 // DecodeLiveSamples strictly decodes and validates a samples document.
 func DecodeLiveSamples(raw []byte) (LiveSamples, error) {
 	var s LiveSamples
-	if err := decodeLiveStrict(raw, MaxLiveSamplesBytes, &s); err != nil {
+	if err := decodeLiveStrict(raw, MaxLiveSamplesBytes, liveSamplesKeys, &s); err != nil {
 		return LiveSamples{}, err
 	}
 	return ValidateLiveSamples(s)
@@ -310,10 +311,97 @@ func MarshalLiveSamples(s LiveSamples) ([]byte, error) {
 	return json.Marshal(v)
 }
 
+// liveKeys is the exact member schema of a live document: the top-level
+// names, the array member holding records (arrayKey) and the record names.
+type liveKeys struct {
+	top      []string
+	arrayKey string
+	elem     []string
+}
+
+var (
+	liveWantKeys = liveKeys{
+		top:      []string{"version", "written_unix", "expires_unix", "targets"},
+		arrayKey: "targets",
+		elem:     []string{"remote", "kind", "node", "vmid"},
+	}
+	liveSamplesKeys = liveKeys{
+		top:      []string{"version", "remote", "written_unix", "samples"},
+		arrayKey: "samples",
+		elem:     []string{"kind", "node", "vmid", "cpu", "mem_used", "mem_total", "disk_used", "disk_total", "net_in", "net_out", "observed_unix"},
+	}
+)
+
+// CheckRecordKeys rejects raw unless it is exactly one JSON object whose
+// member names are the names in top, each at most once. The member named
+// arrayKey, when non-empty, must be an array (or null) of objects whose member
+// names are the names in elem, each at most once. Names match byte for byte:
+// encoding/json matches struct fields case-insensitively and keeps the last of
+// repeated keys, so this check must run before any typed decode.
+func CheckRecordKeys(raw []byte, top []string, arrayKey string, elem []string) error {
+	return checkObjectKeys(raw, keySet(top), arrayKey, keySet(elem))
+}
+
+// keySet returns the names of list as a set.
+func keySet(list []string) map[string]struct{} {
+	set := make(map[string]struct{}, len(list))
+	for _, name := range list {
+		set[name] = struct{}{}
+	}
+	return set
+}
+
+// checkObjectKeys implements CheckRecordKeys for one object. Element objects
+// of arrayKey are checked with elem and no nested array.
+func checkObjectKeys(raw []byte, allowed map[string]struct{}, arrayKey string, elem map[string]struct{}) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return errors.New("document is not a JSON object")
+	}
+	seen := make(map[string]struct{}, len(allowed))
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return fmt.Errorf("decode: %w", err)
+		}
+		name, _ := tok.(string)
+		if _, ok := allowed[name]; !ok {
+			return errors.New("unknown field")
+		}
+		if _, dup := seen[name]; dup {
+			return errors.New("duplicate field")
+		}
+		seen[name] = struct{}{}
+		var value json.RawMessage
+		if err := dec.Decode(&value); err != nil {
+			return fmt.Errorf("decode: %w", err)
+		}
+		if arrayKey == "" || name != arrayKey {
+			continue
+		}
+		var records []json.RawMessage
+		if err := json.Unmarshal(value, &records); err != nil {
+			return fmt.Errorf("decode %s: %w", name, err)
+		}
+		for _, r := range records {
+			if err := checkObjectKeys(r, elem, "", nil); err != nil {
+				return err
+			}
+		}
+	}
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
+		return errors.New("malformed JSON object")
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return errors.New("trailing data after JSON document")
+	}
+	return nil
+}
+
 // decodeLiveStrict enforces the document-wide limits on raw (bounded by
-// limit) and decodes it into v, rejecting unknown fields. raw must be
-// exactly one JSON document.
-func decodeLiveStrict(raw []byte, limit int, v any) error {
+// limit), checks its member names against keys and decodes it into v,
+// rejecting unknown fields. raw must be exactly one JSON document.
+func decodeLiveStrict(raw []byte, limit int, keys liveKeys, v any) error {
 	if len(raw) > limit {
 		return fmt.Errorf("document of %d bytes exceeds %d", len(raw), limit)
 	}
@@ -321,6 +409,9 @@ func decodeLiveStrict(raw []byte, limit int, v any) error {
 		return errors.New("document is not valid UTF-8")
 	}
 	if err := walkDocument(raw); err != nil {
+		return err
+	}
+	if err := CheckRecordKeys(raw, keys.top, keys.arrayKey, keys.elem); err != nil {
 		return err
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
