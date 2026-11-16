@@ -3,6 +3,7 @@
 package reputation
 
 import (
+	"encoding/binary"
 	"errors"
 	"net/netip"
 	"reflect"
@@ -32,18 +33,18 @@ func mustMatcher(t *testing.T, es []Entry) *Matcher {
 func TestLookupListsAllCoveringEntriesBroadestFirst(t *testing.T) {
 	m := mustMatcher(t, []Entry{
 		{Prefix: pfx("8.8.4.0/24"), Category: "c"},
-		{Prefix: pfx("8.0.0.0/8"), Category: "x"},
-		{Prefix: pfx("8.8.0.0/16"), Category: "b"},
-		{Prefix: pfx("8.8.0.0/16"), Category: "a"},
+		{Prefix: pfx("8.8.0.0/16"), Category: "x"},
+		{Prefix: pfx("8.8.0.0/20"), Category: "b"},
+		{Prefix: pfx("8.8.0.0/20"), Category: "a"},
 	})
 	tests := []struct {
 		name string
 		addr string
 		want []string
 	}{
-		{"deepest and all covers", "8.8.4.1", []string{"8.0.0.0/8/x", "8.8.0.0/16/a", "8.8.0.0/16/b", "8.8.4.0/24/c"}},
-		{"no /24 match", "8.8.5.1", []string{"8.0.0.0/8/x", "8.8.0.0/16/a", "8.8.0.0/16/b"}},
-		{"only /8", "8.9.0.1", []string{"8.0.0.0/8/x"}},
+		{"deepest and all covers", "8.8.4.1", []string{"8.8.0.0/16/x", "8.8.0.0/20/a", "8.8.0.0/20/b", "8.8.4.0/24/c"}},
+		{"no /24 match", "8.8.5.1", []string{"8.8.0.0/16/x", "8.8.0.0/20/a", "8.8.0.0/20/b"}},
+		{"only /16", "8.8.32.1", []string{"8.8.0.0/16/x"}},
 		{"outside", "9.0.0.1", nil},
 	}
 	for _, tt := range tests {
@@ -62,9 +63,9 @@ func TestLookupListsAllCoveringEntriesBroadestFirst(t *testing.T) {
 func TestLookupPrefixLengthBoundaryV4AndV6(t *testing.T) {
 	m := mustMatcher(t, []Entry{
 		{Prefix: pfx("8.8.0.0/16"), Category: "v4"},
-		{Prefix: pfx("2a00::/31"), Category: "v6-31"},
+		{Prefix: pfx("2a00::/32"), Category: "v6-32"},
 	})
-	// /16 covers 8.8.x.x; the /15 neighbour 8.9.x.x is not covered by it.
+	// /16 covers 8.8.x.x; the neighbour 8.9.x.x is not covered by it.
 	if got, _ := m.Lookup(addr("8.8.200.1")); len(got) != 1 {
 		t.Errorf("/16 must match 8.8.200.1, got %v", cats(got))
 	}
@@ -72,17 +73,58 @@ func TestLookupPrefixLengthBoundaryV4AndV6(t *testing.T) {
 		t.Errorf("/16 must not match 8.9.0.1, got %v", cats(got))
 	}
 
-	// 2a00::/31 fixes the first 31 bits, so it covers 2a00:0::/32 and
-	// 2a00:1::/32 but not 2a00:2::/32. Its /32 twin 2a00::/32 covers only 2a00:0::/32.
-	m32 := mustMatcher(t, []Entry{{Prefix: pfx("2a00::/32"), Category: "v6-32"}})
-	if got, _ := m32.Lookup(addr("2a00:1::1")); len(got) != 0 {
+	// 2a00::/32 fixes the first 32 bits: it covers 2a00:0::/32 but not the
+	// neighbour 2a00:1::/32.
+	if got, _ := m.Lookup(addr("2a00::1")); len(got) != 1 {
+		t.Errorf("/32 must match 2a00::1, got %v", cats(got))
+	}
+	if got, _ := m.Lookup(addr("2a00:1::1")); len(got) != 0 {
 		t.Errorf("/32 must not match 2a00:1::1, got %v", cats(got))
 	}
-	if got, _ := m.Lookup(addr("2a00:1::1")); len(got) != 1 {
-		t.Errorf("/31 must match 2a00:1::1, got %v", cats(got))
+}
+
+// TestNewMatcherRefusesOverBroadPrefix: a prefix shorter than the minimum is
+// refused by NewMatcher too, so a caller that skips Validate cannot turn one
+// entry into a match for every address (/0) or a large block.
+func TestNewMatcherRefusesOverBroadPrefix(t *testing.T) {
+	bad := []string{"0.0.0.0/0", "8.0.0.0/8", "0.0.0.0/15", "::/0", "2a00::/31"}
+	for _, p := range bad {
+		if _, err := NewMatcher([]Entry{{Prefix: pfx(p), Category: "c"}}); !errors.Is(err, ErrInvalidPrefix) {
+			t.Errorf("NewMatcher(%s): %v, want ErrInvalidPrefix", p, err)
+		}
 	}
-	if got, _ := m.Lookup(addr("2a00:2::1")); len(got) != 0 {
-		t.Errorf("/31 must not match 2a00:2::1, got %v", cats(got))
+	for _, p := range []string{"8.0.0.0/16", "2a00::/32"} {
+		if _, err := NewMatcher([]Entry{{Prefix: pfx(p), Category: "c"}}); err != nil {
+			t.Errorf("NewMatcher(%s) at minimum length: %v", p, err)
+		}
+	}
+}
+
+// genHosts returns n distinct IPv6 /128 entries under 2a00::/16.
+func genHosts(n int) []Entry {
+	out := make([]Entry, 0, n)
+	for i := 0; i < n; i++ {
+		var b [16]byte
+		b[0], b[1] = 0x2a, 0x00
+		binary.BigEndian.PutUint32(b[12:], uint32(i))
+		out = append(out, Entry{Prefix: netip.PrefixFrom(netip.AddrFrom16(b), 128), Category: "c"})
+	}
+	return out
+}
+
+// TestNewMatcherEntryCapBoundary: a matcher at MaxMatcherEntries builds, one
+// more entry is refused with ErrMatcherTooLarge. Without the cap, a hostile
+// feed of distinct /128 entries could build an unbounded trie.
+func TestNewMatcherEntryCapBoundary(t *testing.T) {
+	m, err := NewMatcher(genHosts(MaxMatcherEntries))
+	if err != nil {
+		t.Fatalf("at cap: %v", err)
+	}
+	if got, _ := m.Lookup(addr("2a00::")); len(got) != 1 {
+		t.Fatalf("first host not matched at cap: %v", cats(got))
+	}
+	if _, err := NewMatcher(genHosts(MaxMatcherEntries + 1)); !errors.Is(err, ErrMatcherTooLarge) {
+		t.Fatalf("cap+1: %v, want ErrMatcherTooLarge", err)
 	}
 }
 
@@ -147,7 +189,7 @@ func TestMatcherIsImmutable(t *testing.T) {
 
 func TestMatcherOrderIndependent(t *testing.T) {
 	base := []Entry{
-		{Prefix: pfx("8.0.0.0/8"), Category: "x"},
+		{Prefix: pfx("8.8.0.0/20"), Category: "x"},
 		{Prefix: pfx("8.8.0.0/16"), Category: "b"},
 		{Prefix: pfx("8.8.0.0/16"), Category: "a"},
 		{Prefix: pfx("8.8.4.0/24"), Category: "c"},

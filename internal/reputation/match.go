@@ -17,7 +17,25 @@ var (
 	ErrInvalidAddress = errors.New("reputation: invalid address")
 	// ErrZonedAddress refuses an address with an IPv6 zone.
 	ErrZonedAddress = errors.New("reputation: zoned address refused")
+	// ErrMatcherTooLarge refuses more entries than MaxMatcherEntries.
+	ErrMatcherTooLarge = errors.New("reputation: too many entries for matcher")
 )
+
+// MaxMatcherEntries caps the entries one NewMatcher call accepts. A trie node
+// is about 48 bytes and an IPv6 /128 entry adds up to 128 nodes, so the cap
+// bounds the matcher at about 96 MiB whatever the feed contains (2^14 * 128 *
+// 48 bytes). The Validate caps are caller-supplied; this one is fixed because
+// it bounds memory on the matcher side.
+const MaxMatcherEntries = 1 << 14
+
+// minPrefixBits returns the shortest prefix length the matcher accepts for the
+// family of a (ADR 0012 D6).
+func minPrefixBits(a netip.Addr) int {
+	if a.Is4() {
+		return MinPrefixV4
+	}
+	return MinPrefixV6
+}
 
 // Matcher answers "which entries cover this address" for one set of entries.
 // It is immutable after NewMatcher: Lookup only reads, and the zero value
@@ -38,13 +56,18 @@ type trieNode struct {
 // NewMatcher builds a matcher from entries. The input slice is not kept and
 // may be reordered or reused by the caller; duplicates (same prefix and
 // category) are merged, so any input order gives the same matcher. Entries
-// are expected to be validated by Validate first; NewMatcher checks only that
-// each prefix is canonical and not IPv4-mapped.
+// are expected to be validated by Validate first. NewMatcher checks only that
+// each prefix is canonical, not IPv4-mapped and at least MinPrefixV4 (IPv4) or
+// MinPrefixV6 (IPv6) long, and that there are at most MaxMatcherEntries
+// entries (ErrMatcherTooLarge). Special-range and overlap rules stay in Validate.
 func NewMatcher(entries []Entry) (*Matcher, error) {
+	if len(entries) > MaxMatcherEntries {
+		return nil, fmt.Errorf("%d entries, cap %d: %w", len(entries), MaxMatcherEntries, ErrMatcherTooLarge)
+	}
 	sorted := slices.Clone(entries)
 	for _, e := range sorted {
 		p := e.Prefix
-		if !p.IsValid() || p.Addr().Is4In6() || p.Masked() != p {
+		if !p.IsValid() || p.Addr().Is4In6() || p.Masked() != p || p.Bits() < minPrefixBits(p.Addr()) {
 			return nil, fmt.Errorf("entry %q: %w", p.String(), ErrInvalidPrefix)
 		}
 	}

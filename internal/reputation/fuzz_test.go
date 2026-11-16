@@ -61,7 +61,9 @@ func FuzzLookupMatchesLinearOracle(f *testing.F) {
 		raw := decodeFuzzEntries(data)
 		var entries []Entry
 		for _, e := range raw {
-			if !e.Prefix.IsValid() || e.Prefix.Addr().Is4In6() {
+			// NewMatcher refuses invalid, mapped and too-broad prefixes, so the
+			// oracle is fed only what the matcher accepts.
+			if !e.Prefix.IsValid() || e.Prefix.Addr().Is4In6() || e.Prefix.Bits() < minPrefixBits(e.Prefix.Addr()) {
 				continue
 			}
 			entries = append(entries, Entry{Prefix: e.Prefix.Masked(), Category: e.Category})
@@ -110,9 +112,9 @@ func FuzzLookupMatchesLinearOracle(f *testing.F) {
 // length holds, every kept prefix is canonical and not IPv4-mapped, and the
 // counters match the dropped list.
 func FuzzValidateNeverKeepsSpecialOverlap(f *testing.F) {
-	f.Add([]byte{0, 10, 0, 0, 0, 24, 0})
-	f.Add([]byte{0, 8, 8, 4, 1, 16, 1})
-	f.Add([]byte{1, 0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 64, 0})
+	for _, seed := range fuzzSeeds {
+		f.Add(seed)
+	}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		entries := decodeFuzzEntries(data)
 		caps := Caps{PerFeed: len(entries) + 1, Total: len(entries) + 1}
@@ -150,6 +152,37 @@ func FuzzValidateNeverKeepsSpecialOverlap(f *testing.F) {
 			t.Fatalf("kept %d + dropped %d exceeds input %d", len(res.Kept), len(res.Dropped), len(entries))
 		}
 	})
+}
+
+// fuzzSeedRecord builds one full recordBytes record: family flag, address
+// bytes, prefix length byte and category index.
+func fuzzSeedRecord(v6 bool, addr []byte, bits, cat byte) []byte {
+	rec := make([]byte, recordBytes)
+	if v6 {
+		rec[0] = 1
+	}
+	copy(rec[1:17], addr)
+	rec[17] = bits
+	rec[18] = cat
+	return rec
+}
+
+// fuzzSeeds are complete records. A seed shorter than recordBytes decodes to
+// zero entries and exercises nothing (see TestFuzzSeedsDecodeToEntries).
+var fuzzSeeds = [][]byte{
+	fuzzSeedRecord(false, []byte{10, 0, 0, 0}, 24, 0),
+	fuzzSeedRecord(false, []byte{8, 8, 4, 1}, 16, 1),
+	fuzzSeedRecord(true, []byte{0xfe, 0x80}, 64, 0),
+}
+
+// TestFuzzSeedsDecodeToEntries: every Validate fuzz seed must yield an entry,
+// otherwise the seed checks nothing.
+func TestFuzzSeedsDecodeToEntries(t *testing.T) {
+	for i, seed := range fuzzSeeds {
+		if got := decodeFuzzEntries(seed); len(got) != 1 {
+			t.Fatalf("seed %d decodes to %d entries, want 1", i, len(got))
+		}
+	}
 }
 
 // total sums every counter; used by the fuzz invariants.
