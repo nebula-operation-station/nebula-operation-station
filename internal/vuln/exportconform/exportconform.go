@@ -48,6 +48,7 @@ var Model = []Case{
 	{"hyphenated MAC with digits", "00-11-22-AA-BB-CC", false},
 	{"hyphenated MAC with digits after a prefix", "X1-00-11-22-AA-BB-CC", false},
 	{"bare MAC with digits", "001122AABBCC", false},
+	{"six-octet MAC with digits after a prefix, no address", "X1-00-11-AA-BB-CC-DD", false},
 	{"host-name style address", "IP-10-0-0-7", false},
 	{"public address in a model", "IP-93-184-216-34", false},
 	{"public address with suffix in a model", "PA-93-184-216-34-A", false},
