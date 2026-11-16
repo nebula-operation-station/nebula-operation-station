@@ -14,7 +14,10 @@
 //     descriptions with HTML or control characters) is refused at ingest or
 //     rendered as inert text;
 //   - the approved config baseline (ND-17 part 2) cannot be set by the
-//     server.
+//     server; no executor method or role entry names a baseline except the
+//     compare-only I2 integrity check CompareBaselineList (ADR 0015 D7),
+//     whose answer is a result enum only and which never writes the
+//     executor's stored digest.
 //
 // These tests are protected: a change that weakens or deletes one needs
 // human review (see AGENTS.md).
@@ -23,6 +26,7 @@ package security
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,12 +52,17 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
+	"google.golang.org/protobuf/types/descriptorpb"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/events"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/fimbaseline"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/fimscan"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/keyring"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevcontract"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevinventory"
@@ -1334,22 +1343,391 @@ func TestNetDevDialAddressesArePrivateLiterals(t *testing.T) {
 	}
 }
 
+// ndCompareOnlyBaselineMethod is the one ExecutorService method whose name
+// may contain "baseline" (ND-21 4, decision of 13.11.): the compare-only
+// I2 integrity baseline check of ADR 0015 D7 "Server compromise". It is
+// not the network device config baseline (ND-17) and sets or reveals no
+// baseline: the server streams its I2 list for one host, the executor
+// recomputes the digest itself and answers only MATCH, MISMATCH
+// (`integrity.baseline_tamper`, held by the executor) or NONE. The
+// exception holds only while ndCompareOnlyBaselineShape and
+// TestNetDevCompareOnlyBaselineWritesNothing pass. Any other method, and
+// any role beyond server and admin for this one, stays an error.
+const ndCompareOnlyBaselineMethod = "CompareBaselineList"
+
+// ndCompareOnlyBaselineRoles are the only roles MethodRoles may grant the
+// exempt method.
+var ndCompareOnlyBaselineRoles = []peercred.Role{peercred.RoleServer, peercred.RoleAdmin}
+
+// ndBaselineNameViolations applies the ND-21 4 name rule: every service
+// method and every MethodRoles entry whose name contains "baseline" is a
+// violation, except ndCompareOnlyBaselineMethod granted to no role outside
+// ndCompareOnlyBaselineRoles. methods are bare method names; roles is keyed
+// by full gRPC method name.
+func ndBaselineNameViolations(service string, methods []string, roles map[string][]peercred.Role) []string {
+	exempt := "/" + service + "/" + ndCompareOnlyBaselineMethod
+	var out []string
+	for _, name := range methods {
+		if strings.Contains(strings.ToLower(name), "baseline") && name != ndCompareOnlyBaselineMethod {
+			out = append(out, "method "+name+" exposes a baseline")
+		}
+	}
+	for m, rs := range roles {
+		if !strings.Contains(strings.ToLower(m), "baseline") {
+			continue
+		}
+		if m != exempt {
+			out = append(out, "MethodRoles grants "+m)
+			continue
+		}
+		for _, r := range rs {
+			if !slices.Contains(ndCompareOnlyBaselineRoles, r) {
+				out = append(out, fmt.Sprintf("MethodRoles grants %s to %s", m, r))
+			}
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// ndCompareOnlyBaselineShape checks the exempt method by descriptor: a
+// client stream (the list) answered once; the answer is exactly one enum
+// field with exactly the values UNSPECIFIED, MATCH, MISMATCH and NONE; the
+// request carries only the host header (host, profile, counts) and the
+// list records, pinned field by field, so no digest, approval, assertion
+// or other field can be added without failing here. The request carries
+// the list and never a digest by ADR 0015 D7: a server that rewrote its
+// list must not be able to present the old approved digest.
+func ndCompareOnlyBaselineShape(m protoreflect.MethodDescriptor) []string {
+	var out []string
+	if !m.IsStreamingClient() || m.IsStreamingServer() {
+		out = append(out, "must be a client stream with a single answer")
+	}
+	resp := m.Output()
+	if resp.Fields().Len() != 1 {
+		out = append(out, fmt.Sprintf("answer %s has %d fields, want only the result enum", resp.FullName(), resp.Fields().Len()))
+	}
+	for i := 0; i < resp.Fields().Len(); i++ {
+		f := resp.Fields().Get(i)
+		if f.Kind() != protoreflect.EnumKind || f.Cardinality() == protoreflect.Repeated {
+			out = append(out, fmt.Sprintf("answer field %s is %s, want a single enum", f.Name(), f.Kind()))
+			continue
+		}
+		var vals []string
+		for j := 0; j < f.Enum().Values().Len(); j++ {
+			vals = append(vals, string(f.Enum().Values().Get(j).Name()))
+		}
+		want := []string{"BASELINE_DIGEST_COMPARISON_UNSPECIFIED", "BASELINE_DIGEST_COMPARISON_MATCH",
+			"BASELINE_DIGEST_COMPARISON_MISMATCH", "BASELINE_DIGEST_COMPARISON_NONE"}
+		if !slices.Equal(vals, want) {
+			out = append(out, fmt.Sprintf("answer enum values %v, want %v", vals, want))
+		}
+	}
+	// Every message reachable from the request, with exactly its fields.
+	want := map[string][]string{
+		"CompareBaselineListRequest": {"header", "entries", "mounts"},
+		"CompareBaselineListHeader":  {"host_id", "profile_id", "entry_count", "mount_count"},
+		"BaselineListEntry": {"path", "type", "size", "mode", "uid", "gid", "inode", "mtime", "ctime",
+			"hash_kind", "hash_secret", "hash_sum", "link"},
+		"BaselineListMount": {"path", "fs_type"},
+	}
+	seen := map[string]bool{}
+	var walk func(md protoreflect.MessageDescriptor)
+	walk = func(md protoreflect.MessageDescriptor) {
+		name := string(md.Name())
+		if seen[name] {
+			return
+		}
+		seen[name] = true
+		fields, ok := want[name]
+		if !ok {
+			out = append(out, "request reaches unexpected message "+string(md.FullName()))
+		}
+		var got []string
+		for i := 0; i < md.Fields().Len(); i++ {
+			f := md.Fields().Get(i)
+			got = append(got, string(f.Name()))
+			if strings.Contains(strings.ToLower(string(f.Name())), "digest") {
+				out = append(out, fmt.Sprintf("request field %s.%s takes a digest", name, f.Name()))
+			}
+			if f.Kind() == protoreflect.MessageKind {
+				walk(f.Message())
+			}
+		}
+		if ok && !slices.Equal(got, fields) {
+			out = append(out, fmt.Sprintf("request message %s has fields %v, want %v", name, got, fields))
+		}
+	}
+	walk(m.Input())
+	for name := range want {
+		if !seen[name] {
+			out = append(out, "request no longer reaches "+name)
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+// TestNetDevBaselineNameRuleRejects pins the ND-21 4 name rule itself: the
+// exception is exactly one method name for exactly the server and admin
+// roles, so an invented SetBaseline method or role entry (or a wider grant
+// of the exempt method) is still refused.
+func TestNetDevBaselineNameRuleRejects(t *testing.T) {
+	const svc = "nebula.executor.v1.ExecutorService"
+	full := func(m string) string { return "/" + svc + "/" + m }
+	server := []peercred.Role{peercred.RoleServer}
+	for _, tc := range []struct {
+		name    string
+		methods []string
+		roles   map[string][]peercred.Role
+		want    int
+	}{
+		{"exempt method for server and admin", []string{"CompareBaselineList", "GetIntegrityStatus"},
+			map[string][]peercred.Role{full("CompareBaselineList"): ndCompareOnlyBaselineRoles}, 0},
+		{"SetBaseline method", []string{"CompareBaselineList", "SetBaseline"}, nil, 1},
+		{"SetBaseline role entry", nil, map[string][]peercred.Role{full("SetBaseline"): server}, 1},
+		{"SetBaseline method and role", []string{"SetBaseline"}, map[string][]peercred.Role{full("SetBaseline"): server}, 2},
+		{"lower-case name", []string{"setbaselinedigest"}, nil, 1},
+		{"get netdev baseline", []string{"GetNetDeviceBaseline"}, nil, 1},
+		{"compare digest variant", []string{"CompareBaselineDigest"}, map[string][]peercred.Role{full("CompareBaselineDigest"): server}, 2},
+		{"exempt name as a prefix", []string{"CompareBaselineListAndApprove"}, nil, 1},
+		{"exempt name on another service", nil, map[string][]peercred.Role{"/other.v1.Svc/CompareBaselineList": server}, 1},
+		{"exempt method for a collector", nil,
+			map[string][]peercred.Role{full("CompareBaselineList"): {peercred.RoleServer, peercred.RoleNetDevCollector}}, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ndBaselineNameViolations(svc, tc.methods, tc.roles); len(got) != tc.want {
+				t.Errorf("violations = %q, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNetDevCompareOnlyBaselineShapeRejects: the descriptor check refuses
+// answers that carry a digest or list and requests that carry a digest.
+// Each case edits a copy of the real file descriptor (no proto change).
+func TestNetDevCompareOnlyBaselineShapeRejects(t *testing.T) {
+	real := pb.File_nebula_executor_v1_executor_proto.Services().ByName("ExecutorService").Methods().ByName(ndCompareOnlyBaselineMethod)
+	if got := ndCompareOnlyBaselineShape(real); len(got) != 0 {
+		t.Fatalf("the real method fails its own shape check: %q", got)
+	}
+	msg := func(fd *descriptorpb.FileDescriptorProto, name string) *descriptorpb.DescriptorProto {
+		for _, m := range fd.GetMessageType() {
+			if m.GetName() == name {
+				return m
+			}
+		}
+		t.Fatalf("message %s not in the file", name)
+		return nil
+	}
+	field := func(name string, n int32, typ descriptorpb.FieldDescriptorProto_Type) *descriptorpb.FieldDescriptorProto {
+		return &descriptorpb.FieldDescriptorProto{Name: proto.String(name), Number: proto.Int32(n), Type: typ.Enum(),
+			Label: descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(), JsonName: proto.String(name)}
+	}
+	str, byt := descriptorpb.FieldDescriptorProto_TYPE_STRING, descriptorpb.FieldDescriptorProto_TYPE_BYTES
+	for name, edit := range map[string]func(fd *descriptorpb.FileDescriptorProto){
+		"answer with computed digest": func(fd *descriptorpb.FileDescriptorProto) {
+			m := msg(fd, "CompareBaselineListResponse")
+			m.Field = append(m.Field, field("computed_digest", 3, str))
+			m.ReservedRange, m.ReservedName = nil, nil
+		},
+		"answer with list bytes": func(fd *descriptorpb.FileDescriptorProto) {
+			m := msg(fd, "CompareBaselineListResponse")
+			m.Field = append(m.Field, field("list", 9, byt))
+		},
+		"answer with approved digest instead of enum": func(fd *descriptorpb.FileDescriptorProto) {
+			m := msg(fd, "CompareBaselineListResponse")
+			m.Field[0] = field("approved_digest", 1, str)
+		},
+		"answer enum with an adopt value": func(fd *descriptorpb.FileDescriptorProto) {
+			for _, e := range fd.GetEnumType() {
+				if e.GetName() == "BaselineDigestComparison" {
+					e.Value = append(e.Value, &descriptorpb.EnumValueDescriptorProto{
+						Name: proto.String("BASELINE_DIGEST_COMPARISON_ADOPTED"), Number: proto.Int32(4)})
+				}
+			}
+		},
+		"header with server digest": func(fd *descriptorpb.FileDescriptorProto) {
+			m := msg(fd, "CompareBaselineListHeader")
+			m.Field = append(m.Field, field("server_digest", 9, str))
+		},
+		"header with an approval flag": func(fd *descriptorpb.FileDescriptorProto) {
+			m := msg(fd, "CompareBaselineListHeader")
+			m.Field = append(m.Field, field("adopt", 9, descriptorpb.FieldDescriptorProto_TYPE_BOOL))
+		},
+		"entry with an extra field": func(fd *descriptorpb.FileDescriptorProto) {
+			m := msg(fd, "BaselineListEntry")
+			m.Field = append(m.Field, field("assertion", 99, byt))
+		},
+		"unary call": func(fd *descriptorpb.FileDescriptorProto) {
+			for _, s := range fd.GetService() {
+				for _, m := range s.GetMethod() {
+					if m.GetName() == ndCompareOnlyBaselineMethod {
+						m.ClientStreaming = proto.Bool(false)
+					}
+				}
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fdp := protodesc.ToFileDescriptorProto(pb.File_nebula_executor_v1_executor_proto)
+			edit(fdp)
+			fd, err := protodesc.NewFile(fdp, protoregistry.GlobalFiles)
+			if err != nil {
+				t.Fatalf("edited descriptor: %v", err)
+			}
+			m := fd.Services().ByName("ExecutorService").Methods().ByName(ndCompareOnlyBaselineMethod)
+			if got := ndCompareOnlyBaselineShape(m); len(got) == 0 {
+				t.Error("shape check accepts the edited method")
+			}
+		})
+	}
+	// Every other method of the service fails the shape check too, so the
+	// exception cannot be moved to another method by renaming.
+	other := pb.File_nebula_executor_v1_executor_proto.Services().ByName("ExecutorService").Methods()
+	for i := 0; i < other.Len(); i++ {
+		m := other.Get(i)
+		if m.Name() == ndCompareOnlyBaselineMethod {
+			continue
+		}
+		if got := ndCompareOnlyBaselineShape(m); len(got) == 0 {
+			t.Errorf("shape check accepts %s", m.Name())
+		}
+	}
+}
+
+// ndI2List is a small I2 baseline list for host web-1 as the server would
+// stream it, and its digest computed independently through fimbaseline.
+func ndI2List(t *testing.T, size int64) ([]*pb.CompareBaselineListRequest, string) {
+	t.Helper()
+	sum := sha256.Sum256([]byte("passwd"))
+	entries := []*pb.BaselineListEntry{
+		{Path: []byte("/etc"), Type: pb.BaselineEntryType_BASELINE_ENTRY_TYPE_DIR, Mode: 0o755, Inode: 2,
+			HashKind: pb.BaselineHashKind_BASELINE_HASH_KIND_NONE},
+		{Path: []byte("/etc/passwd"), Type: pb.BaselineEntryType_BASELINE_ENTRY_TYPE_FILE, Size: size, Mode: 0o644,
+			Inode: 3, Mtime: 1700000000, Ctime: 1700000000,
+			HashKind: pb.BaselineHashKind_BASELINE_HASH_KIND_KEYED, HashSum: sum[:]},
+	}
+	mounts := []*pb.BaselineListMount{{Path: []byte("/boot/efi"), FsType: "vfat"}}
+	chunks := []*pb.CompareBaselineListRequest{
+		{Header: &pb.CompareBaselineListHeader{HostId: "web-1", ProfileId: "fim-default-v1",
+			EntryCount: uint32(len(entries)), MountCount: uint32(len(mounts))}},
+		{Entries: entries, Mounts: mounts},
+	}
+	res := &fimscan.Result{ProfileID: "fim-default-v1", Mode: fimscan.ModeFull,
+		Mounts: []fimscan.Mount{{Path: []byte("/boot/efi"), FSType: "vfat"}}}
+	res.Records = append(res.Records,
+		fimscan.Record{Path: []byte("/etc"), Type: fimscan.TypeDir, Mode: 0o755, Inode: 2},
+		fimscan.Record{Path: []byte("/etc/passwd"), Type: fimscan.TypeFile, Size: size, Mode: 0o644, Inode: 3,
+			Mtime: 1700000000, Ctime: 1700000000, Hash: fimscan.Hash{Kind: fimscan.HashKeyed, Sum: sum}})
+	b, err := fimbaseline.NewBaseline(res)
+	if err != nil {
+		t.Fatalf("test list: %v", err)
+	}
+	return chunks, b.Digest().String()
+}
+
+// ndCompareBaselineList streams chunks with the env's (server) client.
+func (e *ndEnv) compareBaselineList(chunks []*pb.CompareBaselineListRequest) (*pb.CompareBaselineListResponse, error) {
+	e.t.Helper()
+	st, err := e.client.CompareBaselineList(e.ctx())
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range chunks {
+		if err := st.Send(c); err != nil {
+			break // the executor ended the stream; CloseAndRecv has its status
+		}
+	}
+	return st.CloseAndRecv()
+}
+
+// TestNetDevCompareOnlyBaselineWritesNothing (ND-21 4, exception): the
+// server role calls the exempt method over the real socket and role table.
+// The executor's stored digest is the same before and after, for a
+// matching list and for a deviating one; a deviating list is MISMATCH (the
+// executor-held `integrity.baseline_tamper` finding), never an adoption;
+// and a host without a stored digest stays without one.
+func TestNetDevCompareOnlyBaselineWritesNothing(t *testing.T) {
+	e := newNDEnv(t, peercred.RoleServer)
+	approvedList, approved := ndI2List(t, 1200)
+	rewritten, rewrittenDigest := ndI2List(t, 1201)
+	if approved == rewrittenDigest {
+		t.Fatal("test lists share a digest")
+	}
+
+	// No stored digest: NONE, and nothing is stored afterwards.
+	resp, err := e.compareBaselineList(rewritten)
+	if err != nil || resp.GetResult() != pb.BaselineDigestComparison_BASELINE_DIGEST_COMPARISON_NONE {
+		t.Fatalf("compare without a stored digest = %v, %v; want NONE", resp, err)
+	}
+	if d, err := e.db.ApprovedBaselineDigest("web-1"); !errors.Is(err, executordb.ErrNoBaselineDigest) {
+		t.Fatalf("compare stored a digest: %+v, %v", d, err)
+	}
+
+	before, err := e.db.StoreApprovedBaselineDigest(executordb.BaselineDigest{
+		HostID: "web-1", Digest: approved, Kind: executordb.BaselineApprovalInitial,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireUnchanged := func(what string) {
+		t.Helper()
+		after, err := e.db.ApprovedBaselineDigest("web-1")
+		if err != nil || after.Digest != before.Digest || after.PreviousDigest != before.PreviousDigest ||
+			after.Kind != before.Kind || !after.ApprovedAt.Equal(before.ApprovedAt) {
+			t.Fatalf("%s changed the stored digest: before %+v, after %+v, %v", what, before, after, err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		chunks []*pb.CompareBaselineListRequest
+		want   pb.BaselineDigestComparison
+	}{
+		{"matching list", approvedList, pb.BaselineDigestComparison_BASELINE_DIGEST_COMPARISON_MATCH},
+		{"deviating list", rewritten, pb.BaselineDigestComparison_BASELINE_DIGEST_COMPARISON_MISMATCH},
+		// Repeated, and then the approved list again: the deviating digest
+		// was not taken over in between.
+		{"deviating list again", rewritten, pb.BaselineDigestComparison_BASELINE_DIGEST_COMPARISON_MISMATCH},
+		{"matching list after the mismatch", approvedList, pb.BaselineDigestComparison_BASELINE_DIGEST_COMPARISON_MATCH},
+	} {
+		resp, err := e.compareBaselineList(tc.chunks)
+		if err != nil || resp.GetResult() != tc.want {
+			t.Fatalf("%s: %v, %v; want %v", tc.name, resp, err, tc.want)
+		}
+		requireUnchanged(tc.name)
+	}
+
+	fs, err := e.db.BaselineTamperFindings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fs) != 1 || fs[0].HostID != "web-1" || fs[0].ApprovedDigest != approved ||
+		fs[0].PresentedDigest != rewrittenDigest || fs[0].Count != 2 {
+		t.Fatalf("tamper findings = %+v; want one for web-1 with the deviating digest, seen twice", fs)
+	}
+}
+
 // TestNetDevBaselineNotSettableByServer (ND-21 4): the approved config
 // baseline (ND-17 part 2) has no RPC; the server cannot obtain an
 // approval for it through ProposeExecution (reserved action namespace);
 // and even in-process the executor refuses a baseline whose raw_digest it
 // did not compute itself, so a server-chosen digest can never become the
-// baseline.
+// baseline. No method or role entry may name a baseline, with exactly one
+// exception (ndCompareOnlyBaselineMethod, compare-only, enum answer).
 func TestNetDevBaselineNotSettableByServer(t *testing.T) {
 	svcDesc := pb.File_nebula_executor_v1_executor_proto.Services().ByName("ExecutorService")
+	var methods []string
 	for i := 0; i < svcDesc.Methods().Len(); i++ {
-		if name := string(svcDesc.Methods().Get(i).Name()); strings.Contains(strings.ToLower(name), "baseline") {
-			t.Errorf("method %s exposes the baseline; it must be admin-only with an executor-computed digest", name)
-		}
+		methods = append(methods, string(svcDesc.Methods().Get(i).Name()))
 	}
-	for m := range executor.MethodRoles() {
-		if strings.Contains(strings.ToLower(m), "baseline") {
-			t.Errorf("MethodRoles grants %s", m)
+	for _, v := range ndBaselineNameViolations(string(svcDesc.FullName()), methods, executor.MethodRoles()) {
+		t.Errorf("%s; a baseline must be admin-only with an executor-computed digest", v)
+	}
+	if m := svcDesc.Methods().ByName(ndCompareOnlyBaselineMethod); m != nil {
+		for _, v := range ndCompareOnlyBaselineShape(m) {
+			t.Errorf("%s: %s", ndCompareOnlyBaselineMethod, v)
 		}
 	}
 
