@@ -179,9 +179,9 @@ func TestContainerMemberRefusals(t *testing.T) {
 			u.Form = canonical.ContainerUpdateFormAlone
 			m.ContainerUpdate = &u
 		}},
-		{"private registry", errContainerUnsupported, func(m *canonical.BatchMember, _ *[]byte) {
+		{"private registry added after rendering", errContainerParameters, func(m *canonical.BatchMember, _ *[]byte) {
 			u := m.ContainerUpdate.Clone()
-			u.Registry = &canonical.ContainerUpdateRegistry{RegistryID: "reg", RecordDigest: hexOf("8"), CredentialID: "c", CredentialVersion: 1}
+			u.Registry = testRegistryBinding()
 			m.ContainerUpdate = &u
 		}},
 		{"parameters not the rendering", errContainerParameters, func(_ *canonical.BatchMember, p *[]byte) {
@@ -228,6 +228,35 @@ func TestContainerMemberRefusals(t *testing.T) {
 				t.Fatalf("err = %v, want %v", err, c.want)
 			}
 		})
+	}
+}
+
+func testRegistryBinding() *canonical.ContainerUpdateRegistry {
+	return &canonical.ContainerUpdateRegistry{RegistryID: "reg", RecordDigest: hexOf("8"), CredentialID: "c", CredentialVersion: 1}
+}
+
+// A private registry binding (cu06) is admitted on a compose update only,
+// with parameters rendered from the binding that names it; a standalone
+// update or a rollback naming one is refused before the claim.
+func TestContainerMemberPrivateRegistryOnlyOnComposeUpdate(t *testing.T) {
+	u := testComposeUpdate()
+	u.Registry = testRegistryBinding()
+	m, params := testContainerMember(t, u)
+	if err := checkContainerMember(m, params, testComposePin()); err != nil {
+		t.Fatalf("private compose update refused: %v", err)
+	}
+	su := testStandaloneUpdate("def-1", 1)
+	su.Registry = testRegistryBinding()
+	sm, sparams := testContainerMember(t, su)
+	sm.Request.ActionID = standaloneUpdateAction
+	if err := checkContainerMember(sm, sparams, testComposePin(), shippedStandaloneUpdatePin()); !errors.Is(err, errContainerUnsupported) {
+		t.Fatalf("private standalone update: %v", err)
+	}
+	_, _, rb := rollbackFixture(t, time.Now())
+	rb.Registry = testRegistryBinding()
+	rm, rparams := testRollbackMember(t, rb)
+	if err := checkContainerMember(rm, rparams, testRollbackPin()); !errors.Is(err, errContainerUnsupported) {
+		t.Fatalf("private rollback: %v", err)
 	}
 }
 

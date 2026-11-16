@@ -107,6 +107,19 @@ type manifestDoc struct {
 	Config        *descriptor  `json:"config"`
 	Layers        []descriptor `json:"layers"`
 	Manifests     []descriptor `json:"manifests"`
+
+	// verified is set by resolveManifest on the platform image manifest:
+	// its body exactly as served (digest-verified), its media type and
+	// digest. It feeds the archive's OCI layout byte for byte.
+	verified ociManifest
+}
+
+// ociManifest is a verified image manifest as the archive's OCI layout
+// stores it.
+type ociManifest struct {
+	body      []byte
+	mediaType string
+	digest    digest
 }
 
 // isIndexType and isManifestType classify media types.
@@ -194,6 +207,7 @@ func (p *Puller) resolveManifest(ctx context.Context, s *session, top digest, wa
 		return nil, err
 	}
 	res.ManifestDigest = top.String()
+	md := top
 	if isIndexType(mt) {
 		entry, err := selectPlatform(doc.Manifests, want, p.limits.ManifestBytes)
 		if err != nil {
@@ -213,10 +227,12 @@ func (p *Puller) resolveManifest(ctx context.Context, s *session, top digest, wa
 		}
 		res.IndexDigest = top.String()
 		res.ManifestDigest = d.String()
+		md = d
 	}
 	if err := p.validateImageManifest(doc); err != nil {
 		return nil, err
 	}
+	doc.verified = ociManifest{body: body, mediaType: mt, digest: md}
 	return doc, nil
 }
 
