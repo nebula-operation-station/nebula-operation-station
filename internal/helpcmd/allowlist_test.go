@@ -239,6 +239,11 @@ var reviewBypasses = []string{
 	"journalctl -b --rotate",
 	"journalctl -eb --vacuum-size=1K",
 	"journalctl -b -D /x",
+	// The long forms with an optional value never take the next word.
+	"journalctl --lines --rotate",
+	"journalctl --lines -D /x",
+	"journalctl --boot --vacuum-size=1K",
+	"journalctl --boot -M c",
 	// tr06i audit: head and tail read `-5c`, `-5n` as one obsolete count
 	// option; the next word is then a file, not a value.
 	"head -5c /dev/watchdog",
