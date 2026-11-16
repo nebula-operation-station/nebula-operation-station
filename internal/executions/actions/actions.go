@@ -151,6 +151,20 @@ var containerRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 
 var containerParam = []Param{{Name: "container", Label: "Container (name or ID)", Pattern: containerRe}}
 
+// containerIDRe is a full container ID (64 lowercase hex), as docker
+// inspect prints it; G5b binds container control to it.
+var containerIDRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// imageIDRe is a local image ID (sha256:, 64 lowercase hex).
+var imageIDRe = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// boundContainerParams are the parameters of docker.start, stop and
+// restart 1.1.0: the container and image IDs of the approved binding.
+var boundContainerParams = []Param{
+	{Name: "container_id", Label: "Bound container ID (full)", Pattern: containerIDRe},
+	{Name: "image_id", Label: "Bound image ID", Pattern: imageIDRe},
+}
+
 // imageRe is a digest-pinned image reference (repo@sha256:…): the scan
 // target is immutable, and no tag lookup or pull is possible.
 var imageRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._/:-]{0,254}@sha256:[0-9a-f]{64}$`)
@@ -330,6 +344,17 @@ var dockerControlTemplate string
 
 func dockerScript(verb string) []byte {
 	return []byte(strings.ReplaceAll(dockerControlTemplate, "@VERB@", verb))
+}
+
+// dockerControlBoundTemplate is the 1.1.0 control script (G5b): it checks
+// the bound container and image IDs before the verb. It is a separate
+// template so that the 1.0.0 bytes, and their reviewed hash, stay as they are.
+//
+//go:embed scripts/docker_control_bound.sh.tmpl
+var dockerControlBoundTemplate string
+
+func dockerBoundScript(verb string) []byte {
+	return []byte(strings.ReplaceAll(dockerControlBoundTemplate, "@VERB@", verb))
 }
 
 //go:embed scripts/service_control.sh.tmpl
@@ -518,6 +543,21 @@ var Builtin = []Action{
 		Risk: pb.RiskClass_RISK_CLASS_MEDIUM, Timeout: 3 * time.Minute, Script: dockerScript("restart"), Params: containerParam, Retry: RetryNever,
 	},
 	{
+		ID: "docker.start", Version: "1.1.0", Title: "Start bound container",
+		Description: "Batch member only (G5b): docker start of the container whose full ID and image ID the approved binding names. Checks both before the start and stops with container_changed, running nothing, if either differs or the container is gone. The configuration hash is not checked. Nothing is recreated or pulled.",
+		Risk:        pb.RiskClass_RISK_CLASS_MEDIUM, Timeout: 3 * time.Minute, Script: dockerBoundScript("start"), Params: boundContainerParams, Retry: RetryNever,
+	},
+	{
+		ID: "docker.stop", Version: "1.1.0", Title: "Stop bound container",
+		Description: "Batch member only (G5b): docker stop of the container whose full ID and image ID the approved binding names. Checks both before the stop and stops with container_changed, running nothing, if either differs or the container is gone. The configuration hash is not checked.",
+		Risk:        pb.RiskClass_RISK_CLASS_MEDIUM, Timeout: 3 * time.Minute, Script: dockerBoundScript("stop"), Params: boundContainerParams, Retry: RetryNever,
+	},
+	{
+		ID: "docker.restart", Version: "1.1.0", Title: "Restart bound container",
+		Description: "Batch member only (G5b): docker restart of the container whose full ID and image ID the approved binding names. Checks both before the restart and stops with container_changed, running nothing, if either differs or the container is gone. The configuration hash is not checked. Nothing is recreated or pulled.",
+		Risk:        pb.RiskClass_RISK_CLASS_MEDIUM, Timeout: 3 * time.Minute, Script: dockerBoundScript("restart"), Params: boundContainerParams, Retry: RetryNever,
+	},
+	{
 		ID: "pci.inventory", Version: "1.0.0", Title: "List PCI GPUs",
 		Description: "The host's NVIDIA display and 3D controllers from lspci (lspci -mm -nn -D), with the PCI bus ID for hostpci passthrough mapping. A host without lspci reports that. Read-only.",
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 30 * time.Second, ReadOnly: true, Script: pciInventory, Retry: RetrySafe,
@@ -533,6 +573,18 @@ var Builtin = []Action{
 func Lookup(id string) (Action, bool) {
 	for _, a := range Builtin {
 		if a.ID == id {
+			return a, true
+		}
+	}
+	return Action{}, false
+}
+
+// LookupVersion returns the built-in action with this ID and version. An
+// action keeps every version that a running approval may name (G5b adds
+// docker.start, stop and restart 1.1.0 next to 1.0.0).
+func LookupVersion(id, version string) (Action, bool) {
+	for _, a := range Builtin {
+		if a.ID == id && a.Version == version {
 			return a, true
 		}
 	}
