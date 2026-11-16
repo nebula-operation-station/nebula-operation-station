@@ -74,101 +74,52 @@ func (m *matcher) device(s Subject) {
 }
 
 // deviceHit says which products of one vulnerability name the device: the
-// exact model (exact), only its family (family), and an exact product
-// version equal to its firmware (firmware).
+// exact model (exact), and an exact product version equal to its firmware
+// (firmware).
 type deviceHit struct {
-	exact, family, firmware bool
+	exact, firmware bool
 }
 
-// deviceModel is a device's model. exact is the normalised model string: a
-// product is the exact model only when its normalised model string is equal
-// (case and whitespace only). family is the model's family before the first
-// "-" when the family has a letter and a digit ("CBS350" for "CBS350-24P-4G");
-// it names sibling SKUs in either direction and only ever leads to a coverage
-// gap, never to a finding. A bare word such as "PA" is no family: it would
-// name every Palo Alto product.
+// deviceModel is a device's model in the normalised form that exact hits are
+// compared under (see normalizeModel). An empty form names no product.
 type deviceModel struct {
-	exact  string
-	family []string
+	key string
 }
 
 // newDeviceModel normalises a device model once per device subject.
 func newDeviceModel(model string) deviceModel {
-	d := deviceModel{exact: normalizeModel(model)}
-	if i := strings.IndexByte(model, '-'); i > 0 {
-		fam := model[:i]
-		if strings.IndexFunc(fam, unicode.IsDigit) >= 0 && strings.IndexFunc(fam, unicode.IsLetter) >= 0 {
-			d.family = modelTokens(fam)
-		}
-	}
-	return d
+	return deviceModel{key: normalizeModel(model)}
 }
 
-// productModel is a CSAF product's model string with its family tokens,
-// built once per product. Only the product's model field (product_name) is
-// used: the full name carries version and vendor words, whose digits must
-// never form a device model.
+// isExact reports whether the product's model is the device's model: the
+// normalised model strings are equal. Nothing else is a hit, so a near name,
+// a sibling SKU or a series word never decides a finding or a clean status.
+func (d deviceModel) isExact(p productModel) bool {
+	return d.key != "" && p.key == d.key
+}
+
+// productModel is a CSAF product's model string in the normalised form. Only
+// the product's model field (product_name) is used: the full name carries
+// version and vendor words, whose digits must never form a device model.
 type productModel struct {
-	key    string
-	tokens []string
+	key string
 }
 
 // newProductModel indexes the model field of a CSAF product.
 func newProductModel(product string) productModel {
-	return productModel{key: normalizeModel(product), tokens: modelTokens(product)}
+	return productModel{key: normalizeModel(product)}
 }
 
-// modelNaming says how a product names a device's model.
-type modelNaming int
-
-const (
-	// namesNothing: the product names neither the model nor its family.
-	namesNothing modelNaming = iota
-	// namesFamily: the product names only the family, a sibling SKU.
-	namesFamily
-	// namesExact: the product's model string equals the device's model.
-	namesExact
-)
-
-// naming reports how a product names the model. Equality of the normalised
-// model strings is the only exact hit; the family key is a hint at most.
-func (d deviceModel) naming(p productModel) modelNaming {
-	switch {
-	case d.exact != "" && p.key == d.exact:
-		return namesExact
-	case containsRun(p.tokens, d.family):
-		return namesFamily
-	}
-	return namesNothing
-}
-
-// normalizeModel lower-cases s and drops all white space: the only
-// normalisation two model strings are compared under.
+// normalizeModel lower-cases s and folds every run of white space, '-' and
+// '_' to one '-', dropping leading and trailing separators. Nothing else is
+// folded: "CBS350 24P" and "CBS350-24P" are equal, "CBS350-24P-4G" is not.
 func normalizeModel(s string) string {
-	return strings.Map(func(r rune) rune {
-		if unicode.IsSpace(r) {
-			return -1
-		}
-		return unicode.ToLower(r)
-	}, s)
+	return strings.Join(strings.FieldsFunc(strings.ToLower(s), isModelSeparator), "-")
 }
 
-// modelTokens splits s into lower-case runs of letters and digits.
-func modelTokens(s string) []string {
-	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
-	})
-}
-
-// containsRun reports whether run occurs in tokens as whole tokens, so
-// "CBS35" never names "CBS350". An empty run names nothing.
-func containsRun(tokens, run []string) bool {
-	for i := 0; len(run) > 0 && i+len(run) <= len(tokens); i++ {
-		if slices.Equal(tokens[i:i+len(run)], run) {
-			return true
-		}
-	}
-	return false
+// isModelSeparator reports whether r separates the words of a model string.
+func isModelSeparator(r rune) bool {
+	return r == '-' || r == '_' || unicode.IsSpace(r)
 }
 
 // indexedProduct is a CSAF product with its model string, built once.
@@ -218,7 +169,7 @@ func (m *matcher) vendorDocs(feed string) []indexedAdvisory {
 func (m *matcher) deviceVuln(s Subject, feed string, d indexedAdvisory, v vulnfeed.CSAFVulnerability, model deviceModel) deviceHit {
 	fw := s.Device.Firmware
 	var affected []vulnfeed.CSAFProduct
-	var isFixed, isNotAffected, rangeSeen bool
+	var isFixed, isNotAffected, rangeSeen, otherModel bool
 	var hit deviceHit
 	scan := func(ids []string, f func(p vulnfeed.CSAFProduct)) {
 		for _, id := range ids {
@@ -226,17 +177,15 @@ func (m *matcher) deviceVuln(s Subject, feed string, d indexedAdvisory, v vulnfe
 			if !ok || ip.p.Ecosystem != s.Ecosystem {
 				continue
 			}
-			// Only the exact model is a hit (ADR 0011 D4). A sibling SKU of
-			// the family never decides a finding or a clean status.
-			switch model.naming(ip.model) {
-			case namesFamily:
-				hit.family = true
-				continue
-			case namesExact:
-				hit.exact = true
-			default:
+			// Only the exact model decides (ADR 0011 D4). Any other product of
+			// the ecosystem that this vulnerability names may be the device
+			// under a near name: it never decides, and it leaves the
+			// vulnerability's coverage unknown, never silent.
+			if !model.isExact(ip.model) {
+				otherModel = true
 				continue
 			}
+			hit.exact = true
 			p := ip.p
 			if p.Version == "" {
 				if p.VersionRange != "" {
@@ -258,10 +207,12 @@ func (m *matcher) deviceVuln(s Subject, feed string, d indexedAdvisory, v vulnfe
 	if firstID == "" {
 		firstID = d.adv.TrackingID
 	}
-	switch {
-	case hit.family && !hit.exact:
+	if otherModel {
+		// A product that is not the exact model sits in this vulnerability:
+		// whether it names the device is unknown, so the coverage is unknown.
 		m.gap(s, s.Device.Model, canonicalID(firstID), GapDeviceModelUnknown)
-	case hit.exact && !hit.firmware:
+	}
+	if hit.exact && !hit.firmware {
 		m.gap(s, s.Device.Model, canonicalID(firstID), GapDeviceVersionUnknown)
 	}
 	n := 0

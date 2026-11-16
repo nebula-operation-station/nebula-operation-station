@@ -136,7 +136,9 @@ const (
 	// complete.
 	GapInventoryIncomplete GapReason = "inventory_incomplete"
 	// GapDeviceModelUnknown: no vendor advisory of the device's ecosystem
-	// names the device's model, so the device has no vendor coverage.
+	// names the device's model exactly, or a vulnerability names another
+	// product whose model may or may not be the device (a near name or a
+	// sibling SKU). Either way the vendor coverage is unknown.
 	GapDeviceModelUnknown GapReason = "device_model_unknown"
 	// GapDeviceVersionUnknown: the model is covered, but no advisory lists
 	// the device's firmware version for it (no unique train hit).
