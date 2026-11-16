@@ -21,10 +21,18 @@ const (
 	segGlob
 )
 
-// piece is literal text, or a %u/%U token matching one or more characters.
+// maxPiecesPerComponent bounds the pieces of one path component. Matching
+// costs O(pieces × component length), so this bounds the work per component.
+// A value with more pieces is not understood (ADR 0015 D7: fail closed).
+const maxPiecesPerComponent = 64
+
+// piece is literal text, or a run of %u/%U tokens. A user run matches min or
+// more characters: each %u or %U needs one character, and adjacent tokens add
+// up, so "%u%u" needs at least two.
 type piece struct {
 	lit  string
 	user bool
+	min  int // user only: the minimum number of characters
 }
 
 type seg struct {
@@ -52,22 +60,33 @@ func (s seg) matchName(name string) bool {
 }
 
 // matchPieces reports whether name is matched by the piece sequence. It is a
-// position-set DP, so no input causes exponential work.
+// position-set DP: each piece costs O(len(name)) for a user run (the smallest
+// live position reaches every later one) and O(len(name) × len(lit)) for a
+// literal, so with at most maxPiecesPerComponent pieces the work is bounded
+// and no input causes exponential work.
 func matchPieces(ps []piece, name string) bool {
 	cur := make([]bool, len(name)+1)
 	cur[0] = true
 	for _, p := range ps {
 		next := make([]bool, len(name)+1)
-		for j, ok := range cur {
-			if !ok {
-				continue
+		if p.user {
+			first := -1
+			for j, ok := range cur {
+				if ok {
+					first = j
+					break
+				}
 			}
-			if p.user {
-				for k := j + 1; k <= len(name); k++ {
+			if first >= 0 {
+				for k := first + p.min; k <= len(name); k++ {
 					next[k] = true
 				}
-			} else if strings.HasPrefix(name[j:], p.lit) {
-				next[j+len(p.lit)] = true
+			}
+		} else {
+			for j, ok := range cur {
+				if ok && strings.HasPrefix(name[j:], p.lit) {
+					next[j+len(p.lit)] = true
+				}
 			}
 		}
 		cur = next
@@ -165,7 +184,11 @@ func userPieces(c string) ([]piece, error) {
 		switch c[i+1] {
 		case 'u', 'U':
 			flush()
-			ps = append(ps, piece{user: true})
+			if n := len(ps); n > 0 && ps[n-1].user {
+				ps[n-1].min++ // adjacent user tokens need one character each
+			} else {
+				ps = append(ps, piece{user: true, min: 1})
+			}
 		case '%':
 			lit.WriteByte('%')
 		default:
@@ -174,6 +197,9 @@ func userPieces(c string) ([]piece, error) {
 		i++
 	}
 	flush()
+	if len(ps) > maxPiecesPerComponent {
+		return nil, errValue
+	}
 	return ps, nil
 }
 

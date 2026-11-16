@@ -232,3 +232,103 @@ func TestSetStringHasNoConfigContent(t *testing.T) {
 		t.Fatalf("String leaks content: %q", got)
 	}
 }
+
+// TestAdjacentUserTokensCollapse checks that adjacent %u and %U tokens need one
+// character each, so %u%u needs at least two, and that a long run of them
+// compiles to one piece and still matches (ADR 0015 D7 (d)).
+func TestAdjacentUserTokensCollapse(t *testing.T) {
+	s := setFor(t, "AuthorizedKeysFile none\nAuthorizedKeysFile /srv/k/%u%U\n")
+	tests := map[string]fimbaseline.SSHMatch{
+		"/srv/k":     fimbaseline.SSHPosition,
+		"/srv/k/x":   fimbaseline.SSHNone,
+		"/srv/k/xy":  fimbaseline.SSHFile,
+		"/srv/k/xyz": fimbaseline.SSHFile,
+	}
+	for p, want := range tests {
+		if got := s.Match([]byte(p)); got != want {
+			t.Errorf("Match(%q) = %v, want %v", p, got, want)
+		}
+	}
+	long := setFor(t, "AuthorizedKeysFile none\nAuthorizedKeysFile /srv/k/"+strings.Repeat("%u", 2000)+"\n")
+	if got := long.Match([]byte("/srv/k/" + strings.Repeat("a", 2000))); got != fimbaseline.SSHFile {
+		t.Errorf("2000 user tokens: got %v, want SSHFile", got)
+	}
+	if got := long.Match([]byte("/srv/k/" + strings.Repeat("a", 1999))); got != fimbaseline.SSHNone {
+		t.Errorf("2000 user tokens, 1999 chars: got %v, want SSHNone", got)
+	}
+}
+
+// TestHostileUserPiecesAreRefused checks that a component with more than
+// maxPiecesPerComponent pieces is refused as unclassifiable, so the matcher
+// work per component stays bounded (ADR 0015 D7 (d)). The values are within
+// the 4,096-byte token limit and the 256 KiB config limit.
+func TestHostileUserPiecesAreRefused(t *testing.T) {
+	hostile := []string{
+		"%h/" + strings.Repeat("%u-", 1000),
+		"%h/%u" + strings.Repeat("a%u", maxPiecesPerComponent),
+	}
+	for _, v := range hostile {
+		if _, err := Parse(cfg("AuthorizedKeysFile " + v + "\n")); !errors.Is(err, ErrUnclassifiable) {
+			t.Errorf("hostile value (%d bytes): err = %v, want ErrUnclassifiable", len(v), err)
+		}
+	}
+	// Right at the cap, the value compiles.
+	atCap := "%h/" + strings.Repeat("a%u", maxPiecesPerComponent/2)
+	if _, err := Parse(cfg("AuthorizedKeysFile " + atCap + "\n")); err != nil {
+		t.Errorf("at cap: Parse: %v", err)
+	}
+}
+
+// TestHostileTokenMatchesWithinBudget matches a 4,096-byte component against
+// many maximal entries. There is no timing assertion: the matcher is linear
+// in the piece count times the component length, so the test only needs to
+// finish with a fixed answer.
+func TestHostileTokenMatchesWithinBudget(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("AuthorizedKeysFile none\n")
+	for i := 0; i < 64; i++ {
+		b.WriteString("AuthorizedKeysFile /srv/" + strings.Repeat("a%u", maxPiecesPerComponent/2) + "\n")
+	}
+	s := setFor(t, b.String())
+	name := strings.Repeat("a", 4000)
+	if got := s.Match([]byte("/srv/" + name)); got != fimbaseline.SSHFile {
+		t.Fatalf("Match of hostile name = %v, want SSHFile", got)
+	}
+}
+
+// TestMatchPiecesAgreesWithReference compares matchPieces with a naive
+// recursive reference on small inputs.
+func TestMatchPiecesAgreesWithReference(t *testing.T) {
+	var ref func(ps []piece, name string) bool
+	ref = func(ps []piece, name string) bool {
+		if len(ps) == 0 {
+			return name == ""
+		}
+		p := ps[0]
+		if !p.user {
+			return strings.HasPrefix(name, p.lit) && ref(ps[1:], name[len(p.lit):])
+		}
+		for k := p.min; k <= len(name); k++ {
+			if ref(ps[1:], name[k:]) {
+				return true
+			}
+		}
+		return false
+	}
+	pieceSets := [][]piece{
+		{{lit: "a"}, {user: true, min: 1}},
+		{{user: true, min: 2}, {lit: "b"}},
+		{{lit: "a"}, {user: true, min: 1}, {lit: "a"}},
+		{{user: true, min: 1}, {user: true, min: 1}, {lit: "ab"}},
+		{{lit: "ab"}},
+		{{user: true, min: 3}},
+	}
+	names := []string{"", "a", "ab", "aab", "abab", "aaaa", "xbab", "aabba", "abbb"}
+	for _, ps := range pieceSets {
+		for _, n := range names {
+			if got, want := matchPieces(ps, n), ref(ps, n); got != want {
+				t.Errorf("matchPieces(%+v, %q) = %v, want %v", ps, n, got, want)
+			}
+		}
+	}
+}
