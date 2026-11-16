@@ -54,8 +54,8 @@ func unitsAt(cmd string, depth int) ([]Unit, error) {
 		return nil, err
 	}
 	var out []Unit
-	for _, words := range simple {
-		us, err := unwrap(words, depth)
+	for _, sc := range simple {
+		us, err := unwrap(sc, depth)
 		if err != nil {
 			return nil, err
 		}
@@ -73,16 +73,30 @@ type substitution struct {
 	depth       int // open parentheses inside a $( … ) substitution
 }
 
-// splitSimple splits s into simple commands (word lists). Quotes are removed
-// from words. Redirections, including their target word, are dropped. The
-// scanner errs on the side of splitting: a backslash never hides a separator,
-// so a separator always starts a new command.
-func splitSimple(s string) ([][]string, error) {
+// simpleCmd is one simple command: its words, quotes removed, and whether
+// some word has an expansion or a glob that the scanner does not evaluate.
+type simpleCmd struct {
+	words []string
+	// dynamic is set when a word contains `$` outside single quotes (a
+	// parameter, arithmetic, ANSI-C or locale expansion) or an unquoted glob
+	// character. The shell replaces such a word before it runs, so the
+	// program and the arguments are unknown.
+	dynamic bool
+}
+
+// splitSimple splits s into simple commands. Quotes and escapes are removed
+// from words the way the shell removes them. Redirections, including their
+// target word, are dropped. The scanner errs on the side of splitting: a
+// backslash never hides a separator, so a separator always starts a new
+// command.
+func splitSimple(s string) ([]simpleCmd, error) {
 	var (
-		cmds     [][]string
+		cmds     []simpleCmd
 		cur      []string
 		word     []byte
 		inWord   bool
+		wordDyn  bool // the current word has an expansion or a glob
+		cmdDyn   bool // the current simple command has a dynamic word
 		skipWord bool // the next word is a redirection target
 		inSingle bool
 		inDouble bool
@@ -96,16 +110,19 @@ func splitSimple(s string) ([][]string, error) {
 			skipWord = false
 		} else {
 			cur = append(cur, string(word))
+			cmdDyn = cmdDyn || wordDyn
 		}
 		word = word[:0]
 		inWord = false
+		wordDyn = false
 	}
 	endCommand := func() {
 		flush()
 		if len(cur) > 0 {
-			cmds = append(cmds, cur)
+			cmds = append(cmds, simpleCmd{words: cur, dynamic: cmdDyn})
 		}
 		cur = nil
+		cmdDyn = false
 		skipWord = false
 	}
 	pushSubstitution := func(backtick bool) {
@@ -137,7 +154,14 @@ func splitSimple(s string) ([][]string, error) {
 					i++
 					continue
 				}
-			} else if n == '\\' || n == '"' || n == '\'' || n == ' ' || n == '\t' {
+			} else if n == '\n' {
+				// Line continuation: a backslash-newline is removed.
+				i++
+				continue
+			} else if strings.IndexByte(";&|()<>{}\r", n) < 0 {
+				// An escaped ordinary character is that character, so `\rm`
+				// and `r\m` are the program rm. Escaped separators stay
+				// separators (below), which keeps the split fail-closed.
 				word = append(word, n)
 				inWord = true
 				i++
@@ -149,6 +173,11 @@ func splitSimple(s string) ([][]string, error) {
 			pushSubstitution(false)
 			i++
 			continue
+		}
+		if c == '$' {
+			// Any other `$` outside single quotes is an expansion ($X, ${X},
+			// $'…' ANSI-C, $"…"), so the word is not known before it runs.
+			wordDyn, inWord = true, true
 		}
 		if c == '`' {
 			endCommand()
@@ -197,6 +226,7 @@ func splitSimple(s string) ([][]string, error) {
 			if inWord && allDigits(word) {
 				word = word[:0]
 				inWord = false
+				wordDyn = false
 			} else {
 				flush()
 			}
@@ -204,6 +234,12 @@ func splitSimple(s string) ([][]string, error) {
 			for i+1 < len(s) && strings.IndexByte(">&<|", s[i+1]) >= 0 {
 				i++
 			}
+		case '*', '?', '[':
+			// An unquoted glob is expanded by the shell to file names, which
+			// may name any program or any option.
+			wordDyn = true
+			word = append(word, c)
+			inWord = true
 		default:
 			word = append(word, c)
 			inWord = true
@@ -225,9 +261,25 @@ func allDigits(b []byte) bool {
 	return true
 }
 
+// unnamedWrappers are programs that run another program but are not named in
+// ADR 0014. Their unit is indeterminate, so it fails closed (V6 cannot see
+// the program they run). The list is not exhaustive; a program not in it and
+// not named by the ADR is checked as itself.
+var unnamedWrappers = map[string]bool{
+	"command": true, "eval": true, "xargs": true, "doas": true,
+	"docker-compose": true, "runuser": true, "setsid": true, "ionice": true,
+	"stdbuf": true, "flock": true, "watch": true, "chroot": true,
+	"busybox": true,
+}
+
 // unwrap removes the wrappers of one simple command until nothing changes and
-// returns its units. depth counts nested sh -c strings.
-func unwrap(words []string, depth int) ([]Unit, error) {
+// returns its units. depth counts nested sh -c strings. A dynamic simple
+// command (an expansion or glob in one of its words) is indeterminate.
+func unwrap(sc simpleCmd, depth int) ([]Unit, error) {
+	words := sc.words
+	if sc.dynamic {
+		return indeterminate(words), nil
+	}
 loop:
 	for {
 		words = dropKeywords(words)
@@ -242,7 +294,8 @@ loop:
 			rest []string
 			ok   = true
 		)
-		switch base(words[0]) {
+		name := base(words[0])
+		switch name {
 		case "sudo":
 			rest, ok = skipOptions(words[1:], sudoSpec)
 		case "env":
@@ -263,15 +316,21 @@ loop:
 				break loop
 			}
 		case "sh", "bash", "su":
-			str, found, strOK := commandString(words[1:])
-			if !found {
-				break loop
+			// A shell without -c runs a script from a file, stdin or a
+			// here-string, which is unknown: indeterminate.
+			sp := shellSpec
+			if name == "su" {
+				sp = suSpec
 			}
-			if !strOK || depth >= maxNesting {
+			str, found := shellCommandString(words[1:], sp)
+			if !found || depth >= maxNesting {
 				return indeterminate(words), nil
 			}
 			return unitsAt(str, depth+1)
 		default:
+			if unnamedWrappers[name] {
+				return indeterminate(words), nil
+			}
 			break loop
 		}
 		if !ok {
@@ -335,26 +394,115 @@ func dropFirst(r []string) []string {
 	return r[1:]
 }
 
-// commandString finds the string argument of `-c` (or `--command`) in the
-// arguments of sh, bash or su. found is false when there is no such option,
-// in which case the unit is not a wrapper; ok is false when -c has no value.
-func commandString(args []string) (str string, found, ok bool) {
-	for j, w := range args {
-		if w == "-c" || w == "--command" {
-			if j+1 < len(args) {
-				return args[j+1], true, true
+// shellCommandString returns the command string of a shell invocation: the
+// value of -c or --command, where -c may sit in a short option cluster such as
+// -lc or -ec. found is false when the arguments do not give a command string,
+// or when an option is unknown, a value is missing or an option is ambiguous.
+// The caller treats found=false as indeterminate (fail closed).
+func shellCommandString(args []string, sp optionSpec) (str string, found bool) {
+	for i := 0; i < len(args); i++ {
+		w := args[i]
+		switch {
+		case w == "--":
+			return "", false
+		case w == "-" && sp.stopAtOperand:
+			return "", false
+		case w == "-":
+			// su: a bare dash is the login option.
+		case w == "--command" && sp.command:
+			if i+1 < len(args) {
+				return args[i+1], true
 			}
-			return "", true, false
-		}
-		if v, cut := strings.CutPrefix(w, "--command="); cut {
-			return v, true, true
+			return "", false
+		case sp.command && strings.HasPrefix(w, "--command="):
+			return w[len("--command="):], true
+		case strings.HasPrefix(w, "--"):
+			name, _, hasValue := strings.Cut(w, "=")
+			switch {
+			case hasValue && (sp.valueLong[name] || sp.boolLong[name]):
+			case !hasValue && sp.valueLong[name]:
+				if i+1 >= len(args) {
+					return "", false
+				}
+				i++
+			case !hasValue && sp.boolLong[name]:
+			default:
+				return "", false
+			}
+		case len(w) > 1 && (w[0] == '-' || w[0] == '+'):
+			sawCommand, valueNext := false, false
+			for k := 1; k < len(w); k++ {
+				ch := w[k]
+				switch {
+				case sp.command && w[0] == '-' && ch == 'c':
+					sawCommand = true
+				case strings.IndexByte(sp.valueShort, ch) >= 0:
+					// A value option takes the next word; inside a cluster
+					// the value would be ambiguous, so it must come last.
+					if k != len(w)-1 {
+						return "", false
+					}
+					valueNext = true
+				case strings.IndexByte(sp.boolShort, ch) >= 0:
+				default:
+					return "", false
+				}
+			}
+			if sawCommand && valueNext {
+				return "", false
+			}
+			if valueNext {
+				if i+1 >= len(args) {
+					return "", false
+				}
+				i++
+				continue
+			}
+			if sawCommand {
+				if i+1 < len(args) {
+					return args[i+1], true
+				}
+				return "", false
+			}
+		default:
+			// An operand. For sh and bash it is the script file, so the
+			// options end here. su takes a user name here and still reads
+			// options after it.
+			if sp.stopAtOperand {
+				return "", false
+			}
 		}
 	}
-	return "", false, false
+	return "", false
 }
 
-// dockerRest handles `docker run`, `docker exec`, `docker compose exec` and
-// `docker compose run`. It returns the command after the image, container or
+// shellSpec lists the options of sh and bash that the unwrapper knows. Any
+// other option is unknown and the unit is indeterminate. -c, -o and -O are
+// the only ones that change what runs; the rest are accepted as flags.
+var shellSpec = optionSpec{
+	command:       true,
+	stopAtOperand: true,
+	valueShort:    "oO",
+	boolShort:     "abBCdDeEfhHiklmnpPqrsStTuvVx",
+	valueLong:     optSet("--rcfile", "--init-file"),
+	boolLong: optSet("--login", "--norc", "--noprofile", "--posix",
+		"--restricted", "--verbose", "--version", "--help", "--debugger",
+		"--noediting", "--dump-strings", "--dump-po-strings", "--pretty-print"),
+}
+
+// suSpec lists the options of su that the unwrapper knows (util-linux).
+var suSpec = optionSpec{
+	command:    true,
+	valueShort: "gGsw",
+	boolShort:  "fhlmpPV",
+	valueLong: optSet("--shell", "--group", "--supp-group",
+		"--whitelist-environment", "--session-command"),
+	boolLong: optSet("--login", "--preserve-environment", "--fast", "--pty",
+		"--help", "--version"),
+}
+
+// dockerRest handles `docker run`, `docker exec`, `docker container run`,
+// `docker container exec`, `docker compose exec` and `docker compose run`. It returns the command after the image, container or
 // service word. wrapper is false when the unit is not one of these forms; ok
 // is false when an option is unknown.
 func dockerRest(words []string) (rest []string, ok, wrapper bool) {
@@ -367,15 +515,13 @@ func dockerRest(words []string) (rest []string, ok, wrapper bool) {
 	}
 	switch rest[0] {
 	case "run", "exec":
-		sp := dockerRunSpec
-		if rest[0] == "exec" {
-			sp = dockerExecSpec
+		return dockerRunOrExec(rest)
+	case "container":
+		// `docker container run|exec` is the same wrapper as `docker run|exec`.
+		if len(rest) > 1 && (rest[1] == "run" || rest[1] == "exec") {
+			return dockerRunOrExec(rest[1:])
 		}
-		r, ok := skipOptions(rest[1:], sp)
-		if !ok {
-			return nil, false, true
-		}
-		return dropFirst(r), true, true
+		return nil, true, false
 	case "compose":
 		r, ok := skipOptions(rest[1:], composeGlobalSpec)
 		if !ok {
@@ -402,6 +548,20 @@ func dockerRest(words []string) (rest []string, ok, wrapper bool) {
 	return nil, true, false
 }
 
+// dockerRunOrExec unwraps `docker run` or `docker exec`; args[0] is "run" or
+// "exec". It returns the command after the image or container word.
+func dockerRunOrExec(args []string) (rest []string, ok, wrapper bool) {
+	sp := dockerRunSpec
+	if args[0] == "exec" {
+		sp = dockerExecSpec
+	}
+	r, ok := skipOptions(args[1:], sp)
+	if !ok {
+		return nil, false, true
+	}
+	return dropFirst(r), true, true
+}
+
 // optionSpec lists the options of one wrapper. Options not listed are
 // unknown, and an unknown option makes the unit indeterminate.
 type optionSpec struct {
@@ -409,6 +569,12 @@ type optionSpec struct {
 	boolShort  string // short options without a value
 	valueLong  map[string]bool
 	boolLong   map[string]bool
+	// command is set for sh, bash and su: -c (or --command) gives the command
+	// string, which may sit in a short cluster such as -lc.
+	command bool
+	// stopAtOperand is set for sh and bash: the first word that is not an
+	// option is the script file, so the options end there.
+	stopAtOperand bool
 }
 
 var noOptions = optionSpec{}
