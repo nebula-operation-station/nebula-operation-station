@@ -281,13 +281,13 @@ func TestCleanTextOracleRejectsFormatRunes(t *testing.T) {
 	}{
 		{"plain ASCII accepted", "pve1 web-2", false},
 		{"letters accepted", "pveé1", false},
-		{"bidi override U+202E rejected", "pve‮1", true},
+		{"bidi override U+202E rejected", "pve\u202e1", true},
 		{"tag character U+E0001 rejected", "pve\U000e0001", true},
 		{"NUL rejected", "pve\x00", true},
 		{"ESC rejected", "pve\x1b[31m", true},
-		{"private use U+E000 rejected", "pve", true},
-		{"no-break space U+00A0 rejected", "pve 1", true},
-		{"line separator U+2028 rejected", "pve 1", true},
+		{"private use U+E000 rejected", "pve\ue000", true},
+		{"no-break space U+00A0 rejected", "pve\u00a01", true},
+		{"line separator U+2028 rejected", "pve\u20281", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
