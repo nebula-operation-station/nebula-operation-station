@@ -44,53 +44,56 @@ func TestValidateURLCustomAllowlistReplacesDefault(t *testing.T) {
 	}
 }
 
+// bypassAttempts are URLs that must be refused under the default allowlist.
+// FuzzValidateURL uses them as seeds.
+var bypassAttempts = []struct{ name, raw string }{
+	{"empty", ""},
+	{"http scheme", "http://avatars.githubusercontent.com/u/1"},
+	{"ftp scheme", "ftp://avatars.githubusercontent.com/u/1"},
+	{"scheme relative", "//avatars.githubusercontent.com/u/1"},
+	{"no scheme", "avatars.githubusercontent.com/u/1"},
+	{"opaque", "https:avatars.githubusercontent.com/u/1"},
+	{"userinfo", "https://user@avatars.githubusercontent.com/u/1"},
+	{"userinfo password", "https://user:pw@avatars.githubusercontent.com/u/1"},
+	{"userinfo is allowlisted", "https://avatars.githubusercontent.com@evil.example/u/1"},
+	{"userinfo empty", "https://@avatars.githubusercontent.com/u/1"},
+	{"backslash authority", "https://evil.example\\@avatars.githubusercontent.com/u/1"},
+	{"backslash path", "https://avatars.githubusercontent.com\\evil.example/u/1"},
+	{"trailing dot", "https://avatars.githubusercontent.com./u/1"},
+	{"suffix match", "https://evil.avatars.githubusercontent.com/u/1"},
+	{"prefix match", "https://avatars.githubusercontent.com.evil.example/u/1"},
+	{"lookalike", "https://avatars-githubusercontent.com/u/1"},
+	{"punycode", "https://xn--avatars-githubusercontent-9qc.com/u/1"},
+	{"unicode host", "https://avatars.githubusercontent.cöm/u/1"},
+	{"fullwidth dot", "https://avatars．githubusercontent.com/u/1"},
+	{"percent encoded host", "https://avatars%2egithubusercontent.com/u/1"},
+	{"percent encoded host char", "https://%61vatars.githubusercontent.com/u/1"},
+	{"port 8443", "https://avatars.githubusercontent.com:8443/u/1"},
+	{"port 80", "https://avatars.githubusercontent.com:80/u/1"},
+	{"empty port", "https://avatars.githubusercontent.com:/u/1"},
+	{"port 0443", "https://avatars.githubusercontent.com:0443/u/1"},
+	{"fragment", "https://avatars.githubusercontent.com/u/1#x"},
+	{"empty fragment", "https://avatars.githubusercontent.com/u/1#"},
+	{"ipv4", "https://127.0.0.1/a.png"},
+	{"ipv4 metadata", "https://169.254.169.254/latest/meta-data"},
+	{"ipv4 public", "https://140.82.112.3/a.png"},
+	{"decimal ipv4", "https://2130706433/a.png"},
+	{"octal ipv4", "https://0177.0.0.1/a.png"},
+	{"hex ipv4", "https://0x7f.0.0.1/a.png"},
+	{"hex ipv4 whole", "https://0x7f000001/a.png"},
+	{"short ipv4", "https://127.1/a.png"},
+	{"ipv6", "https://[::1]/a.png"},
+	{"ipv6 mapped", "https://[::ffff:127.0.0.1]/a.png"},
+	{"ipv6 zone", "https://[fe80::1%25eth0]/a.png"},
+	{"control char", "https://avatars.githubusercontent.com/u/1\x00"},
+	{"space in host", "https://avatars githubusercontent.com/u/1"},
+	{"newline", "https://avatars.githubusercontent.com/u/1\r\nHost: evil"},
+	{"too long", "https://avatars.githubusercontent.com/" + strings.Repeat("a", MaxURLLen)},
+	{"invalid utf8", "https://avatars.githubusercontent.com/\xff"},
+}
+
 func TestValidateURLRejectsBypassAttempts(t *testing.T) {
-	cases := []struct{ name, raw string }{
-		{"empty", ""},
-		{"http scheme", "http://avatars.githubusercontent.com/u/1"},
-		{"ftp scheme", "ftp://avatars.githubusercontent.com/u/1"},
-		{"scheme relative", "//avatars.githubusercontent.com/u/1"},
-		{"no scheme", "avatars.githubusercontent.com/u/1"},
-		{"opaque", "https:avatars.githubusercontent.com/u/1"},
-		{"userinfo", "https://user@avatars.githubusercontent.com/u/1"},
-		{"userinfo password", "https://user:pw@avatars.githubusercontent.com/u/1"},
-		{"userinfo is allowlisted", "https://avatars.githubusercontent.com@evil.example/u/1"},
-		{"userinfo empty", "https://@avatars.githubusercontent.com/u/1"},
-		{"backslash authority", "https://evil.example\\@avatars.githubusercontent.com/u/1"},
-		{"backslash path", "https://avatars.githubusercontent.com\\evil.example/u/1"},
-		{"trailing dot", "https://avatars.githubusercontent.com./u/1"},
-		{"suffix match", "https://evil.avatars.githubusercontent.com/u/1"},
-		{"prefix match", "https://avatars.githubusercontent.com.evil.example/u/1"},
-		{"lookalike", "https://avatars-githubusercontent.com/u/1"},
-		{"punycode", "https://xn--avatars-githubusercontent-9qc.com/u/1"},
-		{"unicode host", "https://avatars.githubusercontent.cöm/u/1"},
-		{"fullwidth dot", "https://avatars．githubusercontent.com/u/1"},
-		{"percent encoded host", "https://avatars%2egithubusercontent.com/u/1"},
-		{"percent encoded host char", "https://%61vatars.githubusercontent.com/u/1"},
-		{"port 8443", "https://avatars.githubusercontent.com:8443/u/1"},
-		{"port 80", "https://avatars.githubusercontent.com:80/u/1"},
-		{"empty port", "https://avatars.githubusercontent.com:/u/1"},
-		{"port 0443", "https://avatars.githubusercontent.com:0443/u/1"},
-		{"fragment", "https://avatars.githubusercontent.com/u/1#x"},
-		{"empty fragment", "https://avatars.githubusercontent.com/u/1#"},
-		{"ipv4", "https://127.0.0.1/a.png"},
-		{"ipv4 metadata", "https://169.254.169.254/latest/meta-data"},
-		{"ipv4 public", "https://140.82.112.3/a.png"},
-		{"decimal ipv4", "https://2130706433/a.png"},
-		{"octal ipv4", "https://0177.0.0.1/a.png"},
-		{"hex ipv4", "https://0x7f.0.0.1/a.png"},
-		{"hex ipv4 whole", "https://0x7f000001/a.png"},
-		{"short ipv4", "https://127.1/a.png"},
-		{"ipv6", "https://[::1]/a.png"},
-		{"ipv6 mapped", "https://[::ffff:127.0.0.1]/a.png"},
-		{"ipv6 zone", "https://[fe80::1%25eth0]/a.png"},
-		{"control char", "https://avatars.githubusercontent.com/u/1\x00"},
-		{"space in host", "https://avatars githubusercontent.com/u/1"},
-		{"newline", "https://avatars.githubusercontent.com/u/1\r\nHost: evil"},
-		{"too long", "https://avatars.githubusercontent.com/" + strings.Repeat("a", MaxURLLen)},
-		{"invalid utf8", "https://avatars.githubusercontent.com/\xff"},
-	}
-	for _, c := range cases {
+	for _, c := range bypassAttempts {
 		t.Run(c.name, func(t *testing.T) {
 			u, err := ValidateURL(c.raw, nil)
 			if err == nil {
@@ -98,6 +101,37 @@ func TestValidateURLRejectsBypassAttempts(t *testing.T) {
 			}
 			if !errors.Is(err, ErrURL) {
 				t.Fatalf("ValidateURL(%q) error %v is not ErrURL", c.raw, err)
+			}
+		})
+	}
+}
+
+func TestValidateURLLengthBoundary(t *testing.T) {
+	const base = "https://avatars.githubusercontent.com/"
+	exact := base + strings.Repeat("a", MaxURLLen-len(base))
+	if len(exact) != MaxURLLen {
+		t.Fatalf("test input is %d bytes, want %d", len(exact), MaxURLLen)
+	}
+	cases := []struct {
+		name    string
+		raw     string
+		wantErr bool
+	}{
+		{"exactly MaxURLLen bytes", exact, false},
+		{"one byte over MaxURLLen", exact + "a", true},
+		{"empty string", "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := ValidateURL(c.raw, nil)
+			if !c.wantErr {
+				if err != nil {
+					t.Fatalf("ValidateURL(len %d): %v", len(c.raw), err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrURL) {
+				t.Fatalf("ValidateURL(len %d) error %v, want ErrURL", len(c.raw), err)
 			}
 		})
 	}
