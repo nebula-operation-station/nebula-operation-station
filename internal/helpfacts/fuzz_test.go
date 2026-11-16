@@ -3,6 +3,7 @@
 package helpfacts
 
 import (
+	"fmt"
 	"net/netip"
 	"reflect"
 	"strconv"
@@ -152,27 +153,8 @@ func FuzzParseQuestionHostValues(f *testing.F) {
 		}
 		seenCIDR := make(map[string]bool)
 		for _, c := range v.CIDRs {
-			p, err := netip.ParsePrefix(c)
-			if err != nil {
-				t.Fatalf("CIDR %q does not parse: %v", c, err)
-			}
-			if p.Masked() != p {
-				t.Fatalf("CIDR %q is not masked", c)
-			}
-			// ADR 0014 D3: no all-hosts mode. IPv4 blocks keep at least
-			// a /16, IPv6 blocks at least a /32, and no IPv6 block may
-			// cover the IPv4-mapped range ::ffff:0:0/96.
-			if p.Addr().Is4() {
-				if p.Bits() < minIPv4CIDRPrefix {
-					t.Fatalf("IPv4 CIDR %q is broader than /%d", c, minIPv4CIDRPrefix)
-				}
-			} else {
-				if p.Bits() < minIPv6CIDRPrefix {
-					t.Fatalf("IPv6 CIDR %q is broader than /%d", c, minIPv6CIDRPrefix)
-				}
-				if p.Bits() <= 96 && p.Contains(mappedBase) {
-					t.Fatalf("IPv6 CIDR %q covers the IPv4-mapped range ::ffff:0:0/96", c)
-				}
+			if err := checkEmittedCIDR(c); err != nil {
+				t.Fatal(err)
 			}
 			if seenCIDR[c] {
 				t.Fatalf("duplicate CIDR %q", c)
@@ -207,6 +189,114 @@ func FuzzParseQuestionHostValues(f *testing.F) {
 			t.Fatalf("second parse differs: %+v != %+v", v, again)
 		}
 	})
+}
+
+// checkEmittedCIDR is the output-side CIDR invariant. An emitted CIDR must be
+// canonical text, parse, be masked, and not be too broad under ADR 0014 D3.
+// tooBroadCIDR is applied to every emitted prefix, including IPv4-mapped
+// ones such as ::ffff:10.0.0.0/100 (an IPv4 /4), so a regression that
+// emits a broad mapped block fails here even when Truncated is set.
+// Canonical text means c == p.String(), as for addresses, so a non-canonical
+// spelling such as an uncompressed IPv6 block is also reported.
+func checkEmittedCIDR(c string) error {
+	p, err := netip.ParsePrefix(c)
+	if err != nil {
+		return fmt.Errorf("CIDR %q does not parse: %w", c, err)
+	}
+	if p.String() != c {
+		return fmt.Errorf("CIDR %q is not in canonical form %q", c, p.String())
+	}
+	if p.Masked() != p {
+		return fmt.Errorf("CIDR %q is not masked", c)
+	}
+	if tooBroadCIDR(p) {
+		return fmt.Errorf("CIDR %q is too broad under ADR 0014 D3", c)
+	}
+	return nil
+}
+
+// unsafeOutputRune is an independent oracle for the text sanitizer. It
+// names the Unicode categories that must never reach a fact as plain text:
+// controls (Cc), format characters such as bidi overrides U+202E and tag
+// characters U+E0001 (Cf), private use (Co), surrogates (Cs), and the line,
+// paragraph and space separators (Zl, Zp, Zs). The separator space ' ' is
+// the one allowed exception. It does not call printable().
+func unsafeOutputRune(r rune) bool {
+	if r == ' ' {
+		return false
+	}
+	return unicode.In(r, unicode.Cc, unicode.Cf, unicode.Co, unicode.Cs,
+		unicode.Zl, unicode.Zp, unicode.Zs)
+}
+
+// checkCleanTextRunes reports the first rune of s that the sanitizer must
+// not emit, using unsafeOutputRune.
+func checkCleanTextRunes(s string) error {
+	for _, r := range s {
+		if unsafeOutputRune(r) {
+			return fmt.Errorf("unsafe rune %U in output %q", r, s)
+		}
+	}
+	return nil
+}
+
+// TestEmittedCIDRInvariantRejectsBadOutput checks that checkEmittedCIDR
+// rejects each kind of bad emitted CIDR and accepts the allowed ones.
+func TestEmittedCIDRInvariantRejectsBadOutput(t *testing.T) {
+	tests := []struct {
+		name    string
+		cidr    string
+		wantErr bool
+	}{
+		{"ipv4 /16 accepted", "10.0.0.0/16", false},
+		{"ipv6 /32 accepted", "2001:db8::/32", false},
+		{"mapped /112 accepted as IPv4 /16", "::ffff:10.1.0.0/112", false},
+		{"ipv4 /8 rejected", "10.0.0.0/8", true},
+		{"ipv6 /16 rejected", "2001::/16", true},
+		{"mapped /100 is IPv4 /4 and rejected", "::ffff:10.0.0.0/100", true},
+		{"mapped /104 is IPv4 /8 and rejected", "::ffff:10.0.0.0/104", true},
+		{"mapped range /80 rejected", "::ffff:0:0/80", true},
+		{"uncompressed IPv6 spelling rejected", "0:0:0:0:0:0:0:0/32", true},
+		{"unparseable rejected", "10.0.0.0/33", true},
+		{"unmasked rejected", "10.0.1.0/16", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkEmittedCIDR(tt.cidr)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("checkEmittedCIDR(%q) = %v, want error %v", tt.cidr, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// TestCleanTextOracleRejectsFormatRunes checks that unsafeOutputRune and
+// checkCleanTextRunes catch the rune classes that printable() must refuse,
+// so the fuzz oracle does not depend on printable() being correct.
+func TestCleanTextOracleRejectsFormatRunes(t *testing.T) {
+	tests := []struct {
+		name    string
+		s       string
+		wantErr bool
+	}{
+		{"plain ASCII accepted", "pve1 web-2", false},
+		{"letters accepted", "pveé1", false},
+		{"bidi override U+202E rejected", "pve\u202e1", true},
+		{"tag character U+E0001 rejected", "pve\U000e0001", true},
+		{"NUL rejected", "pve\x00", true},
+		{"ESC rejected", "pve\x1b[31m", true},
+		{"private use U+E000 rejected", "pve\ue000", true},
+		{"no-break space U+00A0 rejected", "pve\u00a01", true},
+		{"line separator U+2028 rejected", "pve\u20281", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkCleanTextRunes(tt.s)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("checkCleanTextRunes(%q) = %v, want error %v", tt.s, err, tt.wantErr)
+			}
+		})
+	}
 }
 
 // checkTruncatedReported checks the Truncated flag against what the
@@ -351,6 +441,11 @@ func FuzzCleanText(f *testing.F) {
 			if r != ' ' && !printable(r) {
 				t.Fatalf("non-printable %U in output %q", r, got.Value)
 			}
+		}
+		// Independent oracle: printable() could be widened, so also check
+		// the output against the category list.
+		if err := checkCleanTextRunes(got.Value); err != nil {
+			t.Fatal(err)
 		}
 		// Separator collapsing: one space at most between runes, and no
 		// leading or trailing space.
