@@ -211,6 +211,10 @@ func FuzzParseRef(f *testing.F) {
 		if ref.Digest != "" && !ValidDigest(ref.Digest) {
 			t.Fatalf("accepted digest %q", ref.Digest)
 		}
+		host := strings.TrimPrefix(strings.TrimPrefix(ref.Registry, "https://"), "http://")
+		if strings.ContainsAny(host, "/\\@") || strings.IndexFunc(host, unicode.IsSpace) >= 0 {
+			t.Fatalf("accepted registry host %q (from %q)", host, image)
+		}
 		name := ref.Registry + "/" + ref.Repository
 		switch {
 		case ref.Tag != "":
@@ -226,6 +230,17 @@ func FuzzParseRef(f *testing.F) {
 			t.Fatalf("reassembled name %q gives %+v, want %+v", name, again, ref)
 		}
 	})
+}
+
+// TestParseRefRefusesUserinfoHost is the regression for an image reference
+// whose registry part carries userinfo ("user@host/repo"): ParseRef accepted
+// it and produced a registry "https://user@host".
+func TestParseRefRefusesUserinfoHost(t *testing.T) {
+	for _, in := range []string{"a@b/repo:1", "user:pw@evil.example/repo", "https://u@evil.example/repo"} {
+		if _, err := ParseRef(in); !errors.Is(err, ErrBadRef) {
+			t.Errorf("ParseRef(%q): want ErrBadRef, got %v", in, err)
+		}
+	}
 }
 
 // FuzzRegistryHostOf drives registryHostOf with arbitrary image text. An

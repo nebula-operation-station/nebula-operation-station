@@ -119,7 +119,7 @@ func ParseRef(image string) (Ref, error) {
 	}
 	host := s[:slash]
 	rest := s[slash+1:]
-	if host == "" || strings.ContainsAny(host, "/\\") {
+	if host == "" || strings.ContainsAny(host, "/\\@") {
 		return Ref{}, fmt.Errorf("%w: invalid registry host %q", ErrBadRef, host)
 	}
 	ref := Ref{Registry: scheme + host}
