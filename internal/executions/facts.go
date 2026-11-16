@@ -11,6 +11,16 @@ import (
 	"unicode"
 )
 
+// Limits of the core.facts display values.
+const (
+	// maxFactRunes is the length limit of every displayed value, in runes;
+	// a longer value is cut and marked with "…".
+	maxFactRunes = 200
+	// maxUptimeDays bounds the displayed uptime. A larger or non-finite
+	// value is not a plausible uptime, so no uptime line is shown for it.
+	maxUptimeDays = 36500
+)
+
 // Fact is one decoded value of a core.facts result, for display as text.
 type Fact struct {
 	Name  string
@@ -36,7 +46,7 @@ func DecodeFacts(result []byte) []Fact {
 		if err != nil {
 			return ""
 		}
-		return printable(strings.TrimSpace(string(b)), 200)
+		return printable(strings.TrimSpace(string(b)), maxFactRunes)
 	}
 	var out []Fact
 	osr := map[string]string{}
@@ -52,7 +62,7 @@ func DecodeFacts(result []byte) []Fact {
 			} else {
 				v = strings.Trim(v, `"'`)
 			}
-			osr[k] = printable(v, 200)
+			osr[k] = printable(v, maxFactRunes)
 		}
 	}
 	add := func(name, v string) {
@@ -61,11 +71,18 @@ func DecodeFacts(result []byte) []Fact {
 		}
 	}
 	add("Operating system", osr["PRETTY_NAME"])
-	add("OS ID", strings.TrimSpace(osr["ID"]+" "+osr["VERSION_ID"]))
+	// Bounded after joining: each part is already bounded on its own, so
+	// the joined value could otherwise be twice the limit.
+	add("OS ID", printable(strings.TrimSpace(osr["ID"]+" "+osr["VERSION_ID"]), maxFactRunes))
 	add("Kernel", dec(doc.Uname))
 	add("Hostname", dec(doc.Hostname))
-	if up, err := strconv.ParseFloat(dec(doc.Uptime), 64); err == nil && up >= 0 {
-		add("Uptime", strconv.FormatFloat(up/86400, 'f', 1, 64)+" days")
+	if up, err := strconv.ParseFloat(dec(doc.Uptime), 64); err == nil {
+		days := up / 86400
+		// NaN and ±Inf fail both comparisons; a value above the bound is
+		// not a plausible uptime and gets no line.
+		if days >= 0 && days <= maxUptimeDays {
+			add("Uptime", strconv.FormatFloat(days, 'f', 1, 64)+" days")
+		}
 	}
 	if doc.Proxmox {
 		add("Proxmox VE", "yes")
