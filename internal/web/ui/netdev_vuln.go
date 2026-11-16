@@ -4,8 +4,10 @@ package ui
 
 import (
 	"context"
+	"strings"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnmatch"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
 )
 
@@ -13,6 +15,12 @@ import (
 // covered. Its vendor findings are unknown, never a clean result (ADR 0011
 // D4, D8).
 const netdevCoverageUnknown = "coverage unknown"
+
+// vendorFeedSource reports whether a feed source is a vendor advisory source
+// that device findings rest on.
+func vendorFeedSource(id string) bool {
+	return id == vulnmatch.FeedCiscoCSAF || id == vulnmatch.FeedPaloAltoCSAF
+}
 
 // netdevVulnView is the vendor-advisory block of a device page: the device's
 // findings with their observer label, the advisory link of each one, and the
@@ -61,9 +69,27 @@ func (p *NetDevPages) deviceVulns(ctx context.Context, id string) *netdevVulnVie
 	c := newVulnContext(now, page.Subjects, page.Feeds)
 	v := &netdevVulnView{Observer: hermesObserverLabel, Truncated: page.Truncated}
 	lbl, stale := subjectLabel(c.subject(s), now)
-	if stale {
-		v.Coverage, v.CoverageWarn = netdevCoverageUnknown+": "+lbl.Text, true
-	} else {
+	// A vendor source that is stale, unlisted or regressed makes the device's
+	// vendor findings unknown too, even when its last run is recent (ADR 0011
+	// D4, D5): the run covered a source NOS no longer trusts.
+	var feedIssues []string
+	for _, f := range page.Feeds {
+		if !vendorFeedSource(f.SourceID) {
+			continue
+		}
+		for _, l := range feedLabels(f) {
+			feedIssues = append(feedIssues, l.Text)
+		}
+	}
+	switch {
+	case stale || len(feedIssues) > 0:
+		parts := []string{}
+		if stale {
+			parts = append(parts, lbl.Text)
+		}
+		parts = append(parts, feedIssues...)
+		v.Coverage, v.CoverageWarn = netdevCoverageUnknown+": "+strings.Join(parts, "; "), true
+	default:
 		v.Coverage = lbl.Text
 	}
 	fix := p.h.newVulnFixResolver()
