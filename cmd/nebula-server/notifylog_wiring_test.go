@@ -48,6 +48,10 @@ func TestNotifyDecisionsReachTheLog(t *testing.T) {
 	if d, err := gate.Submit(context.Background(), ev, notify.NewIntegrityKey("web01", "pkg_hash", "/etc/x")); err != nil || d != notify.DecisionSent {
 		t.Fatalf("Submit = %v, %v; want DecisionSent", d, err)
 	}
+	// The write runs beside the send; wait for it before reading the log.
+	if err := n.FlushRecords(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	entries, err := store.List(context.Background(), 0, 10)
 	if err != nil {
 		t.Fatal(err)
