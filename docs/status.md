@@ -10,7 +10,7 @@ the decisions, and [docs/implementation](implementation/) the per-area plans.
 
 | Area | ADR | State |
 | --- | --- | --- |
-| Release 0.9 (milestones 0–10) | – | code complete; lab run on real hosts pending; 0.9 Beta in preparation |
+| Release 0.9 (milestones 0–10) | – | code complete; release draft v0.9.0-beta.1 prepared on 2026-11-04, not yet published; running in the reference lab since then, formal integration run on clean VMs pending |
 | Proxmox VE phase 1 / phase 2 | [0006](adr/0006-proxmox-integration.md) | phase 1 merged; phase 2 actions merged, follow-ups ongoing |
 | Approval ergonomics | [0007](adr/0007-approval-ergonomics.md) | merged; read-lease pre-check (lg01) queued |
 | Guest provisioning | [0008](adr/0008-guest-provisioning.md) | merged; deploy profile limits and round-trip fuzz landed (#618) |
@@ -76,7 +76,7 @@ agent proposed (#637) and its 26-ticket plan (ag01–ag26) imported.
   tickets depend on it. Unblocks once ADR 0016 is final.
 - **ep02** after ep01; **lg01** and **op01** start once ep01 releases its paths.
 - **tw:** land #633 and #636, then tw11.
-- **Release 0.9 Beta:** lab run on real hosts.
+- **Release 0.9 Beta:** publish the draft (or cut beta.2 from current main) after the integration run on clean VMs.
 
 ## Blocked / needs maintainer
 

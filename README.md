@@ -59,7 +59,7 @@ Current day-to-day status, work in progress and open maintainer decisions: [docs
 
 | Area | State |
 | --- | --- |
-| Release 0.9 (milestones 0–10) | code complete; lab run on real hosts pending; 0.9 Beta in preparation |
+| Release 0.9 (milestones 0–10) | code complete; release draft v0.9.0-beta.1 prepared on 2026-11-04, not yet published; running in the reference lab since then, formal integration run on clean VMs pending |
 | Proxmox VE, phase 1 (read-only inventory, datastores, org chart, live values) | merged ([ADR 0006](docs/adr/0006-proxmox-integration.md)) |
 | Proxmox VE, phase 2 (guest and node actions, updates from the chart) | guest power, snapshots, backup now, migration, node reboot and OS updates from the chart merged; follow-ups in progress |
 | Approval ergonomics (read grants, batch approval, sessions) | merged ([ADR 0007](docs/adr/0007-approval-ergonomics.md)) |
