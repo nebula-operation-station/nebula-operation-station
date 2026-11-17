@@ -12,31 +12,35 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/docsembed/mdsafe"
 )
 
-// maxOutputFactor and maxOutputSlack bound the output length. Derivation
-// from the code in mdsafe.go:
-//   - html.EscapeString turns one byte into at most 5 bytes ("&#34;",
-//     "&amp;"), so escaped text grows by a factor of 5 at most;
-//   - NUL is replaced by the 3-byte U+FFFD, and a tab by 4 spaces (both
-//     are 1-byte inputs that grow, so they are within the factor);
-//   - the largest fixed wrapper is a heading: the 2-byte line "#\n"
-//     becomes `<h1 id="section"></h1>\n` (24 bytes) plus the "-N"
-//     suffix of duplicate ids (O(log n) bytes); that is at most 16 bytes
-//     per input byte for inputs of this size.
+// maxOutputFactor and maxOutputSlack bound the output length in bytes:
+// len(out) ≤ maxOutputFactor·len(src) + maxOutputSlack. The factor is the
+// worst case over the renderer's output, derived from mdsafe.go:
+//   - a heading "#\n" (2 bytes) becomes `<h1 id="section-N"></h1>\n`; with
+//     N ≤ 524288 (the most headings a MaxSourceBytes source has) that is
+//     30 bytes, i.e. 15 per input byte. This is the worst case.
+//   - a table row "|" (2 bytes) becomes `<tr><td></td></tr>` (18 bytes),
+//     i.e. 9 per input byte. Body rows are not padded to the header width,
+//     so this is the per-row bound for every table.
+//   - escaping grows text at most 5 times (`&#34;`, `&amp;`), and NUL and
+//     tab (1 byte each) grow to 3 and 4 bytes.
 //
-// 32 covers all of these with margin. A parser that was quadratic in
-// output or repeated work per byte would exceed it on the long seeds.
+// 16 covers the worst case (15). Output beyond it is a regression in
+// output amplification. maxOutputSlack covers the fixed wrapper of a
+// short source.
 const (
-	maxOutputFactor = 32
+	maxOutputFactor = 16
 	maxOutputSlack  = 1024
 )
 
 var (
 	// headingIDRE matches the opening tag of a rendered heading.
 	headingIDRE = regexp.MustCompile(`<h[1-6] id="([^"]*)">`)
-	// linkRE matches an opening <a> tag with a local href.
-	linkRE = regexp.MustCompile(`<a href="(/[^"]*)"[^>]*>`)
-	// localPathRE is the Relative contract of mdsafe.go (localHrefRE).
-	localPathRE = regexp.MustCompile(`^/[A-Za-z0-9._/-]*(#[\pL\pN_-]+)?$`)
+	// duplicateSuffixRE is the only allowed suffix of a heading id: "-N"
+	// with N a decimal number, added to make the id unique.
+	duplicateSuffixRE = regexp.MustCompile(`^-[0-9]+$`)
+	// helpHrefRE is the only form of a local link the page policy allows,
+	// the same form assertInert's "a" allowlist accepts.
+	helpHrefRE = regexp.MustCompile(`^/help(/[A-Za-z0-9._-]+)*(#[\pL\pN_-]+)?$`)
 	// tagTokenRE matches any tag, for measuring element nesting.
 	tagTokenRE = regexp.MustCompile(`<(/?)([a-zA-Z0-9]+)[^>]*>`)
 )
@@ -80,42 +84,26 @@ var fuzzSeeds = []string{
 }
 
 // assertOutput runs every output check on one Render result: no error,
-// valid UTF-8, the assertInert allowlist, heading ids unique and derived
-// from Slug, and the output length bound.
+// valid UTF-8, the assertInert allowlist on the output as it is (local
+// links included), heading ids unique and derived from Slug, and the
+// output length bound.
 func assertOutput(t *testing.T, src string, res mdsafe.Result) {
 	t.Helper()
 	out := string(res.HTML)
 	if !utf8.ValidString(out) {
 		t.Fatalf("Render(%q) output is not valid UTF-8", src)
 	}
-	assertInert(t, src, normalizeForeignLinks(t, out))
+	assertInert(t, src, out)
 	checkHeadingIDs(t, src, out, res)
 	if limit := maxOutputFactor*len(src) + maxOutputSlack; len(out) > limit {
 		t.Errorf("Render: output %d bytes for %d input bytes exceeds the bound %d", len(out), len(src), limit)
 	}
 }
 
-// normalizeForeignLinks handles links to local paths outside /help. The
-// Relative contract (localPathRE) allows any local path, but assertInert
-// only admits /help. Such a link is checked against the contract here,
-// then removed so the rest of the output is still checked by assertInert.
-func normalizeForeignLinks(t *testing.T, out string) string {
-	t.Helper()
-	return linkRE.ReplaceAllStringFunc(out, func(tag string) string {
-		href := linkRE.FindStringSubmatch(tag)[1]
-		if strings.HasPrefix(href, "/help") {
-			return tag
-		}
-		if !localPathRE.MatchString(href) {
-			t.Errorf("link %q is not a local path form", href)
-		}
-		return ""
-	})
-}
-
 // checkHeadingIDs checks that the rendered heading ids match
-// res.Headings in order, are unique, and equal Slug of the heading text
-// or Slug with a "-N" suffix ("section" when the slug is empty).
+// res.Headings in order, are unique, and are either Slug of the heading
+// text ("section" when empty) or that slug followed by "-N" with N a
+// decimal number.
 func checkHeadingIDs(t *testing.T, src, out string, res mdsafe.Result) {
 	t.Helper()
 	ids := headingIDRE.FindAllStringSubmatch(out, -1)
@@ -137,7 +125,8 @@ func checkHeadingIDs(t *testing.T, src, out string, res mdsafe.Result) {
 		if base == "" {
 			base = "section"
 		}
-		if id != base && !strings.HasPrefix(id, base+"-") {
+		suffix, found := strings.CutPrefix(id, base)
+		if !found || (suffix != "" && !duplicateSuffixRE.MatchString(suffix)) {
 			t.Errorf("Render(%q): heading id %q does not derive from Slug %q", src, id, base)
 		}
 	}
@@ -156,9 +145,16 @@ func FuzzRender(f *testing.F) {
 		if len(src) > mdsafe.MaxSourceBytes {
 			return
 		}
+		// The page policy: fuzzed results are linkable only in the /help
+		// form assertInert allows, so a link outside it is a finding, not
+		// a resolver mistake. Hostile results are covered without the
+		// policy by TestRelativeHostileResultsNeverLink.
 		rel := func(p, frag string) (string, bool) {
 			switch mode % 3 {
 			case 0:
+				if !helpHrefRE.MatchString(href) {
+					return "", false
+				}
 				return href, true
 			case 1:
 				return href, false
@@ -178,6 +174,28 @@ func FuzzRender(f *testing.F) {
 		}
 		assertOutput(t, src, res)
 	})
+}
+
+// TestHeadingIDsNeverCollide checks that a generated "-N" suffix never
+// reuses an id an explicit slug already has. The first case is the fuzz
+// seed that found the collision.
+func TestHeadingIDsNeverCollide(t *testing.T) {
+	for _, src := range []string{
+		"# a-1\n\n## a\n\n## a\n",
+		"# a\n\n# a\n\n# a-1\n\n# a\n",
+		"# a-1\n# a-1\n# a\n# a\n",
+		"# \n# \n# section\n# section-1\n",
+	} {
+		res := render(t, src)
+		assertOutput(t, src, res)
+	}
+	res := render(t, "# a-1\n\n## a\n\n## a\n")
+	want := []string{"a-1", "a", "a-2"}
+	for i, h := range res.Headings {
+		if h.ID != want[i] {
+			t.Errorf("heading %d id = %q, want %q", i, h.ID, want[i])
+		}
+	}
 }
 
 // TestSourceSizeLimitIsExact checks the size limit at its boundary.
@@ -253,15 +271,12 @@ func elementDepth(t *testing.T, html string) int {
 }
 
 // TestEffortOutputIsBounded checks the output bound on long runs of the
-// delimiters that the inline, link and table scanners look for, at 32 KiB.
-// The check is on output length only (no timing). It does NOT catch
-// superlinear CPU work: a "*" run is quadratic in mdsafe.findRun (see the
-// report for tw09), and that needs a timing or operation-count check that
-// is outside this test. The size is kept small so the suite stays fast;
-// at MaxSourceBytes the same "*" input takes minutes.
+// delimiters that the inline, link and table scanners look for, at
+// MaxSourceBytes. The work bound (not only the output) is checked by
+// TestScanStepsAreLinear in effort_internal_test.go.
 func TestEffortOutputIsBounded(t *testing.T) {
-	for _, unit := range []string{"*", "**", "[", "](", "`", "|", "- ", "[a](b", "| a |\n|-|\n"} {
-		src := strings.Repeat(unit, (1<<15)/len(unit))
+	for _, unit := range []string{"*", "**", "[", "](", "`", "|", "- ", "[a](b", "| a |\n|-|\n", "&"} {
+		src := strings.Repeat(unit, mdsafe.MaxSourceBytes/len(unit))
 		res, err := mdsafe.Render([]byte(src), mdsafe.Options{Relative: pageLinks})
 		if err != nil {
 			t.Fatalf("unit %q: %v", unit, err)
@@ -270,8 +285,23 @@ func TestEffortOutputIsBounded(t *testing.T) {
 	}
 }
 
+// TestTableAmplificationIsBounded is the worst table case: a header with
+// maxTableColumns (32) columns and then rows of "|", two bytes each. The
+// output must stay within maxOutputFactor per input byte.
+func TestTableAmplificationIsBounded(t *testing.T) {
+	header := "|" + strings.Repeat(" a |", 32) + "\n|" + strings.Repeat("-|", 32) + "\n"
+	src := header + strings.Repeat("|\n", (mdsafe.MaxSourceBytes-len(header))/2)
+	res, err := mdsafe.Render([]byte(src), mdsafe.Options{})
+	if err != nil {
+		t.Fatalf("table: %v", err)
+	}
+	assertOutput(t, src, res)
+}
+
 // TestRelativeHostileResultsNeverLink checks hostile resolver results for
-// every link form. The output must hold no link to a non-local target.
+// every link form, without the page policy. The output must pass
+// assertInert, and a resolved link ("a.md" forms) must exist only when the
+// result is in the /help form.
 func TestRelativeHostileResultsNeverLink(t *testing.T) {
 	for _, h := range hostileHrefs {
 		for _, src := range []string{"[x](a.md)", "[x](a.md#frag)", "[x](#frag)", "[x](https://example.org/)"} {
@@ -282,11 +312,9 @@ func TestRelativeHostileResultsNeverLink(t *testing.T) {
 				t.Fatal(err)
 			}
 			out := string(res.HTML)
-			assertInert(t, src, normalizeForeignLinks(t, out))
-			for _, m := range linkRE.FindAllStringSubmatch(out, -1) {
-				if strings.HasPrefix(m[1], "/help") && !localPathRE.MatchString(m[1]) {
-					t.Errorf("resolver %q: link %q is not a local path", h, m[1])
-				}
+			assertInert(t, src, out)
+			if strings.Contains(src, ".md") && strings.Contains(out, "<a ") && !helpHrefRE.MatchString(h) {
+				t.Errorf("resolver result %q produced a link: %s", h, out)
 			}
 		}
 	}

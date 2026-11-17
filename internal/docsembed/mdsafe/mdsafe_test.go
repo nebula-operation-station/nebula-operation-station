@@ -45,7 +45,9 @@ var allowedTags = map[string]*regexp.Regexp{
 	"table": regexp.MustCompile(`^$`), "thead": regexp.MustCompile(`^$`), "tbody": regexp.MustCompile(`^$`),
 	"tr": regexp.MustCompile(`^$`), "th": regexp.MustCompile(`^$`), "td": regexp.MustCompile(`^$`),
 	"div": regexp.MustCompile(`^ class="table-wrap"$`),
-	"a":   regexp.MustCompile(`^ href="(/help[a-z0-9/#_-]*|#[\pL\pN_-]+|https://[^"<>\s]+)"( rel="noopener noreferrer")?$`),
+	// Local links are /help paths (no "//", no empty segment) or same-page
+	// fragments, and carry no rel. External https links carry the rel.
+	"a": regexp.MustCompile(`^ href="(?:/help(?:/[A-Za-z0-9._-]+)*(?:#[\pL\pN_-]+)?|#[\pL\pN_-]+)"$|^ href="https://[^"<>\s]+" rel="noopener noreferrer"$`),
 }
 
 // assertInert checks that out contains only allowed tags and attributes

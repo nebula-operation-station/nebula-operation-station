@@ -44,12 +44,18 @@ const (
 	// link in bold …). Deeper constructs render as text.
 	MaxNesting = 8
 	// maxInlineScan bounds the search for a closing delimiter (code
-	// span, emphasis, link text).
+	// span, emphasis, link text). A match must lie wholly inside it.
 	maxInlineScan = 1024
 	// maxLinkDestBytes bounds a link destination.
 	maxLinkDestBytes = 2048
 	// maxTableColumns bounds the columns of a table.
 	maxTableColumns = 32
+	// maxScanSteps is the total number of bytes all delimiter scans
+	// (findRun, parseLink) may look at in one Render. Each scan is
+	// already bounded by maxInlineScan, so this makes the total work
+	// linear in the source size. Once spent, further delimiters render as
+	// text: the output stays correct and escaped, only the markup is lost.
+	maxScanSteps = 16 * MaxSourceBytes
 	// tabWidth is the number of spaces a tab expands to.
 	tabWidth = 4
 )
@@ -105,14 +111,21 @@ var (
 
 // Render converts src to escaped HTML.
 func Render(src []byte, o Options) (Result, error) {
+	res, _, err := renderCounted(src, o)
+	return res, err
+}
+
+// renderCounted is Render; it also returns the number of scan steps
+// spent, which the tests use to check the effort bound.
+func renderCounted(src []byte, o Options) (Result, int, error) {
 	if len(src) > MaxSourceBytes {
-		return Result{}, ErrTooLarge
+		return Result{}, 0, ErrTooLarge
 	}
 	if !utf8.Valid(src) {
-		return Result{}, ErrInvalidUTF8
+		return Result{}, 0, ErrInvalidUTF8
 	}
 	s := strings.NewReplacer("\r\n", "\n", "\r", "\n", "\x00", "�", "\t", strings.Repeat(" ", tabWidth)).Replace(string(src))
-	r := &renderer{o: o, ids: map[string]int{}}
+	r := &renderer{o: o, taken: map[string]bool{}, next: map[string]int{}}
 	r.blocks(&r.out, strings.Split(s, "\n"), 0, false)
 	return Result{
 		// The builder only ever received escaped text and the fixed
@@ -120,7 +133,7 @@ func Render(src []byte, o Options) (Result, error) {
 		HTML:     template.HTML(r.out.String()),
 		Title:    r.title,
 		Headings: r.headings,
-	}, nil
+	}, r.steps, nil
 }
 
 // Slug turns a heading's Markdown text into an element id the way
@@ -160,7 +173,9 @@ func plainText(s string) string {
 type renderer struct {
 	o        Options
 	out      strings.Builder
-	ids      map[string]int
+	taken    map[string]bool // heading ids in use
+	next     map[string]int  // per base slug: next "-N" suffix to try
+	steps    int             // scan steps spent, at most maxScanSteps (plus one scan)
 	title    string
 	headings []Heading
 }
@@ -331,15 +346,7 @@ func (r *renderer) codeBlock(b *strings.Builder, lines []string, i, ind int, fen
 
 // heading renders one heading with a unique slug id.
 func (r *renderer) heading(b *strings.Builder, level int, text string) {
-	id := Slug(text)
-	if id == "" {
-		id = "section"
-	}
-	if n, seen := r.ids[id]; seen {
-		r.ids[id] = n + 1
-		id = id + "-" + itoa(n+1)
-	}
-	r.ids[id] = 0
+	id := r.uniqueID(Slug(text))
 	plain := plainText(text)
 	r.headings = append(r.headings, Heading{Level: level, Text: plain, ID: id})
 	if level == 1 && r.title == "" {
@@ -353,6 +360,33 @@ func (r *renderer) heading(b *strings.Builder, level int, text string) {
 	b.WriteString("</" + tag + ">\n")
 }
 
+// uniqueID returns an id that no heading has used yet: base, or base
+// followed by "-N" for the smallest N not taken. An explicit slug such as
+// "a-1" can collide with a generated suffix, so every candidate is checked.
+// next keeps each base's scan position, so the total work stays linear.
+func (r *renderer) uniqueID(base string) string {
+	if base == "" {
+		base = "section"
+	}
+	n := r.next[base]
+	id := candidateID(base, n)
+	for r.taken[id] {
+		n++
+		id = candidateID(base, n)
+	}
+	r.taken[id] = true
+	r.next[base] = n + 1
+	return id
+}
+
+// candidateID is the n-th id candidate for base (n 0 is base itself).
+func candidateID(base string, n int) string {
+	if n == 0 {
+		return base
+	}
+	return base + "-" + itoa(n)
+}
+
 func itoa(n int) string {
 	if n == 0 {
 		return "0"
@@ -364,7 +398,10 @@ func itoa(n int) string {
 	return string(d)
 }
 
-// table renders a pipe table starting at lines[i] (header row).
+// table renders a pipe table starting at lines[i] (header row). Body rows
+// render only the cells they have, up to the header's column count; no
+// empty cells are padded in. Padding would let a 2-byte row "|" grow to
+// one padded cell per header column, which is unbounded output growth.
 func (r *renderer) table(b *strings.Builder, lines []string, i int) int {
 	head := splitRow(lines[i])
 	cols := min(len(head), maxTableColumns)
@@ -378,11 +415,9 @@ func (r *renderer) table(b *strings.Builder, lines []string, i int) int {
 	for i += 2; i < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[i]), "|"); i++ {
 		cells := splitRow(lines[i])
 		b.WriteString("<tr>")
-		for c := 0; c < cols; c++ {
+		for _, c := range cells[:min(len(cells), cols)] {
 			b.WriteString("<td>")
-			if c < len(cells) {
-				r.inline(b, cells[c], 0, false)
-			}
+			r.inline(b, c, 0, false)
 			b.WriteString("</td>")
 		}
 		b.WriteString("</tr>")
@@ -496,24 +531,32 @@ func isASCIIPunct(c byte) bool {
 }
 
 // findRun returns the index of the next run of exactly n copies of c in
-// s at or after from, within maxInlineScan bytes, or -1.
-func findRun(s string, from int, c byte, n int) int {
+// s at or after from, or -1. The run must end inside the window of
+// maxInlineScan bytes after from; a longer run that crosses the window
+// edge is not a match. Scanned bytes are charged to r.steps.
+func (r *renderer) findRun(s string, from int, c byte, n int) int {
 	limit := min(len(s), from+maxInlineScan)
-	for j := from; j < limit; {
+	j := from
+	found := -1
+	for j < limit && r.steps < maxScanSteps {
 		if s[j] != c {
 			j++
 			continue
 		}
 		k := j
-		for k < len(s) && s[k] == c {
+		for k < limit && s[k] == c {
 			k++
 		}
-		if k-j == n {
-			return j
+		// The loop stopped at limit or at a byte other than c. A run that
+		// stopped at limit but continues there is longer than n.
+		if k-j == n && (k >= len(s) || s[k] != c) {
+			found = j
+			break
 		}
 		j = k
 	}
-	return -1
+	r.steps += j - from
+	return found
 }
 
 // inline renders inline Markdown. inLink suppresses nested links.
@@ -534,7 +577,7 @@ func (r *renderer) inline(b *strings.Builder, s string, depth int, inLink bool) 
 			for i+n < len(s) && s[i+n] == '`' {
 				n++
 			}
-			end := findRun(s, i+n, '`', n)
+			end := r.findRun(s, i+n, '`', n)
 			if end < 0 {
 				text.WriteString(s[i : i+n])
 				i += n
@@ -555,7 +598,7 @@ func (r *renderer) inline(b *strings.Builder, s string, depth int, inLink bool) 
 				n = 2
 			}
 			open := i + n
-			end := findRun(s, open, '*', n)
+			end := r.findRun(s, open, '*', n)
 			if end <= open || s[open] == ' ' || s[end-1] == ' ' {
 				text.WriteString(s[i:open])
 				i = open
@@ -571,7 +614,7 @@ func (r *renderer) inline(b *strings.Builder, s string, depth int, inLink bool) 
 			b.WriteString("</" + tag + ">")
 			i = end + n
 		case c == '[' && !inLink && depth < MaxNesting:
-			label, dest, end, ok := parseLink(s, i)
+			label, dest, end, ok := r.parseLink(s, i)
 			if !ok {
 				text.WriteByte(c)
 				i++
@@ -601,7 +644,11 @@ func (r *renderer) inline(b *strings.Builder, s string, depth int, inLink bool) 
 }
 
 // parseLink parses "[label](dest)" at s[i]; end is the index after ")".
-func parseLink(s string, i int) (label, dest string, end int, ok bool) {
+// Bytes scanned are charged to r.steps; past the budget it never matches.
+func (r *renderer) parseLink(s string, i int) (label, dest string, end int, ok bool) {
+	if r.steps >= maxScanSteps {
+		return "", "", 0, false
+	}
 	level := 0
 	j := i
 	limit := min(len(s), i+maxInlineScan)
@@ -618,18 +665,21 @@ func parseLink(s string, i int) (label, dest string, end int, ok bool) {
 			break
 		}
 	}
+	r.steps += j - i
 	if j >= limit || level != 0 || j+1 >= len(s) || s[j+1] != '(' {
 		return "", "", 0, false
 	}
 	label = s[i+1 : j]
 	parens := 0
 	limit = min(len(s), j+2+maxLinkDestBytes)
-	for k := j + 2; k < limit; k++ {
+	k := j + 2
+	for ; k < limit; k++ {
 		switch s[k] {
 		case '(':
 			parens++
 		case ')':
 			if parens == 0 {
+				r.steps += k - j
 				dest = strings.TrimSpace(s[j+2 : k])
 				// A title ("dest "title"") is dropped.
 				if f := strings.Fields(dest); len(f) > 0 {
@@ -639,9 +689,11 @@ func parseLink(s string, i int) (label, dest string, end int, ok bool) {
 			}
 			parens--
 		case '\n':
+			r.steps += k - j
 			return "", "", 0, false
 		}
 	}
+	r.steps += k - j
 	return "", "", 0, false
 }
 
