@@ -385,11 +385,20 @@ const (
 	// only write scope of /api/v1, and it writes only into the findings
 	// store.
 	ScopeVulnFindingsWrite = "vuln.findings.write"
+	// ScopeOpsRead reads the ops agent's work list and config (ADR 0016 D2).
+	ScopeOpsRead = "ops.read"
+	// ScopeOpsNotesWrite writes the ops agent's notes and last-run status
+	// (ADR 0016 D2); it writes only into the notes store and the status.
+	ScopeOpsNotesWrite = "ops.notes.write"
 )
 
 // DefaultVulnTokenName is the default name of the one dedicated agent
 // token that may hold the vuln scopes (ADR 0011 D3).
 const DefaultVulnTokenName = "hermes-vuln"
+
+// DefaultOpsTokenName is the default name of the one dedicated token that
+// may hold the ops scopes (ADR 0016 D2).
+const DefaultOpsTokenName = "ops-agent"
 
 // MaxSourceAddresses bounds the source-address allowlist of the vuln token.
 const MaxSourceAddresses = 16
@@ -409,20 +418,34 @@ type APIToken struct {
 	// SHA256 is the lowercase hex SHA-256 of the token string.
 	SHA256 string   `json:"sha256"`
 	Scopes []string `json:"scopes"`
-	// SourceAddresses optionally restricts the vuln token to these client
-	// addresses (IP addresses or prefixes, ADR 0011 D3; set it to the
-	// address of hermes). Allowed only on the vuln token: the read-only
-	// API does not check it, so on another token it would mislead.
+	// SourceAddresses optionally restricts the vuln token or the ops token
+	// to these client addresses (IP addresses or prefixes, ADR 0011 D3 and
+	// ADR 0016 D2; set it to the address of hermes or loopback). Allowed
+	// only on those two tokens: the read-only API does not check it on
+	// another token, so there it would mislead.
 	SourceAddresses []string `json:"source_addresses,omitempty"`
 }
 
 // IsVulnScope reports whether s is one of the ADR 0011 vuln scopes.
 func IsVulnScope(s string) bool { return s == ScopeVulnInventoryRead || s == ScopeVulnFindingsWrite }
 
+// IsOpsScope reports whether s is one of the ADR 0016 ops scopes.
+func IsOpsScope(s string) bool { return s == ScopeOpsRead || s == ScopeOpsNotesWrite }
+
 // HasVulnScope reports whether the token holds a vuln scope.
 func (t APIToken) HasVulnScope() bool {
 	for _, s := range t.Scopes {
 		if IsVulnScope(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// HasOpsScope reports whether the token holds an ops scope.
+func (t APIToken) HasOpsScope() bool {
+	for _, s := range t.Scopes {
+		if IsOpsScope(s) {
 			return true
 		}
 	}
@@ -459,11 +482,22 @@ func (a APIConfig) VulnToken() (APIToken, bool) {
 	return APIToken{}, false
 }
 
+// OpsToken returns the one token holding an ops scope, if any. Problems
+// guarantees there is at most one.
+func (a APIConfig) OpsToken() (APIToken, bool) {
+	for _, t := range a.Tokens {
+		if t.HasOpsScope() {
+			return t, true
+		}
+	}
+	return APIToken{}, false
+}
+
 var (
 	apiTokenNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 	apiHashRe      = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	apiScopes      = map[string]bool{ScopeInventoryRead: true, ScopeOperationsRead: true, ScopeExecutionLogsRead: true,
-		ScopeVulnInventoryRead: true, ScopeVulnFindingsWrite: true}
+		ScopeVulnInventoryRead: true, ScopeVulnFindingsWrite: true, ScopeOpsRead: true, ScopeOpsNotesWrite: true}
 )
 
 // ValidAPIScope reports whether s is a known API scope.
@@ -476,7 +510,7 @@ func (a APIConfig) Problems() []string {
 		out = append(out, "api: enabled needs at least one token")
 	}
 	names, hashes := map[string]bool{}, map[string]bool{}
-	vulnTokens := 0
+	vulnTokens, opsTokens := 0, 0
 	for i, t := range a.Tokens {
 		if !apiTokenNameRe.MatchString(t.Name) {
 			out = append(out, fmt.Sprintf("api.tokens[%d].name: %q must match %s", i, t.Name, apiTokenNameRe))
@@ -503,20 +537,22 @@ func (a APIConfig) Problems() []string {
 			seen[s] = true
 		}
 		out = append(out, vulnTokenProblems(i, t, &vulnTokens)...)
+		out = append(out, opsTokenProblems(i, t, &opsTokens)...)
+		if t.HasVulnScope() || t.HasOpsScope() {
+			out = append(out, sourceAddressProblems(i, t)...)
+		} else if len(t.SourceAddresses) > 0 {
+			out = append(out, fmt.Sprintf("api.tokens[%d].source_addresses: allowed only on the vuln token and the ops token", i))
+		}
 	}
 	return out
 }
 
 // vulnTokenProblems checks the ADR 0011 D3/D5 rules: the vuln scopes are
 // held by one dedicated token that carries no other scope (never
-// operations.read or execution_logs.read), and only that token may carry
-// a source-address allowlist.
+// operations.read, execution_logs.read or an ops scope).
 func vulnTokenProblems(i int, t APIToken, vulnTokens *int) []string {
 	var out []string
 	if !t.HasVulnScope() {
-		if len(t.SourceAddresses) > 0 {
-			out = append(out, fmt.Sprintf("api.tokens[%d].source_addresses: allowed only on the vuln token", i))
-		}
 		return out
 	}
 	*vulnTokens++
@@ -528,10 +564,38 @@ func vulnTokenProblems(i int, t APIToken, vulnTokens *int) []string {
 			out = append(out, fmt.Sprintf("api.tokens[%d].scopes: a token with a vuln scope carries no other scope (%q)", i, s))
 		}
 	}
-	if len(t.SourceAddresses) > MaxSourceAddresses {
-		out = append(out, fmt.Sprintf("api.tokens[%d].source_addresses: at most %d", i, MaxSourceAddresses))
-	} else if _, err := t.SourcePrefixes(); err != nil {
-		out = append(out, fmt.Sprintf("api.tokens[%d].%v", i, err))
+	return out
+}
+
+// opsTokenProblems checks the ADR 0016 D2 rules: the ops scopes are held
+// by one dedicated token that carries no other scope (never
+// inventory.read, operations.read, execution_logs.read or a vuln scope).
+func opsTokenProblems(i int, t APIToken, opsTokens *int) []string {
+	var out []string
+	if !t.HasOpsScope() {
+		return out
+	}
+	*opsTokens++
+	if *opsTokens > 1 {
+		out = append(out, fmt.Sprintf("api.tokens[%d].scopes: only one token may hold the ops scopes", i))
+	}
+	for _, s := range t.Scopes {
+		if apiScopes[s] && !IsOpsScope(s) {
+			out = append(out, fmt.Sprintf("api.tokens[%d].scopes: a token with an ops scope carries no other scope (%q)", i, s))
+		}
 	}
 	return out
+}
+
+// sourceAddressProblems checks the source-address allowlist of the vuln
+// token and the ops token: at most MaxSourceAddresses entries, each an IP
+// address or a prefix without host bits.
+func sourceAddressProblems(i int, t APIToken) []string {
+	if len(t.SourceAddresses) > MaxSourceAddresses {
+		return []string{fmt.Sprintf("api.tokens[%d].source_addresses: at most %d", i, MaxSourceAddresses)}
+	}
+	if _, err := t.SourcePrefixes(); err != nil {
+		return []string{fmt.Sprintf("api.tokens[%d].%v", i, err)}
+	}
+	return nil
 }
