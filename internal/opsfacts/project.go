@@ -125,22 +125,9 @@ func (p *Projector) Candidates(ctx context.Context, groupKey, digest string) ([]
 
 // build reads the sources once and returns the eligible groups.
 func (p *Projector) build(ctx context.Context) ([]Group, error) {
-	hosts, err := p.src.Inventory.Hosts(ctx)
+	byID, exposure, err := p.hostSet(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("opsfacts: read inventory: %w", err)
-	}
-	byID := make(map[string]LabHost, len(hosts))
-	exposure := make(map[string]vulnprio.Exposure, len(hosts))
-	for _, h := range hosts {
-		v, err := validateHost(h)
-		if err != nil {
-			return nil, fmt.Errorf("opsfacts: host %q: %w", h.ID, err)
-		}
-		if _, dup := byID[v.ID]; dup {
-			return nil, fmt.Errorf("opsfacts: host %q: %w", v.ID, ErrDuplicateHost)
-		}
-		byID[v.ID] = v.labHost()
-		exposure[v.ID] = v.Exposure
+		return nil, err
 	}
 
 	findings, err := p.src.Findings.Findings(ctx)
@@ -192,6 +179,59 @@ func (p *Projector) build(ctx context.Context) ([]Group, error) {
 			return nil, fmt.Errorf("opsfacts: digest of group %q: %w", key, err)
 		}
 		out = append(out, Group{Key: key, Projection: proj, Digest: digest})
+	}
+	return out, nil
+}
+
+// hostSet reads and validates the inventory. It returns the lab part and the
+// exposure of every host by ID. A host that fails validation, or a duplicate
+// ID, fails the whole read.
+func (p *Projector) hostSet(ctx context.Context) (map[string]LabHost, map[string]vulnprio.Exposure, error) {
+	hosts, err := p.src.Inventory.Hosts(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opsfacts: read inventory: %w", err)
+	}
+	byID := make(map[string]LabHost, len(hosts))
+	exposure := make(map[string]vulnprio.Exposure, len(hosts))
+	for _, h := range hosts {
+		v, err := validateHost(h)
+		if err != nil {
+			return nil, nil, fmt.Errorf("opsfacts: host %q: %w", h.ID, err)
+		}
+		if _, dup := byID[v.ID]; dup {
+			return nil, nil, fmt.Errorf("opsfacts: host %q: %w", v.ID, ErrDuplicateHost)
+		}
+		byID[v.ID] = v.labHost()
+		exposure[v.ID] = v.Exposure
+	}
+	return byID, exposure, nil
+}
+
+// External returns the external-class projection (ADR 0016 D5): the open
+// findings of inventory hosts, counted per tier and KEV for the whole fleet.
+// No host, package, version or vulnerability ID is read into the result.
+func (p *Projector) External(ctx context.Context) (ExternalProjection, error) {
+	byID, _, err := p.hostSet(ctx)
+	if err != nil {
+		return ExternalProjection{}, err
+	}
+	findings, err := p.src.Findings.Findings(ctx)
+	if err != nil {
+		return ExternalProjection{}, fmt.Errorf("opsfacts: read findings: %w", err)
+	}
+	var out ExternalProjection
+	for _, f := range findings {
+		v, err := validateFinding(f)
+		if err != nil {
+			return ExternalProjection{}, fmt.Errorf("opsfacts: finding of host %q: %w", f.HostID, err)
+		}
+		if v.State != StateOpen {
+			continue
+		}
+		if _, known := byID[v.HostID]; !known {
+			continue
+		}
+		out.Fleet.add(v.Tier, v.KEV)
 	}
 	return out, nil
 }
