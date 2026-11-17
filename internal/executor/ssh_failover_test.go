@@ -285,6 +285,9 @@ func TestHandshakeTimeoutFailsOverWithinBounds(t *testing.T) {
 		if good.connections() != 0 {
 			t.Fatalf("third endpoint saw %d connections, want 0", good.connections())
 		}
+		if s1.connections() != 1 || s2.connections() != 1 {
+			t.Errorf("silent endpoints dialled %d and %d times, want once each", s1.connections(), s2.connections())
+		}
 		if class, _ := connectClass(err); class != classNetworkUnreachable {
 			t.Errorf("connect class = %q, want %q", class, classNetworkUnreachable)
 		}
