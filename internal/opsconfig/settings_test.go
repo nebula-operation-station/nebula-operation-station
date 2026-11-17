@@ -112,9 +112,9 @@ func TestValidateRejectsInvalidSettings(t *testing.T) {
 		{"instructions too long", func(s *Settings) { s.Instructions = strings.Repeat("a", MaxInstructions+1) }},
 		{"instructions invalid utf8", func(s *Settings) { s.Instructions = "ok\xff" }},
 		{"instructions nul", func(s *Settings) { s.Instructions = "a\x00b" }},
-		{"instructions bidi override", func(s *Settings) { s.Instructions = "a‮b" }},
+		{"instructions bidi override", func(s *Settings) { s.Instructions = "a" + string(rune(0x202e)) + "b" }},
 		{"instructions c1 control", func(s *Settings) { s.Instructions = "a\u0085b" }},
-		{"instructions replacement char", func(s *Settings) { s.Instructions = "a�b" }},
+		{"instructions replacement char", func(s *Settings) { s.Instructions = "a" + string(rune(0xfffd)) + "b" }},
 		{"language fr", func(s *Settings) { s.Language = "fr" }},
 		{"language empty", func(s *Settings) { s.Language = "" }},
 	}
