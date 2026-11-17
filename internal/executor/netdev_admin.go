@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -147,6 +148,17 @@ var errNetDevProbeDone = errors.New("probe: chain recorded")
 // executor, so that, for example, a credential set cannot interleave with
 // a removal that is deleting the device's vault entries.
 var netDevAdminMu sync.Mutex
+
+// netDevCredWriteMu is held for writing by a credential set or rotation
+// from before its vault commit until its lease revocation has run and its
+// block is lifted. ReadNetDevice authorizes only while it can take it for
+// reading without waiting, so no read sees a new credential version while a
+// lease approved ahead of the registry for that version is still active
+// (ADR 0010 D1/D2). The durable counterpart, which also covers a failed
+// revocation and a crash, is the block putCredential sets before the
+// commit (netDevCredChangeReason). It is independent of netDevAdminMu,
+// which the RPC handlers hold around the write.
+var netDevCredWriteMu sync.RWMutex
 
 // NetDevDialFunc opens a TCP connection. Tests inject a loopback mapper;
 // production uses net.Dialer. The address is always the checked IP literal
@@ -689,14 +701,19 @@ type NetDevCredential struct {
 // SetCredential stores the first read credential of a live device as
 // vault version 1 and revokes every grant of the device, so no lease
 // approved before the credential existed becomes usable. An existing
-// entry is never adopted or overwritten.
+// entry is never adopted or overwritten. No read is authorized between
+// the vault commit and the revocation: an unblocked device is blocked
+// before the commit and unblocked only after the revocation succeeded
+// (netDevCredChangeReason), and netDevCredWriteMu is held throughout. If
+// the revocation fails the device stays blocked.
 func (a *NetDevAdmin) SetCredential(ctx context.Context, in NetDevCredential) (executordb.NetDevice, int64, error) {
 	in.ExpectedVersion = 0
 	return a.putCredential(ctx, in, "credential_set")
 }
 
 // RotateCredential replaces the read credential at exactly
-// ExpectedVersion and revokes every grant of the device.
+// ExpectedVersion and revokes every grant of the device; as for
+// SetCredential, no read is authorized in between.
 func (a *NetDevAdmin) RotateCredential(ctx context.Context, in NetDevCredential) (executordb.NetDevice, int64, error) {
 	if in.ExpectedVersion < 1 {
 		return executordb.NetDevice{}, 0, fmt.Errorf("%w: expected credential version must be at least 1", ErrNetDevCredentialRequest)
@@ -725,6 +742,22 @@ func (a *NetDevAdmin) putCredential(ctx context.Context, in NetDevCredential, ac
 	value := encodeNetDevCredential(netDevPurposeRead, in.Username, in.Secret)
 	defer clear(value)
 	want := in.ExpectedVersion + 1
+	// Held from before the block until the revocation and the unblock
+	// below have run (deferred unlock): reads are refused throughout.
+	netDevCredWriteMu.Lock()
+	defer netDevCredWriteMu.Unlock()
+	// The durable "revocation pending" marker is set before the new version
+	// exists: an unblocked device is blocked first, so a crash or a failed
+	// revocation after the commit leaves it blocked, and ReadNetDevice
+	// refuses a blocked device. If the block fails, nothing is committed.
+	weBlocked := false
+	if !dev.Blocked {
+		if _, err := a.Store.BlockNetDevice(dev.ID, netDevCredChangeReason); err != nil {
+			return executordb.NetDevice{}, 0, fmt.Errorf("store credential of network device %s: block before commit: %w", dev.ID, err)
+		}
+		weBlocked = true
+	}
+	netDevCredWriteAt(netDevCredBeforeCommit, dev.ID)
 	version, err := a.Vault.PutWithCommit(ref, value, in.By, func(s executordb.VaultSecret) error {
 		switch {
 		case s.Version != want && in.ExpectedVersion == 0:
@@ -735,21 +768,114 @@ func (a *NetDevAdmin) putCredential(ctx context.Context, in NetDevCredential, ac
 		return a.Store.PutSecret(s)
 	})
 	if err != nil {
-		return executordb.NetDevice{}, 0, fmt.Errorf("store credential of network device %s: %w", dev.ID, err)
+		return executordb.NetDevice{}, 0, a.credentialNotStored(dev.ID, ref, want, weBlocked, fmt.Errorf("store credential of network device %s: %w", dev.ID, err))
 	}
 	a.event(action, dev.ID)
+	netDevCredWriteAt(netDevCredAfterCommit, dev.ID)
 	// Every credential write revokes the device's grants, the first set
 	// included: a lease approved for credential version 1 while the device
 	// had no credential yet would otherwise go live with this set (ADR 0010
-	// D1/D2).
-	reason := "network device credential rotated"
-	if in.ExpectedVersion == 0 {
-		reason = "network device credential set"
-	}
-	if err := a.revoke(dev.ID, reason); err != nil {
+	// D1/D2). The new version is already committed here; the block keeps
+	// every read out until this revocation has succeeded, and stays if it
+	// fails.
+	if err := a.revoke(dev.ID, netDevCredRevokeReason(in.ExpectedVersion)); err != nil {
 		return executordb.NetDevice{}, 0, err
 	}
+	netDevCredWriteAt(netDevCredAfterRevoke, dev.ID)
+	if weBlocked {
+		out, err := a.liftCredChangeBlock(dev.ID)
+		if err != nil {
+			return executordb.NetDevice{}, 0, fmt.Errorf("network device %s: credential stored as version %d and leases revoked, device stays blocked: %w", dev.ID, version, err)
+		}
+		dev = out
+	}
 	return dev, version, nil
+}
+
+// netDevCredChangeReason is the block reason a credential set or rotation
+// records on an unblocked device before its vault commit. It stays if the
+// write stops after the commit before its revocation succeeded (failure or
+// crash); Unblock revokes before lifting it, and Block retries the
+// revocation.
+const netDevCredChangeReason = "credential change in progress; revocation pending"
+
+func netDevCredRevokeReason(expectedVersion int64) string {
+	if expectedVersion == 0 {
+		return "network device credential set"
+	}
+	return "network device credential rotated"
+}
+
+// credentialNotStored handles a failed vault commit. A refusal by the
+// write's own version check (ErrNetDevCredentialExists,
+// ErrNetDevCredentialVersion) committed nothing and lifts the block. For
+// any other failure the block is lifted only when the stored version is
+// readable and is not the one this write targeted; otherwise (an ambiguous
+// commit, or that version written meanwhile) the device's leases are
+// revoked like after a commit and the block stays unless that revocation
+// succeeded.
+func (a *NetDevAdmin) credentialNotStored(id, ref string, want int64, weBlocked bool, cause error) error {
+	if !errors.Is(cause, ErrNetDevCredentialExists) && !errors.Is(cause, ErrNetDevCredentialVersion) {
+		cur, verr := a.credentialVersion(ref)
+		if verr != nil || cur == want {
+			if err := a.revoke(id, "network device credential write failed"); err != nil {
+				return errors.Join(cause, err)
+			}
+			if verr != nil {
+				// The stored state is unknown: keep the block (fail closed).
+				return errors.Join(cause, fmt.Errorf("network device %s stays blocked: credential version: %w", id, verr))
+			}
+		}
+	}
+	if !weBlocked {
+		return cause
+	}
+	if _, err := a.liftCredChangeBlock(id); err != nil {
+		return errors.Join(cause, fmt.Errorf("network device %s stays blocked: %w", id, err))
+	}
+	return cause
+}
+
+// liftCredChangeBlock lifts the block a credential write set, and only that
+// block: a device blocked meanwhile for another reason stays blocked.
+func (a *NetDevAdmin) liftCredChangeBlock(id string) (executordb.NetDevice, error) {
+	cur, err := a.liveDevice(id)
+	if err != nil {
+		return executordb.NetDevice{}, fmt.Errorf("unblock after credential change: %w", err)
+	}
+	if !cur.Blocked || cur.BlockReason != netDevCredChangeReason {
+		return cur, nil
+	}
+	out, err := a.Store.UnblockNetDevice(id)
+	if err != nil {
+		return executordb.NetDevice{}, fmt.Errorf("unblock after credential change: %w", err)
+	}
+	return out, nil
+}
+
+// netDevCredWriteStage names a point inside a credential write for
+// netDevCredWriteHook.
+type netDevCredWriteStage int
+
+const (
+	// netDevCredBeforeCommit: blocked, the new version not yet committed.
+	netDevCredBeforeCommit netDevCredWriteStage = iota + 1
+	// netDevCredAfterCommit: the new version committed, leases not yet
+	// revoked.
+	netDevCredAfterCommit
+	// netDevCredAfterRevoke: leases revoked, the block not yet lifted.
+	netDevCredAfterRevoke
+)
+
+// netDevCredWriteHook, if set, runs at each netDevCredWriteStage of a
+// credential write. Tests only; nil in production. Atomic, so a test that
+// sets it does not race with a write on another goroutine.
+var netDevCredWriteHook atomic.Pointer[func(stage netDevCredWriteStage, deviceID string)]
+
+func netDevCredWriteAt(stage netDevCredWriteStage, deviceID string) {
+	if h := netDevCredWriteHook.Load(); h != nil {
+		(*h)(stage, deviceID)
+	}
 }
 
 // --- block, unblock, remove ---
