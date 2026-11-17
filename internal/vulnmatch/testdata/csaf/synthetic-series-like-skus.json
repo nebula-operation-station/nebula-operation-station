@@ -1,0 +1,73 @@
+{
+  "document": {
+    "category": "csaf_security_advisory",
+    "csaf_version": "2.0",
+    "title": "PAN-OS: Synthetic series-like-SKU advisory (test only, not a real advisory)",
+    "publisher": {
+      "category": "vendor",
+      "name": "Palo Alto Networks",
+      "namespace": "https://security.paloaltonetworks.com"
+    },
+    "tracking": {
+      "id": "PAN-SA-2099-0002",
+      "version": "1",
+      "status": "final",
+      "initial_release_date": "2026-01-01T00:00:00Z",
+      "current_release_date": "2026-01-01T00:00:00Z",
+      "revision_history": [
+        {"number": "1", "date": "2026-01-01T00:00:00Z", "summary": "Synthetic test revision."}
+      ]
+    }
+  },
+  "product_tree": {
+    "branches": [
+      {
+        "category": "vendor",
+        "name": "Palo Alto Networks",
+        "branches": [
+          {
+            "category": "product_name",
+            "name": "PAN-OS",
+            "branches": [
+              {"category": "product_version", "name": "10.2.9", "product": {"product_id": "OS-10.2.9", "name": "PAN-OS 10.2.9"}}
+            ]
+          },
+          {
+            "category": "product_family",
+            "name": "Next-Generation Firewalls",
+            "branches": [
+              {"category": "product_name", "name": "PA-400", "product": {"product_id": "HW-PA-400", "name": "PA-400"}},
+              {"category": "product_name", "name": "PA-5400", "product": {"product_id": "HW-PA-5400", "name": "PA-5400"}},
+              {"category": "product_name", "name": "PA-3220", "product": {"product_id": "HW-PA-3220", "name": "PA-3220"}}
+            ]
+          }
+        ]
+      }
+    ],
+    "relationships": [
+      {"category": "installed_on", "product_reference": "OS-10.2.9", "relates_to_product_reference": "HW-PA-400", "full_product_name": {"product_id": "PA-400-10.2.9", "name": "PAN-OS 10.2.9 on PA-400"}},
+      {"category": "installed_on", "product_reference": "OS-10.2.9", "relates_to_product_reference": "HW-PA-5400", "full_product_name": {"product_id": "PA-5400-10.2.9", "name": "PAN-OS 10.2.9 on PA-5400"}},
+      {"category": "installed_on", "product_reference": "OS-10.2.9", "relates_to_product_reference": "HW-PA-3220", "full_product_name": {"product_id": "PA-3220-10.2.9", "name": "PAN-OS 10.2.9 on PA-3220"}}
+    ]
+  },
+  "vulnerabilities": [
+    {
+      "cve": "CVE-2099-2001",
+      "product_status": {
+        "known_affected": ["PA-400-10.2.9"]
+      }
+    },
+    {
+      "cve": "CVE-2099-2002",
+      "product_status": {
+        "known_affected": ["PA-5400-10.2.9"]
+      }
+    },
+    {
+      "cve": "CVE-2099-2003",
+      "product_status": {
+        "known_affected": ["PA-3220-10.2.9"]
+      }
+    }
+  ]
+}
