@@ -161,6 +161,10 @@ type Options struct {
 	// LabOnly selects the lab-only dialer: every connection goes to a lab
 	// address, checked after DNS resolution.
 	LabOnly bool
+	// UnrestrictedEgress selects the plain dialer, for a caller outside
+	// ADR 0011 A1.4. It must be named: New refuses Options that set neither
+	// LabOnly nor this field, and Options that set both.
+	UnrestrictedEgress bool
 	// LabNetworks are extra lab networks, see ParseNetworks. Used with LabOnly.
 	LabNetworks []netip.Prefix
 	// UnixSocket, with LabOnly, is the absolute path of a Unix socket every
@@ -209,6 +213,9 @@ func New(opts Options) (*Client, error) {
 			return nil, cfgErr("llm base url: api key over plain http refused")
 		}
 	}
+	if opts.LabOnly == opts.UnrestrictedEgress {
+		return nil, cfgErr("llm egress: name one mode, LabOnly or UnrestrictedEgress")
+	}
 	return &Client{
 		endpoint: strings.TrimSuffix(u.String(), "/") + "/chat/completions",
 		model:    opts.Model,
@@ -225,10 +232,11 @@ func New(opts Options) (*Client, error) {
 // every address is a lab address (or the Unix socket is configured). A
 // client's dialer repeats the check on every connection, so a later DNS
 // change is refused too. Only the endpoint is checked here; no credential is
-// read.
+// read. Without LabOnly there is no lab check to make, so CheckEndpoint
+// refuses with ErrConfig instead of passing.
 func CheckEndpoint(ctx context.Context, opts Options) error {
 	if !opts.LabOnly {
-		return nil
+		return cfgErr("llm endpoint check: lab-only egress not selected")
 	}
 	d := newLabDialer(opts)
 	if d.socket != "" {
@@ -270,21 +278,27 @@ func printableASCII(s string) bool {
 	return true
 }
 
-// newTransport is the only transport of a Client: no proxy, verified TLS
-// from TLS 1.2, and, with LabOnly, the lab-only dialer.
+// newTransport is the only transport of a Client: no proxy and verified TLS
+// from TLS 1.2. With LabOnly it has the lab-only dialer; otherwise it is a
+// clone of http.DefaultTransport, so it keeps the default dialer and its
+// dial timeout.
 func newTransport(opts Options) *http.Transport {
-	t := &http.Transport{
-		Proxy:                 nil,
-		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: opts.Network.RootCAs},
-		ForceAttemptHTTP2:     true,
-		TLSHandshakeTimeout:   15 * time.Second,
-		MaxIdleConns:          4,
-		IdleConnTimeout:       90 * time.Second,
-		ExpectContinueTimeout: time.Second,
-	}
+	var t *http.Transport
 	if opts.LabOnly {
-		t.DialContext = newLabDialer(opts).dial
+		t = &http.Transport{
+			TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: opts.Network.RootCAs},
+			ForceAttemptHTTP2:     true,
+			TLSHandshakeTimeout:   15 * time.Second,
+			MaxIdleConns:          4,
+			IdleConnTimeout:       90 * time.Second,
+			ExpectContinueTimeout: time.Second,
+			DialContext:           newLabDialer(opts).dial,
+		}
+	} else {
+		t = http.DefaultTransport.(*http.Transport).Clone()
+		t.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: opts.Network.RootCAs}
 	}
+	t.Proxy = nil
 	return t
 }
 
@@ -298,7 +312,9 @@ func readAPIKey(path string) (string, error) {
 	if err != nil {
 		var pe *os.PathError
 		if errors.As(err, &pe) {
-			return "", &Error{msg: "open llm api key file: " + pe.Err.Error()}
+			// The errno is the cause, so errors.Is(err, fs.ErrNotExist) and
+			// fs.ErrPermission hold; the text names no path.
+			return "", &Error{msg: "open llm api key file: " + pe.Err.Error(), cause: pe.Err}
 		}
 		return "", &Error{msg: "open llm api key file"}
 	}

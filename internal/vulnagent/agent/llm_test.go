@@ -41,7 +41,7 @@ func TestLLMCallFailureKeepsAgentSentinelAndText(t *testing.T) {
 		http.Error(w, "upstream says secret", http.StatusInternalServerError)
 	}))
 	defer srv.Close()
-	llm, err := NewLLM(llmclient.Options{BaseURL: srv.URL, Model: "m", AllowPlainHTTP: true, Timeout: 5 * time.Second})
+	llm, err := NewLLM(llmclient.Options{LabOnly: true, BaseURL: srv.URL, Model: "m", AllowPlainHTTP: true, Timeout: 5 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestLLMCallPassesContextErrorThrough(t *testing.T) {
 	}))
 	defer srv.Close()
 	defer close(release)
-	llm, err := NewLLM(llmclient.Options{BaseURL: srv.URL, Model: "m", AllowPlainHTTP: true, Timeout: 5 * time.Second})
+	llm, err := NewLLM(llmclient.Options{LabOnly: true, BaseURL: srv.URL, Model: "m", AllowPlainHTTP: true, Timeout: 5 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}

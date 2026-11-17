@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -60,7 +61,7 @@ func TestKeyFileRejectedUnlessOwnerOnly(t *testing.T) {
 			if err := os.Chmod(p, c.mode); err != nil {
 				t.Fatal(err)
 			}
-			_, err := New(Options{BaseURL: "https://127.0.0.1/v1", Model: "m", Timeout: time.Second, CredentialFile: p})
+			_, err := New(Options{LabOnly: true, BaseURL: "https://127.0.0.1/v1", Model: "m", Timeout: time.Second, CredentialFile: p})
 			if c.ok {
 				if err != nil {
 					t.Fatalf("mode %v rejected: %v", c.mode, err)
@@ -94,6 +95,19 @@ func TestKeyFileMustBeRegularFile(t *testing.T) {
 
 // A FIFO without a writer must be rejected at once: a blocking open would
 // hang the run before the regular-file check could fire.
+// A missing key file keeps the errno of the open, so callers can branch with
+// errors.Is(err, fs.ErrNotExist) as they did before the move.
+func TestKeyFileOpenErrorKeepsErrno(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	_, err := New(Options{LabOnly: true, BaseURL: "https://127.0.0.1/v1", Model: "m", Timeout: time.Second, CredentialFile: missing})
+	if !errors.Is(err, fs.ErrNotExist) || !errors.Is(err, syscall.ENOENT) {
+		t.Fatalf("missing key file: err = %v, want fs.ErrNotExist", err)
+	}
+	if strings.Contains(err.Error(), missing) {
+		t.Errorf("error names the path: %v", err)
+	}
+}
+
 func TestKeyFileFIFORejectedWithoutBlocking(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "fifo")
 	if err := syscall.Mkfifo(p, 0o600); err != nil {
@@ -205,7 +219,7 @@ func TestChatSendsJSONSchema(t *testing.T) {
 }
 
 func TestChatRefusesBadJSONSchema(t *testing.T) {
-	c, err := New(Options{BaseURL: "https://127.0.0.1/v1", Model: "m", Timeout: time.Second})
+	c, err := New(Options{LabOnly: true, BaseURL: "https://127.0.0.1/v1", Model: "m", Timeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +294,7 @@ func TestChatHonoursContextDeadline(t *testing.T) {
 	}))
 	defer srv.Close()
 	defer close(release)
-	c, err := New(Options{BaseURL: srv.URL, Model: "m", AllowPlainHTTP: true, Timeout: 5 * time.Second})
+	c, err := New(Options{LabOnly: true, BaseURL: srv.URL, Model: "m", AllowPlainHTTP: true, Timeout: 5 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -355,23 +369,56 @@ func TestNewRejectsBadOptions(t *testing.T) {
 	}
 	// The same values at their limits are accepted, so the rejections above
 	// are the size checks.
-	if _, err := New(Options{BaseURL: longBaseURL(MaxBaseURLBytes), Model: strings.Repeat("m", MaxModelBytes), Timeout: time.Second}); err != nil {
+	if _, err := New(Options{LabOnly: true, BaseURL: longBaseURL(MaxBaseURLBytes), Model: strings.Repeat("m", MaxModelBytes), Timeout: time.Second}); err != nil {
 		t.Fatalf("model and base url at their limits rejected: %v", err)
 	}
 }
 
 func TestNewUsesProxyFreeTransport(t *testing.T) {
-	c, err := New(Options{BaseURL: "https://127.0.0.1/v1", Model: "m", Timeout: time.Second})
+	c, err := New(Options{UnrestrictedEgress: true, BaseURL: "https://127.0.0.1/v1", Model: "m", Timeout: time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tr, ok := c.http.Transport.(*http.Transport); !ok || tr.Proxy != nil || tr.DialContext != nil {
-		t.Fatalf("default transport: %T proxy/dial set", c.http.Transport)
+	tr, ok := c.http.Transport.(*http.Transport)
+	if !ok || tr.Proxy != nil {
+		t.Fatalf("unrestricted transport: %T proxy set", c.http.Transport)
+	}
+	if tr.DialContext == nil {
+		t.Fatal("unrestricted transport has no dialer: the default dial timeout is lost")
+	}
+	def := http.DefaultTransport.(*http.Transport)
+	if tr.TLSHandshakeTimeout != def.TLSHandshakeTimeout || tr.IdleConnTimeout != def.IdleConnTimeout ||
+		tr.MaxIdleConns != def.MaxIdleConns || tr.ExpectContinueTimeout != def.ExpectContinueTimeout {
+		t.Errorf("unrestricted transport differs from the cloned DefaultTransport: %+v", tr)
 	}
 }
 
-func TestCheckEndpointNoopWithoutLabOnly(t *testing.T) {
-	if err := CheckEndpoint(context.Background(), Options{BaseURL: "https://203.0.113.7/v1"}); err != nil {
-		t.Fatalf("lab-only off: %v", err)
+// The zero Options name no egress mode, so they are refused: a caller that
+// forgets the lab-only dialer gets an error, not unrestricted egress.
+func TestEgressModeMustBeNamed(t *testing.T) {
+	base := Options{BaseURL: "https://127.0.0.1/v1", Model: "m", Timeout: time.Second}
+	both := base
+	both.LabOnly, both.UnrestrictedEgress = true, true
+	for name, o := range map[string]Options{"zero value": base, "both modes": both} {
+		if _, err := New(o); !errors.Is(err, ErrConfig) {
+			t.Errorf("%s: err = %v, want ErrConfig", name, err)
+		}
+	}
+	if _, err := New(Options{LabOnly: true, BaseURL: "https://127.0.0.1/v1", Model: "m", Timeout: time.Second}); err != nil {
+		t.Fatalf("lab-only refused: %v", err)
+	}
+}
+
+// CheckEndpoint is a lab-address check. Without LabOnly it has nothing to
+// check, so it refuses instead of passing silently.
+func TestCheckEndpointRefusesWithoutLabOnly(t *testing.T) {
+	for name, o := range map[string]Options{
+		"zero value":        {BaseURL: "https://203.0.113.7/v1"},
+		"unrestricted":      {UnrestrictedEgress: true, BaseURL: "https://203.0.113.7/v1"},
+		"unrestricted, lab": {UnrestrictedEgress: true, BaseURL: "https://127.0.0.1/v1"},
+	} {
+		if err := CheckEndpoint(context.Background(), o); !errors.Is(err, ErrConfig) {
+			t.Errorf("%s: err = %v, want ErrConfig", name, err)
+		}
 	}
 }
