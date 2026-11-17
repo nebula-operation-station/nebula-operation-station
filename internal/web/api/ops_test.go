@@ -619,7 +619,7 @@ func FuzzOpsNoteBody(f *testing.F) {
 	f.Add(noteBody(g.Key, g.Digest, "package.install_security", opsHost))
 	f.Add(`{"kind":"fix"}`)
 	f.Add(`{"kind":"fix","ref":"x","digest":"y","steps":[{"action_id":"a","host_id":"b"}]}`)
-	f.Add(`{"kind":"summary","ref":"2026-11-17","digest":"x","text":"‮"}`)
+	f.Add("{\"kind\":\"summary\",\"ref\":\"2026-11-17\",\"digest\":\"x\",\"text\":\"\\u202e\"}")
 	f.Add("\xff\xfe")
 	f.Fuzz(func(t *testing.T, body string) {
 		if len(body) > 2*opsnotes.MaxNoteBytes {
