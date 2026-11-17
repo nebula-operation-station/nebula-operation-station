@@ -139,3 +139,90 @@ func TestCheckMasksEntry(t *testing.T) {
 		t.Fatalf("Check = %v, want ErrIPAMNetwork", err)
 	}
 }
+
+// TestCheckMappedRefusalCoversIPv4Entry confirms a refusal written in
+// IPv4-mapped form (::ffff:a.b.c.d/128 and friends) still refuses the IPv4
+// entry it denotes, in every refusal set (ADR 0012 D7). Before the fix the
+// mapped rule was in another address family and never matched.
+func TestCheckMappedRefusalCoversIPv4Entry(t *testing.T) {
+	tests := []struct {
+		name  string
+		set   string // which Refusals field receives the mapped rule
+		rule  string
+		entry string
+		want  error
+	}{
+		{"IPAM mapped /120 refuses contained v4", "IPAM", "::ffff:81.10.0.0/120", "81.10.0.7", ErrIPAMNetwork},
+		{"IPAM mapped /120 refuses containing v4", "IPAM", "::ffff:81.10.0.0/120", "81.10.0.0/16", ErrIPAMNetwork},
+		{"IPAM mapped /120 neighbour allowed", "IPAM", "::ffff:81.10.0.0/120", "81.10.1.0", nil},
+		{"NOS path mapped host refuses v4 host", "NOSPath", "::ffff:81.20.0.5/128", "81.20.0.5", ErrNOSPath},
+		{"NOS path mapped host neighbour allowed", "NOSPath", "::ffff:81.20.0.5/128", "81.20.0.6", nil},
+		{"firewall mapped host refuses v4 host", "FirewallAddresses", "::ffff:81.30.0.1/128", "81.30.0.1", ErrFirewallAddress},
+		{"firewall mapped host refuses containing v4", "FirewallAddresses", "::ffff:81.30.0.1/128", "81.30.0.0/24", ErrFirewallAddress},
+		{"protected mapped /112 refuses contained v4", "ProtectedTargets", "::ffff:81.40.0.0/112", "81.40.200.0/24", ErrProtectedTarget},
+		{"protected mapped /112 refuses containing v4", "ProtectedTargets", "::ffff:81.40.0.0/112", "81.40.0.0/15", ErrProtectedTarget},
+		{"protected mapped /112 just outside allowed", "ProtectedTargets", "::ffff:81.40.0.0/112", "81.41.0.0/16", nil},
+		{"mapped /96 refuses every IPv4 entry", "IPAM", "::ffff:0:0/96", "80.0.0.1", ErrIPAMNetwork},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var r Refusals
+			rule := []netip.Prefix{netip.MustParsePrefix(tt.rule)}
+			switch tt.set {
+			case "IPAM":
+				r.IPAM = rule
+			case "NOSPath":
+				r.NOSPath = rule
+			case "FirewallAddresses":
+				r.FirewallAddresses = rule
+			case "ProtectedTargets":
+				r.ProtectedTargets = rule
+			default:
+				t.Fatalf("unknown set %q", tt.set)
+			}
+			err := Check(pfx(tt.entry), r)
+			if tt.want == nil {
+				if err != nil {
+					t.Fatalf("Check(%s) = %v, want nil", tt.entry, err)
+				}
+				return
+			}
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("Check(%s) = %v, want %v", tt.entry, err, tt.want)
+			}
+		})
+	}
+}
+
+// TestCheckRejectsInvalidMappedRefusal ensures a mapped refusal that cannot
+// be read as an IPv4 prefix (shorter than /96) fails closed in every set.
+func TestCheckRejectsInvalidMappedRefusal(t *testing.T) {
+	tests := []struct {
+		name string
+		rule string
+	}{
+		{"mapped /95 refused", "::ffff:0:0/95"},
+		{"mapped /80 refused", "::ffff:81.0.0.0/80"},
+		{"mapped /0 refused", "::ffff:0:0/0"},
+	}
+	sets := []struct {
+		name string
+		set  func(r *Refusals, p []netip.Prefix)
+	}{
+		{"IPAM", func(r *Refusals, p []netip.Prefix) { r.IPAM = p }},
+		{"NOSPath", func(r *Refusals, p []netip.Prefix) { r.NOSPath = p }},
+		{"FirewallAddresses", func(r *Refusals, p []netip.Prefix) { r.FirewallAddresses = p }},
+		{"ProtectedTargets", func(r *Refusals, p []netip.Prefix) { r.ProtectedTargets = p }},
+	}
+	for _, tt := range tests {
+		for _, s := range sets {
+			t.Run(tt.name+" in "+s.name, func(t *testing.T) {
+				var r Refusals
+				s.set(&r, []netip.Prefix{netip.MustParsePrefix(tt.rule)})
+				if err := Check(pfx("80.0.0.1"), r); !errors.Is(err, ErrInvalidRefusal) {
+					t.Fatalf("Check = %v, want ErrInvalidRefusal", err)
+				}
+			})
+		}
+	}
+}
