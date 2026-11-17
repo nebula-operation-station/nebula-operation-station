@@ -18,11 +18,13 @@ import (
 )
 
 // fuzzSeeds are the hand-picked inputs of export_test.go, used as seeds.
+// Unicode spaces and bidi controls are built from code points so that the
+// source stays free of invisible characters.
 var fuzzSeeds = []string{
 	"=HYPERLINK(\"http://evil\")", "+1+1", "-2+3", "@SUM(A1)", "\tcmd", "\rcmd",
-	" =1+1", "  +cmd", " =HYPERLINK(\"x\")", "　@SUM(A1)", " \t-2+3",
-	"GHSA-x\n‮y", "a\x00b\xff", "<script>alert(1)</script>", " openssl",
-	"CVE-2026-0001", strings.Repeat("A", 300), " =x", "‮=x", "",
+	" =1+1", "  +cmd", string(rune(0x00a0)) + "=HYPERLINK(\"x\")", string(rune(0x3000)) + "@SUM(A1)", " \t-2+3",
+	"GHSA-x\n" + string(rune(0x202e)) + "y", "a\x00b\xff", "<script>alert(1)</script>", " openssl",
+	"CVE-2026-0001", strings.Repeat("A", 300), string(rune(0x2028)) + "=x", string(rune(0x202e)) + "=x", "",
 }
 
 // fuzzFinding builds an exported finding from fuzzed feed fields.
