@@ -5,6 +5,7 @@ package edl
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"net/netip"
 	"slices"
 	"strings"
@@ -229,6 +230,79 @@ func TestCheckRejectsInvalidMappedRefusal(t *testing.T) {
 	}
 }
 
+// TestCheckRefusalSpellingDecidesOnMaskedPrefix confirms the result depends on
+// the masked refusal, not on how it is spelled (ADR 0012 D7). A refusal that
+// overlaps ::ffff:0:0/96 without lying inside it must be ErrInvalidRefusal,
+// whether its address is written in the ::ffff: form or the masked form. A
+// refusal inside the range refuses the IPv4 entries it denotes.
+func TestCheckRefusalSpellingDecidesOnMaskedPrefix(t *testing.T) {
+	tests := []struct {
+		name  string
+		rule  string
+		entry string
+		want  error
+	}{
+		// Overlapping ::ffff:0:0/96 without being inside it: fail closed.
+		{"mapped /95 spelled ::ffff:", "::ffff:0:0/95", "80.0.0.1", ErrInvalidRefusal},
+		{"mapped /95 masked form ::fffe:", "::fffe:0:0/95", "80.0.0.1", ErrInvalidRefusal},
+		{"covering /80 refused", "::/80", "80.0.0.1", ErrInvalidRefusal},
+		{"covering /80 refused for IPv6 entry", "::/80", "2606:4700::1111", ErrInvalidRefusal},
+		{"covering /0 refused", "::/0", "80.0.0.1", ErrInvalidRefusal},
+		{"covering /0 refused for IPv6 entry", "::/0", "2606:4700::1111", ErrInvalidRefusal},
+		{"masked ::ffff:0:0/80 spelling refused", "::ffff:0:0/80", "80.0.0.1", ErrInvalidRefusal},
+		// Inside ::ffff:0:0/96: the IPv4 entry it denotes is refused.
+		{"mapped /104 refuses denoted v4 /8", "::ffff:81.0.0.0/104", "81.10.0.7", ErrIPAMNetwork},
+		{"mapped /104 with host bits set refuses denoted v4", "::ffff:81.10.0.7/104", "81.200.0.1", ErrIPAMNetwork},
+		{"mapped /120 with host bits set refuses denoted v4", "::ffff:81.10.0.7/120", "81.10.0.9", ErrIPAMNetwork},
+		{"mapped /96 refuses every IPv4 entry", "::ffff:0:0/96", "80.0.0.1", ErrIPAMNetwork},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := Refusals{IPAM: []netip.Prefix{netip.MustParsePrefix(tt.rule)}}
+			err := Check(pfx(tt.entry), r)
+			if tt.want == nil {
+				if err != nil {
+					t.Fatalf("Check(%s) = %v, want nil", tt.entry, err)
+				}
+				return
+			}
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("Check(%s) = %v, want %v", tt.entry, err, tt.want)
+			}
+		})
+	}
+}
+
+// TestCheckEquivalentMappedSpellingsGiveSameResult pairs each mapped refusal
+// with its IPv4 equivalent and requires identical results for a set of
+// entries. The mapped spelling must never silently change the outcome.
+func TestCheckEquivalentMappedSpellingsGiveSameResult(t *testing.T) {
+	pairs := []struct {
+		mapped, plain string
+	}{
+		{"::ffff:81.10.0.0/120", "81.10.0.0/24"},
+		{"::ffff:81.10.0.7/120", "81.10.0.0/24"},
+		{"::ffff:81.0.0.0/104", "81.0.0.0/8"},
+		{"::ffff:0:0/96", "0.0.0.0/0"},
+	}
+	entries := []string{"81.10.0.7", "81.10.0.0/16", "81.0.0.0/7", "81.200.0.1", "80.0.0.1", "82.0.0.1"}
+	for _, pr := range pairs {
+		for _, e := range entries {
+			t.Run(pr.mapped+" vs "+pr.plain+" for "+e, func(t *testing.T) {
+				mapped := Refusals{IPAM: []netip.Prefix{netip.MustParsePrefix(pr.mapped)}}
+				plain := Refusals{IPAM: []netip.Prefix{netip.MustParsePrefix(pr.plain)}}
+				gotM := Check(pfx(e), mapped)
+				gotP := Check(pfx(e), plain)
+				// Errors name the masked entry and the sentinel, so equal
+				// outcomes give equal text; nil gives "<nil>".
+				if fmt.Sprint(gotM) != fmt.Sprint(gotP) {
+					t.Fatalf("mapped %s gives %v, plain %s gives %v", pr.mapped, gotM, pr.plain, gotP)
+				}
+			})
+		}
+	}
+}
+
 // fuzzPrefix parses a CIDR or a bare address. ok is false for malformed input.
 func fuzzPrefix(s string) (netip.Prefix, bool) {
 	if p, err := netip.ParsePrefix(s); err == nil {
@@ -280,18 +354,25 @@ func (s rangeSpan) overlaps(o rangeSpan) bool {
 	return bytes.Compare(s.lo[:], o.hi[:]) <= 0 && bytes.Compare(o.lo[:], s.hi[:]) <= 0
 }
 
-// oracleRefusalSpan returns the span a refusal covers, applying the IPv4-mapped
-// rule independently of normalize. ok is false for a refusal that must be
-// ErrInvalidRefusal.
+// mappedSpan is the span of ::ffff:0:0/96, the IPv4-mapped IPv6 range.
+var mappedSpan = spanOf(netip.MustParseAddr("::ffff:0:0"), 96)
+
+// oracleRefusalSpan returns the span a refusal covers. It decides by range
+// arithmetic, not by Is4In6 or Unmap: a refusal whose span intersects
+// ::ffff:0:0/96 must lie inside it, or it is invalid (ok false). A refusal
+// inside the range denotes the IPv4 span of its last 32 bits, so the IPv4
+// entries it covers are the ones it refuses.
 func oracleRefusalSpan(p netip.Prefix) (rangeSpan, bool) {
-	a := p.Addr()
-	if a.Is4In6() {
-		if p.Bits() < 96 {
-			return rangeSpan{}, false
-		}
-		return spanOf(a.Unmap(), p.Bits()-96), true
+	s := spanOf(p.Addr(), p.Bits())
+	if s.v4 || !s.overlaps(mappedSpan) {
+		return s, true
 	}
-	return spanOf(a, p.Bits()), true
+	if bytes.Compare(mappedSpan.lo[:], s.lo[:]) > 0 || bytes.Compare(s.hi[:], mappedSpan.hi[:]) > 0 {
+		return rangeSpan{}, false // overlaps the mapped range without lying inside it
+	}
+	var v4 [4]byte
+	copy(v4[:], s.lo[12:16])
+	return spanOf(netip.AddrFrom4(v4), p.Bits()-96), true
 }
 
 // FuzzCheck compares Check with a range-based oracle for arbitrary entries and
@@ -307,6 +388,9 @@ func FuzzCheck(f *testing.F) {
 	f.Add("81.40.200.0/24", "", "", "", "::ffff:81.40.0.0/112")
 	f.Add("80.0.0.1", "::ffff:0:0/96", "", "", "")
 	f.Add("80.0.0.1", "::ffff:0:0/95", "", "", "")
+	f.Add("80.0.0.1", "::fffe:0:0/95", "", "", "")
+	f.Add("80.0.0.1", "::/80", "", "", "")
+	f.Add("80.0.0.1", "::ffff:81.0.0.0/104", "", "", "")
 	f.Add("2606:4700::1111", "::/0", "fe80::/10", "", "")
 	f.Add("::ffff:81.0.1.5", "81.0.0.0/8", "", "", "")
 	f.Add("10.1.2.3/8", "", "", "", "")

@@ -116,11 +116,16 @@ func Check(entry netip.Prefix, r Refusals) error {
 // IPv4 address in IPv4-mapped IPv6 form.
 const mappedPrefixBits = 96
 
+// mappedRange is ::ffff:0:0/96, the IPv4-mapped IPv6 range.
+var mappedRange = netip.MustParsePrefix("::ffff:0:0/96")
+
 // normalize returns a copy of r in which every refusal is an IPv4 or IPv6
-// prefix in masked form. A refusal in IPv4-mapped form, ::ffff:a.b.c.d/(96+n),
+// prefix in masked form. A refusal inside ::ffff:0:0/96, ::ffff:a.b.c.d/(96+n),
 // becomes a.b.c.d/n, so it refuses the IPv4 entry it denotes (ADR 0012 D7).
-// A mapped prefix shorter than /96 and a prefix with a zone cannot be read as
-// an IPv4 range, so both are ErrInvalidRefusal. The input slices are not
+// A refusal that overlaps ::ffff:0:0/96 without lying inside it, such as
+// ::ffff:0:0/95, ::fffe:0:0/95, ::/80 or ::/0, cannot be read as an IPv4 range
+// and is ErrInvalidRefusal. The decision is made on the masked prefix, so the
+// spelling of an address does not change the result. The input slices are not
 // modified.
 func (r Refusals) normalize() (Refusals, error) {
 	var out Refusals
@@ -161,16 +166,18 @@ func normalizeRefusal(p netip.Prefix) (netip.Prefix, error) {
 	if !p.IsValid() {
 		return netip.Prefix{}, ErrInvalidRefusal
 	}
-	if p.Addr().Zone() != "" {
-		return netip.Prefix{}, fmt.Errorf("%w: zone in %s", ErrInvalidRefusal, p)
+	// Decide on the masked prefix: the same network must give the same result
+	// whatever the spelling of its address (host bits, ::ffff: form or not).
+	m := p.Masked()
+	if !overlaps(m, mappedRange) {
+		return m, nil
 	}
-	if p.Addr().Is4In6() {
-		if p.Bits() < mappedPrefixBits {
-			return netip.Prefix{}, fmt.Errorf("%w: mapped prefix %s is shorter than /%d", ErrInvalidRefusal, p, mappedPrefixBits)
-		}
-		return netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-mappedPrefixBits).Masked(), nil
+	// m overlaps the mapped range. It is usable only when it lies inside it:
+	// the base address is in the range and the prefix is at least /96.
+	if !mappedRange.Contains(m.Addr()) || m.Bits() < mappedPrefixBits {
+		return netip.Prefix{}, fmt.Errorf("%w: %s overlaps the IPv4-mapped range %s but does not lie inside it", ErrInvalidRefusal, m, mappedRange)
 	}
-	return p.Masked(), nil
+	return netip.PrefixFrom(m.Addr().Unmap(), m.Bits()-mappedPrefixBits).Masked(), nil
 }
 
 // firstOverlap reports whether e overlaps any prefix in set.
