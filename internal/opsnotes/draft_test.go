@@ -331,7 +331,7 @@ func TestValidateRejectsMalformedNotes(t *testing.T) {
 // carries none of the model's field names or values: they reach logs and
 // HTTP errors and are untrusted (ADR 0016 D6).
 func TestDecodeErrorsDoNotEchoModelText(t *testing.T) {
-	const secret = "zzEVIL‮"
+	secret := "zzEVIL" + string(rune(0x202E))
 	inputs := []string{
 		`{"kind":"fix","` + secret + `":1}`,
 		`{"kind":"fix","ref":"` + secret + `","digest":5}`,
@@ -343,7 +343,7 @@ func TestDecodeErrorsDoNotEchoModelText(t *testing.T) {
 		if err == nil {
 			t.Fatalf("Decode(%q) succeeded", in)
 		}
-		if strings.Contains(err.Error(), "zzEVIL") || strings.ContainsRune(err.Error(), '‮') {
+		if strings.Contains(err.Error(), "zzEVIL") || strings.ContainsRune(err.Error(), 0x202E) {
 			t.Errorf("Decode error echoes model text: %q", err.Error())
 		}
 	}
