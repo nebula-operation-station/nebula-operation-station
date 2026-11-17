@@ -73,6 +73,19 @@ func TestOnlyDistinctExactSKUsDiffer(t *testing.T) {
 		{"letters only", "PA-ABC", "PA-440", false},
 		{"over-long SKU", "C9300-" + strings.Repeat("A", MaxExactSKULen), "C9300-24T", false},
 		{"equal", "PA-440", "PA-440", false},
+		// Series designations written like SKUs are coverage gaps, never a
+		// distinct model: a round PAN-OS series name ends in 00, and a Cisco
+		// SKU without its type letter is a family or port count.
+		{"PAN-OS series PA-400 vs PA-440: gap", "PA-400", "PA-440", false},
+		{"PAN-OS series PA-5400 vs PA-5450: gap", "PA-5400", "PA-5450", false},
+		{"PAN-OS device is the series: gap", "PA-440", "PA-400", false},
+		{"Catalyst port count vs SKU: gap", "C9300-24", "C9300-24T", false},
+		{"Catalyst SKU vs port count of the device: gap", "C9300-24T", "C9300-24", false},
+		{"PAN-OS distinct appliance still differs", "PA-3220", "PA-440", true},
+		{"Catalyst sibling SKUs still differ", "C9300-48T", "C9300-24T", true},
+		{"unknown vendor scheme: gap", "FOO-12A", "FOO-34B", false},
+		{"mixed schemes: gap", "CBS350-8T", "PA-440", false},
+		{"prefix of the other SKU: gap", "CBS350-24P", "CBS350-24PX", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

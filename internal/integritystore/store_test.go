@@ -264,7 +264,7 @@ func TestEscapePathKeepsPrintableUTF8AndEscapesTheRest(t *testing.T) {
 		want string
 	}{
 		{"ascii", []byte("/etc/hosts"), "/etc/hosts"},
-		{"backslash", []byte(`/etc/a\b`), `/etc/a\\b`},
+		{"backslash", []byte(`/etc/a\b`), `/etc/a\x5cb`},
 		{"newline", []byte("/etc/a\nb"), `/etc/a\x0ab`},
 		{"invalid byte", []byte{'/', 0xff}, `/\xff`},
 		{"truncated multibyte", []byte{'/', 0xc3}, `/\xc3`},

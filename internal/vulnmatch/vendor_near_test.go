@@ -26,6 +26,9 @@ var nearCases = []nearCase{
 	{"version word in model", "vendor:paloalto:panos", FeedPaloAltoCSAF, "PA-440", "PA-440 10.2.9", "10.2.9", "10.2.10"},
 	{"longer SKU of the device", "vendor:cisco:cbs", FeedCiscoCSAF, "CBS350-24P", "CBS350-24P-4G", "3.4.0.17", "3.4.1.3"},
 	{"shorter SKU of the device", "vendor:cisco:cbs", FeedCiscoCSAF, "CBS350-24P-4G", "CBS350-24P", "3.4.0.17", "3.4.1.3"},
+	// "PA-44" is no complete PAN-OS SKU (two digits): it cannot be proven
+	// another model, so it is a coverage gap (fail closed).
+	{"shorter number, not a complete SKU", "vendor:paloalto:panos", FeedPaloAltoCSAF, "PA-440", "PA-44", "10.2.9", "10.2.10"},
 }
 
 // otherModelCases name another model that shares no word run with the
@@ -33,7 +36,6 @@ var nearCases = []nearCase{
 // them, so it is not affected by that vulnerability (decision for PR #606,
 // option a).
 var otherModelCases = []nearCase{
-	{"shorter number", "vendor:paloalto:panos", FeedPaloAltoCSAF, "PA-440", "PA-44", "10.2.9", "10.2.10"},
 	{"other model of the vendor", "vendor:paloalto:panos", FeedPaloAltoCSAF, "PA-440", "PA-220", "10.2.9", "10.2.10"},
 	{"sibling SKU of the family", "vendor:cisco:cbs", FeedCiscoCSAF, "CBS350-24P", "CBS350-8T", "3.4.0.17", "3.4.1.3"},
 }
