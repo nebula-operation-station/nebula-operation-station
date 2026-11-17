@@ -55,8 +55,10 @@ type argSpec struct {
 	exact map[string]bool
 	// operands allows words that are not options.
 	operands bool
-	// anyArgs accepts every argument. It is used only for programs that,
-	// with any option, only stat files or read /proc (see the ADR table).
+	// anyArgs accepts every option and operand. It is used only for programs
+	// that, with any option, only stat files or read /proc (see the ADR
+	// table). Their operands are still checked when opensFiles is set, so an
+	// anyArgs rule must set it.
 	anyArgs bool
 }
 
@@ -142,6 +144,16 @@ func (r allowRule) harmless(args []string) bool {
 // value or operand.
 func (sp argSpec) accepts(args []string, opensFiles bool) bool {
 	if sp.anyArgs {
+		if !opensFiles {
+			return true
+		}
+		// Every word is checked, options included: an option value can name
+		// a special file too, and the program may open it.
+		for _, w := range args {
+			if namesSpecialFile(w) {
+				return false
+			}
+		}
 		return true
 	}
 	_, ok := sp.scan(args, false, opensFiles)
@@ -344,8 +356,16 @@ var ipShow = argSpec{operands: true}
 
 // allowlist is the V6 allowlist of ADR 0014, keyed by the bare program name.
 var allowlist = map[string]allowRule{
-	"ls": {why: "only stats files; no option writes, deletes or runs anything", spec: argSpec{anyArgs: true}},
-	"df": {why: "only reads file system statistics; no option writes or runs anything", spec: argSpec{anyArgs: true}},
+	"ls": {
+		why:        "only stats files; no option writes, deletes or runs anything; operands follow the opens-files rule",
+		opensFiles: true,
+		spec:       argSpec{anyArgs: true},
+	},
+	"df": {
+		why:        "only reads file system statistics; df opens each operand, so operands follow the opens-files rule",
+		opensFiles: true,
+		spec:       argSpec{anyArgs: true},
+	},
 	"du": {
 		why: "only stats files; not --files0-from or -X/--exclude-from, which open a file",
 		spec: argSpec{
@@ -362,9 +382,21 @@ var allowlist = map[string]allowRule{
 			operands: true,
 		},
 	},
-	"free":   {why: "only reads /proc/meminfo; no option writes or runs anything", spec: argSpec{anyArgs: true}},
-	"uptime": {why: "only reads /proc; no option writes or runs anything", spec: argSpec{anyArgs: true}},
-	"ps":     {why: "only reads /proc; no option writes or runs anything", spec: argSpec{anyArgs: true}},
+	"free": {
+		why:        "only reads /proc/meminfo; no option writes or runs anything; operands follow the opens-files rule",
+		opensFiles: true,
+		spec:       argSpec{anyArgs: true},
+	},
+	"uptime": {
+		why:        "only reads /proc; no option writes or runs anything; operands follow the opens-files rule",
+		opensFiles: true,
+		spec:       argSpec{anyArgs: true},
+	},
+	"ps": {
+		why:        "only reads /proc; no option writes or runs anything; operands follow the opens-files rule",
+		opensFiles: true,
+		spec:       argSpec{anyArgs: true},
+	},
 	"cat": {
 		why:        "reads its operands and writes only to stdout",
 		opensFiles: true,
