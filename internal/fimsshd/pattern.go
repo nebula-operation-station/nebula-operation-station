@@ -120,19 +120,26 @@ func (s seg) matchName(name string, sc *scratch) bool {
 // pass finds the first live position, and the run fills every later one. A
 // literal is not linear: it is compared at each live position, which costs up
 // to len(name) × len(lit) byte compares, so no bound below the budget is
-// claimed for it. Each piece is therefore charged against matchBudget before
-// its work, and a piece that does not fit ends the match as indeterminate
-// (the caller sees sc.over and answers SSHFile). The number of pieces is
-// capped by maxPiecesPerComponent, so no input causes exponential work.
+// claimed for it. Every step is charged against matchBudget, not only the
+// compares: each call clears two buffers of len(name)+1 and each piece clears
+// next and scans cur, so a piece costs at least 2 × (len(name)+1) steps before
+// any compare, and a user run also fills up to len(name)+1 positions. A step
+// that does not fit ends the match as indeterminate (the caller sees sc.over
+// and answers SSHFile). The number of pieces is capped by
+// maxPiecesPerComponent, so no input causes exponential work.
 func matchPieces(ps []piece, name string, sc *scratch) bool {
-	cur, next := sc.buffers(len(name) + 1)
+	n := len(name) + 1
+	if !sc.spend(2 * n) { // buffers: clear cur and next
+		return false
+	}
+	cur, next := sc.buffers(n)
 	cur[0] = true
 	for _, p := range ps {
+		if !sc.spend(2 * n) { // clear next, scan cur
+			return false
+		}
 		clear(next)
 		if p.user {
-			if !sc.spend(len(name) + 1) {
-				return false
-			}
 			first := -1
 			for j, ok := range cur {
 				if ok {
@@ -141,6 +148,9 @@ func matchPieces(ps []piece, name string, sc *scratch) bool {
 				}
 			}
 			if first >= 0 {
+				if !sc.spend(n) { // fill the live run
+					return false
+				}
 				for k := first + p.min; k <= len(name); k++ {
 					next[k] = true
 				}

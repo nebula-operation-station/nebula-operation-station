@@ -22,6 +22,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/discoveryjob"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/ipam"
@@ -538,20 +540,31 @@ func (m *matcher) classify(r *Row) {
 	}
 }
 
+// Limits that ipam enforces on assets (its maxName and maxNotes); the
+// import shapes what it creates to fit them.
+const (
+	maxAssetName = 128
+	maxAssetNote = 2000
+	maxAssetID   = 56 // leaves room for a "-N" suffix within ipam's 63
+)
+
 var idChars = regexp.MustCompile(`[^a-z0-9._-]+`)
 
-// assetID derives a free asset ID from the hostname or the address.
+// assetID derives a free asset ID from the hostname or the address. The
+// result always matches ipam's ID pattern (lowercase, starts with a letter
+// or digit, at most 63 characters).
 func (m *matcher) assetID(r Row) string {
 	base := ""
 	if r.Hostname != "" {
-		base, _, _ = strings.Cut(r.Hostname, ".")
-		base = strings.Trim(idChars.ReplaceAllString(base, "-"), "-._")
+		label, _, _ := strings.Cut(strings.ToLower(r.Hostname), ".")
+		base = strings.Trim(idChars.ReplaceAllString(label, "-"), "-._")
 	}
 	if base == "" {
-		base = "ip-" + strings.NewReplacer(".", "-", ":", "-").Replace(r.Address)
+		addr := strings.NewReplacer(".", "-", ":", "-").Replace(strings.ToLower(r.Address))
+		base = strings.Trim(idChars.ReplaceAllString("ip-"+addr, "-"), "-._")
 	}
-	if len(base) > 56 {
-		base = strings.TrimRight(base[:56], "-._")
+	if len(base) > maxAssetID {
+		base = strings.TrimRight(base[:maxAssetID], "-._")
 	}
 	id := base
 	for i := 2; m.ids[id]; i++ {
@@ -637,11 +650,7 @@ func (s *Store) Import(ctx context.Context, user, id string, addresses []string,
 				asset.Hostname = r.Hostname
 			}
 		default:
-			name := r.Hostname
-			if name == "" {
-				name = r.Address
-			}
-			asset = ipam.Asset{ID: m.assetID(r), Name: name, Kind: ipam.KindUnknown, Hostname: r.Hostname, MAC: r.MAC,
+			asset = ipam.Asset{ID: m.assetID(r), Name: assetName(r), Kind: ipam.KindUnknown, Hostname: r.Hostname, MAC: r.MAC,
 				HostID: r.MatchHost, Addresses: []netip.Addr{ad}, Notes: noteFor(r)}
 			created = true
 		}
@@ -682,6 +691,36 @@ func containsAddr(list []netip.Addr, a netip.Addr) bool {
 	return false
 }
 
+// assetName is the display name of a new asset: the hostname, cut to
+// ipam's name limit at a rune boundary, or the address when there is none.
+// The full hostname is kept in the asset's Hostname field.
+func assetName(r Row) string {
+	name := plainText(r.Hostname, maxAssetName)
+	if name == "" {
+		name = plainText(r.Address, maxAssetName)
+	}
+	return name
+}
+
+// plainText returns s as printable text of at most max bytes: control,
+// format and white-space characters become spaces (ipam rejects them in
+// names and notes), and the text is cut at a rune boundary.
+func plainText(s string, max int) string {
+	var b strings.Builder
+	for _, c := range s {
+		if unicode.IsControl(c) || unicode.Is(unicode.Cf, c) || unicode.IsSpace(c) {
+			c = ' '
+		}
+		if b.Len()+utf8.RuneLen(c) > max {
+			break
+		}
+		b.WriteRune(c)
+	}
+	return strings.TrimSpace(b.String())
+}
+
+// noteFor is the note of a new asset: what discovery saw, as plain text
+// within ipam's note limit.
 func noteFor(r Row) string {
 	var parts []string
 	if r.Vendor != "" {
@@ -702,7 +741,7 @@ func noteFor(r Row) string {
 	if len(parts) == 0 {
 		return "found by discovery"
 	}
-	return "found by discovery: " + strings.Join(parts, "; ")
+	return plainText("found by discovery: "+strings.Join(parts, "; "), maxAssetNote)
 }
 
 // --- schedules ---
