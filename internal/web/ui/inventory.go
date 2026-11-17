@@ -555,6 +555,9 @@ func (e *duplicateEndpointError) Error() string {
 // touched: tag values must not look like pasted host keys, and an
 // endpoint used by another host needs a confirmation.
 func (h *Handler) checkHostRequest(ctx context.Context, in hostRequest, host inventory.Host) error {
+	if len(host.Endpoints) > inventory.MaxEditableEndpoints {
+		return fmt.Errorf("a host has at most %d endpoints (primary and alternates)", inventory.MaxEditableEndpoints)
+	}
 	for _, v := range host.Tags {
 		if err := validateTagValue(v); err != nil {
 			return err
@@ -783,6 +786,12 @@ func (h *Handler) handleHostFormUpdate(w http.ResponseWriter, r *http.Request) {
 		h.finishHostUpdate(w, r, in, host, jsonIn)
 		return
 	}
+	// The Endpoints section (hosts_endpoints.go) posts single endpoint
+	// edits to this route, marked by endpoint_op.
+	if err := r.ParseForm(); err == nil && r.PostForm.Has("endpoint_op") {
+		h.handleHostEndpointEdit(w, r)
+		return
+	}
 	if err := readHostForm(r, &in); err != nil {
 		http.Redirect(w, r, "/hosts/"+urlEscape(in.ID)+"?tab=settings", http.StatusSeeOther)
 		return
@@ -815,7 +824,11 @@ func (h *Handler) finishHostUpdate(w http.ResponseWriter, r *http.Request, in ho
 		http.Redirect(w, r, "/hosts/"+urlEscape(in.ID)+"?tab=settings&warn="+urlEscape(err.Error()), http.StatusSeeOther)
 		return
 	}
-	if _, err := h.inventory.Update(ctx, host); err != nil {
+	// The stored endpoint order before the update, for the audit line
+	// of an endpoint change (best effort: a failed read logs no diff).
+	prev, prevErr := h.inventory.Get(ctx, host.ID)
+	updated, err := h.inventory.Update(ctx, host)
+	if err != nil {
 		if jsonIn {
 			h.answerStoreError(w, "update host", host.ID, err)
 			return
@@ -824,6 +837,9 @@ func (h *Handler) finishHostUpdate(w http.ResponseWriter, r *http.Request, in ho
 		return
 	}
 	h.audit(r, "host_updated", host.ID)
+	if prevErr == nil && endpointListText(prev.Endpoints) != endpointListText(updated.Endpoints) {
+		h.auditEndpoints(r, "host_endpoints_changed", host.ID, "", inventory.EndpointChange{Before: prev.Endpoints, After: updated.Endpoints})
+	}
 	if jsonIn {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": host.ID})
 		return
