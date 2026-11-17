@@ -109,8 +109,32 @@ type Resolver interface {
 	DocChunkExists(chunkID string) bool
 }
 
+// noteKeys lists the keys each object of a note may carry, by its path: ""
+// is the note, "steps[]" one step. An object at any other path is refused.
+// Keys match exactly; encoding/json would fold case and so is not trusted
+// with the key set on its own.
+var noteKeys = map[string]map[string]bool{
+	"": {
+		"kind": true, "ref": true, "digest": true, "summary": true, "text": true,
+		"urgency": true, "steps": true, "mitigations": true, "citations": true,
+	},
+	"steps[]": {"action_id": true, "host_id": true, "why": true},
+}
+
+// Fixed error texts. They name no model-supplied field or value: a refused
+// note's error may reach logs and HTTP responses.
+var (
+	errNoteSyntax    = fmt.Errorf("note: not well-formed JSON: %w", ErrDecode)
+	errNoteNotObject = fmt.Errorf("note: not a JSON object: %w", ErrDecode)
+	errNoteTrailing  = fmt.Errorf("note: trailing data after the object: %w", ErrDecode)
+	errNoteKey       = fmt.Errorf("note: field not allowed at this position: %w", ErrDecode)
+	errNoteDuplicate = fmt.Errorf("note: duplicate field: %w", ErrDecode)
+	errNoteShape     = fmt.Errorf("note: value does not match the note schema: %w", ErrDecode)
+)
+
 // Decode parses one strict JSON note: at most MaxNoteBytes, valid UTF-8,
-// exactly one object, no unknown fields at any depth.
+// exactly one object, exact-case keys from noteKeys, no duplicate keys, and
+// no unknown fields at any depth. Its errors never echo the input.
 func Decode(data []byte) (Draft, error) {
 	if len(data) > MaxNoteBytes {
 		return Draft{}, fmt.Errorf("note: %d bytes, max %d: %w", len(data), MaxNoteBytes, ErrLimit)
@@ -118,16 +142,103 @@ func Decode(data []byte) (Draft, error) {
 	if !utf8.Valid(data) {
 		return Draft{}, fmt.Errorf("note: not valid UTF-8: %w", ErrDecode)
 	}
+	if err := checkKeys(data); err != nil {
+		return Draft{}, err
+	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
 	var d Draft
 	if err := dec.Decode(&d); err != nil {
-		return Draft{}, fmt.Errorf("note: %v: %w", err, ErrDecode)
+		return Draft{}, errNoteShape
 	}
 	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return Draft{}, fmt.Errorf("note: trailing data after the object: %w", ErrDecode)
+		return Draft{}, errNoteTrailing
 	}
 	return d, nil
+}
+
+// checkKeys walks the tokens of one JSON object and refuses any key that is
+// not in noteKeys for its position, any repeated key within one object, and
+// any other shape at the top level. The walk does not use the decoded values.
+func checkKeys(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	tok, err := dec.Token()
+	if err != nil {
+		return errNoteSyntax
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+		return errNoteNotObject
+	}
+	if err := walkObject(dec, ""); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return errNoteTrailing
+	}
+	return nil
+}
+
+// walkObject checks the members of an object whose '{' was just read. The
+// closing '}' is consumed.
+func walkObject(dec *json.Decoder, path string) error {
+	keys, known := noteKeys[path]
+	seen := make(map[string]bool)
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			return errNoteSyntax
+		}
+		key, ok := tok.(string)
+		if !ok {
+			return errNoteSyntax
+		}
+		if !known || !keys[key] {
+			return errNoteKey
+		}
+		if seen[key] {
+			return errNoteDuplicate
+		}
+		seen[key] = true
+		if err := walkValue(dec, childPath(path, key)); err != nil {
+			return err
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return errNoteSyntax
+	}
+	return nil
+}
+
+// walkValue checks one value at path: an object is checked against noteKeys,
+// an array's items are checked at path+"[]", and a scalar is accepted.
+func walkValue(dec *json.Decoder, path string) error {
+	tok, err := dec.Token()
+	if err != nil {
+		return errNoteSyntax
+	}
+	delim, isDelim := tok.(json.Delim)
+	switch {
+	case isDelim && delim == '{':
+		return walkObject(dec, path)
+	case isDelim && delim == '[':
+		for dec.More() {
+			if err := walkValue(dec, path+"[]"); err != nil {
+				return err
+			}
+		}
+		if _, err := dec.Token(); err != nil {
+			return errNoteSyntax
+		}
+	}
+	return nil
+}
+
+// childPath is the path of the member key of an object at path.
+func childPath(path, key string) string {
+	if path == "" {
+		return key
+	}
+	return path + "." + key
 }
 
 // Validate checks a draft against the bounds of ADR 0016 D6 and D7 and the

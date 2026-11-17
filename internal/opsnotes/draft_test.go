@@ -316,6 +316,28 @@ func TestValidateRejectsMalformedNotes(t *testing.T) {
 	}
 }
 
+// TestDecodeErrorsDoNotEchoModelText checks that a refused note's error
+// carries none of the model's field names or values: they reach logs and
+// HTTP errors and are untrusted (ADR 0016 D6).
+func TestDecodeErrorsDoNotEchoModelText(t *testing.T) {
+	const secret = "zzEVIL‮"
+	inputs := []string{
+		`{"kind":"fix","` + secret + `":1}`,
+		`{"kind":"fix","ref":"` + secret + `","digest":5}`,
+		`{"kind":"fix","ref":"x","summary":"` + secret + `" "x"}`,
+		`{"kind":"fix","ref":"x",` + secret + `}`,
+	}
+	for _, in := range inputs {
+		_, err := Decode([]byte(in))
+		if err == nil {
+			t.Fatalf("Decode(%q) succeeded", in)
+		}
+		if strings.Contains(err.Error(), "zzEVIL") || strings.ContainsRune(err.Error(), '‮') {
+			t.Errorf("Decode error echoes model text: %q", err.Error())
+		}
+	}
+}
+
 func TestDecodeRejectsMalformedJSON(t *testing.T) {
 	ok := `{"kind":"fix","ref":"vu:host1:openssl","digest":"d1","summary":"s","steps":[{"action_id":"package.install_security","host_id":"host1"}]}`
 	tests := []struct {
@@ -332,6 +354,15 @@ func TestDecodeRejectsMalformedJSON(t *testing.T) {
 		{"number for digest", strings.Replace(ok, `"d1"`, `1`, 1), ErrDecode},
 		{"invalid UTF-8 in raw input", strings.Replace(ok, `"s"`, "\"\xff\"", 1), ErrDecode},
 		{"over the request limit", `{"summary":"` + strings.Repeat("a", MaxNoteBytes) + `"}`, ErrLimit},
+		{"capitalised top-level key", strings.Replace(ok, `"kind"`, `"Kind"`, 1), ErrDecode},
+		{"upper-case step key", strings.Replace(ok, `"action_id"`, `"ACTION_ID"`, 1), ErrDecode},
+		{"duplicate steps key", strings.Replace(ok, `"summary"`, `"steps":[],"summary"`, 1), ErrDecode},
+		{"duplicate digest key", strings.Replace(ok, `"summary"`, `"digest":"d2","summary"`, 1), ErrDecode},
+		{"duplicate step key", strings.Replace(ok, `"host_id"`, `"action_id":"service.restart","host_id"`, 1), ErrDecode},
+		{"object instead of mitigation text", `{"kind":"fix","ref":"vu:host1:openssl","digest":"d1","summary":"s","mitigations":[{"text":"x"}]}`, ErrDecode},
+		{"object as summary", `{"kind":"fix","ref":"vu:host1:openssl","digest":"d1","summary":{"a":"b"},"steps":[]}`, ErrDecode},
+		{"null instead of object", `null`, ErrDecode},
+		{"truncated JSON", `{"kind":`, ErrDecode},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
