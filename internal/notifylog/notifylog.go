@@ -7,16 +7,19 @@
 // The log is structured data only: host label, kind, state, reason, the
 // execution ID, a NOS link and counts. It never holds a provider token, a
 // provider target URL or log text. Kind, State, Reason and Outcome are closed
-// sets: a value that is not a code is refused. The host label and the
-// execution ID are free text, cleaned on write (control, bidi and zero-width
-// runes become U+FFFD, line breaks become spaces) and bounded in bytes; a
-// shortened one is marked in Entry.Changed. A link that is not a NOS path, or
-// is too long, is dropped and marked. Nothing is rejected for size, because a
-// log must not lose a message. Time is injected through New, so retention is
-// testable.
+// sets, and the host label and the execution ID have a fixed shape (letters,
+// digits, '.', '_', '-'; see validShape). A value that does not fit is refused
+// with ErrRefused, and the error names the field but never the value, so a
+// refused input cannot leak through an error or a log line that wraps it. A
+// host label or execution ID that fits the shape but is longer than its byte
+// limit is shortened and marked in Entry.Changed; nothing is rejected for size,
+// because a log must not lose a message. A link that is not a NOS path, or is
+// too long, is dropped and marked. Time is injected through New, so retention
+// is testable.
 //
 // The package does not send notifications and is not wired into the server
-// yet; the caller appends after each decision and runs Prune periodically.
+// yet; the caller appends after each decision. Append keeps the table within
+// MaxEntries itself, and Prune removes entries past Retention.
 package notifylog
 
 import (
@@ -26,24 +29,49 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"regexp"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 )
 
 // Retention is how long entries are kept. Prune removes older entries.
 const Retention = 30 * 24 * time.Hour
 
-// MaxEntries is the number of newest entries Prune keeps.
+// MaxEntries is the number of newest entries kept. Append trims the oldest
+// rows beyond it in the same transaction as each insert, so a flood of events
+// cannot grow the table between prune runs.
 const MaxEntries = 5000
+
+// ErrRefused is returned by Append when a field holds a value it may not hold:
+// a value that is not a closed code, or a host label or execution ID with the
+// wrong shape. Callers branch on it with errors.Is. The error names the field;
+// it never includes the value.
+var ErrRefused = errors.New("notifylog: record refused")
+
+// idShapeRe is the shape of a host label and an execution ID: a letter or digit,
+// then letters, digits, '.', '_' or '-'. It admits no spaces, separators, URL
+// or query characters, colons, or non-ASCII, so a bot token or target URL
+// cannot match it. Length is checked separately, against the byte limits.
+var idShapeRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// validShape reports whether s is empty or has the host-label/ID shape.
+func validShape(s string) bool {
+	return s == "" || idShapeRe.MatchString(s)
+}
+
+// refused builds the error for a refused field. why names the field and the
+// rule, and must never contain the input value.
+func refused(why string) error {
+	return fmt.Errorf("%w: append: %s", ErrRefused, why)
+}
 
 // MaxPage is the largest number of entries List returns in one call.
 const MaxPage = 100
 
 // Byte limits for the free-text fields. They match the CHECK constraints in
 // migration 0045_notify_log.sql. Kind, State, Reason and Outcome are closed
-// sets and have no byte limit: they are refused unless they are a code.
+// sets and have no byte limit: they are refused unless they are a code. Host
+// and ExecutionID have a shape (see validShape) and are refused unless they fit.
 const (
 	MaxHost        = 64
 	MaxExecutionID = 128
@@ -193,7 +221,8 @@ func ReasonForError(err error) ReasonCode {
 type Field uint8
 
 // Fields that can be shortened or dropped on write. Kind, State, Reason and
-// Outcome are closed sets and are never changed on write; they are refused.
+// Outcome are closed sets and Host and ExecutionID are shape-checked; a value
+// that does not fit is refused, not changed.
 const (
 	FieldHost Field = 1 << iota
 	FieldExecutionID
@@ -208,7 +237,8 @@ func (f Field) Has(x Field) bool { return f&x != 0 }
 type Record struct {
 	// Kind is the event kind. Append rejects any value that is not a KindCode.
 	Kind KindCode
-	// Host is the host label, not an address.
+	// Host is the host label, not an address. It must match the label shape
+	// (validShape) or Append refuses the record; it is shortened to MaxHost bytes.
 	Host string
 	// State is the event state. Append rejects any value that is not a
 	// StateCode.
@@ -216,7 +246,9 @@ type Record struct {
 	// Reason is a closed reason code. Append rejects any other value. Use
 	// ReasonForError to map a provider error to a code.
 	Reason ReasonCode
-	// ExecutionID is the execution the event belongs to, if any.
+	// ExecutionID is the execution the event belongs to, if any. It must match
+	// the ID shape (validShape) or Append refuses the record; it is shortened
+	// to MaxExecutionID bytes.
 	ExecutionID string
 	// Link is a NOS UI link (a path starting with "/", at most MaxLink bytes).
 	// Anything else is dropped on write, never shortened; see Store.Append.
@@ -258,31 +290,34 @@ func New(db *sql.DB, now func() time.Time) (*Store, error) {
 	return &Store{db: db, now: now}, nil
 }
 
-// Append stores r and returns its sequence number. Host and ExecutionID are
-// cleaned and shortened as described in the package comment. A Link that is
-// not a NOS path (see isNOSLink), or that is longer than MaxLink, is dropped:
-// it is stored empty and marked as changed. An empty Link is no link at all
-// and is not marked. An unknown Kind, State, Outcome or Reason is an error,
-// because it is a caller bug and not a property of the event: a value that is
-// not a code (a URL, a provider message, a token) is refused, so it can never
-// be stored.
+// Append stores r and returns its sequence number. Kind, State, Outcome and
+// Reason must be codes, and Host and ExecutionID must have the label/ID shape;
+// otherwise Append returns an error wrapping ErrRefused that names the field
+// and never the value. Host and ExecutionID longer than their byte limits are
+// shortened and marked in Changed. A Link that is not a NOS path (see
+// isNOSLink), or that is longer than MaxLink, is dropped: it is stored empty
+// and marked as changed. An empty Link is no link at all and is not marked.
+// In the same transaction as the insert, Append removes the oldest rows beyond
+// MaxEntries, so the table stays bounded without a prune run.
 func (s *Store) Append(ctx context.Context, r Record) (int64, error) {
-	if !r.Kind.valid() {
-		return 0, fmt.Errorf("notifylog: append: kind is not an event kind")
-	}
-	if !r.State.valid() {
-		return 0, fmt.Errorf("notifylog: append: state is not a state code")
-	}
-	if !r.Outcome.valid() {
-		return 0, fmt.Errorf("notifylog: append: unknown outcome %q", r.Outcome)
-	}
-	if !r.Reason.valid() {
-		return 0, fmt.Errorf("notifylog: append: reason is not a reason code")
+	switch {
+	case !r.Kind.valid():
+		return 0, refused("kind is not an event kind")
+	case !r.State.valid():
+		return 0, refused("state is not a state code")
+	case !r.Outcome.valid():
+		return 0, refused("outcome is not an outcome code")
+	case !r.Reason.valid():
+		return 0, refused("reason is not a reason code")
+	case !validShape(r.Host):
+		return 0, refused("host is not a host label")
+	case !validShape(r.ExecutionID):
+		return 0, refused("execution_id is not an execution ID")
 	}
 	var changed Field
-	host, cut := clean(r.Host, MaxHost)
+	host, cut := truncate(r.Host, MaxHost)
 	changed = mark(changed, FieldHost, cut)
-	execID, cut := clean(r.ExecutionID, MaxExecutionID)
+	execID, cut := truncate(r.ExecutionID, MaxExecutionID)
 	changed = mark(changed, FieldExecutionID, cut)
 
 	// isNOSLink accepts printable ASCII only, so a valid link needs no
@@ -299,7 +334,13 @@ func (s *Store) Append(ctx context.Context, r Record) (int64, error) {
 
 	providers := min(max(r.Providers, 0), MaxProviders)
 
-	res, err := s.db.ExecContext(ctx, `INSERT INTO notify_log
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("notifylog: append: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	res, err := tx.ExecContext(ctx, `INSERT INTO notify_log
 		(at, kind, host, state, reason, execution_id, link, outcome, providers, changed)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		s.now().UTC().Unix(), string(r.Kind), host, string(r.State), string(r.Reason), execID, link, string(r.Outcome), providers, int(changed))
@@ -309,6 +350,13 @@ func (s *Store) Append(ctx context.Context, r Record) (int64, error) {
 	seq, err := res.LastInsertId()
 	if err != nil {
 		return 0, fmt.Errorf("notifylog: append: last id: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM notify_log WHERE seq IN
+		(SELECT seq FROM notify_log ORDER BY seq DESC LIMIT -1 OFFSET ?)`, MaxEntries); err != nil {
+		return 0, fmt.Errorf("notifylog: append: trim: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("notifylog: append: commit: %w", err)
 	}
 	return seq, nil
 }
@@ -360,9 +408,9 @@ func (s *Store) List(ctx context.Context, afterSeq int64, limit int) ([]Entry, e
 
 // Prune removes entries older than Retention on the Store's clock (an entry
 // written exactly Retention ago is kept), then removes the oldest entries
-// beyond MaxEntries. It returns the number of entries removed. Prune reads
-// the same clock as Append, so the retention boundary follows the injected
-// time.
+// beyond MaxEntries, which Append normally keeps within the cap already. It
+// returns the number of entries removed. Prune reads the same clock as Append,
+// so the retention boundary follows the injected time.
 func (s *Store) Prune(ctx context.Context) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -409,15 +457,15 @@ func mark(set, f Field, cut bool) Field {
 // turn backslashes into slashes and drop tabs and newlines. So the check is
 // strict and runs before any cleaning. It rejects:
 //   - anything that does not start with "/"
-//   - "//" anywhere (a scheme-relative URL, also after normalization)
+//   - "//" anywhere (a scheme-relative URL, and an absolute URL such as
+//     "/x://host", also after normalization)
 //   - backslashes, "?" (query) and "#" (fragment), where tokens live
-//   - "://" (an absolute URL in the path)
 //   - bytes outside printable ASCII 0x21-0x7E: spaces, controls and non-ASCII
 func isNOSLink(s string) bool {
 	if !strings.HasPrefix(s, "/") {
 		return false
 	}
-	if strings.Contains(s, "//") || strings.Contains(s, "://") || strings.ContainsAny(s, `\?#`) {
+	if strings.Contains(s, "//") || strings.ContainsAny(s, `\?#`) {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
@@ -428,25 +476,12 @@ func isNOSLink(s string) bool {
 	return true
 }
 
-// clean returns s with line breaks turned into spaces and every control,
-// format (zero-width, soft hyphen, bidi) or otherwise non-printable rune
-// replaced by U+FFFD. It keeps whole runes only, so the result is valid
-// UTF-8 of at most limit bytes. cut reports whether text was dropped
-// because of the limit.
-func clean(s string, limit int) (out string, cut bool) {
-	var b strings.Builder
-	b.Grow(min(len(s), limit))
-	for _, r := range s {
-		switch {
-		case r == '\n' || r == '\r' || r == '\t':
-			r = ' '
-		case !unicode.IsPrint(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Bidi_Control, r):
-			r = utf8.RuneError
-		}
-		if b.Len()+utf8.RuneLen(r) > limit {
-			return b.String(), true
-		}
-		b.WriteRune(r)
+// truncate returns s cut to at most limit bytes and reports whether it was cut.
+// It is only called on values that passed validShape, which are ASCII, so the
+// cut never splits a rune.
+func truncate(s string, limit int) (string, bool) {
+	if len(s) <= limit {
+		return s, false
 	}
-	return b.String(), false
+	return s[:limit], true
 }
