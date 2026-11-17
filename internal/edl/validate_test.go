@@ -3,8 +3,10 @@
 package edl
 
 import (
+	"bytes"
 	"errors"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -225,4 +227,171 @@ func TestCheckRejectsInvalidMappedRefusal(t *testing.T) {
 			})
 		}
 	}
+}
+
+// fuzzPrefix parses a CIDR or a bare address. ok is false for malformed input.
+func fuzzPrefix(s string) (netip.Prefix, bool) {
+	if p, err := netip.ParsePrefix(s); err == nil {
+		return p, true
+	}
+	a, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Prefix{}, false
+	}
+	return netip.PrefixFrom(a, a.BitLen()), true
+}
+
+// rangeSpan is the first and last address of a prefix, as 16 big-endian bytes
+// (IPv4 is left-aligned with zero padding). It is the independent overlap
+// oracle for FuzzCheck: two prefixes of one family overlap exactly when their
+// spans intersect. It shares no code with Check.
+type rangeSpan struct {
+	v4     bool
+	lo, hi [16]byte
+}
+
+// spanOf returns the span of addr/bits. addr must be valid.
+func spanOf(addr netip.Addr, bits int) rangeSpan {
+	var s rangeSpan
+	n := 16 // bytes in the address
+	var raw [16]byte
+	if addr.Is4() {
+		s.v4 = true
+		n = 4
+		b := addr.As4()
+		copy(raw[:], b[:])
+	} else {
+		raw = addr.As16()
+	}
+	s.lo, s.hi = raw, raw
+	for i := bits; i < n*8; i++ {
+		mask := byte(0x80) >> (i % 8)
+		s.lo[i/8] &^= mask // host bits to 0 for the first address
+		s.hi[i/8] |= mask  // host bits to 1 for the last address
+	}
+	return s
+}
+
+// overlaps reports whether the two spans share an address.
+func (s rangeSpan) overlaps(o rangeSpan) bool {
+	if s.v4 != o.v4 {
+		return false
+	}
+	return bytes.Compare(s.lo[:], o.hi[:]) <= 0 && bytes.Compare(o.lo[:], s.hi[:]) <= 0
+}
+
+// oracleRefusalSpan returns the span a refusal covers, applying the IPv4-mapped
+// rule independently of normalize. ok is false for a refusal that must be
+// ErrInvalidRefusal.
+func oracleRefusalSpan(p netip.Prefix) (rangeSpan, bool) {
+	a := p.Addr()
+	if a.Is4In6() {
+		if p.Bits() < 96 {
+			return rangeSpan{}, false
+		}
+		return spanOf(a.Unmap(), p.Bits()-96), true
+	}
+	return spanOf(a, p.Bits()), true
+}
+
+// FuzzCheck compares Check with a range-based oracle for arbitrary entries and
+// refusal rules. Each refusal set gets at most one rule (empty means none).
+// Checks: no panic; the error is ErrInvalidRefusal for an invalid rule, else
+// ErrSpecialRange for a special-range overlap, else the first refusal set
+// whose span overlaps the entry, else nil. The input rules are not modified.
+func FuzzCheck(f *testing.F) {
+	f.Add("81.10.0.7", "81.10.0.0/24", "", "", "")
+	f.Add("81.10.0.0/16", "::ffff:81.10.0.0/120", "", "", "")
+	f.Add("81.20.0.5", "", "::ffff:81.20.0.5/128", "", "")
+	f.Add("81.30.0.0/24", "", "", "::ffff:81.30.0.1/128", "")
+	f.Add("81.40.200.0/24", "", "", "", "::ffff:81.40.0.0/112")
+	f.Add("80.0.0.1", "::ffff:0:0/96", "", "", "")
+	f.Add("80.0.0.1", "::ffff:0:0/95", "", "", "")
+	f.Add("2606:4700::1111", "::/0", "fe80::/10", "", "")
+	f.Add("::ffff:81.0.1.5", "81.0.0.0/8", "", "", "")
+	f.Add("10.1.2.3/8", "", "", "", "")
+	f.Add("80.0.0.0/4", "2001:db8::/32", "81.0.0.0/8", "::1", "0.0.0.0/0")
+	f.Add("0.0.0.0/0", "", "", "", "")
+	f.Fuzz(func(t *testing.T, entryStr, ipam, nos, fw, prot string) {
+		entry, ok := fuzzPrefix(entryStr)
+		if !ok {
+			return
+		}
+		raw := []string{ipam, nos, fw, prot}
+		var sets [4][]netip.Prefix
+		for i, s := range raw {
+			if s == "" {
+				continue
+			}
+			p, ok := fuzzPrefix(s)
+			if !ok {
+				return
+			}
+			sets[i] = []netip.Prefix{p}
+		}
+		r := Refusals{IPAM: sets[0], NOSPath: sets[1], FirewallAddresses: sets[2], ProtectedTargets: sets[3]}
+		before := [4][]netip.Prefix{slices.Clone(sets[0]), slices.Clone(sets[1]), slices.Clone(sets[2]), slices.Clone(sets[3])}
+
+		// Oracle: the sentinel Check must return, or nil.
+		names := [4]error{ErrIPAMNetwork, ErrNOSPath, ErrFirewallAddress, ErrProtectedTarget}
+		var want error
+		for _, set := range sets {
+			for _, p := range set {
+				if _, valid := oracleRefusalSpan(p); !valid {
+					want = ErrInvalidRefusal
+				}
+			}
+		}
+		es := spanOf(entry.Addr(), entry.Bits())
+		inSpecial := false
+		for _, sp := range specialRanges {
+			if es.overlaps(spanOf(sp.Addr(), sp.Bits())) {
+				inSpecial = true
+				break
+			}
+		}
+		if want == nil && inSpecial {
+			want = ErrSpecialRange
+		}
+		if want == nil {
+		outer:
+			for i, set := range sets {
+				for _, p := range set {
+					s, _ := oracleRefusalSpan(p)
+					if es.overlaps(s) {
+						want = names[i]
+						break outer
+					}
+				}
+			}
+		}
+
+		err := Check(entry, r) // must not panic
+		if want == nil {
+			if err != nil {
+				t.Fatalf("Check(%v) = %v, want nil", entry, err)
+			}
+		} else if !errors.Is(err, want) {
+			t.Fatalf("Check(%v) = %v, want %v", entry, err, want)
+		}
+
+		// An entry inside a special range is always refused, and is refused as
+		// a special range unless a refusal rule is itself invalid.
+		for _, sp := range specialRanges {
+			if sp.Bits() <= entry.Bits() && sp.Contains(entry.Addr()) {
+				if err == nil {
+					t.Fatalf("Check(%v) = nil, entry lies inside special range %v", entry, sp)
+				}
+				if want != ErrInvalidRefusal && !errors.Is(err, ErrSpecialRange) {
+					t.Fatalf("Check(%v) = %v, want ErrSpecialRange inside %v", entry, err, sp)
+				}
+			}
+		}
+
+		for i := range sets {
+			if !slices.Equal(sets[i], before[i]) {
+				t.Fatalf("Check modified refusal set %d: %v -> %v", i, before[i], sets[i])
+			}
+		}
+	})
 }
