@@ -48,7 +48,10 @@
 // Gap in the ADR table, not in this code: the row "other changed or new
 // file" covers only /etc and watched /usr roots. A removed non-critical
 // path, and a changed or new non-critical path elsewhere (for example under
-// /opt or /usr/local), has no row outside a NOS job. Such a deviation returns
-// ErrNotCovered instead of a silent default class; the maintainers must
-// decide the row.
+// /opt, under /bin on a host without merged /usr, or under /usr/local), has
+// no row outside a NOS job. Classes returns ErrNotCovered for such a
+// deviation. Findings does not drop the run for it: the deviation becomes its
+// own Finding with NotCovered set and no class or severity, and the other
+// findings of the report are still returned. The maintainers must decide the
+// row.
 package fimfinding

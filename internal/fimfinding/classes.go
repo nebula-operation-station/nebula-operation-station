@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/fimbaseline"
@@ -17,9 +18,10 @@ import (
 // shape fimbaseline.Diff produces. Nothing is classified from such input.
 var ErrInvalidInput = errors.New("fimfinding: invalid input")
 
-// ErrNotCovered is returned for a deviation that no covered row of the D9
-// table matches (see doc.go). It fails the whole report: a silent default
-// class would hide the deviation.
+// ErrNotCovered is returned by Classes for a deviation that no covered row of
+// the D9 table matches (see doc.go). Findings does not fail on it: it reports
+// the deviation as a NotCovered finding, so the rest of the run is kept. A
+// silent default class would hide the deviation.
 var ErrNotCovered = errors.New("fimfinding: deviation matches no covered D9 row")
 
 // Finding is one finding of a report: a path with its highest class, or the
@@ -31,6 +33,10 @@ type Finding struct {
 	Class integritystore.Class
 	// Severity is the severity of Class (D9 table).
 	Severity integritystore.Severity
+	// NotCovered marks a deviation that no covered D9 row matches. It has no
+	// Class and no Severity: no class is invented for it. It is reported as
+	// its own gap so the maintainers see it next to the classified findings.
+	NotCovered bool
 }
 
 // setIDBits are the setuid and setgid bits of a record's mode. The sticky
@@ -176,11 +182,40 @@ func inTree(s, root string) bool {
 	return s == root || strings.HasPrefix(s, root+"/")
 }
 
-// Findings maps a comparison report to findings: one per deviating path
-// with the highest severity of its classes (integritystore.Escalate), and,
-// first, a scan-partial finding when the report is not complete (D9 "partial
-// or stale scan", medium). A nil report, or any deviation Classes rejects,
-// fails the whole report.
+// tieOrder ranks the classes of one deviation that share the highest severity.
+// The more specific class is reported: setid-new first, so the new setuid or
+// setgid fact stays visible (D9 keeps it critical once expected-change
+// attribution exists), then critical-path-changed, owner-mode-changed and
+// etc-changed. Classes not listed follow in their given order.
+var tieOrder = []integritystore.Class{
+	integritystore.ClassSetIDNew,
+	integritystore.ClassCriticalPathChanged,
+	integritystore.ClassOwnerModeChanged,
+	integritystore.ClassEtcChanged,
+}
+
+// preferred returns classes ordered by tieOrder. integritystore.Escalate keeps
+// the first class among equal severities, so this order decides the tie.
+func preferred(classes []integritystore.Class) []integritystore.Class {
+	out := slices.Clone(classes)
+	rank := func(c integritystore.Class) int {
+		if i := slices.Index(tieOrder, c); i >= 0 {
+			return i
+		}
+		return len(tieOrder)
+	}
+	slices.SortStableFunc(out, func(a, b integritystore.Class) int { return rank(a) - rank(b) })
+	return out
+}
+
+// Findings maps a comparison report to findings: one per deviating path with
+// the highest severity of its classes (integritystore.Escalate, ties by
+// tieOrder), and, first, a scan-partial finding when the report is not
+// complete (D9 "partial or stale scan", medium). A deviation that no covered
+// row matches is not dropped with the rest of the run: it becomes its own
+// Finding with NotCovered set, at its place in the deviation order, and the
+// other findings are still returned. A nil report or a deviation with an
+// invalid shape fails the whole report (ErrInvalidInput).
 func Findings(rep *fimbaseline.Report, roots []fimscan.Root) ([]Finding, error) {
 	if rep == nil {
 		return nil, fmt.Errorf("findings: nil report: %w", ErrInvalidInput)
@@ -196,11 +231,15 @@ func Findings(rep *fimbaseline.Report, roots []fimscan.Root) ([]Finding, error) 
 	for i := range rep.Deviations {
 		d := rep.Deviations[i]
 		classes, err := Classes(d, roots)
+		if errors.Is(err, ErrNotCovered) {
+			out = append(out, Finding{Path: bytes.Clone(d.Path), NotCovered: true})
+			continue
+		}
 		if err != nil {
 			// The index, not the path: the path is untrusted host data.
 			return nil, fmt.Errorf("deviation %d: %w", i, err)
 		}
-		top, ok := integritystore.Escalate(classes...)
+		top, ok := integritystore.Escalate(preferred(classes)...)
 		if !ok {
 			return nil, fmt.Errorf("deviation %d: no severity: %w", i, ErrNotCovered)
 		}

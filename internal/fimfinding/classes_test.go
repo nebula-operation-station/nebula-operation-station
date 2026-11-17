@@ -3,6 +3,7 @@
 package fimfinding
 
 import (
+	"bytes"
 	"errors"
 	"slices"
 	"testing"
@@ -50,6 +51,7 @@ func TestClassesMapsDeviationRows(t *testing.T) {
 		name     string
 		d        fimbaseline.Deviation
 		want     []integritystore.Class
+		wantTop  integritystore.Class
 		wantSev  integritystore.Severity
 		wantFail error
 	}{
@@ -57,94 +59,100 @@ func TestClassesMapsDeviationRows(t *testing.T) {
 			name: "critical content change in etc is critical and etc-changed",
 			d: dev("/etc/sudoers", fimbaseline.KindChanged, fimbaseline.ChangeContent, critical,
 				fimbaseline.RuleFixedPath, file("/etc/sudoers", 0o440), file("/etc/sudoers", 0o440)),
-			want: []integritystore.Class{cPathChanged, cEtc}, wantSev: integritystore.SeverityCritical,
+			want: []integritystore.Class{cPathChanged, cEtc}, wantTop: cPathChanged, wantSev: integritystore.SeverityCritical,
 		},
 		{
 			name: "removed critical path is critical-path-changed only",
 			d: dev("/etc/sudoers", fimbaseline.KindRemoved, 0, critical,
 				fimbaseline.RuleFixedPath, file("/etc/sudoers", 0o440), nil),
-			want: []integritystore.Class{cPathChanged}, wantSev: integritystore.SeverityCritical,
+			want: []integritystore.Class{cPathChanged}, wantTop: cPathChanged, wantSev: integritystore.SeverityCritical,
 		},
 		{
 			name: "added critical path outside etc and usr roots",
 			d: dev("/boot/new.cfg", fimbaseline.KindAdded, fimbaseline.ChangeNotHashed, critical,
 				fimbaseline.RuleFixedPath, nil, file("/boot/new.cfg", 0o644)),
-			want: []integritystore.Class{cPathChanged}, wantSev: integritystore.SeverityCritical,
+			want: []integritystore.Class{cPathChanged}, wantTop: cPathChanged, wantSev: integritystore.SeverityCritical,
 		},
 		{
-			name: "new setuid file is setid-new",
+			name: "new setuid file is setid-new, which is reported over critical-path-changed",
 			d: dev("/usr/bin/newsu", fimbaseline.KindAdded, 0, critical,
 				fimbaseline.RuleSetID, nil, file("/usr/bin/newsu", 0o4755)),
-			want: []integritystore.Class{cPathChanged, cSetIDNew, cEtc}, wantSev: integritystore.SeverityCritical,
+			want: []integritystore.Class{cPathChanged, cSetIDNew, cEtc}, wantTop: cSetIDNew, wantSev: integritystore.SeverityCritical,
 		},
 		{
 			name: "setgid bit added to an existing file is setid-new",
 			d: dev("/usr/bin/tool", fimbaseline.KindChanged, fimbaseline.ChangeMode, critical,
 				fimbaseline.RuleSetID, file("/usr/bin/tool", 0o755), file("/usr/bin/tool", 0o2755)),
-			want: []integritystore.Class{cPathChanged, cSetIDNew, cOwnerMode, cEtc}, wantSev: integritystore.SeverityCritical,
+			want: []integritystore.Class{cPathChanged, cSetIDNew, cOwnerMode, cEtc}, wantTop: cSetIDNew, wantSev: integritystore.SeverityCritical,
 		},
 		{
 			name: "permission change of a file that already had setuid is not setid-new",
 			d: dev("/usr/bin/su", fimbaseline.KindChanged, fimbaseline.ChangeMode, critical,
 				fimbaseline.RuleSetID, file("/usr/bin/su", 0o4755), file("/usr/bin/su", 0o4775)),
-			want: []integritystore.Class{cPathChanged, cOwnerMode, cEtc}, wantSev: integritystore.SeverityCritical,
+			want: []integritystore.Class{cPathChanged, cOwnerMode, cEtc}, wantTop: cPathChanged, wantSev: integritystore.SeverityCritical,
 		},
 		{
 			name: "owner change in etc is owner-mode-changed",
 			d: dev("/etc/motd", fimbaseline.KindChanged, fimbaseline.ChangeOwner, normal, 0,
 				file("/etc/motd", 0o644), file("/etc/motd", 0o644)),
-			want: []integritystore.Class{cOwnerMode, cEtc}, wantSev: integritystore.SeverityHigh,
+			want: []integritystore.Class{cOwnerMode, cEtc}, wantTop: cOwnerMode, wantSev: integritystore.SeverityHigh,
 		},
 		{
 			name: "mode change in usr bin is owner-mode-changed",
 			d: dev("/usr/bin/ls", fimbaseline.KindChanged, fimbaseline.ChangeMode, normal, 0,
 				file("/usr/bin/ls", 0o755), file("/usr/bin/ls", 0o700)),
-			want: []integritystore.Class{cOwnerMode, cEtc}, wantSev: integritystore.SeverityHigh,
+			want: []integritystore.Class{cOwnerMode, cEtc}, wantTop: cOwnerMode, wantSev: integritystore.SeverityHigh,
 		},
 		{
 			name: "owner change of a critical path escalates to critical",
 			d: dev("/etc/sudoers", fimbaseline.KindChanged, fimbaseline.ChangeOwner, critical,
 				fimbaseline.RuleFixedPath, file("/etc/sudoers", 0o440), file("/etc/sudoers", 0o440)),
-			want: []integritystore.Class{cPathChanged, cOwnerMode, cEtc}, wantSev: integritystore.SeverityCritical,
+			want: []integritystore.Class{cPathChanged, cOwnerMode, cEtc}, wantTop: cPathChanged, wantSev: integritystore.SeverityCritical,
+		},
+		{
+			name: "mode change of etc itself is owner-mode-changed",
+			d: dev("/etc", fimbaseline.KindChanged, fimbaseline.ChangeMode, normal, 0,
+				file("/etc", 0o755), file("/etc", 0o700)),
+			want: []integritystore.Class{cOwnerMode, cEtc}, wantTop: cOwnerMode, wantSev: integritystore.SeverityHigh,
 		},
 		{
 			name: "new non-critical file in etc is etc-changed",
 			d: dev("/etc/new.conf", fimbaseline.KindAdded, fimbaseline.ChangeNotHashed, normal, 0,
 				nil, file("/etc/new.conf", 0o644)),
-			want: []integritystore.Class{cEtc}, wantSev: integritystore.SeverityHigh,
+			want: []integritystore.Class{cEtc}, wantTop: cEtc, wantSev: integritystore.SeverityHigh,
 		},
 		{
 			name: "times-only change in etc is etc-changed",
 			d: dev("/etc/hostname", fimbaseline.KindChanged, fimbaseline.ChangeTimes, normal, 0,
 				file("/etc/hostname", 0o644), file("/etc/hostname", 0o644)),
-			want: []integritystore.Class{cEtc}, wantSev: integritystore.SeverityHigh,
+			want: []integritystore.Class{cEtc}, wantTop: cEtc, wantSev: integritystore.SeverityHigh,
 		},
 		{
 			name: "content change in a watched usr root is etc-changed",
 			d: dev("/usr/bin/foo", fimbaseline.KindChanged, fimbaseline.ChangeContent, normal, 0,
 				file("/usr/bin/foo", 0o755), file("/usr/bin/foo", 0o755)),
-			want: []integritystore.Class{cEtc}, wantSev: integritystore.SeverityHigh,
+			want: []integritystore.Class{cEtc}, wantTop: cEtc, wantSev: integritystore.SeverityHigh,
 		},
 		{
 			name: "efi file-system type change is a critical path change",
 			d: dev("/boot/efi", fimbaseline.KindChanged, fimbaseline.ChangeFSType, critical,
 				fimbaseline.RuleFixedPath, rec("/boot/efi", fimscan.TypeDir, 0o755), rec("/boot/efi", fimscan.TypeDir, 0o755)),
-			want: []integritystore.Class{cPathChanged}, wantSev: integritystore.SeverityCritical,
+			want: []integritystore.Class{cPathChanged}, wantTop: cPathChanged, wantSev: integritystore.SeverityCritical,
 		},
 		{
 			name: "efi mount without a baseline record is a critical path change",
 			d: dev("/boot/efi", fimbaseline.KindChanged, fimbaseline.ChangeFSType, critical,
 				fimbaseline.RuleFixedPath, nil, rec("/boot/efi", fimscan.TypeDir, 0o755)),
-			want: []integritystore.Class{cPathChanged}, wantSev: integritystore.SeverityCritical,
+			want: []integritystore.Class{cPathChanged}, wantTop: cPathChanged, wantSev: integritystore.SeverityCritical,
 		},
 		{
-			name: "change outside etc and usr roots has no row and fails",
+			name: "change outside etc and usr roots has no row and is not covered",
 			d: dev("/opt/app/run.sh", fimbaseline.KindChanged, fimbaseline.ChangeContent, normal, 0,
 				file("/opt/app/run.sh", 0o755), file("/opt/app/run.sh", 0o755)),
 			wantFail: ErrNotCovered,
 		},
 		{
-			name: "removed non-critical path has no row and fails",
+			name: "removed non-critical path has no row and is not covered",
 			d: dev("/etc/old.conf", fimbaseline.KindRemoved, 0, normal, 0,
 				file("/etc/old.conf", 0o644), nil),
 			wantFail: ErrNotCovered,
@@ -222,10 +230,53 @@ func TestClassesMapsDeviationRows(t *testing.T) {
 			if !slices.Equal(got, want) {
 				t.Fatalf("classes = %v, want %v", got, want)
 			}
-			// The reported finding carries the highest severity of the set.
+			// The reported finding is the exact class with the highest severity.
 			f := findingsOf(t, tt.d, true)
-			if len(f) != 1 || f[0].Severity != tt.wantSev || !slices.Contains(tt.want, f[0].Class) {
-				t.Fatalf("findings = %+v, want severity %s", f, tt.wantSev)
+			if len(f) != 1 || f[0].NotCovered || f[0].Class != tt.wantTop || f[0].Severity != tt.wantSev {
+				t.Fatalf("findings = %+v, want %s (%s)", f, tt.wantTop, tt.wantSev)
+			}
+		})
+	}
+}
+
+// TestWatchedRootBoundaries pins the path-boundary checks of the etc-changed
+// row: a sibling such as /etcfoo or /usr/binx is not inside a root, a root
+// itself is, and only literal /usr roots count.
+func TestWatchedRootBoundaries(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		roots   []fimscan.Root
+		path    string
+		covered bool
+	}{
+		{name: "path inside etc", roots: []fimscan.Root{{Pattern: "/etc"}}, path: "/etc/x", covered: true},
+		{name: "etc itself", roots: []fimscan.Root{{Pattern: "/etc"}}, path: "/etc", covered: true},
+		{name: "etc sibling is not etc", roots: []fimscan.Root{{Pattern: "/etc"}}, path: "/etcfoo/x", covered: false},
+		{name: "usr bin root itself", roots: []fimscan.Root{{Pattern: "/usr/bin"}}, path: "/usr/bin", covered: true},
+		{name: "usr bin child", roots: []fimscan.Root{{Pattern: "/usr/bin"}}, path: "/usr/bin/y", covered: true},
+		{name: "usr bin sibling is not under usr bin", roots: []fimscan.Root{{Pattern: "/usr/bin"}}, path: "/usr/binx/y", covered: false},
+		{name: "usr bin prefix string only", roots: []fimscan.Root{{Pattern: "/usr/bin"}}, path: "/usr/bin2", covered: false},
+		{name: "usr root covers its subtree", roots: []fimscan.Root{{Pattern: "/usr"}}, path: "/usr/share/x", covered: true},
+		{name: "usr root sibling is not under usr", roots: []fimscan.Root{{Pattern: "/usr"}}, path: "/usrx/y", covered: false},
+		{name: "non usr root is not a usr root", roots: []fimscan.Root{{Pattern: "/usrlocal"}}, path: "/usrlocal/x", covered: false},
+		{name: "bin root on a host without merged usr", roots: []fimscan.Root{{Pattern: "/bin"}}, path: "/bin/sh", covered: false},
+		{name: "glob usr root is not counted", roots: []fimscan.Root{{Pattern: "/usr/*/bin"}}, path: "/usr/x/bin/tool", covered: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			d := dev(tt.path, fimbaseline.KindChanged, fimbaseline.ChangeContent, normal, 0,
+				file(tt.path, 0o755), file(tt.path, 0o755))
+			got, err := Classes(d, tt.roots)
+			if !tt.covered {
+				if !errors.Is(err, ErrNotCovered) {
+					t.Fatalf("Classes(%s) error = %v (classes %v), want ErrNotCovered", tt.path, err, got)
+				}
+				return
+			}
+			if err != nil || !slices.Equal(got, []integritystore.Class{cEtc}) {
+				t.Fatalf("Classes(%s) = %v, %v; want [etc-changed]", tt.path, got, err)
 			}
 		})
 	}
@@ -283,15 +334,57 @@ func TestFindingsEmptyCompleteReportHasNoFindings(t *testing.T) {
 	}
 }
 
-func TestFindingsUncoveredDeviationFailsWholeReport(t *testing.T) {
+// TestFindingsUncoveredDeviationsDoNotDropTheRun is the field case: a
+// critical change next to uncovered deviations (a removed /etc file, a change
+// under /opt, a /bin change on a host without merged /usr). The critical
+// finding must survive and each uncovered deviation must be reported on its
+// own, in deviation order, without a class.
+func TestFindingsUncoveredDeviationsDoNotDropTheRun(t *testing.T) {
+	t.Parallel()
+	roots := []fimscan.Root{{Pattern: "/etc"}, {Pattern: "/bin"}, {Pattern: "/opt"}, {Pattern: "/boot"}}
+	devs := []fimbaseline.Deviation{
+		dev("/etc/sudoers", fimbaseline.KindChanged, fimbaseline.ChangeContent, critical,
+			fimbaseline.RuleFixedPath, file("/etc/sudoers", 0o440), file("/etc/sudoers", 0o440)),
+		dev("/etc/old.conf", fimbaseline.KindRemoved, 0, normal, 0, file("/etc/old.conf", 0o644), nil),
+		dev("/opt/app/run.sh", fimbaseline.KindChanged, fimbaseline.ChangeContent, normal, 0,
+			file("/opt/app/run.sh", 0o755), file("/opt/app/run.sh", 0o755)),
+		dev("/bin/sh", fimbaseline.KindChanged, fimbaseline.ChangeContent, normal, 0,
+			file("/bin/sh", 0o755), file("/bin/sh", 0o755)),
+	}
+	got, err := Findings(&fimbaseline.Report{Complete: true, Deviations: devs}, roots)
+	if err != nil {
+		t.Fatalf("Findings: %v, want the run to be reported", err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("got %d findings, want 4: %+v", len(got), got)
+	}
+	if got[0].NotCovered || got[0].Class != cPathChanged || got[0].Severity != integritystore.SeverityCritical ||
+		string(got[0].Path) != "/etc/sudoers" {
+		t.Fatalf("finding 0 = %+v, want /etc/sudoers critical-path-changed (critical)", got[0])
+	}
+	for i, wantPath := range []string{"/etc/old.conf", "/opt/app/run.sh", "/bin/sh"} {
+		f := got[i+1]
+		if !f.NotCovered || f.Class != "" || f.Severity != "" || !bytes.Equal(f.Path, []byte(wantPath)) {
+			t.Fatalf("finding %d = %+v, want not-covered finding for %s without class", i+1, f, wantPath)
+		}
+	}
+}
+
+func TestFindingsUncoveredDeviationIsItsOwnFinding(t *testing.T) {
 	t.Parallel()
 	ok := dev("/etc/motd", fimbaseline.KindChanged, fimbaseline.ChangeOwner, normal, 0,
 		file("/etc/motd", 0o644), file("/etc/motd", 0o644))
 	bad := dev("/opt/app/run.sh", fimbaseline.KindChanged, fimbaseline.ChangeContent, normal, 0,
 		file("/opt/app/run.sh", 0o755), file("/opt/app/run.sh", 0o755))
-	_, err := Findings(&fimbaseline.Report{Complete: true, Deviations: []fimbaseline.Deviation{ok, bad}}, testRoots)
-	if !errors.Is(err, ErrNotCovered) {
-		t.Fatalf("Findings error = %v, want ErrNotCovered", err)
+	got, err := Findings(&fimbaseline.Report{Complete: true, Deviations: []fimbaseline.Deviation{ok, bad}}, testRoots)
+	if err != nil {
+		t.Fatalf("Findings: %v", err)
+	}
+	if len(got) != 2 || got[0].Class != cOwnerMode || got[0].NotCovered {
+		t.Fatalf("findings = %+v, want owner-mode-changed then a not-covered finding", got)
+	}
+	if !got[1].NotCovered || got[1].Class != "" || string(got[1].Path) != "/opt/app/run.sh" {
+		t.Fatalf("second finding = %+v, want not-covered /opt/app/run.sh", got[1])
 	}
 }
 
@@ -299,6 +392,16 @@ func TestFindingsNilReportIsInvalidInput(t *testing.T) {
 	t.Parallel()
 	if _, err := Findings(nil, testRoots); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("Findings(nil) error = %v, want ErrInvalidInput", err)
+	}
+}
+
+func TestFindingsInvalidDeviationFailsWholeReport(t *testing.T) {
+	t.Parallel()
+	bad := dev("/etc/motd", fimbaseline.KindChanged, 0, normal, 0,
+		file("/etc/motd", 0o644), file("/etc/motd", 0o644))
+	_, err := Findings(&fimbaseline.Report{Complete: true, Deviations: []fimbaseline.Deviation{bad}}, testRoots)
+	if !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("Findings error = %v, want ErrInvalidInput", err)
 	}
 }
 
@@ -317,19 +420,9 @@ func TestFindingsPathSeverityIsTheHighestClass(t *testing.T) {
 	}
 }
 
-func TestGlobRootIsNotAWatchedUsrRoot(t *testing.T) {
-	t.Parallel()
-	roots := []fimscan.Root{{Pattern: "/usr/*/bin"}}
-	d := dev("/usr/x/bin/tool", fimbaseline.KindChanged, fimbaseline.ChangeContent, normal, 0,
-		file("/usr/x/bin/tool", 0o755), file("/usr/x/bin/tool", 0o755))
-	if _, err := Classes(d, roots); !errors.Is(err, ErrNotCovered) {
-		t.Fatalf("Classes error = %v, want ErrNotCovered", err)
-	}
-}
-
 // FuzzClasses feeds arbitrary deviation fields. Whatever the input, no call
-// panics, a returned class is known to integritystore, and the finding
-// carries a known severity.
+// panics, a returned class is known to integritystore, and every finding is
+// either a known class with its severity or a not-covered finding without one.
 func FuzzClasses(f *testing.F) {
 	f.Add([]byte("/etc/sudoers"), uint8(2), uint16(1), uint8(critical), uint8(1), uint8(3), uint16(0o4755), uint16(0o755), uint8(0))
 	f.Add([]byte("/usr/bin/su"), uint8(1), uint16(0), uint8(normal), uint8(0), uint8(0), uint16(0), uint16(0o2755), uint8(8))
@@ -344,7 +437,7 @@ func FuzzClasses(f *testing.F) {
 			Class:   fimbaseline.Class(class),
 			Rules:   fimbaseline.Rule(rules),
 		}
-		typ := fimscan.Type(recFlags%5 + 0)
+		typ := fimscan.Type(recFlags % 5)
 		if recFlags&1 != 0 {
 			d.Old = rec(string(path), typ, uint32(oldMode))
 		}
@@ -371,6 +464,12 @@ func FuzzClasses(f *testing.F) {
 			return
 		}
 		for _, fd := range findings {
+			if fd.NotCovered {
+				if fd.Class != "" || fd.Severity != "" {
+					t.Fatalf("not-covered finding %+v carries a class or severity", fd)
+				}
+				continue
+			}
 			sev, err := fd.Class.Severity()
 			if err != nil || sev != fd.Severity {
 				t.Fatalf("finding %+v: class/severity mismatch (%v)", fd, err)
