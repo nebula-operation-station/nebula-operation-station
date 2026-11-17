@@ -231,6 +231,17 @@ func TestValidateRejectsMalformedNotes(t *testing.T) {
 			d.Steps[0].Why = "www.example.org"
 			return d
 		}, ErrURL},
+		{"empty mitigation as the only content", func() Draft {
+			d := validFix()
+			d.Steps = nil
+			d.Mitigations = []string{""}
+			return d
+		}, ErrMissing},
+		{"empty mitigation next to a valid one", func() Draft {
+			d := validFix()
+			d.Mitigations = []string{"Dienst abschalten", ""}
+			return d
+		}, ErrMissing},
 		{"four mitigations", func() Draft {
 			d := validFix()
 			d.Mitigations = []string{"a", "b", "c", "d"}

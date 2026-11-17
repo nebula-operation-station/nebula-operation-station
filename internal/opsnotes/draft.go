@@ -320,6 +320,9 @@ func checkShape(d Draft) error {
 		return fmt.Errorf("mitigations: %d, max %d: %w", len(d.Mitigations), MaxMitigations, ErrLimit)
 	}
 	for _, m := range d.Mitigations {
+		if m == "" {
+			return fmt.Errorf("mitigation: %w", ErrMissing)
+		}
 		if err := checkFreeText("mitigation", m, MaxMitigationBytes); err != nil {
 			return err
 		}
