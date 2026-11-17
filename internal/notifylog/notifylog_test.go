@@ -11,8 +11,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 )
@@ -133,10 +131,8 @@ func TestAppendRejectsKindAndStateThatAreNotCodes(t *testing.T) {
 }
 
 // TestClosedFieldsNeverStoreProviderText runs one provider error text through
-// every field that is a closed set and through the free-text fields. The closed
-// fields must refuse it, and the link must drop it. Host and ExecutionID are
-// operator-chosen labels and opaque IDs; they are cleaned and bounded but not
-// refused, so the test checks only that they hold no control text.
+// every field. The closed fields, Host and ExecutionID must refuse it, and the
+// link must drop it.
 func TestClosedFieldsNeverStoreProviderText(t *testing.T) {
 	const token = "123456:SECRET-TOKEN-XYZ"
 	providerText := []string{
@@ -157,6 +153,8 @@ func TestClosedFieldsNeverStoreProviderText(t *testing.T) {
 			{"state", func(r *Record) { r.State = StateCode(v) }},
 			{"reason", func(r *Record) { r.Reason = ReasonCode(v) }},
 			{"outcome", func(r *Record) { r.Outcome = Outcome(v) }},
+			{"host", func(r *Record) { r.Host = v }},
+			{"execution_id", func(r *Record) { r.ExecutionID = v }},
 		} {
 			r := sampleRecord()
 			set.apply(&r)
@@ -506,13 +504,33 @@ func TestPruneUsesInjectedClock(t *testing.T) {
 	}
 }
 
+// fillRaw inserts n rows in one transaction, bypassing Append's trim, so a
+// test can build a table over MaxEntries and then exercise the cap itself.
+func fillRaw(t *testing.T, s *Store, n int) {
+	t.Helper()
+	tx, err := s.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	for i := 0; i < n; i++ {
+		if _, err := tx.Exec(`INSERT INTO notify_log
+			(at, kind, host, state, reason, execution_id, link, outcome, providers, changed)
+			VALUES (?, ?, 'web-1', ?, '', 'ex-1', '/executions/ex-1', 'sent', 2, 0)`,
+			time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC).Unix(), string(KindLeaseRunFailed), string(StateFailed)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestPruneRemovesOldestBeyondMaxEntries(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
 	const extra = 7
-	for i := 0; i < MaxEntries+extra; i++ {
-		mustAppend(t, s, sampleRecord())
-	}
+	fillRaw(t, s, MaxEntries+extra)
 
 	removed, err := s.Prune(ctx)
 	if err != nil {
@@ -554,37 +572,140 @@ func TestPruneIsNoOpWithinLimits(t *testing.T) {
 	}
 }
 
-func TestHostileTextIsCleanedAndStored(t *testing.T) {
+// TestHostileHostAndExecutionIDAreRefused: control, bidi, zero-width, invalid
+// UTF-8 and provider text in Host or ExecutionID is not a label or an ID, so
+// the record is refused and nothing is stored.
+func TestHostileHostAndExecutionIDAreRefused(t *testing.T) {
+	hostile := []string{
+		"web\x00-1\x1b[31m",
+		"web" + string(rune(0x202E)) + "evil",
+		"web" + string(rune(0x200B)) + "1",
+		"ex\ncution",
+		"ex\xff bad utf8",
+	}
 	s, _ := newTestStore(t)
 	ctx := context.Background()
-	r := sampleRecord()
-	r.Host = "web\x00-1\x1b[31m" + string(rune(0x202E)) + "evil" + string(rune(0x200B)) + string(rune(0xFEFF))
-	r.ExecutionID = "ex\ncution \xff bad utf8"
-	seq := mustAppend(t, s, r)
+	for _, v := range hostile {
+		r := sampleRecord()
+		r.Host = v
+		if _, err := s.Append(ctx, r); !errors.Is(err, ErrRefused) {
+			t.Errorf("Host %q: Append err = %v, want ErrRefused", v, err)
+		}
+		r = sampleRecord()
+		r.ExecutionID = v
+		if _, err := s.Append(ctx, r); !errors.Is(err, ErrRefused) {
+			t.Errorf("ExecutionID %q: Append err = %v, want ErrRefused", v, err)
+		}
+	}
+	page, err := s.List(ctx, 0, MaxPage)
+	if err != nil || len(page) != 0 {
+		t.Fatalf("refused records left %d rows (err %v); want none", len(page), err)
+	}
+}
 
-	page, err := s.List(ctx, 0, 1)
-	if err != nil || len(page) != 1 || page[0].Seq != seq {
-		t.Fatalf("List: %v, %+v", err, page)
+// TestHostAndExecutionIDShape checks the accepted shape of the two free-text
+// fields: a label or ID made of letters, digits, '.', '_' and '-', starting
+// with a letter or digit, or empty.
+func TestHostAndExecutionIDShape(t *testing.T) {
+	good := []string{"", "web-1", "nas.lab_01", "ex-1", "A9", "3f2b8c1e-9a4d-4e7f-8c2a-1b2c3d4e5f60"}
+	bad := []string{
+		"-web", ".web", "_web", "web 1", "web/1", "web:1", "web?x", "web#x",
+		"web\x00", "web\n1", "ä", "\xff",
+		"https://api.telegram.org/bot123456:SECRET/sendMessage",
+		"123456:SECRET",
 	}
-	got := page[0]
-	for _, v := range []string{got.Host, got.ExecutionID} {
-		if !utf8.ValidString(v) {
-			t.Fatalf("stored text is not valid UTF-8: %q", v)
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	for _, v := range good {
+		r := sampleRecord()
+		r.Host = v
+		r.ExecutionID = v
+		mustAppend(t, s, r)
+		page, err := s.List(ctx, 0, 1)
+		if err != nil || len(page) != 1 {
+			t.Fatalf("List after %q: %v", v, err)
 		}
-		for _, c := range v {
-			if c == '\n' || c == '\r' || c == '\t' {
-				t.Fatalf("stored text keeps a line break or tab: %q", v)
-			}
-			if !unicode.IsPrint(c) || unicode.Is(unicode.Cf, c) || unicode.Is(unicode.Bidi_Control, c) {
-				t.Fatalf("stored text keeps control, bidi or zero-width rune %U in %q", c, v)
+		if page[0].Host != v || page[0].ExecutionID != v || page[0].Changed != 0 {
+			t.Errorf("stored %+v for accepted value %q", page[0], v)
+		}
+	}
+	for _, v := range bad {
+		r := sampleRecord()
+		r.Host = v
+		if _, err := s.Append(ctx, r); !errors.Is(err, ErrRefused) {
+			t.Errorf("Host %q accepted or wrong error: %v", v, err)
+		}
+		r = sampleRecord()
+		r.ExecutionID = v
+		if _, err := s.Append(ctx, r); !errors.Is(err, ErrRefused) {
+			t.Errorf("ExecutionID %q accepted or wrong error: %v", v, err)
+		}
+	}
+}
+
+// TestRefusalErrorsNameTheFieldNeverTheValue: a refused field is reported by
+// name only. The input is a Telegram bot URL with a token, so any echo of the
+// value would leak it into the error text and into logs that wrap it.
+func TestRefusalErrorsNameTheFieldNeverTheValue(t *testing.T) {
+	const token = "123456:SECRET-TOKEN-XYZ"
+	botURL := "https://api.telegram.org/bot" + token + "/sendMessage?chat_id=42"
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	for _, tc := range []struct {
+		field string
+		apply func(*Record)
+	}{
+		{"kind", func(r *Record) { r.Kind = KindCode(botURL) }},
+		{"state", func(r *Record) { r.State = StateCode(botURL) }},
+		{"reason", func(r *Record) { r.Reason = ReasonCode(botURL) }},
+		{"outcome", func(r *Record) { r.Outcome = Outcome(botURL) }},
+		{"host", func(r *Record) { r.Host = botURL }},
+		{"execution_id", func(r *Record) { r.ExecutionID = botURL }},
+	} {
+		r := sampleRecord()
+		tc.apply(&r)
+		_, err := s.Append(ctx, r)
+		if err == nil {
+			t.Fatalf("%s: Append accepted a bot URL", tc.field)
+		}
+		if !errors.Is(err, ErrRefused) {
+			t.Errorf("%s: error %v does not wrap ErrRefused", tc.field, err)
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, tc.field) {
+			t.Errorf("%s: error %q does not name the field", tc.field, msg)
+		}
+		for _, leak := range []string{token, "123456", "api.telegram.org", "bot", "sendMessage", "chat_id"} {
+			if strings.Contains(msg, leak) {
+				t.Errorf("%s: error %q echoes input fragment %q", tc.field, msg, leak)
 			}
 		}
 	}
-	if !strings.Contains(got.ExecutionID, "ex cution") {
-		t.Fatalf("line breaks were not turned into spaces: %q", got.ExecutionID)
+}
+
+// TestAppendEnforcesMaxEntriesWithoutPrune: a flood of held events must not
+// grow the table past MaxEntries between prune runs. Append trims the oldest
+// rows in the same transaction as the insert.
+func TestAppendEnforcesMaxEntriesWithoutPrune(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	const extra = 7
+	fillRaw(t, s, MaxEntries)
+	for i := 0; i < extra; i++ {
+		mustAppend(t, s, sampleRecord())
 	}
-	if got.Changed != 0 {
-		t.Fatalf("Changed = %b; cleaning alone must not mark a field as shortened", got.Changed)
+	var n, oldest int64
+	if err := s.db.QueryRow(`SELECT COUNT(*), MIN(seq) FROM notify_log`).Scan(&n, &oldest); err != nil {
+		t.Fatal(err)
+	}
+	if n != MaxEntries {
+		t.Fatalf("%d rows after flood, want %d", n, MaxEntries)
+	}
+	if oldest != extra+1 {
+		t.Fatalf("oldest seq = %d, want %d", oldest, extra+1)
+	}
+	if removed, err := s.Prune(ctx); err != nil || removed != 0 {
+		t.Fatalf("Prune after Append trim = %d, %v; want 0, nil", removed, err)
 	}
 }
 
@@ -593,7 +714,7 @@ func TestOverlongFieldIsShortenedAndMarkedNotRejected(t *testing.T) {
 	ctx := context.Background()
 	r := sampleRecord()
 	r.ExecutionID = strings.Repeat("a", MaxExecutionID+100)
-	r.Host = strings.Repeat("ä", MaxHost) // 2 bytes per rune: twice the byte limit
+	r.Host = strings.Repeat("h", MaxHost+10)
 	mustAppend(t, s, r)
 
 	page, err := s.List(ctx, 0, 1)
@@ -604,8 +725,8 @@ func TestOverlongFieldIsShortenedAndMarkedNotRejected(t *testing.T) {
 	if len(got.ExecutionID) != MaxExecutionID {
 		t.Fatalf("ExecutionID has %d bytes, want %d", len(got.ExecutionID), MaxExecutionID)
 	}
-	if len(got.Host) > MaxHost || !utf8.ValidString(got.Host) {
-		t.Fatalf("Host %q exceeds %d bytes or is not valid UTF-8", got.Host, MaxHost)
+	if len(got.Host) != MaxHost {
+		t.Fatalf("Host has %d bytes, want %d", len(got.Host), MaxHost)
 	}
 	if got.Changed != FieldExecutionID|FieldHost {
 		t.Fatalf("Changed = %b, want exactly execution id and host marked", got.Changed)
@@ -785,13 +906,78 @@ func TestSchemaHasNoTokenOrTargetURLColumn(t *testing.T) {
 	}
 }
 
-func TestCleanKeepsPrintableAndBoundsRunes(t *testing.T) {
-	got, cut := clean("a\u0007b"+string(rune(0xAD))+"c", 10)
-	if got != "a�b�c" || cut {
-		t.Fatalf("clean = %q, %v; want control and soft-hyphen replaced, not cut", got, cut)
+// TestSchemaEnforcesEveryCheck inserts one valid row, then changes one column
+// at a time. Each invalid value must be refused by the table, and the limit
+// values themselves must be accepted, so each CHECK is exercised at its edge.
+func TestSchemaEnforcesEveryCheck(t *testing.T) {
+	s, _ := newTestStore(t)
+	base := map[string]string{
+		"at": "1", "kind": "'lease.expiring'", "host": "'h'", "state": "'expiring'",
+		"reason": "''", "execution_id": "''", "link": "''", "outcome": "'failed'",
+		"providers": "0", "changed": "0",
 	}
-	got, cut = clean("äöü", 3)
-	if got != "ä" || !cut {
-		t.Fatalf("clean at byte limit 3 = %q, %v; want %q, true", got, cut, "ä")
+	insert := func(over map[string]string) error {
+		vals := make(map[string]string, len(base))
+		for k, v := range base {
+			vals[k] = v
+		}
+		for k, v := range over {
+			vals[k] = v
+		}
+		cols := []string{"at", "kind", "host", "state", "reason", "execution_id", "link", "outcome", "providers", "changed"}
+		list := make([]string, len(cols))
+		for i, c := range cols {
+			list[i] = vals[c]
+		}
+		_, err := s.db.Exec(`INSERT INTO notify_log (at, kind, host, state, reason, execution_id, link, outcome, providers, changed)
+			VALUES (` + strings.Join(list, ", ") + `)`)
+		return err
+	}
+	quote := func(s string) string { return "'" + s + "'" }
+
+	// Edges that must be accepted.
+	accept := map[string]map[string]string{
+		"host at 64 bytes":        {"host": quote(strings.Repeat("h", MaxHost))},
+		"execution_id at 128":     {"execution_id": quote(strings.Repeat("e", MaxExecutionID))},
+		"link at 256 bytes":       {"link": quote("/" + strings.Repeat("l", MaxLink-1))},
+		"providers 16":            {"providers": "16"},
+		"changed 7":               {"changed": "7"},
+		"reason empty":            {"reason": "''"},
+		"outcome held_rate_limit": {"outcome": "'held_rate_limit'"},
+		"kind digest":             {"kind": "'digest'"},
+		"state summary":           {"state": "'summary'"},
+	}
+	for name, over := range accept {
+		if err := insert(over); err != nil {
+			t.Errorf("%s: database refused a valid row: %v", name, err)
+		}
+	}
+
+	// Edges that must be refused: one per CHECK clause and bound.
+	refuse := map[string]map[string]string{
+		"kind not a code":          {"kind": "'execution'"},
+		"kind URL":                 {"kind": quote("https://api.telegram.org/bot1:x/sendMessage")},
+		"state not a code":         {"state": "'FAILED'"},
+		"state URL":                {"state": quote("bot1:x")},
+		"reason not a code":        {"reason": "'Timeout'"},
+		"reason URL":               {"reason": quote("https://api.telegram.org/bot1:x/sendMessage")},
+		"outcome not a code":       {"outcome": "'maybe'"},
+		"outcome empty":            {"outcome": "''"},
+		"outcome NULL":             {"outcome": "NULL"},
+		"providers -1":             {"providers": "-1"},
+		"providers 17":             {"providers": "17"},
+		"changed 8":                {"changed": "8"},
+		"changed -1":               {"changed": "-1"},
+		"host 65 bytes":            {"host": quote(strings.Repeat("h", MaxHost+1))},
+		"host 33 runes (66 bytes)": {"host": quote(strings.Repeat("ä", 33))},
+		"execution_id 129 bytes":   {"execution_id": quote(strings.Repeat("e", MaxExecutionID+1))},
+		"link 257 bytes":           {"link": quote("/" + strings.Repeat("l", MaxLink))},
+		"host NULL":                {"host": "NULL"},
+		"link NULL":                {"link": "NULL"},
+	}
+	for name, over := range refuse {
+		if err := insert(over); err == nil {
+			t.Errorf("%s: the database accepted the row", name)
+		}
 	}
 }
