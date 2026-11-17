@@ -219,6 +219,10 @@ type Options struct {
 	// (ADR 0011 amendment 1; settings.go). Nil hides the section and makes
 	// its routes answer 404.
 	VulnAgent VulnAgentSettings
+	// OpsAgent serves the settings section "Ops-Agent" (ADR 0016 D12;
+	// settings_opsagent.go). Nil hides the section and makes its routes
+	// answer 404.
+	OpsAgent OpsAgentSettings
 	// RegistryReads is the server's caller of executor private registry
 	// reads (cu06 part 1, G13; leases_registry.go): the registry scope of
 	// the lease form, registry leases on the lease pages and executor-read
@@ -294,6 +298,10 @@ type Handler struct {
 	// (settings.go).
 	vulnAgent        VulnAgentSettings
 	vulnAgentPending *vulnAgentPendingTable
+	// opsAgent and opsAgentPending serve the ops agent settings
+	// (settings_opsagent.go).
+	opsAgent        OpsAgentSettings
+	opsAgentPending *opsAgentPendingTable
 	// registryReads serves private registry leases and digests; nil hides
 	// them.
 	registryReads RegistryReads
@@ -389,6 +397,8 @@ func New(o Options) (*Handler, error) {
 		vulnPending:          newVulnPendingTable(),
 		vulnAgent:            o.VulnAgent,
 		vulnAgentPending:     newVulnAgentPendingTable(),
+		opsAgent:             o.OpsAgent,
+		opsAgentPending:      newOpsAgentPendingTable(),
 		now:                  o.Now,
 
 		guestPowerProposals: newGuestPowerProposals(),
@@ -629,6 +639,8 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("POST /settings/appearance", h.handleSettingsAppearance)
 	mux.HandleFunc("POST /settings/vuln-agent/begin", h.handleVulnAgentBegin)
 	mux.HandleFunc("POST /settings/vuln-agent/commit", h.handleVulnAgentCommit)
+	mux.HandleFunc("POST /settings/ops-agent/begin", h.handleOpsAgentBegin)
+	mux.HandleFunc("POST /settings/ops-agent/commit", h.handleOpsAgentCommit)
 	mux.HandleFunc("POST /ui/nav", h.handleNav)
 	// Network: assets and IPAM-light (M9-1).
 	mux.HandleFunc("GET /network", h.handleNetworkPage)
