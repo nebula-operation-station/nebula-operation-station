@@ -38,25 +38,33 @@ const (
 //
 // Ratio: a linear scanner's steps per byte settle to a constant, and the
 // finite-size offset shrinks as N grows. A quadratic scanner's steps per
-// byte grow in proportion to N, so from 4 KiB to 16 KiB they grow 4x.
-// The measured steps per byte for the real scanner, 4 KiB -> 16 KiB, are
-// at most 1.26x ("[a](b": 308 -> 385; "*": 448 -> 496; "[": 896 ->
-// 992). linearFactor = 2 sits between 1.26 and 4.
+// byte grow in proportion to N, so from 4 KiB to 8 KiB they grow 2x. The
+// measured steps per byte for the real scanner, 4 KiB -> 8 KiB, are at
+// most 1.2x ("[a](b": 308 -> 359; "*": 448 -> 480; "[": 896 -> 960).
+// The allowed growth is linearFactorNum/linearFactorDen = 1.5x. The real
+// scanner grows at most 1.2x per byte from 4 KiB to 8 KiB, and a
+// quadratic scanner grows 2x over the same doubling, so 1.5x separates
+// them with margin on both sides.
 //
-// The largest size is 16 KiB because the "[" unit uses 16,253,440 steps
-// there, within 3% of the budget; a larger size would make the real
-// scanner hit its budget and the verdict would measure the cap.
-const linearFactor = 2
+// The largest size is 8 KiB because the "[" unit spends 7,864,832 steps
+// there, 47% of the budget, while 16 KiB spent 97%. The headroom keeps the
+// verdict about linearity: a linear change that makes the scanner somewhat
+// more expensive still stays under the budget, so the guard does not
+// degrade into errOverBudget.
+const (
+	linearFactorNum = 3
+	linearFactorDen = 2
+)
 
 // linearSizes are the source sizes the linearity check measures. Each is
 // rounded down to a whole number of unit repeats.
-var linearSizes = [3]int{4 << 10, 8 << 10, 16 << 10}
+var linearSizes = [3]int{4 << 10, 6 << 10, 8 << 10}
 
 // scanUnits are the delimiter patterns that drive the scanners.
 var scanUnits = []string{"*", "**", "[", "[a](b", "`", "](", "|", "| a |\n|-|\n", "- ", "&"}
 
-// errNotLinear reports that scan steps per byte grow beyond linearFactor
-// between the smallest and a larger size.
+// errNotLinear reports that scan steps per byte grow beyond
+// linearFactorNum/linearFactorDen between the smallest and a larger size.
 var errNotLinear = errors.New("scan steps grow faster than the source")
 
 // errOverBudget reports that a measurement reached the scanner's own
@@ -66,12 +74,12 @@ var errOverBudget = errors.New("scan steps reach the budget; the scanner is not 
 // checkLinearity measures the scan steps for unit at linearSizes under lim
 // and returns nil if they grow linearly. It returns an error wrapping
 // errOverBudget if a measurement reaches lim.budget, and one wrapping
-// errNotLinear if steps per byte at a size exceed linearFactor times
-// steps per byte at the smallest size. TestScanStepsAreLinear and its
+// errNotLinear if steps per byte at a size exceed linearFactorNum/
+// linearFactorDen times steps per byte at the smallest size. TestScanStepsAreLinear and its
 // self-test both call this function; only lim differs.
-func checkLinearity(lim scanLimits, unit string) error {
-	var sizes, steps [len(linearSizes)]int
-	for i, n := range linearSizes {
+func checkLinearity(lim scanLimits, sizes [len(linearSizes)]int, unit string) error {
+	var measured, steps [len(linearSizes)]int
+	for i, n := range sizes {
 		src := strings.Repeat(unit, n/len(unit))
 		_, s, err := renderLimited([]byte(src), Options{}, lim)
 		if err != nil {
@@ -80,14 +88,16 @@ func checkLinearity(lim scanLimits, unit string) error {
 		if s >= lim.budget {
 			return fmt.Errorf("unit %q: %d steps for %d bytes: %w", unit, s, len(src), errOverBudget)
 		}
-		sizes[i], steps[i] = len(src), s
+		measured[i], steps[i] = len(src), s
 	}
-	// steps[i]/sizes[i] <= linearFactor * steps[0]/sizes[0], cross-multiplied
+	// steps[i]/measured[i] <= (num/den) * steps[0]/measured[0], cross-multiplied
 	// in int64 so the products cannot overflow on 32-bit platforms.
-	for i := 1; i < len(linearSizes); i++ {
-		if int64(steps[i])*int64(sizes[0]) > linearFactor*int64(steps[0])*int64(sizes[i]) {
-			return fmt.Errorf("unit %q: %d steps for %d bytes, %d for %d bytes (per-byte ratio over x%d): %w",
-				unit, steps[0], sizes[0], steps[i], sizes[i], linearFactor, errNotLinear)
+	for i := 1; i < len(sizes); i++ {
+		lhs := int64(steps[i]) * int64(measured[0]) * linearFactorDen
+		rhs := linearFactorNum * int64(steps[0]) * int64(measured[i])
+		if lhs > rhs {
+			return fmt.Errorf("unit %q: %d steps for %d bytes, %d for %d bytes (per-byte growth over %d/%d): %w",
+				unit, steps[0], measured[0], steps[i], measured[i], linearFactorNum, linearFactorDen, errNotLinear)
 		}
 	}
 	return nil
@@ -97,7 +107,7 @@ func checkLinearity(lim scanLimits, unit string) error {
 // with the source under the production limits.
 func TestScanStepsAreLinear(t *testing.T) {
 	for _, unit := range scanUnits {
-		if err := checkLinearity(defaultLimits, unit); err != nil {
+		if err := checkLinearity(defaultLimits, linearSizes, unit); err != nil {
 			t.Error(err)
 		}
 	}
@@ -105,9 +115,23 @@ func TestScanStepsAreLinear(t *testing.T) {
 
 // unboundedLimits is a scanner with no window and no budget: every scan
 // runs to the end of the source, so its work is quadratic in the input.
-// Its budget is far above maxScanSteps, so the budget never stops it at
-// the sizes the check uses; only the ratio comparison can fail.
-var unboundedLimits = scanLimits{window: 1 << 40, linkDest: 1 << 40, budget: 1 << 40}
+// The limits are 1<<30: far above every offset the scanners compute (the
+// source is at most MaxSourceBytes), so a scan still runs to the end of
+// the source, and the value fits in a 32-bit int. It must stay well below
+// MaxInt: window is added to a source offset, and math.MaxInt would wrap
+// that sum negative, which ends each scan at once and makes the scanner
+// look linear. The budget never stops the self-test (about 134 million
+// steps at 16 KiB, below 1<<30); only the ratio comparison can fail.
+const unboundedLimit = 1 << 30
+
+var unboundedLimits = scanLimits{window: unboundedLimit, linkDest: unboundedLimit, budget: unboundedLimit}
+
+// selfTestSizes are the sizes the quadratic self-test measures. They span
+// a 4x range, so a quadratic scanner's per-byte cost grows 4x, well above
+// linearFactorNum/linearFactorDen. The production sizes span only 2x, and
+// the real scanner's per-byte cost grows 1.2x over that range, which is
+// why the two sets differ. checkLinearity is the same function for both.
+var selfTestSizes = [len(linearSizes)]int{4 << 10, 8 << 10, 16 << 10}
 
 // TestQuadraticScannerFailsLinearity runs the same checkLinearity as
 // TestScanStepsAreLinear with an injected quadratic scanner. It must
@@ -115,7 +139,7 @@ var unboundedLimits = scanLimits{window: 1 << 40, linkDest: 1 << 40, budget: 1 <
 // linearity check can fail.
 func TestQuadraticScannerFailsLinearity(t *testing.T) {
 	for _, unit := range []string{"*", "["} {
-		if err := checkLinearity(unboundedLimits, unit); !errors.Is(err, errNotLinear) {
+		if err := checkLinearity(unboundedLimits, selfTestSizes, unit); !errors.Is(err, errNotLinear) {
 			t.Errorf("unit %q: quadratic scanner: got %v, want errNotLinear", unit, err)
 		}
 	}
