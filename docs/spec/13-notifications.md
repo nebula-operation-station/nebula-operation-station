@@ -2,7 +2,7 @@
 
 # Notifications and integrations
 
-Nebula tells the admin when something needs attention, because nobody keeps an operations UI open all day. Notifications and the API can never trigger an execution. The API is read-only except for the vulnerability agent API below, whose one write scope writes only into the findings store (previously: "Notifications and the API are read-only paths").
+Nebula tells the admin when something needs attention, because nobody keeps an operations UI open all day. Notifications and the API can never trigger an execution. The API is read-only except the findings store and the notes store: the vulnerability agent API below writes only into the findings store, and the ops agent API below only into the notes store and the agent's last-run status ([v28-13-01](#v28-13-01); previously: "The API is read-only except for the vulnerability agent API below, whose one write scope writes only into the findings store"; before that: "Notifications and the API are read-only paths").
 
 **Notification events.**
 
@@ -11,7 +11,7 @@ Nebula tells the admin when something needs attention, because nobody keeps an o
 - Stage gate waiting for manual continue.
 - Host-key mismatch (always sent, cannot be muted).
 - Executor locked after a restart, so scheduled checks are paused.
-- Optional daily digest of open updates, reboots pending and hosts not READY.
+- Optional daily digest; its content is in [v28-13-02](#v28-13-02) (previously: open updates, reboots pending and hosts not READY).
 
 Per-host mute with expiry. Messages carry host, state, reason and execution ID, not log content; including the last log lines is opt-in, because logs are untrusted and may be sensitive.
 
@@ -69,6 +69,67 @@ Messages carry **structured fields only**: host label, class, severity, count an
 - `assistant.settings_changed`: an admin changed an assistant setting: the LLM base URL, the model name, the credential reference, `allow_plain_http`, `assistant.enabled`, the NOS source addresses (Q6) or the lab networks ([01-product.md](01-product.md#v27-01-01), [02-architecture.md](02-architecture.md#v27-02-01)). One message per change: a changed URL is how an attacker with an admin session would redirect questions and inventory facts to their own endpoint (T3), and a changed source address is how they would make the assistant offer a copyable `--from <attacker-address>` (T1, T4), and a widened lab network is how they would let the dialer reach an endpoint in `100.64.0.0/10` outside the former lab set, never a public one ([02-architecture.md](02-architecture.md#v27-02-01); previously: "an endpoint outside the former lab set", which overstated the widening) (T3, T10) (previously: a change of the NOS source addresses raised no event, and the lab networks had no owner).
 
 The message carries structured fields only: the admin, the time, which settings changed, the old and new URL in full (scheme, host, port and path; the URL can hold no user info, query or fragment), the old and new model name, the old and new credential reference name (a name only, never the credential), the old and new value of `allow_plain_http`, the old and new NOS source addresses, the old and new lab networks, the replaced and the new settings version, and the old and new enabled state (previously: only the old and new URL **host**, so a change of scheme, port or path on the same host was not visible). It never carries the credential, a question, an answer or any inventory fact. The same fields go into the audit entry, which is written for every change. The event is informational: it triggers nothing, and the assistant has no API scope (it is reachable only from the web UI panel).
+
+<a id="v28-13-01"></a>
+<!-- Spec revision (ADR 0016, ag01): v28-13-01 -->
+**Ops agent API (ADR 0016 D2–D7, D14).** Under `/api/v1/ops/`, separate from the read-only API and the vulnerability agent API, two new scopes exist for one dedicated API token (default name `ops-agent`, used by `nebula-ops-agent`, [02-architecture.md](02-architecture.md#v28-02-01)) (previously: no ops scopes):
+
+| Scope | Endpoints | Writes |
+| --- | --- | --- |
+| `ops.read` | `GET /api/v1/ops/agent-config`, `GET /api/v1/ops/work` | Nothing |
+| `ops.notes.write` | `POST /api/v1/ops/notes`, `POST /api/v1/ops/status` | Only the notes store and the agent's last-run status |
+
+- **Exclusive token**, same rule as the vulnerability token: both scopes live only on this token, the token carries no other scope (never `execution_logs.read`, never a vuln scope), at most one such token, and a configuration that breaks the rule is refused at start. A source-address allowlist is allowed on this token; on the NOS host it is set to loopback (previously: the allowlist was allowed only on the vulnerability agent token). Revoking the token means removing it from `server.json`. The token is server-side like the other API tokens: it is not an executor credential and confers no SSH, vault, permit, proposal or host access.
+- **No execution through the API (G1).** No scope of `/api/v1` creates a proposal, plan, permit, lease, schedule, approval or batch. `ops.notes.write` writes nothing outside the notes store and the agent's last-run status. A note is never an input to planning, proposals, permits, schedules, leases or the executor; its only effect outside the notes store is the origin rule of [05-authentication.md](05-authentication.md#v28-05-01), which can only make an approval stricter.
+- **`GET /api/v1/ops/agent-config`** serves the agent the stored ops agent settings ([03-processes-and-data.md](03-processes-and-data.md#v28-03-01)); never an LLM credential, which the server never stores, and the agent re-validates what it reads against its own rules.
+- **Finding groups and work items (D3).** A group is one inventory host and one remediation path: `os` (open host package findings of that host, kernel included) or `image:<image subject ID>` (open findings of one image that runs on that host); device findings get no fix notes. A group is eligible when it has at least one open finding in tier `critical` or `high`; findings in state `accepted_risk` or `false_positive` are left out; medium and low findings of the group are given as counts. The **input digest** is SHA-256 over the canonical JSON of the group's projection; a group is **due** when no stored note carries its current digest. `GET /api/v1/ops/work` returns at most 20 due items, ordered by tier, KEV, score; each item is complete, so the agent needs no second read. Open admin questions come first; a `summary` item is due once per day.
+- **Projection (D4).** The server builds every work item from a fixed struct in a projector package (`internal/opsfacts`, with an import-boundary test like `internal/helpfacts`); the projection, not the agent, is the security boundary.
+
+  | Field | Data class `lab` | Data class `external` |
+  | --- | --- | --- |
+  | Host | Inventory host ID, label (≤ 64 bytes), environment, criticality | Never |
+  | Exposure | The `vu-prio-v1` exposure level; listening ports as number and protocol, ≤ 32 (*verify* the source, ADR 0009 listeners) | Never |
+  | Findings (≤ 40 per group by score, the rest as counts) | Vulnerability ID, source package, installed version, fixed version or fix state, tier, score, KEV flag | Never |
+  | Fix status per finding | The ADR 0011 D8 result: fix verified, update not verified, no candidate, no fix yet, reboot required | Never |
+  | Step candidates | Opaque key (`c1`…), action ID, host ID, fixed NOS label | Never |
+  | Counts | Per tier and KEV for the group | Per tier and KEV for the whole fleet |
+  | Documentation | ≤ 3 chunks from `internal/helpsearch`, picked by the agent | Same |
+
+  Step candidates come only from the suggestion allowlist ([12-inventory.md](12-inventory.md#v28-12-01)). **Never in any item:** addresses, endpoints, fingerprints, credentials or their references, user names, execution output or logs, audit attributes, the vulnerability agent's assessment text, flows, topology, attack-path steps, notification targets. In data class `external` the server serves only `summary` items with counts per tier and no `fix` item; answers get the question, documentation chunks and the same counts. The server decides what it serves from the stored class; the agent cannot ask for more. ADR 0011 Q6 is unchanged for the vulnerability agent export (`vuln-inventory-v1` carries no labels).
+- **Bounds (named constants).** Item ≤ 32 KiB, page ≤ 20 items, 60 requests per hour per token.
+- **`POST /api/v1/ops/notes` (D6, D7).** One JSON object, checked strictly (unknown fields and invalid UTF-8 rejected):
+
+  | Field | Rule |
+  | --- | --- |
+  | `kind` | `fix`, `summary` or `answer` |
+  | `ref` | Group key (`fix`), day (`summary`) or question ID (`answer`); must exist |
+  | `digest` | Must equal the server's **current** input digest for `ref`; a stale digest is refused |
+  | Text fields | `fix`: `summary` ≤ 600 bytes, each step's `why` ≤ 300 bytes, ≤ 3 `mitigations` of `text` ≤ 400 bytes, `urgency` ≤ 300 bytes; `summary` and `answer`: `text` ≤ 2 KiB. Printable UTF-8 with newlines; control, bidi and zero-width characters rejected; a text that contains `://` or `www.` is rejected |
+  | `steps` | ≤ 6 in order. Each `(action_id, host_id)` must be in the suggestion allowlist, in the catalog, on an existing host that is the group's host, **and** among the candidates the server computes for that digest. No parameters. `answer` notes carry no steps |
+  | `citations` | ≤ 3 chunk IDs of the embedded documentation index |
+
+  A `fix` note in data class `external` is refused. On acceptance the server stores, with the note, its own snapshot of the group's facts; the "What" part of the card is rendered from that snapshot, never from model text. Idempotent by `(kind, ref, digest)`: the same body is a no-op, a different one is `409` and audited. A newer note for the same `ref` supersedes the older one. At most 100 notes per day; retention 30 days or 500 notes, whichever is reached first, pruned with injected time. Notes are **visible to admins only**; every other user gets `404`.
+- **`POST /api/v1/ops/status`.** The agent's per-run status: items seen, LLM calls, token counts, discarded outputs, refusal reasons; never prompt or answer text, never the token.
+- **Audit (D14).** Every API access (existing `api_read`); every accepted or rejected note with token, kind, ref, digest, length and SHA-256, never the text; every question with user and length, never the text; every settings change; the origin of every marked execution ([07-execution-model.md](07-execution-model.md#v28-07-01)).
+
+<a id="v28-13-02"></a>
+<!-- Spec revision (ADR 0016, ag01): v28-13-02 -->
+**Notifications: server only, outbound only (ADR 0016 D10, D12).** The agent sends nothing; all messages come from `internal/notify` with its existing providers, limits and plain-text rule.
+
+- **Outbound only.** NOS never reads from a notification provider. NOS sends to Telegram, ntfy and the webhook and **never reads** from a provider: no `getUpdates`, no incoming webhook endpoint, no bot commands, no free text. The only Telegram API method NOS calls is `sendMessage`; a test fixes that. Questions are asked only in the NOS UI (previously: not stated).
+- **No model text in any message.** Every message is a deterministic server template with structured fields.
+- **Notification log and inbox.** Every event the server sends, holds back (rate limit, mute) or fails to deliver is stored with its structured fields and outcome (30 days, at most 5,000 entries). The web UI shows it as the "Notifications" list. It works without the agent (previously: no stored notification list).
+- **New deterministic events.** They need no agent and no LLM and are delivered first (previously: none of these; the daily digest was named but not built):
+
+  | Event | Rule |
+  | --- | --- |
+  | `lease.expiring` | A read lease or schedule grant expires within 7 days, and again within 1 day; once per grant and threshold |
+  | `lease.run_failed` | A leased run failed; once per grant, action and host until the next success |
+  | Daily digest | Optional, at a configured time: open updates, reboots pending, hosts not READY, grants expiring within 7 days, open findings per tier and KEV count, failed executions of the last 24 h. Counts only |
+  | `opsagent.suggestion_new` | A `fix` note was accepted for a group whose top tier is `critical` or `high`. Text: "Neuer Fix-Vorschlag für <host label>, Tier <tier>" (English: "New fix suggestion for <host label>, tier <tier>") plus a link into the NOS UI. Once per group and tier episode, inside the existing hourly limit and digest |
+  | `opsagent.settings_changed` | An admin changed an ops agent setting ([03-processes-and-data.md](03-processes-and-data.md#v28-03-01)); the event carries the old and new URL, model and data class |
+
+- If the agent or the LLM is down, every notification is unchanged; the Ops tab shows "no suggestion yet" and the agent's last-run status. A notification never triggers an execution.
 
 **Findings export (ADR 0011 D9).** Findings can be exported as CSV or JSON with structured fields only; admin only, and every export is audited before any data is written. CSV cells are prefixed against formula injection ([09-untrusted-host-data.md](09-untrusted-host-data.md#v24-09-02)). D9 excludes the assessment text from CSV by default; the merged export (`internal/vulnnotify`) carries no assessment text, admin reasons, host labels or addresses in either format (implementation choice).
 
