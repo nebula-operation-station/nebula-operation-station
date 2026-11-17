@@ -20,7 +20,8 @@ import (
 func newAPIToken(spec string, w io.Writer) error {
 	name, scopeList, ok := strings.Cut(spec, ":")
 	if !ok || name == "" || scopeList == "" {
-		return errors.New("-api-token: give NAME:SCOPE[,SCOPE], scopes inventory.read, operations.read, execution_logs.read")
+		return errors.New("-api-token: give NAME:SCOPE[,SCOPE], scopes inventory.read, operations.read, execution_logs.read, " +
+			"ops.read, ops.notes.write (vuln scopes and ops scopes are dedicated tokens, see the server.json docs)")
 	}
 	scopes := strings.Split(scopeList, ",")
 	entry := serverconfig.APIToken{Name: name, Scopes: scopes}
@@ -39,5 +40,11 @@ func newAPIToken(spec string, w io.Writer) error {
 	}
 	fmt.Fprintf(w, "API token (shown once; give it to the client as \"Authorization: Bearer <token>\"):\n\n  %s\n\n", tok)
 	fmt.Fprintf(w, "Add this to \"api\": {\"enabled\": true, \"tokens\": [ ... ]} in server.json and restart nebula-server:\n\n      %s\n", js)
+	if entry.HasOpsScope() {
+		fmt.Fprintln(w, "\nOps token: it must be the only token with ops scopes and may carry no other scope (ADR 0016 D2).")
+	}
+	if entry.HasVulnScope() {
+		fmt.Fprintln(w, "\nVuln token: it must be the only token with vuln scopes and may carry no other scope (ADR 0011 D3).")
+	}
 	return nil
 }
