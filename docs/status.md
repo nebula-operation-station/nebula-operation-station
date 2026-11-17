@@ -23,20 +23,41 @@ the decisions, and [docs/implementation](implementation/) the per-area plans.
 | Integrity monitoring | [0015](adr/0015-integrity-monitoring.md) | accepted; baseline digest as tamper evidence (#579), sshd extraction and symlink resolution libraries (#608, #612, #613, #622, #629) merged |
 | Ops agent | ADR 0016 (PR #637) | proposed; implementation chain ag (26 tickets) imported |
 
-### Landed in the last 24 hours (52 PRs, #530–#635)
+### Landed in the last 7 days (223 PRs, 2026-11-10 to 2026-11-17)
 
-- **Fuzzing and limits (tq/tw):** fuzz targets for registrymeta (#594), PVE live contract (#593),
-  netdev spool/ingest (#592), vulnfeed (#591), discovery spool (#611), executions decoders (#609),
-  enrollment renderers (#610), server.json (#617), forwarded-header resolver (#615), prelude (#586);
-  limit/limit+1 tests (#595, #616, #618, #626, #630); netpolicy zoned-address fix (#590).
-- **Integrity (ig, ADR 0015):** #579, #600, #608, #612, #613, #622, #623, #629.
-- **Vulnerability management (vu, ADR 0011):** #588, #606, #624, #631, #635.
-- **Network security advisor (ns, ADR 0012):** #597, #599, #601, #625.
-- **Help assistant (as, ADR 0014):** #596, #607, #621.
-- **Network devices (nd, ADR 0010):** #627; security acceptance tests (#530).
-- **Containers (cu):** #605, #619, #620, #632.
-- **Other:** helpfacts oracles (#589), discovery import (#628), go.sum cleanup (#598).
-- **Docs:** #602, #603, #604, #614, #634.
+Merged per day: 27 (11-10), 60 (11-11), 54 (11-12), 31 (11-13), 25 (11-16), 26 (11-17).
+
+- **Network devices (ADR 0010):** registry store, registration and dial-time address checks
+  (#418, #421), admin RPCs and collector role (#423, #426), probe and credential lifecycle (#427),
+  read-grant profile and enforcement (#434, #436), config versions, diff and approved baseline
+  (#494, #516), device pages and firewall view (#441, #460), acceptance tests (#518, #530),
+  credential/lease ordering (#627).
+- **Vulnerability management (ADR 0011):** attack paths UI and traffic-map overlay (#412),
+  "fix with" links (#411), vulnerability agent API client and tool-calling agent (#464, #514),
+  device findings from vendor advisories end to end (#606), export fuzz (#635).
+- **Network security advisor (ADR 0012):** reachability engine – snapshot, NAT, rule evaluation,
+  explain chain, budgets (#466, #479, #484, #497); rule checks (#501, #507, #515); pure libraries
+  for vu-prio-v2, reputation and EDL (#597, #599, #601, #625).
+- **One-step enrollment (ADR 0013):** spec revision (#461, #468, #472, #476), script generator with
+  pairing code and NetBird section (#474, #480, #485), offer store (#475, #483, #492), permits
+  (#495, #498), local config and pairing RPCs (#490, #504, #521), unauthenticated script download
+  (#519, #615).
+- **Help assistant (ADR 0014):** spec as default-off feature (#553, #557), in-app help under /help
+  (#455), fuzzed matcher and sanitizer (#584, #589), command checks (#596, #621), BM25F scoring (#607).
+- **Integrity monitoring (ADR 0015):** ADR proposed and accepted (#451, #463, #470), spec revision
+  (#502), installed-files manifest (#503, #544), executor-held baseline digest (#579), sshd and
+  symlink libraries (#608, #612, #613, #622, #629), escaped path form (#623).
+- **Release and signing:** offline staging and draft release builds on tags (#533, #534),
+  security-key verifier command (#538), signed root rotation via local admin command (#577).
+- **Containers:** private registry reads and private image transfer into docker load
+  (#452, #478, #528, #605), member checks (#619, #620, #632).
+- **CI and tests:** self-hosted runners on nos-ci (#435), Go toolchain update (#442); fuzz wave
+  across parsers and decoders (#586–#595, #609–#611, #615–#618) and limit/limit+1 tests.
+- **Docs:** 45 docs PRs, among them security-tests inventory (#602, #634), schedule grants (#603),
+  getting-started guide (#614).
+
+Today (2026-11-17): 26 PRs, mainly fuzz and limit tests, integrity libraries and #627; ADR 0016 ops
+agent proposed (#637) and its 26-ticket plan (ag01–ag26) imported.
 
 ## In progress
 
@@ -68,6 +89,6 @@ the decisions, and [docs/implementation](implementation/) the per-area plans.
 
 ## Changelog
 
-- **2026-11-17:** status page created. 52 PRs merged in 24 h (fuzzing wave, integrity libraries,
+- **2026-11-17:** status page created (window: last 7 days). 26 PRs merged today (fuzzing wave, integrity libraries,
   vulnerability findings end to end, ADR 0012 libraries); ADR 0016 ops agent proposed (#637) and
   its 26-ticket chain imported.
