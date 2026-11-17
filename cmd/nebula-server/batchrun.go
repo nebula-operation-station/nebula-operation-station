@@ -6,10 +6,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"maps"
 	"net"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -18,6 +20,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
@@ -232,25 +235,63 @@ var (
 	errBatchActionMissing   = errors.New("the action is not available on this server")
 	errBatchVersionMissing  = errors.New("the action at the approved version is not available on this server")
 	errBatchScriptChanged   = errors.New("the action's script differs from the approved artifact")
+	errBatchParamsChanged   = errors.New("the approved parameters do not name the bound container")
 	errBatchHostMissing     = errors.New("the host is not in the inventory")
 	errBatchHostNoEndpoint  = errors.New("the host has no endpoint")
 	errBatchTargetStaysBusy = errors.New("the target stayed busy with another batch member")
 	errBatchHoldStoreDown   = errors.New("the executor could not persist its held batch targets")
 )
 
+// batchImageIDRe is a local image ID (sha256:, 64 lowercase hex).
+var batchImageIDRe = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// checkBoundParams refuses a bound member (G5b) whose approved parameters do
+// not name its bound container: the document must be exactly the container
+// and image IDs, the container ID must be the member's container, and the
+// document must be the one whose hash the approval froze.
+func checkBoundParams(m executions.BatchMemberView) error {
+	if m.ContainerID == "" {
+		return errBatchParamsChanged
+	}
+	var doc map[string]string
+	if err := json.Unmarshal([]byte(m.Params), &doc); err != nil || len(doc) != 2 ||
+		doc["container_id"] != m.ContainerID || !batchImageIDRe.MatchString(doc["image_id"]) {
+		return errBatchParamsChanged
+	}
+	if h, err := canonical.HashParameters([]byte(m.Params)); err != nil || h != m.ParametersHash {
+		return errBatchParamsChanged
+	}
+	return nil
+}
+
 // memberInputs returns the exact script of a member, its run timeout and
 // its host's endpoints; an error means the member cannot be handed over as
 // approved.
 func (r *batchRunner) memberInputs(ctx context.Context, m executions.BatchMemberView) (script []byte, timeout time.Duration, eps []string, err error) {
-	a, ok := actions.Lookup(m.ActionID)
-	if !ok || a.Version != m.ModuleVersion {
-		if r.actions == nil {
-			return nil, 0, nil, errBatchActionMissing
-		}
-		var found bool
-		a, found, err = r.actions.Action(ctx, m.ActionID, m.ModuleVersion)
-		if err != nil || !found || a.ID != m.ActionID || a.Version != m.ModuleVersion {
+	var a actions.Action
+	if actions.IsBatchMemberOnly(m.ActionID) {
+		// A bound member (G5b) is only ever its batch version, and its
+		// approved parameters must name the container it is bound to.
+		ba, ok := actions.LookupBatchMember(m.ActionID, m.ModuleVersion)
+		if !ok {
 			return nil, 0, nil, errBatchVersionMissing
+		}
+		if err = checkBoundParams(m); err != nil {
+			return nil, 0, nil, err
+		}
+		a = ba
+	} else {
+		var ok bool
+		a, ok = actions.Lookup(m.ActionID)
+		if !ok || a.Version != m.ModuleVersion {
+			if r.actions == nil {
+				return nil, 0, nil, errBatchActionMissing
+			}
+			var found bool
+			a, found, err = r.actions.Action(ctx, m.ActionID, m.ModuleVersion)
+			if err != nil || !found || a.ID != m.ActionID || a.Version != m.ModuleVersion {
+				return nil, 0, nil, errBatchVersionMissing
+			}
 		}
 	}
 	if sum := sha256.Sum256(a.Script); hex.EncodeToString(sum[:]) != m.ArtifactSHA256 {

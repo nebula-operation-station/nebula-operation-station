@@ -596,6 +596,27 @@ func TestDockerControlIsShown(t *testing.T) {
 	}
 }
 
+// A bound docker control that stopped on a binding mismatch shows that as
+// its own reason; an ordinary precheck refusal does not.
+func TestDockerControlContainerChangedIsOwnReason(t *testing.T) {
+	const changed = `{"format":"docker-control-v1","phase":"precheck","code":"container_changed","reason":"the container ID or image no longer matches the approved binding"}`
+	const plain = `{"format":"docker-control-v1","phase":"precheck","reason":"Docker is not installed"}`
+	const own = "the bound container changed, so nothing was run: the container ID or image no longer matches the approved binding"
+	for name, tc := range map[string]struct {
+		result string
+		want   bool
+	}{"binding mismatch": {changed, true}, "ordinary refusal": {plain, false}} {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeOps{exec: executions.Execution{ID: opID, ActionID: "docker.restart", State: "finished", CreatedAt: time.Unix(1791960000, 0),
+				Params: `{"container_id":"` + strings.Repeat("c", 64) + `"}`, Hosts: []executions.Host{{HostID: "a", State: "finished", Class: "success", Result: []byte(tc.result)}}}}
+			page := getBody(t, opsHandler(t, f, nil), "/operations/"+opID)
+			if strings.Contains(page, own) != tc.want || !strings.Contains(page, "Precheck failed:") {
+				t.Fatal(page)
+			}
+		})
+	}
+}
+
 func TestDockerUpdatesAreShown(t *testing.T) {
 	enc := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 	b := "sha256:" + strings.Repeat("b", 64)
