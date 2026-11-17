@@ -1584,13 +1584,15 @@ func TestNetDevCompromisedServerCannotWidenOrExtendLeases(t *testing.T) {
 // at the registry's current identity does read, so the refusals come from
 // the lease binding, not from the device.
 //
-// Nor does such a lease go live later: when an admin rotation, a block
-// and unblock, or a removal brings the registry to (or past) the identity
-// it names, the lifecycle has revoked every lease of the device (ADR 0010
-// D1/D2), so the lease that now matches the registry still reads nothing.
-// (Re-pin runs the same revocation; it needs a HIGH permit and a probe of
-// the new key, and is covered by
-// internal/executor TestNetDevLifecycleRevokesLeasesAheadOfRegistry.)
+// Nor does such a lease go live later: when an admin rotation, a block,
+// an unblock (for a lease approved during the block), or a removal brings
+// the registry to (or past) the identity it names, the lifecycle has
+// revoked every lease of the device (ADR 0010 D1/D2), so the lease that
+// now matches the registry still reads nothing. (The first credential set
+// is TestNetDevLeaseBeforeFirstCredentialStaysDead. Re-pin runs the same
+// revocation; it needs a HIGH permit and a probe of the new key, and is
+// covered by internal/executor
+// TestNetDevLifecycleRevokesLeasesAheadOfRegistry.)
 func TestNetDevLeaseAheadOfRegistryAuthorizesNothing(t *testing.T) {
 	e := newNDEnv(t, peercred.RoleServer)
 	cbsVersion := pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION
@@ -1662,9 +1664,17 @@ func TestNetDevLeaseAheadOfRegistryAuthorizesNothing(t *testing.T) {
 		t.Fatalf("block: %v", err)
 	}
 	requireRevoked("block", nextID)
+	// A lease approved while the device is blocked is revoked by the
+	// unblock: lifting the block must not make it usable once a rotation
+	// reaches the version it names.
+	blockedID := e.approve(e.leaseDoc(2*time.Hour, 24, 900, next))
+	if e.approvedGrant(blockedID).GetRevokedUnix() != 0 {
+		t.Fatalf("lease approved during the block is revoked before the unblock")
+	}
 	if _, err := e.svc.UnblockNetDevice(ctx, &pb.UnblockNetDeviceRequest{DeviceId: ndDevice, Confirm: "yes"}); err != nil {
 		t.Fatalf("unblock: %v", err)
 	}
+	requireRevoked("unblock", blockedID)
 	// Registry at version 2; the server proposes, the admin approves a
 	// lease for version 3 again, and only the rotation revokes that one.
 	laterID := e.approve(e.leaseDoc(2*time.Hour, 24, 900, next))
@@ -1688,6 +1698,76 @@ func TestNetDevLeaseAheadOfRegistryAuthorizesNothing(t *testing.T) {
 	if got := e.authorizedReads(); got != n {
 		t.Errorf("reads authorized after the lifecycle steps: %d audit lines, want %d", got, n)
 	}
+	e.requireNoSecret()
+}
+
+// TestNetDevLeaseBeforeFirstCredentialStaysDead (ND-21 1, ADR 0010 D1/D2):
+// a lease for credential_version 1 can be approved while a registered
+// device has no read credential yet (version 0). The admin's first
+// credential set brings the registry to exactly that version; it revokes
+// every lease of the device, so the lease that now matches the registry
+// reads nothing. A lease approved after the set, at the then current
+// identity, reads: the refusal comes from the revocation, not the device.
+func TestNetDevLeaseBeforeFirstCredentialStaysDead(t *testing.T) {
+	const fresh, freshEndpoint = "edge-sw", "10.20.0.3"
+	freshPin := strings.Repeat("cd", 32)
+	e := newNDEnv(t, peercred.RoleServer)
+	ctx := e.ctx()
+	cbsVersion := pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION
+	v := vault.New(e.db)
+	v.SetMinParams(ndVaultParams)
+	if err := v.Unlock([]byte(passphrase)); err != nil {
+		t.Fatalf("unlock registry vault: %v", err)
+	}
+	if _, err := (&executor.NetDeviceRegistry{Store: e.db, Vault: v}).RegisterNetDevice(ctx, executor.NetDeviceRegistration{
+		DeviceID: fresh, Family: netdevcontract.FamilyCBS, Label: "edge switch", Endpoint: freshEndpoint, Port: 22,
+		PinKind: netdevcontract.PinSSHHostKey, Pin: freshPin, By: "admin",
+	}); err != nil {
+		t.Fatalf("register device: %v", err)
+	}
+	freshTarget := func() permit.NetDeviceTarget {
+		t.Helper()
+		for _, d := range e.devices() {
+			if d.GetDeviceId() == fresh {
+				return permit.NetDeviceTarget{DeviceID: fresh, TrustPin: d.GetTrustPin(), TrustGeneration: d.GetTrustGeneration(),
+					CredentialVersion: d.GetCredentialVersion(), Reads: []string{schedgrant.NetDeviceReadCBSVersion}}
+			}
+		}
+		t.Fatalf("device %s not registered", fresh)
+		return permit.NetDeviceTarget{}
+	}
+	tgt := freshTarget()
+	if tgt.CredentialVersion != 0 || tgt.TrustGeneration != 1 {
+		t.Fatalf("fixture: %s at credential version %d, trust generation %d; want 0, 1", fresh, tgt.CredentialVersion, tgt.TrustGeneration)
+	}
+	// A lease of the other device must survive the set.
+	otherID := e.approve(e.leaseDoc(2*time.Hour, 24, 900, e.target(schedgrant.NetDeviceReadCBSVersion)))
+	n := e.authorizedReads()
+
+	tgt.CredentialVersion = 1
+	aheadID := e.approve(e.leaseDoc(2*time.Hour, 24, 900, tgt))
+	e.wantRefused("read before any credential exists", n, e.read(fresh, cbsVersion), codes.FailedPrecondition)
+
+	e.clock.add(16 * time.Minute)
+	if _, err := e.svc.SetNetDeviceCredential(ctx, &pb.SetNetDeviceCredentialRequest{
+		DeviceId: fresh, Username: ndUser, Secret: []byte(ndSecret),
+	}); err != nil {
+		t.Fatalf("set credential: %v", err)
+	}
+	if got := freshTarget(); got.CredentialVersion != 1 || got.TrustGeneration != tgt.TrustGeneration || got.TrustPin != tgt.TrustPin {
+		t.Fatalf("after the first set: %+v, want exactly the lease identity %+v", got, tgt)
+	}
+	if e.approvedGrant(aheadID).GetRevokedUnix() == 0 {
+		t.Errorf("first credential set left lease %s, approved before any credential existed, active", aheadID)
+	}
+	if e.approvedGrant(otherID).GetRevokedUnix() != 0 {
+		t.Errorf("first credential set of %s revoked lease %s of %s", fresh, otherID, ndDevice)
+	}
+	e.wantRefused("read after the first set reached the lease's version", n, e.read(fresh, cbsVersion), codes.PermissionDenied)
+
+	// Control: a lease approved after the set, at the current identity, reads.
+	e.approve(e.leaseDoc(time.Hour, 24, 900, freshTarget()))
+	e.wantAuthorized(n, e.read(fresh, cbsVersion))
 	e.requireNoSecret()
 }
 
