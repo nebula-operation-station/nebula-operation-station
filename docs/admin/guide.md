@@ -472,6 +472,21 @@ Add hosts under **Inventory**, one by one or with **Import CSV**. A host
 has an ID, endpoints in the order to try, an environment (used by
 DEV → QA → PROD rollouts), a criticality, tags and groups.
 
+The **Endpoints** section on the host's **Settings** tab shows the primary
+endpoint and the alternates in the order Nebula tries them. You can add an
+alternate (up to 4 endpoints per host), move one up or down, or remove one;
+the last endpoint cannot be removed. Two spellings of one address
+(`fd00::9` and `fd00:0::9`, or a missing port and `:22`) count as the same
+endpoint, and an endpoint another host already uses is refused here (the
+settings form warns and asks for confirmation). All
+endpoints of a host must present the same host key: the key is pinned per
+host, and a different key on any endpoint stops the run instead of
+falling back. Every endpoint change — in this section, in the settings
+form or through the JSON API — is written to the audit log with the
+endpoint order before and after. A host imported with more than 4
+endpoints keeps them and stays editable, but cannot get new ones in the
+web UI.
+
 ### 7.1 The enrollment script
 
 Enrolling gives Nebula a restricted login on the host:
