@@ -3,8 +3,11 @@
 package edl
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -138,4 +141,341 @@ func TestCheckMasksEntry(t *testing.T) {
 	if err := Check(pfx("81.10.0.9/24"), testRefusals()); !errors.Is(err, ErrIPAMNetwork) {
 		t.Fatalf("Check = %v, want ErrIPAMNetwork", err)
 	}
+}
+
+// TestCheckMappedRefusalCoversIPv4Entry confirms a refusal written in
+// IPv4-mapped form (::ffff:a.b.c.d/128 and friends) still refuses the IPv4
+// entry it denotes, in every refusal set (ADR 0012 D7). Before the fix the
+// mapped rule was in another address family and never matched.
+func TestCheckMappedRefusalCoversIPv4Entry(t *testing.T) {
+	tests := []struct {
+		name  string
+		set   string // which Refusals field receives the mapped rule
+		rule  string
+		entry string
+		want  error
+	}{
+		{"IPAM mapped /120 refuses contained v4", "IPAM", "::ffff:81.10.0.0/120", "81.10.0.7", ErrIPAMNetwork},
+		{"IPAM mapped /120 refuses containing v4", "IPAM", "::ffff:81.10.0.0/120", "81.10.0.0/16", ErrIPAMNetwork},
+		{"IPAM mapped /120 neighbour allowed", "IPAM", "::ffff:81.10.0.0/120", "81.10.1.0", nil},
+		{"NOS path mapped host refuses v4 host", "NOSPath", "::ffff:81.20.0.5/128", "81.20.0.5", ErrNOSPath},
+		{"NOS path mapped host neighbour allowed", "NOSPath", "::ffff:81.20.0.5/128", "81.20.0.6", nil},
+		{"firewall mapped host refuses v4 host", "FirewallAddresses", "::ffff:81.30.0.1/128", "81.30.0.1", ErrFirewallAddress},
+		{"firewall mapped host refuses containing v4", "FirewallAddresses", "::ffff:81.30.0.1/128", "81.30.0.0/24", ErrFirewallAddress},
+		{"protected mapped /112 refuses contained v4", "ProtectedTargets", "::ffff:81.40.0.0/112", "81.40.200.0/24", ErrProtectedTarget},
+		{"protected mapped /112 refuses containing v4", "ProtectedTargets", "::ffff:81.40.0.0/112", "81.40.0.0/15", ErrProtectedTarget},
+		{"protected mapped /112 just outside allowed", "ProtectedTargets", "::ffff:81.40.0.0/112", "81.41.0.0/16", nil},
+		{"mapped /96 refuses every IPv4 entry", "IPAM", "::ffff:0:0/96", "80.0.0.1", ErrIPAMNetwork},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var r Refusals
+			rule := []netip.Prefix{netip.MustParsePrefix(tt.rule)}
+			switch tt.set {
+			case "IPAM":
+				r.IPAM = rule
+			case "NOSPath":
+				r.NOSPath = rule
+			case "FirewallAddresses":
+				r.FirewallAddresses = rule
+			case "ProtectedTargets":
+				r.ProtectedTargets = rule
+			default:
+				t.Fatalf("unknown set %q", tt.set)
+			}
+			err := Check(pfx(tt.entry), r)
+			if tt.want == nil {
+				if err != nil {
+					t.Fatalf("Check(%s) = %v, want nil", tt.entry, err)
+				}
+				return
+			}
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("Check(%s) = %v, want %v", tt.entry, err, tt.want)
+			}
+		})
+	}
+}
+
+// TestCheckRejectsInvalidMappedRefusal ensures a mapped refusal that cannot
+// be read as an IPv4 prefix (shorter than /96) fails closed in every set.
+func TestCheckRejectsInvalidMappedRefusal(t *testing.T) {
+	tests := []struct {
+		name string
+		rule string
+	}{
+		{"mapped /95 refused", "::ffff:0:0/95"},
+		{"mapped /80 refused", "::ffff:81.0.0.0/80"},
+		{"mapped /0 refused", "::ffff:0:0/0"},
+	}
+	sets := []struct {
+		name string
+		set  func(r *Refusals, p []netip.Prefix)
+	}{
+		{"IPAM", func(r *Refusals, p []netip.Prefix) { r.IPAM = p }},
+		{"NOSPath", func(r *Refusals, p []netip.Prefix) { r.NOSPath = p }},
+		{"FirewallAddresses", func(r *Refusals, p []netip.Prefix) { r.FirewallAddresses = p }},
+		{"ProtectedTargets", func(r *Refusals, p []netip.Prefix) { r.ProtectedTargets = p }},
+	}
+	for _, tt := range tests {
+		for _, s := range sets {
+			t.Run(tt.name+" in "+s.name, func(t *testing.T) {
+				var r Refusals
+				s.set(&r, []netip.Prefix{netip.MustParsePrefix(tt.rule)})
+				if err := Check(pfx("80.0.0.1"), r); !errors.Is(err, ErrInvalidRefusal) {
+					t.Fatalf("Check = %v, want ErrInvalidRefusal", err)
+				}
+			})
+		}
+	}
+}
+
+// TestCheckRefusalSpellingDecidesOnMaskedPrefix confirms the result depends on
+// the masked refusal, not on how it is spelled (ADR 0012 D7). A refusal that
+// overlaps ::ffff:0:0/96 without lying inside it must be ErrInvalidRefusal,
+// whether its address is written in the ::ffff: form or the masked form. A
+// refusal inside the range refuses the IPv4 entries it denotes.
+func TestCheckRefusalSpellingDecidesOnMaskedPrefix(t *testing.T) {
+	tests := []struct {
+		name  string
+		rule  string
+		entry string
+		want  error
+	}{
+		// Overlapping ::ffff:0:0/96 without being inside it: fail closed.
+		{"mapped /95 spelled ::ffff:", "::ffff:0:0/95", "80.0.0.1", ErrInvalidRefusal},
+		{"mapped /95 masked form ::fffe:", "::fffe:0:0/95", "80.0.0.1", ErrInvalidRefusal},
+		{"covering /80 refused", "::/80", "80.0.0.1", ErrInvalidRefusal},
+		{"covering /80 refused for IPv6 entry", "::/80", "2606:4700::1111", ErrInvalidRefusal},
+		{"covering /0 refused", "::/0", "80.0.0.1", ErrInvalidRefusal},
+		{"covering /0 refused for IPv6 entry", "::/0", "2606:4700::1111", ErrInvalidRefusal},
+		{"masked ::ffff:0:0/80 spelling refused", "::ffff:0:0/80", "80.0.0.1", ErrInvalidRefusal},
+		// Inside ::ffff:0:0/96: the IPv4 entry it denotes is refused.
+		{"mapped /104 refuses denoted v4 /8", "::ffff:81.0.0.0/104", "81.10.0.7", ErrIPAMNetwork},
+		{"mapped /104 with host bits set refuses denoted v4", "::ffff:81.10.0.7/104", "81.200.0.1", ErrIPAMNetwork},
+		{"mapped /120 with host bits set refuses denoted v4", "::ffff:81.10.0.7/120", "81.10.0.9", ErrIPAMNetwork},
+		{"mapped /96 refuses every IPv4 entry", "::ffff:0:0/96", "80.0.0.1", ErrIPAMNetwork},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := Refusals{IPAM: []netip.Prefix{netip.MustParsePrefix(tt.rule)}}
+			err := Check(pfx(tt.entry), r)
+			if tt.want == nil {
+				if err != nil {
+					t.Fatalf("Check(%s) = %v, want nil", tt.entry, err)
+				}
+				return
+			}
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("Check(%s) = %v, want %v", tt.entry, err, tt.want)
+			}
+		})
+	}
+}
+
+// TestCheckEquivalentMappedSpellingsGiveSameResult pairs each mapped refusal
+// with its IPv4 equivalent and requires identical results for a set of
+// entries. The mapped spelling must never silently change the outcome.
+func TestCheckEquivalentMappedSpellingsGiveSameResult(t *testing.T) {
+	pairs := []struct {
+		mapped, plain string
+	}{
+		{"::ffff:81.10.0.0/120", "81.10.0.0/24"},
+		{"::ffff:81.10.0.7/120", "81.10.0.0/24"},
+		{"::ffff:81.0.0.0/104", "81.0.0.0/8"},
+		{"::ffff:0:0/96", "0.0.0.0/0"},
+	}
+	entries := []string{"81.10.0.7", "81.10.0.0/16", "81.0.0.0/7", "81.200.0.1", "80.0.0.1", "82.0.0.1"}
+	for _, pr := range pairs {
+		for _, e := range entries {
+			t.Run(pr.mapped+" vs "+pr.plain+" for "+e, func(t *testing.T) {
+				mapped := Refusals{IPAM: []netip.Prefix{netip.MustParsePrefix(pr.mapped)}}
+				plain := Refusals{IPAM: []netip.Prefix{netip.MustParsePrefix(pr.plain)}}
+				gotM := Check(pfx(e), mapped)
+				gotP := Check(pfx(e), plain)
+				// Errors name the masked entry and the sentinel, so equal
+				// outcomes give equal text; nil gives "<nil>".
+				if fmt.Sprint(gotM) != fmt.Sprint(gotP) {
+					t.Fatalf("mapped %s gives %v, plain %s gives %v", pr.mapped, gotM, pr.plain, gotP)
+				}
+			})
+		}
+	}
+}
+
+// fuzzPrefix parses a CIDR or a bare address. ok is false for malformed input.
+func fuzzPrefix(s string) (netip.Prefix, bool) {
+	if p, err := netip.ParsePrefix(s); err == nil {
+		return p, true
+	}
+	a, err := netip.ParseAddr(s)
+	if err != nil {
+		return netip.Prefix{}, false
+	}
+	return netip.PrefixFrom(a, a.BitLen()), true
+}
+
+// rangeSpan is the first and last address of a prefix, as 16 big-endian bytes
+// (IPv4 is left-aligned with zero padding). It is the independent overlap
+// oracle for FuzzCheck: two prefixes of one family overlap exactly when their
+// spans intersect. It shares no code with Check.
+type rangeSpan struct {
+	v4     bool
+	lo, hi [16]byte
+}
+
+// spanOf returns the span of addr/bits. addr must be valid.
+func spanOf(addr netip.Addr, bits int) rangeSpan {
+	var s rangeSpan
+	n := 16 // bytes in the address
+	var raw [16]byte
+	if addr.Is4() {
+		s.v4 = true
+		n = 4
+		b := addr.As4()
+		copy(raw[:], b[:])
+	} else {
+		raw = addr.As16()
+	}
+	s.lo, s.hi = raw, raw
+	for i := bits; i < n*8; i++ {
+		mask := byte(0x80) >> (i % 8)
+		s.lo[i/8] &^= mask // host bits to 0 for the first address
+		s.hi[i/8] |= mask  // host bits to 1 for the last address
+	}
+	return s
+}
+
+// overlaps reports whether the two spans share an address.
+func (s rangeSpan) overlaps(o rangeSpan) bool {
+	if s.v4 != o.v4 {
+		return false
+	}
+	return bytes.Compare(s.lo[:], o.hi[:]) <= 0 && bytes.Compare(o.lo[:], s.hi[:]) <= 0
+}
+
+// mappedSpan is the span of ::ffff:0:0/96, the IPv4-mapped IPv6 range.
+var mappedSpan = spanOf(netip.MustParseAddr("::ffff:0:0"), 96)
+
+// oracleRefusalSpan returns the span a refusal covers. It decides by range
+// arithmetic, not by Is4In6 or Unmap: a refusal whose span intersects
+// ::ffff:0:0/96 must lie inside it, or it is invalid (ok false). A refusal
+// inside the range denotes the IPv4 span of its last 32 bits, so the IPv4
+// entries it covers are the ones it refuses.
+func oracleRefusalSpan(p netip.Prefix) (rangeSpan, bool) {
+	s := spanOf(p.Addr(), p.Bits())
+	if s.v4 || !s.overlaps(mappedSpan) {
+		return s, true
+	}
+	if bytes.Compare(mappedSpan.lo[:], s.lo[:]) > 0 || bytes.Compare(s.hi[:], mappedSpan.hi[:]) > 0 {
+		return rangeSpan{}, false // overlaps the mapped range without lying inside it
+	}
+	var v4 [4]byte
+	copy(v4[:], s.lo[12:16])
+	return spanOf(netip.AddrFrom4(v4), p.Bits()-96), true
+}
+
+// FuzzCheck compares Check with a range-based oracle for arbitrary entries and
+// refusal rules. Each refusal set gets at most one rule (empty means none).
+// Checks: no panic; the error is ErrInvalidRefusal for an invalid rule, else
+// ErrSpecialRange for a special-range overlap, else the first refusal set
+// whose span overlaps the entry, else nil. The input rules are not modified.
+func FuzzCheck(f *testing.F) {
+	f.Add("81.10.0.7", "81.10.0.0/24", "", "", "")
+	f.Add("81.10.0.0/16", "::ffff:81.10.0.0/120", "", "", "")
+	f.Add("81.20.0.5", "", "::ffff:81.20.0.5/128", "", "")
+	f.Add("81.30.0.0/24", "", "", "::ffff:81.30.0.1/128", "")
+	f.Add("81.40.200.0/24", "", "", "", "::ffff:81.40.0.0/112")
+	f.Add("80.0.0.1", "::ffff:0:0/96", "", "", "")
+	f.Add("80.0.0.1", "::ffff:0:0/95", "", "", "")
+	f.Add("80.0.0.1", "::fffe:0:0/95", "", "", "")
+	f.Add("80.0.0.1", "::/80", "", "", "")
+	f.Add("80.0.0.1", "::ffff:81.0.0.0/104", "", "", "")
+	f.Add("2606:4700::1111", "::/0", "fe80::/10", "", "")
+	f.Add("::ffff:81.0.1.5", "81.0.0.0/8", "", "", "")
+	f.Add("10.1.2.3/8", "", "", "", "")
+	f.Add("80.0.0.0/4", "2001:db8::/32", "81.0.0.0/8", "::1", "0.0.0.0/0")
+	f.Add("0.0.0.0/0", "", "", "", "")
+	f.Fuzz(func(t *testing.T, entryStr, ipam, nos, fw, prot string) {
+		entry, ok := fuzzPrefix(entryStr)
+		if !ok {
+			return
+		}
+		raw := []string{ipam, nos, fw, prot}
+		var sets [4][]netip.Prefix
+		for i, s := range raw {
+			if s == "" {
+				continue
+			}
+			p, ok := fuzzPrefix(s)
+			if !ok {
+				return
+			}
+			sets[i] = []netip.Prefix{p}
+		}
+		r := Refusals{IPAM: sets[0], NOSPath: sets[1], FirewallAddresses: sets[2], ProtectedTargets: sets[3]}
+		before := [4][]netip.Prefix{slices.Clone(sets[0]), slices.Clone(sets[1]), slices.Clone(sets[2]), slices.Clone(sets[3])}
+
+		// Oracle: the sentinel Check must return, or nil.
+		names := [4]error{ErrIPAMNetwork, ErrNOSPath, ErrFirewallAddress, ErrProtectedTarget}
+		var want error
+		for _, set := range sets {
+			for _, p := range set {
+				if _, valid := oracleRefusalSpan(p); !valid {
+					want = ErrInvalidRefusal
+				}
+			}
+		}
+		es := spanOf(entry.Addr(), entry.Bits())
+		inSpecial := false
+		for _, sp := range specialRanges {
+			if es.overlaps(spanOf(sp.Addr(), sp.Bits())) {
+				inSpecial = true
+				break
+			}
+		}
+		if want == nil && inSpecial {
+			want = ErrSpecialRange
+		}
+		if want == nil {
+		outer:
+			for i, set := range sets {
+				for _, p := range set {
+					s, _ := oracleRefusalSpan(p)
+					if es.overlaps(s) {
+						want = names[i]
+						break outer
+					}
+				}
+			}
+		}
+
+		err := Check(entry, r) // must not panic
+		if want == nil {
+			if err != nil {
+				t.Fatalf("Check(%v) = %v, want nil", entry, err)
+			}
+		} else if !errors.Is(err, want) {
+			t.Fatalf("Check(%v) = %v, want %v", entry, err, want)
+		}
+
+		// An entry inside a special range is always refused, and is refused as
+		// a special range unless a refusal rule is itself invalid.
+		for _, sp := range specialRanges {
+			if sp.Bits() <= entry.Bits() && sp.Contains(entry.Addr()) {
+				if err == nil {
+					t.Fatalf("Check(%v) = nil, entry lies inside special range %v", entry, sp)
+				}
+				if want != ErrInvalidRefusal && !errors.Is(err, ErrSpecialRange) {
+					t.Fatalf("Check(%v) = %v, want ErrSpecialRange inside %v", entry, err, sp)
+				}
+			}
+		}
+
+		for i := range sets {
+			if !slices.Equal(sets[i], before[i]) {
+				t.Fatalf("Check modified refusal set %d: %v -> %v", i, before[i], sets[i])
+			}
+		}
+	})
 }
