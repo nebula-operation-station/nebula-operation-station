@@ -1020,6 +1020,44 @@ type branchCtx struct {
 	osByName bool
 }
 
+// hardware records a branch that names hardware (a series, switch or
+// router line) as the model scope of the products below it: it is never an
+// OS, so it never makes a product cover every device of an OS. When no OS
+// branch is above it and the name places it in one ecosystem ("Cisco
+// Business 350 Series Managed Switches" for vendor:cisco:cbs), it also
+// stands in as the OS, so that its products stay visible to the devices of
+// that ecosystem; they are model-scoped to the hardware name, which no
+// device model equals exactly, so they are coverage unknown, never a
+// finding or a clean status.
+func (ctx *branchCtx) hardware(vendor CSAFVendor, name string) {
+	ctx.p.Models = []string{name}
+	if ctx.p.OS == "" && osEcosystem(vendor, name) != "" {
+		ctx.p.OS, ctx.osByName = name, false
+	}
+}
+
+// hardwareWords are the words that make a branch name a hardware line.
+var hardwareWords = []string{"series", "switch", "switches", "router", "routers"}
+
+// isHardwareName reports whether a branch name names hardware: it holds a
+// series, switch or router word and no software or firmware word ("Cisco
+// IOS XE Software for Catalyst Switches" stays a software name).
+func isHardwareName(name string) bool {
+	words := strings.FieldsFunc(strings.ToLower(name), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	hw := false
+	for _, w := range words {
+		switch {
+		case w == "software" || w == "firmware":
+			return false
+		case slices.Contains(hardwareWords, w):
+			hw = true
+		}
+	}
+	return hw
+}
+
 func (w *treeWalker) walk(b csafBranch, ctx branchCtx, depth int) error {
 	if depth > MaxCSAFBranchDepth {
 		return fmt.Errorf("branches deeper than %d: %w", MaxCSAFBranchDepth, ErrCSAFMalformed)
@@ -1039,12 +1077,17 @@ func (w *treeWalker) walk(b csafBranch, ctx branchCtx, depth int) error {
 		if ctx.p.Product == "" {
 			ctx.p.Product = b.Name
 		}
-		if osEcosystem(w.vendor, b.Name) != "" {
+		switch {
+		case isHardwareName(b.Name):
+			ctx.hardware(w.vendor, b.Name)
+		case osEcosystem(w.vendor, b.Name) != "":
 			ctx.p.OS, ctx.osByName = b.Name, false
 		}
 	case "product_name":
 		ctx.p.Product = b.Name
 		switch {
+		case isHardwareName(b.Name):
+			ctx.hardware(w.vendor, b.Name)
 		case osEcosystem(w.vendor, b.Name) != "":
 			ctx.p.OS, ctx.osByName = b.Name, true
 		case ctx.p.OS != "" && ctx.osByName:
@@ -1250,7 +1293,10 @@ func classifyCSAFProduct(vendor CSAFVendor, p CSAFProduct) string {
 }
 
 // osEcosystem maps a branch name that names an operating system of the
-// vendor to its D2 ecosystem; "" when it names none.
+// vendor to its D2 ecosystem; "" when it names none. The tree walker never
+// asks it about a hardware name (isHardwareName) for an OS: a hardware line
+// such as "Cisco Business 350 Series Managed Switches" is a model scope,
+// and is only placed in its ecosystem by branchCtx.hardware.
 func osEcosystem(vendor CSAFVendor, os string) string {
 	name := " " + strings.ToLower(os) + " "
 	switch vendor {

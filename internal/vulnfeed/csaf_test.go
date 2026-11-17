@@ -349,8 +349,8 @@ func TestParseCSAFAdvisoryCiscoProductTree(t *testing.T) {
 		"CSAFPID-0002": {Vendor: "Cisco", Product: "Cisco IOS", Family: "Cisco IOS", OS: "Cisco IOS", Version: "15.2(4)M11", Train: "15.2M", Ecosystem: "vendor:cisco:ios"},
 		"CSAFPID-0003": {Vendor: "Cisco", Product: "Cisco IOS XE Software", Family: "Cisco IOS XE Software", OS: "Cisco IOS XE Software", Version: "17.3.1", Train: "17.3", Ecosystem: "vendor:cisco:ios-xe"},
 		"CSAFPID-0004": {Vendor: "Cisco", Product: "Cisco IOS XE Software", Family: "Cisco IOS XE Software", OS: "Cisco IOS XE Software", Version: "17.3.8", Train: "17.3", Ecosystem: "vendor:cisco:ios-xe"},
-		"CSAFPID-0005": {Vendor: "Cisco", Product: "Cisco Business 350 Series Managed Switches", Family: "Cisco Business 350 Series Managed Switches", OS: "Cisco Business 350 Series Managed Switches", Version: "3.2.0.84", Train: "3.2", Ecosystem: "vendor:cisco:cbs"},
-		"CSAFPID-0006": {Vendor: "Cisco", Product: "Cisco Business 350 Series Managed Switches", Family: "Cisco Business 350 Series Managed Switches", OS: "Cisco Business 350 Series Managed Switches", Version: "3.3.0.16", Train: "3.3", Ecosystem: "vendor:cisco:cbs"},
+		"CSAFPID-0005": {Vendor: "Cisco", Product: "Cisco Business 350 Series Managed Switches", Family: "Cisco Business 350 Series Managed Switches", OS: "Cisco Business 350 Series Managed Switches", Models: []string{"Cisco Business 350 Series Managed Switches"}, Version: "3.2.0.84", Train: "3.2", Ecosystem: "vendor:cisco:cbs"},
+		"CSAFPID-0006": {Vendor: "Cisco", Product: "Cisco Business 350 Series Managed Switches", Family: "Cisco Business 350 Series Managed Switches", OS: "Cisco Business 350 Series Managed Switches", Models: []string{"Cisco Business 350 Series Managed Switches"}, Version: "3.3.0.16", Train: "3.3", Ecosystem: "vendor:cisco:cbs"},
 	}
 	checkProducts(t, adv, want)
 	v := adv.Vulnerabilities[0]

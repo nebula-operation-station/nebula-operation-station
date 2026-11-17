@@ -35,7 +35,7 @@ func scopeOf(p CSAFProduct) productScope {
 // and relationships. The full product name never yields a model, and a
 // scope that cannot be read exactly is marked incomplete.
 func TestCSAFProductModelsFromTree(t *testing.T) {
-	const panos, iosxe = "vendor:paloalto:panos", "vendor:cisco:ios-xe"
+	const panos, iosxe, cbs = "vendor:paloalto:panos", "vendor:cisco:ios-xe", "vendor:cisco:cbs"
 	pan := func(inner string) string {
 		return `{"branches":[{"category":"vendor","name":"Palo Alto Networks","branches":[` + inner + `]}]}`
 	}
@@ -84,10 +84,26 @@ func TestCSAFProductModelsFromTree(t *testing.T) {
 			pan(`{"category":"product_name","name":"PAN-OS","branches":[{"category":"product_name","name":"GlobalProtect","branches":[
 {"category":"product_version","name":"10.2.9","product":{"product_id":"P","name":"x"}}]}]}`),
 			"P", productScope{Ecosystem: panos, OS: "PAN-OS", Version: "10.2.9", Incomplete: true}},
-		{"product_family that names no OS is no model and no OS", CSAFVendorCisco,
+		{"hardware product_family is no OS; it is the model scope", CSAFVendorCisco,
 			`{"branches":[{"category":"vendor","name":"Cisco","branches":[{"category":"product_family","name":"Cisco Catalyst 9300 Series Switches","branches":[
 {"category":"product_version","name":"17.9.1","product":{"product_id":"C","name":"Cisco IOS XE Software 17.9.1"}}]}]}]}`,
-			"C", productScope{Version: "17.9.1"}},
+			"C", productScope{Version: "17.9.1", Models: []string{"Cisco Catalyst 9300 Series Switches"}}},
+		{"CBS hardware family is model-scoped, not OS-wide", CSAFVendorCisco,
+			`{"branches":[{"category":"vendor","name":"Cisco","branches":[{"category":"product_family","name":"Cisco Business 350 Series Managed Switches","branches":[
+{"category":"product_version","name":"3.4.0.17","product":{"product_id":"C","name":"x"}}]}]}]}`,
+			"C", productScope{Ecosystem: cbs, OS: "Cisco Business 350 Series Managed Switches", Version: "3.4.0.17", Models: []string{"Cisco Business 350 Series Managed Switches"}}},
+		{"CBS hardware product_name is the model, not the OS", CSAFVendorCisco,
+			`{"branches":[{"category":"vendor","name":"Cisco","branches":[{"category":"product_name","name":"Cisco Business 350 Series Managed Switches","branches":[
+{"category":"product_version","name":"3.4.0.17","product":{"product_id":"C","name":"x"}}]}]}]}`,
+			"C", productScope{Ecosystem: cbs, OS: "Cisco Business 350 Series Managed Switches", Version: "3.4.0.17", Models: []string{"Cisco Business 350 Series Managed Switches"}}},
+		{"hardware family above the OS family scopes the OS product", CSAFVendorCisco,
+			`{"branches":[{"category":"vendor","name":"Cisco","branches":[{"category":"product_family","name":"Catalyst 9300 Series Switches","branches":[
+{"category":"product_family","name":"Cisco IOS XE Software","branches":[{"category":"product_version","name":"17.9.1","product":{"product_id":"C","name":"x"}}]}]}]}]}`,
+			"C", productScope{Ecosystem: iosxe, OS: "Cisco IOS XE Software", Version: "17.9.1", Models: []string{"Catalyst 9300 Series Switches"}}},
+		{"software name with a series word stays the OS", CSAFVendorCisco,
+			`{"branches":[{"category":"vendor","name":"Cisco","branches":[{"category":"product_family","name":"Cisco IOS XE Software for Catalyst 9300 Series Switches","branches":[
+{"category":"product_version","name":"17.9.1","product":{"product_id":"C","name":"x"}}]}]}]}`,
+			"C", productScope{Ecosystem: iosxe, OS: "Cisco IOS XE Software for Catalyst 9300 Series Switches", Version: "17.9.1"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

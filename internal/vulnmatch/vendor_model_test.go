@@ -2,7 +2,10 @@
 
 package vulnmatch
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestProductIsExactModelOnlyByFoldedEquality: a CSAF product is the device's
 // model only when the normalised model strings are equal. Normalisation folds
@@ -42,6 +45,39 @@ func TestProductIsExactModelOnlyByFoldedEquality(t *testing.T) {
 			got := newDeviceModel(tc.model).isExact(newProductModel(tc.product))
 			if got != tc.want {
 				t.Fatalf("isExact(%q, %q) = %v, want %v", tc.product, tc.model, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestOnlyDistinctExactSKUsDiffer: a product model is provably another
+// model only when both it and the device model are exact SKUs (upper-case
+// letters and digits in '-'-separated parts), they differ and neither is a
+// whole-word run of the other. Series names, CPE and lower-case spellings
+// and family words never prove a device not affected.
+func TestOnlyDistinctExactSKUsDiffer(t *testing.T) {
+	tests := []struct {
+		name, product, model string
+		want                 bool
+	}{
+		{"distinct sibling SKUs", "CBS350-24P", "CBS350-8T", true},
+		{"distinct PAN-OS appliances", "PA-440", "PA-3220", true},
+		{"distinct Catalyst SKUs", "C9300-48T", "C9300-24T", true},
+		{"series name", "Catalyst 9300 Series Switches", "C9300-24T", false},
+		{"CPE spelling", "catalyst_9300-24t", "C9300-24T", false},
+		{"lower-case sibling", "cbs350-24p", "CBS350-8T", false},
+		{"family word without part", "CBS350", "CBS350-8T", false},
+		{"longer SKU of the device", "CBS350-24P-4G", "CBS350-24P", false},
+		{"shorter SKU of the device", "CBS350-24P", "CBS350-24P-4G", false},
+		{"device model not an exact SKU", "CBS350-24P", "cbs350-8t", false},
+		{"letters only", "PA-ABC", "PA-440", false},
+		{"over-long SKU", "C9300-" + strings.Repeat("A", MaxExactSKULen), "C9300-24T", false},
+		{"equal", "PA-440", "PA-440", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := newDeviceModel(tc.model).differs(newProductModel(tc.product)); got != tc.want {
+				t.Fatalf("differs(%q, %q) = %v, want %v", tc.product, tc.model, got, tc.want)
 			}
 		})
 	}

@@ -4,6 +4,7 @@ package vulnmatch
 
 import (
 	"cmp"
+	"regexp"
 	"slices"
 	"strings"
 	"unicode"
@@ -27,8 +28,10 @@ func vendorFeed(eco string) (string, bool) {
 // ecosystem (vendor_advisory, D2). The OS (ecosystem) and the models come
 // from the structured product tree (vulnfeed.CSAFProduct.OS and Models): a
 // product applies when it names no model or the device's exact model; a
-// product naming only other models does not affect the device; a near name
-// or an unreadable model scope is a coverage gap. internal/vulnver has no
+// product naming only exact SKUs distinct from the device's exact SKU does
+// not affect the device; any other model scope (series or family names, CPE
+// spellings, shorter or longer SKUs, unreadable scopes) is a coverage gap
+// of that vulnerability. internal/vulnver has no
 // vendor version scheme, so the matcher never orders firmware versions: only an exact
 // product_version equal to the firmware decides. A firmware that only a
 // version range could cover, or that appears in contradicting status
@@ -97,27 +100,27 @@ const (
 	scopeAll modelScope = iota
 	// scopeDevice: one of the product's models is the device's model.
 	scopeDevice
-	// scopeUnknown: the product's scope cannot be read exactly, or it names
-	// a near name of the device's model (one model string is a word run of
-	// the other: "PA-440 Series", "CBS350-24P-4G" for "CBS350-24P"). Whether
-	// it is the device is unknown.
+	// scopeUnknown: the product's scope cannot be read exactly, or one of
+	// its models is not provably another model (see differs): a series or
+	// family name, a CPE or lower-case spelling, a shorter or longer SKU of
+	// the device. Whether it is the device is unknown.
 	scopeUnknown
-	// scopeOther: the product names only other models; it is not the
-	// device.
+	// scopeOther: every model of the product is an exact SKU distinct from
+	// the device's exact SKU; it is not the device.
 	scopeOther
 )
 
 // scope classifies a product's models against the device's model.
 func (d deviceModel) scope(p indexedProduct) modelScope {
-	near := false
+	unknown := false
 	for _, pm := range p.models {
 		if d.isExact(pm) {
 			return scopeDevice
 		}
-		near = near || d.isNear(pm)
+		unknown = unknown || !d.differs(pm)
 	}
 	switch {
-	case p.p.ModelsIncomplete || near:
+	case p.p.ModelsIncomplete || unknown:
 		return scopeUnknown
 	case len(p.models) == 0:
 		return scopeAll
@@ -125,15 +128,33 @@ func (d deviceModel) scope(p indexedProduct) modelScope {
 	return scopeOther
 }
 
-// isNear reports whether one normalised model is a whole-word run of the
-// other without being equal: the same model may be named with a series,
-// region or vendor word, or as a shorter or longer SKU. A near name is never
-// a hit and never proof that the device is not affected.
-func (d deviceModel) isNear(p productModel) bool {
-	if d.key == "" || p.key == "" || d.key == p.key {
+// differs reports whether the product's model is provably not the device's
+// model: both are exact SKUs (see isExactSKU), they are not equal, and
+// neither is a whole-word run of the other (a shorter or longer SKU,
+// "CBS350-24P" and "CBS350-24P-4G", may name the same hardware). Anything
+// else (series names, CPE spellings, family names) is never proof that a
+// device is not affected.
+func (d deviceModel) differs(p productModel) bool {
+	if !d.sku || !p.sku || d.key == p.key {
 		return false
 	}
-	return wordRun(d.key, p.key) || wordRun(p.key, d.key)
+	return !wordRun(d.key, p.key) && !wordRun(p.key, d.key)
+}
+
+// MaxExactSKULen caps the length of a model string read as an exact SKU.
+const MaxExactSKULen = 64
+
+// exactSKURe is the shape of an exact hardware SKU as vendors print it:
+// upper-case letters and digits in at least two '-'-separated parts
+// ("C9300-24T", "CBS350-8T", "PA-440"). Lower case, white space, '_' and
+// any other character mark a spelling (a CPE product, a series or family
+// name) that is not read as an exact SKU.
+var exactSKURe = regexp.MustCompile(`^[A-Z0-9]+(-[A-Z0-9]+)+$`)
+
+// isExactSKU reports whether model is an exact SKU: the SKU shape with at
+// least one digit, within MaxExactSKULen.
+func isExactSKU(model string) bool {
+	return len(model) <= MaxExactSKULen && exactSKURe.MatchString(model) && strings.ContainsAny(model, "0123456789")
 }
 
 // wordRun reports whether the '-'-separated words of inner appear as a
@@ -144,13 +165,15 @@ func wordRun(outer, inner string) bool {
 
 // deviceModel is a device's model in the normalised form that exact hits are
 // compared under (see normalizeModel). An empty form names no product.
+// sku reports that the device's model string is an exact SKU.
 type deviceModel struct {
 	key string
+	sku bool
 }
 
 // newDeviceModel normalises a device model once per device subject.
 func newDeviceModel(model string) deviceModel {
-	return deviceModel{key: normalizeModel(model)}
+	return deviceModel{key: normalizeModel(model), sku: isExactSKU(strings.TrimSpace(model))}
 }
 
 // isExact reports whether the product's model is the device's model: the
@@ -163,14 +186,17 @@ func (d deviceModel) isExact(p productModel) bool {
 // productModel is one of a CSAF product's models in the normalised form.
 // Only the structured Models field from the product tree is used: the full
 // name and the OS or family name carry version, series and vendor words,
-// which must never form a device model.
+// which must never form a device model. sku reports that the tree spells
+// this model as an exact SKU at least once (a product may carry both
+// "PA-220" and the CPE spelling "pa-220").
 type productModel struct {
 	key string
+	sku bool
 }
 
 // newProductModel indexes one model of a CSAF product.
 func newProductModel(model string) productModel {
-	return productModel{key: normalizeModel(model)}
+	return productModel{key: normalizeModel(model), sku: isExactSKU(strings.TrimSpace(model))}
 }
 
 // normalizeModel lower-cases s and folds every run of white space, '-' and
@@ -193,13 +219,18 @@ type indexedProduct struct {
 	models []productModel
 }
 
-// newIndexedProduct normalises the models of p.
+// newIndexedProduct normalises the models of p, one entry per normalised
+// model; the entry is an exact SKU when any of its spellings is one.
 func newIndexedProduct(p vulnfeed.CSAFProduct) indexedProduct {
 	ip := indexedProduct{p: p}
 	for _, m := range p.Models {
 		pm := newProductModel(m)
 		if pm.key == "" {
 			ip.p.ModelsIncomplete = true
+			continue
+		}
+		if i := slices.IndexFunc(ip.models, func(o productModel) bool { return o.key == pm.key }); i >= 0 {
+			ip.models[i].sku = ip.models[i].sku || pm.sku
 			continue
 		}
 		ip.models = append(ip.models, pm)
@@ -245,8 +276,8 @@ func (m *matcher) vendorDocs(feed string) []indexedAdvisory {
 // deviceVuln judges one vulnerability of one advisory for the device. Only
 // products of the device's OS (ecosystem) count, and of those only the ones
 // whose model scope applies to it: no model named, or its exact model. A
-// product naming only other models is not the device; a product whose scope
-// is unreadable or a near name leaves the vulnerability's coverage unknown.
+// product naming only distinct exact SKUs is not the device; any other
+// product scope leaves the vulnerability's coverage unknown.
 // The advisory's own products decide: a hit on the device's exact model
 // without a firmware hit here is a gap for this advisory, whatever other
 // advisories list.
