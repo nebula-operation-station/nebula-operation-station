@@ -46,11 +46,37 @@ type entry struct {
 	segs []seg
 }
 
-// scratch holds the DP buffers of matchPieces. One Set.Match call owns one
-// scratch and reuses it for every component and value, so matching does not
-// allocate per component.
+// matchBudget is the fixed work budget of one Set.Match call, counted in
+// byte steps (never wall-clock time). Every glob, piece and segment step is
+// charged against it. When a call would exceed it, the classification is
+// indeterminate and Set.Match answers SSHFile: fail closed, as ADR 0015 D7
+// requires for values it cannot classify. The budget bounds the work per
+// record path regardless of the configuration and the path.
+const matchBudget = 1 << 20
+
+// scratch holds the DP buffers of matchPieces and the work counter of one
+// Set.Match call. One call owns one scratch and reuses it for every component
+// and value, so matching does not allocate per component. The zero value is a
+// fresh budget.
 type scratch struct {
 	cur, next []bool
+	spent     int  // byte steps charged so far, never more than matchBudget
+	over      bool // the budget was exhausted; every later charge fails
+}
+
+// spend charges n steps against matchBudget. It reports false, and marks the
+// scratch over, when the charge would exceed the budget. Once over, every
+// charge fails, so callers stop without doing more work.
+func (sc *scratch) spend(n int) bool {
+	if sc.over {
+		return false
+	}
+	if n < 0 || n > matchBudget-sc.spent {
+		sc.over = true
+		return false
+	}
+	sc.spent += n
+	return true
 }
 
 // buffers returns two cleared buffers of length n, growing the scratch when
@@ -66,12 +92,22 @@ func (sc *scratch) buffers(n int) ([]bool, []bool) {
 	return cur, next
 }
 
+// globMatch reports whether name matches the glob pat. path.Match may cost
+// O(len(pat) × len(name)) per call, so the call is charged that bound before
+// it runs; a glob that does not fit the budget is not run at all.
+func globMatch(pat, name string, sc *scratch) bool {
+	if !sc.spend((len(pat) + 1) * (len(name) + 1)) {
+		return false
+	}
+	ok, err := path.Match(pat, name)
+	return err == nil && ok
+}
+
 // matchName reports whether one path component matches a single-component seg.
 func (s seg) matchName(name string, sc *scratch) bool {
 	switch s.kind {
 	case segGlob:
-		ok, err := path.Match(s.glob, name)
-		return err == nil && ok
+		return globMatch(s.glob, name, sc)
 	case segPieces:
 		return matchPieces(s.pieces, name, sc)
 	default:
@@ -80,16 +116,23 @@ func (s seg) matchName(name string, sc *scratch) bool {
 }
 
 // matchPieces reports whether name is matched by the piece sequence. It is a
-// position-set DP: each piece costs O(len(name)) for a user run (the smallest
-// live position reaches every later one) and O(len(name) × len(lit)) for a
-// literal, so with at most maxPiecesPerComponent pieces the work is bounded
-// and no input causes exponential work.
+// position-set DP over the live positions of name. A user run is linear: one
+// pass finds the first live position, and the run fills every later one. A
+// literal is not linear: it is compared at each live position, which costs up
+// to len(name) × len(lit) byte compares, so no bound below the budget is
+// claimed for it. Each piece is therefore charged against matchBudget before
+// its work, and a piece that does not fit ends the match as indeterminate
+// (the caller sees sc.over and answers SSHFile). The number of pieces is
+// capped by maxPiecesPerComponent, so no input causes exponential work.
 func matchPieces(ps []piece, name string, sc *scratch) bool {
 	cur, next := sc.buffers(len(name) + 1)
 	cur[0] = true
 	for _, p := range ps {
 		clear(next)
 		if p.user {
+			if !sc.spend(len(name) + 1) {
+				return false
+			}
 			first := -1
 			for j, ok := range cur {
 				if ok {
@@ -104,7 +147,13 @@ func matchPieces(ps []piece, name string, sc *scratch) bool {
 			}
 		} else {
 			for j, ok := range cur {
-				if ok && strings.HasPrefix(name[j:], p.lit) {
+				if !ok {
+					continue
+				}
+				if !sc.spend(len(p.lit) + 1) {
+					return false
+				}
+				if strings.HasPrefix(name[j:], p.lit) {
 					next[j+len(p.lit)] = true
 				}
 			}
@@ -125,6 +174,9 @@ func (e entry) run(comps []string, sc *scratch) (full, extendable bool) {
 	boundary := uint64(1)  // bit i: segs[:i] matched exactly the components so far
 	var many uint64        // bit i: segs[i] (segMany) matched one or more, may continue
 	for _, c := range comps {
+		if !sc.spend(len(e.segs) + 1) {
+			return false, false
+		}
 		var nb, nm uint64
 		for i, sg := range e.segs {
 			bit := uint64(1) << i
