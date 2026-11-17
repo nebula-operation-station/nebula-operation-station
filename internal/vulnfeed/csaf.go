@@ -61,6 +61,9 @@ const (
 	MaxCSAFVulnerabilities = 5000
 	// MaxCSAFProductRefs caps the product IDs of one status list.
 	MaxCSAFProductRefs = 20000
+	// MaxCSAFModelsPerProduct caps the models read for one product; a
+	// product scoped to more is marked ModelsIncomplete.
+	MaxCSAFModelsPerProduct = 64
 	// MaxCSAFBranchDepth caps the nesting of the product tree branches.
 	MaxCSAFBranchDepth = 30
 	// MaxCSAFTextBytes caps one text field (names, versions, ranges).
@@ -777,8 +780,30 @@ type CSAFProduct struct {
 	// 17.3.1, "10.2" for PAN-OS 10.2.9); empty when not derivable.
 	Train string `json:"train,omitempty"`
 	// Ecosystem is the D2 ecosystem (vendor:cisco:<os>,
-	// vendor:paloalto:panos); empty when the product is not classified.
+	// vendor:paloalto:panos); empty when the product is not classified. It
+	// is classified from OS only, never from Name or the document text.
 	Ecosystem string `json:"ecosystem,omitempty"`
+	// Family is the innermost product_family branch name.
+	Family string `json:"family,omitempty"`
+	// OS is the product_family or product_name branch name that names the
+	// product's operating system ("Cisco IOS XE Software", "PAN-OS");
+	// empty when no branch above the product names one.
+	OS string `json:"os,omitempty"`
+	// Models are the hardware models the product tree scopes the product
+	// to: a product_name branch that is not the OS (below an OS
+	// product_family, or above the OS branch), the product identification
+	// helper (model_numbers, skus, a hardware CPE), or, for a relationship,
+	// the models of the product it relates to. Empty when the tree names
+	// no model: the product covers every device of its OS. Free text (Name,
+	// the title) never yields a model.
+	Models []string `json:"models,omitempty"`
+	// ModelsIncomplete is true when the tree scopes the product to
+	// something that could not be read as exact models: a wildcard model
+	// number, SKU or CPE, more than MaxCSAFModelsPerProduct models, a
+	// non-OS product_name below an OS product_name, or a relationship to an
+	// unknown product or to one without a model. Such a product never
+	// decides that a device is not affected.
+	ModelsIncomplete bool `json:"models_incomplete,omitempty"`
 }
 
 // CSAFVulnerability is one vulnerability with its product status lists.
@@ -816,8 +841,17 @@ func (a CSAFAdvisory) FixedProducts(v CSAFVulnerability) []CSAFProduct {
 }
 
 type csafFullProductName struct {
-	ProductID string `json:"product_id"`
-	Name      string `json:"name"`
+	ProductID string      `json:"product_id"`
+	Name      string      `json:"name"`
+	Helper    *csafHelper `json:"product_identification_helper"`
+}
+
+// csafHelper is the part of product_identification_helper that is read:
+// the fields that name hardware models.
+type csafHelper struct {
+	CPE          string   `json:"cpe"`
+	ModelNumbers []string `json:"model_numbers"`
+	SKUs         []string `json:"skus"`
 }
 
 type csafBranch struct {
@@ -843,8 +877,9 @@ type csafDocumentJSON struct {
 		Branches         []csafBranch          `json:"branches"`
 		FullProductNames []csafFullProductName `json:"full_product_names"`
 		Relationships    []struct {
-			ProductReference string              `json:"product_reference"`
-			FullProductName  csafFullProductName `json:"full_product_name"`
+			ProductReference          string              `json:"product_reference"`
+			RelatesToProductReference string              `json:"relates_to_product_reference"`
+			FullProductName           csafFullProductName `json:"full_product_name"`
 		} `json:"relationships"`
 	} `json:"product_tree"`
 	Vulnerabilities []struct {
@@ -900,7 +935,7 @@ func ParseCSAFAdvisory(doc []byte, vendor CSAFVendor) (CSAFAdvisory, error) {
 
 	w := treeWalker{vendor: vendor, byID: map[string]CSAFProduct{}}
 	for _, b := range d.ProductTree.Branches {
-		if err := w.walk(b, CSAFProduct{}, 1); err != nil {
+		if err := w.walk(b, branchCtx{}, 1); err != nil {
 			return CSAFAdvisory{}, fmt.Errorf("tracking %s: product tree: %w", tr.ID, err)
 		}
 	}
@@ -910,10 +945,13 @@ func ParseCSAFAdvisory(doc []byte, vendor CSAFVendor) (CSAFAdvisory, error) {
 		}
 	}
 	for _, r := range d.ProductTree.Relationships {
-		// A combined product inherits the attributes of the product it
-		// refers to (for example a firmware version on a model).
+		// A combined product inherits the software attributes of the
+		// product it refers to (OS, version) and is scoped to the models
+		// of the product it relates to (for example PAN-OS 10.2.9
+		// installed on a PA-440).
 		ctx := w.byID[r.ProductReference]
 		ctx.ProductID, ctx.Name = "", ""
+		ctx.Models, ctx.ModelsIncomplete = relatedModels(w.byID, r.RelatesToProductReference, ctx.ModelsIncomplete)
 		if err := w.add(r.FullProductName, ctx); err != nil {
 			return CSAFAdvisory{}, fmt.Errorf("tracking %s: relationships: %w", tr.ID, err)
 		}
@@ -974,7 +1012,15 @@ type treeWalker struct {
 	nodes  int
 }
 
-func (w *treeWalker) walk(b csafBranch, ctx CSAFProduct, depth int) error {
+// branchCtx is the product attributes of the branches above a node, plus
+// whether the OS was named by a product_name branch (a non-OS product_name
+// below such a branch is not a readable model).
+type branchCtx struct {
+	p        CSAFProduct
+	osByName bool
+}
+
+func (w *treeWalker) walk(b csafBranch, ctx branchCtx, depth int) error {
 	if depth > MaxCSAFBranchDepth {
 		return fmt.Errorf("branches deeper than %d: %w", MaxCSAFBranchDepth, ErrCSAFMalformed)
 	}
@@ -987,20 +1033,36 @@ func (w *treeWalker) walk(b csafBranch, ctx CSAFProduct, depth int) error {
 	}
 	switch b.Category {
 	case "vendor":
-		ctx.Vendor = b.Name
+		ctx.p.Vendor = b.Name
 	case "product_family":
-		if ctx.Product == "" {
-			ctx.Product = b.Name
+		ctx.p.Family = b.Name
+		if ctx.p.Product == "" {
+			ctx.p.Product = b.Name
+		}
+		if osEcosystem(w.vendor, b.Name) != "" {
+			ctx.p.OS, ctx.osByName = b.Name, false
 		}
 	case "product_name":
-		ctx.Product = b.Name
+		ctx.p.Product = b.Name
+		switch {
+		case osEcosystem(w.vendor, b.Name) != "":
+			ctx.p.OS, ctx.osByName = b.Name, true
+		case ctx.p.OS != "" && ctx.osByName:
+			// A named product below a named OS (for example a feature
+			// of PAN-OS): its scope is not a model that can be read.
+			ctx.p.ModelsIncomplete = true
+		default:
+			// A named product below an OS family, or above the OS
+			// branch, is the hardware model.
+			ctx.p.Models = []string{b.Name}
+		}
 	case "product_version":
-		ctx.Version, ctx.VersionRange = b.Name, ""
+		ctx.p.Version, ctx.p.VersionRange = b.Name, ""
 	case "product_version_range":
-		ctx.VersionRange, ctx.Version = b.Name, ""
+		ctx.p.VersionRange, ctx.p.Version = b.Name, ""
 	}
 	if b.Product != nil {
-		if err := w.add(*b.Product, ctx); err != nil {
+		if err := w.add(*b.Product, ctx.p); err != nil {
 			return err
 		}
 	}
@@ -1031,19 +1093,166 @@ func (w *treeWalker) add(fp csafFullProductName, ctx CSAFProduct) error {
 	}
 	p := ctx
 	p.ProductID, p.Name = fp.ProductID, fp.Name
+	p.Models = slices.Clone(ctx.Models)
+	if fp.Helper != nil {
+		if err := p.addHelperModels(*fp.Helper); err != nil {
+			return fmt.Errorf("product identification helper: %w", err)
+		}
+	}
+	if len(p.Models) > MaxCSAFModelsPerProduct {
+		p.Models, p.ModelsIncomplete = p.Models[:MaxCSAFModelsPerProduct], true
+	}
 	p.Ecosystem = classifyCSAFProduct(w.vendor, p)
 	p.Train = csafTrain(p)
 	w.byID[p.ProductID] = p
 	return nil
 }
 
+// addHelperModels adds the models a product identification helper names:
+// its model numbers, SKUs and the product field of a hardware CPE. A
+// wildcard entry or more entries than the limit mark the models
+// incomplete; a field breaking the text rules rejects the document.
+func (p *CSAFProduct) addHelperModels(h csafHelper) error {
+	if len(h.ModelNumbers)+len(h.SKUs) > MaxCSAFModelsPerProduct {
+		p.ModelsIncomplete = true
+		return nil
+	}
+	for _, m := range slices.Concat(h.ModelNumbers, h.SKUs) {
+		if err := checkCSAFText(m); err != nil {
+			return fmt.Errorf("model number or sku: %w", err)
+		}
+		p.addModel(m)
+	}
+	if err := checkCSAFText(h.CPE); err != nil {
+		return fmt.Errorf("cpe: %w", err)
+	}
+	if m, ok, hw := cpeHardwareModel(h.CPE); hw {
+		if ok {
+			p.addModel(m)
+		} else {
+			p.ModelsIncomplete = true
+		}
+	}
+	return nil
+}
+
+// addModel adds one model string. A blank one or one with a CSAF wildcard
+// ('*' or '?', CSAF 2.0 sections 3.1.3.3.3 and 3.1.3.3.6) is not an exact
+// model and marks the models incomplete.
+func (p *CSAFProduct) addModel(m string) {
+	m = strings.TrimSpace(m)
+	switch {
+	case m == "" || strings.ContainsAny(m, "*?"):
+		p.ModelsIncomplete = true
+	case !slices.Contains(p.Models, m):
+		p.Models = append(p.Models, m)
+	}
+}
+
+// cpeHardwareModel reads the product field of a hardware CPE ("h" part,
+// formatted string 2.3 or URI 2.2). hw reports a hardware CPE; ok reports a
+// single exact product (no wildcard, not "-" or empty).
+func cpeHardwareModel(cpe string) (model string, ok, hw bool) {
+	var fields []string
+	switch {
+	case strings.HasPrefix(cpe, "cpe:2.3:h:"):
+		fields = splitCPE23(strings.TrimPrefix(cpe, "cpe:2.3:"))
+	case strings.HasPrefix(cpe, "cpe:/h:"):
+		fields = strings.Split(strings.TrimPrefix(cpe, "cpe:/"), ":")
+	default:
+		return "", false, false
+	}
+	if len(fields) < 3 {
+		return "", false, true
+	}
+	raw := fields[2]
+	if raw == "" || raw == "-" || raw == "*" || cpeHasWildcard(raw) {
+		return "", false, true
+	}
+	return cpeUnescape(raw), true, true
+}
+
+// splitCPE23 splits a CPE 2.3 formatted string at the unescaped colons.
+func splitCPE23(s string) []string {
+	var out []string
+	var cur strings.Builder
+	esc := false
+	for _, r := range s {
+		switch {
+		case esc:
+			cur.WriteRune('\\')
+			cur.WriteRune(r)
+			esc = false
+		case r == '\\':
+			esc = true
+		case r == ':':
+			out = append(out, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	return append(out, cur.String())
+}
+
+// cpeHasWildcard reports an unescaped '*' or '?' in a CPE field.
+func cpeHasWildcard(f string) bool {
+	esc := false
+	for _, r := range f {
+		switch {
+		case esc:
+			esc = false
+		case r == '\\':
+			esc = true
+		case r == '*' || r == '?':
+			return true
+		}
+	}
+	return false
+}
+
+// cpeUnescape drops the backslashes that quote characters in a CPE field.
+func cpeUnescape(f string) string {
+	var b strings.Builder
+	esc := false
+	for _, r := range f {
+		if !esc && r == '\\' {
+			esc = true
+			continue
+		}
+		esc = false
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// relatedModels returns the models a relationship scopes its combined
+// product to: the models of the related product. An unknown related
+// product, a related product that is itself an OS (software on software)
+// or one without models is not a readable model scope and gives
+// incomplete. incomplete carries the referenced product's own flag.
+func relatedModels(byID map[string]CSAFProduct, relatesTo string, incomplete bool) ([]string, bool) {
+	t, ok := byID[relatesTo]
+	if !ok || t.OS != "" || len(t.Models) == 0 {
+		return nil, true
+	}
+	return slices.Clone(t.Models), incomplete || t.ModelsIncomplete
+}
+
 // classifyCSAFProduct maps a product of the source's own vendor to its
-// D2 ecosystem; anything else stays unclassified.
+// D2 ecosystem from the branch that names its OS; anything else stays
+// unclassified.
 func classifyCSAFProduct(vendor CSAFVendor, p CSAFProduct) string {
 	if !strings.EqualFold(strings.TrimSpace(p.Vendor), vendorBranchName[vendor]) {
 		return ""
 	}
-	name := " " + strings.ToLower(p.Product) + " "
+	return osEcosystem(vendor, p.OS)
+}
+
+// osEcosystem maps a branch name that names an operating system of the
+// vendor to its D2 ecosystem; "" when it names none.
+func osEcosystem(vendor CSAFVendor, os string) string {
+	name := " " + strings.ToLower(os) + " "
 	switch vendor {
 	case CSAFVendorPaloAlto:
 		if strings.Contains(name, "pan-os") {
@@ -1057,8 +1266,7 @@ func classifyCSAFProduct(vendor CSAFVendor, p CSAFProduct) string {
 			return "vendor:cisco:ios-xr"
 		case strings.Contains(name, " nx-os"):
 			return "vendor:cisco:nx-os"
-		case strings.Contains(name, " business ") && strings.Contains(name, "switch"),
-			cbsModelRe.MatchString(name):
+		case strings.Contains(name, " business ") && strings.Contains(name, "switch"):
 			return "vendor:cisco:cbs"
 		case strings.Contains(name, " ios "):
 			return "vendor:cisco:ios"
@@ -1068,7 +1276,6 @@ func classifyCSAFProduct(vendor CSAFVendor, p CSAFProduct) string {
 }
 
 var (
-	cbsModelRe = regexp.MustCompile(` cbs[0-9]{3}`)
 	// iosTrainRe: classic IOS "15.2(4)M3" → "15.2" + "M".
 	iosTrainRe = regexp.MustCompile(`^([0-9]+\.[0-9]+)\([0-9]+[a-z]?\)([A-Z]+)`)
 	// dottedTrainRe: "17.3.1", "10.2.9", "11.1.3-h4", "3.2.0.84" → major.minor.
