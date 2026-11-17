@@ -130,20 +130,56 @@ func (d deviceModel) scope(p indexedProduct) modelScope {
 }
 
 // differs reports whether the product's model is provably not the device's
-// model: both are complete SKUs of the same vendor scheme (see skuSchemeOf),
-// they are not equal, and neither is a prefix of the other or a whole-word
-// run of the other (a shorter or longer SKU, "CBS350-24P" and "CBS350-24P-4G",
-// may name the same hardware). Anything else (series names, series
-// designations written like a SKU such as "PA-400", CPE spellings, family
-// names, unknown schemes) is never proof that a device is not affected.
+// model. The rule (fail closed): "different" only when the base models
+// differ and neither base model is a prefix of the other or a whole-word run
+// of the other. The base model is the SKU without its '-'-suffix words
+// (baseModel), so a license or bundle suffix never makes two SKUs different:
+// "C9300-24T-E" and "C9300-24T-A" share the base "C9300-24T" and are the same
+// hardware, a gap and never a skip. "C9300-24T-E" and "C9300-48P-E" have
+// different bases and are different models. The full SKUs must also differ
+// on the same terms. Both must be complete SKUs of the same vendor scheme
+// (see skuSchemeOf). Anything else (series names, series designations
+// written like a SKU such as "PA-400", CPE spellings, family names, unknown
+// schemes) is never proof that a device is not affected.
 func (d deviceModel) differs(p productModel) bool {
-	if d.scheme == schemeNone || d.scheme != p.scheme || d.key == p.key {
+	if d.scheme == schemeNone || d.scheme != p.scheme {
 		return false
 	}
-	if strings.HasPrefix(d.key, p.key) || strings.HasPrefix(p.key, d.key) {
+	db, pb := baseModel(d.scheme, d.key), baseModel(p.scheme, p.key)
+	if db == "" || pb == "" {
 		return false
 	}
-	return !wordRun(d.key, p.key) && !wordRun(p.key, d.key)
+	return distinctModels(d.key, p.key) && distinctModels(db, pb)
+}
+
+// distinctModels reports whether two normalised model strings name different
+// models: they are not equal and neither is a prefix of the other or a
+// whole-word run of the other ("CBS350-24P" and "CBS350-24P-4G" may name the
+// same hardware).
+func distinctModels(a, b string) bool {
+	if a == b || strings.HasPrefix(a, b) || strings.HasPrefix(b, a) {
+		return false
+	}
+	return !wordRun(a, b) && !wordRun(b, a)
+}
+
+// ciscoBaseRe is the base model of a Cisco SKU (see schemeCisco): the
+// family, the port count and the type letters, without any '-'-suffix word.
+// It matches the normalised (lower-case, see normalizeModel) form of a key.
+var ciscoBaseRe = regexp.MustCompile(`^[a-z]+[0-9]+[a-z]*-[0-9]+[a-z]+`)
+
+// baseModel returns the base model of a complete SKU of scheme s: the SKU
+// without its '-'-suffix words (license, bundle and similar). A PAN-OS
+// appliance has no suffix words and is its own base. It returns "" when key
+// does not have the scheme's shape, so that the caller treats it as unknown.
+func baseModel(s skuScheme, key string) string {
+	switch s {
+	case schemeCisco:
+		return ciscoBaseRe.FindString(key)
+	case schemePANOS:
+		return key
+	}
+	return ""
 }
 
 // MaxExactSKULen caps the length of a model string read as an exact SKU.
