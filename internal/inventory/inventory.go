@@ -146,44 +146,7 @@ func Validate(h Host) error {
 		add("criticality %q must be LOW, MEDIUM, HIGH or CRITICAL", h.Criticality)
 	}
 
-	switch {
-	case len(h.Endpoints) == 0:
-		add("at least one endpoint is required")
-	case len(h.Endpoints) > maxEndpoints:
-		add("too many endpoints (%d > %d)", len(h.Endpoints), maxEndpoints)
-	}
-	seenAddr := map[string]int{}
-	for i, e := range h.Endpoints {
-		if !utf8.ValidString(e.Address) {
-			add("endpoint %d: address is not valid UTF-8", i)
-		} else if strings.TrimSpace(e.Address) == "" {
-			add("endpoint %d: address is empty", i)
-		} else if len(e.Address) > maxAddressLen {
-			add("endpoint %d: address is longer than %d bytes", i, maxAddressLen)
-		} else {
-			a := strings.ToLower(e.Address)
-			if net.ParseIP(a) == nil && !hostnameRe.MatchString(a) {
-				add("endpoint %d: %q is neither an IP address nor a hostname", i, e.Address)
-			}
-		}
-		switch {
-		case e.Port == 0:
-		case e.Port < 1 || e.Port > 65535:
-			add("endpoint %d: port %d out of range", i, e.Port)
-		}
-		// Duplicates are compared by lowercased address and effective
-		// port (0 means the default SSH port 22).
-		port := e.Port
-		if port == 0 {
-			port = defaultSSHPort
-		}
-		key := strings.ToLower(e.Address) + ":" + strconv.Itoa(port)
-		if first, dup := seenAddr[key]; dup {
-			add("endpoint %d: %q is duplicated (first at %d)", i, e.Address, first)
-		} else {
-			seenAddr[key] = i
-		}
-	}
+	p = append(p, endpointProblems(h.Endpoints)...)
 
 	if len(h.Groups) > maxGroups {
 		add("too many groups (%d > %d)", len(h.Groups), maxGroups)
@@ -229,6 +192,52 @@ func Validate(h Host) error {
 		return &ValidationError{Problems: p}
 	}
 	return nil
+}
+
+// endpointProblems lists the problems of an ordered endpoint list: count,
+// address form, port range and duplicates.
+func endpointProblems(eps []Endpoint) []string {
+	var p []string
+	add := func(format string, args ...any) { p = append(p, fmt.Sprintf(format, args...)) }
+	switch {
+	case len(eps) == 0:
+		add("at least one endpoint is required")
+	case len(eps) > maxEndpoints:
+		add("too many endpoints (%d > %d)", len(eps), maxEndpoints)
+	}
+	seenAddr := map[string]int{}
+	for i, e := range eps {
+		if !utf8.ValidString(e.Address) {
+			add("endpoint %d: address is not valid UTF-8", i)
+		} else if strings.TrimSpace(e.Address) == "" {
+			add("endpoint %d: address is empty", i)
+		} else if len(e.Address) > maxAddressLen {
+			add("endpoint %d: address is longer than %d bytes", i, maxAddressLen)
+		} else {
+			a := strings.ToLower(e.Address)
+			if net.ParseIP(a) == nil && !hostnameRe.MatchString(a) {
+				add("endpoint %d: %q is neither an IP address nor a hostname", i, e.Address)
+			}
+		}
+		switch {
+		case e.Port == 0:
+		case e.Port < 1 || e.Port > 65535:
+			add("endpoint %d: port %d out of range", i, e.Port)
+		}
+		// Duplicates are compared by lowercased address and effective
+		// port (0 means the default SSH port 22).
+		port := e.Port
+		if port == 0 {
+			port = defaultSSHPort
+		}
+		key := strings.ToLower(e.Address) + ":" + strconv.Itoa(port)
+		if first, dup := seenAddr[key]; dup {
+			add("endpoint %d: %q is duplicated (first at %d)", i, e.Address, first)
+		} else {
+			seenAddr[key] = i
+		}
+	}
+	return p
 }
 
 func validEnvironment(e Environment) bool {
