@@ -55,6 +55,8 @@ A zoomable map of who talks to whom ([ADR 0009](https://github.com/nebula-operat
 
 ## Roadmap
 
+Current day-to-day status, work in progress and open maintainer decisions: [docs/status.md](docs/status.md).
+
 | Area | State |
 | --- | --- |
 | Release 0.9 (milestones 0–10) | code complete; lab run on real hosts pending; 0.9 Beta in preparation |
@@ -64,10 +66,13 @@ A zoomable map of who talks to whom ([ADR 0009](https://github.com/nebula-operat
 | Guest provisioning (deploy profiles, image catalog, cloud-init, enrollment) | merged; preset host keys in progress ([ADR 0008](docs/adr/0008-guest-provisioning.md)) |
 | Network devices, phase 1 (CBS and PAN-OS read path, collector, inventory, device pages) | collector, deployment, store and device pages merged; ingest, firewall view and IPAM/traffic-map integration in progress ([ADR 0010](docs/adr/0010-network-devices.md)) |
 | Vulnerability management (findings, priority, attack paths, notifications) | server side merged; in-repo vulnerability agent in progress ([ADR 0011](docs/adr/0011-vulnerability-management.md)) |
-| Network security advisor (reachability, rule and segmentation advice, firewall logs, IP reputation) | proposed (ADR 0012) |
-| One-step host enrollment (pairing code, optional NetBird join) | proposed (ADR 0013) |
+| Network security advisor (reachability, rule and segmentation advice, firewall logs, IP reputation) | accepted; libraries for EDL, reputation and exposure priority in progress ([ADR 0012](docs/adr/0012-network-security-advisor.md)) |
+| One-step host enrollment (pairing code, optional NetBird join) | accepted; scripts and renderers merged, dialog wiring pending ([ADR 0013](docs/adr/0013-one-step-enrollment.md)) |
 | Handbook, FAQ and in-app help | planned |
-| Traffic map (communication map, observed endpoints, software symbols) | proposed; libraries, store, catalog, icon pipeline and renderer merged; API, page and connections tab in progress ([ADR 0009](https://github.com/nebula-operation-station/nebula-operation-station/pull/232)) |
+| Traffic map (communication map, observed endpoints, software symbols) | proposed; libraries, store, catalog, icon pipeline and renderer merged; API, page and connections tab in progress ([ADR 0009](docs/adr/0009-traffic-map.md)) |
+| Help assistant (local search, command checks) | accepted; in progress ([ADR 0014](docs/adr/0014-help-assistant.md)) |
+| Integrity monitoring (file integrity, sshd configuration baselines) | accepted; libraries in progress ([ADR 0015](docs/adr/0015-integrity-monitoring.md)) |
+| Ops agent | proposed (ADR 0016, PR #637) |
 
 ## Repository layout
 
