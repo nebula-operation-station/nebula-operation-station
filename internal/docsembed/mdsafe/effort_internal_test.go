@@ -27,14 +27,18 @@ const (
 // maxScanSteps (about 1024 steps per byte is the worst), so the budget
 // does not set the count.
 //
-// linearSlack absorbs the window at the end of the document: a window
-// clipped by the document end charges fewer steps, which is a constant
-// offset of up to about maxInlineScan*maxInlineScan/2 (and the link
-// destination window is larger). It does not grow with the size.
+// linearSlack bounds the difference between steps(2N) and 2*steps(N) for
+// an input that repeats a unit. Scan starts before the last
+// maxParseLinkCharge bytes of a document parse the same way in N and 2N,
+// so only starts in the last maxParseLinkCharge bytes of the N-byte
+// document or of the 2N-byte document can differ. There are at most
+// maxParseLinkCharge such starts in each, and each is charged at most
+// maxParseLinkCharge steps, so the difference is at most
+// 2*maxParseLinkCharge². The slack does not grow with the size.
 const (
 	linearSmall = 5 << 10
 	linearLarge = 10 << 10
-	linearSlack = (maxInlineScan + maxLinkDestBytes) * (maxInlineScan + maxLinkDestBytes)
+	linearSlack = 2 * maxParseLinkCharge * maxParseLinkCharge
 )
 
 // scanUnits are the delimiter patterns that drive the scanners.
@@ -58,8 +62,43 @@ func TestScanStepsAreLinear(t *testing.T) {
 			t.Errorf("unit %q: %d steps for %d bytes reaches the budget %d; the scanner is not measured", unit, large.steps, large.size, maxScanSteps)
 			continue
 		}
-		if large.steps > 2*small.steps+linearSlack {
+		if notLinear(small, large) {
 			t.Errorf("unit %q: %d steps for %d bytes, %d for %d bytes: not linear (bound %d)",
+				unit, small.steps, small.size, large.steps, large.size, 2*small.steps+linearSlack)
+		}
+	}
+}
+
+// notLinear reports whether doubling the input (large is twice small)
+// more than doubles the steps beyond linearSlack.
+func notLinear(small, large scanResult) bool {
+	return large.steps > 2*small.steps+linearSlack
+}
+
+// unboundedLimits is a scanner with no window and no budget: every scan
+// runs to the end of the source, so its work is quadratic in the input.
+// Its budget is far above maxScanSteps, so the budget never stops it at
+// the sizes the test uses; only the linearity comparison can fail.
+var unboundedLimits = scanLimits{window: 1 << 40, linkDest: 1 << 40, budget: 1 << 40}
+
+// The self-test sizes are larger than the linearity sizes. A quadratic
+// scanner exceeds the slack only once its excess over 2*steps(N) passes
+// linearSlack, which is about 2*maxParseLinkCharge² of steps; at 5 KiB
+// the "*" unit gives about 6.5M steps, not enough to pass the slack.
+const (
+	quadraticSmall = 8 << 10
+	quadraticLarge = 16 << 10
+)
+
+// TestQuadraticScannerFailsLinearity checks that the linearity comparison
+// itself catches a superlinear scanner. The test hook is unboundedLimits,
+// so the budget cannot stop the scanner; the comparison must reject it.
+func TestQuadraticScannerFailsLinearity(t *testing.T) {
+	for _, unit := range []string{"*", "["} {
+		small := scanStepsWith(t, unboundedLimits, unit, quadraticSmall/len(unit))
+		large := scanStepsWith(t, unboundedLimits, unit, quadraticLarge/len(unit))
+		if !notLinear(small, large) {
+			t.Errorf("unit %q: quadratic scanner passed: %d steps for %d bytes, %d for %d bytes (bound %d)",
 				unit, small.steps, small.size, large.steps, large.size, 2*small.steps+linearSlack)
 		}
 	}
@@ -83,8 +122,14 @@ type scanResult struct{ steps, size int }
 // spent and the source length.
 func scanStepsFor(t *testing.T, unit string, reps int) scanResult {
 	t.Helper()
+	return scanStepsWith(t, defaultLimits, unit, reps)
+}
+
+// scanStepsWith is scanStepsFor under the given scan limits.
+func scanStepsWith(t *testing.T, lim scanLimits, unit string, reps int) scanResult {
+	t.Helper()
 	src := strings.Repeat(unit, reps)
-	_, steps, err := renderCounted([]byte(src), Options{})
+	_, steps, err := renderLimited([]byte(src), Options{}, lim)
 	if err != nil {
 		t.Fatalf("unit %q, %d repeats: %v", unit, reps, err)
 	}
