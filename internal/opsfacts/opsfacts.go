@@ -38,6 +38,8 @@ const (
 	MaxVersionBytes = 64
 	// MaxVulnIDBytes bounds a vulnerability ID.
 	MaxVulnIDBytes = 64
+	// MaxEnvironmentBytes bounds the environment name after cleaning.
+	MaxEnvironmentBytes = 32
 	// MaxScore is the highest priority score (vulnprio).
 	MaxScore = 100
 	// MaxCandidatesPerGroup bounds step candidates; the allowlist has
@@ -104,8 +106,8 @@ type Host struct {
 
 // Port is one listening port of a host (ADR 0009 listeners).
 type Port struct {
-	Number   int
-	Protocol string
+	Number   int    `json:"number"`
+	Protocol string `json:"protocol"`
 }
 
 // Finding is one vulnerability finding as the finding source reports it.

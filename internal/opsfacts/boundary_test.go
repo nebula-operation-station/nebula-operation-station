@@ -25,6 +25,7 @@ var allowedImports = map[string]bool{
 	"unicode":                         true,
 	"unicode/utf8":                    true,
 	"sort":                            true,
+	"encoding/hex":                    true,
 	"encoding/json":                   true,
 	"crypto/sha256":                   true,
 	"fmt":                             true,
