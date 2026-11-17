@@ -123,9 +123,26 @@ func Render(src []byte, o Options) (Result, error) {
 	return res, err
 }
 
+// scanLimits are the bounds the delimiter scanners work under. Render uses
+// defaultLimits; the tests substitute other values to measure a scanner
+// that has no window or budget, which the effort tests must reject.
+type scanLimits struct {
+	window   int // bytes a delimiter scan may look ahead
+	linkDest int // bytes a link destination may span
+	budget   int // total scan steps before delimiters render as text
+}
+
+// defaultLimits are the production bounds.
+var defaultLimits = scanLimits{window: maxInlineScan, linkDest: maxLinkDestBytes, budget: maxScanSteps}
+
 // renderCounted is Render; it also returns the number of scan steps
 // spent, which the tests use to check the effort bound.
 func renderCounted(src []byte, o Options) (Result, int, error) {
+	return renderLimited(src, o, defaultLimits)
+}
+
+// renderLimited is renderCounted under the given scan limits.
+func renderLimited(src []byte, o Options, lim scanLimits) (Result, int, error) {
 	if len(src) > MaxSourceBytes {
 		return Result{}, 0, ErrTooLarge
 	}
@@ -133,7 +150,7 @@ func renderCounted(src []byte, o Options) (Result, int, error) {
 		return Result{}, 0, ErrInvalidUTF8
 	}
 	s := strings.NewReplacer("\r\n", "\n", "\r", "\n", "\x00", "�", "\t", strings.Repeat(" ", tabWidth)).Replace(string(src))
-	r := &renderer{o: o, taken: map[string]bool{}, next: map[string]int{}}
+	r := &renderer{o: o, lim: lim, taken: map[string]bool{}, next: map[string]int{}}
 	r.blocks(&r.out, strings.Split(s, "\n"), 0, false)
 	return Result{
 		// The builder only ever received escaped text and the fixed
@@ -180,10 +197,11 @@ func plainText(s string) string {
 
 type renderer struct {
 	o        Options
+	lim      scanLimits
 	out      strings.Builder
 	taken    map[string]bool // heading ids in use
 	next     map[string]int  // per base slug: next "-N" suffix to try
-	steps    int             // scan steps spent, at most maxScanSteps (plus one scan)
+	steps    int             // scan steps spent, at most lim.budget (plus one scan)
 	title    string
 	headings []Heading
 }
@@ -543,10 +561,10 @@ func isASCIIPunct(c byte) bool {
 // maxInlineScan bytes after from; a longer run that crosses the window
 // edge is not a match. Scanned bytes are charged to r.steps.
 func (r *renderer) findRun(s string, from int, c byte, n int) int {
-	limit := min(len(s), from+maxInlineScan)
+	limit := min(len(s), from+r.lim.window)
 	j := from
 	found := -1
-	for j < limit && r.steps < maxScanSteps {
+	for j < limit && r.steps < r.lim.budget {
 		if s[j] != c {
 			j++
 			continue
@@ -654,12 +672,12 @@ func (r *renderer) inline(b *strings.Builder, s string, depth int, inLink bool) 
 // parseLink parses "[label](dest)" at s[i]; end is the index after ")".
 // Bytes scanned are charged to r.steps; past the budget it never matches.
 func (r *renderer) parseLink(s string, i int) (label, dest string, end int, ok bool) {
-	if r.steps >= maxScanSteps {
+	if r.steps >= r.lim.budget {
 		return "", "", 0, false
 	}
 	level := 0
 	j := i
-	limit := min(len(s), i+maxInlineScan)
+	limit := min(len(s), i+r.lim.window)
 	for ; j < limit; j++ {
 		switch s[j] {
 		case '\\':
@@ -679,7 +697,7 @@ func (r *renderer) parseLink(s string, i int) (label, dest string, end int, ok b
 	}
 	label = s[i+1 : j]
 	parens := 0
-	limit = min(len(s), j+2+maxLinkDestBytes)
+	limit = min(len(s), j+2+r.lim.linkDest)
 	k := j + 2
 	for ; k < limit; k++ {
 		switch s[k] {

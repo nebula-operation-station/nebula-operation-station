@@ -113,7 +113,7 @@ func TestScanBudgetDoesNotTouchNormalDocuments(t *testing.T) {
 // budget is spent, delimiters are plain text and the output stays
 // escaped.
 func TestSpentBudgetRendersDelimitersAsText(t *testing.T) {
-	r := &renderer{taken: map[string]bool{}, next: map[string]int{}, steps: maxScanSteps}
+	r := &renderer{lim: defaultLimits, taken: map[string]bool{}, next: map[string]int{}, steps: maxScanSteps}
 	var b strings.Builder
 	r.inline(&b, "*a* [x](/help) `c` <b>", 0, false)
 	want := "*a* [x](/help) `c` &lt;b&gt;"
