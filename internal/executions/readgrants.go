@@ -10,6 +10,7 @@ import (
 	"io"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -21,6 +22,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/registrymeta"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/schedgrant"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui/invsort"
@@ -30,6 +32,10 @@ import (
 // for the approved read-grant registry; the server decodes each canonical
 // document into a lease-page view and labels the frozen host list against
 // the inventory (all / tag / environment). The server stores nothing here.
+
+// ScopeRegistry is the scope kind of a registry read lease: its private
+// registries (ScopeValue lists their IDs), no hosts and no actions.
+const ScopeRegistry = "registry"
 
 // ReadGrantView is the lease-page view of one executor-held read grant.
 type ReadGrantView struct {
@@ -187,7 +193,16 @@ func decodeReadGrant(g *pb.ReadGrant, inv []inventory.Host, haveInv bool, now ti
 	var doc permit.ReadGrantDoc
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.DisallowUnknownFields()
-	if err := dec.Decode(&doc); err != nil || dec.More() || !knownReadGrantFormat(doc.Grant) ||
+	if err := dec.Decode(&doc); err != nil || dec.More() {
+		return invalidView(v)
+	}
+	// A registry read lease has no hosts or actions, so the host rules below
+	// do not apply to it. It is judged by the rules the lease pages use
+	// (registrymeta.DecodeRegistryLease), so the two views cannot disagree.
+	if doc.RateProfile == schedgrant.RegistryReadProfile {
+		return registryReadView(v, g, now)
+	}
+	if !knownReadGrantFormat(doc.Grant) ||
 		len(doc.Targets) > permit.MaxReadGrantTargets || len(doc.Actions) > permit.MaxReadGrantActions ||
 		len(doc.ProviderTargets) > permit.MaxProviderTargets ||
 		!structurallyValid(doc) || !matchesRegistry(doc, g) {
@@ -283,9 +298,9 @@ func validApprovedBy(s string) bool {
 func structurallyValid(d permit.ReadGrantDoc) bool {
 	if d.RateProfile == permit.ProviderReadProfile || d.RateProfile == permit.ProviderTelemetryProfile {
 		return d.Grant == schedgrant.ReadFormat && len(d.ProviderTargets) > 0 &&
-			len(d.Targets) == 0 && len(d.Actions) == 0 && len(d.Credentials) == 0
+			len(d.Targets) == 0 && len(d.Actions) == 0 && len(d.Credentials) == 0 && len(d.RegistryTargets) == 0
 	}
-	if len(d.ProviderTargets) != 0 || len(d.Targets) == 0 || len(d.Actions) == 0 {
+	if len(d.ProviderTargets) != 0 || len(d.Targets) == 0 || len(d.Actions) == 0 || len(d.RegistryTargets) != 0 {
 		return false
 	}
 	switch d.Grant {
@@ -390,6 +405,28 @@ func walkJSONValue(dec *json.Decoder, first json.Token, depth int) error {
 			return err
 		}
 	}
+}
+
+// registryReadView is the lease-page view of a registry read lease. The
+// verdict is registrymeta.DecodeRegistryLease's: a lease that does not verify
+// is "invalid"; otherwise its state is active, expired or revoked, as the
+// lease pages show it. Its scope is its private registries.
+func registryReadView(v ReadGrantView, g *pb.ReadGrant, now time.Time) ReadGrantView {
+	rl, ok := registrymeta.DecodeRegistryLease(g, now)
+	if !ok {
+		return invalidView(v)
+	}
+	ids := make([]string, 0, len(rl.Registries))
+	for _, t := range rl.Registries {
+		ids = append(ids, t.RegistryID)
+	}
+	v.ID, v.Digest, v.ApprovedBy = rl.ID, rl.Digest, rl.ApprovedBy
+	v.Created, v.Expiry, v.Revoked = rl.Created, rl.Expiry, rl.Revoked
+	v.State = rl.State
+	v.ScopeKind, v.ScopeValue = ScopeRegistry, strings.Join(ids, ", ")
+	v.RateProfile = schedgrant.RegistryReadProfile
+	v.Hosts, v.Actions = []string{}, []string{}
+	return v
 }
 
 // invalidView marks a grant whose document could not be decoded safely.
