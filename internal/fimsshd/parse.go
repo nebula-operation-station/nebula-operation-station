@@ -18,6 +18,15 @@ import (
 // a value that repeats is counted again (fail closed).
 const MaxDerivedValues = 4096
 
+// MaxUserValues caps the per-user values of one derived set: every
+// AuthorizedKeysFile and AuthorizedPrincipalsFile value, the OpenSSH defaults
+// included, counted once each. Such a value can match at any depth, so its
+// cost in Set.Match is paid for every record; above the cap the set is
+// unclassifiable and every deviation is critical (fail closed). This is a
+// named implementation choice of this package; ADR 0015 fixes only
+// MaxDerivedValues.
+const MaxUserValues = 64
+
 // maxTokenBytes bounds one value token (PATH_MAX).
 const maxTokenBytes = 4096
 
@@ -89,6 +98,32 @@ const (
 // as compiled entries. Build the matching set with Set.
 type Directives struct {
 	entries []entry
+	// userValues counts the per-user values among entries (MaxUserValues).
+	userValues int
+}
+
+// add appends one compiled value. The limit is checked per value, so a long
+// line cannot build far more values than MaxDerivedValues before it fails.
+func (d *Directives) add(e entry) error {
+	if len(d.entries) >= MaxDerivedValues {
+		return ErrOverflow
+	}
+	d.entries = append(d.entries, e)
+	return nil
+}
+
+// addUser compiles and appends one per-user value (AuthorizedKeysFile,
+// AuthorizedPrincipalsFile or a default), refusing it above MaxUserValues.
+func (d *Directives) addUser(tok string) error {
+	if d.userValues >= MaxUserValues {
+		return ErrUnclassifiable
+	}
+	e, err := userEntry(tok)
+	if err != nil {
+		return err
+	}
+	d.userValues++
+	return d.add(e)
 }
 
 // Count returns the number of values, the quantity limited by MaxDerivedValues.
@@ -105,13 +140,14 @@ func (d Directives) Set() *Set { return &Set{entries: d.entries} }
 // Errors name the file and the line only, never the content.
 func Parse(files []fimscan.SSHConfigFile) (Directives, error) {
 	var d Directives
-	// authKeysGlobal reports an AuthorizedKeysFile outside every Match block
-	// seen so far; inMatch reports that a Match block has started. Once a
-	// Match block starts, its scope runs to the next Match line or the end of
-	// the file, and the array's later files are read after it, so every later
-	// AuthorizedKeysFile is treated as scoped (the default is kept). That
-	// over-includes at worst, which is the fail-closed direction.
-	authKeysGlobal, inMatch := false, false
+	// The default AuthorizedKeysFile is dropped only when the array holds an
+	// AuthorizedKeysFile and no Match line at all. Whether a value is scoped by
+	// a Match block depends on the order of the files, and the array's order
+	// is host-supplied (an Include may be listed before the file that holds
+	// the Match line), so the decision is taken over the whole array and does
+	// not depend on that order. With any Match line present, the default is
+	// kept: that over-includes at worst, which is the fail-closed direction.
+	akfSeen, matchSeen := false, false
 	for _, f := range files {
 		for n, line := range bytes.Split(f.Content, []byte{'\n'}) {
 			kind, err := d.addLine(string(line))
@@ -123,26 +159,18 @@ func Parse(files []fimscan.SSHConfigFile) (Directives, error) {
 			}
 			switch kind {
 			case lineMatch:
-				inMatch = true
+				matchSeen = true
 			case lineAuthKeysFile:
-				authKeysGlobal = authKeysGlobal || !inMatch
-			}
-			if len(d.entries) > MaxDerivedValues {
-				return Directives{}, ErrOverflow
+				akfSeen = true
 			}
 		}
 	}
-	if !authKeysGlobal {
+	if !akfSeen || matchSeen {
 		for _, v := range defaultAuthorizedKeys {
-			e, err := userEntry(v)
-			if err != nil {
-				return Directives{}, fmt.Errorf("default AuthorizedKeysFile: %w", err)
+			if err := d.addUser(v); err != nil {
+				return Directives{}, err
 			}
-			d.entries = append(d.entries, e)
 		}
-	}
-	if len(d.entries) > MaxDerivedValues {
-		return Directives{}, ErrOverflow
 	}
 	return d, nil
 }
@@ -183,7 +211,9 @@ func (d *Directives) addLine(line string) (lineKind, error) {
 			if err != nil {
 				return lineOther, err
 			}
-			d.entries = append(d.entries, e)
+			if err := d.add(e); err != nil {
+				return lineOther, err
+			}
 		}
 	case dirAuthorizedKeysFile, dirAuthorizedPrincipalsFile:
 		if len(toks) == 1 && toks[0] == "none" {
@@ -193,11 +223,9 @@ func (d *Directives) addLine(line string) (lineKind, error) {
 			if t == "none" {
 				return lineOther, ErrUnclassifiable
 			}
-			e, err := userEntry(t)
-			if err != nil {
+			if err := d.addUser(t); err != nil {
 				return lineOther, err
 			}
-			d.entries = append(d.entries, e)
 		}
 		return authKeysLine(kind), nil
 	case dirMatch:
@@ -210,7 +238,9 @@ func (d *Directives) addLine(line string) (lineKind, error) {
 		if err != nil {
 			return lineOther, err
 		}
-		d.entries = append(d.entries, e)
+		if err := d.add(e); err != nil {
+			return lineOther, err
+		}
 	case dirAuthorizedKeysCommand, dirAuthorizedPrincipalsCommand:
 		if toks[0] == "none" {
 			return lineOther, nil
@@ -223,7 +253,9 @@ func (d *Directives) addLine(line string) (lineKind, error) {
 		if err != nil {
 			return lineOther, err
 		}
-		d.entries = append(d.entries, e)
+		if err := d.add(e); err != nil {
+			return lineOther, err
+		}
 	}
 	return lineOther, nil
 }

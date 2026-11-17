@@ -164,3 +164,93 @@ func TestCommentsAndUnrelatedKeywordsAreIgnored(t *testing.T) {
 		t.Fatalf("default AuthorizedKeysFile missing: %v", got)
 	}
 }
+
+// TestAuthorizedKeysFileDecisionIsOrderIndependent checks that the result for
+// AuthorizedKeysFile does not depend on the order of the host-supplied array.
+// The Match-scoped AuthorizedKeysFile sits in an included file that comes
+// before the file holding the Match line; the default must stay in both
+// orders, because the Match block scopes the value (fail closed).
+func TestAuthorizedKeysFileDecisionIsOrderIndependent(t *testing.T) {
+	main := fimscan.SSHConfigFile{Path: []byte("/etc/ssh/sshd_config"), Content: []byte("Match User bob\nInclude /etc/ssh/auth.conf\n")}
+	auth := fimscan.SSHConfigFile{Path: []byte("/etc/ssh/auth.conf"), Content: []byte("AuthorizedKeysFile /srv/k/%u\n")}
+	orders := map[string][]fimscan.SSHConfigFile{
+		"main first":    {main, auth},
+		"include first": {auth, main},
+	}
+	for name, files := range orders {
+		t.Run(name, func(t *testing.T) {
+			d, err := Parse(files)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			s := d.Set()
+			if got := s.Match([]byte("/var/lib/svc/.ssh/authorized_keys")); got != fimbaseline.SSHFile {
+				t.Fatalf("default dropped for a service home: %v, want SSHFile", got)
+			}
+			if got := s.Match([]byte("/srv/k/bob")); got != fimbaseline.SSHFile {
+				t.Fatalf("Match-scoped value lost: %v, want SSHFile", got)
+			}
+		})
+	}
+}
+
+// TestGlobalAuthorizedKeysFileDecisionIsOrderIndependent checks that without
+// any Match line the default is dropped in both array orders.
+func TestGlobalAuthorizedKeysFileDecisionIsOrderIndependent(t *testing.T) {
+	main := fimscan.SSHConfigFile{Path: []byte("/etc/ssh/sshd_config"), Content: []byte("Port 22\nInclude /etc/ssh/auth.conf\n")}
+	auth := fimscan.SSHConfigFile{Path: []byte("/etc/ssh/auth.conf"), Content: []byte("AuthorizedKeysFile /srv/k/%u\n")}
+	orders := map[string][]fimscan.SSHConfigFile{
+		"main first":    {main, auth},
+		"include first": {auth, main},
+	}
+	for name, files := range orders {
+		t.Run(name, func(t *testing.T) {
+			d, err := Parse(files)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if got := d.Set().Match([]byte("/root/.ssh/authorized_keys")); got != fimbaseline.SSHNone {
+				t.Fatalf("global value did not replace the default: %v", got)
+			}
+		})
+	}
+}
+
+// TestUserValueCapIsUnclassifiable checks that the per-user values are capped
+// (MaxUserValues): one value over the cap fails closed as unclassifiable, and
+// the hostile 4,096-value configuration is refused at once instead of building
+// a set that Match would have to walk.
+func TestUserValueCapIsUnclassifiable(t *testing.T) {
+	line := func(n int) string {
+		return "AuthorizedKeysFile" + strings.Repeat(" a", n) + "\n"
+	}
+	if _, err := Parse(cfg(line(MaxUserValues))); err != nil {
+		t.Fatalf("at cap: Parse: %v", err)
+	}
+	if _, err := Parse(cfg(line(MaxUserValues + 1))); !errors.Is(err, ErrUnclassifiable) {
+		t.Fatalf("one over cap: err = %v, want ErrUnclassifiable", err)
+	}
+	hostile := line(4096) // about 8 KiB, the hostile shape of the review
+	if _, err := Parse(cfg(hostile)); !errors.Is(err, ErrUnclassifiable) {
+		t.Fatalf("hostile 4096 relative values: err = %v, want ErrUnclassifiable", err)
+	}
+	// Across lines the cap counts too, and principals values count with AuthorizedKeysFile.
+	var b strings.Builder
+	for i := 0; i < MaxUserValues; i++ {
+		b.WriteString("AuthorizedKeysFile /srv/k/%u\n")
+	}
+	b.WriteString("AuthorizedPrincipalsFile /srv/p/%u\n")
+	if _, err := Parse(cfg(b.String())); !errors.Is(err, ErrUnclassifiable) {
+		t.Fatalf("principals files not counted: err = %v, want ErrUnclassifiable", err)
+	}
+}
+
+// TestDerivedLimitStopsInsideOneLine checks that the value limit is enforced
+// per value, so one long line cannot build far more values than the limit
+// before ErrOverflow is returned.
+func TestDerivedLimitStopsInsideOneLine(t *testing.T) {
+	line := "Include" + strings.Repeat(" f.conf", MaxDerivedValues+1) + "\n"
+	if _, err := Parse(cfg(line)); !errors.Is(err, ErrOverflow) {
+		t.Fatalf("one long line over the limit: err = %v, want ErrOverflow", err)
+	}
+}

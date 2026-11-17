@@ -46,14 +46,34 @@ type entry struct {
 	segs []seg
 }
 
+// scratch holds the DP buffers of matchPieces. One Set.Match call owns one
+// scratch and reuses it for every component and value, so matching does not
+// allocate per component.
+type scratch struct {
+	cur, next []bool
+}
+
+// buffers returns two cleared buffers of length n, growing the scratch when
+// needed.
+func (sc *scratch) buffers(n int) ([]bool, []bool) {
+	if cap(sc.cur) < n || cap(sc.next) < n {
+		sc.cur = make([]bool, n)
+		sc.next = make([]bool, n)
+	}
+	cur, next := sc.cur[:n], sc.next[:n]
+	clear(cur)
+	clear(next)
+	return cur, next
+}
+
 // matchName reports whether one path component matches a single-component seg.
-func (s seg) matchName(name string) bool {
+func (s seg) matchName(name string, sc *scratch) bool {
 	switch s.kind {
 	case segGlob:
 		ok, err := path.Match(s.glob, name)
 		return err == nil && ok
 	case segPieces:
-		return matchPieces(s.pieces, name)
+		return matchPieces(s.pieces, name, sc)
 	default:
 		return false
 	}
@@ -64,11 +84,11 @@ func (s seg) matchName(name string) bool {
 // live position reaches every later one) and O(len(name) × len(lit)) for a
 // literal, so with at most maxPiecesPerComponent pieces the work is bounded
 // and no input causes exponential work.
-func matchPieces(ps []piece, name string) bool {
-	cur := make([]bool, len(name)+1)
+func matchPieces(ps []piece, name string, sc *scratch) bool {
+	cur, next := sc.buffers(len(name) + 1)
 	cur[0] = true
 	for _, p := range ps {
-		next := make([]bool, len(name)+1)
+		clear(next)
 		if p.user {
 			first := -1
 			for j, ok := range cur {
@@ -89,57 +109,44 @@ func matchPieces(ps []piece, name string) bool {
 				}
 			}
 		}
-		cur = next
+		cur, next = next, cur
 	}
 	return cur[len(name)]
 }
 
 // run feeds the components of an absolute path through the entry. It reports
 // whether they form a complete match, and whether they are a proper prefix of
-// one (a directory on or above a hit).
-func (e entry) run(comps []string) (full, extendable bool) {
+// one (a directory on or above a hit). The segment states are bit sets: an
+// entry has at most maxComponents segments (see userEntry, includeEntry and
+// literalEntry), so bit m of a state fits in a uint64 for m ≤ 32.
+func (e entry) run(comps []string, sc *scratch) (full, extendable bool) {
 	m := len(e.segs)
-	boundary := make([]bool, m+1) // segs[:i] matched exactly the components so far
-	many := make([]bool, m)       // segs[i] (segMany) matched one or more, may continue
-	boundary[0] = true
+	last := uint64(1) << m // bit m: the whole entry has matched
+	boundary := uint64(1)  // bit i: segs[:i] matched exactly the components so far
+	var many uint64        // bit i: segs[i] (segMany) matched one or more, may continue
 	for _, c := range comps {
-		nb := make([]bool, m+1)
-		nm := make([]bool, m)
-		active := false
+		var nb, nm uint64
 		for i, sg := range e.segs {
-			if boundary[i] {
+			bit := uint64(1) << i
+			if boundary&bit != 0 {
 				if sg.kind == segMany {
-					nm[i] = true
-				} else if sg.matchName(c) {
-					nb[i+1] = true
+					nm |= bit
+				} else if sg.matchName(c, sc) {
+					nb |= bit << 1
 				}
 			}
-			if many[i] {
-				nm[i] = true
+			if many&bit != 0 {
+				nm |= bit
 			}
 		}
-		for i := 0; i < m; i++ {
-			if nm[i] {
-				nb[i+1] = true // the many segment may end after c
-			}
-			if nb[i] || nm[i] {
-				active = true
-			}
-		}
-		if nb[m] {
-			active = true
-		}
-		if !active {
+		nb |= nm << 1 // a many segment may end after c
+		if nb|nm == 0 {
 			return false, false
 		}
 		boundary, many = nb, nm
 	}
-	full = boundary[m]
-	for i := 0; i < m; i++ {
-		if boundary[i] || many[i] {
-			extendable = true
-		}
-	}
+	full = boundary&last != 0
+	extendable = boundary&(last-1) != 0 || many != 0
 	return full, extendable
 }
 

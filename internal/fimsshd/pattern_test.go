@@ -311,6 +311,36 @@ func TestHostileTokenMatchesWithinBudget(t *testing.T) {
 	}
 }
 
+// TestMaxUserValuesMatchWithinBudget matches many deep paths against the
+// largest set the cap allows: MaxUserValues per-user values, each a floating
+// pattern with a user token in every component. Every Match must return the
+// right answer without allocating per component; the test completes in
+// bounded work because the value count and the path depth are both capped.
+func TestMaxUserValuesMatchWithinBudget(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < MaxUserValues; i++ {
+		// %h/vNN followed by eight user components: a hit is vNN and exactly
+		// eight components after it.
+		fmt.Fprintf(&b, "AuthorizedKeysFile %%h/v%02d/%%u/%%u/%%u/%%u/%%u/%%u/%%u/%%u\n", i)
+	}
+	s := setFor(t, b.String())
+	deepHit := "/home" + strings.Repeat("/x", 60) + "/v07/a/b/c/d/e/f/g/h"
+	// %h may absorb any prefix, so a path with one more component is still a
+	// directory above a hit (…/v07/a…i/v07/a…h): a position, never a miss.
+	deepExtended := deepHit + "/i"
+	for n := 0; n < 300; n++ {
+		if got := s.Match([]byte(deepHit)); got != fimbaseline.SSHFile {
+			t.Fatalf("deep hit: got %v, want SSHFile", got)
+		}
+		if got := s.Match([]byte(deepExtended)); got != fimbaseline.SSHPosition {
+			t.Fatalf("deep extended path: got %v, want SSHPosition", got)
+		}
+	}
+	if got := s.Match([]byte("/home/svc/v07/a/b/c/d/e/f/g")); got != fimbaseline.SSHPosition {
+		t.Fatalf("prefix of a hit: got %v, want SSHPosition", got)
+	}
+}
+
 // TestMatchPiecesAgreesWithReference compares matchPieces with a naive
 // recursive reference on small inputs.
 func TestMatchPiecesAgreesWithReference(t *testing.T) {
@@ -341,7 +371,7 @@ func TestMatchPiecesAgreesWithReference(t *testing.T) {
 	names := []string{"", "a", "ab", "aab", "abab", "aaaa", "xbab", "aabba", "abbb"}
 	for _, ps := range pieceSets {
 		for _, n := range names {
-			if got, want := matchPieces(ps, n), ref(ps, n); got != want {
+			if got, want := matchPieces(ps, n, &scratch{}), ref(ps, n); got != want {
 				t.Errorf("matchPieces(%+v, %q) = %v, want %v", ps, n, got, want)
 			}
 		}

@@ -29,9 +29,14 @@ func (s *Set) Match(path []byte) fimbaseline.SSHMatch {
 		// non-canonical path is not understood: fail closed as a file.
 		return fimbaseline.SSHFile
 	}
+	// One scratch serves every entry and component of this call, so matching
+	// allocates once per call instead of per component. Per-user values are
+	// capped (MaxUserValues) and are the only entries that can stay active at
+	// any depth; every other value dies within its own segment count.
+	sc := &scratch{}
 	position := false
 	for _, e := range s.entries {
-		full, ext := e.run(comps)
+		full, ext := e.run(comps, sc)
 		if full {
 			return fimbaseline.SSHFile
 		}
