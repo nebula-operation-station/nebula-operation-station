@@ -70,7 +70,76 @@ func TestLLMClientIsAlwaysLabOnly(t *testing.T) {
 	if !got[0].LabOnly || got[0].UnixSocket != "" || got[0].BaseURL != e.llm.srv.URL+"/v1" {
 		t.Errorf("client options = %+v", got[0])
 	}
+	// The default configuration never allows plain http.
+	if got[0].AllowPlainHTTP {
+		t.Error("client built with AllowPlainHTTP without local permission")
+	}
 	e.assertNoSecrets(t)
+}
+
+// runWithLLM runs once with NOS serving base as the LLM endpoint and returns
+// the options of every client the run built.
+func runWithLLM(t *testing.T, e *env, base string, mutate ...func(*Config)) ([]llmclient.Options, *Report) {
+	t.Helper()
+	e.nos.setLLM(true, base, "nos-model")
+	var got []llmclient.Options
+	rep, err := e.runner(t, append(mutate, func(c *Config) {
+		c.NewLLM = func(o llmclient.Options) (agent.LLM, error) {
+			got = append(got, o)
+			return agent.NewLLM(o)
+		}
+	})...).Run(context.Background(), ModeRun)
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	return got, rep
+}
+
+// The Unix socket of the local configuration reaches the client unchanged.
+func TestLLMClientKeepsConfiguredUnixSocket(t *testing.T) {
+	const sock = "/run/nebula-vuln-agent-test/llm.sock"
+	e := newEnv(t)
+	got, _ := runWithLLM(t, e, e.llm.srv.URL+"/v1", func(c *Config) { c.LLM.UnixSocket = sock })
+	if len(got) != 1 {
+		t.Fatalf("client built %d times", len(got))
+	}
+	if !got[0].LabOnly || got[0].UnixSocket != sock {
+		t.Errorf("client options = %+v, want unix socket %s with lab-only", got[0], sock)
+	}
+	e.assertNoSecrets(t)
+}
+
+// Plain http reaches the client only when the local configuration allows it;
+// without that permission the run refuses the URL before any client exists.
+func TestLLMClientPlainHTTPOnlyWhenConfigured(t *testing.T) {
+	const plain = "http://127.0.0.1:9/v1"
+	t.Run("configured", func(t *testing.T) {
+		e := newEnv(t)
+		got, rep := runWithLLM(t, e, plain, func(c *Config) {
+			c.LLM.AllowPlainHTTP = true
+			// A key over plain http is refused by the client; this case is
+			// about the scheme, so the run carries no key.
+			c.LLM.APIKeyFile = ""
+		})
+		if len(got) != 1 {
+			t.Fatalf("client built %d times, rep.LLM = %+v", len(got), rep.LLM)
+		}
+		if !got[0].LabOnly || !got[0].AllowPlainHTTP || got[0].BaseURL != plain {
+			t.Errorf("client options = %+v", got[0])
+		}
+		e.assertNoSecrets(t)
+	})
+	t.Run("not configured", func(t *testing.T) {
+		e := newEnv(t)
+		got, rep := runWithLLM(t, e, plain)
+		if len(got) != 0 {
+			t.Errorf("client built %d times over plain http without permission", len(got))
+		}
+		if !rep.LLM.Failed {
+			t.Errorf("plain http endpoint not refused: %+v", rep.LLM)
+		}
+		e.assertNoSecrets(t)
+	})
 }
 
 func TestLLMClientOptionsCarryConfiguredNetworks(t *testing.T) {
