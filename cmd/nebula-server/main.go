@@ -195,6 +195,12 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	// Audit lines are also kept in server.db for the History page (M10-1).
 	audit := auditlog.New(db, cfg.AuditHashChain)
 	log = slog.New(auditlog.NewHandler(log.Handler(), audit))
+	// Notification log (ADR 0016 D10): every sent, held or failed
+	// notification is recorded here; the notifier does not wait for it.
+	notifyLog, err := attachNotifyLog(notifier, db, time.Now)
+	if err != nil {
+		return err
+	}
 
 	// An unreachable executor is not fatal: the server connects in the
 	// background (and pages show "Executor unavailable" until then). A
@@ -224,6 +230,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	// needs one; logins are verified by the executor.
 	sessions := auth.NewStore(db, nil)
 	bg.Go(func() { pruneSessions(connCtx, sessions, log) })
+	bg.Go(func() { pruneNotifyLog(connCtx, notifyLog, log) })
 	login, err := auth.New(auth.Options{Executor: exec, Sessions: sessions, Log: log})
 	if err != nil {
 		return err
