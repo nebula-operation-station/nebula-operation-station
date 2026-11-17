@@ -52,6 +52,9 @@ type Operations interface {
 	BeginGate(ctx context.Context, user, id string, g executions.Gate) (executions.GateResult, error)
 	CommitGate(ctx context.Context, user, id string, g executions.Gate, assertion []byte) error
 	Abort(ctx context.Context, user, id string) error
+	// Abortable answers which of the executions can be aborted from the
+	// operations list: the detail page's rule (executions.Abortable).
+	Abortable(ctx context.Context, ids []string) (map[string]bool, error)
 	RetryHost(ctx context.Context, user, id, host string) error
 	// CheckCLIApproval asks the executor for the permit state of one
 	// execution (the "Check approval" button) and returns its state after
@@ -80,9 +83,14 @@ type operationsData struct {
 	Pending []opsRow
 	// StateFilter is the active ?state= chip.
 	StateFilter string
-	Actions     []actionView
-	Hosts       []opsHostOption
-	Exec        *execView
+	// AnyAbort: some row of the list can be aborted (the multi-select
+	// shows only then).
+	AnyAbort bool
+	Actions  []actionView
+	Hosts    []opsHostOption
+	Exec     *execView
+	// Abort is the confirmation or result page of an abort.
+	Abort *abortData
 }
 
 type opsRow struct {
@@ -90,6 +98,8 @@ type opsRow struct {
 	Created, Finished                                            time.Time
 	FinishedSet                                                  bool
 	Hosts, Failed                                                int
+	// CanAbort: the row offers the abort button and the checkbox.
+	CanAbort bool
 	// HostNames is the compact host display (first 3 names + "+N").
 	HostNames string
 	// Search is the lowercased text the client-side filter matches
@@ -259,12 +269,19 @@ func (h *Handler) handleOperations(w http.ResponseWriter, r *http.Request) {
 	default:
 		stateF = "" // invalid values are ignored
 	}
+	canAbort, err := h.operations.Abortable(ctx, ids)
+	if err != nil {
+		// Without the executor's view no row offers an abort.
+		h.log.Error("operations list: abortable", "error", err.Error())
+		canAbort = map[string]bool{}
+	}
+	anyAbort := false
 	var rows, pending []opsRow
 	for _, e := range list {
 		row := opsRow{ID: e.ID, Short: e.ID[:8], Action: e.ActionID, Title: actionTitle[e.ActionID],
 			Risk: e.Risk, State: e.State, StateClass: opsStateClass(e.State), CreatedBy: e.CreatedBy,
 			Created: e.CreatedAt.UTC(), Finished: e.FinishedAt.UTC(), FinishedSet: !e.FinishedAt.IsZero(),
-			Hosts: e.Hosts, Failed: e.Failed, hostKey: strings.Join(hostIDs[e.ID], "\n")}
+			Hosts: e.Hosts, Failed: e.Failed, hostKey: strings.Join(hostIDs[e.ID], "\n"), CanAbort: canAbort[e.ID]}
 		var parts []string
 		for _, id := range hostIDs[e.ID] {
 			n := names[id]
@@ -281,9 +298,10 @@ func (h *Handler) handleOperations(w http.ResponseWriter, r *http.Request) {
 		if stateF != "" && e.State != stateF {
 			continue
 		}
+		anyAbort = anyAbort || row.CanAbort
 		rows = append(rows, row)
 	}
-	data.Ops = &operationsData{Items: groupOpsRows(rows, readOnly, stateF == ""), Pending: pending, StateFilter: stateF}
+	data.Ops = &operationsData{Items: groupOpsRows(rows, readOnly, stateF == ""), Pending: pending, StateFilter: stateF, AnyAbort: anyAbort}
 	h.render(w, r, data)
 }
 
