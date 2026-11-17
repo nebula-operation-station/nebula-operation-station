@@ -28,7 +28,7 @@ import (
 )
 
 const (
-	oaTok     = "ops-agent-token-0123456789abcdef"
+	oaTok      = "ops-agent-token-0123456789abcdef"
 	opsVulnTok = "vuln-token-0123456789abcdef-x"
 	opsReadTok = "read-token-0123456789abcdef-xy"
 	opsRemote  = "127.0.0.1:40000"

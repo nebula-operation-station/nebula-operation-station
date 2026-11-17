@@ -323,6 +323,14 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	// Operations (M4): planned here, decided and run by the executor.
 	ops = executions.New(connCtx, exec, db, store, log)
 	ops.SetNotifier(notifier)
+	// Ops agent notes (ADR 0016 D9): the suggestion index reads the notes
+	// store; the store's own file and retention loop live in ops.go.
+	opsNotes, err := newOpsNotes(cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	ops.SetSuggestionIndex(opsSuggestions{notes: opsNotes})
+	bg.Go(func() { runOpsNotes(connCtx, opsNotes, log) })
 	// Runbooks (M7-2) are planned like built-in actions.
 	rb := runbooks.New(db)
 	ops.SetRunbooks(rb)
@@ -592,6 +600,16 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		if vh != nil {
 			apiHandler = api.Mount(a, vh)
 			log.Info("vulnerability agent API enabled")
+		}
+		// Ops agent API (ADR 0016 D2) under /api/v1/ops/, only for the one
+		// ops token. MountOps is the only route to that prefix.
+		oh, err := newOpsAPI(cfg.API, db, opsNotes, store.List, log)
+		if err != nil {
+			return err
+		}
+		apiHandler = api.MountOps(apiHandler, oh)
+		if oh != nil {
+			log.Info("ops agent API enabled")
 		}
 	}
 	// Traffic map (ADR 0009 TM19): page, frame and model behind the session; renderer modules under /static/.
