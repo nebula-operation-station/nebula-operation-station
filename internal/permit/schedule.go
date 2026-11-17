@@ -90,54 +90,25 @@ func scheduleChallengeFor(digest string, expiry time.Time) ([]byte, error) {
 	return h.Sum(nil), nil
 }
 
-// Limits of a grant refusal's text (lowEverywhereAll): it names at most
+// Limits of a grant refusal (lowEverywhereAll): its text names at most
 // maxListedRefusals (action, host) pairs and is at most
-// maxRefusalDetailBytes long; each action or host field is cut to
-// maxRefusalField bytes.
+// maxRefusalDetailBytes long, each action or host field cut to
+// maxRefusalField bytes; at most maxRefusalEvents per-pair `rejected`
+// audit events are written, then one summary event for the rest.
 const (
 	maxListedRefusals     = 50
 	maxRefusalDetailBytes = 16 << 10
 	maxRefusalField       = 128
-)
-
-// refusalReason classifies why a pair is not LOW, for the hint in the text.
-type refusalReason int
-
-const (
-	refusalOther         refusalReason = iota
-	refusalNotGrantable                // batch-only container mutation
-	refusalNotTrusted                  // artifact not trusted for this action/version
-	refusalDeclaredRisk                // trusted, but above LOW
-	refusalNoCriticality               // host has no matching criticality record
-	refusalCriticalHost                // host is CRITICAL
-	refusalScanner                     // raised by the safety scanner
+	maxRefusalEvents      = 50
 )
 
 // grantRefusal is one (action, host) pair the executor does not rate LOW.
-// HostID is empty for an action that cannot be granted on any host.
+// hostID is empty for an action that cannot be granted on any host. It
+// holds no reason on purpose: the risk policy's reason goes to the audit
+// log only (riskpolicy.MinimumRisk); the reply names the pair and level.
 type grantRefusal struct {
 	actionID, version, hostID string
 	floor                     canonical.Risk
-	reason                    refusalReason
-}
-
-// classifyRefusal maps the risk policy's reason (internal/riskpolicy and
-// Authority.floor) to a refusalReason. It only chooses the hint in the
-// refusal text; the decision is the floor alone.
-func classifyRefusal(why string) refusalReason {
-	switch {
-	case strings.HasPrefix(why, "safety scanner"):
-		return refusalScanner
-	case strings.Contains(why, "is not trusted on the executor"):
-		return refusalNotTrusted
-	case strings.HasPrefix(why, "host ") && strings.Contains(why, "has no matching criticality record"):
-		return refusalNoCriticality
-	case strings.HasPrefix(why, "host ") && strings.Contains(why, " is CRITICAL"):
-		return refusalCriticalHost
-	case strings.Contains(why, " is trusted as "):
-		return refusalDeclaredRisk
-	}
-	return refusalOther
 }
 
 // refusalField makes an untrusted field safe for a one-line text: invalid
@@ -157,29 +128,19 @@ func refusalField(s string) string {
 	return b.String()
 }
 
-// text is one refusal with the hint how to resolve it.
+// text is one refusal: the pair and its level, nothing about the reason.
 func (r grantRefusal) text() string {
 	act := refusalField(r.actionID) + "@" + refusalField(r.version)
 	if r.hostID == "" {
 		return act + " cannot be granted on any host (it runs only as an approved batch member)"
 	}
-	host := refusalField(r.hostID)
-	s := fmt.Sprintf("%s is %s on %s", act, r.floor, host)
-	switch r.reason {
-	case refusalNotTrusted:
-		s += " (artifact not trusted for this version: `nebula artifact trust-builtins` for built-ins, else `nebula artifact trust --action " +
-			refusalField(r.actionID) + " --version " + refusalField(r.version) + " --risk LOW FILE`)"
-	case refusalDeclaredRisk:
-		s += " (trusted as " + string(r.floor) + ": only LOW actions can be granted, leave the action out)"
-	case refusalNoCriticality:
-		s += " (no criticality record for this host and key: `nebula host criticality " + host + " LEVEL`, or exclude the host)"
-	case refusalCriticalHost:
-		s += " (the host is CRITICAL: exclude the host from the scope)"
-	case refusalScanner:
-		s += " (raised by the safety scanner: review the artifact)"
-	}
-	return s
+	return fmt.Sprintf("%s is %s on %s", act, r.floor, refusalField(r.hostID))
 }
+
+// refusalHint closes every refusal text. Leaving a listed pair out always
+// removes that refusal, so it is the one hint that holds for every pair;
+// it says nothing about the reason class.
+const refusalHint = ". Leave the listed actions or hosts out of the scope; the executor's audit log has the reason for each"
 
 // refusalError is the CodeGrantInvalid failure naming refs; nil when refs is
 // empty. unchecked notes that the check stopped early (the risk policy
@@ -195,7 +156,7 @@ func (a *Authority) refusalError(refs []grantRefusal, unchecked bool) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d action/host %s not LOW; only actions the executor trusts as LOW (read-only) can be granted:", len(refs), noun)
 	// Room for the longest possible tail.
-	const tailRoom = 128
+	const tailRoom = 256
 	listed := 0
 	for _, r := range refs {
 		if listed == maxListedRefusals {
@@ -218,6 +179,7 @@ func (a *Authority) refusalError(refs []grantRefusal, unchecked bool) error {
 	if unchecked {
 		b.WriteString("; the remaining pairs were not checked (risk policy unavailable)")
 	}
+	b.WriteString(refusalHint)
 	return &Error{Code: CodeGrantInvalid, Detail: b.String()}
 }
 
@@ -235,11 +197,20 @@ func (a *Authority) lowEverywhere(actionID, version, artifactSHA256 string, targ
 // pair, in action order and then target order, within the limits above.
 func (a *Authority) lowEverywhereAll(actions []schedgrant.Action, targets []canonical.Target) error {
 	var refs []grantRefusal
+	// Per-pair events written and refused pairs left without one; only
+	// pairs the risk policy refused get an event (batch-only actions never
+	// did), so the cap counts events actually written.
+	emitted, suppressed := 0, 0
+	summary := func() {
+		if suppressed > 0 {
+			a.emit(Event{Kind: "rejected", Code: CodeGrantInvalid, Detail: fmt.Sprintf("%d more action/host pairs not LOW", suppressed)})
+		}
+	}
 	for _, act := range actions {
 		// No schedule or read grant over container mutations (no unattended
 		// mutation), whatever risk a module declares.
 		if canonical.IsBatchOnlyContainerAction(act.ActionID) {
-			refs = append(refs, grantRefusal{actionID: act.ActionID, version: act.ModuleVersion, reason: refusalNotGrantable})
+			refs = append(refs, grantRefusal{actionID: act.ActionID, version: act.ModuleVersion})
 			continue
 		}
 		r := canonical.Request{ActionID: act.ActionID, ModuleVersion: act.ModuleVersion, ArtifactSHA256: act.ArtifactSHA256}
@@ -247,23 +218,27 @@ func (a *Authority) lowEverywhereAll(actions []schedgrant.Action, targets []cano
 			floor, why, err := a.floor(r, []canonical.Target{t}, nil)
 			if err != nil || floor.Rank() == 0 {
 				if len(refs) > 0 {
-					// Checking pair by pair would have refused already.
+					// Checking pair by pair would have refused already;
+					// the policy failure still goes to the audit log.
+					summary()
+					a.emit(Event{Kind: "rejected", Host: t.HostID, Code: CodeStorage,
+						Detail: fmt.Sprintf("risk policy: %v (floor %q); grant refused, remaining pairs not checked", err, floor)})
 					return a.refusalError(refs, true)
 				}
 				return a.storageFailure("", fmt.Errorf("risk policy: %v (floor %q)", err, floor))
 			}
 			if floor != canonical.RiskLow {
-				if len(refs) < maxListedRefusals {
+				if emitted < maxRefusalEvents {
 					a.emit(Event{Kind: "rejected", Host: t.HostID, Code: CodeGrantInvalid, Detail: act.ActionID + ": " + string(floor) + " (" + why + ")"})
+					emitted++
+				} else {
+					suppressed++
 				}
-				refs = append(refs, grantRefusal{actionID: act.ActionID, version: act.ModuleVersion, hostID: t.HostID,
-					floor: floor, reason: classifyRefusal(why)})
+				refs = append(refs, grantRefusal{actionID: act.ActionID, version: act.ModuleVersion, hostID: t.HostID, floor: floor})
 			}
 		}
 	}
-	if n := len(refs) - maxListedRefusals; n > 0 {
-		a.emit(Event{Kind: "rejected", Code: CodeGrantInvalid, Detail: fmt.Sprintf("%d more action/host pairs not LOW", n)})
-	}
+	summary()
 	return a.refusalError(refs, false)
 }
 

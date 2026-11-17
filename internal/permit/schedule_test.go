@@ -411,19 +411,22 @@ func TestGrantRefusalListsEveryPairAtOnce(t *testing.T) {
 	targets := refusalTargets("dev-001", "dev-192.168.0.21", "dev-004")
 
 	d := refusalDetail(t, e.auth.lowEverywhereAll(acts, targets))
-	// Action order of the document, then target order; all six refusals.
+	// Action order of the document, then target order; all six refusals,
+	// each as exactly "pair is LEVEL on host".
 	wantInOrder(t, d,
 		"6 action/host pairs are not LOW",
-		"core.facts@1.0.0 is MEDIUM on dev-192.168.0.21", "nebula host criticality dev-192.168.0.21 LEVEL",
-		"core.facts@1.0.0 is MEDIUM on dev-004", "CRITICAL", "exclude the host",
-		"service.list@1.0.0 is MEDIUM on dev-001", "trusted as MEDIUM",
-		"service.list@1.0.0 is HIGH on dev-004", "nebula artifact trust",
-		"docker.list@1.0.0 is HIGH on dev-001", "safety scanner",
+		"core.facts@1.0.0 is MEDIUM on dev-192.168.0.21;",
+		"core.facts@1.0.0 is MEDIUM on dev-004;",
+		"service.list@1.0.0 is MEDIUM on dev-001;",
+		"service.list@1.0.0 is HIGH on dev-004;",
+		"docker.list@1.0.0 is HIGH on dev-001;",
 		"docker.update@1.0.0 cannot be granted on any host",
+		refusalHint,
 	)
-	if strings.Contains(d, " more") || strings.Contains(d, "SHA256:x") {
+	if strings.Contains(d, " more") || strings.Contains(d, "not checked") {
 		t.Fatalf("unexpected text in %q", d)
 	}
+	wantNoReasonClass(t, d)
 	// The same refusal twice reads the same (stable order).
 	if d2 := refusalDetail(t, e.auth.lowEverywhereAll(acts, targets)); d2 != d {
 		t.Fatalf("order not stable:\n%s\n%s", d, d2)
@@ -431,6 +434,127 @@ func TestGrantRefusalListsEveryPairAtOnce(t *testing.T) {
 	// One audit event per pair the risk policy refused (two calls).
 	if n := e.countEvents("rejected", CodeGrantInvalid); n != 2*5 {
 		t.Fatalf("want 10 rejected events, got %d", n)
+	}
+}
+
+// reasonClassMarkers are words of the risk policy's reasons (vNoCrit and
+// the others above) that must not reach the reply.
+var reasonClassMarkers = []string{"CRITICAL", "criticality", "trusted as", "not trusted",
+	"scanner", "artifact trust", "network", "SHA256:x", "exclude", "record"}
+
+func wantNoReasonClass(t *testing.T, d string) {
+	t.Helper()
+	for _, m := range reasonClassMarkers {
+		if strings.Contains(d, m) {
+			t.Fatalf("reply reveals the reason class (%q): %s", m, d)
+		}
+	}
+}
+
+func TestGrantRefusalReplyHidesReasonClass(t *testing.T) {
+	// m0.md item 20, riskpolicy.MinimumRisk: the reason goes to the audit
+	// log only. Pairs at the same level read the same whatever the reason.
+	targets := refusalTargets("dev-001", "dev-002")
+	for _, level := range [][]pairVerdict{{vNoCrit, vCritical, vDeclared}, {vUntrusted, vScanner}} {
+		var first string
+		for i, v := range level {
+			e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
+			p := newPairPolicy()
+			e.auth.risk = p
+			p.set("core.facts", "dev-002", v)
+			d := refusalDetail(t, e.auth.lowEverywhereAll(refusalActions("core.facts"), targets))
+			wantNoReasonClass(t, d)
+			if i == 0 {
+				first = d
+			} else if d != first {
+				t.Fatalf("reply depends on the reason (%q):\n%s\n%s", v.why, first, d)
+			}
+			// The audit log keeps the reason.
+			evs := e.eventsOf("rejected", CodeGrantInvalid)
+			if len(evs) != 1 || !strings.Contains(evs[0].Detail, v.why) || evs[0].Host != "dev-002" {
+				t.Fatalf("audit event lacks the reason: %+v", evs)
+			}
+		}
+	}
+}
+
+func (e *env) eventsOf(kind string, code Code) []Event {
+	e.evtMu.Lock()
+	defer e.evtMu.Unlock()
+	var out []Event
+	for _, ev := range e.evts {
+		if ev.Kind == kind && ev.Code == code {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+func TestGrantRefusalEarlyStopSaysSoAndAudits(t *testing.T) {
+	// A refusal, then the risk policy fails: the grant is refused (as the
+	// pair-by-pair check refused at the first pair), the text names what
+	// was found and says the rest was not checked, and the policy failure
+	// is in the audit log.
+	e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
+	p := newPairPolicy()
+	e.auth.risk = p
+	p.set("core.facts", "dev-001", vNoCrit)
+	p.set("core.facts", "dev-002", vStoreDown)
+	p.set("core.facts", "dev-003", vCritical)
+	d := refusalDetail(t, e.auth.lowEverywhereAll(refusalActions("docker.update", "core.facts"), refusalTargets("dev-001", "dev-002", "dev-003")))
+	wantInOrder(t, d, "2 action/host pairs are not LOW",
+		"docker.update@1.0.0 cannot be granted on any host (it runs only as an approved batch member);",
+		"core.facts@1.0.0 is MEDIUM on dev-001;",
+		" the remaining pairs were not checked (risk policy unavailable)", refusalHint)
+	if strings.Contains(d, "dev-003") || strings.Contains(d, "dev-002") || strings.Contains(d, "unavailable)"+refusalHint+";") {
+		t.Fatalf("pairs after the failure are named: %s", d)
+	}
+	wantNoReasonClass(t, d)
+	if evs := e.eventsOf("rejected", CodeGrantInvalid); len(evs) != 1 || evs[0].Host != "dev-001" {
+		t.Fatalf("want one per-pair event for dev-001, got %+v", evs)
+	}
+	evs := e.eventsOf("rejected", CodeStorage)
+	if len(evs) != 1 || evs[0].Host != "dev-002" || !strings.Contains(evs[0].Detail, "criticality store unavailable") ||
+		!strings.Contains(evs[0].Detail, "remaining pairs not checked") {
+		t.Fatalf("want the policy failure audited, got %+v", evs)
+	}
+}
+
+func TestGrantRefusalEventCapCountsEmittedEvents(t *testing.T) {
+	// Batch-only refusals write no event, so they do not use up the cap:
+	// 50 per-pair events, then one summary for the rest. Also on the
+	// early-stop path.
+	for _, early := range []bool{false, true} {
+		e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
+		p := newPairPolicy()
+		e.auth.risk = p
+		var hosts []string
+		for i := range 60 {
+			h := fmt.Sprintf("host-%03d", i)
+			hosts = append(hosts, h)
+			p.set("core.facts", h, vNoCrit)
+		}
+		if early {
+			hosts = append(hosts, "down")
+			p.set("core.facts", "down", vStoreDown)
+		}
+		d := refusalDetail(t, e.auth.lowEverywhereAll(refusalActions("docker.update", "docker.rollback", "core.facts"), refusalTargets(hosts...)))
+		wantInOrder(t, d, "62 action/host pairs", "… and 12 more")
+		if early != strings.Contains(d, "not checked") {
+			t.Fatalf("early=%v: %s", early, d)
+		}
+		evs := e.eventsOf("rejected", CodeGrantInvalid)
+		if len(evs) != maxRefusalEvents+1 {
+			t.Fatalf("early=%v: want %d events, got %d", early, maxRefusalEvents+1, len(evs))
+		}
+		for i, ev := range evs[:maxRefusalEvents] {
+			if want := fmt.Sprintf("host-%03d", i); ev.Host != want {
+				t.Fatalf("event %d for %q, want %q", i, ev.Host, want)
+			}
+		}
+		if last := evs[maxRefusalEvents]; last.Host != "" || last.Detail != "10 more action/host pairs not LOW" {
+			t.Fatalf("summary event %+v", last)
+		}
 	}
 }
 
@@ -482,17 +606,19 @@ func TestGrantRefusalListIsBounded(t *testing.T) {
 		t.Fatalf("list not bounded (%d bytes): %s", len(d), d)
 	}
 
-	// Long host IDs: the byte bound wins over the pair bound.
+	// Long action, version and host IDs (each over the field cap): the
+	// byte bound wins over the pair bound.
 	p2 := newPairPolicy()
 	e.auth.risk = p2
+	longAct := schedgrant.Action{ActionID: "a." + strings.Repeat("z", 200), ModuleVersion: strings.Repeat("9", 200), ArtifactSHA256: hexSum(artifact)}
 	var long []string
 	for i := range 50 {
-		h := fmt.Sprintf("%03d-%s", i, strings.Repeat("x", 120))
+		h := fmt.Sprintf("%03d-%s", i, strings.Repeat("x", 200))
 		long = append(long, h)
-		p2.set("core.facts", h, vNoCrit)
+		p2.set(longAct.ActionID, h, vNoCrit)
 	}
-	d = refusalDetail(t, e.auth.lowEverywhereAll(refusalActions("core.facts"), refusalTargets(long...)))
-	if len(d) > maxRefusalDetailBytes || !strings.Contains(d, " more") {
+	d = refusalDetail(t, e.auth.lowEverywhereAll([]schedgrant.Action{longAct}, refusalTargets(long...)))
+	if len(d) > maxRefusalDetailBytes || !strings.Contains(d, " more") || !strings.HasSuffix(d, refusalHint) {
 		t.Fatalf("byte bound not applied (%d bytes)", len(d))
 	}
 }
@@ -536,6 +662,48 @@ func oldLowEverywhere(a *Authority, actionID, version, artifactSHA256 string, ta
 	return nil
 }
 
+// expectedRefusal is the refusal text lowEverywhereAll should give for
+// acts × hosts under p (no limits reached); ok is false when it should not
+// refuse with CodeGrantInvalid.
+func expectedRefusal(acts []schedgrant.Action, hosts []string, p *pairPolicy) (string, bool) {
+	var entries []string
+	unchecked := false
+walk:
+	for _, a := range acts {
+		if canonical.IsBatchOnlyContainerAction(a.ActionID) {
+			entries = append(entries, a.ActionID+"@1.0.0 cannot be granted on any host (it runs only as an approved batch member)")
+			continue
+		}
+		for _, h := range hosts {
+			v, set := p.pairs[a.ActionID+"|"+h]
+			switch {
+			case !set:
+			case v.err:
+				if len(entries) == 0 {
+					return "", false
+				}
+				unchecked = true
+				break walk
+			default:
+				entries = append(entries, a.ActionID+"@1.0.0 is "+string(v.risk)+" on "+h)
+			}
+		}
+	}
+	if len(entries) == 0 {
+		return "", false
+	}
+	noun := "pairs are"
+	if len(entries) == 1 {
+		noun = "pair is"
+	}
+	s := fmt.Sprintf("%d action/host %s not LOW; only actions the executor trusts as LOW (read-only) can be granted: %s",
+		len(entries), noun, strings.Join(entries, "; "))
+	if unchecked {
+		s += "; the remaining pairs were not checked (risk policy unavailable)"
+	}
+	return s + refusalHint, true
+}
+
 func TestGrantRefusalDecisionUnchanged(t *testing.T) {
 	e := newEnv(t, ModeStandard, virtualwebauthn.AuthenticatorOptions{})
 	verdicts := []*pairVerdict{nil, &vNoCrit, &vUntrusted, &vStoreDown}
@@ -571,6 +739,24 @@ func TestGrantRefusalDecisionUnchanged(t *testing.T) {
 			got := e.auth.lowEverywhereAll(acts, targets)
 			if (old == nil) != (got == nil) || CodeOf(old) != CodeOf(got) {
 				t.Fatalf("%v combo %d: old %v, new %v", actIDs, c, old, got)
+			}
+			// The whole text, from an independent walk over the combo.
+			if want, ok := expectedRefusal(acts, hosts, p); ok {
+				var pe *Error
+				if !errors.As(got, &pe) || pe.Detail != want {
+					t.Fatalf("%v combo %d:\nwant %q\ngot  %v", actIDs, c, want, got)
+				}
+				// The first pair listed is the one the old check refused.
+				var po *Error
+				if !errors.As(old, &po) {
+					t.Fatalf("%v combo %d: old %v", actIDs, c, old)
+				}
+				first, _, _ := strings.Cut(strings.SplitN(want, ": ", 2)[1], ";")
+				oldPair, _, _ := strings.Cut(po.Detail, ", not LOW")
+				if !strings.HasPrefix(first, strings.Fields(oldPair)[0]) ||
+					(strings.Contains(oldPair, " on ") && !strings.HasPrefix(first, oldPair)) {
+					t.Fatalf("%v combo %d: old refused %q, new lists %q first", actIDs, c, po.Detail, first)
+				}
 			}
 			// Per action (the read-lease call) too.
 			for _, a := range acts {
