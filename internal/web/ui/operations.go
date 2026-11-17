@@ -557,6 +557,11 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 			}
 		case "docker.start", "docker.stop", "docker.restart":
 			if c, err := dockerhost.ParseControl(x.Result); err == nil && len(x.Result) > 0 {
+				// A bound control stopped on a binding mismatch (G5b): its own
+				// reason, so it is never read as an ordinary precheck failure.
+				if c.Code == dockerhost.CodeContainerChanged {
+					c.Reason = "the bound container changed, so nothing was run: " + c.Reason
+				}
 				hv.DockerControl = &c
 			}
 		}

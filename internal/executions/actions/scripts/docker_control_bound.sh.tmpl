@@ -4,16 +4,16 @@
 # Parameters, one line: {"container_id":"<64 hex>","image_id":"sha256:<64 hex>"}.
 # Before the verb the script checks that the container with that full ID
 # exists and that its image is the bound image ID. If not, it stops with the
-# code container_changed and runs no verb. The verb acts on the ID, not on a
-# name, so the check and the action refer to the same container. The
+# code container_changed (exit 11) and runs no verb. The verb acts on the ID,
+# not on a name, so the check and the action refer to the same container. The
 # configuration hash is deliberately not checked here (G4: the host cannot
 # produce it). Nothing is recreated or pulled.
 set -u
 b64() { base64 -w0 2>/dev/null || base64 | tr -d '\n'; }
 pre() { printf '{"format":"docker-control-v1","phase":"precheck","reason":"%s"}\n' "$1"; exit 10; }
-# The reason starts with the code: the server's ParseControl keeps only the
-# reason text, so the prefix is what tells a binding mismatch apart.
-changed() { printf '{"format":"docker-control-v1","phase":"precheck","code":"container_changed","reason":"container_changed: %s"}\n' "$1"; exit 10; }
+# The code field is what the server reads (dockerhost.ParseControl); the
+# reason is text for people.
+changed() { printf '{"format":"docker-control-v1","phase":"precheck","code":"container_changed","reason":"%s"}\n' "$1"; exit 11; }
 c=$(sed -n 's/^{"container_id":"\([0-9a-f]\{64\}\)","image_id":"sha256:[0-9a-f]\{64\}"}$/\1/p' "$NEBULA_PARAMS")
 i=$(sed -n 's/^{"container_id":"[0-9a-f]\{64\}","image_id":"\(sha256:[0-9a-f]\{64\}\)"}$/\1/p' "$NEBULA_PARAMS")
 [ -n "$c" ] && [ -n "$i" ] || pre "the container_id or image_id parameter is missing or invalid"

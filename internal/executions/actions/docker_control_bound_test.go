@@ -25,8 +25,10 @@ const (
 )
 
 // boundFake is a fake docker with one container: ctr holds "<id> <image>"
-// (absent means no such container). Inspect by an ID other than the
-// container's fails, as docker does. The verb succeeds and then runs
+// (absent means no such container). Inspect answers for whatever name or ID
+// the script asks, with the stored container, as a name that resolves to that
+// container does; so a different stored ID reaches the script's ID comparison
+// instead of a "no such container" error. The verb succeeds and then runs
 // afterVerb (shell, may change ctr to simulate a race).
 func boundFake(t *testing.T, ctrID, ctrImage, afterVerb string) (*fakeHost, string) {
 	t.Helper()
@@ -45,7 +47,6 @@ case "$1" in
   version) echo 27 ;;
   inspect)
     read id img < "`+f.dir+`/ctr" 2>/dev/null || exit 1
-    [ "$last" = "$id" ] || exit 1
     case "$*" in
       *'{{.Id}} {{.Image}}'*) echo "$id $img" ;;
       *'{{.Id}} {{.State.Status}}'*) echo "$id running" ;;
@@ -113,19 +114,32 @@ func TestBoundControlStopsOnChangedContainer(t *testing.T) {
 			f, p := boundFake(t, c.ctrID, c.ctrImage, "")
 			for _, verb := range []string{"start", "stop", "restart"} {
 				code, doc := runBound(t, f, p, verb, boundLine(c.cid, c.iid))
-				if code != 10 || doc["phase"] != "precheck" || doc["code"] != "container_changed" {
+				// Its own exit code (11) and its own code field: a consumer
+				// reads the code, not the reason text.
+				if code != 11 || doc["phase"] != "precheck" || doc["code"] != "container_changed" {
 					t.Fatalf("%s: %d %v", verb, code, doc)
 				}
-				// The reason starts with the code, so a consumer that keeps only
-				// the reason text can still tell this apart from other refusals.
-				if reason, _ := doc["reason"].(string); !strings.HasPrefix(reason, "container_changed: ") {
-					t.Fatalf("%s: reason %q does not start with the code", verb, reason)
+				if reason, _ := doc["reason"].(string); reason == "" || strings.Contains(reason, "container_changed") {
+					t.Fatalf("%s: reason %q", verb, reason)
 				}
 				if strings.Contains(f.readCalls(t), verb+" -- ") {
 					t.Fatalf("%s: a verb ran after the check failed: %q", verb, f.readCalls(t))
 				}
 			}
 		})
+	}
+}
+
+func TestBoundControlStopsOnOtherIDWithSameImage(t *testing.T) {
+	// Image matches, container ID differs: only the ID comparison can stop
+	// this; a script that compared the image alone would run the verb.
+	f, p := boundFake(t, otherCID, boundIID, "")
+	code, doc := runBound(t, f, p, "stop", boundLine(boundCID, boundIID))
+	if code != 11 || doc["code"] != "container_changed" {
+		t.Fatalf("%d %v", code, doc)
+	}
+	if calls := f.readCalls(t); strings.Contains(calls, "stop -- ") {
+		t.Fatalf("the verb ran on a different container ID: %q", calls)
 	}
 }
 
@@ -199,6 +213,21 @@ func TestBoundControlBatchMemberShape(t *testing.T) {
 // TestBatchMemberVersionsStayOutOfCatalog: the 1.1.0 batch members must not
 // be offered by the general catalog (actions.Builtin, which Service.Catalog
 // lists) and must not change what Lookup returns for the same IDs.
+// TestBatchMemberOnlyIDsAreOnlyBatchMembers: the IDs that have a batch member
+// version are reported as batch only, and no other ID is.
+func TestBatchMemberOnlyIDsAreOnlyBatchMembers(t *testing.T) {
+	for _, id := range []string{"docker.start", "docker.stop", "docker.restart"} {
+		if !IsBatchMemberOnly(id) {
+			t.Fatalf("IsBatchMemberOnly(%s) = false", id)
+		}
+	}
+	for _, id := range []string{"docker.inspect", "docker.logs", "docker.compose_update", "nope.nope"} {
+		if IsBatchMemberOnly(id) {
+			t.Fatalf("IsBatchMemberOnly(%s) = true", id)
+		}
+	}
+}
+
 func TestBatchMemberVersionsStayOutOfCatalog(t *testing.T) {
 	seen := map[string]bool{}
 	for _, b := range Builtin {

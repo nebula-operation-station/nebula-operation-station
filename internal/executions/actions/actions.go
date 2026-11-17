@@ -587,6 +587,19 @@ var batchMembers = []Action{
 	},
 }
 
+// IsBatchMemberOnly reports whether id has a batch-member version (G5b). A
+// batch plan and its runner must resolve such an ID through
+// LookupBatchMember only: the general catalog's version of it (1.0.0) runs
+// without a container binding and is never a batch member.
+func IsBatchMemberOnly(id string) bool {
+	for _, a := range batchMembers {
+		if a.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 // LookupBatchMember returns the batch-member action id at exactly version
 // (G5b). An empty version or a built-in version never matches here: the
 // general catalog answers for those through Lookup.
