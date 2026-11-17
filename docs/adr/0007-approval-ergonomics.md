@@ -10,6 +10,12 @@ rule of this ADR then sets the batch approval
 ([spec 05](../spec/05-authentication.md#v28-05-01)). The decisions below
 are unchanged.
 
+**Amendment note, 2026-11-17 (op02).** Pending proposals can now be
+rejected; see [Amendment (2026-11-17): reject pending
+proposals](#amendment-2026-11-17-reject-pending-proposals) at the end and
+[spec 07](../spec/07-execution-model.md#v29-07-01). Rejecting only removes
+authority; no decision below is weakened.
+
 ## Context
 
 Working across several hosts currently repeats confirmations for facts, update
@@ -306,3 +312,127 @@ precedes its feature's UI/CLI integration; local authority tests need no RPC.
 | E20: session display | `internal/web/ui/`, existing WebAuthn assets | Remaining time, extend once, expired state, no activity-based renewal |
 | E21: security acceptance | `test/security/` **P** | Compromised-server reads bounded; substitution/replay, revoke/lock races, crash reconciliation |
 | E22: operator documentation | `docs/admin/guide.md`, implementation guides | Upgrade trust, 90-day legacy migration, refresh/gates, lock/restart and hardened CLI walkthroughs |
+
+## Amendment (2026-11-17): reject pending proposals
+
+Status: accepted by the maintainer (Axel), 2026-11-17. Spec revision
+[v29](../spec/04-revision-history.md#v29-04-01).
+
+### Context
+
+A proposal that waits for approval (a pending permit of an interactive
+execution, or a pending `batch-v1` plan before its initial approval) can
+today only wait until its approval window ends; the server then marks it
+`expired` (server-side `ExpirePending`, decision 79 in
+`docs/implementation/m0.md`). There is no way to say "no". An admin who
+sees a wrong or unwanted proposal must leave it approvable, in the browser
+and with `nebula approve`, until the window ends. The Wächter review of
+op01 reported this gap.
+
+### Decision
+
+**R1 – What can be rejected.** A pending execution permit and a pending
+batch plan (by its batch digest, as a whole), each only while it is
+pending: not yet approved, not expired, not rejected. Approved permits,
+running rollouts and stage gates keep their existing paths (abort, lock,
+revocation); a rejection is never a way to stop already approved work.
+Pending read-grant and schedule-grant proposals, enrollment permits and
+integrity baselines are not covered by this amendment.
+
+**R2 – Who.** In the web UI, every admin with an open privileged session
+([spec 05](../spec/05-authentication.md#v23-05-01)). On the executor host,
+the local admin UID with `nebula reject <digest>`, without a browser
+session. **No security-key assertion** is needed, in either mode and for
+every risk class: rejecting only removes authority, like revoking a read
+lease or `nebula lock`, so it needs no stronger proof than the session.
+
+**R3 – What the executor does.** On the executor RPC `RejectPending` (roles
+`server` and `admin`, like `GetPermitState`) the executor, under the same
+lock that serialises approval (`SubmitAssertion`, `ApproveCLI`, batch
+approval), removes the pending permit or plan and its challenge and keeps
+a **rejected** marker for the digest. Everything that can fail happens
+before or in one `executor.db` transaction that stores the marker (new
+table `rejected_proposals`, op03), the spent execution ID or batch ID and
+the signed event; if it fails, nothing changes (`storage_error`). After
+the commit the rejection is final and the call succeeds; only infallible
+in-memory deletes follow, and every approval path consults the persisted
+marker, not the in-memory state. Marker and spent ID survive lock and
+restart; they are pruned no earlier than `RetainSpentExecutions` after the
+approval window ended. From then on the
+digest is final: it cannot be approved in the browser or with
+`nebula approve`, it cannot be re-proposed (its execution ID or batch ID
+counts as spent), and no operation returns it to `pending`. "Rejected" is
+a state of its own, distinguishable from "expired" on the executor
+(`GetPermitState` reports `REJECTED`) and on the server (execution state
+`rejected` next to `expired`; a batch plan is rejected as a whole, with
+its member records). There is no "undo"; the admin plans again. The
+phases of this step are authoritative in
+[spec 07](../spec/07-execution-model.md#v29-07-01).
+
+**R4 – Reason.** Optional free text, at most 200 characters (Unicode code
+points; at most 800 bytes), valid UTF-8 without control characters (C0,
+C1, DEL) and without bidirectional control characters; the exact rule is
+in [spec 07](../spec/07-execution-model.md#v29-07-01). It is
+shown on the operation page as text only and stored with the server's
+execution record. It is never sent to an LLM (help assistant, ops agent,
+vulnerability agent) or to a notification target, and it is never part
+of a digest, a challenge or any authorization input.
+
+**R5 – Audit.** The executor writes one signed, hash-chained event
+`permit.rejected` with digest, execution or batch ID, calling role (server
+or admin UID), the user name the server relays in the request field
+`relayed_user` (server UID only; limits as in
+[spec 07](../spec/07-execution-model.md#v29-07-01), which is
+authoritative; marked as server-claimed), the executor-known credential
+ID that opened the privileged session (`session_credential_id`), time and
+the **length** of the reason, never its text. The server writes
+the audit record `execution_rejected` with execution ID, digest, user,
+time and reason length; it stores a rejection intent before the call so
+that a rejection it learns only after a crash is still attributed to the
+UI user. A rejection that `GetPermitState` reports with role `admin`
+(made on the executor host and learned by the server's approval check or
+expiry sweep) is audited as `execution_rejected_on_cli`.
+
+**R6 – Idempotence and race.** Rejecting an already rejected, expired,
+approved or unknown digest changes nothing and returns a distinct error
+code (`permit_already_rejected`, `permit_expired`,
+`permit_already_approved`, `permit_not_found`). Approval and rejection of
+the same digest race inside the executor: whichever reaches the executor
+lock first wins, and the other receives an error (`permit_rejected` for a
+late approval, `permit_already_approved` for a late rejection). The server
+records its state only from the executor's answer.
+
+**R7 – No new approval shortcut.** `RejectPending` carries no approval
+data, has no flag or mode that approves, and is never followed by an
+automatic re-proposal. A rejection never lowers a risk class, never frees
+a spent ID for reuse and never changes what another pending digest needs.
+
+### Consequences and threat analysis
+
+A compromised server can reject any pending proposal while a privileged
+session is open (and, as with lock and lease revocation, it could already
+prevent work by not proposing it). This is a loss of availability only:
+rejection can never cause, widen or speed up an execution. The executor
+event and server audit make each rejection visible; the admin plans again.
+The pending-proposal capacity is not freed early: the rejected marker
+stays until the original approval window would have ended, so rejecting
+cannot be used to churn proposals faster than today.
+
+### Required specification changes (op02)
+
+- `docs/spec/03-processes-and-data.md`: `RejectPending` in the server and
+  admin method sets; the `executor.db` table `rejected_proposals`.
+- `docs/spec/05-authentication.md`: who may reject, no assertion.
+- `docs/spec/07-execution-model.md`: the rejected state, the executor
+  step, error codes, event, race, reason limits.
+- `docs/spec/04-revision-history.md`: revision v29.
+- `docs/threat-model.md`: compromised server rejecting proposals.
+
+### Implementation tickets
+
+| Ticket | Scope / paths | Acceptance tests or review |
+| --- | --- | --- |
+| op03: reject RPC and storage | `proto/` **P**, generated RPC, executor roles **P**, `internal/executordb/` **P** (new migration `rejected_proposals`) | `RejectPending` with `relayed_user` and `PERMIT_STATE_REJECTED`; `GetPermitState` returns the rejecting role and accepts a batch digest; server/admin allowed, every other UID refused; table constraints (32-byte digest, kind, unique ID per kind, role), rows survive reopen, pruning not before `RetainSpentExecutions` after window end |
+| op04: executor reject | `internal/permit/` **P**, `internal/executor/` **P** | Marker, spent ID and signed event in one `executor.db` transaction; a failure in signing or in that transaction returns `storage_error` and leaves the database and the in-memory permit unchanged (still pending, still approvable); after the commit only in-memory deletes follow and the call succeeds; approval paths refuse a digest present in `rejected_proposals` even with a stale in-memory entry; event carries `session_credential_id`; rejected digest unapprovable and its execution or batch ID not re-proposable after lock and restart, every error code, approve-vs-reject race in both orders, reason and `relayed_user` limits, signed event without text |
+| op05: server state and UI | `internal/executions/`, server migration, `internal/web/ui/`, templates | State `rejected`, approval check and sweep honour `REJECTED` (sweep asks `GetPermitState` before `expired`, also after executor lock or restart and server downtime), rejection intent stored before the call and used for attribution after a crash (role `server` → `execution_rejected`, role `admin` → `execution_rejected_on_cli`), batch records rejected as a whole with their members when server batches exist, reason shown as text only, audit records, never in notifications or LLM inputs |
+| op06: `nebula reject` | `cmd/nebula/` **P** | Admin UID only, shows the executor's view first, optional reason, distinct error output |

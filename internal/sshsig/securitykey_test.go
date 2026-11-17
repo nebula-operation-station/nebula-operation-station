@@ -190,7 +190,7 @@ func TestVerifySecurityKeyRejectsCertificate(t *testing.T) {
 	k := newTestSK(t, "ssh:")
 	_, caPriv, _ := ed25519.GenerateKey(rand.Reader)
 	ca, _ := ssh.NewSignerFromKey(caPriv)
-	cert := &ssh.Certificate{Key: k.pub, CertType: ssh.UserCert, ValidBefore: ssh.CertTimeInfinity}
+	cert := &ssh.Certificate{Key: k.pub, CertType: ssh.UserCert, ValidPrincipals: []string{"test"}, ValidBefore: ssh.CertTimeInfinity}
 	if err := cert.SignCert(rand.Reader, ca); err != nil {
 		t.Fatal(err)
 	}
