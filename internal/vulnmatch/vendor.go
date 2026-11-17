@@ -24,7 +24,11 @@ func vendorFeed(eco string) (string, bool) {
 }
 
 // device matches a device's firmware against the CSAF products of its
-// ecosystem (vendor_advisory, D2). internal/vulnver has no vendor version
+// ecosystem (vendor_advisory, D2). The OS (ecosystem) and the models come
+// from the structured product tree (vulnfeed.CSAFProduct.OS and Models): a
+// product applies when it names no model or the device's exact model; a
+// product naming only other models does not affect the device; a near name
+// or an unreadable model scope is a coverage gap. internal/vulnver has no vendor version
 // scheme, so the matcher never orders firmware versions: only an exact
 // product_version equal to the firmware decides. A firmware that only a
 // version range could cover, or that appears in contradicting status
@@ -55,29 +59,87 @@ func (m *matcher) device(s Subject) {
 		return
 	}
 	model := newDeviceModel(s.Device.Model)
-	var exactSeen, firmwareSeen bool
+	var appliesSeen, firmwareSeen bool
 	for _, d := range m.vendorDocs(feed) {
 		for _, v := range d.adv.Vulnerabilities {
 			hit := m.deviceVuln(s, feed, d, v, model)
-			exactSeen = exactSeen || hit.exact
+			appliesSeen = appliesSeen || hit.applies
 			firmwareSeen = firmwareSeen || hit.firmware
 		}
 	}
-	// A finding needs a unique hit on the model and on the firmware's train
-	// (ADR 0011 D4). Without a hit on both, coverage is unknown, never clean.
+	// A finding needs a product that applies to the device (its OS and
+	// either no model or its exact model) and an exact hit on its firmware
+	// (ADR 0011 D4). Without both, coverage is unknown, never clean: a
+	// device whose model the feed only ever excludes is a model unknown to
+	// the feed, not a clean device.
 	switch {
-	case !exactSeen:
+	case !appliesSeen:
 		m.gap(s, s.Device.Model, "", GapDeviceModelUnknown)
 	case !firmwareSeen:
 		m.gap(s, s.Device.Model, "", GapDeviceVersionUnknown)
 	}
 }
 
-// deviceHit says which products of one vulnerability name the device: the
-// exact model (exact), and an exact product version equal to its firmware
-// (firmware).
+// deviceHit says which products of one vulnerability apply to the device:
+// any product of its OS that names no model or its exact model (applies),
+// one that names its exact model (exact), and an applying product whose
+// exact version equals its firmware (firmware).
 type deviceHit struct {
-	exact, firmware bool
+	applies, exact, firmware bool
+}
+
+// modelScope is how a CSAF product's model scope relates to a device.
+type modelScope int
+
+const (
+	// scopeAll: the product names no model; it covers every device of its
+	// OS.
+	scopeAll modelScope = iota
+	// scopeDevice: one of the product's models is the device's model.
+	scopeDevice
+	// scopeUnknown: the product's scope cannot be read exactly, or it names
+	// a near name of the device's model (one model string is a word run of
+	// the other: "PA-440 Series", "CBS350-24P-4G" for "CBS350-24P"). Whether
+	// it is the device is unknown.
+	scopeUnknown
+	// scopeOther: the product names only other models; it is not the
+	// device.
+	scopeOther
+)
+
+// scope classifies a product's models against the device's model.
+func (d deviceModel) scope(p indexedProduct) modelScope {
+	near := false
+	for _, pm := range p.models {
+		if d.isExact(pm) {
+			return scopeDevice
+		}
+		near = near || d.isNear(pm)
+	}
+	switch {
+	case p.p.ModelsIncomplete || near:
+		return scopeUnknown
+	case len(p.models) == 0:
+		return scopeAll
+	}
+	return scopeOther
+}
+
+// isNear reports whether one normalised model is a whole-word run of the
+// other without being equal: the same model may be named with a series,
+// region or vendor word, or as a shorter or longer SKU. A near name is never
+// a hit and never proof that the device is not affected.
+func (d deviceModel) isNear(p productModel) bool {
+	if d.key == "" || p.key == "" || d.key == p.key {
+		return false
+	}
+	return wordRun(d.key, p.key) || wordRun(p.key, d.key)
+}
+
+// wordRun reports whether the '-'-separated words of inner appear as a
+// contiguous run in outer.
+func wordRun(outer, inner string) bool {
+	return strings.Contains("-"+outer+"-", "-"+inner+"-")
 }
 
 // deviceModel is a device's model in the normalised form that exact hits are
@@ -98,16 +160,17 @@ func (d deviceModel) isExact(p productModel) bool {
 	return d.key != "" && p.key == d.key
 }
 
-// productModel is a CSAF product's model string in the normalised form. Only
-// the product's model field (product_name) is used: the full name carries
-// version and vendor words, whose digits must never form a device model.
+// productModel is one of a CSAF product's models in the normalised form.
+// Only the structured Models field from the product tree is used: the full
+// name and the OS or family name carry version, series and vendor words,
+// which must never form a device model.
 type productModel struct {
 	key string
 }
 
-// newProductModel indexes the model field of a CSAF product.
-func newProductModel(product string) productModel {
-	return productModel{key: normalizeModel(product)}
+// newProductModel indexes one model of a CSAF product.
+func newProductModel(model string) productModel {
+	return productModel{key: normalizeModel(model)}
 }
 
 // normalizeModel lower-cases s and folds every run of white space, '-' and
@@ -122,10 +185,26 @@ func isModelSeparator(r rune) bool {
 	return r == '-' || r == '_' || unicode.IsSpace(r)
 }
 
-// indexedProduct is a CSAF product with its model string, built once.
+// indexedProduct is a CSAF product with its normalised models, built once.
+// A model that normalises to nothing is no readable model, so the product's
+// scope counts as incomplete.
 type indexedProduct struct {
-	p     vulnfeed.CSAFProduct
-	model productModel
+	p      vulnfeed.CSAFProduct
+	models []productModel
+}
+
+// newIndexedProduct normalises the models of p.
+func newIndexedProduct(p vulnfeed.CSAFProduct) indexedProduct {
+	ip := indexedProduct{p: p}
+	for _, m := range p.Models {
+		pm := newProductModel(m)
+		if pm.key == "" {
+			ip.p.ModelsIncomplete = true
+			continue
+		}
+		ip.models = append(ip.models, pm)
+	}
+	return ip
 }
 
 // indexedAdvisory is a CSAF advisory with its products by ID.
@@ -149,7 +228,7 @@ func (m *matcher) vendorDocs(feed string) []indexedAdvisory {
 		adv := &m.db.csaf[i].adv
 		byID := make(map[string]indexedProduct, len(adv.Products))
 		for _, p := range adv.Products {
-			byID[p.ProductID] = indexedProduct{p: p, model: newProductModel(p.Product)}
+			byID[p.ProductID] = newIndexedProduct(p)
 		}
 		docs = append(docs, indexedAdvisory{adv: adv, byID: byID})
 	}
@@ -163,13 +242,18 @@ func (m *matcher) vendorDocs(feed string) []indexedAdvisory {
 	return docs
 }
 
-// deviceVuln judges one vulnerability of one advisory for the device. The
-// advisory's own products decide: a model hit without a firmware hit here is
-// a gap for this advisory, whatever other advisories list.
+// deviceVuln judges one vulnerability of one advisory for the device. Only
+// products of the device's OS (ecosystem) count, and of those only the ones
+// whose model scope applies to it: no model named, or its exact model. A
+// product naming only other models is not the device; a product whose scope
+// is unreadable or a near name leaves the vulnerability's coverage unknown.
+// The advisory's own products decide: a hit on the device's exact model
+// without a firmware hit here is a gap for this advisory, whatever other
+// advisories list.
 func (m *matcher) deviceVuln(s Subject, feed string, d indexedAdvisory, v vulnfeed.CSAFVulnerability, model deviceModel) deviceHit {
 	fw := s.Device.Firmware
 	var affected []vulnfeed.CSAFProduct
-	var isFixed, isNotAffected, rangeSeen, otherModel bool
+	var isFixed, isNotAffected, rangeSeen, unknownModel bool
 	var hit deviceHit
 	scan := func(ids []string, f func(p vulnfeed.CSAFProduct)) {
 		for _, id := range ids {
@@ -177,15 +261,17 @@ func (m *matcher) deviceVuln(s Subject, feed string, d indexedAdvisory, v vulnfe
 			if !ok || ip.p.Ecosystem != s.Ecosystem {
 				continue
 			}
-			// Only the exact model decides (ADR 0011 D4). Any other product of
-			// the ecosystem that this vulnerability names may be the device
-			// under a near name: it never decides, and it leaves the
-			// vulnerability's coverage unknown, never silent.
-			if !model.isExact(ip.model) {
-				otherModel = true
+			switch model.scope(ip) {
+			case scopeOther:
+				// The tree scopes this product to other models only.
 				continue
+			case scopeUnknown:
+				unknownModel = true
+				continue
+			case scopeDevice:
+				hit.exact = true
 			}
-			hit.exact = true
+			hit.applies = true
 			p := ip.p
 			if p.Version == "" {
 				if p.VersionRange != "" {
@@ -207,9 +293,9 @@ func (m *matcher) deviceVuln(s Subject, feed string, d indexedAdvisory, v vulnfe
 	if firstID == "" {
 		firstID = d.adv.TrackingID
 	}
-	if otherModel {
-		// A product that is not the exact model sits in this vulnerability:
-		// whether it names the device is unknown, so the coverage is unknown.
+	if unknownModel {
+		// A product whose model scope may or may not be the device sits in
+		// this vulnerability: the coverage is unknown, never silent.
 		m.gap(s, s.Device.Model, canonicalID(firstID), GapDeviceModelUnknown)
 	}
 	if hit.exact && !hit.firmware {
@@ -229,7 +315,7 @@ func (m *matcher) deviceVuln(s Subject, feed string, d indexedAdvisory, v vulnfe
 	case isNotAffected:
 		m.emitDevice(s, ids, vulnfinding.Fix{State: vulnfinding.FixNotAffected}, feed)
 	case len(affected) > 0:
-		m.emitDevice(s, ids, vendorFix(d.byID, v, s.Ecosystem, affected, &m.feedCut), feed)
+		m.emitDevice(s, ids, vendorFix(d.byID, v, s.Ecosystem, model, affected, &m.feedCut), feed)
 	case rangeSeen:
 		m.gap(s, s.Device.Model, canonicalID(firstID), GapVendorRange)
 	}
@@ -238,9 +324,11 @@ func (m *matcher) deviceVuln(s Subject, feed string, d indexedAdvisory, v vulnfe
 
 // vendorFix returns the fixed release of the affected firmware's train:
 // the single distinct exact fixed version of the same ecosystem and train.
-// None, several or an over-bound version give no_fix_yet; the matcher
-// never picks among fixed releases by ordering them.
-func vendorFix(byID map[string]indexedProduct, v vulnfeed.CSAFVulnerability, eco string, affected []vulnfeed.CSAFProduct, cut *int) vulnfinding.Fix {
+// Only fixed products whose model scope applies to the device count, so a
+// fixed release of another model is never offered. None, several or an
+// over-bound version give no_fix_yet; the matcher never picks among fixed
+// releases by ordering them.
+func vendorFix(byID map[string]indexedProduct, v vulnfeed.CSAFVulnerability, eco string, model deviceModel, affected []vulnfeed.CSAFProduct, cut *int) vulnfinding.Fix {
 	trains := map[string]bool{}
 	for _, p := range affected {
 		if p.Train != "" {
@@ -250,7 +338,13 @@ func vendorFix(byID map[string]indexedProduct, v vulnfeed.CSAFVulnerability, eco
 	versions := map[string]bool{}
 	for _, id := range v.Fixed {
 		ip, ok := byID[id]
-		if ok && ip.p.Ecosystem == eco && ip.p.Version != "" && trains[ip.p.Train] {
+		if !ok {
+			continue
+		}
+		if sc := model.scope(ip); sc != scopeAll && sc != scopeDevice {
+			continue
+		}
+		if ip.p.Ecosystem == eco && ip.p.Version != "" && trains[ip.p.Train] {
 			versions[ip.p.Version] = true
 		}
 	}

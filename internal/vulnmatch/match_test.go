@@ -567,10 +567,22 @@ func TestScoreMapsBoundedInTotal(t *testing.T) {
 	}
 }
 
-// devProduct is a product of a device model's family: its name carries the
-// model, as a model-level CSAF branch does (ADR 0011 D4).
+// devProduct is a product of the OS of ecosystem eco scoped to one model, as
+// the CSAF parser builds it from a product_name below an OS family (ADR 0011
+// D4). The OS and product names deliberately differ from the model: only
+// Models is a model.
 func devProduct(id, eco, model, version, train string) vulnfeed.CSAFProduct {
-	return vulnfeed.CSAFProduct{ProductID: id, Name: "Cisco " + model + " " + version, Product: model, Version: version, Train: train, Ecosystem: eco}
+	p := osProduct(id, eco, version, train)
+	p.Name = "Cisco " + model + " " + version
+	p.Models = []string{model}
+	return p
+}
+
+// osProduct is a product of the OS of ecosystem eco that names no model:
+// it covers every device of that OS.
+func osProduct(id, eco, version, train string) vulnfeed.CSAFProduct {
+	os := "OS of " + eco
+	return vulnfeed.CSAFProduct{ProductID: id, Name: os + " " + version, Product: os, OS: os, Version: version, Train: train, Ecosystem: eco}
 }
 
 // TestVendorTrains: devices against CSAF products of their train; only an
@@ -586,7 +598,7 @@ func TestVendorTrains(t *testing.T) {
 			devProduct("p4", panos, "PA-440", "11.1.4", "11.1"),
 			devProduct("p5", panos, "PA-440", "11.1.5", "11.1"),
 			devProduct("p6", panos, "PA-440", "9.1.17", "9.1"),
-			{ProductID: "p7", Name: "PA-440", Product: "PA-440", VersionRange: "vers:generic/>=11.2.0|<11.2.4", Train: "11.2", Ecosystem: panos},
+			{ProductID: "p7", Name: "PA-440", Product: "PAN-OS", OS: "PAN-OS", Models: []string{"PA-440"}, VersionRange: "vers:generic/>=11.2.0|<11.2.4", Train: "11.2", Ecosystem: panos},
 		},
 		Vulnerabilities: []vulnfeed.CSAFVulnerability{{CVE: "CVE-2024-3400", Affected: []string{"p1", "p3", "p7"}, Fixed: []string{"p2", "p4", "p5"}, NotAffected: []string{"p6"}}},
 	}

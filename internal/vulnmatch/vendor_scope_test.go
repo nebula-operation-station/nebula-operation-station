@@ -121,18 +121,19 @@ func TestSiblingSKUNeverDecidesDeviceModel(t *testing.T) {
 	}
 }
 
-// TestSiblingNameNeverMakesModelHit: the product's model is its product
-// name. A model string that only sits inside the full name (which carries
-// version and vendor words) is no exact hit, and a version's digits never
-// form a device model (LOW: no match across field boundaries).
+// TestSiblingNameNeverMakesModelHit: the product's models are its
+// structured Models from the product tree. A model string that only sits
+// inside the full name or the product name (which carry version, series and
+// vendor words) is no exact hit, and a version's digits never form a device
+// model (LOW: no match across field boundaries).
 func TestSiblingNameNeverMakesModelHit(t *testing.T) {
 	const cbs = "vendor:cisco:cbs"
 	const cve = "CVE-2024-30004"
 	adv := vulnfeed.CSAFAdvisory{
 		TrackingID: "cisco-sa-name", Version: "1.0",
 		Products: []vulnfeed.CSAFProduct{
-			{ProductID: "n1", Name: "Cisco CBS350-24P 3.4.0.17", Product: "CBS350", Version: "3.4.0.17", Train: "3.4", Ecosystem: cbs},
-			{ProductID: "n2", Name: "Cisco CBS350-24P 3.4.1.3", Product: "CBS350", Version: "3.4.1.3", Train: "3.4", Ecosystem: cbs},
+			{ProductID: "n1", Name: "Cisco CBS350-24P 3.4.0.17", Product: "CBS350-24P", Models: []string{"CBS350"}, Version: "3.4.0.17", Train: "3.4", Ecosystem: cbs},
+			{ProductID: "n2", Name: "Cisco CBS350-24P 3.4.1.3", Product: "CBS350-24P", Models: []string{"CBS350"}, Version: "3.4.1.3", Train: "3.4", Ecosystem: cbs},
 		},
 		Vulnerabilities: []vulnfeed.CSAFVulnerability{{CVE: cve, Affected: []string{"n1"}, Fixed: []string{"n2"}}},
 	}

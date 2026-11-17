@@ -17,15 +17,71 @@ type nearCase struct {
 	fw, fixedFW     string
 }
 
+// nearCases name the device's model as a word run of the product's model or
+// the other way round: whether the product is the device is unknown.
 var nearCases = []nearCase{
 	{"space instead of hyphen, series word", "vendor:paloalto:panos", FeedPaloAltoCSAF, "PA-440", "PA 440 Series", "10.2.9", "10.2.10"},
 	{"series word", "vendor:paloalto:panos", FeedPaloAltoCSAF, "PA-440", "PA-440 Series", "10.2.9", "10.2.10"},
 	{"vendor prefix", "vendor:paloalto:panos", FeedPaloAltoCSAF, "PA-440", "X-PA-440", "10.2.9", "10.2.10"},
 	{"version word in model", "vendor:paloalto:panos", FeedPaloAltoCSAF, "PA-440", "PA-440 10.2.9", "10.2.9", "10.2.10"},
-	{"shorter number", "vendor:paloalto:panos", FeedPaloAltoCSAF, "PA-440", "PA-44", "10.2.9", "10.2.10"},
 	{"longer SKU of the device", "vendor:cisco:cbs", FeedCiscoCSAF, "CBS350-24P", "CBS350-24P-4G", "3.4.0.17", "3.4.1.3"},
 	{"shorter SKU of the device", "vendor:cisco:cbs", FeedCiscoCSAF, "CBS350-24P-4G", "CBS350-24P", "3.4.0.17", "3.4.1.3"},
+}
+
+// otherModelCases name another model that shares no word run with the
+// device's model: the advisory names models and the device is not one of
+// them, so it is not affected by that vulnerability (decision for PR #606,
+// option a).
+var otherModelCases = []nearCase{
+	{"shorter number", "vendor:paloalto:panos", FeedPaloAltoCSAF, "PA-440", "PA-44", "10.2.9", "10.2.10"},
+	{"other model of the vendor", "vendor:paloalto:panos", FeedPaloAltoCSAF, "PA-440", "PA-220", "10.2.9", "10.2.10"},
 	{"sibling SKU of the family", "vendor:cisco:cbs", FeedCiscoCSAF, "CBS350-24P", "CBS350-8T", "3.4.0.17", "3.4.1.3"},
+}
+
+// TestOtherModelAdvisoryIsNotAffected: an advisory whose products name only
+// other models does not affect the device: no finding and no gap for its
+// vulnerability. Fail-closed stays at the device level: when no advisory
+// product of the device's OS applies to its model at all, the model is
+// unknown to the feed and the device is a coverage gap, never clean.
+func TestOtherModelAdvisoryIsNotAffected(t *testing.T) {
+	const cveOther, cveExact = "CVE-2024-40011", "CVE-2024-40012"
+	for _, c := range otherModelCases {
+		t.Run(c.name+": beside an exact advisory", func(t *testing.T) {
+			db := newDB(t)
+			if err := db.AddCSAF(c.feed, nearAdvisory(c, cveOther)); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.AddCSAF(c.feed, exactAdvisory(c, cveExact)); err != nil {
+				t.Fatal(err)
+			}
+			r := mustMatch(t, db, deviceSubject(c.eco, c.model, c.fw))
+			if _, ok := findingFor(r, c.model, cveExact); !ok {
+				t.Fatalf("exact advisory gives no finding: %+v", r)
+			}
+			if _, ok := findingFor(r, c.model, cveOther); ok {
+				t.Fatalf("other model decided a finding: %+v", r)
+			}
+			if len(r.Gaps) != 0 {
+				t.Fatalf("other-model advisory left gaps: %+v", r.Gaps)
+			}
+		})
+		t.Run(c.name+": only the other-model advisory", func(t *testing.T) {
+			db := newDB(t)
+			if err := db.AddCSAF(c.feed, nearAdvisory(c, cveOther)); err != nil {
+				t.Fatal(err)
+			}
+			r := mustMatch(t, db, deviceSubject(c.eco, c.model, c.fw))
+			if len(r.Findings) != 0 {
+				t.Fatalf("other model decided a finding: %+v", r.Findings)
+			}
+			if hasVulnGap(r, c.model, canonicalID(cveOther), GapDeviceModelUnknown) {
+				t.Fatalf("other model is a per-vulnerability gap, want not affected: %+v", r.Gaps)
+			}
+			if !hasVulnGap(r, c.model, "", GapDeviceModelUnknown) {
+				t.Fatalf("model unknown to the feed is clean, want a device gap: %+v", r.Gaps)
+			}
+		})
+	}
 }
 
 // nearAdvisory is an advisory that lists the near product (affected at fw,
