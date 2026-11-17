@@ -1706,6 +1706,28 @@ func TestNetDevFailedRevocationKeepsDeviceBlocked(t *testing.T) {
 		}
 	})
 
+	t.Run("first set", func(t *testing.T) {
+		// A lease approved before the device had a credential must not go
+		// live with the first set: a failed revocation after the commit
+		// keeps the device blocked, and Unblock refuses until it succeeds.
+		e := newNetDevTestEnv(t)
+		dev := registerTestNetDev(t, e, "core-sw", "10.20.0.2", testNetDevPin)
+		rev := &netDevRevokes{fail: down}
+		a := &NetDevAdmin{Store: e.store, Vault: e.vault, Revoke: rev.revoke}
+		if _, _, err := a.SetCredential(ctx, NetDevCredential{By: "admin", DeviceID: dev.ID, Username: "nos-read", Secret: []byte("v1-secret")}); !errors.Is(err, ErrNetDevRevoke) {
+			t.Fatalf("first set with failing revocation: %v, want ErrNetDevRevoke", err)
+		}
+		if cur, _, _ := e.db.GetNetDevice(dev.ID); !cur.Blocked || cur.BlockReason != netDevCredChangeReason {
+			t.Fatalf("after failed first-set revocation: %+v, want blocked with the credential-change reason", cur)
+		}
+		requireUnblockRefused(t, e, a, rev, dev.ID, netDevCredChangeReason)
+		rev.setFail(nil)
+		n := rev.count()
+		if un, err := a.Unblock(ctx, dev.ID, "yes"); err != nil || un.Blocked || rev.count() != n+1 {
+			t.Fatalf("unblock once revocation works: %+v %v revokes %d", un, err, rev.count()-n)
+		}
+	})
+
 	t.Run("rpc", func(t *testing.T) {
 		svc, logs := newNetDevService(newNetDevTestEnv(t), &netDevDialer{})
 		err := svc.netDevRPCError("unblock", fmt.Errorf("%w: %w", ErrNetDevRevoke, errors.Join(down, executordb.ErrNetDeviceState)))
