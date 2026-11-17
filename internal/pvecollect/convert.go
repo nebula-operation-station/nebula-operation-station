@@ -4,6 +4,7 @@ package pvecollect
 import (
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pvecontract"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
@@ -60,12 +61,19 @@ const maxReasonBytes = 512
 // available is the PVE dataset state that carries a value.
 const available = pb.PVEDatasetState_PVE_DATASET_STATE_AVAILABLE
 
-// boundedReason truncates a carried reason to maxReasonBytes.
+// boundedReason makes a carried reason valid UTF-8 and truncates it to at most
+// maxReasonBytes. Invalid bytes are replaced first, so the cut only has to
+// land on a rune start in valid text and the result is always valid.
 func boundedReason(s string) string {
-	if len(s) > maxReasonBytes {
-		return s[:maxReasonBytes]
+	s = strings.ToValidUTF8(s, "�")
+	if len(s) <= maxReasonBytes {
+		return s
 	}
-	return s
+	cut := maxReasonBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 // datasetUnavailable reports whether a read result carries no usable value:
