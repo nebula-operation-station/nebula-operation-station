@@ -2,6 +2,14 @@
 
 Status: accepted by the maintainer, 2026-10-29
 
+**Amendment note, 2026-11-17 (ADR 0016, ag01).** ADR 0016 D9 uses the
+existing rule that a server-proposed class above the executor minimum
+raises the approval; no new approval type. Agent-suggested executions and
+batch members are proposed as at least MEDIUM, and the strictest-member
+rule of this ADR then sets the batch approval
+([spec 05](../spec/05-authentication.md#v28-05-01)). The decisions below
+are unchanged.
+
 ## Context
 
 Working across several hosts currently repeats confirmations for facts, update
