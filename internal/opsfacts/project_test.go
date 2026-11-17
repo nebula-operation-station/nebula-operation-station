@@ -549,7 +549,7 @@ func TestInvalidInputIsSkippedAndAudited(t *testing.T) {
 // TestMalformedHostIDIsNotEchoed checks that an oversized, hostile host ID
 // reaches neither the audit record nor an error.
 func TestMalformedHostIDIsNotEchoed(t *testing.T) {
-	hostile := "EVIL" + strings.Repeat("x", 5000) + "‮"
+	hostile := "EVIL" + strings.Repeat("x", 5000) + string(rune(0x202e))
 	f := osFinding("CVE-2026-0001", TierCritical, 90)
 	f.HostID = hostile
 	p, audit := newProjectorWith(t, Sources{
