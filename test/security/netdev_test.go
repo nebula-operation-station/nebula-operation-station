@@ -400,6 +400,32 @@ var ndReviewedIOSymbols = map[string]string{
 	"internal/rpc/executorv1: grpc.SupportPackageIsVersion9": "generated version check",
 	"internal/rpc/executorv1: grpc.UnaryServerInfo":          "generated server type",
 	"internal/rpc/executorv1: grpc.UnaryServerInterceptor":   "generated server type",
+	// Reviewed in nd21gh (main merged into PR #530): streaming RPC types
+	// generated for CompareBaselineList. They wrap a stream the caller
+	// already has; none creates a connection (the read path makes no client).
+	"internal/rpc/executorv1: grpc.ClientStreamingClient": "generated client-stream interface type",
+	"internal/rpc/executorv1: grpc.GenericClientStream":   "generated wrapper around an existing client stream",
+	"internal/rpc/executorv1: grpc.ClientStreamingServer": "generated server-stream interface type",
+	"internal/rpc/executorv1: grpc.ServerStream":          "generated handler parameter type",
+	"internal/rpc/executorv1: grpc.GenericServerStream":   "generated wrapper around an existing server stream",
+	// Reviewed in nd21gh: release bundle and installed-file checks open
+	// local files through an os.Root, and parse and verify release root
+	// keys and SSHSIG signatures offline.
+	"internal/release: syscall.O_NOFOLLOW":    "open flag of a local file under an os.Root",
+	"internal/release: syscall.O_NONBLOCK":    "open flag so a FIFO cannot block the open",
+	"internal/release: ssh.PublicKey":         "public key type",
+	"internal/release: ssh.FingerprintSHA256": "hashes a public key",
+	"internal/release: ssh.KeyAlgoSKED25519":  "key type name constant",
+	"internal/release: ssh.ParsePublicKey":    "parses a public key",
+	"internal/release: ssh.Unmarshal":         "decodes SSH wire bytes",
+	"internal/sshsig: ssh.PublicKey":          "public key type",
+	"internal/sshsig: ssh.ParsePublicKey":     "parses a public key",
+	"internal/sshsig: ssh.Unmarshal":          "decodes SSH wire bytes",
+	"internal/sshsig: ssh.Marshal":            "encodes SSH wire bytes",
+	"internal/sshsig: ssh.Signature":          "signature type",
+	"internal/sshsig: ssh.KeyAlgoED25519":     "key type name constant",
+	"internal/sshsig: ssh.KeyAlgoSKED25519":   "key type name constant",
+	"internal/sshsig: ssh.FingerprintSHA256":  "hashes a public key",
 }
 
 // ndReadPathCalls are the calls on the read path that the walk cannot
@@ -764,36 +790,70 @@ func (s *S) ReadNetDevice() { s.db.OpenDeviceSession() }`,
 	for name, tc := range map[string]struct {
 		src  string
 		want bool
+		pkg  string // defaults to permit (want) or canonical (!want)
 	}{
+		// A package with reviewed entries is not trusted as a whole: a
+		// dial next to its reviewed uses is still reported.
+		"ssh.Dial in release beside reviewed key parsing": {`package release
+import "golang.org/x/crypto/ssh"
+func f(b []byte) { _, _ = ssh.ParsePublicKey(b); _, _ = ssh.Dial("tcp", "10.20.0.2:22", nil) }`, true, "internal/release"},
+		"syscall.Socket in release beside reviewed open flags": {`package release
+import "syscall"
+func f() { _ = syscall.O_NOFOLLOW | syscall.O_NONBLOCK; _, _ = syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0) }`, true, "internal/release"},
+		"ssh.NewClientConn in sshsig": {`package sshsig
+import "golang.org/x/crypto/ssh"
+func f() { _, _, _, _ = ssh.NewClientConn(nil, "10.20.0.2:22", nil) }`, true, "internal/sshsig"},
+		"grpc.NewClient in executorv1 beside reviewed stream types": {`package executorv1
+import "google.golang.org/grpc"
+type S = grpc.ClientStreamingClient[int, int]
+func f() { _, _ = grpc.NewClient("10.20.0.1:443") }`, true, "internal/rpc/executorv1"},
+		"reviewed stream types in executorv1": {`package executorv1
+import "google.golang.org/grpc"
+type S = grpc.ClientStreamingServer[int, int]
+func h(s grpc.ServerStream) { _ = &grpc.GenericServerStream[int, int]{ServerStream: s} }`, false, "internal/rpc/executorv1"},
+		"reviewed release key parsing and open flags": {`package release
+import ("syscall"; "golang.org/x/crypto/ssh")
+func f(b []byte) { _ = syscall.O_NOFOLLOW | syscall.O_NONBLOCK; k, _ := ssh.ParsePublicKey(b); _ = ssh.FingerprintSHA256(k) }`, false, "internal/release"},
 		"net.Dial in permit": {`package permit
 import "net"
-func f() { _, _ = net.Dial("tcp", "10.20.0.2:22") }`, true},
+func f() { _, _ = net.Dial("tcp", "10.20.0.2:22") }`, true, ""},
 		"ssh.Dial in permit": {`package permit
 import "golang.org/x/crypto/ssh"
-func f() { _, _ = ssh.Dial("tcp", "10.20.0.2:22", nil) }`, true},
+func f() { _, _ = ssh.Dial("tcp", "10.20.0.2:22", nil) }`, true, ""},
 		"http client in permit": {`package permit
 import "net/http"
-func f() { _, _ = http.Get("https://10.20.0.1/") }`, true},
+func f() { _, _ = http.Get("https://10.20.0.1/") }`, true, ""},
 		"sshtransport dial in a package below permit": {`package permit
 import "github.com/nebula-operation-station/nebula-operation-station/internal/below"
-func f() { below.G() }`, true},
+func f() { below.G() }`, true, ""},
 		"reviewed sshtransport parse in canonical": {`package canonical
 import "github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport"
-func f() { _, _ = sshtransport.ParseEndpoint("10.20.0.2") }`, false},
+func f() { _, _ = sshtransport.ParseEndpoint("10.20.0.2") }`, false, ""},
 	} {
 		root := t.TempDir()
 		pkg := "internal/permit"
 		if !tc.want {
 			pkg = "internal/canonical"
 		}
+		if tc.pkg != "" {
+			pkg = tc.pkg
+		}
 		for _, rel := range []string{"internal/canonical", "internal/executordb", "internal/netdevcontract", "internal/permit",
-			"internal/rpc/executorv1", "internal/schedgrant", "internal/vault", "internal/below"} {
+			"internal/rpc/executorv1", "internal/schedgrant", "internal/vault", "internal/below", pkg} {
 			if err := os.MkdirAll(filepath.Join(root, filepath.FromSlash(rel)), 0o700); err != nil {
 				t.Fatal(err)
 			}
 		}
 		if err := os.WriteFile(filepath.Join(root, filepath.FromSlash(pkg), "x.go"), []byte(tc.src), 0o600); err != nil {
 			t.Fatal(err)
+		}
+		// A package below the read path roots (release, sshsig) is only
+		// scanned when one of them imports it, as permit does here.
+		if !ndReadPathImports[ndModule+"/"+pkg] {
+			imp := "package permit\nimport _ \"" + ndModule + "/" + pkg + "\"\n"
+			if err := os.WriteFile(filepath.Join(root, "internal", "permit", "imp.go"), []byte(imp), 0o600); err != nil {
+				t.Fatal(err)
+			}
 		}
 		below := `package below
 import "github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport"
@@ -804,6 +864,9 @@ func G() { _, _ = sshtransport.Dial(nil, "10.20.0.2:22") }`
 		findings, scanned, _, err := ndPackageIOFindings(root, ndModule)
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
+		}
+		if !slices.Contains(scanned, pkg) {
+			t.Errorf("%s: package %s was not scanned (scanned %v)", name, pkg, scanned)
 		}
 		if tc.want != (len(findings) > 0) {
 			t.Errorf("%s: findings %v (scanned %v), want found = %v", name, findings, scanned, tc.want)
