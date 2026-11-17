@@ -29,7 +29,9 @@ var (
 
 // Refusals holds the injected prefixes that entries must not overlap. Each
 // field is one refusal reason from ADR 0012 D7. The special-range table is
-// fixed in this package.
+// fixed in this package. Refusals are normalized before the check: an
+// IPv4-mapped refusal refuses the IPv4 entry it denotes, and a refusal that
+// cannot be normalized is ErrInvalidRefusal.
 type Refusals struct {
 	// IPAM lists the networks known to the IPAM.
 	IPAM []netip.Prefix
@@ -87,38 +89,95 @@ func Check(entry netip.Prefix, r Refusals) error {
 	if !entry.IsValid() {
 		return fmt.Errorf("%w: zero prefix", ErrInvalidEntry)
 	}
-	if err := r.validate(); err != nil {
+	n, err := r.normalize()
+	if err != nil {
 		return err
 	}
 	e := entry.Masked()
 	if firstOverlap(e, specialRanges) {
 		return fmt.Errorf("%w: %s", ErrSpecialRange, e)
 	}
-	if firstOverlap(e, r.IPAM) {
+	if firstOverlap(e, n.IPAM) {
 		return fmt.Errorf("%w: %s", ErrIPAMNetwork, e)
 	}
-	if firstOverlap(e, r.NOSPath) {
+	if firstOverlap(e, n.NOSPath) {
 		return fmt.Errorf("%w: %s", ErrNOSPath, e)
 	}
-	if firstOverlap(e, r.FirewallAddresses) {
+	if firstOverlap(e, n.FirewallAddresses) {
 		return fmt.Errorf("%w: %s", ErrFirewallAddress, e)
 	}
-	if firstOverlap(e, r.ProtectedTargets) {
+	if firstOverlap(e, n.ProtectedTargets) {
 		return fmt.Errorf("%w: %s", ErrProtectedTarget, e)
 	}
 	return nil
 }
 
-// validate fails if any injected refusal prefix is invalid.
-func (r Refusals) validate() error {
-	for _, set := range [][]netip.Prefix{r.IPAM, r.NOSPath, r.FirewallAddresses, r.ProtectedTargets} {
-		for _, p := range set {
-			if !p.IsValid() {
-				return ErrInvalidRefusal
-			}
-		}
+// mappedPrefixBits is the length of the ::ffff:0:0/96 prefix that carries an
+// IPv4 address in IPv4-mapped IPv6 form.
+const mappedPrefixBits = 96
+
+// mappedRange is ::ffff:0:0/96, the IPv4-mapped IPv6 range.
+var mappedRange = netip.MustParsePrefix("::ffff:0:0/96")
+
+// normalize returns a copy of r in which every refusal is an IPv4 or IPv6
+// prefix in masked form. A refusal inside ::ffff:0:0/96, ::ffff:a.b.c.d/(96+n),
+// becomes a.b.c.d/n, so it refuses the IPv4 entry it denotes (ADR 0012 D7).
+// A refusal that overlaps ::ffff:0:0/96 without lying inside it, such as
+// ::ffff:0:0/95, ::fffe:0:0/95, ::/80 or ::/0, cannot be read as an IPv4 range
+// and is ErrInvalidRefusal. The decision is made on the masked prefix, so the
+// spelling of an address does not change the result. The input slices are not
+// modified.
+func (r Refusals) normalize() (Refusals, error) {
+	var out Refusals
+	var err error
+	if out.IPAM, err = normalizeSet(r.IPAM); err != nil {
+		return Refusals{}, err
 	}
-	return nil
+	if out.NOSPath, err = normalizeSet(r.NOSPath); err != nil {
+		return Refusals{}, err
+	}
+	if out.FirewallAddresses, err = normalizeSet(r.FirewallAddresses); err != nil {
+		return Refusals{}, err
+	}
+	if out.ProtectedTargets, err = normalizeSet(r.ProtectedTargets); err != nil {
+		return Refusals{}, err
+	}
+	return out, nil
+}
+
+// normalizeSet normalizes each refusal in set. It fails on the first invalid one.
+func normalizeSet(set []netip.Prefix) ([]netip.Prefix, error) {
+	if set == nil {
+		return nil, nil
+	}
+	out := make([]netip.Prefix, 0, len(set))
+	for _, p := range set {
+		n, err := normalizeRefusal(p)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+// normalizeRefusal returns the canonical form of one refusal prefix.
+func normalizeRefusal(p netip.Prefix) (netip.Prefix, error) {
+	if !p.IsValid() {
+		return netip.Prefix{}, ErrInvalidRefusal
+	}
+	// Decide on the masked prefix: the same network must give the same result
+	// whatever the spelling of its address (host bits, ::ffff: form or not).
+	m := p.Masked()
+	if !overlaps(m, mappedRange) {
+		return m, nil
+	}
+	// m overlaps the mapped range. It is usable only when it lies inside it:
+	// the base address is in the range and the prefix is at least /96.
+	if !mappedRange.Contains(m.Addr()) || m.Bits() < mappedPrefixBits {
+		return netip.Prefix{}, fmt.Errorf("%w: %s overlaps the IPv4-mapped range %s but does not lie inside it", ErrInvalidRefusal, m, mappedRange)
+	}
+	return netip.PrefixFrom(m.Addr().Unmap(), m.Bits()-mappedPrefixBits).Masked(), nil
 }
 
 // firstOverlap reports whether e overlaps any prefix in set.
