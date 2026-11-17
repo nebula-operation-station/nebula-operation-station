@@ -26,6 +26,7 @@ package mdsafe
 
 import (
 	"errors"
+	"fmt"
 	"html"
 	"html/template"
 	"net/url"
@@ -159,19 +160,62 @@ func renderLimited(src []byte, o Options, lim scanLimits) (Result, int, error) {
 	}, r.steps, nil
 }
 
-// Slug turns a heading's Markdown text into an element id the way
-// GitHub does: markup removed, lower case, only letters, digits, "-"
-// and "_" kept, spaces become "-".
+// Slug turns a heading's Markdown text into an element id: markup removed,
+// then anchorFold. A heading with no letters or digits gets "section" from
+// the renderer.
 func Slug(text string) string {
 	return anchorFold(plainText(text))
 }
 
+// latinFold maps accented Latin letters, after lower-casing, to the letters
+// they are written with. The German umlauts and ß are not here: they are
+// spelled out in anchorFold, as in German anchors.
+var latinFold = buildLatinFold(map[string]string{
+	"a":  "àáâãåāăą",
+	"ae": "æ",
+	"c":  "çćĉċč",
+	"d":  "ďđ",
+	"e":  "èéêëēĕėęě",
+	"g":  "ĝğġģ",
+	"h":  "ĥħ",
+	"i":  "ìíîïĩīĭįı",
+	"j":  "ĵ",
+	"k":  "ķ",
+	"l":  "ĺļľŀł",
+	"n":  "ñńņň",
+	"o":  "òóôõōŏőø",
+	"oe": "œ",
+	"r":  "ŕŗř",
+	"s":  "śŝşš",
+	"t":  "ţťŧ",
+	"u":  "ùúûũūŭůűų",
+	"w":  "ŵ",
+	"y":  "ýÿŷ",
+	"z":  "źżž",
+})
+
+// buildLatinFold inverts groups (base letters to the accented letters that
+// fold to them) into a rune map. Each accented letter must appear once.
+func buildLatinFold(groups map[string]string) map[rune]string {
+	m := make(map[rune]string)
+	for to, from := range groups {
+		for _, c := range from {
+			m[c] = to
+		}
+	}
+	return m
+}
+
 // anchorFold is the one mapping from heading text, and from a link
 // fragment, to an element id. The result is ASCII only: lower-case
-// letters, digits, "-" and "_"; spaces become "-"; the German umlauts and
-// ß are spelled out (ä→ae, ö→oe, ü→ue, ß→ss); every other character is
-// dropped. Because headings and fragments share this mapping, "#Übersicht"
-// names the id of "## Übersicht", on the same page and on another one.
+// letters, digits, "-" and "_"; spaces become "-". The German umlauts
+// and ß are spelled out (ä→ae, ö→oe, ü→ue, ß→ss). Other Latin letters
+// with a diacritic lose it (é→e, ç→c, å→a, ø→o, æ→ae). Any other letter
+// or digit, in any script, becomes "u" and its code point in six hex
+// digits (Обзор→u00043e…), so distinct names give distinct ids and no
+// non-ASCII text reaches the output. Punctuation and symbols are dropped.
+// Because headings and fragments share this mapping, "#Übersicht" names
+// the id of "## Übersicht", on the same page and on another one.
 func anchorFold(s string) string {
 	var b strings.Builder
 	for _, c := range strings.ToLower(s) {
@@ -188,6 +232,12 @@ func anchorFold(s string) string {
 			b.WriteString("ue")
 		case c == 'ß':
 			b.WriteString("ss")
+		case c < 0x80:
+			// Other ASCII punctuation is dropped.
+		case latinFold[c] != "":
+			b.WriteString(latinFold[c])
+		case unicode.IsLetter(c) || unicode.IsDigit(c):
+			fmt.Fprintf(&b, "u%06x", c)
 		}
 	}
 	return b.String()
