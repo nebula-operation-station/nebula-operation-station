@@ -59,36 +59,50 @@ before a release.
 | A compromised server misusing discovery | `TestValidateRefuses`, `FuzzJobArgs`, `TestSpool`, `TestRunWritesResults`, `TestSubmitChecksTargets` |
 | Hostile scan results | `FuzzParseNmapXML`, `TestParseNmapXML`, `TestPollClassifyImport`, `TestDiscoveryFlow` |
 | A backup leaking secrets, or a tampered restore | `TestBackupExecutorPart`, `TestRoundTrip`, `TestReadRefusesTampering`, `TestRestore` |
+| Private image transfer (ADR 0006 R7, cu06): the registry credential stays in the executor, the host gets image bytes only, wrong or oversize blobs, out-of-scope repositories, cross-host redirects, lock or rotation mid-transfer | acceptance (`test/security/cu06_private_transfer_test.go`, `make test`): `TestCU06_HostReceivesImageBytesOnly`, `TestCU06_HostJobHasNoRegistryLogin`, `TestCU06_RegistryCredentialStaysInExecutor`, `TestCU06_CollectorsAndServerCannotObtainCredential`; unit (`internal/executor/registry_transfer_test.go`, `internal/executor/registry_read_server_test.go`, `make test`): `TestPrivateTransferContainerdLoadsImageBytesOnly`, `TestPrivateTransferClassicStoreRefusedBeforeAnyBlob`, `TestPrivateTransferWrongBlobNeverCompletesTheArchive`, `TestPrivateTransferRefusesBeforeTheRegistry`, `TestPrivateTransferLockMidStreamStops`, `TestPrivateTransferLockBeforeCloseStops`, `TestPrivateTransferRecheckStopsOnChange`, `TestServerBuiltRegistryLeaseEndToEnd`; unit (`internal/registrypull/pull_test.go`, `make test`): `TestWrongBlobDigestStopsPullWithoutWritingBlob`, `TestOversizeManifestIsRefused`, `TestOversizeBlobIsRefusedBeforeFetch`, `TestOutOfScopeRepositoryIsRefused`, `TestCrossHostRedirectIsRefused`, `TestManifestRedirectIsRefused`, `TestApprovedBlobHostRedirectGetsNoAuthorization` |
 
 ## Fuzz targets
 
 `make fuzz` (`Makefile`, target `fuzz`) runs 13 fuzz functions for 20
 seconds each. It is not run by CI. The table lists every `Fuzz*` function
-in the repository (141, previously: 118, previously: 111, from `grep -rn '^func Fuzz' --include=*_test.go .`)
+in the repository (168, previously: 141, previously: 118, previously: 111, from `grep -rn '^func Fuzz' --include=*_test.go .`)
 with its package and whether `make fuzz` runs it. Functions marked "no"
 are not run by `make fuzz`; their seed corpora still run in `make test`
 like every other test.
 
 | Package | Fuzz functions | In `make fuzz` |
 | --- | --- | --- |
+| `internal/auditlog` | `FuzzLine` | no |
 | `internal/backup` | `FuzzRead` | yes |
 | `internal/canonical` | `FuzzHashParameters`, `FuzzParseBatch`, `FuzzBatchGraphAndLimits` | yes: `FuzzHashParameters`; no: `FuzzParseBatch`, `FuzzBatchGraphAndLimits` |
 | `internal/cbscli` | `FuzzParsePrompt`, `FuzzLooksInteractive` | no |
 | `internal/cbsparse` | `FuzzParseVLANs`, `FuzzParseLLDPNeighbors`, `FuzzParseLLDPNeighborDetail`, `FuzzParseMACTable`, `FuzzParseInterfaces`, `FuzzParseVersion` | no |
-| `internal/discoveryjob` | `FuzzParseNmapXML`, `FuzzJobArgs` | yes |
-| `internal/executions/actions/netfacts` | `FuzzStrictKeysMatchJSON`, `FuzzDecode` | no |
-| `internal/executions/dockerhost` | `FuzzParsers`, `FuzzParseImagePackages`, `FuzzParseUpdatePreview`, `FuzzParseUpdatePrepare`, `FuzzParseListBounds`, `FuzzParseLogsBounds`, `FuzzParseInspectBounds`, `FuzzParseControlBounds`, `FuzzParseComposeUpdateBounds`, `FuzzParseImageUpdatesBounds`, `FuzzParseStats`, `FuzzParseImageVulns` | yes: `FuzzParsers`; no: the other 11 |
+| `internal/deployprofile` | `FuzzValidateDoc` | no |
+| `internal/discovery` | `FuzzAssetIDAndNote` | no |
+| `internal/discoveryjob` | `FuzzParseNmapXML`, `FuzzJobArgs`, `FuzzDecodeResult`, `FuzzDecodeJob` | yes: `FuzzParseNmapXML`, `FuzzJobArgs`; no: `FuzzDecodeResult`, `FuzzDecodeJob` |
+| `internal/edl` | `FuzzCheck`, `FuzzRenderRoundTrip` | no |
+| `internal/enrollscript` | `FuzzValidAddress`, `FuzzValidators`, `FuzzRenderCommand`, `FuzzRender` | no |
+| `internal/executions` | `FuzzDecodeFacts` | no |
+| `internal/executions/actions/netfacts` | `FuzzDecode`, `FuzzStrictKeysMatchJSON` | no |
+| `internal/executions/dockerhost` | `FuzzParsers`, `FuzzParseImagePackages`, `FuzzParseUpdatePreview`, `FuzzParseUpdatePrepare`, `FuzzParseListBounds`, `FuzzParseLogsBounds`, `FuzzParseInspectBounds`, `FuzzParseControlBounds`, `FuzzParseComposeUpdateBounds`, `FuzzParseImageUpdatesBounds`, `FuzzParseStats`, `FuzzParseImageVulns` | yes: `FuzzParsers`; no: `FuzzParseImagePackages`, `FuzzParseUpdatePreview`, `FuzzParseUpdatePrepare`, `FuzzParseListBounds`, `FuzzParseLogsBounds`, `FuzzParseInspectBounds`, `FuzzParseControlBounds`, `FuzzParseComposeUpdateBounds`, `FuzzParseImageUpdatesBounds`, `FuzzParseStats`, `FuzzParseImageVulns` |
 | `internal/executions/gpuhost` | `FuzzParsePCIInventory`, `FuzzParseGPUStatus`, `FuzzParseGPUStatusUnavailable` | no |
 | `internal/executions/hostmetrics` | `FuzzParseMetrics`, `FuzzParseFilesystems`, `FuzzParseMetricsRoundTrip`, `FuzzParseMetricsBounds`, `FuzzParseFilesystemsBounds` | no |
 | `internal/executions/osdebian` | `FuzzParsers`, `FuzzParseInstalled` | yes: `FuzzParsers`; no: `FuzzParseInstalled` |
+| `internal/executions/servicecheck` | `FuzzParseResult` | no |
 | `internal/fimbaseline` | `FuzzDiff` | no |
+| `internal/fimresolve` | `FuzzResolve` | no |
+| `internal/fimretain` | `FuzzMerge` | no |
 | `internal/fimscan` | `FuzzParse` | no |
+| `internal/fimsshd` | `FuzzParse` | no |
 | `internal/flowagg` | `FuzzDiff`, `FuzzObserve` | no |
+| `internal/helpcmd` | `FuzzCommandChecks` | no |
 | `internal/helpdocs` | `FuzzBuild` | no |
 | `internal/helpfacts` | `FuzzParseQuestionHostValues`, `FuzzTokenize`, `FuzzCleanText` | no |
+| `internal/helpsearch` | `FuzzSearch`, `FuzzTerms` | no |
 | `internal/hostrun` | `FuzzOneJSONDocument` | yes |
 | `internal/iconfetch` | `FuzzValidateURL`, `FuzzForbiddenAddr` | no |
 | `internal/iconstore` | `FuzzSanitize` | no |
+| `internal/integritystore` | `FuzzEscapePathMatchesFimscan` | no |
 | `internal/inventory/csvimport` | `FuzzParse` | yes |
 | `internal/modules` | `FuzzUnpack` | yes |
 | `internal/modulelock` | `FuzzParse` | yes |
@@ -102,23 +116,26 @@ like every other test.
 | `internal/panapi` | `FuzzParseNATRules`, `FuzzParseSecurityRules`, `FuzzParseJob`, `FuzzParseObjects`, `FuzzParseRuleHitCounts`, `FuzzParseZones` | no |
 | `internal/prelude` | `FuzzCheckBuild` | no |
 | `internal/pveapi` | `FuzzListQemu`, `FuzzListLxc`, `FuzzListNodes`, `FuzzGetQemuConfig`, `FuzzGetLxcConfig`, `FuzzClusterStatus`, `FuzzHAStatus`, `FuzzListSnapshots`, `FuzzReadBackups`, `FuzzAgentOSInfo`, `FuzzAgentNetworkInterfaces`, `FuzzAgentFSInfo`, `FuzzNodeTasks`, `FuzzListStorages`, `FuzzNodeStatus`, `FuzzGuestStatus`, `FuzzNodeRRDData`, `FuzzGuestRRDData` | no |
-| `internal/pvecollect` | `FuzzDecodeGuestNet` | no |
+| `internal/pvecollect` | `FuzzDecodeGuestNet`, `FuzzBoundedReason` | no |
 | `internal/pvecontract` | `FuzzDecodeRemote`, `FuzzDecodeObservation`, `FuzzDecodeLiveSamples`, `FuzzDecodeLiveWant` | no |
-| `internal/registrymeta` | `FuzzLatestStable`, `FuzzParseLinkNext`, `FuzzParseRef`, `FuzzParseChallengeParams`, `FuzzRegistryHostOf`, `FuzzParseRealm` | no |
+| `internal/registrymeta` | `FuzzLatestStable`, `FuzzParseChallengeParams`, `FuzzParseRealm`, `FuzzParseLinkNext`, `FuzzParseRef`, `FuzzRegistryHostOf`, `FuzzCompareTags` | no |
 | `internal/release` | `FuzzParseInstalledFiles`, `FuzzVerifyInstalledFiles`, `FuzzReadUstar`, `FuzzParseManifest` | no |
+| `internal/reputation` | `FuzzLookupMatchesLinearOracle`, `FuzzValidateNeverKeepsSpecialOverlap` | no |
 | `internal/scanner` | `FuzzScan` | yes |
 | `internal/schedgrant` | `FuzzParse` | no |
+| `internal/serverconfig` | `FuzzParse` | no |
 | `internal/softwarecat` | `FuzzNormalizers` | no |
 | `internal/sshsig` | `FuzzParse` | yes |
 | `internal/stageplan` | `FuzzParse` | no |
 | `internal/textdiff` | `FuzzDiff` | no |
-| `internal/vulnfeed` | `FuzzParseEPSS`, `FuzzParseOSV`, `FuzzParseOSVArchive`, `FuzzParseDebianTracker`, `FuzzParseDebianAdvisoryList`, `FuzzParseKEV`, `FuzzParseNVD`, `FuzzCompareCSAFVersion`, `FuzzParseChecksum`, `FuzzParseCSAFKeyring`, `FuzzParseCSAFAdvisory` | no |
+| `internal/vulnfeed` | `FuzzParseNVD`, `FuzzParseKEV`, `FuzzParseDebianTracker`, `FuzzParseDebianAdvisoryList`, `FuzzParseOSV`, `FuzzParseOSVArchive`, `FuzzParseEPSS`, `FuzzCompareCSAFVersion`, `FuzzParseChecksum`, `FuzzParseCSAFKeyring`, `FuzzParseCSAFAdvisory` | no |
 | `internal/vulnfeed/reputation` | `FuzzParseEntry`, `FuzzForEachRecord` | no |
 | `internal/vulnfinding` | `FuzzParseRecord` | no |
 | `internal/vulnmatch` | `FuzzMatchVersions` | no |
 | `internal/vulnprio` | `FuzzCompute`, `FuzzComputeV2` | no |
 | `internal/vulnver` | `FuzzCompareDpkg`, `FuzzCompareAPK`, `FuzzOSVAffected`, `FuzzSchemeForEcosystem`, `FuzzRunningKernel`, `FuzzSourceVersionBasis` | no |
 | `internal/web/api/trafficmap` | `FuzzCleanText` | no |
+| `internal/web/clientaddr` | `FuzzNormalize`, `FuzzResolve` | no |
 | `internal/webauthnverify` | `FuzzVerifyNeverPanics` | yes |
 
 `internal/webauthnreg` (registration and login JSON from the browser) has
@@ -128,7 +145,7 @@ package is a protected path.
 Before a release, run each `make fuzz` target for at least an hour
 (`go test -run='^$' -fuzz=NAME -fuzztime=1h ./PKG`).
 
-**Open:** 128 fuzz functions (the "no" rows; previously: 105, before that: 98) are not run by `make fuzz`,
+**Open:** 155 fuzz functions (the "no" rows; previously: 128, before that: 105, before that: 98) are not run by `make fuzz`,
 and CI runs no fuzz target at all, although the M10-3 plan in
 `docs/implementation/m10-plan.md` expects CI to run them briefly. Proposal
 for a separate ticket on the protected `Makefile` (not done here): add the

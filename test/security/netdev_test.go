@@ -454,6 +454,8 @@ var ndReadPathCalls = map[string]string{
 	"i.UpdatedAt.Unix":                 "time conversion",
 	"last.Unix":                        "time conversion",
 	"netDevAfterReserve.Load":          "atomic test hook load",
+	"netDevCredWriteMu.TryRLock":       "in-process credential write lock (sync.RWMutex)",
+	"netDevCredWriteMu.RUnlock":        "in-process credential write lock (sync.RWMutex)",
 	"pub.Marshal":                      "public key encoding",
 	"signer.PublicKey":                 "public key of a loaded signer",
 	"s.keys.Signer":                    "keyring file load (local disk)",

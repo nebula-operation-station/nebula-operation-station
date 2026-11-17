@@ -561,6 +561,402 @@ func TestNetDevLifecycleRevokesLeasesAheadOfRegistry(t *testing.T) {
 	}
 }
 
+// setNetDevCredWriteHook installs f as the credential write stage hook for
+// this test only.
+func setNetDevCredWriteHook(t *testing.T, f func(stage netDevCredWriteStage, deviceID string)) {
+	t.Helper()
+	netDevCredWriteHook.Store(&f)
+	t.Cleanup(func() { netDevCredWriteHook.Store(nil) })
+}
+
+// concurrentRead runs one CBS version read of the switch on another
+// goroutine and returns its result.
+func (e *netDevGrantEnv) concurrentRead() error {
+	done := make(chan error, 1)
+	go func() {
+		got, err := e.svc.ReadNetDevice(context.Background(), &pb.ReadNetDeviceRequest{DeviceId: netDevGrantDevice, Read: pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION})
+		if got != nil {
+			err = errors.Join(err, fmt.Errorf("read reply %v, want none", got))
+		}
+		done <- err
+	}()
+	return <-done
+}
+
+// TestReadNetDeviceRefusedBetweenCredentialCommitAndRevocation (ADR 0010
+// D1/D2): at every stage of a credential write (blocked before the commit,
+// committed before the revocation, revoked before the unblock) a read on
+// another goroutine is refused by the credential write lock (Unavailable;
+// a lock taken only after the commit or released before the revocation
+// fails this), the device is durably blocked, and the lease check alone
+// (without the lock) refuses too. After the commit the new version is
+// visible and leases approved ahead of the registry for it (one before the
+// write, one inside the window) are active until the revocation. After the
+// write both are revoked, the device is unblocked, and only a lease
+// approved afterwards authorizes a read. First set, first rotation and a
+// later rotation, each through the RPC handler (holding netDevAdminMu) and
+// through NetDevAdmin directly.
+func TestReadNetDeviceRefusedBetweenCredentialCommitAndRevocation(t *testing.T) {
+	ctx := context.Background()
+	type tcase struct {
+		name string
+		from int64 // credential version before the write
+		rpc  bool  // through the RPC handler, else NetDevAdmin directly
+	}
+	var cases []tcase
+	for _, c := range []tcase{{"first set", 0, false}, {"first rotation", 1, false}, {"later rotation", 2, false}} {
+		cases = append(cases, c)
+		c.rpc, c.name = true, c.name+" via RPC"
+		cases = append(cases, c)
+	}
+	read := func(e *netDevGrantEnv) error {
+		got, err := e.svc.ReadNetDevice(ctx, &pb.ReadNetDeviceRequest{DeviceId: netDevGrantDevice, Read: pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION})
+		if got != nil {
+			e.t.Errorf("read reply %v, want none", got)
+		}
+		return err
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var e *netDevGrantEnv
+			if tc.from == 0 {
+				e = newNetDevGrantEnvWithCredentials(t, netDevGrantFW)
+			} else {
+				e = newNetDevGrantEnv(t)
+			}
+			for v := int64(1); v < tc.from; v++ {
+				if _, err := e.svc.RotateNetDeviceCredential(ctx, &pb.RotateNetDeviceCredentialRequest{DeviceId: netDevGrantDevice, Username: "nos",
+					Secret: []byte("step-secret"), ExpectedCredentialVersion: v}); err != nil {
+					t.Fatalf("prepare rotation from v%d: %v", v, err)
+				}
+			}
+			tgt := e.target(netDevGrantDevice, schedgrant.NetDeviceReadCBSVersion)
+			if tgt.CredentialVersion != tc.from {
+				t.Fatalf("registry at credential version %d, want %d", tgt.CredentialVersion, tc.from)
+			}
+			tgt.CredentialVersion = tc.from + 1
+			// Approved before the write, ahead of the registry.
+			e.grant(schedgrant.NetDeviceDefaultRunBudget, 900, time.Hour, tgt)
+
+			stages := map[netDevCredWriteStage]bool{}
+			setNetDevCredWriteHook(t, func(stage netDevCredWriteStage, deviceID string) {
+				if deviceID != netDevGrantDevice {
+					return
+				}
+				stages[stage] = true
+				wantVersion := tc.from
+				if stage != netDevCredBeforeCommit {
+					wantVersion = tc.from + 1
+				}
+				if cur := e.target(netDevGrantDevice, schedgrant.NetDeviceReadCBSVersion); cur.CredentialVersion != wantVersion {
+					t.Errorf("stage %d: credential version %d, want %d", stage, cur.CredentialVersion, wantVersion)
+				}
+				if d := e.device(netDevGrantDevice); !d.Blocked || d.BlockReason != netDevCredChangeReason {
+					t.Errorf("stage %d: blocked %v reason %q, want the durable credential change block", stage, d.Blocked, d.BlockReason)
+				}
+				_, active := e.activeGrant()
+				switch stage {
+				case netDevCredAfterCommit:
+					// The window: committed, the ahead lease not yet revoked.
+					if !active {
+						t.Error("after commit: the ahead lease is already revoked; the window is not forced")
+					}
+					// A second lease approved inside the window.
+					e.grant(schedgrant.NetDeviceDefaultRunBudget, 900, time.Hour, tgt)
+				case netDevCredAfterRevoke:
+					if active {
+						t.Error("after revoke: a lease is still active")
+					}
+				}
+				if err := e.concurrentRead(); status.Code(err) != codes.Unavailable {
+					t.Errorf("concurrent read at stage %d: %v, want Unavailable (credential write lock held)", stage, err)
+				}
+				// Without the lock the block still refuses the lease check.
+				if g, err := e.check(netDevGrantDevice, pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION); err == nil {
+					t.Errorf("lease check at stage %d authorized lease %s", stage, g.GrantID)
+				}
+				// spent records a probe reservation itself, so it is taken
+				// once, in the window, covering the reads of both stages.
+				if stage == netDevCredAfterCommit {
+					if n := e.spent(netDevGrantDevice); n != 0 {
+						t.Errorf("reads before the revocation spent %d", n)
+					}
+				}
+			})
+			var err error
+			switch {
+			case tc.rpc && tc.from == 0:
+				_, err = e.svc.SetNetDeviceCredential(ctx, &pb.SetNetDeviceCredentialRequest{DeviceId: netDevGrantDevice, Username: "nos", Secret: []byte("first-secret")})
+			case tc.rpc:
+				_, err = e.svc.RotateNetDeviceCredential(ctx, &pb.RotateNetDeviceCredentialRequest{DeviceId: netDevGrantDevice, Username: "nos",
+					Secret: []byte("rotated-secret"), ExpectedCredentialVersion: tc.from})
+			case tc.from == 0:
+				_, _, err = e.svc.netDevAdmin().SetCredential(ctx, NetDevCredential{DeviceID: netDevGrantDevice, Username: "nos", Secret: []byte("first-secret"), By: "admin"})
+			default:
+				_, _, err = e.svc.netDevAdmin().RotateCredential(ctx, NetDevCredential{DeviceID: netDevGrantDevice, Username: "nos",
+					Secret: []byte("rotated-secret"), ExpectedVersion: tc.from, By: "admin"})
+			}
+			if err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			for _, st := range []netDevCredWriteStage{netDevCredBeforeCommit, netDevCredAfterCommit, netDevCredAfterRevoke} {
+				if !stages[st] {
+					t.Fatalf("stage hook %d did not run", st)
+				}
+			}
+			if d := e.device(netDevGrantDevice); d.Blocked {
+				t.Fatalf("after %s: device still blocked (%q)", tc.name, d.BlockReason)
+			}
+			// Both ahead leases are revoked; the read is now refused for
+			// lack of a lease, not for the write in progress.
+			if id, ok := e.activeGrant(); ok {
+				t.Fatalf("lease %s still active after %s", id, tc.name)
+			}
+			if err := read(e); status.Code(err) != codes.PermissionDenied {
+				t.Fatalf("read after %s: %v, want PermissionDenied", tc.name, err)
+			}
+			// A lease approved after the write authorizes the read.
+			e.grant(schedgrant.NetDeviceDefaultRunBudget, 900, time.Hour, tgt)
+			if err := read(e); status.Code(err) != codes.Unimplemented {
+				t.Fatalf("read under a lease approved after %s: %v, want Unimplemented (authorized)", tc.name, err)
+			}
+		})
+	}
+}
+
+// netDevBlockFaultStore wraps the executor database and fails
+// BlockNetDevice after okBlocks calls passed through (-1: never).
+// putFault fails PutSecret before writing (putFailBefore) or after a
+// successful write (putFailAfter, an ambiguous commit).
+type netDevBlockFaultStore struct {
+	*executordb.DB
+	okBlocks int
+	blocks   int
+	putFault int
+}
+
+const (
+	putFailBefore = 1
+	putFailAfter  = 2
+)
+
+func (s *netDevBlockFaultStore) PutSecret(v executordb.VaultSecret) error {
+	switch s.putFault {
+	case putFailBefore:
+		return errors.New("injected put failure")
+	case putFailAfter:
+		if err := s.DB.PutSecret(v); err != nil {
+			return err
+		}
+		return errors.New("injected put failure after write")
+	}
+	return s.DB.PutSecret(v)
+}
+
+func (s *netDevBlockFaultStore) BlockNetDevice(id, reason string) (executordb.NetDevice, error) {
+	if s.okBlocks >= 0 && s.blocks >= s.okBlocks {
+		return executordb.NetDevice{}, errors.New("injected block failure")
+	}
+	s.blocks++
+	return s.DB.BlockNetDevice(id, reason)
+}
+
+// TestNetDevCredentialWriteFailsClosedWhenRevocationAndBlockFail (ADR 0010
+// D1/D2): a lease approved ahead of the registry for the next credential
+// version never authorizes a read, whatever part of the credential write
+// fails. If the block before the commit fails, nothing is committed (the
+// lease stays stale). If the revocation after the commit fails, its
+// fallback block failing or finding the device already blocked, the device
+// stays durably blocked from before the commit: reads are refused and
+// Unblock is refused while the revocation fails; once it works Unblock
+// revokes the ahead lease, and only a lease approved afterwards
+// authorizes. First set and rotation.
+func TestNetDevCredentialWriteFailsClosedWhenRevocationAndBlockFail(t *testing.T) {
+	ctx := context.Background()
+	down := errors.New("grant store down")
+	type tcase struct {
+		name     string
+		okBlocks int  // netDevBlockFaultStore.okBlocks
+		commits  bool // the new version gets committed
+	}
+	failures := []tcase{
+		{"block before commit fails", 0, false},
+		{"revocation and fallback block fail", 1, true},
+		{"revocation fails, fallback finds the device blocked", -1, true},
+	}
+	for _, from := range []int64{0, 1} {
+		for _, tc := range failures {
+			name := map[int64]string{0: "first set", 1: "rotation"}[from] + ": " + tc.name
+			t.Run(name, func(t *testing.T) {
+				var e *netDevGrantEnv
+				if from == 0 {
+					e = newNetDevGrantEnvWithCredentials(t, netDevGrantFW)
+				} else {
+					e = newNetDevGrantEnv(t)
+				}
+				store := &netDevBlockFaultStore{DB: e.db, okBlocks: tc.okBlocks}
+				a := e.svc.netDevAdmin()
+				a.Store = store
+				realRevoke := a.Revoke
+				var failRevoke bool
+				revokes := 0
+				a.Revoke = func(id, reason string) error {
+					revokes++
+					if failRevoke {
+						return down
+					}
+					return realRevoke(id, reason)
+				}
+
+				tgt := e.target(netDevGrantDevice, schedgrant.NetDeviceReadCBSVersion)
+				tgt.CredentialVersion = from + 1
+				ahead := e.grant(schedgrant.NetDeviceDefaultRunBudget, 900, time.Hour, tgt)
+
+				failRevoke = true
+				in := NetDevCredential{DeviceID: netDevGrantDevice, Username: "nos", Secret: []byte("new-secret"), ExpectedVersion: from, By: "admin"}
+				var err error
+				if from == 0 {
+					_, _, err = a.SetCredential(ctx, in)
+				} else {
+					_, _, err = a.RotateCredential(ctx, in)
+				}
+				if err == nil {
+					t.Fatal("credential write with injected failures succeeded")
+				}
+				if tc.commits != errors.Is(err, ErrNetDevRevoke) {
+					t.Fatalf("credential write: %v, ErrNetDevRevoke %v, want %v", err, errors.Is(err, ErrNetDevRevoke), tc.commits)
+				}
+				wantVersion := from
+				if tc.commits {
+					wantVersion = from + 1
+				}
+				if v := e.target(netDevGrantDevice).CredentialVersion; v != wantVersion {
+					t.Fatalf("credential version %d, want %d", v, wantVersion)
+				}
+				dev := e.device(netDevGrantDevice)
+				if tc.commits != dev.Blocked || (tc.commits && dev.BlockReason != netDevCredChangeReason) {
+					t.Fatalf("after the failed write: blocked %v reason %q, want blocked %v", dev.Blocked, dev.BlockReason, tc.commits)
+				}
+				if id, ok := e.activeGrant(); !ok || id != ahead {
+					t.Fatalf("ahead lease %s not active (got %s %v); the case does not exercise it", ahead, id, ok)
+				}
+				// The ahead lease never authorizes: refused by the block, or
+				// stale because nothing was committed.
+				if err := e.concurrentRead(); err == nil || status.Code(err) == codes.Unimplemented {
+					t.Fatalf("read with the ahead lease after the failed write: %v, want refused", err)
+				}
+				if g, err := e.check(netDevGrantDevice, pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION); err == nil {
+					t.Fatalf("lease check authorized lease %s", g.GrantID)
+				}
+				if n := e.spent(netDevGrantDevice); n != 0 {
+					t.Fatalf("refused reads spent %d", n)
+				}
+				if !tc.commits {
+					return
+				}
+
+				// Unblock retries the revocation and keeps the block while it
+				// fails.
+				n := revokes
+				if _, err := a.Unblock(ctx, netDevGrantDevice, "yes"); !errors.Is(err, ErrNetDevRevoke) || revokes != n+1 {
+					t.Fatalf("unblock with failing revocation: %v (revocations %d), want ErrNetDevRevoke after a retry", err, revokes-n)
+				}
+				if d := e.device(netDevGrantDevice); !d.Blocked {
+					t.Fatal("refused unblock lifted the block")
+				}
+				failRevoke = false
+				if d, err := a.Unblock(ctx, netDevGrantDevice, "yes"); err != nil || d.Blocked {
+					t.Fatalf("unblock once revocation works: %+v %v", d, err)
+				}
+				if id, ok := e.activeGrant(); ok {
+					t.Fatalf("lease %s still active after the unblock", id)
+				}
+				if err := e.concurrentRead(); status.Code(err) != codes.PermissionDenied {
+					t.Fatalf("read after the unblock: %v, want PermissionDenied", err)
+				}
+				e.grant(schedgrant.NetDeviceDefaultRunBudget, 900, time.Hour, tgt)
+				if err := e.concurrentRead(); status.Code(err) != codes.Unimplemented {
+					t.Fatalf("read under a lease approved afterwards: %v, want Unimplemented (authorized)", err)
+				}
+			})
+		}
+	}
+}
+
+// TestNetDevRefusedCredentialWriteLiftsItsBlock: a credential write the
+// vault refuses (wrong expected version, existing first credential) or a
+// store failure before the write commits nothing, revokes nothing and
+// leaves the device unblocked. An ambiguous commit (written, then an
+// error) counts as committed: the device stays blocked while the
+// revocation fails. A device that was blocked before keeps its block and
+// reason after a successful rotation.
+func TestNetDevRefusedCredentialWriteLiftsItsBlock(t *testing.T) {
+	ctx := context.Background()
+	e := newNetDevGrantEnv(t)
+	a := e.svc.netDevAdmin()
+	realRevoke := a.Revoke
+	revokes := 0
+	a.Revoke = func(id, reason string) error {
+		revokes++
+		return realRevoke(id, reason)
+	}
+	if _, _, err := a.RotateCredential(ctx, NetDevCredential{DeviceID: netDevGrantDevice, Username: "nos", Secret: []byte("x-secret"), ExpectedVersion: 5, By: "admin"}); !errors.Is(err, ErrNetDevCredentialVersion) {
+		t.Fatalf("rotation at a wrong version: %v", err)
+	}
+	if _, _, err := a.SetCredential(ctx, NetDevCredential{DeviceID: netDevGrantDevice, Username: "nos", Secret: []byte("x-secret"), By: "admin"}); !errors.Is(err, ErrNetDevCredentialExists) {
+		t.Fatalf("second first set: %v", err)
+	}
+	if d := e.device(netDevGrantDevice); d.Blocked || revokes != 0 || e.target(netDevGrantDevice).CredentialVersion != 1 {
+		t.Fatalf("after refused writes: blocked %v (%q), revocations %d, version %d", d.Blocked, d.BlockReason, revokes, e.target(netDevGrantDevice).CredentialVersion)
+	}
+
+	// A store failure before the write commits nothing: block lifted, no
+	// revocation.
+	store := &netDevBlockFaultStore{DB: e.db, okBlocks: -1, putFault: putFailBefore}
+	a.Store = store
+	if _, _, err := a.RotateCredential(ctx, NetDevCredential{DeviceID: netDevGrantDevice, Username: "nos", Secret: []byte("x-secret"), ExpectedVersion: 1, By: "admin"}); err == nil {
+		t.Fatal("rotation with a failing store succeeded")
+	}
+	if d := e.device(netDevGrantDevice); d.Blocked || revokes != 0 || e.target(netDevGrantDevice).CredentialVersion != 1 {
+		t.Fatalf("after a failed store: blocked %v (%q), revocations %d", d.Blocked, d.BlockReason, revokes)
+	}
+
+	// An ambiguous commit (written, then an error) is treated as committed:
+	// the ahead lease is revoked, and the block stays while that fails.
+	tgt := e.target(netDevGrantDevice, schedgrant.NetDeviceReadCBSVersion)
+	tgt.CredentialVersion = 2
+	e.grant(schedgrant.NetDeviceDefaultRunBudget, 900, time.Hour, tgt)
+	store.putFault = putFailAfter
+	realRevokeOK := a.Revoke
+	a.Revoke = func(string, string) error { revokes++; return errors.New("grant store down") }
+	if _, _, err := a.RotateCredential(ctx, NetDevCredential{DeviceID: netDevGrantDevice, Username: "nos", Secret: []byte("x-secret"), ExpectedVersion: 1, By: "admin"}); !errors.Is(err, ErrNetDevRevoke) {
+		t.Fatalf("ambiguous commit with failing revocation: %v, want ErrNetDevRevoke", err)
+	}
+	if d := e.device(netDevGrantDevice); !d.Blocked || d.BlockReason != netDevCredChangeReason || e.target(netDevGrantDevice).CredentialVersion != 2 {
+		t.Fatalf("after an ambiguous commit: blocked %v (%q), want the credential change block", d.Blocked, d.BlockReason)
+	}
+	if err := e.concurrentRead(); status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("read after an ambiguous commit: %v, want FailedPrecondition (blocked)", err)
+	}
+	a.Revoke, a.Store = realRevokeOK, e.db
+	if d, err := a.Unblock(ctx, netDevGrantDevice, "yes"); err != nil || d.Blocked {
+		t.Fatalf("unblock: %+v %v", d, err)
+	}
+	if id, ok := e.activeGrant(); ok {
+		t.Fatalf("ahead lease %s still active", id)
+	}
+
+	if _, err := e.db.BlockNetDevice(netDevGrantDevice, "maintenance"); err != nil {
+		t.Fatal(err)
+	}
+	if _, v, err := a.RotateCredential(ctx, NetDevCredential{DeviceID: netDevGrantDevice, Username: "nos", Secret: []byte("y-secret"), ExpectedVersion: 2, By: "admin"}); err != nil || v != 3 {
+		t.Fatalf("rotation of a blocked device: v%d %v", v, err)
+	}
+	if d := e.device(netDevGrantDevice); !d.Blocked || d.BlockReason != "maintenance" {
+		t.Fatalf("after rotating a blocked device: blocked %v reason %q, want the earlier block", d.Blocked, d.BlockReason)
+	}
+}
+
 // TestNetDeviceGrantPausedByLock: after Lock no read is authorized, even
 // once the vault alone is unlocked again; only a credential unlock (which
 // resumes read dispatch) lets reads continue.
