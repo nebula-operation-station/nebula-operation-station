@@ -148,6 +148,15 @@ var errNetDevProbeDone = errors.New("probe: chain recorded")
 // a removal that is deleting the device's vault entries.
 var netDevAdminMu sync.Mutex
 
+// netDevCredWriteMu is held for writing by a credential set or rotation
+// from before its vault commit until its lease revocation has run.
+// ReadNetDevice authorizes only while it can take it for reading without
+// waiting, so no read sees a new credential version while a lease approved
+// ahead of the registry for that version is still active (ADR 0010
+// D1/D2). It is independent of netDevAdminMu, which the RPC handlers hold
+// around the write.
+var netDevCredWriteMu sync.RWMutex
+
 // NetDevDialFunc opens a TCP connection. Tests inject a loopback mapper;
 // production uses net.Dialer. The address is always the checked IP literal
 // of the device.
@@ -689,14 +698,16 @@ type NetDevCredential struct {
 // SetCredential stores the first read credential of a live device as
 // vault version 1 and revokes every grant of the device, so no lease
 // approved before the credential existed becomes usable. An existing
-// entry is never adopted or overwritten.
+// entry is never adopted or overwritten. No read is authorized between
+// the vault commit and the revocation (netDevCredWriteMu).
 func (a *NetDevAdmin) SetCredential(ctx context.Context, in NetDevCredential) (executordb.NetDevice, int64, error) {
 	in.ExpectedVersion = 0
 	return a.putCredential(ctx, in, "credential_set")
 }
 
 // RotateCredential replaces the read credential at exactly
-// ExpectedVersion and revokes every grant of the device.
+// ExpectedVersion and revokes every grant of the device; as for
+// SetCredential, no read is authorized in between.
 func (a *NetDevAdmin) RotateCredential(ctx context.Context, in NetDevCredential) (executordb.NetDevice, int64, error) {
 	if in.ExpectedVersion < 1 {
 		return executordb.NetDevice{}, 0, fmt.Errorf("%w: expected credential version must be at least 1", ErrNetDevCredentialRequest)
@@ -725,6 +736,10 @@ func (a *NetDevAdmin) putCredential(ctx context.Context, in NetDevCredential, ac
 	value := encodeNetDevCredential(netDevPurposeRead, in.Username, in.Secret)
 	defer clear(value)
 	want := in.ExpectedVersion + 1
+	// Held until the revocation below has run (deferred unlock): reads are
+	// refused from before the commit until then.
+	netDevCredWriteMu.Lock()
+	defer netDevCredWriteMu.Unlock()
 	version, err := a.Vault.PutWithCommit(ref, value, in.By, func(s executordb.VaultSecret) error {
 		switch {
 		case s.Version != want && in.ExpectedVersion == 0:
@@ -738,10 +753,14 @@ func (a *NetDevAdmin) putCredential(ctx context.Context, in NetDevCredential, ac
 		return executordb.NetDevice{}, 0, fmt.Errorf("store credential of network device %s: %w", dev.ID, err)
 	}
 	a.event(action, dev.ID)
+	if netDevCredentialCommittedHook != nil {
+		netDevCredentialCommittedHook(dev.ID)
+	}
 	// Every credential write revokes the device's grants, the first set
 	// included: a lease approved for credential version 1 while the device
 	// had no credential yet would otherwise go live with this set (ADR 0010
-	// D1/D2).
+	// D1/D2). The new version is already committed here; netDevCredWriteMu
+	// keeps every read out until this revocation has run.
 	reason := "network device credential rotated"
 	if in.ExpectedVersion == 0 {
 		reason = "network device credential set"
@@ -751,6 +770,11 @@ func (a *NetDevAdmin) putCredential(ctx context.Context, in NetDevCredential, ac
 	}
 	return dev, version, nil
 }
+
+// netDevCredentialCommittedHook, if set, runs after a credential write
+// committed the new version and before its revocation. Tests only; nil in
+// production.
+var netDevCredentialCommittedHook func(deviceID string)
 
 // --- block, unblock, remove ---
 

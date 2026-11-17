@@ -17,7 +17,9 @@ import (
 //
 // ReadNetDevice is callable by the netdev-collector and the admin only
 // (MethodRoles). It validates the request, refuses unknown reads, unknown,
-// removed and blocked devices and a read of the other device family, then
+// removed and blocked devices and a read of the other device family,
+// refuses every read while a credential set or rotation has not yet
+// revoked the device's leases (netDevCredWriteMu), then
 // requires an approved device read lease and spends it
 // (checkNetDeviceGrant, ND-13), then answers Unimplemented. Device I/O and
 // the collector schedule (ND-14) come later.
@@ -74,6 +76,14 @@ func (s *Service) ReadNetDevice(ctx context.Context, in *pb.ReadNetDeviceRequest
 	if err := ValidateReadNetDeviceRequest(in); err != nil {
 		return nil, err
 	}
+	// No read is authorized while a credential write is between its vault
+	// commit and its lease revocation (netDevCredWriteMu): the new version
+	// is visible then while a lease approved ahead of the registry for it
+	// may still be active. Refused, not queued: the caller retries.
+	if !netDevCredWriteMu.TryRLock() {
+		return nil, status.Error(codes.Unavailable, "read network device: a credential change is in progress; retry later")
+	}
+	defer netDevCredWriteMu.RUnlock()
 	if s.db == nil {
 		return nil, s.netDevReadFailed(ErrNetDevNoStore)
 	}

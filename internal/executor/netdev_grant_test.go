@@ -561,6 +561,125 @@ func TestNetDevLifecycleRevokesLeasesAheadOfRegistry(t *testing.T) {
 	}
 }
 
+// setNetDevCredentialCommitHook installs f as the hook between the vault
+// commit of a credential write and its return, for this test only.
+func setNetDevCredentialCommitHook(t *testing.T, f func(deviceID string)) {
+	t.Helper()
+	netDevCredentialCommittedHook = f
+	t.Cleanup(func() { netDevCredentialCommittedHook = nil })
+}
+
+// TestReadNetDeviceRefusedBetweenCredentialCommitAndRevocation (ADR 0010
+// D1/D2): the commit hook runs a read synchronously after the vault commit
+// of a credential write and before its lease revocation. There the new
+// version is visible and leases approved ahead of the registry for exactly
+// that version are still active (one approved before the write, one inside
+// the window), yet the read is refused and spends nothing. After the
+// write both leases are revoked, and only a lease approved afterwards
+// authorizes a read. First set, first rotation and a later rotation, each
+// through the RPC handler (holding netDevAdminMu) and through NetDevAdmin
+// directly.
+func TestReadNetDeviceRefusedBetweenCredentialCommitAndRevocation(t *testing.T) {
+	ctx := context.Background()
+	type tcase struct {
+		name string
+		from int64 // credential version before the write
+		rpc  bool  // through the RPC handler, else NetDevAdmin directly
+	}
+	var cases []tcase
+	for _, c := range []tcase{{"first set", 0, false}, {"first rotation", 1, false}, {"later rotation", 2, false}} {
+		cases = append(cases, c)
+		c.rpc, c.name = true, c.name+" via RPC"
+		cases = append(cases, c)
+	}
+	read := func(e *netDevGrantEnv) error {
+		got, err := e.svc.ReadNetDevice(ctx, &pb.ReadNetDeviceRequest{DeviceId: netDevGrantDevice, Read: pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION})
+		if got != nil {
+			e.t.Errorf("read reply %v, want none", got)
+		}
+		return err
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var e *netDevGrantEnv
+			if tc.from == 0 {
+				e = newNetDevGrantEnvWithCredentials(t, netDevGrantFW)
+			} else {
+				e = newNetDevGrantEnv(t)
+			}
+			for v := int64(1); v < tc.from; v++ {
+				if _, err := e.svc.RotateNetDeviceCredential(ctx, &pb.RotateNetDeviceCredentialRequest{DeviceId: netDevGrantDevice, Username: "nos",
+					Secret: []byte("step-secret"), ExpectedCredentialVersion: v}); err != nil {
+					t.Fatalf("prepare rotation from v%d: %v", v, err)
+				}
+			}
+			tgt := e.target(netDevGrantDevice, schedgrant.NetDeviceReadCBSVersion)
+			if tgt.CredentialVersion != tc.from {
+				t.Fatalf("registry at credential version %d, want %d", tgt.CredentialVersion, tc.from)
+			}
+			tgt.CredentialVersion = tc.from + 1
+			// Approved before the write, ahead of the registry.
+			e.grant(schedgrant.NetDeviceDefaultRunBudget, 900, time.Hour, tgt)
+
+			hooked := false
+			setNetDevCredentialCommitHook(t, func(deviceID string) {
+				if deviceID != netDevGrantDevice {
+					return
+				}
+				hooked = true
+				// The new version is committed and the ahead lease not yet
+				// revoked: the window is open.
+				if cur := e.target(netDevGrantDevice, schedgrant.NetDeviceReadCBSVersion); cur.CredentialVersion != tc.from+1 {
+					t.Errorf("in the window: credential version %d, want %d", cur.CredentialVersion, tc.from+1)
+				}
+				if _, ok := e.activeGrant(); !ok {
+					t.Error("in the window: the ahead lease is already revoked; the window is not forced")
+				}
+				// A second lease approved inside the window, then the read.
+				e.grant(schedgrant.NetDeviceDefaultRunBudget, 900, time.Hour, tgt)
+				if err := read(e); status.Code(err) != codes.Unavailable {
+					t.Errorf("read in the window: %v, want Unavailable (an ahead lease authorized it)", err)
+				}
+				if n := e.spent(netDevGrantDevice); n != 0 {
+					t.Errorf("read in the window spent %d", n)
+				}
+			})
+			var err error
+			switch {
+			case tc.rpc && tc.from == 0:
+				_, err = e.svc.SetNetDeviceCredential(ctx, &pb.SetNetDeviceCredentialRequest{DeviceId: netDevGrantDevice, Username: "nos", Secret: []byte("first-secret")})
+			case tc.rpc:
+				_, err = e.svc.RotateNetDeviceCredential(ctx, &pb.RotateNetDeviceCredentialRequest{DeviceId: netDevGrantDevice, Username: "nos",
+					Secret: []byte("rotated-secret"), ExpectedCredentialVersion: tc.from})
+			case tc.from == 0:
+				_, _, err = e.svc.netDevAdmin().SetCredential(ctx, NetDevCredential{DeviceID: netDevGrantDevice, Username: "nos", Secret: []byte("first-secret"), By: "admin"})
+			default:
+				_, _, err = e.svc.netDevAdmin().RotateCredential(ctx, NetDevCredential{DeviceID: netDevGrantDevice, Username: "nos",
+					Secret: []byte("rotated-secret"), ExpectedVersion: tc.from, By: "admin"})
+			}
+			if err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+			if !hooked {
+				t.Fatal("commit hook did not run")
+			}
+			// Both ahead leases are revoked; the read is now refused for
+			// lack of a lease, not for the write in progress.
+			if id, ok := e.activeGrant(); ok {
+				t.Fatalf("lease %s still active after %s", id, tc.name)
+			}
+			if err := read(e); status.Code(err) != codes.PermissionDenied {
+				t.Fatalf("read after %s: %v, want PermissionDenied", tc.name, err)
+			}
+			// A lease approved after the write authorizes the read.
+			e.grant(schedgrant.NetDeviceDefaultRunBudget, 900, time.Hour, tgt)
+			if err := read(e); status.Code(err) != codes.Unimplemented {
+				t.Fatalf("read under a lease approved after %s: %v, want Unimplemented (authorized)", tc.name, err)
+			}
+		})
+	}
+}
+
 // TestNetDeviceGrantPausedByLock: after Lock no read is authorized, even
 // once the vault alone is unlocked again; only a credential unlock (which
 // resumes read dispatch) lets reads continue.
