@@ -229,7 +229,7 @@ func TestDismissHidesOnlyAndMatchingStillFinds(t *testing.T) {
 	if all, _ := s.List(ctx); len(all) != 1 {
 		t.Errorf("List after Dismiss has %d notes, want the dismissed one listed", len(all))
 	}
-	if _, ok, err := s.MatchStep(ctx, "pkg", "host1"); err != nil || !ok {
+	if _, ok, err := s.MatchStep(ctx, "os-update", "host1"); err != nil || !ok {
 		t.Errorf("MatchStep after Dismiss = %v, %v; want a match", ok, err)
 	}
 	if _, ok, err := s.Step(ctx, n.ID, 1); err != nil || !ok {
@@ -256,7 +256,7 @@ func TestMatchStepFindsSupersededNotesAndNewestFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Put new: %v", err)
 	}
-	got, ok, err := s.MatchStep(ctx, "pkg", "host1")
+	got, ok, err := s.MatchStep(ctx, "os-update", "host1")
 	if err != nil || !ok {
 		t.Fatalf("MatchStep = %v, %v; want a match", ok, err)
 	}
@@ -269,26 +269,26 @@ func TestMatchStepNeedsFamilyAndHost(t *testing.T) {
 	s := openTestStore(t, &fakeClock{t: baseTime})
 	ctx := context.Background()
 	d := validFix()
-	d.Steps = append(d.Steps, StepInput{ActionID: "act.svc.restart", HostID: "host1"})
+	d.Steps = append(d.Steps, StepInput{ActionID: "service.restart", HostID: "host1"})
 	n, _, err := s.Put(ctx, newFakeResolver(), d, testSnapshot)
 	if err != nil {
 		t.Fatalf("Put: %v", err)
 	}
-	got, ok, err := s.MatchStep(ctx, "svc", "host1")
+	got, ok, err := s.MatchStep(ctx, "service-restart", "host1")
 	if err != nil || !ok {
 		t.Fatalf("MatchStep svc/host1 = %v, %v", ok, err)
 	}
-	if got.NoteID != n.ID || got.Index != 2 || got.ActionID != "act.svc.restart" || got.Family != "svc" {
+	if got.NoteID != n.ID || got.Index != 2 || got.ActionID != "service.restart" || got.Family != "service-restart" {
 		t.Errorf("MatchStep = %+v, want step 2 of note %d", got, n.ID)
 	}
-	if _, ok, _ := s.MatchStep(ctx, "pkg", "host2"); ok {
+	if _, ok, _ := s.MatchStep(ctx, "os-update", "host2"); ok {
 		t.Errorf("MatchStep pkg/host2 matched; no such step exists")
 	}
 	if _, ok, _ := s.Step(ctx, n.ID, 3); ok {
 		t.Errorf("Step index 3 found; the note has two steps")
 	}
 	st, ok, err := s.Step(ctx, n.ID, 1)
-	if err != nil || !ok || st.ActionID != "act.pkg.upgrade" || st.HostID != "host1" || st.Why != "behebt CVE" {
+	if err != nil || !ok || st.ActionID != "package.install_security" || st.HostID != "host1" || st.Why != "behebt CVE" {
 		t.Errorf("Step 1 = %+v, %v, %v", st, ok, err)
 	}
 }
@@ -312,7 +312,7 @@ func TestPruneRemovesByAgeAfterRetention(t *testing.T) {
 	if _, err := s.Get(ctx, n.ID); !errors.Is(err, ErrNotFound) {
 		t.Errorf("Get pruned note = %v, want ErrNotFound", err)
 	}
-	if _, ok, _ := s.MatchStep(ctx, "pkg", "host1"); ok {
+	if _, ok, _ := s.MatchStep(ctx, "os-update", "host1"); ok {
 		t.Errorf("MatchStep after prune matched a deleted note")
 	}
 	if _, ok, _ := s.Step(ctx, n.ID, 1); ok {

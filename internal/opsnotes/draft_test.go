@@ -10,29 +10,47 @@ import (
 
 // fakeResolver is a Resolver with a fixed catalog, hosts and documentation index.
 type fakeResolver struct {
-	digests  map[string]string
-	external map[string]bool
-	cands    map[string][]Candidate
-	hosts    map[string]bool
-	actions  map[string]string
-	chunks   map[string]bool
+	digests    map[string]string
+	external   map[string]bool
+	cands      map[string][]Candidate
+	groupHosts map[string]string
+	hosts      map[string]bool
+	actions    map[string]string
+	chunks     map[string]bool
 }
 
+// newFakeResolver's catalog holds allowlisted actions (package.install_security,
+// service.restart, docker.restart), one catalog action outside the suggestion
+// allowlist (package.remove) and the candidates of two groups. Candidates may
+// name a host other than the group's host, as a computed set could.
 func newFakeResolver() *fakeResolver {
 	return &fakeResolver{
-		digests:  map[string]string{"vu:host1:openssl": "d1", "ext:1": "e1"},
-		external: map[string]bool{"ext:1": true},
+		digests:    map[string]string{"vu:host1:openssl": "d1", "ext:1": "e1"},
+		external:   map[string]bool{"ext:1": true},
+		groupHosts: map[string]string{"vu:host1:openssl": "host1", "ext:1": "host1"},
 		cands: map[string][]Candidate{
 			"vu:host1:openssl|d1": {
-				{ActionID: "act.pkg.upgrade", HostID: "host1"},
-				{ActionID: "act.svc.restart", HostID: "host1"},
+				{ActionID: "package.install_security", HostID: "host1"},
+				{ActionID: "service.restart", HostID: "host1"},
+				{ActionID: "package.remove", HostID: "host1"},
+				{ActionID: "package.install_security", HostID: "host2"},
 			},
-			"ext:1|e1": {{ActionID: "act.pkg.upgrade", HostID: "host1"}},
+			"ext:1|e1": {{ActionID: "package.install_security", HostID: "host1"}},
 		},
-		hosts:   map[string]bool{"host1": true, "host2": true},
-		actions: map[string]string{"act.pkg.upgrade": "pkg", "act.svc.restart": "svc"},
-		chunks:  map[string]bool{"doc-1": true, "doc-2": true},
+		hosts: map[string]bool{"host1": true, "host2": true},
+		actions: map[string]string{
+			"package.install_security": "os-update",
+			"service.restart":          "service-restart",
+			"package.remove":           "os-remove",
+			"docker.restart":           "container-restart",
+		},
+		chunks: map[string]bool{"doc-1": true, "doc-2": true},
 	}
+}
+
+func (f *fakeResolver) GroupHost(ref string) (string, bool) {
+	h, ok := f.groupHosts[ref]
+	return h, ok
 }
 
 func (f *fakeResolver) CurrentDigest(kind Kind, ref string) (string, bool) {
@@ -69,7 +87,7 @@ func validFix() Draft {
 		Body: Body{
 			Summary:   "Paket aktualisieren",
 			Urgency:   "hoch",
-			Steps:     []StepInput{{ActionID: "act.pkg.upgrade", HostID: "host1", Why: "behebt CVE"}},
+			Steps:     []StepInput{{ActionID: "package.install_security", HostID: "host1", Why: "behebt CVE"}},
 			Citations: []string{"doc-1"},
 		},
 	}
@@ -106,8 +124,8 @@ func TestValidateAcceptsWellFormedNotes(t *testing.T) {
 		{"fix with two steps on one host", func() Draft {
 			d := validFix()
 			d.Steps = []StepInput{
-				{ActionID: "act.pkg.upgrade", HostID: "host1"},
-				{ActionID: "act.svc.restart", HostID: "host1"},
+				{ActionID: "package.install_security", HostID: "host1"},
+				{ActionID: "service.restart", HostID: "host1"},
 			}
 			return d
 		}},
@@ -164,7 +182,7 @@ func TestValidateRejectsMalformedNotes(t *testing.T) {
 			d := validFix()
 			d.Steps = make([]StepInput, MaxStepsPerNote+1)
 			for i := range d.Steps {
-				d.Steps[i] = StepInput{ActionID: "act.pkg.upgrade", HostID: "host1"}
+				d.Steps[i] = StepInput{ActionID: "package.install_security", HostID: "host1"}
 			}
 			return d
 		}, ErrLimit},
@@ -173,6 +191,16 @@ func TestValidateRejectsMalformedNotes(t *testing.T) {
 			d.Steps[0].ActionID = "act.unknown"
 			return d
 		}, ErrUnknownAction},
+		{"catalog action that is not on the suggestion allowlist, though a candidate", func() Draft {
+			d := validFix()
+			d.Steps[0] = StepInput{ActionID: "package.remove", HostID: "host1"}
+			return d
+		}, ErrNotAllowlisted},
+		{"allowlisted action on a host that is a candidate but not the group's host", func() Draft {
+			d := validFix()
+			d.Steps[0] = StepInput{ActionID: "package.install_security", HostID: "host2"}
+			return d
+		}, ErrNotGroupHost},
 		{"step with unknown host", func() Draft {
 			d := validFix()
 			d.Steps[0].HostID = "host9"
@@ -180,7 +208,7 @@ func TestValidateRejectsMalformedNotes(t *testing.T) {
 		}, ErrUnknownHost},
 		{"step that is a known action on a known host but not a candidate", func() Draft {
 			d := validFix()
-			d.Steps[0] = StepInput{ActionID: "act.svc.restart", HostID: "host2"}
+			d.Steps[0] = StepInput{ActionID: "docker.restart", HostID: "host1"}
 			return d
 		}, ErrNotCandidate},
 		{"duplicate step", func() Draft {
@@ -258,7 +286,7 @@ func TestValidateRejectsMalformedNotes(t *testing.T) {
 		}, ErrInvalidText},
 		{"summary carrying steps", func() Draft {
 			d := validText(KindSummary)
-			d.Steps = []StepInput{{ActionID: "act.pkg.upgrade", HostID: "host1"}}
+			d.Steps = []StepInput{{ActionID: "package.install_security", HostID: "host1"}}
 			return d
 		}, ErrFieldNotAllowed},
 		{"answer carrying mitigations", func() Draft {
@@ -289,7 +317,7 @@ func TestValidateRejectsMalformedNotes(t *testing.T) {
 }
 
 func TestDecodeRejectsMalformedJSON(t *testing.T) {
-	ok := `{"kind":"fix","ref":"vu:host1:openssl","digest":"d1","summary":"s","steps":[{"action_id":"act.pkg.upgrade","host_id":"host1"}]}`
+	ok := `{"kind":"fix","ref":"vu:host1:openssl","digest":"d1","summary":"s","steps":[{"action_id":"package.install_security","host_id":"host1"}]}`
 	tests := []struct {
 		name   string
 		data   string

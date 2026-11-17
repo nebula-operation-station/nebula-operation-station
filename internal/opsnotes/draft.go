@@ -93,8 +93,12 @@ type Resolver interface {
 	// external (ADR 0016 D5).
 	External(ref string) bool
 	// Candidates returns the (action, host) pairs the server computed for
-	// ref at digest.
+	// ref at digest. It is not trusted alone: checkSteps also enforces the
+	// suggestion allowlist and the group host.
 	Candidates(ref, digest string) []Candidate
+	// GroupHost returns the managed host of the group ref, and false when
+	// ref is not a fix group.
+	GroupHost(ref string) (string, bool)
 	// HostExists reports whether the managed host exists.
 	HostExists(hostID string) bool
 	// ActionFamily returns the family of a catalog action, and false when
@@ -219,11 +223,28 @@ func checkCitationCount(d Draft) error {
 	return nil
 }
 
-// checkSteps checks each step against the catalog, the hosts and the
-// candidates of the current digest.
+// suggestionAllowlist is the fixed table of actions a fix note may suggest
+// (ADR 0016, suggestion allowlist), with the family of each action. A step
+// outside it is refused whatever the candidates say.
+var suggestionAllowlist = map[string]string{
+	"package.install_security": "os-update",
+	"package.install_all":      "os-update",
+	"system.reboot":            "reboot",
+	"service.restart":          "service-restart",
+	"docker.compose_update":    "container-update",
+	"docker.update":            "container-update",
+	"docker.restart":           "container-restart",
+}
+
+// checkSteps checks each step against the catalog, the suggestion allowlist,
+// the group's host, the hosts and the candidates of the current digest.
 func checkSteps(d Draft, r Resolver) ([]Step, error) {
 	if len(d.Steps) == 0 {
 		return nil, nil
+	}
+	groupHost, ok := r.GroupHost(d.Ref)
+	if !ok {
+		return nil, fmt.Errorf("ref %s: %w", d.Ref, ErrNotGroupHost)
 	}
 	candidates := r.Candidates(d.Ref, d.Digest)
 	seen := make(map[Candidate]bool, len(d.Steps))
@@ -242,8 +263,15 @@ func checkSteps(d Draft, r Resolver) ([]Step, error) {
 		if !ok {
 			return nil, fmt.Errorf("step %d action %s: %w", i+1, s.ActionID, ErrUnknownAction)
 		}
+		allowed, ok := suggestionAllowlist[s.ActionID]
+		if !ok || allowed != family {
+			return nil, fmt.Errorf("step %d action %s: %w", i+1, s.ActionID, ErrNotAllowlisted)
+		}
 		if !r.HostExists(s.HostID) {
 			return nil, fmt.Errorf("step %d host %s: %w", i+1, s.HostID, ErrUnknownHost)
+		}
+		if s.HostID != groupHost {
+			return nil, fmt.Errorf("step %d host %s, group host %s: %w", i+1, s.HostID, groupHost, ErrNotGroupHost)
 		}
 		c := Candidate{ActionID: s.ActionID, HostID: s.HostID}
 		if !contains(candidates, c) {

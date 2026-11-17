@@ -11,7 +11,7 @@ import (
 // Neither may panic, and an accepted note must respect the byte bounds and
 // carry only valid UTF-8 text.
 func FuzzDecode(f *testing.F) {
-	f.Add([]byte(`{"kind":"fix","ref":"vu:host1:openssl","digest":"d1","summary":"s","steps":[{"action_id":"act.pkg.upgrade","host_id":"host1"}]}`))
+	f.Add([]byte(`{"kind":"fix","ref":"vu:host1:openssl","digest":"d1","summary":"s","steps":[{"action_id":"package.install_security","host_id":"host1"}]}`))
 	f.Add([]byte(`{"kind":"summary","ref":"2026-11-17","digest":"dig-2026-11-17","text":"Tag."}`))
 	f.Add([]byte(`{"kind":"answer","ref":"q1","digest":"x","text":"\ud800"}`))
 	f.Add([]byte(`{"kind":"fix","ref":"a","digest":"b","summary":"c","steps":[],"snapshot":"{}"}`))

@@ -44,6 +44,13 @@ var (
 	ErrUnknownAction = errors.New("opsnotes: unknown action")
 	// ErrUnknownHost marks a step whose host does not exist.
 	ErrUnknownHost = errors.New("opsnotes: unknown host")
+	// ErrNotAllowlisted marks a step whose action is in the catalog but not
+	// on the suggestion allowlist (ADR 0016 D4), or whose catalog family
+	// differs from the allowlist family.
+	ErrNotAllowlisted = errors.New("opsnotes: action is not on the suggestion allowlist")
+	// ErrNotGroupHost marks a step on a host that is not the managed host of
+	// the note's group (ADR 0016 D7).
+	ErrNotGroupHost = errors.New("opsnotes: step is not on the group's host")
 	// ErrNotCandidate marks a step that is not among the candidates the
 	// server computed for the current digest.
 	ErrNotCandidate = errors.New("opsnotes: step is not a candidate")
