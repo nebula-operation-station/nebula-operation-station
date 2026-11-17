@@ -12,6 +12,20 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/fimscan"
 )
 
+// Format characters (class Cf) are built from code points so that the source
+// contains no invisible characters (staticcheck ST1018).
+var (
+	bom      = string(rune(0xFEFF)) // byte order mark
+	zwsp     = string(rune(0x200B)) // zero width space
+	zwj      = string(rune(0x200D)) // zero width joiner
+	rlo      = string(rune(0x202E)) // right-to-left override (bidi)
+	nbsp     = string(rune(0x00A0)) // no-break space (Zs, not printable)
+	ideoSpc  = string(rune(0x3000)) // ideographic space (Zs, not printable)
+	c1NEL    = string(rune(0x0085)) // C1 control NEL
+	esc      = string(rune(0x1B))   // ESC control character
+	mixedRaw = "/srv/ä\\" + esc + "[31m" + rlo + "\xff"
+)
+
 // unescapePath is the inverse of EscapePath, used only in tests. In the
 // display form a raw backslash never appears unescaped, so every backslash
 // starts a \xNN escape and the raw bytes can be recovered exactly.
@@ -38,7 +52,6 @@ func unescapePath(t testing.TB, s string) []byte {
 }
 
 func TestEscapePathDisplayForms(t *testing.T) {
-	bom := string(rune(0xFEFF)) // byte order mark, a format character (Cf)
 	cases := []struct {
 		name string
 		raw  []byte
@@ -55,13 +68,13 @@ func TestEscapePathDisplayForms(t *testing.T) {
 		{"printable utf8", []byte("/etc/ä"), "/etc/ä"},
 		{"bidi override RLO", []byte{'/', 'e', 't', 'c', '/', 0xe2, 0x80, 0xae, 'x'}, `/etc/\xe2\x80\xaex`},
 		{"bidi isolate LRI", []byte{'/', 0xe2, 0x81, 0xa6, 'x'}, `/\xe2\x81\xa6x`},
-		{"zero width space", []byte("/a​b"), `/a\xe2\x80\x8bb`},
-		{"zero width joiner", []byte("/a‍b"), `/a\xe2\x80\x8db`},
+		{"zero width space", []byte("/a" + zwsp + "b"), `/a\xe2\x80\x8bb`},
+		{"zero width joiner", []byte("/a" + zwj + "b"), `/a\xe2\x80\x8db`},
 		{"byte order mark", []byte(bom + "/etc"), `\xef\xbb\xbf/etc`},
-		{"no-break space", []byte("/a b"), `/a\xc2\xa0b`},
-		{"ideographic space", []byte("/a　b"), `/a\xe3\x80\x80b`},
-		{"C1 control", []byte("/a\u0085b"), `/a\xc2\x85b`},
-		{"mixed", []byte("/srv/ä\\\x1b[31m‮\xff"), `/srv/ä\x5c\x1b[31m\xe2\x80\xae\xff`},
+		{"no-break space", []byte("/a" + nbsp + "b"), `/a\xc2\xa0b`},
+		{"ideographic space", []byte("/a" + ideoSpc + "b"), `/a\xe3\x80\x80b`},
+		{"C1 control", []byte("/a" + c1NEL + "b"), `/a\xc2\x85b`},
+		{"mixed", []byte(mixedRaw), `/srv/ä\x5c\x1b[31m\xe2\x80\xae\xff`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
