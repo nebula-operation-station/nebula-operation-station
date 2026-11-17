@@ -152,7 +152,7 @@ func (s *Service) finishRun(r executordb.Run) {
 		return
 	}
 	s.log.Info("audit", "kind", "run_finished", "execution", r.ExecutionID, "host", r.HostID, "class", r.Class, "exit", r.ExitCode,
-		"result_bytes", len(r.Result), "log_bytes", len(r.Log), "log_truncated", r.LogTruncated)
+		"endpoint", r.Endpoint, "result_bytes", len(r.Result), "log_bytes", len(r.Log), "log_truncated", r.LogTruncated)
 	// The stage engine decides on the executor's own record of the run.
 	s.auth.RecordOutcome(r.ExecutionID, r.HostID, permit.OutcomeOfClass(r.Class))
 	// So does the batch rollout, for a durable batch member's run.

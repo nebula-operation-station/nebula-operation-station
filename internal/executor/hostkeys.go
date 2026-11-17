@@ -54,8 +54,16 @@ func (s *Service) Connect(ctx context.Context, hostID, fingerprint string, endpo
 	if err != nil {
 		return nil, err
 	}
+	// Failover over the endpoints (ADR 0006, ep02) is sshtransport's: the
+	// next endpoint only after a TCP error or a handshake failure or
+	// timeout before the host key; a mismatch or an auth failure ends the
+	// dial. Every endpoint is checked against the same pin.
 	c, err := s.transport.Dial(ctx, sshtransport.Target{HostID: hostID, Endpoints: endpoints, User: hk.User, HostKey: pin}, signer)
 	if err == nil {
+		if len(c.Attempts) > 0 {
+			s.log.Warn("audit", "kind", "ssh_failover", "host", hostID, "endpoint", c.Endpoint.String(),
+				"skipped", skippedEndpoints(c.Attempts))
+		}
 		return c, nil
 	}
 	var te *sshtransport.Error
@@ -81,6 +89,17 @@ func (s *Service) Connect(ctx context.Context, hostID, fingerprint string, endpo
 		}
 	}
 	return nil, err
+}
+
+// skippedEndpoints names the endpoints a dial left before the one it used,
+// with the stage each failed at ("10.0.0.1:22 tcp, 10.0.0.2:22 handshake").
+// Error texts stay out of the audit: they may carry host-supplied data.
+func skippedEndpoints(attempts []sshtransport.Attempt) string {
+	parts := make([]string, len(attempts))
+	for i, a := range attempts {
+		parts[i] = a.Endpoint.String() + " " + a.Stage
+	}
+	return strings.Join(parts, ", ")
 }
 
 func parseEndpoints(in []string) ([]sshtransport.Endpoint, error) {
