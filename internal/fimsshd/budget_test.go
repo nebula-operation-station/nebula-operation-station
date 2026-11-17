@@ -86,3 +86,55 @@ func TestBudgetDoesNotChangeOrdinaryAnswers(t *testing.T) {
 		}
 	}
 }
+
+// TestMatchPiecesChargesEveryPieceStep checks that the counter covers the work
+// of matchPieces, not only its byte compares. Each piece clears next and scans
+// cur (both O(len(name))) before any compare. The literal pieces here never
+// match a live position, so the only charges are the per-piece ones: at least
+// two steps per position per piece, plus the call's buffer clear.
+func TestMatchPiecesChargesEveryPieceStep(t *testing.T) {
+	const pieces = 50
+	name := strings.Repeat("a", 4000)
+	n := len(name) + 1
+	ps := make([]piece, 0, pieces)
+	for i := 0; i < pieces; i++ {
+		ps = append(ps, piece{lit: "zz"})
+	}
+	sc := &scratch{}
+	if matchPieces(ps, name, sc) {
+		t.Fatalf("literal pieces matched a name they cannot match")
+	}
+	if sc.over {
+		t.Fatalf("50 pieces exhausted the budget (spent %d); the test needs room", sc.spent)
+	}
+	if want := (pieces + 1) * 2 * n; sc.spent < want {
+		t.Fatalf("spent %d steps, want at least %d for %d piece scans of %d positions", sc.spent, want, pieces, n)
+	}
+}
+
+// TestManyLiteralIncludesExhaustBudget covers the review finding: about 4,096
+// literal Include values against one 4,000-byte record component. Each value
+// is compared with the component at its last segment, so the uncharged scans
+// once cost about 33 × 10^6 steps against a budget of about 10^6. The counted
+// steps must reach the budget, and the answer must be indeterminate (SSHFile).
+// The two OpenSSH default AuthorizedKeysFile values count toward the limit, so
+// the Include count leaves room for them.
+func TestManyLiteralIncludesExhaustBudget(t *testing.T) {
+	const defaultValues = 2
+	var b strings.Builder
+	for i := 0; i < MaxDerivedValues-defaultValues; i++ {
+		fmt.Fprintf(&b, "Include /etc/ssh/c%d\n", i)
+	}
+	s := setFor(t, b.String())
+	name := strings.Repeat("a", 4000)
+	sc := &scratch{}
+	if got := s.matchWith([]byte("/etc/ssh/"+name), sc); got != fimbaseline.SSHFile {
+		t.Fatalf("4096 literal includes: got %v, want SSHFile (indeterminate, fail closed)", got)
+	}
+	if !sc.over {
+		t.Fatalf("4096 literal includes finished without exhausting the budget (spent %d)", sc.spent)
+	}
+	if sc.spent > matchBudget {
+		t.Fatalf("spent %d steps, above the budget %d", sc.spent, matchBudget)
+	}
+}

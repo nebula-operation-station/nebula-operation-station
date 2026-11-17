@@ -6,13 +6,16 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 )
@@ -95,6 +98,131 @@ func TestAttrKeySuffixCollision(t *testing.T) {
 	if got := attrKey("_truncated", map[string]string{}); got == "_truncated" {
 		t.Fatal("the reserved key was handed out")
 	}
+}
+
+// The user column survives the attribute bound even when "user" sorts
+// after the MaxAttrs-th key: it is read before the truncation (review
+// tw05), and the body keeps the user attribute among the kept keys.
+func TestUserSurvivesAttrBound(t *testing.T) {
+	attrs := map[string]string{"user": "axel"}
+	for i := 0; i < 40; i++ {
+		attrs["a"+strconv.Itoa(100+i)] = "v"
+	}
+	kind, user, body, err := line("audit_test", attrs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kind != "audit_test" || user != "axel" {
+		t.Fatalf("kind %q user %q", kind, user)
+	}
+	var m map[string]string
+	if err := json.Unmarshal(body, &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["user"] != "axel" || m["_truncated"] != "true" || len(m) != MaxAttrs+1 {
+		t.Fatalf("%d keys, user %q, truncated %q", len(m), m["user"], m["_truncated"])
+	}
+}
+
+// line keeps the bounds: attribute count, value size, kind size, the
+// "unknown" kind and invalid UTF-8 in keys and values.
+func TestLineBounds(t *testing.T) {
+	many := map[string]string{}
+	for i := 0; i < MaxAttrs+5; i++ {
+		many["k"+strconv.Itoa(1000+i)] = "v"
+	}
+	tests := []struct {
+		name      string
+		kind      string
+		attrs     map[string]string
+		wantKind  string
+		wantKeys  int
+		wantTrunc bool
+	}{
+		{"too many attrs", "x", many, "x", MaxAttrs + 1, true},
+		{"empty kind", "", map[string]string{"a": "1"}, "unknown", 1, false},
+		{"long kind", strings.Repeat("k", 200), nil, strings.Repeat("k", MaxKind), 0, false},
+		{"invalid utf-8 kind", "a\xffb", nil, "a?b", 0, false},
+		{"invalid utf-8 key", "x", map[string]string{"a\xff": "1"}, "x", 1, false},
+		{"invalid utf-8 value", "x", map[string]string{"a": "b\xffc"}, "x", 1, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			kind, _, body, err := line(tc.kind, tc.attrs)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var m map[string]string
+			if err := json.Unmarshal(body, &m); err != nil {
+				t.Fatal(err)
+			}
+			if kind != tc.wantKind || len(m) != tc.wantKeys || (m["_truncated"] == "true") != tc.wantTrunc {
+				t.Fatalf("kind %q keys %d truncated %v: %s", kind, len(m), tc.wantTrunc, body)
+			}
+			for k, v := range m {
+				if len(v) > MaxAttrValue || !utf8.ValidString(v) || !utf8.ValidString(k) {
+					t.Fatalf("%q: %d bytes or invalid UTF-8", k, len(v))
+				}
+			}
+		})
+	}
+}
+
+// FuzzLine checks the invariants of a stored line for any input: valid
+// JSON with at most MaxAttrs+1 keys (the reserved _truncated included),
+// bounded valid UTF-8 values, a user column of at most 64 bytes that is a
+// prefix of the stored user attribute, and the same body for the same
+// input.
+func FuzzLine(f *testing.F) {
+	f.Add("kind", "user", "axel", 3)
+	f.Add("", "a\xff", "b\xff", 40)
+	f.Add(strings.Repeat("k", 100), "user", strings.Repeat("é", 2000), 33)
+	f.Fuzz(func(t *testing.T, kind, key, val string, n int) {
+		// Inputs are kept small: line cleans every byte it is given, so
+		// multi-megabyte mutations only slow the fuzzer down.
+		const fuzzInput = 4 * MaxAttrValue
+		kind, key, val = kind[:min(len(kind), fuzzInput)], key[:min(len(key), fuzzInput)], val[:min(len(val), fuzzInput)]
+		if n < 0 {
+			n = -n
+		}
+		n %= MaxAttrs + 10
+		attrs := map[string]string{"user": val}
+		for i := 0; i < n; i++ {
+			attrs[key+strconv.Itoa(i)] = val
+		}
+		gotKind, user, body, err := line(kind, attrs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if gotKind == "" || len(gotKind) > MaxKind || !utf8.ValidString(gotKind) {
+			t.Fatalf("kind %q", gotKind)
+		}
+		var m map[string]string
+		if err := json.Unmarshal(body, &m); err != nil {
+			t.Fatalf("body is not a JSON object of strings: %v", err)
+		}
+		if len(m) > MaxAttrs+1 {
+			t.Fatalf("%d keys", len(m))
+		}
+		for k, v := range m {
+			if !utf8.ValidString(k) || !utf8.ValidString(v) || len(v) > MaxAttrValue {
+				t.Fatalf("%q: %d bytes or invalid UTF-8", k, len(v))
+			}
+		}
+		if len(user) > 64 || !utf8.ValidString(user) {
+			t.Fatalf("user %q", user)
+		}
+		if _, ok := m["user"]; ok && !strings.HasPrefix(m["user"], user) {
+			t.Fatalf("user column %q is not a prefix of the attribute %q", user, m["user"])
+		}
+		if _, ok := attrs["user"]; ok && len(attrs) > MaxAttrs && !strings.HasPrefix(val, user) && utf8.ValidString(val) {
+			t.Fatalf("user column %q lost the input user %q", user, val)
+		}
+		_, _, again, err := line(kind, attrs)
+		if err != nil || string(again) != string(body) {
+			t.Fatalf("same input, different body: %s vs %s", body, again)
+		}
+	})
 }
 
 // AppendFunc is the appendLine parameter of WithTx's function.
