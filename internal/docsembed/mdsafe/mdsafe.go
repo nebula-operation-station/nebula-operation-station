@@ -106,11 +106,9 @@ var (
 	// Every match also passes the assertInert allowlist for "a" in the
 	// tests.
 	localHrefRE = regexp.MustCompile(`^/help(/[a-z0-9_-]+)*(#[a-z0-9_-]+)?$`)
-	// anchorRE is the fragment form of a local link: the id form that
-	// Slug produces for ASCII headings.
+	// anchorRE is the id form of a fragment: the output of anchorFold,
+	// which is what Slug gives every heading.
 	anchorRE = regexp.MustCompile(`^[a-z0-9_-]+$`)
-	// fragmentRE is the accepted fragment ("#…") of a same-page link.
-	fragmentRE = regexp.MustCompile(`^[\pL\pN_-]+$`)
 	// tableSepRE matches a table's header separator row.
 	tableSepRE = regexp.MustCompile(`^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$`)
 	// plainLinkRE strips link syntax for plain text: [text](dest).
@@ -165,13 +163,31 @@ func renderLimited(src []byte, o Options, lim scanLimits) (Result, int, error) {
 // GitHub does: markup removed, lower case, only letters, digits, "-"
 // and "_" kept, spaces become "-".
 func Slug(text string) string {
+	return anchorFold(plainText(text))
+}
+
+// anchorFold is the one mapping from heading text, and from a link
+// fragment, to an element id. The result is ASCII only: lower-case
+// letters, digits, "-" and "_"; spaces become "-"; the German umlauts and
+// ß are spelled out (ä→ae, ö→oe, ü→ue, ß→ss); every other character is
+// dropped. Because headings and fragments share this mapping, "#Übersicht"
+// names the id of "## Übersicht", on the same page and on another one.
+func anchorFold(s string) string {
 	var b strings.Builder
-	for _, c := range strings.ToLower(plainText(text)) {
+	for _, c := range strings.ToLower(s) {
 		switch {
-		case unicode.IsLetter(c) || unicode.IsDigit(c) || c == '-' || c == '_':
+		case c < 0x80 && (unicode.IsLetter(c) || unicode.IsDigit(c) || c == '-' || c == '_'):
 			b.WriteRune(c)
 		case c == ' ':
 			b.WriteByte('-')
+		case c == 'ä':
+			b.WriteString("ae")
+		case c == 'ö':
+			b.WriteString("oe")
+		case c == 'ü':
+			b.WriteString("ue")
+		case c == 'ß':
+			b.WriteString("ss")
 		}
 	}
 	return b.String()
@@ -744,20 +760,22 @@ func (r *renderer) resolve(dest string) (href string, external, ok bool) {
 		return "", false, false
 	}
 	p, frag, _ := strings.Cut(dest, "#")
+	// A fragment names a heading id through the same mapping as the ids
+	// themselves (anchorFold). One that folds to nothing is not an id, so
+	// the link renders its text only.
+	if frag != "" {
+		frag = anchorFold(frag)
+		if !anchorRE.MatchString(frag) {
+			return "", false, false
+		}
+	}
 	if p == "" {
-		if !fragmentRE.MatchString(frag) {
+		if frag == "" {
 			return "", false, false
 		}
 		return "#" + frag, false, true
 	}
 	if r.o.Relative == nil {
-		return "", false, false
-	}
-	// Heading ids are lower case, so "#Add" names the id "add". Upper case
-	// is folded; a fragment that is still not in id form (non-ASCII
-	// letters) renders the link text only.
-	frag = strings.ToLower(frag)
-	if frag != "" && !anchorRE.MatchString(frag) {
 		return "", false, false
 	}
 	h, ok := r.o.Relative(p, frag)
