@@ -6,11 +6,14 @@
 //
 // The log is structured data only: host label, kind, state, reason, the
 // execution ID, a NOS link and counts. It never holds a provider token, a
-// provider target URL or log text. Every text field is cleaned on write
-// (control, bidi and zero-width runes become U+FFFD, line breaks become
-// spaces) and bounded in bytes. A field over its limit is shortened and
-// marked in Entry.Changed; it is never rejected, because a log must not lose
-// a message. Time is injected through New, so retention is testable.
+// provider target URL or log text. Kind, State, Reason and Outcome are closed
+// sets: a value that is not a code is refused. The host label and the
+// execution ID are free text, cleaned on write (control, bidi and zero-width
+// runes become U+FFFD, line breaks become spaces) and bounded in bytes; a
+// shortened one is marked in Entry.Changed. A link that is not a NOS path, or
+// is too long, is dropped and marked. Nothing is rejected for size, because a
+// log must not lose a message. Time is injected through New, so retention is
+// testable.
 //
 // The package does not send notifications and is not wired into the server
 // yet; the caller appends after each decision and runs Prune periodically.
@@ -38,12 +41,11 @@ const MaxEntries = 5000
 // MaxPage is the largest number of entries List returns in one call.
 const MaxPage = 100
 
-// Byte limits for text fields. They match the CHECK constraints in
-// migration 0045_notify_log.sql.
+// Byte limits for the free-text fields. They match the CHECK constraints in
+// migration 0045_notify_log.sql. Kind, State, Reason and Outcome are closed
+// sets and have no byte limit: they are refused unless they are a code.
 const (
-	MaxKind        = 64
 	MaxHost        = 64
-	MaxState       = 64
 	MaxExecutionID = 128
 	MaxLink        = 256
 	// MaxProviders is the largest provider count stored. Larger counts are
@@ -98,6 +100,74 @@ func (c ReasonCode) valid() bool {
 	return false
 }
 
+// KindCode is the event kind: the notification event that was decided on. It
+// is a closed set, so free text, URLs and tokens cannot be stored through it.
+// The values are the event types of spec 13 (plus the digest) and must match
+// the CHECK constraint in migration 0045.
+type KindCode string
+
+// Event kinds.
+const (
+	KindVulnKEVNew              KindCode = "vuln.kev_new"
+	KindVulnCriticalNew         KindCode = "vuln.critical_new"
+	KindVulnHermesStale         KindCode = "vuln.hermes_stale"
+	KindVulnFeedStale           KindCode = "vuln.feed_stale"
+	KindVulnFeedRegressed       KindCode = "vuln.feed_regressed"
+	KindVulnFeedMarkReset       KindCode = "vuln.feed_mark_reset"
+	KindIntegrityNOSMismatch    KindCode = "integrity.nos_mismatch"
+	KindIntegrityHostChange     KindCode = "integrity.host_change"
+	KindIntegrityScanIncomplete KindCode = "integrity.scan_incomplete"
+	KindIntegrityBaselineTamper KindCode = "integrity.baseline_tamper"
+	KindLeaseExpiring           KindCode = "lease.expiring"
+	KindLeaseRunFailed          KindCode = "lease.run_failed"
+	KindDigest                  KindCode = "digest"
+	KindOpsSuggestionNew        KindCode = "opsagent.suggestion_new"
+	KindOpsSettingsChanged      KindCode = "opsagent.settings_changed"
+)
+
+func (k KindCode) valid() bool {
+	switch k {
+	case KindVulnKEVNew, KindVulnCriticalNew, KindVulnHermesStale,
+		KindVulnFeedStale, KindVulnFeedRegressed, KindVulnFeedMarkReset,
+		KindIntegrityNOSMismatch, KindIntegrityHostChange, KindIntegrityScanIncomplete,
+		KindIntegrityBaselineTamper, KindLeaseExpiring, KindLeaseRunFailed, KindDigest,
+		KindOpsSuggestionNew, KindOpsSettingsChanged:
+		return true
+	}
+	return false
+}
+
+// StateCode is the state an event reports, for example "expiring" or
+// "mismatch". It is a closed set for the same reason as KindCode. The values
+// must match the CHECK constraint in migration 0045.
+type StateCode string
+
+// Event states.
+const (
+	StateNew        StateCode = "new"
+	StateEscalated  StateCode = "escalated"
+	StateExpiring   StateCode = "expiring"
+	StateFailed     StateCode = "failed"
+	StateStale      StateCode = "stale"
+	StateRegressed  StateCode = "regressed"
+	StateMismatch   StateCode = "mismatch"
+	StateIncomplete StateCode = "incomplete"
+	StateTamper     StateCode = "tamper"
+	StateChanged    StateCode = "changed"
+	StateReset      StateCode = "reset"
+	StateSummary    StateCode = "summary"
+)
+
+func (s StateCode) valid() bool {
+	switch s {
+	case StateNew, StateEscalated, StateExpiring, StateFailed, StateStale,
+		StateRegressed, StateMismatch, StateIncomplete, StateTamper,
+		StateChanged, StateReset, StateSummary:
+		return true
+	}
+	return false
+}
+
 // ReasonForError maps an error from a notification provider to a reason
 // code. It returns the code only, never err.Error(): a *url.Error carries the
 // full target URL, and a Telegram URL carries the bot token in its path.
@@ -122,11 +192,10 @@ func ReasonForError(err error) ReasonCode {
 // Fields.
 type Field uint8
 
-// Fields that can be shortened or dropped on write.
+// Fields that can be shortened or dropped on write. Kind, State, Reason and
+// Outcome are closed sets and are never changed on write; they are refused.
 const (
-	FieldKind Field = 1 << iota
-	FieldHost
-	FieldState
+	FieldHost Field = 1 << iota
 	FieldExecutionID
 	FieldLink
 )
@@ -137,19 +206,20 @@ func (f Field) Has(x Field) bool { return f&x != 0 }
 // Record is one notification event to append. Text is untrusted in the
 // sense that it is cleaned and bounded before it is stored.
 type Record struct {
-	// Kind is the event kind, for example "execution".
-	Kind string
+	// Kind is the event kind. Append rejects any value that is not a KindCode.
+	Kind KindCode
 	// Host is the host label, not an address.
 	Host string
-	// State is the event state, for example "FAILED".
-	State string
+	// State is the event state. Append rejects any value that is not a
+	// StateCode.
+	State StateCode
 	// Reason is a closed reason code. Append rejects any other value. Use
 	// ReasonForError to map a provider error to a code.
 	Reason ReasonCode
 	// ExecutionID is the execution the event belongs to, if any.
 	ExecutionID string
-	// Link is a NOS UI link (a path starting with "/"). Anything else is
-	// dropped on write; see Store.Append.
+	// Link is a NOS UI link (a path starting with "/", at most MaxLink bytes).
+	// Anything else is dropped on write, never shortened; see Store.Append.
 	Link string
 	// Outcome is what happened to the event.
 	Outcome Outcome
@@ -188,13 +258,21 @@ func New(db *sql.DB, now func() time.Time) (*Store, error) {
 	return &Store{db: db, now: now}, nil
 }
 
-// Append stores r and returns its sequence number. Text fields are cleaned
-// and shortened as described in the package comment. A Link that is not a
-// NOS path (see isNOSLink) is stored empty and marked as changed. An unknown
-// Outcome or Reason is an error, because it is a caller bug and not a
-// property of the event: a Reason that is not a code (a URL, a provider
-// message) is refused, so it can never be stored.
+// Append stores r and returns its sequence number. Host and ExecutionID are
+// cleaned and shortened as described in the package comment. A Link that is
+// not a NOS path (see isNOSLink), or that is longer than MaxLink, is dropped:
+// it is stored empty and marked as changed. An empty Link is no link at all
+// and is not marked. An unknown Kind, State, Outcome or Reason is an error,
+// because it is a caller bug and not a property of the event: a value that is
+// not a code (a URL, a provider message, a token) is refused, so it can never
+// be stored.
 func (s *Store) Append(ctx context.Context, r Record) (int64, error) {
+	if !r.Kind.valid() {
+		return 0, fmt.Errorf("notifylog: append: kind is not an event kind")
+	}
+	if !r.State.valid() {
+		return 0, fmt.Errorf("notifylog: append: state is not a state code")
+	}
 	if !r.Outcome.valid() {
 		return 0, fmt.Errorf("notifylog: append: unknown outcome %q", r.Outcome)
 	}
@@ -202,20 +280,20 @@ func (s *Store) Append(ctx context.Context, r Record) (int64, error) {
 		return 0, fmt.Errorf("notifylog: append: reason is not a reason code")
 	}
 	var changed Field
-	kind, cut := clean(r.Kind, MaxKind)
-	changed = mark(changed, FieldKind, cut)
 	host, cut := clean(r.Host, MaxHost)
 	changed = mark(changed, FieldHost, cut)
-	state, cut := clean(r.State, MaxState)
-	changed = mark(changed, FieldState, cut)
 	execID, cut := clean(r.ExecutionID, MaxExecutionID)
 	changed = mark(changed, FieldExecutionID, cut)
 
+	// isNOSLink accepts printable ASCII only, so a valid link needs no
+	// cleaning, and a link over the limit is dropped rather than cut: a cut
+	// path could point at another or a nonexistent UI route.
 	var link string
-	if isNOSLink(r.Link) {
-		link, cut = clean(r.Link, MaxLink)
-		changed = mark(changed, FieldLink, cut)
-	} else {
+	switch {
+	case r.Link == "":
+	case isNOSLink(r.Link) && len(r.Link) <= MaxLink:
+		link = r.Link
+	default:
 		changed |= FieldLink
 	}
 
@@ -224,7 +302,7 @@ func (s *Store) Append(ctx context.Context, r Record) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `INSERT INTO notify_log
 		(at, kind, host, state, reason, execution_id, link, outcome, providers, changed)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		s.now().UTC().Unix(), kind, host, state, string(r.Reason), execID, link, string(r.Outcome), providers, int(changed))
+		s.now().UTC().Unix(), string(r.Kind), host, string(r.State), string(r.Reason), execID, link, string(r.Outcome), providers, int(changed))
 	if err != nil {
 		return 0, fmt.Errorf("notifylog: append: %w", err)
 	}

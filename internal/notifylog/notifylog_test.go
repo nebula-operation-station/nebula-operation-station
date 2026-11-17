@@ -39,9 +39,9 @@ func newTestStore(t *testing.T) (*Store, *fakeClock) {
 
 func sampleRecord() Record {
 	return Record{
-		Kind:        "execution",
+		Kind:        KindLeaseRunFailed,
 		Host:        "web-1",
-		State:       "FAILED",
+		State:       StateFailed,
 		Reason:      ReasonTimeout,
 		ExecutionID: "ex-1",
 		Link:        "/executions/ex-1",
@@ -92,6 +92,113 @@ func TestAppendRejectsUnknownOutcome(t *testing.T) {
 	r.Outcome = "maybe"
 	if _, err := s.Append(context.Background(), r); err == nil {
 		t.Fatal("unknown outcome was accepted")
+	}
+}
+
+// TestAppendRejectsKindAndStateThatAreNotCodes: Kind and State are closed
+// sets like Reason. Free text, URLs and tokens are refused, so they never
+// reach the log through these fields either.
+func TestAppendRejectsKindAndStateThatAreNotCodes(t *testing.T) {
+	const token = "123456:SECRET-TOKEN-XYZ"
+	bad := []string{
+		"",
+		"execution",
+		"Lease.Expiring",
+		"lease.expiring ",
+		"lease.expiring\n",
+		"https://api.telegram.org/bot" + token + "/sendMessage",
+		"lease.expiring?token=" + token,
+		"lease.expiring#access_token=" + token,
+		"dial tcp: connection refused",
+		"bot " + token,
+	}
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	for _, v := range bad {
+		r := sampleRecord()
+		r.Kind = KindCode(v)
+		if _, err := s.Append(ctx, r); err == nil {
+			t.Errorf("Append accepted kind %q", v)
+		}
+		r = sampleRecord()
+		r.State = StateCode(v)
+		if _, err := s.Append(ctx, r); err == nil {
+			t.Errorf("Append accepted state %q", v)
+		}
+	}
+	page, err := s.List(ctx, 0, MaxPage)
+	if err != nil || len(page) != 0 {
+		t.Fatalf("refused records left %d rows (err %v); want none", len(page), err)
+	}
+}
+
+// TestClosedFieldsNeverStoreProviderText runs one provider error text through
+// every field that is a closed set and through the free-text fields. The closed
+// fields must refuse it, and the link must drop it. Host and ExecutionID are
+// operator-chosen labels and opaque IDs; they are cleaned and bounded but not
+// refused, so the test checks only that they hold no control text.
+func TestClosedFieldsNeverStoreProviderText(t *testing.T) {
+	const token = "123456:SECRET-TOKEN-XYZ"
+	providerText := []string{
+		"https://api.telegram.org/bot" + token + "/sendMessage?chat_id=42",
+		"Post \"https://api.telegram.org/bot" + token + "/sendMessage\": dial tcp: refused",
+		token,
+		"timeout?token=" + token,
+		"timeout#access_token=" + token,
+	}
+	for _, v := range providerText {
+		s, _ := newTestStore(t)
+		ctx := context.Background()
+		for _, set := range []struct {
+			name  string
+			apply func(*Record)
+		}{
+			{"kind", func(r *Record) { r.Kind = KindCode(v) }},
+			{"state", func(r *Record) { r.State = StateCode(v) }},
+			{"reason", func(r *Record) { r.Reason = ReasonCode(v) }},
+			{"outcome", func(r *Record) { r.Outcome = Outcome(v) }},
+		} {
+			r := sampleRecord()
+			set.apply(&r)
+			if _, err := s.Append(ctx, r); err == nil {
+				t.Fatalf("%s: Append accepted provider text %q", set.name, v)
+			}
+		}
+		r := sampleRecord()
+		r.Link = v
+		mustAppend(t, s, r)
+
+		page, err := s.List(ctx, 0, MaxPage)
+		if err != nil || len(page) != 1 {
+			t.Fatalf("List: %d rows, err %v; want the link-only record", len(page), err)
+		}
+		if page[0].Link != "" || !page[0].Changed.Has(FieldLink) {
+			t.Fatalf("provider text %q reached the link: %+v", v, page[0])
+		}
+	}
+}
+
+func TestKindAndStateCodesAreTheDocumentedSet(t *testing.T) {
+	gotKinds := []KindCode{KindVulnKEVNew, KindVulnCriticalNew, KindVulnHermesStale,
+		KindVulnFeedStale, KindVulnFeedRegressed, KindVulnFeedMarkReset,
+		KindIntegrityNOSMismatch, KindIntegrityHostChange, KindIntegrityScanIncomplete,
+		KindIntegrityBaselineTamper, KindLeaseExpiring, KindLeaseRunFailed, KindDigest,
+		KindOpsSuggestionNew, KindOpsSettingsChanged}
+	wantKinds := []KindCode{"vuln.kev_new", "vuln.critical_new", "vuln.hermes_stale",
+		"vuln.feed_stale", "vuln.feed_regressed", "vuln.feed_mark_reset",
+		"integrity.nos_mismatch", "integrity.host_change", "integrity.scan_incomplete",
+		"integrity.baseline_tamper", "lease.expiring", "lease.run_failed", "digest",
+		"opsagent.suggestion_new", "opsagent.settings_changed"}
+	if !reflect.DeepEqual(gotKinds, wantKinds) {
+		t.Fatalf("kind codes = %q, want %q", gotKinds, wantKinds)
+	}
+	gotStates := []StateCode{StateNew, StateEscalated, StateExpiring, StateFailed,
+		StateStale, StateRegressed, StateMismatch, StateIncomplete, StateTamper,
+		StateChanged, StateReset, StateSummary}
+	wantStates := []StateCode{"new", "escalated", "expiring", "failed", "stale",
+		"regressed", "mismatch", "incomplete", "tamper", "changed", "reset", "summary"}
+	if !reflect.DeepEqual(gotStates, wantStates) {
+		t.Fatalf("state codes = %q, want %q", gotStates, wantStates)
 	}
 }
 
@@ -202,12 +309,31 @@ func TestReasonCodesAreTheDocumentedSet(t *testing.T) {
 	}
 }
 
-func TestSchemaRejectsURLReason(t *testing.T) {
+// TestSchemaRejectsNonCodes: the database enforces the closed sets too. Each
+// insert below is valid except for the one field under test.
+func TestSchemaRejectsNonCodes(t *testing.T) {
 	s, _ := newTestStore(t)
-	_, err := s.db.Exec(`INSERT INTO notify_log (at, kind, host, state, reason, execution_id, link, outcome, providers, changed)
-		VALUES (1, 'execution', 'h', 'FAILED', 'https://api.telegram.org/bot1:x/sendMessage', '', '', 'failed', 0, 0)`)
-	if err == nil {
-		t.Fatal("the database accepted a URL as reason")
+	for name, values := range map[string][]string{
+		"reason": {"'https://api.telegram.org/bot1:x/sendMessage'", "'Timeout'"},
+		"kind":   {"'https://api.telegram.org/bot1:x/sendMessage'", "'execution'", "'digest '"},
+		"state":  {"'FAILED'", "'bot1:x'"},
+	} {
+		for _, v := range values {
+			var kind, state, reason = "'lease.expiring'", "'expiring'", "''"
+			switch name {
+			case "reason":
+				reason = v
+			case "kind":
+				kind = v
+			case "state":
+				state = v
+			}
+			_, err := s.db.Exec(`INSERT INTO notify_log (at, kind, host, state, reason, execution_id, link, outcome, providers, changed)
+				VALUES (1, ` + kind + `, 'h', ` + state + `, ` + reason + `, '', '', 'failed', 0, 0)`)
+			if err == nil {
+				t.Errorf("the database accepted %s %s", name, v)
+			}
+		}
 	}
 }
 
@@ -433,8 +559,7 @@ func TestHostileTextIsCleanedAndStored(t *testing.T) {
 	ctx := context.Background()
 	r := sampleRecord()
 	r.Host = "web\x00-1\x1b[31m" + string(rune(0x202E)) + "evil" + string(rune(0x200B)) + string(rune(0xFEFF))
-	r.Kind = "exe\ncution \xff bad utf8"
-	r.State = "FAILED" + string(rune(0x2066)) + "x" + string(rune(0x2069))
+	r.ExecutionID = "ex\ncution \xff bad utf8"
 	seq := mustAppend(t, s, r)
 
 	page, err := s.List(ctx, 0, 1)
@@ -442,7 +567,7 @@ func TestHostileTextIsCleanedAndStored(t *testing.T) {
 		t.Fatalf("List: %v, %+v", err, page)
 	}
 	got := page[0]
-	for _, v := range []string{got.Host, got.Kind, got.State} {
+	for _, v := range []string{got.Host, got.ExecutionID} {
 		if !utf8.ValidString(v) {
 			t.Fatalf("stored text is not valid UTF-8: %q", v)
 		}
@@ -455,8 +580,8 @@ func TestHostileTextIsCleanedAndStored(t *testing.T) {
 			}
 		}
 	}
-	if !strings.Contains(got.Kind, "exe cution") {
-		t.Fatalf("line breaks were not turned into spaces: %q", got.Kind)
+	if !strings.Contains(got.ExecutionID, "ex cution") {
+		t.Fatalf("line breaks were not turned into spaces: %q", got.ExecutionID)
 	}
 	if got.Changed != 0 {
 		t.Fatalf("Changed = %b; cleaning alone must not mark a field as shortened", got.Changed)
@@ -482,11 +607,8 @@ func TestOverlongFieldIsShortenedAndMarkedNotRejected(t *testing.T) {
 	if len(got.Host) > MaxHost || !utf8.ValidString(got.Host) {
 		t.Fatalf("Host %q exceeds %d bytes or is not valid UTF-8", got.Host, MaxHost)
 	}
-	if !got.Changed.Has(FieldExecutionID) || !got.Changed.Has(FieldHost) {
-		t.Fatalf("Changed = %b, want execution id and host marked", got.Changed)
-	}
-	if got.Changed.Has(FieldState) || got.Changed.Has(FieldKind) {
-		t.Fatalf("Changed = %b marks fields that were not shortened", got.Changed)
+	if got.Changed != FieldExecutionID|FieldHost {
+		t.Fatalf("Changed = %b, want exactly execution id and host marked", got.Changed)
 	}
 }
 
