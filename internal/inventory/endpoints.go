@@ -248,9 +248,18 @@ func (s *Store) editEndpoints(ctx context.Context, what, hostID string, edit fun
 		return fail(&ValidationError{Problems: p})
 	}
 
+	// One row per EndpointKey: rows stored before the duplicate rule
+	// compared normalized addresses could hold two spellings of one
+	// endpoint, and mapping both to one key would reorder or delete the
+	// wrong row. Such a host is refused until the list is fixed.
 	keep := make(map[string]int64, len(stored))
 	for _, r := range stored {
-		keep[EndpointKey(r.e)] = r.id
+		k := EndpointKey(r.e)
+		if _, dup := keep[k]; dup {
+			return fail(&ValidationError{Problems: []string{
+				fmt.Sprintf("stored endpoints contain %s twice; fix the endpoint list in the settings form", k)}})
+		}
+		keep[k] = r.id
 	}
 	ts := s.now().UTC().Format(time.RFC3339)
 	wanted := make(map[string]bool, len(after))

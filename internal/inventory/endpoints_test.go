@@ -238,3 +238,111 @@ func TestEndpointKeyNormalizes(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateRejectsDuplicateSpellings checks that Validate (and so
+// Create and Update) uses the same duplicate rule as the endpoint edits:
+// two spellings of one normalized endpoint are a duplicate.
+func TestValidateRejectsDuplicateSpellings(t *testing.T) {
+	cases := []struct {
+		name string
+		eps  []Endpoint
+	}{
+		{"ipv6 zero group", []Endpoint{{Address: "fd00::9", Port: 22}, {Address: "fd00:0::9", Port: 22}}},
+		{"ipv6 case", []Endpoint{{Address: "fd00::9", Port: 22}, {Address: "FD00::9", Port: 22}}},
+		{"ipv6 full form", []Endpoint{{Address: "fd00:0:0:0:0:0:0:9", Port: 0}, {Address: "fd00::9", Port: 22}}},
+		{"hostname case", []Endpoint{{Address: "web.example.org", Port: 22}, {Address: "WEB.example.org", Port: 22}}},
+		{"default port", []Endpoint{{Address: "10.0.0.11", Port: 0}, {Address: "10.0.0.11", Port: 22}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s, ctx := endpointHost(t)
+			h := validHost()
+			h.Endpoints = c.eps
+			var verr *ValidationError
+			if err := Validate(h); !errors.As(err, &verr) {
+				t.Fatalf("Validate = %v, want ValidationError", err)
+			}
+			h.ID = "web-02"
+			if _, err := s.Create(ctx, h, CreateOptions{}); !errors.As(err, &verr) {
+				t.Fatalf("Create = %v, want ValidationError", err)
+			}
+			h.ID = "web-01"
+			if _, err := s.Update(ctx, h); !errors.As(err, &verr) {
+				t.Fatalf("Update = %v, want ValidationError", err)
+			}
+			wantEndpoints(t, s, ctx, []Endpoint{{Address: "10.0.0.11", Port: 22}})
+		})
+	}
+	// Different ports on one address stay two endpoints.
+	h := validHost()
+	h.Endpoints = []Endpoint{{Address: "fd00::9", Port: 22}, {Address: "fd00:0::9", Port: 2222}}
+	if err := Validate(h); err != nil {
+		t.Fatalf("Validate = %v, want nil", err)
+	}
+}
+
+// TestEndpointEditsRefuseStoredDuplicateSpellings covers rows stored
+// before the normalized duplicate rule: two spellings of one endpoint
+// must not be collapsed by a move or remove (which would update one row
+// twice or delete nothing); the edit is refused and nothing changes.
+func TestEndpointEditsRefuseStoredDuplicateSpellings(t *testing.T) {
+	s, ctx := endpointHost(t)
+	if _, err := s.AddEndpoint(ctx, "web-01", Endpoint{Address: "fd00::9", Port: 22}); err != nil {
+		t.Fatalf("AddEndpoint: %v", err)
+	}
+	if _, err := s.db.Exec(`
+		INSERT INTO host_endpoints (host_id, address, port, priority, created_at)
+		SELECT id, 'fd00:0::9', 22, 2, '2026-01-01T00:00:00Z' FROM hosts WHERE name = 'web-01'`); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+	want := []Endpoint{{Address: "10.0.0.11", Port: 22}, {Address: "fd00::9", Port: 22}, {Address: "fd00:0::9", Port: 22}}
+	var verr *ValidationError
+	if _, err := s.MoveEndpoint(ctx, "web-01", Endpoint{Address: "fd00::9", Port: 22}, 0); !errors.As(err, &verr) {
+		t.Fatalf("MoveEndpoint = %v, want ValidationError", err)
+	}
+	if _, err := s.RemoveEndpoint(ctx, "web-01", Endpoint{Address: "fd00:0::9", Port: 22}); !errors.As(err, &verr) {
+		t.Fatalf("RemoveEndpoint = %v, want ValidationError", err)
+	}
+	if _, err := s.AddEndpoint(ctx, "web-01", Endpoint{Address: "10.0.0.12", Port: 22}); !errors.As(err, &verr) {
+		t.Fatalf("AddEndpoint = %v, want ValidationError", err)
+	}
+	h, err := s.Get(ctx, "web-01")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !reflect.DeepEqual(h.Endpoints, want) {
+		t.Fatalf("endpoints = %v, want %v", h.Endpoints, want)
+	}
+	// The settings form (Update) repairs the list.
+	h.Endpoints = want[:2]
+	if _, err := s.Update(ctx, h); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	wantEndpoints(t, s, ctx, want[:2])
+}
+
+// TestUpdateWithEndpointChangeReturnsBeforeAndAfter checks that the
+// endpoint list before an update is the one the update replaced.
+func TestUpdateWithEndpointChangeReturnsBeforeAndAfter(t *testing.T) {
+	s, ctx := endpointHost(t)
+	h, err := s.Get(ctx, "web-01")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	h.Endpoints = []Endpoint{{Address: "fd00::9", Port: 0}, {Address: "10.0.0.11", Port: 22}}
+	got, ch, err := s.UpdateWithEndpointChange(ctx, h)
+	if err != nil {
+		t.Fatalf("UpdateWithEndpointChange: %v", err)
+	}
+	if want := []Endpoint{{Address: "10.0.0.11", Port: 22}}; !reflect.DeepEqual(ch.Before, want) {
+		t.Errorf("Before = %v, want %v", ch.Before, want)
+	}
+	if !reflect.DeepEqual(ch.After, got.Endpoints) {
+		t.Errorf("After = %v, stored %v", ch.After, got.Endpoints)
+	}
+	unknown := Host{ID: "nope", Environment: EnvDev, Criticality: CriticalityLow,
+		Endpoints: []Endpoint{{Address: "10.0.0.1"}}}
+	if _, ch, err := s.UpdateWithEndpointChange(ctx, unknown); !errors.Is(err, ErrHostNotFound) || ch.After != nil {
+		t.Errorf("unknown host = %v (after %v), want ErrHostNotFound and no change", err, ch.After)
+	}
+}

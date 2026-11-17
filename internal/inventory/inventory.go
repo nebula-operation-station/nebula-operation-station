@@ -22,7 +22,6 @@ import (
 	"net"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -224,13 +223,11 @@ func endpointProblems(eps []Endpoint) []string {
 		case e.Port < 1 || e.Port > 65535:
 			add("endpoint %d: port %d out of range", i, e.Port)
 		}
-		// Duplicates are compared by lowercased address and effective
-		// port (0 means the default SSH port 22).
-		port := e.Port
-		if port == 0 {
-			port = defaultSSHPort
-		}
-		key := strings.ToLower(e.Address) + ":" + strconv.Itoa(port)
+		// Duplicates are compared by EndpointKey, the same key the
+		// endpoint edits use: the normalized address (fd00::9 and
+		// fd00:0::9 are one endpoint) and the effective port (0 means
+		// the default SSH port 22).
+		key := EndpointKey(e)
 		if first, dup := seenAddr[key]; dup {
 			add("endpoint %d: %q is duplicated (first at %d)", i, e.Address, first)
 		} else {
@@ -481,14 +478,42 @@ func (s *Store) List(ctx context.Context) ([]Host, error) {
 // groups, tags and credential reference. The host ID itself cannot be
 // changed. Unknown hosts are rejected with ErrHostNotFound.
 func (s *Store) Update(ctx context.Context, h Host) (Host, error) {
+	got, _, err := s.UpdateWithEndpointChange(ctx, h)
+	return got, err
+}
+
+// UpdateWithEndpointChange is Update that also returns the endpoint list
+// of the host before and after the update, both in priority order. The
+// "before" list is read inside the update transaction, so it is the
+// state the update replaced, for the audit record. When the update is
+// committed but the host cannot be read back, the change is returned
+// together with the error (After is non-nil only for a committed update).
+func (s *Store) UpdateWithEndpointChange(ctx context.Context, h Host) (Host, EndpointChange, error) {
 	h = normalize(h)
 	if err := Validate(h); err != nil {
-		return Host{}, err
+		return Host{}, EndpointChange{}, err
 	}
+	before, err := s.update(ctx, h)
+	if err != nil {
+		return Host{}, EndpointChange{}, err
+	}
+	// After is the list this update wrote, not a later read.
+	ch := EndpointChange{Before: before, After: append([]Endpoint(nil), h.Endpoints...)}
+	got, err := s.Get(ctx, h.ID)
+	if err != nil {
+		// The update is committed; the change is returned for the
+		// audit record even though the host cannot be read back.
+		return Host{}, ch, fmt.Errorf("inventory: update host %s: read back: %w", h.ID, err)
+	}
+	return got, ch, nil
+}
 
+// update stores the validated host h in one transaction and returns the
+// endpoints it had before, in priority order.
+func (s *Store) update(ctx context.Context, h Host) ([]Endpoint, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return Host{}, fmt.Errorf("inventory: update host %s: begin: %w", h.ID, err)
+		return nil, fmt.Errorf("inventory: update host %s: begin: %w", h.ID, err)
 	}
 	defer tx.Rollback()
 
@@ -498,19 +523,23 @@ func (s *Store) Update(ctx context.Context, h Host) (Host, error) {
 		WHERE name = ?`,
 		h.CredentialRef, h.DisplayName, string(h.Environment), string(h.Criticality), ts, h.ID)
 	if err != nil {
-		return Host{}, fmt.Errorf("inventory: update host %s: %w", h.ID, err)
+		return nil, fmt.Errorf("inventory: update host %s: %w", h.ID, err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return Host{}, fmt.Errorf("inventory: update host %s: %w", h.ID, err)
+		return nil, fmt.Errorf("inventory: update host %s: %w", h.ID, err)
 	}
 	if n == 0 {
-		return Host{}, fmt.Errorf("inventory: update host %s: %w", h.ID, ErrHostNotFound)
+		return nil, fmt.Errorf("inventory: update host %s: %w", h.ID, ErrHostNotFound)
 	}
 
 	var hid int64
 	if err := tx.QueryRowContext(ctx, `SELECT id FROM hosts WHERE name = ?`, h.ID).Scan(&hid); err != nil {
-		return Host{}, fmt.Errorf("inventory: update host %s: %w", h.ID, err)
+		return nil, fmt.Errorf("inventory: update host %s: %w", h.ID, err)
+	}
+	before, err := loadEndpoints(ctx, tx, hid)
+	if err != nil {
+		return nil, fmt.Errorf("inventory: update host %s: %w", h.ID, err)
 	}
 	for _, q := range []string{
 		`DELETE FROM host_endpoints WHERE host_id = ?`,
@@ -518,16 +547,39 @@ func (s *Store) Update(ctx context.Context, h Host) (Host, error) {
 		`DELETE FROM host_tag_kv WHERE host_id = ?`,
 	} {
 		if _, err := tx.ExecContext(ctx, q, hid); err != nil {
-			return Host{}, fmt.Errorf("inventory: update host %s: %w", h.ID, err)
+			return nil, fmt.Errorf("inventory: update host %s: %w", h.ID, err)
 		}
 	}
 	if err := storeRelations(ctx, tx, hid, h, ts); err != nil {
-		return Host{}, fmt.Errorf("inventory: update host %s: %w", h.ID, err)
+		return nil, fmt.Errorf("inventory: update host %s: %w", h.ID, err)
 	}
 	if err := tx.Commit(); err != nil {
-		return Host{}, fmt.Errorf("inventory: update host %s: commit: %w", h.ID, err)
+		return nil, fmt.Errorf("inventory: update host %s: commit: %w", h.ID, err)
 	}
-	return s.Get(ctx, h.ID)
+	return before, nil
+}
+
+// loadEndpoints returns the stored endpoints of the host row hid in
+// priority order.
+func loadEndpoints(ctx context.Context, tx *sql.Tx, hid int64) ([]Endpoint, error) {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT address, port FROM host_endpoints WHERE host_id = ? ORDER BY priority, id`, hid)
+	if err != nil {
+		return nil, fmt.Errorf("load endpoints: %w", err)
+	}
+	defer rows.Close()
+	var eps []Endpoint
+	for rows.Next() {
+		var e Endpoint
+		if err := rows.Scan(&e.Address, &e.Port); err != nil {
+			return nil, fmt.Errorf("load endpoints: %w", err)
+		}
+		eps = append(eps, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("load endpoints: %w", err)
+	}
+	return eps, nil
 }
 
 // Delete removes the host with the given ID and all of its endpoints,
