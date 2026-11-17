@@ -65,7 +65,7 @@ before a release.
 
 `make fuzz` (`Makefile`, target `fuzz`) runs 13 fuzz functions for 20
 seconds each. It is not run by CI. The table lists every `Fuzz*` function
-in the repository (167, previously: 141, previously: 118, previously: 111, from `grep -rn '^func Fuzz' --include=*_test.go .`)
+in the repository (168, previously: 141, previously: 118, previously: 111, from `grep -rn '^func Fuzz' --include=*_test.go .`)
 with its package and whether `make fuzz` runs it. Functions marked "no"
 are not run by `make fuzz`; their seed corpora still run in `make test`
 like every other test.
@@ -118,7 +118,7 @@ like every other test.
 | `internal/pveapi` | `FuzzListQemu`, `FuzzListLxc`, `FuzzListNodes`, `FuzzGetQemuConfig`, `FuzzGetLxcConfig`, `FuzzClusterStatus`, `FuzzHAStatus`, `FuzzListSnapshots`, `FuzzReadBackups`, `FuzzAgentOSInfo`, `FuzzAgentNetworkInterfaces`, `FuzzAgentFSInfo`, `FuzzNodeTasks`, `FuzzListStorages`, `FuzzNodeStatus`, `FuzzGuestStatus`, `FuzzNodeRRDData`, `FuzzGuestRRDData` | no |
 | `internal/pvecollect` | `FuzzDecodeGuestNet`, `FuzzBoundedReason` | no |
 | `internal/pvecontract` | `FuzzDecodeRemote`, `FuzzDecodeObservation`, `FuzzDecodeLiveSamples`, `FuzzDecodeLiveWant` | no |
-| `internal/registrymeta` | `FuzzLatestStable`, `FuzzParseChallengeParams`, `FuzzParseRealm`, `FuzzParseLinkNext`, `FuzzParseRef`, `FuzzRegistryHostOf` | no |
+| `internal/registrymeta` | `FuzzLatestStable`, `FuzzParseChallengeParams`, `FuzzParseRealm`, `FuzzParseLinkNext`, `FuzzParseRef`, `FuzzRegistryHostOf`, `FuzzCompareTags` | no |
 | `internal/release` | `FuzzParseInstalledFiles`, `FuzzVerifyInstalledFiles`, `FuzzReadUstar`, `FuzzParseManifest` | no |
 | `internal/reputation` | `FuzzLookupMatchesLinearOracle`, `FuzzValidateNeverKeepsSpecialOverlap` | no |
 | `internal/scanner` | `FuzzScan` | yes |
@@ -145,7 +145,7 @@ package is a protected path.
 Before a release, run each `make fuzz` target for at least an hour
 (`go test -run='^$' -fuzz=NAME -fuzztime=1h ./PKG`).
 
-**Open:** 154 fuzz functions (the "no" rows; previously: 128, before that: 105, before that: 98) are not run by `make fuzz`,
+**Open:** 155 fuzz functions (the "no" rows; previously: 128, before that: 105, before that: 98) are not run by `make fuzz`,
 and CI runs no fuzz target at all, although the M10-3 plan in
 `docs/implementation/m10-plan.md` expects CI to run them briefly. Proposal
 for a separate ticket on the protected `Makefile` (not done here): add the
