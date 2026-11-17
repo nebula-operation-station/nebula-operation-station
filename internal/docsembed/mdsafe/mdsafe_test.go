@@ -231,3 +231,39 @@ func TestRelativeResolverOutputIsChecked(t *testing.T) {
 		}
 	}
 }
+
+// TestLocalFragmentsMatchInertAllowlist checks that every local link the
+// renderer emits passes assertInert. Upper-case fragments fold to the
+// lower-case heading id; fragments with non-ASCII letters render text only.
+func TestLocalFragmentsMatchInertAllowlist(t *testing.T) {
+	for _, tc := range []struct{ src, want string }{
+		{"[x](hosts.md#Add)", `<a href="/help/hosts#add">x</a>`},
+		{"[x](hosts.md#add-1)", `<a href="/help/hosts#add-1">x</a>`},
+		{"[x](hosts.md#A_b-C)", `<a href="/help/hosts#a_b-c">x</a>`},
+		{"[x](hosts.md#übersicht)", "x"},
+	} {
+		out := string(render(t, tc.src).HTML)
+		assertInert(t, tc.src, out)
+		if !strings.Contains(out, tc.want) {
+			t.Errorf("Render(%q) = %s, want it to contain %q", tc.src, out, tc.want)
+		}
+	}
+	out := string(render(t, "[x](hosts.md#übersicht)").HTML)
+	if strings.Contains(out, "<a") {
+		t.Errorf("non-ASCII fragment made a link: %s", out)
+	}
+}
+
+// TestResolverFragmentOutsideIDFormIsRejected checks that a resolver
+// result whose fragment is not in heading-id form never becomes a link.
+func TestResolverFragmentOutsideIDFormIsRejected(t *testing.T) {
+	for _, bad := range []string{"/help/hosts#Add", "/help/hosts#übersicht", "/help/hosts#a.b"} {
+		res, err := mdsafe.Render([]byte("[x](a.md)"), mdsafe.Options{Relative: func(string, string) (string, bool) { return bad, true }})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(res.HTML), "<a") {
+			t.Errorf("resolver result %q produced a link: %s", bad, res.HTML)
+		}
+	}
+}

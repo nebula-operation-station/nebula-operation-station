@@ -72,7 +72,7 @@ Current day-to-day status, work in progress and open maintainer decisions: [docs
 | Traffic map (communication map, observed endpoints, software symbols) | proposed; libraries, store, catalog, icon pipeline and renderer merged; API, page and connections tab in progress ([ADR 0009](docs/adr/0009-traffic-map.md)) |
 | Help assistant (local search, command checks) | accepted; in progress ([ADR 0014](docs/adr/0014-help-assistant.md)) |
 | Integrity monitoring (file integrity, sshd configuration baselines) | accepted; libraries in progress ([ADR 0015](docs/adr/0015-integrity-monitoring.md)) |
-| Ops agent | proposed (ADR 0016, PR #637) |
+| Ops agent (notes, digest, notifications; no execution) | accepted; implementation in progress ([ADR 0016](docs/adr/0016-ops-agent.md)) |
 
 ## Repository layout
 

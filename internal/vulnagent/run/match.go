@@ -204,10 +204,9 @@ func (r *Runner) assess(ctx context.Context, m *matched, rep *Report) {
 func (r *Runner) newAssessor(eff LLMConfig, m *matched) (*agent.Agent, error) {
 	newLLM := r.cfg.NewLLM
 	if newLLM == nil {
-		newLLM = func(c agent.ClientConfig) (agent.LLM, error) { return agent.NewHTTPClient(c) }
+		newLLM = agent.NewLLM
 	}
-	llm, err := newLLM(agent.ClientConfig{BaseURL: eff.BaseURL, Model: eff.Model, APIKeyFile: eff.APIKeyFile,
-		AllowPlainHTTP: eff.AllowPlainHTTP, Timeout: eff.Limits.LLMCallTimeout, Transport: llmTransport(r.llmDial)})
+	llm, err := newLLM(r.llmOptions(eff))
 	if err != nil {
 		return nil, fmt.Errorf("llm client: %w", err)
 	}
