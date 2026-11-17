@@ -182,8 +182,11 @@ func (s *Store) Put(ctx context.Context, r Resolver, d Draft, snapshot string) (
 	if today >= MaxNotesPerDay {
 		return Note{}, false, fmt.Errorf("day %s: %w", dayStart.Format(time.DateOnly), ErrDailyLimit)
 	}
+	// Supersession is scoped like idempotency and CurrentDigest: per kind and
+	// ref, so a summary or answer never supersedes a fix note.
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE notes SET superseded = 1 WHERE ref = ? AND superseded = 0`, d.Ref); err != nil {
+		`UPDATE notes SET superseded = 1 WHERE kind = ? AND ref = ? AND superseded = 0`,
+		string(d.Kind), d.Ref); err != nil {
 		return Note{}, false, fmt.Errorf("opsnotes: supersede: %w", err)
 	}
 	res, err := tx.ExecContext(ctx,

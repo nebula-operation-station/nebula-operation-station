@@ -171,6 +171,50 @@ func TestNewerNoteSupersedesOlderOfSameRef(t *testing.T) {
 	}
 }
 
+func TestSummaryWithCollidingRefDoesNotSupersedeFixNote(t *testing.T) {
+	s := openTestStore(t, &fakeClock{t: baseTime})
+	ctx := context.Background()
+	r := newFakeResolver()
+	fix, _, err := s.Put(ctx, r, validFix(), testSnapshot)
+	if err != nil {
+		t.Fatalf("Put fix: %v", err)
+	}
+	// A summary whose ref equals the fix group's ref: supersession is per
+	// kind, so the fix note must stay current.
+	sum := Draft{Kind: KindSummary, Ref: validFix().Ref, Digest: "d1", Body: Body{Text: "Tag."}}
+	if _, _, err := s.Put(ctx, r, sum, testSnapshot); err != nil {
+		t.Fatalf("Put summary: %v", err)
+	}
+	got, err := s.Get(ctx, fix.ID)
+	if err != nil {
+		t.Fatalf("Get fix: %v", err)
+	}
+	if got.Superseded {
+		t.Errorf("fix note superseded by a summary with a colliding ref")
+	}
+}
+
+func TestAnswerWithCollidingRefDoesNotSupersedeSummary(t *testing.T) {
+	s := openTestStore(t, &fakeClock{t: baseTime})
+	ctx := context.Background()
+	r := newFakeResolver()
+	sum, _, err := s.Put(ctx, r, validText(KindSummary), testSnapshot)
+	if err != nil {
+		t.Fatalf("Put summary: %v", err)
+	}
+	ans := Draft{Kind: KindAnswer, Ref: validText(KindSummary).Ref, Digest: validText(KindSummary).Digest, Body: Body{Text: "Antwort."}}
+	if _, _, err := s.Put(ctx, r, ans, testSnapshot); err != nil {
+		t.Fatalf("Put answer: %v", err)
+	}
+	got, err := s.Get(ctx, sum.ID)
+	if err != nil {
+		t.Fatalf("Get summary: %v", err)
+	}
+	if got.Superseded {
+		t.Errorf("summary superseded by an answer with a colliding ref")
+	}
+}
+
 func TestPutRefusesStaleDigestAfterChange(t *testing.T) {
 	s := openTestStore(t, &fakeClock{t: baseTime})
 	r := newFakeResolver()
