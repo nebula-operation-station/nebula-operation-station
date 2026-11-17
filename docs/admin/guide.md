@@ -1305,6 +1305,29 @@ as LOW (section 8.1) with the host recorded at a criticality (`nebula host
 pin --criticality`). `package.refresh`, `docker.logs` and secret-bearing
 actions are excluded even when rated LOW.
 
+When the executor refuses a proposal because something is not LOW, its
+refusal (`schedule_grant_invalid`) now names every blocking host, not just
+the first one. For a read lease that is every blocking host of the first
+blocked action. For a legacy schedule grant it is every blocking (action,
+host) pair. Up to 50 are listed, then "… and N more". Each entry has a
+hint for its reason:
+
+| Reason in the refusal | What to do |
+|---|---|
+| no criticality record for this host and key | `nebula host criticality HOST LEVEL`, or leave the host out of the scope |
+| the host is CRITICAL | leave the host out of the scope (read leases never cover CRITICAL hosts) |
+| artifact not trusted for this version | `nebula artifact trust-builtins` for built-ins, else `nebula artifact trust --action ID --version X.Y.Z --risk LOW FILE` (sections 8.1, 8.2) |
+| trusted as MEDIUM/HIGH | leave the action out; only LOW actions can be leased |
+| raised by the safety scanner | review the artifact's scanner findings |
+| cannot be granted on any host | container mutations run only as approved batch members |
+
+The rule itself is unchanged: one pair that is not LOW refuses the
+whole lease. The executor's audit log has one `rejected` entry per
+refused pair (up to 50) with the full reason; read the list there. The
+web form still shows only "the executor did not accept the read grant
+proposal". It does not yet list the blocking hosts before submitting or
+offer to leave them out.
+
 Budgets. Each host may run the lease at most 24 times in a rolling hour by
 default, at most 240; the allowance is shared across actions and both
 triggers, with a 15-minute per-action floor. Failed or disconnected
