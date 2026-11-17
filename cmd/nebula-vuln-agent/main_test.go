@@ -209,7 +209,7 @@ func TestVulnAgentImportsOnlyAllowlist(t *testing.T) {
 	}
 	const mod = "github.com/nebula-operation-station/nebula-operation-station/"
 	allowedInternal := []string{"internal/vulnagent/", "internal/vulnfeed", "internal/vulnmatch", "internal/vulnassess",
-		"internal/vulnver", "internal/vulnfinding"}
+		"internal/vulnver", "internal/vulnfinding", "internal/llmclient/"}
 	importers := map[string][]string{}
 	var pkgs []string
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
