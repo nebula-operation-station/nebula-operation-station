@@ -312,6 +312,16 @@ func splitSimple(s string) ([]simpleCmd, error) {
 			wordDyn = true
 			word = append(word, c)
 			inWord = true
+		case '~':
+			// An unquoted tilde at the start of a word is expanded to a home
+			// directory: `~sys` is the home of user sys, /dev on Debian and
+			// Ubuntu. Quoted tildes never reach this case. The word is dynamic,
+			// so it is indeterminate.
+			if len(word) == 0 {
+				wordDyn = true
+			}
+			word = append(word, c)
+			inWord = true
 		default:
 			word = append(word, c)
 			inWord = true
