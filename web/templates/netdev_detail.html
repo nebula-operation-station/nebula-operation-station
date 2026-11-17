@@ -61,6 +61,35 @@
   {{end}}
   {{end}}
 
+  {{with $d.Vulns}}
+  <h3 id="vendor-advisories">Vendor advisories</h3>
+  <p class="hint">Observed by {{.Observer}}. Advisory only: nothing here changes a device.</p>
+  {{if .Unavailable}}
+  <p class="status status--error vuln-unavailable">Vulnerability data unavailable. Nothing here means "no findings".</p>
+  {{else}}
+  <p class="status{{if .CoverageWarn}} status--warning{{end}} vuln-coverage">Coverage: {{.Coverage}}</p>
+  {{if .Truncated}}<p class="status status--warning vuln-truncated">More findings exist than NOS reads for one page, so this list is incomplete.</p>{{end}}
+  {{if .Findings}}
+  <div class="table-wrap">
+  <table class="inventory vuln-findings" aria-label="Vendor advisory findings">
+    <thead><tr><th>Vulnerability</th><th>Fix</th><th>Tier</th><th>State</th></tr></thead>
+    <tbody>
+      {{range .Findings}}<tr class="vuln-finding">
+        <td class="mono">{{if .VulnURL}}<a href="{{.VulnURL}}">{{.VulnID}}</a>{{else}}{{.VulnID}}{{end}}</td>
+        <td>{{with .Fix}}<span class="vuln-fix">{{.Text}}{{if .Detail}} <span class="hint mono">{{.Detail}}</span>{{end}}{{if .URL}} · <a class="vuln-fix-link" href="{{.URL}}"{{if .External}} rel="noopener noreferrer external"{{end}}>{{.LinkText}}</a>{{end}}</span>{{else}}none{{end}}</td>
+        <td>{{.Tier}}</td>
+        <td>{{.State}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else}}
+  <p class="hint">No finding is stored for this device. Read the coverage line above: a clean reading holds only when coverage is assessed.</p>
+  {{end}}
+  {{end}}
+  {{end}}
+
   <h3>Datasets</h3>
   <table class="inventory">
     <thead><tr><th>Dataset</th><th>State</th><th>Observed</th><th>Rows</th></tr></thead>

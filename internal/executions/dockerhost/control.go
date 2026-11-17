@@ -11,7 +11,11 @@ import (
 
 // Control is a parsed docker.start/stop/restart result.
 type Control struct {
-	Phase     string // done or precheck
+	Phase string // done or precheck
+	// Code is the fixed code of a precheck refusal that the server acts on:
+	// CodeContainerChanged when the bound container or image no longer
+	// matches the approved binding (G5b). Empty for other refusals.
+	Code      string
 	Reason    string
 	Verb      string
 	Container string
@@ -25,11 +29,17 @@ type Control struct {
 // ErrControlFormat means the result is not a docker control result.
 var ErrControlFormat = errors.New("dockerhost: not a docker.start/stop/restart result")
 
+// CodeContainerChanged is the precheck code of a bound control (G5b) that
+// stopped because the container ID or image ID differs from the approved
+// binding, or the container is gone. The bound script sends the same string.
+const CodeContainerChanged = "container_changed"
+
 // ParseControl reads a docker.start, docker.stop or docker.restart result.
 func ParseControl(result []byte) (Control, error) {
 	var doc struct {
 		Format    string `json:"format"`
 		Phase     string `json:"phase"`
+		Code      string `json:"code"`
 		Reason    string `json:"reason"`
 		Verb      string `json:"verb"`
 		Container string `json:"container"`
@@ -44,6 +54,9 @@ func ParseControl(result []byte) (Control, error) {
 	c := Control{Phase: doc.Phase}
 	if doc.Phase == "precheck" {
 		c.Reason = text(doc.Reason, 300)
+		if doc.Code == CodeContainerChanged {
+			c.Code = doc.Code
+		}
 		return c, nil
 	}
 	switch doc.Verb {

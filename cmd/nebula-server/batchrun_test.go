@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -18,6 +19,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
@@ -169,6 +171,69 @@ func TestBatchRunnerFailureStops(t *testing.T) {
 // nothing ran (failed, "not executed"); a lost answer is unknown (never
 // redispatched); a claimed but revoked member is not executed; an
 // unreachable host is a failure counted as unreachable.
+// A bound docker.start, stop or restart member is handed over only as its
+// 1.1.0 script, and only with parameters that name the container the member
+// is bound to. A member at 1.0.0 (the general action) is not handed over.
+func TestBatchRunnerBoundMemberInputs(t *testing.T) {
+	ctx := context.Background()
+	r := &batchRunner{hosts: wiringHosts{}, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	cid := strings.Repeat("c", 64)
+	img := "sha256:" + strings.Repeat("a", 64)
+	bound := func(id, image string) string {
+		return `{"container_id":"` + id + `","image_id":"` + image + `"}`
+	}
+	member := func(t *testing.T, version, params, containerID string) executions.BatchMemberView {
+		t.Helper()
+		ph, err := canonical.HashParameters([]byte(params))
+		if err != nil {
+			t.Fatal(err)
+		}
+		a, ok := actions.Lookup("docker.restart")
+		if version == "1.1.0" {
+			a, ok = actions.LookupBatchMember("docker.restart", version)
+		}
+		if !ok {
+			t.Fatal("no docker.restart")
+		}
+		return executions.BatchMemberView{ActionID: "docker.restart", ModuleVersion: version, ArtifactSHA256: a.SHA256(),
+			ParametersHash: ph, Params: params, HostID: wiringHost, ContainerID: containerID}
+	}
+	want, _ := actions.LookupBatchMember("docker.restart", "1.1.0")
+
+	t.Run("bound 1.1.0 member is handed over", func(t *testing.T) {
+		m := member(t, "1.1.0", bound(cid, img), cid)
+		script, _, eps, err := r.memberInputs(ctx, m)
+		if err != nil || string(script) != string(want.Script) || len(eps) == 0 {
+			t.Fatalf("endpoints %v, err %v", eps, err)
+		}
+	})
+	t.Run("1.0.0 is never handed over for a batch member", func(t *testing.T) {
+		m := member(t, "1.0.0", `{"container":"`+cid+`"}`, cid)
+		if _, _, _, err := r.memberInputs(ctx, m); !errors.Is(err, errBatchVersionMissing) {
+			t.Fatalf("1.0.0 batch member: %v", err)
+		}
+	})
+	t.Run("parameters naming another container are refused", func(t *testing.T) {
+		m := member(t, "1.1.0", bound(strings.Repeat("d", 64), img), cid)
+		if _, _, _, err := r.memberInputs(ctx, m); !errors.Is(err, errBatchParamsChanged) {
+			t.Fatalf("other container: %v", err)
+		}
+	})
+	t.Run("parameters that do not hash to the approved hash are refused", func(t *testing.T) {
+		m := member(t, "1.1.0", bound(cid, img), cid)
+		m.Params = bound(cid, "sha256:"+strings.Repeat("b", 64))
+		if _, _, _, err := r.memberInputs(ctx, m); !errors.Is(err, errBatchParamsChanged) {
+			t.Fatalf("changed params: %v", err)
+		}
+	})
+	t.Run("a member without a container is refused", func(t *testing.T) {
+		m := member(t, "1.1.0", bound(cid, img), "")
+		if _, _, _, err := r.memberInputs(ctx, m); !errors.Is(err, errBatchParamsChanged) {
+			t.Fatalf("no container: %v", err)
+		}
+	})
+}
+
 func TestBatchRunnerRecordsExecutorAnswers(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -277,7 +342,7 @@ func TestBatchRunnerRefusesChangedArtifact(t *testing.T) {
 // Every reason the server can give for a member it cannot hand over is
 // one the executor accepts (printable, bounded).
 func TestBatchNotExecutedReasonsAreValid(t *testing.T) {
-	for _, err := range []error{errBatchActionMissing, errBatchVersionMissing, errBatchScriptChanged, errBatchHostMissing,
+	for _, err := range []error{errBatchActionMissing, errBatchVersionMissing, errBatchScriptChanged, errBatchParamsChanged, errBatchHostMissing,
 		errBatchHostNoEndpoint, errBatchTargetStaysBusy, errBatchHoldStoreDown} {
 		r := err.Error()
 		if r == "" || len(r) > 256 || strings.ContainsFunc(r, func(c rune) bool { return c < 0x20 || c == 0x7f }) {

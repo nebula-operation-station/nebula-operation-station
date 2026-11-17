@@ -31,7 +31,7 @@ func FuzzMatchVersions(f *testing.F) {
 			t.Fatal(err)
 		}
 		if err := db.AddCSAF(FeedPaloAltoCSAF, vulnfeed.CSAFAdvisory{TrackingID: "PAN-SA-2024-1", Version: "1",
-			Products:        []vulnfeed.CSAFProduct{csafProduct("a", "vendor:paloalto:panos", fw, "10.2")},
+			Products:        []vulnfeed.CSAFProduct{devProduct("a", "vendor:paloalto:panos", "PA-440", fw, "10.2")},
 			Vulnerabilities: []vulnfeed.CSAFVulnerability{{CVE: "CVE-2024-1002", Affected: []string{"a"}}}}); err != nil {
 			t.Fatal(err)
 		}
