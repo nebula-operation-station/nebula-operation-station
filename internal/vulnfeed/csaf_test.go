@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -344,12 +345,12 @@ func TestParseCSAFAdvisoryCiscoProductTree(t *testing.T) {
 		t.Fatalf("advisory = %+v", adv)
 	}
 	want := map[string]CSAFProduct{
-		"CSAFPID-0001": {Vendor: "Cisco", Product: "Cisco IOS", Version: "15.2(4)M3", Train: "15.2M", Ecosystem: "vendor:cisco:ios"},
-		"CSAFPID-0002": {Vendor: "Cisco", Product: "Cisco IOS", Version: "15.2(4)M11", Train: "15.2M", Ecosystem: "vendor:cisco:ios"},
-		"CSAFPID-0003": {Vendor: "Cisco", Product: "Cisco IOS XE Software", Version: "17.3.1", Train: "17.3", Ecosystem: "vendor:cisco:ios-xe"},
-		"CSAFPID-0004": {Vendor: "Cisco", Product: "Cisco IOS XE Software", Version: "17.3.8", Train: "17.3", Ecosystem: "vendor:cisco:ios-xe"},
-		"CSAFPID-0005": {Vendor: "Cisco", Product: "Cisco Business 350 Series Managed Switches", Version: "3.2.0.84", Train: "3.2", Ecosystem: "vendor:cisco:cbs"},
-		"CSAFPID-0006": {Vendor: "Cisco", Product: "Cisco Business 350 Series Managed Switches", Version: "3.3.0.16", Train: "3.3", Ecosystem: "vendor:cisco:cbs"},
+		"CSAFPID-0001": {Vendor: "Cisco", Product: "Cisco IOS", Family: "Cisco IOS", OS: "Cisco IOS", Version: "15.2(4)M3", Train: "15.2M", Ecosystem: "vendor:cisco:ios"},
+		"CSAFPID-0002": {Vendor: "Cisco", Product: "Cisco IOS", Family: "Cisco IOS", OS: "Cisco IOS", Version: "15.2(4)M11", Train: "15.2M", Ecosystem: "vendor:cisco:ios"},
+		"CSAFPID-0003": {Vendor: "Cisco", Product: "Cisco IOS XE Software", Family: "Cisco IOS XE Software", OS: "Cisco IOS XE Software", Version: "17.3.1", Train: "17.3", Ecosystem: "vendor:cisco:ios-xe"},
+		"CSAFPID-0004": {Vendor: "Cisco", Product: "Cisco IOS XE Software", Family: "Cisco IOS XE Software", OS: "Cisco IOS XE Software", Version: "17.3.8", Train: "17.3", Ecosystem: "vendor:cisco:ios-xe"},
+		"CSAFPID-0005": {Vendor: "Cisco", Product: "Cisco Business 350 Series Managed Switches", Family: "Cisco Business 350 Series Managed Switches", OS: "Cisco Business 350 Series Managed Switches", Models: []string{"Cisco Business 350 Series Managed Switches"}, Version: "3.2.0.84", Train: "3.2", Ecosystem: "vendor:cisco:cbs"},
+		"CSAFPID-0006": {Vendor: "Cisco", Product: "Cisco Business 350 Series Managed Switches", Family: "Cisco Business 350 Series Managed Switches", OS: "Cisco Business 350 Series Managed Switches", Models: []string{"Cisco Business 350 Series Managed Switches"}, Version: "3.3.0.16", Train: "3.3", Ecosystem: "vendor:cisco:cbs"},
 	}
 	checkProducts(t, adv, want)
 	v := adv.Vulnerabilities[0]
@@ -368,10 +369,10 @@ func TestParseCSAFAdvisoryPanOSRanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]CSAFProduct{
-		"CSAFPID-1001": {Vendor: "Palo Alto Networks", Product: "PAN-OS", VersionRange: "vers:generic/>=10.2.0|<10.2.9", Train: "10.2", Ecosystem: "vendor:paloalto:panos"},
-		"CSAFPID-1002": {Vendor: "Palo Alto Networks", Product: "PAN-OS", Version: "10.2.9", Train: "10.2", Ecosystem: "vendor:paloalto:panos"},
-		"CSAFPID-1003": {Vendor: "Palo Alto Networks", Product: "PAN-OS", VersionRange: "vers:generic/>=11.1.0|<11.1.3", Train: "11.1", Ecosystem: "vendor:paloalto:panos"},
-		"CSAFPID-1004": {Vendor: "Palo Alto Networks", Product: "PAN-OS", Version: "11.1.3-h4", Train: "11.1", Ecosystem: "vendor:paloalto:panos"},
+		"CSAFPID-1001": {Vendor: "Palo Alto Networks", Product: "PAN-OS", OS: "PAN-OS", VersionRange: "vers:generic/>=10.2.0|<10.2.9", Train: "10.2", Ecosystem: "vendor:paloalto:panos"},
+		"CSAFPID-1002": {Vendor: "Palo Alto Networks", Product: "PAN-OS", OS: "PAN-OS", Version: "10.2.9", Train: "10.2", Ecosystem: "vendor:paloalto:panos"},
+		"CSAFPID-1003": {Vendor: "Palo Alto Networks", Product: "PAN-OS", OS: "PAN-OS", VersionRange: "vers:generic/>=11.1.0|<11.1.3", Train: "11.1", Ecosystem: "vendor:paloalto:panos"},
+		"CSAFPID-1004": {Vendor: "Palo Alto Networks", Product: "PAN-OS", OS: "PAN-OS", Version: "11.1.3-h4", Train: "11.1", Ecosystem: "vendor:paloalto:panos"},
 	}
 	checkProducts(t, adv, want)
 }
@@ -400,7 +401,7 @@ func checkProducts(t *testing.T, adv CSAFAdvisory, want map[string]CSAFProduct) 
 			t.Fatalf("unexpected product %+v", p)
 		}
 		w.ProductID, w.Name = p.ProductID, p.Name
-		if p != w {
+		if !reflect.DeepEqual(p, w) {
 			t.Fatalf("product %s = %+v, want %+v", p.ProductID, p, w)
 		}
 	}

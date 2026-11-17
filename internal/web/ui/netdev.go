@@ -322,6 +322,10 @@ type netdevDetailData struct {
 	// AssetLink is the device ↔ asset link section, nil without a link
 	// store.
 	AssetLink *netdevAssetLinkView
+
+	// Vulns is the vendor-advisory findings section, nil when the
+	// vulnerability pages are off.
+	Vulns *netdevVulnView
 }
 
 // netdevReads lists the reads of a family in display order.
@@ -651,6 +655,7 @@ func (p *NetDevPages) handleDetail(w http.ResponseWriter, r *http.Request) {
 		Link:            netdevDeepLink(e, d.Family),
 		Datasets:        p.datasets(ctx, d, now),
 		AssetLink:       p.assetLink(ctx, d),
+		Vulns:           p.deviceVulns(ctx, d.DeviceID),
 	}
 	// rowErr records a failing read: "not read yet" is normal, anything
 	// else is logged and listed as unavailable.
