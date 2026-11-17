@@ -687,7 +687,9 @@ type NetDevCredential struct {
 }
 
 // SetCredential stores the first read credential of a live device as
-// vault version 1. An existing entry is never adopted or overwritten.
+// vault version 1 and revokes every grant of the device, so no lease
+// approved before the credential existed becomes usable. An existing
+// entry is never adopted or overwritten.
 func (a *NetDevAdmin) SetCredential(ctx context.Context, in NetDevCredential) (executordb.NetDevice, int64, error) {
 	in.ExpectedVersion = 0
 	return a.putCredential(ctx, in, "credential_set")
@@ -736,10 +738,16 @@ func (a *NetDevAdmin) putCredential(ctx context.Context, in NetDevCredential, ac
 		return executordb.NetDevice{}, 0, fmt.Errorf("store credential of network device %s: %w", dev.ID, err)
 	}
 	a.event(action, dev.ID)
-	if in.ExpectedVersion > 0 {
-		if err := a.revoke(dev.ID, "network device credential rotated"); err != nil {
-			return executordb.NetDevice{}, 0, err
-		}
+	// Every credential write revokes the device's grants, the first set
+	// included: a lease approved for credential version 1 while the device
+	// had no credential yet would otherwise go live with this set (ADR 0010
+	// D1/D2).
+	reason := "network device credential rotated"
+	if in.ExpectedVersion == 0 {
+		reason = "network device credential set"
+	}
+	if err := a.revoke(dev.ID, reason); err != nil {
+		return executordb.NetDevice{}, 0, err
 	}
 	return dev, version, nil
 }
@@ -995,6 +1003,12 @@ func (s *Service) netDevAdmin() *NetDevAdmin {
 	}
 	if s.auth != nil {
 		a.Revoke = func(id, reason string) error {
+			// Device read leases first (ADR 0010 D1/D2: every lease of the
+			// device, including one approved ahead of the registry), then
+			// any provider grant naming the same identifier as before.
+			if _, err := s.auth.RevokeNetDeviceGrants(id, reason); err != nil {
+				return err
+			}
 			_, err := s.auth.RevokeProviderGrants(id, reason)
 			return err
 		}

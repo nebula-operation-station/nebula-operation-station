@@ -231,3 +231,70 @@ func TestNetDeviceGrantCloneIsDeep(t *testing.T) {
 		t.Fatal("cloneReadGrantDoc shares netdevice targets")
 	}
 }
+
+// TestRevokeNetDeviceGrantsRevokesEveryLeaseOfTheDevice: the device
+// lifecycle (rotation, block, re-pin, removal) revokes every active device
+// read lease naming the device, whatever trust generation or credential
+// version the lease binds (ADR 0010 D1/D2), and nothing else: leases of
+// other devices and provider grants stay active.
+func TestRevokeNetDeviceGrantsRevokesEveryLeaseOfTheDevice(t *testing.T) {
+	e, le := newLeaseEnv(t, ModeStandard)
+	now := e.clk.Now()
+	// A lease ahead of the registry (generation and version far ahead)
+	// and one at the current identity, both naming sw-core-1.
+	ahead := cloneNetDeviceDoc(netDeviceDocAt(now, time.Hour))
+	ahead.NetDeviceTargets[0].TrustGeneration = 1 << 40
+	ahead.NetDeviceTargets[0].CredentialVersion = 1 << 50
+	approveReadGrant(t, e, readGrantRaw(t, ahead))
+	current := cloneNetDeviceDoc(netDeviceDocAt(now, time.Hour))
+	current.ID = rgID2
+	current.NetDeviceTargets = current.NetDeviceTargets[:1]
+	approveReadGrant(t, e, readGrantRaw(t, current))
+	other := cloneNetDeviceDoc(netDeviceDocAt(now, time.Hour))
+	other.ID = "00000000-0000-4000-8000-0000000000cc"
+	other.NetDeviceTargets = other.NetDeviceTargets[1:]
+	approveReadGrant(t, e, readGrantRaw(t, other))
+	provider := providerDocAt(now, "00000000-0000-4000-8000-0000000000dd", 3)
+	approveReadGrant(t, e, readGrantRaw(t, provider))
+
+	if n, err := e.auth.RevokeNetDeviceGrants("sw-core-1", "test"); err != nil || n != 2 {
+		t.Fatalf("revoke sw-core-1 = %d, %v; want 2, nil", n, err)
+	}
+	if n, err := e.auth.RevokeNetDeviceGrants("sw-core-1", "test"); err != nil || n != 0 {
+		t.Fatalf("second revoke = %d, %v; want 0, nil", n, err)
+	}
+	if n, err := e.auth.RevokeNetDeviceGrants("sw-absent", "test"); err != nil || n != 0 {
+		t.Fatalf("revoke unknown device = %d, %v; want 0, nil", n, err)
+	}
+	gs, err := le.ReadGrants()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRevoked := map[string]bool{rgID: true, rgID2: true, other.ID: false, provider.ID: false}
+	for _, g := range gs {
+		want, ok := wantRevoked[g.ID]
+		if !ok {
+			t.Fatalf("unexpected grant %s", g.ID)
+		}
+		if got := !g.RevokedAt.IsZero(); got != want {
+			t.Errorf("grant %s revoked = %v, want %v", g.ID, got, want)
+		}
+		delete(wantRevoked, g.ID)
+	}
+	if len(wantRevoked) != 0 {
+		t.Errorf("grants missing from the store: %v", wantRevoked)
+	}
+	// The other device's lease is revoked by its own device only.
+	if n, err := e.auth.RevokeNetDeviceGrants("fw-1", "test"); err != nil || n != 1 {
+		t.Fatalf("revoke fw-1 = %d, %v; want 1, nil", n, err)
+	}
+}
+
+// TestRevokeNetDeviceGrantsWithoutLeaseStore: an authority without a lease
+// store has no device lease to revoke.
+func TestRevokeNetDeviceGrantsWithoutLeaseStore(t *testing.T) {
+	var a Authority
+	if n, err := a.RevokeNetDeviceGrants("sw-core-1", "test"); err != nil || n != 0 {
+		t.Fatalf("revoke = %d, %v; want 0, nil", n, err)
+	}
+}

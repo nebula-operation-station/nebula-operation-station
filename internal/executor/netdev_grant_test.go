@@ -41,6 +41,14 @@ type netDevGrantEnv struct {
 
 func newNetDevGrantEnv(t *testing.T) *netDevGrantEnv {
 	t.Helper()
+	return newNetDevGrantEnvWithCredentials(t, netDevGrantDevice, netDevGrantFW)
+}
+
+// newNetDevGrantEnvWithCredentials is newNetDevGrantEnv, but only the
+// devices in withCredential get their first read credential; the others
+// stay at credential version 0.
+func newNetDevGrantEnvWithCredentials(t *testing.T, withCredential ...string) *netDevGrantEnv {
+	t.Helper()
 	e := newReconcileEnv(t)
 	v, err := webauthnverify.New(webauthnverify.Config{RPID: "reconcile.test", Origins: []string{"https://reconcile.test"}, Counters: e.db}, nil)
 	if err != nil {
@@ -76,7 +84,7 @@ func newNetDevGrantEnv(t *testing.T) *netDevGrantEnv {
 		t.Fatal(err)
 	}
 	ge := &netDevGrantEnv{reconcileEnv: e}
-	for _, id := range []string{netDevGrantDevice, netDevGrantFW} {
+	for _, id := range withCredential {
 		if _, v, err := e.svc.netDevAdmin().SetCredential(ctx, NetDevCredential{DeviceID: id, Username: "nos", Secret: []byte(netDevGrantSecret), By: "admin"}); err != nil || v != 1 {
 			t.Fatalf("set credential %s: v%d %v", id, v, err)
 		}
@@ -370,8 +378,11 @@ func TestNetDeviceGrantStaleAfterRepin(t *testing.T) {
 	}
 }
 
-// TestNetDeviceGrantStaleAfterRotation: a credential rotation leaves every
-// older grant stale.
+// TestNetDeviceGrantStaleAfterRotation: a credential rotation revokes every
+// older grant of the device (ADR 0010 D2), so none is merely stale: each is
+// revoked in the store and no read is authorized. (The stale path itself is
+// covered by TestNetDeviceGrantStaleAfterRepin, which bumps the trust
+// generation without the lifecycle.)
 func TestNetDeviceGrantStaleAfterRotation(t *testing.T) {
 	e := newNetDevGrantEnv(t)
 	e.defaultGrant()
@@ -380,9 +391,173 @@ func TestNetDeviceGrantStaleAfterRotation(t *testing.T) {
 		t.Fatalf("rotate: v%d %v", v, err)
 	}
 	for _, r := range cbsReads {
-		if _, err := e.check(netDevGrantDevice, r); !errors.Is(err, ErrGrantStale) {
-			t.Fatalf("%v after rotation: %v, want ErrGrantStale", r, err)
+		if _, err := e.check(netDevGrantDevice, r); !errors.Is(err, ErrNoGrant) {
+			t.Fatalf("%v after rotation: %v, want ErrNoGrant (old lease revoked)", r, err)
 		}
+	}
+	gs, err := e.db.ReadGrants()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gs) == 0 {
+		t.Fatal("no stored lease")
+	}
+	for _, g := range gs {
+		if g.RevokedAt.IsZero() {
+			t.Errorf("lease %s still active after rotation", g.ID)
+		}
+	}
+}
+
+// TestNetDevLifecycleRevokesLeasesAheadOfRegistry (ADR 0010 D1/D2): a
+// lease approved ahead of the registry (credential version or trust
+// generation the device does not have yet) must not go live once a later
+// credential set, rotation, block, unblock, re-pin or removal brings the
+// registry to that identity. Each lifecycle step revokes every device read
+// lease of the device, so the ahead lease is revoked in the store right
+// after that step alone and, once the registry has caught up, it still
+// authorizes no read. A lease of the other device is untouched.
+func TestNetDevLifecycleRevokesLeasesAheadOfRegistry(t *testing.T) {
+	ctx := context.Background()
+	// The re-pin case runs the production Repin against a loopback SSH
+	// endpoint that presents the new host key.
+	repinSrv := startNetDevSSHServer(t)
+	newPin := sshPinOf(repinSrv.key)
+	rotate := func(e *netDevGrantEnv, from int64) {
+		e.t.Helper()
+		if _, v, err := e.svc.netDevAdmin().RotateCredential(ctx, NetDevCredential{
+			DeviceID: netDevGrantDevice, Username: "nos", Secret: []byte("rotated-secret"), ExpectedVersion: from, By: "admin"}); err != nil || v != from+1 {
+			e.t.Fatalf("rotate from v%d: v%d %v", from, v, err)
+		}
+	}
+	block := func(e *netDevGrantEnv) {
+		e.t.Helper()
+		if _, err := e.svc.netDevAdmin().Block(ctx, netDevGrantDevice, "maintenance"); err != nil {
+			e.t.Fatalf("block: %v", err)
+		}
+	}
+	unblock := func(e *netDevGrantEnv) {
+		e.t.Helper()
+		if _, err := e.svc.netDevAdmin().Unblock(ctx, netDevGrantDevice, netDevConfirmWord); err != nil {
+			e.t.Fatalf("unblock: %v", err)
+		}
+	}
+	cases := []struct {
+		name string
+		// noCredential leaves the switch without a read credential
+		// (credential version 0) before the lease is approved.
+		noCredential bool
+		// prepare runs before the lease is approved (nil for none).
+		prepare func(*netDevGrantEnv)
+		// ahead edits the lease target to an identity the registry reaches
+		// only through lifecycle or catchUp.
+		ahead func(*permit.NetDeviceTarget)
+		// before is the refusal of the read before the lifecycle step.
+		before error
+		// lifecycle is the single admin step that must revoke the lease;
+		// the store is checked right after it.
+		lifecycle func(*netDevGrantEnv)
+		// catchUp brings the registry to the lease's identity (nil when the
+		// lifecycle step itself does).
+		catchUp func(*netDevGrantEnv)
+		// want is the refusal of the read after catch-up.
+		want error
+	}{
+		// First credential set: a lease approved for credential version 1
+		// while the device had no credential must not go live once the
+		// admin stores the first credential (version 1).
+		{"first credential set", true, nil, func(t *permit.NetDeviceTarget) { t.CredentialVersion = 1 }, ErrNetDevReadNoCredential,
+			func(e *netDevGrantEnv) {
+				if _, v, err := e.svc.netDevAdmin().SetCredential(ctx, NetDevCredential{
+					DeviceID: netDevGrantDevice, Username: "nos", Secret: []byte(netDevGrantSecret), By: "admin"}); err != nil || v != 1 {
+					e.t.Fatalf("set credential: v%d %v", v, err)
+				}
+			}, nil, ErrNoGrant},
+		{"rotation", false, nil, func(t *permit.NetDeviceTarget) { t.CredentialVersion = 2 }, ErrGrantStale,
+			func(e *netDevGrantEnv) { rotate(e, 1) }, nil, ErrNoGrant},
+		// Block alone must revoke: the store is checked before the unblock
+		// (which revokes too) and the rotation that catches up.
+		{"block", false, nil, func(t *permit.NetDeviceTarget) { t.CredentialVersion = 2 }, ErrGrantStale,
+			block, func(e *netDevGrantEnv) { unblock(e); rotate(e, 1) }, ErrNoGrant},
+		// A lease approved while the device is blocked: only the unblock
+		// can revoke it, so it is the step under test.
+		{"unblock", false, block, func(t *permit.NetDeviceTarget) { t.CredentialVersion = 2 }, ErrNetDevReadBlocked,
+			unblock, func(e *netDevGrantEnv) { rotate(e, 1) }, ErrNoGrant},
+		// Re-pin through the production Repin (probe of the new key, the
+		// permit check stubbed to approve), which reaches the ahead lease's
+		// trust generation and pin itself.
+		{"re-pin", false, nil, func(t *permit.NetDeviceTarget) { t.TrustGeneration = 2; t.TrustPin = newPin }, ErrGrantStale,
+			func(e *netDevGrantEnv) {
+				a := e.svc.netDevAdmin()
+				d := &netDevDialer{target: repinSrv.addr}
+				a.Dial = d.dial
+				a.AuthorizeRepin = func(context.Context, NetDevRepinBinding, string) error { return nil }
+				if _, err := a.Repin(ctx, netDevGrantDevice, testNetDevPin, newPin, "digest"); err != nil {
+					e.t.Fatalf("repin: %v", err)
+				}
+			}, nil, ErrNoGrant},
+		// Removal tombstones the id: no read at all, and the lease is
+		// revoked so it cannot match a later registration.
+		{"removal", false, nil, func(t *permit.NetDeviceTarget) { t.CredentialVersion = 2 }, ErrGrantStale,
+			func(e *netDevGrantEnv) {
+				if _, err := e.svc.netDevAdmin().Remove(ctx, netDevGrantDevice, netDevConfirmWord); err != nil {
+					e.t.Fatalf("remove: %v", err)
+				}
+			}, nil, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var e *netDevGrantEnv
+			if tc.noCredential {
+				e = newNetDevGrantEnvWithCredentials(t, netDevGrantFW)
+			} else {
+				e = newNetDevGrantEnv(t)
+			}
+			if tc.prepare != nil {
+				tc.prepare(e)
+			}
+			tgt := e.target(netDevGrantDevice, schedgrant.NetDeviceReadCBSVersion)
+			tc.ahead(&tgt)
+			id := e.grant(schedgrant.NetDeviceDefaultRunBudget, 900, time.Hour, tgt)
+			fwID := e.grant(schedgrant.NetDeviceDefaultRunBudget, 900, time.Hour, e.target(netDevGrantFW, schedgrant.NetDeviceReadPANOSZones))
+			// Ahead of the registry: refused before the lifecycle.
+			if _, err := e.check(netDevGrantDevice, pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION); !errors.Is(err, tc.before) {
+				t.Fatalf("before %s: %v, want %v", tc.name, err, tc.before)
+			}
+			tc.lifecycle(e)
+			revoked := map[string]bool{}
+			gs, err := e.db.ReadGrants()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, g := range gs {
+				revoked[g.ID] = !g.RevokedAt.IsZero()
+			}
+			if !revoked[id] {
+				t.Errorf("%s left the lease ahead of the registry active", tc.name)
+			}
+			if revoked[fwID] {
+				t.Errorf("%s revoked the other device's lease", tc.name)
+			}
+			if tc.catchUp != nil {
+				tc.catchUp(e)
+			}
+			if tc.want == nil {
+				// Removed: the device is gone, so no lease can cover it.
+				if _, err := e.check(netDevGrantDevice, pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION); err == nil {
+					t.Fatal("read of a removed device authorized")
+				}
+				return
+			}
+			// The registry now has exactly the identity the lease named.
+			cur := e.target(netDevGrantDevice, schedgrant.NetDeviceReadCBSVersion)
+			if cur.TrustGeneration != tgt.TrustGeneration || cur.CredentialVersion != tgt.CredentialVersion || cur.TrustPin != tgt.TrustPin {
+				t.Fatalf("registry at %+v, lease at %+v: catch-up did not reach the lease identity", cur, tgt)
+			}
+			if _, err := e.check(netDevGrantDevice, pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION); !errors.Is(err, tc.want) {
+				t.Fatalf("after %s and catch-up: %v, want %v (the ahead lease went live)", tc.name, err, tc.want)
+			}
+		})
 	}
 }
 
