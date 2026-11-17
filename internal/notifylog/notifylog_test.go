@@ -396,7 +396,7 @@ func TestSchemaHasNoTokenOrTargetURLColumn(t *testing.T) {
 }
 
 func TestCleanKeepsPrintableAndBoundsRunes(t *testing.T) {
-	got, cut := clean("a\u0007b­c", 10)
+	got, cut := clean("a\u0007b"+string(rune(0xAD))+"c", 10)
 	if got != "a�b�c" || cut {
 		t.Fatalf("clean = %q, %v; want control and soft-hyphen replaced, not cut", got, cut)
 	}
