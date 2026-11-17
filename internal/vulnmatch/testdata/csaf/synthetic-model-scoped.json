@@ -1,0 +1,70 @@
+{
+  "document": {
+    "category": "csaf_security_advisory",
+    "csaf_version": "2.0",
+    "title": "PAN-OS: Synthetic model-scoped advisory (test only, not a real advisory)",
+    "publisher": {
+      "category": "vendor",
+      "name": "Palo Alto Networks",
+      "namespace": "https://security.paloaltonetworks.com"
+    },
+    "tracking": {
+      "id": "PAN-SA-2099-0001",
+      "version": "1",
+      "status": "final",
+      "initial_release_date": "2026-01-01T00:00:00Z",
+      "current_release_date": "2026-01-01T00:00:00Z",
+      "revision_history": [
+        {"number": "1", "date": "2026-01-01T00:00:00Z", "summary": "Synthetic test revision."}
+      ]
+    }
+  },
+  "product_tree": {
+    "branches": [
+      {
+        "category": "vendor",
+        "name": "Palo Alto Networks",
+        "branches": [
+          {
+            "category": "product_name",
+            "name": "PAN-OS",
+            "branches": [
+              {"category": "product_version", "name": "10.2.9", "product": {"product_id": "OS-10.2.9", "name": "PAN-OS 10.2.9"}},
+              {"category": "product_version", "name": "10.2.10", "product": {"product_id": "OS-10.2.10", "name": "PAN-OS 10.2.10"}}
+            ]
+          },
+          {
+            "category": "product_family",
+            "name": "Next-Generation Firewalls",
+            "branches": [
+              {"category": "product_name", "name": "PA-440", "product": {"product_id": "HW-PA-440", "name": "PA-440"}},
+              {"category": "product_name", "name": "PA-220", "product": {"product_id": "HW-PA-220", "name": "PA-220", "product_identification_helper": {"cpe": "cpe:2.3:h:paloaltonetworks:pa-220:-:*:*:*:*:*:*:*"}}},
+              {"category": "product_name", "name": "PA-5400 Series", "product": {"product_id": "HW-PA-5400", "name": "PA-5400 Series", "product_identification_helper": {"model_numbers": ["PA-54*"]}}}
+            ]
+          }
+        ]
+      }
+    ],
+    "relationships": [
+      {"category": "installed_on", "product_reference": "OS-10.2.9", "relates_to_product_reference": "HW-PA-440", "full_product_name": {"product_id": "PA-440-10.2.9", "name": "PAN-OS 10.2.9 on PA-440"}},
+      {"category": "installed_on", "product_reference": "OS-10.2.10", "relates_to_product_reference": "HW-PA-440", "full_product_name": {"product_id": "PA-440-10.2.10", "name": "PAN-OS 10.2.10 on PA-440"}},
+      {"category": "installed_on", "product_reference": "OS-10.2.9", "relates_to_product_reference": "HW-PA-220", "full_product_name": {"product_id": "PA-220-10.2.9", "name": "PAN-OS 10.2.9 on PA-220"}},
+      {"category": "installed_on", "product_reference": "OS-10.2.9", "relates_to_product_reference": "HW-PA-5400", "full_product_name": {"product_id": "PA-5400-10.2.9", "name": "PAN-OS 10.2.9 on PA-5400 Series"}}
+    ]
+  },
+  "vulnerabilities": [
+    {
+      "cve": "CVE-2099-0001",
+      "product_status": {
+        "known_affected": ["PA-440-10.2.9", "PA-220-10.2.9"],
+        "fixed": ["PA-440-10.2.10"]
+      }
+    },
+    {
+      "cve": "CVE-2099-0002",
+      "product_status": {
+        "known_affected": ["PA-5400-10.2.9"]
+      }
+    }
+  ]
+}

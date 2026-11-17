@@ -1,0 +1,60 @@
+{
+  "document": {
+    "category": "csaf_security_advisory",
+    "csaf_version": "2.0",
+    "title": "Multiple Vulnerabilities in Cisco IOS XE Software Web UI Feature",
+    "lang": "en",
+    "publisher": {
+      "category": "vendor",
+      "name": "Cisco",
+      "namespace": "https://wwwin.cisco.com"
+    },
+    "tracking": {
+      "id": "cisco-sa-iosxe-webui-privesc-j22SaA4z",
+      "version": "1.21.0",
+      "status": "final",
+      "initial_release_date": "2023-10-16T15:00:00+00:00",
+      "current_release_date": "2023-11-01T19:43:01+00:00",
+      "revision_history": [
+        {"number": "1.21.0", "date": "2023-11-01T19:43:01+00:00", "summary": "Abridged for tests."}
+      ]
+    }
+  },
+  "product_tree": {
+    "branches": [
+      {
+        "category": "vendor",
+        "name": "Cisco",
+        "branches": [
+          {
+            "category": "product_family",
+            "name": "Cisco IOS XE Software",
+            "branches": [
+              {"category": "product_version", "name": "16.12.4", "product": {"product_id": "CSAFPID-275684", "name": "Cisco IOS XE Software 16.12.4"}},
+              {"category": "product_version", "name": "17.3.1", "product": {"product_id": "CSAFPID-276013", "name": "Cisco IOS XE Software 17.3.1"}},
+              {"category": "product_version", "name": "17.6.1", "product": {"product_id": "CSAFPID-280405", "name": "Cisco IOS XE Software 17.6.1"}},
+              {"category": "product_version", "name": "17.9.1", "product": {"product_id": "CSAFPID-283367", "name": "Cisco IOS XE Software 17.9.1"}},
+              {"category": "product_version", "name": "17.9.4a", "product": {"product_id": "CSAFPID-286920", "name": "Cisco IOS XE Software 17.9.4a"}}
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "vulnerabilities": [
+    {
+      "cve": "CVE-2023-20198",
+      "product_status": {
+        "known_affected": ["CSAFPID-275684", "CSAFPID-276013", "CSAFPID-280405", "CSAFPID-283367"],
+        "fixed": ["CSAFPID-286920"]
+      }
+    },
+    {
+      "cve": "CVE-2023-20273",
+      "product_status": {
+        "known_affected": ["CSAFPID-275684", "CSAFPID-276013", "CSAFPID-280405", "CSAFPID-283367"],
+        "fixed": ["CSAFPID-286920"]
+      }
+    }
+  ]
+}

@@ -20,6 +20,15 @@ var _ fimbaseline.SSHSet = (*Set)(nil)
 // names is SSHFile; a directory on or above such a path is SSHPosition; any
 // other path, including a relative one, is SSHNone.
 func (s *Set) Match(path []byte) fimbaseline.SSHMatch {
+	return s.matchWith(path, &scratch{})
+}
+
+// matchWith is Match with the work counter exposed for tests. One scratch
+// serves every entry and component of the call, so matching allocates once per
+// call. All work of the call is charged to sc against matchBudget. When the
+// budget runs out the answer is indeterminate, and the call returns SSHFile
+// (fail closed) even if a hit would have been found later.
+func (s *Set) matchWith(path []byte, sc *scratch) fimbaseline.SSHMatch {
 	if s == nil || len(path) == 0 || path[0] != '/' {
 		return fimbaseline.SSHNone
 	}
@@ -29,14 +38,14 @@ func (s *Set) Match(path []byte) fimbaseline.SSHMatch {
 		// non-canonical path is not understood: fail closed as a file.
 		return fimbaseline.SSHFile
 	}
-	// One scratch serves every entry and component of this call, so matching
-	// allocates once per call instead of per component. Per-user values are
-	// capped (MaxUserValues) and are the only entries that can stay active at
-	// any depth; every other value dies within its own segment count.
-	sc := &scratch{}
 	position := false
 	for _, e := range s.entries {
 		full, ext := e.run(comps, sc)
+		if sc.over {
+			// Indeterminate: the budget ran out before every value was
+			// decided. Fail closed.
+			return fimbaseline.SSHFile
+		}
 		if full {
 			return fimbaseline.SSHFile
 		}

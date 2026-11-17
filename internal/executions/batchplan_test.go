@@ -24,6 +24,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
@@ -133,13 +134,26 @@ func (f *fakeBatchExec) GetBatchStatus(_ context.Context, in *pb.GetBatchStatusR
 	return out, nil
 }
 
-type fakeContainers struct{ err error }
+// fakeContainers answers every binding with the requested ID and image
+// (default "sha256:e…"); otherID answers with a different container ID, as
+// a stale or wrong binding would.
+type fakeContainers struct {
+	err     error
+	image   string
+	otherID bool
+}
 
 func (f fakeContainers) ContainerBinding(_ context.Context, _, id string) (canonical.BatchContainer, error) {
 	if f.err != nil {
 		return canonical.BatchContainer{}, f.err
 	}
-	img := "sha256:" + strings.Repeat("e", 64)
+	img := f.image
+	if img == "" {
+		img = "sha256:" + strings.Repeat("e", 64)
+	}
+	if f.otherID {
+		id = containerID(99)
+	}
 	return canonical.BatchContainer{ContainerID: id, ConfigurationHash: strings.Repeat("f", 64), OldImageDigest: img, NewImageDigest: img}, nil
 }
 
@@ -220,12 +234,15 @@ func TestBatchTwelveUpdatesThreeRestartsAreFifteenListedMembers(t *testing.T) {
 	for i, m := range v.Members {
 		host := fmt.Sprintf("h%02d", i+1)
 		wantAction, wantStage := "package.install_all", 1
+		// A bound restart is planned at its batch member version (1.1.0),
+		// never at the general 1.0.0.
+		wantVersion := "1.0.0"
 		if i >= 12 {
-			wantAction, wantStage = "docker.restart", 2
+			wantAction, wantStage, wantVersion = "docker.restart", 2, "1.1.0"
 		}
 		if m.Index != i+1 || m.MemberID != fmt.Sprintf("m-%03d", i+1) || m.HostID != host || m.ActionID != wantAction || m.Stage != wantStage ||
 			m.Fingerprint != batchFP(i+1) || m.CredentialRef != "nebula-default" || m.Risk != "MEDIUM" || m.Outcome != OutcomePlanned ||
-			len(m.ArtifactSHA256) != 64 || len(m.ParametersHash) != 64 || m.ModuleVersion != "1.0.0" || m.ActionTitle == "" {
+			len(m.ArtifactSHA256) != 64 || len(m.ParametersHash) != 64 || m.ModuleVersion != wantVersion || m.ActionTitle == "" {
 			t.Errorf("member %d: %+v", i+1, m)
 		}
 		if i >= 12 && (m.ContainerID != containerID(i+1) || !strings.Contains(m.Params, containerID(i+1))) {
@@ -336,6 +353,111 @@ func TestBatchPlanFailsClosedWithoutCredentialVersionsOrContainerDetails(t *test
 	b, _ = batchSetup(t, f, func(o *BatchOptions) { o.Containers = fakeContainers{err: ErrBatchContainer} })
 	if _, err := b.ProposeBatch(ctx, "axel", twelveUpdatesThreeRestarts()); !errors.Is(err, ErrBatchContainer) || len(f.proposed) != 0 {
 		t.Errorf("no container details: %v", err)
+	}
+}
+
+// boundReq is one docker.<verb> member on h13 naming containerID(13).
+func boundReq(verb, version string, params map[string]string) BatchRequest {
+	if params == nil {
+		params = map[string]string{"container": containerID(13)}
+	}
+	return BatchRequest{Stages: []BatchStageSpec{{Gate: "manual", Members: []BatchMemberSpec{
+		{ActionID: "docker." + verb, Version: version, HostID: "h13", Params: params}}}}}
+}
+
+// A batch docker.start, stop or restart member is planned at its 1.1.0
+// version: the frozen member carries that script's hash and the parameters
+// are the container and image IDs of the approved binding.
+func TestBatchBoundMemberPlansVersion110FromBinding(t *testing.T) {
+	img := "sha256:" + strings.Repeat("a", 64)
+	for _, verb := range []string{"start", "stop", "restart"} {
+		for _, version := range []string{"", "1.1.0"} {
+			t.Run(verb+" "+version, func(t *testing.T) {
+				f := &fakeBatchExec{}
+				b, _ := batchSetup(t, f, func(o *BatchOptions) { o.Containers = fakeContainers{image: img} })
+				ctx := context.Background()
+				c, err := b.ProposeBatch(ctx, "axel", boundReq(verb, version, nil))
+				if err != nil {
+					t.Fatal(err)
+				}
+				v, err := b.Batch(ctx, c.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want, ok := actions.LookupBatchMember("docker."+verb, "1.1.0")
+				if !ok {
+					t.Fatal("no 1.1.0 batch member")
+				}
+				m := v.Members[0]
+				wantParams := `{"container_id":"` + containerID(13) + `","image_id":"` + img + `"}`
+				if m.ModuleVersion != "1.1.0" || m.ArtifactSHA256 != want.SHA256() || m.Params != wantParams || m.ContainerID != containerID(13) {
+					t.Fatalf("member %+v, want 1.1.0 with %s", m, wantParams)
+				}
+				if got := f.frozen.Members[0]; got.Request.ModuleVersion != "1.1.0" || got.Container == nil || got.Container.OldImageDigest != img {
+					t.Fatalf("frozen member %+v", got)
+				}
+			})
+		}
+	}
+}
+
+// A bound member never falls back to the 1.0.0 script, and the 1.1.0 IDs
+// are the only batch versions there are.
+func TestBatchBoundMemberRefusesOtherVersions(t *testing.T) {
+	for _, version := range []string{"1.0.0", "2.0.0"} {
+		f := &fakeBatchExec{}
+		b, _ := batchSetup(t, f, nil)
+		_, err := b.ProposeBatch(context.Background(), "axel", boundReq("restart", version, nil))
+		var ie *BatchInputError
+		if !errors.As(err, &ie) || !strings.Contains(ie.Reason, "1.1.0") || len(f.proposed) != 0 {
+			t.Errorf("version %s: %v (proposed %d)", version, err, len(f.proposed))
+		}
+	}
+}
+
+// A bound member without a container binding is refused, never planned at
+// 1.0.0 without one.
+func TestBatchBoundMemberNeedsBinding(t *testing.T) {
+	for _, verb := range []string{"start", "stop", "restart"} {
+		f := &fakeBatchExec{}
+		b, _ := batchSetup(t, f, func(o *BatchOptions) { o.Containers = fakeContainers{err: ErrBatchContainer} })
+		if _, err := b.ProposeBatch(context.Background(), "axel", boundReq(verb, "", nil)); !errors.Is(err, ErrBatchContainer) || len(f.proposed) != 0 {
+			t.Errorf("docker.%s without binding: %v (proposed %d)", verb, err, len(f.proposed))
+		}
+	}
+}
+
+// The IDs of a bound member come from the approved binding only: a request
+// that also names container_id or image_id, or names no container, is
+// refused before the executor sees anything.
+func TestBatchBoundMemberRefusesTamperedParams(t *testing.T) {
+	img := "sha256:" + strings.Repeat("e", 64)
+	cases := map[string]map[string]string{
+		"image_id beside container":       {"container": containerID(13), "image_id": img},
+		"container_id beside container":   {"container": containerID(13), "container_id": containerID(14)},
+		"IDs without container":           {"container_id": containerID(13), "image_id": img},
+		"other container named by a name": {"container": "web"},
+	}
+	for name, params := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := &fakeBatchExec{}
+			b, _ := batchSetup(t, f, nil)
+			_, err := b.ProposeBatch(context.Background(), "axel", boundReq("stop", "", params))
+			var ie *BatchInputError
+			if !errors.As(err, &ie) || len(f.proposed) != 0 {
+				t.Fatalf("%v (proposed %d)", err, len(f.proposed))
+			}
+		})
+	}
+}
+
+// The binding must name the container the request names: a binding for
+// another container ID is refused.
+func TestBatchBoundMemberRefusesMismatchedBinding(t *testing.T) {
+	f := &fakeBatchExec{}
+	b, _ := batchSetup(t, f, func(o *BatchOptions) { o.Containers = fakeContainers{otherID: true} })
+	if _, err := b.ProposeBatch(context.Background(), "axel", boundReq("start", "", nil)); !errors.Is(err, ErrBatchContainer) || len(f.proposed) != 0 {
+		t.Fatalf("mismatched binding: %v (proposed %d)", err, len(f.proposed))
 	}
 }
 

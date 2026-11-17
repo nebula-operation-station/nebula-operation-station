@@ -243,10 +243,19 @@ type BatchRequest struct {
 
 // containerActions bind an existing container incarnation; their
 // "container" parameter must be the full 64-hex container ID.
+//
+// docker.start, docker.stop and docker.restart are not here: their batch
+// member version (1.1.0) takes its IDs from the approved binding, see
+// boundMemberParams.
 var containerActions = map[string]bool{
-	"docker.inspect": true, "docker.restart": true, "docker.stop": true, "docker.start": true,
-	"docker.logs": true, "docker.stats": true, "docker.check_updates": true,
+	"docker.inspect": true,
+	"docker.logs":    true, "docker.stats": true, "docker.check_updates": true,
 }
+
+// boundMemberVersion is the only version of a bound batch member
+// (docker.start, stop, restart; G5b). The general 1.0.0 is never planned in
+// a batch.
+const boundMemberVersion = "1.1.0"
 
 // batchExcludedActions are never batch members: docker.logs returns host
 // output that may hold secrets. docker.update_preview runs only as a
@@ -387,7 +396,16 @@ func (b *Batches) planMember(ctx context.Context, spec BatchMemberSpec, pinOf ma
 	if params == nil {
 		params = map[string]string{}
 	}
-	if !container {
+	var bound *canonical.BatchContainer
+	switch {
+	case actions.IsBatchMemberOnly(a.ID):
+		// The IDs are the approved binding's, never the request's.
+		derived, c, err := b.boundMemberParams(ctx, a, spec, n)
+		if err != nil {
+			return plannedMember{}, err
+		}
+		params, bound = derived, c
+	case !container:
 		if err := a.ValidParams(params); err != nil {
 			return plannedMember{}, batchInput("member %d (%s): %v", n, a.ID, err)
 		}
@@ -459,7 +477,9 @@ func (b *Batches) planMember(ctx context.Context, spec BatchMemberSpec, pinOf ma
 		PreconditionHashes: []string{},
 		ContainerUpdate:    update,
 	}
-	if containerActions[a.ID] {
+	if bound != nil {
+		m.Container = bound
+	} else if containerActions[a.ID] {
 		id := params["container"]
 		if !fullContainerIDRe.MatchString(id) {
 			return plannedMember{}, batchInput("member %d (%s on %s): name the container by its full 64-character ID", n, a.ID, spec.HostID)
@@ -473,9 +493,49 @@ func (b *Batches) planMember(ctx context.Context, spec BatchMemberSpec, pinOf ma
 	return plannedMember{stage: stage, action: a, params: paramsJSON, member: m, pin: p}, nil
 }
 
-// lookupAction resolves a member's action: a built-in without a version,
-// or a module or runbook action at exactly spec.Version.
+// boundMemberParams derives the parameters of a bound batch member (G5b,
+// docker.start, stop, restart 1.1.0) from the approved container binding.
+// The request names only the container, by its full ID; container_id and
+// image_id are never taken from the request, and any other parameter is
+// refused. The binding must name that same container ID.
+func (b *Batches) boundMemberParams(ctx context.Context, a actions.Action, spec BatchMemberSpec, n int) (map[string]string, *canonical.BatchContainer, error) {
+	id, named := spec.Params["container"]
+	if len(spec.Params) != 1 || !named {
+		return nil, nil, batchInput("member %d (%s on %s): name only the container; its container and image IDs come from the approved binding", n, a.ID, spec.HostID)
+	}
+	if !fullContainerIDRe.MatchString(id) {
+		return nil, nil, batchInput("member %d (%s on %s): name the container by its full 64-character ID", n, a.ID, spec.HostID)
+	}
+	c, err := b.containers.ContainerBinding(ctx, spec.HostID, id)
+	if err != nil {
+		return nil, nil, fmt.Errorf("member %d (%s on %s): %w", n, a.ID, spec.HostID, err)
+	}
+	if c.ContainerID != id {
+		return nil, nil, fmt.Errorf("member %d (%s on %s): the binding names another container: %w", n, a.ID, spec.HostID, ErrBatchContainer)
+	}
+	params := map[string]string{"container_id": c.ContainerID, "image_id": c.OldImageDigest}
+	if err := a.ValidParams(params); err != nil {
+		return nil, nil, batchInput("member %d (%s on %s): the approved binding is not valid: %v", n, a.ID, spec.HostID, err)
+	}
+	return params, &c, nil
+}
+
+// lookupAction resolves a member's action. A batch member ID (G5b) resolves
+// only at its batch version (1.1.0; an empty version selects it); it never
+// falls back to the general 1.0.0. Otherwise a built-in is taken without a
+// version, or a module or runbook action at exactly spec.Version.
 func (b *Batches) lookupAction(ctx context.Context, spec BatchMemberSpec, n int) (actions.Action, error) {
+	if actions.IsBatchMemberOnly(spec.ActionID) {
+		version := spec.Version
+		if version == "" {
+			version = boundMemberVersion
+		}
+		a, ok := actions.LookupBatchMember(spec.ActionID, version)
+		if !ok {
+			return actions.Action{}, batchInput("member %d: %s is a batch member only at version %s; it is bound to an approved container", n, spec.ActionID, boundMemberVersion)
+		}
+		return a, nil
+	}
 	if a, ok := actions.Lookup(spec.ActionID); ok {
 		if spec.Version != "" && spec.Version != a.Version {
 			return actions.Action{}, batchInput("member %d: %q is a built-in action; it has no version %q", n, spec.ActionID, spec.Version)
