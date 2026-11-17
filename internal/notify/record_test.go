@@ -26,16 +26,41 @@ type fakeRecorder struct {
 	mu   sync.Mutex
 	recs []notifylog.Record
 	err  error
+	// seen gets one value per Append, so a test can wait for the writes,
+	// which run off the send path.
+	seen chan struct{}
 }
 
 func (f *fakeRecorder) Append(_ context.Context, r notifylog.Record) (int64, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	f.recs = append(f.recs, r)
-	if f.err != nil {
-		return 0, f.err
+	n := len(f.recs)
+	err := f.err
+	f.mu.Unlock()
+	if f.seen != nil {
+		f.seen <- struct{}{}
 	}
-	return int64(len(f.recs)), nil
+	if err != nil {
+		return 0, err
+	}
+	return int64(n), nil
+}
+
+// await waits until n Appends have returned, or fails the test.
+func (f *fakeRecorder) await(t *testing.T, n int) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		select {
+		case <-f.seen:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("got %d of %d appends", i, n)
+		}
+	}
+}
+
+// newFakeRecorder returns a recorder that keeps every record and signals await.
+func newFakeRecorder() *fakeRecorder {
+	return &fakeRecorder{seen: make(chan struct{}, 100)}
 }
 
 func (f *fakeRecorder) got() []notifylog.Record {
@@ -70,7 +95,7 @@ func (s *stubSender) count() int {
 // TestHeldIntegrityEventIsLogged: events beyond the hourly limit are held
 // back and must appear in the log as held_rate_limit, next to the sent ones.
 func TestHeldIntegrityEventIsLogged(t *testing.T) {
-	rec := &fakeRecorder{}
+	rec := newFakeRecorder()
 	sender := &stubSender{name: "ntfy"}
 	n := NewWithSenders(quiet(), nil, sender)
 	n.SetRecorder(rec)
@@ -86,6 +111,7 @@ func TestHeldIntegrityEventIsLogged(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	rec.await(t, MaxIntegrityPerHour+1)
 	recs := rec.got()
 	if len(recs) != MaxIntegrityPerHour+1 {
 		t.Fatalf("got %d records, want %d", len(recs), MaxIntegrityPerHour+1)
@@ -117,7 +143,7 @@ func TestHeldIntegrityEventIsLogged(t *testing.T) {
 func TestSendFailureIsLoggedWithoutToken(t *testing.T) {
 	var c captured
 	srv := c.server(t, http.StatusInternalServerError)
-	rec := &fakeRecorder{}
+	rec := newFakeRecorder()
 	tg := &telegram{base: srv.URL, token: botToken, chatID: "42", client: srv.Client()}
 	n := NewWithSenders(quiet(), nil, tg)
 	n.SetRecorder(rec)
@@ -127,6 +153,7 @@ func TestSendFailureIsLoggedWithoutToken(t *testing.T) {
 	if got := n.Notify(context.Background(), ev); got != 0 {
 		t.Fatalf("Notify = %d, want 0", got)
 	}
+	rec.await(t, 1)
 	recs := rec.got()
 	if len(recs) != 1 {
 		t.Fatalf("got %d records, want 1", len(recs))
@@ -143,7 +170,8 @@ func TestSendFailureIsLoggedWithoutToken(t *testing.T) {
 // TestRecorderErrorDoesNotChangeDelivery: a failing recorder must not change
 // what is sent or the number of providers that accepted it.
 func TestRecorderErrorDoesNotChangeDelivery(t *testing.T) {
-	rec := &fakeRecorder{err: errors.New("database is locked")}
+	rec := newFakeRecorder()
+	rec.err = errors.New("database is locked")
 	sender := &stubSender{name: "ntfy"}
 	n := NewWithSenders(quiet(), nil, sender)
 	n.SetRecorder(rec)
@@ -169,7 +197,7 @@ func TestRecorderErrorDoesNotChangeDelivery(t *testing.T) {
 // so nothing is appended (see TestKindsWithoutLogCodeAreSentNotRecorded); the
 // send is unaffected.
 func TestHostKeyMismatchIsSentWithRecorder(t *testing.T) {
-	rec := &fakeRecorder{}
+	rec := newFakeRecorder()
 	sender := &stubSender{name: "ntfy"}
 	n := NewWithSenders(quiet(), nil, sender)
 	n.SetRecorder(rec)
@@ -188,7 +216,7 @@ func TestHostKeyMismatchIsSentWithRecorder(t *testing.T) {
 // host key watcher's already-delivered case), nothing was sent or held, so
 // nothing is recorded.
 func TestSkippedProvidersAreNotRecorded(t *testing.T) {
-	rec := &fakeRecorder{}
+	rec := newFakeRecorder()
 	sender := &stubSender{name: "ntfy"}
 	n := NewWithSenders(quiet(), nil, sender)
 	n.SetRecorder(rec)

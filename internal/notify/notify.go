@@ -27,6 +27,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -166,6 +167,11 @@ type Notifier struct {
 	// rec stores each decision in the notification log (ADR 0016 D10). nil
 	// means no log; the notifier then behaves as before.
 	rec Recorder
+	// recSlots bounds the log writes in flight: one slot per write. It is
+	// made by SetRecorder.
+	recSlots chan struct{}
+	// recDropped counts records dropped because every slot was taken.
+	recDropped atomic.Int64
 }
 
 // Recorder stores one notification decision in the notification log (ADR
@@ -175,27 +181,56 @@ type Recorder interface {
 	Append(ctx context.Context, r notifylog.Record) (int64, error)
 }
 
-// recordTimeout bounds one log write, so a stuck database cannot hold up the
-// next notification for long.
+// recordTimeout bounds one log write, so a stuck database cannot hold a write
+// slot for long.
 const recordTimeout = 5 * time.Second
+
+// maxPendingRecords bounds the log writes in flight. When all are taken, a new
+// record is dropped and counted (RecordsDropped), so a slow database never
+// makes memory or goroutines grow without limit.
+const maxPendingRecords = 64
 
 // SetRecorder sets the notification log. Call it before the notifier is used
 // concurrently; nil removes the log.
-func (n *Notifier) SetRecorder(r Recorder) { n.rec = r }
+func (n *Notifier) SetRecorder(r Recorder) {
+	n.rec = r
+	if r != nil && n.recSlots == nil {
+		n.recSlots = make(chan struct{}, maxPendingRecords)
+	}
+}
 
-// record appends r to the notification log. It runs after the delivery
-// decision is final, uses a context that a cancelled send does not cancel
-// (the decision must still be logged), and logs a failure without the
-// message text. It never returns an error to the caller.
+// RecordsDropped returns how many records were dropped because the log could
+// not keep up. Dropped records are not in the log.
+func (n *Notifier) RecordsDropped() int64 { return n.recDropped.Load() }
+
+// record stores r in the notification log. The write runs in its own
+// goroutine, so a slow or locked database never delays a send or the next
+// notification; the caller does not wait for it. The write uses a context that
+// a cancelled send does not cancel (the decision must still be logged) and is
+// bounded by recordTimeout. When no write slot is free, r is dropped and
+// counted. A failed write is logged without the message text. record never
+// returns an error.
 func (n *Notifier) record(ctx context.Context, r notifylog.Record) {
 	if n.rec == nil {
 		return
 	}
-	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
-	defer cancel()
-	if _, err := n.rec.Append(rctx, r); err != nil {
-		n.log.Warn("notification log write failed", "kind", string(r.Kind), "outcome", string(r.Outcome), "error", err.Error())
+	select {
+	case n.recSlots <- struct{}{}:
+	default:
+		dropped := n.recDropped.Add(1)
+		n.log.Warn("notification log is behind, record dropped", "kind", string(r.Kind), "dropped_total", dropped)
+		return
 	}
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+	go func() {
+		defer func() {
+			cancel()
+			<-n.recSlots
+		}()
+		if _, err := n.rec.Append(rctx, r); err != nil {
+			n.log.Warn("notification log write failed", "kind", string(r.Kind), "outcome", string(r.Outcome), "error", err.Error())
+		}
+	}()
 }
 
 // fitsLabel reports whether s is a host label or execution ID the notification
