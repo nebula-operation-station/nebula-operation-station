@@ -543,21 +543,6 @@ var Builtin = []Action{
 		Risk: pb.RiskClass_RISK_CLASS_MEDIUM, Timeout: 3 * time.Minute, Script: dockerScript("restart"), Params: containerParam, Retry: RetryNever,
 	},
 	{
-		ID: "docker.start", Version: "1.1.0", Title: "Start bound container",
-		Description: "Batch member only (G5b): docker start of the container whose full ID and image ID the approved binding names. Checks both before the start and stops with container_changed, running nothing, if either differs or the container is gone. The configuration hash is not checked. Nothing is recreated or pulled.",
-		Risk:        pb.RiskClass_RISK_CLASS_MEDIUM, Timeout: 3 * time.Minute, Script: dockerBoundScript("start"), Params: boundContainerParams, Retry: RetryNever,
-	},
-	{
-		ID: "docker.stop", Version: "1.1.0", Title: "Stop bound container",
-		Description: "Batch member only (G5b): docker stop of the container whose full ID and image ID the approved binding names. Checks both before the stop and stops with container_changed, running nothing, if either differs or the container is gone. The configuration hash is not checked.",
-		Risk:        pb.RiskClass_RISK_CLASS_MEDIUM, Timeout: 3 * time.Minute, Script: dockerBoundScript("stop"), Params: boundContainerParams, Retry: RetryNever,
-	},
-	{
-		ID: "docker.restart", Version: "1.1.0", Title: "Restart bound container",
-		Description: "Batch member only (G5b): docker restart of the container whose full ID and image ID the approved binding names. Checks both before the restart and stops with container_changed, running nothing, if either differs or the container is gone. The configuration hash is not checked. Nothing is recreated or pulled.",
-		Risk:        pb.RiskClass_RISK_CLASS_MEDIUM, Timeout: 3 * time.Minute, Script: dockerBoundScript("restart"), Params: boundContainerParams, Retry: RetryNever,
-	},
-	{
 		ID: "pci.inventory", Version: "1.0.0", Title: "List PCI GPUs",
 		Description: "The host's NVIDIA display and 3D controllers from lspci (lspci -mm -nn -D), with the PCI bus ID for hostpci passthrough mapping. A host without lspci reports that. Read-only.",
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 30 * time.Second, ReadOnly: true, Script: pciInventory, Retry: RetrySafe,
@@ -579,11 +564,37 @@ func Lookup(id string) (Action, bool) {
 	return Action{}, false
 }
 
-// LookupVersion returns the built-in action with this ID and version. An
-// action keeps every version that a running approval may name (G5b adds
-// docker.start, stop and restart 1.1.0 next to 1.0.0).
-func LookupVersion(id, version string) (Action, bool) {
-	for _, a := range Builtin {
+// batchMembers are the built-in versions that only a batch may plan (G5b):
+// docker.start, stop and restart 1.1.0. They are not in Builtin, so the
+// general catalog (Service.Catalog), the "New operation" form, the
+// quick actions and Lookup never offer them and never see a second entry
+// per ID. The batch planner reaches them through LookupBatchMember only.
+var batchMembers = []Action{
+	{
+		ID: "docker.start", Version: "1.1.0", Title: "Start bound container",
+		Description: "Batch member only (G5b): docker start of the container whose full ID and image ID the approved binding names. Checks both before the start and stops with container_changed, running nothing, if either differs or the container is gone. The configuration hash is not checked. Nothing is recreated or pulled.",
+		Risk:        pb.RiskClass_RISK_CLASS_MEDIUM, Timeout: 3 * time.Minute, Script: dockerBoundScript("start"), Params: boundContainerParams, Retry: RetryNever,
+	},
+	{
+		ID: "docker.stop", Version: "1.1.0", Title: "Stop bound container",
+		Description: "Batch member only (G5b): docker stop of the container whose full ID and image ID the approved binding names. Checks both before the stop and stops with container_changed, running nothing, if either differs or the container is gone. The configuration hash is not checked.",
+		Risk:        pb.RiskClass_RISK_CLASS_MEDIUM, Timeout: 3 * time.Minute, Script: dockerBoundScript("stop"), Params: boundContainerParams, Retry: RetryNever,
+	},
+	{
+		ID: "docker.restart", Version: "1.1.0", Title: "Restart bound container",
+		Description: "Batch member only (G5b): docker restart of the container whose full ID and image ID the approved binding names. Checks both before the restart and stops with container_changed, running nothing, if either differs or the container is gone. The configuration hash is not checked. Nothing is recreated or pulled.",
+		Risk:        pb.RiskClass_RISK_CLASS_MEDIUM, Timeout: 3 * time.Minute, Script: dockerBoundScript("restart"), Params: boundContainerParams, Retry: RetryNever,
+	},
+}
+
+// LookupBatchMember returns the batch-member action id at exactly version
+// (G5b). An empty version or a built-in version never matches here: the
+// general catalog answers for those through Lookup.
+func LookupBatchMember(id, version string) (Action, bool) {
+	if version == "" {
+		return Action{}, false
+	}
+	for _, a := range batchMembers {
 		if a.ID == id && a.Version == version {
 			return a, true
 		}
