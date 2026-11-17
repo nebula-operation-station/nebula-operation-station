@@ -10,12 +10,14 @@ package ui_test
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -350,5 +352,184 @@ func TestHostSettingsFormEndpointChangeAudited(t *testing.T) {
 	}
 	if n := len(e.endpoints(t)); n != 2 {
 		t.Fatalf("endpoints = %d, want 2", n)
+	}
+}
+
+// updateRoute sends a full host update for web-01 through the settings
+// form (textarea, one endpoint per line) or the JSON route and reports
+// whether it was accepted.
+type updateRoute struct {
+	name string
+	send func(t *testing.T, h http.Handler, criticality string, endpoints []string) bool
+}
+
+var updateRoutes = []updateRoute{
+	{"form", func(t *testing.T, h http.Handler, crit string, eps []string) bool {
+		t.Helper()
+		form := url.Values{"id": {"web-01"}, "environment": {"PROD"}, "criticality": {crit},
+			"endpoints": {strings.Join(eps, "\n")}}
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/hosts/web-01/settings", strings.NewReader(form.Encode()))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusSeeOther {
+			t.Fatalf("form update: status %d", rec.Code)
+		}
+		return rec.Header().Get("Location") == settingsTab
+	}},
+	{"json", func(t *testing.T, h http.Handler, crit string, eps []string) bool {
+		t.Helper()
+		q := make([]string, len(eps))
+		for i, s := range eps {
+			q[i] = strconv.Quote(s)
+		}
+		body := `{"id":"web-01","environment":"PROD","criticality":"` + crit + `","endpoints":[` + strings.Join(q, ",") + `]}`
+		code, resp := postJSON(t, h, "/inventory/hosts/update", body)
+		if code != http.StatusOK && code != http.StatusBadRequest {
+			t.Fatalf("json update: status %d (%s)", code, resp)
+		}
+		return code == http.StatusOK
+	}},
+}
+
+// TestHostUpdateRefusesDuplicateSpellings: both update routes use the
+// normalized duplicate rule, so two spellings of one IPv6 endpoint are
+// refused and nothing is stored or audited.
+func TestHostUpdateRefusesDuplicateSpellings(t *testing.T) {
+	for _, rt := range updateRoutes {
+		for _, eps := range [][]string{
+			{"[fd00::9]:22", "[fd00:0::9]:22"},
+			{"fd00::9", "[FD00:0::9]:22"},
+			{"10.0.0.11", "10.0.0.11:22"},
+		} {
+			t.Run(rt.name+"/"+strings.Join(eps, ","), func(t *testing.T) {
+				e := newEPEnv(t)
+				before := e.endpoints(t)
+				e.logged.Reset()
+				if rt.send(t, e.h.Handler(), "MEDIUM", eps) {
+					t.Fatalf("duplicate spellings %v accepted", eps)
+				}
+				if got := e.endpoints(t); !reflect.DeepEqual(got, before) {
+					t.Errorf("endpoints changed: %v -> %v", before, got)
+				}
+				if strings.Contains(e.logged.String(), "kind=host_") {
+					t.Errorf("refusal wrote an audit line:\n%s", e.logged.String())
+				}
+			})
+		}
+	}
+}
+
+// TestHostUpdateAuditsEndpointChangeOnBothRoutes: the JSON route writes
+// the same before/after endpoint audit line as the settings form, and an
+// update that leaves the endpoints alone writes none.
+func TestHostUpdateAuditsEndpointChangeOnBothRoutes(t *testing.T) {
+	for _, rt := range updateRoutes {
+		t.Run(rt.name, func(t *testing.T) {
+			e := newEPEnv(t)
+			if !rt.send(t, e.h.Handler(), "MEDIUM", []string{"10.0.0.12", "10.0.0.11"}) {
+				t.Fatal("reorder refused")
+			}
+			out := e.logged.String()
+			for _, w := range []string{"kind=host_updated", "kind=host_endpoints_changed", "before=10.0.0.11:22",
+				`after="10.0.0.12:22 10.0.0.11:22"`} {
+				if !strings.Contains(out, w) {
+					t.Errorf("audit log missing %q:\n%s", w, out)
+				}
+			}
+			// Swap primary and alternate: also audited.
+			e.logged.Reset()
+			if !rt.send(t, e.h.Handler(), "MEDIUM", []string{"10.0.0.11", "10.0.0.12"}) {
+				t.Fatal("swap refused")
+			}
+			if w := `before="10.0.0.12:22 10.0.0.11:22" after="10.0.0.11:22 10.0.0.12:22"`; !strings.Contains(e.logged.String(), w) {
+				t.Errorf("audit log missing %q:\n%s", w, e.logged.String())
+			}
+			// Criticality only: host_updated, no endpoint line.
+			e.logged.Reset()
+			if !rt.send(t, e.h.Handler(), "HIGH", []string{"10.0.0.11", "10.0.0.12"}) {
+				t.Fatal("criticality change refused")
+			}
+			out = e.logged.String()
+			if !strings.Contains(out, "kind=host_updated") || strings.Contains(out, "kind=host_endpoints_changed") {
+				t.Errorf("unexpected audit for an unchanged endpoint list:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestHostUpdateKeepsStoredEndpointsAboveUILimit: a host stored with more
+// than MaxEditableEndpoints endpoints (the inventory allows more) can
+// still be updated on both routes, but its list cannot grow.
+func TestHostUpdateKeepsStoredEndpointsAboveUILimit(t *testing.T) {
+	six := []string{"10.0.0.11", "10.0.0.12", "10.0.0.13", "10.0.0.14", "10.0.0.15", "10.0.0.16"}
+	for _, rt := range updateRoutes {
+		t.Run(rt.name, func(t *testing.T) {
+			e := newEPEnv(t)
+			h, err := e.store.Get(context.Background(), "web-01")
+			if err != nil {
+				t.Fatal(err)
+			}
+			h.Endpoints = nil
+			for _, a := range six {
+				h.Endpoints = append(h.Endpoints, inventory.Endpoint{Address: a, Port: 22})
+			}
+			if _, err := e.store.Update(context.Background(), h); err != nil {
+				t.Fatal(err)
+			}
+			if !rt.send(t, e.h.Handler(), "HIGH", six) {
+				t.Fatal("update of a host with 6 stored endpoints refused")
+			}
+			got, err := e.store.Get(context.Background(), "web-01")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Criticality != inventory.CriticalityHigh || len(got.Endpoints) != 6 {
+				t.Fatalf("host = %s with %d endpoints, want HIGH with 6", got.Criticality, len(got.Endpoints))
+			}
+			if rt.send(t, e.h.Handler(), "HIGH", append(append([]string(nil), six...), "10.0.0.17")) {
+				t.Fatal("7th endpoint accepted")
+			}
+			if got := e.endpoints(t); len(got) != 6 {
+				t.Fatalf("endpoints = %d, want 6", len(got))
+			}
+		})
+	}
+	// A new host is capped at MaxEditableEndpoints.
+	e := newEPEnv(t)
+	body := `{"id":"web-09","environment":"PROD","criticality":"LOW","endpoints":["10.1.0.1","10.1.0.2","10.1.0.3","10.1.0.4","10.1.0.5"]}`
+	if code, resp := postJSON(t, e.h.Handler(), "/inventory/hosts", body); code != http.StatusBadRequest {
+		t.Fatalf("create with 5 endpoints: status %d (%s)", code, resp)
+	}
+}
+
+// getFailInventory is an inventory without UpdateWithEndpointChange whose
+// Get fails, so the endpoint list before an update cannot be read.
+type getFailInventory struct{ *fakeInventory }
+
+func (g getFailInventory) Get(context.Context, string) (inventory.Host, error) {
+	return inventory.Host{}, errors.New("read failed")
+}
+
+// TestHostUpdateAuditsWhenBeforeUnknown: with a store that cannot return
+// the change atomically and a failing read of the previous state, the
+// update is still audited (before=unknown) and the read error is logged.
+func TestHostUpdateAuditsWhenBeforeUnknown(t *testing.T) {
+	fake := newFakeInventory()
+	fake.hosts["web-01"] = inventory.Host{ID: "web-01", Environment: inventory.EnvProd,
+		Criticality: inventory.CriticalityMedium, Endpoints: []inventory.Endpoint{{Address: "10.0.0.11", Port: 22}}}
+	logged := &strings.Builder{}
+	h := newTestHandler(t, ui.Options{PublicOrigin: epOrigin, Inventory: getFailInventory{fake},
+		Log: slog.New(slog.NewTextHandler(logged, nil))})
+	body := `{"id":"web-01","environment":"PROD","criticality":"MEDIUM","endpoints":["10.0.0.12","10.0.0.11"]}`
+	if code, resp := postJSON(t, h.Handler(), "/inventory/hosts/update", body); code != http.StatusOK {
+		t.Fatalf("status %d (%s)", code, resp)
+	}
+	out := logged.String()
+	for _, w := range []string{"read host before update", "kind=host_updated", "kind=host_endpoints_changed",
+		"before=unknown", `after="10.0.0.12:22 10.0.0.11:22"`} {
+		if !strings.Contains(out, w) {
+			t.Errorf("log missing %q:\n%s", w, out)
+		}
 	}
 }

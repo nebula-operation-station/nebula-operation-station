@@ -555,8 +555,14 @@ func (e *duplicateEndpointError) Error() string {
 // touched: tag values must not look like pasted host keys, and an
 // endpoint used by another host needs a confirmation.
 func (h *Handler) checkHostRequest(ctx context.Context, in hostRequest, host inventory.Host) error {
-	if len(host.Endpoints) > inventory.MaxEditableEndpoints {
-		return fmt.Errorf("a host has at most %d endpoints (primary and alternates)", inventory.MaxEditableEndpoints)
+	if n := len(host.Endpoints); n > inventory.MaxEditableEndpoints {
+		// A host stored with more endpoints (the inventory allows more)
+		// stays editable as long as the list does not grow.
+		prev, err := h.inventory.Get(ctx, in.ID)
+		if err != nil || n > len(prev.Endpoints) {
+			return fmt.Errorf("a host can get at most %d endpoints (primary and alternates) here; "+
+				"a host that already has more keeps them but cannot get new ones", inventory.MaxEditableEndpoints)
+		}
 	}
 	for _, v := range host.Tags {
 		if err := validateTagValue(v); err != nil {
@@ -673,12 +679,60 @@ func (h *Handler) handleHostUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if _, err := h.inventory.Update(ctx, host); err != nil {
+	if err := h.updateHostAudited(ctx, r, host); err != nil {
 		h.answerStoreError(w, "update host", host.ID, err)
 		return
 	}
-	h.audit(r, "host_updated", host.ID)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": host.ID})
+}
+
+// hostUpdateDiffer updates a host and returns its endpoint list before
+// and after, read inside the update transaction. inventory.Store
+// satisfies it.
+type hostUpdateDiffer interface {
+	UpdateWithEndpointChange(ctx context.Context, h inventory.Host) (inventory.Host, inventory.EndpointChange, error)
+}
+
+// updateHostAudited stores host for the JSON and the form update route
+// and writes the audit lines of a committed update: "host_updated", and
+// "host_endpoints_changed" with the endpoint order before and after when
+// the endpoint list changed, so no endpoint change is silent. With a
+// store that cannot return the change atomically, the previous list is
+// read first; if that read fails the change is still audited, with the
+// "before" marked unknown and the read error logged.
+func (h *Handler) updateHostAudited(ctx context.Context, r *http.Request, host inventory.Host) error {
+	var (
+		ch        inventory.EndpointChange
+		committed bool
+		err       error
+	)
+	beforeKnown := true
+	if s, ok := h.inventory.(hostUpdateDiffer); ok {
+		_, ch, err = s.UpdateWithEndpointChange(ctx, host)
+		committed = ch.After != nil
+	} else {
+		prev, prevErr := h.inventory.Get(ctx, host.ID)
+		var updated inventory.Host
+		updated, err = h.inventory.Update(ctx, host)
+		committed = err == nil
+		if prevErr != nil {
+			beforeKnown = false
+			h.log.Error("read host before update", "host", host.ID, "error", prevErr)
+		}
+		ch = inventory.EndpointChange{Before: prev.Endpoints, After: updated.Endpoints}
+	}
+	if !committed {
+		return err
+	}
+	h.audit(r, "host_updated", host.ID)
+	switch {
+	case !beforeKnown:
+		h.log.Info("audit", "kind", "host_endpoints_changed", "host", host.ID, "user", webUser(r), "endpoint", "",
+			"before", "unknown", "after", endpointListText(ch.After))
+	case endpointListText(ch.Before) != endpointListText(ch.After):
+		h.auditEndpoints(r, "host_endpoints_changed", host.ID, "", ch)
+	}
+	return err
 }
 
 // handleHostFormCreate adds a host from the add form: a plain form POST
@@ -824,21 +878,13 @@ func (h *Handler) finishHostUpdate(w http.ResponseWriter, r *http.Request, in ho
 		http.Redirect(w, r, "/hosts/"+urlEscape(in.ID)+"?tab=settings&warn="+urlEscape(err.Error()), http.StatusSeeOther)
 		return
 	}
-	// The stored endpoint order before the update, for the audit line
-	// of an endpoint change (best effort: a failed read logs no diff).
-	prev, prevErr := h.inventory.Get(ctx, host.ID)
-	updated, err := h.inventory.Update(ctx, host)
-	if err != nil {
+	if err := h.updateHostAudited(ctx, r, host); err != nil {
 		if jsonIn {
 			h.answerStoreError(w, "update host", host.ID, err)
 			return
 		}
 		http.Redirect(w, r, "/hosts/"+urlEscape(in.ID)+"?tab=settings&warn="+urlEscape(storeErrorText(err)), http.StatusSeeOther)
 		return
-	}
-	h.audit(r, "host_updated", host.ID)
-	if prevErr == nil && endpointListText(prev.Endpoints) != endpointListText(updated.Endpoints) {
-		h.auditEndpoints(r, "host_endpoints_changed", host.ID, "", inventory.EndpointChange{Before: prev.Endpoints, After: updated.Endpoints})
 	}
 	if jsonIn {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "id": host.ID})
