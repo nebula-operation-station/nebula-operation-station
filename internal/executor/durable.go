@@ -147,12 +147,29 @@ func (s *Service) GetRun(_ context.Context, req *pb.GetRunRequest) (*pb.GetRunRe
 }
 
 func (s *Service) finishRun(r executordb.Run) {
+	s.finishRunChecked(r, "")
+}
+
+// finishRunChecked stores a run's outcome and audits it. The audit names
+// the endpoint the run record keeps (FinishRun keeps a stored dispatch
+// endpoint when r has none), so every close path — also one without a
+// connection — names where the job was dispatched. checkEndpoint, if not
+// empty, is the endpoint a reconcile check used; it is audited separately
+// and never replaces the dispatch endpoint (ep02).
+func (s *Service) finishRunChecked(r executordb.Run, checkEndpoint string) {
 	if err := s.db.FinishRun(r); err != nil {
 		s.log.Error("audit", "kind", "store_error", "op", "finish_run", "execution", r.ExecutionID, "host", r.HostID, "detail", err.Error())
 		return
 	}
+	endpoint := r.Endpoint
+	if stored, err := s.db.GetRun(r.ExecutionID, r.HostID); err != nil {
+		s.log.Error("audit", "kind", "store_error", "op", "get_run", "execution", r.ExecutionID, "host", r.HostID, "detail", err.Error())
+	} else {
+		endpoint = stored.Endpoint
+	}
 	s.log.Info("audit", "kind", "run_finished", "execution", r.ExecutionID, "host", r.HostID, "class", r.Class, "exit", r.ExitCode,
-		"endpoint", r.Endpoint, "result_bytes", len(r.Result), "log_bytes", len(r.Log), "log_truncated", r.LogTruncated)
+		"endpoint", endpoint, "check_endpoint", checkEndpoint,
+		"result_bytes", len(r.Result), "log_bytes", len(r.Log), "log_truncated", r.LogTruncated)
 	// The stage engine decides on the executor's own record of the run.
 	s.auth.RecordOutcome(r.ExecutionID, r.HostID, permit.OutcomeOfClass(r.Class))
 	// So does the batch rollout, for a durable batch member's run.
@@ -295,7 +312,12 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 	if since.IsZero() {
 		since = run.CreatedAt
 	}
-	fin := executordb.Run{ExecutionID: run.ExecutionID, HostID: run.HostID, ExitCode: -1, Endpoint: c.Endpoint.String()}
+	// The run keeps the endpoint it was dispatched on; the check endpoint
+	// (an alternate after failover) is audited beside it. A run never
+	// marked running has no dispatch endpoint: the one that found its
+	// state is recorded.
+	check := c.Endpoint.String()
+	fin := executordb.Run{ExecutionID: run.ExecutionID, HostID: run.HostID, ExitCode: -1, Endpoint: dispatchEndpoint(run, check)}
 	switch st.Phase {
 	case "missing":
 		if run.State == executordb.RunDispatching {
@@ -303,7 +325,7 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 		} else {
 			fin.Class, fin.Detail = classUnknown, "the job directory is gone; the outcome cannot be known (not re-run)"
 		}
-		s.finishRun(fin)
+		s.finishRunChecked(fin, check)
 		// The run directory (with any secrets) may outlive the job
 		// directory; remove both.
 		_ = hostrun.Remove(ctx, c.Client, s.jobs, run.ExecutionID)
@@ -313,13 +335,13 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 		// what the cut-off dispatch left behind.
 		if now.Sub(since) > stuckDispatched {
 			fin.Class, fin.Detail = classNotExecuted, "the dispatch was cut off before the job was stored"
-			s.finishRun(fin)
+			s.finishRunChecked(fin, check)
 			_ = hostrun.Remove(ctx, c.Client, s.jobs, run.ExecutionID)
 		}
 	case "dispatched":
 		if now.Sub(since) > stuckDispatched {
 			fin.Class, fin.Detail = classNotExecuted, "the job was stored but never started"
-			s.finishRun(fin)
+			s.finishRunChecked(fin, check)
 			_ = hostrun.Remove(ctx, c.Client, s.jobs, run.ExecutionID)
 		} else if run.State == executordb.RunDispatching {
 			_ = s.db.MarkRunRunning(run.ExecutionID, run.HostID, c.Endpoint.String())
@@ -333,7 +355,7 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 		if now.Sub(since) >= run.Timeout {
 			fin.Class, fin.Detail = hostrun.ClassExecutionTimeout, "the job did not finish within its timeout"
 		}
-		s.finishRun(fin)
+		s.finishRunChecked(fin, check)
 		// A killed job never ran its own cleanup: remove the job and run
 		// directories (and any secrets) now.
 		if err := hostrun.Remove(ctx, c.Client, s.jobs, run.ExecutionID); err != nil {
@@ -364,7 +386,7 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 			}
 			s.log.Info("audit", "kind", "run_awaits_reboot", "execution", run.ExecutionID, "host", run.HostID, "deadline", deadline.UTC())
 		} else {
-			s.finishRun(fin)
+			s.finishRunChecked(fin, check)
 		}
 		// Stored: the job directory can go (the tmpfiles rule is the
 		// fallback, spec 07).
@@ -374,12 +396,24 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 	}
 }
 
+// dispatchEndpoint is the endpoint a finished run records: the stored
+// dispatch endpoint if there is one, else the endpoint that checked it.
+func dispatchEndpoint(run executordb.Run, check string) string {
+	if run.Endpoint != "" {
+		return run.Endpoint
+	}
+	return check
+}
+
 // classHostNotReturned: a rebooted host did not come back (spec 07/11).
 const classHostNotReturned = "host_not_returned"
 
-func (s *Service) finishReboot(run executordb.Run, r executordb.RunReboot, class, detail, endpoint string) {
-	s.finishRun(executordb.Run{ExecutionID: run.ExecutionID, HostID: run.HostID, Class: class, Detail: detail, ExitCode: r.ExitCode,
-		Result: r.Result, Log: r.Log, LogTruncated: r.LogTruncated, Endpoint: endpoint})
+// finishReboot ends a run that waited for a reboot. checkEndpoint is the
+// endpoint the boot ID was read over ("" without a connection); the run
+// keeps its dispatch endpoint.
+func (s *Service) finishReboot(run executordb.Run, r executordb.RunReboot, class, detail, checkEndpoint string) {
+	s.finishRunChecked(executordb.Run{ExecutionID: run.ExecutionID, HostID: run.HostID, Class: class, Detail: detail, ExitCode: r.ExitCode,
+		Result: r.Result, Log: r.Log, LogTruncated: r.LogTruncated, Endpoint: dispatchEndpoint(run, checkEndpoint)}, checkEndpoint)
 	if err := s.db.DeleteRunReboot(run.ExecutionID, run.HostID); err != nil {
 		s.log.Error("audit", "kind", "store_error", "op", "delete_run_reboot", "detail", err.Error())
 	}

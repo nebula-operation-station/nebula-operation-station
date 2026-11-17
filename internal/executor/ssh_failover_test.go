@@ -291,6 +291,12 @@ func TestHandshakeTimeoutFailsOverWithinBounds(t *testing.T) {
 		if class, _ := connectClass(err); class != classNetworkUnreachable {
 			t.Errorf("connect class = %q, want %q", class, classNetworkUnreachable)
 		}
+		rec := requireFailoverFailed(t, e, sshtransport.ClassUnreachable)
+		wantSkipped := s1.addr + " " + sshtransport.StageHandshake + ", " + s2.addr + " " + sshtransport.StageHandshake
+		if rec.attrs["skipped"] != wantSkipped || rec.attrs["untried"] != good.addr {
+			t.Errorf("ssh_failover_failed skipped/untried = %q/%q, want %q/%q",
+				rec.attrs["skipped"], rec.attrs["untried"], wantSkipped, good.addr)
+		}
 	})
 
 	t.Run("caller deadline ends failover", func(t *testing.T) {
@@ -315,21 +321,87 @@ func TestHandshakeTimeoutFailsOverWithinBounds(t *testing.T) {
 		if good.connections() != 0 {
 			t.Fatalf("endpoint after the deadline saw %d connections, want 0", good.connections())
 		}
+		rec := requireFailoverFailed(t, e, sshtransport.ClassCanceled)
+		if rec.attrs["skipped"] != silent.addr+" "+sshtransport.StageHandshake || rec.attrs["untried"] != good.addr {
+			t.Errorf("ssh_failover_failed skipped/untried = %q/%q, want %s handshake/%s",
+				rec.attrs["skipped"], rec.attrs["untried"], silent.addr, good.addr)
+		}
 	})
+}
+
+// TestFailedFailoverIsAudited: when every endpoint fails, the audit names
+// each one with the stage it failed at, like a successful failover does.
+func TestFailedFailoverIsAudited(t *testing.T) {
+	t.Parallel()
+	e := newReconcileEnv(t)
+	hk := newHostKey(t)
+	e.pin(hk)
+	down := closedAddr(t)
+	silent := startBlackhole(t)
+	e.svc.transport.ConnectTimeout = 300 * time.Millisecond
+
+	_, err := e.svc.Connect(context.Background(), e.host, e.fp, mustEndpoints(t, down, silent.addr))
+	if sshtransport.ClassOf(err) != sshtransport.ClassUnreachable {
+		t.Fatalf("err = %v, want class %s", err, sshtransport.ClassUnreachable)
+	}
+	rec := requireFailoverFailed(t, e, sshtransport.ClassUnreachable)
+	want := down + " " + sshtransport.StageTCP + ", " + silent.addr + " " + sshtransport.StageHandshake
+	if rec.attrs["skipped"] != want || rec.attrs["untried"] != "" {
+		t.Errorf("ssh_failover_failed skipped/untried = %q/%q, want %q/\"\"", rec.attrs["skipped"], rec.attrs["untried"], want)
+	}
+	if rec.attrs["host"] != e.host {
+		t.Errorf("audit host = %v, want %s", rec.attrs["host"], e.host)
+	}
+	if n := len(e.logs.find("ssh_failover", "")); n != 0 {
+		t.Errorf("ssh_failover (success) audit records = %d, want 0", n)
+	}
+}
+
+// TestMismatchIsNoFailedFailover: a host key mismatch has its own audit
+// (host_key_mismatch); it is not reported as a failed failover.
+func TestMismatchIsNoFailedFailover(t *testing.T) {
+	t.Parallel()
+	e := newReconcileEnv(t)
+	hk := newHostKey(t)
+	e.pin(hk)
+	impostor := startTestSSHWithKey(t, e.userPub, sshModeNormal, newHostKey(t))
+	if _, err := e.svc.Connect(context.Background(), e.host, e.fp, mustEndpoints(t, closedAddr(t), impostor.addr)); sshtransport.ClassOf(err) != sshtransport.ClassHostKeyMismatch {
+		t.Fatalf("err = %v, want class %s", err, sshtransport.ClassHostKeyMismatch)
+	}
+	if n := len(e.logs.find("ssh_failover_failed", "")); n != 0 {
+		t.Errorf("ssh_failover_failed records after a mismatch = %d, want 0", n)
+	}
+}
+
+func requireFailoverFailed(t *testing.T, e *reconcileEnv, class sshtransport.Class) logRecord {
+	t.Helper()
+	recs := e.logs.find("ssh_failover_failed", "")
+	if len(recs) != 1 {
+		t.Fatalf("ssh_failover_failed audit records = %d, want 1", len(recs))
+	}
+	if recs[0].attrs["class"] != string(class) {
+		t.Errorf("ssh_failover_failed class = %v, want %s", recs[0].attrs["class"], class)
+	}
+	return recs[0]
 }
 
 // TestReconcileOverAlternateNeverRunsTwice: a durable run whose primary
 // went down after dispatch is checked over the alternate endpoint; the
-// check only reads the job state and never dispatches it again, and the
-// run and its audit name the endpoint actually used.
+// check only reads the job state and never dispatches it again. A run
+// dispatched on the primary keeps that endpoint; the audit names it and,
+// separately, the alternate that checked it. A run never marked running
+// records the endpoint that found its state.
 func TestReconcileOverAlternateNeverRunsTwice(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		state     string
 		wantClass string
+		// wantPrimary: the stored endpoint is the primary (dispatch), not
+		// the alternate (check).
+		wantPrimary bool
 	}{
-		{executordb.RunDispatching, classNotExecuted},
-		{executordb.RunRunning, classUnknown},
+		{executordb.RunDispatching, classNotExecuted, false},
+		{executordb.RunRunning, classUnknown, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.state, func(t *testing.T) {
@@ -352,13 +424,17 @@ func TestReconcileOverAlternateNeverRunsTwice(t *testing.T) {
 
 			e.reconcile(context.Background())
 
+			want := alt.addr
+			if tc.wantPrimary {
+				want = primary
+			}
 			r := e.requireFinished(id, tc.wantClass)
-			if r.Endpoint != alt.addr {
-				t.Errorf("run endpoint = %q, want the alternate %q", r.Endpoint, alt.addr)
+			if r.Endpoint != want {
+				t.Errorf("run endpoint = %q, want %q", r.Endpoint, want)
 			}
 			recs := e.logs.find("run_finished", id)
-			if len(recs) != 1 || recs[0].attrs["endpoint"] != alt.addr {
-				t.Fatalf("run_finished audit = %+v, want one naming %s", recs, alt.addr)
+			if len(recs) != 1 || recs[0].attrs["endpoint"] != want || recs[0].attrs["check_endpoint"] != alt.addr {
+				t.Fatalf("run_finished audit = %+v, want one with endpoint %s and check_endpoint %s", recs, want, alt.addr)
 			}
 			for _, cmd := range alt.commands() {
 				if strings.Contains(cmd, "systemd-run") || strings.Contains(cmd, "setsid") {
@@ -373,5 +449,76 @@ func TestReconcileOverAlternateNeverRunsTwice(t *testing.T) {
 				t.Fatalf("finished run was contacted again")
 			}
 		})
+	}
+}
+
+// TestRunFinishedAuditNamesStoredEndpoint: every close path audits the
+// endpoint the run record keeps. A run dispatched on a known endpoint and
+// then closed without a connection (deadline passed, unusable stored
+// endpoints, a not-dispatched record) still names that endpoint.
+func TestRunFinishedAuditNamesStoredEndpoint(t *testing.T) {
+	t.Parallel()
+	const dispatched = "192.0.2.10:22"
+	cases := []struct {
+		name      string
+		endpoints []string
+		wantClass string
+		close     func(e *reconcileEnv, id string)
+	}{
+		{"closeUncheckable", []string{"127.0.0.1:1"}, classUnknown, func(e *reconcileEnv, _ string) {
+			e.clock.Add(time.Hour)
+			e.reconcile(context.Background())
+			e.clock.Add(24 * time.Hour)
+			e.reconcile(context.Background())
+		}},
+		{"stored endpoints unusable", []string{"not an endpoint"}, classUnknown, func(e *reconcileEnv, _ string) {
+			e.reconcile(context.Background())
+		}},
+		{"not dispatched", []string{"127.0.0.1:1"}, classNetworkUnreachable, func(e *reconcileEnv, id string) {
+			e.svc.finishRun(executordb.Run{ExecutionID: id, HostID: e.host, Class: classNetworkUnreachable,
+				Detail: "not dispatched: unreachable", ExitCode: -1})
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newReconcileEnv(t)
+			e.pin(newHostKey(t))
+			id := newTestUUID()
+			if err := e.db.CreateRun(executordb.Run{ExecutionID: id, HostID: e.host, Digest: "endpoint-audit-digest",
+				Endpoints: tc.endpoints, Fingerprint: e.fp, Timeout: 10 * time.Minute}); err != nil {
+				t.Fatal(err)
+			}
+			if err := e.db.MarkRunRunning(id, e.host, dispatched); err != nil {
+				t.Fatal(err)
+			}
+
+			tc.close(e, id)
+
+			r := e.requireFinished(id, tc.wantClass)
+			if r.Endpoint != dispatched {
+				t.Errorf("run endpoint = %q, want the dispatch endpoint %q", r.Endpoint, dispatched)
+			}
+			recs := e.logs.find("run_finished", id)
+			if len(recs) != 1 || recs[0].attrs["endpoint"] != dispatched || recs[0].attrs["check_endpoint"] != "" {
+				t.Fatalf("run_finished audit = %+v, want one with endpoint %s and no check endpoint", recs, dispatched)
+			}
+		})
+	}
+}
+
+// TestRunFinishedAuditWithoutDispatchEndpoint: a run that never reached a
+// host keeps an empty endpoint, and the audit says so (no invented value).
+func TestRunFinishedAuditWithoutDispatchEndpoint(t *testing.T) {
+	t.Parallel()
+	e := newReconcileEnv(t)
+	e.pin(newHostKey(t))
+	id := e.createRun("127.0.0.1:1", 10*time.Minute)
+	e.svc.finishRun(executordb.Run{ExecutionID: id, HostID: e.host, Class: classNetworkUnreachable,
+		Detail: "not dispatched: unreachable", ExitCode: -1})
+	r := e.requireFinished(id, classNetworkUnreachable)
+	recs := e.logs.find("run_finished", id)
+	if r.Endpoint != "" || len(recs) != 1 || recs[0].attrs["endpoint"] != "" {
+		t.Fatalf("endpoint = %q, audit = %+v, want both empty", r.Endpoint, recs)
 	}
 }

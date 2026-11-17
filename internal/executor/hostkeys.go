@@ -69,6 +69,11 @@ func (s *Service) Connect(ctx context.Context, hostID, fingerprint string, endpo
 	var te *sshtransport.Error
 	if errors.As(err, &te) {
 		switch te.Class {
+		case sshtransport.ClassUnreachable, sshtransport.ClassCanceled:
+			// A failed failover is as visible as a successful one: every
+			// endpoint tried with its stage, and those never reached.
+			s.log.Warn("audit", "kind", "ssh_failover_failed", "host", hostID, "class", string(te.Class),
+				"skipped", skippedEndpoints(te.Attempts), "untried", untriedEndpoints(endpoints, te.Attempts))
 		case sshtransport.ClassHostKeyMismatch:
 			presented, endpoint := "", ""
 			if te.Presented != nil {
@@ -98,6 +103,21 @@ func skippedEndpoints(attempts []sshtransport.Attempt) string {
 	parts := make([]string, len(attempts))
 	for i, a := range attempts {
 		parts[i] = a.Endpoint.String() + " " + a.Stage
+	}
+	return strings.Join(parts, ", ")
+}
+
+// untriedEndpoints names the endpoints a failed dial never reached (it
+// stopped early: a second handshake failure or the caller's deadline).
+// sshtransport tries endpoints in order, one attempt each.
+func untriedEndpoints(endpoints []sshtransport.Endpoint, attempts []sshtransport.Attempt) string {
+	if len(attempts) >= len(endpoints) {
+		return ""
+	}
+	rest := endpoints[len(attempts):]
+	parts := make([]string, len(rest))
+	for i, ep := range rest {
+		parts[i] = ep.String()
 	}
 	return strings.Join(parts, ", ")
 }
