@@ -4,6 +4,8 @@ package notifylog
 
 import (
 	"context"
+	"errors"
+	"net/url"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -40,7 +42,7 @@ func sampleRecord() Record {
 		Kind:        "execution",
 		Host:        "web-1",
 		State:       "FAILED",
-		Reason:      "ssh timeout",
+		Reason:      ReasonTimeout,
 		ExecutionID: "ex-1",
 		Link:        "/executions/ex-1",
 		Outcome:     OutcomeSent,
@@ -90,6 +92,122 @@ func TestAppendRejectsUnknownOutcome(t *testing.T) {
 	r.Outcome = "maybe"
 	if _, err := s.Append(context.Background(), r); err == nil {
 		t.Fatal("unknown outcome was accepted")
+	}
+}
+
+// TestReasonRejectsFreeTextAndURLs: Reason is a closed code set. Anything
+// else is a caller bug and is refused, so no provider text can reach the log.
+func TestReasonRejectsFreeTextAndURLs(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	for _, bad := range []ReasonCode{
+		"ssh timeout",
+		"https://api.telegram.org/bot123456:SECRET/sendMessage",
+		"timeout?token=abc",
+		"timeout#access_token=abc",
+		"Timeout",
+	} {
+		r := sampleRecord()
+		r.Reason = bad
+		if _, err := s.Append(ctx, r); err == nil {
+			t.Fatalf("Append accepted reason %q", bad)
+		}
+	}
+	page, err := s.List(ctx, 0, MaxPage)
+	if err != nil || len(page) != 0 {
+		t.Fatalf("rejected reasons left %d rows (err %v); want none", len(page), err)
+	}
+}
+
+// TestProviderErrorWithTelegramURLNeverReachesLog: a *url.Error carries the
+// full target URL, and a Telegram URL carries the bot token. The caller maps
+// the error with ReasonForError, and no stored text may contain the token.
+func TestProviderErrorWithTelegramURLNeverReachesLog(t *testing.T) {
+	const token = "123456:SECRET-TOKEN-XYZ"
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	providerErr := &url.Error{
+		Op:  "Post",
+		URL: "https://api.telegram.org/bot" + token + "/sendMessage?chat_id=42",
+		Err: errors.New("dial tcp: connection refused"),
+	}
+	if !strings.Contains(providerErr.Error(), token) {
+		t.Fatal("test setup: provider error does not carry the token")
+	}
+
+	r := sampleRecord()
+	r.Outcome = OutcomeFailed
+	r.Reason = ReasonForError(providerErr)
+	if r.Reason != ReasonProviderUnreachable {
+		t.Fatalf("ReasonForError = %q, want %q", r.Reason, ReasonProviderUnreachable)
+	}
+	mustAppend(t, s, r)
+
+	rows, err := s.db.QueryContext(ctx, `SELECT kind, host, state, reason, execution_id, link, outcome FROM notify_log`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	n := 0
+	for rows.Next() {
+		var kind, host, state, reason, execID, link, outcome string
+		if err := rows.Scan(&kind, &host, &state, &reason, &execID, &link, &outcome); err != nil {
+			t.Fatal(err)
+		}
+		n++
+		for _, v := range []string{kind, host, state, reason, execID, link, outcome} {
+			for _, leak := range []string{token, "SECRET", "api.telegram.org", "bot", "sendMessage", "chat_id", "://"} {
+				if strings.Contains(v, leak) {
+					t.Fatalf("stored text %q contains %q", v, leak)
+				}
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("%d rows, want 1", n)
+	}
+}
+
+func TestReasonForErrorMapsErrorsToCodes(t *testing.T) {
+	timeout := &url.Error{Op: "Get", URL: "https://example.invalid/", Err: context.DeadlineExceeded}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want ReasonCode
+	}{
+		{"nil error has no reason", nil, ReasonNone},
+		{"deadline is a timeout", context.DeadlineExceeded, ReasonTimeout},
+		{"url error timeout is a timeout", timeout, ReasonTimeout},
+		{"url error is provider unreachable", &url.Error{Op: "Get", URL: "https://x.invalid/", Err: errors.New("refused")}, ReasonProviderUnreachable},
+		{"other error is internal", errors.New("boom"), ReasonInternal},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ReasonForError(tc.err); got != tc.want {
+				t.Fatalf("ReasonForError = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestReasonCodesAreTheDocumentedSet(t *testing.T) {
+	got := []ReasonCode{ReasonNone, ReasonRateLimited, ReasonMuted, ReasonProviderUnreachable,
+		ReasonProviderRejected, ReasonTimeout, ReasonInternal}
+	want := []ReasonCode{"", "rate_limited", "muted", "provider_unreachable",
+		"provider_rejected", "timeout", "internal"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("reason codes = %q, want %q", got, want)
+	}
+}
+
+func TestSchemaRejectsURLReason(t *testing.T) {
+	s, _ := newTestStore(t)
+	_, err := s.db.Exec(`INSERT INTO notify_log (at, kind, host, state, reason, execution_id, link, outcome, providers, changed)
+		VALUES (1, 'execution', 'h', 'FAILED', 'https://api.telegram.org/bot1:x/sendMessage', '', '', 'failed', 0, 0)`)
+	if err == nil {
+		t.Fatal("the database accepted a URL as reason")
 	}
 }
 
@@ -206,7 +324,7 @@ func TestPruneRemovesEntriesOlderThanRetention(t *testing.T) {
 	clk.t = clk.t.Add(Retention)
 	mustAppend(t, s, sampleRecord())
 
-	removed, err := s.Prune(ctx, clk.t)
+	removed, err := s.Prune(ctx)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
@@ -222,15 +340,55 @@ func TestPruneRemovesEntriesOlderThanRetention(t *testing.T) {
 	}
 }
 
-func TestPruneRemovesOldestBeyondMaxEntries(t *testing.T) {
+// TestPruneKeepsEntryWrittenExactlyRetentionAgo pins the boundary: an entry
+// written exactly Retention ago is kept, and one second later it is removed.
+func TestPruneKeepsEntryWrittenExactlyRetentionAgo(t *testing.T) {
 	s, clk := newTestStore(t)
+	ctx := context.Background()
+	mustAppend(t, s, sampleRecord()) // written at clk.t
+
+	clk.t = clk.t.Add(Retention)
+	removed, err := s.Prune(ctx)
+	if err != nil || removed != 0 {
+		t.Fatalf("Prune at exactly Retention = %d, %v; want 0, nil (entry is kept)", removed, err)
+	}
+
+	clk.t = clk.t.Add(time.Second)
+	removed, err = s.Prune(ctx)
+	if err != nil || removed != 1 {
+		t.Fatalf("Prune one second later = %d, %v; want 1, nil", removed, err)
+	}
+}
+
+// TestPruneUsesInjectedClock: Prune has no time argument. It ages entries on
+// the Store's clock, the same clock Append stamps entries with.
+func TestPruneUsesInjectedClock(t *testing.T) {
+	s, clk := newTestStore(t)
+	ctx := context.Background()
+	mustAppend(t, s, sampleRecord())
+
+	clk.t = clk.t.Add(Retention + time.Hour)
+	mustAppend(t, s, sampleRecord()) // stamped with the same clock, so it is recent
+
+	removed, err := s.Prune(ctx)
+	if err != nil || removed != 1 {
+		t.Fatalf("Prune = %d, %v; want 1, nil (only the old entry)", removed, err)
+	}
+	page, err := s.List(ctx, 0, MaxPage)
+	if err != nil || len(page) != 1 || !page[0].At.Equal(clk.t) {
+		t.Fatalf("left %+v (err %v); want the entry stamped at the injected time %v", page, err, clk.t)
+	}
+}
+
+func TestPruneRemovesOldestBeyondMaxEntries(t *testing.T) {
+	s, _ := newTestStore(t)
 	ctx := context.Background()
 	const extra = 7
 	for i := 0; i < MaxEntries+extra; i++ {
 		mustAppend(t, s, sampleRecord())
 	}
 
-	removed, err := s.Prune(ctx, clk.t)
+	removed, err := s.Prune(ctx)
 	if err != nil {
 		t.Fatalf("Prune: %v", err)
 	}
@@ -262,9 +420,9 @@ func TestPruneRemovesOldestBeyondMaxEntries(t *testing.T) {
 }
 
 func TestPruneIsNoOpWithinLimits(t *testing.T) {
-	s, clk := newTestStore(t)
+	s, _ := newTestStore(t)
 	mustAppend(t, s, sampleRecord())
-	removed, err := s.Prune(context.Background(), clk.t)
+	removed, err := s.Prune(context.Background())
 	if err != nil || removed != 0 {
 		t.Fatalf("Prune = %d, %v; want 0, nil", removed, err)
 	}
@@ -275,7 +433,7 @@ func TestHostileTextIsCleanedAndStored(t *testing.T) {
 	ctx := context.Background()
 	r := sampleRecord()
 	r.Host = "web\x00-1\x1b[31m" + string(rune(0x202E)) + "evil" + string(rune(0x200B)) + string(rune(0xFEFF))
-	r.Reason = "line one\nline two\r\tend \xff bad utf8"
+	r.Kind = "exe\ncution \xff bad utf8"
 	r.State = "FAILED" + string(rune(0x2066)) + "x" + string(rune(0x2069))
 	seq := mustAppend(t, s, r)
 
@@ -284,7 +442,7 @@ func TestHostileTextIsCleanedAndStored(t *testing.T) {
 		t.Fatalf("List: %v, %+v", err, page)
 	}
 	got := page[0]
-	for _, v := range []string{got.Host, got.Reason, got.State} {
+	for _, v := range []string{got.Host, got.Kind, got.State} {
 		if !utf8.ValidString(v) {
 			t.Fatalf("stored text is not valid UTF-8: %q", v)
 		}
@@ -297,8 +455,8 @@ func TestHostileTextIsCleanedAndStored(t *testing.T) {
 			}
 		}
 	}
-	if !strings.Contains(got.Reason, "line one line two") {
-		t.Fatalf("line breaks were not turned into spaces: %q", got.Reason)
+	if !strings.Contains(got.Kind, "exe cution") {
+		t.Fatalf("line breaks were not turned into spaces: %q", got.Kind)
 	}
 	if got.Changed != 0 {
 		t.Fatalf("Changed = %b; cleaning alone must not mark a field as shortened", got.Changed)
@@ -309,7 +467,7 @@ func TestOverlongFieldIsShortenedAndMarkedNotRejected(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
 	r := sampleRecord()
-	r.Reason = strings.Repeat("a", MaxReason+100)
+	r.ExecutionID = strings.Repeat("a", MaxExecutionID+100)
 	r.Host = strings.Repeat("ä", MaxHost) // 2 bytes per rune: twice the byte limit
 	mustAppend(t, s, r)
 
@@ -318,17 +476,54 @@ func TestOverlongFieldIsShortenedAndMarkedNotRejected(t *testing.T) {
 		t.Fatalf("List: %v", err)
 	}
 	got := page[0]
-	if len(got.Reason) != MaxReason {
-		t.Fatalf("Reason has %d bytes, want %d", len(got.Reason), MaxReason)
+	if len(got.ExecutionID) != MaxExecutionID {
+		t.Fatalf("ExecutionID has %d bytes, want %d", len(got.ExecutionID), MaxExecutionID)
 	}
 	if len(got.Host) > MaxHost || !utf8.ValidString(got.Host) {
 		t.Fatalf("Host %q exceeds %d bytes or is not valid UTF-8", got.Host, MaxHost)
 	}
-	if !got.Changed.Has(FieldReason) || !got.Changed.Has(FieldHost) {
-		t.Fatalf("Changed = %b, want reason and host marked", got.Changed)
+	if !got.Changed.Has(FieldExecutionID) || !got.Changed.Has(FieldHost) {
+		t.Fatalf("Changed = %b, want execution id and host marked", got.Changed)
 	}
 	if got.Changed.Has(FieldState) || got.Changed.Has(FieldKind) {
 		t.Fatalf("Changed = %b marks fields that were not shortened", got.Changed)
+	}
+}
+
+// TestNOSLinkRules checks isNOSLink one rule at a time: each bad value breaks
+// exactly one rule, so removing any single check makes a case fail.
+func TestNOSLinkRules(t *testing.T) {
+	good := []string{"/", "/executions/ex-1", "/a:b/c", "/x.y~z_-"}
+	bad := map[string]string{
+		"empty":                  "",
+		"no leading slash":       "executions/ex-1",
+		"https url":              "https://ntfy.example.invalid/topic",
+		"scheme-relative":        "//evil.example/x",
+		"javascript":             "javascript:alert(1)",
+		"backslash after slash":  "/\\evil.example/x",
+		"backslash in path":      "/x\\y",
+		"slash in path":          "/x//y",
+		"tab after slash":        "/\tevil.example/x",
+		"newline after slash":    "/\n/evil.example/x",
+		"space":                  "/a b",
+		"query with token":       "/x?token=a",
+		"bare query mark":        "/x?",
+		"fragment with token":    "/x#access_token=a",
+		"bare fragment mark":     "/x#",
+		"absolute url in path":   "/x://evil.example",
+		"non-ASCII":              "/ä",
+		"nul byte":               "/x\x00y",
+		"del byte":               "/x\x7fy",
+	}
+	for _, v := range good {
+		if !isNOSLink(v) {
+			t.Errorf("isNOSLink(%q) = false, want true", v)
+		}
+	}
+	for name, v := range bad {
+		if isNOSLink(v) {
+			t.Errorf("%s: isNOSLink(%q) = true, want false", name, v)
+		}
 	}
 }
 
@@ -338,6 +533,9 @@ func TestLinkMustBeNOSPathOtherwiseDropped(t *testing.T) {
 	for _, bad := range []string{
 		"https://ntfy.example.invalid/topic?token=abc",
 		"//evil.example/x",
+		"/\\evil.example/x",
+		"/x#access_token=a",
+		"/x?token=a",
 		"javascript:alert(1)",
 	} {
 		r := sampleRecord()
@@ -351,8 +549,8 @@ func TestLinkMustBeNOSPathOtherwiseDropped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(page) != 4 {
-		t.Fatalf("%d entries, want 4 (a bad link never drops the message)", len(page))
+	if len(page) != 7 {
+		t.Fatalf("%d entries, want 7 (a bad link never drops the message)", len(page))
 	}
 	if page[0].Link != good.Link || page[0].Changed.Has(FieldLink) {
 		t.Fatalf("good link altered: %+v", page[0])

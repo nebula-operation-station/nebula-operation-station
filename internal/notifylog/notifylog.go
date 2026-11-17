@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"strings"
 	"time"
 	"unicode"
@@ -43,7 +44,6 @@ const (
 	MaxKind        = 64
 	MaxHost        = 64
 	MaxState       = 64
-	MaxReason      = 300
 	MaxExecutionID = 128
 	MaxLink        = 256
 	// MaxProviders is the largest provider count stored. Larger counts are
@@ -71,6 +71,53 @@ func (o Outcome) valid() bool {
 	return false
 }
 
+// ReasonCode says why an event was held back or failed. It is a closed set:
+// free text is never stored, so a provider error text, a target URL or a
+// token cannot reach the log through the reason. The values are stored as-is
+// and must match the CHECK constraint in migration 0045.
+type ReasonCode string
+
+// Reason codes. ReasonNone is the empty code, for events with no reason
+// (for example a sent event).
+const (
+	ReasonNone                ReasonCode = ""
+	ReasonRateLimited         ReasonCode = "rate_limited"
+	ReasonMuted               ReasonCode = "muted"
+	ReasonProviderUnreachable ReasonCode = "provider_unreachable"
+	ReasonProviderRejected    ReasonCode = "provider_rejected"
+	ReasonTimeout             ReasonCode = "timeout"
+	ReasonInternal            ReasonCode = "internal"
+)
+
+func (c ReasonCode) valid() bool {
+	switch c {
+	case ReasonNone, ReasonRateLimited, ReasonMuted, ReasonProviderUnreachable,
+		ReasonProviderRejected, ReasonTimeout, ReasonInternal:
+		return true
+	}
+	return false
+}
+
+// ReasonForError maps an error from a notification provider to a reason
+// code. It returns the code only, never err.Error(): a *url.Error carries the
+// full target URL, and a Telegram URL carries the bot token in its path.
+func ReasonForError(err error) ReasonCode {
+	if err == nil {
+		return ReasonNone
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return ReasonTimeout
+	}
+	var ne net.Error
+	if errors.As(err, &ne) {
+		if ne.Timeout() {
+			return ReasonTimeout
+		}
+		return ReasonProviderUnreachable
+	}
+	return ReasonInternal
+}
+
 // Field identifies one text field of an entry. Entry.Changed is a set of
 // Fields.
 type Field uint8
@@ -80,7 +127,6 @@ const (
 	FieldKind Field = 1 << iota
 	FieldHost
 	FieldState
-	FieldReason
 	FieldExecutionID
 	FieldLink
 )
@@ -97,8 +143,9 @@ type Record struct {
 	Host string
 	// State is the event state, for example "FAILED".
 	State string
-	// Reason is a short human-readable reason.
-	Reason string
+	// Reason is a closed reason code. Append rejects any other value. Use
+	// ReasonForError to map a provider error to a code.
+	Reason ReasonCode
 	// ExecutionID is the execution the event belongs to, if any.
 	ExecutionID string
 	// Link is a NOS UI link (a path starting with "/"). Anything else is
@@ -143,12 +190,16 @@ func New(db *sql.DB, now func() time.Time) (*Store, error) {
 
 // Append stores r and returns its sequence number. Text fields are cleaned
 // and shortened as described in the package comment. A Link that is not a
-// NOS path (it must start with "/", not "//", and contain neither "://" nor
-// "?") is stored empty and marked as changed. Only an unknown Outcome is an
-// error, because it is a caller bug and not a property of the event.
+// NOS path (see isNOSLink) is stored empty and marked as changed. An unknown
+// Outcome or Reason is an error, because it is a caller bug and not a
+// property of the event: a Reason that is not a code (a URL, a provider
+// message) is refused, so it can never be stored.
 func (s *Store) Append(ctx context.Context, r Record) (int64, error) {
 	if !r.Outcome.valid() {
 		return 0, fmt.Errorf("notifylog: append: unknown outcome %q", r.Outcome)
+	}
+	if !r.Reason.valid() {
+		return 0, fmt.Errorf("notifylog: append: reason is not a reason code")
 	}
 	var changed Field
 	kind, cut := clean(r.Kind, MaxKind)
@@ -157,8 +208,6 @@ func (s *Store) Append(ctx context.Context, r Record) (int64, error) {
 	changed = mark(changed, FieldHost, cut)
 	state, cut := clean(r.State, MaxState)
 	changed = mark(changed, FieldState, cut)
-	reason, cut := clean(r.Reason, MaxReason)
-	changed = mark(changed, FieldReason, cut)
 	execID, cut := clean(r.ExecutionID, MaxExecutionID)
 	changed = mark(changed, FieldExecutionID, cut)
 
@@ -175,7 +224,7 @@ func (s *Store) Append(ctx context.Context, r Record) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `INSERT INTO notify_log
 		(at, kind, host, state, reason, execution_id, link, outcome, providers, changed)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		s.now().UTC().Unix(), kind, host, state, reason, execID, link, string(r.Outcome), providers, int(changed))
+		s.now().UTC().Unix(), kind, host, state, string(r.Reason), execID, link, string(r.Outcome), providers, int(changed))
 	if err != nil {
 		return 0, fmt.Errorf("notifylog: append: %w", err)
 	}
@@ -231,17 +280,19 @@ func (s *Store) List(ctx context.Context, afterSeq int64, limit int) ([]Entry, e
 	return out, nil
 }
 
-// Prune removes entries older than Retention relative to now (an entry
+// Prune removes entries older than Retention on the Store's clock (an entry
 // written exactly Retention ago is kept), then removes the oldest entries
-// beyond MaxEntries. It returns the number of entries removed.
-func (s *Store) Prune(ctx context.Context, now time.Time) (int64, error) {
+// beyond MaxEntries. It returns the number of entries removed. Prune reads
+// the same clock as Append, so the retention boundary follows the injected
+// time.
+func (s *Store) Prune(ctx context.Context) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, fmt.Errorf("notifylog: prune: begin: %w", err)
 	}
 	defer tx.Rollback()
 
-	cutoff := now.Add(-Retention).UTC().Unix()
+	cutoff := s.now().Add(-Retention).UTC().Unix()
 	res, err := tx.ExecContext(ctx, `DELETE FROM notify_log WHERE at < ?`, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("notifylog: prune by age: %w", err)
@@ -275,11 +326,28 @@ func mark(set, f Field, cut bool) Field {
 	return set
 }
 
-// isNOSLink reports whether s looks like a NOS UI path. It rejects absolute
-// URLs, scheme-relative URLs and query strings, where provider tokens live.
+// isNOSLink reports whether s is a plain NOS UI path such as
+// "/executions/ex-1". Browsers normalize a link before they follow it: they
+// turn backslashes into slashes and drop tabs and newlines. So the check is
+// strict and runs before any cleaning. It rejects:
+//   - anything that does not start with "/"
+//   - "//" anywhere (a scheme-relative URL, also after normalization)
+//   - backslashes, "?" (query) and "#" (fragment), where tokens live
+//   - "://" (an absolute URL in the path)
+//   - bytes outside printable ASCII 0x21-0x7E: spaces, controls and non-ASCII
 func isNOSLink(s string) bool {
-	return strings.HasPrefix(s, "/") && !strings.HasPrefix(s, "//") &&
-		!strings.Contains(s, "://") && !strings.Contains(s, "?")
+	if !strings.HasPrefix(s, "/") {
+		return false
+	}
+	if strings.Contains(s, "//") || strings.Contains(s, "://") || strings.ContainsAny(s, `\?#`) {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if c := s[i]; c < 0x21 || c > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // clean returns s with line breaks turned into spaces and every control,
