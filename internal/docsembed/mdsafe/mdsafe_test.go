@@ -281,6 +281,26 @@ func TestUmlautHeadingAnchorsAgree(t *testing.T) {
 	}
 }
 
+// TestFragmentFoldingToNothingRendersText checks that a fragment which
+// anchorFold maps to the empty string is not an id: the link renders its
+// text only, even when the resolver would accept the page.
+func TestFragmentFoldingToNothingRendersText(t *testing.T) {
+	relative := func(string, string) (string, bool) { return "/help/a", true }
+	for _, src := range []string{"[x](a.md#日本)", "[x](#日本)"} {
+		res, err := mdsafe.Render([]byte(src), mdsafe.Options{Relative: relative})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := string(res.HTML)
+		if strings.Contains(out, "<a") {
+			t.Errorf("Render(%q) produced a link: %s", src, out)
+		}
+		if !strings.Contains(out, "x") {
+			t.Errorf("Render(%q) lost the link text: %s", src, out)
+		}
+	}
+}
+
 // TestResolverFragmentOutsideIDFormIsRejected checks that a resolver
 // result whose fragment is not in heading-id form never becomes a link.
 func TestResolverFragmentOutsideIDFormIsRejected(t *testing.T) {
