@@ -806,20 +806,25 @@ func netDevCredRevokeReason(expectedVersion int64) string {
 	return "network device credential rotated"
 }
 
-// credentialNotStored handles a failed vault commit. The block a credential
-// write set is lifted only when the stored version is readable and is not
-// the one this write targeted; otherwise (an ambiguous commit, or that
-// version written meanwhile) the device's leases are revoked like after a
-// commit and the block stays unless that revocation succeeded.
+// credentialNotStored handles a failed vault commit. A refusal by the
+// write's own version check (ErrNetDevCredentialExists,
+// ErrNetDevCredentialVersion) committed nothing and lifts the block. For
+// any other failure the block is lifted only when the stored version is
+// readable and is not the one this write targeted; otherwise (an ambiguous
+// commit, or that version written meanwhile) the device's leases are
+// revoked like after a commit and the block stays unless that revocation
+// succeeded.
 func (a *NetDevAdmin) credentialNotStored(id, ref string, want int64, weBlocked bool, cause error) error {
-	cur, verr := a.credentialVersion(ref)
-	if verr != nil || cur == want {
-		if err := a.revoke(id, "network device credential write failed"); err != nil {
-			return errors.Join(cause, err)
-		}
-		if verr != nil {
-			// The stored state is unknown: keep the block (fail closed).
-			return errors.Join(cause, fmt.Errorf("network device %s stays blocked: credential version: %w", id, verr))
+	if !errors.Is(cause, ErrNetDevCredentialExists) && !errors.Is(cause, ErrNetDevCredentialVersion) {
+		cur, verr := a.credentialVersion(ref)
+		if verr != nil || cur == want {
+			if err := a.revoke(id, "network device credential write failed"); err != nil {
+				return errors.Join(cause, err)
+			}
+			if verr != nil {
+				// The stored state is unknown: keep the block (fail closed).
+				return errors.Join(cause, fmt.Errorf("network device %s stays blocked: credential version: %w", id, verr))
+			}
 		}
 	}
 	if !weBlocked {
