@@ -100,11 +100,15 @@ var (
 	// relativeDestRE is the only accepted relative destination form.
 	relativeDestRE = regexp.MustCompile(`^[A-Za-z0-9._/-]*(#[\pL\pN_-]*)?$`)
 	// localHrefRE is the only accepted form of a Relative result: /help
-	// or /help/<segment>..., with an optional fragment. Segments are
-	// lower-case letters, digits, "_" and "-", so "." and ".." segments,
-	// upper case and "//" are rejected. Every match also passes the
-	// assertInert allowlist for "a" in the tests.
-	localHrefRE = regexp.MustCompile(`^/help(/[a-z0-9_-]+)*(#[\pL\pN_-]+)?$`)
+	// or /help/<segment>..., with an optional fragment. Segments and the
+	// fragment are lower-case ASCII letters, digits, "_" and "-", so "."
+	// and ".." segments, upper case, non-ASCII and "//" are rejected.
+	// Every match also passes the assertInert allowlist for "a" in the
+	// tests.
+	localHrefRE = regexp.MustCompile(`^/help(/[a-z0-9_-]+)*(#[a-z0-9_-]+)?$`)
+	// anchorRE is the fragment form of a local link: the id form that
+	// Slug produces for ASCII headings.
+	anchorRE = regexp.MustCompile(`^[a-z0-9_-]+$`)
 	// fragmentRE is the accepted fragment ("#…") of a same-page link.
 	fragmentRE = regexp.MustCompile(`^[\pL\pN_-]+$`)
 	// tableSepRE matches a table's header separator row.
@@ -729,6 +733,13 @@ func (r *renderer) resolve(dest string) (href string, external, ok bool) {
 		return "#" + frag, false, true
 	}
 	if r.o.Relative == nil {
+		return "", false, false
+	}
+	// Heading ids are lower case, so "#Add" names the id "add". Upper case
+	// is folded; a fragment that is still not in id form (non-ASCII
+	// letters) renders the link text only.
+	frag = strings.ToLower(frag)
+	if frag != "" && !anchorRE.MatchString(frag) {
 		return "", false, false
 	}
 	h, ok := r.o.Relative(p, frag)
