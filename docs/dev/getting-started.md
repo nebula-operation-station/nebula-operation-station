@@ -54,15 +54,20 @@ make check        # lint, generate-check, test, test-deploy, vuln
 - `vuln`: `govulncheck`.
 
 `make build` compiles every package under `cmd/` into `bin/`. That is more
-than Nebula ships: the list of binaries in a release is in
+than Nebula ships: the binaries of the NOS package and image are listed in
 [`deploy/quickstart/binaries.txt`](../../deploy/quickstart/binaries.txt),
-and the install script reads that same list.
+and the install script reads that same list. The release tarball also
+carries `nebula-vuln-agent` (its own `.deb`, installed with
+`install.sh --vuln-agent`); see `.goreleaser.yaml`.
 
 Other targets:
 
 - `make test`: the unit tests only, without the deployment tests.
-- `make fuzz`: runs each fuzz target for 20 seconds (a smoke run, not a
-  campaign).
+- `make fuzz`: runs a fixed list of fuzz targets (see the `fuzz` target
+  in the `Makefile`) for 20 seconds each, a smoke run, not a campaign. Most
+  `Fuzz*` functions are not in that list; run one with
+  `go test -run='^$' -fuzz='^FuzzName$' ./path/`
+  (`docs/implementation/security-tests.md` has the inventory).
 - `make test-integration`: runs `test/integration` against SSH test VMs
   (spec 08, H05).
 - `make test-browser`: runs the browser tests in `test/browser/run.sh`;
