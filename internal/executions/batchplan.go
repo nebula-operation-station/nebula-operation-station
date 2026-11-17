@@ -166,6 +166,9 @@ type BatchOptions struct {
 	// Recreations lists the executor's container recreation rows, the
 	// source of a docker.compose_rollback binding. Nil refuses rollbacks.
 	Recreations RecreationLister
+	// Suggestions marks members that a stored fix note covers (ADR 0016 D9).
+	// Nil means no member is marked.
+	Suggestions SuggestionIndex
 }
 
 // ActionResolver resolves a module or runbook action at an exact version.
@@ -186,6 +189,7 @@ type Batches struct {
 	containers  ContainerBindings
 	actions     ActionResolver
 	recreations RecreationLister
+	suggest     SuggestionIndex
 }
 
 // NewBatches returns a batch planner.
@@ -194,7 +198,7 @@ func NewBatches(o BatchOptions) (*Batches, error) {
 		return nil, errors.New("batches: executor, database and inventory are required")
 	}
 	b := &Batches{exec: o.Exec, db: o.DB, hosts: o.Hosts, log: o.Log, now: o.Now, credVer: o.CredentialVersion, containers: o.Containers, actions: o.Actions,
-		recreations: o.Recreations}
+		recreations: o.Recreations, suggest: o.Suggestions}
 	if b.log == nil {
 		b.log = slog.New(slog.DiscardHandler)
 	}
@@ -277,6 +281,8 @@ type plannedMember struct {
 	params []byte
 	member canonical.BatchMember
 	pin    *pb.HostKeyPin
+	// origin is the member's execution origin (empty when not attributed).
+	origin string
 }
 
 // plan expands and validates req into a canonical batch-v1 document. It
@@ -448,6 +454,12 @@ func (b *Batches) planMember(ctx context.Context, spec BatchMemberSpec, pinOf ma
 			return plannedMember{}, err
 		}
 	}
+	// A member that a fix note covers is proposed at least MEDIUM (D9). The
+	// executor's answer must carry that class; checkAnswer enforces it.
+	origin := matchOrigin(b.suggest, a.ID, []string{spec.HostID})
+	if origin != "" {
+		risk = canonical.MaxRisk(risk, canonical.RiskMedium)
+	}
 	ref := p.GetCredentialRef()
 	ver, ok := versions[ref]
 	if !ok {
@@ -490,7 +502,7 @@ func (b *Batches) planMember(ctx context.Context, spec BatchMemberSpec, pinOf ma
 		}
 		m.Container = &c
 	}
-	return plannedMember{stage: stage, action: a, params: paramsJSON, member: m, pin: p}, nil
+	return plannedMember{stage: stage, action: a, params: paramsJSON, member: m, pin: p, origin: origin}, nil
 }
 
 // boundMemberParams derives the parameters of a bound batch member (G5b,
@@ -614,8 +626,14 @@ func (b *Batches) ProposeBatch(ctx context.Context, user string, req BatchReques
 	if err := b.store(ctx, user, c, resp, frozen, members); err != nil {
 		return BatchCreated{}, err
 	}
+	suggested := 0
+	for _, m := range members {
+		if m.origin != "" {
+			suggested++
+		}
+	}
 	b.log.Info("audit", "kind", "batch_proposed", "batch", c.ID, "digest", c.Digest, "risk", c.Risk,
-		"members", len(members), "stages", len(doc.StagePlan.Stages), "user", user)
+		"members", len(members), "suggested_members", suggested, "stages", len(doc.StagePlan.Stages), "user", user)
 	return c, nil
 }
 
