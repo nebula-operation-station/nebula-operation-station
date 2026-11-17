@@ -203,6 +203,30 @@ func (n *Notifier) SetRecorder(r Recorder) {
 // not keep up. Dropped records are not in the log.
 func (n *Notifier) RecordsDropped() int64 { return n.recDropped.Load() }
 
+// FlushRecords waits until the log writes in flight have ended, or until ctx
+// ends. It holds every write slot while it waits, so a record that arrives
+// meanwhile is dropped; call it when sending has stopped (shutdown, tests).
+func (n *Notifier) FlushRecords(ctx context.Context) error {
+	if n.recSlots == nil {
+		return nil
+	}
+	taken := 0
+	defer func() {
+		for ; taken > 0; taken-- {
+			<-n.recSlots
+		}
+	}()
+	for taken < cap(n.recSlots) {
+		select {
+		case n.recSlots <- struct{}{}:
+			taken++
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
 // record stores r in the notification log. The write runs in its own
 // goroutine, so a slow or locked database never delays a send or the next
 // notification; the caller does not wait for it. The write uses a context that

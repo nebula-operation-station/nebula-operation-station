@@ -150,3 +150,32 @@ func waitStart(t *testing.T, g *gateRecorder) writeStart {
 	}
 	return writeStart{}
 }
+
+// TestFlushRecordsWaitsForWritesInFlight: FlushRecords returns only after the
+// writes in flight have ended, and returns ctx's error when it gives up first.
+func TestFlushRecordsWaitsForWritesInFlight(t *testing.T) {
+	rec := newGateRecorder(t)
+	n := NewWithSenders(quiet(), nil, &stubSender{name: "ntfy"})
+	n.SetRecorder(rec)
+	if got := n.Notify(context.Background(), Event{Kind: kindVulnKEVNew, Host: "web01", State: "critical", Time: testNow}); got != 1 {
+		t.Fatalf("Notify = %d, want 1", got)
+	}
+	waitStart(t, rec)
+
+	short, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := n.FlushRecords(short); err == nil {
+		t.Fatal("FlushRecords returned while a write was blocked")
+	}
+	done := make(chan error, 1)
+	go func() { done <- n.FlushRecords(context.Background()) }()
+	select {
+	case err := <-done:
+		t.Fatalf("FlushRecords returned %v before the write ended", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	rec.release <- struct{}{}
+	if err := <-done; err != nil {
+		t.Fatalf("FlushRecords = %v, want nil", err)
+	}
+}
