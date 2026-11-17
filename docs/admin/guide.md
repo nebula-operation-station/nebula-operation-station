@@ -1305,6 +1305,33 @@ as LOW (section 8.1) with the host recorded at a criticality (`nebula host
 pin --criticality`). `package.refresh`, `docker.logs` and secret-bearing
 actions are excluded even when rated LOW.
 
+When the executor refuses a proposal because something is not LOW, its
+refusal (`schedule_grant_invalid`) now names every blocking host, not just
+the first one. For a read lease that is every blocking host of the first
+blocked action. For a legacy schedule grant it is every blocking (action,
+host) pair. Up to 50 are listed, then "… and N more". Each entry names
+only the action, the host and the level (for example
+`core.facts@1.0.0 is MEDIUM on web-01`), or says that a container
+mutation cannot be granted on any host. The reason (no criticality
+record, CRITICAL host, artifact not trusted, trusted above LOW, safety
+scanner finding) is not in the refusal: like every risk reason it goes to
+the executor's audit log only. Leaving the listed actions or hosts out
+always makes the proposal acceptable; to keep them in, look up the reason
+in the audit log and fix that instead (`nebula host criticality`,
+`nebula artifact trust-builtins` or `nebula artifact trust`, sections 8.1
+and 8.2).
+
+The rule itself is unchanged: one pair that is not LOW refuses the
+whole lease. The executor's audit log has one `rejected` entry per
+pair the risk policy refused, with the full reason, up to 50 entries,
+then one entry "N more action/host pairs not LOW". If the risk policy
+fails after a refusal was found, the refusal says the remaining pairs
+were not checked, and the failure has its own `rejected` entry
+(`storage_error`). The
+web form still shows only "the executor did not accept the read grant
+proposal". It does not yet list the blocking hosts before submitting or
+offer to leave them out.
+
 Budgets. Each host may run the lease at most 24 times in a rolling hour by
 default, at most 240; the allowance is shared across actions and both
 triggers, with a 15-minute per-action floor. Failed or disconnected
