@@ -1,15 +1,41 @@
 # Help assistant plan (ADR 0014)
 
-Status: **plan, not started, 2026-11-11.** Waiting for the maintainer's
-answers to the open questions of
-[ADR 0014](../adr/0014-help-assistant.md) (Proposed). Release placement
-(Q11, recommended): after hb01 (docs embedded and served under `/help`) and
-va09 (LLM settings model).
+Status: **accepted ADR, partly built, re-check 2026-11-18.** (previously:
+"plan, not started, 2026-11-11. Waiting for the maintainer's answers to the
+open questions of ADR 0014 (Proposed)"). [ADR 0014](../adr/0014-help-assistant.md)
+is Accepted, 2026-11-12, with Q1–Q12 decided (its section "Maintainer
+decisions 2026-11-12"). The table "Status on main (2026-11-18)" below says
+what is built and what is open. Release placement (Q11, recommended): after
+hb01 (docs embedded and served under `/help`) and va09 (LLM settings model).
 
 This plan turns ADR 0014 into PR-sized tickets. It follows the maintainer
 request of 2026-11-11: ask in the UI how to do something (for example set
 up the connection to `192.168.22.1`) and get the exact steps and commands
 from the connected LLM, beside the static FAQ (hb00).
+
+## Status on main (2026-11-18) (Claude)
+
+"done" means the evidence file or PR below shows the ticket's core. "partly"
+names what is present and what is missing. "open" means no evidence on main.
+"not verified" means the evidence does not show what the ticket needs.
+Re-check of the tree at the time of writing; the rows do not assess the
+maintainer's open decisions, which stay in [ADR 0014](../adr/0014-help-assistant.md).
+
+| Ticket | Status | Evidence (file or PR) | Missing or not verified |
+| --- | --- | --- | --- |
+| AS-01 | done | `docs/adr/0014-help-assistant.md` (status Accepted, 2026-11-12; Q1–Q12 decided); `.github/protected-paths.txt` lists `docs/handbook/` and `docs/admin/guide.md` | — |
+| AS-02 | done | `docs/spec/01-product.md` (help assistant section), `docs/spec/02-architecture.md` (LLM egress), `docs/spec/13-notifications.md` (`assistant.settings_changed`), `docs/threat-model.md` (section "LLM output", T1–T10) | — |
+| AS-03 | partly | `internal/helpdocs/chunk.go`, `split.go`, `outline.go` and their `_test.go` files | Chunking, fence extraction and the outline check exist. Not every AS-03 acceptance criterion was verified in this re-check. |
+| AS-04 | done | PR #607 (`docs/status.md`); `internal/helpsearch/search.go`, `golden_test.go` (`TestGoldenAS04QueriesRankEnrollmentSectionsInTop3`) | — |
+| AS-05 | partly | PRs #596, #621 (`docs/status.md`); `internal/helpcmd/doc.go` (names the present parts), `placeholder.go`, `allowlist.go` | Present per `internal/helpcmd/doc.go`: check V1 (ASCII), command units, check V6 (allowlist), placeholder class table. Missing per the same file: command catalog, shape builder from code blocks, token matching of V3, checks V2–V5. `cmd/nebula/helpcatalog_test.go` does not exist. |
+| AS-06 | done | `internal/helpfacts/helpfacts.go` (package doc: fixed `Fact` struct, hosts selected by name, address or CIDR), `helpfacts_test.go`, `boundary_test.go` | — |
+| AS-07 | not verified | `internal/llmclient/doc.go` describes the shared client of the NOS agents | `doc.go` does not name the assistant as a user, and no assistant package exists (see AS-09). Use by the assistant is not verified. |
+| AS-08 | open | none: no assistant settings in `internal/serverconfig/` (the only hit is an unrelated test string) | all |
+| AS-09 | open | `internal/helpassist/` does not exist | all |
+| AS-10 | open | none: no assistant UI in `internal/web/` or `web/templates/` | all |
+| AS-11 | open | `internal/helpassist/` does not exist | all |
+| AS-12 | open | none: no assistant test in `test/security/` or `test/browser/` | all |
+| AS-13 | open | none: `docs/admin/guide.md` and `docs/handbook/faq.md` have no assistant section (the hits are "Home Assistant") | all; both paths are protected, and this table does not change them |
 
 ## Rules every ticket keeps
 
