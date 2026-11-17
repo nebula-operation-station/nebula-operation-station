@@ -240,3 +240,7 @@ ADR 0014 and `docs/implementation/help-assistant.md` are to be brought in line w
 | Execution origin | the server's execution record | only `nebula-server` | `suggestion:<note ID>.<step>` or `suggestion-match:<note ID>` ([07-execution-model.md](07-execution-model.md#v28-07-01)) |
 
 ADR 0016 names no file for the run-state file, the settings row's table, the last-run status and the notification log; the implementing tickets choose them inside the owners above and record them in `docs/implementation/ops-agent.md`.
+
+<a id="v29-03-01"></a>
+<!-- Spec revision (ADR 0007 amendment, op02): v29-03-01 -->
+**Rejecting pending proposals: socket method and data (ADR 0007 amendment R3).** The executor socket keeps its fixed per-UID method sets ([v23-03-02](#v23-03-02)). The `server` and `admin` UIDs gain `RejectPending` (previously: no such method), on the rule that the server may call methods that only remove capability, like lock and read-grant revocation; the server UID may call it only while a privileged session is open ([07-execution-model.md](07-execution-model.md#v29-07-01)). The `pve-collector`, discovery and every other UID get no access to it. Data: the executor keeps the rejected marker in memory next to the pending permits (never in `executor.db`; lock and restart drop it) and records the rejection in its signed event log; `nebula.db` gains the execution state `rejected` and the reason text in the execution record, written only by `nebula-server`.
