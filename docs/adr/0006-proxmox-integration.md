@@ -69,6 +69,17 @@ use Go `net/http`, `crypto/tls`, `crypto/x509` and existing security primitives.
   is reconciled, never repeated at another endpoint. Endpoints are admin-approved
   HTTPS origins (normally port 8006); disable redirects and environment proxies.
   Discovery never adds dial targets, and credentials never follow API URLs.
+- Note 2026-11-17 (ep02): the same failover rule holds for SSH hosts with
+  alternate endpoints (spec 08, `internal/sshtransport`). Endpoints are tried
+  in the inventory's priority order; the next one only after a TCP error or a
+  handshake failure/timeout before the host key (at most one handshake retry
+  per dial, the connect timeout per endpoint, the caller's deadline overall).
+  Every endpoint must present the host's single pinned key: a mismatch blocks
+  the host and an authentication failure stops the dial; no later endpoint is
+  tried. A run whose connection breaks after dispatch is reconciled (state
+  read only), never started again at another endpoint. The executor audits a
+  failover (`ssh_failover`: endpoint used, endpoints skipped with stage) and
+  names the endpoint in every run result and `run_finished` entry.
 
 ### Credential custody and least privilege
 
