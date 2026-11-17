@@ -15,7 +15,6 @@ var (
 	vulnIDRe  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 	packageRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+_:~-]{0,127}$`)
 	versionRe = regexp.MustCompile(`^[A-Za-z0-9.+~:_-]{1,64}$`)
-	enumRe    = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,31}$`)
 )
 
 // printable reports whether r is a letter, mark, number, punctuation or

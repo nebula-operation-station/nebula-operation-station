@@ -284,7 +284,7 @@ func TestPortsCappedAt32(t *testing.T) {
 // leaves the projection as plain text of at most MaxLabelBytes.
 func TestHostileLabelIsCleaned(t *testing.T) {
 	h := webHost()
-	h.Label = "web‮​\x00 evil\xff\n" + strings.Repeat("ä", 100)
+	h.Label = "web" + string(rune(0x202e)) + string(rune(0x200b)) + "\x00 evil\xff\n" + strings.Repeat("ä", 100)
 	fs := []Finding{osFinding("CVE-2026-0001", vulnprio.TierHigh, 80)}
 	g := oneGroup(t, newProjector(t, []Host{h}, fs, nil, fullCatalog()))
 	label := g.Projection.Host.Label

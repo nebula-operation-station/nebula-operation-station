@@ -9,6 +9,14 @@ import (
 	"unicode/utf8"
 )
 
+// Format characters are built from code points, not written into the source,
+// so the source stays free of invisible text.
+var (
+	bidiOverride  = string(rune(0x202e))
+	zeroWidth     = string(rune(0x200b))
+	zeroWidthJoin = string(rune(0x200d))
+)
+
 // TestCleanTextRemovesHostileRunes checks that controls, bidi overrides,
 // zero-width characters and invalid UTF-8 never survive cleaning.
 func TestCleanTextRemovesHostileRunes(t *testing.T) {
@@ -18,9 +26,9 @@ func TestCleanTextRemovesHostileRunes(t *testing.T) {
 		want string
 	}{
 		{"plain label", "web-01 lan", "web-01 lan"},
-		{"bidi override", "web‮evil", "web evil"},
-		{"zero width space", "web​evil", "web evil"},
-		{"zero width joiner", "a‍‍b", "a b"},
+		{"bidi override", "web" + bidiOverride + "evil", "web evil"},
+		{"zero width space", "web" + zeroWidth + "evil", "web evil"},
+		{"zero width joiner", "a" + zeroWidthJoin + zeroWidthJoin + "b", "a b"},
 		{"newline and tab", "web\n\tdb", "web db"},
 		{"NUL and escape", "web\x00\x1b[31mred", "web [31mred"},
 		{"invalid utf8 dropped", "we\xffb", "web"},
@@ -68,7 +76,7 @@ func TestCleanTextBoundsLength(t *testing.T) {
 // TestCleanTextNeverRunsOnTruncatedRune checks that a cut that lands inside
 // a multibyte rune drops the partial rune.
 func TestCleanTextNeverRunsOnTruncatedRune(t *testing.T) {
-	got := cleanText(strings.Repeat("ä", 40), 5) // 5 bytes: "äää" is 6, so "ää"
+	got := cleanText(strings.Repeat("ä", 40), 5) // 5 bytes hold two "ä" (2 bytes each)
 	if got != "ää" {
 		t.Fatalf("got %q, want %q", got, "ää")
 	}
