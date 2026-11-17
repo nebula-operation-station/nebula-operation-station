@@ -1,0 +1,76 @@
+{
+  "document": {
+    "category": "csaf_security_advisory",
+    "csaf_version": "2.0",
+    "title": "Cisco: Synthetic model spelling advisory (test only, not a real advisory)",
+    "publisher": {
+      "category": "vendor",
+      "name": "Cisco",
+      "namespace": "https://www.cisco.com"
+    },
+    "tracking": {
+      "id": "cisco-sa-synthetic-model-spellings",
+      "version": "1.0.0",
+      "status": "final",
+      "initial_release_date": "2026-01-01T00:00:00Z",
+      "current_release_date": "2026-01-01T00:00:00Z",
+      "revision_history": [
+        {"number": "1.0.0", "date": "2026-01-01T00:00:00Z", "summary": "Synthetic test revision."}
+      ]
+    }
+  },
+  "product_tree": {
+    "branches": [
+      {
+        "category": "vendor",
+        "name": "Cisco",
+        "branches": [
+          {
+            "category": "product_family",
+            "name": "Cisco IOS XE Software",
+            "branches": [
+              {"category": "product_version", "name": "17.9.1", "product": {"product_id": "XE-ALL-17.9.1", "name": "Cisco IOS XE Software 17.9.1"}},
+              {
+                "category": "product_name",
+                "name": "Catalyst 9300 Series Switches",
+                "branches": [
+                  {"category": "product_version", "name": "17.9.1", "product": {"product_id": "XE-C9300S-17.9.1", "name": "Cisco IOS XE Software 17.9.1 on Catalyst 9300 Series Switches"}}
+                ]
+              },
+              {"category": "product_version", "name": "17.9.1", "product": {"product_id": "XE-CPE-17.9.1", "name": "Cisco IOS XE Software 17.9.1 on a CPE-named model", "product_identification_helper": {"cpe": "cpe:2.3:h:cisco:catalyst_9300-24t:-:*:*:*:*:*:*:*"}}}
+            ]
+          },
+          {
+            "category": "product_family",
+            "name": "Cisco Business 350 Series Managed Switches",
+            "branches": [
+              {"category": "product_version", "name": "3.4.0.17", "product": {"product_id": "CBS350-FAMILY-3.4.0.17", "name": "Cisco Business 350 Series Managed Switches 3.4.0.17"}},
+              {
+                "category": "product_name",
+                "name": "CBS350-24P",
+                "branches": [
+                  {"category": "product_version", "name": "3.4.0.17", "product": {"product_id": "CBS350-24P-3.4.0.17", "name": "CBS350-24P 3.4.0.17"}}
+                ]
+              },
+              {
+                "category": "product_name",
+                "name": "CBS350-8T",
+                "branches": [
+                  {"category": "product_version", "name": "3.4.0.17", "product": {"product_id": "CBS350-8T-3.4.0.17", "name": "CBS350-8T 3.4.0.17"}}
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "vulnerabilities": [
+    {"cve": "CVE-2099-1001", "product_status": {"known_affected": ["XE-ALL-17.9.1"]}},
+    {"cve": "CVE-2099-1002", "product_status": {"known_affected": ["XE-C9300S-17.9.1"]}},
+    {"cve": "CVE-2099-1003", "product_status": {"known_affected": ["XE-CPE-17.9.1"]}},
+    {"cve": "CVE-2099-1004", "product_status": {"known_affected": ["CBS350-24P-3.4.0.17"]}},
+    {"cve": "CVE-2099-1005", "product_status": {"known_affected": ["CBS350-8T-3.4.0.17"]}},
+    {"cve": "CVE-2099-1006", "product_status": {"fixed": ["CBS350-FAMILY-3.4.0.17"]}}
+  ]
+}
