@@ -55,6 +55,10 @@ type Plan struct {
 	// Secrets maps each secret slot of the action to a vault secret ID
 	// (M7-3); it becomes part of the approved parameters.
 	Secrets map[string]string
+	// SuggestionRef is the agent suggestion reference "<note ID>.<step>" of
+	// the create request (ADR 0016 D9). Empty means none; a reference that
+	// does not resolve is refused with ErrUnknownSuggestion.
+	SuggestionRef string
 }
 
 // Staged reports whether the plan has stages.

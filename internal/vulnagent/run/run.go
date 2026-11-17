@@ -19,10 +19,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/llmclient"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnagent/agent"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnagent/nosclient"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfeed"
@@ -133,9 +135,9 @@ type Config struct {
 	AgentConfig AgentConfigSource
 	// LLM is the local assessor configuration.
 	LLM LLMConfig
-	// NewLLM builds the LLM client; nil uses agent.NewHTTPClient. The
-	// ClientConfig it gets carries the lab-only transport.
-	NewLLM func(agent.ClientConfig) (agent.LLM, error)
+	// NewLLM builds the LLM client; nil uses agent.NewLLM. The options it
+	// gets always select the lab-only dialer.
+	NewLLM func(llmclient.Options) (agent.LLM, error)
 	// LLMNet overrides resolver, dialer and TLS roots of the LLM
 	// endpoint; the lab-address check applies regardless.
 	LLMNet LLMNetwork
@@ -153,7 +155,7 @@ type Config struct {
 // Runner runs the agent.
 type Runner struct {
 	cfg     Config
-	llmDial *labDialer
+	labNets []netip.Prefix
 	feeds   []vulnfeed.Feed
 	store   *vulnfeed.Store
 	sync    *vulnfeed.Syncer
@@ -226,7 +228,7 @@ func New(cfg Config) (*Runner, error) {
 	if err != nil {
 		return nil, fmt.Errorf("csaf client: %w", err)
 	}
-	return &Runner{cfg: cfg, llmDial: &labDialer{allowed: allowed, socket: cfg.LLM.UnixSocket, net: cfg.LLMNet}, feeds: feeds, store: store, sync: syncer, csaf: cc, log: log, now: cfg.Now}, nil
+	return &Runner{cfg: cfg, labNets: allowed, feeds: feeds, store: store, sync: syncer, csaf: cc, log: log, now: cfg.Now}, nil
 }
 
 // Data directory layout.

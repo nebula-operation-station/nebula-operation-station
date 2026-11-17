@@ -118,6 +118,8 @@ type Service struct {
 	notifier *notify.Notifier
 	runbooks Runbooks
 	modules  Modules
+	// suggest resolves agent suggestions (ADR 0016 D9); nil means none.
+	suggest SuggestionIndex
 	// opsMu serializes Ops State evaluations, so two runs finishing at
 	// once on one host cannot both see the old state and notify twice.
 	opsMu sync.Mutex
@@ -133,6 +135,11 @@ type Service struct {
 func New(ctx context.Context, exec Executor, db *sql.DB, hosts Hosts, log *slog.Logger) *Service {
 	return &Service{exec: exec, db: db, hosts: hosts, log: log, now: time.Now, running: map[string]bool{}, again: map[string]bool{}, ctx: ctx}
 }
+
+// SetSuggestionIndex installs the suggestion index that marks agent-suggested
+// executions. Call it before the service takes requests; nil (the default)
+// plans every execution as before.
+func (s *Service) SetSuggestionIndex(idx SuggestionIndex) { s.suggest = idx }
 
 // Wait blocks until the background dispatchers have stopped (tests).
 func (s *Service) Wait() { s.wg.Wait() }
@@ -157,6 +164,9 @@ type Created struct {
 	// Options is the WebAuthn request options JSON when the browser must
 	// approve.
 	Options []byte
+	// Origin is the execution origin (spec 07 v28-07-01), empty when the
+	// execution is not attributed to an agent suggestion.
+	Origin string
 }
 
 type target struct {
@@ -200,6 +210,14 @@ func (s *Service) CreateStaged(ctx context.Context, user, actionID string, hostI
 	}
 	if len(hostIDs) > MaxHosts {
 		return Created{}, ErrTooManyHosts
+	}
+	// A reference is checked before any executor call: an unknown one is
+	// refused, never planned without its mark.
+	origin := ""
+	if plan.SuggestionRef != "" {
+		if origin, err = referenceOrigin(s.suggest, plan.SuggestionRef); err != nil {
+			return Created{}, err
+		}
 	}
 	cctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
@@ -249,6 +267,13 @@ func (s *Service) CreateStaged(ctx context.Context, user, actionID string, hostI
 		targets = append(targets, t)
 		creds[t.cred] = true
 	}
+	if origin == "" && plan.SuggestionRef == "" {
+		hostIDs := make([]string, 0, len(targets))
+		for _, t := range targets {
+			hostIDs = append(hostIDs, t.host)
+		}
+		origin = matchOrigin(s.suggest, a.ID, hostIDs)
+	}
 	id, err := newUUID()
 	if err != nil {
 		return Created{}, err
@@ -260,6 +285,11 @@ func (s *Service) CreateStaged(ctx context.Context, user, actionID string, hostI
 	req := &pb.ExecutionRequest{
 		ExecutionId: id, ActionId: a.ID, ModuleVersion: a.Version, ArtifactSha256: a.SHA256(), ParametersHash: ph,
 		RiskClass: a.Risk, StagePlanHash: stagePlanHash, ExpiryUnix: s.now().Add(permitLifetime).Unix(),
+	}
+	if origin != "" {
+		// Attributed to a suggestion: at least MEDIUM, so the approval needs
+		// a presence assertion even for a LOW action (D9).
+		req.RiskClass = suggestedRisk(a.Risk)
 	}
 	var planDoc []byte
 	stageOf := map[string]int{}
@@ -297,16 +327,16 @@ func (s *Service) CreateStaged(ctx context.Context, user, actionID string, hostI
 	if p.GetState() == pb.PermitState_PERMIT_STATE_APPROVED {
 		state = "approved"
 	}
-	c := Created{ID: id, State: state, Risk: riskName(p.GetRiskClass()), Requirement: requirementName(p.GetApprovalRequirement()), Options: p.GetRequestOptionsJson()}
+	c := Created{ID: id, State: state, Risk: riskName(p.GetRiskClass()), Requirement: requirementName(p.GetApprovalRequirement()), Options: p.GetRequestOptionsJson(), Origin: origin}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return Created{}, err
 	}
 	defer tx.Rollback() //nolint:errcheck
 	if _, err := tx.ExecContext(ctx, `INSERT INTO executions (id, digest, action_id, module_version, artifact_sha256, risk, requirement, state,
-			durable, timeout_s, options, approval_expiry, created_by, created_at, params, stage_plan) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			durable, timeout_s, options, approval_expiry, created_by, created_at, params, stage_plan, origin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, p.GetExecutionDigest(), a.ID, a.Version, a.SHA256(), c.Risk, c.Requirement, state, boolInt(a.Durable),
-		int64(a.Timeout/time.Second), p.GetRequestOptionsJson(), p.GetChallengeExpiryUnix(), user, s.now().Unix(), string(paramsJSON), string(planDoc)); err != nil {
+		int64(a.Timeout/time.Second), p.GetRequestOptionsJson(), p.GetChallengeExpiryUnix(), user, s.now().Unix(), string(paramsJSON), string(planDoc), origin); err != nil {
 		return Created{}, fmt.Errorf("store execution: %w", err)
 	}
 	for _, t := range targets {
@@ -321,7 +351,7 @@ func (s *Service) CreateStaged(ctx context.Context, user, actionID string, hostI
 		return Created{}, err
 	}
 	s.log.Info("audit", "kind", "execution_proposed", "execution", id, "digest", p.GetExecutionDigest(), "action", a.ID,
-		"risk", c.Risk, "hosts", len(targets), "user", user)
+		"risk", c.Risk, "declared_risk", riskName(a.Risk), "origin", origin, "hosts", len(targets), "user", user)
 	if state == "approved" {
 		s.start(id)
 	}
