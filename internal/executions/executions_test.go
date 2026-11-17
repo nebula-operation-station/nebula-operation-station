@@ -28,6 +28,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/stageplan"
 )
 
 type fakeExec struct {
@@ -958,5 +959,46 @@ func TestApproveDoesNotStartWhenExecutionStoppedBeingPending(t *testing.T) {
 	defer f.mu.Unlock()
 	if len(f.attached) != 0 || len(f.durable) != 0 {
 		t.Fatalf("dispatched %d attached, %d durable runs", len(f.attached), len(f.durable))
+	}
+}
+
+// TestAbortableMarksOnlyStagedRunningRollouts: the list shows the abort
+// button exactly where the detail page does: a running staged execution
+// whose executor view is neither aborted nor stopped. Unknown IDs and
+// IDs that cannot be aborted have no entry (false), and one query per
+// call answers all of them.
+func TestAbortableMarksOnlyStagedRunningRollouts(t *testing.T) {
+	f := &stagedExec{}
+	s := stagedSetup(t, f)
+	ctx := context.Background()
+	c, err := s.CreateStaged(ctx, "axel", "core.facts", []string{"web", "db", "new"}, nil, Plan{Preset: PresetWaves, Size: 1, Continue: stageplan.ContinueManual})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the gate", func() bool { e, _ := s.Get(ctx, c.ID); return strings.Contains(e.Waiting, "continue to stage 2") })
+
+	got, err := s.Abortable(ctx, []string{c.ID, "00000000-0000-4000-8000-000000000000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got[c.ID] {
+		t.Fatalf("staged running rollout not abortable: %v", got)
+	}
+	if got["00000000-0000-4000-8000-000000000000"] {
+		t.Fatalf("unknown execution reported abortable: %v", got)
+	}
+	if none, err := s.Abortable(ctx, nil); err != nil || len(none) != 0 {
+		t.Fatalf("no ids: %v, %v", none, err)
+	}
+
+	if err := s.Abort(ctx, "axel", c.ID); err != nil {
+		t.Fatal(err)
+	}
+	after, err := s.Abortable(ctx, []string{c.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after[c.ID] {
+		t.Fatalf("aborted rollout still abortable: %v", after)
 	}
 }
