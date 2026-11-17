@@ -35,14 +35,18 @@ func newTestStore(t *testing.T) (*Store, *fakeClock) {
 	return s, clk
 }
 
+// testExecID is a lowercase UUIDv4, the execution ID form the executions
+// package generates.
+const testExecID = "3f2b8c1e-9a4d-4e7f-8c2a-1b2c3d4e5f60"
+
 func sampleRecord() Record {
 	return Record{
 		Kind:        KindLeaseRunFailed,
 		Host:        "web-1",
 		State:       StateFailed,
 		Reason:      ReasonTimeout,
-		ExecutionID: "ex-1",
-		Link:        "/executions/ex-1",
+		ExecutionID: testExecID,
+		Link:        "/executions/" + testExecID,
 		Outcome:     OutcomeSent,
 		Providers:   2,
 	}
@@ -603,43 +607,120 @@ func TestHostileHostAndExecutionIDAreRefused(t *testing.T) {
 	}
 }
 
-// TestHostAndExecutionIDShape checks the accepted shape of the two free-text
-// fields: a label or ID made of letters, digits, '.', '_' and '-', starting
-// with a letter or digit, or empty.
+// TestRealHostIDsAreAccepted: a host is stored only as an inventory host ID
+// (lowercase letters, digits, '.', '_' or '-', starting with a letter or
+// digit, at most 63 bytes), and an execution ID only as a lowercase UUIDv4.
+// Both are stored exactly as given, with no field marked changed.
+func TestRealHostIDsAreAccepted(t *testing.T) {
+	hosts := []string{"web-1", "nas.lab_01", "a", "9", "pve-node-02.lab", strings.Repeat("h", 63)}
+	execIDs := []string{testExecID, "00000000-0000-4000-8000-000000000000", "ffffffff-ffff-4fff-bfff-ffffffffffff"}
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	for _, h := range hosts {
+		for _, e := range execIDs {
+			r := sampleRecord()
+			r.Host = h
+			r.ExecutionID = e
+			mustAppend(t, s, r)
+		}
+	}
+	page, err := s.List(ctx, 0, MaxPage)
+	if err != nil || len(page) != len(hosts)*len(execIDs) {
+		t.Fatalf("List: %d rows, err %v; want %d", len(page), err, len(hosts)*len(execIDs))
+	}
+	for _, e := range page {
+		if e.Changed != 0 {
+			t.Errorf("accepted host %q / execution %q marked changed %b", e.Host, e.ExecutionID, e.Changed)
+		}
+	}
+}
+
+// TestHostAndExecutionIDShape: values outside the real ID schemas are refused.
+// Empty is allowed for both (no host or no execution), as before.
 func TestHostAndExecutionIDShape(t *testing.T) {
-	good := []string{"", "web-1", "nas.lab_01", "ex-1", "A9", "3f2b8c1e-9a4d-4e7f-8c2a-1b2c3d4e5f60"}
-	bad := []string{
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	mustAppend(t, s, sampleRecord())
+	badHosts := []string{
 		"-web", ".web", "_web", "web 1", "web/1", "web:1", "web?x", "web#x",
-		"web\x00", "web\n1", "ä", "\xff",
+		"web\x00", "web\n1", "ä", "\xff", "Web-1", "WEB", "web.1\t",
+		"Lab Server", // a display name, not an inventory ID
+		strings.Repeat("h", 64),
 		"https://api.telegram.org/bot123456:SECRET/sendMessage",
 		"123456:SECRET",
 	}
-	s, _ := newTestStore(t)
-	ctx := context.Background()
-	for _, v := range good {
-		r := sampleRecord()
-		r.Host = v
-		r.ExecutionID = v
-		mustAppend(t, s, r)
-		page, err := s.List(ctx, 0, 1)
-		if err != nil || len(page) != 1 {
-			t.Fatalf("List after %q: %v", v, err)
-		}
-		if page[0].Host != v || page[0].ExecutionID != v || page[0].Changed != 0 {
-			t.Errorf("stored %+v for accepted value %q", page[0], v)
-		}
+	badExecIDs := []string{
+		"ex-1", "web-1", "",
+		"3F2B8C1E-9A4D-4E7F-8C2A-1B2C3D4E5F60", // not a lowercase UUIDv4
+		"3f2b8c1e-9a4d-1e7f-8c2a-1b2c3d4e5f60", // version 1
+		"3f2b8c1e-9a4d-4e7f-7c2a-1b2c3d4e5f60", // wrong variant
+		"3f2b8c1e9a4d4e7f8c2a1b2c3d4e5f60",     // no hyphens
+		testExecID + " ",
+		testExecID + "\n",
 	}
-	for _, v := range bad {
+	for _, v := range badHosts {
 		r := sampleRecord()
 		r.Host = v
 		if _, err := s.Append(ctx, r); !errors.Is(err, ErrRefused) {
 			t.Errorf("Host %q accepted or wrong error: %v", v, err)
 		}
-		r = sampleRecord()
+	}
+	for _, v := range badExecIDs {
+		r := sampleRecord()
 		r.ExecutionID = v
+		if v == "" {
+			// Empty means no execution: accepted, as before.
+			if _, err := s.Append(ctx, r); err != nil {
+				t.Errorf("empty ExecutionID refused: %v", err)
+			}
+			continue
+		}
 		if _, err := s.Append(ctx, r); !errors.Is(err, ErrRefused) {
 			t.Errorf("ExecutionID %q accepted or wrong error: %v", v, err)
 		}
+	}
+	page, err := s.List(ctx, 0, MaxPage)
+	if err != nil || len(page) != 2 {
+		t.Fatalf("refused values left rows: %d, err %v; want only the valid sample and the empty ID", len(page), err)
+	}
+}
+
+// TestSecretValuesAreRefusedWithoutEcho: a provider secret in Host or
+// ExecutionID is refused, and the error names only the field. Covers an ntfy
+// access token, a hex HMAC key, a base64url secret, and a Telegram bot token
+// without its numeric prefix.
+func TestSecretValuesAreRefusedWithoutEcho(t *testing.T) {
+	secrets := []string{
+		"tk_Xy7aQ9mZp2LwR8vN4bKc6sHd3fGj1",                                 // ntfy access token, mixed case
+		"tk_x7aq9mzp2lwr8vn4bkc6shd3fgj1",                                  // ntfy access token, lowercase
+		"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08", // 64 hex HMAC key
+		"5b9ae4c1d0f3e2a7b8c6d5e4f3a2b1c0",                                 // 32 hex HMAC key
+		"A9Lq3-xT7_mZ2vK8pR0sW4eY6uI1oP5aS9dF3gH7jKl",                      // base64url, mixed case
+		"AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw",                               // Telegram token, no numeric prefix
+	}
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	for _, v := range secrets {
+		for _, field := range []string{"host", "execution_id"} {
+			r := sampleRecord()
+			if field == "host" {
+				r.Host = v
+			} else {
+				r.ExecutionID = v
+			}
+			_, err := s.Append(ctx, r)
+			if !errors.Is(err, ErrRefused) {
+				t.Errorf("%s secret accepted or wrong error: %v", field, err)
+				continue
+			}
+			if msg := err.Error(); !strings.Contains(msg, field) || strings.Contains(msg, v) {
+				t.Errorf("%s refusal %q must name the field and not echo the value", field, msg)
+			}
+		}
+	}
+	page, err := s.List(ctx, 0, MaxPage)
+	if err != nil || len(page) != 0 {
+		t.Fatalf("secret values left %d rows (err %v); want none", len(page), err)
 	}
 }
 
@@ -709,27 +790,21 @@ func TestAppendEnforcesMaxEntriesWithoutPrune(t *testing.T) {
 	}
 }
 
-func TestOverlongFieldIsShortenedAndMarkedNotRejected(t *testing.T) {
+// TestOverlongHostOrExecutionIDIsRefused: a host or execution ID over the
+// schema length is not a shorter ID, so it is refused, not cut. A cut value
+// could match a different real ID.
+func TestOverlongHostOrExecutionIDIsRefused(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
 	r := sampleRecord()
-	r.ExecutionID = strings.Repeat("a", MaxExecutionID+100)
+	r.ExecutionID = testExecID + strings.Repeat("a", MaxExecutionID)
+	if _, err := s.Append(ctx, r); !errors.Is(err, ErrRefused) {
+		t.Errorf("overlong ExecutionID: err = %v, want ErrRefused", err)
+	}
+	r = sampleRecord()
 	r.Host = strings.Repeat("h", MaxHost+10)
-	mustAppend(t, s, r)
-
-	page, err := s.List(ctx, 0, 1)
-	if err != nil || len(page) != 1 {
-		t.Fatalf("List: %v", err)
-	}
-	got := page[0]
-	if len(got.ExecutionID) != MaxExecutionID {
-		t.Fatalf("ExecutionID has %d bytes, want %d", len(got.ExecutionID), MaxExecutionID)
-	}
-	if len(got.Host) != MaxHost {
-		t.Fatalf("Host has %d bytes, want %d", len(got.Host), MaxHost)
-	}
-	if got.Changed != FieldExecutionID|FieldHost {
-		t.Fatalf("Changed = %b, want exactly execution id and host marked", got.Changed)
+	if _, err := s.Append(ctx, r); !errors.Is(err, ErrRefused) {
+		t.Errorf("overlong Host: err = %v, want ErrRefused", err)
 	}
 }
 
