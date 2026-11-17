@@ -1,0 +1,56 @@
+{
+  "document": {
+    "category": "csaf_security_advisory",
+    "csaf_version": "2.0",
+    "title": "Cisco: Synthetic license-suffix SKU advisory (test only, not a real advisory)",
+    "publisher": {
+      "category": "vendor",
+      "name": "Cisco",
+      "namespace": "https://www.cisco.com"
+    },
+    "tracking": {
+      "id": "cisco-sa-synthetic-suffix-skus",
+      "version": "1.0.0",
+      "status": "final",
+      "initial_release_date": "2026-01-01T00:00:00Z",
+      "current_release_date": "2026-01-01T00:00:00Z",
+      "revision_history": [
+        {"number": "1.0.0", "date": "2026-01-01T00:00:00Z", "summary": "Synthetic test revision."}
+      ]
+    }
+  },
+  "product_tree": {
+    "branches": [
+      {
+        "category": "vendor",
+        "name": "Cisco",
+        "branches": [
+          {
+            "category": "product_family",
+            "name": "Cisco IOS XE Software",
+            "branches": [
+              {
+                "category": "product_name",
+                "name": "C9300-24T-A",
+                "branches": [
+                  {"category": "product_version", "name": "17.9.1", "product": {"product_id": "C9300-24T-A-17.9.1", "name": "C9300-24T-A 17.9.1"}}
+                ]
+              },
+              {
+                "category": "product_name",
+                "name": "C9300-48P",
+                "branches": [
+                  {"category": "product_version", "name": "17.9.1", "product": {"product_id": "C9300-48P-17.9.1", "name": "C9300-48P 17.9.1"}}
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "vulnerabilities": [
+    {"cve": "CVE-2099-3001", "product_status": {"known_affected": ["C9300-24T-A-17.9.1"]}},
+    {"cve": "CVE-2099-3002", "product_status": {"known_affected": ["C9300-48P-17.9.1"]}}
+  ]
+}
