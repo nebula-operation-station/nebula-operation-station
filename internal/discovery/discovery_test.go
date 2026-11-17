@@ -5,14 +5,18 @@ package discovery
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/discoveryjob"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/ipam"
@@ -312,4 +316,130 @@ func TestLongHostnameImports(t *testing.T) {
 	if len(a.Name) == 0 || len(a.Name) > 128 || !strings.HasPrefix(name, a.Name) {
 		t.Errorf("name %q: want a prefix of the hostname within 128 bytes", a.Name)
 	}
+}
+
+// assetIDPattern is ipam's ID pattern (ipam idRe).
+var assetIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
+
+func TestAssetIDIsValidAndDerivedFromInput(t *testing.T) {
+	long253 := strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 61)
+	if len(long253) != 253 {
+		t.Fatalf("test name has %d bytes", len(long253))
+	}
+	for _, tc := range []struct {
+		name string
+		row  Row
+		want string
+	}{
+		{"uppercase hostname", Row{Host: discoveryjob.Host{Address: "192.168.10.5", Hostname: "NAS.Lan"}}, "nas"},
+		{"ipv6 without hostname", Row{Host: discoveryjob.Host{Address: "2001:db8::1"}}, "ip-2001-db8--1"},
+		{"253-byte hostname", Row{Host: discoveryjob.Host{Address: "192.168.10.6", Hostname: long253}}, strings.Repeat("a", 56)},
+		{"only special characters", Row{Host: discoveryjob.Host{Address: "192.168.10.7", Hostname: "!!--..__"}}, "ip-192-168-10-7"},
+		{"empty hostname", Row{Host: discoveryjob.Host{Address: "192.168.10.8"}}, "ip-192-168-10-8"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &matcher{ids: map[string]bool{}}
+			got := m.assetID(tc.row)
+			if got != tc.want {
+				t.Errorf("assetID = %q, want %q", got, tc.want)
+			}
+			if !assetIDPattern.MatchString(got) {
+				t.Errorf("assetID %q does not match the ipam pattern", got)
+			}
+		})
+	}
+}
+
+func TestAssetIDIsDistinctPerAddress(t *testing.T) {
+	m := &matcher{ids: map[string]bool{}}
+	seen := map[string]string{}
+	for _, r := range []Row{
+		{Host: discoveryjob.Host{Address: "192.168.10.5", Hostname: "nas.lan"}},
+		{Host: discoveryjob.Host{Address: "192.168.10.6", Hostname: "nas.lan"}},
+		{Host: discoveryjob.Host{Address: "192.168.10.7", Hostname: "NAS.LAN"}},
+		{Host: discoveryjob.Host{Address: "192.168.10.8"}},
+		{Host: discoveryjob.Host{Address: "192.168.10.9", Hostname: "!!"}},
+		{Host: discoveryjob.Host{Address: "2001:db8::5"}},
+	} {
+		id := m.assetID(r)
+		if other, dup := seen[id]; dup {
+			t.Errorf("%s and %s both get ID %q", r.Address, other, id)
+		}
+		seen[id] = r.Address
+	}
+	if len(seen) != 6 {
+		t.Fatalf("%d IDs for 6 addresses", len(seen))
+	}
+}
+
+// checkNote reports why a note is not plain text within ipam's limit: no
+// control, format or line/paragraph separator characters, valid UTF-8.
+func checkNote(note string) error {
+	if len(note) > maxAssetNote {
+		return fmt.Errorf("note is %d bytes", len(note))
+	}
+	if !utf8.ValidString(note) {
+		return errors.New("note is not UTF-8")
+	}
+	for _, c := range note {
+		if unicode.IsControl(c) || unicode.Is(unicode.Cf, c) || c == 0x2028 || c == 0x2029 {
+			return fmt.Errorf("note has the character %U", c)
+		}
+	}
+	return nil
+}
+
+func TestNoteForIsPlainAndWithinIPAMLimit(t *testing.T) {
+	ctx := context.Background()
+	f := setup(t, nil)
+	many := make([]discoveryjob.Port, 100)
+	for i := range many {
+		many[i] = discoveryjob.Port{Port: 1000 + i, Protocol: strings.Repeat("p", 300), State: "open"}
+	}
+	lineSep := string(rune(0x2028))
+	paraSep := string(rune(0x2029))
+	zeroWidth := string(rune(0x200b))
+	nbsp := string(rune(0xa0))
+	for i, r := range []Row{
+		{Host: discoveryjob.Host{Address: "192.168.10.9"}},
+		{Host: discoveryjob.Host{Address: "192.168.10.9", Vendor: "ACME", OS: "Linux"}},
+		{Host: discoveryjob.Host{Address: "192.168.10.9", Vendor: "Müller" + lineSep + "x\x07" + zeroWidth + "GmbH", OS: "a\tb\nc" + nbsp + "d"}},
+		{Host: discoveryjob.Host{Address: "192.168.10.9", Vendor: strings.Repeat("ü", 300), OS: strings.Repeat(paraSep, 200)}},
+		{Host: discoveryjob.Host{Address: "192.168.10.9", Ports: many}},
+		{Host: discoveryjob.Host{Address: "192.168.10.9", Vendor: "bad\xffutf8"}},
+	} {
+		note := noteFor(r)
+		if err := checkNote(note); err != nil {
+			t.Errorf("row %d: %v: %q", i, err, note)
+		}
+		// The real check: ipam takes the note.
+		if err := f.ip.SaveAsset(ctx, ipam.Asset{ID: fmt.Sprintf("note-%d", i), Name: "note", Kind: ipam.KindUnknown, Notes: note}); err != nil {
+			t.Errorf("row %d: ipam refuses the note: %v", i, err)
+		}
+	}
+}
+
+func FuzzAssetIDAndNote(f *testing.F) {
+	f.Add("nas.lan", "192.168.10.21", "aa:aa:aa:aa:aa:01")
+	f.Add("", "2001:db8::1", "")
+	f.Add("NAS.LAN", "::ffff:192.168.10.1", "AA-BB-CC-DD-EE-FF")
+	f.Add(strings.Repeat("a", 253), "192.168.10.1", "zz")
+	f.Add("!!..--", "not an address", "\x00")
+	f.Fuzz(func(t *testing.T, host, addr, mac string) {
+		r := Row{Host: discoveryjob.Host{Address: addr, MAC: mac, Hostname: host, Vendor: host, OS: mac}}
+		m := &matcher{ids: map[string]bool{}}
+		id := m.assetID(r)
+		if !assetIDPattern.MatchString(id) {
+			t.Fatalf("assetID %q does not match the ipam pattern", id)
+		}
+		if again := m.assetID(r); again == id || !assetIDPattern.MatchString(again) {
+			t.Fatalf("second assetID %q after %q", again, id)
+		}
+		if err := checkNote(noteFor(r)); err != nil {
+			t.Fatal(err)
+		}
+		if name := assetName(r); len(name) > maxAssetName || !utf8.ValidString(name) {
+			t.Fatalf("name %q", name)
+		}
+	})
 }
