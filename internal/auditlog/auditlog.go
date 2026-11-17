@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -149,20 +150,32 @@ func line(kind string, attrs map[string]string) (string, string, []byte, error) 
 		kind = "unknown"
 	}
 	kind = clip(kind, MaxKind)
-	clean := map[string]string{}
+	// The user column is read from the input before anything is cut, so
+	// a "user" key that sorts behind the MaxAttrs-th key is not lost
+	// (review tw05). The user attribute then stays in the body too: it
+	// takes the place of the last sorted key that would otherwise be kept.
+	user := clip(clip(attrs["user"], MaxAttrValue), 64)
 	keys := make([]string, 0, len(attrs))
 	for k := range attrs {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	for i, k := range keys {
-		if i == MaxAttrs {
-			clean["_truncated"] = "true"
-			break
+	truncated := len(keys) > MaxAttrs
+	if truncated {
+		kept := keys[:MaxAttrs]
+		if _, ok := attrs["user"]; ok && !slices.Contains(kept, "user") {
+			kept = append(append([]string{}, keys[:MaxAttrs-1]...), "user")
+			sort.Strings(kept)
 		}
+		keys = kept
+	}
+	clean := make(map[string]string, len(keys)+1)
+	for _, k := range keys {
 		clean[attrKey(k, clean)] = clip(attrs[k], MaxAttrValue)
 	}
-	user := clip(clean["user"], 64)
+	if truncated {
+		clean["_truncated"] = "true"
+	}
 	body, err := json.Marshal(clean) // map keys are sorted: deterministic
 	if err != nil {
 		return "", "", nil, err
