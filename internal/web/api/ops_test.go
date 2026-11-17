@@ -110,10 +110,13 @@ func newOpsEnv(t *testing.T) *opsEnv {
 	e := &opsEnv{now: opsT0, log: &bytes.Buffer{}}
 	clock := func() time.Time { return e.now }
 	// The notes store refuses a directory that is not private (0700).
-	dir := filepath.Join(t.TempDir(), "private")
-	if err := os.Mkdir(dir, 0o700); err != nil {
+	// os.MkdirTemp (0700) rather than t.TempDir: fuzz seed names contain '#',
+	// which the notes store refuses in a path.
+	dir, err := os.MkdirTemp("", "opsapi")
+	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 	st, err := opsnotes.Open(filepath.Join(dir, "notes.db"), clock)
 	if err != nil {
 		t.Fatal(err)
