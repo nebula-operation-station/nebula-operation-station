@@ -86,6 +86,16 @@ func TestOnlyDistinctExactSKUsDiffer(t *testing.T) {
 		{"unknown vendor scheme: gap", "FOO-12A", "FOO-34B", false},
 		{"mixed schemes: gap", "CBS350-8T", "PA-440", false},
 		{"prefix of the other SKU: gap", "CBS350-24P", "CBS350-24PX", false},
+		// A license or bundle suffix never makes a model distinct: SKUs with
+		// the same base model differ only in suffixes, so they are gaps.
+		{"license suffix, same base: gap", "C9300-24T-A", "C9300-24T-E", false},
+		{"unknown suffix, same base: gap", "C9300-24T-XYZ9", "C9300-24T-E", false},
+		{"two suffixes, same base: gap", "C9300-24T-A-4G", "C9300-24T-E-4G", false},
+		{"suffix on device, bare product, same base: gap", "C9300-24T", "C9300-24T-E", false},
+		{"suffix with other base still differs", "C9300-48P-E", "C9300-24T-E", true},
+		{"suffix on the other base still differs", "C9300-48P", "C9300-24T-E", true},
+		{"suffixes on distinct bases differ", "C9200L-24P-4G", "C9300-24T-E", true},
+		{"PAN-OS SKU vs Catalyst SKU: gap", "PA-440", "C9300-24T-E", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
