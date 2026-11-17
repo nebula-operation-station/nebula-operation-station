@@ -250,6 +250,12 @@ labelled, and its commands are checked against the documentation.
 | Returns text, steps and command **suggestions**, rendered escaped, with citations | Executes a command, calls the executor, creates a proposal, plan, permit, lease, schedule or approval, prefills a form that does, or changes any state other than its own rate-limit counters, audit entries and (opt-in) conversation store |
 | Calls exactly one external endpoint: the configured LLM URL (D5) | Fetches the web, follows links, calls tools |
 
+**Amendment note, 2026-11-17 (ADR 0016, ag01).** The "Assistant" panel
+gets the tabs "Help" ("Hilfe") and "Ops" ([ADR 0016](0016-ops-agent.md)
+D11). This assistant is the Help tab; the Ops tab is a separate backend
+for admins only. D1 itself is unchanged, including "prefills a form that
+does", which applies to the Help tab.
+
 ### D2: Knowledge: retrieval over the embedded docs, cited
 
 - **Corpus:** the operator handbook incl. FAQ (`docs/handbook/*.md`) and
