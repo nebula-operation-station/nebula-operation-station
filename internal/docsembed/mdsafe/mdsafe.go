@@ -99,8 +99,12 @@ type Result struct {
 var (
 	// relativeDestRE is the only accepted relative destination form.
 	relativeDestRE = regexp.MustCompile(`^[A-Za-z0-9._/-]*(#[\pL\pN_-]*)?$`)
-	// localHrefRE is the only accepted form of a Relative result.
-	localHrefRE = regexp.MustCompile(`^/[A-Za-z0-9._/-]*(#[\pL\pN_-]+)?$`)
+	// localHrefRE is the only accepted form of a Relative result: /help
+	// or /help/<segment>..., with an optional fragment. Segments are
+	// lower-case letters, digits, "_" and "-", so "." and ".." segments,
+	// upper case and "//" are rejected. Every match also passes the
+	// assertInert allowlist for "a" in the tests.
+	localHrefRE = regexp.MustCompile(`^/help(/[a-z0-9_-]+)*(#[\pL\pN_-]+)?$`)
 	// fragmentRE is the accepted fragment ("#…") of a same-page link.
 	fragmentRE = regexp.MustCompile(`^[\pL\pN_-]+$`)
 	// tableSepRE matches a table's header separator row.
@@ -728,7 +732,7 @@ func (r *renderer) resolve(dest string) (href string, external, ok bool) {
 		return "", false, false
 	}
 	h, ok := r.o.Relative(p, frag)
-	if !ok || !localHrefRE.MatchString(h) || strings.Contains(h, "//") {
+	if !ok || len(h) > maxLinkDestBytes || !localHrefRE.MatchString(h) || strings.Contains(h, "//") {
 		return "", false, false
 	}
 	return h, false, true

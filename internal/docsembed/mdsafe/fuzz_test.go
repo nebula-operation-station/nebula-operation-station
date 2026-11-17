@@ -38,11 +38,15 @@ var (
 	// duplicateSuffixRE is the only allowed suffix of a heading id: "-N"
 	// with N a decimal number, added to make the id unique.
 	duplicateSuffixRE = regexp.MustCompile(`^-[0-9]+$`)
-	// helpHrefRE is the only form of a local link the page policy allows,
-	// the same form assertInert's "a" allowlist accepts.
-	helpHrefRE = regexp.MustCompile(`^/help(/[A-Za-z0-9._-]+)*(#[\pL\pN_-]+)?$`)
+	// helpHrefRE is the form of a Relative result that may become a link:
+	// /help, /help/<segment>..., optional #fragment. Segments are lower-case
+	// letters, digits, "_" and "-" (the page slugs), so "." and ".." and
+	// "//" never match. It is a subset of assertInert's "a" allowlist.
+	helpHrefRE = regexp.MustCompile(`^/help(/[a-z0-9_-]+)*(#[\pL\pN_-]+)?$`)
 	// tagTokenRE matches any tag, for measuring element nesting.
 	tagTokenRE = regexp.MustCompile(`<(/?)([a-zA-Z0-9]+)[^>]*>`)
+	// hrefAttrRE matches one href attribute of a rendered link.
+	hrefAttrRE = regexp.MustCompile(` href="[^"]*"`)
 )
 
 // hostileHrefs are Relative results that must never become a link
@@ -95,8 +99,12 @@ func assertOutput(t *testing.T, src string, res mdsafe.Result) {
 	}
 	assertInert(t, src, out)
 	checkHeadingIDs(t, src, out, res)
-	if limit := maxOutputFactor*len(src) + maxOutputSlack; len(out) > limit {
-		t.Errorf("Render: output %d bytes for %d input bytes exceeds the bound %d", len(out), len(src), limit)
+	// href values come from Options.Relative, not from src, so they are
+	// left out of the amplification bound. Render caps each at
+	// maxLinkDestBytes, and assertInert checks each one above.
+	body := hrefAttrRE.ReplaceAllString(out, "")
+	if limit := maxOutputFactor*len(src) + maxOutputSlack; len(body) > limit {
+		t.Errorf("Render: output %d bytes (without hrefs) for %d input bytes exceeds the bound %d", len(body), len(src), limit)
 	}
 }
 
@@ -145,16 +153,13 @@ func FuzzRender(f *testing.F) {
 		if len(src) > mdsafe.MaxSourceBytes {
 			return
 		}
-		// The page policy: fuzzed results are linkable only in the /help
-		// form assertInert allows, so a link outside it is a finding, not
-		// a resolver mistake. Hostile results are covered without the
-		// policy by TestRelativeHostileResultsNeverLink.
+		// Mode 0 hands the fuzzed href to the renderer unfiltered, so
+		// traversal-shaped, uppercase, "//" and oversized results all reach
+		// the renderer's own check. A link that escapes it fails assertInert
+		// on the output.
 		rel := func(p, frag string) (string, bool) {
 			switch mode % 3 {
 			case 0:
-				if !helpHrefRE.MatchString(href) {
-					return "", false
-				}
 				return href, true
 			case 1:
 				return href, false
@@ -318,4 +323,44 @@ func TestRelativeHostileResultsNeverLink(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestRelativeTraversalNeverLinks checks resolver results that leave the
+// /help page form. Each must render without a link, and the output must
+// pass assertInert.
+func TestRelativeTraversalNeverLinks(t *testing.T) {
+	for _, h := range []string{
+		"/help/../admin", "/help/..", "/help/./x", "/HELP/x", "/Help/hosts",
+		"//evil.example/", "/help//x", "/help/", "/help/x/", "/helpx",
+		"/admin", "/help/hosts.md", "/help/a b",
+	} {
+		res, err := mdsafe.Render([]byte("[x](a.md)"), mdsafe.Options{
+			Relative: func(string, string) (string, bool) { return h, true },
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := string(res.HTML)
+		assertInert(t, h, out)
+		if strings.Contains(out, "<a ") {
+			t.Errorf("resolver result %q produced a link: %s", h, out)
+		}
+	}
+}
+
+// TestRelativeOversizedResultNeverLinks checks that a resolver result over
+// the destination limit is not emitted, even when it is a /help path, and
+// that a short source with such a result stays inside the output bound.
+func TestRelativeOversizedResultNeverLinks(t *testing.T) {
+	long := "/help/" + strings.Repeat("a", 4096)
+	res, err := mdsafe.Render([]byte("[x](a.md)"), mdsafe.Options{
+		Relative: func(string, string) (string, bool) { return long, true },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(res.HTML), "<a ") {
+		t.Errorf("result of %d bytes produced a link", len(long))
+	}
+	assertOutput(t, "[x](a.md)", res)
 }
