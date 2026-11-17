@@ -19,6 +19,10 @@ import (
 
 const assistantOrigin = "https://nebula.example.org"
 
+// bidiText wraps "evil" in a right-to-left override and its pop, written as
+// escapes so the source holds no invisible format characters.
+var bidiText = string(rune(0x202e)) + "evil" + string(rune(0x202c))
+
 // fakeOpsStore is an in-memory AssistantOpsStore. It records every call so
 // the tests can show that a route read or wrote nothing.
 type fakeOpsStore struct {
@@ -268,10 +272,9 @@ func TestAssistantHelpServesAllUsersAndReadsNoNotes(t *testing.T) {
 // controls never become elements or attributes.
 func TestAssistantCardRendersModelTextAsEscapedText(t *testing.T) {
 	const evil = `<script>alert(1)</script><img src=x onerror=alert(2)>`
-	const bidi = "‮evil‬"
 	store := &fakeOpsStore{notes: []opsnotes.Note{fixNote(1, time.Unix(0, 0), snapshotOpenSSL, opsnotes.Body{
 		Summary: evil,
-		Urgency: bidi,
+		Urgency: bidiText,
 		Steps:   []opsnotes.StepInput{{ActionID: "package.install_security", HostID: "h1", Why: evil}},
 	})}}
 	h := assistantServer(t, assistantOps(store, newCatalog()), assistantUser{"root"})
@@ -285,7 +288,7 @@ func TestAssistantCardRendersModelTextAsEscapedText(t *testing.T) {
 	if !strings.Contains(body, "&lt;script&gt;alert(1)&lt;/script&gt;") {
 		t.Error("escaped model text missing")
 	}
-	if !strings.Contains(body, bidi) {
+	if !strings.Contains(body, bidiText) {
 		t.Error("bidi text should appear as (escaped, unchanged) text")
 	}
 }
