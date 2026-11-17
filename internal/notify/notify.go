@@ -25,10 +25,12 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/notifylog"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 )
 
@@ -143,6 +145,108 @@ type Notifier struct {
 	log     *slog.Logger
 	// retryDelays between attempts; tests shorten them.
 	retryDelays []time.Duration
+	// rec stores each decision in the notification log (ADR 0016 D10). nil
+	// means no log; the notifier then behaves as before.
+	rec Recorder
+}
+
+// Recorder stores one notification decision in the notification log (ADR
+// 0016 D10). *notifylog.Store implements it. A Recorder error is logged and
+// never changes the delivery result.
+type Recorder interface {
+	Append(ctx context.Context, r notifylog.Record) (int64, error)
+}
+
+// recordTimeout bounds one log write, so a stuck database cannot hold up the
+// next notification for long.
+const recordTimeout = 5 * time.Second
+
+// SetRecorder sets the notification log. Call it before the notifier is used
+// concurrently; nil removes the log.
+func (n *Notifier) SetRecorder(r Recorder) { n.rec = r }
+
+// record appends r to the notification log. It runs after the delivery
+// decision is final, uses a context that a cancelled send does not cancel
+// (the decision must still be logged), and logs a failure without the
+// message text. It never returns an error to the caller.
+func (n *Notifier) record(ctx context.Context, r notifylog.Record) {
+	if n.rec == nil {
+		return
+	}
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+	defer cancel()
+	if _, err := n.rec.Append(rctx, r); err != nil {
+		n.log.Warn("notification log write failed", "kind", string(r.Kind), "outcome", string(r.Outcome), "error", err.Error())
+	}
+}
+
+// fitsLabel reports whether s is a host label or execution ID the notification
+// log accepts (its shape and length limits). A value that does not fit is
+// stored empty, so the event is still logged; the message text is unchanged.
+var fitsLabel = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+func logLabel(s string, limit int) string {
+	if len(s) <= limit && fitsLabel.MatchString(s) {
+		return s
+	}
+	return ""
+}
+
+// logKind maps an event kind to the log's kind code. The digest has a
+// different name in the log.
+func logKind(kind string) notifylog.KindCode {
+	if kind == KindIntegrityDigest {
+		return notifylog.KindDigest
+	}
+	return notifylog.KindCode(kind)
+}
+
+// logState maps an event to the log's state code. Integrity events carry a
+// severity in Event.State; the log stores the kind's state instead.
+func logState(e Event) notifylog.StateCode {
+	if e.Kind == KindIntegrityDigest {
+		return notifylog.StateSummary
+	}
+	switch IntegrityKind(e.Kind) {
+	case IntegrityNOSMismatch:
+		return notifylog.StateMismatch
+	case IntegrityHostChange:
+		return notifylog.StateChanged
+	case IntegrityScanIncomplete:
+		return notifylog.StateIncomplete
+	case IntegrityBaselineTamper:
+		return notifylog.StateTamper
+	}
+	return notifylog.StateCode(e.State)
+}
+
+// newRecord builds the log record of e without an outcome.
+func newRecord(e Event) notifylog.Record {
+	return notifylog.Record{
+		Kind:        logKind(e.Kind),
+		Host:        logLabel(e.Host, notifylog.MaxHost),
+		State:       logState(e),
+		ExecutionID: logLabel(e.ExecutionID, notifylog.MaxExecutionID),
+		Link:        e.link,
+	}
+}
+
+// statusError is a provider answer with a non-2xx status. Its text is the same
+// as before; the type lets the log tell a rejection from a network failure.
+type statusError struct {
+	name string
+	code int
+}
+
+func (e *statusError) Error() string { return fmt.Sprintf("%s: answered HTTP %d", e.name, e.code) }
+
+// reasonOf maps a delivery error to the log's closed reason code.
+func reasonOf(err error) notifylog.ReasonCode {
+	var se *statusError
+	if errors.As(err, &se) {
+		return notifylog.ReasonProviderRejected
+	}
+	return notifylog.ReasonForError(err)
 }
 
 // New builds a notifier from the configuration. client may be nil.
@@ -222,10 +326,13 @@ func isIntegrityKind(kind string) bool {
 func (n *Notifier) send(ctx context.Context, e Event, skip func(provider string) bool) []string {
 	e = e.cleaned()
 	var ok []string
+	addressed := 0
+	var lastErr error
 	for _, s := range n.senders {
 		if skip != nil && skip(s.Name()) {
 			continue
 		}
+		addressed++
 		var err error
 		for attempt := 0; ; attempt++ {
 			sctx, cancel := context.WithTimeout(ctx, sendTimeout)
@@ -241,10 +348,23 @@ func (n *Notifier) send(ctx context.Context, e Event, skip func(provider string)
 		}
 		if err != nil {
 			n.log.Warn("notification failed", "provider", s.Name(), "kind", e.Kind, "host", e.Host, "error", err.Error())
+			lastErr = err
 			continue
 		}
 		ok = append(ok, s.Name())
 		n.log.Info("notification sent", "provider", s.Name(), "kind", e.Kind, "host", e.Host)
+	}
+	// Nothing was addressed (all skipped, or no provider): nothing to log.
+	if addressed > 0 {
+		r := newRecord(e)
+		r.Providers = addressed
+		if len(ok) > 0 {
+			r.Outcome = notifylog.OutcomeSent
+		} else {
+			r.Outcome = notifylog.OutcomeFailed
+			r.Reason = reasonOf(lastErr)
+		}
+		n.record(ctx, r)
 	}
 	return ok
 }
@@ -265,12 +385,12 @@ func post(ctx context.Context, c *http.Client, name, u string, body []byte, head
 		if errors.As(err, &ue) {
 			err = ue.Err
 		}
-		return fmt.Errorf("%s: request failed: %v", name, err)
+		return fmt.Errorf("%s: request failed: %w", name, err)
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBodyDrain))
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("%s: answered HTTP %d", name, resp.StatusCode)
+		return &statusError{name: name, code: resp.StatusCode}
 	}
 	return nil
 }

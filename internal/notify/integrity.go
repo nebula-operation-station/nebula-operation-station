@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/notifylog"
 )
 
 // IntegrityKind is one of the integrity notification events (spec 13,
@@ -257,6 +259,11 @@ func (g *IntegrityGate) Submit(ctx context.Context, ev IntegrityEvent, key Integ
 			g.holdLocked(ev.Kind, now)
 			g.markLocked(dk)
 			g.mu.Unlock()
+			held := newRecord(ev.message(now))
+			held.Outcome = notifylog.OutcomeHeldRateLimit
+			held.Reason = notifylog.ReasonRateLimited
+			held.Providers = len(g.n.senders)
+			g.n.record(ctx, held)
 			g.deliverDigest(ctx, due)
 			return DecisionHeld, nil
 		}
