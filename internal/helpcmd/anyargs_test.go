@@ -50,6 +50,80 @@ func TestAnyArgsSpecialFileOperandsNeedConfirmation(t *testing.T) {
 	}
 }
 
+// TestAnyArgsTildeOperandsNeedConfirmation covers an unquoted word that starts
+// with `~`. The shell expands it to a home directory, and the home of user sys
+// is /dev on Debian and Ubuntu, so `df ~sys/watchdog` opens /dev/watchdog. The
+// word is not literal, so it is indeterminate.
+func TestAnyArgsTildeOperandsNeedConfirmation(t *testing.T) {
+	t.Parallel()
+	for _, cmd := range []string{
+		"df ~sys/watchdog",
+		"df -h ~sys/watchdog",
+		"df ~/x",
+		"ls ~root",
+		"ls ~",
+		"ls -la ~+",
+		"free ~sys/x",
+		"uptime ~sys/kmsg",
+		"ps -ef ~sys/x",
+	} {
+		if v := Assess(cmd); v.Harmless {
+			t.Errorf("Assess(%q) = %+v, want not harmless", cmd, v)
+		}
+	}
+}
+
+// TestAnyArgsShellExpansionOperandsNeedConfirmation covers operands that the
+// shell rewrites before the program runs: parameters, command substitutions,
+// globs and brace expansion. The program then sees a path that is not known.
+func TestAnyArgsShellExpansionOperandsNeedConfirmation(t *testing.T) {
+	t.Parallel()
+	for _, cmd := range []string{
+		"df $HOME",
+		"df ${HOME}",
+		"df $HOME/x",
+		"df `echo /dev/watchdog`",
+		"df $(echo /dev/watchdog)",
+		"df /de?/watchdog",
+		"df /d[e]v/watchdog",
+		"df /dev/watch*",
+		"df {/dev,/tmp}",
+		"df /{dev,tmp}/x",
+		"ls *",
+		"ls x?",
+		"ls /dev/[k]msg",
+		"ls -la {/proc,/tmp}",
+		"ls \\/dev/watchdog",
+	} {
+		if v := Assess(cmd); v.Harmless {
+			t.Errorf("Assess(%q) = %+v, want not harmless", cmd, v)
+		}
+	}
+}
+
+// TestAnyArgsBareOperandsOfFileProgramsNeedConfirmation covers the operands of
+// df and ls that are not absolute. Their working directory is not known, and it
+// may be under dev, proc or sys (`cd /dev && df watchdog`), so they are not
+// harmless. Options are not operands and are not affected.
+func TestAnyArgsBareOperandsOfFileProgramsNeedConfirmation(t *testing.T) {
+	t.Parallel()
+	for _, cmd := range []string{
+		"df watchdog",
+		"df -h watchdog",
+		"df -h / watchdog",
+		"df . ..",
+		"df ../x",
+		"ls kmsg",
+		"ls -la kmsg",
+		"ls -- kmsg",
+		"ls ./kmsg",
+	} {
+		if v := Assess(cmd); v.Harmless {
+			t.Errorf("Assess(%q) = %+v, want not harmless", cmd, v)
+		}
+	}
+}
+
 // TestAnyArgsOperandsOutsideSpecialFilesStayHarmless checks that the rule does
 // not reject ordinary operands that only contain the letters of dev, proc or
 // sys as part of another element.

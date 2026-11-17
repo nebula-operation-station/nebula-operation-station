@@ -60,6 +60,11 @@ type argSpec struct {
 	// table). Their operands are still checked when opensFiles is set, so an
 	// anyArgs rule must set it.
 	anyArgs bool
+	// bareOperandsOpen is set with anyArgs for programs that open their
+	// operands as files (ls, df). A word that is neither an option nor an
+	// absolute path is then relative to the working directory, which may be
+	// under dev, proc or sys, so it is not harmless.
+	bareOperandsOpen bool
 }
 
 // allowRule is one program of the V6 allowlist.
@@ -148,9 +153,13 @@ func (sp argSpec) accepts(args []string, opensFiles bool) bool {
 			return true
 		}
 		// Every word is checked, options included: an option value can name
-		// a special file too, and the program may open it.
+		// a special file too, and the program may open it. Words are literal
+		// here: an expansion makes the command dynamic before this point.
 		for _, w := range args {
 			if namesSpecialFile(w) {
+				return false
+			}
+			if sp.bareOperandsOpen && !strings.HasPrefix(w, "-") && !strings.HasPrefix(w, "/") {
 				return false
 			}
 		}
@@ -359,12 +368,12 @@ var allowlist = map[string]allowRule{
 	"ls": {
 		why:        "only stats files; no option writes, deletes or runs anything; operands follow the opens-files rule",
 		opensFiles: true,
-		spec:       argSpec{anyArgs: true},
+		spec:       argSpec{anyArgs: true, bareOperandsOpen: true},
 	},
 	"df": {
 		why:        "only reads file system statistics; df opens each operand, so operands follow the opens-files rule",
 		opensFiles: true,
-		spec:       argSpec{anyArgs: true},
+		spec:       argSpec{anyArgs: true, bareOperandsOpen: true},
 	},
 	"du": {
 		why: "only stats files; not --files0-from or -X/--exclude-from, which open a file",
