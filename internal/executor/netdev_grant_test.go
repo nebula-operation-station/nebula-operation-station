@@ -561,24 +561,41 @@ func TestNetDevLifecycleRevokesLeasesAheadOfRegistry(t *testing.T) {
 	}
 }
 
-// setNetDevCredentialCommitHook installs f as the hook between the vault
-// commit of a credential write and its return, for this test only.
-func setNetDevCredentialCommitHook(t *testing.T, f func(deviceID string)) {
+// setNetDevCredWriteHook installs f as the credential write stage hook for
+// this test only.
+func setNetDevCredWriteHook(t *testing.T, f func(stage netDevCredWriteStage, deviceID string)) {
 	t.Helper()
-	netDevCredentialCommittedHook = f
-	t.Cleanup(func() { netDevCredentialCommittedHook = nil })
+	netDevCredWriteHook.Store(&f)
+	t.Cleanup(func() { netDevCredWriteHook.Store(nil) })
+}
+
+// concurrentRead runs one CBS version read of the switch on another
+// goroutine and returns its result.
+func (e *netDevGrantEnv) concurrentRead() error {
+	done := make(chan error, 1)
+	go func() {
+		got, err := e.svc.ReadNetDevice(context.Background(), &pb.ReadNetDeviceRequest{DeviceId: netDevGrantDevice, Read: pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION})
+		if got != nil {
+			err = errors.Join(err, fmt.Errorf("read reply %v, want none", got))
+		}
+		done <- err
+	}()
+	return <-done
 }
 
 // TestReadNetDeviceRefusedBetweenCredentialCommitAndRevocation (ADR 0010
-// D1/D2): the commit hook runs a read synchronously after the vault commit
-// of a credential write and before its lease revocation. There the new
-// version is visible and leases approved ahead of the registry for exactly
-// that version are still active (one approved before the write, one inside
-// the window), yet the read is refused and spends nothing. After the
-// write both leases are revoked, and only a lease approved afterwards
-// authorizes a read. First set, first rotation and a later rotation, each
-// through the RPC handler (holding netDevAdminMu) and through NetDevAdmin
-// directly.
+// D1/D2): at every stage of a credential write (blocked before the commit,
+// committed before the revocation, revoked before the unblock) a read on
+// another goroutine is refused by the credential write lock (Unavailable;
+// a lock taken only after the commit or released before the revocation
+// fails this), the device is durably blocked, and the lease check alone
+// (without the lock) refuses too. After the commit the new version is
+// visible and leases approved ahead of the registry for it (one before the
+// write, one inside the window) are active until the revocation. After the
+// write both are revoked, the device is unblocked, and only a lease
+// approved afterwards authorizes a read. First set, first rotation and a
+// later rotation, each through the RPC handler (holding netDevAdminMu) and
+// through NetDevAdmin directly.
 func TestReadNetDeviceRefusedBetweenCredentialCommitAndRevocation(t *testing.T) {
 	ctx := context.Background()
 	type tcase struct {
@@ -621,27 +638,49 @@ func TestReadNetDeviceRefusedBetweenCredentialCommitAndRevocation(t *testing.T) 
 			// Approved before the write, ahead of the registry.
 			e.grant(schedgrant.NetDeviceDefaultRunBudget, 900, time.Hour, tgt)
 
-			hooked := false
-			setNetDevCredentialCommitHook(t, func(deviceID string) {
+			stages := map[netDevCredWriteStage]bool{}
+			setNetDevCredWriteHook(t, func(stage netDevCredWriteStage, deviceID string) {
 				if deviceID != netDevGrantDevice {
 					return
 				}
-				hooked = true
-				// The new version is committed and the ahead lease not yet
-				// revoked: the window is open.
-				if cur := e.target(netDevGrantDevice, schedgrant.NetDeviceReadCBSVersion); cur.CredentialVersion != tc.from+1 {
-					t.Errorf("in the window: credential version %d, want %d", cur.CredentialVersion, tc.from+1)
+				stages[stage] = true
+				wantVersion := tc.from
+				if stage != netDevCredBeforeCommit {
+					wantVersion = tc.from + 1
 				}
-				if _, ok := e.activeGrant(); !ok {
-					t.Error("in the window: the ahead lease is already revoked; the window is not forced")
+				if cur := e.target(netDevGrantDevice, schedgrant.NetDeviceReadCBSVersion); cur.CredentialVersion != wantVersion {
+					t.Errorf("stage %d: credential version %d, want %d", stage, cur.CredentialVersion, wantVersion)
 				}
-				// A second lease approved inside the window, then the read.
-				e.grant(schedgrant.NetDeviceDefaultRunBudget, 900, time.Hour, tgt)
-				if err := read(e); status.Code(err) != codes.Unavailable {
-					t.Errorf("read in the window: %v, want Unavailable (an ahead lease authorized it)", err)
+				if d := e.device(netDevGrantDevice); !d.Blocked || d.BlockReason != netDevCredChangeReason {
+					t.Errorf("stage %d: blocked %v reason %q, want the durable credential change block", stage, d.Blocked, d.BlockReason)
 				}
-				if n := e.spent(netDevGrantDevice); n != 0 {
-					t.Errorf("read in the window spent %d", n)
+				_, active := e.activeGrant()
+				switch stage {
+				case netDevCredAfterCommit:
+					// The window: committed, the ahead lease not yet revoked.
+					if !active {
+						t.Error("after commit: the ahead lease is already revoked; the window is not forced")
+					}
+					// A second lease approved inside the window.
+					e.grant(schedgrant.NetDeviceDefaultRunBudget, 900, time.Hour, tgt)
+				case netDevCredAfterRevoke:
+					if active {
+						t.Error("after revoke: a lease is still active")
+					}
+				}
+				if err := e.concurrentRead(); status.Code(err) != codes.Unavailable {
+					t.Errorf("concurrent read at stage %d: %v, want Unavailable (credential write lock held)", stage, err)
+				}
+				// Without the lock the block still refuses the lease check.
+				if g, err := e.check(netDevGrantDevice, pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION); err == nil {
+					t.Errorf("lease check at stage %d authorized lease %s", stage, g.GrantID)
+				}
+				// spent records a probe reservation itself, so it is taken
+				// once, in the window, covering the reads of both stages.
+				if stage == netDevCredAfterCommit {
+					if n := e.spent(netDevGrantDevice); n != 0 {
+						t.Errorf("reads before the revocation spent %d", n)
+					}
 				}
 			})
 			var err error
@@ -660,8 +699,13 @@ func TestReadNetDeviceRefusedBetweenCredentialCommitAndRevocation(t *testing.T) 
 			if err != nil {
 				t.Fatalf("%s: %v", tc.name, err)
 			}
-			if !hooked {
-				t.Fatal("commit hook did not run")
+			for _, st := range []netDevCredWriteStage{netDevCredBeforeCommit, netDevCredAfterCommit, netDevCredAfterRevoke} {
+				if !stages[st] {
+					t.Fatalf("stage hook %d did not run", st)
+				}
+			}
+			if d := e.device(netDevGrantDevice); d.Blocked {
+				t.Fatalf("after %s: device still blocked (%q)", tc.name, d.BlockReason)
 			}
 			// Both ahead leases are revoked; the read is now refused for
 			// lack of a lease, not for the write in progress.
