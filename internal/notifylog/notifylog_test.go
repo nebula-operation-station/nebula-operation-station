@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 )
 
@@ -610,9 +611,19 @@ func TestHostileHostAndExecutionIDAreRefused(t *testing.T) {
 // TestRealHostIDsAreAccepted: a host is stored only as an inventory host ID
 // (lowercase letters, digits, '.', '_' or '-', starting with a letter or
 // digit, at most 63 bytes), and an execution ID only as a lowercase UUIDv4.
-// Both are stored exactly as given, with no field marked changed.
+// Both are stored exactly as given, with no field marked changed. A machine-id
+// style host (32 hex digits) and a host whose name merely contains "tk" are
+// real inventory IDs and are accepted.
 func TestRealHostIDsAreAccepted(t *testing.T) {
-	hosts := []string{"web-1", "nas.lab_01", "a", "9", "pve-node-02.lab", strings.Repeat("h", 63)}
+	hosts := []string{
+		"web-1", "nas.lab_01", "a", "9", "pve-node-02.lab", strings.Repeat("h", 63),
+		"5b9ae4c1d0f3e2a7b8c6d5e4f3a2b1c0",                   // machine-id style, 32 hex
+		"5b9ae4c1d0f3e2a7b8c6d5e4f3a2b1",                     // 30 hex
+		"5b9ae4c1d0f3e2a7b8c6d5e4f3a2b1c0" + "abcdefabcdefa", // 45 hex
+		strings.Repeat("0", 63),                              // 63 hex digits, the length limit
+		"tk-web",                                             // contains "tk", not a token
+		"tk_x7aq9mzp2lwr8vn4bkc6shd3fgj1",                    // inventory-shaped, lowercase
+	}
 	execIDs := []string{testExecID, "00000000-0000-4000-8000-000000000000", "ffffffff-ffff-4fff-bfff-ffffffffffff"}
 	s, _ := newTestStore(t)
 	ctx := context.Background()
@@ -685,10 +696,13 @@ func TestHostAndExecutionIDShape(t *testing.T) {
 	}
 }
 
-// TestSecretValuesAreRefusedWithoutEcho: a provider secret in Host or
-// ExecutionID is refused, and the error names only the field. Covers an ntfy
-// access token, a hex HMAC key, a base64url secret, and a Telegram bot token
-// without its numeric prefix.
+// TestSecretValuesAreRefusedWithoutEcho: a value that is not a valid ID is
+// refused and the error names only the field, never the value. Each secret is
+// refused in ExecutionID (not a UUIDv4). In Host it is refused when it breaks
+// the inventory pattern (uppercase, a symbol, a space, over 63 bytes); the
+// Host rule is the shape, not a secret detector, so a secret-looking value
+// that has the inventory shape is a valid ID (see
+// TestHostIDIsExactlyInventoryPattern).
 func TestSecretValuesAreRefusedWithoutEcho(t *testing.T) {
 	secrets := []string{
 		"tk_Xy7aQ9mZp2LwR8vN4bKc6sHd3fGj1",                                 // ntfy access token, mixed case
@@ -697,30 +711,82 @@ func TestSecretValuesAreRefusedWithoutEcho(t *testing.T) {
 		"5b9ae4c1d0f3e2a7b8c6d5e4f3a2b1c0",                                 // 32 hex HMAC key
 		"A9Lq3-xT7_mZ2vK8pR0sW4eY6uI1oP5aS9dF3gH7jKl",                      // base64url, mixed case
 		"AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw",                               // Telegram token, no numeric prefix
+		"https://api.telegram.org/bot123456:SECRET/sendMessage",            // target URL with a token
 	}
 	s, _ := newTestStore(t)
 	ctx := context.Background()
 	for _, v := range secrets {
-		for _, field := range []string{"host", "execution_id"} {
-			r := sampleRecord()
-			if field == "host" {
-				r.Host = v
-			} else {
-				r.ExecutionID = v
-			}
-			_, err := s.Append(ctx, r)
-			if !errors.Is(err, ErrRefused) {
-				t.Errorf("%s secret accepted or wrong error: %v", field, err)
-				continue
-			}
-			if msg := err.Error(); !strings.Contains(msg, field) || strings.Contains(msg, v) {
-				t.Errorf("%s refusal %q must name the field and not echo the value", field, msg)
-			}
+		r := sampleRecord()
+		r.ExecutionID = v
+		_, err := s.Append(ctx, r)
+		if !errors.Is(err, ErrRefused) {
+			t.Errorf("execution_id secret accepted or wrong error: %v", err)
+		} else if msg := err.Error(); !strings.Contains(msg, "execution_id") || strings.Contains(msg, v) {
+			t.Errorf("execution_id refusal %q must name the field and not echo the value", msg)
+		}
+	}
+	// Host: only the values that break the inventory pattern are refused.
+	for _, v := range []string{secrets[0], secrets[2], secrets[4], secrets[5], secrets[6]} {
+		r := sampleRecord()
+		r.Host = v
+		_, err := s.Append(ctx, r)
+		if !errors.Is(err, ErrRefused) {
+			t.Errorf("host secret %q accepted or wrong error: %v", v, err)
+		} else if msg := err.Error(); !strings.Contains(msg, "host") || strings.Contains(msg, v) {
+			t.Errorf("host refusal %q must name the field and not echo the value", msg)
 		}
 	}
 	page, err := s.List(ctx, 0, MaxPage)
 	if err != nil || len(page) != 0 {
 		t.Fatalf("secret values left %d rows (err %v); want none", len(page), err)
+	}
+}
+
+// TestHostIDIsExactlyInventoryPattern pins Host to the inventory pattern in
+// both directions: a value Append refuses is one canonical.ValidHostID rejects,
+// and a value it accepts is one the inventory accepts. Boundaries (63 and 64
+// bytes, 31/32/33 hex digits, "tk" prefixes, a leading or trailing separator)
+// are included, so an extra secret filter or a looser check fails here.
+func TestHostIDIsExactlyInventoryPattern(t *testing.T) {
+	cases := []string{
+		"", "a", "9", "web-1", "tk-web", "tk_web", "tk_x7aq9mzp2lwr8vn4bkc6shd3fgj1",
+		strings.Repeat("h", 63), strings.Repeat("h", 64),
+		strings.Repeat("0", 31), strings.Repeat("0", 32), strings.Repeat("f", 33),
+		"5b9ae4c1d0f3e2a7b8c6d5e4f3a2b1c0", // machine-id
+		"-web", "web-", ".web", "web.", "_web", "Web", "web 1", "web/1",
+		"A9Lq3-xT7_mZ2vK8pR0sW4eY6uI1oP5aS9dF3gH7jKl",
+	}
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	for _, h := range cases {
+		r := sampleRecord()
+		r.Host = h
+		_, err := s.Append(ctx, r)
+		accepted := err == nil
+		if want := h == "" || canonical.ValidHostID(h); accepted != want {
+			t.Errorf("Host %q: accepted = %v (err %v), inventory pattern says %v", h, accepted, err, want)
+		}
+		if err != nil && !errors.Is(err, ErrRefused) {
+			t.Errorf("Host %q: error %v does not wrap ErrRefused", h, err)
+		}
+	}
+}
+
+// TestEmptyHostIsStored: a record with no host (for example a digest event
+// that belongs to no single host) is stored with an empty Host, and it is not
+// marked changed. Refusing it would drop the event.
+func TestEmptyHostIsStored(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	r := sampleRecord()
+	r.Host = ""
+	mustAppend(t, s, r)
+	page, err := s.List(ctx, 0, MaxPage)
+	if err != nil || len(page) != 1 {
+		t.Fatalf("List: %d rows, err %v; want 1", len(page), err)
+	}
+	if page[0].Host != "" || page[0].Changed != 0 {
+		t.Errorf("empty host stored as %q with changed %b; want \"\" and no change", page[0].Host, page[0].Changed)
 	}
 }
 

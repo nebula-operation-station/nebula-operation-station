@@ -7,13 +7,16 @@
 // The log is structured data only: host ID, kind, state, reason, the
 // execution ID, a NOS link and counts. It never holds a provider token, a
 // provider target URL or log text. Kind, State, Reason and Outcome are closed
-// sets. Host must be an inventory host ID and ExecutionID a lowercase UUIDv4,
-// the same forms the inventory and the executions package use (see validHost
-// and validExecutionID). A value that does not match is refused with
-// ErrRefused, and the error names the field but never the value, so a refused
-// input cannot leak through an error or a log line that wraps it. Token-like
-// values (an ntfy access token, a hex HMAC key) are refused by the same rule.
-// A caller must pass the inventory ID, not a display name. A link that is not
+// sets. Host must be an inventory host ID (or empty, for an event with no
+// host) and ExecutionID a lowercase UUIDv4 (or empty), the same forms the
+// inventory and the executions package use (see validHost and
+// validExecutionID). A value that does not match is refused with ErrRefused,
+// and the error names the field but never the value, so a refused input
+// cannot leak through an error or a log line that wraps it. The guarantee is
+// the ID shape: a value that is not a valid ID is refused, and nothing more is
+// claimed. A token that has the inventory shape is a valid host ID, so
+// callers must never pass a secret as a host. A caller must pass the
+// inventory ID, not a display name. A link that is not
 // a NOS path, or is too long, is dropped and marked in Entry.Changed. Time is
 // injected through New, so retention is testable.
 //
@@ -50,29 +53,17 @@ const MaxEntries = 5000
 // it never includes the value.
 var ErrRefused = errors.New("notifylog: record refused")
 
-// ntfyTokenPrefix is the prefix of an ntfy access token.
-const ntfyTokenPrefix = "tk_"
-
-// hexSecretRe matches 32 or more lowercase hex digits: an HMAC key or a hash
-// in hex form. Such a value is a secret, not a host ID.
-var hexSecretRe = regexp.MustCompile(`^[0-9a-f]{32,}$`)
-
 // execIDRe is the execution ID form: a lowercase UUIDv4, as executions.newUUID
 // generates it. canonical has the same pattern, but its copy is unexported.
 var execIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
-// validHost reports whether s is empty or an inventory host ID (the pattern
-// the inventory checks, canonical.ValidHostID: lowercase, at most 63 bytes).
-// A host ID that looks like a provider secret is refused too: an ntfy access
-// token ("tk_" prefix) or a long hex value.
+// validHost reports whether s is empty (no host) or exactly an inventory host
+// ID: canonical.ValidHostID, the pattern the inventory checks (lowercase
+// letters, digits, '.', '_', '-', at most 63 bytes). Nothing stricter and
+// nothing looser. There is no secret detector here: a value that does not
+// have the ID shape is refused, and a value that does is a valid host ID.
 func validHost(s string) bool {
-	if s == "" {
-		return true
-	}
-	if !canonical.ValidHostID(s) {
-		return false
-	}
-	return !strings.HasPrefix(s, ntfyTokenPrefix) && !hexSecretRe.MatchString(s)
+	return s == "" || canonical.ValidHostID(s)
 }
 
 // validExecutionID reports whether s is empty or a lowercase UUIDv4.
