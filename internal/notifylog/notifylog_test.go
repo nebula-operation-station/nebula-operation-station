@@ -684,6 +684,76 @@ func TestLinkMustBeNOSPathOtherwiseDropped(t *testing.T) {
 	}
 }
 
+// TestEmptyLinkIsNoLinkNotAChangedLink: an event without a link (a held or
+// summary event) has no link to drop, so Changed must not report one.
+func TestEmptyLinkIsNoLinkNotAChangedLink(t *testing.T) {
+	s, _ := newTestStore(t)
+	r := sampleRecord()
+	r.Link = ""
+	mustAppend(t, s, r)
+
+	page, err := s.List(context.Background(), 0, 1)
+	if err != nil || len(page) != 1 {
+		t.Fatalf("List: %d rows, err %v", len(page), err)
+	}
+	if page[0].Link != "" || page[0].Changed.Has(FieldLink) || page[0].Changed != 0 {
+		t.Fatalf("empty link: Link %q, Changed %b; want no link and no change", page[0].Link, page[0].Changed)
+	}
+}
+
+// TestLinkOverMaxIsDroppedNotTruncated: a cut path could point at another or
+// a nonexistent UI route, so an over-long link is dropped like any invalid
+// link. A link of exactly MaxLink bytes is kept.
+func TestLinkOverMaxIsDroppedNotTruncated(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	atLimit := "/" + strings.Repeat("a", MaxLink-1)
+	overLimit := "/" + strings.Repeat("a", MaxLink)
+
+	r := sampleRecord()
+	r.Link = atLimit
+	mustAppend(t, s, r)
+	r.Link = overLimit
+	mustAppend(t, s, r)
+
+	page, err := s.List(ctx, 0, MaxPage)
+	if err != nil || len(page) != 2 {
+		t.Fatalf("List: %d rows, err %v", len(page), err)
+	}
+	if page[0].Link != "" || !page[0].Changed.Has(FieldLink) {
+		t.Fatalf("over-limit link not dropped: Link %q (len %d), Changed=%b", page[0].Link, len(page[0].Link), page[0].Changed)
+	}
+	if page[1].Link != atLimit || page[1].Changed.Has(FieldLink) {
+		t.Fatalf("link of MaxLink bytes altered: Link len %d, Changed=%b", len(page[1].Link), page[1].Changed)
+	}
+}
+
+// TestProvidersAreClampedAndNeverLoseEntry: a count outside 0..MaxProviders is
+// clamped, so the row is still written. Without the clamp the CHECK constraint
+// would refuse it and the entry would be lost.
+func TestProvidersAreClampedAndNeverLoseEntry(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	for _, n := range []int{-5, -1, 0, MaxProviders, MaxProviders + 1, 1000} {
+		r := sampleRecord()
+		r.Providers = n
+		if _, err := s.Append(ctx, r); err != nil {
+			t.Fatalf("Append with Providers %d: %v; the entry must not be lost", n, err)
+		}
+	}
+	page, err := s.List(ctx, 0, MaxPage)
+	if err != nil || len(page) != 6 {
+		t.Fatalf("List: %d rows, err %v; want 6", len(page), err)
+	}
+	// Newest first: 1000, 17, 16, 0, -1, -5, clamped to 16, 16, 16, 0, 0, 0.
+	want := []int{MaxProviders, MaxProviders, MaxProviders, 0, 0, 0}
+	for i, e := range page {
+		if e.Providers != want[i] {
+			t.Fatalf("entry %d: Providers = %d, want %d", i, e.Providers, want[i])
+		}
+	}
+}
+
 func TestSchemaHasNoTokenOrTargetURLColumn(t *testing.T) {
 	s, _ := newTestStore(t)
 	rows, err := s.db.Query(`SELECT name FROM pragma_table_info('notify_log') ORDER BY cid`)
