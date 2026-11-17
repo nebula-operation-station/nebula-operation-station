@@ -28,8 +28,8 @@ func vendorFeed(eco string) (string, bool) {
 // from the structured product tree (vulnfeed.CSAFProduct.OS and Models): a
 // product applies when it names no model or the device's exact model; a
 // product naming only other models does not affect the device; a near name
-// or an unreadable model scope is a coverage gap. internal/vulnver has no vendor version
-// scheme, so the matcher never orders firmware versions: only an exact
+// or an unreadable model scope is a coverage gap. internal/vulnver has no
+// vendor version scheme, so the matcher never orders firmware versions: only an exact
 // product_version equal to the firmware decides. A firmware that only a
 // version range could cover, or that appears in contradicting status
 // lists, is a coverage gap, never fixed or not affected.
