@@ -5,12 +5,9 @@ package opsfacts
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnprio"
 )
 
 // secretFixture is a fleet whose host, label, package and CVE values are all
@@ -19,19 +16,19 @@ func secretFixture() ([]Host, []Finding) {
 	h := webHost()
 	h.ID = "secret-host-7"
 	h.Label = "Keller-Server"
-	f1 := osFinding("CVE-2026-4242", vulnprio.TierCritical, 95)
+	f1 := osFinding("CVE-2026-4242", TierCritical, 95)
 	f1.HostID = "secret-host-7"
 	f1.Package = "libexample"
 	f1.KEV = true
-	f2 := osFinding("CVE-2026-4243", vulnprio.TierHigh, 80)
+	f2 := osFinding("CVE-2026-4243", TierHigh, 80)
 	f2.HostID = "secret-host-7"
 	f2.Package = "libexample2"
-	f3 := osFinding("CVE-2026-4244", vulnprio.TierMedium, 40)
+	f3 := osFinding("CVE-2026-4244", TierMedium, 40)
 	f3.HostID = "secret-host-7"
-	accepted := osFinding("CVE-2026-4245", vulnprio.TierCritical, 99)
+	accepted := osFinding("CVE-2026-4245", TierCritical, 99)
 	accepted.HostID = "secret-host-7"
 	accepted.State = StateAcceptedRisk
-	ghost := osFinding("CVE-2026-4246", vulnprio.TierCritical, 99)
+	ghost := osFinding("CVE-2026-4246", TierCritical, 99)
 	ghost.HostID = "ghost-9"
 	return []Host{h}, []Finding{f1, f2, f3, accepted, ghost}
 }
@@ -119,13 +116,25 @@ func assertNumericLeaves(t *testing.T, v any, path string) {
 	}
 }
 
-// TestExternalRefusesInvalidFinding checks that an invalid finding stops the
-// external count, as it stops the lab projection.
-func TestExternalRefusesInvalidFinding(t *testing.T) {
+// TestExternalSkipsInvalidFinding checks that a malformed finding is left out
+// of the external count and audited, and that the other findings still count.
+func TestExternalSkipsInvalidFinding(t *testing.T) {
 	hosts, fs := secretFixture()
 	fs[0].State = "closed"
-	p := newProjector(t, hosts, fs, nil, fullCatalog())
-	if _, err := p.External(context.Background()); !errors.Is(err, ErrInvalidState) {
-		t.Fatalf("External error = %v, want ErrInvalidState", err)
+	p, audit := newProjectorWith(t, Sources{
+		Inventory: fakeInventory{hosts: hosts},
+		Listeners: fakeListeners{},
+		Findings:  fakeFindings{fs: fs},
+		Catalog:   fullCatalog(),
+	})
+	got, err := p.External(context.Background())
+	if err != nil {
+		t.Fatalf("External: %v, want the bad finding skipped", err)
+	}
+	if want := (Counts{High: 1, Medium: 1}); got.Fleet != want {
+		t.Fatalf("fleet = %+v, want %+v without the skipped critical finding", got.Fleet, want)
+	}
+	if len(audit.skips) != 1 || audit.skips[0].Scope != ScopeFinding {
+		t.Fatalf("audit = %+v, want one finding skip", audit.skips)
 	}
 }

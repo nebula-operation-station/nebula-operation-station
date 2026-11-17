@@ -8,10 +8,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-
-	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfix"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnprio"
 )
 
 type fakeInventory struct {
@@ -38,6 +34,20 @@ type fakeCatalog map[string]bool
 
 func (f fakeCatalog) HasAction(a string) bool { return f[a] }
 
+// recordAudit keeps every skip it is given. A non-nil err makes it fail.
+type recordAudit struct {
+	skips []Skip
+	err   error
+}
+
+func (r *recordAudit) Skipped(_ context.Context, s Skip) error {
+	if r.err != nil {
+		return r.err
+	}
+	r.skips = append(r.skips, s)
+	return nil
+}
+
 // fullCatalog contains every allowlisted action.
 func fullCatalog() fakeCatalog {
 	c := fakeCatalog{}
@@ -53,13 +63,13 @@ func webHost() Host {
 		ID:          "web-01",
 		Label:       "web-01",
 		Environment: "lab",
-		Criticality: inventory.CriticalityHigh,
-		Exposure:    vulnprio.ExposureInternet,
+		Criticality: CriticalityHigh,
+		Exposure:    ExposureInternet,
 	}
 }
 
 // osFinding is a high, open, verified-fix OS finding of web-01.
-func osFinding(vuln string, tier vulnprio.Tier, score int) Finding {
+func osFinding(vuln string, tier Tier, score int) Finding {
 	return Finding{
 		Subject:   SubjectOS,
 		HostID:    "web-01",
@@ -70,26 +80,44 @@ func osFinding(vuln string, tier vulnprio.Tier, score int) Finding {
 		Tier:      tier,
 		Score:     score,
 		State:     StateOpen,
-		Fix: vulnfix.Result{
-			Status: vulnfix.StatusVerified,
-			Action: vulnfix.ActionInstallSecurity,
-			HostID: "web-01",
-			Fixed:  "3.0.2-1",
-		},
+		Fix:       FixDecision{Outcome: OutcomeVerified, Link: LinkInstallSecurity},
 	}
+}
+
+// imageFinding is an open finding of image "nginx-img" that runs on web-01.
+func imageFinding(vuln string, tier Tier, score int, outcome FixOutcome, link FixLink) Finding {
+	f := osFinding(vuln, tier, score)
+	f.Subject = SubjectImage
+	f.ImageSubject = "nginx-img"
+	f.Package = "libssl3"
+	f.Fix = FixDecision{Outcome: outcome, Link: link}
+	return f
+}
+
+// newProjectorWith returns a projector over src and the auditor it records to.
+func newProjectorWith(t *testing.T, src Sources) (*Projector, *recordAudit) {
+	t.Helper()
+	audit := &recordAudit{}
+	if src.Audit == nil {
+		src.Audit = audit
+	} else if a, ok := src.Audit.(*recordAudit); ok {
+		audit = a
+	}
+	p, err := New(src)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return p, audit
 }
 
 func newProjector(t *testing.T, hosts []Host, fs []Finding, ports fakeListeners, cat fakeCatalog) *Projector {
 	t.Helper()
-	p, err := New(Sources{
+	p, _ := newProjectorWith(t, Sources{
 		Inventory: fakeInventory{hosts: hosts},
 		Listeners: ports,
 		Findings:  fakeFindings{fs: fs},
 		Catalog:   cat,
 	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
 	return p
 }
 
@@ -112,11 +140,17 @@ func oneGroup(t *testing.T, p *Projector) Group {
 	return gs[0]
 }
 
+// digestOf returns the digest of the only group of the given sources.
+func digestOf(t *testing.T, hosts []Host, fs []Finding, ports fakeListeners, cat fakeCatalog) string {
+	t.Helper()
+	return oneGroup(t, newProjector(t, hosts, fs, ports, cat)).Digest
+}
+
 // TestSameInputSameDigest checks that the digest does not depend on the order
 // the sources return their items in.
 func TestSameInputSameDigest(t *testing.T) {
-	a := osFinding("CVE-2026-0001", vulnprio.TierHigh, 80)
-	b := osFinding("CVE-2026-0002", vulnprio.TierCritical, 95)
+	a := osFinding("CVE-2026-0001", TierHigh, 80)
+	b := osFinding("CVE-2026-0002", TierCritical, 95)
 	ports := fakeListeners{"web-01": {{Number: 443, Protocol: "tcp"}, {Number: 22, Protocol: "tcp"}}}
 
 	g1 := oneGroup(t, newProjector(t, []Host{webHost()}, []Finding{a, b}, ports, fullCatalog()))
@@ -129,19 +163,47 @@ func TestSameInputSameDigest(t *testing.T) {
 	}
 }
 
+// TestFindingOrderDoesNotChangeDigest checks the total order of sortFindings:
+// findings that tie on every field of the old partial order (score, tier,
+// vulnerability, package, installed version) but differ in a later field
+// give the same digest in either input order.
+func TestFindingOrderDoesNotChangeDigest(t *testing.T) {
+	base := osFinding("CVE-2026-0001", TierHigh, 80)
+	ties := map[string]func(*Finding){
+		"fixed":   func(f *Finding) { f.Fixed = "3.0.9-1" },
+		"kev":     func(f *Finding) { f.KEV = true },
+		"outcome": func(f *Finding) { f.Fix = FixDecision{Outcome: OutcomeNotVerified, Link: LinkInstallSecurity} },
+		"link":    func(f *Finding) { f.Fix = FixDecision{Outcome: OutcomeVerified, Link: LinkInstallAll} },
+		"reboot":  func(f *Finding) { f.Fix.Reboot = true },
+	}
+	for name, tie := range ties {
+		t.Run(name, func(t *testing.T) {
+			other := base
+			tie(&other)
+			ports := fakeListeners{"web-01": {{Number: 22, Protocol: "tcp"}}}
+			d1 := digestOf(t, []Host{webHost()}, []Finding{base, other}, ports, fullCatalog())
+			d2 := digestOf(t, []Host{webHost()}, []Finding{other, base}, ports, fullCatalog())
+			if d1 != d2 {
+				t.Fatalf("digest depends on input order: %s vs %s", d1, d2)
+			}
+		})
+	}
+}
+
 // TestChangedFindingChangesDigest changes one listed value at a time and
 // checks that each change produces a new digest.
 func TestChangedFindingChangesDigest(t *testing.T) {
-	base := osFinding("CVE-2026-0001", vulnprio.TierHigh, 80)
-	want := oneGroup(t, newProjector(t, []Host{webHost()}, []Finding{base}, nil, fullCatalog())).Digest
+	base := osFinding("CVE-2026-0001", TierHigh, 80)
+	want := digestOf(t, []Host{webHost()}, []Finding{base}, nil, fullCatalog())
 
 	changes := map[string]func(*Finding){
 		"fixed version":  func(f *Finding) { f.Fixed = "3.0.3-1" },
 		"installed":      func(f *Finding) { f.Installed = "3.0.0-9" },
-		"tier":           func(f *Finding) { f.Tier = vulnprio.TierCritical },
+		"tier":           func(f *Finding) { f.Tier = TierCritical },
 		"score":          func(f *Finding) { f.Score = 81 },
 		"kev":            func(f *Finding) { f.KEV = true },
-		"fix status":     func(f *Finding) { f.Fix.Status = vulnfix.StatusNotVerified },
+		"fix outcome":    func(f *Finding) { f.Fix.Outcome = OutcomeNotVerified },
+		"fix link":       func(f *Finding) { f.Fix.Link = LinkInstallAll },
 		"reboot":         func(f *Finding) { f.Fix.Reboot = true },
 		"vulnerability":  func(f *Finding) { f.VulnID = "CVE-2026-0009" },
 		"package":        func(f *Finding) { f.Package = "libssl3" },
@@ -152,7 +214,7 @@ func TestChangedFindingChangesDigest(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			fs := []Finding{base}
 			if change == nil {
-				fs = append(fs, osFinding("CVE-2026-0005", vulnprio.TierHigh, 70))
+				fs = append(fs, osFinding("CVE-2026-0005", TierHigh, 70))
 			} else {
 				f := base
 				change(&f)
@@ -174,13 +236,72 @@ func TestChangedFindingChangesDigest(t *testing.T) {
 	}
 }
 
+// TestChangedHostAndCandidatesChangeDigest covers the host part and the
+// candidates, which are not finding fields: each change must give a new
+// digest, so that a note written before it is due again.
+func TestChangedHostAndCandidatesChangeDigest(t *testing.T) {
+	fs := []Finding{osFinding("CVE-2026-0001", TierHigh, 80)}
+	ports := fakeListeners{"web-01": {{Number: 22, Protocol: "tcp"}}}
+	want := digestOf(t, []Host{webHost()}, fs, ports, fullCatalog())
+
+	changes := map[string]func(h *Host, p *fakeListeners, c fakeCatalog){
+		"host label":  func(h *Host, _ *fakeListeners, _ fakeCatalog) { h.Label = "web-02" },
+		"environment": func(h *Host, _ *fakeListeners, _ fakeCatalog) { h.Environment = "prod" },
+		"criticality": func(h *Host, _ *fakeListeners, _ fakeCatalog) { h.Criticality = CriticalityCritical },
+		"exposure":    func(h *Host, _ *fakeListeners, _ fakeCatalog) { h.Exposure = ExposureVPNEntry },
+		"port added": func(_ *Host, p *fakeListeners, _ fakeCatalog) {
+			(*p)["web-01"] = append((*p)["web-01"], Port{Number: 443, Protocol: "tcp"})
+		},
+		"port protocol":   func(_ *Host, p *fakeListeners, _ fakeCatalog) { (*p)["web-01"][0].Protocol = "udp" },
+		"catalog removes": func(_ *Host, _ *fakeListeners, c fakeCatalog) { delete(c, "package.install_security") },
+	}
+	for name, change := range changes {
+		t.Run(name, func(t *testing.T) {
+			h := webHost()
+			pl := fakeListeners{"web-01": append([]Port(nil), ports["web-01"]...)}
+			cat := fullCatalog()
+			change(&h, &pl, cat)
+			got := digestOf(t, []Host{h}, fs, pl, cat)
+			if got == want {
+				t.Fatalf("change %q did not change the digest", name)
+			}
+		})
+	}
+}
+
+// TestDigestChangesAfterRealSourceChange runs the projection twice on source
+// data that differs in one patch: the digest of the first run must be stale
+// after the change, and Candidates must refuse it (ADR 0016 D7).
+func TestDigestChangesAfterRealSourceChange(t *testing.T) {
+	ctx := context.Background()
+	before := osFinding("CVE-2026-0001", TierHigh, 80)
+	p1 := newProjector(t, []Host{webHost()}, []Finding{before}, nil, fullCatalog())
+	g := oneGroup(t, p1)
+
+	// The same host after the package was updated and the finding closed.
+	after := before
+	after.Installed = "3.0.2-1"
+	after.Fix = FixDecision{Outcome: OutcomeVerified, Link: LinkNone}
+	p2 := newProjector(t, []Host{webHost()}, []Finding{after}, nil, fullCatalog())
+	g2 := oneGroup(t, p2)
+	if g2.Digest == g.Digest {
+		t.Fatal("digest did not change after the source changed")
+	}
+	if _, err := p2.Candidates(ctx, g.Key, g.Digest); !errors.Is(err, ErrStaleDigest) {
+		t.Fatalf("Candidates with the old digest: error = %v, want ErrStaleDigest", err)
+	}
+	if _, err := p2.Candidates(ctx, g2.Key, g2.Digest); err != nil {
+		t.Fatalf("Candidates with the new digest: %v", err)
+	}
+}
+
 // TestAcceptedRiskAndFalsePositiveLeftOut checks that only open findings
 // enter a group and its counts (ADR 0016 D3).
 func TestAcceptedRiskAndFalsePositiveLeftOut(t *testing.T) {
-	open := osFinding("CVE-2026-0001", vulnprio.TierHigh, 80)
-	accepted := osFinding("CVE-2026-0002", vulnprio.TierCritical, 99)
+	open := osFinding("CVE-2026-0001", TierHigh, 80)
+	accepted := osFinding("CVE-2026-0002", TierCritical, 99)
 	accepted.State = StateAcceptedRisk
-	fp := osFinding("CVE-2026-0003", vulnprio.TierCritical, 98)
+	fp := osFinding("CVE-2026-0003", TierCritical, 98)
 	fp.State = StateFalsePositive
 	g := oneGroup(t, newProjector(t, []Host{webHost()}, []Finding{open, accepted, fp}, nil, fullCatalog()))
 	if len(g.Projection.Findings) != 1 || g.Projection.Findings[0].VulnID != "CVE-2026-0001" {
@@ -195,8 +316,8 @@ func TestAcceptedRiskAndFalsePositiveLeftOut(t *testing.T) {
 // group with only medium or low findings is not eligible (ADR 0016 D3).
 func TestNoEligibleGroupWithoutCriticalOrHigh(t *testing.T) {
 	fs := []Finding{
-		osFinding("CVE-2026-0001", vulnprio.TierMedium, 50),
-		osFinding("CVE-2026-0002", vulnprio.TierLow, 10),
+		osFinding("CVE-2026-0001", TierMedium, 50),
+		osFinding("CVE-2026-0002", TierLow, 10),
 	}
 	if gs := groupsOf(t, newProjector(t, []Host{webHost()}, fs, nil, fullCatalog())); len(gs) != 0 {
 		t.Fatalf("got %d groups, want none", len(gs))
@@ -206,10 +327,10 @@ func TestNoEligibleGroupWithoutCriticalOrHigh(t *testing.T) {
 // TestImageGroupIsSeparateFromOS checks that image findings form their own
 // group, keyed by the image subject.
 func TestImageGroupIsSeparateFromOS(t *testing.T) {
-	img := osFinding("CVE-2026-0001", vulnprio.TierCritical, 90)
+	img := osFinding("CVE-2026-0001", TierCritical, 90)
 	img.Subject = SubjectImage
 	img.ImageSubject = "nginx-img"
-	fs := []Finding{img, osFinding("CVE-2026-0002", vulnprio.TierHigh, 70)}
+	fs := []Finding{img, osFinding("CVE-2026-0002", TierHigh, 70)}
 	gs := groupsOf(t, newProjector(t, []Host{webHost()}, fs, nil, fullCatalog()))
 	if len(gs) != 2 || gs[0].Key != "web-01/image:nginx-img" || gs[1].Key != "web-01/os" {
 		var keys []string
@@ -220,10 +341,45 @@ func TestImageGroupIsSeparateFromOS(t *testing.T) {
 	}
 }
 
+// TestImageGroupOffersContainerCandidates checks that an image group gets the
+// container update candidates of the "fix with" container link (ADR 0016 D4)
+// and that the image statuses read as the OS statuses do.
+func TestImageGroupOffersContainerCandidates(t *testing.T) {
+	cand := imageFinding("CVE-2026-0001", TierCritical, 90, OutcomeImageCandidate, LinkContainers)
+	g := oneGroup(t, newProjector(t, []Host{webHost()}, []Finding{cand}, nil, fullCatalog()))
+	want := []Candidate{
+		{Key: "c1", Action: "docker.compose_update", HostID: "web-01"},
+		{Key: "c2", Action: "docker.update", HostID: "web-01"},
+	}
+	if fmt.Sprint(g.Projection.Candidates) != fmt.Sprint(want) {
+		t.Fatalf("candidates = %+v, want %+v", g.Projection.Candidates, want)
+	}
+	if g.Projection.Findings[0].Fix != FixNotVerified {
+		t.Fatalf("fix status = %q, want %q", g.Projection.Findings[0].Fix, FixNotVerified)
+	}
+
+	none := imageFinding("CVE-2026-0002", TierHigh, 70, OutcomeImageNoCandidate, LinkNone)
+	g = oneGroup(t, newProjector(t, []Host{webHost()}, []Finding{none}, nil, fullCatalog()))
+	if len(g.Projection.Candidates) != 0 || g.Projection.Findings[0].Fix != FixNoCandidate {
+		t.Fatalf("image without candidate: candidates %+v, fix %q", g.Projection.Candidates, g.Projection.Findings[0].Fix)
+	}
+}
+
+// TestContainerLinkOffersNoCandidateForOS checks that the container link is
+// only a container action on an image group.
+func TestContainerLinkOffersNoCandidateForOS(t *testing.T) {
+	f := osFinding("CVE-2026-0001", TierHigh, 80)
+	f.Fix = FixDecision{Outcome: OutcomeNotVerified, Link: LinkContainers}
+	g := oneGroup(t, newProjector(t, []Host{webHost()}, []Finding{f}, nil, fullCatalog()))
+	if len(g.Projection.Candidates) != 0 {
+		t.Fatalf("candidates = %+v, want none for an OS group", g.Projection.Candidates)
+	}
+}
+
 // TestFindingsOfUnknownHostAreIgnored checks that a finding whose host is not
 // in the inventory forms no group.
 func TestFindingsOfUnknownHostAreIgnored(t *testing.T) {
-	f := osFinding("CVE-2026-0001", vulnprio.TierCritical, 90)
+	f := osFinding("CVE-2026-0001", TierCritical, 90)
 	f.HostID = "ghost-9"
 	if gs := groupsOf(t, newProjector(t, []Host{webHost()}, []Finding{f}, nil, fullCatalog())); len(gs) != 0 {
 		t.Fatalf("got %d groups for an unknown host, want none", len(gs))
@@ -236,9 +392,9 @@ func TestFindingsOfUnknownHostAreIgnored(t *testing.T) {
 func TestFindingsCappedAt40ByScore(t *testing.T) {
 	var fs []Finding
 	for i := 0; i < 45; i++ {
-		tier := vulnprio.TierHigh
+		tier := TierHigh
 		if i >= 40 {
-			tier = vulnprio.TierMedium // lowest scores: counted, not listed
+			tier = TierMedium // lowest scores: counted, not listed
 		}
 		f := osFinding(fmt.Sprintf("CVE-2026-%04d", i), tier, 100-i)
 		fs = append(fs, f)
@@ -266,7 +422,7 @@ func TestPortsCappedAt32(t *testing.T) {
 	for i := 40; i >= 1; i-- { // unsorted on purpose
 		ports = append(ports, Port{Number: i, Protocol: "tcp"})
 	}
-	fs := []Finding{osFinding("CVE-2026-0001", vulnprio.TierHigh, 80)}
+	fs := []Finding{osFinding("CVE-2026-0001", TierHigh, 80)}
 	g := oneGroup(t, newProjector(t, []Host{webHost()}, fs, fakeListeners{"web-01": ports}, fullCatalog()))
 	if len(g.Projection.Ports) != MaxPortsPerHost {
 		t.Fatalf("listed %d ports, want %d", len(g.Projection.Ports), MaxPortsPerHost)
@@ -279,13 +435,30 @@ func TestPortsCappedAt32(t *testing.T) {
 	}
 }
 
+// TestRepeatedPortsDoNotCrowdOutRealPorts checks that duplicate (number,
+// protocol) entries are dropped, so a source that repeats one port cannot
+// push real ports out of the listed 32.
+func TestRepeatedPortsDoNotCrowdOutRealPorts(t *testing.T) {
+	var ports []Port
+	for i := 0; i < 40; i++ {
+		ports = append(ports, Port{Number: 443, Protocol: "tcp"})
+	}
+	ports = append(ports, Port{Number: 22, Protocol: "tcp"}, Port{Number: 80, Protocol: "tcp"}, Port{Number: 53, Protocol: "udp"})
+	fs := []Finding{osFinding("CVE-2026-0001", TierHigh, 80)}
+	g := oneGroup(t, newProjector(t, []Host{webHost()}, fs, fakeListeners{"web-01": ports}, fullCatalog()))
+	if len(g.Projection.Ports) != 4 || g.Projection.PortsOmitted != 0 {
+		t.Fatalf("ports = %+v omitted %d, want the 4 distinct ports and none omitted",
+			g.Projection.Ports, g.Projection.PortsOmitted)
+	}
+}
+
 // TestHostileLabelIsCleaned checks that a label with bidi overrides,
 // zero-width characters, control bytes, invalid UTF-8 and excess length
 // leaves the projection as plain text of at most MaxLabelBytes.
 func TestHostileLabelIsCleaned(t *testing.T) {
 	h := webHost()
 	h.Label = "web" + string(rune(0x202e)) + string(rune(0x200b)) + "\x00 evil\xff\n" + strings.Repeat("ä", 100)
-	fs := []Finding{osFinding("CVE-2026-0001", vulnprio.TierHigh, 80)}
+	fs := []Finding{osFinding("CVE-2026-0001", TierHigh, 80)}
 	g := oneGroup(t, newProjector(t, []Host{h}, fs, nil, fullCatalog()))
 	label := g.Projection.Host.Label
 	if len(label) > MaxLabelBytes {
@@ -297,22 +470,27 @@ func TestHostileLabelIsCleaned(t *testing.T) {
 	}
 }
 
-// TestHostilePackageNameRejected checks that a package name with shell
-// metacharacters after cleaning is refused, and a clean name with a control
-// byte is cleaned and accepted.
-func TestHostilePackageNameRejected(t *testing.T) {
-	bad := osFinding("CVE-2026-0001", vulnprio.TierHigh, 80)
+// TestHostilePackageNameSkipped checks that a package name with shell
+// metacharacters is skipped and audited without its text, while a clean name
+// with a control byte is cleaned and accepted.
+func TestHostilePackageNameSkipped(t *testing.T) {
+	bad := osFinding("CVE-2026-0001", TierHigh, 80)
 	bad.Package = "open ssl;rm -rf /"
-	if _, err := New(Sources{Inventory: fakeInventory{hosts: []Host{webHost()}}, Listeners: fakeListeners{},
-		Findings: fakeFindings{fs: []Finding{bad}}, Catalog: fullCatalog()}); err != nil {
-		t.Fatalf("New: %v", err)
+	p, audit := newProjectorWith(t, Sources{
+		Inventory: fakeInventory{hosts: []Host{webHost()}},
+		Listeners: fakeListeners{},
+		Findings:  fakeFindings{fs: []Finding{bad}},
+		Catalog:   fullCatalog(),
+	})
+	if gs := groupsOf(t, p); len(gs) != 0 {
+		t.Fatalf("got %d groups, want the bad finding skipped", len(gs))
 	}
-	p := newProjector(t, []Host{webHost()}, []Finding{bad}, nil, fullCatalog())
-	if _, err := p.EligibleGroups(context.Background()); !errors.Is(err, ErrInvalidField) {
-		t.Fatalf("EligibleGroups error = %v, want ErrInvalidField", err)
+	if len(audit.skips) != 1 || audit.skips[0].Scope != ScopeFinding {
+		t.Fatalf("audit = %+v, want one finding skip", audit.skips)
 	}
+	assertNoInputEcho(t, audit.skips[0], "rm -rf")
 
-	ok := osFinding("CVE-2026-0002", vulnprio.TierHigh, 80)
+	ok := osFinding("CVE-2026-0002", TierHigh, 80)
 	ok.Package = "openssl\x07"
 	g := oneGroup(t, newProjector(t, []Host{webHost()}, []Finding{ok}, nil, fullCatalog()))
 	if g.Projection.Findings[0].Package != "openssl" {
@@ -320,42 +498,134 @@ func TestHostilePackageNameRejected(t *testing.T) {
 	}
 }
 
-// TestInvalidInputFailsClosed checks that malformed input stops the whole
-// projection with a sentinel error rather than projecting a partial set.
-func TestInvalidInputFailsClosed(t *testing.T) {
+// TestInvalidInputIsSkippedAndAudited checks that a malformed finding or host
+// is left out and recorded with its rule, while the rest of the fleet is
+// projected as before.
+func TestInvalidInputIsSkippedAndAudited(t *testing.T) {
+	good := osFinding("CVE-2026-0100", TierHigh, 80)
 	tests := []struct {
 		name  string
 		hosts []Host
 		fs    []Finding
-		want  error
+		scope SkipScope
+		rule  error
 	}{
-		{"unknown state", []Host{webHost()}, []Finding{withState(osFinding("CVE-2026-0001", vulnprio.TierHigh, 80), "closed")}, ErrInvalidState},
-		{"unknown tier", []Host{webHost()}, []Finding{osFinding("CVE-2026-0001", vulnprio.Tier("urgent"), 80)}, ErrInvalidTier},
-		{"bad vuln id", []Host{webHost()}, []Finding{withVuln(osFinding("x", vulnprio.TierHigh, 80), "CVE 1;DROP")}, ErrInvalidField},
-		{"score out of range", []Host{webHost()}, []Finding{withScore(osFinding("CVE-2026-0001", vulnprio.TierHigh, 80), 101)}, ErrInvalidField},
-		{"duplicate host", []Host{webHost(), webHost()}, nil, ErrDuplicateHost},
-		{"bad host id", []Host{{ID: "../etc", Criticality: inventory.CriticalityLow}}, nil, ErrInvalidField},
-		{"bad criticality", []Host{{ID: "web-01", Criticality: "EXTREME"}}, nil, ErrInvalidField},
+		{"unknown state", []Host{webHost()}, []Finding{withState(osFinding("CVE-2026-0001", TierHigh, 80), "closed")}, ScopeFinding, ErrInvalidState},
+		{"unknown tier", []Host{webHost()}, []Finding{osFinding("CVE-2026-0001", Tier("urgent"), 80)}, ScopeFinding, ErrInvalidTier},
+		{"bad vuln id", []Host{webHost()}, []Finding{withVuln(osFinding("x", TierHigh, 80), "CVE 1;DROP")}, ScopeFinding, ErrInvalidField},
+		{"score out of range", []Host{webHost()}, []Finding{withScore(osFinding("CVE-2026-0001", TierHigh, 80), 101)}, ScopeFinding, ErrInvalidField},
+		{"unknown outcome", []Host{webHost()}, []Finding{withOutcome(osFinding("CVE-2026-0001", TierHigh, 80), "pwned")}, ScopeFinding, ErrInvalidOutcome},
+		{"unknown link", []Host{webHost()}, []Finding{withLink(osFinding("CVE-2026-0001", TierHigh, 80), "shell")}, ScopeFinding, ErrInvalidLink},
+		{"bad host id", []Host{{ID: "../etc", Criticality: CriticalityLow}}, nil, ScopeHost, ErrInvalidField},
+		{"bad criticality", []Host{{ID: "web-02", Criticality: "EXTREME"}}, nil, ScopeHost, ErrInvalidField},
+		{"duplicate host", []Host{webHost(), webHost()}, nil, ScopeHost, ErrDuplicateHost},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p := newProjector(t, tt.hosts, tt.fs, nil, fullCatalog())
-			if _, err := p.EligibleGroups(context.Background()); !errors.Is(err, tt.want) {
-				t.Fatalf("error = %v, want %v", err, tt.want)
+			fs := append([]Finding{good}, tt.fs...)
+			p, audit := newProjectorWith(t, Sources{
+				Inventory: fakeInventory{hosts: tt.hosts},
+				Listeners: fakeListeners{},
+				Findings:  fakeFindings{fs: fs},
+				Catalog:   fullCatalog(),
+			})
+			gs, err := p.EligibleGroups(context.Background())
+			if err != nil {
+				t.Fatalf("EligibleGroups: %v, want the bad input skipped", err)
+			}
+			if tt.scope == ScopeFinding && (len(gs) != 1 || gs[0].Key != "web-01/os") {
+				t.Fatalf("good group lost: %d groups", len(gs))
+			}
+			if len(audit.skips) != 1 {
+				t.Fatalf("audit = %+v, want one skip", audit.skips)
+			}
+			if s := audit.skips[0]; s.Scope != tt.scope || !strings.Contains(s.Rule, tt.rule.Error()) {
+				t.Fatalf("skip = %+v, want scope %s rule %q", s, tt.scope, tt.rule.Error())
 			}
 		})
 	}
 }
 
-// TestBadPortFailsClosed checks that a port outside 1..65535 or with an
-// unknown protocol fails the projection of its host.
-func TestBadPortFailsClosed(t *testing.T) {
-	fs := []Finding{osFinding("CVE-2026-0001", vulnprio.TierHigh, 80)}
-	for _, port := range []Port{{Number: 0, Protocol: "tcp"}, {Number: 70000, Protocol: "tcp"}, {Number: 22, Protocol: "sctp"}} {
-		p := newProjector(t, []Host{webHost()}, fs, fakeListeners{"web-01": {port}}, fullCatalog())
-		if _, err := p.EligibleGroups(context.Background()); !errors.Is(err, ErrInvalidField) {
-			t.Fatalf("port %+v: error = %v, want ErrInvalidField", port, err)
+// TestMalformedHostIDIsNotEchoed checks that an oversized, hostile host ID
+// reaches neither the audit record nor an error.
+func TestMalformedHostIDIsNotEchoed(t *testing.T) {
+	hostile := "EVIL" + strings.Repeat("x", 5000) + "‮"
+	f := osFinding("CVE-2026-0001", TierCritical, 90)
+	f.HostID = hostile
+	p, audit := newProjectorWith(t, Sources{
+		Inventory: fakeInventory{hosts: []Host{webHost()}},
+		Listeners: fakeListeners{},
+		Findings:  fakeFindings{fs: []Finding{f}},
+		Catalog:   fullCatalog(),
+	})
+	gs, err := p.EligibleGroups(context.Background())
+	if err != nil || len(gs) != 0 {
+		t.Fatalf("EligibleGroups = %d groups, %v; want the finding skipped", len(gs), err)
+	}
+	if len(audit.skips) != 1 {
+		t.Fatalf("audit = %+v, want one skip", audit.skips)
+	}
+	if audit.skips[0].HostID != "" {
+		t.Fatalf("audit host ID = %q, want none for a malformed ID", audit.skips[0].HostID)
+	}
+	assertNoInputEcho(t, audit.skips[0], "EVIL")
+
+	// The same finding through External must not echo it either.
+	_, err = p.External(context.Background())
+	if err != nil {
+		t.Fatalf("External: %v", err)
+	}
+}
+
+// TestBadListenersSkipOnlyTheirGroup checks that a malformed listener set
+// drops the groups of its host and nothing else.
+func TestBadListenersSkipOnlyTheirGroup(t *testing.T) {
+	db := webHost()
+	db.ID = "db-01"
+	bad := []Port{{Number: 0, Protocol: "tcp"}, {Number: 70000, Protocol: "tcp"}, {Number: 22, Protocol: "sctp"}}
+	for _, port := range bad {
+		fs := []Finding{osFinding("CVE-2026-0001", TierHigh, 80)}
+		dbFinding := osFinding("CVE-2026-0002", TierHigh, 80)
+		dbFinding.HostID = "db-01"
+		fs = append(fs, dbFinding)
+		p, audit := newProjectorWith(t, Sources{
+			Inventory: fakeInventory{hosts: []Host{webHost(), db}},
+			Listeners: fakeListeners{"web-01": {port}, "db-01": {{Number: 5432, Protocol: "tcp"}}},
+			Findings:  fakeFindings{fs: fs},
+			Catalog:   fullCatalog(),
+		})
+		gs, err := p.EligibleGroups(context.Background())
+		if err != nil {
+			t.Fatalf("port %+v: EligibleGroups: %v", port, err)
 		}
+		if len(gs) != 1 || gs[0].Key != "db-01/os" {
+			var keys []string
+			for _, g := range gs {
+				keys = append(keys, g.Key)
+			}
+			t.Fatalf("port %+v: groups %v, want only db-01/os", port, keys)
+		}
+		if len(audit.skips) != 1 || audit.skips[0].Scope != ScopeListeners || audit.skips[0].HostID != "web-01" {
+			t.Fatalf("port %+v: audit = %+v", port, audit.skips)
+		}
+	}
+}
+
+// TestAuditFailureFailsProjection checks that a failing audit stops the
+// projection: a skip must be on record before its group is left out.
+func TestAuditFailureFailsProjection(t *testing.T) {
+	boom := errors.New("audit log full")
+	bad := osFinding("CVE-2026-0001", TierHigh, 80)
+	bad.Package = "open ssl"
+	p, _ := newProjectorWith(t, Sources{
+		Inventory: fakeInventory{hosts: []Host{webHost()}},
+		Listeners: fakeListeners{},
+		Findings:  fakeFindings{fs: []Finding{bad}},
+		Catalog:   fullCatalog(),
+		Audit:     &recordAudit{err: boom},
+	})
+	if _, err := p.EligibleGroups(context.Background()); !errors.Is(err, boom) {
+		t.Fatalf("error = %v, want wrapped %v", err, boom)
 	}
 }
 
@@ -363,11 +633,11 @@ func TestBadPortFailsClosed(t *testing.T) {
 // for an action the catalog contains: an action missing from the catalog
 // drops out and the others keep their keys c1, c2, ... in action order.
 func TestCandidatesFromCatalogAndAllowlist(t *testing.T) {
-	reboot := osFinding("CVE-2026-0002", vulnprio.TierCritical, 95)
-	reboot.Fix = vulnfix.Result{Status: vulnfix.StatusVerified, Reboot: true, Action: vulnfix.ActionInstallSecurity, HostID: "web-01"}
-	allSec := osFinding("CVE-2026-0003", vulnprio.TierHigh, 70)
-	allSec.Fix.Action = vulnfix.ActionInstallAll
-	fs := []Finding{osFinding("CVE-2026-0001", vulnprio.TierHigh, 80), reboot, allSec}
+	reboot := osFinding("CVE-2026-0002", TierCritical, 95)
+	reboot.Fix = FixDecision{Outcome: OutcomeVerified, Link: LinkInstallSecurity, Reboot: true}
+	allSec := osFinding("CVE-2026-0003", TierHigh, 70)
+	allSec.Fix.Link = LinkInstallAll
+	fs := []Finding{osFinding("CVE-2026-0001", TierHigh, 80), reboot, allSec}
 
 	cat := fakeCatalog{"package.install_security": true, "system.reboot": true}
 	g := oneGroup(t, newProjector(t, []Host{webHost()}, fs, nil, cat))
@@ -383,8 +653,8 @@ func TestCandidatesFromCatalogAndAllowlist(t *testing.T) {
 // TestNoCandidateWithoutFixLink checks that a "no candidate" or "no fix yet"
 // result offers no action.
 func TestNoCandidateWithoutFixLink(t *testing.T) {
-	f := osFinding("CVE-2026-0001", vulnprio.TierCritical, 90)
-	f.Fix = vulnfix.Result{Status: vulnfix.StatusNoCandidate, HostID: "web-01"}
+	f := osFinding("CVE-2026-0001", TierCritical, 90)
+	f.Fix = FixDecision{Outcome: OutcomeNoCandidate, Link: LinkNone}
 	g := oneGroup(t, newProjector(t, []Host{webHost()}, []Finding{f}, nil, fullCatalog()))
 	if len(g.Projection.Candidates) != 0 {
 		t.Fatalf("candidates = %+v, want none", g.Projection.Candidates)
@@ -394,7 +664,7 @@ func TestNoCandidateWithoutFixLink(t *testing.T) {
 // TestCandidatesRequireCurrentDigest checks the validation entry point: a
 // candidate list is returned only for the current digest of an eligible group.
 func TestCandidatesRequireCurrentDigest(t *testing.T) {
-	fs := []Finding{osFinding("CVE-2026-0001", vulnprio.TierHigh, 80)}
+	fs := []Finding{osFinding("CVE-2026-0001", TierHigh, 80)}
 	p := newProjector(t, []Host{webHost()}, fs, nil, fullCatalog())
 	g := oneGroup(t, p)
 	ctx := context.Background()
@@ -416,40 +686,46 @@ func TestCandidatesRequireCurrentDigest(t *testing.T) {
 func TestFixStatusMapping(t *testing.T) {
 	tests := []struct {
 		name string
-		r    vulnfix.Result
+		d    FixDecision
 		want FixStatus
 	}{
-		{"verified", vulnfix.Result{Status: vulnfix.StatusVerified}, FixVerified},
-		{"verified kernel", vulnfix.Result{Status: vulnfix.StatusVerified, Reboot: true}, FixRebootRequired},
-		{"not verified", vulnfix.Result{Status: vulnfix.StatusNotVerified}, FixNotVerified},
-		{"below fixed", vulnfix.Result{Status: vulnfix.StatusBelowFixed}, FixNotVerified},
-		{"no candidate", vulnfix.Result{Status: vulnfix.StatusNoCandidate}, FixNoCandidate},
-		{"no fix yet", vulnfix.Result{Status: vulnfix.StatusNoFixYet}, FixNoFixYet},
-		{"wont fix", vulnfix.Result{Status: vulnfix.StatusWontFix}, FixUnknown},
-		{"unknown", vulnfix.Result{Status: vulnfix.StatusUnknown}, FixUnknown},
+		{"verified", FixDecision{Outcome: OutcomeVerified}, FixVerified},
+		{"verified kernel", FixDecision{Outcome: OutcomeVerified, Reboot: true}, FixRebootRequired},
+		{"not verified", FixDecision{Outcome: OutcomeNotVerified}, FixNotVerified},
+		{"below fixed", FixDecision{Outcome: OutcomeBelowFixed}, FixNotVerified},
+		{"image candidate", FixDecision{Outcome: OutcomeImageCandidate}, FixNotVerified},
+		{"no candidate", FixDecision{Outcome: OutcomeNoCandidate}, FixNoCandidate},
+		{"image no candidate", FixDecision{Outcome: OutcomeImageNoCandidate}, FixNoCandidate},
+		{"no fix yet", FixDecision{Outcome: OutcomeNoFixYet}, FixNoFixYet},
+		{"wont fix", FixDecision{Outcome: OutcomeWontFix}, FixUnknown},
+		{"unknown", FixDecision{Outcome: OutcomeUnknown}, FixUnknown},
+		{"none", FixDecision{Outcome: OutcomeNone}, FixUnknown},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := fixStatus(tt.r); got != tt.want {
+			if got := fixStatus(tt.d); got != tt.want {
 				t.Fatalf("fixStatus = %q, want %q", got, tt.want)
 			}
 		})
 	}
 }
 
-// TestNewRequiresEverySource checks that a missing source is refused.
+// TestNewRequiresEverySource checks that a missing source or auditor is
+// refused.
 func TestNewRequiresEverySource(t *testing.T) {
 	full := Sources{
 		Inventory: fakeInventory{},
 		Listeners: fakeListeners{},
 		Findings:  fakeFindings{},
 		Catalog:   fakeCatalog{},
+		Audit:     &recordAudit{},
 	}
 	for name, mutate := range map[string]func(*Sources){
 		"inventory": func(s *Sources) { s.Inventory = nil },
 		"listeners": func(s *Sources) { s.Listeners = nil },
 		"findings":  func(s *Sources) { s.Findings = nil },
 		"catalog":   func(s *Sources) { s.Catalog = nil },
+		"audit":     func(s *Sources) { s.Audit = nil },
 	} {
 		t.Run(name, func(t *testing.T) {
 			s := full
@@ -465,15 +741,12 @@ func TestNewRequiresEverySource(t *testing.T) {
 // projection instead of returning partial groups.
 func TestSourceErrorIsReturned(t *testing.T) {
 	boom := errors.New("store down")
-	p, err := New(Sources{
+	p, _ := newProjectorWith(t, Sources{
 		Inventory: fakeInventory{hosts: []Host{webHost()}},
 		Listeners: fakeListeners{},
 		Findings:  fakeFindings{err: boom},
 		Catalog:   fullCatalog(),
 	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
 	if _, err := p.EligibleGroups(context.Background()); !errors.Is(err, boom) {
 		t.Fatalf("error = %v, want wrapped %v", err, boom)
 	}
@@ -487,6 +760,17 @@ func TestDigestRefusesOversizedItem(t *testing.T) {
 	}
 }
 
+// assertNoInputEcho fails when the audit record of a skip contains the given
+// piece of input text.
+func assertNoInputEcho(t *testing.T, s Skip, input string) {
+	t.Helper()
+	if strings.Contains(fmt.Sprintf("%+v", s), input) {
+		t.Fatalf("skip record %+v echoes input %q", s, input)
+	}
+}
+
 func withState(f Finding, s FindingState) Finding { f.State = s; return f }
 func withVuln(f Finding, id string) Finding       { f.VulnID = id; return f }
 func withScore(f Finding, s int) Finding          { f.Score = s; return f }
+func withOutcome(f Finding, o FixOutcome) Finding { f.Fix.Outcome = o; return f }
+func withLink(f Finding, l FixLink) Finding       { f.Fix.Link = l; return f }

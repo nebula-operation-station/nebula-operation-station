@@ -7,10 +7,6 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
-
-	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfix"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnprio"
 )
 
 // FixStatus is the fix situation of one finding, as the agent may state it
@@ -38,14 +34,14 @@ type LabHost struct {
 // LabFinding is one listed finding of a group. Every field is validated or
 // cleaned; the vulnerability ID is only ever a strict-shape identifier.
 type LabFinding struct {
-	VulnID    string        `json:"vuln_id"`
-	Package   string        `json:"package"`
-	Installed string        `json:"installed"`
-	Fixed     string        `json:"fixed,omitempty"`
-	Tier      vulnprio.Tier `json:"tier"`
-	Score     int           `json:"score"`
-	KEV       bool          `json:"kev"`
-	Fix       FixStatus     `json:"fix_status"`
+	VulnID    string    `json:"vuln_id"`
+	Package   string    `json:"package"`
+	Installed string    `json:"installed"`
+	Fixed     string    `json:"fixed,omitempty"`
+	Tier      Tier      `json:"tier"`
+	Score     int       `json:"score"`
+	KEV       bool      `json:"kev"`
+	Fix       FixStatus `json:"fix_status"`
 }
 
 // Candidate is one step candidate: an allowlisted action the operator could
@@ -60,15 +56,15 @@ type Candidate struct {
 // It is the input of Digest and the only shape the agent receives for a
 // group. The field set is fixed; nothing else is added to it.
 type LabProjection struct {
-	Group        string            `json:"group"`
-	Host         LabHost           `json:"host"`
-	Exposure     vulnprio.Exposure `json:"exposure"`
-	Ports        []Port            `json:"ports"`
-	PortsOmitted int               `json:"ports_omitted"`
-	Findings     []LabFinding      `json:"findings"`
-	Omitted      Counts            `json:"omitted"`
-	Counts       Counts            `json:"counts"`
-	Candidates   []Candidate       `json:"candidates"`
+	Group        string       `json:"group"`
+	Host         LabHost      `json:"host"`
+	Exposure     Exposure     `json:"exposure"`
+	Ports        []Port       `json:"ports"`
+	PortsOmitted int          `json:"ports_omitted"`
+	Findings     []LabFinding `json:"findings"`
+	Omitted      Counts       `json:"omitted"`
+	Counts       Counts       `json:"counts"`
+	Candidates   []Candidate  `json:"candidates"`
 }
 
 // Group is one eligible group with its projection and input digest.
@@ -86,9 +82,9 @@ type Projector struct {
 	src Sources
 }
 
-// New returns a Projector. Every source is required.
+// New returns a Projector. Every source and the auditor are required.
 func New(s Sources) (*Projector, error) {
-	if s.Inventory == nil || s.Listeners == nil || s.Findings == nil || s.Catalog == nil {
+	if s.Inventory == nil || s.Listeners == nil || s.Findings == nil || s.Catalog == nil || s.Audit == nil {
 		return nil, ErrNoSource
 	}
 	return &Projector{src: s}, nil
@@ -123,7 +119,17 @@ func (p *Projector) Candidates(ctx context.Context, groupKey, digest string) ([]
 	return nil, ErrUnknownGroup
 }
 
-// build reads the sources once and returns the eligible groups.
+// audit records one skipped input. A failing auditor fails the projection.
+func (p *Projector) audit(ctx context.Context, s Skip) error {
+	if err := p.src.Audit.Skipped(ctx, s); err != nil {
+		return fmt.Errorf("opsfacts: audit skip: %w", err)
+	}
+	return nil
+}
+
+// build reads the sources once and returns the eligible groups. A malformed
+// host, finding or listener set is skipped and audited; only a failed read
+// or a failed audit fails the build.
 func (p *Projector) build(ctx context.Context) ([]Group, error) {
 	byID, exposure, err := p.hostSet(ctx)
 	if err != nil {
@@ -138,7 +144,10 @@ func (p *Projector) build(ctx context.Context) ([]Group, error) {
 	for _, f := range findings {
 		v, err := validateFinding(f)
 		if err != nil {
-			return nil, fmt.Errorf("opsfacts: finding of host %q: %w", f.HostID, err)
+			if err := p.audit(ctx, Skip{Scope: ScopeFinding, HostID: displayID(f.HostID), Rule: err.Error()}); err != nil {
+				return nil, err
+			}
+			continue
 		}
 		if v.State != StateOpen {
 			continue // accepted_risk and false_positive are left out (D3)
@@ -156,24 +165,38 @@ func (p *Projector) build(ctx context.Context) ([]Group, error) {
 	}
 	sort.Strings(keys)
 
+	type hostPorts struct {
+		ports []Port
+		rule  string // non-empty when the listener set is malformed
+	}
+	ports := map[string]hostPorts{}
 	var out []Group
-	ports := map[string][]Port{}
 	for _, key := range keys {
 		fs := open[key]
 		if !hasCriticalOrHigh(fs) {
 			continue
 		}
 		hostID := fs[0].HostID
-		if _, read := ports[hostID]; !read {
+		hp, read := ports[hostID]
+		if !read {
 			lp, err := p.src.Listeners.Listeners(ctx, hostID)
 			if err != nil {
-				return nil, fmt.Errorf("opsfacts: read listeners of host %q: %w", hostID, err)
+				return nil, fmt.Errorf("opsfacts: read listeners of host %q: %w", displayID(hostID), err)
 			}
-			if ports[hostID], err = validatePorts(lp); err != nil {
-				return nil, fmt.Errorf("opsfacts: listeners of host %q: %w", hostID, err)
+			validated, err := validatePorts(lp)
+			hp = hostPorts{ports: validated}
+			if err != nil {
+				hp.rule = err.Error()
 			}
+			ports[hostID] = hp
 		}
-		proj := p.project(key, byID[hostID], exposure[hostID], ports[hostID], fs)
+		if hp.rule != "" {
+			if err := p.audit(ctx, Skip{Scope: ScopeListeners, HostID: displayID(hostID), Rule: hp.rule}); err != nil {
+				return nil, err
+			}
+			continue // the group is left out; other groups are not affected
+		}
+		proj := p.project(key, byID[hostID], exposure[hostID], hp.ports, fs)
 		digest, err := Digest(proj)
 		if err != nil {
 			return nil, fmt.Errorf("opsfacts: digest of group %q: %w", key, err)
@@ -184,22 +207,39 @@ func (p *Projector) build(ctx context.Context) ([]Group, error) {
 }
 
 // hostSet reads and validates the inventory. It returns the lab part and the
-// exposure of every host by ID. A host that fails validation, or a duplicate
-// ID, fails the whole read.
-func (p *Projector) hostSet(ctx context.Context) (map[string]LabHost, map[string]vulnprio.Exposure, error) {
+// exposure of every valid host by ID. An invalid host is skipped and audited.
+// Every copy of a duplicated ID is dropped and the duplicate is audited once:
+// which host owns the ID is then unknown, so none of them may take findings.
+func (p *Projector) hostSet(ctx context.Context) (map[string]LabHost, map[string]Exposure, error) {
 	hosts, err := p.src.Inventory.Hosts(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("opsfacts: read inventory: %w", err)
 	}
-	byID := make(map[string]LabHost, len(hosts))
-	exposure := make(map[string]vulnprio.Exposure, len(hosts))
+	valid := make([]Host, 0, len(hosts))
+	count := map[string]int{}
 	for _, h := range hosts {
 		v, err := validateHost(h)
 		if err != nil {
-			return nil, nil, fmt.Errorf("opsfacts: host %q: %w", h.ID, err)
+			if err := p.audit(ctx, Skip{Scope: ScopeHost, HostID: displayID(h.ID), Rule: err.Error()}); err != nil {
+				return nil, nil, err
+			}
+			continue
 		}
-		if _, dup := byID[v.ID]; dup {
-			return nil, nil, fmt.Errorf("opsfacts: host %q: %w", v.ID, ErrDuplicateHost)
+		valid = append(valid, v)
+		count[v.ID]++
+	}
+	byID := make(map[string]LabHost, len(valid))
+	exposure := make(map[string]Exposure, len(valid))
+	reported := map[string]bool{}
+	for _, v := range valid {
+		if count[v.ID] > 1 {
+			if !reported[v.ID] {
+				reported[v.ID] = true
+				if err := p.audit(ctx, Skip{Scope: ScopeHost, HostID: v.ID, Rule: ErrDuplicateHost.Error()}); err != nil {
+					return nil, nil, err
+				}
+			}
+			continue
 		}
 		byID[v.ID] = v.labHost()
 		exposure[v.ID] = v.Exposure
@@ -209,7 +249,8 @@ func (p *Projector) hostSet(ctx context.Context) (map[string]LabHost, map[string
 
 // External returns the external-class projection (ADR 0016 D5): the open
 // findings of inventory hosts, counted per tier and KEV for the whole fleet.
-// No host, package, version or vulnerability ID is read into the result.
+// No host, package, version or vulnerability ID is read into the result. A
+// malformed finding is skipped and audited, as in the lab projection.
 func (p *Projector) External(ctx context.Context) (ExternalProjection, error) {
 	byID, _, err := p.hostSet(ctx)
 	if err != nil {
@@ -223,7 +264,10 @@ func (p *Projector) External(ctx context.Context) (ExternalProjection, error) {
 	for _, f := range findings {
 		v, err := validateFinding(f)
 		if err != nil {
-			return ExternalProjection{}, fmt.Errorf("opsfacts: finding of host %q: %w", f.HostID, err)
+			if err := p.audit(ctx, Skip{Scope: ScopeFinding, HostID: displayID(f.HostID), Rule: err.Error()}); err != nil {
+				return ExternalProjection{}, err
+			}
+			continue
 		}
 		if v.State != StateOpen {
 			continue
@@ -238,7 +282,7 @@ func (p *Projector) External(ctx context.Context) (ExternalProjection, error) {
 
 // project builds the lab projection of one group. Its findings are the open
 // findings of the group, already validated.
-func (p *Projector) project(key string, host LabHost, expo vulnprio.Exposure, ports []Port, fs []Finding) LabProjection {
+func (p *Projector) project(key string, host LabHost, expo Exposure, ports []Port, fs []Finding) LabProjection {
 	sortFindings(fs)
 	var counts Counts
 	for _, f := range fs {
@@ -280,17 +324,26 @@ func (p *Projector) project(key string, host LabHost, expo vulnprio.Exposure, po
 		Findings:     lf,
 		Omitted:      omitted,
 		Counts:       counts,
-		Candidates:   p.candidates(host.ID, fs),
+		Candidates:   p.candidates(host.ID, groupSubject(fs), fs),
 	}
+}
+
+// groupSubject returns the subject kind of a non-empty group. Every finding of
+// a group has the same subject kind (the group key carries it).
+func groupSubject(fs []Finding) SubjectKind {
+	if len(fs) > 0 {
+		return fs[0].Subject
+	}
+	return SubjectOS
 }
 
 // candidates returns the step candidates of a group: the allowlisted actions
 // that the findings' "fix with" decisions offer, that the catalog contains,
 // sorted by action ID and keyed c1, c2, ...
-func (p *Projector) candidates(hostID string, fs []Finding) []Candidate {
+func (p *Projector) candidates(hostID string, subject SubjectKind, fs []Finding) []Candidate {
 	want := map[string]bool{}
 	for _, f := range fs {
-		for _, a := range offeredActions(f.Fix) {
+		for _, a := range offeredActions(subject, f.Fix) {
 			want[a] = true
 		}
 	}
@@ -313,36 +366,44 @@ func (p *Projector) candidates(hostID string, fs []Finding) []Candidate {
 }
 
 // offeredActions maps a "fix with" decision to the allowlisted actions it
-// offers. vulnfix sets an install action only for a candidate that exists
-// (verified or not verified), so a result without one offers no install. A
-// kernel fix that is verified also offers the reboot, which takes it effect.
-func offeredActions(r vulnfix.Result) []string {
+// offers (ADR 0016 D4; the links are those of ADR 0011 D8). The OS install
+// links offer their package action. The container link offers the container
+// update flow of an image group, as batch actions. A kernel fix that is
+// verified also offers the reboot, which takes it effect.
+func offeredActions(subject SubjectKind, d FixDecision) []string {
 	var out []string
-	switch r.Action {
-	case vulnfix.ActionInstallSecurity:
+	switch d.Link {
+	case LinkInstallSecurity:
 		out = append(out, "package.install_security")
-	case vulnfix.ActionInstallAll:
+	case LinkInstallAll:
 		out = append(out, "package.install_all")
+	case LinkContainers:
+		if subject == SubjectImage {
+			out = append(out, "docker.compose_update", "docker.update")
+		}
 	}
-	if r.Reboot && r.Status == vulnfix.StatusVerified {
+	if d.Reboot && d.Outcome == OutcomeVerified {
 		out = append(out, "system.reboot")
 	}
 	return out
 }
 
-// fixStatus maps a "fix with" decision to the fix status the agent sees.
-func fixStatus(r vulnfix.Result) FixStatus {
-	switch r.Status {
-	case vulnfix.StatusVerified:
-		if r.Reboot {
+// fixStatus maps a "fix with" decision to the fix status the agent sees. An
+// image candidate is a container update that is not a verified fix, so it
+// reads as "update not verified", and an image without a candidate as "no
+// candidate", the same as their OS counterparts (ADR 0016 D4).
+func fixStatus(d FixDecision) FixStatus {
+	switch d.Outcome {
+	case OutcomeVerified:
+		if d.Reboot {
 			return FixRebootRequired
 		}
 		return FixVerified
-	case vulnfix.StatusNotVerified, vulnfix.StatusBelowFixed:
+	case OutcomeNotVerified, OutcomeBelowFixed, OutcomeImageCandidate:
 		return FixNotVerified
-	case vulnfix.StatusNoCandidate:
+	case OutcomeNoCandidate, OutcomeImageNoCandidate:
 		return FixNoCandidate
-	case vulnfix.StatusNoFixYet:
+	case OutcomeNoFixYet:
 		return FixNoFixYet
 	default:
 		return FixUnknown
@@ -350,15 +411,15 @@ func fixStatus(r vulnfix.Result) FixStatus {
 }
 
 // add counts one finding.
-func (c *Counts) add(t vulnprio.Tier, kev bool) {
+func (c *Counts) add(t Tier, kev bool) {
 	switch t {
-	case vulnprio.TierCritical:
+	case TierCritical:
 		c.Critical++
-	case vulnprio.TierHigh:
+	case TierHigh:
 		c.High++
-	case vulnprio.TierMedium:
+	case TierMedium:
 		c.Medium++
-	case vulnprio.TierLow:
+	case TierLow:
 		c.Low++
 	}
 	if kev {
@@ -366,31 +427,50 @@ func (c *Counts) add(t vulnprio.Tier, kev bool) {
 	}
 }
 
-// sortFindings orders findings by score (highest first), then tier, then
-// the identifying fields, so the same input always lists the same findings.
+// sortFindings orders findings into a total order: score (highest first),
+// then tier, then every field that the listed finding shows. Two findings
+// equal in all of them are indistinguishable in the projection, so the
+// digest does not depend on the order the source returned them in.
 func sortFindings(fs []Finding) {
-	sort.SliceStable(fs, func(i, j int) bool {
-		a, b := fs[i], fs[j]
-		if a.Score != b.Score {
-			return a.Score > b.Score
-		}
-		if a.Tier.Rank() != b.Tier.Rank() {
-			return a.Tier.Rank() > b.Tier.Rank()
-		}
-		if a.VulnID != b.VulnID {
-			return a.VulnID < b.VulnID
-		}
-		if a.Package != b.Package {
-			return a.Package < b.Package
-		}
+	sort.Slice(fs, func(i, j int) bool { return findingLess(fs[i], fs[j]) })
+}
+
+// findingLess is the order of sortFindings.
+func findingLess(a, b Finding) bool {
+	if a.Score != b.Score {
+		return a.Score > b.Score
+	}
+	if a.Tier.rank() != b.Tier.rank() {
+		return a.Tier.rank() > b.Tier.rank()
+	}
+	if a.VulnID != b.VulnID {
+		return a.VulnID < b.VulnID
+	}
+	if a.Package != b.Package {
+		return a.Package < b.Package
+	}
+	if a.Installed != b.Installed {
 		return a.Installed < b.Installed
-	})
+	}
+	if a.Fixed != b.Fixed {
+		return a.Fixed < b.Fixed
+	}
+	if a.KEV != b.KEV {
+		return a.KEV
+	}
+	if a.Fix.Outcome != b.Fix.Outcome {
+		return a.Fix.Outcome < b.Fix.Outcome
+	}
+	if a.Fix.Link != b.Fix.Link {
+		return a.Fix.Link < b.Fix.Link
+	}
+	return !a.Fix.Reboot && b.Fix.Reboot
 }
 
 // hasCriticalOrHigh reports whether a group is eligible (D3).
 func hasCriticalOrHigh(fs []Finding) bool {
 	for _, f := range fs {
-		if f.Tier == vulnprio.TierCritical || f.Tier == vulnprio.TierHigh {
+		if f.Tier == TierCritical || f.Tier == TierHigh {
 			return true
 		}
 	}
@@ -403,102 +483,4 @@ func groupKey(f Finding) string {
 		return f.HostID + "/image:" + f.ImageSubject
 	}
 	return f.HostID + "/os"
-}
-
-// validateHost checks and cleans one inventory host.
-func validateHost(h Host) (Host, error) {
-	if !vulnfix.ValidSubjectID(h.ID) {
-		return Host{}, fmt.Errorf("host id: %w", ErrInvalidField)
-	}
-	h.Label = cleanText(h.Label, MaxLabelBytes)
-	h.Environment = cleanText(h.Environment, MaxEnvironmentBytes)
-	switch h.Criticality {
-	case inventory.CriticalityLow, inventory.CriticalityMedium,
-		inventory.CriticalityHigh, inventory.CriticalityCritical:
-	default:
-		return Host{}, fmt.Errorf("criticality: %w", ErrInvalidField)
-	}
-	switch h.Exposure {
-	case "":
-		h.Exposure = vulnprio.ExposureUnknown
-	case vulnprio.ExposureInternet, vulnprio.ExposureVPNEntry, vulnprio.ExposureUnknown,
-		vulnprio.ExposureInternal, vulnprio.ExposureNoListener:
-	default:
-		return Host{}, fmt.Errorf("exposure: %w", ErrInvalidField)
-	}
-	return h, nil
-}
-
-// labHost returns the lab host part of a validated host.
-func (h Host) labHost() LabHost {
-	return LabHost{ID: h.ID, Label: h.Label, Environment: h.Environment, Criticality: string(h.Criticality)}
-}
-
-// validateFinding checks one finding. A value that does not have its strict
-// shape rejects the finding; the caller fails closed.
-func validateFinding(f Finding) (Finding, error) {
-	if !vulnfix.ValidSubjectID(f.HostID) {
-		return Finding{}, fmt.Errorf("host id: %w", ErrInvalidField)
-	}
-	switch f.Subject {
-	case SubjectOS:
-		if f.ImageSubject != "" {
-			return Finding{}, fmt.Errorf("image subject on os finding: %w", ErrInvalidField)
-		}
-	case SubjectImage:
-		if !vulnfix.ValidSubjectID(f.ImageSubject) {
-			return Finding{}, fmt.Errorf("image subject: %w", ErrInvalidField)
-		}
-	default:
-		return Finding{}, fmt.Errorf("subject kind: %w", ErrInvalidField)
-	}
-	switch f.State {
-	case StateOpen, StateAcceptedRisk, StateFalsePositive:
-	default:
-		return Finding{}, ErrInvalidState
-	}
-	switch f.Tier {
-	case vulnprio.TierCritical, vulnprio.TierHigh, vulnprio.TierMedium, vulnprio.TierLow:
-	default:
-		return Finding{}, ErrInvalidTier
-	}
-	if f.Score < 0 || f.Score > MaxScore {
-		return Finding{}, fmt.Errorf("score: %w", ErrInvalidField)
-	}
-	if !vulnIDRe.MatchString(f.VulnID) {
-		return Finding{}, fmt.Errorf("vulnerability id: %w", ErrInvalidField)
-	}
-	f.Package = cleanText(f.Package, MaxPackageBytes)
-	if !packageRe.MatchString(f.Package) {
-		return Finding{}, fmt.Errorf("package name: %w", ErrInvalidField)
-	}
-	if !versionRe.MatchString(f.Installed) {
-		return Finding{}, fmt.Errorf("installed version: %w", ErrInvalidField)
-	}
-	if f.Fixed != "" && !versionRe.MatchString(f.Fixed) {
-		return Finding{}, fmt.Errorf("fixed version: %w", ErrInvalidField)
-	}
-	return f, nil
-}
-
-// validatePorts checks listening ports and returns them sorted by number,
-// then protocol, so the first MaxPortsPerHost are always the same ones.
-func validatePorts(ps []Port) ([]Port, error) {
-	out := make([]Port, 0, len(ps))
-	for _, p := range ps {
-		if p.Number < 1 || p.Number > 65535 {
-			return nil, fmt.Errorf("port number %d: %w", p.Number, ErrInvalidField)
-		}
-		if p.Protocol != "tcp" && p.Protocol != "udp" {
-			return nil, fmt.Errorf("port protocol: %w", ErrInvalidField)
-		}
-		out = append(out, p)
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Number != out[j].Number {
-			return out[i].Number < out[j].Number
-		}
-		return out[i].Protocol < out[j].Protocol
-	})
-	return out, nil
 }
