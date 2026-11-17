@@ -1143,8 +1143,10 @@ func TestRotateNetDeviceCredentialRevokesAuthority(t *testing.T) {
 	if _, _, err := a.SetCredential(ctx, NetDevCredential{By: "admin", DeviceID: dev.ID, Username: "nos-read", Secret: []byte("v1-secret")}); err != nil {
 		t.Fatal(err)
 	}
-	if rev.count() != 0 {
-		t.Fatal("first set revoked authority")
+	// The first set revokes too: a lease approved for version 1 before the
+	// credential existed must not go live with it.
+	if !slices.Equal(rev.ids, []string{dev.ID}) {
+		t.Fatalf("first set revocations %v, want one for %s", rev.ids, dev.ID)
 	}
 	if _, _, err := a.RotateCredential(ctx, NetDevCredential{DeviceID: dev.ID, Secret: []byte("v2-secret"), ExpectedVersion: 1}); !errors.Is(err, ErrNetDevCredentialRequest) {
 		t.Fatalf("rotation without actor: %v", err)
@@ -1154,8 +1156,8 @@ func TestRotateNetDeviceCredentialRevokesAuthority(t *testing.T) {
 			t.Fatalf("expected version %d accepted", expected)
 		}
 	}
-	if _, val, v := openNetDevCredential(t, e, dev); val != "v1-secret" || v != 1 || rev.count() != 0 {
-		t.Fatalf("refused rotation changed state: %q v%d revokes %d", val, v, rev.count())
+	if _, val, v := openNetDevCredential(t, e, dev); val != "v1-secret" || v != 1 || rev.count() != 1 {
+		t.Fatalf("refused rotation changed state: %q v%d revokes %d (want only the first set's)", val, v, rev.count())
 	}
 	_, v, err := a.RotateCredential(ctx, NetDevCredential{By: "admin", DeviceID: dev.ID, Username: "nos-read2", Secret: []byte("v2-secret"), ExpectedVersion: 1})
 	if err != nil {
@@ -1164,8 +1166,8 @@ func TestRotateNetDeviceCredentialRevokesAuthority(t *testing.T) {
 	if user, val, sv := openNetDevCredential(t, e, dev); v != 2 || sv != 2 || val != "v2-secret" || user != "nos-read2" {
 		t.Fatalf("rotated to %q %q v%d (reply v%d)", user, val, sv, v)
 	}
-	if !slices.Equal(rev.ids, []string{dev.ID}) {
-		t.Fatalf("revocations %v, want one for %s", rev.ids, dev.ID)
+	if !slices.Equal(rev.ids, []string{dev.ID, dev.ID}) {
+		t.Fatalf("revocations %v, want one for the set and one for the rotation of %s", rev.ids, dev.ID)
 	}
 
 	rev.fail = errors.New("grant store down")
@@ -1192,20 +1194,23 @@ func TestNetDevCredentialVaultFailureRollsBack(t *testing.T) {
 	if _, _, err := a.SetCredential(ctx, NetDevCredential{By: "admin", DeviceID: dev.ID, Secret: []byte("v1-secret")}); err == nil {
 		t.Fatal("set succeeded with a failing vault")
 	}
-	if v, err := a.credentialVersion(netDevReadCredRef(dev)); err != nil || v != 0 {
-		t.Fatalf("failed set left version %d (%v)", v, err)
+	if v, err := a.credentialVersion(netDevReadCredRef(dev)); err != nil || v != 0 || rev.count() != 0 {
+		t.Fatalf("failed set left version %d (%v), revokes %d", v, err, rev.count())
 	}
 	e.store.failPutAfter = -1
 	if _, _, err := a.SetCredential(ctx, NetDevCredential{By: "admin", DeviceID: dev.ID, Secret: []byte("v1-secret")}); err != nil {
 		t.Fatal(err)
+	}
+	if rev.count() != 1 {
+		t.Fatalf("successful set: %d revocations, want 1", rev.count())
 	}
 	e.store.failPutAfter = e.store.puts
 	if _, _, err := a.RotateCredential(ctx, NetDevCredential{By: "admin", DeviceID: dev.ID, Secret: []byte("v2-secret"), ExpectedVersion: 1}); err == nil {
 		t.Fatal("rotate succeeded with a failing vault")
 	}
 	e.store.failPutAfter = -1
-	if _, val, v := openNetDevCredential(t, e, dev); val != "v1-secret" || v != 1 || rev.count() != 0 {
-		t.Fatalf("failed rotation changed state: %q v%d revokes %d", val, v, rev.count())
+	if _, val, v := openNetDevCredential(t, e, dev); val != "v1-secret" || v != 1 || rev.count() != 1 {
+		t.Fatalf("failed rotation changed state: %q v%d revokes %d (want only the set's)", val, v, rev.count())
 	}
 
 	e.vault.Lock()
@@ -1223,8 +1228,9 @@ func TestNetDevCredentialVaultFailureRollsBack(t *testing.T) {
 		PinKind: netdevcontract.PinSSHHostKey, ConfirmedPin: testNetDevPin2, Confirm: "yes"}); !errors.Is(err, vault.ErrLocked) {
 		t.Fatalf("locked register: %v", err)
 	}
-	if cur, _, _ := e.db.GetNetDevice(dev.ID); cur.Blocked || cur.TombstonedAt != nil || rev.count() != 0 {
-		t.Fatalf("locked remove had side effects: %+v revokes %d", cur, rev.count())
+	// Only the earlier successful set revoked; no locked operation did.
+	if cur, _, _ := e.db.GetNetDevice(dev.ID); cur.Blocked || cur.TombstonedAt != nil || rev.count() != 1 {
+		t.Fatalf("locked remove had side effects: %+v revokes %d (want only the set's 1)", cur, rev.count())
 	}
 	svc, _ := newNetDevService(e, &netDevDialer{})
 	if _, err := svc.SetNetDeviceCredential(ctx, &pb.SetNetDeviceCredentialRequest{DeviceId: dev.ID, Secret: []byte("x")}); status.Code(err) != codes.FailedPrecondition {

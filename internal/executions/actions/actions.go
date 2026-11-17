@@ -151,6 +151,20 @@ var containerRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 
 var containerParam = []Param{{Name: "container", Label: "Container (name or ID)", Pattern: containerRe}}
 
+// containerIDRe is a full container ID (64 lowercase hex), as docker
+// inspect prints it; G5b binds container control to it.
+var containerIDRe = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// imageIDRe is a local image ID (sha256:, 64 lowercase hex).
+var imageIDRe = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// boundContainerParams are the parameters of docker.start, stop and
+// restart 1.1.0: the container and image IDs of the approved binding.
+var boundContainerParams = []Param{
+	{Name: "container_id", Label: "Bound container ID (full)", Pattern: containerIDRe},
+	{Name: "image_id", Label: "Bound image ID", Pattern: imageIDRe},
+}
+
 // imageRe is a digest-pinned image reference (repo@sha256:…): the scan
 // target is immutable, and no tag lookup or pull is possible.
 var imageRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._/:-]{0,254}@sha256:[0-9a-f]{64}$`)
@@ -330,6 +344,17 @@ var dockerControlTemplate string
 
 func dockerScript(verb string) []byte {
 	return []byte(strings.ReplaceAll(dockerControlTemplate, "@VERB@", verb))
+}
+
+// dockerControlBoundTemplate is the 1.1.0 control script (G5b): it checks
+// the bound container and image IDs before the verb. It is a separate
+// template so that the 1.0.0 bytes, and their reviewed hash, stay as they are.
+//
+//go:embed scripts/docker_control_bound.sh.tmpl
+var dockerControlBoundTemplate string
+
+func dockerBoundScript(verb string) []byte {
+	return []byte(strings.ReplaceAll(dockerControlBoundTemplate, "@VERB@", verb))
 }
 
 //go:embed scripts/service_control.sh.tmpl
@@ -533,6 +558,57 @@ var Builtin = []Action{
 func Lookup(id string) (Action, bool) {
 	for _, a := range Builtin {
 		if a.ID == id {
+			return a, true
+		}
+	}
+	return Action{}, false
+}
+
+// batchMembers are the built-in versions that only a batch may plan (G5b):
+// docker.start, stop and restart 1.1.0. They are not in Builtin, so the
+// general catalog (Service.Catalog), the "New operation" form, the
+// quick actions and Lookup never offer them and never see a second entry
+// per ID. The batch planner reaches them through LookupBatchMember only.
+var batchMembers = []Action{
+	{
+		ID: "docker.start", Version: "1.1.0", Title: "Start bound container",
+		Description: "Batch member only (G5b): docker start of the container whose full ID and image ID the approved binding names. Checks both before the start and stops with container_changed, running nothing, if either differs or the container is gone. The configuration hash is not checked. Nothing is recreated or pulled.",
+		Risk:        pb.RiskClass_RISK_CLASS_MEDIUM, Timeout: 3 * time.Minute, Script: dockerBoundScript("start"), Params: boundContainerParams, Retry: RetryNever,
+	},
+	{
+		ID: "docker.stop", Version: "1.1.0", Title: "Stop bound container",
+		Description: "Batch member only (G5b): docker stop of the container whose full ID and image ID the approved binding names. Checks both before the stop and stops with container_changed, running nothing, if either differs or the container is gone. The configuration hash is not checked.",
+		Risk:        pb.RiskClass_RISK_CLASS_MEDIUM, Timeout: 3 * time.Minute, Script: dockerBoundScript("stop"), Params: boundContainerParams, Retry: RetryNever,
+	},
+	{
+		ID: "docker.restart", Version: "1.1.0", Title: "Restart bound container",
+		Description: "Batch member only (G5b): docker restart of the container whose full ID and image ID the approved binding names. Checks both before the restart and stops with container_changed, running nothing, if either differs or the container is gone. The configuration hash is not checked. Nothing is recreated or pulled.",
+		Risk:        pb.RiskClass_RISK_CLASS_MEDIUM, Timeout: 3 * time.Minute, Script: dockerBoundScript("restart"), Params: boundContainerParams, Retry: RetryNever,
+	},
+}
+
+// IsBatchMemberOnly reports whether id has a batch-member version (G5b). A
+// batch plan and its runner must resolve such an ID through
+// LookupBatchMember only: the general catalog's version of it (1.0.0) runs
+// without a container binding and is never a batch member.
+func IsBatchMemberOnly(id string) bool {
+	for _, a := range batchMembers {
+		if a.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// LookupBatchMember returns the batch-member action id at exactly version
+// (G5b). An empty version or a built-in version never matches here: the
+// general catalog answers for those through Lookup.
+func LookupBatchMember(id, version string) (Action, bool) {
+	if version == "" {
+		return Action{}, false
+	}
+	for _, a := range batchMembers {
+		if a.ID == id && a.Version == version {
 			return a, true
 		}
 	}
