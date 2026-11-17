@@ -10,9 +10,13 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/fsguard"
 	_ "modernc.org/sqlite" // pure-Go SQLite driver, no CGO
 )
 
@@ -51,10 +55,27 @@ type queryer interface {
 
 // Open opens or creates the notes database at path and applies pending
 // migrations. The caller chooses path; it must not be inside the server
-// backup set. now is the injected clock; nil means time.Now.
+// backup set. path must be absolute and inside a private directory
+// (fsguard.CheckPrivateDir); the database, its -wal and its -shm are
+// private files (0600), as executordb's are. now is the injected clock; nil
+// means time.Now.
 func Open(path string, now func() time.Time) (*Store, error) {
 	if now == nil {
 		now = time.Now
+	}
+	if !filepath.IsAbs(path) {
+		return nil, fmt.Errorf("opsnotes: path %q must be absolute", path)
+	}
+	// The pragmas travel in the DSN query string; '?' or '#' in the path
+	// would start it early and change them.
+	if strings.ContainsAny(path, "?#") {
+		return nil, fmt.Errorf("opsnotes: path %q must not contain '?' or '#'", path)
+	}
+	if err := fsguard.CheckPrivateDir(filepath.Dir(path)); err != nil {
+		return nil, fmt.Errorf("opsnotes: %w", err)
+	}
+	if err := fsguard.EnsurePrivateFile(path); err != nil {
+		return nil, fmt.Errorf("opsnotes: %w", err)
 	}
 	dsn := fmt.Sprintf("%s?_pragma=busy_timeout(%d)&_pragma=foreign_keys(1)&_pragma=secure_delete(1)&_journal_mode=WAL&_synchronous=FULL",
 		path, busyTimeoutMS)
@@ -63,6 +84,23 @@ func Open(path string, now func() time.Time) (*Store, error) {
 		return nil, fmt.Errorf("opsnotes: open %s: %w", path, err)
 	}
 	db.SetMaxOpenConns(1)
+	// Taking the write lock creates -wal and -shm now, before any migration
+	// writes to them. SQLite gives them the mode and owner of the main file;
+	// check that before data lands in them.
+	if _, err := db.Exec(`BEGIN IMMEDIATE; COMMIT;`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("opsnotes: lock %s: %w", path, err)
+	}
+	for _, p := range []string{path + "-wal", path + "-shm"} {
+		if err := fsguard.CheckPrivateFile(p); err != nil && !os.IsNotExist(err) {
+			_ = db.Close()
+			return nil, fmt.Errorf("opsnotes: %w", err)
+		}
+	}
+	if err := fsguard.CheckPrivateFile(path); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("opsnotes: %w", err)
+	}
 	if err := migrate(db); err != nil {
 		_ = db.Close()
 		return nil, err

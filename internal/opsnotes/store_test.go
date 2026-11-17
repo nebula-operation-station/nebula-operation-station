@@ -22,7 +22,7 @@ var baseTime = time.Date(2026, 11, 17, 12, 0, 0, 0, time.UTC)
 // openTestStore opens a store in a fresh temporary directory.
 func openTestStore(t *testing.T, clock *fakeClock) *Store {
 	t.Helper()
-	s, err := Open(filepath.Join(t.TempDir(), "notes.db"), clock.Now)
+	s, err := Open(filepath.Join(privateTestDir(t), "notes.db"), clock.Now)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -409,7 +409,7 @@ func TestGetMissingNoteIsNotFound(t *testing.T) {
 
 func TestNotesPersistAcrossReopen(t *testing.T) {
 	clock := &fakeClock{t: baseTime}
-	path := filepath.Join(t.TempDir(), "notes.db")
+	path := filepath.Join(privateTestDir(t), "notes.db")
 	s, err := Open(path, clock.Now)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
