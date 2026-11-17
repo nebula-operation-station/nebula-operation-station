@@ -123,6 +123,14 @@ func (h *Handler) endpointErrorText(hostID string, err error) string {
 	switch {
 	case errors.Is(err, inventory.ErrEndpointExists):
 		return "This endpoint is already configured for the host."
+	case errors.Is(err, inventory.ErrEndpointInUse):
+		// The detail is "<endpoint> is used by host <id>": a normalized
+		// endpoint and a validated host ID, rendered as text.
+		_, detail, ok := strings.Cut(err.Error(), inventory.ErrEndpointInUse.Error()+": ")
+		if !ok {
+			return "The endpoint is already used by another host."
+		}
+		return "The endpoint " + detail + " already; a second host on it would present the other host's key."
 	case errors.Is(err, inventory.ErrTooManyEndpoints):
 		return "A host has at most " + strconv.Itoa(inventory.MaxEditableEndpoints) + " endpoints."
 	case errors.Is(err, inventory.ErrLastEndpoint):
@@ -142,30 +150,6 @@ func (h *Handler) endpointErrorText(hostID string, err error) string {
 	}
 	h.log.Error("edit host endpoints", "host", hostID, "error", err)
 	return "The inventory could not be reached."
-}
-
-// endpointUsedElsewhere returns the ID of another host that already has
-// the endpoint e, or "".
-func (h *Handler) endpointUsedElsewhere(ctx context.Context, hostID string, e inventory.Endpoint) (string, error) {
-	if h.hosts == nil {
-		return "", nil
-	}
-	all, err := h.hosts(ctx)
-	if err != nil {
-		return "", err
-	}
-	key := inventory.EndpointKey(e)
-	for _, other := range all {
-		if other.ID == hostID {
-			continue
-		}
-		for _, oe := range other.Endpoints {
-			if inventory.EndpointKey(oe) == key {
-				return other.ID, nil
-			}
-		}
-	}
-	return "", nil
 }
 
 // handleHostEndpointEdit runs one endpoint edit of the host in the path
@@ -207,19 +191,8 @@ func (h *Handler) handleHostEndpointEdit(w http.ResponseWriter, r *http.Request)
 	switch op {
 	case "add":
 		// An endpoint of another host would present that host's key and
-		// block this one (key mismatch is a hard stop); refuse it here.
-		if n, nerr := inventory.NormalizeEndpoint(e); nerr == nil {
-			other, herr := h.endpointUsedElsewhere(ctx, id, n)
-			if herr != nil {
-				h.log.Error("list inventory hosts", "error", herr)
-				warn("The inventory could not be reached.")
-				return
-			}
-			if other != "" {
-				warn("The endpoint " + inventory.EndpointKey(n) + " is already used by host " + other + ".")
-				return
-			}
-		}
+		// block this one (key mismatch is a hard stop); AddEndpoint
+		// refuses it inside its transaction (ErrEndpointInUse).
 		kind = "host_endpoint_added"
 		ch, err = store.AddEndpoint(ctx, id, e)
 		if err == nil && len(ch.After) > 0 {

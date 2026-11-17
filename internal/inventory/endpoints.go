@@ -51,6 +51,9 @@ var (
 	// ErrTooManyEndpoints is returned by AddEndpoint when the host
 	// already has MaxEditableEndpoints endpoints.
 	ErrTooManyEndpoints = errors.New("inventory: too many endpoints")
+	// ErrEndpointInUse is returned by AddEndpoint when another host
+	// already has the endpoint.
+	ErrEndpointInUse = errors.New("inventory: endpoint used by another host")
 )
 
 // EndpointChange is the endpoint list of a host before and after an
@@ -120,14 +123,18 @@ func EndpointKey(e Endpoint) string {
 
 // AddEndpoint appends e as the last alternate endpoint of the host. The
 // endpoint is normalized first; a duplicate (compared by EndpointKey)
-// returns ErrEndpointExists and a host that already has
-// MaxEditableEndpoints endpoints returns ErrTooManyEndpoints.
+// returns ErrEndpointExists, an endpoint of another host
+// ErrEndpointInUse (checked in the same transaction) and a host that
+// already has MaxEditableEndpoints endpoints returns ErrTooManyEndpoints.
 func (s *Store) AddEndpoint(ctx context.Context, hostID string, e Endpoint) (EndpointChange, error) {
 	n, err := NormalizeEndpoint(e)
 	if err != nil {
 		return EndpointChange{}, fmt.Errorf("inventory: add endpoint to %s: %w", hostID, err)
 	}
-	return s.editEndpoints(ctx, "add endpoint to", hostID, func(cur []Endpoint) ([]Endpoint, error) {
+	inUse := func(ctx context.Context, tx *sql.Tx, hid int64) error {
+		return endpointUsedByOtherHost(ctx, tx, hid, n)
+	}
+	return s.editEndpoints(ctx, "add endpoint to", hostID, inUse, func(cur []Endpoint) ([]Endpoint, error) {
 		if indexOf(cur, n) >= 0 {
 			return nil, fmt.Errorf("%w: %s", ErrEndpointExists, EndpointKey(n))
 		}
@@ -143,7 +150,7 @@ func (s *Store) AddEndpoint(ctx context.Context, hostID string, e Endpoint) (End
 // returns ErrEndpointNotFound, a position outside 0..n-1
 // ErrInvalidEndpoint.
 func (s *Store) MoveEndpoint(ctx context.Context, hostID string, e Endpoint, to int) (EndpointChange, error) {
-	return s.editEndpoints(ctx, "move endpoint of", hostID, func(cur []Endpoint) ([]Endpoint, error) {
+	return s.editEndpoints(ctx, "move endpoint of", hostID, nil, func(cur []Endpoint) ([]Endpoint, error) {
 		i := indexOf(cur, e)
 		if i < 0 {
 			return nil, fmt.Errorf("%w: %s", ErrEndpointNotFound, EndpointKey(e))
@@ -167,7 +174,7 @@ func (s *Store) MoveEndpoint(ctx context.Context, hostID string, e Endpoint, to 
 // alternate the primary). The only endpoint of a host cannot be removed
 // (ErrLastEndpoint); an unknown endpoint returns ErrEndpointNotFound.
 func (s *Store) RemoveEndpoint(ctx context.Context, hostID string, e Endpoint) (EndpointChange, error) {
-	return s.editEndpoints(ctx, "remove endpoint of", hostID, func(cur []Endpoint) ([]Endpoint, error) {
+	return s.editEndpoints(ctx, "remove endpoint of", hostID, nil, func(cur []Endpoint) ([]Endpoint, error) {
 		i := indexOf(cur, e)
 		if i < 0 {
 			return nil, fmt.Errorf("%w: %s", ErrEndpointNotFound, EndpointKey(e))
@@ -179,6 +186,36 @@ func (s *Store) RemoveEndpoint(ctx context.Context, hostID string, e Endpoint) (
 		out = append(out, cur[:i]...)
 		return append(out, cur[i+1:]...), nil
 	})
+}
+
+// endpointUsedByOtherHost returns ErrEndpointInUse when a host other than
+// hid already has the endpoint e (compared by EndpointKey). It runs in
+// the edit transaction, so the check and the insert are one unit: an
+// endpoint of another host would present that host's pinned key, which
+// is a hard stop for this host.
+func endpointUsedByOtherHost(ctx context.Context, tx *sql.Tx, hid int64, e Endpoint) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT h.name, e.address, e.port FROM host_endpoints e JOIN hosts h ON h.id = e.host_id
+		WHERE e.host_id <> ? ORDER BY h.name, e.priority, e.id`, hid)
+	if err != nil {
+		return fmt.Errorf("list endpoints of other hosts: %w", err)
+	}
+	defer rows.Close()
+	key := EndpointKey(e)
+	for rows.Next() {
+		var name string
+		var o Endpoint
+		if err := rows.Scan(&name, &o.Address, &o.Port); err != nil {
+			return fmt.Errorf("list endpoints of other hosts: %w", err)
+		}
+		if EndpointKey(o) == key {
+			return fmt.Errorf("%w: %s is used by host %s", ErrEndpointInUse, key, name)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("list endpoints of other hosts: %w", err)
+	}
+	return nil
 }
 
 // indexOf returns the position of e in eps by EndpointKey, or -1.
@@ -195,7 +232,9 @@ func indexOf(eps []Endpoint, e Endpoint) int {
 // editEndpoints loads the endpoints of the host in priority order inside
 // one transaction, applies edit and stores the result: removed rows are
 // deleted, new rows inserted and every row gets priority = its position.
-func (s *Store) editEndpoints(ctx context.Context, what, hostID string, edit func([]Endpoint) ([]Endpoint, error)) (EndpointChange, error) {
+// check, if not nil, runs in the same transaction before the edit.
+func (s *Store) editEndpoints(ctx context.Context, what, hostID string,
+	check func(context.Context, *sql.Tx, int64) error, edit func([]Endpoint) ([]Endpoint, error)) (EndpointChange, error) {
 	fail := func(err error) (EndpointChange, error) {
 		return EndpointChange{}, fmt.Errorf("inventory: %s %s: %w", what, hostID, err)
 	}
@@ -211,6 +250,11 @@ func (s *Store) editEndpoints(ctx context.Context, what, hostID string, edit fun
 			return fail(ErrHostNotFound)
 		}
 		return fail(err)
+	}
+	if check != nil {
+		if err := check(ctx, tx, hid); err != nil {
+			return fail(err)
+		}
 	}
 	type row struct {
 		id int64

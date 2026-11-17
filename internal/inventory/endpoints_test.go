@@ -10,7 +10,10 @@ package inventory
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
+	"strings"
+	"sync"
 	"testing"
 )
 
@@ -319,6 +322,55 @@ func TestEndpointEditsRefuseStoredDuplicateSpellings(t *testing.T) {
 		t.Fatalf("Update: %v", err)
 	}
 	wantEndpoints(t, s, ctx, want[:2])
+}
+
+// TestAddEndpointRefusesEndpointOfOtherHost: an endpoint another host
+// already has (in any spelling) is refused inside the add transaction,
+// and of two concurrent adds of one endpoint to two hosts at most one
+// is stored, so two hosts never share an endpoint (and a pinned key).
+func TestAddEndpointRefusesEndpointOfOtherHost(t *testing.T) {
+	s, ctx := endpointHost(t)
+	other := validHost()
+	other.ID = "db-01"
+	other.Endpoints = []Endpoint{{Address: "fd00::50", Port: 22}}
+	if _, err := s.Create(ctx, other, CreateOptions{}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	_, err := s.AddEndpoint(ctx, "web-01", Endpoint{Address: "FD00:0::50"})
+	if !errors.Is(err, ErrEndpointInUse) || !strings.Contains(err.Error(), "db-01") {
+		t.Fatalf("AddEndpoint = %v, want ErrEndpointInUse naming db-01", err)
+	}
+	wantEndpoints(t, s, ctx, []Endpoint{{Address: "10.0.0.11", Port: 22}})
+
+	for round := 0; round < 5; round++ {
+		ep := Endpoint{Address: fmt.Sprintf("10.9.0.%d", round+1), Port: 22}
+		var wg sync.WaitGroup
+		for _, id := range []string{"web-01", "db-01"} {
+			wg.Add(1)
+			go func(id string) {
+				defer wg.Done()
+				_, _ = s.AddEndpoint(ctx, id, ep)
+			}(id)
+		}
+		wg.Wait()
+		owners := 0
+		for _, id := range []string{"web-01", "db-01"} {
+			h, err := s.Get(ctx, id)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if indexOf(h.Endpoints, ep) >= 0 {
+				owners++
+			}
+		}
+		if owners > 1 {
+			t.Fatalf("round %d: %s stored on %d hosts", round, EndpointKey(ep), owners)
+		}
+		// Remove it again so the next round starts from the same state.
+		for _, id := range []string{"web-01", "db-01"} {
+			_, _ = s.RemoveEndpoint(ctx, id, ep)
+		}
+	}
 }
 
 // TestUpdateWithEndpointChangeReturnsBeforeAndAfter checks that the
