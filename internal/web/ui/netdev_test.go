@@ -168,6 +168,13 @@ func newNetDevEnv(t *testing.T) *netdevEnv {
 // on the environment's server database and a log writer (audit lines).
 func newNetDevEnvWith(t *testing.T, links func(*sql.DB) ui.NetDevLinkStore, logw io.Writer) *netdevEnv {
 	t.Helper()
+	return newNetDevEnvVuln(t, links, logw, nil)
+}
+
+// newNetDevEnvVuln is newNetDevEnvWith with the vulnerability store that
+// serves the vendor advisory block of a device page (nil: no block).
+func newNetDevEnvVuln(t *testing.T, links func(*sql.DB) ui.NetDevLinkStore, logw io.Writer, vuln ui.VulnFindings) *netdevEnv {
+	t.Helper()
 	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
 	if err != nil {
 		t.Fatalf("open server DB: %v", err)
@@ -179,7 +186,7 @@ func newNetDevEnvWith(t *testing.T, links func(*sql.DB) ui.NetDevLinkStore, logw
 	if links != nil {
 		linkStore = links(db)
 	}
-	u, err := ui.New(ui.Options{PublicOrigin: pveOrigin, Log: log, Now: func() time.Time { return netdevNow }})
+	u, err := ui.New(ui.Options{PublicOrigin: pveOrigin, Log: log, Now: func() time.Time { return netdevNow }, Vuln: vuln})
 	if err != nil {
 		t.Fatalf("ui.New: %v", err)
 	}
