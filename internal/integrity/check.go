@@ -61,7 +61,9 @@ func Check(ctx context.Context, ref Reference, opts Options) (Report, error) {
 	if !ok {
 		return Report{}, fmt.Errorf("%w: %q", ErrFlavour, o.Flavour)
 	}
-	rootFD, err := unix.Open(o.Root, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	// A symlink as the root itself or in any of its parent directories
+	// is refused, not followed.
+	rootFD, err := openDirNoSymlinks(o.Root)
 	if err != nil {
 		return Report{}, fmt.Errorf("open check root %s: %w", o.Root, err)
 	}

@@ -4,6 +4,7 @@ package stageplan
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -72,6 +73,63 @@ func TestParseRefusesPlansThatDoNotFitTheRequest(t *testing.T) {
 	for name, raw := range cases {
 		if _, err := Parse(raw, targets); !errors.Is(err, ErrInvalid) {
 			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+func TestAutoContinueOnEmptyPlanIsFalse(t *testing.T) {
+	cases := map[string]Plan{
+		"zero value":        {},
+		"one auto stage":    {Stages: []Stage{{Name: "only", Hosts: []string{"a"}, Continue: ContinueAuto, TimeoutS: 60}}},
+		"one manual stage":  {Stages: []Stage{{Name: "only", Hosts: []string{"a"}, Continue: ContinueManual, TimeoutS: 60}}},
+		"empty non-nil set": {Stages: []Stage{}},
+	}
+	for name, p := range cases {
+		if got := p.AutoContinue(); got {
+			t.Errorf("%s: AutoContinue() = true, want false", name)
+		}
+	}
+}
+
+func TestDurationOfEmptyPlanIsZero(t *testing.T) {
+	if got := (Plan{}).Duration(); got != 0 {
+		t.Fatalf("Duration() of zero Plan = %d, want 0", got)
+	}
+}
+
+func TestParseBoundariesAreInclusiveAndTrailingBytesRefused(t *testing.T) {
+	name := func(n int) string { return strings.Repeat("a", n) }
+	atMaxStages := make([]Stage, MaxStages)
+	var targets []string
+	for i := range atMaxStages {
+		host := fmt.Sprintf("h%02d", i)
+		atMaxStages[i] = stage(fmt.Sprintf("s%02d", i), host)
+		targets = append(targets, host)
+	}
+	validStage := func(n string, timeout int) Stage {
+		return Stage{Name: n, Hosts: []string{"a"}, Continue: ContinueManual, TimeoutS: timeout}
+	}
+	cases := []struct {
+		name    string
+		raw     []byte
+		targets []string
+		ok      bool
+	}{
+		{"exactly MaxStages stages accepted", encode(t, atMaxStages...), targets, true},
+		{"timeout_s equal MinTimeout accepted", encode(t, validStage("s", MinTimeout)), []string{"a"}, true},
+		{"timeout_s equal MaxTimeout accepted", encode(t, validStage("s", MaxTimeout)), []string{"a"}, true},
+		{"name of 32 characters accepted", encode(t, validStage(name(32), 60)), []string{"a"}, true},
+		{"name of 33 characters refused", encode(t, validStage(name(33), 60)), []string{"a"}, false},
+		{"trailing bytes after the document refused", append(encode(t, validStage("s", 60)), []byte(" x")...), []string{"a"}, false},
+		{"second document after the first refused", append(encode(t, validStage("s", 60)), encode(t, validStage("s", 60))...), []string{"a"}, false},
+	}
+	for _, c := range cases {
+		_, err := Parse(c.raw, c.targets)
+		if c.ok && err != nil {
+			t.Errorf("%s: %v", c.name, err)
+		}
+		if !c.ok && !errors.Is(err, ErrInvalid) {
+			t.Errorf("%s: err = %v, want ErrInvalid", c.name, err)
 		}
 	}
 }

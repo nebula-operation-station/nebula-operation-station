@@ -8,6 +8,23 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnagent/nosclient"
 )
 
+// deviceFromExport maps a device's export data to the matcher's device. A
+// value the export states as "unknown" is left empty, so the matcher reports
+// the firmware as a version gap and never as clean.
+func deviceFromExport(d *nosclient.Device) *Device {
+	out := &Device{Model: d.Model, Firmware: d.FirmwareVersion}
+	if out.Model == exportUnknown {
+		out.Model = ""
+	}
+	if out.Firmware == exportUnknown {
+		out.Firmware = ""
+	}
+	return out
+}
+
+// exportUnknown is the value the export states for what NOS cannot vouch for.
+const exportUnknown = "unknown"
+
 // SubjectsFromExport merges the subject parts of a vuln-inventory-v1
 // export (D3), in page order, into matcher subjects. Part numbering is the
 // one nosclient validates: a subject's parts are consecutive, start at
@@ -40,6 +57,9 @@ func SubjectsFromExport(parts []nosclient.SubjectPart) ([]Subject, error) {
 			if p.Kernel != nil {
 				s.Kernel = &Kernel{Release: p.Kernel.Release, Mapped: p.Kernel.Mapped,
 					SourcePackage: p.Kernel.SourcePackage, SourceVersion: p.Kernel.SourceVersion}
+			}
+			if p.Device != nil {
+				s.Device = deviceFromExport(p.Device)
 			}
 			out = append(out, s)
 			open, openKey, next = len(out)-1, key, 1

@@ -98,9 +98,12 @@ const ExitSkipped = 3
 type exitError struct {
 	code int
 	msg  string
+	err  error // optional cause, for errors.Is
 }
 
 func (e *exitError) Error() string { return e.msg }
+
+func (e *exitError) Unwrap() error { return e.err }
 
 func skipped(reason string) error {
 	return &exitError{code: ExitSkipped, msg: "backup: no backup was made: " + reason}

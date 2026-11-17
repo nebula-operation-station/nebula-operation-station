@@ -46,3 +46,21 @@ func (c *Client) UnpinBuiltinVersion(ctx context.Context, in *pb.UnpinBuiltinVer
 	resp, err := c.rpc.UnpinBuiltinVersion(ctx, in, opts...)
 	return resp, mapCallError(ctx, err)
 }
+
+// ReviewRootRotation is admin-only on the executor; the server role is
+// always refused. It exists so the client implements the interface.
+func (c *Client) ReviewRootRotation(ctx context.Context, in *pb.ReviewRootRotationRequest, opts ...grpc.CallOption) (*pb.ReviewRootRotationResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.ReviewRootRotation(ctx, in, opts...)
+	return resp, mapCallError(ctx, err)
+}
+
+// CommitRootRotation is admin-only on the executor; the server role is
+// always refused. It exists so the client implements the interface.
+func (c *Client) CommitRootRotation(ctx context.Context, in *pb.CommitRootRotationRequest, opts ...grpc.CallOption) (*pb.CommitRootRotationResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.CommitRootRotation(ctx, in, opts...)
+	return resp, mapCallError(ctx, err)
+}

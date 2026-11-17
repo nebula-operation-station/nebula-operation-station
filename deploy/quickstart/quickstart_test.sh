@@ -517,6 +517,18 @@ dockerfile="${real_repo}/deploy/container/Dockerfile"
 if [[ -f "$goreleaser" && -f "$dockerfile" ]]; then
   # The nfpms block: from 'nfpms:' to the next top-level key.
   nfpms_block=$(awk '/^nfpms:/{f=1;next} f&&/^[a-z]/{f=0} f' "$goreleaser")
+  # The vulnerability agent's own package (ADR 0011 Amendment 1) is not a
+  # NOS binary set: it must carry exactly its own binary, and it is left
+  # out of 9a/9b. Every other entry is still checked against the list.
+  vuln_nfpm_block=$(awk '/^  - id: /{f=($3=="nebula-vuln-agent")} f' <<< "$nfpms_block")
+  nfpms_block=$(awk '/^  - id: /{f=($3!="nebula-vuln-agent")} !/^  - id: /&&f==""{f=1} f' <<< "$nfpms_block")
+  mapfile -t vuln_ids_lines < <(grep -E '^[[:space:]]*ids:' <<< "$vuln_nfpm_block")
+  if [[ -z "$vuln_nfpm_block" ]] \
+    || [[ ${#vuln_ids_lines[@]} -eq 1 && "${vuln_ids_lines[0]}" =~ ^[[:space:]]*ids:[[:space:]]*\[nebula-vuln-agent\][[:space:]]*$ ]]; then
+    ok ".deb nfpm nebula-vuln-agent carries only its own binary"
+  else
+    bad ".deb nfpm nebula-vuln-agent carries only its own binary (ids: ${vuln_ids_lines[*]:-<none>})"
+  fi
   # 9a: every file install.sh reads is in the nfpm contents (src/dst paired).
   install_dst=$(grep -oE 'dst: [^ ]+/install\.sh$' <<< "$nfpms_block" | head -1 | awk '{print $2}')
   mapfile -t install_reads < <(grep -oE '\$\{script_dir\}/[A-Za-z0-9_./-]+' "$install_sh" | sed 's|.*script_dir}/||' | sort -u)

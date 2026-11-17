@@ -146,8 +146,12 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_CommitBuiltinTrust_FullMethodName:    {admin},
 		pb.ExecutorService_UnpinBuiltinVersion_FullMethodName:   {admin},
 		pb.ExecutorService_GetBuiltinTrustStatus_FullMethodName: {server, admin},
-		pb.ExecutorService_ListEvents_FullMethodName:            {server, admin},
-		pb.ExecutorService_BackupExecutor_FullMethodName:        {admin},
+		// Release root rotation (spec 10): local admin only; the server has
+		// no rotation method at all.
+		pb.ExecutorService_ReviewRootRotation_FullMethodName: {admin},
+		pb.ExecutorService_CommitRootRotation_FullMethodName: {admin},
+		pb.ExecutorService_ListEvents_FullMethodName:         {server, admin},
+		pb.ExecutorService_BackupExecutor_FullMethodName:     {admin},
 		// PVE provider reads (ADR 0006, P1-05). The entries are final:
 		// pve-collector may call ONLY these two methods (plus ListReadGrants,
 		// see the read-grant entries above); server may list the
@@ -241,6 +245,20 @@ func MethodRoles() map[string][]peercred.Role {
 		pb.ExecutorService_ClearContainerRecoveryPlan_FullMethodName: {admin},
 		pb.ExecutorService_ListContainerRecreations_FullMethodName:   {server, admin},
 		pb.ExecutorService_ResolveContainerRecreation_FullMethodName: {server, admin},
+
+		// I1 integrity (ADR 0015 D4, Q4; spec 06). The status is
+		// read-only and grants nothing. Only the local admin may ack an
+		// open locking finding: the server UID can never lift the lock
+		// (there is no browser path).
+		pb.ExecutorService_GetIntegrityStatus_FullMethodName:  {server, admin},
+		pb.ExecutorService_AckIntegrityFinding_FullMethodName: {admin},
+		// I2 baseline digest (ADR 0015 D7, IG-06): server and admin may
+		// stream a baseline list; the executor recomputes its digest and
+		// compares it with the executor-held approved digest. A mismatch
+		// is an executor-held baseline_tamper finding, never a write of
+		// the digest. No role has a method that sets the digest: only the
+		// executor's own approval paths store it.
+		pb.ExecutorService_CompareBaselineList_FullMethodName: {server, admin},
 	}
 }
 

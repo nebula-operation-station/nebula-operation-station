@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 )
 
 // Sentinel errors returned by the registry metadata client.
@@ -119,7 +120,7 @@ func ParseRef(image string) (Ref, error) {
 	}
 	host := s[:slash]
 	rest := s[slash+1:]
-	if host == "" || strings.ContainsAny(host, "/\\") {
+	if host == "" || strings.ContainsAny(host, "/\\@") || strings.ContainsFunc(host, unicode.IsSpace) {
 		return Ref{}, fmt.Errorf("%w: invalid registry host %q", ErrBadRef, host)
 	}
 	ref := Ref{Registry: scheme + host}
@@ -1012,7 +1013,7 @@ func (c *Client) resolveLink(registry, listPath, raw string) (string, error) {
 		u.Scheme = base.Scheme
 		u.Host = base.Host
 	}
-	if originOf(u) != registry {
+	if originOf(u) != registry || u.User != nil || u.Fragment != "" {
 		return "", fmt.Errorf("%w: %q", ErrRedirectNotAllowed, raw)
 	}
 	if u.Path != listPath {

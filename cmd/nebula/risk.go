@@ -25,7 +25,7 @@ import (
 
 func artifactCmd(ctx context.Context, c pb.ExecutorServiceClient, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: nebula artifact trust|untrust|list|trust-builtins|unpin")
+		return errors.New("usage: nebula artifact trust|untrust|list|trust-builtins|trust-rotation|unpin")
 	}
 	switch args[0] {
 	case "trust":
@@ -39,6 +39,10 @@ func artifactCmd(ctx context.Context, c pb.ExecutorServiceClient, args []string)
 		// verified bundle and commits it to its built-in trust store. It
 		// dials its own connection with a longer timeout.
 		return artifactTrustBuiltins(args[1:])
+	case "trust-rotation":
+		// Local admin only (spec 10): the executor reviews its local signed
+		// root rotation against its durable root state and applies it.
+		return artifactTrustRotation(args[1:])
 	case "unpin":
 		return artifactUnpin(ctx, c, args[1:])
 	default:

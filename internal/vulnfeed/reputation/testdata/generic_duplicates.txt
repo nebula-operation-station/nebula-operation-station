@@ -1,0 +1,6 @@
+# synthetic: documentation ranges only
+192.0.2.1
+192.0.2.1
+192.0.2.0/24
+2001:db8::/32
+2001:db8::/32

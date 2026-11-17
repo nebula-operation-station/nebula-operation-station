@@ -1,0 +1,102 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# postinst of the nebula-vuln-agent package (ADR 0011 Amendment 1, va08),
+# built by the nfpms entry nebula-vuln-agent in .goreleaser.yaml.
+# It provisions what deploy/install.sh --vuln-agent provisions for a tarball
+# install: the agent's own system user, its data dir and its config dir with
+# a skeleton configuration. It never enables or starts the agent, on install
+# or upgrade: the agent needs a NOS token and URL first, and the admin
+# enables the timer (guide, "Vulnerability agent"). An upgrade needs no
+# restart either: the timer starts every run with the binary on disk.
+#
+# The skeleton must equal the one in install.sh (pinned by
+# deploy/deb/vuln_agent_test.go). A file or symlink at one of the paths is
+# left alone (install -d would follow it) and the admin is warned; the
+# package still configures, the agent just refuses to run until it is fixed.
+vuln_data_dir=/var/lib/nebula-vuln-agent
+vuln_etc_dir=/etc/nebula-vuln-agent
+
+render_vuln_config() {
+  cat <<'EOF' # vuln agent config skeleton
+{
+  "data_dir": "/var/lib/nebula-vuln-agent",
+  "nos": {
+    "url": "",
+    "token_file": "/etc/nebula-vuln-agent/token"
+  },
+  "llm": {
+    "enabled": false
+  }
+}
+EOF
+}
+
+# not_a_dir PATH succeeds if PATH is a symlink or exists as something other
+# than a directory.
+not_a_dir() {
+  [ -L "$1" ] || { [ -e "$1" ] && [ ! -d "$1" ]; }
+}
+
+warn_path() {
+  cat >&2 <<EOF
+nebula-vuln-agent: warning: $1 is a file or a symlink where a $2 belongs; leaving it alone.
+nebula-vuln-agent: inspect it (ls -ld $1), remove it if it is not yours, then: sudo dpkg-reconfigure nebula-vuln-agent
+EOF
+}
+
+# provision_vuln_agent creates the user (not in nebula-rpc: the agent never
+# talks to the executor), the data dir 0700 owned by the agent, the config
+# dir 0750 root:nebula-vuln-agent and, only if absent, the skeleton 0640
+# root:nebula-vuln-agent, so the agent can read but not change its
+# configuration. No secret is created: the token and the LLM key are files
+# the admin puts into the config dir (0600, owned by the agent).
+provision_vuln_agent() {
+  if ! getent passwd nebula-vuln-agent >/dev/null; then
+    useradd --system --home-dir "${vuln_data_dir}" --shell /usr/sbin/nologin nebula-vuln-agent || return 1
+  fi
+  if not_a_dir "${vuln_data_dir}"; then
+    warn_path "${vuln_data_dir}" "directory"
+    return 1
+  fi
+  if not_a_dir "${vuln_etc_dir}"; then
+    warn_path "${vuln_etc_dir}" "directory"
+    return 1
+  fi
+  if [ -L "${vuln_etc_dir}/config.json" ] || { [ -e "${vuln_etc_dir}/config.json" ] && [ ! -f "${vuln_etc_dir}/config.json" ]; }; then
+    warn_path "${vuln_etc_dir}/config.json" "regular file"
+    return 1
+  fi
+  install -d -m 0700 -o nebula-vuln-agent -g nebula-vuln-agent "${vuln_data_dir}" || return 1
+  install -d -m 0750 -o root -g nebula-vuln-agent "${vuln_etc_dir}" || return 1
+  if [ ! -e "${vuln_etc_dir}/config.json" ]; then
+    tmp=$(mktemp) || return 1
+    if render_vuln_config > "${tmp}" \
+      && install -m 0640 -o root -g nebula-vuln-agent "${tmp}" "${vuln_etc_dir}/config.json"; then
+      rm -f "${tmp}"
+    else
+      rm -f "${tmp}"
+      return 1
+    fi
+  fi
+}
+
+case "$1" in
+  configure)
+    provision_vuln_agent || echo "nebula-vuln-agent: warning: provisioning incomplete (see above); the agent will not run until it is fixed" >&2
+    if [ -d /run/systemd/system ]; then
+      systemctl daemon-reload || true
+    fi
+    if [ -z "$2" ]; then
+      cat <<EOF
+nebula-vuln-agent is installed; its timer is NOT enabled. Next steps
+(/usr/share/doc/nebula-vuln-agent/guide.md, "Vulnerability agent"):
+  1. put the NOS token vuln-agent into ${vuln_etc_dir}/token (0600, owned by nebula-vuln-agent),
+  2. set "url" in ${vuln_etc_dir}/config.json,
+  3. sudo systemctl enable --now nebula-vuln-agent.timer
+EOF
+    else
+      echo "nebula-vuln-agent: upgraded; the next timer run uses the new version (enable it with: sudo systemctl enable --now nebula-vuln-agent.timer)"
+    fi
+    ;;
+esac
+exit 0

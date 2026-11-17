@@ -186,9 +186,15 @@ func tryCandidate(t *testing.T, k *testSK, roots []release.Root, version string,
 		mm = append(mm, map[string]any{"name": m.name, "version": m.version, "size": len(b), "sha256": hexSum(b)})
 	}
 	bundle := buildTar(t, names, files)
+	// The manifest must list installed-files.json (spec 10). ReadBundleDir
+	// does not read it from dir, so only its digest is needed here.
+	list := []byte("placeholder")
 	man := canon(t, map[string]any{"format": release.ManifestFormat, "release_version": version,
-		"artifacts": []any{map[string]any{"name": release.BundleArtifact, "size": len(bundle), "sha256": hexSum(bundle)}},
-		"modules":   mm})
+		"artifacts": []any{
+			map[string]any{"name": release.BundleArtifact, "size": len(bundle), "sha256": hexSum(bundle)},
+			map[string]any{"name": release.InstalledFilesArtifact, "size": len(list), "sha256": hexSum(list)},
+		},
+		"modules": mm})
 	dir := t.TempDir()
 	for n, b := range map[string][]byte{release.ManifestFile: man, release.SignatureFile: k.sign(t, man), release.BundleArtifact: bundle} {
 		if err := os.WriteFile(filepath.Join(dir, n), b, 0o600); err != nil {

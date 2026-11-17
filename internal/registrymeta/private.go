@@ -433,8 +433,13 @@ func (p *privateConfig) checkChallenge(h string) error {
 	return nil
 }
 
+// maxChallengeParams bounds the number of auth-params in one challenge. A
+// Bearer challenge needs realm, service and scope; a few more are tolerated.
+const maxChallengeParams = 16
+
 // parseChallengeParams parses comma-separated key="value" pairs (RFC 7235
-// auth-params, quoted values without escapes). Duplicate keys are refused.
+// auth-params, quoted values without escapes). Duplicate keys are refused, as
+// are more than maxChallengeParams pairs and values over MaxChallengeLen.
 func parseChallengeParams(s string) (map[string]string, error) {
 	out := map[string]string{}
 	bad := fmt.Errorf("%w: malformed challenge", ErrRealmNotApproved)
@@ -460,7 +465,8 @@ func parseChallengeParams(s string) (map[string]string, error) {
 			}
 			val, s = strings.TrimSpace(s[:end]), s[end:]
 		}
-		if _, dup := out[key]; dup || key == "" || strings.ContainsAny(val, "\\") {
+		if _, dup := out[key]; dup || key == "" || strings.ContainsAny(val, "\\") ||
+			len(val) > MaxChallengeLen || len(out) >= maxChallengeParams {
 			return nil, bad
 		}
 		out[key] = val

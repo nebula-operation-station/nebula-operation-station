@@ -50,14 +50,26 @@ from a failure.
 (migration 0034) that keep Proxmox provider claims separate from observed
 tiers.
 
-- **Retention is 21 days** (`flowagg.Retention`,
-  `trafficstore.DefaultRetention`). Pruning runs during a full Sync, which
-  happens at least once per clock hour (see Server wiring).
-- **There is no setting to shorten it yet.** The store constructor accepts
-  only a retention in `(0, 21 d]` (configurable lower only, ADR 0009), and
-  `nebula-server` currently always opens the store with the 21-day default.
-  The map's and the connections pages' windows (1 h / 24 h / 7 d / 21 d,
-  default 24 h) are clamped to the store's retention.
+- **Retention is configurable: `traffic.retention_days`, 1–21 days, default
+  21** (previously: not exposed; `nebula-server` always opened the store with
+  the 21-day default). The value is read from the server config:
+  `internal/serverconfig/config.go` (`TrafficConfig.RetentionDays`,
+  `TrafficConfig.EffectiveRetentionDays`, `DefaultTrafficRetentionDays`;
+  `Config.Validate` rejects values outside 1–21).
+  `trafficRetention` in `cmd/nebula-server/config.go` re-checks the range and
+  returns the duration. `cmd/nebula-server/main.go` passes that one value to
+  every reader and writer: the traffic ingest (`newTrafficIngest` in
+  `cmd/nebula-server/traffic.go`), the PVE import (`newPVEImport` in
+  `cmd/nebula-server/pveimport.go`), the connections pages
+  (`newConnectionsPages` in `cmd/nebula-server/connections.go`) and the
+  traffic map (`mountTrafficMap` in `cmd/nebula-server/trafficmap.go`).
+- **Ceiling is 21 days**: `trafficstore.DefaultRetention` (= `flowagg.Retention`).
+  `trafficstore.NewWithRetention` accepts only a retention in `(0, 21 d]`, so
+  the setting can shorten retention but never extend it (ADR 0009 D3).
+  Pruning runs during a full Sync, which happens at least once per clock hour
+  (see Server wiring).
+- The map's and the connections pages' windows (1 h / 24 h / 7 d / 21 d,
+  default 24 h) are clamped to the configured retention.
 
 ### Server wiring
 
@@ -76,8 +88,10 @@ hour passed.
 - `internal/web/ui/connections` renders the *Connections* tab of the host
   page (`/hosts/ID/connections`) and the asset page
   (`/network/a/ID/connections`): peer (linked when the peer is a managed
-  host or asset), direction, protocol and port, process name when known,
-  bytes in/out, first and last seen, source tier and the reporting host.
+  host or asset), direction, protocol and port, process name (always empty:
+  no process names are collected, see *Privacy* below; previously: "process
+  name when known"), bytes in/out, first and last seen, source tier and the
+  reporting host.
   Byte counts from socket snapshots are lower bounds and are marked as
   such; flows whose endpoints are not inventory nodes are counted as
   unmapped, not drawn.
@@ -137,7 +151,5 @@ size-limited, validated and rendered as text only.
 ## Not implemented
 
 - Tiers 3–4 (sensors, DNS) and their parsers.
-- An admin setting to shorten the 21-day retention (the store API already
-  supports a shorter retention; the server does not expose it).
 - An allowlist setting in the server configuration.
 - A sudo rule for `ss -p` (deliberately not adopted; see above).

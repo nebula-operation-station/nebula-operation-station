@@ -1190,7 +1190,65 @@ Until they land, cu04 shows those targets as unavailable with a reason.
 - **Real install:** the operator supplies a definition per container with the
   vault unlocked. Without that, nothing changes.
 
-### cu06 Private registry transfer (P2-04, split out, gated)
+### cu06 Private registry transfer (P2-04, split out, gated) — done
+
+**Status: done (2026-11-16; before: in progress, parts 1 to 3).** Every
+part of the step is merged; enabling private members in batch admission
+is left to a maintainer (see "Left open" below).
+
+- Part 1 and the server side (cu06a, cu06af, cu06af2 to cu06ai): registry
+  read leases and the server caller, see "G13 status" below.
+- Part 2: `internal/registrypull/` (verified pull into a docker-archive
+  and OCI layout), protected in `.github/protected-paths.txt`.
+- Part 3 (cu06c, PR #528): the transfer over SSH into `docker load`
+  (`internal/executor/registry_transfer.go`), the durable path that runs
+  it before a private compose update job (`internal/executor/container_member.go`),
+  and the host job's private branch
+  (`internal/executions/actions/scripts/docker_compose_update_v2.sh`).
+- Part 4 (cu06d): the threat model section "Private image transfer"
+  ([`docs/threat-model.md`](../threat-model.md#private-image-transfer-adr-0006-r7-container-updates-cu06):
+  trust boundary, flows F1 to F7, threats and tests); the security tests
+  in [`test/security/cu06_private_transfer_test.go`](../../test/security/cu06_private_transfer_test.go);
+  the admin guide, section 9.3 "Private registries"
+  ([`docs/admin/guide.md`](../admin/guide.md#93-services-and-docker):
+  record, credential in the vault, registry read lease, executor egress).
+
+The "Tests" line below maps to: credential never on the host, in args,
+env, results or logs: `TestPrivateTransferContainerdLoadsImageBytesOnly`,
+`TestCU06_HostReceivesImageBytesOnly`, `TestCU06_HostJobHasNoRegistryLogin`;
+never on the server, its database, a collector, the executor log, the
+audit chain or executor.db: `TestCU06_RegistryCredentialStaysInExecutor`,
+`TestCU06_CollectorsAndServerCannotObtainCredential`,
+`TestServerBuiltRegistryLeaseEndToEnd`; wrong blob digest:
+`TestWrongBlobDigestStopsPullWithoutWritingBlob`,
+`TestPrivateTransferWrongBlobNeverCompletesTheArchive`; oversize manifest
+or blob: `TestOversizeManifestIsRefused`, `TestOversizeBlobIsRefusedBeforeFetch`;
+out-of-scope repository: `TestOutOfScopeRepositoryIsRefused`,
+`TestPrivateTransferRefusesBeforeTheRegistry`; redirect:
+`TestCrossHostRedirectIsRefused`, `TestManifestRedirectIsRefused`,
+`TestApprovedBlobHostRedirectGetsNoAuthorization`; Lock, rotation and
+expiry during the transfer: `TestPrivateTransferLockMidStreamStops`,
+`TestPrivateTransferLockBeforeCloseStops`,
+`TestPrivateTransferRecheckStopsOnChange`; no `docker login` and no
+`X-Registry-Auth`: `TestCU06_HostReceivesImageBytesOnly`,
+`TestCU06_HostJobHasNoRegistryLogin`; both image stores:
+`TestPrivateTransferContainerdLoadsImageBytesOnly`,
+`TestPrivateTransferClassicStoreRefusedBeforeAnyBlob`.
+
+Left open (outside cu06's agent scope):
+
+- `internal/permit/batch/container.go` still refuses a member with
+  `registry` set (`ErrContainerUnsupported`, "private registry transfer
+  arrives with cu06"), and the container page still shows "private image
+  (not yet supported)". Enabling it is a protected change for a maintainer;
+  until then no private image reaches a host.
+- The classic image store stays unavailable for private images by design
+  (no repository digest after `docker load`).
+- There is no `nebula` command or web page to add, rotate or remove a
+  private registry; only the admin-role executor methods exist.
+- `cmd/nebula-executor` does not call `SetPrivateTransferTempDir`, so the
+  layer spool is the executor's `os.TempDir()` (the unit's private `/tmp`).
+- The cu06 tests are not yet rows in `docs/implementation/security-tests.md`.
 
 **Q6 answered 2026-11-11 (recommended profile):** the maintainer accepted
 option (a), executor fetch and `docker load` over SSH (previously: "Do not

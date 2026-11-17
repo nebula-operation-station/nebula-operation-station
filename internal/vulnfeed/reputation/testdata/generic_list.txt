@@ -1,0 +1,9 @@
+# synthetic generic list: RFC 5737 and RFC 3849 documentation ranges only
+# comment lines and blank lines are skipped
+
+192.0.2.10
+192.0.2.0/24
+198.51.100.0/24
+2001:db8::/32
+
+2001:db8:1::5

@@ -155,6 +155,20 @@ func (a *Authority) ProposePaired(b canonical.PairedEnroll) (PairedPermit, error
 	return p.clone(), nil
 }
 
+// IsPaired reports whether d names a paired enrollment permit the
+// authority knows: pending, approved or already used. The executor uses it
+// to route a browser approval (SubmitAssertion with the permit digest) to
+// SubmitPairedAssertion instead of the execution-permit path.
+func (a *Authority) IsPaired(d canonical.Digest) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, ok := a.paired[d]; ok {
+		return true
+	}
+	_, spent := a.pairedSpent[d]
+	return spent
+}
+
 // SubmitPairedAssertion approves a pending paired permit with a WebAuthn
 // assertion over its challenge. User verification is always required, and
 // the privileged session must be open. Hardened mode refuses it.

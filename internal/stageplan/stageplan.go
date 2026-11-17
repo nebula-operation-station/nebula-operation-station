@@ -151,8 +151,13 @@ func (p Plan) Duration() int {
 }
 
 // AutoContinue reports whether any stage but the last continues
-// automatically.
+// automatically. A plan with fewer than two stages has no stage before the
+// last one, so it reports false; this also covers the zero Plan, which Parse
+// never returns.
 func (p Plan) AutoContinue() bool {
+	if len(p.Stages) < 2 {
+		return false
+	}
 	for _, s := range p.Stages[:len(p.Stages)-1] {
 		if s.Continue == ContinueAuto {
 			return true

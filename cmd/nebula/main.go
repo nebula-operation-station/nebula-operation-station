@@ -10,12 +10,13 @@
 //	nebula approve <digest-prefix>
 //	nebula batch review|approve|stage|skip
 //	nebula read-grant pending|approve <digest>
-//	nebula artifact trust|untrust|list|trust-builtins|unpin
+//	nebula artifact trust|untrust|list|trust-builtins|trust-rotation|unpin
 //	nebula host probe|pin|unpin|keys|test|criticality|clear|list|offers|offer-revoke
 //	nebula webauthn code|list|remove
 //	nebula totp setup|status|remove
 //	nebula pve remote add|rotate-token|remove|repin|list
 //	nebula container definition put|remove|list
+//	nebula integrity verify --offline DIR --root MOUNT --version V --flavour F
 package main
 
 import (
@@ -68,6 +69,8 @@ commands:
   artifact list       list trusted artifacts (anything else needs at least HIGH)
   artifact trust-builtins [--yes-digest DIGEST [--pin name@ver] [--retire name@ver]]
                       review and trust the executor's release built-ins; --pin keeps an old version
+  artifact trust-rotation [--yes-digest DIGEST]
+                      review and apply a signed release root rotation (compare fingerprints)
   artifact unpin MODULE@VERSION
                       clear a saved --pin (deletes nothing; normal retention applies again)
   signer add --name NAME FILE | list | remove SHA256:FINGERPRINT
@@ -141,6 +144,15 @@ commands:
                       remove a definition, or one older version (refused inside a rollback window)
   container definition list [HOST]
                       definition metadata (version, author, time; never content)
+  integrity verify --offline RELEASE-DIR --root MOUNT --version X.Y.Z --flavour FLAVOUR
+                      check a mounted NOS installation (read-only) against a release fetched
+                      and kept on another machine, verified with the compiled release roots;
+                      exit 0 clean, 5 deviations, 6 incomplete (never clean)
+  integrity status    last I1 check, open locking findings (unlock and dispatch are refused
+                      while any is open) and the root-compromise note
+  integrity ack FINDING
+                      show one open finding and clear exactly it after confirmation
+                      (admin UID, audited); deletes and rolls back nothing
   version             print version
 
 environment:
@@ -184,6 +196,12 @@ func run(cmd string, args []string) error {
 		return pveCmd(args, os.Stdin, ttyPrompter, os.Stdout)
 	case "netdev":
 		return netdevCmd(args, defaultNetdevEnv())
+	case "integrity":
+		// The offline check trusts only the compiled release anchors and
+		// never talks to an executor; status and ack do (below).
+		if isOfflineIntegrityCmd(args) {
+			return integrityCmd(args, os.Stdout)
+		}
 	}
 	conn, err := dialExecutor()
 	if err != nil {
@@ -239,6 +257,8 @@ func run(cmd string, args []string) error {
 		return vaultCmd(ctx, c, args, ttyPrompter, os.Stdout)
 	case "container":
 		return containerCmd(ctx, c, args, os.Stdin, openDefinitionFile, os.Stdout)
+	case "integrity":
+		return integrityExecutorCmd(ctx, c, args, os.Stdin, os.Stdout)
 	case "secret":
 		return secretCmd(ctx, c, args, func() ([]byte, error) { return readSecretValue(os.Stdin, ttyPrompter) }, os.Stdin, os.Stdout)
 	default:
