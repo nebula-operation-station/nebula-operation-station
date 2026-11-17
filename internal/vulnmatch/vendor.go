@@ -28,10 +28,11 @@ func vendorFeed(eco string) (string, bool) {
 // ecosystem (vendor_advisory, D2). The OS (ecosystem) and the models come
 // from the structured product tree (vulnfeed.CSAFProduct.OS and Models): a
 // product applies when it names no model or the device's exact model; a
-// product naming only exact SKUs distinct from the device's exact SKU does
-// not affect the device; any other model scope (series or family names, CPE
-// spellings, shorter or longer SKUs, unreadable scopes) is a coverage gap
-// of that vulnerability. internal/vulnver has no
+// product naming only complete SKUs of a known vendor scheme, distinct from
+// the device's complete SKU and not a prefix of it, does not affect the
+// device; any other model scope (series or family names, series designations
+// written like a SKU, CPE spellings, shorter or longer SKUs, unknown schemes,
+// unreadable scopes) is a coverage gap of that vulnerability. internal/vulnver has no
 // vendor version scheme, so the matcher never orders firmware versions: only an exact
 // product_version equal to the firmware decides. A firmware that only a
 // version range could cover, or that appears in contradicting status
@@ -129,13 +130,17 @@ func (d deviceModel) scope(p indexedProduct) modelScope {
 }
 
 // differs reports whether the product's model is provably not the device's
-// model: both are exact SKUs (see isExactSKU), they are not equal, and
-// neither is a whole-word run of the other (a shorter or longer SKU,
-// "CBS350-24P" and "CBS350-24P-4G", may name the same hardware). Anything
-// else (series names, CPE spellings, family names) is never proof that a
-// device is not affected.
+// model: both are complete SKUs of the same vendor scheme (see skuSchemeOf),
+// they are not equal, and neither is a prefix of the other or a whole-word
+// run of the other (a shorter or longer SKU, "CBS350-24P" and "CBS350-24P-4G",
+// may name the same hardware). Anything else (series names, series
+// designations written like a SKU such as "PA-400", CPE spellings, family
+// names, unknown schemes) is never proof that a device is not affected.
 func (d deviceModel) differs(p productModel) bool {
-	if !d.sku || !p.sku || d.key == p.key {
+	if d.scheme == schemeNone || d.scheme != p.scheme || d.key == p.key {
+		return false
+	}
+	if strings.HasPrefix(d.key, p.key) || strings.HasPrefix(p.key, d.key) {
 		return false
 	}
 	return !wordRun(d.key, p.key) && !wordRun(p.key, d.key)
@@ -157,6 +162,45 @@ func isExactSKU(model string) bool {
 	return len(model) <= MaxExactSKULen && exactSKURe.MatchString(model) && strings.ContainsAny(model, "0123456789")
 }
 
+// skuScheme names a vendor's complete-SKU scheme. Two models are compared
+// as distinct only under the same scheme; a model under no known scheme is
+// never proof of a different model.
+type skuScheme int
+
+const (
+	// schemeNone: not a complete SKU of a known scheme.
+	schemeNone skuScheme = iota
+	// schemeCisco: a family of letters and digits, '-', a port count, then
+	// one or more type letters, optionally followed by '-'-suffix words
+	// ("C9300-24T", "CBS350-8T", "C9200L-24P-4G"). A port count with no type
+	// letter ("C9300-24") is a series or family spelling, not a SKU.
+	schemeCisco
+	// schemePANOS: a PAN-OS appliance "PA-" and a 3- or 4-digit model
+	// ("PA-440", "PA-3220"). A round number ending in 00 is a series name
+	// ("PA-400", "PA-5400"), not a SKU.
+	schemePANOS
+)
+
+// ciscoSKURe is the Cisco scheme of exact SKUs (see schemeCisco).
+var ciscoSKURe = regexp.MustCompile(`^[A-Z]+[0-9]+[A-Z]*-[0-9]+[A-Z]+(-[A-Z0-9]+)*$`)
+
+// panosSKURe is the PAN-OS appliance scheme (see schemePANOS).
+var panosSKURe = regexp.MustCompile(`^PA-[1-9][0-9]{2,3}$`)
+
+// skuSchemeOf classifies a raw model string. Only an exact SKU (isExactSKU)
+// that matches a known scheme gets one; everything else is schemeNone.
+func skuSchemeOf(model string) skuScheme {
+	switch {
+	case !isExactSKU(model):
+		return schemeNone
+	case ciscoSKURe.MatchString(model):
+		return schemeCisco
+	case panosSKURe.MatchString(model) && !strings.HasSuffix(model, "00"):
+		return schemePANOS
+	}
+	return schemeNone
+}
+
 // wordRun reports whether the '-'-separated words of inner appear as a
 // contiguous run in outer.
 func wordRun(outer, inner string) bool {
@@ -165,15 +209,16 @@ func wordRun(outer, inner string) bool {
 
 // deviceModel is a device's model in the normalised form that exact hits are
 // compared under (see normalizeModel). An empty form names no product.
-// sku reports that the device's model string is an exact SKU.
+// scheme is the device's complete-SKU scheme (schemeNone unless its model
+// string is a complete SKU of a known scheme).
 type deviceModel struct {
-	key string
-	sku bool
+	key    string
+	scheme skuScheme
 }
 
 // newDeviceModel normalises a device model once per device subject.
 func newDeviceModel(model string) deviceModel {
-	return deviceModel{key: normalizeModel(model), sku: isExactSKU(strings.TrimSpace(model))}
+	return deviceModel{key: normalizeModel(model), scheme: skuSchemeOf(strings.TrimSpace(model))}
 }
 
 // isExact reports whether the product's model is the device's model: the
@@ -186,17 +231,18 @@ func (d deviceModel) isExact(p productModel) bool {
 // productModel is one of a CSAF product's models in the normalised form.
 // Only the structured Models field from the product tree is used: the full
 // name and the OS or family name carry version, series and vendor words,
-// which must never form a device model. sku reports that the tree spells
-// this model as an exact SKU at least once (a product may carry both
-// "PA-220" and the CPE spelling "pa-220").
+// which must never form a device model. scheme is the SKU scheme of the
+// tree's spelling of this model; when a product carries several spellings,
+// the first known scheme wins (a product may carry both "PA-220" and the CPE
+// spelling "pa-220").
 type productModel struct {
-	key string
-	sku bool
+	key    string
+	scheme skuScheme
 }
 
 // newProductModel indexes one model of a CSAF product.
 func newProductModel(model string) productModel {
-	return productModel{key: normalizeModel(model), sku: isExactSKU(strings.TrimSpace(model))}
+	return productModel{key: normalizeModel(model), scheme: skuSchemeOf(strings.TrimSpace(model))}
 }
 
 // normalizeModel lower-cases s and folds every run of white space, '-' and
@@ -230,7 +276,9 @@ func newIndexedProduct(p vulnfeed.CSAFProduct) indexedProduct {
 			continue
 		}
 		if i := slices.IndexFunc(ip.models, func(o productModel) bool { return o.key == pm.key }); i >= 0 {
-			ip.models[i].sku = ip.models[i].sku || pm.sku
+			if ip.models[i].scheme == schemeNone {
+				ip.models[i].scheme = pm.scheme
+			}
 			continue
 		}
 		ip.models = append(ip.models, pm)
