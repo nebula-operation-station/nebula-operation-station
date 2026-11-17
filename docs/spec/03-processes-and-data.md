@@ -13,6 +13,7 @@ Each role runs under its own OS user, and filesystem permissions enforce the spl
 | `nebula-discovery` | `nebula-discovery` | One-shot Nmap runs with `CAP_NET_RAW`, results go to staging | Credentials, database access |
 | `nebula-pve-collector` | `nebula-pve-collector` | Typed provider read scheduling over the executor socket, sanitized result spool | Credentials, database access, network access/listener, capabilities, mutation or approval methods |
 | `nebula` CLI | an admin user | Vault unlock, hardened approval, backup, restore | Persistent state of its own |
+| `nebula-ops-agent` (optional, default off) | `nebula-ops-agent` | Oneshot; reads its work list from `/api/v1/ops/` and writes advisory notes there; one LLM call per work item ([v28-03-01](#v28-03-01); previously: no such process) | SSH keys, vault material, notification provider tokens, executor socket (`nebula-rpc`), database access, authority to execute |
 
 <a id="v23-03-02"></a>
 <!-- Spec v2.3 (ADR 0006, ADR 0007): v23-03-02 -->
@@ -27,6 +28,7 @@ Each role runs under its own OS user, and filesystem permissions enforce the spl
 | `/var/lib/nebula/server/nebula.db` | `nebula-server` | Users, hosts, assets, networks, IP allocations, groups, tags, module metadata, execution metadata, audit, scheduler configuration, presentation copies of PVE inventory and links, normalized telemetry/backup/scan evidence, public registry cache, credential references (names and types only), help assistant settings and pin-state copy ([v27-03-01](#v27-03-01); previously: none) |
 | `/var/lib/nebula/server/assistant.db` | `nebula-server` | Opt-in stored help assistant conversations only, not backed up ([v27-03-01](#v27-03-01); previously: no such file) |
 | `/var/lib/nebula/server/assistant-audit.key` | `nebula-server` | The 32-byte HMAC key of the help assistant's keyed question hash, mode 0600, not backed up ([v27-03-01](#v27-03-01); previously: no such file, the audit entry held an unsalted SHA-256) |
+| `/var/lib/nebula/opsnotes/notes.db` (path to be verified by its ticket) | `nebula-server` | Ops agent notes, their fact snapshots and admin questions only, not backed up ([v28-03-01](#v28-03-01); previously: no such file) |
 | `/var/lib/nebula/server/artifacts/<sha256>` | `nebula-server` | Immutable, content-addressed scripts and manifests |
 | `/var/lib/nebula/executor/executor.db` | `nebula-executor` | Host keys, trusted signers/artifact trust, WebAuthn public keys/counters, signed executor events, spent execution IDs, durable job intent/outcomes, authoritative PVE remote endpoints/pins/criticality/generations/tombstones, approved read grants and durable budget claims, encrypted vault master key and envelope-encrypted secrets |
 
@@ -215,3 +217,26 @@ The setup-key limits (one use, ≤ 1 h, revoke backoff) are in [06-credentials.m
 | Operator documentation | lab networks and source address rules, model context window stated in bytes (36,000 bytes of prompt content plus overhead plus `MaxOutputTokens`, ≥ 37,500 tokens plus template tokens for any content; previously: ≥ `MaxPromptTokens` + `MaxOutputTokens` in the model's own count), "busy", storage file and key not backed up | this table | adds to AS-13 | AS-13 |
 
 ADR 0014 and `docs/implementation/help-assistant.md` are to be brought in line with this table by a maintainer-reviewed change (`docs/adr/` is protected; the plan is outside the spec); until then this table is the reference for the ticket acceptance.
+
+<a id="v28-03-01"></a>
+<!-- Spec revision (ADR 0016, ag01): v28-03-01 -->
+**Ops agent process, files and data (ADR 0016 D2, D3, D7, D10, D12, D13).** The optional ops agent ([01-product.md](01-product.md#v28-01-01), [02-architecture.md](02-architecture.md#v28-02-01)) adds one process and the following state (previously: none). `nebula-executor` gains no table, file, method or role, and `executor.db` is unchanged; no change to `proto/`, `internal/permit/` or `nebula-executor`.
+
+| Process | Adds | Never has |
+| --- | --- | --- |
+| `nebula-ops-agent` (user `nebula-ops-agent`, on the NOS host) | Oneshot started by `nebula-ops-agent.timer` (every 30 minutes) or `nebula-ops-agent.path`; `GET /api/v1/ops/agent-config` and `GET /api/v1/ops/work`, one LLM call per work item, `POST /api/v1/ops/notes` and `POST /api/v1/ops/status` ([13-notifications.md](13-notifications.md#v28-13-01)); its run summary to journald | Membership in `nebula-rpc`, executor access, SSH keys, host credentials, vault material, notification provider tokens, database access, access to `/var/lib/nebula`, `/etc/nebula` and `/run/nebula` (so it cannot see the trigger file), any destination other than the NOS API and the LLM endpoint |
+| `nebula-server` | The ops API under `/api/v1/ops/` with the exclusive ops-agent token; the projector that builds every work item; validation and storage of notes; the Ops tab, suggestion cards and admin questions; touching the trigger file; the notification log; the events of [13-notifications.md](13-notifications.md#v28-13-02) | Any LLM call for the ops agent; any path from a note to planning, proposals, permits, schedules, leases or the executor other than the origin rule of [05-authentication.md](05-authentication.md#v28-05-01) |
+
+| Data | Where | Written by | Content and bounds |
+| --- | --- | --- | --- |
+| Ops-agent API token | server configuration `server.json` (server side); a file readable only by `nebula-ops-agent` (agent side) | the admin | one exclusive token (default name `ops-agent`) with scopes `ops.read` and `ops.notes.write` only; revoking means removing it from `server.json` |
+| LLM credential (optional) | a file readable only by `nebula-ops-agent`, never logged | the admin | the server never stores it |
+| Run-state file | the agent's state directory, the only writable path of its unit | only the agent | the daily LLM call counter; nothing else |
+| Ops agent settings | one row in the server database (ADR 0016 D12: "one row in `server.db`") | only an admin, with one fresh user-verified assertion per change ([05-authentication.md](05-authentication.md#v27-05-01) flow, own domain separator `nebula-opsagent-settings-v1`), audited, raises `opsagent.settings_changed` | enabled (default **off**), LLM base URL, model, `allow_plain_http`, data class (`lab` default or `external`), operator instructions (≤ 4 KiB), language (`de` default, `en`); a "copy from vulnerability agent" action copies only URL and model into the form and saves nothing by itself; the core prompt is shown read-only; separate from the help assistant settings row |
+| Notes and questions | their own SQLite file `/var/lib/nebula/opsnotes/notes.db` (ADR 0016 D7: path to be verified), separate from the server database | notes only through `POST /api/v1/ops/notes` after server validation; questions only by an admin in the Ops tab | `fix`, `summary` and `answer` notes, each `fix` note with the server's own snapshot of the group's facts; at most 100 notes per day; retention 30 days or 500 notes, whichever is reached first, pruned with injected time; questions ≤ 2 KiB, at most 20 open, 50 per day, 30 days; visible to admins only; never part of any backup ([15-backup-and-upgrades.md](15-backup-and-upgrades.md#v28-15-01)) |
+| Agent last-run status | server side, written by `POST /api/v1/ops/status` | only the ops-agent token | items seen, LLM calls, token counts, discarded outputs, refusal reasons; never prompt or answer text, never the token |
+| Trigger file | a path only systemd reads (`nebula-ops-agent.path`) | only `nebula-server` touches it | carries no data |
+| Notification log | server side | only `nebula-server`'s notification code | every event the server sends, holds back (rate limit, mute) or fails to deliver, with its structured fields and outcome; 30 days, at most 5,000 entries ([13-notifications.md](13-notifications.md#v28-13-02)) |
+| Execution origin | the server's execution record | only `nebula-server` | `suggestion:<note ID>.<step>` or `suggestion-match:<note ID>` ([07-execution-model.md](07-execution-model.md#v28-07-01)) |
+
+ADR 0016 names no file for the run-state file, the settings row's table, the last-run status and the notification log; the implementing tickets choose them inside the owners above and record them in `docs/implementation/ops-agent.md`.
