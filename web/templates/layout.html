@@ -132,6 +132,23 @@
     {{template "content" .}}
   </main>
   {{end}}
+  {{if not .Bare}}
+  <!-- The Assistant panel (ADR 0016 D11). On /help it is inline and loads
+       at once. Elsewhere it is a closed <details>: the browser opens it
+       natively, and htmx loads its content on the first open ("toggle
+       once"), so no page fetches hidden content and no script is needed. -->
+  {{if eq .Active "help"}}
+  <section class="assistant assistant--inline" id="assistant" aria-label="Assistant">
+    <h2>Assistant</h2>
+    <div id="assistant-root" hx-get="/assistant/panel" hx-trigger="load" hx-swap="innerHTML"></div>
+  </section>
+  {{else}}
+  <details class="assistant assistant--side" id="assistant">
+    <summary>Assistant</summary>
+    <div id="assistant-root" hx-get="/assistant/panel" hx-trigger="toggle once" hx-swap="innerHTML"></div>
+  </details>
+  {{end}}
+  {{end}}
   <script src="/static/htmx.min.js"></script>
   <script src="/static/time.js"></script>
   {{if not .Bare}}<script src="/static/nav.js"></script>{{end}}
