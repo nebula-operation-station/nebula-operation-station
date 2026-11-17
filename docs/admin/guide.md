@@ -1103,6 +1103,13 @@ on the executor host). A host that could not be reached can be retried or
 skipped (skipping needs the same approval as opening a stage);
 *Abort rollout* stops every host that has not run. A restart of the
 executor ends the rollout like any approval.
+You can also abort from the operations overview (Operations). Each row of a
+staged rollout that is running and neither stopped nor aborted has an
+*Abort…* button and a checkbox; select one or more rows and choose *Abort
+selected rollouts*. A confirmation page lists the operations and says which
+ones cannot be aborted there; only its form aborts. Each operation is
+reported on its own row, and every abort writes the same
+`execution_aborted` audit line with your user as the detail page does.
 
 **Held batch targets.** While a batch member runs on a host, and
 afterwards while its run may still be running there (for example after a

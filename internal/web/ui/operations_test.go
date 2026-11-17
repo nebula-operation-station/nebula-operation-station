@@ -51,6 +51,9 @@ type fakeOps struct {
 	listHosts map[string][]string
 	listHost  []executions.Summary // the host page's operations tab
 	lastSeen  map[string]time.Time
+	// abortable answers Abortable; abortErrs overrides Abort per ID.
+	abortable map[string]bool
+	abortErrs map[string]error
 }
 
 func (f *fakeOps) Catalog(context.Context) ([]actions.Action, error) {
@@ -96,7 +99,20 @@ func (f *fakeOps) CommitGate(_ context.Context, _, id string, g executions.Gate,
 
 func (f *fakeOps) Abort(_ context.Context, _, id string) error {
 	f.gates = append(f.gates, "abort "+id)
+	if err, ok := f.abortErrs[id]; ok {
+		return err
+	}
 	return f.gateErr
+}
+
+func (f *fakeOps) Abortable(_ context.Context, ids []string) (map[string]bool, error) {
+	out := map[string]bool{}
+	for _, id := range ids {
+		if f.abortable[id] {
+			out[id] = true
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeOps) RetryHost(_ context.Context, _, id, host string) error {
