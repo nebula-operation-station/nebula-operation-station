@@ -1002,3 +1002,55 @@ func TestAbortableMarksOnlyStagedRunningRollouts(t *testing.T) {
 		t.Fatalf("aborted rollout still abortable: %v", after)
 	}
 }
+
+// lockedBuffer is a log sink that background dispatchers may write to
+// while the test reads it.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// TestAbortWritesAuditWithUserOnlyWhenAborted: an abort writes one
+// execution_aborted audit line naming the user and the execution; a
+// refused abort (the rollout is no longer running) writes none.
+func TestAbortWritesAuditWithUserOnlyWhenAborted(t *testing.T) {
+	f := &stagedExec{}
+	s := stagedSetup(t, f)
+	ctx := context.Background()
+	c, err := s.CreateStaged(ctx, "axel", "core.facts", []string{"web", "db", "new"}, nil, Plan{Preset: PresetWaves, Size: 1, Continue: stageplan.ContinueManual})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the gate", func() bool { e, _ := s.Get(ctx, c.ID); return strings.Contains(e.Waiting, "continue to stage 2") })
+	var buf lockedBuffer
+	// A service over the same database and executor that logs to buf.
+	audited := &Service{exec: s.exec, db: s.db, hosts: s.hosts, log: slog.New(slog.NewTextHandler(&buf, nil)), now: s.now}
+	if err := audited.Abort(ctx, "maria", c.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitState(t, s, c.ID, "finished")
+	line := buf.String()
+	for _, want := range []string{"kind=execution_aborted", "execution=" + c.ID, "user=maria"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("audit misses %q: %s", want, line)
+		}
+	}
+	if err := audited.Abort(ctx, "maria", c.ID); !errors.Is(err, ErrNotRunning) {
+		t.Fatalf("second abort: %v, want ErrNotRunning", err)
+	}
+	if after := buf.String(); after != line {
+		t.Fatalf("refused abort was audited: %s", after)
+	}
+}
