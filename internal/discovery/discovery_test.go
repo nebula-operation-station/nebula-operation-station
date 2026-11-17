@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -273,5 +274,42 @@ func TestSchedules(t *testing.T) {
 	}
 	if err := f.s.DeleteSchedule(ctx, hourly.ID); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// longHostname is a valid DNS name of exactly 200 bytes: longer than the
+// IPAM name limit (128), within the hostname limit (253).
+func longHostname() string {
+	return strings.Repeat("a", 50) + "." + strings.Repeat("b", 50) + "." + strings.Repeat("c", 50) + "." + strings.Repeat("d", 47)
+}
+
+func TestLongHostnameImports(t *testing.T) {
+	ctx := context.Background()
+	f := setup(t, nil)
+	name := longHostname()
+	if len(name) != 200 {
+		t.Fatalf("test name has %d bytes", len(name))
+	}
+	j, err := f.s.Submit(ctx, "admin", Request{Mode: discoveryjob.ModePing, Targets: []string{"192.168.10.0/24"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.answer(t, j.ID, true, discoveryjob.Host{Address: "192.168.10.60", Hostname: name})
+	if err := f.s.Poll(ctx); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := f.s.Import(ctx, "admin", j.ID, nil, true)
+	if err != nil || len(rep.Skipped) != 0 || len(rep.Created) != 1 {
+		t.Fatalf("%+v %v", rep, err)
+	}
+	a, err := f.ip.Asset(ctx, rep.Created[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Hostname != name {
+		t.Errorf("hostname %q: the full name is kept", a.Hostname)
+	}
+	if len(a.Name) == 0 || len(a.Name) > 128 || !strings.HasPrefix(name, a.Name) {
+		t.Errorf("name %q: want a prefix of the hostname within 128 bytes", a.Name)
 	}
 }
