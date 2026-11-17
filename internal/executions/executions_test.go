@@ -31,19 +31,22 @@ import (
 )
 
 type fakeExec struct {
-	mu        sync.Mutex
-	pins      []*pb.HostKeyPin
-	risk      pb.RiskClass
-	approved  bool
-	proposed  *pb.ProposeExecutionRequest
-	submitted *pb.SubmitAssertionRequest
-	attached  []*pb.RunAttachedRequest
-	attachErr error
-	durable   []*pb.StartDurableRequest
-	polls     int
-	released  bool
-	result    []byte
-	failHost  string
+	mu   sync.Mutex
+	pins []*pb.HostKeyPin
+	risk pb.RiskClass
+	// requirement, when set, is answered by ProposeExecution instead of the
+	// assertion-verified default.
+	requirement pb.ApprovalRequirement
+	approved    bool
+	proposed    *pb.ProposeExecutionRequest
+	submitted   *pb.SubmitAssertionRequest
+	attached    []*pb.RunAttachedRequest
+	attachErr   error
+	durable     []*pb.StartDurableRequest
+	polls       int
+	released    bool
+	result      []byte
+	failHost    string
 	// unreachable answers that many runs with a retryable network_unreachable.
 	unreachable int
 	grantDoc    []byte
@@ -75,6 +78,9 @@ func (f *fakeExec) ProposeExecution(_ context.Context, in *pb.ProposeExecutionRe
 	r := &pb.ProposeExecutionResponse{ExecutionDigest: strings.Repeat("d", 64), RiskClass: f.risk,
 		ApprovalRequirement: pb.ApprovalRequirement_APPROVAL_REQUIREMENT_ASSERTION_VERIFIED, State: pb.PermitState_PERMIT_STATE_PENDING,
 		RequestOptionsJson: []byte(`{"publicKey":{"challenge":"abc"}}`), ChallengeExpiryUnix: time.Now().Add(5 * time.Minute).Unix()}
+	if f.requirement != 0 {
+		r.ApprovalRequirement = f.requirement
+	}
 	if f.approved {
 		r.State, r.RequestOptionsJson = pb.PermitState_PERMIT_STATE_APPROVED, nil
 	}
