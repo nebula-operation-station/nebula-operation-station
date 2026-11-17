@@ -96,7 +96,7 @@ var csvHeader = []string{"finding_key", "subject_kind", "subject_id", "image_dig
 
 func (r ExportRow) csvRecord() []string {
 	return []string{r.FindingKey, r.SubjectKind, r.SubjectID, r.ImageDigest, r.State, r.ClosedBy, r.StateLabel,
-		r.VulnID, strings.Join(r.Aliases, " "), r.Ecosystem, r.Component, r.InstalledVersion, r.FixState, r.FixedVersion,
+		r.VulnID, aliasCell(r.Aliases), r.Ecosystem, r.Component, r.InstalledVersion, r.FixState, r.FixedVersion,
 		r.Tier, r.CVSSScore, strconv.FormatBool(r.KEV), r.FirstSeen, r.LastSeen, r.FixFlow, r.AdvisoryLink}
 }
 
@@ -278,4 +278,11 @@ func exportJSON(w io.Writer, fs []vulnstore.Finding) error {
 	}
 	_, err := io.WriteString(w, "]}\n")
 	return err
+}
+
+// aliasCell joins the already sanitized aliases and bounds the joined cell
+// like any other value: maxAliases short aliases must not add up to a cell
+// far beyond maxCell (found by FuzzExportCSV, VU-14).
+func aliasCell(aliases []string) string {
+	return csvCell(strings.Join(aliases, " "))
 }
