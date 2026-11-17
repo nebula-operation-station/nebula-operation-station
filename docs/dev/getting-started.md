@@ -1,15 +1,18 @@
 # Getting started
 
 This guide gets a contributor from a fresh clone to a green `make check`,
-and shows how to run the executor locally. It covers the Milestone 0
-security prototype: what exists today, and how to build, test and run it.
+and shows how to build, test and run the executor locally. Milestones 0 to
+10 are implemented (see "What exists and what does not" at the end); the
+operator installation is in [`docs/admin/guide.md`](../admin/guide.md).
+(Previously: this guide covered only the Milestone 0 security prototype.)
 
 ## Toolchain
 
 | Tool | Version | Used for |
 | --- | --- | --- |
 | Go | 1.26 or later (`go.mod` requires 1.26; CI builds with 1.27.x) | build, test, vet |
-| [buf](https://buf.build) | any recent release (CI uses v1.6.0) | `buf lint`, `buf generate` |
+| [buf](https://buf.build) | any recent release; CI installs it with `bufbuild/buf-action` v1.6.0 (the action version, not the buf version) | `buf lint`, `buf generate` |
+| python3 | any Python 3; not pinned | `make test-deploy` (deployment policy tests) |
 | protoc-gen-go | v1.36.12 (pinned in CI) | code generation from `proto/` |
 | protoc-gen-go-grpc | v1.6.2 (pinned in CI) | code generation from `proto/` |
 | staticcheck | v0.8.1, run under Go 1.26.9 (pinned in `Makefile`) | `make lint` |
@@ -34,13 +37,46 @@ builds are static.
 git clone <repository>
 cd nebula-operation-station
 make hooks        # point git at .githooks (protected-path tripwire)
-make check        # fmt-check, vet, staticcheck, buf lint, generated-code
-                  # check, go test -race, govulncheck
+make check        # lint, generate-check, test, test-deploy, vuln
 ```
 
-`make check` is the gate: it must pass completely before you push.
-`make build` then produces the static binaries in `bin/`
-(`nebula-server`, `nebula-executor`, `nebula-discovery`, `nebula`).
+`make check` is the gate: it must pass completely before you push. It runs:
+
+- `lint`: `gofmt` check, `go vet` (also with the `privileged` and
+  `integration` tags), staticcheck under Go 1.26.9, and `buf lint`;
+- `generate-check`: regenerates the code from `proto/` and fails if
+  `internal/rpc` changed;
+- `test`: `go test -race ./...`;
+- `test-deploy`: the deployment policy tests (systemd units, nftables
+  files, install and quickstart scripts). It needs `python3`; the
+  systemd-analyze and kernel `nft` checks skip themselves when those
+  tools are missing;
+- `vuln`: `govulncheck`.
+
+`make build` compiles every package under `cmd/` into `bin/`. That is more
+than Nebula ships: the binaries of the NOS package and image are listed in
+[`deploy/quickstart/binaries.txt`](../../deploy/quickstart/binaries.txt),
+and the install script reads that same list. The release tarball also
+carries `nebula-vuln-agent` (its own `.deb`, installed with
+`install.sh --vuln-agent`); see `.goreleaser.yaml`.
+
+Other targets:
+
+- `make test`: the unit tests only, without the deployment tests.
+- `make fuzz`: runs a fixed list of fuzz targets (see the `fuzz` target
+  in the `Makefile`) for 20 seconds each, a smoke run, not a campaign. Most
+  `Fuzz*` functions are not in that list; run one with
+  `go test -run='^$' -fuzz='^FuzzName$' ./path/`
+  (`docs/implementation/security-tests.md` has the inventory).
+- `make test-integration`: runs `test/integration` against SSH test VMs
+  (spec 08, H05).
+- `make test-browser`: runs the browser tests in `test/browser/run.sh`;
+  needs Node.js with Playwright and Chromium.
+- `make fmt`: rewrites Go files with `gofmt`.
+- `make generate`: runs `buf generate` after you change `proto/`.
+- `make clean`: removes `bin/`.
+- `make release-stage`: maintainers only; builds unsigned release
+  staging, see `docs/admin/release-signing.md`.
 
 ### Privileged tests
 
@@ -69,8 +105,10 @@ of `make test`; CI runs them with sudo.
 
 ## Running the executor locally
 
-This is the Milestone 0 prototype setup from `deploy/README.md`, for a
-test machine only:
+This is a manual setup for a developer test machine, not for an operator
+installation (use `deploy/install.sh` as described in
+[`docs/admin/guide.md`](../admin/guide.md)). (Previously: "the Milestone 0
+prototype setup from `deploy/README.md`".)
 
 ```
 sudo groupadd --system nebula-rpc
@@ -116,8 +154,10 @@ nebula unlock        # passphrase-protected; the executor starts locked
 nebula vault init    # optional: secret vault for API tokens (same passphrase recommended)
 ```
 
-`nebula-server` has no systemd unit yet; run it directly for
-development (`bin/nebula-server`) if you need it.
+`deploy/systemd/nebula-server.service` is the reference unit for the web
+server; `deploy/install.sh` installs the shipped units. This manual setup
+does not install it, so for development run `bin/nebula-server` directly
+(previously: "`nebula-server` has no systemd unit yet").
 
 ## Operations and patching
 
