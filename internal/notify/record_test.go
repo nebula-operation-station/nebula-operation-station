@@ -121,7 +121,10 @@ func TestSendFailureIsLoggedWithoutToken(t *testing.T) {
 	tg := &telegram{base: srv.URL, token: botToken, chatID: "42", client: srv.Client()}
 	n := NewWithSenders(quiet(), nil, tg)
 	n.SetRecorder(rec)
-	if got := n.Notify(context.Background(), mismatch); got != 0 {
+	// A kind with a log code: a host key mismatch has none (see
+	// TestKindsWithoutLogCodeAreSentNotRecorded).
+	ev := Event{Kind: kindVulnKEVNew, Host: "web01", State: "critical", Reason: "CVE-2026-0001", Time: testNow}
+	if got := n.Notify(context.Background(), ev); got != 0 {
 		t.Fatalf("Notify = %d, want 0", got)
 	}
 	recs := rec.got()
@@ -162,8 +165,9 @@ func TestRecorderErrorDoesNotChangeDelivery(t *testing.T) {
 }
 
 // TestHostKeyMismatchIsSentWithRecorder: a host key mismatch is still sent
-// once when a recorder is set. The kind is not in the log's closed set, so
-// the record is refused and only logged; the send is unaffected.
+// once when a recorder is set. Its kind has no code in the log's closed sets,
+// so nothing is appended (see TestKindsWithoutLogCodeAreSentNotRecorded); the
+// send is unaffected.
 func TestHostKeyMismatchIsSentWithRecorder(t *testing.T) {
 	rec := &fakeRecorder{}
 	sender := &stubSender{name: "ntfy"}
@@ -174,6 +178,9 @@ func TestHostKeyMismatchIsSentWithRecorder(t *testing.T) {
 	}
 	if sender.count() != 1 {
 		t.Fatalf("sender called %d times, want 1", sender.count())
+	}
+	if n := len(rec.got()); n != 0 {
+		t.Fatalf("recorded %d entries for an unloggable kind, want 0", n)
 	}
 }
 

@@ -57,8 +57,25 @@ type Event struct {
 	// link is a NOS UI link for integrity events. Only IntegrityGate sets
 	// it, after validating it; it is empty for every other kind.
 	link string
-	Time time.Time
+	// logLink is the NOS path of the same link (for example
+	// "/integrity/findings/7"), which the notification log stores. Only
+	// IntegrityGate sets it, from the validated link.
+	logLink string
+	Time    time.Time
 }
+
+// Vulnerability and digest kinds. internal/vulnnotify sends them and imports
+// this package, so the strings are repeated here; the values must match
+// vulnnotify's constants.
+const (
+	kindVulnKEVNew        = "vuln.kev_new"
+	kindVulnCriticalNew   = "vuln.critical_new"
+	kindVulnHermesStale   = "vuln.hermes_stale"
+	kindVulnFeedStale     = "vuln.feed_stale"
+	kindVulnFeedRegressed = "vuln.feed_regressed"
+	kindVulnFeedMarkReset = "vuln.feed_mark_reset"
+	kindVulnDigest        = "vuln.digest"
+)
 
 const (
 	maxField     = 300
@@ -90,7 +107,8 @@ func clean(s string, limit int) string {
 
 func (e Event) cleaned() Event {
 	return Event{Kind: clean(e.Kind, 64), Host: clean(e.Host, 64), State: clean(e.State, 64), Reason: clean(e.Reason, maxField),
-		ExecutionID: clean(e.ExecutionID, 128), link: clean(e.link, maxIntegrityLink), Time: e.Time.UTC().Truncate(time.Second)}
+		ExecutionID: clean(e.ExecutionID, 128), link: clean(e.link, maxIntegrityLink), logLink: e.logLink,
+		Time: e.Time.UTC().Truncate(time.Second)}
 }
 
 // Title is a short summary line.
@@ -190,45 +208,6 @@ func logLabel(s string, limit int) string {
 		return s
 	}
 	return ""
-}
-
-// logKind maps an event kind to the log's kind code. The digest has a
-// different name in the log.
-func logKind(kind string) notifylog.KindCode {
-	if kind == KindIntegrityDigest {
-		return notifylog.KindDigest
-	}
-	return notifylog.KindCode(kind)
-}
-
-// logState maps an event to the log's state code. Integrity events carry a
-// severity in Event.State; the log stores the kind's state instead.
-func logState(e Event) notifylog.StateCode {
-	if e.Kind == KindIntegrityDigest {
-		return notifylog.StateSummary
-	}
-	switch IntegrityKind(e.Kind) {
-	case IntegrityNOSMismatch:
-		return notifylog.StateMismatch
-	case IntegrityHostChange:
-		return notifylog.StateChanged
-	case IntegrityScanIncomplete:
-		return notifylog.StateIncomplete
-	case IntegrityBaselineTamper:
-		return notifylog.StateTamper
-	}
-	return notifylog.StateCode(e.State)
-}
-
-// newRecord builds the log record of e without an outcome.
-func newRecord(e Event) notifylog.Record {
-	return notifylog.Record{
-		Kind:        logKind(e.Kind),
-		Host:        logLabel(e.Host, notifylog.MaxHost),
-		State:       logState(e),
-		ExecutionID: logLabel(e.ExecutionID, notifylog.MaxExecutionID),
-		Link:        e.link,
-	}
 }
 
 // statusError is a provider answer with a non-2xx status. Its text is the same
@@ -356,15 +335,18 @@ func (n *Notifier) send(ctx context.Context, e Event, skip func(provider string)
 	}
 	// Nothing was addressed (all skipped, or no provider): nothing to log.
 	if addressed > 0 {
-		r := newRecord(e)
-		r.Providers = addressed
-		if len(ok) > 0 {
-			r.Outcome = notifylog.OutcomeSent
+		if r, known := newRecord(e); known {
+			r.Providers = addressed
+			if len(ok) > 0 {
+				r.Outcome = notifylog.OutcomeSent
+			} else {
+				r.Outcome = notifylog.OutcomeFailed
+				r.Reason = reasonOf(lastErr)
+			}
+			n.record(ctx, r)
 		} else {
-			r.Outcome = notifylog.OutcomeFailed
-			r.Reason = reasonOf(lastErr)
+			n.log.Debug("event kind has no notification log code", "kind", e.Kind)
 		}
-		n.record(ctx, r)
 	}
 	return ok
 }
