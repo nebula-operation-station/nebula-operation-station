@@ -35,6 +35,23 @@ func oracleTrusted(a netip.Addr) bool {
 	return a == fuzzTrustedProxy || fuzzTrustedNet.Contains(a)
 }
 
+// oracleParse is an independent statement of the address syntax: blanks
+// (space and tab) around the value are ignored, the value is either a bare
+// address or an address with a port, an IPv6 zone is dropped and an
+// IPv4-mapped IPv6 address is shown in IPv4 form. It does not call Normalize,
+// so a too lenient or too strict Normalize shows up as a disagreement.
+func oracleParse(s string) (netip.Addr, bool) {
+	s = strings.Trim(s, " \t")
+	if a, err := netip.ParseAddr(s); err == nil {
+		return a.WithZone("").Unmap(), true
+	}
+	ap, err := netip.ParseAddrPort(s)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return ap.Addr().WithZone("").Unmap(), true
+}
+
 // fuzzLines maps the two fuzzed header values to header lines. Both empty
 // means no X-Forwarded-For line at all; an empty second value means a single
 // line; otherwise two lines are sent (an empty first one is an empty line).
@@ -64,8 +81,21 @@ func checkRefusal(t *testing.T, err error) {
 	t.Fatalf("err = %v, want nil, ErrPeerInvalid or exactly one ErrForwarded* sentinel", err)
 }
 
-// FuzzNormalize checks that Normalize never panics and that an accepted
-// address is valid, unmapped and has no zone.
+// checkNoFallback requires a refused request (a forwarded-header sentinel)
+// to carry no client address and not be marked as forwarded. The peer may
+// still be reported for logging, but a refusal never falls back to the peer
+// address and never uses the header.
+func checkNoFallback(t *testing.T, res Result, err error) {
+	t.Helper()
+	if res.Client.IsValid() || res.Forwarded {
+		t.Fatalf("refused with %v: Result %+v, want no client and Forwarded=false", err, res)
+	}
+}
+
+// FuzzNormalize checks that Normalize never panics, agrees with the
+// independent oracle on which inputs are addresses (so non-addresses such as
+// "192.0.2.1 x" are rejected) and that an accepted address is valid, unmapped
+// and has no zone.
 func FuzzNormalize(f *testing.F) {
 	for _, s := range []string{
 		"", " ", "192.0.2.1", " 192.0.2.1 ", "192.0.2.1:80", "192.0.2.1:99999",
@@ -77,6 +107,10 @@ func FuzzNormalize(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, s string) {
 		a, err := Normalize(s)
+		want, ok := oracleParse(s)
+		if (err == nil) != ok {
+			t.Fatalf("Normalize(%q) err = %v, but the oracle accepts it: %v", s, err, ok)
+		}
 		if err != nil {
 			return
 		}
@@ -88,6 +122,9 @@ func FuzzNormalize(f *testing.F) {
 		}
 		if a.Zone() != "" {
 			t.Fatalf("Normalize(%q) = %v, zone must be stripped", s, a)
+		}
+		if a != want {
+			t.Fatalf("Normalize(%q) = %v, oracle says %v", s, a, want)
 		}
 	})
 }
@@ -108,6 +145,8 @@ func FuzzResolve(f *testing.F) {
 		{"203.0.113.1:1", "192.0.2.10, ", ""},                         // empty entry
 		{"203.0.113.1:1", "", "192.0.2.10"},                           // empty first line
 		{"203.0.113.1:1", "198.51.100.9, 203.0.113.1", ""},            // only trusted
+		{"203.0.113.1:1", "198.51.100.9, 198.51.100.8", ""},           // only trusted in network
+		{"203.0.113.1:1", "203.0.113.1", ""},                          // single trusted entry
 		{"203.0.113.1:1", long[:600], long[600:]},                     // lines joined too long
 		{"203.0.113.1:1", strings.Join(padding(9), ", "), strings.Join(append(padding(7), "192.0.2.10"), ", ")}, // lines joined too many
 		{"203.0.113.1:1", "192.0.2.10", "192.0.2.11"},                                                           // client over two lines
@@ -126,15 +165,25 @@ func FuzzResolve(f *testing.F) {
 		res, err := r.Resolve(request(peer, lines...))
 		checkRefusal(t, err)
 
-		pa, perr := Normalize(peer)
-		if perr != nil {
-			if err != ErrPeerInvalid {
-				t.Fatalf("peer %q: err = %v, want ErrPeerInvalid", peer, err)
+		pa, paOK := oracleParse(peer)
+		if !paOK {
+			// Property: an invalid peer is refused with ErrPeerInvalid and
+			// nothing else; no header value leaks into the Result.
+			if err != ErrPeerInvalid || res != (Result{}) {
+				t.Fatalf("peer %q: got %+v, %v; want zero Result and ErrPeerInvalid", peer, res, err)
 			}
 			return
 		}
+		if err == ErrPeerInvalid {
+			t.Fatalf("valid peer %q refused as ErrPeerInvalid", peer)
+		}
 		if res.Peer != pa {
 			t.Fatalf("peer %q: Result.Peer = %v, want %v", peer, res.Peer, pa)
+		}
+		if err != nil {
+			// Property: a refused header never falls back to the peer or
+			// to the header.
+			checkNoFallback(t, res, err)
 		}
 		if !oracleTrusted(pa) {
 			// Property: an untrusted peer is the client; headers are ignored.
@@ -173,8 +222,8 @@ func FuzzResolve(f *testing.F) {
 		addrs := make([]netip.Addr, 0, len(parts))
 		malformed := false
 		for _, p := range parts {
-			a, perr := Normalize(p)
-			if perr != nil {
+			a, ok := oracleParse(p)
+			if !ok {
 				malformed = true
 				break
 			}
@@ -194,7 +243,8 @@ func FuzzResolve(f *testing.F) {
 			}
 		case err == nil:
 			// Property: the client is the rightmost untrusted entry, and it
-			// is never a trusted proxy.
+			// is never a trusted proxy. If every entry is trusted there is
+			// no such entry and the request must be refused as only-trusted.
 			if !res.Forwarded {
 				t.Fatalf("resolved %q without Forwarded set", joined)
 			}
@@ -204,6 +254,9 @@ func FuzzResolve(f *testing.F) {
 					want = addrs[i]
 					break
 				}
+			}
+			if !want.IsValid() {
+				t.Fatalf("header %q: resolved to %v although every entry is a trusted proxy; want ErrForwardedOnlyTrusted", joined, res.Client)
 			}
 			if res.Client != want || oracleTrusted(res.Client) {
 				t.Fatalf("header %q: client = %v, want rightmost untrusted %v", joined, res.Client, want)
