@@ -63,6 +63,13 @@ const (
 	KindDigest = "vuln.digest"
 )
 
+// Episode markers of the ops agent trigger (ADR 0016 D3). They are not
+// messages: they only key the once-per-episode state of the trigger.
+const (
+	kindTriggerHigh     = "trigger.high"
+	kindTriggerCritical = "trigger.critical"
+)
+
 // Limits.
 const (
 	// MaxPerHour is the D9 message limit; more become one hourly digest.
@@ -167,7 +174,18 @@ type Notifier struct {
 	// heldLog are the messages held since the last flushHeld, passed to the
 	// sink's HoldRecorder in one call once n.mu is released.
 	heldLog []notify.Event
+	// trigger is called (outside n.mu) when a finding newly enters tier high
+	// or critical (ADR 0016 D3). Nil does nothing. See SetTrigger.
+	trigger func()
 }
+
+// SetTrigger sets the callback that Findings calls when a finding newly
+// enters tier high or critical in its episode (once per finding, episode and
+// tier; an escalation to critical inside a high episode calls it again). The
+// callback carries no data and must not block; a failure in it is the
+// callback's to log and never changes what Findings sends. Call SetTrigger
+// before the notifier is used concurrently; nil removes it.
+func (n *Notifier) SetTrigger(f func()) { n.trigger = f }
 
 // New returns a Notifier.
 func New(cfg Config) (*Notifier, error) {
@@ -268,6 +286,7 @@ func (n *Notifier) Findings(ctx context.Context, fs []vulnstore.Finding) int {
 	now := n.now()
 	n.mu.Lock()
 	var out []outMsg
+	touch := false
 	for _, f := range fs {
 		if f.State != vulnstore.StateOpen {
 			continue
@@ -278,9 +297,42 @@ func (n *Notifier) Findings(ctx context.Context, fs []vulnstore.Finding) int {
 		if f.EpisodePeakTier == vulnstore.TierCritical {
 			out = append(out, n.findingAlert(KindCriticalNew, f, now)...)
 		}
+		if n.triggerAlert(f) {
+			touch = true
+		}
 	}
 	n.mu.Unlock()
-	return n.send(ctx, out)
+	sent := n.send(ctx, out)
+	if touch && n.trigger != nil {
+		n.trigger()
+	}
+	return sent
+}
+
+// triggerAlert reports whether f newly enters tier high or critical for the
+// trigger of ADR 0016 D3: once per finding, episode and tier, so a finding
+// that stays in its tier does not call it again. The mark is set when the
+// trigger is due, not on delivery, because the trigger carries no message.
+// Caller holds n.mu.
+func (n *Notifier) triggerAlert(f vulnstore.Finding) bool {
+	if n.trigger == nil {
+		return false
+	}
+	var kind string
+	switch f.EpisodePeakTier {
+	case vulnstore.TierHigh:
+		kind = kindTriggerHigh
+	case vulnstore.TierCritical:
+		kind = kindTriggerCritical
+	default:
+		return false
+	}
+	fe := findingEvent{key: f.Key, kind: kind}
+	if ep, ok := n.notified[fe]; ok && f.Episode <= ep {
+		return false
+	}
+	n.markNotified(fe, f.Episode)
+	return true
 }
 
 // findingAlert queues (kind, f) unless its episode was delivered or is
