@@ -89,6 +89,22 @@ func oldLayout(t *testing.T) Layout {
 	return l
 }
 
+// liveConfig puts live configuration into /etc/nebula (ConfigDir). A refused
+// restore must leave it byte for byte, so the cleanup may only remove what the
+// restore itself created.
+func liveConfig(t *testing.T, l Layout) {
+	t.Helper()
+	if err := os.MkdirAll(l.ConfigDir(), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(l.ConfigDir(), "server.json"), []byte(`{"live": true}`), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(l.ConfigDir(), "executor.yaml"), []byte("live: executor\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // without drops one file from the backup.
 func without(path string) func(*Manifest, *[]File) {
 	return func(_ *Manifest, files *[]File) {
@@ -163,7 +179,8 @@ func TestRestoreRefusalsLeaveOldDataUntouched(t *testing.T) {
 			mutate: func(_ *Manifest, files *[]File) {
 				(*files)[0] = File{Path: ServerDB, Mode: 0o600, Data: []byte("SQLite format 3\x00 broken")}
 			},
-			wantErr: "",
+			// The SQLite check refuses it, not the schema comparison or a later step.
+			wantErr: "integrity check of",
 		},
 		{
 			name: "var/lib/nebula is a file, so the staging directory cannot be made",
@@ -237,10 +254,12 @@ func TestRestoreRefusalsLeaveOldDataUntouched(t *testing.T) {
 			started: true,
 		},
 		{
-			name:    "Stop fails: nothing is moved",
+			// Stop may have stopped some units before it failed; they are started again.
+			name:    "Stop fails: nothing is moved, the services are started again",
 			stopErr: errors.New("unit busy"),
 			wantErr: "stop the services",
 			stopped: true,
+			started: true,
 		},
 		{
 			name:    "owner of the new server directory cannot be set",
@@ -288,6 +307,30 @@ func TestRestoreRefusalsLeaveOldDataUntouched(t *testing.T) {
 			name:    "configuration file cannot be written",
 			failOn:  "server.json",
 			wantErr: "chown failed",
+			stopped: true,
+			started: true,
+		},
+		{
+			name:    "configuration file cannot be written, with live configuration in /etc/nebula",
+			arrange: liveConfig,
+			failOn:  "server.json",
+			wantErr: "chown failed",
+			stopped: true,
+			started: true,
+		},
+		{
+			name: "configuration file name already taken in the new directory, with live configuration",
+			arrange: func(t *testing.T, l Layout) {
+				liveConfig(t, l)
+				dir := filepath.Join(l.ConfigDir(), "from-backup-"+ts)
+				if err := os.Mkdir(dir, 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "server.json"), []byte("made earlier"), 0o640); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr: "file exists",
 			stopped: true,
 			started: true,
 		},
@@ -341,19 +384,28 @@ func TestRestoreRefusalsLeaveOldDataUntouched(t *testing.T) {
 				}
 				return
 			}
-			if len(calls) == 0 || !strings.HasPrefix(calls[0], "stop ") {
-				t.Fatalf("calls %v, want Stop first", calls)
+			// Exactly one Stop, first. Exactly one Start, last, if the services
+			// are started again; none otherwise.
+			stops, starts := 0, 0
+			for _, call := range calls {
+				switch {
+				case strings.HasPrefix(call, "stop "):
+					stops++
+				case strings.HasPrefix(call, "start "):
+					starts++
+				}
+			}
+			if len(calls) == 0 || !strings.HasPrefix(calls[0], "stop ") || stops != 1 {
+				t.Fatalf("calls %v, want exactly one Stop, first", calls)
 			}
 			if c.started {
-				if calls[len(calls)-1] != startCall {
-					t.Fatalf("calls %v, want the services started again last", calls)
+				if starts != 1 || calls[len(calls)-1] != startCall {
+					t.Fatalf("calls %v, want exactly one Start, and it last", calls)
 				}
 				return
 			}
-			for _, call := range calls {
-				if strings.HasPrefix(call, "start ") {
-					t.Fatalf("calls %v, want no Start after a failed Stop", calls)
-				}
+			if starts != 0 {
+				t.Fatalf("calls %v, want no Start: the services stay stopped", calls)
 			}
 		})
 	}
@@ -395,5 +447,36 @@ func TestRestoreReportsWhenStartFails(t *testing.T) {
 	if len(sys.calls) == 0 || !strings.HasPrefix(sys.calls[0], "stop ") ||
 		sys.calls[len(sys.calls)-1] != "start "+strings.Join(StartUnits, ",") {
 		t.Fatalf("calls %v, want Stop first and the Start attempt last", sys.calls)
+	}
+}
+
+// mkdirTracked reports only the topmost directory it created, and nothing when
+// the directory already exists: a cleanup of the reported path can then never
+// remove a directory that was there before the restore.
+func TestMkdirTrackedReportsOnlyWhatItCreated(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "a"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	top, err := mkdirTracked(filepath.Join(root, "a", "b", "c"), 0o750)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if top != filepath.Join(root, "a", "b") {
+		t.Fatalf("reported %q, want the topmost created directory %q", top, filepath.Join(root, "a", "b"))
+	}
+	if _, err := os.Stat(filepath.Join(root, "a", "b", "c")); err != nil {
+		t.Fatal(err)
+	}
+	top, err = mkdirTracked(filepath.Join(root, "a", "b", "c"), 0o750)
+	if err != nil || top != "" {
+		t.Fatalf("second call reported %q, %v; want nothing created", top, err)
+	}
+	// A regular file in the way is an error, and nothing is claimed.
+	if err := os.WriteFile(filepath.Join(root, "f"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if top, err := mkdirTracked(filepath.Join(root, "f", "g"), 0o750); err == nil || top != "" {
+		t.Fatalf("under a file: reported %q, %v; want an error and nothing created", top, err)
 	}
 }

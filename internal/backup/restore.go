@@ -56,19 +56,40 @@ func CheckSchemas(m Manifest, latest map[string]int) error {
 	return nil
 }
 
-// firstMissing returns the highest ancestor of p, or p itself, that does not
-// exist yet, or "" if p exists. MkdirAll creates exactly these directories.
-func firstMissing(p string) string {
-	top := ""
-	for q := p; ; q = filepath.Dir(q) {
-		if _, err := os.Lstat(q); !errors.Is(err, os.ErrNotExist) {
-			return top
+// mkdirTracked creates dir and its missing ancestors with mode, top-down, and
+// returns the topmost directory this call created ("" if dir already existed).
+// A directory that another process creates between the check and the Mkdir
+// makes Mkdir fail with ErrExist; it is not claimed, so a cleanup that removes
+// the returned path never deletes something this restore did not create.
+func mkdirTracked(dir string, mode os.FileMode) (string, error) {
+	var missing []string // bottom-up
+	for q := dir; ; q = filepath.Dir(q) {
+		_, err := os.Lstat(q)
+		if err == nil {
+			break
 		}
-		top = q
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		missing = append(missing, q)
 		if filepath.Dir(q) == q {
-			return top
+			break
 		}
 	}
+	top := ""
+	for i := len(missing) - 1; i >= 0; i-- {
+		err := os.Mkdir(missing[i], mode)
+		if errors.Is(err, os.ErrExist) {
+			continue // made by someone else meanwhile: not ours to remove
+		}
+		if err != nil {
+			return top, err
+		}
+		if top == "" {
+			top = missing[i]
+		}
+	}
+	return top, nil
 }
 
 // Restore puts a checked backup in place: it checks the schemas, stages
@@ -118,7 +139,13 @@ func Restore(m Manifest, files []File, l Layout, sys System, latest map[string]i
 		}
 	}
 	if err := sys.Stop(StopUnits...); err != nil {
-		return rep, fmt.Errorf("backup: stop the services: %w", err)
+		// Stop may have stopped some units before it failed, and nothing has
+		// moved yet: start the units again so the lab is back as it was.
+		stopErr := fmt.Errorf("backup: stop the services: %w", err)
+		if startErr := sys.Start(StartUnits...); startErr != nil {
+			return rep, fmt.Errorf("%w; start the services again: %v", stopErr, startErr)
+		}
+		return rep, stopErr
 	}
 	ts := now.UTC().Format("20060102-150405")
 	type move struct{ from, to string }
@@ -149,8 +176,10 @@ func Restore(m Manifest, files []File, l Layout, sys System, latest map[string]i
 		moved = append(moved, move{d, aside})
 		rep.MovedAside = append(rep.MovedAside, aside)
 	}
-	// cfgRoot is the first directory this restore creates for configuration
-	// files; a failure removes it, with any partly written file in it.
+	// cfgRoot is the topmost directory this restore created for configuration
+	// files; a failure removes it, with any partly written file in it. Live
+	// configuration in ConfigDir is never under cfgRoot unless this restore
+	// created it, because mkdirTracked reports only what it created.
 	var cfgRoot string
 	fail := func(err error) (Report, error) {
 		undo()
@@ -216,10 +245,11 @@ func Restore(m Manifest, files []File, l Layout, sys System, latest map[string]i
 			}
 		case strings.HasPrefix(f.Path, "server/config/") || strings.HasPrefix(f.Path, "server/systemd/"):
 			dir := filepath.Join(l.ConfigDir(), "from-backup-"+ts)
+			created, err := mkdirTracked(dir, 0o750)
 			if cfgRoot == "" {
-				cfgRoot = firstMissing(dir)
+				cfgRoot = created
 			}
-			if err := os.MkdirAll(dir, 0o750); err != nil {
+			if err != nil {
 				return fail(err)
 			}
 			name := strings.ReplaceAll(strings.TrimPrefix(strings.TrimPrefix(f.Path, "server/config/"), "server/systemd/"), "/", "_")
