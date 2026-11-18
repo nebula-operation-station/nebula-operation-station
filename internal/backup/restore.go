@@ -148,7 +148,9 @@ func Restore(m Manifest, files []File, l Layout, sys System, latest map[string]i
 	if err := sys.Stop(StopUnits...); err != nil {
 		// Stop may have stopped some units before it failed, and nothing has
 		// moved yet. All StartUnits are started again, including units that
-		// were inactive or disabled before: System does not report unit state.
+		// were inactive or disabled before: System does not report unit state
+		// (adding that would change its implementation in cmd/nebula). The
+		// handbook (backup-restore.md) documents this for the operator.
 		stopErr := fmt.Errorf("backup: stop the services: %w", err)
 		if startErr := sys.Start(StartUnits...); startErr != nil {
 			return rep, fmt.Errorf("%w; start the services again: %w", stopErr, startErr)

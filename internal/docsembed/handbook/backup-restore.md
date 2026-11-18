@@ -95,6 +95,49 @@ newer Nebula; install that version first. A restore on a new machine starts
 a new event key; the chain records the change and `nebula events verify`
 continues across it.
 
+### If the restore fails after the services were stopped
+
+A restore that fails part-way (a file cannot be written, an owner cannot be
+set, a data directory is a symbolic link, …) undoes itself: it removes the
+directories and configuration files it has written, renames each
+`*.pre-restore-<time>` directory back to its old name, and starts the
+services again. The error names the step that failed; nothing else is to do.
+
+When the services are started again (after a failed restore, or after
+`systemctl stop` itself failed), **all four units** are started:
+`nebula-executor.service`, `nebula-server.service`, `nebula-discovery.path`
+and `nebula-discovery.timer`, also the ones that were stopped or disabled
+before. If you keep discovery off, stop it again:
+
+```
+sudo systemctl stop nebula-discovery.path nebula-discovery.timer
+```
+
+If the undo itself fails (the old data cannot be renamed back, or a new
+directory cannot be removed), the error says `the old data is still at
+/var/lib/nebula/<dir>.pre-restore-<time>` and `the services were left
+stopped`. They stay stopped on purpose: they would run on missing or
+half-restored data. Put the data back by hand, for each directory the error
+names (`<time>` is from the error, UTC, `YYYYMMDD-hhmmss`):
+
+```
+ls -la /var/lib/nebula/
+# only if /var/lib/nebula/server exists: it holds the half-restored data
+sudo mv /var/lib/nebula/server /var/lib/nebula/server.failed-restore-<time>
+sudo mv /var/lib/nebula/server.pre-restore-<time> /var/lib/nebula/server
+# the same for executor, if the error names it
+sudo mv /var/lib/nebula/executor /var/lib/nebula/executor.failed-restore-<time>
+sudo mv /var/lib/nebula/executor.pre-restore-<time> /var/lib/nebula/executor
+sudo systemctl start nebula-executor.service nebula-server.service nebula-discovery.path nebula-discovery.timer
+nebula unlock
+nebula status
+```
+
+`mv` keeps owners and modes. Delete the `*.failed-restore-*` directories once
+Nebula runs again. A configuration file the error says could not be removed
+lies under `/etc/nebula/from-backup-<time>/`; it was never applied, remove it
+by hand.
+
 ## Back up and restore a container install
 
 **Goal:** encrypted copies of the Docker volumes.
