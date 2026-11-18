@@ -13,6 +13,9 @@ import (
 
 var leaseAt = time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
 
+// bidiOverride is U+202E, a bidi control character that must not survive.
+var bidiOverride = string(rune(0x202e))
+
 func TestLeaseExpiringEventIsTemplatedAndLinked(t *testing.T) {
 	e, err := NewLeaseExpiring("https://nebula.example.org/", LeaseExpiry{
 		GrantID:   "lease-7",
@@ -83,14 +86,15 @@ func withID(x LeaseExpiry, id string) LeaseExpiry { x.GrantID = id; return x }
 func withExpiry(x LeaseExpiry, at time.Time) LeaseExpiry { x.ExpiresAt = at; return x }
 
 func TestLeaseNameIsPlainTextOneLine(t *testing.T) {
+	name := "evil\nState: ok" + bidiOverride + "X [link](https://x.example)"
 	e, err := NewLeaseExpiring("https://nebula.example.org", LeaseExpiry{
-		GrantID: "lease-7", GrantName: "evil\nState: ok‮X [link](https://x.example)",
+		GrantID: "lease-7", GrantName: name,
 		Threshold: 24 * time.Hour, ExpiresAt: leaseAt.Add(time.Hour), At: leaseAt,
 	})
 	if err != nil {
 		t.Fatalf("NewLeaseExpiring: %v", err)
 	}
-	if strings.Contains(e.Text(), "‮") {
+	if strings.Contains(e.Text(), bidiOverride) {
 		t.Errorf("bidi control survived in the name: %q", e.Text())
 	}
 	// Title, State, Reason, Details and time: one line each, the name never
