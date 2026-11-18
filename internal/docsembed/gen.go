@@ -3,11 +3,12 @@
 //go:build ignore
 
 // gen copies the operator handbook (docs/handbook/*.md) into
-// internal/docsembed/handbook so that //go:embed can reach it: embed
-// patterns cannot name files outside the package directory. Run it with
-// "go generate ./internal/docsembed" from the repository root after
-// editing the handbook; TestEmbeddedHandbookMatchesDocs fails until the
-// copy is current.
+// internal/docsembed/handbook and the admin guide (docs/admin/guide.md)
+// into internal/docsembed/admin/guide.md so that //go:embed can reach
+// them: embed patterns cannot name files outside the package directory.
+// Run it with "go generate ./internal/docsembed" from the repository
+// root after editing either source; TestEmbeddedHandbookMatchesDocs and
+// TestEmbeddedAdminGuideMatchesDocs fail until the copies are current.
 package main
 
 import (
@@ -16,11 +17,37 @@ import (
 	"path/filepath"
 )
 
+const (
+	handbookSrc = "../../docs/handbook"
+	handbookDst = "handbook"
+	guideSrc    = "../../docs/admin/guide.md"
+	guideDst    = "admin/guide.md"
+)
+
 func main() {
-	if err := run("../../docs/handbook", "handbook"); err != nil {
+	if err := run(handbookSrc, handbookDst); err != nil {
 		fmt.Fprintln(os.Stderr, "docsembed gen:", err)
 		os.Exit(1)
 	}
+	if err := copyGuide(guideSrc, guideDst); err != nil {
+		fmt.Fprintln(os.Stderr, "docsembed gen:", err)
+		os.Exit(1)
+	}
+}
+
+// copyGuide copies the admin guide to dst, creating its directory.
+func copyGuide(src, dst string) error {
+	b, err := os.ReadFile(src)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", src, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(dst), err)
+	}
+	if err := os.WriteFile(dst, b, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", dst, err)
+	}
+	return nil
 }
 
 func run(src, dst string) error {
