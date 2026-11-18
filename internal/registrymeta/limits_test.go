@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -49,11 +50,16 @@ func paddedTagsBody(t *testing.T, repo string, size int) []byte {
 	return []byte(prefix + strings.Repeat("x", pad) + suffix)
 }
 
-// TestRedirectChainLimit pins the redirect budget at its limit and one
-// beyond. checkRedirect refuses a redirect once the chain already holds
-// MaxRedirects requests (the original request plus its redirects), so the
-// chain may contain MaxRedirects-1 redirects: two today.
-func TestRedirectChainLimit(t *testing.T) {
+// TestRedirectChainDeviationFromADR0006 pins the current, documented redirect
+// behaviour at its limit and one beyond. ADR 0006 says "no redirects"; the
+// code deliberately follows up to MaxRedirects-1 (two) same-resource redirects
+// for anonymous requests while the maintainer decision is open (see the
+// MaxRedirects comment in limits.go). This test documents that deviation: if
+// the decision changes the behaviour, this test must be updated on purpose.
+// checkRedirect refuses a redirect once the chain already holds MaxRedirects
+// requests (the original request plus its redirects), so the chain may contain
+// MaxRedirects-1 redirects: two today. The third redirect is refused.
+func TestRedirectChainDeviationFromADR0006(t *testing.T) {
 	for _, redirects := range []int{MaxRedirects - 1, MaxRedirects, MaxRedirects + 1} {
 		t.Run(fmt.Sprintf("redirects=%d", redirects), func(t *testing.T) {
 			rec := &recorder{}
@@ -88,6 +94,41 @@ func TestRedirectChainLimit(t *testing.T) {
 				t.Fatalf("server saw %d requests, want exactly MaxRedirects (%d)", got, MaxRedirects)
 			}
 		})
+	}
+}
+
+// TestThirdRedirectIsRefused checks that the redirect that would be the third
+// hop of an anonymous tag list is refused: the target of that redirect must
+// never be requested, and the error wraps ErrRedirectNotAllowed.
+func TestThirdRedirectIsRefused(t *testing.T) {
+	rec := &recorder{}
+	var highestHop atomic.Int32
+	highestHop.Store(-1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.enter(r.Method, r.URL.Path)
+		defer rec.leave()
+		hop, _ := strconv.Atoi(r.URL.Query().Get("hop"))
+		for {
+			cur := highestHop.Load()
+			if int32(hop) <= cur || highestHop.CompareAndSwap(cur, int32(hop)) {
+				break
+			}
+		}
+		// Every hop redirects, so the chain only ends where checkRedirect stops it.
+		http.Redirect(w, r, fmt.Sprintf("/v2/repo/tags/list?hop=%d", hop+1), http.StatusFound)
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv, newFakeClock())
+
+	_, err := c.ListTags(context.Background(), Ref{Registry: srv.URL, Repository: "repo"})
+	if !errors.Is(err, ErrRedirectNotAllowed) {
+		t.Fatalf("third redirect: want ErrRedirectNotAllowed, got %v", err)
+	}
+	if got := rec.count(""); got != MaxRedirects {
+		t.Fatalf("server saw %d requests, want %d (original plus %d redirects)", got, MaxRedirects, MaxRedirects-1)
+	}
+	if got := highestHop.Load(); got != MaxRedirects-1 {
+		t.Fatalf("highest hop served = %d, want %d: the target of the refused redirect must not be requested", got, MaxRedirects-1)
 	}
 }
 
@@ -291,6 +332,46 @@ func TestRateLimitBackoffGrowthAndCap(t *testing.T) {
 	fc.Advance(MaxBackoff + time.Second) // let the old pause run out
 	if got := pauseAfterRateLimit(); got != MinRateLimitPause {
 		t.Fatalf("first 429 after a success: pause = %s, want %s", got, MinRateLimitPause)
+	}
+}
+
+// TestRetryAfterCappedAtMaxBackoff pins the cap on a registry-supplied
+// Retry-After. The header is hostile input: an unbounded value must not
+// overflow time.Duration and must not push the pause past MaxBackoff, while
+// the values at and just below the cap are honoured exactly.
+func TestRetryAfterCappedAtMaxBackoff(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	defer srv.Close()
+	fc := newFakeClock()
+	c := newTestClient(t, srv, fc)
+	maxSec := int64(MaxBackoff / time.Second)
+
+	for _, tc := range []struct {
+		name   string
+		header string
+		want   time.Duration
+	}{
+		{"zero seconds", "0", 0},
+		{"negative seconds", "-5", 0},
+		{"exactly MaxBackoff", strconv.FormatInt(maxSec, 10), MaxBackoff},
+		{"MaxBackoff plus one second", strconv.FormatInt(maxSec+1, 10), MaxBackoff},
+		{"MaxInt64 seconds", strconv.FormatInt(math.MaxInt64, 10), MaxBackoff},
+		{"HTTP-date a millennium away", fc.Now().AddDate(1000, 0, 0).UTC().Format(http.TimeFormat), MaxBackoff},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := c.retryAfter(tc.header); got != tc.want {
+				t.Fatalf("retryAfter(%q) = %s, want %s", tc.header, got, tc.want)
+			}
+		})
+	}
+
+	// The capped value must also bound the pause the limiter actually sets.
+	c.noteRateLimit(srv.URL, c.retryAfter(strconv.FormatInt(math.MaxInt64, 10)))
+	c.mu.Lock()
+	pause := c.regs[srv.URL].pauseUntil.Sub(fc.Now())
+	c.mu.Unlock()
+	if pause <= 0 || pause > MaxBackoff {
+		t.Fatalf("pause after a hostile Retry-After = %s, want a pause in (0, %s]", pause, MaxBackoff)
 	}
 }
 
