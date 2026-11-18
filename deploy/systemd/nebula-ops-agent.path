@@ -5,6 +5,10 @@
 # this directory; it lies below /var/lib/nebula, which the agent's unit
 # makes inaccessible to the agent (D13). Off by default (guide, "Ops agent"):
 #   sudo systemctl enable --now nebula-ops-agent.path
+# The trigger is inert for now: nebula-server runs with ProtectSystem=strict and may write
+# only its StateDirectory (/var/lib/nebula/server), so nothing touches the
+# trigger yet. Until a follow-up gives nebula-server a write path for
+# /var/lib/nebula/opsagent, only the timer starts runs.
 [Unit]
 Description=Nebula Operation Station ops agent: watch the server's trigger
 

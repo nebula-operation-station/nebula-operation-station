@@ -357,13 +357,26 @@ if [[ ${ops_agent} -eq 1 || ${remove_ops_agent} -eq 1 ]]; then
 
   # begin: ops agent removal
   if [[ ${remove_ops_agent} -eq 1 ]]; then
+    ops_bin=/usr/bin/nebula-ops-agent
+    # A package install (nebula-ops-agent .deb) is removed with apt, so
+    # dpkg's file list stays in sync; deleting its files here would not.
+    ops_owner=""
+    if command -v dpkg >/dev/null 2>&1; then
+      ops_owner="$(dpkg -S "${ops_bin}" 2>/dev/null || true)"
+    fi
+    if [[ -n "${ops_owner}" ]]; then
+      ops_owner="${ops_owner%%: *}"
+      ops_owner="${ops_owner%%:*}"
+      echo "install.sh: ${ops_bin} belongs to the Debian package ${ops_owner}; remove it with: sudo apt remove ${ops_owner}" >&2
+      exit 1
+    fi
     systemctl disable --now nebula-ops-agent.timer nebula-ops-agent.path nebula-ops-agent.service 2>/dev/null || true
     for unit in nebula-ops-agent.service nebula-ops-agent.timer nebula-ops-agent.path; do
       if [[ -f "${ops_unit_dir}/${unit}" && ! -L "${ops_unit_dir}/${unit}" ]]; then
         rm -f "${ops_unit_dir}/${unit}"
       fi
     done
-    rm -f /usr/bin/nebula-ops-agent
+    rm -f "${ops_bin}"
     systemctl daemon-reload
     echo "install.sh: nebula-ops-agent removed; its configuration, token, state, drop-ins and user stay"
     exit 0
@@ -502,6 +515,9 @@ Next steps (guide, section "Ops agent"):
        sudo systemctl start nebula-ops-agent.service
        sudo systemctl enable --now nebula-ops-agent.timer
        sudo systemctl enable --now nebula-ops-agent.path
+     The path unit is inert for now: nebula-server has no write path for
+     its trigger (/var/lib/nebula/opsagent/trigger) yet, so only the
+     timer starts runs until a later release adds one.
 EOF
   exit 0
   # end: ops agent install
