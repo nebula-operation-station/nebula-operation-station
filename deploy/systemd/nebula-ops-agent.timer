@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Runs nebula-ops-agent.service every 30 minutes (ADR 0016 D3). The random
+# delay keeps runs off the full and half hour. No Persistent=: a run missed
+# while the host was down is not caught up, the next slot is at most 30
+# minutes away and a run without due work ends at once. Off by default:
+# enable it once the agent has its NOS token and URL (guide, "Ops agent"):
+#   sudo systemctl enable --now nebula-ops-agent.timer
+[Unit]
+Description=Nebula Operation Station ops agent: run every 30 minutes
+
+[Timer]
+OnCalendar=*-*-* *:00/30:00
+RandomizedDelaySec=5min
+Unit=nebula-ops-agent.service
+
+[Install]
+WantedBy=timers.target
