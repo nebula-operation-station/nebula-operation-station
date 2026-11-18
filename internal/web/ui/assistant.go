@@ -167,9 +167,10 @@ func writeAssistantPanel(w http.ResponseWriter, r *http.Request, log *slog.Logge
 		renderAssistantTemplate(w, log, assistantFragmentTemplate, "assistant_panel", v)
 		return
 	}
+	// Active "assistant" makes the layout skip its inline and side sections:
+	// the full page is the panel, so it holds exactly one (ADR 0016 D11).
 	pd := page(r, "Assistant")
-	pd.Active = "help"
-	pd.AssistantPanel = true
+	pd.Active = "assistant"
 	renderAssistantTemplate(w, log, assistantPanelPageTemplate, "layout", assistantPanelPage{pageData: pd, Panel: v})
 }
 
