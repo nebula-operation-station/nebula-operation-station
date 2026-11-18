@@ -32,7 +32,18 @@ var (
 // order, with the host's own credential only. fingerprint, if not empty, is
 // the key the caller expects (a permit's target) and must equal the pin.
 // A host key mismatch blocks the host; it stays blocked until re-pinned.
+// A failed failover over several endpoints is audited (ssh_failover_failed).
 func (s *Service) Connect(ctx context.Context, hostID, fingerprint string, endpoints []sshtransport.Endpoint) (*sshtransport.Client, error) {
+	c, err := s.connect(ctx, hostID, fingerprint, endpoints)
+	if err != nil {
+		s.auditFailedFailover(hostID, endpoints, err)
+	}
+	return c, err
+}
+
+// connect is Connect without the failed-failover audit, for callers that
+// retry and audit it once themselves (the reconciler).
+func (s *Service) connect(ctx context.Context, hostID, fingerprint string, endpoints []sshtransport.Endpoint) (*sshtransport.Client, error) {
 	hk, ok, err := s.db.HostKey(hostID)
 	if err != nil {
 		return nil, err
@@ -54,8 +65,16 @@ func (s *Service) Connect(ctx context.Context, hostID, fingerprint string, endpo
 	if err != nil {
 		return nil, err
 	}
+	// Failover over the endpoints (ADR 0006, ep02) is sshtransport's: the
+	// next endpoint only after a TCP error or a handshake failure or
+	// timeout before the host key; a mismatch or an auth failure ends the
+	// dial. Every endpoint is checked against the same pin.
 	c, err := s.transport.Dial(ctx, sshtransport.Target{HostID: hostID, Endpoints: endpoints, User: hk.User, HostKey: pin}, signer)
 	if err == nil {
+		if len(c.Attempts) > 0 {
+			s.log.Warn("audit", "kind", "ssh_failover", "host", hostID, "endpoint", c.Endpoint.String(),
+				"skipped", skippedEndpoints(c.Attempts))
+		}
 		return c, nil
 	}
 	var te *sshtransport.Error
@@ -81,6 +100,59 @@ func (s *Service) Connect(ctx context.Context, hostID, fingerprint string, endpo
 		}
 	}
 	return nil, err
+}
+
+// failedFailover reports whether err ends a dial that had a failover to
+// attempt and found no endpoint: more than one endpoint, and every one
+// tried failed on the connection (or the caller's deadline ended the
+// dial). A host key mismatch or an auth failure is not one; they have
+// their own audits. A single endpoint (a one-endpoint host, enroll and
+// pairing) has nothing to fail over to.
+func failedFailover(endpoints []sshtransport.Endpoint, err error) (*sshtransport.Error, bool) {
+	var te *sshtransport.Error
+	if len(endpoints) < 2 || !errors.As(err, &te) {
+		return nil, false
+	}
+	return te, te.Class == sshtransport.ClassUnreachable || te.Class == sshtransport.ClassCanceled
+}
+
+// auditFailedFailover audits a failed failover as visibly as a successful
+// one: every endpoint tried with its stage, and those never reached. It
+// writes nothing for any other error. attrs are added to the record.
+func (s *Service) auditFailedFailover(hostID string, endpoints []sshtransport.Endpoint, err error, attrs ...any) {
+	te, ok := failedFailover(endpoints, err)
+	if !ok {
+		return
+	}
+	args := append([]any{"kind", "ssh_failover_failed", "host", hostID, "class", string(te.Class),
+		"skipped", skippedEndpoints(te.Attempts), "untried", untriedEndpoints(endpoints, te.Attempts)}, attrs...)
+	s.log.Warn("audit", args...)
+}
+
+// skippedEndpoints names the endpoints a dial left before the one it used,
+// with the stage each failed at ("10.0.0.1:22 tcp, 10.0.0.2:22 handshake").
+// Error texts stay out of the audit: they may carry host-supplied data.
+func skippedEndpoints(attempts []sshtransport.Attempt) string {
+	parts := make([]string, len(attempts))
+	for i, a := range attempts {
+		parts[i] = a.Endpoint.String() + " " + a.Stage
+	}
+	return strings.Join(parts, ", ")
+}
+
+// untriedEndpoints names the endpoints a failed dial never reached (it
+// stopped early: a second handshake failure or the caller's deadline).
+// sshtransport tries endpoints in order, one attempt each.
+func untriedEndpoints(endpoints []sshtransport.Endpoint, attempts []sshtransport.Attempt) string {
+	if len(attempts) >= len(endpoints) {
+		return ""
+	}
+	rest := endpoints[len(attempts):]
+	parts := make([]string, len(rest))
+	for i, ep := range rest {
+		parts[i] = ep.String()
+	}
+	return strings.Join(parts, ", ")
 }
 
 func parseEndpoints(in []string) ([]sshtransport.Endpoint, error) {

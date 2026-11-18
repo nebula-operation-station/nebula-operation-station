@@ -83,6 +83,27 @@ func (db *DB) CreateRun(r Run) error {
 	return nil
 }
 
+// ErrRunNotDispatching is returned by SetRunDispatchEndpoint for a run that
+// is not dispatching or already has a dispatch endpoint.
+var ErrRunNotDispatching = errors.New("executordb: run is not dispatching or already has a dispatch endpoint")
+
+// SetRunDispatchEndpoint stores the endpoint a dispatch is attempted on,
+// before anything is sent, while the run is still dispatching (ep02). It is
+// set once; a dispatch that breaks mid-way keeps naming that endpoint.
+func (db *DB) SetRunDispatchEndpoint(executionID, hostID, endpoint string) error {
+	res, err := db.sql.Exec(`UPDATE runs SET endpoint = ? WHERE execution_id = ? AND host_id = ? AND state = 'dispatching' AND endpoint = ''`,
+		endpoint, executionID, hostID)
+	if err != nil {
+		return fmt.Errorf("executordb: set dispatch endpoint: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("executordb: set dispatch endpoint: %w", err)
+	} else if n != 1 {
+		return ErrRunNotDispatching
+	}
+	return nil
+}
+
 // MarkRunRunning records a successful dispatch.
 func (db *DB) MarkRunRunning(executionID, hostID, endpoint string) error {
 	_, err := db.sql.Exec(`UPDATE runs SET state = 'running', endpoint = ?, dispatched_at = ? WHERE execution_id = ? AND host_id = ? AND state = 'dispatching'`,

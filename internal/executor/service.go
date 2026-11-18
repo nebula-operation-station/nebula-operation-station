@@ -149,6 +149,10 @@ type Service struct {
 	// open run gets one try at startup.
 	reconcileBackoffMu sync.Mutex
 	reconcileBackoff   map[string]*reconcileBackoffState
+	// failoverAudited marks the open runs whose failed SSH failover was
+	// audited, so a reconcile retry does not audit it again (ep02). It is
+	// guarded by reconcileBackoffMu and cleared when the host is reached.
+	failoverAudited map[string]bool
 	// offers holds the one-step enrollment configuration and the render
 	// inputs of the offers (enroll_offer.go).
 	offers enrollOfferState
