@@ -28,9 +28,15 @@ const (
 
 	// MaxRedirects caps the requests in one redirect chain, counting the
 	// original request: checkRedirect refuses a redirect once the chain holds
-	// MaxRedirects requests. So at most MaxRedirects-1 redirects are followed
-	// (two today). ADR 0006 names no redirect count and says "no redirects";
-	// the stricter cap is kept.
+	// MaxRedirects requests. So at most MaxRedirects-1 redirects (two) are
+	// followed, and only for anonymous requests to the same metadata resource.
+	//
+	// Known deviation, pending a maintainer decision: ADR 0006 says "no
+	// redirects". This code follows up to two same-resource redirects for
+	// anonymous requests, which is looser than the ADR, not stricter. Credentialed
+	// requests follow none. The behaviour is unchanged here and the ADR is not
+	// edited; a maintainer must decide whether to disable redirects or amend the
+	// ADR.
 	MaxRedirects = 3
 )
 
