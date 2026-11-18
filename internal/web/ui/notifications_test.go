@@ -125,6 +125,9 @@ func (e *notifEnv) get(cookie *http.Cookie, path string) (*http.Response, string
 	return res, string(body)
 }
 
+// notifExecID is a lowercase UUIDv4, the only execution ID form the log accepts.
+const notifExecID = "3f1c2b4e-5d6a-4b7c-8d9e-0f1a2b3c4d5e"
+
 func notifRecord(host, outcome string) notifylog.Record {
 	return notifylog.Record{
 		Kind:      notifylog.KindLeaseRunFailed,
@@ -162,7 +165,7 @@ func TestNotificationsHostileTextIsEscaped(t *testing.T) {
 		t.Fatal("append with markup host label accepted, want refusal")
 	}
 	r := notifRecord("web-1", "failed")
-	r.ExecutionID = "ex-1"
+	r.ExecutionID = notifExecID
 	r.Link = `/"><svg/onload=alert(1)>`
 	if _, err := e.store.Append(context.Background(), r); err != nil {
 		t.Fatal(err)
@@ -176,6 +179,45 @@ func TestNotificationsHostileTextIsEscaped(t *testing.T) {
 	}
 	if strings.Contains(body, "<script>x") {
 		t.Errorf("markup host label reached the page")
+	}
+}
+
+// notifMarkupLog returns one entry whose every displayed field holds markup.
+// It stands in for a log that a broken write path or a future column could
+// fill with markup; the page must still escape every field.
+type notifMarkupLog struct{}
+
+func (notifMarkupLog) List(context.Context, int64, int) ([]notifylog.Entry, error) {
+	return []notifylog.Entry{{
+		Seq: 1,
+		At:  time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC),
+		Record: notifylog.Record{
+			Kind:        notifylog.KindCode("<kind-x>"),
+			Host:        "<host-x>",
+			State:       notifylog.StateCode("<state-x>"),
+			Reason:      notifylog.ReasonCode("<reason-x>"),
+			Outcome:     notifylog.Outcome("sent"),
+			ExecutionID: "<exec-x>",
+			Link:        `/"><svg/onload=alert(1)>`,
+		},
+	}}, nil
+}
+
+func TestNotificationsEveryFieldIsEscaped(t *testing.T) {
+	e := newNotifEnv(t, notifMarkupLog{}, nil)
+	res, body := e.get(e.cookie, "/notifications")
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("GET = %d, want 200", res.StatusCode)
+	}
+	for _, raw := range []string{"<kind-x>", "<host-x>", "<state-x>", "<reason-x>", "<exec-x>", "<svg/onload", `"><svg`} {
+		if strings.Contains(body, raw) {
+			t.Errorf("unescaped %q reached the page", raw)
+		}
+	}
+	for _, esc := range []string{"&lt;kind-x&gt;", "&lt;host-x&gt;", "&lt;state-x&gt;", "&lt;reason-x&gt;", "&lt;exec-x&gt;"} {
+		if !strings.Contains(body, esc) {
+			t.Errorf("escaped field %q missing: the row was not rendered", esc)
+		}
 	}
 }
 
@@ -301,8 +343,8 @@ func TestNotificationsOutcomeBadges(t *testing.T) {
 func TestNotificationsLinkOnlyToNOSPath(t *testing.T) {
 	e := newNotifEnv(t, nil, nil)
 	r := notifRecord("web-1", "sent")
-	r.ExecutionID = "ex-1"
-	r.Link = "/operations/ex-1"
+	r.ExecutionID = notifExecID
+	r.Link = "/operations/" + notifExecID
 	if _, err := e.store.Append(context.Background(), r); err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +356,7 @@ func TestNotificationsLinkOnlyToNOSPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, body := e.get(e.cookie, "/notifications")
-	if !strings.Contains(body, `href="/operations/ex-1"`) {
+	if !strings.Contains(body, `href="/operations/`+notifExecID+`"`) {
 		t.Errorf("NOS execution link missing")
 	}
 	if strings.Contains(body, "evil.example") {
@@ -330,8 +372,21 @@ func TestNotificationsPageHasNoInlineScript(t *testing.T) {
 			t.Errorf("inline script on the notifications page: %s", tag)
 		}
 	}
-	if csp := res.Header.Get("Content-Security-Policy"); strings.Contains(csp, "unsafe-inline") {
-		t.Errorf("CSP allows inline scripts: %q", csp)
+	csp := res.Header.Get("Content-Security-Policy")
+	if csp == "" {
+		t.Fatal("Content-Security-Policy header missing")
+	}
+	script := ""
+	for _, d := range strings.Split(csp, ";") {
+		if d = strings.TrimSpace(d); strings.HasPrefix(d, "script-src ") || d == "script-src" {
+			script = d
+		}
+	}
+	if script == "" {
+		t.Fatalf("CSP has no script-src directive: %q", csp)
+	}
+	if !strings.Contains(script, "'self'") || strings.Contains(script, "unsafe-inline") {
+		t.Errorf("script-src must be 'self' without unsafe-inline, got %q", script)
 	}
 	if !strings.Contains(body, `href="/notifications"`) {
 		t.Errorf("navigation entry for Notifications missing")
