@@ -4,7 +4,13 @@ package notify
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/fs"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -116,21 +122,67 @@ func TestEveryLoggableKindIsRecordedNotRefused(t *testing.T) {
 	}
 }
 
-// allNotifyKinds lists every event kind this package sends. A kind added to
-// the package must be added here and to logEntry; TestEveryNotifyKindHasLogCode
-// fails until both are done.
-var allNotifyKinds = []string{
-	kindVulnKEVNew, kindVulnCriticalNew, kindVulnHermesStale, kindVulnFeedStale,
-	kindVulnFeedRegressed, kindVulnFeedMarkReset, kindVulnDigest,
-	string(IntegrityNOSMismatch), string(IntegrityHostChange), string(IntegrityScanIncomplete),
-	string(IntegrityBaselineTamper), string(IntegrityReferenceConflict), KindIntegrityDigest,
-	KindHostKeyMismatch, KindTest, KindOpsState, KindExecution, KindExecutorLocked,
+// packageKinds returns every event kind the package declares, read from the
+// package source: each string constant named Kind* or kind*, and each constant
+// of type IntegrityKind. A kind added to the package is in this list without
+// anyone editing a table, so it cannot be sent without a log code unnoticed.
+func packageKinds(t *testing.T) []string {
+	t.Helper()
+	fset := token.NewFileSet()
+	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
+		return !strings.HasSuffix(fi.Name(), "_test.go")
+	}, 0)
+	if err != nil {
+		t.Fatalf("parse package source: %v", err)
+	}
+	pkg, ok := pkgs["notify"]
+	if !ok {
+		t.Fatal("package notify not found in source")
+	}
+	var kinds []string
+	for _, f := range pkg.Files {
+		for _, d := range f.Decls {
+			gd, ok := d.(*ast.GenDecl)
+			if !ok || gd.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range gd.Specs {
+				vs := spec.(*ast.ValueSpec)
+				typed := false
+				if id, ok := vs.Type.(*ast.Ident); ok && id.Name == "IntegrityKind" {
+					typed = true
+				}
+				for i, name := range vs.Names {
+					if !typed && !strings.HasPrefix(name.Name, "Kind") && !strings.HasPrefix(name.Name, "kind") {
+						continue
+					}
+					if i >= len(vs.Values) {
+						t.Fatalf("kind constant %s has no value", name.Name)
+					}
+					lit, ok := vs.Values[i].(*ast.BasicLit)
+					if !ok || lit.Kind != token.STRING {
+						t.Fatalf("kind constant %s is not a string literal", name.Name)
+					}
+					v, err := strconv.Unquote(lit.Value)
+					if err != nil {
+						t.Fatalf("kind constant %s: %v", name.Name, err)
+					}
+					kinds = append(kinds, v)
+				}
+			}
+		}
+	}
+	if !slices.Contains(kinds, KindTest) {
+		t.Fatalf("found %d kinds in the package source, not KindTest: the source scan is broken", len(kinds))
+	}
+	return kinds
 }
 
-// TestEveryNotifyKindHasLogCode: every kind this package sends has a log code,
-// so none of them is sent without a record.
+// TestEveryNotifyKindHasLogCode: every kind the package declares has a log
+// code, so none of them is sent without a record. A new Kind constant that is
+// left out of logEntry fails here.
 func TestEveryNotifyKindHasLogCode(t *testing.T) {
-	for _, kind := range allNotifyKinds {
+	for _, kind := range packageKinds(t) {
 		if _, _, ok := logEntry(Event{Kind: kind, State: "WAITING"}); !ok {
 			t.Errorf("kind %q has no notification log code", kind)
 		}
@@ -141,7 +193,7 @@ func TestEveryNotifyKindHasLogCode(t *testing.T) {
 // a record and the real log accepts it. This is the table over all event
 // kinds: each one is stored, none is refused.
 func TestEveryNotifyKindIsStoredNotRefused(t *testing.T) {
-	for _, kind := range allNotifyKinds {
+	for _, kind := range packageKinds(t) {
 		t.Run(kind, func(t *testing.T) {
 			_, rec := newRealLog(t)
 			sender := &stubSender{name: "ntfy"}
