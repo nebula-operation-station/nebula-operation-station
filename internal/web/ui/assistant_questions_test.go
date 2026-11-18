@@ -168,7 +168,7 @@ func TestAssistantQuestionRefusalsShowFixedText(t *testing.T) {
 }
 
 // The question text never reaches a log line, the audit line carries only the
-// user, the length and the SHA-256, and the pages and lists do not log it.
+// user, the length and a keyed digest, and the pages and lists do not log it.
 func TestAssistantQuestionTextNeverReachesLogsOrAudit(t *testing.T) {
 	store := &fakeOpsStore{}
 	text := questionMarker + " ist die Box erreichbar?"
@@ -183,9 +183,50 @@ func TestAssistantQuestionTextNeverReachesLogsOrAudit(t *testing.T) {
 	}
 	sum := sha256.Sum256([]byte(text))
 	audit := auditLineOf(t, logBuf.String(), "ops_question")
-	if !strings.Contains(audit, `"user":"root"`) || !strings.Contains(audit, hex.EncodeToString(sum[:])) ||
-		!strings.Contains(audit, fmt.Sprintf(`"length":%d`, len(text))) {
+	if !strings.Contains(audit, `"user":"root"`) || !strings.Contains(audit, fmt.Sprintf(`"length":%d`, len(text))) {
 		t.Errorf("audit line = %s", audit)
+	}
+	if strings.Contains(audit, hex.EncodeToString(sum[:])) {
+		t.Errorf("audit line carries the plain SHA-256 of the text, which a guessed text can be checked against: %s", audit)
+	}
+	if !strings.Contains(audit, `"digest":"`) {
+		t.Errorf("audit line carries no keyed digest: %s", audit)
+	}
+}
+
+// The audit digest is keyed: a reader of the log cannot confirm a guessed
+// question by hashing it, and the same text gets the same digest in one run.
+func TestAssistantQuestionAuditDigestIsKeyedAndStable(t *testing.T) {
+	store := &fakeOpsStore{}
+	h, logBuf, _ := questionServer(t, store, "root", nil)
+	const guess = "Is web01 down?"
+	postQuestion(t, h, guess, true)
+	postQuestion(t, h, guess, true)
+	first := auditLineOf(t, logBuf.String(), "ops_question")
+	sum := sha256.Sum256([]byte(guess))
+	if strings.Contains(logBuf.String(), hex.EncodeToString(sum[:])) {
+		t.Fatalf("log holds the plain SHA-256 of a guessable question:\n%s", logBuf.String())
+	}
+	digestOf := func(line string) string {
+		i := strings.Index(line, `"digest":"`)
+		if i < 0 {
+			return ""
+		}
+		rest := line[i+len(`"digest":"`):]
+		return rest[:strings.Index(rest, `"`)]
+	}
+	if d := digestOf(first); len(d) != 64 {
+		t.Fatalf("digest = %q, want 64 hex characters", d)
+	}
+	lines := strings.Split(strings.TrimSpace(logBuf.String()), "\n")
+	var digests []string
+	for _, l := range lines {
+		if strings.Contains(l, `"kind":"ops_question"`) {
+			digests = append(digests, digestOf(l))
+		}
+	}
+	if len(digests) != 2 || digests[0] != digests[1] {
+		t.Errorf("digests of the same text = %v, want two equal digests", digests)
 	}
 }
 
@@ -206,7 +247,7 @@ func auditLineOf(t *testing.T, log, kind string) string {
 func TestAssistantQuestionListOwnAndAnswers(t *testing.T) {
 	store := &fakeOpsStore{
 		questions: []opsnotes.Question{
-			{ID: 1, User: "root", Text: "Frage eins", State: opsnotes.QuestionAnswered, CreatedAt: time.Unix(1_800_000_000, 0).UTC()},
+			{ID: 1, User: "root", Text: "Frage eins", State: opsnotes.QuestionAnswered, AnswerNoteID: 9, CreatedAt: time.Unix(1_800_000_000, 0).UTC()},
 			{ID: 2, User: "other", Text: "fremde Frage", State: opsnotes.QuestionOpen, CreatedAt: time.Unix(1_800_000_000, 0).UTC()},
 		},
 		notes: []opsnotes.Note{{
@@ -233,6 +274,47 @@ func TestAssistantQuestionListOwnAndAnswers(t *testing.T) {
 		if strings.Contains(answer, bad) {
 			t.Errorf("answer carries %q:\n%s", bad, answer)
 		}
+	}
+}
+
+// An answer is the note the question stores (AnswerNoteID), not any note that
+// names the question in its ref.
+func TestAssistantQuestionAnswerMatchedByAnswerNoteID(t *testing.T) {
+	store := &fakeOpsStore{
+		questions: []opsnotes.Question{
+			{ID: 1, User: "root", Text: "Frage eins", State: opsnotes.QuestionAnswered, AnswerNoteID: 9,
+				CreatedAt: time.Unix(1_800_000_000, 0).UTC()},
+		},
+		notes: []opsnotes.Note{
+			{ID: 10, Kind: opsnotes.KindAnswer, Ref: "1", Digest: "x", Body: opsnotes.Body{Text: "Falsche Antwort."},
+				CreatedAt: time.Unix(1_800_000_200, 0).UTC()},
+			{ID: 9, Kind: opsnotes.KindAnswer, Ref: "1", Digest: "x", Body: opsnotes.Body{Text: "Richtige Antwort."},
+				CreatedAt: time.Unix(1_800_000_100, 0).UTC()},
+		},
+	}
+	h, _, _ := questionServer(t, store, "root", nil)
+	body := doAssistant(t, h, http.MethodGet, "/assistant/ops/questions", map[string]string{"HX-Request": "true"}).Body.String()
+	if !strings.Contains(body, "Richtige Antwort.") || strings.Contains(body, "Falsche Antwort.") {
+		t.Errorf("answer not matched by AnswerNoteID:\n%s", body)
+	}
+}
+
+// When the answer note was pruned, the question says it is answered without
+// an answer, and it does not show another note.
+func TestAssistantQuestionPrunedAnswerShowsNoAnswer(t *testing.T) {
+	store := &fakeOpsStore{
+		questions: []opsnotes.Question{
+			{ID: 1, User: "root", Text: "Frage eins", State: opsnotes.QuestionAnswered, AnswerNoteID: 9,
+				CreatedAt: time.Unix(1_800_000_000, 0).UTC()},
+		},
+	}
+	h, _, _ := questionServer(t, store, "root", nil)
+	body := doAssistant(t, h, http.MethodGet, "/assistant/ops/questions", map[string]string{"HX-Request": "true"}).Body.String()
+	if !strings.Contains(body, "Frage eins") || strings.Contains(body, `aria-label="Answer"`) {
+		t.Errorf("pruned answer shown or question missing:\n%s", body)
+	}
+	if !strings.Contains(body, "The answer is no longer stored.") {
+		t.Errorf("answered question without its answer says nothing:\n%s", body)
 	}
 }
 

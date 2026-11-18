@@ -120,6 +120,8 @@
     </section>
     {{else if eq .State "open"}}
     <p class="muted">Waiting for an answer.</p>
+    {{else if eq .State "answered"}}
+    <p class="muted">The answer is no longer stored.</p>
     {{end}}
   </article>
   {{else}}

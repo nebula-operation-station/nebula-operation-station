@@ -10,18 +10,20 @@ package ui
 // Rules of this file:
 //   - Admins only: every route answers 404 to anyone else (assistantOpsDenied).
 //   - The question text is never logged, audited or notified. The audit line
-//     carries the user, the length and the SHA-256 of the text.
+//     carries the user, the length and a keyed digest of the text.
 //   - An answer shows its text and its citations under the LLM label. It has
 //     no steps and no buttons: the template has no place for them.
 //   - Error answers carry fixed texts; the input is never echoed.
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"net/http"
-	"strconv"
+	"sync"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsnotes"
 )
@@ -95,14 +97,13 @@ func (h *Handler) assistantQuestionsFor(ctx context.Context, user, errText strin
 	if err != nil {
 		return assistantQuestionsView{}, err
 	}
-	// List is newest first; the first answer of a question is its answer.
-	answers := map[string]opsnotes.Note{}
+	// A question names its answer note (AnswerNoteID). Notes are matched by
+	// that ID only: an answer note pruned by the note cap leaves the question
+	// answered without an answer, and no other note is shown in its place.
+	answers := map[int64]opsnotes.Note{}
 	for _, n := range notes {
-		if n.Kind != opsnotes.KindAnswer {
-			continue
-		}
-		if _, seen := answers[n.Ref]; !seen {
-			answers[n.Ref] = n
+		if n.Kind == opsnotes.KindAnswer {
+			answers[n.ID] = n
 		}
 	}
 	view := assistantQuestionsView{Error: errText, Items: make([]assistantQuestionItem, 0, len(qs))}
@@ -113,7 +114,7 @@ func (h *Handler) assistantQuestionsFor(ctx context.Context, user, errText strin
 			Text:    q.Text,
 			State:   string(q.State),
 		}
-		if n, ok := answers[strconv.FormatInt(q.ID, 10)]; ok && q.State == opsnotes.QuestionAnswered {
+		if n, ok := answers[q.AnswerNoteID]; ok && q.State == opsnotes.QuestionAnswered {
 			it.Answer = &assistantAnswerView{Text: n.Body.Text, Citations: h.assistantCitations(n.Body.Citations)}
 		}
 		view.Items = append(view.Items, it)
@@ -205,12 +206,28 @@ func askFormText(r *http.Request) (string, string) {
 	return vals[0], ""
 }
 
+// questionAuditKey keys the digest of the audit line. It is random per process
+// and never logged, so a reader of the log cannot test a guessed question
+// against the digest; the digests compare only within one run.
+var questionAuditKey = sync.OnceValue(func() []byte {
+	k := make([]byte, 32)
+	_, _ = rand.Read(k) // crypto/rand.Read does not fail since Go 1.24
+	return k
+})
+
+// questionAuditDigest is the HMAC-SHA256 of a question text under the audit
+// key, with a domain prefix.
+func questionAuditDigest(text string) string {
+	m := hmac.New(sha256.New, questionAuditKey())
+	m.Write([]byte("nebula-ops-question-audit-v1\x00" + text))
+	return hex.EncodeToString(m.Sum(nil))
+}
+
 // auditQuestion writes the audit line of a stored question: user, length and
-// SHA-256 of the text. The text itself is never logged.
+// the keyed digest of the text. The text itself is never logged.
 func (h *Handler) auditQuestion(user, text string, id int64) {
-	sum := sha256.Sum256([]byte(text))
 	h.log.Info("audit", "kind", "ops_question", "user", user, "question", id,
-		"length", len(text), "sha256", hex.EncodeToString(sum[:]))
+		"length", len(text), "digest", questionAuditDigest(text))
 }
 
 // touchTrigger wakes the agent through the injected trigger, if configured.
