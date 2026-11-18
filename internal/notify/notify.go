@@ -62,7 +62,10 @@ type Event struct {
 	// "/integrity/findings/7"), which the notification log stores. Only
 	// IntegrityGate sets it, from the validated link.
 	logLink string
-	Time    time.Time
+	// body is the whole text of a daily digest (see NewDailyDigest). Empty
+	// for every other kind.
+	body string
+	Time time.Time
 }
 
 // Vulnerability and digest kinds. internal/vulnnotify sends them and imports
@@ -109,7 +112,7 @@ func clean(s string, limit int) string {
 func (e Event) cleaned() Event {
 	return Event{Kind: clean(e.Kind, 64), Host: clean(e.Host, 64), State: clean(e.State, 64), Reason: clean(e.Reason, maxField),
 		ExecutionID: clean(e.ExecutionID, 128), link: clean(e.link, maxIntegrityLink), logLink: e.logLink,
-		Time: e.Time.UTC().Truncate(time.Second)}
+		body: e.body, Time: e.Time.UTC().Truncate(time.Second)}
 }
 
 // Title is a short summary line.
@@ -128,12 +131,22 @@ func (e Event) Title() string {
 		return "Nebula: operation finished with " + e.State
 	case KindExecutorLocked:
 		return "Nebula: executor is locked"
+	case KindLeaseExpiring:
+		return "Nebula: read lease expires soon"
+	case KindLeaseRunFailed:
+		return "Nebula: leased run failed"
+	case KindDailyDigest:
+		return "Nebula: daily digest"
 	}
 	return "Nebula: " + e.Kind + " " + e.Host
 }
 
 // Text is the plain-text message.
 func (e Event) Text() string {
+	if e.body != "" {
+		// The digest text is complete: it has its own header and lines.
+		return e.body
+	}
 	var b strings.Builder
 	b.WriteString(e.Title())
 	if e.State != "" {
