@@ -43,6 +43,11 @@ var ErrInvalidLeaseEvent = errors.New("invalid lease event")
 // name or whitespace can never form a different NOS path.
 var leaseIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
+// ValidLeaseID reports whether id can form a lease event's link. Callers check
+// it before they record anything about the grant, so that a grant the event
+// could never be built for is not recorded as already warned.
+func ValidLeaseID(id string) bool { return leaseIDRe.MatchString(id) }
+
 // LeaseExpiry is one lease.expiring decision as the caller passes it in.
 type LeaseExpiry struct {
 	// GrantID is the grant's ID; it forms the NOS link /leases/<id>.

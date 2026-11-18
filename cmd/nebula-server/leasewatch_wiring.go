@@ -47,6 +47,10 @@ const (
 	leaseWatchStateFile = "leasewatch-state.json"
 	// leaseRunBatch bounds the stored runs read per query.
 	leaseRunBatch = 5000
+	// leaseRunMaxPages bounds the queries per tick, so that a backlog of runs
+	// is read over several ticks instead of one long one. The scan resumes at
+	// the last run read, so no run is skipped.
+	leaseRunMaxPages = 10
 	// leaseRunWindow is how far behind the clock the stored runs are still
 	// read. A run row that commits later than its finish time plus this window
 	// is not read.
@@ -122,6 +126,11 @@ type leaseWatcher struct {
 	now    func() time.Time
 	log    *slog.Logger
 
+	// runBatch and runMaxPages bound the stored-run reads of one tick. They
+	// are set by newLeaseWatcher; tests lower them.
+	runBatch    int
+	runMaxPages int
+
 	st    leaseWatchState
 	saved []byte
 }
@@ -137,7 +146,8 @@ func newLeaseWatcher(db *sql.DB, src leaseSource, hosts hostLister, vulns *vulns
 		loc = time.Local
 	}
 	return &leaseWatcher{db: db, src: src, hosts: hosts, vulns: vulns, send: send, base: base, digest: digest,
-		loc: loc, path: filepath.Join(dataDir, leaseWatchStateFile), now: now, log: log}
+		loc: loc, path: filepath.Join(dataDir, leaseWatchStateFile), now: now, log: log,
+		runBatch: leaseRunBatch, runMaxPages: leaseRunMaxPages}
 }
 
 // load reads the saved state. A missing file is a first start. A file that is
@@ -272,7 +282,13 @@ func (w *leaseWatcher) deliver(ctx context.Context, e notify.Event) {
 }
 
 // grantSnapshot returns the active read leases and schedule grants as the
-// watch sees them. It fails if either list cannot be read.
+// watch sees them. It fails only if either list cannot be read.
+//
+// One bad grant does not stop the others. A grant that is invalid (no expiry,
+// an ID the notification cannot link, a duplicate ID) is skipped, and so is
+// every grant beyond leasewatch.MaxTrackedGrants, the first ones by ID being
+// kept. A skipped grant gets no expiry mark, so it is never recorded as warned
+// without a message. The skips are logged as counts, not per ID.
 func (w *leaseWatcher) grantSnapshot(ctx context.Context) ([]leasewatch.Grant, error) {
 	reads, err := w.src.ReadGrants(ctx)
 	if err != nil {
@@ -282,18 +298,38 @@ func (w *leaseWatcher) grantSnapshot(ctx context.Context) ([]leasewatch.Grant, e
 	if err != nil {
 		return nil, fmt.Errorf("list schedules: %w", err)
 	}
-	var out []leasewatch.Grant
+	var all []leasewatch.Grant
 	for _, g := range reads {
 		if g.State != "active" || g.Legacy {
 			continue
 		}
-		out = append(out, leasewatch.Grant{ID: g.ID, Name: g.ID, Kind: leasewatch.KindReadLease, ExpiresAt: g.Expiry})
+		all = append(all, leasewatch.Grant{ID: g.ID, Name: g.ID, Kind: leasewatch.KindReadLease, ExpiresAt: g.Expiry})
 	}
 	for _, s := range scheds {
 		if s.State != "active" {
 			continue
 		}
-		out = append(out, leasewatch.Grant{ID: s.ID, Name: s.ID, Kind: leasewatch.KindScheduleGrant, ExpiresAt: s.ExpiresAt})
+		all = append(all, leasewatch.Grant{ID: s.ID, Name: s.ID, Kind: leasewatch.KindScheduleGrant, ExpiresAt: s.ExpiresAt})
+	}
+
+	skipped := 0
+	seen := make(map[string]struct{}, len(all))
+	out := make([]leasewatch.Grant, 0, len(all))
+	for _, g := range all {
+		if _, dup := seen[g.ID]; dup || !notify.ValidLeaseID(g.ID) || g.ExpiresAt.IsZero() {
+			skipped++
+			continue
+		}
+		seen[g.ID] = struct{}{}
+		out = append(out, g)
+	}
+	if len(out) > leasewatch.MaxTrackedGrants {
+		sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+		skipped += len(out) - leasewatch.MaxTrackedGrants
+		out = out[:leasewatch.MaxTrackedGrants]
+	}
+	if skipped > 0 {
+		w.log.Warn("lease watch: grants skipped", "count", skipped, "limit", leasewatch.MaxTrackedGrants)
 	}
 	return out, nil
 }
@@ -306,6 +342,7 @@ func (w *leaseWatcher) expiryEvents(ctx context.Context, now time.Time) []notify
 		w.log.Warn("lease watch: grants not read, expiry skipped", "error", err)
 		return nil
 	}
+	prev := w.st.Watch.Expiry
 	due, next, err := leasewatch.Expiring(grants, w.st.Watch, now)
 	if err != nil {
 		w.log.Error("lease watch: expiry decision", "error", err)
@@ -318,12 +355,25 @@ func (w *leaseWatcher) expiryEvents(ctx context.Context, now time.Time) []notify
 			GrantID: d.GrantID, GrantName: d.GrantName, Threshold: d.Threshold, ExpiresAt: d.ExpiresAt, At: now,
 		})
 		if err != nil {
+			// The mark was set for a warning that was not built. Roll it back
+			// so that the warning is still due at the next tick.
 			w.log.Error("lease watch: build expiry message", "error", err)
+			w.rollbackExpiryMark(d.GrantID, prev)
 			continue
 		}
 		out = append(out, e)
 	}
 	return out
+}
+
+// rollbackExpiryMark restores the expiry marks of one grant to their value
+// before this tick.
+func (w *leaseWatcher) rollbackExpiryMark(id string, prev map[string]leasewatch.ExpiryMarks) {
+	if m, ok := prev[id]; ok {
+		w.st.Watch.Expiry[id] = m
+		return
+	}
+	delete(w.st.Watch.Expiry, id)
 }
 
 // runEvents reads the finished lease runs from the scan start on, sends a
@@ -341,21 +391,33 @@ func (w *leaseWatcher) runEvents(ctx context.Context, now time.Time, silent bool
 		seen[k] = at
 	}
 	var fresh []storedRun
-	pageAt, pageExec, pageHost := w.st.RunFrom, "", ""
-	for {
-		page, err := storedLeaseRuns(ctx, w.db, pageAt, pageExec, pageHost, leaseRunBatch)
+	// The first position is one second before the scan start, so that runs
+	// finishing exactly at the scan start are read (finish times are whole
+	// seconds).
+	pageAt, pageExec, pageHost := w.st.RunFrom-1, "", ""
+	lastAt := w.st.RunFrom
+	truncated := false
+	for pages := 0; ; pages++ {
+		if pages == w.runMaxPages {
+			// The backlog goes on. The scan resumes at lastAt on the next
+			// tick; the runs seen so far stay in the recorded set.
+			truncated = true
+			break
+		}
+		page, err := storedLeaseRuns(ctx, w.db, pageAt, pageExec, pageHost, w.runBatch)
 		if err != nil {
 			w.log.Error("lease watch: read stored runs", "error", err)
 			return nil
 		}
 		for _, r := range page {
+			lastAt = r.at
 			if _, ok := seen[r.key()]; ok {
 				continue
 			}
 			seen[r.key()] = r.at
 			fresh = append(fresh, r)
 		}
-		if len(page) < leaseRunBatch {
+		if len(page) < w.runBatch {
 			break
 		}
 		last := page[len(page)-1]
@@ -412,6 +474,11 @@ func (w *leaseWatcher) runEvents(ctx context.Context, now time.Time, silent bool
 		if cut := ats[leaseRunSeenMax-1]; cut > newFrom {
 			newFrom = cut
 		}
+	}
+	if truncated {
+		// Runs after lastAt were not read yet. The scan must start there, not
+		// at the clock's window, or they would be skipped.
+		newFrom = lastAt
 	}
 	for k, at := range seen {
 		if at < newFrom {
@@ -473,7 +540,11 @@ func (r storedRun) key() string { return r.exec + "\t" + r.host }
 
 // storedLeaseRuns returns up to limit finished runs of leases that sort after
 // the position (at, exec, host), in that order: finish time, execution, host.
-// Pass a position of (scan start, "", "") to start from the scan start.
+// Pass a position of (scan start - 1, "", "") to start at the scan start.
+//
+// The query has no index on execution_hosts.finished_at, so each page is a
+// scan of the host rows. A migration adding one is a follow-up; it is not part
+// of this change.
 func storedLeaseRuns(ctx context.Context, db *sql.DB, at int64, exec, host string, limit int) ([]storedRun, error) {
 	rows, err := db.QueryContext(ctx, `SELECT e.id, e.schedule_id, e.action_id, h.host_id, h.class, h.finished_at
 		FROM executions e JOIN execution_hosts h ON h.execution_id = e.id
@@ -697,12 +768,13 @@ func (w *leaseWatcher) countFindings(ctx context.Context) (opsdigest.Findings, e
 	return out, nil
 }
 
-// countFailedRuns counts host runs of the last 24 hours that finished and did
-// not succeed or did not run.
+// countFailedRuns counts the executions that ended in state failed within the
+// last 24 hours (opsdigest FailedRuns24h). A failed execution with several
+// failed host rows counts once, and host rows of other executions do not count.
 func (w *leaseWatcher) countFailedRuns(ctx context.Context, now time.Time) (int, error) {
 	var n int
-	err := w.db.QueryRowContext(ctx, `SELECT count(*) FROM execution_hosts
-		WHERE state = 'finished' AND finished_at >= ? AND class NOT IN ('success', 'skipped', 'not_run', 'not_executed')`,
+	err := w.db.QueryRowContext(ctx, `SELECT count(*) FROM executions
+		WHERE state = 'failed' AND finished_at >= ?`,
 		now.Add(-24*time.Hour).Unix()).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("count failed runs: %w", err)

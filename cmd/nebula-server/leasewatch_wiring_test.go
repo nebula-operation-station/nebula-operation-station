@@ -251,6 +251,54 @@ func TestLeaseWatchRunFailureOncePerEpisode(t *testing.T) {
 	}
 }
 
+// TestLeaseWatchRunFailureEpisodeSurvivesTicksAndRestarts: the grant stays
+// active in the snapshot across several ticks and a restart. The open episode
+// must survive those ticks, so repeated failures of the same grant, action and
+// host are one event until a success ends the episode.
+func TestLeaseWatchRunFailureEpisodeSurvivesTicksAndRestarts(t *testing.T) {
+	f := newLeaseFixture(t)
+	f.src.reads = []executions.ReadGrantView{activeRead("lease-a", leaseT0.Add(30*24*time.Hour))}
+	w := f.watcher(serverconfig.DailyDigest{})
+	ctx := context.Background()
+	w.Tick(ctx) // first start at T0
+
+	f.now = leaseT0.Add(1 * time.Minute)
+	f.run("lease-a", "os.updates.list", "host-1", "failed", f.now)
+	w.Tick(ctx)
+	if n := f.send.failedCount(); n != 1 {
+		t.Fatalf("first failure sent %d lease.run_failed events, want 1", n)
+	}
+
+	// Failures of the open episode across several ticks, and across a restart.
+	f.now = leaseT0.Add(2 * time.Minute)
+	f.run("lease-a", "os.updates.list", "host-1", "failed", f.now)
+	w.Tick(ctx)
+	f.now = leaseT0.Add(3 * time.Minute)
+	w.Tick(ctx)
+	f.now = leaseT0.Add(4 * time.Minute)
+	f.run("lease-a", "os.updates.list", "host-1", "failed", f.now)
+	w = f.watcher(serverconfig.DailyDigest{})
+	w.Tick(ctx)
+	f.now = leaseT0.Add(5 * time.Minute)
+	w.Tick(ctx)
+	if n := f.send.failedCount(); n != 1 {
+		t.Fatalf("repeated failures of one open episode sent %d lease.run_failed events, want 1", n)
+	}
+
+	// A success ends the episode; the next failure is a new episode.
+	f.now = leaseT0.Add(6 * time.Minute)
+	f.run("lease-a", "os.updates.list", "host-1", "success", f.now)
+	w.Tick(ctx)
+	f.now = leaseT0.Add(7 * time.Minute)
+	f.run("lease-a", "os.updates.list", "host-1", "failed", f.now)
+	w.Tick(ctx)
+	f.now = leaseT0.Add(8 * time.Minute)
+	w.Tick(ctx)
+	if n := f.send.failedCount(); n != 2 {
+		t.Fatalf("after a success and a new failure sent %d lease.run_failed events, want 2", n)
+	}
+}
+
 func TestLeaseWatchSkippedRunIsNotAFailure(t *testing.T) {
 	f := newLeaseFixture(t)
 	w := f.watcher(serverconfig.DailyDigest{})
@@ -322,12 +370,30 @@ func TestDigestSkipEmptySendsNothingOnAnEmptyDay(t *testing.T) {
 	}
 }
 
-func TestDigestCountsFailedRunsOfTheLast24h(t *testing.T) {
+// execution inserts one finished execution in the given state, with no hosts.
+func (f *leaseFixture) execution(state string, at time.Time) {
+	f.t.Helper()
+	f.seq++
+	id := fmt.Sprintf("%036d", f.seq)
+	sha := strings.Repeat("b", 64)
+	if _, err := f.db.Exec(`INSERT INTO executions (id, digest, action_id, module_version, artifact_sha256, risk, requirement, state,
+		durable, timeout_s, created_by, created_at, finished_at, params)
+		VALUES (?, '', 'os.updates.list', '1', ?, 'LOW', '', ?, 0, 60, 'admin', ?, ?, '{}')`,
+		id, sha, state, at.Unix(), at.Unix()); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// TestDigestCountsFailedExecutionsOfTheLast24h: FailedRuns24h counts failed
+// executions, not host rows, and only those finished inside the last 24 hours.
+func TestDigestCountsFailedExecutionsOfTheLast24h(t *testing.T) {
 	f := newLeaseFixture(t)
 	f.now = time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
-	f.run("lease-a", "os.updates.list", "host-1", "failed", f.now.Add(-2*time.Hour))
-	f.run("lease-a", "os.updates.list", "host-1", "failed", f.now.Add(-30*time.Hour))
-	f.run("lease-a", "os.updates.list", "host-1", "success", f.now.Add(-time.Hour))
+	f.execution("failed", f.now.Add(-2*time.Hour))
+	f.execution("failed", f.now.Add(-30*time.Hour))
+	f.execution("finished", f.now.Add(-time.Hour))
+	// A finished execution with a failed host row is not a failed execution.
+	f.run("lease-a", "os.updates.list", "host-1", "failed", f.now.Add(-3*time.Hour))
 	w := f.watcher(serverconfig.DailyDigest{Enabled: true, Time: "07:00"})
 	n, err := w.countFailedRuns(context.Background(), f.now)
 	if err != nil || n != 1 {
@@ -448,5 +514,131 @@ func TestLeaseWatchReadsTheInventoryOncePerTick(t *testing.T) {
 	}
 	if f.send.events[0].Host != "Web" {
 		t.Fatalf("host label %q, want the display name", f.send.events[0].Host)
+	}
+}
+
+// TestLeaseWatchRunAtTheScanStartIsReadWhenItCommitsLate: a failed run that
+// finished exactly at the scan start, and whose row commits after the window
+// has moved to that start, is still read.
+func TestLeaseWatchRunAtTheScanStartIsReadWhenItCommitsLate(t *testing.T) {
+	f := newLeaseFixture(t)
+	w := f.watcher(serverconfig.DailyDigest{})
+	w.Tick(context.Background()) // first start at T0: scan start T0-1h
+
+	f.now = leaseT0.Add(10 * time.Minute)
+	w.Tick(context.Background()) // the scan start moves to T0+10m-1h = T0-50m
+
+	f.run("lease-a", "os.updates.list", "host-1", "failed", leaseT0.Add(-50*time.Minute))
+	f.now = leaseT0.Add(11 * time.Minute)
+	w.Tick(context.Background())
+	if n := f.send.failedCount(); n != 1 {
+		t.Fatalf("run at the scan start sent %d lease.run_failed events, want 1", n)
+	}
+	f.now = leaseT0.Add(12 * time.Minute)
+	w.Tick(context.Background())
+	if n := f.send.failedCount(); n != 1 {
+		t.Fatalf("run at the scan start was sent again: %d events, want 1", n)
+	}
+}
+
+// TestLeaseWatchStoredRunsAreReadInBoundedPages: a backlog larger than one
+// tick may read is read over several ticks, each run once, with no run skipped.
+func TestLeaseWatchStoredRunsAreReadInBoundedPages(t *testing.T) {
+	f := newLeaseFixture(t)
+	w := f.watcher(serverconfig.DailyDigest{})
+	w.Tick(context.Background()) // first start at T0
+	w.runBatch = 2
+	w.runMaxPages = 2
+
+	f.now = leaseT0.Add(time.Minute)
+	for i := 1; i <= 5; i++ {
+		f.run("lease-a", "os.updates.list", fmt.Sprintf("host-%d", i), "failed", leaseT0.Add(time.Duration(i)*time.Minute))
+	}
+	f.now = leaseT0.Add(6 * time.Minute)
+	w.Tick(context.Background())
+	if n := f.send.failedCount(); n != 4 {
+		t.Fatalf("one tick with two pages of two sent %d events, want 4", n)
+	}
+	f.now = leaseT0.Add(7 * time.Minute)
+	w.Tick(context.Background())
+	if n := f.send.failedCount(); n != 5 {
+		t.Fatalf("after the next tick %d lease.run_failed events, want 5 (each run once)", n)
+	}
+	f.now = leaseT0.Add(8 * time.Minute)
+	w.Tick(context.Background())
+	if n := f.send.failedCount(); n != 5 {
+		t.Fatalf("a quiet tick sent again: %d events, want 5", n)
+	}
+}
+
+// TestLeaseWatchInvalidGrantDoesNotStopOtherWarnings: one grant with a zero
+// expiry, a duplicate ID, or an ID that the notification cannot link, is
+// skipped; the valid grants in the same snapshot are still warned, and the
+// skipped ones get no expiry mark.
+func TestLeaseWatchInvalidGrantDoesNotStopOtherWarnings(t *testing.T) {
+	f := newLeaseFixture(t)
+	soon := leaseT0.Add(2 * time.Hour)
+	f.src.reads = []executions.ReadGrantView{
+		activeRead("lease-a", soon),
+		activeRead("lease-zero", time.Time{}),
+		activeRead("lease-a", soon),
+		activeRead("bad id/with slash", soon),
+		activeRead("lease-b", soon),
+	}
+	w := f.watcher(serverconfig.DailyDigest{})
+	w.Tick(context.Background()) // first start at T0
+	if n := len(f.send.events); n != 2 {
+		t.Fatalf("with one invalid grant sent %d events %v, want the two valid grants", n, f.send.kinds())
+	}
+	for _, id := range []string{"lease-zero", "bad id/with slash"} {
+		if _, ok := w.st.Watch.Expiry[id]; ok {
+			t.Fatalf("skipped grant %q got an expiry mark", id)
+		}
+	}
+	f.now = leaseT0.Add(time.Minute)
+	w.Tick(context.Background())
+	if n := len(f.send.events); n != 2 {
+		t.Fatalf("a later tick sent again: %d events, want 2", n)
+	}
+}
+
+// TestLeaseWatchOverLimitSnapshotKeepsTheFirstGrantsByID: with more grants
+// than the watch tracks, the first ones by ID are warned and the rest are
+// skipped; the over-long snapshot does not stop the tracked grants.
+func TestLeaseWatchOverLimitSnapshotKeepsTheFirstGrantsByID(t *testing.T) {
+	f := newLeaseFixture(t)
+	far := leaseT0.Add(30 * 24 * time.Hour)
+	for i := 0; i <= leasewatch.MaxTrackedGrants; i++ {
+		exp := far
+		if i == 0 || i == leasewatch.MaxTrackedGrants {
+			exp = leaseT0.Add(2 * time.Hour)
+		}
+		f.src.reads = append(f.src.reads, activeRead(fmt.Sprintf("lease-%04d", i), exp))
+	}
+	w := f.watcher(serverconfig.DailyDigest{})
+	w.Tick(context.Background())
+	if n := len(f.send.events); n != 1 || !strings.Contains(f.send.events[0].Reason, "lease-0000") {
+		t.Fatalf("over-limit snapshot sent %v; want one warning for lease-0000 only", f.send.kinds())
+	}
+}
+
+// TestLeaseWatchFailedBuildKeepsTheWarningDue: when the message cannot be
+// built (here a bad NOS origin), the warning is not lost: its mark is rolled
+// back, so the warning is sent once the origin is fixed.
+func TestLeaseWatchFailedBuildKeepsTheWarningDue(t *testing.T) {
+	f := newLeaseFixture(t)
+	f.src.reads = []executions.ReadGrantView{activeRead("lease-a", leaseT0.Add(2*time.Hour))}
+	w := f.watcher(serverconfig.DailyDigest{})
+	good := w.base
+	w.base = "ftp://nebula.example.org"
+	w.Tick(context.Background()) // first start: the build fails
+	if n := len(f.send.events); n != 0 {
+		t.Fatalf("with a bad origin sent %d events, want none", n)
+	}
+	w.base = good
+	f.now = leaseT0.Add(time.Minute)
+	w.Tick(context.Background())
+	if n := len(f.send.events); n != 1 {
+		t.Fatalf("after the origin is fixed sent %d events, want the one warning", n)
 	}
 }
