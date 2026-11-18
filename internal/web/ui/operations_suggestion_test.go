@@ -161,3 +161,18 @@ func TestCreateRefusesUnknownSuggestion(t *testing.T) {
 		t.Fatalf("%d %s", code, body)
 	}
 }
+
+func TestContainerPageRefusesSuggestionReference(t *testing.T) {
+	h, _ := ctrHandler(t, false)
+	for _, path := range []string{"/inventory/containers?suggestion=7.0", "/inventory/containers?host=web-01&suggestion="} {
+		rec := httptest.NewRecorder()
+		h.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("%s: status %d", path, rec.Code)
+		}
+	}
+	// Without the parameter the page is unchanged.
+	if code, _ := getPage(t, h.Handler(), "/inventory/containers"); code != http.StatusOK {
+		t.Fatalf("plain container page: status %d", code)
+	}
+}
