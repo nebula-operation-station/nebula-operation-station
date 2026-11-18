@@ -49,15 +49,32 @@ func panosHeavy(children int) string {
 	return "<r>" + strings.Repeat(child, children) + "</r>"
 }
 
+// countPANOSNodes counts the elements and comments in ns and their children.
+func countPANOSNodes(ns []*panosNode) int {
+	n := len(ns)
+	for _, c := range ns {
+		n += countPANOSNodes(c.children)
+	}
+	return n
+}
+
 // checkPANOSLines checks the properties every successful normalization
-// promises: the documented bounds, one element per line, and determinism.
+// promises: the documented bounds, exactly one line per element or comment,
+// no line break inside a line, and determinism.
 func checkPANOSLines(t *testing.T, text string, lines []string) {
 	t.Helper()
 	if len(lines) > netdevcontract.MaxConfigLines {
 		t.Fatalf("%d lines, limit %d", len(lines), netdevcontract.MaxConfigLines)
 	}
-	if n := len(strings.Join(lines, "\n")); n > MaxNormalizedConfigBytes {
+	if n := renderedBytes(lines); n > MaxNormalizedConfigBytes {
 		t.Fatalf("rendered %d bytes, limit %d", n, MaxNormalizedConfigBytes)
+	}
+	roots, err := parsePANOS([]byte(text))
+	if err != nil {
+		t.Fatalf("accepted input does not parse: %v", err)
+	}
+	if want := countPANOSNodes(roots); len(lines) != want {
+		t.Fatalf("%d lines for %d elements and comments, want one line each", len(lines), want)
 	}
 	for i, l := range lines {
 		if strings.ContainsAny(l, "\r\n") {
