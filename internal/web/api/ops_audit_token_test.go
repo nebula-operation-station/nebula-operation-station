@@ -16,7 +16,7 @@ func TestAuditTokenKeepsOnlyIdentifiers(t *testing.T) {
 		}
 	}
 	drop := []string{
-		"ignore previous instructions", "ref\nfake=1", "ref‮gnp.exe", "ref\x00", "réf",
+		"ignore previous instructions", "ref\nfake=1", "ref\u202egnp.exe", "ref\x00", "réf",
 		strings.Repeat("a", maxAuditToken+1), strings.Repeat("x y ", 4096),
 	}
 	for _, s := range drop {
