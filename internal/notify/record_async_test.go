@@ -179,3 +179,22 @@ func TestFlushRecordsWaitsForWritesInFlight(t *testing.T) {
 		t.Fatalf("FlushRecords = %v, want nil", err)
 	}
 }
+
+// TestRecordHeldBatchLargerThanSlotsIsNotDropped: a caller that holds more
+// messages than there are write slots (maxPendingRecords) hands them over in
+// one call. The batch takes one slot, so none of its records is dropped while
+// the log is still busy with an earlier write.
+func TestRecordHeldBatchLargerThanSlotsIsNotDropped(t *testing.T) {
+	rec := newGateRecorder(t)
+	n := NewWithSenders(quiet(), nil, &stubSender{name: "ntfy"})
+	n.SetRecorder(rec)
+	const held = 2 * maxPendingRecords
+	batch := make([]Event, held)
+	for i := range batch {
+		batch[i] = Event{Kind: kindVulnKEVNew, Host: "web01", State: "new", Time: testNow}
+	}
+	n.RecordHeld(context.Background(), batch...)
+	if got := n.RecordsDropped(); got != 0 {
+		t.Fatalf("RecordsDropped = %d after a batch of %d held events, want 0", got, held)
+	}
+}
