@@ -49,6 +49,10 @@ type AssistantOpsStore interface {
 	Dismiss(ctx context.Context, id int64) error
 	// Step returns step index of note noteID, validated at storage time.
 	Step(ctx context.Context, noteID int64, index int) (opsnotes.Step, bool, error)
+	// AskQuestion stores a question of user (ADR 0016 D11).
+	AskQuestion(ctx context.Context, user, text string) (opsnotes.Question, error)
+	// ListQuestions returns the questions of user, newest first.
+	ListQuestions(ctx context.Context, user string) ([]opsnotes.Question, error)
 }
 
 // AssistantOpsCatalog is the server's current view a card is checked
@@ -88,6 +92,10 @@ type AssistantOps struct {
 	// User returns the logged-in user of a request. Nil uses the session
 	// of the auth middleware.
 	User func(r *http.Request) (string, bool)
+	// Touch wakes the ops agent after a question was stored (the trigger
+	// path of ADR 0016 D3). Nil does nothing; the agent then runs on its
+	// timer. A returned error is logged, never shown with question text.
+	Touch func() error
 }
 
 // user returns the logged-in user of r.
@@ -110,6 +118,8 @@ type assistantOpsView struct {
 	Summary string
 	// Cards are the open fix cards, most urgent first.
 	Cards []assistantCard
+	// Questions are the admin's own questions and the question form.
+	Questions assistantQuestionsView
 }
 
 // assistantStatusView is what the status line shows.
@@ -223,6 +233,14 @@ func (h *Handler) assistantOpsBody(ctx context.Context, r *http.Request, notes [
 			if !st.LastRun.IsZero() {
 				view.Status.LastRun = st.LastRun.UTC().Format("2006-01-02 15:04 UTC")
 			}
+		}
+	}
+	if user, ok := o.user(r); ok {
+		qv, err := h.assistantQuestionsFor(ctx, user, "")
+		if err != nil {
+			h.log.Error("assistant ops: list questions", "error", err)
+		} else {
+			view.Questions = qv
 		}
 	}
 	for _, n := range notes {
