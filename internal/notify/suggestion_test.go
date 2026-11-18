@@ -38,8 +38,6 @@ func (s *suggRec) events() []Event {
 	return append([]Event(nil), s.got...)
 }
 
-const suggNOSBase = "https://nos.example.net"
-
 func newSuggestionFixture(t *testing.T, rec *suggRec, now *time.Time) *SuggestionGate {
 	t.Helper()
 	n := NewWithSenders(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, rec)
