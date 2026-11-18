@@ -1248,7 +1248,9 @@ Left open (outside cu06's agent scope):
   private registry; only the admin-role executor methods exist.
 - `cmd/nebula-executor` does not call `SetPrivateTransferTempDir`, so the
   layer spool is the executor's `os.TempDir()` (the unit's private `/tmp`).
-- The cu06 tests are not yet rows in `docs/implementation/security-tests.md`.
+- The cu06 tests are rows in `docs/implementation/security-tests.md` (the
+  "Private image transfer (ADR 0006 R7, cu06)" row; before: "not yet rows in
+  `docs/implementation/security-tests.md`").
 
 **Q6 answered 2026-11-11 (recommended profile):** the maintainer accepted
 option (a), executor fetch and `docker load` over SSH (previously: "Do not
