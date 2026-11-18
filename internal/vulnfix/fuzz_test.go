@@ -133,6 +133,23 @@ func FuzzHostResult(f *testing.F) {
 		{"ubuntu:24.04", "linux", "6.8.0-48.48", "", "h1", 0, "",
 			"linux-image-6.8.0-47-generic|linux|6.8.0-47.47|0", true},
 		{"alpine:3.20", "openssl", "3.3.2-r0", "", "h1", 0, "openssl", "", true},
+		// Kernel: two unsigned images of the source, one below and one at the
+		// fix. The verified candidate is the one at the fix, never the lowest.
+		{"debian:bookworm", "linux", "6.1.115-1", "", "h1", 0, "",
+			"linux-image-6.1.0-27-amd64|linux|6.1.110-1|1\nlinux-image-6.1.0-28-amd64|linux|6.1.115-1|1", true},
+		// Kernel: a signed image alone is never a version basis.
+		{"debian:bookworm", "linux", "6.1.115-1", "", "h1", 0, "",
+			"linux-image-6.1.0-28-amd64|linux-signed-amd64|6.1.115+1|1", true},
+		// Kernel: an unsigned image of another source is not a basis either.
+		{"debian:bookworm", "linux", "6.1.115-1", "", "h1", 0, "",
+			"linux-image-6.1.0-28-amd64|linux-6.1|6.1.115-1|1", true},
+		// Basis rule: libssl3 is installed but has no candidate; the verified
+		// openssl candidate must not hide it.
+		{"debian:bookworm", "openssl", "3.0.11-1~deb12u2", "", "h1", 0, "openssl,libssl3",
+			"openssl|openssl|3.0.11-1~deb12u2|1", true},
+		// Basis rule: no installed binary at all is no coverage.
+		{"debian:bookworm", "openssl", "3.0.11-1~deb12u2", "", "h1", 0, "",
+			"openssl|openssl|3.0.11-1~deb12u2|1", true},
 		// boundary_test.go and decide_test.go: hostile subject IDs.
 		{"debian:bookworm", "openssl", "3.0.11-1~deb12u2", "", "../etc", 0, "openssl",
 			"openssl|openssl|3.0.11-1~deb12u2|1", true},
@@ -196,8 +213,13 @@ func FuzzHostResult(f *testing.F) {
 		if r.Fixed == "" {
 			t.Fatalf("status %d names no fixed version", r.Status)
 		}
-		if !slices.ContainsFunc(list, func(p vulnfix.Package) bool { return p.SourceVersion == r.Candidate }) {
-			t.Fatalf("candidate %q is not a source version of the list", r.Candidate)
+		// The candidate is a source version of the list: an entry whose
+		// apt Source: field is the finding's source. It is never text
+		// taken from an entry of another source.
+		if !slices.ContainsFunc(list, func(p vulnfix.Package) bool {
+			return p.SourceName == source && p.SourceVersion == r.Candidate
+		}) {
+			t.Fatalf("candidate %q is not a source version of an entry of source %q", r.Candidate, source)
 		}
 		cmp, err := vulnver.CompareDpkg(r.Candidate, r.Fixed)
 		if err != nil {
@@ -209,22 +231,56 @@ func FuzzHostResult(f *testing.F) {
 		if r.Status == vulnfix.StatusBelowFixed && cmp >= 0 {
 			t.Fatalf("below-fixed result names candidate %q at or after fixed %q", r.Candidate, r.Fixed)
 		}
+		if r.Status == vulnfix.StatusVerified && vulnver.IsKernelSource(source) {
+			checkKernelBasis(t, source, list, r.Candidate)
+		}
 		if r.Status == vulnfix.StatusVerified && !vulnver.IsKernelSource(source) {
 			checkEveryCandidateReachesFix(t, source, bins, list, r.Fixed)
 		}
 	})
 }
 
+// checkKernelBasis asserts the kernel basis of a verified fix: the named
+// candidate is the source version of an unsigned linux-image-* entry of the
+// finding's kernel source. Signed images (linux-signed-*) and entries of any
+// other source never serve as the version basis.
+func checkKernelBasis(t *testing.T, source string, list []vulnfix.Package, candidate string) {
+	t.Helper()
+	for _, p := range list {
+		if p.SourceVersion != candidate || p.SourceName != source {
+			continue
+		}
+		name, _, _ := strings.Cut(p.Name, ":")
+		if strings.HasPrefix(name, "linux-image-") {
+			return
+		}
+	}
+	t.Fatalf("verified kernel fix names %q, which is no unsigned linux-image candidate of source %q", candidate, source)
+}
+
 // checkEveryCandidateReachesFix asserts the non-kernel basis rule of a
-// verified fix: every candidate of the source has a known source version at
-// or after fixed, and no installed binary is matched by an unknown-source
-// candidate.
+// verified fix: at least one installed binary exists and every installed
+// binary has a candidate of the source; every candidate of the source has a
+// known source version at or after fixed, and no installed binary is matched
+// by an unknown-source candidate.
 func checkEveryCandidateReachesFix(t *testing.T, source, bins string, list []vulnfix.Package, fixed string) {
 	t.Helper()
 	installed := map[string]bool{}
 	for _, b := range strings.Split(bins, ",") {
 		if b != "" {
 			installed[b] = true
+		}
+	}
+	if len(installed) == 0 {
+		t.Fatalf("verified fix without any installed binary")
+	}
+	for b := range installed {
+		covered := slices.ContainsFunc(list, func(p vulnfix.Package) bool {
+			name, _, _ := strings.Cut(p.Name, ":")
+			return name == b && p.SourceName == source
+		})
+		if !covered {
+			t.Fatalf("verified fix while installed binary %q has no candidate of source %q", b, source)
 		}
 	}
 	for _, p := range list {
