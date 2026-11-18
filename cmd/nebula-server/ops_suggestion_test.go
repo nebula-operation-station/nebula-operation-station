@@ -145,10 +145,10 @@ func TestSuggestionEpisodeEndsOnLowerTier(t *testing.T) {
 	crit := []opsfacts.Tier{opsfacts.TierCritical}
 	med := []opsfacts.Tier{opsfacts.TierMedium}
 	accept(s, suggNote(t, 1, opsnotes.KindFix, "g", high, ""))
-	accept(s, suggNote(t, 2, opsnotes.KindFix, "g", med, "")) // episode high ends
+	accept(s, suggNote(t, 2, opsnotes.KindFix, "g", med, ""))  // episode high ends
 	accept(s, suggNote(t, 3, opsnotes.KindFix, "g", high, "")) // new episode: sent again
-	accept(s, suggNote(t, 4, opsnotes.KindFix, "g", crit, ""))  // critical: new episode
-	accept(s, suggNote(t, 5, opsnotes.KindFix, "g", high, ""))  // critical ends; high (step 3) still open
+	accept(s, suggNote(t, 4, opsnotes.KindFix, "g", crit, "")) // critical: new episode
+	accept(s, suggNote(t, 5, opsnotes.KindFix, "g", high, "")) // critical ends; high (step 3) still open
 	accept(s, suggNote(t, 6, opsnotes.KindFix, "g", crit, "")) // critical again: new episode
 	if got := len(rec.texts()); got != 4 {
 		t.Fatalf("sent %d suggestions, want 4 (high, high again, critical, critical again)", got)
