@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package pveapi provides typed, read-only readers for the Proxmox VE JSON
-// API. It is built up ticket by ticket (ADR 0006); nothing in this package
-// mutates cluster state.
-//
-// Every value read from a PVE host is untrusted input: responses are size
-// limited, schema-validated and reduced to nonsecret evidence. Authorization
-// headers and response bodies are never logged.
+// This file holds the backup evidence readers (ADR 0006). They issue GET
+// requests and reduce responses to nonsecret evidence. Authorization headers
+// and response bodies are never logged. See doc.go for the package-wide rules.
+
 package pveapi
 
 import (
