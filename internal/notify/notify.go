@@ -226,54 +226,72 @@ func (n *Notifier) FlushRecords(ctx context.Context) error {
 	return nil
 }
 
-// record stores r in the notification log. The write runs in its own
-// goroutine, so a slow or locked database never delays a send or the next
-// notification; the caller does not wait for it. The write uses a context that
-// a cancelled send does not cancel (the decision must still be logged) and is
-// bounded by recordTimeout. When no write slot is free, r is dropped and
-// counted. A failed write is logged without the message text. record never
-// returns an error.
+// record stores r in the notification log (see write).
 func (n *Notifier) record(ctx context.Context, r notifylog.Record) {
-	if n.rec == nil {
+	n.write(ctx, []notifylog.Record{r})
+}
+
+// write stores recs in the notification log, in order. The whole batch takes
+// one write slot and is written by one goroutine, so a batch larger than the
+// slot count is not split across slots and is not dropped part way. The
+// goroutine lets a slow or locked database never delay a send or the next
+// notification; the caller does not wait for it. The writes use a context that
+// a cancelled send does not cancel (the decision must still be logged), and
+// each is bounded by recordTimeout. When no write slot is free, the whole batch
+// is dropped and counted in RecordsDropped. A failed write is logged without
+// the message text. write never returns an error.
+func (n *Notifier) write(ctx context.Context, recs []notifylog.Record) {
+	if n.rec == nil || len(recs) == 0 {
 		return
 	}
 	select {
 	case n.recSlots <- struct{}{}:
 	default:
-		dropped := n.recDropped.Add(1)
-		n.log.Warn("notification log is behind, record dropped", "kind", string(r.Kind), "dropped_total", dropped)
+		dropped := n.recDropped.Add(int64(len(recs)))
+		n.log.Warn("notification log is behind, records dropped", "count", len(recs), "dropped_total", dropped)
 		return
 	}
-	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), recordTimeout)
+	base := context.WithoutCancel(ctx)
 	go func() {
-		defer func() {
-			cancel()
-			<-n.recSlots
-		}()
-		if _, err := n.rec.Append(rctx, r); err != nil {
-			n.log.Warn("notification log write failed", "kind", string(r.Kind), "outcome", string(r.Outcome), "error", err.Error())
+		defer func() { <-n.recSlots }()
+		for _, r := range recs {
+			n.writeOne(base, r)
 		}
 	}()
 }
 
-// RecordHeld logs e as held back by the hourly limit (held_rate_limit) for a
-// caller that holds the message itself, such as the vulnerability digest. The
-// message is not sent. Integrity events are refused, as in NotifyProviders:
-// they must go through IntegrityGate. It never blocks and never returns an
-// error (see record).
-func (n *Notifier) RecordHeld(ctx context.Context, e Event) {
-	if isIntegrityKind(e.Kind) {
-		n.log.Warn("integrity notification refused outside IntegrityGate", "kind", e.Kind)
-		return
+// writeOne appends one record under its own recordTimeout.
+func (n *Notifier) writeOne(base context.Context, r notifylog.Record) {
+	rctx, cancel := context.WithTimeout(base, recordTimeout)
+	defer cancel()
+	if _, err := n.rec.Append(rctx, r); err != nil {
+		n.log.Warn("notification log write failed", "kind", string(r.Kind), "outcome", string(r.Outcome), "error", err.Error())
 	}
-	r, known := newRecord(e.cleaned())
-	if !known {
-		return
+}
+
+// RecordHeld logs each event in es as held back by the hourly limit
+// (held_rate_limit) for a caller that holds the messages itself, such as the
+// vulnerability digest. The messages are not sent. Integrity events are
+// refused, as in NotifyProviders: they must go through IntegrityGate. A caller
+// passes every message its call held in one call; they are written with one
+// write slot (see write). It never blocks and never returns an error.
+func (n *Notifier) RecordHeld(ctx context.Context, es ...Event) {
+	recs := make([]notifylog.Record, 0, len(es))
+	for _, e := range es {
+		if isIntegrityKind(e.Kind) {
+			n.log.Warn("integrity notification refused outside IntegrityGate", "kind", e.Kind)
+			continue
+		}
+		r, known := newRecord(e.cleaned())
+		if !known {
+			continue
+		}
+		r.Outcome = notifylog.OutcomeHeldRateLimit
+		r.Reason = notifylog.ReasonRateLimited
+		r.Providers = len(n.senders)
+		recs = append(recs, r)
 	}
-	r.Outcome = notifylog.OutcomeHeldRateLimit
-	r.Reason = notifylog.ReasonRateLimited
-	r.Providers = len(n.senders)
-	n.record(ctx, r)
+	n.write(ctx, recs)
 }
 
 // logHost returns the host the notification log stores for a host label: the

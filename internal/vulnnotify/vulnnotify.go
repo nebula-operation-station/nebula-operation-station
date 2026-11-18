@@ -164,6 +164,9 @@ type Notifier struct {
 	sent       []time.Time    // send times inside RateWindow
 	held       map[string]int // kind -> messages held for the digest
 	heldSince  time.Time
+	// heldLog are the messages held since the last flushHeld, passed to the
+	// sink's HoldRecorder in one call once n.mu is released.
+	heldLog []notify.Event
 }
 
 // New returns a Notifier.
@@ -496,6 +499,7 @@ func (n *Notifier) Flush(ctx context.Context) int {
 	n.mu.Lock()
 	n.foldIfFull(n.now())
 	n.mu.Unlock()
+	n.flushHeld(ctx)
 	return sent
 }
 
@@ -619,19 +623,34 @@ func (n *Notifier) admit(m outMsg, episode int64, now time.Time) []outMsg {
 	return out
 }
 
-// HoldRecorder is optionally implemented by the Sink. A message that is held
-// for the digest is passed to RecordHeld, so the notification log shows it
-// (*notify.Notifier implements it). RecordHeld must not block: it is called
-// while the Notifier holds its lock.
+// HoldRecorder is optionally implemented by the Sink. The messages that one
+// call held for the digest are passed to RecordHeld together, after the
+// Notifier has released its lock, so the notification log shows them
+// (*notify.Notifier implements it). RecordHeld must not block.
 type HoldRecorder interface {
-	RecordHeld(ctx context.Context, e notify.Event)
+	RecordHeld(ctx context.Context, es ...notify.Event)
 }
 
-// noteHeld passes a held message to the Sink when the Sink records holds.
-// Caller holds n.mu.
+// noteHeld queues a held message for the Sink's HoldRecorder, if the Sink
+// records holds. Caller holds n.mu; flushHeld passes the queue on.
 func (n *Notifier) noteHeld(e notify.Event) {
+	if _, ok := n.sink.(HoldRecorder); ok {
+		n.heldLog = append(n.heldLog, e)
+	}
+}
+
+// flushHeld passes the messages queued by noteHeld to the Sink in one
+// RecordHeld call. Caller must not hold n.mu.
+func (n *Notifier) flushHeld(ctx context.Context) {
+	n.mu.Lock()
+	es := n.heldLog
+	n.heldLog = nil
+	n.mu.Unlock()
+	if len(es) == 0 {
+		return
+	}
 	if h, ok := n.sink.(HoldRecorder); ok {
-		h.RecordHeld(context.Background(), e)
+		h.RecordHeld(ctx, es...)
 	}
 }
 
@@ -675,6 +694,9 @@ func (n *Notifier) digestDue(now time.Time) []outMsg {
 // set their de-duplication state; undelivered ones release their rate slot
 // and are queued again (bounded), a failed digest returns its counts.
 func (n *Notifier) send(ctx context.Context, ms []outMsg) int {
+	// Every public call ends here after it released n.mu, so the messages it
+	// held are passed on even when it sends nothing.
+	n.flushHeld(ctx)
 	if len(ms) == 0 {
 		return 0
 	}
