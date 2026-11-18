@@ -836,10 +836,8 @@ type pageData struct {
 	Host *hostPageData
 	// Ops is the data of the operations pages.
 	Ops *operationsData
-	// Notifications is the data of the notifications inbox;
-	// NotificationsEnabled shows its navigation entry (render fills it).
-	Notifications        *notificationsData
-	NotificationsEnabled bool
+	// Notifications is the data of the notifications inbox.
+	Notifications *notificationsData
 	// PVEList is the data of the PVE remote list page.
 	PVEList *pveListData
 	// PVEDetail is the data of a PVE remote's detail page.
@@ -1011,7 +1009,6 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, data pageData) 
 	}
 	data.NavCollapsed = navStateFromRequest(r) == navCollapsed
 	data.PVENav = h.pve != nil
-	data.NotificationsEnabled = h.inbox != nil
 	data.DeployEnabled = h.deploy != nil && h.pve != nil && h.pveRemotes != nil
 	// "Deploy here" (ADR 0008 section 6) on the chart's nodes of active
 	// remotes; read-only and blocked remotes get no shortcut.

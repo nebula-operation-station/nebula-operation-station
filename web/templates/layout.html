@@ -59,12 +59,10 @@
           <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-play"></use></svg>
           <span>Operations</span>
         </a>
-        {{if .NotificationsEnabled}}
         <a class="sidebar__item{{if eq .Active "notifications"}} sidebar__item--active{{end}}" href="/notifications"{{if .NavCollapsed}} title="Notifications"{{end}}{{if eq .Active "notifications"}} aria-current="page"{{end}}>
           <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-history"></use></svg>
           <span>Notifications</span>
         </a>
-        {{end}}
         <a class="sidebar__item{{if eq .Active "runbooks"}} sidebar__item--active{{end}}" href="/runbooks"{{if .NavCollapsed}} title="Runbooks / Modules"{{end}}{{if eq .Active "runbooks"}} aria-current="page"{{end}}>
           <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-book-open"></use></svg>
           <span>Runbooks / Modules</span>
