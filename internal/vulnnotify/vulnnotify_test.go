@@ -417,3 +417,50 @@ func TestMessagesArePlainStructuredText(t *testing.T) {
 		t.Fatalf("reason %q", s.es[0].Reason)
 	}
 }
+
+// The production sink must record holds, or digest holds are missing from the
+// notification log.
+var _ HoldRecorder = (*notify.Notifier)(nil)
+
+// holdSink is a sink that also takes held messages, as *notify.Notifier does.
+type holdSink struct {
+	*sink
+	mu   sync.Mutex
+	held []notify.Event
+}
+
+func (h *holdSink) RecordHeld(_ context.Context, e notify.Event) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.held = append(h.held, e)
+}
+
+// TestEveryMessageHeldForDigestIsRecorded: messages over the hourly limit are
+// counted into the digest, and each one must reach the hold recorder so the
+// notification log shows it. Messages that were sent are not held.
+func TestEveryMessageHeldForDigestIsRecorded(t *testing.T) {
+	ctx := context.Background()
+	c := &clock{t: t0}
+	hs := &holdSink{sink: &sink{}}
+	n, err := New(Config{Sink: hs, Sources: []string{"osv", "kev", "debian-tracker"}, Now: c.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fs []vulnstore.Finding
+	for i := 0; i < 25; i++ {
+		fs = append(fs, finding(byte(i), 1, vulnstore.TierHigh, true))
+	}
+	if got := n.Findings(ctx, fs); got != MaxPerHour {
+		t.Fatalf("sent %d, want %d", got, MaxPerHour)
+	}
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	if len(hs.held) != 25-MaxPerHour {
+		t.Fatalf("recorded %d held messages, want %d", len(hs.held), 25-MaxPerHour)
+	}
+	for _, e := range hs.held {
+		if e.Kind != KindKEVNew {
+			t.Fatalf("held message kind %q, want %q", e.Kind, KindKEVNew)
+		}
+	}
+}

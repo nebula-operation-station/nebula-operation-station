@@ -264,3 +264,26 @@ func TestTelegramOnlySendsMessages(t *testing.T) {
 		}
 	}
 }
+
+// TestRecordHeldLogsAHeldEvent: a message that a caller holds back itself
+// (the vulnerability digest) is logged as held_rate_limit and is not sent.
+func TestRecordHeldLogsAHeldEvent(t *testing.T) {
+	rec := newFakeRecorder()
+	sender := &stubSender{name: "ntfy"}
+	n := NewWithSenders(quiet(), nil, sender)
+	n.SetRecorder(rec)
+	n.RecordHeld(context.Background(), Event{Kind: "vuln.kev_new", Host: "web01", State: "new", Time: testNow})
+	rec.await(t, 1)
+	recs := rec.got()
+	if len(recs) != 1 {
+		t.Fatalf("got %d records, want 1", len(recs))
+	}
+	r := recs[0]
+	if r.Kind != notifylog.KindVulnKEVNew || r.Outcome != notifylog.OutcomeHeldRateLimit ||
+		r.Reason != notifylog.ReasonRateLimited || r.Providers != 1 || r.Host != "web01" {
+		t.Fatalf("record %+v: want a held_rate_limit kev record for web01 with 1 provider", r)
+	}
+	if sender.count() != 0 {
+		t.Fatal("a held event was sent")
+	}
+}

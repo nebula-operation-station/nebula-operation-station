@@ -540,6 +540,7 @@ func (n *Notifier) foldIfFull(now time.Time) bool {
 			delete(n.inflight, m.key)
 		}
 		n.hold(m.ev.Kind, 1, now)
+		n.noteHeld(m.ev)
 		if m.commit != nil {
 			m.commit()
 		}
@@ -611,10 +612,27 @@ func (n *Notifier) admit(m outMsg, episode int64, now time.Time) []outMsg {
 		return append(out, m)
 	}
 	n.hold(m.ev.Kind, 1, now)
+	n.noteHeld(m.ev)
 	if m.commit != nil {
 		m.commit()
 	}
 	return out
+}
+
+// HoldRecorder is optionally implemented by the Sink. A message that is held
+// for the digest is passed to RecordHeld, so the notification log shows it
+// (*notify.Notifier implements it). RecordHeld must not block: it is called
+// while the Notifier holds its lock.
+type HoldRecorder interface {
+	RecordHeld(ctx context.Context, e notify.Event)
+}
+
+// noteHeld passes a held message to the Sink when the Sink records holds.
+// Caller holds n.mu.
+func (n *Notifier) noteHeld(e notify.Event) {
+	if h, ok := n.sink.(HoldRecorder); ok {
+		h.RecordHeld(context.Background(), e)
+	}
 }
 
 // hold counts c messages of kind into the digest. Caller holds n.mu.

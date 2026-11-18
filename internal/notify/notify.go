@@ -256,6 +256,26 @@ func (n *Notifier) record(ctx context.Context, r notifylog.Record) {
 	}()
 }
 
+// RecordHeld logs e as held back by the hourly limit (held_rate_limit) for a
+// caller that holds the message itself, such as the vulnerability digest. The
+// message is not sent. Integrity events are refused, as in NotifyProviders:
+// they must go through IntegrityGate. It never blocks and never returns an
+// error (see record).
+func (n *Notifier) RecordHeld(ctx context.Context, e Event) {
+	if isIntegrityKind(e.Kind) {
+		n.log.Warn("integrity notification refused outside IntegrityGate", "kind", e.Kind)
+		return
+	}
+	r, known := newRecord(e.cleaned())
+	if !known {
+		return
+	}
+	r.Outcome = notifylog.OutcomeHeldRateLimit
+	r.Reason = notifylog.ReasonRateLimited
+	r.Providers = len(n.senders)
+	n.record(ctx, r)
+}
+
 // logHost returns the host the notification log stores for a host label: the
 // label itself when it is an inventory host ID (lowercase, at most 63 bytes),
 // otherwise "". A display label such as "Web01" is not an ID, and Append
