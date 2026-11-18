@@ -156,7 +156,7 @@ func TestRefusesMalformedInput(t *testing.T) {
 		"doc too long":       func(in *Input) { in.Docs[0].Text = strings.Repeat("a", MaxDocTextBytes+1) },
 		"too many findings":  func(in *Input) { in.Findings = make([]Finding, MaxFindings+1) },
 		"candidate too long": func(in *Input) { in.Candidates[0].Label = strings.Repeat("a", MaxCandidateLabelBytes+1) },
-		"host label control": func(in *Input) { in.Host.Label = "web‮01" },
+		"host label control": func(in *Input) { in.Host.Label = "web" + string(rune(0x202E)) + "01" },
 		"fix without host":   func(in *Input) { in.Host = nil },
 	}
 	for name, mutate := range cases {

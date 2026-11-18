@@ -134,8 +134,6 @@ func (h harness) run(t *testing.T, docs Searcher) (Summary, error) {
 	return Run(context.Background(), d)
 }
 
-func refusalsOf(s Summary) string { return strings.Join(s.Refusals, ",") }
-
 func TestHappyPathOneCallWritesMappedNote(t *testing.T) {
 	nos := &fakeNOS{cfg: goodSettings(), items: []nosclient.WorkItem{labItem("h1:os")}}
 	h := newHarness(t, nos, &fakeChat{replies: []string{goodFix}})
@@ -186,7 +184,7 @@ func TestModelOutputShapes(t *testing.T) {
 		{"only unknown candidate", `{"summary":"a","steps":[{"candidate":"c9","why":"b"}]}`, false, 1},
 		{"url in summary", `{"summary":"siehe https://evil.example","steps":[{"candidate":"c1","why":"b"}]}`, false, 0},
 		{"www in why", `{"summary":"a","steps":[{"candidate":"c1","why":"www.evil.example"}]}`, false, 0},
-		{"bidi in summary", "{\"summary\":\"a‮b\",\"steps\":[{\"candidate\":\"c1\",\"why\":\"b\"}]}", false, 0},
+		{"bidi in summary", `{"summary":"a` + string(rune(0x202E)) + `b","steps":[{"candidate":"c1","why":"b"}]}`, false, 0},
 		{"too many steps", `{"summary":"a","steps":[` + strings.Repeat(`{"candidate":"c1","why":"b"},`, 6) + `{"candidate":"c1","why":"b"}]}`, false, 0},
 		{"unknown citation", `{"summary":"a","steps":[{"candidate":"c1","why":"b"}],"citations":["x9"]}`, false, 0},
 		{"no steps no mitigation", `{"summary":"a","steps":[]}`, false, 0},
