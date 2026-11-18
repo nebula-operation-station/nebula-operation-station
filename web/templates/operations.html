@@ -30,6 +30,11 @@
     </div>
   </div>
   {{if .Ops.Items}}
+  {{if .Ops.AnyAbort}}
+  <form id="abort-select" method="get" action="/operations/abort/confirm" class="actions">
+    <button type="submit">Abort selected rollouts</button>
+  </form>
+  {{end}}
   <div class="table-wrap">
   <table class="inventory">
     <thead>
@@ -43,13 +48,14 @@
         <th>By</th>
         <th>Created</th>
         <th>Finished</th>
+        <th><span class="hint">Abort</span></th>
       </tr>
     </thead>
     <tbody>
       {{range .Ops.Items}}
       {{if .Group}}
       <tr class="op-group-row" data-search="{{.Group.Search}}">
-        <td colspan="9">
+        <td colspan="10">
           <details class="op-group">
             <summary><strong>{{.Group.Label}}</strong> — {{.Group.Hosts}} host{{if ne .Group.Hosts 1}}s{{end}}, by {{.Group.CreatedBy}}, {{timeTag .Group.Created}}</summary>
             <ul class="op-group__list">
@@ -64,7 +70,7 @@
       </tr>
       {{else}}
       <tr data-search="{{.Row.Search}}">
-        <td><a href="/operations/{{.Row.ID}}">{{.Row.Short}}</a></td>
+        <td>{{if .Row.CanAbort}}<input type="checkbox" name="id" value="{{.Row.ID}}" form="abort-select" aria-label="Select operation {{.Row.Short}} for abort"> {{end}}<a href="/operations/{{.Row.ID}}">{{.Row.Short}}</a></td>
         <td>{{if .Row.Title}}<strong>{{.Row.Title}}</strong> <span class="hint mono">{{.Row.Action}}</span>{{else}}<code class="mono">{{.Row.Action}}</code>{{end}}</td>
         <td>{{.Row.Risk}}</td>
         <td><span class="badge {{.Row.StateClass}}">{{.Row.State}}</span></td>
@@ -73,6 +79,7 @@
         <td>{{.Row.CreatedBy}}</td>
         <td>{{timeTag .Row.Created}}</td>
         <td>{{if .Row.FinishedSet}}{{timeTag .Row.Finished}}{{else}}—{{end}}</td>
+        <td>{{if .Row.CanAbort}}<a class="button" href="/operations/abort/confirm?id={{.Row.ID}}">Abort…</a>{{end}}</td>
       </tr>
       {{end}}
       {{end}}
