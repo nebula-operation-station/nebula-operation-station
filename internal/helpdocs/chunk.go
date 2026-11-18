@@ -116,20 +116,22 @@ func (ix *Index) Lookup(id string) (Chunk, bool) {
 	return Chunk{}, false
 }
 
-// FromDocsembed indexes the embedded operator handbook (docs/handbook,
-// FAQ included) as embedded by internal/docsembed.
-//
-// The admin guide (docs/admin/guide.md) is not part of the embedding
-// yet; it has to be added to internal/docsembed before it can be indexed.
+// FromDocsembed indexes the embedded operator documentation as
+// embedded by internal/docsembed: the handbook (docs/handbook, FAQ
+// included) and the admin guide (docs/admin/guide.md, slug
+// docsembed.AdminGuideSlug). Handbook chunk IDs do not depend on the
+// guide; the guide is indexed by the same rules and anchors.
 func FromDocsembed() (*Index, error) {
 	pages, err := docsembed.Pages()
 	if err != nil {
 		return nil, fmt.Errorf("helpdocs: load handbook: %w", err)
 	}
-	srcs := make([]Source, 0, len(pages))
+	guide := docsembed.AdminGuide()
+	srcs := make([]Source, 0, len(pages)+1)
 	for _, p := range pages {
 		srcs = append(srcs, Source{Slug: p.Slug, File: p.File, Data: p.Source})
 	}
+	srcs = append(srcs, Source{Slug: guide.Slug, File: guide.File, Data: guide.Source})
 	return Build(srcs)
 }
 
