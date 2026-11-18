@@ -656,7 +656,16 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		}
 		// Ops agent API (ADR 0016 D2) under /api/v1/ops/, only for the one
 		// ops token. MountOps is the only route to that prefix.
-		oh, err := newOpsAPI(cfg.API, db, opsNotes, store.List, log)
+		// Suggestions (ADR 0016 D10) are sent for accepted fix notes; they are
+		// wired only with the ops token, like the API that reports them.
+		var opsSugg *opsSuggestEvents
+		if _, hasOpsToken := cfg.API.OpsToken(); hasOpsToken {
+			opsSugg, err = wireOpsSuggestions(db, cfg.DataDir, cfg.PublicOrigin, notifier, log)
+			if err != nil {
+				return err
+			}
+		}
+		oh, err := newOpsAPI(cfg.API, db, opsNotes, store.List, log, opsSugg.acceptedHook())
 		if err != nil {
 			return err
 		}
