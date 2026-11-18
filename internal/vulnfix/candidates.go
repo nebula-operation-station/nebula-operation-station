@@ -30,6 +30,9 @@ type candidateResult struct {
 	// lowest and highest are the lowest and highest known candidate
 	// source versions.
 	lowest, highest string
+	// lowestAtFix is the lowest candidate source version at or after the
+	// fixed version; it is the version a verified fix names.
+	lowestAtFix string
 	// allSecurity: every matched candidate comes from a security archive.
 	allSecurity bool
 }
@@ -71,6 +74,11 @@ func (t *tally) add(p Package, fixed string, known bool) {
 		t.below++
 	} else {
 		t.ok++
+		if t.res.lowestAtFix == "" {
+			t.res.lowestAtFix = p.SourceVersion
+		} else if c, _ := vulnver.CompareDpkg(p.SourceVersion, t.res.lowestAtFix); c < 0 {
+			t.res.lowestAtFix = p.SourceVersion
+		}
 	}
 	if t.res.lowest == "" {
 		t.res.lowest, t.res.highest = p.SourceVersion, p.SourceVersion
