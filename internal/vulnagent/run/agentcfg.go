@@ -51,6 +51,11 @@ type HTTPAgentConfig struct {
 	http     *http.Client
 }
 
+// Format prints a placeholder for every verb. fmt does not call the
+// secret's own methods on the unexported token field, so the struct as a
+// whole must hide it.
+func (HTTPAgentConfig) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, "[REDACTED]") }
+
 // AgentConfigOptions configure NewHTTPAgentConfig; the values are those of
 // nosclient.Config.
 type AgentConfigOptions struct {

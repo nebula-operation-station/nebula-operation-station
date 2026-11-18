@@ -64,8 +64,10 @@ Other targets:
 
 - `make test`: the unit tests only, without the deployment tests.
 - `make fuzz`: runs a fixed list of fuzz targets (see the `fuzz` target
-  in the `Makefile`) for 20 seconds each, a smoke run, not a campaign. Most
-  `Fuzz*` functions are not in that list; run one with
+  in the `Makefile`): 96 targets, 20 seconds each for the first 13 and 10
+  seconds each for the other 83 (before: "for 20 seconds each"), a smoke
+  run, not a campaign. 100 of the 196 `Fuzz*` functions are not in that
+  list; run one with
   `go test -run='^$' -fuzz='^FuzzName$' ./path/`
   (`docs/implementation/security-tests.md` has the inventory).
 - `make test-integration`: runs `test/integration` against SSH test VMs
