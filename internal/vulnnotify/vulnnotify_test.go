@@ -5,6 +5,7 @@ package vulnnotify
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"unicode"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/notifylog"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
 )
@@ -415,5 +417,115 @@ func TestMessagesArePlainStructuredText(t *testing.T) {
 	// The text stays literal: markup is not interpreted, only kept as text.
 	if !strings.Contains(s.es[0].Reason, "<b>x</b>") {
 		t.Fatalf("reason %q", s.es[0].Reason)
+	}
+}
+
+// The production sink must record holds, or digest holds are missing from the
+// notification log.
+var _ HoldRecorder = (*notify.Notifier)(nil)
+
+// holdSink is a sink that also takes held messages, as *notify.Notifier does.
+type holdSink struct {
+	*sink
+	mu   sync.Mutex
+	held []notify.Event
+}
+
+func (h *holdSink) RecordHeld(_ context.Context, es ...notify.Event) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.held = append(h.held, es...)
+}
+
+// TestEveryMessageHeldForDigestIsRecorded: messages over the hourly limit are
+// counted into the digest, and each one must reach the hold recorder so the
+// notification log shows it. Messages that were sent are not held.
+func TestEveryMessageHeldForDigestIsRecorded(t *testing.T) {
+	ctx := context.Background()
+	c := &clock{t: t0}
+	hs := &holdSink{sink: &sink{}}
+	n, err := New(Config{Sink: hs, Sources: []string{"osv", "kev", "debian-tracker"}, Now: c.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fs []vulnstore.Finding
+	for i := 0; i < 25; i++ {
+		fs = append(fs, finding(byte(i), 1, vulnstore.TierHigh, true))
+	}
+	if got := n.Findings(ctx, fs); got != MaxPerHour {
+		t.Fatalf("sent %d, want %d", got, MaxPerHour)
+	}
+	hs.mu.Lock()
+	defer hs.mu.Unlock()
+	if len(hs.held) != 25-MaxPerHour {
+		t.Fatalf("recorded %d held messages, want %d", len(hs.held), 25-MaxPerHour)
+	}
+	for _, e := range hs.held {
+		if e.Kind != KindKEVNew {
+			t.Fatalf("held message kind %q, want %q", e.Kind, KindKEVNew)
+		}
+	}
+}
+
+// gatedRecorder is a notification log whose writes wait for release, so the
+// write slots stay taken until the test lets them go.
+type gatedRecorder struct {
+	release chan struct{}
+	mu      sync.Mutex
+	recs    []notifylog.Record
+}
+
+func (g *gatedRecorder) Append(_ context.Context, r notifylog.Record) (int64, error) {
+	<-g.release
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.recs = append(g.recs, r)
+	return int64(len(g.recs)), nil
+}
+
+// deliveringSink accepts every message and records held ones through the
+// production notifier, as the server wires it.
+type deliveringSink struct{ *notify.Notifier }
+
+func (deliveringSink) Notify(context.Context, notify.Event) int { return 1 }
+
+// TestHeldBurstLargerThanLogSlotsIsNotDropped: one Findings call holds more
+// messages than the notification log has write slots (64). Every held message
+// must reach the log: the holds of one call are written together, so the slots
+// cannot drop the rest while the log is still busy.
+func TestHeldBurstLargerThanLogSlotsIsNotDropped(t *testing.T) {
+	ctx := context.Background()
+	rec := &gatedRecorder{release: make(chan struct{})}
+	nt := notify.NewWithSenders(slog.New(slog.DiscardHandler), nil)
+	nt.SetRecorder(rec)
+	c := &clock{t: t0}
+	n, err := New(Config{Sink: deliveringSink{nt}, Sources: []string{"osv"}, Now: c.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const held = 100 // more than the 64 log write slots
+	var fs []vulnstore.Finding
+	for i := 0; i < MaxPerHour+held; i++ {
+		fs = append(fs, finding(byte(i), 1, vulnstore.TierHigh, true))
+	}
+	if got := n.Findings(ctx, fs); got != MaxPerHour {
+		t.Fatalf("sent %d, want %d", got, MaxPerHour)
+	}
+	close(rec.release)
+	if err := nt.FlushRecords(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := nt.RecordsDropped(); got != 0 {
+		t.Fatalf("%d held messages dropped from the log, want 0", got)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.recs) != held {
+		t.Fatalf("log has %d held records, want %d", len(rec.recs), held)
+	}
+	for _, r := range rec.recs {
+		if r.Outcome != notifylog.OutcomeHeldRateLimit {
+			t.Fatalf("record outcome %q, want held_rate_limit", r.Outcome)
+		}
 	}
 }
