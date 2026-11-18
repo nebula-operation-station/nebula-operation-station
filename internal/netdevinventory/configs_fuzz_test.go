@@ -123,7 +123,15 @@ func TestPANOSDeviceTextCannotForgeLine(t *testing.T) {
 			if len(with) != len(without) {
 				t.Fatalf("break adds lines: %d lines with it, %d without: %q", len(with), len(without), with)
 			}
-			for _, l := range with {
+			// A raw break inside a rendered line keeps the line count
+			// unchanged, so no line may contain a break, and the joined text
+			// split on newlines must have no line that starts with the forgery.
+			for i, l := range with {
+				if strings.ContainsAny(l, "\r\n") {
+					t.Fatalf("line %d contains a line break: %q", i, l)
+				}
+			}
+			for _, l := range strings.Split(strings.Join(with, "\n"), "\n") {
 				if strings.HasPrefix(strings.TrimLeft(l, " "), "forged") {
 					t.Fatalf("device text forged an element line: %q", l)
 				}
