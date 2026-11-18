@@ -732,6 +732,10 @@ type pageData struct {
 	Content string
 	// Bare pages (login, setup) are shown without the navigation.
 	Bare bool
+	// AssistantPanel is true on a full page of the Assistant panel itself:
+	// the layout then renders no inline or side Assistant section, so the
+	// page has exactly one panel (ADR 0016 D11).
+	AssistantPanel bool
 	// Scripts are extra files under /static/ loaded after htmx.
 	Scripts []string
 	// Dashboard only:

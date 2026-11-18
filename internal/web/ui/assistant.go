@@ -4,21 +4,21 @@ package ui
 
 // The Assistant panel (ADR 0016 D11, ADR 0014 D1): one panel with two tabs.
 //
-//   - Help ("Hilfe") is shown to every logged-in user and reads only the
-//     embedded handbook (help.go). It never reads notes.
+//   - Help ("Hilfe") is shown to every logged-in user. Its view is built by
+//     internal/web/ui/assistanthelp from the embedded handbook (help.go) and
+//     plain request values. It never reads notes.
 //   - Ops is shown to admins only. Its handlers live in assistant_ops.go
 //     and read the notes store; they answer 404 to everyone else.
 //
-// Two backends, two types: assistantHelp (this file) holds no notes store
-// and no Ops configuration, only the admin check that decides whether the
-// Ops tab is listed. The Ops handlers (Handler methods in assistant_ops.go)
-// hold the store. The import boundary and the field test in
-// assistant_boundary_test.go keep it that way.
+// The Help routes in this file are a thin adapter: they call
+// assistanthelp.Build and never touch h.assistantOps. The boundary tests in
+// assistant_boundary_test.go and assistanthelp/boundary_test.go keep it so.
 //
 // Every panel route answers with the panel fragment when the request comes
-// from htmx (HX-Request: true) and with the full layout page otherwise, so
-// the links work without htmx too. The panel shell is loaded lazily: the
-// side panel fetches /assistant/panel when it is first opened.
+// from htmx (HX-Request: true) and with the full layout page otherwise. A
+// full page is the panel itself: the layout adds no second Assistant section
+// (pageData.AssistantPanel). The side panel fetches /assistant/panel when it
+// is first opened.
 
 import (
 	"bytes"
@@ -29,8 +29,8 @@ import (
 	"net/http"
 	"sync"
 	"time"
-	"unicode/utf8"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui/assistanthelp"
 	"github.com/nebula-operation-station/nebula-operation-station/web/templates"
 )
 
@@ -54,7 +54,7 @@ type assistantPanelView struct {
 	// Tabs is the tab bar: Help always, Ops only for admins.
 	Tabs []assistantTab
 	// Help is the Help body when the Help tab is active.
-	Help *helpView
+	Help *assistanthelp.View
 	// Ops is the Ops body when the Ops tab is active.
 	Ops *assistantOpsView
 }
@@ -99,75 +99,68 @@ func assistantTabs(active string, showOps bool) []assistantTab {
 	return tabs
 }
 
-// assistantHelp serves the Help tab and the panel shell. It holds no notes
-// store and no Ops store: page renders the layout data, showOps is the
-// admin check that lists the Ops tab. Nothing else is reachable from here.
-type assistantHelp struct {
-	log     *slog.Logger
-	page    func(r *http.Request, title string) pageData
-	showOps func(r *http.Request) bool
+// assistantBook adapts the rendered handbook (help.go) to the Book the Help
+// backend reads. It is the only thing the Help routes hand to that backend.
+type assistantBook struct {
+	b *helpBook
 }
 
-// register adds the Help routes. GET only; the Ops routes are separate.
-func (a *assistantHelp) register(mux *http.ServeMux) {
-	mux.HandleFunc("GET /assistant/panel", a.handlePanel)
-	mux.HandleFunc("GET /assistant/help", a.handleHelp)
+// Chapters returns the handbook's table of contents in reading order.
+func (a assistantBook) Chapters() []assistanthelp.Chapter {
+	out := make([]assistanthelp.Chapter, 0, len(a.b.order))
+	for _, c := range a.b.order {
+		out = append(out, assistanthelp.Chapter{Title: c.title, URL: c.url})
+	}
+	return out
 }
 
-// handlePanel renders the panel shell with the Help tab selected and its
-// chapter list. It is the target of the side panel and of /help.
-func (a *assistantHelp) handlePanel(w http.ResponseWriter, r *http.Request) {
-	a.serve(w, r, false)
+// Search returns the handbook matches of q and whether more matched.
+func (a assistantBook) Search(q string) ([]assistanthelp.Result, bool) {
+	matches, truncated := a.b.search(q)
+	out := make([]assistanthelp.Result, 0, len(matches))
+	for _, m := range matches {
+		out = append(out, assistanthelp.Result{Section: m.Section, Page: m.Page, URL: m.URL})
+	}
+	return out, truncated
 }
 
-// handleHelp renders the Help tab with the search of the query.
-func (a *assistantHelp) handleHelp(w http.ResponseWriter, r *http.Request) {
-	a.serve(w, r, true)
+// handleAssistantPanel renders the panel shell with the Help tab selected
+// and its chapter list. It is the target of the side panel and of /help.
+func (h *Handler) handleAssistantPanel(w http.ResponseWriter, r *http.Request) {
+	h.serveAssistantHelp(w, r, false)
 }
 
-// serve builds the Help view and writes it. The Ops tab is listed for an
-// admin by showOps; no notes are read.
-func (a *assistantHelp) serve(w http.ResponseWriter, r *http.Request, withSearch bool) {
+// handleAssistantHelp renders the Help tab with the search of the query.
+func (h *Handler) handleAssistantHelp(w http.ResponseWriter, r *http.Request) {
+	h.serveAssistantHelp(w, r, true)
+}
+
+// serveAssistantHelp builds the Help view and writes it. The Ops tab is
+// listed for an admin by assistantOpsAllowed, which reads no notes.
+func (h *Handler) serveAssistantHelp(w http.ResponseWriter, r *http.Request, withSearch bool) {
 	if !helpMethodOK(w, r) {
 		return
 	}
 	book, err := loadHelpBook()
 	if err != nil {
-		a.log.Error("assistant: load handbook", "error", err)
+		h.log.Error("assistant: load handbook", "error", err)
 		http.Error(w, "internal server error", http.StatusInternalServerError)
 		return
 	}
-	v := &helpView{}
-	if withSearch {
-		v = helpSearchView(r, book)
+	v, err := assistanthelp.Build(assistantBook{b: book}, r.URL.Query(), withSearch)
+	if err != nil {
+		h.log.Error("assistant: help view", "error", err)
+		http.Error(w, "internal server error", http.StatusInternalServerError)
+		return
 	}
-	for _, c := range book.order {
-		v.Chapters = append(v.Chapters, helpChapter{Title: c.title, URL: c.url})
-	}
-	view := &assistantPanelView{Tabs: assistantTabs(assistantTabHelp, a.showOps(r)), Help: v}
-	writeAssistantPanel(w, r, a.log, a.page, view)
-}
-
-// helpSearchView builds the Help tab view from the request's query.
-// It mirrors the search of /help (help.go).
-func helpSearchView(r *http.Request, book *helpBook) *helpView {
-	v := &helpView{}
-	if q, ok := r.URL.Query()["q"]; ok && len(q) > 0 {
-		v.Searched = true
-		v.Query = q[0]
-		if len(v.Query) > maxHelpQueryBytes || !utf8.ValidString(v.Query) {
-			v.Invalid = true
-			v.Query = ""
-		} else {
-			v.Results, v.Truncated = book.search(v.Query)
-		}
-	}
-	return v
+	view := &assistantPanelView{Tabs: assistantTabs(assistantTabHelp, h.assistantOpsAllowed(r)), Help: v}
+	writeAssistantPanel(w, r, h.log, h.assistantPageData, view)
 }
 
 // writeAssistantPanel answers with the panel fragment for htmx and with the
 // full layout page otherwise. The response depends on HX-Request, so it is
-// marked as varying on it.
+// marked as varying on it. The full page is marked as the panel itself, so
+// the layout does not add a second Assistant section.
 func writeAssistantPanel(w http.ResponseWriter, r *http.Request, log *slog.Logger, page func(*http.Request, string) pageData, v *assistantPanelView) {
 	w.Header().Add("Vary", "HX-Request")
 	if r.Header.Get("HX-Request") == "true" {
@@ -176,6 +169,7 @@ func writeAssistantPanel(w http.ResponseWriter, r *http.Request, log *slog.Logge
 	}
 	pd := page(r, "Assistant")
 	pd.Active = "help"
+	pd.AssistantPanel = true
 	renderAssistantTemplate(w, log, assistantPanelPageTemplate, "layout", assistantPanelPage{pageData: pd, Panel: v})
 }
 
@@ -238,13 +232,13 @@ func (h *Handler) assistantPageData(r *http.Request, title string) pageData {
 	return data
 }
 
-// registerAssistant adds the panel routes. The Help backend gets only the
-// layout data, the admin check and the log; the Ops routes are Handler
-// methods that hold the notes store. Ops routes are registered even without
-// Ops configured: they then answer 404 like for a non-admin.
+// registerAssistant adds the panel routes. The Help routes read the
+// handbook only; the Ops routes are Handler methods that hold the notes
+// store. Ops routes are registered even without Ops configured: they then
+// answer 404 like for a non-admin.
 func (h *Handler) registerAssistant(mux *http.ServeMux) {
-	help := &assistantHelp{log: h.log, page: h.assistantPageData, showOps: h.assistantOpsAllowed}
-	help.register(mux)
+	mux.HandleFunc("GET /assistant/panel", h.handleAssistantPanel)
+	mux.HandleFunc("GET /assistant/help", h.handleAssistantHelp)
 	mux.HandleFunc("GET /assistant/ops", h.handleAssistantOps)
 	mux.HandleFunc("GET /assistant/ops/notes/{id}", h.handleAssistantOpsNote)
 	mux.HandleFunc("POST /assistant/ops/notes/{id}/dismiss", h.handleAssistantOpsDismiss)

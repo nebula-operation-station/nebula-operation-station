@@ -137,7 +137,7 @@
        at once. Elsewhere the link loads the panel into an empty container
        when clicked (htmx), so nothing is fetched before the user asks for
        it. No script and no button here: pages assert their markup. -->
-  {{if eq .Active "help"}}
+  {{if .AssistantPanel}}{{else if eq .Active "help"}}
   <section class="assistant assistant--inline" id="assistant" aria-label="Assistant">
     <h2>Assistant</h2>
     <div id="assistant-root" hx-get="/assistant/panel" hx-trigger="load" hx-swap="innerHTML"></div>
