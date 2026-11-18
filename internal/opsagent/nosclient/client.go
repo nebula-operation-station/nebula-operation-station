@@ -5,6 +5,8 @@ package nosclient
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"os"
 	"time"
 	"unicode/utf8"
 )
@@ -70,10 +73,17 @@ type Config struct {
 	BaseURL string
 	// TokenFile holds the API bearer token (mode 0600 or 0400).
 	TokenFile string
+	// CAFile, when set, is a PEM file with the only CA certificates the
+	// server certificate is verified against (pinned CA). Verification is
+	// never turned off.
+	CAFile string
 	// Transport overrides the HTTP transport; nil uses a default transport
 	// that ignores proxy variables and follows no redirect. Tests use it.
 	Transport http.RoundTripper
 }
+
+// MaxCAFileBytes bounds the pinned CA file.
+const MaxCAFileBytes = 1 << 20
 
 // Client talks to the four ops endpoints. It holds the token only as a
 // Token value, which never prints.
@@ -95,10 +105,15 @@ func New(cfg Config) (*Client, error) {
 	}
 	rt := cfg.Transport
 	if rt == nil {
+		roots, err := pinnedRoots(cfg.CAFile)
+		if err != nil {
+			return nil, err
+		}
 		rt = &http.Transport{
 			DialContext:         (&net.Dialer{Timeout: requestTimeout}).DialContext,
 			TLSHandshakeTimeout: requestTimeout,
 			DisableKeepAlives:   true,
+			TLSClientConfig:     &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots},
 		}
 	}
 	return &Client{
@@ -110,6 +125,31 @@ func New(cfg Config) (*Client, error) {
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 	}, nil
+}
+
+// pinnedRoots returns the pinned CA pool from a PEM file, or nil (the system
+// pool) when no file is named.
+func pinnedRoots(path string) (*x509.CertPool, error) {
+	if path == "" {
+		return nil, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open ca file: %w", err)
+	}
+	defer f.Close()
+	raw, err := io.ReadAll(io.LimitReader(f, MaxCAFileBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read ca file: %w", err)
+	}
+	if len(raw) > MaxCAFileBytes {
+		return nil, fmt.Errorf("ca file: %w", ErrTooLarge)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(raw) {
+		return nil, errors.New("ca file holds no certificate")
+	}
+	return pool, nil
 }
 
 // checkBaseURL accepts https URLs and http URLs whose host is a loopback IP
