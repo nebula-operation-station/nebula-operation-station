@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Starts nebula-ops-agent.service when the server touches its trigger file:
+# a finding newly entered tier critical or high, or an admin asked a
+# question (ADR 0016 D3). The trigger carries no data. Only systemd reads
+# this directory; it lies below /var/lib/nebula, which the agent's unit
+# makes inaccessible to the agent (D13). Off by default (guide, "Ops agent"):
+#   sudo systemctl enable --now nebula-ops-agent.path
+[Unit]
+Description=Nebula Operation Station ops agent: watch the server's trigger
+
+[Path]
+PathChanged=/var/lib/nebula/opsagent/trigger
+Unit=nebula-ops-agent.service
+
+[Install]
+WantedBy=multi-user.target
