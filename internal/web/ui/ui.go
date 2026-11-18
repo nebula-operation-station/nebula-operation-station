@@ -100,6 +100,9 @@ type Options struct {
 	// Operations plans and follows executions. Nil leaves the
 	// operations page empty.
 	Operations Operations
+	// OperationSuggestions opens the operation form from an agent
+	// suggestion (ADR 0016 D8). Nil answers those requests with 404.
+	OperationSuggestions *OperationSuggestions
 	// Pins stores the per-host pinned quick actions (job ui5). Nil
 	// leaves pin management off: no pin endpoints and no pin UI.
 	Pins PinStore
@@ -237,14 +240,16 @@ type Handler struct {
 	publicOrigin string
 	// pages maps a content name to the parsed template set (layout +
 	// that page), so every page can define its own "content" block.
-	pages          map[string]*template.Template
-	staticFS       fs.FS
-	status         StatusProvider
-	hostNames      func(ctx context.Context) []string
-	hosts          func(ctx context.Context) ([]inventory.Host, error)
-	hostKeys       func(ctx context.Context) ([]*pb.HostKeyPin, error)
-	inventory      InventoryStore
-	operations     Operations
+	pages      map[string]*template.Template
+	staticFS   fs.FS
+	status     StatusProvider
+	hostNames  func(ctx context.Context) []string
+	hosts      func(ctx context.Context) ([]inventory.Host, error)
+	hostKeys   func(ctx context.Context) ([]*pb.HostKeyPin, error)
+	inventory  InventoryStore
+	operations Operations
+	// opSuggest opens operation forms from agent suggestions; nil refuses them.
+	opSuggest      *OperationSuggestions
 	pins           PinStore
 	schedules      Schedules
 	leases         Leases
@@ -328,6 +333,9 @@ func New(o Options) (*Handler, error) {
 	if o.AssistantOps != nil && (o.AssistantOps.Store == nil || o.AssistantOps.IsAdmin == nil) {
 		return nil, errors.New("ui: AssistantOps needs Store and IsAdmin")
 	}
+	if o.OperationSuggestions != nil && (o.OperationSuggestions.Store == nil || o.OperationSuggestions.IsAdmin == nil) {
+		return nil, errors.New("ui: OperationSuggestions needs Store and IsAdmin")
+	}
 	serverIP := o.ServerIP
 	if serverIP == nil {
 		serverIP = serverPrivateIPv4
@@ -361,6 +369,7 @@ func New(o Options) (*Handler, error) {
 		hostKeys:             o.HostKeys,
 		inventory:            o.Inventory,
 		operations:           o.Operations,
+		opSuggest:            o.OperationSuggestions,
 		pins:                 o.Pins,
 		schedules:            o.Schedules,
 		leases:               o.Leases,
