@@ -56,6 +56,21 @@ func CheckSchemas(m Manifest, latest map[string]int) error {
 	return nil
 }
 
+// firstMissing returns the highest ancestor of p, or p itself, that does not
+// exist yet, or "" if p exists. MkdirAll creates exactly these directories.
+func firstMissing(p string) string {
+	top := ""
+	for q := p; ; q = filepath.Dir(q) {
+		if _, err := os.Lstat(q); !errors.Is(err, os.ErrNotExist) {
+			return top
+		}
+		top = q
+		if filepath.Dir(q) == q {
+			return top
+		}
+	}
+}
+
 // Restore puts a checked backup in place: it checks the schemas, stages
 // and checks both databases, stops the services, moves the current data
 // directories aside (they are kept), writes the backup's data with the
@@ -124,18 +139,24 @@ func Restore(m Manifest, files []File, l Layout, sys System, latest map[string]i
 		// the report says the data was moved aside (review m102, F7).
 		if err == nil && !fi.IsDir() {
 			undo()
-			return rep, fmt.Errorf("backup: %s is not a directory (a symbolic link?); refusing to restore over it", d)
+			return Report{}, fmt.Errorf("backup: %s is not a directory (a symbolic link?); refusing to restore over it", d)
 		}
 		aside := d + ".pre-restore-" + ts
 		if err := os.Rename(d, aside); err != nil {
 			undo()
-			return rep, fmt.Errorf("backup: move %s aside: %w", d, err)
+			return Report{}, fmt.Errorf("backup: move %s aside: %w", d, err)
 		}
 		moved = append(moved, move{d, aside})
 		rep.MovedAside = append(rep.MovedAside, aside)
 	}
+	// cfgRoot is the first directory this restore creates for configuration
+	// files; a failure removes it, with any partly written file in it.
+	var cfgRoot string
 	fail := func(err error) (Report, error) {
 		undo()
+		if cfgRoot != "" {
+			_ = os.RemoveAll(cfgRoot)
+		}
 		return Report{}, err
 	}
 	mk := func(dir string, mode os.FileMode, user string) error {
@@ -195,6 +216,9 @@ func Restore(m Manifest, files []File, l Layout, sys System, latest map[string]i
 			}
 		case strings.HasPrefix(f.Path, "server/config/") || strings.HasPrefix(f.Path, "server/systemd/"):
 			dir := filepath.Join(l.ConfigDir(), "from-backup-"+ts)
+			if cfgRoot == "" {
+				cfgRoot = firstMissing(dir)
+			}
 			if err := os.MkdirAll(dir, 0o750); err != nil {
 				return fail(err)
 			}

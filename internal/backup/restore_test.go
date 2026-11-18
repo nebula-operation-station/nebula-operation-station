@@ -1,0 +1,399 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package backup
+
+import (
+	"errors"
+	"fmt"
+	"io/fs"
+	"maps"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// tree records every entry under root: directories with their mode, files
+// with mode and content, symbolic links with their target. A refused restore
+// must leave the tree exactly as it was.
+func tree(t *testing.T, root string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		info, err := d.Info() // Lstat semantics: symbolic links are not followed
+		if err != nil {
+			return err
+		}
+		switch {
+		case info.Mode()&fs.ModeSymlink != 0:
+			target, err := os.Readlink(p)
+			if err != nil {
+				return err
+			}
+			out[rel] = "link " + target
+		case info.IsDir():
+			out[rel] = fmt.Sprintf("dir %v", info.Mode().Perm())
+		default:
+			b, err := os.ReadFile(p)
+			if err != nil {
+				return err
+			}
+			out[rel] = fmt.Sprintf("file %v %q", info.Mode().Perm(), b)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// brokenSystem is a fakeSystem whose Stop or Start can fail.
+type brokenSystem struct {
+	*fakeSystem
+	stopErr, startErr error
+}
+
+func (b *brokenSystem) Stop(u ...string) error {
+	_ = b.fakeSystem.Stop(u...)
+	return b.stopErr
+}
+
+func (b *brokenSystem) Start(u ...string) error {
+	_ = b.fakeSystem.Start(u...)
+	return b.startErr
+}
+
+// oldLayout returns a layout whose data directories hold the current data.
+func oldLayout(t *testing.T) Layout {
+	t.Helper()
+	l := Layout{Root: t.TempDir()}
+	must := func(err error) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(os.MkdirAll(l.ServerDir(), 0o750))
+	must(os.WriteFile(filepath.Join(l.ServerDir(), "server.db"), []byte("old server"), 0o600))
+	must(os.MkdirAll(filepath.Join(l.ExecutorDir(), "keys"), 0o700))
+	must(os.WriteFile(filepath.Join(l.ExecutorDir(), "keys", "old.key"), []byte("old key"), 0o600))
+	must(os.WriteFile(filepath.Join(l.ExecutorDir(), "executor.db"), []byte("old executor"), 0o600))
+	return l
+}
+
+// without drops one file from the backup.
+func without(path string) func(*Manifest, *[]File) {
+	return func(_ *Manifest, files *[]File) {
+		var kept []File
+		for _, f := range *files {
+			if f.Path != path {
+				kept = append(kept, f)
+			}
+		}
+		*files = kept
+	}
+}
+
+func TestRestoreRefusalsLeaveOldDataUntouched(t *testing.T) {
+	now := time.Unix(1_800_000_000, 0)
+	ts := now.UTC().Format("20060102-150405")
+	startCall := "start " + strings.Join(StartUnits, ",")
+
+	cases := []struct {
+		name    string
+		mutate  func(*Manifest, *[]File) // changes the backup; nil = none
+		arrange func(*testing.T, Layout) // changes the target; nil = none
+		failOn  string                   // chown of a path with this suffix fails
+		stopErr error                    // Stop fails
+		wantErr string                   // substring of the error
+		stopped bool                     // Stop is called before the refusal
+		started bool                     // Start is called last (undo)
+	}{
+		{
+			name: "newer server schema",
+			mutate: func(m *Manifest, _ *[]File) {
+				m.Schemas = map[string]int{"server": m.Schemas["server"] + 1, "executor": m.Schemas["executor"]}
+			},
+			wantErr: "newer than this Nebula knows",
+		},
+		{
+			name: "manifest without executor schema",
+			mutate: func(m *Manifest, _ *[]File) {
+				m.Schemas = map[string]int{"server": m.Schemas["server"]}
+			},
+			wantErr: "the manifest has no executor schema version",
+		},
+		{
+			name: "database schema differs from the manifest",
+			mutate: func(m *Manifest, _ *[]File) {
+				if m.Schemas["server"] < 1 {
+					panic("test setup: the server schema must be at least 1")
+				}
+				m.Schemas = map[string]int{"server": m.Schemas["server"] - 1, "executor": m.Schemas["executor"]}
+			},
+			wantErr: "the manifest says",
+		},
+		{
+			name: "file path outside the backup layout",
+			mutate: func(_ *Manifest, files *[]File) {
+				*files = append(*files, File{Path: "../etc/shadow", Data: []byte("x")})
+			},
+			wantErr: "is not a backup path",
+		},
+		{
+			name:    "server database missing from the backup",
+			mutate:  without(ServerDB),
+			wantErr: "the backup has no " + ServerDB,
+		},
+		{
+			name:    "executor database missing from the backup",
+			mutate:  without(ExecutorDB),
+			wantErr: "the backup has no " + ExecutorDB,
+		},
+		{
+			name: "damaged server database",
+			mutate: func(_ *Manifest, files *[]File) {
+				(*files)[0] = File{Path: ServerDB, Mode: 0o600, Data: []byte("SQLite format 3\x00 broken")}
+			},
+			wantErr: "",
+		},
+		{
+			name: "var/lib/nebula is a file, so the staging directory cannot be made",
+			arrange: func(t *testing.T, l Layout) {
+				base := filepath.Dir(l.ServerDir())
+				if err := os.RemoveAll(base); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(base, []byte("x"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr: "not a directory",
+		},
+		{
+			name: "server data directory is a symbolic link",
+			arrange: func(t *testing.T, l Layout) {
+				if err := os.RemoveAll(l.ServerDir()); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(t.TempDir(), l.ServerDir()); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr: "is not a directory (a symbolic link?); refusing to restore over it",
+			stopped: true,
+			started: true,
+		},
+		{
+			name: "executor data directory is a symbolic link, after the server directory was moved",
+			arrange: func(t *testing.T, l Layout) {
+				if err := os.RemoveAll(l.ExecutorDir()); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(t.TempDir(), l.ExecutorDir()); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr: "is not a directory (a symbolic link?); refusing to restore over it",
+			stopped: true,
+			started: true,
+		},
+		{
+			name: "server move-aside target already exists",
+			arrange: func(t *testing.T, l Layout) {
+				aside := l.ServerDir() + ".pre-restore-" + ts
+				if err := os.MkdirAll(aside, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(aside, "keep"), []byte("keep"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr: "move ",
+			stopped: true,
+			started: true,
+		},
+		{
+			name: "executor move-aside target already exists, after the server directory was moved",
+			arrange: func(t *testing.T, l Layout) {
+				aside := l.ExecutorDir() + ".pre-restore-" + ts
+				if err := os.MkdirAll(aside, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(aside, "keep"), []byte("keep"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr: "move ",
+			stopped: true,
+			started: true,
+		},
+		{
+			name:    "Stop fails: nothing is moved",
+			stopErr: errors.New("unit busy"),
+			wantErr: "stop the services",
+			stopped: true,
+		},
+		{
+			name:    "owner of the new server directory cannot be set",
+			failOn:  "server",
+			wantErr: "chown failed",
+			stopped: true,
+			started: true,
+		},
+		{
+			name:    "owner of the new executor directory cannot be set",
+			failOn:  "executor",
+			wantErr: "chown failed",
+			stopped: true,
+			started: true,
+		},
+		{
+			name:    "owner of the new keys directory cannot be set",
+			failOn:  "keys",
+			wantErr: "chown failed",
+			stopped: true,
+			started: true,
+		},
+		{
+			name:    "owner of the restored server database cannot be set",
+			failOn:  "server.db",
+			wantErr: "chown failed",
+			stopped: true,
+			started: true,
+		},
+		{
+			name:    "owner of the restored executor database cannot be set",
+			failOn:  "executor.db",
+			wantErr: "chown failed",
+			stopped: true,
+			started: true,
+		},
+		{
+			name:    "owner of a restored key file cannot be set",
+			failOn:  "nebula-default.key",
+			wantErr: "chown failed",
+			stopped: true,
+			started: true,
+		},
+		{
+			name:    "configuration file cannot be written",
+			failOn:  "server.json",
+			wantErr: "chown failed",
+			stopped: true,
+			started: true,
+		},
+		{
+			name: "configuration directory cannot be made, after the data was written",
+			arrange: func(t *testing.T, l Layout) {
+				if err := os.MkdirAll(filepath.Dir(l.ConfigDir()), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(l.ConfigDir(), []byte("x"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantErr: "not a directory",
+			stopped: true,
+			started: true,
+		},
+	}
+
+	m0, files0 := sample(t) // built once; each case works on copies
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m, files := m0, append([]File(nil), files0...)
+			latest := map[string]int{"server": m.Schemas["server"], "executor": m.Schemas["executor"]}
+			if c.mutate != nil {
+				c.mutate(&m, &files)
+			}
+			l := oldLayout(t)
+			if c.arrange != nil {
+				c.arrange(t, l)
+			}
+			before := tree(t, l.Root)
+			sys := &brokenSystem{fakeSystem: &fakeSystem{failOn: c.failOn}, stopErr: c.stopErr}
+
+			rep, err := Restore(m, files, l, sys, latest, now)
+
+			if err == nil || !strings.Contains(err.Error(), c.wantErr) {
+				t.Fatalf("error %v, want one containing %q", err, c.wantErr)
+			}
+			if len(rep.MovedAside) != 0 || len(rep.Config) != 0 {
+				t.Fatalf("report %+v after a refusal, want an empty one", rep)
+			}
+			if after := tree(t, l.Root); !maps.Equal(before, after) {
+				t.Fatalf("the refused restore changed the target:\nbefore %v\nafter  %v", before, after)
+			}
+
+			calls := sys.calls
+			if !c.stopped {
+				if len(calls) != 0 {
+					t.Fatalf("calls %v, want none: the refusal comes before Stop", calls)
+				}
+				return
+			}
+			if len(calls) == 0 || !strings.HasPrefix(calls[0], "stop ") {
+				t.Fatalf("calls %v, want Stop first", calls)
+			}
+			if c.started {
+				if calls[len(calls)-1] != startCall {
+					t.Fatalf("calls %v, want the services started again last", calls)
+				}
+				return
+			}
+			for _, call := range calls {
+				if strings.HasPrefix(call, "start ") {
+					t.Fatalf("calls %v, want no Start after a failed Stop", calls)
+				}
+			}
+		})
+	}
+}
+
+// A Start failure after a complete restore is reported, and the restore stays:
+// the new data is in place, the old directories are kept aside, the report is right.
+func TestRestoreReportsWhenStartFails(t *testing.T) {
+	m, files := sample(t)
+	latest := map[string]int{"server": m.Schemas["server"], "executor": m.Schemas["executor"]}
+	now := time.Unix(1_800_000_000, 0)
+	l := oldLayout(t)
+	startErr := errors.New("unit failed")
+	sys := &brokenSystem{fakeSystem: &fakeSystem{}, startErr: startErr}
+
+	rep, err := Restore(m, files, l, sys, latest, now)
+
+	if err == nil || !strings.Contains(err.Error(), "did not start") || !errors.Is(err, startErr) {
+		t.Fatalf("error %v, want a wrapped start failure", err)
+	}
+	if len(rep.MovedAside) != 2 || len(rep.Config) != 1 {
+		t.Fatalf("report %+v, want two directories moved aside and one configuration file", rep)
+	}
+	if b, _ := os.ReadFile(filepath.Join(rep.MovedAside[0], "server.db")); string(b) != "old server" {
+		t.Fatal("old server data not kept aside")
+	}
+	if b, _ := os.ReadFile(filepath.Join(rep.MovedAside[1], "executor.db")); string(b) != "old executor" {
+		t.Fatal("old executor data not kept aside")
+	}
+	if v, err := CheckSQLite(filepath.Join(l.ServerDir(), "server.db")); err != nil || v != m.Schemas["server"] {
+		t.Fatal("restored server database missing or wrong schema:", v, err)
+	}
+	if v, err := CheckSQLite(filepath.Join(l.ExecutorDir(), "executor.db")); err != nil || v != m.Schemas["executor"] {
+		t.Fatal("restored executor database missing or wrong schema:", v, err)
+	}
+	if b, _ := os.ReadFile(rep.Config[0]); !strings.Contains(string(b), "127.0.0.1:8080") {
+		t.Fatalf("configuration file %s has %q", rep.Config[0], b)
+	}
+	if len(sys.calls) == 0 || !strings.HasPrefix(sys.calls[0], "stop ") ||
+		sys.calls[len(sys.calls)-1] != "start "+strings.Join(StartUnits, ",") {
+		t.Fatalf("calls %v, want Stop first and the Start attempt last", sys.calls)
+	}
+}
