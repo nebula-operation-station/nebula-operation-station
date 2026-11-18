@@ -57,6 +57,24 @@ const DefaultConfigPath = "/etc/nebula/server.json"
 // shutdownTimeout bounds the graceful HTTP shutdown after a signal.
 const shutdownTimeout = 10 * time.Second
 
+// notifyFlushTimeout bounds the wait for notification log writes still in
+// flight at shutdown. A log write is itself bounded per write (5 seconds), so
+// this is a little over one write.
+const notifyFlushTimeout = 10 * time.Second
+
+// flushNotifyRecords waits, for at most timeout, until the notification log
+// writes in flight have ended. Shutdown calls it after sending has stopped and
+// before the database closes; a write that starts after the flush begins is
+// dropped by the notifier, as it would be after shutdown anyway. A timeout is
+// logged and does not stop shutdown.
+func flushNotifyRecords(n *notify.Notifier, log *slog.Logger, timeout time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := n.FlushRecords(ctx); err != nil {
+		log.Warn("notification log writes not finished at shutdown", "error", err.Error())
+	}
+}
+
 // pruneInterval is how often expired web sessions are deleted.
 const pruneInterval = time.Hour
 
@@ -195,8 +213,12 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	// Audit lines are also kept in server.db for the History page (M10-1).
 	audit := auditlog.New(db, cfg.AuditHashChain)
 	log = slog.New(auditlog.NewHandler(log.Handler(), audit))
-	// Notification log (ADR 0016 D10): every sent, held or failed
-	// notification is recorded here, from a write that runs beside the send.
+	// Notification log (ADR 0016 D10): every sent or failed notification, and
+	// every integrity message held by the hourly limit, is recorded here, from
+	// a write that runs beside the send. Vulnerability digest holds are
+	// recorded too: internal/vulnnotify passes them to the notifier's
+	// RecordHeld after its own lock is released. No code path writes a
+	// held_muted record yet.
 	// A log that cannot be opened is an error for the log only: the
 	// notifier keeps sending without it.
 	notifyLog, err := attachNotifyLog(notifier, db, time.Now)
@@ -224,6 +246,10 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		if ops != nil {
 			ops.Wait()
 		}
+		// Sending has stopped. The log writes still in flight must end before
+		// db.Close (deferred above, so it runs after this), or those decisions
+		// are missing from the log.
+		flushNotifyRecords(notifier, log, notifyFlushTimeout)
 	}()
 	bg.Go(func() {
 		exec.connect(connCtx, executorclient.Options{SocketPath: cfg.ExecutorSocket, ExecutorUser: cfg.ExecutorUser}, log)
@@ -471,6 +497,12 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	if vh.started != nil {
 		vh.started(vuln, vulnNotifying)
 	}
+	// Lease events and the optional daily digest (ADR 0016 D10). They read
+	// the grants and stored runs through the operations service; they add no
+	// executor call. The state survives restarts in the data directory.
+	leases := newLeaseWatcher(db, ops, store, vuln.store, notifier, cfg.PublicOrigin,
+		cfg.Notifications.DailyDigest, time.Local, cfg.DataDir, time.Now, log)
+	bg.Go(func() { leases.Run(connCtx) })
 	bg.Go(func() { vuln.runSweeps(connCtx, sweepEvery) })
 	if vulnNotifying {
 		bg.Go(func() { vuln.runEvents(connCtx) })

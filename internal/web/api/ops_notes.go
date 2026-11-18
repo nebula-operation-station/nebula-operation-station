@@ -236,7 +236,7 @@ func opsNoteStatus(err error) int {
 		errors.Is(err, opsnotes.ErrMissing), errors.Is(err, opsnotes.ErrFieldNotAllowed),
 		errors.Is(err, opsnotes.ErrInvalidKind):
 		return http.StatusBadRequest
-	case errors.Is(err, opsnotes.ErrLimit), errors.Is(err, opsnotes.ErrUnknownRef),
+	case errors.Is(err, opsnotes.ErrLimit), errors.Is(err, opsnotes.ErrUnknownRef), errors.Is(err, opsnotes.ErrNotOpen),
 		errors.Is(err, opsnotes.ErrStaleDigest), errors.Is(err, opsnotes.ErrUnknownAction),
 		errors.Is(err, opsnotes.ErrUnknownHost), errors.Is(err, opsnotes.ErrNotAllowlisted),
 		errors.Is(err, opsnotes.ErrNotGroupHost), errors.Is(err, opsnotes.ErrNotCandidate),

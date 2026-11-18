@@ -248,6 +248,23 @@ type Notifications struct {
 	Webhook  *WebhookConfig  `json:"webhook,omitempty"`
 	Ntfy     *NtfyConfig     `json:"ntfy,omitempty"`
 	Telegram *TelegramConfig `json:"telegram,omitempty"`
+	// DailyDigest is the optional daily digest (ADR 0016 D10). Off by default.
+	DailyDigest DailyDigest `json:"daily_digest"`
+}
+
+// providerCount returns how many providers are configured.
+func (n Notifications) providerCount() int {
+	c := 0
+	if n.Webhook != nil {
+		c++
+	}
+	if n.Ntfy != nil {
+		c++
+	}
+	if n.Telegram != nil {
+		c++
+	}
+	return c
 }
 
 // WebhookConfig sends JSON, HMAC-SHA256 signed with Secret.
@@ -285,6 +302,7 @@ var (
 
 func (n Notifications) problems() []string {
 	var p []string
+	p = append(p, n.DailyDigest.problems(n.providerCount())...)
 	if w := n.Webhook; w != nil {
 		if !isHTTPURL(w.URL) {
 			p = append(p, "notifications.webhook.url: must be an absolute http(s) URL without credentials")

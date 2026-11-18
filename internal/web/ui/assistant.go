@@ -242,5 +242,7 @@ func (h *Handler) registerAssistant(mux *http.ServeMux) {
 	mux.HandleFunc("GET /assistant/help", h.handleAssistantHelp)
 	mux.HandleFunc("GET /assistant/ops", h.handleAssistantOps)
 	mux.HandleFunc("GET /assistant/ops/notes/{id}", h.handleAssistantOpsNote)
+	mux.HandleFunc("GET /assistant/ops/questions", h.handleAssistantOpsQuestions)
+	mux.HandleFunc("POST /assistant/ops/questions", h.handleAssistantOpsAsk)
 	mux.HandleFunc("POST /assistant/ops/notes/{id}/dismiss", h.handleAssistantOpsDismiss)
 }

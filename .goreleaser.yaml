@@ -118,6 +118,22 @@ builds:
       - -trimpath
     ldflags:
       - -s -w
+  # The ops agent (ADR 0016 D13), built and shipped like the vulnerability
+  # agent: no version -X flags (its import boundary, D2, has no
+  # internal/version); in the tarball (install.sh --ops-agent) and in its
+  # own .deb (nfpms id nebula-ops-agent), not in the NOS package or image.
+  - id: nebula-ops-agent
+    main: ./cmd/nebula-ops-agent
+    binary: nebula-ops-agent
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
 
 archives:
   - id: nebula
@@ -147,6 +163,10 @@ archives:
         dst: deploy/deb/vuln-agent/postinst
       - src: deploy/deb/vuln-agent/prerm
         dst: deploy/deb/vuln-agent/prerm
+      - src: deploy/deb/ops-agent/postinst
+        dst: deploy/deb/ops-agent/postinst
+      - src: deploy/deb/ops-agent/prerm
+        dst: deploy/deb/ops-agent/prerm
       - src: deploy/deb/*_test.go
         dst: deploy/deb/
       - src: deploy/container/Dockerfile
@@ -244,6 +264,33 @@ nfpms:
     scripts:
       postinstall: deploy/deb/vuln-agent/postinst
       preremove: deploy/deb/vuln-agent/prerm
+  # The ops agent's own .deb (ADR 0016 D13), packaged like the vulnerability
+  # agent: binary, unit, timer and path unit, guide, maintainer scripts. The
+  # postinst creates the user, dirs and config skeleton and enables nothing.
+  - id: nebula-ops-agent
+    package_name: nebula-ops-agent
+    ids: [nebula-ops-agent]
+    file_name_template: "nebula-ops-agent_{{ .Version }}_{{ .Arch }}"
+    vendor: Nebula Operation Station
+    homepage: https://github.com/nebula-operation-station/nebula-operation-station
+    maintainer: Nebula Operation Station maintainers <maintainers@nebula-operation-station.invalid>
+    description: Ops agent for Nebula Operation Station.
+    license: AGPL-3.0-or-later
+    section: admin
+    formats: [deb]
+    bindir: /usr/bin
+    contents:
+      - src: deploy/systemd/nebula-ops-agent.service
+        dst: /lib/systemd/system/nebula-ops-agent.service
+      - src: deploy/systemd/nebula-ops-agent.timer
+        dst: /lib/systemd/system/nebula-ops-agent.timer
+      - src: deploy/systemd/nebula-ops-agent.path
+        dst: /lib/systemd/system/nebula-ops-agent.path
+      - src: docs/admin/guide.md
+        dst: /usr/share/doc/nebula-ops-agent/guide.md
+    scripts:
+      postinstall: deploy/deb/ops-agent/postinst
+      preremove: deploy/deb/ops-agent/prerm
 
 # The container image (decision 5 of the M10 plan): the binaries on
 # debian:12-slim; deploy/container/compose.yaml runs it. Pushing happens
