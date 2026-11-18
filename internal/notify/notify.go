@@ -465,7 +465,9 @@ type WebhookPayload struct {
 	Reason      string `json:"reason,omitempty"`
 	ExecutionID string `json:"execution_id,omitempty"`
 	Link        string `json:"link,omitempty"`
-	Time        string `json:"time"`
+	// Body is the whole text of a daily digest; empty for every other kind.
+	Body string `json:"body,omitempty"`
+	Time string `json:"time"`
 }
 
 // Sign returns the signature header value for a webhook body: HMAC-SHA256
@@ -481,7 +483,7 @@ func Sign(secret []byte, timestamp string, body []byte) string {
 
 func (w *webhook) Send(ctx context.Context, e Event) error {
 	body, err := json.Marshal(WebhookPayload{Kind: e.Kind, Host: e.Host, State: e.State, Reason: e.Reason,
-		ExecutionID: e.ExecutionID, Link: e.link, Time: e.Time.Format(time.RFC3339)})
+		ExecutionID: e.ExecutionID, Link: e.link, Body: e.body, Time: e.Time.Format(time.RFC3339)})
 	if err != nil {
 		return err
 	}

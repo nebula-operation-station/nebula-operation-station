@@ -3,12 +3,15 @@
 package notify
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/notifylog"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 )
 
 var leaseAt = time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC)
@@ -172,5 +175,28 @@ func TestDailyDigestEventRejectsBadText(t *testing.T) {
 		if _, err := NewDailyDigest(body, leaseAt); !errors.Is(err, ErrInvalidLeaseEvent) {
 			t.Errorf("%s: error = %v, want ErrInvalidLeaseEvent", name, err)
 		}
+	}
+}
+
+// TestDailyDigestReachesTheWebhookWithItsText checks that a webhook-only setup
+// receives the digest text, not an event without content.
+func TestDailyDigestReachesTheWebhookWithItsText(t *testing.T) {
+	const body = "NOS daily digest\nOpen updates: 3\nSee https://nebula.example.org/"
+	e, err := NewDailyDigest(body, leaseAt)
+	if err != nil {
+		t.Fatalf("NewDailyDigest: %v", err)
+	}
+	var c captured
+	srv := c.server(t, 204)
+	n := New(serverconfig.Notifications{Webhook: &serverconfig.WebhookConfig{URL: srv.URL + "/hook", Secret: secret}}, nil, quiet())
+	if n.Notify(context.Background(), e) != 1 {
+		t.Fatal("digest not sent over the webhook")
+	}
+	var p WebhookPayload
+	if err := json.Unmarshal(c.body[0], &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.Kind != KindDailyDigest || p.Body != body {
+		t.Fatalf("webhook payload %+v; want the digest body %q", p, body)
 	}
 }
