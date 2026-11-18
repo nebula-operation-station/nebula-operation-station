@@ -401,6 +401,12 @@ func (h *Handler) handleOperationNew(w http.ResponseWriter, r *http.Request) {
 	ccancel()
 	if err != nil {
 		h.log.Error("action catalog", "error", err)
+		if sf != nil {
+			// The reference is valid; the catalog is unreadable. That is
+			// an outage, not an unknown suggestion (ADR 0016 D8).
+			http.Error(w, "operations unavailable", http.StatusInternalServerError)
+			return
+		}
 	}
 	want := q.Get("action")
 	if sf != nil {

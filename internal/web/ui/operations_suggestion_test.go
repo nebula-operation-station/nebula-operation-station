@@ -4,6 +4,7 @@ package ui_test
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -126,6 +127,25 @@ func TestSuggestionPrefillRefusesWithFixedText(t *testing.T) {
 				t.Fatalf("lookups %d (want %d), created %v", s.calls, tc.lookups, f.createdCalls)
 			}
 		})
+	}
+}
+
+// TestSuggestionCatalogOutageIsNotAnUnknownSuggestion: a valid reference
+// whose action catalog cannot be read is a backend failure (500), not the
+// fixed "unknown agent suggestion" 404 that hides it from the admin.
+func TestSuggestionCatalogOutageIsNotAnUnknownSuggestion(t *testing.T) {
+	st := &fakeOpSuggestStore{steps: map[string]opsnotes.Step{"7.1": {NoteID: 7, Index: 1, ActionID: "core.facts", HostID: "web"}}}
+	f := &fakeOps{catalogErr: errors.New("executor unreachable")}
+	code, body := getPage(t, suggestHandler(t, f, st, true), "/operations/new?suggestion=7.1")
+	if code != http.StatusInternalServerError || strings.Contains(body, "unknown agent suggestion") {
+		t.Fatalf("status %d body %q, want 500 without the unknown-suggestion text", code, body)
+	}
+	if !strings.Contains(body, "operations unavailable") {
+		t.Fatalf("body %q lacks the outage text", body)
+	}
+	// A plain form without a reference keeps rendering with an empty catalog.
+	if code, _ := getPage(t, suggestHandler(t, f, st, true), "/operations/new"); code != http.StatusOK {
+		t.Fatalf("plain form during catalog outage: status %d", code)
 	}
 }
 
