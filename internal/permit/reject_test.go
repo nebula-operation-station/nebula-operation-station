@@ -27,9 +27,9 @@ func TestRejectReasonLimits(t *testing.T) {
 		{"C0", "a\tb", false, 0},
 		{"DEL", "a\x7fb", false, 0},
 		{"C1", "a\u0085b", false, 0},
-		{"bidi override", "a‮b", false, 0},
-		{"bidi isolate", "a⁧b", false, 0},
-		{"arabic letter mark", "a؜b", false, 0},
+		{"bidi override", "a" + string(rune(0x202e)) + "b", false, 0},
+		{"bidi isolate", "a" + string(rune(0x2067)) + "b", false, 0},
+		{"arabic letter mark", "a" + string(rune(0x061c)) + "b", false, 0},
 		{"plain text", "wrong host, planned again", true, 25},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -61,7 +61,7 @@ func TestRelayedUserLimits(t *testing.T) {
 		{"server nbsp", RejectRoleServer, "a b", false},
 		{"server ideographic space", RejectRoleServer, "a　b", false},
 		{"server line separator", RejectRoleServer, "a b", false},
-		{"server bidi", RejectRoleServer, "a‏b", false},
+		{"server bidi", RejectRoleServer, "a" + string(rune(0x200f)) + "b", false},
 		{"server invalid UTF-8", RejectRoleServer, "a\xc0", false},
 		{"admin empty", RejectRoleAdmin, "", true},
 		{"admin with user", RejectRoleAdmin, "alice", false},

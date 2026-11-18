@@ -103,18 +103,20 @@ func newRejectEnv(t *testing.T, mode permit.Mode) *rejectEnv {
 	t.Helper()
 	e := setup(t, mode)
 	rej := newMemRejections(e.store)
-	var auditMu sync.Mutex
+	// The setup's audit hook appends without a lock; the concurrent tests
+	// here use a no-op hook instead.
+	noAudit := func(permit.Event) {}
 	exec, err := permit.New(permit.Options{
 		Mode: mode, Verifier: e.options.Verifier, Store: e.store, RiskPolicy: lowFloor{}, Rejections: rej,
 		Now:   e.options.Now,
-		Audit: func(permit.Event) { auditMu.Lock(); auditMu.Unlock() },
+		Audit: noAudit,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	e.options.Session = exec.Session
 	e.options.Rejections = rej
-	e.options.Audit = func(permit.Event) { auditMu.Lock(); auditMu.Unlock() }
+	e.options.Audit = noAudit
 	e.a, err = New(e.options)
 	if err != nil {
 		t.Fatal(err)
@@ -265,7 +267,7 @@ func TestRejectPendingRoleAndInputChecks(t *testing.T) {
 		{"empty role", permit.RejectRole(""), "", "", permit.CodeInvalidRequest},
 		{"reason too long", permit.RejectRoleAdmin, "", strings.Repeat("x", 201), permit.CodeInvalidRequest},
 		{"reason with control", permit.RejectRoleAdmin, "", "a\nb", permit.CodeInvalidRequest},
-		{"reason with bidi", permit.RejectRoleAdmin, "", "a‮b", permit.CodeInvalidRequest},
+		{"reason with bidi", permit.RejectRoleAdmin, "", "a" + string(rune(0x202e)) + "b", permit.CodeInvalidRequest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := r.reject(p.Digest, tc.role, tc.user, tc.reason)
