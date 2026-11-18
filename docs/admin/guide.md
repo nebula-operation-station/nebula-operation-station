@@ -1661,6 +1661,24 @@ hosts, and the executor found locked after a restart. Messages never
 contain host output. Vulnerability events use the same providers once
 vulnerability management is set up (section 10.4).
 
+Two lease events are sent without any LLM or agent: `lease.expiring`
+(a read lease or schedule grant expires within 7 days, and again within
+1 day; one message per grant and threshold) and `lease.run_failed` (a
+leased run failed; one message per grant, action and host until the next
+success).
+
+The daily digest is optional and off by default. Enable it with
+`notifications.daily_digest` in `server.json`: `"enabled": true`, a
+`"time"` as `"HH:MM"` (default `"07:00"`, local server time) and
+`"skip_empty": true` to send nothing on a day when every count is zero.
+An enabled digest needs at least one provider. It contains counts only:
+open updates, reboots pending, hosts not READY, grants expiring within 7
+days, open findings per tier and the KEV count, and failed executions of
+the last 24 hours.
+
+The notification list page in the web UI is not in this release. The log
+of sent, held and failed events is in section 10.3.
+
 ### 10.2 Read-only API (Home Assistant, status pages)
 
 The API is off by default. Create a token on the Nebula machine:
@@ -2358,29 +2376,41 @@ findings and writes one *fix note* per host and finding group: what is
 affected, the steps in order and the priority that NOS computed. The
 model orders and words the text. It never executes anything, never
 approves, never schedules and never submits a form. A step is a button
-that opens the normal NOS form, prefilled with the action and the host.
-You fill in the parameters and submit it yourself, with your security
-key (see "Security key for suggested executions" below).
+that opens the normal NOS form, prefilled with the action and the host
+(in this build, not for container update steps, see "Status in this
+build"). You fill in the parameters and submit it yourself, with your
+security key (see "Security key for suggested executions" below).
 
 #### Status in this build
 
 Parts of ADR 0016 are built and parts are not. Check this before you
-plan a rollout.
+plan a rollout. The list describes this release as it is on `main`.
 
-- **Planned, not connected:** the finding sources of the agent's work
-  list. Until they are, the agent finds no due work and writes no fix
-  note, and the Ops tab shows "no suggestion yet".
-- **Planned, no settings form yet:** the admin form for the LLM settings
-  (section "Settings and data class"). The settings store exists; the
-  form and the settings API do not. Until they ship, the settings stay
-  disabled, and the agent makes no LLM call.
-- **Planned, not sent:** the lease events `lease.expiring` and
-  `lease.run_failed`, the daily digest, and the notification list page in
-  the web UI. Notifications from the existing events work as in section
-  10.1; the server records each event in its notification log.
-- **Built:** the notes store with its limits, the suggestion marking of
-  executions (section "Security key for suggested executions"), the
-  agent binary, the systemd units and the Ops tab.
+- **Not in this build, so the agent stays off:** an admin form and an
+  API for the LLM settings (section "Settings and data class"). The
+  settings store has no writer in this build, so the settings stay at
+  their default (disabled). The agent then makes no LLM call and writes
+  no note, and the Ops tab shows "No suggestion yet.".
+- **Built on the server, but dormant until the settings are enabled:**
+  the agent's work list. The server offers due fix items for lab
+  findings and fleet summaries for class `external`, and it offers the
+  admin questions. The agent refuses a question item in this build, so
+  no question is answered.
+- **Not built:** answers to admin questions. The question form in the
+  Ops tab stores the question (see "Questions" under "Notes, retention
+  and backup"); no answer is produced.
+- **Not built:** the card button for a container update step. It opens
+  a page that answers `404`. The other step buttons open the form.
+- **Built:** the notes store with its limits, the admin question form,
+  the fix cards in the Ops tab, the suggestion form (prefilled from a
+  card, with its banner), the suggestion marking of executions (section
+  "Security key for suggested executions"), the agent binary and the
+  systemd units.
+- **Built, separate from the agent:** the notifications `lease.expiring`
+  and `lease.run_failed` (section 10.1) and the optional daily digest.
+  They need no LLM. The server records each of them in its notification
+  log.
+- **Not built:** the notification list page in the web UI.
 
 #### The token `ops-agent`
 
@@ -2479,13 +2509,18 @@ The data class decides what may leave the lab:
   note. It never falls back to `external` within a run.
 - **`external`:** the LLM may be outside the lab. The model then gets
   only fleet counts per tier and KEV, and no host-specific fix note is
-  made. Questions still get an answer, from the same counts and the
-  handbook.
+  made.
 
 Choose `lab` only if the endpoint is on a network you control. If in
 doubt, choose `external`.
 
+Questions follow the same rule: in this build no question reaches the
+model, in either class (see the table below).
+
 #### What goes to the model
+
+This is the state of this build. The table lists what the agent sends
+when it runs with the settings enabled.
 
 | Data | `lab` | `external` |
 | --- | --- | --- |
@@ -2493,9 +2528,10 @@ doubt, choose `external`.
 | Exposure level, listening ports (number and protocol, at most 32) | Yes | No |
 | Per finding (at most 40 per group): vulnerability ID, source package, installed and fixed version, fix state, tier, score, KEV flag | Yes | No |
 | Counts per tier and KEV, per group and for the fleet | Yes | Fleet counts only |
-| Step candidates as opaque keys (`c1`, `c2`, ...), with the action name | Yes | No |
-| Documentation chunks from the handbook | Yes | Yes |
-| The question you typed in the Ops tab (at most 2 KiB) and the operator instructions | Yes | Yes |
+| Step candidates as opaque keys (`c1`, `c2`, ...) with a short fixed label that NOS sets; the action ID and the host ID never enter the prompt | Yes | No |
+| Documentation chunks from the handbook: up to 3 per fix item, found by the finding's package | Yes | No: `external` items are fleet summaries and carry no chunks |
+| The operator instructions (at most 4 KiB) | Yes | Yes |
+| Your question in the Ops tab (at most 2 KiB) | **No** in this build: the agent refuses question items | **No** in this build |
 
 **Never sent, in either class:** IP addresses and endpoints, fingerprints,
 credentials or their file names, user names, execution output and logs,
@@ -2506,8 +2542,9 @@ Its output is checked twice, once by the agent and once by NOS, and text
 that contains a link is refused. Model text never appears in a
 notification.
 
-Your typed question and the operator instructions reach the model in both
-classes. Do not type a secret into either.
+The operator instructions reach the model in both classes. Do not type a
+secret into them, or into the question form: the question is stored (see
+"Notes, retention and backup") even though no model reads it yet.
 
 #### Security key for suggested executions
 
@@ -2521,9 +2558,11 @@ higher class that the server proposes.
 NOS decides this on the server. An execution counts as suggested in two
 ways:
 
-1. The form carries a suggestion reference, and NOS finds it in its notes
-   store. An unknown, expired or malformed reference is refused (`400`).
-   It never falls back to an unmarked execution.
+1. The form carries a suggestion reference (`suggestion=<note>.<step>`
+   from the card's button, sent back as a hidden field), and NOS finds it
+   in its notes store. An unknown, expired or malformed reference is
+   refused: the form page answers `404`, and a submitted execution with
+   it answers `400`. It never falls back to an unmarked execution.
 2. NOS checks every interactively created execution and batch member
    against its stored fix notes. If a stored note has a step of the same
    action family on the same host, the execution is marked, also when no
@@ -2535,8 +2574,14 @@ Consequences you will notice:
   card and changes nothing else.
 - While a fix note for a host is stored (at most 30 days, see below), an
   admin who starts the same kind of action on that host **by hand** also
-  needs the key. The operation page shows "From an agent suggestion" and
-  "Risk MEDIUM (raised; the action declares LOW)". This is intended.
+  needs the key. Nothing on the page says why, in this build: the
+  operation page shows the executor's risk (at least MEDIUM for a
+  suggested execution) and has no "From an agent suggestion" label. This
+  is intended.
+- A form opened from a card shows the banner "Opened from an agent
+  suggestion. This execution needs a security-key touch." (German:
+  "Aus einem Agenten-Vorschlag geöffnet. Diese Ausführung braucht eine
+  Security-Key-Berührung."). A form you open by hand shows no banner.
 - Schedules and read leases are not affected; the suggestion form offers
   no "schedule this".
 
@@ -2554,12 +2599,18 @@ signs the challenge, not the form on the screen.
   directory is outside the `nebula backup` set.
 - Retention: **30 days or 500 notes**, whichever comes first; the oldest
   are pruned first. At most 100 notes are accepted per UTC day.
-- After a restore, no notes exist. The agent writes new ones on its next
-  run, if the timer runs.
-- Only admins see notes. Every other user gets `404`.
+- **Questions:** the Ops tab's question form stores one question of at
+  most 2 KiB. At most 20 questions are open at once and 50 are asked per
+  UTC day. An open question expires after 7 days. Questions are pruned
+  with the same 30-day retention. In this build no answer is produced
+  (see "Status in this build").
+- After a restore, no notes and no questions exist. The agent writes new
+  notes on its next run, if the timer runs.
+- Only admins see notes and questions. Every other user gets `404`.
 - The audit log records each accepted or rejected note with its kind,
-  reference, digest, length and SHA-256, never its text. It also records
-  each change of the settings.
+  reference, digest, length and SHA-256, never its text. It records each
+  stored question with the user, length and a keyed digest, never its
+  text. It also records each change of the settings.
 
 #### Residual risk
 
