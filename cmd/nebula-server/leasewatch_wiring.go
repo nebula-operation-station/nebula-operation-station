@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"time"
 
@@ -57,17 +58,31 @@ const (
 	leaseRunWindow = time.Hour
 	// leaseRunSeenMax bounds the saved set of runs read inside the window.
 	leaseRunSeenMax = 4096
-	// leaseWatchMaxState bounds the state file size on read.
-	leaseWatchMaxState = leasewatch.MaxStateBytes + 4096
+	// leaseExecIDMax and leaseHostIDMax bound the two parts of a saved run key
+	// (execution ID, tab, host ID). They match the ID formats of the executions
+	// and inventory packages; runKeyRe enforces them so that no key needs JSON
+	// escaping.
+	leaseExecIDMax = 36
+	leaseHostIDMax = 63
+	// leaseRunSeenEntryMax is the largest encoded size of one saved run: the key
+	// with its escaped tab, quotes, colon, an int64 and a comma.
+	leaseRunSeenEntryMax = leaseExecIDMax + 1 + leaseHostIDMax + 1 + 2 + 1 + 20 + 1
+	// leaseWatchMaxState bounds the state file size, on save and on load: the
+	// marks (leasewatch.MaxStateBytes), the recorded runs at their maximum size,
+	// and a small allowance for the envelope.
+	leaseWatchMaxState = leasewatch.MaxStateBytes + leaseRunSeenMax*leaseRunSeenEntryMax + 4096
 	// digestLang is the text language of the daily digest (ADR 0016: de).
 	digestLang = opsdigest.LangDE
 	// digestGrantWindow is the window of the "grants expiring" digest count.
 	digestGrantWindow = 7 * 24 * time.Hour
 )
 
-// errDigestFindingsTruncated reports that the open findings did not fit in one
-// read. The digest is then not sent rather than sent with a wrong count.
-var errDigestFindingsTruncated = errors.New("open findings exceed the digest read limit")
+// runKeyRe is the form of a saved run key: an execution ID, a tab and a host ID,
+// in plain character sets and within their length limits. The parts may be
+// empty: a row with an empty host is still recorded (so it is read once) and
+// then rejected by leasewatch. A key that does not match is not saved, so its
+// JSON form is exactly its length (no escaping).
+var runKeyRe = regexp.MustCompile(`^[0-9A-Za-z._-]{0,36}\t[0-9A-Za-z._-]{0,63}$`)
 
 // leaseSource is the read side of the executions service the watch needs.
 type leaseSource interface {
@@ -133,6 +148,11 @@ type leaseWatcher struct {
 
 	st    leaseWatchState
 	saved []byte
+	// blocked is set while the state file exists but cannot be used (not
+	// readable, too large, malformed or over a limit). Nothing is sent and
+	// nothing is written while it is set: the file is kept for the admin, and
+	// the watch retries the load at each tick.
+	blocked bool
 }
 
 // newLeaseWatcher returns a watcher that keeps its state in dataDir. base is
@@ -150,27 +170,34 @@ func newLeaseWatcher(db *sql.DB, src leaseSource, hosts hostLister, vulns *vulns
 		runBatch: leaseRunBatch, runMaxPages: leaseRunMaxPages}
 }
 
-// load reads the saved state. A missing file is a first start. A file that is
-// too large or malformed is logged and ignored: the watch then starts over
-// from now, which can repeat an expiry message at worst.
+// load reads the saved state. A missing file is a first start. A file that
+// cannot be read, is too large or does not validate blocks the watch (see
+// blocked): the file is not overwritten, so the marks it holds are not lost and
+// no message is repeated. The admin fixes or removes the file; the load is
+// retried at each tick.
 func (w *leaseWatcher) load() {
 	data, err := os.ReadFile(w.path)
 	if errors.Is(err, os.ErrNotExist) {
+		w.blocked = false
 		return
 	}
 	if err != nil {
-		w.log.Error("lease watch: read state", "error", err)
+		w.blocked = true
+		w.log.Error("lease watch: state not readable, nothing sent until it is", "error", err)
 		return
 	}
 	if len(data) > leaseWatchMaxState {
-		w.log.Error("lease watch: state too large, ignored", "bytes", len(data))
+		w.blocked = true
+		w.log.Error("lease watch: state too large, nothing sent until it is fixed", "bytes", len(data), "limit", leaseWatchMaxState)
 		return
 	}
 	st, err := decodeLeaseFile(data)
 	if err != nil {
-		w.log.Error("lease watch: state malformed, ignored", "error", err)
+		w.blocked = true
+		w.log.Error("lease watch: state invalid, nothing sent until it is fixed", "error", err)
 		return
 	}
+	w.blocked = false
 	w.st = st
 	w.saved = data
 }
@@ -183,6 +210,9 @@ func decodeLeaseFile(data []byte) (leaseWatchState, error) {
 	if err := dec.Decode(&f); err != nil {
 		return leaseWatchState{}, fmt.Errorf("decode lease watch state: %w", err)
 	}
+	if err := validateRunSeen(f.RunSeen); err != nil {
+		return leaseWatchState{}, err
+	}
 	st := leaseWatchState{Init: f.Init, RunFrom: f.RunFrom, RunSeen: f.RunSeen, DigestSent: f.DigestSent}
 	if len(f.Watch) > 0 {
 		ws, err := leasewatch.DecodeState(f.Watch)
@@ -194,14 +224,42 @@ func decodeLeaseFile(data []byte) (leaseWatchState, error) {
 	return st, nil
 }
 
-// encode returns the on-disk form of the state.
+// validateRunSeen checks the recorded runs: at most leaseRunSeenMax entries, each
+// with a well-formed run key and a finish time after the epoch.
+func validateRunSeen(seen map[string]int64) error {
+	if len(seen) > leaseRunSeenMax {
+		return fmt.Errorf("lease watch run_seen: %d entries > %d", len(seen), leaseRunSeenMax)
+	}
+	for k, at := range seen {
+		if !runKeyRe.MatchString(k) {
+			return fmt.Errorf("lease watch run_seen: malformed run key")
+		}
+		if at <= 0 {
+			return fmt.Errorf("lease watch run_seen: finish time %d not positive", at)
+		}
+	}
+	return nil
+}
+
+// encode returns the on-disk form of the state. It refuses a state that the
+// load would not accept, so that a save never leaves an unreadable file.
 func (w *leaseWatcher) encode() ([]byte, error) {
+	if err := validateRunSeen(w.st.RunSeen); err != nil {
+		return nil, err
+	}
 	watch, err := leasewatch.EncodeState(w.st.Watch)
 	if err != nil {
 		return nil, fmt.Errorf("encode lease watch marks: %w", err)
 	}
-	return json.Marshal(leaseFile{Init: w.st.Init, Watch: watch, RunFrom: w.st.RunFrom, RunSeen: w.st.RunSeen,
+	data, err := json.Marshal(leaseFile{Init: w.st.Init, Watch: watch, RunFrom: w.st.RunFrom, RunSeen: w.st.RunSeen,
 		DigestSent: w.st.DigestSent})
+	if err != nil {
+		return nil, fmt.Errorf("encode lease watch state: %w", err)
+	}
+	if len(data) > leaseWatchMaxState {
+		return nil, fmt.Errorf("%w: %d > %d bytes", leasewatch.ErrStateTooLarge, len(data), leaseWatchMaxState)
+	}
+	return data, nil
 }
 
 // save writes the state if it changed, atomically (0600 in the data dir).
@@ -239,6 +297,12 @@ func (w *leaseWatcher) Run(ctx context.Context) {
 // on an unreachable executor: each part logs its own failure and leaves its
 // state alone.
 func (w *leaseWatcher) Tick(ctx context.Context) {
+	if w.blocked {
+		w.load()
+		if w.blocked {
+			return
+		}
+	}
 	now := w.now()
 	prev := w.st
 	prevSaved := w.saved
@@ -397,6 +461,7 @@ func (w *leaseWatcher) runEvents(ctx context.Context, now time.Time, silent bool
 	pageAt, pageExec, pageHost := w.st.RunFrom-1, "", ""
 	lastAt := w.st.RunFrom
 	truncated := false
+	skippedKeys := 0
 	for pages := 0; ; pages++ {
 		if pages == w.runMaxPages {
 			// The backlog goes on. The scan resumes at lastAt on the next
@@ -411,6 +476,12 @@ func (w *leaseWatcher) runEvents(ctx context.Context, now time.Time, silent bool
 		}
 		for _, r := range page {
 			lastAt = r.at
+			if !runKeyRe.MatchString(r.key()) {
+				// An ID outside its format cannot be saved. It is skipped
+				// and counted, not reported.
+				skippedKeys++
+				continue
+			}
 			if _, ok := seen[r.key()]; ok {
 				continue
 			}
@@ -424,6 +495,9 @@ func (w *leaseWatcher) runEvents(ctx context.Context, now time.Time, silent bool
 		pageAt, pageExec, pageHost = last.at, last.exec, last.host
 	}
 
+	if skippedKeys > 0 {
+		w.log.Warn("lease watch: stored runs with malformed IDs skipped", "count", skippedKeys)
+	}
 	var out []notify.Event
 	if !silent {
 		label := w.lazyHostNames(ctx)
@@ -465,29 +539,47 @@ func (w *leaseWatcher) runEvents(ctx context.Context, now time.Time, silent bool
 	if newFrom < w.st.RunFrom {
 		newFrom = w.st.RunFrom
 	}
-	if len(seen) > leaseRunSeenMax {
-		ats := make([]int64, 0, len(seen))
-		for _, at := range seen {
-			ats = append(ats, at)
-		}
-		sort.Slice(ats, func(i, j int) bool { return ats[i] > ats[j] })
-		if cut := ats[leaseRunSeenMax-1]; cut > newFrom {
-			newFrom = cut
-		}
-	}
 	if truncated {
 		// Runs after lastAt were not read yet. The scan must start there, not
 		// at the clock's window, or they would be skipped.
 		newFrom = lastAt
 	}
-	for k, at := range seen {
-		if at < newFrom {
-			delete(seen, k)
+	pruneRunSeen(seen, newFrom)
+	if len(seen) > leaseRunSeenMax {
+		// Keep only the runs that finished after cut, the second of the
+		// (leaseRunSeenMax+1)-th newest run. That keeps at most leaseRunSeenMax
+		// runs. A second is never split: its runs are all kept or all dropped,
+		// and moving the scan start past a dropped second means its runs are
+		// not read again.
+		ats := make([]int64, 0, len(seen))
+		for _, at := range seen {
+			ats = append(ats, at)
 		}
+		sort.Slice(ats, func(i, j int) bool { return ats[i] > ats[j] })
+		cut := ats[leaseRunSeenMax] + 1
+		if truncated && cut > lastAt {
+			// Unread runs of second lastAt follow on the next tick. They
+			// cannot be kept without the bound, so they are skipped.
+			w.log.Warn("lease watch: more runs finished in one second than are recorded; some are not reported", "second", lastAt)
+			cut = lastAt + 1
+		}
+		if cut > newFrom {
+			newFrom = cut
+		}
+		pruneRunSeen(seen, newFrom)
 	}
 	w.st.RunFrom = newFrom
 	w.st.RunSeen = seen
 	return out
+}
+
+// pruneRunSeen removes the recorded runs that finished before from.
+func pruneRunSeen(seen map[string]int64, from int64) {
+	for k, at := range seen {
+		if at < from {
+			delete(seen, k)
+		}
+	}
 }
 
 // lazyHostNames returns a function that maps a host ID to its display name. The
@@ -730,40 +822,50 @@ func (w *leaseWatcher) countGrantsExpiring(ctx context.Context, now time.Time) (
 	return n, nil
 }
 
-// countFindings counts open findings per tier and the KEV-listed ones. The tier
-// and KEV rules are those of the vulnerability notifications. A read that does
-// not return every finding is an error, so the digest never shows a partial count.
+// countFindings counts open findings per tier and the KEV-listed ones. It counts
+// in the database, so the number of closed findings does not matter and there
+// is no read limit to hit. The tier and KEV rules are those of the vulnerability
+// notifications: the episode's peak tier, and KEV when the episode was ever
+// KEV-listed or the record carries a KEV score (as in vulnstore's KEV filter).
+// The query groups by tier and KEV; it scans the findings table once, and no
+// index on state exists for it (a follow-up if the table grows large).
 func (w *leaseWatcher) countFindings(ctx context.Context) (opsdigest.Findings, error) {
 	if w.vulns == nil {
 		return opsdigest.Findings{}, opsdigest.ErrMissingSource
 	}
-	fs, more, err := w.vulns.List(ctx, vulnstore.ListQuery{Limit: vulnstore.MaxListFindings})
+	rows, err := w.db.QueryContext(ctx, `SELECT episode_peak_tier,
+		episode_kev_date IS NOT NULL OR json_extract(record, '$.scores.kev') IS NOT NULL, count(*)
+		FROM vuln_findings WHERE state = ? GROUP BY 1, 2`, vulnstore.StateOpen)
 	if err != nil {
-		return opsdigest.Findings{}, err
+		return opsdigest.Findings{}, fmt.Errorf("count open findings: %w", err)
 	}
-	if more {
-		return opsdigest.Findings{}, errDigestFindingsTruncated
-	}
+	defer rows.Close()
 	var out opsdigest.Findings
-	for _, f := range fs {
-		if f.State != vulnstore.StateOpen {
-			continue
+	for rows.Next() {
+		var tier int
+		var kev bool
+		var n int
+		if err := rows.Scan(&tier, &kev, &n); err != nil {
+			return opsdigest.Findings{}, fmt.Errorf("scan open findings: %w", err)
 		}
-		switch f.EpisodePeakTier {
+		switch vulnstore.Tier(tier) {
 		case vulnstore.TierCritical:
-			out.Critical++
+			out.Critical += n
 		case vulnstore.TierHigh:
-			out.High++
+			out.High += n
 		case vulnstore.TierMedium:
-			out.Medium++
+			out.Medium += n
 		case vulnstore.TierLow:
-			out.Low++
+			out.Low += n
 		default:
-			out.Unknown++
+			out.Unknown += n
 		}
-		if f.EpisodeKEV() || f.Record.Scores.KEV != nil {
-			out.KEV++
+		if kev {
+			out.KEV += n
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return opsdigest.Findings{}, fmt.Errorf("read open findings: %w", err)
 	}
 	return out, nil
 }

@@ -56,6 +56,19 @@ func tree(t *testing.T, root string) map[string]string {
 	return out
 }
 
+// withoutStage drops the staging directory (var/lib/nebula/.restore-*) from a
+// tree: Restore removes it on return, after any Start, so it is still there
+// when Start runs and is not part of the state the services see.
+func withoutStage(m map[string]string) map[string]string {
+	prefix := filepath.Join("var", "lib", "nebula", ".restore-")
+	for k := range m {
+		if strings.HasPrefix(k, prefix) {
+			delete(m, k)
+		}
+	}
+	return m
+}
+
 // brokenSystem is a fakeSystem whose Stop or Start can fail.
 type brokenSystem struct {
 	*fakeSystem
@@ -374,6 +387,25 @@ func TestRestoreRefusalsLeaveOldDataUntouched(t *testing.T) {
 			started: true,
 		},
 		{
+			// from-backup-<ts> is not this restore's, so it is not removed; the
+			// configuration file the restore wrote into it is.
+			name: "configuration directory already exists, and the owner of the written file cannot be set",
+			arrange: func(t *testing.T, l Layout) {
+				liveConfig(t, l)
+				dir := filepath.Join(l.ConfigDir(), "from-backup-"+ts)
+				if err := os.Mkdir(dir, 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "keep"), []byte("made earlier"), 0o640); err != nil {
+					t.Fatal(err)
+				}
+			},
+			failOn:  "server.json",
+			wantErr: "chown failed",
+			stopped: true,
+			started: true,
+		},
+		{
 			name: "configuration directory cannot be made, after the data was written",
 			arrange: func(t *testing.T, l Layout) {
 				if err := os.MkdirAll(filepath.Dir(l.ConfigDir()), 0o755); err != nil {
@@ -403,6 +435,7 @@ func TestRestoreRefusalsLeaveOldDataUntouched(t *testing.T) {
 			}
 			before := tree(t, l.Root)
 			sys := &brokenSystem{fakeSystem: &fakeSystem{failOn: c.failOn}, stopErr: c.stopErr}
+			sys.snap = func() map[string]string { return withoutStage(tree(t, l.Root)) }
 
 			rep, err := Restore(m, files, l, sys, latest, now)
 
@@ -440,6 +473,14 @@ func TestRestoreRefusalsLeaveOldDataUntouched(t *testing.T) {
 			if c.started {
 				if starts != 1 || calls[len(calls)-1] != startCall {
 					t.Fatalf("calls %v, want exactly one Start, and it last", calls)
+				}
+				// The services must start on the old data: when Start runs, the
+				// new directories and files are gone and the old ones are back.
+				if len(sys.atStart) != 1 {
+					t.Fatalf("%d snapshots at Start, want 1", len(sys.atStart))
+				}
+				if at := sys.atStart[0]; !maps.Equal(before, at) {
+					t.Fatalf("the services were started before the target was back in its old state:\nbefore   %v\nat Start %v", before, at)
 				}
 				return
 			}
