@@ -120,26 +120,22 @@ func TestScanStepsAreLinear(t *testing.T) {
 // the source, and the value fits in a 32-bit int. It must stay well below
 // MaxInt: window is added to a source offset, and math.MaxInt would wrap
 // that sum negative, which ends each scan at once and makes the scanner
-// look linear. The budget never stops the self-test (about 134 million
-// steps at 16 KiB, below 1<<30); only the ratio comparison can fail.
+// look linear. The budget never stops the self-test (about 17 million
+// steps for "*" at 8 KiB, below 1<<30); only the ratio comparison can fail.
 const unboundedLimit = 1 << 30
 
 var unboundedLimits = scanLimits{window: unboundedLimit, linkDest: unboundedLimit, budget: unboundedLimit}
 
-// selfTestSizes are the sizes the quadratic self-test measures. They span
-// a 4x range, so a quadratic scanner's per-byte cost grows 4x, well above
-// linearFactorNum/linearFactorDen. The production sizes span only 2x, and
-// the real scanner's per-byte cost grows 1.2x over that range, which is
-// why the two sets differ. checkLinearity is the same function for both.
-var selfTestSizes = [len(linearSizes)]int{4 << 10, 8 << 10, 16 << 10}
-
-// TestQuadraticScannerFailsLinearity runs the same checkLinearity as
-// TestScanStepsAreLinear with an injected quadratic scanner. It must
-// return errNotLinear, not pass and not hit the budget, which proves the
-// linearity check can fail.
+// TestQuadraticScannerFailsLinearity runs the same checkLinearity, at the
+// same linearSizes, as TestScanStepsAreLinear with an injected quadratic
+// scanner. It must return errNotLinear, not pass and not hit the budget.
+// Using the production sizes means the production check is shown to be
+// able to fire: a quadratic scanner's per-byte cost doubles from 4 KiB to
+// 8 KiB, above linearFactorNum/linearFactorDen, so the check fires at the
+// production sizes and not only at a wider span.
 func TestQuadraticScannerFailsLinearity(t *testing.T) {
 	for _, unit := range []string{"*", "["} {
-		if err := checkLinearity(unboundedLimits, selfTestSizes, unit); !errors.Is(err, errNotLinear) {
+		if err := checkLinearity(unboundedLimits, linearSizes, unit); !errors.Is(err, errNotLinear) {
 			t.Errorf("unit %q: quadratic scanner: got %v, want errNotLinear", unit, err)
 		}
 	}
