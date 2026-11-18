@@ -1,0 +1,84 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Reference unit for nebula-ops-agent (ADR 0016 D2, D13). One run: fetch the
+# due work items from the NOS API, ask the lab's LLM once per item and post
+# the validated notes back. nebula-ops-agent.timer (every 30 minutes) and
+# nebula-ops-agent.path (the server's trigger) start it; this unit has no
+# [Install] section and is never enabled itself. Neither timer nor path unit
+# is enabled by the package or by install.sh.
+#
+# It runs on the NOS host as its own system user (nebula-ops-agent), never
+# as nebula-server or nebula-executor, and is not in nebula-rpc: it cannot
+# reach the executor socket. It is locked down like the vulnerability agent:
+# no capabilities, a read-only system, its state dir as the only writable
+# path. The NOS state, configuration and sockets, and with them the trigger
+# directory the path unit watches, do not exist for it (InaccessiblePaths);
+# only systemd reads the trigger.
+#
+# It holds the NOS token and, optionally, the LLM credential, each in its
+# own file in /etc/nebula-ops-agent (mode 0600, owned by the agent); the
+# configuration names those files and holds no secret.
+#
+# Network: IPAddressDeny=any with IPAddressAllow=localhost lets it reach the
+# NOS API on loopback (and a resolver on 127.0.0.53) and nothing else. The
+# LLM endpoint is the admin's and is allowed in a drop-in, never here:
+#   sudo systemctl edit nebula-ops-agent.service
+#     [Service]
+#     IPAddressAllow=<LLM address, e.g. 192.0.2.10/32>
+# IPAddressAllow= lines add up, so the drop-in keeps localhost. Give the
+# LLM base URL as that address, or a name a resolver on localhost answers.
+[Unit]
+Description=Nebula Operation Station ops agent (one run)
+Documentation=https://github.com/nebula-operation-station/nebula-operation-station/tree/main/docs
+
+[Service]
+Type=oneshot
+User=nebula-ops-agent
+Group=nebula-ops-agent
+ExecStart=/usr/bin/nebula-ops-agent -config /etc/nebula-ops-agent/config.json run
+# A oneshot has no start timeout by default. The agent bounds a run itself
+# (at most 20 LLM calls of 90 s each, 30 min); 45 min stops only a hung
+# run. A trigger or timer slot that fires while a run is active starts
+# nothing; the next one does.
+TimeoutStartSec=45min
+Nice=10
+IOSchedulingClass=idle
+UMask=0077
+
+# Hardening
+LimitCORE=0
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Outbound HTTP(S) to the NOS API and the LLM endpoint; AF_UNIX for
+# journald. No AF_NETLINK, AF_PACKET or raw sockets.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# Only loopback here; the LLM address comes from the admin's drop-in.
+IPAddressDeny=any
+IPAddressAllow=localhost
+# The server's and executor's state, configuration and sockets, and the
+# trigger directory below /var/lib/nebula, do not exist for the agent.
+InaccessiblePaths=-/var/lib/nebula -/etc/nebula -/run/nebula
+# Nor do their processes: /proc shows only the agent's own processes and
+# no kernel or system information beyond the per-process entries.
+ProtectProc=invisible
+ProcSubset=pid
+# The run-state file (daily call counter). /etc/nebula-ops-agent (config,
+# token, credential) stays read-only.
+ReadWritePaths=/var/lib/nebula-ops-agent
