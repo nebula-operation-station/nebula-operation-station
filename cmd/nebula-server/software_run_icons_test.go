@@ -57,7 +57,9 @@ func TestRunWiresIconService(t *testing.T) {
 	})
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	var stderr bytes.Buffer
+	// The server goroutine keeps logging while the test polls the log, so the
+	// sink must be synchronised (a bare bytes.Buffer is a data race).
+	var stderr syncBuffer
 	done := make(chan error, 1)
 	go func() { done <- run(runCtx, []string{"-config", path}, &stderr) }()
 
