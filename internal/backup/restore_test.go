@@ -387,6 +387,25 @@ func TestRestoreRefusalsLeaveOldDataUntouched(t *testing.T) {
 			started: true,
 		},
 		{
+			// from-backup-<ts> is not this restore's, so it is not removed; the
+			// configuration file the restore wrote into it is.
+			name: "configuration directory already exists, and the owner of the written file cannot be set",
+			arrange: func(t *testing.T, l Layout) {
+				liveConfig(t, l)
+				dir := filepath.Join(l.ConfigDir(), "from-backup-"+ts)
+				if err := os.Mkdir(dir, 0o750); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "keep"), []byte("made earlier"), 0o640); err != nil {
+					t.Fatal(err)
+				}
+			},
+			failOn:  "server.json",
+			wantErr: "chown failed",
+			stopped: true,
+			started: true,
+		},
+		{
 			name: "configuration directory cannot be made, after the data was written",
 			arrange: func(t *testing.T, l Layout) {
 				if err := os.MkdirAll(filepath.Dir(l.ConfigDir()), 0o755); err != nil {
