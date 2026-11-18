@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -250,6 +251,9 @@ func validateQuestion(class string, it nosclient.WorkItem) error {
 		return errors.New("question facts too many")
 	}
 	for _, f := range it.Facts {
+		if len(f.Ports) > prompt.MaxFactPorts {
+			return errors.New("question facts ports too many")
+		}
 		if f.Host.ID == "" || !printableASCII(f.Host.ID) || len(f.Findings) > 0 || len(f.Candidates) > 0 {
 			return errors.New("question facts shape")
 		}
@@ -417,7 +421,12 @@ func (r *runner) item(ctx context.Context, it nosclient.WorkItem) bool {
 		r.log.Warn("ops agent: prompt refused", "kind", it.Kind)
 		return false
 	}
-	for attempt := 0; attempt < MaxAttemptsPerItem; attempt++ {
+	// A question gets exactly one call and no retry (ADR 0016 D11).
+	attempts := MaxAttemptsPerItem
+	if it.Kind == "question" {
+		attempts = 1
+	}
+	for attempt := 0; attempt < attempts; attempt++ {
 		if r.budget <= 0 {
 			r.refuse(RefusedRateLimited)
 			return true
@@ -533,7 +542,7 @@ func (r *runner) prompt(it nosclient.WorkItem) (prompt.Result, map[string]string
 				Counts: *countsOf(f.Counts),
 			})
 		}
-		in.Docs, keys = r.docs(it.Question)
+		in.Docs, keys = r.docs(searchQuery(it.Question))
 	default:
 		g := it.Group
 		in.Group = countsOf(g.Counts)
@@ -570,6 +579,10 @@ func (r *runner) docs(query string) ([]prompt.Doc, map[string]string) {
 		return nil, keys
 	}
 	hits, err := r.d.Docs.Search(query)
+	// The error names no question text; it says only why the query was refused.
+	if err != nil {
+		r.log.Warn("ops agent: documentation search failed", "error", err)
+	}
 	if err != nil {
 		return nil, keys
 	}
@@ -586,6 +599,30 @@ func (r *runner) docs(query string) ([]prompt.Doc, map[string]string) {
 		keys[k] = h.Chunk.ID
 	}
 	return out, keys
+}
+
+// searchQuery turns an admin question into a query the help index accepts: its
+// words in order, cut before helpsearch.MaxQueryBytes or helpsearch.MaxQueryTokens.
+// The question is cut, not refused, so a long question still finds its docs.
+// Words are split the way helpsearch splits tokens, so each word is at most one
+// token and the word count bounds the token count.
+func searchQuery(q string) string {
+	words := strings.FieldsFunc(q, func(r rune) bool {
+		return !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '.' || r == '_')
+	})
+	var b strings.Builder
+	tokens := 0
+	for _, w := range words {
+		if tokens == helpsearch.MaxQueryTokens || b.Len()+len(w)+1 > helpsearch.MaxQueryBytes {
+			break
+		}
+		if tokens > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(w)
+		tokens++
+	}
+	return b.String()
 }
 
 func validChunk(c helpdocs.Chunk) bool {

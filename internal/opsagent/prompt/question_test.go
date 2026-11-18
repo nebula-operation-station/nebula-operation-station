@@ -5,6 +5,7 @@ package prompt
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -149,6 +150,16 @@ func TestQuestionExternalClassHasNoHostOrVulnData(t *testing.T) {
 	}
 }
 
+// TestFactHostPortsAtLimitAccepted: MaxFactPorts is an inclusive bound (ADR
+// 0016 D4: at most 32 ports per host).
+func TestFactHostPortsAtLimitAccepted(t *testing.T) {
+	in := questionInput(LangDE)
+	in.Facts[0].Host.Ports = slices.Repeat([]string{"443/tcp"}, MaxFactPorts)
+	if _, err := Build(in); err != nil {
+		t.Fatalf("Build with %d ports: %v, want accepted", MaxFactPorts, err)
+	}
+}
+
 func TestQuestionRefusesMalformedInput(t *testing.T) {
 	cases := map[string]func(*Input){
 		"empty question":      func(in *Input) { in.Question = "" },
@@ -162,6 +173,7 @@ func TestQuestionRefusesMalformedInput(t *testing.T) {
 		"question candidates": func(in *Input) { in.Candidates = []Candidate{{Key: "c1", Label: "x"}} },
 		"too many fact hosts": func(in *Input) { in.Facts = make([]Facts, MaxFactHosts+1) },
 		"fact host control":   func(in *Input) { in.Facts[0].Host.Label = "web\x00" },
+		"too many fact ports": func(in *Input) { in.Facts[0].Host.Ports = slices.Repeat([]string{"443/tcp"}, MaxFactPorts+1) },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

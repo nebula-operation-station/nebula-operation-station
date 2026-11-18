@@ -44,6 +44,8 @@ const (
 	MaxQuestionBytes = 2 << 10
 	// MaxFactHosts bounds the hosts named in the facts of one question.
 	MaxFactHosts = 5
+	// MaxFactPorts bounds the listening ports of one fact host (ADR 0016 D4).
+	MaxFactPorts = 32
 )
 
 // Lang is the prompt language.
@@ -252,6 +254,9 @@ func check(in Input) error {
 		}
 		for _, f := range in.Facts {
 			h := f.Host
+			if len(h.Ports) > MaxFactPorts {
+				return fmt.Errorf("too many fact host ports: %w", ErrRefused)
+			}
 			for _, s := range append([]string{h.Label, h.Environment, h.Criticality, h.Exposure}, h.Ports...) {
 				if !shortText(s, MaxHostFieldBytes) {
 					return fmt.Errorf("fact host field: %w", ErrRefused)

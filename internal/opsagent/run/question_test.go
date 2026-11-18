@@ -77,8 +77,8 @@ func TestQuestionInjectionYieldsNoSteps(t *testing.T) {
 	if len(nos.notes) != 0 {
 		t.Fatalf("notes %+v; a steps reply must not become a note", nos.notes)
 	}
-	if sum.Discarded != MaxAttemptsPerItem || sum.LLMCalls != MaxAttemptsPerItem {
-		t.Errorf("discarded %d calls %d, want both attempts discarded", sum.Discarded, sum.LLMCalls)
+	if sum.Discarded != 1 || sum.LLMCalls != 1 {
+		t.Errorf("discarded %d calls %d, want one call and its reply discarded (no retry, ADR 0016 D11)", sum.Discarded, sum.LLMCalls)
 	}
 	prompt := h.chat.reqs[0].Messages[0].Content
 	if n := strings.Count(prompt, "docker.restart"); n != 1 {
@@ -111,8 +111,8 @@ func TestQuestionAnswerWithURLOrExtraFieldIsDiscarded(t *testing.T) {
 			if len(nos.notes) != 0 {
 				t.Fatalf("note written from a discarded answer: %+v", nos.notes)
 			}
-			if sum.Discarded != MaxAttemptsPerItem || sum.LLMCalls != MaxAttemptsPerItem {
-				t.Errorf("discarded %d calls %d, want both attempts discarded", sum.Discarded, sum.LLMCalls)
+			if sum.Discarded != 1 || sum.LLMCalls != 1 {
+				t.Errorf("discarded %d calls %d, want one call and its reply discarded (no retry, ADR 0016 D11)", sum.Discarded, sum.LLMCalls)
 			}
 		})
 	}
@@ -318,6 +318,12 @@ func TestQuestionItemShapeRefused(t *testing.T) {
 			}
 			return it
 		},
+		"too many fact ports": func() nosclient.WorkItem {
+			it := questionItem("Ist web-01 betroffen?")
+			it.Facts = questionFacts()
+			it.Facts[0].Ports = slices.Repeat([]nosclient.Port{{Number: 443, Protocol: "tcp"}}, prompt.MaxFactPorts+1)
+			return it
+		},
 		"fix item with question text": func() nosclient.WorkItem {
 			it := labItem("h1:os")
 			it.Question = "Ist web-01 betroffen?"
@@ -339,6 +345,111 @@ func TestQuestionItemShapeRefused(t *testing.T) {
 			}
 			if len(h.chat.reqs) != 0 || len(nos.notes) != 0 || !slices.Contains(sum.Refusals, RefusedWork) {
 				t.Errorf("calls %d notes %d refusals %v", len(h.chat.reqs), len(nos.notes), sum.Refusals)
+			}
+		})
+	}
+}
+
+// limitedDocs records the queries it gets and enforces helpsearch's query
+// limits: an oversized query fails with ErrQueryTooLarge, as the real index does.
+type limitedDocs struct {
+	queries []string
+	hits    []helpsearch.Hit
+}
+
+func (f *limitedDocs) Search(q string) ([]helpsearch.Hit, error) {
+	f.queries = append(f.queries, q)
+	if len(q) > helpsearch.MaxQueryBytes || len(strings.Fields(q)) > helpsearch.MaxQueryTokens {
+		return nil, helpsearch.ErrQueryTooLarge
+	}
+	return f.hits, nil
+}
+
+// TestLongQuestionStillGetsDocChunks: a question of 2 KiB is over the search
+// limits, but the search gets a bounded query, so the answer can cite a chunk
+// and no search error is logged.
+func TestLongQuestionStillGetsDocChunks(t *testing.T) {
+	q := strings.Repeat("Welche Updates sind betroffen? ", 60)
+	if len(q) > prompt.MaxQuestionBytes || len(q) <= helpsearch.MaxQueryBytes {
+		t.Fatalf("test question is %d bytes, want over the search limit and within the question limit", len(q))
+	}
+	docs := &limitedDocs{hits: []helpsearch.Hit{{Chunk: helpdocs.Chunk{ID: "handbuch-updates-1", Text: "Updates laufen über das Formular."}}}}
+	nos := &fakeNOS{cfg: goodSettings(), items: []nosclient.WorkItem{questionItem(q)}}
+	h := newHarness(t, nos, &fakeChat{replies: []string{`{"text":"Über das Formular.","citations":["d1"]}`}})
+	if _, err := h.run(t, docs); err != nil {
+		t.Fatal(err)
+	}
+	if len(docs.queries) != 1 || len(docs.queries[0]) > helpsearch.MaxQueryBytes {
+		t.Fatalf("search queries %d, want one bounded query", len(docs.queries))
+	}
+	if len(nos.notes) != 1 || !slices.Equal(nos.notes[0].Citations, []string{"handbuch-updates-1"}) {
+		t.Fatalf("notes %+v; want the chunk ID cited", nos.notes)
+	}
+	if strings.Contains(h.logs.String(), "documentation search failed") {
+		t.Errorf("search error logged for a long question: %s", h.logs.String())
+	}
+}
+
+// TestSearchQueryIsBounded: the query keeps the leading words of the question
+// and stays within helpsearch's byte and token limits.
+func TestSearchQueryIsBounded(t *testing.T) {
+	cases := map[string]struct {
+		in, want string
+	}{
+		"empty":             {in: "", want: ""},
+		"punctuation":       {in: "Ist web-01 betroffen?", want: "Ist web-01 betroffen"},
+		"one oversize word": {in: strings.Repeat("a", helpsearch.MaxQueryBytes+1), want: ""},
+	}
+	for name, c := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := searchQuery(c.in); got != c.want {
+				t.Errorf("searchQuery(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+	long := strings.Repeat("update paket ", 400)
+	got := searchQuery(long)
+	if len(got) > helpsearch.MaxQueryBytes || len(strings.Fields(got)) > helpsearch.MaxQueryTokens {
+		t.Errorf("long query: %d bytes, %d tokens; limits %d and %d", len(got), len(strings.Fields(got)),
+			helpsearch.MaxQueryBytes, helpsearch.MaxQueryTokens)
+	}
+	if !strings.HasPrefix(long, got) || got == "" {
+		t.Errorf("long query %q is not a prefix of the question", got)
+	}
+}
+
+// TestEveryKindSendsOneCallWithoutTools: a question, a fix and a summary item
+// each make one call with one user message, no tools, and their own schema.
+// A tool added to one kind only (say, to fix items) fails this test.
+func TestEveryKindSendsOneCallWithoutTools(t *testing.T) {
+	cases := map[string]struct {
+		item  nosclient.WorkItem
+		reply string
+	}{
+		"question": {item: questionItem("Ist web-01 betroffen?"), reply: questionReply},
+		"fix":      {item: labItem("h1:os"), reply: goodFix},
+		"summary":  {item: summaryItem(), reply: questionReply},
+	}
+	for kind, c := range cases {
+		t.Run(kind, func(t *testing.T) {
+			nos := &fakeNOS{cfg: goodSettings(), items: []nosclient.WorkItem{c.item}}
+			h := newHarness(t, nos, &fakeChat{replies: []string{c.reply}})
+			sum, err := h.run(t, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sum.LLMCalls != 1 || len(h.chat.reqs) != 1 {
+				t.Fatalf("calls %d reqs %d, want exactly one", sum.LLMCalls, len(h.chat.reqs))
+			}
+			req := h.chat.reqs[0]
+			if len(req.Tools) != 0 {
+				t.Errorf("%s request carries %d tools, want none (ADR 0016 D11)", kind, len(req.Tools))
+			}
+			if len(req.Messages) != 1 || req.Messages[0].Role != "user" {
+				t.Errorf("%s request messages %+v, want one user message", kind, req.Messages)
+			}
+			if req.JSONSchema == nil || req.JSONSchema.Name != "ops_"+kind {
+				t.Errorf("%s request schema %+v, want ops_%s", kind, req.JSONSchema, kind)
 			}
 		})
 	}
