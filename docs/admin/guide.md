@@ -2387,7 +2387,7 @@ plan a rollout.
 The agent has one exclusive API token with exactly two scopes:
 `ops.read` (read its work list and settings) and `ops.notes.write`
 (write notes and its last-run status). Create it on the Nebula machine
-as in section 10.2 and restrict it to loopback, because the agent runs on
+as in section 10.4 and restrict it to loopback, because the agent runs on
 the same host:
 
 ```
