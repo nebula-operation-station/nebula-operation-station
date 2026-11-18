@@ -13,6 +13,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executor/dispatch"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport"
@@ -83,6 +84,13 @@ func (e *privateMemberEnv) transport(t *testing.T, run dispatch.Run) (dispatch.O
 	t.Helper()
 	call := &batchMemberCall{hostID: e.host, fingerprint: e.fp, eps: e.eps, artifact: testComposeArtifact, timeout: time.Minute,
 		durable: true, resp: &pb.RunBatchMemberResponse{}}
+	// As in production (batchRunRecorder.RecordIntent), the member's run is
+	// recorded as dispatching before the transport starts.
+	if err := e.svc.db.CreateRun(executordb.Run{ExecutionID: run.ExecutionID, HostID: e.host, Digest: run.ParentDigest,
+		Endpoints: []string{e.eps[0].String()}, Fingerprint: e.fp, Timeout: time.Minute, MemberID: run.MemberID,
+		ActionID: run.ActionID}); err != nil {
+		t.Fatalf("record intent: %v", err)
+	}
 	c, err := e.svc.Connect(context.Background(), e.host, e.fp, e.eps)
 	if err != nil {
 		t.Fatalf("connect: %v", err)

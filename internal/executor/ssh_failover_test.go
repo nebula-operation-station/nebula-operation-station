@@ -373,6 +373,49 @@ func TestMismatchIsNoFailedFailover(t *testing.T) {
 	}
 }
 
+// TestSingleEndpointIsNoFailedFailover: a host with one endpoint (and the
+// one-endpoint enroll and pairing connects) has nothing to fail over to;
+// an unreachable endpoint is not audited as a failed failover.
+func TestSingleEndpointIsNoFailedFailover(t *testing.T) {
+	t.Parallel()
+	e := newReconcileEnv(t)
+	e.pin(newHostKey(t))
+	if _, err := e.svc.Connect(context.Background(), e.host, e.fp, mustEndpoints(t, closedAddr(t))); sshtransport.ClassOf(err) != sshtransport.ClassUnreachable {
+		t.Fatalf("err = %v, want class %s", err, sshtransport.ClassUnreachable)
+	}
+	if n := len(e.logs.find("ssh_failover_failed", "")); n != 0 {
+		t.Errorf("ssh_failover_failed records for a single endpoint = %d, want 0", n)
+	}
+}
+
+// TestReconcileAuditsFailedFailoverOnce: the reconciler retries a run whose
+// endpoints are all down on every due pass; the failed failover is audited
+// once for the run, not once per pass.
+func TestReconcileAuditsFailedFailoverOnce(t *testing.T) {
+	t.Parallel()
+	e := newReconcileEnv(t)
+	e.pin(newHostKey(t))
+	id := newTestUUID()
+	if err := e.db.CreateRun(executordb.Run{ExecutionID: id, HostID: e.host, Digest: "failover-test-digest",
+		Endpoints: []string{closedAddr(t), "127.0.0.2:1"}, Fingerprint: e.fp, Timeout: 10 * time.Minute}); err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		e.reconcile(context.Background())
+		e.clock.Add(maxReconcileBackoff + time.Minute)
+	}
+	if n := e.failAttempts(id); n != 3 {
+		t.Fatalf("reconcile attempts = %d, want 3", n)
+	}
+	recs := e.logs.find("ssh_failover_failed", "")
+	if len(recs) != 1 {
+		t.Fatalf("ssh_failover_failed records over 3 passes = %d, want 1", len(recs))
+	}
+	if recs[0].attrs["execution"] != id {
+		t.Errorf("ssh_failover_failed execution = %v, want %s", recs[0].attrs["execution"], id)
+	}
+}
+
 func requireFailoverFailed(t *testing.T, e *reconcileEnv, class sshtransport.Class) logRecord {
 	t.Helper()
 	recs := e.logs.find("ssh_failover_failed", "")
@@ -386,25 +429,27 @@ func requireFailoverFailed(t *testing.T, e *reconcileEnv, class sshtransport.Cla
 }
 
 // TestReconcileOverAlternateNeverRunsTwice: a durable run whose primary
-// went down after dispatch is checked over the alternate endpoint; the
-// check only reads the job state and never dispatches it again. A run
-// dispatched on the primary keeps that endpoint; the audit names it and,
-// separately, the alternate that checked it. A run never marked running
-// records the endpoint that found its state.
+// went down after (or during) dispatch is checked over the alternate
+// endpoint; the check only reads the job state and never dispatches it
+// again. The run keeps the endpoint its dispatch was attempted on — also a
+// run whose dispatch broke while it was still dispatching; the audit names
+// it and, separately, the alternate that checked it. The check endpoint is
+// never recorded as the dispatch endpoint: a run without a stored one
+// keeps none.
 func TestReconcileOverAlternateNeverRunsTwice(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
+		name      string
 		state     string
+		stored    bool // the primary is stored as the dispatch endpoint
 		wantClass string
-		// wantPrimary: the stored endpoint is the primary (dispatch), not
-		// the alternate (check).
-		wantPrimary bool
 	}{
-		{executordb.RunDispatching, classNotExecuted, false},
-		{executordb.RunRunning, classUnknown, true},
+		{"dispatching on primary", executordb.RunDispatching, true, classNotExecuted},
+		{"dispatching without endpoint", executordb.RunDispatching, false, classNotExecuted},
+		{"running on primary", executordb.RunRunning, true, classUnknown},
 	}
 	for _, tc := range cases {
-		t.Run(tc.state, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			e := newReconcileEnv(t)
 			hk := newHostKey(t)
@@ -416,6 +461,11 @@ func TestReconcileOverAlternateNeverRunsTwice(t *testing.T) {
 				Endpoints: []string{primary, alt.addr}, Fingerprint: e.fp, Timeout: 10 * time.Minute}); err != nil {
 				t.Fatal(err)
 			}
+			if tc.stored {
+				if err := e.db.SetRunDispatchEndpoint(id, e.host, primary); err != nil {
+					t.Fatal(err)
+				}
+			}
 			if tc.state == executordb.RunRunning {
 				if err := e.db.MarkRunRunning(id, e.host, primary); err != nil {
 					t.Fatal(err)
@@ -424,8 +474,8 @@ func TestReconcileOverAlternateNeverRunsTwice(t *testing.T) {
 
 			e.reconcile(context.Background())
 
-			want := alt.addr
-			if tc.wantPrimary {
+			want := ""
+			if tc.stored {
 				want = primary
 			}
 			r := e.requireFinished(id, tc.wantClass)

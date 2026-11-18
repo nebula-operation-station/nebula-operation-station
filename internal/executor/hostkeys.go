@@ -32,7 +32,18 @@ var (
 // order, with the host's own credential only. fingerprint, if not empty, is
 // the key the caller expects (a permit's target) and must equal the pin.
 // A host key mismatch blocks the host; it stays blocked until re-pinned.
+// A failed failover over several endpoints is audited (ssh_failover_failed).
 func (s *Service) Connect(ctx context.Context, hostID, fingerprint string, endpoints []sshtransport.Endpoint) (*sshtransport.Client, error) {
+	c, err := s.connect(ctx, hostID, fingerprint, endpoints)
+	if err != nil {
+		s.auditFailedFailover(hostID, endpoints, err)
+	}
+	return c, err
+}
+
+// connect is Connect without the failed-failover audit, for callers that
+// retry and audit it once themselves (the reconciler).
+func (s *Service) connect(ctx context.Context, hostID, fingerprint string, endpoints []sshtransport.Endpoint) (*sshtransport.Client, error) {
 	hk, ok, err := s.db.HostKey(hostID)
 	if err != nil {
 		return nil, err
@@ -69,11 +80,6 @@ func (s *Service) Connect(ctx context.Context, hostID, fingerprint string, endpo
 	var te *sshtransport.Error
 	if errors.As(err, &te) {
 		switch te.Class {
-		case sshtransport.ClassUnreachable, sshtransport.ClassCanceled:
-			// A failed failover is as visible as a successful one: every
-			// endpoint tried with its stage, and those never reached.
-			s.log.Warn("audit", "kind", "ssh_failover_failed", "host", hostID, "class", string(te.Class),
-				"skipped", skippedEndpoints(te.Attempts), "untried", untriedEndpoints(endpoints, te.Attempts))
 		case sshtransport.ClassHostKeyMismatch:
 			presented, endpoint := "", ""
 			if te.Presented != nil {
@@ -94,6 +100,33 @@ func (s *Service) Connect(ctx context.Context, hostID, fingerprint string, endpo
 		}
 	}
 	return nil, err
+}
+
+// failedFailover reports whether err ends a dial that had a failover to
+// attempt and found no endpoint: more than one endpoint, and every one
+// tried failed on the connection (or the caller's deadline ended the
+// dial). A host key mismatch or an auth failure is not one; they have
+// their own audits. A single endpoint (a one-endpoint host, enroll and
+// pairing) has nothing to fail over to.
+func failedFailover(endpoints []sshtransport.Endpoint, err error) (*sshtransport.Error, bool) {
+	var te *sshtransport.Error
+	if len(endpoints) < 2 || !errors.As(err, &te) {
+		return nil, false
+	}
+	return te, te.Class == sshtransport.ClassUnreachable || te.Class == sshtransport.ClassCanceled
+}
+
+// auditFailedFailover audits a failed failover as visibly as a successful
+// one: every endpoint tried with its stage, and those never reached. It
+// writes nothing for any other error. attrs are added to the record.
+func (s *Service) auditFailedFailover(hostID string, endpoints []sshtransport.Endpoint, err error, attrs ...any) {
+	te, ok := failedFailover(endpoints, err)
+	if !ok {
+		return
+	}
+	args := append([]any{"kind", "ssh_failover_failed", "host", hostID, "class", string(te.Class),
+		"skipped", skippedEndpoints(te.Attempts), "untried", untriedEndpoints(endpoints, te.Attempts)}, attrs...)
+	s.log.Warn("audit", args...)
 }
 
 // skippedEndpoints names the endpoints a dial left before the one it used,
