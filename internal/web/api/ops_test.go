@@ -158,8 +158,13 @@ type opsResp struct {
 }
 
 func opsDo(h http.Handler, method, path, tok, ctype, body string) opsResp {
+	return opsDoFrom(h, opsRemote, method, path, tok, ctype, body)
+}
+
+// opsDoFrom is opsDo from a given connection address.
+func opsDoFrom(h http.Handler, remote, method, path, tok, ctype, body string) opsResp {
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
-	req.RemoteAddr = opsRemote
+	req.RemoteAddr = remote
 	if tok != "" {
 		req.Header.Set("Authorization", "Bearer "+tok)
 	}
@@ -614,6 +619,159 @@ func TestOpsSourceFailureIsGeneric(t *testing.T) {
 	}
 }
 
+// A note is refused (403) while the stored ops agent setting is disabled, the
+// default (ADR 0016 D12): nothing is stored, indexed or announced, and the
+// refusal is audited with kind, ref and digest.
+func TestOpsNotesDisabledIsRefused(t *testing.T) {
+	e := newOpsEnv(t)
+	g := labGroup(opsHost, "CVE-2026-0001", opsfacts.TierCritical, false, 90)
+	e.facts.groups = []opsfacts.Group{g}
+	e.settings.row.Enabled = false
+	body := noteBody(g.Key, g.Digest, "package.install_security", opsHost)
+	if r := opsPost(e.h, "/api/v1/ops/notes", oaTok, body); r.code != http.StatusForbidden {
+		t.Fatalf("disabled agent: %d, want 403: %s", r.code, r.body)
+	}
+	if len(e.accepted) != 0 {
+		t.Error("a note of a disabled agent reached OnNoteAccepted")
+	}
+	if n, _ := e.notes.List(context.Background()); len(n) != 0 {
+		t.Errorf("a note of a disabled agent was stored: %d", len(n))
+	}
+	line := auditLine(t, e.log.String(), "ops_note_refused")
+	for _, want := range []string{`"note_kind":"fix"`, `"ref":"` + g.Key + `"`, `"digest":"` + g.Digest + `"`} {
+		if !strings.Contains(line, want) {
+			t.Errorf("refusal audit misses %s: %s", want, line)
+		}
+	}
+}
+
+// The setting is read per request: a note is accepted once the agent is on,
+// refused again after it is switched off, and accepted after it is back on.
+func TestOpsNotesFollowsTheStoredSettingPerRequest(t *testing.T) {
+	e := newOpsEnv(t)
+	g := labGroup(opsHost, "CVE-2026-0001", opsfacts.TierCritical, false, 90)
+	e.facts.groups = []opsfacts.Group{g}
+	first := noteBody(g.Key, g.Digest, "package.install_security", opsHost)
+	if r := opsPost(e.h, "/api/v1/ops/notes", oaTok, first); r.code != http.StatusCreated {
+		t.Fatalf("enabled: %d %s", r.code, r.body)
+	}
+	e.settings.row.Enabled = false
+	second := strings.Replace(first, "fixes the finding", "second reason", 1)
+	if r := opsPost(e.h, "/api/v1/ops/notes", oaTok, second); r.code != http.StatusForbidden {
+		t.Fatalf("switched off: %d, want 403", r.code)
+	}
+	if n, _ := e.notes.List(context.Background()); len(n) != 1 {
+		t.Errorf("stored notes %d after switch-off, want 1", len(n))
+	}
+	if len(e.accepted) != 1 {
+		t.Errorf("OnNoteAccepted called %d times, want 1", len(e.accepted))
+	}
+	e.settings.row.Enabled = true
+	if r := opsPost(e.h, "/api/v1/ops/notes", oaTok, second); r.code != http.StatusCreated {
+		t.Errorf("switched back on: %d, want 201", r.code)
+	}
+}
+
+// Every refused note after decode is audited with kind, ref and digest, not
+// only the undecodable ones.
+func TestOpsRefusedNoteAuditHoldsKindRefDigest(t *testing.T) {
+	e := newOpsEnv(t)
+	g := labGroup(opsHost, "CVE-2026-0001", opsfacts.TierCritical, false, 90)
+	e.facts.groups = []opsfacts.Group{g}
+	stale := noteBody(g.Key, "stale-digest-xyz", "package.install_security", opsHost)
+	if r := opsPost(e.h, "/api/v1/ops/notes", oaTok, stale); r.code != http.StatusUnprocessableEntity {
+		t.Fatalf("stale: %d", r.code)
+	}
+	line := auditLine(t, e.log.String(), "ops_note_refused")
+	for _, want := range []string{`"note_kind":"fix"`, `"ref":"` + g.Key + `"`, `"digest":"stale-digest-xyz"`, `"status":422`} {
+		if !strings.Contains(line, want) {
+			t.Errorf("refusal audit misses %s: %s", want, line)
+		}
+	}
+	if strings.Contains(line, "fixes the finding") {
+		t.Error("refusal audit holds note text")
+	}
+}
+
+// auditLine returns the first JSON audit line with the given audit kind.
+func auditLine(t *testing.T, log, kind string) string {
+	t.Helper()
+	for _, l := range strings.Split(log, "\n") {
+		if strings.Contains(l, `"kind":"`+kind+`"`) {
+			return l
+		}
+	}
+	t.Fatalf("no %s audit line in %q", kind, log)
+	return ""
+}
+
+// The source-address allowlist of the ops token: the connection address
+// decides, and a request from outside the list gets 403 and an audit entry.
+func TestOpsSourceAllowlistRefusesOtherAddresses(t *testing.T) {
+	e := newOpsEnv(t)
+	toks := oaTokens()
+	toks[0].SourceAddresses = []string{"192.168.0.0/24"}
+	ops, err := api.NewOps(api.OpsOptions{Tokens: toks, Settings: e.settings, Facts: e.facts, Notes: e.notes,
+		Log: slog.New(slog.NewJSONHandler(e.log, nil)), Now: func() time.Time { return e.now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := opsDoFrom(ops, opsRemote, http.MethodGet, "/api/v1/ops/work", oaTok, "", ""); r.code != http.StatusForbidden {
+		t.Fatalf("from 127.0.0.1: %d, want 403: %s", r.code, r.body)
+	}
+	if !strings.Contains(e.log.String(), `"kind":"api_source_refused"`) {
+		t.Error("refused source has no audit entry")
+	}
+	if r := opsDoFrom(ops, "192.168.0.7:5000", http.MethodGet, "/api/v1/ops/work", oaTok, "", ""); r.code != http.StatusOK {
+		t.Errorf("from the allowed net: %d, want 200", r.code)
+	}
+	if r := opsDoFrom(ops, "192.168.1.7:5000", http.MethodPost, "/api/v1/ops/status", oaTok, "application/json",
+		`{"run_at":"2026-11-17T10:00:00Z"}`); r.code != http.StatusForbidden {
+		t.Errorf("status from outside the net: %d, want 403", r.code)
+	}
+}
+
+// The read budget (agent config and work list share it) answers 429 once
+// MaxOpsReadRequests are used in one window, does not touch the write budget,
+// and is open again when the window has passed.
+func TestOpsReadBudgetAnswers429ThenRecovers(t *testing.T) {
+	e := newOpsEnv(t)
+	for i := range api.MaxOpsReadRequests {
+		if r := opsGet(e.h, "/api/v1/ops/work", oaTok); r.code != http.StatusOK {
+			t.Fatalf("read %d: %d, want 200", i+1, r.code)
+		}
+	}
+	if r := opsGet(e.h, "/api/v1/ops/agent-config", oaTok); r.code != http.StatusTooManyRequests {
+		t.Fatalf("read over budget: %d, want 429", r.code)
+	}
+	status := `{"run_at":"2026-11-17T10:00:00Z"}`
+	if r := opsPost(e.h, "/api/v1/ops/status", oaTok, status); r.code != http.StatusNoContent {
+		t.Errorf("write while reads are limited: %d, want 204", r.code)
+	}
+	e.now = e.now.Add(api.OpsWindow + time.Second)
+	if r := opsGet(e.h, "/api/v1/ops/agent-config", oaTok); r.code != http.StatusOK {
+		t.Errorf("read after the window: %d, want 200", r.code)
+	}
+}
+
+// The write budget (notes and status) answers 429 once MaxOpsWriteRequests
+// are used in one window and does not touch the read budget.
+func TestOpsWriteBudgetAnswers429(t *testing.T) {
+	e := newOpsEnv(t)
+	status := `{"run_at":"2026-11-17T10:00:00Z"}`
+	for i := range api.MaxOpsWriteRequests {
+		if r := opsPost(e.h, "/api/v1/ops/status", oaTok, status); r.code != http.StatusNoContent {
+			t.Fatalf("write %d: %d, want 204", i+1, r.code)
+		}
+	}
+	if r := opsPost(e.h, "/api/v1/ops/status", oaTok, status); r.code != http.StatusTooManyRequests {
+		t.Fatalf("write over budget: %d, want 429", r.code)
+	}
+	if r := opsGet(e.h, "/api/v1/ops/work", oaTok); r.code != http.StatusOK {
+		t.Errorf("read while writes are limited: %d, want 200", r.code)
+	}
+}
+
 // FuzzOpsNoteBody: no body makes the handler panic, leak or answer 5xx
 // other than 502 (a source failure), and nothing reaches OnNoteAccepted
 // without a successful store write.
@@ -626,7 +784,7 @@ func FuzzOpsNoteBody(f *testing.F) {
 	f.Add("\xff\xfe")
 	f.Fuzz(func(t *testing.T, body string) {
 		if len(body) > 2*opsnotes.MaxNoteBytes {
-			t.Skip()
+			return
 		}
 		e := newOpsEnv(t)
 		e.facts.groups = []opsfacts.Group{g}
