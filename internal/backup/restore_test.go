@@ -504,7 +504,8 @@ func stubFilesystem(t *testing.T, remove func(string) error, move func(string, s
 }
 
 // When the old data cannot be put back, the error names where it is, the old
-// data stays there, and the services are still started.
+// data stays there, and the services stay stopped (they would run on missing
+// data, and StateDirectory= would recreate an empty data directory).
 func TestRestoreNamesOldDataThatCannotBePutBack(t *testing.T) {
 	m, files := sample(t)
 	latest := map[string]int{"server": m.Schemas["server"], "executor": m.Schemas["executor"]}
@@ -541,8 +542,13 @@ func TestRestoreNamesOldDataThatCannotBePutBack(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(asideExecutor, "executor.db")); string(b) != "old executor" {
 		t.Fatal("old executor data is not at the reported path")
 	}
-	if len(sys.calls) == 0 || sys.calls[len(sys.calls)-1] != "start "+strings.Join(StartUnits, ",") {
-		t.Fatalf("calls %v, want the services started last", sys.calls)
+	for _, c := range sys.calls {
+		if strings.HasPrefix(c, "start ") {
+			t.Fatalf("calls %v, want the services left stopped", sys.calls)
+		}
+	}
+	if !strings.Contains(err.Error(), "left stopped") {
+		t.Fatalf("error %q does not say the services were left stopped", err)
 	}
 }
 
@@ -581,6 +587,11 @@ func TestRestoreReportsNewDirectoryThatCannotBeRemoved(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(filepath.Join(l.ExecutorDir(), "executor.db")); string(b) != "old executor" {
 		t.Fatal("executor data was not put back")
+	}
+	for _, c := range sys.calls {
+		if strings.HasPrefix(c, "start ") {
+			t.Fatalf("calls %v, want the services left stopped after a failed removal", sys.calls)
+		}
 	}
 }
 

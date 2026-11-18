@@ -163,8 +163,12 @@ func Restore(m Manifest, files []File, l Layout, sys System, latest map[string]i
 	// removes what this restore created, puts each old directory back, and
 	// starts the services. Every error is returned, and an old directory that
 	// could not be put back is named, so the operator knows where the data is.
-	undo := func() error {
-		var errs []error
+	// If anything could not be removed or put back (prior holds earlier
+	// cleanup errors of the caller), the services stay stopped: they would
+	// run on missing or half-restored data, and systemd's StateDirectory=
+	// would create an empty data directory that blocks a manual rename back.
+	undo := func(prior []error) error {
+		errs := append([]error(nil), prior...)
 		for i := len(created) - 1; i >= 0; i-- {
 			if err := removeAll(created[i]); err != nil {
 				errs = append(errs, fmt.Errorf("remove the new %s: %w", created[i], err))
@@ -179,6 +183,10 @@ func Restore(m Manifest, files []File, l Layout, sys System, latest map[string]i
 		}
 		if len(stranded) > 0 {
 			errs = append(errs, fmt.Errorf("the old data is still at %s", strings.Join(stranded, ", ")))
+		}
+		if len(errs) > 0 {
+			errs = append(errs, errors.New("the services were left stopped; put the data back by hand, then start them"))
+			return errors.Join(errs...)
 		}
 		if err := sys.Start(StartUnits...); err != nil {
 			errs = append(errs, fmt.Errorf("start the services: %w", err))
@@ -200,8 +208,8 @@ func Restore(m Manifest, files []File, l Layout, sys System, latest map[string]i
 				errs = append(errs, fmt.Errorf("remove %s: %w", cfgRoot, rerr))
 			}
 		}
-		if uerr := undo(); uerr != nil {
-			errs = append(errs, uerr)
+		if uerr := undo(errs); uerr != nil {
+			errs = []error{uerr}
 		}
 		if len(errs) > 0 {
 			return Report{}, fmt.Errorf("%w; restoring the previous state failed: %w", err, errors.Join(errs...))
