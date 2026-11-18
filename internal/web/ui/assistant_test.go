@@ -384,11 +384,19 @@ func TestAssistantOpsHasOnlyDismissPostAndNoScript(t *testing.T) {
 		Steps: []opsnotes.StepInput{{ActionID: "package.install_security", HostID: "h1", Why: "x"}},
 	})}}
 	h := assistantServer(t, assistantOps(store, newCatalog()), assistantUser{"root"})
+	inlineScript := regexp.MustCompile(`(?i)<script(\s[^>]*)?>`)
 	for _, path := range []string{"/assistant/panel", "/assistant/ops", "/assistant/ops/notes/1"} {
-		body := doAssistant(t, h, http.MethodGet, path, nil).Body.String()
-		if strings.Contains(strings.ToLower(body), "<script") && path != "/assistant/ops/notes/1" {
-			t.Errorf("%s: inline script in the panel markup", path)
+		// The htmx fragment and the full page (layout) both must be free of
+		// inline scripts; the layout's own scripts are external.
+		for _, headers := range []map[string]string{nil, {"HX-Request": "true"}} {
+			body := doAssistant(t, h, http.MethodGet, path, headers).Body.String()
+			for _, tag := range inlineScript.FindAllString(body, -1) {
+				if !strings.Contains(tag, "src=") {
+					t.Errorf("%s (htmx=%v): inline script %q", path, headers != nil, tag)
+				}
+			}
 		}
+		body := doAssistant(t, h, http.MethodGet, path, nil).Body.String()
 		for _, bad := range []string{"onclick=", "onsubmit=", "propose", ">Run<"} {
 			if strings.Contains(strings.ToLower(body), strings.ToLower(bad)) {
 				t.Errorf("%s: found %q", path, bad)

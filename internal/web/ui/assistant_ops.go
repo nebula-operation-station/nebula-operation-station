@@ -5,7 +5,7 @@ package ui
 // The Ops tab of the Assistant panel (ADR 0016 D8, D11). Admins only: every
 // route here answers 404 to anyone else, and the tab is absent from the
 // markup for them. This file reads the notes store; the Help backend
-// (assistant.go, assistant_help.go) must never import it.
+// (assistant.go, help.go) must never import it.
 //
 // Rendering rules (ADR 0016 D8):
 //   - "What" comes from the facts snapshot that NOS wrote, not from model text.
@@ -202,7 +202,7 @@ func (h *Handler) handleAssistantOps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	view := h.assistantOpsBody(ctx, r, notes)
-	h.renderAssistantFragment(w, "assistant_ops", view)
+	writeAssistantPanel(w, r, h.log, h.assistantPageData, &assistantPanelView{Tabs: assistantTabs(assistantTabOps, true), Ops: view})
 }
 
 // assistantOpsBody builds the Ops tab from the stored notes. It reads the
@@ -369,7 +369,7 @@ func (h *Handler) handleAssistantOpsNote(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	page := assistantNotePage{pageData: h.assistantPageData(r, "Fix suggestion"), Card: h.assistantCardFor(ctx, n)}
-	h.renderAssistantPage(w, page)
+	renderAssistantTemplate(w, h.log, assistantNotePageTemplate, "layout", page)
 }
 
 // assistantNotePage is the layout data of the detail page.
