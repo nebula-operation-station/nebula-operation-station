@@ -309,6 +309,30 @@ func (n *Notifier) Findings(ctx context.Context, fs []vulnstore.Finding) int {
 	return sent
 }
 
+// TriggerFindings calls the trigger when one of fs newly enters tier high or
+// critical, by the rule of triggerAlert. It sends no message and changes no
+// vuln.* state other than the trigger's own mark, so it is safe to call with
+// the high-tier candidates that the alert messages never read.
+func (n *Notifier) TriggerFindings(fs []vulnstore.Finding) {
+	if n.trigger == nil {
+		return
+	}
+	touch := false
+	n.mu.Lock()
+	for _, f := range fs {
+		if f.State != vulnstore.StateOpen {
+			continue
+		}
+		if n.triggerAlert(f) {
+			touch = true
+		}
+	}
+	n.mu.Unlock()
+	if touch {
+		n.trigger()
+	}
+}
+
 // triggerAlert reports whether f newly enters tier high or critical for the
 // trigger of ADR 0016 D3: once per finding, episode and tier, so a finding
 // that stays in its tier does not call it again. The mark is set when the

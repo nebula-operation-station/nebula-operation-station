@@ -72,6 +72,40 @@ func TestRunAlertFindingsReturnsOpenKEVOrCriticalOfThatRun(t *testing.T) {
 	}
 }
 
+// TestRunHighFindingsReturnsOnlyOpenHighOfThatRun: the trigger read returns
+// the open high findings of the run, not medium, critical or other runs'
+// findings, and pages by key. The vuln.* read is unchanged by it.
+func TestRunHighFindingsReturnsOnlyOpenHighOfThatRun(t *testing.T) {
+	e := newEnv(t)
+	r := e.start(t)
+	medium := item(t, "h1", cve(1), withCVSS(5.0))
+	high := item(t, "h1", cve(2), withCVSS(7.5))
+	crit := item(t, "h1", cve(3), withCVSS(9.8))
+	e.submit(t, r, 0, nil, medium, high, crit)
+	got, err := e.st.RunHighFindingsAfter(e.ctx, r.ID, nil, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Key != high.Finding.Key {
+		t.Fatalf("RunHighFindingsAfter = %d findings, want only the high one", len(got))
+	}
+	// The vuln.* candidates still come from RunAlertFindingsAfter only.
+	alerts, err := e.st.RunAlertFindings(e.ctx, r.ID, 10)
+	if err != nil || len(alerts) != 1 || alerts[0].Key != crit.Finding.Key {
+		t.Fatalf("RunAlertFindings = %d, %v; want the critical finding only", len(alerts), err)
+	}
+	r2 := e.start(t)
+	if got, err := e.st.RunHighFindingsAfter(e.ctx, r2.ID, nil, 10); err != nil || len(got) != 0 {
+		t.Fatalf("RunHighFindingsAfter(other run) = %d, %v; want none", len(got), err)
+	}
+	if _, err := e.st.RunHighFindingsAfter(e.ctx, "nope", nil, 10); !errors.Is(err, ErrRunNotFound) {
+		t.Fatalf("unknown run err = %v, want ErrRunNotFound", err)
+	}
+	if _, err := e.st.RunHighFindingsAfter(e.ctx, r.ID, nil, 0); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("limit 0 err = %v, want ErrInvalidInput", err)
+	}
+}
+
 // TestRunAlertFindingsAfterPagesThroughEveryCandidate: paging by key
 // returns every KEV or critical finding of the run exactly once, also past
 // the first page.

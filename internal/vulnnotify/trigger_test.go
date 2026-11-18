@@ -40,6 +40,34 @@ func TestTriggerOnNewHighFinding(t *testing.T) {
 	}
 }
 
+// TestTriggerFindingsHighReadTouchesWithoutMessages: the high-tier read
+// (TriggerFindings) touches the trigger for a new high finding and sends no
+// vuln.* message; a second call for the same episode does not touch again.
+func TestTriggerFindingsHighReadTouchesWithoutMessages(t *testing.T) {
+	n, s, c := newTriggerTest(t)
+	f := finding(1, 1, vulnstore.TierHigh, false)
+	n.TriggerFindings([]vulnstore.Finding{f})
+	n.TriggerFindings([]vulnstore.Finding{f})
+	if c.n != 1 {
+		t.Fatalf("trigger touched %d times, want 1", c.n)
+	}
+	if len(s.es) != 0 {
+		t.Fatalf("messages %v, want none", s.kinds())
+	}
+}
+
+// TestTriggerFindingsIgnoresClosedAndMedium: a closed finding and a medium
+// finding never touch the trigger on the high read.
+func TestTriggerFindingsIgnoresClosedAndMedium(t *testing.T) {
+	n, _, c := newTriggerTest(t)
+	closed := finding(1, 1, vulnstore.TierHigh, false)
+	closed.State = vulnstore.StateFixed
+	n.TriggerFindings([]vulnstore.Finding{closed, finding(2, 1, vulnstore.TierMedium, false)})
+	if c.n != 0 {
+		t.Fatalf("trigger touched %d times, want 0", c.n)
+	}
+}
+
 // TestTriggerNotOnMediumOrLow: tiers below high never touch the trigger.
 func TestTriggerNotOnMediumOrLow(t *testing.T) {
 	ctx := context.Background()
