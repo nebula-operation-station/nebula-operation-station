@@ -274,6 +274,11 @@ func (s *Service) durableMemberTransport(ctx context.Context, x *batchExec, call
 		// anything can change on the host (R9).
 		err = s.recordRecreationIntent(run, call.hostID, call.fingerprint)
 	}
+	if err == nil {
+		// The endpoint is recorded before the job is handed over (ep02): a
+		// dispatch that breaks mid-way still names where it was attempted.
+		err = s.db.SetRunDispatchEndpoint(run.ExecutionID, call.hostID, c.Endpoint.String())
+	}
 	if err != nil {
 		c.Close()
 		resp.Class, resp.Detail = classBatchNotExecuted, "not started: "+err.Error()
@@ -295,7 +300,8 @@ func (s *Service) durableMemberTransport(ctx context.Context, x *batchExec, call
 	case err != nil:
 		// The connection broke during dispatch: the reconciler finds out
 		// whether the job is on the host.
-		s.log.Warn("audit", "kind", "batch_member_dispatch_uncertain", "execution", run.ExecutionID, "host", call.hostID, "detail", err.Error())
+		s.log.Warn("audit", "kind", "batch_member_dispatch_uncertain", "execution", run.ExecutionID, "host", call.hostID,
+			"endpoint", c.Endpoint.String(), "detail", err.Error())
 	case outcome == hostrun.NotStarted:
 		call.dispatched = false
 		s.completeNotStarted(run.ExecutionID, detail)

@@ -35,8 +35,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-
-	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 )
 
 // Retention is how long entries are kept. Prune removes older entries.
@@ -57,13 +55,20 @@ var ErrRefused = errors.New("notifylog: record refused")
 // generates it. canonical has the same pattern, but its copy is unexported.
 var execIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
+// hostIDRe is the inventory host ID pattern, canonical.ValidHostID (lowercase
+// letters, digits, '.', '_', '-', at most 63 bytes). It is a copy so that
+// notifylog does not import canonical: internal/notify (on the vuln agent
+// path) imports this package, and canonical imports sshtransport, which the
+// agent path must not reach (TestVulnAgentPathImportsNoActionPackage).
+// TestHostIDPatternMatchesCanonical keeps both in step.
+var hostIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
+
 // validHost reports whether s is empty (no host) or exactly an inventory host
-// ID: canonical.ValidHostID, the pattern the inventory checks (lowercase
-// letters, digits, '.', '_', '-', at most 63 bytes). Nothing stricter and
-// nothing looser. There is no secret detector here: a value that does not
+// ID (hostIDRe, the same pattern as canonical.ValidHostID). Nothing stricter
+// and nothing looser. There is no secret detector here: a value that does not
 // have the ID shape is refused, and a value that does is a valid host ID.
 func validHost(s string) bool {
-	return s == "" || canonical.ValidHostID(s)
+	return s == "" || hostIDRe.MatchString(s)
 }
 
 // validExecutionID reports whether s is empty or a lowercase UUIDv4.
