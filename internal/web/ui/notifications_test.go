@@ -49,6 +49,13 @@ type notifEnv struct {
 // adminErr is set, in which case the admin check fails for every user.
 func newNotifEnv(t *testing.T, log ui.NotificationLog, adminErr error) *notifEnv {
 	t.Helper()
+	return newNotifEnvWired(t, log, adminErr, true)
+}
+
+// newNotifEnvWired is newNotifEnv; with wired false the options carry no
+// notification log and no admin check, so the inbox is off.
+func newNotifEnvWired(t *testing.T, log ui.NotificationLog, adminErr error, wired bool) *notifEnv {
+	t.Helper()
 	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
 	if err != nil {
 		t.Fatalf("open server DB: %v", err)
@@ -65,18 +72,17 @@ func newNotifEnv(t *testing.T, log ui.NotificationLog, adminErr error) *notifEnv
 		log = s
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	u, err := ui.New(ui.Options{
-		PublicOrigin:  pveOrigin,
-		Log:           logger,
-		Now:           clk,
-		Notifications: log,
-		NotificationsAdmin: func(_ context.Context, user string) (bool, error) {
+	opts := ui.Options{PublicOrigin: pveOrigin, Log: logger, Now: clk}
+	if wired {
+		opts.Notifications = log
+		opts.NotificationsAdmin = func(_ context.Context, user string) (bool, error) {
 			if adminErr != nil {
 				return false, adminErr
 			}
 			return e.admins[user], nil
-		},
-	})
+		}
+	}
+	u, err := ui.New(opts)
 	if err != nil {
 		t.Fatalf("ui.New: %v", err)
 	}
@@ -407,5 +413,68 @@ func TestNotificationsOnlyGET(t *testing.T) {
 	// matters is that the inbox does not serve a write.
 	if res.StatusCode != http.StatusNotFound && res.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("POST /notifications = %d, want 404 or 405", res.StatusCode)
+	}
+}
+
+// notifNavPages are pages that render the shared layout and must keep
+// rendering with or without the notifications navigation entry.
+var notifNavPages = []string{"/dashboard", "/inventory", "/help", "/settings", "/network", "/history", "/operations", "/runbooks"}
+
+const notifNavHref = `href="/notifications"`
+
+func TestNotificationsNavHiddenWithoutInbox(t *testing.T) {
+	e := newNotifEnvWired(t, nil, nil, false)
+	for _, p := range notifNavPages {
+		res, body := e.get(e.cookie, p)
+		if res.StatusCode != http.StatusOK {
+			t.Errorf("GET %s without inbox = %d, want 200", p, res.StatusCode)
+		}
+		if strings.Contains(body, notifNavHref) {
+			t.Errorf("GET %s without inbox: navigation entry for Notifications shown", p)
+		}
+	}
+	res, _ := e.get(e.cookie, "/notifications")
+	if res.StatusCode != http.StatusNotFound {
+		t.Errorf("GET /notifications without inbox = %d, want 404", res.StatusCode)
+	}
+}
+
+func TestNotificationsNavHiddenForNonAdmin(t *testing.T) {
+	e := newNotifEnv(t, nil, nil)
+	bob := e.session("cred-bob", "bob")
+	for _, p := range notifNavPages {
+		res, body := e.get(bob, p)
+		if res.StatusCode != http.StatusOK {
+			t.Errorf("GET %s as non-admin = %d, want 200", p, res.StatusCode)
+		}
+		if strings.Contains(body, notifNavHref) {
+			t.Errorf("GET %s as non-admin: navigation entry for Notifications shown", p)
+		}
+	}
+}
+
+func TestNotificationsNavHiddenWhenAdminCheckFails(t *testing.T) {
+	e := newNotifEnv(t, nil, errors.New("executor down"))
+	for _, p := range notifNavPages {
+		res, body := e.get(e.cookie, p)
+		if res.StatusCode != http.StatusOK {
+			t.Errorf("GET %s with admin check error = %d, want 200", p, res.StatusCode)
+		}
+		if strings.Contains(body, notifNavHref) {
+			t.Errorf("GET %s with admin check error: navigation entry shown", p)
+		}
+	}
+}
+
+func TestNotificationsNavShownForAdmin(t *testing.T) {
+	e := newNotifEnv(t, nil, nil)
+	for _, p := range notifNavPages {
+		res, body := e.get(e.cookie, p)
+		if res.StatusCode != http.StatusOK {
+			t.Errorf("GET %s as admin = %d, want 200", p, res.StatusCode)
+		}
+		if !strings.Contains(body, notifNavHref) {
+			t.Errorf("GET %s as admin: navigation entry for Notifications missing", p)
+		}
 	}
 }
