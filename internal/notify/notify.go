@@ -24,7 +24,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -257,13 +256,23 @@ func (n *Notifier) record(ctx context.Context, r notifylog.Record) {
 	}()
 }
 
-// fitsLabel reports whether s is a host label or execution ID the notification
-// log accepts (its shape and length limits). A value that does not fit is
-// stored empty, so the event is still logged; the message text is unchanged.
-var fitsLabel = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+// logHost returns the host the notification log stores for a host label: the
+// label itself when it is an inventory host ID (lowercase, at most 63 bytes),
+// otherwise "". A display label such as "Web01" is not an ID, and Append
+// refuses a record with a host that is not an ID, so a label that is not one
+// is stored empty and the event is still logged. The message text is
+// unchanged.
+func logHost(s string) string {
+	if notifylog.ValidHost(s) {
+		return s
+	}
+	return ""
+}
 
-func logLabel(s string, limit int) string {
-	if len(s) <= limit && fitsLabel.MatchString(s) {
+// logExecutionID returns the execution ID the log stores: the value when it is
+// a lowercase UUIDv4, otherwise "" (see logHost).
+func logExecutionID(s string) string {
+	if notifylog.ValidExecutionID(s) {
 		return s
 	}
 	return ""
