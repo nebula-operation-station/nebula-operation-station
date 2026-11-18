@@ -667,7 +667,9 @@ func TestOpsNotesFollowsTheStoredSettingPerRequest(t *testing.T) {
 		t.Errorf("OnNoteAccepted called %d times, want 1", len(e.accepted))
 	}
 	e.settings.row.Enabled = true
-	if r := opsPost(e.h, "/api/v1/ops/notes", oaTok, second); r.code != http.StatusCreated {
+	g2 := labGroup(opsHost, "CVE-2026-0002", opsfacts.TierHigh, false, 70)
+	e.facts.groups = []opsfacts.Group{g2}
+	if r := opsPost(e.h, "/api/v1/ops/notes", oaTok, noteBody(g2.Key, g2.Digest, "package.install_security", opsHost)); r.code != http.StatusCreated {
 		t.Errorf("switched back on: %d, want 201", r.code)
 	}
 }

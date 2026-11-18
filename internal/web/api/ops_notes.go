@@ -124,16 +124,16 @@ func (h *OpsHandler) postNote(ctx context.Context, w http.ResponseWriter, r *htt
 	sum := sha256.Sum256(body)
 	digest := hex.EncodeToString(sum[:])
 	if errors.Is(err, errBodyTooLarge) {
-		h.refuseNote(w, t, http.StatusRequestEntityTooLarge, len(body), digest)
+		h.refuseNote(w, t, http.StatusRequestEntityTooLarge, len(body), digest, nil)
 		return
 	}
 	if err != nil {
-		h.refuseNote(w, t, http.StatusBadRequest, len(body), digest)
+		h.refuseNote(w, t, http.StatusBadRequest, len(body), digest, nil)
 		return
 	}
 	d, err := opsnotes.Decode(body)
 	if err != nil {
-		h.refuseNote(w, t, http.StatusBadRequest, len(body), digest)
+		h.refuseNote(w, t, http.StatusBadRequest, len(body), digest, nil)
 		return
 	}
 	row, err := h.opts.Settings.Get(ctx)
@@ -142,9 +142,16 @@ func (h *OpsHandler) postNote(ctx context.Context, w http.ResponseWriter, r *htt
 		writeError(w, http.StatusBadGateway, "ops agent settings unavailable")
 		return
 	}
+	// While the agent is off (the default, ADR 0016 D12) no note is stored:
+	// a stored note would feed the suggestion index. The setting is read on
+	// every request, so switching it off takes effect at once.
+	if !row.Enabled {
+		h.refuseNote(w, t, http.StatusForbidden, len(body), digest, &d)
+		return
+	}
 	// A fix note in class external is refused before any facts are read.
 	if row.DataClass != opsconfig.DataClassLab && d.Kind == opsnotes.KindFix {
-		h.refuseNote(w, t, http.StatusForbidden, len(body), digest)
+		h.refuseNote(w, t, http.StatusForbidden, len(body), digest, &d)
 		return
 	}
 	res, groups, fleet, err := h.buildResolver(ctx, row.DataClass)
@@ -172,7 +179,7 @@ func (h *OpsHandler) postNote(ctx context.Context, w http.ResponseWriter, r *htt
 		if status == http.StatusInternalServerError {
 			h.log.Error("ops api: store note", "error", err)
 		}
-		h.refuseNote(w, t, status, len(body), digest)
+		h.refuseNote(w, t, status, len(body), digest, &d)
 		return
 	}
 	h.log.Info("audit", "kind", "ops_note", "token", t.name, "note_kind", string(d.Kind), "ref", d.Ref,
@@ -187,17 +194,23 @@ func (h *OpsHandler) postNote(ctx context.Context, w http.ResponseWriter, r *htt
 	writeJSON(w, code, map[string]any{"id": n.ID, "created": created})
 }
 
-// refuseNote answers a refused note with status and audits it. The text is
-// never logged: only the length and the digest of the bytes.
-func (h *OpsHandler) refuseNote(w http.ResponseWriter, t *token, status, length int, digest string) {
-	h.log.Warn("audit", "kind", "ops_note_refused", "token", t.name, "status", status, "length", length, "sha256", digest)
+// refuseNote answers a refused note with status and audits it (ADR 0016
+// D14). d is the decoded note, nil when the body did not decode; its kind,
+// ref and digest are audited whenever it is set. The text is never logged:
+// only the length and the digest of the bytes.
+func (h *OpsHandler) refuseNote(w http.ResponseWriter, t *token, status, length int, digest string, d *opsnotes.Draft) {
+	attrs := []any{"kind", "ops_note_refused", "token", t.name, "status", status, "length", length, "sha256", digest}
+	if d != nil {
+		attrs = append(attrs, "note_kind", string(d.Kind), "ref", d.Ref, "digest", d.Digest)
+	}
+	h.log.Warn("audit", attrs...)
 	switch status {
 	case http.StatusRequestEntityTooLarge:
 		writeError(w, status, "the note is larger than the limit")
 	case http.StatusBadRequest:
 		writeError(w, status, "the note is malformed")
 	case http.StatusForbidden:
-		writeError(w, status, "fix notes are not accepted for data class external")
+		writeError(w, status, "the note is not accepted: the ops agent is off or the data class takes no fix notes")
 	case http.StatusConflict:
 		writeError(w, status, "a different note exists for this digest")
 	case http.StatusTooManyRequests:
