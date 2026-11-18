@@ -2,6 +2,13 @@
 <h1>New operation</h1>
 <section class="panel" aria-label="New operation">
   <form id="operation-form" class="form" novalidate>
+    {{with .Ops.Suggestion}}
+    <p class="banner" role="note">
+      <span lang="de">Aus einem Agenten-Vorschlag geöffnet. Diese Ausführung braucht eine Security-Key-Berührung.</span>
+      <span lang="en">Opened from an agent suggestion. This execution needs a security-key touch.</span>
+    </p>
+    <input type="hidden" id="operation-suggestion" name="suggestion" value="{{.Ref}}">
+    {{end}}
     <fieldset>
       <legend>Action</legend>
       {{range $i, $a := .Ops.Actions}}

@@ -140,6 +140,11 @@ func writeRaw(t *testing.T, m Manifest, files []File) []byte {
 type fakeSystem struct {
 	calls  []string
 	failOn string
+	// snap, if set, is called on every Start; its results are kept in
+	// atStart, so a test can check what the filesystem looked like when the
+	// services were started, not only afterwards.
+	snap    func() map[string]string
+	atStart []map[string]string
 }
 
 func (f *fakeSystem) Stop(u ...string) error {
@@ -148,6 +153,9 @@ func (f *fakeSystem) Stop(u ...string) error {
 }
 func (f *fakeSystem) Start(u ...string) error {
 	f.calls = append(f.calls, "start "+strings.Join(u, ","))
+	if f.snap != nil {
+		f.atStart = append(f.atStart, f.snap())
+	}
 	return nil
 }
 func (f *fakeSystem) Chown(p, user string) error {
