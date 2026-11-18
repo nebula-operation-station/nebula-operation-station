@@ -100,6 +100,12 @@ type Options struct {
 	// Operations plans and follows executions. Nil leaves the
 	// operations page empty.
 	Operations Operations
+	// Notifications reads the notification log for the notifications
+	// inbox (ADR 0016 D10). Nil hides the page and its navigation entry.
+	Notifications NotificationLog
+	// NotificationsAdmin is the admin check of the notifications page. Nil
+	// denies every user (fail closed).
+	NotificationsAdmin NotificationAdminFunc
 	// Pins stores the per-host pinned quick actions (job ui5). Nil
 	// leaves pin management off: no pin endpoints and no pin UI.
 	Pins PinStore
@@ -234,39 +240,43 @@ type Handler struct {
 	publicOrigin string
 	// pages maps a content name to the parsed template set (layout +
 	// that page), so every page can define its own "content" block.
-	pages          map[string]*template.Template
-	staticFS       fs.FS
-	status         StatusProvider
-	hostNames      func(ctx context.Context) []string
-	hosts          func(ctx context.Context) ([]inventory.Host, error)
-	hostKeys       func(ctx context.Context) ([]*pb.HostKeyPin, error)
-	inventory      InventoryStore
-	operations     Operations
-	pins           PinStore
-	schedules      Schedules
-	leases         Leases
-	leaseProposals *leaseProposals
-	runbooks       Runbooks
-	deployProfiles DeployProfiles
-	trust          ArtifactTrust
-	builtinTrust   *builtinTrustCache
-	modules        Modules
-	lastResult     LastResultFunc
-	network        NetworkStore
-	discovery      DiscoveryStore
-	events         EventSource
-	auditLog       AuditStore
-	log            *slog.Logger
-	repin          Repinner
-	enroll         Enroller
-	onestep        *onestep
-	serverIP       func() netip.Addr
-	securityKeys   func(ctx context.Context) ([]*pb.WebAuthnCredential, error)
-	totpStatus     func(ctx context.Context) (*pb.GetTOTPStatusResponse, error)
-	pveChart       func(ctx context.Context) (pveinventory.Tree, error)
-	now            func() time.Time
-	pve            PVEStore
-	pveRemotes     PVERemoteMetaFunc
+	pages      map[string]*template.Template
+	staticFS   fs.FS
+	status     StatusProvider
+	hostNames  func(ctx context.Context) []string
+	hosts      func(ctx context.Context) ([]inventory.Host, error)
+	hostKeys   func(ctx context.Context) ([]*pb.HostKeyPin, error)
+	inventory  InventoryStore
+	operations Operations
+	// notifications and notificationsAdmin serve the notifications inbox
+	// (notifications.go).
+	notifications      NotificationLog
+	notificationsAdmin NotificationAdminFunc
+	pins               PinStore
+	schedules          Schedules
+	leases             Leases
+	leaseProposals     *leaseProposals
+	runbooks           Runbooks
+	deployProfiles     DeployProfiles
+	trust              ArtifactTrust
+	builtinTrust       *builtinTrustCache
+	modules            Modules
+	lastResult         LastResultFunc
+	network            NetworkStore
+	discovery          DiscoveryStore
+	events             EventSource
+	auditLog           AuditStore
+	log                *slog.Logger
+	repin              Repinner
+	enroll             Enroller
+	onestep            *onestep
+	serverIP           func() netip.Addr
+	securityKeys       func(ctx context.Context) ([]*pb.WebAuthnCredential, error)
+	totpStatus         func(ctx context.Context) (*pb.GetTOTPStatusResponse, error)
+	pveChart           func(ctx context.Context) (pveinventory.Tree, error)
+	now                func() time.Time
+	pve                PVEStore
+	pveRemotes         PVERemoteMetaFunc
 	// guestPower and guestPowerProposals serve the guest power controls.
 	guestPower          GuestPower
 	guestPowerProposals *guestPowerProposals
@@ -353,6 +363,8 @@ func New(o Options) (*Handler, error) {
 		hostKeys:             o.HostKeys,
 		inventory:            o.Inventory,
 		operations:           o.Operations,
+		notifications:        o.Notifications,
+		notificationsAdmin:   o.NotificationsAdmin,
 		pins:                 o.Pins,
 		schedules:            o.Schedules,
 		leases:               o.Leases,
@@ -453,6 +465,7 @@ var pageFiles = map[string]string{
 	"settings":  "settings.html",
 
 	"operations":          "operations.html",
+	"notifications":       "notifications.html",
 	"inventory_import":    "inventory_import.html",
 	"inventory_enroll":    "inventory_enroll.html",
 	"operation_new":       "operation_new.html",
@@ -555,6 +568,8 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("GET /operations/abort/confirm", h.handleOperationAbortConfirm)
 	mux.HandleFunc("POST /operations/abort/form", h.handleOperationAbortForm)
 	mux.HandleFunc("POST /operations/retry", h.handleOperationRetry)
+
+	mux.HandleFunc("GET /notifications", h.handleNotifications)
 	// Scheduled read-only checks (schedule grants).
 	mux.HandleFunc("GET /schedules", h.handleSchedules)
 	mux.HandleFunc("POST /schedules/create", h.handleScheduleCreate)
@@ -821,6 +836,10 @@ type pageData struct {
 	Host *hostPageData
 	// Ops is the data of the operations pages.
 	Ops *operationsData
+	// Notifications is the data of the notifications inbox;
+	// NotificationsEnabled shows its navigation entry (render fills it).
+	Notifications        *notificationsData
+	NotificationsEnabled bool
 	// PVEList is the data of the PVE remote list page.
 	PVEList *pveListData
 	// PVEDetail is the data of a PVE remote's detail page.
@@ -992,6 +1011,7 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, data pageData) 
 	}
 	data.NavCollapsed = navStateFromRequest(r) == navCollapsed
 	data.PVENav = h.pve != nil
+	data.NotificationsEnabled = h.notifications != nil
 	data.DeployEnabled = h.deploy != nil && h.pve != nil && h.pveRemotes != nil
 	// "Deploy here" (ADR 0008 section 6) on the chart's nodes of active
 	// remotes; read-only and blocked remotes get no shortcut.
