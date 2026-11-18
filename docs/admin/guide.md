@@ -2350,6 +2350,229 @@ Either way, then revoke the token on the Nebula machine (section 10.4).
 `/var/lib/nebula-vuln-agent`, `/etc/nebula-vuln-agent` and the user stay
 until you delete them.
 
+### 10.6 Ops agent
+
+The ops agent (`nebula-ops-agent`, ADR 0016) is optional and **off by
+default**. It works through the open critical and high vulnerability
+findings and writes one *fix note* per host and finding group: what is
+affected, the steps in order and the priority that NOS computed. The
+model orders and words the text. It never executes anything, never
+approves, never schedules and never submits a form. A step is a button
+that opens the normal NOS form, prefilled with the action and the host.
+You fill in the parameters and submit it yourself, with your security
+key (see "Security key for suggested executions" below).
+
+#### Status in this build
+
+Parts of ADR 0016 are built and parts are not. Check this before you
+plan a rollout.
+
+- **Planned, not connected:** the finding sources of the agent's work
+  list. Until they are, the agent finds no due work and writes no fix
+  note, and the Ops tab shows "no suggestion yet".
+- **Planned, no settings form yet:** the admin form for the LLM settings
+  (section "Settings and data class"). The settings store exists; the
+  form and the settings API do not. Until they ship, the settings stay
+  disabled, and the agent makes no LLM call.
+- **Planned, not sent:** the lease events `lease.expiring` and
+  `lease.run_failed`, the daily digest, and the notification list page in
+  the web UI. Notifications from the existing events work as in section
+  10.1; the server records each event in its notification log.
+- **Built:** the notes store with its limits, the suggestion marking of
+  executions (section "Security key for suggested executions"), the
+  agent binary, the systemd units and the Ops tab.
+
+#### The token `ops-agent`
+
+The agent has one exclusive API token with exactly two scopes:
+`ops.read` (read its work list and settings) and `ops.notes.write`
+(write notes and its last-run status). Create it on the Nebula machine
+as in section 10.2 and restrict it to loopback, because the agent runs on
+the same host:
+
+```
+nebula-server -api-token ops-agent:ops.read,ops.notes.write
+```
+
+```json
+{"name": "ops-agent", "sha256": "<printed hash>",
+ "scopes": ["ops.read", "ops.notes.write"],
+ "source_addresses": ["127.0.0.1", "::1"]}
+```
+
+The token must carry no other scope and no vulnerability scope. Only one
+token may hold the ops scopes. Nebula refuses to start with a
+configuration that breaks this rule. To revoke the token, remove its
+entry from `server.json` and restart `nebula-server`.
+
+Put the token on the NOS host, paste it, then press Ctrl-D:
+
+```
+sudo sh -c 'umask 077; cat > /etc/nebula-ops-agent/token'
+sudo chown nebula-ops-agent:nebula-ops-agent /etc/nebula-ops-agent/token
+```
+
+#### Configuration file and units
+
+The package installs `/etc/nebula-ops-agent/config.json` as a skeleton.
+Keys: `nos_base_url` (required; `https`, or `http` to a loopback address,
+no path), `nos_token_file`, `nos_ca_file` (optional, a pinned CA),
+`state_dir` (keep `/var/lib/nebula-ops-agent`) and `llm_credential_file`
+(optional, the bearer token of the LLM endpoint, in its own file, mode
+0600 and owned by `nebula-ops-agent`). Unknown keys are an error. The
+configuration holds no secret itself.
+
+Three units ship. None is enabled by the package:
+
+| Unit | What it does | Enable |
+| --- | --- | --- |
+| `nebula-ops-agent.service` | One run: fetch due work, one LLM call per item, post the validated notes. Oneshot, hardened, IP access to loopback only | started by the timer or the path unit |
+| `nebula-ops-agent.timer` | Starts the service every 30 minutes, with up to 5 minutes random delay | `sudo systemctl enable --now nebula-ops-agent.timer` |
+| `nebula-ops-agent.path` | Starts the service when the server touches its trigger file | Inert in this build: the server cannot write the trigger yet, so enable only the timer |
+
+Run it once by hand first and read the log:
+
+```
+sudo systemctl start nebula-ops-agent.service
+journalctl -u nebula-ops-agent.service -n 50
+```
+
+#### LLM address drop-in
+
+The unit allows network access to loopback only. The LLM endpoint is your
+decision, so you allow it in a drop-in, never in the unit:
+
+```
+sudo systemctl edit nebula-ops-agent.service
+```
+
+```ini
+[Service]
+IPAddressAllow=192.0.2.10/32
+```
+
+Use the address of your lab LLM host (the example is a documentation
+address). Lines add up, so the drop-in keeps loopback. The LLM base URL
+must use that address, or a name that a resolver on localhost answers.
+Use only a model you run in your lab, as for the vulnerability agent
+(section 10.5, "LLM"); a hosted model is not a supported endpoint for
+data class `lab`.
+
+#### Settings and data class
+
+The settings row holds: enabled (default **off**), LLM base URL, model,
+`allow_plain_http` (default off), data class (`lab` by default, or
+`external`), operator instructions (at most 4 KiB) and language (`de` by
+default, or `en`). Nebula never stores the LLM credential; it lives only
+in the agent's credential file. The core prompt is fixed in the agent and
+cannot be changed from the settings.
+
+The data class decides what may leave the lab:
+
+- **`lab`:** host labels and vulnerability IDs may go to the model. The
+  agent then **always** uses the lab-only dialer: it connects only to
+  addresses in the lab networks after DNS resolution, follows no
+  redirects, ignores proxy variables, and uses plain `http` only with
+  `allow_plain_http`, never with a credential. No setting, flag or
+  environment variable turns this off. If the URL does not resolve into a
+  lab network, the run stops with `llm_refused_lab_rule` and writes no
+  note. It never falls back to `external` within a run.
+- **`external`:** the LLM may be outside the lab. The model then gets
+  only fleet counts per tier and KEV, and no host-specific fix note is
+  made. Questions still get an answer, from the same counts and the
+  handbook.
+
+Choose `lab` only if the endpoint is on a network you control. If in
+doubt, choose `external`.
+
+#### What goes to the model
+
+| Data | `lab` | `external` |
+| --- | --- | --- |
+| Host label, environment, criticality | Yes (label at most 64 bytes) | No |
+| Exposure level, listening ports (number and protocol, at most 32) | Yes | No |
+| Per finding (at most 40 per group): vulnerability ID, source package, installed and fixed version, fix state, tier, score, KEV flag | Yes | No |
+| Counts per tier and KEV, per group and for the fleet | Yes | Fleet counts only |
+| Step candidates as opaque keys (`c1`, `c2`, ...), with the action name | Yes | No |
+| Documentation chunks from the handbook | Yes | Yes |
+| The question you typed in the Ops tab (at most 2 KiB) and the operator instructions | Yes | Yes |
+
+**Never sent, in either class:** IP addresses and endpoints, fingerprints,
+credentials or their file names, user names, execution output and logs,
+audit entries, the vulnerability agent's assessment text, flows, topology,
+attack-path steps and notification targets. The model does not choose
+actions or hosts: it picks among the candidate keys that NOS computed.
+Its output is checked twice, once by the agent and once by NOS, and text
+that contains a link is refused. Model text never appears in a
+notification.
+
+Your typed question and the operator instructions reach the model in both
+classes. Do not type a secret into either.
+
+#### Security key for suggested executions
+
+Every execution or batch that was opened from an agent suggestion needs a
+security-key touch, **also when the action is LOW**. NOS raises its risk
+class to at least MEDIUM. The executor then asks for the approval of that
+class (spec 05): a security-key assertion with user presence for each
+execution or batch. The executor itself is unchanged; it only applies the
+higher class that the server proposes.
+
+NOS decides this on the server. An execution counts as suggested in two
+ways:
+
+1. The form carries a suggestion reference, and NOS finds it in its notes
+   store. An unknown, expired or malformed reference is refused (`400`).
+   It never falls back to an unmarked execution.
+2. NOS checks every interactively created execution and batch member
+   against its stored fix notes. If a stored note has a step of the same
+   action family on the same host, the execution is marked, also when no
+   reference was sent.
+
+Consequences you will notice:
+
+- A card that you **dismiss** still marks executions. Dismissing hides the
+  card and changes nothing else.
+- While a fix note for a host is stored (at most 30 days, see below), an
+  admin who starts the same kind of action on that host **by hand** also
+  needs the key. The operation page shows "From an agent suggestion" and
+  "Risk MEDIUM (raised; the action declares LOW)". This is intended.
+- Schedules and read leases are not affected; the suggestion form offers
+  no "schedule this".
+
+Limit: the server decides the marking. A compromised NOS server can omit
+it. It already can propose LOW work inside an open privileged session
+(spec 05, `v23-05-07`), so the rule adds no new exposure. It protects
+against a plausible suggestion and a routine click, not against a
+compromised server. As for every browser approval, the authenticator
+signs the challenge, not the form on the screen.
+
+#### Notes, retention and backup
+
+- Notes and questions are stored in their own SQLite file,
+  `<data_dir>/opsnotes/notes.db`, in a directory with mode 0700. The
+  directory is outside the `nebula backup` set.
+- Retention: **30 days or 500 notes**, whichever comes first; the oldest
+  are pruned first. At most 100 notes are accepted per UTC day.
+- After a restore, no notes exist. The agent writes new ones on its next
+  run, if the timer runs.
+- Only admins see notes. Every other user gets `404`.
+- The audit log records each accepted or rejected note with its kind,
+  reference, digest, length and SHA-256, never its text. It also records
+  each change of the settings.
+
+#### Residual risk
+
+The residual risk, as ADR 0016 states it:
+
+> Residual risk: an admin follows a plausible but wrong suggestion, fills
+> in the parameters and approves it with the key. The card reduces
+> reading, not responsibility; the finding page and the cited section stay
+> the authority.
+
+Read the finding page and the cited section before you submit a
+suggested form.
+
 ## 11. Operating securely
 
 - **Hardened mode** (`-hardened`, section 6.2): HIGH and CRITICAL
