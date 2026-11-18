@@ -4,6 +4,7 @@ package netdevinventory
 
 import (
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -157,21 +158,69 @@ func TestPANOSLineLimitIsInclusive(t *testing.T) {
 	}
 }
 
-// TestPANOSByteLimitIsInclusive checks MaxNormalizedConfigBytes at the
-// byte. Each child line is 2 (indent) + 5 (`a = "`) + 4*MaxXMLTextBytes
-// (the DEL bytes, Go-quoted) + 1 (the closing quote) bytes, plus one for
-// its newline. The root line is 2 bytes with its newline. Expected is the
-// largest child count that fits, then one more child that does not.
+// renderedChildBytes is the number of bytes a child element with text
+// renders to, newline included: two spaces of indent, the name "a", " = ",
+// and the Go-quoted text.
+func renderedChildBytes(text string) int {
+	return len("  a = " + strconv.Quote(text) + "\n")
+}
+
+// panosPadText returns raw text whose child line renders to exactly cost
+// bytes, using DEL bytes (four rendered bytes each) and then letters (one
+// each). cost must be at least 10 and at most renderedChildBytes of a full
+// MaxXMLTextBytes DEL text.
+func panosPadText(cost int) string {
+	inner := cost - renderedChildBytes("")
+	return strings.Repeat("\x7f", inner/4) + strings.Repeat("a", inner%4)
+}
+
+// panosChildren is a root with n child elements: n-1 full DEL children and
+// a last child with the given text.
+func panosChildren(n int, last string) string {
+	full := "<a>" + strings.Repeat("\x7f", netdevcontract.MaxXMLTextBytes) + "</a>"
+	return "<r>" + strings.Repeat(full, n-1) + "<a>" + last + "</a></r>"
+}
+
+// TestPANOSByteLimitIsInclusive checks MaxNormalizedConfigBytes at the byte.
+// The root line is 2 bytes with its newline. Full children render
+// fullChild bytes each. The fit full children and a last child padded to the
+// remaining bytes render to exactly MaxNormalizedConfigBytes and are
+// accepted; the same document with one more byte in its last child is
+// refused.
 func TestPANOSByteLimitIsInclusive(t *testing.T) {
-	const perChild = 2 + 5 + 4*netdevcontract.MaxXMLTextBytes + 1 + 1
-	const rootBytes = 2
-	fit := (MaxNormalizedConfigBytes - rootBytes) / perChild
-	lines, ok := NormalizePANOSConfig(panosHeavy(fit))
+	const rootBytes = len("r\n")
+	fullChild := renderedChildBytes(strings.Repeat("\x7f", netdevcontract.MaxXMLTextBytes))
+	fit := (MaxNormalizedConfigBytes - rootBytes) / fullChild
+	rest := MaxNormalizedConfigBytes - rootBytes - fit*fullChild
+	if rest < renderedChildBytes("a") || rest+1 > fullChild {
+		t.Fatalf("remaining %d bytes cannot be padded to exactly the limit", rest)
+	}
+
+	atLimit := panosChildren(fit+1, panosPadText(rest))
+	lines, ok := NormalizePANOSConfig(atLimit)
 	if !ok {
-		t.Fatalf("%d children refused, expected to fit %d bytes", fit, MaxNormalizedConfigBytes)
+		t.Fatalf("document rendering to exactly %d bytes refused", MaxNormalizedConfigBytes)
 	}
-	checkPANOSLines(t, panosHeavy(fit), lines)
+	checkPANOSLines(t, atLimit, lines)
+	if got := renderedBytes(lines); got != MaxNormalizedConfigBytes {
+		t.Fatalf("document renders to %d bytes, want exactly %d", got, MaxNormalizedConfigBytes)
+	}
+
+	overByOne := panosChildren(fit+1, panosPadText(rest+1))
+	if _, ok := NormalizePANOSConfig(overByOne); ok {
+		t.Fatalf("document rendering to %d bytes accepted, limit %d", MaxNormalizedConfigBytes+1, MaxNormalizedConfigBytes)
+	}
 	if _, ok := NormalizePANOSConfig(panosHeavy(fit + 1)); ok {
-		t.Fatalf("%d children accepted, expected to exceed %d bytes", fit+1, MaxNormalizedConfigBytes)
+		t.Fatalf("%d full children accepted, expected to exceed %d bytes", fit+1, MaxNormalizedConfigBytes)
 	}
+}
+
+// renderedBytes is the byte count the renderer bounds: each line plus its
+// newline.
+func renderedBytes(lines []string) int {
+	n := 0
+	for _, l := range lines {
+		n += len(l) + 1
+	}
+	return n
 }
