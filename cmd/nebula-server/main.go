@@ -215,9 +215,10 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	log = slog.New(auditlog.NewHandler(log.Handler(), audit))
 	// Notification log (ADR 0016 D10): every sent or failed notification, and
 	// every integrity message held by the hourly limit, is recorded here, from
-	// a write that runs beside the send. Vulnerability digest holds and muted
-	// events are not recorded: internal/vulnnotify holds them before they
-	// reach the notifier, so the notifier never sees them.
+	// a write that runs beside the send. Vulnerability digest holds are
+	// recorded too: internal/vulnnotify passes them to the notifier's
+	// RecordHeld after its own lock is released. No code path writes a
+	// held_muted record yet.
 	// A log that cannot be opened is an error for the log only: the
 	// notifier keeps sending without it.
 	notifyLog, err := attachNotifyLog(notifier, db, time.Now)
