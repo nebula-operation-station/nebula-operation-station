@@ -61,7 +61,7 @@ func TestAskQuestionRefusesBadTextAndStoresNothing(t *testing.T) {
 		want error
 	}{
 		{"empty", "   ", ErrMissing},
-		{"over 2 KiB", strings.Repeat("a", MaxTextBytes+1), ErrLimit},
+		{"over the question limit", strings.Repeat("a", MaxQuestionBytes+1), ErrLimit},
 		{"control rune", "hallo\x07", ErrInvalidText},
 		{"zero width", "ha" + zeroWidthSpace + "llo", ErrInvalidText},
 		{"invalid UTF-8", "ha\xffllo", ErrInvalidText},
@@ -83,9 +83,9 @@ func TestAskQuestionRefusesBadTextAndStoresNothing(t *testing.T) {
 
 func TestAskQuestionAcceptsExactlyTheByteLimit(t *testing.T) {
 	s := openTestStore(t, &fakeClock{t: baseTime})
-	q := askQuestion(t, s, "admin", strings.Repeat("a", MaxTextBytes))
-	if len(q.Text) != MaxTextBytes {
-		t.Errorf("stored %d bytes, want %d", len(q.Text), MaxTextBytes)
+	q := askQuestion(t, s, "admin", strings.Repeat("a", MaxQuestionBytes))
+	if len(q.Text) != MaxQuestionBytes {
+		t.Errorf("stored %d bytes, want %d", len(q.Text), MaxQuestionBytes)
 	}
 }
 
@@ -204,7 +204,40 @@ func TestOpenQuestionsOldestFirst(t *testing.T) {
 	}
 }
 
-func TestOpenQuestionExpiresAfterRetention(t *testing.T) {
+// A question past QuestionOpenTTL is not served as work and cannot be
+// answered, even before the hourly prune has marked it expired.
+func TestOpenQuestionPastTTLIsNotDueBeforePrune(t *testing.T) {
+	clock := &fakeClock{t: baseTime}
+	s := openTestStore(t, clock)
+	ctx := context.Background()
+	q := askQuestion(t, s, "admin", "alt")
+	clock.t = baseTime.Add(QuestionOpenTTL + time.Minute)
+	open, err := s.OpenQuestions(ctx)
+	if err != nil || len(open) != 0 {
+		t.Fatalf("OpenQuestions past TTL = %+v, %v; want none", open, err)
+	}
+	if _, _, err := s.Put(ctx, newFakeResolver(), answerDraft(q, "zu spät"), testSnapshot); !errors.Is(err, ErrNotOpen) {
+		t.Errorf("answer past TTL before prune error = %v, want ErrNotOpen", err)
+	}
+}
+
+// A question just inside QuestionOpenTTL is still due and answerable.
+func TestOpenQuestionWithinTTLIsDue(t *testing.T) {
+	clock := &fakeClock{t: baseTime}
+	s := openTestStore(t, clock)
+	ctx := context.Background()
+	q := askQuestion(t, s, "admin", "frisch")
+	clock.t = baseTime.Add(QuestionOpenTTL - time.Minute)
+	open, err := s.OpenQuestions(ctx)
+	if err != nil || len(open) != 1 || open[0].ID != q.ID {
+		t.Fatalf("OpenQuestions within TTL = %+v, %v; want the question", open, err)
+	}
+	if _, _, err := s.Put(ctx, newFakeResolver(), answerDraft(q, "rechtzeitig"), testSnapshot); err != nil {
+		t.Errorf("answer within TTL: %v", err)
+	}
+}
+
+func TestOpenQuestionExpiresAfterOpenTTL(t *testing.T) {
 	clock := &fakeClock{t: baseTime}
 	s := openTestStore(t, clock)
 	ctx := context.Background()

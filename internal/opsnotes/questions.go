@@ -17,7 +17,7 @@ import (
 type QuestionState string
 
 // The question states. An open question is answered once; an open question
-// older than Retention becomes expired and can no longer be answered.
+// older than QuestionOpenTTL becomes expired and can no longer be answered.
 const (
 	QuestionOpen     QuestionState = "open"
 	QuestionAnswered QuestionState = "answered"
@@ -123,9 +123,18 @@ func (s *Store) ListQuestions(ctx context.Context, user string) ([]Question, err
 }
 
 // OpenQuestions returns the open questions, oldest first (the order the agent
-// answers them in).
+// answers them in). A question older than QuestionOpenTTL is not returned even
+// before the prune has marked it expired.
 func (s *Store) OpenQuestions(ctx context.Context) ([]Question, error) {
-	return s.queryQuestions(ctx, questionColumns+` WHERE state = 'open' ORDER BY created_at ASC, id ASC`)
+	return s.queryQuestions(ctx,
+		questionColumns+` WHERE state = 'open' AND created_at >= ? ORDER BY created_at ASC, id ASC`,
+		s.openCutoff().UnixNano())
+}
+
+// openCutoff is the oldest creation time an open question may have and still
+// be open: the same bound expireQuestionsTx applies.
+func (s *Store) openCutoff() time.Time {
+	return s.now().UTC().Add(-QuestionOpenTTL)
 }
 
 func (s *Store) queryQuestions(ctx context.Context, query string, args ...any) ([]Question, error) {
@@ -166,6 +175,11 @@ func (s *Store) openQuestionForAnswer(ctx context.Context, ref string) (Question
 	if q.State != QuestionOpen {
 		return Question{}, fmt.Errorf("question %s is %s: %w", ref, q.State, ErrNotOpen)
 	}
+	// The prune marks expired questions only hourly; an open question past
+	// its TTL is refused here already, as expireQuestionsTx would.
+	if q.CreatedAt.Before(s.openCutoff()) {
+		return Question{}, fmt.Errorf("question %s is past its open TTL: %w", ref, ErrNotOpen)
+	}
 	return q, nil
 }
 
@@ -199,7 +213,8 @@ func closeQuestionTx(ctx context.Context, tx *sql.Tx, id, noteID int64, at time.
 }
 
 // expireQuestionsTx marks open questions older than QuestionOpenTTL as
-// expired, and deletes the questions older than Retention.
+// expired, and deletes the questions older than Retention. Reads apply the
+// same open bound (Store.openCutoff) without waiting for this.
 func expireQuestionsTx(ctx context.Context, q queryer, now time.Time) (int64, error) {
 	if _, err := q.ExecContext(ctx,
 		`UPDATE questions SET state = 'expired' WHERE state = 'open' AND created_at < ?`,
