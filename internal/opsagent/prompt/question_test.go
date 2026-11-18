@@ -140,7 +140,7 @@ func TestQuestionExternalClassHasNoHostOrVulnData(t *testing.T) {
 	withGroup.Group = &Counts{High: 1}
 	for name, bad := range map[string]Input{
 		"facts": withFacts, "host": withHost, "finding": withFinding, "candidate": withCandidate, "group": withGroup,
-		"no fleet": {Class: ClassExternal, Lang: LangDE, Kind: "question", Question: "x"},
+		"no fleet":    {Class: ClassExternal, Lang: LangDE, Kind: "question", Question: "x"},
 		"no question": {Class: ClassExternal, Lang: LangDE, Kind: "question", Fleet: &Counts{}},
 	} {
 		if _, err := Build(bad); !errors.Is(err, ErrRefused) {
