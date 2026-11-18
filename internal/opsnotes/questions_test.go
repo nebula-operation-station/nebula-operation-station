@@ -11,6 +11,10 @@ import (
 	"time"
 )
 
+// zeroWidthSpace is U+200B, built from its code point so the source holds no
+// invisible format character.
+const zeroWidthSpace = string(rune(0x200b))
+
 // askQuestion stores a question and fails the test on error.
 func askQuestion(t *testing.T, s *Store, user, text string) Question {
 	t.Helper()
@@ -59,7 +63,7 @@ func TestAskQuestionRefusesBadTextAndStoresNothing(t *testing.T) {
 		{"empty", "   ", ErrMissing},
 		{"over 2 KiB", strings.Repeat("a", MaxTextBytes+1), ErrLimit},
 		{"control rune", "hallo\x07", ErrInvalidText},
-		{"zero width", "ha​llo", ErrInvalidText},
+		{"zero width", "ha" + zeroWidthSpace + "llo", ErrInvalidText},
 		{"invalid UTF-8", "ha\xffllo", ErrInvalidText},
 		{"URL", "siehe https://example.org", ErrURL},
 		{"www", "siehe www.example.org", ErrURL},
