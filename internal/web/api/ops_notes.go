@@ -201,7 +201,7 @@ func (h *OpsHandler) postNote(ctx context.Context, w http.ResponseWriter, r *htt
 func (h *OpsHandler) refuseNote(w http.ResponseWriter, t *token, status, length int, digest string, d *opsnotes.Draft) {
 	attrs := []any{"kind", "ops_note_refused", "token", t.name, "status", status, "length", length, "sha256", digest}
 	if d != nil {
-		attrs = append(attrs, "note_kind", string(d.Kind), "ref", d.Ref, "digest", d.Digest)
+		attrs = append(attrs, "note_kind", auditToken(string(d.Kind)), "ref", auditToken(d.Ref), "digest", auditToken(d.Digest))
 	}
 	h.log.Warn("audit", attrs...)
 	switch status {
@@ -316,4 +316,33 @@ func (h *OpsHandler) LastOpsStatus() (OpsRunStatus, bool) {
 	st := *h.last
 	st.Refusals = slices.Clone(h.last.Refusals)
 	return st, true
+}
+
+// maxAuditToken bounds an agent-supplied identifier in a refusal line.
+const maxAuditToken = 128
+
+// auditToken returns s when it is a short identifier (ASCII letters, digits
+// and . _ : / -), the shape refs, digests and kinds have. Anything else is
+// agent text that was refused before it was validated, so it is replaced by
+// a marker with the SHA-256 of its bytes: the audit line never carries free
+// model text, control or bidi characters, and stays short.
+func auditToken(s string) string {
+	if s == "" {
+		return ""
+	}
+	if len(s) <= maxAuditToken {
+		ok := true
+		for i := 0; i < len(s); i++ {
+			c := s[i]
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == ':' || c == '/' || c == '-') {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return s
+		}
+	}
+	sum := sha256.Sum256([]byte(s))
+	return "invalid:sha256:" + hex.EncodeToString(sum[:])
 }
