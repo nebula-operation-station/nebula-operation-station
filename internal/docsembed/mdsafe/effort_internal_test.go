@@ -60,12 +60,21 @@ const (
 // rounded down to a whole number of unit repeats.
 var linearSizes = [3]int{4 << 10, 6 << 10, 8 << 10}
 
-// scanUnits are the delimiter patterns that drive the scanners.
-var scanUnits = []string{"*", "**", "[", "[a](b", "`", "](", "|", "| a |\n|-|\n", "- ", "&"}
+// scanUnits are the delimiter patterns that drive the scanners. Each one
+// must spend scan steps at every size; checkLinearity rejects a unit that
+// does not. A unit that never reaches findRun or parseLink would pass the
+// ratio test as 0 <= 0 and check nothing. Each entry is therefore a
+// delimiter inside a paragraph (a line of only "`", "|" or "- " is a code
+// fence, a table or a list, and never reaches the inline scanners).
+var scanUnits = []string{"*", "**", "[", "[a](b", "a`", "[a]", "![a](b", "*a"}
 
 // errNotLinear reports that scan steps per byte grow beyond
 // linearFactorNum/linearFactorDen between the smallest and a larger size.
 var errNotLinear = errors.New("scan steps grow faster than the source")
+
+// errNoSteps reports that a measurement spent no scan steps, so the ratio
+// is 0 and the check would pass without measuring the scanner.
+var errNoSteps = errors.New("no scan steps; the unit does not reach the scanner")
 
 // errOverBudget reports that a measurement reached the scanner's own
 // budget, so the count measures the cap, not the scanner.
@@ -73,7 +82,8 @@ var errOverBudget = errors.New("scan steps reach the budget; the scanner is not 
 
 // checkLinearity measures the scan steps for unit at linearSizes under lim
 // and returns nil if they grow linearly. It returns an error wrapping
-// errOverBudget if a measurement reaches lim.budget, and one wrapping
+// errOverBudget if a measurement reaches lim.budget, errNoSteps if a
+// measurement spends no steps, and one wrapping
 // errNotLinear if steps per byte at a size exceed linearFactorNum/
 // linearFactorDen times steps per byte at the smallest size. TestScanStepsAreLinear and its
 // self-test both call this function; only lim differs.
@@ -87,6 +97,9 @@ func checkLinearity(lim scanLimits, sizes [len(linearSizes)]int, unit string) er
 		}
 		if s >= lim.budget {
 			return fmt.Errorf("unit %q: %d steps for %d bytes: %w", unit, s, len(src), errOverBudget)
+		}
+		if s == 0 {
+			return fmt.Errorf("unit %q: 0 steps for %d bytes: %w", unit, len(src), errNoSteps)
 		}
 		measured[i], steps[i] = len(src), s
 	}
@@ -138,6 +151,16 @@ func TestQuadraticScannerFailsLinearity(t *testing.T) {
 		if err := checkLinearity(unboundedLimits, linearSizes, unit); !errors.Is(err, errNotLinear) {
 			t.Errorf("unit %q: quadratic scanner: got %v, want errNotLinear", unit, err)
 		}
+	}
+}
+
+// TestUnitWithoutScanStepsFailsCheck shows that the check rejects a unit
+// that never reaches the scanner. "a " is plain text: it spends no scan
+// steps, so the ratio would be 0 <= 0 and pass without measuring anything.
+// The check must return errNoSteps instead.
+func TestUnitWithoutScanStepsFailsCheck(t *testing.T) {
+	if err := checkLinearity(defaultLimits, linearSizes, "a "); !errors.Is(err, errNoSteps) {
+		t.Errorf("plain-text unit: got %v, want errNoSteps", err)
 	}
 }
 
