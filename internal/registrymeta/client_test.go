@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -305,6 +306,71 @@ func TestListTagsTagBudget(t *testing.T) {
 	}
 	if len(res.Tags) != MaxTagsPerScan {
 		t.Fatalf("expected MaxTagsPerScan=%d tags, got %d", MaxTagsPerScan, len(res.Tags))
+	}
+}
+
+// TestListTagsTagBudgetAtLimit checks that a list of exactly MaxTagsPerScan
+// tags is complete: the budget only marks a result incomplete when a tag
+// beyond the limit exists (the over-limit case is TestListTagsTagBudget).
+func TestListTagsTagBudgetAtLimit(t *testing.T) {
+	rec := &recorder{}
+	tags := make([]string, MaxTagsPerScan)
+	for i := range tags {
+		tags[i] = fmt.Sprintf("t%05d", i)
+	}
+	srv := httptest.NewServer(tagsHandler(rec, tags...))
+	defer srv.Close()
+	c := newTestClient(t, srv, newFakeClock())
+
+	res, err := c.ListTags(context.Background(), Ref{Registry: srv.URL, Repository: "repo"})
+	if err != nil {
+		t.Fatalf("ListTags: %v", err)
+	}
+	if res.Incomplete {
+		t.Fatalf("exactly MaxTagsPerScan=%d tags must be complete", MaxTagsPerScan)
+	}
+	if len(res.Tags) != MaxTagsPerScan {
+		t.Fatalf("expected %d tags, got %d", MaxTagsPerScan, len(res.Tags))
+	}
+}
+
+// TestListTagsPaginationBudgetAtLimit checks that a list ending exactly on
+// page MaxPages is complete: the page budget only marks a result incomplete
+// when a further page is still advertised (see TestListTagsPaginationBudget).
+func TestListTagsPaginationBudgetAtLimit(t *testing.T) {
+	rec := &recorder{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec.enter(r.Method, r.URL.Path)
+		defer rec.leave()
+		if r.URL.Path != "/v2/repo/tags/list" {
+			http.NotFound(w, r)
+			return
+		}
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		if page == 0 {
+			page = 1
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if page < MaxPages {
+			w.Header().Set("Link", fmt.Sprintf(`</v2/repo/tags/list?page=%d>; rel="next"`, page+1))
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"name": "repo", "tags": []string{fmt.Sprintf("p%03d", page)}})
+	}))
+	defer srv.Close()
+	c := newTestClient(t, srv, newFakeClock())
+
+	res, err := c.ListTags(context.Background(), Ref{Registry: srv.URL, Repository: "repo"})
+	if err != nil {
+		t.Fatalf("ListTags: %v", err)
+	}
+	if res.Incomplete {
+		t.Fatalf("a list ending on page MaxPages=%d must be complete", MaxPages)
+	}
+	if len(res.Tags) != MaxPages {
+		t.Fatalf("expected one tag per page (%d), got %d", MaxPages, len(res.Tags))
+	}
+	if got := rec.count("GET /v2/repo/tags/list"); got != MaxPages {
+		t.Fatalf("expected exactly MaxPages=%d requests, got %d", MaxPages, got)
 	}
 }
 

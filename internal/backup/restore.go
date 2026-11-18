@@ -148,7 +148,9 @@ func Restore(m Manifest, files []File, l Layout, sys System, latest map[string]i
 	if err := sys.Stop(StopUnits...); err != nil {
 		// Stop may have stopped some units before it failed, and nothing has
 		// moved yet. All StartUnits are started again, including units that
-		// were inactive or disabled before: System does not report unit state.
+		// were inactive or disabled before: System does not report unit state
+		// (adding that would change its implementation in cmd/nebula). The
+		// handbook (backup-restore.md) documents this for the operator.
 		stopErr := fmt.Errorf("backup: stop the services: %w", err)
 		if startErr := sys.Start(StartUnits...); startErr != nil {
 			return rep, fmt.Errorf("%w; start the services again: %w", stopErr, startErr)
@@ -198,11 +200,21 @@ func Restore(m Manifest, files []File, l Layout, sys System, latest map[string]i
 	// configuration in ConfigDir is never under cfgRoot unless this restore
 	// created it, because mkdirTracked reports only what it created.
 	var cfgRoot string
+	// cfgFiles are the configuration files this restore created (O_EXCL), in
+	// order. A failure removes exactly these, so they are also cleaned up when
+	// from-backup-<ts> already existed and cfgRoot is empty; nothing else in
+	// that directory is touched.
+	var cfgFiles []string
 	// refuse removes what the restore has written, puts the old data back,
 	// starts the services, and returns err. If that cannot be completed, the
 	// error says so and names where the old data is.
 	refuse := func(err error) (Report, error) {
 		var errs []error
+		for i := len(cfgFiles) - 1; i >= 0; i-- {
+			if rerr := removeAll(cfgFiles[i]); rerr != nil {
+				errs = append(errs, fmt.Errorf("remove %s: %w", cfgFiles[i], rerr))
+			}
+		}
 		if cfgRoot != "" {
 			if rerr := removeAll(cfgRoot); rerr != nil {
 				errs = append(errs, fmt.Errorf("remove %s: %w", cfgRoot, rerr))
@@ -243,10 +255,15 @@ func Restore(m Manifest, files []File, l Layout, sys System, latest map[string]i
 		}
 		return sys.Chown(dir, user)
 	}
-	put := func(path string, b []byte, mode os.FileMode, user string) error {
+	// put writes a new file. If written is not nil, the path is appended to it
+	// as soon as the file exists, so a later failure can remove it.
+	put := func(path string, b []byte, mode os.FileMode, user string, written *[]string) error {
 		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 		if err != nil {
 			return err
+		}
+		if written != nil {
+			*written = append(*written, path) // ours from here on
 		}
 		if _, err := f.Write(b); err != nil {
 			f.Close()
@@ -273,10 +290,11 @@ func Restore(m Manifest, files []File, l Layout, sys System, latest map[string]i
 	if err := mk(filepath.Join(l.ExecutorDir(), "keys"), 0o700, "nebula-executor"); err != nil {
 		return refuse(err)
 	}
-	if err := put(filepath.Join(l.ServerDir(), "server.db"), byPath[ServerDB].Data, 0o600, "nebula-server"); err != nil {
+	// Data files need no tracking: they are inside directories in created.
+	if err := put(filepath.Join(l.ServerDir(), "server.db"), byPath[ServerDB].Data, 0o600, "nebula-server", nil); err != nil {
 		return refuse(err)
 	}
-	if err := put(filepath.Join(l.ExecutorDir(), "executor.db"), byPath[ExecutorDB].Data, 0o600, "nebula-executor"); err != nil {
+	if err := put(filepath.Join(l.ExecutorDir(), "executor.db"), byPath[ExecutorDB].Data, 0o600, "nebula-executor", nil); err != nil {
 		return refuse(err)
 	}
 	for _, f := range files {
@@ -286,21 +304,21 @@ func Restore(m Manifest, files []File, l Layout, sys System, latest map[string]i
 			if strings.HasSuffix(f.Path, ".pub") {
 				mode = 0o644
 			}
-			if err := put(filepath.Join(l.ExecutorDir(), "keys", filepath.Base(f.Path)), f.Data, mode, "nebula-executor"); err != nil {
+			if err := put(filepath.Join(l.ExecutorDir(), "keys", filepath.Base(f.Path)), f.Data, mode, "nebula-executor", nil); err != nil {
 				return refuse(err)
 			}
 		case strings.HasPrefix(f.Path, "server/config/") || strings.HasPrefix(f.Path, "server/systemd/"):
 			dir := filepath.Join(l.ConfigDir(), "from-backup-"+ts)
-			created, err := mkdirTracked(dir, 0o750)
+			madeDir, err := mkdirTracked(dir, 0o750)
 			if cfgRoot == "" {
-				cfgRoot = created
+				cfgRoot = madeDir
 			}
 			if err != nil {
 				return refuse(err)
 			}
 			name := strings.ReplaceAll(strings.TrimPrefix(strings.TrimPrefix(f.Path, "server/config/"), "server/systemd/"), "/", "_")
 			p := filepath.Join(dir, name)
-			if err := put(p, f.Data, 0o640, "root"); err != nil {
+			if err := put(p, f.Data, 0o640, "root", &cfgFiles); err != nil {
 				return refuse(err)
 			}
 			rep.Config = append(rep.Config, p)
