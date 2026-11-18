@@ -134,7 +134,11 @@ type assistantCard struct {
 	Mitigate  []string
 	Citations []assistantCitation
 	// Outdated: the findings of the group changed after the note was made.
-	Outdated  bool
+	Outdated bool
+	// ReadOnly is "dismissed" or "superseded" for a note the admin hid or
+	// that a newer note replaced: the card shows its content with no step
+	// buttons and no dismiss form. Empty for a live card.
+	ReadOnly  string
 	DetailURL string
 	tierRank  int
 	score     float64
@@ -271,6 +275,12 @@ func (h *Handler) assistantCardFor(ctx context.Context, n opsnotes.Note) assista
 		{"KEV", yesNo(f.KEV)},
 		{"Exposure", f.Exposure},
 	}
+	switch {
+	case n.Dismissed:
+		c.ReadOnly = "dismissed"
+	case n.Superseded:
+		c.ReadOnly = "superseded"
+	}
 	if cat := h.assistantOps.Catalog; cat != nil {
 		cur, ok := cat.CurrentDigest(opsnotes.KindFix, n.Ref)
 		c.Outdated = !ok || cur != n.Digest
@@ -278,7 +288,9 @@ func (h *Handler) assistantCardFor(ctx context.Context, n opsnotes.Note) assista
 	for i, in := range n.Body.Steps {
 		idx := i + 1
 		st := assistantStep{Index: idx, Action: in.ActionID, Host: in.HostID, Why: in.Why}
-		st.Href, st.ButtonLabel, st.Button = h.assistantStepLink(n.ID, idx, in)
+		if c.ReadOnly == "" {
+			st.Href, st.ButtonLabel, st.Button = h.assistantStepLink(n.ID, idx, in)
+		}
 		c.Steps = append(c.Steps, st)
 	}
 	c.Citations = h.assistantCitations(n.Body.Citations)

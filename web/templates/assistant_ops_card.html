@@ -13,6 +13,12 @@
   <header>
     <h3>Fix suggestion {{.ID}}</h3>
     <p class="muted">Created {{.Created}}</p>
+    {{if .ReadOnly}}
+    <p class="assistant-card__readonly" role="status">
+      <span lang="en">Read only: this suggestion is {{.ReadOnly}}. No actions.</span>
+      <span lang="de">Nur lesen: diese Empfehlung ist {{if eq .ReadOnly "dismissed"}}ausgeblendet{{else}}ersetzt{{end}}. Keine Aktionen.</span>
+    </p>
+    {{end}}
     {{if .Outdated}}
     <p class="assistant-card__outdated" role="status">
       <span lang="en">outdated: findings changed</span>
@@ -49,7 +55,7 @@
         {{if .Why}}<p class="llm-text">{{.Why}}</p>{{end}}
         {{if .Button}}
         <a class="button" href="{{.Href}}">{{.ButtonLabel}}</a>
-        {{else}}
+        {{else if not $.ReadOnly}}
         <p class="muted">No button: this step is not a catalog action on a known host.</p>
         {{end}}
       </li>
@@ -78,6 +84,7 @@
   </section>
   {{end}}
 
+  {{if not .ReadOnly}}
   <footer class="assistant-card__actions">
     <a href="{{.DetailURL}}">Details</a>
     <form method="post" action="/assistant/ops/notes/{{.ID}}/dismiss"
@@ -85,5 +92,6 @@
       <button type="submit" class="button button--secondary">Dismiss</button>
     </form>
   </footer>
+  {{end}}
 </article>
 {{end}}
