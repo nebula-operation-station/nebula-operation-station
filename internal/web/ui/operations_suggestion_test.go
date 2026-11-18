@@ -63,15 +63,15 @@ func getPage(t *testing.T, h http.Handler, path string) (int, string) {
 
 func TestSuggestionPrefillOpensEmptyFormWithoutRunning(t *testing.T) {
 	f := &fakeOps{}
-	st := &fakeOpSuggestStore{steps: map[string]opsnotes.Step{"7.0": {NoteID: 7, Index: 0, ActionID: "core.facts", HostID: "web"}}}
+	st := &fakeOpSuggestStore{steps: map[string]opsnotes.Step{"7.1": {NoteID: 7, Index: 1, ActionID: "core.facts", HostID: "web"}}}
 	h := suggestHandler(t, f, st, true)
 	// action=, host= and param= in the same URL are ignored.
-	code, body := getPage(t, h, "/operations/new?suggestion=7.0&action=docker.stop&host=new&param=container=abc")
+	code, body := getPage(t, h, "/operations/new?suggestion=7.1&action=docker.stop&host=new&param=container=abc")
 	if code != http.StatusOK {
 		t.Fatalf("status %d", code)
 	}
 	for _, want := range []string{
-		`name="suggestion" value="7.0"`,
+		`name="suggestion" value="7.1"`,
 		`value="core.facts" checked`,
 		`value="web" checked`,
 		"Aus einem Agenten-Vorschlag geöffnet. Diese Ausführung braucht eine Security-Key-Berührung.",
@@ -92,7 +92,7 @@ func TestSuggestionPrefillOpensEmptyFormWithoutRunning(t *testing.T) {
 }
 
 func TestSuggestionPrefillRefusesWithFixedText(t *testing.T) {
-	st := &fakeOpSuggestStore{steps: map[string]opsnotes.Step{"7.0": {NoteID: 7, ActionID: "core.facts", HostID: "web"}}}
+	st := &fakeOpSuggestStore{steps: map[string]opsnotes.Step{"7.1": {NoteID: 7, ActionID: "core.facts", HostID: "web"}}}
 	cases := []struct {
 		name, path string
 		store      ui.OperationSuggestionStore
@@ -100,11 +100,15 @@ func TestSuggestionPrefillRefusesWithFixedText(t *testing.T) {
 		lookups    int
 	}{
 		{"unknown step", "/operations/new?suggestion=7.9", st, true, 1},
+		{"step zero", "/operations/new?suggestion=7.0", st, true, 0},
+		{"step leading zero", "/operations/new?suggestion=7.01", st, true, 0},
+		{"note leading zero", "/operations/new?suggestion=07.1", st, true, 0},
+		{"plus sign", "/operations/new?suggestion=%2B7.1", st, true, 0},
 		{"malformed", "/operations/new?suggestion=7", st, true, 0},
-		{"sign", "/operations/new?suggestion=-7.0", st, true, 0},
-		{"letters", "/operations/new?suggestion=x7.0", st, true, 0},
-		{"non admin", "/operations/new?suggestion=7.0", st, false, 0},
-		{"not configured", "/operations/new?suggestion=7.0", nil, true, 0},
+		{"sign", "/operations/new?suggestion=-7.1", st, true, 0},
+		{"letters", "/operations/new?suggestion=x7.1", st, true, 0},
+		{"non admin", "/operations/new?suggestion=7.1", st, false, 0},
+		{"not configured", "/operations/new?suggestion=7.1", nil, true, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -127,11 +131,11 @@ func TestSuggestionPrefillRefusesWithFixedText(t *testing.T) {
 
 func TestSuggestionPrefillNeedsTheStepsActionAndHost(t *testing.T) {
 	st := &fakeOpSuggestStore{steps: map[string]opsnotes.Step{
-		"7.0": {NoteID: 7, ActionID: "no.such.action", HostID: "web"},
-		"7.1": {NoteID: 7, Index: 1, ActionID: "core.facts", HostID: "gone"},
+		"7.2": {NoteID: 7, Index: 2, ActionID: "no.such.action", HostID: "web"},
+		"7.3": {NoteID: 7, Index: 3, ActionID: "core.facts", HostID: "gone"},
 	}}
 	h := suggestHandler(t, &fakeOps{}, st, true)
-	for _, path := range []string{"/operations/new?suggestion=7.0", "/operations/new?suggestion=7.1"} {
+	for _, path := range []string{"/operations/new?suggestion=7.2", "/operations/new?suggestion=7.3"} {
 		if code, _ := getPage(t, h, path); code != http.StatusNotFound {
 			t.Fatalf("%s: status %d", path, code)
 		}
@@ -141,8 +145,8 @@ func TestSuggestionPrefillNeedsTheStepsActionAndHost(t *testing.T) {
 func TestCreateForwardsSuggestionReference(t *testing.T) {
 	f := &fakeOps{}
 	h := suggestHandler(t, f, nil, true)
-	code, _ := postJSON(t, h, "/operations/create", `{"action":"core.facts","hosts":["web"],"suggestion":"7.0"}`)
-	if code != http.StatusOK || f.plan.SuggestionRef != "7.0" {
+	code, _ := postJSON(t, h, "/operations/create", `{"action":"core.facts","hosts":["web"],"suggestion":"7.1"}`)
+	if code != http.StatusOK || f.plan.SuggestionRef != "7.1" {
 		t.Fatalf("%d ref %q", code, f.plan.SuggestionRef)
 	}
 	// Without a reference nothing is marked here; the executor's match
@@ -164,7 +168,7 @@ func TestCreateRefusesUnknownSuggestion(t *testing.T) {
 
 func TestContainerPageRefusesSuggestionReference(t *testing.T) {
 	h, _ := ctrHandler(t, false)
-	for _, path := range []string{"/inventory/containers?suggestion=7.0", "/inventory/containers?host=web-01&suggestion="} {
+	for _, path := range []string{"/inventory/containers?suggestion=7.1", "/inventory/containers?host=web-01&suggestion="} {
 		rec := httptest.NewRecorder()
 		h.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 		if rec.Code != http.StatusNotFound {

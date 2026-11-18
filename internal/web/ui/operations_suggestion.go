@@ -46,15 +46,18 @@ type suggestionForm struct {
 // suggestionNotFound is the fixed text of every refused suggestion page.
 const suggestionNotFound = "unknown agent suggestion"
 
-// parseSuggestionRef reads "<note ID>.<step>" strictly: decimal digits on
-// both sides of one dot, a positive note ID, and a step without leading
-// zeros. Anything else is not a reference.
-func parseSuggestionRef(ref string) (noteID int64, index int, ok bool) {
+// ParseSuggestionRef reads "<note ID>.<step>" strictly, the one parser for
+// the UI and the server (cmd/nebula-server uses it too). Both parts are
+// canonical decimal digits: no sign, no spaces, no leading zero. The note
+// ID is positive. The step counts from 1, as the notes store numbers its
+// steps (opsnotes.Step.Index), so step 0 is refused. Anything else is not
+// a reference.
+func ParseSuggestionRef(ref string) (noteID int64, index int, ok bool) {
 	if ref == "" || len(ref) > maxSuggestionRefLen {
 		return 0, 0, false
 	}
 	note, step, found := strings.Cut(ref, ".")
-	if !found || !allDigits(note) || !allDigits(step) || (len(step) > 1 && step[0] == '0') {
+	if !found || !canonicalDigits(note) || !canonicalDigits(step) {
 		return 0, 0, false
 	}
 	id, err := strconv.ParseInt(note, 10, 64)
@@ -62,15 +65,17 @@ func parseSuggestionRef(ref string) (noteID int64, index int, ok bool) {
 		return 0, 0, false
 	}
 	idx, err := strconv.Atoi(step)
-	if err != nil {
+	if err != nil || idx <= 0 {
 		return 0, 0, false
 	}
 	return id, idx, true
 }
 
-// allDigits reports whether s is a non-empty run of ASCII digits.
-func allDigits(s string) bool {
-	if s == "" {
+// canonicalDigits reports whether s is a non-empty run of ASCII digits
+// with no leading zero (except the single digit "0", which callers refuse
+// by value).
+func canonicalDigits(s string) bool {
+	if s == "" || (len(s) > 1 && s[0] == '0') {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
@@ -90,7 +95,7 @@ func (h *Handler) suggestionPrefill(r *http.Request, ref string) (form *suggesti
 	if h.opSuggest == nil {
 		return nil, false, nil
 	}
-	noteID, index, ok := parseSuggestionRef(ref)
+	noteID, index, ok := ParseSuggestionRef(ref)
 	if !ok {
 		return nil, false, nil
 	}
