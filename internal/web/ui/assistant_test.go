@@ -30,6 +30,36 @@ type fakeOpsStore struct {
 	notes     []opsnotes.Note
 	reads     int
 	dismissed []int64
+	// questions are the stored admin questions; nextQuestion is the ID of
+	// the next one. askErr, when set, is returned by AskQuestion instead.
+	questions    []opsnotes.Question
+	nextQuestion int64
+	askErr       error
+}
+
+func (s *fakeOpsStore) AskQuestion(_ context.Context, user, text string) (opsnotes.Question, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.askErr != nil {
+		return opsnotes.Question{}, s.askErr
+	}
+	s.nextQuestion++
+	q := opsnotes.Question{ID: s.nextQuestion, User: user, Text: text, Digest: opsnotes.QuestionDigest(text),
+		State: opsnotes.QuestionOpen, CreatedAt: time.Unix(1_800_000_000, 0).UTC()}
+	s.questions = append(s.questions, q)
+	return q, nil
+}
+
+func (s *fakeOpsStore) ListQuestions(_ context.Context, user string) ([]opsnotes.Question, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []opsnotes.Question
+	for i := len(s.questions) - 1; i >= 0; i-- {
+		if s.questions[i].User == user {
+			out = append(out, s.questions[i])
+		}
+	}
+	return out, nil
 }
 
 func (s *fakeOpsStore) List(context.Context) ([]opsnotes.Note, error) {
@@ -404,7 +434,8 @@ func TestAssistantOpsHasOnlyDismissPostAndNoScript(t *testing.T) {
 		}
 		// Forms of the shared layout (the header search) are not the panel's.
 		for _, action := range regexp.MustCompile(`<form[^>]*action="(/assistant[^"]*)"`).FindAllStringSubmatch(body, -1) {
-			if action[1] != "/assistant/ops/notes/1/dismiss" && action[1] != "/assistant/help" {
+			if action[1] != "/assistant/ops/notes/1/dismiss" && action[1] != "/assistant/help" &&
+				action[1] != "/assistant/ops/questions" {
 				t.Errorf("%s: form posts to %q", path, action[1])
 			}
 		}
