@@ -98,6 +98,10 @@ type Options struct {
 	// TagPolicy is the executor's tag policy for container tag changes.
 	// Without it, every container member that changes a tag is refused.
 	TagPolicy TagPolicy
+	// Rejections is the persistent rejected-marker store (the same one the
+	// execution permit authority uses). Nil: nothing can be rejected, so
+	// approval and proposal skip the marker checks.
+	Rejections permit.RejectionStore
 }
 
 // Approval is a detached, complete review copy. Parameters and Findings use
@@ -142,6 +146,9 @@ type Authority struct {
 	// batchExecIndex maps a claimed member's execution ID to its batch, member
 	// and ordering key, so outcomes and postchecks can be recorded by ID.
 	batchExecIndex map[string]batchExecRef
+	// placeholders hold the pending slot of a rejected plan until its
+	// original approval window ends (spec 07 "Pending slot"); no bytes.
+	placeholders map[canonical.Digest]time.Time
 }
 
 // New creates an authority with no pending or approved plans.
@@ -162,7 +169,7 @@ func New(o Options) (*Authority, error) {
 		o.Scan = permit.ScanBounded
 	}
 	o.AdminUIDs = slices.Clone(o.AdminUIDs)
-	return &Authority{options: o, entries: map[canonical.Digest]*entry{}, members: map[string]*MemberPermit{}, seen: map[string]struct{}{}, batchExecIndex: map[string]batchExecRef{}}, nil
+	return &Authority{options: o, entries: map[canonical.Digest]*entry{}, members: map[string]*MemberPermit{}, seen: map[string]struct{}{}, batchExecIndex: map[string]batchExecRef{}, placeholders: map[canonical.Digest]time.Time{}}, nil
 }
 
 func failure(code permit.Code, detail string) error { return &permit.Error{Code: code, Detail: detail} }
@@ -280,10 +287,10 @@ func (a *Authority) Propose(ctx context.Context, raw []byte, inputs []MemberInpu
 		return Approval{}, failure(permit.CodeWrongState, "executor locked during proposal")
 	}
 	a.gcLocked()
-	if _, ok := a.seen[plan.BatchID]; ok {
-		return Approval{}, failure(permit.CodeWrongState, "batch ID already proposed; use a fresh plan")
+	if err := a.batchIDFreshLocked(plan.BatchID); err != nil {
+		return Approval{}, err
 	}
-	if len(a.entries) >= permit.MaxPending || len(a.seen) >= permit.MaxExecutionIDs {
+	if a.countLocked() >= permit.MaxPending || len(a.seen) >= permit.MaxExecutionIDs {
 		return Approval{}, failure(permit.CodeLimit, "batch approval capacity reached")
 	}
 	if p.Requirement == permit.RequireNone {
@@ -327,10 +334,10 @@ func (a *Authority) admit(epoch uint64, batchID string) error {
 		return failure(permit.CodeWrongState, "executor locked during proposal")
 	}
 	a.gcLocked()
-	if _, ok := a.seen[batchID]; ok {
-		return failure(permit.CodeWrongState, "batch ID already proposed; use a fresh plan")
+	if err := a.batchIDFreshLocked(batchID); err != nil {
+		return err
 	}
-	if len(a.entries) >= permit.MaxPending || len(a.seen) >= permit.MaxExecutionIDs || a.retained >= MaxRetainedBytes {
+	if a.countLocked() >= permit.MaxPending || len(a.seen) >= permit.MaxExecutionIDs || a.retained >= MaxRetainedBytes {
 		return failure(permit.CodeLimit, "batch approval capacity reached")
 	}
 	return nil
@@ -437,7 +444,9 @@ func (a *Authority) freshLocked(ctx context.Context, d canonical.Digest, e *entr
 			}
 		}
 	}()
-	live, err := a.getLocked(d, 0)
+	// The mutex was released: a rejection may have committed meanwhile, and
+	// its persisted marker answers before the in-memory lookup.
+	live, err := a.approvableLocked(d, 0)
 	if err != nil {
 		return err
 	}
@@ -468,7 +477,7 @@ func (a *Authority) freshLocked(ctx context.Context, d canonical.Digest, e *entr
 func (a *Authority) SubmitAssertion(ctx context.Context, d canonical.Digest, assertionJSON []byte) (Approval, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	e, err := a.getLocked(d, permit.StatePending)
+	e, err := a.approvableLocked(d, permit.StatePending)
 	if err != nil {
 		return Approval{}, err
 	}
@@ -498,7 +507,7 @@ func (a *Authority) SubmitAssertion(ctx context.Context, d canonical.Digest, ass
 		a.emit("batch_rejected", d, permit.CodeAssertionRejected, "")
 		return Approval{}, failure(permit.CodeAssertionRejected, "batch assertion rejected")
 	}
-	if _, err := a.getLocked(d, permit.StatePending); err != nil {
+	if _, err := a.approvableLocked(d, permit.StatePending); err != nil {
 		return Approval{}, err
 	}
 	if !a.sessionActive() {
@@ -539,7 +548,7 @@ func (a *Authority) ApproveCLI(ctx context.Context, d canonical.Digest, peerUID 
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	e, err := a.getLocked(d, permit.StatePending)
+	e, err := a.approvableLocked(d, permit.StatePending)
 	if err != nil {
 		return Approval{}, err
 	}
@@ -587,6 +596,9 @@ func (a *Authority) Lock() {
 	clear(a.entries)
 	clear(a.members)
 	clear(a.batchExecIndex)
+	// Pending-slot placeholders go with the pending plans. seen is kept:
+	// only a restart forgets a batch ID that has no rejected marker.
+	clear(a.placeholders)
 	a.retained = 0
 	a.epoch++
 	a.emit("batch_locked", canonical.Digest{}, "", "")
@@ -608,6 +620,11 @@ func (a *Authority) gcLocked() {
 	for execID, ref := range a.batchExecIndex {
 		if _, ok := a.entries[ref.digest]; !ok {
 			delete(a.batchExecIndex, execID)
+		}
+	}
+	for d, end := range a.placeholders {
+		if !now.Before(end) {
+			delete(a.placeholders, d)
 		}
 	}
 }
