@@ -43,6 +43,10 @@ func logEntry(e Event) (kind notifylog.KindCode, state notifylog.StateCode, ok b
 		return notifylog.KindTest, notifylog.StateTest, true
 	case KindExecutorLocked:
 		return notifylog.KindExecutorLocked, notifylog.StateLocked, true
+	case KindOpsSuggestion:
+		// The log has the kind (migration 0049) and the state "new" for it:
+		// a fix suggestion is new for its group and tier.
+		return notifylog.KindOpsSuggestionNew, notifylog.StateNew, true
 	}
 	switch IntegrityKind(e.Kind) {
 	case IntegrityNOSMismatch:

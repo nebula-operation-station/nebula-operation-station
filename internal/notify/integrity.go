@@ -195,22 +195,8 @@ func NewIntegrityGate(n *Notifier, nosBase string, now func() time.Time) (*Integ
 	if now == nil {
 		now = time.Now
 	}
-	u, err := url.Parse(nosBase)
-	var reason string
-	switch {
-	case err != nil:
-		reason = "not a URL"
-	case u.Scheme != "http" && u.Scheme != "https":
-		reason = "scheme must be http or https"
-	case u.Host == "":
-		reason = "missing host"
-	case u.User != nil:
-		reason = "user info is not allowed"
-	case u.RawQuery != "" || u.Fragment != "" || u.Opaque != "":
-		reason = "query, fragment or opaque form is not allowed"
-	}
-	if reason != "" {
-		return nil, fmt.Errorf("%w: %s", ErrInvalidNOSBase, reason)
+	if err := checkNOSBase(nosBase); err != nil {
+		return nil, err
 	}
 	return &IntegrityGate{
 		n:         n,
@@ -315,6 +301,30 @@ func (g *IntegrityGate) Flush(ctx context.Context) bool {
 	due := g.digestLocked(g.now())
 	g.mu.Unlock()
 	return g.deliverDigest(ctx, due)
+}
+
+// checkNOSBase returns ErrInvalidNOSBase unless nosBase is an absolute http or
+// https URL with a host and without user info, query, fragment or opaque form.
+// The error never contains nosBase: it may carry credentials.
+func checkNOSBase(nosBase string) error {
+	u, err := url.Parse(nosBase)
+	var reason string
+	switch {
+	case err != nil:
+		reason = "not a URL"
+	case u.Scheme != "http" && u.Scheme != "https":
+		reason = "scheme must be http or https"
+	case u.Host == "":
+		reason = "missing host"
+	case u.User != nil:
+		reason = "user info is not allowed"
+	case u.RawQuery != "" || u.Fragment != "" || u.Opaque != "":
+		reason = "query, fragment or opaque form is not allowed"
+	}
+	if reason != "" {
+		return fmt.Errorf("%w: %s", ErrInvalidNOSBase, reason)
+	}
+	return nil
 }
 
 // message renders ev as a notification with fixed wording.
