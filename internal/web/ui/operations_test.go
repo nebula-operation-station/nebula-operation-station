@@ -54,6 +54,16 @@ type fakeOps struct {
 	// abortable answers Abortable; abortErrs overrides Abort per ID.
 	abortable map[string]bool
 	abortErrs map[string]error
+	// rejects records "user id reason" of every Reject call; rejectErrs
+	// overrides its answer per ID.
+	rejects    []string
+	rejectErrs map[string]error
+}
+
+// Reject records the call and answers rejectErrs[id] (nil otherwise).
+func (f *fakeOps) Reject(_ context.Context, user, id, reason string) error {
+	f.rejects = append(f.rejects, user+" "+id+" "+reason)
+	return f.rejectErrs[id]
 }
 
 func (f *fakeOps) Catalog(context.Context) ([]actions.Action, error) {
