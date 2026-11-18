@@ -409,6 +409,11 @@ func TestRejectPendingBatchAsWhole(t *testing.T) {
 	if st, ok := r.a.PlanState(ap.Digest); ok {
 		t.Fatalf("rejected plan live after restart: %v", st)
 	}
+	// A new batch ID passes the batch-ID checks; its reused member
+	// execution IDs are still bound: execution_id_reused.
+	fresh := []byte(strings.Replace(string(raw), "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000099", 1))
+	_, err = r.a.Propose(ctx, fresh, in)
+	wantCode(t, err, permit.CodeExecutionIDReused)
 }
 
 func TestBatchRejectThenLockDropsPlaceholder(t *testing.T) {
