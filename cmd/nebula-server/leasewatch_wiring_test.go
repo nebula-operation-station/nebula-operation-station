@@ -20,8 +20,10 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/leasewatch"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/opsdigest"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
 )
 
 // leaseFixture is a server.db, a fake executor read side and a recording
@@ -231,6 +233,7 @@ func TestLeaseWatchExecutorUnreachableSendsNothingAndKeepsDueEvents(t *testing.T
 
 func TestLeaseWatchRunFailureOncePerEpisode(t *testing.T) {
 	f := newLeaseFixture(t)
+	f.src.reads = []executions.ReadGrantView{activeRead("lease-a", leaseT0.Add(30*24*time.Hour))}
 	w := f.watcher(serverconfig.DailyDigest{})
 	w.Tick(context.Background()) // first start
 
@@ -248,6 +251,32 @@ func TestLeaseWatchRunFailureOncePerEpisode(t *testing.T) {
 	want := []string{notify.KindLeaseRunFailed, notify.KindLeaseRunFailed}
 	if got := f.send.kinds(); strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("sent %v; want one event per episode %v", got, want)
+	}
+}
+
+// TestLeaseWatchRunFailureOnceForGrantOutsideSnapshot: a grant that is not in
+// the snapshot (here: no grant is active at all) keeps its open episode across
+// ticks. Each later failure of the same run is silent until a success.
+func TestLeaseWatchRunFailureOnceForGrantOutsideSnapshot(t *testing.T) {
+	f := newLeaseFixture(t)
+	w := f.watcher(serverconfig.DailyDigest{})
+	w.Tick(context.Background()) // first start
+
+	f.now = leaseT0.Add(time.Minute)
+	f.run("lease-x", "os.updates.list", "host-1", "failed", f.now)
+	w.Tick(context.Background())
+	f.now = leaseT0.Add(2 * time.Minute)
+	f.run("lease-x", "os.updates.list", "host-1", "failed", f.now)
+	w.Tick(context.Background())
+	f.now = leaseT0.Add(3 * time.Minute)
+	w = f.watcher(serverconfig.DailyDigest{}) // restart
+	w.Tick(context.Background())
+	f.now = leaseT0.Add(4 * time.Minute)
+	f.run("lease-x", "os.updates.list", "host-1", "failed", f.now)
+	w.Tick(context.Background())
+
+	if n := f.send.failedCount(); n != 1 {
+		t.Fatalf("%d lease.run_failed events for one open episode, want 1", n)
 	}
 }
 
@@ -640,5 +669,182 @@ func TestLeaseWatchFailedBuildKeepsTheWarningDue(t *testing.T) {
 	w.Tick(context.Background())
 	if n := len(f.send.events); n != 1 {
 		t.Fatalf("after the origin is fixed sent %d events, want the one warning", n)
+	}
+}
+
+// writeLeaseFile writes raw bytes as the state file of the fixture.
+func (f *leaseFixture) writeLeaseFile(data []byte) {
+	f.t.Helper()
+	if err := os.WriteFile(filepath.Join(f.dir, leaseWatchStateFile), data, 0o600); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+// runSeenJSON returns a state file body whose run_seen has n entries.
+func runSeenJSON(n int) []byte {
+	var b strings.Builder
+	b.WriteString(`{"init":true,"run_from":1,"run_seen":{`)
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		fmt.Fprintf(&b, `"%036d\thost-%d":%d`, i, i, leaseT0.Unix())
+	}
+	b.WriteString(`}}`)
+	return []byte(b.String())
+}
+
+// TestLeaseWatchUnusableStateFileIsKeptAndNothingIsSent: a state file that
+// cannot be parsed or validated is not overwritten, and nothing is sent from
+// it. Overwriting it would forget the marks and repeat every expiry message.
+func TestLeaseWatchUnusableStateFileIsKeptAndNothingIsSent(t *testing.T) {
+	cases := []struct {
+		name string
+		body []byte
+	}{
+		{"malformed", []byte(`{"init":true,`)},
+		{"too large", bytes.Repeat([]byte("x"), leaseWatchMaxState+1)},
+		{"run_seen over the limit", runSeenJSON(leaseRunSeenMax + 1)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLeaseFixture(t)
+			f.src.reads = []executions.ReadGrantView{activeRead("lease-a", leaseT0.Add(2*time.Hour))}
+			f.writeLeaseFile(tc.body)
+			w := f.watcher(serverconfig.DailyDigest{})
+			f.run("lease-a", "os.updates.list", "host-1", "failed", leaseT0.Add(-time.Minute))
+			for i := 0; i < 3; i++ {
+				f.now = leaseT0.Add(time.Duration(i) * time.Minute)
+				w.Tick(context.Background())
+			}
+			if n := len(f.send.events); n != 0 {
+				t.Fatalf("unusable state file, but %v was sent", f.send.kinds())
+			}
+			got, err := os.ReadFile(filepath.Join(f.dir, leaseWatchStateFile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(got, tc.body) {
+				t.Fatalf("unusable state file was overwritten (%d bytes, was %d)", len(got), len(tc.body))
+			}
+		})
+	}
+}
+
+// TestLeaseWatchStateFileReadErrorIsKept: a state path that cannot be read
+// (here a directory) is left alone and nothing is sent.
+func TestLeaseWatchStateFileReadErrorIsKept(t *testing.T) {
+	f := newLeaseFixture(t)
+	f.src.reads = []executions.ReadGrantView{activeRead("lease-a", leaseT0.Add(2*time.Hour))}
+	statePath := filepath.Join(f.dir, leaseWatchStateFile)
+	if err := os.Mkdir(statePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w := f.watcher(serverconfig.DailyDigest{})
+	w.Tick(context.Background())
+	if n := len(f.send.events); n != 0 {
+		t.Fatalf("state file unreadable, but %v was sent", f.send.kinds())
+	}
+	if fi, err := os.Stat(statePath); err != nil || !fi.IsDir() {
+		t.Fatalf("state path was replaced: %v", err)
+	}
+}
+
+// TestLeaseWatchRunSeenStaysBoundedWhenRunsShareASecond: more runs finish in one
+// second than leaseRunSeenMax. The recorded set must stay bounded, and the
+// saved state must load after a restart.
+func TestLeaseWatchRunSeenStaysBoundedWhenRunsShareASecond(t *testing.T) {
+	f := newLeaseFixture(t)
+	w := f.watcher(serverconfig.DailyDigest{})
+	w.Tick(context.Background()) // first start at T0
+
+	at := leaseT0.Add(time.Minute)
+	for i := 0; i < leaseRunSeenMax+50; i++ {
+		f.run("lease-a", "os.updates.list", fmt.Sprintf("host-%d", i), "success", at)
+	}
+	f.now = leaseT0.Add(2 * time.Minute)
+	w.Tick(context.Background())
+	if n := len(w.st.RunSeen); n > leaseRunSeenMax {
+		t.Fatalf("recorded runs %d > limit %d", n, leaseRunSeenMax)
+	}
+	restarted := f.watcher(serverconfig.DailyDigest{})
+	if restarted.blocked || !restarted.st.Init {
+		t.Fatalf("saved state does not load after a restart (blocked=%v init=%v)", restarted.blocked, restarted.st.Init)
+	}
+}
+
+// TestLeaseWatchSaveRejectsRunSeenOverLimit: the save checks the recorded set
+// with the same limit as the load.
+func TestLeaseWatchSaveRejectsRunSeenOverLimit(t *testing.T) {
+	f := newLeaseFixture(t)
+	w := f.watcher(serverconfig.DailyDigest{})
+	w.st.RunSeen = make(map[string]int64, leaseRunSeenMax+1)
+	for i := 0; i <= leaseRunSeenMax; i++ {
+		w.st.RunSeen[fmt.Sprintf("%036d\thost-%d", i, i)] = leaseT0.Unix()
+	}
+	if _, err := w.encode(); err == nil {
+		t.Fatalf("encode accepted %d recorded runs, limit %d", len(w.st.RunSeen), leaseRunSeenMax)
+	}
+}
+
+// TestLeaseWatchWorstCaseStateFitsTheFileLimit: a state with every bounded part
+// at its maximum must fit in leaseWatchMaxState, or a valid state could never
+// be saved.
+func TestLeaseWatchWorstCaseStateFitsTheFileLimit(t *testing.T) {
+	f := newLeaseFixture(t)
+	w := f.watcher(serverconfig.DailyDigest{})
+	pad := func(s string, n int) string {
+		return s + strings.Repeat("a", n-len(s))
+	}
+	w.st.Watch.Expiry = make(map[string]leasewatch.ExpiryMarks, leasewatch.MaxTrackedGrants)
+	for i := 0; i < leasewatch.MaxTrackedGrants; i++ {
+		w.st.Watch.Expiry[pad(fmt.Sprintf("g%d", i), leasewatch.MaxIDLen)] = leasewatch.ExpiryMarks{Long: true, Short: true}
+	}
+	w.st.Watch.Seq = leasewatch.MaxOpenEpisodes
+	for i := 0; i < leasewatch.MaxOpenEpisodes; i++ {
+		w.st.Watch.Episodes = append(w.st.Watch.Episodes, leasewatch.Episode{
+			GrantID: pad(fmt.Sprintf("g%d", i), leasewatch.MaxIDLen), Action: pad("a", leasewatch.MaxActionLen),
+			HostLabel: pad("h", leasewatch.MaxLabelLen), Seq: uint64(i + 1)})
+	}
+	w.st.RunSeen = make(map[string]int64, leaseRunSeenMax)
+	for i := 0; i < leaseRunSeenMax; i++ {
+		w.st.RunSeen[fmt.Sprintf("%036d\t%s", i, pad(fmt.Sprintf("h%d", i), leaseHostIDMax))] = 1<<40 + int64(i)
+	}
+	data, err := w.encode()
+	if err != nil {
+		t.Fatalf("worst-case state: %v", err)
+	}
+	if len(data) > leaseWatchMaxState {
+		t.Fatalf("worst-case state %d bytes > limit %d", len(data), leaseWatchMaxState)
+	}
+}
+
+// TestDigestFindingsCountOpenFindingsBeyondTheListLimit: closed findings do not
+// count, and they do not stop the count either. The digest used to read every
+// finding, closed ones included, and gave up above the list limit.
+func TestDigestFindingsCountOpenFindingsBeyondTheListLimit(t *testing.T) {
+	f := newLeaseFixture(t)
+	w := f.watcher(serverconfig.DailyDigest{})
+	closedRows := vulnstore.MaxListFindings + 1
+	if _, err := f.db.Exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+		INSERT INTO vuln_findings (finding_key, subject, subject_kind, record, nos_checked, state, closed_by, closed_at,
+		state_run_seq, episode_opened_at, episode_opened_run_seq, episode_peak_tier, first_seen_at, last_seen_at, updated_at)
+		SELECT CAST(printf('%032d', i) AS BLOB), 'host-1', 'host', '{}', 0, 'fixed', 'nos_inventory', 1, 1, 1, 1, 4, 1, 1, 1 FROM n`, closedRows); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.db.Exec(`INSERT INTO vuln_findings (finding_key, subject, subject_kind, record, nos_checked, state,
+		state_run_seq, episode_opened_at, episode_opened_run_seq, episode_peak_tier, episode_kev_date, first_seen_at, last_seen_at, updated_at)
+		VALUES (CAST(printf('open%028d', 0) AS BLOB), 'host-1', 'host', '{}', 0, 'open', 1, 1, 1, 4, '2026-01-01', 1, 1, 1),
+		(CAST(printf('open%028d', 1) AS BLOB), 'host-1', 'host', '{"scores":{"kev":{"date_added":"2026-01-01"}}}', 0, 'open', 1, 1, 1, 3, NULL, 1, 1, 1),
+		(CAST(printf('open%028d', 2) AS BLOB), 'host-1', 'host', '{}', 0, 'open', 1, 1, 1, 1, NULL, 1, 1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	got, err := w.countFindings(context.Background())
+	if err != nil {
+		t.Fatalf("countFindings: %v", err)
+	}
+	want := opsdigest.Findings{Critical: 1, High: 1, Low: 1, KEV: 2}
+	if got != want {
+		t.Fatalf("countFindings = %+v, want %+v", got, want)
 	}
 }

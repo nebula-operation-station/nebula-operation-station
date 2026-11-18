@@ -227,6 +227,13 @@ func (h *Handler) handleContainerUpdates(w http.ResponseWriter, r *http.Request)
 		http.NotFound(w, r)
 		return
 	}
+	// Container batches do not carry an agent suggestion reference yet
+	// (ADR 0016 D9 batch step omitted), so a suggestion-opened container
+	// page is refused rather than shown without its origin.
+	if r.URL.Query().Has("suggestion") {
+		http.NotFound(w, r)
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 2*operationsCallTimeout)
 	defer cancel()
 	hosts, err := h.hosts(ctx)
