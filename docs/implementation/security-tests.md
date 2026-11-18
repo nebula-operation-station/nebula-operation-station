@@ -68,7 +68,7 @@ functions: the original 13 for 20 seconds each, the 83 parsers of
 untrusted managed-host and device input added by tz07 for 10 seconds
 each (about 18 minutes of fuzzing in total, plus build time). It is not
 run by CI. The table lists every `Fuzz*` function
-in the repository (191, previously: 168, previously: 141, previously: 118, previously: 111, from `grep -rn '^func Fuzz' --include=*_test.go .`)
+in the repository (196, previously: 191, previously: 168, previously: 141, previously: 118, previously: 111, from `grep -rn '^func Fuzz' --include=*_test.go .`)
 with its package and whether `make fuzz` runs it. Functions marked "no"
 are not run by `make fuzz`; their seed corpora still run in `make test`
 like every other test.
@@ -101,7 +101,7 @@ like every other test.
 | `internal/fimscan` | `FuzzParse` | no |
 | `internal/fimsshd` | `FuzzParse` | no |
 | `internal/flowagg` | `FuzzDiff`, `FuzzObserve` | no |
-| `internal/helpcmd` | `FuzzCommandChecks`, `FuzzPlaceholderHost`, `FuzzPlaceholderID`, `FuzzPlaceholderDate`, `FuzzPlaceholderVersion` | no |
+| `internal/helpcmd` | `FuzzCommandChecks`, `FuzzPlaceholderHost`, `FuzzPlaceholderID`, `FuzzPlaceholderDate`, `FuzzPlaceholderVersion`, `FuzzMatchShape` | no |
 | `internal/helpdocs` | `FuzzBuild` | no |
 | `internal/helpfacts` | `FuzzParseQuestionHostValues`, `FuzzTokenize`, `FuzzCleanText` | no |
 | `internal/helpsearch` | `FuzzSearch`, `FuzzTerms` | no |
@@ -112,6 +112,7 @@ like every other test.
 | `internal/inventory/csvimport` | `FuzzParse` | yes |
 | `internal/ipam` | `FuzzNormalizeMAC` | no |
 | `internal/leasewatch` | `FuzzDecodeState` | no |
+| `internal/llmclient` | `FuzzDecodeResponse` | no |
 | `internal/modules` | `FuzzUnpack` | yes |
 | `internal/modulelock` | `FuzzParse` | yes |
 | `internal/netadvisor` | `FuzzRuleInputs` | no |
@@ -128,6 +129,7 @@ like every other test.
 | `internal/pveapi` | `FuzzListQemu`, `FuzzListLxc`, `FuzzListNodes`, `FuzzGetQemuConfig`, `FuzzGetLxcConfig`, `FuzzClusterStatus`, `FuzzHAStatus`, `FuzzListSnapshots`, `FuzzReadBackups`, `FuzzAgentOSInfo`, `FuzzAgentNetworkInterfaces`, `FuzzAgentFSInfo`, `FuzzNodeTasks`, `FuzzListStorages`, `FuzzNodeStatus`, `FuzzGuestStatus`, `FuzzNodeRRDData`, `FuzzGuestRRDData` | yes |
 | `internal/pvecollect` | `FuzzDecodeGuestNet`, `FuzzBoundedReason` | no |
 | `internal/pvecontract` | `FuzzDecodeRemote`, `FuzzDecodeObservation`, `FuzzDecodeLiveSamples`, `FuzzDecodeLiveWant` | no |
+| `internal/pvetransport` | `FuzzParseEndpoint` | no |
 | `internal/registrymeta` | `FuzzLatestStable`, `FuzzParseChallengeParams`, `FuzzParseRealm`, `FuzzParseLinkNext`, `FuzzParseRef`, `FuzzRegistryHostOf`, `FuzzCompareTags` | no |
 | `internal/release` | `FuzzParseInstalledFiles`, `FuzzVerifyInstalledFiles`, `FuzzReadUstar`, `FuzzParseManifest` | yes |
 | `internal/reputation` | `FuzzLookupMatchesLinearOracle`, `FuzzValidateNeverKeepsSpecialOverlap` | no |
@@ -144,6 +146,7 @@ like every other test.
 | `internal/vulnfeed/reputation` | `FuzzParseEntry`, `FuzzForEachRecord` | yes |
 | `internal/vulnagent/agent` | `FuzzParseSubmit`, `FuzzDecodeArgs`, `FuzzToolResultContent` | no |
 | `internal/vulnfinding` | `FuzzParseRecord` | no |
+| `internal/vulnfix` | `FuzzHostResult`, `FuzzValidIDs` | no |
 | `internal/vulnmatch` | `FuzzMatchVersions` | no |
 | `internal/vulnnotify` | `FuzzExportCSV`, `FuzzExportJSON`, `FuzzPlain` | no |
 | `internal/vulnprio` | `FuzzCompute`, `FuzzComputeV2` | no |
@@ -161,7 +164,7 @@ package is a protected path.
 Before a release, run each `make fuzz` target for at least an hour
 (`go test -run='^$' -fuzz=NAME -fuzztime=1h ./PKG`).
 
-**Open:** 95 fuzz functions (the "no" rows; previously: 155, before that: 128, before that: 105, before that: 98) are not run by `make fuzz`,
+**Open:** 100 fuzz functions (the "no" rows; previously: 95, previously: 155, before that: 128, before that: 105, before that: 98) are not run by `make fuzz`,
 and CI runs no fuzz target at all, although the M10-3 plan in
 `docs/implementation/m10-plan.md` expects CI to run them briefly. The
 first step of the earlier proposal is done (tz07): `make fuzz` now runs the
