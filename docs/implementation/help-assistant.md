@@ -5,7 +5,7 @@ Status: **accepted ADR, partly built, re-check 2026-11-18.** (previously:
 open questions of ADR 0014 (Proposed)"). [ADR 0014](../adr/0014-help-assistant.md)
 is Accepted, 2026-11-12, with Q1–Q12 decided (its section "Maintainer
 decisions 2026-11-12"). The table "Status on main (2026-11-18)" below says
-what is built and what is open. Release placement (Q11, recommended): after
+what is built and what is open. Release placement (Q11, decided 2026-11-12; previously "recommended"): after
 hb01 (docs embedded and served under `/help`) and va09 (LLM settings model).
 
 This plan turns ADR 0014 into PR-sized tickets. It follows the maintainer
@@ -25,10 +25,10 @@ maintainer's open decisions, which stay in [ADR 0014](../adr/0014-help-assistant
 | --- | --- | --- | --- |
 | AS-01 | done | `docs/adr/0014-help-assistant.md` (status Accepted, 2026-11-12; Q1–Q12 decided); `.github/protected-paths.txt` lists `docs/handbook/` and `docs/admin/guide.md` | — |
 | AS-02 | done | `docs/spec/01-product.md` (help assistant section), `docs/spec/02-architecture.md` (LLM egress), `docs/spec/13-notifications.md` (`assistant.settings_changed`), `docs/threat-model.md` (section "LLM output", T1–T10) | — |
-| AS-03 | partly | `internal/helpdocs/chunk.go`, `split.go`, `outline.go` and their `_test.go` files | Chunking, fence extraction and the outline check exist. Not every AS-03 acceptance criterion was verified in this re-check. |
-| AS-04 | done | PR #607 (`docs/status.md`); `internal/helpsearch/search.go`, `golden_test.go` (`TestGoldenAS04QueriesRankEnrollmentSectionsInTop3`) | — |
-| AS-05 | partly | PRs #596, #621 (`docs/status.md`); `internal/helpcmd/doc.go` (names the present parts), `placeholder.go`, `allowlist.go` | Present per `internal/helpcmd/doc.go`: check V1 (ASCII), command units, check V6 (allowlist), placeholder class table. Missing per the same file: command catalog, shape builder from code blocks, token matching of V3, checks V2–V5. `cmd/nebula/helpcatalog_test.go` does not exist. |
-| AS-06 | done | `internal/helpfacts/helpfacts.go` (package doc: fixed `Fact` struct, hosts selected by name, address or CIDR), `helpfacts_test.go`, `boundary_test.go` | — |
+| AS-03 | partly | `internal/helpdocs/chunk.go`, `split.go`, `outline.go` and their `_test.go` files | Present: chunking, fence extraction, outline check. Missing: the admin guide is not indexed. `FromDocsembed` (`internal/helpdocs/chunk.go:124`) indexes only the embedded handbook, and the admin guide is not in `internal/docsembed` (comment at `chunk.go:122–123`). Other AS-03 criteria were not verified in this re-check. |
+| AS-04 | partly | PR #607 (`docs/status.md`); `internal/helpsearch/search.go`, `golden_test.go` (`TestGoldenAS04QueriesRankEnrollmentSectionsInTop3`) | Present: both maintainer questions rank the enrollment section in the top 3. Reading: "admin guide 7.1/7.2" is read as section 7.1 only (`golden_test.go:53–56`); 7.2 (pinning) is not tested. Gap: the test loads the admin guide from `docs/admin/guide.md` on disk (`golden_test.go:18–19`), not from the production index, because `FromDocsembed` does not embed it (`chunk.go:124`). |
+| AS-05 | partly | PRs #596, #621 (`docs/status.md`); `internal/helpcmd/doc.go` (names the present parts), `placeholder.go`, `allowlist.go` | Present per `internal/helpcmd/doc.go`: check V1 (ASCII), command units, check V6 (allowlist), placeholder class table. Missing per the same file: command catalog, shape builder from code blocks, token matching of V3, checks V2–V5. Missing test seams in `cmd/nebula/`: no `pveWith` and no `backupWith` exist; `restoreWith` (`cmd/nebula/backup.go:362`) has no injected `isRoot`; the root-free wrapper tests are missing. `cmd/nebula/helpcatalog_test.go` does not exist. |
+| AS-06 | partly | `internal/helpfacts/helpfacts.go:155` (`Visibility` callback, caller passes the inventory check), `helpfacts.go` package doc (fixed `Fact` struct, hosts selected by name, address or CIDR), `helpfacts_test.go`, `boundary_test.go` | Present: the projection takes an injected `Visibility` callback. Missing: no package outside `internal/help*` imports `helpfacts`, so nothing wires the inventory page's authorisation check to it. "User authorisation identical to the inventory page" has no evidence file and is not verified. |
 | AS-07 | not verified | `internal/llmclient/doc.go` describes the shared client of the NOS agents | `doc.go` does not name the assistant as a user, and no assistant package exists (see AS-09). Use by the assistant is not verified. |
 | AS-08 | open | none: no assistant settings in `internal/serverconfig/` (the only hit is an unrelated test string) | all |
 | AS-09 | open | `internal/helpassist/` does not exist | all |
@@ -63,7 +63,7 @@ responsibility.
 
 | ID | Order | Scope | Paths | Protected | Acceptance |
 | --- | --- | --- | --- | --- | --- |
-| AS-01 | 1 | This ADR and plan | `docs/adr/0014-help-assistant.md`, `docs/implementation/help-assistant.md` | yes (`docs/adr/`) | Maintainer answers Q1–Q12, ADR accepted; for Q12 the maintainer adds or declines `docs/handbook/` and `docs/admin/guide.md` in `.github/protected-paths.txt` (protected, maintainer only) |
+| AS-01 | 1 | This ADR and plan | `docs/adr/0014-help-assistant.md`, `docs/implementation/help-assistant.md` | yes (`docs/adr/`) | Maintainer answers Q1–Q12, ADR accepted; Q12 decided 2026-11-12, `docs/handbook/` and `docs/admin/guide.md` are listed in `.github/protected-paths.txt` (done, maintainer change) |
 | AS-02 | 2 | Spec revision and threat model | `docs/spec/01-product.md`, `docs/spec/02-architecture.md`, `docs/spec/13-notifications.md`, `docs/threat-model.md` | yes | Spec 01 non-goal reworded ("an LLM that decides, executes or authorises anything"), assistant as optional default-off feature; new server egress and `assistant.settings_changed` event; threat items T1–T10 with the residual risk |
 
 ### Phase B: deterministic parts (no LLM; after AS-02, may start after AS-01 behind the off switch)
@@ -90,7 +90,7 @@ responsibility.
 | ID | Order | Scope | Paths | Protected | Acceptance |
 | --- | --- | --- | --- | --- | --- |
 | AS-12 | 8 | Security and browser tests | `test/security/`, `test/browser/` | yes | Prompt injection via host name and via a fake LLM answer never produces an action, request to the executor or state change; red-flagged command not copyable (Q7); hostile HTML/script in answers rendered as text; URL change without fresh assertion refused; user cannot get facts of hosts outside their view; rate limits enforced; no question text in logs or audit |
-| AS-13 | 8 | Operator documentation | `docs/admin/guide.md`, `docs/handbook/faq.md` | no today; yes if the maintainer protects the corpus (Q12) | Enabling the assistant, LLM endpoint rules (lab-only), what is sent to the model (docs chunks, opt-in facts, question), what is never sent, rate limits, storage, the residual risk ("check before running"); FAQ entry "What does the assistant send to the LLM?" |
+| AS-13 | 8 | Operator documentation | `docs/admin/guide.md`, `docs/handbook/faq.md` | yes (Q12 decided; `docs/handbook/` and `docs/admin/guide.md` are listed in `.github/protected-paths.txt`) | Enabling the assistant, LLM endpoint rules (lab-only), what is sent to the model (docs chunks, opt-in facts, question), what is never sent, rate limits, storage, the residual risk ("check before running"); FAQ entry "What does the assistant send to the LLM?" |
 
 ## Protected paths touched by this plan
 
@@ -98,13 +98,16 @@ responsibility.
 `test/security/` and `test/browser/` (AS-12); `cmd/nebula/` for the
 AS-05 catalog test (a new test file) and the AS-05 test seams in `cmd/nebula/pve.go` and `cmd/nebula/backup.go` (ADR D4 "Test seams", maintainer decision 2026-11-12, no behaviour change; previously "no production change"); `internal/web/auth/` only if AS-08 cannot
 reuse the existing fresh-assertion helper unchanged; `.github/protected-paths.txt`
-if the maintainer accepts Q12 (adds `docs/handbook/` and `docs/admin/guide.md`;
-maintainer change, not an agent ticket).
+(Q12 decided 2026-11-12: it already lists `docs/handbook/` and `docs/admin/guide.md`;
+`.github/` is a maintainer change, not an agent ticket).
 
-The assistant corpus (`docs/handbook/`, `docs/admin/guide.md`) is **not**
-protected today. Until Q12 is decided, doc changes that alter the prompt
-content and the command shapes the validator allows get only the normal PR
-review (ADR 0014 T2 states this mitigation as not enforced).
+The assistant corpus (`docs/handbook/`, `docs/admin/guide.md`) **is** protected
+since Q12 was decided: `.github/protected-paths.txt` lists both paths, so every
+doc change that alters the prompt content or the command shapes the validator
+allows gets the maintainer review (previously: "not protected today; until Q12 is
+decided, only the normal PR review"). ADR 0014 T2 still states the command-catalog
+cross-check as not enforced until the AS-05 catalog test exists (see AS-05 in the
+status table).
 
 ## Dependencies outside this plan
 
