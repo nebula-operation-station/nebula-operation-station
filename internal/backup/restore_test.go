@@ -489,6 +489,145 @@ func TestRestoreReportsWhenStartFails(t *testing.T) {
 	}
 }
 
+// stubFilesystem replaces the undo's filesystem calls for one test; a nil
+// function keeps the real one.
+func stubFilesystem(t *testing.T, remove func(string) error, move func(string, string) error) {
+	t.Helper()
+	realRemove, realRename := removeAll, rename
+	t.Cleanup(func() { removeAll, rename = realRemove, realRename })
+	if remove != nil {
+		removeAll = remove
+	}
+	if move != nil {
+		rename = move
+	}
+}
+
+// When the old data cannot be put back, the error names where it is, the old
+// data stays there, and the services are still started.
+func TestRestoreNamesOldDataThatCannotBePutBack(t *testing.T) {
+	m, files := sample(t)
+	latest := map[string]int{"server": m.Schemas["server"], "executor": m.Schemas["executor"]}
+	now := time.Unix(1_800_000_000, 0)
+	ts := now.UTC().Format("20060102-150405")
+	errRefused := errors.New("filesystem refused the rename")
+	l := oldLayout(t)
+	asideServer := l.ServerDir() + ".pre-restore-" + ts
+	asideExecutor := l.ExecutorDir() + ".pre-restore-" + ts
+	stubFilesystem(t, nil, func(from, to string) error {
+		if strings.Contains(from, ".pre-restore-") {
+			return errRefused
+		}
+		return os.Rename(from, to)
+	})
+	sys := &fakeSystem{failOn: "server.db"} // fails after both directories were moved aside
+
+	rep, err := Restore(m, files, l, sys, latest, now)
+
+	if err == nil || !errors.Is(err, errRefused) {
+		t.Fatalf("error %v, want the filesystem error wrapped", err)
+	}
+	for _, aside := range []string{asideServer, asideExecutor} {
+		if !strings.Contains(err.Error(), aside) {
+			t.Fatalf("error %q does not name %s, where the old data is", err, aside)
+		}
+	}
+	if len(rep.MovedAside) != 0 || len(rep.Config) != 0 {
+		t.Fatalf("report %+v after a refusal, want an empty one", rep)
+	}
+	if b, _ := os.ReadFile(filepath.Join(asideServer, "server.db")); string(b) != "old server" {
+		t.Fatal("old server data is not at the reported path")
+	}
+	if b, _ := os.ReadFile(filepath.Join(asideExecutor, "executor.db")); string(b) != "old executor" {
+		t.Fatal("old executor data is not at the reported path")
+	}
+	if len(sys.calls) == 0 || sys.calls[len(sys.calls)-1] != "start "+strings.Join(StartUnits, ",") {
+		t.Fatalf("calls %v, want the services started last", sys.calls)
+	}
+}
+
+// A new directory that cannot be removed is reported, and the old data that
+// cannot be put back is named; old data that was put back is not.
+func TestRestoreReportsNewDirectoryThatCannotBeRemoved(t *testing.T) {
+	m, files := sample(t)
+	latest := map[string]int{"server": m.Schemas["server"], "executor": m.Schemas["executor"]}
+	now := time.Unix(1_800_000_000, 0)
+	ts := now.UTC().Format("20060102-150405")
+	errBusy := errors.New("directory busy")
+	l := oldLayout(t)
+	asideServer := l.ServerDir() + ".pre-restore-" + ts
+	asideExecutor := l.ExecutorDir() + ".pre-restore-" + ts
+	stubFilesystem(t, func(p string) error {
+		if p == l.ServerDir() {
+			return errBusy
+		}
+		return os.RemoveAll(p)
+	}, nil)
+	sys := &fakeSystem{failOn: "server.db"}
+
+	_, err := Restore(m, files, l, sys, latest, now)
+
+	if err == nil || !errors.Is(err, errBusy) {
+		t.Fatalf("error %v, want the removal error wrapped", err)
+	}
+	if !strings.Contains(err.Error(), asideServer) {
+		t.Fatalf("error %q does not name %s, where the old server data is", err, asideServer)
+	}
+	if strings.Contains(err.Error(), asideExecutor) {
+		t.Fatalf("error %q names %s, but the executor data was put back", err, asideExecutor)
+	}
+	if b, _ := os.ReadFile(filepath.Join(asideServer, "server.db")); string(b) != "old server" {
+		t.Fatal("old server data is not at the reported path")
+	}
+	if b, _ := os.ReadFile(filepath.Join(l.ExecutorDir(), "executor.db")); string(b) != "old executor" {
+		t.Fatal("executor data was not put back")
+	}
+}
+
+// A Start failure during a refusal is reported with %w, not dropped.
+func TestRefusalReportsFailedStart(t *testing.T) {
+	m, files := sample(t)
+	latest := map[string]int{"server": m.Schemas["server"], "executor": m.Schemas["executor"]}
+	now := time.Unix(1_800_000_000, 0)
+	l := oldLayout(t)
+	if err := os.RemoveAll(l.ServerDir()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(t.TempDir(), l.ServerDir()); err != nil {
+		t.Fatal(err)
+	}
+	startErr := errors.New("unit failed")
+	sys := &brokenSystem{fakeSystem: &fakeSystem{}, startErr: startErr}
+
+	_, err := Restore(m, files, l, sys, latest, now)
+
+	if err == nil || !strings.Contains(err.Error(), "not a directory") || !errors.Is(err, startErr) {
+		t.Fatalf("error %v, want the refusal and the wrapped start failure", err)
+	}
+}
+
+// When Stop and the Start after it both fail, both causes are returned and
+// both can be matched with errors.Is.
+func TestRestoreReportsStopAndStartFailures(t *testing.T) {
+	m, files := sample(t)
+	latest := map[string]int{"server": m.Schemas["server"], "executor": m.Schemas["executor"]}
+	now := time.Unix(1_800_000_000, 0)
+	l := oldLayout(t)
+	before := tree(t, l.Root)
+	stopErr := errors.New("unit busy")
+	startErr := errors.New("unit failed")
+	sys := &brokenSystem{fakeSystem: &fakeSystem{}, stopErr: stopErr, startErr: startErr}
+
+	_, err := Restore(m, files, l, sys, latest, now)
+
+	if err == nil || !errors.Is(err, stopErr) || !errors.Is(err, startErr) || !strings.Contains(err.Error(), "stop the services") {
+		t.Fatalf("error %v, want the stop and the start failure, both matchable", err)
+	}
+	if after := tree(t, l.Root); !maps.Equal(before, after) {
+		t.Fatal("a refused restore changed the target")
+	}
+}
+
 // mkdirTracked reports only the topmost directory it created, and nothing when
 // the directory already exists: a cleanup of the reported path can then never
 // remove a directory that was there before the restore.
