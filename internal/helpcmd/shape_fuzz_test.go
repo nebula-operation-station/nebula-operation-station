@@ -28,6 +28,9 @@ func FuzzMatchShape(f *testing.F) {
 		f.Add(s, s)
 		f.Add(s, "nebula x 10.0.0.1")
 	}
+	// Prefix and suffix overlap on a one-byte command: must refuse, not panic.
+	f.Add("a<id>a", "a")
+	f.Add("a<id>a", "aa")
 	f.Fuzz(func(t *testing.T, doc, cmd string) {
 		// Property 1: no input panics; the error, if any, is one of the
 		// documented kinds or a tokenizer error.

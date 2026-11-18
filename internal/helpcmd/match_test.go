@@ -52,7 +52,8 @@ func TestMatchShapeRules(t *testing.T) {
 		{name: "scheme is taken from the doc", doc: "https://<digest>/x", cmd: "http://abc123/x", wantErr: ErrNoMatch},
 		{name: "empty value is refused", doc: "--x=<id>", cmd: "--x=", wantErr: ErrNoMatch},
 		{name: "prefix and suffix may not overlap the value", doc: "a<id>a", cmd: "aa", wantErr: ErrNoMatch},
-		{name: "prefix with empty value is refused", doc: "--x=<id>", cmd: "--x=", wantErr: ErrNoMatch},
+		{name: "overlapping prefix and suffix on a one-byte command do not panic", doc: "a<id>a", cmd: "a", wantErr: ErrNoMatch},
+		{name: "command shorter than the literal prefix is refused", doc: "--x=<id>", cmd: "--x", wantErr: ErrNoMatch},
 
 		// At most one placeholder per token.
 		{name: "two placeholders in one token do not match", doc: "<host>:<date>", cmd: "10.0.0.1:2026-01-01", wantErr: ErrNoMatch},
@@ -127,6 +128,45 @@ func TestMatchShapeBindings(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Bindings, want) {
 		t.Errorf("Bindings = %+v; want %+v", got.Bindings, want)
+	}
+}
+
+// TestMatchShapeUnchangedBindingValue checks that an Unchanged binding carries
+// the placeholder text itself, not the whole doc token, so a caller can build
+// the "replace <…>" message from Value.
+func TestMatchShapeUnchangedBindingValue(t *testing.T) {
+	tests := []struct {
+		name string
+		doc  string
+		cmd  string
+		want Binding
+	}{
+		{
+			name: "whole token placeholder",
+			doc:  "ssh <host>",
+			cmd:  "ssh <host>",
+			want: Binding{Token: 1, Name: "host", Class: ClassHost, Value: "<host>", Unchanged: true},
+		},
+		{
+			name: "placeholder with literal prefix keeps only the placeholder",
+			doc:  "--x=<id>",
+			cmd:  "--x=<id>",
+			want: Binding{Token: 0, Name: "id", Class: ClassID, Value: "<id>", Unchanged: true},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := MatchShape(tt.doc, tt.cmd)
+			if err != nil {
+				t.Fatalf("MatchShape(%q, %q) error = %v; want match", tt.doc, tt.cmd, err)
+			}
+			if len(got.Bindings) != 1 {
+				t.Fatalf("Bindings = %+v; want one binding", got.Bindings)
+			}
+			if !reflect.DeepEqual(got.Bindings[0], tt.want) {
+				t.Errorf("Bindings[0] = %+v; want %+v", got.Bindings[0], tt.want)
+			}
+		})
 	}
 }
 

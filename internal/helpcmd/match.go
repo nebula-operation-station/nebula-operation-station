@@ -140,7 +140,7 @@ func matchToken(index int, doc, cmd string) (Binding, bool, error) {
 		return Binding{}, false, fmt.Errorf("placeholder <%s> is not in the class table", name)
 	}
 	if cmd == doc {
-		return Binding{Token: index, Name: name, Class: class, Value: doc, Unchanged: true}, true, nil
+		return Binding{Token: index, Name: name, Class: class, Value: doc[loc[0]:loc[1]], Unchanged: true}, true, nil
 	}
 	prefix := doc[:loc[0]]
 	suffix := doc[loc[1]:]
