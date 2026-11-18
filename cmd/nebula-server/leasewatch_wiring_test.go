@@ -3,12 +3,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/leasewatch"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
@@ -96,10 +99,37 @@ func newLeaseFixture(t *testing.T) *leaseFixture {
 // watcher returns a watcher over the fixture's state directory, as a restarted
 // server would build it.
 func (f *leaseFixture) watcher(digest serverconfig.DailyDigest) *leaseWatcher {
-	w := newLeaseWatcher(f.db, f.src, emptyHosts{}, f.vuln.store, f.send, "https://nebula.example.org", digest,
-		time.UTC, f.dir, func() time.Time { return f.now }, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return f.watcherWith(digest, emptyHosts{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+// watcherWith is watcher with the inventory and the log the test wants.
+func (f *leaseFixture) watcherWith(digest serverconfig.DailyDigest, hosts hostLister, log *slog.Logger) *leaseWatcher {
+	w := newLeaseWatcher(f.db, f.src, hosts, f.vuln.store, f.send, "https://nebula.example.org", digest,
+		time.UTC, f.dir, func() time.Time { return f.now }, log)
 	w.load()
 	return w
+}
+
+// countingHosts is an inventory that counts how often it is read.
+type countingHosts struct {
+	hosts []inventory.Host
+	calls int
+}
+
+func (c *countingHosts) List(context.Context) ([]inventory.Host, error) {
+	c.calls++
+	return c.hosts, nil
+}
+
+// failedCount returns how many lease.run_failed events were sent.
+func (r *recordingSender) failedCount() int {
+	n := 0
+	for _, k := range r.kinds() {
+		if k == notify.KindLeaseRunFailed {
+			n++
+		}
+	}
+	return n
 }
 
 // run inserts one finished lease run of grant on host, finished at at.
@@ -302,5 +332,121 @@ func TestDigestCountsFailedRunsOfTheLast24h(t *testing.T) {
 	n, err := w.countFailedRuns(context.Background(), f.now)
 	if err != nil || n != 1 {
 		t.Fatalf("countFailedRuns = %d, %v; want 1", n, err)
+	}
+}
+
+// TestLeaseWatchRunCommittedLateIsNotifiedOnce: a failed run whose finished_at
+// is older than the mark, and which commits only after the watcher has moved
+// past it, is still notified, exactly once.
+func TestLeaseWatchRunCommittedLateIsNotifiedOnce(t *testing.T) {
+	f := newLeaseFixture(t)
+	w := f.watcher(serverconfig.DailyDigest{})
+	w.Tick(context.Background()) // first start at T0
+
+	f.now = leaseT0.Add(11 * time.Minute)
+	f.run("lease-a", "os.updates.list", "host-1", "success", leaseT0.Add(10*time.Minute))
+	w.Tick(context.Background()) // the mark is now at T0+10m
+
+	// The failure finished at T0+5m, but its row commits only now.
+	f.run("lease-b", "os.updates.list", "host-2", "failed", leaseT0.Add(5*time.Minute))
+	f.now = leaseT0.Add(12 * time.Minute)
+	w.Tick(context.Background())
+	f.now = leaseT0.Add(13 * time.Minute)
+	w.Tick(context.Background())
+	f.now = leaseT0.Add(20 * time.Minute)
+	f.watcher(serverconfig.DailyDigest{}).Tick(context.Background()) // restart
+
+	if n := f.send.failedCount(); n != 1 {
+		t.Fatalf("late failure sent %d lease.run_failed events, want exactly 1: %v", n, f.send.kinds())
+	}
+}
+
+// TestLeaseWatchSaveFailureSendsNothing: no event is sent when the state cannot
+// be saved, and the event is sent once when the save works again.
+func TestLeaseWatchSaveFailureSendsNothing(t *testing.T) {
+	f := newLeaseFixture(t)
+	w := f.watcher(serverconfig.DailyDigest{})
+	w.Tick(context.Background()) // first start at T0; state saved
+
+	f.now = leaseT0.Add(time.Minute)
+	f.run("lease-a", "os.updates.list", "host-1", "failed", f.now)
+	// A directory in place of the state file makes the atomic save fail.
+	statePath := filepath.Join(f.dir, leaseWatchStateFile)
+	if err := os.Remove(statePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(statePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	f.now = leaseT0.Add(2 * time.Minute)
+	w.Tick(context.Background())
+	if n := len(f.send.events); n != 0 {
+		t.Fatalf("state could not be saved, but %v was sent", f.send.kinds())
+	}
+
+	if err := os.Remove(statePath); err != nil {
+		t.Fatal(err)
+	}
+	f.now = leaseT0.Add(3 * time.Minute)
+	w.Tick(context.Background())
+	f.now = leaseT0.Add(4 * time.Minute)
+	f.watcher(serverconfig.DailyDigest{}).Tick(context.Background()) // restart
+	if n := f.send.failedCount(); n != 1 {
+		t.Fatalf("after the save works again %d lease.run_failed events, want exactly 1", n)
+	}
+}
+
+// TestLeaseWatchInvalidStoredRowIsSkippedOnceAndTheMarkAdvances: one bad row
+// does not block the good rows after it, and it is logged once, not per tick.
+func TestLeaseWatchInvalidStoredRowIsSkippedOnceAndTheMarkAdvances(t *testing.T) {
+	f := newLeaseFixture(t)
+	var logs bytes.Buffer
+	w := f.watcherWith(serverconfig.DailyDigest{}, emptyHosts{}, slog.New(slog.NewTextHandler(&logs, nil)))
+	w.Tick(context.Background()) // first start at T0
+
+	f.now = leaseT0.Add(time.Minute)
+	f.run("lease-a", "os.updates.list", "host-1", "failed", f.now)
+	f.run("lease-b", strings.Repeat("x", leasewatch.MaxActionLen+1), "host-1", "failed", f.now.Add(time.Second))
+	f.run("lease-c", "os.updates.list", "", "failed", f.now.Add(2*time.Second))
+	w.Tick(context.Background())
+	if n := f.send.failedCount(); n != 1 {
+		t.Fatalf("with two invalid rows sent %d lease.run_failed events, want the one valid run", n)
+	}
+
+	f.now = leaseT0.Add(2 * time.Minute)
+	f.run("lease-d", "os.updates.list", "host-2", "failed", f.now)
+	w.Tick(context.Background())
+	f.now = leaseT0.Add(3 * time.Minute)
+	w.Tick(context.Background())
+	if n := f.send.failedCount(); n != 2 {
+		t.Fatalf("after the later run sent %d lease.run_failed events, want 2", n)
+	}
+	if n := strings.Count(logs.String(), "lease watch: stored run skipped"); n != 2 {
+		t.Fatalf("invalid rows logged %d times, want once each (2)", n)
+	}
+}
+
+// TestLeaseWatchReadsTheInventoryOncePerTick: a burst of failures in one tick
+// reads the inventory once, not once per event.
+func TestLeaseWatchReadsTheInventoryOncePerTick(t *testing.T) {
+	f := newLeaseFixture(t)
+	hosts := &countingHosts{hosts: []inventory.Host{{ID: "host-1", DisplayName: "Web"}}}
+	w := f.watcherWith(serverconfig.DailyDigest{}, hosts, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	w.Tick(context.Background()) // first start at T0
+
+	hosts.calls = 0
+	f.now = leaseT0.Add(time.Minute)
+	for i := 0; i < 3; i++ {
+		f.run(fmt.Sprintf("lease-%d", i), "os.updates.list", "host-1", "failed", f.now.Add(time.Duration(i)*time.Second))
+	}
+	w.Tick(context.Background())
+	if n := f.send.failedCount(); n != 3 {
+		t.Fatalf("sent %d lease.run_failed events, want 3", n)
+	}
+	if hosts.calls > 1 {
+		t.Fatalf("inventory read %d times in one tick, want at most once", hosts.calls)
+	}
+	if f.send.events[0].Host != "Web" {
+		t.Fatalf("host label %q, want the display name", f.send.events[0].Host)
 	}
 }

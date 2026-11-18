@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
@@ -46,6 +47,12 @@ const (
 	leaseWatchStateFile = "leasewatch-state.json"
 	// leaseRunBatch bounds the stored runs read per query.
 	leaseRunBatch = 5000
+	// leaseRunWindow is how far behind the clock the stored runs are still
+	// read. A run row that commits later than its finish time plus this window
+	// is not read.
+	leaseRunWindow = time.Hour
+	// leaseRunSeenMax bounds the saved set of runs read inside the window.
+	leaseRunSeenMax = 4096
 	// leaseWatchMaxState bounds the state file size on read.
 	leaseWatchMaxState = leasewatch.MaxStateBytes + 4096
 	// digestLang is the text language of the daily digest (ADR 0016: de).
@@ -79,26 +86,26 @@ type hostLister interface {
 }
 
 // leaseWatchState is what is saved between runs. The State part holds the
-// expiry marks and open run-failure episodes; the run mark is the last stored
-// run that was looked at, ordered by finish time, execution and host.
+// expiry marks and open run-failure episodes. The run part is the scan start
+// for stored runs (RunFrom, Unix seconds, trailing the clock by leaseRunWindow)
+// and the set of runs already read inside it (RunSeen, keyed by run, with
+// the finish time), so that a run is read once even when its row commits late.
 type leaseWatchState struct {
 	Watch      leasewatch.State
 	Init       bool
-	RunAt      int64
-	RunExec    string
-	RunHost    string
+	RunFrom    int64
+	RunSeen    map[string]int64
 	DigestSent time.Time
 }
 
 // leaseFile is the on-disk form. The watch state uses the leasewatch codec,
 // which validates the limits when it is read.
 type leaseFile struct {
-	Init       bool            `json:"init"`
-	Watch      json.RawMessage `json:"watch,omitempty"`
-	RunAt      int64           `json:"run_at"`
-	RunExec    string          `json:"run_exec,omitempty"`
-	RunHost    string          `json:"run_host,omitempty"`
-	DigestSent time.Time       `json:"digest_sent"`
+	Init       bool             `json:"init"`
+	Watch      json.RawMessage  `json:"watch,omitempty"`
+	RunFrom    int64            `json:"run_from"`
+	RunSeen    map[string]int64 `json:"run_seen,omitempty"`
+	DigestSent time.Time        `json:"digest_sent"`
 }
 
 // leaseWatcher holds the lease watch and digest state of the server.
@@ -166,7 +173,7 @@ func decodeLeaseFile(data []byte) (leaseWatchState, error) {
 	if err := dec.Decode(&f); err != nil {
 		return leaseWatchState{}, fmt.Errorf("decode lease watch state: %w", err)
 	}
-	st := leaseWatchState{Init: f.Init, RunAt: f.RunAt, RunExec: f.RunExec, RunHost: f.RunHost, DigestSent: f.DigestSent}
+	st := leaseWatchState{Init: f.Init, RunFrom: f.RunFrom, RunSeen: f.RunSeen, DigestSent: f.DigestSent}
 	if len(f.Watch) > 0 {
 		ws, err := leasewatch.DecodeState(f.Watch)
 		if err != nil {
@@ -183,8 +190,8 @@ func (w *leaseWatcher) encode() ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encode lease watch marks: %w", err)
 	}
-	return json.Marshal(leaseFile{Init: w.st.Init, Watch: watch, RunAt: w.st.RunAt, RunExec: w.st.RunExec,
-		RunHost: w.st.RunHost, DigestSent: w.st.DigestSent})
+	return json.Marshal(leaseFile{Init: w.st.Init, Watch: watch, RunFrom: w.st.RunFrom, RunSeen: w.st.RunSeen,
+		DigestSent: w.st.DigestSent})
 }
 
 // save writes the state if it changed, atomically (0600 in the data dir).
@@ -227,16 +234,17 @@ func (w *leaseWatcher) Tick(ctx context.Context) {
 	prevSaved := w.saved
 
 	var events []notify.Event
-	if !w.st.Init {
+	silent := !w.st.Init
+	if silent {
 		// First start: nothing before now is reported. Expiry marks are set
 		// by the first snapshot, so grants that are already inside 7 days
 		// are still reported once.
 		w.st.Init = true
-		w.st.RunAt = now.Unix()
-		w.st.RunExec, w.st.RunHost = "", ""
+		w.st.RunFrom = now.Add(-leaseRunWindow).Unix()
+		w.st.RunSeen = nil
 	}
 	events = append(events, w.expiryEvents(ctx, now)...)
-	events = append(events, w.runEvents(ctx, now)...)
+	events = append(events, w.runEvents(ctx, now, silent)...)
 
 	if err := w.save(); err != nil {
 		// Nothing is sent without the saved state: after a restart the
@@ -318,77 +326,155 @@ func (w *leaseWatcher) expiryEvents(ctx context.Context, now time.Time) []notify
 	return out
 }
 
-// runEvents reads the stored runs after the run mark and returns the due
-// lease.run_failed messages. It reads in batches until none are left.
-func (w *leaseWatcher) runEvents(ctx context.Context, now time.Time) []notify.Event {
-	var out []notify.Event
+// runEvents reads the finished lease runs from the scan start on, sends a
+// lease.run_failed for each failure that opens an episode, and records the
+// runs it has read. The scan start trails the clock by leaseRunWindow, so a run
+// whose row commits after a newer run was read is still read. The recorded set
+// keeps a run from being read, and so from being reported, twice. With silent
+// set (the first start) the runs are recorded but nothing is reported.
+//
+// Reads come first: if a read fails, nothing is decided and the state is not
+// changed, so the next tick reads the same window again.
+func (w *leaseWatcher) runEvents(ctx context.Context, now time.Time, silent bool) []notify.Event {
+	seen := make(map[string]int64, len(w.st.RunSeen))
+	for k, at := range w.st.RunSeen {
+		seen[k] = at
+	}
+	var fresh []storedRun
+	pageAt, pageExec, pageHost := w.st.RunFrom, "", ""
 	for {
-		results, mark, n, err := storedLeaseRuns(ctx, w.db, w.st.RunAt, w.st.RunExec, w.st.RunHost, leaseRunBatch)
+		page, err := storedLeaseRuns(ctx, w.db, pageAt, pageExec, pageHost, leaseRunBatch)
 		if err != nil {
 			w.log.Error("lease watch: read stored runs", "error", err)
-			return out
+			return nil
 		}
-		if n == 0 {
-			return out
-		}
-		due, next, err := leasewatch.RunFailed(results, w.st.Watch)
-		if err != nil {
-			w.log.Error("lease watch: run decision", "error", err)
-			return out
-		}
-		// RunFailed returns only the episodes. The expiry marks belong to
-		// Expiring and must survive this step, or the next tick and the
-		// next restart would report the expiry again.
-		next.Expiry = w.st.Watch.Expiry
-		w.st.Watch = next
-		w.st.RunAt, w.st.RunExec, w.st.RunHost = mark.at, mark.exec, mark.host
-		for _, d := range due {
-			e, err := notify.NewLeaseRunFailed(w.base, notify.LeaseRunFailure{
-				GrantID: d.GrantID, GrantName: d.GrantID, Action: d.Action, HostLabel: w.hostLabel(ctx, d.HostLabel), At: d.At,
-			})
-			if err != nil {
-				w.log.Error("lease watch: build run failure message", "error", err)
+		for _, r := range page {
+			if _, ok := seen[r.key()]; ok {
 				continue
 			}
-			out = append(out, e)
+			seen[r.key()] = r.at
+			fresh = append(fresh, r)
 		}
-		if n < leaseRunBatch {
-			return out
+		if len(page) < leaseRunBatch {
+			break
 		}
+		last := page[len(page)-1]
+		pageAt, pageExec, pageHost = last.at, last.exec, last.host
+	}
+
+	var out []notify.Event
+	if !silent {
+		label := w.lazyHostNames(ctx)
+		for _, r := range fresh {
+			if notRunClass(r.class) {
+				continue
+			}
+			res := leasewatch.RunResult{GrantID: r.grant, Action: r.action, HostLabel: r.host,
+				Success: r.class == classSuccess, At: time.Unix(r.at, 0)}
+			// One run at a time: a run that cannot be used is logged and
+			// skipped. It is already in the recorded set, so it is not retried.
+			due, next, err := leasewatch.RunFailed([]leasewatch.RunResult{res}, w.st.Watch)
+			if err != nil {
+				w.log.Error("lease watch: stored run skipped", "execution", r.exec, "error", err)
+				continue
+			}
+			// RunFailed returns only the episodes. The expiry marks belong to
+			// Expiring and must survive this step, or the next tick and the
+			// next restart would report the expiry again.
+			next.Expiry = w.st.Watch.Expiry
+			w.st.Watch = next
+			for _, d := range due {
+				e, err := notify.NewLeaseRunFailed(w.base, notify.LeaseRunFailure{
+					GrantID: d.GrantID, GrantName: d.GrantID, Action: d.Action, HostLabel: label(d.HostLabel), At: d.At,
+				})
+				if err != nil {
+					w.log.Error("lease watch: build run failure message", "error", err)
+					continue
+				}
+				out = append(out, e)
+			}
+		}
+	}
+
+	// Runs that finished more than leaseRunWindow ago are no longer read, and
+	// the recorded set keeps only the runs still in the window. If the set is
+	// over its limit, the window is shortened to the newest leaseRunSeenMax runs.
+	newFrom := now.Add(-leaseRunWindow).Unix()
+	if newFrom < w.st.RunFrom {
+		newFrom = w.st.RunFrom
+	}
+	if len(seen) > leaseRunSeenMax {
+		ats := make([]int64, 0, len(seen))
+		for _, at := range seen {
+			ats = append(ats, at)
+		}
+		sort.Slice(ats, func(i, j int) bool { return ats[i] > ats[j] })
+		if cut := ats[leaseRunSeenMax-1]; cut > newFrom {
+			newFrom = cut
+		}
+	}
+	for k, at := range seen {
+		if at < newFrom {
+			delete(seen, k)
+		}
+	}
+	w.st.RunFrom = newFrom
+	w.st.RunSeen = seen
+	return out
+}
+
+// lazyHostNames returns a function that maps a host ID to its display name. The
+// inventory is read on the first call only, so a tick reads it at most once,
+// and not at all when nothing is due.
+func (w *leaseWatcher) lazyHostNames(ctx context.Context) func(id string) string {
+	var names map[string]string
+	read := false
+	return func(id string) string {
+		if !read {
+			read = true
+			names = w.hostNames(ctx)
+		}
+		if n, ok := names[id]; ok {
+			return n
+		}
+		return id
 	}
 }
 
-// hostLabel returns the display name of a host, or the ID when the host is
-// unknown or the inventory cannot be read.
-func (w *leaseWatcher) hostLabel(ctx context.Context, id string) string {
+// hostNames reads the inventory and returns the display names by host ID. An
+// inventory that cannot be read gives no names; the IDs are shown instead.
+func (w *leaseWatcher) hostNames(ctx context.Context) map[string]string {
 	if w.hosts == nil {
-		return id
+		return nil
 	}
 	hs, err := w.hosts.List(ctx)
 	if err != nil {
-		return id
+		w.log.Warn("lease watch: inventory not read, host IDs shown", "error", err)
+		return nil
 	}
+	names := make(map[string]string, len(hs))
 	for _, h := range hs {
-		if h.ID == id && h.DisplayName != "" {
-			return h.DisplayName
+		if h.DisplayName != "" {
+			names[h.ID] = h.DisplayName
 		}
 	}
-	return id
+	return names
 }
 
-// runMark is the position of the last stored run that was read.
-type runMark struct {
-	at   int64
-	exec string
-	host string
+// storedRun is one finished host run of a lease, as stored. at is the finish
+// time in Unix seconds.
+type storedRun struct {
+	exec, grant, action, host, class string
+	at                               int64
 }
 
-// storedLeaseRuns returns up to limit finished runs of leases after the mark,
-// in finish order, and the mark of the last one. Each run is a leasewatch
-// result: a grant ID, an action, the host ID and whether it succeeded. Runs
-// that did not run (skipped, not run, not executed) are left out. The second
-// return is the number of rows read, so the caller can tell whether to read on.
-func storedLeaseRuns(ctx context.Context, db *sql.DB, at int64, exec, host string, limit int) ([]leasewatch.RunResult, runMark, int, error) {
+// key identifies a host run: an execution and a host.
+func (r storedRun) key() string { return r.exec + "\t" + r.host }
+
+// storedLeaseRuns returns up to limit finished runs of leases that sort after
+// the position (at, exec, host), in that order: finish time, execution, host.
+// Pass a position of (scan start, "", "") to start from the scan start.
+func storedLeaseRuns(ctx context.Context, db *sql.DB, at int64, exec, host string, limit int) ([]storedRun, error) {
 	rows, err := db.QueryContext(ctx, `SELECT e.id, e.schedule_id, e.action_id, h.host_id, h.class, h.finished_at
 		FROM executions e JOIN execution_hosts h ON h.execution_id = e.id
 		WHERE e.schedule_id IS NOT NULL AND e.schedule_id <> '' AND h.state = 'finished' AND h.finished_at IS NOT NULL
@@ -396,30 +482,21 @@ func storedLeaseRuns(ctx context.Context, db *sql.DB, at int64, exec, host strin
 		ORDER BY h.finished_at, h.execution_id, h.host_id LIMIT ?`,
 		at, at, exec, exec, host, limit)
 	if err != nil {
-		return nil, runMark{}, 0, fmt.Errorf("query lease runs: %w", err)
+		return nil, fmt.Errorf("query lease runs: %w", err)
 	}
 	defer rows.Close()
-	var out []leasewatch.RunResult
-	mark := runMark{at: at, exec: exec, host: host}
-	n := 0
+	var out []storedRun
 	for rows.Next() {
-		var execID, grant, action, hostID, class string
-		var finished int64
-		if err := rows.Scan(&execID, &grant, &action, &hostID, &class, &finished); err != nil {
-			return nil, runMark{}, 0, fmt.Errorf("scan lease run: %w", err)
+		var r storedRun
+		if err := rows.Scan(&r.exec, &r.grant, &r.action, &r.host, &r.class, &r.at); err != nil {
+			return nil, fmt.Errorf("scan lease run: %w", err)
 		}
-		n++
-		mark = runMark{at: finished, exec: execID, host: hostID}
-		if notRunClass(class) {
-			continue
-		}
-		out = append(out, leasewatch.RunResult{GrantID: grant, Action: action, HostLabel: hostID,
-			Success: class == classSuccess, At: time.Unix(finished, 0)})
+		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, runMark{}, 0, fmt.Errorf("read lease runs: %w", err)
+		return nil, fmt.Errorf("read lease runs: %w", err)
 	}
-	return out, mark, n, nil
+	return out, nil
 }
 
 // classSuccess is the class of a successful host run (executions package).
