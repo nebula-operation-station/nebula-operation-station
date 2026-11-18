@@ -27,10 +27,10 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsfacts"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsnotes"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
 
 // Ops agent wiring constants.
