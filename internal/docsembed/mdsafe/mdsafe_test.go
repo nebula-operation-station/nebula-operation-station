@@ -359,6 +359,52 @@ func TestNonASCIIFragmentsAreIDs(t *testing.T) {
 	}
 }
 
+// TestLongFoldedFragmentIsRejected checks that a fragment is bounded after
+// anchorFold, as a cross-page link is. A 2-byte Cyrillic or 3-byte CJK
+// letter folds to 7 bytes ("u" and six hex digits), so a fragment within
+// the destination limit can fold far past it. Such a same-page link must
+// render as text, and so must the same fragment on another page, where the
+// resolved href already carries it. A short non-ASCII fragment that folds
+// within the limit is still a link.
+func TestLongFoldedFragmentIsRejected(t *testing.T) {
+	cyrillic := strings.Repeat("я", 300) // 600 bytes raw, 2100 folded
+	cjk := strings.Repeat("日", 300)      // 900 bytes raw, 2100 folded
+	short := strings.Repeat("я", 100)    // 200 bytes raw, 700 folded
+	for _, tc := range []struct {
+		name, src string
+		wantLink  bool
+	}{
+		{"same page cyrillic", "[x](#" + cyrillic + ")", false},
+		{"same page cjk", "[x](#" + cjk + ")", false},
+		{"same page short cyrillic", "[x](#" + short + ")", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := mdsafe.Render([]byte(tc.src), mdsafe.Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := string(res.HTML)
+			assertInert(t, tc.src, out)
+			if got := strings.Contains(out, "<a "); got != tc.wantLink {
+				t.Errorf("link present = %v, want %v: %.120s", got, tc.wantLink, out)
+			}
+			if !tc.wantLink && !strings.Contains(out, "x") {
+				t.Errorf("rejected link lost its text: %.120s", out)
+			}
+		})
+	}
+	for _, frag := range []string{cyrillic, cjk} {
+		relative := func(_, f string) (string, bool) { return "/help/a#" + f, true }
+		res, err := mdsafe.Render([]byte("[x](a.md#"+frag+")"), mdsafe.Options{Relative: relative})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out := string(res.HTML); strings.Contains(out, "<a ") {
+			t.Errorf("cross-page long fragment produced a link: %.120s", out)
+		}
+	}
+}
+
 // TestSymbolOnlyHeadingGetsGenericID checks that a heading with no letters
 // or digits still gets an id, and that its id passes the inert allowlist.
 func TestSymbolOnlyHeadingGetsGenericID(t *testing.T) {

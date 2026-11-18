@@ -61,6 +61,13 @@ func startTestSSH(t *testing.T, user ssh.PublicKey, mode int32) *testSSH {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return startTestSSHWithKey(t, user, mode, hk)
+}
+
+// startTestSSHWithKey is startTestSSH with a given host key, so that several
+// endpoints of one host can present the same (pinned) key.
+func startTestSSHWithKey(t *testing.T, user ssh.PublicKey, mode int32, hk ssh.Signer) *testSSH {
+	t.Helper()
 	cfg := &ssh.ServerConfig{PublicKeyCallback: func(_ ssh.ConnMetadata, k ssh.PublicKey) (*ssh.Permissions, error) {
 		if string(k.Marshal()) == string(user.Marshal()) {
 			return &ssh.Permissions{}, nil
