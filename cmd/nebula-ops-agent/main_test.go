@@ -14,6 +14,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/opsagent/run"
 )
 
 const (
@@ -229,5 +232,13 @@ func TestLoadConfigRefusesBadFiles(t *testing.T) {
 	}
 	if _, err := LoadConfig(write("ok.json", valid)); err != nil {
 		t.Errorf("valid config refused: %v", err)
+	}
+}
+
+// TestRunTimeoutCoversWorstCase: every call of a run may take its full
+// timeout, so the run deadline must cover all of them.
+func TestRunTimeoutCoversWorstCase(t *testing.T) {
+	if worst := time.Duration(run.MaxLLMCallsPerRun) * run.CallTimeout; runTimeout < worst {
+		t.Errorf("run timeout %s is shorter than the worst case %s", runTimeout, worst)
 	}
 }

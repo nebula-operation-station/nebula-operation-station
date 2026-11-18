@@ -36,6 +36,9 @@ const (
 	MaxOutputTokens = 1024
 	// CallTimeout bounds one call.
 	CallTimeout = 90 * time.Second
+	// StatusTimeout bounds the posting of the run status. It runs on a fresh
+	// context, so a run that hit its deadline still reports why.
+	StatusTimeout = 30 * time.Second
 	// MaxAttemptsPerItem is one call and one retry on invalid output.
 	MaxAttemptsPerItem = 2
 	// MaxItemRefs bounds the length of a work item reference.
@@ -104,8 +107,10 @@ type Deps struct {
 
 // Summary is what a run did. It holds counts and refusal reasons only.
 type Summary struct {
-	ItemsSeen    int
-	LLMCalls     int
+	ItemsSeen int
+	LLMCalls  int
+	// Discarded counts model answers thrown away (one per invalid attempt),
+	// work items refused, and steps dropped from answers that were used.
 	Discarded    int
 	NotesWritten int
 	Refusals     []string
@@ -209,7 +214,8 @@ func validateItem(class string, it nosclient.WorkItem) error {
 		}
 		keys := map[string]bool{}
 		for _, c := range g.Candidates {
-			if keys[c.Key] || c.HostID != g.Host.ID || c.Action == "" || !printableASCII(c.Action) {
+			if !prompt.ValidCandidateKey(c.Key) || keys[c.Key] || c.HostID != g.Host.ID ||
+				c.Action == "" || !printableASCII(c.Action) {
 				return errors.New("fix item candidate")
 			}
 			keys[c.Key] = true
@@ -286,7 +292,11 @@ func Run(ctx context.Context, d Deps) (Summary, error) {
 		NotesWritten: sum.NotesWritten,
 		Refusals:     sum.Refusals,
 	}
-	if err := d.NOS.PostStatus(ctx, status); err != nil {
+	// The status is the place where a deadline shows up, so it is posted even
+	// when ctx has expired; only the posting itself is bounded.
+	sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), StatusTimeout)
+	defer cancel()
+	if err := d.NOS.PostStatus(sctx, status); err != nil {
 		log.Warn("ops agent: post status failed", "error", err)
 	}
 	log.Info("ops agent run finished", "items_seen", sum.ItemsSeen, "llm_calls", sum.LLMCalls,

@@ -16,7 +16,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/helpdocs"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/helpsearch"
@@ -25,8 +24,9 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsagent/state"
 )
 
-// runTimeout bounds one whole run; each LLM call has its own timeout.
-const runTimeout = 15 * time.Minute
+// runTimeout bounds one whole run. It covers the worst case: every call of
+// the run times out (run.MaxLLMCallsPerRun × run.CallTimeout).
+const runTimeout = run.MaxLLMCallsPerRun * run.CallTimeout
 
 // stateFile is the run-state file inside the state directory.
 const stateFile = "run-state.json"

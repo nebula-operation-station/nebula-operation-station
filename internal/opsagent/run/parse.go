@@ -125,7 +125,8 @@ type fixAnswer struct {
 	Steps       []stepOut
 	Mitigations []string
 	Citations   []string
-	// Discarded counts steps with a key that is not a candidate of the item.
+	// Discarded counts steps dropped from this answer: a key that is not a
+	// candidate of the item, or a repeated candidate.
 	Discarded int
 }
 
@@ -150,11 +151,15 @@ func parseFix(content string, candidates map[string]bool, docs map[string]string
 		return fixAnswer{}, ErrInvalidOutput
 	}
 	out := fixAnswer{Summary: in.Summary, Urgency: in.Urgency}
+	seen := map[string]bool{}
 	for _, s := range in.Steps {
-		if !candidates[s.Candidate] {
+		// A repeated candidate is the same action on the same host: keep the
+		// first step only.
+		if !candidates[s.Candidate] || seen[s.Candidate] {
 			out.Discarded++
 			continue
 		}
+		seen[s.Candidate] = true
 		if s.Why != "" && !plainNote(s.Why, MaxWhyBytes) {
 			return fixAnswer{}, ErrInvalidOutput
 		}
