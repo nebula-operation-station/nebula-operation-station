@@ -111,6 +111,57 @@ installieren Sie zuerst diese Version. Eine Wiederherstellung auf einer
 neuen Maschine beginnt einen neuen Event-Schlüssel; die Kette verzeichnet
 den Wechsel, und `nebula events verify` prüft über ihn hinweg weiter.
 
+<a id="if-the-restore-fails-after-the-services-were-stopped"></a>
+
+### Wenn die Wiederherstellung nach dem Stoppen der Dienste scheitert
+
+Eine Wiederherstellung, die mittendrin scheitert (eine Datei lässt sich
+nicht schreiben, ein Eigentümer nicht setzen, ein Datenverzeichnis ist ein
+symbolischer Link, …), macht sich selbst rückgängig: sie entfernt die
+Verzeichnisse und Konfigurationsdateien, die sie geschrieben hat, benennt
+jedes `*.pre-restore-<time>`-Verzeichnis zurück in seinen alten Namen und
+startet die Dienste wieder. Die Fehlermeldung nennt den gescheiterten
+Schritt; sonst ist nichts zu tun.
+
+Wenn die Dienste wieder gestartet werden (nach einer gescheiterten
+Wiederherstellung oder wenn schon `systemctl stop` scheiterte), werden
+**alle vier Units** gestartet: `nebula-executor.service`,
+`nebula-server.service`, `nebula-discovery.path` und
+`nebula-discovery.timer`, auch die, die vorher gestoppt oder deaktiviert
+waren. Wer die Discovery aus haben will, stoppt sie wieder:
+
+```
+sudo systemctl stop nebula-discovery.path nebula-discovery.timer
+```
+
+Scheitert das Rückgängigmachen selbst (die alten Daten lassen sich nicht
+zurückbenennen oder ein neues Verzeichnis nicht entfernen), sagt die
+Fehlermeldung `the old data is still at
+/var/lib/nebula/<dir>.pre-restore-<time>` und `the services were left
+stopped`. Die Dienste bleiben absichtlich gestoppt: sie liefen sonst auf
+fehlenden oder halb wiederhergestellten Daten. Legen Sie die Daten von Hand
+zurück, für jedes Verzeichnis, das die Meldung nennt (`<time>` steht in der
+Meldung, UTC, `YYYYMMDD-hhmmss`):
+
+```
+ls -la /var/lib/nebula/
+# nur wenn /var/lib/nebula/server existiert: es enthält die halb wiederhergestellten Daten
+sudo mv /var/lib/nebula/server /var/lib/nebula/server.failed-restore-<time>
+sudo mv /var/lib/nebula/server.pre-restore-<time> /var/lib/nebula/server
+# dasselbe für executor, wenn die Meldung es nennt
+sudo mv /var/lib/nebula/executor /var/lib/nebula/executor.failed-restore-<time>
+sudo mv /var/lib/nebula/executor.pre-restore-<time> /var/lib/nebula/executor
+sudo systemctl start nebula-executor.service nebula-server.service nebula-discovery.path nebula-discovery.timer
+nebula unlock
+nebula status
+```
+
+`mv` behält Eigentümer und Rechte. Löschen Sie die
+`*.failed-restore-*`-Verzeichnisse, sobald Nebula wieder läuft. Eine
+Konfigurationsdatei, die laut Meldung nicht entfernt werden konnte, liegt
+unter `/etc/nebula/from-backup-<time>/`; sie wurde nie angewendet, entfernen
+Sie sie von Hand.
+
 <a id="back-up-and-restore-a-container-install"></a>
 
 ## Eine Container-Installation sichern und wiederherstellen
