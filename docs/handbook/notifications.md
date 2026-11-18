@@ -1,0 +1,65 @@
+# Notifications
+
+NOS sends messages to a webhook, ntfy or Telegram (admin guide
+[10.1](../admin/guide.md#101-notifications)). This page explains which
+messages exist, what is planned, and what NOS never does with a provider.
+Every message is plain text built by a fixed NOS template. None contains
+host output, and none contains text from the LLM of the ops agent.
+
+## NOS never reads from Telegram
+
+NOS only **sends** to Telegram, ntfy and the webhook. It never reads from a
+provider: it does not poll Telegram for updates, it has no incoming webhook
+endpoint for messages, it runs no bot commands and it takes no free text.
+The only Telegram method NOS calls is `sendMessage`.
+
+**Consequence:** you cannot answer the Telegram bot or send it commands. A
+message from the bot is a notification, and nothing you type there reaches
+NOS. Questions to the ops agent are asked only in the NOS web UI (Ops tab).
+
+## Which messages exist now
+
+The messages that are sent in this release are listed in admin guide
+[10.1](../admin/guide.md#101-notifications): a changed host key, an Ops
+State change, an operation with failed hosts, an executor locked after a
+restart, and the vulnerability events of
+[Vulnerabilities](vulnerabilities.md) (KEV and critical findings).
+
+Every event that the server sends, holds back (rate limit or mute) or fails
+to deliver is written to the server's notification log, with its outcome.
+The log keeps 30 days and at most 5,000 entries.
+
+**Planned: the notification list in the web UI.** The log exists; the page
+that shows it is not in this release. Until it ships, check the log with
+the admin guide's history section (10.3).
+
+## Lease expiry and failed leased runs
+
+**Status: Planned.** These two events are not sent in this release
+(admin guide [10.6](../admin/guide.md#106-ops-agent), "Status in this
+build" lists the same).
+
+When they ship, they will work like this:
+
+- `lease.expiring`: a read lease or schedule grant expires within 7 days,
+  and again within 1 day. You get one message per grant and threshold.
+- `lease.run_failed`: a leased run failed. You get one message per grant,
+  action and host, until the next successful run of that combination.
+
+Both messages need no LLM and no agent.
+
+## The daily digest
+
+**Status: Planned.** No digest is sent in this release.
+
+The digest is optional and is sent once a day at a time you set. It
+contains counts only: open updates, reboots pending, hosts not READY, grants
+expiring within 7 days, open findings per tier and the KEV count, and failed
+executions of the last 24 hours. The time is set in `server.json`; the key
+is not in this release, and the admin guide will name it when it ships.
+
+## What a message can ask you to do
+
+A message links into the NOS web UI. It never asks you to reply, and it
+never carries a command. To act on it, log in to NOS, check the page it
+links to and act there, with the normal approvals.
