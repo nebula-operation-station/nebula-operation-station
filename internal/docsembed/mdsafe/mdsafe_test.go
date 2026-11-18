@@ -36,16 +36,16 @@ func render(t *testing.T, src string) mdsafe.Result {
 var tagRE = regexp.MustCompile(`<(/?)([a-zA-Z0-9]+)([^>]*)>`)
 
 var allowedTags = map[string]*regexp.Regexp{
-	"h1": regexp.MustCompile(`^( id="[\pL\pN_-]+")?$`), "h2": regexp.MustCompile(`^( id="[\pL\pN_-]+")?$`),
-	"h3": regexp.MustCompile(`^( id="[\pL\pN_-]+")?$`), "h4": regexp.MustCompile(`^( id="[\pL\pN_-]+")?$`),
-	"h5": regexp.MustCompile(`^( id="[\pL\pN_-]+")?$`), "h6": regexp.MustCompile(`^( id="[\pL\pN_-]+")?$`),
+	"h1": regexp.MustCompile(`^( id="[a-z0-9_-]+")?$`), "h2": regexp.MustCompile(`^( id="[a-z0-9_-]+")?$`),
+	"h3": regexp.MustCompile(`^( id="[a-z0-9_-]+")?$`), "h4": regexp.MustCompile(`^( id="[a-z0-9_-]+")?$`),
+	"h5": regexp.MustCompile(`^( id="[a-z0-9_-]+")?$`), "h6": regexp.MustCompile(`^( id="[a-z0-9_-]+")?$`),
 	"p": regexp.MustCompile(`^$`), "ul": regexp.MustCompile(`^$`), "ol": regexp.MustCompile(`^$`),
 	"li": regexp.MustCompile(`^$`), "pre": regexp.MustCompile(`^$`), "code": regexp.MustCompile(`^$`),
 	"strong": regexp.MustCompile(`^$`), "em": regexp.MustCompile(`^$`),
 	"table": regexp.MustCompile(`^$`), "thead": regexp.MustCompile(`^$`), "tbody": regexp.MustCompile(`^$`),
 	"tr": regexp.MustCompile(`^$`), "th": regexp.MustCompile(`^$`), "td": regexp.MustCompile(`^$`),
 	"div": regexp.MustCompile(`^ class="table-wrap"$`),
-	"a":   regexp.MustCompile(`^ href="(/help[a-z0-9/#_-]*|#[\pL\pN_-]+|https://[^"<>\s]+)"( rel="noopener noreferrer")?$`),
+	"a":   regexp.MustCompile(`^ href="(/help[a-z0-9/#_-]*|#[a-z0-9_-]+|https://[^"<>\s]+)"( rel="noopener noreferrer")?$`),
 }
 
 // assertInert checks that out contains only allowed tags and attributes
@@ -191,8 +191,17 @@ func TestSlug(t *testing.T) {
 		"3.3 In containers": "33-in-containers",
 		"Enroll a host reachable over a VPN (NetBird, WireGuard, Tailscale)": "enroll-a-host-reachable-over-a-vpn-netbird-wireguard-tailscale",
 		"Run read-only checks on a schedule (read lease)":                    "run-read-only-checks-on-a-schedule-read-lease",
-		"Übergabe `nebula` **jetzt**":                                        "übergabe-nebula-jetzt",
+		"Übergabe `nebula` **jetzt**":                                        "uebergabe-nebula-jetzt",
+		"Die Kritikalität des Hosts auf dem Executor setzen":                 "die-kritikalitaet-des-hosts-auf-dem-executor-setzen",
+		"Grüße für Öl, Straße und Ärger":                                     "gruesse-fuer-oel-strasse-und-aerger",
 		"<script>":                                                           "script",
+		"Sécurité":                                                           "securite",
+		"Café à la carte":                                                    "cafe-a-la-carte",
+		"Ångstrom":                                                           "angstrom",
+		"Øl og æbler":                                                        "ol-og-aebler",
+		"Обзор":                                                              "u00043eu000431u000437u00043eu000440",
+		"日本語":                                                                "u0065e5u00672cu008a9e",
+		"— ☃":                                                                "-",
 	} {
 		if got := mdsafe.Slug(in); got != want {
 			t.Errorf("Slug(%q) = %q, want %q", in, got, want)
@@ -233,14 +242,17 @@ func TestRelativeResolverOutputIsChecked(t *testing.T) {
 }
 
 // TestLocalFragmentsMatchInertAllowlist checks that every local link the
-// renderer emits passes assertInert. Upper-case fragments fold to the
-// lower-case heading id; fragments with non-ASCII letters render text only.
+// renderer emits passes assertInert. Fragments fold through the same
+// mapping as heading ids (upper case to lower case, umlauts spelled out),
+// so every emitted fragment is an ASCII id and passes the allowlist.
 func TestLocalFragmentsMatchInertAllowlist(t *testing.T) {
 	for _, tc := range []struct{ src, want string }{
 		{"[x](hosts.md#Add)", `<a href="/help/hosts#add">x</a>`},
 		{"[x](hosts.md#add-1)", `<a href="/help/hosts#add-1">x</a>`},
 		{"[x](hosts.md#A_b-C)", `<a href="/help/hosts#a_b-c">x</a>`},
-		{"[x](hosts.md#übersicht)", "x"},
+		{"[x](hosts.md#Übersicht)", `<a href="/help/hosts#uebersicht">x</a>`},
+		{"[x](#Übersicht)", `<a href="#uebersicht">x</a>`},
+		{"[x](#Add)", `<a href="#add">x</a>`},
 	} {
 		out := string(render(t, tc.src).HTML)
 		assertInert(t, tc.src, out)
@@ -248,10 +260,159 @@ func TestLocalFragmentsMatchInertAllowlist(t *testing.T) {
 			t.Errorf("Render(%q) = %s, want it to contain %q", tc.src, out, tc.want)
 		}
 	}
-	out := string(render(t, "[x](hosts.md#übersicht)").HTML)
-	if strings.Contains(out, "<a") {
-		t.Errorf("non-ASCII fragment made a link: %s", out)
+}
+
+// TestUmlautHeadingAnchorsAgree uses a real handbook heading
+// (docs/handbook/de/hosts.md) with an umlaut. Its id must equal the
+// fragment of a link from the same page and of a link from another page,
+// written in any case, so no link to the heading is lost.
+func TestUmlautHeadingAnchorsAgree(t *testing.T) {
+	const heading = "Die Kritikalität des Hosts auf dem Executor setzen"
+	const id = "die-kritikalitaet-des-hosts-auf-dem-executor-setzen"
+	src := "# Hosts\n\n## " + heading + "\n\n" +
+		"Same page: [a](#die-kritikalität-des-hosts-auf-dem-executor-setzen).\n\n" +
+		"Other page: [b](hosts.md#Die-Kritikalität-des-Hosts-auf-dem-Executor-setzen).\n"
+	res := render(t, src)
+	if len(res.Headings) != 2 || res.Headings[1].ID != id {
+		t.Fatalf("heading ids = %+v, want second id %q", res.Headings, id)
 	}
+	out := string(res.HTML)
+	assertInert(t, src, out)
+	for _, want := range []string{
+		`<a href="#` + id + `">a</a>`,
+		`<a href="/help/hosts#` + id + `">b</a>`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestNonASCIIHeadingAnchorsAgree checks that headings in accented Latin
+// and in other scripts get stable, distinct ids, and that a link to each
+// heading resolves to that id from the same page and from another page,
+// whatever the case of the fragment.
+func TestNonASCIIHeadingAnchorsAgree(t *testing.T) {
+	src := "# Titel\n\n" +
+		"## Sécurité\n\n" +
+		"## Обзор\n\n" +
+		"## 日本語\n\n" +
+		"## Sécurité\n\n" +
+		"Same page: [a](#Sécurité) [b](#обзор) [c](#日本語).\n\n" +
+		"Other page: [d](hosts.md#SÉCURITÉ) [e](hosts.md#Обзор) [f](hosts.md#日本語).\n"
+	res := render(t, src)
+	wantIDs := []string{
+		"titel",
+		"securite",
+		"u00043eu000431u000437u00043eu000440",
+		"u0065e5u00672cu008a9e",
+		"securite-1",
+	}
+	if len(res.Headings) != len(wantIDs) {
+		t.Fatalf("got %d headings, want %d", len(res.Headings), len(wantIDs))
+	}
+	seen := map[string]bool{}
+	for i, want := range wantIDs {
+		got := res.Headings[i].ID
+		if got != want {
+			t.Errorf("heading %d id = %q, want %q", i, got, want)
+		}
+		if seen[got] {
+			t.Errorf("heading id %q is not unique", got)
+		}
+		seen[got] = true
+	}
+	out := string(res.HTML)
+	assertInert(t, src, out)
+	for _, want := range []string{
+		`<a href="#securite">a</a>`,
+		`<a href="#u00043eu000431u000437u00043eu000440">b</a>`,
+		`<a href="#u0065e5u00672cu008a9e">c</a>`,
+		`<a href="/help/hosts#securite">d</a>`,
+		`<a href="/help/hosts#u00043eu000431u000437u00043eu000440">e</a>`,
+		`<a href="/help/hosts#u0065e5u00672cu008a9e">f</a>`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output lacks %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestNonASCIIFragmentsAreIDs checks that a link fragment in another
+// script is folded like a heading id and is not refused: it renders as a
+// link to the id the heading gets.
+func TestNonASCIIFragmentsAreIDs(t *testing.T) {
+	relative := func(_, frag string) (string, bool) { return "/help/a#" + frag, true }
+	for _, tc := range []struct{ src, want string }{
+		{"[x](a.md#日本語)", `<a href="/help/a#u0065e5u00672cu008a9e">x</a>`},
+		{"[x](#Sécurité)", `<a href="#securite">x</a>`},
+	} {
+		res, err := mdsafe.Render([]byte(tc.src), mdsafe.Options{Relative: relative})
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := string(res.HTML)
+		assertInert(t, tc.src, out)
+		if !strings.Contains(out, tc.want) {
+			t.Errorf("Render(%q) = %s, want it to contain %q", tc.src, out, tc.want)
+		}
+	}
+}
+
+// TestLongFoldedFragmentIsRejected checks that a fragment is bounded after
+// anchorFold, as a cross-page link is. A 2-byte Cyrillic or 3-byte CJK
+// letter folds to 7 bytes ("u" and six hex digits), so a fragment within
+// the destination limit can fold far past it. Such a same-page link must
+// render as text, and so must the same fragment on another page, where the
+// resolved href already carries it. A short non-ASCII fragment that folds
+// within the limit is still a link.
+func TestLongFoldedFragmentIsRejected(t *testing.T) {
+	cyrillic := strings.Repeat("я", 300) // 600 bytes raw, 2100 folded
+	cjk := strings.Repeat("日", 300)      // 900 bytes raw, 2100 folded
+	short := strings.Repeat("я", 100)    // 200 bytes raw, 700 folded
+	for _, tc := range []struct {
+		name, src string
+		wantLink  bool
+	}{
+		{"same page cyrillic", "[x](#" + cyrillic + ")", false},
+		{"same page cjk", "[x](#" + cjk + ")", false},
+		{"same page short cyrillic", "[x](#" + short + ")", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := mdsafe.Render([]byte(tc.src), mdsafe.Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := string(res.HTML)
+			assertInert(t, tc.src, out)
+			if got := strings.Contains(out, "<a "); got != tc.wantLink {
+				t.Errorf("link present = %v, want %v: %.120s", got, tc.wantLink, out)
+			}
+			if !tc.wantLink && !strings.Contains(out, "x") {
+				t.Errorf("rejected link lost its text: %.120s", out)
+			}
+		})
+	}
+	for _, frag := range []string{cyrillic, cjk} {
+		relative := func(_, f string) (string, bool) { return "/help/a#" + f, true }
+		res, err := mdsafe.Render([]byte("[x](a.md#"+frag+")"), mdsafe.Options{Relative: relative})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out := string(res.HTML); strings.Contains(out, "<a ") {
+			t.Errorf("cross-page long fragment produced a link: %.120s", out)
+		}
+	}
+}
+
+// TestSymbolOnlyHeadingGetsGenericID checks that a heading with no letters
+// or digits still gets an id, and that its id passes the inert allowlist.
+func TestSymbolOnlyHeadingGetsGenericID(t *testing.T) {
+	res := render(t, "## ☃\n\n## ☃\n")
+	if len(res.Headings) != 2 || res.Headings[0].ID != "section" || res.Headings[1].ID != "section-1" {
+		t.Fatalf("heading ids = %+v, want section and section-1", res.Headings)
+	}
+	assertInert(t, "## ☃", string(res.HTML))
 }
 
 // TestResolverFragmentOutsideIDFormIsRejected checks that a resolver

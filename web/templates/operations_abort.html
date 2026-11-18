@@ -1,0 +1,40 @@
+{{define "content"}}
+<h1>Abort staged rollout</h1>
+<section class="panel" aria-label="Abort staged rollout">
+  {{with .Ops.Abort}}
+  {{if .Result}}
+  <p>Result of the abort. Each operation is reported on its own row.</p>
+  <ul>
+    {{range .Rows}}
+    <li>{{if .ID}}<a href="/operations/{{.ID}}">{{.Short}}</a>{{else}}<code>invalid id</code>{{end}}: {{.Message}}</li>
+    {{end}}
+  </ul>
+  <p><a class="button" href="/operations">Back to operations</a></p>
+  {{else}}
+  <p>Aborting stops every host of the staged rollout that has not run yet. The executor refuses those hosts. Hosts that already ran keep their result.</p>
+  {{if .Submit}}
+  <form method="post" action="/operations/abort/form">
+    <ul>
+      {{range .Rows}}
+      <li>{{if .ID}}<a href="/operations/{{.ID}}">{{.Short}}</a>{{else}}<code>invalid id</code>{{end}}
+        {{if .Abortable}}will be aborted<input type="hidden" name="id" value="{{.ID}}">{{else}}cannot be aborted here: {{.Message}}{{end}}</li>
+      {{end}}
+    </ul>
+    <p>
+      <button type="submit">Abort the rollouts listed above</button>
+      <a class="button" href="/operations">Cancel</a>
+    </p>
+  </form>
+  {{else}}
+  <ul>
+    {{range .Rows}}
+    <li>{{if .ID}}<a href="/operations/{{.ID}}">{{.Short}}</a>{{else}}<code>invalid id</code>{{end}}: cannot be aborted here: {{.Message}}</li>
+    {{end}}
+  </ul>
+  <p>None of the selected operations can be aborted here.</p>
+  <p><a class="button" href="/operations">Back to operations</a></p>
+  {{end}}
+  {{end}}
+  {{end}}
+</section>
+{{end}}

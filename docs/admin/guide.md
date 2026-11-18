@@ -472,6 +472,21 @@ Add hosts under **Inventory**, one by one or with **Import CSV**. A host
 has an ID, endpoints in the order to try, an environment (used by
 DEV → QA → PROD rollouts), a criticality, tags and groups.
 
+The **Endpoints** section on the host's **Settings** tab shows the primary
+endpoint and the alternates in the order Nebula tries them. You can add an
+alternate (up to 4 endpoints per host), move one up or down, or remove one;
+the last endpoint cannot be removed. Two spellings of one address
+(`fd00::9` and `fd00:0::9`, or a missing port and `:22`) count as the same
+endpoint, and an endpoint another host already uses is refused here (the
+settings form warns and asks for confirmation). All
+endpoints of a host must present the same host key: the key is pinned per
+host, and a different key on any endpoint stops the run instead of
+falling back. Every endpoint change — in this section, in the settings
+form or through the JSON API — is written to the audit log with the
+endpoint order before and after. A host imported with more than 4
+endpoints keeps them and stays editable, but cannot get new ones in the
+web UI.
+
 ### 7.1 The enrollment script
 
 Enrolling gives Nebula a restricted login on the host:
@@ -1088,6 +1103,13 @@ on the executor host). A host that could not be reached can be retried or
 skipped (skipping needs the same approval as opening a stage);
 *Abort rollout* stops every host that has not run. A restart of the
 executor ends the rollout like any approval.
+You can also abort from the operations overview (Operations). Each row of a
+staged rollout that is running and neither stopped nor aborted has an
+*Abort…* button and a checkbox; select one or more rows and choose *Abort
+selected rollouts*. A confirmation page lists the operations and says which
+ones cannot be aborted there; only its form aborts. Each operation is
+reported on its own row, and every abort writes the same
+`execution_aborted` audit line with your user as the detail page does.
 
 **Held batch targets.** While a batch member runs on a host, and
 afterwards while its run may still be running there (for example after a

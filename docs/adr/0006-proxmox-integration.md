@@ -69,6 +69,28 @@ use Go `net/http`, `crypto/tls`, `crypto/x509` and existing security primitives.
   is reconciled, never repeated at another endpoint. Endpoints are admin-approved
   HTTPS origins (normally port 8006); disable redirects and environment proxies.
   Discovery never adds dial targets, and credentials never follow API URLs.
+- Note 2026-11-17 (ep02): the same failover rule holds for SSH hosts with
+  alternate endpoints (spec 08, `internal/sshtransport`). Endpoints are tried
+  in the inventory's priority order; the next one only after a TCP error or a
+  handshake failure/timeout before the host key (at most one handshake retry
+  per dial, the connect timeout per endpoint, the caller's deadline overall).
+  Every endpoint must present the host's single pinned key: a mismatch blocks
+  the host and an authentication failure stops the dial; no later endpoint is
+  tried. A run whose connection breaks after dispatch is reconciled (state
+  read only), never started again at another endpoint. The executor audits a
+  failover (`ssh_failover`: endpoint used, endpoints skipped with stage), a
+  failover in which every endpoint failed (`ssh_failover_failed`: endpoints
+  tried with stage, endpoints never reached), and names the endpoint in every
+  run result and `run_finished` entry. That endpoint is the stored dispatch
+  endpoint on every close path; a check over another endpoint does not
+  replace it and is audited as `check_endpoint` (round 1, 2026-11-18).
+  Round 2 (2026-11-18): the dispatch endpoint is stored before anything is
+  sent, while the run is still dispatching (and named in
+  `run_dispatch_uncertain`), so a dispatch that breaks mid-way names where it
+  was attempted; a reconcile check never stores its endpoint as the dispatch
+  endpoint (a run without one keeps none). `ssh_failover_failed` is written
+  only for dials with more than one endpoint, and once per open run while the
+  reconciler retries (not per pass).
 
 ### Credential custody and least privilege
 
