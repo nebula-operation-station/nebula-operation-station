@@ -66,12 +66,66 @@
   </section>
   {{end}}
 
+  {{template "assistant_ask" .Questions}}
+
   {{range .Cards}}{{template "assistant_ops_card" .}}{{else}}
   {{if .Status.Off}}
   <p>Agent switched off. No open suggestion.</p>
   {{else}}
   <p>No suggestion yet.</p>
   {{end}}
+  {{end}}
+  <script src="/static/assistant-ops.js"></script>
+</div>
+{{end}}
+
+{{/* The question form and the admin's own questions (ADR 0016 D11). The form
+     posts with htmx and gets this block back; the list alone is polled. */}}
+{{define "assistant_ask"}}
+<section class="assistant-ask" id="assistant-ask" aria-label="Questions">
+  <h3>Questions</h3>
+  <form method="post" action="/assistant/ops/questions"
+    hx-post="/assistant/ops/questions" hx-target="#assistant-ask" hx-swap="outerHTML">
+    <label for="assistant-question">Ask the ops agent (plain text, no web addresses)</label>
+    <textarea id="assistant-question" name="question" maxlength="2048" required></textarea>
+    {{if .Error}}<p class="form-error" role="alert">{{.Error}}</p>{{end}}
+    <button type="submit">Ask</button>
+  </form>
+  {{template "assistant_questions_list" .}}
+</section>
+{{end}}
+
+{{/* The list of the admin's questions. Answers carry text and sources only:
+     no steps and no buttons. The LLM label is shown above every answer. */}}
+{{define "assistant_questions_list"}}
+<div id="assistant-questions" data-url="/assistant/ops/questions">
+  {{range .Items}}
+  <article class="assistant-question" id="question-{{.ID}}">
+    <header>
+      <h4>Question {{.ID}}</h4>
+      <p class="muted">Asked {{.Created}} · {{.State}}</p>
+    </header>
+    <p class="assistant-question__text">{{.Text}}</p>
+    {{if .Answer}}
+    <section class="assistant-answer" aria-label="Answer">
+      {{template "assistant_llm_label"}}
+      <p class="llm-text">{{.Answer.Text}}</p>
+      {{if .Answer.Citations}}
+      <ul class="assistant-citations">
+        {{range .Answer.Citations}}
+        <li>{{if .URL}}<a href="{{.URL}}">{{.Label}}</a>{{else}}<span>{{.Label}}</span>{{end}}</li>
+        {{end}}
+      </ul>
+      {{end}}
+    </section>
+    {{else if eq .State "open"}}
+    <p class="muted">Waiting for an answer.</p>
+    {{else if eq .State "answered"}}
+    <p class="muted">The answer is no longer stored.</p>
+    {{end}}
+  </article>
+  {{else}}
+  <p class="muted">No questions yet.</p>
   {{end}}
 </div>
 {{end}}

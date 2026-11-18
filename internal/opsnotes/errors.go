@@ -64,8 +64,13 @@ var (
 	ErrConflict = errors.New("opsnotes: conflicting note for this digest")
 	// ErrDailyLimit marks a write over MaxNotesPerDay for the UTC day.
 	ErrDailyLimit = errors.New("opsnotes: daily note limit reached")
-	// ErrNotFound marks a missing note.
+	// ErrNotFound marks a missing note or question.
 	ErrNotFound = errors.New("opsnotes: not found")
+	// ErrQuestionsFull marks a new question while MaxOpenQuestions questions
+	// are open.
+	ErrQuestionsFull = errors.New("opsnotes: too many open questions")
+	// ErrNotOpen marks an answer to a question that is answered or expired.
+	ErrNotOpen = errors.New("opsnotes: question is not open")
 	// ErrInvalidSnapshot marks a facts snapshot that is not valid JSON
 	// text.
 	ErrInvalidSnapshot = errors.New("opsnotes: invalid facts snapshot")
