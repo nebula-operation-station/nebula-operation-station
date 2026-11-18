@@ -113,8 +113,9 @@ type Result struct {
 	HostID string
 	// Reboot: the fix takes effect after a reboot (kernel source).
 	Reboot bool
-	// Candidate is the candidate source version the decision rests on:
-	// the lowest matched one when verified, the highest when below fixed.
+	// Candidate is the candidate source version the decision rests on: when
+	// verified, the lowest matched one at or after Fixed (the candidate that
+	// reaches the fix, never one below it); when below fixed, the highest.
 	Candidate string
 	// Fixed is the fixed version the candidate was compared with.
 	Fixed string
@@ -276,7 +277,7 @@ func HostResult(f vulnstore.Finding, upd *Updates) Result {
 		r.Status, r.Candidate = StatusBelowFixed, res.highest
 		return r
 	case candVerified:
-		r.Status, r.Candidate = StatusVerified, res.lowest
+		r.Status, r.Candidate = StatusVerified, res.lowestAtFix
 	default:
 		r.Status = StatusNotVerified
 	}

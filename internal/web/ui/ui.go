@@ -224,6 +224,9 @@ type Options struct {
 	// the lease form, registry leases on the lease pages and executor-read
 	// digests in docker.check_updates results. Nil hides all three.
 	RegistryReads RegistryReads
+	// AssistantOps configures the Ops tab of the Assistant panel (ADR 0016
+	// D11, assistant_ops.go). Nil hides the tab and answers its routes 404.
+	AssistantOps *AssistantOps
 	// Log receives executor status errors (the page itself only shows
 	// "Executor unavailable"). Nil means slog.Default().
 	Log *slog.Logger
@@ -297,6 +300,8 @@ type Handler struct {
 	// registryReads serves private registry leases and digests; nil hides
 	// them.
 	registryReads RegistryReads
+	// assistantOps serves the Ops tab; nil when it is not configured.
+	assistantOps *AssistantOps
 }
 
 // New parses the embedded templates and builds a Handler.
@@ -319,6 +324,9 @@ func New(o Options) (*Handler, error) {
 	log := o.Log
 	if log == nil {
 		log = slog.Default()
+	}
+	if o.AssistantOps != nil && (o.AssistantOps.Store == nil || o.AssistantOps.IsAdmin == nil) {
+		return nil, errors.New("ui: AssistantOps needs Store and IsAdmin")
 	}
 	serverIP := o.ServerIP
 	if serverIP == nil {
@@ -375,6 +383,7 @@ func New(o Options) (*Handler, error) {
 		pve:                  o.PVE,
 		pveRemotes:           o.PVERemotes,
 		registryReads:        o.RegistryReads,
+		assistantOps:         o.AssistantOps,
 		guestPower:           o.GuestPower,
 		guestSnapshot:        o.GuestSnapshot,
 		deploy:               o.Deploy,
@@ -681,6 +690,8 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("/setup", h.handleBare("Register a security key", "setup", "setup.js"))
 	// In-app help: the embedded handbook and FAQ (help.go).
 	h.registerHelp(mux)
+	// The Assistant panel: Help (every user) and Ops (admins; assistant.go).
+	h.registerAssistant(mux)
 	for _, p := range emptyPages {
 		path := p.path
 		mux.HandleFunc(path, h.handleEmpty(path))

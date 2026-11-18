@@ -57,6 +57,24 @@ const DefaultConfigPath = "/etc/nebula/server.json"
 // shutdownTimeout bounds the graceful HTTP shutdown after a signal.
 const shutdownTimeout = 10 * time.Second
 
+// notifyFlushTimeout bounds the wait for notification log writes still in
+// flight at shutdown. A log write is itself bounded per write (5 seconds), so
+// this is a little over one write.
+const notifyFlushTimeout = 10 * time.Second
+
+// flushNotifyRecords waits, for at most timeout, until the notification log
+// writes in flight have ended. Shutdown calls it after sending has stopped and
+// before the database closes; a write that starts after the flush begins is
+// dropped by the notifier, as it would be after shutdown anyway. A timeout is
+// logged and does not stop shutdown.
+func flushNotifyRecords(n *notify.Notifier, log *slog.Logger, timeout time.Duration) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := n.FlushRecords(ctx); err != nil {
+		log.Warn("notification log writes not finished at shutdown", "error", err.Error())
+	}
+}
+
 // pruneInterval is how often expired web sessions are deleted.
 const pruneInterval = time.Hour
 
@@ -195,8 +213,12 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	// Audit lines are also kept in server.db for the History page (M10-1).
 	audit := auditlog.New(db, cfg.AuditHashChain)
 	log = slog.New(auditlog.NewHandler(log.Handler(), audit))
-	// Notification log (ADR 0016 D10): every sent, held or failed
-	// notification is recorded here, from a write that runs beside the send.
+	// Notification log (ADR 0016 D10): every sent or failed notification, and
+	// every integrity message held by the hourly limit, is recorded here, from
+	// a write that runs beside the send. Vulnerability digest holds are
+	// recorded too: internal/vulnnotify passes them to the notifier's
+	// RecordHeld after its own lock is released. No code path writes a
+	// held_muted record yet.
 	// A log that cannot be opened is an error for the log only: the
 	// notifier keeps sending without it.
 	notifyLog, err := attachNotifyLog(notifier, db, time.Now)
@@ -224,6 +246,10 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		if ops != nil {
 			ops.Wait()
 		}
+		// Sending has stopped. The log writes still in flight must end before
+		// db.Close (deferred above, so it runs after this), or those decisions
+		// are missing from the log.
+		flushNotifyRecords(notifier, log, notifyFlushTimeout)
 	}()
 	bg.Go(func() {
 		exec.connect(connCtx, executorclient.Options{SocketPath: cfg.ExecutorSocket, ExecutorUser: cfg.ExecutorUser}, log)
@@ -335,6 +361,14 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	// Operations (M4): planned here, decided and run by the executor.
 	ops = executions.New(connCtx, exec, db, store, log)
 	ops.SetNotifier(notifier)
+	// Ops agent notes (ADR 0016 D9): the suggestion index reads the notes
+	// store; the store's own file and retention loop live in ops.go.
+	opsNotes, err := newOpsNotes(cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	ops.SetSuggestionIndex(opsSuggestions{notes: opsNotes})
+	bg.Go(func() { runOpsNotes(connCtx, opsNotes, log) })
 	// Runbooks (M7-2) are planned like built-in actions.
 	rb := runbooks.New(db)
 	ops.SetRunbooks(rb)
@@ -610,6 +644,16 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		if vh != nil {
 			apiHandler = api.Mount(a, vh)
 			log.Info("vulnerability agent API enabled")
+		}
+		// Ops agent API (ADR 0016 D2) under /api/v1/ops/, only for the one
+		// ops token. MountOps is the only route to that prefix.
+		oh, err := newOpsAPI(cfg.API, db, opsNotes, store.List, log)
+		if err != nil {
+			return err
+		}
+		apiHandler = api.MountOps(apiHandler, oh)
+		if oh != nil {
+			log.Info("ops agent API enabled")
 		}
 	}
 	// Traffic map (ADR 0009 TM19): page, frame and model behind the session; renderer modules under /static/.

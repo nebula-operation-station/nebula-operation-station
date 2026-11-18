@@ -532,7 +532,21 @@ func (s *Service) GetPermitState(_ context.Context, req *pb.GetPermitStateReques
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
+	// The persisted rejected marker answers first (spec 07 v29-07-01),
+	// also after the window, lock and restart; it reveals only the role.
+	rej, rejected, err := s.auth.RejectionMarker(d)
+	if err != nil {
+		s.log.Error("get permit state", "digest", d.String(), "error", err)
+		return nil, status.Error(codes.Unavailable, "storage_error: executor state store unavailable")
+	}
+	if rejected {
+		return &pb.GetPermitStateResponse{State: pb.PermitState_PERMIT_STATE_REJECTED, RejectedBy: rejectRoleToProto(rej.Role)}, nil
+	}
 	st, ok := s.auth.PermitState(d)
+	if !ok && s.batchAuth != nil {
+		// A batch digest (spec 07: GetPermitState accepts both).
+		st, ok = s.batchAuth.PlanState(d)
+	}
 	if !ok {
 		return &pb.GetPermitStateResponse{State: pb.PermitState_PERMIT_STATE_UNSPECIFIED}, nil
 	}
@@ -566,7 +580,7 @@ func toStatus(err error) error {
 	case permit.CodeStorage:
 		c = codes.Unavailable
 	case permit.CodeWrongState, permit.CodeSessionRequired, permit.CodeCLIRequired, permit.CodeNoChallenge, permit.CodeExpired,
-		permit.CodeStageNotDone:
+		permit.CodeStageNotDone, permit.CodeAlreadyRejected, permit.CodeAlreadyApproved, permit.CodeRejected:
 		c = codes.FailedPrecondition
 	case permit.CodeAssertionRejected, permit.CodeTypedCountMismatch, permit.CodeRiskAboveApproval,
 		permit.CodeTargetNotPermitted, permit.CodeHostAlreadyRun, permit.CodeArtifactMismatch,
