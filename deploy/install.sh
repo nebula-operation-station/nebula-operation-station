@@ -67,6 +67,16 @@ Usage: install.sh --vuln-agent
                  (ADR 0011 Amendment 1): binary, unit and timer, its own
                  user, data dir and config skeleton. Nothing is enabled.
                  Takes no other option.
+
+Usage: install.sh --ops-agent | --remove-ops-agent
+
+  --ops-agent    install only the ops agent from the tarball (ADR 0016
+                 D13): binary, unit, timer and path unit, its own user,
+                 state dir and config skeleton. Nothing is enabled.
+  --remove-ops-agent
+                 disable and remove the ops agent's units and binary; its
+                 configuration, token, state and user stay.
+                 Each takes no other option.
 EOF
 }
 
@@ -80,6 +90,9 @@ bundle_source_dir="${NEBULA_RELEASE_BUNDLE_DIR:-}"
 bundle_dir_option=0
 # --vuln-agent: install only the vulnerability agent (see below).
 vuln_agent=0
+# --ops-agent / --remove-ops-agent: only the ops agent (see below).
+ops_agent=0
+remove_ops_agent=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -135,6 +148,14 @@ while [[ $# -gt 0 ]]; do
       vuln_agent=1
       shift
       ;;
+    --ops-agent)
+      ops_agent=1
+      shift
+      ;;
+    --remove-ops-agent)
+      remove_ops_agent=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -157,7 +178,7 @@ done
 # must render the same skeleton.
 # begin: vuln agent install
 if [[ ${vuln_agent} -eq 1 ]]; then
-  if [[ -n "$admin_users" || -n "$rp_id" || ${from_package} -eq 1 || ${bundle_dir_option} -eq 1 ]]; then
+  if [[ -n "$admin_users" || -n "$rp_id" || ${from_package} -eq 1 || ${bundle_dir_option} -eq 1 || ${ops_agent} -eq 1 || ${remove_ops_agent} -eq 1 ]]; then
     echo "install.sh: --vuln-agent takes no other option" >&2
     usage >&2
     exit 2
@@ -305,6 +326,203 @@ EOF
 fi
 # end: vuln agent install
 
+# --- Ops agent only (ADR 0016 D2, D13) ----------------------------------------
+# The ops agent runs on the NOS host under its own user. --ops-agent installs
+# its binary from the tarball, its unit, timer and path unit, and provisions
+# its user, state dir and config skeleton, then stops. It never enables or
+# starts anything: the agent needs a NOS token, URL and the LLM drop-in first
+# (guide, "Ops agent"). The nebula-ops-agent package's postinst,
+# deploy/deb/ops-agent/postinst, must render the same skeleton.
+# --remove-ops-agent disables and deletes the units and the binary and keeps
+# the configuration, token, state, drop-ins and user.
+if [[ ${ops_agent} -eq 1 || ${remove_ops_agent} -eq 1 ]]; then
+  if [[ -n "$admin_users" || -n "$rp_id" || ${from_package} -eq 1 || ${bundle_dir_option} -eq 1 || $((ops_agent + remove_ops_agent)) -ne 1 ]]; then
+    echo "install.sh: --ops-agent and --remove-ops-agent take no other option" >&2
+    usage >&2
+    exit 2
+  fi
+  if [[ "${NEBULA_INSTALL_DRY_RUN:-0}" == "1" ]]; then
+    if [[ ${ops_agent} -eq 1 ]]; then
+      echo "install.sh: dry run: would install nebula-ops-agent, its unit, timer and path unit (not enabled), its user, state dir and config skeleton; no changes made"
+    else
+      echo "install.sh: dry run: would disable and remove the nebula-ops-agent units and binary, keeping its configuration, state and user; no changes made"
+    fi
+    exit 0
+  fi
+  if [[ ${EUID} -ne 0 ]]; then
+    echo "install.sh: must be run as root (try: sudo ./deploy/install.sh --ops-agent)" >&2
+    exit 1
+  fi
+  ops_unit_dir=/etc/systemd/system
+
+  # begin: ops agent removal
+  if [[ ${remove_ops_agent} -eq 1 ]]; then
+    ops_bin=/usr/bin/nebula-ops-agent
+    # A package install (nebula-ops-agent .deb) is removed with apt, so
+    # dpkg's file list stays in sync; deleting its files here would not.
+    ops_owner=""
+    if command -v dpkg >/dev/null 2>&1; then
+      ops_owner="$(dpkg -S "${ops_bin}" 2>/dev/null || true)"
+    fi
+    if [[ -n "${ops_owner}" ]]; then
+      ops_owner="${ops_owner%%: *}"
+      ops_owner="${ops_owner%%:*}"
+      echo "install.sh: ${ops_bin} belongs to the Debian package ${ops_owner}; remove it with: sudo apt remove ${ops_owner}" >&2
+      exit 1
+    fi
+    systemctl disable --now nebula-ops-agent.timer nebula-ops-agent.path nebula-ops-agent.service 2>/dev/null || true
+    for unit in nebula-ops-agent.service nebula-ops-agent.timer nebula-ops-agent.path; do
+      if [[ -f "${ops_unit_dir}/${unit}" && ! -L "${ops_unit_dir}/${unit}" ]]; then
+        rm -f "${ops_unit_dir}/${unit}"
+      fi
+    done
+    rm -f "${ops_bin}"
+    systemctl daemon-reload
+    echo "install.sh: nebula-ops-agent removed; its configuration, token, state, drop-ins and user stay"
+    exit 0
+  fi
+  # end: ops agent removal
+
+  # begin: ops agent install
+  script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+  tarball_root=$(dirname -- "$script_dir")
+  ops_units=(nebula-ops-agent.service nebula-ops-agent.timer nebula-ops-agent.path)
+  for f in "${tarball_root}/nebula-ops-agent" "${script_dir}/systemd/${ops_units[0]}" "${script_dir}/systemd/${ops_units[1]}" "${script_dir}/systemd/${ops_units[2]}"; do
+    if [[ ! -f "$f" ]]; then
+      echo "install.sh: ${f} not found; run this script from the extracted release tarball" >&2
+      exit 1
+    fi
+  done
+  ops_state_dir=/var/lib/nebula-ops-agent
+  ops_etc_dir=/etc/nebula-ops-agent
+
+  # The agent's own user, with no supplementary group: not in nebula-rpc, it
+  # never talks to the executor, only to the NOS API with its token. Its
+  # state dir is the one path its unit may write: 0700, its own. The config
+  # dir and file are root's, readable by the agent's group only, so the
+  # agent cannot change its own configuration. The token and the LLM
+  # credential are secrets the admin puts there (0600, owned by the agent);
+  # no file here holds one. A file or symlink at one of these paths is
+  # refused before install -d or install follows it.
+  if ! getent passwd nebula-ops-agent >/dev/null; then
+    useradd --system --home-dir "${ops_state_dir}" --shell /usr/sbin/nologin nebula-ops-agent
+  fi
+  for ops_path in "${ops_state_dir}" "${ops_etc_dir}"; do
+    if [[ -L "$ops_path" ]] || { [[ -e "$ops_path" ]] && [[ ! -d "$ops_path" ]]; }; then
+      echo "install.sh: ${ops_path} is a file or a symlink, not a directory; refusing to follow it" >&2
+      echo "install.sh: inspect it (ls -ld ${ops_path}), remove it if it is not yours, and run install.sh --ops-agent again" >&2
+      exit 1
+    fi
+  done
+  if [[ -L "${ops_etc_dir}/config.json" ]] || { [[ -e "${ops_etc_dir}/config.json" ]] && [[ ! -f "${ops_etc_dir}/config.json" ]]; }; then
+    echo "install.sh: ${ops_etc_dir}/config.json is not a regular file; refusing to follow it" >&2
+    exit 1
+  fi
+  install -d -m 0700 -o nebula-ops-agent -g nebula-ops-agent "${ops_state_dir}"
+  install -d -m 0750 -o root -g nebula-ops-agent "${ops_etc_dir}"
+  if [[ -e "${ops_etc_dir}/config.json" ]]; then
+    echo "install.sh: ${ops_etc_dir}/config.json already exists; leaving it untouched"
+  else
+    tmp_ops_config=$(mktemp)
+    cat > "${tmp_ops_config}" <<'EOF' # ops agent config skeleton
+{
+  "nos_base_url": "",
+  "nos_token_file": "/etc/nebula-ops-agent/token",
+  "state_dir": "/var/lib/nebula-ops-agent"
+}
+EOF
+    install -m 0640 -o root -g nebula-ops-agent "${tmp_ops_config}" "${ops_etc_dir}/config.json"
+    rm -f "${tmp_ops_config}"
+  fi
+  if [[ -f "${ops_etc_dir}/token" && ! -L "${ops_etc_dir}/token" ]]; then
+    ops_token_mode=$(stat -c %a "${ops_etc_dir}/token")
+    if [[ "${ops_token_mode}" != "600" ]]; then
+      echo "install.sh: warning: ${ops_etc_dir}/token has mode ${ops_token_mode}, want 600 (sudo chmod 600 ${ops_etc_dir}/token)" >&2
+    fi
+  fi
+
+  install -m 0755 -o root -g root "${tarball_root}/nebula-ops-agent" /usr/bin/nebula-ops-agent
+
+  # Units: installed when absent, replaced when unedited (the checksum
+  # recorded in units.sha256 is the one this script installed), kept with a
+  # warning when edited or not a regular file, like the vulnerability
+  # agent's. The record lives in the root-owned config dir. The admin's
+  # drop-in (nebula-ops-agent.service.d) is never touched.
+  ops_units_manifest="${ops_etc_dir}/units.sha256"
+  ops_manifest_lines=""
+  for unit in "${ops_units[@]}"; do
+    shipped="${script_dir}/systemd/${unit}"
+    target="${ops_unit_dir}/${unit}"
+    shipped_sum=$(sha256sum "${shipped}" | cut -d' ' -f1)
+    recorded_sum=""
+    if [[ -f "${ops_units_manifest}" ]]; then
+      while read -r sum entry; do
+        if [[ "${entry}" == "${unit}" && "${sum}" =~ ^[0-9a-f]{64}$ ]]; then
+          recorded_sum="${sum}"
+          break
+        fi
+      done < "${ops_units_manifest}"
+    fi
+    record="${shipped_sum}"
+    if [[ -L "${target}" ]] || { [[ -e "${target}" ]] && [[ ! -f "${target}" ]]; }; then
+      echo "install.sh: warning: ${target} is not a regular file; keeping it, shipped changes to it do not apply" >&2
+      record="${recorded_sum}"
+    elif [[ -f "${target}" ]]; then
+      current_sum=$(sha256sum "${target}" | cut -d' ' -f1)
+      if [[ "${current_sum}" == "${shipped_sum}" ]]; then
+        :
+      elif [[ -n "${recorded_sum}" && "${current_sum}" == "${recorded_sum}" ]]; then
+        install -m 0644 -o root -g root "${shipped}" "${target}"
+        echo "install.sh: updated ${target} to the shipped version"
+      else
+        echo "install.sh: warning: ${target} differs from the version Nebula installed; keeping it, shipped changes to it do not apply" >&2
+        echo "install.sh:   compare: diff -u ${shipped} ${target}" >&2
+        record="${recorded_sum}"
+      fi
+    else
+      install -m 0644 -o root -g root "${shipped}" "${target}"
+    fi
+    if [[ -n "${record}" ]]; then
+      ops_manifest_lines+="${record}  ${unit}"$'\n'
+    fi
+  done
+  tmp_ops_manifest=$(mktemp)
+  printf '%s' "${ops_manifest_lines}" > "${tmp_ops_manifest}"
+  install -m 0644 -o root -g root "${tmp_ops_manifest}" "${ops_units_manifest}"
+  rm -f "${tmp_ops_manifest}"
+  systemctl daemon-reload
+
+  cat <<EOF
+
+nebula-ops-agent installed; its timer and path unit are NOT enabled.
+
+Next steps (guide, section "Ops agent"):
+
+  1. In the NOS web UI create the API token ops-agent (source address
+     127.0.0.1), and save it here (owned by the agent, 0600):
+       sudo sh -c 'umask 077; cat > ${ops_etc_dir}/token'
+       (paste the token, then Ctrl-D)
+       sudo chown nebula-ops-agent:nebula-ops-agent ${ops_etc_dir}/token
+
+  2. Set "nos_base_url" (the NOS API on loopback) in ${ops_etc_dir}/config.json.
+
+  3. Allow the LLM endpoint (the unit allows only localhost):
+       sudo systemctl edit nebula-ops-agent.service
+         [Service]
+         IPAddressAllow=<LLM address>
+
+  4. Try it, then enable the timer (every 30 minutes) and the trigger:
+       sudo systemctl start nebula-ops-agent.service
+       sudo systemctl enable --now nebula-ops-agent.timer
+       sudo systemctl enable --now nebula-ops-agent.path
+     The path unit is inert for now: nebula-server has no write path for
+     its trigger (/var/lib/nebula/opsagent/trigger) yet, so only the
+     timer starts runs until a later release adds one.
+EOF
+  exit 0
+  # end: ops agent install
+fi
+
 if [[ -z "$admin_users" || -z "$rp_id" ]]; then
   echo "install.sh: --admin-users and --rp-id are required" >&2
   usage >&2
@@ -364,7 +582,7 @@ for user in "${raw_users[@]}"; do
       echo "install.sh: $user cannot be an admin user; use a personal account" >&2
       exit 1
       ;;
-    nebula-vuln-agent)
+    nebula-vuln-agent|nebula-ops-agent)
       echo "install.sh: $user cannot be an admin user; use a personal account" >&2
       exit 1
       ;;
