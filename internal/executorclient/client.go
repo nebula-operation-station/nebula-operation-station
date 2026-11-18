@@ -231,6 +231,15 @@ func (c *Client) GetPermitState(ctx context.Context, in *pb.GetPermitStateReques
 	return resp, mapCallError(ctx, err)
 }
 
+// RejectPending rejects a pending execution permit or batch plan (ADR 0007
+// amendment R1-R7). Role: server (with relayed_user), admin.
+func (c *Client) RejectPending(ctx context.Context, in *pb.RejectPendingRequest, opts ...grpc.CallOption) (*pb.RejectPendingResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.defaultTimeout)
+	defer cancel()
+	resp, err := c.rpc.RejectPending(ctx, in, opts...)
+	return resp, mapCallError(ctx, err)
+}
+
 // ListPVERemotes lists the registered PVE remotes with their nonsecret
 // metadata (ADR 0006). Role: server, admin, pve-collector.
 func (c *Client) ListPVERemotes(ctx context.Context, in *pb.ListPVERemotesRequest, opts ...grpc.CallOption) (*pb.ListPVERemotesResponse, error) {

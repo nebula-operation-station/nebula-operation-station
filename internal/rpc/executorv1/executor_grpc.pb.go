@@ -36,6 +36,7 @@ const (
 	ExecutorService_ListPending_FullMethodName                     = "/nebula.executor.v1.ExecutorService/ListPending"
 	ExecutorService_ApproveCLI_FullMethodName                      = "/nebula.executor.v1.ExecutorService/ApproveCLI"
 	ExecutorService_GetPermitState_FullMethodName                  = "/nebula.executor.v1.ExecutorService/GetPermitState"
+	ExecutorService_RejectPending_FullMethodName                   = "/nebula.executor.v1.ExecutorService/RejectPending"
 	ExecutorService_TrustArtifact_FullMethodName                   = "/nebula.executor.v1.ExecutorService/TrustArtifact"
 	ExecutorService_UntrustArtifact_FullMethodName                 = "/nebula.executor.v1.ExecutorService/UntrustArtifact"
 	ExecutorService_ListTrustedArtifacts_FullMethodName            = "/nebula.executor.v1.ExecutorService/ListTrustedArtifacts"
@@ -239,6 +240,16 @@ type ExecutorServiceClient interface {
 	// is no live permit (never proposed, expired, consumed, revoked by Lock).
 	// Reveals nothing about the permit's contents and changes nothing.
 	GetPermitState(ctx context.Context, in *GetPermitStateRequest, opts ...grpc.CallOption) (*GetPermitStateResponse, error)
+	// Role: server, admin (ADR 0007 amendment 2026-11-17, R1-R7; spec 07
+	// v29-07-01). Rejects a pending execution permit or a pending batch plan
+	// (by its batch digest, as a whole). It only removes authority: it
+	// carries no assertion, no approval field and no mode, and it never
+	// approves. A server-UID call needs an open privileged session and the
+	// relayed_user field; an admin-UID call must leave relayed_user empty.
+	// The executor persists a rejected marker and the signed event
+	// permit.rejected in one executor.db transaction; the reason is checked
+	// against its limits and only its length is recorded.
+	RejectPending(ctx context.Context, in *RejectPendingRequest, opts ...grpc.CallOption) (*RejectPendingResponse, error)
 	// Role: admin. Trusts an artifact for one action and version at a
 	// declared risk. The executor hashes the bytes itself. Replaces an
 	// earlier entry for the same artifact, action and version.
@@ -890,6 +901,16 @@ func (c *executorServiceClient) GetPermitState(ctx context.Context, in *GetPermi
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(GetPermitStateResponse)
 	err := c.cc.Invoke(ctx, ExecutorService_GetPermitState_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) RejectPending(ctx context.Context, in *RejectPendingRequest, opts ...grpc.CallOption) (*RejectPendingResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RejectPendingResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_RejectPending_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -2243,6 +2264,16 @@ type ExecutorServiceServer interface {
 	// is no live permit (never proposed, expired, consumed, revoked by Lock).
 	// Reveals nothing about the permit's contents and changes nothing.
 	GetPermitState(context.Context, *GetPermitStateRequest) (*GetPermitStateResponse, error)
+	// Role: server, admin (ADR 0007 amendment 2026-11-17, R1-R7; spec 07
+	// v29-07-01). Rejects a pending execution permit or a pending batch plan
+	// (by its batch digest, as a whole). It only removes authority: it
+	// carries no assertion, no approval field and no mode, and it never
+	// approves. A server-UID call needs an open privileged session and the
+	// relayed_user field; an admin-UID call must leave relayed_user empty.
+	// The executor persists a rejected marker and the signed event
+	// permit.rejected in one executor.db transaction; the reason is checked
+	// against its limits and only its length is recorded.
+	RejectPending(context.Context, *RejectPendingRequest) (*RejectPendingResponse, error)
 	// Role: admin. Trusts an artifact for one action and version at a
 	// declared risk. The executor hashes the bytes itself. Replaces an
 	// earlier entry for the same artifact, action and version.
@@ -2794,6 +2825,9 @@ func (UnimplementedExecutorServiceServer) ApproveCLI(context.Context, *ApproveCL
 }
 func (UnimplementedExecutorServiceServer) GetPermitState(context.Context, *GetPermitStateRequest) (*GetPermitStateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetPermitState not implemented")
+}
+func (UnimplementedExecutorServiceServer) RejectPending(context.Context, *RejectPendingRequest) (*RejectPendingResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RejectPending not implemented")
 }
 func (UnimplementedExecutorServiceServer) TrustArtifact(context.Context, *TrustArtifactRequest) (*TrustArtifactResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method TrustArtifact not implemented")
@@ -3463,6 +3497,24 @@ func _ExecutorService_GetPermitState_Handler(srv interface{}, ctx context.Contex
 	}
 	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
 		return srv.(ExecutorServiceServer).GetPermitState(ctx, req.(*GetPermitStateRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_RejectPending_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RejectPendingRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).RejectPending(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_RejectPending_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).RejectPending(ctx, req.(*RejectPendingRequest))
 	}
 	return interceptor(ctx, in, info, handler)
 }
@@ -5808,6 +5860,10 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "GetPermitState",
 			Handler:    _ExecutorService_GetPermitState_Handler,
+		},
+		{
+			MethodName: "RejectPending",
+			Handler:    _ExecutorService_RejectPending_Handler,
 		},
 		{
 			MethodName: "TrustArtifact",
