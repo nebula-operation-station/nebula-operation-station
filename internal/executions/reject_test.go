@@ -103,7 +103,7 @@ func TestRejectRefusesBadInputBeforeTheExecutor(t *testing.T) {
 		{"reason over 800 bytes", "axel", tooManyBytes},
 		{"reason with newline", "axel", "two\nlines"},
 		{"reason with NUL", "axel", "a\x00b"},
-		{"reason with RLO", "axel", "a‮b"},
+		{"reason with RLO", "axel", "a" + string(rune(0x202e)) + "b"},
 		{"reason with DEL", "axel", "a\x7fb"},
 		{"user empty", "", ""},
 		{"user with tab", "ax\tel", ""},
@@ -202,5 +202,29 @@ func TestRejectedByExecutorOnTheCLIIsRecorded(t *testing.T) {
 	}
 	if len(f.attached) != 0 {
 		t.Fatalf("a rejected execution was dispatched")
+	}
+}
+
+// noRejectExec is an executor client that predates RejectPending: it has the
+// Executor methods only.
+type noRejectExec struct{ Executor }
+
+// TestRejectWithoutExecutorSupportIsRefused checks that an executor client
+// without RejectPending refuses the rejection with ErrRejectUnavailable and
+// leaves the execution pending.
+func TestRejectWithoutExecutorSupportIsRefused(t *testing.T) {
+	f := &fakeExec{}
+	s, _ := setup(t, f)
+	ctx := context.Background()
+	c, err := s.Create(ctx, "axel", "core.facts", []string{"web"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.exec = noRejectExec{Executor: f}
+	if err := s.Reject(ctx, "axel", c.ID, ""); !errors.Is(err, ErrRejectUnavailable) {
+		t.Fatalf("err = %v, want ErrRejectUnavailable", err)
+	}
+	if e, _ := s.Get(ctx, c.ID); e.State != "pending" {
+		t.Fatalf("state = %s, want pending", e.State)
 	}
 }

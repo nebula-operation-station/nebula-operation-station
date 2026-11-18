@@ -147,6 +147,8 @@ func (h *Handler) rejectRowMessage(err error) string {
 		return "operation not found"
 	case errors.Is(err, executions.ErrNotPending):
 		return "not waiting for approval any more"
+	case errors.Is(err, executions.ErrRejectUnavailable):
+		return "rejecting is not available on this server"
 	case errors.As(err, &pe):
 		return pe.Reason
 	}

@@ -4,9 +4,12 @@ package executions
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"unicode"
 	"unicode/utf8"
+
+	"google.golang.org/grpc"
 
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
@@ -25,6 +28,17 @@ const (
 	// server relays to the executor (spec 07: 1-64 bytes).
 	relayedUserMaxBytes = 64
 )
+
+// Rejecter is the executor call a rejection needs. It is separate from
+// Executor so that the existing implementations of Executor (the server's
+// lazy client, the browser test harness) keep compiling; a Service whose
+// executor does not implement it refuses rejections with ErrRejectUnavailable.
+type Rejecter interface {
+	RejectPending(ctx context.Context, in *pb.RejectPendingRequest, opts ...grpc.CallOption) (*pb.RejectPendingResponse, error)
+}
+
+// ErrRejectUnavailable is returned when the executor client cannot reject.
+var ErrRejectUnavailable = errors.New("rejecting is not available on this server")
 
 // CheckRejectReason validates an optional rejection reason with the rules of
 // spec 07: at most 200 code points and 800 bytes, valid UTF-8, no control
@@ -100,6 +114,10 @@ func (s *Service) Reject(ctx context.Context, user, id, reason string) error {
 	if err := checkRelayedUser(user); err != nil {
 		return err
 	}
+	rej, supported := s.exec.(Rejecter)
+	if !supported {
+		return ErrRejectUnavailable
+	}
 	e, err := s.Get(ctx, id)
 	if err != nil {
 		return err
@@ -112,17 +130,17 @@ func (s *Service) Reject(ctx context.Context, user, id, reason string) error {
 	}
 	cctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
-	if _, err := s.exec.RejectPending(cctx, &pb.RejectPendingRequest{Digest: e.Digest, Reason: reason, RelayedUser: user}); err != nil {
+	if _, err := rej.RejectPending(cctx, &pb.RejectPendingRequest{Digest: e.Digest, Reason: reason, RelayedUser: user}); err != nil {
 		return err
 	}
-	ok, err := s.markRejected(ctx, id, rejectDetail(reason))
+	moved, err := s.markRejected(ctx, id, rejectDetail(reason))
 	if err != nil {
 		// The executor has rejected the proposal and the server could not
 		// record it. The next CheckCLIApproval or sweep reads the executor's
 		// REJECTED state and records it then.
 		return fmt.Errorf("record rejection of execution %s: %w", id, err)
 	}
-	if !ok {
+	if !moved {
 		// Stopped being pending meanwhile (the sweep or another request):
 		// the executor's answer stands, nothing is dispatched here.
 		s.log.Warn("audit", "kind", "execution_rejection_not_recorded", "execution", id, "user", user)
