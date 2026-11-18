@@ -240,43 +240,39 @@ type Handler struct {
 	publicOrigin string
 	// pages maps a content name to the parsed template set (layout +
 	// that page), so every page can define its own "content" block.
-	pages      map[string]*template.Template
-	staticFS   fs.FS
-	status     StatusProvider
-	hostNames  func(ctx context.Context) []string
-	hosts      func(ctx context.Context) ([]inventory.Host, error)
-	hostKeys   func(ctx context.Context) ([]*pb.HostKeyPin, error)
-	inventory  InventoryStore
-	operations Operations
-	// notifications and notificationsAdmin serve the notifications inbox
-	// (notifications.go).
-	notifications      NotificationLog
-	notificationsAdmin NotificationAdminFunc
-	pins               PinStore
-	schedules          Schedules
-	leases             Leases
-	leaseProposals     *leaseProposals
-	runbooks           Runbooks
-	deployProfiles     DeployProfiles
-	trust              ArtifactTrust
-	builtinTrust       *builtinTrustCache
-	modules            Modules
-	lastResult         LastResultFunc
-	network            NetworkStore
-	discovery          DiscoveryStore
-	events             EventSource
-	auditLog           AuditStore
-	log                *slog.Logger
-	repin              Repinner
-	enroll             Enroller
-	onestep            *onestep
-	serverIP           func() netip.Addr
-	securityKeys       func(ctx context.Context) ([]*pb.WebAuthnCredential, error)
-	totpStatus         func(ctx context.Context) (*pb.GetTOTPStatusResponse, error)
-	pveChart           func(ctx context.Context) (pveinventory.Tree, error)
-	now                func() time.Time
-	pve                PVEStore
-	pveRemotes         PVERemoteMetaFunc
+	pages          map[string]*template.Template
+	staticFS       fs.FS
+	status         StatusProvider
+	hostNames      func(ctx context.Context) []string
+	hosts          func(ctx context.Context) ([]inventory.Host, error)
+	hostKeys       func(ctx context.Context) ([]*pb.HostKeyPin, error)
+	inventory      InventoryStore
+	operations     Operations
+	pins           PinStore
+	schedules      Schedules
+	leases         Leases
+	leaseProposals *leaseProposals
+	runbooks       Runbooks
+	deployProfiles DeployProfiles
+	trust          ArtifactTrust
+	builtinTrust   *builtinTrustCache
+	modules        Modules
+	lastResult     LastResultFunc
+	network        NetworkStore
+	discovery      DiscoveryStore
+	events         EventSource
+	auditLog       AuditStore
+	log            *slog.Logger
+	repin          Repinner
+	enroll         Enroller
+	onestep        *onestep
+	serverIP       func() netip.Addr
+	securityKeys   func(ctx context.Context) ([]*pb.WebAuthnCredential, error)
+	totpStatus     func(ctx context.Context) (*pb.GetTOTPStatusResponse, error)
+	pveChart       func(ctx context.Context) (pveinventory.Tree, error)
+	now            func() time.Time
+	pve            PVEStore
+	pveRemotes     PVERemoteMetaFunc
 	// guestPower and guestPowerProposals serve the guest power controls.
 	guestPower          GuestPower
 	guestPowerProposals *guestPowerProposals
@@ -307,6 +303,10 @@ type Handler struct {
 	// registryReads serves private registry leases and digests; nil hides
 	// them.
 	registryReads RegistryReads
+
+	// inbox and inboxAdmin serve the notifications page (notifications.go).
+	inbox      NotificationLog
+	inboxAdmin NotificationAdminFunc
 }
 
 // New parses the embedded templates and builds a Handler.
@@ -363,8 +363,8 @@ func New(o Options) (*Handler, error) {
 		hostKeys:             o.HostKeys,
 		inventory:            o.Inventory,
 		operations:           o.Operations,
-		notifications:        o.Notifications,
-		notificationsAdmin:   o.NotificationsAdmin,
+		inbox:                o.Notifications,
+		inboxAdmin:           o.NotificationsAdmin,
 		pins:                 o.Pins,
 		schedules:            o.Schedules,
 		leases:               o.Leases,
@@ -1011,7 +1011,7 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, data pageData) 
 	}
 	data.NavCollapsed = navStateFromRequest(r) == navCollapsed
 	data.PVENav = h.pve != nil
-	data.NotificationsEnabled = h.notifications != nil
+	data.NotificationsEnabled = h.inbox != nil
 	data.DeployEnabled = h.deploy != nil && h.pve != nil && h.pveRemotes != nil
 	// "Deploy here" (ADR 0008 section 6) on the chart's nodes of active
 	// remotes; read-only and blocked remotes get no shortcut.

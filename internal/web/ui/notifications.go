@@ -135,7 +135,7 @@ func parseNotificationCursor(raw string) (int64, error) {
 
 // handleNotifications serves GET /notifications.
 func (h *Handler) handleNotifications(w http.ResponseWriter, r *http.Request) {
-	if h.notifications == nil {
+	if h.inbox == nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -147,9 +147,9 @@ func (h *Handler) handleNotifications(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), notificationsCallTimeout)
 	defer cancel()
 	admin := false
-	if h.notificationsAdmin != nil {
+	if h.inboxAdmin != nil {
 		var err error
-		admin, err = h.notificationsAdmin(ctx, s.UserName)
+		admin, err = h.inboxAdmin(ctx, s.UserName)
 		if err != nil {
 			h.log.Error("notifications: admin check", "error", err)
 			admin = false
@@ -177,7 +177,7 @@ func (h *Handler) handleNotifications(w http.ResponseWriter, r *http.Request) {
 
 	data := pageData{Title: "Notifications", Active: "notifications", Content: "notifications"}
 	page := &notificationsData{}
-	entries, err := h.notifications.List(ctx, cursor, notificationsPageSize)
+	entries, err := h.inbox.List(ctx, cursor, notificationsPageSize)
 	if err != nil {
 		h.log.Error("notifications: list", "error", err)
 		page.Unavailable = true
