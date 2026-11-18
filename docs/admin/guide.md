@@ -1676,8 +1676,11 @@ open updates, reboots pending, hosts not READY, grants expiring within 7
 days, open findings per tier and the KEV count, and failed executions of
 the last 24 hours.
 
-The notification list page in the web UI is not in this release. The log
-of sent, held and failed events is in section 10.3.
+The notification list page in the web UI is not in this release, and no
+CLI command reads the log either. The server writes every sent, held and
+failed event to the `notify_log` table in `server.db`, keeping 30 days and
+at most 5,000 entries. Nothing reads that table yet. Section 10.3 does not
+cover it.
 
 ### 10.2 Read-only API (Home Assistant, status pages)
 
@@ -2391,11 +2394,15 @@ plan a rollout. The list describes this release as it is on `main`.
   settings store has no writer in this build, so the settings stay at
   their default (disabled). The agent then makes no LLM call and writes
   no note, and the Ops tab shows "No suggestion yet.".
-- **Built on the server, but dormant until the settings are enabled:**
-  the agent's work list. The server offers due fix items for lab
-  findings and fleet summaries for class `external`, and it offers the
-  admin questions. The agent refuses a question item in this build, so
-  no question is answered.
+- **Wired, but empty:** the server connects the projection to empty
+  finding and listener sources (`cmd/nebula-server/ops.go`, "Source
+  gap"). The only item the work list can carry is the fleet summary with
+  zero counts, for class `external`. No group of lab findings is ever
+  produced, so **no fix item is ever due, even with the settings
+  enabled.** Consequently no fix note is written and no fix card can
+  appear, whatever the settings say. The admin questions are offered as
+  well, but the agent refuses a question item in this build, so no
+  question is answered.
 - **Not built:** answers to admin questions. The question form in the
   Ops tab stores the question (see "Questions" under "Notes, retention
   and backup"); no answer is produced.
@@ -2519,19 +2526,37 @@ model, in either class (see the table below).
 
 #### What goes to the model
 
-This is the state of this build. The table lists what the agent sends
-when it runs with the settings enabled.
+This section has two parts. The first table is the **design** of ADR 0016:
+what the agent would send once its inputs are connected. The second table is
+what **is wired in this build**. Only the second one describes what reaches
+the model today.
+
+**Designed (ADR 0016). Not sent in this build, because no lab group is
+produced and the finding sources are not connected:**
 
 | Data | `lab` | `external` |
 | --- | --- | --- |
-| Host label, environment, criticality | Yes (label at most 64 bytes) | No |
-| Exposure level, listening ports (number and protocol, at most 32) | Yes | No |
-| Per finding (at most 40 per group): vulnerability ID, source package, installed and fixed version, fix state, tier, score, KEV flag | Yes | No |
-| Counts per tier and KEV, per group and for the fleet | Yes | Fleet counts only |
-| Step candidates as opaque keys (`c1`, `c2`, ...) with a short fixed label that NOS sets; the action ID and the host ID never enter the prompt | Yes | No |
-| Documentation chunks from the handbook: up to 3 per fix item, found by the finding's package | Yes | No: `external` items are fleet summaries and carry no chunks |
+| Host label, environment, criticality (label at most 64 bytes) | Designed: yes | Designed: no |
+| Exposure level, listening ports (number and protocol, at most 32) | Designed: yes | Designed: no |
+| Per finding (at most 40 per group): vulnerability ID, source package, installed and fixed version, fix state, tier, score, KEV flag | Designed: yes | Designed: no |
+| Counts per tier and KEV, per group and for the fleet | Designed: yes | Designed: fleet counts only |
+| Step candidates as opaque keys (`c1`, `c2`, ...) with a short fixed label that NOS sets; the action ID and the host ID never enter the prompt | Designed: yes | Designed: no |
+| Documentation chunks from the handbook: up to 3 per fix item, found by the finding's package | Designed: yes | Designed: no, `external` items are fleet summaries and carry no chunks |
+
+**Wired in this build.** This is what can reach the model when the settings
+are enabled. The settings have no writer in this build, so in a default
+install nothing is sent at all.
+
+| Data | `lab` | `external` |
+| --- | --- | --- |
+| Fleet counts per tier and KEV (zero in this build) | **No**: no lab group is ever produced | Yes, as zero counts |
 | The operator instructions (at most 4 KiB) | Yes | Yes |
-| Your question in the Ops tab (at most 2 KiB) | **No** in this build: the agent refuses question items | **No** in this build |
+| Host labels, ports, per-finding data, step candidates, documentation chunks | **No**: never produced in this build | No |
+| Your question in the Ops tab (at most 2 KiB) | **No**: the agent refuses question items | **No** |
+
+So in this build the only data that can reach the model is the operator
+instructions and the zero-count fleet summary. Host-specific data stays in
+NOS in both classes.
 
 **Never sent, in either class:** IP addresses and endpoints, fingerprints,
 credentials or their file names, user names, execution output and logs,
@@ -2572,6 +2597,9 @@ Consequences you will notice:
 
 - A card that you **dismiss** still marks executions. Dismissing hides the
   card and changes nothing else.
+- In this build no fix note and no card can come about (see "Status in
+  this build"), so neither rule fires yet and no execution is marked. The
+  rules are kept here for the release that connects the finding sources.
 - While a fix note for a host is stored (at most 30 days, see below), an
   admin who starts the same kind of action on that host **by hand** also
   needs the key. Nothing on the page says why, in this build: the

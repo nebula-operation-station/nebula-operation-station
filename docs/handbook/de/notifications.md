@@ -15,8 +15,8 @@ und nimmt keinen Freitext an. Die einzige Telegram-Methode, die NOS aufruft,
 ist `sendMessage`.
 
 **Folge:** Du kannst dem Telegram-Bot nicht antworten und ihm keine Befehle
-schicken. Eine Nachricht des Bots ist eine Benachrichtigung; was du dort
-eintippst, erreicht NOS nicht. Fragen an den Ops-Agenten werden nur in der
+schicken. Eine Nachricht des Bots ist eine Benachrichtigung; was Sie dort
+eintippen, erreicht NOS nicht. Fragen an den Ops-Agenten werden nur in der
 NOS-Weboberfläche gestellt (Tab Ops).
 
 ## Welche Nachrichten es heute gibt
@@ -34,10 +34,11 @@ Stummschaltung) oder nicht zustellen kann, wird mit seinem Ergebnis im
 Benachrichtigungslog des Servers gespeichert. Das Log behält 30 Tage und
 höchstens 5.000 Einträge.
 
-**Nicht in diesem Release: die Benachrichtigungsliste in der Weboberfläche.**
-Das Log gibt es; die Seite, die es anzeigt, ist in diesem Release nicht
-enthalten. Bis sie kommt, prüfe das Log über den Verlaufsabschnitt des
-Admin-Handbuchs (10.3).
+**Nicht in diesem Release: das Lesen des Logs.** Das Log wird geschrieben,
+aber in diesem Release liest es weder eine Seite der Weboberfläche noch ein
+CLI-Befehl. Sie können es daher nicht über NOS einsehen. Der Verlaufsabschnitt
+des Admin-Handbuchs (10.3) beschreibt Executor-Ereignisse und Audit-Zeilen,
+nicht dieses Log.
 
 ## Lease-Ablauf und fehlgeschlagene Leases
 
@@ -56,14 +57,15 @@ LLM noch Agenten.
 **Status: optional, standardmäßig aus.** Ein Admin schaltet ihn in
 `server.json` ein (Admin-Handbuch [10.1](../../admin/guide.md#101-notifications)).
 
-Der Digest wird einmal am Tag zu einer Uhrzeit gesendet, die du setzt. Er
+Der Digest wird einmal am Tag zu einer Uhrzeit gesendet, die Sie setzen. Er
 enthält nur Zähler: offene Updates, ausstehende Neustarts, Hosts, die nicht
 READY sind, Freigaben, die innerhalb von 7 Tagen ablaufen, offene Befunde je
 Tier und die Anzahl KEV, sowie fehlgeschlagene Ausführungen der letzten 24
 Stunden. Er braucht mindestens einen Benachrichtigungsanbieter.
 
-## Was eine Nachricht von dir verlangen kann
+## Was eine Nachricht von Ihnen verlangen kann
 
 Eine Nachricht verlinkt in die NOS-Weboberfläche. Sie bittet nie um eine
-Antwort und enthält nie einen Befehl. Um zu handeln, melde dich bei NOS an,
-prüfe die verlinkte Seite und handle dort mit den üblichen Genehmigungen.
+Antwort und enthält nie einen Befehl. Um zu handeln, melden Sie sich bei NOS
+an, prüfen Sie die verlinkte Seite und handeln Sie dort mit den üblichen
+Genehmigungen.

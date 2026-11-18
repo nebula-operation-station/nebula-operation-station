@@ -30,9 +30,10 @@ Every event that the server sends, holds back (rate limit or mute) or fails
 to deliver is written to the server's notification log, with its outcome.
 The log keeps 30 days and at most 5,000 entries.
 
-**Not in this release: the notification list in the web UI.** The log
-exists; the page that shows it is not in this release. Until it ships,
-check the log with the admin guide's history section (10.3).
+**Not in this release: reading the log.** The log is written, but in this
+release no web UI page and no CLI command reads it, so you cannot inspect it
+through NOS. The admin guide's history section (10.3) covers executor events
+and audit lines, not this log.
 
 ## Lease expiry and failed leased runs
 

@@ -188,9 +188,13 @@ image, the badge shows the Hermes status instead. The two are never merged.
 **Goal:** decide what to do with a fix suggestion from the ops agent, and
 submit a fix that you have checked yourself.
 
-**Status:** the card and the suggestion form are built, but the agent is
-off by default and this release has no form to turn it on, so a default
-install shows no cards (admin guide
+**Status:** no card can appear in this release. The card and the suggestion
+form are built, but three things stop a card from appearing: the agent is
+off by default, this release has no form to switch it on, and the server
+does not yet connect the finding sources, so the agent never has a finding
+to work on and no fix note can be made. Switching the settings on by other
+means does not change that. A default install shows no card, and neither
+does an install with the settings on (admin guide
 [10.6](../admin/guide.md#106-ops-agent), "Status in this build"). Answers
 to questions in the Ops tab are not produced yet.
 
@@ -203,7 +207,8 @@ not see the Ops tab.
 1. Open the **Ops** tab of the assistant panel. A card is headed "Fix
    suggestion" with its number. With the agent off, the tab says "Agent
    switched off. No open suggestion."; with the agent on and no card yet, it
-   says "No suggestion yet.". The question form is at the top of the tab;
+   says "No suggestion yet.". In this release that is the normal state, since
+  no finding source is connected (see Status above). The question form is at the top of the tab;
    in this build its questions are stored but not answered (admin guide
    [10.6](../admin/guide.md#106-ops-agent)).
 2. Read "What" first (the headings are shown in English). NOS renders it
@@ -236,9 +241,9 @@ Mitigations (for example "restrict the port at the firewall") are text only.
 They have no button and no form. If you act on one, do it outside the card,
 with your own command, after you have checked it.
 
-A card marked "outdated: findings changed" (German: "veraltet: Findings haben
-sich geändert") was made for findings that have since changed. Do not act on
-it; look at the current findings first.
+A card marked "outdated: findings changed" (the German label is in the
+German copy of this page) was made for findings that have since changed. Do
+not act on it; look at the current findings first.
 
 **Dismissing a card** hides it and changes nothing else. It does **not**
 remove the security-key rule for that host (below).
@@ -246,7 +251,9 @@ remove the security-key rule for that host (below).
 **The security-key rule.** Every execution that you open from a suggestion
 needs a security-key touch, **also when the action is LOW**. While a stored
 fix note exists for a host (at most 30 days, or 500 notes), a LOW action of
-the same kind on that host that you start by hand needs the key too. The
+the same kind on that host that you start by hand needs the key too. In
+this release no fix note and no card can come about yet, so no execution is
+marked yet. The
 operation page shows the risk the executor decides, which is at least MEDIUM
 for a suggested execution, but no "From an agent suggestion" label; only the
 form banner marks a card-opened form. Admin guide

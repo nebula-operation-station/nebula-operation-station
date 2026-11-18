@@ -381,15 +381,19 @@ suggestion.". Siehe Admin-Handbuch [10.6](../../admin/guide.md#106-ops-agent),
 
 Weil für diesen Host eine Fix-Notiz gespeichert ist und der Neustart dieselbe
 Art von Aktion (Aktionsfamilie) auf demselben Host ist. NOS markiert die
-Ausführung als aus einem Vorschlag stammend, auch wenn du sie nicht über die
-Karte geöffnet hast, und hebt die Risikoklasse auf MEDIUM. Die Genehmigung ist
+Ausführung als aus einem Vorschlag stammend, auch wenn Sie sie nicht über die
+Karte geöffnet haben, und hebt die Risikoklasse auf MEDIUM. Die Genehmigung ist
 dann eine Berührung des Sicherheitsschlüssels. Die Betriebsseite zeigt das
 Risiko, das der Executor festlegt (für eine vorgeschlagene Ausführung
 mindestens MEDIUM), sagt aber nicht warum: Ein Etikett "Aus einem
-Agenten-Vorschlag" gibt es in diesem Release nicht. Nur ein Formular, das du
-aus einer Karte geöffnet hast, zeigt den Hinweis "Aus einem Agenten-Vorschlag
+Agenten-Vorschlag" gibt es in diesem Release nicht. Nur ein Formular, das Sie
+aus einer Karte geöffnet haben, zeigt den Hinweis "Aus einem Agenten-Vorschlag
 geöffnet. Diese Ausführung braucht eine Security-Key-Berührung." Das ist so
 vorgesehen (ADR 0016 D9).
+
+In diesem Release entsteht allerdings noch keine Fix-Notiz, weil die
+Befundquellen des Servers noch nicht angeschlossen sind. Dieser Fall tritt
+deshalb vorerst nicht auf.
 
 Die Markierung gilt, solange die Notiz gespeichert ist: höchstens 30 Tage oder
 500 Notizen. Eine ausgeblendete Karte hebt sie nicht auf. Lesende Aktionen und
@@ -400,6 +404,6 @@ Zeitpläne sind nicht betroffen. Das Admin-Handbuch
 
 Nein. NOS sendet nur an Telegram und liest nie von dort: Keine Antworten,
 keine Bot-Befehle und kein Freitext erreichen NOS. Fragen an den Ops-Agenten
-stellst du nur in der NOS-Weboberfläche, im Tab Ops. In diesem Release wird
+stellen Sie nur in der NOS-Weboberfläche, im Tab Ops. In diesem Release wird
 eine Frage gespeichert, aber nicht beantwortet: Der Agent liest Fragen noch
 nicht. Siehe [Benachrichtigungen](notifications.md).

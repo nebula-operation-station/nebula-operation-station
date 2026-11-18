@@ -219,16 +219,21 @@ zusammengeführt.
 ## Eine Fix-Vorschlagskarte lesen
 
 **Ziel:** entscheiden, was mit einem Fix-Vorschlag des Ops-Agenten zu tun
-ist, und einen Fix abschicken, den du selbst geprüft hast.
+ist, und einen Fix abschicken, den Sie selbst geprüft haben.
 
-**Status:** Die Karte und das Vorschlagsformular sind gebaut, aber der
-Ops-Agent ist standardmäßig aus, und dieses Release hat kein Formular, um
-ihn einzuschalten. Eine Standardinstallation zeigt daher keine Karten
-(Admin-Handbuch [10.6](../../admin/guide.md#106-ops-agent), "Status in
-this build"). Antworten auf Fragen im Tab Ops werden noch nicht erzeugt.
+**Status:** In diesem Release erscheint noch keine Karte. Die Karte und das
+Vorschlagsformular sind gebaut, aber drei Dinge verhindern eine Karte: Der
+Ops-Agent ist standardmäßig aus, dieses Release hat kein Formular, um ihn
+einzuschalten, und der Server verbindet die Befundquellen noch nicht. Der
+Agent hat daher nie einen Befund zum Bearbeiten, und es kann keine
+Fix-Notiz entstehen. Ihn auf anderem Weg einzuschalten ändert daran nichts.
+Eine Standardinstallation zeigt deshalb keine Karte, und eine Installation
+mit eingeschalteten Einstellungen auch nicht (Admin-Handbuch
+[10.6](../../admin/guide.md#106-ops-agent), "Status in this build").
+Antworten auf Fragen im Tab Ops werden noch nicht erzeugt.
 
 **Voraussetzungen:** Der Ops-Agent ist von einem Admin eingerichtet
-(Admin-Handbuch [10.6](../../admin/guide.md#106-ops-agent)); du bist
+(Admin-Handbuch [10.6](../../admin/guide.md#106-ops-agent)); Sie sind
 Admin. Andere Benutzer sehen den Tab Ops nicht.
 
 **Schritte:**
@@ -236,54 +241,58 @@ Admin. Andere Benutzer sehen den Tab Ops nicht.
 1. Öffne den Tab **Ops** im Assistenten-Panel. Eine Karte trägt die
    Überschrift "Fix suggestion" mit ihrer Nummer. Ist der Agent aus, steht
    dort "Agent switched off. No open suggestion."; ist er an und es gibt
-   noch keine Karte, "No suggestion yet.". Das Fragefeld steht oben im Tab;
-   in diesem Release werden Fragen gespeichert, aber nicht beantwortet
-   (Admin-Handbuch [10.6](../../admin/guide.md#106-ops-agent)).
-2. Lies zuerst den Teil "What" (die Überschriften sind englisch). NOS stellt
-   ihn aus den eigenen gespeicherten Fakten dar: Paket und Version, Tier, KEV
-   und Exposition. Er ist kein Modelltext.
-3. Lies die Kennzeichnung der Karte, die englisch und deutsch steht: "Von
-   einem LLM erzeugt – ungeprüft. NOS hat nur geprüft, dass jeder Schritt
-   eine Katalog-Aktion auf diesem Host ist." Der Text des Modells wird
-   escaped angezeigt. Behandle ihn als Entwurf.
-4. Lies "How to fix". Die Schritte sind geordnet. Jeder Schritt hat genau
-   einen Button.
-5. Drücke den Button eines Schritts. Für jeden Schritt außer einem
+   noch keine Karte, "No suggestion yet.". In diesem Release ist das der
+   Normalzustand, weil keine Befundquelle angeschlossen ist (siehe Status).
+   Das Fragefeld steht oben im Tab; in diesem Release werden Fragen
+   gespeichert, aber nicht beantwortet (Admin-Handbuch
+   [10.6](../../admin/guide.md#106-ops-agent)).
+2. Lesen Sie zuerst den Teil "What" (die Überschriften sind englisch). NOS
+   stellt ihn aus den eigenen gespeicherten Fakten dar: Paket und Version,
+   Tier, KEV und Exposition. Er ist kein Modelltext.
+3. Lesen Sie die Kennzeichnung der Karte, die englisch und deutsch steht:
+   "Von einem LLM erzeugt – ungeprüft. NOS hat nur geprüft, dass jeder
+   Schritt eine Katalog-Aktion auf diesem Host ist." Der Text des Modells
+   wird escaped angezeigt. Behandeln Sie ihn als Entwurf.
+4. Lesen Sie "How to fix". Die Schritte sind geordnet. Jeder Schritt hat
+   genau einen Button.
+5. Drücken Sie den Button eines Schritts. Für jeden Schritt außer einem
    Container-Update **öffnet er das normale Formular** mit Aktion und Host
    vorausgefüllt. Der Button schickt nichts ab. Ein Container-Update ist in
    diesem Release die Ausnahme: Sein Button öffnet eine Seite, die mit `404`
-   antwortet. Willst du das Update trotzdem, nutze die Container-Seite von
-   Hand. Eine Ausführung mit derselben Aktionsfamilie auf demselben Host wird
-   trotzdem als aus einem Vorschlag stammend markiert, solange für diesen Host
-   eine Notiz gespeichert ist.
-6. Fülle jeden Parameter selbst aus (Unit-Name, Container, Stufenplan). Der
-   Vorschlag liefert keinen Parameter und kein Geheimnis.
-7. Prüfe die Befund-Seite und den zitierten Abschnitt. Sie bleiben die
+   antwortet. Wollen Sie das Update trotzdem, nutzen Sie die Container-Seite
+   von Hand. Eine Ausführung mit derselben Aktionsfamilie auf demselben Host
+   wird trotzdem als aus einem Vorschlag stammend markiert, solange für diesen
+   Host eine Notiz gespeichert ist.
+6. Füllen Sie jeden Parameter selbst aus (Unit-Name, Container, Stufenplan).
+   Der Vorschlag liefert keinen Parameter und kein Geheimnis.
+7. Prüfen Sie die Befund-Seite und den zitierten Abschnitt. Sie bleiben die
    maßgebliche Quelle.
 8. Vor dem Abschicken zeigt das Formular den Hinweis "Aus einem
    Agenten-Vorschlag geöffnet. Diese Ausführung braucht eine
    Security-Key-Berührung." (Englisch: "Opened from an agent suggestion.
-   This execution needs a security-key touch.") Berühre deinen
+   This execution needs a security-key touch.") Berühren Sie Ihren
    Sicherheitsschlüssel.
 
 Maßnahmen zur Eindämmung (etwa "Port an der Firewall einschränken") sind
-nur Text. Sie haben keinen Button und kein Formular. Wenn du danach handelst,
-tu es außerhalb der Karte mit deinem eigenen Befehl, nachdem du ihn geprüft
-hast.
+nur Text. Sie haben keinen Button und kein Formular. Wenn Sie danach handeln,
+tun Sie es außerhalb der Karte mit einem eigenen Befehl, nachdem Sie ihn
+geprüft haben.
 
 Eine Karte mit dem Hinweis "veraltet: Findings haben sich geändert" (Englisch:
 "outdated: findings changed") wurde für Befunde erzeugt, die sich inzwischen
-geändert haben. Handle nicht danach; prüfe zuerst die aktuellen Befunde.
+geändert haben. Handeln Sie nicht danach; prüfen Sie zuerst die aktuellen
+Befunde.
 
 **Eine Karte ausblenden** blendet sie nur aus und ändert sonst nichts. Die
 Regel zum Sicherheitsschlüssel (unten) bleibt für diesen Host bestehen.
 
-**Die Regel zum Sicherheitsschlüssel.** Jede Ausführung, die du aus einem
-Vorschlag öffnest, braucht eine Berührung des Sicherheitsschlüssels, **auch
+**Die Regel zum Sicherheitsschlüssel.** Jede Ausführung, die Sie aus einem
+Vorschlag öffnen, braucht eine Berührung des Sicherheitsschlüssels, **auch
 wenn die Aktion LOW ist**. Solange für einen Host eine gespeicherte
 Fix-Notiz existiert (höchstens 30 Tage oder 500 Notizen), braucht auch eine
-LOW-Aktion derselben Art auf diesem Host, die du von Hand startest, den
-Schlüssel. Die Betriebsseite zeigt das Risiko, das der Executor festlegt; für
+LOW-Aktion derselben Art auf diesem Host, die Sie von Hand starten, den
+Schlüssel. In diesem Release kann allerdings noch keine Fix-Notiz und keine
+Karte entstehen; vorerst wird daher keine Ausführung markiert. Die Betriebsseite zeigt das Risiko, das der Executor festlegt; für
 eine vorgeschlagene Ausführung ist es mindestens MEDIUM. Sie hat in diesem
 Release aber kein Etikett "Aus einem Agenten-Vorschlag". Nur der Hinweis im
 Formular markiert ein aus einer Karte geöffnetes Formular. Das
@@ -301,5 +310,5 @@ das Lesen, nicht die Verantwortung; die Befund-Seite und der zitierte
 Abschnitt bleiben maßgeblich.
 
 **Erwartetes Ergebnis:** eine abgeschickte Ausführung mit eigener Genehmigung
-und eigenem Audit-Eintrag. Hast du das Formular aus einer Karte geöffnet, hast
-du vor dem Abschicken den Hinweis oben gesehen.
+und eigenem Audit-Eintrag. Haben Sie das Formular aus einer Karte geöffnet,
+haben Sie vor dem Abschicken den Hinweis oben gesehen.
