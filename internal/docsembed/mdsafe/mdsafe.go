@@ -26,6 +26,7 @@ package mdsafe
 
 import (
 	"errors"
+	"fmt"
 	"html"
 	"html/template"
 	"net/url"
@@ -106,11 +107,9 @@ var (
 	// Every match also passes the assertInert allowlist for "a" in the
 	// tests.
 	localHrefRE = regexp.MustCompile(`^/help(/[a-z0-9_-]+)*(#[a-z0-9_-]+)?$`)
-	// anchorRE is the fragment form of a local link: the id form that
-	// Slug produces for ASCII headings.
+	// anchorRE is the id form of a fragment: the output of anchorFold,
+	// which is what Slug gives every heading.
 	anchorRE = regexp.MustCompile(`^[a-z0-9_-]+$`)
-	// fragmentRE is the accepted fragment ("#…") of a same-page link.
-	fragmentRE = regexp.MustCompile(`^[\pL\pN_-]+$`)
 	// tableSepRE matches a table's header separator row.
 	tableSepRE = regexp.MustCompile(`^\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$`)
 	// plainLinkRE strips link syntax for plain text: [text](dest).
@@ -123,9 +122,26 @@ func Render(src []byte, o Options) (Result, error) {
 	return res, err
 }
 
+// scanLimits are the bounds the delimiter scanners work under. Render uses
+// defaultLimits; the tests substitute other values to measure a scanner
+// that has no window or budget, which the effort tests must reject.
+type scanLimits struct {
+	window   int // bytes a delimiter scan may look ahead
+	linkDest int // bytes a link destination may span
+	budget   int // total scan steps before delimiters render as text
+}
+
+// defaultLimits are the production bounds.
+var defaultLimits = scanLimits{window: maxInlineScan, linkDest: maxLinkDestBytes, budget: maxScanSteps}
+
 // renderCounted is Render; it also returns the number of scan steps
 // spent, which the tests use to check the effort bound.
 func renderCounted(src []byte, o Options) (Result, int, error) {
+	return renderLimited(src, o, defaultLimits)
+}
+
+// renderLimited is renderCounted under the given scan limits.
+func renderLimited(src []byte, o Options, lim scanLimits) (Result, int, error) {
 	if len(src) > MaxSourceBytes {
 		return Result{}, 0, ErrTooLarge
 	}
@@ -133,7 +149,7 @@ func renderCounted(src []byte, o Options) (Result, int, error) {
 		return Result{}, 0, ErrInvalidUTF8
 	}
 	s := strings.NewReplacer("\r\n", "\n", "\r", "\n", "\x00", "�", "\t", strings.Repeat(" ", tabWidth)).Replace(string(src))
-	r := &renderer{o: o, taken: map[string]bool{}, next: map[string]int{}}
+	r := &renderer{o: o, lim: lim, taken: map[string]bool{}, next: map[string]int{}}
 	r.blocks(&r.out, strings.Split(s, "\n"), 0, false)
 	return Result{
 		// The builder only ever received escaped text and the fixed
@@ -144,17 +160,84 @@ func renderCounted(src []byte, o Options) (Result, int, error) {
 	}, r.steps, nil
 }
 
-// Slug turns a heading's Markdown text into an element id the way
-// GitHub does: markup removed, lower case, only letters, digits, "-"
-// and "_" kept, spaces become "-".
+// Slug turns a heading's Markdown text into an element id: markup removed,
+// then anchorFold. A heading with no letters or digits gets "section" from
+// the renderer.
 func Slug(text string) string {
+	return anchorFold(plainText(text))
+}
+
+// latinFold maps accented Latin letters, after lower-casing, to the letters
+// they are written with. The German umlauts and ß are not here: they are
+// spelled out in anchorFold, as in German anchors.
+var latinFold = buildLatinFold(map[string]string{
+	"a":  "àáâãåāăą",
+	"ae": "æ",
+	"c":  "çćĉċč",
+	"d":  "ďđ",
+	"e":  "èéêëēĕėęě",
+	"g":  "ĝğġģ",
+	"h":  "ĥħ",
+	"i":  "ìíîïĩīĭįı",
+	"j":  "ĵ",
+	"k":  "ķ",
+	"l":  "ĺļľŀł",
+	"n":  "ñńņň",
+	"o":  "òóôõōŏőø",
+	"oe": "œ",
+	"r":  "ŕŗř",
+	"s":  "śŝşš",
+	"t":  "ţťŧ",
+	"u":  "ùúûũūŭůűų",
+	"w":  "ŵ",
+	"y":  "ýÿŷ",
+	"z":  "źżž",
+})
+
+// buildLatinFold inverts groups (base letters to the accented letters that
+// fold to them) into a rune map. Each accented letter must appear once.
+func buildLatinFold(groups map[string]string) map[rune]string {
+	m := make(map[rune]string)
+	for to, from := range groups {
+		for _, c := range from {
+			m[c] = to
+		}
+	}
+	return m
+}
+
+// anchorFold is the one mapping from heading text, and from a link
+// fragment, to an element id. The result is ASCII only: lower-case
+// letters, digits, "-" and "_"; spaces become "-". The German umlauts
+// and ß are spelled out (ä→ae, ö→oe, ü→ue, ß→ss). Other Latin letters
+// with a diacritic lose it (é→e, ç→c, å→a, ø→o, æ→ae). Any other letter
+// or digit, in any script, becomes "u" and its code point in six hex
+// digits (Обзор→u00043e…), so distinct names give distinct ids and no
+// non-ASCII text reaches the output. Punctuation and symbols are dropped.
+// Because headings and fragments share this mapping, "#Übersicht" names
+// the id of "## Übersicht", on the same page and on another one.
+func anchorFold(s string) string {
 	var b strings.Builder
-	for _, c := range strings.ToLower(plainText(text)) {
+	for _, c := range strings.ToLower(s) {
 		switch {
-		case unicode.IsLetter(c) || unicode.IsDigit(c) || c == '-' || c == '_':
+		case c < 0x80 && (unicode.IsLetter(c) || unicode.IsDigit(c) || c == '-' || c == '_'):
 			b.WriteRune(c)
 		case c == ' ':
 			b.WriteByte('-')
+		case c == 'ä':
+			b.WriteString("ae")
+		case c == 'ö':
+			b.WriteString("oe")
+		case c == 'ü':
+			b.WriteString("ue")
+		case c == 'ß':
+			b.WriteString("ss")
+		case c < 0x80:
+			// Other ASCII punctuation is dropped.
+		case latinFold[c] != "":
+			b.WriteString(latinFold[c])
+		case unicode.IsLetter(c) || unicode.IsDigit(c):
+			fmt.Fprintf(&b, "u%06x", c)
 		}
 	}
 	return b.String()
@@ -180,10 +263,11 @@ func plainText(s string) string {
 
 type renderer struct {
 	o        Options
+	lim      scanLimits
 	out      strings.Builder
 	taken    map[string]bool // heading ids in use
 	next     map[string]int  // per base slug: next "-N" suffix to try
-	steps    int             // scan steps spent, at most maxScanSteps (plus one scan)
+	steps    int             // scan steps spent, at most lim.budget (plus one scan)
 	title    string
 	headings []Heading
 }
@@ -543,10 +627,10 @@ func isASCIIPunct(c byte) bool {
 // maxInlineScan bytes after from; a longer run that crosses the window
 // edge is not a match. Scanned bytes are charged to r.steps.
 func (r *renderer) findRun(s string, from int, c byte, n int) int {
-	limit := min(len(s), from+maxInlineScan)
+	limit := min(len(s), from+r.lim.window)
 	j := from
 	found := -1
-	for j < limit && r.steps < maxScanSteps {
+	for j < limit && r.steps < r.lim.budget {
 		if s[j] != c {
 			j++
 			continue
@@ -654,12 +738,12 @@ func (r *renderer) inline(b *strings.Builder, s string, depth int, inLink bool) 
 // parseLink parses "[label](dest)" at s[i]; end is the index after ")".
 // Bytes scanned are charged to r.steps; past the budget it never matches.
 func (r *renderer) parseLink(s string, i int) (label, dest string, end int, ok bool) {
-	if r.steps >= maxScanSteps {
+	if r.steps >= r.lim.budget {
 		return "", "", 0, false
 	}
 	level := 0
 	j := i
-	limit := min(len(s), i+maxInlineScan)
+	limit := min(len(s), i+r.lim.window)
 	for ; j < limit; j++ {
 		switch s[j] {
 		case '\\':
@@ -679,7 +763,7 @@ func (r *renderer) parseLink(s string, i int) (label, dest string, end int, ok b
 	}
 	label = s[i+1 : j]
 	parens := 0
-	limit = min(len(s), j+2+maxLinkDestBytes)
+	limit = min(len(s), j+2+r.lim.linkDest)
 	k := j + 2
 	for ; k < limit; k++ {
 		switch s[k] {
@@ -726,20 +810,22 @@ func (r *renderer) resolve(dest string) (href string, external, ok bool) {
 		return "", false, false
 	}
 	p, frag, _ := strings.Cut(dest, "#")
+	// A fragment names a heading id through the same mapping as the ids
+	// themselves (anchorFold). One that folds to nothing is not an id, so
+	// the link renders its text only.
+	if frag != "" {
+		frag = anchorFold(frag)
+		if !anchorRE.MatchString(frag) {
+			return "", false, false
+		}
+	}
 	if p == "" {
-		if !fragmentRE.MatchString(frag) {
+		if frag == "" {
 			return "", false, false
 		}
 		return "#" + frag, false, true
 	}
 	if r.o.Relative == nil {
-		return "", false, false
-	}
-	// Heading ids are lower case, so "#Add" names the id "add". Upper case
-	// is folded; a fragment that is still not in id form (non-ASCII
-	// letters) renders the link text only.
-	frag = strings.ToLower(frag)
-	if frag != "" && !anchorRE.MatchString(frag) {
 		return "", false, false
 	}
 	h, ok := r.o.Relative(p, frag)

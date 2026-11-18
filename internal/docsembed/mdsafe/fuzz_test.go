@@ -42,7 +42,7 @@ var (
 	// /help, /help/<segment>..., optional #fragment. Segments are lower-case
 	// letters, digits, "_" and "-" (the page slugs), so "." and ".." and
 	// "//" never match. It is a subset of assertInert's "a" allowlist.
-	helpHrefRE = regexp.MustCompile(`^/help(/[a-z0-9_-]+)*(#[\pL\pN_-]+)?$`)
+	helpHrefRE = regexp.MustCompile(`^/help(/[a-z0-9_-]+)*(#[a-z0-9_-]+)?$`)
 	// tagTokenRE matches any tag, for measuring element nesting.
 	tagTokenRE = regexp.MustCompile(`<(/?)([a-zA-Z0-9]+)[^>]*>`)
 	// hrefAttrRE matches one href attribute of a rendered link.
