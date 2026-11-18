@@ -105,6 +105,19 @@ func liveConfig(t *testing.T, l Layout) {
 	}
 }
 
+// withoutDir removes the given data directories, as on a machine where Nebula
+// has never run: the restore must create them itself.
+func withoutDir(dirs ...func(Layout) string) func(*testing.T, Layout) {
+	return func(t *testing.T, l Layout) {
+		t.Helper()
+		for _, d := range dirs {
+			if err := os.RemoveAll(d(l)); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
 // without drops one file from the backup.
 func without(path string) func(*Manifest, *[]File) {
 	return func(_ *Manifest, files *[]File) {
@@ -291,6 +304,32 @@ func TestRestoreRefusalsLeaveOldDataUntouched(t *testing.T) {
 		},
 		{
 			name:    "owner of the restored executor database cannot be set",
+			failOn:  "executor.db",
+			wantErr: "chown failed",
+			stopped: true,
+			started: true,
+		},
+		{
+			// The server directory did not exist before: the restore creates it,
+			// and a failure after that must remove it again.
+			name:    "server data directory did not exist, and the owner of server.db cannot be set",
+			arrange: withoutDir(func(l Layout) string { return l.ServerDir() }),
+			failOn:  "server.db",
+			wantErr: "chown failed",
+			stopped: true,
+			started: true,
+		},
+		{
+			name:    "executor data directory did not exist, and a key file cannot be written",
+			arrange: withoutDir(func(l Layout) string { return l.ExecutorDir() }),
+			failOn:  "nebula-default.key",
+			wantErr: "chown failed",
+			stopped: true,
+			started: true,
+		},
+		{
+			name:    "both data directories did not exist, and the executor database cannot be written",
+			arrange: withoutDir(func(l Layout) string { return l.ServerDir() }, func(l Layout) string { return l.ExecutorDir() }),
 			failOn:  "executor.db",
 			wantErr: "chown failed",
 			stopped: true,

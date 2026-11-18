@@ -150,9 +150,12 @@ func Restore(m Manifest, files []File, l Layout, sys System, latest map[string]i
 	ts := now.UTC().Format("20060102-150405")
 	type move struct{ from, to string }
 	var moved []move
+	var created []string // data directories this restore made; removed on a failure
 	undo := func() {
+		for i := len(created) - 1; i >= 0; i-- {
+			_ = os.RemoveAll(created[i])
+		}
 		for i := len(moved) - 1; i >= 0; i-- {
-			_ = os.RemoveAll(moved[i].from)
 			_ = os.Rename(moved[i].to, moved[i].from)
 		}
 		_ = sys.Start(StartUnits...)
@@ -182,16 +185,17 @@ func Restore(m Manifest, files []File, l Layout, sys System, latest map[string]i
 	// created it, because mkdirTracked reports only what it created.
 	var cfgRoot string
 	fail := func(err error) (Report, error) {
-		undo()
 		if cfgRoot != "" {
 			_ = os.RemoveAll(cfgRoot)
 		}
+		undo()
 		return Report{}, err
 	}
 	mk := func(dir string, mode os.FileMode, user string) error {
 		if err := os.Mkdir(dir, mode); err != nil {
 			return err
 		}
+		created = append(created, dir) // ours from here on, even if the owner cannot be set
 		if err := os.Chmod(dir, mode); err != nil {
 			return err
 		}
