@@ -68,6 +68,21 @@ type fakeExec struct {
 	permitStateCalls int
 	// permitStateErrFor answers GetPermitState with an error for one digest.
 	permitStateErrFor map[string]error
+	// rejectErr answers RejectPending with an error and changes nothing.
+	rejectErr error
+	// rejects records the RejectPending calls that reached the executor.
+	rejects []*pb.RejectPendingRequest
+}
+
+// RejectPending records the call and answers REJECTED, or rejectErr.
+func (f *fakeExec) RejectPending(_ context.Context, in *pb.RejectPendingRequest, _ ...grpc.CallOption) (*pb.RejectPendingResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rejects = append(f.rejects, in)
+	if f.rejectErr != nil {
+		return nil, f.rejectErr
+	}
+	return &pb.RejectPendingResponse{State: pb.PermitState_PERMIT_STATE_REJECTED}, nil
 }
 
 func (f *fakeExec) ListHostKeys(context.Context, *pb.ListHostKeysRequest, ...grpc.CallOption) (*pb.ListHostKeysResponse, error) {

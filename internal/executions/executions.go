@@ -54,6 +54,7 @@ type Executor interface {
 	RunScheduled(ctx context.Context, in *pb.RunScheduledRequest, opts ...grpc.CallOption) (*pb.RunScheduledResponse, error)
 	ListScheduleGrants(ctx context.Context, in *pb.ListScheduleGrantsRequest, opts ...grpc.CallOption) (*pb.ListScheduleGrantsResponse, error)
 	GetPermitState(ctx context.Context, in *pb.GetPermitStateRequest, opts ...grpc.CallOption) (*pb.GetPermitStateResponse, error)
+	RejectPending(ctx context.Context, in *pb.RejectPendingRequest, opts ...grpc.CallOption) (*pb.RejectPendingResponse, error)
 }
 
 // Hosts gives the inventory hosts (inventory.Store).
@@ -409,6 +410,11 @@ func (s *Service) checkCLIApproval(ctx context.Context, id, digest string) (bool
 	r, err := s.exec.GetPermitState(cctx, &pb.GetPermitStateRequest{ExecutionDigest: digest})
 	if err != nil {
 		return false, err
+	}
+	if r.GetState() == pb.PermitState_PERMIT_STATE_REJECTED {
+		// Rejected on the executor: record it so the sweep does not show it
+		// as expired. Not an approval, so it reports false.
+		return false, s.recordCLIRejection(ctx, id, digest, r.GetRejectedBy())
 	}
 	if r.GetState() != pb.PermitState_PERMIT_STATE_APPROVED {
 		return false, nil
