@@ -844,6 +844,9 @@ type pageData struct {
 	PVEDetail *pveDetailData
 	// PVENav shows the PVE navigation item (Options.PVE is set).
 	PVENav bool
+	// NotificationsNav shows the Notifications navigation entry: the inbox
+	// is wired and the user is an admin (see inboxVisible).
+	NotificationsNav bool
 	// Vuln is the data of the vulnerabilities pages.
 	Vuln *vulnPageData
 	// BuiltinTrust is the layout's built-in trust banner (ADR 0007
@@ -1009,6 +1012,7 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, data pageData) 
 	}
 	data.NavCollapsed = navStateFromRequest(r) == navCollapsed
 	data.PVENav = h.pve != nil
+	data.NotificationsNav = h.inboxVisible(r)
 	data.DeployEnabled = h.deploy != nil && h.pve != nil && h.pveRemotes != nil
 	// "Deploy here" (ADR 0008 section 6) on the chart's nodes of active
 	// remotes; read-only and blocked remotes get no shortcut.

@@ -276,6 +276,7 @@ func (h *Handler) renderHelp(w http.ResponseWriter, r *http.Request, book *helpB
 	data.Theme = themeFromRequest(r)
 	data.NavCollapsed = navStateFromRequest(r) == navCollapsed
 	data.PVENav = h.pve != nil
+	data.NotificationsNav = h.inboxVisible(r)
 	data.DeployEnabled = h.deploy != nil && h.pve != nil && h.pveRemotes != nil
 	if h.builtinTrust != nil {
 		data.BuiltinTrust = h.builtinTrust.get(r.Context())

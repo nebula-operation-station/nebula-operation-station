@@ -133,32 +133,40 @@ func parseNotificationCursor(raw string) (int64, error) {
 	return n, nil
 }
 
+// inboxVisible reports whether the request's user may see the inbox: the
+// log is wired, there is a session, and the admin check passes. An admin
+// check error denies (it is logged, its detail is not shown). The page and
+// the navigation entry both use this rule, so they cannot disagree.
+func (h *Handler) inboxVisible(r *http.Request) bool {
+	if h.inbox == nil || h.inboxAdmin == nil {
+		return false
+	}
+	s, ok := auth.SessionFrom(r.Context())
+	if !ok || s.UserName == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), notificationsCallTimeout)
+	defer cancel()
+	admin, err := h.inboxAdmin(ctx, s.UserName)
+	if err != nil {
+		h.log.Error("notifications: admin check", "error", err)
+		return false
+	}
+	return admin
+}
+
 // handleNotifications serves GET /notifications.
 func (h *Handler) handleNotifications(w http.ResponseWriter, r *http.Request) {
 	if h.inbox == nil {
 		http.NotFound(w, r)
 		return
 	}
-	s, ok := auth.SessionFrom(r.Context())
-	if !ok || s.UserName == "" {
+	if !h.inboxVisible(r) {
 		http.Error(w, "forbidden: notifications need the admin role", http.StatusForbidden)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), notificationsCallTimeout)
 	defer cancel()
-	admin := false
-	if h.inboxAdmin != nil {
-		var err error
-		admin, err = h.inboxAdmin(ctx, s.UserName)
-		if err != nil {
-			h.log.Error("notifications: admin check", "error", err)
-			admin = false
-		}
-	}
-	if !admin {
-		http.Error(w, "forbidden: notifications need the admin role", http.StatusForbidden)
-		return
-	}
 
 	vals := r.URL.Query()["after"]
 	if len(vals) > 1 {
