@@ -50,6 +50,91 @@ func TestOpsWorkOpenQuestionsComeFirst(t *testing.T) {
 	}
 }
 
+// Open questions take at most MaxOpsQuestionItems slots, so MaxOpenQuestions
+// open questions still leave room for the summary and the fix items.
+func TestOpsWorkManyOpenQuestionsKeepSlotsForSummaryAndFixes(t *testing.T) {
+	e := newOpsEnv(t)
+	for i := range opsnotes.MaxOpenQuestions {
+		askOpsQuestion(t, e, fmt.Sprintf("Frage Nummer %d", i))
+	}
+	for i := range 3 {
+		e.facts.groups = append(e.facts.groups,
+			labGroup(fmt.Sprintf("h-fix-%d", i), fmt.Sprintf("CVE-2026-%04d", i), opsfacts.TierHigh, false, 70))
+	}
+	items := workItems(t, opsGet(e.h, "/api/v1/ops/work", oaTok))
+	if got := len(questionItems(t, opsGet(e.h, "/api/v1/ops/work", oaTok))); got != api.MaxOpsQuestionItems {
+		t.Errorf("question items = %d, want the cap %d", got, api.MaxOpsQuestionItems)
+	}
+	kinds := map[string]int{}
+	for _, it := range items {
+		kinds[fmt.Sprint(it["kind"])]++
+	}
+	if kinds["summary"] != 1 || kinds["fix"] != 3 {
+		t.Errorf("kinds = %v, want one summary and three fix items", kinds)
+	}
+	if len(items) > api.MaxOpsWorkItems {
+		t.Errorf("%d items, want at most %d", len(items), api.MaxOpsWorkItems)
+	}
+}
+
+// A question whose item is over MaxOpsItemBytes is served without the host
+// facts; the text stays.
+func TestOpsWorkQuestionOverItemLimitDropsHostFacts(t *testing.T) {
+	e := newOpsEnv(t)
+	big := labGroup(opsHost, "CVE-2026-0001", opsfacts.TierCritical, false, 90)
+	for i := range 400 {
+		big.Projection.Findings = append(big.Projection.Findings, opsfacts.LabFinding{
+			VulnID: fmt.Sprintf("CVE-2026-%06d", i), Package: "openssl-package-with-a-long-name-for-size",
+			Installed: "3.0.1-1ubuntu1", Fixed: "3.0.2-0ubuntu1", Tier: opsfacts.TierHigh, Score: 50,
+			Fix: opsfacts.FixStatus("fix_verified")})
+	}
+	e.facts.groups = []opsfacts.Group{big}
+	askOpsQuestion(t, e, "Ist "+opsHost+" betroffen?")
+	items := questionItems(t, opsGet(e.h, "/api/v1/ops/work", oaTok))
+	if len(items) != 1 {
+		t.Fatalf("question items = %d, want 1", len(items))
+	}
+	question, _ := items[0]["question"].(map[string]any)
+	if _, ok := question["hosts"]; ok {
+		t.Errorf("host facts kept over the item limit")
+	}
+	if question["text"] != "Ist "+opsHost+" betroffen?" {
+		t.Errorf("question text lost: %v", question)
+	}
+	if !strings.Contains(e.log.String(), "item_over_limit") {
+		t.Errorf("the dropped host facts are not logged")
+	}
+}
+
+// A host named at the end of a sentence is named: a trailing '.' ends a word.
+func TestOpsWorkQuestionHostNamedAtSentenceEnd(t *testing.T) {
+	tests := []struct {
+		name, text string
+		want       int
+	}{
+		{"sentence end", "Check web01.", 1},
+		{"sentence end then more text", "Check web01. Danach.", 1},
+		{"domain continues", "Check web01.example.org", 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newOpsEnv(t)
+			g := labGroup(opsHost, "CVE-2026-0001", opsfacts.TierCritical, false, 90)
+			g.Projection.Host.Label = "web01"
+			e.facts.groups = []opsfacts.Group{g}
+			askOpsQuestion(t, e, tc.text)
+			items := questionItems(t, opsGet(e.h, "/api/v1/ops/work", oaTok))
+			if len(items) != 1 {
+				t.Fatalf("question items = %d, want 1", len(items))
+			}
+			hosts, _ := items[0]["question"].(map[string]any)["hosts"].([]any)
+			if len(hosts) != tc.want {
+				t.Errorf("hosts = %d, want %d", len(hosts), tc.want)
+			}
+		})
+	}
+}
+
 func TestOpsWorkQuestionCarriesDigestAndText(t *testing.T) {
 	e := newOpsEnv(t)
 	q := askOpsQuestion(t, e, "Was ist offen?")

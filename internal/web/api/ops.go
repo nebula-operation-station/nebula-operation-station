@@ -51,6 +51,10 @@ const (
 const (
 	// MaxOpsWorkItems bounds the items of one work list page.
 	MaxOpsWorkItems = 20
+	// MaxOpsQuestionItems bounds the open question items of one page: half
+	// the list, so a backlog of questions cannot push out the daily summary
+	// and the fix items (the agent answers the questions in turn).
+	MaxOpsQuestionItems = MaxOpsWorkItems / 2
 	// MaxOpsItemBytes bounds one work item as JSON; a larger one is left
 	// out and logged.
 	MaxOpsItemBytes = 32 << 10
@@ -427,7 +431,9 @@ func namedIn(lower, name string) bool {
 }
 
 // wordBoundary reports whether the byte at i does not continue a word: a
-// letter, digit, '-', '_', '.' or any non-ASCII byte does.
+// letter, digit, '-', '_' or any non-ASCII byte does. A '.' continues a word
+// only when a word byte follows it, so "web01." ends at the sentence end while
+// "web01.example.org" does not end at the first dot.
 func wordBoundary(s string, i int) bool {
 	if i < 0 || i >= len(s) {
 		return true
@@ -436,10 +442,17 @@ func wordBoundary(s string, i int) bool {
 	switch {
 	case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c >= 0x80:
 		return false
-	case c == '-' || c == '_' || c == '.':
+	case c == '-' || c == '_':
 		return false
+	case c == '.':
+		return i+1 >= len(s) || !isWordByte(s[i+1])
 	}
 	return true
+}
+
+// isWordByte reports whether c is a letter or digit (ASCII or non-ASCII).
+func isWordByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c >= 0x80
 }
 
 // serveWork answers GET OpsWorkPath. The class comes from the stored
@@ -491,7 +504,7 @@ func (h *OpsHandler) dueItems(ctx context.Context, class string) ([]opsWorkItem,
 	}
 	items := make([]opsWorkItem, 0, MaxOpsWorkItems)
 	for _, q := range questions {
-		if len(items) >= MaxOpsWorkItems {
+		if len(items) >= MaxOpsQuestionItems {
 			break
 		}
 		items = append(items, h.questionItem(q, lab, groups, fleet.Fleet))
