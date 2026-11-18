@@ -291,8 +291,13 @@ func parseOrigin(s string) (*url.URL, error) {
 	return u, nil
 }
 
-// checkRedirect confines redirects to the original metadata resource and
-// method on an approved origin, or to a configured token endpoint.
+// checkRedirect decides whether a redirect may be followed. It allows, for
+// anonymous requests only: a metadata GET of /tags/list or HEAD of /manifests/
+// to any approved registry origin with the same path (query may differ), and
+// an anonymous token GET to another approved origin's auth path. It refuses
+// everything for credentialed requests, and any chain of MaxRedirects requests
+// or more. This deviates from ADR 0006 ("no redirects"); the decision is open
+// with a maintainer (see MaxRedirects in limits.go).
 func (c *Client) checkRedirect(req *http.Request, via []*http.Request) error {
 	if c.priv != nil {
 		// Credentialed requests never follow redirects (ADR 0006: no
@@ -500,17 +505,30 @@ func (c *Client) noteBudget(reg string, h http.Header) {
 }
 
 // retryAfter parses a Retry-After header (delta-seconds or HTTP-date)
-// against the injected clock.
+// against the injected clock. The registry is untrusted, so the result is
+// capped at MaxBackoff before any conversion: a huge delta-seconds value must
+// not overflow time.Duration, and a far-future date must not push the pause
+// past the cap. Negative or unparsable values yield 0.
 func (c *Client) retryAfter(h string) time.Duration {
 	h = strings.TrimSpace(h)
 	if h == "" {
 		return 0
 	}
-	if sec, err := strconv.Atoi(h); err == nil && sec >= 0 {
+	const maxSeconds = int64(MaxBackoff / time.Second)
+	if sec, err := strconv.ParseInt(h, 10, 64); err == nil {
+		switch {
+		case sec <= 0:
+			return 0
+		case sec >= maxSeconds:
+			return MaxBackoff
+		}
 		return time.Duration(sec) * time.Second
 	}
 	if t, err := http.ParseTime(h); err == nil {
 		if d := t.Sub(c.now()); d > 0 {
+			if d > MaxBackoff {
+				return MaxBackoff
+			}
 			return d
 		}
 	}

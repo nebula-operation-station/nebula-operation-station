@@ -497,6 +497,12 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	if vh.started != nil {
 		vh.started(vuln, vulnNotifying)
 	}
+	// Lease events and the optional daily digest (ADR 0016 D10). They read
+	// the grants and stored runs through the operations service; they add no
+	// executor call. The state survives restarts in the data directory.
+	leases := newLeaseWatcher(db, ops, store, vuln.store, notifier, cfg.PublicOrigin,
+		cfg.Notifications.DailyDigest, time.Local, cfg.DataDir, time.Now, log)
+	bg.Go(func() { leases.Run(connCtx) })
 	bg.Go(func() { vuln.runSweeps(connCtx, sweepEvery) })
 	if vulnNotifying {
 		bg.Go(func() { vuln.runEvents(connCtx) })
@@ -518,7 +524,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	registryReads := newServerRegistryReads(exec, time.Now, log)
 	bg.Go(func() { closeRegistryReads(connCtx, registryReads, shutdownTimeout, log) })
 
-	h, err := ui.New(withBatchPlanner(ui.Options{
+	h, err := ui.New(withOperationSuggestions(withBatchPlanner(ui.Options{
 		PublicOrigin:   cfg.PublicOrigin,
 		Status:         exec,
 		HostNames:      hostNames,
@@ -572,7 +578,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		// stays in the executor.
 		RegistryReads: registryReads,
 		Log:           log,
-	}, batches))
+	}, batches), opsNotes, isAdmin))
 	if err != nil {
 		return err
 	}
@@ -841,6 +847,19 @@ func (d deployBatches) ApproveBatch(ctx context.Context, user, id string, assert
 func withBatchPlanner(o ui.Options, b deployBatches) ui.Options {
 	o.DeployBatches = b
 	o.ContainerBatches = b
+	return o
+}
+
+// withOperationSuggestions opens the operation form from agent suggestions
+// (ADR 0016 D8) on the notes store, with the server's admin rule. Without
+// it every suggestion link answers 404 in production.
+func withOperationSuggestions(o ui.Options, notes ui.OperationSuggestionStore, isAdmin func(ctx context.Context) bool) ui.Options {
+	o.OperationSuggestions = &ui.OperationSuggestions{
+		Store: notes,
+		IsAdmin: func(ctx context.Context, _ string) (bool, error) {
+			return isAdmin(ctx), nil
+		},
+	}
 	return o
 }
 

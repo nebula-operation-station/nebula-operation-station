@@ -11,6 +11,13 @@ import (
 	"time"
 )
 
+// The filesystem calls that undo depends on. Tests replace them to force the
+// failures a real filesystem does not produce on demand.
+var (
+	removeAll = os.RemoveAll
+	rename    = os.Rename
+)
+
 // System is what a restore needs from the machine: services and owners.
 type System interface {
 	Stop(units ...string) error
@@ -54,6 +61,42 @@ func CheckSchemas(m Manifest, latest map[string]int) error {
 		}
 	}
 	return nil
+}
+
+// mkdirTracked creates dir and its missing ancestors with mode, top-down, and
+// returns the topmost directory this call created ("" if dir already existed).
+// A directory that another process creates between the check and the Mkdir
+// makes Mkdir fail with ErrExist; it is not claimed, so a cleanup that removes
+// the returned path never deletes something this restore did not create.
+func mkdirTracked(dir string, mode os.FileMode) (string, error) {
+	var missing []string // bottom-up
+	for q := dir; ; q = filepath.Dir(q) {
+		_, err := os.Lstat(q)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		missing = append(missing, q)
+		if filepath.Dir(q) == q {
+			break
+		}
+	}
+	top := ""
+	for i := len(missing) - 1; i >= 0; i-- {
+		err := os.Mkdir(missing[i], mode)
+		if errors.Is(err, os.ErrExist) {
+			continue // made by someone else meanwhile: not ours to remove
+		}
+		if err != nil {
+			return top, err
+		}
+		if top == "" {
+			top = missing[i]
+		}
+	}
+	return top, nil
 }
 
 // Restore puts a checked backup in place: it checks the schemas, stages
@@ -103,17 +146,87 @@ func Restore(m Manifest, files []File, l Layout, sys System, latest map[string]i
 		}
 	}
 	if err := sys.Stop(StopUnits...); err != nil {
-		return rep, fmt.Errorf("backup: stop the services: %w", err)
+		// Stop may have stopped some units before it failed, and nothing has
+		// moved yet. All StartUnits are started again, including units that
+		// were inactive or disabled before: System does not report unit state
+		// (adding that would change its implementation in cmd/nebula). The
+		// handbook (backup-restore.md) documents this for the operator.
+		stopErr := fmt.Errorf("backup: stop the services: %w", err)
+		if startErr := sys.Start(StartUnits...); startErr != nil {
+			return rep, fmt.Errorf("%w; start the services again: %w", stopErr, startErr)
+		}
+		return rep, stopErr
 	}
 	ts := now.UTC().Format("20060102-150405")
 	type move struct{ from, to string }
 	var moved []move
-	undo := func() {
-		for i := len(moved) - 1; i >= 0; i-- {
-			_ = os.RemoveAll(moved[i].from)
-			_ = os.Rename(moved[i].to, moved[i].from)
+	var created []string // data directories this restore made; removed on a failure
+	// undo returns the data directories to their state before the restore: it
+	// removes what this restore created, puts each old directory back, and
+	// starts the services. Every error is returned, and an old directory that
+	// could not be put back is named, so the operator knows where the data is.
+	// If anything could not be removed or put back (prior holds earlier
+	// cleanup errors of the caller), the services stay stopped: they would
+	// run on missing or half-restored data, and systemd's StateDirectory=
+	// would create an empty data directory that blocks a manual rename back.
+	undo := func(prior []error) error {
+		errs := append([]error(nil), prior...)
+		for i := len(created) - 1; i >= 0; i-- {
+			if err := removeAll(created[i]); err != nil {
+				errs = append(errs, fmt.Errorf("remove the new %s: %w", created[i], err))
+			}
 		}
-		_ = sys.Start(StartUnits...)
+		var stranded []string
+		for i := len(moved) - 1; i >= 0; i-- {
+			if err := rename(moved[i].to, moved[i].from); err != nil {
+				stranded = append(stranded, moved[i].to)
+				errs = append(errs, fmt.Errorf("put %s back: %w", moved[i].from, err))
+			}
+		}
+		if len(stranded) > 0 {
+			errs = append(errs, fmt.Errorf("the old data is still at %s", strings.Join(stranded, ", ")))
+		}
+		if len(errs) > 0 {
+			errs = append(errs, errors.New("the services were left stopped; put the data back by hand, then start them"))
+			return errors.Join(errs...)
+		}
+		if err := sys.Start(StartUnits...); err != nil {
+			errs = append(errs, fmt.Errorf("start the services: %w", err))
+		}
+		return errors.Join(errs...)
+	}
+	// cfgRoot is the topmost directory this restore created for configuration
+	// files; a failure removes it, with any partly written file in it. Live
+	// configuration in ConfigDir is never under cfgRoot unless this restore
+	// created it, because mkdirTracked reports only what it created.
+	var cfgRoot string
+	// cfgFiles are the configuration files this restore created (O_EXCL), in
+	// order. A failure removes exactly these, so they are also cleaned up when
+	// from-backup-<ts> already existed and cfgRoot is empty; nothing else in
+	// that directory is touched.
+	var cfgFiles []string
+	// refuse removes what the restore has written, puts the old data back,
+	// starts the services, and returns err. If that cannot be completed, the
+	// error says so and names where the old data is.
+	refuse := func(err error) (Report, error) {
+		var errs []error
+		for i := len(cfgFiles) - 1; i >= 0; i-- {
+			if rerr := removeAll(cfgFiles[i]); rerr != nil {
+				errs = append(errs, fmt.Errorf("remove %s: %w", cfgFiles[i], rerr))
+			}
+		}
+		if cfgRoot != "" {
+			if rerr := removeAll(cfgRoot); rerr != nil {
+				errs = append(errs, fmt.Errorf("remove %s: %w", cfgRoot, rerr))
+			}
+		}
+		if uerr := undo(errs); uerr != nil {
+			errs = []error{uerr}
+		}
+		if len(errs) > 0 {
+			return Report{}, fmt.Errorf("%w; restoring the previous state failed: %w", err, errors.Join(errs...))
+		}
+		return Report{}, err
 	}
 	for _, d := range []string{l.ServerDir(), l.ExecutorDir()} {
 		fi, err := os.Lstat(d)
@@ -123,34 +236,34 @@ func Restore(m Manifest, files []File, l Layout, sys System, latest map[string]i
 		// Renaming a symbolic link would leave its target in place while
 		// the report says the data was moved aside (review m102, F7).
 		if err == nil && !fi.IsDir() {
-			undo()
-			return rep, fmt.Errorf("backup: %s is not a directory (a symbolic link?); refusing to restore over it", d)
+			return refuse(fmt.Errorf("backup: %s is not a directory (a symbolic link?); refusing to restore over it", d))
 		}
 		aside := d + ".pre-restore-" + ts
-		if err := os.Rename(d, aside); err != nil {
-			undo()
-			return rep, fmt.Errorf("backup: move %s aside: %w", d, err)
+		if err := rename(d, aside); err != nil {
+			return refuse(fmt.Errorf("backup: move %s aside: %w", d, err))
 		}
 		moved = append(moved, move{d, aside})
 		rep.MovedAside = append(rep.MovedAside, aside)
-	}
-	fail := func(err error) (Report, error) {
-		undo()
-		return Report{}, err
 	}
 	mk := func(dir string, mode os.FileMode, user string) error {
 		if err := os.Mkdir(dir, mode); err != nil {
 			return err
 		}
+		created = append(created, dir) // ours from here on, even if the owner cannot be set
 		if err := os.Chmod(dir, mode); err != nil {
 			return err
 		}
 		return sys.Chown(dir, user)
 	}
-	put := func(path string, b []byte, mode os.FileMode, user string) error {
+	// put writes a new file. If written is not nil, the path is appended to it
+	// as soon as the file exists, so a later failure can remove it.
+	put := func(path string, b []byte, mode os.FileMode, user string, written *[]string) error {
 		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 		if err != nil {
 			return err
+		}
+		if written != nil {
+			*written = append(*written, path) // ours from here on
 		}
 		if _, err := f.Write(b); err != nil {
 			f.Close()
@@ -169,19 +282,20 @@ func Restore(m Manifest, files []File, l Layout, sys System, latest map[string]i
 		return sys.Chown(path, user)
 	}
 	if err := mk(l.ServerDir(), 0o750, "nebula-server"); err != nil {
-		return fail(err)
+		return refuse(err)
 	}
 	if err := mk(l.ExecutorDir(), 0o700, "nebula-executor"); err != nil {
-		return fail(err)
+		return refuse(err)
 	}
 	if err := mk(filepath.Join(l.ExecutorDir(), "keys"), 0o700, "nebula-executor"); err != nil {
-		return fail(err)
+		return refuse(err)
 	}
-	if err := put(filepath.Join(l.ServerDir(), "server.db"), byPath[ServerDB].Data, 0o600, "nebula-server"); err != nil {
-		return fail(err)
+	// Data files need no tracking: they are inside directories in created.
+	if err := put(filepath.Join(l.ServerDir(), "server.db"), byPath[ServerDB].Data, 0o600, "nebula-server", nil); err != nil {
+		return refuse(err)
 	}
-	if err := put(filepath.Join(l.ExecutorDir(), "executor.db"), byPath[ExecutorDB].Data, 0o600, "nebula-executor"); err != nil {
-		return fail(err)
+	if err := put(filepath.Join(l.ExecutorDir(), "executor.db"), byPath[ExecutorDB].Data, 0o600, "nebula-executor", nil); err != nil {
+		return refuse(err)
 	}
 	for _, f := range files {
 		switch {
@@ -190,18 +304,22 @@ func Restore(m Manifest, files []File, l Layout, sys System, latest map[string]i
 			if strings.HasSuffix(f.Path, ".pub") {
 				mode = 0o644
 			}
-			if err := put(filepath.Join(l.ExecutorDir(), "keys", filepath.Base(f.Path)), f.Data, mode, "nebula-executor"); err != nil {
-				return fail(err)
+			if err := put(filepath.Join(l.ExecutorDir(), "keys", filepath.Base(f.Path)), f.Data, mode, "nebula-executor", nil); err != nil {
+				return refuse(err)
 			}
 		case strings.HasPrefix(f.Path, "server/config/") || strings.HasPrefix(f.Path, "server/systemd/"):
 			dir := filepath.Join(l.ConfigDir(), "from-backup-"+ts)
-			if err := os.MkdirAll(dir, 0o750); err != nil {
-				return fail(err)
+			madeDir, err := mkdirTracked(dir, 0o750)
+			if cfgRoot == "" {
+				cfgRoot = madeDir
+			}
+			if err != nil {
+				return refuse(err)
 			}
 			name := strings.ReplaceAll(strings.TrimPrefix(strings.TrimPrefix(f.Path, "server/config/"), "server/systemd/"), "/", "_")
 			p := filepath.Join(dir, name)
-			if err := put(p, f.Data, 0o640, "root"); err != nil {
-				return fail(err)
+			if err := put(p, f.Data, 0o640, "root", &cfgFiles); err != nil {
+				return refuse(err)
 			}
 			rep.Config = append(rep.Config, p)
 		}
