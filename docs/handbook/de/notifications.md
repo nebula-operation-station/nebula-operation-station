@@ -24,27 +24,25 @@ NOS-Weboberfläche gestellt (Tab Ops).
 Welche Nachrichten in diesem Release gesendet werden, steht im
 Admin-Handbuch [10.1](../../admin/guide.md#101-notifications): ein geänderter
 Host-Schlüssel, eine Änderung des Ops-Zustands, eine Operation mit
-fehlgeschlagenen Hosts, ein nach dem Neustart gesperrter Executor und die
-Schwachstellen-Ereignisse aus
-[Schwachstellen](vulnerabilities.md).
+fehlgeschlagenen Hosts, ein nach dem Neustart gesperrter Executor, die
+Schwachstellen-Ereignisse aus [Schwachstellen](vulnerabilities.md) und die
+zwei Lease-Ereignisse unten. Der Tagesdigest ist optional und standardmäßig
+aus.
 
 Jedes Ereignis, das der Server sendet, zurückhält (Ratenlimit oder
 Stummschaltung) oder nicht zustellen kann, wird mit seinem Ergebnis im
 Benachrichtigungslog des Servers gespeichert. Das Log behält 30 Tage und
 höchstens 5.000 Einträge.
 
-**Geplant: die Benachrichtigungsliste in der Weboberfläche.** Das Log gibt
-es; die Seite, die es anzeigt, ist in diesem Release nicht enthalten. Bis
-sie kommt, prüfe das Log über den Verlaufsabschnitt des Admin-Handbuchs
-(10.3).
+**Nicht in diesem Release: die Benachrichtigungsliste in der Weboberfläche.**
+Das Log gibt es; die Seite, die es anzeigt, ist in diesem Release nicht
+enthalten. Bis sie kommt, prüfe das Log über den Verlaufsabschnitt des
+Admin-Handbuchs (10.3).
 
 ## Lease-Ablauf und fehlgeschlagene Leases
 
-**Status: geplant.** Diese zwei Ereignisse werden in diesem Release nicht
-gesendet (Admin-Handbuch [10.6](../../admin/guide.md#106-ops-agent),
-Abschnitt "Status in this build" nennt dasselbe).
-
-Wenn sie kommen, funktionieren sie so:
+Diese zwei Ereignisse werden in diesem Release gesendet. Sie brauchen weder
+LLM noch Agenten.
 
 - `lease.expiring`: Ein Read-Lease oder eine Schedule-Freigabe läuft innerhalb
   von 7 Tagen ab, und nochmals innerhalb von 1 Tag. Du bekommst eine
@@ -53,19 +51,16 @@ Wenn sie kommen, funktionieren sie so:
   Nachricht pro Freigabe, Aktion und Host, bis zum nächsten erfolgreichen
   Lauf dieser Kombination.
 
-Beide Nachrichten brauchen weder LLM noch Agenten.
-
 ## Der Tagesdigest
 
-**Status: geplant.** In diesem Release wird kein Digest gesendet.
+**Status: optional, standardmäßig aus.** Ein Admin schaltet ihn in
+`server.json` ein (Admin-Handbuch [10.1](../../admin/guide.md#101-notifications)).
 
-Der Digest ist optional und wird einmal am Tag zu einer Uhrzeit gesendet, die
-du setzt. Er enthält nur Zähler: offene Updates, ausstehende Neustarts, Hosts,
-die nicht READY sind, Freigaben, die innerhalb von 7 Tagen ablaufen, offene
-Befunde je Tier und die Anzahl KEV, sowie fehlgeschlagene Ausführungen der
-letzten 24 Stunden. Die Uhrzeit wird in `server.json` gesetzt; der Schlüssel
-ist in diesem Release noch nicht vorhanden, das Admin-Handbuch nennt ihn,
-wenn er kommt.
+Der Digest wird einmal am Tag zu einer Uhrzeit gesendet, die du setzt. Er
+enthält nur Zähler: offene Updates, ausstehende Neustarts, Hosts, die nicht
+READY sind, Freigaben, die innerhalb von 7 Tagen ablaufen, offene Befunde je
+Tier und die Anzahl KEV, sowie fehlgeschlagene Ausführungen der letzten 24
+Stunden. Er braucht mindestens einen Benachrichtigungsanbieter.
 
 ## Was eine Nachricht von dir verlangen kann
 

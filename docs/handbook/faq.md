@@ -265,9 +265,10 @@ the agent's last-run status. If the LLM address is not in a lab network
 while the data class is `lab`, the run stops with `llm_refused_lab_rule`
 and writes no note. Nothing falls back to `external` within a run.
 
-In this release the agent has no finding source connected, so it has no
-work at all. See admin guide [10.6](../admin/guide.md#106-ops-agent),
-"Status in this build".
+In this release the agent does nothing by default: it is off, and no form
+or API in this build turns it on. Until an admin enables it, the Ops tab
+says "Agent switched off. No open suggestion." See admin guide
+[10.6](../admin/guide.md#106-ops-agent), "Status in this build".
 
 ## Why does a LOW restart suddenly ask for my security key?
 
@@ -275,8 +276,11 @@ Because a fix note is stored for that host, and the restart is of the same
 kind of action (action family) on the same host. NOS marks the execution
 as suggested, also when you did not open it from the card, and raises its
 risk class to MEDIUM. The approval is then a security-key touch. The
-operation page says "From an agent suggestion" and "Risk MEDIUM (raised;
-the action declares LOW)". This is intended (ADR 0016 D9).
+operation page shows the risk the executor decides (at least MEDIUM here),
+but it does not say why: it has no "From an agent suggestion" label in this
+build. Only a form that you opened from a card shows the banner "Opened from
+an agent suggestion. This execution needs a security-key touch." This is
+intended (ADR 0016 D9).
 
 The marking lasts while the note is stored: at most 30 days, or 500 notes.
 Dismissing the card does not lift it. Read actions and schedules are not
@@ -287,5 +291,6 @@ limit.
 
 No. NOS only sends to Telegram. It never reads from Telegram: no replies,
 no bot commands and no free text reach NOS. Questions to the ops agent are
-asked only in the NOS web UI. The question form in the Ops tab is not in
-this release. See [Notifications](notifications.md).
+asked only in the NOS web UI, in the Ops tab. In this build a question is
+stored but not answered: the agent does not read questions yet. See
+[Notifications](notifications.md).

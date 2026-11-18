@@ -371,9 +371,11 @@ während die Datenklasse `lab` ist, bricht der Lauf mit `llm_refused_lab_rule`
 ab und schreibt keine Notiz. Innerhalb eines Laufs wird nicht auf `external`
 ausgewichen.
 
-In diesem Release hat der Agent noch keine Befundquelle angeschlossen und hat
-daher gar keine Arbeit. Siehe Admin-Handbuch
-[10.6](../../admin/guide.md#106-ops-agent), "Status in this build".
+In diesem Release tut der Agent standardmäßig nichts: Er ist aus, und kein
+Formular und keine API in diesem Release schaltet ihn ein. Solange ein Admin
+ihn nicht einschaltet, zeigt der Tab Ops "Agent switched off. No open
+suggestion.". Siehe Admin-Handbuch [10.6](../../admin/guide.md#106-ops-agent),
+"Status in this build".
 
 ## Warum verlangt ein LOW-Neustart plötzlich den Sicherheitsschlüssel?
 
@@ -381,9 +383,13 @@ Weil für diesen Host eine Fix-Notiz gespeichert ist und der Neustart dieselbe
 Art von Aktion (Aktionsfamilie) auf demselben Host ist. NOS markiert die
 Ausführung als aus einem Vorschlag stammend, auch wenn du sie nicht über die
 Karte geöffnet hast, und hebt die Risikoklasse auf MEDIUM. Die Genehmigung ist
-dann eine Berührung des Sicherheitsschlüssels. Die Betriebsseite zeigt "Aus
-einem Agenten-Vorschlag" und "Risiko MEDIUM (erhöht; die Aktion deklariert
-LOW)". Das ist so vorgesehen (ADR 0016 D9).
+dann eine Berührung des Sicherheitsschlüssels. Die Betriebsseite zeigt das
+Risiko, das der Executor festlegt (für eine vorgeschlagene Ausführung
+mindestens MEDIUM), sagt aber nicht warum: Ein Etikett "Aus einem
+Agenten-Vorschlag" gibt es in diesem Release nicht. Nur ein Formular, das du
+aus einer Karte geöffnet hast, zeigt den Hinweis "Aus einem Agenten-Vorschlag
+geöffnet. Diese Ausführung braucht eine Security-Key-Berührung." Das ist so
+vorgesehen (ADR 0016 D9).
 
 Die Markierung gilt, solange die Notiz gespeichert ist: höchstens 30 Tage oder
 500 Notizen. Eine ausgeblendete Karte hebt sie nicht auf. Lesende Aktionen und
@@ -394,5 +400,6 @@ Zeitpläne sind nicht betroffen. Das Admin-Handbuch
 
 Nein. NOS sendet nur an Telegram und liest nie von dort: Keine Antworten,
 keine Bot-Befehle und kein Freitext erreichen NOS. Fragen an den Ops-Agenten
-stellst du nur in der NOS-Weboberfläche. Das Fragefeld im Tab Ops ist in
-diesem Release nicht enthalten. Siehe [Benachrichtigungen](notifications.md).
+stellst du nur in der NOS-Weboberfläche, im Tab Ops. In diesem Release wird
+eine Frage gespeichert, aber nicht beantwortet: Der Agent liest Fragen noch
+nicht. Siehe [Benachrichtigungen](notifications.md).

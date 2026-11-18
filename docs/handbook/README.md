@@ -22,7 +22,7 @@ below). The how-tos link to the exact section.
 | [Proxmox VE](proxmox.md) | Create a read-only token, add a remote, approve a read lease, live values, link guests to hosts, rotate a token |
 | [Network](network.md) | IPAM networks and assets, discovery scans, the traffic map, register a Cisco CBS switch or a PAN-OS firewall with a `nos-read` account |
 | [Vulnerabilities](vulnerabilities.md) | Set up the Hermes agent token, read the findings pages, understand states and labels, export findings |
-| [Notifications](notifications.md) | What NOS sends and never reads (Telegram is outbound only), the notification log, lease events and the daily digest (planned) |
+| [Notifications](notifications.md) | What NOS sends and never reads (Telegram is outbound only), the notification log, lease events and the optional daily digest |
 | [Backup and restore](backup-restore.md) | Create a backup key, back up, restore, container volumes, upgrade safely |
 | [Troubleshooting](troubleshooting.md) | Symptom-first fixes for the most common problems |
 | [FAQ](faq.md) | Short answers to frequent questions |
