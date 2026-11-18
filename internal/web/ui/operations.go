@@ -78,6 +78,9 @@ const (
 type operationsData struct {
 	// Items is the list: single operations and groups, newest first.
 	Items []opsItem
+	// Suggestion is set when the new-operation form was opened from an
+	// agent suggestion (ADR 0016 D8): the banner and the hidden reference.
+	Suggestion *suggestionForm
 	// Pending are the operations waiting for approval (the section at
 	// the top of the page).
 	Pending []opsRow
@@ -376,20 +379,50 @@ func (h *Handler) handleOperationNew(w http.ResponseWriter, r *http.Request) {
 	}
 	data := pageData{Title: "New operation", Active: "operations", Content: "operation_new", Scripts: []string{"webauthn.js", "operations.js"}}
 	ops := &operationsData{}
+	q := r.URL.Query()
+	// A suggestion opens the form with the action and host of the stored
+	// step only (ADR 0016 D8); action=, host= and param= are ignored.
+	var sf *suggestionForm
+	if q.Has("suggestion") {
+		f, found, err := h.suggestionPrefill(r, q.Get("suggestion"))
+		if err != nil {
+			h.log.Error("suggestion prefill", "error", err)
+			http.Error(w, "operations unavailable", http.StatusInternalServerError)
+			return
+		}
+		if !found {
+			http.Error(w, suggestionNotFound, http.StatusNotFound)
+			return
+		}
+		sf = f
+	}
 	cctx, ccancel := context.WithTimeout(r.Context(), operationsCallTimeout)
 	catalog, err := h.operations.Catalog(cctx)
 	ccancel()
 	if err != nil {
 		h.log.Error("action catalog", "error", err)
 	}
-	want := r.URL.Query().Get("action")
-	if !slices.ContainsFunc(catalog, func(a actions.Action) bool { return a.ID == want }) && len(catalog) > 0 {
+	want := q.Get("action")
+	if sf != nil {
+		want = sf.ActionID
+	}
+	inCatalog := slices.ContainsFunc(catalog, func(a actions.Action) bool { return a.ID == want })
+	if sf != nil && !inCatalog {
+		// A step whose action left the catalog opens no form (D8).
+		http.Error(w, suggestionNotFound, http.StatusNotFound)
+		return
+	}
+	if !inCatalog && len(catalog) > 0 {
 		want = catalog[0].ID
 	}
 	// Param prefill: ?param=name=value, repeatable (a container action
-	// link from the host page).
+	// link from the host page). A suggestion form has no prefilled
+	// parameter: the human enters every one.
 	paramValues := map[string]string{}
-	for _, p := range r.URL.Query()["param"] {
+	for _, p := range q["param"] {
+		if sf != nil {
+			break
+		}
 		if name, value, ok := strings.Cut(p, "="); ok {
 			paramValues[name] = value
 		}
@@ -408,6 +441,7 @@ func (h *Handler) handleOperationNew(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), inventoryCallTimeout)
 	defer cancel()
+	foundHost := false
 	if h.hosts != nil {
 		hosts, err := h.hosts(ctx)
 		if err != nil {
@@ -437,10 +471,20 @@ func (h *Handler) handleOperationNew(w http.ResponseWriter, r *http.Request) {
 			if name == "" {
 				name = x.ID
 			}
-			ops.Hosts = append(ops.Hosts, opsHostOption{ID: x.ID, Name: name, Status: st, Usable: usable[x.ID],
-				Checked: usable[x.ID] && slices.Contains(r.URL.Query()["host"], x.ID)})
+			checked := usable[x.ID] && slices.Contains(q["host"], x.ID)
+			if sf != nil {
+				checked = usable[x.ID] && x.ID == sf.HostID
+				foundHost = foundHost || x.ID == sf.HostID
+			}
+			ops.Hosts = append(ops.Hosts, opsHostOption{ID: x.ID, Name: name, Status: st, Usable: usable[x.ID], Checked: checked})
 		}
 	}
+	if sf != nil && !foundHost {
+		// A step whose host left the inventory opens no form (D8).
+		http.Error(w, suggestionNotFound, http.StatusNotFound)
+		return
+	}
+	ops.Suggestion = sf
 	data.Ops = ops
 	h.render(w, r, data)
 }
@@ -679,7 +723,12 @@ func (h *Handler) handleOperationCreate(w http.ResponseWriter, r *http.Request) 
 		Hosts   []string          `json:"hosts"`
 		Params  map[string]string `json:"params"`
 		Secrets map[string]string `json:"secrets"`
-		Plan    *struct {
+		// Suggestion is the agent suggestion reference "<note ID>.<step>"
+		// of a form opened from a suggestion (ADR 0016 D9). The executions
+		// service resolves it; the browser cannot lower the approval by
+		// omitting it.
+		Suggestion string `json:"suggestion"`
+		Plan       *struct {
 			Preset    string `json:"preset"`
 			Size      int    `json:"size"`
 			Continue  string `json:"continue"`
@@ -696,6 +745,7 @@ func (h *Handler) handleOperationCreate(w http.ResponseWriter, r *http.Request) 
 		plan = executions.Plan{Preset: in.Plan.Preset, Size: in.Plan.Size, Continue: in.Plan.Continue, MaxFailed: in.Plan.MaxFailed}
 	}
 	plan.Secrets = in.Secrets
+	plan.SuggestionRef = in.Suggestion
 	c, err := h.operations.CreateStaged(ctx, webUser(r), in.Action, in.Hosts, in.Params, plan)
 	var he *executions.HostError
 	var pe *executions.ParamError
@@ -710,6 +760,9 @@ func (h *Handler) handleOperationCreate(w http.ResponseWriter, r *http.Request) 
 			out["options"] = json.RawMessage(c.Options)
 		}
 		writeJSON(w, http.StatusOK, out)
+	case errors.Is(err, executions.ErrUnknownSuggestion):
+		// Fixed text: the reference is the browser's input.
+		writeJSONError(w, http.StatusBadRequest, suggestionNotFound)
 	case errors.Is(err, executions.ErrUnknownAction), errors.Is(err, executions.ErrNoHosts), errors.Is(err, executions.ErrTooManyHosts), errors.As(err, &he), errors.As(err, &pe), errors.As(err, &ple):
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 	default:
