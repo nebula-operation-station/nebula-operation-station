@@ -84,6 +84,13 @@ use Go `net/http`, `crypto/tls`, `crypto/x509` and existing security primitives.
   run result and `run_finished` entry. That endpoint is the stored dispatch
   endpoint on every close path; a check over another endpoint does not
   replace it and is audited as `check_endpoint` (round 1, 2026-11-18).
+  Round 2 (2026-11-18): the dispatch endpoint is stored before anything is
+  sent, while the run is still dispatching (and named in
+  `run_dispatch_uncertain`), so a dispatch that breaks mid-way names where it
+  was attempted; a reconcile check never stores its endpoint as the dispatch
+  endpoint (a run without one keeps none). `ssh_failover_failed` is written
+  only for dials with more than one endpoint, and once per open run while the
+  reconciler retries (not per pass).
 
 ### Credential custody and least privilege
 
