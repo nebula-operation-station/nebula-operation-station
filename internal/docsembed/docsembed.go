@@ -10,6 +10,12 @@
 // stale copy cannot pass make check. Translations in subdirectories
 // (docs/handbook/de/) are not embedded yet.
 //
+// The admin guide (docs/admin/guide.md) is embedded too, in admin/, by
+// the same command. It is not a handbook page: Pages and Page do not
+// return it, so /help is unchanged; AdminGuide returns it for the help
+// index (internal/helpdocs). After editing docs/admin/guide.md, run
+// "go generate ./internal/docsembed" as well.
+//
 // The package only hands out the Markdown source; rendering it is the
 // job of internal/docsembed/mdsafe.
 package docsembed
@@ -30,8 +36,19 @@ import (
 //go:embed handbook/*.md
 var handbookFS embed.FS
 
+// adminGuide is the admin guide (docs/admin/guide.md), copied to
+// admin/guide.md by gen.go. It is not a handbook page: Pages and Page
+// never return it. Only AdminGuide does, for the help index (ADR 0014 D2).
+//
+//go:embed admin/guide.md
+var adminGuide []byte
+
 // IndexSlug is the slug of the handbook's overview page (README.md).
 const IndexSlug = "readme"
+
+// AdminGuideSlug is the slug of the admin guide in the help index. It
+// is a valid page slug, but no handbook page has it.
+const AdminGuideSlug = "admin-guide"
 
 // MaxSlugBytes bounds a page slug; longer names are rejected unparsed.
 const MaxSlugBytes = 64
@@ -80,6 +97,13 @@ func Pages() ([]Doc, error) {
 	}
 	slices.SortFunc(docs, func(a, b Doc) int { return strings.Compare(a.Slug, b.Slug) })
 	return docs, nil
+}
+
+// AdminGuide returns the embedded admin guide (docs/admin/guide.md) as
+// a Doc with slug AdminGuideSlug. It is for the help index only; the
+// /help pages come from Pages and Page and never include it.
+func AdminGuide() Doc {
+	return Doc{Slug: AdminGuideSlug, File: "guide.md", Source: slices.Clone(adminGuide)}
 }
 
 // Page returns the page with the given slug, or ErrNotFound.
