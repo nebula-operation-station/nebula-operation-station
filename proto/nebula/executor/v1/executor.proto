@@ -90,6 +90,17 @@ service ExecutorService {
   // Reveals nothing about the permit's contents and changes nothing.
   rpc GetPermitState(GetPermitStateRequest) returns (GetPermitStateResponse);
 
+  // Role: server, admin (ADR 0007 amendment 2026-11-17, R1-R7; spec 07
+  // v29-07-01). Rejects a pending execution permit or a pending batch plan
+  // (by its batch digest, as a whole). It only removes authority: it
+  // carries no assertion, no approval field and no mode, and it never
+  // approves. A server-UID call needs an open privileged session and the
+  // relayed_user field; an admin-UID call must leave relayed_user empty.
+  // The executor persists a rejected marker and the signed event
+  // permit.rejected in one executor.db transaction; the reason is checked
+  // against its limits and only its length is recorded.
+  rpc RejectPending(RejectPendingRequest) returns (RejectPendingResponse);
+
   // Executor-held risk data (H01). ProposeExecution rejects a risk_class
   // below the minimum the executor derives from it: the declared risk of a
   // trusted (artifact, action, version), HIGH for anything untrusted, and
@@ -731,6 +742,24 @@ enum PermitState {
   PERMIT_STATE_UNSPECIFIED = 0;
   PERMIT_STATE_PENDING = 1;
   PERMIT_STATE_APPROVED = 2;
+  // A row in rejected_proposals exists for the digest (RejectPending).
+  // Final: the digest can never be approved again.
+  PERMIT_STATE_REJECTED = 3;
+}
+
+// The caller role that rejected a proposal, from the executor's own
+// marker (never from a request field).
+enum RejectingRole {
+  REJECTING_ROLE_UNSPECIFIED = 0;
+  REJECTING_ROLE_SERVER = 1;
+  REJECTING_ROLE_ADMIN = 2;
+}
+
+// What a rejected digest named.
+enum ProposalKind {
+  PROPOSAL_KIND_UNSPECIFIED = 0;
+  PROPOSAL_KIND_EXECUTION = 1;
+  PROPOSAL_KIND_BATCH = 2;
 }
 
 message Target {
@@ -1058,11 +1087,33 @@ message ApproveCLIResponse {
 }
 
 message GetPermitStateRequest {
+  // An execution digest or a batch digest (lowercase hex SHA-256).
   string execution_digest = 1;
 }
 
 message GetPermitStateResponse {
   PermitState state = 1;
+  // Set only with PERMIT_STATE_REJECTED: who rejected, from the marker.
+  RejectingRole rejected_by = 2;
+}
+
+message RejectPendingRequest {
+  // The execution digest or batch digest (lowercase hex SHA-256).
+  string digest = 1;
+  // Optional; at most 200 code points and 800 bytes, valid UTF-8, no
+  // control or bidirectional control characters. Only its length is
+  // recorded by the executor.
+  string reason = 2;
+  // Server UID only, required there: the privileged session's user name
+  // as claimed by the server (1-64 bytes, see spec 07). Recorded only,
+  // never used for a decision. Must be empty from the admin UID.
+  string relayed_user = 3;
+}
+
+message RejectPendingResponse {
+  // Always PERMIT_STATE_REJECTED on success.
+  PermitState state = 1;
+  ProposalKind kind = 2;
 }
 
 message TrustArtifactRequest {

@@ -51,7 +51,7 @@ func memberKey(parent canonical.Digest, memberID string) string {
 func (a *Authority) ClaimMember(ctx context.Context, parent canonical.Digest, index int, member canonical.BatchMember) (MemberPermit, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	e, err := a.getLocked(parent, permit.StateApproved)
+	e, err := a.approvableLocked(parent, permit.StateApproved)
 	if err != nil {
 		return MemberPermit{}, err
 	}

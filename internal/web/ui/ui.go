@@ -466,6 +466,7 @@ var pageFiles = map[string]string{
 	"inventory_enroll":    "inventory_enroll.html",
 	"operation_new":       "operation_new.html",
 	"operation":           "operation.html",
+	"operations_abort":    "operations_abort.html",
 	"schedules":           "schedules.html",
 	"leases":              "leases.html",
 	"lease":               "leases.html",
@@ -560,6 +561,8 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("POST /operations/gate", h.handleOperationGate)
 	mux.HandleFunc("POST /operations/gate/commit", h.handleOperationGateCommit)
 	mux.HandleFunc("POST /operations/abort", h.handleOperationAbort)
+	mux.HandleFunc("GET /operations/abort/confirm", h.handleOperationAbortConfirm)
+	mux.HandleFunc("POST /operations/abort/form", h.handleOperationAbortForm)
 	mux.HandleFunc("POST /operations/retry", h.handleOperationRetry)
 	// Scheduled read-only checks (schedule grants).
 	mux.HandleFunc("GET /schedules", h.handleSchedules)

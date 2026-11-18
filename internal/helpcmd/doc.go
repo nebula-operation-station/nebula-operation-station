@@ -26,7 +26,10 @@
 // The package is a pure library. It has no command catalog, reads no docs,
 // runs no command, opens no connection and imports only the standard library.
 //
-// AS-05 part 2 is not in this package yet: the command catalog (built from the
-// cmd/nebula command tree, not from the docs), the shape builder from the code
-// blocks of cited chunks, the placeholder class table, and checks V2 to V5.
+// AS-05 part 2 is only partly in this package. The placeholder class table
+// (ADR 0014 D4, "Matching (V3)") is in placeholder.go: the fixed names, the
+// value shape of each class, and the lookup. Still open in part 2: the command
+// catalog (built from the cmd/nebula command tree, not from the docs), the
+// shape builder from the code blocks of cited chunks, the token matching of
+// V3, and checks V2 to V5 (V5 needs the trusted host set).
 package helpcmd
