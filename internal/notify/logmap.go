@@ -23,7 +23,11 @@ func logEntry(e Event) (kind notifylog.KindCode, state notifylog.StateCode, ok b
 		return notifylog.KindCode(e.Kind), notifylog.StateRegressed, true
 	case kindVulnFeedMarkReset:
 		return notifylog.KindCode(e.Kind), notifylog.StateReset, true
-	case kindVulnDigest, KindIntegrityDigest:
+	case KindLeaseExpiring:
+		return notifylog.KindLeaseExpiring, notifylog.StateExpiring, true
+	case KindLeaseRunFailed:
+		return notifylog.KindLeaseRunFailed, notifylog.StateFailed, true
+	case KindDailyDigest, kindVulnDigest, KindIntegrityDigest:
 		// Both are summaries of held or open events; the log has one digest
 		// kind for them.
 		return notifylog.KindDigest, notifylog.StateSummary, true

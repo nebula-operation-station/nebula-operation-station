@@ -497,6 +497,12 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	if vh.started != nil {
 		vh.started(vuln, vulnNotifying)
 	}
+	// Lease events and the optional daily digest (ADR 0016 D10). They read
+	// the grants and stored runs through the operations service; they add no
+	// executor call. The state survives restarts in the data directory.
+	leases := newLeaseWatcher(db, ops, store, vuln.store, notifier, cfg.PublicOrigin,
+		cfg.Notifications.DailyDigest, time.Local, cfg.DataDir, time.Now, log)
+	bg.Go(func() { leases.Run(connCtx) })
 	bg.Go(func() { vuln.runSweeps(connCtx, sweepEvery) })
 	if vulnNotifying {
 		bg.Go(func() { vuln.runEvents(connCtx) })

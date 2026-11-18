@@ -202,8 +202,13 @@ func TestAnswerWithCollidingRefDoesNotSupersedeSummary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Put summary: %v", err)
 	}
-	ans := Draft{Kind: KindAnswer, Ref: validText(KindSummary).Ref, Digest: validText(KindSummary).Digest, Body: Body{Text: "Antwort."}}
-	if _, _, err := s.Put(ctx, r, ans, testSnapshot); err != nil {
+	// An answer needs an open question; its ref is the question ID, so it
+	// can never collide with a summary's day ref.
+	q, err := s.AskQuestion(ctx, "admin", "Frage?")
+	if err != nil {
+		t.Fatalf("AskQuestion: %v", err)
+	}
+	if _, _, err := s.Put(ctx, r, answerDraft(q, "Antwort."), testSnapshot); err != nil {
 		t.Fatalf("Put answer: %v", err)
 	}
 	got, err := s.Get(ctx, sum.ID)
