@@ -7,7 +7,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"io/fs"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -128,19 +127,20 @@ func TestEveryLoggableKindIsRecordedNotRefused(t *testing.T) {
 // anyone editing a table, so it cannot be sent without a log code unnoticed.
 func packageKinds(t *testing.T) []string {
 	t.Helper()
-	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(fi fs.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
+	names, err := filepath.Glob("*.go")
 	if err != nil {
-		t.Fatalf("parse package source: %v", err)
+		t.Fatalf("list package source: %v", err)
 	}
-	pkg, ok := pkgs["notify"]
-	if !ok {
-		t.Fatal("package notify not found in source")
-	}
+	fset := token.NewFileSet()
 	var kinds []string
-	for _, f := range pkg.Files {
+	for _, name := range names {
+		if strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
 		for _, d := range f.Decls {
 			gd, ok := d.(*ast.GenDecl)
 			if !ok || gd.Tok != token.CONST {
