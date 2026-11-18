@@ -4,18 +4,21 @@
 // one row per notification event that was sent, held back by the rate
 // limit, held back by a mute, or failed to send.
 //
-// The log is structured data only: host label, kind, state, reason, the
+// The log is structured data only: host ID, kind, state, reason, the
 // execution ID, a NOS link and counts. It never holds a provider token, a
 // provider target URL or log text. Kind, State, Reason and Outcome are closed
-// sets, and the host label and the execution ID have a fixed shape (letters,
-// digits, '.', '_', '-'; see validShape). A value that does not fit is refused
-// with ErrRefused, and the error names the field but never the value, so a
-// refused input cannot leak through an error or a log line that wraps it. A
-// host label or execution ID that fits the shape but is longer than its byte
-// limit is shortened and marked in Entry.Changed; nothing is rejected for size,
-// because a log must not lose a message. A link that is not a NOS path, or is
-// too long, is dropped and marked. Time is injected through New, so retention
-// is testable.
+// sets. Host must be an inventory host ID (or empty, for an event with no
+// host) and ExecutionID a lowercase UUIDv4 (or empty), the same forms the
+// inventory and the executions package use (see validHost and
+// validExecutionID). A value that does not match is refused with ErrRefused,
+// and the error names the field but never the value, so a refused input
+// cannot leak through an error or a log line that wraps it. The guarantee is
+// the ID shape: a value that is not a valid ID is refused, and nothing more is
+// claimed. A token that has the inventory shape is a valid host ID, so
+// callers must never pass a secret as a host. A caller must pass the
+// inventory ID, not a display name. A link that is not
+// a NOS path, or is too long, is dropped and marked in Entry.Changed. Time is
+// injected through New, so retention is testable.
 //
 // The package does not send notifications and is not wired into the server
 // yet; the caller appends after each decision. Append keeps the table within
@@ -32,6 +35,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 )
 
 // Retention is how long entries are kept. Prune removes older entries.
@@ -43,20 +48,27 @@ const Retention = 30 * 24 * time.Hour
 const MaxEntries = 5000
 
 // ErrRefused is returned by Append when a field holds a value it may not hold:
-// a value that is not a closed code, or a host label or execution ID with the
+// a value that is not a closed code, or a host ID or execution ID with the
 // wrong shape. Callers branch on it with errors.Is. The error names the field;
 // it never includes the value.
 var ErrRefused = errors.New("notifylog: record refused")
 
-// idShapeRe is the shape of a host label and an execution ID: a letter or digit,
-// then letters, digits, '.', '_' or '-'. It admits no spaces, separators, URL
-// or query characters, colons, or non-ASCII, so a bot token or target URL
-// cannot match it. Length is checked separately, against the byte limits.
-var idShapeRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+// execIDRe is the execution ID form: a lowercase UUIDv4, as executions.newUUID
+// generates it. canonical has the same pattern, but its copy is unexported.
+var execIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
-// validShape reports whether s is empty or has the host-label/ID shape.
-func validShape(s string) bool {
-	return s == "" || idShapeRe.MatchString(s)
+// validHost reports whether s is empty (no host) or exactly an inventory host
+// ID: canonical.ValidHostID, the pattern the inventory checks (lowercase
+// letters, digits, '.', '_', '-', at most 63 bytes). Nothing stricter and
+// nothing looser. There is no secret detector here: a value that does not
+// have the ID shape is refused, and a value that does is a valid host ID.
+func validHost(s string) bool {
+	return s == "" || canonical.ValidHostID(s)
+}
+
+// validExecutionID reports whether s is empty or a lowercase UUIDv4.
+func validExecutionID(s string) bool {
+	return s == "" || execIDRe.MatchString(s)
 }
 
 // refused builds the error for a refused field. why names the field and the
@@ -71,7 +83,8 @@ const MaxPage = 100
 // Byte limits for the free-text fields. They match the CHECK constraints in
 // migration 0045_notify_log.sql. Kind, State, Reason and Outcome are closed
 // sets and have no byte limit: they are refused unless they are a code. Host
-// and ExecutionID have a shape (see validShape) and are refused unless they fit.
+// and ExecutionID have a fixed form (see validHost and validExecutionID) and
+// are refused unless they match it, so they never need cutting.
 const (
 	MaxHost        = 64
 	MaxExecutionID = 128
@@ -220,9 +233,11 @@ func ReasonForError(err error) ReasonCode {
 // Fields.
 type Field uint8
 
-// Fields that can be shortened or dropped on write. Kind, State, Reason and
-// Outcome are closed sets and Host and ExecutionID are shape-checked; a value
-// that does not fit is refused, not changed.
+// Fields that can be dropped on write. Kind, State, Reason and Outcome are
+// closed sets and Host and ExecutionID are form-checked; a value that does not
+// match is refused, not changed. FieldHost and FieldExecutionID are never set
+// by Append now. They keep their bit values, so rows written earlier still
+// decode the same way.
 const (
 	FieldHost Field = 1 << iota
 	FieldExecutionID
@@ -237,8 +252,9 @@ func (f Field) Has(x Field) bool { return f&x != 0 }
 type Record struct {
 	// Kind is the event kind. Append rejects any value that is not a KindCode.
 	Kind KindCode
-	// Host is the host label, not an address. It must match the label shape
-	// (validShape) or Append refuses the record; it is shortened to MaxHost bytes.
+	// Host is the inventory host ID, not a display name and not an address.
+	// It must match validHost or Append refuses the record. A display name
+	// (any UTF-8 text, spaces) is refused, so pass the ID.
 	Host string
 	// State is the event state. Append rejects any value that is not a
 	// StateCode.
@@ -246,9 +262,8 @@ type Record struct {
 	// Reason is a closed reason code. Append rejects any other value. Use
 	// ReasonForError to map a provider error to a code.
 	Reason ReasonCode
-	// ExecutionID is the execution the event belongs to, if any. It must match
-	// the ID shape (validShape) or Append refuses the record; it is shortened
-	// to MaxExecutionID bytes.
+	// ExecutionID is the execution the event belongs to, if any. It must be a
+	// lowercase UUIDv4 (validExecutionID) or Append refuses the record.
 	ExecutionID string
 	// Link is a NOS UI link (a path starting with "/", at most MaxLink bytes).
 	// Anything else is dropped on write, never shortened; see Store.Append.
@@ -268,7 +283,7 @@ type Entry struct {
 	Seq int64
 	// At is when the entry was appended, in UTC, at one-second resolution.
 	At time.Time
-	// Changed is the set of fields that were shortened or dropped on write.
+	// Changed is the set of fields that were dropped on write.
 	Changed Field
 }
 
@@ -291,10 +306,10 @@ func New(db *sql.DB, now func() time.Time) (*Store, error) {
 }
 
 // Append stores r and returns its sequence number. Kind, State, Outcome and
-// Reason must be codes, and Host and ExecutionID must have the label/ID shape;
-// otherwise Append returns an error wrapping ErrRefused that names the field
-// and never the value. Host and ExecutionID longer than their byte limits are
-// shortened and marked in Changed. A Link that is not a NOS path (see
+// Reason must be codes, and Host and ExecutionID must match validHost and
+// validExecutionID; otherwise Append returns an error wrapping ErrRefused that
+// names the field and never the value. A Host or ExecutionID that does not
+// match is refused, never cut. A Link that is not a NOS path (see
 // isNOSLink), or that is longer than MaxLink, is dropped: it is stored empty
 // and marked as changed. An empty Link is no link at all and is not marked.
 // In the same transaction as the insert, Append removes the oldest rows beyond
@@ -309,16 +324,12 @@ func (s *Store) Append(ctx context.Context, r Record) (int64, error) {
 		return 0, refused("outcome is not an outcome code")
 	case !r.Reason.valid():
 		return 0, refused("reason is not a reason code")
-	case !validShape(r.Host):
-		return 0, refused("host is not a host label")
-	case !validShape(r.ExecutionID):
+	case !validHost(r.Host):
+		return 0, refused("host is not an inventory host ID")
+	case !validExecutionID(r.ExecutionID):
 		return 0, refused("execution_id is not an execution ID")
 	}
 	var changed Field
-	host, cut := truncate(r.Host, MaxHost)
-	changed = mark(changed, FieldHost, cut)
-	execID, cut := truncate(r.ExecutionID, MaxExecutionID)
-	changed = mark(changed, FieldExecutionID, cut)
 
 	// isNOSLink accepts printable ASCII only, so a valid link needs no
 	// cleaning, and a link over the limit is dropped rather than cut: a cut
@@ -343,7 +354,7 @@ func (s *Store) Append(ctx context.Context, r Record) (int64, error) {
 	res, err := tx.ExecContext(ctx, `INSERT INTO notify_log
 		(at, kind, host, state, reason, execution_id, link, outcome, providers, changed)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		s.now().UTC().Unix(), string(r.Kind), host, string(r.State), string(r.Reason), execID, link, string(r.Outcome), providers, int(changed))
+		s.now().UTC().Unix(), string(r.Kind), r.Host, string(r.State), string(r.Reason), r.ExecutionID, link, string(r.Outcome), providers, int(changed))
 	if err != nil {
 		return 0, fmt.Errorf("notifylog: append: %w", err)
 	}
@@ -444,14 +455,6 @@ func (s *Store) Prune(ctx context.Context) (int64, error) {
 	return byAge + byCount, nil
 }
 
-// mark adds f to set when cut is true.
-func mark(set, f Field, cut bool) Field {
-	if cut {
-		return set | f
-	}
-	return set
-}
-
 // isNOSLink reports whether s is a plain NOS UI path such as
 // "/executions/ex-1". Browsers normalize a link before they follow it: they
 // turn backslashes into slashes and drop tabs and newlines. So the check is
@@ -474,14 +477,4 @@ func isNOSLink(s string) bool {
 		}
 	}
 	return true
-}
-
-// truncate returns s cut to at most limit bytes and reports whether it was cut.
-// It is only called on values that passed validShape, which are ASCII, so the
-// cut never splits a rune.
-func truncate(s string, limit int) (string, bool) {
-	if len(s) <= limit {
-		return s, false
-	}
-	return s[:limit], true
 }
