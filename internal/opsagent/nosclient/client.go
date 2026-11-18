@@ -153,12 +153,17 @@ func pinnedRoots(path string) (*x509.CertPool, error) {
 }
 
 // checkBaseURL accepts https URLs and http URLs whose host is a loopback IP
-// literal, without path, query or credentials.
+// literal, without path, query or credentials. Its errors never carry the
+// configured URL: a refused URL may hold credentials, and the error reaches
+// the journal. (url.Parse errors embed the URL, so they are not wrapped.)
 func checkBaseURL(raw string) (string, error) {
 	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
+	if err != nil {
+		return "", fmt.Errorf("nos base url does not parse: %w", ErrBaseURL)
+	}
+	if u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
 		(u.Path != "" && u.Path != "/") {
-		return "", fmt.Errorf("nos base url %q: %w", raw, ErrBaseURL)
+		return "", fmt.Errorf("nos base url has userinfo, path, query or fragment, or no host: %w", ErrBaseURL)
 	}
 	switch u.Scheme {
 	case "https":

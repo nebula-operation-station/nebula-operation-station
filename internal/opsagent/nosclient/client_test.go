@@ -60,6 +60,34 @@ func TestBaseURLRefusedUnlessHTTPSOrLoopback(t *testing.T) {
 	}
 }
 
+// TestBaseURLErrorsNeverCarryTheURL: a refused base URL may hold credentials;
+// neither its text nor its parts may reach the error that the journal logs.
+func TestBaseURLErrorsNeverCarryTheURL(t *testing.T) {
+	tok := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tok, []byte(testAPIToken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const secret = "s3cret-pass"
+	cases := []string{
+		"https://ops:" + secret + "@nos.lab.example",
+		"http://ops:" + secret + "@192.168.1.10:8080",
+		"https://nos.lab.example/api?token=" + secret,
+		"https://nos.lab.example/" + secret + "#frag",
+		"ftp://ops:" + secret + "@127.0.0.1",
+		"https://[" + secret + "/",
+		"https://nos lab " + secret,
+	}
+	for _, raw := range cases {
+		_, err := New(Config{BaseURL: raw, TokenFile: tok})
+		if !errors.Is(err, ErrBaseURL) {
+			t.Fatalf("%q: %v, want ErrBaseURL", raw, err)
+		}
+		if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "nos.lab.example") {
+			t.Errorf("error carries the configured URL: %v", err)
+		}
+	}
+}
+
 func TestSendsBearerTokenAndDecodesConfig(t *testing.T) {
 	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+testAPIToken {
