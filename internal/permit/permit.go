@@ -274,6 +274,9 @@ type Options struct {
 	// Leases persists read grants; nil uses Schedules when configured,
 	// otherwise disables them.
 	Leases ReadGrantStore
+	// Rejections persists rejected markers (ADR 0007 amendment R3). Nil:
+	// RejectPending fails with storage_error and nothing is ever rejected.
+	Rejections RejectionStore
 }
 
 // Authority owns all permits and the privileged session. It is safe for
@@ -315,8 +318,18 @@ type Authority struct {
 	netbirdOffers      *boundStore[canonical.NetBirdOffer]
 	netbirdPeerDeletes *boundStore[canonical.NetBirdPeerDelete]
 
-	mu          sync.Mutex
-	permits     map[canonical.Digest]*Permit
+	// rejections persists rejected markers (reject.go); nil: none.
+	rejections RejectionStore
+
+	mu      sync.Mutex
+	permits map[canonical.Digest]*Permit
+	// placeholders hold the pending slot of a rejected permit until its
+	// original approval window ends (spec 07 "Pending slot"). No lookup,
+	// approval or state path reads them; only the pending count does.
+	placeholders map[canonical.Digest]time.Time
+	// sessionCred is the credential ID of the assertion that opened the
+	// current privileged session (signed permit.rejected event).
+	sessionCred []byte
 	executions  map[string]canonical.Digest // execution_id -> digest
 	sessionTill time.Time
 	sessChal    []byte
@@ -364,13 +377,16 @@ func New(o Options) (*Authority, error) {
 		risk:       o.RiskPolicy,
 		permits:    map[canonical.Digest]*Permit{},
 		executions: map[string]canonical.Digest{},
-		schedules:  o.Schedules,
-		grants:     map[string]*pendingGrant{},
-		leases:     o.Leases,
-		readGrants: map[string]*pendingReadGrant{},
-		readPaused: true,
-		scans:      map[string]scanResult{},
-		trusts:     map[string]*PendingTrust{},
+		rejections: o.Rejections,
+
+		placeholders: map[canonical.Digest]time.Time{},
+		schedules:    o.Schedules,
+		grants:       map[string]*pendingGrant{},
+		leases:       o.Leases,
+		readGrants:   map[string]*pendingReadGrant{},
+		readPaused:   true,
+		scans:        map[string]scanResult{},
+		trusts:       map[string]*PendingTrust{},
 
 		paired:       map[canonical.Digest]*PairedPermit{},
 		pairedOffers: map[string]canonical.Digest{},
@@ -623,7 +639,12 @@ func (a *Authority) floorRiseLocked(p *Permit) error {
 	// must still be pending and the very same permit the caller holds; a
 	// permit discarded and proposed again under the same digest is another
 	// object, and approving the caller's stale copy would report an approval
-	// that never reaches the live permit.
+	// that never reaches the live permit. A rejection may have committed
+	// while the mutex was released: its persisted marker answers first
+	// (permit_rejected, not permit_not_found).
+	if err := a.rejectedLocked(d); err != nil {
+		return err
+	}
 	q, err := a.pendingLocked(d, a.now())
 	if err != nil {
 		return err
@@ -654,6 +675,10 @@ func (a *Authority) SubmitAssertion(d canonical.Digest, assertionJSON []byte, ty
 	now := a.now()
 	a.gcLocked(now)
 
+	// The persisted rejected marker decides before the in-memory lookup.
+	if err := a.rejectedLocked(d); err != nil {
+		return Permit{}, err
+	}
 	p, err := a.pendingLocked(d, now)
 	if err != nil {
 		return Permit{}, err
@@ -703,6 +728,10 @@ func (a *Authority) ApproveCLI(d canonical.Digest, typedCount int, who string) (
 	now := a.now()
 	a.gcLocked(now)
 
+	// The persisted rejected marker decides before the in-memory lookup.
+	if err := a.rejectedLocked(d); err != nil {
+		return Permit{}, err
+	}
 	p, err := a.pendingLocked(d, now)
 	if err != nil {
 		return Permit{}, err
@@ -925,8 +954,11 @@ func (a *Authority) Lock(who string) {
 	a.readPaused = true
 	a.sessionTill = time.Time{}
 	a.sessChal, a.sessChalExp = nil, time.Time{}
+	a.sessionCred = nil
 	n := len(a.permits)
 	a.permits = map[canonical.Digest]*Permit{}
+	// Pending-slot placeholders go with the pending permits.
+	clear(a.placeholders)
 	// Pending schedule grants go too; approved ones stay (they need an
 	// unlocked keyring to run anyway, and are revoked one by one).
 	a.grants = map[string]*pendingGrant{}
@@ -1038,7 +1070,9 @@ func (a *Authority) sessionActiveLocked(now time.Time) bool {
 }
 
 func (a *Authority) pendingCountLocked() int {
-	n := 0
+	// Rejected proposals keep their slot until their window would have
+	// ended (gcLocked drops ended placeholders).
+	n := a.placeholdersLiveLocked()
 	for _, p := range a.permits {
 		if p.State == StatePending {
 			n++
@@ -1057,6 +1091,11 @@ func (a *Authority) gcLocked(now time.Time) {
 		}
 		if !now.Before(time.Unix(p.Request.ExpiryUnix, 0)) {
 			delete(a.permits, d)
+		}
+	}
+	for d, end := range a.placeholders {
+		if !now.Before(end) {
+			delete(a.placeholders, d)
 		}
 	}
 	// Execution IDs stay in memory for the lifetime of the process and are

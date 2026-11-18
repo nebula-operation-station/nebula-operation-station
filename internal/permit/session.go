@@ -94,6 +94,9 @@ func (a *Authority) completeSessionPolicy(assertionJSON []byte) (time.Time, erro
 	kind := "session_opened"
 	if a.sessionActiveLocked(now) {
 		kind = "session_extended"
+	} else {
+		// The key that opened the session; an extension keeps it.
+		a.sessionCred = append([]byte(nil), credID...)
 	}
 	a.sessionTill = now.Add(a.sessLen)
 	a.emit(Event{Time: now, Kind: kind, Detail: fmt.Sprintf("webauthn:%s duration=%s expiry=%s", hex.EncodeToString(credID), a.sessLen, a.sessionTill.Format(time.RFC3339Nano))})
