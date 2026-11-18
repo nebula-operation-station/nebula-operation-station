@@ -109,9 +109,10 @@ func Validate(d Draft) error {
 	case !slugRe.MatchString(d.Slug) || d.Slug == "new":
 		return invalid("the name must be 1 to 40 lowercase letters, digits or _, start with a letter or digit, and not be \"new\"")
 	case d.Title == "" || len(d.Title) > MaxTitle || !clean(d.Title, false):
-		return invalid("the title must be 1 to %d characters of plain text", MaxTitle)
+		// Limits count bytes (len), so the message says bytes.
+		return invalid("the title must be 1 to %d bytes of plain text", MaxTitle)
 	case len(d.Description) > MaxDescription || !clean(d.Description, true):
-		return invalid("the description must be at most %d characters of plain text", MaxDescription)
+		return invalid("the description must be at most %d bytes of plain text", MaxDescription)
 	case d.Risk != "LOW" && d.Risk != "MEDIUM" && d.Risk != "HIGH" && d.Risk != "CRITICAL":
 		return invalid("the risk must be LOW, MEDIUM, HIGH or CRITICAL")
 	case d.Body == "" || len(d.Body) > MaxBody:
@@ -135,8 +136,11 @@ func Validate(d Draft) error {
 	if d.Durable {
 		maxT = hostrun.MaxDurableTimeout
 	}
-	if t := time.Duration(d.TimeoutS) * time.Second; d.TimeoutS < int(MinTimeout/time.Second) || t > maxT {
-		return invalid("the timeout must be %d to %d seconds", int(MinTimeout/time.Second), int(maxT/time.Second))
+	// Compare the integer with the bounds before any conversion: multiplying
+	// an unchecked int by time.Second wraps in int64 for huge values.
+	minS, maxS := int(MinTimeout/time.Second), int(maxT/time.Second)
+	if d.TimeoutS < minS || d.TimeoutS > maxS {
+		return invalid("the timeout must be %d to %d seconds", minS, maxS)
 	}
 	if reason, ok := prelude.Check(d.Params, d.Secrets); !ok {
 		return invalid("%s", reason)
