@@ -253,3 +253,39 @@ Tarball: `sudo ./deploy/uninstall.sh`; package:
 and configuration are kept until you remove them. Release each managed host
 as in [Remove a host from Nebula](hosts.md#remove-a-host-from-nebula). See
 admin guide [16](../admin/guide.md#16-uninstalling).
+
+## What does the ops agent do when the LLM is unreachable?
+
+Nothing else changes. Notifications, findings, approvals and executions
+do not depend on the ops agent or on its LLM. A run whose LLM call fails
+writes no note for that work item. The item stays due, because no stored
+note carries its current input digest, and the next timer run (every 30
+minutes) tries it again. The Ops tab then shows "no suggestion yet" and
+the agent's last-run status. If the LLM address is not in a lab network
+while the data class is `lab`, the run stops with `llm_refused_lab_rule`
+and writes no note. Nothing falls back to `external` within a run.
+
+In this release the agent has no finding source connected, so it has no
+work at all. See admin guide [10.6](../admin/guide.md#106-ops-agent),
+"Status in this build".
+
+## Why does a LOW restart suddenly ask for my security key?
+
+Because a fix note is stored for that host, and the restart is of the same
+kind of action (action family) on the same host. NOS marks the execution
+as suggested, also when you did not open it from the card, and raises its
+risk class to MEDIUM. The approval is then a security-key touch. The
+operation page says "From an agent suggestion" and "Risk MEDIUM (raised;
+the action declares LOW)". This is intended (ADR 0016 D9).
+
+The marking lasts while the note is stored: at most 30 days, or 500 notes.
+Dismissing the card does not lift it. Read actions and schedules are not
+affected. Admin guide [10.6](../admin/guide.md#106-ops-agent) explains the
+limit.
+
+## Can I reply to the Telegram bot?
+
+No. NOS only sends to Telegram. It never reads from Telegram: no replies,
+no bot commands and no free text reach NOS. Questions to the ops agent are
+asked only in the NOS web UI. The question form in the Ops tab is not in
+this release. See [Notifications](notifications.md).

@@ -357,3 +357,42 @@ Daten, Benutzer und Konfiguration bleiben erhalten, bis Sie sie entfernen.
 Geben Sie jeden verwalteten Host frei wie in
 [Einen Host aus Nebula entfernen](hosts.md#remove-a-host-from-nebula). Siehe
 Admin-Handbuch [16](../../admin/guide.md#16-uninstalling).
+
+## Was macht der Ops-Agent, wenn das LLM nicht erreichbar ist?
+
+Sonst ändert sich nichts. Benachrichtigungen, Befunde, Genehmigungen und
+Ausführungen hängen nicht vom Ops-Agenten oder seinem LLM ab. Ein Lauf, dessen
+LLM-Aufruf fehlschlägt, schreibt für dieses Arbeitselement keine Notiz. Das
+Element bleibt offen, weil keine gespeicherte Notiz seinen aktuellen
+Eingabe-Digest trägt, und der nächste Timer-Lauf (alle 30 Minuten) versucht
+es erneut. Der Tab Ops zeigt dann "noch kein Vorschlag" und den Status des
+letzten Laufs des Agenten. Liegt die LLM-Adresse nicht in einem Lab-Netz,
+während die Datenklasse `lab` ist, bricht der Lauf mit `llm_refused_lab_rule`
+ab und schreibt keine Notiz. Innerhalb eines Laufs wird nicht auf `external`
+ausgewichen.
+
+In diesem Release hat der Agent noch keine Befundquelle angeschlossen und hat
+daher gar keine Arbeit. Siehe Admin-Handbuch
+[10.6](../../admin/guide.md#106-ops-agent), "Status in this build".
+
+## Warum verlangt ein LOW-Neustart plötzlich den Sicherheitsschlüssel?
+
+Weil für diesen Host eine Fix-Notiz gespeichert ist und der Neustart dieselbe
+Art von Aktion (Aktionsfamilie) auf demselben Host ist. NOS markiert die
+Ausführung als aus einem Vorschlag stammend, auch wenn du sie nicht über die
+Karte geöffnet hast, und hebt die Risikoklasse auf MEDIUM. Die Genehmigung ist
+dann eine Berührung des Sicherheitsschlüssels. Die Betriebsseite zeigt "Aus
+einem Agenten-Vorschlag" und "Risiko MEDIUM (erhöht; die Aktion deklariert
+LOW)". Das ist so vorgesehen (ADR 0016 D9).
+
+Die Markierung gilt, solange die Notiz gespeichert ist: höchstens 30 Tage oder
+500 Notizen. Eine ausgeblendete Karte hebt sie nicht auf. Lesende Aktionen und
+Zeitpläne sind nicht betroffen. Das Admin-Handbuch
+[10.6](../../admin/guide.md#106-ops-agent) erklärt die Grenze.
+
+## Kann ich dem Telegram-Bot antworten?
+
+Nein. NOS sendet nur an Telegram und liest nie von dort: Keine Antworten,
+keine Bot-Befehle und kein Freitext erreichen NOS. Fragen an den Ops-Agenten
+stellst du nur in der NOS-Weboberfläche. Das Fragefeld im Tab Ops ist in
+diesem Release nicht enthalten. Siehe [Benachrichtigungen](notifications.md).
