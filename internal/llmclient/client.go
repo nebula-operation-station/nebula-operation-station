@@ -18,6 +18,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 // Client limits, named next to the code that enforces them.
@@ -494,7 +495,9 @@ func encodeTools(defs []Tool) []wireToolDef {
 
 // decodeResponse parses the first choice. Arguments may arrive as a JSON
 // string (OpenAI) or as an object (some compatible servers); an object is
-// kept as its raw JSON text.
+// kept as its raw JSON text. encoding/json does not check UTF-8 inside raw
+// values, so the raw arguments bytes are checked here; invalid UTF-8 is
+// refused with a constant message, and no body bytes enter the error.
 func decodeResponse(data []byte) (Response, error) {
 	var w wireResponse
 	if err := json.Unmarshal(data, &w); err != nil {
@@ -509,6 +512,9 @@ func decodeResponse(data []byte) (Response, error) {
 		out.Content = *m.Content
 	}
 	for _, tc := range m.ToolCalls {
+		if !utf8.Valid(tc.Function.Arguments) {
+			return Response{}, callErr("llm call: malformed tool arguments")
+		}
 		args := string(tc.Function.Arguments)
 		var s string
 		if len(tc.Function.Arguments) > 0 && tc.Function.Arguments[0] == '"' {

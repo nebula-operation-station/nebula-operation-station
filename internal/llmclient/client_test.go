@@ -239,6 +239,31 @@ func TestChatRefusesBadJSONSchema(t *testing.T) {
 	}
 }
 
+// TestInvalidUTF8ToolArgumentsAreRefused: raw object arguments reach the
+// caller unchanged, so invalid UTF-8 there is refused with the constant
+// message and no body bytes in the error.
+func TestInvalidUTF8ToolArgumentsAreRefused(t *testing.T) {
+	cases := map[string]string{
+		"object value":  `{"k":"` + "\xff" + `"}`,
+		"string form":   `"{\"k\":\"` + "\xff" + `\"}"`,
+		"bare object":   "{\"k\":\"\xc3\"}",
+		"valid unicode": `{"k":"é"}`,
+	}
+	for name, args := range cases {
+		body := `{"choices":[{"message":{"tool_calls":[{"id":"c1","function":{"name":"n","arguments":` + args + `}}]}}]}`
+		resp, err := decodeResponse([]byte(body))
+		if name == "valid unicode" {
+			if err != nil || resp.ToolCalls[0].Arguments != `{"k":"é"}` {
+				t.Fatalf("%s: got %+v, %v", name, resp, err)
+			}
+			continue
+		}
+		if !errors.Is(err, ErrCall) || err.Error() != "llm call: malformed tool arguments" {
+			t.Fatalf("%s: got %v, want the constant malformed-arguments error", name, err)
+		}
+	}
+}
+
 func TestNegativeWireUsageIsClampedToZero(t *testing.T) {
 	resp, err := decodeResponse([]byte(`{"choices":[{"message":{"content":"x"}}],
 		"usage":{"prompt_tokens":-9223372036854775808,"completion_tokens":-5}}`))

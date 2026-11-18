@@ -236,6 +236,16 @@ func FuzzDecodeResponse(f *testing.F) {
 		`{"choices":[{"message":{"tool_calls":[{"id":"c2","function":{"name":"t","arguments":null}}]}}]}`,
 		`{"choices":[{"message":{"tool_calls":[{"id":"c3","function":{"name":"t","arguments":"é\"\\\n"}}]}}]}`,
 		`{"choices":[{"message":{"tool_calls":[{"id":"c4","function":{"name":"t","arguments":"{"}}]}}]}`,
+		// Raw 0xFF byte (invalid UTF-8) in content, in a tool call id, in a
+		// tool call name, in an object-valued argument, and in a string-form
+		// argument. Content, id and name are decoded by encoding/json, which
+		// replaces the byte; raw object arguments are passed through, so they
+		// must be refused.
+		`{"choices":[{"message":{"content":"a` + "\xff" + `b"}}]}`,
+		`{"choices":[{"message":{"tool_calls":[{"id":"c` + "\xff" + `","function":{"name":"n","arguments":"{}"}}]}}]}`,
+		`{"choices":[{"message":{"tool_calls":[{"id":"c1","function":{"name":"n` + "\xff" + `","arguments":"{}"}}]}}]}`,
+		`{"choices":[{"message":{"tool_calls":[{"id":"c1","function":{"name":"n","arguments":{"k":"` + "\xff" + `"}}}]}}]}`,
+		`{"choices":[{"message":{"tool_calls":[{"id":"c1","function":{"name":"n","arguments":"{\"k\":\"` + "\xff" + `\"}"}}]}}]}`,
 		// Tool call with no id, no name and no arguments; then a second call.
 		`{"choices":[{"message":{"tool_calls":[{"function":{}},{"id":"x","function":{"name":"n","arguments":"{}"}}]}}]}`,
 		// Null and absent content, message and choice.
