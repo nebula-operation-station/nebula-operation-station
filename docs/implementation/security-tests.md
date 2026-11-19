@@ -68,7 +68,7 @@ functions: the original 13 for 20 seconds each, the 83 parsers of
 untrusted managed-host and device input added by tz07 for 10 seconds
 each (about 18 minutes of fuzzing in total, plus build time). It is not
 run by CI. The table lists every `Fuzz*` function
-in the repository (198, previously: 197, previously: 196, previously: 191, previously: 168, previously: 141, previously: 118, previously: 111, from `grep -rn '^func Fuzz' --include=*_test.go .`)
+in the repository (198, previously: 197, previously: 196, previously: 191, previously: 168, previously: 141, previously: 118, previously: 111, from `grep -rn '^func Fuzz' --include=*_test.go . | wc -l`)
 with its package and whether `make fuzz` runs it. Functions marked "no"
 are not run by `make fuzz`; their seed corpora still run in `make test`
 like every other test.
