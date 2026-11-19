@@ -247,17 +247,25 @@ type Group struct {
 	Candidates   []Candidate `json:"candidates"`
 }
 
-// WorkItem is one due item of the work list.
+// WorkItem is one due item of the work list. Kind is "fix", "summary" or
+// "question"; a question carries its text and the facts of the hosts it names.
 type WorkItem struct {
 	Kind   string  `json:"kind"`
 	Ref    string  `json:"ref"`
 	Digest string  `json:"digest"`
 	Group  *Group  `json:"group,omitempty"`
 	Fleet  *Counts `json:"fleet,omitempty"`
+	// Question is the admin's question (kind "question" only). It is data.
+	Question string `json:"question,omitempty"`
+	// Facts are the hosts the question names (class lab only). Only host,
+	// exposure, ports and counts are used; findings and candidates refuse
+	// the item.
+	Facts []Group `json:"facts,omitempty"`
 }
 
-// Draft is a note as the agent posts it. It carries only the fields the
-// server accepts for the kind; the server rejects unknown fields.
+// Draft is a note as the agent posts it: kind "fix", "summary" or "answer".
+// It carries only the fields the server accepts for the kind; the server
+// rejects unknown fields. An answer has text and citations and no steps.
 type Draft struct {
 	Kind        string   `json:"kind"`
 	Ref         string   `json:"ref"`
