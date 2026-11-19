@@ -69,7 +69,7 @@ func TestRejectIntentMigrationUpFromMain0049(t *testing.T) {
 
 	// The intent reason takes up to 200 characters and no more (0051).
 	id := `'00000000-0000-0000-0000-000000000001'`
-	if _, err := db.Exec(`UPDATE executions SET reject_reason = ? WHERE id = ` + id, strings.Repeat("ä", 200)); err != nil {
+	if _, err := db.Exec(`UPDATE executions SET reject_reason = ? WHERE id = `+id, strings.Repeat("ä", 200)); err != nil {
 		t.Fatalf("200-character reason refused: %v", err)
 	}
 	if _, err := db.Exec(`UPDATE executions SET reject_reason = ? WHERE id = `+id, strings.Repeat("a", 201)); err == nil {
