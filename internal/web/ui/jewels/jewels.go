@@ -84,10 +84,13 @@ type Store interface {
 
 // Chrome is the per-request data of the shared page layout.
 type Chrome struct {
-	Theme         string
-	NavCollapsed  bool
-	PVENav        bool
-	DeployEnabled bool
+	Theme        string
+	NavCollapsed bool
+	PVENav       bool
+	// NotificationsNav shows the Notifications navigation entry; the
+	// server sets it from the inbox rule.
+	NotificationsNav bool
+	DeployEnabled    bool
 }
 
 // Options configure a Handler.
@@ -232,16 +235,19 @@ type view struct {
 }
 
 type page struct {
-	Title         string
-	Active        string
-	Theme         string
-	NavCollapsed  bool
-	Bare          bool
-	PVENav        bool
-	DeployEnabled bool
-	Search        any
-	BuiltinTrust  any
-	Scripts       []string
+	Title        string
+	Active       string
+	Theme        string
+	NavCollapsed bool
+	Bare         bool
+	PVENav       bool
+	// NotificationsNav shows the Notifications navigation entry; the
+	// server sets it from the inbox rule.
+	NotificationsNav bool
+	DeployEnabled    bool
+	Search           any
+	BuiltinTrust     any
+	Scripts          []string
 
 	Jewels *view
 }
@@ -560,7 +566,7 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, v *view) {
 	c := h.o.Chrome(r)
 	p := &page{
 		Title: "Crown jewels", Active: "jewels", Theme: c.Theme, NavCollapsed: c.NavCollapsed,
-		PVENav: c.PVENav, DeployEnabled: c.DeployEnabled, Jewels: v,
+		PVENav: c.PVENav, NotificationsNav: c.NotificationsNav, DeployEnabled: c.DeployEnabled, Jewels: v,
 	}
 	var b strings.Builder
 	if err := h.page.ExecuteTemplate(&b, "layout", p); err != nil {

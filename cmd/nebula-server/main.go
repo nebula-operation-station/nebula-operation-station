@@ -524,32 +524,39 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	registryReads := newServerRegistryReads(exec, time.Now, log)
 	bg.Go(func() { closeRegistryReads(connCtx, registryReads, shutdownTimeout, log) })
 
+	// Notifications inbox (ADR 0016 D10): the log over server.db, for admins.
+	inbox, err := newInboxWiring(db, cachedVulnAdmin(exec, inboxStatusTTL, time.Now))
+	if err != nil {
+		return err
+	}
 	h, err := ui.New(withOperationSuggestions(withBatchPlanner(ui.Options{
-		PublicOrigin:   cfg.PublicOrigin,
-		Status:         exec,
-		HostNames:      hostNames,
-		Hosts:          store.List,
-		HostKeys:       hostKeys,
-		Inventory:      store,
-		Operations:     ops,
-		Pins:           store,
-		Schedules:      ops,
-		Leases:         ops,
-		Runbooks:       rb,
-		DeployProfiles: deployProfiles,
-		Trust:          exec,
-		BuiltinTrust:   exec,
-		Modules:        mods,
-		LastResult:     ops.LastResult,
-		Network:        ipamStore,
-		Discovery:      disc,
-		PVE:            pveStore,
-		PVEChart:       func(ctx context.Context) (pveinventory.Tree, error) { return pveStore.ChartTree(ctx, time.Now()) },
-		PVERemotes:     pveRemotes,
-		Events:         exec,
-		Audit:          audit,
-		Repin:          exec,
-		Enroll:         exec,
+		PublicOrigin:       cfg.PublicOrigin,
+		Notifications:      inbox.Log,
+		NotificationsAdmin: inbox.Admin,
+		Status:             exec,
+		HostNames:          hostNames,
+		Hosts:              store.List,
+		HostKeys:           hostKeys,
+		Inventory:          store,
+		Operations:         ops,
+		Pins:               store,
+		Schedules:          ops,
+		Leases:             ops,
+		Runbooks:           rb,
+		DeployProfiles:     deployProfiles,
+		Trust:              exec,
+		BuiltinTrust:       exec,
+		Modules:            mods,
+		LastResult:         ops.LastResult,
+		Network:            ipamStore,
+		Discovery:          disc,
+		PVE:                pveStore,
+		PVEChart:           func(ctx context.Context) (pveinventory.Tree, error) { return pveStore.ChartTree(ctx, time.Now()) },
+		PVERemotes:         pveRemotes,
+		Events:             exec,
+		Audit:              audit,
+		Repin:              exec,
+		Enroll:             exec,
 		// Typed guest power and snapshots (ADR 0006 P2-01, WA-05): the
 		// server proposes, relays the user's security key assertion and
 		// commits; the executor dispatches only an approved permit at its
@@ -660,7 +667,9 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	if err := mountTrafficMap(pages, cfg.PublicOrigin, db, store.List, ipamStore, log, retention); err != nil {
 		return err
 	}
-	srv, err := webServer(cfg.PublicOrigin, login, pages, apiHandler)
+	// The inbox's navigation entry on every page of pages: one visibility
+	// check per request (ui.WithNotificationsNav, ui.NotificationsNavVisible).
+	srv, err := webServer(cfg.PublicOrigin, login, h.WithNotificationsNav(pages), apiHandler)
 	if err != nil {
 		return err
 	}

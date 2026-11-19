@@ -175,10 +175,13 @@ type Source interface {
 
 // Chrome is the per-request data of the shared page layout.
 type Chrome struct {
-	Theme         string
-	NavCollapsed  bool
-	PVENav        bool
-	DeployEnabled bool
+	Theme        string
+	NavCollapsed bool
+	PVENav       bool
+	// NotificationsNav shows the Notifications navigation entry; the
+	// server sets it from the inbox rule.
+	NotificationsNav bool
+	DeployEnabled    bool
 }
 
 // Options configure a Handler.
@@ -485,16 +488,19 @@ func f2(x float64) string {
 // --- rendering -----------------------------------------------------------------
 
 type page struct {
-	Title         string
-	Active        string
-	Theme         string
-	NavCollapsed  bool
-	Bare          bool
-	PVENav        bool
-	DeployEnabled bool
-	Search        any
-	BuiltinTrust  any
-	Scripts       []string
+	Title        string
+	Active       string
+	Theme        string
+	NavCollapsed bool
+	Bare         bool
+	PVENav       bool
+	// NotificationsNav shows the Notifications navigation entry; the
+	// server sets it from the inbox rule.
+	NotificationsNav bool
+	DeployEnabled    bool
+	Search           any
+	BuiltinTrust     any
+	Scripts          []string
 
 	Paths any
 }
@@ -508,7 +514,7 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, t *template.Tem
 	c := h.o.Chrome(r)
 	p := &page{
 		Title: title, Active: "vuln", Theme: c.Theme, NavCollapsed: c.NavCollapsed,
-		PVENav: c.PVENav, DeployEnabled: c.DeployEnabled, Scripts: scripts, Paths: v,
+		PVENav: c.PVENav, NotificationsNav: c.NotificationsNav, DeployEnabled: c.DeployEnabled, Scripts: scripts, Paths: v,
 	}
 	var b bytes.Buffer
 	if err := t.ExecuteTemplate(&b, "layout", p); err != nil {

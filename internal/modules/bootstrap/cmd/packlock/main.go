@@ -13,6 +13,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -20,19 +21,28 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 2 {
-		fmt.Fprintln(os.Stderr, "usage: packlock <module-dir>")
-		os.Exit(2)
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// run packs the module in args[0] and writes its lock file. It returns
+// the process exit code: 2 for a wrong argument count (usage on stderr),
+// 1 for a pack or write error (message on stderr, no lock written on
+// pack errors), and 0 on success with the lock's SHA-256 on stdout.
+func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) != 1 {
+		fmt.Fprintln(stderr, "usage: packlock <module-dir>")
+		return 2
 	}
-	lock, err := bootstrap.Pack(os.Args[1])
+	lock, err := bootstrap.Pack(args[0])
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "packlock:", err)
-		os.Exit(1)
+		fmt.Fprintln(stderr, "packlock:", err)
+		return 1
 	}
-	if err := os.WriteFile(filepath.Join(os.Args[1], bootstrap.LockFile), lock, 0o644); err != nil {
-		fmt.Fprintln(os.Stderr, "packlock:", err)
-		os.Exit(1)
+	if err := os.WriteFile(filepath.Join(args[0], bootstrap.LockFile), lock, 0o644); err != nil {
+		fmt.Fprintln(stderr, "packlock:", err)
+		return 1
 	}
 	sum := sha256.Sum256(lock)
-	fmt.Println(hex.EncodeToString(sum[:]))
+	fmt.Fprintln(stdout, hex.EncodeToString(sum[:]))
+	return 0
 }
