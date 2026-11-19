@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/auditlog"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
@@ -22,6 +23,9 @@ import (
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // opsSender records the events the real notifier delivers. fail makes the
@@ -34,9 +38,12 @@ type opsSender struct {
 
 func (o *opsSender) Name() string { return "ops-test" }
 
-func (o *opsSender) Send(_ context.Context, e notify.Event) error {
+func (o *opsSender) Send(ctx context.Context, e notify.Event) error {
 	o.mu.Lock()
 	defer o.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("delivery context: %w", err)
+	}
 	if o.fail {
 		return errors.New("provider down")
 	}
@@ -50,16 +57,56 @@ func (o *opsSender) delivered() []notify.Event {
 	return append([]notify.Event(nil), o.events...)
 }
 
+// opsLogins is the executor login fake of the ops agent tests. It issues a
+// fresh login ID per begin and does not expire or single-use the logins: the
+// backend's own binding in take must refuse a reused or foreign challenge,
+// and the tests would fail if it did not. An assertion verifies when it is
+// vaGoodAssertion and names user.
+type opsLogins struct {
+	mu       sync.Mutex
+	n        int
+	user     string
+	begun    int
+	finished int
+}
+
+func (l *opsLogins) BeginLogin(context.Context, *pb.BeginLoginRequest, ...grpc.CallOption) (*pb.BeginLoginResponse, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.n++
+	l.begun++
+	id := fmt.Sprintf("%032x", l.n)
+	return &pb.BeginLoginResponse{LoginId: id, RequestOptionsJson: []byte(`{"challenge":"` + id + `"}`)}, nil
+}
+
+func (l *opsLogins) FinishLogin(_ context.Context, in *pb.FinishLoginRequest, _ ...grpc.CallOption) (*pb.FinishLoginResponse, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.finished++
+	if string(in.GetAssertionJson()) != vaGoodAssertion {
+		return nil, status.Error(codes.Unauthenticated, "assertion not accepted")
+	}
+	return &pb.FinishLoginResponse{CredentialId: "k", UserName: l.user}, nil
+}
+
+func (l *opsLogins) counts() (begun, finished int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.begun, l.finished
+}
+
 // opsEnv is the ops agent backend over the real settings store, the real
-// audit log and the real notifier. The executor login is the fake of the
-// vulnerability agent tests; admin is the maintainer check.
+// audit log and the real notifier. The clock is now. admin is the maintainer
+// check.
 type opsEnv struct {
-	s     *opsAgentSettings
-	store *opsconfig.Store
-	audit *auditlog.Store
-	login *vaLogins
-	sent  *opsSender
-	admin bool
+	s        *opsAgentSettings
+	store    *opsconfig.Store
+	audit    *auditlog.Store
+	login    *opsLogins
+	sent     *opsSender
+	notifier *notify.Notifier
+	admin    bool
+	now      time.Time
 }
 
 func newOpsEnv(t *testing.T) *opsEnv {
@@ -69,20 +116,34 @@ func newOpsEnv(t *testing.T) *opsEnv {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	e := &opsEnv{audit: auditlog.New(db, true), login: newVALogins("alice"), sent: &opsSender{}, admin: true}
+	e := &opsEnv{audit: auditlog.New(db, true), login: &opsLogins{user: "alice"}, sent: &opsSender{}, admin: true,
+		now: time.Date(2026, 11, 19, 10, 0, 0, 0, time.UTC)}
 	store, err := opsconfig.NewStore(db, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	e.store = store
 	quiet := slog.New(slog.NewTextHandler(io.Discard, nil))
-	n := notify.NewWithSenders(quiet, nil, e.sent)
-	s, err := newOpsAgentSettings(store, e.audit, func(context.Context) bool { return e.admin }, e.login, n, nil, quiet)
+	e.notifier = notify.NewWithSenders(quiet, nil, e.sent)
+	s, err := newOpsAgentSettings(store, e.audit, func(context.Context) bool { return e.admin }, e.login, e.notifier,
+		func() time.Time { return e.now }, quiet)
 	if err != nil {
 		t.Fatal(err)
 	}
 	e.s = s
 	return e
+}
+
+// cancelAfterCommit cancels the request context when the backend hands the
+// settings_changed event to the notifier, that is after the commit.
+type cancelAfterCommit struct {
+	inner  opsAgentNotifier
+	cancel context.CancelFunc
+}
+
+func (c *cancelAfterCommit) NotifyOpsAgentSettingsChanged(ctx context.Context, change notify.OpsAgentSettingsChange, at time.Time) int {
+	c.cancel()
+	return c.inner.NotifyOpsAgentSettingsChanged(ctx, change, at)
 }
 
 // opsValid is a complete, valid settings value in the lab.
@@ -205,8 +266,14 @@ func TestOpsAgentCommitRefusesOtherUsers(t *testing.T) {
 		base, _ := e.stored(t)
 		c := opsChange(base, func(s *opsconfig.Settings) { s.Model = "llama3.1-8b" })
 		id := e.beginAs(t, "alice", c)
+		// The executor names mallory, so only the server's binding of the
+		// challenge to alice can refuse this commit.
+		e.login.user = "mallory"
 		if err := e.s.CommitOpsAgentChange(ctx, "mallory", id, c, []byte(vaGoodAssertion)); !errors.Is(err, ui.ErrOpsAgentAssertionRefused) {
 			t.Fatalf("commit by another user = %v, want ErrOpsAgentAssertionRefused", err)
+		}
+		if _, finished := e.login.counts(); finished != 0 {
+			t.Fatalf("the executor verified an assertion for a challenge of another user (%d calls)", finished)
 		}
 		if v, _ := e.stored(t); v != base {
 			t.Fatalf("stored version %d after a refused commit", v)
@@ -248,7 +315,9 @@ func TestOpsAgentChangeNeedsMaintainerAtBeginAndCommit(t *testing.T) {
 	}
 }
 
-// A challenge is single use: a second commit with it is refused.
+// A challenge is single use: a second commit with it is refused by the
+// backend, before the executor is asked again. The fake executor accepts a
+// reused login, so only take can refuse it.
 func TestOpsAgentChallengeIsSingleUse(t *testing.T) {
 	ctx := context.Background()
 	e := newOpsEnv(t)
@@ -261,8 +330,68 @@ func TestOpsAgentChallengeIsSingleUse(t *testing.T) {
 	if err := e.s.CommitOpsAgentChange(ctx, "alice", id, c, []byte(vaGoodAssertion)); !errors.Is(err, ui.ErrOpsAgentAssertionRefused) {
 		t.Fatalf("second commit with the same challenge = %v, want ErrOpsAgentAssertionRefused", err)
 	}
+	if _, finished := e.login.counts(); finished != 1 {
+		t.Fatalf("executor verified %d assertions, want 1 (the reused challenge must not reach it)", finished)
+	}
 	if e.auditCount(t) != 1 || len(e.sent.delivered()) != 1 {
 		t.Fatalf("audit %d, events %d; want 1 each", e.auditCount(t), len(e.sent.delivered()))
+	}
+}
+
+// A begun change expires two minutes after the begin, on the backend's own
+// clock: a commit at the expiry is refused without asking the executor.
+func TestOpsAgentChallengeExpiresAfterTwoMinutes(t *testing.T) {
+	ctx := context.Background()
+	t.Run("live just before the expiry", func(t *testing.T) {
+		e := newOpsEnv(t)
+		base, _ := e.stored(t)
+		c := opsChange(base, func(s *opsconfig.Settings) { s.Model = "llama3.1-8b" })
+		id := e.beginAs(t, "alice", c)
+		e.now = e.now.Add(opsAgentChallengeTTL - time.Second)
+		if err := e.s.CommitOpsAgentChange(ctx, "alice", id, c, []byte(vaGoodAssertion)); err != nil {
+			t.Fatalf("commit one second before the expiry = %v, want nil", err)
+		}
+	})
+	t.Run("refused at the expiry", func(t *testing.T) {
+		e := newOpsEnv(t)
+		base, _ := e.stored(t)
+		c := opsChange(base, func(s *opsconfig.Settings) { s.Model = "llama3.1-8b" })
+		id := e.beginAs(t, "alice", c)
+		e.now = e.now.Add(opsAgentChallengeTTL)
+		if err := e.s.CommitOpsAgentChange(ctx, "alice", id, c, []byte(vaGoodAssertion)); !errors.Is(err, ui.ErrOpsAgentAssertionRefused) {
+			t.Fatalf("commit at the expiry = %v, want ErrOpsAgentAssertionRefused", err)
+		}
+		if _, finished := e.login.counts(); finished != 0 {
+			t.Fatalf("executor asked for an expired challenge (%d calls)", finished)
+		}
+		if v, _ := e.stored(t); v != base || e.auditCount(t) != 0 {
+			t.Fatalf("stored version %d, audit entries %d after an expired challenge", v, e.auditCount(t))
+		}
+	})
+}
+
+// The settings_changed event is sent after the commit on a context detached
+// from the request: a request cancelled after the commit still delivers it.
+func TestOpsAgentEventDeliveredAfterRequestCancelled(t *testing.T) {
+	e := newOpsEnv(t)
+	base, _ := e.stored(t)
+	c := opsChange(base, func(s *opsconfig.Settings) { s.Model = "llama3.1-8b" })
+	id := e.beginAs(t, "alice", c)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	e.s.notifier = &cancelAfterCommit{inner: e.notifier, cancel: cancel}
+	if err := e.s.CommitOpsAgentChange(ctx, "alice", id, c, []byte(vaGoodAssertion)); err != nil {
+		t.Fatalf("commit with a request cancelled after the commit = %v, want nil", err)
+	}
+	if ctx.Err() == nil {
+		t.Fatal("test setup: the request context was not cancelled")
+	}
+	if v, model := e.stored(t); v != base+1 || model != "llama3.1-8b" {
+		t.Fatalf("stored version %d model %q; want the committed change", v, model)
+	}
+	events := e.sent.delivered()
+	if len(events) != 1 || events[0].Kind != notify.KindOpsAgentSettingsChanged {
+		t.Fatalf("events = %+v, want one settings_changed although the request was cancelled", events)
 	}
 }
 
@@ -311,17 +440,28 @@ func TestOpsAgentDeliveryFailureDoesNotUndoTheChange(t *testing.T) {
 	}
 }
 
-// The pending challenges are bounded; the next begin is refused.
+// The pending challenges are bounded; the next begin is refused before the
+// executor is asked, so no challenge is left orphaned there. An expired
+// challenge frees its slot.
 func TestOpsAgentBeginIsBoundedByPendingLimit(t *testing.T) {
+	ctx := context.Background()
 	e := newOpsEnv(t)
 	base, _ := e.stored(t)
 	c := opsChange(base, func(s *opsconfig.Settings) { s.Model = "llama3.1-8b" })
 	for i := 0; i < maxOpsAgentChallenges; i++ {
 		e.beginAs(t, "alice", c)
 	}
-	if _, err := e.s.BeginOpsAgentChange(context.Background(), "alice", c); !errors.Is(err, errOpsAgentChallengeFull) {
+	if begun, _ := e.login.counts(); begun != maxOpsAgentChallenges {
+		t.Fatalf("executor challenges = %d, want %d", begun, maxOpsAgentChallenges)
+	}
+	if _, err := e.s.BeginOpsAgentChange(ctx, "alice", c); !errors.Is(err, errOpsAgentChallengeFull) {
 		t.Fatalf("begin beyond the limit = %v, want errOpsAgentChallengeFull", err)
 	}
+	if begun, _ := e.login.counts(); begun != maxOpsAgentChallenges {
+		t.Fatalf("a begin refused as full asked the executor (%d challenges, want %d)", begun, maxOpsAgentChallenges)
+	}
+	e.now = e.now.Add(opsAgentChallengeTTL)
+	e.beginAs(t, "alice", c)
 }
 
 // opsPostCode posts body to path on h and returns the status.

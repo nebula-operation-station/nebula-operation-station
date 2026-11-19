@@ -44,6 +44,11 @@ const (
 	opsAgentChallengeTTL = 2 * time.Minute
 	// maxOpsAgentChallenges bounds the begun, not yet committed changes.
 	maxOpsAgentChallenges = 32
+	// opsAgentNotifyTimeout bounds the settings_changed delivery after a
+	// commit. It runs on a context detached from the request: the request's
+	// own bound (vulnCallTimeout) is already partly used by the executor
+	// calls, and a client disconnect must not cancel the event.
+	opsAgentNotifyTimeout = 60 * time.Second
 )
 
 // errOpsAgentChallengeFull: too many begun changes.
@@ -75,6 +80,9 @@ type opsAgentSettings struct {
 
 	mu      sync.Mutex
 	pending map[string]opsAgentChallenge
+	// reserved counts the begins that hold a slot while they ask the
+	// executor for a challenge; pending+reserved never exceeds the limit.
+	reserved int
 }
 
 var _ ui.OpsAgentSettings = (*opsAgentSettings)(nil)
@@ -130,6 +138,17 @@ func (s *opsAgentSettings) BeginOpsAgentChange(ctx context.Context, user string,
 	if err != nil {
 		return ui.VulnChallenge{}, fmt.Errorf("begin ops agent settings change: digest: %w", err)
 	}
+	// The slot is checked and held before the executor is asked, so a begin
+	// refused as full leaves no challenge behind at the executor.
+	if err := s.reserve(); err != nil {
+		return ui.VulnChallenge{}, err
+	}
+	held := true
+	defer func() {
+		if held {
+			s.unreserve()
+		}
+	}()
 	b, err := s.login.BeginLogin(ctx, &pb.BeginLoginRequest{})
 	if err != nil {
 		return ui.VulnChallenge{}, fmt.Errorf("begin ops agent settings change: executor login challenge: %w", err)
@@ -142,19 +161,43 @@ func (s *opsAgentSettings) BeginOpsAgentChange(ctx context.Context, user string,
 	id := b.GetLoginId()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.reserved--
+	held = false
+	s.pruneLocked(now)
+	if _, dup := s.pending[id]; dup || id == "" {
+		return ui.VulnChallenge{}, errors.New("begin ops agent settings change: executor returned a reused challenge")
+	}
+	s.pending[id] = opsAgentChallenge{user: user, digest: digest, expires: exp}
+	return ui.VulnChallenge{ID: id, Options: b.GetRequestOptionsJson()}, nil
+}
+
+// reserve holds one slot for a begin that asks the executor. It fails when
+// the pending challenges and the held slots fill the limit.
+func (s *opsAgentSettings) reserve() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneLocked(s.now())
+	if len(s.pending)+s.reserved >= maxOpsAgentChallenges {
+		return errOpsAgentChallengeFull
+	}
+	s.reserved++
+	return nil
+}
+
+// unreserve releases a slot that was not turned into a pending challenge.
+func (s *opsAgentSettings) unreserve() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reserved--
+}
+
+// pruneLocked drops the expired challenges; s.mu must be held.
+func (s *opsAgentSettings) pruneLocked(now time.Time) {
 	for k, p := range s.pending {
 		if !now.Before(p.expires) {
 			delete(s.pending, k)
 		}
 	}
-	if _, dup := s.pending[id]; dup || id == "" {
-		return ui.VulnChallenge{}, errors.New("begin ops agent settings change: executor returned a reused challenge")
-	}
-	if len(s.pending) >= maxOpsAgentChallenges {
-		return ui.VulnChallenge{}, errOpsAgentChallengeFull
-	}
-	s.pending[id] = opsAgentChallenge{user: user, digest: digest, expires: exp}
-	return ui.VulnChallenge{ID: id, Options: b.GetRequestOptionsJson()}, nil
 }
 
 // take removes the challenge id and reports whether it was begun by user
@@ -214,7 +257,10 @@ func (s *opsAgentSettings) CommitOpsAgentChange(ctx context.Context, user, chall
 		return fmt.Errorf("commit ops agent settings change: %w", err)
 	}
 	change := notify.OpsAgentSettingsChange{Old: old.Settings, New: c.Settings, OldVersion: old.Version, NewVersion: cur.Version}
-	if s.notifier.NotifyOpsAgentSettingsChanged(ctx, change, s.now()) == 0 {
+	// The change is committed: the event must not depend on the request.
+	nctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), opsAgentNotifyTimeout)
+	defer cancel()
+	if s.notifier.NotifyOpsAgentSettingsChanged(nctx, change, s.now()) == 0 {
 		s.log.Warn("ops agent settings saved; no notification provider accepted the settings_changed event")
 	}
 	return nil
