@@ -68,7 +68,7 @@ functions: the original 13 for 20 seconds each, the 83 parsers of
 untrusted managed-host and device input added by tz07 for 10 seconds
 each (about 18 minutes of fuzzing in total, plus build time). It is not
 run by CI. The table lists every `Fuzz*` function
-in the repository (197, previously: 196, previously: 191, previously: 168, previously: 141, previously: 118, previously: 111, from `grep -rn '^func Fuzz' --include=*_test.go .`)
+in the repository (198, previously: 197, previously: 196, previously: 191, previously: 168, previously: 141, previously: 118, previously: 111, from `grep -rn '^func Fuzz' --include=*_test.go .`)
 with its package and whether `make fuzz` runs it. Functions marked "no"
 are not run by `make fuzz`; their seed corpora still run in `make test`
 like every other test.
@@ -141,7 +141,7 @@ like every other test.
 | `internal/sshsig` | `FuzzParse` | yes |
 | `internal/stageplan` | `FuzzParse` | no |
 | `internal/textdiff` | `FuzzDiff` | no |
-| `internal/trafficingest` | `FuzzSplitHours` | no |
+| `internal/trafficingest` | `FuzzSplitHours`, `FuzzHostNetHop` | no |
 | `internal/vulnfeed` | `FuzzParseNVD`, `FuzzParseKEV`, `FuzzParseDebianTracker`, `FuzzParseDebianAdvisoryList`, `FuzzParseOSV`, `FuzzParseOSVArchive`, `FuzzParseEPSS`, `FuzzCompareCSAFVersion`, `FuzzParseChecksum`, `FuzzParseCSAFKeyring`, `FuzzParseCSAFAdvisory` | yes |
 | `internal/vulnfeed/reputation` | `FuzzParseEntry`, `FuzzForEachRecord` | yes |
 | `internal/vulnagent/agent` | `FuzzParseSubmit`, `FuzzDecodeArgs`, `FuzzToolResultContent` | no |
@@ -164,7 +164,20 @@ package is a protected path.
 Before a release, run each `make fuzz` target for at least an hour
 (`go test -run='^$' -fuzz=NAME -fuzztime=1h ./PKG`).
 
-**Open:** 101 fuzz functions (the "no" rows; previously: 100, previously: 95, previously: 155, before that: 128, before that: 105, before that: 98) are not run by `make fuzz`,
+The counts in this section come from the table above. Run these in the
+clone root to recount them (the table has 198 names; 98 + 4 = 102 are "no",
+so 96 are "yes"):
+
+```sh
+# all names in the table (198)
+grep -E '^\| `internal/' docs/implementation/security-tests.md | cut -d'|' -f3 | grep -o '`Fuzz[A-Za-z0-9_]*`' | wc -l
+# names in rows whose last cell is "no" (98)
+grep -E '^\| `internal/.*\| no \|$' docs/implementation/security-tests.md | grep -o '`Fuzz[A-Za-z0-9_]*`' | wc -l
+# names after "no:" in mixed rows, e.g. "yes: A; no: B" (4)
+grep -E '^\| `internal/' docs/implementation/security-tests.md | cut -d'|' -f4 | grep -o 'no: .*' | grep -o '`Fuzz[A-Za-z0-9_]*`' | wc -l
+```
+
+**Open:** 102 fuzz functions (the "no" rows; previously: 101, previously: 100, previously: 95, previously: 155, before that: 128, before that: 105, before that: 98) are not run by `make fuzz`,
 and CI runs no fuzz target at all, although the M10-3 plan in
 `docs/implementation/m10-plan.md` expects CI to run them briefly. The
 first step of the earlier proposal is done (tz07): `make fuzz` now runs the
