@@ -534,7 +534,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	bg.Go(func() { closeRegistryReads(connCtx, registryReads, shutdownTimeout, log) })
 
 	// Notifications inbox (ADR 0016 D10): the log over server.db, for admins.
-	inbox, err := newInboxWiring(db, cachedVulnAdmin(exec, inboxStatusTTL, time.Now))
+	inbox, err := newInboxWiring(db, cachedVulnAdmin(exec, inboxStatusTTL, time.Now, bg.Go))
 	if err != nil {
 		return err
 	}

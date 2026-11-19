@@ -20,15 +20,25 @@ const (
 	BatchEnvelopeMaxBytes = 16 << 10
 )
 
-// encodeRecord encodes a record as sent: compact, without HTML escaping.
-func encodeRecord(rec vulnfinding.Record) ([]byte, error) {
+// encodeUnescaped encodes v as nosclient sends it inside a batch: compact,
+// without HTML escaping, so each byte is counted once.
+func encodeUnescaped(v any) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
-	if err := enc.Encode(rec); err != nil {
-		return nil, fmt.Errorf("encode record: %w", err)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
 	}
 	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
+
+// encodeRecord encodes a record as sent.
+func encodeRecord(rec vulnfinding.Record) ([]byte, error) {
+	b, err := encodeUnescaped(rec)
+	if err != nil {
+		return nil, fmt.Errorf("encode record: %w", err)
+	}
+	return b, nil
 }
 
 // printRecords is the dry run's phase 5: the records packed exactly as
@@ -79,7 +89,7 @@ func (p *packer) addFinding(b []byte) {
 }
 
 func (p *packer) addSubject(s nosclient.BatchSubject) error {
-	b, err := json.Marshal(s)
+	b, err := encodeUnescaped(s)
 	if err != nil {
 		return fmt.Errorf("encode subject: %w", err)
 	}
