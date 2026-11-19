@@ -27,7 +27,7 @@ func checkAnswer(t *testing.T, a Answer) {
 		if len(s.Text) > MaxStepTextBytes || !utf8.ValidString(s.Text) {
 			t.Fatalf("accepted a step text of %d bytes", len(s.Text))
 		}
-		if len(s.Command) > MaxCommandBytes || strings.ContainsAny(s.Command, "\r\n") {
+		if len(s.Command) > MaxCommandBytes || strings.ContainsFunc(s.Command, oneLineBreak) {
 			t.Fatalf("accepted command %q", s.Command)
 		}
 		if s.Where != "" && s.Where != WhereNebulaHost && s.Where != WhereManagedHost && s.Where != WhereBrowser {
@@ -50,6 +50,7 @@ func FuzzDecode(f *testing.F) {
 	f.Add([]byte(`{"in_scope":true,"language":"de","summary":"s","steps":[{"text":"t","command":"nebula status","where":"browser"}],"citations":["c1","c1"]}`))
 	f.Add([]byte(`{"in_scope":true,"language":"en","summary":"\ud800","steps":[],"citations":[]}`))
 	f.Add([]byte(`{"in_scope":true,"language":"en","summary":"s","steps":[{"text":"t","command":"a\nb"}],"citations":[]}`))
+	f.Add([]byte(`{"in_scope":true,"language":"en","summary":"s","steps":[{"text":"","command":"a b"}],"citations":[]}`))
 	f.Add([]byte("```json\n" + validEN + "\n```"))
 	f.Add([]byte(`{"in_scope":true,"in_scope":true}`))
 	f.Add([]byte(`{"in_scope":true,"language":"en","summary":"s","steps":[{"text":"t","x":1}],"citations":[]}`))
@@ -95,6 +96,18 @@ func FuzzCleanText(f *testing.F) {
 			t.Fatalf("rune count changed from %d to %d", utf8.RuneCountInString(s), utf8.RuneCountInString(out))
 		}
 	})
+}
+
+// oneLineBreak is the test's own list of line breaks for a command: CR, LF,
+// VT, FF, U+0085, U+2028 and U+2029. It mirrors the one-line rule of D4 and
+// is kept apart from isLineBreak so the oracle does not reuse the code under
+// test.
+func oneLineBreak(c rune) bool {
+	switch c {
+	case '\r', '\n', '\v', '\f', '\u0085', ' ', ' ':
+		return true
+	}
+	return false
 }
 
 // forbiddenRune is the test's own reading of ADR 0014 D4: control, format

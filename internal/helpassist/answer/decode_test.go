@@ -215,7 +215,15 @@ func TestDecodeRejectsInvalidAnswer(t *testing.T) {
 		// One line for commands.
 		{"command with line feed escape", with(t, `"nebula host pin host-01"`, `"nebula host pin host-01\nrm -rf /"`)},
 		{"command with carriage return escape", with(t, `"nebula host pin host-01"`, `"nebula host pin host-01\rrm"`)},
-		{"command with raw line feed", with(t, `"nebula host pin host-01"`, "\"nebula host pin host-01\nrm\"")},
+		{"command with escaped unicode line separator", with(t, `"nebula host pin host-01"`, "\"nebula host pin host-01\x5cu2028rm\"")},
+		{"command with escaped unicode paragraph separator", with(t, `"nebula host pin host-01"`, "\"nebula host pin host-01\x5cu2029rm\"")},
+		{"command with escaped next line", with(t, `"nebula host pin host-01"`, "\"nebula host pin host-01\x5cu0085rm\"")},
+		{"command with escaped vertical tab", with(t, `"nebula host pin host-01"`, "\"nebula host pin host-01\x5cu000brm\"")},
+		{"command with escaped form feed", with(t, `"nebula host pin host-01"`, "\"nebula host pin host-01\x5cfrm\"")},
+		{"command with raw unicode line separator", with(t, `"nebula host pin host-01"`, "\"nebula host pin host-01\xe2\x80\xa8rm\"")},
+		{"command with raw unicode paragraph separator", with(t, `"nebula host pin host-01"`, "\"nebula host pin host-01\xe2\x80\xa9rm\"")},
+		{"command with raw next line", with(t, `"nebula host pin host-01"`, "\"nebula host pin host-01\xc2\x85rm\"")},
+		{"raw line feed inside a string is invalid JSON", with(t, `"nebula host pin host-01"`, "\"nebula host pin host-01\nrm\"")},
 
 		// Encoding.
 		{"invalid utf-8 in summary", with(t, `"Pin the host."`, "\"Pin \xff host.\"")},

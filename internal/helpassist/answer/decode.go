@@ -175,10 +175,22 @@ func decodeCitations(dec *json.Decoder, a *Answer) error {
 // MaxCommandBytes bytes, and no line break. Other characters are checked by
 // helpcmd.CheckASCII where the command is shown.
 func checkCommand(s string) error {
-	if s == "" || len(s) > MaxCommandBytes || strings.ContainsAny(s, "\r\n") {
+	if s == "" || len(s) > MaxCommandBytes || strings.ContainsFunc(s, isLineBreak) {
 		return errSchema
 	}
 	return nil
+}
+
+// isLineBreak reports whether r ends a line for the one-line rule of a
+// command: CR, LF, VT, FF, next line (U+0085), line separator (U+2028) and
+// paragraph separator (U+2029). Every one of them starts a new line in some
+// renderer, so none may appear in a command.
+func isLineBreak(r rune) bool {
+	switch r {
+	case '\r', '\n', '\v', '\f', 0x85, 0x2028, 0x2029:
+		return true
+	}
+	return false
 }
 
 // walkObject reads one JSON object. For every key it calls fn, which reads the
