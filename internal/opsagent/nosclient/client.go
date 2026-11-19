@@ -268,12 +268,15 @@ type Question struct {
 }
 
 // QuestionHost is the fact part of a host a question names: host, exposure,
-// listening ports and counts. It carries no findings and no step candidates.
+// listening ports, the number of ports left out of the list, and counts. It
+// carries no findings and no step candidates. The counts are the sum over all
+// groups of the host.
 type QuestionHost struct {
-	Host     Host   `json:"host"`
-	Exposure string `json:"exposure"`
-	Ports    []Port `json:"ports"`
-	Counts   Counts `json:"counts"`
+	Host         Host   `json:"host"`
+	Exposure     string `json:"exposure"`
+	Ports        []Port `json:"ports"`
+	PortsOmitted int    `json:"ports_omitted"`
+	Counts       Counts `json:"counts"`
 }
 
 // Draft is a note as the agent posts it: kind "fix", "summary" or "answer".
