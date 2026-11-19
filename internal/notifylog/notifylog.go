@@ -35,8 +35,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-
-	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 )
 
 // Retention is how long entries are kept. Prune removes older entries.
@@ -57,19 +55,36 @@ var ErrRefused = errors.New("notifylog: record refused")
 // generates it. canonical has the same pattern, but its copy is unexported.
 var execIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
+// hostIDRe is the inventory host ID pattern, canonical.ValidHostID (lowercase
+// letters, digits, '.', '_', '-', at most 63 bytes). It is a copy so that
+// notifylog does not import canonical: internal/notify (on the vuln agent
+// path) imports this package, and canonical imports sshtransport, which the
+// agent path must not reach (TestVulnAgentPathImportsNoActionPackage).
+// TestHostIDPatternMatchesCanonical keeps both in step.
+var hostIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
+
 // validHost reports whether s is empty (no host) or exactly an inventory host
-// ID: canonical.ValidHostID, the pattern the inventory checks (lowercase
-// letters, digits, '.', '_', '-', at most 63 bytes). Nothing stricter and
-// nothing looser. There is no secret detector here: a value that does not
+// ID (hostIDRe, the same pattern as canonical.ValidHostID). Nothing stricter
+// and nothing looser. There is no secret detector here: a value that does not
 // have the ID shape is refused, and a value that does is a valid host ID.
 func validHost(s string) bool {
-	return s == "" || canonical.ValidHostID(s)
+	return s == "" || hostIDRe.MatchString(s)
 }
 
 // validExecutionID reports whether s is empty or a lowercase UUIDv4.
 func validExecutionID(s string) bool {
 	return s == "" || execIDRe.MatchString(s)
 }
+
+// ValidHost reports whether s is empty or an inventory host ID that Append
+// accepts (lowercase, at most 63 bytes). Callers that build a record from a
+// display label use it to decide between the label and "" before Append, so
+// that a label Append would refuse does not lose the whole event.
+func ValidHost(s string) bool { return validHost(s) }
+
+// ValidExecutionID reports whether s is empty or a lowercase UUIDv4 that
+// Append accepts. See ValidHost.
+func ValidExecutionID(s string) bool { return validExecutionID(s) }
 
 // refused builds the error for a refused field. why names the field and the
 // rule, and must never contain the input value.
@@ -149,21 +164,27 @@ type KindCode string
 
 // Event kinds.
 const (
-	KindVulnKEVNew              KindCode = "vuln.kev_new"
-	KindVulnCriticalNew         KindCode = "vuln.critical_new"
-	KindVulnHermesStale         KindCode = "vuln.hermes_stale"
-	KindVulnFeedStale           KindCode = "vuln.feed_stale"
-	KindVulnFeedRegressed       KindCode = "vuln.feed_regressed"
-	KindVulnFeedMarkReset       KindCode = "vuln.feed_mark_reset"
-	KindIntegrityNOSMismatch    KindCode = "integrity.nos_mismatch"
-	KindIntegrityHostChange     KindCode = "integrity.host_change"
-	KindIntegrityScanIncomplete KindCode = "integrity.scan_incomplete"
-	KindIntegrityBaselineTamper KindCode = "integrity.baseline_tamper"
-	KindLeaseExpiring           KindCode = "lease.expiring"
-	KindLeaseRunFailed          KindCode = "lease.run_failed"
-	KindDigest                  KindCode = "digest"
-	KindOpsSuggestionNew        KindCode = "opsagent.suggestion_new"
-	KindOpsSettingsChanged      KindCode = "opsagent.settings_changed"
+	KindVulnKEVNew                 KindCode = "vuln.kev_new"
+	KindVulnCriticalNew            KindCode = "vuln.critical_new"
+	KindVulnHermesStale            KindCode = "vuln.hermes_stale"
+	KindVulnFeedStale              KindCode = "vuln.feed_stale"
+	KindVulnFeedRegressed          KindCode = "vuln.feed_regressed"
+	KindVulnFeedMarkReset          KindCode = "vuln.feed_mark_reset"
+	KindIntegrityNOSMismatch       KindCode = "integrity.nos_mismatch"
+	KindIntegrityHostChange        KindCode = "integrity.host_change"
+	KindIntegrityScanIncomplete    KindCode = "integrity.scan_incomplete"
+	KindIntegrityBaselineTamper    KindCode = "integrity.baseline_tamper"
+	KindLeaseExpiring              KindCode = "lease.expiring"
+	KindLeaseRunFailed             KindCode = "lease.run_failed"
+	KindDigest                     KindCode = "digest"
+	KindOpsSuggestionNew           KindCode = "opsagent.suggestion_new"
+	KindOpsSettingsChanged         KindCode = "opsagent.settings_changed"
+	KindExecution                  KindCode = "execution"
+	KindOpsState                   KindCode = "ops_state"
+	KindHostKeyMismatch            KindCode = "host_key_mismatch"
+	KindTest                       KindCode = "test"
+	KindExecutorLocked             KindCode = "executor_locked"
+	KindIntegrityReferenceConflict KindCode = "integrity.reference_conflict"
 )
 
 func (k KindCode) valid() bool {
@@ -172,7 +193,8 @@ func (k KindCode) valid() bool {
 		KindVulnFeedStale, KindVulnFeedRegressed, KindVulnFeedMarkReset,
 		KindIntegrityNOSMismatch, KindIntegrityHostChange, KindIntegrityScanIncomplete,
 		KindIntegrityBaselineTamper, KindLeaseExpiring, KindLeaseRunFailed, KindDigest,
-		KindOpsSuggestionNew, KindOpsSettingsChanged:
+		KindOpsSuggestionNew, KindOpsSettingsChanged, KindExecution, KindOpsState,
+		KindHostKeyMismatch, KindTest, KindExecutorLocked, KindIntegrityReferenceConflict:
 		return true
 	}
 	return false
@@ -197,13 +219,20 @@ const (
 	StateChanged    StateCode = "changed"
 	StateReset      StateCode = "reset"
 	StateSummary    StateCode = "summary"
+	StateWaiting    StateCode = "waiting"
+	StatePartial    StateCode = "partial"
+	StateTest       StateCode = "test"
+	StateLocked     StateCode = "locked"
+	StateConflict   StateCode = "conflict"
+	StateOther      StateCode = "other"
 )
 
 func (s StateCode) valid() bool {
 	switch s {
 	case StateNew, StateEscalated, StateExpiring, StateFailed, StateStale,
 		StateRegressed, StateMismatch, StateIncomplete, StateTamper,
-		StateChanged, StateReset, StateSummary:
+		StateChanged, StateReset, StateSummary, StateWaiting, StatePartial,
+		StateTest, StateLocked, StateConflict, StateOther:
 		return true
 	}
 	return false

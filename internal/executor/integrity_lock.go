@@ -336,6 +336,7 @@ var integrityLockedMethods = map[string]bool{
 	pb.ExecutorService_ListPending_FullMethodName:                     false,
 	pb.ExecutorService_ApproveCLI_FullMethodName:                      false,
 	pb.ExecutorService_GetPermitState_FullMethodName:                  false,
+	pb.ExecutorService_RejectPending_FullMethodName:                   false,
 	pb.ExecutorService_TrustArtifact_FullMethodName:                   false,
 	pb.ExecutorService_UntrustArtifact_FullMethodName:                 false,
 	pb.ExecutorService_ListTrustedArtifacts_FullMethodName:            false,

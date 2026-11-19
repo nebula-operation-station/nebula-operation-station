@@ -53,6 +53,10 @@
       try {
         const body = { action: action.value, hosts, params };
         if (Object.keys(secrets).length > 0) body.secrets = secrets;
+        // A form opened from an agent suggestion sends its reference back;
+        // the server resolves it (ADR 0016 D9).
+        const suggestion = document.getElementById('operation-suggestion');
+        if (suggestion && suggestion.value) body.suggestion = suggestion.value;
         const preset = form.querySelector('input[name="preset"]:checked');
         if (preset && preset.value !== 'single') {
           body.plan = {

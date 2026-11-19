@@ -175,17 +175,29 @@ func TestRunFailedRejectsInvalidResults(t *testing.T) {
 	}
 }
 
-func TestExpiringPrunesEpisodesOfRemovedGrants(t *testing.T) {
+// TestExpiringKeepsEpisodesOfGrantsOutsideSnapshot: an episode is keyed by
+// grant, action and host, not by the snapshot. A grant that is missing from the
+// snapshot (inactive, over the limit, invalid) must not lose its open episode,
+// or each further failure of that run would be reported again.
+func TestExpiringKeepsEpisodesOfGrantsOutsideSnapshot(t *testing.T) {
 	_, st := mustRunFailed(t, []RunResult{run("g1", "a", "h", false, 0)}, State{})
 	_, st, err := Expiring([]Grant{lease("g2", testBase.Add(time.Hour*24*30))}, st, testBase)
 	if err != nil {
 		t.Fatalf("Expiring: %v", err)
 	}
-	if len(st.Episodes) != 0 {
-		t.Fatalf("episode of removed grant kept: %+v", st.Episodes)
+	if len(st.Episodes) != 1 {
+		t.Fatalf("episode of grant outside the snapshot dropped: %+v", st.Episodes)
 	}
-	events, _ := mustRunFailed(t, []RunResult{run("g1", "a", "h", false, time.Hour)}, st)
+	events, st := mustRunFailed(t, []RunResult{run("g1", "a", "h", false, time.Hour)}, st)
+	if len(events) != 0 {
+		t.Fatalf("repeated failure of an open episode: %d events, want 0", len(events))
+	}
+	_, st = mustRunFailed(t, []RunResult{run("g1", "a", "h", true, 2*time.Hour)}, st)
+	if len(st.Episodes) != 0 {
+		t.Fatalf("success did not close the episode: %+v", st.Episodes)
+	}
+	events, _ = mustRunFailed(t, []RunResult{run("g1", "a", "h", false, 3*time.Hour)}, st)
 	if len(events) != 1 {
-		t.Fatalf("re-added grant failure: %d events, want 1", len(events))
+		t.Fatalf("failure after the success: %d events, want 1", len(events))
 	}
 }

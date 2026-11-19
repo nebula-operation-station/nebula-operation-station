@@ -812,10 +812,12 @@ func (r *renderer) resolve(dest string) (href string, external, ok bool) {
 	p, frag, _ := strings.Cut(dest, "#")
 	// A fragment names a heading id through the same mapping as the ids
 	// themselves (anchorFold). One that folds to nothing is not an id, so
-	// the link renders its text only.
+	// the link renders its text only. Folding can grow the fragment several
+	// times over, so the folded form is bounded like the destination is: the
+	// href "#"+frag must fit maxLinkDestBytes, as a cross-page href does below.
 	if frag != "" {
 		frag = anchorFold(frag)
-		if !anchorRE.MatchString(frag) {
+		if !anchorRE.MatchString(frag) || len(frag)+1 > maxLinkDestBytes {
 			return "", false, false
 		}
 	}

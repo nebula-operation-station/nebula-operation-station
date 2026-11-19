@@ -127,9 +127,10 @@ type Event struct {
 // ExpiryWarnLong and once more at ExpiryWarnShort. A grant first seen inside the
 // short window reports only the short threshold. The input state is not changed.
 //
-// grants must be a complete snapshot. Expiry marks and run-failure episodes of
-// grants that are not in the snapshot are dropped, so a grant that comes back
-// is treated as new. Events are ordered by grant ID.
+// grants must be a complete snapshot. Expiry marks of grants that are not in
+// the snapshot are dropped, so a grant that comes back is treated as new. Run
+// failure episodes are kept: they are keyed by grant, action and host, not by
+// the snapshot, and RunFailed bounds them. Events are ordered by grant ID.
 func Expiring(grants []Grant, st State, now time.Time) ([]Event, State, error) {
 	if len(grants) > MaxTrackedGrants {
 		return nil, State{}, fmt.Errorf("%w: %d > %d", ErrTooManyGrants, len(grants), MaxTrackedGrants)
@@ -148,18 +149,13 @@ func Expiring(grants []Grant, st State, now time.Time) ([]Event, State, error) {
 	}
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
 
-	next := State{Seq: st.Seq}
+	next := State{Seq: st.Seq, Episodes: append([]Episode(nil), st.Episodes...)}
 	for id, marks := range st.Expiry {
 		if _, ok := live[id]; ok {
 			if next.Expiry == nil {
 				next.Expiry = make(map[string]ExpiryMarks)
 			}
 			next.Expiry[id] = marks
-		}
-	}
-	for _, ep := range st.Episodes {
-		if _, ok := live[ep.GrantID]; ok {
-			next.Episodes = append(next.Episodes, ep)
 		}
 	}
 

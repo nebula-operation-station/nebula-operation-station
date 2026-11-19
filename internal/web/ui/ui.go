@@ -107,6 +107,9 @@ type Options struct {
 	// NotificationsAdmin is the admin check of the notifications page. Nil
 	// denies every user (fail closed).
 	NotificationsAdmin NotificationAdminFunc
+	// OperationSuggestions opens the operation form from an agent
+	// suggestion (ADR 0016 D8). Nil answers those requests with 404.
+	OperationSuggestions *OperationSuggestions
 	// Pins stores the per-host pinned quick actions (job ui5). Nil
 	// leaves pin management off: no pin endpoints and no pin UI.
 	Pins PinStore
@@ -231,6 +234,9 @@ type Options struct {
 	// the lease form, registry leases on the lease pages and executor-read
 	// digests in docker.check_updates results. Nil hides all three.
 	RegistryReads RegistryReads
+	// AssistantOps configures the Ops tab of the Assistant panel (ADR 0016
+	// D11, assistant_ops.go). Nil hides the tab and answers its routes 404.
+	AssistantOps *AssistantOps
 	// Log receives executor status errors (the page itself only shows
 	// "Executor unavailable"). Nil means slog.Default().
 	Log *slog.Logger
@@ -241,14 +247,16 @@ type Handler struct {
 	publicOrigin string
 	// pages maps a content name to the parsed template set (layout +
 	// that page), so every page can define its own "content" block.
-	pages          map[string]*template.Template
-	staticFS       fs.FS
-	status         StatusProvider
-	hostNames      func(ctx context.Context) []string
-	hosts          func(ctx context.Context) ([]inventory.Host, error)
-	hostKeys       func(ctx context.Context) ([]*pb.HostKeyPin, error)
-	inventory      InventoryStore
-	operations     Operations
+	pages      map[string]*template.Template
+	staticFS   fs.FS
+	status     StatusProvider
+	hostNames  func(ctx context.Context) []string
+	hosts      func(ctx context.Context) ([]inventory.Host, error)
+	hostKeys   func(ctx context.Context) ([]*pb.HostKeyPin, error)
+	inventory  InventoryStore
+	operations Operations
+	// opSuggest opens operation forms from agent suggestions; nil refuses them.
+	opSuggest      *OperationSuggestions
 	pins           PinStore
 	schedules      Schedules
 	leases         Leases
@@ -312,6 +320,8 @@ type Handler struct {
 	// check (see logInboxCheckFailure).
 	inboxLogMu sync.Mutex
 	inboxLogAt time.Time
+	// assistantOps serves the Ops tab; nil when it is not configured.
+	assistantOps *AssistantOps
 }
 
 // New parses the embedded templates and builds a Handler.
@@ -334,6 +344,12 @@ func New(o Options) (*Handler, error) {
 	log := o.Log
 	if log == nil {
 		log = slog.Default()
+	}
+	if o.AssistantOps != nil && (o.AssistantOps.Store == nil || o.AssistantOps.IsAdmin == nil) {
+		return nil, errors.New("ui: AssistantOps needs Store and IsAdmin")
+	}
+	if o.OperationSuggestions != nil && (o.OperationSuggestions.Store == nil || o.OperationSuggestions.IsAdmin == nil) {
+		return nil, errors.New("ui: OperationSuggestions needs Store and IsAdmin")
 	}
 	serverIP := o.ServerIP
 	if serverIP == nil {
@@ -370,6 +386,7 @@ func New(o Options) (*Handler, error) {
 		operations:           o.Operations,
 		inbox:                o.Notifications,
 		inboxAdmin:           o.NotificationsAdmin,
+		opSuggest:            o.OperationSuggestions,
 		pins:                 o.Pins,
 		schedules:            o.Schedules,
 		leases:               o.Leases,
@@ -392,6 +409,7 @@ func New(o Options) (*Handler, error) {
 		pve:                  o.PVE,
 		pveRemotes:           o.PVERemotes,
 		registryReads:        o.RegistryReads,
+		assistantOps:         o.AssistantOps,
 		guestPower:           o.GuestPower,
 		guestSnapshot:        o.GuestSnapshot,
 		deploy:               o.Deploy,
@@ -701,6 +719,8 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("/setup", h.handleBare("Register a security key", "setup", "setup.js"))
 	// In-app help: the embedded handbook and FAQ (help.go).
 	h.registerHelp(mux)
+	// The Assistant panel: Help (every user) and Ops (admins; assistant.go).
+	h.registerAssistant(mux)
 	for _, p := range emptyPages {
 		path := p.path
 		mux.HandleFunc(path, h.handleEmpty(path))

@@ -171,6 +171,17 @@ func (s *Store) Put(ctx context.Context, r Resolver, d Draft, snapshot string) (
 	if !utf8.ValidString(snapshot) || !json.Valid([]byte(snapshot)) {
 		return Note{}, false, fmt.Errorf("snapshot: %w", ErrInvalidSnapshot)
 	}
+	// An answer refers to an open question (ADR 0016 D11); its digest is the
+	// question's, and the question is closed by the same transaction below.
+	var answered Question
+	if d.Kind == KindAnswer {
+		q, err := s.openQuestionForAnswer(ctx, d.Ref)
+		if err != nil {
+			return Note{}, false, err
+		}
+		answered = q
+		r = answerResolver{Resolver: r, digest: q.Digest}
+	}
 	steps, err := Validate(d, r)
 	if err != nil {
 		return Note{}, false, err
@@ -236,6 +247,11 @@ func (s *Store) Put(ctx context.Context, r Resolver, d Draft, snapshot string) (
 	id, err := res.LastInsertId()
 	if err != nil {
 		return Note{}, false, fmt.Errorf("opsnotes: note ID: %w", err)
+	}
+	if d.Kind == KindAnswer {
+		if err := closeQuestionTx(ctx, tx, answered.ID, id, now); err != nil {
+			return Note{}, false, err
+		}
 	}
 	for _, st := range steps {
 		if _, err := tx.ExecContext(ctx,
@@ -311,10 +327,14 @@ func (s *Store) Prune(ctx context.Context, now time.Time) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	qn, err := expireQuestionsTx(ctx, tx, now.UTC())
+	if err != nil {
+		return 0, err
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("opsnotes: commit prune: %w", err)
 	}
-	return n, nil
+	return n + qn, nil
 }
 
 // pruneTx deletes notes older than Retention and all but the newest keep

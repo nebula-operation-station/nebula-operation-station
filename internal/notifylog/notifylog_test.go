@@ -105,7 +105,7 @@ func TestAppendRejectsKindAndStateThatAreNotCodes(t *testing.T) {
 	const token = "123456:SECRET-TOKEN-XYZ"
 	bad := []string{
 		"",
-		"execution",
+		"executions",
 		"Lease.Expiring",
 		"lease.expiring ",
 		"lease.expiring\n",
@@ -318,7 +318,7 @@ func TestSchemaRejectsNonCodes(t *testing.T) {
 	s, _ := newTestStore(t)
 	for name, values := range map[string][]string{
 		"reason": {"'https://api.telegram.org/bot1:x/sendMessage'", "'Timeout'"},
-		"kind":   {"'https://api.telegram.org/bot1:x/sendMessage'", "'execution'", "'digest '"},
+		"kind":   {"'https://api.telegram.org/bot1:x/sendMessage'", "'unknown.kind'", "'digest '"},
 		"state":  {"'FAILED'", "'bot1:x'"},
 	} {
 		for _, v := range values {
@@ -1097,7 +1097,7 @@ func TestSchemaEnforcesEveryCheck(t *testing.T) {
 
 	// Edges that must be refused: one per CHECK clause and bound.
 	refuse := map[string]map[string]string{
-		"kind not a code":          {"kind": "'execution'"},
+		"kind not a code":          {"kind": "'unknown.kind'"},
 		"kind URL":                 {"kind": quote("https://api.telegram.org/bot1:x/sendMessage")},
 		"state not a code":         {"state": "'FAILED'"},
 		"state URL":                {"state": quote("bot1:x")},

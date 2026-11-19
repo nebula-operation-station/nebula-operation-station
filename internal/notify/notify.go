@@ -26,9 +26,11 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/notifylog"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 )
 
@@ -55,8 +57,28 @@ type Event struct {
 	// link is a NOS UI link for integrity events. Only IntegrityGate sets
 	// it, after validating it; it is empty for every other kind.
 	link string
+	// logLink is the NOS path of the same link (for example
+	// "/integrity/findings/7"), which the notification log stores. Only
+	// IntegrityGate sets it, from the validated link.
+	logLink string
+	// body is the whole text of a daily digest (see NewDailyDigest). Empty
+	// for every other kind.
+	body string
 	Time time.Time
 }
+
+// Vulnerability and digest kinds. internal/vulnnotify sends them and imports
+// this package, so the strings are repeated here; the values must match
+// vulnnotify's constants.
+const (
+	kindVulnKEVNew        = "vuln.kev_new"
+	kindVulnCriticalNew   = "vuln.critical_new"
+	kindVulnHermesStale   = "vuln.hermes_stale"
+	kindVulnFeedStale     = "vuln.feed_stale"
+	kindVulnFeedRegressed = "vuln.feed_regressed"
+	kindVulnFeedMarkReset = "vuln.feed_mark_reset"
+	kindVulnDigest        = "vuln.digest"
+)
 
 const (
 	maxField     = 300
@@ -88,7 +110,8 @@ func clean(s string, limit int) string {
 
 func (e Event) cleaned() Event {
 	return Event{Kind: clean(e.Kind, 64), Host: clean(e.Host, 64), State: clean(e.State, 64), Reason: clean(e.Reason, maxField),
-		ExecutionID: clean(e.ExecutionID, 128), link: clean(e.link, maxIntegrityLink), Time: e.Time.UTC().Truncate(time.Second)}
+		ExecutionID: clean(e.ExecutionID, 128), link: clean(e.link, maxIntegrityLink), logLink: e.logLink,
+		body: e.body, Time: e.Time.UTC().Truncate(time.Second)}
 }
 
 // Title is a short summary line.
@@ -107,12 +130,22 @@ func (e Event) Title() string {
 		return "Nebula: operation finished with " + e.State
 	case KindExecutorLocked:
 		return "Nebula: executor is locked"
+	case KindLeaseExpiring:
+		return "Nebula: read lease expires soon"
+	case KindLeaseRunFailed:
+		return "Nebula: leased run failed"
+	case KindDailyDigest:
+		return "Nebula: daily digest"
 	}
 	return "Nebula: " + e.Kind + " " + e.Host
 }
 
 // Text is the plain-text message.
 func (e Event) Text() string {
+	if e.body != "" {
+		// The digest text is complete: it has its own header and lines.
+		return e.body
+	}
 	var b strings.Builder
 	b.WriteString(e.Title())
 	if e.State != "" {
@@ -143,6 +176,175 @@ type Notifier struct {
 	log     *slog.Logger
 	// retryDelays between attempts; tests shorten them.
 	retryDelays []time.Duration
+	// rec stores each decision in the notification log (ADR 0016 D10). nil
+	// means no log; the notifier then behaves as before.
+	rec Recorder
+	// recSlots bounds the log writes in flight: one slot per write. It is
+	// made by SetRecorder.
+	recSlots chan struct{}
+	// recDropped counts records dropped because every slot was taken.
+	recDropped atomic.Int64
+}
+
+// Recorder stores one notification decision in the notification log (ADR
+// 0016 D10). *notifylog.Store implements it. A Recorder error is logged and
+// never changes the delivery result.
+type Recorder interface {
+	Append(ctx context.Context, r notifylog.Record) (int64, error)
+}
+
+// recordTimeout bounds one log write, so a stuck database cannot hold a write
+// slot for long.
+const recordTimeout = 5 * time.Second
+
+// maxPendingRecords bounds the log writes in flight. When all are taken, a new
+// record is dropped and counted (RecordsDropped), so a slow database never
+// makes memory or goroutines grow without limit.
+const maxPendingRecords = 64
+
+// SetRecorder sets the notification log. Call it before the notifier is used
+// concurrently; nil removes the log.
+func (n *Notifier) SetRecorder(r Recorder) {
+	n.rec = r
+	if r != nil && n.recSlots == nil {
+		n.recSlots = make(chan struct{}, maxPendingRecords)
+	}
+}
+
+// RecordsDropped returns how many records were dropped because the log could
+// not keep up. Dropped records are not in the log.
+func (n *Notifier) RecordsDropped() int64 { return n.recDropped.Load() }
+
+// FlushRecords waits until the log writes in flight have ended, or until ctx
+// ends. It holds every write slot while it waits, so a record that arrives
+// meanwhile is dropped; call it when sending has stopped (shutdown, tests).
+func (n *Notifier) FlushRecords(ctx context.Context) error {
+	if n.recSlots == nil {
+		return nil
+	}
+	taken := 0
+	defer func() {
+		for ; taken > 0; taken-- {
+			<-n.recSlots
+		}
+	}()
+	for taken < cap(n.recSlots) {
+		select {
+		case n.recSlots <- struct{}{}:
+			taken++
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return nil
+}
+
+// record stores r in the notification log (see write).
+func (n *Notifier) record(ctx context.Context, r notifylog.Record) {
+	n.write(ctx, []notifylog.Record{r})
+}
+
+// write stores recs in the notification log, in order. The whole batch takes
+// one write slot and is written by one goroutine, so a batch larger than the
+// slot count is not split across slots and is not dropped part way. The
+// goroutine lets a slow or locked database never delay a send or the next
+// notification; the caller does not wait for it. The writes use a context that
+// a cancelled send does not cancel (the decision must still be logged), and
+// each is bounded by recordTimeout. When no write slot is free, the whole batch
+// is dropped and counted in RecordsDropped. A failed write is logged without
+// the message text. write never returns an error.
+func (n *Notifier) write(ctx context.Context, recs []notifylog.Record) {
+	if n.rec == nil || len(recs) == 0 {
+		return
+	}
+	select {
+	case n.recSlots <- struct{}{}:
+	default:
+		dropped := n.recDropped.Add(int64(len(recs)))
+		n.log.Warn("notification log is behind, records dropped", "count", len(recs), "dropped_total", dropped)
+		return
+	}
+	base := context.WithoutCancel(ctx)
+	go func() {
+		defer func() { <-n.recSlots }()
+		for _, r := range recs {
+			n.writeOne(base, r)
+		}
+	}()
+}
+
+// writeOne appends one record under its own recordTimeout.
+func (n *Notifier) writeOne(base context.Context, r notifylog.Record) {
+	rctx, cancel := context.WithTimeout(base, recordTimeout)
+	defer cancel()
+	if _, err := n.rec.Append(rctx, r); err != nil {
+		n.log.Warn("notification log write failed", "kind", string(r.Kind), "outcome", string(r.Outcome), "error", err.Error())
+	}
+}
+
+// RecordHeld logs each event in es as held back by the hourly limit
+// (held_rate_limit) for a caller that holds the messages itself, such as the
+// vulnerability digest. The messages are not sent. Integrity events are
+// refused, as in NotifyProviders: they must go through IntegrityGate. A caller
+// passes every message its call held in one call; they are written with one
+// write slot (see write). It never blocks and never returns an error.
+func (n *Notifier) RecordHeld(ctx context.Context, es ...Event) {
+	recs := make([]notifylog.Record, 0, len(es))
+	for _, e := range es {
+		if isIntegrityKind(e.Kind) {
+			n.log.Warn("integrity notification refused outside IntegrityGate", "kind", e.Kind)
+			continue
+		}
+		r, known := newRecord(e.cleaned())
+		if !known {
+			continue
+		}
+		r.Outcome = notifylog.OutcomeHeldRateLimit
+		r.Reason = notifylog.ReasonRateLimited
+		r.Providers = len(n.senders)
+		recs = append(recs, r)
+	}
+	n.write(ctx, recs)
+}
+
+// logHost returns the host the notification log stores for a host label: the
+// label itself when it is an inventory host ID (lowercase, at most 63 bytes),
+// otherwise "". A display label such as "Web01" is not an ID, and Append
+// refuses a record with a host that is not an ID, so a label that is not one
+// is stored empty and the event is still logged. The message text is
+// unchanged.
+func logHost(s string) string {
+	if notifylog.ValidHost(s) {
+		return s
+	}
+	return ""
+}
+
+// logExecutionID returns the execution ID the log stores: the value when it is
+// a lowercase UUIDv4, otherwise "" (see logHost).
+func logExecutionID(s string) string {
+	if notifylog.ValidExecutionID(s) {
+		return s
+	}
+	return ""
+}
+
+// statusError is a provider answer with a non-2xx status. Its text is the same
+// as before; the type lets the log tell a rejection from a network failure.
+type statusError struct {
+	name string
+	code int
+}
+
+func (e *statusError) Error() string { return fmt.Sprintf("%s: answered HTTP %d", e.name, e.code) }
+
+// reasonOf maps a delivery error to the log's closed reason code.
+func reasonOf(err error) notifylog.ReasonCode {
+	var se *statusError
+	if errors.As(err, &se) {
+		return notifylog.ReasonProviderRejected
+	}
+	return notifylog.ReasonForError(err)
 }
 
 // New builds a notifier from the configuration. client may be nil.
@@ -222,10 +424,13 @@ func isIntegrityKind(kind string) bool {
 func (n *Notifier) send(ctx context.Context, e Event, skip func(provider string) bool) []string {
 	e = e.cleaned()
 	var ok []string
+	addressed := 0
+	var lastErr error
 	for _, s := range n.senders {
 		if skip != nil && skip(s.Name()) {
 			continue
 		}
+		addressed++
 		var err error
 		for attempt := 0; ; attempt++ {
 			sctx, cancel := context.WithTimeout(ctx, sendTimeout)
@@ -241,10 +446,26 @@ func (n *Notifier) send(ctx context.Context, e Event, skip func(provider string)
 		}
 		if err != nil {
 			n.log.Warn("notification failed", "provider", s.Name(), "kind", e.Kind, "host", e.Host, "error", err.Error())
+			lastErr = err
 			continue
 		}
 		ok = append(ok, s.Name())
 		n.log.Info("notification sent", "provider", s.Name(), "kind", e.Kind, "host", e.Host)
+	}
+	// Nothing was addressed (all skipped, or no provider): nothing to log.
+	if addressed > 0 {
+		if r, known := newRecord(e); known {
+			r.Providers = addressed
+			if len(ok) > 0 {
+				r.Outcome = notifylog.OutcomeSent
+			} else {
+				r.Outcome = notifylog.OutcomeFailed
+				r.Reason = reasonOf(lastErr)
+			}
+			n.record(ctx, r)
+		} else {
+			n.log.Debug("event kind has no notification log code", "kind", e.Kind)
+		}
 	}
 	return ok
 }
@@ -265,12 +486,12 @@ func post(ctx context.Context, c *http.Client, name, u string, body []byte, head
 		if errors.As(err, &ue) {
 			err = ue.Err
 		}
-		return fmt.Errorf("%s: request failed: %v", name, err)
+		return fmt.Errorf("%s: request failed: %w", name, err)
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBodyDrain))
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("%s: answered HTTP %d", name, resp.StatusCode)
+		return &statusError{name: name, code: resp.StatusCode}
 	}
 	return nil
 }
@@ -291,7 +512,9 @@ type WebhookPayload struct {
 	Reason      string `json:"reason,omitempty"`
 	ExecutionID string `json:"execution_id,omitempty"`
 	Link        string `json:"link,omitempty"`
-	Time        string `json:"time"`
+	// Body is the whole text of a daily digest; empty for every other kind.
+	Body string `json:"body,omitempty"`
+	Time string `json:"time"`
 }
 
 // Sign returns the signature header value for a webhook body: HMAC-SHA256
@@ -307,7 +530,7 @@ func Sign(secret []byte, timestamp string, body []byte) string {
 
 func (w *webhook) Send(ctx context.Context, e Event) error {
 	body, err := json.Marshal(WebhookPayload{Kind: e.Kind, Host: e.Host, State: e.State, Reason: e.Reason,
-		ExecutionID: e.ExecutionID, Link: e.link, Time: e.Time.Format(time.RFC3339)})
+		ExecutionID: e.ExecutionID, Link: e.link, Body: e.body, Time: e.Time.Format(time.RFC3339)})
 	if err != nil {
 		return err
 	}

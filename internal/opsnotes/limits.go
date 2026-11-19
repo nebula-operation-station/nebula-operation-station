@@ -13,6 +13,17 @@ const (
 	MaxNotes = 500
 	// MaxNotesPerDay bounds the notes stored per UTC day.
 	MaxNotesPerDay = 100
+	// MaxOpenQuestions bounds the questions that are open at the same time
+	// (ADR 0016 D11).
+	MaxOpenQuestions = 20
+	// MaxQuestionsPerDay bounds the questions asked per UTC day (ADR 0016
+	// D11).
+	MaxQuestionsPerDay = 50
+	// QuestionOpenTTL is how long an open question waits for an answer
+	// before it expires and can no longer be answered. The ADR names no
+	// value; a week is the chosen one. Expired questions are kept until
+	// Retention, then deleted.
+	QuestionOpenTTL = 7 * 24 * time.Hour
 )
 
 // Field bounds from ADR 0016 D6, applied to the note the model produced.
@@ -23,6 +34,8 @@ const (
 	MaxSummaryBytes = 600
 	// MaxTextBytes bounds the text of a summary or answer note.
 	MaxTextBytes = 2 << 10
+	// MaxQuestionBytes bounds the text of one admin question (ADR 0016 D11).
+	MaxQuestionBytes = 2 << 10
 	// MaxStepsPerNote bounds the steps of a fix note.
 	MaxStepsPerNote = 6
 	// MaxStepWhyBytes bounds the reason of one step.
