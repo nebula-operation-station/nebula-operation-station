@@ -23,6 +23,9 @@ import (
 // MaxCSAFStateBytes bounds the stored state of one CSAF provider.
 const MaxCSAFStateBytes = 256 << 20
 
+// errCSAFStateTooLarge reports a stored CSAF state over its size limit.
+var errCSAFStateTooLarge = errors.New("csaf state too large")
+
 // syncFeeds is run order phase 1. A feed that fails keeps its previous
 // snapshot; the failure is recorded and the run goes on. Dated and
 // undated feeds go first, so a proxy-dated feed sees its companions'
@@ -240,12 +243,34 @@ func (r *Runner) loadCSAFState(feed string) (vulnfeed.CSAFState, error) {
 		return vulnfeed.CSAFState{}, fmt.Errorf("open csaf state %s: %w", feed, err)
 	}
 	defer func() { _ = f.Close() }()
-	b, err := io.ReadAll(io.LimitReader(f, MaxCSAFStateBytes+1))
+	return readCSAFState(feed, f, MaxCSAFStateBytes)
+}
+
+// csafStateFile is the part of *os.File that readCSAFState uses. It lets
+// tests inject a file whose size or content differs from the real one.
+type csafStateFile interface {
+	io.Reader
+	Stat() (fs.FileInfo, error)
+}
+
+// readCSAFState decodes one stored CSAF state of at most limit bytes.
+// It refuses by size before reading, so an oversized file is never
+// buffered. The LimitReader still guards against the file growing after
+// that check.
+func readCSAFState(feed string, f csafStateFile, limit int64) (vulnfeed.CSAFState, error) {
+	info, err := f.Stat()
+	if err != nil {
+		return vulnfeed.CSAFState{}, fmt.Errorf("stat csaf state %s: %w", feed, err)
+	}
+	if info.Size() > limit {
+		return vulnfeed.CSAFState{}, fmt.Errorf("csaf state %s over %d bytes: %w", feed, limit, errCSAFStateTooLarge)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
 		return vulnfeed.CSAFState{}, fmt.Errorf("read csaf state %s: %w", feed, err)
 	}
-	if len(b) > MaxCSAFStateBytes {
-		return vulnfeed.CSAFState{}, fmt.Errorf("csaf state %s over %d bytes", feed, MaxCSAFStateBytes)
+	if int64(len(b)) > limit {
+		return vulnfeed.CSAFState{}, fmt.Errorf("csaf state %s over %d bytes: %w", feed, limit, errCSAFStateTooLarge)
 	}
 	var st vulnfeed.CSAFState
 	dec := json.NewDecoder(bytes.NewReader(b))
@@ -262,7 +287,7 @@ func (r *Runner) saveCSAFState(feed string, st vulnfeed.CSAFState) error {
 		return fmt.Errorf("encode csaf state %s: %w", feed, err)
 	}
 	if len(b) > MaxCSAFStateBytes {
-		return fmt.Errorf("csaf state %s over %d bytes", feed, MaxCSAFStateBytes)
+		return fmt.Errorf("csaf state %s over %d bytes: %w", feed, MaxCSAFStateBytes, errCSAFStateTooLarge)
 	}
 	dir := filepath.Join(r.cfg.DataDir, csafDir)
 	if err := os.MkdirAll(dir, 0o700); err != nil {

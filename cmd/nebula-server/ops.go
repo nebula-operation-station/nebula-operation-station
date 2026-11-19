@@ -221,9 +221,11 @@ func (f opsFactsSource) Hosts(ctx context.Context) ([]string, error) {
 }
 
 // newOpsAPI returns the ops API handler, or nil when no ops token is
-// configured. The settings row lives in db (server.db).
+// configured. The settings row lives in db (server.db). accepted (may be nil)
+// runs after each note is stored for the first time (see ops_suggestion.go).
 func newOpsAPI(cfg serverconfig.APIConfig, db *sql.DB, notes *opsnotes.Store,
-	hosts func(ctx context.Context) ([]inventory.Host, error), log *slog.Logger) (http.Handler, error) {
+	hosts func(ctx context.Context) ([]inventory.Host, error), log *slog.Logger,
+	accepted func(opsnotes.Note)) (http.Handler, error) {
 	if _, ok := cfg.OpsToken(); !ok {
 		return nil, nil
 	}
@@ -238,7 +240,8 @@ func newOpsAPI(cfg serverconfig.APIConfig, db *sql.DB, notes *opsnotes.Store,
 		return nil, fmt.Errorf("ops api: projection: %w", err)
 	}
 	h, err := api.NewOps(api.OpsOptions{Tokens: cfg.Tokens, Settings: settings,
-		Facts: opsFactsSource{proj: proj, hosts: src}, Notes: notes, CorePrompt: opsAgentCorePrompt, Log: log})
+		Facts: opsFactsSource{proj: proj, hosts: src}, Notes: notes, CorePrompt: opsAgentCorePrompt, Log: log,
+		OnNoteAccepted: accepted})
 	if err != nil {
 		return nil, fmt.Errorf("ops api: %w", err)
 	}
