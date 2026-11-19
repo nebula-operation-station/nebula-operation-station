@@ -10,6 +10,8 @@ import (
 	"unicode/utf8"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
@@ -107,6 +109,12 @@ func rejectDetail(reason string) string {
 // returned unchanged so the caller can show it. An execution that is not
 // pending on the server is refused with ErrNotPending before the executor is
 // asked.
+//
+// Spec 07 v29-07-01: before the call the server stores the rejection intent
+// (user, reason, time) in the pending record without changing the state. An
+// executor refusal clears it again; a call whose answer is lost (see
+// rejectAnswerLost) keeps it, so a rejection the executor committed is still
+// attributed to the web UI after a restart.
 func (s *Service) Reject(ctx context.Context, user, id, reason string) error {
 	if err := CheckRejectReason(reason); err != nil {
 		return err
@@ -128,12 +136,22 @@ func (s *Service) Reject(ctx context.Context, user, id, reason string) error {
 	if e.Digest == "" {
 		return &ParamError{Reason: "the operation has no proposal digest to reject"}
 	}
+	if err := s.storeRejectIntent(ctx, id, user, reason); err != nil {
+		return err
+	}
 	cctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
 	if _, err := rej.RejectPending(cctx, &pb.RejectPendingRequest{Digest: e.Digest, Reason: reason, RelayedUser: user}); err != nil {
+		if !rejectAnswerLost(err) {
+			if cerr := s.clearRejectIntent(ctx, id); cerr != nil {
+				// The intent is data only; keeping it is harmless. The
+				// executor's refusal is what the caller needs to see.
+				s.log.Warn("audit", "kind", "execution_reject_intent_not_cleared", "execution", id, "error", cerr.Error())
+			}
+		}
 		return err
 	}
-	moved, err := s.markRejected(ctx, id, rejectDetail(reason))
+	moved, err := s.markRejected(ctx, id, rejectDetail(reason), false)
 	if err != nil {
 		// The executor has rejected the proposal and the server could not
 		// record it. The next CheckCLIApproval or sweep reads the executor's
@@ -151,18 +169,73 @@ func (s *Service) Reject(ctx context.Context, user, id, reason string) error {
 	return nil
 }
 
+// storeRejectIntent writes the rejection intent (user, reason, time) into the
+// pending record before the executor is asked. The state does not change. The
+// guarded update refuses an execution that is no longer pending with
+// ErrNotPending.
+func (s *Service) storeRejectIntent(ctx context.Context, id, user, reason string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE executions SET reject_user = ?, reject_reason = ?, reject_at = ?
+		WHERE id = ? AND state = 'pending'`, user, reason, s.now().Unix(), id)
+	if err != nil {
+		return fmt.Errorf("store rejection intent of execution %s: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store rejection intent of execution %s: %w", id, err)
+	}
+	if n != 1 {
+		return ErrNotPending
+	}
+	return nil
+}
+
+// clearRejectIntent removes the rejection intent of a pending execution. It is
+// used when the executor refused the call, so nothing was rejected.
+func (s *Service) clearRejectIntent(ctx context.Context, id string) error {
+	if _, err := s.db.ExecContext(ctx, `UPDATE executions SET reject_user = NULL, reject_reason = NULL, reject_at = NULL
+		WHERE id = ? AND state = 'pending'`, id); err != nil {
+		return fmt.Errorf("clear rejection intent of execution %s: %w", id, err)
+	}
+	return nil
+}
+
+// rejectAnswerLost reports whether a RejectPending error leaves the outcome
+// open: the call timed out, was cancelled, could not reach the executor, or
+// the answer is unknown. Every other error code is a refusal by the executor
+// and nothing was rejected (spec 07: a refused call clears the intent).
+func rejectAnswerLost(err error) bool {
+	st, ok := status.FromError(err)
+	if !ok {
+		return true
+	}
+	switch st.Code() {
+	case codes.Unavailable, codes.DeadlineExceeded, codes.Canceled, codes.Unknown:
+		return true
+	}
+	return false
+}
+
+// intentDrop clears the rejection intent in the same update that records a
+// rejection; it is used for a rejection by the executor's admin.
+const intentDrop = `, reject_user = NULL, reject_reason = NULL, reject_at = NULL`
+
 // markRejected moves a pending execution to 'rejected' with a guarded update
 // and sets its waiting host rows to finished/not_executed, in one
-// transaction. It reports whether this call moved the execution; false means
-// it was no longer pending and nothing changed.
-func (s *Service) markRejected(ctx context.Context, id, detail string) (bool, error) {
+// transaction. dropIntent also clears the rejection intent. It reports whether
+// this call moved the execution; false means it was no longer pending and
+// nothing changed.
+func (s *Service) markRejected(ctx context.Context, id, detail string, dropIntent bool) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback() //nolint:errcheck
 	now := s.now().Unix()
-	res, err := tx.ExecContext(ctx, `UPDATE executions SET state = 'rejected', detail = ?, finished_at = ?
+	drop := ""
+	if dropIntent {
+		drop = intentDrop
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE executions SET state = 'rejected', detail = ?, finished_at = ?`+drop+`
 		WHERE id = ? AND state = 'pending'`, detail, now, id)
 	if err != nil {
 		return false, err
@@ -188,16 +261,19 @@ func (s *Service) markRejected(ctx context.Context, id, detail string) (bool, er
 // execution (rejected on the executor host with `nebula reject`, or a server
 // rejection whose record was lost). The executor's answer carries no reason.
 func (s *Service) recordCLIRejection(ctx context.Context, id, digest string, role pb.RejectingRole) error {
-	ok, err := s.markRejected(ctx, id, "rejected on the executor host; nothing was run")
+	// Spec 07: the admin role drops any intent left over from a server call
+	// that never reached the executor.
+	isAdmin := role == pb.RejectingRole_REJECTING_ROLE_ADMIN
+	ok, err := s.markRejected(ctx, id, "rejected on the executor host; nothing was run", isAdmin)
 	if err != nil {
 		return err
 	}
 	if !ok {
 		return nil
 	}
-	kind := "execution_rejected_on_cli"
-	if role != pb.RejectingRole_REJECTING_ROLE_ADMIN {
-		kind = "execution_rejected"
+	kind := "execution_rejected"
+	if isAdmin {
+		kind = "execution_rejected_on_cli"
 	}
 	s.log.Info("audit", "kind", kind, "execution", id, "digest", digest)
 	return nil

@@ -72,10 +72,18 @@ type fakeExec struct {
 	rejectErr error
 	// rejects records the RejectPending calls that reached the executor.
 	rejects []*pb.RejectPendingRequest
+	// beforeReject runs first in RejectPending, before the call is recorded
+	// (the server's database is readable from here; the lock is not held).
+	beforeReject func()
+	// rejectedBy is the role GetPermitState reports for a REJECTED state.
+	rejectedBy pb.RejectingRole
 }
 
 // RejectPending records the call and answers REJECTED, or rejectErr.
 func (f *fakeExec) RejectPending(_ context.Context, in *pb.RejectPendingRequest, _ ...grpc.CallOption) (*pb.RejectPendingResponse, error) {
+	if f.beforeReject != nil {
+		f.beforeReject()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.rejects = append(f.rejects, in)
@@ -170,7 +178,7 @@ func (f *fakeExec) GetPermitState(_ context.Context, in *pb.GetPermitStateReques
 	if f.permitStateErr != nil {
 		return nil, f.permitStateErr
 	}
-	return &pb.GetPermitStateResponse{State: f.permitState}, nil
+	return &pb.GetPermitStateResponse{State: f.permitState, RejectedBy: f.rejectedBy}, nil
 }
 
 type fakeHosts map[string]inventory.Host
