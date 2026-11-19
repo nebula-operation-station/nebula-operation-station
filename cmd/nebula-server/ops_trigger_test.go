@@ -117,20 +117,166 @@ func TestOpsTriggerAtMostOncePerMinute(t *testing.T) {
 	}
 }
 
-// TestOpsTriggerKeepsContent: touching never changes the file's content; the
-// trigger carries no data.
-func TestOpsTriggerKeepsContent(t *testing.T) {
+// TestOpsTriggerCarriesNoData: the trigger is replaced by an empty file; it
+// carries no data, and nothing a previous writer left in it survives (ADR
+// 0016 D3, amendment 2026-11-19). Before the amendment the touch kept the
+// content unchanged; the atomic replace makes it empty instead.
+func TestOpsTriggerCarriesNoData(t *testing.T) {
 	tr, path, _, _ := triggerFixture(t, true)
-	if err := os.WriteFile(path, []byte("unchanged"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("planted"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	tr.Touch()
+	if !tr.Touch() {
+		t.Fatal("touch failed")
+	}
 	got, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(got) != "unchanged" {
-		t.Fatalf("content changed to %q", got)
+	if len(got) != 0 {
+		t.Fatalf("trigger content is %q, want empty", got)
+	}
+}
+
+// TestOpsTriggerPathIsInServerStateDirectory: the trigger lies directly in the
+// server's own StateDirectory from nebula-server.service, and the ops agent's
+// path unit watches exactly that file (ADR 0016 amendment 2026-11-19).
+func TestOpsTriggerPathIsInServerStateDirectory(t *testing.T) {
+	if opsTriggerPath != "/var/lib/nebula/server/ops-trigger" {
+		t.Fatalf("opsTriggerPath = %q", opsTriggerPath)
+	}
+	var stateDirs, watched []string
+	for _, l := range systemdUnitLines(t, "../../deploy/systemd/nebula-server.service") {
+		if v, ok := strings.CutPrefix(l, "StateDirectory="); ok {
+			stateDirs = append(stateDirs, strings.Fields(v)...)
+		}
+	}
+	if len(stateDirs) != 1 || "/var/lib/"+stateDirs[0] != filepath.Dir(opsTriggerPath) {
+		t.Fatalf("server StateDirectory %q does not hold the trigger %s", stateDirs, opsTriggerPath)
+	}
+	for _, l := range systemdUnitLines(t, "../../deploy/systemd/nebula-ops-agent.path") {
+		for _, k := range []string{"PathChanged=", "PathModified=", "PathExists=", "PathExistsGlob=", "DirectoryNotEmpty="} {
+			if v, ok := strings.CutPrefix(l, k); ok {
+				watched = append(watched, v)
+			}
+		}
+	}
+	if len(watched) != 1 || watched[0] != opsTriggerPath {
+		t.Fatalf("path unit watches %q, want only %s", watched, opsTriggerPath)
+	}
+}
+
+// systemdUnitLines returns the trimmed non-comment lines of a unit file.
+func systemdUnitLines(t *testing.T, path string) []string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, l := range strings.Split(string(raw), "\n") {
+		l = strings.TrimSpace(l)
+		if l == "" || strings.HasPrefix(l, "#") || strings.HasPrefix(l, ";") {
+			continue
+		}
+		out = append(out, l)
+	}
+	return out
+}
+
+// TestOpsTriggerFileIsMode0600: the trigger is created with mode 0600 and
+// replaced with mode 0600 even when a looser file was there before.
+func TestOpsTriggerFileIsMode0600(t *testing.T) {
+	for _, pre := range []bool{false, true} {
+		tr, path, _, _ := triggerFixture(t, true)
+		if pre {
+			if err := os.WriteFile(path, nil, 0o666); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(path, 0o666); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !tr.Touch() {
+			t.Fatal("touch failed")
+		}
+		fi, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !fi.Mode().IsRegular() || fi.Mode().Perm() != 0o600 {
+			t.Fatalf("pre-existing=%v: trigger mode %v, want regular 0600", pre, fi.Mode())
+		}
+	}
+}
+
+// TestOpsTriggerReplacesAtomically: every touch puts a new file in place by
+// rename (a new inode, so the path unit sees it) and leaves no temporary file
+// behind in the state directory.
+func TestOpsTriggerReplacesAtomically(t *testing.T) {
+	tr, path, clk, _ := triggerFixture(t, true)
+	if !tr.Touch() {
+		t.Fatal("first touch failed")
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clk.t = triggerT0.Add(time.Minute)
+	if !tr.Touch() {
+		t.Fatal("second touch failed")
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(before, after) {
+		t.Fatal("trigger rewritten in place, want a replace by rename")
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(path) {
+		var names []string
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("state directory holds %q, want only the trigger", names)
+	}
+}
+
+// TestOpsTriggerNeverFollowsASymlink: a symlink at the trigger path is
+// replaced, never written through; the file it points to stays unchanged.
+func TestOpsTriggerNeverFollowsASymlink(t *testing.T) {
+	tr, path, _, _ := triggerFixture(t, true)
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, path); err != nil {
+		t.Fatal(err)
+	}
+	if !tr.Touch() {
+		t.Fatal("touch failed")
+	}
+	fi, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fi.Mode().IsRegular() {
+		t.Fatalf("trigger is %v after touch, want a regular file", fi.Mode())
+	}
+	got, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vi, err := os.Stat(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "keep" || vi.Mode().Perm() != 0o644 {
+		t.Fatalf("symlink target changed: %q %v", got, vi.Mode())
 	}
 }
 

@@ -16,7 +16,7 @@ const (
 	opsStateDir    = "/var/lib/nebula-ops-agent"
 	opsEtcDir      = "/etc/nebula-ops-agent"
 	opsConfigPath  = opsEtcDir + "/config.json"
-	opsTriggerDir  = "/var/lib/nebula/opsagent/trigger"
+	opsTriggerPath = "/var/lib/nebula/server/ops-trigger"
 	opsUnit        = "../systemd/nebula-ops-agent.service"
 	opsTimer       = "../systemd/nebula-ops-agent.timer"
 	opsPath        = "../systemd/nebula-ops-agent.path"
@@ -143,9 +143,9 @@ func TestOpsAgentUnitExplainsTheLLMDropIn(t *testing.T) {
 	}
 }
 
-// The trigger directory the path unit watches lies below a path the agent's
-// unit makes inaccessible, and outside the agent's one write path: only
-// systemd sees it.
+// The trigger file the path unit watches lies below a path the agent's unit
+// makes inaccessible, and outside the agent's one write path: only systemd
+// sees it.
 func TestOpsAgentCannotSeeTheTriggerPath(t *testing.T) {
 	var watched []string
 	for _, l := range unitLines(t, opsPath) {
@@ -155,23 +155,40 @@ func TestOpsAgentCannotSeeTheTriggerPath(t *testing.T) {
 			}
 		}
 	}
-	if !slices.Equal(watched, []string{opsTriggerDir}) {
-		t.Fatalf("path unit watches %q, want only PathChanged=%s", watched, opsTriggerDir)
+	if !slices.Equal(watched, []string{opsTriggerPath}) {
+		t.Fatalf("path unit watches %q, want only PathChanged=%s", watched, opsTriggerPath)
 	}
 	var hidden []string
+	under := func(p, dir string) bool { return p == dir || strings.HasPrefix(p, dir+"/") }
 	for _, l := range unitLines(t, opsUnit) {
-		if v, ok := strings.CutPrefix(l, "InaccessiblePaths="); ok {
+		k, v, ok := strings.Cut(l, "=")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "InaccessiblePaths":
 			for _, p := range strings.Fields(v) {
 				hidden = append(hidden, strings.TrimPrefix(p, "-"))
 			}
+		case "ReadWritePaths", "ReadOnlyPaths", "BindPaths", "BindReadOnlyPaths", "ExecPaths":
+			// No path setting may bring the server's state directory back
+			// into the agent's view.
+			for _, p := range strings.Fields(v) {
+				p = strings.TrimPrefix(strings.TrimPrefix(p, "-"), "+")
+				if src, _, ok := strings.Cut(p, ":"); ok {
+					p = src
+				}
+				if under(opsTriggerPath, p) || under(p, filepath.Dir(opsTriggerPath)) {
+					t.Errorf("agent unit exposes the trigger directory via %q", l)
+				}
+			}
 		}
 	}
-	under := func(p, dir string) bool { return p == dir || strings.HasPrefix(p, dir+"/") }
-	if !slices.ContainsFunc(hidden, func(h string) bool { return under(opsTriggerDir, h) }) {
-		t.Errorf("trigger %s is not below an InaccessiblePaths entry %q", opsTriggerDir, hidden)
+	if !slices.ContainsFunc(hidden, func(h string) bool { return under(opsTriggerPath, h) }) {
+		t.Errorf("trigger %s is not below an InaccessiblePaths entry %q", opsTriggerPath, hidden)
 	}
-	if under(opsTriggerDir, opsStateDir) || under(opsStateDir, filepath.Dir(opsTriggerDir)) {
-		t.Errorf("trigger %s and state dir %s overlap", opsTriggerDir, opsStateDir)
+	if under(opsTriggerPath, opsStateDir) || under(opsStateDir, filepath.Dir(opsTriggerPath)) {
+		t.Errorf("trigger %s and state dir %s overlap", opsTriggerPath, opsStateDir)
 	}
 }
 
@@ -200,13 +217,23 @@ func TestOpsAgentPathUnitStartsTheService(t *testing.T) {
 	lines := unitLines(t, opsPath)
 	for _, want := range []string{
 		"[Path]",
-		"PathChanged=" + opsTriggerDir,
+		"PathChanged=" + opsTriggerPath,
 		"Unit=" + opsServiceName,
 		"[Install]",
 		"WantedBy=multi-user.target",
 	} {
 		if !slices.Contains(lines, want) {
 			t.Errorf("path unit lacks %q", want)
+		}
+	}
+	// systemd (PID 1, root) watches the path itself: the path unit runs no
+	// process and names no user, so no user gains access to the server's
+	// state directory for the watch.
+	for _, l := range lines {
+		for _, bad := range []string{"[Service]", "User=", "Group=", "ExecStart="} {
+			if strings.HasPrefix(l, bad) {
+				t.Errorf("path unit has %q; it must stay a plain root-watched path unit", l)
+			}
 		}
 	}
 }
