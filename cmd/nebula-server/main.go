@@ -464,6 +464,12 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	if err != nil {
 		return err
 	}
+	// Ops agent settings (ADR 0016 D12): the same maintainer and fresh
+	// assertion rules; the settings_changed event follows each commit.
+	opsAgent, err := newOpsAgentWiring(db, audit, isAdmin, exec, notifier, log)
+	if err != nil {
+		return err
+	}
 
 	// Private registry reads (G13). The digest reader's background worker
 	// lives as long as the server: when connCtx ends it is closed (its
@@ -520,6 +526,8 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		// Findings pages over the real store.
 		Vuln:      vulnPages{v: vuln, admin: isAdmin},
 		VulnAgent: vulnAgent,
+		// Ops agent settings section (ADR 0016 D12).
+		OpsAgent: opsAgent,
 		// Private registry reads (ADR 0006, cu06 part 1, G13): registry
 		// read leases on the lease pages and executor-read digests of
 		// private images in docker.check_updates results. The credential
