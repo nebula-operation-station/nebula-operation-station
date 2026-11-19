@@ -224,14 +224,60 @@ type opsAgentPending struct {
 	expires time.Time
 }
 
-// opsAgentPendingTable keeps begun changes by challenge ID.
+// opsAgentPendingTable keeps begun changes by challenge ID. A begin holds a
+// slot (reserve) before it asks the backend, so a full table refuses the
+// begin before any executor challenge exists.
 type opsAgentPendingTable struct {
-	mu sync.Mutex
-	m  map[string]opsAgentPending
+	mu       sync.Mutex
+	m        map[string]opsAgentPending
+	reserved int
 }
 
 func newOpsAgentPendingTable() *opsAgentPendingTable {
 	return &opsAgentPendingTable{m: map[string]opsAgentPending{}}
+}
+
+// pruneLocked drops the expired entries; t.mu must be held.
+func (t *opsAgentPendingTable) pruneLocked(now time.Time) {
+	for k, v := range t.m {
+		if !now.Before(v.expires) {
+			delete(t.m, k)
+		}
+	}
+}
+
+// reserve holds a slot for a begin that is about to ask the backend; false
+// when the pending changes and the held slots fill the table. Each reserve
+// is ended by exactly one settle or release.
+func (t *opsAgentPendingTable) reserve(now time.Time) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.pruneLocked(now)
+	if len(t.m)+t.reserved >= maxOpsAgentPending {
+		return false
+	}
+	t.reserved++
+	return true
+}
+
+// release gives back a slot that was not turned into a pending change.
+func (t *opsAgentPendingTable) release() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.reserved--
+}
+
+// settle turns a held slot into the pending change under id.
+func (t *opsAgentPendingTable) settle(id string, p opsAgentPending, now time.Time) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.reserved--
+	t.pruneLocked(now)
+	if len(t.m) >= maxOpsAgentPending {
+		return false
+	}
+	t.m[id] = p
+	return true
 }
 
 // put stores a pending change; false when the table is full of live
@@ -239,11 +285,7 @@ func newOpsAgentPendingTable() *opsAgentPendingTable {
 func (t *opsAgentPendingTable) put(id string, p opsAgentPending, now time.Time) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	for k, v := range t.m {
-		if !now.Before(v.expires) {
-			delete(t.m, k)
-		}
-	}
+	t.pruneLocked(now)
 	if len(t.m) >= maxOpsAgentPending {
 		return false
 	}
@@ -316,6 +358,19 @@ func (h *Handler) handleOpsAgentBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	user := webUser(r)
+	// The slot is held before the backend is asked: a full table must not
+	// leave an executor challenge behind.
+	now := h.clockNow()
+	if !h.opsAgentPending.reserve(now) {
+		writeJSONError(w, http.StatusTooManyRequests, "too many changes in progress; try again in a few minutes")
+		return
+	}
+	held := true
+	defer func() {
+		if held {
+			h.opsAgentPending.release()
+		}
+	}()
 	ch, err := h.opsAgent.BeginOpsAgentChange(ctx, user, c)
 	if err != nil {
 		h.opsAgentError(w, "begin", err)
@@ -326,8 +381,8 @@ func (h *Handler) handleOpsAgentBegin(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadGateway, "security key challenge unavailable")
 		return
 	}
-	now := h.clockNow()
-	if !h.opsAgentPending.put(ch.ID, opsAgentPending{user: user, change: c, expires: now.Add(opsAgentPendingTTL)}, now) {
+	held = false
+	if !h.opsAgentPending.settle(ch.ID, opsAgentPending{user: user, change: c, expires: now.Add(opsAgentPendingTTL)}, now) {
 		writeJSONError(w, http.StatusTooManyRequests, "too many changes in progress; try again in a few minutes")
 		return
 	}

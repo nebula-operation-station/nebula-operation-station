@@ -438,6 +438,11 @@ func TestOpsAgentChallengesAreLimitedAndExpire(t *testing.T) {
 	if code, _ := vulnPost(t, h, opsBegin, opsAgentBody(func(m map[string]any) { m["model"] = "overflow" })); code != http.StatusTooManyRequests {
 		t.Fatalf("begin beyond the limit = %d, want 429", code)
 	}
+	// A begin refused as full must not ask the backend, so no executor
+	// challenge is left behind without a pending change here.
+	if len(ops.begun) != maxOpen {
+		t.Fatalf("backend begins = %d, want %d: the refused begin reached the backend", len(ops.begun), maxOpen)
+	}
 	// After the TTL a challenge is gone.
 	clock.t = vulnNow.Add(6 * time.Minute)
 	body := opsAgentBody(func(m map[string]any) { m["model"] = "m0" })
