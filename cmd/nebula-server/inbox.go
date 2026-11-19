@@ -55,47 +55,84 @@ func newInboxWiring(db *sql.DB, isAdmin func(ctx context.Context) (bool, error))
 // this old.
 const inboxStatusTTL = 3 * time.Second
 
-// cachedVulnAdmin is vulnAdmin with the executor status cached for ttl. A
-// failed status read is cached as well, with its error, so a hung executor
-// delays at most one request per ttl and every request in that ttl is logged
-// as a failed check with the same error; concurrent callers wait for the one
-// read in flight instead of each starting their own. A read that failed
-// because the caller's own context ended is not cached: it says nothing about
-// the executor, and the next request reads again. A status error is returned
-// with false, never as "no session" silently.
+// cachedVulnAdmin is vulnAdmin with the executor status cached for ttl; see
+// cachedVulnAdminWithTimeout.
 func cachedVulnAdmin(status ui.StatusProvider, ttl time.Duration, now func() time.Time) func(ctx context.Context) (bool, error) {
+	return cachedVulnAdminWithTimeout(status, ttl, now, vulnStatusTimeout)
+}
+
+// cachedVulnAdminWithTimeout is vulnAdmin with the executor status cached for
+// ttl. The status is read by the cache, not by the caller: the read runs on a
+// context that the caller's cancellation does not reach, bounded by
+// statusTimeout, and its result, a failed read included, is cached for ttl
+// from the moment it completes. So a hung executor costs one read per ttl,
+// and a caller whose own deadline is shorter only stops waiting for that read
+// (it gets its context error and the read still completes and is cached).
+// Concurrent callers share the read in flight; no lock is held while waiting.
+// The one exception is a caller whose context has already ended before any
+// read starts: it starts no read and caches nothing. A status error is
+// returned with false, never as "no session" silently.
+func cachedVulnAdminWithTimeout(status ui.StatusProvider, ttl time.Duration, now func() time.Time, statusTimeout time.Duration) func(ctx context.Context) (bool, error) {
+	type read struct {
+		done   chan struct{}
+		active bool
+		expiry int64
+		err    error
+	}
 	var (
-		mu      sync.Mutex
-		at      time.Time
-		fetched bool
-		active  bool
-		expiry  int64
-		readErr error
+		mu       sync.Mutex
+		at       time.Time
+		fetched  bool
+		cached   *read // the last completed read, valid while fetched
+		inflight *read // the read in progress, if any
 	)
 	return func(ctx context.Context) (bool, error) {
 		if status == nil {
 			return false, nil
 		}
 		mu.Lock()
-		if !fetched || now().Sub(at) >= ttl {
-			sctx, cancel := context.WithTimeout(ctx, vulnStatusTimeout)
-			st, err := status.GetStatus(sctx, &pb.GetStatusRequest{})
-			cancel()
-			if err != nil && ctx.Err() != nil {
+		r := cached
+		switch {
+		case fetched && now().Sub(at) < ttl:
+		case inflight != nil:
+			r = inflight
+		default:
+			if err := ctx.Err(); err != nil {
 				mu.Unlock()
 				return false, err
 			}
-			active, expiry, readErr = false, 0, err
-			if err == nil {
-				active, expiry = st.GetPrivilegedSessionActive(), st.GetPrivilegedSessionExpiryUnix()
-			}
-			at, fetched = now(), true
+			nr := &read{done: make(chan struct{})}
+			inflight = nr
+			go func() {
+				sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), statusTimeout)
+				st, err := status.GetStatus(sctx, &pb.GetStatusRequest{})
+				cancel()
+				if err == nil {
+					nr.active, nr.expiry = st.GetPrivilegedSessionActive(), st.GetPrivilegedSessionExpiryUnix()
+				}
+				nr.err = err
+				mu.Lock()
+				cached, inflight, at, fetched = nr, nil, now(), true
+				mu.Unlock()
+				close(nr.done)
+			}()
+			r = nr
 		}
-		a, e, rerr := active, expiry, readErr
 		mu.Unlock()
-		if rerr != nil {
-			return false, rerr
+		select {
+		case <-r.done:
+		default:
+			// Only a read still in flight makes the caller wait, and only
+			// until its own context ends.
+			select {
+			case <-r.done:
+			case <-ctx.Done():
+				return false, ctx.Err()
+			}
 		}
-		return a && auth.HoldsPrivilegedSession(ctx, e), nil
+		if r.err != nil {
+			return false, r.err
+		}
+		return r.active && auth.HoldsPrivilegedSession(ctx, r.expiry), nil
 	}
 }

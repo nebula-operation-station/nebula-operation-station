@@ -109,11 +109,67 @@ func TestCachedVulnAdminDoesNotCacheCallerCancellation(t *testing.T) {
 	if _, err := admin(gone); !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled request: error = %v, want context.Canceled", err)
 	}
+	// The caller was gone before any read started, so no read happens for it
+	// and nothing is cached; the next request reads once.
+	if got := st.calls.Load(); got != 0 {
+		t.Fatalf("%d status reads for an already cancelled request, want 0", got)
+	}
 	if _, err := admin(context.Background()); err != nil {
 		t.Fatalf("next request: error = %v, want none", err)
 	}
+	if got := st.calls.Load(); got != 1 {
+		t.Fatalf("%d status reads after the cancelled request, want 1", got)
+	}
+}
+
+// hangStatus never answers until the read's own context ends, as a hung
+// executor behind a gRPC call does, and then fails with that context error.
+type hangStatus struct{ calls atomic.Int32 }
+
+func (h *hangStatus) GetStatus(ctx context.Context, _ *pb.GetStatusRequest, _ ...grpc.CallOption) (*pb.GetStatusResponse, error) {
+	h.calls.Add(1)
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// A hung executor with a caller deadline shorter than the status timeout: every
+// render gives up at its own deadline, but the executor is read once per TTL,
+// and the failure of that read is cached for the TTL. Before the fix the
+// caller's deadline always fired first, the failure was never cached, and every
+// render asked the executor again.
+func TestCachedVulnAdminHungExecutorReadOncePerTTL(t *testing.T) {
+	const (
+		statusTimeout = 200 * time.Millisecond
+		callerWait    = 10 * time.Millisecond
+		renders       = 30
+	)
+	st := &hangStatus{}
+	clock := time.Unix(1_800_000_000, 0)
+	admin := cachedVulnAdminWithTimeout(st, inboxStatusTTL, func() time.Time { return clock }, statusTimeout)
+
+	for i := range renders {
+		ctx, cancel := context.WithTimeout(context.Background(), callerWait)
+		ok, err := admin(ctx)
+		cancel()
+		if ok {
+			t.Fatalf("render %d: admin granted on a hung executor", i)
+		}
+		if err == nil {
+			t.Fatalf("render %d: no error on a hung executor", i)
+		}
+	}
+	if got := st.calls.Load(); got != 1 {
+		t.Fatalf("%d status reads within the TTL, want 1", got)
+	}
+
+	// Past the TTL, the next request starts one new read. A request without
+	// a deadline waits for it and gets its failure.
+	clock = clock.Add(inboxStatusTTL)
+	if _, err := admin(context.Background()); err == nil {
+		t.Fatal("request after the TTL: no error on a hung executor")
+	}
 	if got := st.calls.Load(); got != 2 {
-		t.Fatalf("%d status reads, want 2 (the cancelled read must not be cached)", got)
+		t.Fatalf("%d status reads after the TTL, want 2", got)
 	}
 }
 
