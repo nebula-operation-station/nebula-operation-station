@@ -69,6 +69,28 @@ use Go `net/http`, `crypto/tls`, `crypto/x509` and existing security primitives.
   is reconciled, never repeated at another endpoint. Endpoints are admin-approved
   HTTPS origins (normally port 8006); disable redirects and environment proxies.
   Discovery never adds dial targets, and credentials never follow API URLs.
+- Note 2026-11-17 (ep02): the same failover rule holds for SSH hosts with
+  alternate endpoints (spec 08, `internal/sshtransport`). Endpoints are tried
+  in the inventory's priority order; the next one only after a TCP error or a
+  handshake failure/timeout before the host key (at most one handshake retry
+  per dial, the connect timeout per endpoint, the caller's deadline overall).
+  Every endpoint must present the host's single pinned key: a mismatch blocks
+  the host and an authentication failure stops the dial; no later endpoint is
+  tried. A run whose connection breaks after dispatch is reconciled (state
+  read only), never started again at another endpoint. The executor audits a
+  failover (`ssh_failover`: endpoint used, endpoints skipped with stage), a
+  failover in which every endpoint failed (`ssh_failover_failed`: endpoints
+  tried with stage, endpoints never reached), and names the endpoint in every
+  run result and `run_finished` entry. That endpoint is the stored dispatch
+  endpoint on every close path; a check over another endpoint does not
+  replace it and is audited as `check_endpoint` (round 1, 2026-11-18).
+  Round 2 (2026-11-18): the dispatch endpoint is stored before anything is
+  sent, while the run is still dispatching (and named in
+  `run_dispatch_uncertain`), so a dispatch that breaks mid-way names where it
+  was attempted; a reconcile check never stores its endpoint as the dispatch
+  endpoint (a run without one keeps none). `ssh_failover_failed` is written
+  only for dials with more than one endpoint, and once per open run while the
+  reconciler retries (not per pass).
 
 ### Credential custody and least privilege
 
@@ -380,9 +402,39 @@ sanitized results; lock/rotation/expiry pauses them. No Docker config, password
 or authenticated bearer token reaches the server/collector. This adds registry
 metadata egress to the server, not PVE API access. Use administrator-approved
 HTTPS registry/auth origins, verified TLS, validated repository references,
-bounded schemas and no redirects/proxies; host-supplied refs, pagination links
+bounded schemas and no redirects/proxies (registry metadata redirects: see the
+amendment below); host-supplied refs, pagination links
 or authentication challenges cannot select arbitrary origins/private addresses.
 Private-network registries require an explicit executor-side origin allowlist.
+
+#### Amendment (2026-11-19): registry metadata redirects
+
+Maintainer decision (2026-11-19): the ADR follows the implemented behaviour of
+`internal/registrymeta`. "No redirects" above is narrowed for registry metadata
+lookups only (PVE API endpoints and `service.check` keep "no redirects"):
+
+- Only anonymous requests may follow a redirect. A request that carries an
+  `Authorization` header or token of any kind (Basic credential, private
+  registry token, or an anonymous bearer token obtained after a 401) follows
+  no redirect, and an executor-side private registry client follows none at
+  all.
+- At most two redirects per request; the third is refused and its target is
+  never requested.
+- Same origin only: scheme, host and port of every hop must equal those of the
+  original request. Never cross-host, never to another port, never from
+  `https` to `http`, even when the target is itself an approved origin.
+- Only the same resource: a tag list GET or manifest HEAD may be redirected to
+  the same path (the query may differ); an anonymous token GET only to that
+  origin's configured token endpoint. No userinfo in the target.
+- Every hop is a separate request under the registry's budgets (interval,
+  concurrency, 429/rate-limit pauses).
+
+Rationale: some public registries answer metadata and token requests with a
+redirect within the same origin (path normalization, query rewriting, token
+endpoint forwarding); refusing those makes lookups fail without a security
+gain. Restricting redirects to the same origin and to requests without
+credentials keeps the original guarantees: no credential or token is ever
+replayed, and no redirect can reach a host the administrator did not approve.
 
 Cache by registry/repository/tag/platform/policy (private entries also credential
 scope/version): same-tag checks 24 h, stable tag lists 24 h, failures 15 min,
@@ -672,7 +724,7 @@ so the new surfaces each fit one agent job.
 | P1-14: service/install and operator guide | New `deploy/systemd/nebula-pve-collector.service`; `deploy/install.sh`, `deploy/install_test.sh`, `deploy/container/{Dockerfile,compose.yaml}`, `.goreleaser.yaml`; new `test/security/pve_test.go`, `docs/operator/proxmox.md` | Distinct UID/peercred role, spool permissions, no collector network/capabilities or executor DB mount, locked startup, CLI rotation/re-pin walkthrough; isolated tests only |
 | P1-15: org-chart read model | `internal/pveinventory/{tree,links}.go`, tests; reuse existing batch observations | PVE/guest/bare-metal branches, Compose grouping, reviewed placements/replicas/full-ID incarnations; bounded queries, no duplicate counts or inferred SSH authority; aggregate worst state/counts |
 | P1-16: Docker image observation fields | `internal/executions/actions/{actions.go,scripts/docker_list.sh,scripts/docker_inspect.sh}`, `internal/executions/dockerhost/`, tests | LOW list/inspect, creation/platform/full-ID/digest fields and stopped containers; index vs platform changes, digest pins, malformed/oversize/secret rejection; no configuration recreation |
-| P1-17: public registry metadata client/cache | New `internal/registrymeta/{client,cache,limits}.go`, tests | Anonymous server reads, approved origins/SSRF/redirect rejection, bounded pagination, coalescing/TTLs/429 budgets with injected time; no layer pulls |
+| P1-17: public registry metadata client/cache | New `internal/registrymeta/{client,cache,limits}.go`, tests | Anonymous server reads, approved origins/SSRF/redirect rejection (amendment 2026-11-19: at most two same-origin anonymous redirects), bounded pagination, coalescing/TTLs/429 budgets with injected time; no layer pulls |
 | P1-18: server-rendered org-chart layout | `web/templates/{inventory,host}.html`, `web/static/app.css`, UI render tests | Connected boxes, left-to-right levels/vertical siblings, ~220×110 / 180×70 sizes, Compose grouping, native collapse/counts, VM-depth default/problem expansion; hundreds of siblings scroll down, ≤600 px list, no orientation toggle, no-JS/CSP/accessibility |
 | P1-19: cluster/task reader | New `internal/pveapi/{cluster,tasks}.go`, tests | HA/quorum/foreign-task summaries, typed pagination, source/age and response limits; no task logs or mutation methods |
 | P1-20: PVE backup evidence reader | New `internal/pveapi/backups.go`, tests | vzdump/PBS metadata correlation, success vs catalog/verification, denied/filtered reads remain unavailable; no action token or broadened ACLs |

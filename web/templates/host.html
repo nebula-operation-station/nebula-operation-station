@@ -290,6 +290,69 @@
 <section class="panel" aria-label="Settings">
   <h2>Settings</h2>
   {{with .Settings}}
+  {{with .Endpoints}}
+  {{$editable := .Editable}}
+  <section aria-label="Endpoints">
+  <h3>Endpoints</h3>
+  <p class="hint">The executor connects to the primary endpoint first and tries the alternates in this order only when a connection fails or times out. All endpoints must reach the same machine and present the same host key: the key is pinned per host, not per endpoint, and an endpoint that presents another key stops the run (no failover). Each change is recorded in the audit log.</p>
+  <div class="table-wrap">
+  <table class="inventory">
+    <thead><tr><th>Role</th><th>Endpoint</th>{{if .Editable}}<th>Change</th>{{end}}</tr></thead>
+    <tbody>
+    {{range .Rows}}
+    <tr>
+      <td>{{.Label}}</td>
+      <td class="mono">{{.Text}}</td>
+      {{if $editable}}
+      <td>
+        {{if not .First}}
+        {{if gt .Up 0}}
+        <form class="inline-form" method="post" action="/hosts/{{$hid}}/settings" data-fetch>
+          <input type="hidden" name="endpoint_op" value="move"><input type="hidden" name="address" value="{{.Address}}"><input type="hidden" name="port" value="{{.Port}}"><input type="hidden" name="to" value="0">
+          <button type="submit" class="button">Make primary</button>
+        </form>
+        {{end}}
+        <form class="inline-form" method="post" action="/hosts/{{$hid}}/settings" data-fetch>
+          <input type="hidden" name="endpoint_op" value="move"><input type="hidden" name="address" value="{{.Address}}"><input type="hidden" name="port" value="{{.Port}}"><input type="hidden" name="to" value="{{.Up}}">
+          <button type="submit" class="button" aria-label="Move {{.Text}} up">Up</button>
+        </form>
+        {{end}}
+        {{if not .Last}}
+        <form class="inline-form" method="post" action="/hosts/{{$hid}}/settings" data-fetch>
+          <input type="hidden" name="endpoint_op" value="move"><input type="hidden" name="address" value="{{.Address}}"><input type="hidden" name="port" value="{{.Port}}"><input type="hidden" name="to" value="{{.Down}}">
+          <button type="submit" class="button" aria-label="Move {{.Text}} down">Down</button>
+        </form>
+        {{end}}
+        {{if not (and .First .Last)}}
+        <form class="inline-form" method="post" action="/hosts/{{$hid}}/settings" data-fetch>
+          <input type="hidden" name="endpoint_op" value="remove"><input type="hidden" name="address" value="{{.Address}}"><input type="hidden" name="port" value="{{.Port}}">
+          <button type="submit" class="button button--danger" aria-label="Remove {{.Text}}">Remove</button>
+        </form>
+        {{end}}
+      </td>
+      {{end}}
+    </tr>
+    {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{if .CanAdd}}
+  <form class="form form-grid" method="post" action="/hosts/{{$hid}}/settings" data-fetch>
+    <input type="hidden" name="endpoint_op" value="add">
+    <label>Address (IPv4, IPv6 or DNS name)
+      <input name="address" maxlength="253" autocomplete="off" required>
+    </label>
+    <label>Port
+      <input name="port" inputmode="numeric" pattern="[0-9]{1,5}" maxlength="5" placeholder="22" autocomplete="off">
+    </label>
+    <div class="actions">
+      <button type="submit" class="button">Add alternate endpoint</button>
+    </div>
+  </form>
+  {{end}}
+  <p class="hint">A host has at most {{.Max}} endpoints. The last endpoint cannot be removed.</p>
+  </section>
+  {{end}}
   <form class="form form-grid" method="post" action="/hosts/{{$hid}}/settings" data-fetch>
     <label>ID
       <input name="id" value="{{$hid}}" readonly>

@@ -24,6 +24,7 @@ Konfigurationsschlüssel und die vollständige Fehlertabelle stehen im
 | [Proxmox VE](proxmox.md) | Read-only-Token erstellen, Remote hinzufügen, Read Lease genehmigen, Live-Werte, Gäste mit Hosts verknüpfen, Token rotieren |
 | [Netzwerk](network.md) | IPAM-Netze und Assets, Discovery-Scans, die Traffic-Map, einen Cisco-CBS-Switch oder eine PAN-OS-Firewall mit einem `nos-read`-Konto registrieren |
 | [Schwachstellen](vulnerabilities.md) | Hermes-Agent-Token einrichten, die Findings-Seiten lesen, Zustände und Labels verstehen, Findings exportieren |
+| [Benachrichtigungen](notifications.md) | Was NOS sendet und nie liest (Telegram nur ausgehend), das Benachrichtigungslog, Lease-Ereignisse und der optionale Tagesdigest |
 | [Backup und Wiederherstellung](backup-restore.md) | Backup-Schlüssel erstellen, sichern, wiederherstellen, Container-Volumes, sicher upgraden |
 | [Fehlerbehebung](troubleshooting.md) | Lösungen für die häufigsten Probleme, geordnet nach Symptom |
 | [FAQ](faq.md) | Kurze Antworten auf häufige Fragen |

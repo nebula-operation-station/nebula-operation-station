@@ -1,0 +1,15 @@
+#!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# prerm of the nebula-ops-agent package: stop and disable the timer, the
+# path unit and the service on removal (not on upgrade); dpkg then removes
+# the unit files. The state, the configuration and token in the agent's
+# config dir and the system user stay.
+set -e
+case "$1" in
+  remove)
+    if [ -d /run/systemd/system ]; then
+      systemctl disable --now nebula-ops-agent.timer nebula-ops-agent.path nebula-ops-agent.service 2>/dev/null || true
+    fi
+    ;;
+esac
+exit 0

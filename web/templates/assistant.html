@@ -1,0 +1,131 @@
+{{/* The Assistant panel (ADR 0016 D11, ADR 0014 D1). Fragments only: the
+     layout is not used, htmx swaps them in. No inline script (strict CSP). */}}
+
+{{define "assistant_panel"}}
+<div class="assistant-panel" id="assistant-panel">
+  <nav class="assistant-tabs" aria-label="Assistant tabs" role="tablist">
+    {{range .Tabs}}
+    <a class="assistant-tab{{if .Active}} assistant-tab--active{{end}}" href="{{.URL}}"
+      hx-get="{{.URL}}" hx-target="#assistant-panel" hx-swap="outerHTML" hx-push-url="false"
+      role="tab" aria-selected="{{if .Active}}true{{else}}false{{end}}">{{.Label}}</a>
+    {{end}}
+  </nav>
+  <div class="assistant-body" id="assistant-body" role="tabpanel">
+    {{with .Help}}{{template "assistant_help" .}}{{end}}
+    {{with .Ops}}{{template "assistant_ops" .}}{{end}}
+  </div>
+</div>
+{{end}}
+
+{{define "assistant_help"}}
+<div class="assistant-help">
+  <form class="assistant-search" action="/assistant/help" method="get" role="search"
+    hx-get="/assistant/help" hx-target="#assistant-panel" hx-swap="outerHTML" hx-push-url="false">
+    <label for="assistant-help-q">Search the handbook</label>
+    <input id="assistant-help-q" type="search" name="q" maxlength="100" value="{{.Query}}">
+    <button type="submit">Search</button>
+  </form>
+  {{if .Invalid}}
+  <p class="form-error">The search text is too long or not valid UTF-8.</p>
+  {{else if .Searched}}
+    {{if .Results}}
+    <ul class="assistant-results">
+      {{range .Results}}<li><a href="{{.URL}}">{{.Section}}</a> <span class="muted">{{.Page}}</span></li>{{end}}
+    </ul>
+    {{if .Truncated}}<p class="muted">More matches than shown. Refine the search.</p>{{end}}
+    {{else}}
+    <p class="muted">No handbook section matches.</p>
+    {{end}}
+  {{end}}
+  <ul class="assistant-chapters">
+    {{range .Chapters}}<li><a href="{{.URL}}">{{.Title}}</a></li>{{end}}
+  </ul>
+</div>
+{{end}}
+
+{{define "assistant_ops"}}
+<div class="assistant-ops">
+  {{if .Status.Shown}}
+  <p class="assistant-status">
+    {{if .Status.Off}}Agent switched off.{{else}}Agent on.{{end}}
+    {{if .Status.LastRun}}Last run: {{.Status.LastRun}}.{{else}}No run yet.{{end}}
+  </p>
+  {{if .Status.Rejections}}
+  <p>Refused by the checks in the last run:</p>
+  <ul class="assistant-rejections">
+    {{range .Status.Rejections}}<li>{{.}}</li>{{end}}
+  </ul>
+  {{end}}
+  {{end}}
+
+  {{if .Summary}}
+  <section class="assistant-summary" aria-label="Summary">
+    <h3>Summary</h3>
+    {{template "assistant_llm_label"}}
+    <p class="llm-text">{{.Summary}}</p>
+  </section>
+  {{end}}
+
+  {{template "assistant_ask" .Questions}}
+
+  {{range .Cards}}{{template "assistant_ops_card" .}}{{else}}
+  {{if .Status.Off}}
+  <p>Agent switched off. No open suggestion.</p>
+  {{else}}
+  <p>No suggestion yet.</p>
+  {{end}}
+  {{end}}
+  <script src="/static/assistant-ops.js"></script>
+</div>
+{{end}}
+
+{{/* The question form and the admin's own questions (ADR 0016 D11). The form
+     posts with htmx and gets this block back; the list alone is polled. */}}
+{{define "assistant_ask"}}
+<section class="assistant-ask" id="assistant-ask" aria-label="Questions">
+  <h3>Questions</h3>
+  <form method="post" action="/assistant/ops/questions"
+    hx-post="/assistant/ops/questions" hx-target="#assistant-ask" hx-swap="outerHTML">
+    <label for="assistant-question">Ask the ops agent (plain text, no web addresses)</label>
+    <textarea id="assistant-question" name="question" maxlength="2048" required></textarea>
+    {{if .Error}}<p class="form-error" role="alert">{{.Error}}</p>{{end}}
+    <button type="submit">Ask</button>
+  </form>
+  {{template "assistant_questions_list" .}}
+</section>
+{{end}}
+
+{{/* The list of the admin's questions. Answers carry text and sources only:
+     no steps and no buttons. The LLM label is shown above every answer. */}}
+{{define "assistant_questions_list"}}
+<div id="assistant-questions" data-url="/assistant/ops/questions">
+  {{range .Items}}
+  <article class="assistant-question" id="question-{{.ID}}">
+    <header>
+      <h4>Question {{.ID}}</h4>
+      <p class="muted">Asked {{.Created}} · {{.State}}</p>
+    </header>
+    <p class="assistant-question__text">{{.Text}}</p>
+    {{if .Answer}}
+    <section class="assistant-answer" aria-label="Answer">
+      {{template "assistant_llm_label"}}
+      <p class="llm-text">{{.Answer.Text}}</p>
+      {{if .Answer.Citations}}
+      <ul class="assistant-citations">
+        {{range .Answer.Citations}}
+        <li>{{if .URL}}<a href="{{.URL}}">{{.Label}}</a>{{else}}<span>{{.Label}}</span>{{end}}</li>
+        {{end}}
+      </ul>
+      {{end}}
+    </section>
+    {{else if eq .State "open"}}
+    <p class="muted">Waiting for an answer.</p>
+    {{else if eq .State "answered"}}
+    <p class="muted">The answer is no longer stored.</p>
+    {{end}}
+  </article>
+  {{else}}
+  <p class="muted">No questions yet.</p>
+  {{end}}
+</div>
+{{end}}

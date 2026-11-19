@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 	"unicode"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/notifylog"
 )
 
 // IntegrityKind is one of the integrity notification events (spec 13,
@@ -257,6 +259,12 @@ func (g *IntegrityGate) Submit(ctx context.Context, ev IntegrityEvent, key Integ
 			g.holdLocked(ev.Kind, now)
 			g.markLocked(dk)
 			g.mu.Unlock()
+			if held, known := newRecord(g.event(ev, now)); known {
+				held.Outcome = notifylog.OutcomeHeldRateLimit
+				held.Reason = notifylog.ReasonRateLimited
+				held.Providers = len(g.n.senders)
+				g.n.record(ctx, held)
+			}
 			g.deliverDigest(ctx, due)
 			return DecisionHeld, nil
 		}
@@ -266,7 +274,7 @@ func (g *IntegrityGate) Submit(ctx context.Context, ev IntegrityEvent, key Integ
 		g.mu.Unlock()
 
 		g.deliverDigest(ctx, due)
-		ok := len(g.n.send(ctx, ev.message(now), nil)) > 0
+		ok := len(g.n.send(ctx, g.event(ev, now), nil)) > 0
 
 		g.mu.Lock()
 		delete(g.inflight, dk)
@@ -313,6 +321,17 @@ func (g *IntegrityGate) Flush(ctx context.Context) bool {
 func (ev IntegrityEvent) message(now time.Time) Event {
 	return Event{Kind: string(ev.Kind), Host: integrityLabel(ev.Host), State: string(ev.Severity),
 		Reason: fmt.Sprintf("Class: %s, count: %d", ev.Class, ev.Count), link: ev.Link, Time: now}
+}
+
+// event is the notification for ev, which must already be validated. Its log
+// link is the NOS path of the finding (the part after the NOS base URL), so
+// the notification log never stores an absolute URL.
+func (g *IntegrityGate) event(ev IntegrityEvent, now time.Time) Event {
+	e := ev.message(now)
+	if ev.Link != "" && strings.HasPrefix(ev.Link, g.linkStart) {
+		e.logLink = integrityLinkRoute + ev.Link[len(g.linkStart):]
+	}
+	return e
 }
 
 func (ev IntegrityEvent) validate(linkStart string) error {

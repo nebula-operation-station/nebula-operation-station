@@ -1,7 +1,8 @@
 # Ops agent plan (ADR 0016)
 
-Status: **plan, ADR accepted 2026-11-17; ag01 (this plan, spec revision
-`v28`, threat model, amendments) done, ag02–ag26 not started.**
+Status: **ADR accepted 2026-11-17; ag01 (this plan, spec revision
+`v28`, threat model, amendments) done; ag02–ag05, ag07–ag17, ag21 and
+ag22 merged; ag06, ag18–ag20 and ag23–ag26 in progress (see [status](../status.md)).**
 
 This plan carries [ADR 0016](../adr/0016-ops-agent.md) into tickets. The
 ADR is the authority: where this file and the ADR differ, the ADR and the

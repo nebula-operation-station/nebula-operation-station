@@ -26,7 +26,23 @@ const (
 	// followed per scan. Exhausting it leaves the result incomplete.
 	MaxPages = 100
 
-	// MaxRedirects is the maximum number of redirects followed per request.
+	// MaxRedirects caps the requests in one redirect chain, counting the
+	// original request: checkRedirect refuses a redirect once the chain holds
+	// MaxRedirects requests, so at most MaxRedirects-1 redirects (two) are
+	// followed.
+	//
+	// The redirect rules follow the ADR 0006 amendment "registry metadata
+	// redirects" (2026-11-19). checkRedirect allows, for anonymous requests
+	// only and only within the origin (scheme, host and port) of the
+	// original request:
+	//   - a metadata GET of /tags/list or a HEAD of /manifests/ with the same
+	//     path (the query may differ);
+	//   - an anonymous token GET on the configured token endpoint to that
+	//     origin's auth path.
+	// It never follows a redirect across hosts, ports or schemes, and never
+	// for a credentialed client or a request carrying an Authorization
+	// header (including anonymous bearer tokens). TestCheckRedirectRules and
+	// TestAnonymousRedirectChainLimit pin these rules.
 	MaxRedirects = 3
 )
 

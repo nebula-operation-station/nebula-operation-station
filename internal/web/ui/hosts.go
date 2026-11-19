@@ -98,6 +98,8 @@ type hostSettingsView struct {
 	DisplayName, Environment, Criticality string
 	EndpointsText, TagsText               string
 	Environments, Criticalities           []string
+	// Endpoints is the Endpoints section (primary and alternates).
+	Endpoints *endpointsView
 }
 
 type hostPageData struct {
@@ -333,6 +335,7 @@ func (h *Handler) fillHost(ctx context.Context, host *inventory.Host, hp *hostPa
 			Environments:  []string{string(inventory.EnvDev), string(inventory.EnvQA), string(inventory.EnvProd)},
 			Criticalities: []string{string(inventory.CriticalityLow), string(inventory.CriticalityMedium),
 				string(inventory.CriticalityHigh), string(inventory.CriticalityCritical)},
+			Endpoints: h.hostEndpointsView(*host),
 		}
 	}
 }

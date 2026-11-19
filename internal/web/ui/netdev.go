@@ -818,6 +818,7 @@ func (p *NetDevPages) render(w http.ResponseWriter, r *http.Request, data netdev
 	}
 	data.NavCollapsed = navStateFromRequest(r) == navCollapsed
 	data.PVENav = h.pve != nil
+	data.NotificationsNav = h.navVisible(r)
 	data.DeployEnabled = h.deploy != nil && h.pve != nil && h.pveRemotes != nil
 	if h.builtinTrust != nil {
 		data.BuiltinTrust = h.builtinTrust.get(r.Context())
