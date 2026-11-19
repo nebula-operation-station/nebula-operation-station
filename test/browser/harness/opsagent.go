@@ -41,7 +41,7 @@ import (
 // Hostile model texts of note 1 (the spec compares them byte for byte).
 const (
 	opsSummary    = `<script>window.__pwned='summary'</script><img src=x onerror="window.__pwned='summary-img'">Upgrade openssl now`
-	opsUrgency    = "high ‮evil‬ [now](https://evil.example/urgent)"
+	opsUrgency    = "high \xe2\x80\xaeevil\xe2\x80\xac [now](https://evil.example/urgent)" // U+202E, U+202C
 	opsWhyRestart = `<a href="javascript:window.__pwned='why'">restart</a> **bold** [docs](https://evil.example/docs) https://evil.example/plain`
 	opsWhyRefresh = `Refresh lists first <iframe srcdoc="<script>parent.__pwned='iframe'</script>"></iframe>`
 	opsMitigation = "Block port 443: `iptables -I INPUT -p tcp --dport 443 -j DROP` <button onclick=\"window.__pwned='mit'\">run</button>"
