@@ -359,56 +359,77 @@ type opsWorkItem struct {
 }
 
 // opsWorkQuestion is the context of one open admin question (ADR 0016 D11).
+// The agent decodes it as nosclient.Question; both sides change together.
 type opsWorkQuestion struct {
 	Text string `json:"text"`
-	// Hosts are the group projections of the hosts the text names, at most
+	// Hosts are the facts of the hosts the text names, at most
 	// MaxOpsQuestionHosts hosts. Only class lab carries them.
-	Hosts []opsfacts.LabProjection `json:"hosts,omitempty"`
+	Hosts []opsWorkQuestionHost `json:"hosts,omitempty"`
+}
+
+// opsWorkQuestionHost is the fact part of one named host: host, exposure,
+// listening ports and counts. Findings and step candidates never go into a
+// question. PortsOmitted counts the listening ports the list leaves out.
+type opsWorkQuestionHost struct {
+	Host         opsfacts.LabHost  `json:"host"`
+	Exposure     opsfacts.Exposure `json:"exposure"`
+	Ports        []opsfacts.Port   `json:"ports"`
+	PortsOmitted int               `json:"ports_omitted"`
+	Counts       opsfacts.Counts   `json:"counts"`
 }
 
 // questionItem builds the work item of one open question. Ref is the question
-// ID; Digest is the question's digest, which the answer must carry.
+// ID; Digest is the question's digest, which the answer must carry. Every
+// question carries the fleet counts; class lab adds the named hosts. The
+// largest item the projector can produce is bounded by MaxOpsItemBytes (see
+// TestOpsWorkQuestionWorstCaseFitsItemLimit), so no size fallback is needed.
 func (h *OpsHandler) questionItem(q opsnotes.Question, lab bool, groups []opsfacts.Group, fleet opsfacts.Counts) opsWorkItem {
+	c := fleet
 	it := opsWorkItem{Kind: string(opsKindQuestion), Ref: strconv.FormatInt(q.ID, 10), Digest: q.Digest,
-		Question: &opsWorkQuestion{Text: q.Text}}
-	if !lab {
-		c := fleet
-		it.Fleet = &c
-		return it
-	}
-	it.Question.Hosts = questionHosts(q.Text, groups)
-	if size, err := json.Marshal(it); err != nil || len(size) > MaxOpsItemBytes {
-		h.log.Warn("ops api: question facts left out", "kind", "item_over_limit", "ref", it.Ref)
-		it.Question.Hosts = nil
+		Fleet: &c, Question: &opsWorkQuestion{Text: q.Text}}
+	if lab {
+		it.Question.Hosts = questionHosts(q.Text, groups)
 	}
 	return it
 }
 
-// questionHosts returns the groups of the hosts that text names, in the order
-// of groups (already sorted by sortGroups), for at most MaxOpsQuestionHosts
-// hosts. A host is named by its ID or its label as a whole word, in any case.
-// The choice depends only on the text and the sorted groups.
-func questionHosts(text string, groups []opsfacts.Group) []opsfacts.LabProjection {
+// questionHosts returns one fact per host that text names, for at most
+// MaxOpsQuestionHosts hosts. The hosts are taken in the order of groups
+// (already sorted by sortGroups). A host's groups are merged into its one fact:
+// the counts are summed; the ports, their omitted count and the exposure are
+// per host and the same in every group of it. A host is named by its ID or its
+// label as a whole word, in any case. The choice depends only on the text and
+// the sorted groups.
+func questionHosts(text string, groups []opsfacts.Group) []opsWorkQuestionHost {
 	lower := strings.ToLower(text)
-	chosen := map[string]bool{}
+	index := map[string]int{} // host ID -> position in out
 	rejected := map[string]bool{}
-	var out []opsfacts.LabProjection
+	var out []opsWorkQuestionHost
 	for _, g := range groups {
-		id := g.Projection.Host.ID
+		p := g.Projection
+		id := p.Host.ID
 		if rejected[id] {
 			continue
 		}
-		if !chosen[id] {
-			h := g.Projection.Host
-			if len(chosen) >= MaxOpsQuestionHosts || !(namedIn(lower, id) || namedIn(lower, h.Label)) {
-				rejected[id] = true
-				continue
-			}
-			chosen[id] = true
+		if i, ok := index[id]; ok {
+			out[i].Counts = addCounts(out[i].Counts, p.Counts)
+			continue
 		}
-		out = append(out, g.Projection)
+		if len(out) >= MaxOpsQuestionHosts || !(namedIn(lower, id) || namedIn(lower, p.Host.Label)) {
+			rejected[id] = true
+			continue
+		}
+		index[id] = len(out)
+		out = append(out, opsWorkQuestionHost{Host: p.Host, Exposure: p.Exposure, Ports: p.Ports,
+			PortsOmitted: p.PortsOmitted, Counts: p.Counts})
 	}
 	return out
+}
+
+// addCounts returns the sum of two finding counters.
+func addCounts(a, b opsfacts.Counts) opsfacts.Counts {
+	return opsfacts.Counts{Critical: a.Critical + b.Critical, High: a.High + b.High, Medium: a.Medium + b.Medium,
+		Low: a.Low + b.Low, KEV: a.KEV + b.KEV}
 }
 
 // namedIn reports whether name occurs in the lower-cased text as a whole word.

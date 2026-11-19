@@ -3,6 +3,7 @@
 package api_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -77,32 +78,160 @@ func TestOpsWorkManyOpenQuestionsKeepSlotsForSummaryAndFixes(t *testing.T) {
 	}
 }
 
-// A question whose item is over MaxOpsItemBytes is served without the host
-// facts; the text stays.
-func TestOpsWorkQuestionOverItemLimitDropsHostFacts(t *testing.T) {
+// The largest question item the projector can produce fits MaxOpsItemBytes:
+// MaxOpsQuestionHosts hosts, each with a label of MaxLabelBytes and
+// MaxPortsPerHost ports, and a question of MaxQuestionBytes. The item carries
+// no findings, so nothing else can grow it.
+func TestOpsWorkQuestionWorstCaseFitsItemLimit(t *testing.T) {
 	e := newOpsEnv(t)
-	big := labGroup(opsHost, "CVE-2026-0001", opsfacts.TierCritical, false, 90)
-	for i := range 400 {
-		big.Projection.Findings = append(big.Projection.Findings, opsfacts.LabFinding{
-			VulnID: fmt.Sprintf("CVE-2026-%06d", i), Package: "openssl-package-with-a-long-name-for-size",
-			Installed: "3.0.1-1ubuntu1", Fixed: "3.0.2-0ubuntu1", Tier: opsfacts.TierHigh, Score: 50,
-			Fix: opsfacts.FixStatus("fix_verified")})
+	var names []string
+	for i := range api.MaxOpsQuestionHosts {
+		id := fmt.Sprintf("h-w%d", i)
+		label := fmt.Sprintf("lab-%d-%s", i, strings.Repeat("x", opsfacts.MaxLabelBytes-6))
+		g := labGroup(id, "CVE-2026-0001", opsfacts.TierCritical, true, 99)
+		g.Projection.Host.Label = label
+		for p := range opsfacts.MaxPortsPerHost {
+			g.Projection.Ports = append(g.Projection.Ports, opsfacts.Port{Number: 60000 + p, Protocol: "udp"})
+		}
+		g.Projection.PortsOmitted = 1000
+		e.facts.groups = append(e.facts.groups, g)
+		names = append(names, label)
 	}
-	e.facts.groups = []opsfacts.Group{big}
+	text := "Ist " + strings.Join(names, " und ") + " betroffen? " + strings.Repeat("a ", 400)
+	if len(text) > opsnotes.MaxQuestionBytes {
+		t.Fatalf("test question is %d bytes, over %d", len(text), opsnotes.MaxQuestionBytes)
+	}
+	askOpsQuestion(t, e, text)
+	items := questionItems(t, opsGet(e.h, "/api/v1/ops/work", oaTok))
+	if len(items) != 1 {
+		t.Fatalf("question items = %d, want 1", len(items))
+	}
+	hosts, _ := items[0]["question"].(map[string]any)["hosts"].([]any)
+	if len(hosts) != api.MaxOpsQuestionHosts {
+		t.Fatalf("hosts = %d, want %d: the worst case must keep every host fact", len(hosts), api.MaxOpsQuestionHosts)
+	}
+	size, err := json.Marshal(items[0])
+	if err != nil {
+		t.Fatalf("marshal item: %v", err)
+	}
+	if len(size) > api.MaxOpsItemBytes {
+		t.Errorf("worst-case question item is %d bytes, over %d", len(size), api.MaxOpsItemBytes)
+	}
+}
+
+// jsonCounts reads a counts object of a decoded work item.
+func jsonCounts(t *testing.T, v any) map[string]float64 {
+	t.Helper()
+	m, ok := v.(map[string]any)
+	if !ok {
+		t.Fatalf("counts = %v, want an object", v)
+	}
+	out := map[string]float64{}
+	for k, x := range m {
+		f, _ := x.(float64)
+		out[k] = f
+	}
+	return out
+}
+
+// imageGroup is a container image group of host, with the given counts.
+func imageGroup(host, subject string, c opsfacts.Counts) opsfacts.Group {
+	g := labGroup(host, "CVE-2026-0002", opsfacts.TierHigh, false, 70)
+	g.Key = host + "/image:" + subject
+	g.Digest = "d-" + g.Key
+	g.Projection.Group = g.Key
+	g.Projection.Counts = c
+	return g
+}
+
+// A named host with an OS group and two image groups is one host fact whose
+// counts are the sum of its groups.
+func TestOpsWorkQuestionHostWithSeveralGroupsIsOneEntry(t *testing.T) {
+	e := newOpsEnv(t)
+	osg := labGroup(opsHost, "CVE-2026-0001", opsfacts.TierCritical, false, 90)
+	osg.Projection.Host.Label = "Web 01"
+	osg.Projection.Counts = opsfacts.Counts{Critical: 1, High: 1}
+	e.facts.groups = []opsfacts.Group{
+		osg,
+		imageGroup(opsHost, "img-a", opsfacts.Counts{High: 2, KEV: 1}),
+		imageGroup(opsHost, "img-b", opsfacts.Counts{Medium: 3}),
+	}
+	askOpsQuestion(t, e, "Warum ist Web 01 kritisch?")
+	items := questionItems(t, opsGet(e.h, "/api/v1/ops/work", oaTok))
+	if len(items) != 1 {
+		t.Fatalf("question items = %d, want 1", len(items))
+	}
+	hosts, _ := items[0]["question"].(map[string]any)["hosts"].([]any)
+	if len(hosts) != 1 {
+		t.Fatalf("hosts = %d, want one entry for the one named host", len(hosts))
+	}
+	host, _ := hosts[0].(map[string]any)
+	want := map[string]float64{"critical": 1, "high": 3, "medium": 3, "low": 0, "kev": 1}
+	got := jsonCounts(t, host["counts"])
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("counts[%s] = %v, want %v (all: %v)", k, got[k], v, got)
+		}
+	}
+}
+
+// Five named hosts with extra image groups still give five host facts, so the
+// agent answers the question instead of refusing it (MaxFactHosts = 5).
+func TestOpsWorkQuestionFiveHostsWithImageGroupsAreAnswered(t *testing.T) {
+	e := newOpsEnv(t)
+	var names []string
+	for i := range api.MaxOpsQuestionHosts {
+		id := fmt.Sprintf("h-f%d", i)
+		label := fmt.Sprintf("lab-f%d", i)
+		osg := labGroup(id, "CVE-2026-0001", opsfacts.TierCritical, false, 90)
+		osg.Projection.Host.Label = label
+		e.facts.groups = append(e.facts.groups, osg,
+			imageGroup(id, "img-a", opsfacts.Counts{High: 1}),
+			imageGroup(id, "img-b", opsfacts.Counts{High: 1}))
+		names = append(names, label)
+	}
+	askOpsQuestion(t, e, "Was ist mit "+strings.Join(names, ", ")+"?")
+	items := questionItems(t, opsGet(e.h, "/api/v1/ops/work", oaTok))
+	if len(items) != 1 {
+		t.Fatalf("question items = %d, want 1", len(items))
+	}
+	hosts, _ := items[0]["question"].(map[string]any)["hosts"].([]any)
+	if len(hosts) != api.MaxOpsQuestionHosts {
+		t.Fatalf("hosts = %d, want %d", len(hosts), api.MaxOpsQuestionHosts)
+	}
+	seen := map[string]bool{}
+	for _, h := range hosts {
+		host, _ := h.(map[string]any)
+		id, _ := host["host"].(map[string]any)["id"].(string)
+		if seen[id] {
+			t.Errorf("host %s has more than one entry", id)
+		}
+		seen[id] = true
+		if c := jsonCounts(t, host["counts"]); c["high"] != 3 {
+			t.Errorf("host %s high = %v, want 3 (one OS and two image groups)", id, c["high"])
+		}
+	}
+}
+
+// PortsOmitted of the group's host reaches the host fact, so a truncated
+// port list is visible to the agent.
+func TestOpsWorkQuestionHostCarriesPortsOmitted(t *testing.T) {
+	e := newOpsEnv(t)
+	g := labGroup(opsHost, "CVE-2026-0001", opsfacts.TierCritical, false, 90)
+	g.Projection.Ports = []opsfacts.Port{{Number: 443, Protocol: "tcp"}}
+	g.Projection.PortsOmitted = 7
+	e.facts.groups = []opsfacts.Group{g}
 	askOpsQuestion(t, e, "Ist "+opsHost+" betroffen?")
 	items := questionItems(t, opsGet(e.h, "/api/v1/ops/work", oaTok))
 	if len(items) != 1 {
 		t.Fatalf("question items = %d, want 1", len(items))
 	}
-	question, _ := items[0]["question"].(map[string]any)
-	if _, ok := question["hosts"]; ok {
-		t.Errorf("host facts kept over the item limit")
+	hosts, _ := items[0]["question"].(map[string]any)["hosts"].([]any)
+	if len(hosts) != 1 {
+		t.Fatalf("hosts = %d, want 1", len(hosts))
 	}
-	if question["text"] != "Ist "+opsHost+" betroffen?" {
-		t.Errorf("question text lost: %v", question)
-	}
-	if !strings.Contains(e.log.String(), "item_over_limit") {
-		t.Errorf("the dropped host facts are not logged")
+	if got := hosts[0].(map[string]any)["ports_omitted"]; got != float64(7) {
+		t.Errorf("ports_omitted = %v, want 7", got)
 	}
 }
 
@@ -195,8 +324,9 @@ func TestOpsWorkQuestionNamesAtMostFiveHostsDeterministically(t *testing.T) {
 		t.Fatalf("%d hosts, want %d", len(hosts), api.MaxOpsQuestionHosts)
 	}
 	for i, h := range hosts {
-		if want := fmt.Sprintf(`"h-%d/os"`, i); !strings.Contains(fmt.Sprint(h), fmt.Sprintf("h-%d/os", i)) {
-			t.Errorf("host %d = %v, want the first five in key order (%s)", i, h, want)
+		id, _ := h.(map[string]any)["host"].(map[string]any)["id"].(string)
+		if want := fmt.Sprintf("h-%d", i); id != want {
+			t.Errorf("host %d id = %q, want the first five in key order (%s)", i, id, want)
 		}
 	}
 }

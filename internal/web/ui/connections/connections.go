@@ -139,9 +139,12 @@ type Chrome struct {
 	// Theme is "system", "light" or "dark".
 	Theme string
 	// NavCollapsed, PVENav and DeployEnabled drive the navigation.
-	NavCollapsed  bool
-	PVENav        bool
-	DeployEnabled bool
+	NavCollapsed bool
+	PVENav       bool
+	// NotificationsNav shows the Notifications navigation entry; the
+	// server sets it from the inbox rule.
+	NotificationsNav bool
+	DeployEnabled    bool
 }
 
 // Options configure a Handler.
@@ -469,16 +472,19 @@ func peerAddrs(recs []Record, nodes []netip.Addr) []netip.Addr {
 // page is the data of the layout template (web/templates/layout.html)
 // plus the data of this package's page.
 type page struct {
-	Title         string
-	Active        string
-	Theme         string
-	NavCollapsed  bool
-	Bare          bool
-	PVENav        bool
-	DeployEnabled bool
-	Search        any // the layout's search box state; none here
-	BuiltinTrust  any // the layout's trust banner; none here
-	Scripts       []string
+	Title        string
+	Active       string
+	Theme        string
+	NavCollapsed bool
+	Bare         bool
+	PVENav       bool
+	// NotificationsNav shows the Notifications navigation entry; the
+	// server sets it from the inbox rule.
+	NotificationsNav bool
+	DeployEnabled    bool
+	Search           any // the layout's search box state; none here
+	BuiltinTrust     any // the layout's trust banner; none here
+	Scripts          []string
 
 	Conn *view
 }
@@ -850,13 +856,14 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, v *view, kind s
 		active = "network"
 	}
 	p := &page{
-		Title:         "Connections · " + v.SubjectName,
-		Active:        active,
-		Theme:         c.Theme,
-		NavCollapsed:  c.NavCollapsed,
-		PVENav:        c.PVENav,
-		DeployEnabled: c.DeployEnabled,
-		Conn:          v,
+		Title:            "Connections · " + v.SubjectName,
+		Active:           active,
+		Theme:            c.Theme,
+		NavCollapsed:     c.NavCollapsed,
+		PVENav:           c.PVENav,
+		NotificationsNav: c.NotificationsNav,
+		DeployEnabled:    c.DeployEnabled,
+		Conn:             v,
 	}
 	var b strings.Builder
 	if err := h.page.ExecuteTemplate(&b, "layout", p); err != nil {

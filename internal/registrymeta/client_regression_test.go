@@ -57,16 +57,19 @@ func TestRedirectRejectsNonMetadataResources(t *testing.T) {
 				continue // permitted manifest HEAD resource
 			}
 			t.Run(source+target, func(t *testing.T) {
+				// Same origin, so only the resource rule can refuse the
+				// redirect (the origin rule is covered by
+				// TestRedirectToOtherApprovedHostRefused).
 				var hits atomic.Int32
-				dest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					hits.Add(1)
-				}))
-				defer dest.Close()
 				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					http.Redirect(w, r, dest.URL+target, http.StatusFound)
+					if r.URL.EscapedPath() == target {
+						hits.Add(1)
+						return
+					}
+					http.Redirect(w, r, target, http.StatusFound)
 				}))
 				defer srv.Close()
-				c := regressionRedirectClient(t, srv, dest, newFakeClock())
+				c := newTestClient(t, srv, newFakeClock())
 				ref := Ref{Registry: srv.URL, Repository: "repo", Tag: "latest"}
 				var err error
 				switch source {
@@ -156,14 +159,29 @@ func TestRequestSlotsHeldUntilBodyClosure(t *testing.T) {
 	resp.Body.Close()
 }
 
-func TestRedirectHopsUseDestinationBudgetAndBackoff(t *testing.T) {
-	for _, mode := range []string{"interval", "paused", "full", "429", "remaining", "intermediateBudget"} {
+// TestRedirectHopsUseBudgetAndBackoff checks that every followed redirect hop
+// is itself charged to the registry budget: the hop waits for the request
+// interval, its 429 or exhausted budget pauses the registry, and a budget
+// exhausted by the redirect response stops the hop before it is sent. Since
+// the ADR 0006 amendment (2026-11-19) only same-origin hops are followed;
+// cross-origin hops are refused before any request
+// (TestRedirectToOtherApprovedHostRefused).
+func TestRedirectHopsUseBudgetAndBackoff(t *testing.T) {
+	for _, mode := range []string{"interval", "429", "remaining", "intermediateBudget"} {
 		t.Run(mode, func(t *testing.T) {
 			fc := newFakeClock()
-			var hits atomic.Int32
-			var arrived time.Time
-			dest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				hits.Add(1)
+			var hops atomic.Int32
+			var first, arrived time.Time
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Query().Get("hop") == "" {
+					first = fc.Now()
+					if mode == "intermediateBudget" {
+						w.Header().Set("ratelimit-remaining", "0;w=21600")
+					}
+					http.Redirect(w, r, r.URL.Path+"?hop=1", http.StatusFound)
+					return
+				}
+				hops.Add(1)
 				arrived = fc.Now()
 				if mode == "429" {
 					w.Header().Set("Retry-After", "3600")
@@ -175,73 +193,40 @@ func TestRedirectHopsUseDestinationBudgetAndBackoff(t *testing.T) {
 				}
 				_, _ = w.Write([]byte(`{"name":"repo","tags":[]}`))
 			}))
-			defer dest.Close()
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if mode == "intermediateBudget" {
-					w.Header().Set("ratelimit-remaining", "0;w=21600")
-				}
-				http.Redirect(w, r, dest.URL+r.URL.Path, http.StatusFound)
-			}))
 			defer srv.Close()
-			c := regressionRedirectClient(t, srv, dest, fc)
-			start := fc.Now()
-			c.mu.Lock()
-			st := c.regLocked(dest.URL)
-			st.last = start
-			if mode == "paused" {
-				st.pauseUntil = start.Add(time.Hour)
-			}
-			if mode == "full" {
-				st.inflight = MaxConcurrentPerRegistry
-			}
-			c.mu.Unlock()
-			c.sleep = func(ctx context.Context, d time.Duration) error {
-				if d == acquirePollInterval {
-					return sleepCtx(ctx, d)
-				}
-				return fc.Sleep(ctx, d)
-			}
+			c := newTestClient(t, srv, fc)
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
 			_, err := c.ListTags(ctx, Ref{Registry: srv.URL, Repository: "repo"})
-			if mode == "full" {
-				if !errors.Is(err, context.DeadlineExceeded) || hits.Load() != 0 {
-					t.Fatalf("redirect bypassed destination concurrency cap: hits=%d err=%v", hits.Load(), err)
+			if mode == "intermediateBudget" {
+				if !errors.Is(err, ErrRateLimited) || hops.Load() != 0 {
+					t.Fatalf("redirect hop ignored the exhausted budget: hops=%d err=%v", hops.Load(), err)
 				}
 				return
 			}
-			if mode == "paused" || mode == "429" {
+			if mode == "429" {
 				if !errors.Is(err, ErrRateLimited) {
 					t.Fatalf("want rate limit: %v", err)
 				}
 			} else if err != nil {
 				t.Fatal(err)
 			}
-			if mode == "paused" {
-				if hits.Load() != 0 {
-					t.Fatal("paused destination received a request")
-				}
-				return
+			if hops.Load() != 1 {
+				t.Fatalf("redirect hop sent %d times, want 1", hops.Load())
 			}
-			if arrived.Sub(start) < MinRequestInterval {
-				t.Fatal("redirect bypassed destination request interval")
+			if arrived.Sub(first) < MinRequestInterval {
+				t.Fatal("redirect hop bypassed the request interval")
 			}
-			c.mu.Lock()
-			defer c.mu.Unlock()
 			if mode == "429" || mode == "remaining" {
 				want := time.Hour
 				if mode == "remaining" {
 					want = 6 * time.Hour
 				}
-				if got := c.regs[dest.URL].pauseUntil.Sub(fc.Now()); got != want {
-					t.Fatalf("destination pause=%s want=%s", got, want)
+				c.mu.Lock()
+				defer c.mu.Unlock()
+				if got := c.regs[srv.URL].pauseUntil.Sub(fc.Now()); got != want {
+					t.Fatalf("pause=%s want=%s", got, want)
 				}
-				if !c.regs[srv.URL].pauseUntil.IsZero() {
-					t.Fatal("destination limit charged to source")
-				}
-			}
-			if mode == "intermediateBudget" && !c.regs[srv.URL].pauseUntil.After(fc.Now()) {
-				t.Fatal("intermediate response budget ignored")
 			}
 		})
 	}

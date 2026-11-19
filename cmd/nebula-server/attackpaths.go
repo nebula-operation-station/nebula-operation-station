@@ -61,5 +61,5 @@ func mountAttackPaths(pages *http.ServeMux, publicOrigin string, isAdmin func(ct
 // attackPathChrome is softwareChrome for the attack-path pages.
 func attackPathChrome(r *http.Request) paths.Chrome {
 	c := softwareChrome(r)
-	return paths.Chrome{Theme: c.Theme, NavCollapsed: c.NavCollapsed, PVENav: c.PVENav, DeployEnabled: c.DeployEnabled}
+	return paths.Chrome{Theme: c.Theme, NavCollapsed: c.NavCollapsed, PVENav: c.PVENav, DeployEnabled: c.DeployEnabled, NotificationsNav: c.NotificationsNav}
 }

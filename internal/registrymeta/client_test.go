@@ -485,7 +485,11 @@ func TestRedirectRejected(t *testing.T) {
 	}
 }
 
-func TestRedirectAllowed(t *testing.T) {
+// TestRedirectBetweenApprovedOriginsRefused: before the ADR 0006 amendment
+// (2026-11-19) a redirect between two approved registry origins was
+// followed; now no redirect leaves the origin of the original request, even
+// when the target is approved.
+func TestRedirectBetweenApprovedOriginsRefused(t *testing.T) {
 	recB := &recorder{}
 	srvB := httptest.NewServer(tagsHandler(recB, "1.0.0"))
 	defer srvB.Close()
@@ -511,12 +515,12 @@ func TestRedirectAllowed(t *testing.T) {
 		t.Fatalf("NewClient: %v", err)
 	}
 
-	res, err := c.ListTags(context.Background(), Ref{Registry: srvA.URL, Repository: "repo"})
-	if err != nil {
-		t.Fatalf("ListTags: %v", err)
+	_, err = c.ListTags(context.Background(), Ref{Registry: srvA.URL, Repository: "repo"})
+	if !errors.Is(err, ErrRedirectNotAllowed) {
+		t.Fatalf("want ErrRedirectNotAllowed, got %v", err)
 	}
-	if len(res.Tags) != 1 || res.Tags[0] != "1.0.0" {
-		t.Fatalf("unexpected result %+v", res)
+	if n := recB.count(""); n != 0 {
+		t.Fatalf("the other approved origin must not be reached, got %d requests", n)
 	}
 }
 
