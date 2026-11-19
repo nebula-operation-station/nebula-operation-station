@@ -14,7 +14,7 @@ eingehenden Webhook-Endpunkt für Nachrichten, führt keine Bot-Befehle aus
 und nimmt keinen Freitext an. Die einzige Telegram-Methode, die NOS aufruft,
 ist `sendMessage`.
 
-**Folge:** Du kannst dem Telegram-Bot nicht antworten und ihm keine Befehle
+**Folge:** Sie können dem Telegram-Bot nicht antworten und ihm keine Befehle
 schicken. Eine Nachricht des Bots ist eine Benachrichtigung; was Sie dort
 eintippen, erreicht NOS nicht. Fragen an den Ops-Agenten werden nur in der
 NOS-Weboberfläche gestellt (Tab Ops).
@@ -46,9 +46,9 @@ Diese zwei Ereignisse werden in diesem Release gesendet. Sie brauchen weder
 LLM noch Agenten.
 
 - `lease.expiring`: Ein Read-Lease oder eine Schedule-Freigabe läuft innerhalb
-  von 7 Tagen ab, und nochmals innerhalb von 1 Tag. Du bekommst eine
+  von 7 Tagen ab, und nochmals innerhalb von 1 Tag. Sie bekommen eine
   Nachricht pro Freigabe und Schwelle.
-- `lease.run_failed`: Ein Lease-Lauf ist fehlgeschlagen. Du bekommst eine
+- `lease.run_failed`: Ein Lease-Lauf ist fehlgeschlagen. Sie bekommen eine
   Nachricht pro Freigabe, Aktion und Host, bis zum nächsten erfolgreichen
   Lauf dieser Kombination.
 
