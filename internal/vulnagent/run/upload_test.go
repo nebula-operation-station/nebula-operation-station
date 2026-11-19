@@ -640,6 +640,38 @@ func TestPackRecordByteLimitFlushesBeforeCoverage(t *testing.T) {
 	}
 }
 
+// padHTML fills a field with `<`, `>` and `&` in turn. json.Marshal writes
+// each one as six bytes, but the packer counts it as one.
+func padHTML(r *vulnfinding.Record, s string) {
+	b := []byte(s)
+	for i := range b {
+		b[i] = "<>&"[i%3]
+	}
+	r.Assessment.Text = string(b)
+}
+
+func TestPackBatchBodyWithinLimitWhenRecordsNeedHTMLEscaping(t *testing.T) {
+	// 63 records of MaxRecordBytes fill the packer's budget exactly. Their
+	// `<`, `>` and `&` bytes grow to six each in the body nosclient sends,
+	// so the batch must not be packed to the budget as counted.
+	m := &matched{uncovered: map[string]bool{}}
+	for range 63 {
+		m.findings = append(m.findings, prep(recordOfCost(t, "a", MaxRecordBytes, padHTML)))
+	}
+	snap := &nosclient.Snapshot{Subjects: []nosclient.SubjectCoverage{hostCov("a", 1, true)}}
+	batches, withheld, covered, err := pack(snap, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkBatchLimits(t, batches)
+	if withheld != 0 || covered != 1 {
+		t.Errorf("withheld %d, covered %d; want 0, 1", withheld, covered)
+	}
+	if n := len(sentRecords(t, batches)); n != 63 {
+		t.Errorf("%d records sent, want 63", n)
+	}
+}
+
 func TestPackerFindingByteLimitAfterSubjectEntries(t *testing.T) {
 	// Pack adds a subject's coverage entries before the next subject's
 	// records, so addFinding meets a budget already partly used by entries.
