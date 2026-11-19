@@ -107,42 +107,14 @@ func TestShutdownFlushWithoutLogIsNoOp(t *testing.T) {
 	}
 }
 
-// slowRecorder stores each record after delay (honouring its context), so a
-// batch takes delay times its size in total.
-type slowRecorder struct {
-	delay time.Duration
-	mu    sync.Mutex
-	n     int
-}
-
-func (s *slowRecorder) Append(ctx context.Context, _ notifylog.Record) (int64, error) {
-	t := time.NewTimer(s.delay)
-	defer t.Stop()
-	select {
-	case <-t.C:
-	case <-ctx.Done():
-		return 0, ctx.Err()
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.n++
-	return int64(s.n), nil
-}
-
-func (s *slowRecorder) count() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.n
-}
-
 // TestShutdownFlushCoversWholeHeldBatch: the records of one held batch (the
 // vulnerability digest hands its holds over in one call) are all in the log
-// when the flush returns. The batch takes 6 seconds in total, longer than one
-// 5-second record deadline, so the flush must wait for the whole batch and no
-// record may be lost to a deadline shared by the batch.
+// when the flush returns. The writes of the batch are still in flight at the
+// flush, so the flush must wait for the whole batch, not just its first record.
 func TestShutdownFlushCoversWholeHeldBatch(t *testing.T) {
 	const size = 3
-	rec := &slowRecorder{delay: 2 * time.Second}
+	release := make(chan struct{})
+	rec := &blockingRecorder{release: release}
 	n := notify.NewWithSenders(flushTestLogger(), nil, flushTestSender{})
 	n.SetRecorder(rec)
 	batch := make([]notify.Event, size)
@@ -151,8 +123,24 @@ func TestShutdownFlushCoversWholeHeldBatch(t *testing.T) {
 	}
 	n.RecordHeld(context.Background(), batch...)
 
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		close(release)
+	}()
 	flushNotifyRecords(n, flushTestLogger(), notifyFlushTimeout)
 	if got := rec.count(); got != size {
 		t.Fatalf("stored records after flush = %d, want %d", got, size)
+	}
+}
+
+// TestShutdownFlushTimeoutCoversBatchBudget: the flush waits for a batch in
+// flight, and a batch ends within notify.RecordBatchTimeout of its first write.
+// The flush timeout must therefore be that bound plus a margin, so the flush
+// never stops waiting for a batch that is still within its budget.
+func TestShutdownFlushTimeoutCoversBatchBudget(t *testing.T) {
+	const margin = time.Second
+	if notifyFlushTimeout < notify.RecordBatchTimeout+margin {
+		t.Fatalf("notifyFlushTimeout = %v, want at least the batch budget %v plus %v",
+			notifyFlushTimeout, notify.RecordBatchTimeout, margin)
 	}
 }
