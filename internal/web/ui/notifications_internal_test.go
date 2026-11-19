@@ -36,6 +36,25 @@ func TestInboxCheckFailureLogsOncePerMinute(t *testing.T) {
 	}
 }
 
+// TestInboxCheckFailureLogsAtWarn: the line is WARN, like the other
+// executor-outage lines of the server, so an executor outage does not show as
+// an ERROR in the log.
+func TestInboxCheckFailureLogsAtWarn(t *testing.T) {
+	var buf bytes.Buffer
+	h := &Handler{
+		log: slog.New(slog.NewTextHandler(&buf, nil)),
+		now: func() time.Time { return time.Date(2026, 11, 19, 9, 0, 0, 0, time.UTC) },
+	}
+	h.logInboxCheckFailure(errors.New("executor down"))
+	out := buf.String()
+	if !strings.Contains(out, "level=WARN") || !strings.Contains(out, "notifications: admin check") {
+		t.Errorf("log line = %q, want a WARN line for the admin check", out)
+	}
+	if strings.Contains(out, "level=ERROR") {
+		t.Errorf("log line = %q, want no ERROR level", out)
+	}
+}
+
 // TestRenderLinkRuleIsTheStoreRule fixes the render-time link rule: a link is
 // shown only when notifylog.IsNOSLink, the same rule the store applies on
 // write, accepts it.
