@@ -106,3 +106,41 @@ func TestShutdownFlushWithoutLogIsNoOp(t *testing.T) {
 		t.Fatalf("flush without a log logged %q", buf.String())
 	}
 }
+
+// TestShutdownFlushCoversWholeHeldBatch: the records of one held batch (the
+// vulnerability digest hands its holds over in one call) are all in the log
+// when the flush returns. The writes of the batch are still in flight at the
+// flush, so the flush must wait for the whole batch, not just its first record.
+func TestShutdownFlushCoversWholeHeldBatch(t *testing.T) {
+	const size = 3
+	release := make(chan struct{})
+	rec := &blockingRecorder{release: release}
+	n := notify.NewWithSenders(flushTestLogger(), nil, flushTestSender{})
+	n.SetRecorder(rec)
+	batch := make([]notify.Event, size)
+	for i := range batch {
+		batch[i] = notify.Event{Kind: notify.KindTest, Reason: "x", Time: time.Unix(1791960000, 0)}
+	}
+	n.RecordHeld(context.Background(), batch...)
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		close(release)
+	}()
+	flushNotifyRecords(n, flushTestLogger(), notifyFlushTimeout)
+	if got := rec.count(); got != size {
+		t.Fatalf("stored records after flush = %d, want %d", got, size)
+	}
+}
+
+// TestShutdownFlushTimeoutCoversBatchBudget: the flush waits for a batch in
+// flight, and a batch ends within notify.RecordBatchTimeout of its first write.
+// The flush timeout must therefore be that bound plus a margin, so the flush
+// never stops waiting for a batch that is still within its budget.
+func TestShutdownFlushTimeoutCoversBatchBudget(t *testing.T) {
+	const margin = time.Second
+	if notifyFlushTimeout < notify.RecordBatchTimeout+margin {
+		t.Fatalf("notifyFlushTimeout = %v, want at least the batch budget %v plus %v",
+			notifyFlushTimeout, notify.RecordBatchTimeout, margin)
+	}
+}

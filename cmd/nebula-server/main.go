@@ -58,9 +58,12 @@ const DefaultConfigPath = "/etc/nebula/server.json"
 const shutdownTimeout = 10 * time.Second
 
 // notifyFlushTimeout bounds the wait for notification log writes still in
-// flight at shutdown. A log write is itself bounded per write (5 seconds), so
-// this is a little over one write.
-const notifyFlushTimeout = 10 * time.Second
+// flight at shutdown. Each write slot holds one batch, and the notify package
+// bounds every batch as a whole to notify.RecordBatchTimeout from its first
+// write (records not written by then are counted as dropped). The batches in
+// flight end concurrently, so the flush ends at the latest of them: this is
+// that bound plus 2 seconds of margin.
+const notifyFlushTimeout = notify.RecordBatchTimeout + 2*time.Second
 
 // flushNotifyRecords waits, for at most timeout, until the notification log
 // writes in flight have ended. Shutdown calls it after sending has stopped and
