@@ -34,6 +34,10 @@ func (s *scriptedRecorder) Append(ctx context.Context, _ notifylog.Record) (int6
 	blocked := s.block[idx]
 	s.mu.Unlock()
 
+	// As a real write does, refuse a context that has already ended.
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	if blocked {
 		<-ctx.Done()
 		return 0, ctx.Err()
