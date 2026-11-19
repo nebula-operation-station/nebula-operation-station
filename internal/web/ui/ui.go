@@ -25,6 +25,7 @@ import (
 	"net/netip"
 	"slices"
 	"sort"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -100,6 +101,12 @@ type Options struct {
 	// Operations plans and follows executions. Nil leaves the
 	// operations page empty.
 	Operations Operations
+	// Notifications reads the notification log for the notifications
+	// inbox (ADR 0016 D10). Nil hides the page and its navigation entry.
+	Notifications NotificationLog
+	// NotificationsAdmin is the admin check of the notifications page. Nil
+	// denies every user (fail closed).
+	NotificationsAdmin NotificationAdminFunc
 	// OperationSuggestions opens the operation form from an agent
 	// suggestion (ADR 0016 D8). Nil answers those requests with 404.
 	OperationSuggestions *OperationSuggestions
@@ -222,6 +229,10 @@ type Options struct {
 	// (ADR 0011 amendment 1; settings.go). Nil hides the section and makes
 	// its routes answer 404.
 	VulnAgent VulnAgentSettings
+	// OpsAgent serves the settings section "Ops-Agent" (ADR 0016 D12;
+	// settings_opsagent.go). Nil hides the section and makes its routes
+	// answer 404.
+	OpsAgent OpsAgentSettings
 	// RegistryReads is the server's caller of executor private registry
 	// reads (cu06 part 1, G13; leases_registry.go): the registry scope of
 	// the lease form, registry leases on the lease pages and executor-read
@@ -302,9 +313,21 @@ type Handler struct {
 	// (settings.go).
 	vulnAgent        VulnAgentSettings
 	vulnAgentPending *vulnAgentPendingTable
+	// opsAgent and opsAgentPending serve the ops agent settings
+	// (settings_opsagent.go).
+	opsAgent        OpsAgentSettings
+	opsAgentPending *opsAgentPendingTable
 	// registryReads serves private registry leases and digests; nil hides
 	// them.
 	registryReads RegistryReads
+
+	// inbox and inboxAdmin serve the notifications page (notifications.go).
+	inbox      NotificationLog
+	inboxAdmin NotificationAdminFunc
+	// inboxLogMu and inboxLogAt rate-limit the log line of a failing admin
+	// check (see logInboxCheckFailure).
+	inboxLogMu sync.Mutex
+	inboxLogAt time.Time
 	// assistantOps serves the Ops tab; nil when it is not configured.
 	assistantOps *AssistantOps
 }
@@ -369,6 +392,8 @@ func New(o Options) (*Handler, error) {
 		hostKeys:             o.HostKeys,
 		inventory:            o.Inventory,
 		operations:           o.Operations,
+		inbox:                o.Notifications,
+		inboxAdmin:           o.NotificationsAdmin,
 		opSuggest:            o.OperationSuggestions,
 		pins:                 o.Pins,
 		schedules:            o.Schedules,
@@ -407,6 +432,8 @@ func New(o Options) (*Handler, error) {
 		vulnPending:          newVulnPendingTable(),
 		vulnAgent:            o.VulnAgent,
 		vulnAgentPending:     newVulnAgentPendingTable(),
+		opsAgent:             o.OpsAgent,
+		opsAgentPending:      newOpsAgentPendingTable(),
 		now:                  o.Now,
 
 		guestPowerProposals: newGuestPowerProposals(),
@@ -471,6 +498,7 @@ var pageFiles = map[string]string{
 	"settings":  "settings.html",
 
 	"operations":          "operations.html",
+	"notifications":       "notifications.html",
 	"inventory_import":    "inventory_import.html",
 	"inventory_enroll":    "inventory_enroll.html",
 	"operation_new":       "operation_new.html",
@@ -573,6 +601,8 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("GET /operations/abort/confirm", h.handleOperationAbortConfirm)
 	mux.HandleFunc("POST /operations/abort/form", h.handleOperationAbortForm)
 	mux.HandleFunc("POST /operations/retry", h.handleOperationRetry)
+
+	mux.HandleFunc("GET /notifications", h.handleNotifications)
 	// Scheduled read-only checks (schedule grants).
 	mux.HandleFunc("GET /schedules", h.handleSchedules)
 	mux.HandleFunc("POST /schedules/create", h.handleScheduleCreate)
@@ -650,6 +680,8 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("POST /settings/appearance", h.handleSettingsAppearance)
 	mux.HandleFunc("POST /settings/vuln-agent/begin", h.handleVulnAgentBegin)
 	mux.HandleFunc("POST /settings/vuln-agent/commit", h.handleVulnAgentCommit)
+	mux.HandleFunc("POST /settings/ops-agent/begin", h.handleOpsAgentBegin)
+	mux.HandleFunc("POST /settings/ops-agent/commit", h.handleOpsAgentCommit)
 	mux.HandleFunc("POST /ui/nav", h.handleNav)
 	// Network: assets and IPAM-light (M9-1).
 	mux.HandleFunc("GET /network", h.handleNetworkPage)
@@ -841,12 +873,17 @@ type pageData struct {
 	Host *hostPageData
 	// Ops is the data of the operations pages.
 	Ops *operationsData
+	// Notifications is the data of the notifications inbox.
+	Notifications *notificationsData
 	// PVEList is the data of the PVE remote list page.
 	PVEList *pveListData
 	// PVEDetail is the data of a PVE remote's detail page.
 	PVEDetail *pveDetailData
 	// PVENav shows the PVE navigation item (Options.PVE is set).
 	PVENav bool
+	// NotificationsNav shows the Notifications navigation entry: the inbox
+	// is wired and the user is an admin (see inboxVisible).
+	NotificationsNav bool
 	// Vuln is the data of the vulnerabilities pages.
 	Vuln *vulnPageData
 	// BuiltinTrust is the layout's built-in trust banner (ADR 0007
@@ -1012,6 +1049,7 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, data pageData) 
 	}
 	data.NavCollapsed = navStateFromRequest(r) == navCollapsed
 	data.PVENav = h.pve != nil
+	data.NotificationsNav = h.navVisible(r)
 	data.DeployEnabled = h.deploy != nil && h.pve != nil && h.pveRemotes != nil
 	// "Deploy here" (ADR 0008 section 6) on the chart's nodes of active
 	// remotes; read-only and blocked remotes get no shortcut.

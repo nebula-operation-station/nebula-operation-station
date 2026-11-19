@@ -39,6 +39,8 @@ func logEntry(e Event) (kind notifylog.KindCode, state notifylog.StateCode, ok b
 		return notifylog.KindOpsState, notifylog.StateChanged, true
 	case KindHostKeyMismatch:
 		return notifylog.KindHostKeyMismatch, notifylog.StateMismatch, true
+	case KindOpsAgentSettingsChanged:
+		return notifylog.KindOpsSettingsChanged, notifylog.StateChanged, true
 	case KindTest:
 		return notifylog.KindTest, notifylog.StateTest, true
 	case KindExecutorLocked:

@@ -58,9 +58,12 @@ const DefaultConfigPath = "/etc/nebula/server.json"
 const shutdownTimeout = 10 * time.Second
 
 // notifyFlushTimeout bounds the wait for notification log writes still in
-// flight at shutdown. A log write is itself bounded per write (5 seconds), so
-// this is a little over one write.
-const notifyFlushTimeout = 10 * time.Second
+// flight at shutdown. Each write slot holds one batch, and the notify package
+// bounds every batch as a whole to notify.RecordBatchTimeout from its first
+// write (records not written by then are counted as dropped). The batches in
+// flight end concurrently, so the flush ends at the latest of them: this is
+// that bound plus 2 seconds of margin.
+const notifyFlushTimeout = notify.RecordBatchTimeout + 2*time.Second
 
 // flushNotifyRecords waits, for at most timeout, until the notification log
 // writes in flight have ended. Shutdown calls it after sending has stopped and
@@ -525,6 +528,12 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	if err != nil {
 		return err
 	}
+	// Ops agent settings (ADR 0016 D12): the same maintainer and fresh
+	// assertion rules; the settings_changed event follows each commit.
+	opsAgent, err := newOpsAgentWiring(db, audit, isAdmin, exec, notifier, log)
+	if err != nil {
+		return err
+	}
 
 	// Private registry reads (G13). The digest reader's background worker
 	// lives as long as the server: when connCtx ends it is closed (its
@@ -533,32 +542,39 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	registryReads := newServerRegistryReads(exec, time.Now, log)
 	bg.Go(func() { closeRegistryReads(connCtx, registryReads, shutdownTimeout, log) })
 
+	// Notifications inbox (ADR 0016 D10): the log over server.db, for admins.
+	inbox, err := newInboxWiring(db, cachedVulnAdmin(exec, inboxStatusTTL, time.Now, bg.Go))
+	if err != nil {
+		return err
+	}
 	h, err := ui.New(withOperationSuggestions(withBatchPlanner(ui.Options{
-		PublicOrigin:   cfg.PublicOrigin,
-		Status:         exec,
-		HostNames:      hostNames,
-		Hosts:          store.List,
-		HostKeys:       hostKeys,
-		Inventory:      store,
-		Operations:     ops,
-		Pins:           store,
-		Schedules:      ops,
-		Leases:         ops,
-		Runbooks:       rb,
-		DeployProfiles: deployProfiles,
-		Trust:          exec,
-		BuiltinTrust:   exec,
-		Modules:        mods,
-		LastResult:     ops.LastResult,
-		Network:        ipamStore,
-		Discovery:      disc,
-		PVE:            pveStore,
-		PVEChart:       func(ctx context.Context) (pveinventory.Tree, error) { return pveStore.ChartTree(ctx, time.Now()) },
-		PVERemotes:     pveRemotes,
-		Events:         exec,
-		Audit:          audit,
-		Repin:          exec,
-		Enroll:         exec,
+		PublicOrigin:       cfg.PublicOrigin,
+		Notifications:      inbox.Log,
+		NotificationsAdmin: inbox.Admin,
+		Status:             exec,
+		HostNames:          hostNames,
+		Hosts:              store.List,
+		HostKeys:           hostKeys,
+		Inventory:          store,
+		Operations:         ops,
+		Pins:               store,
+		Schedules:          ops,
+		Leases:             ops,
+		Runbooks:           rb,
+		DeployProfiles:     deployProfiles,
+		Trust:              exec,
+		BuiltinTrust:       exec,
+		Modules:            mods,
+		LastResult:         ops.LastResult,
+		Network:            ipamStore,
+		Discovery:          disc,
+		PVE:                pveStore,
+		PVEChart:           func(ctx context.Context) (pveinventory.Tree, error) { return pveStore.ChartTree(ctx, time.Now()) },
+		PVERemotes:         pveRemotes,
+		Events:             exec,
+		Audit:              audit,
+		Repin:              exec,
+		Enroll:             exec,
 		// Typed guest power and snapshots (ADR 0006 P2-01, WA-05): the
 		// server proposes, relays the user's security key assertion and
 		// commits; the executor dispatches only an approved permit at its
@@ -581,6 +597,8 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		// Findings pages over the real store.
 		Vuln:      vulnPages{v: vuln, admin: isAdmin},
 		VulnAgent: vulnAgent,
+		// Ops agent settings section (ADR 0016 D12).
+		OpsAgent: opsAgent,
 		// Private registry reads (ADR 0006, cu06 part 1, G13): registry
 		// read leases on the lease pages and executor-read digests of
 		// private images in docker.check_updates results. The credential
@@ -681,7 +699,9 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	if err := mountTrafficMap(pages, cfg.PublicOrigin, db, store.List, ipamStore, log, retention); err != nil {
 		return err
 	}
-	srv, err := webServer(cfg.PublicOrigin, login, pages, apiHandler)
+	// The inbox's navigation entry on every page of pages: one visibility
+	// check per request (ui.WithNotificationsNav, ui.NotificationsNavVisible).
+	srv, err := webServer(cfg.PublicOrigin, login, h.WithNotificationsNav(pages), apiHandler)
 	if err != nil {
 		return err
 	}

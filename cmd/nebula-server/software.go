@@ -17,6 +17,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/softwarecat"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/middleware"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui/icons"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui/icons/iconjob"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui/software"
@@ -142,7 +143,7 @@ func softwarePagesWith(db *sql.DB, log *slog.Logger, w *iconWiring) (*software.H
 // and navigation cookies, and the navigation items this server always
 // serves (PVE remotes and deployments are always configured in run).
 func softwareChrome(r *http.Request) software.Chrome {
-	c := software.Chrome{Theme: "system", PVENav: true, DeployEnabled: true}
+	c := software.Chrome{Theme: "system", PVENav: true, DeployEnabled: true, NotificationsNav: ui.NotificationsNavVisible(r)}
 	if k, err := r.Cookie(themeCookie); err == nil {
 		c.Theme = k.Value
 	}

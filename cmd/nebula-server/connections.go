@@ -73,7 +73,7 @@ func sessionAuthorized(r *http.Request) bool {
 // connectionsChrome is softwareChrome for the connections pages.
 func connectionsChrome(r *http.Request) connections.Chrome {
 	c := softwareChrome(r)
-	return connections.Chrome{Theme: c.Theme, NavCollapsed: c.NavCollapsed, PVENav: c.PVENav, DeployEnabled: c.DeployEnabled}
+	return connections.Chrome{Theme: c.Theme, NavCollapsed: c.NavCollapsed, PVENav: c.PVENav, DeployEnabled: c.DeployEnabled, NotificationsNav: c.NotificationsNav}
 }
 
 // connDirectory resolves hosts, assets and peers from the inventory and

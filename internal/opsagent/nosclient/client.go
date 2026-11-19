@@ -248,7 +248,8 @@ type Group struct {
 }
 
 // WorkItem is one due item of the work list. Kind is "fix", "summary" or
-// "question"; a question carries its text and the facts of the hosts it names.
+// "question". A question carries the fleet counts and the question (ADR 0016
+// D11); the server builds the same shape in internal/web/api (ops.go).
 type WorkItem struct {
 	Kind   string  `json:"kind"`
 	Ref    string  `json:"ref"`
@@ -256,11 +257,26 @@ type WorkItem struct {
 	Group  *Group  `json:"group,omitempty"`
 	Fleet  *Counts `json:"fleet,omitempty"`
 	// Question is the admin's question (kind "question" only). It is data.
-	Question string `json:"question,omitempty"`
-	// Facts are the hosts the question names (class lab only). Only host,
-	// exposure, ports and counts are used; findings and candidates refuse
-	// the item.
-	Facts []Group `json:"facts,omitempty"`
+	Question *Question `json:"question,omitempty"`
+}
+
+// Question is the context of one admin question: its text and, in class lab
+// only, the facts of the hosts the text names (at most 5).
+type Question struct {
+	Text  string         `json:"text"`
+	Hosts []QuestionHost `json:"hosts,omitempty"`
+}
+
+// QuestionHost is the fact part of a host a question names: host, exposure,
+// listening ports, the number of ports left out of the list, and counts. It
+// carries no findings and no step candidates. The counts are the sum over all
+// groups of the host.
+type QuestionHost struct {
+	Host         Host   `json:"host"`
+	Exposure     string `json:"exposure"`
+	Ports        []Port `json:"ports"`
+	PortsOmitted int    `json:"ports_omitted"`
+	Counts       Counts `json:"counts"`
 }
 
 // Draft is a note as the agent posts it: kind "fix", "summary" or "answer".
