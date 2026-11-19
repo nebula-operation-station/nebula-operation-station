@@ -19,5 +19,8 @@
 // server-side spool and hands each one to a GuestNetSink. GuestNetStoreSink
 // is that sink: it writes the guest NIC snapshots into the trafficstore,
 // which is backed by database/sql. So this package performs database writes
-// through those two stores, and only on the server side.
+// through three server-side paths: Importer (IngestObservation into the
+// pveinventory store), BucketSink (RecordSample into the pveinventory metric
+// buckets) and GuestNetStoreSink (the trafficstore). The collector side never
+// reaches these stores.
 package pvecollect

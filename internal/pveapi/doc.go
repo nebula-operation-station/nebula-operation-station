@@ -17,9 +17,9 @@
 //     values, not URLs or raw PVE parameters. The one caller-supplied URL is
 //     DownloadRequest.SourceURL: it must be an absolute https URL without
 //     user info, query or fragment, and it is sent with a SHA-256 checksum.
-//     Its consumer is the executor (internal/executor), which builds Writer
-//     with the PVE action token for mutations and with the read token for
-//     task-status lookups (pve_mutation_client.go).
+//     Its consumer is the executor (internal/executor). Every mutation step
+//     calls NewWriter with the PVE action token; the task-status lookup calls
+//     it with the read token instead.
 //
 // Untrusted responses: every response from a PVE host is untrusted input.
 // Response bodies are size-limited (see the Max* constants next to each
@@ -28,11 +28,13 @@
 // fields; the guest-agent file read (agent_file.go) rejects them.
 //
 // Unavailable versus empty: a dataset that cannot be read is reported in
-// one of two ways, and both stay distinct from "empty" (a valid response
-// with no entries). A failed Client request returns an error, and
-// MetricsClient wraps ErrUnavailable. Backup and storage dataset readers
-// return an UnavailableDataset value that carries a reason instead of an
-// error. HA status returns an HAStatus with the unavailable part marked and
+// one of several ways, and each stays distinct from "empty" (a valid
+// response with no entries). A failed Client request, including one from
+// ListStorages and GetStorage, returns a *UnavailableError with a fixed
+// reason; errors.Is(err, ErrUnavailable) matches it. MetricsClient wraps
+// ErrUnavailable. Only the backup dataset readers return an
+// UnavailableDataset value that carries a reason instead of an error.
+// HAStatus marks the unavailable part inside its HAStatus value and returns
 // a nil error.
 //
 // Credentials and errors: the package stores no secret values. The caller
