@@ -187,6 +187,9 @@ type Notifier struct {
 	recDropped atomic.Int64
 	// recTimeout bounds each log write; 0 means recordTimeout. Tests set it.
 	recTimeout time.Duration
+	// recBatchTimeout bounds the whole batch; 0 means RecordBatchTimeout.
+	// Tests set it.
+	recBatchTimeout time.Duration
 }
 
 // Recorder stores one notification decision in the notification log (ADR
@@ -199,6 +202,19 @@ type Recorder interface {
 // recordTimeout bounds one record's log write, so a stuck database cannot hold
 // a write slot for long.
 const recordTimeout = 5 * time.Second
+
+// RecordBatchTimeout bounds the whole batch written under one write slot,
+// from the moment its first write starts. Each record of the batch has its
+// own deadline of at most recordTimeout, but never past what is left of this
+// budget. A record that is not tried before the budget ends is counted in
+// RecordsDropped, so a batch of any size holds its slot for at most this long.
+// Shutdown waits for the batches in flight, so it must allow for this bound
+// (see cmd/nebula-server).
+const RecordBatchTimeout = 8 * time.Second
+
+// errBatchTimeout is the error counted for a record of a batch that was not
+// tried because the batch's time budget (RecordBatchTimeout) had ended.
+var errBatchTimeout = errors.New("batch time budget ended before the record was written")
 
 // maxPendingRecords bounds the log writes in flight. When all are taken, a new
 // record is dropped and counted (RecordsDropped), so a slow database never
@@ -257,9 +273,10 @@ func (n *Notifier) record(ctx context.Context, r notifylog.Record) {
 // no write slot is free, the whole batch is dropped and counted in
 // RecordsDropped. write never returns an error.
 //
-// Each record of the batch has its own deadline of recordTimeout and every
-// record is tried, so a long batch never loses its tail to a deadline that ran
-// out early (see writeBatch).
+// Each record of the batch has its own deadline of recordTimeout, so a long
+// batch never loses its tail to a deadline that ran out early; the whole batch
+// is bounded by RecordBatchTimeout, and records left over when that ends are
+// counted as dropped (see writeBatch).
 func (n *Notifier) write(ctx context.Context, recs []notifylog.Record) {
 	if n.rec == nil || len(recs) == 0 {
 		return
@@ -278,26 +295,44 @@ func (n *Notifier) write(ctx context.Context, recs []notifylog.Record) {
 	}()
 }
 
-// writeBatch appends every record of recs in order, each under its own
-// deadline. A record whose write fails or times out is counted in
-// RecordsDropped; the others are still tried. One warning is logged for the
-// batch with the count of records not stored, and the first failure's kind,
-// outcome and error (never the message text).
+// writeBatch appends the records of recs in order. Each record gets its own
+// deadline of recordTimeout, cut short by what is left of the batch's budget
+// (RecordBatchTimeout), so the batch as a whole ends within that budget. A
+// record whose write fails or times out, and every record not tried once the
+// budget has ended, is counted in RecordsDropped. One warning is logged for
+// the batch with the count of records not stored, and the first failure's
+// kind, outcome and error (never the message text).
 func (n *Notifier) writeBatch(base context.Context, recs []notifylog.Record) {
 	timeout := n.recTimeout
 	if timeout <= 0 {
 		timeout = recordTimeout
 	}
+	budget := n.recBatchTimeout
+	if budget <= 0 {
+		budget = RecordBatchTimeout
+	}
+	start := time.Now()
 	failed := 0
 	var first error
 	var firstKind, firstOutcome string
-	for _, r := range recs {
-		if err := n.appendOne(base, timeout, r); err != nil {
-			if first == nil {
-				first = err
-				firstKind, firstOutcome = string(r.Kind), string(r.Outcome)
+	note := func(r notifylog.Record, err error) {
+		if first == nil {
+			first = err
+			firstKind, firstOutcome = string(r.Kind), string(r.Outcome)
+		}
+		failed++
+	}
+	for i, r := range recs {
+		left := budget - time.Since(start)
+		if left <= 0 {
+			// The budget ended: the rest are not tried, and not in the log.
+			for _, rest := range recs[i:] {
+				note(rest, errBatchTimeout)
 			}
-			failed++
+			break
+		}
+		if err := n.appendOne(base, min(timeout, left), r); err != nil {
+			note(r, err)
 		}
 	}
 	if failed > 0 {

@@ -11,8 +11,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/nebula-operation-station/nebula-operation-station/internal/notifylog"
 )
 
 // syncBuffer is a log sink that is safe for the write goroutine and the test.
@@ -33,56 +31,26 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
-// deadlineRecorder records the deadline of each Append's context and the time
-// of the call.
-type deadlineRecorder struct {
-	mu        sync.Mutex
-	deadlines []time.Time
-	starts    []time.Time
-	hasDL     []bool
-}
-
-func (d *deadlineRecorder) Append(ctx context.Context, _ notifylog.Record) (int64, error) {
-	start := time.Now()
-	dl, ok := ctx.Deadline()
-	d.mu.Lock()
-	d.deadlines = append(d.deadlines, dl)
-	d.starts = append(d.starts, start)
-	d.hasDL = append(d.hasDL, ok)
-	d.mu.Unlock()
-	return 1, nil
-}
-
-// TestHeldBatchRecordsEachGetOneDeadline: a batch from RecordHeld is written
-// as one write slot, and each of its records has its own deadline of about
-// recordTimeout from the moment it is written, so a long batch never loses its
-// tail to a deadline that ran out early.
-func TestHeldBatchRecordsEachGetOneDeadline(t *testing.T) {
-	rec := &deadlineRecorder{}
+// TestHeldBatchEachRecordGetsItsOwnDeadline: the records of one batch take
+// longer in total than one record deadline (5 x 60ms against 100ms). With a
+// deadline shared by the whole batch, only the first record would be stored;
+// each record has its own deadline, so every record is stored.
+func TestHeldBatchEachRecordGetsItsOwnDeadline(t *testing.T) {
+	rec := &scriptedRecorder{delay: 60 * time.Millisecond}
 	n := NewWithSenders(quiet(), nil, &stubSender{name: "ntfy"})
 	n.SetRecorder(rec)
+	n.recTimeout = 100 * time.Millisecond
 	const size = 5
-	batch := make([]Event, size)
-	for i := range batch {
-		batch[i] = Event{Kind: kindVulnKEVNew, Host: "web01", State: "new", Time: testNow}
-	}
-	n.RecordHeld(context.Background(), batch...)
+	n.RecordHeld(context.Background(), heldBatch(size)...)
 	if err := n.FlushRecords(context.Background()); err != nil {
 		t.Fatalf("FlushRecords = %v", err)
 	}
-	rec.mu.Lock()
-	defer rec.mu.Unlock()
-	if len(rec.deadlines) != size {
-		t.Fatalf("got %d appends, want %d", len(rec.deadlines), size)
+	attempted, stored := rec.counts()
+	if attempted != size || stored != size {
+		t.Fatalf("attempted %d, stored %d; want both %d", attempted, stored, size)
 	}
-	for i, dl := range rec.deadlines {
-		if !rec.hasDL[i] {
-			t.Fatalf("record %d write has no deadline", i)
-		}
-		budget := dl.Sub(rec.starts[i])
-		if budget > recordTimeout || budget < recordTimeout-time.Second {
-			t.Fatalf("record %d deadline budget %v, want about %v", i, budget, recordTimeout)
-		}
+	if got := n.RecordsDropped(); got != 0 {
+		t.Fatalf("RecordsDropped = %d, want 0", got)
 	}
 }
 

@@ -151,3 +151,79 @@ func TestFailedAppendsAreCountedInRecordsDropped(t *testing.T) {
 		t.Fatalf("RecordsDropped = %d, want %d", got, size)
 	}
 }
+
+// TestStuckLargeBatchEndsWithinItsBudgetAndCountsTheRest: a batch of many
+// records on a recorder that never answers ends within the batch budget, not
+// size x recordTimeout. The records not tried before the budget ended are
+// counted in RecordsDropped, together with the records that timed out, and the
+// warning gives the count of the whole batch.
+func TestStuckLargeBatchEndsWithinItsBudgetAndCountsTheRest(t *testing.T) {
+	const (
+		size   = 200
+		budget = 150 * time.Millisecond
+		slack  = time.Second // scheduling room; the bound is budget, not size x timeout
+	)
+	block := make(map[int]bool, size)
+	for i := range size {
+		block[i] = true
+	}
+	rec := &scriptedRecorder{block: block}
+	var buf syncBuffer
+	n := NewWithSenders(slog.New(slog.NewTextHandler(&buf, nil)), nil, &stubSender{name: "ntfy"})
+	n.SetRecorder(rec)
+	n.recTimeout = 20 * time.Millisecond
+	n.recBatchTimeout = budget
+
+	start := time.Now()
+	n.RecordHeld(context.Background(), heldBatch(size)...)
+	if err := n.FlushRecords(context.Background()); err != nil {
+		t.Fatalf("FlushRecords = %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > budget+slack {
+		t.Fatalf("batch held its slot for %v, want at most about %v", elapsed, budget)
+	}
+	attempted, stored := rec.counts()
+	if attempted == 0 || attempted == size {
+		t.Fatalf("attempted %d records, want some but not all %d (budget ended)", attempted, size)
+	}
+	if stored != 0 {
+		t.Fatalf("stored %d records on a stuck recorder, want 0", stored)
+	}
+	if got := n.RecordsDropped(); got != size {
+		t.Fatalf("RecordsDropped = %d, want every record of the batch (%d)", got, size)
+	}
+	out := buf.String()
+	if c := strings.Count(out, "notification log write failed"); c != 1 {
+		t.Fatalf("got %d warnings, want 1: %q", c, out)
+	}
+	if !strings.Contains(out, "count=200") || !strings.Contains(out, "of=200") {
+		t.Fatalf("warning does not count the whole batch: %q", out)
+	}
+}
+
+// TestBatchBudgetCutsOnlyTheTailOfAFastBatch: when the budget ends in the
+// middle of a batch whose writes are fast, the records written before it are
+// stored and only the rest are dropped and counted.
+func TestBatchBudgetCutsOnlyTheTailOfAFastBatch(t *testing.T) {
+	rec := &scriptedRecorder{delay: 40 * time.Millisecond}
+	n := NewWithSenders(quiet(), nil, &stubSender{name: "ntfy"})
+	n.SetRecorder(rec)
+	n.recBatchTimeout = 100 * time.Millisecond
+	const size = 10 // 10 x 40ms is far longer than the 100ms budget
+	n.RecordHeld(context.Background(), heldBatch(size)...)
+	if err := n.FlushRecords(context.Background()); err != nil {
+		t.Fatalf("FlushRecords = %v", err)
+	}
+	attempted, stored := rec.counts()
+	if stored == 0 || stored >= size {
+		t.Fatalf("stored %d records, want some but not all %d", stored, size)
+	}
+	if got := n.RecordsDropped(); got != int64(size-stored) {
+		t.Fatalf("RecordsDropped = %d, want %d (every record not stored)", got, size-stored)
+	}
+	// The record the budget cut short is tried and fails; the ones after it
+	// are not tried at all.
+	if attempted >= size {
+		t.Fatalf("attempted %d records, want fewer than %d: the budget should end the batch", attempted, size)
+	}
+}
