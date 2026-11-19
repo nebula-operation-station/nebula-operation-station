@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -203,6 +204,9 @@ func validateItem(class string, it nosclient.WorkItem) error {
 	if !isDigest(it.Digest) {
 		return errors.New("item digest")
 	}
+	if it.Kind != "question" && (it.Question != "" || len(it.Facts) > 0) {
+		return errors.New("item carries question data")
+	}
 	switch it.Kind {
 	case "fix":
 		if class != string(prompt.ClassLab) || it.Group == nil || it.Fleet != nil {
@@ -226,9 +230,35 @@ func validateItem(class string, it nosclient.WorkItem) error {
 			return errors.New("summary item shape")
 		}
 		return nil
+	case "question":
+		return validateQuestion(class, it)
 	default:
 		return errors.New("item kind")
 	}
+}
+
+// validateQuestion checks a question item: its text and fleet counts, and,
+// in class lab only, the facts of the hosts it names. Facts never carry
+// findings or steps (ADR 0016 D11).
+func validateQuestion(class string, it nosclient.WorkItem) error {
+	if it.Question == "" || len(it.Question) > prompt.MaxQuestionBytes || it.Group != nil || it.Fleet == nil {
+		return errors.New("question shape")
+	}
+	if class == string(prompt.ClassExternal) && len(it.Facts) > 0 {
+		return errors.New("question facts outside class lab")
+	}
+	if len(it.Facts) > prompt.MaxFactHosts {
+		return errors.New("question facts too many")
+	}
+	for _, f := range it.Facts {
+		if len(f.Ports) > prompt.MaxFactPorts {
+			return errors.New("question facts ports too many")
+		}
+		if f.Host.ID == "" || !printableASCII(f.Host.ID) || len(f.Findings) > 0 || len(f.Candidates) > 0 {
+			return errors.New("question facts shape")
+		}
+	}
+	return nil
 }
 
 func isDigest(s string) bool {
@@ -332,7 +362,13 @@ func (r *runner) loop(ctx context.Context, items []nosclient.WorkItem) {
 		r.refuse(RefusedRateLimited)
 		return
 	}
-	for _, it := range items {
+	// Admin questions run before fix items and share their budget (ADR 0016
+	// D11); the order within each kind is the order of the work list.
+	ordered := slices.Clone(items)
+	slices.SortStableFunc(ordered, func(a, b nosclient.WorkItem) int {
+		return kindRank(a.Kind) - kindRank(b.Kind)
+	})
+	for _, it := range ordered {
 		if ctx.Err() != nil {
 			r.refuse(RefusedTimeout)
 			return
@@ -351,6 +387,14 @@ func (r *runner) loop(ctx context.Context, items []nosclient.WorkItem) {
 			return
 		}
 	}
+}
+
+// kindRank orders work items: questions first, then the rest.
+func kindRank(kind string) int {
+	if kind == "question" {
+		return 0
+	}
+	return 1
 }
 
 // item handles one work item with one call and at most one retry. It reports
@@ -377,7 +421,12 @@ func (r *runner) item(ctx context.Context, it nosclient.WorkItem) bool {
 		r.log.Warn("ops agent: prompt refused", "kind", it.Kind)
 		return false
 	}
-	for attempt := 0; attempt < MaxAttemptsPerItem; attempt++ {
+	// A question gets exactly one call and no retry (ADR 0016 D11).
+	attempts := MaxAttemptsPerItem
+	if it.Kind == "question" {
+		attempts = 1
+	}
+	for attempt := 0; attempt < attempts; attempt++ {
 		if r.budget <= 0 {
 			r.refuse(RefusedRateLimited)
 			return true
@@ -475,9 +524,26 @@ func (r *runner) prompt(it nosclient.WorkItem) (prompt.Result, map[string]string
 		Operator: r.cfg.OperatorInstructions,
 	}
 	var keys map[string]string
-	if it.Kind == "summary" {
+	switch it.Kind {
+	case "summary":
 		in.Fleet = countsOf(*it.Fleet)
-	} else {
+	case "question":
+		in.Fleet = countsOf(*it.Fleet)
+		in.Question = it.Question
+		for _, f := range it.Facts {
+			in.Facts = append(in.Facts, prompt.Facts{
+				Host: prompt.Host{
+					Label:       f.Host.Label,
+					Environment: f.Host.Environment,
+					Criticality: f.Host.Criticality,
+					Exposure:    f.Exposure,
+					Ports:       portList(f.Ports),
+				},
+				Counts: *countsOf(f.Counts),
+			})
+		}
+		in.Docs, keys = r.docs(searchQuery(it.Question))
+	default:
 		g := it.Group
 		in.Group = countsOf(g.Counts)
 		in.Host = &prompt.Host{
@@ -494,20 +560,29 @@ func (r *runner) prompt(it nosclient.WorkItem) (prompt.Result, map[string]string
 		for _, c := range g.Candidates {
 			in.Candidates = append(in.Candidates, prompt.Candidate{Key: c.Key, Label: c.Label})
 		}
-		in.Docs, keys = r.docs(g)
+		query := ""
+		if len(g.Findings) > 0 {
+			query = g.Findings[0].Package
+		}
+		in.Docs, keys = r.docs(query)
 	}
 	res, err := prompt.Build(in)
 	return res, keys, err
 }
 
-// docs picks up to MaxDocChunks documentation chunks for a group and gives
-// them opaque keys d1, d2, …; keys maps each key back to the chunk ID.
-func (r *runner) docs(g *nosclient.Group) ([]prompt.Doc, map[string]string) {
+// docs picks up to MaxDocChunks documentation chunks for a query (a package
+// name for a group, the question for an admin question) and gives them opaque
+// keys d1, d2, …; keys maps each key back to the chunk ID.
+func (r *runner) docs(query string) ([]prompt.Doc, map[string]string) {
 	keys := map[string]string{}
-	if r.d.Docs == nil || len(g.Findings) == 0 {
+	if r.d.Docs == nil || query == "" {
 		return nil, keys
 	}
-	hits, err := r.d.Docs.Search(g.Findings[0].Package)
+	hits, err := r.d.Docs.Search(query)
+	// The error names no question text; it says only why the query was refused.
+	if err != nil {
+		r.log.Warn("ops agent: documentation search failed", "error", err)
+	}
 	if err != nil {
 		return nil, keys
 	}
@@ -526,18 +601,46 @@ func (r *runner) docs(g *nosclient.Group) ([]prompt.Doc, map[string]string) {
 	return out, keys
 }
 
+// searchQuery turns an admin question into a query the help index accepts: its
+// words in order, cut before helpsearch.MaxQueryBytes or helpsearch.MaxQueryTokens.
+// The question is cut, not refused, so a long question still finds its docs.
+// Words are split the way helpsearch splits tokens, so each word is at most one
+// token and the word count bounds the token count.
+func searchQuery(q string) string {
+	words := strings.FieldsFunc(q, func(r rune) bool {
+		return !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '.' || r == '_')
+	})
+	var b strings.Builder
+	tokens := 0
+	for _, w := range words {
+		if tokens == helpsearch.MaxQueryTokens || b.Len()+len(w)+1 > helpsearch.MaxQueryBytes {
+			break
+		}
+		if tokens > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(w)
+		tokens++
+	}
+	return b.String()
+}
+
 func validChunk(c helpdocs.Chunk) bool {
 	return c.ID != "" && len(c.Text) <= prompt.MaxDocTextBytes && len(c.ID) <= 128
 }
 
 // check parses an answer and builds the note for the item.
 func (r *runner) check(it nosclient.WorkItem, content string, docs map[string]string) (nosclient.Draft, error) {
-	if it.Kind == "summary" {
+	if it.Kind == "summary" || it.Kind == "question" {
 		text, cites, err := parseText(content, docs)
 		if err != nil {
 			return nosclient.Draft{}, err
 		}
-		return nosclient.Draft{Kind: "summary", Ref: it.Ref, Digest: it.Digest, Text: text, Citations: cites}, nil
+		kind := "summary"
+		if it.Kind == "question" {
+			kind = "answer"
+		}
+		return nosclient.Draft{Kind: kind, Ref: it.Ref, Digest: it.Digest, Text: text, Citations: cites}, nil
 	}
 	cands := map[string]nosclient.Candidate{}
 	keys := map[string]bool{}
@@ -576,7 +679,7 @@ func portList(ps []nosclient.Port) []string {
 
 // schemaFor returns the JSON schema the endpoint is asked for.
 func schemaFor(kind string) []byte {
-	if kind == "summary" {
+	if kind == "summary" || kind == "question" {
 		return []byte(textSchema)
 	}
 	return []byte(fixSchema)
