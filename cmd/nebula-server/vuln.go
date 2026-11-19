@@ -244,18 +244,35 @@ func (v *vulnService) runEvents(ctx context.Context) {
 // vulnstore.MaxListFindings findings; the notifier de-duplicates and
 // rate-limits).
 func (v *vulnService) runAlerts(ctx context.Context, runID string) {
+	v.pageRun(ctx, runID, v.store.RunAlertFindingsAfter, func(fs []vulnstore.Finding) {
+		v.notifier.Findings(ctx, fs)
+	})
+	// The ops agent trigger (ADR 0016 D3) reads the high findings in its own
+	// pass; it sends no vuln.* message.
+	v.pageRun(ctx, runID, v.store.RunHighFindingsAfter, func(fs []vulnstore.Finding) {
+		v.notifier.TriggerFindings(fs)
+	})
+}
+
+// runRead is one paged read of a run's findings (vulnstore's RunAlertFindingsAfter
+// or RunHighFindingsAfter).
+type runRead func(ctx context.Context, runID string, after *vulnfinding.Key, limit int) ([]vulnstore.Finding, error)
+
+// pageRun reads every page of read for runID in key order and passes each page
+// to deliver. A read error is logged and ends the pass.
+func (v *vulnService) pageRun(ctx context.Context, runID string, read runRead, deliver func([]vulnstore.Finding)) {
 	var after *vulnfinding.Key
-	for read := 0; read < vulnstore.MaxListFindings; {
-		fs, err := v.store.RunAlertFindingsAfter(ctx, runID, after, maxVulnAlertScan)
+	for n := 0; n < vulnstore.MaxListFindings; {
+		fs, err := read(ctx, runID, after, maxVulnAlertScan)
 		if err != nil {
 			v.log.Error("vulnerability alerts: read run findings", "error", err)
 			return
 		}
-		v.notifier.Findings(ctx, fs)
+		deliver(fs)
 		if len(fs) < maxVulnAlertScan {
 			return
 		}
-		read += len(fs)
+		n += len(fs)
 		k := fs[len(fs)-1].Key
 		after = &k
 	}

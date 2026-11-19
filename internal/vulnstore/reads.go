@@ -83,6 +83,30 @@ func (s *Store) RunAlertFindingsAfter(ctx context.Context, runID string, after *
 		ORDER BY finding_key LIMIT ?`, args...)
 }
 
+// RunHighFindingsAfter returns at most limit open findings that run runID
+// wrote last (state_run_seq) and whose episode peak tier is high: the
+// candidates for the ops agent trigger (ADR 0016 D3). It is its own read so
+// that RunAlertFindingsAfter, which feeds the vuln.* messages, keeps exactly
+// its candidates. Paging works as in RunAlertFindingsAfter. ErrRunNotFound
+// for an unknown run.
+func (s *Store) RunHighFindingsAfter(ctx context.Context, runID string, after *vulnfinding.Key, limit int) ([]Finding, error) {
+	if limit <= 0 || limit > MaxListFindings {
+		return nil, fmt.Errorf("vulnstore: run high findings: limit %d: %w", limit, ErrInvalidInput)
+	}
+	r, err := loadRun(ctx, s.db, runID)
+	if err != nil {
+		return nil, fmt.Errorf("vulnstore: run high findings: %w", err)
+	}
+	where, args := `state = 'open' AND state_run_seq = ? AND episode_peak_tier = ?`, []any{r.seq, int(TierHigh)}
+	if after != nil {
+		where += ` AND finding_key > ?`
+		args = append(args, after[:])
+	}
+	args = append(args, limit)
+	return queryFindings(ctx, s.db, `SELECT `+findingColumns+` FROM vuln_findings WHERE `+where+
+		` ORDER BY finding_key LIMIT ?`, args...)
+}
+
 // MaxSubjectStatuses bounds one SubjectStatuses read.
 const MaxSubjectStatuses = 5_000
 
