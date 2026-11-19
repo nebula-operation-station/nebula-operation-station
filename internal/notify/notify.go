@@ -64,7 +64,10 @@ type Event struct {
 	// body is the whole text of a daily digest (see NewDailyDigest). Empty
 	// for every other kind.
 	body string
-	Time time.Time
+	// title is the title line of a fixed-template event that has its own
+	// wording (opsagent.suggestion_new). Empty for every other kind.
+	title string
+	Time  time.Time
 }
 
 // Vulnerability and digest kinds. internal/vulnnotify sends them and imports
@@ -111,11 +114,14 @@ func clean(s string, limit int) string {
 func (e Event) cleaned() Event {
 	return Event{Kind: clean(e.Kind, 64), Host: clean(e.Host, 64), State: clean(e.State, 64), Reason: clean(e.Reason, maxField),
 		ExecutionID: clean(e.ExecutionID, 128), link: clean(e.link, maxIntegrityLink), logLink: e.logLink,
-		body: e.body, Time: e.Time.UTC().Truncate(time.Second)}
+		body: e.body, title: e.title, Time: e.Time.UTC().Truncate(time.Second)}
 }
 
 // Title is a short summary line.
 func (e Event) Title() string {
+	if e.title != "" {
+		return e.title
+	}
 	if t, ok := integrityTitle(e); ok {
 		return t
 	}

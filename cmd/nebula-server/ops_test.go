@@ -77,7 +77,7 @@ func TestOpsNotesFileIsPrivateAndUnknownRefsAreNotSuggestions(t *testing.T) {
 func TestNoOpsTokenMeansNoOpsAPI(t *testing.T) {
 	cfg := serverconfig.APIConfig{Enabled: true, Tokens: []serverconfig.APIToken{
 		{Name: "reader", SHA256: "00", Scopes: []string{serverconfig.ScopeInventoryRead}}}}
-	h, err := newOpsAPI(cfg, nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h, err := newOpsAPI(cfg, nil, nil, nil, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
