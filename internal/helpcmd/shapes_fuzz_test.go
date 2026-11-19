@@ -17,10 +17,15 @@ const fuzzMaxBody = 8 << 10
 
 // FuzzShapes checks the properties of the shape builder (ADR 0014 D4,
 // "Shapes") on arbitrary input: no panic, the same input gives the same
-// result, no shape holds a line break, no shape holds a control character, and
-// no shape holds a word of a compound construct keyword (so no shape begins
-// with one of for, while, until, if, case or select, or contains done, fi or
-// esac as a word either).
+// result, no shape holds a line break or a control character, no shape holds a
+// compound keyword in command position or a heredoc operator (the lexer of the
+// scanner decides both), and every shape and exclusion lies in the block.
+//
+// The lines inside a construct or heredoc body are checked by an oracle that
+// does not run the scanner: TestShapesConstructBodiesNeverShape builds blocks
+// whose body lines are known by construction. The fuzz target cannot know the
+// expected result of arbitrary input, so it checks the shapes it returns
+// against the lexer's view of each shape text.
 func FuzzShapes(f *testing.F) {
 	seeds := []struct{ info, body string }{
 		{"", ""},
@@ -34,6 +39,13 @@ func FuzzShapes(f *testing.F) {
 		{"", "echo \"abc"},
 		{"", "echo a \\"},
 		{"", "echo\tx\r"},
+		{"", "for f in *; do\n  echo done\n  echo ' fi '\n  rm \"$f\"\ndone"},
+		{"", "ls | while read l; do\n  rm \"$l\"\ndone\nnebula status"},
+		{"", "cat <<A <<B\na\nA\nb\nB\nnebula status"},
+		{"", "cat <<\"E\"OF\nx\nEOF\necho"},
+		{"", "# note \\\nnebula status"},
+		{"", "case $x in\n  done) rm;;\nesac\necho"},
+		{"", "x=$(\nfor f in a; do\ndone\n)"},
 	}
 	for _, s := range seeds {
 		f.Add(s.info, s.body)
@@ -59,10 +71,8 @@ func FuzzShapes(f *testing.F) {
 			if s.Line < 1 || s.Line > lines {
 				t.Fatalf("Shapes(%q, %q) shape %q has line %d, block has %d lines", info, body, s.Text, s.Line, lines)
 			}
-			for _, w := range words(s.Text) {
-				if openers[w] || closers[w] {
-					t.Fatalf("Shapes(%q, %q) shape %q holds compound keyword %q", info, body, s.Text, w)
-				}
+			if got := analyze(lexLine(s.Text).toks); len(got.events) != 0 || len(got.docs) != 0 {
+				t.Fatalf("Shapes(%q, %q) shape %q holds a compound keyword or a heredoc operator: %+v", info, body, s.Text, got)
 			}
 		}
 		for _, e := range set.Excluded {

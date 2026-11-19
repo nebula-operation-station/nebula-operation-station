@@ -41,10 +41,11 @@ func TestShapesRuleOneInfoString(t *testing.T) {
 		{"bash", "bash", true},
 		{"shell", "shell", true},
 		{"console", "console", true},
-		{"bash with a second word", "bash title=x", true},
+		{"bash with a second word is not bash", "bash title=x", false},
 		{"json", "json", false},
 		{"yaml", "yaml", false},
 		{"json with a shell word after it", "json sh", false},
+		{"sh with a second word is not sh", "sh title=x", false},
 		{"upper-case SH is another tag", "SH", false},
 		{"text", "text", false},
 	}
@@ -474,6 +475,212 @@ func TestShapesExclusionReasons(t *testing.T) {
 			}
 			t.Fatalf("Shapes(%q) = %+v, want a reason %q", tt.body, set, tt.reason)
 		})
+	}
+}
+
+// TestShapesKeywordsOnlyInCommandPosition checks that a compound keyword is a
+// keyword only where a command starts (ADR 0014 D4, rule 3). A closer used as
+// an argument, a quoted keyword and a keyword inside a word are plain words:
+// those lines are shapes. A keyword after a pipe or a group opens a construct.
+func TestShapesKeywordsOnlyInCommandPosition(t *testing.T) {
+	tests := []struct {
+		name   string
+		body   string
+		shapes []Shape
+		excl   []int
+	}{
+		{"echo done is a shape", "echo done", []Shape{{1, "echo done"}}, nil},
+		{"grep done log is a shape", "grep done log", []Shape{{1, "grep done log"}}, nil},
+		{"quoted for in echo is a shape", "echo 'a for b'", []Shape{{1, "echo 'a for b'"}}, nil},
+		{"keyword inside a word is a shape", "echo forx fi_ esacs", []Shape{{1, "echo forx fi_ esacs"}}, nil},
+		{"pipe into while opens a construct", "ls | while read l; do\n  rm \"$l\"\ndone\nnebula status",
+			[]Shape{{4, "nebula status"}}, []int{1, 2, 3}},
+		{"group opens a for loop", "{ for f in a; do\n  rm x\ndone; }\nnebula status",
+			[]Shape{{4, "nebula status"}}, []int{1, 2, 3}},
+		{"command substitution with a loop", "x=$(\nfor f in a; do\n  rm \"$f\"\ndone\n)\nnebula status",
+			[]Shape{{1, "x=$("}, {5, ")"}, {6, "nebula status"}}, []int{2, 3, 4}},
+		{"if after and-list opens a construct", "true && if x; then\n  rm y\nfi\nnebula status",
+			[]Shape{{4, "nebula status"}}, []int{1, 2, 3}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			set := Shapes("", tt.body)
+			if got := excludedLines(set); !equalInts(got, tt.excl) {
+				t.Fatalf("excluded lines %v, want %v (set %+v)", got, tt.excl, set)
+			}
+			if len(set.Shapes) != len(tt.shapes) {
+				t.Fatalf("shapes %+v, want %+v", set.Shapes, tt.shapes)
+			}
+			for i, want := range tt.shapes {
+				if got := set.Shapes[i]; got.Line != want.Line || normalizeSpaces(got.Text) != normalizeSpaces(want.Text) {
+					t.Fatalf("shape %d = %+v, want %+v", i, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestShapesCloserInsideLoopBody checks the leak of a closing word used as a
+// plain word in a loop body: the body lines after it stay excluded.
+func TestShapesCloserInsideLoopBody(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"echo done", "for f in a; do\n  echo done\n  rm \"$f\"\ndone\nnebula status"},
+		{"quoted fi", "for f in a; do\n  echo ' fi '\n  rm \"$f\"\ndone\nnebula status"},
+		{"grep done in an if", "for f in a; do\n  if grep done \"$f\"; then\n    echo esac\n  fi\n  rm \"$f\"\ndone\nnebula status"},
+		{"case pattern done", "case $x in\n  done) rm -r y;;\n  *) rm z;;\nesac\nnebula status"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			set := Shapes("", tt.body)
+			if len(set.Shapes) != 1 || set.Shapes[0].Text != "nebula status" {
+				t.Fatalf("shapes %+v, want only nebula status", set.Shapes)
+			}
+			lines := strings.Count(tt.body, "\n") + 1
+			if got := excludedLines(set); len(got) != lines-1 {
+				t.Fatalf("excluded lines %v, want every line but the last", got)
+			}
+		})
+	}
+}
+
+// TestShapesHeredocs checks heredocs: several "<<" on one line take their
+// bodies in order, a quoted delimiter with trailing text is read per POSIX
+// quote removal, and a here-string excludes its line without a body.
+func TestShapesHeredocs(t *testing.T) {
+	tests := []struct {
+		name   string
+		body   string
+		shapes []Shape
+		excl   []int
+	}{
+		{"two heredocs on one line", "cat <<A <<B\na\nA\nb\nB\nnebula status",
+			[]Shape{{6, "nebula status"}}, []int{1, 2, 3, 4, 5}},
+		{"second heredoc starts after the first one ends", "cat <<A <<B\na\nB\nA\nnebula status",
+			nil, []int{1, 2, 3, 4, 5}},
+		{"quoted delimiter with trailing text", "cat <<\"E\"OF\nx\nEOF\nnebula status",
+			[]Shape{{4, "nebula status"}}, []int{1, 2, 3}},
+		{"single-quoted delimiter with trailing text", "cat <<'E'OF\nx\nEOF\nnebula status",
+			[]Shape{{4, "nebula status"}}, []int{1, 2, 3}},
+		{"heredoc inside a loop, delimiter line closes the heredoc only",
+			"for f in a; do\n  cat <<EOF\ndone\nEOF\n  rm \"$f\"\ndone\nnebula status",
+			[]Shape{{7, "nebula status"}}, []int{1, 2, 3, 4, 5, 6}},
+		{"here-string in a loop", "for f in a; do\n  grep x <<< \"$f\"\ndone\nnebula status",
+			[]Shape{{4, "nebula status"}}, []int{1, 2, 3}},
+		{"empty delimiter excludes to the end", "cat <<\"\"\n\nnebula status",
+			nil, []int{1, 2, 3}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			set := Shapes("", tt.body)
+			if got := excludedLines(set); !equalInts(got, tt.excl) {
+				t.Fatalf("excluded lines %v, want %v (set %+v)", got, tt.excl, set)
+			}
+			if len(set.Shapes) != len(tt.shapes) {
+				t.Fatalf("shapes %+v, want %+v", set.Shapes, tt.shapes)
+			}
+			for i, want := range tt.shapes {
+				if got := set.Shapes[i]; got.Line != want.Line || normalizeSpaces(got.Text) != normalizeSpaces(want.Text) {
+					t.Fatalf("shape %d = %+v, want %+v", i, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestShapesCommentBackslashDoesNotJoin checks that a backslash inside a
+// comment does not continue the line: the next command is a shape of its own.
+func TestShapesCommentBackslashDoesNotJoin(t *testing.T) {
+	tests := []struct {
+		name   string
+		body   string
+		shapes []Shape
+	}{
+		{"comment line ending in a backslash", "# note \\\nnebula status", []Shape{{2, "nebula status"}}},
+		{"trailing comment ending in a backslash", "echo a # c \\\nb", []Shape{{1, "echo a"}, {2, "b"}}},
+		{"escaped backslash at the end is not a continuation", "echo a \\\\\nb", []Shape{{1, "echo a \\\\"}, {2, "b"}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			set := Shapes("", tt.body)
+			if len(set.Excluded) != 0 {
+				t.Fatalf("excluded %+v, want none", set.Excluded)
+			}
+			if len(set.Shapes) != len(tt.shapes) {
+				t.Fatalf("shapes %+v, want %+v", set.Shapes, tt.shapes)
+			}
+			for i, want := range tt.shapes {
+				if got := set.Shapes[i]; got.Line != want.Line || normalizeSpaces(got.Text) != normalizeSpaces(want.Text) {
+					t.Fatalf("shape %d = %+v, want %+v", i, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestShapesUnbalancedQuoteEndsReadableBlock checks that after a line with an
+// unbalanced quote the quoting state is unknown, so every later line is
+// excluded with the reason of the quote.
+func TestShapesUnbalancedQuoteEndsReadableBlock(t *testing.T) {
+	set := Shapes("", "echo \"a\nnebula status\nnebula pve list")
+	if len(set.Shapes) != 0 {
+		t.Fatalf("shapes %+v, want none after an unbalanced quote", set.Shapes)
+	}
+	if got := excludedLines(set); !equalInts(got, []int{1, 2, 3}) {
+		t.Fatalf("excluded lines %v, want [1 2 3]", got)
+	}
+	for _, e := range set.Excluded {
+		if e.Reason != reasonUnbalancedQuote {
+			t.Fatalf("exclusion %+v, want reason %q", e, reasonUnbalancedQuote)
+		}
+	}
+}
+
+// TestShapesConstructBodiesNeverShape is the oracle of the construct rules: it
+// builds blocks from a known opener, a known body and a known closer. The body
+// lines are never shapes, whatever words they hold, and the line after the
+// closer is the only shape. The expected result follows from how the block is
+// built, not from the scanner.
+func TestShapesConstructBodiesNeverShape(t *testing.T) {
+	type construct struct{ open, close string }
+	constructs := []construct{
+		{"for x in a; do", "done"},
+		{"ls | while read l; do", "done"},
+		{"{ for x in a; do", "done; }"},
+		{"x=$(for x in a; do", "done)"},
+		{"if true; then", "fi"},
+		{"case $x in", "esac"},
+	}
+	bodies := [][]string{
+		{"echo done"},
+		{"echo ' fi '", "rm \"$f\""},
+		{"grep done log", "echo esac"},
+		{"cat <<EOF", "done", "EOF"},
+		{"for y in b; do", "echo y", "done"},
+		{"echo \"done\" # fi"},
+	}
+	for _, c := range constructs {
+		for bi, body := range bodies {
+			lines := append([]string{c.open}, body...)
+			lines = append(lines, c.close, "nebula status")
+			block := strings.Join(lines, "\n")
+			t.Run(c.open+" body "+string(rune('a'+bi)), func(t *testing.T) {
+				set := Shapes("", block)
+				last := len(lines)
+				if len(set.Shapes) != 1 || set.Shapes[0].Line != last || set.Shapes[0].Text != "nebula status" {
+					t.Fatalf("block %q shapes %+v, want only nebula status at line %d", block, set.Shapes, last)
+				}
+				var want []int
+				for k := 1; k < last; k++ {
+					want = append(want, k)
+				}
+				if got := excludedLines(set); !equalInts(got, want) {
+					t.Fatalf("block %q excluded lines %v, want %v", block, got, want)
+				}
+			})
+		}
 	}
 }
 

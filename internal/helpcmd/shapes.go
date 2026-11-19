@@ -27,15 +27,6 @@ const (
 	reasonBlockTooLong    = "block too long"
 )
 
-// openers are the words that start a compound construct (ADR 0014 D4, rule 3).
-var openers = map[string]bool{
-	"for": true, "while": true, "until": true, "if": true, "case": true, "select": true,
-}
-
-// closers are the words that end one. done closes for, while, until and
-// select; fi closes if; esac closes case.
-var closers = map[string]bool{"done": true, "fi": true, "esac": true}
-
 // Shape is one logical command line of a shell code block, a doc example for
 // the V3 matching (ADR 0014 D4, "Shapes").
 type Shape struct {
@@ -72,31 +63,45 @@ type ShapeSet struct {
 
 // logicalLine is one logical line before the rules of ADR 0014 D4 are applied.
 type logicalLine struct {
-	line int    // 1-based first physical line
-	raw  string // continuations joined, common indentation removed; keeps comments
-	text string // raw without a trailing comment, trimmed; "" when raw is only a comment
-	prob string // reason the line cannot be a shape, "" when it can
+	line   int    // 1-based first physical line
+	raw    string // continuations joined, common indentation removed; keeps comments
+	joined bool   // the logical line holds more than one physical line
+	prob   string // reason set by the joining (a continuation at the end of the block)
 }
 
 // Shapes builds the shapes of one fenced code block (ADR 0014 D4). info is the
 // info string of the fence and body the code between the fences, lines joined
-// with "\n". Only a block whose info string starts with the word "", sh, bash,
-// shell or console gives shapes; any other block gives an empty ShapeSet.
+// with "\n". Only a block whose info string is exactly empty, "sh", "bash",
+// "shell" or "console" gives shapes; any other block gives an empty ShapeSet.
 //
-// The rules, in order: remove the common indentation; join a line ending in a
-// backslash with the next line, the backslash and the line break becoming one
-// space; drop blank lines and lines starting with "#"; remove a trailing
-// comment, that is a "#" starting a word outside quotes (Tokenize decides
-// quoting). A line that starts with a compound construct keyword (for, while,
-// until, if, case, select), or any line that holds one of these or done, fi,
-// esac as a word, belongs to a construct that runs to its closing word, with
-// the nesting counted; a line with a heredoc ("<<") and its body up to the
-// delimiter is excluded too. A construct or heredoc that is not closed excludes
-// everything to the end of the block (fail closed).
+// The rules, in order: remove the common indentation; join a line ending in an
+// unmasked backslash with the next line, the backslash and the line break
+// becoming one space (a backslash inside a comment or quotes does not join);
+// drop blank lines and lines starting with "#" outside a construct or heredoc
+// body; remove a trailing comment, that is a "#" starting a word outside quotes
+// (the lexer decides quoting).
 //
-// A line the rules do not settle is excluded, not guessed: an unbalanced quote,
-// a tab or other control character inside the line, a line longer than
-// MaxCommandBytes, and a continuation at the end of the block.
+// A compound keyword (for, while, until, if, case, select) counts only in
+// command position: the first word of a line, or a word after one of ; ;; &
+// && | || ( ` or after do, then, else, elif, {, ! or time. A quoted word or a
+// keyword that is an argument ("echo done", "grep done log") is a plain word.
+// Such a keyword opens a construct that runs to its closing word (done for
+// for, while, until and select; fi for if; esac for case), nesting counted; a
+// closer that is directly followed by ")" inside a case is a pattern, not a
+// closer. Every line of the construct is excluded, with the lines that open
+// and close it on the same line counted as one line.
+//
+// A heredoc ("<<" or "<<-") excludes its line; its body is excluded up to the
+// delimiter, which is read per POSIX quote removal ("<<\"E\"OF" has the
+// delimiter EOF). Several heredocs on one line take their bodies in order, and
+// a "<<<" here-string excludes its line but has no body. A construct or heredoc
+// that is not closed excludes everything to the end of the block (fail closed).
+//
+// A line the rules do not settle is excluded, not guessed: an unbalanced quote
+// (every later line of the block is then excluded too, since the quoting state
+// is unknown), a delimiter that cannot be read, a tab or other control character
+// inside the line, a line longer than MaxCommandBytes, and a continuation at the
+// end of the block.
 func Shapes(info, body string) ShapeSet {
 	var set ShapeSet
 	if !isShellBlock(info) {
@@ -106,21 +111,19 @@ func Shapes(info, body string) ShapeSet {
 		set.Excluded = append(set.Excluded, Excluded{Line: 1, Text: "", Reason: reasonBlockTooLong})
 		return set
 	}
-	lines := joinContinuations(strings.Split(body, "\n"), &set)
-	lines = dropBlankAndComment(lines)
-	scan(lines, &set)
+	s := scanner{lines: joinContinuations(strings.Split(body, "\n"))}
+	s.run()
+	set.Shapes = s.shapes
+	set.Excluded = s.excl
 	return set
 }
 
-// isShellBlock reports whether the first word of the info string is one of the
-// tags of ADR 0014 D4, rule 1: an empty info string, sh, bash, shell or console.
+// isShellBlock reports whether the info string is one of the tags of ADR 0014
+// D4, rule 1: exactly empty, sh, bash, shell or console. A second word, as in
+// "bash title=x", is not one of them.
 func isShellBlock(info string) bool {
-	fields := strings.Fields(info)
-	if len(fields) == 0 {
-		return true
-	}
-	switch fields[0] {
-	case "sh", "bash", "shell", "console":
+	switch strings.TrimSpace(info) {
+	case "", "sh", "bash", "shell", "console":
 		return true
 	}
 	return false
@@ -148,87 +151,82 @@ func commonIndent(phys []string) string {
 	return common
 }
 
-// joinContinuations removes the common indentation and joins every line that
-// ends in a backslash with the next line. The backslash and the line break
-// become one space. A continuation that runs to the end of the block is
-// excluded, since the command is then not known.
-func joinContinuations(phys []string, set *ShapeSet) []logicalLine {
+// joinContinuations removes the common indentation and joins every physical
+// line that continues into the next one (see continues) with that line. The
+// backslash and the line break become one space. A continuation that runs to
+// the end of the block becomes a line with the reason reasonContinuation, since
+// the command is then not known.
+func joinContinuations(phys []string) []logicalLine {
 	common := commonIndent(phys)
 	var out []logicalLine
 	var acc strings.Builder
 	start := 0
 	open := false
+	multi := false
 	for n, p := range phys {
 		p = strings.TrimPrefix(p, common)
 		if !open {
 			start = n + 1
 			acc.Reset()
+			multi = false
 		} else {
 			acc.WriteByte(' ')
+			multi = true
 		}
-		if strings.HasSuffix(p, `\`) {
+		if continues(p) {
 			acc.WriteString(p[:len(p)-1])
 			open = true
 			continue
 		}
 		open = false
 		acc.WriteString(p)
-		out = append(out, logicalLine{line: start, raw: acc.String()})
+		out = append(out, logicalLine{line: start, raw: acc.String(), joined: multi})
 	}
 	if open {
-		set.Excluded = append(set.Excluded, Excluded{Line: start, Text: acc.String(), Reason: reasonContinuation})
+		out = append(out, logicalLine{line: start, raw: acc.String(), joined: multi, prob: reasonContinuation})
 	}
 	return out
 }
 
-// dropBlankAndComment removes the blank lines and the lines that start with
-// "#" (after spaces and tabs), removes a trailing comment from the others, and
-// records what keeps a line from being a shape.
-func dropBlankAndComment(in []logicalLine) []logicalLine {
-	out := in[:0]
-	for _, l := range in {
-		t := strings.TrimLeft(l.raw, " \t")
-		if t == "" || strings.HasPrefix(t, "#") {
-			continue
+// continues reports whether the physical line p ends in a backslash that joins
+// it with the next line: the backslash is not masked by another backslash, not
+// inside single quotes, and not inside a comment. Inside double quotes a
+// backslash at the end still joins, as in POSIX shells.
+func continues(p string) bool {
+	var quote byte
+	comment := false
+	for i := 0; i < len(p); i++ {
+		if comment {
+			return false
 		}
-		text, err := stripComment(t)
+		c := p[i]
 		switch {
-		case err != nil && isTooLong(err):
-			l.prob = reasonLineTooLong
-		case err != nil:
-			l.prob = reasonUnbalancedQuote
+		case quote == '\'':
+			if c == '\'' {
+				quote = 0
+			}
+		case c == '\\':
+			if i == len(p)-1 {
+				return quote != '\''
+			}
+			i++
+		case quote == '"':
+			if c == '"' {
+				quote = 0
+			}
+		case c == '\'' || c == '"':
+			quote = c
+		case c == '#' && (i == 0 || isBlankOrOperator(p[i-1])):
+			comment = true
 		}
-		l.text = strings.TrimRight(text, " ")
-		if l.prob == "" && containsControl(l.text) {
-			l.prob = reasonControl
-		}
-		out = append(out, l)
 	}
-	return out
+	return false
 }
 
-// stripComment removes a trailing comment from s. The comment starts at the
-// first token that begins with "#": Tokenize splits s, and a token starting
-// with "#" is a word outside quotes. Tokens are literal substrings of s that
-// are separated only by spaces, so the byte offset of each token is found by
-// skipping the spaces before it. An error of Tokenize is returned unchanged
-// and s is returned as it is.
-func stripComment(s string) (string, error) {
-	tokens, err := Tokenize(s)
-	if err != nil {
-		return s, err
-	}
-	pos := 0
-	for _, tok := range tokens {
-		for pos < len(s) && s[pos] == ' ' {
-			pos++
-		}
-		if strings.HasPrefix(tok, "#") {
-			return s[:pos], nil
-		}
-		pos += len(tok)
-	}
-	return s, nil
+// isBlankOrOperator reports whether c ends a word: a space, a tab or one of the
+// shell operator bytes.
+func isBlankOrOperator(c byte) bool {
+	return c == ' ' || c == '\t' || strings.IndexByte(";&|()<>`", c) >= 0
 }
 
 // containsControl reports whether s holds a byte below 0x20 or the byte 0x7f.
@@ -247,200 +245,448 @@ func isTooLong(err error) bool {
 	return errors.Is(err, ErrTooLong)
 }
 
-// words splits a logical line into the words that matter for the compound
-// constructs: the separators are spaces, tabs and the shell operators ; & | ( ).
-// Quotes are not removed, so a quoted keyword is not a keyword word.
-func words(s string) []string {
-	return strings.FieldsFunc(s, func(r rune) bool {
-		switch r {
-		case ' ', '\t', ';', '&', '|', '(', ')':
-			return true
-		}
-		return false
-	})
+// tokKind classifies a token of a shell line.
+type tokKind uint8
+
+const (
+	tokWord    tokKind = iota // a word, quotes and backslashes kept in text
+	tokSep                    // a command separator: ; ;; & && | || ( ) or a backquote
+	tokRedir                  // a redirection operator, its target is the next word
+	tokHeredoc                // << or <<-, its delimiter is the next word
+	tokHereStr                // <<<, a here-string, no body
+)
+
+// token is one token of a shell line.
+type token struct {
+	kind   tokKind
+	text   string // the word as written, or the operator
+	value  string // a word with quotes and backslashes removed
+	quoted bool   // the word holds a quote or a backslash
 }
 
-// keywordDelta returns the number of openers minus the number of closers among
-// the words of a line.
-func keywordDelta(ws []string) int {
-	d := 0
-	for _, w := range ws {
-		switch {
-		case openers[w]:
-			d++
-		case closers[w]:
-			d--
+// lexed is a shell line split into tokens. cut is the byte offset where a
+// trailing comment starts, or len of the line when there is none.
+type lexed struct {
+	toks []token
+	cut  int
+}
+
+// operatorAt returns the operator at the start of s and its kind, or "" when s
+// does not start with an operator.
+func operatorAt(s string) (string, tokKind) {
+	switch {
+	case strings.HasPrefix(s, "<<<"):
+		return "<<<", tokHereStr
+	case strings.HasPrefix(s, "<<-"):
+		return "<<-", tokHeredoc
+	case strings.HasPrefix(s, "<<"):
+		return "<<", tokHeredoc
+	case strings.HasPrefix(s, "&&"):
+		return "&&", tokSep
+	case strings.HasPrefix(s, "||"):
+		return "||", tokSep
+	case strings.HasPrefix(s, ";;"):
+		return ";;", tokSep
+	case strings.HasPrefix(s, ">>"), strings.HasPrefix(s, ">&"), strings.HasPrefix(s, ">|"),
+		strings.HasPrefix(s, "<&"), strings.HasPrefix(s, "<>"):
+		return s[:2], tokRedir
+	}
+	switch s[0] {
+	case ';', '&', '|', '(', ')', '`':
+		return s[:1], tokSep
+	case '<', '>':
+		return s[:1], tokRedir
+	}
+	return "", 0
+}
+
+// lexLine splits s into tokens. Spaces and tabs separate tokens, a "#" that
+// starts a token is a comment that ends the line, and quotes and backslashes
+// keep the characters they mask inside one word. It does not report errors:
+// the caller has checked the quoting with Tokenize. An unclosed quote takes
+// the rest of the line.
+func lexLine(s string) lexed {
+	var toks []token
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		if c == ' ' || c == '\t' {
+			i++
+			continue
+		}
+		if c == '#' {
+			return lexed{toks: toks, cut: i}
+		}
+		if op, kind := operatorAt(s[i:]); op != "" {
+			toks = append(toks, token{kind: kind, text: op})
+			i += len(op)
+			continue
+		}
+		w, n := lexWord(s[i:])
+		toks = append(toks, w)
+		i += n
+	}
+	return lexed{toks: toks, cut: len(s)}
+}
+
+// lexWord reads the word at the start of s, which begins with a character that
+// is neither a blank nor an operator, and returns it with its length in bytes.
+// Quote removal follows POSIX: single quotes keep everything, double quotes
+// keep everything except a backslash before one of "\$` and the quotes of the
+// word, and a backslash outside quotes masks the next byte.
+func lexWord(s string) (token, int) {
+	var val strings.Builder
+	quoted := false
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		if c == ' ' || c == '\t' {
+			break
+		}
+		if op, _ := operatorAt(s[i:]); op != "" {
+			break
+		}
+		switch c {
+		case '\'':
+			quoted = true
+			end := strings.IndexByte(s[i+1:], '\'')
+			if end < 0 {
+				val.WriteString(s[i+1:])
+				i = len(s)
+				continue
+			}
+			val.WriteString(s[i+1 : i+1+end])
+			i += end + 2
+		case '"':
+			quoted = true
+			i++
+			for i < len(s) && s[i] != '"' {
+				if s[i] == '\\' && i+1 < len(s) && strings.IndexByte("\"\\$`", s[i+1]) >= 0 {
+					val.WriteByte(s[i+1])
+					i += 2
+					continue
+				}
+				val.WriteByte(s[i])
+				i++
+			}
+			i++
+		case '\\':
+			quoted = true
+			if i+1 < len(s) {
+				val.WriteByte(s[i+1])
+			}
+			i += 2
+		default:
+			val.WriteByte(c)
+			i++
 		}
 	}
-	return d
-}
-
-// hasKeyword reports whether a word of the line is an opener or a closer.
-func hasKeyword(ws []string) bool {
-	for _, w := range ws {
-		if openers[w] || closers[w] {
-			return true
-		}
+	if i > len(s) {
+		i = len(s)
 	}
-	return false
+	return token{kind: tokWord, text: s[:i], value: val.String(), quoted: quoted}, i
 }
 
-// heredocOp describes the "<<" of a line.
+// kwEvent is a compound keyword in command position of a line.
+type kwEvent struct {
+	word    string // for, select, case, while, until, if, done, fi or esac
+	open    bool   // the word opens a construct
+	pattern bool   // a closer directly followed by ")": a case pattern or a subshell end
+}
+
+// heredocOp describes a "<<", "<<-" or "<<<" of a line.
 type heredocOp struct {
-	present bool   // the line contains "<<"
-	body    bool   // a heredoc with a body (not a here-string "<<<")
-	ok      bool   // the delimiter could be read
-	delim   string // the delimiter word, quotes removed
-	dash    bool   // "<<-": leading tabs of body and delimiter are ignored
+	body  bool   // a heredoc with a body (false for a here-string)
+	ok    bool   // the delimiter could be read
+	delim string // the delimiter word, quotes removed
+	dash  bool   // "<<-": leading tabs of the body and the delimiter are ignored
 }
 
-// parseHeredoc reads the first "<<" of s. A "<<<" is a here-string and has no
-// body. For a heredoc it reads the delimiter word: a word in single or double
-// quotes, a word after a backslash, or a plain word ending at a space or a
-// shell operator.
-func parseHeredoc(s string) heredocOp {
-	i := strings.Index(s, "<<")
-	if i < 0 {
-		return heredocOp{}
-	}
-	op := heredocOp{present: true}
-	if i+2 < len(s) && s[i+2] == '<' {
-		return op
-	}
-	op.body = true
-	p := i + 2
-	if p < len(s) && s[p] == '-' {
-		op.dash = true
-		p++
-	}
-	for p < len(s) && (s[p] == ' ' || s[p] == '\t') {
-		p++
-	}
-	if p >= len(s) {
-		return op
-	}
-	switch s[p] {
-	case '\'', '"':
-		end := strings.IndexByte(s[p+1:], s[p])
-		if end < 0 {
-			return op
-		}
-		op.delim = s[p+1 : p+1+end]
-	default:
-		if s[p] == '\\' {
-			p++
-		}
-		j := p
-		for j < len(s) && !strings.ContainsRune(" \t;&|()<>", rune(s[j])) {
-			j++
-		}
-		op.delim = s[p:j]
-	}
-	op.ok = op.delim != ""
-	return op
+// lineInfo is what the tokens of one line say about compound constructs and
+// heredocs.
+type lineInfo struct {
+	events []kwEvent
+	docs   []heredocOp
 }
 
-// endsHeredoc reports whether a line ends a heredoc body: it equals the
-// delimiter exactly, and with "<<-" it may have leading tabs.
-func endsHeredoc(raw string, op heredocOp) bool {
+// closers maps each closing word to the opening words it closes.
+var closers = map[string][]string{
+	"done": {"for", "while", "until", "select"},
+	"fi":   {"if"},
+	"esac": {"case"},
+}
+
+// analyze finds the compound keywords in command position and the heredoc
+// operators of a line. The start of a line is a command position, as are the
+// words after a separator and after the reserved words that take a command. A
+// redirection does not change the command position, and its target word is
+// not a keyword.
+func analyze(toks []token) lineInfo {
+	var info lineInfo
+	cmd := true
+	for k := 0; k < len(toks); k++ {
+		t := toks[k]
+		switch t.kind {
+		case tokSep:
+			cmd = true
+			continue
+		case tokRedir, tokHereStr:
+			if k+1 < len(toks) && toks[k+1].kind == tokWord {
+				k++
+			}
+			if t.kind == tokHereStr {
+				info.docs = append(info.docs, heredocOp{})
+			}
+			continue
+		case tokHeredoc:
+			op := heredocOp{body: true, dash: t.text == "<<-"}
+			if k+1 < len(toks) && toks[k+1].kind == tokWord {
+				k++
+				op.delim = toks[k].value
+				op.ok = op.delim != ""
+			}
+			info.docs = append(info.docs, op)
+			continue
+		}
+		if !cmd || t.quoted {
+			cmd = false
+			continue
+		}
+		// A keyword directly followed by ")" is a case pattern, and an opener
+		// is never one; a closer is marked so the scan can decide.
+		paren := k+1 < len(toks) && toks[k+1].kind == tokSep && toks[k+1].text == ")"
+		switch t.text {
+		case "for", "select", "case":
+			if !paren {
+				info.events = append(info.events, kwEvent{word: t.text, open: true})
+			}
+			cmd = false
+		case "while", "until", "if":
+			if !paren {
+				info.events = append(info.events, kwEvent{word: t.text, open: true})
+			}
+			cmd = true
+		case "do", "then", "else", "elif", "{", "!", "time":
+			cmd = true
+		case "done", "fi", "esac":
+			info.events = append(info.events, kwEvent{word: t.text, pattern: paren})
+			cmd = false
+		default:
+			cmd = false
+		}
+	}
+	return info
+}
+
+// endsHeredoc reports whether the logical line l ends the heredoc of op: it
+// equals the delimiter exactly, and with "<<-" it may have leading tabs. A
+// line that was joined from several physical lines never ends a heredoc, so a
+// backslash in a body fails closed.
+func endsHeredoc(l logicalLine, op heredocOp) bool {
+	if l.joined {
+		return false
+	}
+	raw := l.raw
 	if op.dash {
 		raw = strings.TrimLeft(raw, "\t")
 	}
 	return raw == op.delim
 }
 
-// findHeredocEnd returns the index of the line that ends the heredoc whose
-// body starts at from, or -1 when no line ends it.
-func findHeredocEnd(lines []logicalLine, from int, op heredocOp) int {
-	for m := from; m < len(lines); m++ {
-		if endsHeredoc(lines[m].raw, op) {
-			return m
-		}
-	}
-	return -1
+// pendingDoc is a heredoc whose body has not ended yet.
+type pendingDoc struct {
+	op   heredocOp
+	body []int // indices into scanner.excl of the body lines read so far
 }
 
-// constructEnd returns the index of the line that closes the compound construct
-// whose first line is start, and true. It counts openers and closers over the
-// lines and skips the bodies of heredocs. When the construct is not closed, it
-// returns the last line of the block and false.
-func constructEnd(lines []logicalLine, start int) (int, bool) {
-	depth := 0
-	for k := start; k < len(lines); k++ {
-		depth += keywordDelta(words(lines[k].text))
-		if op := parseHeredoc(lines[k].text); op.body {
-			if !op.ok {
-				return len(lines) - 1, false
-			}
-			m := findHeredocEnd(lines, k+1, op)
-			if m < 0 {
-				return len(lines) - 1, false
-			}
-			k = m
-		}
-		if depth <= 0 {
-			return k, true
-		}
-	}
-	return len(lines) - 1, false
+// scanner walks the logical lines in order and sorts each into a shape or an
+// exclusion. It keeps the open compound constructs and the pending heredocs,
+// so a line inside either is never read as a command.
+type scanner struct {
+	lines  []logicalLine
+	excl   []Excluded
+	shapes []Shape
+
+	stack      []string // open compound constructs, innermost last
+	inGroup    bool     // a construct is open or a line of one has been seen
+	groupStart int      // index of the first line of the group
+	groupFirst string   // the first opener of the group, "" when none
+	groupIdx   []int    // indices into excl of the group's lines; reasons set when it ends
+
+	pend   []pendingDoc
+	broken string // reason for every remaining line; "" while the block is readable
 }
 
-// scan walks the logical lines in order and sorts each into a shape or an
-// exclusion. The order of the checks matters: a construct consumes its own
-// heredocs, and a heredoc consumes its body, so no body line is read as a
-// command.
-func scan(lines []logicalLine, set *ShapeSet) {
-	exclude := func(l logicalLine, reason string) {
-		set.Excluded = append(set.Excluded, Excluded{Line: l.line, Text: l.text, Reason: reason})
+// run sorts every line of the block.
+func (s *scanner) run() {
+	for i, l := range s.lines {
+		s.line(i, l)
 	}
-	last := len(lines) - 1
-	for i := 0; i <= last; {
-		l := lines[i]
-		ws := words(l.text)
-		op := parseHeredoc(l.text)
-		switch {
-		case len(ws) > 0 && openers[ws[0]]:
-			end, closed := constructEnd(lines, i)
-			reason := "compound construct (" + ws[0] + ")"
-			if !closed {
-				reason = "unclosed compound construct (" + ws[0] + ")"
-			}
-			for k := i; k <= end; k++ {
-				exclude(lines[k], reason)
-			}
-			i = end + 1
-		case hasKeyword(ws):
-			exclude(l, reasonKeywordInLine)
-			i++
-		case op.present:
-			exclude(l, reasonHeredoc)
-			if !op.body {
-				i++
-				continue
-			}
-			if !op.ok {
-				for k := i + 1; k <= last; k++ {
-					exclude(lines[k], reasonHeredocNoDelim)
-				}
-				return
-			}
-			m := findHeredocEnd(lines, i+1, op)
-			if m < 0 {
-				for k := i + 1; k <= last; k++ {
-					exclude(lines[k], reasonHeredocOpen)
-				}
-				return
-			}
-			for k := i + 1; k <= m; k++ {
-				exclude(lines[k], reasonHeredocBody)
-			}
-			i = m + 1
-		case l.prob != "":
-			exclude(l, l.prob)
-			i++
-		default:
-			set.Shapes = append(set.Shapes, Shape{Line: l.line, Text: l.text})
-			i++
+	if s.inGroup {
+		s.endGroup(len(s.lines)-1, true)
+	}
+	for _, p := range s.pend {
+		for _, k := range p.body {
+			s.excl[k].Reason = reasonHeredocOpen
 		}
+	}
+}
+
+// exclude records an excluded line and returns its index in excl.
+func (s *scanner) exclude(l logicalLine, text, reason string) int {
+	s.excl = append(s.excl, Excluded{Line: l.line, Text: text, Reason: reason})
+	return len(s.excl) - 1
+}
+
+// line sorts one logical line.
+func (s *scanner) line(i int, l logicalLine) {
+	if s.broken != "" {
+		s.exclude(l, strings.TrimRight(l.raw, " "), s.broken)
+		return
+	}
+	if len(s.pend) > 0 {
+		p := &s.pend[0]
+		p.body = append(p.body, s.exclude(l, strings.TrimRight(l.raw, " "), reasonHeredocBody))
+		if endsHeredoc(l, p.op) {
+			s.pend = s.pend[1:]
+		}
+		return
+	}
+	t := strings.TrimLeft(l.raw, " \t")
+	if !s.inGroup && l.prob == "" && (t == "" || strings.HasPrefix(t, "#")) {
+		return
+	}
+	var prob string
+	unbalanced := false
+	if l.prob != "" {
+		prob = l.prob
+	} else if _, err := Tokenize(t); err != nil {
+		if isTooLong(err) {
+			prob = reasonLineTooLong
+		} else {
+			prob = reasonUnbalancedQuote
+			unbalanced = true
+		}
+	}
+	lx := lexed{cut: len(t)}
+	var info lineInfo
+	if l.prob == "" {
+		lx = lexLine(t)
+	}
+	text := strings.TrimRight(t[:lx.cut], " ")
+	if prob == "" && containsControl(text) {
+		prob = reasonControl
+	}
+	if l.prob == "" && !unbalanced {
+		info = analyze(lx.toks)
+	}
+	if !s.inGroup && len(info.events) == 0 {
+		s.plainLine(l, text, prob, info.docs)
+	} else {
+		s.constructLine(i, l, text, info)
+	}
+	if unbalanced {
+		s.broken = reasonUnbalancedQuote
+	}
+}
+
+// plainLine sorts a line that is outside every construct.
+func (s *scanner) plainLine(l logicalLine, text, prob string, docs []heredocOp) {
+	switch {
+	case len(docs) > 0:
+		s.exclude(l, text, reasonHeredoc)
+		s.addDocs(docs)
+	case prob != "":
+		s.exclude(l, text, prob)
+	default:
+		s.shapes = append(s.shapes, Shape{Line: l.line, Text: text})
+	}
+}
+
+// constructLine adds a line of a compound construct to the open group. The
+// group's reason is set when the group ends.
+func (s *scanner) constructLine(i int, l logicalLine, text string, info lineInfo) {
+	if !s.inGroup {
+		s.inGroup = true
+		s.groupStart = i
+		s.groupFirst = ""
+	}
+	s.groupIdx = append(s.groupIdx, s.exclude(l, text, ""))
+	for _, ev := range info.events {
+		s.apply(ev)
+	}
+	s.addDocs(info.docs)
+	if len(s.stack) == 0 {
+		s.endGroup(i, false)
+	}
+}
+
+// apply updates the open constructs for one keyword. A closer that does not
+// match the innermost construct changes nothing, so the construct stays open
+// and everything up to its real closer is excluded (fail closed).
+func (s *scanner) apply(ev kwEvent) {
+	if ev.open {
+		s.stack = append(s.stack, ev.word)
+		if s.groupFirst == "" {
+			s.groupFirst = ev.word
+		}
+		return
+	}
+	if ev.pattern && s.inCase() {
+		return
+	}
+	n := len(s.stack)
+	if n == 0 {
+		return
+	}
+	for _, opener := range closers[ev.word] {
+		if s.stack[n-1] == opener {
+			s.stack = s.stack[:n-1]
+			return
+		}
+	}
+}
+
+// inCase reports whether a case construct is open.
+func (s *scanner) inCase() bool {
+	for _, w := range s.stack {
+		if w == "case" {
+			return true
+		}
+	}
+	return false
+}
+
+// endGroup closes the open group at line i and sets the reason of its lines.
+// A group that was not closed says so.
+func (s *scanner) endGroup(i int, unclosed bool) {
+	reason := reasonKeywordInLine
+	switch {
+	case unclosed:
+		reason = "unclosed compound construct (" + s.groupFirst + ")"
+	case s.groupFirst != "" && s.groupStart != i:
+		reason = "compound construct (" + s.groupFirst + ")"
+	}
+	for _, k := range s.groupIdx {
+		s.excl[k].Reason = reason
+	}
+	s.groupIdx = nil
+	s.inGroup = false
+	s.groupFirst = ""
+	s.stack = nil
+}
+
+// addDocs registers the heredocs of a line. A delimiter that cannot be read
+// leaves the rest of the block unreadable.
+func (s *scanner) addDocs(docs []heredocOp) {
+	for _, op := range docs {
+		if !op.body {
+			continue
+		}
+		if !op.ok {
+			s.broken = reasonHeredocNoDelim
+			return
+		}
+		s.pend = append(s.pend, pendingDoc{op: op})
 	}
 }
