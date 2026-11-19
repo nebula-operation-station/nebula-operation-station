@@ -30,7 +30,7 @@
         <td>{{.State}}</td>
         <td>{{if .Reason}}{{.Reason}}{{else}}-{{end}}</td>
         <td><span class="badge {{.OutcomeBadge}}">{{.OutcomeText}}</span></td>
-        <td>{{if .Href}}<a href="{{.Href}}">{{if .ExecutionID}}{{.ExecutionID}}{{else}}Open{{end}}</a>{{else}}-{{end}}</td>
+        <td>{{if .ExecutionID}}{{if .Href}}<a href="{{.Href}}">{{.ExecutionID}}</a>{{else}}{{.ExecutionID}}{{end}}{{else if .Href}}<a href="{{.Href}}">Open</a>{{else}}-{{end}}</td>
       </tr>
       {{end}}
     </tbody>

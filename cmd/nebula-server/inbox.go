@@ -25,9 +25,12 @@ type inboxWiring struct {
 
 // newInboxWiring builds the inbox over db. The admin rule is the one of the
 // other admin pages (isAdmin, the privileged session of the request, see
-// vulnAdmin), so the inbox needs no separate role. Without this wiring the
-// /notifications page answers 404 and the navigation entry stays hidden.
-func newInboxWiring(db *sql.DB, isAdmin func(ctx context.Context) bool) (inboxWiring, error) {
+// cachedVulnAdmin), so the inbox needs no separate role. An error from
+// isAdmin (the executor status could not be read) reaches the inbox, which
+// denies and logs it; it is not turned into "not an admin". Without this
+// wiring the /notifications page answers 404 and the navigation entry stays
+// hidden.
+func newInboxWiring(db *sql.DB, isAdmin func(ctx context.Context) (bool, error)) (inboxWiring, error) {
 	if isAdmin == nil {
 		return inboxWiring{}, errors.New("notification inbox: nil admin rule")
 	}
@@ -38,7 +41,7 @@ func newInboxWiring(db *sql.DB, isAdmin func(ctx context.Context) bool) (inboxWi
 	return inboxWiring{
 		Log: store,
 		Admin: func(ctx context.Context, _ string) (bool, error) {
-			return isAdmin(ctx), nil
+			return isAdmin(ctx)
 		},
 	}, nil
 }
@@ -52,35 +55,86 @@ func newInboxWiring(db *sql.DB, isAdmin func(ctx context.Context) bool) (inboxWi
 // this old.
 const inboxStatusTTL = 3 * time.Second
 
-// cachedVulnAdmin is vulnAdmin with the executor status cached for ttl. A
-// failed status read is cached as well (as "no session"), so a hung executor
-// delays at most one request per ttl; concurrent callers wait for the one read
-// in flight instead of each starting their own.
-func cachedVulnAdmin(status ui.StatusProvider, ttl time.Duration, now func() time.Time) func(ctx context.Context) bool {
+// cachedVulnAdmin is vulnAdmin with the executor status cached for ttl; see
+// cachedVulnAdminWithTimeout. spawn starts the read goroutine; main passes
+// bg.Go so that run joins it.
+func cachedVulnAdmin(status ui.StatusProvider, ttl time.Duration, now func() time.Time, spawn func(func())) func(ctx context.Context) (bool, error) {
+	return cachedVulnAdminWithTimeout(status, ttl, now, vulnStatusTimeout, spawn)
+}
+
+// cachedVulnAdminWithTimeout is vulnAdmin with the executor status cached for
+// ttl. The status is read by the cache, not by the caller: the read runs on a
+// context that the caller's cancellation does not reach, bounded by
+// statusTimeout, and its result, a failed read included, is cached for ttl
+// from the moment it completes. So a hung executor costs one read per ttl,
+// and a caller whose own deadline is shorter only stops waiting for that read
+// (it gets its context error and the read still completes and is cached).
+// Concurrent callers share the read in flight; no lock is held while waiting.
+// The one exception is a caller whose context has already ended before any
+// read starts: it starts no read and caches nothing. A status error is
+// returned with false, never as "no session" silently. The read goroutine is
+// started with spawn, so the server can join it.
+func cachedVulnAdminWithTimeout(status ui.StatusProvider, ttl time.Duration, now func() time.Time, statusTimeout time.Duration, spawn func(func())) func(ctx context.Context) (bool, error) {
+	type read struct {
+		done   chan struct{}
+		active bool
+		expiry int64
+		err    error
+	}
 	var (
-		mu      sync.Mutex
-		at      time.Time
-		fetched bool
-		active  bool
-		expiry  int64
+		mu       sync.Mutex
+		at       time.Time
+		fetched  bool
+		cached   *read // the last completed read, valid while fetched
+		inflight *read // the read in progress, if any
 	)
-	return func(ctx context.Context) bool {
+	return func(ctx context.Context) (bool, error) {
 		if status == nil {
-			return false
+			return false, nil
 		}
 		mu.Lock()
-		if !fetched || now().Sub(at) >= ttl {
-			sctx, cancel := context.WithTimeout(ctx, vulnStatusTimeout)
-			st, err := status.GetStatus(sctx, &pb.GetStatusRequest{})
-			cancel()
-			active, expiry = false, 0
-			if err == nil {
-				active, expiry = st.GetPrivilegedSessionActive(), st.GetPrivilegedSessionExpiryUnix()
+		r := cached
+		switch {
+		case fetched && now().Sub(at) < ttl:
+		case inflight != nil:
+			r = inflight
+		default:
+			if err := ctx.Err(); err != nil {
+				mu.Unlock()
+				return false, err
 			}
-			at, fetched = now(), true
+			nr := &read{done: make(chan struct{})}
+			inflight = nr
+			spawn(func() {
+				sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), statusTimeout)
+				st, err := status.GetStatus(sctx, &pb.GetStatusRequest{})
+				cancel()
+				if err == nil {
+					nr.active, nr.expiry = st.GetPrivilegedSessionActive(), st.GetPrivilegedSessionExpiryUnix()
+				}
+				nr.err = err
+				mu.Lock()
+				cached, inflight, at, fetched = nr, nil, now(), true
+				mu.Unlock()
+				close(nr.done)
+			})
+			r = nr
 		}
-		a, e := active, expiry
 		mu.Unlock()
-		return a && auth.HoldsPrivilegedSession(ctx, e)
+		select {
+		case <-r.done:
+		default:
+			// Only a read still in flight makes the caller wait, and only
+			// until its own context ends.
+			select {
+			case <-r.done:
+			case <-ctx.Done():
+				return false, ctx.Err()
+			}
+		}
+		if r.err != nil {
+			return false, r.err
+		}
+		return r.active && auth.HoldsPrivilegedSession(ctx, r.expiry), nil
 	}
 }
