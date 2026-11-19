@@ -240,6 +240,16 @@ func (r *Runner) loadCSAFState(feed string) (vulnfeed.CSAFState, error) {
 		return vulnfeed.CSAFState{}, fmt.Errorf("open csaf state %s: %w", feed, err)
 	}
 	defer func() { _ = f.Close() }()
+	// Refuse by size before reading: an oversized file is never buffered
+	// in memory. The LimitReader below still guards against the file
+	// growing after this check.
+	info, err := f.Stat()
+	if err != nil {
+		return vulnfeed.CSAFState{}, fmt.Errorf("stat csaf state %s: %w", feed, err)
+	}
+	if info.Size() > MaxCSAFStateBytes {
+		return vulnfeed.CSAFState{}, fmt.Errorf("csaf state %s over %d bytes", feed, MaxCSAFStateBytes)
+	}
 	b, err := io.ReadAll(io.LimitReader(f, MaxCSAFStateBytes+1))
 	if err != nil {
 		return vulnfeed.CSAFState{}, fmt.Errorf("read csaf state %s: %w", feed, err)
