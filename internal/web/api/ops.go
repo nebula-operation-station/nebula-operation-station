@@ -359,21 +359,31 @@ type opsWorkItem struct {
 }
 
 // opsWorkQuestion is the context of one open admin question (ADR 0016 D11).
+// The agent decodes it as nosclient.Question; both sides change together.
 type opsWorkQuestion struct {
 	Text string `json:"text"`
-	// Hosts are the group projections of the hosts the text names, at most
+	// Hosts are the facts of the hosts the text names, at most
 	// MaxOpsQuestionHosts hosts. Only class lab carries them.
-	Hosts []opsfacts.LabProjection `json:"hosts,omitempty"`
+	Hosts []opsWorkQuestionHost `json:"hosts,omitempty"`
+}
+
+// opsWorkQuestionHost is the fact part of one named host: host, exposure,
+// ports and counts. Findings and step candidates never go into a question.
+type opsWorkQuestionHost struct {
+	Host     opsfacts.LabHost  `json:"host"`
+	Exposure opsfacts.Exposure `json:"exposure"`
+	Ports    []opsfacts.Port   `json:"ports"`
+	Counts   opsfacts.Counts   `json:"counts"`
 }
 
 // questionItem builds the work item of one open question. Ref is the question
-// ID; Digest is the question's digest, which the answer must carry.
+// ID; Digest is the question's digest, which the answer must carry. Every
+// question carries the fleet counts; class lab adds the named hosts.
 func (h *OpsHandler) questionItem(q opsnotes.Question, lab bool, groups []opsfacts.Group, fleet opsfacts.Counts) opsWorkItem {
+	c := fleet
 	it := opsWorkItem{Kind: string(opsKindQuestion), Ref: strconv.FormatInt(q.ID, 10), Digest: q.Digest,
-		Question: &opsWorkQuestion{Text: q.Text}}
+		Fleet: &c, Question: &opsWorkQuestion{Text: q.Text}}
 	if !lab {
-		c := fleet
-		it.Fleet = &c
 		return it
 	}
 	it.Question.Hosts = questionHosts(q.Text, groups)
@@ -384,15 +394,15 @@ func (h *OpsHandler) questionItem(q opsnotes.Question, lab bool, groups []opsfac
 	return it
 }
 
-// questionHosts returns the groups of the hosts that text names, in the order
+// questionHosts returns the facts of the hosts that text names, in the order
 // of groups (already sorted by sortGroups), for at most MaxOpsQuestionHosts
 // hosts. A host is named by its ID or its label as a whole word, in any case.
 // The choice depends only on the text and the sorted groups.
-func questionHosts(text string, groups []opsfacts.Group) []opsfacts.LabProjection {
+func questionHosts(text string, groups []opsfacts.Group) []opsWorkQuestionHost {
 	lower := strings.ToLower(text)
 	chosen := map[string]bool{}
 	rejected := map[string]bool{}
-	var out []opsfacts.LabProjection
+	var out []opsWorkQuestionHost
 	for _, g := range groups {
 		id := g.Projection.Host.ID
 		if rejected[id] {
@@ -406,7 +416,8 @@ func questionHosts(text string, groups []opsfacts.Group) []opsfacts.LabProjectio
 			}
 			chosen[id] = true
 		}
-		out = append(out, g.Projection)
+		p := g.Projection
+		out = append(out, opsWorkQuestionHost{Host: p.Host, Exposure: p.Exposure, Ports: p.Ports, Counts: p.Counts})
 	}
 	return out
 }

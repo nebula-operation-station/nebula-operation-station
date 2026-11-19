@@ -81,12 +81,12 @@ func TestOpsWorkManyOpenQuestionsKeepSlotsForSummaryAndFixes(t *testing.T) {
 // facts; the text stays.
 func TestOpsWorkQuestionOverItemLimitDropsHostFacts(t *testing.T) {
 	e := newOpsEnv(t)
+	// Question host facts carry no findings, so only the port list can push
+	// the item over the limit: 32 ports of about 1 KiB each.
 	big := labGroup(opsHost, "CVE-2026-0001", opsfacts.TierCritical, false, 90)
-	for i := range 400 {
-		big.Projection.Findings = append(big.Projection.Findings, opsfacts.LabFinding{
-			VulnID: fmt.Sprintf("CVE-2026-%06d", i), Package: "openssl-package-with-a-long-name-for-size",
-			Installed: "3.0.1-1ubuntu1", Fixed: "3.0.2-0ubuntu1", Tier: opsfacts.TierHigh, Score: 50,
-			Fix: opsfacts.FixStatus("fix_verified")})
+	proto := strings.Repeat("p", 1100)
+	for range 32 {
+		big.Projection.Ports = append(big.Projection.Ports, opsfacts.Port{Number: 443, Protocol: proto})
 	}
 	e.facts.groups = []opsfacts.Group{big}
 	askOpsQuestion(t, e, "Ist "+opsHost+" betroffen?")
@@ -195,8 +195,9 @@ func TestOpsWorkQuestionNamesAtMostFiveHostsDeterministically(t *testing.T) {
 		t.Fatalf("%d hosts, want %d", len(hosts), api.MaxOpsQuestionHosts)
 	}
 	for i, h := range hosts {
-		if want := fmt.Sprintf(`"h-%d/os"`, i); !strings.Contains(fmt.Sprint(h), fmt.Sprintf("h-%d/os", i)) {
-			t.Errorf("host %d = %v, want the first five in key order (%s)", i, h, want)
+		id, _ := h.(map[string]any)["host"].(map[string]any)["id"].(string)
+		if want := fmt.Sprintf("h-%d", i); id != want {
+			t.Errorf("host %d id = %q, want the first five in key order (%s)", i, id, want)
 		}
 	}
 }
