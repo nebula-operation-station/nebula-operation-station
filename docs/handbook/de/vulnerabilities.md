@@ -238,7 +238,7 @@ Admin. Andere Benutzer sehen den Tab Ops nicht.
 
 **Schritte:**
 
-1. Öffne den Tab **Ops** im Assistenten-Panel. Eine Karte trägt die
+1. Öffnen Sie den Tab **Ops** im Assistenten-Panel. Eine Karte trägt die
    Überschrift "Fix suggestion" mit ihrer Nummer. Ist der Agent aus, steht
    dort "Agent switched off. No open suggestion."; ist er an und es gibt
    noch keine Karte, "No suggestion yet.". In diesem Release ist das der
