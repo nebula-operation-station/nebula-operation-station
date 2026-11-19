@@ -25,6 +25,7 @@ import (
 	"net/netip"
 	"slices"
 	"sort"
+	"sync"
 	"time"
 
 	"google.golang.org/grpc"
@@ -307,6 +308,10 @@ type Handler struct {
 	// inbox and inboxAdmin serve the notifications page (notifications.go).
 	inbox      NotificationLog
 	inboxAdmin NotificationAdminFunc
+	// inboxLogMu and inboxLogAt rate-limit the log line of a failing admin
+	// check (see logInboxCheckFailure).
+	inboxLogMu sync.Mutex
+	inboxLogAt time.Time
 }
 
 // New parses the embedded templates and builds a Handler.
@@ -1012,7 +1017,7 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, data pageData) 
 	}
 	data.NavCollapsed = navStateFromRequest(r) == navCollapsed
 	data.PVENav = h.pve != nil
-	data.NotificationsNav = h.inboxVisible(r)
+	data.NotificationsNav = h.navVisible(r)
 	data.DeployEnabled = h.deploy != nil && h.pve != nil && h.pveRemotes != nil
 	// "Deploy here" (ADR 0008 section 6) on the chart's nodes of active
 	// remotes; read-only and blocked remotes get no shortcut.

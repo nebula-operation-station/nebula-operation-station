@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -42,6 +43,8 @@ type notifEnv struct {
 	store    *notifylog.Store
 	admins   map[string]bool
 	cookie   *http.Cookie
+	// adminCalls counts the admin checks the server ran.
+	adminCalls atomic.Int32
 }
 
 // newNotifEnv serves the UI with the notification log. A nil log uses a
@@ -76,6 +79,7 @@ func newNotifEnvWired(t *testing.T, log ui.NotificationLog, adminErr error, wire
 	if wired {
 		opts.Notifications = log
 		opts.NotificationsAdmin = func(_ context.Context, user string) (bool, error) {
+			e.adminCalls.Add(1)
 			if adminErr != nil {
 				return false, adminErr
 			}
@@ -367,6 +371,63 @@ func TestNotificationsLinkOnlyToNOSPath(t *testing.T) {
 	}
 	if strings.Contains(body, "evil.example") {
 		t.Errorf("external link reached the page")
+	}
+}
+
+// notifRawLinkLog returns one entry whose link bypasses the store's write
+// check, as a log filled by a broken write path could. The page must drop the
+// link at render time and still show the row.
+type notifRawLinkLog struct{ link string }
+
+func (f notifRawLinkLog) List(context.Context, int64, int) ([]notifylog.Entry, error) {
+	return []notifylog.Entry{{
+		Seq: 1,
+		At:  time.Date(2026, 11, 18, 9, 0, 0, 0, time.UTC),
+		Record: notifylog.Record{
+			Kind:        notifylog.KindLeaseRunFailed,
+			Host:        "web-1",
+			State:       notifylog.StateFailed,
+			Reason:      notifylog.ReasonTimeout,
+			Outcome:     notifylog.Outcome("sent"),
+			ExecutionID: notifExecID,
+			Link:        f.link,
+		},
+	}}, nil
+}
+
+// TestNotificationsDropsBadLinkAtRenderTime checks the render-time link rule
+// through the handler: each bad link is absent from the markup, and the row
+// stays. The good link case shows the same row keeps a valid link.
+func TestNotificationsDropsBadLinkAtRenderTime(t *testing.T) {
+	bad := []string{"//evil.example/x", "https://evil.example/x", `/a"b`, "/x?token=1", `/x\evil`}
+	for _, link := range bad {
+		e := newNotifEnv(t, notifRawLinkLog{link: link}, nil)
+		res, body := e.get(e.cookie, "/notifications")
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("link %q: GET = %d, want 200", link, res.StatusCode)
+		}
+		if strings.Contains(body, "evil.example") || strings.Contains(body, `href="`+link) {
+			t.Errorf("link %q reached the page", link)
+		}
+		if !strings.Contains(body, "web-1") {
+			t.Errorf("link %q: row missing from the page", link)
+		}
+	}
+	e := newNotifEnv(t, notifRawLinkLog{link: "/operations/" + notifExecID}, nil)
+	if _, body := e.get(e.cookie, "/notifications"); !strings.Contains(body, `href="/operations/`+notifExecID+`"`) {
+		t.Errorf("valid NOS link missing: the render check drops too much")
+	}
+}
+
+// TestNotificationsAdminCheckRunsOncePerRequest: the page needs the admin
+// check for the 403 decision and for the navigation entry; it runs once.
+func TestNotificationsAdminCheckRunsOncePerRequest(t *testing.T) {
+	e := newNotifEnv(t, nil, nil)
+	if res, _ := e.get(e.cookie, "/notifications"); res.StatusCode != http.StatusOK {
+		t.Fatalf("GET = %d, want 200", res.StatusCode)
+	}
+	if n := e.adminCalls.Load(); n != 1 {
+		t.Errorf("admin checks for one page view = %d, want 1", n)
 	}
 }
 

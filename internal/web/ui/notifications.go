@@ -19,7 +19,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
-	"strings"
+	"sync"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/notifylog"
@@ -91,25 +91,6 @@ func notificationOutcome(o notifylog.Outcome) (text, badge string) {
 	return "Unknown", "badge--unknown"
 }
 
-// safeNOSLink reports whether s is a plain NOS path: it starts with "/",
-// has no "//", backslash, "?" or "#", holds only printable ASCII without
-// spaces, and is at most notifylog.MaxLink bytes. It is the same rule the
-// notification log applies on write, checked again before a link is shown.
-func safeNOSLink(s string) bool {
-	if s == "" || len(s) > notifylog.MaxLink || s[0] != '/' {
-		return false
-	}
-	if strings.Contains(s, "//") || strings.ContainsAny(s, `\?#`) {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		if c := s[i]; c < 0x21 || c > 0x7e {
-			return false
-		}
-	}
-	return true
-}
-
 // parseNotificationCursor reads the after parameter strictly. Empty means
 // the newest page (0). Anything else must be a decimal integer of at most
 // notificationsCursorMaxDigits digits, at least 1, with no sign, space or
@@ -133,10 +114,15 @@ func parseNotificationCursor(raw string) (int64, error) {
 	return n, nil
 }
 
+// inboxCheckLogEvery is the least time between two log lines for a failing
+// admin check, so a broken check does not write a line on every page view.
+const inboxCheckLogEvery = time.Minute
+
 // inboxVisible reports whether the request's user may see the inbox: the
 // log is wired, there is a session, and the admin check passes. An admin
-// check error denies (it is logged, its detail is not shown). The page and
-// the navigation entry both use this rule, so they cannot disagree.
+// check error denies (it is logged, at most once a minute; its detail is not
+// shown). Pages reach this rule through navVisible, which runs it once per
+// request.
 func (h *Handler) inboxVisible(r *http.Request) bool {
 	if h.inbox == nil || h.inboxAdmin == nil {
 		return false
@@ -149,10 +135,79 @@ func (h *Handler) inboxVisible(r *http.Request) bool {
 	defer cancel()
 	admin, err := h.inboxAdmin(ctx, s.UserName)
 	if err != nil {
-		h.log.Error("notifications: admin check", "error", err)
+		h.logInboxCheckFailure(err)
 		return false
 	}
 	return admin
+}
+
+// logInboxCheckFailure logs a failed admin check, at most once per
+// inboxCheckLogEvery.
+func (h *Handler) logInboxCheckFailure(err error) {
+	h.inboxLogMu.Lock()
+	defer h.inboxLogMu.Unlock()
+	now := time.Now()
+	if h.now != nil {
+		now = h.now()
+	}
+	if !h.inboxLogAt.IsZero() && now.Sub(h.inboxLogAt) < inboxCheckLogEvery {
+		return
+	}
+	h.inboxLogAt = now
+	h.log.Error("notifications: admin check", "error", err)
+}
+
+// inboxNavKey is the request-context key of the per-request inbox cache.
+type inboxNavKey struct{}
+
+// inboxNav caches the result of inboxVisible for one request. The page, the
+// page's navigation data and the navigation of the subpackage pages ask it,
+// so the admin check runs at most once per request.
+type inboxNav struct {
+	h       *Handler
+	once    sync.Once
+	visible bool
+}
+
+// withInboxNav returns r carrying a fresh inbox cache for h, unless r already
+// carries one for h.
+func (h *Handler) withInboxNav(r *http.Request) *http.Request {
+	if n, ok := r.Context().Value(inboxNavKey{}).(*inboxNav); ok && n.h == h {
+		return r
+	}
+	return r.WithContext(context.WithValue(r.Context(), inboxNavKey{}, &inboxNav{h: h}))
+}
+
+// navVisible is inboxVisible, computed at most once for the request when r
+// carries a cache (see withInboxNav).
+func (h *Handler) navVisible(r *http.Request) bool {
+	n, ok := r.Context().Value(inboxNavKey{}).(*inboxNav)
+	if !ok || n.h != h {
+		return h.inboxVisible(r)
+	}
+	n.once.Do(func() { n.visible = h.inboxVisible(r) })
+	return n.visible
+}
+
+// WithNotificationsNav wraps next so that the requests it serves share one
+// inbox visibility check. The server wraps the mux that holds the subpackage
+// pages with it; NotificationsNavVisible then reads the same answer.
+func (h *Handler) WithNotificationsNav(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, h.withInboxNav(r))
+	})
+}
+
+// NotificationsNavVisible reports whether the Notifications navigation entry
+// is shown for r. It is for the Chrome adapters of the subpackage pages. It
+// reports false when the request does not come through WithNotificationsNav,
+// so an unwired server never shows the entry.
+func NotificationsNavVisible(r *http.Request) bool {
+	n, ok := r.Context().Value(inboxNavKey{}).(*inboxNav)
+	if !ok {
+		return false
+	}
+	return n.h.navVisible(r)
 }
 
 // handleNotifications serves GET /notifications.
@@ -161,7 +216,8 @@ func (h *Handler) handleNotifications(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if !h.inboxVisible(r) {
+	r = h.withInboxNav(r)
+	if !h.navVisible(r) {
 		http.Error(w, "forbidden: notifications need the admin role", http.StatusForbidden)
 		return
 	}
@@ -202,7 +258,7 @@ func (h *Handler) handleNotifications(w http.ResponseWriter, r *http.Request) {
 				OutcomeBadge: badge,
 				ExecutionID:  e.ExecutionID,
 			}
-			if safeNOSLink(e.Link) {
+			if notifylog.IsNOSLink(e.Link) {
 				row.Href = e.Link
 			}
 			page.Items = append(page.Items, row)
