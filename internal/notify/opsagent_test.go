@@ -95,3 +95,30 @@ func TestNotifyOpsAgentSettingsChangedSendsOnce(t *testing.T) {
 		t.Fatalf("events = %+v", rec.events)
 	}
 }
+
+// Every settings field of the event has its own change line: enabled,
+// allow_plain_http and language were not covered before.
+func TestOpsAgentEventShowsEnabledPlainHTTPAndLanguageChanges(t *testing.T) {
+	c := opsChange()
+	c.New.Enabled = false
+	c.New.AllowPlainHTTP = true
+	c.New.Language = opsconfig.LanguageEN
+	e := OpsAgentSettingsEvent(c, time.Unix(1, 0))
+	for _, want := range []string{"enabled: true -> false", "allow_plain_http: false -> true", "language: de -> en"} {
+		if !strings.Contains(e.Reason, want) {
+			t.Errorf("reason %q lacks %q", e.Reason, want)
+		}
+	}
+}
+
+// An unchanged field gets no line.
+func TestOpsAgentEventOmitsUnchangedFieldLines(t *testing.T) {
+	c := opsChange()
+	c.New.Enabled = false
+	e := OpsAgentSettingsEvent(c, time.Unix(1, 0))
+	for _, bad := range []string{"allow_plain_http:", "language:", "base_url:", "model:"} {
+		if strings.Contains(e.Reason, bad) {
+			t.Errorf("reason lists unchanged field %q: %q", bad, e.Reason)
+		}
+	}
+}
