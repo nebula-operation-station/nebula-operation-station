@@ -399,13 +399,21 @@ func decodeText(field string, limit int) (string, error) {
 	return string(raw), nil
 }
 
+// maxPhaseQuoteLen bounds how much of a rejected host phase is quoted back in
+// the error. The rest is reported by length only, so a multi-KiB phase cannot
+// inflate error text.
+const maxPhaseQuoteLen = 32
+
 // validatePhase accepts only the known phases; anything else is rejected
 // rather than guessed.
 func validatePhase(phase string) error {
-	if phase != "done" && phase != "precheck" {
+	if phase == "done" || phase == "precheck" {
+		return nil
+	}
+	if len(phase) <= maxPhaseQuoteLen {
 		return fmt.Errorf("host telemetry: unknown phase %q", phase)
 	}
-	return nil
+	return fmt.Errorf("host telemetry: unknown phase %q… (%d bytes)", phase[:maxPhaseQuoteLen], len(phase))
 }
 
 // printable reports whether s is non-empty printable text within limit bytes.
