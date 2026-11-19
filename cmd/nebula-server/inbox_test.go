@@ -4,12 +4,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/trafficstore"
@@ -41,7 +43,7 @@ func newInboxFixture(t *testing.T, wired, admin bool) *swFixture {
 
 	opts := ui.Options{PublicOrigin: swOrigin, Log: log}
 	if wired {
-		w, err := newInboxWiring(db, isAdmin)
+		w, err := newInboxWiring(db, func(ctx context.Context) (bool, error) { return isAdmin(ctx), nil })
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -162,5 +164,28 @@ func TestNotificationsNavVisibleNeedsTheInboxRequestWrapper(t *testing.T) {
 	plain := httptest.NewRequest(http.MethodGet, "/hosts/web1/connections", nil)
 	if c := connectionsChrome(plain); c.NotificationsNav {
 		t.Error("request without the inbox wrapper shows the entry")
+	}
+}
+
+// An executor outage must reach the inbox as an admin check error, not as a
+// plain "no": the inbox then logs the failure (logInboxCheckFailure) and
+// denies. The wiring of main is cachedVulnAdmin behind newInboxWiring.
+func TestInboxAdminErrorReachesTheInbox(t *testing.T) {
+	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	boom := errors.New("executor unavailable")
+	w, err := newInboxWiring(db, cachedVulnAdmin(&countingStatus{err: boom}, inboxStatusTTL, time.Now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err := w.Admin(context.Background(), "alice")
+	if ok {
+		t.Fatal("admin granted on a failed executor status read")
+	}
+	if !errors.Is(err, boom) {
+		t.Fatalf("inbox admin error = %v, want the executor status error", err)
 	}
 }

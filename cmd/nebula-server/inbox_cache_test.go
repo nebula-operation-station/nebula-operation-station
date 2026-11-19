@@ -38,7 +38,7 @@ func TestCachedVulnAdminAsksTheExecutorOncePerTTL(t *testing.T) {
 			clock := time.Unix(1_800_000_000, 0)
 			admin := cachedVulnAdmin(st, inboxStatusTTL, func() time.Time { return clock })
 			for range 20 {
-				if admin(context.Background()) {
+				if ok, _ := admin(context.Background()); ok {
 					t.Fatal("admin without a privileged session in the request")
 				}
 			}
@@ -54,8 +54,75 @@ func TestCachedVulnAdminAsksTheExecutorOncePerTTL(t *testing.T) {
 	}
 }
 
+// An executor status error must reach the caller, so the inbox can log it
+// (logInboxCheckFailure) instead of hiding the inbox silently. It is returned
+// on every call within the TTL, from the cache, and the check still denies.
+func TestCachedVulnAdminReturnsTheExecutorStatusError(t *testing.T) {
+	boom := errors.New("executor unavailable")
+	st := &countingStatus{err: boom}
+	clock := time.Unix(1_800_000_000, 0)
+	admin := cachedVulnAdmin(st, inboxStatusTTL, func() time.Time { return clock })
+	for i := range 3 {
+		ok, err := admin(context.Background())
+		if ok {
+			t.Fatalf("call %d: admin granted on a failed status read", i)
+		}
+		if !errors.Is(err, boom) {
+			t.Fatalf("call %d: error = %v, want the executor status error", i, err)
+		}
+	}
+	if got := st.calls.Load(); got != 1 {
+		t.Fatalf("%d status reads within the TTL, want 1", got)
+	}
+}
+
+func TestCachedVulnAdminNoErrorWhenStatusIsRead(t *testing.T) {
+	st := &countingStatus{}
+	admin := cachedVulnAdmin(st, inboxStatusTTL, time.Now)
+	if ok, err := admin(context.Background()); ok || err != nil {
+		t.Fatalf("admin = %v, err = %v; want false and no error", ok, err)
+	}
+}
+
+// ctxStatus fails with the caller's context error when that context ended,
+// as a real gRPC call does.
+type ctxStatus struct{ calls atomic.Int32 }
+
+func (c *ctxStatus) GetStatus(ctx context.Context, _ *pb.GetStatusRequest, _ ...grpc.CallOption) (*pb.GetStatusResponse, error) {
+	c.calls.Add(1)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return &pb.GetStatusResponse{}, nil
+}
+
+// A read that failed because the caller went away must not be cached: the
+// next request, with a live context, reads the executor again instead of
+// being denied for the whole TTL.
+func TestCachedVulnAdminDoesNotCacheCallerCancellation(t *testing.T) {
+	st := &ctxStatus{}
+	clock := time.Unix(1_800_000_000, 0)
+	admin := cachedVulnAdmin(st, inboxStatusTTL, func() time.Time { return clock })
+
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := admin(gone); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled request: error = %v, want context.Canceled", err)
+	}
+	if _, err := admin(context.Background()); err != nil {
+		t.Fatalf("next request: error = %v, want none", err)
+	}
+	if got := st.calls.Load(); got != 2 {
+		t.Fatalf("%d status reads, want 2 (the cancelled read must not be cached)", got)
+	}
+}
+
 func TestCachedVulnAdminWithoutStatusDenies(t *testing.T) {
-	if cachedVulnAdmin(nil, inboxStatusTTL, time.Now)(context.Background()) {
+	ok, err := cachedVulnAdmin(nil, inboxStatusTTL, time.Now)(context.Background())
+	if ok {
 		t.Fatal("admin without a status provider")
+	}
+	if err != nil {
+		t.Fatalf("error = %v, want none without a status provider", err)
 	}
 }

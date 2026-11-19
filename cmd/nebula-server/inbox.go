@@ -25,9 +25,12 @@ type inboxWiring struct {
 
 // newInboxWiring builds the inbox over db. The admin rule is the one of the
 // other admin pages (isAdmin, the privileged session of the request, see
-// vulnAdmin), so the inbox needs no separate role. Without this wiring the
-// /notifications page answers 404 and the navigation entry stays hidden.
-func newInboxWiring(db *sql.DB, isAdmin func(ctx context.Context) bool) (inboxWiring, error) {
+// cachedVulnAdmin), so the inbox needs no separate role. An error from
+// isAdmin (the executor status could not be read) reaches the inbox, which
+// denies and logs it; it is not turned into "not an admin". Without this
+// wiring the /notifications page answers 404 and the navigation entry stays
+// hidden.
+func newInboxWiring(db *sql.DB, isAdmin func(ctx context.Context) (bool, error)) (inboxWiring, error) {
 	if isAdmin == nil {
 		return inboxWiring{}, errors.New("notification inbox: nil admin rule")
 	}
@@ -38,7 +41,7 @@ func newInboxWiring(db *sql.DB, isAdmin func(ctx context.Context) bool) (inboxWi
 	return inboxWiring{
 		Log: store,
 		Admin: func(ctx context.Context, _ string) (bool, error) {
-			return isAdmin(ctx), nil
+			return isAdmin(ctx)
 		},
 	}, nil
 }
@@ -53,34 +56,46 @@ func newInboxWiring(db *sql.DB, isAdmin func(ctx context.Context) bool) (inboxWi
 const inboxStatusTTL = 3 * time.Second
 
 // cachedVulnAdmin is vulnAdmin with the executor status cached for ttl. A
-// failed status read is cached as well (as "no session"), so a hung executor
-// delays at most one request per ttl; concurrent callers wait for the one read
-// in flight instead of each starting their own.
-func cachedVulnAdmin(status ui.StatusProvider, ttl time.Duration, now func() time.Time) func(ctx context.Context) bool {
+// failed status read is cached as well, with its error, so a hung executor
+// delays at most one request per ttl and every request in that ttl is logged
+// as a failed check with the same error; concurrent callers wait for the one
+// read in flight instead of each starting their own. A read that failed
+// because the caller's own context ended is not cached: it says nothing about
+// the executor, and the next request reads again. A status error is returned
+// with false, never as "no session" silently.
+func cachedVulnAdmin(status ui.StatusProvider, ttl time.Duration, now func() time.Time) func(ctx context.Context) (bool, error) {
 	var (
 		mu      sync.Mutex
 		at      time.Time
 		fetched bool
 		active  bool
 		expiry  int64
+		readErr error
 	)
-	return func(ctx context.Context) bool {
+	return func(ctx context.Context) (bool, error) {
 		if status == nil {
-			return false
+			return false, nil
 		}
 		mu.Lock()
 		if !fetched || now().Sub(at) >= ttl {
 			sctx, cancel := context.WithTimeout(ctx, vulnStatusTimeout)
 			st, err := status.GetStatus(sctx, &pb.GetStatusRequest{})
 			cancel()
-			active, expiry = false, 0
+			if err != nil && ctx.Err() != nil {
+				mu.Unlock()
+				return false, err
+			}
+			active, expiry, readErr = false, 0, err
 			if err == nil {
 				active, expiry = st.GetPrivilegedSessionActive(), st.GetPrivilegedSessionExpiryUnix()
 			}
 			at, fetched = now(), true
 		}
-		a, e := active, expiry
+		a, e, rerr := active, expiry, readErr
 		mu.Unlock()
-		return a && auth.HoldsPrivilegedSession(ctx, e)
+		if rerr != nil {
+			return false, rerr
+		}
+		return a && auth.HoldsPrivilegedSession(ctx, e), nil
 	}
 }
