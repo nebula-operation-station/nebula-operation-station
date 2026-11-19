@@ -250,9 +250,14 @@ func (n *Notifier) record(ctx context.Context, r notifylog.Record) {
 // goroutine lets a slow or locked database never delay a send or the next
 // notification; the caller does not wait for it. The writes use a context that
 // a cancelled send does not cancel (the decision must still be logged), and
-// each is bounded by recordTimeout. When no write slot is free, the whole batch
+// batch as a whole is bounded by recordTimeout. When no write slot is free, the whole batch
 // is dropped and counted in RecordsDropped. A failed write is logged without
 // the message text. write never returns an error.
+//
+// The whole batch shares one deadline of recordTimeout, so a batch is bounded
+// as one write and the shutdown flush (see FlushRecords) can wait for it. A
+// failure of the batch is logged once, with the count of records not stored,
+// so a closed database does not produce one warning per record.
 func (n *Notifier) write(ctx context.Context, recs []notifylog.Record) {
 	if n.rec == nil || len(recs) == 0 {
 		return
@@ -267,18 +272,40 @@ func (n *Notifier) write(ctx context.Context, recs []notifylog.Record) {
 	base := context.WithoutCancel(ctx)
 	go func() {
 		defer func() { <-n.recSlots }()
-		for _, r := range recs {
-			n.writeOne(base, r)
-		}
+		n.writeBatch(base, recs)
 	}()
 }
 
-// writeOne appends one record under its own recordTimeout.
-func (n *Notifier) writeOne(base context.Context, r notifylog.Record) {
+// writeBatch appends recs in order under one deadline of recordTimeout. When
+// the deadline passes or an Append fails, the records not stored are counted
+// and one warning is logged for the batch, with the first failure's kind,
+// outcome and error (never the message text).
+func (n *Notifier) writeBatch(base context.Context, recs []notifylog.Record) {
 	rctx, cancel := context.WithTimeout(base, recordTimeout)
 	defer cancel()
-	if _, err := n.rec.Append(rctx, r); err != nil {
-		n.log.Warn("notification log write failed", "kind", string(r.Kind), "outcome", string(r.Outcome), "error", err.Error())
+	failed := 0
+	var first error
+	var firstKind, firstOutcome string
+	for i, r := range recs {
+		if rctx.Err() != nil {
+			failed += len(recs) - i
+			if first == nil {
+				first = rctx.Err()
+				firstKind, firstOutcome = string(r.Kind), string(r.Outcome)
+			}
+			break
+		}
+		if _, err := n.rec.Append(rctx, r); err != nil {
+			failed++
+			if first == nil {
+				first = err
+				firstKind, firstOutcome = string(r.Kind), string(r.Outcome)
+			}
+		}
+	}
+	if failed > 0 {
+		n.log.Warn("notification log write failed", "count", failed, "of", len(recs),
+			"kind", firstKind, "outcome", firstOutcome, "error", first.Error())
 	}
 }
 

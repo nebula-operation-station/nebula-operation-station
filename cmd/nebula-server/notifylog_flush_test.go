@@ -106,3 +106,28 @@ func TestShutdownFlushWithoutLogIsNoOp(t *testing.T) {
 		t.Fatalf("flush without a log logged %q", buf.String())
 	}
 }
+
+// TestShutdownFlushCoversWholeHeldBatch: the records of one held batch (the
+// vulnerability digest hands its holds over in one call) are all in the log
+// when the flush returns, even though the write is still in flight when the
+// flush starts.
+func TestShutdownFlushCoversWholeHeldBatch(t *testing.T) {
+	release := make(chan struct{})
+	rec := &blockingRecorder{release: release}
+	n := notify.NewWithSenders(flushTestLogger(), nil, flushTestSender{})
+	n.SetRecorder(rec)
+	batch := make([]notify.Event, 3)
+	for i := range batch {
+		batch[i] = notify.Event{Kind: notify.KindTest, Reason: "x", Time: time.Unix(1791960000, 0)}
+	}
+	n.RecordHeld(context.Background(), batch...)
+
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		close(release)
+	}()
+	flushNotifyRecords(n, flushTestLogger(), notifyFlushTimeout)
+	if got := rec.count(); got != len(batch) {
+		t.Fatalf("stored records after flush = %d, want %d", got, len(batch))
+	}
+}
