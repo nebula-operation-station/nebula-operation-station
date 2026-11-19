@@ -204,7 +204,7 @@ func validateItem(class string, it nosclient.WorkItem) error {
 	if !isDigest(it.Digest) {
 		return errors.New("item digest")
 	}
-	if it.Kind != "question" && (it.Question != "" || len(it.Facts) > 0) {
+	if it.Kind != "question" && it.Question != nil {
 		return errors.New("item carries question data")
 	}
 	switch it.Kind {
@@ -238,23 +238,24 @@ func validateItem(class string, it nosclient.WorkItem) error {
 }
 
 // validateQuestion checks a question item: its text and fleet counts, and,
-// in class lab only, the facts of the hosts it names. Facts never carry
-// findings or steps (ADR 0016 D11).
+// in class lab only, the facts of the hosts it names. The facts carry no
+// findings or steps by type (ADR 0016 D11).
 func validateQuestion(class string, it nosclient.WorkItem) error {
-	if it.Question == "" || len(it.Question) > prompt.MaxQuestionBytes || it.Group != nil || it.Fleet == nil {
+	q := it.Question
+	if q == nil || q.Text == "" || len(q.Text) > prompt.MaxQuestionBytes || it.Group != nil || it.Fleet == nil {
 		return errors.New("question shape")
 	}
-	if class == string(prompt.ClassExternal) && len(it.Facts) > 0 {
+	if class == string(prompt.ClassExternal) && len(q.Hosts) > 0 {
 		return errors.New("question facts outside class lab")
 	}
-	if len(it.Facts) > prompt.MaxFactHosts {
+	if len(q.Hosts) > prompt.MaxFactHosts {
 		return errors.New("question facts too many")
 	}
-	for _, f := range it.Facts {
+	for _, f := range q.Hosts {
 		if len(f.Ports) > prompt.MaxFactPorts {
 			return errors.New("question facts ports too many")
 		}
-		if f.Host.ID == "" || !printableASCII(f.Host.ID) || len(f.Findings) > 0 || len(f.Candidates) > 0 {
+		if f.Host.ID == "" || !printableASCII(f.Host.ID) {
 			return errors.New("question facts shape")
 		}
 	}
@@ -529,8 +530,8 @@ func (r *runner) prompt(it nosclient.WorkItem) (prompt.Result, map[string]string
 		in.Fleet = countsOf(*it.Fleet)
 	case "question":
 		in.Fleet = countsOf(*it.Fleet)
-		in.Question = it.Question
-		for _, f := range it.Facts {
+		in.Question = it.Question.Text
+		for _, f := range it.Question.Hosts {
 			in.Facts = append(in.Facts, prompt.Facts{
 				Host: prompt.Host{
 					Label:       f.Host.Label,
@@ -542,7 +543,7 @@ func (r *runner) prompt(it nosclient.WorkItem) (prompt.Result, map[string]string
 				Counts: *countsOf(f.Counts),
 			})
 		}
-		in.Docs, keys = r.docs(searchQuery(it.Question))
+		in.Docs, keys = r.docs(searchQuery(it.Question.Text))
 	default:
 		g := it.Group
 		in.Group = countsOf(g.Counts)

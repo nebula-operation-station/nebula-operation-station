@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Package pvecollect implements the PVE collector (ADR 0006, P1-10): it
-// schedules typed read requests over the executor socket, assembles
-// sanitized observations and writes them to the spool. It never talks to a
-// PVE endpoint itself, opens no network listener, touches no database and
-// holds no credentials.
+
+// This file holds the Collector poll loop (ADR 0006, P1-10). See doc.go for
+// the package description.
+
 package pvecollect
 
 import (

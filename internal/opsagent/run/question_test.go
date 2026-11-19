@@ -18,14 +18,14 @@ const questionReply = `{"text":"Ja, web-01 ist vom letzten Update betroffen.","c
 
 // questionItem is an admin question with the fleet counts the server adds.
 func questionItem(q string) nosclient.WorkItem {
-	return nosclient.WorkItem{Kind: "question", Ref: "q1", Digest: goodDigest, Question: q,
+	return nosclient.WorkItem{Kind: "question", Ref: "q1", Digest: goodDigest, Question: &nosclient.Question{Text: q},
 		Fleet: &nosclient.Counts{Critical: 2, High: 3, KEV: 1}}
 }
 
-// questionFacts is the group projection of one host a question names: host,
+// questionFacts is the fact part of one host a question names: host,
 // exposure, ports and counts only.
-func questionFacts() []nosclient.Group {
-	return []nosclient.Group{{
+func questionFacts() []nosclient.QuestionHost {
+	return []nosclient.QuestionHost{{
 		Host:     nosclient.Host{ID: "h1", Label: "web-01", Environment: "lab", Criticality: "high"},
 		Exposure: "lan",
 		Ports:    []nosclient.Port{{Number: 443, Protocol: "tcp"}},
@@ -246,7 +246,7 @@ func TestQuestionFactsRefusedInExternalClass(t *testing.T) {
 	cfg.LLMBaseURL = "https://llm.example.invalid/v1"
 	cfg.AllowPlainHTTP = false
 	item := questionItem("Ist web-01 betroffen?")
-	item.Facts = questionFacts()
+	item.Question.Hosts = questionFacts()
 	nos := &fakeNOS{cfg: cfg, items: []nosclient.WorkItem{item}}
 	h := newHarness(t, nos, &fakeChat{replies: []string{questionReply}})
 	sum, err := h.run(t, nil)
@@ -259,10 +259,10 @@ func TestQuestionFactsRefusedInExternalClass(t *testing.T) {
 }
 
 // TestQuestionFactsCarryHostAndCountsOnly: lab facts reach the prompt as host
-// and counts; findings and candidates in facts refuse the item.
+// and counts only; the fact type has no findings or candidates to carry.
 func TestQuestionFactsCarryHostAndCountsOnly(t *testing.T) {
 	item := questionItem("Ist web-01 betroffen?")
-	item.Facts = questionFacts()
+	item.Question.Hosts = questionFacts()
 	nos := &fakeNOS{cfg: goodSettings(), items: []nosclient.WorkItem{item}}
 	h := newHarness(t, nos, &fakeChat{replies: []string{questionReply}})
 	if _, err := h.run(t, nil); err != nil {
@@ -271,26 +271,6 @@ func TestQuestionFactsCarryHostAndCountsOnly(t *testing.T) {
 	text := h.chat.reqs[0].Messages[0].Content
 	if !strings.Contains(text, "Host: web-01; Umgebung: lab") || strings.Contains(text, "Befund:") {
 		t.Errorf("facts block not as expected:\n%s", text)
-	}
-
-	for name, mutate := range map[string]func(*nosclient.Group){
-		"finding":   func(g *nosclient.Group) { g.Findings = labItem("h1:os").Group.Findings },
-		"candidate": func(g *nosclient.Group) { g.Candidates = labItem("h1:os").Group.Candidates },
-	} {
-		t.Run(name, func(t *testing.T) {
-			bad := questionItem("Ist web-01 betroffen?")
-			bad.Facts = questionFacts()
-			mutate(&bad.Facts[0])
-			nos := &fakeNOS{cfg: goodSettings(), items: []nosclient.WorkItem{bad}}
-			h := newHarness(t, nos, &fakeChat{replies: []string{questionReply}})
-			sum, err := h.run(t, nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(h.chat.reqs) != 0 || !slices.Contains(sum.Refusals, RefusedWork) {
-				t.Errorf("calls %d refusals %v", len(h.chat.reqs), sum.Refusals)
-			}
-		})
 	}
 }
 
@@ -314,24 +294,24 @@ func TestQuestionItemShapeRefused(t *testing.T) {
 		"too many fact hosts": func() nosclient.WorkItem {
 			it := questionItem("Ist web-01 betroffen?")
 			for i := 0; i <= prompt.MaxFactHosts; i++ {
-				it.Facts = append(it.Facts, questionFacts()...)
+				it.Question.Hosts = append(it.Question.Hosts, questionFacts()...)
 			}
 			return it
 		},
 		"too many fact ports": func() nosclient.WorkItem {
 			it := questionItem("Ist web-01 betroffen?")
-			it.Facts = questionFacts()
-			it.Facts[0].Ports = slices.Repeat([]nosclient.Port{{Number: 443, Protocol: "tcp"}}, prompt.MaxFactPorts+1)
+			it.Question.Hosts = questionFacts()
+			it.Question.Hosts[0].Ports = slices.Repeat([]nosclient.Port{{Number: 443, Protocol: "tcp"}}, prompt.MaxFactPorts+1)
 			return it
 		},
-		"fix item with question text": func() nosclient.WorkItem {
+		"fix item with question": func() nosclient.WorkItem {
 			it := labItem("h1:os")
-			it.Question = "Ist web-01 betroffen?"
+			it.Question = &nosclient.Question{Text: "Ist web-01 betroffen?"}
 			return it
 		},
-		"summary item with facts": func() nosclient.WorkItem {
+		"summary item with question": func() nosclient.WorkItem {
 			it := summaryItem()
-			it.Facts = questionFacts()
+			it.Question = &nosclient.Question{Text: "Ist web-01 betroffen?", Hosts: questionFacts()}
 			return it
 		},
 	}
