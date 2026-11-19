@@ -164,6 +164,19 @@ package is a protected path.
 Before a release, run each `make fuzz` target for at least an hour
 (`go test -run='^$' -fuzz=NAME -fuzztime=1h ./PKG`).
 
+The counts in this section come from the table above. Run these in the
+clone root to recount them (the table has 198 names; 98 + 4 = 102 are "no",
+so 96 are "yes"):
+
+```sh
+# all names in the table (198)
+grep -E '^\| `internal/' docs/implementation/security-tests.md | cut -d'|' -f3 | grep -o '`Fuzz[A-Za-z0-9_]*`' | wc -l
+# names in rows whose last cell is "no" (98)
+grep -E '^\| `internal/.*\| no \|$' docs/implementation/security-tests.md | grep -o '`Fuzz[A-Za-z0-9_]*`' | wc -l
+# names after "no:" in mixed rows, e.g. "yes: A; no: B" (4)
+grep -E '^\| `internal/' docs/implementation/security-tests.md | cut -d'|' -f4 | grep -o 'no: .*' | grep -o '`Fuzz[A-Za-z0-9_]*`' | wc -l
+```
+
 **Open:** 102 fuzz functions (the "no" rows; previously: 101, previously: 100, previously: 95, previously: 155, before that: 128, before that: 105, before that: 98) are not run by `make fuzz`,
 and CI runs no fuzz target at all, although the M10-3 plan in
 `docs/implementation/m10-plan.md` expects CI to run them briefly. The

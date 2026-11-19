@@ -67,7 +67,7 @@ Other targets:
   in the `Makefile`): 96 targets, 20 seconds each for the first 13 and 10
   seconds each for the other 83 (before: "for 20 seconds each"), a smoke
   run, not a campaign. 102 of the 198 `Fuzz*` functions are not in that
-  list (before: "100 of the 196"); run one with
+  list (previously: "100 of the 196"); run one with
   `go test -run='^$' -fuzz='^FuzzName$' ./path/`
   (`docs/implementation/security-tests.md` has the inventory).
 - `make test-integration`: runs `test/integration` against SSH test VMs
@@ -202,8 +202,10 @@ With tokens in it the file must not be readable by others (`chmod 0640`,
 owner `root:nebula-server`, as the installer creates it). Check with
 `nebula-server -config /etc/nebula/server.json -notify-test`. The full list
 of notified events is in [`docs/spec/13-notifications.md`](../spec/13-notifications.md);
-the examples here (a host key mismatch, an Ops State change, an operation
-that finished with failed hosts, a locked executor) are not complete.
+the examples here are not complete (previously: "Today a host key mismatch
+is notified (once per block), an Ops State change (worse or recovered), an
+operation that finished with failed hosts, and the executor found locked
+after a restart.").
 
 ## What exists and what does not
 
