@@ -84,6 +84,12 @@ func TestDecodeAcceptsValidAnswer(t *testing.T) {
 			want: Answer{InScope: false, Language: "en", Steps: []Step{}, Citations: []string{}},
 		},
 		{
+			name: "empty step text is valid (ADR 0014 D4 gives only a maximum)",
+			raw:  with(t, `"Run the command on the NOS host."`, `""`),
+			want: Answer{InScope: true, Language: "en", Summary: "Pin the host.",
+				Steps: []Step{{Command: "nebula host pin host-01", Where: WhereNebulaHost}}, Citations: []string{"c1"}},
+		},
+		{
 			name: "step without command and where",
 			raw:  `{"in_scope":true,"language":"en","summary":"s","steps":[{"text":"Check the log."}],"citations":["c2"]}`,
 			want: Answer{InScope: true, Language: "en", Summary: "s",

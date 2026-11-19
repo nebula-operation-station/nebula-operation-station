@@ -24,7 +24,7 @@ func checkAnswer(t *testing.T, a Answer) {
 		t.Fatalf("accepted %d steps", len(a.Steps))
 	}
 	for _, s := range a.Steps {
-		if len(s.Text) == 0 || len(s.Text) > MaxStepTextBytes || !utf8.ValidString(s.Text) {
+		if len(s.Text) > MaxStepTextBytes || !utf8.ValidString(s.Text) {
 			t.Fatalf("accepted a step text of %d bytes", len(s.Text))
 		}
 		if len(s.Command) > MaxCommandBytes || strings.ContainsAny(s.Command, "\r\n") {
