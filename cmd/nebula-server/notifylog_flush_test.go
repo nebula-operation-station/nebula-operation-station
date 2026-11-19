@@ -107,27 +107,52 @@ func TestShutdownFlushWithoutLogIsNoOp(t *testing.T) {
 	}
 }
 
+// slowRecorder stores each record after delay (honouring its context), so a
+// batch takes delay times its size in total.
+type slowRecorder struct {
+	delay time.Duration
+	mu    sync.Mutex
+	n     int
+}
+
+func (s *slowRecorder) Append(ctx context.Context, _ notifylog.Record) (int64, error) {
+	t := time.NewTimer(s.delay)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.n++
+	return int64(s.n), nil
+}
+
+func (s *slowRecorder) count() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.n
+}
+
 // TestShutdownFlushCoversWholeHeldBatch: the records of one held batch (the
 // vulnerability digest hands its holds over in one call) are all in the log
-// when the flush returns, even though the write is still in flight when the
-// flush starts.
+// when the flush returns. The batch takes 6 seconds in total, longer than one
+// 5-second record deadline, so the flush must wait for the whole batch and no
+// record may be lost to a deadline shared by the batch.
 func TestShutdownFlushCoversWholeHeldBatch(t *testing.T) {
-	release := make(chan struct{})
-	rec := &blockingRecorder{release: release}
+	const size = 3
+	rec := &slowRecorder{delay: 2 * time.Second}
 	n := notify.NewWithSenders(flushTestLogger(), nil, flushTestSender{})
 	n.SetRecorder(rec)
-	batch := make([]notify.Event, 3)
+	batch := make([]notify.Event, size)
 	for i := range batch {
 		batch[i] = notify.Event{Kind: notify.KindTest, Reason: "x", Time: time.Unix(1791960000, 0)}
 	}
 	n.RecordHeld(context.Background(), batch...)
 
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		close(release)
-	}()
 	flushNotifyRecords(n, flushTestLogger(), notifyFlushTimeout)
-	if got := rec.count(); got != len(batch) {
-		t.Fatalf("stored records after flush = %d, want %d", got, len(batch))
+	if got := rec.count(); got != size {
+		t.Fatalf("stored records after flush = %d, want %d", got, size)
 	}
 }
