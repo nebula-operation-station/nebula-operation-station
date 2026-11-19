@@ -46,10 +46,6 @@ const (
 	maxOpsAgentChallenges = 32
 )
 
-// opsAgentCorePrompt is the agent's fixed core prompt shown on the settings
-// page. This build carries none, so the page shows no prompt.
-const opsAgentCorePrompt = ""
-
 // errOpsAgentChallengeFull: too many begun changes.
 var errOpsAgentChallengeFull = errors.New("too many ops agent setting changes in progress")
 
