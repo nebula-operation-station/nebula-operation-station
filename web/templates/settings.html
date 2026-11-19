@@ -126,6 +126,65 @@
 </section>
 {{end}}
 
+{{with .Settings.OpsAgent}}
+<section class="panel" id="ops-agent">
+  <h2>Ops-Agent</h2>
+  <p class="hint">The ops agent drafts fix cards, a summary and answers for admins from the server’s state. The LLM credential is never stored in NOS; it stays on the agent host.</p>
+  {{if .Error}}
+  <p class="message message--error">{{.Error}}</p>
+  {{else}}
+  {{if .Locked}}
+  <p class="message message--error">{{.Locked}}</p>
+  {{end}}
+  {{if not .Maintainer}}
+  <p class="hint">Only the maintainer (admin) can change these settings, with a security key.</p>
+  {{end}}
+  <form id="ops-agent-form" class="form" novalidate data-version="{{.Config.Version}}" data-url="{{.Config.BaseURL}}">
+    <fieldset{{if or (not .Maintainer) .Locked}} disabled{{end}}>
+      <legend>Agent</legend>
+      <label class="choice"><input type="checkbox" id="ops-agent-enabled" name="enabled"{{if .Config.Enabled}} checked{{end}}> Ops agent enabled</label>
+      <label for="ops-agent-url">LLM base URL (OpenAI-compatible)</label>
+      <input id="ops-agent-url" name="base_url" class="mono" maxlength="{{.MaxBaseURL}}" autocomplete="off" spellcheck="false" value="{{.Config.BaseURL}}">
+      <p class="message message--error">The base URL is security-relevant: changing it redirects the agent’s prompt to another endpoint. The change needs your explicit confirmation and a security key, and it is audited.</p>
+      <label class="choice"><input type="checkbox" id="ops-agent-confirm-url" name="confirm_url_change"> I confirm the change of the base URL</label>
+      <label for="ops-agent-model">Model</label>
+      <input id="ops-agent-model" name="model" class="mono" maxlength="{{.MaxModel}}" autocomplete="off" spellcheck="false" value="{{.Config.Model}}">
+      {{if .CanCopy}}
+      <button type="button" id="ops-agent-copy" class="button button--secondary" data-copy-url="{{.CopyURL}}" data-copy-model="{{.CopyModel}}">Vom Vuln-Agenten kopieren</button>
+      {{end}}
+      <label class="choice"><input type="checkbox" id="ops-agent-plain" name="allow_plain_http"{{if .Config.AllowPlainHTTP}} checked{{end}}> Allow plain http (not https) for the base URL</label>
+      <label for="ops-agent-data-class">Data class</label>
+      <select id="ops-agent-data-class" name="data_class">
+        <option value="lab"{{if eq .Config.DataClass "lab"}} selected{{end}}>lab</option>
+        <option value="external"{{if eq .Config.DataClass "external"}} selected{{end}}>external</option>
+      </select>
+      <p class="hint">Datenklasse. lab: Hostnamen und CVE-IDs gehen an das LLM, nur über den Lab-only-Dialer; external: nur Zähler je Tier.</p>
+      <label for="ops-agent-language">Assessment language</label>
+      <select id="ops-agent-language" name="language">
+        <option value="de"{{if eq .Config.Language "de"}} selected{{end}}>Deutsch</option>
+        <option value="en"{{if eq .Config.Language "en"}} selected{{end}}>English</option>
+      </select>
+      <label for="ops-agent-instructions">Operator instructions (added after the core prompt, at most 4 KiB)</label>
+      <textarea id="ops-agent-instructions" name="operator_instructions" rows="6" maxlength="{{.MaxInstructions}}" spellcheck="false">{{.Config.Instructions}}</textarea>
+    </fieldset>
+    <h3>Core prompt (fixed in the agent, read-only)</h3>
+    {{if .CorePrompt}}
+    <pre class="mono" id="ops-agent-core">{{.CorePrompt}}</pre>
+    {{else}}
+    <p class="hint">This build does not include the agent’s core prompt.</p>
+    {{end}}
+    <p class="hint">{{if .Config.Version}}Version {{.Config.Version}}, saved by {{.Config.UpdatedBy}} {{.Updated}}.{{else}}Never saved: the defaults apply.{{end}}</p>
+    <p id="ops-agent-message" class="message" role="status" aria-live="polite"></p>
+    {{if and .Maintainer (not .Locked)}}
+    <div class="actions">
+      <button type="submit" id="ops-agent-submit" class="button">Save with security key</button>
+    </div>
+    {{end}}
+  </form>
+  {{end}}
+</section>
+{{end}}
+
 <section class="panel">
   <h2>Inventory tools</h2>
   <div class="actions actions--stack">
