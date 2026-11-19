@@ -17,6 +17,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsfacts"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsnotes"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnnotify"
 )
 
 // suggSender records the notification events it accepts.
@@ -55,9 +56,13 @@ func suggFixture(t *testing.T, dataDir string, enabled bool) (*opsSuggestEvents,
 	}
 	rec := &suggSender{}
 	n := notify.NewWithSenders(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, rec)
+	vn, err := vulnnotify.New(vulnnotify.Config{Sink: n})
+	if err != nil {
+		t.Fatal(err)
+	}
 	st := &fakeTriggerSettings{row: opsconfig.Row{Settings: opsconfig.Settings{Enabled: enabled}}}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return newOpsSuggestions(st, dataDir, suggTestBase, n, log), rec
+	return newOpsSuggestions(st, dataDir, suggTestBase, vn, log), rec
 }
 
 // suggNote returns an accepted note of kind for group ref whose snapshot has
@@ -76,10 +81,18 @@ func suggNote(t *testing.T, id int64, kind opsnotes.Kind, ref string, tiers []op
 		Body: opsnotes.Body{Summary: marker, Urgency: marker}}
 }
 
-// accept runs the hook for n and waits for its background work.
+// accept runs the hook for n and then handles the queued notes, as the worker
+// would, before it returns.
 func accept(s *opsSuggestEvents, n opsnotes.Note) {
 	s.NoteAccepted(n)
-	s.bg.Wait()
+	for {
+		select {
+		case j := <-s.queue:
+			s.handle(context.Background(), j)
+		default:
+			return
+		}
+	}
 }
 
 // TestSuggestionSentOnceForHighFixNote: an accepted fix note at tier high sends

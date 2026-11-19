@@ -81,6 +81,12 @@ const (
 	// MaxTrackedFindings bounds the per-finding de-duplication state; the
 	// oldest entries are dropped first.
 	MaxTrackedFindings = 100_000
+	// MaxTrackedTriggers bounds the trigger's episode marks. They have their
+	// own eviction order, so they never push out a vuln.* de-duplication mark.
+	MaxTrackedTriggers = 100_000
+	// MaxTrackedSuggestionKeys bounds the remembered suggestion episodes; the
+	// oldest are dropped first.
+	MaxTrackedSuggestionKeys = 100_000
 	// MaxPending bounds the messages queued for another delivery attempt
 	// after no provider accepted them; the oldest are dropped first.
 	MaxPending = 100
@@ -176,16 +182,30 @@ type Notifier struct {
 	heldLog []notify.Event
 	// trigger is called (outside n.mu) when a finding newly enters tier high
 	// or critical (ADR 0016 D3). Nil does nothing. See SetTrigger.
-	trigger func()
+	trigger func() bool
+	// triggered is the trigger's own episode state, with its own eviction
+	// order (triggerOrder); see triggerAlert.
+	triggered    map[findingEvent]int64
+	triggerOrder []findingEvent
+	// triggerPending is set when the trigger was due but its callback
+	// reported that it did not run; Flush retries it.
+	triggerPending bool
+	// suggested holds the episode keys of the delivered, held or queued
+	// opsagent.suggestion_new messages; suggestOrder is their eviction order.
+	suggested    map[string]bool
+	suggestOrder []string
 }
 
 // SetTrigger sets the callback that Findings calls when a finding newly
 // enters tier high or critical in its episode (once per finding, episode and
 // tier; an escalation to critical inside a high episode calls it again). The
-// callback carries no data and must not block; a failure in it is the
-// callback's to log and never changes what Findings sends. Call SetTrigger
-// before the notifier is used concurrently; nil removes it.
-func (n *Notifier) SetTrigger(f func()) { n.trigger = f }
+// callback carries no data and must not block; it returns false when it did
+// not run (throttled, agent off, settings unreadable, touch failed). Such a
+// trigger is kept pending and the callback is called again by the next Flush.
+// A failure in the callback is the callback's to log and never changes what
+// Findings sends. Call SetTrigger before the notifier is used concurrently;
+// nil removes it.
+func (n *Notifier) SetTrigger(f func() bool) { n.trigger = f }
 
 // New returns a Notifier.
 func New(cfg Config) (*Notifier, error) {
@@ -195,7 +215,7 @@ func New(cfg Config) (*Notifier, error) {
 	n := &Notifier{sink: cfg.Sink, now: cfg.Now, hermesMax: cfg.HermesStaleAfter,
 		sources: map[string]bool{}, notified: map[findingEvent]int64{},
 		feedStale: map[string]time.Time{}, feedRegr: map[string]bool{}, held: map[string]int{},
-		inflight: map[alertKey]pendingRef{}}
+		inflight: map[alertKey]pendingRef{}, triggered: map[findingEvent]int64{}, suggested: map[string]bool{}}
 	if n.now == nil {
 		n.now = time.Now
 	}
@@ -303,10 +323,30 @@ func (n *Notifier) Findings(ctx context.Context, fs []vulnstore.Finding) int {
 	}
 	n.mu.Unlock()
 	sent := n.send(ctx, out)
-	if touch && n.trigger != nil {
-		n.trigger()
-	}
+	n.runTrigger(touch)
 	return sent
+}
+
+// runTrigger calls the trigger when it is due or pending. A callback that
+// reports it did not run leaves the trigger pending, so the next Flush calls
+// it again: an episode is never lost to a throttle, to agent-off or to a
+// failed settings read. The callback runs outside n.mu.
+func (n *Notifier) runTrigger(due bool) {
+	if n.trigger == nil {
+		return
+	}
+	n.mu.Lock()
+	run := due || n.triggerPending
+	n.triggerPending = false
+	n.mu.Unlock()
+	if !run {
+		return
+	}
+	if !n.trigger() {
+		n.mu.Lock()
+		n.triggerPending = true
+		n.mu.Unlock()
+	}
 }
 
 // TriggerFindings calls the trigger when one of fs newly enters tier high or
@@ -328,9 +368,7 @@ func (n *Notifier) TriggerFindings(fs []vulnstore.Finding) {
 		}
 	}
 	n.mu.Unlock()
-	if touch {
-		n.trigger()
-	}
+	n.runTrigger(touch)
 }
 
 // triggerAlert reports whether f newly enters tier high or critical for the
@@ -352,11 +390,29 @@ func (n *Notifier) triggerAlert(f vulnstore.Finding) bool {
 		return false
 	}
 	fe := findingEvent{key: f.Key, kind: kind}
-	if ep, ok := n.notified[fe]; ok && f.Episode <= ep {
+	if ep, ok := n.triggered[fe]; ok && f.Episode <= ep {
 		return false
 	}
-	n.markNotified(fe, f.Episode)
+	n.markTriggered(fe, f.Episode)
 	return true
+}
+
+// markTriggered records the episode the trigger was due for. It has its own
+// bounded order, separate from the vuln.* marks of markNotified. Caller holds
+// n.mu.
+func (n *Notifier) markTriggered(fe findingEvent, ep int64) {
+	if old, ok := n.triggered[fe]; ok {
+		if ep > old {
+			n.triggered[fe] = ep
+		}
+		return
+	}
+	for len(n.triggerOrder) >= MaxTrackedTriggers {
+		delete(n.triggered, n.triggerOrder[0])
+		n.triggerOrder = n.triggerOrder[1:]
+	}
+	n.triggered[fe] = ep
+	n.triggerOrder = append(n.triggerOrder, fe)
 }
 
 // findingAlert queues (kind, f) unless its episode was delivered or is
@@ -576,6 +632,9 @@ func (n *Notifier) Flush(ctx context.Context) int {
 	n.foldIfFull(n.now())
 	n.mu.Unlock()
 	n.flushHeld(ctx)
+	// A trigger deferred by a throttle, agent-off or a failed settings read
+	// is retried on this tick (ADR 0016 D3).
+	n.runTrigger(false)
 	return sent
 }
 

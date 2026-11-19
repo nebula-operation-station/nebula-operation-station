@@ -660,10 +660,13 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		// wired only with the ops token, like the API that reports them.
 		var opsSugg *opsSuggestEvents
 		if _, hasOpsToken := cfg.API.OpsToken(); hasOpsToken {
-			opsSugg, err = wireOpsSuggestions(db, cfg.DataDir, cfg.PublicOrigin, notifier, log)
+			// The messages go through the vulnerability notifier, which owns
+			// the hourly limit and digest (ADR 0016 D10).
+			opsSugg, err = wireOpsSuggestions(db, cfg.DataDir, cfg.PublicOrigin, vuln.notifier, log)
 			if err != nil {
 				return err
 			}
+			bg.Go(func() { opsSugg.Run(connCtx) })
 		}
 		oh, err := newOpsAPI(cfg.API, db, opsNotes, store.List, log, opsSugg.acceptedHook())
 		if err != nil {

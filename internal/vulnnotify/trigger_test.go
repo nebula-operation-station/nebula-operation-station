@@ -7,13 +7,82 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
 )
 
-// triggerCount is a trigger callback that counts its calls.
-type triggerCount struct{ n int }
+// triggerCount is a trigger callback that counts its calls. It reports that
+// it ran, unless refuse is set (a throttle, agent-off or failed settings read).
+type triggerCount struct {
+	n      int
+	refuse bool
+}
 
-func (c *triggerCount) touch() { c.n++ }
+func (c *triggerCount) touch() bool {
+	c.n++
+	return !c.refuse
+}
+
+// TestTriggerDeferredWhenItDoesNotRun: a trigger whose callback reports it did
+// not run keeps the episode pending, and the next Flush calls it again. Once it
+// ran, Flush does not call it again.
+func TestTriggerDeferredWhenItDoesNotRun(t *testing.T) {
+	ctx := context.Background()
+	n, _, c := newTriggerTest(t)
+	c.refuse = true
+	n.Findings(ctx, []vulnstore.Finding{finding(1, 1, vulnstore.TierHigh, false)})
+	if c.n != 1 {
+		t.Fatalf("trigger called %d times, want 1", c.n)
+	}
+	c.refuse = false
+	n.Flush(ctx)
+	if c.n != 2 {
+		t.Fatalf("Flush retried the trigger %d times in total, want 2", c.n)
+	}
+	n.Flush(ctx)
+	if c.n != 2 {
+		t.Fatalf("trigger called again after it ran (%d), want no retry", c.n)
+	}
+}
+
+// TestTriggerDeferralKeepsEpisodeAcrossTickFindingsAndRead: the episode of a
+// finding that entered high while the trigger was refused is not lost, also
+// when the high read (TriggerFindings) runs on a later tick.
+func TestTriggerDeferralKeepsEpisodeAcrossTickFindingsAndRead(t *testing.T) {
+	ctx := context.Background()
+	n, _, c := newTriggerTest(t)
+	c.refuse = true
+	f := finding(2, 1, vulnstore.TierCritical, false)
+	n.TriggerFindings([]vulnstore.Finding{f})
+	c.refuse = false
+	n.TriggerFindings([]vulnstore.Finding{f}) // same episode: no new due, but pending runs
+	if c.n != 2 {
+		t.Fatalf("trigger called %d times, want 2 (refused, then the deferred call)", c.n)
+	}
+	n.Flush(ctx)
+	if c.n != 2 {
+		t.Fatalf("trigger called %d times after the episode was delivered, want 2", c.n)
+	}
+}
+
+// TestTriggerMarksDoNotEvictVulnMarks: the trigger's episode marks have their
+// own bound, so they never push out a vuln.* de-duplication mark.
+func TestTriggerMarksDoNotEvictVulnMarks(t *testing.T) {
+	n, _, _ := newTest(t)
+	fe := findingEvent{key: finding(1, 1, vulnstore.TierHigh, true).Key, kind: KindKEVNew}
+	n.markNotified(fe, 1)
+	for i := 0; i < MaxTrackedTriggers+5; i++ {
+		var k vulnfinding.Key
+		k[0], k[1], k[2] = byte(i), byte(i>>8), byte(i>>16)
+		n.markTriggered(findingEvent{key: k, kind: kindTriggerHigh}, 1)
+	}
+	if _, ok := n.notified[fe]; !ok {
+		t.Fatal("vuln.kev_new mark evicted by trigger marks")
+	}
+	if len(n.triggered) > MaxTrackedTriggers {
+		t.Fatalf("trigger marks %d exceed the bound %d", len(n.triggered), MaxTrackedTriggers)
+	}
+}
 
 func newTriggerTest(t *testing.T) (*Notifier, *sink, *triggerCount) {
 	t.Helper()

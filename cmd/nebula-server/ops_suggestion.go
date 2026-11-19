@@ -30,9 +30,31 @@ const (
 	opsSuggestionStateFile = "suggestions.json"
 	// maxOpsSuggestionState bounds reading that file.
 	maxOpsSuggestionState = 16 << 20
-	// opsSuggestionSendTimeout bounds one suggestion send, including retries.
+	// opsSuggestionSendTimeout bounds the handling of one accepted note,
+	// including the sends and their retries.
 	opsSuggestionSendTimeout = 2 * time.Minute
+	// opsSuggestionQueue bounds the accepted notes waiting for the worker. An
+	// accepted note that finds the queue full is not handled (and logged).
+	opsSuggestionQueue = 64
 )
+
+// opsSuggestSink is the part of the notifier the suggestions use. The messages
+// go through the notifier's hourly limit and digest; *vulnnotify.Notifier
+// implements it.
+type opsSuggestSink interface {
+	Suggestion(ctx context.Context, key string, e notify.Event) int
+	SuggestionKeys() []string
+	RestoreSuggestions(keys []string)
+	ForgetSuggestions(keys []string)
+}
+
+// opsSuggestJob is one accepted fix note, reduced to what the worker needs.
+type opsSuggestJob struct {
+	noteID int64
+	host   string // the host label from the note's own projection
+	group  string // hashed group reference (see groupKey)
+	tier   opsfacts.Tier
+}
 
 // opsSuggestEvents sends opsagent.suggestion_new (ADR 0016 D10) when an accepted
 // fix note's group is at tier critical or high. The message is the notify
@@ -42,51 +64,54 @@ const (
 // the same group has a lower top tier: the episodes of the tiers above that
 // one are forgotten, so a later return to such a tier is a new episode.
 //
+// Accepted notes are handled by one worker (Run), in order, from a queue of
+// opsSuggestionQueue entries. The worker runs on the server's context, so
+// shutdown stops it; the API hook never waits for a provider.
+//
 // Open: the mute per host ("Stummschaltung je Host", ADR 0016 D10) does not
 // exist in this repository yet, so a suggestion is not muted per host here.
 type opsSuggestEvents struct {
-	gate      *notify.SuggestionGate // nil when the NOS base URL is not usable
+	tmpl      *notify.SuggestionTemplate // nil when the NOS base URL is not usable
+	sink      opsSuggestSink
 	settings  opsSettingsReader
 	statePath string
 	log       *slog.Logger
+	queue     chan opsSuggestJob
 
-	// noteMu serialises the accepted notes, so the episode bookkeeping of one
-	// group is applied in order.
-	noteMu sync.Mutex
-	// bg tracks the background work started by NoteAccepted (tests wait on it).
-	bg sync.WaitGroup
 	// saveMu serialises writes of statePath.
 	saveMu sync.Mutex
 }
 
 // newOpsSuggestions returns the suggestions for the server. dataDir holds the
 // suggestion state (in the notes directory); publicOrigin is the NOS base URL
-// that the links start with. A publicOrigin that is not usable turns the
-// suggestions off with a log line.
-func newOpsSuggestions(settings opsSettingsReader, dataDir, publicOrigin string, n *notify.Notifier, log *slog.Logger) *opsSuggestEvents {
+// that the links start with; sink is the server's notifier. A publicOrigin
+// that is not usable turns the suggestions off with a log line.
+func newOpsSuggestions(settings opsSettingsReader, dataDir, publicOrigin string, sink opsSuggestSink, log *slog.Logger) *opsSuggestEvents {
 	s := &opsSuggestEvents{
+		sink:      sink,
 		settings:  settings,
 		statePath: filepath.Join(dataDir, opsNotesDir, opsSuggestionStateFile),
 		log:       log,
+		queue:     make(chan opsSuggestJob, opsSuggestionQueue),
 	}
-	g, err := notify.NewSuggestionGate(n, publicOrigin, time.Now)
+	tpl, err := notify.NewSuggestionTemplate(publicOrigin)
 	if err != nil {
 		log.Error("ops agent suggestions disabled: the NOS base URL is not usable", "error", err.Error())
 		return s
 	}
-	s.gate = g
+	s.tmpl = tpl
 	s.restore()
 	return s
 }
 
 // wireOpsSuggestions returns the suggestions on the server's database, reading
 // the ops settings from db. Call it only when the ops token is configured.
-func wireOpsSuggestions(db *sql.DB, dataDir, publicOrigin string, n *notify.Notifier, log *slog.Logger) (*opsSuggestEvents, error) {
+func wireOpsSuggestions(db *sql.DB, dataDir, publicOrigin string, sink opsSuggestSink, log *slog.Logger) (*opsSuggestEvents, error) {
 	st, err := opsconfig.NewStore(db, time.Now)
 	if err != nil {
 		return nil, fmt.Errorf("ops agent suggestions: %w", err)
 	}
-	return newOpsSuggestions(st, dataDir, publicOrigin, n, log), nil
+	return newOpsSuggestions(st, dataDir, publicOrigin, sink, log), nil
 }
 
 // acceptedHook returns the ops API's OnNoteAccepted hook, or nil when s is nil
@@ -124,17 +149,18 @@ func (s *opsSuggestEvents) restore() {
 		s.log.Error("ops agent suggestions: state unusable, starting empty", "error", err)
 		return
 	}
-	s.gate.Restore(st.Keys)
+	s.sink.RestoreSuggestions(st.Keys)
 }
 
 // save writes the remembered episodes to statePath. A failed write is logged;
-// the episodes stay in memory and the next change writes them again.
+// the episodes stay in memory and the next change writes them again. Held
+// episodes are part of the state too, so they are not sent after a restart.
 func (s *opsSuggestEvents) save() {
 	s.saveMu.Lock()
 	defer s.saveMu.Unlock()
 	data, err := json.Marshal(struct {
 		Keys []string `json:"keys"`
-	}{Keys: s.gate.Keys()})
+	}{Keys: s.sink.SuggestionKeys()})
 	if err == nil {
 		err = writeFileAtomic(s.statePath, data)
 	}
@@ -143,13 +169,27 @@ func (s *opsSuggestEvents) save() {
 	}
 }
 
-// NoteAccepted is the ops API's OnNoteAccepted hook. It runs in the background,
-// so the API answer never waits for the providers. For a fix note it ends the
-// episodes above the group's new top tier and, when that tier is critical or
-// high, sends opsagent.suggestion_new (once per episode, inside the gate's
-// limit and the normal send path).
+// Run is the worker of the accepted notes. It handles the queued notes one at a
+// time, in order, until ctx is done; notes still queued then are dropped, as
+// the server is stopping. Start it once, in the server's joined goroutines.
+func (s *opsSuggestEvents) Run(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case j := <-s.queue:
+			s.handle(ctx, j)
+		}
+	}
+}
+
+// NoteAccepted is the ops API's OnNoteAccepted hook. It parses the note and
+// queues it for the worker without waiting; a full queue drops the note and
+// logs it. For a fix note the worker ends the episodes above the group's new
+// top tier and, when that tier is critical or high, sends
+// opsagent.suggestion_new (once per episode, inside the notifier's limit).
 func (s *opsSuggestEvents) NoteAccepted(n opsnotes.Note) {
-	if n.Kind != opsnotes.KindFix || s.gate == nil {
+	if n.Kind != opsnotes.KindFix || s.tmpl == nil {
 		return
 	}
 	var p opsfacts.LabProjection
@@ -157,39 +197,43 @@ func (s *opsSuggestEvents) NoteAccepted(n opsnotes.Note) {
 		s.log.Error("ops agent suggestions: note snapshot unreadable", "note", n.ID, "error", err)
 		return
 	}
-	tier := topTier(p.Findings)
-	group := groupKey(n.Ref)
-	s.bg.Go(func() {
-		s.noteMu.Lock()
-		defer s.noteMu.Unlock()
-		if ended := endedEpisodes(group, tier); len(ended) > 0 {
-			s.gate.Forget(ended)
-			s.save()
-		}
-		if tier != opsfacts.TierCritical && tier != opsfacts.TierHigh {
-			return
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), opsSuggestionSendTimeout)
-		defer cancel()
-		row, err := s.settings.Get(ctx)
-		if err != nil {
-			s.log.Error("ops agent suggestions: read settings", "error", err)
-			return
-		}
-		if !row.Enabled {
-			return
-		}
-		ev := notify.SuggestionEvent{Key: episodeKey(group, tier), Host: p.Host.Label, Tier: string(tier),
-			English: row.Language == opsconfig.LanguageEN, NoteID: n.ID}
-		d, err := s.gate.Submit(ctx, ev)
-		if err != nil {
-			s.log.Error("ops agent suggestions: refused", "note", n.ID, "error", err)
-			return
-		}
-		if d == notify.DecisionSent {
-			s.save()
-		}
-	})
+	j := opsSuggestJob{noteID: n.ID, host: p.Host.Label, group: groupKey(n.Ref), tier: topTier(p.Findings)}
+	select {
+	case s.queue <- j:
+	default:
+		s.log.Warn("ops agent suggestions: queue full, note not handled", "note", n.ID)
+	}
+}
+
+// handle applies one accepted note: the episodes above its tier end, and a
+// critical or high tier sends the suggestion when the agent is on.
+func (s *opsSuggestEvents) handle(ctx context.Context, j opsSuggestJob) {
+	ctx, cancel := context.WithTimeout(ctx, opsSuggestionSendTimeout)
+	defer cancel()
+	if ended := endedEpisodes(j.group, j.tier); len(ended) > 0 {
+		s.sink.ForgetSuggestions(ended)
+		s.save()
+	}
+	if j.tier != opsfacts.TierCritical && j.tier != opsfacts.TierHigh {
+		return
+	}
+	row, err := s.settings.Get(ctx)
+	if err != nil {
+		s.log.Error("ops agent suggestions: read settings", "error", err)
+		return
+	}
+	if !row.Enabled {
+		return
+	}
+	key := episodeKey(j.group, j.tier)
+	ev, err := s.tmpl.Event(notify.SuggestionEvent{Key: key, Host: j.host, Tier: string(j.tier),
+		English: row.Language == opsconfig.LanguageEN, NoteID: j.noteID}, time.Now())
+	if err != nil {
+		s.log.Error("ops agent suggestions: refused", "note", j.noteID, "error", err)
+		return
+	}
+	s.sink.Suggestion(ctx, key, ev)
+	s.save()
 }
 
 // groupKey is the hashed group reference. The hash keeps the note's group

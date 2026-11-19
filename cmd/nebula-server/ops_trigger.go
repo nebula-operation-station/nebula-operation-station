@@ -68,31 +68,36 @@ func newOpsTrigger(settings opsSettingsReader, path string, now func() time.Time
 	return &opsTrigger{settings: settings, path: path, now: now, log: log}
 }
 
-// Touch is the trigger callback of internal/vulnnotify. It returns nothing:
-// a settings read or a touch that fails is logged, and the caller's findings
-// upload and notifications do not depend on it.
-func (t *opsTrigger) Touch() {
+// Touch is the trigger callback of internal/vulnnotify. It returns true when
+// the trigger file was touched. It returns false when the touch did not happen
+// (a settings read failed, the agent is off, the once-per-minute throttle holds
+// it, or the file could not be touched); the notifier then keeps the trigger
+// pending and calls Touch again on its next tick, so the episode is not lost.
+// A failure is logged and never changes the findings upload or the messages.
+func (t *opsTrigger) Touch() bool {
 	ctx, cancel := context.WithTimeout(context.Background(), opsTriggerSettingsTimeout)
 	defer cancel()
 	row, err := t.settings.Get(ctx)
 	if err != nil {
 		t.log.Error("ops agent trigger: read settings", "error", err)
-		return
+		return false
 	}
 	if !row.Enabled {
-		return
+		return false
 	}
 	t.mu.Lock()
 	now := t.now()
 	if t.touched && now.Sub(t.lastTouch) < opsTriggerInterval {
 		t.mu.Unlock()
-		return
+		return false
 	}
 	t.touched, t.lastTouch = true, now
 	t.mu.Unlock()
 	if err := touchTrigger(t.path); err != nil {
 		t.log.Warn("ops agent trigger not touched", "error", err)
+		return false
 	}
+	return true
 }
 
 // touchTrigger opens the trigger file for writing and closes it: systemd's path
