@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"math"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -15,13 +16,21 @@ import (
 // longer means the host's bytes were quoted back without a limit.
 const fuzzSSHErrMax = 512
 
-// fuzzSSHMarker is a 16-byte marker used in seeds to check that a quoted
-// input fragment stays bounded in the error text.
-const fuzzSSHMarker = "MARKERMARKER0016"
+// fuzzSSHLongPhase is a phase several KiB long. Parsers that quote the host's
+// phase into an error without a limit produce an error far above
+// fuzzSSHErrMax, so this seed exercises the error bound for real.
+var fuzzSSHLongPhase = strings.Repeat("P", 4096)
 
 // fuzzSSHActions maps the fuzzed selector byte to an action ID. The third
 // entry is not a telemetry action: it must yield no samples and no error.
 var fuzzSSHActions = [...]string{"host.metrics", "filesystem.list", "gpu.status"}
+
+// fuzzSSHMetrics lists the metric kinds each telemetry action may yield.
+// filesystem.list only describes mounts, so it may yield disk and nothing else.
+var fuzzSSHMetrics = map[string][]string{
+	"host.metrics":    {TelemetryMetricCPU, TelemetryMetricRAM, TelemetryMetricDisk},
+	"filesystem.list": {TelemetryMetricDisk},
+}
 
 // fuzzSSHHostID is the host ID every fuzz target carries; errors must name it.
 const fuzzSSHHostID = "host-fuzz"
@@ -80,10 +89,10 @@ func fuzzSSHSeeds(f *testing.F) {
 		{0, []byte{}},
 		{1, []byte{}},
 		{0, []byte(`{"format":"other","phase":"done"}`)},
-		// A 16-byte marker inside an invalid phase: the error may name the
-		// phase but must stay within fuzzSSHErrMax.
-		{0, []byte(`{"format":"host-metrics-v1","phase":"` + fuzzSSHMarker + `"}`)},
-		{1, []byte(`{"format":"fs-list-v1","phase":"` + fuzzSSHMarker + `"}`)},
+		// A several-KiB invalid phase: the error may name the phase but must
+		// stay within fuzzSSHErrMax.
+		{0, []byte(`{"format":"host-metrics-v1","phase":"` + fuzzSSHLongPhase + `"}`)},
+		{1, []byte(`{"format":"fs-list-v1","phase":"` + fuzzSSHLongPhase + `"}`)},
 		// Unknown action selector.
 		{2, fuzzSSHMetricsDoc("done", "25", "1 2", "/\t1\t2")},
 	}
@@ -96,11 +105,18 @@ func fuzzSSHSeeds(f *testing.F) {
 // must hold, whatever the host sent.
 func fuzzSSHChecks(t *testing.T, action string, target TelemetryTarget, samples []TelemetrySample, err error) {
 	t.Helper()
+	// The non-telemetry action must yield neither samples nor an error.
+	if action == "gpu.status" {
+		if err != nil || len(samples) != 0 {
+			t.Fatalf("non-telemetry action %s: err=%v samples=%+v, want none", action, err, samples)
+		}
+		return
+	}
 	if err != nil {
 		if samples != nil {
 			t.Fatalf("error %v with samples %+v", err, samples)
 		}
-		if !strings.Contains(err.Error(), fuzzSSHHostID) && action != "gpu.status" {
+		if !strings.Contains(err.Error(), fuzzSSHHostID) {
 			t.Fatalf("error does not name the host: %q", err.Error())
 		}
 		if len(err.Error()) > fuzzSSHErrMax {
@@ -108,20 +124,20 @@ func fuzzSSHChecks(t *testing.T, action string, target TelemetryTarget, samples 
 		}
 		return
 	}
-	limit := map[string]int{"host.metrics": 3, "filesystem.list": 1}[action]
-	if action == "gpu.status" && len(samples) != 0 {
-		t.Fatalf("unknown action produced samples: %+v", samples)
+	allowed, ok := fuzzSSHMetrics[action]
+	if !ok {
+		t.Fatalf("no metric kinds declared for action %q", action)
 	}
-	if len(samples) > limit {
-		t.Fatalf("%s: %d samples, at most %d allowed", action, len(samples), limit)
+	if len(samples) > len(allowed) {
+		t.Fatalf("%s: %d samples, at most %d allowed", action, len(samples), len(allowed))
 	}
 	seen := map[string]bool{}
 	for _, s := range samples {
 		if s.Target != target {
 			t.Fatalf("sample target = %+v, want %+v", s.Target, target)
 		}
-		if s.Metric != TelemetryMetricCPU && s.Metric != TelemetryMetricRAM && s.Metric != TelemetryMetricDisk {
-			t.Fatalf("unknown metric %q", s.Metric)
+		if !slices.Contains(allowed, s.Metric) {
+			t.Fatalf("%s yielded metric %q, allowed %v", action, s.Metric, allowed)
 		}
 		if seen[s.Metric] {
 			t.Fatalf("duplicate metric %q in %+v", s.Metric, samples)
