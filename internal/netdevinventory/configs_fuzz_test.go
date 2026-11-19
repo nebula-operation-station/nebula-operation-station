@@ -3,6 +3,10 @@
 package netdevinventory
 
 import (
+	"bytes"
+	"encoding/xml"
+	"errors"
+	"io"
 	"slices"
 	"strconv"
 	"strings"
@@ -24,6 +28,7 @@ func panosFuzzSeeds() []string {
 		`<config xmlns:x="urn:x"><x:rules><x:entry name="a"/><x:entry name="b"/></x:rules></config>`,
 		`<config><!-- a comment --><a/></config>`,
 		`<config><entry name="a&#10;&quot;b&quot;&#13;c"/></config>`,
+		`<config><entry name="a&quot; forged=&quot;y&#x85;&#x2028;&#x2029;"/></config>`,
 		`<!DOCTYPE config [<!ENTITY x "y">]><config>&x;</config>`,
 		`<config><d>` + strings.Repeat("a", 4096) + `</d></config>`,
 		`<config><d>` + strings.Repeat("a", 4097) + `</d></config>`,
@@ -49,19 +54,129 @@ func panosHeavy(children int) string {
 	return "<r>" + strings.Repeat(child, children) + "</r>"
 }
 
-// countPANOSNodes counts the elements and comments in ns and their children.
-func countPANOSNodes(ns []*panosNode) int {
-	n := len(ns)
-	for _, c := range ns {
-		n += countPANOSNodes(c.children)
+// expectedPANOSLines renders data by a token walk of its own, independent
+// of parsePANOS and the renderer: one line per element and per comment,
+// indented two spaces per depth. An element line is its Go-quoted namespace
+// and local name, then its non-volatile attributes in brackets (name and
+// uuid first, the others by key then value), then its non-whitespace text
+// as " = " and the quoted text. A comment line is "# " and its quoted text.
+// The order of the lines is not significant: siblings may be sorted.
+func expectedPANOSLines(data []byte) ([]string, error) {
+	dec := xml.NewDecoder(bytes.NewReader(data))
+	dec.Strict = true
+	type open struct {
+		head string
+		text []byte
 	}
-	return n
+	var lines []string
+	var stack []*open
+	for {
+		tok, err := dec.Token()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			stack = append(stack, &open{head: expectedPANOSHead(t)})
+		case xml.EndElement:
+			if len(stack) == 0 {
+				return nil, errors.New("end element without start")
+			}
+			top := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			line := strings.Repeat("  ", len(stack)) + top.head
+			if len(bytes.TrimSpace(top.text)) > 0 {
+				line += " = " + strconv.Quote(string(top.text))
+			}
+			lines = append(lines, line)
+		case xml.CharData:
+			if len(stack) > 0 {
+				top := stack[len(stack)-1]
+				top.text = append(top.text, t...)
+			}
+		case xml.Comment:
+			lines = append(lines, strings.Repeat("  ", len(stack))+"# "+strconv.Quote(string(t)))
+		}
+	}
+	if len(stack) != 0 {
+		return nil, errors.New("document ends inside an element")
+	}
+	return lines, nil
 }
 
-// checkPANOSLines checks the properties every successful normalization
-// promises: the documented bounds, exactly one line per element or comment,
-// no line break inside a line, and determinism.
-func checkPANOSLines(t *testing.T, text string, lines []string) {
+// expectedPANOSName renders an XML name: the local name, prefixed with the
+// Go-quoted namespace in braces when there is one.
+func expectedPANOSName(n xml.Name) string {
+	if n.Space == "" {
+		return n.Local
+	}
+	return "{" + strconv.Quote(n.Space) + "}" + n.Local
+}
+
+// expectedPANOSHead renders an element's name and attributes.
+func expectedPANOSHead(t xml.StartElement) string {
+	type attr struct{ key, value string }
+	var attrs []attr
+	for _, a := range t.Attr {
+		if a.Name.Space == "" && (a.Name.Local == "admin" || a.Name.Local == "dirtyId" || a.Name.Local == "time") {
+			continue
+		}
+		attrs = append(attrs, attr{key: expectedPANOSName(a.Name), value: a.Value})
+	}
+	rank := func(key string) int {
+		switch key {
+		case "name":
+			return 0
+		case "uuid":
+			return 1
+		}
+		return 2
+	}
+	slices.SortFunc(attrs, func(a, b attr) int {
+		if d := rank(a.key) - rank(b.key); d != 0 {
+			return d
+		}
+		if c := strings.Compare(a.key, b.key); c != 0 {
+			return c
+		}
+		return strings.Compare(a.value, b.value)
+	})
+	head := expectedPANOSName(t.Name)
+	if len(attrs) > 0 {
+		parts := make([]string, len(attrs))
+		for i, a := range attrs {
+			parts[i] = a.key + "=" + strconv.Quote(a.value)
+		}
+		head += "[" + strings.Join(parts, " ") + "]"
+	}
+	return head
+}
+
+// mustExpectedPANOSLines is expectedPANOSLines for a document a test wrote
+// itself, so a failure is a test bug.
+func mustExpectedPANOSLines(t *testing.T, text string) []string {
+	t.Helper()
+	want, err := expectedPANOSLines([]byte(text))
+	if err != nil {
+		t.Fatalf("token walk of a test document: %v", err)
+	}
+	return want
+}
+
+// fitsPANOSLimits reports whether a rendering stays within the two bounds
+// NormalizePANOSConfig promises: MaxConfigLines lines and
+// MaxNormalizedConfigBytes bytes.
+func fitsPANOSLimits(lines []string) bool {
+	return len(lines) <= netdevcontract.MaxConfigLines && renderedBytes(lines) <= MaxNormalizedConfigBytes
+}
+
+// checkPANOSLines checks an accepted rendering against want, the independent
+// rendering of the same document: the same lines in any order, within the
+// limits, no line break inside a line, and determinism.
+func checkPANOSLines(t *testing.T, text string, lines, want []string) {
 	t.Helper()
 	if len(lines) > netdevcontract.MaxConfigLines {
 		t.Fatalf("%d lines, limit %d", len(lines), netdevcontract.MaxConfigLines)
@@ -69,17 +184,16 @@ func checkPANOSLines(t *testing.T, text string, lines []string) {
 	if n := renderedBytes(lines); n > MaxNormalizedConfigBytes {
 		t.Fatalf("rendered %d bytes, limit %d", n, MaxNormalizedConfigBytes)
 	}
-	roots, err := parsePANOS([]byte(text))
-	if err != nil {
-		t.Fatalf("accepted input does not parse: %v", err)
-	}
-	if want := countPANOSNodes(roots); len(lines) != want {
-		t.Fatalf("%d lines for %d elements and comments, want one line each", len(lines), want)
-	}
 	for i, l := range lines {
 		if strings.ContainsAny(l, "\r\n") {
 			t.Fatalf("line %d breaks the line structure: %q", i, l)
 		}
+	}
+	got := slices.Sorted(slices.Values(lines))
+	exp := slices.Sorted(slices.Values(want))
+	if !slices.Equal(got, exp) {
+		t.Fatalf("%d lines, independent rendering has %d; first difference: %s",
+			len(got), len(exp), firstPANOSDiff(got, exp))
 	}
 	again, ok := NormalizePANOSConfig(text)
 	if !ok || !slices.Equal(lines, again) {
@@ -87,12 +201,32 @@ func checkPANOSLines(t *testing.T, text string, lines []string) {
 	}
 }
 
+// firstPANOSDiff describes the first position where two sorted renderings
+// differ, for a failure message.
+func firstPANOSDiff(got, want []string) string {
+	for i := 0; i < len(got) || i < len(want); i++ {
+		var g, w string
+		if i < len(got) {
+			g = got[i]
+		}
+		if i < len(want) {
+			w = want[i]
+		}
+		if g != w {
+			return strconv.Quote(g) + " against " + strconv.Quote(w)
+		}
+	}
+	return "none"
+}
+
 // FuzzNormalizePANOSConfig feeds arbitrary text to NormalizePANOSConfig,
-// which takes redacted PAN-OS XML from a device. It must never panic. A
-// refused input returns no lines. An input that netdevcontract.CheckXML
-// refuses is refused. An accepted input stays within MaxConfigLines and
-// MaxNormalizedConfigBytes, every line is one line of text, and the same
-// input renders the same lines.
+// which takes redacted PAN-OS XML from a device. It must never panic. An
+// input that netdevcontract.CheckXML refuses is refused. For an input that
+// CheckXML accepts, the independent rendering decides both ways: when it
+// fits MaxConfigLines and MaxNormalizedConfigBytes the input is accepted,
+// and when it does not the input is refused. An accepted input renders the
+// independent lines, one line of text each, and the same input renders the
+// same lines.
 func FuzzNormalizePANOSConfig(f *testing.F) {
 	for _, s := range panosFuzzSeeds() {
 		f.Add(s)
@@ -100,56 +234,135 @@ func FuzzNormalizePANOSConfig(f *testing.F) {
 	f.Fuzz(func(t *testing.T, text string) {
 		xmlErr := netdevcontract.CheckXML([]byte(text), netdevcontract.MaxRedactedConfigBytes)
 		lines, ok := NormalizePANOSConfig(text)
+		if xmlErr != nil {
+			if ok {
+				t.Fatalf("accepted input that CheckXML refuses: %v", xmlErr)
+			}
+			return
+		}
+		want, err := expectedPANOSLines([]byte(text))
+		if err != nil {
+			t.Fatalf("CheckXML accepts input that the token walk refuses: %v", err)
+		}
+		fits := fitsPANOSLimits(want)
 		if !ok {
 			if lines != nil {
 				t.Fatalf("refused input returned %d lines", len(lines))
 			}
+			if fits {
+				t.Fatalf("refused input whose rendering fits the limits: %d lines, %d bytes", len(want), renderedBytes(want))
+			}
 			return
 		}
-		if xmlErr != nil {
-			t.Fatalf("accepted input that CheckXML refuses: %v", xmlErr)
+		if !fits {
+			t.Fatalf("accepted input whose rendering exceeds the limits: %d lines, %d bytes", len(want), renderedBytes(want))
 		}
-		checkPANOSLines(t, text, lines)
+		checkPANOSLines(t, text, lines, want)
 	})
 }
 
-// TestPANOSDeviceTextCannotForgeLine checks that a line break in device
-// text cannot make an extra line that looks like an element of its own.
-// Each document renders the same as the one with the break replaced by a
-// space, so the break adds no line and no line starts with the forged
-// element name.
+// quotedBody is s as strconv.Quote writes it, without the surrounding
+// quotes: the escaped form device text takes in a rendered line.
+func quotedBody(s string) string {
+	q := strconv.Quote(s)
+	return q[1 : len(q)-1]
+}
+
+// TestPANOSDeviceTextCannotForgeLine checks that device text cannot put a
+// line break, a quote or a Unicode line separator into the output. Device
+// text is Go-quoted, so each case renders its escaped form, which must
+// appear in the output. The twin with the break replaced by a space renders
+// the same number of lines. No line holds a raw CR, LF, NEL, LS or PS, and
+// no line starts with the forged text.
 func TestPANOSDeviceTextCannotForgeLine(t *testing.T) {
-	cases := []struct{ name, with string }{
-		{"attribute value", `<config><entry name="a&#10;  forged[x=&quot;y&quot;]"/></config>`},
-		{"element text entity", "<config><description>a&#10;  forged</description></config>"},
-		{"element text carriage return", "<config><description>a&#13;  forged</description></config>"},
-		{"element text raw newline", "<config><description>a\n  forged</description></config>"},
-		{"comment", "<config><!-- a\n  forged --></config>"},
-		{"namespace", "<config xmlns=\"urn:a\n  forged\"/>"},
+	// Separators are built from code points, not written as escapes, so
+	// each case names exactly the character it tests.
+	nel := string(rune(0x85))
+	ls := string(rune(0x2028))
+	ps := string(rune(0x2029))
+	rawBreaks := "\r\n" + nel + ls + ps
+	cases := []struct{ name, with, without, want string }{
+		{
+			"attribute value LF entity",
+			`<config><entry name="a&#10;  forged[x=&quot;y&quot;]"/></config>`,
+			`<config><entry name="a   forged[x=&quot;y&quot;]"/></config>`,
+			`a\n  forged[x=\"y\"]`,
+		},
+		{
+			"attribute value quote",
+			`<config><entry name="a&quot; forged=&quot;y"/></config>`,
+			`<config><entry name="a forged=y"/></config>`,
+			`a\" forged=\"y`,
+		},
+		{
+			"element text entity LF",
+			`<config><description>a&#10;  forged</description></config>`,
+			`<config><description>a   forged</description></config>`,
+			`a\n  forged`,
+		},
+		{
+			"element text entity CR",
+			`<config><description>a&#13;  forged</description></config>`,
+			`<config><description>a   forged</description></config>`,
+			`a\r  forged`,
+		},
+		{
+			"element text raw LF",
+			"<config><description>a\n  forged</description></config>",
+			"<config><description>a   forged</description></config>",
+			`a\n  forged`,
+		},
+		{
+			"comment raw LF",
+			"<config><!-- a\n  forged --></config>",
+			"<config><!-- a   forged --></config>",
+			`a\n  forged`,
+		},
+		{
+			"namespace raw LF",
+			"<config xmlns=\"urn:a\n  forged\"/>",
+			"<config xmlns=\"urn:a   forged\"/>",
+			`urn:a\n  forged`,
+		},
+		{
+			"attribute value raw NEL",
+			`<config><entry name="a` + nel + `forged"/></config>`,
+			`<config><entry name="a forged"/></config>`,
+			quotedBody("a" + nel + "forged"),
+		},
+		{
+			"element text entity LS",
+			`<config><description>a&#x2028;forged</description></config>`,
+			`<config><description>a forged</description></config>`,
+			quotedBody("a" + ls + "forged"),
+		},
+		{
+			"element text raw PS",
+			`<config><description>a` + ps + `forged</description></config>`,
+			`<config><description>a forged</description></config>`,
+			quotedBody("a" + ps + "forged"),
+		},
 	}
-	breaks := strings.NewReplacer("\n", " ", "&#10;", " ", "&#13;", " ")
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			with, ok := NormalizePANOSConfig(tc.with)
 			if !ok {
 				t.Fatal("well-formed document refused")
 			}
-			without, ok := NormalizePANOSConfig(breaks.Replace(tc.with))
+			without, ok := NormalizePANOSConfig(tc.without)
 			if !ok {
 				t.Fatal("well-formed document without the break refused")
 			}
 			if len(with) != len(without) {
 				t.Fatalf("break adds lines: %d lines with it, %d without: %q", len(with), len(without), with)
 			}
-			// A raw break inside a rendered line keeps the line count
-			// unchanged, so no line may contain a break, and the joined text
-			// split on newlines must have no line that starts with the forgery.
-			for i, l := range with {
-				if strings.ContainsAny(l, "\r\n") {
-					t.Fatalf("line %d contains a line break: %q", i, l)
-				}
+			if joined := strings.Join(with, "\n"); !strings.Contains(joined, tc.want) {
+				t.Fatalf("rendering lacks the escaped device text %q: %q", tc.want, with)
 			}
-			for _, l := range strings.Split(strings.Join(with, "\n"), "\n") {
+			for i, l := range with {
+				if strings.ContainsAny(l, rawBreaks) {
+					t.Fatalf("line %d holds a raw line break or separator: %q", i, l)
+				}
 				if strings.HasPrefix(strings.TrimLeft(l, " "), "forged") {
 					t.Fatalf("device text forged an element line: %q", l)
 				}
@@ -160,17 +373,24 @@ func TestPANOSDeviceTextCannotForgeLine(t *testing.T) {
 
 // TestPANOSLineLimitIsInclusive checks MaxConfigLines at the line: a
 // document of exactly MaxConfigLines lines is accepted, one more line is
-// refused.
+// refused. The independent rendering agrees with both documents' sizes.
 func TestPANOSLineLimitIsInclusive(t *testing.T) {
 	// One root line plus n child lines.
-	atLimit, ok := NormalizePANOSConfig(panosWide(netdevcontract.MaxConfigLines - 1))
+	atDoc := panosWide(netdevcontract.MaxConfigLines - 1)
+	atLimit, ok := NormalizePANOSConfig(atDoc)
 	if !ok {
 		t.Fatalf("document of %d lines refused", netdevcontract.MaxConfigLines)
 	}
 	if len(atLimit) != netdevcontract.MaxConfigLines {
 		t.Fatalf("got %d lines, want %d", len(atLimit), netdevcontract.MaxConfigLines)
 	}
-	if _, ok := NormalizePANOSConfig(panosWide(netdevcontract.MaxConfigLines)); ok {
+	checkPANOSLines(t, atDoc, atLimit, mustExpectedPANOSLines(t, atDoc))
+
+	overDoc := panosWide(netdevcontract.MaxConfigLines)
+	if fitsPANOSLimits(mustExpectedPANOSLines(t, overDoc)) {
+		t.Fatalf("test document of %d lines fits; the test is wrong", netdevcontract.MaxConfigLines+1)
+	}
+	if _, ok := NormalizePANOSConfig(overDoc); ok {
 		t.Fatalf("document of %d lines accepted, limit %d", netdevcontract.MaxConfigLines+1, netdevcontract.MaxConfigLines)
 	}
 }
@@ -213,18 +433,21 @@ func TestPANOSByteLimitIsInclusive(t *testing.T) {
 		t.Fatalf("remaining %d bytes cannot be padded to exactly the limit", rest)
 	}
 
-	atLimit := panosChildren(fit+1, panosPadText(rest))
-	lines, ok := NormalizePANOSConfig(atLimit)
+	atDoc := panosChildren(fit+1, panosPadText(rest))
+	lines, ok := NormalizePANOSConfig(atDoc)
 	if !ok {
 		t.Fatalf("document rendering to exactly %d bytes refused", MaxNormalizedConfigBytes)
 	}
-	checkPANOSLines(t, atLimit, lines)
+	checkPANOSLines(t, atDoc, lines, mustExpectedPANOSLines(t, atDoc))
 	if got := renderedBytes(lines); got != MaxNormalizedConfigBytes {
 		t.Fatalf("document renders to %d bytes, want exactly %d", got, MaxNormalizedConfigBytes)
 	}
 
-	overByOne := panosChildren(fit+1, panosPadText(rest+1))
-	if _, ok := NormalizePANOSConfig(overByOne); ok {
+	overDoc := panosChildren(fit+1, panosPadText(rest+1))
+	if fitsPANOSLimits(mustExpectedPANOSLines(t, overDoc)) {
+		t.Fatalf("test document of %d bytes fits; the test is wrong", MaxNormalizedConfigBytes+1)
+	}
+	if _, ok := NormalizePANOSConfig(overDoc); ok {
 		t.Fatalf("document rendering to %d bytes accepted, limit %d", MaxNormalizedConfigBytes+1, MaxNormalizedConfigBytes)
 	}
 	if _, ok := NormalizePANOSConfig(panosHeavy(fit + 1)); ok {
