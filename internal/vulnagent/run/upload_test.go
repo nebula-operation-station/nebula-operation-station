@@ -41,7 +41,7 @@ func repeatCost(cost, n int) []int {
 // subjectCost is the packer's cost of a batch subject entry.
 func subjectCost(t *testing.T, s nosclient.BatchSubject) int {
 	t.Helper()
-	b, err := json.Marshal(s)
+	b, err := encodeUnescaped(s)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,16 +64,16 @@ func subjectWithCost(t *testing.T, cost int) nosclient.BatchSubject {
 }
 
 // sentBatch repeats the body shape of nosclient's encodeBatch, which is
-// unexported. The tags and the default HTML escaping must stay the same.
+// unexported. The tags and the encoding (no HTML escaping) must stay the
+// same; nosclient's own tests pin the bytes it sends.
 type sentBatch struct {
 	BatchSeq int64                    `json:"batch_seq"`
 	Subjects []nosclient.BatchSubject `json:"subjects"`
 	Findings []json.RawMessage        `json:"findings"`
 }
 
-// sentBodySize is the length of the batch body as nosclient sends it. The
-// findings are RawMessage, and json.Marshal escapes `<`, `>` and `&` inside
-// them to six bytes, so this can exceed the packer's own count.
+// sentBodySize is the length of the batch body as nosclient sends it. With
+// HTML escaping off, it is exactly the packer's count plus the envelope.
 func sentBodySize(t *testing.T, b nosclient.Batch) int {
 	t.Helper()
 	sb := sentBatch{BatchSeq: b.Seq, Subjects: b.Subjects, Findings: b.Findings}
@@ -83,7 +83,7 @@ func sentBodySize(t *testing.T, b nosclient.Batch) int {
 	if sb.Findings == nil {
 		sb.Findings = []json.RawMessage{}
 	}
-	body, err := json.Marshal(sb)
+	body, err := encodeUnescaped(sb)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,6 +141,11 @@ func TestPackLimitsMatchD5(t *testing.T) {
 	}
 	if nosclient.MaxFindingsPerBatch != 1000 {
 		t.Errorf("MaxFindingsPerBatch = %d, D5 says 1,000", nosclient.MaxFindingsPerBatch)
+	}
+	// D5 names no subject count; the code sets it to the findings count.
+	// Pinned here so that a change to it is seen by the boundary tests.
+	if nosclient.MaxCoveredPerBatch != 1000 {
+		t.Errorf("MaxCoveredPerBatch = %d, want 1,000 (equal to MaxFindingsPerBatch)", nosclient.MaxCoveredPerBatch)
 	}
 }
 
@@ -246,6 +251,43 @@ func TestPackerSubjectByteLimit(t *testing.T) {
 			p.flush()
 			if got := perBatch(p.batches, subjectsOf); !slices.Equal(got, tc.want) {
 				t.Errorf("subjects per batch = %v, want %v", got, tc.want)
+			}
+			checkBatchLimits(t, p.batches)
+		})
+	}
+}
+
+func TestPackerSubjectByteLimitAfterFindingsFillTheBudget(t *testing.T) {
+	// The findings take 62 records of MaxRecordBytes and leave exactly one
+	// more record's room. A subject entry then either fits that room exactly
+	// or, one byte larger, starts a batch of its own.
+	const recMax = MaxRecordBytes
+	tests := []struct {
+		name         string
+		findingCosts []int
+		subjectCost  int
+		wantFindings []int
+		wantSubjects []int
+	}{
+		{"entry fills the room the findings left exactly", repeatCost(recMax, 62), recMax, []int{62}, []int{1}},
+		{"entry one byte over the room opens a batch", repeatCost(recMax, 62), recMax + 1, []int{62, 0}, []int{0, 1}},
+		{"entry after a full budget opens a batch", repeatCost(recMax, 63), 100, []int{63, 0}, []int{0, 1}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var p packer
+			for _, c := range tc.findingCosts {
+				p.addFinding(filler(c))
+			}
+			if err := p.addSubject(subjectWithCost(t, tc.subjectCost)); err != nil {
+				t.Fatal(err)
+			}
+			p.flush()
+			if got := perBatch(p.batches, findingsOf); !slices.Equal(got, tc.wantFindings) {
+				t.Errorf("findings per batch = %v, want %v", got, tc.wantFindings)
+			}
+			if got := perBatch(p.batches, subjectsOf); !slices.Equal(got, tc.wantSubjects) {
+				t.Errorf("subjects per batch = %v, want %v", got, tc.wantSubjects)
 			}
 			checkBatchLimits(t, p.batches)
 		})
@@ -640,8 +682,8 @@ func TestPackRecordByteLimitFlushesBeforeCoverage(t *testing.T) {
 	}
 }
 
-// padHTML fills a field with `<`, `>` and `&` in turn. json.Marshal writes
-// each one as six bytes, but the packer counts it as one.
+// padHTML fills a field with `<`, `>` and `&` in turn. nosclient sends them
+// unescaped, so each is one byte in the count and in the body.
 func padHTML(r *vulnfinding.Record, s string) {
 	b := []byte(s)
 	for i := range b {
@@ -651,9 +693,9 @@ func padHTML(r *vulnfinding.Record, s string) {
 }
 
 func TestPackBatchBodyWithinLimitWhenRecordsNeedHTMLEscaping(t *testing.T) {
-	// 63 records of MaxRecordBytes fill the packer's budget exactly. Their
-	// `<`, `>` and `&` bytes grow to six each in the body nosclient sends,
-	// so the batch must not be packed to the budget as counted.
+	// 63 records of MaxRecordBytes fill the packer's budget exactly, and
+	// their `<`, `>` and `&` bytes must reach nosclient's body unescaped, so
+	// the body stays within MaxBatchBytes (sentBodySize, checkBatchLimits).
 	m := &matched{uncovered: map[string]bool{}}
 	for range 63 {
 		m.findings = append(m.findings, prep(recordOfCost(t, "a", MaxRecordBytes, padHTML)))
@@ -775,6 +817,57 @@ func TestPackerFindingAndSubjectCountLimitsAreSeparate(t *testing.T) {
 				checkBatchLimits(t, p.batches)
 			})
 		}
+	}
+}
+
+func TestPackStrippedRecordAtMaxRecordBytesBoundary(t *testing.T) {
+	// The record is over the limit with its assessment, so pack strips the
+	// assessment and measures again. The stripped record is the one tested.
+	tests := []struct {
+		name        string
+		stripped    int
+		wantSent    int
+		wantCovered int
+		wantWithhld int
+	}{
+		{"stripped record at MaxRecordBytes is sent and covers its subject", MaxRecordBytes, 1, 1, 0},
+		{"stripped record one byte over MaxRecordBytes is withheld and names no subject", MaxRecordBytes + 1, 0, 0, 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := recordOfCost(t, "a", tc.stripped, padSource)
+			rec.Assessment.Text = strings.Repeat("t", 64)
+			if c := recordCost(t, rec); c <= MaxRecordBytes {
+				t.Fatalf("unstripped cost %d must exceed MaxRecordBytes to test the strip", c)
+			}
+			stripped := rec
+			stripped.Assessment = vulnfinding.Assessment{}
+			if c := recordCost(t, stripped); c != tc.stripped {
+				t.Fatalf("stripped cost %d, want %d", c, tc.stripped)
+			}
+			snap := &nosclient.Snapshot{Subjects: []nosclient.SubjectCoverage{hostCov("a", 1, true)}}
+			m := &matched{uncovered: map[string]bool{}, findings: []prepared{prep(rec)}}
+			batches, withheld, covered, err := pack(snap, m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkBatchLimits(t, batches)
+			if withheld != tc.wantWithhld || covered != tc.wantCovered {
+				t.Errorf("withheld %d, covered %d; want %d, %d", withheld, covered, tc.wantWithhld, tc.wantCovered)
+			}
+			sent := sentRecords(t, batches)
+			if len(sent) != tc.wantSent {
+				t.Fatalf("%d records sent, want %d", len(sent), tc.wantSent)
+			}
+			for _, s := range sentSubjects(batches) {
+				if tc.wantCovered == 0 {
+					t.Errorf("subject %q named as covered; a withheld record's subject must not be", s.Ref.ID)
+				}
+			}
+			if len(sent) == 1 && sent[0].Assessment.Text != "" {
+				t.Errorf("record sent with assessment %q; it must be stripped", sent[0].Assessment.Text)
+			}
+		})
 	}
 }
 
