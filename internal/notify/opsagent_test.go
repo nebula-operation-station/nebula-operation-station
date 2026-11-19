@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsconfig"
 )
@@ -120,5 +121,57 @@ func TestOpsAgentEventOmitsUnchangedFieldLines(t *testing.T) {
 		if strings.Contains(e.Reason, bad) {
 			t.Errorf("reason lists unchanged field %q: %q", bad, e.Reason)
 		}
+	}
+}
+
+// longURL returns a URL of the maximum settings length (512 bytes) that
+// differs from every other longURL only in its last byte.
+func longURL(last byte) string {
+	const prefix = "https://ollama.lab.example/"
+	return prefix + strings.Repeat("p", opsconfig.MaxBaseURL-len(prefix)-1) + string(last)
+}
+
+// Two 512-byte base URLs, a data class change and a model change must all
+// fit into the reason: the notifier cuts the reason at maxField runes, and
+// ADR 0016 D12 uses this event for out-of-NOS detection.
+func TestOpsAgentEventKeepsSecurityFieldsWithLongURLs(t *testing.T) {
+	c := opsChange()
+	c.Old.BaseURL = longURL('1')
+	c.New.BaseURL = longURL('2')
+	c.New.Model = "llama3.1-8b"
+	e := OpsAgentSettingsEvent(c, time.Unix(1, 0))
+	if n := utf8.RuneCountInString(e.Reason); n > maxField {
+		t.Fatalf("reason has %d runes, more than the cap of %d: %q", n, maxField, e.Reason)
+	}
+	if got := clean(e.Reason, maxField); got != e.Reason {
+		t.Fatalf("reason is cut by the notifier's cap:\n got %q\nwant %q", got, e.Reason)
+	}
+	oldShort, newShort := opsAgentShortValue(c.Old.BaseURL), opsAgentShortValue(c.New.BaseURL)
+	if oldShort == newShort {
+		t.Fatalf("short forms of two different URLs are equal: %q", oldShort)
+	}
+	for _, want := range []string{
+		"Version 4 -> 5.",
+		"Changed: data_class, model, base_url.",
+		"data_class: lab -> external",
+		"model: qwen3.5-9b -> llama3.1-8b",
+		"base_url: " + oldShort + " -> " + newShort,
+	} {
+		if !strings.Contains(e.Reason, want) {
+			t.Errorf("reason %q lacks %q", e.Reason, want)
+		}
+	}
+}
+
+// A URL up to opsAgentShortLimit bytes is shown whole; a longer one is shown
+// cut, with a digest of the whole URL, so two long URLs stay distinct.
+func TestOpsAgentShortValueShowsShortURLsWhole(t *testing.T) {
+	if got := opsAgentShortValue("http://10.0.0.20:11434/v1"); got != "http://10.0.0.20:11434/v1" {
+		t.Fatalf("short URL changed: %q", got)
+	}
+	long := longURL('x')
+	got := opsAgentShortValue(long)
+	if !strings.HasPrefix(got, long[:opsAgentShortLimit]) || len(got) > opsAgentShortLimit+16 {
+		t.Fatalf("long URL not cut to its prefix plus digest: %q", got)
 	}
 }
