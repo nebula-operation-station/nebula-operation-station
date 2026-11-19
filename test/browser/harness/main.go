@@ -378,6 +378,9 @@ func newHarness(preview bool, port, dir string) http.Handler {
 	opts := ui.Options{PublicOrigin: origin, Events: direct{svc}, Audit: audit, Status: direct{svc}, Hosts: inv.List, HostKeys: hostKeys, Inventory: inv, Operations: ops, Pins: inv, Schedules: ops, Runbooks: rb, Trust: direct{svc}, Modules: mods, LastResult: ops.LastResult, Network: ipamStore, Discovery: disc, Repin: direct{svc}, Enroll: direct{svc}, SecurityKeys: securityKeys, TOTPStatus: totpStatus, Log: uiLog}
 	// Vulnerabilities pages with hostile data (vuln.go, vuln.spec.js).
 	opts.Vuln = harnessVuln{}
+	// Ops tab, suggestion form and Ops-Agent settings (opsagent.go,
+	// opsagent.spec.js).
+	must(wireOps(context.Background(), svc, ops, inv, sdb, audit, &opts))
 	pages := http.NewServeMux()
 	var pveStore *pveinventory.Store
 	if preview {
@@ -425,6 +428,9 @@ func newHarness(preview bool, port, dir string) http.Handler {
 	// Test hook: make the signed-in user an admin of the attack-path pages
 	// or not (attackpath.spec.js).
 	mux.HandleFunc("/__paths/admin", pathsAdminHook)
+	// Test hook: make the signed-in user an admin of the Ops tab, the
+	// suggestion form and the Ops-Agent settings or not (opsagent.spec.js).
+	mux.HandleFunc("/__ops/admin", opsAdminHook)
 	// Test hooks: set up TOTP recovery like `nebula totp setup`, and give
 	// the code for the next step (the current one is used by the setup).
 	var totpSecret []byte

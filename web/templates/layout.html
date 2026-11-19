@@ -59,6 +59,12 @@
           <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-play"></use></svg>
           <span>Operations</span>
         </a>
+        {{if .NotificationsNav}}
+        <a class="sidebar__item{{if eq .Active "notifications"}} sidebar__item--active{{end}}" href="/notifications"{{if .NavCollapsed}} title="Notifications"{{end}}{{if eq .Active "notifications"}} aria-current="page"{{end}}>
+          <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-history"></use></svg>
+          <span>Notifications</span>
+        </a>
+        {{end}}
         <a class="sidebar__item{{if eq .Active "runbooks"}} sidebar__item--active{{end}}" href="/runbooks"{{if .NavCollapsed}} title="Runbooks / Modules"{{end}}{{if eq .Active "runbooks"}} aria-current="page"{{end}}>
           <svg class="sidebar__icon" aria-hidden="true"><use href="/static/icons.svg#i-book-open"></use></svg>
           <span>Runbooks / Modules</span>
@@ -131,6 +137,24 @@
   <main class="main main--bare">
     {{template "content" .}}
   </main>
+  {{end}}
+  {{if not .Bare}}
+  <!-- The Assistant panel (ADR 0016 D11). On /help it is inline and loads
+       at once. Elsewhere the link loads the panel into an empty container
+       when clicked (htmx), so nothing is fetched before the user asks for
+       it. No script and no button here: pages assert their markup. -->
+  {{if eq .Active "assistant"}}{{else if eq .Active "help"}}
+  <section class="assistant assistant--inline" id="assistant" aria-label="Assistant">
+    <h2>Assistant</h2>
+    <div id="assistant-root" hx-get="/assistant/panel" hx-trigger="load" hx-swap="innerHTML"></div>
+  </section>
+  {{else}}
+  <p class="assistant-open"><a class="button button--secondary button--small" href="/assistant/panel"
+    hx-get="/assistant/panel" hx-target="#assistant-root" hx-swap="innerHTML" hx-push-url="false">Assistant</a></p>
+  <section class="assistant assistant--side" id="assistant" aria-label="Assistant">
+    <div id="assistant-root"></div>
+  </section>
+  {{end}}
   {{end}}
   <script src="/static/htmx.min.js"></script>
   <script src="/static/time.js"></script>

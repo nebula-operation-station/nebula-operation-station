@@ -51,6 +51,10 @@ const (
 const (
 	// MaxOpsWorkItems bounds the items of one work list page.
 	MaxOpsWorkItems = 20
+	// MaxOpsQuestionItems bounds the open question items of one page: half
+	// the list, so a backlog of questions cannot push out the daily summary
+	// and the fix items (the agent answers the questions in turn).
+	MaxOpsQuestionItems = MaxOpsWorkItems / 2
 	// MaxOpsItemBytes bounds one work item as JSON; a larger one is left
 	// out and logged.
 	MaxOpsItemBytes = 32 << 10
@@ -68,7 +72,13 @@ const (
 	MaxOpsRefusals = 8
 	// MaxOpsRunCount bounds each counter of a status.
 	MaxOpsRunCount = 1_000_000
+	// MaxOpsQuestionHosts bounds the hosts whose group facts one question
+	// carries in class lab (ADR 0016 D11).
+	MaxOpsQuestionHosts = 5
 )
+
+// opsKindQuestion is the work item kind of an open admin question.
+const opsKindQuestion = "question"
 
 // opsRefusalReasons is the fixed list of refusal reasons a status may name
 // (ADR 0016 D14). Any other text is refused, so no model output reaches the
@@ -104,6 +114,8 @@ type OpsFacts interface {
 type OpsNotes interface {
 	Put(ctx context.Context, r opsnotes.Resolver, d opsnotes.Draft, snapshot string) (opsnotes.Note, bool, error)
 	List(ctx context.Context) ([]opsnotes.Note, error)
+	// OpenQuestions returns the open admin questions, oldest first.
+	OpenQuestions(ctx context.Context) ([]opsnotes.Question, error)
 }
 
 // OpsOptions configure the ops API. Tokens is the validated API
@@ -334,13 +346,134 @@ type opsWorkResponse struct {
 }
 
 // opsWorkItem is one due item. Kind "fix" carries the group projection
-// (class lab only); kind "summary" carries the fleet counters.
+// (class lab only); kind "summary" carries the fleet counters; kind
+// "question" carries the question text and, in class lab, the group facts of
+// the hosts it names, or in class external the fleet counters only.
 type opsWorkItem struct {
-	Kind   string                  `json:"kind"`
-	Ref    string                  `json:"ref"`
-	Digest string                  `json:"digest"`
-	Group  *opsfacts.LabProjection `json:"group,omitempty"`
-	Fleet  *opsfacts.Counts        `json:"fleet,omitempty"`
+	Kind     string                  `json:"kind"`
+	Ref      string                  `json:"ref"`
+	Digest   string                  `json:"digest"`
+	Group    *opsfacts.LabProjection `json:"group,omitempty"`
+	Fleet    *opsfacts.Counts        `json:"fleet,omitempty"`
+	Question *opsWorkQuestion        `json:"question,omitempty"`
+}
+
+// opsWorkQuestion is the context of one open admin question (ADR 0016 D11).
+// The agent decodes it as nosclient.Question; both sides change together.
+type opsWorkQuestion struct {
+	Text string `json:"text"`
+	// Hosts are the facts of the hosts the text names, at most
+	// MaxOpsQuestionHosts hosts. Only class lab carries them.
+	Hosts []opsWorkQuestionHost `json:"hosts,omitempty"`
+}
+
+// opsWorkQuestionHost is the fact part of one named host: host, exposure,
+// listening ports and counts. Findings and step candidates never go into a
+// question. PortsOmitted counts the listening ports the list leaves out.
+type opsWorkQuestionHost struct {
+	Host         opsfacts.LabHost  `json:"host"`
+	Exposure     opsfacts.Exposure `json:"exposure"`
+	Ports        []opsfacts.Port   `json:"ports"`
+	PortsOmitted int               `json:"ports_omitted"`
+	Counts       opsfacts.Counts   `json:"counts"`
+}
+
+// questionItem builds the work item of one open question. Ref is the question
+// ID; Digest is the question's digest, which the answer must carry. Every
+// question carries the fleet counts; class lab adds the named hosts. The
+// largest item the projector can produce is bounded by MaxOpsItemBytes (see
+// TestOpsWorkQuestionWorstCaseFitsItemLimit), so no size fallback is needed.
+func (h *OpsHandler) questionItem(q opsnotes.Question, lab bool, groups []opsfacts.Group, fleet opsfacts.Counts) opsWorkItem {
+	c := fleet
+	it := opsWorkItem{Kind: string(opsKindQuestion), Ref: strconv.FormatInt(q.ID, 10), Digest: q.Digest,
+		Fleet: &c, Question: &opsWorkQuestion{Text: q.Text}}
+	if lab {
+		it.Question.Hosts = questionHosts(q.Text, groups)
+	}
+	return it
+}
+
+// questionHosts returns one fact per host that text names, for at most
+// MaxOpsQuestionHosts hosts. The hosts are taken in the order of groups
+// (already sorted by sortGroups). A host's groups are merged into its one fact:
+// the counts are summed; the ports, their omitted count and the exposure are
+// per host and the same in every group of it. A host is named by its ID or its
+// label as a whole word, in any case. The choice depends only on the text and
+// the sorted groups.
+func questionHosts(text string, groups []opsfacts.Group) []opsWorkQuestionHost {
+	lower := strings.ToLower(text)
+	index := map[string]int{} // host ID -> position in out
+	rejected := map[string]bool{}
+	var out []opsWorkQuestionHost
+	for _, g := range groups {
+		p := g.Projection
+		id := p.Host.ID
+		if rejected[id] {
+			continue
+		}
+		if i, ok := index[id]; ok {
+			out[i].Counts = addCounts(out[i].Counts, p.Counts)
+			continue
+		}
+		if len(out) >= MaxOpsQuestionHosts || !(namedIn(lower, id) || namedIn(lower, p.Host.Label)) {
+			rejected[id] = true
+			continue
+		}
+		index[id] = len(out)
+		out = append(out, opsWorkQuestionHost{Host: p.Host, Exposure: p.Exposure, Ports: p.Ports,
+			PortsOmitted: p.PortsOmitted, Counts: p.Counts})
+	}
+	return out
+}
+
+// addCounts returns the sum of two finding counters.
+func addCounts(a, b opsfacts.Counts) opsfacts.Counts {
+	return opsfacts.Counts{Critical: a.Critical + b.Critical, High: a.High + b.High, Medium: a.Medium + b.Medium,
+		Low: a.Low + b.Low, KEV: a.KEV + b.KEV}
+}
+
+// namedIn reports whether name occurs in the lower-cased text as a whole word.
+func namedIn(lower, name string) bool {
+	name = strings.ToLower(name)
+	if name == "" {
+		return false
+	}
+	for from := 0; ; {
+		i := strings.Index(lower[from:], name)
+		if i < 0 {
+			return false
+		}
+		start, end := from+i, from+i+len(name)
+		if wordBoundary(lower, start-1) && wordBoundary(lower, end) {
+			return true
+		}
+		from = start + 1
+	}
+}
+
+// wordBoundary reports whether the byte at i does not continue a word: a
+// letter, digit, '-', '_' or any non-ASCII byte does. A '.' continues a word
+// only when a word byte follows it, so "web01." ends at the sentence end while
+// "web01.example.org" does not end at the first dot.
+func wordBoundary(s string, i int) bool {
+	if i < 0 || i >= len(s) {
+		return true
+	}
+	c := s[i]
+	switch {
+	case c >= 'a' && c <= 'z', c >= '0' && c <= '9', c >= 0x80:
+		return false
+	case c == '-' || c == '_':
+		return false
+	case c == '.':
+		return i+1 >= len(s) || !isWordByte(s[i+1])
+	}
+	return true
+}
+
+// isWordByte reports whether c is a letter or digit (ASCII or non-ASCII).
+func isWordByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c >= 0x80
 }
 
 // serveWork answers GET OpsWorkPath. The class comes from the stored
@@ -366,7 +499,8 @@ func (h *OpsHandler) serveWork(ctx context.Context, w http.ResponseWriter, t *to
 	writeJSON(w, http.StatusOK, opsWorkResponse{Items: items})
 }
 
-// dueItems builds the work list for one data class.
+// dueItems builds the work list for one data class. Open admin questions come
+// first, oldest first (ADR 0016 D3, D11), then the summary and the fix groups.
 func (h *OpsHandler) dueItems(ctx context.Context, class string) ([]opsWorkItem, error) {
 	answered, err := h.answeredSet(ctx)
 	if err != nil {
@@ -376,20 +510,34 @@ func (h *OpsHandler) dueItems(ctx context.Context, class string) ([]opsWorkItem,
 	if err != nil {
 		return nil, fmt.Errorf("fleet counters: %w", err)
 	}
+	questions, err := h.opts.Notes.OpenQuestions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("open questions: %w", err)
+	}
+	lab := class == opsconfig.DataClassLab
+	var groups []opsfacts.Group
+	if lab {
+		groups, err = h.opts.Facts.EligibleGroups(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("eligible groups: %w", err)
+		}
+		sortGroups(groups)
+	}
 	items := make([]opsWorkItem, 0, MaxOpsWorkItems)
+	for _, q := range questions {
+		if len(items) >= MaxOpsQuestionItems {
+			break
+		}
+		items = append(items, h.questionItem(q, lab, groups, fleet.Fleet))
+	}
 	day := h.now().UTC().Format(time.DateOnly)
-	if sd := fleetDigest(fleet.Fleet); !answered[answerKey(opsnotes.KindSummary, day, sd)] {
+	if sd := fleetDigest(fleet.Fleet); len(items) < MaxOpsWorkItems && !answered[answerKey(opsnotes.KindSummary, day, sd)] {
 		c := fleet.Fleet
 		items = append(items, opsWorkItem{Kind: string(opsnotes.KindSummary), Ref: day, Digest: sd, Fleet: &c})
 	}
-	if class != opsconfig.DataClassLab {
+	if !lab {
 		return items, nil
 	}
-	groups, err := h.opts.Facts.EligibleGroups(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("eligible groups: %w", err)
-	}
-	sortGroups(groups)
 	for _, g := range groups {
 		if len(items) >= MaxOpsWorkItems {
 			break

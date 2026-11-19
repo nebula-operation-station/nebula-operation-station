@@ -76,6 +76,16 @@ func validExecutionID(s string) bool {
 	return s == "" || execIDRe.MatchString(s)
 }
 
+// ValidHost reports whether s is empty or an inventory host ID that Append
+// accepts (lowercase, at most 63 bytes). Callers that build a record from a
+// display label use it to decide between the label and "" before Append, so
+// that a label Append would refuse does not lose the whole event.
+func ValidHost(s string) bool { return validHost(s) }
+
+// ValidExecutionID reports whether s is empty or a lowercase UUIDv4 that
+// Append accepts. See ValidHost.
+func ValidExecutionID(s string) bool { return validExecutionID(s) }
+
 // refused builds the error for a refused field. why names the field and the
 // rule, and must never contain the input value.
 func refused(why string) error {
@@ -154,21 +164,27 @@ type KindCode string
 
 // Event kinds.
 const (
-	KindVulnKEVNew              KindCode = "vuln.kev_new"
-	KindVulnCriticalNew         KindCode = "vuln.critical_new"
-	KindVulnHermesStale         KindCode = "vuln.hermes_stale"
-	KindVulnFeedStale           KindCode = "vuln.feed_stale"
-	KindVulnFeedRegressed       KindCode = "vuln.feed_regressed"
-	KindVulnFeedMarkReset       KindCode = "vuln.feed_mark_reset"
-	KindIntegrityNOSMismatch    KindCode = "integrity.nos_mismatch"
-	KindIntegrityHostChange     KindCode = "integrity.host_change"
-	KindIntegrityScanIncomplete KindCode = "integrity.scan_incomplete"
-	KindIntegrityBaselineTamper KindCode = "integrity.baseline_tamper"
-	KindLeaseExpiring           KindCode = "lease.expiring"
-	KindLeaseRunFailed          KindCode = "lease.run_failed"
-	KindDigest                  KindCode = "digest"
-	KindOpsSuggestionNew        KindCode = "opsagent.suggestion_new"
-	KindOpsSettingsChanged      KindCode = "opsagent.settings_changed"
+	KindVulnKEVNew                 KindCode = "vuln.kev_new"
+	KindVulnCriticalNew            KindCode = "vuln.critical_new"
+	KindVulnHermesStale            KindCode = "vuln.hermes_stale"
+	KindVulnFeedStale              KindCode = "vuln.feed_stale"
+	KindVulnFeedRegressed          KindCode = "vuln.feed_regressed"
+	KindVulnFeedMarkReset          KindCode = "vuln.feed_mark_reset"
+	KindIntegrityNOSMismatch       KindCode = "integrity.nos_mismatch"
+	KindIntegrityHostChange        KindCode = "integrity.host_change"
+	KindIntegrityScanIncomplete    KindCode = "integrity.scan_incomplete"
+	KindIntegrityBaselineTamper    KindCode = "integrity.baseline_tamper"
+	KindLeaseExpiring              KindCode = "lease.expiring"
+	KindLeaseRunFailed             KindCode = "lease.run_failed"
+	KindDigest                     KindCode = "digest"
+	KindOpsSuggestionNew           KindCode = "opsagent.suggestion_new"
+	KindOpsSettingsChanged         KindCode = "opsagent.settings_changed"
+	KindExecution                  KindCode = "execution"
+	KindOpsState                   KindCode = "ops_state"
+	KindHostKeyMismatch            KindCode = "host_key_mismatch"
+	KindTest                       KindCode = "test"
+	KindExecutorLocked             KindCode = "executor_locked"
+	KindIntegrityReferenceConflict KindCode = "integrity.reference_conflict"
 )
 
 func (k KindCode) valid() bool {
@@ -177,7 +193,8 @@ func (k KindCode) valid() bool {
 		KindVulnFeedStale, KindVulnFeedRegressed, KindVulnFeedMarkReset,
 		KindIntegrityNOSMismatch, KindIntegrityHostChange, KindIntegrityScanIncomplete,
 		KindIntegrityBaselineTamper, KindLeaseExpiring, KindLeaseRunFailed, KindDigest,
-		KindOpsSuggestionNew, KindOpsSettingsChanged:
+		KindOpsSuggestionNew, KindOpsSettingsChanged, KindExecution, KindOpsState,
+		KindHostKeyMismatch, KindTest, KindExecutorLocked, KindIntegrityReferenceConflict:
 		return true
 	}
 	return false
@@ -202,13 +219,20 @@ const (
 	StateChanged    StateCode = "changed"
 	StateReset      StateCode = "reset"
 	StateSummary    StateCode = "summary"
+	StateWaiting    StateCode = "waiting"
+	StatePartial    StateCode = "partial"
+	StateTest       StateCode = "test"
+	StateLocked     StateCode = "locked"
+	StateConflict   StateCode = "conflict"
+	StateOther      StateCode = "other"
 )
 
 func (s StateCode) valid() bool {
 	switch s {
 	case StateNew, StateEscalated, StateExpiring, StateFailed, StateStale,
 		StateRegressed, StateMismatch, StateIncomplete, StateTamper,
-		StateChanged, StateReset, StateSummary:
+		StateChanged, StateReset, StateSummary, StateWaiting, StatePartial,
+		StateTest, StateLocked, StateConflict, StateOther:
 		return true
 	}
 	return false
@@ -315,7 +339,7 @@ func New(db *sql.DB, now func() time.Time) (*Store, error) {
 // validExecutionID; otherwise Append returns an error wrapping ErrRefused that
 // names the field and never the value. A Host or ExecutionID that does not
 // match is refused, never cut. A Link that is not a NOS path (see
-// isNOSLink), or that is longer than MaxLink, is dropped: it is stored empty
+// IsNOSLink), or that is longer than MaxLink, is dropped: it is stored empty
 // and marked as changed. An empty Link is no link at all and is not marked.
 // In the same transaction as the insert, Append removes the oldest rows beyond
 // MaxEntries, so the table stays bounded without a prune run.
@@ -336,13 +360,13 @@ func (s *Store) Append(ctx context.Context, r Record) (int64, error) {
 	}
 	var changed Field
 
-	// isNOSLink accepts printable ASCII only, so a valid link needs no
+	// IsNOSLink accepts printable ASCII only, so a valid link needs no
 	// cleaning, and a link over the limit is dropped rather than cut: a cut
 	// path could point at another or a nonexistent UI route.
 	var link string
 	switch {
 	case r.Link == "":
-	case isNOSLink(r.Link) && len(r.Link) <= MaxLink:
+	case IsNOSLink(r.Link):
 		link = r.Link
 	default:
 		changed |= FieldLink
@@ -460,17 +484,20 @@ func (s *Store) Prune(ctx context.Context) (int64, error) {
 	return byAge + byCount, nil
 }
 
-// isNOSLink reports whether s is a plain NOS UI path such as
-// "/executions/ex-1". Browsers normalize a link before they follow it: they
-// turn backslashes into slashes and drop tabs and newlines. So the check is
-// strict and runs before any cleaning. It rejects:
+// IsNOSLink reports whether s is a plain NOS UI path such as
+// "/executions/ex-1". It is the one link rule of the notification log: the
+// store applies it on write, and the inbox page applies it again before it
+// shows a link, so both checks share this code. Browsers normalize a link
+// before they follow it: they turn backslashes into slashes and drop tabs and
+// newlines. So the check is strict and runs before any cleaning. It rejects:
 //   - anything that does not start with "/"
+//   - anything longer than MaxLink bytes
 //   - "//" anywhere (a scheme-relative URL, and an absolute URL such as
 //     "/x://host", also after normalization)
 //   - backslashes, "?" (query) and "#" (fragment), where tokens live
 //   - bytes outside printable ASCII 0x21-0x7E: spaces, controls and non-ASCII
-func isNOSLink(s string) bool {
-	if !strings.HasPrefix(s, "/") {
+func IsNOSLink(s string) bool {
+	if len(s) > MaxLink || !strings.HasPrefix(s, "/") {
 		return false
 	}
 	if strings.Contains(s, "//") || strings.ContainsAny(s, `\?#`) {

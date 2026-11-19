@@ -21,7 +21,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
@@ -31,6 +30,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsnotes"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
 
 // Ops agent wiring constants.
@@ -140,21 +140,11 @@ func (s opsSuggestions) Family(actionID string) (string, bool) {
 	return opsfacts.Families(actionID)
 }
 
-// parseSuggestionRef splits "<note ID>.<step>"; both parts are positive.
+// parseSuggestionRef splits "<note ID>.<step>" with the UI's parser, so the
+// server and the operation form accept exactly the same references. Steps
+// count from 1, as the notes store numbers them.
 func parseSuggestionRef(ref string) (int64, int, bool) {
-	i := strings.LastIndexByte(ref, '.')
-	if i <= 0 || i == len(ref)-1 {
-		return 0, 0, false
-	}
-	id, err := strconv.ParseInt(ref[:i], 10, 64)
-	if err != nil || id <= 0 {
-		return 0, 0, false
-	}
-	idx, err := strconv.Atoi(ref[i+1:])
-	if err != nil || idx <= 0 {
-		return 0, 0, false
-	}
-	return id, idx, true
+	return ui.ParseSuggestionRef(ref)
 }
 
 // opsHostsSource adapts the inventory to the projection.
@@ -231,9 +221,11 @@ func (f opsFactsSource) Hosts(ctx context.Context) ([]string, error) {
 }
 
 // newOpsAPI returns the ops API handler, or nil when no ops token is
-// configured. The settings row lives in db (server.db).
+// configured. The settings row lives in db (server.db). accepted (may be nil)
+// runs after each note is stored for the first time (see ops_suggestion.go).
 func newOpsAPI(cfg serverconfig.APIConfig, db *sql.DB, notes *opsnotes.Store,
-	hosts func(ctx context.Context) ([]inventory.Host, error), log *slog.Logger) (http.Handler, error) {
+	hosts func(ctx context.Context) ([]inventory.Host, error), log *slog.Logger,
+	accepted func(opsnotes.Note)) (http.Handler, error) {
 	if _, ok := cfg.OpsToken(); !ok {
 		return nil, nil
 	}
@@ -248,7 +240,8 @@ func newOpsAPI(cfg serverconfig.APIConfig, db *sql.DB, notes *opsnotes.Store,
 		return nil, fmt.Errorf("ops api: projection: %w", err)
 	}
 	h, err := api.NewOps(api.OpsOptions{Tokens: cfg.Tokens, Settings: settings,
-		Facts: opsFactsSource{proj: proj, hosts: src}, Notes: notes, CorePrompt: opsAgentCorePrompt, Log: log})
+		Facts: opsFactsSource{proj: proj, hosts: src}, Notes: notes, CorePrompt: opsAgentCorePrompt, Log: log,
+		OnNoteAccepted: accepted})
 	if err != nil {
 		return nil, fmt.Errorf("ops api: %w", err)
 	}

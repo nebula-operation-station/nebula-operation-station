@@ -105,7 +105,7 @@ func TestAppendRejectsKindAndStateThatAreNotCodes(t *testing.T) {
 	const token = "123456:SECRET-TOKEN-XYZ"
 	bad := []string{
 		"",
-		"execution",
+		"executions",
 		"Lease.Expiring",
 		"lease.expiring ",
 		"lease.expiring\n",
@@ -318,7 +318,7 @@ func TestSchemaRejectsNonCodes(t *testing.T) {
 	s, _ := newTestStore(t)
 	for name, values := range map[string][]string{
 		"reason": {"'https://api.telegram.org/bot1:x/sendMessage'", "'Timeout'"},
-		"kind":   {"'https://api.telegram.org/bot1:x/sendMessage'", "'execution'", "'digest '"},
+		"kind":   {"'https://api.telegram.org/bot1:x/sendMessage'", "'unknown.kind'", "'digest '"},
 		"state":  {"'FAILED'", "'bot1:x'"},
 	} {
 		for _, v := range values {
@@ -874,11 +874,12 @@ func TestOverlongHostOrExecutionIDIsRefused(t *testing.T) {
 	}
 }
 
-// TestNOSLinkRules checks isNOSLink one rule at a time: each bad value breaks
+// TestNOSLinkRules checks IsNOSLink one rule at a time: each bad value breaks
 // exactly one rule, so removing any single check makes a case fail.
 func TestNOSLinkRules(t *testing.T) {
-	good := []string{"/", "/executions/ex-1", "/a:b/c", "/x.y~z_-"}
+	good := []string{"/", "/executions/ex-1", "/a:b/c", "/x.y~z_-", "/" + strings.Repeat("a", MaxLink-1)}
 	bad := map[string]string{
+		"over MaxLink":          "/" + strings.Repeat("a", MaxLink),
 		"empty":                 "",
 		"no leading slash":      "executions/ex-1",
 		"https url":             "https://ntfy.example.invalid/topic",
@@ -900,13 +901,13 @@ func TestNOSLinkRules(t *testing.T) {
 		"del byte":              "/x\x7fy",
 	}
 	for _, v := range good {
-		if !isNOSLink(v) {
-			t.Errorf("isNOSLink(%q) = false, want true", v)
+		if !IsNOSLink(v) {
+			t.Errorf("IsNOSLink(%q) = false, want true", v)
 		}
 	}
 	for name, v := range bad {
-		if isNOSLink(v) {
-			t.Errorf("%s: isNOSLink(%q) = true, want false", name, v)
+		if IsNOSLink(v) {
+			t.Errorf("%s: IsNOSLink(%q) = true, want false", name, v)
 		}
 	}
 }
@@ -1096,7 +1097,7 @@ func TestSchemaEnforcesEveryCheck(t *testing.T) {
 
 	// Edges that must be refused: one per CHECK clause and bound.
 	refuse := map[string]map[string]string{
-		"kind not a code":          {"kind": "'execution'"},
+		"kind not a code":          {"kind": "'unknown.kind'"},
 		"kind URL":                 {"kind": quote("https://api.telegram.org/bot1:x/sendMessage")},
 		"state not a code":         {"state": "'FAILED'"},
 		"state URL":                {"state": quote("bot1:x")},

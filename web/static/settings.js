@@ -87,6 +87,71 @@
   });
 })();
 
+// Ops-Agent (ADR 0016 D12). "Vom Vuln-Agenten kopieren" fills only the URL
+// and model fields from the data attributes the server rendered; it saves
+// nothing. A change is posted to /settings/ops-agent/begin, signed with the
+// security key and committed through /settings/ops-agent/commit. A changed
+// base URL needs the confirmation box (the server enforces it too). Server
+// text is shown with textContent only.
+(function () {
+  'use strict';
+
+  var copy = document.getElementById('ops-agent-copy');
+  if (copy) {
+    copy.addEventListener('click', function () {
+      document.getElementById('ops-agent-url').value = copy.dataset.copyUrl || '';
+      document.getElementById('ops-agent-model').value = copy.dataset.copyModel || '';
+    });
+  }
+
+  var form = document.getElementById('ops-agent-form');
+  var btn = document.getElementById('ops-agent-submit');
+  if (!form || !btn || typeof nebulaWebAuthn === 'undefined') return;
+  var w = nebulaWebAuthn;
+  var message = document.getElementById('ops-agent-message');
+
+  function show(text, isError) {
+    message.textContent = text;
+    message.classList.toggle('message--error', !!isError);
+  }
+
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    var body = {
+      enabled: document.getElementById('ops-agent-enabled').checked,
+      base_url: document.getElementById('ops-agent-url').value.trim(),
+      model: document.getElementById('ops-agent-model').value.trim(),
+      allow_plain_http: document.getElementById('ops-agent-plain').checked,
+      data_class: document.getElementById('ops-agent-data-class').value,
+      language: document.getElementById('ops-agent-language').value,
+      // The server rejects '\r'; send textarea line breaks as '\n'.
+      operator_instructions: document.getElementById('ops-agent-instructions').value.replace(/\r\n?/g, '\n'),
+      base_version: Number(form.dataset.version),
+      confirm_url_change: document.getElementById('ops-agent-confirm-url').checked,
+    };
+    if (body.base_url !== form.dataset.url && !body.confirm_url_change) {
+      show('Changing the base URL is security-relevant: tick the confirmation box first.', true);
+      return;
+    }
+    btn.disabled = true;
+    w.post('/settings/ops-agent/begin', body)
+      .then(function (begin) {
+        show('Touch your security key…', false);
+        return navigator.credentials.get(w.requestOptions(begin.options)).then(function (cred) {
+          return w.post('/settings/ops-agent/commit', { id: begin.id, assertion: w.assertionJSON(cred) });
+        });
+      })
+      .then(function () {
+        show('Saved.', false);
+        window.location.reload();
+      })
+      .catch(function (err) {
+        show(err.name === 'NotAllowedError' ? 'Cancelled or timed out.' : (err.message || 'The change failed.'), true);
+        btn.disabled = false;
+      });
+  });
+})();
+
 // Vulnerability agent – LLM (ADR 0011 amendment 1): the maintainer's
 // change is posted to /settings/vuln-agent/begin, the returned challenge
 // is signed with the security key and the assertion committed. A changed

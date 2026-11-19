@@ -291,25 +291,44 @@ func parseOrigin(s string) (*url.URL, error) {
 	return u, nil
 }
 
-// checkRedirect confines redirects to the original metadata resource and
-// method on an approved origin, or to a configured token endpoint.
+// checkRedirect decides whether a redirect may be followed, implementing the
+// ADR 0006 amendment "registry metadata redirects" (2026-11-19). It allows,
+// for anonymous requests only and only to the origin (scheme, host and port)
+// of the original request: a metadata GET of /tags/list or HEAD of
+// /manifests/ with the same path (query may differ), and an anonymous token
+// GET to that origin's configured auth path. It refuses every redirect of a
+// credentialed client or of any request in the chain that carries an
+// Authorization header, every change of scheme, host or port, and any chain
+// that would exceed MaxRedirects-1 (two) redirects.
 func (c *Client) checkRedirect(req *http.Request, via []*http.Request) error {
 	if c.priv != nil {
-		// Credentialed requests never follow redirects (ADR 0006: no
-		// redirects), so a credential or authenticated token cannot be
-		// carried to another resource or origin.
+		// Credentialed requests never follow redirects, so a credential or
+		// authenticated token cannot be carried to another resource.
 		return fmt.Errorf("%w: credentialed registry requests do not follow redirects", ErrRedirectNotAllowed)
 	}
 	if len(via) == 0 || len(via) >= MaxRedirects {
-		return fmt.Errorf("%w: more than %d redirects", ErrRedirectNotAllowed, MaxRedirects)
+		return fmt.Errorf("%w: more than %d redirects", ErrRedirectNotAllowed, MaxRedirects-1)
+	}
+	if req.Header.Get("Authorization") != "" {
+		return fmt.Errorf("%w: requests with an Authorization header do not follow redirects", ErrRedirectNotAllowed)
+	}
+	for _, prev := range via {
+		if prev.Header.Get("Authorization") != "" {
+			return fmt.Errorf("%w: requests with an Authorization header do not follow redirects", ErrRedirectNotAllowed)
+		}
 	}
 	first := via[0]
 	o := originOf(req.URL)
+	if o != originOf(first.URL) {
+		// Scheme, host and port must all stay the same: no cross-host
+		// redirect and no https->http downgrade.
+		return fmt.Errorf("%w: redirect leaves origin %s for %s", ErrRedirectNotAllowed, originOf(first.URL), o)
+	}
 	if req.Method != first.Method || req.URL.User != nil || req.URL.Fragment != "" {
 		return fmt.Errorf("%w: invalid metadata resource", ErrRedirectNotAllowed)
 	}
-	if _, ok := c.byOrigin[originOf(first.URL)]; ok {
-		if _, ok := c.byOrigin[o]; ok && req.URL.Path == first.URL.Path && req.URL.EscapedPath() == first.URL.EscapedPath() {
+	if _, ok := c.byOrigin[o]; ok {
+		if req.URL.Path == first.URL.Path && req.URL.EscapedPath() == first.URL.EscapedPath() {
 			if (first.Method == http.MethodGet && strings.HasSuffix(first.URL.Path, "/tags/list")) ||
 				(first.Method == http.MethodHead && strings.Contains(first.URL.Path, "/manifests/")) {
 				return nil
@@ -500,17 +519,30 @@ func (c *Client) noteBudget(reg string, h http.Header) {
 }
 
 // retryAfter parses a Retry-After header (delta-seconds or HTTP-date)
-// against the injected clock.
+// against the injected clock. The registry is untrusted, so the result is
+// capped at MaxBackoff before any conversion: a huge delta-seconds value must
+// not overflow time.Duration, and a far-future date must not push the pause
+// past the cap. Negative or unparsable values yield 0.
 func (c *Client) retryAfter(h string) time.Duration {
 	h = strings.TrimSpace(h)
 	if h == "" {
 		return 0
 	}
-	if sec, err := strconv.Atoi(h); err == nil && sec >= 0 {
+	const maxSeconds = int64(MaxBackoff / time.Second)
+	if sec, err := strconv.ParseInt(h, 10, 64); err == nil {
+		switch {
+		case sec <= 0:
+			return 0
+		case sec >= maxSeconds:
+			return MaxBackoff
+		}
 		return time.Duration(sec) * time.Second
 	}
 	if t, err := http.ParseTime(h); err == nil {
 		if d := t.Sub(c.now()); d > 0 {
+			if d > MaxBackoff {
+				return MaxBackoff
+			}
 			return d
 		}
 	}

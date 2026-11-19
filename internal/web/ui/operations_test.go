@@ -31,6 +31,8 @@ const opID = "0b9c2f7e-4a51-4c8e-9a51-6f0d3c2b1a00"
 type fakeOps struct {
 	createErr  error
 	approveErr error
+	// catalogErr makes Catalog fail (an executor outage).
+	catalogErr error
 	created    []string
 	// createdCalls records every CreateStaged call as [user, action, hosts...].
 	createdCalls [][]string
@@ -67,6 +69,9 @@ func (f *fakeOps) Reject(_ context.Context, user, id, reason string) error {
 }
 
 func (f *fakeOps) Catalog(context.Context) ([]actions.Action, error) {
+	if f.catalogErr != nil {
+		return nil, f.catalogErr
+	}
 	return append(append([]actions.Action(nil), actions.Builtin...), f.extra...), nil
 }
 

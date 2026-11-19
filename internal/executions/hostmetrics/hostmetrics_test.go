@@ -438,3 +438,36 @@ func TestParseFilesystemsMalformedRowsPreserveValidMounts(t *testing.T) {
 		}
 	}
 }
+
+// TestUnknownPhaseErrorQuotesBoundedPrefix pins the bound on the host's phase
+// in the error text: a several-KiB phase must not be quoted back in full.
+func TestUnknownPhaseErrorQuotesBoundedPrefix(t *testing.T) {
+	long := strings.Repeat("P", 4096)
+	const bound = 128
+	metrics := []byte(`{"format":"host-metrics-v1","phase":"` + long + `"}`)
+	fs := []byte(`{"format":"fs-list-v1","phase":"` + long + `"}`)
+	for name, parse := range map[string]func() error{
+		"metrics": func() error { _, err := ParseMetrics(metrics); return err },
+		"fs":      func() error { _, err := ParseFilesystems(fs); return err },
+	} {
+		err := parse()
+		if err == nil {
+			t.Fatalf("%s: 4 KiB unknown phase accepted", name)
+		}
+		if len(err.Error()) > bound {
+			t.Fatalf("%s: error is %d bytes, want at most %d: %q", name, len(err.Error()), bound, err.Error())
+		}
+		if !strings.Contains(err.Error(), "4096 bytes") {
+			t.Fatalf("%s: error %q does not report the phase length", name, err.Error())
+		}
+	}
+}
+
+// TestUnknownPhaseShortPhaseQuotedInFull keeps short phases readable: the
+// bound only truncates phases longer than the quoted prefix.
+func TestUnknownPhaseShortPhaseQuotedInFull(t *testing.T) {
+	_, err := ParseMetrics([]byte(`{"format":"host-metrics-v1","phase":"bogus"}`))
+	if err == nil || !strings.Contains(err.Error(), `"bogus"`) {
+		t.Fatalf("error = %v, want the short phase quoted in full", err)
+	}
+}

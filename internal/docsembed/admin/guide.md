@@ -1661,6 +1661,27 @@ hosts, and the executor found locked after a restart. Messages never
 contain host output. Vulnerability events use the same providers once
 vulnerability management is set up (section 10.4).
 
+Two lease events are sent without any LLM or agent: `lease.expiring`
+(a read lease or schedule grant expires within 7 days, and again within
+1 day; one message per grant and threshold) and `lease.run_failed` (a
+leased run failed; one message per grant, action and host until the next
+success).
+
+The daily digest is optional and off by default. Enable it with
+`notifications.daily_digest` in `server.json`: `"enabled": true`, a
+`"time"` as `"HH:MM"` (default `"07:00"`, local server time) and
+`"skip_empty": true` to send nothing on a day when every count is zero.
+An enabled digest needs at least one provider. It contains counts only:
+open updates, reboots pending, hosts not READY, grants expiring within 7
+days, open findings per tier and the KEV count, and failed executions of
+the last 24 hours.
+
+The notification list page in the web UI is not in this release, and no
+CLI command reads the log either. The server writes every sent, held and
+failed event to the `notify_log` table in `server.db`, keeping 30 days and
+at most 5,000 entries. Nothing reads that table yet. Section 10.3 does not
+cover it.
+
 ### 10.2 Read-only API (Home Assistant, status pages)
 
 The API is off by default. Create a token on the Nebula machine:
@@ -2349,6 +2370,343 @@ sudo systemctl daemon-reload
 Either way, then revoke the token on the Nebula machine (section 10.4).
 `/var/lib/nebula-vuln-agent`, `/etc/nebula-vuln-agent` and the user stay
 until you delete them.
+
+### 10.6 Ops agent
+
+The ops agent (`nebula-ops-agent`, ADR 0016) is optional and **off by
+default**. It works through the open critical and high vulnerability
+findings and writes one *fix note* per host and finding group: what is
+affected, the steps in order and the priority that NOS computed. The
+model orders and words the text. It never executes anything, never
+approves, never schedules and never submits a form. A step is a button
+that opens the normal NOS form, prefilled with the action and the host
+(in this build, not for container update steps, see "Status in this
+build"). You fill in the parameters and submit it yourself, with your
+security key (see "Security key for suggested executions" below).
+
+#### Status in this build
+
+Parts of ADR 0016 are built and parts are not. Check this before you
+plan a rollout. The list describes this release as it is on `main`.
+
+- **Not in this build, so the agent stays off:** an admin form and an
+  API for the LLM settings (section "Settings and data class"). The
+  settings store has no writer in this build, so the settings stay at
+  their default (disabled). The agent then makes no LLM call and writes
+  no note, and the Ops tab shows "No suggestion yet.".
+- **Wired, but empty:** the server connects the projection to empty
+  finding and listener sources (`cmd/nebula-server/ops.go`, "Source
+  gap"). Besides the open admin questions, the only item the work list
+  can carry is the fleet summary with zero counts. No group of lab
+  findings is ever produced, so **no fix item is ever due, even with the settings
+  enabled.** Consequently no fix note is written and no fix card can
+  appear, whatever the settings say.
+- **Built, but off with the settings:** answers to admin questions. The
+  question form in the Ops tab stores the question (see "Questions" under
+  "Notes, retention and backup"). With the settings enabled, the work list
+  carries each open question and the agent answers it (see "Admin
+  questions" below). The settings stay disabled in this build, so in a
+  default install no question is answered: it stays open and expires
+  after 7 days.
+- **Not built:** the card button for a container update step. It opens
+  a page that answers `404`. The other step buttons open the form.
+- **Built:** the notes store with its limits, the admin question form
+  and its answers, the fix cards in the Ops tab, the suggestion form
+  (prefilled from a card, with its banner), the suggestion marking of executions (section
+  "Security key for suggested executions"), the agent binary and the
+  systemd units.
+- **Built, separate from the agent:** the notifications `lease.expiring`
+  and `lease.run_failed` (section 10.1) and the optional daily digest.
+  They need no LLM. The server records each of them in its notification
+  log.
+- **Not built:** the notification list page in the web UI.
+
+#### The token `ops-agent`
+
+The agent has one exclusive API token with exactly two scopes:
+`ops.read` (read its work list and settings) and `ops.notes.write`
+(write notes and its last-run status). Create it on the Nebula machine
+as in section 10.4 and restrict it to loopback, because the agent runs on
+the same host:
+
+```
+nebula-server -api-token ops-agent:ops.read,ops.notes.write
+```
+
+```json
+{"name": "ops-agent", "sha256": "<printed hash>",
+ "scopes": ["ops.read", "ops.notes.write"],
+ "source_addresses": ["127.0.0.1", "::1"]}
+```
+
+The token must carry no other scope and no vulnerability scope. Only one
+token may hold the ops scopes. Nebula refuses to start with a
+configuration that breaks this rule. To revoke the token, remove its
+entry from `server.json` and restart `nebula-server`.
+
+Put the token on the NOS host, paste it, then press Ctrl-D:
+
+```
+sudo sh -c 'umask 077; cat > /etc/nebula-ops-agent/token'
+sudo chown nebula-ops-agent:nebula-ops-agent /etc/nebula-ops-agent/token
+```
+
+#### Configuration file and units
+
+The package installs `/etc/nebula-ops-agent/config.json` as a skeleton.
+Keys: `nos_base_url` (required; `https`, or `http` to a loopback address,
+no path), `nos_token_file`, `nos_ca_file` (optional, a pinned CA),
+`state_dir` (keep `/var/lib/nebula-ops-agent`) and `llm_credential_file`
+(optional, the bearer token of the LLM endpoint, in its own file, mode
+0600 and owned by `nebula-ops-agent`). Unknown keys are an error. The
+configuration holds no secret itself.
+
+Three units ship. None is enabled by the package:
+
+| Unit | What it does | Enable |
+| --- | --- | --- |
+| `nebula-ops-agent.service` | One run: fetch due work, one LLM call per item, post the validated notes. Oneshot, hardened, IP access to loopback only | started by the timer or the path unit |
+| `nebula-ops-agent.timer` | Starts the service every 30 minutes, with up to 5 minutes random delay | `sudo systemctl enable --now nebula-ops-agent.timer` |
+| `nebula-ops-agent.path` | Starts the service when the server touches its trigger file | Inert in this build: the server cannot write the trigger yet, so enable only the timer |
+
+Run it once by hand first and read the log:
+
+```
+sudo systemctl start nebula-ops-agent.service
+journalctl -u nebula-ops-agent.service -n 50
+```
+
+#### LLM address drop-in
+
+The unit allows network access to loopback only. The LLM endpoint is your
+decision, so you allow it in a drop-in, never in the unit:
+
+```
+sudo systemctl edit nebula-ops-agent.service
+```
+
+```ini
+[Service]
+IPAddressAllow=192.0.2.10/32
+```
+
+Use the address of your lab LLM host (the example is a documentation
+address). Lines add up, so the drop-in keeps loopback. The LLM base URL
+must use that literal address: for data class `lab` the settings accept
+only a literal IP inside the lab networks (loopback, RFC 1918, IPv6 ULA),
+not a host name. A name works only with data class `external`.
+Use only a model you run in your lab, as for the vulnerability agent
+(section 10.5, "LLM"); a hosted model is not a supported endpoint for
+data class `lab`.
+
+#### Settings and data class
+
+The settings row holds: enabled (default **off**), LLM base URL, model,
+`allow_plain_http` (default off), data class (`lab` by default, or
+`external`), operator instructions (at most 4 KiB) and language (`de` by
+default, or `en`). Nebula never stores the LLM credential; it lives only
+in the agent's credential file. The core prompt is fixed in the agent and
+cannot be changed from the settings.
+
+The data class decides what may leave the lab:
+
+- **`lab`:** host labels and vulnerability IDs may go to the model. The
+  agent then **always** uses the lab-only dialer: it connects only to
+  addresses in the lab networks after DNS resolution, follows no
+  redirects, ignores proxy variables, and uses plain `http` only with
+  `allow_plain_http`, never with a credential. No setting, flag or
+  environment variable turns this off. If the URL does not resolve into a
+  lab network, the run stops with `llm_refused_lab_rule` and writes no
+  note. It never falls back to `external` within a run.
+- **`external`:** the LLM may be outside the lab. The model then gets
+  only fleet counts per tier and KEV, and no host-specific fix note is
+  made.
+
+Choose `lab` only if the endpoint is on a network you control. If in
+doubt, choose `external`.
+
+Questions follow the same rule: in class `lab` a question may carry the
+facts of the hosts it names, in class `external` it carries the fleet
+counts only (see "Admin questions" and the table below).
+
+#### Admin questions
+
+As built (ADR 0016 D11), with the settings enabled:
+
+1. An admin types a question of at most 2 KiB into the Ops tab. NOS
+   stores it as *open*.
+2. The work list carries the open questions first, oldest first, at most
+   10 per list, so a backlog of questions cannot push out the daily
+   summary and the fix items. Each question item carries the question
+   text and the fleet counts. In class `lab` it also carries the facts of
+   the hosts the text names by ID or label as a whole word, at most 5
+   hosts: label, environment, criticality, exposure, listening ports and
+   the counts per tier and KEV, one entry per host. A question item never
+   carries findings or step candidates. In class `external` it carries
+   no host facts.
+3. The agent works the questions before the other items of the run and
+   from the same call budget. It checks each item first; an item that
+   breaks the contract (for example host facts in class `external` or
+   more than 5 hosts) is refused, the run status records
+   `work_unavailable`, and the rest of the run goes on. A valid question
+   gets exactly **one** LLM call, no retry. The prompt holds the
+   question as data (not as instructions), the counts and facts, and up
+   to 3 handbook chunks found by the question's words.
+4. The answer is text with up to 3 citations of those chunks: no steps,
+   no buttons, no links. The agent checks it and posts it as an
+   *answer* note. NOS checks it again and stores it only while the
+   question is open and the answer carries the question's digest; the
+   question is then *answered*.
+5. The Ops tab shows the answer under the question, under the LLM label,
+   with its citations.
+
+If the call fails or the answer is refused, the question stays open, and
+the next run asks again, until the question expires after 7 days. An
+answered question is not asked again.
+
+Earlier builds sent a question in a shape the agent could not read: one
+open question made the whole work list fail, and while it was open
+every run ended with `work_unavailable` and no note at all. In this
+build NOS and the agent use the same item shape.
+
+In this build no lab group is produced (see "Status in this build"), so
+a question in class `lab` names no host that NOS can find and carries no
+host facts. It still carries the question and the fleet counts.
+
+#### What goes to the model
+
+This section has two parts. The first table is the **design** of ADR 0016:
+what the agent would send once its inputs are connected. The second table is
+what **is wired in this build**. Only the second one describes what reaches
+the model today.
+
+**Designed (ADR 0016). Not sent in this build, because no lab group is
+produced and the finding sources are not connected:**
+
+| Data | `lab` | `external` |
+| --- | --- | --- |
+| Host label, environment, criticality (label at most 64 bytes) | Designed: yes | Designed: no |
+| Exposure level, listening ports (number and protocol, at most 32) | Designed: yes | Designed: no |
+| Per finding (at most 40 per group): vulnerability ID, source package, installed and fixed version, fix state, tier, score, KEV flag | Designed: yes | Designed: no |
+| Counts per tier and KEV, per group and for the fleet | Designed: yes | Designed: fleet counts only |
+| Step candidates as opaque keys (`c1`, `c2`, ...) with a short fixed label that NOS sets; the action ID and the host ID never enter the prompt | Designed: yes | Designed: no |
+| Documentation chunks from the handbook: up to 3 per fix item, found by the finding's package | Designed: yes | Designed: no, `external` items are fleet summaries and carry no chunks |
+
+**Wired in this build.** This is what can reach the model when the settings
+are enabled. The settings have no writer in this build, so in a default
+install nothing is sent at all.
+
+| Data | `lab` | `external` |
+| --- | --- | --- |
+| Fleet counts per tier and KEV (zero in this build), in the summary and in each question | Yes, as zero counts | Yes, as zero counts |
+| The operator instructions (at most 4 KiB) | Yes | Yes |
+| Host labels, ports, per-finding data, step candidates, documentation chunks | **No**: never produced in this build | No |
+| Your question in the Ops tab (at most 2 KiB) | Yes | Yes |
+| Facts of the hosts a question names (at most 5) | **No**: no lab group is produced, so no host is found | No |
+| Documentation chunks for a question: up to 3, found by the question's words | Yes | Yes |
+
+So in this build the data that can reach the model is the operator
+instructions, the zero-count fleet summary, your questions and the
+handbook chunks found for them. Host-specific data stays in NOS in both
+classes, unless you type it into a question yourself.
+
+**Never sent, in either class:** IP addresses and endpoints, fingerprints,
+credentials or their file names, user names, execution output and logs,
+audit entries, the vulnerability agent's assessment text, flows, topology,
+attack-path steps and notification targets. The model does not choose
+actions or hosts: it picks among the candidate keys that NOS computed.
+Its output is checked twice, once by the agent and once by NOS, and text
+that contains a link is refused. Model text never appears in a
+notification.
+
+The operator instructions and your questions reach the model in both
+classes. Do not type a secret into them: a question is also stored (see
+"Notes, retention and backup"), and with the settings enabled the model
+reads it.
+
+#### Security key for suggested executions
+
+Every execution or batch that was opened from an agent suggestion needs a
+security-key touch, **also when the action is LOW**. NOS raises its risk
+class to at least MEDIUM. The executor then asks for the approval of that
+class (spec 05): a security-key assertion with user presence for each
+execution or batch. The executor itself is unchanged; it only applies the
+higher class that the server proposes.
+
+NOS decides this on the server. An execution counts as suggested in two
+ways:
+
+1. The form carries a suggestion reference (`suggestion=<note>.<step>`
+   from the card's button, sent back as a hidden field), and NOS finds it
+   in its notes store. An unknown, expired or malformed reference is
+   refused: the form page answers `404`, and a submitted execution with
+   it answers `400`. It never falls back to an unmarked execution.
+2. NOS checks every interactively created execution and batch member
+   against its stored fix notes. If a stored note has a step of the same
+   action family on the same host, the execution is marked, also when no
+   reference was sent.
+
+Consequences you will notice:
+
+- A card that you **dismiss** still marks executions. Dismissing hides the
+  card and changes nothing else.
+- In this build no fix note and no card can come about (see "Status in
+  this build"), so neither rule fires yet and no execution is marked. The
+  rules are kept here for the release that connects the finding sources.
+- While a fix note for a host is stored (at most 30 days, see below), an
+  admin who starts the same kind of action on that host **by hand** also
+  needs the key. Nothing on the page says why, in this build: the
+  operation page shows the executor's risk (at least MEDIUM for a
+  suggested execution) and has no "From an agent suggestion" label. This
+  is intended.
+- A form opened from a card shows the banner "Opened from an agent
+  suggestion. This execution needs a security-key touch." (German:
+  "Aus einem Agenten-Vorschlag geöffnet. Diese Ausführung braucht eine
+  Security-Key-Berührung."). A form you open by hand shows no banner.
+- Schedules and read leases are not affected; the suggestion form offers
+  no "schedule this".
+
+Limit: the server decides the marking. A compromised NOS server can omit
+it. It already can propose LOW work inside an open privileged session
+(spec 05, `v23-05-07`), so the rule adds no new exposure. It protects
+against a plausible suggestion and a routine click, not against a
+compromised server. As for every browser approval, the authenticator
+signs the challenge, not the form on the screen.
+
+#### Notes, retention and backup
+
+- Notes and questions are stored in their own SQLite file,
+  `<data_dir>/opsnotes/notes.db`, in a directory with mode 0700. The
+  directory is outside the `nebula backup` set.
+- Retention: **30 days or 500 notes**, whichever comes first; the oldest
+  are pruned first. At most 100 notes are accepted per UTC day.
+- **Questions:** the Ops tab's question form stores one question of at
+  most 2 KiB. At most 20 questions are open at once and 50 are asked per
+  UTC day. An open question expires after 7 days. Questions are pruned
+  with the same 30-day retention. An answer is an *answer* note and
+  counts against the note limits. The question is answered once; if its
+  answer note is pruned first, the question stays answered and shows no
+  answer. With the settings disabled, as in a default install, no answer
+  is produced (see "Status in this build").
+- After a restore, no notes and no questions exist. The agent writes new
+  notes on its next run, if the timer runs.
+- Only admins see notes and questions. Every other user gets `404`.
+- The audit log records each accepted or rejected note with its kind,
+  reference, digest, length and SHA-256, never its text. It records each
+  stored question with the user, length and a keyed digest, never its
+  text. It also records each change of the settings.
+
+#### Residual risk
+
+The residual risk, as ADR 0016 states it:
+
+> Residual risk: an admin follows a plausible but wrong suggestion, fills
+> in the parameters and approves it with the key. The card reduces
+> reading, not responsibility; the finding page and the cited section stay
+> the authority.
+
+Read the finding page and the cited section before you submit a
+suggested form.
 
 ## 11. Operating securely
 
