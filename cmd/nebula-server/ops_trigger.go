@@ -2,8 +2,8 @@
 
 // Ops agent trigger of the server (ADR 0016 D3): the server touches a trigger
 // file when a finding newly enters tier critical or high, and systemd's path
-// unit starts the agent. The trigger file holds no data and the touch never
-// reads or writes anything else.
+// unit starts the agent. The trigger file holds no data; the touch replaces it
+// by rename inside the server's own state directory and touches nothing else.
 package main
 
 import (
@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -21,9 +22,14 @@ import (
 // Ops agent trigger constants.
 const (
 	// opsTriggerPath is the trigger file the ops agent's path unit watches
-	// (deploy/systemd/nebula-ops-agent.path). It lies in the agent's own
-	// directory below /var/lib/nebula.
-	opsTriggerPath = "/var/lib/nebula/opsagent/trigger"
+	// (deploy/systemd/nebula-ops-agent.path). It lies in the server's own
+	// StateDirectory (nebula/server in nebula-server.service), the only
+	// directory the server may write under ProtectSystem=strict, so the
+	// server needs no extra write path (ADR 0016 amendment 2026-11-19;
+	// previously /var/lib/nebula/opsagent/trigger, which the server could
+	// not write). The agent never reads it: /var/lib/nebula is in its
+	// InaccessiblePaths.
+	opsTriggerPath = "/var/lib/nebula/server/ops-trigger"
 	// opsTriggerInterval is the least time between two touches of the trigger.
 	opsTriggerInterval = time.Minute
 	// opsTriggerSettingsTimeout bounds the settings read before a touch.
@@ -100,16 +106,34 @@ func (t *opsTrigger) Touch() bool {
 	return true
 }
 
-// touchTrigger opens the trigger file for writing and closes it: systemd's path
-// unit reacts to the close of a file opened for writing. The file is created
-// with mode 0600 when missing and its content is never changed.
-func touchTrigger(path string) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0o600)
+// touchTrigger replaces the trigger file atomically: it creates an empty
+// temporary file with mode 0600 in the same directory and renames it over
+// path. The path unit (PathChanged=) sees the new file appear, or the old
+// inode lose its link. The content is empty and has no meaning. A symlink or
+// any other file at path is replaced, never written through. On failure the
+// temporary file is removed.
+func touchTrigger(path string) (err error) {
+	dir, base := filepath.Split(path)
+	f, err := os.CreateTemp(dir, "."+base+".tmp-*")
 	if err != nil {
-		return fmt.Errorf("open trigger: %w", err)
+		return fmt.Errorf("create trigger: %w", err)
+	}
+	tmp := f.Name()
+	defer func() {
+		if err != nil {
+			_ = os.Remove(tmp)
+		}
+	}()
+	// CreateTemp already uses 0600; Chmod makes the mode independent of it.
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("chmod trigger: %w", err)
 	}
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("close trigger: %w", err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		return fmt.Errorf("rename trigger: %w", err)
 	}
 	return nil
 }
