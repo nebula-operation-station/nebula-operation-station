@@ -2396,21 +2396,23 @@ plan a rollout. The list describes this release as it is on `main`.
   no note, and the Ops tab shows "No suggestion yet.".
 - **Wired, but empty:** the server connects the projection to empty
   finding and listener sources (`cmd/nebula-server/ops.go`, "Source
-  gap"). The only item the work list can carry is the fleet summary with
-  zero counts, for class `external`. No group of lab findings is ever
-  produced, so **no fix item is ever due, even with the settings
+  gap"). Besides the open admin questions, the only item the work list
+  can carry is the fleet summary with zero counts. No group of lab
+  findings is ever produced, so **no fix item is ever due, even with the settings
   enabled.** Consequently no fix note is written and no fix card can
-  appear, whatever the settings say. The admin questions are offered as
-  well, but the agent refuses a question item in this build, so no
-  question is answered.
-- **Not built:** answers to admin questions. The question form in the
-  Ops tab stores the question (see "Questions" under "Notes, retention
-  and backup"); no answer is produced.
+  appear, whatever the settings say.
+- **Built, but off with the settings:** answers to admin questions. The
+  question form in the Ops tab stores the question (see "Questions" under
+  "Notes, retention and backup"). With the settings enabled, the work list
+  carries each open question and the agent answers it (see "Admin
+  questions" below). The settings stay disabled in this build, so in a
+  default install no question is answered: it stays open and expires
+  after 7 days.
 - **Not built:** the card button for a container update step. It opens
   a page that answers `404`. The other step buttons open the form.
-- **Built:** the notes store with its limits, the admin question form,
-  the fix cards in the Ops tab, the suggestion form (prefilled from a
-  card, with its banner), the suggestion marking of executions (section
+- **Built:** the notes store with its limits, the admin question form
+  and its answers, the fix cards in the Ops tab, the suggestion form
+  (prefilled from a card, with its banner), the suggestion marking of executions (section
   "Security key for suggested executions"), the agent binary and the
   systemd units.
 - **Built, separate from the agent:** the notifications `lease.expiring`
@@ -2523,8 +2525,53 @@ The data class decides what may leave the lab:
 Choose `lab` only if the endpoint is on a network you control. If in
 doubt, choose `external`.
 
-Questions follow the same rule: in this build no question reaches the
-model, in either class (see the table below).
+Questions follow the same rule: in class `lab` a question may carry the
+facts of the hosts it names, in class `external` it carries the fleet
+counts only (see "Admin questions" and the table below).
+
+#### Admin questions
+
+As built (ADR 0016 D11), with the settings enabled:
+
+1. An admin types a question of at most 2 KiB into the Ops tab. NOS
+   stores it as *open*.
+2. The work list carries the open questions first, oldest first, at most
+   10 per list, so a backlog of questions cannot push out the daily
+   summary and the fix items. Each question item carries the question
+   text and the fleet counts. In class `lab` it also carries the facts of
+   the hosts the text names by ID or label as a whole word, at most 5
+   hosts: label, environment, criticality, exposure, listening ports and
+   the counts per tier and KEV, one entry per host. A question item never
+   carries findings or step candidates. In class `external` it carries
+   no host facts.
+3. The agent works the questions before the other items of the run and
+   from the same call budget. It checks each item first; an item that
+   breaks the contract (for example host facts in class `external` or
+   more than 5 hosts) is refused, the run status records
+   `work_unavailable`, and the rest of the run goes on. A valid question
+   gets exactly **one** LLM call, no retry. The prompt holds the
+   question as data (not as instructions), the counts and facts, and up
+   to 3 handbook chunks found by the question's words.
+4. The answer is text with up to 3 citations of those chunks: no steps,
+   no buttons, no links. The agent checks it and posts it as an
+   *answer* note. NOS checks it again and stores it only while the
+   question is open and the answer carries the question's digest; the
+   question is then *answered*.
+5. The Ops tab shows the answer under the question, under the LLM label,
+   with its citations.
+
+If the call fails or the answer is refused, the question stays open, and
+the next run asks again, until the question expires after 7 days. An
+answered question is not asked again.
+
+Earlier builds sent a question in a shape the agent could not read: one
+open question made the whole work list fail, and while it was open
+every run ended with `work_unavailable` and no note at all. In this
+build NOS and the agent use the same item shape.
+
+In this build no lab group is produced (see "Status in this build"), so
+a question in class `lab` names no host that NOS can find and carries no
+host facts. It still carries the question and the fleet counts.
 
 #### What goes to the model
 
@@ -2551,14 +2598,17 @@ install nothing is sent at all.
 
 | Data | `lab` | `external` |
 | --- | --- | --- |
-| Fleet counts per tier and KEV (zero in this build) | **No**: no lab group is ever produced | Yes, as zero counts |
+| Fleet counts per tier and KEV (zero in this build), in the summary and in each question | Yes, as zero counts | Yes, as zero counts |
 | The operator instructions (at most 4 KiB) | Yes | Yes |
 | Host labels, ports, per-finding data, step candidates, documentation chunks | **No**: never produced in this build | No |
-| Your question in the Ops tab (at most 2 KiB) | **No**: the agent refuses question items | **No** |
+| Your question in the Ops tab (at most 2 KiB) | Yes | Yes |
+| Facts of the hosts a question names (at most 5) | **No**: no lab group is produced, so no host is found | No |
+| Documentation chunks for a question: up to 3, found by the question's words | Yes | Yes |
 
-So in this build the only data that can reach the model is the operator
-instructions and the zero-count fleet summary. Host-specific data stays in
-NOS in both classes.
+So in this build the data that can reach the model is the operator
+instructions, the zero-count fleet summary, your questions and the
+handbook chunks found for them. Host-specific data stays in NOS in both
+classes, unless you type it into a question yourself.
 
 **Never sent, in either class:** IP addresses and endpoints, fingerprints,
 credentials or their file names, user names, execution output and logs,
@@ -2569,9 +2619,10 @@ Its output is checked twice, once by the agent and once by NOS, and text
 that contains a link is refused. Model text never appears in a
 notification.
 
-The operator instructions reach the model in both classes. Do not type a
-secret into them, or into the question form: the question is stored (see
-"Notes, retention and backup") even though no model reads it yet.
+The operator instructions and your questions reach the model in both
+classes. Do not type a secret into them: a question is also stored (see
+"Notes, retention and backup"), and with the settings enabled the model
+reads it.
 
 #### Security key for suggested executions
 
@@ -2632,8 +2683,11 @@ signs the challenge, not the form on the screen.
 - **Questions:** the Ops tab's question form stores one question of at
   most 2 KiB. At most 20 questions are open at once and 50 are asked per
   UTC day. An open question expires after 7 days. Questions are pruned
-  with the same 30-day retention. In this build no answer is produced
-  (see "Status in this build").
+  with the same 30-day retention. An answer is an *answer* note and
+  counts against the note limits. The question is answered once; if its
+  answer note is pruned first, the question stays answered and shows no
+  answer. With the settings disabled, as in a default install, no answer
+  is produced (see "Status in this build").
 - After a restore, no notes and no questions exist. The agent writes new
   notes on its next run, if the timer runs.
 - Only admins see notes and questions. Every other user gets `404`.

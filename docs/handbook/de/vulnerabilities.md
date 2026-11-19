@@ -230,7 +230,8 @@ Fix-Notiz entstehen. Ihn auf anderem Weg einzuschalten ändert daran nichts.
 Eine Standardinstallation zeigt deshalb keine Karte, und eine Installation
 mit eingeschalteten Einstellungen auch nicht (Admin-Handbuch
 [10.6](../../admin/guide.md#106-ops-agent), "Status in this build").
-Antworten auf Fragen im Tab Ops werden noch nicht erzeugt.
+Fragen im Tab Ops werden nur beantwortet, solange der Agent an ist; eine
+Standardinstallation beantwortet daher auch keine.
 
 **Voraussetzungen:** Der Ops-Agent ist von einem Admin eingerichtet
 (Admin-Handbuch [10.6](../../admin/guide.md#106-ops-agent)); Sie sind
@@ -238,14 +239,16 @@ Admin. Andere Benutzer sehen den Tab Ops nicht.
 
 **Schritte:**
 
-1. Öffne den Tab **Ops** im Assistenten-Panel. Eine Karte trägt die
+1. Öffnen Sie den Tab **Ops** im Assistenten-Panel. Eine Karte trägt die
    Überschrift "Fix suggestion" mit ihrer Nummer. Ist der Agent aus, steht
    dort "Agent switched off. No open suggestion."; ist er an und es gibt
    noch keine Karte, "No suggestion yet.". In diesem Release ist das der
    Normalzustand, weil keine Befundquelle angeschlossen ist (siehe Status).
-   Das Fragefeld steht oben im Tab; in diesem Release werden Fragen
-   gespeichert, aber nicht beantwortet (Admin-Handbuch
-   [10.6](../../admin/guide.md#106-ops-agent)).
+   Das Fragefeld steht oben im Tab. Ist der Agent an, erscheint die
+   Antwort unter Ihrer Frage, mit der LLM-Kennzeichnung und ihren
+   Zitaten, ohne Schritte und ohne Buttons; ist er aus, bleibt die Frage
+   offen und verfällt nach 7 Tagen (Admin-Handbuch
+   [10.6](../../admin/guide.md#106-ops-agent), "Admin questions").
 2. Lesen Sie zuerst den Teil "What" (die Überschriften sind englisch). NOS
    stellt ihn aus den eigenen gespeicherten Fakten dar: Paket und Version,
    Tier, KEV und Exposition. Er ist kein Modelltext.

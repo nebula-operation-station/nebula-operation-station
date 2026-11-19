@@ -404,6 +404,8 @@ Zeitpläne sind nicht betroffen. Das Admin-Handbuch
 
 Nein. NOS sendet nur an Telegram und liest nie von dort: Keine Antworten,
 keine Bot-Befehle und kein Freitext erreichen NOS. Fragen an den Ops-Agenten
-stellen Sie nur in der NOS-Weboberfläche, im Tab Ops. In diesem Release wird
-eine Frage gespeichert, aber nicht beantwortet: Der Agent liest Fragen noch
-nicht. Siehe [Benachrichtigungen](notifications.md).
+stellen Sie nur in der NOS-Weboberfläche, im Tab Ops. Dort erscheint auch die
+Antwort, nie in einer Benachrichtigung. Sie kommt nur, solange der Ops-Agent
+eingeschaltet ist, und das ist er in einer Standardinstallation nicht
+(Admin-Handbuch [10.6](../../admin/guide.md#106-ops-agent), "Admin
+questions"). Siehe [Benachrichtigungen](notifications.md).

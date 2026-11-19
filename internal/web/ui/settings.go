@@ -141,6 +141,8 @@ type settingsData struct {
 	// Agent is the "Vulnerability agent – LLM" section; nil hides it (no
 	// backend configured).
 	Agent *vulnAgentView
+	// OpsAgent is the "Ops-Agent" section; nil hides it (no backend).
+	OpsAgent *opsAgentView
 }
 
 // handleSettingsPage renders the settings page (GET /settings).
@@ -176,6 +178,7 @@ func (h *Handler) handleSettingsPage(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	data.Agent = h.vulnAgentSection(r)
+	data.OpsAgent = h.opsAgentSection(r)
 	h.render(w, r, pageData{
 		Title:    "Settings",
 		Active:   "settings",
