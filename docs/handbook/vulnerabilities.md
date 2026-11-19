@@ -195,8 +195,9 @@ does not yet connect the finding sources, so the agent never has a finding
 to work on and no fix note can be made. Switching the settings on by other
 means does not change that. A default install shows no card, and neither
 does an install with the settings on (admin guide
-[10.6](../admin/guide.md#106-ops-agent), "Status in this build"). Answers
-to questions in the Ops tab are not produced yet.
+[10.6](../admin/guide.md#106-ops-agent), "Status in this build"). Questions
+in the Ops tab are answered only while the agent is on, so a default
+install answers none either.
 
 **Prerequisites:** the ops agent is set up by an admin (admin guide
 [10.6](../admin/guide.md#106-ops-agent)); you are an admin. Other users do
@@ -208,9 +209,12 @@ not see the Ops tab.
    suggestion" with its number. With the agent off, the tab says "Agent
    switched off. No open suggestion."; with the agent on and no card yet, it
    says "No suggestion yet.". In this release that is the normal state, since
-  no finding source is connected (see Status above). The question form is at the top of the tab;
-   in this build its questions are stored but not answered (admin guide
-   [10.6](../admin/guide.md#106-ops-agent)).
+   no finding source is connected (see Status above). The question form
+   is at the top of the tab. With the agent on, the answer appears under
+   your question, under the LLM label, with its citations and without
+   steps or buttons; with the agent off, the question stays open and
+   expires after 7 days (admin guide
+   [10.6](../admin/guide.md#106-ops-agent), "Admin questions").
 2. Read "What" first (the headings are shown in English). NOS renders it
    from its own stored facts: package and version, tier, KEV and exposure.
    It is not model text.

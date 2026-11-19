@@ -291,6 +291,8 @@ limit.
 
 No. NOS only sends to Telegram. It never reads from Telegram: no replies,
 no bot commands and no free text reach NOS. Questions to the ops agent are
-asked only in the NOS web UI, in the Ops tab. In this build a question is
-stored but not answered: the agent does not read questions yet. See
+asked only in the NOS web UI, in the Ops tab. The answer appears there
+too, never in a notification. It comes only while the ops agent is
+enabled, which a default install is not (admin guide
+[10.6](../admin/guide.md#106-ops-agent), "Admin questions"). See
 [Notifications](notifications.md).
