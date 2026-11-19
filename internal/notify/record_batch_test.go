@@ -33,27 +33,31 @@ func (s *syncBuffer) String() string {
 	return s.b.String()
 }
 
-// deadlineRecorder records the deadline of each Append's context.
+// deadlineRecorder records the deadline of each Append's context and the time
+// of the call.
 type deadlineRecorder struct {
 	mu        sync.Mutex
 	deadlines []time.Time
+	starts    []time.Time
 	hasDL     []bool
 }
 
 func (d *deadlineRecorder) Append(ctx context.Context, _ notifylog.Record) (int64, error) {
+	start := time.Now()
 	dl, ok := ctx.Deadline()
 	d.mu.Lock()
 	d.deadlines = append(d.deadlines, dl)
+	d.starts = append(d.starts, start)
 	d.hasDL = append(d.hasDL, ok)
 	d.mu.Unlock()
 	return 1, nil
 }
 
-// TestHeldBatchIsOneWriteWithOneDeadline: a batch from RecordHeld is written
-// as one write operation. All of its records share one deadline of about
-// recordTimeout, so a batch cannot take recordTimeout per record and outlast
-// the shutdown flush.
-func TestHeldBatchIsOneWriteWithOneDeadline(t *testing.T) {
+// TestHeldBatchRecordsEachGetOneDeadline: a batch from RecordHeld is written
+// as one write slot, and each of its records has its own deadline of about
+// recordTimeout from the moment it is written, so a long batch never loses its
+// tail to a deadline that ran out early.
+func TestHeldBatchRecordsEachGetOneDeadline(t *testing.T) {
 	rec := &deadlineRecorder{}
 	n := NewWithSenders(quiet(), nil, &stubSender{name: "ntfy"})
 	n.SetRecorder(rec)
@@ -71,18 +75,14 @@ func TestHeldBatchIsOneWriteWithOneDeadline(t *testing.T) {
 	if len(rec.deadlines) != size {
 		t.Fatalf("got %d appends, want %d", len(rec.deadlines), size)
 	}
-	first := rec.deadlines[0]
-	if !rec.hasDL[0] {
-		t.Fatal("batch write has no deadline")
-	}
 	for i, dl := range rec.deadlines {
-		if !rec.hasDL[i] || !dl.Equal(first) {
-			t.Fatalf("record %d deadline %v, want the batch deadline %v", i, dl, first)
+		if !rec.hasDL[i] {
+			t.Fatalf("record %d write has no deadline", i)
 		}
-	}
-	left := time.Until(first)
-	if left > recordTimeout || left < recordTimeout-time.Second {
-		t.Fatalf("batch deadline in %v, want about %v", left, recordTimeout)
+		budget := dl.Sub(rec.starts[i])
+		if budget > recordTimeout || budget < recordTimeout-time.Second {
+			t.Fatalf("record %d deadline budget %v, want about %v", i, budget, recordTimeout)
+		}
 	}
 }
 
