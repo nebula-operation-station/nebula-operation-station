@@ -766,12 +766,13 @@ func TestUnreadableCSAFStateMarksSourceFailed(t *testing.T) {
 	// "too large" is a sparse file of MaxCSAFStateBytes+1 bytes: the loader
 	// checks the size, so no 256 MiB buffer is needed in memory.
 	for name, tc := range map[string]struct {
-		content string
-		size    int64
+		content      string
+		size         int64
+		wantTooLarge bool
 	}{
 		"not json":      {content: "{"},
 		"unknown field": {content: `{"bogus":1}`},
-		"too large":     {size: MaxCSAFStateBytes + 1},
+		"too large":     {size: MaxCSAFStateBytes + 1, wantTooLarge: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			e := newEnv(t)
@@ -789,6 +790,11 @@ func TestUnreadableCSAFStateMarksSourceFailed(t *testing.T) {
 				if err := os.Truncate(r.csafStatePath(feed.Name), tc.size); err != nil {
 					t.Fatal(err)
 				}
+			}
+			// The loader must name the size limit, not only fail to decode.
+			_, loadErr := r.loadCSAFState(feed.Name)
+			if got := errors.Is(loadErr, errCSAFStateTooLarge); got != tc.wantTooLarge {
+				t.Fatalf("loadCSAFState error = %v, want too large %v", loadErr, tc.wantTooLarge)
 			}
 			rep := &Report{Sources: []SourceEvidence{{Feed: feed.Name, SourceID: feed.SourceID, Status: SourceNotModified, SnapshotID: "sha256:x"}}}
 			_, loaded, err := r.loadDB(context.Background(), newSnapshotView(nil), rep)
