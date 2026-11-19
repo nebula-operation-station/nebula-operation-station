@@ -200,12 +200,40 @@ Add a `notifications` block to `/etc/nebula/server.json` (any subset):
 
 With tokens in it the file must not be readable by others (`chmod 0640`,
 owner `root:nebula-server`, as the installer creates it). Check with
-`nebula-server -config /etc/nebula/server.json -notify-test`. The full list
-of notified events is in [`docs/spec/13-notifications.md`](../spec/13-notifications.md);
-the examples here are not complete (previously: "Today a host key mismatch
-is notified (once per block), an Ops State change (worse or recovered), an
-operation that finished with failed hosts, and the executor found locked
-after a restart.").
+`nebula-server -config /etc/nebula/server.json -notify-test`.
+
+Events sent today (the kinds in `internal/notify`, `Kind` constants; each
+name is the `kind` of the event):
+
+- `host_key_mismatch`: a host key changed; the host is blocked (once per block).
+- `ops_state`: a host's Ops State changed (worse, or recovered).
+- `execution`: an operation finished with `WARNING` (some hosts failed) or
+  `FAILED`, or a rollout waits at a stage gate for a manual continue
+  (state `WAITING`; there is no separate kind for the gate).
+- `executor_locked`: the executor is found locked after a restart or at server start.
+- `lease.expiring` and `lease.run_failed`: a read lease or schedule grant
+  expires soon, or a leased run failed.
+- `daily_digest`: the optional daily digest (off by default).
+- `vuln.kev_new`, `vuln.critical_new`, `vuln.hermes_stale`, `vuln.feed_stale`,
+  `vuln.feed_regressed`, `vuln.feed_mark_reset` and `vuln.digest`: vulnerability
+  alerts. They are sent only when the vulnerability API is enabled and a
+  vulnerability token is configured.
+- `opsagent.settings_changed`: the Ops Agent settings were saved.
+- `test`: sent by `-notify-test`.
+
+Not sent today: the `integrity.*` kinds (`integrity.nos_mismatch`,
+`integrity.host_change`, `integrity.scan_incomplete`,
+`integrity.baseline_tamper`, `integrity.reference_conflict`) and
+`integrity.digest`. `internal/notify` has the integrity gate for them, but
+no production code calls it yet.
+
+The events the specification describes are in
+[`docs/spec/13-notifications.md`](../spec/13-notifications.md). That file
+lists what is specified, not what is sent today; the list above is what
+is sent (previously: "Today a host key mismatch is notified (once per
+block), an Ops State change (worse or recovered), an operation that
+finished with failed hosts, and the executor found locked after a
+restart.").
 
 ## What exists and what does not
 
