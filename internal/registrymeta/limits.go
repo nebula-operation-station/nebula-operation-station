@@ -31,20 +31,18 @@ const (
 	// MaxRedirects requests, so at most MaxRedirects-1 redirects (two) are
 	// followed.
 	//
-	// What checkRedirect allows today, for anonymous requests only:
-	//   - a metadata GET of /tags/list or a HEAD of /manifests/ may be
-	//     redirected to any approved registry origin with the same path
-	//     (the query may differ);
-	//   - an anonymous token GET on a configured token endpoint may be
-	//     redirected to another approved origin's auth path.
-	// Credentialed requests follow no redirects at all.
-	//
-	// Known deviation, decision open (maintainer): ADR 0006 says "no redirects".
-	// This code follows redirects as described above, which is looser than the
-	// ADR, not stricter. The behaviour is unchanged here and the ADR is not
-	// edited; a maintainer must decide whether to disable redirects or amend the
-	// ADR. TestRedirectChainDeviationFromADR0006 pins the current behaviour, so a
-	// change must update that test on purpose.
+	// The redirect rules follow the ADR 0006 amendment "registry metadata
+	// redirects" (2026-11-19). checkRedirect allows, for anonymous requests
+	// only and only within the origin (scheme, host and port) of the
+	// original request:
+	//   - a metadata GET of /tags/list or a HEAD of /manifests/ with the same
+	//     path (the query may differ);
+	//   - an anonymous token GET on the configured token endpoint to that
+	//     origin's auth path.
+	// It never follows a redirect across hosts, ports or schemes, and never
+	// for a credentialed client or a request carrying an Authorization
+	// header (including anonymous bearer tokens). TestCheckRedirectRules and
+	// TestAnonymousRedirectChainLimit pin these rules.
 	MaxRedirects = 3
 )
 

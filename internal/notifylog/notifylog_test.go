@@ -874,11 +874,12 @@ func TestOverlongHostOrExecutionIDIsRefused(t *testing.T) {
 	}
 }
 
-// TestNOSLinkRules checks isNOSLink one rule at a time: each bad value breaks
+// TestNOSLinkRules checks IsNOSLink one rule at a time: each bad value breaks
 // exactly one rule, so removing any single check makes a case fail.
 func TestNOSLinkRules(t *testing.T) {
-	good := []string{"/", "/executions/ex-1", "/a:b/c", "/x.y~z_-"}
+	good := []string{"/", "/executions/ex-1", "/a:b/c", "/x.y~z_-", "/" + strings.Repeat("a", MaxLink-1)}
 	bad := map[string]string{
+		"over MaxLink":          "/" + strings.Repeat("a", MaxLink),
 		"empty":                 "",
 		"no leading slash":      "executions/ex-1",
 		"https url":             "https://ntfy.example.invalid/topic",
@@ -900,13 +901,13 @@ func TestNOSLinkRules(t *testing.T) {
 		"del byte":              "/x\x7fy",
 	}
 	for _, v := range good {
-		if !isNOSLink(v) {
-			t.Errorf("isNOSLink(%q) = false, want true", v)
+		if !IsNOSLink(v) {
+			t.Errorf("IsNOSLink(%q) = false, want true", v)
 		}
 	}
 	for name, v := range bad {
-		if isNOSLink(v) {
-			t.Errorf("%s: isNOSLink(%q) = true, want false", name, v)
+		if IsNOSLink(v) {
+			t.Errorf("%s: IsNOSLink(%q) = true, want false", name, v)
 		}
 	}
 }

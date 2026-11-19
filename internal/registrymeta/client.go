@@ -291,30 +291,44 @@ func parseOrigin(s string) (*url.URL, error) {
 	return u, nil
 }
 
-// checkRedirect decides whether a redirect may be followed. It allows, for
-// anonymous requests only: a metadata GET of /tags/list or HEAD of /manifests/
-// to any approved registry origin with the same path (query may differ), and
-// an anonymous token GET to another approved origin's auth path. It refuses
-// everything for credentialed requests, and any chain of MaxRedirects requests
-// or more. This deviates from ADR 0006 ("no redirects"); the decision is open
-// with a maintainer (see MaxRedirects in limits.go).
+// checkRedirect decides whether a redirect may be followed, implementing the
+// ADR 0006 amendment "registry metadata redirects" (2026-11-19). It allows,
+// for anonymous requests only and only to the origin (scheme, host and port)
+// of the original request: a metadata GET of /tags/list or HEAD of
+// /manifests/ with the same path (query may differ), and an anonymous token
+// GET to that origin's configured auth path. It refuses every redirect of a
+// credentialed client or of any request in the chain that carries an
+// Authorization header, every change of scheme, host or port, and any chain
+// that would exceed MaxRedirects-1 (two) redirects.
 func (c *Client) checkRedirect(req *http.Request, via []*http.Request) error {
 	if c.priv != nil {
-		// Credentialed requests never follow redirects (ADR 0006: no
-		// redirects), so a credential or authenticated token cannot be
-		// carried to another resource or origin.
+		// Credentialed requests never follow redirects, so a credential or
+		// authenticated token cannot be carried to another resource.
 		return fmt.Errorf("%w: credentialed registry requests do not follow redirects", ErrRedirectNotAllowed)
 	}
 	if len(via) == 0 || len(via) >= MaxRedirects {
-		return fmt.Errorf("%w: more than %d redirects", ErrRedirectNotAllowed, MaxRedirects)
+		return fmt.Errorf("%w: more than %d redirects", ErrRedirectNotAllowed, MaxRedirects-1)
+	}
+	if req.Header.Get("Authorization") != "" {
+		return fmt.Errorf("%w: requests with an Authorization header do not follow redirects", ErrRedirectNotAllowed)
+	}
+	for _, prev := range via {
+		if prev.Header.Get("Authorization") != "" {
+			return fmt.Errorf("%w: requests with an Authorization header do not follow redirects", ErrRedirectNotAllowed)
+		}
 	}
 	first := via[0]
 	o := originOf(req.URL)
+	if o != originOf(first.URL) {
+		// Scheme, host and port must all stay the same: no cross-host
+		// redirect and no https->http downgrade.
+		return fmt.Errorf("%w: redirect leaves origin %s for %s", ErrRedirectNotAllowed, originOf(first.URL), o)
+	}
 	if req.Method != first.Method || req.URL.User != nil || req.URL.Fragment != "" {
 		return fmt.Errorf("%w: invalid metadata resource", ErrRedirectNotAllowed)
 	}
-	if _, ok := c.byOrigin[originOf(first.URL)]; ok {
-		if _, ok := c.byOrigin[o]; ok && req.URL.Path == first.URL.Path && req.URL.EscapedPath() == first.URL.EscapedPath() {
+	if _, ok := c.byOrigin[o]; ok {
+		if req.URL.Path == first.URL.Path && req.URL.EscapedPath() == first.URL.EscapedPath() {
 			if (first.Method == http.MethodGet && strings.HasSuffix(first.URL.Path, "/tags/list")) ||
 				(first.Method == http.MethodHead && strings.Contains(first.URL.Path, "/manifests/")) {
 				return nil

@@ -1,0 +1,45 @@
+{{define "content"}}
+<h1>Notifications</h1>
+<section class="panel" aria-label="Notifications">
+  <p class="hint">Notifications NOS sent, held back or failed to send. Newest first. Admins only.</p>
+  {{with .Notifications}}
+  {{if .Unavailable}}
+  <p class="notice" role="status">Notifications unavailable</p>
+  {{else if not .Items}}
+  <p class="hint">No notifications yet.</p>
+  {{else}}
+  <div class="table-wrap">
+  <table class="inventory notifications" aria-label="Notifications">
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Kind</th>
+        <th>Host</th>
+        <th>State</th>
+        <th>Reason</th>
+        <th>Result</th>
+        <th>Link</th>
+      </tr>
+    </thead>
+    <tbody>
+      {{range .Items}}
+      <tr>
+        <td>{{timeTag .At}}</td>
+        <td class="mono">{{.Kind}}</td>
+        <td>{{.Host}}</td>
+        <td>{{.State}}</td>
+        <td>{{if .Reason}}{{.Reason}}{{else}}-{{end}}</td>
+        <td><span class="badge {{.OutcomeBadge}}">{{.OutcomeText}}</span></td>
+        <td>{{if .Href}}<a href="{{.Href}}">{{if .ExecutionID}}{{.ExecutionID}}{{else}}Open{{end}}</a>{{else}}-{{end}}</td>
+      </tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{if .HasNext}}
+  <p class="actions"><a class="button" href="/notifications?after={{.NextAfter}}">Older notifications</a></p>
+  {{end}}
+  {{end}}
+  {{end}}
+</section>
+{{end}}
