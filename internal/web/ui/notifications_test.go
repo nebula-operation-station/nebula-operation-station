@@ -419,6 +419,29 @@ func TestNotificationsDropsBadLinkAtRenderTime(t *testing.T) {
 	}
 }
 
+// TestNotificationsShowsExecutionIDAsText: the execution ID is shown as text
+// in every row that has one, whether the row has a link or not. A missing or
+// dropped link never hides the ID.
+func TestNotificationsShowsExecutionIDAsText(t *testing.T) {
+	for _, link := range []string{"", "//evil.example/x", "/x?token=1"} {
+		e := newNotifEnv(t, notifRawLinkLog{link: link}, nil)
+		res, body := e.get(e.cookie, "/notifications")
+		if res.StatusCode != http.StatusOK {
+			t.Fatalf("link %q: GET = %d, want 200", link, res.StatusCode)
+		}
+		if !strings.Contains(body, ">"+notifExecID+"<") {
+			t.Errorf("link %q: execution ID not shown as text", link)
+		}
+		if strings.Contains(body, "evil.example") || strings.Contains(body, "token=1") {
+			t.Errorf("link %q reached the page", link)
+		}
+	}
+	e := newNotifEnv(t, notifRawLinkLog{link: "/operations/" + notifExecID}, nil)
+	if _, body := e.get(e.cookie, "/notifications"); !strings.Contains(body, `href="/operations/`+notifExecID+`">`+notifExecID+`</a>`) {
+		t.Errorf("valid link: want the execution ID as the link text")
+	}
+}
+
 // TestNotificationsAdminCheckRunsOncePerRequest: the page needs the admin
 // check for the 403 decision and for the navigation entry; it runs once.
 func TestNotificationsAdminCheckRunsOncePerRequest(t *testing.T) {
