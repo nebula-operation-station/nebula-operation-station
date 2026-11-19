@@ -4,6 +4,7 @@ package run
 
 import (
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -18,9 +19,14 @@ const packBudget = nosclient.MaxBatchBytes - BatchEnvelopeMaxBytes
 
 // filler returns a raw record of the given cost, where cost is its length
 // plus the one separator byte the packer counts. The packer does not parse
-// records, so filler bytes are enough for packer-level tests.
+// records, but checkBatchLimits encodes the batch, so the bytes are a valid
+// JSON string (or the number 0 for a length of one).
 func filler(cost int) json.RawMessage {
-	return json.RawMessage(strings.Repeat("x", cost-1))
+	n := cost - 1
+	if n < 2 {
+		return json.RawMessage(strings.Repeat("0", n))
+	}
+	return json.RawMessage(`"` + strings.Repeat("x", n-2) + `"`)
 }
 
 // repeatCost returns n copies of cost.
@@ -57,9 +63,37 @@ func subjectWithCost(t *testing.T, cost int) nosclient.BatchSubject {
 	return s
 }
 
+// sentBatch repeats the body shape of nosclient's encodeBatch, which is
+// unexported. The tags and the default HTML escaping must stay the same.
+type sentBatch struct {
+	BatchSeq int64                    `json:"batch_seq"`
+	Subjects []nosclient.BatchSubject `json:"subjects"`
+	Findings []json.RawMessage        `json:"findings"`
+}
+
+// sentBodySize is the length of the batch body as nosclient sends it. The
+// findings are RawMessage, and json.Marshal escapes `<`, `>` and `&` inside
+// them to six bytes, so this can exceed the packer's own count.
+func sentBodySize(t *testing.T, b nosclient.Batch) int {
+	t.Helper()
+	sb := sentBatch{BatchSeq: b.Seq, Subjects: b.Subjects, Findings: b.Findings}
+	if sb.Subjects == nil {
+		sb.Subjects = []nosclient.BatchSubject{}
+	}
+	if sb.Findings == nil {
+		sb.Findings = []json.RawMessage{}
+	}
+	body, err := json.Marshal(sb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(body)
+}
+
 // checkBatchLimits asserts the invariants every batch must keep: Seq runs
-// 1, 2, … without gaps, no batch exceeds the finding or subject count, and
-// no batch exceeds the byte budget.
+// 1, 2, … without gaps, no batch exceeds the finding or subject count, no
+// batch exceeds the packer's byte budget, and no batch body exceeds
+// MaxBatchBytes as sent.
 func checkBatchLimits(t *testing.T, batches []nosclient.Batch) {
 	t.Helper()
 	for i, b := range batches {
@@ -81,6 +115,9 @@ func checkBatchLimits(t *testing.T, batches []nosclient.Batch) {
 		}
 		if size > packBudget {
 			t.Errorf("batch %d is %d bytes, budget %d", b.Seq, size, packBudget)
+		}
+		if n := sentBodySize(t, b); n > nosclient.MaxBatchBytes {
+			t.Errorf("batch %d encodes to %d bytes as sent, limit %d", b.Seq, n, nosclient.MaxBatchBytes)
 		}
 	}
 }
@@ -600,5 +637,147 @@ func TestPackRecordByteLimitFlushesBeforeCoverage(t *testing.T) {
 	checkBatchLimits(t, batches)
 	if got := perBatch(batches, findingsOf); !slices.Equal(got, []int{63, 1}) {
 		t.Errorf("64 max-size records: findings per batch = %v, want [63 1]", got)
+	}
+}
+
+func TestPackerFindingByteLimitAfterSubjectEntries(t *testing.T) {
+	// Pack adds a subject's coverage entries before the next subject's
+	// records, so addFinding meets a budget already partly used by entries.
+	const recMax = MaxRecordBytes
+	const subjectCost = 4000
+	left := packBudget - subjectCost
+	full, rest := left/recMax, left%recMax
+	tests := []struct {
+		name         string
+		findingCosts []int
+		wantFindings []int
+		wantSubjects []int
+	}{
+		{
+			name:         "findings fill the budget a subject entry leaves exactly",
+			findingCosts: append(repeatCost(recMax, full), rest),
+			wantFindings: []int{full + 1},
+			wantSubjects: []int{1},
+		},
+		{
+			name:         "one byte over the budget a subject entry leaves moves the last finding",
+			findingCosts: append(repeatCost(recMax, full), rest+1),
+			wantFindings: []int{full, 1},
+			wantSubjects: []int{1, 0},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var p packer
+			if err := p.addSubject(subjectWithCost(t, subjectCost)); err != nil {
+				t.Fatal(err)
+			}
+			for _, c := range tc.findingCosts {
+				p.addFinding(filler(c))
+			}
+			p.flush()
+			if got := perBatch(p.batches, findingsOf); !slices.Equal(got, tc.wantFindings) {
+				t.Errorf("findings per batch = %v, want %v", got, tc.wantFindings)
+			}
+			if got := perBatch(p.batches, subjectsOf); !slices.Equal(got, tc.wantSubjects) {
+				t.Errorf("subjects per batch = %v, want %v", got, tc.wantSubjects)
+			}
+			checkBatchLimits(t, p.batches)
+		})
+	}
+}
+
+func TestPackerFindingAndSubjectCountLimitsAreSeparate(t *testing.T) {
+	const m = nosclient.MaxFindingsPerBatch
+	tests := []struct {
+		name         string
+		findings     int
+		subjects     int
+		wantFindings []int
+		wantSubjects []int
+	}{
+		{"findings at the count limit take a subject entry in the same batch", m, 1, []int{m}, []int{1}},
+		{"subject entries at the count limit take a finding in the same batch", 1, m, []int{1}, []int{m}},
+		{"findings and subject entries both at the count limit share a batch", m, m, []int{m}, []int{m}},
+	}
+	s := nosclient.BatchSubject{Kind: vulnfinding.SubjectHost, Ref: vulnfinding.SubjectRef{ID: "web01"}, Part: 1, LastPart: true}
+	addFindings := func(t *testing.T, p *packer, n int) {
+		for range n {
+			p.addFinding(json.RawMessage("{}"))
+		}
+	}
+	addSubjects := func(t *testing.T, p *packer, n int) {
+		for range n {
+			if err := p.addSubject(s); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for _, tc := range tests {
+		// Each order is tested: a counter shared by both kinds must fail
+		// whichever kind comes second.
+		orders := []struct {
+			name string
+			add  func(t *testing.T, p *packer)
+		}{
+			{"findings first", func(t *testing.T, p *packer) {
+				addFindings(t, p, tc.findings)
+				addSubjects(t, p, tc.subjects)
+			}},
+			{"subject entries first", func(t *testing.T, p *packer) {
+				addSubjects(t, p, tc.subjects)
+				addFindings(t, p, tc.findings)
+			}},
+		}
+		for _, order := range orders {
+			t.Run(tc.name+", "+order.name, func(t *testing.T) {
+				var p packer
+				order.add(t, &p)
+				p.flush()
+				if got := perBatch(p.batches, findingsOf); !slices.Equal(got, tc.wantFindings) {
+					t.Errorf("findings per batch = %v, want %v", got, tc.wantFindings)
+				}
+				if got := perBatch(p.batches, subjectsOf); !slices.Equal(got, tc.wantSubjects) {
+					t.Errorf("subjects per batch = %v, want %v", got, tc.wantSubjects)
+				}
+				checkBatchLimits(t, p.batches)
+			})
+		}
+	}
+}
+
+func TestPackWithheldRecordAtAnyPositionNamesNoSubjectPart(t *testing.T) {
+	// Subject a has two parts and three records; the oversize one is first,
+	// in the middle or last. Subject b is complete and must stay covered.
+	tooLarge := recordOfCost(t, "a", MaxRecordBytes+1, padSource)
+	snap := &nosclient.Snapshot{Subjects: []nosclient.SubjectCoverage{hostCov("a", 2, true), hostCov("b", 1, true)}}
+	for pos := range 3 {
+		t.Run(fmt.Sprintf("withheld at position %d", pos), func(t *testing.T) {
+			m := &matched{uncovered: map[string]bool{}}
+			for i := range 3 {
+				if i == pos {
+					m.findings = append(m.findings, prep(tooLarge))
+				} else {
+					m.findings = append(m.findings, prep(packRecord("a")))
+				}
+			}
+			m.findings = append(m.findings, prep(packRecord("b")))
+			batches, withheld, covered, err := pack(snap, m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkBatchLimits(t, batches)
+			if withheld != 1 || covered != 1 {
+				t.Fatalf("withheld %d, covered %d; want 1, 1", withheld, covered)
+			}
+			if n := len(sentRecords(t, batches)); n != 3 {
+				t.Errorf("%d records sent, want 3", n)
+			}
+			for _, s := range sentSubjects(batches) {
+				if s.Ref.ID != "b" {
+					t.Errorf("subject entry %+v named as covered; only b may be", s)
+				}
+			}
+		})
 	}
 }
