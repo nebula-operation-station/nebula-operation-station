@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,6 +13,14 @@ import (
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"google.golang.org/grpc"
 )
+
+// testSpawn starts the status reads in a WaitGroup that the test waits for at
+// its end, as run joins bg.Go in the server.
+func testSpawn(t *testing.T) func(func()) {
+	var wg sync.WaitGroup
+	t.Cleanup(wg.Wait)
+	return wg.Go
+}
 
 type countingStatus struct {
 	calls atomic.Int32
@@ -36,7 +45,7 @@ func TestCachedVulnAdminAsksTheExecutorOncePerTTL(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			st := &countingStatus{err: tc.err}
 			clock := time.Unix(1_800_000_000, 0)
-			admin := cachedVulnAdmin(st, inboxStatusTTL, func() time.Time { return clock })
+			admin := cachedVulnAdmin(st, inboxStatusTTL, func() time.Time { return clock }, testSpawn(t))
 			for range 20 {
 				if ok, _ := admin(context.Background()); ok {
 					t.Fatal("admin without a privileged session in the request")
@@ -61,7 +70,7 @@ func TestCachedVulnAdminReturnsTheExecutorStatusError(t *testing.T) {
 	boom := errors.New("executor unavailable")
 	st := &countingStatus{err: boom}
 	clock := time.Unix(1_800_000_000, 0)
-	admin := cachedVulnAdmin(st, inboxStatusTTL, func() time.Time { return clock })
+	admin := cachedVulnAdmin(st, inboxStatusTTL, func() time.Time { return clock }, testSpawn(t))
 	for i := range 3 {
 		ok, err := admin(context.Background())
 		if ok {
@@ -78,7 +87,7 @@ func TestCachedVulnAdminReturnsTheExecutorStatusError(t *testing.T) {
 
 func TestCachedVulnAdminNoErrorWhenStatusIsRead(t *testing.T) {
 	st := &countingStatus{}
-	admin := cachedVulnAdmin(st, inboxStatusTTL, time.Now)
+	admin := cachedVulnAdmin(st, inboxStatusTTL, time.Now, testSpawn(t))
 	if ok, err := admin(context.Background()); ok || err != nil {
 		t.Fatalf("admin = %v, err = %v; want false and no error", ok, err)
 	}
@@ -102,7 +111,7 @@ func (c *ctxStatus) GetStatus(ctx context.Context, _ *pb.GetStatusRequest, _ ...
 func TestCachedVulnAdminDoesNotCacheCallerCancellation(t *testing.T) {
 	st := &ctxStatus{}
 	clock := time.Unix(1_800_000_000, 0)
-	admin := cachedVulnAdmin(st, inboxStatusTTL, func() time.Time { return clock })
+	admin := cachedVulnAdmin(st, inboxStatusTTL, func() time.Time { return clock }, testSpawn(t))
 
 	gone, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -145,7 +154,16 @@ func TestCachedVulnAdminHungExecutorReadOncePerTTL(t *testing.T) {
 	)
 	st := &hangStatus{}
 	clock := time.Unix(1_800_000_000, 0)
-	admin := cachedVulnAdminWithTimeout(st, inboxStatusTTL, func() time.Time { return clock }, statusTimeout)
+	var (
+		spawned atomic.Int32
+		wg      sync.WaitGroup
+	)
+	t.Cleanup(wg.Wait)
+	spawn := func(f func()) {
+		spawned.Add(1)
+		wg.Go(f)
+	}
+	admin := cachedVulnAdminWithTimeout(st, inboxStatusTTL, func() time.Time { return clock }, statusTimeout, spawn)
 
 	for i := range renders {
 		ctx, cancel := context.WithTimeout(context.Background(), callerWait)
@@ -161,6 +179,9 @@ func TestCachedVulnAdminHungExecutorReadOncePerTTL(t *testing.T) {
 	if got := st.calls.Load(); got != 1 {
 		t.Fatalf("%d status reads within the TTL, want 1", got)
 	}
+	if got := spawned.Load(); got != 1 {
+		t.Fatalf("%d read goroutines started within the TTL, want 1 (joined through spawn)", got)
+	}
 
 	// Past the TTL, the next request starts one new read. A request without
 	// a deadline waits for it and gets its failure.
@@ -174,7 +195,7 @@ func TestCachedVulnAdminHungExecutorReadOncePerTTL(t *testing.T) {
 }
 
 func TestCachedVulnAdminWithoutStatusDenies(t *testing.T) {
-	ok, err := cachedVulnAdmin(nil, inboxStatusTTL, time.Now)(context.Background())
+	ok, err := cachedVulnAdmin(nil, inboxStatusTTL, time.Now, testSpawn(t))(context.Background())
 	if ok {
 		t.Fatal("admin without a status provider")
 	}

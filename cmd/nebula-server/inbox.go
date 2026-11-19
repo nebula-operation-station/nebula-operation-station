@@ -56,9 +56,10 @@ func newInboxWiring(db *sql.DB, isAdmin func(ctx context.Context) (bool, error))
 const inboxStatusTTL = 3 * time.Second
 
 // cachedVulnAdmin is vulnAdmin with the executor status cached for ttl; see
-// cachedVulnAdminWithTimeout.
-func cachedVulnAdmin(status ui.StatusProvider, ttl time.Duration, now func() time.Time) func(ctx context.Context) (bool, error) {
-	return cachedVulnAdminWithTimeout(status, ttl, now, vulnStatusTimeout)
+// cachedVulnAdminWithTimeout. spawn starts the read goroutine; main passes
+// bg.Go so that run joins it.
+func cachedVulnAdmin(status ui.StatusProvider, ttl time.Duration, now func() time.Time, spawn func(func())) func(ctx context.Context) (bool, error) {
+	return cachedVulnAdminWithTimeout(status, ttl, now, vulnStatusTimeout, spawn)
 }
 
 // cachedVulnAdminWithTimeout is vulnAdmin with the executor status cached for
@@ -71,8 +72,9 @@ func cachedVulnAdmin(status ui.StatusProvider, ttl time.Duration, now func() tim
 // Concurrent callers share the read in flight; no lock is held while waiting.
 // The one exception is a caller whose context has already ended before any
 // read starts: it starts no read and caches nothing. A status error is
-// returned with false, never as "no session" silently.
-func cachedVulnAdminWithTimeout(status ui.StatusProvider, ttl time.Duration, now func() time.Time, statusTimeout time.Duration) func(ctx context.Context) (bool, error) {
+// returned with false, never as "no session" silently. The read goroutine is
+// started with spawn, so the server can join it.
+func cachedVulnAdminWithTimeout(status ui.StatusProvider, ttl time.Duration, now func() time.Time, statusTimeout time.Duration, spawn func(func())) func(ctx context.Context) (bool, error) {
 	type read struct {
 		done   chan struct{}
 		active bool
@@ -103,7 +105,7 @@ func cachedVulnAdminWithTimeout(status ui.StatusProvider, ttl time.Duration, now
 			}
 			nr := &read{done: make(chan struct{})}
 			inflight = nr
-			go func() {
+			spawn(func() {
 				sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), statusTimeout)
 				st, err := status.GetStatus(sctx, &pb.GetStatusRequest{})
 				cancel()
@@ -115,7 +117,7 @@ func cachedVulnAdminWithTimeout(status ui.StatusProvider, ttl time.Duration, now
 				cached, inflight, at, fetched = nr, nil, now(), true
 				mu.Unlock()
 				close(nr.done)
-			}()
+			})
 			r = nr
 		}
 		mu.Unlock()

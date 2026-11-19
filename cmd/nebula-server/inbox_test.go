@@ -177,7 +177,7 @@ func TestInboxAdminErrorReachesTheInbox(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	boom := errors.New("executor unavailable")
-	w, err := newInboxWiring(db, cachedVulnAdmin(&countingStatus{err: boom}, inboxStatusTTL, time.Now))
+	w, err := newInboxWiring(db, cachedVulnAdmin(&countingStatus{err: boom}, inboxStatusTTL, time.Now, testSpawn(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
