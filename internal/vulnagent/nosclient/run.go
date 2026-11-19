@@ -288,10 +288,15 @@ func encodeBatch(b Batch) ([]byte, error) {
 	if bj.Findings == nil {
 		bj.Findings = []json.RawMessage{}
 	}
-	body, err := json.Marshal(bj)
-	if err != nil {
+	// HTML escaping is off: the packer counts `<`, `>` and `&` as one byte,
+	// and json.Marshal would send each as six bytes of escape sequence.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(bj); err != nil {
 		return nil, fmt.Errorf("encode batch: %w", err)
 	}
+	body := bytes.TrimSuffix(buf.Bytes(), []byte("\n"))
 	if len(body) > MaxBatchBytes {
 		return nil, fmt.Errorf("batch body over %d bytes: %w", MaxBatchBytes, ErrTooLarge)
 	}
