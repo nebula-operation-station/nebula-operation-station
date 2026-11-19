@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Package pvecollect uses a bounded, descriptor-relative spool handoff.
+
+// This file holds the Spool handoff: bounded, descriptor-relative storage of
+// observations for the importer. See doc.go for the package description.
+
 package pvecollect
 
 import (

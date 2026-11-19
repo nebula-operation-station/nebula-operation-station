@@ -1,16 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-// Package pveapi is a typed, read-only client for the Proxmox VE API
-// (ADR 0006). It performs status and RRD metric reads only and never
-// calls mutation endpoints. It holds no credentials: the HTTP client,
-// the base URL and the auth header supplier are injected by the caller.
-//
-// Every PVE response is untrusted input: bodies are size-limited,
-// decoded against explicit schemas and range-validated. Headers and
-// bodies are never logged and never appear in error messages. An
-// unavailable endpoint (network failure, timeout, HTTP error status)
-// is reported as an error and is distinct from an empty successful
-// response.
+// This file holds MetricsClient (ADR 0006), which performs node and guest
+// status and RRD metric reads with GET requests only. An unavailable
+// endpoint (network failure, timeout, HTTP error status) is reported as an
+// error and is distinct from an empty successful response. The HTTP client,
+// base URL and auth header supplier are injected by the caller. See doc.go
+// for the package-wide rules.
+
 package pveapi
 
 import (
