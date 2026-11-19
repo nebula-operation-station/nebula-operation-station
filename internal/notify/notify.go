@@ -182,8 +182,14 @@ type Notifier struct {
 	// recSlots bounds the log writes in flight: one slot per write. It is
 	// made by SetRecorder.
 	recSlots chan struct{}
-	// recDropped counts records dropped because every slot was taken.
+	// recDropped counts records not in the log: dropped because every slot
+	// was taken, or whose write failed or timed out.
 	recDropped atomic.Int64
+	// recTimeout bounds each log write; 0 means recordTimeout. Tests set it.
+	recTimeout time.Duration
+	// recBatchTimeout bounds the whole batch; 0 means RecordBatchTimeout.
+	// Tests set it.
+	recBatchTimeout time.Duration
 }
 
 // Recorder stores one notification decision in the notification log (ADR
@@ -193,9 +199,22 @@ type Recorder interface {
 	Append(ctx context.Context, r notifylog.Record) (int64, error)
 }
 
-// recordTimeout bounds one log write, so a stuck database cannot hold a write
-// slot for long.
+// recordTimeout bounds one record's log write, so a stuck database cannot hold
+// a write slot for long.
 const recordTimeout = 5 * time.Second
+
+// RecordBatchTimeout bounds the whole batch written under one write slot,
+// from the moment its first write starts. Each record of the batch has its
+// own deadline of at most recordTimeout, but never past what is left of this
+// budget. A record that is not tried before the budget ends is counted in
+// RecordsDropped, so a batch of any size holds its slot for at most this long.
+// Shutdown waits for the batches in flight, so it must allow for this bound
+// (see cmd/nebula-server).
+const RecordBatchTimeout = 8 * time.Second
+
+// errBatchTimeout is the error counted for a record of a batch that was not
+// tried because the batch's time budget (RecordBatchTimeout) had ended.
+var errBatchTimeout = errors.New("batch time budget ended before the record was written")
 
 // maxPendingRecords bounds the log writes in flight. When all are taken, a new
 // record is dropped and counted (RecordsDropped), so a slow database never
@@ -211,8 +230,9 @@ func (n *Notifier) SetRecorder(r Recorder) {
 	}
 }
 
-// RecordsDropped returns how many records were dropped because the log could
-// not keep up. Dropped records are not in the log.
+// RecordsDropped returns how many records are not in the log: records dropped
+// because the log could not keep up, and records whose write failed or timed
+// out.
 func (n *Notifier) RecordsDropped() int64 { return n.recDropped.Load() }
 
 // FlushRecords waits until the log writes in flight have ended, or until ctx
@@ -249,10 +269,14 @@ func (n *Notifier) record(ctx context.Context, r notifylog.Record) {
 // slot count is not split across slots and is not dropped part way. The
 // goroutine lets a slow or locked database never delay a send or the next
 // notification; the caller does not wait for it. The writes use a context that
-// a cancelled send does not cancel (the decision must still be logged), and
-// each is bounded by recordTimeout. When no write slot is free, the whole batch
-// is dropped and counted in RecordsDropped. A failed write is logged without
-// the message text. write never returns an error.
+// a cancelled send does not cancel (the decision must still be logged). When
+// no write slot is free, the whole batch is dropped and counted in
+// RecordsDropped. write never returns an error.
+//
+// Each record of the batch has its own deadline of recordTimeout, so a long
+// batch never loses its tail to a deadline that ran out early; the whole batch
+// is bounded by RecordBatchTimeout, and records left over when that ends are
+// counted as dropped (see writeBatch).
 func (n *Notifier) write(ctx context.Context, recs []notifylog.Record) {
 	if n.rec == nil || len(recs) == 0 {
 		return
@@ -267,19 +291,64 @@ func (n *Notifier) write(ctx context.Context, recs []notifylog.Record) {
 	base := context.WithoutCancel(ctx)
 	go func() {
 		defer func() { <-n.recSlots }()
-		for _, r := range recs {
-			n.writeOne(base, r)
-		}
+		n.writeBatch(base, recs)
 	}()
 }
 
-// writeOne appends one record under its own recordTimeout.
-func (n *Notifier) writeOne(base context.Context, r notifylog.Record) {
-	rctx, cancel := context.WithTimeout(base, recordTimeout)
-	defer cancel()
-	if _, err := n.rec.Append(rctx, r); err != nil {
-		n.log.Warn("notification log write failed", "kind", string(r.Kind), "outcome", string(r.Outcome), "error", err.Error())
+// writeBatch appends the records of recs in order. Each record gets its own
+// deadline of recordTimeout, cut short by what is left of the batch's budget
+// (RecordBatchTimeout), so the batch as a whole ends within that budget. A
+// record whose write fails or times out, and every record not tried once the
+// budget has ended, is counted in RecordsDropped. One warning is logged for
+// the batch with the count of records not stored, and the first failure's
+// kind, outcome and error (never the message text).
+func (n *Notifier) writeBatch(base context.Context, recs []notifylog.Record) {
+	timeout := n.recTimeout
+	if timeout <= 0 {
+		timeout = recordTimeout
 	}
+	budget := n.recBatchTimeout
+	if budget <= 0 {
+		budget = RecordBatchTimeout
+	}
+	start := time.Now()
+	failed := 0
+	var first error
+	var firstKind, firstOutcome string
+	note := func(r notifylog.Record, err error) {
+		if first == nil {
+			first = err
+			firstKind, firstOutcome = string(r.Kind), string(r.Outcome)
+		}
+		failed++
+	}
+	for i, r := range recs {
+		left := budget - time.Since(start)
+		if left <= 0 {
+			// The budget ended: the rest are not tried, and not in the log.
+			for _, rest := range recs[i:] {
+				note(rest, errBatchTimeout)
+			}
+			break
+		}
+		if err := n.appendOne(base, min(timeout, left), r); err != nil {
+			note(r, err)
+		}
+	}
+	if failed > 0 {
+		dropped := n.recDropped.Add(int64(failed))
+		n.log.Warn("notification log write failed", "count", failed, "of", len(recs),
+			"dropped_total", dropped, "kind", firstKind, "outcome", firstOutcome, "error", first.Error())
+	}
+}
+
+// appendOne appends r under its own deadline of timeout and returns the error
+// of the write, if any.
+func (n *Notifier) appendOne(base context.Context, timeout time.Duration, r notifylog.Record) error {
+	rctx, cancel := context.WithTimeout(base, timeout)
+	defer cancel()
+	_, err := n.rec.Append(rctx, r)
+	return err
 }
 
 // RecordHeld logs each event in es as held back by the hourly limit
