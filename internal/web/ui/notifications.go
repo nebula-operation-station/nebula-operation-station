@@ -154,7 +154,7 @@ func (h *Handler) logInboxCheckFailure(err error) {
 		return
 	}
 	h.inboxLogAt = now
-	h.log.Error("notifications: admin check", "error", err)
+	h.log.Warn("notifications: admin check", "error", err)
 }
 
 // inboxNavKey is the request-context key of the per-request inbox cache.
