@@ -53,7 +53,7 @@ func TestSuggestionRefusesBadInput(t *testing.T) {
 			t.Errorf("%s: err %v, want ErrInvalidSuggestion", name, err)
 		}
 	}
-	if ValidSuggestionKey("a|high") != true || ValidSuggestionKey("") {
+	if !ValidSuggestionKey("a|high") || ValidSuggestionKey("") {
 		t.Fatal("ValidSuggestionKey disagrees with the key rules")
 	}
 }
@@ -89,11 +89,12 @@ func TestSuggestionTextIsFixedTemplate(t *testing.T) {
 func TestSuggestionHostLabelIsPlainText(t *testing.T) {
 	tpl := suggTemplate(t)
 	now := time.Date(2026, 11, 18, 10, 0, 0, 0, time.UTC)
-	ev, err := tpl.Event(SuggestionEvent{Key: "c|high", Host: "web\x07‮02", Tier: "high", NoteID: 3}, now)
+	bidi := string(rune(0x202e)) // right-to-left override, built at run time
+	ev, err := tpl.Event(SuggestionEvent{Key: "c|high", Host: "web\x07" + bidi + "02", Tier: "high", NoteID: 3}, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.ContainsAny(ev.Text(), "\x07‮") {
+	if strings.ContainsAny(ev.Text(), "\x07"+bidi) {
 		t.Fatalf("control or bidi character in text %q", ev.Text())
 	}
 }
