@@ -222,7 +222,9 @@ func TestDecodeRejectsInvalidAnswer(t *testing.T) {
 		{"raw control character in string", with(t, `"Pin the host."`, "\"Pin\x01 host.\"")},
 		{"lone high surrogate escape", with(t, `"Pin the host."`, `"Pin \ud800 host."`)},
 		{"lone low surrogate escape", with(t, `"Pin the host."`, `"Pin \udc00 host."`)},
-		{"high surrogate followed by non-low escape", with(t, `"Pin the host."`, `"Pin \ud800A."`)},
+		{"high surrogate followed by plain character", with(t, `"Pin the host."`, `"Pin \ud800A."`)},
+		{"high surrogate followed by non-low escape", with(t, `"Pin the host."`, "\"Pin \\ud800\x5cu0041.\"")},
+		{"high surrogate followed by high surrogate escape", with(t, `"Pin the host."`, `"Pin \ud800\ud800."`)},
 		{"malformed unicode escape", with(t, `"Pin the host."`, `"Pin \u12G4."`)},
 
 		// Syntax.
