@@ -18,8 +18,12 @@ import (
 // panosFuzzSeeds are PAN-OS documents in the shapes configs_test.go and
 // the normalization tests exercise: hostile text, deep nesting, DOCTYPE,
 // long text, a wide element, namespaces, comments, attributes with quotes
-// and line breaks, volatile attributes, and malformed input.
+// and line breaks, volatile attributes, malformed input, and the documents
+// at and just over MaxConfigLines and MaxNormalizedConfigBytes, so the
+// fuzzer starts on both limit branches.
 func panosFuzzSeeds() []string {
+	atLines, overLines := panosLineLimitDocs()
+	atBytes, overBytes, _, _ := panosByteLimitDocs()
 	return []string{
 		`<config><address><entry name="a&#10;  entry[name=&quot;forged&quot;]"><description>&lt;script&gt;x&lt;/script&gt;&#10;line2</description></entry></address></config>`,
 		`<config><rules><entry name="b"/><entry name="a"/></rules><address><entry name="z"/><entry name="y"/></address></config>`,
@@ -35,6 +39,10 @@ func panosFuzzSeeds() []string {
 		strings.Repeat("<n>", 60) + "x" + strings.Repeat("</n>", 60),
 		strings.Repeat("<n>", 70) + "x" + strings.Repeat("</n>", 70),
 		panosWide(300),
+		atLines,
+		overLines,
+		atBytes,
+		overBytes,
 		`<config>`,
 		`not xml at all`,
 		``,
@@ -46,6 +54,13 @@ func panosWide(n int) string {
 	return "<config>" + strings.Repeat(`<a/>`, n) + "</config>"
 }
 
+// panosLineLimitDocs returns the documents at and just over
+// MaxConfigLines: the root line plus MaxConfigLines-1 children renders to
+// exactly MaxConfigLines lines, and one more child renders one line more.
+func panosLineLimitDocs() (atDoc, overDoc string) {
+	return panosWide(netdevcontract.MaxConfigLines - 1), panosWide(netdevcontract.MaxConfigLines)
+}
+
 // panosHeavy is a root with children elements, each with the largest text
 // MaxXMLTextBytes allows. A DEL byte is valid XML and Go-quotes to four
 // bytes, so each child renders 4*MaxXMLTextBytes bytes of text.
@@ -54,22 +69,50 @@ func panosHeavy(children int) string {
 	return "<r>" + strings.Repeat(child, children) + "</r>"
 }
 
+// expPANOSNode is one element or comment of the tree that expectedPANOSLines
+// builds from a token walk of its own. The root of the tree is a virtual
+// node that is never rendered.
+type expPANOSNode struct {
+	// name is the Go-quoted namespace and local name of an element.
+	name string
+	// local is the local name alone, which decides whether the children of
+	// an element keep their document order.
+	local string
+	// attrs are the non-volatile attributes, in the rendered order.
+	attrs    []expPANOSAttr
+	comment  bool
+	text     []byte
+	children []*expPANOSNode
+}
+
+// expPANOSAttr is one rendered attribute: its key is the Go-quoted namespace
+// and local name.
+type expPANOSAttr struct{ key, value string }
+
+// expPANOSOrdered are the elements whose children keep document order. It is
+// the test's own statement of the ordered containers.
+var expPANOSOrdered = []string{
+	"rules", "encryption", "hash", "dh-group", "authentication", "authentication-profiles",
+}
+
+// expPANOSVolatile are the attribute names without a namespace that are
+// dropped from the rendering.
+var expPANOSVolatile = []string{"admin", "dirtyId", "time"}
+
 // expectedPANOSLines renders data by a token walk of its own, independent
-// of parsePANOS and the renderer: one line per element and per comment,
-// indented two spaces per depth. An element line is its Go-quoted namespace
-// and local name, then its non-volatile attributes in brackets (name and
-// uuid first, the others by key then value), then its non-whitespace text
-// as " = " and the quoted text. A comment line is "# " and its quoted text.
-// The order of the lines is not significant: siblings may be sorted.
+// of parsePANOS and the renderer, in pre-order: a parent line is followed by
+// its children, indented two spaces per depth. An element line is its
+// Go-quoted namespace and local name, then its non-volatile attributes in
+// brackets (name and uuid first, the others by key then value), then its
+// non-whitespace text as " = " and the quoted text. A comment line is "# "
+// and its quoted text. Siblings are sorted: elements before comments, then
+// by name, attributes and text. The children of an ordered container keep
+// document order. The order of the lines is significant.
 func expectedPANOSLines(data []byte) ([]string, error) {
 	dec := xml.NewDecoder(bytes.NewReader(data))
 	dec.Strict = true
-	type open struct {
-		head string
-		text []byte
-	}
-	var lines []string
-	var stack []*open
+	root := &expPANOSNode{}
+	stack := []*expPANOSNode{root}
 	for {
 		tok, err := dec.Token()
 		if errors.Is(err, io.EOF) {
@@ -78,33 +121,130 @@ func expectedPANOSLines(data []byte) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
+		top := stack[len(stack)-1]
 		switch t := tok.(type) {
 		case xml.StartElement:
-			stack = append(stack, &open{head: expectedPANOSHead(t)})
+			n := expPANOSElement(t)
+			top.children = append(top.children, n)
+			stack = append(stack, n)
 		case xml.EndElement:
-			if len(stack) == 0 {
+			if len(stack) == 1 {
 				return nil, errors.New("end element without start")
 			}
-			top := stack[len(stack)-1]
 			stack = stack[:len(stack)-1]
-			line := strings.Repeat("  ", len(stack)) + top.head
-			if len(bytes.TrimSpace(top.text)) > 0 {
-				line += " = " + strconv.Quote(string(top.text))
-			}
-			lines = append(lines, line)
 		case xml.CharData:
-			if len(stack) > 0 {
-				top := stack[len(stack)-1]
+			if top != root {
 				top.text = append(top.text, t...)
 			}
 		case xml.Comment:
-			lines = append(lines, strings.Repeat("  ", len(stack))+"# "+strconv.Quote(string(t)))
+			top.children = append(top.children, &expPANOSNode{comment: true, text: bytes.Clone(t)})
 		}
 	}
-	if len(stack) != 0 {
+	if len(stack) != 1 {
 		return nil, errors.New("document ends inside an element")
 	}
+	var lines []string
+	expPANOSRender(root, 0, &lines)
 	return lines, nil
+}
+
+// expPANOSElement builds the node of an element start, with its attributes
+// filtered and sorted.
+func expPANOSElement(t xml.StartElement) *expPANOSNode {
+	var attrs []expPANOSAttr
+	for _, a := range t.Attr {
+		if a.Name.Space == "" && slices.Contains(expPANOSVolatile, a.Name.Local) {
+			continue
+		}
+		attrs = append(attrs, expPANOSAttr{key: expectedPANOSName(a.Name), value: a.Value})
+	}
+	slices.SortFunc(attrs, expPANOSAttrCompare)
+	return &expPANOSNode{name: expectedPANOSName(t.Name), local: t.Name.Local, attrs: attrs}
+}
+
+// expPANOSRender appends the lines of n's children at depth, each followed
+// by its own subtree. Siblings are sorted unless their parent is an ordered
+// container.
+func expPANOSRender(n *expPANOSNode, depth int, out *[]string) {
+	kids := n.children
+	if !slices.Contains(expPANOSOrdered, n.local) {
+		kids = slices.Clone(kids)
+		slices.SortStableFunc(kids, expPANOSCompare)
+	}
+	for _, c := range kids {
+		*out = append(*out, strings.Repeat("  ", depth)+expPANOSLine(c))
+		expPANOSRender(c, depth+1, out)
+	}
+}
+
+// expPANOSLine is the rendered line of a node, without indentation.
+func expPANOSLine(n *expPANOSNode) string {
+	if n.comment {
+		return "# " + strconv.Quote(string(n.text))
+	}
+	var b strings.Builder
+	b.WriteString(n.name)
+	if len(n.attrs) > 0 {
+		parts := make([]string, len(n.attrs))
+		for i, a := range n.attrs {
+			parts[i] = a.key + "=" + strconv.Quote(a.value)
+		}
+		b.WriteString("[" + strings.Join(parts, " ") + "]")
+	}
+	if t := expPANOSText(n); t != "" {
+		b.WriteString(" = " + strconv.Quote(t))
+	}
+	return b.String()
+}
+
+// expPANOSText is the text an element line shows: all of its text when some
+// of it is not whitespace, else nothing.
+func expPANOSText(n *expPANOSNode) string {
+	if len(bytes.TrimSpace(n.text)) == 0 {
+		return ""
+	}
+	return string(n.text)
+}
+
+// expPANOSCompare orders siblings: elements before comments, then by name,
+// attributes and text.
+func expPANOSCompare(a, b *expPANOSNode) int {
+	if a.comment != b.comment {
+		if a.comment {
+			return 1
+		}
+		return -1
+	}
+	if c := strings.Compare(a.name, b.name); c != 0 {
+		return c
+	}
+	if c := slices.CompareFunc(a.attrs, b.attrs, expPANOSAttrCompare); c != 0 {
+		return c
+	}
+	return strings.Compare(expPANOSText(a), expPANOSText(b))
+}
+
+// expPANOSAttrCompare orders attributes: name, then uuid, then the other
+// keys, each by key then value.
+func expPANOSAttrCompare(a, b expPANOSAttr) int {
+	if c := expPANOSAttrRank(a.key) - expPANOSAttrRank(b.key); c != 0 {
+		return c
+	}
+	if c := strings.Compare(a.key, b.key); c != 0 {
+		return c
+	}
+	return strings.Compare(a.value, b.value)
+}
+
+// expPANOSAttrRank is 0 for name, 1 for uuid and 2 for any other key.
+func expPANOSAttrRank(key string) int {
+	switch key {
+	case "name":
+		return 0
+	case "uuid":
+		return 1
+	}
+	return 2
 }
 
 // expectedPANOSName renders an XML name: the local name, prefixed with the
@@ -114,45 +254,6 @@ func expectedPANOSName(n xml.Name) string {
 		return n.Local
 	}
 	return "{" + strconv.Quote(n.Space) + "}" + n.Local
-}
-
-// expectedPANOSHead renders an element's name and attributes.
-func expectedPANOSHead(t xml.StartElement) string {
-	type attr struct{ key, value string }
-	var attrs []attr
-	for _, a := range t.Attr {
-		if a.Name.Space == "" && (a.Name.Local == "admin" || a.Name.Local == "dirtyId" || a.Name.Local == "time") {
-			continue
-		}
-		attrs = append(attrs, attr{key: expectedPANOSName(a.Name), value: a.Value})
-	}
-	rank := func(key string) int {
-		switch key {
-		case "name":
-			return 0
-		case "uuid":
-			return 1
-		}
-		return 2
-	}
-	slices.SortFunc(attrs, func(a, b attr) int {
-		if d := rank(a.key) - rank(b.key); d != 0 {
-			return d
-		}
-		if c := strings.Compare(a.key, b.key); c != 0 {
-			return c
-		}
-		return strings.Compare(a.value, b.value)
-	})
-	head := expectedPANOSName(t.Name)
-	if len(attrs) > 0 {
-		parts := make([]string, len(attrs))
-		for i, a := range attrs {
-			parts[i] = a.key + "=" + strconv.Quote(a.value)
-		}
-		head += "[" + strings.Join(parts, " ") + "]"
-	}
-	return head
 }
 
 // mustExpectedPANOSLines is expectedPANOSLines for a document a test wrote
@@ -166,6 +267,17 @@ func mustExpectedPANOSLines(t *testing.T, text string) []string {
 	return want
 }
 
+// mustCheckXML fails the test unless netdevcontract.CheckXML accepts text
+// with the redacted-config limit. The over-limit documents of the limit tests
+// must pass it, so a refusal is the normalizer's own limit and not a
+// malformed document.
+func mustCheckXML(t *testing.T, text string) {
+	t.Helper()
+	if err := netdevcontract.CheckXML([]byte(text), netdevcontract.MaxRedactedConfigBytes); err != nil {
+		t.Fatalf("CheckXML refuses a test document, so the normalizer's limit is not what is tested: %v", err)
+	}
+}
+
 // fitsPANOSLimits reports whether a rendering stays within the two bounds
 // NormalizePANOSConfig promises: MaxConfigLines lines and
 // MaxNormalizedConfigBytes bytes.
@@ -174,8 +286,10 @@ func fitsPANOSLimits(lines []string) bool {
 }
 
 // checkPANOSLines checks an accepted rendering against want, the independent
-// rendering of the same document: the same lines in any order, within the
-// limits, no line break inside a line, and determinism.
+// rendering of the same document: the same lines in the same order, so the
+// sibling order, the ordered containers and the depth of each line are all
+// checked. It also checks the limits, that no line breaks a line, and
+// determinism.
 func checkPANOSLines(t *testing.T, text string, lines, want []string) {
 	t.Helper()
 	if len(lines) > netdevcontract.MaxConfigLines {
@@ -189,11 +303,9 @@ func checkPANOSLines(t *testing.T, text string, lines, want []string) {
 			t.Fatalf("line %d breaks the line structure: %q", i, l)
 		}
 	}
-	got := slices.Sorted(slices.Values(lines))
-	exp := slices.Sorted(slices.Values(want))
-	if !slices.Equal(got, exp) {
+	if !slices.Equal(lines, want) {
 		t.Fatalf("%d lines, independent rendering has %d; first difference: %s",
-			len(got), len(exp), firstPANOSDiff(got, exp))
+			len(lines), len(want), firstPANOSDiff(lines, want))
 	}
 	again, ok := NormalizePANOSConfig(text)
 	if !ok || !slices.Equal(lines, again) {
@@ -201,8 +313,8 @@ func checkPANOSLines(t *testing.T, text string, lines, want []string) {
 	}
 }
 
-// firstPANOSDiff describes the first position where two sorted renderings
-// differ, for a failure message.
+// firstPANOSDiff describes the first position where two renderings differ,
+// for a failure message.
 func firstPANOSDiff(got, want []string) string {
 	for i := 0; i < len(got) || i < len(want); i++ {
 		var g, w string
@@ -213,10 +325,22 @@ func firstPANOSDiff(got, want []string) string {
 			w = want[i]
 		}
 		if g != w {
-			return strconv.Quote(g) + " against " + strconv.Quote(w)
+			return "line " + strconv.Itoa(i) + ": " + shortPANOSLine(g) + " against " + shortPANOSLine(w)
 		}
 	}
 	return "none"
+}
+
+// panosShownLine bounds how much of a rendered line a failure message quotes.
+const panosShownLine = 120
+
+// shortPANOSLine quotes a rendered line for a failure message, cut to
+// panosShownLine bytes, so a long text line does not flood the log.
+func shortPANOSLine(s string) string {
+	if len(s) > panosShownLine {
+		return strconv.Quote(s[:panosShownLine]) + "...(" + strconv.Itoa(len(s)) + " bytes)"
+	}
+	return strconv.Quote(s)
 }
 
 // FuzzNormalizePANOSConfig feeds arbitrary text to NormalizePANOSConfig,
@@ -225,8 +349,8 @@ func firstPANOSDiff(got, want []string) string {
 // CheckXML accepts, the independent rendering decides both ways: when it
 // fits MaxConfigLines and MaxNormalizedConfigBytes the input is accepted,
 // and when it does not the input is refused. An accepted input renders the
-// independent lines, one line of text each, and the same input renders the
-// same lines.
+// independent lines in the same order, one line of text each, and the same
+// input renders the same lines.
 func FuzzNormalizePANOSConfig(f *testing.F) {
 	for _, s := range panosFuzzSeeds() {
 		f.Add(s)
@@ -373,10 +497,11 @@ func TestPANOSDeviceTextCannotForgeLine(t *testing.T) {
 
 // TestPANOSLineLimitIsInclusive checks MaxConfigLines at the line: a
 // document of exactly MaxConfigLines lines is accepted, one more line is
-// refused. The independent rendering agrees with both documents' sizes.
+// refused. The independent rendering agrees with both documents' sizes, and
+// CheckXML accepts the refused document, so the refusal is the normalizer's
+// own limit.
 func TestPANOSLineLimitIsInclusive(t *testing.T) {
-	// One root line plus n child lines.
-	atDoc := panosWide(netdevcontract.MaxConfigLines - 1)
+	atDoc, overDoc := panosLineLimitDocs()
 	atLimit, ok := NormalizePANOSConfig(atDoc)
 	if !ok {
 		t.Fatalf("document of %d lines refused", netdevcontract.MaxConfigLines)
@@ -386,7 +511,7 @@ func TestPANOSLineLimitIsInclusive(t *testing.T) {
 	}
 	checkPANOSLines(t, atDoc, atLimit, mustExpectedPANOSLines(t, atDoc))
 
-	overDoc := panosWide(netdevcontract.MaxConfigLines)
+	mustCheckXML(t, overDoc)
 	if fitsPANOSLimits(mustExpectedPANOSLines(t, overDoc)) {
 		t.Fatalf("test document of %d lines fits; the test is wrong", netdevcontract.MaxConfigLines+1)
 	}
@@ -418,22 +543,36 @@ func panosChildren(n int, last string) string {
 	return "<r>" + strings.Repeat(full, n-1) + "<a>" + last + "</a></r>"
 }
 
-// TestPANOSByteLimitIsInclusive checks MaxNormalizedConfigBytes at the byte.
-// The root line is 2 bytes with its newline. Full children render
-// fullChild bytes each. The fit full children and a last child padded to the
-// remaining bytes render to exactly MaxNormalizedConfigBytes and are
-// accepted; the same document with one more byte in its last child is
-// refused.
-func TestPANOSByteLimitIsInclusive(t *testing.T) {
+// panosByteLimitDocs returns the documents of the byte limit at and just
+// over MaxNormalizedConfigBytes, with the number of full children fit and
+// the bytes rest left for the last child. The root line is 2 bytes with its
+// newline. Full children render fullChild bytes each. The fit full children
+// and a last child padded to the remaining bytes render to exactly
+// MaxNormalizedConfigBytes; the same document with one more byte in its last
+// child renders one byte more.
+func panosByteLimitDocs() (atDoc, overDoc string, fit, rest int) {
 	const rootBytes = len("r\n")
 	fullChild := renderedChildBytes(strings.Repeat("\x7f", netdevcontract.MaxXMLTextBytes))
-	fit := (MaxNormalizedConfigBytes - rootBytes) / fullChild
-	rest := MaxNormalizedConfigBytes - rootBytes - fit*fullChild
+	fit = (MaxNormalizedConfigBytes - rootBytes) / fullChild
+	rest = MaxNormalizedConfigBytes - rootBytes - fit*fullChild
+	return panosChildren(fit+1, panosPadText(rest)), panosChildren(fit+1, panosPadText(rest+1)), fit, rest
+}
+
+// TestPANOSByteLimitIsInclusive checks MaxNormalizedConfigBytes at the byte.
+// The document that renders to exactly MaxNormalizedConfigBytes is accepted;
+// the same document with one more byte in its last child is refused, and
+// CheckXML accepts it, so the refusal is the normalizer's own limit.
+func TestPANOSByteLimitIsInclusive(t *testing.T) {
+	atDoc, overDoc, fit, rest := panosByteLimitDocs()
+	const rootBytes = len("r\n")
+	fullChild := renderedChildBytes(strings.Repeat("\x7f", netdevcontract.MaxXMLTextBytes))
 	if rest < renderedChildBytes("a") || rest+1 > fullChild {
 		t.Fatalf("remaining %d bytes cannot be padded to exactly the limit", rest)
 	}
+	if rootBytes+fit*fullChild+rest != MaxNormalizedConfigBytes {
+		t.Fatalf("split of %d bytes into %d full children and %d bytes does not add up", MaxNormalizedConfigBytes, fit, rest)
+	}
 
-	atDoc := panosChildren(fit+1, panosPadText(rest))
 	lines, ok := NormalizePANOSConfig(atDoc)
 	if !ok {
 		t.Fatalf("document rendering to exactly %d bytes refused", MaxNormalizedConfigBytes)
@@ -443,14 +582,16 @@ func TestPANOSByteLimitIsInclusive(t *testing.T) {
 		t.Fatalf("document renders to %d bytes, want exactly %d", got, MaxNormalizedConfigBytes)
 	}
 
-	overDoc := panosChildren(fit+1, panosPadText(rest+1))
+	mustCheckXML(t, overDoc)
 	if fitsPANOSLimits(mustExpectedPANOSLines(t, overDoc)) {
 		t.Fatalf("test document of %d bytes fits; the test is wrong", MaxNormalizedConfigBytes+1)
 	}
 	if _, ok := NormalizePANOSConfig(overDoc); ok {
 		t.Fatalf("document rendering to %d bytes accepted, limit %d", MaxNormalizedConfigBytes+1, MaxNormalizedConfigBytes)
 	}
-	if _, ok := NormalizePANOSConfig(panosHeavy(fit + 1)); ok {
+	heavy := panosHeavy(fit + 1)
+	mustCheckXML(t, heavy)
+	if _, ok := NormalizePANOSConfig(heavy); ok {
 		t.Fatalf("%d full children accepted, expected to exceed %d bytes", fit+1, MaxNormalizedConfigBytes)
 	}
 }
