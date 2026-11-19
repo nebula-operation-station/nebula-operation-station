@@ -50,16 +50,13 @@ func paddedTagsBody(t *testing.T, repo string, size int) []byte {
 	return []byte(prefix + strings.Repeat("x", pad) + suffix)
 }
 
-// TestRedirectChainDeviationFromADR0006 pins the current, documented redirect
-// behaviour at its limit and one beyond. ADR 0006 says "no redirects"; the
-// code deliberately follows up to MaxRedirects-1 (two) same-resource redirects
-// for anonymous requests while the maintainer decision is open (see the
-// MaxRedirects comment in limits.go). This test documents that deviation: if
-// the decision changes the behaviour, this test must be updated on purpose.
-// checkRedirect refuses a redirect once the chain already holds MaxRedirects
-// requests (the original request plus its redirects), so the chain may contain
-// MaxRedirects-1 redirects: two today. The third redirect is refused.
-func TestRedirectChainDeviationFromADR0006(t *testing.T) {
+// TestRedirectChainLimitADR0006Amendment pins the redirect limit of the ADR
+// 0006 amendment "registry metadata redirects" (2026-11-19) at its limit and
+// one beyond: anonymous requests follow at most MaxRedirects-1 (two)
+// same-origin, same-resource redirects. checkRedirect refuses a redirect once
+// the chain already holds MaxRedirects requests (the original request plus
+// its redirects), so the third redirect is refused.
+func TestRedirectChainLimitADR0006Amendment(t *testing.T) {
 	for _, redirects := range []int{MaxRedirects - 1, MaxRedirects, MaxRedirects + 1} {
 		t.Run(fmt.Sprintf("redirects=%d", redirects), func(t *testing.T) {
 			rec := &recorder{}
