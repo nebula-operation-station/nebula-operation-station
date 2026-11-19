@@ -2490,7 +2490,9 @@ IPAddressAllow=192.0.2.10/32
 
 Use the address of your lab LLM host (the example is a documentation
 address). Lines add up, so the drop-in keeps loopback. The LLM base URL
-must use that address, or a name that a resolver on localhost answers.
+must use that literal address: for data class `lab` the settings accept
+only a literal IP inside the lab networks (loopback, RFC 1918, IPv6 ULA),
+not a host name. A name works only with data class `external`.
 Use only a model you run in your lab, as for the vulnerability agent
 (section 10.5, "LLM"); a hosted model is not a supported endpoint for
 data class `lab`.
