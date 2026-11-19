@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -96,6 +97,43 @@ func TestHarnessOpsIndexRefusesMalformedRefs(t *testing.T) {
 	}
 	if _, ok := x.Match("harness-refresh", "e2e-two"); ok {
 		t.Error("match on a host no note names")
+	}
+}
+
+// TestHarnessSuggestionFormIsWired: the preview harness (no login) opens
+// the operation form from step 1.1 with the stored action and host, the
+// banner, the reference and no parameter; a step that is not an action, an
+// unknown note and a non-admin get 404. opsagent.spec.js relies on this.
+func TestHarnessSuggestionFormIsWired(t *testing.T) {
+	defer opsAdmin.Store(true)
+	h := newHarness(true, "8080", t.TempDir())
+	code, body := get(t, h, "/operations/new?suggestion=1.1&action=core.facts&host=e2e-two&param=unit%3Devil.service")
+	if code != http.StatusOK {
+		t.Fatalf("GET suggestion 1.1 = %d", code)
+	}
+	for _, want := range []string{
+		"Opened from an agent suggestion. This execution needs a security-key touch.",
+		`id="operation-suggestion" name="suggestion" value="1.1"`,
+		`value="service.restart" checked`,
+		`value="e2e-host" checked`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("suggestion form lacks %q", want)
+		}
+	}
+	for _, bad := range []string{`value="e2e-two" checked`, `value="core.facts" checked`, "evil.service"} {
+		if strings.Contains(body, bad) {
+			t.Errorf("suggestion form took %q from the URL", bad)
+		}
+	}
+	for _, ref := range []string{"1.4", "99.1", "1.3", "abc"} {
+		if code, _ := get(t, h, "/operations/new?suggestion="+ref); code != http.StatusNotFound {
+			t.Errorf("suggestion %q = %d, want 404", ref, code)
+		}
+	}
+	opsAdmin.Store(false)
+	if code, _ := get(t, h, "/operations/new?suggestion=1.1"); code != http.StatusNotFound {
+		t.Errorf("suggestion for a non-admin = %d, want 404", code)
 	}
 }
 
