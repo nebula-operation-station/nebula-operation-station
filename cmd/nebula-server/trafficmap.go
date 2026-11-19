@@ -101,7 +101,7 @@ func mountTrafficMap(pages *http.ServeMux, publicOrigin string, db *sql.DB,
 // trafficChrome is softwareChrome for the traffic map page.
 func trafficChrome(r *http.Request) tmui.Chrome {
 	c := softwareChrome(r)
-	return tmui.Chrome{Theme: c.Theme, NavCollapsed: c.NavCollapsed, PVENav: c.PVENav, DeployEnabled: c.DeployEnabled}
+	return tmui.Chrome{Theme: c.Theme, NavCollapsed: c.NavCollapsed, PVENav: c.PVENav, DeployEnabled: c.DeployEnabled, NotificationsNav: c.NotificationsNav}
 }
 
 // trafficAssetPrefix starts the node ID of an IPAM asset. Host and asset

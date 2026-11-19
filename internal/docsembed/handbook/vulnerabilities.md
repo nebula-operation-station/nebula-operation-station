@@ -20,6 +20,7 @@ operation flow ([Patching and services](patching-and-services.md)).
 | Closing findings based on NOS's own package data | **Planned:** closures a run asks for are held for an admin instead |
 | Maintainer decisions (accept risk, false positive, confirm or discard a held closure, reset a feed mark) | **Planned:** the forms are shown, but submitting fails with "vulnerability decisions need an executor-verified security key assertion, which this executor does not offer" |
 | Priority with real exposure and host criticality | **Planned:** tier `vu-prio-v1` uses exposure "unknown" and criticality "unset" (counted as HIGH) |
+| Fix suggestion cards from the ops agent (ADR 0016) | **Off by default:** the agent is disabled, and this release has no form to enable it, so a default install shows no cards. The section *Read a fix suggestion card* describes them |
 | Device findings, Hermes narratives for attack paths | Not available; narratives are not planned |
 
 ## Set up the Hermes agent token
@@ -181,3 +182,89 @@ when the audit entry cannot be written (`vuln.export_refused`).
 **Expected result:** the org chart's image badge shows the result,
 labelled "host Trivy, partial". When a fresh complete Hermes run covers the
 image, the badge shows the Hermes status instead. The two are never merged.
+
+## Read a fix suggestion card
+
+**Goal:** decide what to do with a fix suggestion from the ops agent, and
+submit a fix that you have checked yourself.
+
+**Status:** no card can appear in this release. The card and the suggestion
+form are built, but three things stop a card from appearing: the agent is
+off by default, this release has no form to switch it on, and the server
+does not yet connect the finding sources, so the agent never has a finding
+to work on and no fix note can be made. Switching the settings on by other
+means does not change that. A default install shows no card, and neither
+does an install with the settings on (admin guide
+[10.6](../admin/guide.md#106-ops-agent), "Status in this build"). Answers
+to questions in the Ops tab are not produced yet.
+
+**Prerequisites:** the ops agent is set up by an admin (admin guide
+[10.6](../admin/guide.md#106-ops-agent)); you are an admin. Other users do
+not see the Ops tab.
+
+**Steps:**
+
+1. Open the **Ops** tab of the assistant panel. A card is headed "Fix
+   suggestion" with its number. With the agent off, the tab says "Agent
+   switched off. No open suggestion."; with the agent on and no card yet, it
+   says "No suggestion yet.". In this release that is the normal state, since
+  no finding source is connected (see Status above). The question form is at the top of the tab;
+   in this build its questions are stored but not answered (admin guide
+   [10.6](../admin/guide.md#106-ops-agent)).
+2. Read "What" first (the headings are shown in English). NOS renders it
+   from its own stored facts: package and version, tier, KEV and exposure.
+   It is not model text.
+3. Read the card's label, which is shown in English and German: "Generated
+   by an LLM – unverified. NOS checked only that each step is a catalog
+   action on this host." The German text is "Von einem LLM erzeugt –
+   ungeprüft. NOS hat nur geprüft, dass jeder Schritt eine Katalog-Aktion
+   auf diesem Host ist." The text from the model is shown escaped. Treat it
+   as a draft.
+4. Read "How to fix". The steps are in order. Each step has one button.
+5. Press a step's button. For every step except a container update, it
+   **opens the normal form** with the action and the host filled in.
+   Nothing is submitted by the button. A container update step is the
+   exception in this build: its button opens a page that answers `404`.
+   If you still want that update, use the container page by hand. An
+   execution with the same action family on the same host is marked as
+   suggested anyway, while a note for that host is stored.
+6. Fill in every parameter yourself (the unit name, the container, the
+   stage plan). The suggestion supplies no parameter and no secret.
+7. Check the finding page and the section the card cites. They stay the
+   authority.
+8. Submit. Before you submit, the form shows the banner "Opened from an
+   agent suggestion. This execution needs a security-key touch." (German:
+   "Aus einem Agenten-Vorschlag geöffnet. Diese Ausführung braucht eine
+   Security-Key-Berührung.") Touch your security key.
+
+Mitigations (for example "restrict the port at the firewall") are text only.
+They have no button and no form. If you act on one, do it outside the card,
+with your own command, after you have checked it.
+
+A card marked "outdated: findings changed" (the German label is in the
+German copy of this page) was made for findings that have since changed. Do
+not act on it; look at the current findings first.
+
+**Dismissing a card** hides it and changes nothing else. It does **not**
+remove the security-key rule for that host (below).
+
+**The security-key rule.** Every execution that you open from a suggestion
+needs a security-key touch, **also when the action is LOW**. While a stored
+fix note exists for a host (at most 30 days, or 500 notes), a LOW action of
+the same kind on that host that you start by hand needs the key too. In
+this release no fix note and no card can come about yet, so no execution is
+marked yet. The
+operation page shows the risk the executor decides, which is at least MEDIUM
+for a suggested execution, but no "From an agent suggestion" label; only the
+form banner marks a card-opened form. Admin guide
+[10.6](../admin/guide.md#106-ops-agent) explains the limit: a compromised
+server can omit the marking.
+
+**Residual risk** (ADR 0016, verbatim): an admin follows a plausible but
+wrong suggestion, fills in the parameters and approves it with the key. The
+card reduces reading, not responsibility; the finding page and the cited
+section stay the authority.
+
+**Expected result:** a submitted execution with its own approval and its own
+audit entry. Before you submit, you saw the banner above, if you opened the
+form from a card.
