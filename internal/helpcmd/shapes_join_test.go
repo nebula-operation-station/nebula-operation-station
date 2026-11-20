@@ -87,3 +87,70 @@ func TestShapesSegmentWithUnbalancedQuoteBreaksBlock(t *testing.T) {
 		t.Fatalf("excluded lines %v, want [1 3 4]", got)
 	}
 }
+
+// TestShapesHeredocOpenedBeforeShellBreakTakesBodyText checks that a heredoc
+// opener followed by a line break the shell ends (a backslash in a comment or
+// after another backslash) registers its heredoc at that segment. The next
+// segment is the heredoc body, not a command: body text such as "done" or "fi"
+// must not close a construct early, and the lines after it stay excluded until
+// the delimiter.
+func TestShapesHeredocOpenedBeforeShellBreakTakesBodyText(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{"done in the body after a doubled backslash closes nothing",
+			"for x in a; do\ncat <<EOF \\\\\ndone\nEOF\nnebula status\ndone\nnebula pve list",
+			[]string{"nebula pve list"}},
+		{"fi in the body after a doubled backslash closes nothing",
+			"if true; then\ncat <<EOF \\\\\nfi\nEOF\nnebula status\nfi\nnebula pve list",
+			[]string{"nebula pve list"}},
+		{"done in the body after a comment backslash closes nothing",
+			"for x in a; do\ncat <<EOF # c \\\ndone\nEOF\nnebula status\ndone\nnebula pve list",
+			[]string{"nebula pve list"}},
+		{"the delimiter as the next segment ends the heredoc",
+			"for x in a; do\ncat <<EOF \\\\\nEOF\nnebula status\ndone\nnebula pve list",
+			[]string{"nebula pve list"}},
+		{"the body segment is not a command even without a construct",
+			"cat <<EOF \\\\\nnebula status\nEOF\nnebula pve list",
+			[]string{"nebula pve list"}},
+		{"two heredocs take their bodies in order across the break",
+			"cat <<A <<B \\\\\nA\nB\nnebula status\nnebula pve list",
+			[]string{"nebula status", "nebula pve list"}},
+		// A clean join puts the body text on the next physical line of one
+		// logical line: the shell reads "done" as an argument, and "EOF" as
+		// the empty body's delimiter, so "nebula status" stays in the loop.
+		{"done after a clean join closes nothing before the delimiter",
+			"for x in a; do \\\ncat <<EOF \\\ndone\nEOF\nnebula status\ndone\nnebula pve list",
+			[]string{"nebula pve list"}},
+		{"a joined body segment does not end the heredoc",
+			"cat <<EOF \\\\\nEO\\\nF\nnebula status\nEOF\nnebula pve list",
+			[]string{"nebula pve list"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			set := Shapes("", tt.body)
+			var got []string
+			for _, sh := range set.Shapes {
+				got = append(got, sh.Text)
+			}
+			if !equalStrings(got, tt.want) {
+				t.Fatalf("shapes %q, want %q (excluded %+v)", got, tt.want, set.Excluded)
+			}
+		})
+	}
+}
+
+// equalStrings reports whether a and b hold the same strings in the same order.
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
