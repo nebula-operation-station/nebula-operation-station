@@ -15,9 +15,10 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
 )
 
-// ubuntuDeclaredBytes is the size the live sync reported for the OSV
-// Ubuntu all.zip (live host .30, 2026-11-20): it exceeded the old 512 MiB
-// cap.
+// ubuntuDeclaredBytes is the compressed size of the OSV Ubuntu all.zip
+// as observed by a live sync on 2026-11-20. It exceeds the former 512 MiB
+// per-download cap. This is the compressed size only; the uncompressed
+// total is not measured (see MaxOSVArchiveBytes).
 const ubuntuDeclaredBytes int64 = 821463306
 
 func TestOSVUbuntuCapFitsLiveArchive(t *testing.T) {

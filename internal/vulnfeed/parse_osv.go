@@ -39,14 +39,14 @@ const (
 	// MaxOSVArchiveFiles caps the files in one OSV all.zip.
 	MaxOSVArchiveFiles = 1_000_000
 	// MaxOSVArchiveBytes caps the decompressed bytes of one OSV all.zip,
-	// the sum of the declared entry sizes. It was 4 GiB until the live
-	// Ubuntu archive (host .30, 2026-11-20, 821 MB compressed) exceeded
-	// it; the content date needs the whole archive read, so the sync
-	// failed closed with no snapshot. 16 GiB is about 20 times the live
-	// compressed size. Each entry stays capped at MaxOSVRecordBytes and
-	// the file count at MaxOSVArchiveFiles, so this total is the only
-	// bound on the work per archive. The true uncompressed total of the
-	// live archive is not measured here (see the report).
+	// the sum of the declared entry sizes. Facts: the live osv-ubuntu
+	// all.zip declared 821,463,306 bytes (compressed) on 2026-11-20, which
+	// exceeded the former 4 GiB cap of this sum. The live uncompressed
+	// total is NOT measured yet, so 16 GiB (2^34) is a provisional value,
+	// not a derived one: it is about 20 times the compressed size and has
+	// no measured headroom. Each entry stays capped at MaxOSVRecordBytes
+	// and the file count at MaxOSVArchiveFiles. Both caps are enforced
+	// from the central directory before any entry is inflated.
 	MaxOSVArchiveBytes int64 = 16 << 30
 )
 

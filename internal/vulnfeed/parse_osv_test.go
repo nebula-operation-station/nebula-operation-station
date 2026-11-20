@@ -468,9 +468,9 @@ func TestParseOSVArchiveTotalLimitIsInjectable(t *testing.T) {
 }
 
 func TestParseOSVArchiveTotalAboveOldCapPassesGate(t *testing.T) {
-	// The declared total is 5 GiB, above the 4 GiB cap the live sync hit
-	// (host .30). The entries hold no record data, so the archive must
-	// fail while reading, not at the size gate.
+	// The declared total is 5 GiB, above the former 4 GiB total cap. The
+	// entries hold no record data, so the archive must fail while
+	// reading, not at the size gate.
 	const entries = 1281 // 1280 entries of MaxOSVRecordBytes are 5 GiB
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
@@ -499,6 +499,9 @@ func TestParseOSVArchiveTotalAboveOldCapPassesGate(t *testing.T) {
 	}
 	if errors.Is(err, ErrFeedLimit) {
 		t.Fatalf("5 GiB declared total refused by the size gate: %v", err)
+	}
+	if !errors.Is(err, ErrFeedMalformed) {
+		t.Fatalf("entries without record data: err = %v, want ErrFeedMalformed from the read", err)
 	}
 }
 
