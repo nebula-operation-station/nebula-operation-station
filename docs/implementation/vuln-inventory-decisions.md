@@ -1,12 +1,24 @@
 # Decision paper: package inventory for the vulnerability export (ADR 0011)
 
-Status: **open, maintainer decides.** Nothing in this paper is decided. Each
+Status: **open, maintainer decides.** This paper decides nothing. Points that
+ADR 0011 already decides are not open and are marked as decided (E4). Each
 point gives the question, what ADR 0011, the spec and the code say today, the
 options, a recommendation and the consequence for the code. The recommendations
 are proposals for the maintainer; none of them changes an ADR or spec.
 
-Ticket: iv01 (autopilot). Blocks: iv08 (the rest of the chain iv02–iv10 waits
-for this paper; per the ticket, iv02–iv07 build what ADR and code already fix).
+Ticket: iv01 (autopilot). Which tickets wait and which go ahead:
+
+- **Waits for this paper:** iv08. Also the parts of iv02–iv07 that touch E1
+  (retention), E2 (read age) or E3 (host and OS-release holds). Those are not
+  built until the maintainer decides.
+- **Goes ahead:** the parts of iv02–iv07 that ADR 0011 and the current code
+  already fix.
+- **Depends on E4:** image freshness. E4 (a) option 1 would put an image
+  schedule before iv10, option 2 puts it after iv10. Until decided, iv10 must
+  not assume image freshness.
+
+The ticket text is not in this clone. This mapping comes from the references in
+this paper; the maintainer should check it against the ticket.
 
 ## Why this is open
 
@@ -71,11 +83,12 @@ if the maintainer wants history for audit, it should be a new decision (Q-style
 entry in ADR 0011), not an implementation default. The rule in option 2 needs
 no number of its own: it follows from D5 and `MaxInventoryAge`. This retention rule is not decided yet, so iv02–iv07 must not implement it before the maintainer decides (they build only what ADR and code already fix, lines 8–9).
 
-**Consequence for the code.** Pruning of package reads runs with the same
-clock as `vulnstore` pruning. Rows that are neither latest, last complete nor
-pinned by a valid snapshot are deleted. Tests must cover: a partial latest read
-does not drop the last complete read; a snapshot ID keeps its read until
-`MaxInventoryAge` has passed.
+**Consequence for the code.** Conditional on the choice. Only if option 2 is
+chosen: pruning of package reads runs with the same clock as `vulnstore` pruning,
+and rows that are neither latest, last complete nor pinned by a valid snapshot
+are deleted. Tests must then cover: a partial latest read does not drop the last
+complete read; a snapshot ID keeps its read until `MaxInventoryAge` has passed.
+With option 1 or 3 the rule above does not apply and the tests change with it.
 
 ---
 
@@ -103,7 +116,8 @@ subject in a run and keep a closure possible)?
 **Options.**
 
 1. No limit on the age of a read.
-2. 24 h (`MaxInventoryAge`): three missed reads at the 6-hour floor.
+2. 24 h (proposed value; the same number as `MaxInventoryAge`, but not derived
+   from it).
 3. 48 h (`vulnstore.StaleAfter`): the run staleness threshold of D6.
 
 **Recommendation: option 2 (24 h).** A read older than 24 h is exported as
@@ -120,23 +134,24 @@ the classifier returns an error (lines 646–647) or returns a class outside the
 known set (lines 654–655).
 
 Option 3 (48 h) would let a host be covered by a read up to two days old. The
-24 h figure is proposed because a read 24 h old has missed three reads at the
-6-hour floor (reads due 6, 12 and 18 h after the last one), not because of
-`MaxInventoryAge`: that constant limits snapshot age at run start, not read
-age. `PackageListInstalledMinInterval` (6 h) is only a floor: it limits how
-often a read may run, not how often it runs. The real cadence comes from the
-approved lease, so the 24 h limit must be checked against the lease interval
-once the maintainer sets it (E4 b). A 24 h read inside a 24 h snapshot is already up to 48 h old when the run
+24 h figure is a judgement, not a value derived from a source. Neither
+sourced value gives it: `MaxInventoryAge` limits snapshot age at run start, not
+read age, and `PackageListInstalledMinInterval` (6 h) is a minimum interval, not
+a cadence. It limits how often a read may run, not how often it runs. The real
+cadence comes from the approved lease, so the 24 h limit must be checked against
+the lease interval once the maintainer sets it (E4 b). The maintainer may choose
+another value. A 24 h read inside a 24 h snapshot is already up to 48 h old when the run
 uses it. Option 1 is the case the ADR text does not address; it is listed only
 for completeness.
 
-**Consequence for the code.** The export marks a subject without a fresh
-complete read as incomplete (same effect as D3 partial read). The 24 h read age
-needs its own named constant next to the code that enforces it. It must not
-reuse `vulnstore.MaxInventoryAge`, whose meaning is snapshot age at run start.
-The name and value are a maintainer decision (24 h proposed). Tests: a read
-exactly at 24 h and one at 24 h + 1 s; a fresh read after a stale one restores
-coverage.
+**Consequence for the code.** Conditional on the choice. With option 1 there is
+no age check and nothing below applies. With option 2 or 3 the export marks a
+subject without a fresh complete read as incomplete (same effect as a D3
+partial read). The read age then needs its own named constant next to the code
+that enforces it. It must not reuse `vulnstore.MaxInventoryAge`, whose meaning
+is snapshot age at run start. The name and value are a maintainer decision; 24 h
+is only the proposal. Tests, for the chosen value: a read exactly at the limit
+and one a second past it; a fresh read after a stale one restores coverage.
 
 ---
 
