@@ -20,8 +20,12 @@ import (
 
 // Limits of OSV records and OSV bulk archives (ADR 0011 D4).
 const (
-	// MaxOSVRecordBytes caps one OSV JSON record.
-	MaxOSVRecordBytes = 4 << 20
+	// MaxOSVRecordBytes caps one OSV JSON record and each entry of an OSV
+	// archive (the declared and the decompressed size). Measured on
+	// 2026-11-20 from the central directory of the osv-ubuntu all.zip: the
+	// largest entry declared 4,973,117 bytes, which the former 4 MiB cap
+	// refused. 10 MiB (10,485,760 bytes) is about 2.1 times that value.
+	MaxOSVRecordBytes = 10 << 20
 	// MaxOSVAliases caps the aliases of one record.
 	MaxOSVAliases = 256
 	// MaxOSVAffected caps the affected entries of one record.
@@ -36,11 +40,36 @@ const (
 	// MaxOSVEventsPerRecord caps the events of all ranges of one record
 	// together.
 	MaxOSVEventsPerRecord = 32_768
-	// MaxOSVArchiveFiles caps the files in one OSV all.zip.
+	// MaxOSVArchiveFiles caps the files in one OSV all.zip. Measured on
+	// 2026-11-20: the osv-ubuntu all.zip has 74,879 entries, so this limit
+	// is about 13 times the measured count.
 	MaxOSVArchiveFiles = 1_000_000
-	// MaxOSVArchiveBytes caps the decompressed bytes of one OSV all.zip.
-	MaxOSVArchiveBytes int64 = 4 << 30
+	// MaxOSVArchiveBytes caps the decompressed bytes of one OSV all.zip,
+	// the sum of the declared entry sizes. Measured on 2026-11-20 from the
+	// central directory of the osv-ubuntu all.zip (no entry inflated): the
+	// declared uncompressed total is 8,591,856,407 bytes (8.002 GiB). The
+	// cap is 17 GiB (18,253,611,008 bytes), about 2.1 times the measured
+	// total. 16 GiB would be only 1.999 times it, so it is not used. Each
+	// entry is also capped
+	// at MaxOSVRecordBytes and the file count at MaxOSVArchiveFiles; all
+	// three are checked from the central directory before any entry is
+	// inflated.
+	//
+	// The record's content date (newest "modified") is only known after
+	// the records are parsed. The zip entry times of the live archive are
+	// empty (all 1980-00-00), so no content date can be read without a
+	// bounded pass over the entries; the sync keeps that full pass.
+	MaxOSVArchiveBytes int64 = 17 << 30
 )
+
+// osvArchiveLimits are the archive limits of one parse. ParseOSVArchive
+// uses the package constants; tests inject smaller values.
+type osvArchiveLimits struct {
+	// Files caps the central directory records.
+	Files int
+	// Bytes caps the sum of the declared entry sizes.
+	Bytes int64
+}
 
 // OSVRangeType is an OSV range type the matcher uses.
 type OSVRangeType string
@@ -341,17 +370,18 @@ type OSVArchiveSummary struct {
 // name or ID, or corrupt compressed data fails the archive. On error the
 // caller must discard what it has seen.
 func ParseOSVArchive(ctx context.Context, ra io.ReaderAt, size int64, visit func(OSVRecord) error) (OSVArchiveSummary, error) {
-	return parseOSVArchive(ctx, ra, size, MaxOSVArchiveFiles, visit)
+	lim := osvArchiveLimits{Files: MaxOSVArchiveFiles, Bytes: MaxOSVArchiveBytes}
+	return parseOSVArchive(ctx, ra, size, lim, visit)
 }
 
-// parseOSVArchive is ParseOSVArchive with the file limit as a parameter,
-// so tests can reach it with a small archive.
-func parseOSVArchive(ctx context.Context, ra io.ReaderAt, size int64, maxFiles int, visit func(OSVRecord) error) (OSVArchiveSummary, error) {
+// parseOSVArchive is ParseOSVArchive with the limits as a parameter, so
+// tests can reach the file and byte caps with a small archive.
+func parseOSVArchive(ctx context.Context, ra io.ReaderAt, size int64, lim osvArchiveLimits, visit func(OSVRecord) error) (OSVArchiveSummary, error) {
 	var sum OSVArchiveSummary
 	if size <= 0 || size > MaxFeedBytesOSVUbuntu {
 		return sum, fmt.Errorf("osv archive: size: %w", ErrFeedLimit)
 	}
-	files, err := countZipDirectory(ctx, ra, size, maxFiles)
+	files, err := countZipDirectory(ctx, ra, size, lim.Files)
 	if err != nil {
 		return sum, fmt.Errorf("osv archive: %w", err)
 	}
@@ -376,8 +406,8 @@ func parseOSVArchive(ctx context.Context, ra io.ReaderAt, size int64, maxFiles i
 			return sum, fmt.Errorf("osv archive file %d: %w", i, ErrFeedLimit)
 		}
 		total += int64(f.UncompressedSize64)
-		if total > MaxOSVArchiveBytes {
-			return sum, fmt.Errorf("osv archive: more than %d bytes: %w", MaxOSVArchiveBytes, ErrFeedLimit)
+		if total > lim.Bytes {
+			return sum, fmt.Errorf("osv archive: more than %d bytes: %w", lim.Bytes, ErrFeedLimit)
 		}
 	}
 	ids := make(map[string]struct{}, len(zr.File))
