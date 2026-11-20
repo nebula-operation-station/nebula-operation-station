@@ -189,6 +189,39 @@ func (x ag24Index) Match(family, hostID string) (string, bool) {
 
 func (x ag24Index) Family(actionID string) (string, bool) { return opsfacts.Families(actionID) }
 
+// ag24LowAction is a built-in action the catalog declares LOW. No action on
+// the suggestion allowlist is LOW today, so a match can only reach the D9
+// floor (raise to at least MEDIUM) through a LOW action that carries a
+// family; ag24LowIndex gives it one.
+const ag24LowAction = "package.refresh"
+
+// ag24LowIndex is ag24Index with ag24LowAction in the os-update family, the
+// shape of a future LOW allowlist entry. Step and Match stay the real notes
+// store, so the member is matched by a stored fix note exactly as in
+// production; only the family lookup is widened. Without the D9 floor such
+// a member would stay LOW and be approved by an open privileged session.
+type ag24LowIndex struct{ ag24Index }
+
+func (x ag24LowIndex) Family(actionID string) (string, bool) {
+	if actionID == ag24LowAction {
+		return opsfacts.FamilyOSUpdate, true
+	}
+	return x.ag24Index.Family(actionID)
+}
+
+// wantNativelyLow fails unless the catalog declares ag24LowAction LOW and
+// the production allowlist gives it no family (the test premise).
+func wantNativelyLow(t *testing.T) {
+	t.Helper()
+	a, ok := actions.Lookup(ag24LowAction)
+	if !ok || a.Risk != pb.RiskClass_RISK_CLASS_LOW {
+		t.Fatalf("catalog %s = %+v (%v): test premise changed, want a LOW built-in action", ag24LowAction, a.Risk, ok)
+	}
+	if _, ok := opsfacts.Families(ag24LowAction); ok {
+		t.Fatalf("%s is on the suggestion allowlist now: use the production index", ag24LowAction)
+	}
+}
+
 // ag24Chat is the hostile LLM double. It answers by the schema the agent
 // asked for and records every request.
 type ag24Chat struct {
@@ -875,7 +908,8 @@ func (e *ag24Env) wantNoRunWithoutAssertion(t *testing.T, c executions.Created, 
 //     stays pending with requirement presence; no run is authorised without
 //     the assertion (the human changed the action in the form: still marked);
 //   - the same family on the same host without the reference is marked by
-//     the match and needs presence too;
+//     the match and needs presence too; a natively LOW action matched the
+//     same way (ag24LowIndex) is raised to MEDIUM by the D9 floor;
 //   - an invented or malformed reference is refused before any executor
 //     call and plans nothing;
 //   - a LOW action on a host without a note is approved by the open
@@ -917,6 +951,22 @@ func TestAG24SuggestedOriginNeedsPresenceOnRealExecutor(t *testing.T) {
 		}
 		e.wantNoRunWithoutAssertion(t, c, ag24HostWeb)
 	})
+	t.Run("omitted reference on a natively LOW action is raised by the match", func(t *testing.T) {
+		// The floor is only observable on a LOW action: install_security
+		// is MEDIUM already. Removing suggestedRisk in Service.Create
+		// leaves this one LOW and approved by the open session.
+		wantNativelyLow(t)
+		e.ops.SetSuggestionIndex(ag24LowIndex{ag24Index{notes: e.notes}})
+		defer e.ops.SetSuggestionIndex(ag24Index{notes: e.notes})
+		c, err := e.ops.Create(e.ctx(), "admin", ag24LowAction, []string{ag24HostWeb}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if c.Origin != "suggestion-match:"+strconv.FormatInt(stored.ID, 10) || c.Risk != "MEDIUM" || c.Requirement != "assertion_presence" || c.State != "pending" {
+			t.Fatalf("created %+v, want the match origin, MEDIUM, assertion_presence, pending", c)
+		}
+		e.wantNoRunWithoutAssertion(t, c, ag24HostWeb)
+	})
 	t.Run("invented reference is refused", func(t *testing.T) {
 		rows, rpcs := e.executionRows(), e.rpcs.Load()
 		for _, bad := range []string{strconv.FormatInt(stored.ID+999, 10) + ".1", strconv.FormatInt(stored.ID, 10) + ".7", "abc", "1", strings.Repeat("9", 200) + ".1"} {
@@ -938,15 +988,16 @@ func TestAG24SuggestedOriginNeedsPresenceOnRealExecutor(t *testing.T) {
 			t.Fatalf("created %+v, want unmarked LOW approved by the privileged session", c)
 		}
 	})
-	// The marked executions carry their origin into the audit log (D9 record).
+	// The marked executions (reference, two matches) carry their origin into
+	// the audit log (D9 record).
 	var marked int
 	for _, b := range e.auditBodies() {
 		if strings.HasPrefix(b, "execution_proposed ") && strings.Contains(b, "suggestion") {
 			marked++
 		}
 	}
-	if marked != 2 {
-		t.Fatalf("%d execution_proposed audit entries carry a suggestion origin, want 2", marked)
+	if marked != 3 {
+		t.Fatalf("%d execution_proposed audit entries carry a suggestion origin, want 3", marked)
 	}
 }
 
@@ -961,8 +1012,11 @@ func TestAG24SuggestedOriginNeedsPresenceOnRealExecutor(t *testing.T) {
 // approved by the open session as before.
 //
 // Every built-in action on the suggestion allowlist is declared MEDIUM or
-// higher, so the floor shows as the frozen class and the requirement, not as
-// a LOW→MEDIUM change of a built-in member.
+// higher, so with the production index the floor cannot show as a class
+// change. A second planner over ag24LowIndex proposes a batch of natively
+// LOW members, one matched by the stored note: that member is raised to
+// MEDIUM and the batch needs presence (mutation proof for the D9 floor in
+// batchplan.go).
 func TestAG24BatchMemberMatchedByFixNoteNeedsPresence(t *testing.T) {
 	e := newAG24Env(t, "web01")
 	e.enable(opsconfig.DataClassLab)
@@ -985,21 +1039,30 @@ func TestAG24BatchMemberMatchedByFixNoteNeedsPresence(t *testing.T) {
 	e.h.svc.SetBatchAuthority(ba)
 	e.h.unlock()
 	e.h.openSession()
-	bs, err := executions.NewBatches(executions.BatchOptions{Exec: e.client, DB: e.db, Hosts: e.inv, Log: e.logger,
-		CredentialVersion: func(ctx context.Context, ref string) (uint64, error) {
-			return executorclient.CredentialVersion(ctx, e.client, ref)
-		},
-		Suggestions: ag24Index{notes: e.notes}})
-	if err != nil {
-		t.Fatal(err)
+	planner := func(idx executions.SuggestionIndex) *executions.Batches {
+		t.Helper()
+		bs, err := executions.NewBatches(executions.BatchOptions{Exec: e.client, DB: e.db, Hosts: e.inv, Log: e.logger,
+			CredentialVersion: func(ctx context.Context, ref string) (uint64, error) {
+				return executorclient.CredentialVersion(ctx, e.client, ref)
+			},
+			Suggestions: idx})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return bs
 	}
-	propose := func(ms ...executions.BatchMemberSpec) executions.BatchCreated {
+	bs := planner(ag24Index{notes: e.notes})
+	proposeWith := func(bs *executions.Batches, ms ...executions.BatchMemberSpec) executions.BatchCreated {
 		t.Helper()
 		c, err := bs.ProposeBatch(e.ctx(), "admin", executions.BatchRequest{Stages: []executions.BatchStageSpec{{Gate: canonical.BatchGateManual, Members: ms}}})
 		if err != nil {
 			t.Fatalf("propose batch: %v", err)
 		}
 		return c
+	}
+	propose := func(ms ...executions.BatchMemberSpec) executions.BatchCreated {
+		t.Helper()
+		return proposeWith(bs, ms...)
 	}
 	suggestedIn := func(digest string) string {
 		t.Helper()
@@ -1052,6 +1115,29 @@ func TestAG24BatchMemberMatchedByFixNoteNeedsPresence(t *testing.T) {
 	}
 	if s := e.permitState(t, marked.Digest); s != pb.PermitState_PERMIT_STATE_PENDING {
 		t.Fatalf("executor batch permit state %v, want pending", s)
+	}
+
+	// The D9 floor itself: a batch of natively LOW members only, one of them
+	// matched by the stored note (web01). Without the floor in batchplan.go
+	// every member and the batch stay LOW and the open session approves it.
+	wantNativelyLow(t)
+	lowWeb := executions.BatchMemberSpec{ActionID: ag24LowAction, HostID: ag24HostWeb}
+	lowDB := executions.BatchMemberSpec{ActionID: ag24LowAction, HostID: ag24HostDB}
+	floored := proposeWith(planner(ag24LowIndex{ag24Index{notes: e.notes}}), lowWeb, lowDB)
+	if floored.Risk != "MEDIUM" || floored.Requirement != "assertion_presence" || floored.State != "pending" {
+		t.Fatalf("LOW batch with a matched member = %+v, want MEDIUM, assertion_presence, pending", floored)
+	}
+	if got := suggestedIn(floored.Digest); got != "1" {
+		t.Fatalf("LOW batch with one matched member: %s suggested members, want 1 (web01 only)", got)
+	}
+	if r := memberRisk(floored.ID, ag24HostWeb, ag24LowAction); r != "MEDIUM" {
+		t.Fatalf("matched LOW member frozen at %s, want MEDIUM", r)
+	}
+	if r := memberRisk(floored.ID, ag24HostDB, ag24LowAction); r != "LOW" {
+		t.Fatalf("unmatched LOW member frozen at %s, want LOW", r)
+	}
+	if s := e.permitState(t, floored.Digest); s != pb.PermitState_PERMIT_STATE_PENDING {
+		t.Fatalf("executor permit state of the floored batch %v, want pending", s)
 	}
 
 	// Control: a LOW batch with no matched member is approved by the open

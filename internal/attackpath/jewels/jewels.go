@@ -117,26 +117,24 @@ var markableKinds = []attackpath.NodeKind{
 	attackpath.NodeContainer, attackpath.NodeNetworkDevice,
 }
 
-// NodeKind returns the kind of a markable node ID, or ErrInvalidNode for an
-// entry, an unmanaged endpoint or an ID that is not valid UTF-8, has
-// control or space characters, is longer than attackpath.MaxIDBytes or has
-// no markable prefix followed by at least one character.
+// NodeKind returns the kind of a markable node ID, or ErrInvalidNode. An ID
+// is markable exactly when the attack-path Builder accepts it as a node of
+// a markable kind, so a crown jewel can never name an ID the search refuses.
+// Entries and unmanaged endpoints are not markable.
 func NodeKind(id string) (attackpath.NodeKind, error) {
-	if id == "" || len(id) > attackpath.MaxIDBytes || !utf8.ValidString(id) {
-		return 0, fmt.Errorf("node id: %w", ErrInvalidNode)
-	}
-	for _, r := range id {
-		if unicode.IsControl(r) || unicode.IsSpace(r) {
-			return 0, fmt.Errorf("node id: %w", ErrInvalidNode)
-		}
-	}
 	for _, k := range markableKinds {
-		p := k.IDPrefix()
-		if strings.HasPrefix(id, p) && len(id) > len(p) {
+		if strings.HasPrefix(id, k.IDPrefix()) && builderAccepts(id, k) == nil {
 			return k, nil
 		}
 	}
-	return 0, fmt.Errorf("node id kind: %w", ErrInvalidNode)
+	return 0, fmt.Errorf("node id: %w", ErrInvalidNode)
+}
+
+// builderAccepts reports the Builder's verdict on id as a node of kind k.
+// The ID rule (prefix, length, characters) is the Builder's own and is not
+// copied here.
+func builderAccepts(id string, k attackpath.NodeKind) error {
+	return attackpath.NewBuilder().AddNode(attackpath.Node{ID: id, Kind: k})
 }
 
 // checkText validates a bounded admin text; empty is allowed when optional.

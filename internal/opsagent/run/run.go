@@ -201,7 +201,7 @@ func validateItem(class string, it nosclient.WorkItem) error {
 	if it.Ref == "" || len(it.Ref) > MaxItemRefs || !printableASCII(it.Ref) {
 		return errors.New("item ref")
 	}
-	if !isDigest(it.Digest) {
+	if !isDigest(it.Kind, it.Digest) {
 		return errors.New("item digest")
 	}
 	if it.Kind != "question" && it.Question != nil {
@@ -264,13 +264,22 @@ func validateQuestion(class string, it nosclient.WorkItem) error {
 
 // digestPrefix is the prefix of a fix group digest as the server writes it
 // (opsfacts.Digest: "sha256:<64 hex>"). Summary and question digests are
-// sent as 64 bare hex (fleet summary, opsnotes.QuestionDigest).
+// sent as 64 bare hex (internal/web/api fleetDigest, opsnotes.QuestionDigest).
 const digestPrefix = "sha256:"
 
-// isDigest accepts exactly "sha256:" followed by 64 lowercase hex, or 64
-// lowercase hex alone. No other prefix or case is accepted.
-func isDigest(s string) bool {
-	s = strings.TrimPrefix(s, digestPrefix)
+// isDigest accepts the digest forms of an item kind: for a fix item
+// "sha256:" followed by 64 lowercase hex (the server's form) or 64 lowercase
+// hex alone; for a summary or question item only 64 lowercase hex alone,
+// the one form the server writes there. Any other kind, prefix or case is
+// refused.
+func isDigest(kind, s string) bool {
+	switch kind {
+	case "fix":
+		s = strings.TrimPrefix(s, digestPrefix)
+	case "summary", "question":
+	default:
+		return false
+	}
 	if len(s) != 64 {
 		return false
 	}

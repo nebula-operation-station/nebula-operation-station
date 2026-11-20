@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/attackpath"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnprio"
@@ -116,21 +114,14 @@ func entryState(c EntryClass, node, label string, src *Exposure, reason string) 
 var exposableKinds = append([]attackpath.NodeKind{attackpath.NodeUnmanaged}, markableKinds...)
 
 // validExposed checks an exposed node ID like NodeKind, but also accepts
-// unmanaged endpoints.
+// unmanaged endpoints. The Builder decides, as in NodeKind.
 func validExposed(id string) error {
-	if id == "" || len(id) > attackpath.MaxIDBytes || !utf8.ValidString(id) {
-		return fmt.Errorf("exposed node: %w", ErrInvalidNode)
-	}
-	if strings.IndexFunc(id, func(r rune) bool { return unicode.IsControl(r) || unicode.IsSpace(r) }) >= 0 {
-		return fmt.Errorf("exposed node: %w", ErrInvalidNode)
-	}
 	for _, k := range exposableKinds {
-		p := k.IDPrefix()
-		if strings.HasPrefix(id, p) && len(id) > len(p) {
+		if strings.HasPrefix(id, k.IDPrefix()) && builderAccepts(id, k) == nil {
 			return nil
 		}
 	}
-	return fmt.Errorf("exposed node kind: %w", ErrInvalidNode)
+	return fmt.Errorf("exposed node: %w", ErrInvalidNode)
 }
 
 // exposes reports whether s lists node.
