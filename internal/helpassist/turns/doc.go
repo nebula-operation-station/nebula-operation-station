@@ -8,7 +8,8 @@
 //
 //   - at most MaxTurns turns per session; the oldest turn is dropped first;
 //   - a turn expires MaxAge after it was appended and is never returned after
-//     that; expired turns are removed on the next access;
+//     that; every Append and History removes expired turns of all sessions, and
+//     Run (started by the owner with SweepEvery) does so while nobody calls;
 //   - Clear ends one session, ClearUser ends every session of one user (logout);
 //   - nothing is written to disk or to the database; a restart empties the store;
 //   - a turn holds the question and the rendered answer as text only. Facts sent

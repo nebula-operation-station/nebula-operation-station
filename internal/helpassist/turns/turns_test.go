@@ -4,6 +4,7 @@ package turns
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -340,6 +341,75 @@ func mustAppend(t *testing.T, s *Store, session string, tn Turn) {
 	if err := s.Append(session, tn); err != nil {
 		t.Fatalf("append %q: %v", session, err)
 	}
+}
+
+func TestIdleSessionTextGoneAfterMaxAgeWithoutAccess(t *testing.T) {
+	s, c := newClockStore(t)
+	mustAppend(t, s, "idle", turn("alice", "idle secret"))
+	c.Advance(MaxAge)
+	s.Sweep()
+	if textHeld(s, "idle secret") {
+		t.Fatalf("idle session text still held after MaxAge without access")
+	}
+}
+
+func TestAppendForOtherSessionSweepsIdleSession(t *testing.T) {
+	s, c := newClockStore(t)
+	mustAppend(t, s, "idle", turn("alice", "idle secret"))
+	c.Advance(MaxAge)
+	mustAppend(t, s, "other", turn("bob", "bob question"))
+	if textHeld(s, "idle secret") {
+		t.Fatalf("expired idle session still held after an append to another session")
+	}
+	if got := questions(s.History("other")); len(got) != 1 || got[0] != "bob question" {
+		t.Fatalf("other session = %v, want [bob question]", got)
+	}
+}
+
+func TestSweepKeepsLiveTurnsOfIdleSessions(t *testing.T) {
+	s, c := newClockStore(t)
+	mustAppend(t, s, "old", turn("alice", "old"))
+	c.Advance(20 * time.Minute)
+	mustAppend(t, s, "new", turn("bob", "new"))
+	c.Advance(MaxAge - 20*time.Minute)
+	s.Sweep()
+	if textHeld(s, "old") {
+		t.Fatalf("expired turn still held after Sweep")
+	}
+	if got := questions(s.History("new")); len(got) != 1 {
+		t.Fatalf("live turn removed by Sweep: %v", got)
+	}
+}
+
+func TestRunRejectsNonPositiveInterval(t *testing.T) {
+	s, _ := newClockStore(t)
+	if err := s.Run(context.Background(), 0); !errors.Is(err, ErrBadInterval) {
+		t.Fatalf("Run(0) err = %v, want ErrBadInterval", err)
+	}
+}
+
+func TestRunStopsWhenContextIsDone(t *testing.T) {
+	s, _ := newClockStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := s.Run(ctx, time.Millisecond); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run after cancel err = %v, want context.Canceled", err)
+	}
+}
+
+// textHeld reports whether any stored turn still holds text, questions or
+// answers, that contains marker. It inspects the store directly.
+func textHeld(s *Store, marker string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, sess := range s.sessions {
+		for _, e := range sess.turns {
+			if strings.Contains(e.turn.Question, marker) || strings.Contains(e.turn.Answer, marker) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func TestNonUTF8QuestionAndAnswerRejected(t *testing.T) {

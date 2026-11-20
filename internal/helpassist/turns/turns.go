@@ -3,6 +3,7 @@
 package turns
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -27,10 +28,18 @@ const MaxAnswerBytes = 8 * 1024
 // MaxKeyBytes is the largest session key or user name, in bytes.
 const MaxKeyBytes = 128
 
-// MaxSessions is the number of sessions held at the same time. When it is
-// reached, expired sessions are removed first; if none is expired the new
-// session is refused.
+// MaxSessions is the number of sessions held at the same time. Expired sessions
+// are removed before the limit is checked; if none is expired the new session
+// is refused.
 const MaxSessions = 1024
+
+// SweepEvery is the interval the owner of a Store should pass to Run. Every
+// Append and History also sweeps, so the interval only bounds how long the
+// text of an idle session stays in memory after MaxAge.
+const SweepEvery = time.Minute
+
+// ErrBadInterval reports a non-positive sweep interval passed to Run.
+var ErrBadInterval = errors.New("turns: sweep interval must be positive")
 
 // ErrEmptyKey reports a turn whose session key or user name is empty.
 var ErrEmptyKey = errors.New("turns: empty session or user key")
@@ -121,15 +130,12 @@ func (s *Store) Append(session string, t Turn) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now()
-	s.purgeLocked(session, now)
+	s.sweepLocked(now)
 	sess, ok := s.sessions[session]
 	if ok && sess.owner != t.User {
 		return fmt.Errorf("append turn: %w", ErrSessionOwner)
 	}
 	if !ok {
-		if len(s.sessions) >= MaxSessions {
-			s.sweepLocked(now)
-		}
 		if len(s.sessions) >= MaxSessions {
 			return fmt.Errorf("append turn: %w", ErrTooManySessions)
 		}
@@ -149,7 +155,7 @@ func (s *Store) Append(session string, t Turn) error {
 func (s *Store) History(session string) []Turn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.purgeLocked(session, s.now())
+	s.sweepLocked(s.now())
 	sess, ok := s.sessions[session]
 	if !ok || len(sess.turns) == 0 {
 		return nil
@@ -159,6 +165,34 @@ func (s *Store) History(session string) []Turn {
 		out = append(out, e.turn)
 	}
 	return out
+}
+
+// Sweep removes every expired turn of every session, including sessions that
+// nobody accesses again. It is safe to call at any time.
+func (s *Store) Sweep() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sweepLocked(s.now())
+}
+
+// Run calls Sweep every interval until ctx is done, then returns ctx.Err(). The
+// owner of the Store starts Run in its own goroutine (with interval SweepEvery)
+// so that idle sessions expire without any request. It returns ErrBadInterval
+// wrapped when interval is not positive.
+func (s *Store) Run(ctx context.Context, interval time.Duration) error {
+	if interval <= 0 {
+		return fmt.Errorf("run sweeper: %w", ErrBadInterval)
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			s.Sweep()
+		}
+	}
 }
 
 // Clear removes session and all its turns. Other sessions are not affected.
@@ -200,20 +234,9 @@ func validate(session string, t Turn) error {
 	return nil
 }
 
-// purgeLocked drops the expired turns of session and removes the session when
-// none is left. The caller holds s.mu.
-func (s *Store) purgeLocked(key string, now time.Time) {
-	sess, ok := s.sessions[key]
-	if !ok {
-		return
-	}
-	sess.turns = live(sess.turns, now)
-	if len(sess.turns) == 0 {
-		delete(s.sessions, key)
-	}
-}
-
-// sweepLocked purges every session. The caller holds s.mu.
+// sweepLocked purges the expired turns of every session and removes the
+// sessions left empty. It is bounded by MaxSessions times MaxTurns. The caller
+// holds s.mu.
 func (s *Store) sweepLocked(now time.Time) {
 	for key, sess := range s.sessions {
 		sess.turns = live(sess.turns, now)
