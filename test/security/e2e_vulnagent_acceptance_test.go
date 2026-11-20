@@ -587,7 +587,7 @@ func TestE2E01VulnAgentOverRealHTTP(t *testing.T) {
 	if !ran {
 		t.Fatal("the agent run failed; nothing to read back")
 	}
-	t.Run("StoredRunReadBack",func(t *testing.T) { e2e01ReadBack(t, e.with(t)) })
+	t.Run("StoredRunReadBack", func(t *testing.T) { e2e01ReadBack(t, e.with(t)) })
 }
 
 // Every call of one agent run goes through the server's real HTTP chain
