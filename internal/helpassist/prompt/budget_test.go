@@ -5,14 +5,15 @@ package prompt
 import (
 	"errors"
 	"testing"
-
-	"github.com/nebula-operation-station/nebula-operation-station/internal/helpfacts"
 )
 
 // TestConstantsMatchADR pins the limits to the values of ADR 0014 D2 and D5.
 func TestConstantsMatchADR(t *testing.T) {
-	if MaxPromptTokens != 12000 {
-		t.Errorf("MaxPromptTokens = %d, want 12000", MaxPromptTokens)
+	if MaxPromptTokens != 16000 {
+		t.Errorf("MaxPromptTokens = %d, want 16000", MaxPromptTokens)
+	}
+	if MaxFactsBlockBytes != 12<<10 {
+		t.Errorf("MaxFactsBlockBytes = %d, want 12 KiB", MaxFactsBlockBytes)
 	}
 	if MaxOutputTokens != 1500 {
 		t.Errorf("MaxOutputTokens = %d, want 1500", MaxOutputTokens)
@@ -47,14 +48,15 @@ func TestCheckFitPassesForConstants(t *testing.T) {
 // worst case is refused, with the constants otherwise unchanged.
 func TestCheckFitFailsForSmallBudget(t *testing.T) {
 	tests := map[string]struct {
-		maxTokens, docBytes int
+		maxTokens, docBytes, factsBytes int
 	}{
-		"token limit below the worst case": {maxTokens: 100, docBytes: MaxContextDocBytes},
-		"docs doubled":                     {maxTokens: MaxPromptTokens, docBytes: 2 * MaxContextDocBytes},
+		"token limit below the worst case": {maxTokens: 100, docBytes: MaxContextDocBytes, factsBytes: MaxFactsBlockBytes},
+		"docs doubled":                     {maxTokens: MaxPromptTokens, docBytes: 2 * MaxContextDocBytes, factsBytes: MaxFactsBlockBytes},
+		"facts cap doubled":                {maxTokens: MaxPromptTokens, docBytes: MaxContextDocBytes, factsBytes: 2 * MaxFactsBlockBytes},
 	}
 	for name, tt := range tests {
 		t.Run(name, func(t *testing.T) {
-			err := checkFit(SystemPrompt, tt.maxTokens, tt.docBytes, helpfacts.MaxFactBytes, MaxQuestionBytes)
+			err := checkFit(SystemPrompt, tt.maxTokens, tt.docBytes, MaxQuestionBytes, tt.factsBytes)
 			if !errors.Is(err, ErrTooLarge) {
 				t.Fatalf("checkFit error = %v, want ErrTooLarge", err)
 			}

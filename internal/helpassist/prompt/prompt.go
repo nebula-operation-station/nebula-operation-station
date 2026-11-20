@@ -17,7 +17,8 @@ import (
 // Sentinel errors. Callers branch on them with errors.Is.
 var (
 	// ErrTooLarge is returned when a prompt, or a configuration, does
-	// not fit MaxPromptTokens. Build never shortens a prompt silently.
+	// not fit MaxPromptTokens, or when the facts block exceeds
+	// MaxFactsBlockBytes. Build never shortens a prompt silently.
 	ErrTooLarge = errors.New("prompt: exceeds the token budget")
 	// ErrInvalidQuestion is returned for an empty, non-UTF-8 or
 	// over-long question.
@@ -107,6 +108,9 @@ func Build(in Input) (Prompt, error) {
 	var facts string
 	if in.Facts != nil {
 		if facts, err = encodeFacts(in.Facts); err != nil {
+			return Prompt{}, err
+		}
+		if err := checkFactsBlock(facts); err != nil {
 			return Prompt{}, err
 		}
 	}
@@ -212,6 +216,15 @@ func encodeFacts(f *helpfacts.Result) (string, error) {
 		return "", fmt.Errorf("facts contain markup characters: %w", ErrInvalidFacts)
 	}
 	return string(b), nil
+}
+
+// checkFactsBlock reports ErrTooLarge when the facts block body, as it
+// is sent, exceeds MaxFactsBlockBytes.
+func checkFactsBlock(facts string) error {
+	if len(facts) > MaxFactsBlockBytes {
+		return fmt.Errorf("facts block is %d bytes, limit %d: %w", len(facts), MaxFactsBlockBytes, ErrTooLarge)
+	}
+	return nil
 }
 
 // checkTotal reports ErrTooLarge when the estimated size of p exceeds

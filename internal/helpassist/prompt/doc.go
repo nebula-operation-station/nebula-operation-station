@@ -48,8 +48,9 @@ package prompt
 // D2 and D5 and are pinned by TestConstantsMatchADR.
 const (
 	// MaxPromptTokens is the estimated token limit of system prompt and
-	// user message together (ADR 0014 D5).
-	MaxPromptTokens = 12000
+	// user message together (ADR 0014 D5). At bytesPerToken it is a
+	// budget of 48000 bytes.
+	MaxPromptTokens = 16000
 	// MaxOutputTokens is the output limit requested from the model. It
 	// is not part of the prompt budget.
 	MaxOutputTokens = 1500
@@ -64,4 +65,9 @@ const (
 	// FramingBytes is the allowance for the language line, the block
 	// markers and the blank lines around them, for CheckFit.
 	FramingBytes = 1 << 10
+	// MaxFactsBlockBytes is the byte limit of the body of the <facts>
+	// block as sent: the encoded, escaped facts (ADR 0014 D5). Build
+	// refuses a larger block with ErrTooLarge and never cuts it; CheckFit
+	// reserves it in full.
+	MaxFactsBlockBytes = 12 << 10
 )
