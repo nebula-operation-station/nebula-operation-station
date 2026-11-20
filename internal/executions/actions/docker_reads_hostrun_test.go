@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/dockerhost"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
@@ -94,12 +95,24 @@ func dockerID(i int) string { return fmt.Sprintf("%064x", i+1) }
 // names, image, state, status, ports, Compose project, service, working
 // directory, creation time.
 func dockerPSLine(i int, project string) string {
-	return strings.Join([]string{
+	return dockerPSRow(i, project, "/srv/stack")
+}
+
+// dockerPSRow is dockerPSLine with the working directory (column 9) given.
+func dockerPSRow(i int, project, dir string) string {
+	return strings.Join(dockerPSFields(i, project, dir), "\t")
+}
+
+func dockerPSFields(i int, project, dir string) []string {
+	return []string{
 		dockerID(i), fmt.Sprintf("svc-%03d", i), "registry.example/app:1.27", "running",
 		"Up 2 hours (healthy)", fmt.Sprintf("0.0.0.0:%d->80/tcp", 8000+i),
-		project, fmt.Sprintf("svc-%03d", i), "/srv/stack", "2026-01-02 03:04:05 +0000 UTC",
-	}, "\t")
+		project, fmt.Sprintf("svc-%03d", i), dir, "2026-01-02 03:04:05 +0000 UTC",
+	}
 }
+
+// dockerListCut is the byte offset the script's head -c cuts at.
+const dockerListCut = 524288
 
 func projectFor(i int) string {
 	switch {
@@ -165,6 +178,95 @@ func TestDockerListThroughHostrunOversizedLabelStaysBounded(t *testing.T) {
 	}
 	if len(l.Containers) != n-1 {
 		t.Fatalf("%d containers, want the %d before the oversized row", len(l.Containers), n-1)
+	}
+}
+
+// The byte cut must not split a multi-byte UTF-8 character: a 2 MiB Compose
+// label of "ü" is cut in the middle of a character, and the parser would
+// refuse the whole payload. The script drops the cut row, so the 299 rows
+// before it stay readable and the payload is valid UTF-8.
+func TestDockerListThroughHostrunCutInsideMultiByteLabelDropsOnlyThatRow(t *testing.T) {
+	const n = 300
+	f := newFakeHost(t, "1")
+	installDockerFake(t, f)
+	var b strings.Builder
+	for i := 0; i < n-1; i++ {
+		b.WriteString(dockerPSLine(i, projectFor(i)) + "\n")
+	}
+	// The one ASCII byte before the 2 MiB of 2-byte characters moves the
+	// characters to an odd offset, so the cut lands on a continuation byte.
+	label := "L" + strings.Repeat("ü", 1<<20)
+	row := dockerPSRow(n-1, label, "/srv/stack")
+	labelAt := b.Len() + strings.Index(row, "ü")
+	if (dockerListCut-labelAt)%2 == 0 {
+		t.Fatalf("fixture does not split a character: cut at label byte %d", dockerListCut-labelAt)
+	}
+	b.WriteString(row + "\n")
+	writeDockerFixture(t, f, "ps", []byte(b.String()))
+	r := runDockerRead(t, "docker.list", f.bin+":/usr/bin:/bin", `{}`)
+	requireOneBoundedResult(t, r)
+	l, err := dockerhost.ParseList(r.Result)
+	if err != nil {
+		t.Fatalf("one oversized non-ASCII label must not empty the list: %v", err)
+	}
+	if len(l.Containers) != n-1 {
+		t.Fatalf("%d containers, want the %d before the cut row", len(l.Containers), n-1)
+	}
+	for _, c := range l.Containers {
+		if c.Name == fmt.Sprintf("svc-%03d", n-1) {
+			t.Fatalf("the cut row svc-%03d is in the list", n-1)
+		}
+	}
+}
+
+// When the cut falls inside the working directory (column 9) or the creation
+// time (column 10) of the last row, that row is left out whole. Otherwise
+// the parser would accept a 9-field row with a truncated directory, or a
+// 10-field row with a truncated creation time.
+func TestDockerListThroughHostrunCutInLastColumnsDropsTheRow(t *testing.T) {
+	const n = 300
+	cases := []struct {
+		name string
+		// dirLen returns the working-directory length for a cut at offset
+		// k bytes into that column.
+		dirLen func(k int) int
+	}{
+		{"cut in column 9", func(k int) int { return k + 100 }},
+		{"cut in column 10", func(k int) int { return k - 3 }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeHost(t, "1")
+			installDockerFake(t, f)
+			var b strings.Builder
+			for i := 0; i < n-1; i++ {
+				b.WriteString(dockerPSLine(i, projectFor(i)) + "\n")
+			}
+			// Offset of the working directory in the stream: all earlier rows
+			// plus the first eight columns and their tabs.
+			head := strings.Join(dockerPSFields(n-1, "", "")[:8], "\t") + "\t"
+			k := dockerListCut - (b.Len() + len(head))
+			dir := "/" + strings.Repeat("d", tc.dirLen(k)-1)
+			b.WriteString(dockerPSRow(n-1, "stack-01", dir) + "\n")
+			writeDockerFixture(t, f, "ps", []byte(b.String()))
+			r := runDockerRead(t, "docker.list", f.bin+":/usr/bin:/bin", `{}`)
+			requireOneBoundedResult(t, r)
+			l, err := dockerhost.ParseList(r.Result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(l.Containers) != n-1 {
+				t.Fatalf("%d containers, want the %d before the cut row", len(l.Containers), n-1)
+			}
+			for _, c := range l.Containers {
+				if c.Name == fmt.Sprintf("svc-%03d", n-1) {
+					t.Fatalf("the cut row is in the list with dir %q, created %v", c.Dir, c.Created)
+				}
+				if c.Dir != "/srv/stack" && c.Dir != "" {
+					t.Fatalf("container %s has a truncated dir %q", c.Name, c.Dir)
+				}
+			}
+		})
 	}
 }
 
@@ -248,17 +350,24 @@ func TestDockerLogsThroughHostrunHostileOutput(t *testing.T) {
 	writeDockerFixture(t, f, "ps", nil)
 	r := runDockerRead(t, "docker.logs", f.bin+":/usr/bin:/bin", `{"container":"web-1"}`)
 	requireOneBoundedResult(t, r)
-	for _, c := range r.Result {
-		if c < 0x20 && c != '\n' || c == 0x7f {
-			t.Fatalf("result has raw control byte %#x", c)
-		}
-	}
 	l, err := dockerhost.ParseLogs(r.Result)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if l.Phase != "done" || l.Container != "web-1" || l.State != "running" {
 		t.Fatalf("phase=%s container=%q state=%q", l.Phase, l.Container, l.State)
+	}
+	// The parsed lines are what the UI shows: no control byte (ESC, NUL, BEL,
+	// DEL and the rest) and no invalid UTF-8 may survive the parser.
+	for i, line := range l.Lines {
+		if !utf8.ValidString(line) {
+			t.Fatalf("line %d is not valid UTF-8: %q", i, line)
+		}
+		for _, c := range line {
+			if c < 0x20 && c != '\t' || c == 0x7f || (c >= 0x80 && c <= 0x9f) {
+				t.Fatalf("line %d has control rune %#x: %.80q", i, c, line)
+			}
+		}
 	}
 	if len(l.Lines) != 100 || !strings.Contains(l.Lines[99], "line 099") || !strings.Contains(l.Lines[0], "line 000") {
 		t.Fatalf("%d lines; first %.60q, last %.60q", len(l.Lines), l.Lines[0], l.Lines[len(l.Lines)-1])
