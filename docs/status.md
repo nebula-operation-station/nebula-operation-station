@@ -1,6 +1,6 @@
 # Project status
 
-Last updated 2026-11-19 (evening)
+Last updated 2026-11-20 (evening)
 
 This page is the short, frequently updated view of where Nebula Operation Station stands. The
 [README roadmap](../README.md#roadmap) gives the area overview; the ADRs in [docs/adr](adr/) hold
@@ -12,42 +12,39 @@ the decisions, and [docs/implementation](implementation/) the per-area plans.
 | --- | --- | --- |
 | Release 0.9 (milestones 0–10) | – | code complete; release draft v0.9.0-beta.1 prepared on 2026-11-04, not yet published; running in the reference lab since then, formal integration run on clean VMs pending |
 | Proxmox VE phase 1 / phase 2 | [0006](adr/0006-proxmox-integration.md) | phase 1 and phase 2 actions merged; **amendment 2026-11-19: registry metadata may follow at most two same-host redirects for anonymous requests** (#717); registry metadata limits pinned (#698); pveapi/pvecollect package comments match the code (#714, #721); spool retry state and SSH telemetry mapping tested (#730, #729) |
-| Approval ergonomics | [0007](adr/0007-approval-ergonomics.md) | merged; amendment 2026-11-17 (reject pending proposals): spec and executor `RejectPending` RPC merged (#665, #670, #682), UI (#687) and CLI (op04b) open |
+| Approval ergonomics | [0007](adr/0007-approval-ergonomics.md) | merged; amendment 2026-11-17 (reject pending proposals) complete: spec, executor `RejectPending` RPC, UI (#687) and CLI `nebula reject` (#755), follow-ups (#753) |
 | Guest provisioning | [0008](adr/0008-guest-provisioning.md) | merged; `packlock` testable with its exit codes covered (#715, PV-07) |
 | Traffic map | [0009](adr/0009-traffic-map.md) | proposed; libraries, store and renderer merged; `HostNet.Hop` fuzzed (#711) |
 | Network devices | [0010](adr/0010-network-devices.md) | accepted; `NormalizePANOSConfig` fuzzed against its bounds (#709, #719) |
-| Vulnerability management | [0011](adr/0011-vulnerability-management.md) | accepted; export conformance table checked (#716); vuln agent snapshot view and batch packer limits tested – the packer now counts HTML-escaped bytes (#725, #724); attack-path heap checked against a sorted reference (#731) |
+| Vulnerability management | [0011](adr/0011-vulnerability-management.md) | accepted; **first live run on 2026-11-20** found four integration bugs, all fixed the same day: token API refused by the browser origin check (#744), Debian feeds without a content date (#743), OSV Ubuntu over the download cap (#746), `package.list_installed` output not one JSON document (#752). The run also showed that **the server does not store package inventories yet** (the export is always empty) – chain iv01–iv10 closes that gap, decision paper merged (#764, #765), lease interval floor (#767). End-to-end tests over real HTTP (#763) and on a lab VM (#757) |
 | Network security advisor | [0012](adr/0012-network-security-advisor.md) | accepted; pure libraries merged |
 | One-step enrollment | [0013](adr/0013-one-step-enrollment.md) | accepted; renderer and download limits tested; dialog not yet wired in nebula-server (#604) |
-| Help assistant | [0014](adr/0014-help-assistant.md) | accepted; status table re-checked for AS-03 and AS-05 (#728); assistant service AS-09 (ud01–ud05) and the AS-05 shape builder (ud06) started |
+| Help assistant | [0014](adr/0014-help-assistant.md) | accepted; AS-09 parts 1–5 merged (decoder #737, secret guard #736, limits #738, prompt assembly with a 16,000-token budget #739/#754, follow-up turns #745); shape builder (#740, #750) |
 | Integrity monitoring | [0015](adr/0015-integrity-monitoring.md) | accepted; libraries merged |
-| Ops agent | [0016](adr/0016-ops-agent.md) | accepted 2026-11-17; **implementation 24/27 tickets merged** – today: admin questions answered with one LLM call (#708, #718), settings page (#659), notifications list and inbox follow-ups (#679, #726), digest holds and server wiring of the notifications page (#723), prefill origin (#695), browser tests (#722), operator docs (#703, #720) |
+| Ops agent | [0016](adr/0016-ops-agent.md) | accepted 2026-11-17; **implementation chain complete (27/27)** – today: suggestion event and trigger file (#713, #741), `settings_changed` reason budget (#732), security acceptance tests with a real bug fix: the agent rejected every fix item because of a `sha256:` digest prefix (#742, #756) |
 
-### Landed since the last update (31 PRs, 2026-11-18 19:00 to 2026-11-19 19:00)
+### Landed since the last update (31 PRs, 2026-11-19 19:00 to 2026-11-20 19:00)
 
-- **Ops agent (ADR 0016):** settings with fresh assertion, audit and `settings_changed` event
-  (#659, AG-19); notifications list from the notification log (#679, AG-06) and inbox follow-ups
-  for a hanging executor (#726); prefilled forms carry a server-checked origin (#695, AG-18);
-  admin questions answered with one LLM call (#708, AG-23) and the question work-item contract
-  (#718); lease watch follow-ups (#707); digest holds recorded and the notifications page wired in
-  the server (#723); browser tests for the Ops tab (#722, AG-25); operator documentation
-  (#703, #720, AG-26).
-- **Proxmox VE (ADR 0006):** registry redirect decision resolved by an ADR amendment (#717);
-  registry metadata limits (#698); package comments (#714, #721); pvecollect spool retry and SSH
-  telemetry fuzz (#730, #729).
-- **Vulnerability management (ADR 0011, uc wave 7/8):** export conformance table (#716), snapshot
-  view (#725), batch packer at the D5 limits with an HTML-escaping fix (#724), attack-path heap
-  (#731).
-- **Tests and fuzzing:** PAN-OS config (#709, #719), `HostNet.Hop` (#711), container definition
-  and registry client (#710), icon resampler (#712), `packlock` (#715), backup restore follow-ups
-  (#706).
-- **Docs:** fuzz inventory and developer guide (#727), getting-started notifications (#733), help
-  assistant status table (#728).
+- **Vulnerability management, live fixes:** origin check no longer blocks the token API (#744);
+  Debian tracker, DSA and DLA content dates (#743); OSV Ubuntu download cap (#746);
+  `package.list_installed` 1.1.0 returns one JSON document (#752); SQLITE_BUSY flake (#751).
+- **Vulnerability inventory (new chain iv):** decision paper (#764, #765); the lease runner honours
+  an action's own interval floor (#767). Storage, export and classifier follow (iv02–iv10).
+- **End-to-end and integration tests:** vuln agent over real HTTP (#763); `package.list_installed`
+  on a lab VM (#757); every read action through the real hostrun classifier (#758, #759, #761) –
+  these found real parser bugs (service journal with one invalid UTF-8 line, Docker list cut
+  inside a UTF-8 sequence), fixes in progress.
+- **Ops agent (ADR 0016):** chain complete (#713, #741, #732, #742, #756).
+- **Reject pending proposals:** UI (#687), CLI (#755), follow-ups (#753).
+- **Help assistant (ADR 0014):** AS-09 parts 1–5 and the shape builder (#736–#740, #745, #750,
+  #754).
+- **Attack paths:** fuzzing of the CVSS v3 parser and of node rules (#747, #748); vuln agent test
+  memory (#734).
 
 ### Landed in the last 7 days
 
 Merged per day: 54 (11-12), 31 (11-13), 25 (11-16), 46 (11-17), about 45 (11-18), about 30
-(11-19). Main themes: vulnerability agent and attack paths (ADR 0011); one-step enrollment
+(11-19), 31 (11-20). Main themes: vulnerability agent and attack paths (ADR 0011); one-step enrollment
 (ADR 0013); help assistant (ADR 0014); integrity monitoring (ADR 0015); a large fuzz and
 limit-test wave; ops agent (ADR 0016) accepted and nearly all of its implementation chain merged.
 
@@ -55,42 +52,37 @@ limit-test wave; ops agent (ADR 0016) accepted and nearly all of its implementat
 
 | Chain | Topic | Progress | Running now |
 | --- | --- | --- | --- |
-| ag | Ops agent (ADR 0016) | 24/27 | ag20f (#713, suggestion event and agent trigger file); queued: ag27 (trigger file in the server state directory), ag24 (security acceptance), ag19hf2 (#732, `settings_changed` reason budget, last round) |
-| op | Reject pending proposals / abort rollouts | 3/4 | op04f (#687, UI) and op04b (CLI) queued behind ag20f |
-| uc | Vulnerability agent and attack-path tests | 7/8 | uc08f (#734, vulnagent run test under 1 GiB memory) |
-| ud | Help assistant service (AS-09), shape builder, fuzz | 0/9 | ud01 (strict answer decoder), ud02 (secret-pattern refusal); queued ud03–ud09 |
-| ua, ty, ep, tw | Limit and fuzz waves, endpoints | done | – |
+| iv | Package inventory for vulnerability management | 4/11 | iv02f (inventory store, review round), queued iv03–iv10 |
+| vf | Feed fixes from the live run | 3/4 | vf03f (OSV Ubuntu content date without unpacking more than 4 GiB) |
+| ue | Read actions through the real hostrun classifier | 3/9 | ue03f2, ue06f2 (fix rounds), queued ue05, ue07–ue09, ue02h |
+| e2e | End-to-end tests | 2/3 | e2e02 (ops agent over real HTTP) |
+| ud | Help assistant (AS-09, shape builder, fuzz) | most merged | ud09f, ud04h follow-ups |
 
 ## Next
 
-- **ag chain:** ag20f → ag27 → ag24 (security acceptance, needs ag16, ag18, ag20); ag19hf2 after
-  ag20f releases `cmd/nebula-server/`.
-- **op04:** UI (#687) and CLI `nebula reject` (op04b) after ag20f; op04f is large for one run and
-  may need to be split.
-- **ud chain:** AS-09 parts 1–5 (decoder, secret guard, limits, prompt assembly, follow-up
-  turns), then the AS-05 shape builder (ud06) and fuzz tickets ud07–ud09.
-- **Dependabot:** #647 (buf-action 1.7.0), #648 (upload-artifact v7) wait for review.
-- **Release 0.9 Beta:** publish the draft (or cut beta.2 from current main) after the integration
-  run on clean VMs.
+- **iv chain:** store (iv02) → hook after `package.list_installed` (iv03) → immutable snapshots
+  (iv04) → real export (iv05) → classifier (iv06) → maximum read age (iv08) → host tab (iv09) →
+  end-to-end test from script output to a finding (iv10).
+- **Lab:** the reference lab runs 4a1acc10 with the vuln agent installed (timer still off until a
+  run produces real findings); a throwaway lab VM is now used for integration runs before every
+  lab upgrade.
+- **Release 0.9 Beta:** cut beta.2 after the iv chain and the open feed fix.
 
 ## Blocked / needs maintainer
 
-- **CI runner:** a test job hung for more than 70 minutes on the self-hosted runner on 2026-11-19
-  and could not be cancelled; one runner instance was offline and the runner disk was reported
-  low. Please check the CI runner host.
-- **Protected PRs:** none open at the moment (#713, #687, #732, #734 touch no protected paths).
-- **Read-lease refusal reason (#655):** the response names only the level; the risk-policy class
-  stays in the audit log (m0 item 20). Showing the class to the admin would need a spec change –
-  open question.
-- **ADR 0009 (traffic map):** still "proposed", awaiting the maintainer's decision on the open
-  questions, although large parts are merged.
-- **One-step enrollment:** dialog is documented as not wired in nebula-server (#604); decide whether
-  wiring is a ticket for 0.9 or later.
-- **README roadmap row "Handbook, FAQ and in-app help: planned"** looks stale (handbook and admin
-  guide are embedded in the help assistant since #686); please confirm the wording.
+- **Vulnerability inventory decisions (iv01):** retention (E1), maximum read age 24 h (E2),
+  missing inventory held instead of closed (E3), no image inventory yet (E4), default read-lease
+  interval 6 h – recommendations in `docs/implementation/vuln-inventory-decisions.md`, waiting for
+  the maintainer.
+- **ADR 0009 (traffic map):** still "proposed".
+- **One-step enrollment:** dialog not wired in nebula-server (#604).
+- **Dependabot:** #647, #648 wait for review.
 
 ## Changelog
 
+- **2026-11-20 (evening):** 31 PRs; first live run of the vuln agent: four integration bugs fixed
+  and deployed, missing package inventory found (iv chain started); end-to-end and lab-VM tests;
+  ops agent chain and reject-pending complete; help assistant AS-09 merged.
 - **2026-11-19 (evening):** 31 PRs; ag chain 24/27 (settings, notifications list, admin answers,
   browser tests, operator docs); registry redirect decision resolved by ADR 0006 amendment (#717);
   uc wave 7/8; ud chain (help assistant service) started.
