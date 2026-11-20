@@ -18,7 +18,9 @@ $d version --format '{{.Server.Version}}' >/dev/null 2>&1 ||
 state=$($d inspect --type container --format '{{.State.Status}}' -- "$c" 2>/dev/null) || pre "no such container"
 state=$(printf '%s' "$state" | head -c 100 | b64)
 # The last 100 lines, each cut to its first 2048 bytes (100 x 2 KiB stays
-# under the 256 KiB raw bound, so the newest lines are never dropped). Cutting
-# the whole stream from the top would keep the oldest lines instead.
-logs=$($d logs --tail 100 --timestamps -- "$c" 2>&1 | tail -n 100 | cut -b1-2048 | head -c 262144 | b64)
+# under the 256 KiB raw bound, so the newest lines are never dropped). Each
+# line is cut before tail keeps the last 100, so a huge line with no newline
+# is bounded as it streams and is never held whole. Cutting the whole stream
+# from the top would keep the oldest lines instead.
+logs=$($d logs --tail 100 --timestamps -- "$c" 2>&1 | cut -b1-2048 | tail -n 100 | head -c 262144 | b64)
 printf '{"format":"docker-logs-v1","phase":"done","container":"%s","state":"%s","logs":"%s"}\n' "$c" "$state" "$logs"

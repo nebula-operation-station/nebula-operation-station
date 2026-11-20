@@ -5,6 +5,7 @@ package actions
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -111,7 +112,9 @@ func dockerPSFields(i int, project, dir string) []string {
 	}
 }
 
-// dockerListCut is the byte offset the script's head -c cuts at.
+// dockerListCut is the raw byte bound of the awk row filter in docker_list.sh
+// (max=524288). A row that would take the total past it is skipped whole; the
+// script never cuts inside a row.
 const dockerListCut = 524288
 
 func projectFor(i int) string {
@@ -181,11 +184,50 @@ func TestDockerListThroughHostrunOversizedLabelStaysBounded(t *testing.T) {
 	}
 }
 
-// The byte cut must not split a multi-byte UTF-8 character: a 2 MiB Compose
-// label of "ü" is cut in the middle of a character, and the parser would
-// refuse the whole payload. The script drops the cut row, so the 299 rows
-// before it stay readable and the payload is valid UTF-8.
-func TestDockerListThroughHostrunCutInsideMultiByteLabelDropsOnlyThatRow(t *testing.T) {
+// docker ps lists the newest containers first, so the oversized row can sit in
+// the middle. Only that row is skipped: the rows before it and the rows after
+// it (which the filter must not stop at) are all read.
+func TestDockerListThroughHostrunOversizedRowInMiddleKeepsLaterRows(t *testing.T) {
+	const n = 300
+	const huge = 150
+	f := newFakeHost(t, "1")
+	installDockerFake(t, f)
+	var b strings.Builder
+	for i := 0; i < n; i++ {
+		project := projectFor(i)
+		if i == huge {
+			project = strings.Repeat("L", 2<<20)
+		}
+		b.WriteString(dockerPSLine(i, project) + "\n")
+	}
+	writeDockerFixture(t, f, "ps", []byte(b.String()))
+	r := runDockerRead(t, "docker.list", f.bin+":/usr/bin:/bin", `{}`)
+	requireOneBoundedResult(t, r)
+	l, err := dockerhost.ParseList(r.Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(l.Containers) != n-1 {
+		t.Fatalf("%d containers, want %d: only the oversized row is skipped", len(l.Containers), n-1)
+	}
+	names := map[string]bool{}
+	for _, c := range l.Containers {
+		names[c.Name] = true
+	}
+	if names[fmt.Sprintf("svc-%03d", huge)] {
+		t.Fatalf("the oversized row svc-%03d is in the list", huge)
+	}
+	for _, i := range []int{0, huge - 1, huge + 1, n - 1} {
+		if name := fmt.Sprintf("svc-%03d", i); !names[name] {
+			t.Fatalf("%s is hidden by the oversized row before it", name)
+		}
+	}
+}
+
+// A 2 MiB Compose label of "ü" (2-byte characters) makes its row too big for
+// the bound. The awk filter skips that row whole, so no character is ever cut
+// and the parser accepts the payload; the 299 rows before it stay readable.
+func TestDockerListThroughHostrunOversizedMultiByteLabelDropsOnlyThatRow(t *testing.T) {
 	const n = 300
 	f := newFakeHost(t, "1")
 	installDockerFake(t, f)
@@ -193,13 +235,11 @@ func TestDockerListThroughHostrunCutInsideMultiByteLabelDropsOnlyThatRow(t *test
 	for i := 0; i < n-1; i++ {
 		b.WriteString(dockerPSLine(i, projectFor(i)) + "\n")
 	}
-	// The one ASCII byte before the 2 MiB of 2-byte characters moves the
-	// characters to an odd offset, so the cut lands on a continuation byte.
-	label := "L" + strings.Repeat("ü", 1<<20)
-	row := dockerPSRow(n-1, label, "/srv/stack")
-	labelAt := b.Len() + strings.Index(row, "ü")
-	if (dockerListCut-labelAt)%2 == 0 {
-		t.Fatalf("fixture does not split a character: cut at label byte %d", dockerListCut-labelAt)
+	row := dockerPSRow(n-1, strings.Repeat("ü", 1<<20), "/srv/stack")
+	// Precondition: the row alone does not fit in what is left of the bound,
+	// so the filter must skip it.
+	if b.Len()+len(row)+1 <= dockerListCut {
+		t.Fatalf("fixture fits the bound: %d bytes, bound %d", b.Len()+len(row)+1, dockerListCut)
 	}
 	b.WriteString(row + "\n")
 	writeDockerFixture(t, f, "ps", []byte(b.String()))
@@ -219,10 +259,10 @@ func TestDockerListThroughHostrunCutInsideMultiByteLabelDropsOnlyThatRow(t *test
 	}
 }
 
-// When the cut falls inside the working directory (column 9) or the creation
-// time (column 10) of the last row, that row is left out whole. Otherwise
-// the parser would accept a 9-field row with a truncated directory, or a
-// 10-field row with a truncated creation time.
+// When the row's working directory (column 9) or creation time (column 10)
+// is the part that crosses the bound, the whole last row is skipped. A byte
+// cut would leave a 9-field row with a truncated directory, or a 10-field row
+// with a truncated creation time, which the parser would accept.
 func TestDockerListThroughHostrunCutInLastColumnsDropsTheRow(t *testing.T) {
 	const n = 300
 	cases := []struct {
@@ -371,6 +411,113 @@ func TestDockerLogsThroughHostrunHostileOutput(t *testing.T) {
 	}
 	if len(l.Lines) != 100 || !strings.Contains(l.Lines[99], "line 099") || !strings.Contains(l.Lines[0], "line 000") {
 		t.Fatalf("%d lines; first %.60q, last %.60q", len(l.Lines), l.Lines[0], l.Lines[len(l.Lines)-1])
+	}
+}
+
+// A 2 MiB log line with no newline after 99 normal lines: each line is cut to
+// 2 KiB before the last 100 are kept, so the huge line arrives as a 2 KiB line
+// and the result stays one bounded document. The parser keeps the 100 lines.
+func TestDockerLogsThroughHostrunHugeUnterminatedLineIsCut(t *testing.T) {
+	f := newFakeHost(t, "1")
+	installDockerFake(t, f)
+	var b strings.Builder
+	for i := 0; i < 99; i++ {
+		fmt.Fprintf(&b, "2026-01-02T03:04:05.000000000Z line %03d\n", i)
+	}
+	b.WriteString("2026-01-02T03:04:05.000000000Z " + strings.Repeat("X", 2<<20))
+	writeDockerFixture(t, f, "logs", []byte(b.String()))
+	writeDockerFixture(t, f, "ps", nil)
+	r := runDockerRead(t, "docker.logs", f.bin+":/usr/bin:/bin", `{"container":"web-1"}`)
+	requireOneBoundedResult(t, r)
+	l, err := dockerhost.ParseLogs(r.Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(l.Lines) != 100 || !strings.Contains(l.Lines[98], "line 098") {
+		t.Fatalf("%d lines; line 98 = %.60q", len(l.Lines), l.Lines[len(l.Lines)-2])
+	}
+	if last := l.Lines[99]; len(last) > 2048 || !strings.HasPrefix(last, "2026-01-02T03:04:05") || !strings.Contains(last, "XXXX") {
+		t.Fatalf("huge line not cut to 2 KiB: %d bytes", len(last))
+	}
+}
+
+// docker.inspect with a 600 KiB mount source: the inspect document is cut at
+// 512 KiB, so its JSON is truncated. The script still returns one bounded
+// document, and the parser refuses the truncated inspect as a whole instead
+// of returning a partial mount list.
+func TestDockerInspectThroughHostrunTruncatedInspectIsRefused(t *testing.T) {
+	f := newFakeHost(t, "1")
+	installDockerFake(t, f)
+	inspect := dockerInspectDoc(map[string]any{
+		"Type": "bind", "Name": "", "Source": strings.Repeat("s", 600<<10), "Destination": "/data", "RW": true,
+	})
+	ib, err := json.Marshal(inspect)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ib) <= 512<<10 {
+		t.Fatalf("fixture %d bytes does not exceed the 512 KiB inspect cut", len(ib))
+	}
+	writeDockerFixture(t, f, "inspect", ib)
+	writeDockerFixture(t, f, "image", []byte(`{}`))
+	r := runDockerRead(t, "docker.inspect", f.bin+":/usr/bin:/bin", `{"container":"web-1"}`)
+	requireOneBoundedResult(t, r)
+	if _, err := dockerhost.ParseInspect(r.Result); !errors.Is(err, dockerhost.ErrInspectFormat) {
+		t.Fatalf("truncated inspect: err %v, want ErrInspectFormat", err)
+	}
+}
+
+// docker.inspect with an image document over the 64 KiB image cut: the cut
+// image JSON does not parse, so the parser keeps the container and its
+// mounts, and drops the image fields that were only in the cut part.
+func TestDockerInspectThroughHostrunTruncatedImageKeepsContainer(t *testing.T) {
+	f := newFakeHost(t, "1")
+	installDockerFake(t, f)
+	ib, err := json.Marshal(dockerInspectDoc(map[string]any{"Type": "bind", "Source": "/srv/data", "Destination": "/data", "RW": true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	digests := make([]string, 0, 2000)
+	for i := 0; i < 2000; i++ {
+		digests = append(digests, "registry.example/app@"+dockerHostrunDigest)
+	}
+	image := map[string]any{"id": dockerHostrunImageID, "created": "2026-01-01T00:00:00Z", "os": "linux", "architecture": "amd64",
+		"variant": "", "repo_digests": digests,
+		"descriptor": map[string]any{"digest": dockerHostrunDigest, "mediaType": "application/vnd.docker.distribution.manifest.v2+json"}}
+	imb, err := json.Marshal(image)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(imb) <= 64<<10 {
+		t.Fatalf("image fixture %d bytes does not exceed the 64 KiB image cut", len(imb))
+	}
+	writeDockerFixture(t, f, "inspect", ib)
+	writeDockerFixture(t, f, "image", imb)
+	r := runDockerRead(t, "docker.inspect", f.bin+":/usr/bin:/bin", `{"container":"web-1"}`)
+	requireOneBoundedResult(t, r)
+	in, err := dockerhost.ParseInspect(r.Result)
+	if err != nil {
+		t.Fatalf("a cut image must not fail the inspect: %v", err)
+	}
+	if in.Phase != "done" || in.FullID != dockerHostrunID || len(in.Mounts) != 1 {
+		t.Fatalf("phase=%s full=%q mounts=%d", in.Phase, in.FullID, len(in.Mounts))
+	}
+	if len(in.Digests) != 0 || in.ImageDigestPlatform != "" || in.ImageDigestIndex != "" || in.ImageCreated != "" {
+		t.Fatalf("image fields from a cut document: digests=%d platform=%q index=%q created=%v",
+			len(in.Digests), in.ImageDigestPlatform, in.ImageDigestIndex, in.ImageCreated)
+	}
+}
+
+// dockerInspectDoc is a small docker.inspect document with one mount, the
+// shape the script's inspect template produces.
+func dockerInspectDoc(mount map[string]any) map[string]any {
+	return map[string]any{
+		"id": dockerHostrunID, "name": "/web-1", "image": "registry.example/app:1.27", "image_id": dockerHostrunImageID,
+		"created": "2026-01-02T03:04:05.123456789Z",
+		"state": map[string]any{"Status": "running", "ExitCode": 0, "StartedAt": "2026-01-02T03:04:06Z",
+			"FinishedAt": "0001-01-01T00:00:00Z"},
+		"restarts": 0, "restart_policy": "unless-stopped", "mounts": []map[string]any{mount},
+		"ports": map[string]any{}, "networks": map[string]any{},
 	}
 }
 
