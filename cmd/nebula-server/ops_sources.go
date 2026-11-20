@@ -59,27 +59,35 @@ type fixDecider interface {
 }
 
 // opsVulnFindings is the finding source of the projection (ADR 0016 D3). It
-// holds no copy of the findings: each call reads the store again.
+// holds no copy of the findings: each call reads the store again. It holds no
+// fix decider either: a vulnfix.Resolver is a per-page object (it caches the
+// update lists and container previews without a lock), so newFixes builds a
+// fresh one for every Findings call.
 type opsVulnFindings struct {
-	store vulnFindingReader
-	fixes fixDecider
+	store    vulnFindingReader
+	newFixes func() fixDecider
 }
 
 var _ opsfacts.FindingSource = opsVulnFindings{}
 
-// newOpsVulnFindings returns the finding source over store and fixes. Both
-// are required; a missing one fails closed as opsfacts.ErrNoSource.
-func newOpsVulnFindings(store vulnFindingReader, fixes fixDecider) (opsVulnFindings, error) {
-	if store == nil || fixes == nil {
+// newOpsVulnFindings returns the finding source over store, with one fix
+// decider per Findings call from newFixes. Both are required; a missing one
+// fails closed as opsfacts.ErrNoSource.
+func newOpsVulnFindings(store vulnFindingReader, newFixes func() fixDecider) (opsVulnFindings, error) {
+	if store == nil || newFixes == nil {
 		return opsVulnFindings{}, fmt.Errorf("ops finding source: %w", opsfacts.ErrNoSource)
 	}
-	return opsVulnFindings{store: store, fixes: fixes}, nil
+	return opsVulnFindings{store: store, newFixes: newFixes}, nil
 }
 
 // Findings returns every stored finding that is not fixed, with its fix
 // decision. A failed read, a read that is truncated at MaxListFindings, or a
 // finding whose stored scores do not compute, fails the whole list.
 func (s opsVulnFindings) Findings(ctx context.Context) ([]opsfacts.Finding, error) {
+	fixes := s.newFixes()
+	if fixes == nil {
+		return nil, fmt.Errorf("read findings: fix decider: %w", opsfacts.ErrNoSource)
+	}
 	fs, more, err := s.store.List(ctx, vulnstore.ListQuery{Limit: vulnstore.MaxListFindings})
 	if err != nil {
 		return nil, fmt.Errorf("read findings: %w", err)
@@ -92,7 +100,7 @@ func (s opsVulnFindings) Findings(ctx context.Context) ([]opsfacts.Finding, erro
 		if f.State == vulnstore.StateFixed {
 			continue
 		}
-		of, err := opsFindingOf(f, s.fixes.Decide(ctx, f))
+		of, err := opsFindingOf(f, fixes.Decide(ctx, f))
 		if err != nil {
 			return nil, fmt.Errorf("read findings: %w", err)
 		}

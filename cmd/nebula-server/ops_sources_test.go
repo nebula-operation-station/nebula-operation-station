@@ -40,6 +40,11 @@ func (d fixedDecision) Decide(context.Context, vulnstore.Finding) vulnfix.Result
 	return vulnfix.Result(d)
 }
 
+// fixesOf returns the factory of a fixedDecision with decision r.
+func fixesOf(r vulnfix.Result) func() fixDecider {
+	return func() fixDecider { return fixedDecision(r) }
+}
+
 // failingReader is a finding store whose read fails.
 type failingReader struct{ err error }
 
@@ -86,8 +91,8 @@ func opsCriticalRecord(cve string) map[string]any {
 func TestOpsFindingsCriticalVerifiedFixOffersInstallSecurity(t *testing.T) {
 	env := newVTEnv(t)
 	env.startAndSubmit(t, opsCriticalRecord("CVE-2026-7001"))
-	src, err := newOpsVulnFindings(env.svc.store, fixedDecision{Status: vulnfix.StatusVerified,
-		Action: vulnfix.ActionInstallSecurity, HostID: "web01"})
+	src, err := newOpsVulnFindings(env.svc.store, fixesOf(vulnfix.Result{Status: vulnfix.StatusVerified,
+		Action: vulnfix.ActionInstallSecurity, HostID: "web01"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,8 +133,8 @@ func TestOpsFindingsAcceptedRiskLeavesGroupOut(t *testing.T) {
 		vulnstore.AcceptRisk{Approver: "admin", Reason: "tested in lab", BasisVersion: "3.0.15-1~deb12u1"}); err != nil {
 		t.Fatalf("SetAcceptedRisk: %v", err)
 	}
-	src, err := newOpsVulnFindings(env.svc.store, fixedDecision{Status: vulnfix.StatusVerified,
-		Action: vulnfix.ActionInstallSecurity, HostID: "web01"})
+	src, err := newOpsVulnFindings(env.svc.store, fixesOf(vulnfix.Result{Status: vulnfix.StatusVerified,
+		Action: vulnfix.ActionInstallSecurity, HostID: "web01"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +151,7 @@ func TestOpsFindingsAcceptedRiskLeavesGroupOut(t *testing.T) {
 // error of the projection, never an empty finding list.
 func TestOpsFindingsReadErrorFailsProjection(t *testing.T) {
 	errRead := errors.New("store unreadable")
-	src, err := newOpsVulnFindings(failingReader{err: errRead}, fixedDecision{})
+	src, err := newOpsVulnFindings(failingReader{err: errRead}, fixesOf(vulnfix.Result{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +168,7 @@ func TestOpsFindingsReadErrorFailsProjection(t *testing.T) {
 // list and no error, and so no group.
 func TestOpsFindingsEmptyStoreIsEmptyAndNoError(t *testing.T) {
 	env := newVTEnv(t)
-	src, err := newOpsVulnFindings(env.svc.store, fixedDecision{})
+	src, err := newOpsVulnFindings(env.svc.store, fixesOf(vulnfix.Result{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +185,7 @@ func TestOpsFindingsEmptyStoreIsEmptyAndNoError(t *testing.T) {
 // TestOpsFindingsTruncatedReadIsAnError: a store that holds more findings
 // than one read returns fails the read; a partial list would hide findings.
 func TestOpsFindingsTruncatedReadIsAnError(t *testing.T) {
-	src, err := newOpsVulnFindings(truncatedReader{}, fixedDecision{})
+	src, err := newOpsVulnFindings(truncatedReader{}, fixesOf(vulnfix.Result{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,11 +197,48 @@ func TestOpsFindingsTruncatedReadIsAnError(t *testing.T) {
 // TestNewOpsVulnFindingsRejectsNilSources: a missing store or decision source
 // is refused, so the projection cannot run on a partial set.
 func TestNewOpsVulnFindingsRejectsNilSources(t *testing.T) {
-	if _, err := newOpsVulnFindings(nil, fixedDecision{}); !errors.Is(err, opsfacts.ErrNoSource) {
+	if _, err := newOpsVulnFindings(nil, fixesOf(vulnfix.Result{})); !errors.Is(err, opsfacts.ErrNoSource) {
 		t.Fatalf("nil store: error = %v, want ErrNoSource", err)
 	}
 	if _, err := newOpsVulnFindings(failingReader{}, nil); !errors.Is(err, opsfacts.ErrNoSource) {
-		t.Fatalf("nil decision source: error = %v, want ErrNoSource", err)
+		t.Fatalf("nil decision factory: error = %v, want ErrNoSource", err)
+	}
+}
+
+// TestOpsFindingsBuildsFixDeciderPerCall: every Findings call builds its own
+// fix decider, so no resolver (with its cached lists) outlives one read.
+func TestOpsFindingsBuildsFixDeciderPerCall(t *testing.T) {
+	env := newVTEnv(t)
+	env.startAndSubmit(t, opsCriticalRecord("CVE-2026-7004"))
+	var built int
+	src, err := newOpsVulnFindings(env.svc.store, func() fixDecider {
+		built++
+		return fixedDecision{Status: vulnfix.StatusVerified, Action: vulnfix.ActionInstallSecurity, HostID: "web01"}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := src.Findings(context.Background()); err != nil {
+			t.Fatalf("Findings %d: %v", i, err)
+		}
+	}
+	if built != 2 {
+		t.Fatalf("fix deciders built = %d for 2 reads, want 2", built)
+	}
+}
+
+// TestOpsFindingsNilFixDeciderFailsRead: a factory that gives no decider fails
+// the read closed; it never yields findings without a decision.
+func TestOpsFindingsNilFixDeciderFailsRead(t *testing.T) {
+	env := newVTEnv(t)
+	env.startAndSubmit(t, opsCriticalRecord("CVE-2026-7005"))
+	src, err := newOpsVulnFindings(env.svc.store, func() fixDecider { return nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.Findings(context.Background()); !errors.Is(err, opsfacts.ErrNoSource) {
+		t.Fatalf("Findings error = %v, want ErrNoSource", err)
 	}
 }
 
