@@ -58,6 +58,8 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executorclient"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/llmclient"
@@ -70,6 +72,8 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsnotes"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit/batch"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/riskpolicy"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
@@ -219,6 +223,7 @@ type ag24Env struct {
 	proj     *opsfacts.Projector
 	inv      ag24Inventory
 	ops      *executions.Service
+	client   pb.ExecutorServiceClient // the server's counted executor connection
 	srv      *httptest.Server
 	opsAPI   *api.OpsHandler
 	rpcs     atomic.Int64 // executor RPCs made by the server's executions service
@@ -315,7 +320,8 @@ func newAG24Env(t *testing.T, label string) *ag24Env {
 	}
 	t.Cleanup(func() { conn.Close() })
 	ctx, cancel := context.WithCancel(context.Background())
-	e.ops = executions.New(ctx, pb.NewExecutorServiceClient(conn), e.db, e.inv, e.logger)
+	e.client = pb.NewExecutorServiceClient(conn)
+	e.ops = executions.New(ctx, e.client, e.db, e.inv, e.logger)
 	e.ops.SetSuggestionIndex(ag24Index{notes: e.notes})
 	t.Cleanup(func() { cancel(); e.ops.Wait() })
 
@@ -869,6 +875,121 @@ func TestAG24SuggestedOriginNeedsPresenceOnRealExecutor(t *testing.T) {
 	}
 	if marked != 2 {
 		t.Fatalf("%d execution_proposed audit entries carry a suggestion origin, want 2", marked)
+	}
+}
+
+// TestAG24BatchMemberMatchedByFixNoteNeedsPresence: the real batch planner
+// (executions.Batches, with the suggestion index as in cmd/nebula-server)
+// proposes to the real executor. A batch member whose family and host a
+// stored fix note covers is proposed at least MEDIUM, the executor freezes
+// it at that class, the batch stays pending with requirement presence
+// despite the open privileged session, and the batch audit counts the
+// member as suggested. The same family on a host without a note and a
+// non-family member stay unmarked; a LOW batch with no matched member is
+// approved by the open session as before.
+//
+// Every built-in action on the suggestion allowlist is declared MEDIUM or
+// higher, so the floor shows as the frozen class and the requirement, not as
+// a LOW→MEDIUM change of a built-in member.
+func TestAG24BatchMemberMatchedByFixNoteNeedsPresence(t *testing.T) {
+	e := newAG24Env(t, "web01")
+	e.enable(opsconfig.DataClassLab)
+	// The executor's batch authority as cmd/nebula-executor wires it
+	// (setupBatchAuthority): the production batch policy over the service
+	// and its risk data, the single-action authority's session.
+	risk, err := riskpolicy.New(e.h.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pol, err := executor.NewBatchPolicy(e.h.svc, risk, e.h.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ba, err := batch.New(batch.Options{Mode: permit.ModeStandard, Verifier: e.h.verifier, Policy: pol, Session: e.h.auth.Session,
+		AdminUIDs: []uint32{uint32(os.Getuid()) + 4242}, Store: e.h.db})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.h.svc.SetBatchAuthority(ba)
+	e.h.unlock()
+	e.h.openSession()
+	bs, err := executions.NewBatches(executions.BatchOptions{Exec: e.client, DB: e.db, Hosts: e.inv, Log: e.logger,
+		CredentialVersion: func(ctx context.Context, ref string) (uint64, error) {
+			return executorclient.CredentialVersion(ctx, e.client, ref)
+		},
+		Suggestions: ag24Index{notes: e.notes}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	propose := func(ms ...executions.BatchMemberSpec) executions.BatchCreated {
+		t.Helper()
+		c, err := bs.ProposeBatch(e.ctx(), "admin", executions.BatchRequest{Stages: []executions.BatchStageSpec{{Gate: canonical.BatchGateManual, Members: ms}}})
+		if err != nil {
+			t.Fatalf("propose batch: %v", err)
+		}
+		return c
+	}
+	suggestedIn := func(digest string) string {
+		t.Helper()
+		for _, b := range e.auditBodies() {
+			if strings.HasPrefix(b, "batch_proposed ") && strings.Contains(b, digest) {
+				m := regexp.MustCompile(`"suggested_members":"?(\d+)"?`).FindStringSubmatch(b)
+				if m == nil {
+					t.Fatalf("batch_proposed audit entry without suggested_members: %s", b)
+				}
+				return m[1]
+			}
+		}
+		t.Fatalf("no batch_proposed audit entry for %s", digest)
+		return ""
+	}
+	memberRisk := func(batch, host, action string) string {
+		t.Helper()
+		var r string
+		if err := e.db.QueryRow(`SELECT risk FROM batch_members WHERE batch_id = ? AND host_id = ? AND action_id = ?`, batch, host, action).Scan(&r); err != nil {
+			t.Fatalf("batch member %s on %s: %v", action, host, err)
+		}
+		return r
+	}
+	refresh := executions.BatchMemberSpec{ActionID: "package.refresh", HostID: ag24HostDB}
+	patchWeb := executions.BatchMemberSpec{ActionID: "package.install_security", HostID: ag24HostWeb}
+	patchDB := executions.BatchMemberSpec{ActionID: "package.install_security", HostID: ag24HostDB}
+
+	// Before the note: nothing is matched.
+	before := propose(patchWeb, refresh)
+	if got := suggestedIn(before.Digest); got != "0" {
+		t.Fatalf("batch before any note: %s suggested members, want 0", got)
+	}
+
+	if code, body := e.postFix("Install the security updates.", map[string]string{"action_id": "package.install_security", "host_id": ag24HostWeb, "why": "fixes openssl"}); code != http.StatusCreated {
+		t.Fatalf("store fix note = %d %s", code, body)
+	}
+
+	marked := propose(patchWeb, patchDB, refresh)
+	if marked.Risk != "MEDIUM" && marked.Risk != "HIGH" || marked.Requirement != "assertion_presence" || marked.State != "pending" {
+		t.Fatalf("batch with a matched member = %+v, want at least MEDIUM, assertion_presence, pending", marked)
+	}
+	if got := suggestedIn(marked.Digest); got != "1" {
+		t.Fatalf("batch with one matched member: %s suggested members, want 1 (web01 only)", got)
+	}
+	if r := memberRisk(marked.ID, ag24HostWeb, "package.install_security"); r != "MEDIUM" && r != "HIGH" {
+		t.Fatalf("matched member frozen at %s, want at least MEDIUM", r)
+	}
+	if r := memberRisk(marked.ID, ag24HostDB, "package.refresh"); r != "LOW" {
+		t.Fatalf("non-family member frozen at %s, want LOW", r)
+	}
+	if s := e.permitState(t, marked.Digest); s != pb.PermitState_PERMIT_STATE_PENDING {
+		t.Fatalf("executor batch permit state %v, want pending", s)
+	}
+
+	// Control: a LOW batch with no matched member is approved by the open
+	// privileged session, unmarked.
+	low := propose(refresh)
+	if low.Risk != "LOW" || low.State != "approved" {
+		t.Fatalf("LOW batch without a matched member = %+v, want LOW approved", low)
+	}
+	if got := suggestedIn(low.Digest); got != "0" {
+		t.Fatalf("LOW batch: %s suggested members, want 0", got)
 	}
 }
 
