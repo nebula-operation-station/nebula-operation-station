@@ -1,6 +1,8 @@
 # Decision paper: package inventory for the vulnerability export (ADR 0011)
 
-Status: **open, maintainer decides.** This paper decides nothing. Points that
+Status: **decided by the maintainer, 2026-11-20**; see "Decision (2026-11-20)"
+below (previously: **open, maintainer decides.** This paper decides nothing).
+The analysis sections E1–E4 are kept as written before the decision. Points that
 ADR 0011 already decides are not open and are marked as decided (E4). Each
 point gives the question, what ADR 0011, the spec and the code say today, the
 options, a recommendation and the consequence for the code. The recommendations
@@ -19,6 +21,52 @@ Ticket: iv01 (autopilot). Which tickets wait and which go ahead:
 
 The ticket text is not in this clone. This mapping comes from the references in
 this paper; the maintainer should check it against the ticket.
+
+## Decision (2026-11-20)
+
+The maintainer (Axel) decided on 2026-11-20 at 22:12 (UTC+1) in chat. Where the
+decision differs from a recommendation below, the decision wins. Original
+wording (German), verbatim:
+
+> - **E1:** Je Host immer **2 Inventar-Lesungen** aufheben (vorher/nachher);
+>   ältere werden gelöscht.
+> - **E2:** Eine Lesung gilt als **zu alt, sobald eine dritte vorhanden ist**
+>   (zählbasiert, keine Zeitgrenze). Hinweis Claude an Axel: Ein Host, der
+>   keine neuen Lesungen mehr liefert, behält seine letzte Lesung unbegrenzt;
+>   die Oberfläche zeigt deshalb das Alter der Lesung deutlich an (iv09), ohne
+>   die Wirkung zu ändern.
+> - **E3:** Empfehlung angenommen (Host ohne Lesung → Schließung gehalten;
+>   unbekanntes OS-Release → als unvollständig exportiert).
+> - **E4:** Container-Images: je Image immer die **3 letzten Inventare** halten
+>   (siehe iv12).
+> - **Lese-Intervall:** Standard-Intervall der Host-Lese-Freigabe für
+>   `package.list_installed` **6 Stunden**.
+
+The same rules in English:
+
+1. **E1, retention of host reads.** NOS always keeps **2 package reads per
+   host** (the one before and the one after); older reads are deleted. This
+   replaces the recommended option 2 (latest, last complete and
+   snapshot-pinned reads). Tickets: **iv02** (inventory store and pruning).
+2. **E2, age of a read.** A read counts as **too old as soon as a third read
+   exists** for the same host. The rule is count-based; there is **no time
+   limit**. This replaces the proposed 24 h limit. Tickets: **iv08** (read
+   age: count-based, no time constant), **iv09** (host tab). Note from Claude
+   to the maintainer, given with the decision: a host that delivers no new
+   reads keeps its last read indefinitely. The UI therefore shows the age of
+   the read clearly (iv09); this does not change the effect of the rule.
+3. **E3, missing inventory.** The recommendation is accepted: a closure for a
+   **host without a stored read is held**; a host with an **unknown OS release
+   is exported as incomplete**. Tickets: **iv08**, and the tickets that build
+   these two rules (iv06 classifier, iv03 hook; see E3 below).
+4. **E4, container images.** For each image NOS always keeps the **3 latest
+   inventories**. Tickets: **iv12**.
+5. **Read interval.** The default interval of a host read lease for
+   `package.list_installed` is **6 hours** (equal to the floor
+   `permit.PackageListInstalledMinInterval`). Tickets: **iv08** (the read
+   cadence that E2 relies on), **iv09** (host tab that shows the read age).
+   The ticket that sets this default when a read lease is proposed is not
+   named in this clone.
 
 ## Why this is open
 
