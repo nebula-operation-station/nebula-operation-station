@@ -9,10 +9,8 @@ export LC_ALL=C
 max_result=1048576
 # Line cap of the candidates section (MaxCandidateStanzas lines of 4).
 max_cand_lines=160000
-# osdebian.MaxPackages: the simulation keeps at most this many Inst lines.
+# osdebian.MaxPackages: a simulation with more Inst lines cannot be listed.
 max_sim_lines=20000
-# Bytes kept back for the marker line of a cut simulation.
-marker_reserve=32
 b64() { base64 -w0 2>/dev/null || base64 | tr -d '\n'; }
 command -v apt-get >/dev/null 2>&1 || { echo "no apt-get: not a Debian or Ubuntu host" >&2; exit 3; }
 proxmox=false
@@ -34,26 +32,31 @@ doc() {
 }
 # Simulation: the Inst lines stream from apt-get through grep and awk into
 # the stream variable; the raw apt output is never stored. apt-get's exit
-# status follows the lines as a token line that apt does not print. The awk
-# keeps whole Inst lines up to max_sim_lines and up to sim_budget bytes:
-# what fits next to the rest of the document, base64 turns 3 bytes into 4,
-# minus marker_reserve for the marker of a cut simulation. A cut simulation
-# is marked as partial. A failed simulation is a failed run, never an empty
-# update list.
+# status and the cut flag follow the lines as token lines that apt does not
+# print. The awk keeps whole Inst lines up to max_sim_lines and up to
+# sim_budget bytes: what fits next to the rest of the document, base64 turns
+# 3 bytes into 4. A simulation that does not fit is not listed at all: a
+# partial list would read as "only these updates", so the run fails with
+# exit 5. A failed simulation is a failed run too, never an empty update list.
 sim=""
 skel=$(doc "" false)
-sim_budget=$(( (max_result - ${#skel} - 64) / 4 * 3 - marker_reserve ))
+sim_budget=$(( (max_result - ${#skel} - 64) / 4 * 3 ))
 stream=$({ apt-get -s -o Debug::NoLocking=1 "$mode" 2>/dev/null; echo "nebula-apt-rc=$?"; } \
   | grep -E '^(Inst |nebula-apt-rc=)' \
-  | awk -v max="$sim_budget" -v cap="$max_sim_lines" -v marker="# simulation cut: size limit" '
+  | awk -v max="$sim_budget" -v cap="$max_sim_lines" '
       /^nebula-apt-rc=/ { rc = $0; sub(/^nebula-apt-rc=/, "", rc); next }
       cut { next }
       { line = $0 "\n" }
       count == cap || n + length(line) > max { cut = 1; next }
       { printf "%s", line; n += length(line); count++ }
-      END { if (cut) print marker; print "nebula-apt-rc=" rc }')
+      END { if (cut) print "nebula-apt-cut=1"; print "nebula-apt-rc=" rc }')
 simrc=${stream##*nebula-apt-rc=}
 [ "$simrc" = 0 ] || { echo "apt-get simulation failed" >&2; exit 4; }
+case "$stream" in
+  *"nebula-apt-cut=1"*)
+    echo "apt-get simulation exceeds the result size limit: the upgrade cannot be listed completely" >&2
+    exit 5 ;;
+esac
 raw=${stream%nebula-apt-rc=*}
 [ -n "$raw" ] && sim=$(printf '%s' "$raw" | b64)
 

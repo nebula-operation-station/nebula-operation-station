@@ -222,8 +222,8 @@ func expectedCandidates(n, copies int) string {
 }
 
 // listUpdatesBudgetSlack is how many bytes of hostrun.MaxResult a worst-case
-// result may leave unused: one Inst line or one candidate stanza in base64,
-// the script's fixed margin and its marker line. A script that budgets far
+// result may leave unused: one Inst line or one candidate stanza in base64
+// and the script's fixed margin. A script that budgets far
 // less than the remaining bytes leaves more unused and fails this check.
 const listUpdatesBudgetSlack = 512
 
@@ -252,21 +252,36 @@ func requireDecodedField(t *testing.T, doc map[string]any, name string) []byte {
 	return b
 }
 
+// shortSimulationText is k Inst lines of 35 bytes each, with newlines. Their
+// total stays well under the simulation's byte budget, so only the line cap
+// (osdebian.MaxPackages) can cut them.
+func shortSimulationText(k int) string {
+	var b strings.Builder
+	for i := 1; i <= k; i++ {
+		fmt.Fprintf(&b, "Inst p%06d (2 Debian:12 [amd64])\n", i)
+	}
+	return b.String()
+}
+
 // listUpdatesSimulationHost is a fake host whose apt-get prints the
 // simulation lines of n packages and whose apt-cache prints copies stanzas
 // per requested candidate: more candidate bytes than fit next to the
 // simulation in hostrun.MaxResult.
 func listUpdatesSimulationHost(t *testing.T, n, copies int) *fakeHost {
 	t.Helper()
+	return simulationHostWith(t, "Reading package lists...\n"+simulationText(n), copies)
+}
+
+// simulationHostWith is a fake host whose apt-get prints simText and whose
+// apt-cache prints copies stanzas per requested candidate.
+func simulationHostWith(t *testing.T, simText string, copies int) *fakeHost {
+	t.Helper()
 	d := t.TempDir()
 	f := &fakeHost{dir: d, bin: filepath.Join(d, "bin"), calls: filepath.Join(d, "calls")}
 	if err := os.Mkdir(f.bin, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	var sim strings.Builder
-	sim.WriteString("Reading package lists...\n")
-	sim.WriteString(simulationText(n))
-	if err := os.WriteFile(filepath.Join(d, "sim.txt"), []byte(sim.String()), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(d, "sim.txt"), []byte(simText), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	f.write(t, "apt-get", `cat "`+filepath.Join(d, "sim.txt")+`"`)
@@ -347,13 +362,57 @@ func TestListUpdatesAt4000PackagesThroughHostrun(t *testing.T) {
 	}
 }
 
-// The worst case the script allows: osdebian.MaxPackages (20,000) Inst
-// lines. They do not fit in hostrun.MaxResult, so the simulation is cut at
-// a line boundary, marked as cut, and the rest of the budget is used. The
-// result is a success through hostrun and osdebian reads the lines kept.
-func TestListUpdatesAtMaxPackagesThroughHostrun(t *testing.T) {
+// requireListUpdatesFailure fails unless r is a script failure with exit
+// status 5 and no result: the simulation did not fit and the run says so.
+func requireListUpdatesFailure(t *testing.T, r hostrun.Result) {
+	t.Helper()
+	if r.Class == hostrun.ClassSuccess {
+		t.Fatalf("cut simulation classed as success: %d result bytes, leaving the update list incomplete", len(r.Result))
+	}
+	if r.Class != hostrun.ClassScriptFailed || r.ExitCode != 5 || len(r.Result) != 0 {
+		t.Fatalf("class %s, exit %d, result %d bytes", r.Class, r.ExitCode, len(r.Result))
+	}
+	if !bytes.Contains(r.Log, []byte("cannot be listed completely")) {
+		t.Errorf("log %q lacks the size limit line", r.Log)
+	}
+}
+
+// An upgrade whose simulation exceeds the byte budget (here 20,000 long Inst
+// lines, about 1.5 MB) is not listed as a complete success. The script cuts
+// the simulation at a line boundary, and the run ends as a script failure
+// with exit status 5 and no result, so no partial update list can be read
+// as "only these updates". Through hostrun, the consumer sees a failed run.
+func TestListUpdatesOversizedSimulationFailsThroughHostrun(t *testing.T) {
 	const n = osdebian.MaxPackages
+	if len(simulationText(n)) <= hostrun.MaxResult {
+		t.Fatal("the fake simulation fits in hostrun.MaxResult; the test would not cut it")
+	}
 	f := listUpdatesSimulationHost(t, n, 3)
+	r := attachedRun(t, "package.list_updates", netHostrunExecutionID, f.bin+":/usr/bin:/bin")
+	requireListUpdatesFailure(t, r)
+}
+
+// The line cap (osdebian.MaxPackages) is a limit of its own: 20,001 short
+// lines are 700 KB, well under the byte budget, so the 20,001st line cuts the
+// simulation by the cap alone and the run fails the same way.
+func TestListUpdatesLineCapFailsThroughHostrun(t *testing.T) {
+	const k = osdebian.MaxPackages + 1
+	sim := shortSimulationText(k)
+	if len(sim) >= 3*hostrun.MaxResult/4-1024 {
+		t.Fatalf("%d short lines are %d bytes, not under the byte budget: the cap would not be the cause", k, len(sim))
+	}
+	f := simulationHostWith(t, sim, 1)
+	r := attachedRun(t, "package.list_updates", netHostrunExecutionID, f.bin+":/usr/bin:/bin")
+	requireListUpdatesFailure(t, r)
+}
+
+// Exactly osdebian.MaxPackages short lines fit the line cap and the byte
+// budget: the simulation is complete, the run succeeds, and osdebian reads
+// every line. This is the boundary of the cap branch.
+func TestListUpdatesAtLineCapThroughHostrun(t *testing.T) {
+	const n = osdebian.MaxPackages
+	sim := shortSimulationText(n)
+	f := simulationHostWith(t, sim, 1)
 	r := attachedRun(t, "package.list_updates", netHostrunExecutionID, f.bin+":/usr/bin:/bin")
 	if r.Class != hostrun.ClassSuccess || r.ExitCode != 0 {
 		t.Fatalf("class %s (%s), exit %d, log %q", r.Class, r.Detail, r.ExitCode, r.Log)
@@ -361,34 +420,19 @@ func TestListUpdatesAtMaxPackagesThroughHostrun(t *testing.T) {
 	if len(r.Result) == 0 || len(r.Result) > hostrun.MaxResult {
 		t.Fatalf("result %d bytes, want 1..%d", len(r.Result), hostrun.MaxResult)
 	}
-	t.Logf("%d packages: result %d bytes (limit %d)", n, len(r.Result), hostrun.MaxResult)
-	requireBudgetUsed(t, r.Result)
-
 	var doc map[string]any
 	if err := json.Unmarshal(r.Result, &doc); err != nil {
 		t.Fatal(err)
 	}
-	sim := string(requireDecodedField(t, doc, "simulate"))
-	k := strings.Count(sim, "Inst ")
-	if k == 0 || k >= n {
-		t.Fatalf("%d Inst lines kept of %d, want a cut simulation", k, n)
+	if got := string(requireDecodedField(t, doc, "simulate")); got != sim {
+		t.Fatalf("simulation has %d bytes, want the %d bytes of the %d lines", len(got), len(sim), n)
 	}
-	// The kept lines are the first k lines of the fake, whole, followed by
-	// the marker text and no further Inst line.
-	prefix := simulationText(k)
-	if !strings.HasPrefix(sim, prefix) || len(sim) == len(prefix) || strings.Contains(sim[len(prefix):], "Inst ") {
-		t.Fatalf("simulation is not the first %d lines followed by a marker", k)
-	}
-	if doc["candidates_truncated"] != true {
-		t.Fatalf("candidates_truncated = %v, want true", doc["candidates_truncated"])
-	}
-
 	u, err := osdebian.ParseUpdates(r.Result)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(u.Packages) != k || !u.CandidatesTruncated {
-		t.Fatalf("%d packages, want the %d kept lines; truncated %v", len(u.Packages), k, u.CandidatesTruncated)
+	if len(u.Packages) != n {
+		t.Fatalf("%d packages, want %d", len(u.Packages), n)
 	}
 }
 
