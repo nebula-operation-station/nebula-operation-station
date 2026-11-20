@@ -24,6 +24,10 @@ import (
 
 const goodDigest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+// goodFixDigest is goodDigest in the form the server writes for a fix item
+// (opsfacts.Digest).
+const goodFixDigest = "sha256:" + goodDigest
+
 var fixedNow = time.Date(2026, 11, 18, 10, 0, 0, 0, time.UTC)
 
 // fakeNOS is the NOS API with fixed answers; it records what the run posts.
@@ -88,7 +92,7 @@ func goodSettings() nosclient.AgentConfig {
 
 func labItem(ref string) nosclient.WorkItem {
 	return nosclient.WorkItem{
-		Kind: "fix", Ref: ref, Digest: goodDigest,
+		Kind: "fix", Ref: ref, Digest: goodFixDigest,
 		Group: &nosclient.Group{
 			Group:    ref,
 			Host:     nosclient.Host{ID: "h1", Label: "web-01", Environment: "lab", Criticality: "high"},
@@ -148,7 +152,7 @@ func TestHappyPathOneCallWritesMappedNote(t *testing.T) {
 		t.Fatalf("summary %+v notes %d", sum, len(nos.notes))
 	}
 	n := nos.notes[0]
-	if n.Kind != "fix" || n.Ref != "h1:os" || n.Digest != goodDigest {
+	if n.Kind != "fix" || n.Ref != "h1:os" || n.Digest != goodFixDigest {
 		t.Errorf("note %+v", n)
 	}
 	if len(n.Steps) != 1 || n.Steps[0].ActionID != "package.install_security" || n.Steps[0].HostID != "h1" {
