@@ -64,8 +64,8 @@ func TestCoreFactsHostileKernelAndHostnameDisplay(t *testing.T) {
 			wantHostname: "h�(st",
 		},
 		"bidi override": {
-			uname:        []byte("Linux ‮6.1\n"),
-			hostname:     []byte("web⁦\n"),
+			uname:        []byte("Linux " + string(rune(0x202e)) + "6.1\n"),
+			hostname:     []byte("web" + string(rune(0x2066)) + "\n"),
 			wantKernel:   "Linux �6.1",
 			wantHostname: "web�",
 		},
