@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
+	"unicode/utf8"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -30,7 +32,26 @@ const (
 	rejectFormMax = 16 << 10
 	// rejectNotPrivileged is the 403 text when no privileged session is open.
 	rejectNotPrivileged = "rejecting needs an open privileged session opened from this login: open one on the dashboard and try again"
+	// rejectNotFoundText is the row text for an executor NotFound (spec 07).
+	rejectNotFoundText = "No longer pending on the executor (expired, or the executor was locked or restarted)"
+	// rejectExecutorMsgMax bounds the executor's refusal text in bytes.
+	rejectExecutorMsgMax = 300
 )
+
+// boundedText returns s cut to at most max bytes, at a rune boundary, after
+// replacing invalid UTF-8 (the executor's text is untrusted input and is
+// rendered as text only).
+func boundedText(s string, max int) string {
+	s = strings.ToValidUTF8(s, "�")
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
+}
 
 // rejectData is the page data of the reject confirmation and result.
 type rejectData struct {
@@ -154,12 +175,12 @@ func (h *Handler) rejectRowMessage(err error) string {
 	}
 	st, _ := status.FromError(err)
 	switch st.Code() {
-	case codes.InvalidArgument, codes.FailedPrecondition, codes.PermissionDenied, codes.NotFound, codes.AlreadyExists:
-		msg := st.Message()
-		if len(msg) > 300 {
-			msg = msg[:300]
-		}
-		return "the executor refused: " + msg
+	case codes.NotFound:
+		// RejectPending answers NotFound for permit_not_found (spec 07: never
+		// proposed, window ended, or dropped by lock or restart).
+		return rejectNotFoundText
+	case codes.InvalidArgument, codes.FailedPrecondition, codes.PermissionDenied, codes.AlreadyExists:
+		return "the executor refused: " + boundedText(st.Message(), rejectExecutorMsgMax)
 	default:
 		h.log.Error("reject proposal", "error", err.Error())
 		return "executor unavailable; nothing was rejected"

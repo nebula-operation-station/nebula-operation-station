@@ -193,13 +193,72 @@ func TestRejectFormAnswersEachRowWithItsOwnError(t *testing.T) {
 	if !reflect.DeepEqual(f.rejects, want) {
 		t.Fatalf("rejects %v, want %v", f.rejects, want)
 	}
-	for _, msg := range []string{"rejected", "not waiting for approval any more", "the executor refused: privileged session required", "executor unavailable", "invalid operation id"} {
-		if !strings.Contains(body, msg) {
-			t.Errorf("result misses %q: %s", msg, body)
+	// Each row is checked on its own line: the success row must say exactly
+	// "rejected", not merely contain the word.
+	for id, msg := range map[string]string{
+		opID: "rejected",
+		idB:  "not waiting for approval any more",
+		idC:  "the executor refused: privileged session required",
+		idD:  "executor unavailable; nothing was rejected",
+	} {
+		want := `<a href="/operations/` + id + `">` + id[:8] + `</a>: ` + msg + `</li>`
+		if !strings.Contains(body, want) {
+			t.Errorf("result misses row %q: %s", want, body)
 		}
+	}
+	if !strings.Contains(body, `<code>invalid id</code>: invalid operation id</li>`) {
+		t.Errorf("result misses the invalid-id row: %s", body)
 	}
 	if strings.Contains(body, "secret") {
 		t.Errorf("executor internals shown: %s", body)
+	}
+}
+
+// TestRejectFormShowsExecutorNotFoundAsSpecText: an executor NotFound
+// (permit_not_found) is shown with the spec 07 text, not as an executor
+// refusal.
+func TestRejectFormShowsExecutorNotFoundAsSpecText(t *testing.T) {
+	f := &fakeOps{rejectErrs: map[string]error{
+		idB: status.Error(codes.NotFound, "permit_not_found: no such permit"),
+	}}
+	e := newRejectEnv(t, f, true)
+	form := url.Values{"id": {idB}, "reason": {""}}
+	code, body := e.do(t, http.MethodPost, "/operations/reject/form", form, pveOrigin, e.alice)
+	if code != http.StatusOK {
+		t.Fatalf("status %d: %s", code, body)
+	}
+	want := `</a>: No longer pending on the executor (expired, or the executor was locked or restarted)</li>`
+	if !strings.Contains(body, want) {
+		t.Errorf("result misses the spec text: %s", body)
+	}
+	if strings.Contains(body, "the executor refused") {
+		t.Errorf("NotFound shown as a refusal: %s", body)
+	}
+}
+
+// TestRejectFormCutsExecutorTextAtARuneBoundary: the executor's refusal text
+// is cut to 300 bytes without splitting a UTF-8 sequence, and invalid UTF-8 is
+// replaced before it is rendered.
+func TestRejectFormCutsExecutorTextAtARuneBoundary(t *testing.T) {
+	// "a" then 200 two-byte runes: 401 bytes; byte 300 falls inside a rune,
+	// so the cut must stop after 299 bytes (the "a" and 149 runes).
+	long := "a" + strings.Repeat("ä", 200)
+	f := &fakeOps{rejectErrs: map[string]error{
+		idB: status.Error(codes.FailedPrecondition, long),
+		idC: status.Error(codes.FailedPrecondition, "bad\xffbyte"),
+	}}
+	e := newRejectEnv(t, f, true)
+	form := url.Values{"id": {idB, idC}, "reason": {""}}
+	code, body := e.do(t, http.MethodPost, "/operations/reject/form", form, pveOrigin, e.alice)
+	if code != http.StatusOK {
+		t.Fatalf("status %d: %s", code, body)
+	}
+	want := "the executor refused: a" + strings.Repeat("ä", 149) + "</li>"
+	if !strings.Contains(body, want) {
+		t.Errorf("long executor text not cut at a rune boundary: %s", body)
+	}
+	if !strings.Contains(body, "the executor refused: bad�byte</li>") {
+		t.Errorf("invalid UTF-8 not replaced: %s", body)
 	}
 }
 
