@@ -2467,7 +2467,7 @@ Three units ship. None is enabled by the package:
 | --- | --- | --- |
 | `nebula-ops-agent.service` | One run: fetch due work, one LLM call per item, post the validated notes. Oneshot, hardened, IP access to loopback only | started by the timer or the path unit |
 | `nebula-ops-agent.timer` | Starts the service every 30 minutes, with up to 5 minutes random delay | `sudo systemctl enable --now nebula-ops-agent.timer` |
-| `nebula-ops-agent.path` | Starts the service when the server touches its trigger file | Inert in this build: the server cannot write the trigger yet, so enable only the timer |
+| `nebula-ops-agent.path` | Starts the service when the server touches its trigger file `/var/lib/nebula/server/ops-trigger` (a new critical or high finding, or an admin question). systemd watches the file; the agent cannot read it | `sudo systemctl enable --now nebula-ops-agent.path` |
 
 Run it once by hand first and read the log:
 

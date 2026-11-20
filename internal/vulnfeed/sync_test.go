@@ -115,6 +115,23 @@ func TestSyncAcceptsDatedFeed(t *testing.T) {
 	}
 }
 
+// TestSyncDatedFeedKeepsDateParseCause: a date parser that fails for a
+// reason other than a missing date (here a line limit) still fails the sync
+// as ErrNoContentDate, and the cause stays visible to errors.Is.
+func TestSyncDatedFeedKeepsDateParseCause(t *testing.T) {
+	e := newSyncEnv(t)
+	e.fs.set("/list", "[01 Feb 2024] DSA-1-1 x\n")
+	f := e.feed("debian-dsa", "/list", DateKindDated)
+	limited := func(io.Reader) (time.Time, error) { return time.Time{}, ErrFeedLimit }
+	_, err := e.syncer.Sync(context.Background(), f, SyncOptions{ContentDate: limited})
+	if !errors.Is(err, ErrNoContentDate) || !errors.Is(err, ErrFeedLimit) {
+		t.Fatalf("err = %v, want ErrNoContentDate and ErrFeedLimit", err)
+	}
+	if _, err := e.store.Load("debian-dsa"); !errors.Is(err, ErrNoSnapshot) {
+		t.Fatal("snapshot accepted after a failed date parse")
+	}
+}
+
 func TestSyncDatedFeedNeedsDateFromData(t *testing.T) {
 	e := newSyncEnv(t)
 	e.fs.set("/kev.json", "no date here\n")

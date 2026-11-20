@@ -488,6 +488,15 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		return err
 	}
 	vuln.statePath = filepath.Join(cfg.DataDir, vulnNotifyStateFile)
+	// Ops agent events (ADR 0016 D3, D10): only with the ops token. The
+	// trigger touches nothing while the agent is off (see Touch).
+	if _, hasOpsToken := cfg.API.OpsToken(); hasOpsToken {
+		opsTrig, err := wireOpsTrigger(db, log)
+		if err != nil {
+			return err
+		}
+		vuln.notifier.SetTrigger(opsTrig.Touch)
+	}
 	_, hasVulnToken := cfg.API.VulnToken()
 	vulnNotifying := cfg.API.Enabled && hasVulnToken
 	sweepEvery, notifyEvery := vulnSweepInterval, vulnNotifyInterval
@@ -665,7 +674,19 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		}
 		// Ops agent API (ADR 0016 D2) under /api/v1/ops/, only for the one
 		// ops token. MountOps is the only route to that prefix.
-		oh, err := newOpsAPI(cfg.API, db, opsNotes, store.List, log)
+		// Suggestions (ADR 0016 D10) are sent for accepted fix notes; they are
+		// wired only with the ops token, like the API that reports them.
+		var opsSugg *opsSuggestEvents
+		if _, hasOpsToken := cfg.API.OpsToken(); hasOpsToken {
+			// The messages go through the vulnerability notifier, which owns
+			// the hourly limit and digest (ADR 0016 D10).
+			opsSugg, err = wireOpsSuggestions(db, cfg.DataDir, cfg.PublicOrigin, vuln.notifier, log)
+			if err != nil {
+				return err
+			}
+			bg.Go(func() { opsSugg.Run(connCtx) })
+		}
+		oh, err := newOpsAPI(cfg.API, db, opsNotes, store.List, log, opsSugg.acceptedHook())
 		if err != nil {
 			return err
 		}

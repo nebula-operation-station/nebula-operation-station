@@ -11,8 +11,8 @@
 # reach the executor socket. It is locked down like the vulnerability agent:
 # no capabilities, a read-only system, its state dir as the only writable
 # path. The NOS state, configuration and sockets, and with them the trigger
-# directory the path unit watches, do not exist for it (InaccessiblePaths);
-# only systemd reads the trigger.
+# file the path unit watches (/var/lib/nebula/server/ops-trigger), do not
+# exist for it (InaccessiblePaths); only systemd reads the trigger.
 #
 # It holds the NOS token and, optionally, the LLM credential, each in its
 # own file in /etc/nebula-ops-agent (mode 0600, owned by the agent); the
@@ -73,7 +73,8 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 IPAddressDeny=any
 IPAddressAllow=localhost
 # The server's and executor's state, configuration and sockets, and the
-# trigger directory below /var/lib/nebula, do not exist for the agent.
+# trigger in the server's state directory (/var/lib/nebula/server), do not
+# exist for the agent.
 InaccessiblePaths=-/var/lib/nebula -/etc/nebula -/run/nebula
 # Nor do their processes: /proc shows only the agent's own processes and
 # no kernel or system information beyond the per-process entries.

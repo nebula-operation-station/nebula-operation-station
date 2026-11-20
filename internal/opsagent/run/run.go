@@ -262,7 +262,15 @@ func validateQuestion(class string, it nosclient.WorkItem) error {
 	return nil
 }
 
+// digestPrefix is the prefix of a fix group digest as the server writes it
+// (opsfacts.Digest: "sha256:<64 hex>"). Summary and question digests are
+// sent as 64 bare hex (fleet summary, opsnotes.QuestionDigest).
+const digestPrefix = "sha256:"
+
+// isDigest accepts exactly "sha256:" followed by 64 lowercase hex, or 64
+// lowercase hex alone. No other prefix or case is accepted.
 func isDigest(s string) bool {
+	s = strings.TrimPrefix(s, digestPrefix)
 	if len(s) != 64 {
 		return false
 	}

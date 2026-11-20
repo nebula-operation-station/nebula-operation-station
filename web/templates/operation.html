@@ -40,6 +40,13 @@
       <a class="button" href="{{.PlanAgain}}">Plan again</a>
     </div>
   </div>
+  {{else if .Rejected}}
+  <div class="approval">
+    <p class="status">Rejected: nothing was run.</p>
+    <div class="actions">
+      <a class="button" href="{{.PlanAgain}}">Plan again</a>
+    </div>
+  </div>
   {{end}}
   <p id="message" class="message" role="status" aria-live="polite"></p>
 </section>
