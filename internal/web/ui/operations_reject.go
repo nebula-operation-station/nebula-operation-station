@@ -36,6 +36,9 @@ const (
 	rejectNotFoundText = "No longer pending on the executor (expired, or the executor was locked or restarted)"
 	// rejectExecutorMsgMax bounds the executor's refusal text in bytes.
 	rejectExecutorMsgMax = 300
+	// rejectOutcomeUnknownText is the row text when the executor's answer was
+	// lost: it may have rejected the proposal, and the sweep checks it again.
+	rejectOutcomeUnknownText = "outcome unknown - the executor may have rejected it; it is checked again"
 )
 
 // boundedText returns s cut to at most max bytes, at a rune boundary, after
@@ -170,6 +173,9 @@ func (h *Handler) rejectRowMessage(err error) string {
 		return "not waiting for approval any more"
 	case errors.Is(err, executions.ErrRejectUnavailable):
 		return "rejecting is not available on this server"
+	case errors.Is(err, executions.ErrRejectOutcomeUnknown):
+		h.log.Warn("reject proposal: outcome unknown", "error", err.Error())
+		return rejectOutcomeUnknownText
 	case errors.As(err, &pe):
 		return pe.Reason
 	}
