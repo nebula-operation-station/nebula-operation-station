@@ -54,6 +54,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/auditlog"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
@@ -698,22 +699,37 @@ func TestAG24OpsTokenReachesOnlyOpsAPI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{"/api/v1/hosts", "/api/v1/hosts/" + ag24HostWeb, "/api/v1/operations", "/api/v1/operations/" + c.ID,
-		"/api/v1/vuln/inventory", "/api/v1/vuln/runs", "/api/v1/ops"} {
-		for _, m := range []string{http.MethodGet, http.MethodPost} {
-			code, body := e.do(ag24OpsToken, m, p, []byte(`{}`))
-			if code == http.StatusOK || code == http.StatusCreated || code == http.StatusNoContent {
-				t.Errorf("ops token %s %s = %d, want refused", m, p, code)
-			}
-			if bytes.Contains(body, []byte(ag24HostWeb)) || bytes.Contains(body, []byte(c.ID)) {
-				t.Errorf("ops token %s %s: answer carries host or operation data: %s", m, p, body)
-			}
-		}
+	// Each route is a real one: its own token is admitted there (positive
+	// control: not 401, 403, 404 or 405), so the ops token's 401 or 403 is a
+	// refusal of the token, not a missing or renamed route. The read API has
+	// no write method at all (405 for every token), so only GET is listed.
+	routes := []struct {
+		method, path, owner string
+		body                []byte
+	}{
+		{http.MethodGet, "/api/v1/hosts", ag24ReadToken, nil},
+		{http.MethodGet, "/api/v1/hosts/" + ag24HostWeb, ag24ReadToken, nil},
+		{http.MethodGet, "/api/v1/operations", ag24ReadToken, nil},
+		{http.MethodGet, "/api/v1/operations/" + c.ID, ag24ReadToken, nil},
+		{http.MethodGet, "/api/v1/vuln/inventory", vulnAgentToken, nil},
+		{http.MethodPost, "/api/v1/vuln/runs", vulnAgentToken, []byte(`{}`)},
 	}
-	// Sanity: the read token does read hosts, so the refusals above are the
-	// ops token's, not a broken mux.
-	if code, _ := e.do(ag24ReadToken, http.MethodGet, "/api/v1/hosts", nil); code != http.StatusOK {
-		t.Fatalf("read token GET /api/v1/hosts = %d", code)
+	for _, r := range routes {
+		code, body := e.do(r.owner, r.method, r.path, r.body)
+		switch code {
+		case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusMethodNotAllowed:
+			t.Fatalf("positive control: owning token %s %s = %d %s; the route is not a live one", r.method, r.path, code, body)
+		}
+		if code >= 500 {
+			t.Fatalf("positive control: owning token %s %s = %d %s", r.method, r.path, code, body)
+		}
+		code, body = e.do(ag24OpsToken, r.method, r.path, r.body)
+		if code != http.StatusUnauthorized && code != http.StatusForbidden {
+			t.Errorf("ops token %s %s = %d, want 401 or 403", r.method, r.path, code)
+		}
+		if bytes.Contains(body, []byte(ag24HostWeb)) || bytes.Contains(body, []byte(c.ID)) {
+			t.Errorf("ops token %s %s: answer carries host or operation data: %s", r.method, r.path, body)
+		}
 	}
 	g := e.group()
 	note := mustMarshal(t, map[string]any{"kind": "fix", "ref": g.Key, "digest": g.Digest, "summary": "s",
@@ -733,7 +749,13 @@ func TestAG24OpsTokenReachesOnlyOpsAPI(t *testing.T) {
 	if n := e.noteCount(); n != 0 {
 		t.Fatalf("%d notes stored by other tokens", n)
 	}
-	// The ops token does work on its own endpoints.
+	// The ops token does work on its own endpoints (positive control for the
+	// 401s above).
+	for _, p := range []string{api.OpsWorkPath, api.OpsAgentConfigPath} {
+		if code, _ := e.do(ag24OpsToken, http.MethodGet, p, nil); code != http.StatusOK {
+			t.Fatalf("ops token GET %s = %d, want 200", p, code)
+		}
+	}
 	if code, _ := e.do(ag24OpsToken, http.MethodPost, api.OpsNotesPath, note); code != http.StatusCreated {
 		t.Fatalf("ops token POST note = %d, want 201", code)
 	}
@@ -1322,6 +1344,8 @@ type ag24SettingsBackend struct {
 	audit *auditlog.Store
 	mu    sync.Mutex
 	bound map[string][32]byte
+	// finishCalls counts the assertions handed to the executor.
+	finishCalls atomic.Int64
 }
 
 func (b *ag24SettingsBackend) OpsAgentConfig(ctx context.Context) (opsconfig.Row, error) {
@@ -1352,11 +1376,14 @@ func (b *ag24SettingsBackend) CommitOpsAgentChange(ctx context.Context, user, id
 	}
 	b.mu.Lock()
 	want, ok := b.bound[id]
-	delete(b.bound, id)
 	b.mu.Unlock()
 	if !ok || want != d {
 		return ui.ErrOpsAgentAssertionRefused
 	}
+	// The production backend also consumes the challenge here
+	// (cmd/nebula-server TestOpsAgentChallengeIsSingleUse); this double
+	// keeps it, so the replay refusal below cannot come from the double.
+	b.finishCalls.Add(1)
 	if _, err := b.h.client.FinishLogin(ctx, &pb.FinishLoginRequest{LoginId: id, AssertionJson: assertion}); err != nil {
 		return fmt.Errorf("%w: %v", ui.ErrOpsAgentAssertionRefused, err)
 	}
@@ -1442,8 +1469,24 @@ func TestAG24SettingsChangeNeedsFreshAssertion(t *testing.T) {
 	if code, out := post("/settings/ops-agent/commit", fresh); code != http.StatusOK {
 		t.Fatalf("commit with a fresh assertion = %d %v", code, out)
 	}
-	if code, _ := post("/settings/ops-agent/commit", fresh); code == http.StatusOK {
-		t.Fatal("a replayed assertion was accepted")
+	// The replay is refused by the production UI handler: the pending change
+	// is single use (opsAgentPending.take), so the commit is 404 and no
+	// backend, test double or production, is asked.
+	calls := backend.finishCalls.Load()
+	if code, _ := post("/settings/ops-agent/commit", fresh); code != http.StatusNotFound {
+		t.Fatalf("replayed commit = %d, want 404 from the UI's single-use pending change", code)
+	}
+	if backend.finishCalls.Load() != calls {
+		t.Fatal("the replayed commit reached the settings backend")
+	}
+	// The real executor refuses the same assertion on the finished challenge
+	// on its own as well.
+	_, err = e.h.client.FinishLogin(e.ctx(), &pb.FinishLoginRequest{LoginId: idB, AssertionJson: e.h.loginAssertion(respB, e.h.id)})
+	if err == nil {
+		t.Fatal("the executor accepted a finished login challenge again")
+	}
+	if c := status.Code(err); c != codes.NotFound && c != codes.Unauthenticated && c != codes.PermissionDenied && c != codes.FailedPrecondition {
+		t.Fatalf("executor replay refusal = %v, want a refusal code", err)
 	}
 	cur, err := e.settings.Get(e.ctx())
 	if err != nil {
