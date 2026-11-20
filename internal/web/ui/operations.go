@@ -55,6 +55,8 @@ type Operations interface {
 	// Abortable answers which of the executions can be aborted from the
 	// operations list: the detail page's rule (executions.Abortable).
 	Abortable(ctx context.Context, ids []string) (map[string]bool, error)
+	// Reject rejects one pending proposal (executions.Service.Reject).
+	Reject(ctx context.Context, user, id, reason string) error
 	RetryHost(ctx context.Context, user, id, host string) error
 	// CheckCLIApproval asks the executor for the permit state of one
 	// execution (the "Check approval" button) and returns its state after
@@ -89,11 +91,16 @@ type operationsData struct {
 	// AnyAbort: some row of the list can be aborted (the multi-select
 	// shows only then).
 	AnyAbort bool
-	Actions  []actionView
-	Hosts    []opsHostOption
-	Exec     *execView
+	// AnyReject: some pending row can be rejected (the reject multi-select
+	// shows only then).
+	AnyReject bool
+	Actions   []actionView
+	Hosts     []opsHostOption
+	Exec      *execView
 	// Abort is the confirmation or result page of an abort.
 	Abort *abortData
+	// Reject is the confirmation or result page of a rejection.
+	Reject *rejectData
 }
 
 type opsRow struct {
@@ -103,6 +110,9 @@ type opsRow struct {
 	Hosts, Failed                                                int
 	// CanAbort: the row offers the abort button and the checkbox.
 	CanAbort bool
+	// CanReject: the row is pending and this web session holds the open
+	// privileged session: it offers the reject button and the checkbox.
+	CanReject bool
 	// HostNames is the compact host display (first 3 names + "+N").
 	HostNames string
 	// Search is the lowercased text the client-side filter matches
@@ -164,7 +174,10 @@ type execView struct {
 	// Expired is true when the approval window ended before anyone
 	// approved (issue #71): nothing was run. PlanAgain opens the
 	// operation form prefilled with the same action, hosts and parameters.
-	Expired   bool
+	Expired bool
+	// Rejected is true when a person rejected the proposal (spec 07
+	// v29-07-01): nothing was run. It offers the same Plan again as Expired.
+	Rejected  bool
 	PlanAgain string
 	// Scanner holds the Safety Scanner's findings for the action's script
 	// (advisory; the executor applies the same list to the risk).
@@ -268,7 +281,7 @@ func (h *Handler) handleOperations(w http.ResponseWriter, r *http.Request) {
 	}
 	stateF := r.URL.Query().Get("state")
 	switch stateF {
-	case "", "pending", "running", "finished", "failed", "expired":
+	case "", "pending", "running", "finished", "failed", "expired", "rejected":
 	default:
 		stateF = "" // invalid values are ignored
 	}
@@ -278,13 +291,23 @@ func (h *Handler) handleOperations(w http.ResponseWriter, r *http.Request) {
 		h.log.Error("operations list: abortable", "error", err.Error())
 		canAbort = map[string]bool{}
 	}
-	anyAbort := false
+	// Rejecting needs the open privileged session of this web session; it is
+	// asked only when the list has a pending row (one executor call).
+	canReject := false
+	for _, e := range list {
+		if e.State == "pending" {
+			canReject = h.rejectPrivileged(ctx)
+			break
+		}
+	}
+	anyAbort, anyReject := false, false
 	var rows, pending []opsRow
 	for _, e := range list {
 		row := opsRow{ID: e.ID, Short: e.ID[:8], Action: e.ActionID, Title: actionTitle[e.ActionID],
 			Risk: e.Risk, State: e.State, StateClass: opsStateClass(e.State), CreatedBy: e.CreatedBy,
 			Created: e.CreatedAt.UTC(), Finished: e.FinishedAt.UTC(), FinishedSet: !e.FinishedAt.IsZero(),
-			Hosts: e.Hosts, Failed: e.Failed, hostKey: strings.Join(hostIDs[e.ID], "\n"), CanAbort: canAbort[e.ID]}
+			Hosts: e.Hosts, Failed: e.Failed, hostKey: strings.Join(hostIDs[e.ID], "\n"), CanAbort: canAbort[e.ID],
+			CanReject: canReject && e.State == "pending"}
 		var parts []string
 		for _, id := range hostIDs[e.ID] {
 			n := names[id]
@@ -302,9 +325,11 @@ func (h *Handler) handleOperations(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		anyAbort = anyAbort || row.CanAbort
+		anyReject = anyReject || row.CanReject
 		rows = append(rows, row)
 	}
-	data.Ops = &operationsData{Items: groupOpsRows(rows, readOnly, stateF == ""), Pending: pending, StateFilter: stateF, AnyAbort: anyAbort}
+	data.Ops = &operationsData{Items: groupOpsRows(rows, readOnly, stateF == ""), Pending: pending, StateFilter: stateF,
+		AnyAbort: anyAbort, AnyReject: anyReject}
 	h.render(w, r, data)
 }
 
@@ -321,6 +346,10 @@ func opsStateClass(state string) string {
 		return "badge--critical"
 	case "expired":
 		return "badge--expired"
+	case "rejected":
+		// Not the muted expired badge: a rejection is a decision, not a
+		// window that ran out.
+		return "badge--rejected"
 	default:
 		return "badge--unknown"
 	}
@@ -549,8 +578,12 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 		Detail: e.Detail, Digest: e.Digest, CreatedBy: e.CreatedBy, Created: e.CreatedAt.UTC(),
 		Pending: e.State == "pending", Live: e.State == "approved" || e.State == "running",
 		NeedsTypedCount: e.Requirement == "assertion_verified_typed_count"}
-	if e.State == "expired" {
+	switch e.State {
+	case "expired":
 		v.Expired = true
+		v.PlanAgain = planAgainURL(e)
+	case "rejected":
+		v.Rejected = true
 		v.PlanAgain = planAgainURL(e)
 	}
 	if e.Params != "" && e.Params != "{}" {
