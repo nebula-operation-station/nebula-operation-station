@@ -427,26 +427,100 @@ type DebianAdvisoryList struct {
 	Skipped int
 }
 
+// debianListBufferBytes is the read buffer of the list reader. A line
+// longer than it is read in pieces, never buffered whole.
+const debianListBufferBytes = 4096
+
+// debianListLine is one line of a DSA or DLA list.
+type debianListLine struct {
+	// text is the line without its line break; empty when over is set.
+	text string
+	// first is the first byte of the line (0 for an empty line).
+	first byte
+	// over: the line is longer than MaxDebianListLineBytes. Its remainder
+	// is read and discarded, so the list reader can go on.
+	over bool
+}
+
+// readDebianListLine reads the next line of a list. It returns io.EOF when
+// the input has no line left. A line that is too long is reported with
+// over set; the bytes beyond the limit are not kept.
+func readDebianListLine(r *bufio.Reader) (debianListLine, error) {
+	var ln debianListLine
+	var buf []byte
+	started := false
+	// The raw line may hold the content plus "\r\n".
+	const maxRaw = MaxDebianListLineBytes + len("\r\n")
+	for {
+		chunk, err := r.ReadSlice('\n')
+		if len(chunk) > 0 && !started {
+			started = true
+			ln.first = chunk[0]
+		}
+		if !ln.over {
+			if len(buf)+len(chunk) > maxRaw {
+				ln.over, buf = true, nil
+			} else {
+				buf = append(buf, chunk...)
+			}
+		}
+		switch {
+		case errors.Is(err, bufio.ErrBufferFull):
+			continue
+		case errors.Is(err, io.EOF) && !started:
+			return debianListLine{}, io.EOF
+		case err != nil && !errors.Is(err, io.EOF):
+			return debianListLine{}, err
+		}
+		if !ln.over {
+			ln.text = strings.TrimSuffix(strings.TrimSuffix(string(buf), "\n"), "\r")
+			if len(ln.text) > MaxDebianListLineBytes {
+				ln.over, ln.text = true, ""
+			}
+		}
+		return ln, nil
+	}
+}
+
 // ParseDebianAdvisoryList parses a Debian DSA or DLA list
-// (data/DSA/list, data/DLA/list of the security tracker repository).
-// Each entry starts with a line "[DD Mon YYYY] DSA-NNNN-N ..."; indented
-// continuation lines are skipped. Any other line is skipped and counted.
-// A list mixing DSA and DLA entries, a too long line or too many entries
-// fail the list; a list without entries fails with ErrNoContentDate.
+// (data/DSA/list, data/DLA/list of the security tracker repository on
+// salsa.debian.org). Each entry starts with a line "[DD Mon YYYY] DSA-NNNN-N
+// ..." whose date is the advisory date; indented continuation lines (CVE
+// lists, "[suite] - package version", NOTE lines) carry no date. Any other
+// line is skipped and counted. A list mixing DSA and DLA entries, an entry
+// line longer than MaxDebianListLineBytes or too many entries fail the list.
+// An overlong continuation line cannot hold a date (a long linux CVE list
+// can exceed the limit), so it is skipped and counted instead. A list
+// without entries fails with ErrNoContentDate.
+//
+// The list dates are the content dates of the DSA and DLA feeds and, through
+// their newest date, the proxy date of the tracker JSON. They are never the
+// fetch time.
 func ParseDebianAdvisoryList(ctx context.Context, r io.Reader) (DebianAdvisoryList, error) {
 	var out DebianAdvisoryList
 	br := newBoundedReader(r, MaxDebianListBytes)
-	sc := bufio.NewScanner(br)
-	sc.Buffer(make([]byte, 0, 4096), MaxDebianListLineBytes)
-	line := 0
-	for sc.Scan() {
-		line++
+	rd := bufio.NewReaderSize(br, debianListBufferBytes)
+	for line := 1; ; line++ {
 		if line%4096 == 0 {
 			if err := ctx.Err(); err != nil {
 				return DebianAdvisoryList{}, fmt.Errorf("debian advisory list: %w", err)
 			}
 		}
-		s := strings.TrimSuffix(sc.Text(), "\r")
+		ln, err := readDebianListLine(rd)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return DebianAdvisoryList{}, br.fail("debian advisory list", err)
+		}
+		if ln.over {
+			if ln.first == '[' {
+				return DebianAdvisoryList{}, fmt.Errorf("debian advisory list line %d: longer than %d bytes: %w", line, MaxDebianListLineBytes, ErrFeedLimit)
+			}
+			out.Skipped++
+			continue
+		}
+		s := ln.text
 		if s == "" || s[0] == '\t' || s[0] == ' ' {
 			if err := checkText(s, MaxDebianListLineBytes); err != nil {
 				if !recordSkippable(err) {
@@ -480,12 +554,6 @@ func ParseDebianAdvisoryList(ctx context.Context, r io.Reader) (DebianAdvisoryLi
 		if d.After(out.Newest) {
 			out.Newest = d
 		}
-	}
-	if err := sc.Err(); err != nil {
-		if errors.Is(err, bufio.ErrTooLong) {
-			return DebianAdvisoryList{}, fmt.Errorf("debian advisory list line %d: %w", line+1, ErrFeedLimit)
-		}
-		return DebianAdvisoryList{}, br.fail("debian advisory list", err)
 	}
 	if out.Entries == 0 {
 		return DebianAdvisoryList{}, fmt.Errorf("debian advisory list: %w", ErrNoContentDate)
