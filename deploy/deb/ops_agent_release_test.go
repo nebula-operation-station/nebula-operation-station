@@ -91,43 +91,42 @@ func TestOpsAgentPackagedLikeTheVulnAgent(t *testing.T) {
 	}
 }
 
-// The path unit's trigger is inert until a follow-up gives nebula-server a
-// write path for it: the server runs with ProtectSystem=strict and may only
-// write its own StateDirectory. The path unit and install.sh say so. When the
-// server unit gains a write path for the trigger, this test fails and the
-// notes must be updated together with it.
-func TestOpsAgentPathTriggerIsInertUntilTheServerCanWriteIt(t *testing.T) {
+// The trigger lies in nebula-server's own StateDirectory, and the server unit
+// gains no write path for it (ADR 0016 amendment 2026-11-19): it stays
+// ProtectSystem=strict with StateDirectory=nebula/server as its only writable
+// location. This replaces the earlier check that the trigger was inert while
+// the server could not write /var/lib/nebula/opsagent; the "inert" notes in
+// the path unit and install.sh are gone with it.
+func TestOpsAgentTriggerIsInTheServerStateDirWithoutNewWritePaths(t *testing.T) {
 	server := unitLines(t, "../systemd/nebula-server.service")
 	if !slices.Contains(server, "ProtectSystem=strict") {
-		t.Fatalf("nebula-server.service is no longer ProtectSystem=strict; revisit the trigger note")
+		t.Fatalf("nebula-server.service is no longer ProtectSystem=strict")
 	}
-	trigDir := filepath.Dir(opsTriggerDir)
-	under := func(p, dir string) bool { return p == dir || strings.HasPrefix(p, dir+"/") }
+	var stateDirs []string
 	for _, l := range server {
 		k, v, ok := strings.Cut(l, "=")
 		if !ok {
 			continue
 		}
 		switch k {
-		case "ReadWritePaths", "StateDirectory", "RuntimeDirectory", "BindPaths":
-			for _, p := range strings.Fields(v) {
-				p = strings.TrimPrefix(strings.TrimPrefix(p, "-"), "+")
-				if k == "StateDirectory" {
-					p = "/var/lib/" + p
-				}
-				if under(trigDir, p) || under(p, trigDir) {
-					t.Errorf("nebula-server.service now can write %s (%s); remove the inert-trigger notes and this test", trigDir, l)
-				}
-			}
+		case "StateDirectory":
+			stateDirs = append(stateDirs, strings.Fields(v)...)
+		case "ReadWritePaths", "BindPaths", "RuntimeDirectory", "CacheDirectory", "LogsDirectory", "ConfigurationDirectory":
+			t.Errorf("nebula-server.service gained a write path: %q", l)
 		}
 	}
-	note := "inert"
-	raw := readFile(t, opsPath)
-	if !strings.Contains(raw, note) || !strings.Contains(raw, "nebula-server") {
-		t.Errorf("path unit comment does not record that the trigger is inert until nebula-server gets a write path")
+	if !slices.Equal(stateDirs, []string{"nebula/server"}) {
+		t.Fatalf("nebula-server.service StateDirectory = %q, want only nebula/server", stateDirs)
 	}
-	if b := installBlock(t, "ops agent install"); !strings.Contains(b, note) {
-		t.Errorf("install.sh --ops-agent next steps do not say the path unit is inert for now")
+	if filepath.Dir(opsTriggerPath) != "/var/lib/"+stateDirs[0] {
+		t.Errorf("trigger %s is not in the server's StateDirectory /var/lib/%s", opsTriggerPath, stateDirs[0])
+	}
+	if raw := readFile(t, opsPath); strings.Contains(raw, "inert") {
+		t.Errorf("path unit comment still calls the trigger inert")
+	}
+	b := installBlock(t, "ops agent install")
+	if strings.Contains(b, "inert") || strings.Contains(b, "/var/lib/nebula/opsagent") {
+		t.Errorf("install.sh --ops-agent next steps still call the path unit inert or name the old trigger path")
 	}
 }
 
