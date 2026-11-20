@@ -515,9 +515,9 @@ Next steps (guide, section "Ops agent"):
        sudo systemctl start nebula-ops-agent.service
        sudo systemctl enable --now nebula-ops-agent.timer
        sudo systemctl enable --now nebula-ops-agent.path
-     The path unit is inert for now: nebula-server has no write path for
-     its trigger (/var/lib/nebula/opsagent/trigger) yet, so only the
-     timer starts runs until a later release adds one.
+     The path unit starts a run when nebula-server replaces its trigger
+     (/var/lib/nebula/server/ops-trigger) on a new critical or high
+     finding or an admin question.
 EOF
   exit 0
   # end: ops agent install

@@ -149,7 +149,8 @@ below and every ticket.
   - `nebula-ops-agent.path`: the server touches a trigger file when a
     finding newly enters tier `critical` or `high` (new, or escalated) or
     when an admin asks a question. Only systemd reads that path; the
-    agent cannot see it (D13). The pattern is that of
+    agent cannot see it (D13). The file is
+    `/var/lib/nebula/server/ops-trigger` (amendment 2026-11-19). The pattern is that of
     `nebula-discovery.path`.
   A trigger carries no data. A run that finds no due item ends.
 
@@ -560,6 +561,34 @@ recommended. Q6 suggestions with buttons and the D9 rule (previously
 recommended: text only). Q7 one panel, two tabs, separate backends, and
 admin questions in the Ops tab (previously recommended: no merge, no
 questions). Q8 no Telegram intake.
+
+## Amendment (2026-11-19): trigger file in the server state directory
+
+Maintainer decision (Axel, 2026-11-19, finding B4 of the review). The
+trigger file of D3 was `/var/lib/nebula/opsagent/trigger`. nebula-server
+runs with `ProtectSystem=strict` and may write only its own
+`StateDirectory`, so it could not write that path and the path unit was
+inert. The trigger moves (previously `/var/lib/nebula/opsagent/trigger`):
+
+- **Path:** `/var/lib/nebula/server/ops-trigger`, directly in the
+  server's `StateDirectory=nebula/server`.
+- **Server writes only its own state directory.** `nebula-server.service`
+  gets **no new write paths**: no `ReadWritePaths=`, no further
+  `*Directory=`; `ProtectSystem=strict` stays.
+- **Write:** the server creates an empty temporary file with mode `0600`
+  in the same directory and renames it over the trigger (atomic). The
+  content is empty and has no meaning; a symlink or other file at the
+  path is replaced, never written through. Rate and conditions stay as
+  in D3 (at most once per minute, only while the agent is enabled).
+- **Watch:** `nebula-ops-agent.path` watches the file with
+  `PathChanged=` (`PathModified=` would be equivalent here). Path units
+  are watched by systemd itself (PID 1, root); the path unit runs no
+  process and names no user, so no account gains access to the server's
+  directory. It starts the oneshot `nebula-ops-agent.service`.
+- **Agent stays locked out.** `nebula-ops-agent.service` keeps
+  `InaccessiblePaths=-/var/lib/nebula -/etc/nebula -/run/nebula` (D13),
+  which covers `/var/lib/nebula/server`. The agent never reads the
+  trigger; a trigger carries no data (D3).
 
 ## Tickets
 

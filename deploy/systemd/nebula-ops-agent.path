@@ -1,19 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Starts nebula-ops-agent.service when the server touches its trigger file:
 # a finding newly entered tier critical or high, or an admin asked a
-# question (ADR 0016 D3). The trigger carries no data. Only systemd reads
-# this directory; it lies below /var/lib/nebula, which the agent's unit
-# makes inaccessible to the agent (D13). Off by default (guide, "Ops agent"):
+# question (ADR 0016 D3). The trigger carries no data.
+#
+# The trigger lies in nebula-server's own StateDirectory
+# (/var/lib/nebula/server/ops-trigger, ADR 0016 amendment 2026-11-19;
+# previously /var/lib/nebula/opsagent/trigger, which nebula-server could not
+# write). nebula-server replaces it by rename and needs no extra write path.
+# Path units are watched by systemd (PID 1, root) itself, so this unit reads
+# the server's directory without any user being given access to it. The
+# agent never reads the file: /var/lib/nebula is in its InaccessiblePaths
+# (D13). Off by default (guide, "Ops agent"):
 #   sudo systemctl enable --now nebula-ops-agent.path
-# The trigger is inert for now: nebula-server runs with ProtectSystem=strict and may write
-# only its StateDirectory (/var/lib/nebula/server), so nothing touches the
-# trigger yet. Until a follow-up gives nebula-server a write path for
-# /var/lib/nebula/opsagent, only the timer starts runs.
 [Unit]
 Description=Nebula Operation Station ops agent: watch the server's trigger
 
 [Path]
-PathChanged=/var/lib/nebula/opsagent/trigger
+PathChanged=/var/lib/nebula/server/ops-trigger
 Unit=nebula-ops-agent.service
 
 [Install]
