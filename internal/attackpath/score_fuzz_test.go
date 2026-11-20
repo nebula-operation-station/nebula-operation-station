@@ -272,7 +272,7 @@ func FuzzValidateFinding(f *testing.F) {
 	f.Add("host:a", "CVE-2024-0001", vec, false, math.Float64bits(0.3), false, uint8(FindingOpen), []byte{1, 0, 0})
 	f.Add("host:a", "CVE-2024-0001", vec, false, math.Float64bits(0.3), false, uint8(0), []byte{})
 	f.Add("", "", "", false, uint64(0), false, uint8(0), []byte{})
-	f.Add("host:"+strings.Repeat("a", MaxIDBytes), "k", "not a vector", false, math.Float64bits(-0.0), false, uint8(FindingOpen), []byte{9, 255, 255})
+	f.Add("host:"+strings.Repeat("a", MaxIDBytes), "k", "not a vector", false, math.Float64bits(math.Copysign(0, -1)), false, uint8(FindingOpen), []byte{9, 255, 255})
 	f.Fuzz(func(t *testing.T, node, key, vector string, kev bool, epssBits uint64, epssKnown bool, state uint8, ports []byte) {
 		fd := Finding{
 			Node:      node,
