@@ -9,12 +9,11 @@
 // the highest id; the last complete read is the newest one with complete set.
 // The closure classes of ADR 0011 D5 use these two reads.
 //
-// Prune keeps, per host in the keep set, the newest read, the last complete
-// read and every read an export snapshot points at. Other hosts keep only the
-// reads a snapshot points at, so their newest and last complete reads are
-// deleted too once no snapshot refers to them.
+// The store deletes no reads. Retention of package reads (ADR 0011 D6, decision
+// E1 in docs/implementation/vuln-inventory-decisions.md) is not decided yet.
 //
 // Inputs are checked against the named limits in store.go and rejected, never
-// truncated. The package uses database/sql only and has no dependency on
+// truncated. Package names, versions and architectures must match the export's
+// ASCII patterns. The package uses database/sql only and has no dependency on
 // other NOS packages.
 package vulninventory

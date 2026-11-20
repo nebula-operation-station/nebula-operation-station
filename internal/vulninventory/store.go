@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"time"
 	"unicode/utf8"
@@ -23,6 +24,10 @@ const (
 	// MaxComponents bounds the source packages of one read. A source package
 	// has at least one binary in practice, so MaxBinaries also bounds it.
 	MaxComponents = MaxBinaries
+	// MaxDropped bounds Read.Dropped. The dpkg list parser accepts twice
+	// MaxBinaries stanzas (osdebian.MaxCandidateStanzas = 2 * MaxPackages),
+	// so a read cannot honestly report more dropped lines than that.
+	MaxDropped = 2 * MaxBinaries
 	// MaxReasonBytes bounds Read.Reason (why a read is partial or failed).
 	MaxReasonBytes = 128
 
@@ -42,7 +47,10 @@ const (
 	maxArchBytes = 32
 
 	// The body is the canonical JSON of the components. Its size bound is
-	// derived from the field limits above; the worst case of one encoded
+	// derived from the field limits above. Package names, versions and
+	// architectures are restricted to the export's ASCII patterns (see
+	// namePattern etc.), so no byte of a field is escaped by json.Marshal
+	// (escaping would grow a byte to six). The worst case of one encoded
 	// binary is
 	//   {"name":"<128>","version":"<128>","arch":"<32>"}  = 322 bytes
 	// plus one separator, 323. One encoded component without its binaries is
@@ -53,6 +61,7 @@ const (
 	maxBodyEnvelopeBytes  = 2
 	// MaxBodyBytes bounds the stored body: MaxComponents components and
 	// MaxBinaries binaries at their maximum encoded size (12,540,002 bytes).
+	// The body column CHECK in migration 0052 repeats this number.
 	MaxBodyBytes = MaxComponents*maxComponentJSONBytes + MaxBinaries*maxBinaryJSONBytes + maxBodyEnvelopeBytes
 )
 
@@ -101,7 +110,7 @@ type Read struct {
 	Complete bool
 	// Reason says why the read is partial or failed, at most MaxReasonBytes.
 	Reason string
-	// Dropped counts the package lines the read could not use.
+	// Dropped counts the package lines the read could not use, at most MaxDropped.
 	Dropped    int
 	Ecosystem  string
 	Kernel     Kernel
@@ -151,6 +160,31 @@ func checkText(field, v string, max int, required bool) error {
 	return nil
 }
 
+// Patterns of the export (internal/web/api/vuln_export.go: exportPackageRe,
+// exportVersionRe, exportArchRe). Package names and versions are ASCII, so a
+// valid field has no byte that json.Marshal escapes.
+var (
+	namePattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9+._-]{1,127}$`)
+	versionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.+~:_-]{0,127}$`)
+	archPattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,31}$`)
+)
+
+// checkPattern rejects a value that does not match re. An empty value is
+// rejected only when required; otherwise it is allowed. The value itself is
+// not echoed: it comes from a managed host and may be hostile.
+func checkPattern(field, v string, re *regexp.Regexp, required bool) error {
+	if v == "" {
+		if required {
+			return fmt.Errorf("%w: %s is empty", ErrInvalidRead, field)
+		}
+		return nil
+	}
+	if !re.MatchString(v) {
+		return fmt.Errorf("%w: %s does not match the export pattern", ErrInvalidRead, field)
+	}
+	return nil
+}
+
 // checkBodySize rejects a body longer than MaxBodyBytes.
 func checkBodySize(n int) error {
 	if n > MaxBodyBytes {
@@ -159,35 +193,52 @@ func checkBodySize(n int) error {
 	return nil
 }
 
-// canonicalBody validates the components of r and returns their canonical
-// JSON (sorted by source, then source version; binaries by name, version and
-// arch) and the number of binaries. It does not modify comps.
-func canonicalBody(comps []Component) ([]byte, int, error) {
-	if len(comps) > MaxComponents {
-		return nil, 0, fmt.Errorf("%w: %d components, limit %d", ErrLimit, len(comps), MaxComponents)
+// checkBodyCount rejects a count over its limit.
+func checkBodyCount(what string, n, limit int) error {
+	if n > limit {
+		return fmt.Errorf("%w: %d %s, limit %d", ErrLimit, n, what, limit)
+	}
+	return nil
+}
+
+// canonicalComponents validates comps and returns them in canonical order
+// (sorted by source, then source version; binaries by name, version and
+// arch) together with the number of binaries. Two components with the same
+// source and source version, and two identical binaries in one component,
+// are rejected: the canonical order must be total for the body to be
+// canonical. comps is not modified.
+func canonicalComponents(comps []Component) ([]bodyComponent, int, error) {
+	if err := checkBodyCount("components", len(comps), MaxComponents); err != nil {
+		return nil, 0, err
 	}
 	binaries := 0
 	out := make([]bodyComponent, 0, len(comps))
-	for i, c := range comps {
-		if err := checkText("component source", c.Source, maxNameBytes, true); err != nil {
+	seen := make(map[[2]string]bool, len(comps))
+	for _, c := range comps {
+		if err := checkPattern("component source", c.Source, namePattern, true); err != nil {
 			return nil, 0, err
 		}
-		if err := checkText("component source version", c.SourceVersion, maxVersionBytes, true); err != nil {
+		if err := checkPattern("component source version", c.SourceVersion, versionPattern, true); err != nil {
 			return nil, 0, err
 		}
+		key := [2]string{c.Source, c.SourceVersion}
+		if seen[key] {
+			return nil, 0, fmt.Errorf("%w: duplicate component %s", ErrInvalidRead, c.Source)
+		}
+		seen[key] = true
 		binaries += len(c.Binaries)
-		if binaries > MaxBinaries {
-			return nil, 0, fmt.Errorf("%w: more than %d binaries (component %d)", ErrLimit, MaxBinaries, i)
+		if err := checkBodyCount("binaries", binaries, MaxBinaries); err != nil {
+			return nil, 0, err
 		}
 		bs := make([]bodyBinary, 0, len(c.Binaries))
 		for _, b := range c.Binaries {
-			if err := checkText("binary name", b.Name, maxNameBytes, true); err != nil {
+			if err := checkPattern("binary name", b.Name, namePattern, true); err != nil {
 				return nil, 0, err
 			}
-			if err := checkText("binary version", b.Version, maxVersionBytes, true); err != nil {
+			if err := checkPattern("binary version", b.Version, versionPattern, true); err != nil {
 				return nil, 0, err
 			}
-			if err := checkText("binary arch", b.Arch, maxArchBytes, false); err != nil {
+			if err := checkPattern("binary arch", b.Arch, archPattern, false); err != nil {
 				return nil, 0, err
 			}
 			bs = append(bs, bodyBinary(b))
@@ -201,15 +252,30 @@ func canonicalBody(comps []Component) ([]byte, int, error) {
 			}
 			return bs[x].Arch < bs[y].Arch
 		})
+		for i := 1; i < len(bs); i++ {
+			if bs[i] == bs[i-1] {
+				return nil, 0, fmt.Errorf("%w: duplicate binary %s in component %s", ErrInvalidRead, bs[i].Name, c.Source)
+			}
+		}
 		out = append(out, bodyComponent{Source: c.Source, SourceVersion: c.SourceVersion, Binaries: bs})
 	}
-	sort.SliceStable(out, func(x, y int) bool {
+	sort.Slice(out, func(x, y int) bool {
 		if out[x].Source != out[y].Source {
 			return out[x].Source < out[y].Source
 		}
 		return out[x].SourceVersion < out[y].SourceVersion
 	})
-	body, err := json.Marshal(out)
+	return out, binaries, nil
+}
+
+// encodeBody returns the canonical JSON of comps and the number of binaries.
+// It validates comps and checks the body size.
+func encodeBody(comps []Component) ([]byte, int, error) {
+	canon, binaries, err := canonicalComponents(comps)
+	if err != nil {
+		return nil, 0, err
+	}
+	body, err := json.Marshal(canon)
 	if err != nil {
 		return nil, 0, fmt.Errorf("vulninventory: encode body: %w", err)
 	}
@@ -219,8 +285,37 @@ func canonicalBody(comps []Component) ([]byte, int, error) {
 	return body, binaries, nil
 }
 
+// decodeBody parses a stored body and checks it as Put would have: size,
+// field patterns, uniqueness and canonical bytes. A body that does not
+// re-encode to itself was not written by Put.
+func decodeBody(body []byte) ([]Component, error) {
+	if err := checkBodySize(len(body)); err != nil {
+		return nil, err
+	}
+	var bc []bodyComponent
+	if err := json.Unmarshal(body, &bc); err != nil {
+		return nil, fmt.Errorf("vulninventory: decode body: %w", err)
+	}
+	comps := make([]Component, 0, len(bc))
+	for _, c := range bc {
+		bs := make([]Binary, 0, len(c.Binaries))
+		for _, b := range c.Binaries {
+			bs = append(bs, Binary(b))
+		}
+		comps = append(comps, Component{Source: c.Source, SourceVersion: c.SourceVersion, Binaries: bs})
+	}
+	again, _, err := encodeBody(comps)
+	if err != nil {
+		return nil, fmt.Errorf("vulninventory: decode body: %w", err)
+	}
+	if string(again) != string(body) {
+		return nil, fmt.Errorf("vulninventory: decode body: body is not canonical")
+	}
+	return comps, nil
+}
+
 // validateRead checks the header fields of r. Components are checked by
-// canonicalBody.
+// encodeBody.
 func validateRead(r Read) error {
 	if err := checkText("host id", r.HostID, maxHostIDBytes, true); err != nil {
 		return err
@@ -236,6 +331,9 @@ func validateRead(r Read) error {
 	}
 	if r.Dropped < 0 {
 		return fmt.Errorf("%w: dropped is negative", ErrInvalidRead)
+	}
+	if err := checkBodyCount("dropped lines", r.Dropped, MaxDropped); err != nil {
+		return err
 	}
 	if err := checkText("ecosystem", r.Ecosystem, maxEcosystemBytes, false); err != nil {
 		return err
@@ -259,7 +357,7 @@ func (s *Store) Put(ctx context.Context, r Read) (int64, error) {
 	if err := validateRead(r); err != nil {
 		return 0, fmt.Errorf("vulninventory: put: %w", err)
 	}
-	body, binaries, err := canonicalBody(r.Components)
+	body, binaries, err := encodeBody(r.Components)
 	if err != nil {
 		return 0, fmt.Errorf("vulninventory: put: %w", err)
 	}
@@ -296,7 +394,7 @@ type rowScanner interface {
 }
 
 // scanRead reads one row of headerColumns (withBody false) or fullColumns
-// (withBody true).
+// (withBody true). A body is decoded and checked with decodeBody.
 func scanRead(sc rowScanner, withBody bool) (Read, error) {
 	var r Read
 	var readAt int64
@@ -313,18 +411,11 @@ func scanRead(sc rowScanner, withBody bool) (Read, error) {
 	r.ReadAt = time.Unix(readAt, 0).UTC()
 	r.Complete = complete == 1
 	if withBody {
-		var bc []bodyComponent
-		if err := json.Unmarshal(body, &bc); err != nil {
-			return Read{}, fmt.Errorf("vulninventory: decode body of read %d: %w", r.ID, err)
+		comps, err := decodeBody(body)
+		if err != nil {
+			return Read{}, fmt.Errorf("read %d: %w", r.ID, err)
 		}
-		r.Components = make([]Component, 0, len(bc))
-		for _, c := range bc {
-			bs := make([]Binary, 0, len(c.Binaries))
-			for _, b := range c.Binaries {
-				bs = append(bs, Binary(b))
-			}
-			r.Components = append(r.Components, Component{Source: c.Source, SourceVersion: c.SourceVersion, Binaries: bs})
-		}
+		r.Components = comps
 	}
 	return r, nil
 }
@@ -392,88 +483,7 @@ func (s *Store) LatestAll(ctx context.Context) ([]Read, error) {
 	return out, nil
 }
 
-// Prune deletes the reads no closure or snapshot still needs and returns how
-// many it deleted. For a host with keepHosts[host] true it keeps the newest
-// read, the last complete read and every read a snapshot points at. For any
-// other host (absent, or false) it keeps only the reads a snapshot points at,
-// so such a host's newest and last complete reads go too once no snapshot
-// refers to them. The whole prune runs in one transaction.
-func (s *Store) Prune(ctx context.Context, keepHosts map[string]bool) (int, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, fmt.Errorf("vulninventory: prune: begin: %w", err)
-	}
-	defer tx.Rollback()
-
-	hosts, err := distinctHosts(ctx, tx)
-	if err != nil {
-		return 0, err
-	}
-	deleted := 0
-	for _, host := range hosts {
-		n, err := pruneHost(ctx, tx, host, keepHosts[host])
-		if err != nil {
-			return 0, err
-		}
-		deleted += n
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("vulninventory: prune: commit: %w", err)
-	}
-	return deleted, nil
-}
-
-// pruneHost deletes the unneeded reads of one host inside tx and returns how
-// many rows it deleted. keep selects the rule (see Prune).
-func pruneHost(ctx context.Context, tx *sql.Tx, host string, keep bool) (int, error) {
-	const notSnapshotted = `NOT EXISTS (SELECT 1 FROM vuln_inventory_snapshot_reads AS s WHERE s.read_id = vuln_inventory_reads.id)`
-	var res sql.Result
-	var err error
-	if keep {
-		var latest int64
-		if err := tx.QueryRowContext(ctx, `SELECT id FROM vuln_inventory_reads WHERE host_id = ?
-			ORDER BY read_at DESC, id DESC LIMIT 1`, host).Scan(&latest); err != nil {
-			return 0, fmt.Errorf("vulninventory: prune: latest %s: %w", host, err)
-		}
-		// A host with no complete read has NULL here; IS NOT (not <>) then
-		// excludes nothing, so the newest read is still the only one kept.
-		var lastComplete sql.NullInt64
-		if err := tx.QueryRowContext(ctx, `SELECT id FROM vuln_inventory_reads WHERE host_id = ? AND complete = 1
-			ORDER BY read_at DESC, id DESC LIMIT 1`, host).Scan(&lastComplete); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return 0, fmt.Errorf("vulninventory: prune: last complete %s: %w", host, err)
-		}
-		res, err = tx.ExecContext(ctx, `DELETE FROM vuln_inventory_reads WHERE host_id = ?
-			AND id IS NOT ? AND id IS NOT ? AND `+notSnapshotted, host, latest, lastComplete)
-	} else {
-		res, err = tx.ExecContext(ctx, `DELETE FROM vuln_inventory_reads WHERE host_id = ? AND `+notSnapshotted, host)
-	}
-	if err != nil {
-		return 0, fmt.Errorf("vulninventory: prune %s: %w", host, err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("vulninventory: prune %s: %w", host, err)
-	}
-	return int(n), nil
-}
-
-// distinctHosts returns every host ID that has at least one read, in order.
-func distinctHosts(ctx context.Context, tx *sql.Tx) ([]string, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT host_id FROM vuln_inventory_reads ORDER BY host_id`)
-	if err != nil {
-		return nil, fmt.Errorf("vulninventory: prune: hosts: %w", err)
-	}
-	defer rows.Close()
-	var hosts []string
-	for rows.Next() {
-		var h string
-		if err := rows.Scan(&h); err != nil {
-			return nil, fmt.Errorf("vulninventory: prune: hosts: %w", err)
-		}
-		hosts = append(hosts, h)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("vulninventory: prune: hosts: %w", err)
-	}
-	return hosts, nil
-}
+// TODO(E1): package read retention is not decided. The recommended rule
+// (latest, last complete and snapshot-pinned reads) is in
+// docs/implementation/vuln-inventory-decisions.md under E1. Until the
+// maintainer decides, this package deletes no reads, and no Prune exists.
