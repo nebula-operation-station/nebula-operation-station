@@ -38,7 +38,7 @@ Reference points used below (all verified in this clone):
 | `vulnstore.MaxInventoryAge` | `internal/vulnstore/vulnstore.go:59` | 24 h, maximum age of a snapshot ID |
 | `vulnstore.StaleAfter` | `internal/vulnstore/vulnstore.go:83` | 48 h, run staleness (ADR D6, Q5) |
 | `permit.PackageListInstalledMinInterval` | `internal/permit/lease.go:114` | 6 h, minimum interval per host |
-| `VulnInventory` | `internal/web/api/vuln_export.go:50` | "A snapshot is immutable for its ID" |
+| `VulnInventory` | `internal/web/api/vuln_export.go:52–54` | "A snapshot is immutable for its ID" |
 | `vulnSnapshotPrefix`, `VulnSnapshot` | `cmd/nebula-server/vuln.go:148–150` | returns the empty `nos-empty-<hour>` snapshot |
 | `leaseableAction` | `internal/executions/readgrants_propose.go:173` | which actions a proposed read lease may contain |
 | `imageParam` | `internal/executions/actions/actions.go:172` | `image` parameter (`repo@sha256:digest`) of `image.packages` (line 500) |
@@ -62,10 +62,11 @@ Reference points used below (all verified in this clone):
   latest read that lists the component; if the latest read is partial (D3) and
   does not list it, from the last complete read". So NOS needs at least the
   latest read and the last complete read per subject.
-- ADR 0011 D3 (`VulnInventory`, `vuln_export.go:50`): a snapshot is immutable
-  for its ID, and `vulnstore.MaxInventoryAge` (24 h) bounds how long a snapshot
-  ID stays valid. A snapshot therefore points at reads that must still exist for
-  as long as the ID is valid.
+- The code's `VulnInventory` interface (`internal/web/api/vuln_export.go:52–54`)
+  says a snapshot is immutable for its ID. That is a code comment, not ADR text.
+  `vulnstore.MaxInventoryAge` (24 h) bounds how long a snapshot ID stays valid.
+  A snapshot therefore points at reads that must still exist for as long as the
+  ID is valid.
 - Spec `docs/spec/03-processes-and-data.md` (line 57) lists the vulnerability
   tables; it has no table for package reads yet.
 
@@ -81,7 +82,7 @@ classification and the D3 snapshot guarantee need. Option 1 breaks D5 when the
 latest read is partial. Option 3 is a new retention number that no ADR decides;
 if the maintainer wants history for audit, it should be a new decision (Q-style
 entry in ADR 0011), not an implementation default. The rule in option 2 needs
-no number of its own: it follows from D5 and `MaxInventoryAge`. This retention rule is not decided yet, so iv02–iv07 must not implement it before the maintainer decides (they build only what ADR and code already fix, lines 8–9).
+no number of its own: it follows from D5 and `MaxInventoryAge`. This retention rule is not decided yet, so iv02–iv07 must not implement it before the maintainer decides (they build only what ADR and code already fix, the "Goes ahead" bullet at lines 14–15).
 
 **Consequence for the code.** Conditional on the choice. Only if option 2 is
 chosen: pruning of package reads runs with the same clock as `vulnstore` pruning,
@@ -102,10 +103,12 @@ subject in a run and keep a closure possible)?
 - ADR 0011 D3: `package.list_installed` runs at most every 6 h per host
   (`permit.PackageListInstalledMinInterval`). This bounds the frequency from
   below only.
-- ADR 0011 D5 limits the age of the **snapshot** (`MaxInventoryAge`, 24 h) and
-  the age of a run's **feed** data; it does not limit the age of a read.
-  `vulnstore.MaxInventoryAge` (`internal/vulnstore/vulnstore.go:59`) is checked
-  at run start against the snapshot ID, so it bounds snapshot age, not read age.
+- ADR 0011 D5 run protocol (lines 492–493) rejects a run whose inventory
+  generation is more than 24 h older than the current one. The code's
+  `vulnstore.MaxInventoryAge` (`internal/vulnstore/vulnstore.go:59`, 24 h) is the
+  snapshot-age limit, so it bounds snapshot age, not read age. ADR 0011 D4 limits
+  the age of **feed** snapshots (72 h for daily feeds, line 334). Neither limits
+  the age of a read.
 - ADR 0011 D6 "Staleness" limits the last complete **run** per subject
   (`vulnstore.StaleAfter`, 48 h, Q5). This is about the assessment, not the
   inventory.
@@ -245,8 +248,10 @@ schedule?
   `permit.ReadGrantAction.ParametersHash` (`internal/permit/lease.go:147-152`)
   is that binding. The permit allowlist already lists `image.packages` with the
   digest pinned by the grant's parameters hash (`internal/permit/lease.go:99-103`).
-  So under ADR 0007 a lease could carry one image digest. ADR 0011 D3 does not
-  say whether `image.packages` may be leased; the code blocks it today.
+  So under ADR 0007 a lease could carry one image digest. ADR 0011 D3 and line
+  1175 decide that `image.packages` is in the read-only allowlist. They do not
+  say whether a lease may carry its digest parameter, and the code blocks that
+  today.
 - Host reads: `package.list_installed` has no parameters and is in the code's
   read-only allowlist (`internal/permit/lease.go:98`), so `leaseableAction`
   (`internal/executions/readgrants_propose.go:173`) accepts it.
@@ -261,7 +266,7 @@ schedule?
   parameters, duration, budget); grant creation does not require a privileged
   session, which the ADR calls "an explicit change to the existing schedule
   proposal/commit precondition". Its identity table (line 68): renewal requires
-  new approval; default 7 days, maximum 30. Lines 79–80: new enrollment, changed
+  new approval; default 7 days, maximum 30. Lines 77–78: new enrollment, changed
   tag membership or a replacement key never joins a lease automatically.
   Lines 121–122: read runs need unlocked credentials but no privileged session
   and no per-run approval.
@@ -275,6 +280,14 @@ schedule?
   is the text: ADR 0007's initial allowlist (lines 83–84) does not name it, and
   the spec text (ADR 0011 line 1175: spec 07 and 10) is still to be written.
   That is a documentation follow-up (see the list at the end), not a decision.
+- **Decided by ADR 0011 D3 and line 1175 (not open).** `image.packages` is in
+  the read-only allowlist. The code agrees: `internal/permit/lease.go:99–103`
+  lists it and cites ADR 0011 D3. Only its use in a lease with a digest
+  parameter is open (decision (1) below).
+- **Decided by ADR 0011 D3 and line 1175 (not open).** `image.packages` is in
+  the read-only allowlist. The code agrees: `internal/permit/lease.go:99–103`
+  lists it and cites ADR 0011 D3. Only its use in a lease with a digest
+  parameter is open (decision (1) below).
 
 **Options for (a) image freshness.**
 
@@ -283,8 +296,10 @@ schedule?
    decision on digest source and scheduling. Until then, image packages are not
    stored and image subjects stay Unconfirmed (E3).
 3. Allow one exact image digest per lease action: the digest is a lease
-   parameter bound by `ParametersHash` (ADR 0007 line 69). This changes
-   `leaseableAction` (`readgrants_propose.go:178`).
+   parameter bound by `ParametersHash` (ADR 0007 line 69). Membership in the
+   read-only allowlist is already decided (ADR 0011 line 1175), so this option
+   only changes `leaseableAction` (`readgrants_propose.go:178`, which rejects
+   any action with parameters).
 
 **Recommendation for (a): option 2.** Scheduling needs a decision on where the
 digest comes from and who approves it, and the ticket chain does not have that.
@@ -306,15 +321,17 @@ option 3 keeps images held. Option 3 here changes a security predicate
 
 **Recommendation for (b): option 2.** This is the rule ADR 0007 already states;
 no new approval decision is needed. The hint from iv09 makes the missing read
-visible instead of silent. Two details stay open (see the decision list below):
-the lease interval, which sets the cadence that E2 depends on, and the
-allowlist gap above.
+visible instead of silent. One detail stays open (decision (2) below): the
+default interval of a host read lease, which sets the cadence that E2 depends on.
 
 **Decision needed.** Confirm (a) option 2, or choose option 1 or 3. For (b), no
 approver decision is needed. Open: (1) whether `image.packages` may be leased
-with a digest (see the `leaseableAction` bullet above; ADR 0011 D3 is silent);
-(2) the default interval of a host read lease, which E2 needs. ADR 0007 line 72
-requires a minimum interval in the grant digest but sets no default. Whether
+with its digest as a lease parameter. Its read-only allowlist membership is
+decided (ADR 0011 D3, line 1175). The open part is the parameter: `leaseableAction`
+(`readgrants_propose.go:178`) rejects any action with parameters today, and
+ADR 0007 line 69 allows a parameter hash; (2) the default interval of a host
+read lease, which E2 needs. ADR 0007 line 72 requires a minimum interval in the
+grant digest but sets no default. Whether
 `package.list_installed` may sit in a read lease is decided (ADR 0011 D3) and
 is not listed here.
 
@@ -339,8 +356,8 @@ Once the maintainer decides, the following text must be written by a maintainer:
 4. **ADR 0011 D3 `image.packages`**: freshness, scheduling, and whether it may
    be leased with a digest (E4 a, options 1–3).
 5. **ADR 0007 initial allowlist or spec 07 and 10** (text only; no decision
-   open): record `package.list_installed` as decided by ADR 0011 D3 lines
-   198–199. Host read leases need no new ADR text on approval: ADR 0007 already
+   open): record `package.list_installed` (ADR 0011 D3 lines 198–199) and
+   `image.packages` (ADR 0011 line 1175) as decided allowlist members. Host read leases need no new ADR text on approval: ADR 0007 already
    decides it.
 6. **`docs/spec/03-processes-and-data.md`** (vulnerability tables, line 57):
    name the package-read table, its retention rule and whether it has a
