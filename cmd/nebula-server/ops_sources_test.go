@@ -52,6 +52,26 @@ func (r failingReader) List(context.Context, vulnstore.ListQuery) ([]vulnstore.F
 	return nil, false, r.err
 }
 
+// sliceReader is a finding store that holds fs and returns all of it.
+type sliceReader struct{ fs []vulnstore.Finding }
+
+func (r sliceReader) List(context.Context, vulnstore.ListQuery) ([]vulnstore.Finding, bool, error) {
+	return r.fs, false, nil
+}
+
+// opsTestFinding returns a stored finding in state st on a subject of kind
+// kind (the host web01, or its image with a valid platform digest).
+func opsTestFinding(st vulnstore.State, kind vulnfinding.SubjectKind) vulnstore.Finding {
+	f := vulnstore.Finding{Subject: vulnstore.Subject{Kind: kind, ID: "web01"}, State: st,
+		EpisodePeakTier: vulnstore.TierCritical}
+	if kind == vulnfinding.SubjectImage {
+		f.Subject.ImageDigest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	}
+	f.Record = vulnfinding.Record{Component: vulnfinding.Component{SourcePackage: "openssl", SourceVersion: "3.0.15-1"},
+		Vuln: vulnfinding.Vuln{ID: "CVE-2026-7008"}}
+	return f
+}
+
 // truncatedReader reports that more findings exist than one read returns.
 type truncatedReader struct{}
 
@@ -249,6 +269,54 @@ func TestOpsListenersUnavailableFailsProjection(t *testing.T) {
 	}
 	if gs != nil {
 		t.Fatalf("groups = %+v, want none on a listener error", gs)
+	}
+}
+
+// failingUpdates is a update-list source that cannot be read.
+type failingUpdates struct{ err error }
+
+func (u failingUpdates) Lists(context.Context) (map[string]vulnfix.Updates, error) {
+	return nil, u.err
+}
+
+// TestOpsFindingsUnreadUpdateListsIsAnError: when the real resolver cannot read
+// the update lists, the finding read fails with errOpsUpdateListsUnread and
+// the projection gets no group; the failure never reaches it as an unknown
+// fix decision.
+func TestOpsFindingsUnreadUpdateListsIsAnError(t *testing.T) {
+	env := newVTEnv(t)
+	env.startAndSubmit(t, opsCriticalRecord("CVE-2026-7007"))
+	errLists := errors.New("lists store down")
+	src, err := newOpsVulnFindings(env.svc.store, func() fixDecider {
+		return vulnfix.NewResolver(failingUpdates{err: errLists}, nil)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.Findings(context.Background()); !errors.Is(err, errOpsUpdateListsUnread) {
+		t.Fatalf("Findings error = %v, want errOpsUpdateListsUnread", err)
+	}
+	gs, _, err := opsGroupsWith(t, src, opsTestListeners{})
+	if !errors.Is(err, errOpsUpdateListsUnread) || gs != nil {
+		t.Fatalf("EligibleGroups = %+v, %v; want none and errOpsUpdateListsUnread", gs, err)
+	}
+}
+
+// TestOpsFindingsNoPreviewStaysUnknownDecision: a missing container preview is
+// an unknown decision, not a failed read: the finding is still listed.
+func TestOpsFindingsNoPreviewStaysUnknownDecision(t *testing.T) {
+	fs := []vulnstore.Finding{opsTestFinding(vulnstore.StateOpen, vulnfinding.SubjectImage)}
+	src, err := newOpsVulnFindings(sliceReader{fs: fs}, fixesOf(vulnfix.Result{Status: vulnfix.StatusUnknown,
+		Reason: vulnfix.ReasonNoPreview, Action: vulnfix.ActionContainers, HostID: "web01"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := src.Findings(context.Background())
+	if err != nil || len(got) != 1 {
+		t.Fatalf("Findings = %d, %v; want one finding and no error", len(got), err)
+	}
+	if got[0].Fix.Outcome != opsfacts.OutcomeUnknown || got[0].Fix.Link != opsfacts.LinkContainers {
+		t.Fatalf("decision = %+v, want unknown outcome with containers link", got[0].Fix)
 	}
 }
 

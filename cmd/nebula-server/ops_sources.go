@@ -44,6 +44,11 @@ const opsImageSubjectHex = 40
 // errOpsFindingsTruncated: the store holds more findings than one read returns.
 var errOpsFindingsTruncated = errors.New("more findings stored than one read returns")
 
+// errOpsUpdateListsUnread: the host update lists cannot be read, so the fix
+// decision of a finding that needs them is not known. The read fails instead
+// of giving an unknown decision, which would look like a decision.
+var errOpsUpdateListsUnread = errors.New("host update lists cannot be read")
+
 // opsDigestRe is the platform digest form of an image subject.
 var opsDigestRe = regexp.MustCompile(`^sha256:([0-9a-f]{64})$`)
 
@@ -100,7 +105,11 @@ func (s opsVulnFindings) Findings(ctx context.Context) ([]opsfacts.Finding, erro
 		if f.State == vulnstore.StateFixed {
 			continue
 		}
-		of, err := opsFindingOf(f, fixes.Decide(ctx, f))
+		res := fixes.Decide(ctx, f)
+		if res.Status == vulnfix.StatusUnknown && res.Reason == vulnfix.ReasonListsUnread {
+			return nil, fmt.Errorf("read findings: %w", errOpsUpdateListsUnread)
+		}
+		of, err := opsFindingOf(f, res)
 		if err != nil {
 			return nil, fmt.Errorf("read findings: %w", err)
 		}
