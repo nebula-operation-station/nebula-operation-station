@@ -174,13 +174,14 @@ func TestNetFactsAbsentAndFailedThroughHostrun(t *testing.T) {
 	}
 }
 
-// simulationLine is one Inst line of an apt-get -s upgrade on a host with
-// long package names, epochs, security and other sources and kernels.
-func simulationLine(i int) string {
-	name := fmt.Sprintf("libexample-long-package-name-component-%05d-runtime-x", i)
-	old := fmt.Sprintf("1:2.%d.%d-%d+deb12u%d", i%9, i%31, i%5+1, i%4+1)
-	newv := fmt.Sprintf("1:2.%d.%d-%d+deb12u%d", i%9, i%31+1, i%5+1, i%4+2)
-	archive := "Debian:12/stable"
+// simulationFields returns the name, old version, new version and archive
+// list of simulation line i of an apt-get -s upgrade on a host with long
+// package names, epochs, security and other sources and kernels.
+func simulationFields(i int) (name, old, newv, archive string) {
+	name = fmt.Sprintf("libexample-long-package-name-component-%05d-runtime-x", i)
+	old = fmt.Sprintf("1:2.%d.%d-%d+deb12u%d", i%9, i%31, i%5+1, i%4+1)
+	newv = fmt.Sprintf("1:2.%d.%d-%d+deb12u%d", i%9, i%31+1, i%5+1, i%4+2)
+	archive = "Debian:12/stable"
 	if i%3 == 0 {
 		archive = "Debian-Security:12/stable-security"
 	}
@@ -188,7 +189,67 @@ func simulationLine(i int) string {
 		name = fmt.Sprintf("linux-image-6.1.0-%d-amd64", 20+i/500)
 		old, newv, archive = "6.1.112-1", "6.1.115-1", "Debian-Security:12/stable-security"
 	}
+	return name, old, newv, archive
+}
+
+// simulationLine is the Inst line of simulation line i.
+func simulationLine(i int) string {
+	name, old, newv, archive := simulationFields(i)
 	return fmt.Sprintf("Inst %s [%s] (%s %s [amd64])", name, old, newv, archive)
+}
+
+// simulationText is the first k simulation lines, each with its newline.
+func simulationText(k int) string {
+	var b strings.Builder
+	for i := 1; i <= k; i++ {
+		b.WriteString(simulationLine(i) + "\n")
+	}
+	return b.String()
+}
+
+// expectedCandidates is the candidates text the fake apt-cache of
+// listUpdatesSimulationHost prints for the n simulation lines, with copies
+// stanzas per candidate, in simulation order.
+func expectedCandidates(n, copies int) string {
+	var b strings.Builder
+	for i := 1; i <= n; i++ {
+		name, _, newv, _ := simulationFields(i)
+		for j := 0; j < copies; j++ {
+			fmt.Fprintf(&b, "Package: %s\nVersion: %s\nSource: example-src-%s (%s)\n\n", name, newv, name[len(name)-5:], newv)
+		}
+	}
+	return b.String()
+}
+
+// listUpdatesBudgetSlack is how many bytes of hostrun.MaxResult a worst-case
+// result may leave unused: one Inst line or one candidate stanza in base64,
+// the script's fixed margin and its marker line. A script that budgets far
+// less than the remaining bytes leaves more unused and fails this check.
+const listUpdatesBudgetSlack = 512
+
+// requireBudgetUsed fails unless out is within listUpdatesBudgetSlack bytes
+// of hostrun.MaxResult.
+func requireBudgetUsed(t *testing.T, out []byte) {
+	t.Helper()
+	unused := hostrun.MaxResult - len(out)
+	if unused < 0 || unused >= listUpdatesBudgetSlack {
+		t.Fatalf("result is %d bytes and leaves %d bytes of hostrun.MaxResult unused, want fewer than %d", len(out), unused, listUpdatesBudgetSlack)
+	}
+}
+
+// requireDecodedField returns the decoded bytes of the base64 string field
+// name of a list-updates document.
+func requireDecodedField(t *testing.T, doc map[string]any, name string) []byte {
+	t.Helper()
+	s, ok := doc[name].(string)
+	if !ok {
+		t.Fatalf("field %s is not a string: %v", name, doc[name])
+	}
+	b, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		t.Fatalf("field %s: %v", name, err)
+	}
+	return b
 }
 
 // listUpdatesSimulationHost is a fake host whose apt-get prints the
@@ -204,9 +265,7 @@ func listUpdatesSimulationHost(t *testing.T, n, copies int) *fakeHost {
 	}
 	var sim strings.Builder
 	sim.WriteString("Reading package lists...\n")
-	for i := 1; i <= n; i++ {
-		sim.WriteString(simulationLine(i) + "\n")
-	}
+	sim.WriteString(simulationText(n))
 	if err := os.WriteFile(filepath.Join(d, "sim.txt"), []byte(sim.String()), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -216,12 +275,14 @@ func listUpdatesSimulationHost(t *testing.T, n, copies int) *fakeHost {
 }
 
 // A 4000-package upgrade with long names, epochs, security and other
-// sources and kernels: hostrun classes it as a success, the result is within
-// hostrun.MaxResult, the simulation is complete, and the candidate section
-// is cut and marked as cut. osdebian reads the same counts as the script.
+// sources and kernels: hostrun classes it as a success, the simulation is
+// complete, and the candidate section is the first whole stanzas of the
+// candidates, cut and marked as cut, using the remaining space of
+// hostrun.MaxResult. osdebian reads the same counts as the script.
 func TestListUpdatesAt4000PackagesThroughHostrun(t *testing.T) {
 	const n = 4000
-	f := listUpdatesSimulationHost(t, n, 3)
+	const copies = 3
+	f := listUpdatesSimulationHost(t, n, copies)
 	r := attachedRun(t, "package.list_updates", netHostrunExecutionID, f.bin+":/usr/bin:/bin")
 	if r.Class != hostrun.ClassSuccess || r.ExitCode != 0 {
 		t.Fatalf("class %s (%s), exit %d, log %q", r.Class, r.Detail, r.ExitCode, r.Log)
@@ -230,6 +291,7 @@ func TestListUpdatesAt4000PackagesThroughHostrun(t *testing.T) {
 		t.Fatalf("result %d bytes, want 1..%d", len(r.Result), hostrun.MaxResult)
 	}
 	t.Logf("4000 packages: result %d bytes (limit %d)", len(r.Result), hostrun.MaxResult)
+	requireBudgetUsed(t, r.Result)
 
 	var doc map[string]any
 	if err := json.Unmarshal(r.Result, &doc); err != nil {
@@ -239,12 +301,17 @@ func TestListUpdatesAt4000PackagesThroughHostrun(t *testing.T) {
 		t.Fatalf("candidates_truncated = %v, want true", doc["candidates_truncated"])
 	}
 	// The simulation the script printed has every Inst line of the fake.
-	sim, err := base64.StdEncoding.DecodeString(doc["simulate"].(string))
-	if err != nil {
-		t.Fatal(err)
-	}
+	sim := requireDecodedField(t, doc, "simulate")
 	if got := strings.Count(string(sim), "Inst "); got != n {
 		t.Fatalf("simulation has %d Inst lines, want %d", got, n)
+	}
+	if string(sim) != simulationText(n) {
+		t.Fatal("simulation is not the fake's simulation lines")
+	}
+	// The candidates are the first whole stanzas of the full candidates text.
+	cands := string(requireDecodedField(t, doc, "candidates"))
+	if cands == "" || !strings.HasPrefix(expectedCandidates(n, copies), cands) {
+		t.Fatalf("candidates are not a prefix of the %d expected stanzas (%d bytes)", n*copies, len(cands))
 	}
 
 	u, err := osdebian.ParseUpdates(r.Result)
@@ -280,9 +347,55 @@ func TestListUpdatesAt4000PackagesThroughHostrun(t *testing.T) {
 	}
 }
 
+// The worst case the script allows: osdebian.MaxPackages (20,000) Inst
+// lines. They do not fit in hostrun.MaxResult, so the simulation is cut at
+// a line boundary, marked as cut, and the rest of the budget is used. The
+// result is a success through hostrun and osdebian reads the lines kept.
+func TestListUpdatesAtMaxPackagesThroughHostrun(t *testing.T) {
+	const n = osdebian.MaxPackages
+	f := listUpdatesSimulationHost(t, n, 3)
+	r := attachedRun(t, "package.list_updates", netHostrunExecutionID, f.bin+":/usr/bin:/bin")
+	if r.Class != hostrun.ClassSuccess || r.ExitCode != 0 {
+		t.Fatalf("class %s (%s), exit %d, log %q", r.Class, r.Detail, r.ExitCode, r.Log)
+	}
+	if len(r.Result) == 0 || len(r.Result) > hostrun.MaxResult {
+		t.Fatalf("result %d bytes, want 1..%d", len(r.Result), hostrun.MaxResult)
+	}
+	t.Logf("%d packages: result %d bytes (limit %d)", n, len(r.Result), hostrun.MaxResult)
+	requireBudgetUsed(t, r.Result)
+
+	var doc map[string]any
+	if err := json.Unmarshal(r.Result, &doc); err != nil {
+		t.Fatal(err)
+	}
+	sim := string(requireDecodedField(t, doc, "simulate"))
+	k := strings.Count(sim, "Inst ")
+	if k == 0 || k >= n {
+		t.Fatalf("%d Inst lines kept of %d, want a cut simulation", k, n)
+	}
+	// The kept lines are the first k lines of the fake, whole, followed by
+	// the marker text and no further Inst line.
+	prefix := simulationText(k)
+	if !strings.HasPrefix(sim, prefix) || len(sim) == len(prefix) || strings.Contains(sim[len(prefix):], "Inst ") {
+		t.Fatalf("simulation is not the first %d lines followed by a marker", k)
+	}
+	if doc["candidates_truncated"] != true {
+		t.Fatalf("candidates_truncated = %v, want true", doc["candidates_truncated"])
+	}
+
+	u, err := osdebian.ParseUpdates(r.Result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(u.Packages) != k || !u.CandidatesTruncated {
+		t.Fatalf("%d packages, want the %d kept lines; truncated %v", len(u.Packages), k, u.CandidatesTruncated)
+	}
+}
+
 // The simulation fails (apt-get exits non-zero, e.g. broken packages).
 // The script must not turn that into a successful, empty update list; the
-// run ends with a failure class and no result.
+// run ends with a failure class, exit status 4, the script's log line and
+// no result.
 func TestListUpdatesSimulationFailureThroughHostrun(t *testing.T) {
 	d := t.TempDir()
 	f := &fakeHost{dir: d, bin: filepath.Join(d, "bin"), calls: filepath.Join(d, "calls")}
@@ -294,8 +407,11 @@ func TestListUpdatesSimulationFailureThroughHostrun(t *testing.T) {
 	if r.Class == hostrun.ClassSuccess {
 		t.Fatalf("failed simulation classed as success: %s", r.Result)
 	}
-	if r.Class != hostrun.ClassScriptFailed || r.ExitCode == 0 || len(r.Result) != 0 {
+	if r.Class != hostrun.ClassScriptFailed || r.ExitCode != 4 || len(r.Result) != 0 {
 		t.Fatalf("class %s, exit %d, result %q", r.Class, r.ExitCode, r.Result)
+	}
+	if !bytes.Contains(r.Log, []byte("apt-get simulation failed")) {
+		t.Errorf("log %q lacks the simulation failure line", r.Log)
 	}
 }
 
