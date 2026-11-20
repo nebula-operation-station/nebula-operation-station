@@ -4,6 +4,7 @@ package executions
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"unicode"
@@ -136,6 +137,12 @@ func (s *Service) Reject(ctx context.Context, user, id, reason string) error {
 	if e.Digest == "" {
 		return &ParamError{Reason: "the operation has no proposal digest to reject"}
 	}
+	// One web rejection at a time: a second caller must not overwrite the
+	// intent of the first, nor clear it on its own refusal, while the first is
+	// still waiting for the executor (spec 07: the intent is the record of the
+	// call that the executor answers).
+	s.rejectMu.Lock()
+	defer s.rejectMu.Unlock()
 	if err := s.storeRejectIntent(ctx, id, user, reason); err != nil {
 		return err
 	}
@@ -151,7 +158,7 @@ func (s *Service) Reject(ctx context.Context, user, id, reason string) error {
 		}
 		return err
 	}
-	moved, err := s.markRejected(ctx, id, rejectDetail(reason), false)
+	moved, _, err := s.markRejected(ctx, id, false, func(rejectIntent) string { return rejectDetail(reason) })
 	if err != nil {
 		// The executor has rejected the proposal and the server could not
 		// record it. The next CheckCLIApproval or sweep reads the executor's
@@ -219,17 +226,45 @@ func rejectAnswerLost(err error) bool {
 // rejection; it is used for a rejection by the executor's admin.
 const intentDrop = `, reject_user = NULL, reject_reason = NULL, reject_at = NULL`
 
+// rejectIntent is the rejection intent stored on a pending execution. present
+// is false when no intent is stored.
+type rejectIntent struct {
+	present bool
+	user    string
+	reason  string
+}
+
+// readRejectIntent reads the intent of an execution inside tx. A missing row
+// reads as no intent; the guarded update that follows reports it.
+func readRejectIntent(ctx context.Context, tx *sql.Tx, id string) (rejectIntent, error) {
+	var user, reason sql.NullString
+	err := tx.QueryRowContext(ctx, `SELECT reject_user, reject_reason FROM executions WHERE id = ?`, id).Scan(&user, &reason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return rejectIntent{}, nil
+	}
+	if err != nil {
+		return rejectIntent{}, err
+	}
+	return rejectIntent{present: user.Valid, user: user.String, reason: reason.String}, nil
+}
+
 // markRejected moves a pending execution to 'rejected' with a guarded update
-// and sets its waiting host rows to finished/not_executed, in one
-// transaction. dropIntent also clears the rejection intent. It reports whether
-// this call moved the execution; false means it was no longer pending and
-// nothing changed.
-func (s *Service) markRejected(ctx context.Context, id, detail string, dropIntent bool) (bool, error) {
+// and sets its waiting host rows to finished/not_executed, in one transaction.
+// The detail is computed from the intent read in the same transaction.
+// dropIntent also clears the rejection intent. It reports whether this call
+// moved the execution (false means it was no longer pending and nothing
+// changed) and the intent it read.
+func (s *Service) markRejected(ctx context.Context, id string, dropIntent bool, detailOf func(rejectIntent) string) (bool, rejectIntent, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, err
+		return false, rejectIntent{}, err
 	}
 	defer tx.Rollback() //nolint:errcheck
+	in, err := readRejectIntent(ctx, tx, id)
+	if err != nil {
+		return false, rejectIntent{}, err
+	}
+	detail := detailOf(in)
 	now := s.now().Unix()
 	drop := ""
 	if dropIntent {
@@ -238,43 +273,59 @@ func (s *Service) markRejected(ctx context.Context, id, detail string, dropInten
 	res, err := tx.ExecContext(ctx, `UPDATE executions SET state = 'rejected', detail = ?, finished_at = ?`+drop+`
 		WHERE id = ? AND state = 'pending'`, detail, now, id)
 	if err != nil {
-		return false, err
+		return false, in, err
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return false, err
+		return false, in, err
 	}
 	if n != 1 {
-		return false, nil
+		return false, in, nil
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE execution_hosts SET state = 'finished', class = 'not_executed',
 		detail = ?, finished_at = ? WHERE execution_id = ? AND state = 'waiting'`, detail, now, id); err != nil {
-		return false, err
+		return false, in, err
 	}
 	if err := tx.Commit(); err != nil {
-		return false, err
+		return false, in, err
 	}
-	return true, nil
+	return true, in, nil
 }
 
 // recordCLIRejection records a rejection the executor reports for a pending
-// execution (rejected on the executor host with `nebula reject`, or a server
-// rejection whose record was lost). The executor's answer carries no reason.
+// execution (spec 07 v29-07-01). Role admin is a rejection on the executor host
+// with `nebula reject`; it drops any intent left over from a server call that
+// never reached the executor. Role server is a web-UI rejection whose answer
+// was lost or whose record the server lost: with a stored intent it is recorded
+// with the intent's user and reason, marked as recorded after restart; without
+// one the user is not known. The executor's event stays the authoritative
+// record of who rejected.
 func (s *Service) recordCLIRejection(ctx context.Context, id, digest string, role pb.RejectingRole) error {
-	// Spec 07: the admin role drops any intent left over from a server call
-	// that never reached the executor.
 	isAdmin := role == pb.RejectingRole_REJECTING_ROLE_ADMIN
-	ok, err := s.markRejected(ctx, id, "rejected on the executor host; nothing was run", isAdmin)
+	detailOf := func(in rejectIntent) string {
+		switch {
+		case isAdmin:
+			return "rejected on the executor host; nothing was run"
+		case !in.present:
+			return "Rejected in the web UI; user not recorded; nothing was run"
+		case in.reason == "":
+			return "Rejected in the web UI; recorded after restart; nothing was run"
+		default:
+			return "Rejected in the web UI; recorded after restart; nothing was run. Reason: " + in.reason
+		}
+	}
+	ok, in, err := s.markRejected(ctx, id, isAdmin, detailOf)
 	if err != nil {
 		return err
 	}
 	if !ok {
 		return nil
 	}
-	kind := "execution_rejected"
 	if isAdmin {
-		kind = "execution_rejected_on_cli"
+		s.log.Info("audit", "kind", "execution_rejected_on_cli", "execution", id, "digest", digest)
+		return nil
 	}
-	s.log.Info("audit", "kind", kind, "execution", id, "digest", digest)
+	s.log.Info("audit", "kind", "execution_rejected", "execution", id, "digest", digest,
+		"user", in.user, "reason_len", utf8.RuneCountInString(in.reason), "recorded_after_restart", in.present)
 	return nil
 }

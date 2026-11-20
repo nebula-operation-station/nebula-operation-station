@@ -6,7 +6,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -189,5 +192,156 @@ func TestAdminRejectionOnTheCLIDropsLeftoverIntent(t *testing.T) {
 	got := readIntent(t, db, c.ID)
 	if got.state != "rejected" || got.user.Valid || got.reason.Valid || got.at.Valid {
 		t.Fatalf("after admin rejection: state %s, intent user %v reason %v at %v; want rejected and no intent", got.state, got.user, got.reason, got.at)
+	}
+}
+
+// setIntent writes a rejection intent into a pending execution, as the server
+// does before it calls RejectPending.
+func setIntent(t *testing.T, db *sql.DB, id, user, reason string) {
+	t.Helper()
+	if _, err := db.Exec(`UPDATE executions SET reject_user = ?, reject_reason = ?, reject_at = 1700000000 WHERE id = ?`, user, reason, id); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestServerRejectionAfterLostAnswerIsRecordedWithTheIntent checks spec 07
+// v29-07-01: the server stored the intent, the executor committed the
+// rejection, and the answer was lost (or the server restarted). The approval
+// check learns REJECTED with role server: the execution is recorded with the
+// intent's user and reason, marked as recorded after restart, and not as a
+// rejection on the executor host.
+func TestServerRejectionAfterLostAnswerIsRecordedWithTheIntent(t *testing.T) {
+	f := &fakeExec{permitState: pb.PermitState_PERMIT_STATE_REJECTED, rejectedBy: pb.RejectingRole_REJECTING_ROLE_SERVER}
+	s, db := setup(t, f)
+	ctx := context.Background()
+	c, err := s.Create(ctx, "axel", "core.facts", []string{"web"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	setIntent(t, db, c.ID, "axel", "wrong host")
+	state, err := s.CheckCLIApproval(ctx, c.ID)
+	if err != nil || state != "rejected" {
+		t.Fatalf("state=%s err=%v, want rejected", state, err)
+	}
+	e, _ := s.Get(ctx, c.ID)
+	if !strings.Contains(e.Detail, "recorded after restart") || !strings.Contains(e.Detail, "wrong host") {
+		t.Fatalf("detail %q, want the recorded-after-restart marker and the stored reason", e.Detail)
+	}
+	if strings.Contains(e.Detail, "executor host") {
+		t.Fatalf("detail %q says the rejection was on the executor host", e.Detail)
+	}
+	got := readIntent(t, db, c.ID)
+	if got.user.String != "axel" || got.reason.String != "wrong host" {
+		t.Fatalf("intent after recording = user %v reason %v, want the stored intent kept", got.user, got.reason)
+	}
+	if st, class := hostState(t, s, c.ID); st != "finished" || class != "not_executed" {
+		t.Fatalf("host row = %s/%s, want finished/not_executed", st, class)
+	}
+}
+
+// TestServerRejectionWithoutIntentSaysUserNotRecorded checks spec 07 v29-07-01:
+// role server with no intent (the server lost its record of the call) is shown
+// as "Rejected in the web UI; user not recorded", and no intent is invented.
+func TestServerRejectionWithoutIntentSaysUserNotRecorded(t *testing.T) {
+	f := &fakeExec{permitState: pb.PermitState_PERMIT_STATE_REJECTED, rejectedBy: pb.RejectingRole_REJECTING_ROLE_SERVER}
+	s, db := setup(t, f)
+	ctx := context.Background()
+	c, err := s.Create(ctx, "axel", "core.facts", []string{"web"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state, err := s.CheckCLIApproval(ctx, c.ID); err != nil || state != "rejected" {
+		t.Fatalf("state=%s err=%v, want rejected", state, err)
+	}
+	e, _ := s.Get(ctx, c.ID)
+	if !strings.HasPrefix(e.Detail, "Rejected in the web UI; user not recorded") {
+		t.Fatalf("detail %q, want the user-not-recorded text", e.Detail)
+	}
+	if got := readIntent(t, db, c.ID); got.user.Valid || got.reason.Valid || got.at.Valid {
+		t.Fatalf("an intent appeared from nowhere: user %v reason %v at %v", got.user, got.reason, got.at)
+	}
+}
+
+// TestAdminRejectionOnTheCLIIsSaidToBeOnTheExecutorHost checks the detail of a
+// rejection with role admin, with or without a leftover intent: it is the
+// executor-host text, and the intent is dropped.
+func TestAdminRejectionOnTheCLIIsSaidToBeOnTheExecutorHost(t *testing.T) {
+	for _, withIntent := range []bool{false, true} {
+		name := "without intent"
+		if withIntent {
+			name = "with intent"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := &fakeExec{permitState: pb.PermitState_PERMIT_STATE_REJECTED, rejectedBy: pb.RejectingRole_REJECTING_ROLE_ADMIN}
+			s, db := setup(t, f)
+			ctx := context.Background()
+			c, err := s.Create(ctx, "axel", "core.facts", []string{"web"}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if withIntent {
+				setIntent(t, db, c.ID, "axel", "old")
+			}
+			if state, err := s.CheckCLIApproval(ctx, c.ID); err != nil || state != "rejected" {
+				t.Fatalf("state=%s err=%v, want rejected", state, err)
+			}
+			e, _ := s.Get(ctx, c.ID)
+			if e.Detail != "rejected on the executor host; nothing was run" {
+				t.Fatalf("detail = %q, want the executor-host text", e.Detail)
+			}
+			if got := readIntent(t, db, c.ID); got.user.Valid || got.reason.Valid || got.at.Valid {
+				t.Fatalf("intent kept after an admin rejection: user %v", got.user)
+			}
+		})
+	}
+}
+
+// TestConcurrentRejectionsKeepTheWinnersIntent checks that two web rejections
+// of one execution at the same time cannot overwrite the winner's intent: the
+// executor answers the first call slowly, the other caller must wait, and the
+// execution is rejected once, with the intent of the call the executor accepted.
+func TestConcurrentRejectionsKeepTheWinnersIntent(t *testing.T) {
+	f := &fakeExec{}
+	// Every caller gets past its own checks while the first call waits here.
+	f.beforeReject = func() { time.Sleep(100 * time.Millisecond) }
+	s, db := setup(t, f)
+	ctx := context.Background()
+	c, err := s.Create(ctx, "axel", "core.facts", []string{"web"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	users := []string{"u0", "u1", "u2", "u3"}
+	errs := make([]error, len(users))
+	var wg sync.WaitGroup
+	for i, u := range users {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = s.Reject(ctx, u, c.ID, "reason of "+u)
+		}()
+	}
+	wg.Wait()
+	winner := ""
+	for i, err := range errs {
+		switch {
+		case err == nil:
+			if winner != "" {
+				t.Fatalf("two rejections succeeded: %s and %s", winner, users[i])
+			}
+			winner = users[i]
+		case errors.Is(err, ErrNotPending):
+		default:
+			t.Fatalf("rejection by %s: err = %v, want nil or ErrNotPending", users[i], err)
+		}
+	}
+	if winner == "" {
+		t.Fatal("no rejection succeeded")
+	}
+	if len(f.rejects) != 1 {
+		t.Fatalf("executor asked %d times, want 1", len(f.rejects))
+	}
+	got := readIntent(t, db, c.ID)
+	if got.state != "rejected" || got.user.String != winner || got.reason.String != "reason of "+winner {
+		t.Fatalf("state %s, intent user %v reason %v; want rejected with the winner %s's intent", got.state, got.user, got.reason, winner)
 	}
 }
