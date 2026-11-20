@@ -12,30 +12,27 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/attackpath"
 )
 
-// builderIDByte reports whether the attackpath Builder admits byte c in a
-// node ID: printable ASCII [A-Za-z0-9._:/@-] (model.go validID).
-func builderIDByte(c byte) bool {
-	switch {
-	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
-		return true
+// builderKinds returns the kinds from kinds that the attackpath Builder
+// accepts id as. The Builder binds each ID to one kind by prefix, so the
+// result has at most one element; the Builder itself decides, not a copy of
+// its rule.
+func builderKinds(id string, kinds []attackpath.NodeKind) []attackpath.NodeKind {
+	var out []attackpath.NodeKind
+	for _, k := range kinds {
+		if builderAccepts(id, k) == nil {
+			out = append(out, k)
+		}
 	}
-	return strings.IndexByte("._:/@-", c) >= 0
+	return out
 }
 
-// builderAccepts reports the Builder's verdict on id as a node of kind.
-func builderAccepts(id string, kind attackpath.NodeKind) error {
-	return attackpath.NewBuilder().AddNode(attackpath.Node{ID: id, Kind: kind, Label: "x"})
-}
-
-// FuzzNodeKind checks the markable-ID rule against the Builder. NodeKind is
-// the looser of the two: every ID the Builder accepts, NodeKind accepts with
-// the same kind; and NodeKind accepts an ID the Builder rejects only when the
-// ID has a byte outside the Builder's ASCII set. That last part records a
-// known gap, see the comment at TestNodeKindKnownGapNonASCII.
+// FuzzNodeKind checks the markable-ID rule against the Builder: NodeKind
+// returns a kind exactly when the Builder accepts id as a node of a markable
+// kind, and then the kind is that one.
 func FuzzNodeKind(f *testing.F) {
 	for _, s := range []string{
 		"host:1", "pve:n1", "guest:100", "ctr:abc", "dev:sw1", "host:", "unk:x", "internet", "netbird",
-		"host:a b", "host:\x00", "host:\xff", "host:é", "host:a/b@c.d-e_f:g",
+		"host:a b", "host:\x00", "host:\xff", "host:é", "host:!", "host:a/b@c.d-e_f:g",
 		"ctr:" + strings.Repeat("a", attackpath.MaxIDBytes-len("ctr:")),
 		"ctr:" + strings.Repeat("a", attackpath.MaxIDBytes-len("ctr:")+1),
 		"", "host:" + string(rune(0x202e)),
@@ -44,69 +41,38 @@ func FuzzNodeKind(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, s string) {
 		k, err := NodeKind(s)
-		if err != nil {
-			if !errors.Is(err, ErrInvalidNode) || k != 0 {
-				t.Fatalf("NodeKind(%q) = %v, %v: want ErrInvalidNode and kind 0", s, k, err)
-			}
-			for _, mk := range markableKinds {
-				if builderAccepts(s, mk) == nil {
-					t.Fatalf("NodeKind(%q) rejects, but the Builder accepts it as %v", s, mk)
-				}
-			}
-			return
+		if err != nil && (!errors.Is(err, ErrInvalidNode) || k != 0) {
+			t.Fatalf("NodeKind(%q) = %v, %v: want ErrInvalidNode and kind 0", s, k, err)
 		}
-		p := k.IDPrefix()
-		if !strings.HasPrefix(s, p) || len(s) <= len(p) || len(s) > attackpath.MaxIDBytes {
-			t.Fatalf("NodeKind(%q) = %v: prefix %q, length %d outside the rule", s, k, p, len(s))
-		}
-		if !utf8.ValidString(s) {
-			t.Fatalf("NodeKind(%q) accepted invalid UTF-8", s)
-		}
-		for _, r := range s {
-			if unicode.IsControl(r) || unicode.IsSpace(r) {
-				t.Fatalf("NodeKind(%q) accepted control or space %U", s, r)
-			}
-		}
-		for _, mk := range markableKinds {
-			err := builderAccepts(s, mk)
-			switch {
-			case err == nil && mk != k:
-				t.Fatalf("NodeKind(%q) = %v, but the Builder accepts it as %v", s, k, mk)
-			case err != nil && mk == k && !errors.Is(err, attackpath.ErrInvalidNode):
-				t.Fatalf("Builder rejects %q as %v with %v, not ErrInvalidNode", s, mk, err)
-			case err != nil && mk == k && !hasNonBuilderByte(s):
-				t.Fatalf("NodeKind(%q) accepts, the Builder rejects with %v, and all bytes are Builder bytes", s, err)
-			}
+		want := builderKinds(s, markableKinds)
+		switch {
+		case len(want) > 1:
+			t.Fatalf("the Builder accepts %q as %v: prefixes overlap", s, want)
+		case err != nil && len(want) == 1:
+			t.Fatalf("NodeKind(%q) rejects, but the Builder accepts it as %v", s, want[0])
+		case err == nil && len(want) == 0:
+			t.Fatalf("NodeKind(%q) = %v, but the Builder rejects it as every markable kind", s, k)
+		case err == nil && k != want[0]:
+			t.Fatalf("NodeKind(%q) = %v, but the Builder accepts it as %v", s, k, want[0])
 		}
 	})
 }
 
-// hasNonBuilderByte reports whether s has a byte the Builder's ID rule
-// rejects.
-func hasNonBuilderByte(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if !builderIDByte(s[i]) {
-			return true
+// TestNodeKindRefusesIDsTheBuilderRejects pins the IDs that NodeKind used to
+// accept while the Builder rejects them. Marking such an ID would store a
+// crown jewel that makes attack-path prepareTargets fail the whole
+// computation. Mark refusing them is tested in jewels_test.go
+// (TestMarkRejectsBadInput).
+func TestNodeKindRefusesIDsTheBuilderRejects(t *testing.T) {
+	for _, id := range []string{"host:!", "host:é", "host:a+b", "host:a%20b", "ctr:x~y", "host:a\x7f"} {
+		if k, err := NodeKind(id); !errors.Is(err, ErrInvalidNode) {
+			t.Errorf("NodeKind(%q) = %v, %v: want ErrInvalidNode", id, k, err)
 		}
-	}
-	return false
-}
-
-// TestNodeKindKnownGapNonASCII documents a known gap, not a passing rule.
-// NodeKind("host:é") is accepted as a crown jewel target, but the Builder
-// rejects the ID (ASCII only, ErrInvalidNode). The consequence is in the
-// report of ticket ud08 (internal/attackpath/jewels, fuzz_test.go): the
-// marked jewel reaches attackpath's prepareTargets, which refuses the whole
-// computation with ErrInvalidTarget. Follow-up ticket: make NodeKind use the
-// Builder's ID rule. When that lands, this test must change with it.
-func TestNodeKindKnownGapNonASCII(t *testing.T) {
-	// "host:!" is the smallest case: printable ASCII outside the Builder set.
-	for _, id := range []string{"host:!", "host:é"} {
-		if k, err := NodeKind(id); err != nil || k != attackpath.NodeHost {
-			t.Fatalf("NodeKind(%q) = %v, %v: the documented gap no longer holds, update the report and this test", id, k, err)
+		if err := validExposed(id); !errors.Is(err, ErrInvalidNode) {
+			t.Errorf("validExposed(%q) = %v: want ErrInvalidNode", id, err)
 		}
-		if err := builderAccepts(id, attackpath.NodeHost); !errors.Is(err, attackpath.ErrInvalidNode) {
-			t.Fatalf("Builder accepts %q (%v): the documented gap no longer holds", id, err)
+		if got := builderKinds(id, exposableKinds); len(got) != 0 {
+			t.Errorf("the Builder accepts %q as %v; the test premise is wrong", id, got)
 		}
 	}
 }
@@ -186,12 +152,13 @@ func hasControl(s string) bool {
 	return false
 }
 
-// FuzzValidExposed checks the exposure rule against the Builder: an exposed
-// ID the Builder accepts is accepted, and one it rejects is rejected unless
-// the same known ASCII gap as NodeKind applies.
+// FuzzValidExposed checks the exposure rule against the Builder: validExposed
+// accepts an ID exactly when the Builder accepts it as a node of an exposable
+// kind, whatever prefix the ID has.
 func FuzzValidExposed(f *testing.F) {
 	for _, s := range []string{
-		"unk:1.2.3.4", "host:1", "dev:sw", "guest:1", "unk:", "internet", "netbird", "host:a b", "host:é", "",
+		"unk:1.2.3.4", "host:1", "dev:sw", "guest:1", "unk:", "internet", "netbird", "host:a b", "host:é",
+		"foo:bar", "", "unk:\x7f",
 	} {
 		f.Add(s)
 	}
@@ -200,18 +167,14 @@ func FuzzValidExposed(f *testing.F) {
 		if err != nil && !errors.Is(err, ErrInvalidNode) {
 			t.Fatalf("validExposed(%q): %v, want ErrInvalidNode", s, err)
 		}
-		for _, k := range exposableKinds {
-			p := k.IDPrefix()
-			if !strings.HasPrefix(s, p) || len(s) <= len(p) {
-				continue
-			}
-			bErr := builderAccepts(s, k)
-			switch {
-			case bErr == nil && err != nil:
-				t.Fatalf("validExposed(%q) rejects, the Builder accepts it as %v", s, k)
-			case bErr != nil && err == nil && !hasNonBuilderByte(s):
-				t.Fatalf("validExposed(%q) accepts, the Builder rejects it as %v with %v, and all bytes are Builder bytes", s, k, bErr)
-			}
+		want := builderKinds(s, exposableKinds)
+		switch {
+		case len(want) > 1:
+			t.Fatalf("the Builder accepts %q as %v: prefixes overlap", s, want)
+		case err == nil && len(want) == 0:
+			t.Fatalf("validExposed(%q) accepts, but the Builder rejects it as every exposable kind", s)
+		case err != nil && len(want) == 1:
+			t.Fatalf("validExposed(%q) rejects, but the Builder accepts it as %v", s, want[0])
 		}
 	})
 }
@@ -230,6 +193,7 @@ func TestValidExposedBoundaries(t *testing.T) {
 		{"host:a b", false},
 		{"", false},
 		{"unk:\x7f", false},
+		{"foo:bar", false},
 	}
 	for _, tt := range tests {
 		if err := validExposed(tt.id); (err == nil) != tt.ok {
