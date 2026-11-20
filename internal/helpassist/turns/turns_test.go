@@ -341,3 +341,55 @@ func mustAppend(t *testing.T, s *Store, session string, tn Turn) {
 		t.Fatalf("append %q: %v", session, err)
 	}
 }
+
+func TestNonUTF8QuestionAndAnswerRejected(t *testing.T) {
+	bad := "\xff\xfe broken"
+	cases := []struct {
+		name string
+		t    Turn
+	}{
+		{"question not UTF-8", Turn{User: "alice", Question: bad, Answer: "a"}},
+		{"answer not UTF-8", Turn{User: "alice", Question: "q", Answer: bad}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, _ := newClockStore(t)
+			if err := s.Append("sess", tc.t); !errors.Is(err, ErrInvalidUTF8) {
+				t.Fatalf("err = %v, want ErrInvalidUTF8", err)
+			}
+			if got := s.History("sess"); len(got) != 0 {
+				t.Fatalf("rejected turn was stored")
+			}
+		})
+	}
+}
+
+func TestAppendErrorsCarryContextAndKeepSentinel(t *testing.T) {
+	s, _ := newClockStore(t)
+	err := s.Append("", turn("alice", "q"))
+	if !errors.Is(err, ErrEmptyKey) {
+		t.Fatalf("err = %v, want ErrEmptyKey in chain", err)
+	}
+	if !strings.HasPrefix(err.Error(), "append turn: ") {
+		t.Fatalf("error %q does not start with the operation context", err)
+	}
+}
+
+func TestLiveReleasesDroppedTurnText(t *testing.T) {
+	now := time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC)
+	turns := []timed{
+		{at: now.Add(-2 * MaxAge), turn: Turn{User: "alice", Question: "gone-1", Answer: "gone-1"}},
+		{at: now.Add(-MaxAge), turn: Turn{User: "alice", Question: "gone-2", Answer: "gone-2"}},
+		{at: now, turn: Turn{User: "alice", Question: "kept", Answer: "kept"}},
+	}
+	backing := turns[:cap(turns)]
+	got := live(turns, now)
+	if len(got) != 1 || got[0].turn.Question != "kept" {
+		t.Fatalf("live = %+v, want only the kept turn", got)
+	}
+	for i := len(got); i < len(backing); i++ {
+		if backing[i].turn.Question != "" || backing[i].turn.Answer != "" {
+			t.Fatalf("dropped element %d still holds text %q", i, backing[i].turn.Question)
+		}
+	}
+}

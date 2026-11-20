@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // MaxTurns is the number of turns kept per session. Appending a turn beyond it
@@ -46,6 +47,9 @@ var ErrTooManySessions = errors.New("turns: too many live sessions")
 
 // ErrSessionOwner reports a turn for a session that belongs to another user.
 var ErrSessionOwner = errors.New("turns: session belongs to another user")
+
+// ErrInvalidUTF8 reports a question or answer that is not valid UTF-8.
+var ErrInvalidUTF8 = errors.New("turns: text is not valid UTF-8")
 
 // Turn is one question and its rendered answer. Facts and chunk texts are not
 // part of a Turn.
@@ -112,7 +116,7 @@ func New(now func() time.Time) *Store {
 // session already holds MaxTurns turns.
 func (s *Store) Append(session string, t Turn) error {
 	if err := validate(session, t); err != nil {
-		return err
+		return fmt.Errorf("append turn: %w", err)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -120,14 +124,14 @@ func (s *Store) Append(session string, t Turn) error {
 	s.purgeLocked(session, now)
 	sess, ok := s.sessions[session]
 	if ok && sess.owner != t.User {
-		return ErrSessionOwner
+		return fmt.Errorf("append turn: %w", ErrSessionOwner)
 	}
 	if !ok {
 		if len(s.sessions) >= MaxSessions {
 			s.sweepLocked(now)
 		}
 		if len(s.sessions) >= MaxSessions {
-			return ErrTooManySessions
+			return fmt.Errorf("append turn: %w", ErrTooManySessions)
 		}
 		sess = &panelSession{owner: t.User}
 		s.sessions[session] = sess
@@ -190,6 +194,9 @@ func validate(session string, t Turn) error {
 	if len(t.Question) > MaxQuestionBytes || len(t.Answer) > MaxAnswerBytes {
 		return ErrTooLarge
 	}
+	if !utf8.ValidString(t.Question) || !utf8.ValidString(t.Answer) {
+		return ErrInvalidUTF8
+	}
 	return nil
 }
 
@@ -225,5 +232,8 @@ func live(turns []timed, now time.Time) []timed {
 			kept = append(kept, e)
 		}
 	}
+	// Clear the tail that was filtered out, so the dropped turns no longer
+	// reference their question and answer text through the backing array.
+	clear(turns[len(kept):])
 	return kept
 }
