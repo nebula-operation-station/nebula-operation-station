@@ -48,8 +48,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/descope/virtualwebauthn"
 	"golang.org/x/crypto/ssh"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/auditlog"
@@ -67,6 +69,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsfacts"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsnotes"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
@@ -728,24 +731,63 @@ func TestAG24AgentUserCannotReachExecutorSocket(t *testing.T) {
 
 // --- D9, T2, T3: suggested origin against the real executor ---
 
-func (e *ag24Env) permitState(id string) pb.PermitState {
-	e.t.Helper()
-	var digest string
-	if err := e.db.QueryRow(`SELECT digest FROM executions WHERE id = ?`, id).Scan(&digest); err != nil {
-		e.t.Fatal(err)
+// serverRun is the host run the server itself would ask for on execution id
+// (executions.Service.runHost): the stored digest, action, version and
+// parameters, the stored pin and credential, the catalog artifact.
+func (e *ag24Env) serverRun(t *testing.T, id, host string) *pb.AuthorizeRunRequest {
+	t.Helper()
+	var digest, actionID, version, params, fp, cred string
+	if err := e.db.QueryRow(`SELECT x.digest, x.action_id, x.module_version, x.params, h.fingerprint, h.credential_ref
+		FROM executions x JOIN execution_hosts h ON h.execution_id = x.id WHERE x.id = ? AND h.host_id = ?`, id, host).
+		Scan(&digest, &actionID, &version, &params, &fp, &cred); err != nil {
+		t.Fatalf("execution %s on %s: %v", id, host, err)
 	}
+	a, ok := actions.Lookup(actionID)
+	if !ok || a.Version != version {
+		t.Fatalf("execution %s: action %s %s is not the catalog's", id, actionID, version)
+	}
+	return &pb.AuthorizeRunRequest{ExecutionDigest: digest, HostId: host, HostKeyFingerprint: fp, ActionId: a.ID,
+		ModuleVersion: a.Version, Artifact: a.Script, ParametersJson: []byte(params), CredentialRef: cred}
+}
+
+func (e *ag24Env) permitState(t *testing.T, digest string) pb.PermitState {
+	t.Helper()
 	r, err := e.h.client.GetPermitState(e.ctx(), &pb.GetPermitStateRequest{ExecutionDigest: digest})
 	if err != nil {
-		e.t.Fatal(err)
-	}
-	// Without an assertion no host run is authorised on that digest.
-	a, _ := actions.Lookup("package.refresh")
-	if _, err := e.h.client.AuthorizeRun(e.ctx(), &pb.AuthorizeRunRequest{ExecutionDigest: digest, HostId: ag24HostWeb,
-		HostKeyFingerprint: e.pins[ag24HostWeb], ActionId: a.ID, ModuleVersion: a.Version, Artifact: a.Script,
-		ParametersJson: []byte(`{}`), CredentialRef: credRef}); err == nil && r.GetState() != pb.PermitState_PERMIT_STATE_APPROVED {
-		e.t.Fatalf("execution %s: a run was authorised on a permit in state %v", id, r.GetState())
+		t.Fatal(err)
 	}
 	return r.GetState()
+}
+
+// wantNoRunWithoutAssertion: the executor holds execution c pending and
+// refuses the exact run the server would ask for (valid action, parameters,
+// pin and credential) as not approved. Positive control: once the assertion
+// over the execution's own challenge is submitted, the same run is
+// authorised, so the refusal came from the missing assertion alone.
+func (e *ag24Env) wantNoRunWithoutAssertion(t *testing.T, c executions.Created, host string) {
+	t.Helper()
+	run := e.serverRun(t, c.ID, host)
+	if s := e.permitState(t, run.GetExecutionDigest()); s != pb.PermitState_PERMIT_STATE_PENDING {
+		t.Fatalf("executor permit state %v, want pending", s)
+	}
+	_, err := e.h.client.AuthorizeRun(e.ctx(), run)
+	wantCode(t, err, codes.FailedPrecondition, string(permit.CodeWrongState))
+
+	opts, err := virtualwebauthn.ParseAssertionOptions(string(c.Options))
+	if err != nil {
+		t.Fatalf("execution %s: request options: %v", c.ID, err)
+	}
+	assertion := virtualwebauthn.CreateAssertionResponse(e.h.rp, e.h.id.dev, e.h.id.cred, *opts)
+	if _, err := e.h.client.SubmitAssertion(e.ctx(), &pb.SubmitAssertionRequest{ExecutionDigest: run.GetExecutionDigest(),
+		AssertionJson: []byte(assertion)}); err != nil {
+		t.Fatalf("positive control: assertion over the execution's challenge refused: %v", err)
+	}
+	if s := e.permitState(t, run.GetExecutionDigest()); s != pb.PermitState_PERMIT_STATE_APPROVED {
+		t.Fatalf("positive control: permit state %v after the assertion, want approved", s)
+	}
+	if _, err := e.h.client.AuthorizeRun(e.ctx(), run); err != nil {
+		t.Fatalf("positive control: the same run after the assertion: %v", err)
+	}
 }
 
 // TestAG24SuggestedOriginNeedsPresenceOnRealExecutor: with a fix note for
@@ -785,9 +827,7 @@ func TestAG24SuggestedOriginNeedsPresenceOnRealExecutor(t *testing.T) {
 		if c.Origin != "suggestion:"+ref || c.Risk != "MEDIUM" || c.Requirement != "assertion_presence" || c.State != "pending" {
 			t.Fatalf("created %+v, want origin suggestion:%s, MEDIUM, assertion_presence, pending", c, ref)
 		}
-		if s := e.permitState(c.ID); s != pb.PermitState_PERMIT_STATE_PENDING {
-			t.Fatalf("executor permit state %v, want pending", s)
-		}
+		e.wantNoRunWithoutAssertion(t, c, ag24HostWeb)
 	})
 	t.Run("omitted reference is caught by the match", func(t *testing.T) {
 		c, err := e.ops.Create(e.ctx(), "admin", "package.install_security", []string{ag24HostWeb}, nil)
@@ -797,9 +837,7 @@ func TestAG24SuggestedOriginNeedsPresenceOnRealExecutor(t *testing.T) {
 		if c.Origin != "suggestion-match:"+strconv.FormatInt(stored.ID, 10) || c.Requirement != "assertion_presence" || c.State != "pending" {
 			t.Fatalf("created %+v, want the match origin, assertion_presence, pending", c)
 		}
-		if s := e.permitState(c.ID); s != pb.PermitState_PERMIT_STATE_PENDING {
-			t.Fatalf("executor permit state %v, want pending", s)
-		}
+		e.wantNoRunWithoutAssertion(t, c, ag24HostWeb)
 	})
 	t.Run("invented reference is refused", func(t *testing.T) {
 		rows, rpcs := e.executionRows(), e.rpcs.Load()
