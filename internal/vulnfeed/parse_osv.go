@@ -38,9 +38,26 @@ const (
 	MaxOSVEventsPerRecord = 32_768
 	// MaxOSVArchiveFiles caps the files in one OSV all.zip.
 	MaxOSVArchiveFiles = 1_000_000
-	// MaxOSVArchiveBytes caps the decompressed bytes of one OSV all.zip.
-	MaxOSVArchiveBytes int64 = 4 << 30
+	// MaxOSVArchiveBytes caps the decompressed bytes of one OSV all.zip,
+	// the sum of the declared entry sizes. It was 4 GiB until the live
+	// Ubuntu archive (host .30, 2026-11-20, 821 MB compressed) exceeded
+	// it; the content date needs the whole archive read, so the sync
+	// failed closed with no snapshot. 16 GiB is about 20 times the live
+	// compressed size. Each entry stays capped at MaxOSVRecordBytes and
+	// the file count at MaxOSVArchiveFiles, so this total is the only
+	// bound on the work per archive. The true uncompressed total of the
+	// live archive is not measured here (see the report).
+	MaxOSVArchiveBytes int64 = 16 << 30
 )
+
+// osvArchiveLimits are the archive limits of one parse. ParseOSVArchive
+// uses the package constants; tests inject smaller values.
+type osvArchiveLimits struct {
+	// Files caps the central directory records.
+	Files int
+	// Bytes caps the sum of the declared entry sizes.
+	Bytes int64
+}
 
 // OSVRangeType is an OSV range type the matcher uses.
 type OSVRangeType string
@@ -341,17 +358,18 @@ type OSVArchiveSummary struct {
 // name or ID, or corrupt compressed data fails the archive. On error the
 // caller must discard what it has seen.
 func ParseOSVArchive(ctx context.Context, ra io.ReaderAt, size int64, visit func(OSVRecord) error) (OSVArchiveSummary, error) {
-	return parseOSVArchive(ctx, ra, size, MaxOSVArchiveFiles, visit)
+	lim := osvArchiveLimits{Files: MaxOSVArchiveFiles, Bytes: MaxOSVArchiveBytes}
+	return parseOSVArchive(ctx, ra, size, lim, visit)
 }
 
-// parseOSVArchive is ParseOSVArchive with the file limit as a parameter,
-// so tests can reach it with a small archive.
-func parseOSVArchive(ctx context.Context, ra io.ReaderAt, size int64, maxFiles int, visit func(OSVRecord) error) (OSVArchiveSummary, error) {
+// parseOSVArchive is ParseOSVArchive with the limits as a parameter, so
+// tests can reach the file and byte caps with a small archive.
+func parseOSVArchive(ctx context.Context, ra io.ReaderAt, size int64, lim osvArchiveLimits, visit func(OSVRecord) error) (OSVArchiveSummary, error) {
 	var sum OSVArchiveSummary
 	if size <= 0 || size > MaxFeedBytesOSVUbuntu {
 		return sum, fmt.Errorf("osv archive: size: %w", ErrFeedLimit)
 	}
-	files, err := countZipDirectory(ctx, ra, size, maxFiles)
+	files, err := countZipDirectory(ctx, ra, size, lim.Files)
 	if err != nil {
 		return sum, fmt.Errorf("osv archive: %w", err)
 	}
@@ -376,8 +394,8 @@ func parseOSVArchive(ctx context.Context, ra io.ReaderAt, size int64, maxFiles i
 			return sum, fmt.Errorf("osv archive file %d: %w", i, ErrFeedLimit)
 		}
 		total += int64(f.UncompressedSize64)
-		if total > MaxOSVArchiveBytes {
-			return sum, fmt.Errorf("osv archive: more than %d bytes: %w", MaxOSVArchiveBytes, ErrFeedLimit)
+		if total > lim.Bytes {
+			return sum, fmt.Errorf("osv archive: more than %d bytes: %w", lim.Bytes, ErrFeedLimit)
 		}
 	}
 	ids := make(map[string]struct{}, len(zr.File))
