@@ -190,7 +190,7 @@ func canonicalBody(comps []Component) ([]byte, int, error) {
 			if err := checkText("binary arch", b.Arch, maxArchBytes, false); err != nil {
 				return nil, 0, err
 			}
-			bs = append(bs, bodyBinary{Name: b.Name, Version: b.Version, Arch: b.Arch})
+			bs = append(bs, bodyBinary(b))
 		}
 		sort.Slice(bs, func(x, y int) bool {
 			if bs[x].Name != bs[y].Name {
@@ -321,7 +321,7 @@ func scanRead(sc rowScanner, withBody bool) (Read, error) {
 		for _, c := range bc {
 			bs := make([]Binary, 0, len(c.Binaries))
 			for _, b := range c.Binaries {
-				bs = append(bs, Binary{Name: b.Name, Version: b.Version, Arch: b.Arch})
+				bs = append(bs, Binary(b))
 			}
 			r.Components = append(r.Components, Component{Source: c.Source, SourceVersion: c.SourceVersion, Binaries: bs})
 		}
@@ -411,42 +411,50 @@ func (s *Store) Prune(ctx context.Context, keepHosts map[string]bool) (int, erro
 	}
 	deleted := 0
 	for _, host := range hosts {
-		var res sql.Result
-		if keepHosts[host] {
-			var latest int64
-			if err := tx.QueryRowContext(ctx, `SELECT id FROM vuln_inventory_reads WHERE host_id = ?
-				ORDER BY read_at DESC, id DESC LIMIT 1`, host).Scan(&latest); err != nil {
-				return 0, fmt.Errorf("vulninventory: prune: latest %s: %w", host, err)
-			}
-			var lastComplete sql.NullInt64
-			err := tx.QueryRowContext(ctx, `SELECT id FROM vuln_inventory_reads WHERE host_id = ? AND complete = 1
-				ORDER BY read_at DESC, id DESC LIMIT 1`, host).Scan(&lastComplete)
-			if err != nil && !errors.Is(err, sql.ErrNoRows) {
-				return 0, fmt.Errorf("vulninventory: prune: last complete %s: %w", host, err)
-			}
-			// IS NOT, not <>: a NULL last complete (host has no complete read)
-			// must not exclude every row.
-			res, err = tx.ExecContext(ctx, `DELETE FROM vuln_inventory_reads WHERE host_id = ?
-				AND id IS NOT ? AND id IS NOT ?
-				AND NOT EXISTS (SELECT 1 FROM vuln_inventory_snapshot_reads AS s WHERE s.read_id = vuln_inventory_reads.id)`,
-				host, latest, lastComplete)
-		} else {
-			res, err = tx.ExecContext(ctx, `DELETE FROM vuln_inventory_reads WHERE host_id = ?
-				AND NOT EXISTS (SELECT 1 FROM vuln_inventory_snapshot_reads AS s WHERE s.read_id = vuln_inventory_reads.id)`, host)
-		}
+		n, err := pruneHost(ctx, tx, host, keepHosts[host])
 		if err != nil {
-			return 0, fmt.Errorf("vulninventory: prune %s: %w", host, err)
+			return 0, err
 		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return 0, fmt.Errorf("vulninventory: prune %s: %w", host, err)
-		}
-		deleted += int(n)
+		deleted += n
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("vulninventory: prune: commit: %w", err)
 	}
 	return deleted, nil
+}
+
+// pruneHost deletes the unneeded reads of one host inside tx and returns how
+// many rows it deleted. keep selects the rule (see Prune).
+func pruneHost(ctx context.Context, tx *sql.Tx, host string, keep bool) (int, error) {
+	const notSnapshotted = `NOT EXISTS (SELECT 1 FROM vuln_inventory_snapshot_reads AS s WHERE s.read_id = vuln_inventory_reads.id)`
+	var res sql.Result
+	var err error
+	if keep {
+		var latest int64
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM vuln_inventory_reads WHERE host_id = ?
+			ORDER BY read_at DESC, id DESC LIMIT 1`, host).Scan(&latest); err != nil {
+			return 0, fmt.Errorf("vulninventory: prune: latest %s: %w", host, err)
+		}
+		// A host with no complete read has NULL here; IS NOT (not <>) then
+		// excludes nothing, so the newest read is still the only one kept.
+		var lastComplete sql.NullInt64
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM vuln_inventory_reads WHERE host_id = ? AND complete = 1
+			ORDER BY read_at DESC, id DESC LIMIT 1`, host).Scan(&lastComplete); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return 0, fmt.Errorf("vulninventory: prune: last complete %s: %w", host, err)
+		}
+		res, err = tx.ExecContext(ctx, `DELETE FROM vuln_inventory_reads WHERE host_id = ?
+			AND id IS NOT ? AND id IS NOT ? AND `+notSnapshotted, host, latest, lastComplete)
+	} else {
+		res, err = tx.ExecContext(ctx, `DELETE FROM vuln_inventory_reads WHERE host_id = ? AND `+notSnapshotted, host)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("vulninventory: prune %s: %w", host, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("vulninventory: prune %s: %w", host, err)
+	}
+	return int(n), nil
 }
 
 // distinctHosts returns every host ID that has at least one read, in order.
