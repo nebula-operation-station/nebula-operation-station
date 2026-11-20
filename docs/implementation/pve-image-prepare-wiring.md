@@ -52,8 +52,22 @@ What the operator sees in the deploy wizard (`internal/web/ui/deploy.go`):
   (`pve_rpc.go:1169`). The refusal comes before any permit, VMID reservation
   or PVE change.
 
+The wizard also sends the wrong generation. `templateGeneration`
+(`deploy.go:1379-1389`, called at `deploy.go:1154`) takes `Generation` from
+the server's PVE-inventory guest (`g.Generation`), which is the server's
+count of the guest's incarnations. `BindTemplate` compares it with
+`rec.Generation` (`pve_images.go:541`), the executor's preparation counter
+that `Prepare` starts at 1 and raises by one per preparation
+(`pve_images.go:476`). The two counters are unrelated. Whenever they differ,
+the provisioning is refused with `ErrPveTemplateChanged` (refusal text at
+`pve_rpc.go:1169`), even for a template that is prepared and unchanged. The
+wizard's `Generation` (`deploy.go:1178-1179`) must therefore come from the
+executor's record, not from the inventory.
+
 **Result:** the chain `catalog -> prepare -> record -> bind -> clone` has a
-verified middle (`Prepare`, `BindTemplate`) and no way in at either end.
+verified middle (`Prepare`, `BindTemplate`) and no way in at either end. The
+wizard's image fields and the generation are all wrong or unbound, so the
+middle is not reached from the UI.
 
 Two further facts the decision depends on:
 
@@ -102,8 +116,9 @@ Two further facts the decision depends on:
    `pve_images.go:424-436` sits in `ProposalRequest`, not in `Prepare`, and
    fires only while the old record still binds. A gone or changed template
    falls through to a new proposal, and `Prepare` writes generation + 1
-   (`pve_images.go:475-477`). Item 5 is therefore settled by the existing
-   code; PV-03b tests it, and the ADR amendment (PV-03j) records it.
+   (`pve_images.go:476`). Item 5 is settled by the existing code, but the
+   fall-through is wider than D5 states (see D5); PV-03b narrows it, and the
+   ADR amendment (PV-03j) records the result.
 
 Items 1-4 block PV-03.
 
@@ -140,10 +155,23 @@ missing, its signature does not verify (`release.VerifyCatalog`,
 `internal/release/catalog.go:94`), or `LoadSigned` refuses a rollback
 (`pve_images.go:124-151`, `ErrPveCatalogRollback`), the executor logs an
 audit event, starts, and loads no signed catalog. The signed part stays
-empty, so `mutation` refuses every image with `ErrPveImageUnknown`
-(`pve_images.go:376`). Nothing is persisted on these paths, because
-`VerifyCatalog` runs before `PutPveCatalogState`. This is fail closed for the
-catalog. It does not stop the whole process, so a broken release file cannot
+empty, so `mutation` refuses every **signed** image with `ErrPveImageUnknown`
+(`mutation` at `pve_images.go:373-376`, which uses `Lookup`, and `Lookup`
+returns not-found when `c.signed == nil`, `pve_images.go:187-188`). Nothing is
+persisted on these paths, because `VerifyCatalog` runs before
+`PutPveCatalogState`. This is fail closed for the signed catalog.
+
+**Local entries are deliberately not affected.** `Lookup` serves `local-` IDs
+from the local map before it looks at the signed part (`pve_images.go:182-185`).
+At start that map is empty, because nothing persists it today, so a `local-`
+ID is refused at start only for that reason. Once PV-03b persists local
+entries (D3a), a local entry stays preparable when no signed catalog is loaded.
+This is intended: a Local entry carries its own trust (Local, HIGH approval,
+`ImagePrepareRisk`), and a broken release file must not take away an image the
+operator added on purpose. The cost is that a local entry does not depend on
+the release signature; the HIGH approval is the gate.
+
+The executor does not stop the whole process, so a broken release file cannot
 disable unrelated executor actions. A maintainer may choose to refuse start
 instead; that choice belongs in PV-03c.
 
@@ -172,34 +200,65 @@ and the two RPCs in PV-03a, both in protected paths.
 
 | Variant | Consequences |
 | --- | --- |
-| (a) Read-only "Images" page under `/deploy` (catalog entries, template records, trust) | Operator can see which SHA-256 a template was prepared from. Needs a read RPC (`ListPVEImages`) and a read role. |
-| (b) Wizard drop-downs for the OS image and the template SHA-256 | Removes two free-text fields. Depends on (a)'s data. |
-| (c) Nothing new; document the CLI | Leaves the wizard as is. |
+| (a) Read-only "Images" page under `/deploy` (catalog entries, template records, trust) | Operator can see which SHA-256 a template was prepared from. Needs the read RPC `ListPVEImages`. Its roles: **`server` and `admin`**, read-only, no approval. The `pve-collector` role gets no access (it has only `ListReadGrants` and `ReadPVE`, `roles.go:129`, `:160-163`). Its `integrity_lock.go` entry goes next to `ListReadGrants` (`integrity_lock.go:401`) with the same value. |
+| (b) Wizard drop-downs for the OS image and the template SHA-256, and the template generation taken from `ListPVEImages` | Removes the two free-text fields. The generation is the executor's record generation for the chosen key, not the inventory value (`deploy.go:1379-1389`). Depends on (a)'s data. |
+| (c) Nothing new; document the CLI | Leaves the wizard as is. The generation mismatch stays, so wizard provisioning keeps failing with `ErrPveTemplateChanged`. |
 
 **Recommendation: (a) first, (b) in the same ticket as the page if it is
-small.** This is the page the proposal names (`internal/web/ui/`).
+small.** This is the page the proposal names (`internal/web/ui/`). Option (b)
+is required, not optional, for the wizard to provision after PV-03b: the
+generation replacement is part of it (see the chain in section 1).
 
 ### D5. Re-preparation (decide inside PV-03)
 
 **Recommendation: the existing flow, no record removal.** Verified in the
 code:
 
-- `ProposalRequest` (`pve_images.go:424-436`) refuses with `ErrPveImagePrepared`
+- `ProposalRequest` (`pve_images.go:428-431`) refuses with `ErrPveImagePrepared`
   only when `BindTemplate` succeeds on the old record, that is while the
   template still exists, is unchanged and the catalog still lists the image.
+- **The fall-through is wider than "gone or changed".** Lines 433-434 return
+  only the store errors (`ErrPveTemplateStore`, `ErrPveJobStore`). Every other
+  `BindTemplate` error lets the proposal through as a new `pve.image.prepare`.
+  That includes:
+  - `ErrPveRemoteChanged` (`pve_images.go:552-553`): the remote is not active,
+    or its trust generation changed.
+  - Any read error of the live template. `liveTemplate` maps every
+    `TargetState` error to `ErrPveTemplateChanged` (`pve_images.go:505-507`),
+    so a transient PVE read failure looks like a changed template. A failure
+    of `readToken` is returned unchanged (`pve_images.go:500-503`) and also
+    falls through.
+  - A withdrawn catalog entry does **not** reach this point. `mutation`
+    (`pve_images.go:374`) refuses the unknown image first with
+    `ErrPveImageUnknown`.
 - A gone or changed template makes `BindTemplate` fail (`ErrPveTemplateNotPrepared`
-  or `ErrPveTemplateChanged`, `pve_images.go:539-561`), so the proposal goes
+  or `ErrPveTemplateChanged`, `pve_images.go:539-546`), so the proposal goes
   through as a new `pve.image.prepare`.
 - `Prepare` sets `Generation = prev.Generation + 1` when a record exists
   (`pve_images.go:475-477`) and overwrites that key's record with
   `PutPveTemplate`.
 
 So no operator step, CLI command or new write path to `pve-templates.json` is
-needed, and `BindTemplate` stays the single check. PV-03b must test: prepare,
-delete the template in PVE, re-propose and re-prepare (generation 2, the old
-record is not needed); and a changed template (config digest differs), which
-fails the binding and allows re-preparation. PV-03b also checks what happens
-when the VMID of the gone template is reused, since the VMID reservation path
+needed, and `BindTemplate` stays the single check. **Decision for PV-03b:**
+narrow the fall-through in `ProposalRequest` to `ErrPveTemplateNotPrepared`
+and `ErrPveTemplateChanged`, and refuse every other error. A transient read
+failure then refuses the re-preparation, and the record and the generation
+stay as they are. The "gone" case needs a distinction that the code does not
+have yet: `liveTemplate` must report a missing VM as `ErrPveTemplateChanged`
+(or `ErrPveTemplateNotPrepared`) and any other read error as a separate
+sentinel that is refused. PV-03b confirms in the PVE client how a missing VM
+shows up. If the client cannot tell "missing" from "unreachable", the paper
+accepts the cost instead: a gone template is re-prepared only after a
+successful read of its absence, and an unreachable PVE leaves the proposal
+refused.
+
+PV-03b must test: prepare, delete the template in PVE, re-propose and
+re-prepare (generation 2, the old record is not needed); a changed template
+(config digest differs), which fails the binding and allows re-preparation;
+and the refusal cases: a `TargetState` read error and `ErrPveRemoteChanged`
+each refuse the re-preparation proposal with no permit, leave the record
+unchanged and bump no generation. PV-03b also checks what happens when the VMID
+of the gone template is reused, since the VMID reservation path
 (`ErrPveVMIDTaken`) applies there.
 
 ## 4. Follow-up tickets
@@ -209,13 +268,13 @@ Protection status is taken from `.github/protected-paths.txt`.
 | # | Ticket | Paths | Protected? | Scope | Required test (real path) |
 | --- | --- | --- | --- | --- | --- |
 | PV-03a | RPCs `ProposePVEImagePrepare` / `CommitPVEImagePrepare` (D1a), read RPC `ListPVEImages` (D4a), admin-only `AddPVELocalImage` / `RemovePVELocalImage` (D3a) | `proto/nebula/executor/v1/executor.proto`, generated `internal/rpc/executorv1/` (via `make generate`) | `proto/` **yes**; generated code follows `proto/` | Messages and service methods only | `buf lint` and the generated-code check (`make check`) |
-| PV-03b | Handlers, role table (`server`, `admin` for prepare; `admin` only for local entries), per-method entries, `pveImagePrepare` wiring, catalog load function, local-entry persistence | `internal/executor/roles.go`, `internal/executor/pve_rpc.go`, `internal/executor/pve_images.go`, `internal/executor/integrity_lock.go` (per-method tables at `:320`, `:427`) | `internal/executor/` **yes** | Executor side of D1-D3 and D5 | Executor RPC test against the PVE fake (httptest on loopback, see `internal/executor/pve_admin_test.go`): propose, approve (permit), commit, then `BindTemplate` succeeds on the recorded template. Then a provisioning proposal on that template no longer returns `template is not prepared`. Re-preparation after a gone template (generation 2) and after a changed one (D5 cases). Security rejections: wrong role (server calling `AddPVELocalImage`), unsigned or rolled-back catalog, local ID without the prefix, oversize catalog, local entry that fails `ValidateImage`. |
-| PV-03c | Catalog load at executor start (D2a), with the fail-closed start behaviour | `cmd/nebula-executor/` (builtin trust wiring, `builtin_trust.go:19`) | `cmd/nebula-executor/` **yes** | Read `image-catalog.json` and its signature from the bundle directory, call `LoadSigned` | Start-up test with a temporary bundle directory (no `/usr/share` access): signed catalog loads; a catalog with a lower sequence is refused after restart. **Fail-closed cases (D2a):** file missing, bad signature and rollback each start the executor with no signed catalog, store no catalog state, and make a `pve.image.prepare` for any image return `ErrPveImageUnknown`. Then the PVE-fake test of PV-03b runs through the started binary's wiring. |
+| PV-03b | Handlers, role table (`server`, `admin` for prepare and for `ListPVEImages`; `admin` only for the local-entry RPCs; `pve-collector` for none of them), per-method entries, `pveImagePrepare` wiring, catalog load function, local-entry persistence | `internal/executor/roles.go`, `internal/executor/pve_rpc.go`, `internal/executor/pve_images.go`, `internal/executor/integrity_lock.go` (per-method tables at `:320`, `:427`) | `internal/executor/` **yes** | Executor side of D1-D3 and D5 | Executor RPC test against the PVE fake (httptest on loopback, see `internal/executor/pve_admin_test.go`): propose, approve (permit), commit, then `BindTemplate` succeeds on the recorded template. Then `ProposePVEGuestProvision` for that template must succeed exactly: no error, a provisioning permit in the response (`respond(res.Permit)`, `pve_rpc.go:1247`) and the VMID reserved for that execution. Any other outcome fails the test, including `ErrPveTemplateChanged`, `ErrPveRemoteChanged` and `ErrPveVMIDTaken`. Re-preparation after a gone template (generation 2) and after a changed one (D5 cases). D5 refusal cases: a `TargetState` read error and `ErrPveRemoteChanged` each refuse the re-preparation proposal with no permit, and the record and generation stay unchanged. Security rejections: wrong role (server calling `AddPVELocalImage`), unsigned or rolled-back catalog, local ID without the prefix, oversize catalog, local entry that fails `ValidateImage`. |
+| PV-03c | Catalog load at executor start (D2a), with the fail-closed start behaviour | `cmd/nebula-executor/` (builtin trust wiring, `builtin_trust.go:19`) | `cmd/nebula-executor/` **yes** | Read `image-catalog.json` and its signature from the bundle directory, call `LoadSigned` | Start-up test with a temporary bundle directory (no `/usr/share` access): signed catalog loads; a catalog with a lower sequence is refused after restart. **Fail-closed cases (D2a):** file missing, bad signature and rollback each start the executor with no signed catalog, store no catalog state, and make a `pve.image.prepare` for every **signed** image return `ErrPveImageUnknown`. A local entry persisted under D3a stays preparable with no signed catalog loaded (D2: local entries are served by `Lookup` independently of the signed part, `pve_images.go:182-185`); the test asserts this on purpose and does not narrow it. Then the PVE-fake test of PV-03b runs through the started binary's wiring. |
 | PV-03d | CLI `nebula` subcommands for local entries (D3a) and, if chosen, a prepare command; they call the PV-03a admin RPCs | `cmd/nebula/` | `cmd/nebula/` **yes** | `nebula` subcommands on the executor host only, over the admin socket | CLI test against the executor RPC on a Unix socket in a temporary directory: add and remove a local entry; entry survives an executor restart; ID without `local-` refused; a non-admin peer refused. |
 | PV-03e | Release tooling produces `image-catalog.json` and its signature (decides the open sub-question in D2) | `internal/release/` and `cmd/nebula-release-stage/` | **not on the list** (`internal/release` and `cmd/nebula-release-stage` are not in `.github/protected-paths.txt`; verify before starting) | Build and sign the catalog in the release pipeline | Round-trip test: staged catalog verifies with `VerifyCatalog` and loads with `LoadSigned`. |
-| PV-03f | Server pass-through of the two RPCs | `internal/executorclient/` | **no** | Client methods for propose, commit, list | Client test against an in-process executor on a Unix socket in a temporary directory, or on loopback. |
-| PV-03g | Server handlers that forward the RPCs and map errors | `cmd/nebula-server/` | **no** | Forward propose, commit and list; keep the approval on the user's key | Server handler test with a fake executor client: a server request cannot approve (the approval step needs the user's assertion). Then the PVE-fake end-to-end test of PV-03b, started from the server side. |
-| PV-03h | "Images" page under `/deploy` (D4a) and drop-downs (D4b) | `internal/web/ui/` | **no** | Read-only list; optionally replace the two free-text fields | UI handler test: list shows catalog entries and records; the template SHA-256 and OS image fields accept only listed values. **Rendering check:** the page renders catalog URLs and executor data as text only (`html/template` escaping, no raw HTML or script), offers only `https` links, and its response carries a Content-Security-Policy in the same style as the existing UI pages (e.g. `internal/web/ui/enroll_onestep.go:524`). Test with a catalog entry containing `<script>` and a `javascript:` URL. |
+| PV-03f | Server pass-through of three RPCs: propose, commit and list (`ProposePVEImagePrepare`, `CommitPVEImagePrepare`, `ListPVEImages`). The local-entry RPCs are not forwarded. | `internal/executorclient/` | **no** | Client methods for the three RPCs | Client test against an in-process executor on a Unix socket in a temporary directory, or on loopback. |
+| PV-03g | Server handlers that forward the three RPCs of PV-03f and map errors | `cmd/nebula-server/` | **no** | Forward propose, commit and list; keep the approval on the user's key; do not forward the local-entry RPCs | Server handler test with a fake executor client: a server request cannot approve (the approval step needs the user's assertion). Then the PVE-fake end-to-end test of PV-03b, started from the server side. |
+| PV-03h | "Images" page under `/deploy` (D4a) and drop-downs (D4b) | `internal/web/ui/` | **no** | Read-only list; replace the two free-text fields with drop-downs; take `PVETemplateRef.Generation` from `ListPVEImages` (the executor record), not from `templateGeneration` (`deploy.go:1379-1389`). This generation change is required, not optional. | UI handler test: list shows catalog entries and records; the template SHA-256 and OS image fields accept only listed values; the generation sent is the record's generation for the chosen key. **Wizard acceptance:** after a successful prepare, a provisioning through the wizard has the same outcome as PV-03b (no error, provisioning permit registered, no `ErrPveTemplateChanged`). **Rendering check:** the page renders catalog URLs and executor data as text only (`html/template` escaping, no raw HTML or script), offers only `https` links, and its response carries a Content-Security-Policy in the same style as the existing UI pages (e.g. `internal/web/ui/enroll_onestep.go:524`). Test with a catalog entry containing `<script>` and a `javascript:` URL. |
 | PV-03i | Documentation update after the path works | `docs/operator/proxmox.md`, `README.md:66`, `docs/status.md:16` | `docs/adr/` and `docs/spec/` **yes**; `docs/operator/` and the two status lines are not on the list | Replace "Not available today" and the status wording | Doc check: every changed `path:line` grep-verified. |
 | PV-03j | **ADR 0008 amendment** (new "Amendment 2 (date): image preparation wiring") recording D1 (roles and the server's new HIGH proposal path), D2 (catalog load, fail-closed start), D3 (admin-only local-entry RPCs), D4 and D5 (re-preparation through the existing flow). Changes the open-question list in section 2 of the ADR. | `docs/adr/0008-guest-provisioning.md` | `docs/adr/` **yes** | Decision record only; no code | Doc check: each decision cites `path:line` from the code and states the test ticket (PV-03b, PV-03c, PV-03d). Maintainer approval needed, as for amendment 1. The earlier role decisions were recorded this way (ADR 0008 "Roles of the provision RPCs", amendment 2026-11-03, line 146); the WA-05 decision for guest power has no record in `docs/` (`docs/implementation/wiring-audit.md:290`), so it is not a precedent to copy. |
 | PV-03k | **Threat-model update** for the new server path to propose a HIGH action (D1a), the admin-only local-entry RPCs (D3a) and the catalog trust chain (D2a) | `docs/threat-model.md` | `docs/threat-model.md` **yes** | New rows next to the existing "Compromised web process" row (`docs/threat-model.md:54`) and risk row (`:58`): a compromised server can propose, but not approve, an image preparation; a server-originated local entry is refused by role; unsigned or rolled-back catalog refused, and a catalog the executor could not verify loads nothing | Doc check: each row names the package and test that enforces it (PV-03b, PV-03c). |
@@ -252,9 +311,12 @@ those lines, because they are outside the change allowed for this ticket.
    CLI over the admin socket on the executor host; the executor writes and
    persists them. No file written by the CLI.
 4. Accept D4 (a): read-only Images page as the first step, with the rendering
-   check in PV-03h.
-5. Accept D5 (existing flow): re-preparation through a new proposal after a
-   gone or changed template; no operator record removal and no new write
-   path to `pve-templates.json`.
+   check in PV-03h. `ListPVEImages` is readable by `server` and `admin` only.
+   Accept D4 (b) in the same ticket as far as the generation is concerned:
+   the wizard takes the generation from the executor record.
+5. Accept D5 (existing flow, narrowed): re-preparation through a new proposal
+   only after a gone or changed template (`ErrPveTemplateNotPrepared`,
+   `ErrPveTemplateChanged`); every other `BindTemplate` error refuses it. No
+   operator record removal and no new write path to `pve-templates.json`.
 6. Accept the follow-up tickets PV-03j (ADR 0008 amendment) and PV-03k
    (threat-model update) before PV-03a-b start.
