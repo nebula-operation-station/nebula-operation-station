@@ -9,6 +9,10 @@ import (
 	"testing"
 )
 
+// bidiOverride is U+202E, a bidi control character, built at run time so
+// that the test source stays plain ASCII.
+var bidiOverride = string(rune(0x202e))
+
 // factsWithOSRelease wraps text in a core.facts document as the executor
 // reports it: os_release is base64, the other members are ignored here.
 func factsWithOSRelease(text string) []byte {
@@ -99,7 +103,7 @@ func TestOSReleaseRejectsControlAndOddCharacters(t *testing.T) {
 		{"uppercase", "ID=Debian\nVERSION_ID=12\nVERSION_CODENAME=bookworm\n"},
 		{"space in value", "ID=debian gnu\nVERSION_ID=12\nVERSION_CODENAME=book worm\n"},
 		{"slash", "ID=debian\nVERSION_ID=12/../x\nVERSION_CODENAME=bookworm\n"},
-		{"bidi override", "ID=debian\nVERSION_ID=12\nVERSION_CODENAME=book‮worm\n"},
+		{"bidi override", "ID=debian\nVERSION_ID=12\nVERSION_CODENAME=book" + bidiOverride + "worm\n"},
 		{"newline inside quotes", "ID=\"debian\nVERSION_ID=12\nVERSION_CODENAME=bookworm\n"},
 	}
 	for _, tc := range tests {
@@ -108,7 +112,7 @@ func TestOSReleaseRejectsControlAndOddCharacters(t *testing.T) {
 			if !ok {
 				t.Fatalf("ok = false for a readable document")
 			}
-			if strings.ContainsAny(id+ver+code, "\x1b‮ /\n") {
+			if strings.ContainsAny(id+ver+code, "\x1b"+bidiOverride+" /\n") {
 				t.Fatalf("control or odd characters kept: %q %q %q", id, ver, code)
 			}
 			if id != "" && id != "debian" {
