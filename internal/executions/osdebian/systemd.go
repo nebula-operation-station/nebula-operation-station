@@ -15,6 +15,14 @@ type Unit struct {
 	Name, Load, Active, Sub, Description string
 }
 
+// Limits of the journal block of a service status result.
+const (
+	// maxJournalLines is the number of kept journal lines.
+	maxJournalLines = 50
+	// maxJournalLineBytes is the length limit of one kept journal line.
+	maxJournalLineBytes = 1000
+)
+
 // ServiceStatus is a parsed service.status / service.<verb> result.
 type ServiceStatus struct {
 	Phase   string
@@ -23,6 +31,10 @@ type ServiceStatus struct {
 	Exit    int
 	Props   []Prop
 	Journal []string
+	// JournalDropped counts the journal lines that were not valid UTF-8 and
+	// were left out of Journal. It is at most the number of lines in the
+	// block, which is bounded by maxRawSize.
+	JournalDropped int
 }
 
 // Prop is one `systemctl show` property.
@@ -33,12 +45,22 @@ var (
 	propRe     = regexp.MustCompile(`^(Id|Description|LoadState|ActiveState|SubState|UnitFileState|ActiveEnterTimestamp|MainPID)=(.{0,300})$`)
 )
 
-func decodeText(s string) (string, bool) {
+// decodeRaw decodes a base64 block within maxRawSize. It does not check UTF-8;
+// callers decide per line or per block.
+func decodeRaw(s string) (string, bool) {
 	b, err := base64.StdEncoding.DecodeString(s)
-	if err != nil || len(b) > maxRawSize || !utf8.Valid(b) {
+	if err != nil || len(b) > maxRawSize {
 		return "", false
 	}
 	return string(b), true
+}
+
+func decodeText(s string) (string, bool) {
+	t, ok := decodeRaw(s)
+	if !ok || !utf8.ValidString(t) {
+		return "", false
+	}
+	return t, true
 }
 
 // ParseUnits reads a service.list result.
@@ -100,16 +122,31 @@ func ParseServiceStatus(result []byte) (ServiceStatus, error) {
 			}
 		}
 	}
-	if j, ok := decodeText(doc.Journal); ok {
+	if j, ok := decodeRaw(doc.Journal); ok {
 		for _, l := range strings.Split(strings.TrimRight(j, "\n"), "\n") {
-			if len(st.Journal) >= 50 {
+			if len(st.Journal) >= maxJournalLines {
 				break
 			}
-			if len(l) > 1000 {
-				l = l[:1000]
+			// A line that is not valid UTF-8 is dropped on its own; the valid
+			// lines around it are kept.
+			if !utf8.ValidString(l) {
+				st.JournalDropped++
+				continue
 			}
-			st.Journal = append(st.Journal, strings.ToValidUTF8(l, "�"))
+			st.Journal = append(st.Journal, cutRunes(l, maxJournalLineBytes))
 		}
 	}
 	return st, nil
+}
+
+// cutRunes shortens s to at most n bytes without splitting a UTF-8 sequence.
+// s must be valid UTF-8.
+func cutRunes(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }

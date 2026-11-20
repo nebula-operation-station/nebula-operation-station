@@ -7,6 +7,10 @@
 # "unknown". Needs curl on the host.
 set -u
 set -f
+# Bytes, not locale collation: the printable-ASCII test below and sort -u
+# must not depend on the SSH user's locale.
+LC_ALL=C
+export LC_ALL
 b64() { base64 -w0 2>/dev/null || base64 | tr -d '\n'; }
 pre() { printf '{"format":"docker-updates-v1","phase":"precheck","reason":"%s"}\n' "$1"; exit 10; }
 command -v docker >/dev/null 2>&1 || pre "Docker is not installed"
@@ -46,10 +50,12 @@ remote_digest() {
 	fi
 	[ "$code" = "200" ] || { echo "unknown registry answered $code"; return; }
 	dg=$(header "$h" "docker-content-digest")
-	case "$dg" in
-	sha256:*) echo "$dg" ;;
-	*) echo "unknown no digest in the answer" ;;
-	esac
+	# The form the parser accepts: sha256 and 64 lower-case hex digits.
+	if printf '%s\n' "$dg" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+		echo "$dg"
+	else
+		echo "unknown no digest in the answer"
+	fi
 }
 
 out=""
@@ -59,6 +65,9 @@ emit() { out="$out$(printf '%s\t%s\t%s\t%s' "$1" "$2" "$3" "$4")
 "; }
 for img in $($d ps --format '{{.Image}}' 2>/dev/null | sort -u | head -n 50); do
 	n=$((n + 1))
+	# Not printable ASCII: no reference (the registry grammar has none),
+	# and one such line would make the parser refuse the whole result.
+	case "$img" in *[!\ -~]*) continue ;; esac
 	ref="$img"
 	case "$ref" in
 	*@sha256:*) emit "$img" pinned "" "the image is pinned by digest"; continue ;;
