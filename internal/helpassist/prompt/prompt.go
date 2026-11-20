@@ -227,10 +227,10 @@ func checkFactsBlock(facts string) error {
 	return nil
 }
 
-// checkTotal reports ErrTooLarge when the estimated size of p exceeds
-// maxTokens.
+// checkTotal reports ErrTooLarge when the estimate of p's two messages,
+// PromptMessageOverheadTokens each included, exceeds maxTokens.
 func checkTotal(p Prompt, maxTokens int) error {
-	n := EstimateTokens(len(p.System) + len(p.User))
+	n := EstimateMessageTokens(p.System, p.User)
 	if n > maxTokens {
 		return fmt.Errorf("prompt estimated at %d tokens, limit %d: %w", n, maxTokens, ErrTooLarge)
 	}
