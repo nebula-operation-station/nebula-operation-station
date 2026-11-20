@@ -348,8 +348,8 @@ func TestImageGroupOffersContainerCandidates(t *testing.T) {
 	cand := imageFinding("CVE-2026-0001", TierCritical, 90, OutcomeImageCandidate, LinkContainers)
 	g := oneGroup(t, newProjector(t, []Host{webHost()}, []Finding{cand}, nil, fullCatalog()))
 	want := []Candidate{
-		{Key: "c1", Action: "docker.compose_update", HostID: "web-01"},
-		{Key: "c2", Action: "docker.update", HostID: "web-01"},
+		{Key: "c1", Action: "docker.compose_update", HostID: "web-01", Label: "Update the Compose project"},
+		{Key: "c2", Action: "docker.update", HostID: "web-01", Label: "Update the standalone container"},
 	}
 	if fmt.Sprint(g.Projection.Candidates) != fmt.Sprint(want) {
 		t.Fatalf("candidates = %+v, want %+v", g.Projection.Candidates, want)
@@ -642,8 +642,8 @@ func TestCandidatesFromCatalogAndAllowlist(t *testing.T) {
 	cat := fakeCatalog{"package.install_security": true, "system.reboot": true}
 	g := oneGroup(t, newProjector(t, []Host{webHost()}, fs, nil, cat))
 	want := []Candidate{
-		{Key: "c1", Action: "package.install_security", HostID: "web-01"},
-		{Key: "c2", Action: "system.reboot", HostID: "web-01"},
+		{Key: "c1", Action: "package.install_security", HostID: "web-01", Label: "Install security updates"},
+		{Key: "c2", Action: "system.reboot", HostID: "web-01", Label: "Reboot the host"},
 	}
 	if fmt.Sprint(g.Projection.Candidates) != fmt.Sprint(want) {
 		t.Fatalf("candidates = %+v, want %+v", g.Projection.Candidates, want)
