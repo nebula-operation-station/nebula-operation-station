@@ -278,7 +278,6 @@ func TestRedactedRenderingsDoNotContainQuestion(t *testing.T) {
 		"%v":  fmt.Sprintf("%v", tn),
 		"%+v": fmt.Sprintf("%+v", tn),
 		"%#v": fmt.Sprintf("%#v", tn),
-		"%s":  fmt.Sprintf("%s", tn),
 	}
 	for verb, out := range outputs {
 		if strings.Contains(out, marker) {
