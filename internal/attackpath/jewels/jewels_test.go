@@ -170,6 +170,8 @@ func TestMarkRejectsBadInput(t *testing.T) {
 		{"control char", func(m *jewels.Mark) { m.Node = "host:a\nb" }, jewels.ErrInvalidNode},
 		{"space", func(m *jewels.Mark) { m.Node = "host:a b" }, jewels.ErrInvalidNode},
 		{"bad utf8", func(m *jewels.Mark) { m.Node = "host:\xff" }, jewels.ErrInvalidNode},
+		{"printable ascii outside the builder alphabet", func(m *jewels.Mark) { m.Node = "host:!" }, jewels.ErrInvalidNode},
+		{"non-ascii letter", func(m *jewels.Mark) { m.Node = "host:é" }, jewels.ErrInvalidNode},
 		{"too long", func(m *jewels.Mark) { m.Node = "host:" + strings.Repeat("x", attackpath.MaxIDBytes) }, jewels.ErrInvalidNode},
 		{"unknown role", func(m *jewels.Mark) { m.Role = "router" }, jewels.ErrInvalidRole},
 		{"empty role", func(m *jewels.Mark) { m.Role = "" }, jewels.ErrInvalidRole},
