@@ -9,10 +9,14 @@ Ticket: uf04 (autopilot), Issue: none.
 
 ## Why this is open
 
-ADR 0011 decides who may make the five maintainer decisions and that each one
-needs a **fresh WebAuthn assertion** "as for read-lease approval"
-(`docs/adr/0011-vulnerability-management.md:796-798`, Q4 decided at
-`:1108`). It does not say how the assertion is bound to the decision, and it
+ADR 0011 decides who may make the five maintainer decisions. Four of them need
+a **fresh WebAuthn assertion** "as for read-lease approval": accept risk, false
+positive, held-closure confirmation and the mark reset
+(`docs/adr/0011-vulnerability-management.md:796-800`; Q4 was decided 2026-11-09
+at `:798`; the Q4 row at `:1108` still reads "open"). The fifth, discarding a
+held closure (`discard_hold`), is not named there: its row at `:731` names only
+"Admin" (or automatic supersession). Whether it needs an assertion is an open point for the maintainer.
+The ADR does not say how the assertion is bound to the decision, and it
 does not say whether the hardened mode of the executor (CLI-only approval,
 see below) applies to decisions. The only executor RPC that binds an assertion
 to a digest for vulnerability decisions does not exist, so every submit of a
@@ -93,12 +97,12 @@ not change it.
 
 | Path | Who verifies | Binding | Where |
 | --- | --- | --- | --- |
-| Read grant approval, default mode (`CommitReadGrant`) | executor | executor challenge bound to the grant digest (SHA-256 over digest, nonce, expiry); the server only relays the assertion | `internal/permit/lease.go:636-647` (challenge), `:682-691` (issued), `:737-760` (commit); `internal/executor/roles_read.go:142-155`; request `proto/nebula/executor/v1/executor.proto:2884-2889` |
+| Read grant approval, default mode (`CommitReadGrant`) | executor | executor challenge bound to the grant digest (SHA-256 over the domain separator `nebula-read-grant-v2`, digest, nonce, expiry); the server only relays the assertion | `internal/permit/lease.go:636-649` (challenge; separator at `:642`), `:682-691` (issued), `:737-760` (commit); `internal/executor/roles_read.go:142-155`; request `proto/nebula/executor/v1/executor.proto:2884-2889` |
 | Permit approval | executor | challenge = SHA-256(digest, nonce, expiry), single use, sign counter checked | `docs/threat-model.md:57` (`internal/permit`, `internal/webauthnverify`) |
 | Agent LLM settings (A1.8) | executor for the assertion, `nebula-server` for the binding | login assertion (`BeginLogin`/`FinishLogin`, `executor.proto:161,165`); server holds a single-use challenge bound to user and change digest | `cmd/nebula-server/vuln_agentcfg.go:56-60` (relay interface), `:166` (`take`), `:181-200` (commit) |
 
 `executor.(*Service).BeginLogin` and `FinishLogin` take no digest and no mode
-(`internal/executor/webauthn.go:174-198`). The executor checks the signature
+(`internal/executor/webauthn.go:174-199`). The executor checks the signature
 against its own login challenge and returns the credential and the user name.
 It does not know which change or decision the user signed. The binding exists
 only in `nebula-server`.
@@ -143,7 +147,9 @@ Consequence for both variants: a compromised `nebula-server` can write any
 decision (accept a risk, mark a false positive, confirm or discard a held
 closure, reset a feed mark) directly into its own store, with no assertion at
 all. The assertion gates the decision path the UI uses. It does not gate the
-database. Neither variant prevents this.
+database. Neither variant prevents this. The same holds for web sessions: the
+server creates them itself (`internal/web/auth/auth.go:281`), so no assertion
+gates a session once the server is compromised.
 
 What each variant adds on top of that:
 - **Variant A** checks the binding in `nebula-server`. A refused request
@@ -208,22 +214,29 @@ applies to every item: a compromised server can also write decisions to
   `docs/adr/0011-vulnerability-management.md:3899-3904`.
 - **Login purpose.** A login assertion is not bound to a purpose.
   `FinishLogin` checks the signature against the executor's login challenge
-  and returns the credential and user name (`internal/executor/webauthn.go:183-198`).
+  and returns the credential and user name (`internal/executor/webauthn.go:183-199`).
   Variant A's decision challenges come from the same executor login pool as
-  web logins: `BeginLogin` stores them in `r.logins` (`internal/webauthnreg/login.go:45-74`;
+  web logins: `BeginLogin` stores them in `r.logins` (`internal/webauthnreg/login.go:47-74`;
   challenge of 32 random bytes, `:62`, TTL `LoginTTL` 2 min at `:21`, pool
   limit `MaxPendingLogin` 32 at `:22`). A decision assertion is therefore also
   a valid login assertion for the same user, and the executor cannot tell the
-  two uses apart. The web login path creates a web session from exactly that
-  result (`internal/web/auth/auth.go:272-281`, audit line at `:287`). So this
-  assertion does **not** protect against a session: a compromised server that
-  relays it can spend a maintainer's decision signature as a login for that
-  user instead of, or before, the decision. The executor logs both uses
-  (`login_succeeded` at `internal/executor/webauthn.go:197`), so the misuse is
-  visible afterwards, but it is not prevented. Closing it needs a purpose-bound
-  challenge (a separate pool, or a challenge FinishLogin refuses for decisions).
-  That lies in protected paths (`internal/webauthnreg/`, `internal/executor/`)
-  and is outside Variant A as written.
+  two uses apart. The web login path creates a web session from that result
+  (`internal/web/auth/auth.go:272-281`, audit line at `:287`).
+  **Against a compromised `nebula-server` this gap adds nothing.** The server
+  creates web sessions itself: `h.sessions.Create` at `auth.go:281` (and the
+  recovery path at `:313`) runs with no assertion at all, so a compromised
+  server can open a session for any user without a decision signature. The
+  login assertion protects only against an attacker outside the server who
+  lacks the key (for example someone holding only a stolen browser session).
+  Against a compromised server only a CLI/executor-side check protects, which
+  is hardened mode (see below); neither variant gives that in default mode.
+  Purpose binding still matters for a party that holds a decision assertion but
+  not the server. Its window is the 2-minute challenge TTL, and a separate
+  challenge type would close it. The executor logs login uses
+  (`login_succeeded` at `internal/executor/webauthn.go:197`), but it cannot
+  tell a decision use from a login. Purpose binding lies in protected paths
+  (`internal/webauthnreg/`, `internal/executor/`) and is outside Variant A as
+  written.
 - It can skip the digest check in its own code. The executor cannot detect
   this, because the executor never sees the digest.
 - It can forge the server-side audit line. Server audit lines are not signed
@@ -272,7 +285,7 @@ cross-language canonical encoding. Moving it into `internal/canonical`
 **Read-grant precedent, corrected.** The read-grant challenge is held in
 memory: the pending grant (`internal/permit/lease.go:615-621`, `pendingReadGrant`)
 carries its challenge, which is derived by `readGrantChallengeFor`
-(`lease.go:636-647`). The approved grant is **not** only in memory. It is
+(`lease.go:636-649` (separator `nebula-read-grant-v2` at `:642`)). The approved grant is **not** only in memory. It is
 stored with `SaveReadGrant` (`internal/permit/lease.go:794`, implemented by
 `internal/executordb/lease.go:33`). The signed event of B is stored the same
 way: the executor writes its event chain through `executordb.InsertEvent`
@@ -297,7 +310,7 @@ a maintainer review under AGENTS.md. This paper does not change them.
 **Login purpose under B.** B's decision challenge is digest-bound and must be
 a separate challenge type that the login path (`FinishLogin`) cannot consume.
 That is a requirement of this variant, not an existing feature: today the login
-pool has no purpose field (`internal/webauthnreg/login.go:45-74`).
+pool has no purpose field (`internal/webauthnreg/login.go:47-74`).
 
 **Hardened mode under B.** B can mirror read grants. In hardened mode
 `ProposeVulnDecision` would issue no challenge (as `lease.go:682-687`), the
@@ -317,8 +330,10 @@ applies: it can still write decisions to `vulnstore` with no assertion.)
 - It cannot get a signature to count for a different digest: the challenge is
   bound to the digest in the executor. In A, the same protection holds only if
   the server's own check is correct.
-- It cannot spend a decision signature as a login, if B's challenge is a
-  separate type (see "Login purpose under B"). Under A it can.
+- Against a compromised server the separate challenge type of "Login purpose
+  under B" adds nothing: the server can already create a session with no
+  assertion (`auth.go:281`). It matters only for a party that holds a signature
+  and not the server, and there B is stronger than A.
 - It cannot make the executor's signed record show a decision the user did
   not sign. It can still apply a different decision to its own store, because
   step 3 leaves the applying to the server.
@@ -346,7 +361,7 @@ issued, browser commit refused), plus the server-side tests of Variant A.
 | Compromised server writes a decision directly, no assertion | possible (common limit) | possible (common limit), same |
 | UI deception, default mode (server shows a false decision, maintainer signs) | possible | possible (same limit) |
 | UI deception, hardened mode | possible: no CLI-only path; `BeginLogin` issues a challenge in every mode (`internal/executor/webauthn.go:174-180`) | avoidable: read-grant pattern (no challenge, CLI approval); needs `cmd/nebula/` and a new RPC |
-| Decision signature spent as a login | possible: same login pool, `FinishLogin` checks no purpose (`internal/webauthnreg/login.go:45-74`) | avoidable, if the decision challenge is a separate type (a requirement of B, not yet designed) |
+| Decision signature used as a login | against a compromised server: no effect, it creates sessions itself (`auth.go:281`). Against a party holding only the signature: possible, same login pool, `FinishLogin` checks no purpose (`internal/webauthnreg/login.go:47-74`) | against a compromised server: no effect. Against a signature holder: avoidable, if the decision challenge is a separate type (a requirement of B, not yet designed) |
 | Signature for one digest used for another | refused only if the server's check is correct | refused by the executor |
 | Evidence of what was signed | server audit line (unsigned) and executor `login_succeeded` log (a login, not a decision) | executor's signed event in `executordb`, in addition |
 | Protected paths | none for the change itself; closing login purpose and hardened mode needs `internal/webauthnreg/`, `internal/executor/`, `cmd/nebula/` | `proto/`, `internal/executor/`, `internal/permit/`, `internal/canonical/`, `internal/executordb/`, `cmd/nebula/` (hardened CLI), `internal/webauthnreg/` (if separate pool); `internal/executorclient/` is not protected |
@@ -366,8 +381,9 @@ Reasons:
    paths. It needs the `vulnstore` auditor change (follow-up 1), which is
    work in its own right.
 3. Variant B is stronger on three points: the digest binding, the signed
-   evidence, and the two limits that A cannot close (decision signature spent
-   as a login; no CLI-only approval in hardened mode). It moves the decision
+   evidence, and two limits that A cannot close: a decision signature usable as
+   a login by a party outside the server, and no CLI-only approval in hardened
+   mode. It moves the decision
    check into the executor and needs a canonical digest encoding and changes in
    six protected paths. Against a compromised `nebula-server` it protects no
    more of the applied state than A does (see the common limit). That is more
@@ -382,7 +398,11 @@ Variant A:
   and apply it, and the audit trail shows it afterwards (both variants in
   default mode; A in hardened mode too).
 - A decision signature is also a login signature for the same user (A only).
-  Under A, a compromised server can use it to start a web session as that user.
+  This adds no capability against a compromised server, which can create a
+  session for any user with no assertion (`auth.go:281`). It matters only for a
+  party that holds a signature and not the server. Only the hardened-mode
+  CLI/executor check protects against a compromised server, and only if the
+  maintainer requires it.
 
 Accepting risk and false positives can hide findings, so the impact is not zero.
 Choosing B does not remove the first limit; only a change to where the decision
@@ -399,7 +419,8 @@ is required.
 0. **Maintainer decisions first.** (a) Accept the three limits above in
    `docs/threat-model.md` (protected, a separate maintainer change). (b) Say
    whether decisions follow the hardened-mode CLI rule. If yes, do not choose
-   Variant A alone.
+   Variant A alone. (c) Say whether `discard_hold` needs the assertion (open
+   point: ADR 0011 `:796-800` does not name it; its row at `:731` names only "Admin" or automatic supersession).
 1. **`vulnstore` auditor change (prerequisite, new work).** Give the five
    decision methods (`SetAcceptedRisk`, `SetFalsePositive`, `ConfirmHeld`,
    `DiscardHeld`, `ResetMark`) an auditor argument of the `AgentAuditor` kind
@@ -481,15 +502,15 @@ below, so a reader can repeat it. Lines are as they stand on this branch.
 | `internal/vulnstore/human_test.go:95,129,154` | test `TestReviewHumanStatesReopens` (:95) and its two calls |
 | `internal/vulnstore/reset.go:49-50`, `:165` | comment: caller writes the audit log; `ResetMark` |
 | `internal/vulnstore/vulnstore.go:35` | audit log is the caller's job |
-| `internal/vulnstore/agentcfg.go:207-210`, `:284` | `AgentAuditor` interface; `AgentConfigStore.Change` takes it |
+| `internal/vulnstore/agentcfg.go:209`, `:284` | `AgentAuditor` interface; `AgentConfigStore.Change` takes it |
 | `internal/vulnnotify/vulnnotify.go:607` | `(*Notifier).MarkReset` |
 | `internal/auditlog/auditlog.go:114` | `Store.WithTx` |
-| `internal/executor/webauthn.go:174-198` | `BeginLogin` (no mode, no digest) / `FinishLogin` (no digest) |
+| `internal/executor/webauthn.go:174-199` | `BeginLogin` (`:174-180`, no mode, no digest) / `FinishLogin` (`:183-199`, no digest) |
 | `internal/executor/webauthn.go:197` | `login_succeeded` audit line |
-| `internal/webauthnreg/login.go:21-22`, `:45-73`, `:62`, `:72` | `LoginTTL`, `MaxPendingLogin`; `BeginLogin`; challenge bytes; `r.logins` store |
-| `internal/web/auth/auth.go:272-281`, `:287` | `FinishLogin` call and `sessions.Create` (session minted from its result); `web_login` audit line |
+| `internal/webauthnreg/login.go:21-22`, `:47-74`, `:62`, `:72` | `LoginTTL`, `MaxPendingLogin`; `BeginLogin`; challenge bytes; `r.logins` store |
+| `internal/web/auth/auth.go:272-281`, `:287`, `:313` | `FinishLogin` call (`:272`) and `sessions.Create` (`:281`, session minted by the server from its result); `web_login` audit line (`:287`); recovery `sessions.Create` (`:313`, no assertion) |
 | `internal/permit/permit.go:46-47` | `ModeHardened` and its "requires `nebula approve`" comment |
-| `internal/permit/lease.go:615-621`, `:636-645`, `:682-691` | `pendingReadGrant`; `readGrantChallengeFor`; requirement, `RequireCLI` and challenge issue |
+| `internal/permit/lease.go:615-621`, `:636-649`, `:682-691` | `pendingReadGrant`; `readGrantChallengeFor` (domain separator `nebula-read-grant-v2` at `:642`); requirement, `RequireCLI` and challenge issue |
 | `internal/permit/lease.go:737-760`, `:746-748` | `CommitReadGrant`; hardened-mode refusal |
 | `internal/permit/lease.go:763-773`, `:794` | `ApproveReadGrantCLI` (no assertion); `SaveReadGrant` call |
 | `internal/executordb/lease.go:33` | `SaveReadGrant` implementation |
@@ -499,7 +520,7 @@ below, so a reader can repeat it. Lines are as they stand on this branch.
 | `cmd/nebula/readgrant.go:26`, `:51`, `:152` | usage `read-grant approve`; dispatch; `ApproveReadGrantCLI` RPC call |
 | `cmd/nebula/batch.go:214` | `nebula approve` for batches |
 | `docs/threat-model.md:57,78,127,160,163` | permit/WebAuthn row; feed row; T3 (help assistant, LLM URL); UI deception and hardened-mode defence; unsigned server audit lines |
-| `docs/adr/0011-vulnerability-management.md:796-798`, `:1108`, `:3890-3892`, `:3899-3904` | "as for read-lease approval"; Q4 decision row; A1.8 `server.db`; A1.8 login assertion and "no RPC that binds an assertion" |
+| `docs/adr/0011-vulnerability-management.md:796-800`, `:798`, `:731`, `:1108`, `:3890-3892`, `:3899-3904` | "as for read-lease approval" and the four named decisions (`:796-800`); Q4 decided 2026-11-09 (`:798`); hold discard row, "Admin" only (`:731`); Q4 row still "open" (`:1108`); A1.8 `server.db`; A1.8 login assertion |
 | `docs/admin/guide.md:1791-1797` | operator text on refused decisions (whole bullet) |
 | `.github/protected-paths.txt:13,15,16,17,18,21,22,29,30,34` | `docs/threat-model.md`; `docs/admin/guide.md`; `proto/`; `internal/canonical/`; `internal/permit/`; `internal/webauthnverify/`; `internal/webauthnreg/`; `internal/executor/`; `internal/executordb/`; `cmd/nebula/`. No line matches `internal/executorclient/` |
 
