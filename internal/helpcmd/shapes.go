@@ -112,8 +112,9 @@ type logicalLine struct {
 // A line the rules do not settle is excluded, not guessed: an unbalanced quote
 // (every later line of the block is then excluded too, since the quoting state
 // is unknown), a delimiter that cannot be read, a tab or other control character
-// inside the line, a line longer than MaxCommandBytes, and a continuation at the
-// end of the block.
+// inside the line, and a continuation at the end of the block. A line longer
+// than MaxCommandBytes is excluded and, like an unbalanced quote, ends the
+// readable part of the block: its quoting and heredocs are unknown past it.
 func Shapes(info, body string) ShapeSet {
 	var set ShapeSet
 	if !isShellBlock(info) {
@@ -616,30 +617,45 @@ func (s *scanner) line(i int, l logicalLine) {
 	if !s.inGroup && l.prob == "" && (t == "" || strings.HasPrefix(t, "#")) {
 		return
 	}
-	// A logical line with a prob is excluded whole: it is not lexed, so its
-	// text keeps every joined part, comment included.
+	// A logical line joined by an ambiguous continuation is excluded from the
+	// shapes, but it is still lexed and analyzed: an opener or heredoc it holds
+	// must register, or the body lines after it would read as commands. A
+	// continuation at the end of the block is not analyzed; nothing follows it.
+	analyzable := l.prob == "" || l.prob == reasonAmbiguousJoin
 	lx := lexed{cut: len(t)}
-	if l.prob == "" {
+	if analyzable {
 		lx = lexLine(t)
 	}
-	var prob string
-	unbalanced := false
-	if l.prob != "" {
-		prob = l.prob
-	} else if _, err := Tokenize(t[:lx.cut]); err != nil {
-		if isTooLong(err) {
-			prob = reasonLineTooLong
-		} else {
-			prob = reasonUnbalancedQuote
-			unbalanced = true
+	// Quote balance is checked on every analyzable line, including one longer
+	// than MaxCommandBytes: an open quote there runs into the following lines.
+	var unbalanced, tooLong bool
+	var quoteProb string
+	if analyzable {
+		if _, err := Tokenize(t[:lx.cut]); err != nil {
+			if isTooLong(err) {
+				tooLong = true
+				quoteProb = reasonLineTooLong
+			} else {
+				unbalanced = true
+				quoteProb = reasonUnbalancedQuote
+			}
 		}
 	}
+	prob := quoteProb
+	if l.prob != "" {
+		prob = l.prob
+	}
+	// A logical line with a prob keeps every joined part, comment included,
+	// because the comment may hide the text the reader needs to see.
 	text := strings.TrimRight(t[:lx.cut], " ")
+	if l.prob != "" {
+		text = strings.TrimRight(t, " ")
+	}
 	if prob == "" && containsControl(text) {
 		prob = reasonControl
 	}
 	var info lineInfo
-	if l.prob == "" && !unbalanced {
+	if analyzable && !unbalanced && !tooLong {
 		info = analyze(lx.toks)
 	}
 	if s.inGroup || hasKeyword(info.events) || netOpen(nil, info.events) {
@@ -647,16 +663,27 @@ func (s *scanner) line(i int, l logicalLine) {
 	} else {
 		s.plainLine(l, text, prob, info.docs)
 	}
-	if unbalanced {
+	switch {
+	case unbalanced:
 		s.broken = reasonUnbalancedQuote
+	case tooLong:
+		// The quoting of an over-long line is unknown past its end, so the
+		// rest of the block is excluded, as after an unbalanced quote.
+		s.broken = reasonLineTooLong
 	}
 }
 
-// plainLine sorts a line that is outside every construct.
+// plainLine sorts a line that is outside every construct. A heredoc it opens
+// is registered even when the line is excluded for another reason, so its body
+// is excluded too.
 func (s *scanner) plainLine(l logicalLine, text, prob string, docs []heredocOp) {
 	switch {
 	case len(docs) > 0:
-		s.exclude(l, text, reasonHeredoc)
+		reason := reasonHeredoc
+		if prob == reasonAmbiguousJoin {
+			reason = prob
+		}
+		s.exclude(l, text, reason)
 		s.addDocs(docs)
 	case prob != "":
 		s.exclude(l, text, prob)
