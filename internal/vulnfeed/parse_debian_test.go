@@ -365,7 +365,10 @@ func TestParseDebianAdvisoryListRejectsMalformed(t *testing.T) {
 		{"only continuation", "\t{CVE-2024-1}\n", ErrNoContentDate},
 		{"only garbage", "<html>\n<body>\n", ErrNoContentDate},
 		{"mixed kinds", "[01 Feb 2024] DSA-1-1 x\n[01 Feb 2024] DLA-1-1 x\n", ErrFeedMalformed},
-		{"long line", "[01 Feb 2024] DSA-1-1 x\n\t" + strings.Repeat("a", MaxDebianListLineBytes) + "\n", ErrFeedLimit},
+		// An entry line that is too long could hide the date of the entry,
+		// so the list fails. A long continuation line cannot, and is skipped
+		// (TestParseDebianAdvisoryListSkipsOverlongContinuation).
+		{"long entry line", "[01 Feb 2024] DSA-1-1 " + strings.Repeat("a", MaxDebianListLineBytes) + "\n", ErrFeedLimit},
 		{"too many entries", strings.Repeat("[01 Feb 2024] DSA-1-1 x\n", MaxDebianListEntries+1), ErrFeedLimit},
 	}
 	for _, tc := range tests {
@@ -375,6 +378,27 @@ func TestParseDebianAdvisoryListRejectsMalformed(t *testing.T) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
 			}
 		})
+	}
+}
+
+// TestParseDebianAdvisoryListSkipsOverlongContinuation: a DSA with a long
+// CVE list (the linux packages) carries it on one continuation line that can
+// be longer than MaxDebianListLineBytes. That line holds no date, so it is
+// skipped and the list still yields its newest date.
+func TestParseDebianAdvisoryListSkipsOverlongContinuation(t *testing.T) {
+	long := "\t{" + strings.Repeat("CVE-2024-1 ", MaxDebianListLineBytes/8) + "}"
+	if len(long) <= MaxDebianListLineBytes {
+		t.Fatal("fixture line is not overlong")
+	}
+	in := "[05 Mar 2024] DSA-3-1 linux - security update\n" + long + "\n" +
+		"\t[bookworm] - linux 6.1\n" +
+		"[01 Feb 2024] DSA-1-1 x\n" + long // no line break at the end
+	got, err := ParseDebianAdvisoryList(context.Background(), strings.NewReader(in))
+	if err != nil {
+		t.Fatalf("err = %v, want the overlong continuation skipped", err)
+	}
+	if got.Kind != "DSA" || got.Entries != 2 || got.Skipped != 2 || !got.Newest.Equal(day(2024, 3, 5)) {
+		t.Fatalf("got %+v", got)
 	}
 }
 
