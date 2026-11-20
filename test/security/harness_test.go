@@ -74,8 +74,9 @@ type harness struct {
 	db       *executordb.DB
 	verifier *webauthnverify.Verifier
 	svc      *executor.Service
-	userKey  ssh.PublicKey // public half of the credRef key (H05)
-	dataDir  string        // executor data directory, for restarts
+	auth     *permit.Authority // the single-action authority (its session feeds a batch authority, AG-24)
+	userKey  ssh.PublicKey     // public half of the credRef key (H05)
+	dataDir  string            // executor data directory, for restarts
 	stopFn   func()
 	once     sync.Once
 }
@@ -216,6 +217,7 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 		t.Fatal(err)
 	}
 	h.verifier = verifier
+	h.auth = auth
 	svc := executor.NewService(auth, keyring.New(keysDir), db, reg, log)
 	svc.SetEventKey(chain.PublicKey())
 	if _, _, err := db.RegisterEventKey(chain.PublicKey()); err != nil {

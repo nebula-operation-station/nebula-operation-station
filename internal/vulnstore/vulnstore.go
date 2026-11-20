@@ -237,6 +237,12 @@ type Store struct {
 	// that the resume tests need fewer findings for several apply
 	// transactions; it never raises the bound in production.
 	applyRows int
+	// holdClock measures how long an apply transaction holds the write
+	// lock (maxApplyHold); nil means time.Now. Tests inject a fake clock.
+	holdClock func() time.Time
+	// applyStep, when set (tests only), is called before each unit of
+	// apply work; a test advances its fake hold clock there.
+	applyStep func()
 }
 
 // sourceIDRe is the D5 source ID pattern (64 bytes at most).
