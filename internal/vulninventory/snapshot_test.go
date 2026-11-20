@@ -11,6 +11,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
 )
 
 // clock is a settable time source for a store under test.
@@ -378,8 +381,142 @@ func TestCurrentLimitsHostsToMaxSnapshotHosts(t *testing.T) {
 }
 
 func TestMaxSnapshotHostsIsTheExportLimit(t *testing.T) {
-	if MaxSnapshotHosts != 10000 {
-		t.Fatalf("MaxSnapshotHosts = %d, want 10000 (api.MaxExportSubjects, vulnstore.MaxCoveredPerRun)", MaxSnapshotHosts)
+	if MaxSnapshotHosts != api.MaxExportSubjects {
+		t.Fatalf("MaxSnapshotHosts = %d, api.MaxExportSubjects = %d: want equal", MaxSnapshotHosts, api.MaxExportSubjects)
+	}
+	if MaxSnapshotHosts != vulnstore.MaxCoveredPerRun {
+		t.Fatalf("MaxSnapshotHosts = %d, vulnstore.MaxCoveredPerRun = %d: want equal", MaxSnapshotHosts, vulnstore.MaxCoveredPerRun)
+	}
+}
+
+func TestCurrentFloorAgainstReusableSnapshot(t *testing.T) {
+	// The newest snapshot pins the same reads and is younger than maxReuse, so
+	// only the floor decides whether it may be returned.
+	cases := []struct {
+		name      string
+		floor     int64
+		wantGen   int64
+		wantReuse bool
+	}{
+		{"floor below generation reuses", 0, 1, true},
+		{"floor equal to generation is not reused", 1, 2, false},
+		{"floor above generation is not reused", 495000, 495001, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, db := openStore(t)
+			c := useClock(t)
+			mustPut(t, s, testRead("h1", true, 0))
+			first := mustCurrent(t, s, []string{"h1"}, time.Hour, 0)
+			if first.Generation != 1 {
+				t.Fatalf("first generation = %d, want 1", first.Generation)
+			}
+
+			c.t = base.Add(time.Minute)
+			got := mustCurrent(t, s, []string{"h1"}, time.Hour, tc.floor)
+			if got.Generation != tc.wantGen {
+				t.Fatalf("generation = %d, want %d", got.Generation, tc.wantGen)
+			}
+			if reused := got.ID == first.ID; reused != tc.wantReuse {
+				t.Fatalf("reused = %v (snapshot %s), want %v", reused, got.ID, tc.wantReuse)
+			}
+			if !reflect.DeepEqual(readIDs(got), readIDs(first)) {
+				t.Fatalf("reads = %v, want the same reads %v", readIDs(got), readIDs(first))
+			}
+			wantRows := 1
+			if !tc.wantReuse {
+				wantRows = 2
+			}
+			if n := rowCountTable(t, db, "vuln_inventory_snapshots"); n != wantRows {
+				t.Fatalf("snapshot rows = %d, want %d", n, wantRows)
+			}
+		})
+	}
+}
+
+func TestCurrentNeverReturnsGenerationAtOrBelowFloor(t *testing.T) {
+	s, _ := openStore(t)
+	useClock(t)
+	mustPut(t, s, testRead("h1", true, 0))
+	mustCurrent(t, s, []string{"h1"}, time.Hour, 0)
+	// nos-inv-1 is stored and young; a vulnstore run has seen generation 495000.
+	snap := mustCurrent(t, s, []string{"h1"}, time.Hour, 495000)
+	if snap.Generation <= 495000 {
+		t.Fatalf("generation = %d (%s), want above floor 495000", snap.Generation, snap.ID)
+	}
+}
+
+func TestSnapshotPagesReadsInHostOrder(t *testing.T) {
+	s, db := openStore(t)
+	useClock(t)
+	hosts := []string{"h1", "h2", "h3", "h4", "h5", "h6", "h7"}
+	ids := make(map[string]int64, len(hosts))
+	for _, h := range hosts {
+		ids[h] = mustPut(t, s, testRead(h, true, 0))
+	}
+	snap := mustCurrent(t, s, hosts, time.Hour, 0)
+
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback()
+	// Pages of 3 reads: 7 reads take three queries.
+	got, err := loadSnapshotReads(context.Background(), tx, snap.ID, 3, MaxSnapshotBodyBytes)
+	if err != nil {
+		t.Fatalf("loadSnapshotReads: %v", err)
+	}
+	if len(got) != len(hosts) {
+		t.Fatalf("reads = %d, want %d", len(got), len(hosts))
+	}
+	for i, r := range got {
+		if r.HostID != hosts[i] || r.ID != ids[hosts[i]] {
+			t.Fatalf("reads[%d] = %s/%d, want %s/%d", i, r.HostID, r.ID, hosts[i], ids[hosts[i]])
+		}
+		if len(r.Components) != 1 {
+			t.Fatalf("reads[%d] has %d components, want the stored body", i, len(r.Components))
+		}
+	}
+}
+
+func TestSnapshotByteLimitCountsBodiesAcrossPages(t *testing.T) {
+	s, db := openStore(t)
+	useClock(t)
+	// Ten reads of one component each: many large-enough bodies to span pages.
+	var hosts []string
+	for i := 0; i < 10; i++ {
+		h := fmt.Sprintf("h%02d", i)
+		hosts = append(hosts, h)
+		mustPut(t, s, testRead(h, true, 0))
+	}
+	snap := mustCurrent(t, s, hosts, time.Hour, 0)
+	ctx := context.Background()
+
+	var total int64
+	if err := db.QueryRow(`SELECT SUM(LENGTH(body)) FROM vuln_inventory_reads`).Scan(&total); err != nil {
+		t.Fatalf("sum body bytes: %v", err)
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback()
+
+	// Exactly the total fits; one byte less is refused before any body is decoded.
+	if got, err := loadSnapshotReads(ctx, tx, snap.ID, 4, total); err != nil || len(got) != 10 {
+		t.Fatalf("limit = total %d: reads %d, err %v; want 10 reads", total, len(got), err)
+	}
+	if _, err := loadSnapshotReads(ctx, tx, snap.ID, 4, total-1); !errors.Is(err, ErrLimit) {
+		t.Fatalf("limit = total-1: err = %v, want ErrLimit", err)
+	}
+}
+
+func TestMaxSnapshotBodyBytesFitsWorstCaseBodies(t *testing.T) {
+	// The cap must admit at least one worst-case read, or a single legal read
+	// could never be snapshotted.
+	if MaxSnapshotBodyBytes < MaxBodyBytes {
+		t.Fatalf("MaxSnapshotBodyBytes = %d, want at least MaxBodyBytes %d", MaxSnapshotBodyBytes, MaxBodyBytes)
 	}
 }
 

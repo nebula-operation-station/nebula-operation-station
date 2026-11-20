@@ -16,10 +16,24 @@ import (
 )
 
 // MaxSnapshotHosts bounds the hosts of one inventory snapshot. It equals
-// api.MaxExportSubjects and vulnstore.MaxCoveredPerRun (ADR 0011 D3: 1,000
-// subjects per page, one run covers at most this many subjects). Hosts past
-// the limit are left out in host-ID order and counted in Snapshot.Omitted.
+// api.MaxExportSubjects and vulnstore.MaxCoveredPerRun, because the two limits
+// describe the same thing: one snapshot holds at most this many subjects, and
+// one run covers at most this many. The export serves a snapshot in pages of
+// api.MaxSubjectsPerPage (1,000) subjects, so a full snapshot is ten pages
+// (ADR 0011 D3). The 1,000 is the page size, the 10,000 the total over all
+// pages; they do not conflict. Hosts past the limit are left out in host-ID
+// order and counted in Snapshot.Omitted.
 const MaxSnapshotHosts = 10000
+
+// snapshotPageReads is how many reads Snapshot loads per query.
+const snapshotPageReads = 100
+
+// MaxSnapshotBodyBytes bounds the stored bodies that Snapshot returns: the sum
+// of the body lengths of the reads of one snapshot. It is sixteen worst-case
+// bodies (MaxBodyBytes each, about 200 MB), so a snapshot of typical hosts is
+// far below it, while a snapshot of hostile maximum-size bodies is refused
+// with ErrLimit before any body is decoded.
+const MaxSnapshotBodyBytes = 16 * MaxBodyBytes
 
 // maxSnapshotIDBytes matches the snapshot ID column (0052: 1 to 64 bytes).
 const maxSnapshotIDBytes = 64
@@ -158,7 +172,7 @@ func (s *Store) Current(ctx context.Context, hosts []string, maxReuse time.Durat
 	slices.Sort(ids)
 
 	now := nowFunc().UTC()
-	if snap, ok, err := reusable(ctx, tx, reads, ids, now, maxReuse); err != nil {
+	if snap, ok, err := reusable(ctx, tx, reads, ids, now, maxReuse, floor); err != nil {
 		return Snapshot{}, fmt.Errorf("vulninventory: current: %w", err)
 	} else if ok {
 		snap.Omitted = omitted
@@ -197,9 +211,12 @@ func (s *Store) Current(ctx context.Context, hosts []string, maxReuse time.Durat
 	return snap, nil
 }
 
-// reusable returns the newest snapshot when it pins exactly ids (sorted) and
-// was taken less than maxReuse before now. The snapshot's reads are reads.
-func reusable(ctx context.Context, tx *sql.Tx, reads []Read, ids []int64, now time.Time, maxReuse time.Duration) (Snapshot, bool, error) {
+// reusable returns the newest snapshot when it pins exactly ids (sorted), was
+// taken less than maxReuse before now, and its generation is above floor. The
+// floor check is part of reuse: a snapshot at or below a generation that
+// vulnstore has seen must never be handed out again (ADR 0011 D5). The
+// snapshot's reads are reads.
+func reusable(ctx context.Context, tx *sql.Tx, reads []Read, ids []int64, now time.Time, maxReuse time.Duration, floor int64) (Snapshot, bool, error) {
 	var snap Snapshot
 	var takenAt int64
 	err := tx.QueryRowContext(ctx, `SELECT id, generation, taken_at FROM vuln_inventory_snapshots
@@ -210,7 +227,7 @@ func reusable(ctx context.Context, tx *sql.Tx, reads []Read, ids []int64, now ti
 	if err != nil {
 		return Snapshot{}, false, fmt.Errorf("newest snapshot: %w", err)
 	}
-	if now.Sub(time.Unix(takenAt, 0).UTC()) >= maxReuse {
+	if snap.Generation <= floor || now.Sub(time.Unix(takenAt, 0).UTC()) >= maxReuse {
 		return Snapshot{}, false, nil
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT read_id FROM vuln_inventory_snapshot_reads WHERE snapshot_id = ? ORDER BY read_id`, snap.ID)
@@ -262,24 +279,71 @@ func (s *Store) Snapshot(ctx context.Context, id string) (Snapshot, error) {
 	}
 	snap.TakenAt = time.Unix(takenAt, 0).UTC()
 
-	rows, err := tx.QueryContext(ctx, `SELECT `+fullColumns+` FROM vuln_inventory_reads
-		WHERE id IN (SELECT read_id FROM vuln_inventory_snapshot_reads WHERE snapshot_id = ?)
-		ORDER BY host_id`, snap.ID)
+	reads, err := loadSnapshotReads(ctx, tx, snap.ID, snapshotPageReads, MaxSnapshotBodyBytes)
 	if err != nil {
-		return Snapshot{}, fmt.Errorf("vulninventory: snapshot reads: %w", err)
+		return Snapshot{}, fmt.Errorf("vulninventory: snapshot: %w", err)
+	}
+	snap.Reads = reads
+	return snap, nil
+}
+
+// loadSnapshotReads returns the reads pinned by snapshot id, with their
+// components, in host-ID order. Before any body is decoded it sums the stored
+// body lengths and refuses a total above byteLimit with ErrLimit. Then it loads
+// pageReads reads per query, keyset-paged on (host_id, id), so no single query
+// returns more than pageReads bodies.
+func loadSnapshotReads(ctx context.Context, q *sql.Tx, id string, pageReads int, byteLimit int64) ([]Read, error) {
+	if pageReads <= 0 {
+		return nil, fmt.Errorf("snapshot reads: page size %d: must be positive", pageReads)
+	}
+	const members = `SELECT read_id FROM vuln_inventory_snapshot_reads WHERE snapshot_id = ?`
+	var total int64
+	if err := q.QueryRowContext(ctx, `SELECT COALESCE(SUM(LENGTH(body)), 0) FROM vuln_inventory_reads WHERE id IN (`+members+`)`, id).Scan(&total); err != nil {
+		return nil, fmt.Errorf("snapshot body bytes: %w", err)
+	}
+	if total > byteLimit {
+		return nil, fmt.Errorf("snapshot bodies: %w: %d bytes, limit %d", ErrLimit, total, byteLimit)
+	}
+
+	var out []Read
+	afterHost, afterID := "", int64(0)
+	for {
+		page, err := scanSnapshotPage(ctx, q, id, afterHost, afterID, pageReads)
+		if err != nil {
+			return nil, fmt.Errorf("snapshot reads: %w", err)
+		}
+		out = append(out, page...)
+		if len(page) < pageReads {
+			return out, nil
+		}
+		last := page[len(page)-1]
+		afterHost, afterID = last.HostID, last.ID
+	}
+}
+
+// scanSnapshotPage returns up to limit reads of snapshot id that sort after
+// (afterHost, afterID) in (host_id, id) order, with their components.
+func scanSnapshotPage(ctx context.Context, q *sql.Tx, id, afterHost string, afterID int64, limit int) ([]Read, error) {
+	rows, err := q.QueryContext(ctx, `SELECT `+fullColumns+` FROM vuln_inventory_reads
+		WHERE id IN (SELECT read_id FROM vuln_inventory_snapshot_reads WHERE snapshot_id = ?)
+		AND (host_id, id) > (?, ?)
+		ORDER BY host_id, id LIMIT ?`, id, afterHost, afterID, limit)
+	if err != nil {
+		return nil, err
 	}
 	defer rows.Close()
+	var page []Read
 	for rows.Next() {
 		r, err := scanRead(rows, true)
 		if err != nil {
-			return Snapshot{}, fmt.Errorf("vulninventory: snapshot reads: %w", err)
+			return nil, err
 		}
-		snap.Reads = append(snap.Reads, r)
+		page = append(page, r)
 	}
 	if err := rows.Err(); err != nil {
-		return Snapshot{}, fmt.Errorf("vulninventory: snapshot reads: %w", err)
+		return nil, err
 	}
-	return snap, nil
+	return page, nil
 }
 
 // PruneSnapshots deletes the snapshots taken more than maxAge ago, with their
