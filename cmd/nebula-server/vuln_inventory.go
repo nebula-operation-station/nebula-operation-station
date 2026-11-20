@@ -45,15 +45,28 @@ func newVulnInventoryService(db *sql.DB, facts factsSource, log *slog.Logger) (*
 	return &vulnInventoryService{store: st, facts: facts, log: log}, nil
 }
 
+// observeTimeout bounds the database work of one ObserveInstalled call (the
+// release lookup and the store writes). The parse is bounded by the input
+// limits of osdebian.
+const observeTimeout = 30 * time.Second
+
 // ObserveInstalled parses result (untrusted host output) with
 // osdebian.ParseInstalledResult and stores the read of host from execution
 // execID at time at. The distribution comes only from the host's newest
 // successful core.facts result; without one the read is stored incomplete.
-func (v *vulnInventoryService) ObserveInstalled(ctx context.Context, hostID, execID string, at time.Time, result []byte) {
+//
+// Fail closed: when the release lookup fails, or the store refuses the read
+// (for example a field over its limit caused by host content), a partial
+// marker (vulninventory.Failed) is stored instead. The host's older complete
+// read then stops being its latest inventory. If the marker cannot be
+// stored either, the failure is only logged.
+func (v *vulnInventoryService) ObserveInstalled(parent context.Context, hostID, execID string, at time.Time, result []byte) {
+	ctx, cancel := context.WithTimeout(parent, observeTimeout)
+	defer cancel()
 	facts, _, ok, err := v.facts.LastResult(ctx, inventoryFactsAction, hostID)
 	if err != nil {
-		// Nothing is stored: the next package.list_installed run replaces it.
 		v.log.Error("vulnerability inventory: release lookup", "host", hostID, "execution", execID, "error_class", "lookup")
+		v.markFailed(ctx, hostID, execID, at, vulninventory.ReasonLookupFailed)
 		return
 	}
 	var eco string
@@ -67,6 +80,7 @@ func (v *vulnInventoryService) ObserveInstalled(ctx context.Context, hostID, exe
 	read := vulninventory.FromInstalled(hostID, execID, at, eco, inv)
 	if _, err := v.store.Put(ctx, read); err != nil {
 		v.log.Error("vulnerability inventory: store read", "host", hostID, "execution", execID, "error_class", inventoryErrorClass(err))
+		v.markFailed(ctx, hostID, execID, at, vulninventory.ReasonRefused)
 		return
 	}
 	binaries := 0
@@ -75,6 +89,17 @@ func (v *vulnInventoryService) ObserveInstalled(ctx context.Context, hostID, exe
 	}
 	v.log.Info("audit", "kind", "vuln_inventory_read_stored", "host", hostID, "execution", execID,
 		"complete", read.Complete, "binaries", binaries, "sources", len(read.Components))
+}
+
+// markFailed stores the partial marker of a list that could not be read or
+// stored, so that the host's previous read is no longer its latest one. A
+// failure to store the marker is logged by class and does not fail the run.
+func (v *vulnInventoryService) markFailed(ctx context.Context, hostID, execID string, at time.Time, reason string) {
+	if _, err := v.store.Put(ctx, vulninventory.Failed(hostID, execID, at, reason)); err != nil {
+		v.log.Error("vulnerability inventory: store failure marker", "host", hostID, "execution", execID, "error_class", inventoryErrorClass(err))
+		return
+	}
+	v.log.Info("audit", "kind", "vuln_inventory_read_failed", "host", hostID, "execution", execID, "reason", reason)
 }
 
 // inventoryErrorClass names the class of a store error without its text.

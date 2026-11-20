@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -226,9 +227,10 @@ func TestInventoryStoreFailureIsLoggedWithoutResultText(t *testing.T) {
 	}
 }
 
-// TestInventoryLookupFailureStoresNothing: a closed database fails the
-// core.facts lookup; the observer logs the class and stores nothing.
-func TestInventoryLookupFailureStoresNothing(t *testing.T) {
+// TestInventoryLookupFailureIsLoggedByClass: a closed database fails the
+// core.facts lookup; the observer logs the class without result text and
+// does not panic, even though no marker can be written to a closed database.
+func TestInventoryLookupFailureIsLoggedByClass(t *testing.T) {
 	e := newInvEnv(t)
 	if err := e.db.Close(); err != nil {
 		t.Fatal(err)
@@ -243,4 +245,114 @@ func TestInventoryLookupFailureStoresNothing(t *testing.T) {
 	if strings.Contains(logged, "libjansson4") {
 		t.Fatalf("log contains result text: %s", logged)
 	}
+}
+
+// failingFacts is a core.facts source whose lookup always fails.
+type failingFacts struct{}
+
+func (failingFacts) LastResult(context.Context, string, string) ([]byte, time.Time, bool, error) {
+	return nil, time.Time{}, false, errors.New("lookup refused")
+}
+
+// TestInventoryLookupFailureMarksHostPartial: when the release lookup fails,
+// the newest list is stored as a partial read with no components, so the
+// older complete read is no longer the latest (fail closed), but it stays
+// the last complete read.
+func TestInventoryLookupFailureMarksHostPartial(t *testing.T) {
+	e := newInvEnv(t)
+	e.insertFacts(t, 7, invTestHost, factsResult(t, debian12Release))
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-old", invTestAt, installedEnvelope(t, debian12Text(t), false))
+	if r := e.latestRead(t, invTestHost); !r.Complete {
+		t.Fatalf("setup: first read not complete: %q", r.Reason)
+	}
+
+	e.svc.facts = failingFacts{}
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-lookup", invTestAt.Add(time.Minute), installedEnvelope(t, debian12Text(t), false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != vulninventory.ReasonLookupFailed || r.ExecutionID != "exec-lookup" {
+		t.Fatalf("latest read complete=%v reason=%q execution=%q, want partial lookup marker of exec-lookup", r.Complete, r.Reason, r.ExecutionID)
+	}
+	if len(r.Components) != 0 {
+		t.Fatalf("partial marker stores %d components", len(r.Components))
+	}
+	last, err := e.svc.store.LastComplete(context.Background(), invTestHost)
+	if err != nil || last.ExecutionID != "exec-old" {
+		t.Fatalf("last complete = %q, %v; want exec-old", last.ExecutionID, err)
+	}
+	if !strings.Contains(e.log.String(), "error_class=lookup") {
+		t.Fatalf("lookup failure not logged by class: %s", e.log.String())
+	}
+}
+
+// hostileVersion is a binary version the parser accepts (an epoch and a
+// 128-character upstream version: 139 bytes) that the store refuses, because
+// its version field is limited to 128 bytes.
+// The parser allows an epoch of up to 10 digits and 128 upstream characters;
+// the store's version field is 128 bytes in total, so this is accepted by the
+// parser and refused by the store.
+var hostileVersion = "1234567890:" + strings.Repeat("a", 128)
+
+// hostileText is a nos-installed-v1 text whose one package has hostileVersion.
+func hostileText() string {
+	return "nos-installed-v1\nP\tinstalled\tlibjansson4\tamd64\t" + hostileVersion + "\tjansson\t2.14-2\t\t.\nK\t6.1.0-26-amd64\t#1 SMP\nEND\t1\n"
+}
+
+// TestInventoryStoreRefusalMarksHostPartial: hostile package content that the
+// store refuses (a field over its limit) leaves a partial marker as the latest
+// read; the older complete read remains the last complete one. The refused
+// content is not logged.
+func TestInventoryStoreRefusalMarksHostPartial(t *testing.T) {
+	e := newInvEnv(t)
+	e.insertFacts(t, 8, invTestHost, factsResult(t, debian12Release))
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-good", invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-hostile", invTestAt.Add(time.Minute), installedEnvelope(t, hostileText(), false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != vulninventory.ReasonRefused || r.ExecutionID != "exec-hostile" {
+		t.Fatalf("latest read complete=%v reason=%q execution=%q, want refused marker of exec-hostile", r.Complete, r.Reason, r.ExecutionID)
+	}
+	if len(r.Components) != 0 {
+		t.Fatalf("refused marker stores %d components", len(r.Components))
+	}
+	last, err := e.svc.store.LastComplete(context.Background(), invTestHost)
+	if err != nil || last.ExecutionID != "exec-good" {
+		t.Fatalf("last complete = %q, %v; want exec-good", last.ExecutionID, err)
+	}
+	logged := e.log.String()
+	if !strings.Contains(logged, "error_class=invalid_read") {
+		t.Fatalf("store refusal not logged by class: %s", logged)
+	}
+	if strings.Contains(logged, "hostilever") {
+		t.Fatalf("log contains the refused package content: %s", logged)
+	}
+}
+
+// TestInventoryWorkIsBoundedByTimeout: the release lookup runs under the
+// observeTimeout deadline, so a stuck database cannot hold the run's finish
+// path for longer.
+func TestInventoryWorkIsBoundedByTimeout(t *testing.T) {
+	e := newInvEnv(t)
+	rec := &deadlineFacts{}
+	e.svc.facts = rec
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-deadline", invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+	if !rec.hasDeadline {
+		t.Fatalf("release lookup has no deadline")
+	}
+	if left := time.Until(rec.deadline); left > observeTimeout || left <= 0 {
+		t.Fatalf("deadline in %v, want within %v", left, observeTimeout)
+	}
+}
+
+// deadlineFacts records the deadline of the lookup context and finds nothing.
+type deadlineFacts struct {
+	hasDeadline bool
+	deadline    time.Time
+}
+
+func (d *deadlineFacts) LastResult(ctx context.Context, _, _ string) ([]byte, time.Time, bool, error) {
+	d.deadline, d.hasDeadline = ctx.Deadline()
+	return nil, time.Time{}, false, nil
 }

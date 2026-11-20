@@ -21,7 +21,22 @@ const (
 	ReasonNoBasis = "source version basis unknown"
 	// ReasonIncomplete: the package list was partial but gave no reason.
 	ReasonIncomplete = "package list incomplete"
+	// ReasonLookupFailed: the host's release could not be read, so the list
+	// cannot be mapped (fail closed, see Failed).
+	ReasonLookupFailed = "release lookup failed"
+	// ReasonRefused: the store refused the list (a field or limit check on
+	// host content). The list is not stored (see Failed).
+	ReasonRefused = "list refused by the store"
 )
+
+// Failed returns the partial marker stored in place of a list that could not
+// be read or stored (fail closed): an incomplete read of host from execution
+// execID at time at, with reason (one of the Reason constants) and no
+// components. Latest returns it, so an older complete read is no longer the
+// host's current inventory, while LastComplete still finds that read.
+func Failed(host, execID string, at time.Time, reason string) Read {
+	return Read{HostID: host, ExecutionID: execID, ReadAt: at, Reason: reason}
+}
 
 // ecosystemRe is the shape of an ecosystem NOS stores for a Debian or Ubuntu
 // host. It mirrors the debian and ubuntu alternatives of exportEcosystemRe
