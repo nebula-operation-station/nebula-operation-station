@@ -59,12 +59,27 @@ func (truncatedReader) List(context.Context, vulnstore.ListQuery) ([]vulnstore.F
 	return nil, true, nil
 }
 
-// opsGroupsOf runs the projector over the finding source fs and returns its
-// eligible groups and the skips it reported.
+// opsTestListeners is a listener source that reports that the test host has
+// no listening ports. It is a fixture: the real source (opsVulnListeners)
+// cannot make that statement.
+type opsTestListeners struct{}
+
+func (opsTestListeners) Listeners(context.Context, string) ([]opsfacts.Port, error) {
+	return nil, nil
+}
+
+// opsGroupsOf runs the projector over the finding source fs, with the test
+// listeners, and returns its eligible groups and the skips it reported.
 func opsGroupsOf(t *testing.T, fs opsfacts.FindingSource) ([]opsfacts.Group, []opsfacts.Skip, error) {
 	t.Helper()
+	return opsGroupsWith(t, fs, opsTestListeners{})
+}
+
+// opsGroupsWith is opsGroupsOf with the listener source ls.
+func opsGroupsWith(t *testing.T, fs opsfacts.FindingSource, ls opsfacts.ListenerSource) ([]opsfacts.Group, []opsfacts.Skip, error) {
+	t.Helper()
 	var skips []opsfacts.Skip
-	p, err := opsfacts.New(opsfacts.Sources{Inventory: opsTestInventory{}, Listeners: opsVulnListeners{},
+	p, err := opsfacts.New(opsfacts.Sources{Inventory: opsTestInventory{}, Listeners: ls,
 		Findings: fs, Catalog: opsCatalog{}, Audit: opsTestAudit{skips: &skips}})
 	if err != nil {
 		t.Fatalf("opsfacts.New: %v", err)
@@ -202,6 +217,38 @@ func TestNewOpsVulnFindingsRejectsNilSources(t *testing.T) {
 	}
 	if _, err := newOpsVulnFindings(failingReader{}, nil); !errors.Is(err, opsfacts.ErrNoSource) {
 		t.Fatalf("nil decision factory: error = %v, want ErrNoSource", err)
+	}
+}
+
+// TestOpsListenersUnavailableIsNeverAnEmptyList: the server stores no ports, so
+// the listener source fails; it never returns an empty list, which would read
+// as "verified no listening ports".
+func TestOpsListenersUnavailableIsNeverAnEmptyList(t *testing.T) {
+	ps, err := opsVulnListeners{}.Listeners(context.Background(), "web01")
+	if !errors.Is(err, errOpsListenersUnavailable) {
+		t.Fatalf("Listeners error = %v, want errOpsListenersUnavailable", err)
+	}
+	if ps != nil {
+		t.Fatalf("Listeners ports = %+v, want none with the error", ps)
+	}
+}
+
+// TestOpsListenersUnavailableFailsProjection: a host with a high finding needs
+// its listeners, so the projection fails and reports no group for it.
+func TestOpsListenersUnavailableFailsProjection(t *testing.T) {
+	env := newVTEnv(t)
+	env.startAndSubmit(t, opsCriticalRecord("CVE-2026-7006"))
+	src, err := newOpsVulnFindings(env.svc.store, fixesOf(vulnfix.Result{Status: vulnfix.StatusVerified,
+		Action: vulnfix.ActionInstallSecurity, HostID: "web01"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gs, _, err := opsGroupsWith(t, src, opsVulnListeners{})
+	if !errors.Is(err, errOpsListenersUnavailable) {
+		t.Fatalf("EligibleGroups error = %v, want errOpsListenersUnavailable", err)
+	}
+	if gs != nil {
+		t.Fatalf("groups = %+v, want none on a listener error", gs)
 	}
 }
 

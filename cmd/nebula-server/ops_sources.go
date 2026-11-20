@@ -3,8 +3,8 @@
 // Sources of the ops projection over the stored findings (ADR 0016 D3, D4).
 // opsVulnFindings is the finding source: it reads the vulnerability store and
 // maps each finding to an opsfacts.Finding. opsVulnListeners is the listener
-// source; it reports no ports (see its comment). The wiring into the
-// projector is in ops.go and is not done here.
+// source; it fails every read, because the server stores no ports (see its
+// comment). The wiring into the projector is in ops.go and is not done here.
 //
 // Mapping rules:
 //   - Every enum value leaves this file through a fixed switch table. A value
@@ -240,19 +240,23 @@ func opsLinkOf(a vulnfix.Action) opsfacts.FixLink {
 	return opsfacts.LinkNone
 }
 
+// errOpsListenersUnavailable: the server holds no listening ports of a host.
+var errOpsListenersUnavailable = errors.New("listening ports of the host are not stored")
+
 // opsVulnListeners is the listener source of the projection (ADR 0016 D4,
 // ADR 0009). The server stores no listening ports per host: server.db has no
 // table for them (checked against the migrations in
 // internal/serverdb/migrations), and the discovered_addresses ports are scan
-// results of unmanaged addresses, not the host's own listeners. So it reports
-// no ports. A host's exposure is then the inventory value, which is empty
-// (unknown) until the inventory carries it, so exposure stays "unknown" and
-// is never reported as "no listener".
+// results of unmanaged addresses, not the host's own listeners. So every read
+// fails with errOpsListenersUnavailable. It never returns an empty list: an
+// empty list reads as "verified no listening ports", which the server cannot
+// verify. The projection therefore fails for a host with a critical or high
+// finding until a listener source exists; it does not show ports: [] instead.
 type opsVulnListeners struct{}
 
 var _ opsfacts.ListenerSource = opsVulnListeners{}
 
-// Listeners returns no ports for hostID; see the type comment.
+// Listeners always fails with errOpsListenersUnavailable; see the type comment.
 func (opsVulnListeners) Listeners(context.Context, string) ([]opsfacts.Port, error) {
-	return nil, nil
+	return nil, errOpsListenersUnavailable
 }
