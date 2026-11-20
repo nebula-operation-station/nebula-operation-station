@@ -93,6 +93,8 @@ subject in a run and keep a closure possible)?
   below only.
 - ADR 0011 D5 limits the age of the **snapshot** (`MaxInventoryAge`, 24 h) and
   the age of a run's **feed** data; it does not limit the age of a read.
+  `vulnstore.MaxInventoryAge` (`internal/vulnstore/vulnstore.go:59`) is checked
+  at run start against the snapshot ID, so it bounds snapshot age, not read age.
 - ADR 0011 D6 "Staleness" limits the last complete **run** per subject
   (`vulnstore.StaleAfter`, 48 h, Q5). This is about the assessment, not the
   inventory.
@@ -107,18 +109,32 @@ subject in a run and keep a closure possible)?
 3. 48 h (`vulnstore.StaleAfter`): the run staleness threshold of D6.
 
 **Recommendation: option 2 (24 h).** A read older than 24 h is exported as
-**not complete**, so no run can cover that host with it, and the classifier
-holds the closure (`HoldClassifyFailed`) instead of closing findings by
-omission. Option 3 would let a host be covered by a read from two days ago,
-which is weaker than the snapshot age the export already enforces. Option 1 is
-the case the ADR text does not address; it is listed only for completeness.
+**not complete** (the D3 partial-read path), so it does not cover that host in
+a run. What a run then does with the host's findings is set by D5 for
+incomplete or uncovered subjects. The sources cited here do not state that
+outcome. D5 has no text on it. Two history notes in ADR 0011 touch the topic:
+line 2115 says a failed, incomplete or invalid **agent** read fails the agent
+run before matching, and line 662 is about incomplete **runs**. Neither says
+what happens to closures of an incomplete subject in a Hermes run. The outcome
+must be written into ADR 0011 before the code is built (see the list at the end). Note: `HoldClassifyFailed` is not the
+reason for this case. In `internal/vulnstore/complete.go` it is set only when
+the classifier returns an error (lines 646–647) or returns a class outside the
+known set (lines 654–655).
+
+Option 3 (48 h) would let a host be covered by a read up to two days old. The
+24 h figure is proposed because it is four missed 6-hour reads, not because of
+`MaxInventoryAge`: that constant limits snapshot age at run start, not read
+age. A 24 h read inside a 24 h snapshot is already up to 48 h old when the run
+uses it. Option 1 is the case the ADR text does not address; it is listed only
+for completeness.
 
 **Consequence for the code.** The export marks a subject without a fresh
-complete read as incomplete (same effect as D3 partial read); the classifier
-holds closures that depend on it. The 24 h value is a named constant next to
-the code that enforces it (reuse `vulnstore.MaxInventoryAge`, do not add a new
-number). Tests: a read exactly at 24 h and one at 24 h + 1 s; a fresh read
-after a stale one restores coverage.
+complete read as incomplete (same effect as D3 partial read). The 24 h read age
+needs its own named constant next to the code that enforces it. It must not
+reuse `vulnstore.MaxInventoryAge`, whose meaning is snapshot age at run start.
+The name and value are a maintainer decision (24 h proposed). Tests: a read
+exactly at 24 h and one at 24 h + 1 s; a fresh read after a stale one restores
+coverage.
 
 ---
 
@@ -129,44 +145,66 @@ inventory?
 
 **What the sources say.**
 
+- **Today's code (fail-closed).** `cmd/nebula-server/vuln.go:129-137`:
+  `vulnClassifier.Classify` always returns `errVulnNotCheckable`, because NOS
+  stores no package inventory. Every requested run closure therefore hits the
+  classifier-error branch and is held as `HoldClassifyFailed`
+  (`internal/vulnstore/complete.go:646-647`). Today no closure is closed as
+  `hermes_unconfirmed`, for hosts or for images.
 - ADR 0011 D5, closure-class table (line ~704–705): "Unconfirmed" covers "every
   other run closure: not checkable now (incl. kernel version unknown, image
   packages unknown, …)". Unconfirmed closures are applied as `fixed` with
   `closed_by = hermes_unconfirmed` and shown as "closed by Hermes, not confirmed
   by NOS" (D6), except that episode KEV or peak tier `critical` is always held
-  (D7).
+  (D7). So the ADR table, read literally, is looser than today's code for both
+  host and image subjects with no inventory.
 - ADR 0011 D3: completeness is defined only by the read itself (exit success,
   every line parsed, limit not reached). It does not say what happens when a
   subject has **no** read or no OS release.
-- Implementation plan (iv06) builds a stricter variant for host subjects with
-  no stored read at all: hold the closure instead of marking it unconfirmed.
-  Image subjects without `image.packages` stay Unconfirmed, as in the D5 table.
-- iv03 exports a host without a known OS release (no `core.facts` result, or not
-  Debian/Ubuntu) as **incomplete**. Reason: otherwise a run could cover the host
-  with no matches and close findings by omission. The D3 text does not cover
-  this case.
+- **Proposal, not in the ADR and not in any file in this clone.** The autopilot
+  ticket for iv06 asks for host subjects without any stored read to be held
+  instead of marked Unconfirmed. `docs/implementation/vulnerability-management.md`
+  has no iv06 entry, and no code in `internal/` or `cmd/` implements a per-host
+  rule (the classifier at `cmd/nebula-server/vuln.go:129-137` holds everything).
+  This rule departs from the D5 Unconfirmed row.
+- **Proposal, same source (ticket iv03).** Export a host without a known OS
+  release (no `core.facts` result, or not Debian/Ubuntu) as **incomplete**. It
+  is not in D3 or D5 and no file in this clone states it. It is a new rule.
 
-**Options.**
+**Options.** The "vs. today" column compares with the code as it stands
+(`cmd/nebula-server/vuln.go:129-137`: every closure held). The "vs. D5" column
+compares with the ADR table.
 
-1. Keep the ADR table as written: no inventory means Unconfirmed for every
-   subject kind.
-2. Hold closures for host subjects without any stored read (iv06 as built),
-   keep Unconfirmed for image subjects, as the D5 table states.
-3. Hold all closures without inventory, host and image alike.
+| Option | Host, no read | Image, no `image.packages` | vs. today (code) | vs. D5 table |
+| --- | --- | --- | --- | --- |
+| 1. ADR table as written | Unconfirmed (closed as `hermes_unconfirmed`) | Unconfirmed | **Loosens** for hosts and images | matches |
+| 2. Hold host closures without a stored read; images Unconfirmed | Held | Unconfirmed | Hosts: unchanged. **Images: loosens** (held → `hermes_unconfirmed`) | Tightens hosts; images match |
+| 3. Hold all closures without inventory | Held | Held | Unchanged for both (no loosening) | Tightens hosts and images |
 
-**Recommendation: option 2, and the same rule for the OS-release case in iv03
-(export as incomplete).** Holding a host closure without any read stops a run
-from closing findings by omission, which is the failure mode this ADR guards
-against. Image subjects are kept as the D5 table words them, because an image
-with no `image.packages` is a known and common state (the action is optional,
-E4). Option 3 changes the ADR table for images without a stated reason.
+Option 1 and option 2 both loosen today's behaviour for image subjects. Only
+option 3 keeps today's fail-closed result for every subject until the code
+stores package lists.
 
-**Decision needed.** Confirm option 2, or send this point back to the ADR table
-(in which case iv06 must change to the D5 wording).
+**Recommendation: option 2, with the image loosening accepted explicitly, and
+the same export rule for the OS-release case in ticket iv03 (export as
+incomplete).** Holding a host closure without any read stops a run from closing
+findings by omission, which is the failure mode this ADR guards against. Image
+subjects follow the D5 table because an image with no `image.packages` is a
+known and common state (the action is optional, E4). This choice moves images
+from held to closed-as-unconfirmed, which today's code does not do. If the
+maintainer does not want that loosening before `image.packages` is stored,
+choose option 3 for images and keep option 2 for hosts.
 
-**Consequence for the code.** iv06 stays as built for host subjects; iv03
-keeps the incomplete export for unknown OS releases. The ADR table needs an
-explicit row for "host subject with no stored read" (see the list at the end).
+**Decision needed.** Pick one of the three options. For option 2 or 3, confirm
+the image choice above. If option 1 or 2 is chosen, the ADR table (or the iv06
+rule) must be written down first. Both host rules above are proposals and need
+the maintainer's approval before any code follows them.
+
+**Consequence for the code.** Nothing changes in the code yet; the classifier
+keeps holding every closure (`cmd/nebula-server/vuln.go:129-137`) until a
+decision is taken. Whatever is chosen, the ADR table needs an explicit row for
+"host subject with no stored read" and a rule for the unknown OS release (see
+the list at the end).
 
 ---
 
@@ -187,9 +225,15 @@ schedule?
   carry the image digest and `image.packages` cannot run from a lease today.
 - Host reads are different: `package.list_installed` is a lease action;
   `RunDueReadGrants` (`internal/executions/leaserunner.go`) runs due reads of
-  an **approved** lease. ADR 0007 (line ~39) says leases currently require a
-  privileged session to propose and browser-approve them. Nothing creates a
-  lease automatically.
+  an **approved** lease. The proposal and commit paths take a user
+  (`ProposeReadGrant`, `internal/executions/readgrants_propose.go:259`;
+  `CommitReadGrant`, line 475, which also takes an assertion). The files cited
+  here show no automatic caller of these functions.
+- ADR 0007 line 39 describes the **baseline for schedule grants**
+  (`internal/permit/schedule.go`, `internal/schedgrant`): they currently require
+  a privileged session to propose and browser-approve. ADR 0007 says nothing
+  about read leases. Using the same manual approval for host read leases is
+  this paper's proposal, not something the ADR states.
 
 **Options for (a) image freshness.**
 
@@ -201,8 +245,11 @@ schedule?
 
 **Recommendation for (a): option 2.** Scheduling needs a decision on where the
 digest comes from and who approves it, and the ticket chain does not have that.
-Storing nothing for images until then is consistent with E3. Option 3 changes a
-security predicate (`leaseableAction`) and needs its own review.
+Storing nothing for images until then is consistent with E3. Note that option 2
+means image subjects are Unconfirmed (closed as `hermes_unconfirmed`) until then,
+which loosens today's held state (E3, table). If that is not acceptable, E3
+option 3 keeps images held. Option 3 here changes a security predicate
+(`leaseableAction`) and needs its own review.
 
 **Options for (b) host freshness.**
 
@@ -211,10 +258,11 @@ security predicate (`leaseableAction`) and needs its own review.
    the host has no current read and E3 (hold) applies. The UI and export show
    the hint "no package inventory / inventory older than …" (from iv09).
 
-**Recommendation for (b): option 2.** ADR 0007 requires a privileged session to
-propose and approve leases; an automatic lease would be a new grant created by software, which
-is not a decision the ADR makes. The hint from iv09 makes the missing read
-visible instead of silent.
+**Recommendation for (b): option 2.** An automatic lease would be a new grant
+created by software. Neither ADR 0007 nor ADR 0011 makes that decision (ADR 0007
+line 39 is only the schedule-grant baseline, see the sources above), so the
+manual approval path is kept until the maintainer decides otherwise. The hint
+from iv09 makes the missing read visible instead of silent.
 
 **Decision needed.** Confirm (a) option 2 and (b) option 2, or name a different
 approver for host leases.
@@ -236,7 +284,8 @@ Once the maintainer decides, the following text must be written by a maintainer:
 3. **ADR 0011 D5 closure-class table**: a row for "host subject with no stored
    read" (E3 option 2), and the D3 rule for an unknown OS release (iv03).
 4. **ADR 0011 D3 `image.packages`**: freshness and scheduling (E4 a), and the
-   statement that host reads are never created automatically (E4 b, ADR 0007).
+   statement that host reads are never created automatically (E4 b, a proposal
+   of this paper; ADR 0007 line 39 does not cover read leases).
 5. **`docs/spec/03-processes-and-data.md`** (vulnerability tables, line 57):
    name the package-read table, its retention rule and whether it has a
    column for the completeness flag.
