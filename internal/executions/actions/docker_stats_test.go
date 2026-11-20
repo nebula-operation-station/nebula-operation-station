@@ -150,7 +150,9 @@ case "$1" in version) echo "27.3.1" ;; stats) printf '%s\n' '`+line+`' ;; esac`)
 }
 
 func TestDockerStatsScriptBoundsCollectionAndPreservesFailures(t *testing.T) {
-	const maxBytes = 1048576
+	// Raw bytes kept before base64 (docker_stats.sh max_stats_bytes): base64
+	// adds a third, so 1 MiB raw would exceed hostrun.MaxResult.
+	const maxBytes = 524288
 	mktemp, err := exec.LookPath("mktemp")
 	if err != nil {
 		t.Fatal(err)
@@ -160,7 +162,7 @@ func TestDockerStatsScriptBoundsCollectionAndPreservesFailures(t *testing.T) {
 		failed             bool
 	}{
 		{"empty", "exit 0", "", false},
-		{"byte limit", `head -c 1048576 /dev/zero | tr '\000' x`, strings.Repeat("x", maxBytes), false},
+		{"byte limit", `head -c 524288 /dev/zero | tr '\000' x`, strings.Repeat("x", maxBytes), false},
 		{"oversized line", `head -c 2097152 /dev/zero | tr '\000' x`, strings.Repeat("x", maxBytes), false},
 		{"oversized binary", `head -c 2097152 /dev/zero`, strings.Repeat("\x00", maxBytes), false},
 		{"row limit", `i=0; while [ "$i" -lt 3000 ]; do printf 'row\n'; i=$((i + 1)); done`, strings.Repeat("row\n", 2000), false},
@@ -208,8 +210,8 @@ esac`)
 	if code != 0 || doc["phase"] != "done" || doc["present"] != true {
 		t.Fatalf("code=%d phase=%v reason=%v", code, doc["phase"], doc["reason"])
 	}
-	if got := b64(t, doc, "stats"); got != strings.Repeat("x", 1048576) {
-		t.Fatalf("stats differ: got %d bytes, want 1048576", len(got))
+	if got := b64(t, doc, "stats"); got != strings.Repeat("x", 524288) {
+		t.Fatalf("stats differ: got %d bytes, want 524288", len(got))
 	}
 }
 

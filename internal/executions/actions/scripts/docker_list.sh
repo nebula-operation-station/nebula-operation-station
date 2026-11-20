@@ -23,6 +23,9 @@ fmt="$fmt{{.Label \"com.docker.compose.project\"}}$t{{.Label \"com.docker.compos
 # Creation time is the 10th column; older parsers ignore it, this one keeps it.
 fmt="$fmt{{.Label \"com.docker.compose.project.working_dir\"}}$t{{.CreatedAt}}"
 ps=$($d ps -a --no-trunc --format "$fmt" 2>/dev/null) || pre "docker ps failed"
-ps=$(printf '%s\n' "$ps" | head -n 2000 | b64)
+# Bound bytes before lines: one label can be arbitrarily large. 512 KiB raw
+# is about 700 KiB encoded, under hostrun.MaxResult; a row cut in half is
+# left out by the parser.
+ps=$(printf '%s\n' "$ps" | head -c 524288 | head -n 2000 | b64)
 ver=$(printf '%s' "$ver" | head -c 100 | b64)
 printf '{"format":"docker-ps-v1","phase":"done","present":true,"version":"%s","containers":"%s"}\n' "$ver" "$ps"
