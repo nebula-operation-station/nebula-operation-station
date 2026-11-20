@@ -48,6 +48,13 @@ type Options struct {
 	// IdleTimeout bounds idle keep-alive connections. Zero means
 	// DefaultIdleTimeout.
 	IdleTimeout time.Duration
+	// OriginExempt, when not nil and true for a request, skips the origin
+	// check for that request only. The security headers and the body limit
+	// still apply. The caller must return true only for requests that carry
+	// no ambient browser credentials (for example a bearer token and no
+	// session cookie), because a browser cannot attach an Authorization
+	// header on its own, so a cross-site form cannot reach them.
+	OriginExempt func(r *http.Request) bool
 }
 
 // Handler wraps next with the security chain: response headers, the origin
@@ -70,7 +77,8 @@ func Handler(opts Options, next http.Handler) http.Handler {
 		// An empty PublicOrigin must fail closed: reject every
 		// state-changing request, including ones with no Origin header
 		// ("" == "" must not pass).
-		if stateChanging(r.Method) && (opts.PublicOrigin == "" || r.Header.Get("Origin") != opts.PublicOrigin) {
+		exempt := opts.OriginExempt != nil && opts.OriginExempt(r)
+		if stateChanging(r.Method) && !exempt && (opts.PublicOrigin == "" || r.Header.Get("Origin") != opts.PublicOrigin) {
 			http.Error(w, "origin not allowed", http.StatusForbidden)
 			return
 		}
