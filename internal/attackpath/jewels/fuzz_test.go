@@ -38,7 +38,7 @@ func FuzzNodeKind(f *testing.F) {
 		"host:a b", "host:\x00", "host:\xff", "host:é", "host:a/b@c.d-e_f:g",
 		"ctr:" + strings.Repeat("a", attackpath.MaxIDBytes-len("ctr:")),
 		"ctr:" + strings.Repeat("a", attackpath.MaxIDBytes-len("ctr:")+1),
-		"", "host:‮",
+		"", "host:" + string(rune(0x202e)),
 	} {
 		f.Add(s)
 	}
