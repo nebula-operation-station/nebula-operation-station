@@ -16,19 +16,26 @@ package security
 //
 // The tests here put the real parts together:
 //
-//   - The server is the server's own HTTP chain: webServer of
-//     cmd/nebula-server (same mux, middleware.NewServer with the origin
-//     check and its OriginExempt rule, the read-only API with the vuln API
-//     mounted under api.Prefix, the real session gate for the pages),
-//     built from a server.json read by serverconfig.Load with the vuln
-//     token "vuln-agent" limited to source_addresses ["127.0.0.1"]. It runs
-//     in package main through a go build overlay (e2e01ServerDriver; nothing
-//     is written to the source tree), so a change of the real wiring is
-//     what the test sees, not a copy of it. TLS is terminated on the
-//     server's listener because nosclient talks https only.
+//   - The server is the nebula-server binary itself, built once from
+//     ./cmd/nebula-server with the go tool and started with -config on a
+//     server.json read by its own serverconfig.LoadWithFlags: the whole
+//     composition of runServer in main.go (api.New, newVulnAPI, api.Mount,
+//     api.MountOps, the session gate, webServer with middleware.NewServer
+//     and its origin check and OriginExempt rule) is what answers, so a
+//     regression in that wiring fails here. The vuln token "vuln-agent" is
+//     limited to source_addresses ["127.0.0.1"]. No executor runs (the
+//     server keeps connecting in the background, as after a reboot).
+//   - nosclient talks https only and nebula-server serves plain HTTP behind
+//     a TLS terminator, so the test puts a byte-level TLS front in front of
+//     it (e2e01TLSFront): it decrypts and copies the bytes unchanged, and
+//     dials the server from the client's own source address, so the
+//     server's source_addresses check sees the real client address.
 //   - The agent side is internal/vulnagent/nosclient (and the agent-config
 //     reader of internal/vulnagent/run) with the token file, the pinned CA
-//     and no Origin header: every call one agent run makes.
+//     and no Origin header: every call one agent run makes, including a
+//     batch with a finding the server must refuse as input. After the
+//     server has shut down, the completed run is read back from its
+//     server.db, and that the refused finding was not stored.
 //   - The package list is the registered package.list_installed script,
 //     run as an attached run through hostrun.Attached against the
 //     in-process SSH server that executes it with /bin/sh on this machine,
@@ -57,6 +64,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -67,9 +75,11 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun/hostruntest"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnagent/nosclient"
 	vulnrun "github.com/nebula-operation-station/nebula-operation-station/internal/vulnagent/run"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnver"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
@@ -82,146 +92,45 @@ const (
 	e2e01TokenName = "vuln-agent"
 	// e2e01Origin is the server's public_origin.
 	e2e01Origin = "https://nos.e2e01.test"
-	// e2e01StartTimeout bounds building and starting the server (the
-	// overlay build of cmd/nebula-server).
-	e2e01StartTimeout = 50 * time.Second
+	// e2e01BuildTimeout bounds building the server binary. A cold build
+	// (empty build cache, started from inside go test ./... beside other
+	// packages) can take minutes; the test's own deadline still applies.
+	e2e01BuildTimeout = 8 * time.Minute
+	// e2e01StartTimeout bounds starting the built binary until it logs
+	// "started" (no build in it).
+	e2e01StartTimeout = 30 * time.Second
+	// e2e01StopTimeout bounds the graceful shutdown after SIGINT.
+	e2e01StopTimeout = 20 * time.Second
 	// e2e01CallTimeout bounds every request of the test.
 	e2e01CallTimeout = 10 * time.Second
-	// e2e01MaxAnswer bounds what the control socket and a raw response are
-	// read up to.
+	// e2e01MaxAnswer bounds what a raw response is read up to.
 	e2e01MaxAnswer = 64 << 10
+	// e2e01MaxLogLine bounds one log line of the server read by the test.
+	e2e01MaxLogLine = 1 << 20
 	// e2e01ForeignSource is a loopback address outside the token's
 	// source_addresses (Linux routes all of 127.0.0.0/8 to lo).
 	e2e01ForeignSource = "127.0.0.2"
 	// e2e01OriginRefusal is the security middleware's 403 body.
 	e2e01OriginRefusal = "origin not allowed"
+	// e2e01Matcher is the matcher version of the agent run.
+	e2e01Matcher = "e2e01-1.0.0"
+	// e2e01CVE is the vulnerability of the run's one finding.
+	e2e01CVE = "CVE-2026-0101"
+	// e2e01Host is the host subject of the run's one finding.
+	e2e01Host = "web01"
+	// e2e01Assessment is the finding's assessment text.
+	e2e01Assessment = "E2E01-ASSESSMENT-TEXT"
 )
-
-// e2e01ServerDriver is added to package main of cmd/nebula-server through a
-// go build overlay. It builds the HTTP chain exactly as run in main.go does
-// for the vulnerability agent: server.json through serverconfig.Load,
-// server.db, the vuln service, the agent settings store, api.New with the
-// vuln API (newVulnAPI, vulnInventory) mounted by api.Mount and api.MountOps
-// (no ops token configured), the real session gate, and webServer. It
-// serves on cfg.Listen with TLS, reports the address over the control
-// socket and serves until the test hangs up.
-const e2e01ServerDriver = `// SPDX-License-Identifier: AGPL-3.0-or-later
-
-package main
-
-import (
-	"context"
-	"crypto/tls"
-	"fmt"
-	"io"
-	"log/slog"
-	"net"
-	"net/http"
-	"os"
-	"path/filepath"
-	"testing"
-	"time"
-
-	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
-)
-
-type e2e01Sink struct{}
-
-func (e2e01Sink) Notify(context.Context, notify.Event) int { return 0 }
-
-// e2e01Ops is the read-only API's view of executions (main.go:
-// executions.New on the executor); the vuln agent never reaches it.
-type e2e01Ops struct{}
-
-func (e2e01Ops) Get(context.Context, string) (executions.Execution, error) {
-	return executions.Execution{}, executions.ErrNotFound
-}
-func (e2e01Ops) List(context.Context, int) ([]executions.Summary, error) { return nil, nil }
-func (e2e01Ops) AllUpdates(context.Context) (map[string]executions.HostUpdates, error) {
-	return nil, nil
-}
-func (e2e01Ops) AllOpsStates(context.Context) (map[string]executions.OpsState, error) {
-	return nil, nil
-}
-
-func TestE2E01OverlayServer(t *testing.T) {
-	cfg, err := serverconfig.Load(os.Getenv("E2E01_CONFIG"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
-	db, err := serverdb.Open(filepath.Join(cfg.DataDir, "server.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	vuln, err := newVulnService(db, e2e01Sink{}, log, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	agentCfg, err := vulnstore.NewAgentConfigStore(db, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	hosts := func(context.Context) ([]inventory.Host, error) { return nil, nil }
-	a, err := api.New(api.Options{Tokens: cfg.API.Tokens, Hosts: hosts, Operations: e2e01Ops{}, Log: log})
-	if err != nil {
-		t.Fatal(err)
-	}
-	vh, err := newVulnAPI(cfg.API, vuln, vulnInventory{now: time.Now}, agentCfg, log)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if vh == nil {
-		t.Fatal("server.json enables no vuln API")
-	}
-	apiHandler := api.MountOps(api.Mount(a, vh), nil)
-	login, err := auth.New(auth.Options{Executor: &lazyExecutor{}, Sessions: auth.NewStore(db, nil), Log: log})
-	if err != nil {
-		t.Fatal(err)
-	}
-	pages := http.NewServeMux()
-	pages.Handle("/", http.NotFoundHandler())
-	srv, err := webServer(cfg.PublicOrigin, login, pages, apiHandler)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cert, err := tls.LoadX509KeyPair(os.Getenv("E2E01_CERT"), os.Getenv("E2E01_KEY"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	ln, err := net.Listen("tcp", cfg.Listen)
-	if err != nil {
-		t.Fatal(err)
-	}
-	go func() { _ = srv.Serve(tls.NewListener(ln, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})) }()
-	defer srv.Close()
-	ctl, err := net.Dial("unix", os.Getenv("E2E01_CONTROL"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ctl.Close()
-	if _, err := fmt.Fprintf(ctl, "%s\n", ln.Addr()); err != nil {
-		t.Fatal(err)
-	}
-	_, _ = io.Copy(io.Discard, ctl)
-}
-`
 
 // e2e01Env is a running server and the agent's files.
 type e2e01Env struct {
 	t         *testing.T
-	base      string // https://127.0.0.1:port
+	base      string // https://127.0.0.1:port (the TLS front)
 	caFile    string // the server certificate, pinned
 	tokenFile string // the agent token, mode 0600
+	dataDir   string // the server's data_dir
 	caPool    *x509.CertPool
+	srv       *e2e01Process
 }
 
 // with returns a copy of e that reports to t (for subtests).
@@ -231,33 +140,113 @@ func (e *e2e01Env) with(t *testing.T) *e2e01Env {
 	return &c
 }
 
-// e2e01Server writes server.json, the TLS key pair and the token file into
-// a private directory, starts the overlay driver and waits for its address
-// on the control socket. The server stops when t ends: closing the control
-// connection ends the driver.
+// e2e01Server builds nebula-server, writes server.json, the TLS key pair
+// and the token file into a private directory, starts the binary and puts
+// the TLS front in front of it. The server stops when t ends (or earlier
+// through e.srv.stop).
 func e2e01Server(t *testing.T) *e2e01Env {
 	t.Helper()
 	dir := privateDir(t)
+	bin := e2e01Build(t, dir)
 	certPEM, keyPEM, err := e2e01Cert()
 	if err != nil {
 		t.Fatal(err)
 	}
-	e, err := e2e01Files(dir, certPEM, keyPEM)
+	listen, err := e2e01FreeAddr()
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := e2e01Files(dir, listen, certPEM, keyPEM)
 	if err != nil {
 		t.Fatal(err)
 	}
 	e.t = t
-	addr, stop, err := e2e01Run(dir, filepath.Join(dir, "server.json"), e.caFile, filepath.Join(dir, "key.pem"))
+	e.srv, err = e2e01Start(bin, filepath.Join(dir, "server.json"))
 	if err != nil {
 		t.Fatalf("start the server: %v", err)
 	}
-	t.Cleanup(stop)
-	e.base = "https://" + addr
+	t.Cleanup(func() {
+		if err := e.srv.stop(); err != nil {
+			t.Errorf("stop the server: %v", err)
+		}
+	})
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.base = "https://" + e2e01TLSFront(t, listen, cert)
 	return e
 }
 
+// e2e01GoFlags returns GOFLAGS for the nested go build: the caller's flags
+// unchanged, plus -mod=readonly and -buildvcs=false where the caller set no
+// -mod or -buildvcs (nothing in go.mod or go.sum may change, and the build
+// must not depend on running git).
+func e2e01GoFlags(caller string) string {
+	flags := strings.Fields(caller)
+	hasMod, hasVCS := false, false
+	for _, f := range flags {
+		hasMod = hasMod || strings.HasPrefix(f, "-mod=")
+		hasVCS = hasVCS || f == "-buildvcs" || strings.HasPrefix(f, "-buildvcs=")
+	}
+	if !hasMod {
+		flags = append(flags, "-mod=readonly")
+	}
+	if !hasVCS {
+		flags = append(flags, "-buildvcs=false")
+	}
+	return strings.Join(flags, " ")
+}
+
+// e2e01Build builds ./cmd/nebula-server into dir with the go tool
+// (GOPROXY=off, so nothing is fetched; CGO_ENABLED=0 like make build) and
+// returns the binary's path. As root it builds in a private cache, so a
+// privileged run leaves no root-owned files in the caller's cache.
+func e2e01Build(t *testing.T, dir string) string {
+	t.Helper()
+	goTool, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatalf("the go tool is needed to build the server: %v", err)
+	}
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), e2e01BuildTimeout)
+	defer cancel()
+	if dl, ok := t.Deadline(); ok {
+		// Leave the test time to report a build that runs out of time.
+		var c2 context.CancelFunc
+		ctx, c2 = context.WithDeadline(ctx, dl.Add(-30*time.Second))
+		defer c2()
+	}
+	bin := filepath.Join(dir, "nebula-server")
+	cmd := exec.CommandContext(ctx, goTool, "build", "-o", bin, "./cmd/nebula-server")
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "GOPROXY=off", "CGO_ENABLED=0", "GOFLAGS="+e2e01GoFlags(os.Getenv("GOFLAGS")))
+	if os.Geteuid() == 0 {
+		cmd.Env = append(cmd.Env, "GOCACHE="+filepath.Join(dir, "gocache"))
+	}
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build ./cmd/nebula-server: %v\n%s", err, out)
+	}
+	return bin
+}
+
+// e2e01FreeAddr returns a loopback address with a port that was free a
+// moment ago (nebula-server logs its config listen value, so the test
+// needs a fixed port to configure).
+func e2e01FreeAddr() (string, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
+	}
+	addr := ln.Addr().String()
+	return addr, ln.Close()
+}
+
 // e2e01Files writes the server's and the agent's files into dir.
-func e2e01Files(dir string, certPEM, keyPEM []byte) (*e2e01Env, error) {
+func e2e01Files(dir, listen string, certPEM, keyPEM []byte) (*e2e01Env, error) {
 	var err error
 	write := func(name string, b []byte) (string, error) {
 		p := filepath.Join(dir, name)
@@ -274,15 +263,19 @@ func e2e01Files(dir string, certPEM, keyPEM []byte) (*e2e01Env, error) {
 	if e.tokenFile, err = write("agent.token", []byte(e2e01Token+"\n")); err != nil {
 		return nil, err
 	}
-	dataDir := filepath.Join(dir, "data")
-	if err := os.Mkdir(dataDir, 0o700); err != nil {
-		return nil, err
+	e.dataDir = filepath.Join(dir, "data")
+	for _, d := range []string{e.dataDir, filepath.Join(dir, "discovery"), filepath.Join(dir, "pve")} {
+		if err := os.Mkdir(d, 0o700); err != nil {
+			return nil, err
+		}
 	}
 	// The vuln token as server.json holds it (docs: api.tokens).
 	cfg := map[string]any{
-		"listen":          "127.0.0.1:0",
+		"listen":          listen,
 		"public_origin":   e2e01Origin,
-		"data_dir":        dataDir,
+		"data_dir":        e.dataDir,
+		"discovery_dir":   filepath.Join(dir, "discovery"),
+		"pve_spool_dir":   filepath.Join(dir, "pve"),
 		"executor_socket": filepath.Join(dir, "executor.sock"),
 		"executor_user":   "nebula-executor",
 		"api": map[string]any{"enabled": true, "tokens": []map[string]any{{
@@ -302,84 +295,165 @@ func e2e01Files(dir string, certPEM, keyPEM []byte) (*e2e01Env, error) {
 	return e, nil
 }
 
-// e2e01Run starts e2e01ServerDriver with the go tool (GOPROXY=off, so
-// nothing is fetched) and returns the address it serves on and the stop
-// function, which ends the driver and waits for it.
-func e2e01Run(dir, cfgFile, certFile, keyFile string) (string, func(), error) {
-	goTool, err := exec.LookPath("go")
+// e2e01Process is a running nebula-server.
+type e2e01Process struct {
+	cmd    *exec.Cmd
+	log    *syncBuffer
+	exited chan struct{}
+	err    error // cmd.Wait's result, set before exited closes
+	once   sync.Once
+	stopEr error
+}
+
+// e2e01Start starts bin with -config cfgFile and returns once it has logged
+// "started" (it then listens), or with the error and its log when it ends
+// or does not start within e2e01StartTimeout.
+func e2e01Start(bin, cfgFile string) (*e2e01Process, error) {
+	p := &e2e01Process{log: &syncBuffer{}, exited: make(chan struct{})}
+	p.cmd = exec.Command(bin, "-config", cfgFile)
+	p.cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + filepath.Dir(cfgFile)}
+	stderr, err := p.cmd.StderrPipe()
 	if err != nil {
-		return "", nil, fmt.Errorf("the go tool is needed to build the server: %w", err)
+		return nil, err
 	}
-	root, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		return "", nil, err
+	p.cmd.Stdout = p.log
+	if err := p.cmd.Start(); err != nil {
+		return nil, err
 	}
-	driver := filepath.Join(dir, "driver.go")
-	if err := os.WriteFile(driver, []byte(e2e01ServerDriver), 0o600); err != nil {
-		return "", nil, err
-	}
-	overlay, err := json.Marshal(map[string]any{"Replace": map[string]string{
-		filepath.Join(root, "cmd", "nebula-server", "zz_e2e01_overlay_test.go"): driver}})
-	if err != nil {
-		return "", nil, err
-	}
-	overlayFile := filepath.Join(dir, "overlay.json")
-	if err := os.WriteFile(overlayFile, overlay, 0o600); err != nil {
-		return "", nil, err
-	}
-	ctlPath := filepath.Join(dir, "ctl.sock")
-	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: ctlPath, Net: "unix"})
-	if err != nil {
-		return "", nil, err
-	}
-	cmd := exec.Command(goTool, "test", "-overlay", overlayFile, "-count=1", "-timeout=10m",
-		"-run", "^TestE2E01OverlayServer$", "./cmd/nebula-server")
-	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "GOPROXY=off", "GOFLAGS=-mod=readonly", "E2E01_CONFIG="+cfgFile,
-		"E2E01_CERT="+certFile, "E2E01_KEY="+keyFile, "E2E01_CONTROL="+ctlPath)
-	out := &syncBuffer{}
-	cmd.Stdout, cmd.Stderr = out, out
-	if err := cmd.Start(); err != nil {
-		ln.Close()
-		return "", nil, err
-	}
-	// A driver that ends before it reports closes the listener, so the
-	// Accept below returns at once instead of waiting for the deadline.
-	exited := make(chan struct{})
-	go func() { _ = cmd.Wait(); close(exited); ln.Close() }()
-	kill := func() { _ = cmd.Process.Kill(); <-exited }
-	if err := ln.SetDeadline(time.Now().Add(e2e01StartTimeout)); err != nil {
-		kill()
-		return "", nil, err
-	}
-	conn, err := ln.Accept()
-	if err != nil {
-		kill()
-		return "", nil, fmt.Errorf("server driver did not report (%w):\n%s", err, out.String())
-	}
-	ln.Close()
-	// The driver serves until conn closes.
-	stop := func() {
-		conn.Close()
-		select {
-		case <-exited:
-		case <-time.After(e2e01CallTimeout):
-			kill()
+	started := make(chan struct{})
+	logDone := make(chan struct{})
+	go func() {
+		defer close(logDone)
+		sc := bufio.NewScanner(stderr)
+		sc.Buffer(make([]byte, 64<<10), e2e01MaxLogLine)
+		seen := false
+		for sc.Scan() {
+			line := sc.Bytes()
+			_, _ = p.log.Write(append(append([]byte{}, line...), '\n'))
+			var rec struct {
+				Msg string `json:"msg"`
+			}
+			if !seen && json.Unmarshal(line, &rec) == nil && rec.Msg == "started" {
+				seen = true
+				close(started)
+			}
 		}
+		_, _ = io.Copy(io.Discard, stderr)
+	}()
+	go func() {
+		<-logDone
+		p.err = p.cmd.Wait()
+		close(p.exited)
+	}()
+	select {
+	case <-started:
+		return p, nil
+	case <-p.exited:
+		return nil, fmt.Errorf("nebula-server ended before it started (%v):\n%s", p.err, p.log.String())
+	case <-time.After(e2e01StartTimeout):
+		_ = p.cmd.Process.Kill()
+		<-p.exited
+		return nil, fmt.Errorf("nebula-server did not start within %s:\n%s", e2e01StartTimeout, p.log.String())
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(e2e01CallTimeout))
-	line, err := bufio.NewReader(io.LimitReader(conn, e2e01MaxAnswer)).ReadString('\n')
+}
+
+// stop sends SIGINT (main's signal.NotifyContext) and waits for the
+// graceful shutdown; it kills the process when that takes too long. It
+// returns an error unless the server exited cleanly; later calls return
+// the first call's result.
+func (p *e2e01Process) stop() error {
+	p.once.Do(func() {
+		if err := p.cmd.Process.Signal(os.Interrupt); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			p.stopEr = err
+		}
+		select {
+		case <-p.exited:
+			if p.err != nil && p.stopEr == nil {
+				p.stopEr = fmt.Errorf("nebula-server exited with %v:\n%s", p.err, p.log.String())
+			}
+		case <-time.After(e2e01StopTimeout):
+			_ = p.cmd.Process.Kill()
+			<-p.exited
+			p.stopEr = fmt.Errorf("nebula-server did not shut down within %s:\n%s", e2e01StopTimeout, p.log.String())
+		}
+	})
+	return p.stopEr
+}
+
+// e2e01TLSFront listens on 127.0.0.1 with TLS (cert) and copies every
+// decrypted connection byte for byte to backend, dialled from the client's
+// own source address. It returns its address; it stops when t ends.
+func e2e01TLSFront(t *testing.T, backend string, cert tls.Certificate) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		stop()
-		return "", nil, fmt.Errorf("read server address: %w:\n%s", err, out.String())
+		t.Fatal(err)
 	}
-	_ = conn.SetReadDeadline(time.Time{})
-	addr := strings.TrimSpace(line)
-	if host, _, err := net.SplitHostPort(addr); err != nil || host != "127.0.0.1" {
-		stop()
-		return "", nil, fmt.Errorf("server reported address %q, want 127.0.0.1:port", addr)
+	var (
+		mu    sync.Mutex
+		conns = map[net.Conn]struct{}{}
+		wg    sync.WaitGroup
+	)
+	track := func(c net.Conn) bool {
+		mu.Lock()
+		defer mu.Unlock()
+		if conns == nil {
+			return false
+		}
+		conns[c] = struct{}{}
+		return true
 	}
-	return addr, stop, nil
+	tl := tls.NewListener(ln, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+	wg.Go(func() {
+		for {
+			c, err := tl.Accept()
+			if err != nil {
+				return
+			}
+			if !track(c) {
+				c.Close()
+				return
+			}
+			wg.Go(func() { e2e01Pipe(c, backend, track) })
+		}
+	})
+	t.Cleanup(func() {
+		ln.Close()
+		mu.Lock()
+		for c := range conns {
+			c.Close()
+		}
+		conns = nil
+		mu.Unlock()
+		wg.Wait()
+	})
+	return ln.Addr().String()
+}
+
+// e2e01Pipe copies between the TLS connection c and a new connection to
+// backend from c's source address until either side ends.
+func e2e01Pipe(c net.Conn, backend string, track func(net.Conn) bool) {
+	defer c.Close()
+	src, ok := c.RemoteAddr().(*net.TCPAddr)
+	if !ok {
+		return
+	}
+	d := net.Dialer{Timeout: e2e01CallTimeout, LocalAddr: &net.TCPAddr{IP: src.IP}}
+	b, err := d.Dial("tcp", backend)
+	if err != nil {
+		return
+	}
+	defer b.Close()
+	if !track(b) {
+		return
+	}
+	done := make(chan struct{}, 2)
+	go func() { _, _ = io.Copy(b, c); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(c, b); done <- struct{}{} }()
+	<-done
+	c.Close()
+	b.Close()
+	<-done
 }
 
 // e2e01Cert returns a fresh self-signed certificate for 127.0.0.1 (it is
@@ -463,7 +537,7 @@ func (e *e2e01Env) raw(method, path, source string, header map[string]string, bo
 // e2e01StartRequest is the start request of one agent run: every source of the
 // server's list, dated an hour ago.
 func e2e01StartRequest() nosclient.StartRequest {
-	req := nosclient.StartRequest{MatcherVersion: "e2e01-1.0.0"}
+	req := nosclient.StartRequest{MatcherVersion: e2e01Matcher}
 	at := time.Now().Add(-time.Hour).UTC().Truncate(time.Second)
 	for _, s := range vulnListedSources {
 		req.Sources = append(req.Sources, nosclient.SourceSnapshot{SourceID: s.ID, SnapshotID: "snap-" + s.ID,
@@ -472,23 +546,62 @@ func e2e01StartRequest() nosclient.StartRequest {
 	return req
 }
 
+// e2e01BatchBody is a findings batch (batch_seq 1) as the agent sends it:
+// host web01 complete in one part, with one Debian tracker finding for
+// openssl.
+func e2e01BatchBody() (string, error) {
+	b, err := json.Marshal(map[string]any{
+		"batch_seq": 1,
+		"subjects":  []any{map[string]any{"subject_kind": "host", "subject_ref": map[string]any{"id": e2e01Host}, "part": 1, "last_part": true}},
+		"findings": []any{map[string]any{
+			"subject_kind":  "host",
+			"subject_ref":   map[string]any{"id": e2e01Host},
+			"ecosystem":     "debian:bookworm",
+			"component":     map[string]any{"source_package": "openssl", "source_version": "3.0.15-1~deb12u1"},
+			"vuln":          map[string]any{"id": e2e01CVE},
+			"fix":           map[string]any{"state": "fixed", "version": "3.0.16-1~deb12u1"},
+			"tracker_state": "fixed",
+			"match_basis":   "distro_tracker",
+			"evidence": map[string]any{"matcher_version": e2e01Matcher,
+				"basis_sources": []any{map[string]any{"source_id": "debian-tracker", "snapshot_id": "snap-debian-tracker", "integrity": "none"}}},
+			"assessment": map[string]any{"text": e2e01Assessment},
+		}},
+	})
+	return string(b), err
+}
+
 // --- the agent's run over the real chain ---
 
-// TestE2E01VulnAgentOverRealHTTP starts the server once (one overlay
-// build) and runs the agent's calls and the refusals against it.
+// TestE2E01VulnAgentOverRealHTTP starts the server once (one build) and
+// runs the agent's calls and the refusals against it, then stops it and
+// reads back what the agent's run stored.
 func TestE2E01VulnAgentOverRealHTTP(t *testing.T) {
 	e := e2e01Server(t)
-	t.Run("AgentRunPassesTheRealHTTPChain", func(t *testing.T) { e2e01AgentRun(t, e.with(t)) })
+	ran := t.Run("AgentRunPassesTheRealHTTPChain", func(t *testing.T) { e2e01AgentRun(t, e.with(t)) })
 	t.Run("WrongTokenIsUnauthorized", func(t *testing.T) { e2e01WrongToken(t, e.with(t)) })
 	t.Run("ForeignSourceAddressIsForbidden", func(t *testing.T) { e2e01ForeignSourceRefused(t, e.with(t)) })
-	t.Run("BrowserPostWithoutOriginIsForbidden", func(t *testing.T) { e2e01BrowserPost(t, e.with(t)) })
+	t.Run("BrowserPostIsForbidden", func(t *testing.T) { e2e01BrowserPost(t, e.with(t)) })
+	if err := e.srv.stop(); err != nil {
+		t.Fatalf("stop the server: %v", err)
+	}
+	if !ran {
+		t.Fatal("the agent run failed; nothing to read back")
+	}
+	t.Run("StoredRunReadBack",func(t *testing.T) { e2e01ReadBack(t, e.with(t)) })
 }
 
 // Every call of one agent run goes through the server's real HTTP chain
-// and is answered with its success status: the agent settings read, the
-// inventory export (GET), the run start, a findings batch and the run
-// completion (POST with the bearer token, no Origin header). Before ao01
-// every POST here was refused by the origin check with 403.
+// and is answered by the API, not by the origin check: the agent settings
+// read, the inventory export (GET), the run start, a findings batch and
+// the run completion (POST with the bearer token, no Origin header).
+// Before ao01 every POST here was refused by the origin check with 403.
+//
+// The inventory export of nebula-server is empty by design for now
+// (vulnInventory in cmd/nebula-server/vuln.go: NOS does not store parsed
+// package lists yet), so a batch with a finding is refused by the API as
+// input (its subject is not in the snapshot) and the batch that covers the
+// empty snapshot is accepted. Once the server exports packages, the batch
+// with the finding is the one to accept and read back.
 func e2e01AgentRun(t *testing.T, e *e2e01Env) {
 	ctx := e.ctx()
 
@@ -516,15 +629,61 @@ func e2e01AgentRun(t *testing.T, e *e2e01Env) {
 	if run.InventorySnapshotID != snap.ID {
 		t.Fatalf("run bound to snapshot %q, want %q", run.InventorySnapshotID, snap.ID)
 	}
-	res, err := run.Submit(ctx, nosclient.Batch{Seq: 1})
+	// The finding's subject is not in the (empty) snapshot. nosclient
+	// would not send such a batch, so it goes out as the agent's request
+	// would (bearer, no Origin) and the server must read it and refuse it
+	// as input: nothing of it is stored (e2e01ReadBack).
+	body, err := e2e01BatchBody()
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, answer := e.raw(http.MethodPost, api.VulnPrefix+"runs/"+run.ID+"/findings", "",
+		map[string]string{"Authorization": "Bearer " + e2e01Token, "Content-Type": "application/json"}, body)
+	if code != http.StatusUnprocessableEntity || !strings.Contains(answer, "not in the run's inventory snapshot") {
+		t.Fatalf("POST findings batch on a subject outside the snapshot: %d %q, want the API's 422", code, answer)
+	}
+	// The batch that covers the snapshot is accepted.
+	res, err := run.Submit(ctx, nosclient.Batch{Seq: 2})
 	if err != nil {
 		t.Fatalf("POST findings batch (bearer, no Origin): %v", err)
 	}
-	if res.BatchSeq != 1 || res.Rejected != 0 {
-		t.Fatalf("batch result %+v", res)
+	if res.BatchSeq != 2 || res.Rejected != 0 || res.Opened != 0 {
+		t.Fatalf("batch result %+v, want seq 2, nothing opened or rejected", res)
 	}
 	if _, err := run.Complete(ctx); err != nil {
 		t.Fatalf("POST complete run (bearer, no Origin): %v", err)
+	}
+}
+
+// What the agent's run wrote is in the server's database: the run is
+// completed just now, and the refused finding was not stored. A completion
+// answered 2xx but not stored, or a refused batch stored in part, fails
+// here.
+func e2e01ReadBack(t *testing.T, e *e2e01Env) {
+	db, err := serverdb.Open(filepath.Join(e.dataDir, "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	st, err := vulnstore.New(db, vulnstore.Config{Sources: vulnListedSources, Tier: vulnTierOf,
+		Classifier: &viewClassifier{view: map[vulnstore.Subject]map[string]string{}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := e.ctx()
+	done, err := st.LastComplete(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done.IsZero() || time.Since(done) > time.Hour {
+		t.Fatalf("last completed run at %v, want the agent's run of just now", done)
+	}
+	fs, more, err := st.List(ctx, vulnstore.ListQuery{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fs) != 0 || more {
+		t.Fatalf("stored findings %+v (more %v), want none: the only finding was refused", fs, more)
 	}
 }
 
@@ -571,13 +730,15 @@ func e2e01ForeignSourceRefused(t *testing.T, e *e2e01Env) {
 	}
 }
 
-// The origin check stays for browsers: a POST without Origin and without a
-// token, and a POST that carries the session cookie (with or without a
-// bearer header), are refused by the middleware with 403, on the API
-// prefix and on the pages. A GET is not state-changing and is not refused
-// by it.
+// The origin check stays for browsers and for everything outside the
+// token API: a POST without Origin and without a token, a POST that
+// carries the session cookie (with or without a bearer header), and a
+// bearer POST without a cookie to a page or to the traffic-map model
+// (which stays on the session chain) are refused by the middleware with
+// 403. A GET is not state-changing and is not refused by it.
 func e2e01BrowserPost(t *testing.T, e *e2e01Env) {
 	cookie := auth.CookieName + "=e2e01-session"
+	bearer := "Bearer " + e2e01Token
 	cases := []struct {
 		name   string
 		path   string
@@ -587,8 +748,16 @@ func e2e01BrowserPost(t *testing.T, e *e2e01Env) {
 		{"page, no token", "/assistant/ops/questions", map[string]string{"Content-Type": "application/x-www-form-urlencoded"}},
 		{"api, session cookie", "/api/v1/vuln/runs", map[string]string{"Cookie": cookie, "Content-Type": "application/json"}},
 		{"api, session cookie and bearer", "/api/v1/vuln/runs", map[string]string{"Cookie": cookie,
-			"Authorization": "Bearer " + e2e01Token, "Content-Type": "application/json"}},
+			"Authorization": bearer, "Content-Type": "application/json"}},
 		{"api, foreign origin", "/api/v1/vuln/runs", map[string]string{"Origin": "https://evil.example", "Content-Type": "application/json"}},
+		{"page, bearer without cookie", "/assistant/ops/questions", map[string]string{"Authorization": bearer,
+			"Content-Type": "application/x-www-form-urlencoded"}},
+		{"page outside the api prefix, bearer without cookie", "/api-v1/vuln/runs", map[string]string{"Authorization": bearer,
+			"Content-Type": "application/json"}},
+		{"traffic-map model, bearer without cookie", "/api/v1/trafficmap", map[string]string{"Authorization": bearer,
+			"Content-Type": "application/json"}},
+		{"traffic-map model below, bearer without cookie", "/api/v1/trafficmap/model", map[string]string{"Authorization": bearer,
+			"Content-Type": "application/json"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -601,6 +770,21 @@ func e2e01BrowserPost(t *testing.T, e *e2e01Env) {
 	code, body := e.raw(http.MethodGet, "/api/v1/vuln/inventory", "", nil, "")
 	if code != http.StatusUnauthorized || strings.Contains(body, e2e01OriginRefusal) {
 		t.Fatalf("GET inventory without token: %d %q, want the API's 401", code, body)
+	}
+}
+
+// The nested build keeps the caller's GOFLAGS and only adds what is unset.
+func TestE2E01GoFlagsExtendTheCallers(t *testing.T) {
+	for in, want := range map[string]string{
+		"":                           "-mod=readonly -buildvcs=false",
+		"-mod=mod":                   "-mod=mod -buildvcs=false",
+		"-mod=vendor -buildvcs=true": "-mod=vendor -buildvcs=true",
+		"-trimpath -buildvcs":        "-trimpath -buildvcs -mod=readonly",
+		" -race  -tags=x ":           "-race -tags=x -mod=readonly -buildvcs=false",
+	} {
+		if got := e2e01GoFlags(in); got != want {
+			t.Errorf("e2e01GoFlags(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
@@ -654,6 +838,16 @@ Version: 1.0-1
 Description: removed, configuration kept
 `
 
+// e2e01FakeDpkgQuery is a dpkg-query that prints e2e01Status as the
+// script's dpkg-query -W --showformat does on it (P records), for machines
+// without dpkg.
+const e2e01FakeDpkgQuery = `#!/bin/sh
+printf 'P\tinstalled\topenssl\tamd64\t3.0.15-1~deb12u1\topenssl\t3.0.15-1~deb12u1\t\t.\n'
+printf 'P\tinstalled\tlibssl3\tamd64\t3.0.15-1~deb12u1\topenssl\t3.0.15-1~deb12u1\t\t.\n'
+printf 'P\tinstalled\tlinux-image-6.1.0-26-amd64\tamd64\t6.1.112-1\tlinux-signed-amd64\t6.1.112+1\tlinux (= 6.1.112-1)\t.\n'
+printf 'P\tconfig-files\toldtool\tamd64\t1.0-1\toldtool\t1.0-1\t\t.\n'
+`
+
 // e2e01Hostrun runs the registered package.list_installed script as an
 // attached run through hostrun.Attached against the in-process SSH server
 // (which runs it with /bin/sh on this machine, like a managed host). env is
@@ -687,35 +881,52 @@ func e2e01Hostrun(t *testing.T, env string) hostrun.Result {
 }
 
 // The script's output is accepted by the executor's classifier and parses
-// into package records, on a fixture dpkg database and, when present, on
-// this machine's own. Before pli01 the plain-text output was classified as
-// "stdout is not exactly one JSON document".
+// into package records. Before pli01 the plain-text output was classified
+// as "stdout is not exactly one JSON document".
+//
+// The fake dpkg-query case runs everywhere. With dpkg-query on this
+// machine the real one also reads the fixture dpkg database and this
+// machine's own; in CI (CI set, Debian/Ubuntu runners) a missing
+// dpkg-query fails the test instead of narrowing it.
 func TestE2E01PackageListIsAcceptedByHostrun(t *testing.T) {
-	if _, err := exec.LookPath("dpkg-query"); err != nil {
-		t.Skip("no dpkg-query on this machine: package.list_installed cannot run here")
-	}
-	admin := privateDir(t)
-	if err := os.WriteFile(filepath.Join(admin, "status"), []byte(e2e01Status), 0o600); err != nil {
+	fixture := []string{"openssl", "libssl3", "linux-image-6.1.0-26-amd64"}
+	fakeBin := privateDir(t)
+	if err := os.WriteFile(filepath.Join(fakeBin, "dpkg-query"), []byte(e2e01FakeDpkgQuery), 0o700); err != nil {
 		t.Fatal(err)
-	}
-	for _, d := range []string{"info", "updates", "triggers"} {
-		if err := os.Mkdir(filepath.Join(admin, d), 0o700); err != nil {
-			t.Fatal(err)
-		}
 	}
 	cases := []struct {
 		name string
 		env  string
 		want []string // packages that must be in the inventory
 	}{
-		{"fixture", "DPKG_ADMINDIR='" + admin + "'; export DPKG_ADMINDIR\n", []string{"openssl", "libssl3", "linux-image-6.1.0-26-amd64"}},
+		{"fake dpkg-query", "PATH='" + fakeBin + "':\"$PATH\"; export PATH\n", fixture},
 	}
-	if fi, err := os.Stat("/var/lib/dpkg/status"); err == nil && fi.Size() > 0 {
+	if _, err := exec.LookPath("dpkg-query"); err == nil {
+		admin := privateDir(t)
+		if err := os.WriteFile(filepath.Join(admin, "status"), []byte(e2e01Status), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		for _, d := range []string{"info", "updates", "triggers"} {
+			if err := os.Mkdir(filepath.Join(admin, d), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
 		cases = append(cases, struct {
 			name string
 			env  string
 			want []string
-		}{"this machine", "unset DPKG_ADMINDIR\n", nil})
+		}{"fixture", "DPKG_ADMINDIR='" + admin + "'; export DPKG_ADMINDIR\n", fixture})
+		if fi, err := os.Stat("/var/lib/dpkg/status"); err == nil && fi.Size() > 0 {
+			cases = append(cases, struct {
+				name string
+				env  string
+				want []string
+			}{"this machine", "unset DPKG_ADMINDIR\n", nil})
+		}
+	} else if os.Getenv("CI") != "" {
+		t.Fatalf("no dpkg-query on this CI runner: the real package.list_installed run cannot be checked: %v", err)
+	} else {
+		t.Logf("no dpkg-query on this machine: only the fake dpkg-query case runs (%v)", err)
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
