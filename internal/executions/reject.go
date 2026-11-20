@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 
@@ -14,6 +15,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
@@ -42,6 +44,13 @@ type Rejecter interface {
 
 // ErrRejectUnavailable is returned when the executor client cannot reject.
 var ErrRejectUnavailable = errors.New("rejecting is not available on this server")
+
+// ErrRejectOutcomeUnknown is returned (wrapping the transport error) when the
+// answer to a RejectPending call was lost: the call timed out, was cancelled,
+// could not reach the executor, or the answer is unreadable. The executor may
+// have rejected the proposal. The intent stays stored, and the sweep checks
+// the executor again and records what it finds.
+var ErrRejectOutcomeUnknown = errors.New("rejection outcome unknown")
 
 // CheckRejectReason validates an optional rejection reason with the rules of
 // spec 07: at most 200 code points and 800 bytes, valid UTF-8, no control
@@ -149,12 +158,15 @@ func (s *Service) Reject(ctx context.Context, user, id, reason string) error {
 	cctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
 	if _, err := rej.RejectPending(cctx, &pb.RejectPendingRequest{Digest: e.Digest, Reason: reason, RelayedUser: user}); err != nil {
-		if !rejectAnswerLost(err) {
-			if cerr := s.clearRejectIntent(ctx, id); cerr != nil {
-				// The intent is data only; keeping it is harmless. The
-				// executor's refusal is what the caller needs to see.
-				s.log.Warn("audit", "kind", "execution_reject_intent_not_cleared", "execution", id, "error", cerr.Error())
-			}
+		if rejectAnswerLost(err) {
+			// The executor may have rejected it: keep the intent and say so.
+			return fmt.Errorf("%w: %w", ErrRejectOutcomeUnknown, err)
+		}
+		// A refusal: nothing was rejected, so the intent goes.
+		if cerr := s.clearRejectIntent(ctx, id); cerr != nil {
+			// The intent is data only; keeping it is harmless. The
+			// executor's refusal is what the caller needs to see.
+			s.log.Warn("audit", "kind", "execution_reject_intent_not_cleared", "execution", id, "error", cerr.Error())
 		}
 		return err
 	}
@@ -208,9 +220,14 @@ func (s *Service) clearRejectIntent(ctx context.Context, id string) error {
 
 // rejectAnswerLost reports whether a RejectPending error leaves the outcome
 // open: the call timed out, was cancelled, could not reach the executor, or
-// the answer is unknown. Every other error code is a refusal by the executor
-// and nothing was rejected (spec 07: a refused call clears the intent).
+// the answer is unknown. Every other error is a refusal by the executor and
+// nothing was rejected (spec 07: a refused call clears the intent). The
+// executor's storage refusal is a refusal, although its gRPC code is
+// Unavailable (see rejectStorageRefusal).
 func rejectAnswerLost(err error) bool {
+	if rejectStorageRefusal(err) {
+		return false
+	}
 	st, ok := status.FromError(err)
 	if !ok {
 		return true
@@ -220,6 +237,22 @@ func rejectAnswerLost(err error) bool {
 		return true
 	}
 	return false
+}
+
+// rejectStorageRefusal reports whether a RejectPending error is the executor's
+// refusal for a storage failure (permit.CodeStorage): the executor rolled the
+// rejection back, so nothing was rejected. The executor maps this refusal to
+// codes.Unavailable and puts the permit code first in the status message
+// (executor toStatus: "storage_error: <detail>"), so a transport Unavailable
+// without that prefix is still a lost answer.
+func rejectStorageRefusal(err error) bool {
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.Unavailable {
+		return false
+	}
+	code := string(permit.CodeStorage)
+	msg := st.Message()
+	return msg == code || strings.HasPrefix(msg, code+": ")
 }
 
 // intentDrop clears the rejection intent in the same update that records a
@@ -300,7 +333,16 @@ func (s *Service) markRejected(ctx context.Context, id string, dropIntent bool, 
 // with the intent's user and reason, marked as recorded after restart; without
 // one the user is not known. The executor's event stays the authoritative
 // record of who rejected.
+//
+// It takes rejectMu, as Reject does, so a sweep that sees the executor's
+// rejection between the executor's commit and the web call's markRejected
+// waits for that call. Otherwise the sweep would record the web rejection as
+// "recorded after restart" and the web call would find nothing to record. The
+// executor is not called here, so the mutex is never held across an RPC by
+// this path.
 func (s *Service) recordCLIRejection(ctx context.Context, id, digest string, role pb.RejectingRole) error {
+	s.rejectMu.Lock()
+	defer s.rejectMu.Unlock()
 	isAdmin := role == pb.RejectingRole_REJECTING_ROLE_ADMIN
 	detailOf := func(in rejectIntent) string {
 		switch {

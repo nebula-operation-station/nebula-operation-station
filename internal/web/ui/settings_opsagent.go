@@ -280,19 +280,6 @@ func (t *opsAgentPendingTable) settle(id string, p opsAgentPending, now time.Tim
 	return true
 }
 
-// put stores a pending change; false when the table is full of live
-// entries. Expired entries are dropped first.
-func (t *opsAgentPendingTable) put(id string, p opsAgentPending, now time.Time) bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.pruneLocked(now)
-	if len(t.m) >= maxOpsAgentPending {
-		return false
-	}
-	t.m[id] = p
-	return true
-}
-
 // take removes and returns the pending change of user under id. A change
 // begun by another user is not returned and stays in place.
 func (t *opsAgentPendingTable) take(id, user string, now time.Time) (OpsAgentChange, bool) {

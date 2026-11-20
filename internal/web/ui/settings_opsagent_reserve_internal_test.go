@@ -33,8 +33,8 @@ func TestOpsAgentPendingSettleTurnsSlotIntoPendingChange(t *testing.T) {
 	now := time.Unix(1791960000, 0)
 	tab := newOpsAgentPendingTable()
 	for i := 0; i < maxOpsAgentPending-1; i++ {
-		if !tab.put("ops-challenge-live-"+string(rune('a'+i)), opsAgentPending{user: "alice", expires: now.Add(opsAgentPendingTTL)}, now) {
-			t.Fatalf("put %d refused", i)
+		if !begin(t, tab, "ops-challenge-live-"+string(rune('a'+i)), opsAgentPending{user: "alice", expires: now.Add(opsAgentPendingTTL)}, now) {
+			t.Fatalf("begin %d refused", i)
 		}
 	}
 	if !tab.reserve(now) {

@@ -29,8 +29,12 @@
 // contains "<", so no data can open or close <docs>, <facts> or
 // <question>, and no data can forge a "[cN]" reference line. The mapping
 // is reversible, so the model can still read the text. The facts block
-// is JSON from encoding/json, which already writes < > & as < >
-// &; Build checks that no markup character is left.
+// is JSON from encoding/json, which writes < > & as JSON escapes
+// (backslash-u003c, -u003e, -u0026); Build checks that no "<" or ">" is left. [ ] stay as they are
+// in the facts block: they are JSON arrays, and a [ ] inside a JSON
+// string cannot start a "[cN]" line because encoding/json escapes line
+// breaks. System prompt rule 8 therefore names the entity escaping for
+// <docs> and <question> only and the JSON escapes for <facts>.
 //
 // Citations. Chunks are numbered c1…cN in the rank order given by the
 // caller. The numbering depends only on that order and on the budget, so
@@ -39,17 +43,20 @@
 // the model invents.
 //
 // Budget. Byte limits apply to the bytes actually sent, after escaping.
-// The token estimate (EstimateTokens) assumes 3 bytes per token. The ADR
-// asks for a conservative estimate from bytes but gives no ratio; 3 is an
-// assumption of this package and is an open question for the maintainer.
+// The token estimate is the one spec 01 (D5 "How NOS counts tokens")
+// fixes: ⌈bytes ÷ PromptBytesPerToken⌉ with PromptBytesPerToken = 3,
+// plus PromptMessageOverheadTokens = 8 per chat message
+// (EstimateMessageTokens). CheckFit and Build check MaxPromptTokens
+// against it.
 package prompt
 
 // Limits of the help assistant prompt. They are the values of ADR 0014
 // D2 and D5 and are pinned by TestConstantsMatchADR.
 const (
 	// MaxPromptTokens is the estimated token limit of system prompt and
-	// user message together (ADR 0014 D5). At bytesPerToken it is a
-	// budget of 48000 bytes.
+	// user message together (ADR 0014 D5), estimated by
+	// EstimateMessageTokens. At PromptBytesPerToken it is a budget of
+	// 48000 bytes of message content, minus the message overhead.
 	MaxPromptTokens = 16000
 	// MaxOutputTokens is the output limit requested from the model. It
 	// is not part of the prompt budget.

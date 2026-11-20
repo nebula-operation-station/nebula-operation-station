@@ -4,6 +4,7 @@ package prompt
 
 import (
 	"errors"
+	"math"
 	"strconv"
 	"strings"
 	"testing"
@@ -38,30 +39,39 @@ func payloadBytes(r *helpfacts.Result) int {
 	return n
 }
 
-// fullFacts returns a projection with helpfacts.MaxFactHosts hosts of
-// helpfacts.MaxEndpoints endpoints each, every field set and marked
-// altered, the most source addresses, and a payload of exactly
+// fullFacts returns the projection whose JSON encoding exceeds its
+// helpfacts.MaxFactBytes payload the most, for plain text: everything
+// the payload does not count, or counts below its encoded size, is at
+// its largest. That is: helpfacts.MaxFactHosts hosts of
+// helpfacts.MaxEndpoints endpoints each, helpfacts.MaxFactHosts
+// NotInInventory entries and helpfacts.MaxSourceAddresses source
+// addresses (each list item adds quotes, a comma or an object), every
+// field set, EndpointsDropped at math.MaxInt (19 digits, not counted by
+// the payload), a zero EnrollmentSince (encoded as the 20-byte
+// "0001-01-01T00:00:00Z", but counted as 0 bytes), and Altered and
+// Truncated false (5 bytes, "true" is 4). The payload is exactly
 // helpfacts.MaxFactBytes. Every text is built from fill, so the caller
 // chooses how much the encoding grows.
 func fullFacts(t *testing.T, fill string) *helpfacts.Result {
 	t.Helper()
 	text := func(n int) helpfacts.Text {
-		return helpfacts.Text{Value: strings.Repeat(fill, n/len(fill)+1)[:n], Altered: true}
+		return helpfacts.Text{Value: strings.Repeat(fill, n/len(fill)+1)[:n]}
 	}
-	since := time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC)
-	r := &helpfacts.Result{Truncated: true}
+	r := &helpfacts.Result{}
 	for i := 0; i < helpfacts.MaxSourceAddresses; i++ {
 		r.SourceAddresses = append(r.SourceAddresses, "10.0.0."+strconv.Itoa(250+i))
+	}
+	for i := 0; i < helpfacts.MaxFactHosts; i++ {
+		r.NotInInventory = append(r.NotInInventory, "10.0.1."+strconv.Itoa(i))
 	}
 	for h := 0; h < helpfacts.MaxFactHosts; h++ {
 		f := helpfacts.Fact{
 			ID:                   text(12),
 			Name:                 text(24),
-			EndpointsDropped:     1 << 20,
+			EndpointsDropped:     math.MaxInt,
 			InventoryCriticality: "critical",
 			ExecutorCriticality:  "critical",
 			Enrollment:           helpfacts.EnrollmentScriptRunUnknown,
-			EnrollmentSince:      since,
 			OSFamily:             text(16),
 			OSRelease:            text(24),
 		}
@@ -107,9 +117,9 @@ func fullDocs(t *testing.T) []helpdocs.Chunk {
 }
 
 // TestLargestLegitimatePromptFits builds the largest prompt the shipped
-// limits allow for plain data: full docs, MaxFactHosts hosts with
-// MaxEndpoints endpoints and the full facts payload, and a question of
-// MaxQuestionBytes. Build must accept it.
+// limits allow for plain data: full docs, the worst-case facts of
+// fullFacts, and a question of MaxQuestionBytes. Build must accept it,
+// and its estimate, message overhead included, must fit MaxPromptTokens.
 func TestLargestLegitimatePromptFits(t *testing.T) {
 	in := Input{
 		Chunks:   fullDocs(t),
@@ -134,7 +144,12 @@ func TestLargestLegitimatePromptFits(t *testing.T) {
 	if len(facts) > MaxFactsBlockBytes {
 		t.Fatalf("facts block is %d bytes, cap %d", len(facts), MaxFactsBlockBytes)
 	}
-	n := EstimateTokens(len(p.System) + len(p.User))
+	for _, want := range []string{`"0001-01-01T00:00:00Z"`, strconv.Itoa(math.MaxInt), `"Truncated":false`} {
+		if !strings.Contains(facts, want) {
+			t.Fatalf("facts block lacks %s: fixture is not the worst case", want)
+		}
+	}
+	n := EstimateMessageTokens(p.System, p.User)
 	if n > MaxPromptTokens {
 		t.Fatalf("prompt estimated at %d tokens, limit %d", n, MaxPromptTokens)
 	}
@@ -156,7 +171,7 @@ func TestOversizedFactsBlockFailsClosed(t *testing.T) {
 	if len(enc) <= MaxFactsBlockBytes {
 		t.Fatalf("test payload encodes to %d bytes, want more than the cap %d", len(enc), MaxFactsBlockBytes)
 	}
-	if n := EstimateTokens(len(SystemPrompt) + FramingBytes + len(enc)); n > MaxPromptTokens {
+	if n := EstimateTokens(len(SystemPrompt)+FramingBytes+len(enc)) + 2*PromptMessageOverheadTokens; n > MaxPromptTokens {
 		t.Fatalf("test payload (%d tokens) would also fail the total budget; it must isolate the facts cap", n)
 	}
 	p, err := Build(in)
@@ -180,12 +195,13 @@ func TestFactsBlockCapBoundary(t *testing.T) {
 }
 
 // TestCheckFitReservesFactsBlock checks that CheckFit counts the whole
-// worst case: the system prompt, MaxContextDocBytes, MaxQuestionBytes,
-// FramingBytes and MaxFactsBlockBytes. A token limit one below the sum
-// fails; the sum itself passes.
+// worst case: the system prompt as one message, and MaxContextDocBytes,
+// MaxQuestionBytes, FramingBytes and MaxFactsBlockBytes as the user
+// message, each message rounded up and with PromptMessageOverheadTokens.
+// A token limit one below the sum fails; the sum itself passes.
 func TestCheckFitReservesFactsBlock(t *testing.T) {
-	worst := len(SystemPrompt) + MaxContextDocBytes + MaxQuestionBytes + FramingBytes + MaxFactsBlockBytes
-	need := EstimateTokens(worst)
+	user := MaxContextDocBytes + MaxQuestionBytes + FramingBytes + MaxFactsBlockBytes
+	need := EstimateTokens(len(SystemPrompt)) + EstimateTokens(user) + 2*PromptMessageOverheadTokens
 	if err := checkFit(SystemPrompt, need, MaxContextDocBytes, MaxQuestionBytes, MaxFactsBlockBytes); err != nil {
 		t.Fatalf("checkFit at %d tokens: %v", need, err)
 	}
