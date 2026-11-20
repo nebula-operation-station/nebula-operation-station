@@ -793,12 +793,8 @@ func TestAG24AgentUserCannotReachExecutorSocket(t *testing.T) {
 		t.Fatal("the import closure of internal/executorclient lacks gRPC or the executor API; the check below would prove nothing")
 	}
 	deps := ag24Imports(t, "cmd/nebula-ops-agent")
-	for _, bad := range []string{ag24Module + "/internal/rpc/executorv1", ag24Module + "/internal/executorclient",
-		ag24Module + "/internal/executions", ag24Module + "/internal/peercred", ag24Module + "/internal/notify",
-		"google.golang.org/grpc"} {
-		if deps[bad] {
-			t.Errorf("nebula-ops-agent imports %s", bad)
-		}
+	for _, p := range ag24ForbiddenImports(deps, ag24OpsAgentForbidden) {
+		t.Errorf("nebula-ops-agent imports %s", p)
 	}
 	unit, err := os.ReadFile(filepath.Join("..", "..", "deploy", "systemd", "nebula-ops-agent.service"))
 	if err != nil {
@@ -1263,7 +1259,7 @@ func ag24ServerSuggestions(t *testing.T, dbPath string, notes []opsnotes.Note) (
 	cmd := exec.CommandContext(t.Context(), goTool, "test", "-overlay", overlay, "-count=1",
 		"-run", "^TestAG24OverlaySuggestionPath$", "./cmd/nebula-server")
 	cmd.Dir = root
-	cmd.Env = append(os.Environ(), "GOPROXY=off", "GOFLAGS=-mod=mod", "AG24_NOTES="+notesFile, "AG24_DB="+dbPath,
+	cmd.Env = append(os.Environ(), "GOPROXY=off", "GOFLAGS=-mod=readonly", "AG24_NOTES="+notesFile, "AG24_DB="+dbPath,
 		"AG24_ORIGIN="+ag24NOSBase, "AG24_OUT="+outFile)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("server suggestion path: %v\n%s", err, out)
@@ -1521,10 +1517,8 @@ func TestAG24HelpAssistantStaysSeparate(t *testing.T) {
 	// The help backend is the packages below internal/helpassist (the
 	// directory itself holds no Go files).
 	deps := ag24Imports(t, "internal/helpassist/...")
-	for _, bad := range []string{"opsnotes", "opsfacts", "opsconfig", "opsagent", "vulnstore", "vulnfinding", "executions", "executorclient", "rpc/executorv1"} {
-		if deps[ag24Module+"/internal/"+bad] {
-			t.Errorf("internal/helpassist imports internal/%s", bad)
-		}
+	for _, p := range ag24ForbiddenImports(deps, ag24HelpForbidden) {
+		t.Errorf("internal/helpassist imports %s", p)
 	}
 	e := newAG24Env(t, "web01")
 	uiH, err := ui.New(ui.Options{PublicOrigin: ag24NOSBase, Log: e.logger, AssistantOps: &ui.AssistantOps{Store: e.notes,
@@ -1684,7 +1678,7 @@ func ag24Imports(t *testing.T, dir string) map[string]bool {
 	}
 	cmd := exec.CommandContext(t.Context(), goTool, "list", "-deps", "-f", "{{.ImportPath}}", "./"+dir)
 	cmd.Dir = filepath.Join("..", "..")
-	cmd.Env = append(os.Environ(), "GOPROXY=off", "GOFLAGS=-mod=mod")
+	cmd.Env = append(os.Environ(), "GOPROXY=off", "GOFLAGS=-mod=readonly")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -1710,4 +1704,96 @@ func ag24Imports(t *testing.T, dir string) map[string]bool {
 		}
 	}
 	return seen
+}
+
+// ag24OpsAgentForbidden are the package trees nebula-ops-agent must not
+// import (G2): no executor API, executor client, execution planning, peer
+// credential or notification code, and no gRPC at all.
+var ag24OpsAgentForbidden = []string{
+	ag24Module + "/internal/rpc/executorv1",
+	ag24Module + "/internal/executorclient",
+	ag24Module + "/internal/executions",
+	ag24Module + "/internal/peercred",
+	ag24Module + "/internal/notify",
+	"google.golang.org/grpc",
+}
+
+// ag24HelpForbidden are the package trees the help backend must not import
+// (G5): no ops notes, facts or settings, no ops agent, no findings and no
+// execution code.
+var ag24HelpForbidden = []string{
+	ag24Module + "/internal/opsnotes",
+	ag24Module + "/internal/opsfacts",
+	ag24Module + "/internal/opsconfig",
+	ag24Module + "/internal/opsagent",
+	ag24Module + "/internal/vulnstore",
+	ag24Module + "/internal/vulnfinding",
+	ag24Module + "/internal/executions",
+	ag24Module + "/internal/executorclient",
+	ag24Module + "/internal/rpc/executorv1",
+}
+
+// ag24ForbiddenImports returns, sorted, every package in deps that is one of
+// the forbidden package trees: the root itself or any package below it
+// (root + "/..."). A path that merely shares a name prefix
+// (internal/executionsfoo) is not below the root.
+func ag24ForbiddenImports(deps map[string]bool, roots []string) []string {
+	var hits []string
+	for p := range deps {
+		for _, r := range roots {
+			if p == r || strings.HasPrefix(p, r+"/") {
+				hits = append(hits, p)
+				break
+			}
+		}
+	}
+	slices.Sort(hits)
+	return hits
+}
+
+// TestAG24ForbiddenImportsMatchPackageTrees: the G2 and G5 import checks catch
+// subpackages of a forbidden tree, not only the exact root path, so a help
+// backend that imported internal/opsagent/run (internal/opsagent itself holds
+// no Go files) or an ops agent that imported internal/executions/actions
+// would fail them.
+func TestAG24ForbiddenImportsMatchPackageTrees(t *testing.T) {
+	m := ag24Module + "/internal/"
+	for _, tc := range []struct {
+		name  string
+		roots []string
+		pkg   string
+		hit   bool
+	}{
+		{"help imports opsagent/run", ag24HelpForbidden, m + "opsagent/run", true},
+		{"help imports opsagent/prompt", ag24HelpForbidden, m + "opsagent/prompt", true},
+		{"help imports executions/actions", ag24HelpForbidden, m + "executions/actions", true},
+		{"help imports opsnotes", ag24HelpForbidden, m + "opsnotes", true},
+		{"help imports executorv1", ag24HelpForbidden, m + "rpc/executorv1", true},
+		{"help imports a name-prefix sibling", ag24HelpForbidden, m + "opsagentx", false},
+		{"help imports its own answer package", ag24HelpForbidden, m + "helpassist/answer", false},
+		{"agent imports executions", ag24OpsAgentForbidden, m + "executions", true},
+		{"agent imports executions/actions", ag24OpsAgentForbidden, m + "executions/actions", true},
+		{"agent imports an executorclient subpackage", ag24OpsAgentForbidden, m + "executorclient/future", true},
+		{"agent imports a grpc subpackage", ag24OpsAgentForbidden, "google.golang.org/grpc/credentials", true},
+		{"agent imports its own run package", ag24OpsAgentForbidden, m + "opsagent/run", false},
+	} {
+		got := ag24ForbiddenImports(map[string]bool{tc.pkg: true, "fmt": true}, tc.roots)
+		if hit := len(got) == 1 && got[0] == tc.pkg; hit != tc.hit || (!tc.hit && len(got) != 0) {
+			t.Errorf("%s: forbidden = %v, want hit %v", tc.name, got, tc.hit)
+		}
+	}
+
+	// Against the real closures: a help backend that also imported
+	// internal/opsagent/run (its closure joined to the help backend's) fails
+	// the G5 check, though the help backend alone passes it.
+	help := ag24Imports(t, "internal/helpassist/...")
+	if got := ag24ForbiddenImports(help, ag24HelpForbidden); len(got) != 0 {
+		t.Fatalf("the help backend alone already imports %v", got)
+	}
+	for p := range ag24Imports(t, "internal/opsagent/run") {
+		help[p] = true
+	}
+	if got := ag24ForbiddenImports(help, ag24HelpForbidden); !slices.Contains(got, m+"opsagent/run") {
+		t.Fatalf("a help backend importing internal/opsagent/run passes the G5 check (forbidden = %v)", got)
+	}
 }
