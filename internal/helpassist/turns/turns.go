@@ -33,6 +33,10 @@ const MaxKeyBytes = 128
 // is refused.
 const MaxSessions = 1024
 
+// MaxSessionsPerUser is the number of live sessions one user may hold. It stops
+// a single user from taking every slot of MaxSessions and locking others out.
+const MaxSessionsPerUser = 8
+
 // SweepEvery is the interval the owner of a Store should pass to Run. Every
 // Append and History also sweeps, so the interval only bounds how long the
 // text of an idle session stays in memory after MaxAge.
@@ -53,6 +57,10 @@ var ErrTooLarge = errors.New("turns: value exceeds size limit")
 // ErrTooManySessions reports that MaxSessions live sessions are held and the
 // new session cannot be opened.
 var ErrTooManySessions = errors.New("turns: too many live sessions")
+
+// ErrTooManySessionsForUser reports that the user already holds
+// MaxSessionsPerUser live sessions.
+var ErrTooManySessionsForUser = errors.New("turns: user holds too many live sessions")
 
 // ErrSessionOwner reports a turn for a session that belongs to another user.
 var ErrSessionOwner = errors.New("turns: session belongs to another user")
@@ -136,6 +144,15 @@ func (s *Store) Append(session string, t Turn) error {
 		return fmt.Errorf("append turn: %w", ErrSessionOwner)
 	}
 	if !ok {
+		owned := 0
+		for _, other := range s.sessions {
+			if other.owner == t.User {
+				owned++
+			}
+		}
+		if owned >= MaxSessionsPerUser {
+			return fmt.Errorf("append turn: %w", ErrTooManySessionsForUser)
+		}
 		if len(s.sessions) >= MaxSessions {
 			return fmt.Errorf("append turn: %w", ErrTooManySessions)
 		}

@@ -154,16 +154,39 @@ func TestClearUserEndsAllPanelsOfThatUserOnly(t *testing.T) {
 
 func TestClearUserFreesSessionSlotsForReuse(t *testing.T) {
 	s, _ := newClockStore(t)
-	for i := 0; i < MaxSessions; i++ {
-		mustAppend(t, s, fmt.Sprintf("s%d", i), turn("alice", "q"))
-	}
+	fillSessions(t, s, "p", MaxSessions)
 	if err := s.Append("extra", turn("bob", "q")); !errors.Is(err, ErrTooManySessions) {
 		t.Fatalf("append beyond MaxSessions: err = %v, want ErrTooManySessions", err)
 	}
-	s.ClearUser("alice")
+	s.ClearUser(fmt.Sprintf("p-u%d", 0))
 	if err := s.Append("extra", turn("bob", "q")); err != nil {
 		t.Fatalf("append after ClearUser freed slots: %v", err)
 	}
+}
+
+func TestPerUserSessionCapStopsOneUserFillingTheStore(t *testing.T) {
+	s, c := newClockStore(t)
+	for i := 0; i < MaxSessionsPerUser; i++ {
+		mustAppend(t, s, fmt.Sprintf("alice-%d", i), turn("alice", "q"))
+	}
+	if err := s.Append("alice-extra", turn("alice", "q")); !errors.Is(err, ErrTooManySessionsForUser) {
+		t.Fatalf("session beyond per-user cap: err = %v, want ErrTooManySessionsForUser", err)
+	}
+	if err := s.Append("alice-0", turn("alice", "again")); err != nil {
+		t.Fatalf("existing session of capped user: %v", err)
+	}
+	mustAppend(t, s, "bob-0", turn("bob", "q"))
+	c.Advance(MaxAge)
+	mustAppend(t, s, "alice-extra", turn("alice", "q"))
+}
+
+func TestPerUserSessionCapCountsOnlyLiveSessions(t *testing.T) {
+	s, c := newClockStore(t)
+	for i := 0; i < MaxSessionsPerUser; i++ {
+		mustAppend(t, s, fmt.Sprintf("alice-%d", i), turn("alice", "q"))
+	}
+	c.Advance(MaxAge)
+	mustAppend(t, s, "alice-new", turn("alice", "q"))
 }
 
 func TestSessionsOfDifferentUsersNeverSeeEachOther(t *testing.T) {
@@ -244,11 +267,19 @@ func TestLimitsAreExactlyAtBoundaryAccepted(t *testing.T) {
 	}
 }
 
+// fillSessions opens count sessions named prefix-s<i>, spread over users
+// prefix-u<i/MaxSessionsPerUser>, each with one turn.
+func fillSessions(t *testing.T, s *Store, prefix string, count int) {
+	t.Helper()
+	for i := 0; i < count; i++ {
+		user := fmt.Sprintf("%s-u%d", prefix, i/MaxSessionsPerUser)
+		mustAppend(t, s, fmt.Sprintf("%s-s%d", prefix, i), turn(user, fmt.Sprintf("q%d", i)))
+	}
+}
+
 func TestSessionLimitEvictsExpiredFirst(t *testing.T) {
 	s, c := newClockStore(t)
-	for i := 0; i < MaxSessions; i++ {
-		mustAppend(t, s, fmt.Sprintf("s%d", i), turn("alice", "q"))
-	}
+	fillSessions(t, s, "p", MaxSessions)
 	c.Advance(MaxAge)
 	if err := s.Append("fresh", turn("bob", "q")); err != nil {
 		t.Fatalf("expired sessions should make room: %v", err)
@@ -258,16 +289,44 @@ func TestSessionLimitEvictsExpiredFirst(t *testing.T) {
 	}
 }
 
+func TestSessionLimitMixedLiveAndExpired(t *testing.T) {
+	s, c := newClockStore(t)
+	half := MaxSessions / 2
+	fillSessions(t, s, "old", half)
+	c.Advance(MaxAge)
+	fillSessions(t, s, "live", half)
+	// The store is full: half the sessions are expired, half are live.
+	if err := s.Append("fresh", turn("bob", "q")); err != nil {
+		t.Fatalf("expired sessions should make room in a mixed store: %v", err)
+	}
+	s.mu.Lock()
+	held := len(s.sessions)
+	s.mu.Unlock()
+	if want := half + 1; held != want {
+		t.Fatalf("sessions held = %d, want %d (all live sessions plus fresh)", held, want)
+	}
+	for i := 0; i < half; i++ {
+		key := fmt.Sprintf("live-s%d", i)
+		if got := s.History(key); len(got) != 1 {
+			t.Fatalf("live session %s was evicted by the limit: %v", key, questions(got))
+		}
+	}
+	for i := 0; i < half; i++ {
+		key := fmt.Sprintf("old-s%d", i)
+		if got := s.History(key); len(got) != 0 {
+			t.Fatalf("expired session %s still has turns: %v", key, questions(got))
+		}
+	}
+}
+
 func TestSessionLimitRejectsWhenAllLive(t *testing.T) {
 	s, _ := newClockStore(t)
-	for i := 0; i < MaxSessions; i++ {
-		mustAppend(t, s, fmt.Sprintf("s%d", i), turn("alice", "q"))
-	}
+	fillSessions(t, s, "p", MaxSessions)
 	if err := s.Append("fresh", turn("bob", "q")); !errors.Is(err, ErrTooManySessions) {
 		t.Fatalf("err = %v, want ErrTooManySessions", err)
 	}
 	// An existing session can still take turns at the limit.
-	if err := s.Append("s0", turn("alice", "again")); err != nil {
+	if err := s.Append("p-s0", turn("p-u0", "again")); err != nil {
 		t.Fatalf("existing session at limit: %v", err)
 	}
 }

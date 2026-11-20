@@ -7,6 +7,8 @@
 // Those turns live only here:
 //
 //   - at most MaxTurns turns per session; the oldest turn is dropped first;
+//   - at most MaxSessions sessions in all and MaxSessionsPerUser per user, so
+//     one user cannot lock the others out of follow-up turns;
 //   - a turn expires MaxAge after it was appended and is never returned after
 //     that; every Append and History removes expired turns of all sessions, and
 //     Run (started by the owner with SweepEvery) does so while nobody calls;
