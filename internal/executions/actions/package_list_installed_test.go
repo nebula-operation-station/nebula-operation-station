@@ -4,6 +4,7 @@ package actions
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -37,7 +38,7 @@ func TestPackageListInstalledIsLowReadOnly(t *testing.T) {
 		t.Errorf("has %d secret slots, want none", len(a.Secrets))
 	case a.Retry != RetrySafe:
 		t.Errorf("retry class %q, want %q", a.Retry, RetrySafe)
-	case a.Version != "1.0.0":
+	case a.Version != "1.1.0":
 		t.Errorf("version %q", a.Version)
 	}
 }
@@ -204,7 +205,43 @@ func (h *installedHost) run(t *testing.T) ([]byte, int) {
 }
 
 func parseRun(out []byte, code int) osdebian.InstalledInventory {
-	return osdebian.ParseInstalled(out, osdebian.ReadStatus{ExitCode: code}, vulnver.DistroDebian)
+	return osdebian.ParseInstalledResult(out, osdebian.ReadStatus{ExitCode: code}, vulnver.DistroDebian)
+}
+
+// installedDoc is the 1.1.0 result document.
+type installedDoc struct {
+	Format    string `json:"format"`
+	Text      string `json:"text"`
+	Truncated bool   `json:"truncated"`
+}
+
+// decodeInstalled decodes the script's result strictly: one object with
+// the three members only, nothing after it.
+func decodeInstalled(t *testing.T, out []byte) installedDoc {
+	t.Helper()
+	dec := json.NewDecoder(bytes.NewReader(out))
+	dec.DisallowUnknownFields()
+	var d installedDoc
+	if err := dec.Decode(&d); err != nil {
+		t.Fatalf("result is not the 1.1.0 document: %v\n%s", err, out)
+	}
+	if dec.More() || d.Format != osdebian.InstalledFormat {
+		t.Fatalf("result is not the 1.1.0 document:\n%s", out)
+	}
+	return d
+}
+
+// cutText re-wraps the result with n bytes cut from the end of its text,
+// as if the text had been cut on the host.
+func cutText(t *testing.T, out []byte, n int) []byte {
+	t.Helper()
+	d := decodeInstalled(t, out)
+	d.Text = d.Text[:len(d.Text)-n]
+	b, err := json.Marshal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 var debianRows = []installedRow{
@@ -250,7 +287,11 @@ func TestPackageListInstalledEndToEndComplete(t *testing.T) {
 		t.Errorf("running kernel = %+v", k)
 	}
 	// The exact record shape: header, P lines, one K line, END with count.
-	lines := strings.Split(strings.TrimSuffix(string(out), "\n"), "\n")
+	doc := decodeInstalled(t, out)
+	if doc.Truncated {
+		t.Error("complete read marked truncated")
+	}
+	lines := strings.Split(strings.TrimSuffix(doc.Text, "\n"), "\n")
 	if lines[0] != osdebian.InstalledFormat {
 		t.Errorf("header %q", lines[0])
 	}
@@ -275,7 +316,8 @@ func TestPackageListInstalledEndToEndPartial(t *testing.T) {
 		rows   []installedRow
 		rc     int
 		mutate func(h *installedHost, t *testing.T)
-		cut    int // bytes to cut from the end of the output
+		cut    int // bytes to cut from the end of the text
+		cutDoc int // bytes to cut from the end of the document
 		reason string
 	}{
 		{name: "dpkg-query fails midway", rows: debianRows[:3], rc: 2, reason: osdebian.ReasonReadFailed},
@@ -287,6 +329,7 @@ func TestPackageListInstalledEndToEndPartial(t *testing.T) {
 		{name: "half-installed package", rows: append([]installedRow{{"half-installed", "vim", "amd64", "2:9.0.1378-2", "vim", "2:9.0.1378-2", ""}}, debianRows...),
 			reason: osdebian.ReasonUnfinished},
 		{name: "output cut", rows: debianRows, cut: 9, reason: osdebian.ReasonTruncated},
+		{name: "document cut", rows: debianRows, cutDoc: 9, reason: osdebian.ReasonResultFormat},
 		{name: "value with a tab", rows: append([]installedRow{{"installed", "evil", "amd64", "1.0<TAB>injected", "evil", "1.0", ""}}, debianRows...),
 			reason: osdebian.ReasonMalformed},
 		// A folded multi-line Built-Using cannot forge a record: the
@@ -307,7 +350,10 @@ func TestPackageListInstalledEndToEndPartial(t *testing.T) {
 			}
 			out, code := h.run(t)
 			if c.cut > 0 {
-				out = out[:len(out)-c.cut]
+				out = cutText(t, out, c.cut)
+			}
+			if c.cutDoc > 0 {
+				out = out[:len(out)-c.cutDoc]
 			}
 			inv := parseRun(out, code)
 			if inv.Complete {
@@ -327,7 +373,7 @@ func TestPackageListInstalledFailedReadHasNoEnd(t *testing.T) {
 	if code == 0 {
 		t.Fatal("failed read exited 0")
 	}
-	if bytes.Contains(out, []byte("\nEND\t")) {
+	if strings.Contains(decodeInstalled(t, out).Text, "\nEND\t") {
 		t.Fatalf("failed read wrote an END record:\n%s", out)
 	}
 	inv := parseRun(out, 0)

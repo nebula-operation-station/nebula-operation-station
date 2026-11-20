@@ -14,7 +14,9 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnver"
 )
 
-// InstalledFormat is the first line of a package.list_installed result.
+// InstalledFormat is the first line of the package.list_installed text.
+// Since 1.1.0 the result is one JSON document that carries this text
+// unchanged in its "text" member (ParseInstalledResult).
 //
 // The result is line based; every line ends with "\n" and fields are
 // separated by a single TAB. After the header line come, in this order:
