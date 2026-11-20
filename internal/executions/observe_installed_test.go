@@ -4,6 +4,7 @@ package executions
 
 import (
 	"context"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -84,6 +85,41 @@ func TestInstalledObserverNotCalledForOtherClassesOrActions(t *testing.T) {
 				t.Fatalf("observer calls = %d, want 0", n)
 			}
 		})
+	}
+}
+
+// panickingInstalled panics on every call, with a value that carries result text.
+type panickingInstalled struct{}
+
+func (panickingInstalled) ObserveInstalled(context.Context, string, string, time.Time, []byte) {
+	panic("libjansson4 6.1.0-26-amd64")
+}
+
+// TestInstalledObserverPanicDoesNotBreakOpsRefresh: a panic in the observer
+// is contained; the finish path still refreshes the host's ops state, and the
+// panic value (which may carry host text) is not logged.
+func TestInstalledObserverPanicDoesNotBreakOpsRefresh(t *testing.T) {
+	s, db := setup(t, &fakeExec{})
+	buf := &strings.Builder{}
+	s.log = slog.New(slog.NewTextHandler(buf, nil))
+	s.SetInstalledObserver(panickingInstalled{})
+	exec := strings.Repeat("p", 36)
+	seedExecution(t, db, exec, "package.list_installed", "web", "success", nil, 100, 100)
+
+	s.finishHost(exec, "package.list_installed", "web", "success", "", 0, []byte(`{}`), nil, false)
+
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM host_ops_state WHERE host_id = ?`, "web").Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("host_ops_state rows = %d after a panicking observer, want 1", n)
+	}
+	if strings.Contains(buf.String(), "libjansson4") {
+		t.Fatalf("panic value logged: %s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "error_class=panic") {
+		t.Fatalf("panic not logged by class: %s", buf.String())
 	}
 }
 
