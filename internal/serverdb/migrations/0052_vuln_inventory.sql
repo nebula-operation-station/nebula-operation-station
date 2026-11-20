@@ -20,9 +20,9 @@
 --
 -- vuln_inventory_snapshots and vuln_inventory_snapshot_reads: the export
 -- snapshot (vuln-inventory-v1) that pins the reads a page series serves. The
--- snapshot rows are used by a later step (iv04); the store only reads them
--- to decide what Prune may delete. A read a snapshot points to is never
--- deleted (the foreign key is RESTRICT).
+-- snapshot rows are used by a later step (iv04). A read a snapshot points to
+-- is never deleted (the foreign key is RESTRICT). Read retention (E1) is not
+-- decided, so this migration adds no delete rule.
 
 CREATE TABLE vuln_inventory_reads (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -31,18 +31,27 @@ CREATE TABLE vuln_inventory_reads (
     read_at        INTEGER NOT NULL CHECK (read_at > 0),
     complete       INTEGER NOT NULL CHECK (complete IN (0, 1)),
     reason         TEXT NOT NULL CHECK (length(CAST(reason AS BLOB)) <= 128),
-    dropped        INTEGER NOT NULL DEFAULT 0 CHECK (dropped >= 0),
+    dropped        INTEGER NOT NULL DEFAULT 0 CHECK (dropped BETWEEN 0 AND 40000),
     ecosystem      TEXT NOT NULL CHECK (length(CAST(ecosystem AS BLOB)) <= 64),
     kernel_release TEXT NOT NULL CHECK (length(CAST(kernel_release AS BLOB)) <= 128),
     kernel_state   TEXT NOT NULL CHECK (length(CAST(kernel_state AS BLOB)) <= 32),
     kernel_source  TEXT NOT NULL CHECK (length(CAST(kernel_source AS BLOB)) <= 64),
     kernel_version TEXT NOT NULL CHECK (length(CAST(kernel_version AS BLOB)) <= 256),
-    binaries       INTEGER NOT NULL CHECK (binaries >= 0),
-    sources        INTEGER NOT NULL CHECK (sources >= 0),
-    body           BLOB NOT NULL
+    binaries       INTEGER NOT NULL CHECK (binaries BETWEEN 0 AND 20000),
+    sources        INTEGER NOT NULL CHECK (sources BETWEEN 0 AND 20000),
+    -- 12540002 = MaxBodyBytes in internal/vulninventory (store.go).
+    body           BLOB NOT NULL CHECK (length(body) BETWEEN 2 AND 12540002)
 );
 
 CREATE INDEX vuln_inventory_reads_host ON vuln_inventory_reads (host_id, id);
+
+-- A read is immutable at the database level too: the Go store only inserts,
+-- and this trigger makes any UPDATE fail. Deletion is not covered here; the
+-- retention rule (ADR 0011 D6, decisions E1) is not decided yet.
+CREATE TRIGGER vuln_inventory_reads_immutable BEFORE UPDATE ON vuln_inventory_reads
+BEGIN
+    SELECT RAISE(ABORT, 'vuln_inventory_reads: a read is immutable');
+END;
 
 CREATE TABLE vuln_inventory_snapshots (
     id          TEXT PRIMARY KEY CHECK (length(CAST(id AS BLOB)) BETWEEN 1 AND 64),
