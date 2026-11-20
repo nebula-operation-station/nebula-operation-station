@@ -1,0 +1,44 @@
+{{define "content"}}
+<h1>Reject proposal</h1>
+<section class="panel" aria-label="Reject proposal">
+  {{with .Ops.Reject}}
+  {{if .Result}}
+  <p>Result of the rejection. Each operation is reported on its own row.</p>
+  <ul>
+    {{range .Rows}}
+    <li>{{if .ID}}<a href="/operations/{{.ID}}">{{.Short}}</a>{{else}}<code>invalid id</code>{{end}}: {{.Message}}</li>
+    {{end}}
+  </ul>
+  <p><a class="button" href="/operations">Back to operations</a></p>
+  {{else}}
+  <p>Rejecting removes the proposal: the executor drops its permit and nothing is run. A rejected proposal cannot be approved later. It needs no security key, only this open privileged session.</p>
+  {{if .Submit}}
+  <form method="post" action="/operations/reject/form">
+    <ul>
+      {{range .Rows}}
+      <li>{{if .ID}}<a href="/operations/{{.ID}}">{{.Short}}</a>{{else}}<code>invalid id</code>{{end}}
+        {{if .Abortable}}will be rejected<input type="hidden" name="id" value="{{.ID}}">{{else}}cannot be rejected here: {{.Message}}{{end}}</li>
+      {{end}}
+    </ul>
+    <p>
+      <label for="reject-reason">Reason (optional, at most 200 characters)</label><br>
+      <input type="text" id="reject-reason" name="reason" maxlength="200" autocomplete="off">
+    </p>
+    <p>
+      <button type="submit">Reject the proposals listed above</button>
+      <a class="button" href="/operations">Cancel</a>
+    </p>
+  </form>
+  {{else}}
+  <ul>
+    {{range .Rows}}
+    <li>{{if .ID}}<a href="/operations/{{.ID}}">{{.Short}}</a>{{else}}<code>invalid id</code>{{end}}: cannot be rejected here: {{.Message}}</li>
+    {{end}}
+  </ul>
+  <p>None of the selected operations can be rejected here.</p>
+  <p><a class="button" href="/operations">Back to operations</a></p>
+  {{end}}
+  {{end}}
+  {{end}}
+</section>
+{{end}}

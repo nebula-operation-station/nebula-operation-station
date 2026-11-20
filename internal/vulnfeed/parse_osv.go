@@ -348,7 +348,7 @@ func ParseOSVArchive(ctx context.Context, ra io.ReaderAt, size int64, visit func
 // so tests can reach it with a small archive.
 func parseOSVArchive(ctx context.Context, ra io.ReaderAt, size int64, maxFiles int, visit func(OSVRecord) error) (OSVArchiveSummary, error) {
 	var sum OSVArchiveSummary
-	if size <= 0 || size > MaxFeedBytesDefault {
+	if size <= 0 || size > MaxFeedBytesOSVUbuntu {
 		return sum, fmt.Errorf("osv archive: size: %w", ErrFeedLimit)
 	}
 	files, err := countZipDirectory(ctx, ra, size, maxFiles)

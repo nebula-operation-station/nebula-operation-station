@@ -123,6 +123,10 @@ type Service struct {
 	// opsMu serializes Ops State evaluations, so two runs finishing at
 	// once on one host cannot both see the old state and notify twice.
 	opsMu sync.Mutex
+	// rejectMu serializes web rejections (Reject), so the rejection intent
+	// of one call is not overwritten or cleared by another while the
+	// executor answers (spec 07 v29-07-01).
+	rejectMu sync.Mutex
 
 	mu      sync.Mutex
 	running map[string]bool // executions with a dispatcher in this process
@@ -409,6 +413,11 @@ func (s *Service) checkCLIApproval(ctx context.Context, id, digest string) (bool
 	r, err := s.exec.GetPermitState(cctx, &pb.GetPermitStateRequest{ExecutionDigest: digest})
 	if err != nil {
 		return false, err
+	}
+	if r.GetState() == pb.PermitState_PERMIT_STATE_REJECTED {
+		// Rejected on the executor: record it so the sweep does not show it
+		// as expired. Not an approval, so it reports false.
+		return false, s.recordCLIRejection(ctx, id, digest, r.GetRejectedBy())
 	}
 	if r.GetState() != pb.PermitState_PERMIT_STATE_APPROVED {
 		return false, nil
