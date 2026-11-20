@@ -3,6 +3,7 @@
 package helpcmd
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -139,6 +140,72 @@ func TestShapesHeredocOpenedBeforeShellBreakTakesBodyText(t *testing.T) {
 				t.Fatalf("shapes %q, want %q (excluded %+v)", got, tt.want, set.Excluded)
 			}
 		})
+	}
+}
+
+// TestShapesHeredocBodyUsesHeredocRules checks that a heredoc body is read with
+// the heredoc rules only, not with the rules of a command segment. "#" is text
+// in a body, so a body line ending in a backslash after "#" is not a comment:
+// with an unquoted delimiter the shell joins it with the next physical line
+// (the delimiter is then not met), and with a quoted delimiter nothing is
+// joined and the line is text on its own.
+func TestShapesHeredocBodyUsesHeredocRules(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{"unquoted delimiter: comment-backslash body line joins the delimiter line",
+			"cat <<EOF # c \\\nx # y \\\nEOF\nnebula status\nEOF\nnebula pve list",
+			[]string{"nebula pve list"}},
+		{"unquoted delimiter: body segment ending in comment-backslash, then delimiter",
+			"cat <<EOF # c \\\nx # \\\nEOF\nnebula status\nEOF\nnebula pve list",
+			[]string{"nebula pve list"}},
+		{"quoted delimiter: comment-backslash body line is text, delimiter ends the body",
+			"cat <<'EOF' # c \\\nx # y \\\nEOF\nnebula status\nnebula pve list",
+			[]string{"nebula status", "nebula pve list"}},
+		{"quoted delimiter: body segment ending in comment-backslash, then delimiter",
+			"cat <<'EOF' # c \\\nx # \\\nEOF\nnebula status\nnebula pve list",
+			[]string{"nebula status", "nebula pve list"}},
+		{"quoted delimiter: plain backslash body line is not joined with the delimiter",
+			"cat <<'EOF' # c \\\nx \\\nEOF\nnebula status\nnebula pve list",
+			[]string{"nebula status", "nebula pve list"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			set := Shapes("", tt.body)
+			var got []string
+			for _, sh := range set.Shapes {
+				got = append(got, sh.Text)
+			}
+			if !equalStrings(got, tt.want) {
+				t.Fatalf("shapes %q, want %q (excluded %+v)", got, tt.want, set.Excluded)
+			}
+		})
+	}
+}
+
+// TestSegmentInfoRejectsOverlongJoinedLine checks that the joined length of a
+// command segment group is checked against MaxCommandBytes, even when every
+// segment on its own is short, and that the error is ErrTooLong.
+func TestSegmentInfoRejectsOverlongJoinedLine(t *testing.T) {
+	segs := []segment{{text: "echo a", phys: []string{"echo a \\", "b"}}, {text: "echo c", phys: []string{"echo c"}}}
+	if _, err := segmentInfo(segs, MaxCommandBytes+1); !errors.Is(err, ErrTooLong) {
+		t.Fatalf("segmentInfo error %v, want ErrTooLong", err)
+	}
+	if _, err := segmentInfo(segs, MaxCommandBytes); err != nil {
+		t.Fatalf("segmentInfo at the limit: %v, want nil", err)
+	}
+}
+
+// TestShapesOverlongSegmentedLineFailsClosed checks that a line joined from a
+// comment-ended segment and a long second part longer than MaxCommandBytes is
+// refused as a whole: no line after it is a shape.
+func TestShapesOverlongSegmentedLineFailsClosed(t *testing.T) {
+	body := "echo # c \\\n" + strings.Repeat("b", MaxCommandBytes) + "\nnebula status\nnebula pve list"
+	set := Shapes("", body)
+	if len(set.Shapes) != 0 {
+		t.Fatalf("shapes %+v after an over-long segmented line, want none", set.Shapes)
 	}
 }
 
