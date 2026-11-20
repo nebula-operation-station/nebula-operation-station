@@ -849,3 +849,33 @@ func TestOperationPageShowsExpiredWithPlanAgain(t *testing.T) {
 		t.Error("expired page must not offer approval")
 	}
 }
+
+// TestOperationPageShowsRejectedWithPlanAgain covers the operation page of a
+// rejected execution (spec 07 v29-07-01): it says the proposal was rejected
+// and nothing was run, offers "Plan again" prefilled with the same action,
+// and offers no approval controls. It does not use the expired wording.
+func TestOperationPageShowsRejectedWithPlanAgain(t *testing.T) {
+	f := &fakeOps{exec: executions.Execution{ID: opID, ActionID: "service.restart", ModuleVersion: "1.0.0", Risk: "HIGH",
+		State: "rejected", Detail: "Rejected in the web UI; user not recorded; nothing was run", Digest: strings.Repeat("d", 64),
+		CreatedBy: "axel", CreatedAt: time.Unix(1791960000, 0), FinishedAt: time.Unix(1791963600, 0),
+		Hosts: []executions.Host{{HostID: "web", State: "finished", Class: "not_executed",
+			Detail: "Rejected in the web UI; user not recorded; nothing was run"}}}}
+	h := opsHandler(t, f, nil)
+
+	body := getBody(t, h, "/operations/"+opID)
+	for _, want := range []string{
+		"Rejected: nothing was run.",
+		`href="/operations/new?action=service.restart&amp;host=web"`,
+		"Plan again",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("rejected page misses %q", want)
+		}
+	}
+	if strings.Contains(body, "approval window ended") {
+		t.Error("rejected page must not say the approval window ended")
+	}
+	if strings.Contains(body, "Approve with security key") || strings.Contains(body, "Check approval") {
+		t.Error("rejected page must not offer approval")
+	}
+}

@@ -175,6 +175,9 @@ type execView struct {
 	// approved (issue #71): nothing was run. PlanAgain opens the
 	// operation form prefilled with the same action, hosts and parameters.
 	Expired   bool
+	// Rejected is true when a person rejected the proposal (spec 07
+	// v29-07-01): nothing was run. It offers the same Plan again as Expired.
+	Rejected  bool
 	PlanAgain string
 	// Scanner holds the Safety Scanner's findings for the action's script
 	// (advisory; the executor applies the same list to the risk).
@@ -575,8 +578,12 @@ func (h *Handler) handleOperation(w http.ResponseWriter, r *http.Request) {
 		Detail: e.Detail, Digest: e.Digest, CreatedBy: e.CreatedBy, Created: e.CreatedAt.UTC(),
 		Pending: e.State == "pending", Live: e.State == "approved" || e.State == "running",
 		NeedsTypedCount: e.Requirement == "assertion_verified_typed_count"}
-	if e.State == "expired" {
+	switch e.State {
+	case "expired":
 		v.Expired = true
+		v.PlanAgain = planAgainURL(e)
+	case "rejected":
+		v.Rejected = true
 		v.PlanAgain = planAgainURL(e)
 	}
 	if e.Params != "" && e.Params != "{}" {
