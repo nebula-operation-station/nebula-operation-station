@@ -76,7 +76,7 @@ type harness struct {
 	svc      *executor.Service
 	auth     *permit.Authority // the single-action authority (its session feeds a batch authority, AG-24)
 	userKey  ssh.PublicKey     // public half of the credRef key (H05)
-	dataDir  string        // executor data directory, for restarts
+	dataDir  string            // executor data directory, for restarts
 	stopFn   func()
 	once     sync.Once
 }
