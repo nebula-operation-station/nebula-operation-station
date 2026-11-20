@@ -3,6 +3,7 @@
 package osdebian
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -75,5 +76,43 @@ func FuzzParseInstalled(f *testing.F) {
 			t.Fatalf("unknown kernel with version basis: %+v", k)
 		}
 		assertKernelAgreesWithVulnver(t, inv, distro)
+	})
+}
+
+// The 1.1.0 envelope comes from a managed host too: decoding never panics,
+// a result that is not the exact object stays partial and empty, and a
+// read marked truncated or failed is never complete.
+func FuzzParseInstalledResult(f *testing.F) {
+	b, err := os.ReadFile(filepath.Join("testdata", "installed", "debian12.txt"))
+	if err != nil {
+		f.Fatal(err)
+	}
+	q, err := json.Marshal(string(b))
+	if err != nil {
+		f.Fatal(err)
+	}
+	f.Add([]byte(`{"format":"nos-installed-v1","text":`+string(q)+`,"truncated":false}`), 0)
+	f.Add([]byte(`{"format":"nos-installed-v1","text":`+string(q)+`,"truncated":true}`), 0)
+	f.Add([]byte(`{"format":"nos-installed-v1","text":"x","truncated":false,"text":"y"}`), 0)
+	f.Add(b, 0)
+	f.Fuzz(func(t *testing.T, doc []byte, exit int) {
+		inv := ParseInstalledResult(doc, ReadStatus{ExitCode: exit}, vulnver.DistroDebian)
+		if len(inv.Packages) > MaxPackages {
+			t.Fatalf("unbounded output: %d packages", len(inv.Packages))
+		}
+		if !inv.Complete && inv.Reason == "" {
+			t.Fatal("partial read without reason")
+		}
+		_, truncated, err := decodeInstalledResult(doc)
+		want := ReasonResultFormat
+		if exit != 0 {
+			want = ReasonReadFailed
+		}
+		if err != nil && (inv.Complete || inv.Reason != want || len(inv.Packages) != 0) {
+			t.Fatalf("rejected envelope with inventory: %+v", inv)
+		}
+		if inv.Complete && (exit != 0 || truncated) {
+			t.Fatalf("complete read from %q", doc)
+		}
 	})
 }
