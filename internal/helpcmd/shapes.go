@@ -83,6 +83,10 @@ type logicalLine struct {
 type segment struct {
 	text   string
 	joined bool
+	// phys holds the physical lines of the segment as written, with their
+	// backslashes and without the common indentation. A heredoc body that
+	// starts in a later segment is read from these lines, not from text.
+	phys []string
 }
 
 // Shapes builds the shapes of one fenced code block (ADR 0014 D4). info is the
@@ -192,6 +196,7 @@ func joinContinuations(phys []string) []logicalLine {
 	var out []logicalLine
 	var acc, seg strings.Builder // the joined text, and the command segment being read
 	var segs []segment           // the command segments closed by a line break the shell ends
+	var segPhys []string         // the physical lines of the segment being read
 	start := 0
 	open := false
 	multi := false
@@ -204,6 +209,7 @@ func joinContinuations(phys []string) []logicalLine {
 			acc.Reset()
 			seg.Reset()
 			segs = nil
+			segPhys = nil
 			multi = false
 			ambiguous = false
 			segLines = 0
@@ -228,24 +234,28 @@ func joinContinuations(phys []string) []logicalLine {
 				// opener, its body). The text stays joined for the exclusion;
 				// the segments are analyzed apart.
 				seg.WriteString(p)
-				segs = append(segs, segment{text: seg.String(), joined: segLines > 1})
+				segPhys = append(segPhys, p)
+				segs = append(segs, segment{text: seg.String(), joined: segLines > 1, phys: segPhys})
 				seg.Reset()
+				segPhys = nil
 				segLines = 0
 			} else {
 				seg.WriteString(p[:len(p)-1])
+				segPhys = append(segPhys, p)
 			}
 			continue
 		}
 		open = false
 		acc.WriteString(p)
 		seg.WriteString(p)
+		segPhys = append(segPhys, p)
 		segLines++
 		l := logicalLine{line: start, raw: acc.String(), joined: multi}
 		if ambiguous {
 			l.prob = reasonAmbiguousJoin
 		}
 		if len(segs) > 0 {
-			l.segs = append(segs, segment{text: seg.String(), joined: segLines > 1})
+			l.segs = append(segs, segment{text: seg.String(), joined: segLines > 1, phys: segPhys})
 		}
 		out = append(out, l)
 	}
@@ -316,10 +326,12 @@ func segmentInfo(segs []segment, joinedLen int) (lineInfo, error) {
 	}
 	var info lineInfo
 	var open []heredocOp // heredoc bodies still to read, the first one is read first
+	joined := false      // the last body line read goes on with the next physical line
 	for _, sg := range segs {
 		if len(open) > 0 {
-			if endsHeredocLine(sg.text, sg.joined, open[0]) {
-				open = open[1:]
+			var err error
+			if open, joined, err = readBody(open, joined, sg.phys); err != nil {
+				return lineInfo{}, err
 			}
 			continue
 		}
@@ -339,6 +351,39 @@ func segmentInfo(segs []segment, joinedLen int) (lineInfo, error) {
 	}
 	info.docs = open
 	return info, nil
+}
+
+// readBody reads the physical lines phys as body lines of the heredocs in open,
+// the first one first, and returns the heredocs still open, and whether the last
+// line read goes on with the next physical line. A body is read with the
+// heredoc rules only: "#" is text, and a quoted delimiter joins nothing. With an
+// unquoted delimiter a line that ends in an odd number of backslashes is joined
+// with the next physical line, as the shell removes the backslash-newline. A
+// joined body line never ends the heredoc, so a backslash in a body fails
+// closed. A physical line that follows the end of a body in the same segment is
+// not read here, so it is an error.
+func readBody(open []heredocOp, joined bool, phys []string) ([]heredocOp, bool, error) {
+	for _, p := range phys {
+		if len(open) == 0 {
+			return nil, false, errors.New("segments: a line follows the end of a heredoc body in one segment")
+		}
+		op := open[0]
+		if !op.quoted && endsWithJoin(p) {
+			joined = true
+			continue
+		}
+		if !joined && endsHeredocLine(p, false, op) {
+			open = open[1:]
+		}
+		joined = false
+	}
+	return open, joined, nil
+}
+
+// endsWithJoin reports whether the physical line p ends in a backslash that the
+// shell reads as a line continuation: an odd number of backslashes at its end.
+func endsWithJoin(p string) bool {
+	return (len(p)-len(strings.TrimRight(p, "\\")))%2 == 1
 }
 
 // isBlankOrOperator reports whether c ends a word: a space, a tab or one of the
@@ -514,10 +559,11 @@ type kwEvent struct {
 
 // heredocOp describes a "<<", "<<-" or "<<<" of a line.
 type heredocOp struct {
-	body  bool   // a heredoc with a body (false for a here-string)
-	ok    bool   // the delimiter could be read
-	delim string // the delimiter word, quotes removed
-	dash  bool   // "<<-": leading tabs of the body and the delimiter are ignored
+	body   bool   // a heredoc with a body (false for a here-string)
+	ok     bool   // the delimiter could be read
+	delim  string // the delimiter word, quotes removed
+	dash   bool   // "<<-": leading tabs of the body and the delimiter are ignored
+	quoted bool   // the delimiter holds a quote or a backslash: no expansion, no line joining
 }
 
 // lineInfo is what the tokens of one line say about compound constructs and
@@ -576,6 +622,7 @@ func analyze(toks []token) lineInfo {
 			if k+1 < len(toks) && toks[k+1].kind == tokWord {
 				k++
 				op.delim = toks[k].value
+				op.quoted = toks[k].quoted
 				op.ok = op.delim != ""
 			}
 			info.docs = append(info.docs, op)
