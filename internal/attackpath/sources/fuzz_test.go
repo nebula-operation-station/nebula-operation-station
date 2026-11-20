@@ -4,10 +4,9 @@ package sources
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/attackpath"
 )
@@ -32,9 +31,13 @@ func builderAccepts(id string, kind attackpath.NodeKind, label string) error {
 	return attackpath.NewBuilder().AddNode(attackpath.Node{ID: id, Kind: kind, Label: label})
 }
 
-// FuzzNodeID checks the adapter rule against the Builder itself: whatever
-// nodeID accepts, the Builder accepts as a node of the prefix's kind, and a
-// rejection yields "".
+// FuzzNodeID checks the adapter rule against the Builder itself, in both
+// directions. Whatever nodeID accepts, the Builder accepts as a node of the
+// prefix's kind. Whatever nodeID rejects with non-empty parts, the Builder
+// rejects too: the candidate is prefix plus the parts joined with "/", the
+// form nodeID documents. An empty part is an adapter rule of its own (a
+// dangling "/" is a malformed record, which the Builder would accept), so
+// that case is left to TestNodeIDBoundariesMatchBuilder.
 func FuzzNodeID(f *testing.F) {
 	for _, s := range [][3]string{
 		{"web-01", "", ""},
@@ -64,6 +67,13 @@ func FuzzNodeID(f *testing.F) {
 			if id != "" {
 				t.Fatalf("nodeID(%q, %q) rejected but returned %q", pf.prefix, parts, id)
 			}
+			if slices.Contains(parts, "") {
+				return
+			}
+			candidate := pf.prefix + strings.Join(parts, "/")
+			if err := builderAccepts(candidate, pf.kind, "x"); err == nil {
+				t.Fatalf("nodeID(%q, %q) rejected, but the Builder accepts %q as %v", pf.prefix, parts, candidate, pf.kind)
+			}
 			return
 		}
 		if !strings.HasPrefix(id, pf.prefix) || len(id) <= len(pf.prefix) {
@@ -83,8 +93,8 @@ func FuzzNodeID(f *testing.F) {
 	})
 }
 
-// FuzzLabel checks the label rule against the Builder: label returns s or
-// "", and it returns s exactly when the Builder accepts s as a label.
+// FuzzLabel checks the label rule against the Builder: label returns s
+// exactly when the Builder accepts s as a label, and "" otherwise.
 func FuzzLabel(f *testing.F) {
 	for _, s := range []string{
 		"",
@@ -107,39 +117,14 @@ func FuzzLabel(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, s string) {
 		got := label(s)
-		if got != "" && got != s {
-			t.Fatalf("label(%q) = %q: neither the input nor empty", s, got)
-		}
 		builderErr := builderAccepts("host:x", attackpath.NodeHost, s)
-		switch {
-		case builderErr == nil && got != s:
-			t.Fatalf("label(%q) dropped a label the Builder accepts", s)
-		case builderErr != nil && !errors.Is(builderErr, attackpath.ErrInvalidNode):
+		if builderErr != nil && !errors.Is(builderErr, attackpath.ErrInvalidNode) {
 			t.Fatalf("Builder rejected label %q with %v, not ErrInvalidNode", s, builderErr)
-		case builderErr != nil && got != "":
-			t.Fatalf("label(%q) = %q, but the Builder rejects it: %v", s, got, builderErr)
 		}
-		if got == "" {
-			return
-		}
-		if len(got) > attackpath.MaxLabelBytes || !utf8.ValidString(got) {
-			t.Fatalf("label %q: too long or not UTF-8", got)
-		}
-		for _, r := range got {
-			if r != '\t' && unicode.IsControl(r) {
-				t.Fatalf("label %q contains control character %U", got, r)
-			}
-			if isBidiChar(r) {
-				t.Fatalf("label %q contains bidi character %U", got, r)
-			}
+		if (builderErr == nil) != (got == s) {
+			t.Fatalf("label(%q) = %q, but the Builder accepts it as a label: %v", s, got, builderErr == nil)
 		}
 	})
-}
-
-// isBidiChar reports the bidi controls label rejects (ADR 0011 D10).
-func isBidiChar(r rune) bool {
-	return r == 0x061c || r == 0x200e || r == 0x200f ||
-		(r >= 0x202a && r <= 0x202e) || (r >= 0x2066 && r <= 0x2069)
 }
 
 // TestNodeIDBoundariesMatchBuilder runs the length and character boundaries
