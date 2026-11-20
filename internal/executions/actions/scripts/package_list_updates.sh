@@ -15,7 +15,11 @@ proxmox=false
 [ -d /etc/pve ] && proxmox=true
 mode=upgrade
 [ "$proxmox" = true ] && mode=dist-upgrade
-raw=$(apt-get -s -o Debug::NoLocking=1 "$mode" 2>/dev/null | grep '^Inst ' | head -n 20000)
+# A failed simulation (e.g. broken packages, exit 100) is a failed run, not an
+# empty update list: without the status check the pipeline's exit status would
+# be head's, and an empty document would read as "no updates".
+simout=$(apt-get -s -o Debug::NoLocking=1 "$mode" 2>/dev/null) || { echo "apt-get simulation failed" >&2; exit 4; }
+raw=$(printf '%s\n' "$simout" | grep '^Inst ' | head -n 20000)
 sim=""
 [ -n "$raw" ] && sim=$(printf '%s\n' "$raw" | b64)
 reboot=false
