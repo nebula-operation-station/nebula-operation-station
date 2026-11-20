@@ -1849,8 +1849,11 @@ does NOS connect **from** (`--from`)?
   involved and gains nothing.
 - **Limits:** per user 20 questions per hour and 1 in flight (Q9); global
   300 questions per day; question ≤ 2 KiB; prompt ≤ `MaxPromptTokens`
-  (default 12,000, estimated conservatively from bytes) and output ≤
-  `MaxOutputTokens` (default 1,500); request timeout 90 s; a cancelled
+  (default 16,000, decided 2026-11-20, previously 12,000; estimated
+  conservatively from bytes) and output ≤
+  `MaxOutputTokens` (default 1,500); the escaped, encoded `<facts>` block
+  ≤ `MaxFactsBlockBytes` (default 12 KiB; larger is refused, never cut);
+  request timeout 90 s; a cancelled
   browser request cancels the LLM call. Limits are named constants next to
   the code; a configuration that cannot fit system prompt + `k` chunks +
   facts + question into `MaxPromptTokens` is refused at startup.
