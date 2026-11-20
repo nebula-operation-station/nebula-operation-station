@@ -143,7 +143,9 @@ var goodKey = flowagg.FlowKey{
 }
 
 // checkAcceptedKey asserts the properties validKey promises for an
-// accepted key.
+// accepted key. It is an independent oracle: it does not call validKey,
+// validKeyAddr or validTier, so a loosened production check is caught here.
+// The tier names are the wire names written out literally.
 func checkAcceptedKey(t *testing.T, k flowagg.FlowKey) {
 	t.Helper()
 	for _, a := range []netip.Addr{k.A, k.B} {
@@ -170,7 +172,9 @@ func checkAcceptedKey(t *testing.T, k flowagg.FlowKey) {
 	if k.Server != flowagg.SideA && k.Server != flowagg.SideB {
 		t.Fatalf("accepted server side %d", uint8(k.Server))
 	}
-	if !validTier(k.Tier) {
+	switch k.Tier {
+	case "socket", "conntrack", "sensor":
+	default:
 		t.Fatalf("accepted tier %q", k.Tier)
 	}
 }
@@ -197,8 +201,8 @@ func FuzzValidKey(f *testing.F) {
 	f.Add([]byte{0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0xff, 0xff, 0xff})
 	f.Fuzz(func(t *testing.T, data []byte) {
 		k := (&byteReader{b: data}).key()
-		// The error text of a rejected key is not bounded here: an unknown
-		// tier is echoed in full (see the report, finding 1).
+		// The error text of a rejected key is not checked here; its bound is
+		// pinned by TestValidKeyBoundsUnknownTierError.
 		if err := validKey(k); err != nil {
 			return
 		}
@@ -230,6 +234,10 @@ func FuzzStoredTotal(f *testing.F) {
 	for _, s := range seeds {
 		f.Add(s.a, s.b, tier, s.proto, s.port, s.side)
 	}
+	// Non-canonical text that netip.ParseAddr accepts; the store writes only
+	// the String form, so these must be refused.
+	f.Add("2001:DB8::1", "2001:db8::2", tier, int64(6), int64(443), int64(2))
+	f.Add("2001:0db8::1", "2001:db8::2", tier, int64(6), int64(443), int64(2))
 	f.Fuzz(func(t *testing.T, a, b, tier string, proto, port, side int64) {
 		got, err := storedTotal(a, b, tier, proto, port, side)
 		outOfRange := port < 1 || port > 65535 || proto < 0 || proto > 255 || side < 0 || side > 255
@@ -239,8 +247,11 @@ func FuzzStoredTotal(f *testing.F) {
 		if err != nil {
 			return
 		}
-		if err := validKey(got.Key); err != nil {
-			t.Fatalf("accepted stored row fails validKey: %v", err)
+		checkAcceptedKey(t, got.Key)
+		// The stored text must be the store's own written form, or two
+		// different rows can decode to the same key.
+		if got.Key.A.String() != a || got.Key.B.String() != b {
+			t.Fatalf("accepted non-canonical stored address %q %q", a, b)
 		}
 		if strings.ContainsRune(a, '%') || strings.ContainsRune(b, '%') {
 			t.Fatalf("accepted zone in %q %q", a, b)
@@ -388,6 +399,10 @@ func TestStoredTotalBoundarySeeds(t *testing.T) {
 		{"loopback end", "127.0.0.1", "198.51.100.7", flowagg.TierSocket, tcp, 443, 2, false},
 		{"empty tier", "192.0.2.1", "198.51.100.7", "", tcp, 443, 2, false},
 		{"tier case", "192.0.2.1", "198.51.100.7", "Socket", tcp, 443, 2, false},
+		{"tier socket with trailing space", "192.0.2.1", "198.51.100.7", "socket ", tcp, 443, 2, false},
+		{"uppercase IPv6 text", "2001:DB8::1", "2001:db8::2", flowagg.TierSocket, udp, 53, 1, false},
+		{"leading zero IPv6 text", "2001:0db8::1", "2001:db8::2", flowagg.TierSocket, udp, 53, 1, false},
+		{"IPv4 with leading zero", "192.000.2.1", "198.51.100.7", flowagg.TierSocket, tcp, 443, 2, false},
 		{"udp ipv6 pair", "2001:db8::1", "2001:db8::2", flowagg.TierSensor, udp, 53, 1, true},
 	}
 	for _, tt := range tests {
@@ -410,6 +425,45 @@ func TestValidKeyRoundTripsGoodKey(t *testing.T) {
 		t.Fatalf("good key rejected: %v", err)
 	}
 	checkRoundTrip(t, goodKey)
+}
+
+// maxKeyErrorLen bounds the error text of a rejected key in the tests below.
+// An unknown tier is echoed with %q, so without a cap the text grows with
+// the attacker-chosen tier.
+const maxKeyErrorLen = 128
+
+// TestValidKeyBoundsUnknownTierError checks that a rejected key with a long
+// or hostile tier yields a bounded error, and that the error is still
+// produced (the key is refused).
+func TestValidKeyBoundsUnknownTierError(t *testing.T) {
+	tiers := map[string]string{
+		"long tier":       strings.Repeat("t", 4096),
+		"control bytes":   "\x00\x1b[31m\n" + strings.Repeat("\xff", 300),
+		"long socket-ish": "socket" + strings.Repeat(" ", 1000),
+	}
+	for name, tier := range tiers {
+		t.Run(name, func(t *testing.T) {
+			k := goodKey
+			k.Tier = tier
+			err := validKey(k)
+			if err == nil {
+				t.Fatal("unknown tier accepted")
+			}
+			if n := len(err.Error()); n > maxKeyErrorLen {
+				t.Fatalf("error text is %d bytes, want at most %d", n, maxKeyErrorLen)
+			}
+		})
+	}
+}
+
+// TestValidKeyRejectsSocketWithSpace pins the tier "socket " (trailing
+// space) as refused, as "Socket" and "" are.
+func TestValidKeyRejectsSocketWithSpace(t *testing.T) {
+	k := goodKey
+	k.Tier = "socket "
+	if err := validKey(k); err == nil {
+		t.Fatal("tier \"socket \" accepted")
+	}
 }
 
 // TestCompareKeyOrderSeeds checks compareKey and sortTotals on boundary
