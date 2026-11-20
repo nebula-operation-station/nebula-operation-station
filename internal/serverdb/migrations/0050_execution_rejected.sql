@@ -1,4 +1,4 @@
--- 0048_execution_rejected.sql (ADR 0007 amendment R1-R7, spec 07 v29-07-01):
+-- 0050_execution_rejected.sql (ADR 0007 amendment R1-R7, spec 07 v29-07-01):
 -- allow the execution state 'rejected'. An operator rejects a pending
 -- proposal (from the operations overview, or on the executor host with
 -- `nebula reject`); the executor drops the permit and the server records the

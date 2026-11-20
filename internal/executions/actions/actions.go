@@ -214,9 +214,11 @@ var fsList []byte
 //go:embed scripts/package_list_updates.sh
 var packageListUpdates []byte
 
-// packageListInstalled is package.list_installed 1.0.0 (ADR 0011 D3): the
+// packageListInstalled is package.list_installed 1.1.0 (ADR 0011 D3): the
 // installed packages with source package and version plus the running
-// kernel, in osdebian.InstalledFormat for osdebian.ParseInstalled.
+// kernel, in osdebian.InstalledFormat wrapped in one JSON document (the
+// executor accepts nothing else) for osdebian.ParseInstalledResult.
+// (1.0.0 printed the bare text, which the executor rejected.)
 //
 //go:embed scripts/package_list_installed.sh
 var packageListInstalled []byte
@@ -406,7 +408,7 @@ var Builtin = []Action{
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 2 * time.Minute, ReadOnly: true, Script: packageListUpdates, Retry: RetrySafe,
 	},
 	{
-		ID: "package.list_installed", Version: "1.0.0", Title: "List installed packages",
+		ID: "package.list_installed", Version: "1.1.0", Title: "List installed packages",
 		Description: "Installed packages with architecture, version, source package and source version from the dpkg database (dpkg-query -W), Built-Using for kernel images only, and the running kernel (uname -r, uname -v). No root, no apt, no network. Read-only.",
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: 2 * time.Minute, ReadOnly: true, Script: packageListInstalled, Retry: RetrySafe,
 	},
