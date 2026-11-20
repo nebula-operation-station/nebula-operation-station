@@ -69,9 +69,7 @@ classification and the D3 snapshot guarantee need. Option 1 breaks D5 when the
 latest read is partial. Option 3 is a new retention number that no ADR decides;
 if the maintainer wants history for audit, it should be a new decision (Q-style
 entry in ADR 0011), not an implementation default. The rule in option 2 needs
-no number of its own: it follows from D5 and `MaxInventoryAge`. The iv02/iv04
-work reportedly already follows this rule (taken from the ticket; not verified
-in this paper).
+no number of its own: it follows from D5 and `MaxInventoryAge`. This retention rule is not decided yet, so iv02–iv07 must not implement it before the maintainer decides (they build only what ADR and code already fix, lines 8–9).
 
 **Consequence for the code.** Pruning of package reads runs with the same
 clock as `vulnstore` pruning. Rows that are neither latest, last complete nor
@@ -105,26 +103,30 @@ subject in a run and keep a closure possible)?
 **Options.**
 
 1. No limit on the age of a read.
-2. 24 h (`MaxInventoryAge`): four missed 6-hour reads.
+2. 24 h (`MaxInventoryAge`): three missed reads at the 6-hour floor.
 3. 48 h (`vulnstore.StaleAfter`): the run staleness threshold of D6.
 
 **Recommendation: option 2 (24 h).** A read older than 24 h is exported as
 **not complete** (the D3 partial-read path), so it does not cover that host in
 a run. What a run then does with the host's findings is set by D5 for
 incomplete or uncovered subjects. The sources cited here do not state that
-outcome. D5 has no text on it. Two history notes in ADR 0011 touch the topic:
-line 2115 says a failed, incomplete or invalid **agent** read fails the agent
-run before matching, and line 662 is about incomplete **runs**. Neither says
-what happens to closures of an incomplete subject in a Hermes run. The outcome
+outcome. D5 has no text on it. ADR 0011 line 662 is about incomplete **runs** (an incomplete run only adds or
+updates) and says nothing about an incomplete or old **read**; the feed-side
+rules around line 2191 concern the primary-anchor list read, not package reads.
+Neither says what happens to closures of an incomplete subject in a Hermes run. The outcome
 must be written into ADR 0011 before the code is built (see the list at the end). Note: `HoldClassifyFailed` is not the
 reason for this case. In `internal/vulnstore/complete.go` it is set only when
 the classifier returns an error (lines 646–647) or returns a class outside the
 known set (lines 654–655).
 
 Option 3 (48 h) would let a host be covered by a read up to two days old. The
-24 h figure is proposed because it is four missed 6-hour reads, not because of
+24 h figure is proposed because a read 24 h old has missed three reads at the
+6-hour floor (reads due 6, 12 and 18 h after the last one), not because of
 `MaxInventoryAge`: that constant limits snapshot age at run start, not read
-age. A 24 h read inside a 24 h snapshot is already up to 48 h old when the run
+age. `PackageListInstalledMinInterval` (6 h) is only a floor: it limits how
+often a read may run, not how often it runs. The real cadence comes from the
+approved lease, so the 24 h limit must be checked against the lease interval
+once the maintainer sets it (E4 b). A 24 h read inside a 24 h snapshot is already up to 48 h old when the run
 uses it. Option 1 is the case the ADR text does not address; it is listed only
 for completeness.
 
@@ -223,17 +225,33 @@ schedule?
   proposed read lease can contain only actions for which this predicate holds;
   an action with a required parameter is not a lease target. So a lease cannot
   carry the image digest and `image.packages` cannot run from a lease today.
-- Host reads are different: `package.list_installed` is a lease action;
+- Host reads: `package.list_installed` has no parameters and is in the code's
+  read-only allowlist (`internal/permit/lease.go:98`), so `leaseableAction`
+  (`internal/executions/readgrants_propose.go:173`) accepts it.
   `RunDueReadGrants` (`internal/executions/leaserunner.go`) runs due reads of
   an **approved** lease. The proposal and commit paths take a user
   (`ProposeReadGrant`, `internal/executions/readgrants_propose.go:259`;
   `CommitReadGrant`, line 475, which also takes an assertion). The files cited
   here show no automatic caller of these functions.
-- ADR 0007 line 39 describes the **baseline for schedule grants**
-  (`internal/permit/schedule.go`, `internal/schedgrant`): they currently require
-  a privileged session to propose and browser-approve. ADR 0007 says nothing
-  about read leases. Using the same manual approval for host read leases is
-  this paper's proposal, not something the ADR states.
+- **ADR 0007 decides the approval model for host read leases.** Its
+  "One standing read-grant mechanism" (lines 48–60): in Standard mode one fresh
+  user-verified assertion approves the complete grant digest (targets, actions,
+  parameters, duration, budget); grant creation does not require a privileged
+  session, which the ADR calls "an explicit change to the existing schedule
+  proposal/commit precondition". Its identity table (line 68): renewal requires
+  new approval; default 7 days, maximum 30. Lines 79–80: new enrollment, changed
+  tag membership or a replacement key never joins a lease automatically.
+  Lines 121–122: read runs need unlocked credentials but no privileged session
+  and no per-run approval.
+- Line 39 of ADR 0007 is the **pre-ADR baseline** for schedule grants (privileged
+  session to propose and browser-approve). The read-lease decision replaces
+  that baseline; it does not apply to read leases any more.
+- **Open gap in ADR 0007.** Its initial allowlist (lines 83–84) lists seven
+  actions and does not name `package.list_installed`. The code adds it
+  (`internal/permit/lease.go:95–98`), and ADR 0011 line 1175 lists the spec
+  text (spec 07 and 10) still to be written for it as a read-only allowlist
+  entry. Neither ADR 0007 nor the spec yet states that it may sit in a lease. This is the one point of host-read approval that ADR 0007 does
+  not settle.
 
 **Options for (a) image freshness.**
 
@@ -253,19 +271,24 @@ option 3 keeps images held. Option 3 here changes a security predicate
 
 **Options for (b) host freshness.**
 
-1. Create `package.list_installed` leases automatically for each host.
-2. No automatic lease. The admin approves a read lease for the host; until then
-   the host has no current read and E3 (hold) applies. The UI and export show
-   the hint "no package inventory / inventory older than …" (from iv09).
+1. Create `package.list_installed` leases automatically for each host. This
+   conflicts with ADR 0007: each grant needs one fresh user-verified assertion
+   (creation and renewal), so software cannot create it.
+2. No automatic lease. The admin approves a read lease for the host under ADR
+   0007's assertion rule; until then the host has no current read and E3
+   (hold) applies. The UI and export show the hint "no package inventory /
+   inventory older than …" (from iv09).
 
-**Recommendation for (b): option 2.** An automatic lease would be a new grant
-created by software. Neither ADR 0007 nor ADR 0011 makes that decision (ADR 0007
-line 39 is only the schedule-grant baseline, see the sources above), so the
-manual approval path is kept until the maintainer decides otherwise. The hint
-from iv09 makes the missing read visible instead of silent.
+**Recommendation for (b): option 2.** This is the rule ADR 0007 already states;
+no new approval decision is needed. The hint from iv09 makes the missing read
+visible instead of silent. Two details stay open (see the decision list below):
+the lease interval, which sets the cadence that E2 depends on, and the
+allowlist gap above.
 
-**Decision needed.** Confirm (a) option 2 and (b) option 2, or name a different
-approver for host leases.
+**Decision needed.** Confirm (a) option 2. For (b), no approver decision is
+needed. Open: (1) whether `package.list_installed` may sit in a read lease, since
+ADR 0007's allowlist does not name it; (2) the default interval of a host read
+lease, which E2 needs.
 
 **Consequence for the code.** No code change in this paper. No new read grant
 is created by the server; `leaseableAction` stays as it is.
@@ -283,13 +306,14 @@ Once the maintainer decides, the following text must be written by a maintainer:
    proposed).
 3. **ADR 0011 D5 closure-class table**: a row for "host subject with no stored
    read" (E3 option 2), and the D3 rule for an unknown OS release (iv03).
-4. **ADR 0011 D3 `image.packages`**: freshness and scheduling (E4 a), and the
-   statement that host reads are never created automatically (E4 b, a proposal
-   of this paper; ADR 0007 line 39 does not cover read leases).
-5. **`docs/spec/03-processes-and-data.md`** (vulnerability tables, line 57):
+4. **ADR 0011 D3 `image.packages`**: freshness and scheduling (E4 a).
+5. **ADR 0007 initial allowlist or spec 07**: state whether
+   `package.list_installed` may be in a read lease (E4 b, open gap). Host read
+   leases need no new ADR text on approval: ADR 0007 already decides it.
+6. **`docs/spec/03-processes-and-data.md`** (vulnerability tables, line 57):
    name the package-read table, its retention rule and whether it has a
    column for the completeness flag.
-6. **`docs/implementation/vulnerability-management.md`**: point the plan at
+7. **`docs/implementation/vulnerability-management.md`**: point the plan at
    this paper's answers once they are decided.
 
 ## Test
