@@ -11,11 +11,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/iconstore"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/softwarecat"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/middleware"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui/icons"
@@ -172,5 +174,29 @@ func webServer(publicOrigin string, login sessionGate, pages, apiHandler http.Ha
 	if apiHandler != nil {
 		root.Handle(api.Prefix, apiHandler)
 	}
-	return middleware.NewServer(middleware.Options{PublicOrigin: publicOrigin}, root)
+	opts := middleware.Options{PublicOrigin: publicOrigin}
+	if apiHandler != nil {
+		opts.OriginExempt = isTokenAPIRequest
+	}
+	return middleware.NewServer(opts, root)
+}
+
+// isTokenAPIRequest reports whether r is a token API request (under
+// api.Prefix, served by apiHandler) that the browser origin check must not
+// refuse. Agents are not browsers: they send a bearer token and no Origin.
+// The exemption needs both conditions: an Authorization bearer header and no
+// session cookie. A request with the session cookie is a browser session and
+// keeps the origin check, so CSRF protection for cookie sessions is
+// unchanged. The traffic map model is read by a page and stays on the session
+// chain, so it is not exempt either. The token itself is checked by the API
+// handler; the security headers and the body limit still apply.
+func isTokenAPIRequest(r *http.Request) bool {
+	if !strings.HasPrefix(r.URL.Path, api.Prefix) || strings.HasPrefix(r.URL.Path, trafficMapAPIPath) {
+		return false
+	}
+	if !strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+		return false
+	}
+	_, err := r.Cookie(auth.CookieName)
+	return errors.Is(err, http.ErrNoCookie)
 }

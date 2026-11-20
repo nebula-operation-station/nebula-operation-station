@@ -138,7 +138,12 @@ func (s *Syncer) Sync(ctx context.Context, feed Feed, opt SyncOptions) (SyncResu
 			return SyncResult{}, fmt.Errorf("sync %s: %w", feed.Name, err)
 		}
 		d, err := opt.ContentDate(r)
-		if err != nil || d.IsZero() {
+		if err != nil {
+			// Keep the parser's cause (a line limit, a malformed list)
+			// next to ErrNoContentDate; the feed still fails closed.
+			return SyncResult{}, fmt.Errorf("sync %s: content date from data: %w: %w", feed.Name, ErrNoContentDate, err)
+		}
+		if d.IsZero() {
 			return SyncResult{}, fmt.Errorf("sync %s: content date from data: %w", feed.Name, ErrNoContentDate)
 		}
 		acc.ContentDate = d
