@@ -46,6 +46,8 @@ func FuzzShapes(f *testing.F) {
 		{"", "# note \\\nnebula status"},
 		{"", "case $x in\n  done) rm;;\nesac\necho"},
 		{"", "x=$(\nfor f in a; do\ndone\n)"},
+		{"", "for) rm -rf /\nnebula status"},
+		{"", "{\n  rm x\n}\nnebula status"},
 	}
 	for _, s := range seeds {
 		f.Add(s.info, s.body)
@@ -71,8 +73,9 @@ func FuzzShapes(f *testing.F) {
 			if s.Line < 1 || s.Line > lines {
 				t.Fatalf("Shapes(%q, %q) shape %q has line %d, block has %d lines", info, body, s.Text, s.Line, lines)
 			}
-			if got := analyze(lexLine(s.Text).toks); len(got.events) != 0 || len(got.docs) != 0 {
-				t.Fatalf("Shapes(%q, %q) shape %q holds a compound keyword or a heredoc operator: %+v", info, body, s.Text, got)
+			got := analyze(lexLine(s.Text).toks)
+			if hasKeyword(got.events) || netOpen(nil, got.events) || len(got.docs) != 0 {
+				t.Fatalf("Shapes(%q, %q) shape %q holds a compound keyword, an open bracket or a heredoc operator: %+v", info, body, s.Text, got)
 			}
 		}
 		for _, e := range set.Excluded {

@@ -162,7 +162,6 @@ func TestShapesRuleTwoExclusions(t *testing.T) {
 		body string
 		want []int
 	}{
-		{"comment with an apostrophe after a command", "echo hi # don't", []int{1}},
 		{"unbalanced double quote", `echo "abc`, []int{1}},
 		{"tab inside a line", "echo\tx", []int{1}},
 		{"carriage return", "nebula status\r", []int{1}},
@@ -498,9 +497,29 @@ func TestShapesKeywordsOnlyInCommandPosition(t *testing.T) {
 		{"group opens a for loop", "{ for f in a; do\n  rm x\ndone; }\nnebula status",
 			[]Shape{{4, "nebula status"}}, []int{1, 2, 3}},
 		{"command substitution with a loop", "x=$(\nfor f in a; do\n  rm \"$f\"\ndone\n)\nnebula status",
-			[]Shape{{1, "x=$("}, {5, ")"}, {6, "nebula status"}}, []int{2, 3, 4}},
+			[]Shape{{6, "nebula status"}}, []int{1, 2, 3, 4, 5}},
 		{"if after and-list opens a construct", "true && if x; then\n  rm y\nfi\nnebula status",
 			[]Shape{{4, "nebula status"}}, []int{1, 2, 3}},
+		{"for) outside a case opens a construct", "for) rm -rf /\nnebula status",
+			nil, []int{1, 2}},
+		{"if) outside a case opens a construct", "if) x\nnebula status",
+			nil, []int{1, 2}},
+		{"for) inside a case is a pattern", "case $x in\n  for) rm -r y;;\n  *) rm z;;\nesac\nnebula status",
+			[]Shape{{5, "nebula status"}}, []int{1, 2, 3, 4}},
+		{"if) inside a case is a pattern", "case $x in\n  if) rm -r y;;\nesac\nnebula status",
+			[]Shape{{4, "nebula status"}}, []int{1, 2, 3}},
+		{"multi-line brace group", "{\n  rm x\n}\nnebula status",
+			[]Shape{{4, "nebula status"}}, []int{1, 2, 3}},
+		{"function body", "f() {\n  rm x\n}\nnebula status",
+			[]Shape{{4, "nebula status"}}, []int{1, 2, 3}},
+		{"multi-line subshell", "(\n  rm x\n)\nnebula status",
+			[]Shape{{4, "nebula status"}}, []int{1, 2, 3}},
+		{"multi-line command substitution", "x=$(\n  rm x\n)\nnebula status",
+			[]Shape{{4, "nebula status"}}, []int{1, 2, 3}},
+		{"single-line brace group is a shape", "{ nebula status; }", []Shape{{1, "{ nebula status; }"}}, nil},
+		{"single-line command substitution is a shape", "x=$(date +%F)", []Shape{{1, "x=$(date +%F)"}}, nil},
+		{"unclosed brace group excludes the rest", "{\n  nebula status",
+			nil, []int{1, 2}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -590,33 +609,74 @@ func TestShapesHeredocs(t *testing.T) {
 	}
 }
 
-// TestShapesCommentBackslashDoesNotJoin checks that a backslash inside a
-// comment does not continue the line: the next command is a shape of its own.
-func TestShapesCommentBackslashDoesNotJoin(t *testing.T) {
+// TestShapesAmbiguousJoinIsExcluded checks rule 2 read literally: a line ending
+// in a backslash is joined with the next line. When the shell would not read
+// that join as a plain continuation (the backslash is in a comment, in quotes or
+// after another backslash), the joined logical line is excluded with
+// reasonAmbiguousJoin. It is never a shape and the next command is not dropped.
+func TestShapesAmbiguousJoinIsExcluded(t *testing.T) {
 	tests := []struct {
-		name   string
-		body   string
-		shapes []Shape
+		name string
+		body string
+		excl []Excluded
 	}{
-		{"comment line ending in a backslash", "# note \\\nnebula status", []Shape{{2, "nebula status"}}},
-		{"trailing comment ending in a backslash", "echo a # c \\\nb", []Shape{{1, "echo a"}, {2, "b"}}},
-		{"escaped backslash at the end is not a continuation", "echo a \\\\\nb", []Shape{{1, "echo a \\\\"}, {2, "b"}}},
+		{"comment line ending in a backslash", "# note \\\nnebula status",
+			[]Excluded{{1, "# note  nebula status", reasonAmbiguousJoin}}},
+		{"trailing comment ending in a backslash", "echo a # c \\\nb",
+			[]Excluded{{1, "echo a # c  b", reasonAmbiguousJoin}}},
+		{"escaped backslash at the end is not a continuation", "echo a \\\\\nb",
+			[]Excluded{{1, "echo a \\ b", reasonAmbiguousJoin}}},
+		{"backslash inside single quotes", "echo 'a \\\nb'",
+			[]Excluded{{1, "echo 'a  b'", reasonAmbiguousJoin}}},
+		{"backslash inside double quotes", "echo \"a \\\nb\"",
+			[]Excluded{{1, "echo \"a  b\"", reasonAmbiguousJoin}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			set := Shapes("", tt.body)
-			if len(set.Excluded) != 0 {
-				t.Fatalf("excluded %+v, want none", set.Excluded)
+			if len(set.Shapes) != 0 {
+				t.Fatalf("shapes %+v, want none", set.Shapes)
 			}
-			if len(set.Shapes) != len(tt.shapes) {
-				t.Fatalf("shapes %+v, want %+v", set.Shapes, tt.shapes)
+			if len(set.Excluded) != len(tt.excl) {
+				t.Fatalf("excluded %+v, want %+v", set.Excluded, tt.excl)
 			}
-			for i, want := range tt.shapes {
-				if got := set.Shapes[i]; got.Line != want.Line || normalizeSpaces(got.Text) != normalizeSpaces(want.Text) {
-					t.Fatalf("shape %d = %+v, want %+v", i, got, want)
+			for i, want := range tt.excl {
+				if got := set.Excluded[i]; got != want {
+					t.Fatalf("excluded %d = %+v, want %+v", i, got, want)
 				}
 			}
 		})
+	}
+}
+
+// TestShapesPlainContinuationJoins checks that a backslash at the end of an
+// unquoted command joins it with the next line into one shape.
+func TestShapesPlainContinuationJoins(t *testing.T) {
+	set := Shapes("", "echo a \\\n  b \\\n  c\nnebula status")
+	if len(set.Excluded) != 0 {
+		t.Fatalf("excluded %+v, want none", set.Excluded)
+	}
+	if len(set.Shapes) != 2 || set.Shapes[0].Line != 1 || normalizeSpaces(set.Shapes[0].Text) != "echo a b c" {
+		t.Fatalf("shapes %+v, want the joined echo at line 1 and nebula status", set.Shapes)
+	}
+}
+
+// TestShapesTrailingCommentDoesNotBreakQuotes checks that the quote check looks
+// at the text before the trailing comment: "echo hi # don't" is a shape, and an
+// apostrophe in a comment does not mark the later lines of the block broken.
+func TestShapesTrailingCommentDoesNotBreakQuotes(t *testing.T) {
+	set := Shapes("", "echo hi # don't\nnebula status\nnebula pve list")
+	if len(set.Excluded) != 0 {
+		t.Fatalf("excluded %+v, want none", set.Excluded)
+	}
+	want := []Shape{{1, "echo hi"}, {2, "nebula status"}, {3, "nebula pve list"}}
+	if len(set.Shapes) != len(want) {
+		t.Fatalf("shapes %+v, want %+v", set.Shapes, want)
+	}
+	for i := range want {
+		if set.Shapes[i] != want[i] {
+			t.Fatalf("shape %d = %+v, want %+v", i, set.Shapes[i], want[i])
+		}
 	}
 }
 
@@ -650,6 +710,10 @@ func TestShapesConstructBodiesNeverShape(t *testing.T) {
 		{"ls | while read l; do", "done"},
 		{"{ for x in a; do", "done; }"},
 		{"x=$(for x in a; do", "done)"},
+		{"x=$(", ")"},
+		{"{", "}"},
+		{"f() {", "}"},
+		{"(", ")"},
 		{"if true; then", "fi"},
 		{"case $x in", "esac"},
 	}
