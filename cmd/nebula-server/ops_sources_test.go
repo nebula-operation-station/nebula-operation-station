@@ -433,3 +433,148 @@ func TestOpsFindingOfMapsStateTierAndKEV(t *testing.T) {
 		t.Fatalf("malformed digest gave image subject %q, want empty", got.ImageSubject)
 	}
 }
+
+// TestOpsFindingOfKEVFromRecordScore: a record that carries a KEV score is KEV
+// even when the episode never had a KEV date (the parity rule with
+// countFindings); without either, KEV is false.
+func TestOpsFindingOfKEVFromRecordScore(t *testing.T) {
+	f := opsTestFinding(vulnstore.StateOpen, vulnfinding.SubjectHost)
+	if got, _ := opsFindingOf(f, vulnfix.Result{}); got.KEV {
+		t.Fatal("no KEV date and no KEV score: KEV = true, want false")
+	}
+	f.Record.Scores.KEV = &vulnfinding.KEV{DateAdded: "2026-11-01"}
+	if got, _ := opsFindingOf(f, vulnfix.Result{}); !got.KEV {
+		t.Fatal("record KEV score: KEV = false, want true")
+	}
+}
+
+// TestOpsFindingsExcludesFixedFindings: a fixed finding is closed and never
+// reaches the projection; open, accepted and false-positive findings do.
+func TestOpsFindingsExcludesFixedFindings(t *testing.T) {
+	fs := []vulnstore.Finding{
+		opsTestFinding(vulnstore.StateFixed, vulnfinding.SubjectHost),
+		opsTestFinding(vulnstore.StateOpen, vulnfinding.SubjectHost),
+		opsTestFinding(vulnstore.StateAcceptedRisk, vulnfinding.SubjectHost),
+		opsTestFinding(vulnstore.StateFalsePositive, vulnfinding.SubjectHost),
+	}
+	src, err := newOpsVulnFindings(sliceReader{fs: fs}, fixesOf(vulnfix.Result{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := src.Findings(context.Background())
+	if err != nil {
+		t.Fatalf("Findings: %v", err)
+	}
+	want := []opsfacts.FindingState{opsfacts.StateOpen, opsfacts.StateAcceptedRisk, opsfacts.StateFalsePositive}
+	if len(got) != len(want) {
+		t.Fatalf("Findings = %d, want %d (fixed excluded)", len(got), len(want))
+	}
+	for i, w := range want {
+		if got[i].State != w {
+			t.Fatalf("finding %d state = %q, want %q", i, got[i].State, w)
+		}
+	}
+}
+
+// TestOpsTierMappingTable: every stored tier maps to its projection tier; the
+// unknown tier and any value outside the table give the empty value.
+func TestOpsTierMappingTable(t *testing.T) {
+	cases := []struct {
+		name string
+		in   vulnstore.Tier
+		want opsfacts.Tier
+	}{
+		{"low", vulnstore.TierLow, opsfacts.TierLow},
+		{"medium", vulnstore.TierMedium, opsfacts.TierMedium},
+		{"high", vulnstore.TierHigh, opsfacts.TierHigh},
+		{"critical", vulnstore.TierCritical, opsfacts.TierCritical},
+		{"unknown", vulnstore.TierUnknown, ""},
+		{"outside the table", vulnstore.Tier(99), ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := opsTierOf(c.in); got != c.want {
+				t.Fatalf("opsTierOf(%d) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// TestOpsStateMappingTable: the open and closed-by-decision states map to their
+// projection states; fixed and any other value give the empty state.
+func TestOpsStateMappingTable(t *testing.T) {
+	cases := []struct {
+		name string
+		in   vulnstore.State
+		want opsfacts.FindingState
+	}{
+		{"open", vulnstore.StateOpen, opsfacts.StateOpen},
+		{"accepted risk", vulnstore.StateAcceptedRisk, opsfacts.StateAcceptedRisk},
+		{"false positive", vulnstore.StateFalsePositive, opsfacts.StateFalsePositive},
+		{"fixed never maps", vulnstore.StateFixed, ""},
+		{"outside the table", vulnstore.State("other"), ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := opsStateOf(c.in); got != c.want {
+				t.Fatalf("opsStateOf(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// TestOpsOutcomeMappingTable: every decision status maps to its fix outcome; a
+// status outside the table is the unknown outcome.
+func TestOpsOutcomeMappingTable(t *testing.T) {
+	cases := []struct {
+		name string
+		in   vulnfix.Status
+		want opsfacts.FixOutcome
+	}{
+		{"none", vulnfix.StatusNone, opsfacts.OutcomeNone},
+		{"verified", vulnfix.StatusVerified, opsfacts.OutcomeVerified},
+		{"not verified", vulnfix.StatusNotVerified, opsfacts.OutcomeNotVerified},
+		{"below fixed", vulnfix.StatusBelowFixed, opsfacts.OutcomeBelowFixed},
+		{"no candidate", vulnfix.StatusNoCandidate, opsfacts.OutcomeNoCandidate},
+		{"no fix yet", vulnfix.StatusNoFixYet, opsfacts.OutcomeNoFixYet},
+		{"wont fix", vulnfix.StatusWontFix, opsfacts.OutcomeWontFix},
+		{"unknown", vulnfix.StatusUnknown, opsfacts.OutcomeUnknown},
+		{"image candidate", vulnfix.StatusImageCandidate, opsfacts.OutcomeImageCandidate},
+		{"image no candidate", vulnfix.StatusImageNoCandidate, opsfacts.OutcomeImageNoCandidate},
+		{"device no patch", vulnfix.StatusDeviceNoPatch, opsfacts.OutcomeDeviceNoPatch},
+		{"outside the table", vulnfix.Status(999), opsfacts.OutcomeUnknown},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := opsOutcomeOf(c.in); got != c.want {
+				t.Fatalf("opsOutcomeOf(%d) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// TestOpsLinkMappingTable: every decision action maps to its link; no action
+// and an action outside the table give the no-link value.
+func TestOpsLinkMappingTable(t *testing.T) {
+	cases := []struct {
+		name string
+		in   vulnfix.Action
+		want opsfacts.FixLink
+	}{
+		{"none", vulnfix.ActionNone, opsfacts.LinkNone},
+		{"install security", vulnfix.ActionInstallSecurity, opsfacts.LinkInstallSecurity},
+		{"install all", vulnfix.ActionInstallAll, opsfacts.LinkInstallAll},
+		{"list updates", vulnfix.ActionListUpdates, opsfacts.LinkListUpdates},
+		{"containers", vulnfix.ActionContainers, opsfacts.LinkContainers},
+		{"cisco advisory", vulnfix.ActionCiscoAdvisory, opsfacts.LinkCiscoAdvisory},
+		{"pan advisory", vulnfix.ActionPANAdvisory, opsfacts.LinkPANAdvisory},
+		{"outside the table", vulnfix.Action(999), opsfacts.LinkNone},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := opsLinkOf(c.in); got != c.want {
+				t.Fatalf("opsLinkOf(%d) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
