@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -50,22 +52,31 @@ func questions(ts []Turn) []string {
 	return out
 }
 
+// appendNow appends t to session with the user's current logout epoch, as a
+// request that starts now would.
+func appendNow(s *Store, session string, t Turn) error {
+	return s.Append(session, s.Epoch(t.User), t)
+}
+
+func mustAppend(t *testing.T, s *Store, session string, tn Turn) {
+	t.Helper()
+	if err := appendNow(s, session, tn); err != nil {
+		t.Fatalf("append %q: %v", session, err)
+	}
+}
+
 func TestSeventhTurnDropsOldestAndKeepsLastSix(t *testing.T) {
 	s, _ := newClockStore(t)
 	for i := 1; i <= 7; i++ {
-		if err := s.Append("sess-a", turn("alice", fmt.Sprintf("q%d", i))); err != nil {
-			t.Fatalf("append %d: %v", i, err)
-		}
+		mustAppend(t, s, "sess-a", turn("alice", fmt.Sprintf("q%d", i)))
 	}
-	got := questions(s.History("sess-a"))
+	got := questions(s.History("sess-a", "alice"))
 	want := []string{"q2", "q3", "q4", "q5", "q6", "q7"}
 	if len(got) != MaxTurns || MaxTurns != 6 {
 		t.Fatalf("history length = %d (MaxTurns %d), want 6", len(got), MaxTurns)
 	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("history = %v, want %v", got, want)
-		}
+	if !slices.Equal(got, want) {
+		t.Fatalf("history = %v, want %v", got, want)
 	}
 }
 
@@ -74,46 +85,38 @@ func TestTurnExpiresThirtyMinutesAfterItsOwnAppend(t *testing.T) {
 		t.Fatalf("MaxAge = %v, want 30m", MaxAge)
 	}
 	s, c := newClockStore(t)
-	if err := s.Append("sess-a", turn("alice", "old")); err != nil {
-		t.Fatal(err)
-	}
+	mustAppend(t, s, "sess-a", turn("alice", "old"))
 	c.Advance(20 * time.Minute)
-	if err := s.Append("sess-a", turn("alice", "new")); err != nil {
-		t.Fatal(err)
-	}
+	mustAppend(t, s, "sess-a", turn("alice", "new"))
 	c.Advance(10*time.Minute + time.Second) // old is 30m1s old, new is 10m1s old
-	got := questions(s.History("sess-a"))
+	got := questions(s.History("sess-a", "alice"))
 	if len(got) != 1 || got[0] != "new" {
 		t.Fatalf("history = %v, want [new]", got)
 	}
 	c.Advance(20 * time.Minute) // new is now 30m1s old
-	if got := s.History("sess-a"); len(got) != 0 {
+	if got := s.History("sess-a", "alice"); len(got) != 0 {
 		t.Fatalf("history after all turns expired = %v, want none", got)
 	}
 }
 
 func TestTurnStillLiveJustBeforeMaxAge(t *testing.T) {
 	s, c := newClockStore(t)
-	if err := s.Append("sess-a", turn("alice", "q")); err != nil {
-		t.Fatal(err)
-	}
+	mustAppend(t, s, "sess-a", turn("alice", "q"))
 	c.Advance(MaxAge - time.Nanosecond)
-	if got := s.History("sess-a"); len(got) != 1 {
+	if got := s.History("sess-a", "alice"); len(got) != 1 {
 		t.Fatalf("turn at MaxAge-1ns: history len = %d, want 1", len(got))
 	}
 	c.Advance(time.Nanosecond)
-	if got := s.History("sess-a"); len(got) != 0 {
+	if got := s.History("sess-a", "alice"); len(got) != 0 {
 		t.Fatalf("turn at exactly MaxAge: history len = %d, want 0", len(got))
 	}
 }
 
 func TestExpiredTurnsAreRemovedOnAccess(t *testing.T) {
 	s, c := newClockStore(t)
-	if err := s.Append("sess-a", turn("alice", "q")); err != nil {
-		t.Fatal(err)
-	}
+	mustAppend(t, s, "sess-a", turn("alice", "q"))
 	c.Advance(MaxAge)
-	_ = s.History("sess-a")
+	_ = s.History("sess-a", "alice")
 	s.mu.Lock()
 	_, present := s.sessions["sess-a"]
 	s.mu.Unlock()
@@ -127,10 +130,10 @@ func TestClearRemovesOnlyThatSession(t *testing.T) {
 	mustAppend(t, s, "sess-a", turn("alice", "a"))
 	mustAppend(t, s, "sess-b", turn("alice", "b"))
 	s.Clear("sess-a")
-	if got := s.History("sess-a"); len(got) != 0 {
+	if got := s.History("sess-a", "alice"); len(got) != 0 {
 		t.Fatalf("after Clear sess-a = %v, want none", got)
 	}
-	if got := questions(s.History("sess-b")); len(got) != 1 || got[0] != "b" {
+	if got := questions(s.History("sess-b", "alice")); len(got) != 1 || got[0] != "b" {
 		t.Fatalf("sess-b after Clear(sess-a) = %v, want [b]", got)
 	}
 }
@@ -141,25 +144,93 @@ func TestClearUserEndsAllPanelsOfThatUserOnly(t *testing.T) {
 	mustAppend(t, s, "alice-panel-2", turn("alice", "a2"))
 	mustAppend(t, s, "bob-panel", turn("bob", "b1"))
 	s.ClearUser("alice")
-	if got := s.History("alice-panel-1"); len(got) != 0 {
+	if got := s.History("alice-panel-1", "alice"); len(got) != 0 {
 		t.Fatalf("alice-panel-1 after logout = %v, want none", got)
 	}
-	if got := s.History("alice-panel-2"); len(got) != 0 {
+	if got := s.History("alice-panel-2", "alice"); len(got) != 0 {
 		t.Fatalf("alice-panel-2 after logout = %v, want none", got)
 	}
-	if got := questions(s.History("bob-panel")); len(got) != 1 || got[0] != "b1" {
+	if got := questions(s.History("bob-panel", "bob")); len(got) != 1 || got[0] != "b1" {
 		t.Fatalf("bob-panel after ClearUser(alice) = %v, want [b1]", got)
+	}
+}
+
+func TestLogoutBetweenHistoryAndAppendStoresNothing(t *testing.T) {
+	const question = "MARKER-logout-in-flight question"
+	s, _ := newClockStore(t)
+	mustAppend(t, s, "sess-a", turn("alice", "earlier"))
+	// The request starts: it reads the epoch and the history, then waits for
+	// the LLM. The user logs out in the meantime.
+	epoch := s.Epoch("alice")
+	_ = s.History("sess-a", "alice")
+	s.ClearUser("alice")
+	err := s.Append("sess-a", epoch, Turn{User: "alice", Question: question, Answer: "answer"})
+	if !errors.Is(err, ErrLoggedOut) {
+		t.Fatalf("append after logout: err = %v, want ErrLoggedOut", err)
+	}
+	if got := s.History("sess-a", "alice"); len(got) != 0 {
+		t.Fatalf("history after in-flight append past logout = %v, want none", got)
+	}
+	if textHeld(s, "MARKER-logout-in-flight") {
+		t.Fatalf("question of a request that crossed logout is held in memory")
+	}
+	s.mu.Lock()
+	held := len(s.sessions)
+	s.mu.Unlock()
+	if held != 0 {
+		t.Fatalf("logout let an in-flight request recreate %d session(s)", held)
+	}
+}
+
+func TestLogoutWithoutSessionStillFencesInFlightRequest(t *testing.T) {
+	s, _ := newClockStore(t)
+	epoch := s.Epoch("alice") // first question of a new panel, no session yet
+	s.ClearUser("alice")
+	err := s.Append("new-panel", epoch, turn("alice", "first question"))
+	if !errors.Is(err, ErrLoggedOut) {
+		t.Fatalf("first append after logout: err = %v, want ErrLoggedOut", err)
+	}
+	if got := s.History("new-panel", "alice"); len(got) != 0 {
+		t.Fatalf("history = %v, want none", got)
+	}
+}
+
+func TestRequestAfterLoginAppendsWithFreshEpoch(t *testing.T) {
+	s, _ := newClockStore(t)
+	old := s.Epoch("alice")
+	s.ClearUser("alice")
+	fresh := s.Epoch("alice")
+	if fresh == old {
+		t.Fatalf("ClearUser did not change the epoch of alice")
+	}
+	if err := s.Append("sess-a", old, turn("alice", "stale")); !errors.Is(err, ErrLoggedOut) {
+		t.Fatalf("stale epoch: err = %v, want ErrLoggedOut", err)
+	}
+	if err := s.Append("sess-a", fresh, turn("alice", "after login")); err != nil {
+		t.Fatalf("append with fresh epoch: %v", err)
+	}
+	if got := questions(s.History("sess-a", "alice")); len(got) != 1 || got[0] != "after login" {
+		t.Fatalf("history = %v, want [after login]", got)
+	}
+}
+
+func TestLogoutOfOtherUserDoesNotFenceInFlightRequest(t *testing.T) {
+	s, _ := newClockStore(t)
+	epoch := s.Epoch("alice")
+	s.ClearUser("bob")
+	if err := s.Append("sess-a", epoch, turn("alice", "still allowed")); err != nil {
+		t.Fatalf("append of alice after logout of bob: %v", err)
 	}
 }
 
 func TestClearUserFreesSessionSlotsForReuse(t *testing.T) {
 	s, _ := newClockStore(t)
 	fillSessions(t, s, "p", MaxSessions)
-	if err := s.Append("extra", turn("bob", "q")); !errors.Is(err, ErrTooManySessions) {
+	if err := appendNow(s, "extra", turn("bob", "q")); !errors.Is(err, ErrTooManySessions) {
 		t.Fatalf("append beyond MaxSessions: err = %v, want ErrTooManySessions", err)
 	}
 	s.ClearUser(fmt.Sprintf("p-u%d", 0))
-	if err := s.Append("extra", turn("bob", "q")); err != nil {
+	if err := appendNow(s, "extra", turn("bob", "q")); err != nil {
 		t.Fatalf("append after ClearUser freed slots: %v", err)
 	}
 }
@@ -169,10 +240,10 @@ func TestPerUserSessionCapStopsOneUserFillingTheStore(t *testing.T) {
 	for i := 0; i < MaxSessionsPerUser; i++ {
 		mustAppend(t, s, fmt.Sprintf("alice-%d", i), turn("alice", "q"))
 	}
-	if err := s.Append("alice-extra", turn("alice", "q")); !errors.Is(err, ErrTooManySessionsForUser) {
+	if err := appendNow(s, "alice-extra", turn("alice", "q")); !errors.Is(err, ErrTooManySessionsForUser) {
 		t.Fatalf("session beyond per-user cap: err = %v, want ErrTooManySessionsForUser", err)
 	}
-	if err := s.Append("alice-0", turn("alice", "again")); err != nil {
+	if err := appendNow(s, "alice-0", turn("alice", "again")); err != nil {
 		t.Fatalf("existing session of capped user: %v", err)
 	}
 	mustAppend(t, s, "bob-0", turn("bob", "q"))
@@ -192,25 +263,42 @@ func TestPerUserSessionCapCountsOnlyLiveSessions(t *testing.T) {
 func TestSessionsOfDifferentUsersNeverSeeEachOther(t *testing.T) {
 	s, _ := newClockStore(t)
 	mustAppend(t, s, "sess-alice", turn("alice", "secret of alice"))
-	if err := s.Append("sess-alice", turn("bob", "bob writes into alice's session")); !errors.Is(err, ErrSessionOwner) {
+	if err := appendNow(s, "sess-alice", turn("bob", "bob writes into alice's session")); !errors.Is(err, ErrSessionOwner) {
 		t.Fatalf("foreign user appended to session: err = %v, want ErrSessionOwner", err)
 	}
-	if got := s.History("sess-alice"); len(got) != 1 || got[0].Question != "secret of alice" {
+	if got := s.History("sess-alice", "alice"); len(got) != 1 || got[0].Question != "secret of alice" {
 		t.Fatalf("history after rejected foreign append = %v", questions(got))
 	}
 	s.ClearUser("bob")
-	if got := questions(s.History("sess-alice")); len(got) != 1 {
+	if got := questions(s.History("sess-alice", "alice")); len(got) != 1 {
 		t.Fatalf("ClearUser(bob) removed alice's session: %v", got)
+	}
+}
+
+func TestHistoryOfAnotherUsersKeyReturnsNothing(t *testing.T) {
+	const secret = "MARKER-alice-private question"
+	s, _ := newClockStore(t)
+	mustAppend(t, s, "sess-alice", turn("alice", secret))
+	// Bob knows or guesses alice's session key, for example from a client
+	// that sends its panel id. He must get nothing back.
+	if got := s.History("sess-alice", "bob"); got != nil {
+		t.Fatalf("History with another user's key = %v, want nil", questions(got))
+	}
+	if got := s.History("sess-alice", ""); got != nil {
+		t.Fatalf("History with empty user = %v, want nil", questions(got))
+	}
+	if got := questions(s.History("sess-alice", "alice")); len(got) != 1 || got[0] != secret {
+		t.Fatalf("owner lost her history: %v", got)
 	}
 }
 
 func TestHistoryReturnsCopies(t *testing.T) {
 	s, _ := newClockStore(t)
 	mustAppend(t, s, "sess-a", turn("alice", "original"))
-	got := s.History("sess-a")
+	got := s.History("sess-a", "alice")
 	got[0].Question = "changed"
 	got[0].Answer = "changed"
-	again := s.History("sess-a")
+	again := s.History("sess-a", "alice")
 	if len(again) != 1 || again[0].Question != "original" || again[0].Answer != "answer to original" {
 		t.Fatalf("store changed through returned copy: %+v", again)
 	}
@@ -218,13 +306,13 @@ func TestHistoryReturnsCopies(t *testing.T) {
 
 func TestEmptyKeysRejected(t *testing.T) {
 	s, _ := newClockStore(t)
-	if err := s.Append("", turn("alice", "q")); !errors.Is(err, ErrEmptyKey) {
+	if err := appendNow(s, "", turn("alice", "q")); !errors.Is(err, ErrEmptyKey) {
 		t.Fatalf("empty session: err = %v, want ErrEmptyKey", err)
 	}
-	if err := s.Append("sess", turn("", "q")); !errors.Is(err, ErrEmptyKey) {
+	if err := s.Append("sess", s.Epoch(""), turn("", "q")); !errors.Is(err, ErrEmptyKey) {
 		t.Fatalf("empty user: err = %v, want ErrEmptyKey", err)
 	}
-	if err := s.Append("sess", Turn{User: "alice"}); !errors.Is(err, ErrEmptyTurn) {
+	if err := appendNow(s, "sess", Turn{User: "alice"}); !errors.Is(err, ErrEmptyTurn) {
 		t.Fatalf("empty question: err = %v, want ErrEmptyTurn", err)
 	}
 }
@@ -245,10 +333,10 @@ func TestOversizedTurnsRejected(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s, _ := newClockStore(t)
 			key := tc.key
-			if err := s.Append(key, tc.t); !errors.Is(err, ErrTooLarge) {
+			if err := appendNow(s, key, tc.t); !errors.Is(err, ErrTooLarge) {
 				t.Fatalf("err = %v, want ErrTooLarge", err)
 			}
-			if got := s.History(key); len(got) != 0 {
+			if got := s.History(key, tc.t.User); len(got) != 0 {
 				t.Fatalf("rejected turn was stored")
 			}
 		})
@@ -262,7 +350,7 @@ func TestLimitsAreExactlyAtBoundaryAccepted(t *testing.T) {
 		Question: strings.Repeat("q", MaxQuestionBytes),
 		Answer:   strings.Repeat("a", MaxAnswerBytes),
 	}
-	if err := s.Append(strings.Repeat("s", MaxKeyBytes), ok); err != nil {
+	if err := appendNow(s, strings.Repeat("s", MaxKeyBytes), ok); err != nil {
 		t.Fatalf("turn at exact limits: %v", err)
 	}
 }
@@ -281,10 +369,10 @@ func TestSessionLimitEvictsExpiredFirst(t *testing.T) {
 	s, c := newClockStore(t)
 	fillSessions(t, s, "p", MaxSessions)
 	c.Advance(MaxAge)
-	if err := s.Append("fresh", turn("bob", "q")); err != nil {
+	if err := appendNow(s, "fresh", turn("bob", "q")); err != nil {
 		t.Fatalf("expired sessions should make room: %v", err)
 	}
-	if got := questions(s.History("fresh")); len(got) != 1 {
+	if got := questions(s.History("fresh", "bob")); len(got) != 1 {
 		t.Fatalf("fresh session = %v", got)
 	}
 }
@@ -296,7 +384,7 @@ func TestSessionLimitMixedLiveAndExpired(t *testing.T) {
 	c.Advance(MaxAge)
 	fillSessions(t, s, "live", half)
 	// The store is full: half the sessions are expired, half are live.
-	if err := s.Append("fresh", turn("bob", "q")); err != nil {
+	if err := appendNow(s, "fresh", turn("bob", "q")); err != nil {
 		t.Fatalf("expired sessions should make room in a mixed store: %v", err)
 	}
 	s.mu.Lock()
@@ -307,13 +395,13 @@ func TestSessionLimitMixedLiveAndExpired(t *testing.T) {
 	}
 	for i := 0; i < half; i++ {
 		key := fmt.Sprintf("live-s%d", i)
-		if got := s.History(key); len(got) != 1 {
+		if got := s.History(key, fmt.Sprintf("live-u%d", i/MaxSessionsPerUser)); len(got) != 1 {
 			t.Fatalf("live session %s was evicted by the limit: %v", key, questions(got))
 		}
 	}
 	for i := 0; i < half; i++ {
 		key := fmt.Sprintf("old-s%d", i)
-		if got := s.History(key); len(got) != 0 {
+		if got := s.History(key, fmt.Sprintf("old-u%d", i/MaxSessionsPerUser)); len(got) != 0 {
 			t.Fatalf("expired session %s still has turns: %v", key, questions(got))
 		}
 	}
@@ -322,11 +410,11 @@ func TestSessionLimitMixedLiveAndExpired(t *testing.T) {
 func TestSessionLimitRejectsWhenAllLive(t *testing.T) {
 	s, _ := newClockStore(t)
 	fillSessions(t, s, "p", MaxSessions)
-	if err := s.Append("fresh", turn("bob", "q")); !errors.Is(err, ErrTooManySessions) {
+	if err := appendNow(s, "fresh", turn("bob", "q")); !errors.Is(err, ErrTooManySessions) {
 		t.Fatalf("err = %v, want ErrTooManySessions", err)
 	}
 	// An existing session can still take turns at the limit.
-	if err := s.Append("p-s0", turn("p-u0", "again")); err != nil {
+	if err := appendNow(s, "p-s0", turn("p-u0", "again")); err != nil {
 		t.Fatalf("existing session at limit: %v", err)
 	}
 }
@@ -357,6 +445,25 @@ func TestRedactedRenderingsDoNotContainQuestion(t *testing.T) {
 	}
 }
 
+// TestTurnFieldSetIsExactlyUserQuestionAnswer pins the rule that facts and
+// chunk texts are never stored: a new field on Turn, for example Facts or
+// Chunks, fails this test until the rule is decided again.
+func TestTurnFieldSetIsExactlyUserQuestionAnswer(t *testing.T) {
+	typ := reflect.TypeOf(Turn{})
+	var names []string
+	for i := 0; i < typ.NumField(); i++ {
+		f := typ.Field(i)
+		if f.Type.Kind() != reflect.String {
+			t.Errorf("field %s has kind %s, want string", f.Name, f.Type.Kind())
+		}
+		names = append(names, f.Name)
+	}
+	want := []string{"User", "Question", "Answer"}
+	if !slices.Equal(names, want) {
+		t.Fatalf("Turn fields = %v, want exactly %v", names, want)
+	}
+}
+
 func TestConcurrentAppendHistoryClearUser(t *testing.T) {
 	s, _ := newClockStore(t)
 	const workers = 8
@@ -367,13 +474,13 @@ func TestConcurrentAppendHistoryClearUser(t *testing.T) {
 		go func(w int) {
 			defer wg.Done()
 			for i := 0; i < rounds; i++ {
-				_ = s.Append("shared", turn("alice", fmt.Sprintf("w%d-%d", w, i)))
+				_ = appendNow(s, "shared", turn("alice", fmt.Sprintf("w%d-%d", w, i)))
 			}
 		}(w)
 		go func() {
 			defer wg.Done()
 			for i := 0; i < rounds; i++ {
-				if got := s.History("shared"); len(got) > MaxTurns {
+				if got := s.History("shared", "alice"); len(got) > MaxTurns {
 					t.Errorf("history length %d exceeds MaxTurns", len(got))
 					return
 				}
@@ -385,20 +492,15 @@ func TestConcurrentAppendHistoryClearUser(t *testing.T) {
 				if i%10 == 0 {
 					s.ClearUser("alice")
 				}
-				_ = s.Append("shared", turn("alice", "x"))
+				// A request that read the epoch before a logout may be refused;
+				// it must never be stored after it.
+				_ = appendNow(s, "shared", turn("alice", "x"))
 			}
 		}(w)
 	}
 	wg.Wait()
-	if got := s.History("shared"); len(got) > MaxTurns {
+	if got := s.History("shared", "alice"); len(got) > MaxTurns {
 		t.Fatalf("final history length %d exceeds MaxTurns", len(got))
-	}
-}
-
-func mustAppend(t *testing.T, s *Store, session string, tn Turn) {
-	t.Helper()
-	if err := s.Append(session, tn); err != nil {
-		t.Fatalf("append %q: %v", session, err)
 	}
 }
 
@@ -420,7 +522,7 @@ func TestAppendForOtherSessionSweepsIdleSession(t *testing.T) {
 	if textHeld(s, "idle secret") {
 		t.Fatalf("expired idle session still held after an append to another session")
 	}
-	if got := questions(s.History("other")); len(got) != 1 || got[0] != "bob question" {
+	if got := questions(s.History("other", "bob")); len(got) != 1 || got[0] != "bob question" {
 		t.Fatalf("other session = %v, want [bob question]", got)
 	}
 }
@@ -435,7 +537,7 @@ func TestSweepKeepsLiveTurnsOfIdleSessions(t *testing.T) {
 	if textHeld(s, "old") {
 		t.Fatalf("expired turn still held after Sweep")
 	}
-	if got := questions(s.History("new")); len(got) != 1 {
+	if got := questions(s.History("new", "bob")); len(got) != 1 {
 		t.Fatalf("live turn removed by Sweep: %v", got)
 	}
 }
@@ -453,6 +555,38 @@ func TestRunStopsWhenContextIsDone(t *testing.T) {
 	cancel()
 	if err := s.Run(ctx, time.Millisecond); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run after cancel err = %v, want context.Canceled", err)
+	}
+}
+
+// TestRunSweepsOnEveryTick drives Run with a fake ticker. Each tick is an
+// unbuffered send, so the second send is only received after Run has finished
+// the Sweep of the first tick; Run returns only after the Sweep of the second.
+// Nothing else calls Sweep, so an idle session that expired is gone only if Run
+// swept on the ticks.
+func TestRunSweepsOnEveryTick(t *testing.T) {
+	s, c := newClockStore(t)
+	ticks := make(chan time.Time)
+	s.newTicker = func(d time.Duration) (<-chan time.Time, func()) {
+		if d != SweepEvery {
+			t.Errorf("ticker interval = %v, want %v", d, SweepEvery)
+		}
+		return ticks, func() {}
+	}
+	mustAppend(t, s, "idle", turn("alice", "idle secret"))
+	c.Advance(MaxAge)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Run(ctx, SweepEvery) }()
+
+	ticks <- c.Now()
+	ticks <- c.Now()
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run err = %v, want context.Canceled", err)
+	}
+	if textHeld(s, "idle secret") {
+		t.Fatalf("idle session text held after Run ticked past MaxAge")
 	}
 }
 
@@ -483,10 +617,10 @@ func TestNonUTF8QuestionAndAnswerRejected(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s, _ := newClockStore(t)
-			if err := s.Append("sess", tc.t); !errors.Is(err, ErrInvalidUTF8) {
+			if err := appendNow(s, "sess", tc.t); !errors.Is(err, ErrInvalidUTF8) {
 				t.Fatalf("err = %v, want ErrInvalidUTF8", err)
 			}
-			if got := s.History("sess"); len(got) != 0 {
+			if got := s.History("sess", "alice"); len(got) != 0 {
 				t.Fatalf("rejected turn was stored")
 			}
 		})
@@ -495,7 +629,7 @@ func TestNonUTF8QuestionAndAnswerRejected(t *testing.T) {
 
 func TestAppendErrorsCarryContextAndKeepSentinel(t *testing.T) {
 	s, _ := newClockStore(t)
-	err := s.Append("", turn("alice", "q"))
+	err := appendNow(s, "", turn("alice", "q"))
 	if !errors.Is(err, ErrEmptyKey) {
 		t.Fatalf("err = %v, want ErrEmptyKey in chain", err)
 	}

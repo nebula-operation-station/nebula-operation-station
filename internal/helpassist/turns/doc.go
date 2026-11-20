@@ -12,7 +12,10 @@
 //   - a turn expires MaxAge after it was appended and is never returned after
 //     that; every Append and History removes expired turns of all sessions, and
 //     Run (started by the owner with SweepEvery) does so while nobody calls;
-//   - Clear ends one session, ClearUser ends every session of one user (logout);
+//   - Clear ends one session; ClearUser ends every session of one user (logout)
+//     and bumps the user's epoch, so a request that started before the logout
+//     (it read Epoch first) is refused by Append with ErrLoggedOut;
+//   - History returns the turns only to the user that owns the session;
 //   - nothing is written to disk or to the database; a restart empties the store;
 //   - a turn holds the question and the rendered answer as text only. Facts sent
 //     with a turn and chunk texts are not stored: the Turn type has no field for

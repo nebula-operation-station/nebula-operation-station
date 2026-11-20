@@ -65,6 +65,11 @@ var ErrTooManySessionsForUser = errors.New("turns: user holds too many live sess
 // ErrSessionOwner reports a turn for a session that belongs to another user.
 var ErrSessionOwner = errors.New("turns: session belongs to another user")
 
+// ErrLoggedOut reports a turn whose request started before the user logged out.
+// Such a turn is refused, so the text of a request that crosses logout is never
+// stored.
+var ErrLoggedOut = errors.New("turns: user logged out while the request was running")
+
 // ErrInvalidUTF8 reports a question or answer that is not valid UTF-8.
 var ErrInvalidUTF8 = errors.New("turns: text is not valid UTF-8")
 
@@ -113,9 +118,14 @@ type panelSession struct {
 // Store holds the follow-up turns of all panel sessions. It is safe for
 // concurrent use. The zero value is not usable; create one with New.
 type Store struct {
-	now      func() time.Time
-	mu       sync.Mutex
-	sessions map[string]*panelSession
+	now       func() time.Time
+	newTicker func(time.Duration) (<-chan time.Time, func())
+	mu        sync.Mutex
+	sessions  map[string]*panelSession
+	// epochs holds, per user, the logout epoch. ClearUser increments it, so a
+	// request that read the epoch before a logout cannot store a turn after it.
+	// It has one entry per user that logged out while the process runs.
+	epochs map[string]uint64
 }
 
 // New returns an empty Store that reads the time from now. A nil now uses
@@ -124,14 +134,36 @@ func New(now func() time.Time) *Store {
 	if now == nil {
 		now = time.Now
 	}
-	return &Store{now: now, sessions: make(map[string]*panelSession)}
+	return &Store{
+		now:       now,
+		newTicker: realTicker,
+		sessions:  make(map[string]*panelSession),
+		epochs:    make(map[string]uint64),
+	}
 }
 
-// Append stores t as the newest turn of session. It returns an error wrapping
+// realTicker starts a time.Ticker and returns its channel and stop function.
+func realTicker(d time.Duration) (<-chan time.Time, func()) {
+	t := time.NewTicker(d)
+	return t.C, t.Stop
+}
+
+// Epoch returns the logout epoch of user. A request reads it before it reads the
+// history and calls the language model, and passes it to Append. The value
+// changes when the user logs out.
+func (s *Store) Epoch(user string) uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.epochs[user]
+}
+
+// Append stores t as the newest turn of session. epoch is the value Epoch
+// returned for t.User when the request started. It returns an error wrapping
 // one of the package's sentinel errors when the turn or the session cannot be
 // stored; the store is then unchanged. The oldest turn is dropped when the
-// session already holds MaxTurns turns.
-func (s *Store) Append(session string, t Turn) error {
+// session already holds MaxTurns turns. A turn whose epoch is no longer current
+// (the user logged out after the request started) fails with ErrLoggedOut.
+func (s *Store) Append(session string, epoch uint64, t Turn) error {
 	if err := validate(session, t); err != nil {
 		return fmt.Errorf("append turn: %w", err)
 	}
@@ -139,6 +171,9 @@ func (s *Store) Append(session string, t Turn) error {
 	defer s.mu.Unlock()
 	now := s.now()
 	s.sweepLocked(now)
+	if s.epochs[t.User] != epoch {
+		return fmt.Errorf("append turn: %w", ErrLoggedOut)
+	}
 	sess, ok := s.sessions[session]
 	if ok && sess.owner != t.User {
 		return fmt.Errorf("append turn: %w", ErrSessionOwner)
@@ -166,15 +201,16 @@ func (s *Store) Append(session string, t Turn) error {
 	return nil
 }
 
-// History returns a copy of the live turns of session, oldest first. Expired
-// turns are removed and not returned. A session with no live turns yields nil.
+// History returns a copy of the live turns of session, oldest first, when user
+// owns session. Expired turns are removed and not returned. A session with no
+// live turns, a session of another user and an empty user all yield nil.
 // Changing the returned slice does not change the store.
-func (s *Store) History(session string) []Turn {
+func (s *Store) History(session, user string) []Turn {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sweepLocked(s.now())
 	sess, ok := s.sessions[session]
-	if !ok || len(sess.turns) == 0 {
+	if !ok || sess.owner != user || len(sess.turns) == 0 {
 		return nil
 	}
 	out := make([]Turn, 0, len(sess.turns))
@@ -200,13 +236,13 @@ func (s *Store) Run(ctx context.Context, interval time.Duration) error {
 	if interval <= 0 {
 		return fmt.Errorf("run sweeper: %w", ErrBadInterval)
 	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	ticks, stop := s.newTicker(interval)
+	defer stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ticker.C:
+		case <-ticks:
 			s.Sweep()
 		}
 	}
@@ -219,11 +255,13 @@ func (s *Store) Clear(session string) {
 	delete(s.sessions, session)
 }
 
-// ClearUser removes every session owned by user, for example at logout. The
-// sessions of other users are not affected.
+// ClearUser removes every session owned by user, for example at logout, and
+// advances the user's epoch so that requests started before the call cannot
+// store a turn after it. The sessions of other users are not affected.
 func (s *Store) ClearUser(user string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.epochs[user]++
 	for key, sess := range s.sessions {
 		if sess.owner == user {
 			delete(s.sessions, key)
