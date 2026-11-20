@@ -745,3 +745,362 @@ func TestNewRequiresDatabase(t *testing.T) {
 		t.Error("New(nil) accepted")
 	}
 }
+
+// queryPlan returns the EXPLAIN QUERY PLAN detail lines of query, one per line.
+func queryPlan(t *testing.T, db *sql.DB, query string, args ...any) string {
+	t.Helper()
+	rows, err := db.Query("EXPLAIN QUERY PLAN "+query, args...)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	defer rows.Close()
+	var b strings.Builder
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		b.WriteString(detail + "\n")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return b.String()
+}
+
+// TestReadQueriesUseIndexesWithoutSorting checks the plans of the read path.
+// Each query must use an index on the host's reads and must not sort a
+// temporary B-tree, so a lookup costs the index seek and not a sort of every
+// read of the host (or of the table, for LatestAll).
+func TestReadQueriesUseIndexesWithoutSorting(t *testing.T) {
+	s, db := openStore(t)
+	mustPut(t, s, testRead("host-a", true, 1))
+	mustPut(t, s, testRead("host-a", false, 2))
+	mustPut(t, s, testRead("host-b", false, 3))
+	cases := []struct {
+		name  string
+		query string
+		args  []any
+		index string
+	}{
+		{"latest", latestQuery, []any{"host-a"}, "vuln_inventory_reads_host_read"},
+		{"last complete", lastCompleteQuery, []any{"host-a"}, "vuln_inventory_reads_host_complete"},
+		{"latest all: per-host subquery", latestAllQuery, nil, "vuln_inventory_reads_host_read"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			plan := queryPlan(t, db, c.query, c.args...)
+			if strings.Contains(plan, "TEMP B-TREE") {
+				t.Errorf("query sorts a temporary B-tree:\n%s", plan)
+			}
+			if !strings.Contains(plan, c.index) {
+				t.Errorf("query does not use %s:\n%s", c.index, plan)
+			}
+		})
+	}
+}
+
+// TestLatestAllAgreesWithLatestPerHost checks the set-based LatestAll against
+// the single-host Latest, with hosts whose newest read is not their last
+// inserted one and whose last complete read is not their newest.
+func TestLatestAllAgreesWithLatestPerHost(t *testing.T) {
+	s, _ := openStore(t)
+	ctx := context.Background()
+	mustPut(t, s, testRead("host-c", true, 9))
+	mustPut(t, s, testRead("host-c", false, 4))
+	mustPut(t, s, testRead("host-a", false, 2))
+	mustPut(t, s, testRead("host-a", true, 2))
+	mustPut(t, s, testRead("host-b", true, 1))
+	mustPut(t, s, testRead("host-b", false, 1))
+	got, err := s.LatestAll(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("LatestAll returned %d hosts, want 3", len(got))
+	}
+	for i, r := range got {
+		if i > 0 && got[i-1].HostID >= r.HostID {
+			t.Errorf("LatestAll not ordered by host: %s before %s", got[i-1].HostID, r.HostID)
+		}
+		want, err := s.Latest(ctx, r.HostID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.ID != want.ID || !r.ReadAt.Equal(want.ReadAt) || r.Complete != want.Complete {
+			t.Errorf("LatestAll %s = id %d, Latest = id %d", r.HostID, r.ID, want.ID)
+		}
+	}
+}
+
+// countBody returns the binary and source counts of a stored body, computed
+// from the body itself and not from the columns.
+func countBody(t *testing.T, body []byte) (int, int) {
+	t.Helper()
+	comps, err := decodeBody(body)
+	if err != nil {
+		t.Fatalf("decode stored body: %v", err)
+	}
+	bins := 0
+	for _, c := range comps {
+		bins += len(c.Binaries)
+	}
+	return bins, len(comps)
+}
+
+// TestDerivedCountsMatchBody checks the binaries and sources columns against
+// the body they were written with. Each case has a different shape, so an
+// implementation that counts only the first component fails one of them.
+func TestDerivedCountsMatchBody(t *testing.T) {
+	binaries := func(prefix string, n int) []Binary {
+		bs := make([]Binary, n)
+		for i := range bs {
+			bs[i] = Binary{Name: fmt.Sprintf("%s%d", prefix, i), Version: "1", Arch: "amd64"}
+		}
+		return bs
+	}
+	cases := []struct {
+		name     string
+		comps    []Component
+		wantBins int
+		wantSrcs int
+	}{
+		{"no components", nil, 0, 0},
+		{"one component, no binaries", []Component{{Source: "src-a", SourceVersion: "1"}}, 0, 1},
+		{"first component has one binary", []Component{
+			{Source: "src-a", SourceVersion: "1", Binaries: binaries("x", 1)},
+			{Source: "src-b", SourceVersion: "1", Binaries: binaries("y", 3)},
+			{Source: "src-c", SourceVersion: "1", Binaries: binaries("z", 2)},
+		}, 6, 3},
+		{"first component has none", []Component{
+			{Source: "src-a", SourceVersion: "1"},
+			{Source: "src-b", SourceVersion: "1", Binaries: binaries("y", 2)},
+		}, 2, 2},
+		{"one component, many binaries", []Component{
+			{Source: "src-a", SourceVersion: "1", Binaries: binaries("x", 7)},
+		}, 7, 1},
+	}
+	s, db := openStore(t)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := testRead("host-counts", true, 1)
+			r.Components = c.comps
+			id := mustPut(t, s, r)
+			var bins, srcs int
+			var body []byte
+			if err := db.QueryRow(`SELECT binaries, sources, body FROM vuln_inventory_reads WHERE id = ?`, id).Scan(&bins, &srcs, &body); err != nil {
+				t.Fatal(err)
+			}
+			if bins != c.wantBins || srcs != c.wantSrcs {
+				t.Errorf("columns binaries=%d sources=%d, want %d and %d", bins, srcs, c.wantBins, c.wantSrcs)
+			}
+			gotBins, gotSrcs := countBody(t, body)
+			if gotBins != bins || gotSrcs != srcs {
+				t.Errorf("body holds %d binaries and %d sources, columns say %d and %d", gotBins, gotSrcs, bins, srcs)
+			}
+		})
+	}
+}
+
+// rawColumns are the columns of a read in the order rawInsert writes them.
+var rawColumns = []string{"host_id", "execution_id", "read_at", "complete", "reason", "dropped",
+	"ecosystem", "kernel_release", "kernel_state", "kernel_source", "kernel_version", "binaries", "sources", "body"}
+
+// rawInsert inserts a row through SQL, skipping the Go checks, with every
+// column valid except column, which takes value.
+func rawInsert(db *sql.DB, column string, value any) error {
+	vals := map[string]any{
+		"host_id": "h", "execution_id": "e", "read_at": 1, "complete": 1, "reason": "", "dropped": 0,
+		"ecosystem": "", "kernel_release": "", "kernel_state": "", "kernel_source": "", "kernel_version": "",
+		"binaries": 0, "sources": 0, "body": []byte("[]"),
+	}
+	vals[column] = value
+	args := make([]any, len(rawColumns))
+	marks := make([]string, len(rawColumns))
+	for i, c := range rawColumns {
+		args[i] = vals[c]
+		marks[i] = "?"
+	}
+	_, err := db.Exec(`INSERT INTO vuln_inventory_reads (`+strings.Join(rawColumns, ", ")+`) VALUES (`+strings.Join(marks, ", ")+`)`, args...)
+	return err
+}
+
+// bytesOf returns a string of exactly n bytes: "ä" (two bytes) repeated, with
+// one "x" when n is odd. Multibyte characters make a byte limit differ from a
+// character limit.
+func bytesOf(n int) string {
+	return strings.Repeat("ä", n/2) + strings.Repeat("x", n%2)
+}
+
+// TestSQLTextLimitsMatchGoConstants checks each byte CHECK of the migration
+// against the Go constant that names the same limit. The migration cannot
+// import Go, so the two are compared here: a value of exactly the constant's
+// bytes is stored and one byte more is refused.
+func TestSQLTextLimitsMatchGoConstants(t *testing.T) {
+	cases := []struct {
+		column string
+		limit  int
+		min    int
+	}{
+		{"host_id", maxHostIDBytes, 1},
+		{"execution_id", maxExecutionIDBytes, 1},
+		{"reason", MaxReasonBytes, 0},
+		{"ecosystem", maxEcosystemBytes, 0},
+		{"kernel_release", maxKernelReleaseBytes, 0},
+		{"kernel_state", maxKernelStateBytes, 0},
+		{"kernel_source", maxKernelSourceBytes, 0},
+		{"kernel_version", maxKernelVersionBytes, 0},
+	}
+	_, db := openStore(t)
+	for _, c := range cases {
+		t.Run(c.column, func(t *testing.T) {
+			if err := rawInsert(db, c.column, bytesOf(c.limit)); err != nil {
+				t.Errorf("%d bytes refused by the column: %v", c.limit, err)
+			}
+			if err := rawInsert(db, c.column, bytesOf(c.limit+1)); err == nil {
+				t.Errorf("%d bytes accepted by the column, limit %d", c.limit+1, c.limit)
+			}
+			if c.min == 1 {
+				if err := rawInsert(db, c.column, ""); err == nil {
+					t.Errorf("empty value accepted by the column")
+				}
+			}
+		})
+	}
+}
+
+// TestSQLCountLimitsMatchGoConstants checks the count CHECKs of the migration
+// against the Go constants: dropped <= MaxDropped, binaries <= MaxBinaries and
+// sources <= MaxComponents.
+func TestSQLCountLimitsMatchGoConstants(t *testing.T) {
+	cases := []struct {
+		column string
+		limit  int
+	}{
+		{"dropped", MaxDropped},
+		{"binaries", MaxBinaries},
+		{"sources", MaxComponents},
+	}
+	_, db := openStore(t)
+	for _, c := range cases {
+		t.Run(c.column, func(t *testing.T) {
+			if err := rawInsert(db, c.column, c.limit); err != nil {
+				t.Errorf("%s = %d refused by the column: %v", c.column, c.limit, err)
+			}
+			if err := rawInsert(db, c.column, c.limit+1); err == nil {
+				t.Errorf("%s = %d accepted by the column, limit %d", c.column, c.limit+1, c.limit)
+			}
+		})
+	}
+}
+
+// TestStoredReadCannotBeDeletedWhenPinnedNewestOrLastComplete checks the delete
+// rule of migration 0052. A read is protected while a snapshot pins it, while
+// it is the newest read of its host, and while it is the last complete read of
+// its host. Any other read can be deleted.
+func TestStoredReadCannotBeDeletedWhenPinnedNewestOrLastComplete(t *testing.T) {
+	s, db := openStore(t)
+	ctx := context.Background()
+	// host-d: last complete at 1, unpinned incomplete at 2, newest incomplete at 3.
+	lastComplete := mustPut(t, s, testRead("host-d", true, 1))
+	middle := mustPut(t, s, testRead("host-d", false, 2))
+	newest := mustPut(t, s, testRead("host-d", false, 3))
+	// host-p: a pinned incomplete read at 1, under a complete read at 2 and a newer incomplete read at 3.
+	pinned := mustPut(t, s, testRead("host-p", false, 1))
+	mustPut(t, s, testRead("host-p", true, 2))
+	mustPut(t, s, testRead("host-p", false, 3))
+	if _, err := db.Exec(`INSERT INTO vuln_inventory_snapshots (id, generation, taken_at) VALUES ('s-pin', 1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO vuln_inventory_snapshot_reads (snapshot_id, read_id) VALUES ('s-pin', ?)`, pinned); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name    string
+		id      int64
+		wantErr bool
+	}{
+		{"pinned read", pinned, true},
+		{"newest read", newest, true},
+		{"last complete read", lastComplete, true},
+		{"unpinned incomplete read", middle, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := db.Exec(`DELETE FROM vuln_inventory_reads WHERE id = ?`, c.id)
+			if (err != nil) != c.wantErr {
+				t.Fatalf("DELETE err = %v, wantErr %v", err, c.wantErr)
+			}
+			if _, err := s.Get(ctx, c.id); (err != nil) == c.wantErr {
+				t.Errorf("read %d present = %v after DELETE, wantErr %v", c.id, err == nil, c.wantErr)
+			}
+		})
+	}
+}
+
+// TestMultiRowDeleteIsRefusedAsAWhole checks that a DELETE which would remove
+// a protected read along with unprotected ones changes nothing.
+func TestMultiRowDeleteIsRefusedAsAWhole(t *testing.T) {
+	s, db := openStore(t)
+	mustPut(t, s, testRead("host-m", true, 1))
+	mustPut(t, s, testRead("host-m", false, 2))
+	mustPut(t, s, testRead("host-m", false, 3))
+	before := rowCount(t, db)
+	if _, err := db.Exec(`DELETE FROM vuln_inventory_reads WHERE host_id = 'host-m'`); err == nil {
+		t.Fatal("DELETE of every read of a host succeeded")
+	}
+	if n := rowCount(t, db); n != before {
+		t.Errorf("rows = %d after refused DELETE, want %d", n, before)
+	}
+}
+
+// TestInsertOrReplaceCannotSwapARead checks that no insert reuses the id of a
+// stored read. INSERT OR REPLACE deletes the old row without a DELETE trigger,
+// so it is refused by the insert trigger; a plain INSERT with a used id is
+// refused by the primary key. The protected and the unprotected reads are both
+// tried.
+func TestInsertOrReplaceCannotSwapARead(t *testing.T) {
+	s, db := openStore(t)
+	ctx := context.Background()
+	lastComplete := mustPut(t, s, testRead("host-r", true, 1))
+	middle := mustPut(t, s, testRead("host-r", false, 2))
+	newest := mustPut(t, s, testRead("host-r", false, 3))
+	for _, c := range []struct {
+		name string
+		id   int64
+	}{
+		{"last complete read", lastComplete},
+		{"unprotected middle read", middle},
+		{"newest read", newest},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			before, err := s.Get(ctx, c.id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			n := rowCount(t, db)
+			const swap = `INSERT OR REPLACE INTO vuln_inventory_reads (id, host_id, execution_id, read_at, complete, reason,
+				dropped, ecosystem, kernel_release, kernel_state, kernel_source, kernel_version, binaries, sources, body)
+				VALUES (?, 'host-r', 'evil', 9, 1, 'swapped', 0, '', '', '', '', '', 0, 0, x'5b5d')`
+			if _, err := db.Exec(swap, c.id); err == nil {
+				t.Fatal("INSERT OR REPLACE of a stored read succeeded")
+			}
+			if _, err := db.Exec(`INSERT INTO vuln_inventory_reads (id, host_id, execution_id, read_at, complete, reason,
+				dropped, ecosystem, kernel_release, kernel_state, kernel_source, kernel_version, binaries, sources, body)
+				VALUES (?, 'host-r', 'evil', 9, 1, 'swapped', 0, '', '', '', '', '', 0, 0, x'5b5d')`, c.id); err == nil {
+				t.Fatal("plain INSERT with a stored id succeeded")
+			}
+			after, err := s.Get(ctx, c.id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Reason != before.Reason || after.ExecutionID != before.ExecutionID || !after.ReadAt.Equal(before.ReadAt) {
+				t.Errorf("stored read changed: %+v, was %+v", after, before)
+			}
+			if rowCount(t, db) != n {
+				t.Errorf("row count changed by a refused insert")
+			}
+		})
+	}
+}

@@ -432,14 +432,34 @@ func (s *Store) one(ctx context.Context, what, query string, args ...any) (Read,
 	return r, nil
 }
 
+// Read-path statements. The plan tests run these same strings, so an index
+// that the store relies on is checked where it is used.
+const (
+	// latestQuery is the newest read of one host (param: host ID). It seeks
+	// vuln_inventory_reads_host_read and reads one entry.
+	latestQuery = `SELECT ` + fullColumns + ` FROM vuln_inventory_reads
+		WHERE host_id = ? ORDER BY read_at DESC, id DESC LIMIT 1`
+	// lastCompleteQuery is the newest complete read of one host (param: host
+	// ID). It seeks vuln_inventory_reads_host_complete.
+	lastCompleteQuery = `SELECT ` + fullColumns + ` FROM vuln_inventory_reads
+		WHERE host_id = ? AND complete = 1 ORDER BY read_at DESC, id DESC LIMIT 1`
+	// latestAllQuery is the newest read of every host, without components.
+	// The host list is taken once (one scan of the host_id index, grouped);
+	// each host then costs one index seek for its newest read. There is no
+	// sort of the table and no correlated sort per row.
+	latestAllQuery = `SELECT ` + headerColumns + ` FROM vuln_inventory_reads
+		WHERE id IN (SELECT (SELECT n.id FROM vuln_inventory_reads AS n WHERE n.host_id = h.host_id
+			ORDER BY n.read_at DESC, n.id DESC LIMIT 1)
+			FROM (SELECT host_id FROM vuln_inventory_reads GROUP BY host_id) AS h)`
+)
+
 // Latest returns the newest read of host: the highest read_at, then the
 // highest id. It returns ErrNoRead when the host has no read.
 func (s *Store) Latest(ctx context.Context, host string) (Read, error) {
 	if err := checkText("host id", host, maxHostIDBytes, true); err != nil {
 		return Read{}, fmt.Errorf("vulninventory: latest: %w", err)
 	}
-	return s.one(ctx, "latest "+host, `SELECT `+fullColumns+` FROM vuln_inventory_reads
-		WHERE host_id = ? ORDER BY read_at DESC, id DESC LIMIT 1`, host)
+	return s.one(ctx, "latest "+host, latestQuery, host)
 }
 
 // LastComplete returns the newest complete read of host (D5: the basis of a
@@ -449,8 +469,7 @@ func (s *Store) LastComplete(ctx context.Context, host string) (Read, error) {
 	if err := checkText("host id", host, maxHostIDBytes, true); err != nil {
 		return Read{}, fmt.Errorf("vulninventory: last complete: %w", err)
 	}
-	return s.one(ctx, "last complete "+host, `SELECT `+fullColumns+` FROM vuln_inventory_reads
-		WHERE host_id = ? AND complete = 1 ORDER BY read_at DESC, id DESC LIMIT 1`, host)
+	return s.one(ctx, "last complete "+host, lastCompleteQuery, host)
 }
 
 // Get returns the read with the given ID, or ErrNoRead.
@@ -461,10 +480,7 @@ func (s *Store) Get(ctx context.Context, id int64) (Read, error) {
 // LatestAll returns the newest read of every host, ordered by host ID, without
 // the components. It is for the export's choice of reads and for the UI.
 func (s *Store) LatestAll(ctx context.Context) ([]Read, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+headerColumns+` FROM vuln_inventory_reads AS r
-		WHERE r.id = (SELECT n.id FROM vuln_inventory_reads AS n WHERE n.host_id = r.host_id
-			ORDER BY n.read_at DESC, n.id DESC LIMIT 1)
-		ORDER BY r.host_id`)
+	rows, err := s.db.QueryContext(ctx, latestAllQuery)
 	if err != nil {
 		return nil, fmt.Errorf("vulninventory: latest all: %w", err)
 	}
@@ -480,10 +496,13 @@ func (s *Store) LatestAll(ctx context.Context) ([]Read, error) {
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("vulninventory: latest all: %w", err)
 	}
+	// One row per host, so sorting the few result rows in Go is cheap and keeps
+	// the SQL free of a sort.
+	sort.Slice(out, func(i, j int) bool { return out[i].HostID < out[j].HostID })
 	return out, nil
 }
 
-// TODO(E1): package read retention is not decided. The recommended rule
-// (latest, last complete and snapshot-pinned reads) is in
-// docs/implementation/vuln-inventory-decisions.md under E1. Until the
-// maintainer decides, this package deletes no reads, and no Prune exists.
+// Retention of reads is decision E1 in docs/implementation/vuln-inventory-decisions.md
+// and is not decided. The database (migration 0052) already refuses to delete a
+// snapshot-pinned read, the newest read of a host and the last complete read of
+// a host. This package deletes no reads and has no Prune.

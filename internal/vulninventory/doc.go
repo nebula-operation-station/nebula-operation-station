@@ -11,6 +11,9 @@
 //
 // The store deletes no reads. Retention of package reads (ADR 0011 D6, decision
 // E1 in docs/implementation/vuln-inventory-decisions.md) is not decided yet.
+// Migration 0052 already refuses any DELETE of a snapshot-pinned read, of a
+// host's newest read and of a host's last complete read, and any INSERT that
+// reuses a stored id.
 //
 // Inputs are checked against the named limits in store.go and rejected, never
 // truncated. Package names, versions and architectures must match the export's
