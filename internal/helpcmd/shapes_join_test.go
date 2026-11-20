@@ -24,6 +24,24 @@ func TestShapesAmbiguousJoinKeepsConstructBodiesExcluded(t *testing.T) {
 			"for x in a; do # c \\\necho hi\nnebula status\ndone\nnebula pve list"},
 		{"if opener in a comment",
 			"if true; then # c \\\necho hi\nnebula status\nfi\nnebula pve list"},
+		// The shell does not join across a backslash that ends a comment, so
+		// the next physical line is a command of its own.
+		{"heredoc opener on the line after a backslash in a comment",
+			"echo # c \\\ncat <<EOF\nnebula status\nEOF\nnebula pve list"},
+		{"for opener on the line after a backslash in a comment",
+			"echo # c \\\nfor x in a; do\necho hi\nnebula status\ndone\nnebula pve list"},
+		{"if opener on the line after a backslash in a comment",
+			"echo # c \\\nif true; then\necho hi\nnebula status\nfi\nnebula pve list"},
+		// A doubled backslash is a literal backslash, so the line break ends
+		// the command and the next physical line is read on its own.
+		{"heredoc opener on the line after a doubled backslash",
+			"echo foo \\\\\ncat <<EOF\nnebula status\nEOF\nnebula pve list"},
+		{"for opener on the line after a doubled backslash",
+			"echo foo \\\\\nfor x in a; do\necho hi\nnebula status\ndone\nnebula pve list"},
+		{"while opener on the line after a doubled backslash",
+			"echo foo \\\\\nwhile false; do\necho hi\nnebula status\ndone\nnebula pve list"},
+		{"heredoc opener on the line after a comment backslash, then a real join",
+			"echo # c \\\ncat <<EOF \\\n\"x\"\nnebula status\nEOF\nnebula pve list"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -52,5 +70,20 @@ func TestShapesOverlongLineFailsClosedForQuotes(t *testing.T) {
 	}
 	if got := excludedLines(set); !equalInts(got, []int{1, 2, 3}) {
 		t.Fatalf("excluded lines %v, want [1 2 3]", got)
+	}
+}
+
+// TestShapesSegmentWithUnbalancedQuoteBreaksBlock checks that a command segment
+// read after a line break the shell ends is checked for quoting like any line:
+// an open quote there breaks the rest of the block, so no later line is a shape.
+func TestShapesSegmentWithUnbalancedQuoteBreaksBlock(t *testing.T) {
+	body := "echo # c \\\necho \"x\nnebula status\nnebula pve list"
+	set := Shapes("", body)
+	if len(set.Shapes) != 0 {
+		t.Fatalf("shapes %+v after an unbalanced quote in a segment, want none", set.Shapes)
+	}
+	// Lines 1 and 2 are one joined logical line, which starts at line 1.
+	if got := excludedLines(set); !equalInts(got, []int{1, 3, 4}) {
+		t.Fatalf("excluded lines %v, want [1 3 4]", got)
 	}
 }

@@ -4,6 +4,7 @@ package helpcmd
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -68,6 +69,11 @@ type logicalLine struct {
 	raw    string // continuations joined, common indentation removed; keeps comments
 	joined bool   // the logical line holds more than one physical line
 	prob   string // reason that excludes the whole logical line (a continuation at the end of the block, or an ambiguous join)
+	// segs holds the command segments of an ambiguous join that the shell ends
+	// at a line break (a backslash in a comment or after another backslash).
+	// raw is kept joined for the exclusion; the tracker reads each segment as a
+	// command of its own. nil when there is no such break.
+	segs []string
 }
 
 // Shapes builds the shapes of one fenced code block (ADR 0014 D4). info is the
@@ -83,7 +89,10 @@ type logicalLine struct {
 // the next command is never dropped; drop blank lines and lines starting with
 // "#" outside a construct or heredoc body; remove a trailing comment, that is a
 // "#" starting a word outside quotes (the lexer decides quoting). The quote
-// check looks at the text before the trailing comment only.
+// check looks at the text before the trailing comment only. A backslash that
+// ends a comment, or that follows another backslash outside quotes, joins
+// nothing: the shell ends the command at that line break, so the physical line
+// is excluded alone with reasonAmbiguousJoin and the next line is read on its own.
 //
 // A compound keyword (for, while, until, if, case, select) counts only in
 // command position: the first word of a line, or a word after one of ; ;; &
@@ -172,7 +181,8 @@ func commonIndent(phys []string) string {
 func joinContinuations(phys []string) []logicalLine {
 	common := commonIndent(phys)
 	var out []logicalLine
-	var acc strings.Builder
+	var acc, seg strings.Builder // the joined text, and the command segment being read
+	var segs []string            // the command segments closed by a line break the shell ends
 	start := 0
 	open := false
 	multi := false
@@ -182,23 +192,41 @@ func joinContinuations(phys []string) []logicalLine {
 		if !open {
 			start = n + 1
 			acc.Reset()
+			seg.Reset()
+			segs = nil
 			multi = false
 			ambiguous = false
 		} else {
 			acc.WriteByte(' ')
+			seg.WriteByte(' ')
 			multi = true
 		}
-		if joins, clean := continuation(p); joins {
+		joins, clean, ends := continuation(p)
+		if joins {
 			acc.WriteString(p[:len(p)-1])
 			open = true
 			ambiguous = ambiguous || !clean
+			if ends {
+				// The shell ends the command at this line break, so the next
+				// physical line is a command of its own. The text stays joined
+				// for the exclusion; the segments are analyzed apart.
+				seg.WriteString(p)
+				segs = append(segs, seg.String())
+				seg.Reset()
+			} else {
+				seg.WriteString(p[:len(p)-1])
+			}
 			continue
 		}
 		open = false
 		acc.WriteString(p)
+		seg.WriteString(p)
 		l := logicalLine{line: start, raw: acc.String(), joined: multi}
 		if ambiguous {
 			l.prob = reasonAmbiguousJoin
+		}
+		if len(segs) > 0 {
+			l.segs = append(segs, seg.String())
 		}
 		out = append(out, l)
 	}
@@ -212,15 +240,18 @@ func joinContinuations(phys []string) []logicalLine {
 // joins it with the next line (ADR 0014 D4, rule 2, read literally). clean is
 // true when the shell reads the join the same way: the backslash is not inside a
 // comment, not inside quotes and not masked by another backslash. Otherwise the
-// joined logical line is excluded (see reasonAmbiguousJoin).
-func continuation(p string) (joins, clean bool) {
+// joined logical line is excluded (see reasonAmbiguousJoin). ends is true when
+// the shell ends the command at the line break instead: the backslash is in a
+// comment or masked by another backslash outside quotes. Such a line is not
+// joined with the next one; the next physical line is a command of its own.
+func continuation(p string) (joins, clean, ends bool) {
 	if !strings.HasSuffix(p, "\\") {
-		return false, false
+		return false, false, false
 	}
 	var quote byte
 	for i := 0; i < len(p); i++ {
 		if i == len(p)-1 {
-			return true, quote == 0
+			return true, quote == 0, false
 		}
 		c := p[i]
 		switch {
@@ -237,10 +268,38 @@ func continuation(p string) (joins, clean bool) {
 		case c == '\'' || c == '"':
 			quote = c
 		case c == '#' && (i == 0 || isBlankOrOperator(p[i-1])):
-			return true, false
+			// A comment outside quotes: the backslash is part of the comment.
+			return true, false, true
 		}
 	}
-	return true, false
+	// The loop ended on a masked final backslash: a doubled backslash, which
+	// is a literal backslash, ends the command outside quotes. Inside quotes
+	// the line break is part of the quoted text.
+	return true, false, quote == 0
+}
+
+// segmentInfo lexes and checks the command segments of an ambiguous join on
+// their own. The shell starts a new command after each line break it ends, so
+// a comment or an opener in one segment does not hide the text of the next. The
+// quoting of each segment is checked as a single line; joinedLen, the length of
+// the whole joined line, is checked against MaxCommandBytes like a single line.
+// On an error the returned info is empty.
+func segmentInfo(segs []string, joinedLen int) (lineInfo, error) {
+	if joinedLen > MaxCommandBytes {
+		return lineInfo{}, fmt.Errorf("segments: %w: %d bytes, limit %d", ErrTooLong, joinedLen, MaxCommandBytes)
+	}
+	var info lineInfo
+	for _, sg := range segs {
+		sg = strings.TrimLeft(sg, " \t")
+		lx := lexLine(sg)
+		if _, err := Tokenize(sg[:lx.cut]); err != nil {
+			return lineInfo{}, err
+		}
+		si := analyze(lx.toks)
+		info.events = append(info.events, si.events...)
+		info.docs = append(info.docs, si.docs...)
+	}
+	return info, nil
 }
 
 // isBlankOrOperator reports whether c ends a word: a space, a tab or one of the
@@ -623,15 +682,25 @@ func (s *scanner) line(i int, l logicalLine) {
 	// continuation at the end of the block is not analyzed; nothing follows it.
 	analyzable := l.prob == "" || l.prob == reasonAmbiguousJoin
 	lx := lexed{cut: len(t)}
-	if analyzable {
+	if analyzable && l.segs == nil {
 		lx = lexLine(t)
 	}
-	// Quote balance is checked on every analyzable line, including one longer
-	// than MaxCommandBytes: an open quote there runs into the following lines.
+	// Quote balance is checked on every analyzable line. A line longer than
+	// MaxCommandBytes makes Tokenize return ErrTooLong before it scans any
+	// quote, so its quoting is unknown: the block is broken from that line on
+	// (see below), which is what keeps an open quote from running into the
+	// following lines.
 	var unbalanced, tooLong bool
 	var quoteProb string
+	var info lineInfo
 	if analyzable {
-		if _, err := Tokenize(t[:lx.cut]); err != nil {
+		var err error
+		if l.segs != nil {
+			info, err = segmentInfo(l.segs, len(t))
+		} else {
+			_, err = Tokenize(t[:lx.cut])
+		}
+		if err != nil {
 			if isTooLong(err) {
 				tooLong = true
 				quoteProb = reasonLineTooLong
@@ -654,8 +723,7 @@ func (s *scanner) line(i int, l logicalLine) {
 	if prob == "" && containsControl(text) {
 		prob = reasonControl
 	}
-	var info lineInfo
-	if analyzable && !unbalanced && !tooLong {
+	if analyzable && l.segs == nil && !unbalanced && !tooLong {
 		info = analyze(lx.toks)
 	}
 	if s.inGroup || hasKeyword(info.events) || netOpen(nil, info.events) {
