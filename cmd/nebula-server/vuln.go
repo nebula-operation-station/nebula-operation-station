@@ -180,6 +180,8 @@ type vulnService struct {
 	// so a run's batches queue one read, not one per batch.
 	alertMu     sync.Mutex
 	alertQueued map[string]bool
+	// inv stores the installed package reads (ADR 0011 D3); runServer sets it.
+	inv *vulnInventoryService
 	// swept, when set (tests only), is called after every sweep.
 	swept func(vulnstore.PruneResult, error)
 	// ticked, when set (tests only), is called after every notification

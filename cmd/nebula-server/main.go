@@ -364,6 +364,13 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	// Operations (M4): planned here, decided and run by the executor.
 	ops = executions.New(connCtx, exec, db, store, log)
 	ops.SetNotifier(notifier)
+	// Installed package reads (ADR 0011 D3): every successful
+	// package.list_installed result is stored as an inventory read.
+	invSvc, err := newVulnInventoryService(db, ops, log)
+	if err != nil {
+		return err
+	}
+	ops.SetInstalledObserver(invSvc)
 	// Ops agent notes (ADR 0016 D9): the suggestion index reads the notes
 	// store; the store's own file and retention loop live in ops.go.
 	opsNotes, err := newOpsNotes(cfg.DataDir)
@@ -488,6 +495,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		return err
 	}
 	vuln.statePath = filepath.Join(cfg.DataDir, vulnNotifyStateFile)
+	vuln.inv = invSvc
 	// Ops agent events (ADR 0016 D3, D10): only with the ops token. The
 	// trigger touches nothing while the agent is off (see Touch).
 	if _, hasOpsToken := cfg.API.OpsToken(); hasOpsToken {
