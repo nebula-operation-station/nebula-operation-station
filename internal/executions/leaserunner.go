@@ -193,7 +193,11 @@ func (s *Service) runLease(ctx context.Context, exec readGrantRunner, l ordinary
 			if used[t.HostID] >= l.budget {
 				break
 			}
-			if at, ok := last[a.ID+"\x00"+t.HostID]; ok && s.now().Before(at.Add(l.interval)) {
+			// The action's own floor (ADR 0011 D3) can exceed the lease's
+			// interval; asking sooner only gets a refusal that stops the
+			// host's other actions for this tick.
+			due := max(l.interval, permit.ReadActionMinInterval(a.ID))
+			if at, ok := last[a.ID+"\x00"+t.HostID]; ok && s.now().Before(at.Add(due)) {
 				continue
 			}
 			err := s.runLeaseAction(ctx, exec, l, a, t, ref)
