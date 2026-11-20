@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
 	"go/parser"
 	"go/token"
 	"io"
@@ -786,6 +787,11 @@ func TestAG24AgentUserCannotReachExecutorSocket(t *testing.T) {
 
 	// Static: the agent binary's import closure holds no executor client,
 	// no gRPC and no execution planning.
+	// Positive control: the closure does show gRPC and the executor API
+	// where they are used.
+	if ctl := ag24Imports(t, "internal/executorclient"); !ctl["google.golang.org/grpc"] || !ctl[ag24Module+"/internal/rpc/executorv1"] {
+		t.Fatal("the import closure of internal/executorclient lacks gRPC or the executor API; the check below would prove nothing")
+	}
 	deps := ag24Imports(t, "cmd/nebula-ops-agent")
 	for _, bad := range []string{ag24Module + "/internal/rpc/executorv1", ag24Module + "/internal/executorclient",
 		ag24Module + "/internal/executions", ag24Module + "/internal/peercred", ag24Module + "/internal/notify",
@@ -1512,7 +1518,9 @@ func TestAG24SettingsChangeNeedsFreshAssertion(t *testing.T) {
 // no notes, findings, ops settings or execution code, and a non-admin gets
 // 404 from the Ops tab's endpoints.
 func TestAG24HelpAssistantStaysSeparate(t *testing.T) {
-	deps := ag24Imports(t, "internal/helpassist")
+	// The help backend is the packages below internal/helpassist (the
+	// directory itself holds no Go files).
+	deps := ag24Imports(t, "internal/helpassist/...")
 	for _, bad := range []string{"opsnotes", "opsfacts", "opsconfig", "opsagent", "vulnstore", "vulnfinding", "executions", "executorclient", "rpc/executorv1"} {
 		if deps[ag24Module+"/internal/"+bad] {
 			t.Errorf("internal/helpassist imports internal/%s", bad)
@@ -1547,9 +1555,14 @@ func TestAG24ServerNeverReadsFromNotificationProvider(t *testing.T) {
 	root := filepath.Join("..", "..")
 	readMethod := regexp.MustCompile(`(?i)getUpdates|setWebhook|deleteWebhook|getWebhookInfo|answerCallbackQuery`)
 	route := regexp.MustCompile(`(?:HandleFunc|Handle)\(\s*"([^"]*)"`)
-	// The "/notifications" page is the server's own notification log (ADR
-	// 0016 D10), not an intake; provider names and bot or webhook paths are.
-	intake := regexp.MustCompile(`(?i)telegram|ntfy|webhook|/bot|/hooks?\b`)
+	// The scan sees string-literal route patterns wherever they are: as a
+	// Handle argument, a constant or a variable. A path assembled at run time
+	// from non-literal parts is not seen.
+	const synthetic = "package x\nconst intakePath = \"POST /hooks/\" + \"telegram\"\nvar botPath = \"/bot123/updates\"\n" +
+		"func f() { mux.Handle(intakePath, nil); mux.Handle(botPath, nil); send(base + \"/bot\" + tok + \"/sendMessage\") }\n"
+	if got := ag24IntakeLiterals(t, "synthetic.go", []byte(synthetic)); !slices.Equal(got, []string{"POST /hooks/telegram", "/bot123/updates"}) {
+		t.Fatalf("the route scan finds %q in a constant- and variable-registered intake, want both patterns", got)
+	}
 	files := 0
 	for _, dir := range []string{"cmd", "internal"} {
 		err := filepath.WalkDir(filepath.Join(root, dir), func(p string, d fs.DirEntry, err error) error {
@@ -1568,9 +1581,12 @@ func TestAG24ServerNeverReadsFromNotificationProvider(t *testing.T) {
 				t.Errorf("%s calls the provider read method %s", p, m)
 			}
 			for _, m := range route.FindAllSubmatch(b, -1) {
-				if intake.Match(m[1]) {
+				if ag24Intake.Match(m[1]) {
 					t.Errorf("%s registers the route %q, a notification provider intake", p, m[1])
 				}
+			}
+			for _, lit := range ag24IntakeLiterals(t, p, b) {
+				t.Errorf("%s holds the route pattern %q, a notification provider intake", p, lit)
 			}
 			return nil
 		})
@@ -1583,46 +1599,109 @@ func TestAG24ServerNeverReadsFromNotificationProvider(t *testing.T) {
 	}
 }
 
+// ag24Intake matches a notification provider intake path. The
+// "/notifications" page is the server's own notification log (ADR 0016
+// D10), not an intake; provider names and bot or webhook paths are.
+var ag24Intake = regexp.MustCompile(`(?i)telegram|ntfy|webhook|/bot|/hooks?\b`)
+
+// ag24RoutePattern is a ServeMux pattern: an optional method, then a path.
+var ag24RoutePattern = regexp.MustCompile(`^(?:[A-Z]+ +)?/`)
+
+// ag24IntakeLiterals returns the string literals in the Go source src that
+// are route patterns of a provider intake, wherever they stand (a Handle
+// argument, a constant, a variable). Adjacent literals joined with + are
+// joined before the check.
+func ag24IntakeLiterals(t *testing.T, name string, src []byte) []string {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), name, src, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", name, err)
+	}
+	var out []string
+	var literal func(e ast.Expr) (string, bool)
+	literal = func(e ast.Expr) (string, bool) {
+		switch x := e.(type) {
+		case *ast.BasicLit:
+			if x.Kind != token.STRING {
+				return "", false
+			}
+			s, err := strconv.Unquote(x.Value)
+			return s, err == nil
+		case *ast.BinaryExpr:
+			if x.Op != token.ADD {
+				return "", false
+			}
+			l, ok1 := literal(x.X)
+			r, ok2 := literal(x.Y)
+			return l + r, ok1 && ok2
+		case *ast.ParenExpr:
+			return literal(x.X)
+		}
+		return "", false
+	}
+	// A literal that is a piece of a concatenation with non-literal parts
+	// (an outgoing URL such as base+"/bot"+token+"/sendMessage") is not a
+	// complete pattern and is skipped.
+	pieces := map[ast.Expr]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		if b, ok := n.(*ast.BinaryExpr); ok && b.Op == token.ADD {
+			if _, whole := literal(b); !whole {
+				pieces[b.X], pieces[b.Y] = true, true
+			}
+		}
+		return true
+	})
+	ast.Inspect(f, func(n ast.Node) bool {
+		e, ok := n.(ast.Expr)
+		if !ok || pieces[e] {
+			return true
+		}
+		s, ok := literal(e)
+		if !ok {
+			return true
+		}
+		if ag24RoutePattern.MatchString(s) && ag24Intake.MatchString(s) {
+			out = append(out, s)
+		}
+		// A joined literal is checked once, not again per part.
+		_, joined := e.(*ast.BinaryExpr)
+		return !joined
+	})
+	return out
+}
+
 // --- helpers ---
 
 // ag24Imports returns the transitive import closure of the module package in
-// dir (relative to the module root), from the non-test Go files.
+// dir (relative to the module root), as the go tool builds it: every package
+// it depends on, inside the module, in third-party modules and in the
+// standard library (go list -deps, non-test files, GOPROXY=off).
 func ag24Imports(t *testing.T, dir string) map[string]bool {
 	t.Helper()
-	root := filepath.Join("..", "..")
+	goTool, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatalf("the go tool is needed for the import closure: %v", err)
+	}
+	cmd := exec.CommandContext(t.Context(), goTool, "list", "-deps", "-f", "{{.ImportPath}}", "./"+dir)
+	cmd.Dir = filepath.Join("..", "..")
+	cmd.Env = append(os.Environ(), "GOPROXY=off", "GOFLAGS=-mod=mod")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("go list -deps ./%s: %v\n%s", dir, err, stderr.String())
+	}
 	seen := map[string]bool{}
-	queue := []string{ag24Module + "/" + dir}
-	for len(queue) > 0 {
-		pkg := queue[0]
-		queue = queue[1:]
-		rel, ok := strings.CutPrefix(pkg, ag24Module+"/")
-		if !ok {
-			continue
+	own := 0
+	base := ag24Module + "/" + strings.TrimSuffix(dir, "/...")
+	for _, p := range strings.Fields(string(out)) {
+		seen[p] = true
+		if p == base || strings.HasPrefix(p, base+"/") {
+			own++
 		}
-		entries, err := os.ReadDir(filepath.Join(root, rel))
-		if err != nil {
-			t.Fatalf("read %s: %v", rel, err)
-		}
-		for _, en := range entries {
-			n := en.Name()
-			if en.IsDir() || !strings.HasSuffix(n, ".go") || strings.HasSuffix(n, "_test.go") {
-				continue
-			}
-			f, err := parser.ParseFile(token.NewFileSet(), filepath.Join(root, rel, n), nil, parser.ImportsOnly)
-			if err != nil {
-				t.Fatal(err)
-			}
-			for _, im := range f.Imports {
-				p, err := strconv.Unquote(im.Path.Value)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if !seen[p] {
-					seen[p] = true
-					queue = append(queue, p)
-				}
-			}
-		}
+	}
+	if own == 0 || len(seen) < 10 {
+		t.Fatalf("go list -deps ./%s returned %d packages, none of them the pattern's own", dir, len(seen))
 	}
 	// Third-party roots count by prefix (google.golang.org/grpc/...).
 	for p := range seen {
