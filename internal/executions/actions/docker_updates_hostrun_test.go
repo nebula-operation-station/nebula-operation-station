@@ -5,6 +5,7 @@ package actions
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -270,5 +271,226 @@ func TestCheckUpdatesHostrunHostileImageNames(t *testing.T) {
 	}
 	if bytes.Contains(r.Result, []byte("\xff")) {
 		t.Fatal("raw invalid UTF-8 byte in the result")
+	}
+}
+
+// runPreviewHostrun runs the shipped docker.update_preview copy of c (the
+// one composeV2.preview runs) over hostrun with params as the run's
+// parameters. It writes the salt and the state the fakes read, as preview
+// does, so the two runs see the same host.
+func runPreviewHostrun(t *testing.T, c *composeV2, params []byte) hostrun.Result {
+	t.Helper()
+	if !c.noSalt {
+		if err := os.MkdirAll(c.state, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(c.state, "salt"), c.salt, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c.beforeRun != nil {
+		c.beforeRun(t)
+	}
+	st, err := json.Marshal(c.st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(c.f.dir, "state.json"), st, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return runHostrunAction(t, c.f.bin+":/usr/bin:/bin", []byte(c.previewScript(t)), string(params))
+}
+
+// previewParams is the parameter document of a preview with tags (padded
+// with spaces to size bytes when size > 0, as the limit tests do).
+func previewParams(t *testing.T, tags string, size int) []byte {
+	t.Helper()
+	a, _ := Lookup("docker.update_preview")
+	p, err := a.ParametersJSON(map[string]string{"target_tags": tags}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if size > 0 {
+		p = []byte(`{"target_tags":"` + tags + `"}` + strings.Repeat(" ", size-len(`{"target_tags":"`+tags+`"}`)))
+	}
+	return p
+}
+
+// listedContainers adds n listed-only containers, all in project "big".
+func listedContainers(c *composeV2, n int) {
+	listed := map[string]any{}
+	for i := range n {
+		listed[pvID(i)] = "big"
+	}
+	c.st["listed_only"] = listed
+}
+
+// walkStrings calls visit with the member name and value of every string
+// in a decoded JSON document.
+func walkStrings(v any, key string, visit func(key, s string)) {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, c := range x {
+			walkStrings(c, k, visit)
+		}
+	case []any:
+		for _, c := range x {
+			walkStrings(c, key, visit)
+		}
+	case string:
+		visit(key, x)
+	}
+}
+
+// TestPreviewHostrunLargestAcceptedInput: the largest input the limit tests
+// accept (200 listed containers, 20 target tags, parameters of 4096 bytes)
+// is class success, below MaxResult and the preview bound, and the
+// dockerhost parser accepts it.
+func TestPreviewHostrunLargestAcceptedInput(t *testing.T) {
+	c := newComposeV2(t)
+	listedContainers(c, 200)
+	r := runPreviewHostrun(t, c, previewParams(t, nTags(20), 4096))
+	if r.Class != hostrun.ClassSuccess || r.ExitCode != 0 {
+		t.Fatalf("class %s exit %d (%s), result %q", r.Class, r.ExitCode, r.Detail, r.Result)
+	}
+	if len(r.Result) > hostrun.MaxResult || len(r.Result) > dockerhost.MaxPreviewResultBytes {
+		t.Fatalf("result of %d bytes is over the bound", len(r.Result))
+	}
+	if _, err := dockerhost.ParseUpdatePreview(r.Result); err != nil {
+		t.Fatalf("the parser refuses the result: %v", err)
+	}
+	if bytes.Contains(r.Result, []byte(cuPlanted)) {
+		t.Fatal("a planted env value left the host")
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(r.Result, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc["status"] != "ok" {
+		t.Fatalf("status %v", doc["status"])
+	}
+}
+
+// TestPreviewHostrunOverLimitStaysOneDocument: one input just over each
+// limit. The run is either a success whose result carries the truncation
+// the script documents, or exit 1 with the status it documents. It is never
+// result_missing, and it stays one parseable document.
+func TestPreviewHostrunOverLimitStaysOneDocument(t *testing.T) {
+	cases := map[string]struct {
+		mutate func(c *composeV2)
+		params func(t *testing.T) []byte
+		status string // "" for a success, else the exit-1 status
+		trunc  string // unit name that must be truncated on success
+	}{
+		"21 target tags": {
+			params: func(t *testing.T) []byte { return []byte(`{"target_tags":"` + nTags(21) + `"}`) },
+			status: "params_invalid",
+		},
+		"4097-byte parameters": {
+			params: func(t *testing.T) []byte { return previewParams(t, "", 4097) },
+			status: "params_invalid",
+		},
+		"201 listed containers": {
+			mutate: func(c *composeV2) { listedContainers(c, 201) },
+			trunc:  "site",
+		},
+		"51 projects": {
+			mutate: func(c *composeV2) {
+				listed := map[string]any{}
+				for i := range 51 {
+					listed[pvID(i)] = fmt.Sprintf("p%02d", i)
+				}
+				c.st["listed_only"] = listed
+			},
+			trunc: "site",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			c := newComposeV2(t)
+			if tc.mutate != nil {
+				tc.mutate(c)
+			}
+			params := previewParams(t, "", 0)
+			if tc.params != nil {
+				params = tc.params(t)
+			}
+			r := runPreviewHostrun(t, c, params)
+			if r.Class == hostrun.ClassResultMissing {
+				t.Fatalf("result_missing (exit %d, log %q)", r.ExitCode, r.Log)
+			}
+			if len(r.Result) == 0 {
+				t.Fatalf("no result document (class %s): %q", r.Class, r.Result)
+			}
+			var doc map[string]any
+			if err := json.Unmarshal(r.Result, &doc); err != nil {
+				t.Fatalf("result %q: %v", r.Result, err)
+			}
+			if tc.status != "" {
+				if r.Class != hostrun.ClassScriptFailed || r.ExitCode != 1 || doc["status"] != tc.status {
+					t.Fatalf("class %s exit %d status %v, want %s exit 1", r.Class, r.ExitCode, doc["status"], tc.status)
+				}
+				return
+			}
+			if r.Class != hostrun.ClassSuccess {
+				t.Fatalf("class %s (%s): %q", r.Class, r.Detail, r.Result)
+			}
+			if _, err := dockerhost.ParseUpdatePreview(r.Result); err != nil {
+				t.Fatalf("the parser refuses the result: %v", err)
+			}
+			found := false
+			for _, x := range doc["units"].([]any) {
+				u := x.(map[string]any)
+				if u["project"] == tc.trunc && u["reason"] == "truncated" {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("no truncated unit %s in %q", tc.trunc, r.Result)
+			}
+		})
+	}
+}
+
+// TestPreviewHostrunHostileProjectLabel: a Compose project label with
+// quotes, a backslash and non-ASCII letters. The result is one document with
+// no raw control byte, and the label appears only as the value of a project
+// member, never in another field.
+func TestPreviewHostrunHostileProjectLabel(t *testing.T) {
+	const hostile = `proj "ü" \x`
+	c := newComposeV2(t)
+	for _, id := range []string{cuHex("1"), cuHex("3")} {
+		c.container(id)["Config"].(map[string]any)["Labels"].(map[string]any)["com.docker.compose.project"] = hostile
+	}
+	r := runPreviewHostrun(t, c, previewParams(t, "", 0))
+	if r.Class != hostrun.ClassSuccess {
+		t.Fatalf("class %s (%s): %q", r.Class, r.Detail, r.Result)
+	}
+	requireNoRawControl(t, r.Result)
+	if _, err := dockerhost.ParseUpdatePreview(r.Result); err != nil {
+		t.Fatalf("the parser refuses the result: %v", err)
+	}
+	if bytes.Contains(r.Result, []byte(cuPlanted)) {
+		t.Fatal("a planted env value left the host")
+	}
+	var doc any
+	if err := json.Unmarshal(r.Result, &doc); err != nil {
+		t.Fatal(err)
+	}
+	seen := 0
+	walkStrings(doc, "", func(key, s string) {
+		if !strings.Contains(s, `"ü"`) {
+			return
+		}
+		seen++
+		if key != "project" {
+			t.Fatalf("the project label is in field %q: %q", key, s)
+		}
+	})
+	// The script drops containers whose project label does not match the
+	// listed project (no unit), so the label may not reach the result at
+	// all; if a unit does carry it, it must sit in the project member.
+	if u := doc.(map[string]any)["units"].([]any); seen == 0 && len(u) != 0 {
+		t.Fatalf("units without the hostile label: %q", r.Result)
 	}
 }
