@@ -92,7 +92,7 @@ func TestListUpdatesWithoutAptCacheLeavesSourcesUnknown(t *testing.T) {
 	if err := os.Mkdir(tools, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, tool := range []string{"base64", "tr", "grep", "head", "sed", "stat", "xargs", "env", "cat"} {
+	for _, tool := range []string{"base64", "tr", "grep", "awk", "head", "sed", "stat", "xargs", "env", "cat"} {
 		for _, dir := range []string{"/usr/bin", "/bin"} {
 			if _, err := os.Stat(filepath.Join(dir, tool)); err == nil {
 				if err := os.Symlink(filepath.Join(dir, tool), filepath.Join(tools, tool)); err != nil {
