@@ -170,7 +170,7 @@ func (s *Store) Current(ctx context.Context, hosts []string, maxReuse time.Durat
 		return Snapshot{}, fmt.Errorf("vulninventory: current: generation: %w", err)
 	}
 	top := max(maxStored, floor)
-	if top >= math.MaxInt64 {
+	if top == math.MaxInt64 {
 		return Snapshot{}, fmt.Errorf("vulninventory: current: generation overflow")
 	}
 	gen := top + 1
