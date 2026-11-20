@@ -274,9 +274,11 @@ func TestHostMetricsThroughHostrunFailedReadsAreUnavailable(t *testing.T) {
 
 // Host text in the fullest mount reaches the document as base64. A mount the
 // parser can take (quotes, backslashes) comes through exactly. A tab splits
-// the mount in df's output, and the scripts join the parts with a space. A
-// control byte makes the disk reading unavailable; it never falls back to a
-// neighbouring row.
+// the mount in df's output, and the scripts join the parts with a single
+// space. This is a known limitation: a tab or a run of spaces in a mount
+// point is not preserved (the script splits df's whitespace-separated
+// columns), but it is never injected into the document. A control byte makes
+// the disk reading unavailable; it never falls back to a neighbouring row.
 func TestHostMetricsThroughHostrunHostileMounts(t *testing.T) {
 	neighbour := "/dev/y ext4 1000 100 900 10% /neighbour"
 	for _, tc := range []struct {
