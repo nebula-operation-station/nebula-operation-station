@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
@@ -20,6 +21,54 @@ import (
 // per-download cap. This is the compressed size only; the uncompressed
 // total is not measured (see MaxOSVArchiveBytes).
 const ubuntuDeclaredBytes int64 = 821463306
+
+// Measured on 2026-11-20 from the zip central directory of the OSV Ubuntu
+// all.zip (range requests, no entry was inflated). The caps in
+// parse_osv.go are derived from these values with a 2x reserve.
+const (
+	// ubuntuMeasuredUncompressedBytes is the sum of the declared
+	// uncompressed sizes of all entries (8.00 GiB).
+	ubuntuMeasuredUncompressedBytes int64 = 8_591_856_407
+	// ubuntuMeasuredEntries is the number of entries in the archive.
+	ubuntuMeasuredEntries = 74_879
+	// ubuntuMeasuredLargestEntry is the largest declared entry size.
+	ubuntuMeasuredLargestEntry int64 = 4_973_117
+)
+
+// TestOSVArchiveCapsHaveTwoFoldReserve pins the archive caps to the
+// measured live archive: each cap is at least twice the measured value.
+func TestOSVArchiveCapsHaveTwoFoldReserve(t *testing.T) {
+	if MaxOSVArchiveBytes < 2*ubuntuMeasuredUncompressedBytes {
+		t.Errorf("MaxOSVArchiveBytes = %d, below 2x the measured total %d", MaxOSVArchiveBytes, ubuntuMeasuredUncompressedBytes)
+	}
+	if int64(MaxOSVRecordBytes) < 2*ubuntuMeasuredLargestEntry {
+		t.Errorf("MaxOSVRecordBytes = %d, below 2x the largest measured entry %d", MaxOSVRecordBytes, ubuntuMeasuredLargestEntry)
+	}
+	if MaxOSVArchiveFiles < 2*ubuntuMeasuredEntries {
+		t.Errorf("MaxOSVArchiveFiles = %d, below 2x the measured entry count %d", MaxOSVArchiveFiles, ubuntuMeasuredEntries)
+	}
+}
+
+// TestParseOSVArchiveAcceptsMeasuredLargestEntry: a valid record of the
+// largest measured entry size must parse; before the per-entry cap was
+// raised it was refused with ErrFeedLimit.
+func TestParseOSVArchiveAcceptsMeasuredLargestEntry(t *testing.T) {
+	head := `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z","details":"`
+	tail := `"}`
+	pad := int(ubuntuMeasuredLargestEntry) - len(head) - len(tail)
+	body := []byte(head + strings.Repeat("a", pad) + tail)
+	if int64(len(body)) != ubuntuMeasuredLargestEntry {
+		t.Fatalf("test record is %d bytes, want %d", len(body), ubuntuMeasuredLargestEntry)
+	}
+	data := makeZip(t, zipFile{"OSV-1.json", body})
+	sum, err := ParseOSVArchive(context.Background(), bytes.NewReader(data), int64(len(data)), func(OSVRecord) error { return nil })
+	if err != nil {
+		t.Fatalf("largest measured entry refused: %v", err)
+	}
+	if sum.Records != 1 {
+		t.Fatalf("records = %d, want 1", sum.Records)
+	}
+}
 
 func TestOSVUbuntuCapFitsLiveArchive(t *testing.T) {
 	f, ok := FeedByName("osv-ubuntu")

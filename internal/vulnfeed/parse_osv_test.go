@@ -130,7 +130,7 @@ func TestParseOSVRejectsMalformed(t *testing.T) {
 	}
 }
 
-// TestParseOSVDecodeStaysWithinFieldCaps: a 4 MiB record of tiny elements
+// TestParseOSVDecodeStaysWithinFieldCaps: a record of MaxOSVRecordBytes of tiny elements
 // spread over capped arrays (the shape that made json.Unmarshal build
 // about a million empty maps) is rejected during the walk.
 func TestParseOSVDecodeStaysWithinFieldCaps(t *testing.T) {
@@ -471,7 +471,9 @@ func TestParseOSVArchiveTotalAboveOldCapPassesGate(t *testing.T) {
 	// The declared total is 5 GiB, above the former 4 GiB total cap. The
 	// entries hold no record data, so the archive must fail while
 	// reading, not at the size gate.
-	const entries = 1281 // 1280 entries of MaxOSVRecordBytes are 5 GiB
+	// Entries of MaxOSVRecordBytes that add up to 5 GiB, rounded up.
+	const fiveGiB int64 = 5 << 30
+	entries := int((fiveGiB + MaxOSVRecordBytes - 1) / MaxOSVRecordBytes)
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 	for i := range entries {

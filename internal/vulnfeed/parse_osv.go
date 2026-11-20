@@ -20,8 +20,12 @@ import (
 
 // Limits of OSV records and OSV bulk archives (ADR 0011 D4).
 const (
-	// MaxOSVRecordBytes caps one OSV JSON record.
-	MaxOSVRecordBytes = 4 << 20
+	// MaxOSVRecordBytes caps one OSV JSON record and each entry of an OSV
+	// archive (the declared and the decompressed size). Measured on
+	// 2026-11-20 from the central directory of the osv-ubuntu all.zip: the
+	// largest entry declared 4,973,117 bytes, which the former 4 MiB cap
+	// refused. 10 MiB (10,485,760 bytes) is about 2.1 times that value.
+	MaxOSVRecordBytes = 10 << 20
 	// MaxOSVAliases caps the aliases of one record.
 	MaxOSVAliases = 256
 	// MaxOSVAffected caps the affected entries of one record.
@@ -36,18 +40,26 @@ const (
 	// MaxOSVEventsPerRecord caps the events of all ranges of one record
 	// together.
 	MaxOSVEventsPerRecord = 32_768
-	// MaxOSVArchiveFiles caps the files in one OSV all.zip.
+	// MaxOSVArchiveFiles caps the files in one OSV all.zip. Measured on
+	// 2026-11-20: the osv-ubuntu all.zip has 74,879 entries, so this limit
+	// is about 13 times the measured count.
 	MaxOSVArchiveFiles = 1_000_000
 	// MaxOSVArchiveBytes caps the decompressed bytes of one OSV all.zip,
-	// the sum of the declared entry sizes. Facts: the live osv-ubuntu
-	// all.zip declared 821,463,306 bytes (compressed) on 2026-11-20, which
-	// exceeded the former 4 GiB cap of this sum. The live uncompressed
-	// total is NOT measured yet, so 16 GiB (2^34) is a provisional value,
-	// not a derived one: it is about 20 times the compressed size and has
-	// no measured headroom. Each entry stays capped at MaxOSVRecordBytes
-	// and the file count at MaxOSVArchiveFiles. Both caps are enforced
-	// from the central directory before any entry is inflated.
-	MaxOSVArchiveBytes int64 = 16 << 30
+	// the sum of the declared entry sizes. Measured on 2026-11-20 from the
+	// central directory of the osv-ubuntu all.zip (no entry inflated): the
+	// declared uncompressed total is 8,591,856,407 bytes (8.002 GiB). The
+	// cap is 17 GiB (18,253,611,008 bytes), about 2.1 times the measured
+	// total. 16 GiB would be only 1.999 times it, so it is not used. Each
+	// entry is also capped
+	// at MaxOSVRecordBytes and the file count at MaxOSVArchiveFiles; all
+	// three are checked from the central directory before any entry is
+	// inflated.
+	//
+	// The record's content date (newest "modified") is only known after
+	// the records are parsed. The zip entry times of the live archive are
+	// empty (all 1980-00-00), so no content date can be read without a
+	// bounded pass over the entries; the sync keeps that full pass.
+	MaxOSVArchiveBytes int64 = 17 << 30
 )
 
 // osvArchiveLimits are the archive limits of one parse. ParseOSVArchive
