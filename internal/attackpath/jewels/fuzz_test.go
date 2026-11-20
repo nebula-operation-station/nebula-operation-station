@@ -100,12 +100,14 @@ func hasNonBuilderByte(s string) bool {
 // computation with ErrInvalidTarget. Follow-up ticket: make NodeKind use the
 // Builder's ID rule. When that lands, this test must change with it.
 func TestNodeKindKnownGapNonASCII(t *testing.T) {
-	const id = "host:é"
-	if k, err := NodeKind(id); err != nil || k != attackpath.NodeHost {
-		t.Fatalf("NodeKind(%q) = %v, %v: the documented gap no longer holds, update the report and this test", id, k, err)
-	}
-	if err := builderAccepts(id, attackpath.NodeHost); !errors.Is(err, attackpath.ErrInvalidNode) {
-		t.Fatalf("Builder accepts %q (%v): the documented gap no longer holds", id, err)
+	// "host:!" is the smallest case: printable ASCII outside the Builder set.
+	for _, id := range []string{"host:!", "host:é"} {
+		if k, err := NodeKind(id); err != nil || k != attackpath.NodeHost {
+			t.Fatalf("NodeKind(%q) = %v, %v: the documented gap no longer holds, update the report and this test", id, k, err)
+		}
+		if err := builderAccepts(id, attackpath.NodeHost); !errors.Is(err, attackpath.ErrInvalidNode) {
+			t.Fatalf("Builder accepts %q (%v): the documented gap no longer holds", id, err)
+		}
 	}
 }
 
