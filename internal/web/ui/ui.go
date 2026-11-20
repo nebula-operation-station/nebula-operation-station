@@ -504,6 +504,7 @@ var pageFiles = map[string]string{
 	"operation_new":       "operation_new.html",
 	"operation":           "operation.html",
 	"operations_abort":    "operations_abort.html",
+	"operations_reject":   "operations_reject.html",
 	"schedules":           "schedules.html",
 	"leases":              "leases.html",
 	"lease":               "leases.html",
@@ -600,6 +601,8 @@ func (h *Handler) Handler() http.Handler {
 	mux.HandleFunc("POST /operations/abort", h.handleOperationAbort)
 	mux.HandleFunc("GET /operations/abort/confirm", h.handleOperationAbortConfirm)
 	mux.HandleFunc("POST /operations/abort/form", h.handleOperationAbortForm)
+	mux.HandleFunc("GET /operations/reject/confirm", h.handleOperationRejectConfirm)
+	mux.HandleFunc("POST /operations/reject/form", h.handleOperationRejectForm)
 	mux.HandleFunc("POST /operations/retry", h.handleOperationRetry)
 
 	mux.HandleFunc("GET /notifications", h.handleNotifications)
