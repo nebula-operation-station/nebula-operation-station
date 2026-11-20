@@ -4,11 +4,20 @@ package main
 
 import (
 	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 )
 
 func TestLazyExecutorPVEAdminRPCsNotConnected(t *testing.T) {
@@ -132,5 +141,64 @@ func TestLazyExecutorGuestProvision(t *testing.T) {
 	}
 	if r, err := pv.CommitPVEGuestProvision(context.Background(), &pb.CommitPVEGuestProvisionRequest{}); r != nil || err != errNotConnected {
 		t.Fatalf("CommitPVEGuestProvision = (%v, %v), want (nil, errNotConnected)", r, err)
+	}
+}
+
+// TestLazyExecutorRejectPending guards the web rejection: executions.Service
+// finds RejectPending by type assertion (executions.Rejecter) on the executor
+// it gets, and in nebula-server that executor is a *lazyExecutor. Without the
+// pass-through every rejection in the UI fails with ErrRejectUnavailable.
+func TestLazyExecutorRejectPending(t *testing.T) {
+	var exec any = new(lazyExecutor)
+	rej, ok := exec.(executions.Rejecter)
+	if !ok {
+		t.Fatal("lazyExecutor does not implement executions.Rejecter; rejecting in the UI would be unavailable")
+	}
+	if r, err := rej.RejectPending(context.Background(), &pb.RejectPendingRequest{Digest: "x"}); r != nil || err != errNotConnected {
+		t.Fatalf("RejectPending = (%v, %v), want (nil, errNotConnected)", r, err)
+	}
+}
+
+// TestWiredServerRejectIsAvailable builds executions.Service the way
+// nebula-server does (a lazyExecutor and the server database) and checks that
+// Reject gets past the Rejecter check: an unknown execution is ErrNotFound,
+// never ErrRejectUnavailable.
+func TestWiredServerRejectIsAvailable(t *testing.T) {
+	db, err := serverdb.Open(filepath.Join(t.TempDir(), "nebula.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	ops := executions.New(t.Context(), new(lazyExecutor), db, nil, log)
+	err = ops.Reject(context.Background(), "admin", "no-such-execution", "")
+	if errors.Is(err, executions.ErrRejectUnavailable) {
+		t.Fatal("Reject in the wired server returned ErrRejectUnavailable")
+	}
+	if !errors.Is(err, executions.ErrNotFound) {
+		t.Fatalf("Reject of an unknown execution = %v, want ErrNotFound", err)
+	}
+}
+
+// TestWiredServerRejectReachesExecutor sends RejectPending through the
+// server's lazyExecutor to a real executor that holds only the server role
+// for this UID. With no privileged session open the executor refuses it with
+// privileged_session_required (spec 07 v29-07-01): the call is forwarded, and
+// the server role is not let through without a session.
+func TestWiredServerRejectReachesExecutor(t *testing.T) {
+	rig := newProviderRig(t)
+	lazy := new(lazyExecutor)
+	lazy.c.Store(rig.client)
+	_, err := lazy.RejectPending(context.Background(), &pb.RejectPendingRequest{
+		Digest: strings.Repeat("ab", 32), RelayedUser: "admin",
+	})
+	if err == nil {
+		t.Fatal("RejectPending without a privileged session succeeded")
+	}
+	if st, _ := status.FromError(err); st.Code() == codes.Unimplemented || st.Code() == codes.Unavailable {
+		t.Fatalf("RejectPending did not reach the executor: %v", err)
+	}
+	if !strings.Contains(err.Error(), "privileged_session_required") {
+		t.Fatalf("RejectPending = %v, want privileged_session_required", err)
 	}
 }

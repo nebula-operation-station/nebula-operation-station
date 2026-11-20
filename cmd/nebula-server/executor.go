@@ -283,6 +283,16 @@ func (l *lazyExecutor) GetPermitState(ctx context.Context, in *pb.GetPermitState
 	return nil, errNotConnected
 }
 
+// RejectPending makes lazyExecutor an executions.Rejecter, so the operations
+// overview can reject a pending proposal (spec 07 v29-07-01). The executor
+// refuses it for the server role unless a privileged session is open.
+func (l *lazyExecutor) RejectPending(ctx context.Context, in *pb.RejectPendingRequest, opts ...grpc.CallOption) (*pb.RejectPendingResponse, error) {
+	if c := l.c.Load(); c != nil {
+		return c.RejectPending(ctx, in, opts...)
+	}
+	return nil, errNotConnected
+}
+
 func (l *lazyExecutor) RunAttached(ctx context.Context, in *pb.RunAttachedRequest, opts ...grpc.CallOption) (*pb.RunAttachedResponse, error) {
 	if c := l.c.Load(); c != nil {
 		return c.RunAttached(ctx, in, opts...)
