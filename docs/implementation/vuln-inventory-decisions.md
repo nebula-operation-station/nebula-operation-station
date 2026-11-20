@@ -221,10 +221,17 @@ schedule?
   the operator-installed Trivy under the P1-30 rules.
 - `internal/executions/actions/actions.go:500`: `image.packages` takes
   `Params: imageParam`, i.e. the image digest is a required parameter.
-- `internal/executions/readgrants_propose.go:173` (`leaseableAction`): a
-  proposed read lease can contain only actions for which this predicate holds;
-  an action with a required parameter is not a lease target. So a lease cannot
-  carry the image digest and `image.packages` cannot run from a lease today.
+- `internal/executions/readgrants_propose.go:173-179` (`leaseableAction`): a
+  proposed read lease can contain only actions for which this predicate holds.
+  It requires `len(a.Params) == 0` (line 178), so `image.packages` (it takes
+  `imageParam`) is not a lease target today. This is a code predicate, not an
+  ADR rule. ADR 0007 line 69 lets each lease action carry exact parameters: the
+  Actions row binds "exact canonical parameters hash", and
+  `permit.ReadGrantAction.ParametersHash` (`internal/permit/lease.go:147-152`)
+  is that binding. The permit allowlist already lists `image.packages` with the
+  digest pinned by the grant's parameters hash (`internal/permit/lease.go:99-103`).
+  So under ADR 0007 a lease could carry one image digest. ADR 0011 D3 does not
+  say whether `image.packages` may be leased; the code blocks it today.
 - Host reads: `package.list_installed` has no parameters and is in the code's
   read-only allowlist (`internal/permit/lease.go:98`), so `leaseableAction`
   (`internal/executions/readgrants_propose.go:173`) accepts it.
@@ -246,12 +253,13 @@ schedule?
 - Line 39 of ADR 0007 is the **pre-ADR baseline** for schedule grants (privileged
   session to propose and browser-approve). The read-lease decision replaces
   that baseline; it does not apply to read leases any more.
-- **Open gap in ADR 0007.** Its initial allowlist (lines 83–84) lists seven
-  actions and does not name `package.list_installed`. The code adds it
-  (`internal/permit/lease.go:95–98`), and ADR 0011 line 1175 lists the spec
-  text (spec 07 and 10) still to be written for it as a read-only allowlist
-  entry. Neither ADR 0007 nor the spec yet states that it may sit in a lease. This is the one point of host-read approval that ADR 0007 does
-  not settle.
+- **Decided by ADR 0011 D3 (not open).** ADR 0011 D3 (lines 198–199) adds
+  `package.list_installed` to the read-lease allowlist with its own cost limit
+  (at most every 6 h per host). The code does this: `internal/permit/lease.go:95–98`,
+  with `PackageListInstalledMinInterval` at `lease.go:114`. What is still stale
+  is the text: ADR 0007's initial allowlist (lines 83–84) does not name it, and
+  the spec text (ADR 0011 line 1175: spec 07 and 10) is still to be written.
+  That is a documentation follow-up (see the list at the end), not a decision.
 
 **Options for (a) image freshness.**
 
@@ -259,7 +267,9 @@ schedule?
 2. Put `image.packages` in its own follow-up chain after iv10, with its own
    decision on digest source and scheduling. Until then, image packages are not
    stored and image subjects stay Unconfirmed (E3).
-3. Make the image digest a lease parameter (changes `leaseableAction`).
+3. Allow one exact image digest per lease action: the digest is a lease
+   parameter bound by `ParametersHash` (ADR 0007 line 69). This changes
+   `leaseableAction` (`readgrants_propose.go:178`).
 
 **Recommendation for (a): option 2.** Scheduling needs a decision on where the
 digest comes from and who approves it, and the ticket chain does not have that.
@@ -285,13 +295,18 @@ visible instead of silent. Two details stay open (see the decision list below):
 the lease interval, which sets the cadence that E2 depends on, and the
 allowlist gap above.
 
-**Decision needed.** Confirm (a) option 2. For (b), no approver decision is
-needed. Open: (1) whether `package.list_installed` may sit in a read lease, since
-ADR 0007's allowlist does not name it; (2) the default interval of a host read
-lease, which E2 needs.
+**Decision needed.** Confirm (a) option 2, or choose option 1 or 3. For (b), no
+approver decision is needed. Open: (1) whether `image.packages` may be leased
+with a digest (see the `leaseableAction` bullet above; ADR 0011 D3 is silent);
+(2) the default interval of a host read lease, which E2 needs. ADR 0007 line 72
+requires a minimum interval in the grant digest but sets no default. Whether
+`package.list_installed` may sit in a read lease is decided (ADR 0011 D3) and
+is not listed here.
 
-**Consequence for the code.** No code change in this paper. No new read grant
-is created by the server; `leaseableAction` stays as it is.
+**Consequence for the code.** None until the maintainer decides. If (a) option 3
+is chosen, `leaseableAction` (`readgrants_propose.go:178`) changes and needs its
+own security review; with options 1 or 2 it stays as it is. With (b) option 2
+the server creates no read grant.
 
 ---
 
@@ -306,10 +321,12 @@ Once the maintainer decides, the following text must be written by a maintainer:
    proposed).
 3. **ADR 0011 D5 closure-class table**: a row for "host subject with no stored
    read" (E3 option 2), and the D3 rule for an unknown OS release (iv03).
-4. **ADR 0011 D3 `image.packages`**: freshness and scheduling (E4 a).
-5. **ADR 0007 initial allowlist or spec 07**: state whether
-   `package.list_installed` may be in a read lease (E4 b, open gap). Host read
-   leases need no new ADR text on approval: ADR 0007 already decides it.
+4. **ADR 0011 D3 `image.packages`**: freshness, scheduling, and whether it may
+   be leased with a digest (E4 a, options 1–3).
+5. **ADR 0007 initial allowlist or spec 07 and 10** (text only; no decision
+   open): record `package.list_installed` as decided by ADR 0011 D3 lines
+   198–199. Host read leases need no new ADR text on approval: ADR 0007 already
+   decides it.
 6. **`docs/spec/03-processes-and-data.md`** (vulnerability tables, line 57):
    name the package-read table, its retention rule and whether it has a
    column for the completeness flag.
