@@ -37,6 +37,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -213,6 +214,7 @@ func (c *ag24Chat) Chat(_ context.Context, req llmclient.Request) (llmclient.Res
 type ag24Env struct {
 	t        *testing.T
 	h        *harness
+	dbPath   string
 	db       *sql.DB
 	audit    *auditlog.Store
 	log      *syncBuffer // server log (JSON), audit lines included
@@ -241,7 +243,8 @@ func newAG24Env(t *testing.T, label string) *ag24Env {
 	t.Helper()
 	e := &ag24Env{t: t, h: newHarness(t, harnessOptions{}), log: &syncBuffer{}, pins: map[string]string{}}
 	var err error
-	e.db, err = serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
+	e.dbPath = filepath.Join(t.TempDir(), "server.db")
+	e.db, err = serverdb.Open(e.dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1092,43 +1095,26 @@ func TestAG24NoteAndQuestionTextNeverInMessagesLogsOrAudit(t *testing.T) {
 	if c, b := e.postFix("Sicherheitsupdates "+ag24Marker+"-S", map[string]string{"action_id": "package.install_security", "host_id": ag24HostWeb, "why": "why " + ag24Marker + "-W"}); c != http.StatusCreated {
 		t.Fatalf("fix note = %d %s", c, b)
 	}
-	// The accepted fix note becomes opsagent.suggestion_new the way the
-	// server builds it (cmd/nebula-server ops_suggestion.go): host label from
-	// the server's own snapshot, the tier, the note ID. The event type has no
-	// field for any other text.
+	// The event type has no field for any text but the label.
 	if got, want := ag24FieldNames(reflect.TypeFor[notify.SuggestionEvent]()), []string{"English", "Host", "Key", "NoteID", "Tier"}; !slices.Equal(got, want) {
 		t.Fatalf("notify.SuggestionEvent fields %v, want only %v", got, want)
 	}
-	tmpl, err := notify.NewSuggestionTemplate(ag24NOSBase)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Every note the ops API accepted goes through the server's own path to
+	// opsagent.suggestion_new (cmd/nebula-server ops_suggestion.go:
+	// wireOpsSuggestions on this server.db, NoteAccepted, handle, the fixed
+	// template, the notifier sink); a server that put note text into the
+	// message, in Host or anywhere else, fails the marker check.
 	e.mu.Lock()
 	accepted := slices.Clone(e.accepted)
 	e.mu.Unlock()
-	var msgs []string
-	for _, n := range accepted {
-		if n.Kind != opsnotes.KindFix {
-			continue
-		}
-		var p opsfacts.LabProjection
-		if err := json.Unmarshal([]byte(n.Snapshot), &p); err != nil {
-			t.Fatal(err)
-		}
-		ev, err := tmpl.Event(notify.SuggestionEvent{Key: "g|critical", Host: p.Host.Label, Tier: "critical", NoteID: n.ID}, time.Now())
-		if err != nil {
-			t.Fatal(err)
-		}
-		msg := ev.Title() + "\n" + ev.Text()
-		if !strings.Contains(msg, "Neuer Fix-Vorschlag für web01, Tier critical") || !strings.Contains(msg, ag24NOSBase+"/") {
-			t.Fatalf("suggestion message %q lacks label, tier or link", msg)
-		}
-		msgs = append(msgs, msg)
-	}
+	msgs, serverLog := ag24ServerSuggestions(t, e.dbPath, accepted)
 	if len(msgs) != 1 {
-		t.Fatalf("%d suggestion messages, want 1", len(msgs))
+		t.Fatalf("%d suggestion messages from %d accepted notes, want 1: %q", len(msgs), len(accepted), msgs)
 	}
-	e.wantNoMarker("question, answer and fix note", msgs...)
+	if !strings.Contains(msgs[0], "Neuer Fix-Vorschlag für web01, Tier critical") || !strings.Contains(msgs[0], ag24NOSBase+"/") {
+		t.Fatalf("suggestion message %q lacks label, tier or link", msgs[0])
+	}
+	e.wantNoMarker("question, answer and fix note", append(msgs, serverLog)...)
 	// The audit trail still records each of them, by length and digest.
 	var q, notes int
 	for _, b := range e.auditBodies() {
@@ -1142,6 +1128,130 @@ func TestAG24NoteAndQuestionTextNeverInMessagesLogsOrAudit(t *testing.T) {
 	if q != 1 || notes != 2 {
 		t.Fatalf("audit has %d question and %d note entries, want 1 and 2", q, notes)
 	}
+}
+
+// ag24SuggestionDriver is added to package main of cmd/nebula-server through
+// a go build overlay (nothing is written to the source tree). It runs the
+// server's own suggestion path on the accepted notes: wireOpsSuggestions on
+// the test's server.db and NOS base, NoteAccepted for each note, the worker
+// step handle for each queued job, a recording notifier sink. It writes the
+// messages the sink received and the server log.
+const ag24SuggestionDriver = `// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/opsnotes"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
+)
+
+type ag24Sink struct{ msgs []string }
+
+func (s *ag24Sink) Suggestion(_ context.Context, _ string, e notify.Event) int {
+	s.msgs = append(s.msgs, e.Title()+"\n"+e.Text())
+	return 1
+}
+func (s *ag24Sink) SuggestionKeys() []string       { return nil }
+func (s *ag24Sink) RestoreSuggestions([]string)    {}
+func (s *ag24Sink) ForgetSuggestions([]string)     {}
+
+func TestAG24OverlaySuggestionPath(t *testing.T) {
+	in, err := os.ReadFile(os.Getenv("AG24_NOTES"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var notes []opsnotes.Note
+	if err := json.Unmarshal(in, &notes); err != nil {
+		t.Fatal(err)
+	}
+	db, err := serverdb.Open(os.Getenv("AG24_DB"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, opsNotesDir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var logBuf bytes.Buffer
+	sink := &ag24Sink{}
+	s, err := wireOpsSuggestions(db, dir, os.Getenv("AG24_ORIGIN"), sink, slog.New(slog.NewJSONHandler(&logBuf, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range notes {
+		s.NoteAccepted(n)
+	}
+	for len(s.queue) > 0 {
+		s.handle(context.Background(), <-s.queue)
+	}
+	out, err := json.Marshal(map[string]any{"messages": sink.msgs, "log": logBuf.String()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(os.Getenv("AG24_OUT"), out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+`
+
+// ag24ServerSuggestions runs the accepted notes through the server's real
+// suggestion path (ag24SuggestionDriver in package main of cmd/nebula-server,
+// built with the go tool and -overlay, GOPROXY=off so nothing is fetched)
+// and returns the messages and the server log it produced.
+func ag24ServerSuggestions(t *testing.T, dbPath string, notes []opsnotes.Note) ([]string, string) {
+	t.Helper()
+	goTool, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatalf("the go tool is needed to run the server's suggestion path: %v", err)
+	}
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := privateDir(t)
+	write := func(name string, b []byte) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	driver := write("driver.go", []byte(ag24SuggestionDriver))
+	overlay := write("overlay.json", mustMarshal(t, map[string]any{"Replace": map[string]string{
+		filepath.Join(root, "cmd", "nebula-server", "zz_ag24_overlay_test.go"): driver}}))
+	notesFile := write("notes.json", mustMarshal(t, notes))
+	outFile := filepath.Join(dir, "out.json")
+
+	cmd := exec.CommandContext(t.Context(), goTool, "test", "-overlay", overlay, "-count=1",
+		"-run", "^TestAG24OverlaySuggestionPath$", "./cmd/nebula-server")
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "GOPROXY=off", "GOFLAGS=-mod=mod", "AG24_NOTES="+notesFile, "AG24_DB="+dbPath,
+		"AG24_ORIGIN="+ag24NOSBase, "AG24_OUT="+outFile)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("server suggestion path: %v\n%s", err, out)
+	}
+	b, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var res struct {
+		Messages []string `json:"messages"`
+		Log      string   `json:"log"`
+	}
+	if err := json.Unmarshal(b, &res); err != nil {
+		t.Fatal(err)
+	}
+	return res.Messages, res.Log
 }
 
 func ag24FieldNames(t reflect.Type) []string {
