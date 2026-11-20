@@ -34,8 +34,11 @@
 // token counts and order must agree, each token is byte-identical or holds one
 // placeholder whose value matches its class, and a copied placeholder is
 // reported as Unchanged. MatchShape only reports the host values; it does not
-// check them against the trusted host set. Still open in part 2: the command
-// catalog (built from the cmd/nebula command tree, not from the docs), the
-// shape builder from the code blocks of cited chunks, and checks V2, V4 and V5
-// (V5 needs the trusted host set; the docs cross-check runs at build time).
+// check them against the trusted host set. The shape builder (Shapes,
+// shapes.go) turns the code blocks of a cited chunk into shapes under ADR 0014
+// D4, "Shapes": only shell blocks, the logical lines, and the compound
+// constructs and heredocs excluded with a reason. Still open in part 2: the
+// command catalog (built from the cmd/nebula command tree, not from the docs),
+// and checks V2, V4 and V5 (V5 needs the trusted host set; the docs cross-check
+// runs at build time).
 package helpcmd
