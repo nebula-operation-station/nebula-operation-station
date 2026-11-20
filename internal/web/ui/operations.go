@@ -174,7 +174,7 @@ type execView struct {
 	// Expired is true when the approval window ended before anyone
 	// approved (issue #71): nothing was run. PlanAgain opens the
 	// operation form prefilled with the same action, hosts and parameters.
-	Expired   bool
+	Expired bool
 	// Rejected is true when a person rejected the proposal (spec 07
 	// v29-07-01): nothing was run. It offers the same Plan again as Expired.
 	Rejected  bool
