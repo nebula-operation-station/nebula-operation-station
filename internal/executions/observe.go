@@ -29,9 +29,26 @@ type HostUpdates struct {
 	Packages       []osdebian.Package
 }
 
+// InstalledObserver receives every successful package.list_installed result
+// of a host, once, when the run finishes (ADR 0011 D3). The result is the
+// untrusted 1.1.0 JSON document the executor kept; the observer parses and
+// stores it, and must not fail the run: it has no error to return.
+type InstalledObserver interface {
+	ObserveInstalled(ctx context.Context, hostID, execID string, at time.Time, result []byte)
+}
+
+// SetInstalledObserver installs the observer of package.list_installed
+// results; nil turns it off. Call it before runs start.
+func (s *Service) SetInstalledObserver(o InstalledObserver) { s.installed = o }
+
 // observe keeps what successful read-only actions report about a host.
 func (s *Service) observe(execID, actionID, host, class string, result []byte) {
 	switch actionID {
+	case "package.list_installed":
+		// Only a success carries the document; other classes keep none.
+		if class == "success" && s.installed != nil {
+			s.installed.ObserveInstalled(s.ctx, host, execID, s.now(), result)
+		}
 	case "package.install_security", "package.install_all", "system.reboot":
 		// Packages may have changed: the stored update list is stale.
 		if class != "precheck_failed" && class != "not_executed" {
