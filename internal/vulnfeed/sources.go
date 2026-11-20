@@ -28,6 +28,10 @@ const (
 	MaxFeedBytesNVD int64 = 2 << 30
 	// MaxFeedBytesDefault caps every other feed file.
 	MaxFeedBytesDefault int64 = 512 << 20
+	// MaxFeedBytesOSVUbuntu caps the OSV Ubuntu all.zip only. The archive
+	// was about 821 MB on 2026-11-20 and outgrew the default cap. The body
+	// is staged to a file, never held in memory.
+	MaxFeedBytesOSVUbuntu int64 = 2 << 30
 )
 
 // DateKind says where a feed's content date comes from (D4).
@@ -153,7 +157,7 @@ var feedTable = []Feed{
 	{
 		Name: "osv-ubuntu", SourceID: "osv",
 		URL:       "https://osv-vulnerabilities.storage.googleapis.com/Ubuntu/all.zip",
-		Integrity: vulnfinding.IntegrityNone, MaxBytes: MaxFeedBytesDefault, DateKind: DateKindDated,
+		Integrity: vulnfinding.IntegrityNone, MaxBytes: MaxFeedBytesOSVUbuntu, DateKind: DateKindDated,
 	},
 	{
 		Name: "osv-alpine", SourceID: "osv",
