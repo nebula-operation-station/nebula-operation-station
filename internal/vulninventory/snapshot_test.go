@@ -675,7 +675,7 @@ func TestLatestSizesQuerySelectsTheSameReadsAsLatestAll(t *testing.T) {
 	mustPut(t, s, testRead("h2", true, 0))
 	mustPut(t, s, testRead("h3", false, 1))
 
-	all, err := s.LatestAll(context.Background())
+	all, _, err := s.LatestAll(context.Background())
 	if err != nil {
 		t.Fatalf("LatestAll: %v", err)
 	}
