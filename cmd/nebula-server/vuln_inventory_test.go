@@ -821,3 +821,63 @@ func TestVulnSweepPrunesSnapshotsOlderThanMaxAge(t *testing.T) {
 		t.Fatalf("pruned snapshot: err = %v, want ErrVulnSnapshotGone", err)
 	}
 }
+
+// countingReads counts the snapshot loads of the store. Each load decodes
+// every pinned read body of the snapshot, so the count is the decode count.
+type countingReads struct {
+	*vulninventory.Store
+	loads int
+}
+
+func (c *countingReads) Snapshot(ctx context.Context, id string) (vulninventory.Snapshot, error) {
+	c.loads++
+	return c.Store.Snapshot(ctx, id)
+}
+
+// TestVulnInventoryDecodesSnapshotOncePerID: paging the export and starting
+// runs against one snapshot decode its bodies once. Every later call with the
+// same ID is served from the decoded copy, and the current snapshot keeps the
+// same ID while it is reused.
+func TestVulnInventoryDecodesSnapshotOncePerID(t *testing.T) {
+	e := newSrcEnv(t)
+	e.addHost(t, srcHost)
+	e.addRead(t, srcRead(srcHost, "exec-1", e.clk.Now().Add(-time.Minute), true, "openssl"))
+	st, err := vulninventory.New(e.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counted := &countingReads{Store: st}
+	inv := newVulnInventoryOn(counted, e.db, inventory.NewWithNow(e.db, e.clk.Now), e.clk.Now)
+	ctx := context.Background()
+	first, err := inv.VulnSnapshot(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range 5 {
+		cur, err := inv.VulnSnapshot(ctx, "")
+		if err != nil || cur.ID != first.ID {
+			t.Fatalf("current #%d = %s, %v; want %s", i, cur.ID, err, first.ID)
+		}
+		byID, err := inv.VulnSnapshot(ctx, first.ID)
+		if err != nil || byID.ID != first.ID || len(byID.Subjects) != 1 {
+			t.Fatalf("page #%d = %+v, %v; want the same snapshot", i, byID, err)
+		}
+	}
+	if counted.loads != 1 {
+		t.Fatalf("snapshot bodies decoded %d times for one snapshot, want 1", counted.loads)
+	}
+}
+
+// TestVulnInventoryFutureTakenAtIsGone: a snapshot whose TakenAt lies after
+// the clock (the wall clock stepped back) is expired, as the reuse rule of
+// the store treats a negative age. It is Gone by ID even when it is cached.
+func TestVulnInventoryFutureTakenAtIsGone(t *testing.T) {
+	e := newSrcEnv(t)
+	e.addHost(t, srcHost)
+	e.addRead(t, srcRead(srcHost, "exec-1", e.clk.Now().Add(-time.Minute), true, "openssl"))
+	p, _ := e.exportPage(t)
+	e.clk.Add(-2 * time.Hour)
+	if _, err := e.inv.VulnSnapshot(context.Background(), p.SnapshotID); !errors.Is(err, api.ErrVulnSnapshotGone) {
+		t.Fatalf("snapshot taken after the clock: err = %v, want ErrVulnSnapshotGone", err)
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
@@ -164,10 +165,47 @@ const vulnSnapshotIDMaxBytes = 64
 // every generation a run has seen, and it is Gone once it is older than
 // vulnstore.MaxInventoryAge.
 type vulnInventory struct {
-	store *vulninventory.Store
+	reads inventoryReads
 	db    *sql.DB
 	hosts vulnHostLister
 	now   func() time.Time
+	cache *snapshotCache
+}
+
+// inventoryReads is the part of vulninventory.Store the export uses.
+// Snapshot is the only call that decodes the pinned read bodies, so tests
+// count its calls.
+type inventoryReads interface {
+	Current(ctx context.Context, hosts []string, maxReuse time.Duration, floor int64) (vulninventory.Snapshot, error)
+	Snapshot(ctx context.Context, id string) (vulninventory.Snapshot, error)
+}
+
+// snapshotCache holds the decoded snapshot that was served last. A snapshot
+// is immutable for its ID, so the decoded copy is valid for that ID for as
+// long as the snapshot is fresh (see vulnInventory.fresh). One entry is
+// enough: Hermes pages one snapshot at a time, and a run start names the
+// snapshot of its export.
+type snapshotCache struct {
+	mu   sync.Mutex
+	snap api.VulnSnapshot
+	set  bool
+}
+
+// get returns the cached snapshot when it has ID.
+func (c *snapshotCache) get(id string) (api.VulnSnapshot, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.set && c.snap.ID == id {
+		return c.snap, true
+	}
+	return api.VulnSnapshot{}, false
+}
+
+// put replaces the cached snapshot with s.
+func (c *snapshotCache) put(s api.VulnSnapshot) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.snap, c.set = s, true
 }
 
 // newVulnInventory returns the export's inventory on db (server.db), with the
@@ -183,7 +221,22 @@ func newVulnInventory(db *sql.DB, hosts vulnHostLister, now func() time.Time) (v
 	if err != nil {
 		return vulnInventory{}, fmt.Errorf("vulnerability inventory: %w", err)
 	}
-	return vulnInventory{store: st, db: db, hosts: hosts, now: now}, nil
+	return newVulnInventoryOn(st, db, hosts, now), nil
+}
+
+// newVulnInventoryOn returns the export's inventory over reads, which is the
+// store on db in production. now must not be nil.
+func newVulnInventoryOn(reads inventoryReads, db *sql.DB, hosts vulnHostLister, now func() time.Time) vulnInventory {
+	return vulnInventory{reads: reads, db: db, hosts: hosts, now: now, cache: &snapshotCache{}}
+}
+
+// fresh reports whether a snapshot taken at takenAt may still be served: it
+// is at most vulnstore.MaxInventoryAge old. A TakenAt after the clock (the
+// wall clock stepped back) is not fresh, as the store's reuse rule counts a
+// negative age as expired.
+func (v vulnInventory) fresh(takenAt time.Time) bool {
+	age := v.now().UTC().Sub(takenAt)
+	return age >= 0 && age <= vulnstore.MaxInventoryAge
 }
 
 // VulnSnapshot returns the current snapshot when id is empty: the newest read
@@ -208,37 +261,52 @@ func (v vulnInventory) VulnSnapshot(ctx context.Context, id string) (api.VulnSna
 	}
 	// Generations of the old hourly IDs (time in hours) stay below the new ones.
 	hour := v.now().UTC().Truncate(vulnInventoryBucket).Unix() / int64(vulnInventoryBucket/time.Second)
-	cur, err := v.store.Current(ctx, ids, vulnInventoryBucket, max(floor, hour))
+	cur, err := v.reads.Current(ctx, ids, vulnInventoryBucket, max(floor, hour))
 	if err != nil {
 		return api.VulnSnapshot{}, fmt.Errorf("vuln inventory: current: %w", err)
 	}
-	// Current leaves the bodies out; Snapshot loads them, and the snapshot
-	// is immutable, so the two reads agree.
-	full, err := v.store.Snapshot(ctx, cur.ID)
-	if err != nil {
-		return api.VulnSnapshot{}, fmt.Errorf("vuln inventory: snapshot %s: %w", cur.ID, err)
+	// Current leaves the bodies out. The snapshot is immutable for its ID,
+	// so a decoded copy of the same ID is the same snapshot: decode only
+	// when it is not cached.
+	if s, ok := v.cache.get(cur.ID); ok {
+		return s, nil
 	}
-	return toVulnSnapshot(full), nil
+	return v.load(ctx, cur.ID)
 }
 
 // byID returns the snapshot with id, or api.ErrVulnSnapshotGone when the
 // store does not hold it (unknown, pruned, an ID of the old form, or an ID
-// the store cannot hold) or when it is older than vulnstore.MaxInventoryAge.
+// the store cannot hold) or when it is not fresh (see fresh).
 func (v vulnInventory) byID(ctx context.Context, id string) (api.VulnSnapshot, error) {
 	if len(id) > vulnSnapshotIDMaxBytes {
 		return api.VulnSnapshot{}, api.ErrVulnSnapshotGone
 	}
-	s, err := v.store.Snapshot(ctx, id)
+	if s, ok := v.cache.get(id); ok {
+		if !v.fresh(s.TakenAt) {
+			return api.VulnSnapshot{}, api.ErrVulnSnapshotGone
+		}
+		return s, nil
+	}
+	return v.load(ctx, id)
+}
+
+// load decodes the snapshot with id from the store, caches it and returns it.
+// The store's refusals of an unknown or unusable ID are Gone; a snapshot that
+// is not fresh is Gone too and is not cached.
+func (v vulnInventory) load(ctx context.Context, id string) (api.VulnSnapshot, error) {
+	s, err := v.reads.Snapshot(ctx, id)
 	if errors.Is(err, vulninventory.ErrSnapshotGone) || errors.Is(err, vulninventory.ErrInvalidRead) {
 		return api.VulnSnapshot{}, api.ErrVulnSnapshotGone
 	}
 	if err != nil {
-		return api.VulnSnapshot{}, fmt.Errorf("vuln inventory: snapshot: %w", err)
+		return api.VulnSnapshot{}, fmt.Errorf("vuln inventory: snapshot %s: %w", id, err)
 	}
-	if v.now().UTC().Sub(s.TakenAt) > vulnstore.MaxInventoryAge {
+	out := toVulnSnapshot(s)
+	if !v.fresh(out.TakenAt) {
 		return api.VulnSnapshot{}, api.ErrVulnSnapshotGone
 	}
-	return toVulnSnapshot(s), nil
+	v.cache.put(out)
+	return out, nil
 }
 
 // toVulnSnapshot maps a stored snapshot to the export's snapshot type.
