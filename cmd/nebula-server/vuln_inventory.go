@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
@@ -38,6 +39,15 @@ type vulnInventoryService struct {
 	store *vulninventory.Store
 	facts factsSource
 	log   *slog.Logger
+	// closer closes findings by a complete read (D5 paths 1 and 2). It is
+	// set once the findings store exists (setCloser); until then a complete
+	// read closes nothing, and the next complete read does.
+	closer atomic.Pointer[vulnstore.Store]
+}
+
+// setCloser sets the findings store that complete reads close findings in.
+func (v *vulnInventoryService) setCloser(st *vulnstore.Store) {
+	v.closer.Store(st)
 }
 
 // newVulnInventoryService returns the service on db (server.db) that reads
@@ -116,12 +126,43 @@ func (v *vulnInventoryService) ObserveInstalled(parent context.Context, hostID, 
 		v.markFailed(parent, hostID, execID, at, reason)
 		return
 	}
+	if read.Complete {
+		v.closeByInventory(ctx, parent, hostID, execID, read)
+	}
 	binaries := 0
 	for _, c := range read.Components {
 		binaries += len(c.Binaries)
 	}
 	v.log.Info("audit", "kind", "vuln_inventory_read_stored", "host", hostID, "execution", execID,
 		"complete", read.Complete, "binaries", binaries, "sources", len(read.Components))
+}
+
+// closeByInventory closes the open findings of host that the complete read
+// settles (D5 paths 1 and 2) and writes the count as an audit line. A failure
+// is logged by class and does not fail the run; the findings stay open.
+func (v *vulnInventoryService) closeByInventory(ctx context.Context, parent context.Context, hostID, execID string, read vulninventory.Read) {
+	st := v.closer.Load()
+	if st == nil {
+		return
+	}
+	versions := make(map[string]string, len(read.Components))
+	for _, c := range read.Components {
+		versions[c.Source] = c.SourceVersion
+	}
+	closed, err := st.CloseByInventory(ctx, vulnstore.InventoryRead{
+		Subject:        vulnstore.Subject{Kind: vulnfinding.SubjectHost, ID: hostID},
+		Complete:       read.Complete,
+		ReadAt:         read.ReadAt,
+		SourceVersions: versions,
+	})
+	if err != nil {
+		if v.shutdown(parent, hostID, execID) {
+			return
+		}
+		v.log.Error("vulnerability inventory: close by inventory", "host", hostID, "execution", execID, "error_class", "close")
+		return
+	}
+	v.log.Info("audit", "kind", "vuln_closed_by_inventory", "host", hostID, "execution", execID, "closed", len(closed))
 }
 
 // shutdown reports whether parent is cancelled (the server is stopping). If

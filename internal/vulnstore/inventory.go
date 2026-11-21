@@ -26,9 +26,10 @@ type InventoryRead struct {
 	SourceVersions map[string]string
 }
 
-// checkable reports whether NOS re-checks the finding's match basis and
+// Checkable reports whether NOS re-checks the finding's match basis and
 // ecosystem (D4): distro_tracker or osv_range on Debian, Ubuntu or Alpine.
-func checkable(r vulnfinding.Record) bool {
+// The store and the closure classifier share this one rule.
+func Checkable(r vulnfinding.Record) bool {
 	if r.MatchBasis != vulnfinding.MatchDistroTracker && r.MatchBasis != vulnfinding.MatchOSVRange {
 		return false
 	}
@@ -70,7 +71,7 @@ func (s *Store) CloseByInventory(ctx context.Context, read InventoryRead) ([]vul
 	n := unix(now)
 	for _, f := range open {
 		r := f.Record
-		if !checkable(r) || vulnver.IsKernelSource(r.Component.SourcePackage) {
+		if !Checkable(r) || vulnver.IsKernelSource(r.Component.SourcePackage) {
 			continue
 		}
 		installed, present := read.SourceVersions[r.Component.SourcePackage]
