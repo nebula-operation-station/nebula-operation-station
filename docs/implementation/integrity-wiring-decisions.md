@@ -105,10 +105,13 @@ Work that follows from the decisions (moved here from section 3.1 on
 ## 2. Open points
 
 Each point: question, what the ADR says, what the code says, options,
-recommendation. Nothing below is decided.
+recommendation. The points marked "Decided 2026-11-21" follow the decision
+block above; the others are still open.
 
 ### (a) Who plans the scans (scheduling owner)
 
+- **Decided 2026-11-21: option 1** (see the Decision block). The ADR wording
+  stays until IG-05 lands, as noted below.
 - **ADR:** the server's scheduler, or a collector role, "*verify* which one
   owns scheduling when IG-05 lands" (`docs/adr/0015-integrity-monitoring.md:492-494`).
   The executor authorizes and dials; the server or collector only triggers.
@@ -137,6 +140,7 @@ recommendation. Nothing below is decided.
 
 ### (b) Transport limits (1 MiB and 10 min against 128 MiB and 40 min)
 
+- **Decided 2026-11-21: option 2, together with (g)** (see the Decision block).
 - **ADR:** the 128 MiB document per run and the 40 min action timeout are
   chosen so that the scan fits (`docs/adr/0015-integrity-monitoring.md:624-627`).
   The ADR says that the 1 MiB `result.json` default of spec 09 needs an
@@ -196,11 +200,15 @@ recommendation. Nothing below is decided.
   option 1 is the smaller change is withdrawn. Option 2 does not hold the permit
   mutex, so for a 40 min run this paper would lean to option 2, once the durable
   path's lock and revocation behaviour is checked (not done here). Option 2 also
-  needs (g) decided. The maintainer decides; nothing here is decided. The spec 09
+  needs (g) decided. Decided 2026-11-21 together with (g): option 2, as a
+  durable job (see the Decision block). The spec 09
   amendment comes first in either case, and the ADR's limits stay the only numbers.
 
 ### (c) Who computes the baseline digest: server or executor
 
+- **Decided 2026-11-21: option 1** (see the Decision block). The server digest is
+  removed after the executor check is wired; the open direction question below
+  still applies.
 - **ADR:** the executor alone decides what goes into a baseline; the digest the
   admin approves is computed by the executor, never taken from the server
   (`docs/adr/0015-integrity-monitoring.md:1035-1037`).
@@ -246,6 +254,8 @@ recommendation. Nothing below is decided.
 
 ### (d) Lease runner and proposal drop actions with parameters
 
+- **Decided 2026-11-21: option 1, restricted to `FimScanActionID`, with (i) to (iii)**
+  (see the Decision block).
 - **ADR:** the grant freezes a profile ID and a mode, and the lease binds the
   exact action, script hash and parameters (`docs/adr/0015-integrity-monitoring.md:489-500`;
   `permit/lease_fimscan.go` implements the lease check).
@@ -311,6 +321,8 @@ recommendation. Nothing below is decided.
 
 ### (e) Severity for paths the table does not cover
 
+- **Decided 2026-11-21: option 2** (see the Decision block). Option 1 stays
+  possible later; the text below is the analysis.
 - **ADR:** the severity table row "Other changed or new file in `/etc` or a
   watched `/usr` root (D5)" is `high` (`docs/adr/0015-integrity-monitoring.md:1518`).
   Local software is always compared against the baseline (`:520`): `/usr/local/bin`,
@@ -365,6 +377,7 @@ recommendation. Nothing below is decided.
 
 ### (g) Durable actions cannot run through read leases (new)
 
+- **Decided 2026-11-21: option 2, together with (b)** (see the Decision block).
 - **ADR:** the ADR does not say whether `fim.scan` is durable. It names a 40 min
   action timeout (`:624-627`) and calls `fim.scan` a read-only action
   (`:481-482`). The ADR never uses the word "durable".
@@ -388,10 +401,11 @@ recommendation. Nothing below is decided.
      durable maximum (section 2 (b) option 2).
   3. *Shorten the scan below the attached 10 min limit.* Contradicts the ADR's
      40 min budget (`:624-627`). Not recommended.
-- **Recommendation:** not decided here. Option 1 needs the (b) guard change
+- **Decided 2026-11-21 together with (b): option 2** (see the Decision block).
+  The lease rule change is ADR 0007 territory and is decided there as well.
+- **Recommendation (before the decision):** option 1 needs the (b) guard change
   before a 40 min run; option 2 avoids the permit mutex but needs the lease rule
-  change and a durable branch. Decide (g) together with (b). The lease rule is
-  ADR 0007 territory; the maintainer decides it.
+  change and a durable branch.
 
 ## 3. Work split
 
@@ -476,8 +490,8 @@ No Go code changed; no test is possible for a document. Instead:
   and the ADR line numbers in sections 2 to 5. Round 3 re-read the code for
   the points named in its review: section 1 (baseline and findings rows), section
   2 (b), (c), (d) and (g), and the lock and revocation callers of the permit mutex.
-- No option in this paper is presented as decided. Where the ADR is open, the
-  text says so.
+- Options marked "Decided 2026-11-21" follow the maintainer's decision block at
+  the top. All other options are open, and the text says so.
 - Review round 4 (uf13g, Claude): the (d) lease-run parameter check was re-checked
   at `internal/permit/lease.go:950-1024` (`checkReadRun`); `permit.go:814-854` is
   `authorizeGrant` on the permit path. The IG-03 row and `integrity_findings` were
