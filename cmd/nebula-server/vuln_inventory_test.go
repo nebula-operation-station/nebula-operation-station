@@ -897,6 +897,48 @@ func TestVulnInventoryFutureTakenAtIsGone(t *testing.T) {
 	}
 }
 
+// TestVulnSweepLoopPrunesSnapshots: the sweep loop of runSweeps prunes the
+// expired inventory snapshots, not only sweepSnapshots when it is called
+// directly. The loop reports each sweep through swept after it has run the
+// snapshot prune, so the snapshot is gone when the first sweep is reported.
+func TestVulnSweepLoopPrunesSnapshots(t *testing.T) {
+	e := newSrcEnv(t)
+	e.addHost(t, srcHost)
+	e.addRead(t, srcRead(srcHost, "exec-1", e.clk.Now().Add(-2*time.Minute), true, "openssl"))
+	old, _ := e.exportPage(t)
+	e.addRead(t, srcRead(srcHost, "exec-2", e.clk.Now().Add(-time.Minute), true, "curl"))
+	_, _ = e.exportPage(t)
+	if _, err := e.db.Exec(`UPDATE vuln_inventory_snapshots SET taken_at = taken_at - ? WHERE id = ?`,
+		int64((vulnstore.MaxInventoryAge + time.Hour).Seconds()), old.SnapshotID); err != nil {
+		t.Fatal(err)
+	}
+	swept := make(chan struct{}, 1)
+	e.svc.swept = func(_ vulnstore.PruneResult, err error) {
+		if err == nil {
+			select {
+			case swept <- struct{}{}:
+			default:
+			}
+		}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { e.svc.runSweeps(ctx, 10*time.Millisecond); close(done) }()
+	defer func() { cancel(); <-done }()
+	select {
+	case <-swept:
+	case <-time.After(vtWait):
+		t.Fatal("no sweep ran")
+	}
+	var n int
+	if err := e.db.QueryRow(`SELECT COUNT(*) FROM vuln_inventory_snapshots WHERE id = ?`, old.SnapshotID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("expired snapshot still stored after the sweep loop ran")
+	}
+}
+
 // recordingReads stands in for a run start that commits between the floor
 // read of the export and its check: after the first Current it records the
 // generation of the snapshot it returned as the store's run floor, as a run
