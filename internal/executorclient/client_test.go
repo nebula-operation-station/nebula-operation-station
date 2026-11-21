@@ -70,8 +70,8 @@ type harness struct {
 	dataDir string // executor.db directory (BackupExecutor snapshot source)
 	keysDir string // SSH key files (BackupExecutor key source)
 	rp      virtualwebauthn.RelyingParty
-	dev    virtualwebauthn.Authenticator
-	cred   virtualwebauthn.Credential
+	dev     virtualwebauthn.Authenticator
+	cred    virtualwebauthn.Credential
 }
 
 type harnessOptions struct {
