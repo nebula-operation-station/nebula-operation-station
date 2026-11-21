@@ -1,6 +1,8 @@
 # PVE image preparation: wiring decision paper (ADR 0008 PV-03)
 
-Status: decision paper, proposal. No code is changed by this document.
+Status: **decided** by the maintainer, 2026-11-21; see "Decision (2026-11-21,
+maintainer)" below (previously: decision paper, proposal). No code is changed
+by this document.
 Date: 2026-11-20. Ticket: uf18 (gap G04). Scope: the path that prepares a
 PVE template from a signed catalog entry, so that `pve.guest.provision` can
 clone it. Read with [ADR 0008](../adr/0008-guest-provisioning.md) section 2
@@ -16,6 +18,28 @@ would otherwise stay refused for good); D5 settles how a missing template is
 told apart from an unreachable PVE; section D4 states the `pve-collector`
 rights and whether the wizard's Template VMID is bound. Text that changed is
 marked "(before)" where the old position matters.
+
+## Decision (2026-11-21, maintainer)
+
+The maintainer (Axel) decided on 2026-11-21 at 13:48 (UTC+1) in chat. Where the
+decision differs from the text below, the decision wins. Original wording
+(German), verbatim:
+
+> **uf18 (docs/implementation/pve-image-prepare-wiring.md, ADR 0008 PV-03):**
+> Empfehlungen angenommen: D1 (a) Propose/Commit-RPCs wie
+> Gast-Power/Provisioning; D2 (a) Katalog beim Executor-Start aus dem
+> Release-Bundle; D3 (a); D4 (a) Images-Seite unter /deploy, (b)
+> Auswahllisten im Wizard; D5 wie empfohlen.
+
+In English (translation by Claude, not part of the decision): the
+recommendations are accepted.
+
+- **D1 (a):** Propose/Commit RPCs, as for guest power and provisioning.
+- **D2 (a):** the catalog is loaded at executor start from the release bundle.
+- **D3 (a).**
+- **D4 (a):** an Images page under `/deploy`; **(b):** drop-downs in the
+  wizard.
+- **D5:** as recommended.
 
 ## 1. Current state (as built)
 
