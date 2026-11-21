@@ -37,6 +37,16 @@ const (
 	defaultSpool        = "/var/lib/nebula/pve"
 	defaultInterval     = time.Minute
 	defaultLive         = true
+	// collectorReadBudget is the collector's own bound on one ReadPVE call
+	// (pvecollect.Config.ReadTimeout, default 30 s; not exported, so the
+	// test checks the default through pvecollect's behaviour).
+	collectorReadBudget = 30 * time.Second
+	// collectorCallTimeout is the executor client's per-call timeout. It
+	// must not be below collectorReadBudget: the client default
+	// (executorclient.DefaultCallTimeout, 10 s) would cut every read that
+	// takes longer than 10 s, although the executor and the collector both
+	// allow it.
+	collectorCallTimeout = collectorReadBudget
 )
 
 // errLoopStopped means a service loop returned while the service was
@@ -74,10 +84,9 @@ func run(o options, log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	client, err := executorclient.NewPVECollector(ctx, executorclient.Options{
-		SocketPath:   o.socket,
-		ExecutorUser: o.executorUser,
-	})
+	// One client serves the sampling loop and the live watcher; its
+	// timeouts come from clientOptions only.
+	client, err := executorclient.NewPVECollector(ctx, clientOptions(o))
 	if err != nil {
 		return err
 	}
@@ -127,6 +136,17 @@ func run(o options, log *slog.Logger) error {
 	}
 	log.Info("nebula-pve-collector: stopped")
 	return nil
+}
+
+// clientOptions returns the executor client options for the collector. The
+// per-call timeout covers one collector read; without it the client would
+// cut every slow read at executorclient.DefaultCallTimeout.
+func clientOptions(o options) executorclient.Options {
+	return executorclient.Options{
+		SocketPath:     o.socket,
+		ExecutorUser:   o.executorUser,
+		DefaultTimeout: collectorCallTimeout,
+	}
 }
 
 // openLive opens the collector side of the live handoff under root,

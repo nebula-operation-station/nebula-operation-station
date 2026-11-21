@@ -50,7 +50,7 @@ func TestConcurrentWriterDuringLargestCompleteSucceeds(t *testing.T) {
 	r, keys := largestRun(t, e)
 
 	stats := recordApplyTx(e.st)
-	stop := startWriters(t, path, 4)
+	stop := startWriters(t, path, contendingWriters)
 	begin := time.Now()
 	c, cerr := e.st.Complete(e.ctx, r.ID)
 	took := time.Since(begin)

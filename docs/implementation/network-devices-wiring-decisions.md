@@ -24,7 +24,7 @@ collector can never be enabled safely (see section 3).
 2. **Lease (ND-13 producer).** The lease check exists, the lease document
    type exists, and the executor accepts a server-authored device lease. No
    web or CLI path proposes one, and `ProposeReadGrant` does not check device
-   targets against the registry (step 16). Approval does not show device
+   targets against the registry (step 8). Approval does not show device
    targets either (section 5). Without an approved lease every read is
    refused, which is the safe state.
 3. **Server (ND-16).** The server never starts the importer, has no device
@@ -34,18 +34,29 @@ collector can never be enabled safely (see section 3).
 4. **Pages (ND-19/ND-20).** The device page constructors exist and are
    tested, but nothing registers them on the server mux.
 
-**Security gap in the current tree (priority 1).** The missing device-target
-check at proposal (step 16) is exploitable today in default mode. The
-server role may propose a device lease (`internal/executor/roles.go:120`),
-and the executor accepts it. In default mode the browser approves any grant
-the web server has previewed, with a WebAuthn assertion
-(`internal/permit/lease.go:682-690`, `:737-758`; web handler
-`internal/web/ui/leases_new.go:395` and `:459-466`). The admin is shown no
-device targets (section 5). No web or CLI path creates a device lease today,
-so the exploit needs a server that proposes one through the web handler's
-flow: a compromised server process, or a future server code path. Fix A1-0
-(section 8) and the approval rule of section 5 before any device variant
-ships; neither depends on the other variants.
+**Security gap in the current tree (priority 1).** The attack is: the
+server proposes a lease for a real, registered device, and the browser
+approves it without seeing the device. The cause is the approval side. In
+default mode the browser approves any grant the web server has previewed,
+with a WebAuthn assertion (`internal/permit/lease.go:682-690`, `:737-758`;
+web handler `internal/web/ui/leases_new.go:395` and `:459-466`), and the
+preview shows no device targets (section 5). The server role may propose a
+device lease (`internal/executor/roles.go:120`), and the executor accepts
+it. The missing proposal-time device check (step 8, ticket A1-0) is a
+separate gap: it would refuse unknown, tombstoned or stale devices, but a
+registered, unblocked device passes it, so it does not stop this attack.
+A second, smaller gap was in the web code: `sameReadGrant`
+(`internal/executions/readgrants_propose.go`) did not compare
+`NetDeviceTargets`, so the server's check that the executor stored the grant
+it proposed ignored device targets. That comparison is fixed in code
+(`sameNetDeviceTargets`, uf14g). No web or CLI path creates a device lease
+today, so the exploit needs a server that proposes one through the web
+handler's flow: a compromised server process, or a future server code path.
+Ticket A1-0b (section 5, with the `sameReadGrant` fix) and the approval rule
+of section 5 are the fixes; they must land before any device variant ships.
+They do not depend on the other variants. Note that the preview fix does not
+protect against a compromised server, because the server renders the preview
+(section 5).
 
 ## 2. Current chain, with evidence
 
@@ -61,20 +72,20 @@ against the tree at the time of writing; re-check them if the file moved.
 | 5 | Executor performs the device read | **Missing**: answers `Unimplemented` after the spend | `internal/executor/netdev_read.go:110-112` |
 | 6 | Lease proposal and approval for a device read | **Missing producer**: `NetDeviceTargets` exists in the lease document; no non-test code sets it. The proposal RPC is open to the server only; the executor's validation accepts a device lease | `internal/permit/lease.go:178-181` (field), `:365` (`NetDeviceReadProfile` validated by `ParseReadGrant`); `internal/executor/roles.go:120` (`ProposeReadGrant`: `{server}` only), `:121` (`CommitReadGrant`: `{server}`), `:122` (`ListPendingReadGrants` and `:123` `ApproveReadGrantCLI`: `{admin}`). Approval depends on the mode: in default mode `CommitReadGrant` verifies a browser WebAuthn assertion for any pending grant (`internal/permit/lease.go:682-690` sets the challenge; `:737-758` verifies it; the web route is `internal/web/ui/leases_new.go:466`); in hardened mode (`cmd/nebula-executor/main.go:157-158`) the requirement is `RequireCLI`, `CommitReadGrant` refuses (`lease.go:746-748`) and only the CLI prompt (`cmd/nebula/readgrant.go:152`) approves. No device-specific rule exists. Nothing in `cmd/` or `internal/executions/` proposes a device lease |
 | 7 | Spool accepts only the closed set of typed read names | Works; the set is closed, enforced by `readLimits` | `internal/netdevcollect/spool.go:69` (`readLimits`, the closed set); names at `:43-63` |
-| 16 | Proposal checks every target against the registry | **Missing for devices**: `ProposeReadGrant` checks host and provider targets against the registry, not device targets, so a device lease for an unknown, tombstoned or stale device is accepted at proposal and refused only at spend time | `internal/executor/roles_read.go:97-122` (checks at `:105-121` cover `doc.Targets` and `doc.ProviderTargets`; no loop over `NetDeviceTargets`); device lookup exists at `internal/executor/netdev_read.go:90` |
-| 8 | Server starts the importer | **Missing**: `Importer` is constructed in tests only | `internal/netdevcollect/import.go:150` (type), `:205` (`Run`), `:101` (`ErrImporterNotConfigured`); no caller outside `import_test.go` |
-| 9 | Importer maps a record to a known device | Would reject every record | `internal/netdevcollect/import.go:89` (`unknown_device`), `:505-508` (`ErrDeviceNotFound` → reject) |
-| 10 | Store has device rows | **Missing**: `UpsertDevice` has no production caller | `internal/netdevinventory/store.go:286`; callers are `_test.go` files and `test/security/netdev_test.go` |
-| 11 | Server role may list devices | **Not allowed**: `ListNetDevices` is open to admin and the collector only | `internal/executor/roles.go:190` (`{admin, peercred.RoleNetDevCollector}`), `:193` (comment: the server calls neither), `:197` (`ReadNetDevice`: collector and admin) |
-| 12 | Server mounts the device pages | **Missing**: no registration; `cmd/nebula-server/main.go` has no reference to netdev | `internal/web/ui/netdev.go:146` (`NetDevPages` type), `:160` (constructor), `:182` (`Register`); `internal/web/ui/netdev_firewall.go:88` (`NetDevFirewallPage` type), `:96` (constructor), `:113` (`Register`); only callers are tests and `test/security/netdev_test.go` |
-| 13 | Credential-free packages used by the chain | **Not imported**: `cbscli`, `cbsparse`, `panapi` have no importer outside their own package | grep for their import paths over `*.go`: no hits outside the packages |
-| 14 | Redaction before the executor returns data (ADR 0010 D4: "returns sanitized records") | **Missing**: `internal/netdevredact/` does not exist (ND-07) | `docs/adr/0010-network-devices.md:275-277`; `network-devices.md:83` |
-| 15 | Lab verification of vendor claims | **Missing**: `docs/implementation/network-devices-lab.md` does not exist (ND-03; rule N5) | `network-devices.md:27` (N5), `:73` (ND-03) |
+| 8 | Proposal checks every target against the registry | **Missing for devices**: `ProposeReadGrant` checks host and provider targets against the registry, not device targets, so a device lease for an unknown, tombstoned or stale device is accepted at proposal and refused only at spend time | `internal/executor/roles_read.go:97-122` (checks at `:105-121` cover `doc.Targets` and `doc.ProviderTargets`; no loop over `NetDeviceTargets`); device lookup exists at `internal/executor/netdev_read.go:90` |
+| 9 | Server starts the importer | **Missing**: `Importer` is constructed in tests only | `internal/netdevcollect/import.go:150` (type), `:205` (`Run`), `:101` (`ErrImporterNotConfigured`); no caller outside `import_test.go` |
+| 10 | Importer maps a record to a known device | Would reject every record | `internal/netdevcollect/import.go:89` (`unknown_device`), `:505-508` (`ErrDeviceNotFound` → reject) |
+| 11 | Store has device rows | **Missing**: `UpsertDevice` has no production caller | `internal/netdevinventory/store.go:286`; callers are `_test.go` files and `test/security/netdev_test.go` |
+| 12 | Server role may list devices | **Not allowed**: `ListNetDevices` is open to admin and the collector only | `internal/executor/roles.go:190` (`{admin, peercred.RoleNetDevCollector}`), `:193` (comment: the server calls neither), `:197` (`ReadNetDevice`: collector and admin) |
+| 13 | Server mounts the device pages | **Missing**: no registration; `cmd/nebula-server/main.go` has no reference to netdev | `internal/web/ui/netdev.go:146` (`NetDevPages` type), `:160` (constructor), `:182` (`Register`); `internal/web/ui/netdev_firewall.go:88` (`NetDevFirewallPage` type), `:96` (constructor), `:113` (`Register`); only callers are tests and `test/security/netdev_test.go` |
+| 14 | Credential-free packages used by the chain | **Not imported**: `cbscli`, `cbsparse`, `panapi` have no importer outside their own package | grep for their import paths over `*.go`: no hits outside the packages |
+| 15 | Redaction before the executor returns data (ADR 0010 D4: "returns sanitized records") | **Missing**: `internal/netdevredact/` does not exist (ND-07) | `docs/adr/0010-network-devices.md:275-277`; `network-devices.md:83` |
+| 16 | Lab verification of vendor claims | **Missing**: `docs/implementation/network-devices-lab.md` does not exist (ND-03; rule N5) | `network-devices.md:27` (N5), `:73` (ND-03) |
 
 Consequence: steps 1 to 4 run today, so the collector spends a lease
 check on each read, but a read can only fail. Step 5 is the first step that
-needs a device, and it must not be implemented before rule N5 (step 15) and
-redaction (step 14) are in place.
+needs a device, and it must not be implemented before rule N5 (step 16) and
+redaction (step 15) are in place.
 
 ## 3. Installed but not enabled
 
@@ -88,7 +99,7 @@ place and the devices are registered. The unit is listed in `tarball_units`
 only (`deploy/install.sh:991-999`); the enable loop skips it.
 
 This is the right default and this paper does not change it. The unit must
-stay disabled until step 8 (import) and step 10 (rows) of section 2 exist.
+stay disabled until step 9 (import) and step 11 (rows) of section 2 exist.
 
 ## 4. Open question A: how does the server learn which devices exist?
 
@@ -184,6 +195,19 @@ browser approval would need a new executor RPC; that was wrong.
   `CommitReadGrant` (`lease.go:737`), not only at proposal: the `Requirement`
   in the proposal response is advisory, and `CommitReadGrant` does not check
   it today.
+
+- **The browser preview does not protect against a compromised server.**
+  The preview is rendered by the web server, so a compromised server can
+  render a preview without device targets, or with different ones, and the
+  admin's WebAuthn assertion signs only the digest. Showing device targets
+  (A1-0b) protects against an honest server that proposes a device lease the
+  admin did not choose, for example through the collector-steered proposal
+  of section 4. Against a compromised server, only a rule the executor
+  enforces protects: device grants are CLI-only and `CommitReadGrant`
+  refuses them in default mode. The CLI does not go through the server for
+  this: `cmd/nebula/readgrant.go:98` and `:125` list the pending grants from
+  the executor (`ListPendingReadGrants`), so the device list it prints is
+  the executor's own document.
 
 "B2 with CLI approval" is therefore not what the code offers. It is either
 hardened mode (an existing setting with a wider effect, see B2) or B2 plus
@@ -347,14 +371,17 @@ tag can be left out of a release build with no runtime signal, and the
 default build would then have a real reader. The concrete design:
 
 1. The redactor is a field of the service. `NewService`
-   (`internal/executor/service.go:174`) keeps its signature and does not
-   take one, so a service without a redactor is valid to build; it is the
-   default state. The only constructor that sets the field is an option,
-   `WithNetDevRedactor(r)`, which returns an error that wraps
-   `ErrNetDevNoRedactor` when `r` is nil. That is the construction-time
-   check. The option returns an error rather than panicking, because
-   AGENTS.md rule 9 forbids panics in library code (`NewService` already
-   panics on its own nil arguments; this paper does not change that).
+   (`internal/executor/service.go:174`) takes no options and keeps its
+   signature, so a service without a redactor is valid to build; it is the
+   default state. Nothing can pass the redactor to `NewService` as an
+   argument, so it reaches the service through a method called after
+   construction: `(*Service).SetNetDevRedactor(r)`, which returns an error
+   that wraps `ErrNetDevNoRedactor` when `r` is nil. That is the
+   construction-time check. The method returns an error rather than
+   panicking, because AGENTS.md rule 9 forbids panics in library code
+   (`NewService` already panics on its own nil arguments; this paper does
+   not change that). The method name is a proposal for ND-14; it does not
+   exist in the tree.
 2. `ReadNetDevice` (`internal/executor/netdev_read.go:75`) checks the field
    again on every call, before the lease is spent. A nil field returns
    `codes.FailedPrecondition`. This handler check is the fail-closed
@@ -363,8 +390,8 @@ default build would then have a real reader. The concrete design:
 3. The gate runs before the lease is spent. It must sit above
    `checkNetDeviceGrant` (`netdev_read.go:103`); a gate after the spend would
    burn lease budget on every refused read.
-4. `cmd/nebula-executor` is the only caller that passes the option. The
-   option is set in `cmd/nebula-executor`, not in `NewService`.
+4. `cmd/nebula-executor` is the only caller of `SetNetDevRedactor`. It
+   calls the method after `NewService`, not inside it.
 
 Tests (in `internal/executor/`):
 
@@ -372,7 +399,7 @@ Tests (in `internal/executor/`):
   against an approved lease, with the service built without the option
   (point 2 covers this case), returns `codes.FailedPrecondition`, and the
   lease's spend counter is unchanged afterwards.
-- `TestWithNetDevRedactorRejectsNil`: passing a nil redactor to the option
+- `TestSetNetDevRedactorRejectsNil`: passing a nil redactor to the method
   returns an error that wraps `ErrNetDevNoRedactor` (point 1).
 
 Both tests are needed before ND-14 lands and must still pass when the real
@@ -383,7 +410,7 @@ redactor is wired.
 Mounting `NetDevPages` and `NetDevFirewallPage` now, with the empty store,
 would show an empty device list. It gives no value:
 
-- The store has no rows (step 10), so every page would show "no devices",
+- The store has no rows (step 11), so every page would show "no devices",
   which looks like a real answer. ND-04 requires "unavailable" to be
   distinct from "empty"; a page that cannot tell them apart would break that
   rule.
@@ -391,8 +418,8 @@ would show an empty device list. It gives no value:
   and the lease exist.
 - It adds routes and a CSP surface that have to be reviewed again later.
 
-Recommendation: do not mount the pages before the import (step 8) and rows
-(step 10) exist. The pages should be mounted in the same change that makes
+Recommendation: do not mount the pages before the import (step 9) and rows
+(step 11) exist. The pages should be mounted in the same change that makes
 the first real row appear.
 
 ## 8. Ticket list by variant
@@ -409,7 +436,7 @@ is a protected path and needs a maintainer.
 | Ticket | Change | Paths | Protected | Test |
 | --- | --- | --- | --- | --- |
 | A1-0 | Device-target check in `ProposeReadGrant` (open gap now, see section 1 and 5) | `internal/executor/roles_read.go` | **yes** | Unknown, tombstoned, blocked, stale-pin and wrong-generation device targets refused at proposal; valid target accepted |
-| A1-0b | Approval rule for device grants: `RequireCLI` at proposal and refusal at `CommitReadGrant` in default mode; device list and reads in both previews | `internal/permit/lease.go`; `cmd/nebula/readgrant.go`; `internal/executions/readgrants_propose.go` and the web template (unprotected) | **yes** (permit, CLI) | A device grant gets `RequireCLI`; `CommitReadGrant` refuses its digest in default mode; browser and CLI previews list every device and read; host and PVE grants unchanged |
+| A1-0b | Approval rule for device grants: `RequireCLI` at proposal and refusal at `CommitReadGrant` in default mode; device list and reads in both previews. Also the `sameReadGrant` fix (`internal/executions/readgrants_propose.go`, `sameNetDeviceTargets`; done in uf14g, not waiting for A1-0b): the stored grant must carry exactly the proposed device targets | `internal/permit/lease.go`; `cmd/nebula/readgrant.go`; `internal/executions/readgrants_propose.go` and the web template (unprotected) | **yes** (permit, CLI) | A device grant gets `RequireCLI`; `CommitReadGrant` refuses its digest in default mode; browser and CLI previews list every device and read; host and PVE grants unchanged; `sameReadGrant` rejects a differing device target (test `TestSameReadGrantComparesNetDeviceTargets`) |
 | A1-1 | New spool read name for device metadata; importer table | `internal/netdevcollect/spool.go`, `import.go` | no | Closed set rejects unknown names; metadata record round trip |
 | A1-2 | Collector writes one metadata record per listed device | `internal/netdevcollect/poll.go`, `cmd/nebula-netdev-collector/` | no | Fake client: one record per device, none for blocked/tombstoned |
 | A1-3 | Server starts the importer, with a staleness rule | `cmd/nebula-server/`, `internal/netdevcollect/import.go` | no | Import creates rows; unknown device rejected; stale shown |
@@ -455,6 +482,13 @@ without a change. The table above replaces the earlier counts.
 
 ## 9. Verification of this paper
 
+- Round 3 (uf14g, after PR #784): step numbers of section 2 were made
+  consecutive (the proposal check is step 8; import, rows, redaction and
+  lab verification moved to 9, 11, 15, 16). `NewService` (`service.go:174`)
+  takes no options; the redactor setter is a proposal. The CLI's pending
+  grant list comes from the executor (`cmd/nebula/readgrant.go:98,125`).
+  `sameReadGrant` now compares `NetDeviceTargets` (`sameNetDeviceTargets`),
+  with tests in `internal/executions/readgrants_propose_test.go`.
 - Round 2 re-checked the approval anchors against the tree: `lease.go:682-690`,
   `:737-758`, `:746-748`, `roles.go:120-123`, `cmd/nebula-executor/main.go:157-158`,
   `readgrants_propose.go:381` (no `NetDeviceTargets` copied),
