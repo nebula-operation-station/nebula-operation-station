@@ -518,6 +518,15 @@ func (s *Store) LatestAll(ctx context.Context) ([]Read, error) {
 	return out, nil
 }
 
+// The delete rule of migration 0052 (vuln_inventory_reads_protected) runs once per
+// row of a DELETE. Its comment there says the check sees the rows as they were
+// before the statement. That is wrong, and 0052 is not edited for it: SQLite
+// runs the BEFORE trigger for each row after the earlier rows of the same
+// statement are gone, so the check sees those deletions. The rule still holds.
+// Deleting an unprotected row never changes which read is the newest, the last
+// complete one or a pinned one, and a protected row aborts the whole statement,
+// which rolls the earlier deletions back (store_test.go checks this).
+//
 // Retention of reads is decision E1 in docs/implementation/vuln-inventory-decisions.md
 // and is not decided. The database (migration 0052) already refuses to delete a
 // snapshot-pinned read, the newest read of a host and the last complete read of

@@ -1172,6 +1172,104 @@ func TestMultiRowDeleteIsRefusedAsAWhole(t *testing.T) {
 	}
 }
 
+// ruleCase is one read a delete-rule test tries to delete. protected says
+// whether the rule must refuse the DELETE and keep the read.
+type ruleCase struct {
+	name      string
+	id        int64
+	protected bool
+}
+
+// checkDeleteRule runs a DELETE of each case's read and checks the outcome. The
+// cases are chosen so that a DELETE of an unprotected read never changes which
+// reads are protected, so they can share one store.
+func checkDeleteRule(t *testing.T, s *Store, db *sql.DB, cases []ruleCase) {
+	t.Helper()
+	ctx := context.Background()
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := db.Exec(`DELETE FROM vuln_inventory_reads WHERE id = ?`, c.id)
+			if refused := err != nil; refused != c.protected {
+				t.Fatalf("DELETE of read %d: refused = %v, want %v (err %v)", c.id, refused, c.protected, err)
+			}
+			if _, err := s.Get(ctx, c.id); (err == nil) != c.protected {
+				t.Errorf("read %d present = %v after DELETE, want %v", c.id, err == nil, c.protected)
+			}
+		})
+	}
+}
+
+// TestDeleteRuleFollowsReadTimeNotInsertOrder inserts reads out of read_at
+// order, so the highest id is not the newest read. A rule that picks "newest"
+// by id alone would protect the wrong read.
+func TestDeleteRuleFollowsReadTimeNotInsertOrder(t *testing.T) {
+	s, db := openStore(t)
+	newestByTime := mustPut(t, s, testRead("host-o", false, 5)) // lowest id, newest read_at
+	lastComplete := mustPut(t, s, testRead("host-o", true, 1))  // only complete read
+	middle := mustPut(t, s, testRead("host-o", false, 3))       // highest id, middle read_at
+	checkDeleteRule(t, s, db, []ruleCase{
+		{"newest by read_at with the lowest id", newestByTime, true},
+		{"last complete with the middle id", lastComplete, true},
+		{"middle read_at with the highest id", middle, false},
+	})
+}
+
+// TestLastCompleteFollowsReadTimeNotInsertOrder inserts two complete reads with
+// the higher id on the older read. The last complete read is the newer one.
+func TestLastCompleteFollowsReadTimeNotInsertOrder(t *testing.T) {
+	s, db := openStore(t)
+	lastComplete := mustPut(t, s, testRead("host-l", true, 5))  // complete, newer, lower id
+	olderComplete := mustPut(t, s, testRead("host-l", true, 2)) // complete, older, higher id
+	newest := mustPut(t, s, testRead("host-l", false, 9))       // incomplete, newest read_at
+	checkDeleteRule(t, s, db, []ruleCase{
+		{"newer complete read with the lower id", lastComplete, true},
+		{"older complete read with the higher id", olderComplete, false},
+		{"newest incomplete read", newest, true},
+	})
+}
+
+// TestDeleteRuleBreaksEqualReadTimeByID gives reads the same read_at. The
+// newest read is the highest id, and so is the last complete read, the same
+// order the read queries use (read_at DESC, id DESC).
+func TestDeleteRuleBreaksEqualReadTimeByID(t *testing.T) {
+	s, db := openStore(t)
+	// host-e: two complete reads and one incomplete, all at read_at 4.
+	olderComplete := mustPut(t, s, testRead("host-e", true, 4)) // id 1
+	lastComplete := mustPut(t, s, testRead("host-e", true, 4))  // id 2, last complete by id
+	newestE := mustPut(t, s, testRead("host-e", false, 4))      // id 3, newest by id
+	// host-f: two incomplete reads at read_at 4; only the higher id is newest.
+	olderIncomplete := mustPut(t, s, testRead("host-f", false, 4)) // id 4
+	newestF := mustPut(t, s, testRead("host-f", false, 4))         // id 5, newest by id
+	checkDeleteRule(t, s, db, []ruleCase{
+		{"newest at equal read_at, highest id", newestE, true},
+		{"last complete at equal read_at, highest id", lastComplete, true},
+		{"complete at equal read_at, lower id", olderComplete, false},
+		{"newest incomplete at equal read_at", newestF, true},
+		{"incomplete at equal read_at, lower id", olderIncomplete, false},
+	})
+}
+
+// TestMultiRowDeleteRollsBackEarlierRowsOfTheStatement checks what the rule
+// does for a DELETE that removes an unprotected row before it reaches the
+// newest one. The BEFORE DELETE check runs per row, so the earlier row is
+// already gone when the newest row is checked; RAISE(ABORT) then rolls the
+// whole statement back, so the earlier row must still be there.
+func TestMultiRowDeleteRollsBackEarlierRowsOfTheStatement(t *testing.T) {
+	s, db := openStore(t)
+	deletable := mustPut(t, s, testRead("host-x", false, 1)) // lower id, not protected
+	mustPut(t, s, testRead("host-x", false, 2))              // newest, protected
+	before := rowCount(t, db)
+	if _, err := db.Exec(`DELETE FROM vuln_inventory_reads WHERE host_id = 'host-x'`); err == nil {
+		t.Fatal("DELETE of every read of a host succeeded")
+	}
+	if n := rowCount(t, db); n != before {
+		t.Errorf("rows = %d after refused DELETE, want %d", n, before)
+	}
+	if _, err := s.Get(context.Background(), deletable); err != nil {
+		t.Errorf("unprotected read %d lost after refused DELETE: %v", deletable, err)
+	}
+}
+
 // TestInsertOrReplaceCannotSwapARead checks that no insert reuses the id of a
 // stored read. INSERT OR REPLACE deletes the old row without a DELETE trigger,
 // so it is refused by the insert trigger; a plain INSERT with a used id is
