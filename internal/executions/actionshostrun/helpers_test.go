@@ -201,11 +201,15 @@ func oneDocument(t *testing.T, b []byte) {
 	}
 }
 
-// verbCalled reports whether a logged call runs verb on a container (the
-// bound and standalone scripts both use "verb -- <container>").
-func verbCalled(calls, verb string) bool {
+// verbCalled reports whether the logged calls contain exactly the call
+// "verb -- container", the argument list both scripts pass to docker. The
+// standalone script passes the container parameter as given (a name), the
+// bound script passes the bound full container ID, so the caller names the
+// argument the call must have.
+func verbCalled(calls, verb, container string) bool {
+	want := verb + " -- " + container
 	for _, line := range strings.Split(calls, "\n") {
-		if strings.HasPrefix(line, verb+" -- ") {
+		if line == want {
 			return true
 		}
 	}

@@ -45,8 +45,8 @@ func TestStandaloneDockerControlThroughHostrun(t *testing.T) {
 				if err != nil || c.Phase != "done" || c.Verb != verb || c.Container != "web" || c.Exit != 0 {
 					t.Fatalf("ParseControl: %+v, %v", c, err)
 				}
-				if !verbCalled(h.readCalls(t), verb) {
-					t.Fatalf("calls %q: the verb did not run on web", h.readCalls(t))
+				if !verbCalled(h.readCalls(t), verb, "web") {
+					t.Fatalf("calls %q: %s -- web was not called", h.readCalls(t), verb)
 				}
 			})
 
@@ -75,7 +75,7 @@ func TestStandaloneDockerControlThroughHostrun(t *testing.T) {
 				if err != nil || c.Phase != "precheck" || !strings.Contains(c.Reason, "not reachable") {
 					t.Fatalf("ParseControl: %+v, %v", c, err)
 				}
-				if verbCalled(h.readCalls(t), verb) {
+				if verbCalled(h.readCalls(t), verb, "web") {
 					t.Fatalf("the verb ran without a daemon: %q", h.readCalls(t))
 				}
 			})
@@ -92,7 +92,7 @@ func TestStandaloneDockerControlThroughHostrun(t *testing.T) {
 				if err != nil || c.Phase != "precheck" || c.Reason != "no such container" || c.Code != "" {
 					t.Fatalf("ParseControl: %+v, %v", c, err)
 				}
-				if verbCalled(h.readCalls(t), verb) {
+				if verbCalled(h.readCalls(t), verb, "web") {
 					t.Fatalf("the verb ran for an unknown container: %q", h.readCalls(t))
 				}
 			})
@@ -123,7 +123,7 @@ func TestBoundDockerControlThroughHostrun(t *testing.T) {
 				if err != nil || c.Phase != "done" || c.Verb != verb || c.Container != boundCID || c.Exit != 0 {
 					t.Fatalf("ParseControl: %+v, %v", c, err)
 				}
-				if !verbCalled(h.readCalls(t), verb) {
+				if !verbCalled(h.readCalls(t), verb, boundCID) {
 					t.Fatalf("calls %q: the verb did not run on the bound container", h.readCalls(t))
 				}
 			})
@@ -155,7 +155,7 @@ func TestBoundDockerControlThroughHostrun(t *testing.T) {
 					if c.Phase != "precheck" || c.Code != dockerhost.CodeContainerChanged || c.Reason == "" {
 						t.Fatalf("ParseControl: %+v", c)
 					}
-					if verbCalled(h.readCalls(t), verb) {
+					if verbCalled(h.readCalls(t), verb, boundCID) {
 						t.Fatalf("the verb ran after the check failed: %q", h.readCalls(t))
 					}
 				})
@@ -195,7 +195,7 @@ func TestBoundDockerControlNeedsCanonicalKeyOrder(t *testing.T) {
 
 	// The same canonical bytes pass the check (the control for the probe above).
 	r = attach(t, h.script(a), canon, a.Timeout)
-	if r.Class != hostrun.ClassSuccess || !verbCalled(h.readCalls(t), "stop") {
+	if r.Class != hostrun.ClassSuccess || !verbCalled(h.readCalls(t), "stop", boundCID) {
 		t.Fatalf("canonical order: class %s (%s), calls %q", r.Class, r.Detail, h.readCalls(t))
 	}
 }
@@ -247,12 +247,15 @@ exit 100`)
 		if len(r.Log) < 2<<20 || len(r.Log) > hostrun.MaxLog || r.LogTruncated {
 			t.Fatalf("log %d bytes, truncated %v, limit %d", len(r.Log), r.LogTruncated, hostrun.MaxLog)
 		}
-		if r.Result != nil {
-			oneDocument(t, r.Result)
-			i, err := osdebian.ParseInstall(r.Result)
-			if err != nil || i.Phase != "done" || i.AptExit != 100 {
-				t.Fatalf("ParseInstall: %+v, %v", i, err)
-			}
+		// The script always prints its done document before it exits with the
+		// apt-get code, so a missing result is a failure.
+		if r.Result == nil {
+			t.Fatalf("no result document: the script stopped before its done document (log %d bytes)", len(r.Log))
+		}
+		oneDocument(t, r.Result)
+		i, err := osdebian.ParseInstall(r.Result)
+		if err != nil || i.Phase != "done" || i.AptExit != 100 {
+			t.Fatalf("ParseInstall: %+v, %v", i, err)
 		}
 	})
 
