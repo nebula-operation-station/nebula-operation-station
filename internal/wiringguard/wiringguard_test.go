@@ -217,6 +217,7 @@ const ticketPlan = "# Plan\n\n" +
 	"| EN-16h: SSH step | later | label with a colon |\n" +
 	"| Attached runs (M4-1) | done | ticket in parentheses |\n" +
 	"## WG-07: wiring rules\n" +
+	"## WG-02: wiring guard\n" +
 	"## later\n" +
 	"## planned\n"
 
@@ -294,7 +295,7 @@ func TestMissingRegisterIsEmpty(t *testing.T) {
 	root := writeTree(t, map[string]string{"docs/implementation/plan.md": ticketPlan})
 	allow := Allowlist{
 		"internal/a": {Reason: "planned: table row", Ticket: "AS-09"},
-		"internal/b": {Reason: "developer tool: guard", Ticket: "WG-02"},
+		"internal/b": {Reason: "developer tool: guard", Ticket: "WG-09"},
 	}
 	got, err := UnknownTickets(root, allow)
 	if err != nil {

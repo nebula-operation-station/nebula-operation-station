@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/build/constraint"
 	"go/parser"
 	"go/token"
 	"io"
@@ -67,14 +68,16 @@ var ErrNoModule = errors.New("no go.mod found in any parent directory")
 // code.
 var generatedRe = regexp.MustCompile(`^// Code generated .* DO NOT EDIT\.$`)
 
-// ignoreBuildRe matches the build constraint that excludes a file from builds.
-var ignoreBuildRe = regexp.MustCompile(`^//go:build\s+ignore\s*$`)
-
 // ticketRe matches one ticket ID in the project's form: 1 to 4 letters, an
 // optional hyphen, 1 to 3 digits, an optional lower-case letter and an optional
 // "-<digits>" part, as in "AS-09", "iv02", "EN-16h" or "M4-1". Words without
 // digits ("TODO", "none", "later", "planned") never match.
 var ticketRe = regexp.MustCompile(`^[A-Za-z]{1,4}-?[0-9]{1,3}[a-z]?(?:-[0-9]{1,3})?$`)
+
+// designLabelRe matches a design-decision label such as "D7" or "I2": one
+// letter, digits and an optional lower-case letter, with no hyphen. Such labels
+// are numbered decisions inside a document; definedTickets does not count them.
+var designLabelRe = regexp.MustCompile(`^[A-Za-z][0-9]{1,3}[a-z]?$`)
 
 // Entry is one allowlist record: why an internal package is not wired yet and
 // the ticket or plan item that will wire it.
@@ -247,8 +250,25 @@ func UnknownTickets(root string, allow Allowlist) ([]string, error) {
 // placeholder such as "TODO", which is not in the ticket form.
 func definedTickets(text string) map[string]bool {
 	known := map[string]bool{}
+	// fence is the marker of the fenced code block the scan is inside, or "".
+	// Lines inside a fence are examples, not definitions.
+	var fence string
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
+		if fence != "" {
+			if strings.HasPrefix(line, fence) {
+				fence = ""
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "```") {
+			fence = "```"
+			continue
+		}
+		if strings.HasPrefix(line, "~~~") {
+			fence = "~~~"
+			continue
+		}
 		var label string
 		switch {
 		case strings.HasPrefix(line, "|"):
@@ -269,18 +289,26 @@ func definedTickets(text string) map[string]bool {
 func labelTicket(label string) (string, bool) {
 	label = strings.Trim(label, " \t*`")
 	isSep := func(r rune) bool { return strings.ContainsRune(" \t:()*`", r) }
-	if first := strings.FieldsFunc(label, isSep); len(first) > 0 && ticketRe.MatchString(first[0]) {
+	if first := strings.FieldsFunc(label, isSep); len(first) > 0 && isTicketID(first[0]) {
 		return first[0], true
 	}
 	if strings.HasSuffix(label, ")") {
 		if i := strings.LastIndex(label, "("); i >= 0 {
 			inner := strings.Trim(label[i+1:len(label)-1], " \t*`")
-			if ticketRe.MatchString(inner) {
+			if isTicketID(inner) {
 				return inner, true
 			}
 		}
 	}
 	return "", false
+}
+
+// isTicketID reports whether s is a ticket ID that a document can define. It
+// must match ticketRe and must not be a design-decision label: a single letter
+// and digits without a hyphen, as in "D7" or "I2", name a decision of the
+// document that names them, not a ticket.
+func isTicketID(s string) bool {
+	return ticketRe.MatchString(s) && !designLabelRe.MatchString(s)
 }
 
 // documentedTickets collects the ticket IDs defined by the Markdown planning
@@ -341,7 +369,7 @@ func readRegister(root string) (map[string]string, error) {
 		if _, dup := registered[id]; dup {
 			return nil, fmt.Errorf("ticket register line %d: %s listed twice", i+1, id)
 		}
-		if err := checkTrackingDoc(root, doc); err != nil {
+		if err := checkTrackingDoc(root, doc, id); err != nil {
 			return nil, fmt.Errorf("ticket register line %d: %s: %w", i+1, id, err)
 		}
 		registered[id] = doc
@@ -350,17 +378,27 @@ func readRegister(root string) (map[string]string, error) {
 }
 
 // checkTrackingDoc returns an error unless doc is a clean, slash-separated path
-// to an existing Markdown file under docs/.
-func checkTrackingDoc(root, doc string) error {
+// to an existing Markdown file under docs/ that defines id as a table row or
+// heading (see definedTickets). A file that merely exists, or that mentions id
+// in running text, does not track the ticket.
+func checkTrackingDoc(root, doc, id string) error {
 	if path.Clean(doc) != doc || !strings.HasPrefix(doc, docsDir+"/") || !strings.HasSuffix(doc, ".md") {
 		return fmt.Errorf("tracking document %q must be a clean path to a Markdown file under %s/", doc, docsDir)
 	}
-	info, err := os.Stat(filepath.Join(root, filepath.FromSlash(doc)))
+	file := filepath.Join(root, filepath.FromSlash(doc))
+	info, err := os.Stat(file)
 	if err != nil {
 		return fmt.Errorf("tracking document %s: %w", doc, err)
 	}
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("tracking document %s is not a regular file", doc)
+	}
+	data, err := readLimited(file, maxTicketSourceBytes)
+	if err != nil {
+		return fmt.Errorf("tracking document %s: %w", doc, err)
+	}
+	if !definedTickets(string(data))[id] {
+		return fmt.Errorf("tracking document %s does not define %s as a table row or heading", doc, id)
 	}
 	return nil
 }
@@ -583,8 +621,9 @@ func scan(root, modPath string) (map[string]*pkgInfo, error) {
 	return pkgs, nil
 }
 
-// isIgnored reports whether a file carries the "//go:build ignore" constraint
-// before its package clause, which excludes it from every build. The file must
+// isIgnored reports whether a file carries a build constraint before its
+// package clause that excludes it from every build, such as "//go:build ignore",
+// "//go:build ignore && linux" or the legacy "// +build ignore". The file must
 // be parsed with parser.ParseComments.
 func isIgnored(f *ast.File) bool {
 	for _, group := range f.Comments {
@@ -592,12 +631,35 @@ func isIgnored(f *ast.File) bool {
 			break
 		}
 		for _, c := range group.List {
-			if ignoreBuildRe.MatchString(c.Text) {
+			expr, err := constraint.Parse(c.Text)
+			if err != nil {
+				// Not a build constraint line.
+				continue
+			}
+			if excludesEveryBuild(expr) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// excludesEveryBuild reports whether expr is false in every build because the
+// "ignore" tag is never set. A conjunction with such a term is false; a
+// disjunction is false only when both sides are. Negation and any other term
+// are not decided here, so the result is conservative: a file it does not
+// recognise counts as production code.
+func excludesEveryBuild(expr constraint.Expr) bool {
+	switch x := expr.(type) {
+	case *constraint.TagExpr:
+		return x.Tag == "ignore"
+	case *constraint.AndExpr:
+		return excludesEveryBuild(x.X) || excludesEveryBuild(x.Y)
+	case *constraint.OrExpr:
+		return excludesEveryBuild(x.X) && excludesEveryBuild(x.Y)
+	default:
+		return false
+	}
 }
 
 // isGenerated reports whether a file has the Go generated-code marker before
