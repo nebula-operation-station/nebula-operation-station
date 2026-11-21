@@ -287,7 +287,165 @@ func newTestPVEImport(t *testing.T, root string, logs *syncBuffer) (*pveImport, 
 		t.Fatal(err)
 	}
 	p.interval = 5 * time.Millisecond
+	p.retentionInterval = 5 * time.Millisecond
 	return p, db
+}
+
+const testRetentionRemote = "remote-retention"
+
+// seedRetentionRows writes one expired and one young row of each kind the
+// retention removes: a tombstoned guest, a task, and a metric bucket. The
+// expired rows are older than the store's own windows.
+func seedRetentionRows(t *testing.T, db *sql.DB, now time.Time) {
+	t.Helper()
+	old := now.Add(-(pveinventory.TombstoneRetention + 24*time.Hour))
+	young := now.Add(-24 * time.Hour)
+	stamp := func(at time.Time) string { return at.UTC().Format(time.RFC3339) }
+	exec := func(q string, args ...any) {
+		t.Helper()
+		if _, err := db.Exec(q, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec(`INSERT INTO pve_guests (remote_id, vmid, generation, observed_at, state, tombstoned, tombstoned_at)
+		VALUES (?, 901, 1, ?, 'available', 1, ?)`, testRetentionRemote, stamp(old), stamp(old))
+	exec(`INSERT INTO pve_guests (remote_id, vmid, generation, observed_at, state, tombstoned, tombstoned_at)
+		VALUES (?, 902, 1, ?, 'available', 1, ?)`, testRetentionRemote, stamp(young), stamp(young))
+	exec(`INSERT INTO pve_tasks (remote_id, node, actor, type, target, started_unix, observed_at)
+		VALUES (?, 'pve', 'root@pam', 'vzdump', 'old', ?, ?)`, testRetentionRemote, old.Unix(), stamp(old))
+	exec(`INSERT INTO pve_tasks (remote_id, node, actor, type, target, started_unix, observed_at)
+		VALUES (?, 'pve', 'root@pam', 'vzdump', 'young', ?, ?)`, testRetentionRemote, young.Unix(), stamp(young))
+	exec(`INSERT INTO pve_metric_buckets (remote_id, target_kind, node, vmid, generation, metric, bucket_start_unix, sum, count)
+		VALUES (?, 'node', 'pve', 0, 0, 'cpu', ?, 1, 1)`, testRetentionRemote, now.Add(-48*time.Hour).Unix())
+	exec(`INSERT INTO pve_metric_buckets (remote_id, target_kind, node, vmid, generation, metric, bucket_start_unix, sum, count)
+		VALUES (?, 'node', 'pve', 0, 0, 'mem', ?, 1, 1)`, testRetentionRemote, now.Add(-time.Hour).Unix())
+}
+
+// countRows returns the result of a single-value count query.
+func countRows(t *testing.T, db *sql.DB, q string, args ...any) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRow(q, args...).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
+}
+
+// retentionState reports which seeded expired rows are still stored, as
+// counts: expired guest, expired task, expired bucket, then the young ones.
+func retentionState(t *testing.T, db *sql.DB) (oldGuest, oldTask, oldBucket, youngGuest, youngTask, youngBucket int) {
+	t.Helper()
+	oldGuest = countRows(t, db, `SELECT COUNT(*) FROM pve_guests WHERE remote_id = ? AND vmid = 901`, testRetentionRemote)
+	oldTask = countRows(t, db, `SELECT COUNT(*) FROM pve_tasks WHERE remote_id = ? AND target = 'old'`, testRetentionRemote)
+	oldBucket = countRows(t, db, `SELECT COUNT(*) FROM pve_metric_buckets WHERE remote_id = ? AND metric = 'cpu'`, testRetentionRemote)
+	youngGuest = countRows(t, db, `SELECT COUNT(*) FROM pve_guests WHERE remote_id = ? AND vmid = 902`, testRetentionRemote)
+	youngTask = countRows(t, db, `SELECT COUNT(*) FROM pve_tasks WHERE remote_id = ? AND target = 'young'`, testRetentionRemote)
+	youngBucket = countRows(t, db, `SELECT COUNT(*) FROM pve_metric_buckets WHERE remote_id = ? AND metric = 'mem'`, testRetentionRemote)
+	return
+}
+
+// stopRun cancels ctx and fails the test unless run returns promptly.
+func stopRun(t *testing.T, cancel context.CancelFunc, done <-chan struct{}) {
+	t.Helper()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("run did not return after context end")
+	}
+}
+
+// Expired rows are removed by the store's own retention during run; young
+// rows stay; the count of removed rows is logged once, not on every pass.
+func TestPVEImportRetentionRemovesOnlyExpiredRows(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "pve")
+	makeSpoolDirs(t, root)
+	var logs syncBuffer
+	p, db := newTestPVEImport(t, root, &logs)
+	seedRetentionRows(t, db, time.Now())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); p.run(ctx) }()
+
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		og, ot, ob, _, _, _ := retentionState(t, db)
+		if og == 0 && ot == 0 && ob == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("expired rows not removed: guest=%d task=%d bucket=%d\n%s", og, ot, ob, logs.String())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	stopRun(t, cancel, done)
+
+	_, _, _, yg, yt, yb := retentionState(t, db)
+	if yg != 1 || yt != 1 || yb != 1 {
+		t.Fatalf("young rows removed: guest=%d task=%d bucket=%d", yg, yt, yb)
+	}
+	if n := strings.Count(logs.String(), "PVE retention removed expired rows"); n != 1 {
+		t.Fatalf("removal logged %d times, want once (zero passes stay silent):\n%s", n, logs.String())
+	}
+}
+
+// A failing retention pass is logged with its context and does not stop the
+// import: a spool entry published after the failure is still imported. The
+// next pass, after the failure is gone, removes the expired rows.
+func TestPVEImportRetentionErrorDoesNotStopImport(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "pve")
+	makeSpoolDirs(t, root)
+	var logs syncBuffer
+	p, db := newTestPVEImport(t, root, &logs)
+	seedRetentionRows(t, db, time.Now())
+	// Force Prune to fail: any delete of a task row aborts its transaction.
+	exec := func(q string) {
+		t.Helper()
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exec(`CREATE TRIGGER test_block_task_prune BEFORE DELETE ON pve_tasks
+		BEGIN SELECT RAISE(ABORT, 'forced prune failure'); END`)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() { defer close(done); p.run(ctx) }()
+
+	deadline := time.Now().Add(15 * time.Second)
+	for !strings.Contains(logs.String(), "PVE retention failed") {
+		if time.Now().After(deadline) {
+			t.Fatalf("forced prune failure not logged:\n%s", logs.String())
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if og, _, _, _, _, _ := retentionState(t, db); og != 1 {
+		t.Fatalf("failed pass changed the tombstone: %d rows left, want 1", og)
+	}
+
+	files := spoolTestFiles(t, root)
+	waitConsumed(t, files, logs.String)
+	assertImported(t, db)
+
+	exec(`DROP TRIGGER test_block_task_prune`)
+	deadline = time.Now().Add(15 * time.Second)
+	for {
+		og, ot, _, _, _, _ := retentionState(t, db)
+		if og == 0 && ot == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("next pass did not retry the expired rows: guest=%d task=%d\n%s", og, ot, logs.String())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	stopRun(t, cancel, done)
+	if strings.Contains(logs.String(), "context canceled") {
+		t.Fatalf("shutdown logged a retention error:\n%s", logs.String())
+	}
 }
 
 // A spool that is not there yet (no collector installed) must not stop the
