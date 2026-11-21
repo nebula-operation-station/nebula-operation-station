@@ -31,6 +31,7 @@ const (
 	drPrefix = "192.168.10.0/24"
 	drKnown  = "192.168.10.21" // already in the IPAM as an asset: EXISTING
 	drNew    = "192.168.10.22" // not in the IPAM: NEW, imported by the test
+	drEvil   = "https://evil.example"
 )
 
 // drNmapXML is what nmap writes for a ping scan with two hosts up.
@@ -201,21 +202,11 @@ func TestDiscoveryFromFormPostThroughRunServer(t *testing.T) {
 		t.Fatalf("save asset = %d %s", code, body)
 	}
 
-	// Step 2: the submit. Without an Origin the handler is not reached.
+	// Step 2: the submit. Each refusal leaves no job behind.
 	submit := map[string]any{"mode": discoveryjob.ModePing, "targets": []string{drPrefix}}
-	if code, _, _ := drPost(t, s, "/network/discovery/submit", e.alice, "", submit); code != http.StatusForbidden {
-		t.Fatalf("submit without origin = %d, want 403", code)
-	}
+	drRefusals(t, s, "/network/discovery/submit", e.alice, submit)
 	if n := len(e.jobFiles()); n != 0 {
-		t.Fatalf("%d job files after the refused submit without origin", n)
-	}
-	// Without a session the POST is refused with 401 (not a redirect to the
-	// login page: the UI's JSON routes answer for the API class of routes).
-	if code, _, _ := drPost(t, s, "/network/discovery/submit", "", vrOrigin, submit); code != http.StatusUnauthorized {
-		t.Fatalf("submit without session = %d, want 401", code)
-	}
-	if n := len(e.jobFiles()); n != 0 {
-		t.Fatalf("%d job files after the refused submit without session", n)
+		t.Fatalf("%d job files after the refused submits", n)
 	}
 	code, _, body := drPost(t, s, "/network/discovery/submit", e.alice, vrOrigin, submit)
 	if code != http.StatusOK {
@@ -236,10 +227,8 @@ func TestDiscoveryFromFormPostThroughRunServer(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().Unix()
+	// nebula-discovery only writes the result; it never removes the job.
 	if err := e.spool.WriteResult(discoveryjob.Result{Format: discoveryjob.ResultFormat, Job: job.ID, StartedAt: now - 30, FinishedAt: now, OK: true, Hosts: hosts}); err != nil {
-		t.Fatal(err)
-	}
-	if err := e.spool.RemoveJob(job.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -249,6 +238,8 @@ func TestDiscoveryFromFormPostThroughRunServer(t *testing.T) {
 	s = e.start()
 	jobPage := "/network/discovery/" + job.ID
 	page := drWaitPage(t, s, jobPage, e.alice, "State: done")
+	// The server's poll, not the test, removes the job file after the take-over.
+	waitFor(t, "the server to remove the job file of "+job.ID, func() bool { return len(e.jobFiles()) == 0 })
 	// The asset has no MAC, so an address-only match is a POSSIBLE MATCH, not EXISTING.
 	if !drRow(drKnown, "POSSIBLE MATCH").MatchString(page) {
 		t.Fatalf("%s is not shown as POSSIBLE MATCH:\n%s", drKnown, drTable(page))
@@ -256,10 +247,29 @@ func TestDiscoveryFromFormPostThroughRunServer(t *testing.T) {
 	if !drRow(drNew, "NEW").MatchString(page) {
 		t.Fatalf("%s is not shown as NEW:\n%s", drNew, page)
 	}
-	// Import the new address only.
-	code, _, body = drPost(t, s, "/network/discovery/import", e.alice, vrOrigin, map[string]any{"id": job.ID, "addresses": []string{drNew}, "all": false})
+	// The import refusals change nothing: the new address is still not imported.
+	importBody := map[string]any{"id": job.ID, "addresses": []string{drNew}, "all": false}
+	drRefusals(t, s, "/network/discovery/import", e.alice, importBody)
+	if _, page := drGet(t, s, jobPage, e.alice); strings.Contains(page, `imported as <a href="/network/a/`) {
+		t.Fatal("a refused import changed the job page")
+	}
+	// Import the new address only. drKnown is not in the list and must stay
+	// out of the import: the answer lists exactly one created host, no update
+	// and no skip.
+	code, _, body = drPost(t, s, "/network/discovery/import", e.alice, vrOrigin, importBody)
 	if code != http.StatusOK {
 		t.Fatalf("import = %d %s", code, body)
+	}
+	var rep struct {
+		Created []string          `json:"created"`
+		Updated []string          `json:"updated"`
+		Skipped map[string]string `json:"skipped"`
+	}
+	if err := json.Unmarshal(body, &rep); err != nil {
+		t.Fatalf("import answer %s: %v", body, err)
+	}
+	if len(rep.Created) != 1 || len(rep.Updated) != 0 || len(rep.Skipped) != 0 {
+		t.Fatalf("import answer %s: want exactly one created host and nothing else (%s was not in the list)", body, drKnown)
 	}
 	if _, page := drGet(t, s, jobPage, e.alice); !strings.Contains(page, `imported as <a href="/network/a/`) {
 		t.Fatal("the job page does not show the import")
@@ -277,7 +287,13 @@ func TestDiscoveryFromFormPostThroughRunServer(t *testing.T) {
 		t.Fatalf("submit for cancel = %d %s", code, body)
 	}
 	cancelled := drJobID(t, body)
-	if code, _, body = drPost(t, s, "/network/discovery/cancel", e.alice, vrOrigin, map[string]any{"id": cancelled}); code != http.StatusOK {
+	// The refused cancels leave the queued job in jobs/.
+	cancelBody := map[string]any{"id": cancelled}
+	drRefusals(t, s, "/network/discovery/cancel", e.alice, cancelBody)
+	if n := len(e.jobFiles()); n != 1 {
+		t.Fatalf("%d job files after the refused cancels, want the queued job", n)
+	}
+	if code, _, body = drPost(t, s, "/network/discovery/cancel", e.alice, vrOrigin, cancelBody); code != http.StatusOK {
 		t.Fatalf("cancel = %d %s", code, body)
 	}
 	if n := len(e.jobFiles()); n != 0 {
@@ -295,7 +311,7 @@ func TestDiscoveryFromFormPostThroughRunServer(t *testing.T) {
 	}
 	big := submitted()
 	foreign := submitted()
-	if err := os.WriteFile(filepath.Join(e.spool.ResultsDir(), big+".json"), make([]byte, discoveryjob.MaxResultBytes+1), 0o640); err != nil {
+	if err := os.WriteFile(filepath.Join(e.spool.ResultsDir(), big+".json"), drOversized(t, big), 0o640); err != nil {
 		t.Fatal(err)
 	}
 	other := foreignResult(t, cancelled, discoveryjob.ResultFormat)
@@ -310,6 +326,13 @@ func TestDiscoveryFromFormPostThroughRunServer(t *testing.T) {
 			t.Fatalf("job %s: want a failed state without data:\n%s", j, page)
 		}
 	}
+	// The page does not say why. The server's log does: the size limit refuses
+	// the oversized result, and the other job's result is refused by its ID.
+	s.stop()
+	if logged := s.stderr.String(); !strings.Contains(logged, "file too large") || !strings.Contains(logged, "result for another job") {
+		t.Fatalf("log does not name the size limit and the job mismatch:\n%s", logged)
+	}
+	s = e.start()
 
 	// Step 5c: the server cannot write jobs/. The submit answers with an
 	// error text, not an empty 500.
@@ -333,6 +356,46 @@ func TestDiscoveryFromFormPostThroughRunServer(t *testing.T) {
 	if n := len(e.jobFiles()); n != 0 {
 		t.Fatalf("%d job files in an unwritable spool", n)
 	}
+}
+
+// drRefusals sends a state-changing POST to path without an Origin, with
+// another site's Origin, and without a session. The Origin cases must be
+// refused with 403 and the session case with 401. The caller checks that
+// nothing changed.
+func drRefusals(t *testing.T, s *vrServer, path, alice string, body any) {
+	t.Helper()
+	for _, c := range []struct {
+		name, token, origin string
+		want                int
+	}{
+		{"without origin", alice, "", http.StatusForbidden},
+		{"with a cross-site origin", alice, drEvil, http.StatusForbidden},
+		{"without session", "", vrOrigin, http.StatusUnauthorized},
+	} {
+		if code, _, b := drPost(t, s, path, c.token, c.origin, body); code != c.want {
+			t.Fatalf("POST %s %s = %d %s, want %d", path, c.name, code, b, c.want)
+		}
+	}
+}
+
+// drOversized is a valid result of exactly MaxResultBytes+1 bytes. JSON
+// whitespace pads the object, so only the size limit can refuse it.
+func drOversized(t *testing.T, job string) []byte {
+	t.Helper()
+	b, err := json.Marshal(discoveryjob.Result{Format: discoveryjob.ResultFormat, Job: job, StartedAt: 1, FinishedAt: 2, OK: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pad := discoveryjob.MaxResultBytes + 1 - len(b)
+	if pad < 1 {
+		t.Fatalf("result of %d bytes leaves no room to pad", len(b))
+	}
+	out := append(append([]byte{}, b[:len(b)-1]...), bytes.Repeat([]byte(" "), pad)...)
+	out = append(out, '}')
+	if len(out) != discoveryjob.MaxResultBytes+1 || !json.Valid(out) {
+		t.Fatalf("padded result: %d bytes, valid JSON %v", len(out), json.Valid(out))
+	}
+	return out
 }
 
 // foreignResult is a valid result that names another job.
