@@ -201,6 +201,7 @@ func TestReadLimitsComeFromContract(t *testing.T) {
 		ReadPANOSSecurityRules: netdevcontract.MaxPANOSResponseBytes,
 		ReadPANOSNATRules:      netdevcontract.MaxPANOSResponseBytes,
 		ReadPANOSRuleHitCounts: netdevcontract.MaxPANOSResponseBytes,
+		ReadDeviceMetadata:     MaxDeviceMetadataBytes,
 	}
 	for read, want := range cases {
 		if got, ok := ReadLimit(read); !ok || got != want {
