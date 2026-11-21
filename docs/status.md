@@ -11,7 +11,7 @@ the decisions, and [docs/implementation](implementation/) the per-area plans.
 | Area | ADR | State |
 | --- | --- | --- |
 | Release 0.9 (milestones 0–10) | – | code complete; release draft v0.9.0-beta.1 prepared on 2026-11-04, not yet published; running in the reference lab since then, formal integration run on clean VMs pending |
-| Proxmox VE phase 1 / phase 2 | [0006](adr/0006-proxmox-integration.md) | phase 1 wired; phase 2 guest power and snapshot executor RPCs merged, not offered in the chart; backup, migration and node reboot executor code only (previously: "phase 1 and phase 2 actions merged"); **amendment 2026-11-19: registry metadata may follow at most two same-host redirects for anonymous requests** (#717); registry metadata limits pinned (#698); pveapi/pvecollect package comments match the code (#714, #721); spool retry state and SSH telemetry mapping tested (#730, #729) |
+| Proxmox VE phase 1 / phase 2 | [0006](adr/0006-proxmox-integration.md) | phase 1 wired; phase 2 guest power and snapshot controls wired in nebula-server (`cmd/nebula-server/main.go:582-583`); backup, migration and node reboot executor code only, no RPC (previously: "not offered in the chart"; "phase 1 and phase 2 actions merged"); **amendment 2026-11-19: registry metadata may follow at most two same-host redirects for anonymous requests** (#717); registry metadata limits pinned (#698); pveapi/pvecollect package comments match the code (#714, #721); spool retry state and SSH telemetry mapping tested (#730, #729) |
 | Approval ergonomics | [0007](adr/0007-approval-ergonomics.md) | merged; amendment 2026-11-17 (reject pending proposals) complete: spec, executor `RejectPending` RPC, UI (#687) and CLI `nebula reject` (#755), follow-ups (#753) |
 | Guest provisioning | [0008](adr/0008-guest-provisioning.md) | merged; `packlock` testable with its exit codes covered (#715, PV-07) |
 | Traffic map | [0009](adr/0009-traffic-map.md) | proposed; libraries, store and renderer merged; API and pages mounted in nebula-server (`cmd/nebula-server/main.go:639-648`, `:699`); `HostNet.Hop` fuzzed (#711) |
@@ -54,9 +54,9 @@ limit-test wave; ops agent (ADR 0016) accepted and nearly all of its implementat
 
 | Area | Wired in nebula-server? | Evidence |
 | --- | --- | --- |
-| Proxmox VE phase 1 (read-only pages, inventory, live values) | yes, the `/pve` pages and the PVE part of the chart | [operator guide](operator/proxmox.md) status table |
-| Proxmox VE guest power and snapshots | no: executor RPCs exist, the chart does not offer them and the routes answer 404 | `proto/nebula/executor/v1/executor.proto:551-554`; no caller sets the UI options in `cmd/nebula-server` |
-| Proxmox VE backup now, migration, node reboot | no: executor code only, no RPC | [operator guide](operator/proxmox.md) status table |
+| Proxmox VE phase 1 (read-only pages, inventory, live values) | yes, the `/pve` pages and the PVE part of the chart | `cmd/nebula-server/main.go:278` (`pveStore`), `:571` (`PVE: pveStore`) |
+| Proxmox VE guest power and snapshots | yes, set in nebula-server: `GuestPower: exec`, `GuestSnapshot: exec` (`cmd/nebula-server/main.go:582-583`). The routes answer 404 only when the option is nil or, for snapshots, the PVE store lacks `ListSnapshots` (`internal/web/ui/guestactions.go:708-713`, `:1343-1350`; `internal/pveinventory/store.go:732`). The chart shows a Power section on running guests of active remotes (`guestactions.go:193-200`); rendering not checked in a browser | `cmd/nebula-server/guestactions_wiring_test.go` |
+| Proxmox VE backup now, migration, node reboot | no: executor code only (`internal/executor/pve_guest_backup.go`, `pve_guest_migrate.go`, `pve_node_reboot.go`); no RPC for them in `proto/nebula/executor/v1/executor.proto` | grep of `executor.proto`, 2026-11-21 |
 | Traffic map API, page and connections tab | yes, mounted | `cmd/nebula-server/main.go:639-648`, `:699` |
 | Attack paths (vulnerability management) | pages mounted, path computation not wired: the source reports no paths | `cmd/nebula-server/main.go:653`, `cmd/nebula-server/attackpaths.go:19-26` |
 | Network devices (read path and device pages) | no: the device read returns `Unimplemented` (ND-14); `NetDevPages` has no caller; `cmd/nebula-server` does not reference netdev | `internal/executor/netdev_read.go:112`, `internal/web/ui/netdev.go:146-160` |
