@@ -47,9 +47,9 @@ below are unchanged.)
 | EN-11 | Dropped 2026-11-12 (ADR 0013 amendment; previously "Open") | `internal/netbirdapi/` does not exist and will not be written |
 | EN-12 | Open, reshaped 2026-11-12 into EN-16b to EN-16h (see below; previously "Open") | no NetBird key handling in offers on `main` |
 | EN-13 | Done | `cmd/nebula/enroll_offers.go` (`nebula host offers`, `nebula host offer-revoke`) |
-| EN-14 | Open | no one-step acceptance tests in `test/security/` |
+| EN-14 | Tests exist; status not re-audited (previously: "Open") | `test/security/en14_onestep_acceptance_test.go` |
 | EN-15 | Part 1 in progress (`docs/admin/guide.md` §7); part 2 (NetBird section) open until EN-16g (previously "open with EN-12") | `docs/admin/guide.md` |
-| Wiring in `nebula-server` (open; not yet a ticket) | Open: the route `GET /enroll/<offer-id>` is not mounted (EN-09), and the executor client in `cmd/nebula-server/executor.go` has none of the offer methods that `ui.EnrollOffers` requires (EN-10), so the one-step dialog is not switched on there. The solution is not decided here. (Added 2026-11-16, Claude.) | `cmd/nebula-server/executor.go` (no offer methods), `internal/web/ui/enroll_onestep.go` (`EnrollOffers`), `internal/web/enroll/enroll.go` (not imported) |
+| Wiring in `nebula-server` (open; not yet a ticket) | Open: the route `GET /enroll/<offer-id>` is not mounted (EN-09), and the executor client in `cmd/nebula-server/executor.go` has none of the offer methods that `ui.EnrollOffers` requires (EN-10), so the one-step dialog is not switched on there. Executor gap: `SetEnrollOffers` is called once at start from the executor's local flags (`cmd/nebula-executor/main.go:269`); the enrollment configuration stays local and is never served over RPC (`cmd/nebula-executor/main.go:82`, `:240-241`), so the server cannot set offers. The solution is not decided here. (Added 2026-11-16, Claude.) | `cmd/nebula-server/executor.go` (no offer methods), `internal/web/ui/enroll_onestep.go` (`EnrollOffers`), `internal/web/enroll/enroll.go` (not imported) |
 
 ## Rules every ticket keeps
 
