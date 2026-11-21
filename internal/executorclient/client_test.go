@@ -65,9 +65,11 @@ var (
 // harness runs the real executor service in-process on a real Unix socket
 // with the real method-role table.
 type harness struct {
-	t      *testing.T
-	socket string
-	rp     virtualwebauthn.RelyingParty
+	t       *testing.T
+	socket  string
+	dataDir string // executor.db directory (BackupExecutor snapshot source)
+	keysDir string // SSH key files (BackupExecutor key source)
+	rp      virtualwebauthn.RelyingParty
 	dev    virtualwebauthn.Authenticator
 	cred   virtualwebauthn.Credential
 }
@@ -129,6 +131,9 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 		t.Fatal(err)
 	}
 	svc := executor.NewService(auth, keyring.New(keysDir), db, reg, discardLogger())
+	// BackupExecutor reads the real snapshot and the key files from these dirs.
+	svc.SetBackupDirs(dataDir, keysDir)
+	h.dataDir, h.keysDir = dataDir, keysDir
 
 	sockDir := t.TempDir()
 	if err := os.Chmod(sockDir, 0o755); err != nil {
