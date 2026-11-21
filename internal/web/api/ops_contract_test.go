@@ -3,12 +3,14 @@
 package api_test
 
 import (
+	"context"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsagent/nosclient"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/opsagent/prompt"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsfacts"
 )
@@ -61,6 +63,67 @@ func TestOpsWorkQuestionAndSummaryDecodeInNosclient(t *testing.T) {
 				t.Errorf("summary item = %+v", s)
 			}
 		})
+	}
+}
+
+// ctrSources are the inputs of a real opsfacts.Projector in the contract test:
+// one host with one open OS finding whose fix is verified.
+type ctrSources struct{}
+
+func (ctrSources) Hosts(context.Context) ([]opsfacts.Host, error) {
+	return []opsfacts.Host{{ID: opsHost, Label: "Web 01", Environment: "lab",
+		Criticality: opsfacts.CriticalityHigh, Exposure: opsfacts.ExposureInternet}}, nil
+}
+
+func (ctrSources) Listeners(context.Context, string) ([]opsfacts.Port, error) { return nil, nil }
+
+func (ctrSources) Findings(context.Context) ([]opsfacts.Finding, error) {
+	return []opsfacts.Finding{{Subject: opsfacts.SubjectOS, HostID: opsHost, VulnID: "CVE-2026-0001",
+		Package: "openssl", Installed: "3.0.1-1", Fixed: "3.0.2-1", Tier: opsfacts.TierCritical, Score: 90,
+		State: opsfacts.StateOpen, Fix: opsfacts.FixDecision{Outcome: opsfacts.OutcomeVerified,
+			Link: opsfacts.LinkInstallSecurity}}}, nil
+}
+
+func (ctrSources) HasAction(string) bool { return true }
+
+func (ctrSources) Skipped(context.Context, opsfacts.Skip) error { return nil }
+
+// TestOpsFixCandidatesCarryLabelsThroughNosclient runs the candidates of a
+// real opsfacts projection (not a hand-built group) through the server's work
+// list and the agent's decoder: every candidate of every fix item has a
+// non-empty label that fits the prompt bound (ADR 0016 D4).
+func TestOpsFixCandidatesCarryLabelsThroughNosclient(t *testing.T) {
+	p, err := opsfacts.New(opsfacts.Sources{Inventory: ctrSources{}, Listeners: ctrSources{},
+		Findings: ctrSources{}, Catalog: ctrSources{}, Audit: ctrSources{}})
+	if err != nil {
+		t.Fatalf("opsfacts.New: %v", err)
+	}
+	groups, err := p.EligibleGroups(t.Context())
+	if err != nil {
+		t.Fatalf("EligibleGroups: %v", err)
+	}
+	e := newOpsEnv(t)
+	e.facts.groups = groups
+	srv := httptest.NewServer(e.h)
+	t.Cleanup(srv.Close)
+	items, err := newAgentClient(t, srv.URL).Work(t.Context())
+	if err != nil {
+		t.Fatalf("agent decodes the work list: %v", err)
+	}
+	candidates := 0
+	for _, it := range items {
+		if it.Kind != "fix" {
+			continue
+		}
+		for _, c := range it.Group.Candidates {
+			candidates++
+			if c.Label == "" || len(c.Label) > prompt.MaxCandidateLabelBytes {
+				t.Errorf("candidate %s of %s: label %q, want 1..%d bytes", c.Key, it.Ref, c.Label, prompt.MaxCandidateLabelBytes)
+			}
+		}
+	}
+	if candidates == 0 {
+		t.Fatal("no fix candidates reached the agent: the contract is not exercised")
 	}
 }
 
