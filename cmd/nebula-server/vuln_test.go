@@ -89,10 +89,34 @@ func (s *vtSink) waitKind(t *testing.T, kind string) notify.Event {
 type vtClock struct {
 	mu sync.Mutex
 	t  time.Time
+	// follow is set by followReal: Now then runs with the real clock from
+	// that moment on, so it agrees with the package clock of
+	// vulninventory (which stamps TakenAt and checks read times with the
+	// real clock).
+	follow  bool
+	started time.Time
 }
 
-func (c *vtClock) Now() time.Time      { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
+func (c *vtClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.follow {
+		return c.t.Add(time.Since(c.started))
+	}
+	return c.t
+}
+
 func (c *vtClock) Add(d time.Duration) { c.mu.Lock(); c.t = c.t.Add(d); c.mu.Unlock() }
+
+// followReal makes the clock run with the real clock from now on, and
+// Add still moves it. The start is exact (not truncated), so the clock is
+// never behind a real time the package clock stamps later.
+func (c *vtClock) followReal() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	c.t, c.started, c.follow = now, now, true
+}
 
 // vtInventory serves one snapshot with host web01.
 type vtInventory struct{ at time.Time }

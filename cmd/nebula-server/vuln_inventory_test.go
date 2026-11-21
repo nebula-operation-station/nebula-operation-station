@@ -550,12 +550,11 @@ type srcEnv struct {
 func newSrcEnv(t *testing.T) *srcEnv {
 	t.Helper()
 	e := newVTEnv(t)
-	// vulninventory stamps TakenAt with the real clock, while the export
-	// judges freshness with this clock. Starting the test clock an hour
-	// ahead keeps every TakenAt before it, so a snapshot is never "taken
-	// after the clock" in a slow test run. The clock split itself is open
-	// (see the round-1 report).
-	e.clk.Add(time.Hour)
+	// vulninventory stamps TakenAt and checks read times with its own
+	// package clock, which is the real clock. The test clock follows the
+	// real clock, so reads and TakenAt agree and no snapshot is "taken after
+	// the clock". Tests that move the clock use Add, as before.
+	e.clk.followReal()
 	hosts := inventory.NewWithNow(e.db, e.clk.Now)
 	inv, err := newVulnInventory(e.db, hosts, e.clk.Now)
 	if err != nil {
@@ -746,16 +745,26 @@ func TestVulnExportSecondReadMakesNewSnapshotOldIDKeepsOldState(t *testing.T) {
 	}
 }
 
+// hourGeneration is the generation floor of the hour of now (see
+// VulnSnapshot): the hour value that the export uses when it is higher.
+func hourGeneration(now time.Time) int64 {
+	return now.UTC().Truncate(vulnInventoryBucket).Unix() / int64(vulnInventoryBucket/time.Second)
+}
+
+// TestVulnExportFloorFromRunStateIsKept: a stored run floor above the hour
+// value is kept, so the export's generation is above it, not just above the
+// hour value. Dropping the stored floor from the export fails this test.
 func TestVulnExportFloorFromRunStateIsKept(t *testing.T) {
 	e := newSrcEnv(t)
-	if _, err := e.db.Exec(`UPDATE vuln_store_state SET max_inventory_generation = 495000 WHERE id = 1`); err != nil {
+	floor := hourGeneration(e.clk.Now()) + 1000
+	if _, err := e.db.Exec(`UPDATE vuln_store_state SET max_inventory_generation = ? WHERE id = 1`, floor); err != nil {
 		t.Fatal(err)
 	}
 	e.addHost(t, srcHost)
 	e.addRead(t, srcRead(srcHost, "exec-1", e.clk.Now().Add(-time.Minute), true, "openssl"))
 	p, _ := e.exportPage(t)
-	if p.Generation <= 495000 {
-		t.Fatalf("generation = %d, want above the stored 495000", p.Generation)
+	if p.Generation <= floor {
+		t.Fatalf("generation = %d, want above the stored floor %d (hour value %d)", p.Generation, floor, hourGeneration(e.clk.Now()))
 	}
 	if code := e.startRun(t, p.SnapshotID); code != http.StatusCreated {
 		t.Fatalf("first run start = %d, want 201", code)
