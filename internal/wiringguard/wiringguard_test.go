@@ -90,6 +90,23 @@ func TestWiringRulesOnFixtures(t *testing.T) {
 			allowed:   []string{"tools/gen"},
 			wantCheck: 2,
 		},
+		{
+			name:      "import from a build-constrained file counts toward reachability",
+			fixture:   "buildtags",
+			wantCheck: 2,
+		},
+		{
+			name:      "vendor, underscore and dot directories are not scanned, so their imports do not count",
+			fixture:   "skipdirs",
+			unwired:   []string{"internal/b", "internal/c", "internal/d"},
+			wantCheck: 4,
+		},
+		{
+			name:      "generated marker after the package clause does not make a package generated",
+			fixture:   "latemarker",
+			unwired:   []string{"internal/g"},
+			wantCheck: 1,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
