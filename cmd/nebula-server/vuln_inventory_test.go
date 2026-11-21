@@ -550,6 +550,12 @@ type srcEnv struct {
 func newSrcEnv(t *testing.T) *srcEnv {
 	t.Helper()
 	e := newVTEnv(t)
+	// vulninventory stamps TakenAt with the real clock, while the export
+	// judges freshness with this clock. Starting the test clock an hour
+	// ahead keeps every TakenAt before it, so a snapshot is never "taken
+	// after the clock" in a slow test run. The clock split itself is open
+	// (see the round-1 report).
+	e.clk.Add(time.Hour)
 	hosts := inventory.NewWithNow(e.db, e.clk.Now)
 	inv, err := newVulnInventory(e.db, hosts, e.clk.Now)
 	if err != nil {
