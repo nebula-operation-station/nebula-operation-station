@@ -97,7 +97,7 @@ func AnchorRoots() ([]Root, error) {
 	var out []Root
 	for _, a := range anchors {
 		if a.Key != nil {
-			out = append(out, Root{ID: a.ID, Key: a.Key})
+			out = append(out, Root(a))
 		}
 	}
 	return out, nil
