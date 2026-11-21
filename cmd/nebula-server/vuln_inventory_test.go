@@ -896,3 +896,54 @@ func TestVulnInventoryFutureTakenAtIsGone(t *testing.T) {
 		t.Fatalf("snapshot taken after the clock: err = %v, want ErrVulnSnapshotGone", err)
 	}
 }
+
+// recordingReads stands in for a run start that commits between the floor
+// read of the export and its check: after the first Current it records the
+// generation of the snapshot it returned as the store's run floor, as a run
+// started with that snapshot would.
+type recordingReads struct {
+	*vulninventory.Store
+	db       *sql.DB
+	recorded bool
+}
+
+func (r *recordingReads) Current(ctx context.Context, hosts []string, maxReuse time.Duration, floor int64) (vulninventory.Snapshot, error) {
+	s, err := r.Store.Current(ctx, hosts, maxReuse, floor)
+	if err == nil && !r.recorded {
+		r.recorded = true
+		if _, err := r.db.ExecContext(ctx, `UPDATE vuln_store_state SET max_inventory_generation = ? WHERE id = 1`, s.Generation); err != nil {
+			return s, err
+		}
+	}
+	return s, err
+}
+
+// TestVulnInventoryNeverServesSnapshotAFleetRunAlreadyRecorded: when a run
+// start records the generation of the snapshot that Current returned, the
+// export must not hand that snapshot out again. The next run start with it
+// would be refused (409), so the export serves a higher generation.
+func TestVulnInventoryNeverServesSnapshotRunAlreadyRecorded(t *testing.T) {
+	e := newSrcEnv(t)
+	e.addHost(t, srcHost)
+	e.addRead(t, srcRead(srcHost, "exec-1", e.clk.Now().Add(-time.Minute), true, "openssl"))
+	st, err := vulninventory.New(e.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reads := &recordingReads{Store: st, db: e.db}
+	inv := newVulnInventoryOn(reads, e.db, inventory.NewWithNow(e.db, e.clk.Now), e.clk.Now)
+	snap, err := inv.VulnSnapshot(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reads.recorded {
+		t.Fatal("the run record did not happen")
+	}
+	recorded, err := maxInventoryGeneration(context.Background(), e.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.Generation <= recorded {
+		t.Fatalf("served generation %d, want above the recorded run generation %d", snap.Generation, recorded)
+	}
+}

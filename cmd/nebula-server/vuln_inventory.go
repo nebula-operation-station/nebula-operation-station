@@ -255,15 +255,9 @@ func (v vulnInventory) VulnSnapshot(ctx context.Context, id string) (api.VulnSna
 	for _, h := range hosts {
 		ids = append(ids, h.ID)
 	}
-	floor, err := maxInventoryGeneration(ctx, v.db)
+	cur, err := v.current(ctx, ids)
 	if err != nil {
 		return api.VulnSnapshot{}, err
-	}
-	// Generations of the old hourly IDs (time in hours) stay below the new ones.
-	hour := v.now().UTC().Truncate(vulnInventoryBucket).Unix() / int64(vulnInventoryBucket/time.Second)
-	cur, err := v.reads.Current(ctx, ids, vulnInventoryBucket, max(floor, hour))
-	if err != nil {
-		return api.VulnSnapshot{}, fmt.Errorf("vuln inventory: current: %w", err)
 	}
 	// Current leaves the bodies out. The snapshot is immutable for its ID,
 	// so a decoded copy of the same ID is the same snapshot: decode only
@@ -272,6 +266,42 @@ func (v vulnInventory) VulnSnapshot(ctx context.Context, id string) (api.VulnSna
 		return s, nil
 	}
 	return v.load(ctx, cur.ID)
+}
+
+// maxCurrentAttempts bounds the Current calls of one export. A run start that
+// records a generation after the floor was read makes the snapshot just
+// returned unusable for a run, and the next call builds a higher one.
+const maxCurrentAttempts = 3
+
+// current returns the current snapshot of ids with a generation above every
+// run floor the export can see. The floor is read before and after Current:
+// when a run start recorded the returned generation in between (Current may
+// have reused that snapshot), the snapshot is not handed out, because the
+// next run start with it would be refused with 409. The two reads are not in
+// one transaction with Current (that needs a change in vulninventory), so a
+// run that records a generation after the second read is still possible; it
+// is seen by the next export call.
+func (v vulnInventory) current(ctx context.Context, ids []string) (vulninventory.Snapshot, error) {
+	// Generations of the old hourly IDs (time in hours) stay below the new ones.
+	hour := v.now().UTC().Truncate(vulnInventoryBucket).Unix() / int64(vulnInventoryBucket/time.Second)
+	for range maxCurrentAttempts {
+		floor, err := maxInventoryGeneration(ctx, v.db)
+		if err != nil {
+			return vulninventory.Snapshot{}, err
+		}
+		cur, err := v.reads.Current(ctx, ids, vulnInventoryBucket, max(floor, hour))
+		if err != nil {
+			return vulninventory.Snapshot{}, fmt.Errorf("vuln inventory: current: %w", err)
+		}
+		recorded, err := maxInventoryGeneration(ctx, v.db)
+		if err != nil {
+			return vulninventory.Snapshot{}, err
+		}
+		if recorded < cur.Generation {
+			return cur, nil
+		}
+	}
+	return vulninventory.Snapshot{}, fmt.Errorf("vuln inventory: current: run starts recorded the snapshot generation on %d attempts", maxCurrentAttempts)
 }
 
 // byID returns the snapshot with id, or api.ErrVulnSnapshotGone when the
