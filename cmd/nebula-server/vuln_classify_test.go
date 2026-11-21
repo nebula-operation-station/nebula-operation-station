@@ -26,6 +26,9 @@ const (
 	clsOld  = "3.0.15-1~deb12u1"
 	clsNew  = "3.0.16-1~deb12u1"
 	clsHost = "web01"
+	// clsIncomparable is a version the store keeps but no scheme compares:
+	// its epoch is not a number.
+	clsIncomparable = "x:3.0.15-1"
 )
 
 // clsRecord is a host record of source package src installed at ver with
@@ -65,6 +68,12 @@ func clsRead(exec string, at time.Time, complete bool, kernel vulninventory.Kern
 		r.Reason = vulninventory.ReasonIncomplete
 	}
 	return r
+}
+
+// clsFailure is a read-failure marker of clsHost: no components, no kernel
+// data and no ecosystem, as the observer stores a list it could not read.
+func clsFailure(exec string, at time.Time, reason string) vulninventory.Read {
+	return vulninventory.Read{HostID: clsHost, ExecutionID: exec, ReadAt: at, Reason: reason}
 }
 
 // clsPut stores a read as the package list observer does.
@@ -213,20 +222,97 @@ func TestVulnClassifyClosureClasses(t *testing.T) {
 			want: vulnstore.ClassUnconfirmed,
 		},
 		{
-			name: "partial newest read naming the fixed version without a complete read is unconfirmed",
+			name: "partial newest read naming the fixed version without a complete read holds",
 			rec:  clsRecord("CVE-2026-7001", "openssl", clsOld, clsNew),
 			reads: func(t0 time.Time) []vulninventory.Read {
 				return []vulninventory.Read{clsRead("r1", t0.Add(time.Minute), false, clsKernel("6.1.119-1"), clsComp("openssl", clsNew))}
 			},
-			want: vulnstore.ClassUnconfirmed, wantNOS: clsNew,
+			wantErr: true,
 		},
 		{
-			name: "only a partial read not naming the component is unconfirmed",
+			name: "only a partial read not naming the component holds like no read",
 			rec:  clsRecord("CVE-2026-7001", "openssl", clsOld, clsNew),
 			reads: func(t0 time.Time) []vulninventory.Read {
 				return []vulninventory.Read{clsRead("r1", t0.Add(time.Minute), false, clsKernel("6.1.119-1"), clsComp("zlib", "1.2.13"))}
 			},
+			wantErr: true,
+		},
+		{
+			name: "only failure markers hold like no read",
+			rec:  clsRecord("CVE-2026-7001", "openssl", clsOld, ""),
+			reads: func(t0 time.Time) []vulninventory.Read {
+				return []vulninventory.Read{clsFailure("r1", t0.Add(time.Minute), vulninventory.ReasonRefused)}
+			},
+			wantErr: true,
+		},
+		{
+			name: "failure marker after a complete read keeps the contradiction",
+			rec:  clsRecord("CVE-2026-7001", "openssl", clsOld, clsNew),
+			reads: func(t0 time.Time) []vulninventory.Read {
+				return []vulninventory.Read{
+					clsRead("r1", t0.Add(time.Minute), true, clsKernel("6.1.119-1"), clsComp("openssl", clsOld)),
+					clsFailure("r2", t0.Add(2*time.Minute), vulninventory.ReasonStoreUnavailable),
+				}
+			},
+			want: vulnstore.ClassContradicted, wantNOS: clsOld,
+		},
+		{
+			name: "read in the same second as the write does not evidence",
+			rec:  clsRecord("CVE-2026-7001", "openssl", clsOld, clsNew),
+			reads: func(t0 time.Time) []vulninventory.Read {
+				return []vulninventory.Read{clsRead("r1", t0, true, clsKernel("6.1.119-1"), clsComp("openssl", clsNew))}
+			},
+			want: vulnstore.ClassUnconfirmed, wantNOS: clsNew,
+		},
+		{
+			name: "row 2 in the same second as the write does not evidence",
+			rec:  clsRecord("CVE-2026-7001", "openssl", clsOld, clsNew),
+			reads: func(t0 time.Time) []vulninventory.Read {
+				return []vulninventory.Read{clsRead("r1", t0, true, clsKernel("6.1.119-1"), clsComp("zlib", "1.2.13"))}
+			},
 			want: vulnstore.ClassUnconfirmed,
+		},
+		{
+			name: "newest read from another ecosystem holds",
+			rec:  clsRecord("CVE-2026-7001", "openssl", clsOld, clsNew),
+			reads: func(t0 time.Time) []vulninventory.Read {
+				r := clsRead("r1", t0.Add(time.Minute), true, clsKernel("6.1.119-1"), clsComp("openssl", clsNew))
+				r.Ecosystem = "debian:trixie"
+				return []vulninventory.Read{r}
+			},
+			wantErr: true,
+		},
+		{
+			name: "last complete read from another ecosystem holds even when a partial read names the component",
+			rec:  clsRecord("CVE-2026-7001", "openssl", clsOld, clsNew),
+			reads: func(t0 time.Time) []vulninventory.Read {
+				r := clsRead("r1", t0.Add(time.Minute), true, clsKernel("6.1.119-1"), clsComp("zlib", "1.2.13"))
+				r.Ecosystem = "debian:trixie"
+				return []vulninventory.Read{r,
+					clsRead("r2", t0.Add(2*time.Minute), false, clsKernel("6.1.119-1"), clsComp("openssl", clsOld))}
+			},
+			wantErr: true,
+		},
+		{
+			// clsIncomparable passes the store's version pattern but is not
+			// a dpkg version (its epoch is not a number).
+			name: "incomparable installed version holds against the fixed version",
+			rec:  clsRecord("CVE-2026-7001", "openssl", clsOld, clsNew),
+			reads: func(t0 time.Time) []vulninventory.Read {
+				return []vulninventory.Read{clsRead("r1", t0.Add(time.Minute), true, clsKernel("6.1.119-1"), clsComp("openssl", clsIncomparable))}
+			},
+			wantErr: true,
+		},
+		{
+			name: "incomparable installed version in the last complete read holds",
+			rec:  clsRecord("CVE-2026-7001", "openssl", clsOld, clsNew),
+			reads: func(t0 time.Time) []vulninventory.Read {
+				return []vulninventory.Read{
+					clsRead("r1", t0.Add(time.Minute), true, clsKernel("6.1.119-1"), clsComp("openssl", clsIncomparable)),
+					clsRead("r2", t0.Add(2*time.Minute), false, clsKernel("6.1.119-1"), clsComp("zlib", "1.2.13")),
+				}
+			},
+			wantErr: true,
 		},
 		{
 			name:    "no inventory read at all fails closed",
@@ -275,12 +361,53 @@ func TestVulnClassifyClosureClasses(t *testing.T) {
 			want: vulnstore.ClassContradicted, wantNOS: "6.1.119-1",
 		},
 		{
-			name: "kernel: a partial read at the fixed version does not evidence",
+			name: "kernel: a partial read at the fixed version neither evidences nor decides",
+			rec:  clsRecord("CVE-2026-7002", "linux", "6.1.119-1", "6.1.120-1"),
+			reads: func(t0 time.Time) []vulninventory.Read {
+				return []vulninventory.Read{
+					clsRead("r1", t0.Add(time.Minute), true, clsKernel("6.1.119-1")),
+					clsRead("r2", t0.Add(2*time.Minute), false, clsKernel("6.1.120-1")),
+				}
+			},
+			want: vulnstore.ClassContradicted, wantNOS: "6.1.119-1",
+		},
+		{
+			name: "kernel: only a partial read holds like no read",
 			rec:  clsRecord("CVE-2026-7002", "linux", "6.1.119-1", "6.1.120-1"),
 			reads: func(t0 time.Time) []vulninventory.Read {
 				return []vulninventory.Read{clsRead("r1", t0.Add(time.Minute), false, clsKernel("6.1.120-1"))}
 			},
-			want: vulnstore.ClassUnconfirmed, wantNOS: "6.1.120-1",
+			wantErr: true,
+		},
+		{
+			name: "kernel: failure marker after a complete read below the fix stays contradicted",
+			rec:  clsRecord("CVE-2026-7002", "linux", "6.1.119-1", "6.1.120-1"),
+			reads: func(t0 time.Time) []vulninventory.Read {
+				return []vulninventory.Read{
+					clsRead("r1", t0.Add(time.Minute), true, clsKernel("6.1.119-1")),
+					clsFailure("r2", t0.Add(2*time.Minute), vulninventory.ReasonRefused),
+				}
+			},
+			want: vulnstore.ClassContradicted, wantNOS: "6.1.119-1",
+		},
+		{
+			name: "kernel: failure marker after a complete read at the fix is evidenced",
+			rec:  clsRecord("CVE-2026-7002", "linux", "6.1.119-1", "6.1.120-1"),
+			reads: func(t0 time.Time) []vulninventory.Read {
+				return []vulninventory.Read{
+					clsRead("r1", t0.Add(time.Minute), true, clsKernel("6.1.120-1")),
+					clsFailure("r2", t0.Add(2*time.Minute), vulninventory.ReasonFactsOlder),
+				}
+			},
+			want: vulnstore.ClassEvidenced, wantNOS: "6.1.120-1",
+		},
+		{
+			name: "kernel: complete read without kernel data holds",
+			rec:  clsRecord("CVE-2026-7002", "linux", "6.1.119-1", "6.1.120-1"),
+			reads: func(t0 time.Time) []vulninventory.Read {
+				return []vulninventory.Read{clsRead("r1", t0.Add(time.Minute), true, vulninventory.Kernel{}, clsComp("openssl", clsNew))}
+			},
+			wantErr: true,
 		},
 		{
 			name: "kernel: an unmapped running kernel is unconfirmed",
@@ -528,5 +655,91 @@ func TestClassifierErrorsOnlyForHostsWithoutInventory(t *testing.T) {
 			Component: vulnfinding.Component{SourcePackage: "openssl", SourceVersion: clsOld}}}
 	if _, err := e.svc.classifier.Classify(context.Background(), host); !errors.Is(err, errVulnNoInventory) {
 		t.Fatalf("host Classify err = %v, want errVulnNoInventory", err)
+	}
+}
+
+// TestInventoryReadClosesNothingAtTheWriteSecondAndOfAnotherRelease: a complete
+// read taken in the same second as the finding's last write is no evidence
+// of it (D5: strictly newer), and a read of another release than the
+// finding's ecosystem is no basis for it either. Both leave the finding open.
+// The other-release case has a positive control with the finding's release,
+// which closes the same absent package.
+func TestInventoryReadClosesNothingAtTheWriteSecondAndOfAnotherRelease(t *testing.T) {
+	t.Run("read in the same second as the write", func(t *testing.T) {
+		e := newVTEnv(t)
+		t0 := e.clk.Now()
+		clsRunCovering(t, e, clsRecord("CVE-2026-7020", "openssl", clsOld, clsNew))
+		svc, err := newVulnInventoryService(e.db, staticFacts{result: factsResult(t, debian12Release), at: t0},
+			slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		svc.setCloser(e.svc.store)
+		svc.ObserveInstalled(context.Background(), clsHost, "exec-inv-3", t0, installedEnvelope(t, debian12Text(t), false))
+		fs, err := e.svc.store.SubjectFindings(context.Background(), vulnstore.Subject{Kind: vulnfinding.SubjectHost, ID: clsHost})
+		if err != nil || len(fs) != 1 {
+			t.Fatalf("findings = %d, %v; want one", len(fs), err)
+		}
+		if fs[0].State != vulnstore.StateOpen {
+			t.Fatalf("state = %s, want open", fs[0].State)
+		}
+	})
+	t.Run("read of another release than the finding", func(t *testing.T) {
+		for _, tt := range []struct {
+			eco  string
+			want vulnstore.State
+		}{
+			{"debian:trixie", vulnstore.StateOpen},
+			{"debian:bookworm", vulnstore.StateFixed}, // control: same release closes
+		} {
+			e := newVTEnv(t)
+			t0 := e.clk.Now()
+			f := clsFinding(t, e, clsRecord("CVE-2026-7021", "openssl", clsOld, clsNew))
+			read := vulnstore.InventoryRead{Subject: vulnstore.Subject{Kind: vulnfinding.SubjectHost, ID: clsHost},
+				Complete: true, ReadAt: t0.Add(time.Minute), Ecosystem: tt.eco,
+				SourceVersions: map[string]string{"zlib": "1.2.13"}}
+			closed, err := e.svc.store.CloseByInventory(context.Background(), read)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := e.svc.store.Get(context.Background(), f.Key)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.State != tt.want {
+				t.Fatalf("eco %s: state = %s (closed %d), want %s", tt.eco, got.State, len(closed), tt.want)
+			}
+		}
+	})
+}
+
+// TestClassifyMalformedFixedVersionHolds: a fixed version that does not parse
+// holds the closure whatever the reads say, including when the package is gone
+// (D5, fail closed). Hermes rejects such a version at submit, so the
+// classifier is called on a finding with the version set directly.
+func TestClassifyMalformedFixedVersionHolds(t *testing.T) {
+	tests := []struct {
+		name  string
+		reads func(t0 time.Time) []vulninventory.Read
+	}{
+		{"package gone", func(t0 time.Time) []vulninventory.Read {
+			return []vulninventory.Read{clsRead("r1", t0.Add(time.Minute), true, clsKernel("6.1.119-1"), clsComp("zlib", "1.2.13"))}
+		}},
+		{"installed at the fixed version", func(t0 time.Time) []vulninventory.Read {
+			return []vulninventory.Read{clsRead("r1", t0.Add(time.Minute), true, clsKernel("6.1.119-1"), clsComp("openssl", clsNew))}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := newVTEnv(t)
+			f := clsFinding(t, e, clsRecord("CVE-2026-7022", "openssl", clsOld, clsNew))
+			for _, r := range tt.reads(e.clk.Now()) {
+				clsPut(t, e, r)
+			}
+			f.EpisodeFixedVersion = clsIncomparable
+			if _, err := e.svc.classifier.Classify(context.Background(), f); err == nil {
+				t.Fatal("Classify returned no error for a malformed episode fixed version")
+			}
+		})
 	}
 }
