@@ -670,6 +670,49 @@ func TestPutAcceptsBoundaryValues(t *testing.T) {
 	}
 }
 
+// TestPutRefusesReadTimeFarInTheFuture checks the upper bound of ReadAt. A read
+// stamped more than MaxReadSkew after the store's clock would stay the newest
+// read of its host, and so protected, for as long as the clock stays behind it.
+// Put refuses it; a read at the bound or in the past is accepted.
+func TestPutRefusesReadTimeFarInTheFuture(t *testing.T) {
+	c := useClock(t)
+	now := c.t
+	cases := []struct {
+		name    string
+		readAt  time.Time
+		wantErr bool
+	}{
+		{"now", now, false},
+		{"in the past", now.Add(-time.Hour), false},
+		{"exactly MaxReadSkew ahead", now.Add(MaxReadSkew), false},
+		{"one second over MaxReadSkew", now.Add(MaxReadSkew + time.Second), true},
+		{"one year ahead", now.AddDate(1, 0, 0), true},
+	}
+	s, db := openStore(t)
+	ctx := context.Background()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := rowCount(t, db)
+			r := testRead("host-future", true, 0)
+			r.ReadAt = tc.readAt
+			_, err := s.Put(ctx, r)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Put err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr && !errors.Is(err, ErrInvalidRead) {
+				t.Errorf("Put err = %v, want ErrInvalidRead", err)
+			}
+			want := before
+			if !tc.wantErr {
+				want++
+			}
+			if n := rowCount(t, db); n != want {
+				t.Errorf("rows = %d, want %d", n, want)
+			}
+		})
+	}
+}
+
 func TestBodySizeCheckRejectsAboveLimit(t *testing.T) {
 	if err := checkBodySize(MaxBodyBytes); err != nil {
 		t.Errorf("body at limit refused: %v", err)

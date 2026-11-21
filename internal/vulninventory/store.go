@@ -36,6 +36,10 @@ const (
 	MaxDropped = 2 * MaxBinaries
 	// MaxReasonBytes bounds Read.Reason (why a read is partial or failed).
 	MaxReasonBytes = 128
+	// MaxReadSkew is how far after the store's clock a read time may be. A
+	// read stamped further ahead would stay the newest read of its host, and
+	// so protected, until the clock caught up. Put refuses such a read.
+	MaxReadSkew = 5 * time.Minute
 
 	maxHostIDBytes        = 128
 	maxExecutionIDBytes   = 64
@@ -334,6 +338,9 @@ func validateRead(r Read) error {
 	}
 	if r.ReadAt.IsZero() || r.ReadAt.Unix() <= 0 {
 		return fmt.Errorf("%w: read time is unset", ErrInvalidRead)
+	}
+	if limit := nowFunc().Add(MaxReadSkew); r.ReadAt.After(limit) {
+		return fmt.Errorf("%w: read time is more than %s after the store clock", ErrInvalidRead, MaxReadSkew)
 	}
 	if err := checkText("reason", r.Reason, MaxReasonBytes, false); err != nil {
 		return err
