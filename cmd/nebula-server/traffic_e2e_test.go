@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -15,15 +16,18 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"google.golang.org/grpc"
 
-	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/flowagg"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun/hostruntest"
+	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/trafficingest"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/trafficstore"
 	tmapi "github.com/nebula-operation-station/nebula-operation-station/internal/web/api/trafficmap"
@@ -31,20 +35,19 @@ import (
 )
 
 // The traffic map chain, end to end (ADR 0009, guide 9.9): the net.facts
-// script runs on two hosts through hostrun over SSH, its stdout is what
-// the server stores as the execution result, the ingest turns the stored
-// results into flows, and the map API answers behind the session chain.
+// script runs on two hosts through hostrun over SSH, the executions
+// service stores each result with its real save step (finishHost), the
+// ingest turns the stored results into flows, and the map API answers
+// behind the session chain of the web server.
 //
-// Only the network tools are fakes. ip prints the recorded output of the
-// fixtures in internal/trafficingest/testdata; ss prints the socket table
-// written by the test for each round. Everything else is the real script,
-// the real hostrun classifier and the real ingest.
-//
-// Befund ug08: the stored execution result is taken from the hostrun
-// result and written with e.runAction, not through the executions
-// service's finishHost (unexported, needs the executor). The save step
-// therefore is not part of this chain; its own tests live in
-// internal/executions.
+// Only the network tools and the executor's gRPC side are fakes. ip prints
+// the recorded output of the fixtures in internal/trafficingest/testdata;
+// ss prints the socket table written by the test for each round. The
+// executor fake pins the two hosts, approves the proposal (approval is the
+// executor's business, not this chain's) and runs each attached run as the
+// real script, unchanged apart from a PATH in front, over the host's SSH
+// client. Everything else is the real script, the real hostrun classifier,
+// the real executions service, the real ingest and the real map API.
 
 // e2eExecIDs make the attached-run IDs, which must be lowercase UUIDs.
 var e2eExecIDs = map[string]string{
@@ -129,21 +132,11 @@ func (h *e2eHost) setSS(table string) {
 	}
 }
 
-// netFacts runs the built-in net.facts script on h as an attached run
-// (hostrun.Attached over SSH), with PATH set to the fake tools in front of
-// the unchanged script.
-func (h *e2eHost) netFacts(t *testing.T) hostrun.Result {
-	t.Helper()
-	a, ok := actions.Lookup("net.facts")
-	if !ok {
-		t.Fatal("net.facts is not a built-in action")
-	}
-	script := "PATH='" + h.bin + "'; export PATH\n" + string(a.Script)
-	r, err := hostrun.Attached(context.Background(), h.client, e2eExecIDs[h.name], []byte(`{}`), []byte(script), a.Timeout)
-	if err != nil {
-		t.Fatalf("%s: attached run: %v", h.name, err)
-	}
-	return r
+// attached runs script on h as an attached run (hostrun.Attached over
+// SSH), with PATH set to the fake tools in front of it.
+func (h *e2eHost) attached(ctx context.Context, script []byte, params []byte, timeout time.Duration) (hostrun.Result, error) {
+	pre := "PATH='" + h.bin + "'; export PATH\n"
+	return hostrun.Attached(ctx, h.client, e2eExecIDs[h.name], params, append([]byte(pre), script...), timeout)
 }
 
 // ssConn is one established TCP socket in the format of `ss -tinuaH`.
@@ -170,8 +163,161 @@ func e2eSocketsA(sent, recv uint64) string {
 	return ssConn(e2eA0, e2eB0, sent, sent, recv)
 }
 
+// e2eSocketsB is host-b's view of the same socket: its own sent and
+// received counters, which mirror host-a's (B sent what A received).
 func e2eSocketsB(sent, recv uint64) string {
-	return ssListen("*:9100") + ssConn(e2eB0, e2eA0, recv, recv, sent)
+	return ssListen("*:9100") + ssConn(e2eB0, e2eA0, sent, sent, recv)
+}
+
+// e2eExec is the executor side the executions service talks to. It pins
+// both hosts, approves every proposal, and answers each attached run with
+// the real net.facts script run over the host's SSH client. The results
+// it answers are kept, so the stored results can be compared with them.
+// Any other executor call is unexpected and panics through the nil
+// embedded interface.
+type e2eExec struct {
+	executions.Executor
+	hosts map[string]*e2eHost
+	seq   int
+
+	mu  sync.Mutex
+	got map[string]hostrun.Result
+}
+
+func (x *e2eExec) ListHostKeys(context.Context, *pb.ListHostKeysRequest, ...grpc.CallOption) (*pb.ListHostKeysResponse, error) {
+	var pins []*pb.HostKeyPin
+	for id := range x.hosts {
+		pins = append(pins, &pb.HostKeyPin{HostId: id, Fingerprint: "SHA256:e2e-" + id})
+	}
+	return &pb.ListHostKeysResponse{Hosts: pins}, nil
+}
+
+func (x *e2eExec) ProposeExecution(context.Context, *pb.ProposeExecutionRequest, ...grpc.CallOption) (*pb.ProposeExecutionResponse, error) {
+	x.mu.Lock()
+	x.seq++
+	digest := fmt.Sprintf("%064x", x.seq)
+	x.mu.Unlock()
+	return &pb.ProposeExecutionResponse{ExecutionDigest: digest, State: pb.PermitState_PERMIT_STATE_APPROVED}, nil
+}
+
+func (x *e2eExec) RunAttached(ctx context.Context, in *pb.RunAttachedRequest, _ ...grpc.CallOption) (*pb.RunAttachedResponse, error) {
+	id := in.GetRun().GetHostId()
+	h, ok := x.hosts[id]
+	if !ok {
+		return nil, fmt.Errorf("e2e executor: no host %q", id)
+	}
+	r, err := h.attached(ctx, in.GetRun().GetArtifact(), in.GetRun().GetParametersJson(), time.Duration(in.GetTimeoutSeconds())*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("%s: attached run: %w", id, err)
+	}
+	x.mu.Lock()
+	x.got[id] = r
+	x.mu.Unlock()
+	return &pb.RunAttachedResponse{Class: r.Class, Detail: r.Detail, ExitCode: int32(r.ExitCode), Result: r.Result, Log: r.Log, LogTruncated: r.LogTruncated}, nil
+}
+
+// answered returns what the executor answered for host in the last run.
+func (x *e2eExec) answered(host string) hostrun.Result {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	return x.got[host]
+}
+
+// e2eRig is the chain of one test: the server database with the traffic
+// ingest wired to it, the executions service on that database, the
+// executor fake, and the two hosts.
+type e2eRig struct {
+	e    *trafficEnv
+	ops  *executions.Service
+	exec *e2eExec
+	a, b *e2eHost
+}
+
+// e2eSetup builds the lab, the two hosts, the executions service on the
+// server database, and the traffic ingest wired to it.
+func e2eSetup(t *testing.T) *e2eRig {
+	t.Helper()
+	signer := e2eSigner(t)
+	e := newTrafficEnv(t)
+	e.now = time.Now().UTC()
+	e2eLab(t, e)
+	r := &e2eRig{e: e, a: newE2EHost(t, "host-a", signer), b: newE2EHost(t, "host-b", signer)}
+	r.exec = &e2eExec{hosts: map[string]*e2eHost{"host-a": r.a, "host-b": r.b}, got: map[string]hostrun.Result{}}
+	r.ops = executions.New(t.Context(), r.exec, e.db, e.inv, slog.New(slog.DiscardHandler))
+	t.Cleanup(r.ops.Wait)
+	return r
+}
+
+// e2eRound runs net.facts on host-a and host-b as one execution through
+// the executions service with the given socket tables, and lets the wired
+// ingest sync. It returns the stored host records by host ID.
+func e2eRound(t *testing.T, r *e2eRig, sockA, sockB string) map[string]executions.Host {
+	t.Helper()
+	e := r.e
+	// Finished times have one-second resolution: each round finishes in a
+	// later second than the one before.
+	time.Sleep(time.Until(time.Now().Truncate(time.Second).Add(time.Second)))
+	r.a.setSS(sockA)
+	r.b.setSS(sockB)
+	created, err := r.ops.Create(t.Context(), "admin", trafficingest.ActionID, []string{"host-a", "host-b"}, nil)
+	if err != nil {
+		t.Fatalf("create net.facts run: %v", err)
+	}
+	if created.State != "approved" {
+		t.Fatalf("execution state %s, want approved by the executor", created.State)
+	}
+	r.ops.Wait()
+	ex, err := r.ops.Get(t.Context(), created.ID)
+	if err != nil {
+		t.Fatalf("read execution: %v", err)
+	}
+	if ex.State != "finished" {
+		t.Fatalf("execution state %s, want finished", ex.State)
+	}
+	stored := map[string]executions.Host{}
+	for _, h := range ex.Hosts {
+		stored[h.HostID] = h
+	}
+	if len(stored) != 2 {
+		t.Fatalf("stored hosts %v, want host-a and host-b", ex.Hosts)
+	}
+	// The stored record is what finishHost wrote from the executor's answer.
+	for _, id := range []string{"host-a", "host-b"} {
+		h, want := stored[id], r.exec.answered(id)
+		if h.State != "finished" || h.Class != want.Class || h.ExitCode != want.ExitCode ||
+			!bytes.Equal(h.Result, want.Result) || h.FinishedAt.IsZero() {
+			t.Fatalf("%s stored as state %s class %s exit %d finished %v; the executor answered class %s exit %d",
+				id, h.State, h.Class, h.ExitCode, h.FinishedAt, want.Class, want.ExitCode)
+		}
+	}
+	e.now = time.Now().UTC().Add(time.Minute)
+	if _, err := e.sync.Sync(t.Context()); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	return stored
+}
+
+// e2eOutcome returns the ingest outcome of host in the last sync. It fails
+// when the sync did not report the host at all.
+func e2eOutcome(t *testing.T, e *trafficEnv, host string) trafficingest.HostResult {
+	t.Helper()
+	for _, h := range e.sync.last.Hosts {
+		if h.Host == host {
+			return h
+		}
+	}
+	t.Fatalf("sync result has no %s: %+v", host, e.sync.last.Hosts)
+	return trafficingest.HostResult{}
+}
+
+// e2eLab records the two hosts, their NICs and their inventory, the way
+// an admin records them: host-a with its address, host-b with its own.
+func e2eLab(t *testing.T, e *trafficEnv) {
+	t.Helper()
+	e.host("host-a", tfAddrA.String())
+	e.host("host-b", tfAddrB.String())
+	e.nic("nic-a", tfMACA, "host-a", tfAddrA)
+	e.nic("nic-b", tfMACB, "host-b", tfAddrB)
 }
 
 // e2eMapFixture is the server's HTTP chain (webServer) with the traffic
@@ -225,44 +371,7 @@ type e2eService struct {
 	Port  uint16 `json:"port"`
 }
 
-// e2eRound runs net.facts on both hosts with the given socket tables,
-// stores each result as the server does after a run (see the file comment
-// for what is not part of the chain), and lets the wired ingest sync.
-func e2eRound(t *testing.T, e *trafficEnv, a, b *e2eHost, at time.Time, sockA, sockB string) []hostrun.Result {
-	t.Helper()
-	a.setSS(sockA)
-	b.setSS(sockB)
-	var out []hostrun.Result
-	for _, h := range []*e2eHost{a, b} {
-		r := h.netFacts(t)
-		if r.Class != hostrun.ClassSuccess || r.ExitCode != 0 {
-			t.Fatalf("%s: class %s (%s), exit %d, log %q", h.name, r.Class, r.Detail, r.ExitCode, r.Log)
-		}
-		var doc map[string]json.RawMessage
-		if err := json.Unmarshal(r.Result, &doc); err != nil {
-			t.Fatalf("%s: result is not one JSON document: %v", h.name, err)
-		}
-		e.run(h.name, at, r.Result)
-		out = append(out, r)
-	}
-	e.now = at.Add(time.Minute)
-	if _, err := e.sync.Sync(context.Background()); err != nil {
-		t.Fatalf("sync: %v", err)
-	}
-	return out
-}
-
-// e2eLab records the two hosts, their NICs and their inventory, the way
-// an admin records them: host-a with its address, host-b with its own.
-func e2eLab(t *testing.T, e *trafficEnv) {
-	t.Helper()
-	e.host("host-a", tfAddrA.String())
-	e.host("host-b", tfAddrB.String())
-	e.nic("nic-a", tfMACA, "host-a", tfAddrA)
-	e.nic("nic-b", tfMACB, "host-b", tfAddrB)
-}
-
-// e2eEdge returns the edge between A and B from the model, or nil.
+// e2eEdge returns the edge between host-a and host-b from the model, or nil.
 func e2eEdge(m e2eModel) *e2eEdgeJSON {
 	for i := range m.Edges {
 		e := &m.Edges[i]
@@ -271,6 +380,13 @@ func e2eEdge(m e2eModel) *e2eEdgeJSON {
 		}
 	}
 	return nil
+}
+
+// e2eResp is the status, Location and body of a model request.
+type e2eResp struct {
+	Code     int
+	Location string
+	Body     string
 }
 
 // getModel fetches the overview model through the session chain.
@@ -283,62 +399,7 @@ func getModel(t *testing.T, f *swFixture, token string) (*e2eResp, e2eModel) {
 			t.Fatalf("model: %v: %s", err, rec.Body)
 		}
 	}
-	return &e2eResp{Code: rec.Code, Body: rec.Body.String()}, m
-}
-
-// e2eResp is the status and body of a model request.
-type e2eResp struct {
-	Code int
-	Body string
-}
-
-// TestTrafficMapFromNetFactsScriptOutput runs the whole chain on two
-// hosts: the script's output over hostrun is stored, ingested, and the map
-// behind the session shows the connection A -> B on port 9100 and both
-// hosts; without a session it shows nothing.
-func TestTrafficMapFromNetFactsScriptOutput(t *testing.T) {
-	signer := e2eSigner(t)
-	e := newTrafficEnv(t)
-	e2eLab(t, e)
-	a := newE2EHost(t, "host-a", signer)
-	b := newE2EHost(t, "host-b", signer)
-
-	base := time.Now().UTC().Truncate(time.Minute).Add(-20 * time.Minute)
-	e2eRound(t, e, a, b, base, e2eSocketsA(1000, 200), e2eSocketsB(200, 1000))
-	e2eRound(t, e, a, b, base.Add(5*time.Minute), e2eSocketsA(4000, 900), e2eSocketsB(900, 4000))
-
-	f := e2eMapFixture(t, e)
-	resp, m := getModel(t, f, f.token)
-	if resp.Code != http.StatusOK {
-		t.Fatalf("GET model with session: status %d: %s", resp.Code, resp.Body)
-	}
-	nodes := map[string]bool{}
-	for _, n := range m.Nodes {
-		nodes[n.ID] = true
-	}
-	if !nodes["host-a"] || !nodes["host-b"] {
-		t.Fatalf("nodes %v, want host-a and host-b", m.Nodes)
-	}
-	edge := e2eEdge(m)
-	if edge == nil {
-		t.Fatalf("no edge between host-a and host-b: %s", resp.Body)
-	}
-	if len(m.Edges) != 1 {
-		t.Errorf("%d edges, want exactly the A-B edge: %s", len(m.Edges), resp.Body)
-	}
-	if len(edge.Services) != 1 || edge.Services[0].Proto != "tcp" || edge.Services[0].Port != 9100 {
-		t.Errorf("services %+v, want tcp/9100", edge.Services)
-	}
-	// Flows are the difference of the two rounds: 3000 bytes from A to
-	// B and 700 back, however the edge is oriented.
-	if edge.BytesAB+edge.BytesBA != 3700 {
-		t.Errorf("bytes %d+%d, want 3700 in total", edge.BytesAB, edge.BytesBA)
-	}
-
-	noSession, _ := getModel(t, f, "")
-	if noSession.Code == http.StatusOK || strings.Contains(noSession.Body, "host-b") {
-		t.Errorf("model without session: status %d, body leaks the map", noSession.Code)
-	}
+	return &e2eResp{Code: rec.Code, Location: rec.Header().Get("Location"), Body: rec.Body.String()}, m
 }
 
 func e2eSigner(t *testing.T) ssh.Signer {
@@ -354,16 +415,75 @@ func e2eSigner(t *testing.T) ssh.Signer {
 	return s
 }
 
+// TestTrafficMapFromNetFactsScriptOutput runs the whole chain on two
+// hosts: the script's output over hostrun is stored by the executions
+// service, ingested, and the map behind the session shows the connection
+// host-a -> host-b on tcp/9100 with the counted bytes in each direction;
+// without a session it shows nothing.
+func TestTrafficMapFromNetFactsScriptOutput(t *testing.T) {
+	r := e2eSetup(t)
+	e := r.e
+	e2eRound(t, r, e2eSocketsA(1000, 200), e2eSocketsB(200, 1000))
+	e2eRound(t, r, e2eSocketsA(4000, 900), e2eSocketsB(900, 4000))
+	for _, id := range []string{"host-a", "host-b"} {
+		if o := e2eOutcome(t, e, id); o.Outcome != trafficingest.OutcomeFlows || o.Err != nil {
+			t.Fatalf("%s: outcome %s err %v, want flows", id, o.Outcome, o.Err)
+		}
+	}
+
+	f := e2eMapFixture(t, e)
+	resp, m := getModel(t, f, f.token)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("GET model with session: status %d: %s", resp.Code, resp.Body)
+	}
+	nodes := map[string]bool{}
+	for _, n := range m.Nodes {
+		nodes[n.ID] = true
+	}
+	if !nodes["host-a"] || !nodes["host-b"] {
+		t.Fatalf("nodes %v, want host-a and host-b", m.Nodes)
+	}
+	if len(m.Edges) != 1 {
+		t.Fatalf("%d edges, want exactly the A-B edge: %s", len(m.Edges), resp.Body)
+	}
+	edge := e2eEdge(m)
+	if edge == nil {
+		t.Fatalf("no edge between host-a and host-b: %s", resp.Body)
+	}
+	// host-a is the client: it sent 3000 bytes to host-b's 9100 and
+	// received 700 back. The edge is A < B by ID, so BytesAB is host-a's
+	// output.
+	if edge.A != "host-a" || edge.B != "host-b" {
+		t.Errorf("edge %s - %s, want host-a - host-b", edge.A, edge.B)
+	}
+	if edge.BytesAB != 3000 || edge.BytesBA != 700 {
+		t.Errorf("bytes ab %d ba %d, want 3000 from host-a to host-b and 700 back", edge.BytesAB, edge.BytesBA)
+	}
+	if len(edge.Services) != 1 || edge.Services[0].Proto != "tcp" || edge.Services[0].Port != 9100 {
+		t.Errorf("services %+v, want tcp/9100", edge.Services)
+	}
+
+	// The session gate redirects a GET without a session to /login (303);
+	// the map is not in the answer.
+	noSession, _ := getModel(t, f, "")
+	if noSession.Code != http.StatusSeeOther || noSession.Location != "/login" {
+		t.Errorf("model without session: status %d location %q, want 303 to /login", noSession.Code, noSession.Location)
+	}
+	if strings.Contains(noSession.Body, "host-") || strings.Contains(noSession.Body, `"nodes"`) {
+		t.Errorf("model without session leaks the map: %q", noSession.Body)
+	}
+}
+
 // TestTrafficMapEdgeSurvivesTruncatedScriptOutput: a socket table larger
 // than the script's section bound is cut by the script (truncated:true).
-// The cut result is still accepted by the ingest, and the map still shows
-// the A -> B connection, which is listed before the cut.
+// The cut result is stored as it is and ingested as incomplete: the spec
+// (09, "Incomplete") and the ingest (snapshotOf) take no flows from a
+// truncated sockets section, so host-a's outcome is no-flows without an
+// error. The A -> B edge then comes from host-b's untruncated report alone,
+// with the exact bytes of that one side, not doubled by host-a's result.
 func TestTrafficMapEdgeSurvivesTruncatedScriptOutput(t *testing.T) {
-	signer := e2eSigner(t)
-	e := newTrafficEnv(t)
-	e2eLab(t, e)
-	a := newE2EHost(t, "host-a", signer)
-	b := newE2EHost(t, "host-b", signer)
+	r := e2eSetup(t)
+	e := r.e
 
 	// Filler sockets of A to unrelated peers push the table past the
 	// section bound of net.facts (262144 bytes); the A-B socket comes first.
@@ -372,20 +492,25 @@ func TestTrafficMapEdgeSurvivesTruncatedScriptOutput(t *testing.T) {
 	for i := 0; filler.Len() <= 300*1024; i++ {
 		filler.WriteString(ssConn(fmt.Sprintf("192.168.10.37:%d", 41000+i%20000), "203.0.113.9:443", 10, 10, 10))
 	}
-	base := time.Now().UTC().Truncate(time.Minute).Add(-20 * time.Minute)
-	e2eRound(t, e, a, b, base, e2eSocketsA(1000, 200), e2eSocketsB(200, 1000))
+	e2eRound(t, r, e2eSocketsA(1000, 200), e2eSocketsB(200, 1000))
 
-	rounds := e2eRound(t, e, a, b, base.Add(5*time.Minute), filler.String(), e2eSocketsB(900, 4000))
+	stored := e2eRound(t, r, filler.String(), e2eSocketsB(900, 4000))
 	var doc struct {
 		Sockets struct {
 			Truncated bool `json:"truncated"`
 		} `json:"sockets"`
 	}
-	if err := json.Unmarshal(rounds[0].Result, &doc); err != nil {
+	if err := json.Unmarshal(stored["host-a"].Result, &doc); err != nil {
 		t.Fatal(err)
 	}
 	if !doc.Sockets.Truncated {
 		t.Fatal("the script did not cut the socket table; the fixture is too small")
+	}
+	if o := e2eOutcome(t, e, "host-a"); o.Outcome != trafficingest.OutcomeNoFlows || o.Err != nil {
+		t.Fatalf("host-a's cut result: outcome %s err %v, want no-flows (incomplete) without error", o.Outcome, o.Err)
+	}
+	if o := e2eOutcome(t, e, "host-b"); o.Outcome != trafficingest.OutcomeFlows || o.Err != nil {
+		t.Fatalf("host-b: outcome %s err %v, want flows", o.Outcome, o.Err)
 	}
 
 	f := e2eMapFixture(t, e)
@@ -393,8 +518,12 @@ func TestTrafficMapEdgeSurvivesTruncatedScriptOutput(t *testing.T) {
 	if resp.Code != http.StatusOK {
 		t.Fatalf("GET model: status %d: %s", resp.Code, resp.Body)
 	}
-	if edge := e2eEdge(m); edge == nil {
-		t.Fatalf("the cut result lost the A-B edge: %s", resp.Body)
+	edge := e2eEdge(m)
+	if edge == nil {
+		t.Fatalf("the truncated result of host-a cost the A-B edge: %s", resp.Body)
+	}
+	if edge.A != "host-a" || edge.B != "host-b" || edge.BytesAB != 3000 || edge.BytesBA != 700 {
+		t.Errorf("edge %s - %s ab %d ba %d, want host-a - host-b 3000 and 700 once", edge.A, edge.B, edge.BytesAB, edge.BytesBA)
 	}
 }
 
@@ -459,41 +588,40 @@ func (s *capSpy) OverviewUnion(ctx context.Context, nodes []netip.Addr, w flowag
 	return s.store.OverviewUnion(ctx, nodes, w, k)
 }
 
-// TestTrafficChainFailedSocketTableIsNoFlows records the current behaviour
-// when ss fails on a host (here: permission denied, exit 1). Befund ug08:
-// net.facts still returns class success with the sockets section
-// "failed" and no data, so the run looks healthy; the ingest reports the
-// host as no-flows without an error, and the map shows no A-B edge from
-// that host's side. The script is not changed here (ue06h/ud09f own it).
+// TestTrafficChainFailedSocketTableIsNoFlows: ss fails on host-a in the
+// second round (permission denied, exit 1). net.facts still returns class
+// success with the sockets section "failed" and no data. The ingest must
+// report host-a as no-flows without an error, and no A-B traffic may be
+// counted: host-b's socket counters do not move in this round, so any
+// bytes on the A-B edge would come from a failed table read as data.
 func TestTrafficChainFailedSocketTableIsNoFlows(t *testing.T) {
-	signer := e2eSigner(t)
-	e := newTrafficEnv(t)
-	e2eLab(t, e)
-	a := newE2EHost(t, "host-a", signer)
-	b := newE2EHost(t, "host-b", signer)
-	a.write("ss", "#!/bin/sh\necho 'ss: permission denied' >&2\nexit 1\n")
+	r := e2eSetup(t)
+	e := r.e
 
-	base := time.Now().UTC().Truncate(time.Minute).Add(-20 * time.Minute)
-	rounds := e2eRound(t, e, a, b, base, e2eSocketsA(1000, 200), e2eSocketsB(200, 1000))
+	e2eRound(t, r, e2eSocketsA(1000, 200), e2eSocketsB(200, 1000))
+	r.a.write("ss", "#!/bin/sh\necho 'ss: permission denied' >&2\nexit 1\n")
+	stored := e2eRound(t, r, e2eSocketsA(4000, 900), e2eSocketsB(200, 1000))
+
 	var doc struct {
 		Sockets struct {
 			Status string `json:"status"`
 		} `json:"sockets"`
 	}
-	if err := json.Unmarshal(rounds[0].Result, &doc); err != nil {
+	if err := json.Unmarshal(stored["host-a"].Result, &doc); err != nil {
 		t.Fatal(err)
 	}
-	if rounds[0].Class != hostrun.ClassSuccess || doc.Sockets.Status != "failed" {
-		t.Fatalf("class %s, sockets %q: Befund ug08 changed, re-check the script's failure path", rounds[0].Class, doc.Sockets.Status)
+	if stored["host-a"].Class != hostrun.ClassSuccess || doc.Sockets.Status != "failed" {
+		t.Fatalf("class %s, sockets %q: Befund ug08 changed, re-check the script's failure path", stored["host-a"].Class, doc.Sockets.Status)
 	}
-	for _, h := range e.sync.last.Hosts {
-		if h.Host == "host-a" && (h.Outcome != trafficingest.OutcomeNoFlows || h.Err != nil) {
-			t.Fatalf("host-a: outcome %s err %v, want no-flows without error", h.Outcome, h.Err)
-		}
+	if o := e2eOutcome(t, e, "host-a"); o.Outcome != trafficingest.OutcomeNoFlows || o.Err != nil {
+		t.Fatalf("host-a: outcome %s err %v, want no-flows without error", o.Outcome, o.Err)
 	}
 	f := e2eMapFixture(t, e)
 	resp, m := getModel(t, f, f.token)
-	if resp.Code != http.StatusOK || e2eEdge(m) != nil {
-		t.Fatalf("status %d, edge %v: a failed socket table must not invent flows", resp.Code, e2eEdge(m))
+	if resp.Code != http.StatusOK {
+		t.Fatalf("GET model: status %d: %s", resp.Code, resp.Body)
+	}
+	if edge := e2eEdge(m); edge != nil && edge.BytesAB+edge.BytesBA != 0 {
+		t.Fatalf("a failed socket table counted %d+%d bytes on the A-B edge", edge.BytesAB, edge.BytesBA)
 	}
 }
