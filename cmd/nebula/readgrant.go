@@ -160,8 +160,10 @@ func readGrantApprove(ctx context.Context, c pb.ExecutorServiceClient, digest st
 
 // printReadGrant shows the complete grant as the executor holds it: every
 // field of the decoded document (every host with its credential version,
-// every action, interval, budget, expiry) and then the complete canonical
-// document itself, untruncated. All strings go through displaySafe.
+// every action, interval, budget, expiry, every provider remote and every
+// network device with its trust pin, credential version and reads, in
+// document order) and then the complete canonical document itself,
+// untruncated. All strings go through displaySafe.
 func printReadGrant(out io.Writer, p *pb.PendingReadGrant, doc permit.ReadGrantDoc) {
 	s := func(v string) string { return displaySafe([]byte(v), permit.MaxReadGrantDocSize) }
 	ts := func(u int64) string { return time.Unix(u, 0).Format(time.RFC3339) }
@@ -217,6 +219,19 @@ func printReadGrant(out io.Writer, p *pb.PendingReadGrant, doc permit.ReadGrantD
 			for _, m := range pt.MetricsTargets {
 				fmt.Fprintf(out, "      metrics %s %s vmid %d generation %d\n", s(m.Node), s(m.Kind), m.VMID, m.Generation)
 			}
+		}
+	}
+
+	if len(doc.NetDeviceTargets) > 0 {
+		fmt.Fprintf(out, "  network devices (%d):\n", len(doc.NetDeviceTargets))
+		for _, nd := range doc.NetDeviceTargets {
+			reads := make([]string, 0, len(nd.Reads))
+			for _, r := range nd.Reads {
+				reads = append(reads, s(r))
+			}
+			fmt.Fprintf(out, "    %s  trust pin %s generation %d  credential version %d  reads (%d): %s\n",
+				s(nd.DeviceID), s(nd.TrustPin), nd.TrustGeneration, nd.CredentialVersion,
+				len(nd.Reads), strings.Join(reads, ", "))
 		}
 	}
 
