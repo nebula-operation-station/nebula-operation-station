@@ -40,7 +40,7 @@ Work that follows from the decisions (moved here from section 3.1 on
 2026-11-21, Claude):
 
 - **(f) option 3, I1 status beside the server check:** read-only. Show the
-  executor's `GetIntegrityStatus` result (`internal/executorclient/client.go:896`)
+  executor's `GetIntegrityStatus` result (`internal/executorclient/client.go:922-923`)
   next to the server's own check on `cmd/nebula-server/integrity.go`, labelled by
   source; neither is presented as the other. Files: `cmd/nebula-server/integrity.go`,
   `internal/executorclient/` (both unprotected; the executor is not changed).
@@ -86,7 +86,7 @@ Work that follows from the decisions (moved here from section 3.1 on
 | Transport | **Limits do not agree.** Attached runs (the only path read leases use) are capped at 1 MiB output and 10 min. Durable result reads are capped at the same 1 MiB. The scan allows 128 MiB and 40 min. The 10 min limit is enforced in the executor before dispatch (`schedule.go:133-135`, `roles_read.go:258-259`) and clamped in `hostrun`. | `internal/hostrun/hostrun.go:39` (`MaxResult = 1 << 20`), `:41-42` (`MaxTimeout = 10 min`), `:211` (output cap applied), `:221-222` (timeout clamp); `internal/hostrun/durable.go:358,370`; `internal/executor/schedule.go:133-135,211`; `internal/executor/roles_read.go:258-259`; `internal/fimscan/limits.go:13` (`MaxDocumentBytes = 128 << 20`); `internal/fimscan/script.go:30` (`ActionTimeout = 40 min`) |
 | Parser | Built, no production caller. `Parse` is only called from tests. | `internal/fimscan/parse.go:33`; no non-test caller found |
 | Retention | Built, no production caller. Merge of scan runs (`fimretain`), the retention store (`fimstore`) and `integritystore` are not called from production code. | `internal/fimretain/merge.go`; `internal/fimstore/store.go:128` (`Propose`); `internal/integritystore/integritystore.go`; `internal/fimresolve/resolve.go` (no production caller) |
-| Baseline (digest) | **Partly wired.** The executor's `CompareBaselineList` stream builds a baseline from the streamed list and compares its digest with the executor-held approved digest. This RPC is registered on the gRPC service. By design it receives the server's approved list, not a scan run (ADR 0015:1049-1052; `internal/executor/integrity_baseline.go:25-30`). The gap is that no server code calls it: the only client wrapper is `internal/executorclient/client.go:920`, and no caller of that wrapper exists. The server-side `fimstore.Propose` also builds a baseline and stores its digest, without a production caller. | `internal/executor/integrity_baseline.go:153` (`NewBaseline`), `:355` (`CompareBaselineList`); `internal/executor/service.go:221` (`RegisterExecutorServiceServer`); `internal/fimstore/store.go:143` |
+| Baseline (digest) | **Partly wired.** The executor's `CompareBaselineList` stream builds a baseline from the streamed list and compares its digest with the executor-held approved digest. This RPC is registered on the gRPC service. By design it receives the server's approved list, not a scan run (ADR 0015:1049-1052; `internal/executor/integrity_baseline.go:25-30`). The gap is that no server code calls it: the only client wrapper is `internal/executorclient/client.go:947`, and no caller of that wrapper exists. The server-side `fimstore.Propose` also builds a baseline and stores its digest, without a production caller. | `internal/executor/integrity_baseline.go:153` (`NewBaseline`), `:355` (`CompareBaselineList`); `internal/executor/service.go:221` (`RegisterExecutorServiceServer`); `internal/fimstore/store.go:143` |
 | Approval | **Missing.** `StoreApprovedBaselineDigest` (the only writer of the approved digest) has no production caller. No approval RPC, no approval screen, no `nebula integrity pending/approve`. The server's `Approve` re-hashes its own stored proposal rows (section 2 (c)). | `internal/executordb/integrity_baseline.go:111`; no non-test caller; `internal/fimstore/store.go:205` (`Approve`), `:241` (`verifyProposal`) |
 | Diff | Built, no production caller. | `internal/fimbaseline/diff.go:111` (`Diff`) |
 | Findings | Classes exist, no production caller. The executor writes a tamper finding on a digest mismatch (`RecordBaselineTamper`), but that path is not reachable in production: `CompareBaselineList` has no server caller, and `StoreApprovedBaselineDigest` (the only writer of the approved digest) has no production caller. So `approvedBaselineDigest` finds no digest and `finishBaselineCompare` returns `BaselineNone` before the call (`internal/executor/integrity_baseline.go:249`, `:253-254`). Severity is missing for uncovered paths (section 2 (e)). | `internal/fimfinding/classes.go`; `internal/fimfinding/doc.go:48-56`; `internal/executor/integrity_baseline.go:259` |
@@ -98,7 +98,7 @@ Work that follows from the decisions (moved here from section 3.1 on
 | Step | Status today | Evidence (file:line) |
 | --- | --- | --- |
 | Server self-check | Runs at start and every 60 min. Its reference loader always returns an error: a release build reports `no-admitted-reference` (ERROR, hashes nothing), a development build reports not-checkable. It cannot report "ok". | `cmd/nebula-server/integrity.go:53-61` (comment), `:65-80` (`newIntegrityMonitorAt`, `Load` at `:68-74`); `cmd/nebula-server/main.go:359-362` (`selfCheck`, comment says "no reaction here (IG-04)") |
-| Executor status RPC | Exists, read-only, server and admin roles allowed. | `internal/executor/roles.go:257`; `internal/executor/integrity_lock.go:494` (`GetIntegrityStatus`); client `internal/executorclient/client.go:896` |
+| Executor status RPC | Exists, read-only, server and admin roles allowed. | `internal/executor/roles.go:257`; `internal/executor/integrity_lock.go:494` (`GetIntegrityStatus`); client `internal/executorclient/client.go:922-923` |
 | Server calls executor status | **Never.** The only callers of `GetIntegrityStatus` are the admin CLI. The server's lock watcher calls the separate `GetStatus` RPC for the lock state only. | `cmd/nebula/integrity_ack.go:39,88`; `cmd/nebula-server/main.go:348-357` (`GetStatus`) |
 | Server UI for I1 | `/integrity/status` shows the server monitor's result only. | `cmd/nebula-server/integrity.go:118-129` |
 
@@ -228,7 +228,7 @@ recommendation. Nothing below is decided.
      approval binds that digest (ADR 0015:1035-1037). Protected:
      `internal/executor/`, `internal/executordb/`.
      **Direction, not decided by this paper:** the code has the server push the
-     list in a client stream (`internal/executorclient/client.go:912`), while the
+     list in a client stream (`internal/executorclient/client.go:947`), while the
      ADR text has the executor fetch it from the server (`:1049-1050`). Option 1
      works with either, but the maintainer should confirm which one the ADR means.
   2. *Server proposes, executor re-checks at approval.* The server's digest is
@@ -403,7 +403,7 @@ change.
 
 | Item | Files | Required test (real HTTP unless noted) |
 | --- | --- | --- |
-| Server baseline proposal store (`fimstore`) built on the server database. Only after (c) is decided: until then the server keeps digest logic that ADR 0015:1035-1060 may forbid. Whether it does is the open reading in (c) option 2, not settled here. | `internal/fimstore/`, `cmd/nebula-server/` | `httptest`-served handler that writes and reads a baseline proposal; error path for a host without a stored host row |
+| Server baseline proposal store (`fimstore`) built on the server database. Decided 2026-11-21, (c) option 1: the server digest (`internal/fimstore/store.go:143`) and the `verifyProposal` check are removed, but only after the executor check on the list is wired (section 2 (c)). Do not add server digest logic. Until that removal, the existing code stays as it is. | `internal/fimstore/`, `cmd/nebula-server/` | `httptest`-served handler that writes and reads a baseline proposal; error path for a host without a stored host row |
 | `IntegrityGate` wired to the notifier (`internal/notify/integrity.go:194`) | `internal/notify/integrity.go`, `cmd/nebula-server/` | `httptest` notification sink receives an `integrity.*` message; a held message is recorded |
 | Stale comment in `fim.scan` contract (`internal/fimscan/script.go:78-80`) | `internal/fimscan/script.go` | none (comment only); correct the sentence about the allowlist now, the catalog sentence after the catalog entry is decided |
 
