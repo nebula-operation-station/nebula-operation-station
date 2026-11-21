@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/helpdocs"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsfacts"
@@ -241,9 +242,29 @@ func newOpsAPI(cfg serverconfig.APIConfig, db *sql.DB, notes *opsnotes.Store,
 	}
 	h, err := api.NewOps(api.OpsOptions{Tokens: cfg.Tokens, Settings: settings,
 		Facts: opsFactsSource{proj: proj, hosts: src}, Notes: notes, CorePrompt: opsAgentCorePrompt, Log: log,
-		OnNoteAccepted: accepted})
+		OnNoteAccepted: accepted, DocChunk: opsDocChunk(log)})
 	if err != nil {
 		return nil, fmt.Errorf("ops api: %w", err)
 	}
 	return h, nil
+}
+
+// opsDocChunk returns the citation check of ADR 0016 D6: a note may cite only
+// chunk IDs of the embedded documentation index, the same index the ops agent
+// searches (helpdocs.FromDocsembed in cmd/nebula-ops-agent). When the index
+// does not load, it logs a warning and returns nil, so no note may cite.
+func opsDocChunk(log *slog.Logger) func(chunkID string) bool {
+	ix, err := helpdocs.FromDocsembed()
+	if err != nil {
+		log.Warn("ops api: documentation index not loaded, notes may not cite chunks", "error", err)
+		return nil
+	}
+	ids := make(map[string]struct{}, len(ix.Chunks))
+	for _, c := range ix.Chunks {
+		ids[c.ID] = struct{}{}
+	}
+	return func(chunkID string) bool {
+		_, ok := ids[chunkID]
+		return ok
+	}
 }
