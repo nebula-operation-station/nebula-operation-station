@@ -824,9 +824,12 @@ func TestLatestAllReturnsOneHeaderPerHost(t *testing.T) {
 	mustPut(t, s, testRead("host-b", false, 1))
 	wantB := mustPut(t, s, testRead("host-b", true, 3))
 	mustPut(t, s, testRead("host-b", true, 2))
-	got, err := s.LatestAll(ctx)
+	got, truncated, err := s.LatestAll(ctx)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if truncated {
+		t.Error("truncated = true for two hosts")
 	}
 	if len(got) != 2 {
 		t.Fatalf("LatestAll returned %d reads, want 2", len(got))
@@ -839,6 +842,75 @@ func TestLatestAllReturnsOneHeaderPerHost(t *testing.T) {
 		if r.Components != nil {
 			t.Errorf("LatestAll read %d carries components; headers only", r.ID)
 		}
+	}
+}
+
+// insertHostReads stores one read for each of n hosts, host-00000 upwards, in
+// one transaction. It writes rows directly, so a test with thousands of hosts
+// stays fast; the body is the empty list, which LatestAll does not decode.
+func insertHostReads(t *testing.T, db *sql.DB, n int) {
+	t.Helper()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(`INSERT INTO vuln_inventory_reads (host_id, execution_id, read_at, complete, reason,
+		dropped, ecosystem, kernel_release, kernel_state, kernel_source, kernel_version, binaries, sources, body)
+		VALUES (?, 'exec-1', ?, 1, '', 0, '', '', '', '', '', 0, 0, x'5b5d')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stmt.Close()
+	for i := range n {
+		if _, err := stmt.Exec(fmt.Sprintf("host-%05d", i), base.Unix()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestLatestAllStopsAtMaxLatestAllHosts checks the result limit. A store with
+// more hosts than the limit returns the first MaxLatestAllHosts in host-ID order
+// and says the result was truncated, so a caller cannot take a partial list for
+// the whole fleet.
+func TestLatestAllStopsAtMaxLatestAllHosts(t *testing.T) {
+	s, db := openStore(t)
+	insertHostReads(t, db, MaxLatestAllHosts+1)
+	got, truncated, err := s.LatestAll(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !truncated {
+		t.Error("truncated = false with MaxLatestAllHosts+1 hosts")
+	}
+	if len(got) != MaxLatestAllHosts {
+		t.Fatalf("LatestAll returned %d reads, want %d", len(got), MaxLatestAllHosts)
+	}
+	if first := got[0].HostID; first != "host-00000" {
+		t.Errorf("first host = %s, want host-00000", first)
+	}
+	if last, want := got[len(got)-1].HostID, fmt.Sprintf("host-%05d", MaxLatestAllHosts-1); last != want {
+		t.Errorf("last host = %s, want %s", last, want)
+	}
+}
+
+// TestLatestAllAtTheLimitIsNotTruncated checks that exactly MaxLatestAllHosts
+// hosts are all returned and not reported as truncated.
+func TestLatestAllAtTheLimitIsNotTruncated(t *testing.T) {
+	s, db := openStore(t)
+	insertHostReads(t, db, MaxLatestAllHosts)
+	got, truncated, err := s.LatestAll(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if truncated {
+		t.Error("truncated = true with exactly MaxLatestAllHosts hosts")
+	}
+	if len(got) != MaxLatestAllHosts {
+		t.Errorf("LatestAll returned %d reads, want %d", len(got), MaxLatestAllHosts)
 	}
 }
 
@@ -904,6 +976,7 @@ func TestReadQueriesUseIndexesWithoutSorting(t *testing.T) {
 		{"latest", latestQuery, []any{"host-a"}, "vuln_inventory_reads_host_read"},
 		{"last complete", lastCompleteQuery, []any{"host-a"}, "vuln_inventory_reads_host_complete"},
 		{"latest all: per-host subquery", latestAllQuery, nil, "vuln_inventory_reads_host_read"},
+		{"latest all: limited host list", latestAllLimitedQuery, []any{MaxLatestAllHosts + 1}, "vuln_inventory_reads_host_read"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -930,7 +1003,7 @@ func TestLatestAllAgreesWithLatestPerHost(t *testing.T) {
 	mustPut(t, s, testRead("host-a", true, 2))
 	mustPut(t, s, testRead("host-b", true, 1))
 	mustPut(t, s, testRead("host-b", false, 1))
-	got, err := s.LatestAll(ctx)
+	got, _, err := s.LatestAll(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -467,6 +467,15 @@ const (
 		WHERE id IN (SELECT (SELECT n.id FROM vuln_inventory_reads AS n WHERE n.host_id = h.host_id
 			ORDER BY n.read_at DESC, n.id DESC LIMIT 1)
 			FROM (SELECT host_id FROM vuln_inventory_reads GROUP BY host_id) AS h)`
+	// latestAllLimitedQuery is latestAllQuery for LatestAll: the host list is
+	// cut at a LIMIT (param: MaxLatestAllHosts+1, one past the limit so the
+	// caller can tell a truncated result). ORDER BY host_id follows the GROUP
+	// BY, so the cut keeps the first hosts in host-ID order. The snapshot does
+	// not use this: it needs every host to count the omitted ones.
+	latestAllLimitedQuery = `SELECT ` + headerColumns + ` FROM vuln_inventory_reads
+		WHERE id IN (SELECT (SELECT n.id FROM vuln_inventory_reads AS n WHERE n.host_id = h.host_id
+			ORDER BY n.read_at DESC, n.id DESC LIMIT 1)
+			FROM (SELECT host_id FROM vuln_inventory_reads GROUP BY host_id ORDER BY host_id LIMIT ?) AS h)`
 )
 
 // Latest returns the newest read of host: the highest read_at, then the
@@ -493,29 +502,39 @@ func (s *Store) Get(ctx context.Context, id int64) (Read, error) {
 	return s.one(ctx, fmt.Sprintf("get %d", id), `SELECT `+fullColumns+` FROM vuln_inventory_reads WHERE id = ?`, id)
 }
 
+// MaxLatestAllHosts bounds the reads LatestAll returns. It equals the snapshot's
+// host limit (MaxSnapshotHosts, which is the export's total). Past it LatestAll
+// returns the first hosts in host-ID order and truncated is true.
+const MaxLatestAllHosts = MaxSnapshotHosts
+
 // LatestAll returns the newest read of every host, ordered by host ID, without
-// the components. It is for the export's choice of reads and for the UI.
-func (s *Store) LatestAll(ctx context.Context) ([]Read, error) {
-	rows, err := s.db.QueryContext(ctx, latestAllQuery)
+// the components, up to MaxLatestAllHosts hosts. truncated reports that the
+// store has more hosts than that and the result is only the first of them. It
+// is for the export's choice of reads and for the UI.
+func (s *Store) LatestAll(ctx context.Context) (reads []Read, truncated bool, err error) {
+	rows, err := s.db.QueryContext(ctx, latestAllLimitedQuery, MaxLatestAllHosts+1)
 	if err != nil {
-		return nil, fmt.Errorf("vulninventory: latest all: %w", err)
+		return nil, false, fmt.Errorf("vulninventory: latest all: %w", err)
 	}
 	defer rows.Close()
 	var out []Read
 	for rows.Next() {
 		r, err := scanRead(rows, false)
 		if err != nil {
-			return nil, fmt.Errorf("vulninventory: latest all: %w", err)
+			return nil, false, fmt.Errorf("vulninventory: latest all: %w", err)
 		}
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("vulninventory: latest all: %w", err)
+		return nil, false, fmt.Errorf("vulninventory: latest all: %w", err)
 	}
 	// One row per host, so sorting the few result rows in Go is cheap and keeps
 	// the SQL free of a sort.
 	sort.Slice(out, func(i, j int) bool { return out[i].HostID < out[j].HostID })
-	return out, nil
+	if len(out) > MaxLatestAllHosts {
+		return out[:MaxLatestAllHosts], true, nil
+	}
+	return out, false, nil
 }
 
 // The delete rule of migration 0052 (vuln_inventory_reads_protected) runs once per
