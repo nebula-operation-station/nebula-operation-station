@@ -11,7 +11,7 @@ the decisions, and [docs/implementation](implementation/) the per-area plans.
 | Area | ADR | State |
 | --- | --- | --- |
 | Release 0.9 (milestones 0–10) | – | code complete; release draft v0.9.0-beta.1 prepared on 2026-11-04, not yet published; running in the reference lab since then, formal integration run on clean VMs pending |
-| Proxmox VE phase 1 / phase 2 | [0006](adr/0006-proxmox-integration.md) | phase 1 wired; PVE inventory retention now runs beside the spool import (#786); collector call timeout covers the read budget (#794); phase 2 guest power and snapshot controls wired in nebula-server; backup, migration and node reboot executor code only, no RPC |
+| Proxmox VE phase 1 / phase 2 | [0006](adr/0006-proxmox-integration.md) | phase 1 wired; PVE inventory retention now runs beside the spool import (#786); collector call timeout covers the read budget (#794); phase 2 guest power and snapshot controls wired in nebula-server; backup, migration and node reboot executor code only, no RPC (previously: "not offered in the chart"; "phase 1 and phase 2 actions merged") |
 | Approval ergonomics | [0007](adr/0007-approval-ergonomics.md) | merged; reject pending proposals complete (#687, #753, #755); read grants with network device targets compare those targets (#795) and need CLI approval in every mode (#813, rule A1-0b) |
 | Guest provisioning | [0008](adr/0008-guest-provisioning.md) | merged; **amendment 2026-11-21: PV-03 wiring of `pve.image.prepare` decided** (#805, paper #772, #790); chain pi started, the release bundle now stages `image-catalog.json` and its signature (#816) |
 | Traffic map | [0009](adr/0009-traffic-map.md) | proposed; API and pages mounted in nebula-server; end-to-end test from real `net.facts` output to the map API (#798) |
@@ -69,7 +69,7 @@ remaining wiring gaps (ADR 0008, 0010, 0011, 0015); end-to-end and hostrun class
 | Vulnerability inventory export | yes: served from the stored package inventory (#792) | PR #792 |
 | Network devices (read path and device pages) | no: device read returns `Unimplemented` (ND-14); chain nx (decided 2026-11-21) closes this | `internal/executor/netdev_read.go`, `internal/web/ui/netdev.go` |
 | Network security advisor (netreach, netadvisor, edl, reputation) | no: libraries exist, nothing outside their own packages imports them | `internal/netadvisor/`, `internal/edl/`, `internal/reputation/` |
-| One-step enrollment | yes, the dialog: `Enroll: exec`, and `lazyExecutor` implements `ui.EnrollOffers` (#785); the executor installs the loaded configuration (#782). The NetBird option still waits for EN-16g | `cmd/nebula-server/main.go:584`, `cmd/nebula-server/executor_onestep.go` |
+| One-step enrollment | yes, the dialog: `Enroll: exec`, and `lazyExecutor` implements `ui.EnrollOffers` (#785); the executor installs the loaded configuration (#782). Offers are RPCs: the server role creates and relays them, `ListEnrollOffers` is admin only (`internal/executor/roles.go:77-86`). The NetBird option still waits for EN-16g | `cmd/nebula-server/main.go:584`, `cmd/nebula-server/executor_onestep.go` |
 | Help assistant | panel routes mounted; the `internal/helpassist` libraries are not imported | `internal/web/ui/assistant.go`, `internal/web/ui/ui.go` |
 | Ops agent | API wired; projection still gets empty findings and listeners (`opsNoFindings`); Ops tab not set (no `AssistantOps` in `cmd/nebula-server`) | `cmd/nebula-server/ops.go:237` |
 
