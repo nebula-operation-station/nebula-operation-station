@@ -53,19 +53,50 @@ func newInvEnv(t *testing.T) *invEnv {
 	return &invEnv{db: db, svc: svc, log: buf, ops: ops}
 }
 
-// insertFacts stores a successful core.facts result of host. Every call
-// needs its own n, which makes the execution ID unique.
+// factsBase is when the core.facts results of these tests finish by default:
+// an hour after every package list the tests store, so that the release is
+// never older than the list. insertFacts adds n seconds to it, which keeps
+// the order of n.
+var factsBase = invTestAt.Add(time.Hour)
+
+// insertFacts stores a successful core.facts result of host, finished at
+// factsBase plus n seconds. Every call needs its own n, which makes the
+// execution ID unique.
 func (e *invEnv) insertFacts(t *testing.T, n int, host string, result []byte) {
 	t.Helper()
+	e.insertFactsAt(t, n, host, result, factsBase.Add(time.Duration(n)*time.Second))
+}
+
+// insertFactsAt stores a successful core.facts result of host that finished
+// at finished. n makes the execution ID unique.
+func (e *invEnv) insertFactsAt(t *testing.T, n int, host string, result []byte, finished time.Time) {
+	t.Helper()
 	id := fmt.Sprintf("facts-%030d", n) // executions.id is 36 characters
+	at := finished.Unix()
 	if _, err := e.db.Exec(`INSERT INTO executions (id, action_id, module_version, artifact_sha256, risk, state, durable, timeout_s, created_by, created_at, finished_at)
-		VALUES (?, 'core.facts', '1.0.0', ?, 'LOW', 'finished', 0, 60, 'axel', ?, ?)`, id, strings.Repeat("a", 64), n, n); err != nil {
+		VALUES (?, 'core.facts', '1.0.0', ?, 'LOW', 'finished', 0, 60, 'axel', ?, ?)`, id, strings.Repeat("a", 64), at, at); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := e.db.Exec(`INSERT INTO execution_hosts (execution_id, host_id, fingerprint, credential_ref, endpoints, state, class, result, started_at, finished_at)
-		VALUES (?, ?, 'SHA256:x', 'nebula-default', '[]', 'finished', 'success', ?, ?, ?)`, id, host, result, n, n); err != nil {
+		VALUES (?, ?, 'SHA256:x', 'nebula-default', '[]', 'finished', 'success', ?, ?, ?)`, id, host, result, at, at); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// staticFacts is a core.facts source that returns result, finished at at,
+// and runs onCall first (it may cancel the parent context or close the
+// database to simulate a shutdown or a failing store).
+type staticFacts struct {
+	result []byte
+	at     time.Time
+	onCall func()
+}
+
+func (s staticFacts) LastResult(context.Context, string, string) ([]byte, time.Time, bool, error) {
+	if s.onCall != nil {
+		s.onCall()
+	}
+	return s.result, s.at, true, nil
 }
 
 // factsResult is a core.facts 1.x document with the given os-release text.
@@ -206,6 +237,141 @@ func TestNonJSONInstalledResultIsStoredIncompleteWithFormatReason(t *testing.T) 
 	}
 }
 
+// TestInstalledResultWithFactsOlderThanListIsStoredIncomplete: the release
+// must come from a core.facts run at least as recent as the list. Older facts
+// give an incomplete read with no components and no ecosystem.
+func TestInstalledResultWithFactsOlderThanListIsStoredIncomplete(t *testing.T) {
+	e := newInvEnv(t)
+	e.insertFactsAt(t, 20, invTestHost, factsResult(t, debian12Release), invTestAt.Add(-time.Minute))
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-stale-facts", invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != vulninventory.ReasonFactsOlder || r.ExecutionID != "exec-stale-facts" {
+		t.Fatalf("latest read complete=%v reason=%q execution=%q, want facts-older marker", r.Complete, r.Reason, r.ExecutionID)
+	}
+	if r.Ecosystem != "" || len(r.Components) != 0 {
+		t.Fatalf("read stored ecosystem %q and %d components from older facts", r.Ecosystem, len(r.Components))
+	}
+}
+
+// TestFactsAtOrAfterListGiveCompleteRead: facts from the same run time as
+// the list (same second) or newer are current, so the read is complete.
+func TestFactsAtOrAfterListGiveCompleteRead(t *testing.T) {
+	tests := []struct {
+		name string
+		at   time.Time
+	}{
+		{"same second", invTestAt},
+		{"newer", invTestAt.Add(time.Minute)},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newInvEnv(t)
+			e.insertFactsAt(t, 21+i, invTestHost, factsResult(t, debian12Release), tc.at)
+
+			e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-current", invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+			r := e.latestRead(t, invTestHost)
+			if !r.Complete || r.Ecosystem != "debian:bookworm" {
+				t.Fatalf("read complete=%v ecosystem=%q reason=%q, want complete debian:bookworm", r.Complete, r.Ecosystem, r.Reason)
+			}
+		})
+	}
+}
+
+// TestUpgradedHostIsNotMatchedWithOldRelease: a host upgraded from bookworm
+// to trixie whose core.facts has not run since keeps its list incomplete;
+// the old release is never used for the new package list. A fresh core.facts
+// (trixie) makes the next list complete under debian:trixie.
+func TestUpgradedHostIsNotMatchedWithOldRelease(t *testing.T) {
+	const trixieRelease = "PRETTY_NAME=\"Debian GNU/Linux 13 (trixie)\"\nID=debian\nVERSION_ID=\"13\"\nVERSION_CODENAME=trixie\n"
+	e := newInvEnv(t)
+	// The bookworm facts ran before the upgrade; the trixie list follows.
+	e.insertFactsAt(t, 22, invTestHost, factsResult(t, debian12Release), invTestAt.Add(-time.Hour))
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-trixie-1", invTestAt, installedEnvelope(t, debian12Text(t), false))
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != vulninventory.ReasonFactsOlder || r.Ecosystem == "debian:bookworm" {
+		t.Fatalf("list after upgrade: complete=%v reason=%q ecosystem=%q, want facts-older marker", r.Complete, r.Reason, r.Ecosystem)
+	}
+
+	// Fresh trixie facts, run at the time of the next list.
+	e.insertFactsAt(t, 23, invTestHost, factsResult(t, trixieRelease), invTestAt.Add(2*time.Minute))
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-trixie-2", invTestAt.Add(2*time.Minute), installedEnvelope(t, debian12Text(t), false))
+	r = e.latestRead(t, invTestHost)
+	if r.Ecosystem != "debian:trixie" {
+		t.Fatalf("ecosystem after fresh facts = %q (complete=%v reason=%q), want debian:trixie", r.Ecosystem, r.Complete, r.Reason)
+	}
+}
+
+// TestShutdownWritesNoMarker: when the server shuts down (the parent context
+// is cancelled) the observer writes nothing: no refusal or lookup marker
+// replaces the older complete read, and the cancellation is logged by class.
+func TestShutdownWritesNoMarker(t *testing.T) {
+	e := newInvEnv(t)
+	e.insertFacts(t, 24, invTestHost, factsResult(t, debian12Release))
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-before", invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	e.svc.ObserveInstalled(ctx, invTestHost, "exec-shutdown", invTestAt.Add(time.Minute), installedEnvelope(t, hostileText(), false))
+
+	if r := e.latestRead(t, invTestHost); r.ExecutionID != "exec-before" || !r.Complete {
+		t.Fatalf("latest read %q complete=%v after shutdown, want exec-before complete", r.ExecutionID, r.Complete)
+	}
+	logged := e.log.String()
+	if !strings.Contains(logged, "error_class=canceled") {
+		t.Fatalf("shutdown not logged by class: %s", logged)
+	}
+	if strings.Contains(logged, "error_class=invalid_read") || strings.Contains(logged, "error_class=limit") {
+		t.Fatalf("shutdown logged as a store refusal: %s", logged)
+	}
+}
+
+// TestCancelledStoreWriteIsNotARefusal: a context cancelled during the store
+// write (shutdown) is not recorded as a refusal of the list: no marker, the
+// older complete read stays the latest, and the error is logged as canceled.
+func TestCancelledStoreWriteIsNotARefusal(t *testing.T) {
+	e := newInvEnv(t)
+	e.insertFacts(t, 25, invTestHost, factsResult(t, debian12Release))
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-good-2", invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	e.svc.facts = staticFacts{result: factsResult(t, debian12Release), at: factsBase, onCall: cancel}
+	e.svc.ObserveInstalled(ctx, invTestHost, "exec-cancel", invTestAt.Add(time.Minute), installedEnvelope(t, debian12Text(t), false))
+
+	if r := e.latestRead(t, invTestHost); r.ExecutionID != "exec-good-2" || !r.Complete {
+		t.Fatalf("latest read %q complete=%v reason=%q, want exec-good-2 complete", r.ExecutionID, r.Complete, r.Reason)
+	}
+	logged := e.log.String()
+	if !strings.Contains(logged, "error_class=canceled") || strings.Contains(logged, "error_class=invalid_read") {
+		t.Fatalf("cancelled store write not logged as canceled: %s", logged)
+	}
+}
+
+// TestStoreOutageIsNotRecordedAsRefusal: a store error that is not a limit
+// or format refusal (here a closed database, as with a lost connection or a
+// busy store) is logged as a store error, never as a refusal of the list.
+func TestStoreOutageIsNotRecordedAsRefusal(t *testing.T) {
+	e := newInvEnv(t)
+	e.svc.facts = staticFacts{result: factsResult(t, debian12Release), at: factsBase, onCall: func() {
+		if err := e.db.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}}
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-outage", invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+	logged := e.log.String()
+	if !strings.Contains(logged, "error_class=store") {
+		t.Fatalf("store outage not logged by class: %s", logged)
+	}
+	if strings.Contains(logged, "error_class=invalid_read") || strings.Contains(logged, "error_class=limit") {
+		t.Fatalf("store outage logged as a refusal: %s", logged)
+	}
+}
+
 // TestInventoryStoreFailureIsLoggedWithoutResultText: a read the store
 // refuses (here a host ID over the store's limit) is logged by class only,
 // and the run is not failed (ObserveInstalled returns nothing).
@@ -324,8 +490,10 @@ func TestInventoryStoreRefusalMarksHostPartial(t *testing.T) {
 	if !strings.Contains(logged, "error_class=invalid_read") {
 		t.Fatalf("store refusal not logged by class: %s", logged)
 	}
-	if strings.Contains(logged, "hostilever") {
-		t.Fatalf("log contains the refused package content: %s", logged)
+	for _, secret := range []string{hostileVersion, "1234567890:", "libjansson4"} {
+		if strings.Contains(logged, secret) {
+			t.Fatalf("log contains the refused package content %q: %s", secret, logged)
+		}
 	}
 }
 

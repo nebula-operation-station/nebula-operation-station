@@ -27,6 +27,14 @@ const (
 	// ReasonRefused: the store refused the list (a field or limit check on
 	// host content). The list is not stored (see Failed).
 	ReasonRefused = "list refused by the store"
+	// ReasonFactsOlder: the host's newest core.facts is older than the list,
+	// so the release may have changed since (for example a release upgrade
+	// without a fresh facts run). The list is not mapped (see Failed).
+	ReasonFactsOlder = "core.facts older than the package list"
+	// ReasonStoreUnavailable: the store could not write the list for a reason
+	// other than a refusal (a closed database, a busy store). The list is not
+	// stored (see Failed).
+	ReasonStoreUnavailable = "list not stored: store unavailable"
 )
 
 // Failed returns the partial marker stored in place of a list that could not

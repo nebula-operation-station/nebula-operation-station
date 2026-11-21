@@ -495,7 +495,6 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		return err
 	}
 	vuln.statePath = filepath.Join(cfg.DataDir, vulnNotifyStateFile)
-	vuln.inv = invSvc
 	// Ops agent events (ADR 0016 D3, D10): only with the ops token. The
 	// trigger touches nothing while the agent is off (see Touch).
 	if _, hasOpsToken := cfg.API.OpsToken(); hasOpsToken {
