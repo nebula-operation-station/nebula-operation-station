@@ -276,6 +276,37 @@ func TestOpsAgentSkeletonIsAValidStartingPoint(t *testing.T) {
 	}
 }
 
+// The admin hints of the package and of install.sh --ops-agent name the
+// token path that exists: nebula-server -api-token and server.json, never a
+// web UI. Both name the loopback base URL example and the plain-http rule for
+// llm_credential_file; neither hint suggests the hostname localhost for
+// nos_base_url, which the agent refuses.
+func TestOpsAgentHintsNameTheRealTokenPath(t *testing.T) {
+	s := newOpsSandbox(t)
+	hints := map[string]string{
+		"postinst":   s.run(t, opsPostinst, "configure", ""),
+		"install.sh": installBlock(t, "ops agent install"),
+	}
+	for name, hint := range hints {
+		if strings.Contains(strings.ToLower(hint), "web ui") {
+			t.Errorf("%s hint names a web UI for the ops token; it comes from nebula-server -api-token", name)
+		}
+		for _, want := range []string{
+			"nebula-server -api-token ops-agent:ops.read,ops.notes.write",
+			"server.json",
+			"http://127.0.0.1:8080",
+			"llm_credential_file",
+		} {
+			if !strings.Contains(hint, want) {
+				t.Errorf("%s hint lacks %q:\n%s", name, want, hint)
+			}
+		}
+		if strings.Contains(hint, "http://localhost") {
+			t.Errorf("%s hint suggests http://localhost; the agent accepts only a loopback IP", name)
+		}
+	}
+}
+
 // install.sh --ops-agent renders the same skeleton as the package.
 func TestOpsAgentSkeletonMatchesInstallScript(t *testing.T) {
 	if pkg, inst := opsSkeleton(t, readFile(t, opsPostinst)), opsSkeleton(t, installScript(t)); pkg != inst {
