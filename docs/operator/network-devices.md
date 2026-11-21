@@ -34,7 +34,10 @@ or firewall, and no change credential exists (ADR 0010 Q3).
   credentials, opens no network listener and touches no database. It
   schedules typed reads over the executor socket and writes the sanitized
   results to its spool.
-- **`nebula-server`** imports the spool and renders the device pages.
+- **`nebula-server`** does not yet import the spool or render the device
+  pages: the page code is in `internal/web/ui/netdev.go`, but nothing
+  registers it and `cmd/nebula-server` has no netdev reference (checked
+  2026-11-21; previously: "imports the spool and renders the device pages").
 
 Everything a device returns is untrusted input: output is size-, line- and
 count-bounded, must be valid UTF-8, and is rendered as text only.
