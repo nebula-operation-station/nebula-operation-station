@@ -59,32 +59,24 @@ func (f *fakeClient) Close() error {
 type memSpool struct {
 	mu       sync.Mutex
 	payloads []string
-	metadata int
 }
 
+// Write records executor read payloads; the device metadata records that
+// each cycle writes are not reads and are not recorded.
 func (s *memSpool) Write(_ context.Context, _, read string, _ uint64, _ bool, payload []byte) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if read == netdevcollect.ReadDeviceMetadata {
-		s.metadata++
-		return "x", nil
+	if read != netdevcollect.ReadDeviceMetadata {
+		s.payloads = append(s.payloads, string(payload))
 	}
-	s.payloads = append(s.payloads, string(payload))
 	return "x", nil
 }
 
-// count returns the executor read records; the metadata records of each
-// cycle are counted apart in metadataCount.
+// count returns the number of executor read records.
 func (s *memSpool) count() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.payloads)
-}
-
-func (s *memSpool) metadataCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.metadata
 }
 
 func testDeps(c *fakeClient, s *memSpool, euid int) deps {
