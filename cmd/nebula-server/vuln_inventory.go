@@ -153,6 +153,7 @@ func (v *vulnInventoryService) closeByInventory(ctx context.Context, parent cont
 		Subject:        vulnstore.Subject{Kind: vulnfinding.SubjectHost, ID: hostID},
 		Complete:       read.Complete,
 		ReadAt:         read.ReadAt,
+		Ecosystem:      read.Ecosystem,
 		SourceVersions: versions,
 	})
 	if err != nil {

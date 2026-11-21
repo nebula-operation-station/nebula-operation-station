@@ -19,8 +19,15 @@ type InventoryRead struct {
 	// Complete is the D3 completeness flag; a failed, truncated or partly
 	// unparsed read is not complete and closes nothing.
 	Complete bool
-	// ReadAt is when the read finished.
+	// ReadAt is when the read finished. The package list carries no host
+	// time, so a write between the host taking the list and this time is not
+	// seen; the closure can then rest on a list older than the write. This is
+	// the gap of ADR 0011 D3 until the list reports its own time.
 	ReadAt time.Time
+	// Ecosystem is the read's ecosystem. When set, only findings of that
+	// ecosystem close: a read of another release is no basis for them. Empty
+	// means not checked (image reads).
+	Ecosystem string
 	// SourceVersions maps source package name to its installed source
 	// version (D4 basis: the lowest source:Version of its binaries).
 	SourceVersions map[string]string
@@ -73,6 +80,15 @@ func (s *Store) CloseByInventory(ctx context.Context, read InventoryRead) ([]vul
 		r := f.Record
 		if !Checkable(r) || vulnver.IsKernelSource(r.Component.SourcePackage) {
 			continue
+		}
+		if read.Ecosystem != "" && r.Ecosystem != read.Ecosystem {
+			continue
+		}
+		if f.EpisodeFixedVersion != "" {
+			sch, err := vulnver.SchemeForEcosystem(r.Ecosystem)
+			if err != nil || vulnver.Validate(sch, f.EpisodeFixedVersion) != nil {
+				continue // a malformed fixed version closes nothing
+			}
 		}
 		installed, present := read.SourceVersions[r.Component.SourcePackage]
 		if present {
