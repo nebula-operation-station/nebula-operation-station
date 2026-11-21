@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsfacts"
@@ -41,9 +42,27 @@ func (d fixedDecision) Decide(context.Context, vulnstore.Finding) vulnfix.Result
 }
 
 // fixesOf returns the factory of a fixedDecision with decision r.
-func fixesOf(r vulnfix.Result) func() fixDecider {
-	return func() fixDecider { return fixedDecision(r) }
+func fixesOf(r vulnfix.Result) func(vulnfix.PreviewSource) fixDecider {
+	return func(vulnfix.PreviewSource) fixDecider { return fixedDecision(r) }
 }
+
+// fakePreviews is a container preview source that reads every host as "no
+// preview" (an empty preview) and fails with err when err is set. reads counts
+// the calls, when reads is not nil.
+type fakePreviews struct {
+	err   error
+	reads *int
+}
+
+func (p fakePreviews) Preview(_ context.Context, _ string) (vulnfix.Preview, error) {
+	if p.reads != nil {
+		*p.reads++
+	}
+	return vulnfix.Preview{}, p.err
+}
+
+// opsTestPreviews is a preview source that reads without error.
+var opsTestPreviews = fakePreviews{}
 
 // failingReader is a finding store whose read fails.
 type failingReader struct{ err error }
@@ -126,7 +145,7 @@ func opsCriticalRecord(cve string) map[string]any {
 func TestOpsFindingsCriticalVerifiedFixOffersInstallSecurity(t *testing.T) {
 	env := newVTEnv(t)
 	env.startAndSubmit(t, opsCriticalRecord("CVE-2026-7001"))
-	src, err := newOpsVulnFindings(env.svc.store, fixesOf(vulnfix.Result{Status: vulnfix.StatusVerified,
+	src, err := newOpsVulnFindings(env.svc.store, opsTestPreviews, fixesOf(vulnfix.Result{Status: vulnfix.StatusVerified,
 		Action: vulnfix.ActionInstallSecurity, HostID: "web01"}))
 	if err != nil {
 		t.Fatal(err)
@@ -168,7 +187,7 @@ func TestOpsFindingsAcceptedRiskLeavesGroupOut(t *testing.T) {
 		vulnstore.AcceptRisk{Approver: "admin", Reason: "tested in lab", BasisVersion: "3.0.15-1~deb12u1"}); err != nil {
 		t.Fatalf("SetAcceptedRisk: %v", err)
 	}
-	src, err := newOpsVulnFindings(env.svc.store, fixesOf(vulnfix.Result{Status: vulnfix.StatusVerified,
+	src, err := newOpsVulnFindings(env.svc.store, opsTestPreviews, fixesOf(vulnfix.Result{Status: vulnfix.StatusVerified,
 		Action: vulnfix.ActionInstallSecurity, HostID: "web01"}))
 	if err != nil {
 		t.Fatal(err)
@@ -186,7 +205,7 @@ func TestOpsFindingsAcceptedRiskLeavesGroupOut(t *testing.T) {
 // error of the projection, never an empty finding list.
 func TestOpsFindingsReadErrorFailsProjection(t *testing.T) {
 	errRead := errors.New("store unreadable")
-	src, err := newOpsVulnFindings(failingReader{err: errRead}, fixesOf(vulnfix.Result{}))
+	src, err := newOpsVulnFindings(failingReader{err: errRead}, opsTestPreviews, fixesOf(vulnfix.Result{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +222,7 @@ func TestOpsFindingsReadErrorFailsProjection(t *testing.T) {
 // list and no error, and so no group.
 func TestOpsFindingsEmptyStoreIsEmptyAndNoError(t *testing.T) {
 	env := newVTEnv(t)
-	src, err := newOpsVulnFindings(env.svc.store, fixesOf(vulnfix.Result{}))
+	src, err := newOpsVulnFindings(env.svc.store, opsTestPreviews, fixesOf(vulnfix.Result{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +239,7 @@ func TestOpsFindingsEmptyStoreIsEmptyAndNoError(t *testing.T) {
 // TestOpsFindingsTruncatedReadIsAnError: a store that holds more findings
 // than one read returns fails the read; a partial list would hide findings.
 func TestOpsFindingsTruncatedReadIsAnError(t *testing.T) {
-	src, err := newOpsVulnFindings(truncatedReader{}, fixesOf(vulnfix.Result{}))
+	src, err := newOpsVulnFindings(truncatedReader{}, opsTestPreviews, fixesOf(vulnfix.Result{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,10 +251,13 @@ func TestOpsFindingsTruncatedReadIsAnError(t *testing.T) {
 // TestNewOpsVulnFindingsRejectsNilSources: a missing store or decision source
 // is refused, so the projection cannot run on a partial set.
 func TestNewOpsVulnFindingsRejectsNilSources(t *testing.T) {
-	if _, err := newOpsVulnFindings(nil, fixesOf(vulnfix.Result{})); !errors.Is(err, opsfacts.ErrNoSource) {
+	if _, err := newOpsVulnFindings(nil, opsTestPreviews, fixesOf(vulnfix.Result{})); !errors.Is(err, opsfacts.ErrNoSource) {
 		t.Fatalf("nil store: error = %v, want ErrNoSource", err)
 	}
-	if _, err := newOpsVulnFindings(failingReader{}, nil); !errors.Is(err, opsfacts.ErrNoSource) {
+	if _, err := newOpsVulnFindings(failingReader{}, nil, fixesOf(vulnfix.Result{})); !errors.Is(err, opsfacts.ErrNoSource) {
+		t.Fatalf("nil preview source: error = %v, want ErrNoSource", err)
+	}
+	if _, err := newOpsVulnFindings(failingReader{}, opsTestPreviews, nil); !errors.Is(err, opsfacts.ErrNoSource) {
 		t.Fatalf("nil decision factory: error = %v, want ErrNoSource", err)
 	}
 }
@@ -258,7 +280,7 @@ func TestOpsListenersUnavailableIsNeverAnEmptyList(t *testing.T) {
 func TestOpsListenersUnavailableFailsProjection(t *testing.T) {
 	env := newVTEnv(t)
 	env.startAndSubmit(t, opsCriticalRecord("CVE-2026-7006"))
-	src, err := newOpsVulnFindings(env.svc.store, fixesOf(vulnfix.Result{Status: vulnfix.StatusVerified,
+	src, err := newOpsVulnFindings(env.svc.store, opsTestPreviews, fixesOf(vulnfix.Result{Status: vulnfix.StatusVerified,
 		Action: vulnfix.ActionInstallSecurity, HostID: "web01"}))
 	if err != nil {
 		t.Fatal(err)
@@ -287,8 +309,8 @@ func TestOpsFindingsUnreadUpdateListsIsAnError(t *testing.T) {
 	env := newVTEnv(t)
 	env.startAndSubmit(t, opsCriticalRecord("CVE-2026-7007"))
 	errLists := errors.New("lists store down")
-	src, err := newOpsVulnFindings(env.svc.store, func() fixDecider {
-		return vulnfix.NewResolver(failingUpdates{err: errLists}, nil)
+	src, err := newOpsVulnFindings(env.svc.store, opsTestPreviews, func(p vulnfix.PreviewSource) fixDecider {
+		return vulnfix.NewResolver(failingUpdates{err: errLists}, p)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -303,11 +325,16 @@ func TestOpsFindingsUnreadUpdateListsIsAnError(t *testing.T) {
 }
 
 // TestOpsFindingsNoPreviewStaysUnknownDecision: a missing container preview is
-// an unknown decision, not a failed read: the finding is still listed.
+// an unknown decision, not a failed read: the finding is still listed. The
+// real resolver reads the preview as empty (no preview exists).
 func TestOpsFindingsNoPreviewStaysUnknownDecision(t *testing.T) {
-	fs := []vulnstore.Finding{opsTestFinding(vulnstore.StateOpen, vulnfinding.SubjectImage)}
-	src, err := newOpsVulnFindings(sliceReader{fs: fs}, fixesOf(vulnfix.Result{Status: vulnfix.StatusUnknown,
-		Reason: vulnfix.ReasonNoPreview, Action: vulnfix.ActionContainers, HostID: "web01"}))
+	f := opsTestFinding(vulnstore.StateOpen, vulnfinding.SubjectImage)
+	// Only a fixed image finding is decided from the preview (vulnfix.ImageResult).
+	f.Record.Fix = vulnfinding.Fix{State: vulnfinding.FixFixed, Version: "3.0.16-1"}
+	fs := []vulnstore.Finding{f}
+	src, err := newOpsVulnFindings(sliceReader{fs: fs}, opsTestPreviews, func(p vulnfix.PreviewSource) fixDecider {
+		return vulnfix.NewResolver(nil, p)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,13 +347,190 @@ func TestOpsFindingsNoPreviewStaysUnknownDecision(t *testing.T) {
 	}
 }
 
+// TestOpsFindingsFailedPreviewReadIsAnError: a failed container preview read
+// is an error of the read, not a missing preview. The resolver would give the
+// same unknown decision for both, so the adapter must not let the failure
+// through as "no preview exists".
+func TestOpsFindingsFailedPreviewReadIsAnError(t *testing.T) {
+	f := opsTestFinding(vulnstore.StateOpen, vulnfinding.SubjectImage)
+	f.Record.Fix = vulnfinding.Fix{State: vulnfinding.FixFixed, Version: "3.0.16-1"}
+	fs := []vulnstore.Finding{f}
+	errPreview := errors.New("preview store down")
+	src, err := newOpsVulnFindings(sliceReader{fs: fs}, fakePreviews{err: errPreview}, func(p vulnfix.PreviewSource) fixDecider {
+		return vulnfix.NewResolver(nil, p)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := src.Findings(context.Background())
+	if !errors.Is(err, errOpsPreviewUnreadable) || !errors.Is(err, errPreview) {
+		t.Fatalf("Findings error = %v, want errOpsPreviewUnreadable wrapping the read error", err)
+	}
+	if got != nil {
+		t.Fatalf("Findings = %+v, want none with the error", got)
+	}
+	gs, _, err := opsGroupsWith(t, src, opsTestListeners{})
+	if !errors.Is(err, errOpsPreviewUnreadable) || gs != nil {
+		t.Fatalf("EligibleGroups = %+v, %v; want none and errOpsPreviewUnreadable", gs, err)
+	}
+}
+
+// imageFindingsOn returns n open image findings on n distinct hosts.
+func imageFindingsOn(n int) []vulnstore.Finding {
+	fs := make([]vulnstore.Finding, 0, n)
+	for i := 0; i < n; i++ {
+		f := opsTestFinding(vulnstore.StateOpen, vulnfinding.SubjectImage)
+		f.Subject.ID = fmt.Sprintf("img-host%02d", i)
+		fs = append(fs, f)
+	}
+	return fs
+}
+
+// TestOpsFindingsImageHostsPastPreviewLimitAreAnError: the resolver reads the
+// previews of at most vulnfix.MaxPreviewHosts hosts; further image hosts would
+// read as "no preview", so the read fails instead.
+func TestOpsFindingsImageHostsPastPreviewLimitAreAnError(t *testing.T) {
+	over := imageFindingsOn(vulnfix.MaxPreviewHosts + 1)
+	src, err := newOpsVulnFindings(sliceReader{fs: over}, opsTestPreviews, func(p vulnfix.PreviewSource) fixDecider {
+		return vulnfix.NewResolver(nil, p)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.Findings(context.Background()); !errors.Is(err, errOpsPreviewLimited) {
+		t.Fatalf("Findings error = %v, want errOpsPreviewLimited", err)
+	}
+}
+
+// TestOpsFindingsImageHostsAtPreviewLimitAreRead: exactly vulnfix.MaxPreviewHosts
+// image hosts are all read; the limit is not an error below it.
+func TestOpsFindingsImageHostsAtPreviewLimitAreRead(t *testing.T) {
+	var reads int
+	fs := imageFindingsOn(vulnfix.MaxPreviewHosts)
+	src, err := newOpsVulnFindings(sliceReader{fs: fs}, fakePreviews{reads: &reads}, func(p vulnfix.PreviewSource) fixDecider {
+		return vulnfix.NewResolver(nil, p)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := src.Findings(context.Background())
+	if err != nil || len(got) != vulnfix.MaxPreviewHosts {
+		t.Fatalf("Findings = %d, %v; want %d findings and no error", len(got), err, vulnfix.MaxPreviewHosts)
+	}
+	if reads != vulnfix.MaxPreviewHosts {
+		t.Fatalf("preview reads = %d, want %d", reads, vulnfix.MaxPreviewHosts)
+	}
+}
+
+// TestOpsFindingsFixedFindingsDoNotCountTowardPreviewLimit: a fixed image
+// finding is never decided, so its host needs no preview read.
+func TestOpsFindingsFixedFindingsDoNotCountTowardPreviewLimit(t *testing.T) {
+	fs := imageFindingsOn(vulnfix.MaxPreviewHosts + 1)
+	fs[0].State = vulnstore.StateFixed
+	src, err := newOpsVulnFindings(sliceReader{fs: fs}, opsTestPreviews, func(p vulnfix.PreviewSource) fixDecider {
+		return vulnfix.NewResolver(nil, p)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := src.Findings(context.Background())
+	if err != nil || len(got) != vulnfix.MaxPreviewHosts {
+		t.Fatalf("Findings = %d, %v; want %d findings and no error", len(got), err, vulnfix.MaxPreviewHosts)
+	}
+}
+
+// TestOpsFindingsOneUnscoreableFindingFailsWholeRead: a stored finding whose
+// scores do not compute fails the whole read; the good finding beside it is
+// not listed, and no partial list is returned (fail closed).
+func TestOpsFindingsOneUnscoreableFindingFailsWholeRead(t *testing.T) {
+	good := opsTestFinding(vulnstore.StateOpen, vulnfinding.SubjectHost)
+	bad := opsTestFinding(vulnstore.StateOpen, vulnfinding.SubjectHost)
+	bad.Record.Vuln.ID = "CVE-2026-7009"
+	bad.Record.Scores.CVSS = &vulnfinding.CVSS{Version: "3.1", BaseScore: 11, Source: vulnfinding.CVSSSourceNVD}
+	src, err := newOpsVulnFindings(sliceReader{fs: []vulnstore.Finding{good, bad}}, opsTestPreviews, fixesOf(vulnfix.Result{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := src.Findings(context.Background())
+	if err == nil {
+		t.Fatalf("Findings = %+v, want an error for the unscoreable finding", got)
+	}
+	if got != nil {
+		t.Fatalf("Findings = %+v, want no partial list with the error", got)
+	}
+	gs, _, err := opsGroupsOf(t, src)
+	if err == nil || gs != nil {
+		t.Fatalf("EligibleGroups = %+v, %v; want none and an error", gs, err)
+	}
+}
+
+// TestOpsFindingOfUnscoreableIsAnError: a finding whose scores do not compute
+// gives an error, never a zero score.
+func TestOpsFindingOfUnscoreableIsAnError(t *testing.T) {
+	f := opsTestFinding(vulnstore.StateOpen, vulnfinding.SubjectHost)
+	f.Record.Scores.CVSS = &vulnfinding.CVSS{Version: "3.1", BaseScore: -1, Source: vulnfinding.CVSSSourceNVD}
+	if got, err := opsFindingOf(f, vulnfix.Result{}); err == nil {
+		t.Fatalf("opsFindingOf = %+v, want an error", got)
+	}
+}
+
+// TestOpsFindingOfDeviceAndUnknownSubjectsLeaveSubjectEmpty: a device or unknown
+// subject gets the empty subject kind, which opsfacts records as a skip (no
+// fix notes for devices, ADR 0016 D3); it is never mapped to the OS subject.
+func TestOpsFindingOfDeviceAndUnknownSubjectsLeaveSubjectEmpty(t *testing.T) {
+	cases := []struct {
+		name string
+		kind vulnfinding.SubjectKind
+	}{
+		{"device", vulnfinding.SubjectDevice},
+		{"unknown", vulnfinding.SubjectKind("other")},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := opsTestFinding(vulnstore.StateOpen, c.kind)
+			got, err := opsFindingOf(f, vulnfix.Result{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Subject != "" || got.ImageSubject != "" {
+				t.Fatalf("subject = %q, image subject = %q; want both empty", got.Subject, got.ImageSubject)
+			}
+		})
+	}
+}
+
+// TestOpsFindingOfFixedIsTheDecisionVersion: Fixed is the fixed version the
+// decision used, which is the higher of the record's and the episode's; a
+// decision without a comparable fixed version leaves Fixed empty.
+func TestOpsFindingOfFixedIsTheDecisionVersion(t *testing.T) {
+	f := opsTestFinding(vulnstore.StateOpen, vulnfinding.SubjectHost)
+	f.Record.Fix = vulnfinding.Fix{State: vulnfinding.FixFixed, Version: "3.0.16-1"}
+	f.EpisodeFixedVersion = "3.0.17-1"
+
+	got, err := opsFindingOf(f, vulnfix.Result{Status: vulnfix.StatusVerified, Fixed: "3.0.17-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Fixed != "3.0.17-1" {
+		t.Fatalf("Fixed = %q, want the decision's 3.0.17-1 (not the record's 3.0.16-1)", got.Fixed)
+	}
+
+	got, err = opsFindingOf(f, vulnfix.Result{Status: vulnfix.StatusUnknown, Reason: vulnfix.ReasonFixedNotComparable})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Fixed != "" {
+		t.Fatalf("Fixed = %q, want empty when the decision had no fixed version", got.Fixed)
+	}
+}
+
 // TestOpsFindingsBuildsFixDeciderPerCall: every Findings call builds its own
 // fix decider, so no resolver (with its cached lists) outlives one read.
 func TestOpsFindingsBuildsFixDeciderPerCall(t *testing.T) {
 	env := newVTEnv(t)
 	env.startAndSubmit(t, opsCriticalRecord("CVE-2026-7004"))
 	var built int
-	src, err := newOpsVulnFindings(env.svc.store, func() fixDecider {
+	src, err := newOpsVulnFindings(env.svc.store, opsTestPreviews, func(vulnfix.PreviewSource) fixDecider {
 		built++
 		return fixedDecision{Status: vulnfix.StatusVerified, Action: vulnfix.ActionInstallSecurity, HostID: "web01"}
 	})
@@ -348,7 +552,7 @@ func TestOpsFindingsBuildsFixDeciderPerCall(t *testing.T) {
 func TestOpsFindingsNilFixDeciderFailsRead(t *testing.T) {
 	env := newVTEnv(t)
 	env.startAndSubmit(t, opsCriticalRecord("CVE-2026-7005"))
-	src, err := newOpsVulnFindings(env.svc.store, func() fixDecider { return nil })
+	src, err := newOpsVulnFindings(env.svc.store, opsTestPreviews, func(vulnfix.PreviewSource) fixDecider { return nil })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -391,7 +595,7 @@ func TestOpsFindingOfMapsStateTierAndKEV(t *testing.T) {
 		State: vulnstore.StateOpen, EpisodePeakTier: vulnstore.TierCritical}
 	base.Record = vulnfinding.Record{Component: vulnfinding.Component{SourcePackage: "openssl", SourceVersion: "3.0.15-1"},
 		Vuln: vulnfinding.Vuln{ID: "CVE-2026-7003"}, Fix: vulnfinding.Fix{State: vulnfinding.FixFixed, Version: "3.0.16-1"}}
-	got, err := opsFindingOf(base, vulnfix.Result{})
+	got, err := opsFindingOf(base, vulnfix.Result{Fixed: "3.0.16-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +661,7 @@ func TestOpsFindingsExcludesFixedFindings(t *testing.T) {
 		opsTestFinding(vulnstore.StateAcceptedRisk, vulnfinding.SubjectHost),
 		opsTestFinding(vulnstore.StateFalsePositive, vulnfinding.SubjectHost),
 	}
-	src, err := newOpsVulnFindings(sliceReader{fs: fs}, fixesOf(vulnfix.Result{}))
+	src, err := newOpsVulnFindings(sliceReader{fs: fs}, opsTestPreviews, fixesOf(vulnfix.Result{}))
 	if err != nil {
 		t.Fatal(err)
 	}

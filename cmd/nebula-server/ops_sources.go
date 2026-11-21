@@ -49,6 +49,16 @@ var errOpsFindingsTruncated = errors.New("more findings stored than one read ret
 // of giving an unknown decision, which would look like a decision.
 var errOpsUpdateListsUnread = errors.New("host update lists cannot be read")
 
+// errOpsPreviewUnreadable: a container preview of an image finding cannot be
+// read. The resolver gives a failed read and a missing preview the same unknown
+// decision (ReasonNoPreview), so the read fails instead.
+var errOpsPreviewUnreadable = errors.New("container preview cannot be read")
+
+// errOpsPreviewLimited: the open image findings cover more hosts than the
+// resolver reads container previews of (vulnfix.MaxPreviewHosts); the hosts
+// past the limit would read as "no preview", so the read fails instead.
+var errOpsPreviewLimited = errors.New("more image hosts than container previews are read")
+
 // opsDigestRe is the platform digest form of an image subject.
 var opsDigestRe = regexp.MustCompile(`^sha256:([0-9a-f]{64})$`)
 
@@ -67,29 +77,52 @@ type fixDecider interface {
 // holds no copy of the findings: each call reads the store again. It holds no
 // fix decider either: a vulnfix.Resolver is a per-page object (it caches the
 // update lists and container previews without a lock), so newFixes builds a
-// fresh one for every Findings call.
+// fresh one for every Findings call, over a per-call preview guard.
 type opsVulnFindings struct {
 	store    vulnFindingReader
-	newFixes func() fixDecider
+	previews vulnfix.PreviewSource
+	newFixes func(vulnfix.PreviewSource) fixDecider
 }
 
 var _ opsfacts.FindingSource = opsVulnFindings{}
 
-// newOpsVulnFindings returns the finding source over store, with one fix
-// decider per Findings call from newFixes. Both are required; a missing one
-// fails closed as opsfacts.ErrNoSource.
-func newOpsVulnFindings(store vulnFindingReader, newFixes func() fixDecider) (opsVulnFindings, error) {
-	if store == nil || newFixes == nil {
+// newOpsVulnFindings returns the finding source over store, with the container
+// previews of image findings and one fix decider per Findings call from
+// newFixes (given the preview source it must read through). All three are
+// required; a missing one fails closed as opsfacts.ErrNoSource.
+func newOpsVulnFindings(store vulnFindingReader, previews vulnfix.PreviewSource,
+	newFixes func(vulnfix.PreviewSource) fixDecider) (opsVulnFindings, error) {
+	if store == nil || previews == nil || newFixes == nil {
 		return opsVulnFindings{}, fmt.Errorf("ops finding source: %w", opsfacts.ErrNoSource)
 	}
-	return opsVulnFindings{store: store, newFixes: newFixes}, nil
+	return opsVulnFindings{store: store, previews: previews, newFixes: newFixes}, nil
+}
+
+// opsPreviewGuard is the container preview source of one Findings call. It
+// passes every read to inner and keeps the first failed read. The resolver
+// gives a failed read and a missing preview the same unknown decision, so
+// Findings checks err after the decisions and fails the read.
+type opsPreviewGuard struct {
+	inner vulnfix.PreviewSource
+	err   error
+}
+
+// Preview reads the newest preview of hostID through the guard; see opsPreviewGuard.
+func (g *opsPreviewGuard) Preview(ctx context.Context, hostID string) (vulnfix.Preview, error) {
+	p, err := g.inner.Preview(ctx, hostID)
+	if err != nil && g.err == nil {
+		g.err = fmt.Errorf("read container preview: %w: %w", errOpsPreviewUnreadable, err)
+	}
+	return p, err
 }
 
 // Findings returns every stored finding that is not fixed, with its fix
-// decision. A failed read, a read that is truncated at MaxListFindings, or a
-// finding whose stored scores do not compute, fails the whole list.
+// decision. A failed read, a read that is truncated at MaxListFindings, a failed
+// container preview read, more image hosts than the resolver reads previews of,
+// or a finding whose stored scores do not compute, fails the whole list.
 func (s opsVulnFindings) Findings(ctx context.Context) ([]opsfacts.Finding, error) {
-	fixes := s.newFixes()
+	guard := &opsPreviewGuard{inner: s.previews}
+	fixes := s.newFixes(guard)
 	if fixes == nil {
 		return nil, fmt.Errorf("read findings: fix decider: %w", opsfacts.ErrNoSource)
 	}
@@ -99,6 +132,9 @@ func (s opsVulnFindings) Findings(ctx context.Context) ([]opsfacts.Finding, erro
 	}
 	if more {
 		return nil, fmt.Errorf("read findings: %d or more: %w", vulnstore.MaxListFindings, errOpsFindingsTruncated)
+	}
+	if n := opsPreviewHostsOf(fs); n > vulnfix.MaxPreviewHosts {
+		return nil, fmt.Errorf("read findings: %d image hosts: %w", n, errOpsPreviewLimited)
 	}
 	out := make([]opsfacts.Finding, 0, len(fs))
 	for _, f := range fs {
@@ -115,7 +151,23 @@ func (s opsVulnFindings) Findings(ctx context.Context) ([]opsfacts.Finding, erro
 		}
 		out = append(out, of)
 	}
+	if guard.err != nil {
+		return nil, fmt.Errorf("read findings: %w", guard.err)
+	}
 	return out, nil
+}
+
+// opsPreviewHostsOf counts the distinct hosts of the not fixed image findings.
+// The decisions read one container preview per such host, so a count above
+// vulnfix.MaxPreviewHosts means that some reads would be cut off.
+func opsPreviewHostsOf(fs []vulnstore.Finding) int {
+	hosts := map[string]bool{}
+	for _, f := range fs {
+		if f.State != vulnstore.StateFixed && f.Subject.Kind == vulnfinding.SubjectImage {
+			hosts[f.Subject.ID] = true
+		}
+	}
+	return len(hosts)
 }
 
 // opsFindingOf maps one stored finding and its fix decision to the projection
@@ -137,7 +189,9 @@ func opsFindingOf(f vulnstore.Finding, res vulnfix.Result) (opsfacts.Finding, er
 		Fix:       opsDecisionOf(res),
 	}
 	if f.Record.Fix.State == vulnfinding.FixFixed {
-		out.Fixed = f.Record.Fix.Version
+		// The version the decision used: the higher of the record's and the
+		// episode's fixed version (vulnfix.Result.Fixed).
+		out.Fixed = res.Fixed
 	}
 	switch f.Subject.Kind {
 	case vulnfinding.SubjectHost:
