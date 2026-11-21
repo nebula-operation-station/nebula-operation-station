@@ -92,7 +92,6 @@ func TestNetFactsAtLimitThroughHostrun(t *testing.T) {
 	}
 	t.Logf("worst case: result %d bytes (limit %d)", len(r.Result), hostrun.MaxResult)
 
-	sections := decodeNetDoc(t, r.Result)
 	var doc map[string]json.RawMessage
 	if err := json.Unmarshal(r.Result, &doc); err != nil {
 		t.Fatal(err)
@@ -128,8 +127,36 @@ func TestNetFactsAtLimitThroughHostrun(t *testing.T) {
 	if !facts.Incomplete() {
 		t.Fatal("netfacts reports a cut result as complete")
 	}
-	if got := len(sections); got != len(netFactsCommands) {
-		t.Fatalf("%d sections, want %d", got, len(netFactsCommands))
+	requireRawSections(t, r.Result)
+}
+
+// requireRawSections counts the sections in the raw net.facts document: every
+// top-level member except format and phase. Each must be a known section and
+// every known section must be present, so a missing or extra section fails.
+// It does not go through decodeNetDoc, which only reads the names it is given.
+func requireRawSections(t *testing.T, out []byte) {
+	t.Helper()
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatalf("result is not a JSON object: %v", err)
+	}
+	known := map[string]bool{}
+	for _, c := range netFactsCommands {
+		known[c.section] = true
+	}
+	var raw []string
+	for name := range doc {
+		if name != "format" && name != "phase" {
+			raw = append(raw, name)
+		}
+	}
+	if len(raw) != len(netFactsCommands) {
+		t.Fatalf("%d sections in the raw document, want %d: %v", len(raw), len(netFactsCommands), raw)
+	}
+	for _, name := range raw {
+		if !known[name] {
+			t.Errorf("unknown section %q in the raw document", name)
+		}
 	}
 }
 
@@ -362,18 +389,28 @@ func TestListUpdatesAt4000PackagesThroughHostrun(t *testing.T) {
 	}
 }
 
-// requireListUpdatesFailure fails unless r is a script failure with exit
-// status 5 and no result: the simulation did not fit and the run says so.
-func requireListUpdatesFailure(t *testing.T, r hostrun.Result) {
-	t.Helper()
+// listUpdatesFailure returns nil when r is a script failure with exit status
+// 5 and no result, the run's way of saying the simulation did not fit. Any
+// other outcome is an error.
+func listUpdatesFailure(r hostrun.Result) error {
 	if r.Class == hostrun.ClassSuccess {
-		t.Fatalf("cut simulation classed as success: %d result bytes, leaving the update list incomplete", len(r.Result))
+		return fmt.Errorf("cut simulation classed as success: %d result bytes, leaving the update list incomplete", len(r.Result))
 	}
 	if r.Class != hostrun.ClassScriptFailed || r.ExitCode != 5 || len(r.Result) != 0 {
-		t.Fatalf("class %s, exit %d, result %d bytes", r.Class, r.ExitCode, len(r.Result))
+		return fmt.Errorf("class %s, exit %d, result %d bytes", r.Class, r.ExitCode, len(r.Result))
 	}
 	if !bytes.Contains(r.Log, []byte("cannot be listed completely")) {
-		t.Errorf("log %q lacks the size limit line", r.Log)
+		return fmt.Errorf("log %q lacks the size limit line", r.Log)
+	}
+	return nil
+}
+
+// requireListUpdatesFailure fails unless r is the failure listUpdatesFailure
+// describes.
+func requireListUpdatesFailure(t *testing.T, r hostrun.Result) {
+	t.Helper()
+	if err := listUpdatesFailure(r); err != nil {
+		t.Fatal(err)
 	}
 }
 
