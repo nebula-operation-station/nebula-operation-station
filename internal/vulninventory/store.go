@@ -12,6 +12,8 @@ import (
 	"sort"
 	"time"
 	"unicode/utf8"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
 )
 
 // Limits. Every one is enforced by Put (or by the read path that decodes what
@@ -21,6 +23,10 @@ const (
 	// MaxBinaries bounds the binary packages of one read (ADR 0011 D3:
 	// osdebian.MaxPackages, 20,000 packages per host).
 	MaxBinaries = 20000
+	// MaxComponentBinaries bounds the binaries of one component. It is the
+	// export's limit (vulnfinding.MaxBinaries): the export drops a component
+	// with more binaries, so Put refuses to store one.
+	MaxComponentBinaries = vulnfinding.MaxBinaries
 	// MaxComponents bounds the source packages of one read. A source package
 	// has at least one binary in practice, so MaxBinaries also bounds it.
 	MaxComponents = MaxBinaries
@@ -30,6 +36,10 @@ const (
 	MaxDropped = 2 * MaxBinaries
 	// MaxReasonBytes bounds Read.Reason (why a read is partial or failed).
 	MaxReasonBytes = 128
+	// MaxReadSkew is how far after the store's clock a read time may be. A
+	// read stamped further ahead would stay the newest read of its host, and
+	// so protected, until the clock caught up. Put refuses such a read.
+	MaxReadSkew = 5 * time.Minute
 
 	maxHostIDBytes        = 128
 	maxExecutionIDBytes   = 64
@@ -226,6 +236,9 @@ func canonicalComponents(comps []Component) ([]bodyComponent, int, error) {
 			return nil, 0, fmt.Errorf("%w: duplicate component %s", ErrInvalidRead, c.Source)
 		}
 		seen[key] = true
+		if err := checkBodyCount("binaries in one component", len(c.Binaries), MaxComponentBinaries); err != nil {
+			return nil, 0, err
+		}
 		binaries += len(c.Binaries)
 		if err := checkBodyCount("binaries", binaries, MaxBinaries); err != nil {
 			return nil, 0, err
@@ -325,6 +338,9 @@ func validateRead(r Read) error {
 	}
 	if r.ReadAt.IsZero() || r.ReadAt.Unix() <= 0 {
 		return fmt.Errorf("%w: read time is unset", ErrInvalidRead)
+	}
+	if limit := nowFunc().Add(MaxReadSkew); r.ReadAt.After(limit) {
+		return fmt.Errorf("%w: read time is more than %s after the store clock", ErrInvalidRead, MaxReadSkew)
 	}
 	if err := checkText("reason", r.Reason, MaxReasonBytes, false); err != nil {
 		return err
@@ -451,6 +467,15 @@ const (
 		WHERE id IN (SELECT (SELECT n.id FROM vuln_inventory_reads AS n WHERE n.host_id = h.host_id
 			ORDER BY n.read_at DESC, n.id DESC LIMIT 1)
 			FROM (SELECT host_id FROM vuln_inventory_reads GROUP BY host_id) AS h)`
+	// latestAllLimitedQuery is latestAllQuery for LatestAll: the host list is
+	// cut at a LIMIT (param: MaxLatestAllHosts+1, one past the limit so the
+	// caller can tell a truncated result). ORDER BY host_id follows the GROUP
+	// BY, so the cut keeps the first hosts in host-ID order. The snapshot does
+	// not use this: it needs every host to count the omitted ones.
+	latestAllLimitedQuery = `SELECT ` + headerColumns + ` FROM vuln_inventory_reads
+		WHERE id IN (SELECT (SELECT n.id FROM vuln_inventory_reads AS n WHERE n.host_id = h.host_id
+			ORDER BY n.read_at DESC, n.id DESC LIMIT 1)
+			FROM (SELECT host_id FROM vuln_inventory_reads GROUP BY host_id ORDER BY host_id LIMIT ?) AS h)`
 )
 
 // Latest returns the newest read of host: the highest read_at, then the
@@ -477,31 +502,50 @@ func (s *Store) Get(ctx context.Context, id int64) (Read, error) {
 	return s.one(ctx, fmt.Sprintf("get %d", id), `SELECT `+fullColumns+` FROM vuln_inventory_reads WHERE id = ?`, id)
 }
 
+// MaxLatestAllHosts bounds the reads LatestAll returns. It equals the snapshot's
+// host limit (MaxSnapshotHosts, which is the export's total). Past it LatestAll
+// returns the first hosts in host-ID order and truncated is true.
+const MaxLatestAllHosts = MaxSnapshotHosts
+
 // LatestAll returns the newest read of every host, ordered by host ID, without
-// the components. It is for the export's choice of reads and for the UI.
-func (s *Store) LatestAll(ctx context.Context) ([]Read, error) {
-	rows, err := s.db.QueryContext(ctx, latestAllQuery)
+// the components, up to MaxLatestAllHosts hosts. truncated reports that the
+// store has more hosts than that and the result is only the first of them. It
+// is for the export's choice of reads and for the UI.
+func (s *Store) LatestAll(ctx context.Context) (reads []Read, truncated bool, err error) {
+	rows, err := s.db.QueryContext(ctx, latestAllLimitedQuery, MaxLatestAllHosts+1)
 	if err != nil {
-		return nil, fmt.Errorf("vulninventory: latest all: %w", err)
+		return nil, false, fmt.Errorf("vulninventory: latest all: %w", err)
 	}
 	defer rows.Close()
 	var out []Read
 	for rows.Next() {
 		r, err := scanRead(rows, false)
 		if err != nil {
-			return nil, fmt.Errorf("vulninventory: latest all: %w", err)
+			return nil, false, fmt.Errorf("vulninventory: latest all: %w", err)
 		}
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("vulninventory: latest all: %w", err)
+		return nil, false, fmt.Errorf("vulninventory: latest all: %w", err)
 	}
 	// One row per host, so sorting the few result rows in Go is cheap and keeps
 	// the SQL free of a sort.
 	sort.Slice(out, func(i, j int) bool { return out[i].HostID < out[j].HostID })
-	return out, nil
+	if len(out) > MaxLatestAllHosts {
+		return out[:MaxLatestAllHosts], true, nil
+	}
+	return out, false, nil
 }
 
+// The delete rule of migration 0052 (vuln_inventory_reads_protected) runs once per
+// row of a DELETE. Its comment there says the check sees the rows as they were
+// before the statement. That is wrong, and 0052 is not edited for it: SQLite
+// runs the BEFORE trigger for each row after the earlier rows of the same
+// statement are gone, so the check sees those deletions. The rule still holds.
+// Deleting an unprotected row never changes which read is the newest, the last
+// complete one or a pinned one, and a protected row aborts the whole statement,
+// which rolls the earlier deletions back (store_test.go checks this).
+//
 // Retention of reads is decision E1 in docs/implementation/vuln-inventory-decisions.md
 // and is not decided. The database (migration 0052) already refuses to delete a
 // snapshot-pinned read, the newest read of a host and the last complete read of
