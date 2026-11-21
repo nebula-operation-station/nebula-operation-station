@@ -1,6 +1,6 @@
 # Network security advisor plan (ADR 0012)
 
-Status: **plan, not started, 2026-11-11; ADR 0012 Accepted 2026-11-11**
+Status: **plan; pure libraries exist but are not wired (checked 2026-11-21); ADR 0012 Accepted 2026-11-11** (previously: "plan, not started, 2026-11-11")
 (previously Proposed with Q1 to Q11 open). The maintainer answered Q1–Q10
 on 2026-11-11 09:18 (ADR 0012 "Decisions 2026-11-11"); Q11 stays open,
 so NS-04 waits for it. Pure libraries without tables or migrations
@@ -46,9 +46,14 @@ steps, in the style of [network-devices.md](network-devices.md).
 | Agent feed sync | `internal/vulnfeed/` (ADR 0011 amendment 1, va-tickets) | Reputation feeds as a subpackage, inside the A1.2 import allowlist (NS-14) |
 | API scopes and tokens | `internal/web/api/`, `internal/serverconfig/` | `netsec.reputation.write` (NS-15) |
 
-Gaps: no reachability model, no advisor store, no log read methods, no
-log store, no reputation store or matcher, no EDL endpoint, no zone trust
-classes.
+Gaps (re-checked 2026-11-21): the libraries exist (`internal/netreach/eval.go`,
+`internal/netadvisor/netadvisor.go`, `internal/edl/render.go`,
+`internal/reputation/match.go`), but no package outside them imports them, so
+nothing is wired: no advisor store, log read methods, log store, reputation
+store, EDL endpoint or zone trust classes are reachable from nebula-server.
+Previously: "Gaps: no reachability model, no advisor store, no log read methods,
+no log store, no reputation store or matcher, no EDL endpoint, no zone trust
+classes."
 
 ## Tickets
 
