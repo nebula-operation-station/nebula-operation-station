@@ -169,6 +169,12 @@ func TestParseAllowlistRejectsIncompleteEntries(t *testing.T) {
 		{"empty path", " | planned: a | WG-01\n"},
 		{"reason without category", "internal/b | not wired yet | WG-01\n"},
 		{"reason with unknown category", "internal/b | later: not wired yet | WG-01\n"},
+		{"reason is only planned category", "internal/b | planned: | WG-01\n"},
+		{"reason is only developer tool category", "internal/b | developer tool: | WG-01\n"},
+		{"reason is only test helper category", "internal/b | test helper - never wired:   | WG-01\n"},
+		{"category without colon", "internal/b | planned | WG-01\n"},
+		{"ticket is a placeholder", "internal/b | planned: not wired yet | TODO\n"},
+		{"ticket has no digits", "internal/b | planned: not wired yet | wiring\n"},
 		{"ticket with a space", "internal/b | planned: a | G 41\n"},
 		{"ticket with a slash", "internal/b | planned: a | WG-01/02\n"},
 		{"too large", strings.Repeat("#", maxAllowlistBytes+1) + "\n"},
@@ -200,27 +206,126 @@ func TestParseAllowlistAcceptsEveryCategory(t *testing.T) {
 	}
 }
 
+// ticketPlan is a planning document that defines some tickets and mentions or
+// fakes others.
+const ticketPlan = "# Plan\n\n" +
+	"| AS-09 | open | the assistant |\n" +
+	"IG-05 is the parser, mentioned in running text only.\n" +
+	"| TODO | placeholder | x |\n" +
+	"| none | nothing | x |\n" +
+	"| **VU-23** | open | bold label |\n" +
+	"| EN-16h: SSH step | later | label with a colon |\n" +
+	"| Attached runs (M4-1) | done | ticket in parentheses |\n" +
+	"## WG-07: wiring rules\n" +
+	"## later\n" +
+	"## planned\n"
+
 func TestUnknownTicketIsReported(t *testing.T) {
 	root := writeTree(t, map[string]string{
-		"docs/implementation/plan.md": "# Plan\n\n| AS-09 | open | the assistant |\nIG-05 is the parser.\n",
-		"internal/wiringguard/tickets.txt": "WG-01 | wiring guard\n" +
-			"# comment\n",
+		"docs/implementation/plan.md":      ticketPlan,
+		"internal/wiringguard/tickets.txt": "WG-02 | wiring guard | docs/implementation/plan.md\n",
 	})
 	allow := Allowlist{
 		"internal/a": {Reason: "planned: parser", Ticket: "IG-05"},
 		"internal/b": {Reason: "planned: never defined", Ticket: "G41"},
-		"internal/c": {Reason: "planned: prefix only", Ticket: "IG-0"},
-		"internal/d": {Reason: "developer tool: guard", Ticket: "WG-01"},
-		"internal/e": {Reason: "planned: in the register title only", Ticket: "wiring"},
-		"internal/f": {Reason: "planned: table row", Ticket: "AS-09"},
+		"internal/c": {Reason: "planned: placeholder", Ticket: "TODO"},
+		"internal/d": {Reason: "planned: placeholder", Ticket: "none"},
+		"internal/e": {Reason: "planned: placeholder", Ticket: "later"},
+		"internal/f": {Reason: "planned: placeholder", Ticket: "planned"},
+		"internal/g": {Reason: "planned: a label word", Ticket: "wiring"},
+		"internal/h": {Reason: "planned: table row", Ticket: "AS-09"},
+		"internal/i": {Reason: "planned: bold label", Ticket: "VU-23"},
+		"internal/j": {Reason: "planned: label with colon", Ticket: "EN-16h"},
+		"internal/k": {Reason: "planned: ticket in parentheses", Ticket: "M4-1"},
+		"internal/l": {Reason: "planned: heading", Ticket: "WG-07"},
+		"internal/m": {Reason: "developer tool: guard", Ticket: "WG-02"},
 	}
 	got, err := UnknownTickets(root, allow)
 	if err != nil {
 		t.Fatalf("UnknownTickets: %v", err)
 	}
-	want := []string{"internal/b", "internal/c", "internal/e"}
+	want := []string{"internal/a", "internal/b", "internal/c", "internal/d", "internal/e", "internal/f", "internal/g"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("UnknownTickets = %v, want %v", got, want)
+	}
+}
+
+func TestPlaceholderTicketsAreNotAccepted(t *testing.T) {
+	for _, id := range []string{"TODO", "none", "later", "planned", "tbd"} {
+		t.Run(id, func(t *testing.T) {
+			text := "internal/b | planned: not wired yet | " + id + "\n"
+			if _, err := ParseAllowlist(strings.NewReader(text)); err == nil {
+				t.Fatalf("ParseAllowlist accepted placeholder ticket %q", id)
+			}
+		})
+	}
+}
+
+func TestRegisterMustNameTrackingDocument(t *testing.T) {
+	tests := []struct {
+		name     string
+		register string
+	}{
+		{"two fields only", "WG-02 | wiring guard\n"},
+		{"four fields", "WG-02 | wiring guard | docs/implementation/plan.md | extra\n"},
+		{"placeholder id", "TODO | wiring guard | docs/implementation/plan.md\n"},
+		{"tracking document missing", "WG-02 | wiring guard | docs/implementation/missing.md\n"},
+		{"tracking document outside docs", "WG-02 | wiring guard | internal/wiringguard/tickets.txt\n"},
+		{"tracking path escapes docs", "WG-02 | wiring guard | docs/../go.mod\n"},
+		{"tracking document not markdown", "WG-02 | wiring guard | docs/implementation/plan.txt\n"},
+		{"duplicate id", "WG-02 | a | docs/implementation/plan.md\nWG-02 | b | docs/implementation/plan.md\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			root := writeTree(t, map[string]string{
+				"docs/implementation/plan.md":      ticketPlan,
+				"docs/implementation/plan.txt":     ticketPlan,
+				"internal/wiringguard/tickets.txt": tc.register,
+			})
+			allow := Allowlist{"internal/a": {Reason: "developer tool: guard", Ticket: "WG-02"}}
+			if _, err := UnknownTickets(root, allow); err == nil {
+				t.Fatalf("UnknownTickets with register %q succeeded, want error", tc.register)
+			}
+		})
+	}
+}
+
+func TestMissingRegisterIsEmpty(t *testing.T) {
+	root := writeTree(t, map[string]string{"docs/implementation/plan.md": ticketPlan})
+	allow := Allowlist{
+		"internal/a": {Reason: "planned: table row", Ticket: "AS-09"},
+		"internal/b": {Reason: "developer tool: guard", Ticket: "WG-02"},
+	}
+	got, err := UnknownTickets(root, allow)
+	if err != nil {
+		t.Fatalf("UnknownTickets without register: %v", err)
+	}
+	if want := []string{"internal/b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("UnknownTickets = %v, want %v", got, want)
+	}
+}
+
+func TestPlanningDocumentSizeLimit(t *testing.T) {
+	tests := []struct {
+		name    string
+		size    int
+		wantErr bool
+	}{
+		{"at the limit", maxTicketSourceBytes, false},
+		{"one byte over the limit", maxTicketSourceBytes + 1, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			big := ticketPlan + strings.Repeat("x", tc.size-len(ticketPlan))
+			root := writeTree(t, map[string]string{"docs/implementation/big.md": big})
+			_, err := UnknownTickets(root, Allowlist{"internal/a": {Reason: "planned: a", Ticket: "AS-09"}})
+			if tc.wantErr && err == nil {
+				t.Fatal("UnknownTickets accepted an oversized planning document")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("UnknownTickets on a document at the limit: %v", err)
+			}
+		})
 	}
 }
 
@@ -302,6 +407,84 @@ func TestRealTreeTicketsExist(t *testing.T) {
 		t.Fatalf("check tickets: %v", err)
 	}
 	for _, pkg := range unknown {
-		t.Errorf("%s: ticket %q is not defined in docs/ or internal/wiringguard/tickets.txt", pkg, allow[pkg].Ticket)
+		t.Errorf("%s: ticket %q is not defined in a docs/ table row or heading, nor registered in internal/wiringguard/tickets.txt", pkg, allow[pkg].Ticket)
+	}
+}
+
+func TestModulePathAcceptsTrailingComment(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"go.mod":          "module example.com/tc // the module\n\ngo 1.26.0\n",
+		"cmd/app/main.go": "package main\n\nimport _ \"example.com/tc/internal/b\"\n\nfunc main() {}\n",
+		"internal/b/b.go": "package b\n",
+	})
+	res, err := Check(root, Allowlist{})
+	if err != nil {
+		t.Fatalf("Check with a commented module line: %v", err)
+	}
+	if res.Checked != 1 || len(res.Unwired) != 0 {
+		t.Fatalf("Check = %+v, want one checked package that is wired", res)
+	}
+}
+
+func TestModuleBoundaryDoesNotMatchPrefix(t *testing.T) {
+	root := writeTree(t, map[string]string{
+		"go.mod": "module example.com/wg\n\ngo 1.26.0\n",
+		"cmd/app/main.go": "package main\n\nimport (\n" +
+			"\t_ \"example.com/wg2/internal/b\"\n" +
+			"\t_ \"example.com/wg/internal/c\"\n" +
+			")\n\nfunc main() {}\n",
+		"internal/b/b.go": "package b\n",
+		"internal/c/c.go": "package c\n",
+	})
+	res, err := Check(root, Allowlist{})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if want := []string{"internal/b"}; !reflect.DeepEqual(res.Unwired, want) {
+		t.Fatalf("Unwired = %v, want %v: an import of example.com/wg2 must not count for module example.com/wg", res.Unwired, want)
+	}
+}
+
+func TestModuleDirMapsOnlyOwnModule(t *testing.T) {
+	tests := []struct {
+		importPath string
+		wantDir    string
+		wantOK     bool
+	}{
+		{"example.com/wg", ".", true},
+		{"example.com/wg/internal/b", "internal/b", true},
+		{"example.com/wg2", "", false},
+		{"example.com/wg2/internal/b", "", false},
+		{"example.com/wgx/internal/b", "", false},
+		{"example.com/other/internal/b", "", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.importPath, func(t *testing.T) {
+			dir, ok := moduleDir(tc.importPath, "example.com/wg")
+			if ok != tc.wantOK || dir != tc.wantDir {
+				t.Fatalf("moduleDir(%q) = (%q, %v), want (%q, %v)", tc.importPath, dir, ok, tc.wantDir, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestIgnoredGoFileDoesNotMakeMainPackage(t *testing.T) {
+	const generator = "//go:build ignore\n\npackage main\n\nfunc main() {}\n"
+	root := writeTree(t, map[string]string{
+		"go.mod":            "module example.com/g\n\ngo 1.26.0\n",
+		"tools/gen/gen.go":  generator,
+		"internal/h/gen.go": generator,
+		"internal/g/gen.go": generator,
+		"internal/g/lib.go": "package g\n",
+	})
+	res, err := Check(root, Allowlist{})
+	if err != nil {
+		t.Fatalf("Check: %v", err)
+	}
+	if res.Checked != 1 {
+		t.Errorf("Checked = %d, want 1: a directory whose only main file is ignored by build constraints is not a candidate", res.Checked)
+	}
+	if want := []string{"internal/g"}; !reflect.DeepEqual(res.Unwired, want) {
+		t.Errorf("Unwired = %v, want %v", res.Unwired, want)
 	}
 }

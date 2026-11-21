@@ -34,9 +34,13 @@ const (
 	// docsDir is the planning-document directory whose Markdown files are
 	// searched for ticket IDs, relative to the module root.
 	docsDir = "docs"
-	// ticketRegister lists wiring tickets that have no entry under docsDir,
-	// relative to the module root. One ticket per line: "<ID> | <title>".
+	// ticketRegister lists wiring tickets that have no table row or heading under
+	// docsDir, relative to the module root. One ticket per line:
+	// "<ID> | <title> | <planning document under docsDir>".
 	ticketRegister = "internal/wiringguard/tickets.txt"
+	// registerFields is the number of "|"-separated fields in a register line:
+	// ticket ID, title, tracking document.
+	registerFields = 3
 	// maxTicketSourceBytes limits how much of one planning document or the
 	// ticket register is read.
 	maxTicketSourceBytes = 1 << 20
@@ -63,11 +67,11 @@ var ErrNoModule = errors.New("no go.mod found in any parent directory")
 // code.
 var generatedRe = regexp.MustCompile(`^// Code generated .* DO NOT EDIT\.$`)
 
-// ticketRe matches one ticket ID such as "AS-09", "iv02" or "M4-1".
-var ticketRe = regexp.MustCompile(`^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$`)
-
-// ticketWordRe finds ticket-like words in a planning document.
-var ticketWordRe = regexp.MustCompile(`[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*`)
+// ticketRe matches one ticket ID in the project's form: 1 to 4 letters, an
+// optional hyphen, 1 to 3 digits, an optional lower-case letter and an optional
+// "-<digits>" part, as in "AS-09", "iv02", "EN-16h" or "M4-1". Words without
+// digits ("TODO", "none", "later", "planned") never match.
+var ticketRe = regexp.MustCompile(`^[A-Za-z]{1,4}-?[0-9]{1,3}[a-z]?(?:-[0-9]{1,3})?$`)
 
 // Entry is one allowlist record: why an internal package is not wired yet and
 // the ticket or plan item that will wire it.
@@ -170,8 +174,12 @@ func ParseAllowlist(r io.Reader) (Allowlist, error) {
 		if reason == "" {
 			return nil, fmt.Errorf("allowlist line %d: %s has no reason", line, pkg)
 		}
-		if !hasCategory(reason) {
+		cat, ok := categoryOf(reason)
+		if !ok {
 			return nil, fmt.Errorf("allowlist line %d: %s: reason must start with %q, %q or %q", line, pkg, CategoryPlanned, CategoryTestHelper, CategoryDeveloperTool)
+		}
+		if strings.TrimSpace(strings.TrimPrefix(reason, cat)) == "" {
+			return nil, fmt.Errorf("allowlist line %d: %s: reason has no text after %q", line, pkg, cat)
 		}
 		if ticket == "" {
 			return nil, fmt.Errorf("allowlist line %d: %s has no ticket or plan item", line, pkg)
@@ -190,29 +198,35 @@ func ParseAllowlist(r io.Reader) (Allowlist, error) {
 	return allow, nil
 }
 
-// hasCategory reports whether reason starts with a known reason category.
-func hasCategory(reason string) bool {
+// categoryOf returns the reason category that reason starts with.
+func categoryOf(reason string) (string, bool) {
 	for _, c := range []string{CategoryPlanned, CategoryTestHelper, CategoryDeveloperTool} {
 		if strings.HasPrefix(reason, c) {
-			return true
+			return c, true
 		}
 	}
-	return false
+	return "", false
 }
 
-// UnknownTickets returns the sorted package paths of allow whose ticket ID
-// does not appear as a whole ID in a Markdown file under root/docs or in the
-// ticket register root/internal/wiringguard/tickets.txt. A missing register
-// counts as empty; a missing docs directory is an error, so the check cannot
-// pass by reading nothing.
+// UnknownTickets returns the sorted package paths of allow whose ticket is
+// neither defined under root/docs nor registered. A ticket is defined when a
+// Markdown file under root/docs has a table row whose first cell names it, or a
+// heading that starts with it (see definedTickets). A ticket is registered when
+// root/internal/wiringguard/tickets.txt names it with a tracking document that
+// exists. A missing register counts as empty; a missing docs directory is an
+// error, so the check cannot pass by reading nothing.
 func UnknownTickets(root string, allow Allowlist) ([]string, error) {
-	known, err := ticketIDs(root)
+	known, err := documentedTickets(root)
+	if err != nil {
+		return nil, err
+	}
+	registered, err := readRegister(root)
 	if err != nil {
 		return nil, err
 	}
 	var unknown []string
 	for pkg, entry := range allow {
-		if !known[entry.Ticket] {
+		if !known[entry.Ticket] && registered[entry.Ticket] == "" {
 			unknown = append(unknown, pkg)
 		}
 	}
@@ -220,9 +234,53 @@ func UnknownTickets(root string, allow Allowlist) ([]string, error) {
 	return unknown, nil
 }
 
-// ticketIDs collects the ticket IDs named in the planning documents and the
-// first field of each line of the ticket register.
-func ticketIDs(root string) (map[string]bool, error) {
+// definedTickets returns the ticket IDs that a Markdown document defines. An ID
+// is defined when the first cell of a table row names it (optionally bold, or
+// followed by a colon, as in "| EN-16h: SSH step |"), when a heading starts with
+// it, or when the first cell ends with it in parentheses ("Attached runs
+// (M4-1)"). A mention in running text does not define an ID, and neither does a
+// placeholder such as "TODO", which is not in the ticket form.
+func definedTickets(text string) map[string]bool {
+	known := map[string]bool{}
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		var label string
+		switch {
+		case strings.HasPrefix(line, "|"):
+			label = strings.Split(line, "|")[1]
+		case strings.HasPrefix(line, "#"):
+			label = strings.TrimLeft(line, "#")
+		default:
+			continue
+		}
+		if id, ok := labelTicket(label); ok {
+			known[id] = true
+		}
+	}
+	return known
+}
+
+// labelTicket returns the ticket ID that a table label or heading names, if any.
+func labelTicket(label string) (string, bool) {
+	label = strings.Trim(label, " \t*`")
+	isSep := func(r rune) bool { return strings.ContainsRune(" \t:()*`", r) }
+	if first := strings.FieldsFunc(label, isSep); len(first) > 0 && ticketRe.MatchString(first[0]) {
+		return first[0], true
+	}
+	if strings.HasSuffix(label, ")") {
+		if i := strings.LastIndex(label, "("); i >= 0 {
+			inner := strings.Trim(label[i+1:len(label)-1], " \t*`")
+			if ticketRe.MatchString(inner) {
+				return inner, true
+			}
+		}
+	}
+	return "", false
+}
+
+// documentedTickets collects the ticket IDs defined by the Markdown planning
+// documents under root/docs.
+func documentedTickets(root string) (map[string]bool, error) {
 	known := map[string]bool{}
 	err := filepath.WalkDir(filepath.Join(root, docsDir), func(file string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -235,7 +293,7 @@ func ticketIDs(root string) (map[string]bool, error) {
 		if err != nil {
 			return err
 		}
-		for _, id := range ticketWordRe.FindAllString(string(data), -1) {
+		for id := range definedTickets(string(data)) {
 			known[id] = true
 		}
 		return nil
@@ -243,19 +301,63 @@ func ticketIDs(root string) (map[string]bool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read planning documents: %w", err)
 	}
+	return known, nil
+}
+
+// readRegister reads the ticket register and returns each registered ticket ID
+// with its tracking document, a module-relative path under docs/. A missing
+// register is empty. Every line must have registerFields fields, a ticket ID in
+// the ticket form, a title, and a tracking document that exists.
+func readRegister(root string) (map[string]string, error) {
+	registered := map[string]string{}
 	data, err := readLimited(filepath.Join(root, ticketRegister), maxTicketSourceBytes)
-	switch {
-	case err == nil:
-		for _, line := range strings.Split(string(data), "\n") {
-			id, _, _ := strings.Cut(line, "|")
-			if id = strings.TrimSpace(id); ticketRe.MatchString(id) {
-				known[id] = true
-			}
-		}
-	case !errors.Is(err, fs.ErrNotExist):
+	if errors.Is(err, fs.ErrNotExist) {
+		return registered, nil
+	}
+	if err != nil {
 		return nil, err
 	}
-	return known, nil
+	for i, line := range strings.Split(string(data), "\n") {
+		text := strings.TrimSpace(line)
+		if text == "" || strings.HasPrefix(text, "#") {
+			continue
+		}
+		fields := strings.Split(text, "|")
+		if len(fields) != registerFields {
+			return nil, fmt.Errorf("ticket register line %d: want %d fields separated by \"|\" (ID | title | tracking document), got %d", i+1, registerFields, len(fields))
+		}
+		id, title, doc := strings.TrimSpace(fields[0]), strings.TrimSpace(fields[1]), strings.TrimSpace(fields[2])
+		if !ticketRe.MatchString(id) {
+			return nil, fmt.Errorf("ticket register line %d: ID %q is not in the ticket form", i+1, id)
+		}
+		if title == "" {
+			return nil, fmt.Errorf("ticket register line %d: %s has no title", i+1, id)
+		}
+		if _, dup := registered[id]; dup {
+			return nil, fmt.Errorf("ticket register line %d: %s listed twice", i+1, id)
+		}
+		if err := checkTrackingDoc(root, doc); err != nil {
+			return nil, fmt.Errorf("ticket register line %d: %s: %w", i+1, id, err)
+		}
+		registered[id] = doc
+	}
+	return registered, nil
+}
+
+// checkTrackingDoc returns an error unless doc is a clean, slash-separated path
+// to an existing Markdown file under docs/.
+func checkTrackingDoc(root, doc string) error {
+	if path.Clean(doc) != doc || !strings.HasPrefix(doc, docsDir+"/") || !strings.HasSuffix(doc, ".md") {
+		return fmt.Errorf("tracking document %q must be a clean path to a Markdown file under %s/", doc, docsDir)
+	}
+	info, err := os.Stat(filepath.Join(root, filepath.FromSlash(doc)))
+	if err != nil {
+		return fmt.Errorf("tracking document %s: %w", doc, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("tracking document %s is not a regular file", doc)
+	}
+	return nil
 }
 
 // readLimited reads file and fails when it is larger than limit bytes.
