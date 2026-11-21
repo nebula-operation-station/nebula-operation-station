@@ -440,10 +440,6 @@ func TestWorstCaseReadsFitEveryLimit(t *testing.T) {
 	// component 303 + binary 322 = 625 bytes; MaxComponents of them joined
 	// by commas inside the "[]" envelope.
 	const perComponent = 303 + 322
-	// One source package with MaxBinaries binaries at maximum length:
-	// component 303 (its empty binaries list included), each binary 322,
-	// commas between binaries, inside the envelope.
-	const perBinary = 322
 
 	cases := []struct {
 		name      string
