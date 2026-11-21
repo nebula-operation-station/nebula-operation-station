@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -318,6 +319,10 @@ func (r *joinedRig) startServer(t *testing.T) {
 	})
 }
 
+// joinedClient sends the one-shot requests. Its timeout is joinedWait, so a
+// hung handler fails the test within the same bound as every other wait.
+var joinedClient = &http.Client{Timeout: joinedWait}
+
 // request sends one request through the real server chain over loopback.
 // cookie is the session cookie value ("" for none), origin the Origin
 // header ("" for none).
@@ -337,7 +342,7 @@ func (r *joinedRig) request(ctx context.Context, method, path, cookie, origin, b
 	if origin != "" {
 		req.Header.Set("Origin", origin)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := joinedClient.Do(req)
 	if err != nil {
 		r.t.Fatal(err)
 	}
@@ -359,7 +364,12 @@ func (r *joinedRig) openEvents(t *testing.T) (string, <-chan sseEvent) {
 	}
 	req.Host = joinedHost
 	req.AddCookie(&http.Cookie{Name: auth.CookieName, Value: r.cookie})
+	// The stream itself is long-lived, so no client timeout applies to it;
+	// the request is cancelled only if the response headers do not arrive
+	// within joinedWait.
+	headers := time.AfterFunc(joinedWait, cancel)
 	resp, err := http.DefaultClient.Do(req)
+	headers.Stop()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +391,13 @@ func (r *joinedRig) openEvents(t *testing.T) (string, <-chan sseEvent) {
 				ev.data = strings.TrimPrefix(line, "data: ")
 			case line == "":
 				if ev.name != "" {
-					ch <- ev
+					// The reader must not block for good once the test has
+					// stopped reading: a full buffer yields to cancellation.
+					select {
+					case ch <- ev:
+					case <-ctx.Done():
+						return
+					}
 				}
 				ev = sseEvent{}
 			}
@@ -533,19 +549,49 @@ func TestLiveValuesJoinedNoSessionOrOriginNoTargets(t *testing.T) {
 			t.Fatalf("want-list = %+v (%v), want no targets", want, err)
 		}
 	}
+
+	// Positive control: the same rig with an authorised POST makes the
+	// collector ask both targets. Without it, the empty window above would
+	// also hold if the collector never ran.
+	if status, _, _ := r.postTargets(t, viewer, r.cookie, swOrigin, twoBoxes); status != http.StatusOK {
+		t.Fatalf("control: authorised targets status %d, want 200", status)
+	}
+	waitAsked(t, r.exec, joinedNodeTarget, joinedGuestTarget)
 }
 
-// waitGone polls for a file to disappear; the collector removes its samples
-// when the want-list expires, after its next tick.
-func waitGone(t *testing.T, path string) {
+// waitAsked polls until the stand-in has been asked for every target.
+func waitAsked(t *testing.T, e *joinedExec, want ...pvecontract.LiveTarget) {
 	t.Helper()
 	deadline := time.Now().Add(joinedWait)
 	for {
-		if _, err := os.Stat(path); os.IsNotExist(err) {
+		counts := e.askedCounts()
+		done := true
+		for _, k := range want {
+			if counts[k] == 0 {
+				done = false
+			}
+		}
+		if done {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("%s still present after the want-list expired", path)
+			t.Fatalf("stand-in asked for %v, want %v", counts, want)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// waitFile polls until the file exists (present) or is gone (!present).
+func waitFile(t *testing.T, path string, present bool) {
+	t.Helper()
+	deadline := time.Now().Add(joinedWait)
+	for {
+		_, err := os.Stat(path)
+		if (err == nil) == present {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s: present=%v not reached within %v (stat: %v)", path, present, joinedWait, err)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -595,9 +641,15 @@ func TestLiveWantExpiryStopsCollectorReads(t *testing.T) {
 		t.Fatalf("want-list lasts %d s, want the contract's %d s", got, pvecontract.LiveWantMaxExpiry)
 	}
 
-	// Past the expiry the server's tick is gone; the collector must stop.
+	// The samples file must exist before the clock moves: otherwise the
+	// absence checked below would prove nothing about expiry.
+	samples := filepath.Join(r.root, "live", joinedRemote+".json")
+	waitFile(t, samples, true)
+
+	// Past the expiry the server's tick is gone; the collector must stop
+	// and remove the samples it published.
 	clk.Advance((pvecontract.LiveWantMaxExpiry + 1) * time.Second)
-	waitGone(t, filepath.Join(r.root, "live", joinedRemote+".json"))
+	waitFile(t, samples, false)
 	before := sumCounts(r.exec.askedCounts())
 	time.Sleep(1500 * time.Millisecond)
 	if after := sumCounts(r.exec.askedCounts()); after != before {
@@ -643,14 +695,31 @@ func TestLiveWantOverTargetLimitRefusedNoFile(t *testing.T) {
 		t.Fatalf("refused want-list left a file behind (stat: %v)", statErr)
 	}
 
-	// The targets endpoint bounds the boxes of one viewer (32).
+	// The targets endpoint bounds the boxes of one viewer (maxViewerBoxes).
+	// The control is the limit itself: 32 boxes are accepted, so a 400 for
+	// 33 is the limit and not some other rejection.
 	viewer, _ := r.openEvents(t)
-	var boxes []string
-	for i := range 33 {
-		boxes = append(boxes, fmt.Sprintf(`{"kind":"node","name":"pve%d"}`, i+1))
+	boxesOf := func(n int) string {
+		boxes := make([]string, 0, n)
+		for i := range n {
+			boxes = append(boxes, fmt.Sprintf(`{"kind":"node","name":"pve%d"}`, i+1))
+		}
+		return strings.Join(boxes, ",")
 	}
-	if status, _, _ := r.postTargets(t, viewer, r.cookie, swOrigin, strings.Join(boxes, ",")); status != http.StatusBadRequest {
-		t.Fatalf("33 boxes: status %d, want 400", status)
+	if status, _, _ := r.postTargets(t, viewer, r.cookie, swOrigin, boxesOf(32)); status != http.StatusOK {
+		t.Fatalf("32 boxes: status %d, want 200 (the limit itself)", status)
+	}
+	body := `{"viewer":"` + viewer + `","boxes":[` + boxesOf(33) + `]}`
+	resp := r.request(r.ctx, http.MethodPost, live.TargetsPath, r.cookie, swOrigin, body)
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("33 boxes: status %d, want 400", resp.StatusCode)
+	}
+	if got := strings.TrimSpace(string(raw)); got != "too many boxes" {
+		t.Fatalf("33 boxes: body %q, want %q", got, "too many boxes")
 	}
 }
 
