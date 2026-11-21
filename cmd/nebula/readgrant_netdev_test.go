@@ -113,15 +113,16 @@ func TestReadGrantApproveNetDeviceOrderFollowsDocument(t *testing.T) {
 }
 
 func TestReadGrantApproveNetDeviceEscapesControlCharacters(t *testing.T) {
+	rlo := string(rune(0x202e)) // right-to-left override, a format character
 	targets := []permit.NetDeviceTarget{{
 		DeviceID: "dev\x1b[2Jice", TrustPin: "pin\rspoof", TrustGeneration: 1, CredentialVersion: 1,
-		Reads: []string{"cbs_version\n    11111111-fake  trust pin x", "cbs‮vlans", "cbs_lldp\x00"},
+		Reads: []string{"cbs_version\n    11111111-fake  trust pin x", "cbs" + rlo + "vlans", "cbs_lldp\x00"},
 	}}
 	before, f := approveScreen(t, testNetDeviceGrantDoc(t, targets), "no\n")
 	if len(f.approved) != 0 {
 		t.Fatalf("approved without yes: %v", f.approved)
 	}
-	for _, raw := range []string{"\x1b", "\r", "\x00", "‮", "cbs_version\n"} {
+	for _, raw := range []string{"\x1b", "\r", "\x00", rlo, "cbs_version\n"} {
 		if strings.Contains(before, raw) {
 			t.Errorf("raw %q in output:\n%q", raw, before)
 		}
