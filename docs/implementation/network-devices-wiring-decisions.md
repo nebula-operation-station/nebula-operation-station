@@ -1,6 +1,8 @@
 # Network devices: wiring decisions for the device read chain
 
-Status: decision paper (no code). Scope: the read chain of ADR 0010 (phase 1,
+Status: **decided** by the maintainer, 2026-11-21, for questions A and B; see
+"Decision (2026-11-21, maintainer)" below (previously: decision paper (no
+code)). Scope: the read chain of ADR 0010 (phase 1,
 read only) from the device to the operator's page, tickets ND-14 to ND-20 of
 `network-devices.md`. Owner decisions are open until recorded in the ADR
 decision log. Nothing in this paper changes behaviour.
@@ -10,6 +12,24 @@ Related: `network-devices.md` (plan and rule numbers N1 to N8b),
 WA-13). `wiring-audit.md` has no entry for the device chain. WA-01 and WA-02
 describe the same break pattern for the PVE chain (importer not started, no
 grant proposed), which is the precedent for points 3 and 2 below.
+
+## Decision (2026-11-21, maintainer)
+
+The maintainer (Axel) decided on 2026-11-21 at 13:48 (UTC+1) in chat. Where the
+decision differs from the text below, the decision wins. Original wording
+(German), verbatim:
+
+> **uf14 (docs/implementation/network-devices-wiring-decisions.md, ADR
+> 0010):** Frage A: Variante 1 (Collector spoolt einen Metadaten-Datensatz je
+> Gerät). Frage B: B1 (lokale CLI `nebula netdev lease …`) mit
+> Geräte-Freigaberegel A1-0b und Vorschlagsprüfung A1-0.
+
+In English (translation by Claude, not part of the decision):
+
+- **Question A:** Variant 1 (the collector spools one metadata record per
+  device).
+- **Question B:** B1 (local CLI `nebula netdev lease …`) with the device
+  approval rule A1-0b and the proposal check A1-0.
 
 ## 1. Summary
 

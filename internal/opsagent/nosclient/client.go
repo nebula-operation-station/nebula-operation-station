@@ -38,8 +38,10 @@ const (
 	MaxWorkBytes = 1 << 20
 	// MaxNoteReplyBytes bounds the answer to a note post.
 	MaxNoteReplyBytes = 4 << 10
-	// MaxNoteRequestBytes bounds one note post; the server refuses more.
-	MaxNoteRequestBytes = 64 << 10
+	// MaxNoteRequestBytes bounds one note post. It equals the server's
+	// opsnotes.MaxNoteBytes (16 KiB); the server refuses a larger request.
+	// ops_limits_contract_test.go pins the equality.
+	MaxNoteRequestBytes = 16 << 10
 	// MaxStatusRequestBytes bounds one status post.
 	MaxStatusRequestBytes = 4 << 10
 	// requestTimeout bounds one request to the NOS API.
@@ -333,26 +335,40 @@ func (c *Client) Work(ctx context.Context) ([]WorkItem, error) {
 
 // PostNote posts one note (POST notes). A refused note gives ErrNoteRejected.
 func (c *Client) PostNote(ctx context.Context, d Draft) error {
-	body, err := json.Marshal(d)
+	body, err := encodeJSON(d)
 	if err != nil {
 		return fmt.Errorf("encode note: %w", ErrProtocol)
 	}
 	if len(body) > MaxNoteRequestBytes {
-		return fmt.Errorf("note request: %w", ErrTooLarge)
+		return fmt.Errorf("note request: %d bytes, max %d: %w", len(body), MaxNoteRequestBytes, ErrTooLarge)
 	}
 	return c.post(ctx, notesPath, body, MaxNoteReplyBytes, nil)
 }
 
 // PostStatus posts the last-run report (POST status).
 func (c *Client) PostStatus(ctx context.Context, s Status) error {
-	body, err := json.Marshal(s)
+	body, err := encodeJSON(s)
 	if err != nil {
 		return fmt.Errorf("encode status: %w", ErrProtocol)
 	}
 	if len(body) > MaxStatusRequestBytes {
-		return fmt.Errorf("status request: %w", ErrTooLarge)
+		return fmt.Errorf("status request: %d bytes, max %d: %w", len(body), MaxStatusRequestBytes, ErrTooLarge)
 	}
 	return c.post(ctx, statusPath, body, MaxNoteReplyBytes, nil)
+}
+
+// encodeJSON encodes v as one JSON value without a trailing newline. HTML
+// escaping is off: json.Marshal writes <, > and & as six-byte escapes, which
+// would grow a note past the size the server accepts (the limit is counted in
+// bytes of the request body).
+func encodeJSON(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
 }
 
 // get reads one JSON answer of at most limit bytes into out.

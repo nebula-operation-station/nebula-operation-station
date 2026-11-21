@@ -83,7 +83,7 @@ func productionDeps() deps {
 	return deps{
 		geteuid: os.Geteuid,
 		newClient: func(ctx context.Context, o executorclient.Options) (collectorClient, error) {
-			c, err := executorclient.New(ctx, o)
+			c, err := executorclient.NewNetDevCollector(ctx, o)
 			if err != nil {
 				return nil, err
 			}
