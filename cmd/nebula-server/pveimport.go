@@ -20,16 +20,27 @@ import (
 // interval of one minute, so a healthy server keeps results/ near empty.
 const pveImportInterval = 30 * time.Second
 
+// pveRetentionIntervalHours is how often the PVE inventory retention runs
+// (ADR 0006). The store's windows are days long, so hourly passes would only
+// repeat no-op deletes.
+const pveRetentionIntervalHours = 6
+
+// pveRetentionInterval is pveRetentionIntervalHours as a duration.
+const pveRetentionInterval = pveRetentionIntervalHours * time.Hour
+
 // pveImport feeds the collector's spool (ADR 0006, P1-10) into the server:
 // observations into the PVE inventory, guest NIC records into the traffic
 // store as provider links (ADR 0009 TM14). The spool is the server's only
 // PVE input; everything in it is untrusted and revalidated by the importers.
+// Alongside the import, the PVE inventory retention removes expired rows
+// through the store's own retention functions.
 type pveImport struct {
-	root     string
-	store    *pveinventory.Store
-	sink     pvecollect.GuestNetSink
-	log      *slog.Logger
-	interval time.Duration
+	root              string
+	store             *pveinventory.Store
+	sink              pvecollect.GuestNetSink
+	log               *slog.Logger
+	interval          time.Duration
+	retentionInterval time.Duration
 }
 
 // newPVEImport wires the import of the spool at root over the server
@@ -44,12 +55,20 @@ func newPVEImport(db *sql.DB, root string, retention time.Duration, log *slog.Lo
 	if err != nil {
 		return nil, fmt.Errorf("build guest NIC sink: %w", err)
 	}
-	return &pveImport{root: root, store: pveinventory.New(db), sink: sink, log: log, interval: pveImportInterval}, nil
+	return &pveImport{
+		root:              root,
+		store:             pveinventory.New(db),
+		sink:              sink,
+		log:               log,
+		interval:          pveImportInterval,
+		retentionInterval: pveRetentionInterval,
+	}, nil
 }
 
 // run imports the spool until ctx is cancelled and returns after both
-// importers stopped. A spool that cannot be opened is not fatal: a server
-// without a collector works, so run logs that once and keeps trying.
+// importers and the retention stopped. A spool that cannot be opened is not
+// fatal: a server without a collector works, so run logs that once and keeps
+// trying.
 func (p *pveImport) run(ctx context.Context) {
 	spool := p.open(ctx)
 	if spool == nil {
@@ -78,7 +97,42 @@ func (p *pveImport) run(ctx context.Context) {
 			p.log.Error("guest NIC import stopped", "error", err)
 		}
 	})
+	wg.Go(func() { p.retain(ctx) })
 	wg.Wait()
+}
+
+// retain runs the PVE inventory retention once now and then every
+// retentionInterval until ctx ends. It deletes only through the store's
+// retention functions, which apply their own windows. A failed pass is
+// logged and retried at the next interval; it never stops the import.
+func (p *pveImport) retain(ctx context.Context) {
+	t := time.NewTicker(p.retentionInterval)
+	defer t.Stop()
+	for {
+		p.pruneOnce(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
+// pruneOnce runs one retention pass. Both prunes run even if the other
+// fails. A pass that removed nothing is not logged.
+func (p *pveImport) pruneOnce(ctx context.Context) {
+	report, err := p.store.Prune(ctx)
+	if err != nil && ctx.Err() == nil {
+		p.log.Error("PVE retention failed, retrying next interval", "scope", "tombstones and tasks", "error", err)
+	}
+	buckets, err := p.store.PruneMetrics(ctx)
+	if err != nil && ctx.Err() == nil {
+		p.log.Error("PVE retention failed, retrying next interval", "scope", "metric buckets", "error", err)
+	}
+	if report.TombstonesRemoved > 0 || report.TasksRemoved > 0 || buckets > 0 {
+		p.log.Info("PVE retention removed expired rows",
+			"tombstones", report.TombstonesRemoved, "tasks", report.TasksRemoved, "metric_buckets", buckets)
+	}
 }
 
 // open returns the read-side spool, or nil when ctx ended first.
