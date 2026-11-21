@@ -19,14 +19,16 @@ type InventoryRead struct {
 	// Complete is the D3 completeness flag; a failed, truncated or partly
 	// unparsed read is not complete and closes nothing.
 	Complete bool
-	// ReadAt is when the read finished. The package list carries no host
-	// time, so a write between the host taking the list and this time is not
-	// seen; the closure can then rest on a list older than the write. This is
-	// the gap of ADR 0011 D3 until the list reports its own time.
+	// ReadAt is the time no later than which the host took the list: a
+	// finding last written before it is older than the list and may close.
+	// The list carries no host time (ADR 0011 D3), so the caller passes a
+	// lower bound (the read's finish time less its listing lag), never the
+	// finish time itself; a write inside that lag stays open.
 	ReadAt time.Time
 	// Ecosystem is the read's ecosystem. When set, only findings of that
 	// ecosystem close: a read of another release is no basis for them. Empty
-	// means not checked (image reads).
+	// means not checked (image reads); the observer holds a host read that
+	// names no ecosystem before it gets here.
 	Ecosystem string
 	// SourceVersions maps source package name to its installed source
 	// version (D4 basis: the lowest source:Version of its binaries).

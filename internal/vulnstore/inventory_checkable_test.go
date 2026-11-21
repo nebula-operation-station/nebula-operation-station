@@ -4,6 +4,7 @@ package vulnstore
 
 import (
 	"testing"
+	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
 )
@@ -37,4 +38,36 @@ func TestCheckableFollowsBasisAndEcosystem(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestInventoryCloseHoldsMalformedFixedVersion: a finding whose episode fixed
+// version does not parse closes nothing by inventory, even when a complete
+// read no longer names its package (path 2, fail closed). The control is the
+// same finding on another host with a well-formed fixed version, which closes.
+func TestInventoryCloseHoldsMalformedFixedVersion(t *testing.T) {
+	e := newEnv(t)
+	bad := item(t, "web01", cve(1), withPackage("zlib"))
+	good := item(t, "web02", cve(2), withPackage("zlib"))
+	r := e.start(t)
+	e.submit(t, r, 0, nil, bad, good)
+	e.complete(t, r)
+	// The submit path rejects a malformed fixed version, so the stored episode
+	// is corrupted directly to reach the guard in CloseByInventory.
+	if _, err := e.st.db.ExecContext(e.ctx, `UPDATE vuln_findings SET episode_fixed_version = ? WHERE subject = ?`,
+		"x:1.0-2", hostSubj("web01").String()); err != nil {
+		t.Fatal(err)
+	}
+	e.clk.Add(time.Minute)
+	read := func(host string) InventoryRead {
+		return InventoryRead{Subject: hostSubj(host), Complete: true, ReadAt: e.clk.Now(),
+			Ecosystem: "ubuntu:24.04", SourceVersions: map[string]string{"bash": "5.0-1"}}
+	}
+	if k, err := e.st.CloseByInventory(e.ctx, read("web01")); err != nil || len(k) != 0 {
+		t.Fatalf("malformed fixed version closed %d (%v), want none", len(k), err)
+	}
+	e.wantState(t, bad.Finding.Key, StateOpen, "")
+	if k, err := e.st.CloseByInventory(e.ctx, read("web02")); err != nil || len(k) != 1 {
+		t.Fatalf("control closed %d (%v), want one", len(k), err)
+	}
+	e.wantState(t, good.Finding.Key, StateFixed, ClosedByNOSInventory)
 }
