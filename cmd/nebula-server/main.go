@@ -671,7 +671,11 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		log.Info("read-only API enabled", "tokens", len(cfg.API.Tokens))
 		// Vulnerability agent API (ADR 0011 D3, D5) under /api/v1/vuln/,
 		// only for the one vuln token, from its allowed addresses.
-		vh, err := newVulnAPI(cfg.API, vuln, vulnInventory{now: time.Now}, agentCfg, log)
+		vinv, err := newVulnInventory(db, store, time.Now)
+		if err != nil {
+			return err
+		}
+		vh, err := newVulnAPI(cfg.API, vuln, vinv, agentCfg, log)
 		if err != nil {
 			return err
 		}

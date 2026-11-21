@@ -1,11 +1,29 @@
 # Decision paper: security key assertion for maintainer decisions (ADR 0011 Q4)
 
-Status: **open, maintainer decides.** This paper decides nothing. It sets out
-the current state, two ways to bind the security key assertion to a
+Status: **decided** by the maintainer, 2026-11-21; see "Decision (2026-11-21,
+maintainer)" below (previously: **open, maintainer decides.** This paper
+decides nothing). It sets out the current state, two ways to bind the security key assertion to a
 maintainer decision, a recommendation (marked as a proposal) and the follow-up
 tickets for each variant. The recommendation does not change any ADR or spec.
 
 Ticket: uf04 (autopilot), Issue: none.
+
+## Decision (2026-11-21, maintainer)
+
+The maintainer (Axel) decided on 2026-11-21 at 13:48 (UTC+1) in chat. Where the
+decision differs from the text below, the decision wins. Original wording
+(German), verbatim:
+
+> **uf04 (docs/implementation/vuln-decisions-assertion.md, ADR 0011 Q4):**
+> Variante A (Login-Assertion mit serverseitiger Digest-Bindung wie A1.8);
+> Variante B bleibt spätere Härtung. Zusatz: auch `discard_hold` braucht eine
+> frische Assertion.
+
+In English (translation by Claude, not part of the decision):
+
+- **Variant A** (login assertion with a server-side digest binding, as in
+  A1.8) is chosen; **Variant B** stays a later hardening step.
+- **Addition:** `discard_hold` also needs a fresh assertion.
 
 ## Why this is open
 
