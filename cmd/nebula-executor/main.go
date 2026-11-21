@@ -207,6 +207,13 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// One-step enrollment offers (ADR 0013, EN-06/EN-08): installed from
+	// the executor-local flags before the socket accepts requests. Without
+	// -enroll-source nothing is installed and CreateEnrollOffer stays
+	// refused.
+	if err := setupEnrollOffers(svc, enrollCfg, log); err != nil {
+		return err
+	}
 
 	lis, err := peercred.Listen(peercred.ListenOptions{Path: *socketPath, Mode: 0o660, Group: *socketGroup})
 	if err != nil {
@@ -237,9 +244,35 @@ func run() error {
 	log.Info("started", "version", version.String(), "socket", *socketPath, "mode", modeName(mode),
 		"rp_id", *rpID, "webauthn_credentials", len(creds), "locked", true,
 		"permits", 0, "spent_execution_ids_pruned", pruned,
-		"enroll_sources", len(enrollCfg.Sources), "netbird", enrollCfg.NetBird.Enabled(),
+		"enroll_sources", len(enrollCfg.Sources), "enroll_offers", len(enrollCfg.Sources) > 0, "netbird", enrollCfg.NetBird.Enabled(),
 		"netbird_trust", enrollCfg.NetBird.TrustName(), "netbird_managed_group", enrollCfg.ManagedGroup)
 	return srv.Serve(lis)
+}
+
+// enrollOfferSetter is the part of the executor service setupEnrollOffers
+// configures.
+type enrollOfferSetter interface {
+	SetEnrollOffers(executor.EnrollOfferConfig) error
+}
+
+// setupEnrollOffers installs the executor-local enrollment configuration
+// on svc. Without enrollment sources it installs nothing, so offers stay
+// refused as before. The NetBird part is never installed here: the
+// executor has no key-passing mode table for NetBird clients yet (EN-16e)
+// and ADR 0013 Q11 is open, so NetBird offers stay refused even with
+// -netbird-management-url set. A configuration the service refuses stops
+// the start.
+func setupEnrollOffers(svc enrollOfferSetter, cfg enrollConfig, log *slog.Logger) error {
+	if len(cfg.Sources) == 0 {
+		return nil
+	}
+	if err := svc.SetEnrollOffers(executor.EnrollOfferConfig{Sources: cfg.Sources}); err != nil {
+		return fmt.Errorf("install enrollment configuration: %w", err)
+	}
+	if cfg.NetBird.Enabled() {
+		log.Warn("one-step enrollment offers installed without NetBird: NetBird offers stay refused until the NetBird client table exists (EN-16e)")
+	}
+	return nil
 }
 
 // reconcileInterval is how often open durable runs are checked.
