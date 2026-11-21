@@ -296,6 +296,17 @@ func scan(root, modPath string) (map[string]*pkgInfo, error) {
 			if file != root && (name == "testdata" || name == "vendor" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")) {
 				return filepath.SkipDir
 			}
+			if file != root {
+				// A directory with its own go.mod is a separate module; its
+				// packages are not part of this module and are not scanned.
+				_, err := os.Stat(filepath.Join(file, "go.mod"))
+				switch {
+				case err == nil:
+					return filepath.SkipDir
+				case !errors.Is(err, fs.ErrNotExist):
+					return fmt.Errorf("check module boundary at %s: %w", filepath.ToSlash(file), err)
+				}
+			}
 			return nil
 		}
 		name := d.Name()

@@ -91,6 +91,11 @@ func TestWiringRulesOnFixtures(t *testing.T) {
 			wantCheck: 2,
 		},
 		{
+			name:      "subdirectory with its own go.mod is another module and is not scanned",
+			fixture:   "nestedmod",
+			wantCheck: 1,
+		},
+		{
 			name:      "import from a build-constrained file counts toward reachability",
 			fixture:   "buildtags",
 			wantCheck: 2,
