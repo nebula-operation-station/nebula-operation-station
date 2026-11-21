@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
 )
 
 // base is the fixed clock every test reads from; no test uses time.Now.
@@ -368,6 +369,69 @@ func uniqueBinaries(from, to int) []Binary {
 	return bs
 }
 
+// maxBinaryComponentsBytes is the body size of MaxBinaries maximal binaries
+// split into k = ceil(MaxBinaries / MaxComponentBinaries) components, as
+// encodeBody writes it: 303 bytes per component (its empty binaries list
+// included), 322 bytes per binary, a comma between binaries and between
+// components, and the "[]" envelope. The commas add up to 323 per binary
+// minus one per component, which gives 303k + 323·MaxBinaries + 1.
+func maxBinaryComponentsBytes() int {
+	k := (MaxBinaries + MaxComponentBinaries - 1) / MaxComponentBinaries
+	return 303*k + 323*MaxBinaries + 1
+}
+
+// TestPutRejectsMoreBinariesThanTheExportListsPerComponent checks the
+// per-component binary limit. The export drops a component with more than
+// vulnfinding.MaxBinaries binaries, so Put refuses such a read and stores
+// nothing. The limit is per component: a read may hold more binaries in total,
+// as long as no single component goes over.
+func TestPutRejectsMoreBinariesThanTheExportListsPerComponent(t *testing.T) {
+	s, db := openStore(t)
+	ctx := context.Background()
+	component := func(source string, n int) Component {
+		return Component{Source: source, SourceVersion: "3.0.11-1", Binaries: uniqueBinaries(0, n)}
+	}
+	cases := []struct {
+		name    string
+		comps   []Component
+		wantErr error
+	}{
+		{"one binary over the limit in one component", []Component{component("openssl", vulnfinding.MaxBinaries+1)}, ErrLimit},
+		{"far over the limit in one component", []Component{component("openssl", MaxBinaries)}, ErrLimit},
+		{"one over, next to a small component", []Component{component("gnutls", 1), component("openssl", vulnfinding.MaxBinaries+1)}, ErrLimit},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			before := rowCount(t, db)
+			r := testRead("host-cb", true, 1)
+			r.Components = c.comps
+			if _, err := s.Put(ctx, r); !errors.Is(err, c.wantErr) {
+				t.Fatalf("Put err = %v, want %v", err, c.wantErr)
+			}
+			if n := rowCount(t, db); n != before {
+				t.Errorf("rejected read left %d new rows", n-before)
+			}
+		})
+	}
+	t.Run("exactly the limit in one component is stored", func(t *testing.T) {
+		r := testRead("host-cb", true, 2)
+		r.Components = []Component{component("openssl", vulnfinding.MaxBinaries)}
+		id := mustPut(t, s, r)
+		got, err := s.Get(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := len(got.Components[0].Binaries); n != vulnfinding.MaxBinaries {
+			t.Errorf("read back %d binaries, want %d", n, vulnfinding.MaxBinaries)
+		}
+	})
+	t.Run("two components at the limit make a larger total and are stored", func(t *testing.T) {
+		r := testRead("host-cb", true, 3)
+		r.Components = []Component{component("openssl", vulnfinding.MaxBinaries), component("gnutls", vulnfinding.MaxBinaries)}
+		mustPut(t, s, r)
+	})
+}
+
 // TestWorstCaseReadsFitEveryLimit stores the largest reads the limits allow
 // and checks the exact body size, so the derivation of MaxBodyBytes is tested
 // against real bytes, not only against the constant.
@@ -376,10 +440,6 @@ func TestWorstCaseReadsFitEveryLimit(t *testing.T) {
 	// component 303 + binary 322 = 625 bytes; MaxComponents of them joined
 	// by commas inside the "[]" envelope.
 	const perComponent = 303 + 322
-	// One source package with MaxBinaries binaries at maximum length:
-	// component 303 (its empty binaries list included), each binary 322,
-	// commas between binaries, inside the envelope.
-	const perBinary = 322
 
 	cases := []struct {
 		name      string
@@ -392,20 +452,30 @@ func TestWorstCaseReadsFitEveryLimit(t *testing.T) {
 			MaxComponents*perComponent + (MaxComponents - 1) + 2,
 		},
 		{
-			"one component with MaxBinaries maximal-length binaries",
+			"MaxBinaries maximal-length binaries in components of MaxComponentBinaries",
 			func() []Component {
-				bs := make([]Binary, MaxBinaries)
-				for i := range bs {
-					// 128 distinct digits; a digit is a valid first character.
-					bs[i] = Binary{Name: fmt.Sprintf("%0128d", i), Version: "v" + strings.Repeat("v", maxVersionBytes-1), Arch: strings.Repeat("a", maxArchBytes)}
+				// Every component is full (MaxComponentBinaries binaries) but the
+				// last, so the read holds MaxBinaries binaries in total.
+				var out []Component
+				for i := 0; i < MaxBinaries; i += MaxComponentBinaries {
+					n := min(MaxComponentBinaries, MaxBinaries-i)
+					bs := make([]Binary, n)
+					for j := range bs {
+						// 128 distinct digits; a digit is a valid first character.
+						bs[j] = Binary{Name: fmt.Sprintf("%0128d", i+j), Version: "v" + strings.Repeat("v", maxVersionBytes-1), Arch: strings.Repeat("a", maxArchBytes)}
+					}
+					out = append(out, Component{
+						Source:        fmt.Sprintf("%0128d", len(out)),
+						SourceVersion: "v" + strings.Repeat("v", maxVersionBytes-1),
+						Binaries:      bs,
+					})
 				}
-				return []Component{{
-					Source:        "s" + strings.Repeat("s", maxNameBytes-1),
-					SourceVersion: "v" + strings.Repeat("v", maxVersionBytes-1),
-					Binaries:      bs,
-				}}
+				return out
 			},
-			303 + MaxBinaries*perBinary + (MaxBinaries - 1) + 2,
+			// k components of 303 bytes each (the empty-list envelope), MaxBinaries
+			// binaries of perBinary bytes, commas between binaries (MaxBinaries
+			// minus k) and between components (k-1), and the "[]" envelope.
+			maxBinaryComponentsBytes(),
 		},
 	}
 	for _, c := range cases {
@@ -596,6 +666,49 @@ func TestPutAcceptsBoundaryValues(t *testing.T) {
 	}
 }
 
+// TestPutRefusesReadTimeFarInTheFuture checks the upper bound of ReadAt. A read
+// stamped more than MaxReadSkew after the store's clock would stay the newest
+// read of its host, and so protected, for as long as the clock stays behind it.
+// Put refuses it; a read at the bound or in the past is accepted.
+func TestPutRefusesReadTimeFarInTheFuture(t *testing.T) {
+	c := useClock(t)
+	now := c.t
+	cases := []struct {
+		name    string
+		readAt  time.Time
+		wantErr bool
+	}{
+		{"now", now, false},
+		{"in the past", now.Add(-time.Hour), false},
+		{"exactly MaxReadSkew ahead", now.Add(MaxReadSkew), false},
+		{"one second over MaxReadSkew", now.Add(MaxReadSkew + time.Second), true},
+		{"one year ahead", now.AddDate(1, 0, 0), true},
+	}
+	s, db := openStore(t)
+	ctx := context.Background()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			before := rowCount(t, db)
+			r := testRead("host-future", true, 0)
+			r.ReadAt = tc.readAt
+			_, err := s.Put(ctx, r)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Put err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr && !errors.Is(err, ErrInvalidRead) {
+				t.Errorf("Put err = %v, want ErrInvalidRead", err)
+			}
+			want := before
+			if !tc.wantErr {
+				want++
+			}
+			if n := rowCount(t, db); n != want {
+				t.Errorf("rows = %d, want %d", n, want)
+			}
+		})
+	}
+}
+
 func TestBodySizeCheckRejectsAboveLimit(t *testing.T) {
 	if err := checkBodySize(MaxBodyBytes); err != nil {
 		t.Errorf("body at limit refused: %v", err)
@@ -707,9 +820,12 @@ func TestLatestAllReturnsOneHeaderPerHost(t *testing.T) {
 	mustPut(t, s, testRead("host-b", false, 1))
 	wantB := mustPut(t, s, testRead("host-b", true, 3))
 	mustPut(t, s, testRead("host-b", true, 2))
-	got, err := s.LatestAll(ctx)
+	got, truncated, err := s.LatestAll(ctx)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if truncated {
+		t.Error("truncated = true for two hosts")
 	}
 	if len(got) != 2 {
 		t.Fatalf("LatestAll returned %d reads, want 2", len(got))
@@ -722,6 +838,75 @@ func TestLatestAllReturnsOneHeaderPerHost(t *testing.T) {
 		if r.Components != nil {
 			t.Errorf("LatestAll read %d carries components; headers only", r.ID)
 		}
+	}
+}
+
+// insertHostReads stores one read for each of n hosts, host-00000 upwards, in
+// one transaction. It writes rows directly, so a test with thousands of hosts
+// stays fast; the body is the empty list, which LatestAll does not decode.
+func insertHostReads(t *testing.T, db *sql.DB, n int) {
+	t.Helper()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	stmt, err := tx.Prepare(`INSERT INTO vuln_inventory_reads (host_id, execution_id, read_at, complete, reason,
+		dropped, ecosystem, kernel_release, kernel_state, kernel_source, kernel_version, binaries, sources, body)
+		VALUES (?, 'exec-1', ?, 1, '', 0, '', '', '', '', '', 0, 0, x'5b5d')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stmt.Close()
+	for i := range n {
+		if _, err := stmt.Exec(fmt.Sprintf("host-%05d", i), base.Unix()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestLatestAllStopsAtMaxLatestAllHosts checks the result limit. A store with
+// more hosts than the limit returns the first MaxLatestAllHosts in host-ID order
+// and says the result was truncated, so a caller cannot take a partial list for
+// the whole fleet.
+func TestLatestAllStopsAtMaxLatestAllHosts(t *testing.T) {
+	s, db := openStore(t)
+	insertHostReads(t, db, MaxLatestAllHosts+1)
+	got, truncated, err := s.LatestAll(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !truncated {
+		t.Error("truncated = false with MaxLatestAllHosts+1 hosts")
+	}
+	if len(got) != MaxLatestAllHosts {
+		t.Fatalf("LatestAll returned %d reads, want %d", len(got), MaxLatestAllHosts)
+	}
+	if first := got[0].HostID; first != "host-00000" {
+		t.Errorf("first host = %s, want host-00000", first)
+	}
+	if last, want := got[len(got)-1].HostID, fmt.Sprintf("host-%05d", MaxLatestAllHosts-1); last != want {
+		t.Errorf("last host = %s, want %s", last, want)
+	}
+}
+
+// TestLatestAllAtTheLimitIsNotTruncated checks that exactly MaxLatestAllHosts
+// hosts are all returned and not reported as truncated.
+func TestLatestAllAtTheLimitIsNotTruncated(t *testing.T) {
+	s, db := openStore(t)
+	insertHostReads(t, db, MaxLatestAllHosts)
+	got, truncated, err := s.LatestAll(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if truncated {
+		t.Error("truncated = true with exactly MaxLatestAllHosts hosts")
+	}
+	if len(got) != MaxLatestAllHosts {
+		t.Errorf("LatestAll returned %d reads, want %d", len(got), MaxLatestAllHosts)
 	}
 }
 
@@ -787,6 +972,7 @@ func TestReadQueriesUseIndexesWithoutSorting(t *testing.T) {
 		{"latest", latestQuery, []any{"host-a"}, "vuln_inventory_reads_host_read"},
 		{"last complete", lastCompleteQuery, []any{"host-a"}, "vuln_inventory_reads_host_complete"},
 		{"latest all: per-host subquery", latestAllQuery, nil, "vuln_inventory_reads_host_read"},
+		{"latest all: limited host list", latestAllLimitedQuery, []any{MaxLatestAllHosts + 1}, "vuln_inventory_reads_host_read"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -813,7 +999,7 @@ func TestLatestAllAgreesWithLatestPerHost(t *testing.T) {
 	mustPut(t, s, testRead("host-a", true, 2))
 	mustPut(t, s, testRead("host-b", true, 1))
 	mustPut(t, s, testRead("host-b", false, 1))
-	got, err := s.LatestAll(ctx)
+	got, _, err := s.LatestAll(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1052,6 +1238,104 @@ func TestMultiRowDeleteIsRefusedAsAWhole(t *testing.T) {
 	}
 	if n := rowCount(t, db); n != before {
 		t.Errorf("rows = %d after refused DELETE, want %d", n, before)
+	}
+}
+
+// ruleCase is one read a delete-rule test tries to delete. protected says
+// whether the rule must refuse the DELETE and keep the read.
+type ruleCase struct {
+	name      string
+	id        int64
+	protected bool
+}
+
+// checkDeleteRule runs a DELETE of each case's read and checks the outcome. The
+// cases are chosen so that a DELETE of an unprotected read never changes which
+// reads are protected, so they can share one store.
+func checkDeleteRule(t *testing.T, s *Store, db *sql.DB, cases []ruleCase) {
+	t.Helper()
+	ctx := context.Background()
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := db.Exec(`DELETE FROM vuln_inventory_reads WHERE id = ?`, c.id)
+			if refused := err != nil; refused != c.protected {
+				t.Fatalf("DELETE of read %d: refused = %v, want %v (err %v)", c.id, refused, c.protected, err)
+			}
+			if _, err := s.Get(ctx, c.id); (err == nil) != c.protected {
+				t.Errorf("read %d present = %v after DELETE, want %v", c.id, err == nil, c.protected)
+			}
+		})
+	}
+}
+
+// TestDeleteRuleFollowsReadTimeNotInsertOrder inserts reads out of read_at
+// order, so the highest id is not the newest read. A rule that picks "newest"
+// by id alone would protect the wrong read.
+func TestDeleteRuleFollowsReadTimeNotInsertOrder(t *testing.T) {
+	s, db := openStore(t)
+	newestByTime := mustPut(t, s, testRead("host-o", false, 5)) // lowest id, newest read_at
+	lastComplete := mustPut(t, s, testRead("host-o", true, 1))  // only complete read
+	middle := mustPut(t, s, testRead("host-o", false, 3))       // highest id, middle read_at
+	checkDeleteRule(t, s, db, []ruleCase{
+		{"newest by read_at with the lowest id", newestByTime, true},
+		{"last complete with the middle id", lastComplete, true},
+		{"middle read_at with the highest id", middle, false},
+	})
+}
+
+// TestLastCompleteFollowsReadTimeNotInsertOrder inserts two complete reads with
+// the higher id on the older read. The last complete read is the newer one.
+func TestLastCompleteFollowsReadTimeNotInsertOrder(t *testing.T) {
+	s, db := openStore(t)
+	lastComplete := mustPut(t, s, testRead("host-l", true, 5))  // complete, newer, lower id
+	olderComplete := mustPut(t, s, testRead("host-l", true, 2)) // complete, older, higher id
+	newest := mustPut(t, s, testRead("host-l", false, 9))       // incomplete, newest read_at
+	checkDeleteRule(t, s, db, []ruleCase{
+		{"newer complete read with the lower id", lastComplete, true},
+		{"older complete read with the higher id", olderComplete, false},
+		{"newest incomplete read", newest, true},
+	})
+}
+
+// TestDeleteRuleBreaksEqualReadTimeByID gives reads the same read_at. The
+// newest read is the highest id, and so is the last complete read, the same
+// order the read queries use (read_at DESC, id DESC).
+func TestDeleteRuleBreaksEqualReadTimeByID(t *testing.T) {
+	s, db := openStore(t)
+	// host-e: two complete reads and one incomplete, all at read_at 4.
+	olderComplete := mustPut(t, s, testRead("host-e", true, 4)) // id 1
+	lastComplete := mustPut(t, s, testRead("host-e", true, 4))  // id 2, last complete by id
+	newestE := mustPut(t, s, testRead("host-e", false, 4))      // id 3, newest by id
+	// host-f: two incomplete reads at read_at 4; only the higher id is newest.
+	olderIncomplete := mustPut(t, s, testRead("host-f", false, 4)) // id 4
+	newestF := mustPut(t, s, testRead("host-f", false, 4))         // id 5, newest by id
+	checkDeleteRule(t, s, db, []ruleCase{
+		{"newest at equal read_at, highest id", newestE, true},
+		{"last complete at equal read_at, highest id", lastComplete, true},
+		{"complete at equal read_at, lower id", olderComplete, false},
+		{"newest incomplete at equal read_at", newestF, true},
+		{"incomplete at equal read_at, lower id", olderIncomplete, false},
+	})
+}
+
+// TestMultiRowDeleteRollsBackEarlierRowsOfTheStatement checks what the rule
+// does for a DELETE that removes an unprotected row before it reaches the
+// newest one. The BEFORE DELETE check runs per row, so the earlier row is
+// already gone when the newest row is checked; RAISE(ABORT) then rolls the
+// whole statement back, so the earlier row must still be there.
+func TestMultiRowDeleteRollsBackEarlierRowsOfTheStatement(t *testing.T) {
+	s, db := openStore(t)
+	deletable := mustPut(t, s, testRead("host-x", false, 1)) // lower id, not protected
+	mustPut(t, s, testRead("host-x", false, 2))              // newest, protected
+	before := rowCount(t, db)
+	if _, err := db.Exec(`DELETE FROM vuln_inventory_reads WHERE host_id = 'host-x'`); err == nil {
+		t.Fatal("DELETE of every read of a host succeeded")
+	}
+	if n := rowCount(t, db); n != before {
+		t.Errorf("rows = %d after refused DELETE, want %d", n, before)
+	}
+	if _, err := s.Get(context.Background(), deletable); err != nil {
+		t.Errorf("unprotected read %d lost after refused DELETE: %v", deletable, err)
 	}
 }
 
