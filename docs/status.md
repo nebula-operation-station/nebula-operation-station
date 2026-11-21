@@ -23,29 +23,35 @@ the decisions, and [docs/implementation](implementation/) the per-area plans.
 | Integrity monitoring | [0015](adr/0015-integrity-monitoring.md) | accepted; libraries merged; **amendment 2026-11-21: I1 status and I2 scan chain wiring decided**, `fim.scan` as a durable job (#805, paper #783); chain fi imported (0/15) |
 | Ops agent | [0016](adr/0016-ops-agent.md) | accepted; implementation chain complete (27/27); finding and listener sources merged (#780) but `cmd/nebula-server/ops.go:237` still passes `opsNoFindings` – connecting them is ticket uh02; a run without work reports its status, exit codes pinned for systemd (#807); note size limit aligned, pinned CA tested over real TLS (#809); install hint fixed (#811); Ops tab still not set in nebula-server |
 
-### Landed since the last update (41 PRs, 2026-11-20 19:00 to 2026-11-21 19:30)
+### Landed since the last update (42 PRs, 2026-11-20 19:00 to 2026-11-21 19:00)
 
-- **Maintainer decisions of 2026-11-21 (#805):** PV-03 image preparation, network device read
-  chain, assertion binding for vuln decisions, integrity wiring. Decision papers: #771, #772,
-  #775, #783, #784, #790. 46 implementation tickets imported (chains fi, nx, pi and others).
+- **Maintainer decisions (#805):** PV-03 image preparation, network device read chain, assertion
+  binding for vuln decisions, integrity wiring; inventory decisions E1–E4 (#776). Decision
+  papers: #771, #772, #775, #783, #784, #790.
 - **Vulnerability inventory (chain iv):** store (#766), parse and store every
   `package.list_installed` result (#777), immutable snapshots (#779), limits and delete-rule
   tests (#793), export served from the inventory (#792), inventory decisions recorded (#776);
-  SQLITE_BUSY flake (#791); osv-ubuntu over 4 GiB (#768).
-- **Wiring:** one-step enrollment (#782, #785); PVE inventory retention (#786); ops finding and
-  listener sources (#780); wiring guard that fails on internal packages without a production
-  importer (#788); README and implementation notes say what is wired (#789).
-- **Security fixes:** read grants with network device targets (#795, #813).
+  SQLITE_BUSY flake (#791); osv-ubuntu archive caps from the measured file (#768).
+- **Wiring:** one-step enrollment (#782, #785); PVE inventory retention (#786) and collector
+  call timeout (#794); netdev collector under its own role (#796); ops finding and listener
+  sources (#780); wiring guard that fails on internal packages without a production importer
+  (#788); README and implementation notes say what is wired (#789).
+- **Image preparation and release:** release stages the image catalog and its signature (#816).
+- **Ops agent (ADR 0016):** open-findings count (#808), empty-run status (#807), client limits
+  and pinned CA (#809), install hints (#811), candidate label (#781).
+- **Security fixes:** read grants with network device targets (#795), device read grants need
+  CLI approval in every mode (#813).
 - **End-to-end and integration tests:** write operation from the HTTP form to the host script
   (#797), backup and restore (#800), read-only API token through runServer (#802), largest run
-  results over the real gRPC limits (#801), traffic map (#798), ops agent over real HTTP (#770);
-  read actions through the real hostrun classifier (#773, #799) and parser fixes (#774, #778).
-- **Ops agent:** #807, #809, #811.
+  results over the real gRPC limits (#801), traffic map (#798), ops agent over real HTTP (#770).
+- **Hostrun classifier and parser fixes:** read actions through the real classifier (#773,
+  #799), docker reads through hostrun (#760), journal lines with a bad entry (#774), heredoc
+  bodies in help text (#778).
 
 ### Landed in the last 7 days
 
 Merged per day: 31 (11-13), 25 (11-16), 46 (11-17), about 45 (11-18), about 30 (11-19), 31
-(11-20), 41 (11-21). Main themes: vulnerability agent and package inventory (ADR 0011); ops agent
+(11-20), 42 (11-21). Main themes: vulnerability agent and package inventory (ADR 0011); ops agent
 (ADR 0016) complete and partly wired; wiring of one-step enrollment; maintainer decisions for the
 remaining wiring gaps (ADR 0008, 0010, 0011, 0015); end-to-end and hostrun classifier tests.
 
@@ -73,24 +79,25 @@ Not re-checked in this pass: release 0.9, approval ergonomics, integrity monitor
 
 | Chain | Topic | Progress | Running now |
 | --- | --- | --- | --- |
-| iv | Package inventory for vulnerability management | 7/12 | iv06f (classifier against the inventory, PR #815, HIGH finding being fixed, prio 1); queued iv08–iv10, iv12, follow-ups iv03g, iv05g |
-| ug | End-to-end tests through runServer | 8/12 | ug07f (#810), ug13f2 (#804), ug14f (#806); queued ug12f (#803), ug10g |
-| uh | Ops agent live (sources, docs, deploy sandbox) | 5/11 | uh11; queued uh02 (connect stored findings), uh03f (#787), uh05, uh07, uh10 |
+| iv | Package inventory for vulnerability management | 7/12 | iv06 classifier against the inventory (#815, HIGH finding being fixed, prio 1); queued iv08–iv10, iv12; follow-ups iv03g, iv05g |
+| va | Security key for vulnerability decisions (ADR 0011 Q4) | 0/6 | queued; decision paper merged (#771) |
+| ug | End-to-end tests through runServer | 8/12 | fix round: ug07f (#810), ug13f2 (#804), ug14f (#806); queued ug12f (#803); ug10 merged (#801) |
+| uh | Ops agent live (sources, docs, deploy sandbox) | 5/11 | fix round: uh11; queued uh02 (connect stored findings), uh03f (#787), uh05, uh07, uh10 |
 | uf | Wiring follow-ups and decision papers | 9/16 | queued uf01 (feature registry), uf07–uf11, uf17, follow-ups uf13g, uf15g, uf16g |
 | ue | Read and control actions through the real hostrun classifier | 6/9 | ue06h; queued ue07–ue09 |
 | nx | Network device read chain (ADR 0010, decided 2026-11-21) | 1/11 | nx07f blocked (#812), nx08f queued (#814), nx01, nx03–nx06, nx09–nx11 queued |
-| pi | Image preparation wiring (ADR 0008 PV-03) | 1/14 | queued pi01–pi14 (wait for ug12f) |
-| fi | Integrity wiring (ADR 0015 I1/I2) | 0/15 | queued (wait for ug12f and iv/ue follow-ups) |
+| pi | Image preparation wiring (ADR 0008 PV-03) | 1/14 | template preparation; pi03 merged (#816); pi01–pi14 queued (wait for ug12f) |
+| fi | Integrity check wiring (ADR 0015 I1/I2) | 0/15 | queued (wait for ug12f and iv/ue follow-ups) |
 | vf | Feed fixes from the live run | 3/4 | vf04 queued ("not configured" instead of "stale") |
 
 ## Next
 
-- **iv chain (critical path):** classifier fix iv06f → maximum read age (iv08) → host tab (iv09)
-  → end-to-end test from script output to a finding (iv10); image inventories (iv12).
+- **iv chain (critical path):** classifier fix iv06 (#815) → maximum read age (iv08) → host tab
+  (iv09) → end-to-end test from script output to a finding (iv10); image inventories (iv12).
 - **Ops agent live:** connect the stored findings to the projection (uh02), then uh05 and the
   admin guide section 10.6 (uh10).
-- **Decision implementation:** nx (device read chain), pi (image preparation), fi (integrity);
-  most of them wait for ug12f and the feature registry uf01.
+- **Decision implementation:** nx (device read chain), pi (template preparation), fi (integrity
+  check), va (security key); pi and fi wait for ug12f and the feature registry uf01.
 - **Release 0.9 Beta:** cut beta.2 after the iv chain and vf04.
 
 ## Blocked / needs maintainer
@@ -98,12 +105,13 @@ Not re-checked in this pass: release 0.9, approval ergonomics, integrity monitor
 - **nx07f (#812):** blocked – the local runner's permission layer refused `make test-deploy` and
   `make vuln` (govulncheck); everything else passes. Needs a run with permission or CI, then a
   review of the design choice (superseded metadata removed without a validity check).
-- **#815 (iv06):** HIGH finding (kernel findings measured only at the newest read); fix iv06f
+- **#815 (iv06):** HIGH finding (kernel findings measured only at the newest read); fix round
   running. No merge with HIGH.
-- **Vulnerability inventory, still open questions:** precedence of E1 over D5 and snapshot
+- **Vulnerability inventory, open questions Q1–Q5:** precedence of E1 over D5 and snapshot
   pinning (Q1), E1/E2 reading (Q2), classifier rule for image subjects without `image.packages`
   (Q3), image freshness (Q4) and lease digest parameter (Q5) – see
-  [vuln-inventory-decisions.md](implementation/vuln-inventory-decisions.md).
+  [vuln-inventory-decisions.md](implementation/vuln-inventory-decisions.md). E1–E4 are decided
+  (#776).
 - **ADR 0009 (traffic map):** still "proposed".
 - **Dependabot:** #647, #648 wait for review.
 - **Wiring gaps:** network device pages and read path, attack path computation, Ops tab and
@@ -111,10 +119,10 @@ Not re-checked in this pass: release 0.9, approval ergonomics, integrity monitor
 
 ## Changelog
 
-- **2026-11-21 (evening):** 41 PRs; maintainer decisions for PV-03, device read chain, assertion
-  binding and integrity wiring (#805), 46 tickets imported; package inventory stored and
-  exported (iv 7/12); one-step enrollment dialog wired; device read grant security fixes (#795,
-  #813); many end-to-end tests.
+- **2026-11-21 (evening):** 42 PRs; maintainer decisions for PV-03, device read chain, assertion
+  binding and integrity wiring (#805), inventory decisions E1–E4 (#776); package inventory stored
+  and exported (iv 7/12); one-step enrollment dialog wired; device read grant security fixes
+  (#795, #813); many end-to-end tests.
 - **2026-11-21:** wiring re-check of README, status and implementation notes (#789); decision
   papers uf04, uf13, uf14.
 - **2026-11-20 (evening):** 31 PRs; first live run of the vuln agent: four integration bugs fixed
