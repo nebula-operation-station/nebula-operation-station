@@ -12,6 +12,8 @@ import (
 	"sort"
 	"time"
 	"unicode/utf8"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
 )
 
 // Limits. Every one is enforced by Put (or by the read path that decodes what
@@ -21,6 +23,10 @@ const (
 	// MaxBinaries bounds the binary packages of one read (ADR 0011 D3:
 	// osdebian.MaxPackages, 20,000 packages per host).
 	MaxBinaries = 20000
+	// MaxComponentBinaries bounds the binaries of one component. It is the
+	// export's limit (vulnfinding.MaxBinaries): the export drops a component
+	// with more binaries, so Put refuses to store one.
+	MaxComponentBinaries = vulnfinding.MaxBinaries
 	// MaxComponents bounds the source packages of one read. A source package
 	// has at least one binary in practice, so MaxBinaries also bounds it.
 	MaxComponents = MaxBinaries
@@ -226,6 +232,9 @@ func canonicalComponents(comps []Component) ([]bodyComponent, int, error) {
 			return nil, 0, fmt.Errorf("%w: duplicate component %s", ErrInvalidRead, c.Source)
 		}
 		seen[key] = true
+		if err := checkBodyCount("binaries in one component", len(c.Binaries), MaxComponentBinaries); err != nil {
+			return nil, 0, err
+		}
 		binaries += len(c.Binaries)
 		if err := checkBodyCount("binaries", binaries, MaxBinaries); err != nil {
 			return nil, 0, err

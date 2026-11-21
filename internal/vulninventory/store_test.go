@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
 )
 
 // base is the fixed clock every test reads from; no test uses time.Now.
@@ -368,6 +369,69 @@ func uniqueBinaries(from, to int) []Binary {
 	return bs
 }
 
+// maxBinaryComponentsBytes is the body size of MaxBinaries maximal binaries
+// split into k = ceil(MaxBinaries / MaxComponentBinaries) components, as
+// encodeBody writes it: 303 bytes per component (its empty binaries list
+// included), 322 bytes per binary, a comma between binaries and between
+// components, and the "[]" envelope. The commas add up to 323 per binary
+// minus one per component, which gives 303k + 323·MaxBinaries + 1.
+func maxBinaryComponentsBytes() int {
+	k := (MaxBinaries + MaxComponentBinaries - 1) / MaxComponentBinaries
+	return 303*k + 323*MaxBinaries + 1
+}
+
+// TestPutRejectsMoreBinariesThanTheExportListsPerComponent checks the
+// per-component binary limit. The export drops a component with more than
+// vulnfinding.MaxBinaries binaries, so Put refuses such a read and stores
+// nothing. The limit is per component: a read may hold more binaries in total,
+// as long as no single component goes over.
+func TestPutRejectsMoreBinariesThanTheExportListsPerComponent(t *testing.T) {
+	s, db := openStore(t)
+	ctx := context.Background()
+	component := func(source string, n int) Component {
+		return Component{Source: source, SourceVersion: "3.0.11-1", Binaries: uniqueBinaries(0, n)}
+	}
+	cases := []struct {
+		name    string
+		comps   []Component
+		wantErr error
+	}{
+		{"one binary over the limit in one component", []Component{component("openssl", vulnfinding.MaxBinaries+1)}, ErrLimit},
+		{"far over the limit in one component", []Component{component("openssl", MaxBinaries)}, ErrLimit},
+		{"one over, next to a small component", []Component{component("gnutls", 1), component("openssl", vulnfinding.MaxBinaries+1)}, ErrLimit},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			before := rowCount(t, db)
+			r := testRead("host-cb", true, 1)
+			r.Components = c.comps
+			if _, err := s.Put(ctx, r); !errors.Is(err, c.wantErr) {
+				t.Fatalf("Put err = %v, want %v", err, c.wantErr)
+			}
+			if n := rowCount(t, db); n != before {
+				t.Errorf("rejected read left %d new rows", n-before)
+			}
+		})
+	}
+	t.Run("exactly the limit in one component is stored", func(t *testing.T) {
+		r := testRead("host-cb", true, 2)
+		r.Components = []Component{component("openssl", vulnfinding.MaxBinaries)}
+		id := mustPut(t, s, r)
+		got, err := s.Get(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n := len(got.Components[0].Binaries); n != vulnfinding.MaxBinaries {
+			t.Errorf("read back %d binaries, want %d", n, vulnfinding.MaxBinaries)
+		}
+	})
+	t.Run("two components at the limit make a larger total and are stored", func(t *testing.T) {
+		r := testRead("host-cb", true, 3)
+		r.Components = []Component{component("openssl", vulnfinding.MaxBinaries), component("gnutls", vulnfinding.MaxBinaries)}
+		mustPut(t, s, r)
+	})
+}
+
 // TestWorstCaseReadsFitEveryLimit stores the largest reads the limits allow
 // and checks the exact body size, so the derivation of MaxBodyBytes is tested
 // against real bytes, not only against the constant.
@@ -392,20 +456,30 @@ func TestWorstCaseReadsFitEveryLimit(t *testing.T) {
 			MaxComponents*perComponent + (MaxComponents - 1) + 2,
 		},
 		{
-			"one component with MaxBinaries maximal-length binaries",
+			"MaxBinaries maximal-length binaries in components of MaxComponentBinaries",
 			func() []Component {
-				bs := make([]Binary, MaxBinaries)
-				for i := range bs {
-					// 128 distinct digits; a digit is a valid first character.
-					bs[i] = Binary{Name: fmt.Sprintf("%0128d", i), Version: "v" + strings.Repeat("v", maxVersionBytes-1), Arch: strings.Repeat("a", maxArchBytes)}
+				// Every component is full (MaxComponentBinaries binaries) but the
+				// last, so the read holds MaxBinaries binaries in total.
+				var out []Component
+				for i := 0; i < MaxBinaries; i += MaxComponentBinaries {
+					n := min(MaxComponentBinaries, MaxBinaries-i)
+					bs := make([]Binary, n)
+					for j := range bs {
+						// 128 distinct digits; a digit is a valid first character.
+						bs[j] = Binary{Name: fmt.Sprintf("%0128d", i+j), Version: "v" + strings.Repeat("v", maxVersionBytes-1), Arch: strings.Repeat("a", maxArchBytes)}
+					}
+					out = append(out, Component{
+						Source:        fmt.Sprintf("%0128d", len(out)),
+						SourceVersion: "v" + strings.Repeat("v", maxVersionBytes-1),
+						Binaries:      bs,
+					})
 				}
-				return []Component{{
-					Source:        "s" + strings.Repeat("s", maxNameBytes-1),
-					SourceVersion: "v" + strings.Repeat("v", maxVersionBytes-1),
-					Binaries:      bs,
-				}}
+				return out
 			},
-			303 + MaxBinaries*perBinary + (MaxBinaries - 1) + 2,
+			// k components of 303 bytes each (the empty-list envelope), MaxBinaries
+			// binaries of perBinary bytes, commas between binaries (MaxBinaries
+			// minus k) and between components (k-1), and the "[]" envelope.
+			maxBinaryComponentsBytes(),
 		},
 	}
 	for _, c := range cases {
