@@ -16,6 +16,12 @@ import (
 // release data and signed by a release root through the same chain as the
 // release manifest (E15). The catalog's format member separates it from
 // the other documents signed in the release namespace.
+//
+// Staged layout (PV-03e, catalog_stage.go): the release staging directory
+// holds image-catalog.json (the canonical catalog) and
+// image-catalog.json.sig (its detached signature, namespace
+// "nebula-release", by a release root). The catalog is not listed in
+// release-manifest.json. VerifyCatalog is the only admission check.
 
 // CatalogFormat is the "format" of the image catalog.
 const CatalogFormat = "nebula-image-catalog-v1"

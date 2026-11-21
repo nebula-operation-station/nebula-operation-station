@@ -2865,6 +2865,139 @@ bundle_run "$c"
 
 rm -rf -- "$bundle_base"
 
+# --- Ops agent (--ops-agent, --remove-ops-agent) ---------------------------
+# These cases run the real install and removal blocks of install.sh in a
+# temporary tree, with stubs for useradd, getent and systemctl and an
+# install(1) that drops the root ownership flags (no root needed). The tree
+# is laid out like the release tarball (the block finds its files through
+# BASH_SOURCE), and the absolute system paths are redirected into it.
+ops_base=$(mktemp -d)
+ops_result() {
+  if [[ "$2" -eq 0 ]]; then
+    echo "ok   $1"
+    pass=$((pass + 1))
+  else
+    echo "FAIL $1"
+    fail=$((fail + 1))
+  fi
+}
+ops_install_block=$(sed -n '/^ *# begin: ops agent install$/,/^ *# end: ops agent install$/p' "$install_sh")
+ops_remove_block=$(sed -n '/^ *# begin: ops agent removal$/,/^ *# end: ops agent removal$/p' "$install_sh")
+if [[ -z "$ops_install_block" || -z "$ops_remove_block" ]]; then
+  echo "FAIL install.sh has no ops agent install or removal block"
+  fail=$((fail + 1))
+fi
+
+# ops_fill <root>: the tarball files the install block needs.
+ops_fill() {
+  local root="$1" unit
+  mkdir -p "$root/deploy/systemd"
+  printf 'fixture binary\n' > "$root/nebula-ops-agent"
+  for unit in nebula-ops-agent.service nebula-ops-agent.timer nebula-ops-agent.path; do
+    cp -- "${script_dir}/systemd/${unit}" "$root/deploy/systemd/${unit}"
+  done
+}
+
+# ops_run <root> <install|remove>: runs the real block in <root>. Sets ops_rc
+# and ops_out. The calls of the stubs go to <root>/calls.log.
+ops_run() {
+  local root="$1" which="$2" stubdir="$1/bin" block
+  mkdir -p "$stubdir" "$root/deploy" "$root/unit" "$root/usr/bin"
+  cat > "$stubdir/install" <<'STUB'
+#!/usr/bin/env bash
+printf 'install %s\n' "$*" >> "$OPS_LOG"
+args=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -o|-g) shift 2 ;;
+    *) args+=("$1"); shift ;;
+  esac
+done
+exec /usr/bin/install "${args[@]}"
+STUB
+  cat > "$stubdir/useradd" <<'STUB'
+#!/usr/bin/env bash
+printf 'useradd %s\n' "$*" >> "$OPS_LOG"
+touch "$OPS_USERS"
+STUB
+  cat > "$stubdir/getent" <<'STUB'
+#!/usr/bin/env bash
+printf 'getent %s\n' "$*" >> "$OPS_LOG"
+[[ "$1" == passwd && "$2" == nebula-ops-agent && -e "$OPS_USERS" ]]
+STUB
+  cat > "$stubdir/systemctl" <<'STUB'
+#!/usr/bin/env bash
+printf 'systemctl %s\n' "$*" >> "$OPS_LOG"
+STUB
+  chmod 0755 "$stubdir"/*
+  if [[ "$which" == install ]]; then
+    block="$ops_install_block"
+  else
+    block="$ops_remove_block"
+  fi
+  {
+    printf 'set -euo pipefail\nops_unit_dir=%s\n' "$root/unit"
+    # The removal block is guarded by the option flag that the option parser sets.
+    [[ "$which" == install ]] || printf 'remove_ops_agent=1\n'
+    sed -e "s|/etc/nebula-ops-agent|${root}/etc|g" \
+      -e "s|/var/lib/nebula-ops-agent|${root}/var|g" \
+      -e "s|/usr/bin/nebula-ops-agent|${root}/usr/bin/nebula-ops-agent|g" <<< "$block"
+  } > "$root/deploy/run-${which}.sh"
+  ops_out=$(env PATH="$stubdir:$PATH" OPS_LOG="$root/calls.log" OPS_USERS="$root/users" \
+    bash "$root/deploy/run-${which}.sh" 2>&1)
+  ops_rc=$?
+}
+
+# Install: user, modes, skeleton, three units installed and none enabled.
+c="${ops_base}/install"
+ops_fill "$c"
+ops_run "$c" install
+[[ "$ops_rc" -eq 0 ]]; ops_result "--ops-agent block runs in a fresh tree" $?
+grep -q '^useradd --system --home-dir ' "$c/calls.log"
+ops_result "--ops-agent creates the nebula-ops-agent user once" $?
+[[ "$(stat -c %a "$c/var")" == 700 ]]; ops_result "state directory is 0700" $?
+[[ "$(stat -c %a "$c/etc")" == 750 ]]; ops_result "config directory is 0750" $?
+[[ -f "$c/etc/config.json" && "$(stat -c %a "$c/etc/config.json")" == 640 ]]
+ops_result "config skeleton is a regular file, mode 0640" $?
+units_ok=0
+for unit in nebula-ops-agent.service nebula-ops-agent.timer nebula-ops-agent.path; do
+  cmp -s "$c/deploy/systemd/$unit" "$c/unit/$unit" || units_ok=1
+done
+[[ "$units_ok" -eq 0 ]]; ops_result "the three units are installed unchanged" $?
+[[ -x "$c/usr/bin/nebula-ops-agent" ]]; ops_result "the agent binary is installed" $?
+! grep -Eq '^systemctl .*(enable|start|restart)' "$c/calls.log"
+ops_result "--ops-agent enables and starts nothing" $?
+
+# A second run keeps the admin's config.json and does not add a user.
+printf '{"nos_base_url": "http://127.0.0.1:8080"}\n' > "$c/etc/config.json"
+cp -- "$c/etc/config.json" "$c/config.before"
+ops_run "$c" install
+[[ "$ops_rc" -eq 0 ]]; ops_result "second --ops-agent run succeeds" $?
+cmp -s "$c/etc/config.json" "$c/config.before"
+ops_result "second --ops-agent run leaves config.json unchanged" $?
+[[ "$(grep -c '^useradd ' "$c/calls.log")" -eq 1 ]]
+ops_result "second --ops-agent run does not create the user again" $?
+
+# Removal: units and binary go, the configuration, token, state and user stay.
+c="${ops_base}/remove"
+ops_fill "$c"
+ops_run "$c" install
+printf 'token\n' > "$c/etc/token"
+ops_run "$c" remove
+[[ "$ops_rc" -eq 0 ]]; ops_result "--remove-ops-agent block runs" $?
+[[ ! -e "$c/unit/nebula-ops-agent.service" && ! -e "$c/unit/nebula-ops-agent.timer" \
+  && ! -e "$c/unit/nebula-ops-agent.path" ]]
+ops_result "--remove-ops-agent removes the three units" $?
+[[ ! -e "$c/usr/bin/nebula-ops-agent" ]]; ops_result "--remove-ops-agent removes the binary" $?
+grep -q '^systemctl disable --now nebula-ops-agent.timer nebula-ops-agent.path nebula-ops-agent.service$' "$c/calls.log"
+ops_result "--remove-ops-agent disables the units first" $?
+[[ -f "$c/etc/config.json" && -f "$c/etc/token" && -d "$c/var" && -e "$c/users" ]]
+ops_result "--remove-ops-agent keeps config, token, state and user" $?
+! grep -q '^userdel\|^groupdel' "$c/calls.log"
+ops_result "--remove-ops-agent deletes no user or group" $?
+
+rm -rf -- "$ops_base"
+
 echo
 echo "install_test.sh: ${pass} passed, ${fail} failed"
 if [[ "$fail" -gt 0 ]]; then

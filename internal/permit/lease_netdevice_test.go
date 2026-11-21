@@ -245,15 +245,15 @@ func TestRevokeNetDeviceGrantsRevokesEveryLeaseOfTheDevice(t *testing.T) {
 	ahead := cloneNetDeviceDoc(netDeviceDocAt(now, time.Hour))
 	ahead.NetDeviceTargets[0].TrustGeneration = 1 << 40
 	ahead.NetDeviceTargets[0].CredentialVersion = 1 << 50
-	approveReadGrant(t, e, readGrantRaw(t, ahead))
+	approveReadGrantCLI(t, e, readGrantRaw(t, ahead))
 	current := cloneNetDeviceDoc(netDeviceDocAt(now, time.Hour))
 	current.ID = rgID2
 	current.NetDeviceTargets = current.NetDeviceTargets[:1]
-	approveReadGrant(t, e, readGrantRaw(t, current))
+	approveReadGrantCLI(t, e, readGrantRaw(t, current))
 	other := cloneNetDeviceDoc(netDeviceDocAt(now, time.Hour))
 	other.ID = "00000000-0000-4000-8000-0000000000cc"
 	other.NetDeviceTargets = other.NetDeviceTargets[1:]
-	approveReadGrant(t, e, readGrantRaw(t, other))
+	approveReadGrantCLI(t, e, readGrantRaw(t, other))
 	provider := providerDocAt(now, "00000000-0000-4000-8000-0000000000dd", 3)
 	approveReadGrant(t, e, readGrantRaw(t, provider))
 
