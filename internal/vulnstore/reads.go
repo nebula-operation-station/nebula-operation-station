@@ -22,6 +22,11 @@ type ListQuery struct {
 	VulnID string
 	// Subject limits the read to one subject; nil for all.
 	Subject *Subject
+	// ExcludeFixed skips the findings in state fixed (the closed history);
+	// open, accepted_risk and false_positive findings are still returned.
+	// Without it a long fixed history fills the limit and the read is
+	// truncated even when few findings are live.
+	ExcludeFixed bool
 	// Limit is the most findings returned, 1 to MaxListFindings.
 	Limit int
 }
@@ -40,6 +45,10 @@ func (s *Store) List(ctx context.Context, q ListQuery) ([]Finding, bool, error) 
 	if q.Subject != nil {
 		where += ` AND subject = ?`
 		args = append(args, q.Subject.String())
+	}
+	if q.ExcludeFixed {
+		where += ` AND state <> ?`
+		args = append(args, string(StateFixed))
 	}
 	args = append(args, q.Limit+1)
 	fs, err := queryFindings(ctx, s.db, `SELECT `+findingColumns+` FROM vuln_findings WHERE `+where+` ORDER BY finding_key LIMIT ?`, args...)
