@@ -218,8 +218,10 @@ func validateItem(class string, it nosclient.WorkItem) error {
 		}
 		keys := map[string]bool{}
 		for _, c := range g.Candidates {
+			// A candidate without its fixed NOS label gives the model nothing
+			// to choose by (ADR 0016 D4): refuse the item, make no call.
 			if !prompt.ValidCandidateKey(c.Key) || keys[c.Key] || c.HostID != g.Host.ID ||
-				c.Action == "" || !printableASCII(c.Action) {
+				c.Action == "" || !printableASCII(c.Action) || c.Label == "" {
 				return errors.New("fix item candidate")
 			}
 			keys[c.Key] = true

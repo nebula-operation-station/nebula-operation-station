@@ -46,10 +46,13 @@ type LabFinding struct {
 
 // Candidate is one step candidate: an allowlisted action the operator could
 // run on a host. Key is the opaque label the agent quotes back (c1, c2, ...).
+// Label is the fixed NOS label of the action (Label, ADR 0016 D4); a
+// candidate always has one.
 type Candidate struct {
 	Key    string `json:"key"`
 	Action string `json:"action"`
 	HostID string `json:"host_id"`
+	Label  string `json:"label"`
 }
 
 // LabProjection is the projection of one group in class lab (ADR 0016 D4).
@@ -352,6 +355,9 @@ func (p *Projector) candidates(hostID string, subject SubjectKind, fs []Finding)
 		if _, ok := Families(a); !ok || !p.src.Catalog.HasAction(a) {
 			continue // not allowlisted, or not in the catalog: drops out
 		}
+		if _, ok := Label(a); !ok {
+			continue // no fixed label: a candidate without one is refused
+		}
 		actions = append(actions, a)
 	}
 	sort.Strings(actions)
@@ -360,7 +366,8 @@ func (p *Projector) candidates(hostID string, subject SubjectKind, fs []Finding)
 	}
 	out := make([]Candidate, 0, len(actions))
 	for i, a := range actions {
-		out = append(out, Candidate{Key: "c" + strconv.Itoa(i+1), Action: a, HostID: hostID})
+		label, _ := Label(a)
+		out = append(out, Candidate{Key: "c" + strconv.Itoa(i+1), Action: a, HostID: hostID, Label: label})
 	}
 	return out
 }
