@@ -94,6 +94,11 @@ const (
 	// lock on the store's hold clock: it takes no further unit of work once
 	// the lock has been held this long, and commits.
 	maxApplyHold = time.Second
+	// maxDropRows bounds the superseded holds that one DELETE statement
+	// drops. The hold limit is checked between statements, so a statement
+	// that drops a whole transaction's row budget (maxApplyRows) would hold
+	// the lock for its whole duration past maxApplyHold.
+	maxDropRows = 64
 )
 
 // candidate is one requested run closure.
@@ -450,7 +455,7 @@ func (s *Store) applyChunk(ctx context.Context, run runRow, plans []*subjectPlan
 			// dropped in chunks of the rows left in this transaction. A
 			// resumed subject repeats the drop: our own holds carry
 			// run.seq and are never matched.
-			n, more, err := dropSuperseded(ctx, tx, p.subject, run.seq, max(1, budget-writes))
+			n, more, err := dropSuperseded(ctx, tx, p.subject, run.seq, min(maxDropRows, max(1, budget-writes)))
 			writes += max(1, n)
 			if err != nil {
 				return nil, pos, false, err
