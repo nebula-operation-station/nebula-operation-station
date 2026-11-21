@@ -401,3 +401,74 @@ func TestReadGrantActionIDs(t *testing.T) {
 		}
 	}
 }
+
+// netDeviceTargetsOf returns two device targets of one family for the
+// device-target comparison tests.
+func netDeviceTargetsOf() []permit.NetDeviceTarget {
+	return []permit.NetDeviceTarget{
+		{DeviceID: "sw-1", TrustPin: strings.Repeat("ab", 32), TrustGeneration: 1, CredentialVersion: 3, Reads: []string{"cbs_lldp", "cbs_version"}},
+		{DeviceID: "sw-2", TrustPin: strings.Repeat("cd", 32), TrustGeneration: 2, CredentialVersion: 4, Reads: []string{"cbs_version"}},
+	}
+}
+
+// TestSameReadGrantComparesNetDeviceTargets pins that the executor's stored
+// document must carry exactly the proposed device targets: any change of a
+// device, its trust pin, generation, credential version or reads is a
+// mismatch, while reordering devices or reads (canonicalization) is not.
+func TestSameReadGrantComparesNetDeviceTargets(t *testing.T) {
+	base := func() permit.ReadGrantDoc {
+		d := validDoc()
+		d.NetDeviceTargets = netDeviceTargetsOf()
+		return d
+	}
+	for _, tc := range []struct {
+		name  string
+		alter func(*permit.ReadGrantDoc)
+	}{
+		{"other device id", func(d *permit.ReadGrantDoc) { d.NetDeviceTargets[0].DeviceID = "sw-9" }},
+		{"other trust pin", func(d *permit.ReadGrantDoc) { d.NetDeviceTargets[1].TrustPin = strings.Repeat("ef", 32) }},
+		{"other trust generation", func(d *permit.ReadGrantDoc) { d.NetDeviceTargets[0].TrustGeneration = 7 }},
+		{"other credential version", func(d *permit.ReadGrantDoc) { d.NetDeviceTargets[1].CredentialVersion = 5 }},
+		{"other reads", func(d *permit.ReadGrantDoc) { d.NetDeviceTargets[0].Reads = []string{"cbs_lldp"} }},
+		{"extra device", func(d *permit.ReadGrantDoc) {
+			d.NetDeviceTargets = append(d.NetDeviceTargets, permit.NetDeviceTarget{DeviceID: "sw-3", TrustPin: strings.Repeat("01", 32), TrustGeneration: 1, CredentialVersion: 1, Reads: []string{"cbs_version"}})
+		}},
+		{"dropped device", func(d *permit.ReadGrantDoc) { d.NetDeviceTargets = d.NetDeviceTargets[:1] }},
+		{"no devices", func(d *permit.ReadGrantDoc) { d.NetDeviceTargets = nil }},
+		{"duplicated device", func(d *permit.ReadGrantDoc) { d.NetDeviceTargets[1] = d.NetDeviceTargets[0] }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := base()
+			tc.alter(&b)
+			if sameReadGrant(base(), b) || sameReadGrant(b, base()) {
+				t.Fatal("a document with different device targets compares as the same grant")
+			}
+		})
+	}
+	t.Run("reordered devices and reads are the same", func(t *testing.T) {
+		b := base()
+		b.NetDeviceTargets[0], b.NetDeviceTargets[1] = b.NetDeviceTargets[1], b.NetDeviceTargets[0]
+		b.NetDeviceTargets[1].Reads = []string{"cbs_version", "cbs_lldp"}
+		if !sameReadGrant(base(), b) || !sameReadGrant(b, base()) {
+			t.Fatal("canonically reordered device targets compare as different")
+		}
+	})
+	t.Run("identical devices are the same", func(t *testing.T) {
+		if !sameReadGrant(base(), base()) {
+			t.Fatal("identical documents with device targets differ")
+		}
+	})
+}
+
+// TestProposeReadGrantRejectsExecutorAddedDeviceTarget pins that a device
+// target the executor adds to the stored grant is refused, not shown as
+// approvable scope.
+func TestProposeReadGrantRejectsExecutorAddedDeviceTarget(t *testing.T) {
+	f := newProposeFake()
+	f.alter = func(d *permit.ReadGrantDoc) { d.NetDeviceTargets = netDeviceTargetsOf()[:1] }
+	s, _ := proposeService(t, f, testInventory())
+	_, err := s.ProposeReadGrant(context.Background(), "alice", ReadGrantRequest{ScopeKind: ScopeAll, Actions: []string{"core.facts"}, Days: 7})
+	if !errors.Is(err, ErrReadGrantProposalMismatch) {
+		t.Fatalf("err %v, want ErrReadGrantProposalMismatch", err)
+	}
+}

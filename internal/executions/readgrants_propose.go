@@ -436,17 +436,57 @@ func previewFromResponse(r *pb.ProposeReadGrantResponse, sent permit.ReadGrantDo
 
 // sameReadGrant reports whether the executor's document is exactly the
 // proposed one: every scalar member equal, the same targets, actions and
-// credential bindings (as sets: canonicalization may reorder them), and
-// exactly the same provider targets (sameProviderTargets; both empty for an
-// SSH lease).
+// credential bindings (as sets: canonicalization may reorder them), exactly
+// the same provider targets (sameProviderTargets; both empty for an SSH
+// lease) and exactly the same network device targets (sameNetDeviceTargets;
+// both empty unless the profile is netdevice).
 func sameReadGrant(a, b permit.ReadGrantDoc) bool {
 	if a.Grant != b.Grant || a.ID != b.ID || a.Issuer != b.Issuer || a.CreatedUnix != b.CreatedUnix ||
 		a.ExpiryUnix != b.ExpiryUnix || a.Trigger != b.Trigger || a.MinIntervalS != b.MinIntervalS ||
 		a.RunBudget != b.RunBudget || a.RateProfile != b.RateProfile ||
-		!sameProviderTargets(a.ProviderTargets, b.ProviderTargets) {
+		!sameProviderTargets(a.ProviderTargets, b.ProviderTargets) ||
+		!sameNetDeviceTargets(a.NetDeviceTargets, b.NetDeviceTargets) {
 		return false
 	}
 	return sameSetOf(a.Targets, b.Targets) && sameSetOf(a.Actions, b.Actions) && sameSetOf(a.Credentials, b.Credentials)
+}
+
+// sameNetDeviceTargets reports whether a and b name the same devices, each
+// with the same trust pin, trust generation, credential version and the same
+// reads. Devices and reads are compared as sets (canonicalization may
+// reorder them). A device ID that occurs twice on either side is a mismatch.
+func sameNetDeviceTargets(a, b []permit.NetDeviceTarget) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	byID := make(map[string]permit.NetDeviceTarget, len(a))
+	for _, t := range a {
+		if _, dup := byID[t.DeviceID]; dup {
+			return false
+		}
+		byID[t.DeviceID] = t
+	}
+	for _, t := range b {
+		x, ok := byID[t.DeviceID]
+		if !ok {
+			return false
+		}
+		delete(byID, t.DeviceID)
+		if x.TrustPin != t.TrustPin || x.TrustGeneration != t.TrustGeneration ||
+			x.CredentialVersion != t.CredentialVersion || !sameMultiset(x.Reads, t.Reads) {
+			return false
+		}
+	}
+	return len(byID) == 0
+}
+
+// sameMultiset reports whether a and b hold the same strings with the same
+// multiplicities, in any order.
+func sameMultiset(a, b []string) bool {
+	x, y := slices.Clone(a), slices.Clone(b)
+	slices.Sort(x)
+	slices.Sort(y)
+	return slices.Equal(x, y)
 }
 
 // sameSetOf reports whether a and b hold the same distinct elements.
