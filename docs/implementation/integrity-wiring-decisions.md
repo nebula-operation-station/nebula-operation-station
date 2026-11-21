@@ -1,7 +1,8 @@
 # Decision paper: wiring I1 status and the I2 scan chain (ADR 0015)
 
-Status: **open, maintainer decides.** This paper decides nothing. Each open
-point gives the question, what ADR 0015 says, what the code says today (with
+Status: **decided** by the maintainer, 2026-11-21; see "Decision (2026-11-21,
+maintainer)" below (previously: **open, maintainer decides.** This paper
+decides nothing). Each open point gives the question, what ADR 0015 says, what the code says today (with
 file:line), the options, a recommendation and the consequence. Where the ADR
 leaves a point open, this paper says so and does not present a choice as made.
 
@@ -12,6 +13,28 @@ Line numbers were checked against the tree at branch
 `agent/uf13-integrity-wiring-paper` (based on `main`, 2026-11-21). They are
 references for review, not stable identifiers; re-check them when a point is
 decided.
+
+## Decision (2026-11-21, maintainer)
+
+The maintainer (Axel) decided on 2026-11-21 at 13:48 (UTC+1) in chat. Where the
+decision differs from the text below, the decision wins. Original wording
+(German), verbatim:
+
+> **uf13 (docs/implementation/integrity-wiring-decisions.md, ADR 0015):**
+> Empfehlungen angenommen: (a) Option 1, (c) Option 1, (d) Option 1
+> beschränkt auf `FimScanActionID` mit (i)–(iii), (e) Option 2, (f) Option 3.
+> (b)/(g) zusammen: Scan als dauerhafter Job (Option 2, ohne Permit-Mutex
+> über 40 min), mit der nötigen Lease-Regel-Änderung (ADR 0007-Bereich,
+> hiermit entschieden).
+
+In English (translation by Claude, not part of the decision): the
+recommendations are accepted.
+
+- **(a)** option 1; **(c)** option 1; **(d)** option 1, restricted to
+  `FimScanActionID`, with (i)–(iii); **(e)** option 2; **(f)** option 3.
+- **(b) and (g) together:** the scan runs as a durable job (option 2, without
+  a permit mutex held over 40 min), with the lease rule change this needs
+  (ADR 0007 territory, decided hereby).
 
 ## Summary
 

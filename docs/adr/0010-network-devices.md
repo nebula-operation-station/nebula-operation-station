@@ -1084,3 +1084,13 @@ All answered on 2026-11-09 (previously open); see "Decisions 2026-11-09".
   command vocabulary of the lab configs; until then the limit stands as
   stated in D4. **Answered 2026-11-09** (previously open): per the
   recommendation.
+
+## Amendment 2026-11-21: wiring of the device read chain
+
+The maintainer decided on 2026-11-21, 13:48 UTC+1 in chat (wording verbatim
+in `docs/implementation/network-devices-wiring-decisions.md`, "Decision
+(2026-11-21, maintainer)"): the server learns the devices through **Variant
+1**, the collector spools one metadata record per device (question A); the
+device read lease is proposed through **B1**, the local CLI
+`nebula netdev lease …`, with the device approval rule A1-0b and the
+proposal check A1-0 (question B). The text above is unchanged.
