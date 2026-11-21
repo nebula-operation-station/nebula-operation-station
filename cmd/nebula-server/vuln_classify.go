@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/osdebian"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
@@ -26,6 +27,28 @@ var errVulnEcosystem = errors.New("NOS inventory read is of another ecosystem th
 
 // errVulnNoKernel: the newest complete read carries no running kernel data.
 var errVulnNoKernel = errors.New("latest complete NOS read has no running kernel data")
+
+// errVulnNoEcosystem: a stored read that names packages or is complete has no
+// ecosystem, so NOS cannot tell whether it covers the finding (fail closed).
+var errVulnNoEcosystem = errors.New("NOS inventory read names no ecosystem")
+
+// vulnListTimeout is the run timeout of package.list_installed
+// (internal/executions/actions); a list is produced within one run of it.
+const vulnListTimeout = 2 * time.Minute
+
+// vulnListLag is how long before a read's finish time its package list can
+// have been taken. The list carries no host time (ADR 0011 D3) and the finish
+// time is the server's clock, so the lower bound is the finish time less one
+// run (vulnListTimeout) and the clock margin vulninventory.MaxReadSkew. A
+// finding last written before that bound was written before the list was taken.
+const vulnListLag = vulnListTimeout + vulninventory.MaxReadSkew
+
+// listedAfter reports whether read's list was certainly taken after a write at
+// written (D5: strictly newer). It is false whenever the write may fall inside
+// the listing lag, so the list could predate it.
+func listedAfter(read vulninventory.Read, written time.Time) bool {
+	return read.ReadAt.Add(-vulnListLag).After(written)
+}
 
 // vulnClassifier classifies a requested run closure against NOS's own
 // stored inventory (ADR 0011 D5). It fails closed: any doubt is returned as
@@ -58,7 +81,9 @@ func (c vulnClassifier) Classify(ctx context.Context, f vulnstore.Finding) (vuln
 // from the last complete read, and only when it was taken strictly after the
 // finding's last write. A host without a complete read, a read of another
 // ecosystem, a malformed fixed version or a version that cannot be compared
-// is an error, which holds the closure.
+// is an error, which holds the closure. Evidence also holds while the last
+// write of the finding may fall inside the listing lag of the complete read
+// (listedAfter), and while a newer read still names the package.
 func (c vulnClassifier) assess(ctx context.Context, f vulnstore.Finding) (vulnAssessment, error) {
 	unconfirmed := vulnAssessment{class: vulnstore.ClassUnconfirmed}
 	if f.Subject.Kind != vulnfinding.SubjectHost || !vulnstore.Checkable(f.Record) {
@@ -84,9 +109,13 @@ func (c vulnClassifier) assess(ctx context.Context, f vulnstore.Finding) (vulnAs
 	if err != nil {
 		return vulnAssessment{}, fmt.Errorf("classify: ecosystem: %w", err)
 	}
-	// A read that names an ecosystem must name the finding's one. Failure
-	// markers name none and are no basis anyway.
+	// A read that names an ecosystem must name the finding's one. A read that
+	// is complete or names packages must name one at all: an empty ecosystem
+	// is no basis (fail closed). Failure markers name none and are no basis.
 	for _, r := range []vulninventory.Read{latest, lc} {
+		if r.Ecosystem == "" && (r.Complete || len(r.Components) > 0) {
+			return vulnAssessment{}, errVulnNoEcosystem
+		}
 		if r.Ecosystem != "" && r.Ecosystem != eco {
 			return vulnAssessment{}, errVulnEcosystem
 		}
@@ -120,16 +149,18 @@ func (c vulnClassifier) assess(ctx context.Context, f vulnstore.Finding) (vulnAs
 			return a, nil
 		}
 	}
-	// Evidence needs the last complete read taken strictly after the last
-	// write of the finding (D5 closure rows 1 and 2). Its ReadAt is the time
-	// the observer stored the list; the list itself carries no host time.
-	if lc.ReadAt.After(f.Updated) {
+	// Evidence needs the last complete read listed strictly after the last
+	// write of the finding (D5 closure rows 1 and 2, listedAfter). Row 2 also
+	// needs the newest read not to name the package: a newer partial read that
+	// still names it means the package is installed again.
+	if listedAfter(lc, f.Updated) {
 		lv, present := componentVersion(lc, src)
 		if !present {
-			a.class = vulnstore.ClassEvidenced // row 2: no longer installed
-			return a, nil
-		}
-		if fixed != "" {
+			if _, namedNow := componentVersion(latest, src); !namedNow {
+				a.class = vulnstore.ClassEvidenced // row 2: no longer installed
+				return a, nil
+			}
+		} else if fixed != "" {
 			cmp, err := vulnver.Compare(scheme, lv, fixed)
 			if err != nil {
 				return vulnAssessment{}, fmt.Errorf("classify: compare complete read: %w", err)
@@ -166,7 +197,7 @@ func assessKernel(lc vulninventory.Read, f vulnstore.Finding, scheme vulnver.Sch
 			a.class = vulnstore.ClassContradicted
 			return a, nil
 		}
-		if lc.ReadAt.After(f.Updated) {
+		if listedAfter(lc, f.Updated) {
 			a.class = vulnstore.ClassEvidenced
 			return a, nil
 		}

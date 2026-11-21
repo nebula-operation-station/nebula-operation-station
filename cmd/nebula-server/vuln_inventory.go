@@ -145,14 +145,23 @@ func (v *vulnInventoryService) closeByInventory(ctx context.Context, parent cont
 	if st == nil {
 		return
 	}
+	if read.Ecosystem == "" {
+		// A host read names its ecosystem (the release is mapped); without one
+		// NOS cannot tell which findings it covers, so it closes nothing.
+		v.log.Error("vulnerability inventory: close by inventory", "host", hostID, "execution", execID, "error_class", "ecosystem")
+		return
+	}
 	versions := make(map[string]string, len(read.Components))
 	for _, c := range read.Components {
 		versions[c.Source] = c.SourceVersion
 	}
 	closed, err := st.CloseByInventory(ctx, vulnstore.InventoryRead{
-		Subject:        vulnstore.Subject{Kind: vulnfinding.SubjectHost, ID: hostID},
-		Complete:       read.Complete,
-		ReadAt:         read.ReadAt,
+		Subject:  vulnstore.Subject{Kind: vulnfinding.SubjectHost, ID: hostID},
+		Complete: read.Complete,
+		// The list was taken no earlier than the read's listing lag before
+		// it finished (vulnListLag); a finding written after that may not be
+		// in the list, so it stays open.
+		ReadAt:         read.ReadAt.Add(-vulnListLag),
 		Ecosystem:      read.Ecosystem,
 		SourceVersions: versions,
 	})
