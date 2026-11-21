@@ -16,14 +16,20 @@
 //   - Imports are taken from all non-test files of a package, including
 //     generated files and files behind build constraints. This over-approximates
 //     reachability, so the guard reports gaps rather than false alarms.
-//   - A package made only of generated files is not checked itself, but its
-//     imports still count while its package is reachable.
+//   - A file with the "//go:build ignore" constraint is never compiled. It does
+//     not make its directory a package main, and it is not production code, but
+//     its imports still count, as those of other constrained files do.
+//   - A package made only of generated or ignored files is not checked itself,
+//     but its imports still count while its package is reachable.
 //   - Allowlist entries need a reason and a ticket. The reason starts with a
-//     category (planned, test helper - never wired, developer tool), and the
-//     ticket must be a whole ID that appears in a file under docs/ or in
-//     internal/wiringguard/tickets.txt. An entry whose package is reachable now
-//     is reported as informational only. An entry that names no checked package
-//     is stale and is reported as a finding.
+//     category (planned, test helper - never wired, developer tool) followed by
+//     text. The ticket must be an ID in the project's ticket form (for example
+//     "AS-09", "iv02" or "EN-16h") that a Markdown file under docs/ defines in a
+//     table row or heading, or that internal/wiringguard/tickets.txt registers
+//     with an existing docs/ tracking document. Words such as "TODO" or "none"
+//     are not tickets. An entry whose package is reachable now is reported as
+//     informational only. An entry that names no checked package is stale and
+//     is reported as a finding.
 //   - Directories named testdata, vendor, or starting with "." or "_" are not
 //     scanned. A subdirectory with its own go.mod is another module and is not
 //     scanned either.

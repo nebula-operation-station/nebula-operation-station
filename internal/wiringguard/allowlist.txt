@@ -11,8 +11,9 @@
 #   developer tool: <what>                a command run by hand or by make
 #                                         check, never by a product command
 #
-# The ticket ID must appear as a whole ID in a Markdown file under docs/ or in
-# internal/wiringguard/tickets.txt. TestRealTreeTicketsExist checks this.
+# The ticket ID must be defined by a table row or heading of a Markdown file
+# under docs/, or be registered in internal/wiringguard/tickets.txt with an
+# existing docs/ tracking document. TestRealTreeTicketsExist checks this.
 
 internal/attackpath/jewels | planned: crown-jewels store of the attack-path search (ADR 0011), no importer on main | VU-23
 internal/cbscli | planned: Cisco CBS CLI session driver, no caller wired | ND-05

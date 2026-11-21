@@ -67,6 +67,9 @@ var ErrNoModule = errors.New("no go.mod found in any parent directory")
 // code.
 var generatedRe = regexp.MustCompile(`^// Code generated .* DO NOT EDIT\.$`)
 
+// ignoreBuildRe matches the build constraint that excludes a file from builds.
+var ignoreBuildRe = regexp.MustCompile(`^//go:build\s+ignore\s*$`)
+
 // ticketRe matches one ticket ID in the project's form: 1 to 4 letters, an
 // optional hyphen, 1 to 3 digits, an optional lower-case letter and an optional
 // "-<digits>" part, as in "AS-09", "iv02", "EN-16h" or "M4-1". Words without
@@ -106,11 +109,13 @@ type Result struct {
 
 // pkgInfo is what the scan records about one package directory.
 type pkgInfo struct {
-	// main is true when a non-test file declares package main.
+	// main is true when a non-test file that no build constraint ignores
+	// declares package main.
 	main bool
-	// allGenerated is true when every non-test file carries the generated
-	// marker.
-	allGenerated bool
+	// production is true when a non-test file is neither generated nor excluded
+	// from every build by "//go:build ignore". A directory without production
+	// files is not a candidate.
+	production bool
 	// imports holds the module-internal directories this package imports.
 	imports map[string]struct{}
 }
@@ -441,7 +446,7 @@ func Check(root string, allow Allowlist) (Result, error) {
 // (not only generated code) and lives under internal/, or it is a package main
 // outside cmd/. Package main under cmd/ are the roots and need no wiring.
 func isCandidate(dir string, info *pkgInfo) bool {
-	if info.allGenerated {
+	if !info.production {
 		return false
 	}
 	if info.main {
@@ -492,7 +497,8 @@ func modulePath(root string) (string, error) {
 		return "", fmt.Errorf("read go.mod: %w", err)
 	}
 	for _, line := range strings.Split(string(data), "\n") {
-		fields := strings.Fields(line)
+		text, _, _ := strings.Cut(line, "//")
+		fields := strings.Fields(text)
 		if len(fields) == 2 && fields[0] == "module" {
 			mod, err := strconv.Unquote(fields[1])
 			if err != nil {
@@ -547,14 +553,18 @@ func scan(root, modPath string) (map[string]*pkgInfo, error) {
 		}
 		info := pkgs[dir]
 		if info == nil {
-			info = &pkgInfo{allGenerated: true, imports: map[string]struct{}{}}
+			info = &pkgInfo{imports: map[string]struct{}{}}
 			pkgs[dir] = info
 		}
-		if f.Name.Name == "main" {
+		// An ignored file is never compiled, so it cannot make the directory
+		// a main package; its imports still count, as those of other
+		// build-constrained files do.
+		ignored := isIgnored(f)
+		if !ignored && f.Name.Name == "main" {
 			info.main = true
 		}
-		if !isGenerated(f) {
-			info.allGenerated = false
+		if !ignored && !isGenerated(f) {
+			info.production = true
 		}
 		for _, imp := range f.Imports {
 			target, err := strconv.Unquote(imp.Path.Value)
@@ -571,6 +581,23 @@ func scan(root, modPath string) (map[string]*pkgInfo, error) {
 		return nil, fmt.Errorf("scan module %s: %w", modPath, err)
 	}
 	return pkgs, nil
+}
+
+// isIgnored reports whether a file carries the "//go:build ignore" constraint
+// before its package clause, which excludes it from every build. The file must
+// be parsed with parser.ParseComments.
+func isIgnored(f *ast.File) bool {
+	for _, group := range f.Comments {
+		if group.Pos() >= f.Package {
+			break
+		}
+		for _, c := range group.List {
+			if ignoreBuildRe.MatchString(c.Text) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // isGenerated reports whether a file has the Go generated-code marker before
