@@ -114,12 +114,12 @@ func nrConfig(t *testing.T, dir string, notifications map[string]any, apiCfg any
 
 // nrNotifyTest runs `-config <path> -notify-test` through runServer and
 // returns its error and stderr.
-func nrNotifyTest(t *testing.T, cfg map[string]any) (error, string) {
+func nrNotifyTest(t *testing.T, cfg map[string]any) (string, error) {
 	t.Helper()
 	path := writeConfig(t, t.TempDir(), cfg)
 	var stderr bytes.Buffer
 	err := runServer(context.Background(), []string{"-config", path, "-notify-test"}, &stderr, vulnHooks{})
-	return err, stderr.String()
+	return stderr.String(), err
 }
 
 // nrCheckSecretsAbsent fails if a secret appears in text (logs or errors).
@@ -178,7 +178,7 @@ func TestNotifyTestSendsToWebhookAndNtfy(t *testing.T) {
 	ntfy := newNRReceiver(t, http.StatusOK)
 	cfg := nrConfig(t, t.TempDir(), nrNotifications(webhook.srv.URL, ntfy.srv.URL), nil)
 
-	err, stderr := nrNotifyTest(t, cfg)
+	stderr, err := nrNotifyTest(t, cfg)
 	if err != nil {
 		t.Fatalf("-notify-test: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestNotifyWebhookSignatureFormat(t *testing.T) {
 	t.Parallel()
 	webhook := newNRReceiver(t, http.StatusOK)
 	cfg := nrConfig(t, t.TempDir(), nrNotifications(webhook.srv.URL, ""), nil)
-	if err, _ := nrNotifyTest(t, cfg); err != nil {
+	if _, err := nrNotifyTest(t, cfg); err != nil {
 		t.Fatalf("-notify-test: %v", err)
 	}
 	wr := webhook.requests()
@@ -251,7 +251,7 @@ func TestNotifyWebhookSignatureFormat(t *testing.T) {
 // the error of main.go, and sends nothing.
 func TestNotifyTestWithoutProviderFails(t *testing.T) {
 	t.Parallel()
-	err, stderr := nrNotifyTest(t, nrConfig(t, t.TempDir(), map[string]any{}, nil))
+	stderr, err := nrNotifyTest(t, nrConfig(t, t.TempDir(), map[string]any{}, nil))
 	if err == nil || err.Error() != "no notification provider configured" {
 		t.Fatalf("err = %v, want no notification provider configured", err)
 	}
@@ -269,7 +269,7 @@ func TestNotifyTestFailsWhenBothProvidersReject(t *testing.T) {
 	ntfy := newNRReceiver(t, http.StatusInternalServerError)
 	cfg := nrConfig(t, t.TempDir(), nrNotifications(webhook.srv.URL, ntfy.srv.URL), nil)
 
-	err, stderr := nrNotifyTest(t, cfg)
+	stderr, err := nrNotifyTest(t, cfg)
 	if err == nil || err.Error() != "no provider accepted the test notification (see the log)" {
 		t.Fatalf("err = %v, want no provider accepted", err)
 	}
@@ -295,7 +295,7 @@ func TestNotifyTestOneAcceptingProviderIsEnough(t *testing.T) {
 	ntfy := newNRReceiver(t, http.StatusOK)
 	cfg := nrConfig(t, t.TempDir(), nrNotifications(webhook.srv.URL, ntfy.srv.URL), nil)
 
-	err, stderr := nrNotifyTest(t, cfg)
+	stderr, err := nrNotifyTest(t, cfg)
 	if err != nil {
 		t.Fatalf("-notify-test with one accepting provider: %v", err)
 	}
@@ -322,7 +322,7 @@ func TestNotifyTestDoesNotFollowRedirect(t *testing.T) {
 	ntfy := newNRReceiver(t, http.StatusOK)
 	cfg := nrConfig(t, t.TempDir(), nrNotifications(webhook.srv.URL, ntfy.srv.URL), nil)
 
-	err, stderr := nrNotifyTest(t, cfg)
+	stderr, err := nrNotifyTest(t, cfg)
 	if err != nil {
 		t.Fatalf("-notify-test: %v", err)
 	}
