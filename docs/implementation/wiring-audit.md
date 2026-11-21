@@ -455,3 +455,22 @@ behaviour this audit could not observe.
 Order for the lab run: WA-02 and WA-01 first, as PVE depends on both, then WA-03,
 WA-04 and WA-06, then the rest. Add `install_test.sh` to CI with whichever of them
 touches it first, so that its static checks run at all.
+
+## Re-check 2026-11-20
+
+Checked 2026-11-21 against the tree with grep and Read. The audit above is kept as history. The
+table lists gaps where a document says "merged" or "in progress" but the code is library-only or
+not mounted in `nebula-server`.
+
+| Gap | Evidence |
+| --- | --- |
+| Network device read path not implemented (ND-14) | `internal/executor/netdev_read.go:112` returns `Unimplemented` |
+| Network device pages not registered | `internal/web/ui/netdev.go:160,182`: `NetDevPages` has no caller; `cmd/nebula-server` has no netdev reference |
+| Attack path computation not wired | `cmd/nebula-server/attackpaths.go:19-26` (source reports no paths); pages mounted at `cmd/nebula-server/main.go:653` |
+| Guest power and snapshots not offered in the chart | RPCs at `proto/nebula/executor/v1/executor.proto:551-554`; no caller in `cmd/nebula-server` sets the UI options |
+| Guest backup, migration, node reboot: no RPC | `docs/operator/proxmox.md` status table; no such RPC in `executor.proto` |
+| Network security libraries not imported | no import of `internal/netreach`, `netadvisor`, `edl` or `reputation` outside their own trees |
+| Help assistant service not wired | `internal/helpassist/` (five packages) has no importer |
+| Ops tab not set in nebula-server | `internal/web/ui/ui.go:331`; no caller outside `internal/web/ui` sets `assistantOps` |
+| One-step enrollment offers are local only | `cmd/nebula-executor/main.go:82`, `:240-241`, `:269` |
+| Decision papers uf04, uf13, uf14 not in the tree | grep, 2026-11-21 |
