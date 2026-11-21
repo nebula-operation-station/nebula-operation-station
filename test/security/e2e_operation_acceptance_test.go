@@ -407,11 +407,7 @@ func (e *ug05Env) createOK(unit string) ug05Created {
 // the server delivered.
 func (e *ug05Env) approve(c ug05Created) {
 	e.t.Helper()
-	body := map[string]any{"id": c.ID, "assertion": e.assertion(c.Options)}
-	if c.Requirement == "assertion_verified_typed_count" {
-		body["typed_count"] = 1
-	}
-	e.postJSON("/operations/approve", body, nil)
+	e.postJSON("/operations/approve", map[string]any{"id": c.ID, "assertion": e.assertion(c.Options)}, nil)
 }
 
 // state returns the operation's state from GET /operations/{id}/status.
@@ -588,6 +584,12 @@ func ug05Restart(t *testing.T, e *ug05Env) {
 	e.fakes.setMode(t, "ok")
 	hostCmds := len(e.host.srv.Commands())
 	c := e.createOK(ug05Unit)
+	// The action is MEDIUM and its script is trusted as MEDIUM; the pinned
+	// host has no criticality in the executor, so the executor's minimum is
+	// HIGH and the server's proposal (RaiseToMinimum) is raised to it.
+	if c.Risk != "HIGH" || c.Requirement != "assertion_verified" {
+		t.Fatalf("proposal risk %s, requirement %s; want HIGH, assertion_verified", c.Risk, c.Requirement)
+	}
 	e.approve(c)
 	if s := e.waitFinished(c.ID); s != "finished" {
 		t.Fatalf("operation ended %s, want finished; page:\n%s", s, e.page(c.ID))
@@ -611,7 +613,7 @@ func ug05Restart(t *testing.T, e *ug05Env) {
 		}
 	}
 	e.h.requireAudit("run_finished", ug05Host, "success")
-	t.Logf("risk %s, requirement %s, host tool calls %q", c.Risk, c.Requirement, e.fakes.calls(t))
+	t.Logf("host tool calls %q", e.fakes.calls(t))
 
 	p := e.page(c.ID)
 	for _, want := range []string{
