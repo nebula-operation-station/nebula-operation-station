@@ -17,7 +17,8 @@ decided.
 
 - **I2 (file integrity on hosts) has no working end-to-end chain.** The scan
   script exists and is embedded. The executor-side digest comparison of a
-  server-supplied baseline list is registered and reachable. Everything between
+  server-supplied baseline list is registered on the gRPC service, but no server
+  code calls it. Everything between
   them (catalog entry, scheduling, scan result intake, retained records,
   approval, diff, findings, UI, notification) either has no production caller
   or is missing. Details in section 1.
@@ -51,10 +52,10 @@ decided.
 | Transport | **Limits do not agree.** Attached runs (the only path read leases use) are capped at 1 MiB output and 10 min. Durable result reads are capped at the same 1 MiB. The scan allows 128 MiB and 40 min. The 10 min limit is enforced in the executor before dispatch (`schedule.go:133-135`, `roles_read.go:258-259`) and clamped in `hostrun`. | `internal/hostrun/hostrun.go:39` (`MaxResult = 1 << 20`), `:41-42` (`MaxTimeout = 10 min`), `:211` (output cap applied), `:221-222` (timeout clamp); `internal/hostrun/durable.go:358,370`; `internal/executor/schedule.go:133-135,211`; `internal/executor/roles_read.go:258-259`; `internal/fimscan/limits.go:13` (`MaxDocumentBytes = 128 << 20`); `internal/fimscan/script.go:30` (`ActionTimeout = 40 min`) |
 | Parser | Built, no production caller. `Parse` is only called from tests. | `internal/fimscan/parse.go:33`; no non-test caller found |
 | Retention | Built, no production caller. Merge of scan runs (`fimretain`), the retention store (`fimstore`) and `integritystore` are not called from production code. | `internal/fimretain/merge.go`; `internal/fimstore/store.go:128` (`Propose`); `internal/integritystore/integritystore.go`; `internal/fimresolve/resolve.go` (no production caller) |
-| Baseline (digest) | **Partly wired.** The executor's `CompareBaselineList` stream builds a baseline from the streamed list and compares its digest with the executor-held approved digest. This RPC is registered on the gRPC service. It does not take its records from a scan run, because no scan run reaches the executor. The server-side `fimstore.Propose` also builds a baseline and stores its digest, without a production caller. | `internal/executor/integrity_baseline.go:153` (`NewBaseline`), `:355` (`CompareBaselineList`); `internal/executor/service.go:221` (`RegisterExecutorServiceServer`); `internal/fimstore/store.go:143` |
+| Baseline (digest) | **Partly wired.** The executor's `CompareBaselineList` stream builds a baseline from the streamed list and compares its digest with the executor-held approved digest. This RPC is registered on the gRPC service. By design it receives the server's approved list, not a scan run (ADR 0015:1049-1052; `internal/executor/integrity_baseline.go:25-30`). The gap is that no server code calls it: the only client wrapper is `internal/executorclient/client.go:920`, and no caller of that wrapper exists. The server-side `fimstore.Propose` also builds a baseline and stores its digest, without a production caller. | `internal/executor/integrity_baseline.go:153` (`NewBaseline`), `:355` (`CompareBaselineList`); `internal/executor/service.go:221` (`RegisterExecutorServiceServer`); `internal/fimstore/store.go:143` |
 | Approval | **Missing.** `StoreApprovedBaselineDigest` (the only writer of the approved digest) has no production caller. No approval RPC, no approval screen, no `nebula integrity pending/approve`. The server's `Approve` re-hashes its own stored proposal rows (section 2 (c)). | `internal/executordb/integrity_baseline.go:111`; no non-test caller; `internal/fimstore/store.go:205` (`Approve`), `:241` (`verifyProposal`) |
 | Diff | Built, no production caller. | `internal/fimbaseline/diff.go:111` (`Diff`) |
-| Findings | Classes exist, no production caller. The executor writes its own tamper finding on a digest mismatch (`RecordBaselineTamper`), so the lock-related finding path is live. Severity is missing for uncovered paths (section 2 (e)). | `internal/fimfinding/classes.go`; `internal/fimfinding/doc.go:48-56`; `internal/executor/integrity_baseline.go:259` |
+| Findings | Classes exist, no production caller. The executor writes a tamper finding on a digest mismatch (`RecordBaselineTamper`), but that path is not reachable in production: `CompareBaselineList` has no server caller, and `StoreApprovedBaselineDigest` (the only writer of the approved digest) has no production caller. So `approvedBaselineDigest` finds no digest and `finishBaselineCompare` returns `BaselineNone` before the call (`internal/executor/integrity_baseline.go:249`, `:253-254`). Severity is missing for uncovered paths (section 2 (e)). | `internal/fimfinding/classes.go`; `internal/fimfinding/doc.go:48-56`; `internal/executor/integrity_baseline.go:259` |
 | UI | **Missing** for I2. The server has `/integrity/status` for its own I1 monitor only. No baseline or findings page. | `cmd/nebula-server/integrity.go:118-129`; `cmd/nebula-server/main.go:649` |
 | Notification | `IntegrityGate` is built (`NewIntegrityGate`) but has no production caller. The executor logs the tamper finding name with slog only (audit lines: `integrity_baseline_tamper` at `:270-275`, the unrecorded-storage error branch at `:263-266`). The notification kind exists in notifylog. | `internal/notify/integrity.go:194`; `internal/executor/integrity_baseline.go:263-275`; `internal/notifylog/notifylog.go:176` |
 
@@ -118,25 +119,51 @@ recommendation. Nothing below is decided.
   `internal/fimscan/limits.go:13` and `internal/fimscan/script.go:30`.
 - **Options:**
   1. *Action-specific limits for `fim.scan` in `hostrun.Attached`* (128 MiB
-     output, 40 min timeout, only for this action). The read path stays as it
-     is, apart from the two executor timeout checks above, which must accept
-     the action's own limit. Cost: one SSH session is held for up to 40 min.
-     Protected: `internal/hostrun/` and `internal/executor/`.
+     output, 40 min timeout, only for this action), and the two executor timeout
+     checks above accepting the action's own limit.
+     **Cost, precisely:** `dispatchReadRun` takes `Authority.mu`
+     (`internal/permit/lease.go:1086-1087`) and calls the dispatch callback while
+     it holds the mutex (`:1102`). That callback is the closure returned by
+     `ReadDispatchGuard` (`internal/executor/schedule.go:142`), and it runs
+     `hostrun.Attached` (`schedule.go:211`). So for the whole attached run, every
+     call that takes the same mutex waits: `AuthorizeReadRun` (`lease.go:885`,
+     called at `schedule.go:163`), `AuthorizeGrant` (`internal/permit/permit.go:816`),
+     the revocations (`lease.go:802`, `:825`), and `Lock` (`permit.go:949-954`,
+     which also pauses reads). Today that wait is up to 10 min; with the scan it
+     is up to 40 min. The doc comment at `lease.go:1076-1078` already names this
+     wait ("lifecycle calls may wait for its bounded timeout"); the bound is 10 min
+     today and would be 40 min under option 1. The held SSH session is the
+     smaller part of the cost.
+     **Option 1 therefore needs a guard change, not only limits.** The run must
+     leave the mutex: claim the read under the lock, release it, run the SSH
+     session, and let lock or revocation cancel the in-flight run's context so
+     the connection closes. That changes the "serialized with lock" guarantee of
+     `dispatchReadRun`, is a lease-semantics decision (ADR 0007), and is protected
+     (`internal/permit/`, `internal/executor/`). The alternative, keeping the
+     mutex, means a lock or a read-grant revocation can take up to 40 min to take
+     effect, which is not acceptable for a revocation.
+     Protected: `internal/hostrun/`, `internal/executor/`, `internal/permit/`.
   2. *Action-specific limits and a durable run for `fim.scan`.* A durable job
      survives an SSH drop and fits the 6 h maximum. It needs the lease path to
      accept durable actions (section (g)), a durable branch in the executor's
      read path, and the same per-action 128 MiB cap in the durable result read
-     (`durable.go:358,370`). Protected: `internal/hostrun/`, `internal/executor/`.
+     (`durable.go:358,370`). The durable path does not call `ReadDispatchGuard`
+     (its only caller is `schedule.go:142`), so it does not hold this mutex; its
+     lock and revocation behaviour is not checked in this paper.
+     Protected: `internal/hostrun/`, `internal/executor/`.
   3. *Chunked result* (several documents, each under 1 MiB, reassembled and
      checked by the executor). New protocol framing; touches `proto/` and the
      spec. Protected.
   4. *Smaller document* (fewer fields, shorter encodings). Does not remove the
      need for a per-action limit, because the ADR chose 128 MiB above the 1 MiB
      default on purpose (`:624-627`).
-- **Recommendation:** option 1, with the spec 09 amendment first and the ADR's
-  limits as the only numbers. It is the smaller change. Choose option 2 if the
-  maintainer wants a run that survives a dropped SSH session; it then needs
-  (g) decided as well.
+- **Recommendation:** do not take option 1 as a limits-only change. It needs the
+  guard change above before a 40 min run is safe, so the earlier reading that
+  option 1 is the smaller change is withdrawn. Option 2 does not hold the permit
+  mutex, so for a 40 min run this paper would lean to option 2, once the durable
+  path's lock and revocation behaviour is checked (not done here). Option 2 also
+  needs (g) decided. The maintainer decides; nothing here is decided. The spec 09
+  amendment comes first in either case, and the ADR's limits stay the only numbers.
 
 ### (c) Who computes the baseline digest: server or executor
 
@@ -155,22 +182,33 @@ recommendation. Nothing below is decided.
   executor-held digest (`executordb/integrity_baseline.go:111`, which has no
   production caller).
 - **Options:**
-  1. *Executor only.* Delete the server-side digest. The executor builds the
-     proposal from its retained run and computes the digest, and the approval
-     binds that digest. The server keeps a display copy at most. The server's
-     `verifyProposal` check goes away with it, so its test cases move to the
-     executor path. Matches the ADR text. Protected: `internal/executor/`,
-     `internal/executordb/`.
+  1. *Executor only, after the executor check on the list is wired.* Delete the
+     server-side digest (computed at `store.go:143`) and the `verifyProposal`
+     check that compares it (`store.go:241`, `:527-551`). The server still holds
+     the approved list, because the ADR has the executor take that list from the
+     server and accept it only if its digest equals the executor-held digest
+     (ADR 0015:1049-1052). The executor recomputes the digest of the fetched
+     list and compares it with the digest it holds (`CompareBaselineList`,
+     `internal/executor/integrity_baseline.go:25-30`, `:249-260`). The executor
+     builds the proposal from its retained run and computes the digest, and the
+     approval binds that digest (ADR 0015:1035-1037). Protected:
+     `internal/executor/`, `internal/executordb/`.
+     **Direction, not decided by this paper:** the code has the server push the
+     list in a client stream (`internal/executorclient/client.go:912`), while the
+     ADR text has the executor fetch it from the server (`:1049-1050`). Option 1
+     works with either, but the maintainer should confirm which one the ADR means.
   2. *Server proposes, executor re-checks at approval.* The server's digest is
      a preview. The approval sends it, and the executor compares it with its own
      digest and refuses on mismatch. This keeps `verifyProposal` and adds the
      executor half. The ADR does not clearly allow a server-computed digest to
      exist even as a preview, so this needs a maintainer reading of ADR
      `:1035-1060`.
-- **Recommendation:** option 1, because it matches the ADR text. Option 2 only
-  if the maintainer reads the ADR as allowing a server preview. The trade-off is
-  that option 1 removes a check that exists today, so the approval relies on the
-  executor digest alone.
+- **Recommendation:** option 1, because it matches the ADR text, in this order:
+  first wire the executor check on the list (this needs a server caller of
+  `CompareBaselineList`, which would sit in `cmd/nebula-server/` and is not
+  protected, and the direction question above), then remove the server digest. Removing the server check first would
+  leave the approval with no digest check at all. Option 2 only if the maintainer
+  reads the ADR as allowing a server preview.
 
 ### (d) Lease runner and proposal drop actions with parameters
 
@@ -190,6 +228,15 @@ recommendation. Nothing below is decided.
   then matches the run's parameter hash to the request (`internal/permit/permit.go:814-854`),
   and the lease check compares the action's hash (`internal/permit/lease.go:1007`).
   The accepted hashes for `fim.scan` are fixed in `internal/permit/lease_fimscan.go:34-39,107-125`.
+  The runner keeps no per-entry mode. `ordinaryLease.actions` holds
+  `actions.Action` values only (`internal/executions/leaserunner.go:57`), so the
+  entry's `da.ParametersHash` (read at `:93`) is dropped. The runner keys its last
+  run by action ID and host (`leaserunner.go:222-226`, `:239`) and computes the due
+  time from the lease interval or `permit.ReadActionMinInterval`, which for
+  `fim.scan` is the incremental floor of 1 h (`leaserunner.go:199`;
+  `internal/permit/lease.go:122-125`; `internal/permit/lease_fimscan.go:45`). The
+  executor's full-mode floor is 7 d − 6 h under its own key `fim.scan#full`
+  (`lease_fimscan.go:52`, `:55`, `:60`, `:117-128`).
 - **Options:**
   1. *Allow the one action:* accept `fim.scan` with its two fixed parameters
      when the grant's parameter hash matches the canonical parameters; reject
@@ -199,13 +246,28 @@ recommendation. Nothing below is decided.
      builds the canonical parameters JSON for the grant (`mode`, `profile`)
      and sends it in `runLeaseAction` (`leaserunner.go:264`) instead of `{}`,
      so the bytes hash to the grant's `ParametersHash`. Without (ii) the lease
-     check at `permit.go:854` and `lease.go:1007` fails for every run.
+     check at `permit.go:854` and `lease.go:1007` fails for every run; (iii)
+     keep each entry's mode in the runner: carry the entry's `ParametersHash`
+     with `ordinaryLease.actions` (`leaserunner.go:57`), key the last run and the
+     due time by that mode with the executor's floor (incremental 1 h, full
+     7 d − 6 h; `lease_fimscan.go:45`, `:52`, `:117-128`), and check whether the
+     stored run row records the parameters hash, because `leaseRuns` groups by
+     action ID and host only (`leaserunner.go:222-226`). Without (iii) a
+     full-mode entry is due after the 1 h floor (`leaserunner.go:199`), the
+     executor refuses it with `ResourceExhausted` (`leaserunner.go:274-275`), and
+     that refusal ends the host's other actions for the tick (`:197-198`, `:204-205`).
+     This repeats every hour for the whole 7 day floor. The tests listed under
+     the recommendation do not catch it, because they check acceptance and
+     parameters, not timing.
   2. *Keep the generic rule* and give `fim.scan` a separate runner. More code,
      two lease paths.
-- **Recommendation:** option 1, restricted to `FimScanActionID`, with tests
-  that a foreign profile, a foreign mode and a wrong parameter hash are each
-  rejected, and that the runner sends exactly the canonical parameters (the
-  bytes whose hash the grant binds). The code is not protected
+- **Recommendation:** option 1, restricted to `FimScanActionID`, with (i) to (iii)
+  above. Tests: a foreign profile, a foreign mode and a wrong parameter hash are
+  each rejected; the runner sends exactly the canonical parameters (the bytes
+  whose hash the grant binds); and a full-mode entry is not requested before
+  7 d − 6 h, with a fake executor that refuses earlier requests and fails the
+  test if one arrives. A recent incremental run must not delay a full entry, and
+  the reverse. The code is not protected
   (`internal/executions/`), but the lease semantics are ADR 0007 territory:
   the maintainer confirms the rule. The catalog entry (section 1) must come
   first.
@@ -276,8 +338,9 @@ recommendation. Nothing below is decided.
   `fim.scan` is made durable (option 2). The 40 min run is blocked by the
   10 min attached limit (section 1, (b)), not by durability.
 - **Options:**
-  1. *Keep `fim.scan` attached.* Action-specific limits (section 2 (b) option 1).
-     No lease rule change and no `Durable` flag.
+  1. *Keep `fim.scan` attached.* Action-specific limits and the guard change
+     (section 2 (b) option 1). No durability rule change and no `Durable` flag;
+     the (d) rule change still applies.
   2. *Make `fim.scan` durable.* Set `Durable: true` in the contract, and lift
      the `!a.Durable` skip for `FimScanActionID` in both places, plus a durable
      branch in the executor's read path (`internal/executor/durable.go`). Two
@@ -285,10 +348,10 @@ recommendation. Nothing below is decided.
      durable maximum (section 2 (b) option 2).
   3. *Shorten the scan below the attached 10 min limit.* Contradicts the ADR's
      40 min budget (`:624-627`). Not recommended.
-- **Recommendation:** option 1 if the maintainer wants no SSH session change
-  beyond (b); option 2 if a run must survive a dropped SSH session. Decided
-  together with (b). The lease rule is ADR 0007 territory; the maintainer
-  decides it.
+- **Recommendation:** not decided here. Option 1 needs the (b) guard change
+  before a 40 min run; option 2 avoids the permit mutex but needs the lease rule
+  change and a durable branch. Decide (g) together with (b). The lease rule is
+  ADR 0007 territory; the maintainer decides it.
 
 ## 3. Work split
 
@@ -312,12 +375,12 @@ reaction (section 3.2) is not part of this list.
 
 | Path | Why |
 | --- | --- |
-| `internal/executor/` | Executor side of the scan (intake, retained records, baseline approval, scheduling in (a)), the `CompareBaselineList` path in (c), the durable read branch in (g) option 2, and the IG-04 I1 reaction (unlock refusal per Q4, ADR 0015:1675) |
+| `internal/executor/` | Executor side of the scan (intake, retained records, baseline approval, scheduling in (a)), the `CompareBaselineList` path in (c), the durable read branch in (g) option 2, the attached-run guard call in (b) (`schedule.go:142`, `:211`), and the IG-04 I1 reaction (unlock refusal per Q4, ADR 0015:1675) |
 | `internal/executordb/` | Approved-digest writer (`StoreApprovedBaselineDigest`) and the approval transaction (c) |
 | `internal/hostrun/` | Action-specific limit in (b) |
 | `proto/` | Any new RPC (for example the approval RPC or a findings query); regenerate with `make generate` |
 | `cmd/nebula/` | `nebula integrity ack` and `verify --offline` (IG-04, ADR 0015:1675); `nebula verify` from an admin machine (IG-04); `nebula integrity pending`/`approve` (IG-06) |
-| `internal/permit/` | Lease rule for `fim.scan` in (d), if the rule moves out of `executions` |
+| `internal/permit/` | Lease rule for `fim.scan` in (d), if the rule moves out of `executions`; the `dispatchReadRun` guard change in (b) (`lease.go:1085-1102`) |
 | `internal/executions/`, `cmd/nebula-server/` | **Not** protected. Listed here only to note that (d) and (g) lease-rule changes can be made there, but the rule itself needs the maintainer (ADR 0007) |
 
 Also check before IG-05: `internal/executions/actions/actions.go` (the catalog)
@@ -370,6 +433,8 @@ No Go code changed; no test is possible for a document. Instead:
 
 - Every file:line cited above was checked with `grep` or `sed` against the
   tree on this branch. Round 1 re-checked the lines named in the local review,
-  and the ADR line numbers in sections 2 to 5.
+  and the ADR line numbers in sections 2 to 5. Round 3 re-read the code for
+  the points named in its review: section 1 (baseline and findings rows), section
+  2 (b), (c), (d) and (g), and the lock and revocation callers of the permit mutex.
 - No option in this paper is presented as decided. Where the ADR is open, the
   text says so.
