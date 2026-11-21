@@ -1,0 +1,40 @@
+# Allowlist for internal/wiringguard (G41).
+#
+# One package per line: <package path> | <reason> | <ticket or plan item>
+# Every field is required. A listed package is not reachable from cmd/ yet;
+# the reason says why. Remove the line when the package gets an importer.
+# G41 means: no wiring ticket exists yet; the package is recorded and must be
+# triaged (wired, or removed) under G41.
+
+internal/attackpath/jewels | crown-jewels store of the attack-path search (ADR 0011), no importer on main | G41
+internal/cbscli | Cisco CBS CLI session driver, no caller wired | G41
+internal/cbsparse | parsers for Cisco CBS CLI output, no caller wired | G41
+internal/edl | pure rules for External Dynamic Lists (ADR 0012 D7), no caller wired | G41
+internal/fimfinding | maps I2 baseline deviations to findings (ADR 0015), no caller wired | G41
+internal/fimresolve | resolves paths of fim-scan-v1 records, no caller wired | G41
+internal/fimretain | merges fim-scan-v1 runs into retained records, no caller wired | G41
+internal/fimsshd | SSH login file set of ADR 0015 D7/D9, no caller wired | G41
+internal/fimstore | per-host FIM baseline store (ADR 0015 D7), no caller wired | G41
+internal/helpassist/answer | in-app help assistant answer checks, package tree not mounted | G41
+internal/helpassist/prompt | in-app help assistant prompt assembly, package tree not mounted | G41
+internal/helpassist/ratelimit | in-app help assistant rate limit, package tree not mounted | G41
+internal/helpassist/secretguard | in-app help assistant question guard, package tree not mounted | G41
+internal/helpassist/turns | in-app help assistant follow-up turns, package tree not mounted | G41
+internal/helpcmd | deterministic command checks of the in-app help, no caller wired | G41
+internal/helpfacts | minimised inventory facts for the in-app help, no caller wired | G41
+internal/integritystore | integrity findings store (ADR 0015 D9), no caller wired | G41
+internal/modules/bootstrap | loads first-party bootstrap modules, no caller on main | G41
+internal/modules/bootstrap/cmd/packlock | developer command that regenerates module.lock.json, run by hand (main outside cmd/) | PV-07
+internal/netadvisor | rule advisor checks na-v1 (ADR 0012 D4), no caller wired | G41
+internal/netdevadapt | connects netdevinventory store to its consumers, no caller wired | G41
+internal/netreach | reachability model nr-v1 (ADR 0012 D2), no caller wired | G41
+internal/panapi | read-only PAN-OS XML API client, no caller wired | G41
+internal/reputation | IP reputation snapshot validation, no caller wired | G41
+internal/vuln/exportconform | test helper: shared table of device values, imported by tests only | G41
+internal/vulnfeed/reputation | pure parser library for IP reputation feeds, no caller wired | G41
+internal/vulninventory | versioned reads of installed software, no caller wired | G41
+internal/web/enroll | enrollment script route merged but not mounted in nebula-server (EN-09) | EN-09
+internal/web/ui/jewels | crown-jewels admin page (ADR 0011 D10), not mounted | G41
+internal/hostrun/hostruntest | test helper: in-process SSH server, imported by tests only | G41
+test/browser/harness | browser-test harness binary (main outside cmd/), run by the browser test | G41
+internal/wiringguard | this guard; run by its own test in make check, not imported by a command | uf15
