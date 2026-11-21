@@ -297,26 +297,24 @@ func (s *Store) runHook(stage string) error {
 	return s.hook(stage)
 }
 
-// UpsertDevice records or updates the server copy of an executor device,
-// stamping the report with the server clock. It is the only writer of
-// device rows; see UpsertDeviceReported for the import path. The family is
-// immutable and the trust generation never decreases.
+// UpsertDevice records or updates the server copy of an executor device.
+// It does not stamp last_seen: last_seen keeps meaning the newest dataset
+// observation (see Device.LastSeen). The family is immutable and the trust
+// generation never decreases.
 func (s *Store) UpsertDevice(ctx context.Context, d netdevcontract.Device) error {
-	return s.UpsertDeviceReported(ctx, d, s.now())
+	return s.upsertDevice(ctx, d, sql.NullInt64{})
 }
 
-// UpsertDeviceReported writes the device row from one metadata record the
-// collector spooled (ND-16 variant 1, the import path). reportedAt is the
-// time the collector reported the device. It sets last_seen to the newest
-// report (never backwards), so a row always shows when the collector last
-// reported it. The row is "reported by collector"; it is never a confirmed
-// device, which needs the explicit admin link (ND-18 part 2).
+// UpsertDeviceReported is the import path (ND-16 variant 1): it writes the
+// device row from one metadata record the collector spooled. reportedAt is
+// the time the collector reported the device; last_seen moves forward to it
+// (never backwards), so the row shows when the collector last reported it.
+// The row is "reported by collector", never a confirmed device, which needs
+// the explicit admin link (ND-18 part 2).
 //
-// The family is immutable: a record for another family is refused with
-// ErrFamilyChanged. A record whose trust generation is lower than the
-// stored one is refused with ErrTrustGenerationRegressed. A refused record
-// changes nothing. A reportedAt that is zero or more than MaxFutureSkew
-// ahead of the server clock is refused.
+// A reportedAt that is zero or more than MaxFutureSkew ahead of the server
+// clock is refused. The family and trust generation rules are those of
+// UpsertDevice.
 func (s *Store) UpsertDeviceReported(ctx context.Context, d netdevcontract.Device, reportedAt time.Time) error {
 	v, err := netdevcontract.ValidateDevice(d)
 	if err != nil {
@@ -325,11 +323,20 @@ func (s *Store) UpsertDeviceReported(ctx context.Context, d netdevcontract.Devic
 	if reportedAt.IsZero() {
 		return fmt.Errorf("netdevinventory: upsert device %s: report time is zero", v.DeviceID)
 	}
-	now := s.now()
-	if reportedAt.After(now.Add(MaxFutureSkew)) {
+	if reportedAt.After(s.now().Add(MaxFutureSkew)) {
 		return fmt.Errorf("netdevinventory: upsert device %s: %w", v.DeviceID, ErrFutureObservation)
 	}
-	reported, nowMicros := micros(reportedAt), micros(now)
+	return s.upsertDevice(ctx, v, sql.NullInt64{Int64: micros(reportedAt), Valid: true})
+}
+
+// upsertDevice is the single writer of device rows. reported, when valid,
+// is the collector report time folded into last_seen.
+func (s *Store) upsertDevice(ctx context.Context, d netdevcontract.Device, reported sql.NullInt64) error {
+	v, err := netdevcontract.ValidateDevice(d)
+	if err != nil {
+		return fmt.Errorf("netdevinventory: upsert device: %w", err)
+	}
+	now := micros(s.now())
 	return s.withTx(ctx, func(tx *sql.Tx) error {
 		var family string
 		var gen int64
@@ -340,7 +347,7 @@ func (s *Store) UpsertDeviceReported(ctx context.Context, d netdevcontract.Devic
 			_, err = tx.ExecContext(ctx, `INSERT INTO netdev_devices_seen
 				(device_id, family, label, trust_generation, last_seen, state, created_at, updated_at)
 				VALUES (?, ?, ?, ?, ?, 'fresh', ?, ?)`,
-				v.DeviceID, string(v.Family), v.Name, int64(v.TrustGeneration), reported, nowMicros, nowMicros)
+				v.DeviceID, string(v.Family), v.Name, int64(v.TrustGeneration), reported, now, now)
 			if err != nil {
 				return fmt.Errorf("netdevinventory: insert device %s: %w", v.DeviceID, err)
 			}
@@ -354,15 +361,16 @@ func (s *Store) UpsertDeviceReported(ctx context.Context, d netdevcontract.Devic
 		if int64(v.TrustGeneration) < gen {
 			return fmt.Errorf("netdevinventory: device %s: %w", v.DeviceID, ErrTrustGenerationRegressed)
 		}
-		// last_seen only moves forward; a report newer than the stored
-		// last_seen also makes the device fresh again.
+		// A NULL reported time leaves last_seen and state as they are: the
+		// COALESCE around MAX and the NULL comparison in CASE fall through.
+		// A report newer than the stored last_seen makes the device fresh.
 		_, err = tx.ExecContext(ctx, `UPDATE netdev_devices_seen
 			SET label = ?, trust_generation = ?,
-			    last_seen = MAX(COALESCE(last_seen, ?), ?),
+			    last_seen = COALESCE(MAX(COALESCE(last_seen, ?), ?), last_seen),
 			    state = CASE WHEN ? > COALESCE(last_seen, 0) THEN 'fresh' ELSE state END,
 			    updated_at = ?
 			WHERE device_id = ?`,
-			v.Name, int64(v.TrustGeneration), reported, reported, reported, nowMicros, v.DeviceID)
+			v.Name, int64(v.TrustGeneration), reported, reported, reported, now, v.DeviceID)
 		if err != nil {
 			return fmt.Errorf("netdevinventory: update device %s: %w", v.DeviceID, err)
 		}

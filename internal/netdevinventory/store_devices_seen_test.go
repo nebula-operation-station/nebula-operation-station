@@ -208,10 +208,11 @@ func TestDeviceReadReportsOriginAndAge(t *testing.T) {
 	}
 }
 
-// TestUpsertDeviceUsesServerClock: the unchanged UpsertDevice entry point
-// stamps the report with the server clock.
-func TestUpsertDeviceUsesServerClock(t *testing.T) {
-	s, _, clock := newTestStore(t)
+// TestUpsertDeviceLeavesLastSeenUnset: the plain UpsertDevice path does not
+// stamp last_seen, which stays the newest dataset observation (zero before
+// any dataset). Only the import path UpsertDeviceReported sets it.
+func TestUpsertDeviceLeavesLastSeenUnset(t *testing.T) {
+	s, _, _ := newTestStore(t)
 	ctx := context.Background()
 	if err := s.UpsertDevice(ctx, cbsDevice()); err != nil {
 		t.Fatal(err)
@@ -220,8 +221,31 @@ func TestUpsertDeviceUsesServerClock(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !got.LastSeen.Equal(*clock) {
-		t.Fatalf("LastSeen = %v, want server clock %v", got.LastSeen, *clock)
+	if !got.LastSeen.IsZero() {
+		t.Fatalf("LastSeen = %v, want zero", got.LastSeen)
+	}
+}
+
+// TestUpsertDeviceReportedKeepsReportAcrossPlainUpsert: a later plain
+// UpsertDevice (label change) does not clear a collector report time.
+func TestUpsertDeviceReportedKeepsReportAcrossPlainUpsert(t *testing.T) {
+	s, _, clock := newTestStore(t)
+	ctx := context.Background()
+	at := *clock
+	if err := s.UpsertDeviceReported(ctx, cbsDevice(), at); err != nil {
+		t.Fatal(err)
+	}
+	renamed := cbsDevice()
+	renamed.Name = "renamed"
+	if err := s.UpsertDevice(ctx, renamed); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetDevice(ctx, "sw-core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.LastSeen.Equal(at) || got.Label != "renamed" {
+		t.Fatalf("device = %+v, want LastSeen %v and label renamed", got, at)
 	}
 }
 
