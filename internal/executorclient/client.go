@@ -64,17 +64,38 @@ type Client struct {
 // New creates a Client and verifies the connection: the socket must exist,
 // be served by the configured executor user, and answer GetStatus.
 func New(ctx context.Context, o Options) (*Client, error) {
-	return newClient(ctx, o, false)
+	return newClient(ctx, o, probeGetStatus)
 }
 
 // NewPVECollector creates a Client for a collector-only UID. It verifies the
 // executor's peer UID and probes ListPVERemotes instead of GetStatus. An
 // Unimplemented response is accepted while the PVE handlers await wiring.
 func NewPVECollector(ctx context.Context, o Options) (*Client, error) {
-	return newClient(ctx, o, true)
+	return newClient(ctx, o, probePVERemotes)
 }
 
-func newClient(ctx context.Context, o Options, collector bool) (*Client, error) {
+// NewNetDevCollector creates a Client for the netdev-collector UID. It
+// verifies the executor's peer UID and probes ListNetDevices instead of
+// GetStatus, which that role may not call. An Unimplemented response is
+// accepted like NewPVECollector accepts it.
+func NewNetDevCollector(ctx context.Context, o Options) (*Client, error) {
+	return newClient(ctx, o, probeNetDevices)
+}
+
+// probe is the call that verifies a new connection.
+type probe int
+
+const (
+	// probeGetStatus is the probe of New: only the server and admin roles
+	// may call GetStatus.
+	probeGetStatus probe = iota
+	// probePVERemotes is the probe of NewPVECollector.
+	probePVERemotes
+	// probeNetDevices is the probe of NewNetDevCollector.
+	probeNetDevices
+)
+
+func newClient(ctx context.Context, o Options, pr probe) (*Client, error) {
 	if o.SocketPath == "" {
 		return nil, errors.New("executorclient: SocketPath is required")
 	}
@@ -116,13 +137,16 @@ func newClient(ctx context.Context, o Options, collector bool) (*Client, error) 
 		defaultTimeout:   o.DefaultTimeout,
 		authorizeTimeout: o.AuthorizeRunTimeout,
 	}
-	if collector {
+	switch pr {
+	case probePVERemotes:
 		_, err = c.ListPVERemotes(ctx, &pb.ListPVERemotesRequest{})
-		if status.Code(err) == codes.Unimplemented {
-			err = nil
-		}
-	} else {
+	case probeNetDevices:
+		_, err = c.ListNetDevices(ctx, &pb.ListNetDevicesRequest{})
+	default:
 		_, err = c.GetStatus(ctx, &pb.GetStatusRequest{})
+	}
+	if pr != probeGetStatus && status.Code(err) == codes.Unimplemented {
+		err = nil
 	}
 	if err != nil {
 		conn.Close()
