@@ -456,7 +456,7 @@ Order for the lab run: WA-02 and WA-01 first, as PVE depends on both, then WA-03
 WA-04 and WA-06, then the rest. Add `install_test.sh` to CI with whichever of them
 touches it first, so that its static checks run at all.
 
-## Re-check 2026-11-20
+## Re-check 2026-11-21
 
 Checked 2026-11-21 against the tree with grep and Read. The audit above is kept as history. The
 table lists gaps where a document says "merged" or "in progress" but the code is library-only or

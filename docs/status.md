@@ -98,7 +98,7 @@ server side (other than attack paths).
 - **One-step enrollment:** dialog not wired in nebula-server (#604).
 - **Dependabot:** #647, #648 wait for review.
 - **Decision papers uf04, uf13, uf14:** the files do not exist in the tree yet (grep, 2026-11-21), so the open decisions are named here only.
-- **Wiring gaps:** network device pages and read path, attack path computation, Ops tab, one-step dialog and help assistant service. See [wiring audit, re-check 2026-11-20](implementation/wiring-audit.md).
+- **Wiring gaps:** network device pages and read path, attack path computation, Ops tab, one-step dialog and help assistant service. See [wiring audit, re-check 2026-11-21](implementation/wiring-audit.md#re-check-2026-11-21).
 
 ## Changelog
 
