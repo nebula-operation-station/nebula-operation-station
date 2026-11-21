@@ -217,7 +217,7 @@ func TestCompleteDropsSupersededHoldsInRowBoundedTransactions(t *testing.T) {
 	e.submit(t, r, 0, covered)
 
 	stats := recordApplyTx(e.st)
-	stop := startWriters(t, path, 4)
+	stop := startWriters(t, path, contendingWriters)
 	c, err := e.st.Complete(e.ctx, r.ID)
 	checkWriters(t, stop())
 	if err != nil {
