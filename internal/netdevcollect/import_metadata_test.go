@@ -107,14 +107,21 @@ func TestImportIgnoresFileWithUnknownReadName(t *testing.T) {
 
 // writeRawRecord publishes a record that Spool.Write would refuse, to test
 // what the importer does with a record it did not validate on the way in.
-func writeRawRecord(t *testing.T, s *Spool, device, read string, gen uint64, payload string) {
+func writeRawRecord(t *testing.T, s *Spool, device, read string, gen uint64, payload string) string {
+	t.Helper()
+	return writeRawRecordAt(t, s, device, read, gen, testTime, strings.Repeat("A", randomChars), payload)
+}
+
+// writeRawRecordAt publishes a record observed at observed under the random
+// name part random, so tests can build many distinct spool files.
+func writeRawRecordAt(t *testing.T, s *Spool, device, read string, gen uint64, observed time.Time, random, payload string) string {
 	t.Helper()
 	raw, err := json.Marshal(Record{DeviceID: device, Read: read, TrustGeneration: gen,
-		ObservedAt: testTime.UTC(), Data: json.RawMessage(payload)})
+		ObservedAt: observed.UTC(), Data: json.RawMessage(payload)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	name := formatSpoolName(device, read, testTime.UnixNano(), strings.Repeat("A", randomChars))
+	name := formatSpoolName(device, read, observed.UnixNano(), random)
 	dir, err := s.openDir(true)
 	if err != nil {
 		t.Fatal(err)
@@ -123,6 +130,7 @@ func writeRawRecord(t *testing.T, s *Spool, device, read string, gen uint64, pay
 	if err := writeAt(dir, name, raw); err != nil {
 		t.Fatalf("publish %s: %v", name, err)
 	}
+	return name
 }
 
 // keptNames lists the records in kept/, by spool name without the reason
@@ -136,4 +144,152 @@ func keptNames(t *testing.T, s *Spool) []string {
 		}
 	}
 	return out
+}
+
+// metadataFiles returns the device metadata files still in the spool, in
+// List order.
+func metadataFiles(t *testing.T, s *Spool) []string {
+	t.Helper()
+	var out []string
+	for _, n := range spoolFiles(t, s) {
+		if p, err := parseSpoolName(n); err == nil && p.read == ReadDeviceMetadata {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// metadataAt publishes a metadata record of device observed at testTime plus
+// offset.
+func metadataAt(t *testing.T, env *importEnv, device string, offset time.Duration, payload string) string {
+	t.Helper()
+	return writeRawRecordAt(t, env.spool, device, ReadDeviceMetadata, importGen,
+		testTime.Add(offset), strings.Repeat("A", randomChars), payload)
+}
+
+// datasetPayload returns the spooled device and payload of read.
+func datasetPayload(t *testing.T, read string) (device, payload string) {
+	t.Helper()
+	for _, rp := range readPayloads {
+		if rp.read == read {
+			return rp.device, rp.payload
+		}
+	}
+	t.Fatalf("no payload for %s", read)
+	return "", ""
+}
+
+const (
+	validCBSMetadata     = `{"device_id":"core-sw-01","family":"cbs","label":"Core switch","trust_generation":3,"blocked":false,"block_reason":""}`
+	invalidCBSMetadata   = `{"device_id":"core-sw-01","family":"cbs","label":"a\u0007","trust_generation":3,"blocked":false,"block_reason":""}`
+	metadataFloodSize    = 2 * MaxMetadataPerRun
+	metadataFloodSpacing = time.Millisecond
+)
+
+func TestSecondRunKeepsStagedMetadataAndStoresNothing(t *testing.T) {
+	env := newImportEnv(t)
+	store := &recordingStore{t: t}
+	env.imp.Store = store
+	name := metadataAt(t, env, importCBS, 0, validCBSMetadata)
+
+	if rep := env.run(t); rep.Staged != 1 {
+		t.Fatalf("first run report = %+v, want one staged record", rep)
+	}
+	for pass := 2; pass <= 3; pass++ {
+		rep := env.run(t)
+		if rep.Kept+rep.Failed+rep.Retry+rep.Imported != 0 {
+			t.Fatalf("pass %d report = %+v, want nothing rejected or stored", pass, rep)
+		}
+		if got := metadataFiles(t, env.spool); !slices.Equal(got, []string{name}) {
+			t.Fatalf("pass %d spool metadata = %v, want only %s", pass, got, name)
+		}
+	}
+	if store.calls != 0 {
+		t.Fatalf("store called %d times", store.calls)
+	}
+}
+
+func TestNewerStagedMetadataSupersedesOlderOfTheDevice(t *testing.T) {
+	env := newImportEnv(t)
+	older := metadataAt(t, env, importCBS, 0, validCBSMetadata)
+	if rep := env.run(t); rep.Staged != 1 {
+		t.Fatalf("first run report = %+v", rep)
+	}
+	newer := metadataAt(t, env, importCBS, time.Second, validCBSMetadata)
+	rep := env.run(t)
+	if rep.Staged != 1 || rep.Pruned != 1 || rep.Kept != 0 {
+		t.Fatalf("second run report = %+v, want the newer record staged and the older pruned", rep)
+	}
+	if got := metadataFiles(t, env.spool); !slices.Equal(got, []string{newer}) {
+		t.Fatalf("spool metadata = %v, want only %s (older %s)", got, newer, older)
+	}
+}
+
+func TestInvalidNewestMetadataDoesNotRetireOlderValid(t *testing.T) {
+	env := newImportEnv(t)
+	valid := metadataAt(t, env, importCBS, 0, validCBSMetadata)
+	metadataAt(t, env, importCBS, time.Second, invalidCBSMetadata)
+	rep := env.run(t)
+	if rep.Kept != 1 || rep.Staged != 1 || rep.Pruned != 0 {
+		t.Fatalf("report = %+v, want the newer record kept and the older one staged", rep)
+	}
+	if got := metadataFiles(t, env.spool); !slices.Equal(got, []string{valid}) {
+		t.Fatalf("spool metadata = %v, want only %s", got, valid)
+	}
+}
+
+func TestStagedMetadataOfEachDeviceIsKept(t *testing.T) {
+	env := newImportEnv(t)
+	cbs := metadataAt(t, env, importCBS, 0, validCBSMetadata)
+	panos := metadataAt(t, env, importPANOS, 0,
+		`{"device_id":"fw-01","family":"panos","label":"Edge firewall","trust_generation":3,"blocked":false,"block_reason":""}`)
+	rep := env.run(t)
+	if rep.Staged != 2 || rep.Pruned != 0 {
+		t.Fatalf("report = %+v, want two staged records", rep)
+	}
+	if got := metadataFiles(t, env.spool); len(got) != 2 || !slices.Contains(got, cbs) || !slices.Contains(got, panos) {
+		t.Fatalf("spool metadata = %v, want %s and %s", got, cbs, panos)
+	}
+}
+
+// Accumulated valid metadata must not hold back dataset import: the newest
+// valid record per device is kept, the rest are superseded, and the dataset
+// record waiting behind them is stored in the same pass.
+func TestManyAcceptedMetadataFilesDoNotStarveDatasetImport(t *testing.T) {
+	env := newImportEnv(t)
+	for i := 0; i < metadataFloodSize; i++ {
+		metadataAt(t, env, importCBS, time.Duration(i)*metadataFloodSpacing, validCBSMetadata)
+	}
+	device, payload := datasetPayload(t, ReadPANOSZones)
+	env.write(t, device, ReadPANOSZones, importGen, false, payload)
+
+	rep := env.run(t)
+	if rep.Imported != 1 || rep.Deferred != 0 {
+		t.Fatalf("report = %+v, want the dataset imported", rep)
+	}
+	if got := metadataFiles(t, env.spool); len(got) != 1 {
+		t.Fatalf("%d metadata files remain, want only the newest", len(got))
+	}
+}
+
+// Rejected metadata is bounded per pass as well: a flood of invalid metadata
+// must not stop the dataset import of the same pass.
+func TestManyRejectedMetadataFilesDoNotStarveDatasetImport(t *testing.T) {
+	env := newImportEnv(t)
+	for i := 0; i < metadataFloodSize; i++ {
+		metadataAt(t, env, importCBS, time.Duration(i)*metadataFloodSpacing, invalidCBSMetadata)
+	}
+	device, payload := datasetPayload(t, ReadPANOSZones)
+	env.write(t, device, ReadPANOSZones, importGen, false, payload)
+
+	rep := env.run(t)
+	if rep.Imported != 1 {
+		t.Fatalf("report = %+v, want the dataset imported", rep)
+	}
+	if rep.Kept > MaxMetadataPerRun {
+		t.Fatalf("kept %d metadata records in one pass, want at most %d", rep.Kept, MaxMetadataPerRun)
+	}
+	if got := len(metadataFiles(t, env.spool)); got != metadataFloodSize-rep.Kept {
+		t.Fatalf("%d metadata files remain, want %d", got, metadataFloodSize-rep.Kept)
+	}
 }

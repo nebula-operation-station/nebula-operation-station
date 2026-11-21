@@ -54,6 +54,10 @@ const (
 	// MaxRecordsPerRun bounds the records one Run stores; the rest wait
 	// for the next pass.
 	MaxRecordsPerRun = 512
+	// MaxMetadataPerRun bounds the device metadata records one Run judges.
+	// It is a budget of its own, so that accumulated metadata never holds
+	// back the dataset records of the same pass.
+	MaxMetadataPerRun = 512
 	// KeptDirName is the spool subdirectory that holds rejected records.
 	KeptDirName = "kept"
 	// MaxKeptFiles bounds the rejected records kept/ holds. Beyond it a
@@ -135,12 +139,15 @@ type ImportReport struct {
 	// Deferred counts records left for a later pass: their device is
 	// halted or backing off, or the pass reached MaxRecordsPerRun.
 	Deferred int
-	// Pruned counts records of a device with a store failure on record
-	// removed because a newer record of the same read, judged valid, waits
-	// in the spool (see MaxPendingPerRead).
+	// Pruned counts records removed because a newer record of the same
+	// read, judged valid, waits in the spool: datasets of a device with a
+	// store failure on record (see MaxPendingPerRead), and older device
+	// metadata of a device (see stageMetadata).
 	Pruned int
-	// Staged counts device metadata records judged valid. They stay in the
-	// spool: the store step that writes them does not exist yet (nx08/nx10).
+	// Staged counts device metadata records judged valid in this pass. The
+	// newest valid one per device stays in the spool and is not judged again
+	// until a newer one arrives: the store step that writes it does not
+	// exist yet (nx08/nx10).
 	Staged int
 	// Errors holds one "<file>: <code>" line per kept, retried or failed
 	// record.
@@ -163,6 +170,9 @@ type Importer struct {
 	// unmoved holds rejected records whose move and removal both failed;
 	// later passes only retry that, never the import.
 	unmoved map[string]string
+	// metaValid maps a device to the newest device metadata record of it
+	// judged valid, which stays in the spool.
+	metaValid map[string]string
 }
 
 type importBackoff struct {
@@ -240,6 +250,7 @@ func (im *Importer) Run(ctx context.Context) (ImportReport, error) {
 	if im.backoff == nil {
 		im.backoff = map[string]importBackoff{}
 		im.unmoved = map[string]string{}
+		im.metaValid = map[string]string{}
 	}
 	names, err := im.Spool.List(ctx)
 	if err != nil {
@@ -266,9 +277,18 @@ func (im *Importer) Run(ctx context.Context) (ImportReport, error) {
 
 	rep := ImportReport{Files: len(names)}
 	now := im.Now()
-	handled, err := im.pruneSuperseded(ctx, names, &rep)
+	// Device metadata has its own budget and never waits behind a store
+	// failure: it writes nothing, so it is judged before the datasets.
+	handled, err := im.stageMetadata(ctx, names, &rep)
 	if err != nil {
 		return rep, err
+	}
+	pruned, err := im.pruneSuperseded(ctx, names, &rep)
+	if err != nil {
+		return rep, err
+	}
+	for name := range pruned {
+		handled[name] = struct{}{}
 	}
 	halted := map[string]struct{}{}
 	taken := 0
@@ -279,24 +299,15 @@ func (im *Importer) Run(ctx context.Context) (ImportReport, error) {
 		if _, ok := handled[name]; ok {
 			continue
 		}
-		if reason, ok := im.unmoved[name]; ok {
-			im.reject(ctx, name, reason, &rep)
-			continue
-		}
 		n, err := parseSpoolName(name)
 		if err != nil {
 			continue // List only returns well-formed names
 		}
 		if importStepFor(n.read) == stepDeviceMetadata {
-			// Metadata never waits behind a store failure: it writes nothing.
-			if taken >= MaxRecordsPerRun {
-				rep.Deferred++
-				continue
-			}
-			taken++
-			if im.stageDeviceMetadata(ctx, name, &rep) == outcomeInterrupted {
-				return rep, ctx.Err()
-			}
+			continue // judged by stageMetadata; never stored
+		}
+		if reason, ok := im.unmoved[name]; ok {
+			im.reject(ctx, name, reason, &rep)
 			continue
 		}
 		_, stop := halted[n.device]
@@ -476,33 +487,122 @@ func (im *Importer) judge(ctx context.Context, name string, rep *ImportReport) (
 	return judgeValid, nil
 }
 
-// stageDeviceMetadata is the device metadata step. It takes and validates
-// one device metadata record and leaves a valid one in the spool, unread
-// by any store and unconfirmed. A record at fault goes to kept/ with its
-// reason. The store step that writes device rows is not part of this step.
-func (im *Importer) stageDeviceMetadata(ctx context.Context, name string, rep *ImportReport) importOutcome {
+// stageMetadata is the device metadata step. Every device metadata record
+// is a full snapshot of its device's registry metadata, so per device only
+// the newest valid record matters. For each device the records are judged
+// newest first until one is valid; that record stays in the spool, unread by
+// any store and unconfirmed, and every older metadata file of the device is
+// removed as superseded. A record at fault goes to kept/ with its reason.
+// The pass judges at most MaxMetadataPerRun records. The newest valid record
+// of a device is remembered in metaValid and is not taken again while it is
+// still the newest file, since spool files are published once and never
+// rewritten. The store step that writes device rows is not part of this
+// step. Its error is only ever ctx's.
+func (im *Importer) stageMetadata(ctx context.Context, names []string, rep *ImportReport) (map[string]struct{}, error) {
+	handled := map[string]struct{}{}
+	byDevice := map[string][]string{}
+	var devices []string
+	for _, name := range names {
+		n, err := parseSpoolName(name)
+		if err != nil || importStepFor(n.read) != stepDeviceMetadata {
+			continue
+		}
+		if _, ok := byDevice[n.device]; !ok {
+			devices = append(devices, n.device)
+		}
+		byDevice[n.device] = append(byDevice[n.device], name) // oldest first, as listed
+	}
+	for dev := range im.metaValid {
+		if _, ok := byDevice[dev]; !ok {
+			delete(im.metaValid, dev)
+		}
+	}
+	judged := 0
+	for _, dev := range devices {
+		run := byDevice[dev]
+		known := im.metaValid[dev]
+		valid := -1
+		for i := len(run) - 1; i >= 0; i-- {
+			name := run[i]
+			if name == known {
+				valid = i // judged in an earlier pass, still the newest valid
+				break
+			}
+			if reason, ok := im.unmoved[name]; ok {
+				im.reject(ctx, name, reason, rep)
+				handled[name] = struct{}{}
+				continue
+			}
+			if judged >= MaxMetadataPerRun {
+				break
+			}
+			judged++
+			j, err := im.judgeMetadata(ctx, name, rep)
+			if err != nil {
+				return handled, err
+			}
+			if j == judgeHandled {
+				handled[name] = struct{}{}
+				continue
+			}
+			if j == judgeValid {
+				valid = i
+				rep.Staged++
+				break
+			}
+		}
+		if valid < 0 {
+			if known != "" && !slices.Contains(run, known) {
+				delete(im.metaValid, dev) // the remembered file left the spool
+			}
+			continue
+		}
+		im.metaValid[dev] = run[valid]
+		for _, name := range run[:valid] {
+			if _, ok := handled[name]; ok {
+				continue
+			}
+			if err := spoolDiscard(im.Spool, ctx, name); err != nil {
+				if ctx.Err() != nil {
+					return handled, ctx.Err()
+				}
+				rep.Failed++
+				rep.Errors = append(rep.Errors, name+": remove_failed")
+				continue
+			}
+			handled[name] = struct{}{}
+			rep.Pruned++
+			im.log().Info("netdev import: record removed", "file", name, "reason", ReasonSuperseded)
+		}
+	}
+	return handled, nil
+}
+
+// judgeMetadata takes and validates one device metadata record without
+// storing or confirming it. A record at fault is rejected, as importOne
+// would. Its error is only ever ctx's.
+func (im *Importer) judgeMetadata(ctx context.Context, name string, rep *ImportReport) (judgement, error) {
 	t, err := im.Spool.Take(ctx, name)
 	switch {
 	case err == nil:
 	case errors.Is(err, ErrInvalidRecord), errors.Is(err, ErrBadName):
 		im.reject(ctx, name, ReasonInvalidRecord, rep)
-		return outcomeDone
+		return judgeHandled, nil
 	case errors.Is(err, ErrReplayed):
 		im.drop(ctx, name, ReasonReplayed, rep)
-		return outcomeDone
+		return judgeHandled, nil
 	case ctx.Err() != nil:
-		return outcomeInterrupted
+		return judgeUnread, ctx.Err()
 	default:
 		rep.Failed++
 		rep.Errors = append(rep.Errors, name+": read_failed")
-		return outcomeDone
+		return judgeUnread, nil
 	}
 	if err := checkDeviceMetadata(t.Record.DeviceID, t.Record.TrustGeneration, t.Record.Data); err != nil {
 		im.reject(ctx, name, ReasonInvalidPayload, rep)
-		return outcomeDone
+		return judgeHandled, nil
 	}
-	rep.Staged++
-	return outcomeDone
+	return judgeValid, nil
 }
 
 // importOne takes, validates, stores and confirms one record.
