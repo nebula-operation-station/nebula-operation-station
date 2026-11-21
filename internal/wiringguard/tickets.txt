@@ -1,0 +1,3 @@
+# Wiring tickets with no entry under docs/. One per line: <ID> | <title>.
+# TestRealTreeTicketsExist accepts an ID named in a docs/ Markdown file or here.
+WG-01 | wiring guard (internal/wiringguard): allowlist, import scan and fixtures; its test runs in make check

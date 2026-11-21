@@ -18,9 +18,15 @@
 //     reachability, so the guard reports gaps rather than false alarms.
 //   - A package made only of generated files is not checked itself, but its
 //     imports still count while its package is reachable.
-//   - Allowlist entries need a reason and a ticket. An entry whose package is
-//     reachable now is reported as informational only. An entry that names no
-//     checked package is stale and is reported as a finding.
+//   - Allowlist entries need a reason and a ticket. The reason starts with a
+//     category (planned, test helper - never wired, developer tool), and the
+//     ticket must be a whole ID that appears in a file under docs/ or in
+//     internal/wiringguard/tickets.txt. An entry whose package is reachable now
+//     is reported as informational only. An entry that names no checked package
+//     is stale and is reported as a finding.
+//   - Directories named testdata, vendor, or starting with "." or "_" are not
+//     scanned. A subdirectory with its own go.mod is another module and is not
+//     scanned either.
 //
 // The package uses only the standard library and reads only the module tree.
 package wiringguard

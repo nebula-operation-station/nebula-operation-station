@@ -31,6 +31,28 @@ const (
 	// allowlistFields is the number of "|"-separated fields in an entry:
 	// package path, reason, ticket.
 	allowlistFields = 3
+	// docsDir is the planning-document directory whose Markdown files are
+	// searched for ticket IDs, relative to the module root.
+	docsDir = "docs"
+	// ticketRegister lists wiring tickets that have no entry under docsDir,
+	// relative to the module root. One ticket per line: "<ID> | <title>".
+	ticketRegister = "internal/wiringguard/tickets.txt"
+	// maxTicketSourceBytes limits how much of one planning document or the
+	// ticket register is read.
+	maxTicketSourceBytes = 1 << 20
+)
+
+// Reason categories. The reason of every allowlist entry starts with one of
+// them, so triage can tell a package that a ticket will wire from a helper
+// that must never be wired.
+const (
+	// CategoryPlanned: the named ticket wires the package.
+	CategoryPlanned = "planned:"
+	// CategoryTestHelper: the package is imported by tests only, by design.
+	CategoryTestHelper = "test helper - never wired:"
+	// CategoryDeveloperTool: a command run by hand or by make check, never by
+	// a product command.
+	CategoryDeveloperTool = "developer tool:"
 )
 
 // ErrNoModule is returned by FindModuleRoot when no go.mod exists in the
@@ -40,6 +62,12 @@ var ErrNoModule = errors.New("no go.mod found in any parent directory")
 // generatedRe matches the comment marker that the Go tool treats as generated
 // code.
 var generatedRe = regexp.MustCompile(`^// Code generated .* DO NOT EDIT\.$`)
+
+// ticketRe matches one ticket ID such as "AS-09", "iv02" or "M4-1".
+var ticketRe = regexp.MustCompile(`^[A-Za-z0-9]+(-[A-Za-z0-9]+)*$`)
+
+// ticketWordRe finds ticket-like words in a planning document.
+var ticketWordRe = regexp.MustCompile(`[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*`)
 
 // Entry is one allowlist record: why an internal package is not wired yet and
 // the ticket or plan item that will wire it.
@@ -108,7 +136,9 @@ func FindModuleRoot(start string) (string, error) {
 //
 //	<package path> | <reason> | <ticket>
 //
-// Every field must be non-empty and each package may appear once.
+// Every field must be non-empty, the reason must start with one of the
+// Category constants, the ticket must be a single ID, and each package may
+// appear once. Whether the ticket exists is checked by UnknownTickets.
 func ParseAllowlist(r io.Reader) (Allowlist, error) {
 	data, err := io.ReadAll(io.LimitReader(r, maxAllowlistBytes+1))
 	if err != nil {
@@ -140,8 +170,14 @@ func ParseAllowlist(r io.Reader) (Allowlist, error) {
 		if reason == "" {
 			return nil, fmt.Errorf("allowlist line %d: %s has no reason", line, pkg)
 		}
+		if !hasCategory(reason) {
+			return nil, fmt.Errorf("allowlist line %d: %s: reason must start with %q, %q or %q", line, pkg, CategoryPlanned, CategoryTestHelper, CategoryDeveloperTool)
+		}
 		if ticket == "" {
 			return nil, fmt.Errorf("allowlist line %d: %s has no ticket or plan item", line, pkg)
+		}
+		if !ticketRe.MatchString(ticket) {
+			return nil, fmt.Errorf("allowlist line %d: %s: ticket %q is not a single ID", line, pkg, ticket)
 		}
 		if _, dup := allow[pkg]; dup {
 			return nil, fmt.Errorf("allowlist line %d: %s listed twice", line, pkg)
@@ -152,6 +188,91 @@ func ParseAllowlist(r io.Reader) (Allowlist, error) {
 		return nil, fmt.Errorf("read allowlist: %w", err)
 	}
 	return allow, nil
+}
+
+// hasCategory reports whether reason starts with a known reason category.
+func hasCategory(reason string) bool {
+	for _, c := range []string{CategoryPlanned, CategoryTestHelper, CategoryDeveloperTool} {
+		if strings.HasPrefix(reason, c) {
+			return true
+		}
+	}
+	return false
+}
+
+// UnknownTickets returns the sorted package paths of allow whose ticket ID
+// does not appear as a whole ID in a Markdown file under root/docs or in the
+// ticket register root/internal/wiringguard/tickets.txt. A missing register
+// counts as empty; a missing docs directory is an error, so the check cannot
+// pass by reading nothing.
+func UnknownTickets(root string, allow Allowlist) ([]string, error) {
+	known, err := ticketIDs(root)
+	if err != nil {
+		return nil, err
+	}
+	var unknown []string
+	for pkg, entry := range allow {
+		if !known[entry.Ticket] {
+			unknown = append(unknown, pkg)
+		}
+	}
+	sort.Strings(unknown)
+	return unknown, nil
+}
+
+// ticketIDs collects the ticket IDs named in the planning documents and the
+// first field of each line of the ticket register.
+func ticketIDs(root string) (map[string]bool, error) {
+	known := map[string]bool{}
+	err := filepath.WalkDir(filepath.Join(root, docsDir), func(file string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return fmt.Errorf("walk %s: %w", filepath.ToSlash(file), err)
+		}
+		if d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
+			return nil
+		}
+		data, err := readLimited(file, maxTicketSourceBytes)
+		if err != nil {
+			return err
+		}
+		for _, id := range ticketWordRe.FindAllString(string(data), -1) {
+			known[id] = true
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read planning documents: %w", err)
+	}
+	data, err := readLimited(filepath.Join(root, ticketRegister), maxTicketSourceBytes)
+	switch {
+	case err == nil:
+		for _, line := range strings.Split(string(data), "\n") {
+			id, _, _ := strings.Cut(line, "|")
+			if id = strings.TrimSpace(id); ticketRe.MatchString(id) {
+				known[id] = true
+			}
+		}
+	case !errors.Is(err, fs.ErrNotExist):
+		return nil, err
+	}
+	return known, nil
+}
+
+// readLimited reads file and fails when it is larger than limit bytes.
+func readLimited(file string, limit int64) ([]byte, error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", filepath.ToSlash(file), err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", filepath.ToSlash(file), err)
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("read %s: larger than %d bytes", filepath.ToSlash(file), limit)
+	}
+	return data, nil
 }
 
 // LoadAllowlist reads and parses the allowlist file at file.
