@@ -76,8 +76,8 @@ func NewPVECollector(ctx context.Context, o Options) (*Client, error) {
 
 // NewNetDevCollector creates a Client for the netdev-collector UID. It
 // verifies the executor's peer UID and probes ListNetDevices instead of
-// GetStatus, which that role may not call. An Unimplemented response is
-// accepted like NewPVECollector accepts it.
+// GetStatus, which that role may not call. Unimplemented is refused: the
+// executor wires ListNetDevices, so that answer means a wrong peer.
 func NewNetDevCollector(ctx context.Context, o Options) (*Client, error) {
 	return newClient(ctx, o, probeNetDevices)
 }
@@ -145,7 +145,10 @@ func newClient(ctx context.Context, o Options, pr probe) (*Client, error) {
 	default:
 		_, err = c.GetStatus(ctx, &pb.GetStatusRequest{})
 	}
-	if pr != probeGetStatus && status.Code(err) == codes.Unimplemented {
+	// Only the PVE probe tolerates Unimplemented: its handlers are not wired
+	// yet. The netdev probe is wired, so Unimplemented there means a wrong
+	// or outdated peer and must be refused.
+	if pr == probePVERemotes && status.Code(err) == codes.Unimplemented {
 		err = nil
 	}
 	if err != nil {

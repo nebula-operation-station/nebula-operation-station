@@ -89,9 +89,14 @@ func TestNewNetDevCollectorProbe(t *testing.T) {
 		name       string
 		probeError error
 		wantError  error
+		// wantRefused is set when the probe fails with an error that has no
+		// typed sentinel, such as Unimplemented from a wrong peer.
+		wantRefused bool
 	}{
 		{name: "success"},
-		{name: "unimplemented counts as reachable", probeError: status.Error(codes.Unimplemented, "not wired")},
+		// The executor implements ListNetDevices and wires it, so an
+		// Unimplemented answer means a wrong or outdated peer.
+		{name: "unimplemented is a wrong peer", probeError: status.Error(codes.Unimplemented, "not wired"), wantRefused: true},
 		{name: "permission denied", probeError: status.Error(codes.PermissionDenied, "denied"), wantError: ErrPermissionDenied},
 		{name: "unavailable", probeError: status.Error(codes.Unavailable, "unavailable"), wantError: ErrUnavailable},
 	} {
@@ -100,6 +105,12 @@ func TestNewNetDevCollectorProbe(t *testing.T) {
 			c, err := NewNetDevCollector(testCtx(t), Options{SocketPath: socket, ExecutorUser: currentUser(t)})
 			if c != nil {
 				defer c.Close()
+			}
+			if tc.wantRefused {
+				if err == nil || c != nil {
+					t.Fatalf("wrong peer accepted: client=%v, err=%v", c, err)
+				}
+				return
 			}
 			if !errors.Is(err, tc.wantError) {
 				t.Fatalf("want %v, got %v", tc.wantError, err)
