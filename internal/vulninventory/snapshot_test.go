@@ -359,24 +359,109 @@ func TestCurrentRejectsInvalidInput(t *testing.T) {
 	}
 }
 
-func TestCurrentLimitsHostsToMaxSnapshotHosts(t *testing.T) {
+func TestCurrentHostCapCountsOnlyHostsWithReads(t *testing.T) {
 	s, _ := openStore(t)
 	useClock(t)
-	mustPut(t, s, testRead("h00000", true, 0))
-	mustPut(t, s, testRead("h00001", true, 0))
-	// h10004 sorts after the first MaxSnapshotHosts host IDs and is left out.
-	mustPut(t, s, testRead("h10004", true, 0))
-
+	// Hosts h00000..h09999 have no read. They must not take the host slots of
+	// the three hosts that do have reads.
 	hosts := make([]string, 0, MaxSnapshotHosts+5)
 	for i := 0; i < MaxSnapshotHosts+5; i++ {
 		hosts = append(hosts, fmt.Sprintf("h%05d", i))
 	}
-	snap := mustCurrent(t, s, hosts, time.Hour, 0)
-	if snap.Omitted != 5 {
-		t.Fatalf("omitted = %d, want 5", snap.Omitted)
+	last := []string{"h10002", "h10003", "h10004"}
+	for _, h := range last {
+		mustPut(t, s, testRead(h, true, 0))
 	}
-	if len(snap.Reads) != 2 || snap.Reads[0].HostID != "h00000" || snap.Reads[1].HostID != "h00001" {
-		t.Fatalf("reads = %+v, want h00000 and h00001 only", snap.Reads)
+	snap := mustCurrent(t, s, hosts, time.Hour, 0)
+	if snap.Omitted != 0 {
+		t.Fatalf("omitted = %d, want 0 (only three hosts have reads)", snap.Omitted)
+	}
+	if len(snap.Reads) != len(last) {
+		t.Fatalf("reads = %d, want %d", len(snap.Reads), len(last))
+	}
+	for i, h := range last {
+		if snap.Reads[i].HostID != h {
+			t.Fatalf("reads[%d] = %s, want %s", i, snap.Reads[i].HostID, h)
+		}
+	}
+}
+
+// sized returns a latest read of host id with a stored body of n bytes.
+func sized(id int64, host string, n int64) sizedRead {
+	return sizedRead{Read: Read{ID: id, HostID: host}, bytes: n}
+}
+
+func TestSelectSnapshotReads(t *testing.T) {
+	big := make([]sizedRead, 0, 17)
+	for i := 0; i < 17; i++ {
+		big = append(big, sized(int64(i+1), fmt.Sprintf("h%02d", i), MaxBodyBytes))
+	}
+	many := make([]sizedRead, 0, MaxSnapshotHosts+1)
+	for i := 0; i < MaxSnapshotHosts+1; i++ {
+		many = append(many, sized(int64(i+1), fmt.Sprintf("h%05d", i), 1))
+	}
+	cases := []struct {
+		name     string
+		latest   []sizedRead
+		maxHosts int
+		maxBytes int64
+		wantIDs  []int64
+		wantLeft int
+	}{
+		{"all kept within limits", []sizedRead{sized(1, "a", 3), sized(2, "b", 4)}, 10, 10, []int64{1, 2}, 0},
+		{"host cap keeps the first hosts in host order", []sizedRead{sized(1, "a", 1), sized(2, "b", 1), sized(3, "c", 1), sized(4, "d", 1)}, 2, 100, []int64{1, 2}, 2},
+		{"byte budget skips a read that does not fit and keeps later ones", []sizedRead{sized(1, "a", 6), sized(2, "b", 5), sized(3, "c", 4)}, 10, 10, []int64{1, 3}, 1},
+		{"a read larger than the budget is omitted", []sizedRead{sized(1, "a", 11)}, 10, 10, nil, 1},
+		{"seventeen maximum bodies keep sixteen and omit one", big, MaxSnapshotHosts, MaxSnapshotBodyBytes, nil, 1},
+		{"host cap at MaxSnapshotHosts omits the host past it", many, MaxSnapshotHosts, MaxSnapshotBodyBytes, nil, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, left := selectSnapshotReads(tc.latest, tc.maxHosts, tc.maxBytes)
+			if left != tc.wantLeft {
+				t.Fatalf("omitted = %d, want %d", left, tc.wantLeft)
+			}
+			var sum int64
+			for _, r := range got {
+				sum += sizeOf(tc.latest, r.ID)
+			}
+			if sum > tc.maxBytes {
+				t.Fatalf("kept bodies %d bytes, budget %d: a snapshot would be refused by Snapshot", sum, tc.maxBytes)
+			}
+			if len(got) > tc.maxHosts {
+				t.Fatalf("kept %d hosts, cap %d", len(got), tc.maxHosts)
+			}
+			if tc.wantIDs != nil {
+				if ids := readIDs(Snapshot{Reads: got}); !reflect.DeepEqual(ids, tc.wantIDs) {
+					t.Fatalf("kept IDs = %v, want %v", ids, tc.wantIDs)
+				}
+			}
+		})
+	}
+}
+
+// sizeOf returns the body size of read id in latest.
+func sizeOf(latest []sizedRead, id int64) int64 {
+	for _, s := range latest {
+		if s.ID == id {
+			return s.bytes
+		}
+	}
+	return -1
+}
+
+func TestCurrentClockBackwardsDoesNotExtendReuse(t *testing.T) {
+	s, _ := openStore(t)
+	c := useClock(t)
+	mustPut(t, s, testRead("h1", true, 0))
+	first := mustCurrent(t, s, []string{"h1"}, time.Hour, 0)
+
+	// The wall clock jumps back two hours. The snapshot's age is negative: it
+	// must not count as younger than maxReuse.
+	c.t = base.Add(-2 * time.Hour)
+	second := mustCurrent(t, s, []string{"h1"}, time.Hour, 0)
+	if second.ID == first.ID || second.Generation != first.Generation+1 {
+		t.Fatalf("second = %s gen %d after clock went back: want a new snapshot after %s", second.ID, second.Generation, first.ID)
 	}
 }
 
@@ -579,6 +664,41 @@ func TestConcurrentCurrentWithoutReuseYieldsUniqueGenerations(t *testing.T) {
 	}
 	if rows := rowCountTable(t, db, "vuln_inventory_snapshots"); rows != n {
 		t.Fatalf("snapshot rows = %d, want %d", rows, n)
+	}
+}
+
+func TestLatestSizesQuerySelectsTheSameReadsAsLatestAll(t *testing.T) {
+	s, db := openStore(t)
+	useClock(t)
+	mustPut(t, s, testRead("h1", true, 0))
+	mustPut(t, s, testRead("h1", true, 5))
+	mustPut(t, s, testRead("h2", true, 0))
+	mustPut(t, s, testRead("h3", false, 1))
+
+	all, err := s.LatestAll(context.Background())
+	if err != nil {
+		t.Fatalf("LatestAll: %v", err)
+	}
+	rows, err := db.Query(latestSizesQuery)
+	if err != nil {
+		t.Fatalf("latestSizesQuery: %v", err)
+	}
+	defer rows.Close()
+	got := map[int64]bool{}
+	for rows.Next() {
+		var id, n int64
+		if err := rows.Scan(&id, &n); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		got[id] = true
+	}
+	if len(got) != len(all) {
+		t.Fatalf("latestSizesQuery returned %d reads, LatestAll %d", len(got), len(all))
+	}
+	for _, r := range all {
+		if !got[r.ID] {
+			t.Fatalf("latestSizesQuery misses read %d of host %s", r.ID, r.HostID)
+		}
 	}
 }
 

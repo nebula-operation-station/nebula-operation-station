@@ -21,18 +21,20 @@ import (
 // one run covers at most this many. The export serves a snapshot in pages of
 // api.MaxSubjectsPerPage (1,000) subjects, so a full snapshot is ten pages
 // (ADR 0011 D3). The 1,000 is the page size, the 10,000 the total over all
-// pages; they do not conflict. Hosts past the limit are left out in host-ID
-// order and counted in Snapshot.Omitted.
+// pages; they do not conflict. Only hosts that have a read take a slot; hosts
+// past the limit are left out in host-ID order and counted in Snapshot.Omitted.
 const MaxSnapshotHosts = 10000
 
 // snapshotPageReads is how many reads Snapshot loads per query.
 const snapshotPageReads = 100
 
-// MaxSnapshotBodyBytes bounds the stored bodies that Snapshot returns: the sum
-// of the body lengths of the reads of one snapshot. It is sixteen worst-case
-// bodies (MaxBodyBytes each, about 200 MB), so a snapshot of typical hosts is
-// far below it, while a snapshot of hostile maximum-size bodies is refused
-// with ErrLimit before any body is decoded.
+// MaxSnapshotBodyBytes bounds the stored bodies of one snapshot: the sum of the
+// body lengths of its reads. It is sixteen worst-case bodies (MaxBodyBytes
+// each, about 200 MB). Current enforces it when it creates a snapshot, so every
+// snapshot it returns can be read back by Snapshot: when the newest reads
+// would exceed the bound, the reads in host-ID order that fit are kept and the
+// rest are left out and counted in Omitted. Hostile maximum-size bodies can
+// therefore shrink a snapshot, but never make its ID fail with ErrLimit.
 const MaxSnapshotBodyBytes = 16 * MaxBodyBytes
 
 // maxSnapshotIDBytes matches the snapshot ID column (0052: 1 to 64 bytes).
@@ -67,55 +69,105 @@ type Snapshot struct {
 	// Reads are the pinned reads in host-ID order, one per host. Current
 	// returns them without components; Snapshot returns them with components.
 	Reads []Read
-	// Omitted counts the hosts past MaxSnapshotHosts that Current left out.
-	// It is set only by Current and is not stored, so Snapshot reports 0.
+	// Omitted counts the hosts that have a newest read but that Current left
+	// out, because the snapshot was full (MaxSnapshotHosts) or because their
+	// bodies did not fit in MaxSnapshotBodyBytes. It is set only by Current and
+	// is not stored, so Snapshot reports 0.
 	Omitted int
 }
 
-// wantedHosts validates hosts, removes duplicates and keeps the first
-// MaxSnapshotHosts host IDs in host-ID order. It returns the kept set and the
-// number of hosts left out.
-func wantedHosts(hosts []string) (map[string]bool, int, error) {
+// sizedRead is the newest read of a host with the stored length of its body.
+// Current needs the length to apply MaxSnapshotBodyBytes before it creates a
+// snapshot.
+type sizedRead struct {
+	Read
+	bytes int64
+}
+
+// wantedHosts validates hosts and removes duplicates. It returns the set of
+// host IDs. Hosts without a read are kept in the set and simply match nothing.
+func wantedHosts(hosts []string) (map[string]bool, error) {
 	set := make(map[string]bool, len(hosts))
 	for _, h := range hosts {
 		if err := checkText("host id", h, maxHostIDBytes, true); err != nil {
-			return nil, 0, err
+			return nil, err
 		}
 		set[h] = true
 	}
-	if len(set) <= MaxSnapshotHosts {
-		return set, 0, nil
-	}
-	ids := make([]string, 0, len(set))
-	for h := range set {
-		ids = append(ids, h)
-	}
-	sort.Strings(ids)
-	keep := make(map[string]bool, MaxSnapshotHosts)
-	for _, h := range ids[:MaxSnapshotHosts] {
-		keep[h] = true
-	}
-	return keep, len(ids) - MaxSnapshotHosts, nil
+	return set, nil
 }
 
-// newestReads returns the newest read of every host in want, in host-ID order.
-// Hosts without a read are absent. It runs on q, so it sees the state of the
-// caller's transaction.
-func newestReads(ctx context.Context, q *sql.Tx, want map[string]bool) ([]Read, error) {
+// selectSnapshotReads chooses the reads of one snapshot from latest, which is
+// sorted by host ID. It walks the reads in host-ID order and keeps a read when
+// fewer than maxHosts reads are kept so far and its body still fits in the
+// remaining maxBytes; a read that does not fit is skipped, and later smaller
+// reads may still be kept. It returns the kept reads (without sizes) and the
+// number of reads left out. The result is deterministic, and the bodies of the
+// kept reads never add up to more than maxBytes.
+func selectSnapshotReads(latest []sizedRead, maxHosts int, maxBytes int64) ([]Read, int) {
+	kept := make([]Read, 0, min(len(latest), maxHosts))
+	var used int64
+	omitted := 0
+	for _, s := range latest {
+		if len(kept) >= maxHosts || s.bytes > maxBytes-used {
+			omitted++
+			continue
+		}
+		used += s.bytes
+		kept = append(kept, s.Read)
+	}
+	return kept, omitted
+}
+
+// latestSizesQuery is the newest read of every host with its body length. Its
+// selection is the same as latestAllQuery (store.go); a test checks that both
+// return the same reads. It is needed because scanRead has no body length
+// column.
+const latestSizesQuery = `SELECT id, LENGTH(body) FROM vuln_inventory_reads
+	WHERE id IN (SELECT (SELECT n.id FROM vuln_inventory_reads AS n WHERE n.host_id = h.host_id
+		ORDER BY n.read_at DESC, n.id DESC LIMIT 1)
+		FROM (SELECT host_id FROM vuln_inventory_reads GROUP BY host_id) AS h)`
+
+// newestReads returns the newest read of every host in want, sorted by host
+// ID, each with its body length. Hosts without a read are absent. It runs on
+// q, so it sees the state of the caller's transaction.
+func newestReads(ctx context.Context, q *sql.Tx, want map[string]bool) ([]sizedRead, error) {
+	sizes := make(map[int64]int64)
+	srows, err := q.QueryContext(ctx, latestSizesQuery)
+	if err != nil {
+		return nil, fmt.Errorf("newest read sizes: %w", err)
+	}
+	defer srows.Close()
+	for srows.Next() {
+		var id, n int64
+		if err := srows.Scan(&id, &n); err != nil {
+			return nil, fmt.Errorf("newest read sizes: %w", err)
+		}
+		sizes[id] = n
+	}
+	if err := srows.Err(); err != nil {
+		return nil, fmt.Errorf("newest read sizes: %w", err)
+	}
+
 	rows, err := q.QueryContext(ctx, latestAllQuery)
 	if err != nil {
 		return nil, fmt.Errorf("newest reads: %w", err)
 	}
 	defer rows.Close()
-	var out []Read
+	var out []sizedRead
 	for rows.Next() {
 		r, err := scanRead(rows, false)
 		if err != nil {
 			return nil, fmt.Errorf("newest reads: %w", err)
 		}
-		if want[r.HostID] {
-			out = append(out, r)
+		if !want[r.HostID] {
+			continue
 		}
+		n, ok := sizes[r.ID]
+		if !ok {
+			return nil, fmt.Errorf("newest reads: read %d has no body length", r.ID)
+		}
+		out = append(out, sizedRead{Read: r, bytes: n})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("newest reads: %w", err)
@@ -128,12 +180,15 @@ func newestReads(ctx context.Context, q *sql.Tx, want map[string]bool) ([]Read, 
 // Current returns the snapshot of the newest read of each host in hosts.
 //
 // The current snapshot is reused when it pins exactly the same reads and was
-// taken less than maxReuse ago. Otherwise a new snapshot is written with
-// generation max(highest stored generation, floor) + 1. floor is the lowest
-// generation the caller allows: the caller passes the highest inventory
-// generation a vulnstore run has seen, so a run is never rejected for a
-// regression (ADR 0011 D5). Hosts without a read are left out; hosts past
-// MaxSnapshotHosts are left out and counted in Omitted.
+// taken less than maxReuse ago (a snapshot whose time lies in the future, after
+// a backwards clock step, counts as expired). Otherwise a new snapshot is
+// written with generation max(highest stored generation, floor) + 1. floor is
+// a generation that a vulnstore run has seen: every generation Current returns
+// is greater than floor, so a run is never handed a snapshot at or below one it
+// has seen (ADR 0011 D5). Hosts without a read are left out. Of the hosts with
+// a read, the first MaxSnapshotHosts in host-ID order are kept and the bodies
+// are limited to MaxSnapshotBodyBytes (see selectSnapshotReads); the hosts
+// left out are counted in Omitted.
 //
 // Reads are returned without components; use Snapshot for the bodies.
 func (s *Store) Current(ctx context.Context, hosts []string, maxReuse time.Duration, floor int64) (Snapshot, error) {
@@ -143,7 +198,7 @@ func (s *Store) Current(ctx context.Context, hosts []string, maxReuse time.Durat
 	if floor < 0 {
 		return Snapshot{}, fmt.Errorf("vulninventory: current: %w: negative floor", ErrInvalidRead)
 	}
-	want, omitted, err := wantedHosts(hosts)
+	want, err := wantedHosts(hosts)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("vulninventory: current: %w", err)
 	}
@@ -161,10 +216,11 @@ func (s *Store) Current(ctx context.Context, hosts []string, maxReuse time.Durat
 		return Snapshot{}, fmt.Errorf("vulninventory: current: lock: %w", err)
 	}
 
-	reads, err := newestReads(ctx, tx, want)
+	latest, err := newestReads(ctx, tx, want)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("vulninventory: current: %w", err)
 	}
+	reads, omitted := selectSnapshotReads(latest, MaxSnapshotHosts, MaxSnapshotBodyBytes)
 	ids := make([]int64, 0, len(reads))
 	for _, r := range reads {
 		ids = append(ids, r.ID)
@@ -212,10 +268,11 @@ func (s *Store) Current(ctx context.Context, hosts []string, maxReuse time.Durat
 }
 
 // reusable returns the newest snapshot when it pins exactly ids (sorted), was
-// taken less than maxReuse before now, and its generation is above floor. The
-// floor check is part of reuse: a snapshot at or below a generation that
-// vulnstore has seen must never be handed out again (ADR 0011 D5). The
-// snapshot's reads are reads.
+// taken less than maxReuse before now, and its generation is above floor. A
+// negative age (the clock went back past the snapshot) counts as expired, so a
+// backwards clock step never extends reuse. The floor check is part of reuse:
+// a snapshot at or below a generation that vulnstore has seen must never be
+// handed out again (ADR 0011 D5). The snapshot's reads are reads.
 func reusable(ctx context.Context, tx *sql.Tx, reads []Read, ids []int64, now time.Time, maxReuse time.Duration, floor int64) (Snapshot, bool, error) {
 	var snap Snapshot
 	var takenAt int64
@@ -227,7 +284,8 @@ func reusable(ctx context.Context, tx *sql.Tx, reads []Read, ids []int64, now ti
 	if err != nil {
 		return Snapshot{}, false, fmt.Errorf("newest snapshot: %w", err)
 	}
-	if snap.Generation <= floor || now.Sub(time.Unix(takenAt, 0).UTC()) >= maxReuse {
+	age := now.Sub(time.Unix(takenAt, 0).UTC())
+	if snap.Generation <= floor || age < 0 || age >= maxReuse {
 		return Snapshot{}, false, nil
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT read_id FROM vuln_inventory_snapshot_reads WHERE snapshot_id = ? ORDER BY read_id`, snap.ID)
@@ -290,60 +348,62 @@ func (s *Store) Snapshot(ctx context.Context, id string) (Snapshot, error) {
 // loadSnapshotReads returns the reads pinned by snapshot id, with their
 // components, in host-ID order. Before any body is decoded it sums the stored
 // body lengths and refuses a total above byteLimit with ErrLimit. Then it loads
-// pageReads reads per query, keyset-paged on (host_id, id), so no single query
-// returns more than pageReads bodies.
+// pageReads reads per query, keyset-paged on (host_id, id). Each page is
+// decoded straight into the result slice, which is allocated once, from the
+// read count, so no page is kept on its own and the slice is never copied to
+// grow it.
 func loadSnapshotReads(ctx context.Context, q *sql.Tx, id string, pageReads int, byteLimit int64) ([]Read, error) {
 	if pageReads <= 0 {
 		return nil, fmt.Errorf("snapshot reads: page size %d: must be positive", pageReads)
 	}
 	const members = `SELECT read_id FROM vuln_inventory_snapshot_reads WHERE snapshot_id = ?`
-	var total int64
-	if err := q.QueryRowContext(ctx, `SELECT COALESCE(SUM(LENGTH(body)), 0) FROM vuln_inventory_reads WHERE id IN (`+members+`)`, id).Scan(&total); err != nil {
+	var count, total int64
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(LENGTH(body)), 0) FROM vuln_inventory_reads WHERE id IN (`+members+`)`, id).Scan(&count, &total); err != nil {
 		return nil, fmt.Errorf("snapshot body bytes: %w", err)
 	}
 	if total > byteLimit {
 		return nil, fmt.Errorf("snapshot bodies: %w: %d bytes, limit %d", ErrLimit, total, byteLimit)
 	}
 
-	var out []Read
+	out := make([]Read, 0, min(count, MaxSnapshotHosts))
 	afterHost, afterID := "", int64(0)
 	for {
-		page, err := scanSnapshotPage(ctx, q, id, afterHost, afterID, pageReads)
+		before := len(out)
+		var err error
+		out, err = appendSnapshotPage(ctx, q, out, id, afterHost, afterID, pageReads)
 		if err != nil {
 			return nil, fmt.Errorf("snapshot reads: %w", err)
 		}
-		out = append(out, page...)
-		if len(page) < pageReads {
+		if len(out)-before < pageReads {
 			return out, nil
 		}
-		last := page[len(page)-1]
+		last := out[len(out)-1]
 		afterHost, afterID = last.HostID, last.ID
 	}
 }
 
-// scanSnapshotPage returns up to limit reads of snapshot id that sort after
-// (afterHost, afterID) in (host_id, id) order, with their components.
-func scanSnapshotPage(ctx context.Context, q *sql.Tx, id, afterHost string, afterID int64, limit int) ([]Read, error) {
+// appendSnapshotPage appends up to limit reads of snapshot id that sort after
+// (afterHost, afterID) in (host_id, id) order, with their components, to out.
+func appendSnapshotPage(ctx context.Context, q *sql.Tx, out []Read, id, afterHost string, afterID int64, limit int) ([]Read, error) {
 	rows, err := q.QueryContext(ctx, `SELECT `+fullColumns+` FROM vuln_inventory_reads
 		WHERE id IN (SELECT read_id FROM vuln_inventory_snapshot_reads WHERE snapshot_id = ?)
 		AND (host_id, id) > (?, ?)
 		ORDER BY host_id, id LIMIT ?`, id, afterHost, afterID, limit)
 	if err != nil {
-		return nil, err
+		return out, err
 	}
 	defer rows.Close()
-	var page []Read
 	for rows.Next() {
 		r, err := scanRead(rows, true)
 		if err != nil {
-			return nil, err
+			return out, err
 		}
-		page = append(page, r)
+		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return out, err
 	}
-	return page, nil
+	return out, nil
 }
 
 // PruneSnapshots deletes the snapshots taken more than maxAge ago, with their
