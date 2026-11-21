@@ -18,8 +18,12 @@ all: check build
 build:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags '$(LDFLAGS)' -o bin/ ./cmd/...
 
+# The vulnstore writer tests run a second time without -race: under the race
+# detector they use 2 contending writers, without it 4 (race_off_test.go), so
+# the 4-writer starvation checks run in CI too (vs02f, review of PR #791).
 test:
 	$(GO) test -race -timeout 40m ./...
+	$(GO) test -count=1 -timeout 20m -run 'TestCompleteDropsSupersededHolds|TestConcurrentWriter' ./internal/vulnstore/
 
 # Deployment policy tests for the systemd units and nftables files, the
 # install script's unit list (deploy/install_test.sh), and for the shared

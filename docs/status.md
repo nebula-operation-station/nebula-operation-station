@@ -1,6 +1,6 @@
 # Project status
 
-Last updated 2026-11-20 (evening)
+Last updated 2026-11-21 (wiring re-check; previously 2026-11-20 (evening))
 
 This page is the short, frequently updated view of where Nebula Operation Station stands. The
 [README roadmap](../README.md#roadmap) gives the area overview; the ADRs in [docs/adr](adr/) hold
@@ -11,17 +11,17 @@ the decisions, and [docs/implementation](implementation/) the per-area plans.
 | Area | ADR | State |
 | --- | --- | --- |
 | Release 0.9 (milestones 0–10) | – | code complete; release draft v0.9.0-beta.1 prepared on 2026-11-04, not yet published; running in the reference lab since then, formal integration run on clean VMs pending |
-| Proxmox VE phase 1 / phase 2 | [0006](adr/0006-proxmox-integration.md) | phase 1 and phase 2 actions merged; **amendment 2026-11-19: registry metadata may follow at most two same-host redirects for anonymous requests** (#717); registry metadata limits pinned (#698); pveapi/pvecollect package comments match the code (#714, #721); spool retry state and SSH telemetry mapping tested (#730, #729) |
+| Proxmox VE phase 1 / phase 2 | [0006](adr/0006-proxmox-integration.md) | phase 1 wired; phase 2 guest power and snapshot controls wired in nebula-server (`cmd/nebula-server/main.go:589-590`); backup, migration and node reboot executor code only, no RPC (previously: "not offered in the chart"; "phase 1 and phase 2 actions merged"); **amendment 2026-11-19: registry metadata may follow at most two same-host redirects for anonymous requests** (#717); registry metadata limits pinned (#698); pveapi/pvecollect package comments match the code (#714, #721); spool retry state and SSH telemetry mapping tested (#730, #729) |
 | Approval ergonomics | [0007](adr/0007-approval-ergonomics.md) | merged; amendment 2026-11-17 (reject pending proposals) complete: spec, executor `RejectPending` RPC, UI (#687) and CLI `nebula reject` (#755), follow-ups (#753) |
 | Guest provisioning | [0008](adr/0008-guest-provisioning.md) | merged; `packlock` testable with its exit codes covered (#715, PV-07) |
-| Traffic map | [0009](adr/0009-traffic-map.md) | proposed; libraries, store and renderer merged; `HostNet.Hop` fuzzed (#711) |
+| Traffic map | [0009](adr/0009-traffic-map.md) | proposed; libraries, store and renderer merged; API and pages mounted in nebula-server (`cmd/nebula-server/main.go:636-655`, `:706`); `HostNet.Hop` fuzzed (#711) |
 | Network devices | [0010](adr/0010-network-devices.md) | accepted; `NormalizePANOSConfig` fuzzed against its bounds (#709, #719) |
 | Vulnerability management | [0011](adr/0011-vulnerability-management.md) | accepted; **first live run on 2026-11-20** found four integration bugs, all fixed the same day: token API refused by the browser origin check (#744), Debian feeds without a content date (#743), OSV Ubuntu over the download cap (#746), `package.list_installed` output not one JSON document (#752). The run also showed that **the server does not store package inventories yet** (the export is always empty) – chain iv01–iv10 closes that gap, decision paper merged (#764, #765), lease interval floor (#767). End-to-end tests over real HTTP (#763) and on a lab VM (#757) |
-| Network security advisor | [0012](adr/0012-network-security-advisor.md) | accepted; pure libraries merged |
+| Network security advisor | [0012](adr/0012-network-security-advisor.md) | accepted; pure libraries merged, none imported by nebula-server (not wired) |
 | One-step enrollment | [0013](adr/0013-one-step-enrollment.md) | accepted; renderer and download limits tested; dialog not yet wired in nebula-server (#604) |
-| Help assistant | [0014](adr/0014-help-assistant.md) | accepted; AS-09 parts 1–5 merged (decoder #737, secret guard #736, limits #738, prompt assembly with a 16,000-token budget #739/#754, follow-up turns #745); shape builder (#740, #750) |
+| Help assistant | [0014](adr/0014-help-assistant.md) | accepted; AS-09 libraries merged, service and wiring open (previously: "AS-09 parts 1–5 merged"; the parts are in `internal/helpassist`, not imported; the Assistant panel routes are mounted, `internal/web/ui/assistant.go:240-243`) (decoder #737, secret guard #736, limits #738, prompt assembly with a 16,000-token budget #739/#754, follow-up turns #745); shape builder (#740, #750) |
 | Integrity monitoring | [0015](adr/0015-integrity-monitoring.md) | accepted; libraries merged |
-| Ops agent | [0016](adr/0016-ops-agent.md) | accepted 2026-11-17; **implementation chain complete (27/27)** – today: suggestion event and trigger file (#713, #741), `settings_changed` reason budget (#732), security acceptance tests with a real bug fix: the agent rejected every fix item because of a `sha256:` digest prefix (#742, #756) |
+| Ops agent | [0016](adr/0016-ops-agent.md) | accepted 2026-11-17; **implementation chain complete (27/27)** – today: suggestion event and trigger file (#713, #741), `settings_changed` reason budget (#732), security acceptance tests with a real bug fix: the agent rejected every fix item because of a `sha256:` digest prefix (#742, #756). **Open:** the Ops tab is not set in nebula-server: no `AssistantOps` option is passed (`cmd/nebula-server` has no reference to it), so `assistantOps` stays nil (`internal/web/ui/ui.go:243,332`). The projector gets empty Findings and Listeners sources (`cmd/nebula-server/ops.go:237-238`, `opsNoFindings` at `ops.go:171-176`), so its projections carry no findings or ports; the projection code is in `internal/opsfacts/project.go` |
 
 ### Landed since the last update (31 PRs, 2026-11-19 19:00 to 2026-11-20 19:00)
 
@@ -47,6 +47,26 @@ Merged per day: 54 (11-12), 31 (11-13), 25 (11-16), 46 (11-17), about 45 (11-18)
 (11-19), 31 (11-20). Main themes: vulnerability agent and attack paths (ADR 0011); one-step enrollment
 (ADR 0013); help assistant (ADR 0014); integrity monitoring (ADR 0015); a large fuzz and
 limit-test wave; ops agent (ADR 0016) accepted and nearly all of its implementation chain merged.
+
+## Wired in nebula-server (re-checked 2026-11-21)
+
+"Merged" in the table above means code is on `main`, not that the server uses it. Per area:
+
+| Area | Wired in nebula-server? | Evidence |
+| --- | --- | --- |
+| Proxmox VE phase 1 (read-only pages, inventory, live values) | yes, the `/pve` pages and the PVE part of the chart | `cmd/nebula-server/main.go:278` (`pveStore`), `:578` (`PVE: pveStore`) |
+| Proxmox VE guest power and snapshots | yes, set in nebula-server: `GuestPower: exec`, `GuestSnapshot: exec` (`cmd/nebula-server/main.go:589-590`). The routes answer 404 only when the option is nil or, for snapshots, the PVE store lacks `ListSnapshots` (`internal/web/ui/guestactions.go:708-713`, `:1343-1350`; `internal/pveinventory/store.go:732`). The chart shows a Power section on running guests of active remotes (`guestactions.go:193-200`); rendering not checked in a browser | `cmd/nebula-server/guestactions_wiring_test.go` |
+| Proxmox VE backup now, migration, node reboot | no: executor code only (`internal/executor/pve_guest_backup.go`, `pve_guest_migrate.go`, `pve_node_reboot.go`); no RPC for them in `proto/nebula/executor/v1/executor.proto` | grep of `executor.proto`, 2026-11-21 |
+| Traffic map API, page and connections tab | yes, mounted | `cmd/nebula-server/main.go:636-655`, `:706` |
+| Attack paths (vulnerability management) | pages mounted, path computation not wired: the source reports no paths | `cmd/nebula-server/main.go:660`, `cmd/nebula-server/attackpaths.go:19-26` |
+| Network devices (read path and device pages) | no: the device read returns `Unimplemented` (ND-14); `NetDevPages` has no caller; `cmd/nebula-server` does not reference netdev | `internal/executor/netdev_read.go:112`, `internal/web/ui/netdev.go:146-160` |
+| Network security advisor (netreach, netadvisor, edl, reputation) | no: libraries exist, nothing outside their own packages imports them | `internal/netadvisor/netadvisor.go`, `internal/edl/render.go`, `internal/reputation/match.go` |
+| One-step enrollment | no: dialog not wired; the executor's enrollment offers are local start-up configuration, never served over RPC | `cmd/nebula-executor/main.go:81-82` (load and comment), `:269` (`SetEnrollOffers`) |
+| Help assistant | panel routes mounted; the `internal/helpassist` libraries are not imported | `internal/web/ui/assistant.go:240-243`, `internal/web/ui/ui.go:738` |
+| Ops agent | the Ops tab is not set in nebula-server, so the tab is absent | `internal/web/ui/ui.go:243,332` (no `AssistantOps` in `cmd/nebula-server`) |
+
+Not re-checked in this pass: release 0.9, approval ergonomics, integrity monitoring, vulnerability
+server side (other than attack paths).
 
 ## In progress
 
@@ -77,12 +97,14 @@ limit-test wave; ops agent (ADR 0016) accepted and nearly all of its implementat
 - **ADR 0009 (traffic map):** still "proposed".
 - **One-step enrollment:** dialog not wired in nebula-server (#604).
 - **Dependabot:** #647, #648 wait for review.
+- **Decision papers uf04, uf13, uf14:** uf04 is in the tree (`docs/implementation/vuln-decisions-assertion.md`, "Ticket: uf04"). uf14 is on `origin/main` (`docs/implementation/network-devices-wiring-decisions.md`, PR #784) and not yet on this branch. No uf13 paper was found on `origin/main` or this branch (grep and `git log --grep=uf1`, 2026-11-21). Previously: "the files do not exist in the tree yet, so the open decisions are named here only."
+- **Wiring gaps:** network device pages and read path, attack path computation, Ops tab, one-step dialog and help assistant service. See [wiring audit, re-check 2026-11-21](implementation/wiring-audit.md#re-check-2026-11-21).
 
 ## Changelog
 
 - **2026-11-20 (evening):** 31 PRs; first live run of the vuln agent: four integration bugs fixed
   and deployed, missing package inventory found (iv chain started); end-to-end and lab-VM tests;
-  ops agent chain and reject-pending complete; help assistant AS-09 merged.
+  ops agent chain and reject-pending complete; help assistant AS-09 libraries merged, service and wiring open (previously: "help assistant AS-09 merged").
 - **2026-11-19 (evening):** 31 PRs; ag chain 24/27 (settings, notifications list, admin answers,
   browser tests, operator docs); registry redirect decision resolved by ADR 0006 amendment (#717);
   uc wave 7/8; ud chain (help assistant service) started.

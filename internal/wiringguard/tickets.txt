@@ -1,0 +1,6 @@
+# Wiring tickets with no table row or heading under docs/. One per line:
+# <ID> | <title> | <planning document under docs/ that tracks the ticket>
+# The document must exist. TestRealTreeTicketsExist accepts a ticket that a
+# docs/ table row or heading defines, or that is registered here.
+WG-01 | wiring guard (internal/wiringguard): allowlist, import scan and fixtures; its test runs in make check | docs/implementation/wiring-audit.md
+iv02 | inventory store and pruning (internal/vulninventory), named as a ticket in the decision paper | docs/implementation/vuln-inventory-decisions.md
