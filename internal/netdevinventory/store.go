@@ -221,16 +221,32 @@ func readAllowed(r Read, f netdevcontract.Family) bool {
 	return false
 }
 
+// Origin says where a stored device row came from.
+type Origin string
+
+// OriginCollectorReported marks a row written from a metadata record the
+// collector spooled. It means "the collector reported this device". It
+// does not mean "an admin confirmed this device": the confirmed asset link
+// is a separate admin act (netdev_asset_links) that this package never
+// reads or writes.
+const OriginCollectorReported Origin = "collector_reported"
+
 // Device is the stored presentation copy of one device.
 type Device struct {
 	DeviceID        string
 	Family          netdevcontract.Family
 	Label           string
 	TrustGeneration uint64
-	// LastSeen is the newest observed_at of any stored dataset; zero if
-	// none was stored yet.
+	// LastSeen is the time the collector last reported the device; zero
+	// for a row without a report time.
 	LastSeen time.Time
-	State    DeviceState
+	// Age is how long ago the collector last reported the device, by the
+	// server clock (never negative).
+	Age time.Duration
+	// Origin is where the row came from; every row is
+	// OriginCollectorReported.
+	Origin Origin
+	State  DeviceState
 }
 
 // Dataset is the status of one stored dataset.
@@ -281,14 +297,39 @@ func (s *Store) runHook(stage string) error {
 	return s.hook(stage)
 }
 
-// UpsertDevice records or updates the server copy of an executor device.
-// The family is immutable and the trust generation never decreases.
+// UpsertDevice records or updates the server copy of an executor device,
+// stamping the report with the server clock. It is the only writer of
+// device rows; see UpsertDeviceReported for the import path. The family is
+// immutable and the trust generation never decreases.
 func (s *Store) UpsertDevice(ctx context.Context, d netdevcontract.Device) error {
+	return s.UpsertDeviceReported(ctx, d, s.now())
+}
+
+// UpsertDeviceReported writes the device row from one metadata record the
+// collector spooled (ND-16 variant 1, the import path). reportedAt is the
+// time the collector reported the device. It sets last_seen to the newest
+// report (never backwards), so a row always shows when the collector last
+// reported it. The row is "reported by collector"; it is never a confirmed
+// device, which needs the explicit admin link (ND-18 part 2).
+//
+// The family is immutable: a record for another family is refused with
+// ErrFamilyChanged. A record whose trust generation is lower than the
+// stored one is refused with ErrTrustGenerationRegressed. A refused record
+// changes nothing. A reportedAt that is zero or more than MaxFutureSkew
+// ahead of the server clock is refused.
+func (s *Store) UpsertDeviceReported(ctx context.Context, d netdevcontract.Device, reportedAt time.Time) error {
 	v, err := netdevcontract.ValidateDevice(d)
 	if err != nil {
 		return fmt.Errorf("netdevinventory: upsert device: %w", err)
 	}
-	now := micros(s.now())
+	if reportedAt.IsZero() {
+		return fmt.Errorf("netdevinventory: upsert device %s: report time is zero", v.DeviceID)
+	}
+	now := s.now()
+	if reportedAt.After(now.Add(MaxFutureSkew)) {
+		return fmt.Errorf("netdevinventory: upsert device %s: %w", v.DeviceID, ErrFutureObservation)
+	}
+	reported, nowMicros := micros(reportedAt), micros(now)
 	return s.withTx(ctx, func(tx *sql.Tx) error {
 		var family string
 		var gen int64
@@ -298,8 +339,8 @@ func (s *Store) UpsertDevice(ctx context.Context, d netdevcontract.Device) error
 		case errors.Is(err, sql.ErrNoRows):
 			_, err = tx.ExecContext(ctx, `INSERT INTO netdev_devices_seen
 				(device_id, family, label, trust_generation, last_seen, state, created_at, updated_at)
-				VALUES (?, ?, ?, ?, NULL, 'fresh', ?, ?)`,
-				v.DeviceID, string(v.Family), v.Name, int64(v.TrustGeneration), now, now)
+				VALUES (?, ?, ?, ?, ?, 'fresh', ?, ?)`,
+				v.DeviceID, string(v.Family), v.Name, int64(v.TrustGeneration), reported, nowMicros, nowMicros)
 			if err != nil {
 				return fmt.Errorf("netdevinventory: insert device %s: %w", v.DeviceID, err)
 			}
@@ -313,8 +354,15 @@ func (s *Store) UpsertDevice(ctx context.Context, d netdevcontract.Device) error
 		if int64(v.TrustGeneration) < gen {
 			return fmt.Errorf("netdevinventory: device %s: %w", v.DeviceID, ErrTrustGenerationRegressed)
 		}
-		_, err = tx.ExecContext(ctx, `UPDATE netdev_devices_seen SET label = ?, trust_generation = ?, updated_at = ?
-			WHERE device_id = ?`, v.Name, int64(v.TrustGeneration), now, v.DeviceID)
+		// last_seen only moves forward; a report newer than the stored
+		// last_seen also makes the device fresh again.
+		_, err = tx.ExecContext(ctx, `UPDATE netdev_devices_seen
+			SET label = ?, trust_generation = ?,
+			    last_seen = MAX(COALESCE(last_seen, ?), ?),
+			    state = CASE WHEN ? > COALESCE(last_seen, 0) THEN 'fresh' ELSE state END,
+			    updated_at = ?
+			WHERE device_id = ?`,
+			v.Name, int64(v.TrustGeneration), reported, reported, reported, nowMicros, v.DeviceID)
 		if err != nil {
 			return fmt.Errorf("netdevinventory: update device %s: %w", v.DeviceID, err)
 		}
@@ -342,12 +390,14 @@ func (s *Store) GetDevice(ctx context.Context, deviceID string) (Device, error) 
 	d.Family = netdevcontract.Family(family)
 	d.TrustGeneration = uint64(gen)
 	d.State = DeviceState(state)
+	d.Origin = OriginCollectorReported
 	ref := created
 	if last.Valid {
 		d.LastSeen = fromMicros(last.Int64)
 		ref = last.Int64
 	}
-	if s.now().Sub(fromMicros(ref)) > StaleAfterIntervals*devicePollInterval(d.Family) {
+	d.Age = max(s.now().Sub(fromMicros(ref)), 0)
+	if d.Age > StaleAfterIntervals*devicePollInterval(d.Family) {
 		d.State = DeviceStale
 	}
 	return d, nil
