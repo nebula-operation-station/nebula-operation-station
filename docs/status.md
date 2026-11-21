@@ -21,7 +21,7 @@ the decisions, and [docs/implementation](implementation/) the per-area plans.
 | One-step enrollment | [0013](adr/0013-one-step-enrollment.md) | accepted; renderer and download limits tested; dialog not yet wired in nebula-server (#604) |
 | Help assistant | [0014](adr/0014-help-assistant.md) | accepted; AS-09 libraries merged, service and wiring open (previously: "AS-09 parts 1–5 merged"; the parts are in `internal/helpassist`, not imported; the Assistant panel routes are mounted, `internal/web/ui/assistant.go:240-242`) (decoder #737, secret guard #736, limits #738, prompt assembly with a 16,000-token budget #739/#754, follow-up turns #745); shape builder (#740, #750) |
 | Integrity monitoring | [0015](adr/0015-integrity-monitoring.md) | accepted; libraries merged |
-| Ops agent | [0016](adr/0016-ops-agent.md) | accepted 2026-11-17; **implementation chain complete (27/27)** – today: suggestion event and trigger file (#713, #741), `settings_changed` reason budget (#732), security acceptance tests with a real bug fix: the agent rejected every fix item because of a `sha256:` digest prefix (#742, #756). **Open:** the Ops tab is not set in nebula-server (`internal/web/ui/ui.go:331`, G01 in `out/gaps.md`); projector sources (G02; the projection code is in `internal/opsfacts/project.go`, the sources are not verified here, and `out/gaps.md` is outside this clone) |
+| Ops agent | [0016](adr/0016-ops-agent.md) | accepted 2026-11-17; **implementation chain complete (27/27)** – today: suggestion event and trigger file (#713, #741), `settings_changed` reason budget (#732), security acceptance tests with a real bug fix: the agent rejected every fix item because of a `sha256:` digest prefix (#742, #756). **Open:** the Ops tab is not set in nebula-server: no `AssistantOps` option is passed (`cmd/nebula-server` has no reference to it), so `assistantOps` stays nil (`internal/web/ui/ui.go:241,331`). The projector gets empty Findings and Listeners sources (`cmd/nebula-server/ops.go:237-238`, `opsNoFindings` at `ops.go:171-176`), so its projections carry no findings or ports; the projection code is in `internal/opsfacts/project.go` |
 
 ### Landed since the last update (31 PRs, 2026-11-19 19:00 to 2026-11-20 19:00)
 
@@ -63,7 +63,7 @@ limit-test wave; ops agent (ADR 0016) accepted and nearly all of its implementat
 | Network security advisor (netreach, netadvisor, edl, reputation) | no: libraries exist, nothing outside their own packages imports them | `internal/netadvisor/netadvisor.go`, `internal/edl/render.go`, `internal/reputation/match.go` |
 | One-step enrollment | no: dialog not wired; the executor's enrollment offers are local start-up configuration, never served over RPC | `cmd/nebula-executor/main.go:82`, `:240-241`, `:269` |
 | Help assistant | panel routes mounted; the `internal/helpassist` libraries are not imported | `internal/web/ui/assistant.go:240-242`, `internal/web/ui/ui.go:738` |
-| Ops agent | the Ops tab is not set in nebula-server, so the tab is absent | `internal/web/ui/ui.go:331` (no caller sets `assistantOps`) |
+| Ops agent | the Ops tab is not set in nebula-server, so the tab is absent | `internal/web/ui/ui.go:241,331` (no `AssistantOps` in `cmd/nebula-server`) |
 
 Not re-checked in this pass: release 0.9, approval ergonomics, integrity monitoring, vulnerability
 server side (other than attack paths).

@@ -470,6 +470,6 @@ not mounted in `nebula-server`. Guest power and snapshots are not a gap any more
 | Guest backup, migration, node reboot: no RPC | executor code in `internal/executor/pve_guest_backup.go`, `pve_guest_migrate.go`, `pve_node_reboot.go`; no such RPC in `proto/nebula/executor/v1/executor.proto` |
 | Network security libraries not imported | no import of `internal/netreach`, `netadvisor`, `edl` or `reputation` outside their own trees |
 | Help assistant service not wired | `internal/helpassist/` (five packages) has no importer |
-| Ops tab not set in nebula-server | `internal/web/ui/ui.go:331`; no caller outside `internal/web/ui` sets `assistantOps` |
+| Ops tab not set in nebula-server | `internal/web/ui/ui.go:241,331`; `cmd/nebula-server` has no `AssistantOps` reference; projector sources empty: `cmd/nebula-server/ops.go:237-238` |
 | One-step enrollment offers are local only | `cmd/nebula-executor/main.go:82`, `:240-241`, `:269` |
 | Decision papers uf04, uf13, uf14 not in the tree | grep, 2026-11-21 |
