@@ -40,9 +40,11 @@ const (
 	// duStateDirLine is the one line naming the state directory in the
 	// shipped scripts; the test points it at a temporary directory.
 	duStateDirLine = `STATE_DIR = "/var/lib/nebula/container-updates"`
-	// duDefinitionSlot is the run secret slot of a standalone definition.
-	// The executor's definitionSlot is unexported; this is the same value
-	// (internal/executor/container_standalone.go).
+	// duDefinitionSlot is the run secret slot of a standalone definition. The
+	// executor's definitionSlot (internal/executor/container_standalone.go) is
+	// unexported and cannot be imported; this copy is not checked against it
+	// here. The end-to-end success test proves that the shipped scripts read
+	// the slot this constant names, so only the executor side can drift.
 	duDefinitionSlot = "definition"
 	// duDefinitionVersion is the bound definition version of the update and
 	// of the rollback of it (docker.rollback runs "from the same definition
@@ -126,16 +128,24 @@ func duDefinition(t *testing.T) []byte {
 // duWorld is the host state before any update: web (container 1, nginx:1.27
 // on the old digest) and a registry whose 1.27 index lists the bound
 // linux/amd64 digest. The update's new container is cuHex 9.
+//
+// Limit of the fake: its docker tag only appends a RepoTags entry, and its
+// create resolves a digest reference only through "_refs". So the prior
+// image carries its digest reference (nginx:1.27@a, a repo digest it has
+// locally) in _refs from the start, and the update's own docker tag produces
+// the nos-retained tag the rollback inspects.
 func duWorld(t *testing.T, web map[string]any) map[string]any {
 	t.Helper()
 	reg := duRegistry + "1.27"
 	pullRef := "docker.io/library/nginx@" + duDigest("c")
 	newRef := "docker.io/library/nginx:1.27@" + duDigest("c")
+	priorRef := "docker.io/library/nginx:1.27@" + duDigest("a")
 	return map[string]any{
 		"planted": duPlanted, "planted_name": "DB_PASSWORD",
 		"containers": map[string]any{duHex("1"): web},
 		"images": []any{map[string]any{"Id": duDigest("d"), "RepoTags": []any{"nginx:1.27"},
-			"RepoDigests": []any{"nginx@" + duDigest("a")}, "Os": "linux", "Architecture": "amd64"}},
+			"RepoDigests": []any{"nginx@" + duDigest("a")}, "Os": "linux", "Architecture": "amd64",
+			"_refs": []any{priorRef}}},
 		"pullable": map[string]any{pullRef: map[string]any{"Id": duDigest("f"), "RepoDigests": []any{"nginx@" + duDigest("c")},
 			"Os": "linux", "Architecture": "amd64", "_refs": []any{pullRef, newRef}}},
 		"create": duCreated(duHex("9")),
@@ -469,8 +479,10 @@ func (d *durable) prepare(t *testing.T, id string) (duRun, []byte) {
 func TestUpdatePrepareDurableJob(t *testing.T) {
 	d := newDurable(t)
 	first, salt := d.prepare(t, duPrepareExec)
+	// The leak check runs before any failure message can print the log or result.
+	duNoLeak(t, first, salt)
 	if first.Class != hostrun.ClassSuccess || first.ExitCode != 0 {
-		t.Fatalf("class %s (%s), exit %d, log %q", first.Class, first.Detail, first.ExitCode, first.Log)
+		t.Fatalf("first run: class %s (%s), exit %d", first.Class, first.Detail, first.ExitCode)
 	}
 	if len(salt) != 32 {
 		t.Fatalf("salt has %d bytes, want 32", len(salt))
@@ -479,12 +491,12 @@ func TestUpdatePrepareDurableJob(t *testing.T) {
 	if err != nil || p.Status != "created" || !p.Prepared() {
 		t.Fatalf("first run: %+v, %v", p, err)
 	}
-	duNoLeak(t, first, salt)
 	duLogLines(t, first.Log)
 
 	second, again := d.prepare(t, duPrepareAgain)
+	duNoLeak(t, second, salt)
 	if second.Class != hostrun.ClassSuccess || second.ExitCode != 0 {
-		t.Fatalf("second run: class %s, exit %d, log %q", second.Class, second.ExitCode, second.Log)
+		t.Fatalf("second run: class %s, exit %d", second.Class, second.ExitCode)
 	}
 	p, err = dockerhost.ParseUpdatePrepare(second.Result.Result)
 	if err != nil || p.Status != "present" {
@@ -493,7 +505,6 @@ func TestUpdatePrepareDurableJob(t *testing.T) {
 	if !bytes.Equal(salt, again) {
 		t.Fatal("the second run replaced the salt")
 	}
-	duNoLeak(t, second, salt)
 }
 
 // duSecret is the definition as the executor adds it to the run.
@@ -525,8 +536,9 @@ func TestUpdateDurableJobRecreatesWebFromDefinition(t *testing.T) {
 
 	a, _ := actions.Lookup("docker.update")
 	r := d.job(duUpdateExec, a, duParams(t, duUpdate(t, salt, web)), duSecret(t))
+	duNoLeak(t, r, salt)
 	if r.Class != hostrun.ClassSuccess || r.ExitCode != 0 {
-		t.Fatalf("class %s (%s), exit %d, log %q, result %q", r.Class, r.Detail, r.ExitCode, r.Log, r.Result.Result)
+		t.Fatalf("class %s (%s), exit %d", r.Class, r.Detail, r.ExitCode)
 	}
 	doc := duDoc(t, r.Result)
 	if doc["format"] != "standalone-update-v1" || doc["phase"] != "after_snapshot" || doc["reason"] != "" || doc["recreate_exit"] != float64(0) {
@@ -563,11 +575,16 @@ func TestUpdateDurableJobRecreatesWebFromDefinition(t *testing.T) {
 	if c.EnvFileMode != "0o600" || c.EnvFileLines != 2 || !slices.Equal(c.EnvFileNames, []string{"DB_PASSWORD", "PORT"}) || !c.EnvFileHasPlanted {
 		t.Fatalf("env file: mode %q, %d lines, names %q, planted %v", c.EnvFileMode, c.EnvFileLines, c.EnvFileNames, c.EnvFileHasPlanted)
 	}
-	duNoLeak(t, r, salt)
 	duLogLines(t, r.Log)
+	// The survivor is the new container (create template cuHex 9), named /web
+	// and running; the old container 1 is gone.
 	cs := duMap(t, d.readState(), "containers")
 	if len(cs) != 1 {
-		t.Fatalf("containers after update: %v", cs)
+		t.Fatalf("%d containers after update, want 1", len(cs))
+	}
+	survivor := duMap(t, cs, duHex("9"))
+	if survivor["Name"] != "/web" || duString(t, duMap(t, survivor, "State"), "Status") != "running" {
+		t.Fatalf("survivor: name %v, state %v", survivor["Name"], survivor["State"])
 	}
 }
 
@@ -589,8 +606,9 @@ func TestUpdateDurableJobStopsOrFailsWithRollbackInput(t *testing.T) {
 		web["HostConfig"].(map[string]any)["Privileged"] = true
 		d.writeState(duWorld(t, web))
 		r := d.job(duUpdateExec, a, duParams(t, u), duSecret(t))
+		duNoLeak(t, r, salt)
 		if r.Class != hostrun.ClassPrecheckFailed || r.ExitCode != hostrun.ExitPrecheckFailed {
-			t.Fatalf("class %s, exit %d, log %q", r.Class, r.ExitCode, r.Log)
+			t.Fatalf("class %s, exit %d", r.Class, r.ExitCode)
 		}
 		doc := duDoc(t, r.Result)
 		if doc["phase"] != "precheck" || doc["reason"] != "configuration_changed" {
@@ -601,7 +619,6 @@ func TestUpdateDurableJobStopsOrFailsWithRollbackInput(t *testing.T) {
 				t.Fatalf("a change happened before the precheck passed: %q", c.Argv)
 			}
 		}
-		duNoLeak(t, r, salt)
 	})
 
 	t.Run("failed removal after recreate", func(t *testing.T) {
@@ -612,8 +629,9 @@ func TestUpdateDurableJobStopsOrFailsWithRollbackInput(t *testing.T) {
 		st["fail_rm"] = 3
 		d.writeState(st)
 		r := d.job(duUpdateAbort, a, duParams(t, duUpdate(t, salt, web)), duSecret(t))
+		duNoLeak(t, r, salt)
 		if r.Class != hostrun.ClassScriptFailed || r.ExitCode != 1 {
-			t.Fatalf("class %s, exit %d, log %q", r.Class, r.ExitCode, r.Log)
+			t.Fatalf("class %s, exit %d", r.Class, r.ExitCode)
 		}
 		doc := duDoc(t, r.Result)
 		if doc["phase"] != "after_snapshot" || doc["reason"] != "remove_failed" {
@@ -630,7 +648,6 @@ func TestUpdateDurableJobStopsOrFailsWithRollbackInput(t *testing.T) {
 		if img := duString(t, duOne(t, doc, "baseline"), "image_id"); img != duDigest("d") {
 			t.Fatalf("baseline image %q, want the prior image", img)
 		}
-		duNoLeak(t, r, salt)
 		duLogLines(t, r.Log)
 	})
 
@@ -642,8 +659,9 @@ func TestUpdateDurableJobStopsOrFailsWithRollbackInput(t *testing.T) {
 		st["fail_start"] = 3
 		d.writeState(st)
 		r := d.job(duUpdateExec, a, duParams(t, duUpdate(t, salt, web)), duSecret(t))
+		duNoLeak(t, r, salt)
 		if r.Class != hostrun.ClassScriptFailed || r.ExitCode != 1 {
-			t.Fatalf("class %s, exit %d, log %q", r.Class, r.ExitCode, r.Log)
+			t.Fatalf("class %s, exit %d", r.Class, r.ExitCode)
 		}
 		doc := duDoc(t, r.Result)
 		if doc["phase"] != "after_snapshot" || doc["reason"] != "start_failed" {
@@ -654,9 +672,8 @@ func TestUpdateDurableJobStopsOrFailsWithRollbackInput(t *testing.T) {
 		cs := duMap(t, d.readState(), "containers")
 		old := duMap(t, cs, duHex("1"))
 		if old["Name"] != "/web" || duString(t, duMap(t, old, "State"), "Status") != "running" || len(cs) != 1 {
-			t.Fatalf("containers after the failed start: %v", cs)
+			t.Fatalf("containers after the failed start: %d, old running %q", len(cs), duString(t, duMap(t, old, "State"), "Status"))
 		}
-		duNoLeak(t, r, salt)
 	})
 }
 
@@ -673,6 +690,7 @@ func TestRollbackDurableJobRestoresRetainedImage(t *testing.T) {
 	d.writeState(st)
 	upd, _ := actions.Lookup("docker.update")
 	ur := d.job(duUpdateExec, upd, duParams(t, duUpdate(t, salt, web)), duSecret(t))
+	duNoLeak(t, ur, salt)
 	if ur.ExitCode != 1 {
 		t.Fatalf("update exit %d, want 1 (remove failed)", ur.ExitCode)
 	}
@@ -689,33 +707,29 @@ func TestRollbackDurableJobRestoresRetainedImage(t *testing.T) {
 	}
 	retainedTag := strings.TrimPrefix(retained, retainedPrefix)
 
-	// The host as the update left it: the failed removal is over, the
-	// retained image is known to the fake under its reference, and the
-	// rollback creates from the fake's next container template.
+	// The update's own retain step (phase 4) must have tagged the prior image
+	// under the retained tag; the rollback's inspect of that tag depends on it.
+	wantTag := retainedPrefix + duUpdateExec + "-0"
+	if !slices.ContainsFunc(ur.calls, func(c duCall) bool {
+		return c.Tool == "docker" && slices.Equal(c.Argv, []string{"tag", priorImage, wantTag})
+	}) {
+		t.Fatalf("the update did not tag the prior image as %q", wantTag)
+	}
+	// The host as the update left it. The failed removal is over; the fake's
+	// next create gets container ID 8. The retained reference is the fake's
+	// initial state (see duWorld), not written here.
 	st = d.readState()
 	delete(st, "fail_rm")
-	retainedRef := "docker.io/library/nginx:1.27@" + duDigest("a")
-	images, ok := st["images"].([]any)
-	if !ok {
-		t.Fatalf("fake images: %v", st["images"])
-	}
-	for _, im := range images {
-		m, ok := im.(map[string]any)
-		if !ok {
-			t.Fatalf("fake image entry: %v", im)
-		}
-		if m["Id"] == priorImage {
-			m["_refs"] = []any{retainedRef}
-		}
-	}
 	st["create"] = duCreated(duHex("8"))
 	d.writeState(st)
+	retainedRef := "docker.io/library/nginx:1.27@" + duDigest("a")
 
 	rb, _ := actions.Lookup("docker.rollback")
 	rbParams := duParams(t, duRollback(t, salt, newID, priorImage, retainedTag))
 	r := d.job(duRollbackExec, rb, rbParams, duSecret(t))
+	duNoLeak(t, r, salt)
 	if r.Class != hostrun.ClassSuccess || r.ExitCode != 0 {
-		t.Fatalf("rollback: class %s (%s), exit %d, log %q, result %q", r.Class, r.Detail, r.ExitCode, r.Log, r.Result.Result)
+		t.Fatalf("rollback: class %s (%s), exit %d", r.Class, r.Detail, r.ExitCode)
 	}
 	rdoc := duDoc(t, r.Result)
 	if rdoc["format"] != "standalone-rollback-v1" || rdoc["phase"] != "after_snapshot" || rdoc["reason"] != "" {
@@ -748,8 +762,9 @@ func TestRollbackDurableJobRestoresRetainedImage(t *testing.T) {
 	// A second rollback: the container it would return from is gone, so
 	// the precheck must refuse before any change.
 	r2 := d.job(duRollbackAgain, rb, duParams(t, duRollback(t, salt, newID, priorImage, retainedTag)), duSecret(t))
+	duNoLeak(t, r2, salt)
 	if r2.Class != hostrun.ClassPrecheckFailed || r2.ExitCode != hostrun.ExitPrecheckFailed {
-		t.Fatalf("second rollback: class %s, exit %d, log %q, result %q", r2.Class, r2.ExitCode, r2.Log, r2.Result.Result)
+		t.Fatalf("second rollback: class %s, exit %d", r2.Class, r2.ExitCode)
 	}
 	if d2 := duDoc(t, r2.Result); d2["phase"] != "precheck" {
 		t.Fatalf("second rollback result %v", d2)
@@ -759,39 +774,39 @@ func TestRollbackDurableJobRestoresRetainedImage(t *testing.T) {
 			t.Fatalf("a change happened before the precheck: %q", c.Argv)
 		}
 	}
-	duNoLeak(t, r2, salt)
 }
 
-// TestDurableJobOutputSizeIsBounded: every docker command answers with 2 MiB
-// of inspect output (a padded label in the bound container). The scripts
-// bound what they read, so the job stops at a precheck with one small
-// document; the result stays under hostrun.MaxResult and the log under
-// hostrun.MaxLog.
+// TestDurableJobOutputSizeIsBounded: only the docker inspect of the bound
+// container is padded (a 2 MiB label); no other docker or curl call is. The
+// bound configuration digest is computed before the padding, so the padded
+// inspect would not match it. The script's call() reads the whole stdout and
+// drops it above MAX_INSPECT_BYTES (1 MiB; cu05 uses the cu02 phase 1
+// inspect). The cap alone turns the output into target_changed, so the test
+// pins that reason: without the cap the padded container would fail the
+// digest check with configuration_changed instead. The result stays under
+// hostrun.MaxResult and the log under hostrun.MaxLog.
 func TestDurableJobOutputSizeIsBounded(t *testing.T) {
 	d := newDurable(t)
 	_, salt := d.prepare(t, duPrepareExec)
 	web := duContainer(duHex("1"), "web", duDigest("d"), "nginx:1.27")
+	u := duUpdate(t, salt, web)
 	web["Config"].(map[string]any)["Labels"].(map[string]any)["pad"] = strings.Repeat("x", duPadBytes)
 	d.writeState(duWorld(t, web))
 
 	a, _ := actions.Lookup("docker.update")
-	r := d.job(duSizeExec, a, duParams(t, duUpdate(t, salt, web)), duSecret(t))
+	r := d.job(duSizeExec, a, duParams(t, u), duSecret(t))
+	duNoLeak(t, r, salt)
 	if len(r.Result.Result) > hostrun.MaxResult || len(r.Log) > hostrun.MaxLog {
 		t.Fatalf("result %d bytes, log %d bytes", len(r.Result.Result), len(r.Log))
 	}
 	if r.LogTruncated {
 		t.Fatal("the log was truncated")
 	}
-	// The 1 MiB inspect bound (MAX_INSPECT_BYTES) drops the output, and the
-	// precheck stops with a typed reason. Which reason is the script's
-	// choice: the oversize output is reported as target_changed (a finding,
-	// see the report); the test pins the shape, not that reason.
 	doc := duDoc(t, r.Result)
 	if r.ExitCode != hostrun.ExitPrecheckFailed || doc["phase"] != "precheck" {
-		t.Fatalf("exit %d, result %v; want the precheck exit", r.ExitCode, doc)
+		t.Fatalf("exit %d, phase %v; want the precheck exit", r.ExitCode, doc["phase"])
 	}
-	if reason, _ := doc["reason"].(string); reason == "" {
-		t.Fatalf("precheck without a reason: %v", doc)
+	if doc["reason"] != "target_changed" {
+		t.Fatalf("precheck reason %v, want target_changed (the inspect cap)", doc["reason"])
 	}
-	duNoLeak(t, r, salt)
 }
