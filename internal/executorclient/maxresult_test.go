@@ -353,15 +353,25 @@ func (p *backupProbe) setExtra(k int) {
 	}
 }
 
+// backupTooLargeMsg is the message the executor sets on its own refusal of a
+// backup over its total limit (executor backup.go). The client maps every
+// gRPC ResourceExhausted to CodeLimit, transport send and receive limits
+// included, so the message is what tells the executor's refusal apart. A
+// transport refusal fails the probe instead of moving the bisection point.
+const backupTooLargeMsg = "the backup is too large"
+
 // accepted asks the executor for a backup with the current probe files. A
-// refusal must be the executor's size refusal (CodeLimit); any other error
-// fails the test.
+// refusal must be the executor's own size refusal, with its message; any other
+// error fails the test.
 func (p *backupProbe) accepted(resp *pb.BackupExecutorResponse, err error) bool {
 	p.t.Helper()
 	if err == nil {
 		return resp != nil
 	}
-	requireCode(p.t, err, permit.CodeLimit)
+	var e *Error
+	if !errors.As(err, &e) || e.Code != string(permit.CodeLimit) || e.Detail != backupTooLargeMsg {
+		p.t.Fatalf("backup refused by something other than the executor's size refusal %q: %v", backupTooLargeMsg, err)
+	}
 	return false
 }
 
@@ -537,10 +547,16 @@ func TestRequestAtMaxMessageSizeArrives(t *testing.T) {
 		t.Fatalf("no artifact makes the request %d bytes", executor.MaxMessageSize)
 	}
 	req := &pb.RunBatchMemberRequest{BatchDigest: unknownDigest, MemberId: "m1", Artifact: data}
+
+	// The production client sends the request: it is at its send limit, not
+	// over it. The handler then refuses it by its own rule. A local refusal
+	// by the client would be CodeLimit and fails here.
 	_, err := c.RunBatchMember(bigCtx(t), req)
-	if err == nil {
-		t.Fatal("RunBatchMember with an oversize artifact succeeded")
+	requireCode(t, err, permit.CodeInvalidRequest)
+	if detail := clientErrorDetail(t, err); !strings.Contains(detail, "artifact missing or oversize") {
+		t.Fatalf("request did not reach the handler's artifact rule: detail %q", detail)
 	}
+
 	raw := rawClient(t, h.socket, executor.MaxMessageSize, executor.MaxMessageSize)
 	_, err = raw.RunBatchMember(bigCtx(t), req)
 	st := status.Convert(err)
@@ -550,6 +566,17 @@ func TestRequestAtMaxMessageSizeArrives(t *testing.T) {
 	if st.Code() != codes.InvalidArgument || !strings.Contains(st.Message(), "artifact missing or oversize") {
 		t.Fatalf("request did not reach the handler's artifact rule: %v", err)
 	}
+}
+
+// clientErrorDetail returns the Detail of a typed client error, or fails the
+// test when err is not one.
+func clientErrorDetail(t *testing.T, err error) string {
+	t.Helper()
+	var e *Error
+	if !errors.As(err, &e) {
+		t.Fatalf("want a typed client error, got %T: %v", err, err)
+	}
+	return e.Detail
 }
 
 // TestRequestOverMaxMessageSizeIsRefused: one byte over is refused by the
@@ -585,19 +612,35 @@ func TestRequestOverMaxMessageSizeIsRefused(t *testing.T) {
 	}
 }
 
-// TestLimitsFitTogether checks the sums of the run answer: the largest run
-// answer, measured as the proto encodes it, is below
-// executor.MaxResponseSize. The strings of the answer (class, detail,
-// endpoint) are not bounded by the proto; they must fit in the margin
-// measured here.
+// runAnswerStringRoom is the length given to each of the class, detail and
+// endpoint strings of a run answer in TestLimitsFitTogether. The proto does
+// not bound these strings, so the test checks that a run answer with three
+// strings of this length, plus the largest result and log, still fits
+// executor.MaxResponseSize.
+const runAnswerStringRoom = 1 << 20
+
+// TestLimitsFitTogether checks that the largest run answer fits the response
+// limit, both with empty strings and with three strings of runAnswerStringRoom
+// bytes each. The second check fails if the response limit is lowered below
+// the answer's content plus the strings.
 func TestLimitsFitTogether(t *testing.T) {
 	logWithMarker := append(sizePayload(hostrun.MaxLog, 2), hostrun.TruncationMarker...)
 	largest := &pb.RunAttachedResponse{Class: "success", Result: sizePayload(hostrun.MaxResult, 1), Log: logWithMarker, LogTruncated: true}
 	if size := proto.Size(largest); size >= executor.MaxResponseSize {
 		t.Fatalf("largest run answer is %d bytes, not below MaxResponseSize %d", size, executor.MaxResponseSize)
 	}
-	if size := proto.Size(&pb.RunAttachedResponse{}); size+hostrun.MaxResult+hostrun.MaxLog+len(hostrun.TruncationMarker) >= executor.MaxResponseSize {
-		t.Fatalf("run answer framing leaves no margin under MaxResponseSize")
+
+	withStrings := &pb.RunAttachedResponse{
+		Class:        strings.Repeat("c", runAnswerStringRoom),
+		Detail:       strings.Repeat("d", runAnswerStringRoom),
+		Endpoint:     strings.Repeat("e", runAnswerStringRoom),
+		Result:       largest.GetResult(),
+		Log:          logWithMarker,
+		LogTruncated: true,
+	}
+	if size := proto.Size(withStrings); size >= executor.MaxResponseSize {
+		t.Fatalf("run answer with %d-byte class, detail and endpoint is %d bytes, not below MaxResponseSize %d",
+			runAnswerStringRoom, size, executor.MaxResponseSize)
 	}
 }
 
