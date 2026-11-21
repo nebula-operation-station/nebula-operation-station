@@ -151,6 +151,35 @@ func TestOpsNoteRefusesCitationOutsideEmbeddedIndex(t *testing.T) {
 	}
 }
 
+// TestOpsNoteAcceptsCitationOfSearchedChunk posts a summary that cites a real
+// chunk ID, one the agent's search returns for a fixed word, and expects 201.
+func TestOpsNoteAcceptsCitationOfSearchedChunk(t *testing.T) {
+	ix, err := helpdocs.FromDocsembed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var chunkID string
+	for _, w := range docChunkSearchWords {
+		hits, err := helpsearch.New(ix).Search(w)
+		if err != nil {
+			t.Fatalf("search %q: %v", w, err)
+		}
+		if len(hits) > 0 {
+			chunkID = hits[0].Chunk.ID
+			break
+		}
+	}
+	if chunkID == "" {
+		t.Fatal("the fixed search words returned no chunk; nothing to cite")
+	}
+	h := docChunkEnv(t)
+	ref, digest := docChunkSummaryRef(t, h)
+	cited := docChunkNote(ref, digest, chunkID)
+	if code, body := docChunkDo(h, http.MethodPost, "/api/v1/ops/notes", cited); code != http.StatusCreated {
+		t.Fatalf("summary citing %q: %d %s, want 201", chunkID, code, body)
+	}
+}
+
 // TestDocChunkContractKnowsEveryChunkTheAgentSearchReturns checks that every
 // chunk ID the agent's search path (helpdocs.FromDocsembed, helpsearch.New,
 // Search) returns for the fixed words is known to the server's citation check.

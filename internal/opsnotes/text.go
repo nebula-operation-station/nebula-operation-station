@@ -20,8 +20,9 @@ func checkFreeText(field, s string, max int) error {
 	return checkText(field, s, max, true)
 }
 
-// checkToken validates a single-line identifier (ref, digest, action, host,
-// chunk): ASCII letters, digits and ._:/@+- only, at most MaxIDBytes, no URL.
+// checkToken validates a single-line identifier (ref, digest, action, host):
+// ASCII letters, digits and ._:/@+- only, at most MaxIDBytes, no URL.
+// Citations have their own rule, checkCitation.
 func checkToken(field, s string) error {
 	if s == "" {
 		return fmt.Errorf("%s: %w", field, ErrMissing)
@@ -31,6 +32,28 @@ func checkToken(field, s string) error {
 	}
 	for i := 0; i < len(s); i++ {
 		if !tokenByte(s[i]) {
+			return fmt.Errorf("%s: byte %#x at %d: %w", field, s[i], i, ErrInvalidField)
+		}
+	}
+	return checkNoURL(field, s)
+}
+
+// checkCitation validates a citation: a handbook chunk ID as the embedded
+// index writes it, Slug#Anchor, optionally with a "#pN" part suffix. It is
+// checkToken with one addition: '#' is allowed between parts but not at
+// either end. No other identifier may contain '#'.
+func checkCitation(field, s string) error {
+	if s == "" {
+		return fmt.Errorf("%s: %w", field, ErrMissing)
+	}
+	if len(s) > MaxIDBytes {
+		return fmt.Errorf("%s: %d bytes, max %d: %w", field, len(s), MaxIDBytes, ErrLimit)
+	}
+	if s[0] == '#' || s[len(s)-1] == '#' {
+		return fmt.Errorf("%s: '#' at an end of the chunk ID: %w", field, ErrInvalidField)
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] != '#' && !tokenByte(s[i]) {
 			return fmt.Errorf("%s: byte %#x at %d: %w", field, s[i], i, ErrInvalidField)
 		}
 	}
