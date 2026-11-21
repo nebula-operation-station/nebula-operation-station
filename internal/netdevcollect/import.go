@@ -139,6 +139,9 @@ type ImportReport struct {
 	// removed because a newer record of the same read, judged valid, waits
 	// in the spool (see MaxPendingPerRead).
 	Pruned int
+	// Staged counts device metadata records judged valid. They stay in the
+	// spool: the store step that writes them does not exist yet (nx08/nx10).
+	Staged int
 	// Errors holds one "<file>: <code>" line per kept, retried or failed
 	// record.
 	Errors []string
@@ -174,7 +177,9 @@ type importBackoff struct {
 // failing removal.
 var spoolDiscard = (*Spool).Discard
 
-// spoolReadEnum maps a spool read name to its typed executor read.
+// spoolReadEnum maps a spool read name to its typed executor read. It holds
+// only executor reads: device metadata has no NetDeviceRead value and is
+// handled by its own step (importStepFor).
 var spoolReadEnum = func() map[string]pb.NetDeviceRead {
 	m := make(map[string]pb.NetDeviceRead, len(spoolReadName))
 	for k, v := range spoolReadName {
@@ -182,6 +187,30 @@ var spoolReadEnum = func() map[string]pb.NetDeviceRead {
 	}
 	return m
 }()
+
+// importStep is the importer step that handles a spool read name.
+type importStep int
+
+const (
+	// stepUnknown: the name is outside the closed set of reads.
+	stepUnknown importStep = iota
+	// stepDataset: an executor read, decoded and stored as a dataset.
+	stepDataset
+	// stepDeviceMetadata: device registry metadata, taken and validated
+	// by stageDeviceMetadata; it is never sent to a device.
+	stepDeviceMetadata
+)
+
+// importStepFor returns the step that handles spool read name read.
+func importStepFor(read string) importStep {
+	if _, ok := spoolReadEnum[read]; ok {
+		return stepDataset
+	}
+	if read == ReadDeviceMetadata {
+		return stepDeviceMetadata
+	}
+	return stepUnknown
+}
 
 type importOutcome int
 
@@ -258,6 +287,18 @@ func (im *Importer) Run(ctx context.Context) (ImportReport, error) {
 		if err != nil {
 			continue // List only returns well-formed names
 		}
+		if importStepFor(n.read) == stepDeviceMetadata {
+			// Metadata never waits behind a store failure: it writes nothing.
+			if taken >= MaxRecordsPerRun {
+				rep.Deferred++
+				continue
+			}
+			taken++
+			if im.stageDeviceMetadata(ctx, name, &rep) == outcomeInterrupted {
+				return rep, ctx.Err()
+			}
+			continue
+		}
 		_, stop := halted[n.device]
 		if stop || now.Before(im.backoff[n.device].notBefore) || taken >= MaxRecordsPerRun {
 			rep.Deferred++
@@ -329,7 +370,7 @@ func (im *Importer) pruneSuperseded(ctx context.Context, names []string, rep *Im
 			continue
 		}
 		n, err := parseSpoolName(name)
-		if err != nil {
+		if err != nil || importStepFor(n.read) != stepDataset {
 			continue
 		}
 		if _, failing := im.backoff[n.device]; !failing {
@@ -433,6 +474,35 @@ func (im *Importer) judge(ctx context.Context, name string, rep *ImportReport) (
 		return judgeHandled, nil
 	}
 	return judgeValid, nil
+}
+
+// stageDeviceMetadata is the device metadata step. It takes and validates
+// one device metadata record and leaves a valid one in the spool, unread
+// by any store and unconfirmed. A record at fault goes to kept/ with its
+// reason. The store step that writes device rows is not part of this step.
+func (im *Importer) stageDeviceMetadata(ctx context.Context, name string, rep *ImportReport) importOutcome {
+	t, err := im.Spool.Take(ctx, name)
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrInvalidRecord), errors.Is(err, ErrBadName):
+		im.reject(ctx, name, ReasonInvalidRecord, rep)
+		return outcomeDone
+	case errors.Is(err, ErrReplayed):
+		im.drop(ctx, name, ReasonReplayed, rep)
+		return outcomeDone
+	case ctx.Err() != nil:
+		return outcomeInterrupted
+	default:
+		rep.Failed++
+		rep.Errors = append(rep.Errors, name+": read_failed")
+		return outcomeDone
+	}
+	if err := checkDeviceMetadata(t.Record.DeviceID, t.Record.TrustGeneration, t.Record.Data); err != nil {
+		im.reject(ctx, name, ReasonInvalidPayload, rep)
+		return outcomeDone
+	}
+	rep.Staged++
+	return outcomeDone
 }
 
 // importOne takes, validates, stores and confirms one record.
