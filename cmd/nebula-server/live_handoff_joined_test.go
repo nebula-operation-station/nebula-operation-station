@@ -144,18 +144,20 @@ func (e *joinedExec) RunReadGrant(context.Context, *pb.RunReadGrantRequest, ...g
 	return nil, fmt.Errorf("joined test: RunReadGrant is not used")
 }
 
-// ReadPVE returns the fixed metrics of a node or guest and counts the ask.
-// A target without a fixed value is refused, so an unexpected ask fails.
+// ReadPVE counts every asked target, including unknown ones, and then returns
+// the fixed metrics of a node or guest. A target without a fixed value is
+// refused with an error; the collector's watcher only logs that refusal, so
+// the count is what makes an unexpected ask visible to the test.
 func (e *joinedExec) ReadPVE(_ context.Context, req *pb.ReadPVERequest, _ ...grpc.CallOption) (*pb.ReadPVEResponse, error) {
 	m := req.GetMetrics()
 	k := pvecontract.LiveTarget{Remote: req.GetRemoteId(), Kind: m.GetKind(), Node: m.GetNode(), VMID: m.GetVmid()}
+	e.mu.Lock()
+	e.asked[k]++
+	e.mu.Unlock()
 	cpu, ok := joinedCPU[k]
 	if !ok {
 		return nil, fmt.Errorf("joined test: no fixed value for %+v", k)
 	}
-	e.mu.Lock()
-	e.asked[k]++
-	e.mu.Unlock()
 	select {
 	case e.reads <- k:
 	default:
@@ -534,10 +536,12 @@ func TestLiveValuesJoinedNoSessionOrOriginNoTargets(t *testing.T) {
 	}
 
 	// Let the collector's watcher and the server's loops run for a few
-	// ticks: no target may reach the stand-in.
+	// ticks: no target may reach the stand-in. The stand-in counts every
+	// asked target, known or not, so this catches any leaked target, not only
+	// the two fixture targets.
 	time.Sleep(2500 * time.Millisecond)
-	if n := len(r.exec.askedCounts()); n != 0 {
-		t.Fatalf("stand-in asked for %d targets, want none", n)
+	if counts := r.exec.askedCounts(); len(counts) != 0 {
+		t.Fatalf("stand-in asked for %v, want no target", counts)
 	}
 	if _, err := os.Stat(filepath.Join(r.root, "requests", "live.json")); err == nil {
 		raw, err := os.ReadFile(filepath.Join(r.root, "requests", "live.json"))
