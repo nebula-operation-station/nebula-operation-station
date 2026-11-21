@@ -4,6 +4,7 @@ package netdevcollect
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -137,6 +138,11 @@ type CycleReport struct {
 	Busy int
 	// Dispatched is the number of reads handed to device workers.
 	Dispatched int
+	// MetadataWritten counts device metadata records spooled in this cycle.
+	MetadataWritten int
+	// MetadataFailed counts device metadata records the spool refused. A
+	// failed record does not stop the reads of the cycle.
+	MetadataFailed int
 }
 
 // Poller schedules typed reads over the executor socket and spools the
@@ -280,6 +286,10 @@ func (p *Poller) Cycle(ctx context.Context) (CycleReport, error) {
 	now := p.Now()
 	rep := CycleReport{Devices: len(infos)}
 
+	// Metadata first: one record per listed device that is not blocked,
+	// before any read of this cycle is dispatched (ADR 0010 D1, nx07).
+	p.spoolMetadata(ctx, infos, &rep)
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.init()
@@ -316,6 +326,54 @@ func (p *Poller) Cycle(ctx context.Context) (CycleReport, error) {
 	}
 	p.prune(listed, now)
 	return rep, nil
+}
+
+// metadataEligible reports whether a listed device gets a metadata record:
+// a blocked device gets none, and a device whose id, trust generation or
+// family the spool would refuse is not written. Credential state does not
+// matter here: the metadata carries no credential. A device that the
+// executor no longer lists (a tombstoned one) is never in the list, so it
+// gets no record either.
+func metadataEligible(info *pb.NetDeviceInfo) bool {
+	gen := info.GetTrustGeneration()
+	return !info.GetBlocked() && gen >= 1 && gen <= netdevcontract.MaxTrustGeneration &&
+		familyReads[info.GetFamily()] != nil
+}
+
+// spoolMetadata writes one device metadata record per listed device that
+// metadataEligible accepts, using the first listing of a duplicate id. A
+// failed write is counted in rep and logged without its detail; it never
+// stops the cycle, and it does not touch any read schedule.
+func (p *Poller) spoolMetadata(ctx context.Context, infos []*pb.NetDeviceInfo, rep *CycleReport) {
+	seen := make(map[string]bool, len(infos))
+	for _, info := range infos {
+		if ctx.Err() != nil {
+			return
+		}
+		id := info.GetDeviceId()
+		if !netdevcontract.ValidDeviceID(id) || seen[id] {
+			continue
+		}
+		seen[id] = true
+		if !metadataEligible(info) {
+			continue
+		}
+		payload, err := json.Marshal(DeviceMetadata{
+			DeviceID:        id,
+			Family:          netdevcontract.Family(info.GetFamily()),
+			Label:           info.GetLabel(),
+			TrustGeneration: info.GetTrustGeneration(),
+		})
+		if err == nil {
+			_, err = p.Spool.Write(ctx, id, ReadDeviceMetadata, info.GetTrustGeneration(), false, payload)
+		}
+		if err != nil {
+			rep.MetadataFailed++
+			p.log().Warn("netdev metadata spool failed", "device", id, "code", "spool")
+			continue
+		}
+		rep.MetadataWritten++
+	}
 }
 
 // usable reports whether a listed device may be read and returns it.
