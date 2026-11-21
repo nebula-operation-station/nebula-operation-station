@@ -450,14 +450,15 @@ protects `CODEOWNERS`, `docs/handbook/`, `docs/admin/guide.md` and
 
 | Ticket | Paths | Protected | Required test |
 | --- | --- | --- | --- |
+| IG-03: I1 checks, executor cross-check, server check of executor, `integrity_findings` store (ADR 0015:1674) | `internal/integritystore/`, `cmd/nebula-server/integrity.go`, `internal/executorclient/`; executor cross-check in `internal/executor/` | Yes for `internal/executor/` (the cross-check) | Proposed: findings row written and read back through `internal/integritystore/` on a real database; the server page shows the executor status and its own check labelled apart (decision (f) 3). Depends on IG-02 (ADR 0015:1674), not on (c) |
 | IG-05: `fim.scan` script, read-only contract, parser with fuzz tests and limits | `internal/fimscan/`, `internal/executions/actions/actions.go` (catalog), `internal/executions/leaserunner.go`, `internal/executions/readgrants_propose.go` (d), `internal/hostrun/` (b), `internal/executor/` (intake) | Yes for `internal/hostrun/`, `internal/executor/`; catalog and `executions` not listed (see 3.2 note) | Lease with `fim.scan` and foreign parameters rejected; a 128 MiB-class document accepted by the transport limit; parser fuzz for limit boundaries |
 | IG-06: host baseline store, executor-held digest, baseline approval UI, `nebula integrity pending`/`approve` | `internal/fimstore/` (server view only, c), `internal/executordb/`, `internal/executor/`, `internal/web/ui/`, `cmd/nebula/` | Yes for `executordb`, `executor`, `cmd/nebula` | Approval binds the executor-computed digest; a stale `PreviousDigest` is rejected (over real HTTP for the UI) |
 | IG-07: incremental/full logic and expected-change attribution | `internal/fimretain/`, `internal/fimbaseline/`, `internal/executor/` | Yes for `executor` | A complete incremental run keeps a hash only for paths it hashed; a metadata change drops the hash (D9) |
-| IG-03: I1 checks, executor cross-check, server check of executor, `integrity_findings` store (ADR 0015:1674) | `internal/integritystore/`, `cmd/nebula-server/integrity.go`, `internal/executorclient/`; executor cross-check in `internal/executor/` | Yes for `internal/executor/` (the cross-check) | Proposed: findings row written and read back through `internal/integritystore/` on a real database; the server page shows the executor status and its own check labelled apart (decision (f) 3). Depends on IG-02 (ADR 0015:1674), not on (c) |
 | IG-08: findings UI and `integrity.*` notifications | `internal/fimfinding/`, `internal/notify/integrity.go`, `cmd/nebula-server/integrity.go` | No | Findings page over real HTTP; notification sink receives the finding. Conditional on (e) option 2 (decided 2026-11-21): the "not covered" case shows no severity. If (e) option 1 is chosen later, this test changes |
 
-IG-03 and IG-04 are mixed: IG-03 (server check of executor, server page,
-`integrity_findings` store) is section 3.1 plus the IG-03 row above; IG-04 (unlock refusal, `ack`, `verify --offline`,
+IG-03 and IG-04 are mixed: IG-03 (I1 checks, server check of executor, server
+page, `integrity_findings` store) is the (f) work item under the Decision block
+plus the IG-03 row above; section 3.1 holds no IG-03 item. IG-04 (unlock refusal, `ack`, `verify --offline`,
 configuration approval) is mostly section 3.2 and needs the maintainer. The
 admission of `installed-files.json` into executor storage is IG-02 (ADR
 0015:1673). Its executor part is protected (`internal/executor/`). The
