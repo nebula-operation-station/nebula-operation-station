@@ -1,6 +1,6 @@
 # Project status
 
-Last updated 2026-11-21 (wiring re-check; previously 2026-11-20 (evening))
+Last updated 2026-11-21 (evening; previously 2026-11-21 wiring re-check)
 
 This page is the short, frequently updated view of where Nebula Operation Station stands. The
 [README roadmap](../README.md#roadmap) gives the area overview; the ADRs in [docs/adr](adr/) hold
@@ -11,100 +11,116 @@ the decisions, and [docs/implementation](implementation/) the per-area plans.
 | Area | ADR | State |
 | --- | --- | --- |
 | Release 0.9 (milestones 0–10) | – | code complete; release draft v0.9.0-beta.1 prepared on 2026-11-04, not yet published; running in the reference lab since then, formal integration run on clean VMs pending |
-| Proxmox VE phase 1 / phase 2 | [0006](adr/0006-proxmox-integration.md) | phase 1 wired; phase 2 guest power and snapshot controls wired in nebula-server (`cmd/nebula-server/main.go:589-590`); backup, migration and node reboot executor code only, no RPC (previously: "not offered in the chart"; "phase 1 and phase 2 actions merged"); **amendment 2026-11-19: registry metadata may follow at most two same-host redirects for anonymous requests** (#717); registry metadata limits pinned (#698); pveapi/pvecollect package comments match the code (#714, #721); spool retry state and SSH telemetry mapping tested (#730, #729) |
-| Approval ergonomics | [0007](adr/0007-approval-ergonomics.md) | merged; amendment 2026-11-17 (reject pending proposals) complete: spec, executor `RejectPending` RPC, UI (#687) and CLI `nebula reject` (#755), follow-ups (#753) |
-| Guest provisioning | [0008](adr/0008-guest-provisioning.md) | merged; `packlock` testable with its exit codes covered (#715, PV-07) |
-| Traffic map | [0009](adr/0009-traffic-map.md) | proposed; libraries, store and renderer merged; API and pages mounted in nebula-server (`cmd/nebula-server/main.go:636-655`, `:706`); `HostNet.Hop` fuzzed (#711) |
-| Network devices | [0010](adr/0010-network-devices.md) | accepted; `NormalizePANOSConfig` fuzzed against its bounds (#709, #719) |
-| Vulnerability management | [0011](adr/0011-vulnerability-management.md) | accepted; **first live run on 2026-11-20** found four integration bugs, all fixed the same day: token API refused by the browser origin check (#744), Debian feeds without a content date (#743), OSV Ubuntu over the download cap (#746), `package.list_installed` output not one JSON document (#752). The run also showed that **the server does not store package inventories yet** (the export is always empty) – chain iv01–iv10 closes that gap, decision paper merged (#764, #765), lease interval floor (#767). End-to-end tests over real HTTP (#763) and on a lab VM (#757) |
+| Proxmox VE phase 1 / phase 2 | [0006](adr/0006-proxmox-integration.md) | phase 1 wired; PVE inventory retention now runs beside the spool import (#786); collector call timeout covers the read budget (#794); phase 2 guest power and snapshot controls wired in nebula-server; backup, migration and node reboot executor code only, no RPC |
+| Approval ergonomics | [0007](adr/0007-approval-ergonomics.md) | merged; reject pending proposals complete (#687, #753, #755); read grants with network device targets compare those targets (#795) and need CLI approval in every mode (#813, rule A1-0b) |
+| Guest provisioning | [0008](adr/0008-guest-provisioning.md) | merged; **amendment 2026-11-21: PV-03 wiring of `pve.image.prepare` decided** (#805, paper #772, #790); chain pi started, the release bundle now stages `image-catalog.json` and its signature (#816) |
+| Traffic map | [0009](adr/0009-traffic-map.md) | proposed; API and pages mounted in nebula-server; end-to-end test from real `net.facts` output to the map API (#798) |
+| Network devices | [0010](adr/0010-network-devices.md) | accepted; **amendment 2026-11-21: device read chain decided** – variant 1 (collector spools one metadata record per device), device lease only through the local CLI (#805, paper #784); collector probe fix (#796); chain nx started (#813) |
+| Vulnerability management | [0011](adr/0011-vulnerability-management.md) | accepted; **package inventory now stored on the server** (#766, #777, #779, #793) and the `vuln-inventory-v1` export is served from it (#792); open-findings listing fix (#808); maintainer decisions recorded: inventory E1–E4 (#776), assertion binding variant A incl. `discard_hold` (#805, papers #771, #775); classifier against the inventory in review (#815) |
 | Network security advisor | [0012](adr/0012-network-security-advisor.md) | accepted; pure libraries merged, none imported by nebula-server (not wired) |
-| One-step enrollment | [0013](adr/0013-one-step-enrollment.md) | accepted; renderer and download limits tested; dialog not yet wired in nebula-server (#604) |
-| Help assistant | [0014](adr/0014-help-assistant.md) | accepted; AS-09 libraries merged, service and wiring open (previously: "AS-09 parts 1–5 merged"; the parts are in `internal/helpassist`, not imported; the Assistant panel routes are mounted, `internal/web/ui/assistant.go:240-243`) (decoder #737, secret guard #736, limits #738, prompt assembly with a 16,000-token budget #739/#754, follow-up turns #745); shape builder (#740, #750) |
-| Integrity monitoring | [0015](adr/0015-integrity-monitoring.md) | accepted; libraries merged |
-| Ops agent | [0016](adr/0016-ops-agent.md) | accepted 2026-11-17; **implementation chain complete (27/27)** – today: suggestion event and trigger file (#713, #741), `settings_changed` reason budget (#732), security acceptance tests with a real bug fix: the agent rejected every fix item because of a `sha256:` digest prefix (#742, #756). **Open:** the Ops tab is not set in nebula-server: no `AssistantOps` option is passed (`cmd/nebula-server` has no reference to it), so `assistantOps` stays nil (`internal/web/ui/ui.go:243,332`). The projector gets empty Findings and Listeners sources (`cmd/nebula-server/ops.go:237-238`, `opsNoFindings` at `ops.go:171-176`), so its projections carry no findings or ports; the projection code is in `internal/opsfacts/project.go` |
+| One-step enrollment | [0013](adr/0013-one-step-enrollment.md) | accepted; **dialog now switched on in nebula-server**: the executor installs the loaded enrollment configuration (#782) and the server relays the one-step RPCs (#785) |
+| Help assistant | [0014](adr/0014-help-assistant.md) | accepted; AS-09 libraries merged, service and wiring open |
+| Integrity monitoring | [0015](adr/0015-integrity-monitoring.md) | accepted; libraries merged; **amendment 2026-11-21: I1 status and I2 scan chain wiring decided**, `fim.scan` as a durable job (#805, paper #783); chain fi imported (0/15) |
+| Ops agent | [0016](adr/0016-ops-agent.md) | accepted; implementation chain complete (27/27); finding and listener sources merged (#780) but `cmd/nebula-server/ops.go:237` still passes `opsNoFindings` – connecting them is ticket uh02; a run without work reports its status, exit codes pinned for systemd (#807); note size limit aligned, pinned CA tested over real TLS (#809); install hint fixed (#811); Ops tab still not set in nebula-server |
 
-### Landed since the last update (31 PRs, 2026-11-19 19:00 to 2026-11-20 19:00)
+### Landed since the last update (41 PRs, 2026-11-20 19:00 to 2026-11-21 19:30)
 
-- **Vulnerability management, live fixes:** origin check no longer blocks the token API (#744);
-  Debian tracker, DSA and DLA content dates (#743); OSV Ubuntu download cap (#746);
-  `package.list_installed` 1.1.0 returns one JSON document (#752); SQLITE_BUSY flake (#751).
-- **Vulnerability inventory (new chain iv):** decision paper (#764, #765); the lease runner honours
-  an action's own interval floor (#767). Storage, export and classifier follow (iv02–iv10).
-- **End-to-end and integration tests:** vuln agent over real HTTP (#763); `package.list_installed`
-  on a lab VM (#757); every read action through the real hostrun classifier (#758, #759, #761) –
-  these found real parser bugs (service journal with one invalid UTF-8 line, Docker list cut
-  inside a UTF-8 sequence), fixes in progress.
-- **Ops agent (ADR 0016):** chain complete (#713, #741, #732, #742, #756).
-- **Reject pending proposals:** UI (#687), CLI (#755), follow-ups (#753).
-- **Help assistant (ADR 0014):** AS-09 parts 1–5 and the shape builder (#736–#740, #745, #750,
-  #754).
-- **Attack paths:** fuzzing of the CVSS v3 parser and of node rules (#747, #748); vuln agent test
-  memory (#734).
+- **Maintainer decisions of 2026-11-21 (#805):** PV-03 image preparation, network device read
+  chain, assertion binding for vuln decisions, integrity wiring. Decision papers: #771, #772,
+  #775, #783, #784, #790. 46 implementation tickets imported (chains fi, nx, pi and others).
+- **Vulnerability inventory (chain iv):** store (#766), parse and store every
+  `package.list_installed` result (#777), immutable snapshots (#779), limits and delete-rule
+  tests (#793), export served from the inventory (#792), inventory decisions recorded (#776);
+  SQLITE_BUSY flake (#791); osv-ubuntu over 4 GiB (#768).
+- **Wiring:** one-step enrollment (#782, #785); PVE inventory retention (#786); ops finding and
+  listener sources (#780); wiring guard that fails on internal packages without a production
+  importer (#788); README and implementation notes say what is wired (#789).
+- **Security fixes:** read grants with network device targets (#795, #813).
+- **End-to-end and integration tests:** write operation from the HTTP form to the host script
+  (#797), backup and restore (#800), read-only API token through runServer (#802), largest run
+  results over the real gRPC limits (#801), traffic map (#798), ops agent over real HTTP (#770);
+  read actions through the real hostrun classifier (#773, #799) and parser fixes (#774, #778).
+- **Ops agent:** #807, #809, #811.
 
 ### Landed in the last 7 days
 
-Merged per day: 54 (11-12), 31 (11-13), 25 (11-16), 46 (11-17), about 45 (11-18), about 30
-(11-19), 31 (11-20). Main themes: vulnerability agent and attack paths (ADR 0011); one-step enrollment
-(ADR 0013); help assistant (ADR 0014); integrity monitoring (ADR 0015); a large fuzz and
-limit-test wave; ops agent (ADR 0016) accepted and nearly all of its implementation chain merged.
+Merged per day: 31 (11-13), 25 (11-16), 46 (11-17), about 45 (11-18), about 30 (11-19), 31
+(11-20), 41 (11-21). Main themes: vulnerability agent and package inventory (ADR 0011); ops agent
+(ADR 0016) complete and partly wired; wiring of one-step enrollment; maintainer decisions for the
+remaining wiring gaps (ADR 0008, 0010, 0011, 0015); end-to-end and hostrun classifier tests.
 
-## Wired in nebula-server (re-checked 2026-11-21)
+## Wired in nebula-server (re-checked 2026-11-21 evening)
 
 "Merged" in the table above means code is on `main`, not that the server uses it. Per area:
 
 | Area | Wired in nebula-server? | Evidence |
 | --- | --- | --- |
-| Proxmox VE phase 1 (read-only pages, inventory, live values) | yes, the `/pve` pages and the PVE part of the chart | `cmd/nebula-server/main.go:278` (`pveStore`), `:578` (`PVE: pveStore`) |
-| Proxmox VE guest power and snapshots | yes, set in nebula-server: `GuestPower: exec`, `GuestSnapshot: exec` (`cmd/nebula-server/main.go:589-590`). The routes answer 404 only when the option is nil or, for snapshots, the PVE store lacks `ListSnapshots` (`internal/web/ui/guestactions.go:708-713`, `:1343-1350`; `internal/pveinventory/store.go:732`). The chart shows a Power section on running guests of active remotes (`guestactions.go:193-200`); rendering not checked in a browser | `cmd/nebula-server/guestactions_wiring_test.go` |
-| Proxmox VE backup now, migration, node reboot | no: executor code only (`internal/executor/pve_guest_backup.go`, `pve_guest_migrate.go`, `pve_node_reboot.go`); no RPC for them in `proto/nebula/executor/v1/executor.proto` | grep of `executor.proto`, 2026-11-21 |
-| Traffic map API, page and connections tab | yes, mounted | `cmd/nebula-server/main.go:636-655`, `:706` |
-| Attack paths (vulnerability management) | pages mounted, path computation not wired: the source reports no paths | `cmd/nebula-server/main.go:660`, `cmd/nebula-server/attackpaths.go:19-26` |
-| Network devices (read path and device pages) | no: the device read returns `Unimplemented` (ND-14); `NetDevPages` has no caller; `cmd/nebula-server` does not reference netdev | `internal/executor/netdev_read.go:112`, `internal/web/ui/netdev.go:146-160` |
-| Network security advisor (netreach, netadvisor, edl, reputation) | no: libraries exist, nothing outside their own packages imports them | `internal/netadvisor/netadvisor.go`, `internal/edl/render.go`, `internal/reputation/match.go` |
-| One-step enrollment | no: dialog not wired; the executor's enrollment offers are local start-up configuration, never served over RPC | `cmd/nebula-executor/main.go:81-82` (load and comment), `:269` (`SetEnrollOffers`) |
-| Help assistant | panel routes mounted; the `internal/helpassist` libraries are not imported | `internal/web/ui/assistant.go:240-243`, `internal/web/ui/ui.go:738` |
-| Ops agent | the Ops tab is not set in nebula-server, so the tab is absent | `internal/web/ui/ui.go:243,332` (no `AssistantOps` in `cmd/nebula-server`) |
+| Proxmox VE phase 1 (read-only pages, inventory, live values) | yes, the `/pve` pages and the PVE part of the chart; inventory retention runs beside the spool import (#786) | `cmd/nebula-server/main.go` (`pveStore`) |
+| Proxmox VE guest power and snapshots | yes: `GuestPower: exec`, `GuestSnapshot: exec`; rendering not checked in a browser | `cmd/nebula-server/guestactions_wiring_test.go` |
+| Proxmox VE backup now, migration, node reboot | no: executor code only; no RPC for them in `proto/nebula/executor/v1/executor.proto` | grep of `executor.proto`, 2026-11-21 |
+| Traffic map API, page and connections tab | yes, mounted; end-to-end test (#798) | `cmd/nebula-server/main.go` |
+| Attack paths (vulnerability management) | pages mounted, path computation not wired: the source reports no paths | `cmd/nebula-server/attackpaths.go` |
+| Vulnerability inventory export | yes: served from the stored package inventory (#792) | PR #792 |
+| Network devices (read path and device pages) | no: device read returns `Unimplemented` (ND-14); chain nx (decided 2026-11-21) closes this | `internal/executor/netdev_read.go`, `internal/web/ui/netdev.go` |
+| Network security advisor (netreach, netadvisor, edl, reputation) | no: libraries exist, nothing outside their own packages imports them | `internal/netadvisor/`, `internal/edl/`, `internal/reputation/` |
+| One-step enrollment | yes, the dialog: `Enroll: exec`, and `lazyExecutor` implements `ui.EnrollOffers` (#785); the executor installs the loaded configuration (#782). The NetBird option still waits for EN-16g | `cmd/nebula-server/main.go:584`, `cmd/nebula-server/executor_onestep.go` |
+| Help assistant | panel routes mounted; the `internal/helpassist` libraries are not imported | `internal/web/ui/assistant.go`, `internal/web/ui/ui.go` |
+| Ops agent | API wired; projection still gets empty findings and listeners (`opsNoFindings`); Ops tab not set (no `AssistantOps` in `cmd/nebula-server`) | `cmd/nebula-server/ops.go:237` |
 
-Not re-checked in this pass: release 0.9, approval ergonomics, integrity monitoring, vulnerability
-server side (other than attack paths).
+Not re-checked in this pass: release 0.9, approval ergonomics, integrity monitoring.
 
 ## In progress
 
 | Chain | Topic | Progress | Running now |
 | --- | --- | --- | --- |
-| iv | Package inventory for vulnerability management | 4/11 | iv02f (inventory store, review round), queued iv03–iv10 |
-| vf | Feed fixes from the live run | 3/4 | vf03f (OSV Ubuntu content date without unpacking more than 4 GiB) |
-| ue | Read actions through the real hostrun classifier | 3/9 | ue03f2, ue06f2 (fix rounds), queued ue05, ue07–ue09, ue02h |
-| e2e | End-to-end tests | 2/3 | e2e02 (ops agent over real HTTP) |
-| ud | Help assistant (AS-09, shape builder, fuzz) | most merged | ud09f, ud04h follow-ups |
+| iv | Package inventory for vulnerability management | 7/12 | iv06f (classifier against the inventory, PR #815, HIGH finding being fixed, prio 1); queued iv08–iv10, iv12, follow-ups iv03g, iv05g |
+| ug | End-to-end tests through runServer | 8/12 | ug07f (#810), ug13f2 (#804), ug14f (#806); queued ug12f (#803), ug10g |
+| uh | Ops agent live (sources, docs, deploy sandbox) | 5/11 | uh11; queued uh02 (connect stored findings), uh03f (#787), uh05, uh07, uh10 |
+| uf | Wiring follow-ups and decision papers | 9/16 | queued uf01 (feature registry), uf07–uf11, uf17, follow-ups uf13g, uf15g, uf16g |
+| ue | Read and control actions through the real hostrun classifier | 6/9 | ue06h; queued ue07–ue09 |
+| nx | Network device read chain (ADR 0010, decided 2026-11-21) | 1/11 | nx07f blocked (#812), nx08f queued (#814), nx01, nx03–nx06, nx09–nx11 queued |
+| pi | Image preparation wiring (ADR 0008 PV-03) | 1/14 | queued pi01–pi14 (wait for ug12f) |
+| fi | Integrity wiring (ADR 0015 I1/I2) | 0/15 | queued (wait for ug12f and iv/ue follow-ups) |
+| vf | Feed fixes from the live run | 3/4 | vf04 queued ("not configured" instead of "stale") |
 
 ## Next
 
-- **iv chain:** store (iv02) → hook after `package.list_installed` (iv03) → immutable snapshots
-  (iv04) → real export (iv05) → classifier (iv06) → maximum read age (iv08) → host tab (iv09) →
-  end-to-end test from script output to a finding (iv10).
-- **Lab:** the reference lab runs 4a1acc10 with the vuln agent installed (timer still off until a
-  run produces real findings); a throwaway lab VM is now used for integration runs before every
-  lab upgrade.
-- **Release 0.9 Beta:** cut beta.2 after the iv chain and the open feed fix.
+- **iv chain (critical path):** classifier fix iv06f → maximum read age (iv08) → host tab (iv09)
+  → end-to-end test from script output to a finding (iv10); image inventories (iv12).
+- **Ops agent live:** connect the stored findings to the projection (uh02), then uh05 and the
+  admin guide section 10.6 (uh10).
+- **Decision implementation:** nx (device read chain), pi (image preparation), fi (integrity);
+  most of them wait for ug12f and the feature registry uf01.
+- **Release 0.9 Beta:** cut beta.2 after the iv chain and vf04.
 
 ## Blocked / needs maintainer
 
-- **Vulnerability inventory decisions (iv01):** retention (E1), maximum read age 24 h (E2),
-  missing inventory held instead of closed (E3), no image inventory yet (E4), default read-lease
-  interval 6 h – recommendations in `docs/implementation/vuln-inventory-decisions.md`, waiting for
-  the maintainer.
+- **nx07f (#812):** blocked – the local runner's permission layer refused `make test-deploy` and
+  `make vuln` (govulncheck); everything else passes. Needs a run with permission or CI, then a
+  review of the design choice (superseded metadata removed without a validity check).
+- **#815 (iv06):** HIGH finding (kernel findings measured only at the newest read); fix iv06f
+  running. No merge with HIGH.
+- **Vulnerability inventory, still open questions:** precedence of E1 over D5 and snapshot
+  pinning (Q1), E1/E2 reading (Q2), classifier rule for image subjects without `image.packages`
+  (Q3), image freshness (Q4) and lease digest parameter (Q5) – see
+  [vuln-inventory-decisions.md](implementation/vuln-inventory-decisions.md).
 - **ADR 0009 (traffic map):** still "proposed".
-- **One-step enrollment:** dialog not wired in nebula-server (#604).
 - **Dependabot:** #647, #648 wait for review.
-- **Decision papers uf04, uf13, uf14:** uf04 is in the tree (`docs/implementation/vuln-decisions-assertion.md`, "Ticket: uf04"). uf14 is on `origin/main` (`docs/implementation/network-devices-wiring-decisions.md`, PR #784) and not yet on this branch. No uf13 paper was found on `origin/main` or this branch (grep and `git log --grep=uf1`, 2026-11-21). Previously: "the files do not exist in the tree yet, so the open decisions are named here only."
-- **Wiring gaps:** network device pages and read path, attack path computation, Ops tab, one-step dialog and help assistant service. See [wiring audit, re-check 2026-11-21](implementation/wiring-audit.md#re-check-2026-11-21).
+- **Wiring gaps:** network device pages and read path, attack path computation, Ops tab and
+  projection sources, help assistant service. See [wiring audit](implementation/wiring-audit.md).
 
 ## Changelog
 
+- **2026-11-21 (evening):** 41 PRs; maintainer decisions for PV-03, device read chain, assertion
+  binding and integrity wiring (#805), 46 tickets imported; package inventory stored and
+  exported (iv 7/12); one-step enrollment dialog wired; device read grant security fixes (#795,
+  #813); many end-to-end tests.
+- **2026-11-21:** wiring re-check of README, status and implementation notes (#789); decision
+  papers uf04, uf13, uf14.
 - **2026-11-20 (evening):** 31 PRs; first live run of the vuln agent: four integration bugs fixed
   and deployed, missing package inventory found (iv chain started); end-to-end and lab-VM tests;
-  ops agent chain and reject-pending complete; help assistant AS-09 libraries merged, service and wiring open (previously: "help assistant AS-09 merged").
+  ops agent chain and reject-pending complete; help assistant AS-09 libraries merged, service and
+  wiring open.
 - **2026-11-19 (evening):** 31 PRs; ag chain 24/27 (settings, notifications list, admin answers,
   browser tests, operator docs); registry redirect decision resolved by ADR 0006 amendment (#717);
   uc wave 7/8; ud chain (help assistant service) started.
