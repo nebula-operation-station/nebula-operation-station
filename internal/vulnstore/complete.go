@@ -452,7 +452,8 @@ func (s *Store) applyChunk(ctx context.Context, run runRow, plans []*subjectPlan
 			s.unit()
 			// Holds of older runs on the subject are superseded (path 7);
 			// there can be about MaxFindingsPerRun of them, so they are
-			// dropped in chunks of the rows left in this transaction. A
+			// dropped in chunks of at most maxDropRows rows, and of the rows
+			// left in this transaction (each chunk is one statement). A
 			// resumed subject repeats the drop: our own holds carry
 			// run.seq and are never matched.
 			n, more, err := dropSuperseded(ctx, tx, p.subject, run.seq, min(maxDropRows, max(1, budget-writes)))
