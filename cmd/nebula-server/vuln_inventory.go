@@ -12,8 +12,12 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/osdebian"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulninventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnver"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
 )
 
 // inventoryFactsAction is the action whose latest result gives a host's
@@ -141,6 +145,160 @@ func (v *vulnInventoryService) markFailed(parent context.Context, hostID, execID
 		return
 	}
 	v.log.Info("audit", "kind", "vuln_inventory_read_failed", "host", hostID, "execution", execID, "reason", reason)
+}
+
+// vulnHostLister lists the inventory hosts; inventory.Store is one.
+type vulnHostLister interface {
+	List(ctx context.Context) ([]inventory.Host, error)
+}
+
+// vulnSnapshotIDMaxBytes is the longest snapshot ID the store can hold
+// (the vuln_inventory_snapshots.id column). A longer ID is Gone.
+const vulnSnapshotIDMaxBytes = 64
+
+// vulnInventory serves the D3 inventory export from the stored package
+// inventory: each snapshot pins the newest read of every host, read through
+// vulninventory.Store. It never triggers a read; it only reuses the reads
+// that the executions stored. A snapshot is immutable for its ID, its
+// generation rises above the hour value of the old snapshot IDs and above
+// every generation a run has seen, and it is Gone once it is older than
+// vulnstore.MaxInventoryAge.
+type vulnInventory struct {
+	store *vulninventory.Store
+	db    *sql.DB
+	hosts vulnHostLister
+	now   func() time.Time
+}
+
+// newVulnInventory returns the export's inventory on db (server.db), with the
+// hosts from hosts and the clock now (nil means time.Now).
+func newVulnInventory(db *sql.DB, hosts vulnHostLister, now func() time.Time) (vulnInventory, error) {
+	if hosts == nil {
+		return vulnInventory{}, errors.New("vulnerability inventory: no host list")
+	}
+	if now == nil {
+		now = time.Now
+	}
+	st, err := vulninventory.New(db)
+	if err != nil {
+		return vulnInventory{}, fmt.Errorf("vulnerability inventory: %w", err)
+	}
+	return vulnInventory{store: st, db: db, hosts: hosts, now: now}, nil
+}
+
+// VulnSnapshot returns the current snapshot when id is empty: the newest read
+// of every host in the inventory, as a new or reused snapshot. Otherwise it
+// returns the snapshot with that ID. A host list that cannot be read is an
+// error, never an empty snapshot.
+func (v vulnInventory) VulnSnapshot(ctx context.Context, id string) (api.VulnSnapshot, error) {
+	if id != "" {
+		return v.byID(ctx, id)
+	}
+	hosts, err := v.hosts.List(ctx)
+	if err != nil {
+		return api.VulnSnapshot{}, fmt.Errorf("vuln inventory: list hosts: %w", err)
+	}
+	ids := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		ids = append(ids, h.ID)
+	}
+	floor, err := maxInventoryGeneration(ctx, v.db)
+	if err != nil {
+		return api.VulnSnapshot{}, err
+	}
+	// Generations of the old hourly IDs (time in hours) stay below the new ones.
+	hour := v.now().UTC().Truncate(vulnInventoryBucket).Unix() / int64(vulnInventoryBucket/time.Second)
+	cur, err := v.store.Current(ctx, ids, vulnInventoryBucket, max(floor, hour))
+	if err != nil {
+		return api.VulnSnapshot{}, fmt.Errorf("vuln inventory: current: %w", err)
+	}
+	// Current leaves the bodies out; Snapshot loads them, and the snapshot
+	// is immutable, so the two reads agree.
+	full, err := v.store.Snapshot(ctx, cur.ID)
+	if err != nil {
+		return api.VulnSnapshot{}, fmt.Errorf("vuln inventory: snapshot %s: %w", cur.ID, err)
+	}
+	return toVulnSnapshot(full), nil
+}
+
+// byID returns the snapshot with id, or api.ErrVulnSnapshotGone when the
+// store does not hold it (unknown, pruned, an ID of the old form, or an ID
+// the store cannot hold) or when it is older than vulnstore.MaxInventoryAge.
+func (v vulnInventory) byID(ctx context.Context, id string) (api.VulnSnapshot, error) {
+	if len(id) > vulnSnapshotIDMaxBytes {
+		return api.VulnSnapshot{}, api.ErrVulnSnapshotGone
+	}
+	s, err := v.store.Snapshot(ctx, id)
+	if errors.Is(err, vulninventory.ErrSnapshotGone) || errors.Is(err, vulninventory.ErrInvalidRead) {
+		return api.VulnSnapshot{}, api.ErrVulnSnapshotGone
+	}
+	if err != nil {
+		return api.VulnSnapshot{}, fmt.Errorf("vuln inventory: snapshot: %w", err)
+	}
+	if v.now().UTC().Sub(s.TakenAt) > vulnstore.MaxInventoryAge {
+		return api.VulnSnapshot{}, api.ErrVulnSnapshotGone
+	}
+	return toVulnSnapshot(s), nil
+}
+
+// toVulnSnapshot maps a stored snapshot to the export's snapshot type.
+func toVulnSnapshot(s vulninventory.Snapshot) api.VulnSnapshot {
+	out := api.VulnSnapshot{ID: s.ID, Generation: s.Generation, TakenAt: s.TakenAt,
+		Subjects: make([]api.VulnSubject, 0, len(s.Reads))}
+	for _, r := range s.Reads {
+		out.Subjects = append(out.Subjects, hostSubject(r))
+	}
+	return out
+}
+
+// hostSubject maps the read of one host to an export subject. Only what the
+// api types hold is copied: the host ID as the subject reference, the
+// ecosystem, the completeness, the kernel (its source only when it is mapped)
+// and the components with their binaries. Nothing else of the read is
+// exported, and no host name or address.
+func hostSubject(r vulninventory.Read) api.VulnSubject {
+	sub := api.VulnSubject{Kind: vulnfinding.SubjectHost, Ref: vulnfinding.SubjectRef{ID: r.HostID},
+		Ecosystem: r.Ecosystem, Complete: r.Complete}
+	if r.Kernel.Release != "" {
+		k := &api.VulnKernel{Release: r.Kernel.Release}
+		if r.Kernel.State == string(osdebian.KernelMapped) {
+			k.Source, k.SourceVersion = r.Kernel.Source, r.Kernel.Version
+		}
+		sub.Kernel = k
+	}
+	for _, c := range r.Components {
+		vc := api.VulnComponent{Source: c.Source, SourceVersion: c.SourceVersion,
+			Binaries: make([]api.VulnBinary, 0, len(c.Binaries))}
+		for _, b := range c.Binaries {
+			vc.Binaries = append(vc.Binaries, api.VulnBinary{Name: b.Name, Version: b.Version, Arch: b.Arch})
+		}
+		sub.Components = append(sub.Components, vc)
+	}
+	return sub
+}
+
+// maxInventoryGeneration is the highest inventory generation a run has
+// started with (vuln_store_state.max_inventory_generation); 0 before the
+// first run. The export's generations must stay above it (ADR 0011 D5).
+func maxInventoryGeneration(ctx context.Context, db *sql.DB) (int64, error) {
+	var g int64
+	err := db.QueryRowContext(ctx, `SELECT max_inventory_generation FROM vuln_store_state WHERE id = 1`).Scan(&g)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("vulnerability store state: %w", err)
+	}
+	return g, nil
+}
+
+// sweepSnapshots prunes the inventory snapshots older than
+// vulnstore.MaxInventoryAge. The newest snapshot is always kept.
+func (v *vulnService) sweepSnapshots(ctx context.Context) error {
+	if err := v.inventory.PruneSnapshots(ctx, vulnstore.MaxInventoryAge); err != nil {
+		return fmt.Errorf("vulnerability inventory: prune snapshots: %w", err)
+	}
+	return nil
 }
 
 // inventoryErrorClass names the class of an error without its text: a store

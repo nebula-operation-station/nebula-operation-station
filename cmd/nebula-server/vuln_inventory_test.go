@@ -10,7 +10,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,8 +21,12 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/osdebian"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulninventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
 )
 
 const invTestHost = "web"
@@ -523,4 +529,295 @@ type deadlineFacts struct {
 func (d *deadlineFacts) LastResult(ctx context.Context, _, _ string) ([]byte, time.Time, bool, error) {
 	d.deadline, d.hasDeadline = ctx.Deadline()
 	return nil, time.Time{}, false, nil
+}
+
+// srcHost is the inventory host of the export tests. Its display name and
+// address must never reach the export (ADR 0011 D3).
+const (
+	srcHost    = "srv-a"
+	srcName    = "srv-a.lab.example"
+	srcAddress = "192.0.2.44"
+)
+
+// srcEnv is the vulnerability API of newVTEnv, with the export served from
+// the real inventory store and the stored reads of the same database.
+type srcEnv struct {
+	*vtEnv
+	hosts *inventory.Store
+	inv   vulnInventory
+}
+
+func newSrcEnv(t *testing.T) *srcEnv {
+	t.Helper()
+	e := newVTEnv(t)
+	hosts := inventory.NewWithNow(e.db, e.clk.Now)
+	inv, err := newVulnInventory(e.db, hosts, e.clk.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := serverconfig.APIToken{Name: serverconfig.DefaultVulnTokenName, SHA256: api.HashToken(vtToken),
+		Scopes:          []string{serverconfig.ScopeVulnInventoryRead, serverconfig.ScopeVulnFindingsWrite},
+		SourceAddresses: []string{"192.0.2.10"}}
+	vh, err := newVulnAPI(serverconfig.APIConfig{Enabled: true, Tokens: []serverconfig.APIToken{tok}}, e.svc, inv, vtAgentCfg{},
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil || vh == nil {
+		t.Fatalf("newVulnAPI = %v, %v", vh, err)
+	}
+	readOnly := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "read-only api", http.StatusTeapot) })
+	e.api = api.Mount(readOnly, vh)
+	return &srcEnv{vtEnv: e, hosts: hosts, inv: inv}
+}
+
+// addHost creates an inventory host with a display name and an address.
+func (e *srcEnv) addHost(t *testing.T, id string) {
+	t.Helper()
+	if _, err := e.hosts.Create(context.Background(), inventory.Host{ID: id, DisplayName: id + ".lab.example",
+		Environment: inventory.EnvProd, Criticality: inventory.CriticalityMedium,
+		Endpoints: []inventory.Endpoint{{Address: srcAddress, Port: 22}}, CredentialRef: id}, inventory.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// srcRead is the read that addRead stores: one source package, openssl.
+func srcRead(host, exec string, at time.Time, complete bool, pkg string) vulninventory.Read {
+	r := vulninventory.Read{HostID: host, ExecutionID: exec, ReadAt: at, Complete: complete, Ecosystem: "debian:bookworm",
+		Kernel: vulninventory.Kernel{Release: "6.1.0-28-amd64", State: string(osdebian.KernelMapped), Source: "linux", Version: "6.1.119-1"},
+		Components: []vulninventory.Component{{Source: pkg, SourceVersion: "3.0.15-1~deb12u1",
+			Binaries: []vulninventory.Binary{{Name: pkg, Version: "3.0.15-1~deb12u1", Arch: "amd64"}}}}}
+	if !complete {
+		r.Reason = vulninventory.ReasonIncomplete
+	}
+	return r
+}
+
+// addRead stores a read of host, taken at the clock's time, as the ADR says
+// a package list read is stored.
+func (e *srcEnv) addRead(t *testing.T, r vulninventory.Read) {
+	t.Helper()
+	st, err := vulninventory.New(e.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Put(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// srcPage is the part of the export page these tests read.
+type srcPage struct {
+	SnapshotID string `json:"snapshot_id"`
+	Generation int64  `json:"generation"`
+	Subjects   []struct {
+		SubjectKind string `json:"subject_kind"`
+		SubjectRef  struct {
+			ID string `json:"id"`
+		} `json:"subject_ref"`
+		Ecosystem string `json:"ecosystem"`
+		Kernel    *struct {
+			Release       string `json:"release"`
+			Mapped        bool   `json:"mapped"`
+			SourcePackage string `json:"source_package"`
+			SourceVersion string `json:"source_version"`
+		} `json:"running_kernel"`
+		Complete   bool `json:"complete"`
+		Components []struct {
+			SourcePackage string `json:"source_package"`
+			SourceVersion string `json:"source_version"`
+			Binaries      []struct {
+				Name    string `json:"name"`
+				Version string `json:"version"`
+				Arch    string `json:"arch"`
+			} `json:"binaries"`
+		} `json:"components"`
+	} `json:"subjects"`
+}
+
+// exportPage GETs the export and decodes its first page.
+func (e *srcEnv) exportPage(t *testing.T) (srcPage, string) {
+	t.Helper()
+	rec := e.do(t, http.MethodGet, "/api/v1/vuln/inventory", vtToken, vtHermes, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET inventory = %d %s", rec.Code, rec.Body)
+	}
+	var p srcPage
+	if err := json.Unmarshal(rec.Body.Bytes(), &p); err != nil {
+		t.Fatal(err)
+	}
+	return p, rec.Body.String()
+}
+
+// startRun starts a run that names snapID as its inventory snapshot.
+func (e *srcEnv) startRun(t *testing.T, snapID string) int {
+	t.Helper()
+	at := e.clk.Now().Add(-time.Hour).Format(time.RFC3339)
+	var sources []any
+	for _, id := range []string{"debian-tracker", "kev", "osv"} {
+		sources = append(sources, map[string]any{"source_id": id, "snapshot_id": "snap-" + id, "integrity": "none", "date_kind": "data", "content_date": at})
+	}
+	rec := e.do(t, http.MethodPost, "/api/v1/vuln/runs", vtToken, vtHermes,
+		map[string]any{"inventory_snapshot_id": snapID, "matcher_version": "1.4.0", "sources": sources})
+	return rec.Code
+}
+
+func TestVulnExportServesStoredHostFromInventory(t *testing.T) {
+	e := newSrcEnv(t)
+	e.addHost(t, srcHost)
+	e.addRead(t, srcRead(srcHost, "exec-1", e.clk.Now().Add(-time.Minute), true, "openssl"))
+	p, body := e.exportPage(t)
+	if len(p.Subjects) != 1 {
+		t.Fatalf("subjects = %d, want 1: %s", len(p.Subjects), body)
+	}
+	s := p.Subjects[0]
+	if s.SubjectKind != "host" || s.SubjectRef.ID != srcHost || s.Ecosystem != "debian:bookworm" || !s.Complete {
+		t.Fatalf("subject = %+v, want the complete host", s)
+	}
+	if s.Kernel == nil || s.Kernel.Release != "6.1.0-28-amd64" || !s.Kernel.Mapped || s.Kernel.SourcePackage != "linux" || s.Kernel.SourceVersion != "6.1.119-1" {
+		t.Fatalf("running kernel = %+v, want the mapped kernel", s.Kernel)
+	}
+	if len(s.Components) != 1 || s.Components[0].SourcePackage != "openssl" || len(s.Components[0].Binaries) != 1 || s.Components[0].Binaries[0].Name != "openssl" {
+		t.Fatalf("components = %+v, want openssl with its binary", s.Components)
+	}
+	if strings.Contains(body, srcName) || strings.Contains(body, srcAddress) {
+		t.Fatalf("export carries the host name or address: %s", body)
+	}
+}
+
+func TestVulnExportKernelSourceOnlyWhenMapped(t *testing.T) {
+	e := newSrcEnv(t)
+	e.addHost(t, srcHost)
+	r := srcRead(srcHost, "exec-1", e.clk.Now().Add(-time.Minute), true, "openssl")
+	r.Kernel.State = "kernel_version_unknown"
+	e.addRead(t, r)
+	p, _ := e.exportPage(t)
+	k := p.Subjects[0].Kernel
+	if k == nil || k.Release != "6.1.0-28-amd64" || k.Mapped || k.SourcePackage != "" || k.SourceVersion != "" {
+		t.Fatalf("running kernel = %+v, want the release only", k)
+	}
+}
+
+func TestVulnExportPartialReadIsIncomplete(t *testing.T) {
+	e := newSrcEnv(t)
+	e.addHost(t, srcHost)
+	e.addRead(t, srcRead(srcHost, "exec-1", e.clk.Now().Add(-time.Minute), false, "openssl"))
+	p, _ := e.exportPage(t)
+	if len(p.Subjects) != 1 || p.Subjects[0].Complete {
+		t.Fatalf("subjects = %+v, want one incomplete subject", p.Subjects)
+	}
+}
+
+func TestVulnExportLeavesOutHostWithoutRead(t *testing.T) {
+	e := newSrcEnv(t)
+	e.addHost(t, srcHost)
+	e.addHost(t, "srv-b")
+	e.addRead(t, srcRead(srcHost, "exec-1", e.clk.Now().Add(-time.Minute), true, "openssl"))
+	p, _ := e.exportPage(t)
+	if len(p.Subjects) != 1 || p.Subjects[0].SubjectRef.ID != srcHost {
+		t.Fatalf("subjects = %+v, want only %s", p.Subjects, srcHost)
+	}
+}
+
+func TestVulnExportSecondReadMakesNewSnapshotOldIDKeepsOldState(t *testing.T) {
+	e := newSrcEnv(t)
+	e.addHost(t, srcHost)
+	e.addRead(t, srcRead(srcHost, "exec-1", e.clk.Now().Add(-2*time.Minute), true, "openssl"))
+	first, _ := e.exportPage(t)
+	e.addRead(t, srcRead(srcHost, "exec-2", e.clk.Now().Add(-time.Minute), false, "curl"))
+	second, _ := e.exportPage(t)
+	if second.SnapshotID == first.SnapshotID || second.Generation <= first.Generation {
+		t.Fatalf("second snapshot %s gen %d after %s gen %d, want a new ID and a higher generation",
+			second.SnapshotID, second.Generation, first.SnapshotID, first.Generation)
+	}
+	if second.Subjects[0].Complete {
+		t.Fatalf("second snapshot still complete, want the newer partial read")
+	}
+	old, err := e.inv.VulnSnapshot(context.Background(), first.SnapshotID)
+	if err != nil {
+		t.Fatalf("old snapshot: %v", err)
+	}
+	if old.Generation != first.Generation || len(old.Subjects) != 1 || !old.Subjects[0].Complete ||
+		len(old.Subjects[0].Components) != 1 || old.Subjects[0].Components[0].Source != "openssl" {
+		t.Fatalf("old snapshot = %+v, want the first read unchanged", old)
+	}
+}
+
+func TestVulnExportFloorFromRunStateIsKept(t *testing.T) {
+	e := newSrcEnv(t)
+	if _, err := e.db.Exec(`UPDATE vuln_store_state SET max_inventory_generation = 495000 WHERE id = 1`); err != nil {
+		t.Fatal(err)
+	}
+	e.addHost(t, srcHost)
+	e.addRead(t, srcRead(srcHost, "exec-1", e.clk.Now().Add(-time.Minute), true, "openssl"))
+	p, _ := e.exportPage(t)
+	if p.Generation <= 495000 {
+		t.Fatalf("generation = %d, want above the stored 495000", p.Generation)
+	}
+	if code := e.startRun(t, p.SnapshotID); code != http.StatusCreated {
+		t.Fatalf("first run start = %d, want 201", code)
+	}
+}
+
+func TestVulnRunStartWithSnapshotOlderThanMaxAgeIsConflict(t *testing.T) {
+	e := newSrcEnv(t)
+	e.addHost(t, srcHost)
+	e.addRead(t, srcRead(srcHost, "exec-1", e.clk.Now().Add(-time.Minute), true, "openssl"))
+	p, _ := e.exportPage(t)
+	e.clk.Add(vulnstore.MaxInventoryAge + time.Hour)
+	if code := e.startRun(t, p.SnapshotID); code != http.StatusConflict {
+		t.Fatalf("run start with a snapshot %v old = %d, want 409", vulnstore.MaxInventoryAge+time.Hour, code)
+	}
+}
+
+func TestVulnExportNeverServesAnEmptySnapshotForAFailedHostList(t *testing.T) {
+	e := newSrcEnv(t)
+	failing := vulnHostLister(srcFailingHosts{})
+	inv, err := newVulnInventory(e.db, failing, e.clk.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s, err := inv.VulnSnapshot(context.Background(), ""); err == nil || errors.Is(err, api.ErrVulnSnapshotGone) {
+		t.Fatalf("snapshot = %+v, %v; want an error that is not Gone", s, err)
+	}
+}
+
+// srcFailingHosts is a host list that cannot be read.
+type srcFailingHosts struct{}
+
+func (srcFailingHosts) List(context.Context) ([]inventory.Host, error) {
+	return nil, errors.New("inventory unreadable")
+}
+
+func TestVulnInventoryOldNosEmptyIDsAreGone(t *testing.T) {
+	e := newSrcEnv(t)
+	for _, id := range []string{"nos-empty-1784000000", "nos-inv-999999999", "x y", strings.Repeat("a", 200)} {
+		if _, err := e.inv.VulnSnapshot(context.Background(), id); !errors.Is(err, api.ErrVulnSnapshotGone) {
+			t.Fatalf("snapshot %q: err = %v, want ErrVulnSnapshotGone", id, err)
+		}
+	}
+}
+
+func TestVulnSweepPrunesSnapshotsOlderThanMaxAge(t *testing.T) {
+	e := newSrcEnv(t)
+	e.addHost(t, srcHost)
+	e.addRead(t, srcRead(srcHost, "exec-1", e.clk.Now().Add(-2*time.Minute), true, "openssl"))
+	old, _ := e.exportPage(t)
+	e.addRead(t, srcRead(srcHost, "exec-2", e.clk.Now().Add(-time.Minute), true, "curl"))
+	_, _ = e.exportPage(t)
+	// Age the first snapshot past MaxInventoryAge in the store's own clock.
+	if _, err := e.db.Exec(`UPDATE vuln_inventory_snapshots SET taken_at = taken_at - ? WHERE id = ?`,
+		int64((vulnstore.MaxInventoryAge + time.Hour).Seconds()), old.SnapshotID); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.svc.sweepSnapshots(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	if err := e.db.QueryRow(`SELECT COUNT(*) FROM vuln_inventory_snapshots WHERE id = ?`, old.SnapshotID).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("expired snapshot still stored after the sweep")
+	}
+	if _, err := e.inv.VulnSnapshot(context.Background(), old.SnapshotID); !errors.Is(err, api.ErrVulnSnapshotGone) {
+		t.Fatalf("pruned snapshot: err = %v, want ErrVulnSnapshotGone", err)
+	}
 }

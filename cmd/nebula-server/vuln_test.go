@@ -288,24 +288,29 @@ func TestVulnAgentAPINotMountedWithoutVulnToken(t *testing.T) {
 }
 
 func TestVulnInventorySnapshotIsStableAndExpires(t *testing.T) {
-	clk := &vtClock{t: time.Date(2026, 11, 9, 12, 30, 0, 0, time.UTC)}
-	inv := vulnInventory{now: clk.Now}
-	cur, err := inv.VulnSnapshot(context.Background(), "")
-	if err != nil || len(cur.Subjects) != 0 || !cur.TakenAt.Equal(time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)) {
-		t.Fatalf("current snapshot = %+v, %v; want empty, taken at the hour", cur, err)
+	e := newSrcEnv(t)
+	e.addHost(t, srcHost)
+	e.addRead(t, srcRead(srcHost, "exec-1", e.clk.Now().Add(-time.Minute), true, "openssl"))
+	ctx := context.Background()
+	cur, err := e.inv.VulnSnapshot(ctx, "")
+	if err != nil || len(cur.Subjects) != 1 {
+		t.Fatalf("current snapshot = %+v, %v; want the stored host", cur, err)
 	}
-	clk.Add(3 * time.Hour)
-	again, err := inv.VulnSnapshot(context.Background(), cur.ID)
-	if err != nil || again.ID != cur.ID || again.Generation != cur.Generation || !again.TakenAt.Equal(cur.TakenAt) {
+	if hour := e.clk.Now().Truncate(time.Hour).Unix() / int64(time.Hour/time.Second); cur.Generation <= hour {
+		t.Fatalf("generation %d, want it above the hour value %d", cur.Generation, hour)
+	}
+	e.clk.Add(3 * time.Hour)
+	again, err := e.inv.VulnSnapshot(ctx, cur.ID)
+	if err != nil || again.ID != cur.ID || again.Generation != cur.Generation || !again.TakenAt.Equal(cur.TakenAt) || len(again.Subjects) != 1 {
 		t.Fatalf("snapshot by ID = %+v, %v; want the same snapshot", again, err)
 	}
-	now, _ := inv.VulnSnapshot(context.Background(), "")
-	if now.Generation <= cur.Generation {
-		t.Fatalf("generation %d after %d, want it to rise", now.Generation, cur.Generation)
+	now, err := e.inv.VulnSnapshot(ctx, "")
+	if err != nil || now.Generation <= cur.Generation {
+		t.Fatalf("generation %d after %d (%v), want it to rise", now.Generation, cur.Generation, err)
 	}
-	clk.Add(vulnstore.MaxInventoryAge)
-	for _, id := range []string{cur.ID, "nos-empty-x", "other", vulnSnapshotPrefix + "1"} {
-		if _, err := inv.VulnSnapshot(context.Background(), id); !errors.Is(err, api.ErrVulnSnapshotGone) {
+	e.clk.Add(vulnstore.MaxInventoryAge)
+	for _, id := range []string{cur.ID, "nos-empty-1784000000", "other"} {
+		if _, err := e.inv.VulnSnapshot(ctx, id); !errors.Is(err, api.ErrVulnSnapshotGone) {
 			t.Fatalf("snapshot %q: err = %v, want ErrVulnSnapshotGone", id, err)
 		}
 	}
