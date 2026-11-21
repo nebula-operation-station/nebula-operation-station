@@ -648,6 +648,14 @@ func readGrantChallengeFor(digest string, expiry time.Time) ([]byte, error) {
 	return h.Sum(nil), nil
 }
 
+// readGrantNeedsCLI reports whether a grant needs executor-local CLI
+// approval regardless of mode. Grants with network device targets do
+// (A1-0b): the browser preview is rendered by the server, so only the CLI,
+// which shows the executor's own document, may approve device reads.
+func readGrantNeedsCLI(doc ReadGrantDoc) bool {
+	return len(doc.NetDeviceTargets) > 0
+}
+
 // ProposeReadGrant checks a read-grant document and holds it for approval.
 // Unlike schedule grants it needs no privileged session (ADR 0007): the
 // user-verified assertion over the grant digest is the approval.
@@ -680,7 +688,7 @@ func (a *Authority) ProposeReadGrant(raw []byte) (PendingReadGrant, error) {
 		return PendingReadGrant{}, fail(CodeLimit, "too many pending read grants")
 	}
 	req := RequireAssertionVerified
-	if a.mode == ModeHardened {
+	if a.mode == ModeHardened || readGrantNeedsCLI(doc) {
 		req = RequireCLI
 	}
 	pg := &pendingReadGrant{doc: doc, canon: canon, digest: digest, expiry: now.Add(ApprovalWindow)}
@@ -733,7 +741,9 @@ func (a *Authority) PendingReadGrants() []PendingReadGrant {
 // CommitReadGrant approves a pending read grant with a user-verified
 // assertion over its challenge. No privileged session is needed (ADR 0007);
 // the assertion is the approval. The challenge is consumed whether or not
-// the assertion verifies.
+// the assertion verifies. In hardened mode, and for grants with network
+// device targets in every mode, it refuses with CodeCLIRequired before the
+// pending grant is consumed or the assertion is checked.
 func (a *Authority) CommitReadGrant(digest string, assertionJSON []byte) (StoredReadGrant, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -745,6 +755,11 @@ func (a *Authority) CommitReadGrant(digest string, assertionJSON []byte) (Stored
 	}
 	if a.mode == ModeHardened {
 		return StoredReadGrant{}, fail(CodeCLIRequired, "hardened mode: use nebula read-grant approve")
+	}
+	// The proposal's Requirement is advisory; the device rule is enforced
+	// here, before the pending grant is consumed, so it stays for the CLI.
+	if readGrantNeedsCLI(pg.doc) {
+		return StoredReadGrant{}, fail(CodeCLIRequired, "network device grant: use nebula read-grant approve")
 	}
 	delete(a.readGrants, digest)
 	credID, err := a.verifier.Verify(assertionJSON, pg.challenge, webauthnverify.Requirement{UserVerification: true})
