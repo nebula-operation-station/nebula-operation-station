@@ -1,0 +1,49 @@
+# Allowlist for internal/wiringguard.
+#
+# One package per line: <package path> | <reason> | <ticket ID>
+# Every field is required. A listed package is not reachable from cmd/; the
+# reason says why and starts with one of three categories:
+#
+#   planned: <what>                       the ticket wires the package; remove
+#                                         the line when it gets an importer
+#   test helper - never wired: <what>     imported by tests only, by design;
+#                                         never triage it as "wire or remove"
+#   developer tool: <what>                a command run by hand or by make
+#                                         check, never by a product command
+#
+# The ticket ID must be defined by a table row or heading of a Markdown file
+# under docs/, or be registered in internal/wiringguard/tickets.txt with an
+# existing docs/ tracking document. TestRealTreeTicketsExist checks this.
+
+internal/attackpath/jewels | planned: crown-jewels store of the attack-path search (ADR 0011), no importer on main | VU-23
+internal/cbscli | planned: Cisco CBS CLI session driver, no caller wired | ND-05
+internal/cbsparse | planned: parsers for Cisco CBS CLI output, no caller wired | ND-06
+internal/edl | planned: pure rules for External Dynamic Lists (ADR 0012 D7), no caller wired | NS-17
+internal/fimfinding | planned: maps I2 baseline deviations to findings (ADR 0015 D9), no caller wired | IG-08
+internal/fimresolve | planned: resolves paths of fim-scan-v1 records (ADR 0015 D6), no caller wired | IG-05
+internal/fimretain | planned: merges fim-scan-v1 runs into retained records (ADR 0015 D6), no caller wired | IG-06
+internal/fimsshd | planned: SSH login file set of ADR 0015 D7/D9, no caller wired | IG-06
+internal/fimstore | planned: per-host FIM baseline store (ADR 0015 D7), no caller wired | IG-06
+internal/helpassist/answer | planned: in-app help assistant answer checks (ADR 0014), package tree not mounted | AS-09
+internal/helpassist/prompt | planned: in-app help assistant prompt assembly (ADR 0014), package tree not mounted | AS-09
+internal/helpassist/ratelimit | planned: in-app help assistant rate limit (ADR 0014), package tree not mounted | AS-09
+internal/helpassist/secretguard | planned: in-app help assistant question guard (ADR 0014), package tree not mounted | AS-09
+internal/helpassist/turns | planned: in-app help assistant follow-up turns (ADR 0014), package tree not mounted | AS-09
+internal/helpcmd | planned: deterministic command checks of the in-app help, no caller wired | AS-05
+internal/helpfacts | planned: minimised inventory facts for the in-app help, no caller wired | AS-06
+internal/integritystore | planned: integrity findings store (ADR 0015 D9), no caller wired | IG-03
+internal/modules/bootstrap | planned: loads first-party bootstrap modules (ADR 0008), no caller on main; its NetBird join is the candidate for the SSH step | EN-16h
+internal/modules/bootstrap/cmd/packlock | developer tool: regenerates module.lock.json, run by hand (main outside cmd/) | PV-07
+internal/netadvisor | planned: rule advisor checks na-v1 (ADR 0012 D4), no caller wired | NS-09
+internal/netdevadapt | planned: connects netdevinventory store to its consumers, no caller wired | ND-18
+internal/netreach | planned: reachability model nr-v1 (ADR 0012 D2), no caller wired | NS-05
+internal/panapi | planned: read-only PAN-OS XML API client, no caller wired | ND-08
+internal/reputation | planned: IP reputation snapshot validation and store, no caller wired | NS-15
+internal/vuln/exportconform | test helper - never wired: shared table of device values for the export conformance tests | VU-16
+internal/vulnfeed/reputation | planned: pure parser library for IP reputation feeds, no caller wired | NS-14
+internal/vulninventory | planned: versioned reads of installed software, no caller wired | iv02
+internal/web/enroll | planned: enrollment script route merged but not mounted in nebula-server | EN-09
+internal/web/ui/jewels | planned: crown-jewels admin page (ADR 0011 D10), not mounted | VU-23
+internal/hostrun/hostruntest | test helper - never wired: in-process SSH server for the hostrun tests | M4-1
+test/browser/harness | test helper - never wired: browser-test harness binary (main outside cmd/), run by the browser test | VU-16
+internal/wiringguard | developer tool: this guard, run by its own test in make check; no command imports it | WG-01
