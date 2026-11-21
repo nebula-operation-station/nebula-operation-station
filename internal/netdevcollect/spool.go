@@ -32,6 +32,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevcontract"
@@ -361,14 +362,17 @@ func setDeviceMetadataField(out *DeviceMetadata, key string, v json.RawMessage) 
 	return nil
 }
 
-// validMetadataText reports whether s fits the text limit and holds no
-// control characters, so that it can be shown as plain text.
+// validMetadataText reports whether s fits the text limit and is printable
+// UTF-8 in the sense of unicode.IsPrint, the rule the executor applies to
+// the same kind of label. That excludes control characters (C0, DEL and
+// C1), format characters (bidi overrides and isolates, zero-width marks) and
+// spaces other than U+0020, so that the text can be shown as plain text.
 func validMetadataText(s string) bool {
-	if len(s) > MaxDeviceMetadataTextBytes {
+	if len(s) > MaxDeviceMetadataTextBytes || !utf8.ValidString(s) {
 		return false
 	}
 	for _, r := range s {
-		if r < 0x20 || r == 0x7f {
+		if !unicode.IsPrint(r) {
 			return false
 		}
 	}

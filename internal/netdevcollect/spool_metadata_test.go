@@ -80,6 +80,12 @@ func TestDeviceMetadataSchemaRejections(t *testing.T) {
 			uintString(netdevcontract.MaxTrustGeneration+1) + `,"blocked":false,"block_reason":""}`},
 		{"control character in label", `{"device_id":"core-sw-01","family":"cbs","label":"a\nb","trust_generation":3,"blocked":false,"block_reason":""}`},
 		{"escape character in block reason", `{"device_id":"core-sw-01","family":"cbs","label":"a","trust_generation":3,"blocked":true,"block_reason":"\u001b[2J"}`},
+		{"C1 control character in label", `{"device_id":"core-sw-01","family":"cbs","label":"a\u009b31m","trust_generation":3,"blocked":false,"block_reason":""}`},
+		{"C1 control character in block reason", `{"device_id":"core-sw-01","family":"cbs","label":"a","trust_generation":3,"blocked":true,"block_reason":"\u0085"}`},
+		{"bidi override in label", `{"device_id":"core-sw-01","family":"cbs","label":"pay‮gnp","trust_generation":3,"blocked":false,"block_reason":""}`},
+		{"bidi isolate in block reason", `{"device_id":"core-sw-01","family":"cbs","label":"a","trust_generation":3,"blocked":true,"block_reason":"x⁦y⁩"}`},
+		{"zero width space in label", `{"device_id":"core-sw-01","family":"cbs","label":"core​sw","trust_generation":3,"blocked":false,"block_reason":""}`},
+		{"no-break space in label", `{"device_id":"core-sw-01","family":"cbs","label":"core sw","trust_generation":3,"blocked":false,"block_reason":""}`},
 		{"label over the text limit", `{"device_id":"core-sw-01","family":"cbs","label":"` + long + `","trust_generation":3,"blocked":false,"block_reason":""}`},
 		{"block reason over the text limit", `{"device_id":"core-sw-01","family":"cbs","label":"a","trust_generation":3,"blocked":true,"block_reason":"` + long + `"}`},
 		{"trailing value", validMetadataPayload + ` {}`},
@@ -104,6 +110,20 @@ func TestDeviceMetadataAcceptsTextAtTheLimit(t *testing.T) {
 	}
 	if got.Label != label {
 		t.Fatalf("label length = %d, want %d", len(got.Label), len(label))
+	}
+}
+
+func TestDeviceMetadataAcceptsPrintableUnicodeText(t *testing.T) {
+	for _, label := range []string{"Kernschalter Ü", "Switch 東京-01", "core: rack/A (2)", "ok–dash", "emoji ☎"} {
+		payload := `{"device_id":"core-sw-01","family":"cbs","label":"` + label + `","trust_generation":3,"blocked":false,"block_reason":""}`
+		got, err := DecodeDeviceMetadata([]byte(payload))
+		if err != nil {
+			t.Errorf("label %q: %v", label, err)
+			continue
+		}
+		if got.Label != label {
+			t.Errorf("label = %q, want %q", got.Label, label)
+		}
 	}
 }
 
