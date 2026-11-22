@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -16,8 +17,10 @@ import (
 // These tests read docs/admin/guide.md (read only) and check the
 // server.json documentation against the strict loader in config.go. They
 // do not repeat the key list: the keys come from the json tags of Config,
-// read with reflect. A key that the guide leaves out, or an example with a
-// misspelled key, fails here instead of at the admin's server start.
+// read with reflect, and the required and defaulted keys come from the
+// loader itself (Parse). A key that the guide leaves out, a default that the
+// loader does not give, or an example with a misspelled key fails here
+// instead of at the admin's server start.
 
 // guideAdminPath is the admin guide, relative to this package directory
 // (go test runs there), as internal/docsembed/guide_test.go resolves it.
@@ -25,6 +28,24 @@ const guideAdminPath = "../../docs/admin/guide.md"
 
 // guideSection61 is the heading of the table of server.json keys.
 const guideSection61 = "### 6.1 "
+
+// guideRequired is the Default cell of a key the loader requires.
+const guideRequired = "(required)"
+
+// guideServerSections are the heading prefixes of the guide sections whose
+// JSON and inline examples are server.json examples. Every top-level key in
+// them must be a loader key, so a misspelled key fails even when no other
+// server key appears in the example.
+var guideServerSections = []string{
+	"### 6.1 ",  // configuration reference
+	"### 9.9 ",  // traffic map: "traffic": {"retention_days": N}
+	"### 10.1 ", // notifications
+	"### 10.2 ", // read-only API
+}
+
+// guideNearMissDistance is the edit distance at which a top-level key of an
+// example counts as a misspelled server key, wherever the example is.
+const guideNearMissDistance = 2
 
 // guideConfigKeysUndocumented lists top-level server.json keys that the
 // guide deliberately does not list in the 6.1 table, with the reason and
@@ -60,6 +81,19 @@ var guideElisions = map[string]string{
 	`"api": {"enabled": true, "tokens": [ ... ]}`: "section 10.2 prose elision of the token list",
 }
 
+// guideNestedSpans maps inline spans that are members of a nested server.json
+// object to the dotted path of that object. They have no top-level key, so
+// they are validated inside that path. The test fails if one of them no
+// longer occurs in the guide.
+var guideNestedSpans = map[string]string{
+	`"enabled": true`:    "notifications.daily_digest",
+	`"skip_empty": true`: "notifications.daily_digest",
+}
+
+// guideProviderFill is the provider that a nested notifications example gets
+// in the test document, because an enabled daily digest needs a provider.
+const guideProviderFill = `{"url": "https://ntfy.sh", "topic": "nebula-alerts"}`
+
 // guidePlaceholders is the fixed table that replaces the placeholders of the
 // guide's JSON examples before they are parsed. Each value is a valid value
 // for its key, so the example is judged by its keys and not by the
@@ -82,6 +116,8 @@ const guideNPlaceholder = "7"
 
 // guideMinimalFields are the required fields of a minimal server.json. A
 // block is validated with these added when the block does not give them.
+// TestGuide61DefaultsMatchLoader checks that this is exactly the set of keys
+// that the loader requires.
 var guideMinimalFields = map[string]any{
 	"public_origin":   "https://nebula.example.org",
 	"data_dir":        "/var/lib/nebula/server",
@@ -93,6 +129,7 @@ var (
 	guidePlaceholderRe = regexp.MustCompile(`<[^<>\n]*>`)
 	guideNValueRe      = regexp.MustCompile(`(:\s*)N(\s*[,}\]])`)
 	guideInlineSpanRe  = regexp.MustCompile("`([^`\n]+)`")
+	guideRangeRe       = regexp.MustCompile(`\((\d+)-(\d+)\)`)
 )
 
 // guideLines returns the lines of the admin guide.
@@ -112,6 +149,34 @@ func headingLevel(line string) int {
 		return 0
 	}
 	return n
+}
+
+// guideHeadingAt returns the nearest heading above the 1-based line, outside
+// code fences, or "" when there is none.
+func guideHeadingAt(lines []string, line int) string {
+	heading := ""
+	inFence := false
+	for i := 0; i < line-1 && i < len(lines); i++ {
+		if strings.HasPrefix(lines[i], "```") {
+			inFence = !inFence
+			continue
+		}
+		if !inFence && headingLevel(lines[i]) > 0 {
+			heading = lines[i]
+		}
+	}
+	return heading
+}
+
+// guideInServerSection reports whether an example under heading is a
+// server.json example (see guideServerSections).
+func guideInServerSection(heading string) bool {
+	for _, p := range guideServerSections {
+		if strings.HasPrefix(heading, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // guideSection returns the lines of the section whose heading starts with
@@ -146,13 +211,38 @@ func guideSection(t *testing.T, lines []string, prefix string) []string {
 	return lines[start+1:]
 }
 
-// guideRow is one row of a Markdown table: the first cell is the key, the
-// default cell is set only when it is a plain backticked value.
+// guideRow is one row of a Markdown table. cells holds every cell, trimmed;
+// cells[0] is the key, cells[1] the default and cells[2] the meaning.
 type guideRow struct {
-	key    string
-	def    string
-	hasDef bool
-	line   string
+	key   string
+	cells []string
+	line  string
+}
+
+// def returns the Default cell, or "" when the row has none.
+func (r guideRow) def() string {
+	if len(r.cells) < 2 {
+		return ""
+	}
+	return r.cells[1]
+}
+
+// meaning returns the Meaning cell, or "" when the row has none.
+func (r guideRow) meaning() string {
+	if len(r.cells) < 3 {
+		return ""
+	}
+	return r.cells[2]
+}
+
+// plainDefault returns the Default cell without its backticks, and false when
+// the cell is not a backticked value.
+func (r guideRow) plainDefault() (string, bool) {
+	d := r.def()
+	if len(d) >= 2 && strings.HasPrefix(d, "`") && strings.HasSuffix(d, "`") {
+		return d[1 : len(d)-1], true
+	}
+	return "", false
 }
 
 // guideTableRows returns the rows whose first cell is a backticked key.
@@ -170,21 +260,35 @@ func guideTableRows(section []string) []guideRow {
 		for i := range cells {
 			cells[i] = strings.TrimSpace(cells[i])
 		}
-		r := guideRow{key: strings.Trim(cells[0], "`"), line: line}
-		if len(cells) >= 2 && strings.HasPrefix(cells[1], "`") && strings.HasSuffix(cells[1], "`") && len(cells[1]) >= 2 {
-			r.def = strings.Trim(cells[1], "`")
-			r.hasDef = true
-		}
-		rows = append(rows, r)
+		rows = append(rows, guideRow{key: strings.Trim(cells[0], "`"), cells: cells, line: line})
 	}
 	return rows
 }
 
-// configTopLevelKeys returns the json names of the top-level Config fields,
-// read with reflect.
-func configTopLevelKeys(t *testing.T) map[string]bool {
+// guideRowsByKey indexes table rows by key. A duplicate key keeps its first
+// row; TestGuide61TableListsEveryConfigKey reports the duplicate.
+func guideRowsByKey(rows []guideRow) map[string]guideRow {
+	byKey := map[string]guideRow{}
+	for _, r := range rows {
+		if _, ok := byKey[r.key]; !ok {
+			byKey[r.key] = r
+		}
+	}
+	return byKey
+}
+
+// configField is one top-level key of Config: its json name, its Go kind and
+// its index in the struct.
+type configField struct {
+	name  string
+	kind  reflect.Kind
+	index int
+}
+
+// configFields returns the top-level fields of Config, read with reflect.
+func configFields(t *testing.T) []configField {
 	t.Helper()
-	keys := map[string]bool{}
+	var fields []configField
 	typ := reflect.TypeOf(Config{})
 	for i := 0; i < typ.NumField(); i++ {
 		f := typ.Field(i)
@@ -192,8 +296,28 @@ func configTopLevelKeys(t *testing.T) map[string]bool {
 		if name == "" || name == "-" {
 			t.Fatalf("Config.%s has no json name; the guide test needs one", f.Name)
 		}
-		keys[name] = true
+		fields = append(fields, configField{name: name, kind: f.Type.Kind(), index: i})
 	}
+	return fields
+}
+
+// configTopLevelKeys returns the json names of the top-level Config fields.
+func configTopLevelKeys(t *testing.T) map[string]bool {
+	t.Helper()
+	keys := map[string]bool{}
+	for _, f := range configFields(t) {
+		keys[f.name] = true
+	}
+	return keys
+}
+
+// sortedKeys returns the keys of m in order, for stable test output.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 	return keys
 }
 
@@ -329,6 +453,13 @@ func jsonMembers(text string) (map[string]json.RawMessage, error) {
 	return nil, fmt.Errorf("not a JSON object or member list")
 }
 
+// guideJSONLooking reports whether an example is written as JSON: an object,
+// or a member list such as "key": value. Such an example must parse.
+func guideJSONLooking(text string) bool {
+	s := strings.TrimSpace(text)
+	return strings.HasPrefix(s, "{") || (strings.HasPrefix(s, `"`) && strings.Contains(s, `":`))
+}
+
 // guideFillPlaceholders applies guidePlaceholders and the bare N rule. A
 // placeholder that the table does not cover stays in the text; the caller
 // reports it.
@@ -339,33 +470,77 @@ func guideFillPlaceholders(text string) string {
 	return guideNValueRe.ReplaceAllString(text, "${1}"+guideNPlaceholder+"${2}")
 }
 
-// hasServerKey reports whether the object has a top-level server.json key.
-func hasServerKey(m map[string]json.RawMessage, cfg map[string]bool) bool {
+// editDistance returns the Levenshtein distance between a and b.
+func editDistance(a, b string) int {
+	prev := make([]int, len(b)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(a); i++ {
+		cur := make([]int, len(b)+1)
+		cur[0] = i
+		for j := 1; j <= len(b); j++ {
+			cost := 1
+			if a[i-1] == b[j-1] {
+				cost = 0
+			}
+			cur[j] = min(prev[j]+1, cur[j-1]+1, prev[j-1]+cost)
+		}
+		prev = cur
+	}
+	return prev[len(b)]
+}
+
+// isServerExample reports whether an example is a server.json example outside
+// the server sections: it has a server key, a key one edit away from a server
+// key (a misspelling), or it is a token entry of api.tokens.
+func isServerExample(m map[string]json.RawMessage, cfg map[string]bool) bool {
+	if _, ok := m["sha256"]; ok {
+		return true
+	}
 	for k := range m {
 		if cfg[k] {
 			return true
+		}
+		for c := range cfg {
+			if editDistance(k, c) <= guideNearMissDistance {
+				return true
+			}
 		}
 	}
 	return false
 }
 
-// buildServerConfig returns the document the server would read for an
-// example: the minimal required fields, plus the example's members. An
-// example that is a token entry (it has "sha256") is placed into
-// api.tokens, because the guide shows token entries on their own.
-func buildServerConfig(t *testing.T, m map[string]json.RawMessage) []byte {
+// buildServerConfigAt returns the document the server would read for an
+// example: the minimal required fields, plus the example's members. With a
+// nested path the members sit at that path (and a notifications path gets a
+// provider). An example that is a token entry (it has "sha256") is placed
+// into api.tokens, because the guide shows token entries on their own.
+func buildServerConfigAt(t *testing.T, path []string, m map[string]json.RawMessage) []byte {
 	t.Helper()
 	doc := map[string]any{}
 	for k, v := range guideMinimalFields {
 		doc[k] = v
 	}
-	if _, ok := m["sha256"]; ok {
+	switch {
+	case len(path) > 0:
+		var inner any = m
+		for i := len(path) - 1; i >= 0; i-- {
+			inner = map[string]any{path[i]: inner}
+		}
+		for k, v := range inner.(map[string]any) {
+			doc[k] = v
+		}
+		if path[0] == "notifications" {
+			doc["notifications"].(map[string]any)["ntfy"] = json.RawMessage(guideProviderFill)
+		}
+	case hasKey(m, "sha256"):
 		entry, err := json.Marshal(m)
 		if err != nil {
 			t.Fatalf("marshal token entry: %v", err)
 		}
 		doc["api"] = map[string]any{"enabled": true, "tokens": []json.RawMessage{entry}}
-	} else {
+	default:
 		for k, v := range m {
 			doc[k] = v
 		}
@@ -377,12 +552,42 @@ func buildServerConfig(t *testing.T, m map[string]json.RawMessage) []byte {
 	return out
 }
 
+// buildServerConfig is buildServerConfigAt for a top-level example.
+func buildServerConfig(t *testing.T, m map[string]json.RawMessage) []byte {
+	t.Helper()
+	return buildServerConfigAt(t, nil, m)
+}
+
+// hasKey reports whether m has the key.
+func hasKey(m map[string]json.RawMessage, key string) bool {
+	_, ok := m[key]
+	return ok
+}
+
+// guideMinimalDoc returns the minimal server.json without the key omit (pass
+// "" to keep all of them).
+func guideMinimalDoc(t *testing.T, omit string) []byte {
+	t.Helper()
+	doc := map[string]any{}
+	for k, v := range guideMinimalFields {
+		if k != omit {
+			doc[k] = v
+		}
+	}
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatalf("marshal minimal server.json: %v", err)
+	}
+	return out
+}
+
 // TestGuideServerJSONExamplesParseStrictly sends every JSON example of the
 // admin guide that is a server.json example through Parse, the strict loader
 // that the server uses at start (unknown keys and trailing data are errors).
-// Examples are fenced or indented blocks and inline code spans of the form
-// "key": value. A block or span counts when it has at least one top-level
-// server key, or it is a token entry of api.tokens. The examples are
+// An example is a server.json example when it is in a server section
+// (guideServerSections), has a server key, has a key one edit away from one,
+// or is a token entry of api.tokens. Examples are fenced or indented blocks
+// and inline code spans. JSON-looking examples must parse. The examples are
 // completed with the minimal required fields and the placeholders replaced
 // from guidePlaceholders first.
 func TestGuideServerJSONExamplesParseStrictly(t *testing.T) {
@@ -391,8 +596,9 @@ func TestGuideServerJSONExamplesParseStrictly(t *testing.T) {
 	validated := 0
 	seenExclusion := map[string]bool{}
 	seenElision := map[string]bool{}
+	seenNested := map[string]bool{}
 
-	check := func(where, text string, mustParse bool) {
+	check := func(where, text string, mustParse, inScope bool, nestPath []string) {
 		t.Helper()
 		for marker := range guideBlockExclusions {
 			if strings.Contains(text, marker) {
@@ -411,12 +617,20 @@ func TestGuideServerJSONExamplesParseStrictly(t *testing.T) {
 		filled := guideFillPlaceholders(text)
 		m, err := jsonMembers(filled)
 		if err != nil {
-			if mustParse {
-				t.Errorf("%s: JSON block does not parse: %v", where, err)
+			if mustParse || guideJSONLooking(text) {
+				t.Errorf("%s: JSON example does not parse: %v", where, err)
 			}
 			return
 		}
-		if _, isEntry := m["sha256"]; !isEntry && !hasServerKey(m, cfg) {
+		if nestPath != nil {
+			if _, err := Parse(buildServerConfigAt(t, nestPath, m)); err != nil {
+				t.Errorf("%s: example under %s does not pass the strict loader: %v", where, strings.Join(nestPath, "."), err)
+				return
+			}
+			validated++
+			return
+		}
+		if !inScope && !isServerExample(m, cfg) {
 			return
 		}
 		if left := guidePlaceholderRe.FindString(filled); left != "" {
@@ -432,7 +646,8 @@ func TestGuideServerJSONExamplesParseStrictly(t *testing.T) {
 
 	for _, b := range guideCodeBlocks(lines) {
 		where := fmt.Sprintf("%s:%d (code block)", guideAdminPath, b.line)
-		check(where, b.body, b.fenced && b.info == "json")
+		inScope := guideInServerSection(guideHeadingAt(lines, b.line))
+		check(where, b.body, b.fenced && b.info == "json", inScope, nil)
 	}
 
 	inFence := false
@@ -444,11 +659,18 @@ func TestGuideServerJSONExamplesParseStrictly(t *testing.T) {
 		if inFence {
 			continue
 		}
+		inScope := guideInServerSection(guideHeadingAt(lines, i+1))
 		for _, sp := range guideInlineSpanRe.FindAllStringSubmatch(line, -1) {
-			if !strings.HasPrefix(sp[1], `"`) {
+			text := sp[1]
+			if !strings.HasPrefix(text, `"`) {
 				continue
 			}
-			check(fmt.Sprintf("%s:%d (inline example %s)", guideAdminPath, i+1, sp[1]), sp[1], false)
+			var nestPath []string
+			if p, ok := guideNestedSpans[text]; ok {
+				seenNested[text] = true
+				nestPath = strings.Split(p, ".")
+			}
+			check(fmt.Sprintf("%s:%d (inline example %s)", guideAdminPath, i+1, text), text, false, inScope, nestPath)
 		}
 	}
 
@@ -462,6 +684,11 @@ func TestGuideServerJSONExamplesParseStrictly(t *testing.T) {
 			t.Errorf("guideElisions marker %q matches no example; remove the entry", marker)
 		}
 	}
+	for span := range guideNestedSpans {
+		if !seenNested[span] {
+			t.Errorf("guideNestedSpans names %q, which is no inline example of the guide; remove the entry", span)
+		}
+	}
 	// The guide has at least the notification, the token entries and the
 	// traffic and audit examples. Fewer means the scan lost them.
 	const minValidated = 5
@@ -471,48 +698,147 @@ func TestGuideServerJSONExamplesParseStrictly(t *testing.T) {
 	}
 }
 
-// TestGuide61DefaultsMatchLoader compares the Default column of section 6.1
-// with the value that the loader gives for a minimal configuration, for every
-// row whose default is a plain value. The five keys that have a default are
-// required, so a changed table cannot drop them silently.
+// guideProseDefaults checks the Default cell of a struct-valued key, which is
+// prose and not a plain value. Every struct-valued Config key needs an entry;
+// the test fails for a key without one.
+var guideProseDefaults = map[string]func(t *testing.T, loaded Config, row guideRow){
+	"traffic": guideCheckTrafficDefault,
+	"notifications": func(t *testing.T, loaded Config, row guideRow) {
+		t.Helper()
+		if row.def() != "none" {
+			t.Errorf("guide 6.1 default for notifications is %q, want \"none\" (guide line: %s)", row.def(), row.line)
+		}
+		if loaded.Notifications.providerCount() != 0 || loaded.Notifications.DailyDigest.Enabled {
+			t.Errorf("guide 6.1 says notifications default to none, but the minimal configuration enables a provider or the daily digest")
+		}
+	},
+	"api": func(t *testing.T, loaded Config, row guideRow) {
+		t.Helper()
+		if row.def() != "disabled" {
+			t.Errorf("guide 6.1 default for api is %q, want \"disabled\" (guide line: %s)", row.def(), row.line)
+		}
+		if loaded.API.Enabled {
+			t.Errorf("guide 6.1 says the api default is disabled, but the minimal configuration enables it")
+		}
+	},
+}
+
+// guideCheckTrafficDefault compares the traffic row with the loader: the
+// default must be the loader's effective retention in days, and the allowed
+// range (lo-hi) in the Meaning cell must match the loader's boundaries.
+func guideCheckTrafficDefault(t *testing.T, loaded Config, row guideRow) {
+	t.Helper()
+	want := fmt.Sprintf("%d days", loaded.Traffic.EffectiveRetentionDays())
+	if row.def() != want {
+		t.Errorf("guide 6.1 default for traffic is %q, the loader gives %q (guide line: %s)", row.def(), want, row.line)
+	}
+	m := guideRangeRe.FindStringSubmatch(row.meaning())
+	if m == nil {
+		t.Errorf("guide 6.1 traffic row does not give the allowed range as (lo-hi) (guide line: %s)", row.line)
+		return
+	}
+	lo, errLo := strconv.Atoi(m[1])
+	hi, errHi := strconv.Atoi(m[2])
+	if errLo != nil || errHi != nil {
+		t.Errorf("guide 6.1 traffic range %q is not two integers (guide line: %s)", m[0], row.line)
+		return
+	}
+	if hi != DefaultTrafficRetentionDays {
+		t.Errorf("guide 6.1 traffic range upper bound is %d, the loader's is %d", hi, DefaultTrafficRetentionDays)
+	}
+	for _, tc := range []struct {
+		days int
+		ok   bool
+	}{{lo - 1, false}, {lo, true}, {hi, true}, {hi + 1, false}} {
+		raw := json.RawMessage(fmt.Sprintf(`{"retention_days": %d}`, tc.days))
+		_, err := Parse(buildServerConfig(t, map[string]json.RawMessage{"traffic": raw}))
+		if (err == nil) != tc.ok {
+			t.Errorf("guide 6.1 range is %d-%d; the loader gives an error for retention_days %d = %v, want error = %v", lo, hi, tc.days, err != nil, !tc.ok)
+		}
+	}
+}
+
+// TestGuide61DefaultsMatchLoader derives the required and the defaulted keys
+// from the loader, and compares the Default column of section 6.1 with them:
+// a key the loader requires must say "(required)" and be in
+// guideMinimalFields; a scalar key with a default must have a backticked
+// value equal to the loader's value for a minimal configuration; a
+// struct-valued key must pass its check in guideProseDefaults. No key is
+// listed by hand here, so a new key is covered as soon as it is in Config.
 func TestGuide61DefaultsMatchLoader(t *testing.T) {
-	rows := guideTableRows(guideSection(t, guideLines(t), guideSection61))
-	minimal, err := Parse(buildServerConfig(t, map[string]json.RawMessage{}))
+	rows := guideRowsByKey(guideTableRows(guideSection(t, guideLines(t), guideSection61)))
+	fields := configFields(t)
+	loaded, err := Parse(guideMinimalDoc(t, ""))
 	if err != nil {
 		t.Fatalf("minimal configuration does not load: %v", err)
 	}
-	v := reflect.ValueOf(minimal)
-	typ := v.Type()
-	loaderValue := map[string]string{}
-	for i := 0; i < typ.NumField(); i++ {
-		name := strings.Split(typ.Field(i).Tag.Get("json"), ",")[0]
-		loaderValue[name] = fmt.Sprint(v.Field(i).Interface())
+	loadedValues := reflect.ValueOf(loaded)
+
+	// A key is required when the loader rejects the minimal configuration
+	// without it. A key that is not in guideMinimalFields leaves the minimal
+	// configuration unchanged, so it is never reported as required here.
+	required := map[string]bool{}
+	for _, f := range fields {
+		if _, err := Parse(guideMinimalDoc(t, f.name)); err != nil {
+			required[f.name] = true
+		}
+	}
+	for _, k := range sortedKeys(required) {
+		if _, ok := guideMinimalFields[k]; !ok {
+			t.Errorf("the loader requires %q, but guideMinimalFields does not give it; add it", k)
+		}
+	}
+	for _, k := range sortedKeys(guideMinimalFields) {
+		if !required[k] {
+			t.Errorf("guideMinimalFields gives %q, which the loader does not require; remove it", k)
+		}
 	}
 
-	want := map[string]bool{
-		"listen":              true,
-		"allow_remote_listen": true,
-		"discovery_dir":       true,
-		"pve_spool_dir":       true,
-		"audit_hash_chain":    true,
+	known := map[string]bool{}
+	for _, f := range fields {
+		known[f.name] = true
 	}
-	checked := map[string]bool{}
-	for _, r := range rows {
-		if !r.hasDef {
+	for k := range guideProseDefaults {
+		if !known[k] {
+			t.Errorf("guideProseDefaults names %q, which is not a Config key; remove the entry", k)
+		}
+	}
+
+	for _, f := range fields {
+		if _, ok := guideConfigKeysUndocumented[f.name]; ok {
 			continue
 		}
-		got, ok := loaderValue[r.key]
+		row, ok := rows[f.name]
 		if !ok {
-			continue // not a loader key; TestGuide61TableListsEveryConfigKey reports it
+			continue // TestGuide61TableListsEveryConfigKey reports the missing row
 		}
-		checked[r.key] = true
-		if r.def != got {
-			t.Errorf("guide 6.1 default for %q is %q, the loader gives %q for a minimal configuration (guide line: %s)", r.key, r.def, got, r.line)
+		if required[f.name] {
+			if row.def() != guideRequired {
+				t.Errorf("guide 6.1 default for %q is %q, but the loader requires the key; the cell must be %s (guide line: %s)", f.name, row.def(), guideRequired, row.line)
+			}
+			continue
 		}
-	}
-	for k := range want {
-		if !checked[k] {
-			t.Errorf("guide 6.1 has no plain default for %q; the table changed or the key lost its default", k)
+		if row.def() == guideRequired {
+			t.Errorf("guide 6.1 says %q is %s, but the loader gives it a default (guide line: %s)", f.name, guideRequired, row.line)
+			continue
+		}
+		switch f.kind {
+		case reflect.String, reflect.Bool:
+			want := fmt.Sprint(loadedValues.Field(f.index).Interface())
+			got, plain := row.plainDefault()
+			switch {
+			case !plain:
+				t.Errorf("guide 6.1 default for %q must be a backticked value, the loader gives %q (guide line: %s)", f.name, want, row.line)
+			case got != want:
+				t.Errorf("guide 6.1 default for %q is %q, the loader gives %q for a minimal configuration (guide line: %s)", f.name, got, want, row.line)
+			}
+		default:
+			check, ok := guideProseDefaults[f.name]
+			if !ok {
+				t.Errorf("guide 6.1 default for %q is not a plain value, and guideProseDefaults has no check for it", f.name)
+				continue
+			}
+			check(t, loaded, row)
 		}
 	}
 }
