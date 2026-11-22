@@ -10,37 +10,47 @@ import (
 	"testing"
 )
 
+// TestRegisterMustDefineIDInTrackingDocument checks the register rule: a
+// registered ticket is known only when the document it names defines it as a
+// table row or heading. A definition in some other document under docs/ does
+// not count. Each case asserts whether the allowlisted package is reported
+// unknown, so the register decides the outcome; the cases where the ID is
+// defined elsewhere fail if the register is ignored.
 func TestRegisterMustDefineIDInTrackingDocument(t *testing.T) {
+	const named = "docs/implementation/plan.md"
+	const other = "docs/implementation/other.md"
 	tests := []struct {
-		name string
-		doc  string
-		ok   bool
+		name  string
+		doc   string // the named tracking document
+		other string // another document under docs/, "" for none
+		known bool
 	}{
-		{"id not mentioned", "# Plan\n\n| AS-09 | open | x |\n", false},
-		{"id in running text only", "# Plan\n\nWG-02 is planned here.\n", false},
-		{"id only in fenced code", "# Plan\n\n```\n## WG-02: wiring guard\n```\n", false},
-		{"id as heading", "# Plan\n\n## WG-02: wiring guard\n", true},
-		{"id as table row", "# Plan\n\n| WG-02 | open | wiring guard |\n", true},
+		{"id not mentioned", "# Plan\n\n| AS-09 | open | x |\n", "", false},
+		{"id in running text only", "# Plan\n\nWG-02 is planned here.\n", "", false},
+		{"id only in fenced code", "# Plan\n\n```\n## WG-02: wiring guard\n```\n", "", false},
+		{"id defined only in another document", "# Plan\n\n| AS-09 | open | x |\n", "## WG-02: wiring guard\n", false},
+		{"id defined in named and another document", "# Plan\n\n## WG-02: wiring guard\n", "| WG-02 | open | x |\n", true},
+		{"id as heading", "# Plan\n\n## WG-02: wiring guard\n", "", true},
+		{"id as table row", "# Plan\n\n| WG-02 | open | wiring guard |\n", "", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			root := writeTree(t, map[string]string{
-				"docs/implementation/plan.md":      tc.doc,
-				"internal/wiringguard/tickets.txt": "WG-02 | wiring guard | docs/implementation/plan.md\n",
-			})
+			files := map[string]string{
+				named:                              tc.doc,
+				"internal/wiringguard/tickets.txt": "WG-02 | wiring guard | " + named + "\n",
+			}
+			if tc.other != "" {
+				files[other] = tc.other
+			}
+			root := writeTree(t, files)
 			allow := Allowlist{"internal/a": {Reason: "developer tool: guard", Ticket: "WG-02"}}
 			unknown, err := UnknownTickets(root, allow)
-			if tc.ok {
-				if err != nil {
-					t.Fatalf("UnknownTickets: %v, want the registration to be accepted", err)
-				}
-				if len(unknown) != 0 {
-					t.Fatalf("UnknownTickets = %v, want none", unknown)
-				}
-				return
+			if err != nil {
+				t.Fatalf("UnknownTickets: %v", err)
 			}
-			if err == nil {
-				t.Fatal("UnknownTickets accepted a registration whose tracking document does not define the ID")
+			gotKnown := len(unknown) == 0
+			if gotKnown != tc.known {
+				t.Fatalf("UnknownTickets = %v, want known=%v for WG-02 registered to %s", unknown, tc.known, named)
 			}
 		})
 	}
@@ -84,6 +94,10 @@ func TestIgnoreConstraintIsRecognisedInEveryForm(t *testing.T) {
 		{"go:build tag and ignore", "//go:build linux && ignore\n", true},
 		{"legacy +build ignore", "// +build ignore\n", true},
 		{"legacy ignore with comma tag", "// +build ignore,linux\n", true},
+		{"go:build linux overrides legacy ignore", "//go:build linux\n// +build ignore\n", false},
+		{"go:build ignore overrides legacy tag", "//go:build ignore\n// +build linux\n", true},
+		{"legacy lines without go:build are conjoined", "// +build linux\n// +build ignore\n", true},
+		{"go:build linux alone with legacy linux", "//go:build linux\n// +build linux\n", false},
 		{"ignore or tag can build", "//go:build ignore || linux\n", false},
 		{"negated ignore builds", "//go:build !ignore\n", false},
 		{"other constraint", "//go:build linux\n", false},

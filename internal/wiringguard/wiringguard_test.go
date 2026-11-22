@@ -217,13 +217,13 @@ const ticketPlan = "# Plan\n\n" +
 	"| EN-16h: SSH step | later | label with a colon |\n" +
 	"| Attached runs (M4-1) | done | ticket in parentheses |\n" +
 	"## WG-07: wiring rules\n" +
-	"## WG-02: wiring guard\n" +
 	"## later\n" +
 	"## planned\n"
 
 func TestUnknownTicketIsReported(t *testing.T) {
 	root := writeTree(t, map[string]string{
 		"docs/implementation/plan.md":      ticketPlan,
+		"docs/implementation/other.md":     "## WG-02: wiring guard\n",
 		"internal/wiringguard/tickets.txt": "WG-02 | wiring guard | docs/implementation/plan.md\n",
 	})
 	allow := Allowlist{
@@ -245,7 +245,9 @@ func TestUnknownTicketIsReported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UnknownTickets: %v", err)
 	}
-	want := []string{"internal/a", "internal/b", "internal/c", "internal/d", "internal/e", "internal/f", "internal/g"}
+	// internal/m: WG-02 is registered to plan.md, which does not define it;
+	// other.md does, but the register names plan.md, so it is unknown.
+	want := []string{"internal/a", "internal/b", "internal/c", "internal/d", "internal/e", "internal/f", "internal/g", "internal/m"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("UnknownTickets = %v, want %v", got, want)
 	}

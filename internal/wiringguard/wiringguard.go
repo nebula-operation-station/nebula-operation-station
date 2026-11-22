@@ -35,8 +35,9 @@ const (
 	// docsDir is the planning-document directory whose Markdown files are
 	// searched for ticket IDs, relative to the module root.
 	docsDir = "docs"
-	// ticketRegister lists wiring tickets that have no table row or heading under
-	// docsDir, relative to the module root. One ticket per line:
+	// ticketRegister names the tracking document of wiring tickets, relative to
+	// the module root. A registered ticket is known only when that document
+	// defines it. One ticket per line:
 	// "<ID> | <title> | <planning document under docsDir>".
 	ticketRegister = "internal/wiringguard/tickets.txt"
 	// registerFields is the number of "|"-separated fields in a register line:
@@ -216,15 +217,16 @@ func categoryOf(reason string) (string, bool) {
 	return "", false
 }
 
-// UnknownTickets returns the sorted package paths of allow whose ticket is
-// neither defined under root/docs nor registered. A ticket is defined when a
-// Markdown file under root/docs has a table row whose first cell names it, or a
-// heading that starts with it (see definedTickets). A ticket is registered when
-// root/internal/wiringguard/tickets.txt names it with a tracking document that
-// exists. A missing register counts as empty; a missing docs directory is an
-// error, so the check cannot pass by reading nothing.
+// UnknownTickets returns the sorted package paths of allow whose ticket is not
+// known. A ticket that root/internal/wiringguard/tickets.txt registers is known
+// only when the tracking document it names defines it: a Markdown file under
+// root/docs with a table row whose first cell names it, or a heading that
+// starts with it (see definedTickets). A definition in any other document does
+// not count. A ticket that is not registered is known when some Markdown file
+// under root/docs defines it. A missing register counts as empty; a missing
+// docs directory is an error, so the check cannot pass by reading nothing.
 func UnknownTickets(root string, allow Allowlist) ([]string, error) {
-	known, err := documentedTickets(root)
+	documented, err := documentedTickets(root)
 	if err != nil {
 		return nil, err
 	}
@@ -232,14 +234,41 @@ func UnknownTickets(root string, allow Allowlist) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// named caches the tickets each tracking document defines, by path.
+	named := map[string]map[string]bool{}
 	var unknown []string
 	for pkg, entry := range allow {
-		if !known[entry.Ticket] && registered[entry.Ticket] == "" {
+		doc, isRegistered := registered[entry.Ticket]
+		if !isRegistered {
+			if !documented[entry.Ticket] {
+				unknown = append(unknown, pkg)
+			}
+			continue
+		}
+		defs, ok := named[doc]
+		if !ok {
+			defs, err = definedInFile(root, doc)
+			if err != nil {
+				return nil, err
+			}
+			named[doc] = defs
+		}
+		if !defs[entry.Ticket] {
 			unknown = append(unknown, pkg)
 		}
 	}
 	sort.Strings(unknown)
 	return unknown, nil
+}
+
+// definedInFile returns the ticket IDs that the Markdown file at the
+// module-relative path doc defines (see definedTickets).
+func definedInFile(root, doc string) (map[string]bool, error) {
+	data, err := readLimited(filepath.Join(root, filepath.FromSlash(doc)), maxTicketSourceBytes)
+	if err != nil {
+		return nil, fmt.Errorf("tracking document %s: %w", doc, err)
+	}
+	return definedTickets(string(data)), nil
 }
 
 // definedTickets returns the ticket IDs that a Markdown document defines. An ID
@@ -340,7 +369,8 @@ func documentedTickets(root string) (map[string]bool, error) {
 // readRegister reads the ticket register and returns each registered ticket ID
 // with its tracking document, a module-relative path under docs/. A missing
 // register is empty. Every line must have registerFields fields, a ticket ID in
-// the ticket form, a title, and a tracking document that exists.
+// the ticket form, a title, and a tracking document that exists. Whether that
+// document defines the ID is decided by UnknownTickets.
 func readRegister(root string) (map[string]string, error) {
 	registered := map[string]string{}
 	data, err := readLimited(filepath.Join(root, ticketRegister), maxTicketSourceBytes)
@@ -369,7 +399,7 @@ func readRegister(root string) (map[string]string, error) {
 		if _, dup := registered[id]; dup {
 			return nil, fmt.Errorf("ticket register line %d: %s listed twice", i+1, id)
 		}
-		if err := checkTrackingDoc(root, doc, id); err != nil {
+		if err := checkTrackingDocPath(root, doc); err != nil {
 			return nil, fmt.Errorf("ticket register line %d: %s: %w", i+1, id, err)
 		}
 		registered[id] = doc
@@ -377,28 +407,18 @@ func readRegister(root string) (map[string]string, error) {
 	return registered, nil
 }
 
-// checkTrackingDoc returns an error unless doc is a clean, slash-separated path
-// to an existing Markdown file under docs/ that defines id as a table row or
-// heading (see definedTickets). A file that merely exists, or that mentions id
-// in running text, does not track the ticket.
-func checkTrackingDoc(root, doc, id string) error {
+// checkTrackingDocPath returns an error unless doc is a clean, slash-separated
+// path to an existing regular Markdown file under docs/.
+func checkTrackingDocPath(root, doc string) error {
 	if path.Clean(doc) != doc || !strings.HasPrefix(doc, docsDir+"/") || !strings.HasSuffix(doc, ".md") {
 		return fmt.Errorf("tracking document %q must be a clean path to a Markdown file under %s/", doc, docsDir)
 	}
-	file := filepath.Join(root, filepath.FromSlash(doc))
-	info, err := os.Stat(file)
+	info, err := os.Stat(filepath.Join(root, filepath.FromSlash(doc)))
 	if err != nil {
 		return fmt.Errorf("tracking document %s: %w", doc, err)
 	}
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("tracking document %s is not a regular file", doc)
-	}
-	data, err := readLimited(file, maxTicketSourceBytes)
-	if err != nil {
-		return fmt.Errorf("tracking document %s: %w", doc, err)
-	}
-	if !definedTickets(string(data))[id] {
-		return fmt.Errorf("tracking document %s does not define %s as a table row or heading", doc, id)
 	}
 	return nil
 }
@@ -623,22 +643,36 @@ func scan(root, modPath string) (map[string]*pkgInfo, error) {
 
 // isIgnored reports whether a file carries a build constraint before its
 // package clause that excludes it from every build, such as "//go:build ignore",
-// "//go:build ignore && linux" or the legacy "// +build ignore". The file must
-// be parsed with parser.ParseComments.
+// "//go:build ignore && linux" or the legacy "// +build ignore". As the Go
+// toolchain does, a "//go:build" line replaces any "// +build" lines; without
+// one, the "// +build" lines are conjoined. The file must be parsed with
+// parser.ParseComments.
 func isIgnored(f *ast.File) bool {
+	var goBuild *constraint.Expr
+	var plusBuild []constraint.Expr
 	for _, group := range f.Comments {
 		if group.Pos() >= f.Package {
 			break
 		}
 		for _, c := range group.List {
-			expr, err := constraint.Parse(c.Text)
-			if err != nil {
-				// Not a build constraint line.
-				continue
+			switch {
+			case constraint.IsGoBuild(c.Text):
+				if expr, err := constraint.Parse(c.Text); err == nil && goBuild == nil {
+					goBuild = &expr
+				}
+			case constraint.IsPlusBuild(c.Text):
+				if expr, err := constraint.Parse(c.Text); err == nil {
+					plusBuild = append(plusBuild, expr)
+				}
 			}
-			if excludesEveryBuild(expr) {
-				return true
-			}
+		}
+	}
+	if goBuild != nil {
+		return excludesEveryBuild(*goBuild)
+	}
+	for _, expr := range plusBuild {
+		if excludesEveryBuild(expr) {
+			return true
 		}
 	}
 	return false
