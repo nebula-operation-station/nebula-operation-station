@@ -5,6 +5,7 @@ package vulninventory
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -212,10 +213,17 @@ func validateImageRead(r ImageRead) error {
 	return checkText("os name", r.OSName, maxImageOSNameBytes, false)
 }
 
+// ErrDiscardedByRetention is returned by PutImage when the new read is older
+// than the ImageReadsKept newest reads of its host and digest: it was written
+// and deleted by the retention of the same transaction, so it has no row ID.
+var ErrDiscardedByRetention = errors.New("vulninventory: image read discarded by retention")
+
 // PutImage validates r, inserts it as a new immutable image read and then
-// keeps only the ImageReadsKept newest reads of its repository, in one
-// transaction. It returns the new row ID. A rejected read writes nothing and
-// deletes nothing.
+// keeps only the ImageReadsKept newest reads of its host and digest (the
+// repository is not part of the key), in one transaction. It returns the new
+// row ID. When retention deletes the new read itself, it returns 0 and
+// ErrDiscardedByRetention; the retention still commits. A rejected read writes
+// nothing and deletes nothing.
 func (s *Store) PutImage(ctx context.Context, r ImageRead) (int64, error) {
 	if err := validateImageRead(r); err != nil {
 		return 0, fmt.Errorf("vulninventory: put image: %w", err)
@@ -250,8 +258,15 @@ func (s *Store) PutImage(ctx context.Context, r ImageRead) (int64, error) {
 		r.HostID, r.Digest, r.HostID, r.Digest, ImageReadsKept); err != nil {
 		return 0, fmt.Errorf("vulninventory: put image: keep newest: %w", err)
 	}
+	var kept int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM vuln_image_reads WHERE id = ?`, id).Scan(&kept); err != nil {
+		return 0, fmt.Errorf("vulninventory: put image: check kept: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, fmt.Errorf("vulninventory: put image: commit: %w", err)
+	}
+	if kept == 0 {
+		return 0, ErrDiscardedByRetention
 	}
 	return id, nil
 }

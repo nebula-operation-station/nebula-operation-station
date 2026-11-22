@@ -129,7 +129,7 @@ func TestImageStoreRetentionFollowsReadTime(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := s.PutImage(ctx, testImageRead(imgRepo, 5)); err != nil {
+	if _, err := s.PutImage(ctx, testImageRead(imgRepo, 5)); !errors.Is(err, ErrDiscardedByRetention) {
 		t.Fatal(err)
 	}
 	reads, err := s.ImageReads(ctx, "host-1", imgDigest("a"))
@@ -287,5 +287,42 @@ func TestImageBodyRefusesOverLimit(t *testing.T) {
 	pkgs = append(pkgs, ImagePackage{Ecosystem: "debian", Name: "x", Version: "1"})
 	if _, err := encodeImageBody(pkgs); !errors.Is(err, ErrLimit) {
 		t.Fatalf("over-limit read: %v, want ErrLimit", err)
+	}
+}
+
+// TestImageStoreReportsReadDiscardedByRetention checks that a late read older
+// than the three kept reads is written and deleted in one transaction: it
+// returns no row ID and ErrDiscardedByRetention, the kept reads are unchanged,
+// and the table never holds a fourth read.
+func TestImageStoreReportsReadDiscardedByRetention(t *testing.T) {
+	s, db := openStore(t)
+	ctx := context.Background()
+	for _, at := range []int64{30, 40, 50} {
+		if _, err := s.PutImage(ctx, testImageRead(imgRepo, at)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	id, err := s.PutImage(ctx, testImageRead(imgRepo, 5))
+	if !errors.Is(err, ErrDiscardedByRetention) {
+		t.Fatalf("late read: err %v, want ErrDiscardedByRetention", err)
+	}
+	if id != 0 {
+		t.Fatalf("late read returned row ID %d, want 0", id)
+	}
+	reads, err := s.ImageReads(ctx, "host-1", imgDigest("a"))
+	if err != nil || len(reads) != ImageReadsKept {
+		t.Fatalf("kept %d reads (err %v), want %d", len(reads), err, ImageReadsKept)
+	}
+	for i, want := range []int64{50, 40, 30} {
+		if got := reads[i].ReadAt.Unix() - base.Unix(); got != want {
+			t.Errorf("kept read %d at %d, want %d", i, got, want)
+		}
+	}
+	var rows int
+	if err := db.QueryRow(`SELECT count(*) FROM vuln_image_reads`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != ImageReadsKept {
+		t.Fatalf("table holds %d rows, want %d", rows, ImageReadsKept)
 	}
 }
