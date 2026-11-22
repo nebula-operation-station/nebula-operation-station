@@ -7,6 +7,7 @@ import (
 	"log/slog"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/clientaddr"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/enroll"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
 
@@ -20,11 +21,31 @@ func init() {
 
 // enrollFeature returns the download route's feature. Its options hook sets
 // the dialog's client-address resolver, so the dialog and the download see
-// the same address (ADR 0013 D7). The route itself is not mounted here: it
-// needs a route outside the session check, which the registry does not
-// offer yet.
+// the same address (ADR 0013 D7). Its public hook mounts the download route
+// outside the session check (EN-09), the only public route.
 func enrollFeature() serverFeature {
-	return serverFeature{name: enrollFeatureName, options: enrollOptions}
+	return serverFeature{name: enrollFeatureName, options: enrollOptions, public: enrollPublic}
+}
+
+// enrollPublic mounts GET /enroll/<offer-id> with its rate limit. The
+// resolver is built from the same configuration as the dialog's (no trusted
+// proxies), so both see the same client address. The startup warning is
+// logged once, by enrollOptions.
+func enrollPublic(deps serverDeps, p *publicRoutes) error {
+	addr, err := enrollClientAddr(deps.log)
+	if err != nil {
+		return err
+	}
+	h, err := enroll.New(enroll.Options{
+		Executor:   deps.exec,
+		ClientAddr: addr,
+		Limiter:    enroll.NewLimiter(enroll.DefaultTableSize, nil),
+		Log:        deps.log,
+	})
+	if err != nil {
+		return fmt.Errorf("enrollment download route: %w", err)
+	}
+	return p.Handle(enroll.PathPrefix, h)
 }
 
 // enrollOptions sets ui.Options.EnrollClientAddr and runs the startup

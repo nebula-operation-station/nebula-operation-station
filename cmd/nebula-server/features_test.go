@@ -19,6 +19,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
@@ -228,6 +229,84 @@ func TestFeatureHooksThroughWebServer(t *testing.T) {
 	}
 	if rec := do(pagePath, token); rec.Code != http.StatusOK {
 		t.Fatalf("page with session: status %d, want 200", rec.Code)
+	}
+}
+
+// TestPublicRouteRefusals: the public registry takes only the exact enroll
+// prefix. Every other pattern is refused and not mounted: the root, the
+// login, the token API, the traffic map API, page paths, a prefix without
+// its slash, a path below the prefix, a method pattern, an empty pattern
+// and a nil handler.
+func TestPublicRouteRefusals(t *testing.T) {
+	ok := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	cases := []struct {
+		name    string
+		prefix  string
+		h       http.Handler
+		wantErr error
+	}{
+		{"root", "/", ok, errPublicRouteRefused},
+		{"login", "/login", ok, errPublicRouteRefused},
+		{"token API prefix", api.Prefix, ok, errPublicRouteRefused},
+		{"traffic map API", trafficMapAPIPath, ok, errPublicRouteRefused},
+		{"page path", "/inventory", ok, errPublicRouteRefused},
+		{"prefix without slash", "/enroll", ok, errPublicRouteRefused},
+		{"path below the prefix", "/enroll/abc", ok, errPublicRouteRefused},
+		{"method pattern", "GET /enroll/", ok, errPublicRouteRefused},
+		{"empty pattern", "", ok, errPublicRouteRefused},
+		{"nil handler", "/enroll/", nil, errBadPublicRoute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newPublicRoutes()
+			err := p.Handle(tc.prefix, tc.h)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Handle(%q): err = %v, want %v", tc.prefix, err, tc.wantErr)
+			}
+			if n := len(p.routes); n != 0 {
+				t.Fatalf("refused route mounted: %d routes", n)
+			}
+		})
+	}
+}
+
+// TestPublicRouteDuplicateRefused: the enroll prefix can be registered once.
+func TestPublicRouteDuplicateRefused(t *testing.T) {
+	ok := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	p := newPublicRoutes()
+	if err := p.Handle("/enroll/", ok); err != nil {
+		t.Fatalf("first registration: %v", err)
+	}
+	if err := p.Handle("/enroll/", ok); !errors.Is(err, errPublicRouteRefused) {
+		t.Fatalf("second registration: err = %v, want errPublicRouteRefused", err)
+	}
+	if n := len(p.routes); n != 1 {
+		t.Fatalf("routes = %d, want 1", n)
+	}
+}
+
+// TestPublicHookRegistersOnlyEnrollPrefix runs the real registry: the enroll
+// feature is the only public route, and it sits under /enroll/.
+func TestPublicHookRegistersOnlyEnrollPrefix(t *testing.T) {
+	deps := serverDeps{exec: &lazyExecutor{}, log: slog.New(slog.DiscardHandler)}
+	p := newPublicRoutes()
+	if err := mountServerPublicRoutes(deps, p); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.routes) != 1 || p.routes[0].prefix != "/enroll/" {
+		t.Fatalf("public routes = %+v, want exactly /enroll/", p.routes)
+	}
+}
+
+// TestPublicHookErrorNamesFeature: a refused public route stops the start
+// with the feature name.
+func TestPublicHookErrorNamesFeature(t *testing.T) {
+	withServerFeatures(t, serverFeature{name: "leaky", public: func(_ serverDeps, p *publicRoutes) error {
+		return p.Handle("/inventory", http.NotFoundHandler())
+	}})
+	err := mountServerPublicRoutes(serverDeps{}, newPublicRoutes())
+	if !errors.Is(err, errPublicRouteRefused) || !strings.Contains(err.Error(), "leaky") {
+		t.Fatalf("refused public route: err = %v, want errPublicRouteRefused naming leaky", err)
 	}
 }
 

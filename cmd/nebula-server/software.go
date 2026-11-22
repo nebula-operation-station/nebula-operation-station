@@ -167,7 +167,20 @@ type sessionGate interface {
 // The traffic map model (trafficMapAPIPath) lies under that prefix but is
 // read by a page, so it always goes to the session chain (pages).
 func webServer(publicOrigin string, login sessionGate, pages, apiHandler http.Handler) (*http.Server, error) {
+	return webServerPublic(publicOrigin, login, pages, apiHandler, nil)
+}
+
+// webServerPublic is webServer with the public routes of
+// mountServerPublicRoutes (ADR 0013 D7). A public route is mounted on the
+// root mux beside the pages, not behind login.Wrap, and it gets the same
+// security middleware as every other route. public may be nil.
+func webServerPublic(publicOrigin string, login sessionGate, pages, apiHandler http.Handler, public *publicRoutes) (*http.Server, error) {
 	root := http.NewServeMux()
+	if public != nil {
+		for _, r := range public.routes {
+			root.Handle(r.prefix, r.handler)
+		}
+	}
 	gated := login.Wrap(pages)
 	root.Handle("/", gated)
 	root.Handle(trafficMapAPIPath, gated)
