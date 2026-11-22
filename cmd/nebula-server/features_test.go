@@ -19,6 +19,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
@@ -231,6 +232,84 @@ func TestFeatureHooksThroughWebServer(t *testing.T) {
 	}
 }
 
+// TestPublicRouteRefusals: the public registry takes only the exact enroll
+// prefix. Every other pattern is refused and not mounted: the root, the
+// login, the token API, the traffic map API, page paths, a prefix without
+// its slash, a path below the prefix, a method pattern, an empty pattern
+// and a nil handler.
+func TestPublicRouteRefusals(t *testing.T) {
+	ok := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	cases := []struct {
+		name    string
+		prefix  string
+		h       http.Handler
+		wantErr error
+	}{
+		{"root", "/", ok, errPublicRouteRefused},
+		{"login", "/login", ok, errPublicRouteRefused},
+		{"token API prefix", api.Prefix, ok, errPublicRouteRefused},
+		{"traffic map API", trafficMapAPIPath, ok, errPublicRouteRefused},
+		{"page path", "/inventory", ok, errPublicRouteRefused},
+		{"prefix without slash", "/enroll", ok, errPublicRouteRefused},
+		{"path below the prefix", "/enroll/abc", ok, errPublicRouteRefused},
+		{"method pattern", "GET /enroll/", ok, errPublicRouteRefused},
+		{"empty pattern", "", ok, errPublicRouteRefused},
+		{"nil handler", "/enroll/", nil, errBadPublicRoute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newPublicRoutes()
+			err := p.Handle(tc.prefix, tc.h)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("Handle(%q): err = %v, want %v", tc.prefix, err, tc.wantErr)
+			}
+			if n := len(p.routes); n != 0 {
+				t.Fatalf("refused route mounted: %d routes", n)
+			}
+		})
+	}
+}
+
+// TestPublicRouteDuplicateRefused: the enroll prefix can be registered once.
+func TestPublicRouteDuplicateRefused(t *testing.T) {
+	ok := http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})
+	p := newPublicRoutes()
+	if err := p.Handle("/enroll/", ok); err != nil {
+		t.Fatalf("first registration: %v", err)
+	}
+	if err := p.Handle("/enroll/", ok); !errors.Is(err, errPublicRouteRefused) {
+		t.Fatalf("second registration: err = %v, want errPublicRouteRefused", err)
+	}
+	if n := len(p.routes); n != 1 {
+		t.Fatalf("routes = %d, want 1", n)
+	}
+}
+
+// TestPublicHookRegistersOnlyEnrollPrefix runs the real registry: the enroll
+// feature is the only public route, and it sits under /enroll/.
+func TestPublicHookRegistersOnlyEnrollPrefix(t *testing.T) {
+	deps := serverDeps{exec: &lazyExecutor{}, log: slog.New(slog.DiscardHandler)}
+	p := newPublicRoutes()
+	if err := mountServerPublicRoutes(deps, p); err != nil {
+		t.Fatal(err)
+	}
+	if len(p.routes) != 1 || p.routes[0].prefix != "/enroll/" {
+		t.Fatalf("public routes = %+v, want exactly /enroll/", p.routes)
+	}
+}
+
+// TestPublicHookErrorNamesFeature: a refused public route stops the start
+// with the feature name.
+func TestPublicHookErrorNamesFeature(t *testing.T) {
+	withServerFeatures(t, serverFeature{name: "leaky", public: func(_ serverDeps, p *publicRoutes) error {
+		return p.Handle("/inventory", http.NotFoundHandler())
+	}})
+	err := mountServerPublicRoutes(serverDeps{}, newPublicRoutes())
+	if !errors.Is(err, errPublicRouteRefused) || !strings.Contains(err.Error(), "leaky") {
+		t.Fatalf("refused public route: err = %v, want errPublicRouteRefused naming leaky", err)
+	}
+}
+
 // calleeName returns "pkg.Func" for a selector on an identifier, "Func" for
 // a plain identifier, and "" for anything else.
 func calleeName(fun ast.Expr) string {
@@ -308,9 +387,24 @@ func TestRunServerWiresFeaturesInOrder(t *testing.T) {
 	mount := one("mountServerFeaturePages")
 	ident(mount.args[0], "deps")
 	ident(mount.args[1], "pages")
-	webSrv := one("webServer")
+	webSrv := one("webServerPublic")
 	if mount.pos >= webSrv.pos {
-		t.Fatal("mountServerFeaturePages must run before webServer")
+		t.Fatal("mountServerFeaturePages must run before webServerPublic")
+	}
+	// The public routes are mounted before the server is assembled, and the
+	// same registry is handed to webServerPublic.
+	pub := one("mountServerPublicRoutes")
+	if len(pub.args) != 2 || len(webSrv.args) != 5 {
+		t.Fatalf("mountServerPublicRoutes takes %d arguments, webServerPublic %d, want 2 and 5", len(pub.args), len(webSrv.args))
+	}
+	ident(pub.args[0], "deps")
+	ident(pub.args[1], "public")
+	ident(webSrv.args[4], "public")
+	if pub.pos >= webSrv.pos {
+		t.Fatal("mountServerPublicRoutes must run before webServerPublic")
+	}
+	if n := len(calls["webServer"]); n != 0 {
+		t.Fatalf("runServer calls webServer %d times, want 0: it bypasses the public routes", n)
 	}
 	// The mount comes after every route main.go registers on pages, so the
 	// feature pages are added last, as reviewed.
