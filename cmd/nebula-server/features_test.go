@@ -104,6 +104,42 @@ func TestFeatureRouteConflictIsStartError(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "clash") {
 		t.Fatalf("route conflict: err = %v, want an error naming clash", err)
 	}
+	// The existing route is kept: the mux still answers with its own handler
+	// (NotFoundHandler, 404), not the clashing feature's (200).
+	rec := httptest.NewRecorder()
+	pages.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/taken", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("/taken after conflict: status %d, want 404 from the existing route", rec.Code)
+	}
+}
+
+// TestFeatureInvalidPatternIsStartError: a page hook that registers a route
+// pattern the mux refuses fails the start with the feature name.
+func TestFeatureInvalidPatternIsStartError(t *testing.T) {
+	withServerFeatures(t, serverFeature{name: "badpattern", pages: func(_ serverDeps, mux *http.ServeMux) error {
+		mux.Handle("GET /broken{", http.NotFoundHandler())
+		return nil
+	}})
+	err := mountServerFeaturePages(serverDeps{}, http.NewServeMux())
+	if err == nil || !strings.Contains(err.Error(), "badpattern") {
+		t.Fatalf("invalid pattern: err = %v, want an error naming badpattern", err)
+	}
+}
+
+// TestFeatureOtherPanicIsNotSwallowed: only the mux's own refusals become
+// start errors. Any other panic in a hook propagates, so a bug is not
+// reported as a route conflict.
+func TestFeatureOtherPanicIsNotSwallowed(t *testing.T) {
+	withServerFeatures(t, serverFeature{name: "bug", options: func(serverDeps, *ui.Options) error {
+		panic("nil pointer in feature setup")
+	}})
+	defer func() {
+		if r := recover(); r != "nil pointer in feature setup" {
+			t.Fatalf("panic value = %v, want the hook's own panic to propagate", r)
+		}
+	}()
+	_ = applyServerFeatureOptions(serverDeps{}, &ui.Options{})
+	t.Fatal("hook panic was swallowed")
 }
 
 // TestFeatureHookSeesUIOptionsByPointer: the options hook edits the value

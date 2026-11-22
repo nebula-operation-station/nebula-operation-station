@@ -139,14 +139,43 @@ func orderServerFeatures(fs []serverFeature) ([]serverFeature, error) {
 	return out, nil
 }
 
-// featureHook calls one hook. A panic (http.ServeMux panics on a route that
-// is already registered) becomes an error here, so the start fails with the
-// feature name instead of crashing; the panic can only come from the hook's
-// own setup at startup.
+// muxRefusalMarkers are the texts of the panics http.ServeMux raises when it
+// refuses a route: a pattern that is already registered, a pattern that
+// conflicts with one, or a pattern it cannot parse.
+var muxRefusalMarkers = []string{"multiple registrations", "conflicts with pattern", "invalid pattern", "parsing"}
+
+// muxRefusal returns the text of a ServeMux refusal panic, and false for any
+// other panic value.
+func muxRefusal(r any) (string, bool) {
+	var text string
+	switch v := r.(type) {
+	case error:
+		text = v.Error()
+	case string:
+		text = v
+	default:
+		return "", false
+	}
+	for _, m := range muxRefusalMarkers {
+		if strings.Contains(text, m) {
+			return text, true
+		}
+	}
+	return "", false
+}
+
+// featureHook calls one hook. A ServeMux refusal (a route that is already
+// registered, conflicts with one, or does not parse) becomes an error here,
+// so the start fails with the feature name instead of crashing. Any other
+// panic is a bug in the hook and propagates unchanged.
 func featureHook(f serverFeature, phase string, call func() error) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("feature %s: %s: panic: %v", f.name, phase, r)
+			text, ok := muxRefusal(r)
+			if !ok {
+				panic(r)
+			}
+			err = fmt.Errorf("feature %s: %s: %s", f.name, phase, text)
 		}
 	}()
 	if err := call(); err != nil {
