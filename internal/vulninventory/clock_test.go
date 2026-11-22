@@ -81,37 +81,53 @@ func TestCurrentReuseWindowUsesStoreClock(t *testing.T) {
 	}
 }
 
-// fakeFloor records how Current calls it: on which transaction, how many times,
-// and what the snapshot table held at that moment.
-type fakeFloor struct {
-	value    int64
-	db       *sql.DB
-	calls    int
-	rowsSeen int
-	txNil    bool
+// lockProbe is a GenerationFloor that checks from inside Generation whether
+// Current already holds the database write lock. It attempts a write on a
+// second connection to the same file, with a short busy timeout. While the
+// write lock is held that write is refused; before the lock it would succeed.
+type lockProbe struct {
+	value int64
+	other *sql.DB
+	calls int
+	txNil bool
+	// refused is true when the second connection's write was refused.
+	refused bool
 }
 
-func (f *fakeFloor) Generation(_ context.Context, tx *sql.Tx) (int64, error) {
+func (f *lockProbe) Generation(ctx context.Context, tx *sql.Tx) (int64, error) {
 	f.calls++
 	if tx == nil {
 		f.txNil = true
 		return 0, nil
 	}
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM vuln_inventory_snapshots`).Scan(&f.rowsSeen); err != nil {
-		return 0, err
-	}
+	_, err := f.other.ExecContext(ctx, `UPDATE vuln_inventory_snapshots SET taken_at = taken_at WHERE 0`)
+	f.refused = err != nil
 	return f.value, nil
 }
 
 // TestCurrentReadsFloorInsideTransaction: Current asks the floor once, on its
-// own transaction, before it writes the new snapshot. A floor that is read
-// there bounds the generation of that same write.
+// own transaction, after it has taken the write lock. A floor read before the
+// lock could be stale by the time the snapshot is written; the probe sees the
+// lock held when Generation runs.
 func TestCurrentReadsFloorInsideTransaction(t *testing.T) {
 	c := &clock{t: base}
-	s, db := openStoreOnClock(t, c)
+	path := filepath.Join(t.TempDir(), "server.db")
+	db, err := serverdb.Open(path)
+	if err != nil {
+		t.Fatalf("open server db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+	other, err := serverdb.OpenWithOptions(path, serverdb.Options{BusyTimeout: 20 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("open second connection: %v", err)
+	}
+	t.Cleanup(func() { other.Close() })
+	s, err := NewWithNow(db, c.now)
+	if err != nil {
+		t.Fatalf("NewWithNow: %v", err)
+	}
 	mustPut(t, s, testRead("h1", true, 0))
-	before := rowCountTable(t, db, "vuln_inventory_snapshots")
-	f := &fakeFloor{value: 7, db: db}
+	f := &lockProbe{value: 7, other: other}
 
 	snap, err := s.Current(context.Background(), []string{"h1"}, 0, f)
 	if err != nil {
@@ -123,8 +139,8 @@ func TestCurrentReadsFloorInsideTransaction(t *testing.T) {
 	if f.txNil {
 		t.Fatal("floor was given no transaction")
 	}
-	if f.rowsSeen != before {
-		t.Fatalf("floor saw %d snapshot rows, want %d (read before the write)", f.rowsSeen, before)
+	if !f.refused {
+		t.Fatal("a second connection could write while Current read the floor: the floor was read before the write lock")
 	}
 	if snap.Generation != 8 {
 		t.Fatalf("generation = %d, want 8 (floor 7 plus one)", snap.Generation)
@@ -143,7 +159,8 @@ func TestCurrentRefusesNilFloor(t *testing.T) {
 
 // TestConcurrentCurrentNeverLowersGeneration: callers with different floors run
 // at the same time. Each snapshot is above its own floor, no two different
-// snapshots share a generation, and the generations rise with the floors.
+// snapshots share a generation, and every snapshot that was handed out is
+// stored under its generation, with nothing else stored.
 func TestConcurrentCurrentNeverLowersGeneration(t *testing.T) {
 	c := &clock{t: base}
 	s, db := openStoreOnClock(t, c)
@@ -180,18 +197,27 @@ func TestConcurrentCurrentNeverLowersGeneration(t *testing.T) {
 		}
 		byGen[r.snap.Generation] = r.snap.ID
 	}
-	// The stored generations are exactly the ones handed out, and the highest
-	// stored one is at least the highest floor plus one.
+	// The stored snapshots are exactly the ones handed out: one row per call,
+	// each under the generation it was given. The highest stored generation is
+	// the highest handed out, and it is at least the highest floor plus one.
+	if rows := rowCountTable(t, db, "vuln_inventory_snapshots"); rows != n {
+		t.Fatalf("stored snapshots = %d, want %d (one per call)", rows, n)
+	}
 	var maxStored int64
 	if err := db.QueryRow(`SELECT COALESCE(MAX(generation), 0) FROM vuln_inventory_snapshots`).Scan(&maxStored); err != nil {
 		t.Fatal(err)
 	}
-	if maxStored < int64((n-1)*10)+1 {
-		t.Fatalf("highest stored generation = %d, want at least %d", maxStored, (n-1)*10+1)
-	}
+	var maxHanded int64
 	for gen, id := range byGen {
+		maxHanded = max(maxHanded, gen)
 		if want := fmt.Sprintf("nos-inv-%d", gen); id != want {
 			t.Fatalf("snapshot %s has generation %d, want ID %s", id, gen, want)
 		}
+	}
+	if maxStored != maxHanded {
+		t.Fatalf("highest stored generation = %d, highest handed out = %d", maxStored, maxHanded)
+	}
+	if maxStored < int64((n-1)*10)+1 {
+		t.Fatalf("highest stored generation = %d, want at least %d", maxStored, (n-1)*10+1)
 	}
 }
