@@ -929,8 +929,12 @@ func subjectStatus(g vulnSubjectGroup, st VulnSubjectStatus, feedIssue, pageFeed
 	if l, stale := subjectLabel(st, now); stale {
 		return l
 	}
+	// A truncated list or a host inventory that is not fully known (none
+	// stored, unavailable, partial, unmapped running kernel) makes every
+	// count only what NOS could match: a lower bound.
+	inventoryLabel, inventoryUnknown := inventoryUnknown(st)
 	atLeast := ""
-	if truncated {
+	if truncated || inventoryUnknown {
 		atLeast = "at least "
 	}
 	switch {
@@ -945,21 +949,22 @@ func subjectStatus(g vulnSubjectGroup, st VulnSubjectStatus, feedIssue, pageFeed
 	case feedIssue, pageFeedIssue:
 		return vulnLabel{"feed issue", classWarning}
 	}
-	if l, unknown := inventoryUnknown(st); unknown {
-		return l
+	if inventoryUnknown {
+		return inventoryLabel
 	}
 	return vulnLabel{"no open findings", classOK}
 }
 
 // inventoryUnknown reports whether a host's package inventory keeps its
-// status from being green (D6, D8): no stored read, an unavailable read or
-// a partial one. Its findings are whatever NOS could match, so a host
-// without a complete list is never "no open findings".
+// status from being green (D4, D6, D8): no stored read, an unavailable read,
+// a partial one, or a complete one whose running kernel does not map to a
+// kernel source (kernel coverage unknown, never clean). Its findings are
+// whatever NOS could match, so such a host is never "no open findings".
 func inventoryUnknown(st VulnSubjectStatus) (vulnLabel, bool) {
 	if st.Subject.Kind != vulnfinding.SubjectHost {
 		return vulnLabel{}, false
 	}
-	if inv := st.Inventory; inv != nil && inv.Complete && !inv.Unavailable {
+	if inv := st.Inventory; inv != nil && inv.Complete && inv.KernelMapped && !inv.Unavailable {
 		return vulnLabel{}, false
 	}
 	return vulnLabel{labelIncomplete, classUnknown}, true
