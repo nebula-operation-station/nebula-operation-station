@@ -135,11 +135,12 @@ func TestMetadataIsWrittenOncePerDevicePerCycle(t *testing.T) {
 }
 
 // TestMetadataWritesEveryCycleForSubMinuteInterval checks that a collector
-// interval below metadataMinInterval writes one record per listed device in
-// every cycle (spec A1-2). The rate is then bounded by the interval the
-// operator chose; the importer keeps only the newest record per device.
+// interval from metadataSubMinuteWindow up to metadataMinInterval writes one
+// record per listed device in every cycle (spec A1-2). Intervals below
+// metadataSubMinuteWindow are bounded instead (see
+// TestMetadataWritesAreBoundedForOneSecondInterval).
 func TestMetadataWritesEveryCycleForSubMinuteInterval(t *testing.T) {
-	for _, interval := range []time.Duration{time.Second, 10 * time.Second, metadataMinInterval - time.Second} {
+	for _, interval := range []time.Duration{metadataSubMinuteWindow, 30 * time.Second, metadataMinInterval - time.Second} {
 		clock := newClock()
 		c := newFakeClient(clock, labelled("core-sw-01", "Core"), labelled("edge-fw-01", "Edge"))
 		s := &fakeSpool{}
@@ -204,6 +205,102 @@ func TestMetadataWritesAreRateBoundedByMinInterval(t *testing.T) {
 	}
 	if n := len(metadataWrites(s)); n != 2 {
 		t.Fatalf("metadata records = %d, want 2 (one per metadataMinInterval)", n)
+	}
+}
+
+// TestMetadataWindowForIntervals checks the least time between two metadata
+// records of one device for each collector Interval. An unset (zero or
+// negative) Interval means DefaultInterval and so keeps the one-minute bound.
+func TestMetadataWindowForIntervals(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		interval time.Duration
+		want     time.Duration
+	}{
+		{"unset", 0, metadataMinInterval},
+		{"negative", -time.Second, metadataMinInterval},
+		{"one second", time.Second, metadataSubMinuteWindow},
+		{"below the floor", metadataSubMinuteWindow - time.Second, metadataSubMinuteWindow},
+		{"at the floor", metadataSubMinuteWindow, metadataSubMinuteWindow},
+		{"30 seconds", 30 * time.Second, 30 * time.Second},
+		{"just under a minute", metadataMinInterval - time.Second, metadataMinInterval - time.Second},
+		{"one minute", metadataMinInterval, metadataMinInterval},
+		{"five minutes", 5 * metadataMinInterval, metadataMinInterval},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &Poller{Interval: tc.interval}
+			if got := p.metadataWindow(); got != tc.want {
+				t.Fatalf("metadataWindow() with Interval %v = %v, want %v", tc.interval, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestMetadataWritesAreBoundedWhenIntervalUnset runs the one-minute bound with
+// the Interval left at its zero value, not set to DefaultInterval explicitly.
+func TestMetadataWritesAreBoundedWhenIntervalUnset(t *testing.T) {
+	clock := newClock()
+	c := newFakeClient(clock, labelled("core-sw-01", "Core"))
+	s := &fakeSpool{}
+	p := newTestPoller(c, s, clock, constRand(0.5))
+	if p.Interval != 0 {
+		t.Fatalf("test poller Interval = %v, want unset", p.Interval)
+	}
+	if rep := cycle(t, p); rep.MetadataWritten != 1 {
+		t.Fatalf("first cycle metadata written = %d, want 1", rep.MetadataWritten)
+	}
+	// Five cycles, each 10 s apart, all younger than one minute: no record.
+	for i := 1; i <= 5; i++ {
+		clock.Advance(10 * time.Second)
+		if rep := cycle(t, p); rep.MetadataWritten != 0 {
+			t.Fatalf("cycle %d after the last write: metadata written = %d, want 0", i, rep.MetadataWritten)
+		}
+	}
+	// One minute after the first write the next record is due.
+	clock.Advance(10 * time.Second)
+	if rep := cycle(t, p); rep.MetadataWritten != 1 {
+		t.Fatalf("cycle one minute after the first write: metadata written = %d, want 1", rep.MetadataWritten)
+	}
+	if n := len(metadataWrites(s)); n != 2 {
+		t.Fatalf("metadata records = %d, want 2 (one per minute)", n)
+	}
+}
+
+// TestMetadataWritesAreBoundedForOneSecondInterval checks the rate bound of a
+// sub-minute Interval with the largest device list: with Interval = 1 s and
+// MaxDevices devices, each device gets at most one record per
+// metadataSubMinuteWindow, so 30 cycles write 3 records per device, not 30.
+func TestMetadataWritesAreBoundedForOneSecondInterval(t *testing.T) {
+	clock := newClock()
+	devices := make([]*pb.NetDeviceInfo, 0, MaxDevices)
+	for i := range MaxDevices {
+		devices = append(devices, labelled("dev-"+strconv.Itoa(i), "Dev"))
+	}
+	c := newFakeClient(clock, devices...)
+	s := &fakeSpool{}
+	p := newTestPoller(c, s, clock, constRand(0.5))
+	p.Interval = time.Second
+	const cycles = 30
+	for i := 0; i < cycles; i++ {
+		if i > 0 {
+			clock.Advance(time.Second)
+		}
+		if rep := cycle(t, p); rep.MetadataFailed != 0 {
+			t.Fatalf("cycle %d: metadata failed = %d, want 0", i+1, rep.MetadataFailed)
+		}
+	}
+	perDevice := map[string]int{}
+	for _, w := range metadataWrites(s) {
+		perDevice[w.device]++
+	}
+	const want = cycles / int(metadataSubMinuteWindow/time.Second)
+	if len(perDevice) != MaxDevices {
+		t.Fatalf("devices with metadata = %d, want %d", len(perDevice), MaxDevices)
+	}
+	for id, n := range perDevice {
+		if n != want {
+			t.Fatalf("device %s: metadata records = %d over %d cycles, want %d", id, n, cycles, want)
+		}
 	}
 }
 

@@ -165,7 +165,8 @@ type Poller struct {
 	// executor error detail. Nil discards.
 	Log *slog.Logger
 	// Interval is how often Run starts a cycle (default DefaultInterval). Below
-	// one minute, every cycle writes a metadata record per listed device.
+	// one minute, every cycle writes a metadata record per listed device, but
+	// no device gets more than one per metadataSubMinuteWindow.
 	Interval time.Duration
 	// MaxBackoff caps the backoff (default DefaultMaxBackoff, never below
 	// MinReadInterval).
@@ -366,33 +367,38 @@ func metadataEligible(info *pb.NetDeviceInfo) bool {
 // (nx07f), so the bound caps the write load without losing the device's latest
 // state. With the default Interval (DefaultInterval, one minute) every cycle
 // writes.
-//
-// A shorter Interval disables the bound (see metadataWindow): every cycle
-// writes one record per listed device, as spec A1-2 requires. The write rate
-// is then the device count divided by the Interval; the importer supersedes the
-// older records, so the store keeps the newest state only.
 const metadataMinInterval = time.Minute
 
+// metadataSubMinuteWindow is the hard floor between two metadata records of one
+// device for a collector Interval below metadataMinInterval. Such an Interval
+// writes one record per listed device in every cycle (spec A1-2) only down to
+// this window, so a device gets at most 6 records per minute whatever the
+// Interval. The spool has no total size cap, so this bound is what limits the
+// write rate: at MaxDevices (1024) and this window the worst case is about 102
+// files per second, not one per device per Interval.
+const metadataSubMinuteWindow = 10 * time.Second
+
 // metadataWindow returns the least time between two metadata records of one
-// device for this Poller. It is metadataMinInterval for an Interval of at least
-// that long (and for the default Interval), and zero for a shorter Interval, so
-// that every cycle writes a record.
+// device for this Poller. An unset (zero or negative) Interval means
+// DefaultInterval. For an Interval of at least metadataMinInterval the window
+// is metadataMinInterval. For a shorter Interval every cycle writes a record,
+// but never more often than metadataSubMinuteWindow: the window is the Interval
+// when that is at least the floor, and the floor otherwise.
 func (p *Poller) metadataWindow() time.Duration {
 	interval := p.Interval
 	if interval <= 0 {
 		interval = DefaultInterval
 	}
-	if interval < metadataMinInterval {
-		return 0
+	if interval >= metadataMinInterval {
+		return metadataMinInterval
 	}
-	return metadataMinInterval
+	return max(interval, metadataSubMinuteWindow)
 }
 
 // spoolMetadata writes one device metadata record for each listed device
 // that metadataEligible accepts, using the first listing of a duplicate id,
 // unless the spool accepted a record for that device less than the window
-// (metadataWindow: metadataMinInterval, or none for a sub-minute Interval)
-// before now. A device that is
+// (metadataWindow) before now. A device that is
 // not eligible, or not listed, loses its write time, so it gets a fresh
 // record when it becomes eligible again. A refused write keeps the old write
 // time, so it is tried again in the next cycle. A refusal is counted in rep
