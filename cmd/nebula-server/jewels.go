@@ -4,12 +4,11 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
-	"sync"
+	"strings"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/attackpath/jewels"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
@@ -22,31 +21,33 @@ import (
 // behind the session check; its subjects are the server's own inventory
 // (managed hosts, PVE nodes and PVE guests), never flow reports.
 
-// jewelStores holds one crown-jewel store per database, so the page and the
-// attack-path computation (uf10) share one instance.
-var jewelStores = struct {
-	sync.Mutex
-	byDB map[*sql.DB]*jewels.Store
-}{byDB: map[*sql.DB]*jewels.Store{}}
-
-// crownJewelStore returns the crown-jewel store on d.db, creating it on the
-// first call. The page and the attack-path computation (uf10) both call it,
-// so they read and write through one instance.
+// crownJewelStore returns a crown-jewel store on d.db. The store holds no
+// state besides the database handle, the logger and the clock, so every
+// caller gets a store that reads and writes the same rows; nothing is cached
+// per process, and this package keeps no closed database alive.
 func crownJewelStore(d serverDeps) (*jewels.Store, error) {
 	if d.db == nil {
 		return nil, errors.New("crown jewels: no server database")
-	}
-	jewelStores.Lock()
-	defer jewelStores.Unlock()
-	if st, ok := jewelStores.byDB[d.db]; ok {
-		return st, nil
 	}
 	st, err := jewels.New(d.db, d.log, nil)
 	if err != nil {
 		return nil, fmt.Errorf("crown jewels: %w", err)
 	}
-	jewelStores.byDB[d.db] = st
 	return st, nil
+}
+
+// jewelNodeID joins prefix and parts into an attack-path node ID, or reports
+// false when a part is empty. It mirrors attackpath/sources nodeID (which is
+// unexported there): an empty part would make "pve:<remote>/" or
+// "pve:/<node>", which the Builder accepts but no adapter creates, so a
+// crown jewel on it could never be reached.
+func jewelNodeID(prefix string, parts ...string) (string, bool) {
+	for _, p := range parts {
+		if p == "" {
+			return "", false
+		}
+	}
+	return prefix + strings.Join(parts, "/"), true
 }
 
 // jewelHosts is the inventory read the crown-jewels directory needs;
@@ -97,7 +98,11 @@ func (d jewelDirectory) Subjects(ctx context.Context) ([]jewelspage.Subject, err
 			return nil, fmt.Errorf("crown jewels: list PVE nodes: %w", err)
 		}
 		for _, n := range nodes {
-			out = append(out, jewelspage.Subject{Node: "pve:" + r.RemoteID + "/" + n.Node, Label: n.Node})
+			id, ok := jewelNodeID("pve:", r.RemoteID, n.Node)
+			if !ok {
+				continue
+			}
+			out = append(out, jewelspage.Subject{Node: id, Label: n.Node})
 		}
 		guests, err := d.pve.ListGuests(ctx, r.RemoteID, pveinventory.GuestFilter{}, pveinventory.MaxGuestsQuery)
 		if err != nil {
@@ -108,7 +113,11 @@ func (d jewelDirectory) Subjects(ctx context.Context) ([]jewelspage.Subject, err
 			if label == "" {
 				label = strconv.FormatUint(g.VMID, 10)
 			}
-			out = append(out, jewelspage.Subject{Node: "guest:" + r.RemoteID + "/" + strconv.FormatUint(g.VMID, 10), Label: label})
+			id, ok := jewelNodeID("guest:", r.RemoteID, strconv.FormatUint(g.VMID, 10))
+			if !ok {
+				continue
+			}
+			out = append(out, jewelspage.Subject{Node: id, Label: label})
 		}
 	}
 	return out, nil
@@ -129,24 +138,17 @@ func jewelsChrome(r *http.Request) jewelspage.Chrome {
 	return jewelspage.Chrome{Theme: c.Theme, NavCollapsed: c.NavCollapsed, PVENav: c.PVENav, DeployEnabled: c.DeployEnabled, NotificationsNav: c.NotificationsNav}
 }
 
-// mountCrownJewels adds the crown-jewels routes to the pages mux. Only
-// admins pass (d.isAdmin, the rule of the findings export); the page
-// refuses (403) every request it does not approve. Without a server
-// database there is nothing to show, and no route is added.
-func mountCrownJewels(d serverDeps, mux *http.ServeMux) error {
-	if d.db == nil {
-		return nil
-	}
-	if d.isAdmin == nil || d.inventory == nil || d.pveStore == nil {
-		return errors.New("crown jewels pages: admin rule, inventory and PVE store are required")
-	}
+// newCrownJewelsPage builds the crown-jewels page on d.db with the given
+// directory. Only admins pass (d.isAdmin, the rule of the findings export);
+// the page refuses (403) every request it does not approve.
+func newCrownJewelsPage(d serverDeps, dir jewelspage.Directory) (*jewelspage.Handler, error) {
 	st, err := crownJewelStore(d)
 	if err != nil {
-		return fmt.Errorf("crown jewels pages: %w", err)
+		return nil, err
 	}
 	h, err := jewelspage.New(jewelspage.Options{
 		Store:        st,
-		Directory:    jewelDirectory{hosts: d.inventory, pve: d.pveStore},
+		Directory:    dir,
 		Authorize:    func(r *http.Request) bool { return d.isAdmin(r.Context()) },
 		User:         jewelUser,
 		PublicOrigin: d.cfg.PublicOrigin,
@@ -154,7 +156,31 @@ func mountCrownJewels(d serverDeps, mux *http.ServeMux) error {
 		Log:          d.log,
 	})
 	if err != nil {
-		return fmt.Errorf("crown jewels pages: %w", err)
+		return nil, fmt.Errorf("crown jewels pages: %w", err)
+	}
+	return h, nil
+}
+
+// mountCrownJewels adds the crown-jewels routes to the pages mux. The page
+// needs the admin rule, the inventory and the PVE store, because its
+// subjects come from them. A server without a database, or without one of
+// these, mounts no route: the page is absent (404 behind the session check),
+// which is the closed choice, and the server still starts. The production
+// wiring (main.go) always gives all of them, so the page is mounted there;
+// a missing dependency is logged.
+func mountCrownJewels(d serverDeps, mux *http.ServeMux) error {
+	if d.db == nil {
+		return nil
+	}
+	if d.isAdmin == nil || d.inventory == nil || d.pveStore == nil {
+		if d.log != nil {
+			d.log.Warn("crown jewels page not mounted: admin rule, inventory or PVE store missing")
+		}
+		return nil
+	}
+	h, err := newCrownJewelsPage(d, jewelDirectory{hosts: d.inventory, pve: d.pveStore})
+	if err != nil {
+		return err
 	}
 	h.Register(mux)
 	return nil
