@@ -121,9 +121,12 @@ type ndEnv struct {
 	auth   *permit.Authority
 	client pb.ExecutorServiceClient
 	conn   *grpc.ClientConn
-	logs   *syncBuffer
-	clock  *e21Clock
-	seq    int
+	// admin is a client whose UID holds only the admin role, the only
+	// proposer of device read leases (A1-5).
+	admin pb.ExecutorServiceClient
+	logs  *syncBuffer
+	clock *e21Clock
+	seq   int
 }
 
 func newNDEnv(t *testing.T, roles ...peercred.Role) *ndEnv {
@@ -175,6 +178,23 @@ func newNDEnv(t *testing.T, roles ...peercred.Role) *ndEnv {
 	}
 	svc.SetVaultParams(ndVaultParams)
 
+	t.Cleanup(func() { _ = db.Close() })
+	conn := ndServe(t, svc, log, roles)
+	// The local admin's own socket: device read leases are proposed only by
+	// the admin peer (A1-5), so the tests propose them here, through the
+	// real role table and peer check.
+	adminConn := ndServe(t, svc, log, []peercred.Role{peercred.RoleAdmin})
+
+	e := &ndEnv{t: t, db: db, svc: svc, auth: authority, client: pb.NewExecutorServiceClient(conn), conn: conn,
+		admin: pb.NewExecutorServiceClient(adminConn), logs: logs, clock: clock}
+	e.adminSetup()
+	return e
+}
+
+// ndServe serves svc on a fresh Unix socket with the real role table, where
+// the test's UID holds exactly roles, and returns a client connection.
+func ndServe(t *testing.T, svc *executor.Service, log *slog.Logger, roles []peercred.Role) *grpc.ClientConn {
+	t.Helper()
 	sockDir := t.TempDir()
 	if err := os.Chmod(sockDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -187,16 +207,13 @@ func newNDEnv(t *testing.T, roles ...peercred.Role) *ndEnv {
 	policy := peercred.NewPolicy(map[uint32][]peercred.Role{uint32(os.Getuid()): roles}, executor.MethodRoles())
 	srv := executor.NewGRPCServer(svc, policy, log)
 	go func() { _ = srv.Serve(lis) }()
-	t.Cleanup(func() { srv.Stop(); _ = db.Close() })
+	t.Cleanup(srv.Stop)
 	conn, err := grpc.NewClient("unix://"+socket, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.Close() })
-
-	e := &ndEnv{t: t, db: db, svc: svc, auth: authority, client: pb.NewExecutorServiceClient(conn), conn: conn, logs: logs, clock: clock}
-	e.adminSetup()
-	return e
+	return conn
 }
 
 func (e *ndEnv) ctx() context.Context {
@@ -290,7 +307,7 @@ func (e *ndEnv) leaseDoc(lifetime time.Duration, budget, intervalS int64, target
 	e.seq++
 	now := e.clock.now()
 	return permit.ReadGrantDoc{
-		Grant: permit.ReadGrantFormat, ID: fmt.Sprintf("4d210000-0000-4000-8000-%012d", e.seq), Issuer: "server",
+		Grant: permit.ReadGrantFormat, ID: fmt.Sprintf("4d210000-0000-4000-8000-%012d", e.seq), Issuer: "admin",
 		CreatedUnix: now.Unix(), ExpiryUnix: now.Add(lifetime).Unix(), Trigger: permit.TriggerScheduled,
 		Actions: []permit.ReadGrantAction{}, MinIntervalS: intervalS, RunBudget: budget,
 		RateProfile: schedgrant.NetDeviceReadProfile, NetDeviceTargets: targets,
@@ -306,11 +323,11 @@ func ndMarshal(t *testing.T, v any) []byte {
 	return raw
 }
 
-// approve proposes doc and approves it as the local admin on the
-// executor CLI. It returns the grant id.
+// approve proposes doc over the admin socket and approves it as the local
+// admin on the executor CLI. It returns the grant id.
 func (e *ndEnv) approve(doc permit.ReadGrantDoc) string {
 	e.t.Helper()
-	p, err := e.svc.ProposeReadGrant(e.ctx(), &pb.ProposeReadGrantRequest{GrantJson: ndMarshal(e.t, doc)})
+	p, err := e.admin.ProposeReadGrant(e.ctx(), &pb.ProposeReadGrantRequest{GrantJson: ndMarshal(e.t, doc)})
 	if err != nil {
 		e.t.Fatalf("propose lease: %v", err)
 	}
@@ -321,8 +338,10 @@ func (e *ndEnv) approve(doc permit.ReadGrantDoc) string {
 // approveRefused is approve for a lease the executor must refuse at
 // proposal (A1-0): a device that is unknown, removed, blocked, without a
 // read credential, or at another pin, trust generation or credential
-// version than the registry. It asserts that ProposeReadGrant refuses it
-// with InvalidArgument, names no device data and leaves nothing pending,
+// version than the registry. It asserts that ProposeReadGrant, called by
+// the admin (the only proposer of device leases, A1-5, so the refusal comes
+// from the registry check and not from the role), refuses it with
+// InvalidArgument, names no device data and leaves nothing pending,
 // then puts the lease in place past the RPC (permit authority propose and
 // CLI approve, as the internal/executor tests do), so the read-time and
 // lifecycle checks stay covered as defense in depth. It returns the grant
@@ -334,7 +353,7 @@ func (e *ndEnv) approveRefused(doc permit.ReadGrantDoc) string {
 	if err != nil {
 		e.t.Fatalf("lease %s: parser refuses it, want only the registry to: %v", doc.ID, err)
 	}
-	_, err = e.svc.ProposeReadGrant(e.ctx(), &pb.ProposeReadGrantRequest{GrantJson: raw})
+	_, err = e.admin.ProposeReadGrant(e.ctx(), &pb.ProposeReadGrantRequest{GrantJson: raw})
 	if status.Code(err) != codes.InvalidArgument {
 		e.t.Fatalf("lease %s: want InvalidArgument at proposal, got %v", doc.ID, err)
 	}
@@ -1447,15 +1466,17 @@ func TestNetDevCompromisedServerCannotReachDevicesOrCredentials(t *testing.T) {
 	e.requireNoSecret()
 }
 
-// TestNetDevCompromisedServerCannotWidenOrExtendLeases (ND-21 1): the
-// server may propose device read leases, but a proposal is no authority:
-// without the admin's approval nothing is read, a forged approval is
-// refused, and the executor refuses at proposal every lease that would
+// TestNetDevCompromisedServerCannotWidenOrExtendLeases (ND-21 1, A1-5):
+// the server may not propose device read leases at all (PermissionDenied,
+// for registered and unknown devices alike); only the local admin does.
+// A proposal is no authority: without the admin's approval nothing is
+// read, a forged approval by the server is refused, and the executor
+// refuses at proposal, from either role, every lease that would
 // exceed the profile (lifetime, budget, interval), name a read outside the
 // closed set or carry anything else, such as a dial endpoint, a command
 // or an XPath. An approved lease grants exactly its reads within its
-// interval until its expiry; a longer lease the server proposes does not
-// extend it, and leases that name an unregistered device or a stale pin
+// interval until its expiry; a longer lease, refused from the server and
+// left unapproved from the admin, does not extend it, and leases that name an unregistered device or a stale pin
 // authorize nothing and add no dial target. Revocation, which the server
 // may do, only narrows.
 func TestNetDevCompromisedServerCannotWidenOrExtendLeases(t *testing.T) {
@@ -1465,11 +1486,32 @@ func TestNetDevCompromisedServerCannotWidenOrExtendLeases(t *testing.T) {
 	cbsVersion := pb.NetDeviceRead_NET_DEVICE_READ_CBS_VERSION
 	n := e.authorizedReads()
 
-	// A proposal alone authorizes nothing; a forged approval is refused.
-	p, err := e.client.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: ndMarshal(t,
+	// The server cannot propose a device read lease at all (A1-5): the
+	// target list of a device lease never comes from the web server. The
+	// refusal names no device data and leaves nothing pending.
+	serverDoc := e.leaseDoc(permit.DefaultReadGrantLifetime, 24, 900, e.target(schedgrant.NetDeviceReadCBSVersion))
+	_, err := e.client.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: ndMarshal(t, serverDoc)})
+	wantCode(t, err, codes.PermissionDenied, "")
+	if msg := status.Convert(err).Message(); strings.Contains(msg, ndDevice) || strings.Contains(msg, ndPin) || strings.Contains(msg, ndEndpoint) {
+		t.Fatalf("server proposal refusal %q names device data", msg)
+	}
+	// Nor for a device the registry does not hold: the same answer, so the
+	// server gets no registry oracle.
+	ghost := e.target(schedgrant.NetDeviceReadCBSVersion)
+	ghost.DeviceID = ndRogueDevice
+	_, err = e.client.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: ndMarshal(t,
+		e.leaseDoc(permit.DefaultReadGrantLifetime, 24, 900, ghost))})
+	wantCode(t, err, codes.PermissionDenied, "")
+	if pending, err := e.svc.ListPendingReadGrants(ctx, &pb.ListPendingReadGrantsRequest{}); err != nil || len(pending.GetGrants()) != 0 {
+		t.Fatalf("server proposals left pending leases: %v, %v", pending, err)
+	}
+
+	// An admin proposal alone authorizes nothing; a forged approval by the
+	// server is refused.
+	p, err := e.admin.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: ndMarshal(t,
 		e.leaseDoc(permit.DefaultReadGrantLifetime, 24, 900, e.target(schedgrant.NetDeviceReadCBSVersion)))})
 	if err != nil {
-		t.Fatalf("server propose: %v", err)
+		t.Fatalf("admin propose: %v", err)
 	}
 	e.wantRefused("read on a proposed, unapproved lease", n, e.read(ndDevice, cbsVersion), codes.PermissionDenied)
 	_, err = e.client.CommitReadGrant(ctx, &pb.CommitReadGrantRequest{GrantDigest: p.GetGrantDigest(), AssertionJson: []byte(`{"id":"forged","type":"public-key"}`)})
@@ -1533,10 +1575,18 @@ func TestNetDevCompromisedServerCannotWidenOrExtendLeases(t *testing.T) {
 		{"xpath in the lease", withMember(valid(), false, "xpath", "/config")},
 		{"credential reference in the target", withMember(valid(), true, "credential_ref", "netdev-core-sw-rc")},
 	}
+	// The document check runs first, so the server and the admin alike are
+	// refused with InvalidArgument; the admin role widens nothing.
+	proposers := []struct {
+		name   string
+		client pb.ExecutorServiceClient
+	}{{"server", e.client}, {"admin", e.admin}}
 	for _, tc := range widen {
-		_, err := e.client.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: tc.raw})
-		if status.Code(err) != codes.InvalidArgument {
-			t.Errorf("%s: want InvalidArgument at proposal, got %v", tc.name, err)
+		for _, who := range proposers {
+			_, err := who.client.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: tc.raw})
+			if status.Code(err) != codes.InvalidArgument {
+				t.Errorf("%s by the %s: want InvalidArgument at proposal, got %v", tc.name, who.name, err)
+			}
 		}
 	}
 
@@ -1620,9 +1670,11 @@ func TestNetDevCompromisedServerCannotWidenOrExtendLeases(t *testing.T) {
 		d := valid()
 		tc.doc(&d)
 		raw := ndMarshal(t, d)
-		_, err := e.client.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: raw})
-		if status.Code(err) != codes.InvalidArgument {
-			t.Errorf("%s: want InvalidArgument at proposal, got %v", tc.name, err)
+		for _, who := range proposers {
+			_, err := who.client.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: raw})
+			if status.Code(err) != codes.InvalidArgument {
+				t.Errorf("%s by the %s: want InvalidArgument at proposal, got %v", tc.name, who.name, err)
+			}
 		}
 		if _, _, _, err := permit.ParseReadGrant(raw, e.clock.now()); err == nil || !strings.Contains(err.Error(), tc.reason) {
 			t.Errorf("%s: parser: want a refusal naming %q, got %v", tc.name, tc.reason, err)
@@ -1632,11 +1684,12 @@ func TestNetDevCompromisedServerCannotWidenOrExtendLeases(t *testing.T) {
 	// lease created now with the full 30 days, one with exactly
 	// MaxNetDeviceTargets devices, the smallest budget, the interval floor
 	// itself and the largest credential version and trust generation are
-	// valid proposals (they stay proposals; none is approved). The device
-	// count, credential version and generation bounds name devices or
+	// valid proposals by the admin (they stay proposals; none is approved);
+	// the server's proposal of each is refused for its role (A1-5). The
+	// device count, credential version and generation bounds name devices or
 	// identities the registry does not hold, so for those the lease format
-	// bound is checked at the parser and the proposal is refused by the
-	// registry check (A1-0) instead.
+	// bound is checked at the parser and the admin's proposal is refused by
+	// the registry check (A1-0) instead.
 	for name, c := range map[string]struct {
 		edit     func(*permit.ReadGrantDoc)
 		registry bool
@@ -1651,7 +1704,10 @@ func TestNetDevCompromisedServerCannotWidenOrExtendLeases(t *testing.T) {
 		d := valid()
 		c.edit(&d)
 		raw := ndMarshal(t, d)
-		_, err := e.client.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: raw})
+		if _, err := e.client.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: raw}); status.Code(err) != codes.PermissionDenied {
+			t.Errorf("control %s: server proposal: want PermissionDenied, got %v", name, err)
+		}
+		_, err := e.admin.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: raw})
 		if !c.registry {
 			if err != nil {
 				t.Errorf("control %s: refused at proposal: %v", name, err)
@@ -1679,12 +1735,18 @@ func TestNetDevCompromisedServerCannotWidenOrExtendLeases(t *testing.T) {
 	e.wantAuthorized(n, e.read(ndDevice, cbsVersion))
 	n = e.authorizedReads()
 
-	// The server proposes a 30-day lease with every CBS read; it stays a
-	// proposal. When the approved lease expires, nothing is read.
-	if _, err := e.client.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: ndMarshal(t, e.leaseDoc(permit.ReadGrantMaxLifetime, 24, 900,
-		e.target(schedgrant.NetDeviceReadCBSVersion, schedgrant.NetDeviceReadCBSVLANs, schedgrant.NetDeviceReadCBSInterfaces,
-			schedgrant.NetDeviceReadCBSMACTable, schedgrant.NetDeviceReadCBSLLDP)))}); err != nil {
-		t.Fatalf("server propose of a longer lease: %v", err)
+	// The server's 30-day lease with every CBS read is refused for its
+	// role; the same lease proposed by the admin stays a proposal. When the
+	// approved lease expires, nothing is read.
+	longer := func() []byte {
+		return ndMarshal(t, e.leaseDoc(permit.ReadGrantMaxLifetime, 24, 900,
+			e.target(schedgrant.NetDeviceReadCBSVersion, schedgrant.NetDeviceReadCBSVLANs, schedgrant.NetDeviceReadCBSInterfaces,
+				schedgrant.NetDeviceReadCBSMACTable, schedgrant.NetDeviceReadCBSLLDP)))
+	}
+	_, err = e.client.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: longer()})
+	wantCode(t, err, codes.PermissionDenied, "")
+	if _, err := e.admin.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: longer()}); err != nil {
+		t.Fatalf("admin propose of a longer lease: %v", err)
 	}
 	e.clock.add(time.Hour)
 	e.wantRefused("read after the approved lease expired", n, e.read(ndDevice, cbsVersion), codes.PermissionDenied)
@@ -1814,8 +1876,8 @@ func TestNetDevLeaseAheadOfRegistryAuthorizesNothing(t *testing.T) {
 		t.Fatalf("unblock: %v", err)
 	}
 	requireRevoked("unblock", blockedID)
-	// Registry at version 2; the server proposes, the admin approves a
-	// lease for version 3 again, and only the rotation revokes that one.
+	// Registry at version 2; a lease for version 3 is put in place again
+	// past the RPC (the admin's proposal is refused by the registry check), and only the rotation revokes that one.
 	laterID := e.approveRefused(e.leaseDoc(2*time.Hour, 24, 900, next))
 	e.clock.add(16 * time.Minute)
 	if _, err := e.svc.RotateNetDeviceCredential(ctx, &pb.RotateNetDeviceCredentialRequest{DeviceId: ndDevice, ExpectedCredentialVersion: 2,
@@ -1927,9 +1989,10 @@ func (e *ndEnv) approvedGrant(id string) *pb.ReadGrant {
 	return nil
 }
 
-// TestNetDevServerCannotReproposeApprovedLease (ND-21 1): the server
-// re-proposes the id of an already approved device read lease with wider
-// reads, with a later expiry, or both. Every such proposal is refused, so
+// TestNetDevServerCannotReproposeApprovedLease (ND-21 1, A1-5): the server
+// and the admin re-propose the id of an already approved device read lease
+// with wider reads, with a later expiry, or both. Every such proposal is
+// refused (the server's for its role, the admin's for the reused id), so
 // there is nothing for the admin to approve over the stored lease; the
 // stored lease is byte-for-byte unchanged, its reads stay narrow and it
 // still expires on time. The same wider document under a fresh id is
@@ -1968,9 +2031,15 @@ func TestNetDevServerCannotReproposeApprovedLease(t *testing.T) {
 		if tc.doc.ID != id {
 			t.Fatalf("%s: id %s, want the approved %s", tc.name, tc.doc.ID, id)
 		}
+		// The server is refused for its role (A1-5) ...
 		_, err := e.client.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: ndMarshal(t, tc.doc)})
+		if status.Code(err) != codes.PermissionDenied {
+			t.Errorf("%s by the server: want PermissionDenied, got %v", tc.name, err)
+		}
+		// ... and the admin, who may propose device leases, for the reused id.
+		_, err = e.admin.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: ndMarshal(t, tc.doc)})
 		if status.Code(err) != codes.InvalidArgument || !strings.Contains(status.Convert(err).Message(), "exists") {
-			t.Errorf("%s: want InvalidArgument (grant exists), got %v", tc.name, err)
+			t.Errorf("%s by the admin: want InvalidArgument (grant exists), got %v", tc.name, err)
 		}
 	}
 	pending, err := e.svc.ListPendingReadGrants(ctx, &pb.ListPendingReadGrantsRequest{})
@@ -1982,10 +2051,10 @@ func TestNetDevServerCannotReproposeApprovedLease(t *testing.T) {
 	}
 
 	// Control: the same wide, long document under a fresh id is a valid
-	// proposal (it stays one until the admin approves it).
+	// proposal by the admin (it stays one until the admin approves it).
 	fresh := both
 	fresh.ID = "4d210000-0000-4000-8000-0000000fffff"
-	if _, err := e.client.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: ndMarshal(t, fresh)}); err != nil {
+	if _, err := e.admin.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: ndMarshal(t, fresh)}); err != nil {
 		t.Fatalf("control: wide lease under a fresh id refused at proposal: %v", err)
 	}
 
