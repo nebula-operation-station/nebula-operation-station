@@ -213,6 +213,11 @@ func validateImageRead(r ImageRead) error {
 	return checkText("os name", r.OSName, maxImageOSNameBytes, false)
 }
 
+// ErrDuplicateRead is returned by PutImage when a read of the same execution on
+// the same host is already stored (migration 0054): the replay writes nothing,
+// runs no retention and has no row ID.
+var ErrDuplicateRead = errors.New("vulninventory: image read already stored for this execution")
+
 // ErrDiscardedByRetention is returned by PutImage when the new read is older
 // than the ImageReadsKept newest reads of its host and digest: it was written
 // and deleted by the retention of the same transaction, so it has no row ID.
@@ -222,8 +227,9 @@ var ErrDiscardedByRetention = errors.New("vulninventory: image read discarded by
 // keeps only the ImageReadsKept newest reads of its host and digest (the
 // repository is not part of the key), in one transaction. It returns the new
 // row ID. When retention deletes the new read itself, it returns 0 and
-// ErrDiscardedByRetention; the retention still commits. A rejected read writes
-// nothing and deletes nothing.
+// ErrDiscardedByRetention; the retention still commits. A read of an execution
+// that is stored already on the host returns ErrDuplicateRead and writes and
+// deletes nothing. A rejected read writes nothing and deletes nothing.
 func (s *Store) PutImage(ctx context.Context, r ImageRead) (int64, error) {
 	if err := validateImageRead(r); err != nil {
 		return 0, fmt.Errorf("vulninventory: put image: %w", err)
@@ -243,11 +249,21 @@ func (s *Store) PutImage(ctx context.Context, r ImageRead) (int64, error) {
 	defer func() { _ = tx.Rollback() }()
 	res, err := tx.ExecContext(ctx, `INSERT INTO vuln_image_reads (repository, digest, host_id, execution_id, read_at,
 		complete, reason, os_family, os_name, packages, body)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (host_id, execution_id) DO NOTHING`,
 		r.Repository, r.Digest, r.HostID, r.ExecutionID, r.ReadAt.UTC().Unix(), complete, r.Reason,
 		r.OSFamily, r.OSName, len(r.Packages), body)
 	if err != nil {
 		return 0, fmt.Errorf("vulninventory: put image: insert: %w", err)
+	}
+	// A replay of an execution that is stored already changes no row. It
+	// returns before the retention, so it cannot push out a kept read.
+	inserted, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("vulninventory: put image: rows: %w", err)
+	}
+	if inserted == 0 {
+		return 0, ErrDuplicateRead
 	}
 	id, err := res.LastInsertId()
 	if err != nil {
