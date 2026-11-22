@@ -83,6 +83,12 @@ to open questions are added by Claude and are not part of the decision:
    that shows the read age). The ticket that sets this default when a read
    lease is proposed is not named in this clone.
 
+### iv02: inventory store and pruning (Claude)
+
+Ticket iv02 tracks the package inventory store in `internal/vulninventory` and
+its pruning. It implements E1 above (2 package reads per host, older reads are
+deleted). It goes ahead with the decision of 2026-11-20 (see the list above).
+
 ### Note (Claude)
 
 Not part of the decision; Claude's notes and readings, for the maintainer to
