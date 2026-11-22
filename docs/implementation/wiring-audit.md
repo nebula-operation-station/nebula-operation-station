@@ -473,3 +473,7 @@ not mounted in `nebula-server`. Guest power and snapshots are not a gap any more
 | Ops tab not set in nebula-server | `internal/web/ui/ui.go:243` (option) and `:332` (field); `cmd/nebula-server` has no `AssistantOps` reference; projector sources empty: `cmd/nebula-server/ops.go:237-238` |
 | One-step enrollment offers are local only | `cmd/nebula-executor/main.go:81-82` (load and comment), `:269` (`SetEnrollOffers`) |
 | Decision paper uf13 not in the tree; uf14 on `origin/main` only; uf04 is in the tree (`docs/implementation/vuln-decisions-assertion.md`, "Ticket: uf04") | grep and `git log --grep=uf1`, 2026-11-21 |
+
+## WG-01: wiring guard (internal/wiringguard) (Claude)
+
+The wiring guard checks that each `internal/` package is reachable from `cmd/` or has an entry in `internal/wiringguard/allowlist.txt`. WG-01 tracks its allowlist, its import scan and its fixtures; its test runs in `make check`.
