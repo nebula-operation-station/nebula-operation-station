@@ -103,7 +103,38 @@ func TestCycleSpoolsOneMetadataRecordPerListedDevice(t *testing.T) {
 	}
 }
 
-func TestUnchangedMetadataIsNotRespooledInLaterCycles(t *testing.T) {
+func TestMetadataIsWrittenOncePerDevicePerCycle(t *testing.T) {
+	// Unchanged metadata is still written in every cycle: the record proves
+	// the device is still listed. Cycles are MinReadInterval+1 apart, which
+	// is above metadataMinInterval (so the rate bound does not apply) and
+	// makes the reads due again, so the test also covers cycles with reads.
+	clock := newClock()
+	c := newFakeClient(clock, labelled("core-sw-01", "Core"), labelled("edge-fw-01", "Edge"))
+	s := &fakeSpool{}
+	p := newTestPoller(c, s, clock, constRand(0.5))
+	for cyc := 1; cyc <= 4; cyc++ {
+		if cyc > 1 {
+			clock.Advance(MinReadInterval + 1)
+		}
+		before := s.count()
+		rep := cycle(t, p)
+		if rep.MetadataWritten != 2 || rep.MetadataFailed != 0 {
+			t.Fatalf("cycle %d: metadata report = written %d, failed %d; want 2, 0", cyc, rep.MetadataWritten, rep.MetadataFailed)
+		}
+		seen := map[string]int{}
+		for _, w := range metaSince(s, before) {
+			seen[w.device]++
+		}
+		if seen["core-sw-01"] != 1 || seen["edge-fw-01"] != 1 || len(seen) != 2 {
+			t.Fatalf("cycle %d: metadata records per device = %v, want exactly one for each listed device", cyc, seen)
+		}
+		if rep.Dispatched == 0 {
+			t.Fatalf("cycle %d: reads were not dispatched; the test checks nothing", cyc)
+		}
+	}
+}
+
+func TestMetadataWritesAreRateBoundedByMinInterval(t *testing.T) {
 	clock := newClock()
 	c := newFakeClient(clock, labelled("core-sw-01", "Core"))
 	s := &fakeSpool{}
@@ -111,19 +142,32 @@ func TestUnchangedMetadataIsNotRespooledInLaterCycles(t *testing.T) {
 	if rep := cycle(t, p); rep.MetadataWritten != 1 {
 		t.Fatalf("first cycle metadata written = %d, want 1", rep.MetadataWritten)
 	}
-	for cyc := 2; cyc <= 4; cyc++ {
-		clock.Advance(MinReadInterval + 1)
+	// Cycles younger than metadataMinInterval reuse the last write time and
+	// write no record for the device.
+	const step = 10 * time.Second
+	for i := 1; i < int(metadataMinInterval/step); i++ {
+		clock.Advance(step)
 		before := s.count()
 		rep := cycle(t, p)
 		if rep.MetadataWritten != 0 || rep.MetadataFailed != 0 {
-			t.Fatalf("cycle %d: metadata report = written %d, failed %d; want 0, 0", cyc, rep.MetadataWritten, rep.MetadataFailed)
+			t.Fatalf("%v after the last write: metadata report = written %d, failed %d; want 0, 0", time.Duration(i)*step, rep.MetadataWritten, rep.MetadataFailed)
 		}
 		if n := len(metaSince(s, before)); n != 0 {
-			t.Fatalf("cycle %d: %d metadata records for unchanged metadata, want 0", cyc, n)
+			t.Fatalf("%v after the last write: %d metadata records, want 0", time.Duration(i)*step, n)
 		}
-		if rep.Dispatched == 0 {
-			t.Fatalf("cycle %d: reads were not dispatched; the test checks nothing", cyc)
-		}
+	}
+	// Exactly metadataMinInterval after the last write the record is written
+	// again, and the next cycle is bounded once more.
+	clock.Advance(step)
+	if rep := cycle(t, p); rep.MetadataWritten != 1 {
+		t.Fatalf("cycle at metadataMinInterval: metadata written = %d, want 1", rep.MetadataWritten)
+	}
+	clock.Advance(step)
+	if rep := cycle(t, p); rep.MetadataWritten != 0 {
+		t.Fatalf("cycle right after the new write: metadata written = %d, want 0", rep.MetadataWritten)
+	}
+	if n := len(metadataWrites(s)); n != 2 {
+		t.Fatalf("metadata records = %d, want 2 (one per metadataMinInterval)", n)
 	}
 }
 
@@ -267,11 +311,13 @@ func TestDeviceNotListedGetsNoMetadataRecord(t *testing.T) {
 	clock.Advance(MinReadInterval + 1)
 	before := s.count()
 	rep = cycle(t, p)
-	if rep.MetadataWritten != 0 {
-		t.Fatalf("cycle with tombstoned device wrote %d metadata records, want 0", rep.MetadataWritten)
+	if rep.MetadataWritten != 1 {
+		t.Fatalf("cycle with tombstoned device wrote %d metadata records, want 1 (core only)", rep.MetadataWritten)
 	}
 	for _, w := range metaSince(s, before) {
-		t.Fatalf("metadata record for unlisted device %s", w.device)
+		if w.device == "tomb-sw-01" {
+			t.Fatalf("metadata record for unlisted device %s", w.device)
+		}
 	}
 
 	// It is listed again with the same content: its record is written again.
@@ -279,8 +325,8 @@ func TestDeviceNotListedGetsNoMetadataRecord(t *testing.T) {
 	clock.Advance(MinReadInterval + 1)
 	before = s.count()
 	rep = cycle(t, p)
-	if rep.MetadataWritten != 1 || !hasMetadataIn(metaSince(s, before), "tomb-sw-01") {
-		t.Fatalf("re-listed device: written %d, want 1 record for tomb-sw-01", rep.MetadataWritten)
+	if rep.MetadataWritten != 2 || !hasMetadataIn(metaSince(s, before), "tomb-sw-01") {
+		t.Fatalf("re-listed device: written %d, want 2 (core and tomb-sw-01)", rep.MetadataWritten)
 	}
 }
 
@@ -389,17 +435,38 @@ func TestRefusedMetadataWritesAreLoggedAggregated(t *testing.T) {
 	}
 }
 
+// stopOnLog is a slog.Handler that cancels stop once a record with msg has
+// been handled, so Run returns as soon as the summary line is logged, not
+// after a wall-clock delay.
+type stopOnLog struct {
+	slog.Handler
+	msg  string
+	stop context.CancelFunc
+}
+
+func (h stopOnLog) Handle(ctx context.Context, r slog.Record) error {
+	err := h.Handler.Handle(ctx, r)
+	if r.Message == h.msg {
+		h.stop()
+	}
+	return err
+}
+
 func TestCycleSummaryReportsMetadataCounts(t *testing.T) {
 	clock := newClock()
 	c := newFakeClient(clock, labelled("core-sw-01", "Core"))
 	s := &fakeSpool{}
 	var buf bytes.Buffer
 	p := newTestPoller(c, s, clock, constRand(0.5))
-	p.Log = slog.New(slog.NewJSONHandler(&buf, nil))
-	p.Interval = time.Nanosecond
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if err := p.Run(ctx); err != nil {
+	p.Log = slog.New(stopOnLog{Handler: slog.NewJSONHandler(&buf, nil), msg: "netdev cycle", stop: cancel})
+	p.Interval = time.Nanosecond
+	// The timeout is a safety net only: the run ends when the summary line
+	// is logged, which happens on the first cycle.
+	safety, stopSafety := context.WithTimeout(ctx, time.Minute)
+	defer stopSafety()
+	if err := p.Run(safety); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(buf.String(), `"metadata_written":1`) || !strings.Contains(buf.String(), `"metadata_failed":0`) {

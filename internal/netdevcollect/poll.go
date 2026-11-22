@@ -4,7 +4,6 @@ package netdevcollect
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -140,9 +139,10 @@ type CycleReport struct {
 	// Dispatched is the number of reads handed to device workers.
 	Dispatched int
 	// MetadataWritten counts device metadata records spooled in this cycle.
-	// A record is written only when its device's metadata changed since the
-	// last record of that device, or when the device is listed again after
-	// it was not eligible.
+	// The rule: every listed device that is not blocked and has a valid trust
+	// generation gets one record per cycle, unless its last record was
+	// written less than metadataMinInterval ago. A tombstoned (unlisted)
+	// device gets none.
 	MetadataWritten int
 	// MetadataFailed counts device metadata records the spool refused. A
 	// failed record does not stop the reads of the cycle, and it is tried
@@ -175,13 +175,13 @@ type Poller struct {
 	// DefaultMaxConcurrentDevices).
 	MaxConcurrentDevices int
 
-	// metaMu guards the metadata state below. metaDigest maps each device
-	// to the digest of the last metadata record the spool accepted for it;
-	// a device without an entry gets a record on its next eligible cycle.
-	// metaPending counts refused metadata writes not yet logged, and
-	// metaWarnAt is when the last refusal warning was logged.
+	// metaMu guards the metadata state below. metaWritten maps each device
+	// to the time the spool last accepted a metadata record for it; a device
+	// without an entry gets a record on its next eligible cycle. metaPending
+	// counts refused metadata writes not yet logged, and metaWarnAt is when
+	// the last refusal warning was logged.
 	metaMu      sync.Mutex
-	metaDigest  map[string][sha256.Size]byte
+	metaWritten map[string]time.Time
 	metaPending int
 	metaWarnAt  time.Time
 
@@ -302,9 +302,10 @@ func (p *Poller) Cycle(ctx context.Context) (CycleReport, error) {
 	now := p.Now()
 	rep := CycleReport{Devices: len(infos)}
 
-	// Metadata first: one record per listed device that is not blocked,
-	// before any read of this cycle is dispatched (ADR 0010 D1, nx07).
-	p.spoolMetadata(ctx, infos, &rep)
+	// Metadata first: one record per listed device that is not blocked and
+	// not tombstoned, at most one per metadataMinInterval, before any read of
+	// this cycle is dispatched (ADR 0010 D1, nx07).
+	p.spoolMetadata(ctx, infos, now, &rep)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -357,19 +358,28 @@ func metadataEligible(info *pb.NetDeviceInfo) bool {
 		familyReads[info.GetFamily()] != nil
 }
 
+// metadataMinInterval is the least time between two metadata records of one
+// device. A cycle that starts sooner than this after the device's last
+// accepted record writes no record for the device. The importer keeps only
+// the newest record per device (nx07f), so the bound caps the write load
+// without losing the device's latest state. With the default Interval
+// (DefaultInterval, one minute) every cycle writes.
+const metadataMinInterval = time.Minute
+
 // spoolMetadata writes one device metadata record for each listed device
-// that metadataEligible accepts and whose metadata differs from the last
-// record the spool accepted for it, using the first listing of a duplicate
-// id. A device that is not eligible, or not listed, loses its digest, so
-// it gets a fresh record when it becomes eligible again. A refused write
-// keeps the old digest, so it is tried again in the next cycle. A refusal
-// is counted in rep and logged as an aggregate at most once per
-// MinReadInterval; it never stops the cycle or touches a read schedule.
-func (p *Poller) spoolMetadata(ctx context.Context, infos []*pb.NetDeviceInfo, rep *CycleReport) {
+// that metadataEligible accepts, using the first listing of a duplicate id,
+// unless the spool accepted a record for that device less than
+// metadataMinInterval before now (see metadataMinInterval). A device that is
+// not eligible, or not listed, loses its write time, so it gets a fresh
+// record when it becomes eligible again. A refused write keeps the old write
+// time, so it is tried again in the next cycle. A refusal is counted in rep
+// and logged as an aggregate at most once per MinReadInterval; it never stops
+// the cycle or touches a read schedule.
+func (p *Poller) spoolMetadata(ctx context.Context, infos []*pb.NetDeviceInfo, now time.Time, rep *CycleReport) {
 	p.metaMu.Lock()
 	defer p.metaMu.Unlock()
-	if p.metaDigest == nil {
-		p.metaDigest = map[string][sha256.Size]byte{}
+	if p.metaWritten == nil {
+		p.metaWritten = map[string]time.Time{}
 	}
 	seen := make(map[string]bool, len(infos))
 	eligible := make(map[string]bool, len(infos))
@@ -385,6 +395,13 @@ func (p *Poller) spoolMetadata(ctx context.Context, infos []*pb.NetDeviceInfo, r
 		if !metadataEligible(info) {
 			continue
 		}
+		eligible[id] = true
+		if last, ok := p.metaWritten[id]; ok {
+			// A clock that went back is not a reason to hold the record back.
+			if d := now.Sub(last); d >= 0 && d < metadataMinInterval {
+				continue
+			}
+		}
 		payload, err := json.Marshal(DeviceMetadata{
 			DeviceID:        id,
 			Family:          netdevcontract.Family(info.GetFamily()),
@@ -395,29 +412,23 @@ func (p *Poller) spoolMetadata(ctx context.Context, infos []*pb.NetDeviceInfo, r
 			rep.MetadataFailed++
 			continue
 		}
-		eligible[id] = true
-		sum := sha256.Sum256(payload)
-		if prev, ok := p.metaDigest[id]; ok && prev == sum {
-			continue
-		}
 		if _, err := p.Spool.Write(ctx, id, ReadDeviceMetadata, info.GetTrustGeneration(), false, payload); err != nil {
 			rep.MetadataFailed++
 			continue
 		}
-		p.metaDigest[id] = sum
+		p.metaWritten[id] = now
 		rep.MetadataWritten++
 	}
 	if ctx.Err() != nil {
 		return
 	}
-	for id := range p.metaDigest {
+	for id := range p.metaWritten {
 		if !eligible[id] {
-			delete(p.metaDigest, id)
+			delete(p.metaWritten, id)
 		}
 	}
 	p.metaPending += rep.MetadataFailed
 	if p.metaPending > 0 {
-		now := p.Now()
 		if p.metaWarnAt.IsZero() || now.Sub(p.metaWarnAt) >= MinReadInterval {
 			p.log().Warn("netdev metadata refused", "failed", p.metaPending, "code", "spool")
 			p.metaPending = 0
