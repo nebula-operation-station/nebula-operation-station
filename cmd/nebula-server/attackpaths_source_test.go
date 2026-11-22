@@ -6,17 +6,25 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"io"
 	"log/slog"
+	"net/http"
 	"net/netip"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/attackpath/jewels"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/attackpath/sources"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/auditlog"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/flowagg"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/trafficstore"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
 )
 
 // apTestRetention is the traffic retention of the attack-path tests.
@@ -40,11 +48,56 @@ type apSourceEnv struct {
 	jewl *jewels.Store
 }
 
+// apInventory serves one vulnerability inventory snapshot with the hosts
+// web01 and app02 (the findings of app02 must be accepted).
+type apInventory struct{ at time.Time }
+
+func (i apInventory) VulnSnapshot(_ context.Context, id string) (api.VulnSnapshot, error) {
+	if id != "" && id != "snap-1" {
+		return api.VulnSnapshot{}, api.ErrVulnSnapshotGone
+	}
+	var subjects []api.VulnSubject
+	for _, h := range []string{"web01", "app02"} {
+		subjects = append(subjects, api.VulnSubject{Kind: vulnfinding.SubjectHost, Ref: vulnfinding.SubjectRef{ID: h},
+			Ecosystem: "debian:bookworm", Complete: true,
+			Components: []api.VulnComponent{{Source: "openssl", SourceVersion: "3.0.15-1~deb12u1",
+				Binaries: []api.VulnBinary{{Name: "openssl", Version: "3.0.15-1~deb12u1", Arch: "amd64"}}}}})
+	}
+	return api.VulnSnapshot{ID: "snap-1", Generation: 1, TakenAt: i.at, Subjects: subjects}, nil
+}
+
+// newAPVulnEnv is newVTEnv with the two-host inventory of apInventory.
+func newAPVulnEnv(t *testing.T) *vtEnv {
+	t.Helper()
+	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	clk := &vtClock{t: time.Now().UTC().Truncate(time.Second)}
+	sink := newVTSink()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc, err := newVulnService(db, sink, log, clk.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := serverconfig.APIToken{Name: serverconfig.DefaultVulnTokenName, SHA256: api.HashToken(vtToken),
+		Scopes:          []string{serverconfig.ScopeVulnInventoryRead, serverconfig.ScopeVulnFindingsWrite},
+		SourceAddresses: []string{"192.0.2.10"}}
+	vh, err := newVulnAPI(serverconfig.APIConfig{Enabled: true, Tokens: []serverconfig.APIToken{tok}}, svc,
+		apInventory{at: clk.Now().Add(-time.Minute)}, vtAgentCfg{}, log)
+	if err != nil || vh == nil {
+		t.Fatalf("newVulnAPI = %v, %v", vh, err)
+	}
+	readOnly := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { http.Error(w, "read-only api", http.StatusTeapot) })
+	return &vtEnv{db: db, svc: svc, sink: sink, clk: clk, api: api.Mount(readOnly, vh), audit: auditlog.New(db, false)}
+}
+
 // newAPSourceEnv builds the environment; the crown jewel and the finding
 // are added by the caller (markWebJewel, submitAppFinding).
 func newAPSourceEnv(t *testing.T) *apSourceEnv {
 	t.Helper()
-	vt := newVTEnv(t)
+	vt := newAPVulnEnv(t)
 	db := vt.db
 	ctx := context.Background()
 	inv := inventory.New(db)
@@ -100,17 +153,24 @@ func (e *apSourceEnv) markWebJewel(t *testing.T) {
 	}
 }
 
-// submitAppFinding stores a KEV-listed, network-reachable finding on app02.
+// submitAppFinding stores a KEV-listed, network-reachable finding on app02
+// and a network-reachable one on web01: a step reaches a node only over a
+// usable finding on it (ADR 0011 D10), so the path needs one on the jewel.
 func (e *apSourceEnv) submitAppFinding(t *testing.T) {
 	t.Helper()
-	r := vtRecord("CVE-2026-7001", true)
-	r["subject_ref"] = map[string]any{"id": "app02"}
-	r["scores"] = map[string]any{
-		"kev": map[string]any{"date_added": "2026-11-01"},
-		"cvss": map[string]any{"version": "3.1", "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
-			"base_score": 9.8, "source": "nvd"},
+	cvss := map[string]any{"version": "3.1", "vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
+		"base_score": 9.8, "source": "nvd"}
+	app := vtRecord("CVE-2026-7001", true)
+	app["subject_ref"] = map[string]any{"id": "app02"}
+	app["scores"] = map[string]any{"kev": map[string]any{"date_added": "2026-11-01"}, "cvss": cvss}
+	web := vtRecord("CVE-2026-7002", false)
+	web["subject_ref"] = map[string]any{"id": "web01"}
+	web["scores"] = map[string]any{"cvss": cvss}
+	runID := e.vt.startAndSubmit(t, app, web)
+	// Findings reach the store with the run's completion.
+	if _, err := e.vt.svc.store.Complete(context.Background(), runID); err != nil {
+		t.Fatalf("complete run: %v", err)
 	}
-	e.vt.startAndSubmit(t, r)
 }
 
 // failingPlacements is a placement reader whose store cannot be read.
@@ -220,10 +280,14 @@ func TestAttackPathSourceFindingsOfHostsOnly(t *testing.T) {
 	if snap.Result == nil {
 		t.Fatal("no result")
 	}
+	want := map[string]string{"host:app02": "CVE-2026-7001", "host:web01": "CVE-2026-7002"}
 	for ref, fi := range snap.Findings {
-		if ref.Node != "host:app02" || fi.VulnID != "CVE-2026-7001" {
-			t.Errorf("finding %v = %+v, want CVE-2026-7001 on host:app02", ref, fi)
+		if want[ref.Node] != fi.VulnID {
+			t.Errorf("finding %v = %+v, want %s on its host", ref, fi, want[ref.Node])
 		}
+	}
+	if len(snap.Findings) == 0 {
+		t.Error("no finding described for the paths")
 	}
 	if snap.Result.UnattachedFindings != 0 {
 		t.Errorf("unattached findings = %d, want 0", snap.Result.UnattachedFindings)
