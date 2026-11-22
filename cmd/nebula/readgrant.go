@@ -160,8 +160,11 @@ func readGrantApprove(ctx context.Context, c pb.ExecutorServiceClient, digest st
 
 // printReadGrant shows the complete grant as the executor holds it: every
 // field of the decoded document (every host with its credential version,
-// every action, interval, budget, expiry) and then the complete canonical
-// document itself, untruncated. All strings go through displaySafe.
+// every action, interval, budget, expiry, every provider remote, every
+// network device with its trust pin, credential version and reads, and every
+// private registry with its config, credential, repositories and methods, in
+// document order) and then the complete canonical document itself,
+// untruncated. All strings go through displaySafe.
 func printReadGrant(out io.Writer, p *pb.PendingReadGrant, doc permit.ReadGrantDoc) {
 	s := func(v string) string { return displaySafe([]byte(v), permit.MaxReadGrantDocSize) }
 	ts := func(u int64) string { return time.Unix(u, 0).Format(time.RFC3339) }
@@ -220,8 +223,37 @@ func printReadGrant(out io.Writer, p *pb.PendingReadGrant, doc permit.ReadGrantD
 		}
 	}
 
+	if len(doc.NetDeviceTargets) > 0 {
+		fmt.Fprintf(out, "  network devices (%d):\n", len(doc.NetDeviceTargets))
+		for _, nd := range doc.NetDeviceTargets {
+			fmt.Fprintf(out, "    %s  trust pin %s generation %d  credential version %d  reads (%d): %s\n",
+				s(nd.DeviceID), s(nd.TrustPin), nd.TrustGeneration, nd.CredentialVersion,
+				len(nd.Reads), joinSafe(s, nd.Reads))
+		}
+	}
+
+	if len(doc.RegistryTargets) > 0 {
+		fmt.Fprintf(out, "  registries (%d):\n", len(doc.RegistryTargets))
+		for _, rt := range doc.RegistryTargets {
+			fmt.Fprintf(out, "    %s  config version %d sha256:%s  credential %s version %d\n",
+				s(rt.RegistryID), rt.ConfigVersion, s(rt.ConfigDigest), s(rt.CredentialID), rt.CredentialVersion)
+			fmt.Fprintf(out, "      repositories (%d): %s\n", len(rt.Repositories), joinSafe(s, rt.Repositories))
+			fmt.Fprintf(out, "      methods (%d): %s\n", len(rt.Methods), joinSafe(s, rt.Methods))
+		}
+	}
+
 	fmt.Fprintln(out, "  canonical grant (complete):")
 	fmt.Fprintf(out, "    %s\n", displaySafe(p.GetCanonicalGrant(), permit.MaxReadGrantDocSize))
+}
+
+// joinSafe escapes each element on its own and joins them with ", ", so an
+// element cannot fake a separator or a new line.
+func joinSafe(s func(string) string, vs []string) string {
+	out := make([]string, 0, len(vs))
+	for _, v := range vs {
+		out = append(out, s(v))
+	}
+	return strings.Join(out, ", ")
 }
 
 // decodeReadGrantDoc decodes the executor's canonical grant for display. It

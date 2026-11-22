@@ -71,7 +71,9 @@ func validKey(k flowagg.FlowKey) error {
 	case k.Server != flowagg.SideA && k.Server != flowagg.SideB:
 		return fmt.Errorf("invalid server side %d", uint8(k.Server))
 	case !validTier(k.Tier):
-		return fmt.Errorf("unknown tier %q", k.Tier)
+		// Bound the echo: a tier is attacker-influenced text that
+		// UpsertBucket wraps into its error.
+		return fmt.Errorf("unknown tier %.16q", k.Tier)
 	}
 	return nil
 }
