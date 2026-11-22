@@ -1,6 +1,6 @@
 # Project status
 
-Last updated 2026-11-22 (evening; previously 2026-11-21 evening)
+Last updated 2026-11-22 (late evening; previously 2026-11-22 evening)
 
 This page is the short, frequently updated view of where Nebula Operation Station stands. The
 [README roadmap](../README.md#roadmap) gives the area overview; the ADRs in [docs/adr](adr/) hold
@@ -16,14 +16,22 @@ the decisions, and [docs/implementation](implementation/) the per-area plans.
 | Guest provisioning | [0008](adr/0008-guest-provisioning.md) | merged; **amendment 2026-11-21: PV-03 wiring of `pve.image.prepare` decided** (#805, paper #772, #790); chain pi started, the release bundle now stages `image-catalog.json` and its signature (#816) |
 | Traffic map | [0009](adr/0009-traffic-map.md) | proposed; API and pages mounted in nebula-server; end-to-end test from real `net.facts` output to the map API (#798) |
 | Network devices | [0010](adr/0010-network-devices.md) | accepted; **amendment 2026-11-21: device read chain decided** – variant 1 (collector spools one metadata record per device), device lease only through the local CLI (#805, paper #784); collector probe fix (#796); chain nx 7/11: read grants with device targets checked against the registry (#823) and previewed in the CLI (#821), device grants CLI-only (#813), CLI lease (#835) and admin-proposed leases (#833), collector spools one metadata record per device every cycle (#822, sub-minute #836) |
-| Vulnerability management | [0011](adr/0011-vulnerability-management.md) | accepted; **package inventory now stored on the server** (#766, #777, #779, #793) and the `vuln-inventory-v1` export is served from it (#792); open-findings listing fix (#808); maintainer decisions recorded: inventory E1–E4 (#776), assertion binding variant A incl. `discard_hold` (#805, papers #771, #775); chain iv 11/12: classifier closes runs by the inventory (#815, kernel fix #831), decided maximum read age applied (#837), host Vulnerabilities tab shows inventory status (#834), image package inventories kept for the last 3 per image (#832); end-to-end test iv10 open |
+| Vulnerability management | [0011](adr/0011-vulnerability-management.md) | accepted; **package inventory now stored on the server** (#766, #777, #779, #793) and the `vuln-inventory-v1` export is served from it (#792); open-findings listing fix (#808); maintainer decisions recorded: inventory E1–E4 (#776), assertion binding variant A incl. `discard_hold` (#805, papers #771, #775); chain iv 12/12 complete: classifier closes runs by the inventory (#815, kernel fix #831), decided maximum read age applied (#837), host Vulnerabilities tab shows inventory status (#834), image package inventories kept for the last 3 per image (#832, one read per execution #844), end-to-end test from real script output to a stored finding over real HTTP (#838); follow-ups iv03g, iv05gf, iv13g queued |
 | Network security advisor | [0012](adr/0012-network-security-advisor.md) | accepted; pure libraries merged, none imported by nebula-server (not wired) |
 | One-step enrollment | [0013](adr/0013-one-step-enrollment.md) | accepted; **dialog now switched on in nebula-server**: the executor installs the loaded enrollment configuration (#782) and the server relays the one-step RPCs (#785); **public `GET /enroll/<offer-id>` route outside the session gate** (#841, ADR 0013 D7) |
 | Help assistant | [0014](adr/0014-help-assistant.md) | accepted; AS-09 libraries merged, service and wiring open |
 | Integrity monitoring | [0015](adr/0015-integrity-monitoring.md) | accepted; libraries merged; **amendment 2026-11-21: I1 status and I2 scan chain wiring decided**, `fim.scan` as a durable job (#805, paper #783); chain fi imported (0/15) |
 | Ops agent | [0016](adr/0016-ops-agent.md) | accepted; implementation chain complete (27/27); finding and listener sources merged (#780) but `cmd/nebula-server/ops.go:237` still passes `opsNoFindings` – connecting them is ticket uh02; a run without work reports its status, exit codes pinned for systemd (#807); note size limit aligned, pinned CA tested over real TLS (#809); install hint fixed (#811); Ops tab still not set in nebula-server |
 
-### Landed since the last update (27 PRs, 2026-11-21 19:00 to 2026-11-22 19:00)
+### Landed since the evening update (3 PRs, 2026-11-22 19:00 to 19:45)
+
+- **Vulnerability inventory (chain iv, now 12/12):** end-to-end test from a real
+  `package_list_installed.sh` result to a stored finding over real HTTP (#838, iv10f); one image
+  read per execution, tied to the stored run result (#844, iv12g).
+- **Server configuration:** admin guide key table and `server.json` examples must match the strict
+  loader (#828, ue09f).
+
+### Landed in the evening update (27 PRs, 2026-11-21 19:00 to 2026-11-22 19:00)
 
 - **Vulnerability inventory (chain iv):** classifier closes runs by the stored inventory (#815);
   kernel closure must not ignore a newer partial read (#831); decided maximum read age applied to
@@ -79,12 +87,12 @@ Not re-checked in this pass: release 0.9, approval ergonomics, integrity monitor
 
 | Chain | Topic | Progress | Running now |
 | --- | --- | --- | --- |
-| iv | Package inventory for vulnerability management | 11/12 | end-to-end test from script output to a finding (iv10) is the last item; follow-ups iv03g, iv05g |
+| iv | Package inventory for vulnerability management | 12/12 | complete (iv10f #838, iv12g #844); follow-ups iv03g, iv05gf, iv13g queued |
 | va | Security key for vulnerability decisions (ADR 0011 Q4) | 0/6 | queued; decision paper merged (#771) |
 | ug | End-to-end tests through runServer | 11/12 | ug12f queued; fix rounds ug07f (#810), ug13f2 (#804), ug14f (#806) merged; follow-up ug07g (#827) |
 | uh | Ops agent live (sources, docs, deploy sandbox) | 6/11 | uh11 merged (#818); queued uh02 (connect stored findings), uh03f (#787), uh05, uh07, uh10 |
 | uf | Wiring follow-ups and decision papers | 12/16 | uf01 feature registry (#829), uf07 (#841), uf11 (#839) merged; queued uf08–uf10, uf17; follow-ups uf15g |
-| ue | Read and control actions through the real hostrun classifier | merged: ue06h (#820), ue07 (#825), ue08 (#826) | ue09 queued |
+| ue | Read and control actions through the real hostrun classifier | merged: ue06h (#820), ue07 (#825), ue08 (#826), ue09f (#828) | – |
 | nx | Network device read chain (ADR 0010, decided 2026-11-21) | 7/11 | merged nx01 (#823), nx04 (#821), nx05 (#833), nx06 (#835), nx07 (#812), nx09 (#822); left: nx03, nx08f (#814), nx10, nx11 |
 | pi | Image preparation wiring (ADR 0008 PV-03) | 1/14 | no change since the last update; pi03 merged (#816); pi01–pi14 queued (wait for ug12f) |
 | fi | Integrity check wiring (ADR 0015 I1/I2) | 0/15 | queued (wait for ug12f and iv/ue follow-ups) |
@@ -92,8 +100,8 @@ Not re-checked in this pass: release 0.9, approval ergonomics, integrity monitor
 
 ## Next
 
-- **iv chain (nearly complete, 11/12):** end-to-end test from script output to a finding (iv10);
-  then the reference lab upgrade and a live vuln-agent run.
+- **iv chain (complete, 12/12):** next the reference lab upgrade and a live vuln-agent run;
+  follow-ups iv03g, iv05gf, iv13g.
 - **Ops agent live:** connect the stored findings to the projection (uh02), then uh05 and the
   admin guide section 10.6 (uh10).
 - **Decision implementation:** nx (4 items left), pi (template preparation), fi (integrity
@@ -116,6 +124,8 @@ Not re-checked in this pass: release 0.9, approval ergonomics, integrity monitor
 
 ## Changelog
 
+- **2026-11-22 (late evening):** 3 PRs; iv chain complete (end-to-end test #838, image read per
+  execution #844); server config guide keys checked against the strict loader (#828).
 - **2026-11-22 (evening):** 27 PRs; iv chain 11/12 (classifier by inventory, maximum read age,
   host inventory status, image inventories); nx chain 7/11 (device grants, device leases, collector
   metadata per device); public `/enroll/` route (#841); server feature registry (#829); ue06h,
