@@ -1000,13 +1000,16 @@ func TestVulnInventoryTakenAtUsesTheExportClock(t *testing.T) {
 	e.addHost(t, srcHost)
 	e.addRead(t, srcRead(srcHost, "exec-1", e.clk.Now().Add(-time.Minute), true, "openssl"))
 	e.clk.Add(10 * time.Hour)
+	// The clock runs with the real clock, so it is read on both sides of the
+	// call: TakenAt is the second of the stamp, which lies between them.
+	before := e.clk.Now()
 	snap, err := e.inv.VulnSnapshot(context.Background(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	now := e.clk.Now()
-	if snap.TakenAt.Before(now.Add(-time.Second)) || snap.TakenAt.After(now) {
-		t.Fatalf("TakenAt = %s, want the export clock %s", snap.TakenAt, now)
+	after := e.clk.Now()
+	if snap.TakenAt.Before(before.Truncate(time.Second)) || snap.TakenAt.After(after) {
+		t.Fatalf("TakenAt = %s, want the export clock between %s and %s", snap.TakenAt, before, after)
 	}
 }
 

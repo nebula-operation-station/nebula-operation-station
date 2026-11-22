@@ -155,7 +155,9 @@ func newVulnService(db *sql.DB, sink vulnnotify.Sink, log *slog.Logger, now func
 	if now == nil {
 		now = time.Now
 	}
-	inv, err := vulninventory.New(db)
+	// The snapshot store shares the injected clock: TakenAt and the prune
+	// cutoff of sweepSnapshots are judged with the same now as the rest.
+	inv, err := vulninventory.NewWithNow(db, now)
 	if err != nil {
 		return nil, fmt.Errorf("vulnerability inventory: %w", err)
 	}
