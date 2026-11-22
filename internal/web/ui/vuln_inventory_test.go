@@ -11,6 +11,10 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
 
+// bidiOverride is U+202E, a bidi control character a host may send in its
+// kernel release.
+var bidiOverride = string(rune(0x202e))
+
 // inventoryHost returns a host subject with a fresh complete run, so the
 // only thing that can keep it from green is its package inventory.
 func inventoryHost(id string, inv *ui.VulnInventoryStatus) ui.VulnSubjectStatus {
@@ -89,7 +93,7 @@ func TestVulnInventoryLineShowsEachState(t *testing.T) {
 }
 
 func TestVulnInventoryKernelReleaseIsEscapedAndCapped(t *testing.T) {
-	hostile := "<script>alert(1)</script>\x07‮" + strings.Repeat("q", 200)
+	hostile := "<script>alert(1)</script>\x07" + bidiOverride + strings.Repeat("q", 200)
 	inv := &ui.VulnInventoryStatus{ReadAt: vulnNow.Add(-time.Hour), Complete: true, KernelRelease: hostile, KernelMapped: true}
 	body := inventoryPage(t, inventoryHost("web01", inv))
 	if strings.Contains(body, "<script>alert(1)") {
@@ -98,7 +102,7 @@ func TestVulnInventoryKernelReleaseIsEscapedAndCapped(t *testing.T) {
 	if !strings.Contains(body, "&lt;script&gt;") {
 		t.Error("kernel release text not escaped")
 	}
-	if strings.ContainsRune(body, '\x07') || strings.ContainsRune(body, '‮') {
+	if strings.ContainsRune(body, '\x07') || strings.Contains(body, bidiOverride) {
 		t.Error("control or bidi characters of the kernel release were not replaced")
 	}
 	if strings.Contains(body, strings.Repeat("q", 127)) {
