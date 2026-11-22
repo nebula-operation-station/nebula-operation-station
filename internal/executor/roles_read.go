@@ -5,6 +5,7 @@ package executor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"regexp"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/schedgrant"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/webauthnverify"
 )
 
@@ -121,6 +123,11 @@ func (s *Service) ProposeReadGrant(_ context.Context, req *pb.ProposeReadGrantRe
 			return nil, status.Error(codes.InvalidArgument, "read grant: remote is not active with the approved trust and credential version")
 		}
 	}
+	for _, target := range doc.NetDeviceTargets {
+		if err := s.checkNetDeviceTarget(target); err != nil {
+			return nil, err
+		}
+	}
 	pg, err := s.auth.ProposeReadGrant(req.GetGrantJson())
 	if err != nil {
 		return nil, readGrantStatus(err)
@@ -135,6 +142,37 @@ func (s *Service) ProposeReadGrant(_ context.Context, req *pb.ProposeReadGrantRe
 		out.RequestOptionsJson = opts
 	}
 	return out, nil
+}
+
+// errNetDeviceTargetRefused is the proposal refusal for a device read lease
+// target that the registry does not back; it carries no device data.
+var errNetDeviceTargetRefused = status.Error(codes.InvalidArgument, "read grant: network device is not active with the approved trust, credential version and read family")
+
+// checkNetDeviceTarget refuses a device read lease target unless the device
+// is registered, not removed and not blocked, has a read credential, and the
+// frozen trust pin, trust generation, credential version and read family
+// equal the registry's (netDevLiveIdentity, netDevTargetMatches). Store
+// errors map through adminStoreError.
+func (s *Service) checkNetDeviceTarget(target permit.NetDeviceTarget) error {
+	if s.db == nil {
+		return s.adminStoreError("read grant", ErrNetDevNoStore)
+	}
+	dev, credVersion, err := s.netDevLiveIdentity(target.DeviceID)
+	switch {
+	case errors.Is(err, ErrNetDevReadGone), errors.Is(err, ErrNetDevReadBlocked), errors.Is(err, ErrNetDevReadNoCredential):
+		return errNetDeviceTargetRefused
+	case err != nil:
+		return s.adminStoreError("read grant", err)
+	}
+	if !netDevTargetMatches(target, dev, credVersion) {
+		return errNetDeviceTargetRefused
+	}
+	for _, read := range target.Reads {
+		if schedgrant.NetDeviceReadFamily(read) != string(dev.Family) {
+			return errNetDeviceTargetRefused
+		}
+	}
+	return nil
 }
 
 // CommitReadGrant relays a bounded assertion to executor verification. No
