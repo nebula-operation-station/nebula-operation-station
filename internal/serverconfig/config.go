@@ -271,7 +271,9 @@ func (c Config) ClientAddrConfig() clientaddr.Config {
 // trustedProxyProblems checks trusted_proxies and trusted_proxy_networks:
 // at most MaxTrustedProxies entries each; every trusted_proxies entry a
 // single address (bare, /32 or /128, normalised as ADR 0013 D7 says); every
-// trusted_proxy_networks entry a network prefix without host bits; no entry
+// trusted_proxy_networks entry a network prefix without host bits, no
+// broader than MinTrustedNetworkBitsIPv4/IPv6 and neither the unspecified
+// address nor multicast; no entry
 // twice after normalisation. A list the loader accepts must also build the
 // resolver, so the server cannot start with a list the resolver reads
 // differently.
@@ -351,7 +353,41 @@ func parseTrustedNetwork(s string) (netip.Prefix, string) {
 	if m := p.Masked(); m != p {
 		return netip.Prefix{}, fmt.Sprintf("has host bits set (the network is %s; a single proxy belongs in trusted_proxies)", m)
 	}
+	minBits := MinTrustedNetworkBitsIPv6
+	if p.Addr().Is4() {
+		minBits = MinTrustedNetworkBitsIPv4
+	}
+	if p.Bits() < minBits {
+		return netip.Prefix{}, fmt.Sprintf("is too broad: a trusted network must be at least /%d for %s; every address in it may set X-Forwarded-For", minBits, ipFamily(p.Addr()))
+	}
+	// With the length limits above, a prefix that contains the unspecified
+	// address or overlaps the multicast range starts with such an address.
+	if p.Addr().IsUnspecified() {
+		return netip.Prefix{}, "contains the unspecified address; no proxy connects from it"
+	}
+	if p.Addr().IsMulticast() {
+		return netip.Prefix{}, "is a multicast network; no proxy connects from it"
+	}
 	return p, ""
+}
+
+// MinTrustedNetworkBitsIPv4 and MinTrustedNetworkBitsIPv6 are the shortest
+// prefixes trusted_proxy_networks accepts. Every address in a trusted network
+// may set X-Forwarded-For, so a catch-all such as 0.0.0.0/0 or ::/0 (or any
+// network broader than a /8 or a /32 site allocation) would let any client
+// pick its own rate-limit bucket and forge the client address in audit
+// records (ADR 0013 D7). Proxy networks are far narrower in practice.
+const (
+	MinTrustedNetworkBitsIPv4 = 8
+	MinTrustedNetworkBitsIPv6 = 32
+)
+
+// ipFamily names the address family of a for problem texts.
+func ipFamily(a netip.Addr) string {
+	if a.Is4() {
+		return "IPv4"
+	}
+	return "IPv6"
 }
 
 // parseUnmappedPrefix parses s as address/bits and unmaps an IPv4-mapped

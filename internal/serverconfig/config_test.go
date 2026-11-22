@@ -577,6 +577,17 @@ func TestTrustedProxiesRejections(t *testing.T) {
 		{"network duplicate", `"trusted_proxy_networks": ["10.0.0.0/24", "10.0.0.0/24"]`, []string{"trusted_proxy_networks[1]", "duplicate of trusted_proxy_networks[0]"}},
 		{"network duplicate after normalisation", `"trusted_proxy_networks": ["10.0.0.0/24", "::ffff:10.0.0.0/120"]`, []string{"trusted_proxy_networks[1]", "duplicate of trusted_proxy_networks[0]"}},
 		{"too many networks", `"trusted_proxy_networks": ` + jsonList(numberedNets(MaxTrustedProxies+1)), []string{"trusted_proxy_networks", fmt.Sprintf("at most %d entries", MaxTrustedProxies)}},
+		{"network IPv4 catch-all", `"trusted_proxy_networks": ["0.0.0.0/0"]`, []string{"trusted_proxy_networks[0]", "too broad", fmt.Sprintf("/%d", MinTrustedNetworkBitsIPv4)}},
+		{"network IPv6 catch-all", `"trusted_proxy_networks": ["::/0"]`, []string{"trusted_proxy_networks[0]", "too broad", fmt.Sprintf("/%d", MinTrustedNetworkBitsIPv6)}},
+		{"network mapped catch-all", `"trusted_proxy_networks": ["::ffff:0.0.0.0/96"]`, []string{"trusted_proxy_networks[0]", "too broad"}},
+		{"network IPv4 prefix too short", `"trusted_proxy_networks": ["8.0.0.0/7"]`, []string{"trusted_proxy_networks[0]", "too broad"}},
+		{"network IPv6 prefix too short", `"trusted_proxy_networks": ["2001:d00::/31"]`, []string{"trusted_proxy_networks[0]", "too broad"}},
+		{"network IPv4 unspecified", `"trusted_proxy_networks": ["0.0.0.0/8"]`, []string{"trusted_proxy_networks[0]", "unspecified"}},
+		{"network IPv4 unspecified host", `"trusted_proxy_networks": ["0.0.0.0/32"]`, []string{"trusted_proxy_networks[0]", "unspecified"}},
+		{"network IPv6 unspecified", `"trusted_proxy_networks": ["::/128"]`, []string{"trusted_proxy_networks[0]", "unspecified"}},
+		{"network IPv4 multicast", `"trusted_proxy_networks": ["224.0.0.0/8"]`, []string{"trusted_proxy_networks[0]", "multicast"}},
+		{"network IPv6 multicast", `"trusted_proxy_networks": ["ff02::/64"]`, []string{"trusted_proxy_networks[0]", "multicast"}},
+		{"network catch-all next to a valid one", `"trusted_proxy_networks": ["172.18.0.0/16", "0.0.0.0/0"]`, []string{"trusted_proxy_networks[1]", "too broad"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -590,6 +601,15 @@ func TestTrustedProxiesRejections(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestTrustedNetworksAtMinimumBitsAccepted: the breadth limit is inclusive,
+// so a /8 (IPv4) or /32 (IPv6) network is still accepted.
+func TestTrustedNetworksAtMinimumBitsAccepted(t *testing.T) {
+	nets := []string{fmt.Sprintf("10.0.0.0/%d", MinTrustedNetworkBitsIPv4), fmt.Sprintf("2001:db8::/%d", MinTrustedNetworkBitsIPv6), "::ffff:11.0.0.0/104"}
+	if _, err := Parse(trustedJSON(`"trusted_proxy_networks": ` + jsonList(nets))); err != nil {
+		t.Fatalf("Parse rejected networks at the minimum prefix length: %v", err)
 	}
 }
 
