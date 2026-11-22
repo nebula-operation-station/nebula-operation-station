@@ -498,18 +498,28 @@ nebula-ops-agent installed; its timer and path unit are NOT enabled.
 
 Next steps (guide, section "Ops agent"):
 
-  1. In the NOS web UI create the API token ops-agent (source address
-     127.0.0.1), and save it here (owned by the agent, 0600):
+  1. Create the API token ops-agent on the Nebula machine (nebula-server
+     prints the token once and a server.json entry):
+       nebula-server -api-token ops-agent:ops.read,ops.notes.write
+     Add the entry to "api" -> "tokens" in server.json with
+     "source_addresses": ["127.0.0.1", "::1"], then restart nebula-server:
+       sudo systemctl restart nebula-server.service
+     Save the token here (owned by the agent, 0600):
        sudo sh -c 'umask 077; cat > ${ops_etc_dir}/token'
        (paste the token, then Ctrl-D)
        sudo chown nebula-ops-agent:nebula-ops-agent ${ops_etc_dir}/token
 
-  2. Set "nos_base_url" (the NOS API on loopback) in ${ops_etc_dir}/config.json.
+  2. Set "nos_base_url" in ${ops_etc_dir}/config.json to the NOS API on
+     loopback, for example "http://127.0.0.1:8080" (the default listen
+     address). Only https URLs and http URLs to a loopback IP are accepted,
+     not "localhost"; an IPv6 address goes in brackets: "http://[::1]:8080".
 
   3. Allow the LLM endpoint (the unit allows only localhost):
        sudo systemctl edit nebula-ops-agent.service
          [Service]
          IPAddressAllow=<LLM address>
+     A plain http LLM address is refused together with llm_credential_file,
+     so set llm_credential_file only for an https address.
 
   4. Try it, then enable the timer (every 30 minutes) and the trigger:
        sudo systemctl start nebula-ops-agent.service

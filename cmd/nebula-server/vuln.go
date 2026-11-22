@@ -21,8 +21,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -30,6 +28,7 @@ import (
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulninventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnnotify"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnprio"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
@@ -122,55 +121,18 @@ func vulnTier(_ vulnstore.Subject, r vulnfinding.Record) vulnstore.Tier {
 	return vulnstore.TierUnknown
 }
 
-// errVulnNotCheckable: NOS keeps no package inventory the classifier
-// could compare against yet.
-var errVulnNotCheckable = errors.New("no NOS package inventory to classify against")
-
-// vulnClassifier fails closed: until NOS stores the package inventory
-// (package.list_installed, image.packages) every requested run closure is
-// held for an admin (vulnstore.HoldClassifyFailed), never closed on
-// Hermes' word alone.
-type vulnClassifier struct{}
-
-func (vulnClassifier) Classify(context.Context, vulnstore.Finding) (vulnstore.Class, error) {
-	return 0, errVulnNotCheckable
-}
-
-// vulnInventory serves the D3 inventory export. NOS does not store the
-// parsed package lists yet, so every snapshot is empty: Hermes can cover
-// no subject, so no run requests a closure. The snapshot ID names its
-// hour, so a snapshot is immutable for its ID, the generation only rises,
-// and a run start within vulnstore.MaxInventoryAge finds it again.
-type vulnInventory struct {
-	now func() time.Time
-}
-
-const vulnSnapshotPrefix = "nos-empty-"
-
-func (v vulnInventory) VulnSnapshot(_ context.Context, id string) (api.VulnSnapshot, error) {
-	bucket := v.now().UTC().Truncate(vulnInventoryBucket)
-	if id != "" {
-		n, err := strconv.ParseInt(strings.TrimPrefix(id, vulnSnapshotPrefix), 10, 64)
-		if err != nil || !strings.HasPrefix(id, vulnSnapshotPrefix) || n <= 0 {
-			return api.VulnSnapshot{}, api.ErrVulnSnapshotGone
-		}
-		at := time.Unix(n, 0).UTC()
-		if at.After(bucket) || bucket.Sub(at) > vulnstore.MaxInventoryAge || !at.Equal(at.Truncate(vulnInventoryBucket)) {
-			return api.VulnSnapshot{}, api.ErrVulnSnapshotGone
-		}
-		bucket = at
-	}
-	return api.VulnSnapshot{ID: vulnSnapshotPrefix + strconv.FormatInt(bucket.Unix(), 10),
-		Generation: bucket.Unix() / int64(vulnInventoryBucket/time.Second), TakenAt: bucket}, nil
-}
-
 // vulnService holds the findings store and the notifier and runs the
 // background work: run events, sweeps and notification ticks.
 type vulnService struct {
-	store    *vulnstore.Store
-	notifier *vulnnotify.Notifier
-	log      *slog.Logger
-	events   chan func(context.Context)
+	store *vulnstore.Store
+	// classifier judges run closures against the stored inventory (D5).
+	classifier vulnClassifier
+	// inventory holds the snapshots the export serves; its snapshots are
+	// pruned by the sweep (sweepSnapshots).
+	inventory *vulninventory.Store
+	notifier  *vulnnotify.Notifier
+	log       *slog.Logger
+	events    chan func(context.Context)
 	// statePath is the file keeping the delivered staleness alerts
 	// (vulnNotifyStateFile); empty keeps them in memory only.
 	statePath string
@@ -193,7 +155,12 @@ func newVulnService(db *sql.DB, sink vulnnotify.Sink, log *slog.Logger, now func
 	if now == nil {
 		now = time.Now
 	}
-	st, err := vulnstore.New(db, vulnstore.Config{Sources: vulnSources, Tier: vulnTier, Classifier: vulnClassifier{}, Now: now})
+	inv, err := vulninventory.New(db)
+	if err != nil {
+		return nil, fmt.Errorf("vulnerability inventory: %w", err)
+	}
+	cl := vulnClassifier{inv: inv}
+	st, err := vulnstore.New(db, vulnstore.Config{Sources: vulnSources, Tier: vulnTier, Classifier: cl, Now: now})
 	if err != nil {
 		return nil, fmt.Errorf("vulnerability store: %w", err)
 	}
@@ -201,7 +168,7 @@ func newVulnService(db *sql.DB, sink vulnnotify.Sink, log *slog.Logger, now func
 	if err != nil {
 		return nil, fmt.Errorf("vulnerability notifications: %w", err)
 	}
-	return &vulnService{store: st, notifier: n, log: log, events: make(chan func(context.Context), vulnEventQueue),
+	return &vulnService{store: st, classifier: cl, inventory: inv, notifier: n, log: log, events: make(chan func(context.Context), vulnEventQueue),
 		alertQueued: map[string]bool{}}, nil
 }
 
@@ -490,6 +457,11 @@ func (v *vulnService) runSweeps(ctx context.Context, interval time.Duration) {
 		}
 		sctx, cancel := context.WithTimeout(ctx, vulnSweepTimeout)
 		res, err := v.store.Prune(sctx)
+		// Snapshots are pruned after the findings. This sweep deletes no
+		// inventory read, so no snapshot is left pointing at a deleted read.
+		if serr := v.sweepSnapshots(sctx); serr != nil {
+			v.log.Error("vulnerability inventory: prune snapshots", "error", serr)
+		}
 		cancel()
 		attrs := []any{"resumed", res.ResumedRuns, "aborted", res.AbortedRuns, "deleted_findings", res.DeletedFindings,
 			"cleared_assessment", res.ClearedAssessment, "deleted_runs", res.DeletedRuns, "deleted_history", res.DeletedHistory}
@@ -676,10 +648,14 @@ func (p vulnPages) VulnFinding(ctx context.Context, key vulnfinding.Key) (ui.Vul
 	if err != nil {
 		return ui.VulnFindingDetail{}, err
 	}
-	for _, h := range holds {
-		// NOS keeps no package inventory yet: no NOS version, never
-		// shown as contradicted or confirmed by NOS.
-		d.Holds = append(d.Holds, ui.VulnHold{Hold: h})
+	if len(holds) > 0 {
+		// The NOS view is the same judgement the closure used (D5); an
+		// error leaves it empty, shown as unknown.
+		nos := p.v.assessFinding(ctx, f)
+		for _, h := range holds {
+			d.Holds = append(d.Holds, ui.VulnHold{Hold: h, NOSVersion: nos.nosVersion,
+				Contradicted: nos.class == vulnstore.ClassContradicted})
+		}
 	}
 	if d.Subject, err = p.subject(ctx, f.Subject); err != nil {
 		return ui.VulnFindingDetail{}, err

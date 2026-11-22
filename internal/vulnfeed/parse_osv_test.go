@@ -130,7 +130,7 @@ func TestParseOSVRejectsMalformed(t *testing.T) {
 	}
 }
 
-// TestParseOSVDecodeStaysWithinFieldCaps: a 4 MiB record of tiny elements
+// TestParseOSVDecodeStaysWithinFieldCaps: a record of MaxOSVRecordBytes of tiny elements
 // spread over capped arrays (the shape that made json.Unmarshal build
 // about a million empty maps) is rejected during the walk.
 func TestParseOSVDecodeStaysWithinFieldCaps(t *testing.T) {
@@ -324,7 +324,8 @@ func TestParseOSVArchiveFileLimit(t *testing.T) {
 	files := []zipFile{{"a.json", rec}, {"b.json", rec}, {"c.json", rec}}
 	visit := func(OSVRecord) error { return nil }
 	parse := func(data []byte, max int) (OSVArchiveSummary, error) {
-		return parseOSVArchive(context.Background(), bytes.NewReader(data), int64(len(data)), max, visit)
+		lim := osvArchiveLimits{Files: max, Bytes: MaxOSVArchiveBytes}
+		return parseOSVArchive(context.Background(), bytes.NewReader(data), int64(len(data)), lim, visit)
 	}
 	data := makeZip(t, files...)
 	// Same ID three times: at the limit the duplicate stops the parse
@@ -441,6 +442,84 @@ func TestParseOSVArchiveRejectsLyingSizeHeader(t *testing.T) {
 	data[cd+24], data[cd+25], data[cd+26], data[cd+27] = 10, 0, 0, 0
 	if _, _, err := parseZip(data); err == nil {
 		t.Fatal("accepted an entry larger than its declared size")
+	}
+}
+
+func TestParseOSVArchiveTotalLimitIsInjectable(t *testing.T) {
+	// Two valid records; the total cap is enforced on the sum of their
+	// declared sizes. One byte under the sum fails before any record is
+	// delivered; exactly at the sum the archive parses.
+	first := readFixture(t, "parse_osv", "go.json")
+	second := readFixture(t, "parse_osv", "dsa.json")
+	data := makeZip(t, zipFile{"a.json", first}, zipFile{"b.json", second})
+	total := int64(len(first)) + int64(len(second))
+	parse := func(max int64, visit func(OSVRecord) error) (OSVArchiveSummary, error) {
+		lim := osvArchiveLimits{Files: MaxOSVArchiveFiles, Bytes: max}
+		return parseOSVArchive(context.Background(), bytes.NewReader(data), int64(len(data)), lim, visit)
+	}
+	visited := 0
+	if _, err := parse(total-1, func(OSVRecord) error { visited++; return nil }); !errors.Is(err, ErrFeedLimit) || visited != 0 {
+		t.Fatalf("one byte under the total: err = %v after %d records, want ErrFeedLimit before any", err, visited)
+	}
+	sum, err := parse(total, func(OSVRecord) error { return nil })
+	if err != nil || sum.Records != 2 {
+		t.Fatalf("exactly at the total: %+v, %v", sum, err)
+	}
+}
+
+func TestParseOSVArchiveTotalAboveOldCapPassesGate(t *testing.T) {
+	// The declared total is 5 GiB, above the former 4 GiB total cap. The
+	// entries hold no record data, so the archive must fail while
+	// reading, not at the size gate.
+	// Entries of MaxOSVRecordBytes that add up to 5 GiB, rounded up.
+	const fiveGiB int64 = 5 << 30
+	entries := int((fiveGiB + MaxOSVRecordBytes - 1) / MaxOSVRecordBytes)
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	for i := range entries {
+		w, err := zw.CreateRaw(&zip.FileHeader{
+			Name: fmt.Sprintf("OSV-%d.json", i), Method: zip.Deflate,
+			CompressedSize64: 1, UncompressedSize64: MaxOSVRecordBytes,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := w.Write([]byte{0}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if MaxOSVArchiveBytes < 5<<30 {
+		t.Fatalf("MaxOSVArchiveBytes = %d, below the 5 GiB archive this test models", MaxOSVArchiveBytes)
+	}
+	data := buf.Bytes()
+	_, err := ParseOSVArchive(context.Background(), bytes.NewReader(data), int64(len(data)), func(OSVRecord) error { return nil })
+	if err == nil {
+		t.Fatal("archive without record data parsed")
+	}
+	if errors.Is(err, ErrFeedLimit) {
+		t.Fatalf("5 GiB declared total refused by the size gate: %v", err)
+	}
+	if !errors.Is(err, ErrFeedMalformed) {
+		t.Fatalf("entries without record data: err = %v, want ErrFeedMalformed from the read", err)
+	}
+}
+
+func TestParseOSVArchiveEntryOverLimitStillRejected(t *testing.T) {
+	// One byte over the per-entry limit: rejected with ErrFeedLimit even
+	// though the total is far under its cap, and no record is delivered.
+	body := bytes.Repeat([]byte(" "), MaxOSVRecordBytes+1)
+	copy(body, `{"id":"OSV-1","modified":"2024-01-01T00:00:00Z"}`)
+	data := makeZip(t, zipFile{"big.json", body})
+	visited := 0
+	_, err := ParseOSVArchive(context.Background(), bytes.NewReader(data), int64(len(data)), func(OSVRecord) error {
+		visited++
+		return nil
+	})
+	if !errors.Is(err, ErrFeedLimit) || visited != 0 {
+		t.Fatalf("entry over the per-entry limit: err = %v after %d records", err, visited)
 	}
 }
 

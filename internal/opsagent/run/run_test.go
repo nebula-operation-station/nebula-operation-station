@@ -24,6 +24,10 @@ import (
 
 const goodDigest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
+// goodFixDigest is goodDigest in the form the server writes for a fix item
+// (opsfacts.Digest).
+const goodFixDigest = "sha256:" + goodDigest
+
 var fixedNow = time.Date(2026, 11, 18, 10, 0, 0, 0, time.UTC)
 
 // fakeNOS is the NOS API with fixed answers; it records what the run posts.
@@ -88,7 +92,7 @@ func goodSettings() nosclient.AgentConfig {
 
 func labItem(ref string) nosclient.WorkItem {
 	return nosclient.WorkItem{
-		Kind: "fix", Ref: ref, Digest: goodDigest,
+		Kind: "fix", Ref: ref, Digest: goodFixDigest,
 		Group: &nosclient.Group{
 			Group:    ref,
 			Host:     nosclient.Host{ID: "h1", Label: "web-01", Environment: "lab", Criticality: "high"},
@@ -148,7 +152,7 @@ func TestHappyPathOneCallWritesMappedNote(t *testing.T) {
 		t.Fatalf("summary %+v notes %d", sum, len(nos.notes))
 	}
 	n := nos.notes[0]
-	if n.Kind != "fix" || n.Ref != "h1:os" || n.Digest != goodDigest {
+	if n.Kind != "fix" || n.Ref != "h1:os" || n.Digest != goodFixDigest {
 		t.Errorf("note %+v", n)
 	}
 	if len(n.Steps) != 1 || n.Steps[0].ActionID != "package.install_security" || n.Steps[0].HostID != "h1" {
@@ -360,6 +364,57 @@ func TestLabRuleRefusalAtConnectionEndsRunWithoutFallback(t *testing.T) {
 	}
 	if len(h.chat.reqs) != 1 || len(nos.notes) != 0 || !slices.Contains(sum.Refusals, RefusedLabRule) {
 		t.Fatalf("calls %d notes %d refusals %v", len(h.chat.reqs), len(nos.notes), sum.Refusals)
+	}
+}
+
+// TestEmptyWorkPostsZeroStatus: an empty work list ends the run with exactly one
+// status of zero counts and an empty (not null) refusal list, within the same
+// status timeout. It makes no LLM call and does not read the daily counter: the
+// store path is a directory, so any read of it would fail the run.
+func TestEmptyWorkPostsZeroStatus(t *testing.T) {
+	nos := &fakeNOS{cfg: goodSettings()}
+	chat := &fakeChat{replies: []string{goodFix}}
+	h := newHarness(t, nos, chat)
+	h.st = &state.Store{Path: t.TempDir()}
+	if _, err := h.st.Used(); err == nil {
+		t.Fatal("test store reads, want an error: the counter must not be touched")
+	}
+	sum, err := h.run(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Disabled || len(chat.reqs) != 0 || len(nos.notes) != 0 {
+		t.Errorf("summary %+v calls %d notes %d, want no work done", sum, len(chat.reqs), len(nos.notes))
+	}
+	if len(nos.status) != 1 {
+		t.Fatalf("statuses %d, want exactly 1", len(nos.status))
+	}
+	s := nos.status[0]
+	if s.ItemsSeen != 0 || s.LLMCalls != 0 || s.Discarded != 0 || s.NotesWritten != 0 {
+		t.Errorf("status %+v, want zero counts", s)
+	}
+	if s.Refusals == nil || len(s.Refusals) != 0 {
+		t.Errorf("refusals %#v, want an empty non-nil list", s.Refusals)
+	}
+	if s.RunAt != fixedNow.Format(time.RFC3339) {
+		t.Errorf("run_at %q, want %q", s.RunAt, fixedNow.Format(time.RFC3339))
+	}
+}
+
+// TestDisabledPostsNoStatus: a run switched off by the settings posts no status.
+func TestDisabledPostsNoStatus(t *testing.T) {
+	off := goodSettings()
+	off.Enabled = false
+	nos := &fakeNOS{cfg: off}
+	chat := &fakeChat{replies: []string{goodFix}}
+	h := newHarness(t, nos, chat)
+	sum, err := h.run(t, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sum.Disabled || len(nos.status) != 0 || len(chat.reqs) != 0 {
+		t.Fatalf("disabled %v statuses %d calls %d, want no status and no call",
+			sum.Disabled, len(nos.status), len(chat.reqs))
 	}
 }
 

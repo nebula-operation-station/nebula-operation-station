@@ -8,6 +8,7 @@
 //	nebula lock
 //	nebula pending
 //	nebula approve <digest-prefix>
+//	nebula reject <digest-prefix> [--reason <text>]
 //	nebula batch review|approve|stage|skip
 //	nebula read-grant pending|approve <digest>
 //	nebula artifact trust|untrust|list|trust-builtins|trust-rotation|unpin
@@ -53,6 +54,9 @@ commands:
   approve <digest>    approve a pending permit (hardened path); a unique prefix is enough
   approve --stage N DIGEST | approve --skip HOST DIGEST
                       open the next stage of a rollout, or skip a host (hardened path)
+  reject <digest> [--reason TEXT]
+                      reject a pending permit (unique prefix) or batch (full digest) for good;
+                      shows the executor's view first; reason at most 200 characters
   batch review DIGEST | approve DIGEST
                       the executor's complete batch plan; approve it locally (needed for
                       HIGH batches in hardened mode); "approve DIGEST" works too
@@ -233,6 +237,8 @@ func run(cmd string, args []string) error {
 			return errors.New("usage: nebula approve <digest-prefix>")
 		}
 		return approve(ctx, c, args[0], os.Stdin, os.Stdout)
+	case "reject":
+		return rejectCmd(ctx, c, args, os.Stdin, os.Stdout)
 	case "batch":
 		return batchCmd(ctx, c, args, os.Stdin, os.Stdout)
 	case "schedule":

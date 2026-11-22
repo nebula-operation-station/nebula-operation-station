@@ -27,7 +27,9 @@ fmt='{"id":{{json .ID}},"name":{{json .Name}},"cpu":{{json .CPUPerc}},"mem":{{js
 # Bound bytes before lines: a single line can itself be arbitrarily large.
 # Keep the command status outside the truncated stream and drain the rest,
 # so a real Docker failure is detected without truncation causing SIGPIPE.
-max_stats_bytes=1048576
+# 512 KiB raw: base64 adds a third, so the encoded result stays well under
+# hostrun.MaxResult (1 MiB) together with the JSON wrapper.
+max_stats_bytes=524288
 status_file=$(mktemp) || pre "cannot collect docker stats"
 trap 'rm -f -- "$status_file"' 0
 st=$({ $d stats --no-stream --no-trunc --format "$fmt" 2>/dev/null; printf '%s\n' "$?" > "$status_file"; } |

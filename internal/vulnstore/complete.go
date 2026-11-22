@@ -68,7 +68,10 @@ type Completion struct {
 //     nothing counts as one; the superseded-holds DELETE runs in chunks
 //     of the rows left), plus the run report: about 100 ms measured, and
 //     under about 1.5 s even under the race detector on a loaded machine
-//     (2048 rows took up to 2.9 s there);
+//     (2048 rows took up to 2.9 s there). It is also bounded by time: no
+//     unit of work starts once it has held the lock for maxApplyHold on
+//     the hold clock, so it commits within maxApplyHold plus one unit,
+//     far below the busy timeout whatever the row count;
 //   - the next one starts only after a pause of at least applyPause and
 //     at least as long as the previous transaction took, so the lock is
 //     free at least half of the time and every pause spans at least two
@@ -87,6 +90,15 @@ type Completion struct {
 const (
 	maxApplyRows = 1024
 	applyPause   = 250 * time.Millisecond
+	// maxApplyHold bounds how long one apply transaction holds the write
+	// lock on the store's hold clock: it takes no further unit of work once
+	// the lock has been held this long, and commits.
+	maxApplyHold = time.Second
+	// maxDropRows bounds the superseded holds that one DELETE statement
+	// drops. The hold limit is checked between statements, so a statement
+	// that drops a whole transaction's row budget (maxApplyRows) would hold
+	// the lock for its whole duration past maxApplyHold.
+	maxDropRows = 64
 )
 
 // candidate is one requested run closure.
@@ -326,6 +338,22 @@ func (s *Store) applyComplete(ctx context.Context, run runRow, plans []*subjectP
 	}
 }
 
+// holdNow is the clock that measures how long an apply transaction holds
+// the write lock (maxApplyHold).
+func (s *Store) holdNow() time.Time {
+	if s.holdClock != nil {
+		return s.holdClock()
+	}
+	return time.Now()
+}
+
+// unit marks the start of one unit of apply work (tests only).
+func (s *Store) unit() {
+	if s.applyStep != nil {
+		s.applyStep()
+	}
+}
+
 // checkProgress loads the run inside tx and checks that it is running with
 // the completing state want (nil: none) the caller planned on. Otherwise
 // another Complete, possibly of another process, moved it on and the
@@ -353,7 +381,7 @@ func (s *Store) applyChunk(ctx context.Context, run runRow, plans []*subjectPlan
 		return nil, pos, false, err
 	}
 	defer tx.Rollback()
-	locked := time.Now()
+	locked := s.holdNow()
 	var changesBefore int64
 	if s.applyDone != nil {
 		if err := tx.QueryRowContext(ctx, `SELECT total_changes()`).Scan(&changesBefore); err != nil {
@@ -375,8 +403,22 @@ func (s *Store) applyChunk(ctx context.Context, run runRow, plans []*subjectPlan
 		budget = s.applyRows
 	}
 	writes := 0
-	for pos.i < len(plans) && writes < budget {
+	// changed counts the units that changed the database (a head, a drop
+	// or a candidate; a watermark re-check on resume does not count). The
+	// time limit only applies once this transaction changed something, so
+	// that a slow unit cannot make every transaction stop before any
+	// progress (a livelock).
+	changed := 0
+	// full: the row budget is spent, or the lock has been held for
+	// maxApplyHold after a change. The check is made before each unit of
+	// work, so the transaction stops at a unit boundary, where pos describes
+	// what is applied, and the next one resumes there.
+	full := func() bool {
+		return writes >= budget || (changed > 0 && s.holdNow().Sub(locked) >= maxApplyHold)
+	}
+	for pos.i < len(plans) && !full() {
 		p := plans[pos.i]
+		s.unit()
 		if !pos.head && !p.resumed {
 			n, live, err := applyHead(ctx, tx, run, p, at, &comp)
 			writes += n
@@ -387,6 +429,7 @@ func (s *Store) applyChunk(ctx context.Context, run runRow, plans []*subjectPlan
 				pos = applyPos{i: pos.i + 1}
 				continue
 			}
+			changed++
 		} else {
 			// The head was applied by an earlier transaction; a newer run
 			// may have covered the subject since.
@@ -403,27 +446,35 @@ func (s *Store) applyChunk(ctx context.Context, run runRow, plans []*subjectPlan
 		}
 		pos.head = true
 		if !pos.dropped {
+			if full() {
+				break // the head is applied; the drop starts the next transaction
+			}
+			s.unit()
 			// Holds of older runs on the subject are superseded (path 7);
 			// there can be about MaxFindingsPerRun of them, so they are
-			// dropped in chunks of the rows left in this transaction. A
+			// dropped in chunks of at most maxDropRows rows, and of the rows
+			// left in this transaction (each chunk is one statement). A
 			// resumed subject repeats the drop: our own holds carry
 			// run.seq and are never matched.
-			n, more, err := dropSuperseded(ctx, tx, p.subject, run.seq, max(1, budget-writes))
+			n, more, err := dropSuperseded(ctx, tx, p.subject, run.seq, min(maxDropRows, max(1, budget-writes)))
 			writes += max(1, n)
 			if err != nil {
 				return nil, pos, false, err
 			}
+			changed++
 			if more {
 				continue // the budget is spent: the next transaction goes on
 			}
 			pos.dropped = true
 		}
-		for pos.j < len(p.cands) && writes < budget {
+		for pos.j < len(p.cands) && !full() {
+			s.unit()
 			n, err := applyCandidate(ctx, tx, run, p.subject, p.cands[pos.j], at, &comp)
 			writes += n
 			if err != nil {
 				return nil, pos, false, err
 			}
+			changed++
 			pos.j++
 		}
 		if pos.j == len(p.cands) {
@@ -467,7 +518,7 @@ func (s *Store) applyChunk(ctx context.Context, run runRow, plans []*subjectPlan
 		return nil, pos, false, fmt.Errorf("commit: %w", err)
 	}
 	if s.applyDone != nil {
-		s.applyDone(changes-changesBefore, time.Since(locked))
+		s.applyDone(changes-changesBefore, s.holdNow().Sub(locked))
 	}
 	return next, pos, done, nil
 }

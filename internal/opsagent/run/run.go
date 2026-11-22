@@ -201,7 +201,7 @@ func validateItem(class string, it nosclient.WorkItem) error {
 	if it.Ref == "" || len(it.Ref) > MaxItemRefs || !printableASCII(it.Ref) {
 		return errors.New("item ref")
 	}
-	if !isDigest(it.Digest) {
+	if !isDigest(it.Kind, it.Digest) {
 		return errors.New("item digest")
 	}
 	if it.Kind != "question" && it.Question != nil {
@@ -218,8 +218,10 @@ func validateItem(class string, it nosclient.WorkItem) error {
 		}
 		keys := map[string]bool{}
 		for _, c := range g.Candidates {
+			// A candidate without its fixed NOS label gives the model nothing
+			// to choose by (ADR 0016 D4): refuse the item, make no call.
 			if !prompt.ValidCandidateKey(c.Key) || keys[c.Key] || c.HostID != g.Host.ID ||
-				c.Action == "" || !printableASCII(c.Action) {
+				c.Action == "" || !printableASCII(c.Action) || c.Label == "" {
 				return errors.New("fix item candidate")
 			}
 			keys[c.Key] = true
@@ -262,7 +264,24 @@ func validateQuestion(class string, it nosclient.WorkItem) error {
 	return nil
 }
 
-func isDigest(s string) bool {
+// digestPrefix is the prefix of a fix group digest as the server writes it
+// (opsfacts.Digest: "sha256:<64 hex>"). Summary and question digests are
+// sent as 64 bare hex (internal/web/api fleetDigest, opsnotes.QuestionDigest).
+const digestPrefix = "sha256:"
+
+// isDigest accepts the digest forms of an item kind: for a fix item
+// "sha256:" followed by 64 lowercase hex (the server's form) or 64 lowercase
+// hex alone; for a summary or question item only 64 lowercase hex alone,
+// the one form the server writes there. Any other kind, prefix or case is
+// refused.
+func isDigest(kind, s string) bool {
+	switch kind {
+	case "fix":
+		s = strings.TrimPrefix(s, digestPrefix)
+	case "summary", "question":
+	default:
+		return false
+	}
 	if len(s) != 64 {
 		return false
 	}
@@ -302,19 +321,26 @@ func Run(ctx context.Context, d Deps) (Summary, error) {
 		return Summary{}, fmt.Errorf("read work list: %w", err)
 	}
 	var sum Summary
+	// An empty work list makes no call and does not read the daily counter, but
+	// the run still reports its status (ADR 0016 D14), so "Last run" shows this
+	// run and not an older one.
 	if len(items) == 0 {
 		log.Info("ops agent: no work")
-		return sum, nil
+	} else {
+		used, err := d.State.Used()
+		if err != nil {
+			return Summary{}, fmt.Errorf("read call counter: %w", err)
+		}
+		budget := min(MaxLLMCallsPerRun, MaxLLMCallsPerDay-used)
+		sum.ItemsSeen = len(items)
+		r := &runner{d: d, log: log, cfg: cfg, sum: &sum, budget: budget, now: now}
+		r.loop(ctx, items)
 	}
-	used, err := d.State.Used()
-	if err != nil {
-		return Summary{}, fmt.Errorf("read call counter: %w", err)
-	}
-	budget := min(MaxLLMCallsPerRun, MaxLLMCallsPerDay-used)
-	sum.ItemsSeen = len(items)
-	r := &runner{d: d, log: log, cfg: cfg, sum: &sum, budget: budget, now: now}
-	r.loop(ctx, items)
 	sum.Refusals = uniqueSorted(sum.Refusals)
+	if sum.Refusals == nil {
+		// An empty list is sent as [], not null.
+		sum.Refusals = []string{}
+	}
 	status := nosclient.Status{
 		RunAt:        now().UTC().Format(time.RFC3339),
 		ItemsSeen:    sum.ItemsSeen,
