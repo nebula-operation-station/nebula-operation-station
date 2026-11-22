@@ -387,9 +387,24 @@ func TestRunServerWiresFeaturesInOrder(t *testing.T) {
 	mount := one("mountServerFeaturePages")
 	ident(mount.args[0], "deps")
 	ident(mount.args[1], "pages")
-	webSrv := one("webServer")
+	webSrv := one("webServerPublic")
 	if mount.pos >= webSrv.pos {
-		t.Fatal("mountServerFeaturePages must run before webServer")
+		t.Fatal("mountServerFeaturePages must run before webServerPublic")
+	}
+	// The public routes are mounted before the server is assembled, and the
+	// same registry is handed to webServerPublic.
+	pub := one("mountServerPublicRoutes")
+	if len(pub.args) != 2 || len(webSrv.args) != 5 {
+		t.Fatalf("mountServerPublicRoutes takes %d arguments, webServerPublic %d, want 2 and 5", len(pub.args), len(webSrv.args))
+	}
+	ident(pub.args[0], "deps")
+	ident(pub.args[1], "public")
+	ident(webSrv.args[4], "public")
+	if pub.pos >= webSrv.pos {
+		t.Fatal("mountServerPublicRoutes must run before webServerPublic")
+	}
+	if n := len(calls["webServer"]); n != 0 {
+		t.Fatalf("runServer calls webServer %d times, want 0: it bypasses the public routes", n)
 	}
 	// The mount comes after every route main.go registers on pages, so the
 	// feature pages are added last, as reviewed.

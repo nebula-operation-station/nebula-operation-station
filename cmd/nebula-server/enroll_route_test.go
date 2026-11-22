@@ -7,12 +7,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -325,5 +328,88 @@ func TestEnrollRouteLogsHoldNoOfferID(t *testing.T) {
 	c.do(t, http.MethodPost, enroll.PathPrefix+enrollTestID, "")
 	if strings.Contains(c.logs.String(), enrollTestID) {
 		t.Errorf("offer ID in the log:\n%s", c.logs.String())
+	}
+}
+
+// TestRunServesEnrollRouteOutsideSession starts the real server (run, as the
+// binary does) and checks the public route through the wiring of runServer:
+// GET /enroll/<id> without a session is not redirected to the login, while
+// /inventory still is. The executor socket does not exist, so the download
+// itself fails; the test only checks that the route is reached and that the
+// offer ID is in no log line.
+func TestRunServesEnrollRouteOutsideSession(t *testing.T) {
+	dir := t.TempDir()
+	u, err := user.Current()
+	if err != nil {
+		t.Fatalf("current user: %v", err)
+	}
+	listen := freeListenAddr(t)
+	path := writeConfig(t, dir, map[string]any{
+		"listen":          listen,
+		"public_origin":   "https://nebula.example.org",
+		"data_dir":        dir,
+		"executor_socket": filepath.Join(dir, "no-executor.sock"),
+		"executor_user":   u.Username,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var stderr bytes.Buffer
+	done := make(chan error, 1)
+	go func() { done <- run(ctx, []string{"-config", path}, &stderr) }()
+
+	base := "http://" + listen
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		resp, err := http.Get(base + "/login")
+		if err == nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("server did not come up: %v (stderr: %s)", err, stderr.String())
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	noRedirect := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	do := func(method, p string) *http.Response {
+		t.Helper()
+		req, _ := http.NewRequest(method, base+p, nil)
+		resp, err := noRedirect.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, p, err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return resp
+	}
+
+	// The public route: not sent to the login, and the security headers stay.
+	resp := do(http.MethodGet, enroll.PathPrefix+enrollTestID)
+	if resp.StatusCode == http.StatusSeeOther && resp.Header.Get("Location") == "/login" {
+		t.Fatal("GET enroll route without session went to the login")
+	}
+	if resp.Header.Get("Content-Security-Policy") == "" || resp.Header.Get("X-Content-Type-Options") != "nosniff" {
+		t.Errorf("GET enroll route: security headers missing (CSP %q)", resp.Header.Get("Content-Security-Policy"))
+	}
+	if resp := do(http.MethodPost, enroll.PathPrefix+enrollTestID); resp.StatusCode == http.StatusSeeOther {
+		t.Errorf("POST enroll route: status %d, want a refusal", resp.StatusCode)
+	}
+
+	// Everything else stays behind the login.
+	if resp := do(http.MethodGet, "/inventory"); resp.StatusCode != http.StatusSeeOther || resp.Header.Get("Location") != "/login" {
+		t.Fatalf("GET /inventory without session: %d %q, want 303 to /login", resp.StatusCode, resp.Header.Get("Location"))
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if strings.Contains(stderr.String(), enrollTestID) {
+		t.Errorf("offer ID in the server log:\n%s", stderr.String())
 	}
 }
