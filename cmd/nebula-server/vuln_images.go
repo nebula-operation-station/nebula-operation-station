@@ -20,38 +20,93 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
 )
 
-// inspectActionID is the action whose stored result names the image digests
-// a host runs (docker.inspect). A digest is only read when the host's stored
-// inspect result names it (decision E4a; see vulnImageService.ObserveImage).
+// inspectActionID is the action whose stored results name the image digests
+// a host runs (docker.inspect, one result per container). A digest is only
+// read when a stored inspect result of the host names it (decision E4a; see
+// vulnImageService.ObserveImage).
 const inspectActionID = "docker.inspect"
 
-// imageLastResults is the part of executions.Service the image inventory
-// reads from: the stored latest result of an action on a host.
-type imageLastResults interface {
-	LastResult(ctx context.Context, actionID, host string) ([]byte, time.Time, bool, error)
+const (
+	// ImageInspectMaxAge is how old a stored docker.inspect result may be and
+	// still name an image for a read. An inspect of a container removed long
+	// ago does not authorise reads of its image any more.
+	ImageInspectMaxAge = 24 * time.Hour
+	// maxInspectRows bounds the stored inspect results read for one host:
+	// the newest ones, which name every container the host ran in the
+	// ImageInspectMaxAge window.
+	maxInspectRows = 500
+)
+
+// imageInspectRow is one stored successful docker.inspect result of a host
+// and the time it finished.
+type imageInspectRow struct {
+	Result     []byte
+	FinishedAt time.Time
+}
+
+// imageInspects lists the stored docker.inspect results of host that finished
+// at or after since, newest first, at most limit of them.
+type imageInspects interface {
+	InspectResults(ctx context.Context, host string, since time.Time, limit int) ([]imageInspectRow, error)
+}
+
+// sqlInspects reads the stored docker.inspect results from server.db. It reads
+// the executions tables directly: the executions service keeps only the
+// newest result per host, which names one container, not every container
+// the host runs.
+type sqlInspects struct {
+	db *sql.DB
+}
+
+// InspectResults implements imageInspects over server.db.
+func (q sqlInspects) InspectResults(ctx context.Context, host string, since time.Time, limit int) ([]imageInspectRow, error) {
+	rows, err := q.db.QueryContext(ctx, `SELECT h.result, h.finished_at FROM execution_hosts h
+		JOIN executions e ON e.id = h.execution_id
+		WHERE e.action_id = ? AND h.host_id = ? AND h.state = 'finished' AND h.class = 'success'
+		AND h.finished_at >= ? ORDER BY h.finished_at DESC, e.id DESC LIMIT ?`,
+		inspectActionID, host, since.Unix(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("inspect results: %w", err)
+	}
+	defer rows.Close()
+	var out []imageInspectRow
+	for rows.Next() {
+		var res []byte
+		var at sql.NullInt64
+		if err := rows.Scan(&res, &at); err != nil {
+			return nil, fmt.Errorf("inspect results: %w", err)
+		}
+		out = append(out, imageInspectRow{Result: res, FinishedAt: time.Unix(at.Int64, 0)})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("inspect results: %w", err)
+	}
+	return out, nil
 }
 
 // imageDigestRe is a sha256 platform digest, as image.packages pins it.
 var imageDigestRe = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 
 // vulnImageService stores each successful image.packages result as an image
-// read (decision E4: the store keeps the last three reads of each image
-// repository). It never starts a read and never fails a run; errors are logged
+// read (decision E4: the store keeps the last three reads of each image on
+// each host). It never starts a read and never fails a run; errors are logged
 // by class only, never with package names or result text.
 type vulnImageService struct {
-	store   *vulninventory.Store
-	results imageLastResults
-	log     *slog.Logger
+	store    *vulninventory.Store
+	inspects imageInspects
+	now      func() time.Time
+	log      *slog.Logger
 }
 
-// newVulnImageService returns the service on db (server.db). results supplies
-// the stored docker.inspect results that name the digests.
-func newVulnImageService(db *sql.DB, results imageLastResults, log *slog.Logger) (*vulnImageService, error) {
+// newVulnImageService returns the service on db (server.db). inspects supplies
+// the stored docker.inspect results that name the digests; production passes
+// sqlInspects over the same db.
+func newVulnImageService(db *sql.DB, inspects imageInspects, log *slog.Logger) (*vulnImageService, error) {
 	st, err := vulninventory.New(db)
 	if err != nil {
 		return nil, fmt.Errorf("image inventory store: %w", err)
 	}
-	return &vulnImageService{store: st, results: results, log: log}, nil
+	return &vulnImageService{store: st, inspects: inspects, now: time.Now, log: log}, nil
 }
 
 // splitImageRef splits a digest-pinned reference (repository@sha256:...) into
@@ -68,26 +123,45 @@ func splitImageRef(ref string) (repo, digest string, ok bool) {
 	return repo, digest, true
 }
 
-// digestInInspect reports whether the stored docker.inspect result of host
-// names digest: as the platform digest of a local image, or as a repository
-// digest ending in it. An absent or unreadable inspect result names nothing.
-func (v *vulnImageService) digestInInspect(ctx context.Context, host, digest string) (bool, error) {
-	raw, _, ok, err := v.results.LastResult(ctx, inspectActionID, host)
+// inspectNames reports whether one parsed docker.inspect result names the
+// image repo@digest. A repository digest must be repo@digest exactly. The
+// platform digest carries no repository, so it names repo@digest only when
+// repo is one of the repositories the image's repository digests give.
+func inspectNames(in dockerhost.Inspect, repo, digest string) bool {
+	repos := map[string]bool{}
+	for _, d := range in.Digests {
+		r, dg, ok := splitImageRef(d)
+		if !ok {
+			continue
+		}
+		if r == repo && dg == digest {
+			return true
+		}
+		repos[r] = true
+	}
+	return in.ImageDigestPlatform == digest && repos[repo]
+}
+
+// namedByInspect reports whether any of the host's stored docker.inspect
+// results from the last ImageInspectMaxAge names repo@digest. The results of
+// every container of the host count, not only the newest one. An absent or
+// unreadable result names nothing.
+func (v *vulnImageService) namedByInspect(ctx context.Context, host, repo, digest string) (bool, error) {
+	now := v.now()
+	since := now.Add(-ImageInspectMaxAge)
+	rows, err := v.inspects.InspectResults(ctx, host, since, maxInspectRows)
 	if err != nil {
 		return false, fmt.Errorf("inspect lookup: %w", err)
 	}
-	if !ok {
-		return false, nil
-	}
-	in, err := dockerhost.ParseInspect(raw)
-	if err != nil {
-		return false, nil
-	}
-	if in.ImageDigestPlatform == digest {
-		return true, nil
-	}
-	for _, d := range in.Digests {
-		if strings.HasSuffix(d, "@"+digest) {
+	for _, row := range rows {
+		if row.FinishedAt.Before(since) {
+			continue
+		}
+		in, err := dockerhost.ParseInspect(row.Result)
+		if err != nil {
+			continue
+		}
+		if inspectNames(in, repo, digest) {
 			return true, nil
 		}
 	}
@@ -96,16 +170,27 @@ func (v *vulnImageService) digestInInspect(ctx context.Context, host, digest str
 
 // ObserveImage parses result (untrusted host output of image.packages for
 // imageRef, a repository@sha256 reference) and stores the read of host from
-// execution execID at time at. The digest must be named by host's stored
-// docker.inspect result; a digest the host's stored results do not name is
-// refused and nothing is stored. An unknown read (no package listing) is not
-// stored: it has no packages and would push out a kept read. A read the store
-// refuses is logged by class and not stored.
+// execution execID at time at. The read is stored only when imageRef is the
+// reference the read grant pinned (grantedRef), and when a docker.inspect
+// result of host from the last ImageInspectMaxAge names the repository and
+// digest of imageRef. Anything else is refused and nothing is stored. An
+// unknown read (no package listing) is not stored: it has no packages and
+// would push out a kept read. A read the store refuses is logged by class and
+// not stored.
 //
 // ObserveImage starts no read. It only reads what the executions already
-// stored, and is called for successful image.packages runs, which only a read
+// stored, and is meant for successful image.packages runs, which only a read
 // grant can start (ADR 0011 D3; the grant pins one digest per entry).
-func (v *vulnImageService) ObserveImage(parent context.Context, hostID, execID, imageRef string, at time.Time, result []byte) {
+//
+// NOT WIRED: nothing in the server calls ObserveImage yet. grantedRef is
+// trusted as the caller's copy of the execution's read grant; the check here
+// is that imageRef equals it. Wiring must take grantedRef from the stored
+// execution, not from the result.
+func (v *vulnImageService) ObserveImage(parent context.Context, hostID, execID, grantedRef, imageRef string, at time.Time, result []byte) {
+	if imageRef != grantedRef {
+		v.log.Info("audit", "kind", "vuln_image_read_refused", "host", hostID, "execution", execID, "reason", "not_granted")
+		return
+	}
 	repo, digest, ok := splitImageRef(imageRef)
 	if !ok {
 		v.log.Error("vulnerability image inventory: image ref", "host", hostID, "execution", execID, "error_class", "image_ref")
@@ -113,7 +198,7 @@ func (v *vulnImageService) ObserveImage(parent context.Context, hostID, execID, 
 	}
 	ctx, cancel := context.WithTimeout(parent, observeTimeout)
 	defer cancel()
-	named, err := v.digestInInspect(ctx, hostID, digest)
+	named, err := v.namedByInspect(ctx, hostID, repo, digest)
 	if err != nil {
 		v.log.Error("vulnerability image inventory: inspect lookup", "host", hostID, "execution", execID, "error_class", inventoryErrorClass(err))
 		return
