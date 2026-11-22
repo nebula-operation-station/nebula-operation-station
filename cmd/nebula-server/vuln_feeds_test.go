@@ -26,6 +26,21 @@ func TestUnseenFeedIsMappedAsNotNamed(t *testing.T) {
 			want: ui.VulnFeedStatus{SourceID: "cisco-csaf", Listed: true, Unseen: true},
 		},
 		{
+			name: "required core feed never named stays stale",
+			in:   vulnstore.FeedState{SourceID: "nvd", Stale: true, Seen: false},
+			want: ui.VulnFeedStatus{SourceID: "nvd", Listed: true, Stale: true},
+		},
+		{
+			name: "required core feed that has never synced stays stale",
+			in:   vulnstore.FeedState{SourceID: "debian-tracker", Stale: true, Seen: false},
+			want: ui.VulnFeedStatus{SourceID: "debian-tracker", Listed: true, Stale: true},
+		},
+		{
+			name: "optional CSAF feed seen and past its age",
+			in:   vulnstore.FeedState{SourceID: "paloalto-csaf", Stale: true, Seen: true, ContentDate: date, LastVerdict: vulnstore.SourceAccepted},
+			want: ui.VulnFeedStatus{SourceID: "paloalto-csaf", Listed: true, Stale: true, SnapshotDate: date, LastVerdict: vulnstore.SourceAccepted},
+		},
+		{
 			name: "seen and past its age",
 			in:   vulnstore.FeedState{SourceID: "nvd", Stale: true, Seen: true, ContentDate: date, LastVerdict: vulnstore.SourceAccepted},
 			want: ui.VulnFeedStatus{SourceID: "nvd", Listed: true, Stale: true, SnapshotDate: date, LastVerdict: vulnstore.SourceAccepted},

@@ -90,3 +90,35 @@ func TestUnseenFeedKeepsClosuresBlocked(t *testing.T) {
 		t.Errorf("subject under an omitted feed = %q, want feed issue and not green", got)
 	}
 }
+
+// TestOmittedFeedFindingsFollowStaleFilter: a finding that rests only on a
+// not-configured (unseen) feed is in the stale filter of the findings page,
+// as the subject list keeps its subject under the same feed issue. A
+// finding resting on healthy feeds only is not.
+func TestOmittedFeedFindingsFollowStaleFilter(t *testing.T) {
+	s := hostSubject("web2")
+	omitted := vulnRow(7, s, "CVE-2024-0007", vulnstore.StateOpen, vulnstore.TierHigh, "cisco-csaf")
+	healthy := vulnRow(8, s, "CVE-2024-0008", vulnstore.StateOpen, vulnstore.TierHigh, "debian-tracker")
+	f := &fakeVuln{page: ui.VulnPage{
+		Rows:     []ui.VulnRow{omitted, healthy},
+		Subjects: []ui.VulnSubjectStatus{freshSubject(s)},
+		Feeds: []ui.VulnFeedStatus{
+			okFeed("debian-tracker"),
+			{SourceID: "cisco-csaf", Listed: true, Unseen: true},
+		},
+		LastComplete: vulnNow,
+	}}
+	h := vulnHandler(t, f)
+
+	_, body := vulnGet(t, h, "/vulnerabilities?stale=stale")
+	if !strings.Contains(body, "CVE-2024-0007") {
+		t.Error("stale filter drops a finding resting on an omitted feed; the subject list still counts it as a feed issue")
+	}
+	if strings.Contains(body, "CVE-2024-0008") {
+		t.Error("stale filter keeps a finding resting on healthy feeds only")
+	}
+	_, body = vulnGet(t, h, "/vulnerabilities?view=subject&stale=stale")
+	if _, ok := subjectRows(body)["web2"]; !ok {
+		t.Error("stale filter drops the subject under an omitted feed")
+	}
+}

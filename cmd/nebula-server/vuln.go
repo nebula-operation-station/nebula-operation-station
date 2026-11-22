@@ -584,11 +584,22 @@ func (p vulnPages) feeds(ctx context.Context) ([]ui.VulnFeedStatus, error) {
 	return out, nil
 }
 
-// uiFeedStatus is the page view of one listed source. A source no run has
-// named (not seen) is Unseen: the agent leaves it out on purpose, so its
-// stale flag is dropped and the pages show a neutral note, not "stale".
+// optionalVulnSources are the listed sources the vulnerability agent loads
+// only when an operator configures them (the CSAF providers, see
+// cmd/nebula-vuln-agent/config.go). Only these can be left out on purpose.
+var optionalVulnSources = map[string]bool{
+	"cisco-csaf":    true,
+	"paloalto-csaf": true,
+}
+
+// uiFeedStatus is the page view of one listed source. An optional source no
+// run has named (not seen) is Unseen: the operator has not configured it, so
+// the pages show a neutral note and its stale flag is dropped. Any other
+// source keeps its stale flag: a required feed that has not synced is a
+// real gap, not a choice.
 func uiFeedStatus(s vulnstore.FeedState) ui.VulnFeedStatus {
-	return ui.VulnFeedStatus{SourceID: s.SourceID, Listed: true, Unseen: !s.Seen, Stale: s.Stale && s.Seen,
+	unseen := !s.Seen && optionalVulnSources[s.SourceID]
+	return ui.VulnFeedStatus{SourceID: s.SourceID, Listed: true, Unseen: unseen, Stale: s.Stale && !unseen,
 		SnapshotDate: s.ContentDate, LastVerdict: s.LastVerdict, Probation: s.Probation,
 		PreResetDate: s.PreResetDate, PreResetSeq: s.PreResetSeq}
 }

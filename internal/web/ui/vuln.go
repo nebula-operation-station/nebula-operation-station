@@ -569,7 +569,10 @@ func (c vulnContext) view(row VulnRow) vulnFindingView {
 		}
 		if ls := feedLabels(fs); len(ls) > 0 {
 			v.Labels = append(v.Labels, ls...)
-			v.Stale = v.Stale || !fs.Unseen
+			// Unseen feeds count too: the finding rests on a feed that
+			// runs do not use, so it is in the stale filter, as its
+			// subject is in the subject list's feed issue.
+			v.Stale = true
 		}
 	}
 	if v.Unconfirmed {
