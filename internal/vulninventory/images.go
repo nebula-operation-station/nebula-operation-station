@@ -14,11 +14,15 @@ import (
 // Image inventory (ADR 0011 D3, image.packages; decision E4). An image read
 // is the package list of one local container image, pinned to one platform
 // digest, as image.packages reports it. The store keeps the last
-// ImageReadsKept reads of each image repository and deletes the older ones
-// in the same transaction as an insert (migration 0053).
+// ImageReadsKept reads of each image (the digest, per host) and deletes the
+// older ones in the same transaction as an insert (migration 0053). The
+// repository of a read is a name the host's inspect result gave the image;
+// it is not part of the key, so one image under several names shares one
+// budget.
 const (
-	// ImageReadsKept is how many reads of one image repository the store
-	// keeps: the newest ones by read time (decision E4).
+	// ImageReadsKept is how many reads of one image on one host the store
+	// keeps: the newest ones by read time (decision E4, "je Image"). Hosts
+	// never share this budget.
 	ImageReadsKept = 3
 	// MaxImagePackages bounds the packages of one image read (ADR 0011 D3:
 	// 5,000 packages per image). It equals dockerhost.MaxImagePackages.
@@ -241,9 +245,9 @@ func (s *Store) PutImage(ctx context.Context, r ImageRead) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("vulninventory: put image: row id: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM vuln_image_reads WHERE repository = ? AND id NOT IN (
-		SELECT id FROM vuln_image_reads WHERE repository = ? ORDER BY read_at DESC, id DESC LIMIT ?)`,
-		r.Repository, r.Repository, ImageReadsKept); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM vuln_image_reads WHERE host_id = ? AND digest = ? AND id NOT IN (
+		SELECT id FROM vuln_image_reads WHERE host_id = ? AND digest = ? ORDER BY read_at DESC, id DESC LIMIT ?)`,
+		r.HostID, r.Digest, r.HostID, r.Digest, ImageReadsKept); err != nil {
 		return 0, fmt.Errorf("vulninventory: put image: keep newest: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -252,16 +256,19 @@ func (s *Store) PutImage(ctx context.Context, r ImageRead) (int64, error) {
 	return id, nil
 }
 
-// ImageReads returns the kept reads of repository, newest first (by read
-// time, then ID), with their packages. It returns at most ImageReadsKept
-// reads; an unknown repository has none.
-func (s *Store) ImageReads(ctx context.Context, repository string) ([]ImageRead, error) {
-	if err := checkPattern("repository", repository, imageRepositoryPattern, true); err != nil {
+// ImageReads returns the kept reads of the image with digest on host, newest
+// first (by read time, then ID), with their packages. It returns at most
+// ImageReadsKept reads; an unknown image has none.
+func (s *Store) ImageReads(ctx context.Context, hostID, digest string) ([]ImageRead, error) {
+	if err := checkText("host id", hostID, maxHostIDBytes, true); err != nil {
 		return nil, fmt.Errorf("vulninventory: image reads: %w", err)
 	}
+	if !imageDigestPattern.MatchString(digest) {
+		return nil, fmt.Errorf("vulninventory: image reads: %w: digest is not a sha256 digest", ErrInvalidRead)
+	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id, repository, digest, host_id, execution_id, read_at, complete,
-		reason, os_family, os_name, body FROM vuln_image_reads WHERE repository = ?
-		ORDER BY read_at DESC, id DESC LIMIT ?`, repository, ImageReadsKept)
+		reason, os_family, os_name, body FROM vuln_image_reads WHERE host_id = ? AND digest = ?
+		ORDER BY read_at DESC, id DESC LIMIT ?`, hostID, digest, ImageReadsKept)
 	if err != nil {
 		return nil, fmt.Errorf("vulninventory: image reads: %w", err)
 	}

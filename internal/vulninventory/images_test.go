@@ -18,7 +18,8 @@ const imgRepo = "registry.example/app/web"
 // imgDigest returns a sha256 digest made of the hex digit d.
 func imgDigest(d string) string { return "sha256:" + strings.Repeat(d, 64) }
 
-// testImageRead is a valid complete image read of repo at base+at seconds.
+// testImageRead is a valid complete image read of repo on host-1 at base+at
+// seconds, of the digest imgDigest("a").
 func testImageRead(repo string, at int64) ImageRead {
 	return ImageRead{
 		Repository:  repo,
@@ -35,22 +36,32 @@ func testImageRead(repo string, at int64) ImageRead {
 	}
 }
 
-// TestImageStoreKeepsThreeReadsPerRepository checks decision E4: the fourth
-// read of an image pushes out the oldest, and another repository's reads are
-// not touched.
-func TestImageStoreKeepsThreeReadsPerRepository(t *testing.T) {
+// testImageReadOn is testImageRead for host.
+func testImageReadOn(host, repo string, at int64) ImageRead {
+	r := testImageRead(repo, at)
+	r.HostID = host
+	return r
+}
+
+// TestImageStoreKeepsThreeReadsPerHostAndDigest checks decision E4 with the
+// image as the key: the fourth read of one image on one host pushes out the
+// oldest, even when the reads name the image under several repositories, and
+// another digest on the same host is not touched.
+func TestImageStoreKeepsThreeReadsPerHostAndDigest(t *testing.T) {
 	s, db := openStore(t)
 	ctx := context.Background()
-	other := testImageRead("registry.example/app/api", 1)
+	other := testImageReadOn("host-1", "api", 1)
+	other.Digest = imgDigest("b")
 	if _, err := s.PutImage(ctx, other); err != nil {
-		t.Fatalf("put other repository: %v", err)
+		t.Fatalf("put other digest: %v", err)
 	}
-	for at := int64(10); at < 14; at++ {
-		if _, err := s.PutImage(ctx, testImageRead(imgRepo, at)); err != nil {
+	names := []string{imgRepo, "web", "web:1", imgRepo}
+	for i, at := range []int64{10, 11, 12, 13} {
+		if _, err := s.PutImage(ctx, testImageReadOn("host-1", names[i], at)); err != nil {
 			t.Fatalf("put read %d: %v", at, err)
 		}
 	}
-	reads, err := s.ImageReads(ctx, imgRepo)
+	reads, err := s.ImageReads(ctx, "host-1", imgDigest("a"))
 	if err != nil {
 		t.Fatalf("image reads: %v", err)
 	}
@@ -63,14 +74,47 @@ func TestImageStoreKeepsThreeReadsPerRepository(t *testing.T) {
 		}
 	}
 	var rows int
-	if err := db.QueryRow(`SELECT count(*) FROM vuln_image_reads WHERE repository = ?`, imgRepo).Scan(&rows); err != nil {
+	if err := db.QueryRow(`SELECT count(*) FROM vuln_image_reads WHERE host_id = ? AND digest = ?`,
+		"host-1", imgDigest("a")).Scan(&rows); err != nil {
 		t.Fatal(err)
 	}
 	if rows != ImageReadsKept {
-		t.Fatalf("table holds %d rows for the repository, want %d", rows, ImageReadsKept)
+		t.Fatalf("table holds %d rows for the image, want %d", rows, ImageReadsKept)
 	}
-	if otherReads, err := s.ImageReads(ctx, other.Repository); err != nil || len(otherReads) != 1 {
-		t.Fatalf("other repository: %d reads, err %v; want 1", len(otherReads), err)
+	if otherReads, err := s.ImageReads(ctx, "host-1", imgDigest("b")); err != nil || len(otherReads) != 1 {
+		t.Fatalf("other digest: %d reads, err %v; want 1", len(otherReads), err)
+	}
+}
+
+// TestImageStoreRetentionIsPerHost checks that one host's reads do not push
+// out another host's reads of the same image: each host keeps its own three.
+// host-2's reads are the oldest, so a shared budget would drop them all.
+func TestImageStoreRetentionIsPerHost(t *testing.T) {
+	s, _ := openStore(t)
+	ctx := context.Background()
+	for _, at := range []int64{1, 2, 3} {
+		if _, err := s.PutImage(ctx, testImageReadOn("host-2", imgRepo, at)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, at := range []int64{10, 11, 12, 13} {
+		if _, err := s.PutImage(ctx, testImageReadOn("host-1", imgRepo, at)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, host := range []string{"host-1", "host-2"} {
+		reads, err := s.ImageReads(ctx, host, imgDigest("a"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(reads) != ImageReadsKept {
+			t.Fatalf("%s kept %d reads, want %d", host, len(reads), ImageReadsKept)
+		}
+		for _, r := range reads {
+			if r.HostID != host {
+				t.Fatalf("%s read holds host %q", host, r.HostID)
+			}
+		}
 	}
 }
 
@@ -88,7 +132,7 @@ func TestImageStoreRetentionFollowsReadTime(t *testing.T) {
 	if _, err := s.PutImage(ctx, testImageRead(imgRepo, 5)); err != nil {
 		t.Fatal(err)
 	}
-	reads, err := s.ImageReads(ctx, imgRepo)
+	reads, err := s.ImageReads(ctx, "host-1", imgDigest("a"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +159,7 @@ func TestImageStoreRoundTripsPackages(t *testing.T) {
 	if _, err := s.PutImage(ctx, in); err != nil {
 		t.Fatal(err)
 	}
-	reads, err := s.ImageReads(ctx, imgRepo)
+	reads, err := s.ImageReads(ctx, "host-1", imgDigest("a"))
 	if err != nil || len(reads) != 1 {
 		t.Fatalf("image reads: %d, err %v", len(reads), err)
 	}
@@ -142,6 +186,7 @@ func TestImageStoreRefusesInvalidReadsWithoutWriting(t *testing.T) {
 		{"digest short", func(r *ImageRead) { r.Digest = "sha256:abc" }, ErrInvalidRead},
 		{"repository empty", func(r *ImageRead) { r.Repository = "" }, ErrInvalidRead},
 		{"repository with space", func(r *ImageRead) { r.Repository = "a b" }, ErrInvalidRead},
+		{"host id empty", func(r *ImageRead) { r.HostID = "" }, ErrInvalidRead},
 		{"package name with quote", func(r *ImageRead) { r.Packages[0].Name = `a"b` }, ErrInvalidRead},
 		{"package version empty", func(r *ImageRead) { r.Packages[0].Version = "" }, ErrInvalidRead},
 		{"source version without source", func(r *ImageRead) { r.Packages[0].Source = "" }, ErrInvalidRead},
