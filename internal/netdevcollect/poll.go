@@ -4,6 +4,7 @@ package netdevcollect
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -139,9 +140,13 @@ type CycleReport struct {
 	// Dispatched is the number of reads handed to device workers.
 	Dispatched int
 	// MetadataWritten counts device metadata records spooled in this cycle.
+	// A record is written only when its device's metadata changed since the
+	// last record of that device, or when the device is listed again after
+	// it was not eligible.
 	MetadataWritten int
 	// MetadataFailed counts device metadata records the spool refused. A
-	// failed record does not stop the reads of the cycle.
+	// failed record does not stop the reads of the cycle, and it is tried
+	// again in the next cycle.
 	MetadataFailed int
 }
 
@@ -169,6 +174,16 @@ type Poller struct {
 	// MaxConcurrentDevices bounds devices read at once (default
 	// DefaultMaxConcurrentDevices).
 	MaxConcurrentDevices int
+
+	// metaMu guards the metadata state below. metaDigest maps each device
+	// to the digest of the last metadata record the spool accepted for it;
+	// a device without an entry gets a record on its next eligible cycle.
+	// metaPending counts refused metadata writes not yet logged, and
+	// metaWarnAt is when the last refusal warning was logged.
+	metaMu      sync.Mutex
+	metaDigest  map[string][sha256.Size]byte
+	metaPending int
+	metaWarnAt  time.Time
 
 	mu    sync.Mutex
 	sched map[schedKey]*schedState
@@ -256,8 +271,9 @@ func (p *Poller) Run(ctx context.Context) error {
 				return nil
 			}
 			p.log().Warn("netdev cycle failed", "code", errClass(err))
-		} else if rep.Dispatched > 0 || rep.Busy > 0 {
-			p.log().Info("netdev cycle", "devices", rep.Devices, "skipped", rep.Skipped, "busy", rep.Busy, "dispatched", rep.Dispatched)
+		} else if rep.Dispatched > 0 || rep.Busy > 0 || rep.MetadataWritten > 0 {
+			p.log().Info("netdev cycle", "devices", rep.Devices, "skipped", rep.Skipped, "busy", rep.Busy,
+				"dispatched", rep.Dispatched, "metadata_written", rep.MetadataWritten, "metadata_failed", rep.MetadataFailed)
 		}
 		t.Reset(interval)
 	}
@@ -331,21 +347,32 @@ func (p *Poller) Cycle(ctx context.Context) (CycleReport, error) {
 // metadataEligible reports whether a listed device gets a metadata record:
 // a blocked device gets none, and a device whose id, trust generation or
 // family the spool would refuse is not written. Credential state does not
-// matter here: the metadata carries no credential. A device that the
-// executor no longer lists (a tombstoned one) is never in the list, so it
-// gets no record either.
+// matter here: the metadata carries no credential, so a device without a
+// usable credential is still described (it is only not read). A device that
+// the executor no longer lists (a tombstoned one) is never in the list, so
+// it gets no record either.
 func metadataEligible(info *pb.NetDeviceInfo) bool {
 	gen := info.GetTrustGeneration()
 	return !info.GetBlocked() && gen >= 1 && gen <= netdevcontract.MaxTrustGeneration &&
 		familyReads[info.GetFamily()] != nil
 }
 
-// spoolMetadata writes one device metadata record per listed device that
-// metadataEligible accepts, using the first listing of a duplicate id. A
-// failed write is counted in rep and logged without its detail; it never
-// stops the cycle, and it does not touch any read schedule.
+// spoolMetadata writes one device metadata record for each listed device
+// that metadataEligible accepts and whose metadata differs from the last
+// record the spool accepted for it, using the first listing of a duplicate
+// id. A device that is not eligible, or not listed, loses its digest, so
+// it gets a fresh record when it becomes eligible again. A refused write
+// keeps the old digest, so it is tried again in the next cycle. A refusal
+// is counted in rep and logged as an aggregate at most once per
+// MinReadInterval; it never stops the cycle or touches a read schedule.
 func (p *Poller) spoolMetadata(ctx context.Context, infos []*pb.NetDeviceInfo, rep *CycleReport) {
+	p.metaMu.Lock()
+	defer p.metaMu.Unlock()
+	if p.metaDigest == nil {
+		p.metaDigest = map[string][sha256.Size]byte{}
+	}
 	seen := make(map[string]bool, len(infos))
+	eligible := make(map[string]bool, len(infos))
 	for _, info := range infos {
 		if ctx.Err() != nil {
 			return
@@ -364,15 +391,38 @@ func (p *Poller) spoolMetadata(ctx context.Context, infos []*pb.NetDeviceInfo, r
 			Label:           info.GetLabel(),
 			TrustGeneration: info.GetTrustGeneration(),
 		})
-		if err == nil {
-			_, err = p.Spool.Write(ctx, id, ReadDeviceMetadata, info.GetTrustGeneration(), false, payload)
-		}
 		if err != nil {
 			rep.MetadataFailed++
-			p.log().Warn("netdev metadata spool failed", "device", id, "code", "spool")
 			continue
 		}
+		eligible[id] = true
+		sum := sha256.Sum256(payload)
+		if prev, ok := p.metaDigest[id]; ok && prev == sum {
+			continue
+		}
+		if _, err := p.Spool.Write(ctx, id, ReadDeviceMetadata, info.GetTrustGeneration(), false, payload); err != nil {
+			rep.MetadataFailed++
+			continue
+		}
+		p.metaDigest[id] = sum
 		rep.MetadataWritten++
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	for id := range p.metaDigest {
+		if !eligible[id] {
+			delete(p.metaDigest, id)
+		}
+	}
+	p.metaPending += rep.MetadataFailed
+	if p.metaPending > 0 {
+		now := p.Now()
+		if p.metaWarnAt.IsZero() || now.Sub(p.metaWarnAt) >= MinReadInterval {
+			p.log().Warn("netdev metadata refused", "failed", p.metaPending, "code", "spool")
+			p.metaPending = 0
+			p.metaWarnAt = now
+		}
 	}
 }
 
