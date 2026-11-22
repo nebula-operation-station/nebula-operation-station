@@ -27,6 +27,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -34,6 +35,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -64,6 +66,13 @@ const (
 	e2eFixtureResult = "../../internal/executions/actions/testdata/package_list_installed_result.json"
 	// e2eFeedDir holds the feed bodies; their dates are filled in per run.
 	e2eFeedDir = "testdata/vuln_inventory"
+	// e2eSources and e2eBinaries are the counts of the fixture's complete
+	// read that the inventory line shows: the source packages (openssl,
+	// glibc, restic) and their binary packages (openssl, libssl3, libc6,
+	// restic). The kernel meta source is not a component (convert.go skips
+	// it), so the two kernel images are not counted.
+	e2eSources  = 3
+	e2eBinaries = 4
 )
 
 // e2eFixture returns the fixture result bytes.
@@ -191,9 +200,12 @@ func e2eClient(t *testing.T, base, tokenFile, caFile string) *nosclient.Client {
 }
 
 // e2eObserver is the installed-result observer on the server's database:
-// the same ObserveInstalled code runServer runs for package.list_installed,
-// with the store configuration of the server, so complete reads close
-// findings by inventory.
+// the same ObserveInstalled code runServer runs for package.list_installed.
+// Its findings store is built by newVulnService, the constructor runServer
+// uses (main.go), so the store, tier and classifier are the production ones,
+// and the observer gets it with setCloser as main.go does. What this does
+// not reach is runServer's own observer and its setCloser call: that
+// observer is local to runServer (see the report).
 func e2eObserver(t *testing.T, db *sql.DB, log *slog.Logger) (*vulnInventoryService, *vulnstore.Store) {
 	t.Helper()
 	ops := executions.New(context.Background(), nil, db, nil, log)
@@ -201,12 +213,22 @@ func e2eObserver(t *testing.T, db *sql.DB, log *slog.Logger) (*vulnInventoryServ
 	if err != nil {
 		t.Fatal(err)
 	}
-	st, err := vulnstore.New(db, vulnstore.Config{Sources: vulnSources, Tier: vulnTier, Classifier: vulnClassifier{}})
+	v, err := newVulnService(db, newVTSink(), log, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	inv.setCloser(st)
-	return inv, st
+	inv.setCloser(v.store)
+	return inv, v.store
+}
+
+// e2eRead stores a complete read of ivcHost taken at at, and runs the
+// closure of the observer. A core.facts result finished at the same time
+// stands for the release, so the facts are never older than the list.
+func e2eRead(t *testing.T, db *sql.DB, inv *vulnInventoryService, n int, at time.Time, result []byte) {
+	t.Helper()
+	seed := &invEnv{db: db}
+	seed.insertFactsAt(t, n, ivcHost, factsResult(t, debian12Release), at)
+	inv.ObserveInstalled(context.Background(), ivcHost, fmt.Sprintf("exec-e2e-list-%d", n), at, result)
 }
 
 // e2eFindings lists the findings of host in the stored order.
@@ -340,7 +362,7 @@ func TestPackageListInstalledFindingReachesServerOverHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	_, st := e2eObserver(t, db, log)
+	inv, st := e2eObserver(t, db, log)
 	fs := e2eFindings(t, st, ivcHost)
 	if len(fs) != 1 {
 		t.Fatalf("%d findings for %s, want exactly the openssl finding", len(fs), ivcHost)
@@ -353,18 +375,32 @@ func TestPackageListInstalledFindingReachesServerOverHTTP(t *testing.T) {
 	}
 
 	// The upgraded read closes it (path 1: the installed version is at or
-	// above the fixed version). The finding was written moments ago; the
-	// closure needs its write to be older than the read by the listing lag,
-	// so its write time is moved back an hour in the database. The store
-	// clock cannot be injected through runServer.
-	if _, err := db.ExecContext(ctx, `UPDATE vuln_findings SET updated_at = updated_at - 3600`); err != nil {
-		t.Fatal(err)
+	// above the fixed version). The closure needs the finding's last write
+	// to be strictly older than the read less the listing lag (vulnListLag).
+	// A read may be at most vulninventory.MaxReadSkew after now, so a read
+	// at the lag edge of a write made just now would be refused. The store
+	// clock is not reachable through runServer, so the write time is moved
+	// back by the lag and two seconds in the database; the edge read is then
+	// in the past. A read exactly at the edge holds the finding open; one
+	// second later closes it. A different lag then changes this outcome.
+	back := vulnListLag + 2*time.Second
+	if _, err := db.ExecContext(ctx, `UPDATE vuln_findings SET updated_at = updated_at - ? WHERE finding_key = ?`,
+		int64(back/time.Second), fs[0].Key[:]); err != nil {
+		t.Fatalf("move the finding's write back: %v", err)
 	}
-	at2 := time.Now().UTC().Truncate(time.Second)
-	seed2 := &invEnv{db: db}
-	seed2.insertFactsAt(t, 101, ivcHost, factsResult(t, debian12Release), at2)
-	inv, _ = e2eObserver(t, db, log)
-	inv.ObserveInstalled(ctx, ivcHost, "exec-e2e-list-2", at2, e2eUpgraded(t))
+	fs = e2eFindings(t, st, ivcHost)
+	if len(fs) != 1 {
+		t.Fatalf("after the write time moved: %d findings, want 1", len(fs))
+	}
+	written := fs[0].Updated
+	edge := written.Add(vulnListLag)
+	e2eRead(t, db, inv, 101, edge, e2eUpgraded(t))
+	if fs = e2eFindings(t, st, ivcHost); len(fs) != 1 || fs[0].State != vulnstore.StateOpen {
+		t.Fatalf("read at the listing lag edge: %d findings, want 1 open (write at %s, read at %s)",
+			len(fs), written.Format(time.RFC3339), edge.Format(time.RFC3339))
+	}
+	after := edge.Add(time.Second)
+	e2eRead(t, db, inv, 102, after, e2eUpgraded(t))
 	fs = e2eFindings(t, st, ivcHost)
 	if len(fs) != 1 {
 		t.Fatalf("after the upgraded read: %d findings, want 1", len(fs))
@@ -376,11 +412,15 @@ func TestPackageListInstalledFindingReachesServerOverHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The vulnerabilities page of the host shows the inventory line.
+	// The vulnerabilities page of the host shows the inventory line of the
+	// last read exactly: its time, the source and binary counts of the
+	// fixture, and the complete flag; then the running kernel line.
 	s2 := startVR(t, dir, cfg)
 	defer s2.stop()
 	code, body := s2.do(t, http.MethodGet, "/vulnerabilities/subject/host/"+ivcHost, alice, "", nil)
-	if code != http.StatusOK || !strings.Contains(string(body), "complete") || !strings.Contains(string(body), "Running kernel 6.1.0-26-amd64: mapped") {
-		t.Fatalf("vulnerabilities page = %d; inventory line missing:\n%s", code, body)
+	wantLine := "read " + after.UTC().Format("2006-01-02 15:04 UTC") + ", " +
+		strconv.Itoa(e2eSources) + " source packages (" + strconv.Itoa(e2eBinaries) + " binaries), complete"
+	if code != http.StatusOK || !strings.Contains(string(body), wantLine) || !strings.Contains(string(body), "Running kernel 6.1.0-26-amd64: mapped") {
+		t.Fatalf("vulnerabilities page = %d; want the inventory line %q and the mapped kernel:\n%s", code, wantLine, body)
 	}
 }
