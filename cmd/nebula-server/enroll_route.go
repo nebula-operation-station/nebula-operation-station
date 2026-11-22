@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/clientaddr"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/enroll"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
@@ -28,11 +29,12 @@ func enrollFeature() serverFeature {
 }
 
 // enrollPublic mounts GET /enroll/<offer-id> with its rate limit. The
-// resolver is built from the same configuration as the dialog's (no trusted
-// proxies), so both see the same client address. The startup warning is
-// logged once, by enrollOptions.
+// resolver is built from the same configuration as the dialog's
+// (enrollClientAddr on deps.cfg), so both see the same client address. The
+// startup warning and the trusted-proxy-network lines are logged once, by
+// enrollOptions.
 func enrollPublic(deps serverDeps, p *publicRoutes) error {
-	addr, err := enrollClientAddr(deps.log)
+	addr, err := enrollClientAddr(deps.cfg, nil)
 	if err != nil {
 		return err
 	}
@@ -49,10 +51,11 @@ func enrollPublic(deps serverDeps, p *publicRoutes) error {
 }
 
 // enrollOptions sets ui.Options.EnrollClientAddr and runs the startup
-// warning of WarnListener. No trusted proxy is configured (this release has
-// no setting for one, docs/admin/guide.md), so the TCP peer is the client.
+// warning of WarnListener. The trusted proxies come from server.json
+// (trusted_proxies, trusted_proxy_networks); without them the TCP peer is
+// the client.
 func enrollOptions(deps serverDeps, o *ui.Options) error {
-	r, err := enrollClientAddr(deps.log)
+	r, err := enrollClientAddr(deps.cfg, deps.log)
 	if err != nil {
 		return err
 	}
@@ -61,10 +64,13 @@ func enrollOptions(deps serverDeps, o *ui.Options) error {
 	return nil
 }
 
-// enrollClientAddr builds the resolver without trusted proxies, the
-// configuration the download route and the dialog share.
-func enrollClientAddr(log *slog.Logger) (*clientaddr.Resolver, error) {
-	r, err := clientaddr.New(clientaddr.Config{}, log)
+// enrollClientAddr builds the resolver of the download route and the dialog
+// from the trusted-proxy settings of cfg (ADR 0013 D7). Both hooks call it
+// on the same deps.cfg, so the two resolvers are equal. log receives the
+// trusted proxy networks; nil logs nothing. An invalid setting fails the
+// start (the loader has refused it already).
+func enrollClientAddr(cfg serverconfig.Config, log *slog.Logger) (*clientaddr.Resolver, error) {
+	r, err := clientaddr.New(cfg.ClientAddrConfig(), log)
 	if err != nil {
 		return nil, fmt.Errorf("enrollment client address: %w", err)
 	}
