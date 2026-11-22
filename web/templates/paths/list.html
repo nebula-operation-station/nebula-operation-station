@@ -20,6 +20,7 @@
 <div class="toolbar">
   <h1>Attack paths</h1>
   <a class="button button--small button--secondary" href="{{.MapHref}}">Show on the traffic map</a>
+  <a class="button button--small button--secondary" href="/vuln/jewels">Crown jewels</a>
 </div>
 <p class="hint">Paths from the internet or NetBird peers to each crown jewel, computed by NOS from its own data (ADR 0011). L is the path likelihood, the product of the step values e, with steps treated as independent (an approximation); R = L × the crown jewel's impact weight. At most {{.PathsPerTarget}} paths per crown jewel and {{.MaxDepth}} steps per path. Open a path to see every input of every number. Nothing here starts an action; fix links open the existing flows, prefilled.</p>
 
