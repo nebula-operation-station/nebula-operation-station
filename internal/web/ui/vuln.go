@@ -74,6 +74,35 @@ type VulnSubjectStatus struct {
 	// LastComplete is the end of the last complete run that covered the
 	// subject; zero means no complete run did ("not assessed").
 	LastComplete time.Time
+	// Inventory is the package inventory NOS holds for a host (ADR 0011
+	// D8); nil means no read is stored. Only host subjects carry one.
+	Inventory *VulnInventoryStatus
+}
+
+// VulnInventoryStatus is the package inventory of a host as its last stored
+// read describes it (ADR 0011 D8, the coverage of the Vulnerabilities tab).
+// It holds the time, completeness and counts of the read and the running
+// kernel, never the package list.
+type VulnInventoryStatus struct {
+	// ReadAt is the time of the read.
+	ReadAt time.Time
+	// Complete is the read's completeness flag (D3).
+	Complete bool
+	// Reason says why a partial read is partial: fixed text from the
+	// inventory, never host content.
+	Reason string
+	// Sources is the number of source packages of the read, Binaries the
+	// number of their binary packages.
+	Sources  int
+	Binaries int
+	// KernelRelease is the running kernel's release: host text, shown as
+	// text and capped (see kernelText).
+	KernelRelease string
+	// KernelMapped: the running kernel maps to a kernel source version
+	// (D4); otherwise its coverage is unknown, never clean.
+	KernelMapped bool
+	// Unavailable: the read could not be loaded, so nothing is known.
+	Unavailable bool
 }
 
 // VulnFeedStatus is NOS's view of one feed source (D4, D5, D6).
@@ -916,7 +945,98 @@ func subjectStatus(g vulnSubjectGroup, st VulnSubjectStatus, feedIssue, pageFeed
 	case feedIssue, pageFeedIssue:
 		return vulnLabel{"feed issue", classWarning}
 	}
+	if l, unknown := inventoryUnknown(st); unknown {
+		return l
+	}
 	return vulnLabel{"no open findings", classOK}
+}
+
+// inventoryUnknown reports whether a host's package inventory keeps its
+// status from being green (D6, D8): no stored read, an unavailable read or
+// a partial one. Its findings are whatever NOS could match, so a host
+// without a complete list is never "no open findings".
+func inventoryUnknown(st VulnSubjectStatus) (vulnLabel, bool) {
+	if st.Subject.Kind != vulnfinding.SubjectHost {
+		return vulnLabel{}, false
+	}
+	if inv := st.Inventory; inv != nil && inv.Complete && !inv.Unavailable {
+		return vulnLabel{}, false
+	}
+	return vulnLabel{labelIncomplete, classUnknown}, true
+}
+
+// vulnInventoryView is the "Package inventory" line of a host's
+// Vulnerabilities tab: the read (or why there is none) and the kernel line.
+type vulnInventoryView struct {
+	Package string
+	Kernel  string
+}
+
+// Texts of the package inventory line (ADR 0011 D8, D4). They are fixed
+// text; only the kernel release comes from the host.
+const (
+	labelInventoryNone        = "none stored: no successful package.list_installed run for this host yet"
+	labelInventoryUnavailable = "inventory status unavailable"
+	labelKernelUnknown        = "kernel coverage unknown"
+	// maxKernelShown caps the kernel release shown, in characters.
+	maxKernelShown = 128
+)
+
+// hostInventoryView builds the inventory line of a host subject; it returns
+// nil for images and devices, which have no package inventory line.
+func hostInventoryView(st VulnSubjectStatus) *vulnInventoryView {
+	if st.Subject.Kind != vulnfinding.SubjectHost {
+		return nil
+	}
+	inv := st.Inventory
+	unknownKernel := "Running kernel: " + labelKernelUnknown
+	switch {
+	case inv == nil:
+		return &vulnInventoryView{Package: labelInventoryNone, Kernel: unknownKernel}
+	case inv.Unavailable:
+		return &vulnInventoryView{Package: labelInventoryUnavailable, Kernel: unknownKernel}
+	}
+	v := &vulnInventoryView{}
+	if inv.Complete {
+		v.Package = "read " + vulnTime(inv.ReadAt) + ", " + strconv.Itoa(inv.Sources) + " source packages (" +
+			strconv.Itoa(inv.Binaries) + " binaries), complete"
+	} else {
+		reason := vulnText(inv.Reason, false)
+		if reason == "" {
+			reason = "reason not stored"
+		}
+		v.Package = "partial: " + reason
+	}
+	kernel := "Running kernel"
+	if rel := kernelText(inv.KernelRelease); rel != "" {
+		kernel += " " + rel
+	}
+	if inv.KernelMapped {
+		v.Kernel = kernel + ": mapped"
+	} else {
+		v.Kernel = kernel + ": " + labelKernelUnknown
+	}
+	return v
+}
+
+// kernelText makes the host-reported kernel release safe to show as text:
+// at most maxKernelShown characters, with control, format and bidi
+// characters replaced by U+FFFD (as executions/facts.go printable does).
+func kernelText(s string) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		if n >= maxKernelShown {
+			b.WriteString("…")
+			break
+		}
+		if !unicode.IsPrint(r) || unicode.Is(unicode.Bidi_Control, r) {
+			r = unicode.ReplacementChar
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return b.String()
 }
 
 // feedHasIssue reports whether a source has any feed label (not listed,
@@ -1135,6 +1255,11 @@ func (h *Handler) handleVulnSubject(w http.ResponseWriter, r *http.Request) {
 	groups := groupBySubject(c, VulnPage{Rows: rows, Truncated: page.Truncated, Subjects: []VulnSubjectStatus{c.subject(s)}}, views, vulnFilter{State: vulnStateAll})
 	if len(groups) == 1 {
 		d.Subject = &groups[0]
+	}
+	// The host's package inventory line (ADR 0011 D8) is shown with the page
+	// banners, the only text slot the subject page has without a template change.
+	if inv := hostInventoryView(c.subject(s)); inv != nil {
+		d.Banners = append(d.Banners, vulnBanner{Text: "Package inventory: " + inv.Package}, vulnBanner{Text: inv.Kernel})
 	}
 	d.TrivyLocal.besideHermes(rows, c.subject(s), d.Subject, now)
 	fix := h.newVulnFixResolver()

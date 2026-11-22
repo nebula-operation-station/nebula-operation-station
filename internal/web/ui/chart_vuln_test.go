@@ -45,7 +45,8 @@ func vulnLineState(body string) string {
 func chartTime(age time.Duration) time.Time { return linesNow.Add(-age) }
 
 func chartFreshHost() ui.VulnSubjectStatus {
-	return ui.VulnSubjectStatus{Subject: hostSubject("box"), LastComplete: chartTime(time.Hour)}
+	return ui.VulnSubjectStatus{Subject: hostSubject("box"), LastComplete: chartTime(time.Hour),
+		Inventory: &ui.VulnInventoryStatus{ReadAt: chartTime(time.Hour), Complete: true, KernelMapped: true}}
 }
 
 func TestChartVulnLineHiddenWithoutBackend(t *testing.T) {
