@@ -6,12 +6,14 @@
 // real BackupExecutor returns, and the message limits on both sides, all
 // over a real Unix socket.
 //
-// Two servers appear here. Requests and the backup are driven through
-// newHarness, which runs executor.NewGRPCServer around the real Service, so
-// the server's limits are the production options. The run answers need a
-// handler that returns a chosen result and log; the real Service cannot be
-// made to return those, so they use sizedService, a stand-in served with
-// startSizedServer.
+// Every server here is started by newHarness, so its options are the
+// production ones. Requests and the backup are driven through
+// executor.NewGRPCServer around the real Service. The run answers and the
+// exact-size answers need a handler that returns a chosen answer; the real
+// Service cannot be made to return those, so they use sizedService, a
+// stand-in served under executor.ServerOptions (the options NewGRPCServer
+// itself is built with) by startSized. Only the test of the client's own
+// receive limit raises the server's send limit on top of them.
 
 package executorclient
 
@@ -24,8 +26,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -46,15 +46,17 @@ import (
 )
 
 // sizedService is the stand-in executor for the run answers and the
-// exact-size backup answer. Each test sets the handler of the RPC it drives;
+// exact-size answers. Each test sets the handler of the RPC it drives;
 // every other RPC is Unimplemented. The handlers are set before the server
-// starts and never change afterwards.
+// starts and never change afterwards. calls counts the handler calls other
+// than GetStatus, so a test can tell whether a message reached the handler.
 type sizedService struct {
 	pb.UnimplementedExecutorServiceServer
 	runAttached func(*pb.RunAttachedRequest) *pb.RunAttachedResponse
 	getRun      func(*pb.GetRunRequest) *pb.GetRunResponse
 	batchMember func(*pb.RunBatchMemberRequest) *pb.RunBatchMemberResponse
 	backup      func(*pb.BackupExecutorRequest) *pb.BackupExecutorResponse
+	calls       atomic.Int32
 }
 
 func (s *sizedService) GetStatus(_ context.Context, _ *pb.GetStatusRequest) (*pb.GetStatusResponse, error) {
@@ -62,51 +64,61 @@ func (s *sizedService) GetStatus(_ context.Context, _ *pb.GetStatusRequest) (*pb
 }
 
 func (s *sizedService) RunAttached(_ context.Context, in *pb.RunAttachedRequest) (*pb.RunAttachedResponse, error) {
+	s.calls.Add(1)
 	return s.runAttached(in), nil
 }
 
 func (s *sizedService) GetRun(_ context.Context, in *pb.GetRunRequest) (*pb.GetRunResponse, error) {
+	s.calls.Add(1)
 	return s.getRun(in), nil
 }
 
 func (s *sizedService) RunBatchMember(_ context.Context, in *pb.RunBatchMemberRequest) (*pb.RunBatchMemberResponse, error) {
+	s.calls.Add(1)
 	return s.batchMember(in), nil
 }
 
 func (s *sizedService) BackupExecutor(_ context.Context, in *pb.BackupExecutorRequest) (*pb.BackupExecutorResponse, error) {
+	s.calls.Add(1)
 	return s.backup(in), nil
 }
 
-// startSizedServer serves svc on a real peercred socket with the real role
-// table. Its message limits are the executor's constants. It is not
-// executor.NewGRPCServer, which takes the concrete *executor.Service; a
-// change to NewGRPCServer's limits is therefore not seen by the tests that
-// use this server (see the report, open item on the server options).
-func startSizedServer(t *testing.T, svc pb.ExecutorServiceServer) string {
+// startSized serves svc with newHarness under executor.ServerOptions, the
+// options executor.NewGRPCServer is built with, and returns the socket. A
+// change to the production server options is therefore seen here. extra is
+// appended after them; only the test of the client's receive limit uses it.
+func startSized(t *testing.T, svc *sizedService, extra ...grpc.ServerOption) string {
 	t.Helper()
-	uidRoles := map[uint32][]peercred.Role{uint32(os.Getuid()): {peercred.RoleServer, peercred.RoleAdmin}}
-	policy := peercred.NewPolicy(uidRoles, executor.MethodRoles())
-	sockDir := t.TempDir()
-	if err := os.Chmod(sockDir, 0o755); err != nil {
-		t.Fatal(err)
+	return newHarness(t, harnessOptions{handler: svc, extraServerOptions: extra}).socket
+}
+
+// sendRefusal and receiveRefusal are the gRPC status messages of a message
+// over a send or a receive limit: size is the message, limit the limit that
+// refused it. The limits of the two sides differ (executor.MaxMessageSize
+// for requests, executor.MaxResponseSize for answers), so the limit in the
+// message names the side whose limit fired.
+func sendRefusal(size, limit int) string {
+	return fmt.Sprintf("trying to send message larger than max (%d vs. %d)", size, limit)
+}
+
+func receiveRefusal(size, limit int) string {
+	return fmt.Sprintf("grpc: received message larger than max (%d vs. %d)", size, limit)
+}
+
+// requireLimitDetail asserts that err is the client's ErrLimitExceeded with
+// exactly the given detail and a gRPC ResourceExhausted cause.
+func requireLimitDetail(t *testing.T, err error, detail string) {
+	t.Helper()
+	requireCode(t, err, permit.CodeLimit)
+	if !errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("error %v is not ErrLimitExceeded", err)
 	}
-	socket := filepath.Join(sockDir, "executor.sock")
-	lis, err := peercred.Listen(peercred.ListenOptions{Path: socket, Mode: 0o666})
-	if err != nil {
-		t.Fatal(err)
+	if got := clientErrorDetail(t, err); got != detail {
+		t.Fatalf("limit detail = %q, want %q", got, detail)
 	}
-	srv := grpc.NewServer(
-		grpc.Creds(peercred.Credentials{Policy: policy}),
-		grpc.MaxConcurrentStreams(executor.MaxConcurrentStreams),
-		grpc.ChainUnaryInterceptor(policy.UnaryInterceptor(nil)),
-		grpc.ChainStreamInterceptor(policy.StreamInterceptor(nil)),
-		grpc.MaxRecvMsgSize(executor.MaxMessageSize),
-		grpc.MaxSendMsgSize(executor.MaxResponseSize),
-	)
-	pb.RegisterExecutorServiceServer(srv, svc)
-	go func() { _ = srv.Serve(lis) }()
-	t.Cleanup(srv.Stop)
-	return socket
+	if st, ok := status.FromError(errors.Unwrap(err)); !ok || st.Code() != codes.ResourceExhausted {
+		t.Fatalf("cause of %v is not a gRPC ResourceExhausted status", err)
+	}
 }
 
 // newSizedClient returns a verified client with the production options.
@@ -233,7 +245,7 @@ func TestLargestRunAttachedAnswerArrives(t *testing.T) {
 				return &pb.RunAttachedResponse{Class: "success", ExitCode: 0, Result: o.result, Log: o.log,
 					LogTruncated: o.truncated, Endpoint: "192.0.2.10:22", DurationMs: 1}
 			}}
-			c := newSizedClient(t, startSizedServer(t, svc))
+			c := newSizedClient(t, startSized(t, svc))
 			resp, err := c.RunAttached(bigCtx(t), &pb.RunAttachedRequest{})
 			if err != nil {
 				t.Fatalf("RunAttached: %v", err)
@@ -254,7 +266,7 @@ func TestLargestGetRunAnswerArrives(t *testing.T) {
 				return &pb.GetRunResponse{Run: &pb.RunStatus{ExecutionId: "exec-1", HostId: "host-1", State: "finished",
 					Class: "success", Result: o.result, Log: o.log, LogTruncated: o.truncated, Endpoint: "192.0.2.10:22"}}
 			}}
-			c := newSizedClient(t, startSizedServer(t, svc))
+			c := newSizedClient(t, startSized(t, svc))
 			resp, err := c.GetRun(bigCtx(t), &pb.GetRunRequest{ExecutionId: "exec-1", HostId: "host-1"})
 			if err != nil {
 				t.Fatalf("GetRun: %v", err)
@@ -275,7 +287,7 @@ func TestLargestRunBatchMemberAnswerArrives(t *testing.T) {
 				return &pb.RunBatchMemberResponse{ExecutionId: "exec-1", Class: "success", Result: o.result, Log: o.log,
 					LogTruncated: o.truncated, Endpoint: "192.0.2.10:22"}
 			}}
-			c := newSizedClient(t, startSizedServer(t, svc))
+			c := newSizedClient(t, startSized(t, svc))
 			resp, err := c.RunBatchMember(bigCtx(t), &pb.RunBatchMemberRequest{BatchDigest: unknownDigest, MemberId: "m1"})
 			if err != nil {
 				t.Fatalf("RunBatchMember: %v", err)
@@ -296,16 +308,9 @@ func TestLargestRunBatchMemberAnswerArrives(t *testing.T) {
 // skipped silently by the executor, and the answer check below catches it.
 const backupChunk = 1 << 20
 
-// backupMaxExtra bounds the key bytes the probe adds. The answer has to fit
-// executor.MaxResponseSize, so no backup of the executor's can ask for more
-// than that; the probe stops one chunk short of it.
-const backupMaxExtra = executor.MaxResponseSize - backupChunk
-
 // backupProbe drives the real BackupExecutor over gRPC. It adds key files of
 // known sizes to the real keys directory and asks the real executor whether
-// the answer is accepted. The executor's limit is found this way, not read
-// from its source, so the test follows the limit wherever the executor
-// keeps it.
+// the answer is accepted.
 type backupProbe struct {
 	t        *testing.T
 	c        *Client
@@ -327,7 +332,10 @@ const probePart = "probe-part.key"
 func (p *backupProbe) setExtra(k int) {
 	p.t.Helper()
 	full, rest := k/backupChunk, k%backupChunk
-	for i := 0; i < executor.MaxResponseSize/backupChunk; i++ {
+	if k < 0 || k > executor.MaxBackupTotal+backupChunk {
+		p.t.Fatalf("probe size %d is outside 0..%d", k, executor.MaxBackupTotal+backupChunk)
+	}
+	for i := 0; i <= (executor.MaxBackupTotal+backupChunk)/backupChunk; i++ {
 		name := filepath.Join(p.keysDir, probeName(i))
 		if err := os.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
 			p.t.Fatal(err)
@@ -357,7 +365,7 @@ func (p *backupProbe) setExtra(k int) {
 // backup over its total limit (executor backup.go). The client maps every
 // gRPC ResourceExhausted to CodeLimit, transport send and receive limits
 // included, so the message is what tells the executor's refusal apart. A
-// transport refusal fails the probe instead of moving the bisection point.
+// transport refusal fails the test instead of passing as the executor's.
 const backupTooLargeMsg = "the backup is too large"
 
 // accepted asks the executor for a backup with the current probe files. A
@@ -401,31 +409,27 @@ func TestLargestBackupAnswerArrivesOverRealService(t *testing.T) {
 		t.Fatal("the backup with no probe key files is refused")
 	}
 	baseBytes := backupTotal(base)
-
-	// Find the largest accepted probe size by bisection. lo is accepted, hi
-	// is refused; the search stops when they are one byte apart.
-	lo, hi := 0, backupMaxExtra
-	if _, ok := p.run(hi); ok {
-		t.Fatalf("a backup of %d extra bytes is accepted; the probe range is too small", hi)
-	}
-	for hi-lo > 1 {
-		mid := lo + (hi-lo)/2
-		if _, ok := p.run(mid); ok {
-			lo = mid
-		} else {
-			hi = mid
-		}
+	if baseBytes <= 0 || baseBytes >= executor.MaxBackupTotal {
+		t.Fatalf("base backup is %d bytes, want 1..%d", baseBytes, executor.MaxBackupTotal-1)
 	}
 
-	// The answer at the largest accepted size arrives whole: every file the
-	// probe wrote is in it with its exact content, and the total is the base
-	// plus lo.
+	// One byte over executor.MaxBackupTotal is the executor's own refusal
+	// (accepted fails the test on any other error).
+	over := executor.MaxBackupTotal - baseBytes + 1
+	if _, ok := p.run(over); ok {
+		t.Fatalf("a backup of %d bytes, one over MaxBackupTotal, is accepted", baseBytes+over)
+	}
+
+	// Exactly executor.MaxBackupTotal is accepted and arrives whole: every
+	// file the probe wrote is in it with its exact content, and the total is
+	// MaxBackupTotal.
+	lo := executor.MaxBackupTotal - baseBytes
 	resp, ok := p.run(lo)
 	if !ok {
-		t.Fatalf("the backup at its largest accepted size (%d bytes) is refused on the second call", lo)
+		t.Fatalf("the backup at MaxBackupTotal (%d bytes, base %d + probe %d) is refused", executor.MaxBackupTotal, baseBytes, lo)
 	}
-	if got := backupTotal(resp); got != baseBytes+lo {
-		t.Fatalf("backup total = %d bytes, want %d (base %d + probe %d)", got, baseBytes+lo, baseBytes, lo)
+	if got := backupTotal(resp); got != executor.MaxBackupTotal {
+		t.Fatalf("backup total = %d bytes, want MaxBackupTotal %d (base %d + probe %d)", got, executor.MaxBackupTotal, baseBytes, lo)
 	}
 	chunk := sizePayload(backupChunk, 9)
 	full, rest := lo/backupChunk, lo%backupChunk
@@ -453,7 +457,6 @@ func TestLargestBackupAnswerArrivesOverRealService(t *testing.T) {
 	if size := proto.Size(resp); size >= executor.MaxResponseSize {
 		t.Fatalf("largest backup answer is %d bytes, not below MaxResponseSize %d", size, executor.MaxResponseSize)
 	}
-	t.Logf("largest backup total accepted by the real executor: %d bytes (base %d, probe %d)", baseBytes+lo, baseBytes, lo)
 }
 
 // backupTotal is the sum of the data of every file of a backup answer.
@@ -489,7 +492,7 @@ func TestAnswerAtMaxResponseSizeArrives(t *testing.T) {
 	svc := &sizedService{backup: func(*pb.BackupExecutorRequest) *pb.BackupExecutorResponse {
 		return backupAnswer(data)
 	}}
-	c := newSizedClient(t, startSizedServer(t, svc))
+	c := newSizedClient(t, startSized(t, svc))
 	resp, err := c.BackupExecutor(bigCtx(t), &pb.BackupExecutorRequest{})
 	if err != nil {
 		t.Fatalf("BackupExecutor at MaxResponseSize: %v", err)
@@ -497,36 +500,59 @@ func TestAnswerAtMaxResponseSizeArrives(t *testing.T) {
 	checkBytes(t, "backup file", resp.GetFiles()[0].GetData(), data)
 }
 
-// TestAnswerOverMaxResponseSizeIsRefused shows the refusal comes from the
-// server's send limit. The production client's own receive limit is raised
-// for this call, so only the server can refuse: its message names the send
-// side. The stand-in answers one byte over MaxResponseSize.
-func TestAnswerOverMaxResponseSizeIsRefused(t *testing.T) {
+// overMaxResponseAnswer returns a backup answer of exactly one byte over
+// executor.MaxResponseSize on the wire.
+func overMaxResponseAnswer(t *testing.T) *pb.BackupExecutorResponse {
+	t.Helper()
 	buf := sizePayload(executor.MaxResponseSize+1, 6)
 	data, ok := fitData(buf, executor.MaxResponseSize+1, backupBuild)
 	if !ok {
 		t.Fatalf("no payload makes the answer %d bytes", executor.MaxResponseSize+1)
 	}
-	if size := proto.Size(backupAnswer(data)); size != executor.MaxResponseSize+1 {
+	answer := backupAnswer(data)
+	if size := proto.Size(answer); size != executor.MaxResponseSize+1 {
 		t.Fatalf("answer is %d bytes, want %d", size, executor.MaxResponseSize+1)
 	}
-	var handled atomic.Bool
-	svc := &sizedService{backup: func(*pb.BackupExecutorRequest) *pb.BackupExecutorResponse {
-		handled.Store(true)
-		return backupAnswer(data)
-	}}
-	socket := startSizedServer(t, svc)
+	return answer
+}
+
+// TestAnswerOverMaxResponseSizeIsRefused shows the server's send limit
+// refuses an answer one byte over MaxResponseSize. The caller is a raw
+// client whose receive limit is raised, so only the server can refuse: the
+// message is the send refusal against MaxResponseSize, after the handler
+// built the answer.
+func TestAnswerOverMaxResponseSizeIsRefused(t *testing.T) {
+	answer := overMaxResponseAnswer(t)
+	svc := &sizedService{backup: func(*pb.BackupExecutorRequest) *pb.BackupExecutorResponse { return answer }}
+	socket := startSized(t, svc)
 	raw := rawClient(t, socket, executor.MaxResponseSize+(1<<20), executor.MaxMessageSize)
 	_, err := raw.BackupExecutor(bigCtx(t), &pb.BackupExecutorRequest{})
 	st := status.Convert(err)
 	if st.Code() != codes.ResourceExhausted {
 		t.Fatalf("server answered %v, want ResourceExhausted (%v)", st.Code(), err)
 	}
-	if !strings.Contains(st.Message(), "send") {
-		t.Fatalf("refusal is not the server's send limit: %q", st.Message())
+	if want := sendRefusal(executor.MaxResponseSize+1, executor.MaxResponseSize); st.Message() != want {
+		t.Fatalf("refusal = %q, want the server's send refusal %q", st.Message(), want)
 	}
-	if !handled.Load() {
-		t.Fatal("the handler did not run; the refusal came before the answer was built")
+	if n := svc.calls.Load(); n != 1 {
+		t.Fatalf("handler ran %d times, want 1: the refusal must come after the answer was built", n)
+	}
+}
+
+// TestProductionClientRefusesAnswerOverMaxResponseSize: the production
+// client's receive limit refuses an answer one byte over MaxResponseSize.
+// The server's send limit is raised on top of the production options for
+// this test only, so the server sends the answer and only the client can
+// refuse it: the detail is the receive refusal against MaxResponseSize, not
+// the server's send refusal or its receive limit (MaxMessageSize).
+func TestProductionClientRefusesAnswerOverMaxResponseSize(t *testing.T) {
+	answer := overMaxResponseAnswer(t)
+	svc := &sizedService{backup: func(*pb.BackupExecutorRequest) *pb.BackupExecutorResponse { return answer }}
+	c := newSizedClient(t, startSized(t, svc, grpc.MaxSendMsgSize(executor.MaxResponseSize+(1<<20))))
+	_, err := c.BackupExecutor(bigCtx(t), &pb.BackupExecutorRequest{})
+	requireLimitDetail(t, err, receiveRefusal(executor.MaxResponseSize+1, executor.MaxResponseSize))
+	if n := svc.calls.Load(); n != 1 {
+		t.Fatalf("handler ran %d times, want 1", n)
 	}
 }
 
@@ -580,11 +606,15 @@ func clientErrorDetail(t *testing.T, err error) string {
 }
 
 // TestRequestOverMaxMessageSizeIsRefused: one byte over is refused by the
-// production client before it is sent, and by the real server when the
-// client's own send limit is raised.
+// production client before it is sent, and by the server (production
+// options) when the client's own send limit is raised. The handler is the
+// stand-in, so the test sees that the request never reaches it.
 func TestRequestOverMaxMessageSizeIsRefused(t *testing.T) {
-	h := newHarness(t, harnessOptions{})
-	c := h.client()
+	svc := &sizedService{batchMember: func(*pb.RunBatchMemberRequest) *pb.RunBatchMemberResponse {
+		return &pb.RunBatchMemberResponse{}
+	}}
+	socket := startSized(t, svc)
+	c := newSizedClient(t, socket)
 	buf := sizePayload(executor.MaxMessageSize+1, 8)
 	build := func(data []byte) proto.Message {
 		return &pb.RunBatchMemberRequest{BatchDigest: unknownDigest, MemberId: "m1", Artifact: data}
@@ -595,20 +625,30 @@ func TestRequestOverMaxMessageSizeIsRefused(t *testing.T) {
 	}
 	req := &pb.RunBatchMemberRequest{BatchDigest: unknownDigest, MemberId: "m1", Artifact: data}
 
-	// The production client refuses the request before it is sent.
+	// The production client refuses the request before it is sent. The
+	// detail is the send refusal against MaxMessageSize: the server never
+	// sends a request, and its own send limit is MaxResponseSize, its receive
+	// refusal reads "received". mapCallError maps every ResourceExhausted to
+	// CodeLimit, so the code alone would not tell the sides apart.
 	_, err := c.RunBatchMember(bigCtx(t), req)
-	requireCode(t, err, permit.CodeLimit)
+	requireLimitDetail(t, err, sendRefusal(executor.MaxMessageSize+1, executor.MaxMessageSize))
+	if n := svc.calls.Load(); n != 0 {
+		t.Fatalf("the refused request reached the handler (%d calls)", n)
+	}
 
 	// Past the client's send limit, the server refuses it on its receive
-	// limit: its message names the receive side.
-	raw := rawClient(t, h.socket, executor.MaxMessageSize, executor.MaxMessageSize+(1<<20))
+	// limit, against MaxMessageSize, before the handler.
+	raw := rawClient(t, socket, executor.MaxMessageSize, executor.MaxMessageSize+(1<<20))
 	_, err = raw.RunBatchMember(bigCtx(t), req)
 	st := status.Convert(err)
 	if st.Code() != codes.ResourceExhausted {
 		t.Fatalf("server answered %v, want ResourceExhausted (%v)", st.Code(), err)
 	}
-	if !strings.Contains(st.Message(), "received") {
-		t.Fatalf("refusal is not the server's receive limit: %q", st.Message())
+	if want := receiveRefusal(executor.MaxMessageSize+1, executor.MaxMessageSize); st.Message() != want {
+		t.Fatalf("refusal = %q, want the server's receive refusal %q", st.Message(), want)
+	}
+	if n := svc.calls.Load(); n != 0 {
+		t.Fatalf("the refused request reached the handler (%d calls)", n)
 	}
 }
 
@@ -641,41 +681,5 @@ func TestLimitsFitTogether(t *testing.T) {
 	if size := proto.Size(withStrings); size >= executor.MaxResponseSize {
 		t.Fatalf("run answer with %d-byte class, detail and endpoint is %d bytes, not below MaxResponseSize %d",
 			runAnswerStringRoom, size, executor.MaxResponseSize)
-	}
-}
-
-// literalValue reads a Go source file of this repository as text and
-// returns n<<s for the first match of pattern, whose two groups are the
-// number and the shift. The file is not changed.
-func literalValue(t *testing.T, rel, pattern string) int {
-	t.Helper()
-	src, err := os.ReadFile(filepath.Join("..", "..", rel))
-	if err != nil {
-		t.Fatal(err)
-	}
-	m := regexp.MustCompile(pattern).FindSubmatch(src)
-	if m == nil {
-		t.Fatalf("%s: no match for %q", rel, pattern)
-	}
-	n, err := strconv.Atoi(string(m[1]))
-	if err != nil {
-		t.Fatal(err)
-	}
-	s, err := strconv.Atoi(string(m[2]))
-	if err != nil {
-		t.Fatal(err)
-	}
-	return n << s
-}
-
-// TestCLIReceiveLimitMatchesExecutor reads the receive limit of the CLI as
-// text, because cmd/nebula/main.go is a protected path and the CLI cannot
-// yet use executor.MaxResponseSize. The test fails when the CLI's limit and
-// the executor's differ. When the CLI uses the constant, this test should
-// be removed.
-func TestCLIReceiveLimitMatchesExecutor(t *testing.T) {
-	cli := literalValue(t, "cmd/nebula/main.go", `MaxCallRecvMsgSize\((\d+)<<(\d+)\)`)
-	if cli != executor.MaxResponseSize {
-		t.Fatalf("CLI receive limit is %d, executor.MaxResponseSize is %d", cli, executor.MaxResponseSize)
 	}
 }

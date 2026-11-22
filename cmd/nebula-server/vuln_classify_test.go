@@ -439,7 +439,7 @@ func TestVulnClassifyClosureClasses(t *testing.T) {
 			want: vulnstore.ClassContradicted, wantNOS: "6.1.119-1",
 		},
 		{
-			name: "kernel: a partial read at the fixed version neither evidences nor decides",
+			name: "kernel: a newer partial read at the fixed version over an older complete read below it is unconfirmed",
 			rec:  clsRecord("CVE-2026-7002", "linux", "6.1.119-1", "6.1.120-1"),
 			reads: func(t0 time.Time) []vulninventory.Read {
 				return []vulninventory.Read{
@@ -447,7 +447,62 @@ func TestVulnClassifyClosureClasses(t *testing.T) {
 					clsRead("r2", t0.Add(clsLag+2*time.Minute), false, clsKernel("6.1.120-1")),
 				}
 			},
+			want: vulnstore.ClassUnconfirmed, wantNOS: "6.1.120-1",
+		},
+		{
+			name: "kernel: a newer partial read at the fixed version over an older complete read at the fix is evidenced",
+			rec:  clsRecord("CVE-2026-7002", "linux", "6.1.119-1", "6.1.120-1"),
+			reads: func(t0 time.Time) []vulninventory.Read {
+				return []vulninventory.Read{
+					clsRead("r1", t0.Add(clsLag+time.Minute), true, clsKernel("6.1.120-1")),
+					clsRead("r2", t0.Add(clsLag+2*time.Minute), false, clsKernel("6.1.120-1")),
+				}
+			},
+			want: vulnstore.ClassEvidenced, wantNOS: "6.1.120-1",
+		},
+		{
+			name: "kernel: a newer complete read at the fixed version over an older complete read below it is evidenced",
+			rec:  clsRecord("CVE-2026-7002", "linux", "6.1.119-1", "6.1.120-1"),
+			reads: func(t0 time.Time) []vulninventory.Read {
+				return []vulninventory.Read{
+					clsRead("r1", t0.Add(clsLag+time.Minute), true, clsKernel("6.1.119-1"), clsComp("zlib", "1.2.13")),
+					clsRead("r2", t0.Add(clsLag+2*time.Minute), true, clsKernel("6.1.120-1"), clsComp("zlib", "1.2.13")),
+				}
+			},
+			want: vulnstore.ClassEvidenced, wantNOS: "6.1.120-1",
+		},
+		{
+			name: "kernel: a newer partial read below the fix contradicts a complete read at the fix",
+			rec:  clsRecord("CVE-2026-7002", "linux", "6.1.119-1", "6.1.120-1"),
+			reads: func(t0 time.Time) []vulninventory.Read {
+				return []vulninventory.Read{
+					clsRead("r1", t0.Add(clsLag+time.Minute), true, clsKernel("6.1.120-1")),
+					clsRead("r2", t0.Add(clsLag+2*time.Minute), false, clsKernel("6.1.119-1")),
+				}
+			},
 			want: vulnstore.ClassContradicted, wantNOS: "6.1.119-1",
+		},
+		{
+			name: "kernel: a newer complete read below the fix contradicts a complete read at the fix",
+			rec:  clsRecord("CVE-2026-7002", "linux", "6.1.119-1", "6.1.120-1"),
+			reads: func(t0 time.Time) []vulninventory.Read {
+				return []vulninventory.Read{
+					clsRead("r1", t0.Add(clsLag+time.Minute), true, clsKernel("6.1.120-1")),
+					clsRead("r2", t0.Add(clsLag+2*time.Minute), true, clsKernel("6.1.119-1"), clsComp("openssl", clsNew)),
+				}
+			},
+			want: vulnstore.ClassContradicted, wantNOS: "6.1.119-1",
+		},
+		{
+			name: "kernel: a newer partial read with an unmapped kernel does not evidence",
+			rec:  clsRecord("CVE-2026-7002", "linux", "6.1.119-1", "6.1.120-1"),
+			reads: func(t0 time.Time) []vulninventory.Read {
+				return []vulninventory.Read{
+					clsRead("r1", t0.Add(clsLag+time.Minute), true, clsKernel("6.1.120-1")),
+					clsRead("r2", t0.Add(clsLag+2*time.Minute), false, clsUnmappedKernel),
+				}
+			},
+			want: vulnstore.ClassUnconfirmed,
 		},
 		{
 			name: "kernel: only a partial read holds like no read",
@@ -894,5 +949,58 @@ func TestCloseByInventoryHoldsReadWithoutEcosystem(t *testing.T) {
 				t.Fatalf("state = %s, want %s", got.State, tt.want)
 			}
 		})
+	}
+}
+
+// TestVulnClassifyPairsLatestAndLastCompleteFromOneState: a read stored between
+// the newest read and the last complete read must not pair stale and new data.
+// The classifier re-reads the newest read after the complete read and retries
+// when it moved, so the basis is the state that held at one instant.
+func TestVulnClassifyPairsLatestAndLastCompleteFromOneState(t *testing.T) {
+	e := clsEnv(t)
+	f := clsFinding(t, e, clsRecord("CVE-2026-7004", "openssl", clsOld, clsNew))
+	clsSettle(e)
+	clsPut(t, e, clsRead("r1", f.Updated.Add(clsLag+time.Minute), true, clsKernel("6.1.119-1"), clsComp("openssl", clsOld)))
+	st, err := vulninventory.New(e.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inserted := false
+	c := vulnClassifier{inv: st, betweenReads: func() {
+		if inserted {
+			return
+		}
+		inserted = true
+		clsPut(t, e, clsRead("r2", f.Updated.Add(clsLag+2*time.Minute), true, clsKernel("6.1.119-1"), clsComp("openssl", clsNew)))
+	}}
+	a, err := c.assess(context.Background(), f)
+	if err != nil {
+		t.Fatalf("assess: %v", err)
+	}
+	// Stale pairing (r1 newest, r2 complete) would read openssl at clsOld and
+	// contradict; the consistent state is r2 newest and complete, at the fix.
+	if a.class != vulnstore.ClassEvidenced || a.nosVersion != clsNew {
+		t.Fatalf("assess = class %d version %q, want evidenced at %q", a.class, a.nosVersion, clsNew)
+	}
+}
+
+// TestVulnClassifyHoldsWhenReadsKeepMoving: when the newest read keeps moving
+// between the two reads, the classifier gives up and holds (fail closed).
+func TestVulnClassifyHoldsWhenReadsKeepMoving(t *testing.T) {
+	e := clsEnv(t)
+	f := clsFinding(t, e, clsRecord("CVE-2026-7005", "openssl", clsOld, clsNew))
+	clsSettle(e)
+	clsPut(t, e, clsRead("r1", f.Updated.Add(clsLag+time.Minute), true, clsKernel("6.1.119-1"), clsComp("openssl", clsOld)))
+	st, err := vulninventory.New(e.db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	c := vulnClassifier{inv: st, betweenReads: func() {
+		n++
+		clsPut(t, e, clsRead(fmt.Sprintf("m%d", n), f.Updated.Add(clsLag+time.Duration(n+1)*time.Minute), true, clsKernel("6.1.119-1"), clsComp("openssl", clsOld)))
+	}}
+	if _, err := c.assess(context.Background(), f); !errors.Is(err, errVulnReadRace) {
+		t.Fatalf("assess error = %v, want errVulnReadRace (fail closed)", err)
 	}
 }

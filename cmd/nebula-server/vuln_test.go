@@ -747,3 +747,116 @@ func TestVulnServiceSnapshotStoreUsesInjectedClock(t *testing.T) {
 		t.Fatalf("newest snapshot after the sweep: %v", err)
 	}
 }
+
+// TestVulnSubjectInventoryFromStoredRead checks that the subject page gets the
+// host's package inventory (ADR 0011 D8) from its newest stored read: time,
+// completeness, counts and the running kernel.
+func TestVulnSubjectInventoryFromStoredRead(t *testing.T) {
+	e := newVTEnv(t)
+	ctx := context.Background()
+	s := vulnstore.Subject{Kind: vulnfinding.SubjectHost, ID: clsHost}
+	p := vulnPages{v: e.svc, admin: func(context.Context) bool { return false }}
+	at := e.clk.Now().Add(-time.Hour)
+
+	// No read stored: nil, not an empty "complete" inventory.
+	page, err := p.VulnFindings(ctx, ui.VulnQuery{Subject: &s, Limit: ui.MaxVulnRows})
+	if err != nil || len(page.Subjects) != 1 || page.Subjects[0].Inventory != nil {
+		t.Fatalf("no read: subjects = %+v, %v; want one subject without inventory", page.Subjects, err)
+	}
+
+	clsPut(t, e, clsRead("r1", at, true, clsKernel("6.1.119-1"), clsComp("openssl", "3.0.11-1"), clsComp("zlib", "1.2.13")))
+	page, err = p.VulnFindings(ctx, ui.VulnQuery{Subject: &s, Limit: ui.MaxVulnRows})
+	if err != nil || len(page.Subjects) != 1 || page.Subjects[0].Inventory == nil {
+		t.Fatalf("complete read: subjects = %+v, %v", page.Subjects, err)
+	}
+	inv := page.Subjects[0].Inventory
+	if !inv.ReadAt.Equal(at) || !inv.Complete || inv.Sources != 2 || inv.Binaries != 2 || inv.Unavailable ||
+		inv.KernelRelease != "6.1.0-28-amd64" || !inv.KernelMapped {
+		t.Errorf("complete read inventory = %+v", inv)
+	}
+	one, err := p.subject(ctx, s)
+	if err != nil || one.Inventory == nil || one.Inventory.Sources != 2 {
+		t.Errorf("subject() inventory = %+v, %v; want the same counts", one.Inventory, err)
+	}
+
+	// The newest read decides: a later partial read is what the page shows.
+	clsPut(t, e, clsRead("r2", at.Add(time.Minute), false, clsUnmappedKernel, clsComp("openssl", "3.0.11-1")))
+	page, err = p.VulnFindings(ctx, ui.VulnQuery{Subject: &s, Limit: ui.MaxVulnRows})
+	if err != nil || page.Subjects[0].Inventory == nil || page.Subjects[0].Inventory.Complete ||
+		page.Subjects[0].Inventory.Reason != vulninventory.ReasonIncomplete || page.Subjects[0].Inventory.KernelMapped {
+		t.Errorf("partial read inventory = %+v, %v", page.Subjects[0].Inventory, err)
+	}
+}
+
+// TestVulnInventoryReadFailureIsUnavailable checks that a failing inventory
+// read is reported as unavailable on the page, not as "no read stored" and
+// not as an error of the whole page.
+func TestVulnInventoryReadFailureIsUnavailable(t *testing.T) {
+	e := newVTEnv(t)
+	ctx := context.Background()
+	s := vulnstore.Subject{Kind: vulnfinding.SubjectHost, ID: clsHost}
+	clsPut(t, e, clsRead("r1", e.clk.Now().Add(-time.Hour), true, clsKernel("6.1.119-1"), clsComp("openssl", "3.0.11-1")))
+	if _, err := e.db.ExecContext(ctx, `DROP TABLE vuln_inventory_reads`); err != nil {
+		t.Fatal(err)
+	}
+	p := vulnPages{v: e.svc, admin: func(context.Context) bool { return false }}
+	page, err := p.VulnFindings(ctx, ui.VulnQuery{Subject: &s, Limit: ui.MaxVulnRows})
+	if err != nil {
+		t.Fatalf("VulnFindings = %v; a failed inventory read must not fail the page", err)
+	}
+	if len(page.Subjects) != 1 || page.Subjects[0].Inventory == nil || !page.Subjects[0].Inventory.Unavailable {
+		t.Fatalf("subjects = %+v, want an unavailable inventory", page.Subjects)
+	}
+}
+
+// TestVulnHostInventoriesKeysEveryHost checks the list-page read: every host
+// subject gets an entry, nil when no read is stored, and non-host subjects
+// never get one.
+func TestVulnHostInventoriesKeysEveryHost(t *testing.T) {
+	e := newVTEnv(t)
+	clsPut(t, e, clsRead("r1", e.clk.Now().Add(-time.Hour), true, clsKernel("6.1.119-1"), clsComp("openssl", "3.0.11-1")))
+	p := vulnPages{v: e.svc}
+	subjects := []vulnstore.Subject{
+		{Kind: vulnfinding.SubjectHost, ID: clsHost},
+		{Kind: vulnfinding.SubjectHost, ID: "ghost"},
+		{Kind: vulnfinding.SubjectDevice, ID: clsHost},
+	}
+	inv := p.hostInventories(context.Background(), subjects)
+	// LatestAll loads no components, so the counts are not checked here.
+	if got := inv[clsHost]; got == nil || !got.Complete || !got.KernelMapped {
+		t.Errorf("stored host inventory = %+v", got)
+	}
+	if st, ok := inv["ghost"]; !ok || st != nil {
+		t.Errorf("host without a read: entry %v, present %v; want nil and present", st, ok)
+	}
+	if hostInventory(subjects[2], inv) != nil {
+		t.Error("device subject got a host inventory")
+	}
+}
+
+// TestVulnHostInventoriesTruncatedListIsUnavailable checks the list-page
+// merge of a LatestAll result: when LatestAll was cut at its host limit, a
+// host without a read in the result may be past the cut, so its inventory is
+// Unavailable (unknown), never nil ("none stored"). Untruncated, a missing
+// host has no read stored.
+func TestVulnHostInventoriesTruncatedListIsUnavailable(t *testing.T) {
+	at := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	reads := []vulninventory.Read{{HostID: "alpha", ReadAt: at, Complete: true, Kernel: clsKernel("6.1.119-1")}}
+	hosts := []string{"alpha", "zulu"}
+
+	cut := mergeInventories(hosts, reads, true)
+	if got := cut["alpha"]; got == nil || got.Unavailable || !got.Complete || !got.ReadAt.Equal(at) {
+		t.Errorf("truncated: host in the result = %+v, want its read", got)
+	}
+	if got, ok := cut["zulu"]; !ok || got == nil || !got.Unavailable {
+		t.Errorf("truncated: host past the cut = %+v (present %v), want Unavailable", got, ok)
+	}
+
+	whole := mergeInventories(hosts, reads, false)
+	if got, ok := whole["zulu"]; !ok || got != nil {
+		t.Errorf("untruncated: host without a read = %+v (present %v), want nil", got, ok)
+	}
+	if got := whole["alpha"]; got == nil || got.Unavailable {
+		t.Errorf("untruncated: host in the result = %+v, want its read", got)
+	}
+}
