@@ -10,10 +10,14 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -40,11 +44,10 @@ const (
 	// duStateDirLine is the one line naming the state directory in the
 	// shipped scripts; the test points it at a temporary directory.
 	duStateDirLine = `STATE_DIR = "/var/lib/nebula/container-updates"`
-	// duDefinitionSlot is the run secret slot of a standalone definition. The
-	// executor's definitionSlot (internal/executor/container_standalone.go) is
-	// unexported and cannot be imported; this copy is not checked against it
-	// here. The end-to-end success test proves that the shipped scripts read
-	// the slot this constant names, so only the executor side can drift.
+	// duDefinitionSlot is the run secret slot of a standalone definition. It
+	// must equal the executor's definitionSlot (internal/executor/
+	// container_standalone.go), which is unexported; TestDefinitionSlotMatchesExecutor
+	// reads that source and fails on any difference, including a rename.
 	duDefinitionSlot = "definition"
 	// duDefinitionVersion is the bound definition version of the update and
 	// of the rollback of it (docker.rollback runs "from the same definition
@@ -513,6 +516,80 @@ func duSecret(t *testing.T) hostrun.Secret {
 	return hostrun.Secret{Slot: duDefinitionSlot, Value: duDefinition(t)}
 }
 
+// TestDefinitionSlotMatchesExecutor: the run secret slot the tests add the
+// definition under must be the executor's definitionSlot. That constant is
+// unexported and internal/executor cannot be changed here, so the test reads
+// its source file, finds the const definitionSlot and requires its string
+// literal to equal duDefinitionSlot. A rename of the constant, or a new value,
+// fails this test.
+func TestDefinitionSlotMatchesExecutor(t *testing.T) {
+	const src = "../../executor/container_standalone.go"
+	f, err := parser.ParseFile(token.NewFileSet(), src, nil, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse %s: %v", src, err)
+	}
+	var got string
+	found := false
+	for _, decl := range f.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			for i, name := range vs.Names {
+				if name.Name != "definitionSlot" || i >= len(vs.Values) {
+					continue
+				}
+				lit, ok := vs.Values[i].(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					t.Fatalf("%s: definitionSlot is not a string literal", src)
+				}
+				v, err := strconv.Unquote(lit.Value)
+				if err != nil {
+					t.Fatalf("%s: definitionSlot: %v", src, err)
+				}
+				got, found = v, true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("%s declares no constant definitionSlot", src)
+	}
+	if got != duDefinitionSlot {
+		t.Fatalf("executor definitionSlot is %q, the tests use %q", got, duDefinitionSlot)
+	}
+}
+
+// duCheckDefinitionCreate checks the job's one docker create: its argv with
+// the job's env-file path replaced by "--env-file=<job secrets>" equals want
+// (the definition's options, command and digest reference), and the env file
+// the fake read at create was mode 0600 and held the two definition variables,
+// the planted value among them. Only names and counts are compared, never values.
+func duCheckDefinitionCreate(t *testing.T, calls []duCall, want []string) {
+	t.Helper()
+	creates := duCreates(calls)
+	if len(creates) != 1 {
+		t.Fatalf("%d creates, want 1", len(creates))
+	}
+	c := creates[0]
+	argv := slices.Clone(c.Argv)
+	envFile := slices.IndexFunc(argv, func(a string) bool { return strings.HasPrefix(a, "--env-file=") })
+	if envFile < 0 {
+		t.Fatalf("create argv %q has no --env-file", argv)
+	}
+	argv[envFile] = "--env-file=<job secrets>"
+	if !slices.Equal(argv, want) {
+		t.Fatalf("create argv %q, want %q", argv, want)
+	}
+	if c.EnvFileMode != "0o600" || c.EnvFileLines != 2 || !slices.Equal(c.EnvFileNames, []string{"DB_PASSWORD", "PORT"}) || !c.EnvFileHasPlanted {
+		t.Fatalf("env file: mode %q, %d lines, names %q, planted %v", c.EnvFileMode, c.EnvFileLines, c.EnvFileNames, c.EnvFileHasPlanted)
+	}
+}
+
 // duParams builds the update's or rollback's parameters the way the server
 // does (canonical form).
 func duParams(t *testing.T, u canonical.BatchContainerUpdate) []byte {
@@ -549,32 +626,9 @@ func TestUpdateDurableJobRecreatesWebFromDefinition(t *testing.T) {
 	// its options, its command, the env file built from its env list and the
 	// bound digest with --pull=never. The env file path is the job's own, so
 	// it is matched by its prefix; every other argv element is exact.
-	creates := duCreates(r.calls)
-	if len(creates) != 1 {
-		t.Fatalf("%d creates, want 1", len(creates))
-	}
-	argv := creates[0].Argv
-	envFile := -1
-	for i, a := range argv {
-		if strings.HasPrefix(a, "--env-file=") {
-			envFile = i
-		}
-	}
-	if envFile < 0 {
-		t.Fatalf("create argv %q has no --env-file", argv)
-	}
-	argv[envFile] = "--env-file=<job secrets>"
-	wantArgv := []string{"create", "--name=web", "--restart=unless-stopped", "--publish=8080:80", "--label=note=from-definition",
-		"--env-file=<job secrets>", "--pull=never", "--", "docker.io/library/nginx:1.27@" + duDigest("c"), "serve", "--port=80"}
-	if !slices.Equal(argv, wantArgv) {
-		t.Fatalf("create argv %q, want %q", argv, wantArgv)
-	}
-	// The env file the fake read at create: mode 0600, the two definition
-	// variables, the planted value among them. The values are not recorded.
-	c := creates[0]
-	if c.EnvFileMode != "0o600" || c.EnvFileLines != 2 || !slices.Equal(c.EnvFileNames, []string{"DB_PASSWORD", "PORT"}) || !c.EnvFileHasPlanted {
-		t.Fatalf("env file: mode %q, %d lines, names %q, planted %v", c.EnvFileMode, c.EnvFileLines, c.EnvFileNames, c.EnvFileHasPlanted)
-	}
+	duCheckDefinitionCreate(t, r.calls, []string{"create", "--name=web", "--restart=unless-stopped", "--publish=8080:80",
+		"--label=note=from-definition", "--env-file=<job secrets>", "--pull=never", "--",
+		"docker.io/library/nginx:1.27@" + duDigest("c"), "serve", "--port=80"})
 	duLogLines(t, r.Log)
 	// The survivor is the new container (create template cuHex 9), named /web
 	// and running; the old container 1 is gone.
@@ -740,23 +794,16 @@ func TestRollbackDurableJobRestoresRetainedImage(t *testing.T) {
 			t.Fatalf("a rollback resolves or pulls: %+v", c)
 		}
 	}
-	creates := duCreates(r.calls)
-	if len(creates) != 1 {
-		t.Fatalf("rollback: %d creates, want 1", len(creates))
-	}
-	// The image is the argv element after the "--" separator.
-	sep := slices.Index(creates[0].Argv, "--")
-	if sep < 0 || sep+1 >= len(creates[0].Argv) {
-		t.Fatalf("rollback create argv %q has no image after --", creates[0].Argv)
-	}
-	if created := creates[0].Argv[sep+1]; created != retainedRef {
-		t.Fatalf("rollback created from %q, want the retained reference", created)
-	}
-	duNoLeak(t, r, salt)
+	// The rollback recreates web from the same definition: its options, its
+	// command and the env file, with the retained reference as the image.
+	duCheckDefinitionCreate(t, r.calls, []string{"create", "--name=web", "--restart=unless-stopped", "--publish=8080:80",
+		"--label=note=from-definition", "--env-file=<job secrets>", "--pull=never", "--", retainedRef, "serve", "--port=80"})
 	duLogLines(t, r.Log)
 	restored := duMap(t, duMap(t, d.readState(), "containers"), duHex("8"))
+	// Failure messages name only the fields compared; the restored container
+	// carries the planted and inspect-only values and must not be printed.
 	if restored["Name"] != "/web" || duString(t, duMap(t, restored, "State"), "Status") != "running" || restored["Image"] != priorImage {
-		t.Fatalf("restored container %v", restored)
+		t.Fatalf("restored container: name %v, status %v, image %v", restored["Name"], duMap(t, restored, "State")["Status"], restored["Image"])
 	}
 
 	// A second rollback: the container it would return from is gone, so
@@ -766,8 +813,10 @@ func TestRollbackDurableJobRestoresRetainedImage(t *testing.T) {
 	if r2.Class != hostrun.ClassPrecheckFailed || r2.ExitCode != hostrun.ExitPrecheckFailed {
 		t.Fatalf("second rollback: class %s, exit %d", r2.Class, r2.ExitCode)
 	}
-	if d2 := duDoc(t, r2.Result); d2["phase"] != "precheck" {
-		t.Fatalf("second rollback result %v", d2)
+	// The container is gone (its ID is the bound target), so the inspect
+	// reports target_changed; the phase alone would also match another refusal.
+	if d2 := duDoc(t, r2.Result); d2["phase"] != "precheck" || d2["reason"] != "target_changed" {
+		t.Fatalf("second rollback: phase %v, reason %v", d2["phase"], d2["reason"])
 	}
 	for _, c := range r2.calls {
 		if c.Tool == "docker" && len(c.Argv) > 0 && (c.Argv[0] == "stop" || c.Argv[0] == "rename" || c.Argv[0] == "create") {
