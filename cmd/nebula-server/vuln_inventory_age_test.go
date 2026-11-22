@@ -50,7 +50,10 @@ func TestVulnExportReadAgeHasNoTimeLimit(t *testing.T) {
 
 // TestVulnClassifyOldCompleteReadStillBasesTheClosure: a host whose only
 // read is a year old is not held for age (no time limit, E2). Its complete
-// read is a basis like any other, so the classifier returns no error.
+// read is a basis like any other. For this fixture (named component, no
+// episode fixed version, the same version as the finding) the closure is
+// ClassUnconfirmedUnchanged. A classifier that ignored the old read would fall
+// back to ClassUnconfirmed, so the exact class proves the read is used.
 func TestVulnClassifyOldCompleteReadStillBasesTheClosure(t *testing.T) {
 	e := clsEnv(t)
 	at := e.clk.Now().Add(-365 * 24 * time.Hour)
@@ -58,7 +61,11 @@ func TestVulnClassifyOldCompleteReadStillBasesTheClosure(t *testing.T) {
 	f := vulnstore.Finding{Subject: vulnstore.Subject{Kind: vulnfinding.SubjectHost, ID: clsHost},
 		Record: vulnfinding.Record{MatchBasis: vulnfinding.MatchDistroTracker, Ecosystem: "debian:bookworm",
 			Component: vulnfinding.Component{SourcePackage: "openssl", SourceVersion: clsOld}}}
-	if _, err := e.svc.classifier.Classify(context.Background(), f); err != nil {
+	got, err := e.svc.classifier.Classify(context.Background(), f)
+	if err != nil {
 		t.Fatalf("Classify of a host with a year-old complete read err = %v, want none", err)
+	}
+	if got != vulnstore.ClassUnconfirmedUnchanged {
+		t.Fatalf("Classify of a host with a year-old complete read = %v, want %v", got, vulnstore.ClassUnconfirmedUnchanged)
 	}
 }

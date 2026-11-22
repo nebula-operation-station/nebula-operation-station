@@ -20,8 +20,13 @@ package vulninventory
 // a read is too old: a third read exists (E2).
 const readsNewerThanTooOld = 2
 
-// TooOld reports whether a read with newer newer reads of its host is too old
+// tooOld reports whether a read with newer reads of its host (n) is too old
 // under the count rule of E2. It never looks at the time of the read.
-func TooOld(newer int) bool {
-	return newer >= readsNewerThanTooOld
+//
+// TODO(Q2): no production caller yet. Wire it into the export and the
+// classifier only after the maintainer answers Q2 of the decisions paper; the
+// answer decides whether a stored read can be too old at all (reading (i) or
+// (ii)).
+func tooOld(n int) bool {
+	return n >= readsNewerThanTooOld
 }
