@@ -134,11 +134,47 @@ func TestMetadataIsWrittenOncePerDevicePerCycle(t *testing.T) {
 	}
 }
 
+// TestMetadataWritesEveryCycleForSubMinuteInterval checks that a collector
+// interval below metadataMinInterval writes one record per listed device in
+// every cycle (spec A1-2). The rate is then bounded by the interval the
+// operator chose; the importer keeps only the newest record per device.
+func TestMetadataWritesEveryCycleForSubMinuteInterval(t *testing.T) {
+	for _, interval := range []time.Duration{time.Second, 10 * time.Second, metadataMinInterval - time.Second} {
+		clock := newClock()
+		c := newFakeClient(clock, labelled("core-sw-01", "Core"), labelled("edge-fw-01", "Edge"))
+		s := &fakeSpool{}
+		p := newTestPoller(c, s, clock, constRand(0.5))
+		p.Interval = interval
+		const cycles = 8
+		for i := 0; i < cycles; i++ {
+			if i > 0 {
+				clock.Advance(interval)
+			}
+			before := s.count()
+			rep := cycle(t, p)
+			if rep.MetadataWritten != 2 || rep.MetadataFailed != 0 {
+				t.Fatalf("interval %v, cycle %d: metadata report = written %d, failed %d; want 2, 0", interval, i+1, rep.MetadataWritten, rep.MetadataFailed)
+			}
+			seen := map[string]int{}
+			for _, w := range metaSince(s, before) {
+				seen[w.device]++
+			}
+			if seen["core-sw-01"] != 1 || seen["edge-fw-01"] != 1 || len(seen) != 2 {
+				t.Fatalf("interval %v, cycle %d: metadata records per device = %v, want one for each listed device", interval, i+1, seen)
+			}
+		}
+		if n := len(metadataWrites(s)); n != 2*cycles {
+			t.Fatalf("interval %v: metadata records = %d, want %d", interval, n, 2*cycles)
+		}
+	}
+}
+
 func TestMetadataWritesAreRateBoundedByMinInterval(t *testing.T) {
 	clock := newClock()
 	c := newFakeClient(clock, labelled("core-sw-01", "Core"))
 	s := &fakeSpool{}
 	p := newTestPoller(c, s, clock, constRand(0.5))
+	p.Interval = DefaultInterval
 	if rep := cycle(t, p); rep.MetadataWritten != 1 {
 		t.Fatalf("first cycle metadata written = %d, want 1", rep.MetadataWritten)
 	}
