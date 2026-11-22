@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"go/ast"
+	"go/build/constraint"
 	"go/parser"
 	"go/token"
 	"io"
@@ -34,8 +35,9 @@ const (
 	// docsDir is the planning-document directory whose Markdown files are
 	// searched for ticket IDs, relative to the module root.
 	docsDir = "docs"
-	// ticketRegister lists wiring tickets that have no table row or heading under
-	// docsDir, relative to the module root. One ticket per line:
+	// ticketRegister names the tracking document of wiring tickets, relative to
+	// the module root. A registered ticket is known only when that document
+	// defines it. One ticket per line:
 	// "<ID> | <title> | <planning document under docsDir>".
 	ticketRegister = "internal/wiringguard/tickets.txt"
 	// registerFields is the number of "|"-separated fields in a register line:
@@ -67,14 +69,16 @@ var ErrNoModule = errors.New("no go.mod found in any parent directory")
 // code.
 var generatedRe = regexp.MustCompile(`^// Code generated .* DO NOT EDIT\.$`)
 
-// ignoreBuildRe matches the build constraint that excludes a file from builds.
-var ignoreBuildRe = regexp.MustCompile(`^//go:build\s+ignore\s*$`)
-
 // ticketRe matches one ticket ID in the project's form: 1 to 4 letters, an
 // optional hyphen, 1 to 3 digits, an optional lower-case letter and an optional
 // "-<digits>" part, as in "AS-09", "iv02", "EN-16h" or "M4-1". Words without
 // digits ("TODO", "none", "later", "planned") never match.
 var ticketRe = regexp.MustCompile(`^[A-Za-z]{1,4}-?[0-9]{1,3}[a-z]?(?:-[0-9]{1,3})?$`)
+
+// designLabelRe matches a design-decision label such as "D7" or "I2": one
+// letter, digits and an optional lower-case letter, with no hyphen. Such labels
+// are numbered decisions inside a document; definedTickets does not count them.
+var designLabelRe = regexp.MustCompile(`^[A-Za-z][0-9]{1,3}[a-z]?$`)
 
 // Entry is one allowlist record: why an internal package is not wired yet and
 // the ticket or plan item that will wire it.
@@ -213,15 +217,16 @@ func categoryOf(reason string) (string, bool) {
 	return "", false
 }
 
-// UnknownTickets returns the sorted package paths of allow whose ticket is
-// neither defined under root/docs nor registered. A ticket is defined when a
-// Markdown file under root/docs has a table row whose first cell names it, or a
-// heading that starts with it (see definedTickets). A ticket is registered when
-// root/internal/wiringguard/tickets.txt names it with a tracking document that
-// exists. A missing register counts as empty; a missing docs directory is an
-// error, so the check cannot pass by reading nothing.
+// UnknownTickets returns the sorted package paths of allow whose ticket is not
+// known. A ticket that root/internal/wiringguard/tickets.txt registers is known
+// only when the tracking document it names defines it: a Markdown file under
+// root/docs with a table row whose first cell names it, or a heading that
+// starts with it (see definedTickets). A definition in any other document does
+// not count. A ticket that is not registered is known when some Markdown file
+// under root/docs defines it. A missing register counts as empty; a missing
+// docs directory is an error, so the check cannot pass by reading nothing.
 func UnknownTickets(root string, allow Allowlist) ([]string, error) {
-	known, err := documentedTickets(root)
+	documented, err := documentedTickets(root)
 	if err != nil {
 		return nil, err
 	}
@@ -229,14 +234,41 @@ func UnknownTickets(root string, allow Allowlist) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// named caches the tickets each tracking document defines, by path.
+	named := map[string]map[string]bool{}
 	var unknown []string
 	for pkg, entry := range allow {
-		if !known[entry.Ticket] && registered[entry.Ticket] == "" {
+		doc, isRegistered := registered[entry.Ticket]
+		if !isRegistered {
+			if !documented[entry.Ticket] {
+				unknown = append(unknown, pkg)
+			}
+			continue
+		}
+		defs, ok := named[doc]
+		if !ok {
+			defs, err = definedInFile(root, doc)
+			if err != nil {
+				return nil, err
+			}
+			named[doc] = defs
+		}
+		if !defs[entry.Ticket] {
 			unknown = append(unknown, pkg)
 		}
 	}
 	sort.Strings(unknown)
 	return unknown, nil
+}
+
+// definedInFile returns the ticket IDs that the Markdown file at the
+// module-relative path doc defines (see definedTickets).
+func definedInFile(root, doc string) (map[string]bool, error) {
+	data, err := readLimited(filepath.Join(root, filepath.FromSlash(doc)), maxTicketSourceBytes)
+	if err != nil {
+		return nil, fmt.Errorf("tracking document %s: %w", doc, err)
+	}
+	return definedTickets(string(data)), nil
 }
 
 // definedTickets returns the ticket IDs that a Markdown document defines. An ID
@@ -247,8 +279,25 @@ func UnknownTickets(root string, allow Allowlist) ([]string, error) {
 // placeholder such as "TODO", which is not in the ticket form.
 func definedTickets(text string) map[string]bool {
 	known := map[string]bool{}
+	// fence is the marker of the fenced code block the scan is inside, or "".
+	// Lines inside a fence are examples, not definitions.
+	var fence string
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
+		if fence != "" {
+			if strings.HasPrefix(line, fence) {
+				fence = ""
+			}
+			continue
+		}
+		if strings.HasPrefix(line, "```") {
+			fence = "```"
+			continue
+		}
+		if strings.HasPrefix(line, "~~~") {
+			fence = "~~~"
+			continue
+		}
 		var label string
 		switch {
 		case strings.HasPrefix(line, "|"):
@@ -269,18 +318,26 @@ func definedTickets(text string) map[string]bool {
 func labelTicket(label string) (string, bool) {
 	label = strings.Trim(label, " \t*`")
 	isSep := func(r rune) bool { return strings.ContainsRune(" \t:()*`", r) }
-	if first := strings.FieldsFunc(label, isSep); len(first) > 0 && ticketRe.MatchString(first[0]) {
+	if first := strings.FieldsFunc(label, isSep); len(first) > 0 && isTicketID(first[0]) {
 		return first[0], true
 	}
 	if strings.HasSuffix(label, ")") {
 		if i := strings.LastIndex(label, "("); i >= 0 {
 			inner := strings.Trim(label[i+1:len(label)-1], " \t*`")
-			if ticketRe.MatchString(inner) {
+			if isTicketID(inner) {
 				return inner, true
 			}
 		}
 	}
 	return "", false
+}
+
+// isTicketID reports whether s is a ticket ID that a document can define. It
+// must match ticketRe and must not be a design-decision label: a single letter
+// and digits without a hyphen, as in "D7" or "I2", name a decision of the
+// document that names them, not a ticket.
+func isTicketID(s string) bool {
+	return ticketRe.MatchString(s) && !designLabelRe.MatchString(s)
 }
 
 // documentedTickets collects the ticket IDs defined by the Markdown planning
@@ -312,7 +369,8 @@ func documentedTickets(root string) (map[string]bool, error) {
 // readRegister reads the ticket register and returns each registered ticket ID
 // with its tracking document, a module-relative path under docs/. A missing
 // register is empty. Every line must have registerFields fields, a ticket ID in
-// the ticket form, a title, and a tracking document that exists.
+// the ticket form, a title, and a tracking document that exists. Whether that
+// document defines the ID is decided by UnknownTickets.
 func readRegister(root string) (map[string]string, error) {
 	registered := map[string]string{}
 	data, err := readLimited(filepath.Join(root, ticketRegister), maxTicketSourceBytes)
@@ -341,7 +399,7 @@ func readRegister(root string) (map[string]string, error) {
 		if _, dup := registered[id]; dup {
 			return nil, fmt.Errorf("ticket register line %d: %s listed twice", i+1, id)
 		}
-		if err := checkTrackingDoc(root, doc); err != nil {
+		if err := checkTrackingDocPath(root, doc); err != nil {
 			return nil, fmt.Errorf("ticket register line %d: %s: %w", i+1, id, err)
 		}
 		registered[id] = doc
@@ -349,9 +407,9 @@ func readRegister(root string) (map[string]string, error) {
 	return registered, nil
 }
 
-// checkTrackingDoc returns an error unless doc is a clean, slash-separated path
-// to an existing Markdown file under docs/.
-func checkTrackingDoc(root, doc string) error {
+// checkTrackingDocPath returns an error unless doc is a clean, slash-separated
+// path to an existing regular Markdown file under docs/.
+func checkTrackingDocPath(root, doc string) error {
 	if path.Clean(doc) != doc || !strings.HasPrefix(doc, docsDir+"/") || !strings.HasSuffix(doc, ".md") {
 		return fmt.Errorf("tracking document %q must be a clean path to a Markdown file under %s/", doc, docsDir)
 	}
@@ -583,21 +641,59 @@ func scan(root, modPath string) (map[string]*pkgInfo, error) {
 	return pkgs, nil
 }
 
-// isIgnored reports whether a file carries the "//go:build ignore" constraint
-// before its package clause, which excludes it from every build. The file must
-// be parsed with parser.ParseComments.
+// isIgnored reports whether a file carries a build constraint before its
+// package clause that excludes it from every build, such as "//go:build ignore",
+// "//go:build ignore && linux" or the legacy "// +build ignore". As the Go
+// toolchain does, a "//go:build" line replaces any "// +build" lines; without
+// one, the "// +build" lines are conjoined. The file must be parsed with
+// parser.ParseComments.
 func isIgnored(f *ast.File) bool {
+	var goBuild *constraint.Expr
+	var plusBuild []constraint.Expr
 	for _, group := range f.Comments {
 		if group.Pos() >= f.Package {
 			break
 		}
 		for _, c := range group.List {
-			if ignoreBuildRe.MatchString(c.Text) {
-				return true
+			switch {
+			case constraint.IsGoBuild(c.Text):
+				if expr, err := constraint.Parse(c.Text); err == nil && goBuild == nil {
+					goBuild = &expr
+				}
+			case constraint.IsPlusBuild(c.Text):
+				if expr, err := constraint.Parse(c.Text); err == nil {
+					plusBuild = append(plusBuild, expr)
+				}
 			}
 		}
 	}
+	if goBuild != nil {
+		return excludesEveryBuild(*goBuild)
+	}
+	for _, expr := range plusBuild {
+		if excludesEveryBuild(expr) {
+			return true
+		}
+	}
 	return false
+}
+
+// excludesEveryBuild reports whether expr is false in every build because the
+// "ignore" tag is never set. A conjunction with such a term is false; a
+// disjunction is false only when both sides are. Negation and any other term
+// are not decided here, so the result is conservative: a file it does not
+// recognise counts as production code.
+func excludesEveryBuild(expr constraint.Expr) bool {
+	switch x := expr.(type) {
+	case *constraint.TagExpr:
+		return x.Tag == "ignore"
+	case *constraint.AndExpr:
+		return excludesEveryBuild(x.X) || excludesEveryBuild(x.Y)
+	case *constraint.OrExpr:
+		return excludesEveryBuild(x.X) && excludesEveryBuild(x.Y)
+	default:
+		return false
+	}
 }
 
 // isGenerated reports whether a file has the Go generated-code marker before

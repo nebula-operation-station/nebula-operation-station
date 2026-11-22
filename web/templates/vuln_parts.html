@@ -5,10 +5,17 @@
 {{with .Vuln}}
 {{if .Unavailable}}<p class="status status--error vuln-unavailable">Vulnerability data unavailable. Nothing here means "no findings".</p>{{end}}
 {{range .Banners}}
+{{if .Note}}
+<details class="vuln-note">
+  <summary>{{.Text}}</summary>
+  <p class="vuln-note__detail">{{.Detail}}</p>
+</details>
+{{else}}
 <div class="trust-banner vuln-banner" role="status">
   <p class="trust-banner__headline">{{.Text}}</p>
   {{if .ResetURL}}<p class="trust-banner__detail"><a href="{{.ResetURL}}">Review the high-water mark</a></p>{{end}}
 </div>
+{{end}}
 {{end}}
 {{if .Truncated}}<p class="status status--warning vuln-truncated">More findings exist than NOS reads for one page, so this page is incomplete: counts are lower bounds and no subject is shown as clean. Filters do not bring back the rows that were cut off.</p>{{end}}
 {{end}}
