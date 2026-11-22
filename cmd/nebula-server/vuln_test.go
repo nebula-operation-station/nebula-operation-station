@@ -704,6 +704,50 @@ func TestVulnPagesReadTheRealStoreAndRefuseDecisions(t *testing.T) {
 	}
 }
 
+// TestVulnServiceSnapshotStoreUsesInjectedClock: the snapshot store that
+// newVulnService opens takes its TakenAt and its prune cutoff from the injected
+// clock, not the wall clock. The clock is set a thousand days ahead of the wall
+// clock, so a store on the wall clock would stamp a different TakenAt and would
+// not prune the snapshot by the injected cutoff.
+func TestVulnServiceSnapshotStoreUsesInjectedClock(t *testing.T) {
+	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	clk := &vtClock{t: time.Now().UTC().Add(1000 * 24 * time.Hour).Truncate(time.Second)}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc, err := newVulnService(db, newVTSink(), log, clk.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	first, err := svc.inventory.Current(ctx, nil, 0, vulninventory.FixedFloor(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := clk.Now().Unix(); first.TakenAt.Unix() != want {
+		t.Fatalf("TakenAt = %s, want the injected clock %s", first.TakenAt, clk.Now())
+	}
+	clk.Add(vulnstore.MaxInventoryAge + time.Hour)
+	second, err := svc.inventory.Current(ctx, nil, 0, vulninventory.FixedFloor(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Generation <= first.Generation {
+		t.Fatalf("generation %d after %d: want a new snapshot", second.Generation, first.Generation)
+	}
+	if err := svc.sweepSnapshots(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.inventory.Snapshot(ctx, first.ID); !errors.Is(err, vulninventory.ErrSnapshotGone) {
+		t.Fatalf("snapshot older than MaxInventoryAge on the injected clock: err = %v, want ErrSnapshotGone (pruned)", err)
+	}
+	if _, err := svc.inventory.Snapshot(ctx, second.ID); err != nil {
+		t.Fatalf("newest snapshot after the sweep: %v", err)
+	}
+}
+
 // TestVulnSubjectInventoryFromStoredRead checks that the subject page gets the
 // host's package inventory (ADR 0011 D8) from its newest stored read: time,
 // completeness, counts and the running kernel.

@@ -223,7 +223,7 @@ func TestFromInstalledClampsDroppedToLimit(t *testing.T) {
 	if r.Dropped != MaxDropped {
 		t.Fatalf("dropped = %d, want %d", r.Dropped, MaxDropped)
 	}
-	if err := validateRead(r); err != nil {
+	if err := validateRead(r, convertAt); err != nil {
 		t.Fatalf("clamped read rejected: %v", err)
 	}
 }

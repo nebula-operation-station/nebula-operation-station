@@ -227,7 +227,7 @@ type vulnInventory struct {
 // Snapshot is the only call that decodes the pinned read bodies, so tests
 // count its calls.
 type inventoryReads interface {
-	Current(ctx context.Context, hosts []string, maxReuse time.Duration, floor int64) (vulninventory.Snapshot, error)
+	Current(ctx context.Context, hosts []string, maxReuse time.Duration, floor vulninventory.GenerationFloor) (vulninventory.Snapshot, error)
 	Snapshot(ctx context.Context, id string) (vulninventory.Snapshot, error)
 }
 
@@ -268,7 +268,9 @@ func newVulnInventory(db *sql.DB, hosts vulnHostLister, now func() time.Time) (v
 	if now == nil {
 		now = time.Now
 	}
-	st, err := vulninventory.New(db)
+	// The store and the export share one clock: TakenAt and the reuse window
+	// of the store are judged with the same now as the export's freshness.
+	st, err := vulninventory.NewWithNow(db, now)
 	if err != nil {
 		return vulnInventory{}, fmt.Errorf("vulnerability inventory: %w", err)
 	}
@@ -325,22 +327,20 @@ func (v vulnInventory) VulnSnapshot(ctx context.Context, id string) (api.VulnSna
 const maxCurrentAttempts = 3
 
 // current returns the current snapshot of ids with a generation above every
-// run floor the export can see. The floor is read before and after Current:
-// when a run start recorded the returned generation in between (Current may
-// have reused that snapshot), the snapshot is not handed out, because the
-// next run start with it would be refused with 409. The two reads are not in
-// one transaction with Current (that needs a change in vulninventory), so a
-// run that records a generation after the second read is still possible; it
-// is seen by the next export call.
+// run floor the export can see. The run floor is read by Current itself, inside
+// its transaction (see vulnFloor), so the generation it returns is above the
+// floor of the same serialised state. A run start that records the returned
+// generation after that transaction commits is still possible; the recorded
+// generation is therefore read again after Current, and when it has reached
+// the returned generation (Current may have reused that snapshot) the snapshot
+// is not handed out, because the next run start with it would be refused with
+// 409. The next call then builds a higher one.
 func (v vulnInventory) current(ctx context.Context, ids []string) (vulninventory.Snapshot, error) {
 	// Generations of the old hourly IDs (time in hours) stay below the new ones.
 	hour := v.now().UTC().Truncate(vulnInventoryBucket).Unix() / int64(vulnInventoryBucket/time.Second)
+	floor := vulnFloor{hour: hour}
 	for range maxCurrentAttempts {
-		floor, err := maxInventoryGeneration(ctx, v.db)
-		if err != nil {
-			return vulninventory.Snapshot{}, err
-		}
-		cur, err := v.reads.Current(ctx, ids, vulnInventoryBucket, max(floor, hour))
+		cur, err := v.reads.Current(ctx, ids, vulnInventoryBucket, floor)
 		if err != nil {
 			return vulninventory.Snapshot{}, fmt.Errorf("vuln inventory: current: %w", err)
 		}
@@ -426,10 +426,34 @@ func hostSubject(r vulninventory.Read) api.VulnSubject {
 	return sub
 }
 
+// vulnFloor is the generation floor of one export call (vulninventory's
+// GenerationFloor): the highest inventory generation a run has started with,
+// read on the transaction Current runs in, or the hour value of the old
+// snapshot IDs, whichever is higher. The read is inside Current's transaction,
+// so a run start that serialises after it is seen by the next call.
+type vulnFloor struct {
+	hour int64
+}
+
+// Generation returns the floor on tx (see vulnFloor).
+func (f vulnFloor) Generation(ctx context.Context, tx *sql.Tx) (int64, error) {
+	g, err := maxInventoryGeneration(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+	return max(g, f.hour), nil
+}
+
+// queryRower is the part of *sql.DB and *sql.Tx that maxInventoryGeneration
+// needs.
+type queryRower interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 // maxInventoryGeneration is the highest inventory generation a run has
 // started with (vuln_store_state.max_inventory_generation); 0 before the
 // first run. The export's generations must stay above it (ADR 0011 D5).
-func maxInventoryGeneration(ctx context.Context, db *sql.DB) (int64, error) {
+func maxInventoryGeneration(ctx context.Context, db queryRower) (int64, error) {
 	var g int64
 	err := db.QueryRowContext(ctx, `SELECT max_inventory_generation FROM vuln_store_state WHERE id = 1`).Scan(&g)
 	if errors.Is(err, sql.ErrNoRows) {
