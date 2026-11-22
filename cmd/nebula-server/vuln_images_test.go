@@ -132,7 +132,6 @@ func imageServer(t *testing.T) (*vulnImageService, *vulninventory.Store, *sql.DB
 	if err != nil {
 		t.Fatal(err)
 	}
-	svc.now = func() time.Time { return imgClock }
 	st, err := vulninventory.New(db)
 	if err != nil {
 		t.Fatal(err)
@@ -156,8 +155,8 @@ func storedReads(t *testing.T, st *vulninventory.Store, host string) []vulninven
 func TestImageReadStoredWhenInspectNamesDigest(t *testing.T) {
 	svc, st, db := imageServer(t)
 	inspectRun(t, db, 1, "host-1", imgClock, inspectResult(imgHex))
-	grantRun(t, db, 2, "host-1", imgRef, imgClock, nil)
-	svc.ObserveImage(context.Background(), "host-1", execN(2), imageResult("debian", "12.8", "debian"))
+	grantRun(t, db, 2, "host-1", imgRef, imgClock, imageResult("debian", "12.8", "debian"))
+	svc.ObserveImage(context.Background(), "host-1", execN(2))
 	reads := storedReads(t, st, "host-1")
 	if len(reads) != 1 {
 		t.Fatalf("stored %d reads, want 1", len(reads))
@@ -176,8 +175,8 @@ func TestImageReadStoredOnPlatformDigestMatch(t *testing.T) {
 	index := strings.Repeat("c", 64)
 	inspectRun(t, db, 1, "host-1", imgClock,
 		inspectDoc([]string{"registry.example/app/web@sha256:" + index}, imgHex))
-	grantRun(t, db, 2, "host-1", imgRef, imgClock, nil)
-	svc.ObserveImage(context.Background(), "host-1", execN(2), imageResult("debian", "12.8", "debian"))
+	grantRun(t, db, 2, "host-1", imgRef, imgClock, imageResult("debian", "12.8", "debian"))
+	svc.ObserveImage(context.Background(), "host-1", execN(2))
 	if reads := storedReads(t, st, "host-1"); len(reads) != 1 {
 		t.Fatalf("stored %d reads on the platform digest match, want 1", len(reads))
 	}
@@ -199,8 +198,8 @@ func TestImageReadRefusedForDifferentRepository(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			svc, st, db := imageServer(t)
 			inspectRun(t, db, 1, "host-1", imgClock, inspect)
-			grantRun(t, db, 2, "host-1", other, imgClock, nil)
-			svc.ObserveImage(context.Background(), "host-1", execN(2), resultFor(other))
+			grantRun(t, db, 2, "host-1", other, imgClock, resultFor(other))
+			svc.ObserveImage(context.Background(), "host-1", execN(2))
 			if reads := storedReads(t, st, "host-1"); len(reads) != 0 {
 				t.Fatalf("stored %d reads of a repository the inspect does not name, want 0", len(reads))
 			}
@@ -226,8 +225,8 @@ func TestImageReadRefusedWithoutInspectNamingDigest(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			svc, st, db := imageServer(t)
 			setup(t, db)
-			grantRun(t, db, 2, "host-1", imgRef, imgClock, nil)
-			svc.ObserveImage(context.Background(), "host-1", execN(2), imageResult("debian", "12.8", "debian"))
+			grantRun(t, db, 2, "host-1", imgRef, imgClock, imageResult("debian", "12.8", "debian"))
+			svc.ObserveImage(context.Background(), "host-1", execN(2))
 			if reads := storedReads(t, st, "host-1"); len(reads) != 0 {
 				t.Fatalf("stored %d reads for a digest the host does not name, want 0", len(reads))
 			}
@@ -243,8 +242,8 @@ func TestImageReadUsesEveryContainerOfHost(t *testing.T) {
 	svc, st, db := imageServer(t)
 	inspectRun(t, db, 1, "host-1", imgClock, inspectResult(strings.Repeat("c", 64)))
 	inspectRun(t, db, 2, "host-1", imgClock.Add(-time.Hour), inspectResult(imgHex))
-	grantRun(t, db, 3, "host-1", imgRef, imgClock, nil)
-	svc.ObserveImage(context.Background(), "host-1", execN(3), imageResult("debian", "12.8", "debian"))
+	grantRun(t, db, 3, "host-1", imgRef, imgClock, imageResult("debian", "12.8", "debian"))
+	svc.ObserveImage(context.Background(), "host-1", execN(3))
 	if reads := storedReads(t, st, "host-1"); len(reads) != 1 {
 		t.Fatalf("stored %d reads, want 1: the digest of the older container inspect", len(reads))
 	}
@@ -266,8 +265,8 @@ func TestImageReadRefusedForStaleInspect(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			svc, st, db := imageServer(t)
 			inspectRun(t, db, 1, "host-1", tc.finished, inspectResult(imgHex))
-			grantRun(t, db, 2, "host-1", imgRef, imgClock, nil)
-			svc.ObserveImage(context.Background(), "host-1", execN(2), imageResult("debian", "12.8", "debian"))
+			grantRun(t, db, 2, "host-1", imgRef, imgClock, imageResult("debian", "12.8", "debian"))
+			svc.ObserveImage(context.Background(), "host-1", execN(2))
 			if got := len(storedReads(t, st, "host-1")) == 1; got != tc.stored {
 				t.Fatalf("stored = %v, want %v", got, tc.stored)
 			}
@@ -302,7 +301,7 @@ func TestImageReadRefusedWithoutGrant(t *testing.T) {
 			storeRun(t, db, 2, imageActionID, `{"image":"`+imgRef+`","x":"y"}`, "host-1", "finished", "success", imgClock, nil)
 		},
 		"grant pins another image": func(t *testing.T, db *sql.DB) {
-			grantRun(t, db, 2, "host-1", other, imgClock, nil)
+			grantRun(t, db, 2, "host-1", other, imgClock, resultFor(other))
 		},
 	}
 	for name, setup := range cases {
@@ -310,7 +309,7 @@ func TestImageReadRefusedWithoutGrant(t *testing.T) {
 			svc, st, db := imageServer(t)
 			inspectRun(t, db, 1, "host-1", imgClock, inspectResult(imgHex))
 			setup(t, db)
-			svc.ObserveImage(context.Background(), "host-1", execN(2), imageResult("debian", "12.8", "debian"))
+			svc.ObserveImage(context.Background(), "host-1", execN(2))
 			if reads := storedReads(t, st, "host-1"); len(reads) != 0 {
 				t.Fatalf("stored %d reads without a grant, want 0", len(reads))
 			}
@@ -324,9 +323,9 @@ func TestImageReadRefusedWithoutGrant(t *testing.T) {
 func TestImageReadRefusedForResultOfAnotherImage(t *testing.T) {
 	svc, st, db := imageServer(t)
 	inspectRun(t, db, 1, "host-1", imgClock, inspectResult(imgHex))
-	grantRun(t, db, 2, "host-1", imgRef, imgClock, nil)
 	other := "registry.example/app/web@sha256:" + strings.Repeat("e", 64)
-	svc.ObserveImage(context.Background(), "host-1", execN(2), resultFor(other))
+	grantRun(t, db, 2, "host-1", imgRef, imgClock, resultFor(other))
+	svc.ObserveImage(context.Background(), "host-1", execN(2))
 	if reads := storedReads(t, st, "host-1"); len(reads) != 0 {
 		t.Fatalf("stored %d reads of a result for another image, want 0", len(reads))
 	}
@@ -339,8 +338,8 @@ func TestFourthImageReadPushesOutOldest(t *testing.T) {
 	inspectRun(t, db, 1, "host-1", imgClock, inspectResult(imgHex))
 	for i := range 4 {
 		at := imgClock.Add(time.Duration(i) * time.Minute)
-		grantRun(t, db, 10+i, "host-1", imgRef, at, nil)
-		svc.ObserveImage(context.Background(), "host-1", execN(10+i), imageResult("debian", "12.8", "debian"))
+		grantRun(t, db, 10+i, "host-1", imgRef, at, imageResult("debian", "12.8", "debian"))
+		svc.ObserveImage(context.Background(), "host-1", execN(10+i))
 	}
 	reads := storedReads(t, st, "host-1")
 	if len(reads) != vulninventory.ImageReadsKept {
@@ -360,14 +359,16 @@ func TestImageReadLogsDiscardedByRetention(t *testing.T) {
 	svc, st, db := imageServer(t)
 	var logs bytes.Buffer
 	svc.log = slog.New(slog.NewTextHandler(&logs, nil))
-	inspectRun(t, db, 1, "host-1", imgClock, inspectResult(imgHex))
+	// The inspect finished before every grant of this test (the grants run
+	// from one hour before the clock to four hours after it).
+	inspectRun(t, db, 1, "host-1", imgClock.Add(-2*time.Hour), inspectResult(imgHex))
 	for i := range vulninventory.ImageReadsKept {
 		at := imgClock.Add(time.Duration(i+1) * time.Hour)
-		grantRun(t, db, 10+i, "host-1", imgRef, at, nil)
-		svc.ObserveImage(context.Background(), "host-1", execN(10+i), imageResult("debian", "12.8", "debian"))
+		grantRun(t, db, 10+i, "host-1", imgRef, at, imageResult("debian", "12.8", "debian"))
+		svc.ObserveImage(context.Background(), "host-1", execN(10+i))
 	}
-	grantRun(t, db, 20, "host-1", imgRef, imgClock.Add(-time.Hour), nil)
-	svc.ObserveImage(context.Background(), "host-1", execN(20), imageResult("debian", "12.8", "debian"))
+	grantRun(t, db, 20, "host-1", imgRef, imgClock.Add(-time.Hour), imageResult("debian", "12.8", "debian"))
+	svc.ObserveImage(context.Background(), "host-1", execN(20))
 	if !strings.Contains(logs.String(), "discarded_by_retention") {
 		t.Fatalf("late read not logged as discarded_by_retention: %s", logs.String())
 	}
@@ -393,8 +394,8 @@ func TestImageReadsOfOneImageUnderSeveralNamesKeepThree(t *testing.T) {
 	for i, name := range names {
 		ref := name + "@sha256:" + imgHex
 		at := imgClock.Add(time.Duration(i) * time.Minute)
-		grantRun(t, db, 10+i, "host-1", ref, at, nil)
-		svc.ObserveImage(context.Background(), "host-1", execN(10+i), resultFor(ref))
+		grantRun(t, db, 10+i, "host-1", ref, at, resultFor(ref))
+		svc.ObserveImage(context.Background(), "host-1", execN(10+i))
 	}
 	if reads := storedReads(t, st, "host-1"); len(reads) != vulninventory.ImageReadsKept {
 		t.Fatalf("kept %d reads of one image under several names, want %d", len(reads), vulninventory.ImageReadsKept)
@@ -406,17 +407,19 @@ func TestImageReadsOfOneImageUnderSeveralNamesKeepThree(t *testing.T) {
 // oldest, so a budget shared by hosts would drop them all.
 func TestImageRetentionIsPerHost(t *testing.T) {
 	svc, st, db := imageServer(t)
-	inspectRun(t, db, 1, "host-1", imgClock, inspectResult(imgHex))
-	inspectRun(t, db, 2, "host-2", imgClock, inspectResult(imgHex))
+	// The inspects finished before the grants of this test, which run from
+	// ten minutes before the clock on.
+	inspectRun(t, db, 1, "host-1", imgClock.Add(-2*time.Hour), inspectResult(imgHex))
+	inspectRun(t, db, 2, "host-2", imgClock.Add(-2*time.Hour), inspectResult(imgHex))
 	for i := range 3 {
 		at := imgClock.Add(time.Duration(i-10) * time.Minute)
-		grantRun(t, db, 10+i, "host-2", imgRef, at, nil)
-		svc.ObserveImage(context.Background(), "host-2", execN(10+i), imageResult("debian", "12.8", "debian"))
+		grantRun(t, db, 10+i, "host-2", imgRef, at, imageResult("debian", "12.8", "debian"))
+		svc.ObserveImage(context.Background(), "host-2", execN(10+i))
 	}
 	for i := range 4 {
 		at := imgClock.Add(time.Duration(i) * time.Minute)
-		grantRun(t, db, 20+i, "host-1", imgRef, at, nil)
-		svc.ObserveImage(context.Background(), "host-1", execN(20+i), imageResult("debian", "12.8", "debian"))
+		grantRun(t, db, 20+i, "host-1", imgRef, at, imageResult("debian", "12.8", "debian"))
+		svc.ObserveImage(context.Background(), "host-1", execN(20+i))
 	}
 	for _, host := range []string{"host-1", "host-2"} {
 		if reads := storedReads(t, st, host); len(reads) != vulninventory.ImageReadsKept {
@@ -430,9 +433,9 @@ func TestImageRetentionIsPerHost(t *testing.T) {
 func TestUnknownImageReadIsNotStored(t *testing.T) {
 	svc, st, db := imageServer(t)
 	inspectRun(t, db, 1, "host-1", imgClock, inspectResult(imgHex))
-	grantRun(t, db, 2, "host-1", imgRef, imgClock, nil)
 	absent := []byte(`{"format":"image-packages-v1","phase":"done","image":"` + imgRef + `","status":"absent","present":false}`)
-	svc.ObserveImage(context.Background(), "host-1", execN(2), absent)
+	grantRun(t, db, 2, "host-1", imgRef, imgClock, absent)
+	svc.ObserveImage(context.Background(), "host-1", execN(2))
 	if reads := storedReads(t, st, "host-1"); len(reads) != 0 {
 		t.Fatalf("stored %d reads of an unknown result, want 0", len(reads))
 	}
@@ -445,6 +448,7 @@ func TestUnknownImageReadIsNotStored(t *testing.T) {
 func TestInspectResultsIsTheStoredDigestSource(t *testing.T) {
 	svc, _, db := imageServer(t)
 	since := imgClock.Add(-time.Hour)
+	to := imgClock
 	inspectRun(t, db, 1, "host-1", imgClock.Add(-2*time.Minute), []byte("older"))
 	inspectRun(t, db, 2, "host-1", imgClock.Add(-time.Minute), []byte("newer"))
 	inspectRun(t, db, 3, "host-1", imgClock, []byte("newest"))
@@ -457,7 +461,7 @@ func TestInspectResultsIsTheStoredDigestSource(t *testing.T) {
 
 	collect := func(limit int) []string {
 		var got []string
-		err := svc.inspects.InspectResults(context.Background(), "host-1", since, limit, func(r imageInspectRow) bool {
+		err := svc.inspects.InspectResults(context.Background(), "host-1", since, to, limit, func(r imageInspectRow) bool {
 			got = append(got, string(r.Result))
 			return false
 		})
@@ -473,7 +477,7 @@ func TestInspectResultsIsTheStoredDigestSource(t *testing.T) {
 		t.Fatalf("limit 2 passed on %v, want the two newest", got)
 	}
 	var first []string
-	err := svc.inspects.InspectResults(context.Background(), "host-1", since, 10, func(r imageInspectRow) bool {
+	err := svc.inspects.InspectResults(context.Background(), "host-1", since, to, 10, func(r imageInspectRow) bool {
 		first = append(first, string(r.Result))
 		return true
 	})
@@ -492,15 +496,15 @@ func TestImageReadNamedOnlyByBoundedInspect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	inspectRun(t, tx, 1, "host-1", imgClock.Add(-time.Hour), inspectResult(imgHex))
+	inspectRun(t, tx, 1, "host-1", imgClock.Add(-2*time.Hour), inspectResult(imgHex))
 	for i := range maxInspectRows {
-		inspectRun(t, tx, 10+i, "host-1", imgClock.Add(time.Duration(i)*time.Second), inspectResult(strings.Repeat("c", 64)))
+		inspectRun(t, tx, 10+i, "host-1", imgClock.Add(-30*time.Minute+time.Duration(i)*time.Second), inspectResult(strings.Repeat("c", 64)))
 	}
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	grantRun(t, db, 2, "host-1", imgRef, imgClock, nil)
-	svc.ObserveImage(context.Background(), "host-1", execN(2), imageResult("debian", "12.8", "debian"))
+	grantRun(t, db, 2, "host-1", imgRef, imgClock, imageResult("debian", "12.8", "debian"))
+	svc.ObserveImage(context.Background(), "host-1", execN(2))
 	if reads := storedReads(t, st, "host-1"); len(reads) != 0 {
 		t.Fatalf("stored %d reads named by an inspect beyond the row bound, want 0", len(reads))
 	}
