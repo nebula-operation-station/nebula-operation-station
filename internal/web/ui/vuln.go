@@ -110,8 +110,15 @@ type VulnFeedStatus struct {
 	SourceID string
 	// Listed: the source is on NOS's fixed source list.
 	Listed bool
-	// Stale: past its maximum snapshot age, or undated.
+	// Stale: past its maximum snapshot age, or undated. Only meaningful
+	// when the source is not Unseen.
 	Stale bool
+	// Unseen: listed, but no run has named it and it has no high-water
+	// mark. The agent leaves such a source out on purpose (not configured),
+	// so it is not a feed that stopped: it is shown as a neutral note,
+	// never as stale. Closures are unaffected: the source still counts as
+	// a feed issue, so runs do not close findings resting on it.
+	Unseen bool
 	// SnapshotDate is the content date of the last accepted snapshot;
 	// zero when unknown or undated.
 	SnapshotDate time.Time
@@ -306,6 +313,11 @@ func feedLabels(f VulnFeedStatus) []vulnLabel {
 	var out []vulnLabel
 	if !f.Listed {
 		out = append(out, vulnLabel{"feed " + id + " not on NOS's source list", classWarning})
+	}
+	if f.Unseen {
+		// Neutral: left out on purpose, not a failure. Still a label, so the
+		// subject is not green (closures are unchanged).
+		return append(out, vulnLabel{"feed " + id + " not configured: no run has named it", classUnknown})
 	}
 	switch f.LastVerdict {
 	case vulnstore.SourceRegressed:
@@ -557,6 +569,9 @@ func (c vulnContext) view(row VulnRow) vulnFindingView {
 		}
 		if ls := feedLabels(fs); len(ls) > 0 {
 			v.Labels = append(v.Labels, ls...)
+			// Unseen feeds count too: the finding rests on a feed that
+			// runs do not use, so it is in the stale filter, as its
+			// subject is in the subject list's feed issue.
 			v.Stale = true
 		}
 	}
@@ -667,6 +682,10 @@ type vulnBanner struct {
 	Text string
 	// ResetURL links the maintainer to the mark reset page.
 	ResetURL string
+	// Note: a neutral, collapsible notice; Text is its summary and Detail
+	// the explanation shown when it is opened.
+	Note   bool
+	Detail string
 }
 
 // vulnPageData is the data of every vulnerabilities page.
@@ -768,6 +787,25 @@ func withUnknownFeeds(feeds []VulnFeedStatus, rows []VulnRow) []VulnFeedStatus {
 	return out
 }
 
+// unseenFeedScope names what a source covers and how to enable it, for the
+// not-configured note; sources not listed here get the generic text.
+var unseenFeedScope = map[string]string{
+	"cisco-csaf":    "Only Cisco network devices depend on this source. To enable it, add a signed CSAF provider with pinned keys to the vulnerability agent configuration.",
+	"paloalto-csaf": "Only Palo Alto Networks devices depend on this source. To enable it, add a signed CSAF provider with pinned keys to the vulnerability agent configuration.",
+}
+
+// unseenFeedDetail is the text of the not-configured note of a source no
+// run has named: it is left out on purpose, so this is not a failure. It
+// says what the source covers, how to enable it and that runs do not close
+// findings resting on it.
+func unseenFeedDetail(sourceID string) string {
+	scope, ok := unseenFeedScope[sourceID]
+	if !ok {
+		scope = "No run has named this source yet."
+	}
+	return scope + " Findings resting on it are not closed by runs."
+}
+
 // feedBanners builds the page-wide feed and Hermes banners.
 func feedBanners(feeds []VulnFeedStatus, lastComplete, now time.Time, maintainer bool) []vulnBanner {
 	var out []vulnBanner
@@ -780,6 +818,10 @@ func feedBanners(feeds []VulnFeedStatus, lastComplete, now time.Time, maintainer
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].SourceID < sorted[j].SourceID })
 	for _, f := range sorted {
 		id := vulnText(f.SourceID, false)
+		if f.Unseen {
+			out = append(out, vulnBanner{Text: "Feed " + id + " not configured", Note: true, Detail: unseenFeedDetail(f.SourceID)})
+			continue
+		}
 		if f.Stale {
 			t := "Feed " + id + " stale"
 			if !f.SnapshotDate.IsZero() {
