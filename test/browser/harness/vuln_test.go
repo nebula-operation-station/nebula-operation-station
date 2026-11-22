@@ -26,7 +26,10 @@ var vulnSpecPages = []struct {
 	{path: "/vulnerabilities/subject/host/e2e-two", shows: []string{vulnTwoName}, status: `^not assessed$`},
 	{path: "/vulnerabilities/subject/image/e2e-host?digest=" + vulnImageDigest, status: `^stale since `},
 	{path: "/vulnerabilities/subject/host/e2e-unconf", status: `closed by Hermes, not confirmed by NOS$`},
-	{path: "/vulnerabilities/subject/host/e2e-clean", status: `^no open findings$`, green: true},
+	{path: "/vulnerabilities/subject/host/e2e-clean", status: `^no open findings$`, green: true,
+		shows: []string{"Package inventory: read ", "412 source packages (1187 binaries), complete", "Running kernel " + vulnHostileKernel + ": mapped"}},
+	{path: "/vulnerabilities/subject/host/e2e-noinv", status: `^unknown: list incomplete$`,
+		shows: []string{"Package inventory: none stored: no successful package.list_installed run for this host yet", "Running kernel: kernel coverage unknown"}},
 	{path: "/vulnerabilities/subject/host/e2e-unknown", status: `^not assessed$`},
 	{path: "/vulnerabilities/f/" + vulnKeyCritical.String(), shows: []string{vulnAssessment, vulnHostileAlias, vulnHostileRun, vulnHostileVersion}},
 	{path: "/vulnerabilities/f/" + vulnKeyHostile.String(), shows: []string{vulnMarkdownText, vulnHostileID}},
@@ -48,7 +51,7 @@ var (
 func TestHarnessVulnPagesShowHostileValuesAsText(t *testing.T) {
 	h := newHarness(true, "8080", t.TempDir())
 	raw := []string{vulnHostName, vulnTwoName, vulnAssessment, vulnMarkdownText, vulnHostileID, vulnHostilePackage,
-		vulnHostileAlias, vulnHostileSource, vulnHostileRun, vulnHostileVersion, "<iframe", "\x1b", "\xe2\x80\xae"}
+		vulnHostileAlias, vulnHostileSource, vulnHostileRun, vulnHostileVersion, vulnHostileKernel, "<iframe", "\x1b", "\xe2\x80\xae"}
 	for _, p := range vulnSpecPages {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, p.path, nil))
@@ -99,8 +102,8 @@ func TestHarnessVulnPagesShowHostileValuesAsText(t *testing.T) {
 	// unlisted feed is a page-wide feed issue).
 	_, body := get(t, h, "/vulnerabilities?view=subject")
 	st := vulnStatusRe.FindAllStringSubmatch(body, -1)
-	if len(st) != 5 {
-		t.Fatalf("list by subject: %d statuses, want 5", len(st))
+	if len(st) != 6 {
+		t.Fatalf("list by subject: %d statuses, want 6", len(st))
 	}
 	if !strings.Contains(body, ">feed issue<") {
 		t.Error("list by subject: the clean subject does not show the feed issue")

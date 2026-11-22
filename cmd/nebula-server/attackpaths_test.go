@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
 )
@@ -37,7 +38,9 @@ func newAPFixture(t *testing.T) *apFixture {
 		s, ok := auth.SessionFrom(ctx)
 		return ok && s.UserName == "admin"
 	}
-	if err := mountAttackPaths(pages, swOrigin, isAdmin, log); err != nil {
+	// Mounted through the real registry, as run does (no withServerFeatures).
+	deps := serverDeps{cfg: serverconfig.Config{PublicOrigin: swOrigin}, isAdmin: isAdmin, log: log}
+	if err := mountServerFeaturePages(deps, pages); err != nil {
 		t.Fatal(err)
 	}
 	sessions := auth.NewStore(db, nil)
