@@ -579,10 +579,18 @@ func (p vulnPages) feeds(ctx context.Context) ([]ui.VulnFeedStatus, error) {
 	}
 	out := make([]ui.VulnFeedStatus, len(st))
 	for i, s := range st {
-		out[i] = ui.VulnFeedStatus{SourceID: s.SourceID, Listed: true, Stale: s.Stale, SnapshotDate: s.ContentDate,
-			LastVerdict: s.LastVerdict, Probation: s.Probation, PreResetDate: s.PreResetDate, PreResetSeq: s.PreResetSeq}
+		out[i] = uiFeedStatus(s)
 	}
 	return out, nil
+}
+
+// uiFeedStatus is the page view of one listed source. A source no run has
+// named (not seen) is Unseen: the agent leaves it out on purpose, so its
+// stale flag is dropped and the pages show a neutral note, not "stale".
+func uiFeedStatus(s vulnstore.FeedState) ui.VulnFeedStatus {
+	return ui.VulnFeedStatus{SourceID: s.SourceID, Listed: true, Unseen: !s.Seen, Stale: s.Stale && s.Seen,
+		SnapshotDate: s.ContentDate, LastVerdict: s.LastVerdict, Probation: s.Probation,
+		PreResetDate: s.PreResetDate, PreResetSeq: s.PreResetSeq}
 }
 
 func (p vulnPages) subject(ctx context.Context, s vulnstore.Subject) (ui.VulnSubjectStatus, error) {
