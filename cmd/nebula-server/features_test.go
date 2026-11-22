@@ -5,6 +5,9 @@ package main
 import (
 	"context"
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -188,6 +191,96 @@ func TestFeatureHooksThroughWebServer(t *testing.T) {
 	}
 	if rec := do(pagePath, token); rec.Code != http.StatusOK {
 		t.Fatalf("page with session: status %d, want 200", rec.Code)
+	}
+}
+
+// calleeName returns "pkg.Func" for a selector on an identifier, "Func" for
+// a plain identifier, and "" for anything else.
+func calleeName(fun ast.Expr) string {
+	switch f := fun.(type) {
+	case *ast.Ident:
+		return f.Name
+	case *ast.SelectorExpr:
+		if x, ok := f.X.(*ast.Ident); ok {
+			return x.Name + "." + f.Sel.Name
+		}
+	}
+	return ""
+}
+
+// TestRunServerWiresFeaturesInOrder reads runServer in main.go. The hooks
+// must see the ui.Options before ui.New, and the feature pages must be
+// mounted on the pages mux after its own routes and before webServer. A
+// test that calls the two phases itself cannot see main.go drop or move
+// them; this one fails when that happens.
+func TestRunServerWiresFeaturesInOrder(t *testing.T) {
+	f, err := parser.ParseFile(token.NewFileSet(), "main.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body *ast.BlockStmt
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "runServer" {
+			body = fd.Body
+		}
+	}
+	if body == nil {
+		t.Fatal("runServer not found in main.go")
+	}
+	type site struct {
+		pos  token.Pos
+		args []ast.Expr
+	}
+	calls := map[string][]site{}
+	ast.Inspect(body, func(n ast.Node) bool {
+		if c, ok := n.(*ast.CallExpr); ok {
+			if name := calleeName(c.Fun); name != "" {
+				calls[name] = append(calls[name], site{c.Pos(), c.Args})
+			}
+		}
+		return true
+	})
+	one := func(name string) site {
+		t.Helper()
+		s := calls[name]
+		if len(s) != 1 {
+			t.Fatalf("runServer calls %s %d times, want exactly 1", name, len(s))
+		}
+		return s[0]
+	}
+	ident := func(e ast.Expr, want string) {
+		t.Helper()
+		if id, ok := e.(*ast.Ident); !ok || id.Name != want {
+			t.Fatalf("argument = %T, want identifier %s", e, want)
+		}
+	}
+
+	opts := one("applyServerFeatureOptions")
+	uiNew := one("ui.New")
+	ident(opts.args[0], "deps")
+	if u, ok := opts.args[1].(*ast.UnaryExpr); !ok || u.Op != token.AND {
+		t.Fatalf("applyServerFeatureOptions second argument is not &uiOpts")
+	} else {
+		ident(u.X, "uiOpts")
+	}
+	ident(uiNew.args[0], "uiOpts")
+	if opts.pos >= uiNew.pos {
+		t.Fatal("applyServerFeatureOptions must run before ui.New")
+	}
+
+	mount := one("mountServerFeaturePages")
+	ident(mount.args[0], "deps")
+	ident(mount.args[1], "pages")
+	webSrv := one("webServer")
+	if mount.pos >= webSrv.pos {
+		t.Fatal("mountServerFeaturePages must run before webServer")
+	}
+	// The mount comes after every route main.go registers on pages, so the
+	// feature pages are added last, as reviewed.
+	for _, s := range calls["pages.Handle"] {
+		if s.pos > mount.pos {
+			t.Fatal("mountServerFeaturePages must come after every pages.Handle route")
+		}
 	}
 }
 
