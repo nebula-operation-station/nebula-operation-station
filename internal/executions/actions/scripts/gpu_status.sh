@@ -34,5 +34,7 @@ out=${out%????}
 	*) pre "nvidia-smi failed" ;;
 	esac
 }
-out=$(printf '%s\n' "$out" | head -n 64 | b64)
+# nvidia-smi prints "[Not Supported]" for a field the GPU does not report;
+# it is the same as "[N/A]" (unavailable), which the parser reads as such.
+out=$(printf '%s\n' "$out" | sed 's/, \[Not Supported\]/, [N\/A]/g' | head -n 64 | b64)
 printf '{"format":"gpu-status-v1","phase":"done","present":true,"gpus":"%s"}\n' "$out"

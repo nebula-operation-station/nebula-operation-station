@@ -118,6 +118,7 @@ type ndEnv struct {
 	t      *testing.T
 	db     *executordb.DB
 	svc    *executor.Service
+	auth   *permit.Authority
 	client pb.ExecutorServiceClient
 	conn   *grpc.ClientConn
 	logs   *syncBuffer
@@ -193,7 +194,7 @@ func newNDEnv(t *testing.T, roles ...peercred.Role) *ndEnv {
 	}
 	t.Cleanup(func() { conn.Close() })
 
-	e := &ndEnv{t: t, db: db, svc: svc, client: pb.NewExecutorServiceClient(conn), conn: conn, logs: logs, clock: clock}
+	e := &ndEnv{t: t, db: db, svc: svc, auth: authority, client: pb.NewExecutorServiceClient(conn), conn: conn, logs: logs, clock: clock}
 	e.adminSetup()
 	return e
 }
@@ -314,6 +315,49 @@ func (e *ndEnv) approve(doc permit.ReadGrantDoc) string {
 		e.t.Fatalf("propose lease: %v", err)
 	}
 	e.approveDigest(p.GetGrantDigest())
+	return doc.ID
+}
+
+// approveRefused is approve for a lease the executor must refuse at
+// proposal (A1-0): a device that is unknown, removed, blocked, without a
+// read credential, or at another pin, trust generation or credential
+// version than the registry. It asserts that ProposeReadGrant refuses it
+// with InvalidArgument, names no device data and leaves nothing pending,
+// then puts the lease in place past the RPC (permit authority propose and
+// CLI approve, as the internal/executor tests do), so the read-time and
+// lifecycle checks stay covered as defense in depth. It returns the grant
+// id.
+func (e *ndEnv) approveRefused(doc permit.ReadGrantDoc) string {
+	e.t.Helper()
+	raw := ndMarshal(e.t, doc)
+	_, _, digest, err := permit.ParseReadGrant(raw, e.clock.now())
+	if err != nil {
+		e.t.Fatalf("lease %s: parser refuses it, want only the registry to: %v", doc.ID, err)
+	}
+	_, err = e.svc.ProposeReadGrant(e.ctx(), &pb.ProposeReadGrantRequest{GrantJson: raw})
+	if status.Code(err) != codes.InvalidArgument {
+		e.t.Fatalf("lease %s: want InvalidArgument at proposal, got %v", doc.ID, err)
+	}
+	msg := status.Convert(err).Message()
+	leaks := []string{ndEndpoint}
+	for _, tgt := range doc.NetDeviceTargets {
+		leaks = append(leaks, tgt.DeviceID, tgt.TrustPin)
+	}
+	for _, l := range leaks {
+		if strings.Contains(msg, l) {
+			e.t.Fatalf("lease %s: proposal refusal %q names device data %q", doc.ID, msg, l)
+		}
+	}
+	if _, err := e.svc.ApproveReadGrantCLI(e.ctx(), &pb.ApproveReadGrantCLIRequest{GrantDigest: digest}); err == nil {
+		e.t.Fatalf("lease %s: refused proposal left a pending lease the CLI approved", doc.ID)
+	}
+	p, err := e.auth.ProposeReadGrant(raw)
+	if err != nil {
+		e.t.Fatalf("lease %s: propose past the RPC: %v", doc.ID, err)
+	}
+	if _, err := e.auth.ApproveReadGrantCLI(p.Digest, "admin"); err != nil {
+		e.t.Fatalf("lease %s: approve past the RPC: %v", doc.ID, err)
+	}
 	return doc.ID
 }
 
@@ -1588,19 +1632,37 @@ func TestNetDevCompromisedServerCannotWidenOrExtendLeases(t *testing.T) {
 	// lease created now with the full 30 days, one with exactly
 	// MaxNetDeviceTargets devices, the smallest budget, the interval floor
 	// itself and the largest credential version and trust generation are
-	// valid proposals (they stay proposals; none is approved).
-	for name, edit := range map[string]func(*permit.ReadGrantDoc){
-		"created now, 30 days":        func(d *permit.ReadGrantDoc) { d.ExpiryUnix = d.CreatedUnix + maxLife },
-		"MaxNetDeviceTargets devices": func(d *permit.ReadGrantDoc) { d.NetDeviceTargets = distinctTargets(permit.MaxNetDeviceTargets) },
-		"run_budget 1":                func(d *permit.ReadGrantDoc) { d.RunBudget = 1 },
-		"min_interval_s at the floor": func(d *permit.ReadGrantDoc) { d.MinIntervalS = minIntervalS },
-		"credential_version 1<<53-1":  func(d *permit.ReadGrantDoc) { d.NetDeviceTargets[0].CredentialVersion = 1<<53 - 1 },
-		"trust_generation 1<<48":      func(d *permit.ReadGrantDoc) { d.NetDeviceTargets[0].TrustGeneration = 1 << 48 },
+	// valid proposals (they stay proposals; none is approved). The device
+	// count, credential version and generation bounds name devices or
+	// identities the registry does not hold, so for those the lease format
+	// bound is checked at the parser and the proposal is refused by the
+	// registry check (A1-0) instead.
+	for name, c := range map[string]struct {
+		edit     func(*permit.ReadGrantDoc)
+		registry bool
+	}{
+		"created now, 30 days":        {func(d *permit.ReadGrantDoc) { d.ExpiryUnix = d.CreatedUnix + maxLife }, false},
+		"MaxNetDeviceTargets devices": {func(d *permit.ReadGrantDoc) { d.NetDeviceTargets = distinctTargets(permit.MaxNetDeviceTargets) }, true},
+		"run_budget 1":                {func(d *permit.ReadGrantDoc) { d.RunBudget = 1 }, false},
+		"min_interval_s at the floor": {func(d *permit.ReadGrantDoc) { d.MinIntervalS = minIntervalS }, false},
+		"credential_version 1<<53-1":  {func(d *permit.ReadGrantDoc) { d.NetDeviceTargets[0].CredentialVersion = 1<<53 - 1 }, true},
+		"trust_generation 1<<48":      {func(d *permit.ReadGrantDoc) { d.NetDeviceTargets[0].TrustGeneration = 1 << 48 }, true},
 	} {
 		d := valid()
-		edit(&d)
-		if _, err := e.client.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: ndMarshal(t, d)}); err != nil {
-			t.Errorf("control %s: refused at proposal: %v", name, err)
+		c.edit(&d)
+		raw := ndMarshal(t, d)
+		_, err := e.client.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: raw})
+		if !c.registry {
+			if err != nil {
+				t.Errorf("control %s: refused at proposal: %v", name, err)
+			}
+			continue
+		}
+		if _, _, _, perr := permit.ParseReadGrant(raw, e.clock.now()); perr != nil {
+			t.Errorf("control %s: parser refuses the bound: %v", name, perr)
+		}
+		if status.Code(err) != codes.InvalidArgument {
+			t.Errorf("control %s: devices not in the registry: want InvalidArgument at proposal, got %v", name, err)
 		}
 	}
 	e.wantRefused("read after the widening proposals", n, e.read(ndDevice, cbsVersion), codes.PermissionDenied)
@@ -1628,16 +1690,16 @@ func TestNetDevCompromisedServerCannotWidenOrExtendLeases(t *testing.T) {
 	e.wantRefused("read after the approved lease expired", n, e.read(ndDevice, cbsVersion), codes.PermissionDenied)
 	e.wantRefused("read the unapproved longer lease would grant", n, e.read(ndDevice, pb.NetDeviceRead_NET_DEVICE_READ_CBS_MAC_TABLE), codes.PermissionDenied)
 
-	// A lease naming an unregistered device (even approved by a careless
-	// admin) authorizes no read and adds no dial target; one with a
-	// substituted pin is stale.
+	// A lease naming an unregistered device is refused at proposal; put in
+	// place past the RPC it still authorizes no read and adds no dial
+	// target. One with a substituted pin is refused at proposal and stale.
 	rogue := e.target(schedgrant.NetDeviceReadCBSVersion)
 	rogue.DeviceID = ndRogueDevice
-	e.approve(e.leaseDoc(time.Hour, 24, 900, rogue))
+	e.approveRefused(e.leaseDoc(time.Hour, 24, 900, rogue))
 	e.wantRefused("read of an unregistered device", n, e.read(ndRogueDevice, cbsVersion), codes.NotFound)
 	stale := e.target(schedgrant.NetDeviceReadCBSVersion)
 	stale.TrustPin = strings.Repeat("cd", 32)
-	e.approve(e.leaseDoc(time.Hour, 24, 900, stale))
+	e.approveRefused(e.leaseDoc(time.Hour, 24, 900, stale))
 	e.wantRefused("read on a lease with a substituted pin", n, e.read(ndDevice, cbsVersion), codes.PermissionDenied)
 
 	// Revocation by the server only narrows.
@@ -1653,8 +1715,9 @@ func TestNetDevCompromisedServerCannotWidenOrExtendLeases(t *testing.T) {
 
 // TestNetDevLeaseAheadOfRegistryAuthorizesNothing (ND-21 1): a lease
 // whose credential_version or trust_generation is ahead of the registry
-// binds an identity the device does not have. Even approved, alone or all
-// together, such leases authorize no read, for any of their reads. A lease
+// binds an identity the device does not have. ProposeReadGrant refuses
+// such a lease (A1-0); put in place past the RPC, alone or all together,
+// such leases authorize no read, for any of their reads. A lease
 // at the registry's current identity does read, so the refusals come from
 // the lease binding, not from the device.
 //
@@ -1690,7 +1753,7 @@ func TestNetDevLeaseAheadOfRegistryAuthorizesNothing(t *testing.T) {
 	for _, tc := range ahead {
 		tgt := e.target(schedgrant.NetDeviceReadCBSVersion, schedgrant.NetDeviceReadCBSMACTable)
 		tc.edit(&tgt)
-		aheadIDs = append(aheadIDs, e.approve(e.leaseDoc(2*time.Hour, 24, 900, tgt)))
+		aheadIDs = append(aheadIDs, e.approveRefused(e.leaseDoc(2*time.Hour, 24, 900, tgt)))
 		e.wantRefused("read on a lease with "+tc.name, n, e.read(ndDevice, cbsVersion), codes.PermissionDenied)
 	}
 	// All of them together still authorize nothing, for either read.
@@ -1733,15 +1796,17 @@ func TestNetDevLeaseAheadOfRegistryAuthorizesNothing(t *testing.T) {
 	// rotation before that rotation happens.
 	next := e.target(schedgrant.NetDeviceReadCBSVersion)
 	next.CredentialVersion = 3
-	nextID := e.approve(e.leaseDoc(2*time.Hour, 24, 900, next))
+	nextID := e.approveRefused(e.leaseDoc(2*time.Hour, 24, 900, next))
 	if _, err := e.svc.BlockNetDevice(ctx, &pb.BlockNetDeviceRequest{DeviceId: ndDevice, Reason: "maintenance"}); err != nil {
 		t.Fatalf("block: %v", err)
 	}
 	requireRevoked("block", nextID)
 	// A lease approved while the device is blocked is revoked by the
 	// unblock: lifting the block must not make it usable once a rotation
-	// reaches the version it names.
-	blockedID := e.approve(e.leaseDoc(2*time.Hour, 24, 900, next))
+	// reaches the version it names. A blocked device gets no lease at
+	// proposal, not even at its current identity (A1-0).
+	e.approveRefused(e.leaseDoc(2*time.Hour, 24, 900, e.target(schedgrant.NetDeviceReadCBSVersion)))
+	blockedID := e.approveRefused(e.leaseDoc(2*time.Hour, 24, 900, next))
 	if e.approvedGrant(blockedID).GetRevokedUnix() != 0 {
 		t.Fatalf("lease approved during the block is revoked before the unblock")
 	}
@@ -1751,7 +1816,7 @@ func TestNetDevLeaseAheadOfRegistryAuthorizesNothing(t *testing.T) {
 	requireRevoked("unblock", blockedID)
 	// Registry at version 2; the server proposes, the admin approves a
 	// lease for version 3 again, and only the rotation revokes that one.
-	laterID := e.approve(e.leaseDoc(2*time.Hour, 24, 900, next))
+	laterID := e.approveRefused(e.leaseDoc(2*time.Hour, 24, 900, next))
 	e.clock.add(16 * time.Minute)
 	if _, err := e.svc.RotateNetDeviceCredential(ctx, &pb.RotateNetDeviceCredentialRequest{DeviceId: ndDevice, ExpectedCredentialVersion: 2,
 		Username: ndUser, Secret: []byte(ndSecret + "-2")}); err != nil {
@@ -1764,7 +1829,7 @@ func TestNetDevLeaseAheadOfRegistryAuthorizesNothing(t *testing.T) {
 	// cannot match a device that is later registered again.
 	gone := e.target(schedgrant.NetDeviceReadCBSVersion)
 	gone.CredentialVersion = 4
-	goneID := e.approve(e.leaseDoc(2*time.Hour, 24, 900, gone))
+	goneID := e.approveRefused(e.leaseDoc(2*time.Hour, 24, 900, gone))
 	if _, err := e.svc.RemoveNetDevice(ctx, &pb.RemoveNetDeviceRequest{DeviceId: ndDevice, Confirm: "yes"}); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
@@ -1776,8 +1841,9 @@ func TestNetDevLeaseAheadOfRegistryAuthorizesNothing(t *testing.T) {
 }
 
 // TestNetDevLeaseBeforeFirstCredentialStaysDead (ND-21 1, ADR 0010 D1/D2):
-// a lease for credential_version 1 can be approved while a registered
-// device has no read credential yet (version 0). The admin's first
+// a lease for credential_version 1, for a registered device without a
+// read credential yet (version 0), is refused at proposal (A1-0); put in
+// place past the RPC it is the lease under test. The admin's first
 // credential set brings the registry to exactly that version; it revokes
 // every lease of the device, so the lease that now matches the registry
 // reads nothing. A lease approved after the set, at the then current
@@ -1819,7 +1885,7 @@ func TestNetDevLeaseBeforeFirstCredentialStaysDead(t *testing.T) {
 	n := e.authorizedReads()
 
 	tgt.CredentialVersion = 1
-	aheadID := e.approve(e.leaseDoc(2*time.Hour, 24, 900, tgt))
+	aheadID := e.approveRefused(e.leaseDoc(2*time.Hour, 24, 900, tgt))
 	e.wantRefused("read before any credential exists", n, e.read(fresh, cbsVersion), codes.FailedPrecondition)
 
 	e.clock.add(16 * time.Minute)
