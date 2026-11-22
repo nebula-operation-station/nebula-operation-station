@@ -1020,26 +1020,33 @@ func TestVulnInventoryConcurrentSnapshotsNeverLowerGeneration(t *testing.T) {
 	e.addRead(t, srcRead(srcHost, "exec-1", e.clk.Now().Add(-time.Minute), true, "openssl"))
 	ctx := context.Background()
 	const rounds, callers = 5, 4
-	var last int64
 	for round := range rounds {
-		// A run start recorded the last generation served; the next served
-		// generation must be above it, whatever the calls interleave with.
-		if _, err := e.db.ExecContext(ctx, `UPDATE vuln_store_state SET max_inventory_generation = ? WHERE id = 1`, last); err != nil {
-			t.Fatal(err)
-		}
-		floor, err := maxInventoryGeneration(ctx, e.db)
-		if err != nil {
-			t.Fatal(err)
-		}
 		e.addRead(t, srcRead(srcHost, fmt.Sprintf("exec-r%d", round), e.clk.Now().Add(-time.Duration(round+1)*time.Second), true, "openssl"))
 		snaps := make([]api.VulnSnapshot, callers)
+		floors := make([]int64, callers)
 		errs := make([]error, callers)
 		var wg sync.WaitGroup
 		for i := range callers {
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()
+				// The run floor recorded before this call starts. Calls
+				// run concurrently with the other callers' run starts,
+				// which record the generation they were handed (below)
+				// while this call may be in progress.
+				floors[i], errs[i] = maxInventoryGeneration(ctx, e.db)
+				if errs[i] != nil {
+					return
+				}
 				snaps[i], errs[i] = e.inv.VulnSnapshot(ctx, "")
+				if errs[i] != nil {
+					return
+				}
+				// A run start with this snapshot records its generation. It
+				// runs while the other calls are in progress, so a call that
+				// reused this snapshot after its own floor read must not serve
+				// it: the post-check in current refuses it.
+				_, errs[i] = e.db.ExecContext(ctx, `UPDATE vuln_store_state SET max_inventory_generation = MAX(max_inventory_generation, ?) WHERE id = 1`, snaps[i].Generation)
 			}(i)
 		}
 		wg.Wait()
@@ -1048,14 +1055,13 @@ func TestVulnInventoryConcurrentSnapshotsNeverLowerGeneration(t *testing.T) {
 			if errs[i] != nil {
 				t.Fatalf("round %d call %d: %v", round, i, errs[i])
 			}
-			if s.Generation <= floor {
-				t.Fatalf("round %d: generation %d not above the recorded floor %d", round, s.Generation, floor)
+			if s.Generation <= floors[i] {
+				t.Fatalf("round %d call %d: generation %d not above the run floor %d recorded before the call", round, i, s.Generation, floors[i])
 			}
 			if prev, ok := byGen[s.Generation]; ok && prev != s.ID {
 				t.Fatalf("round %d: generation %d served as %s and %s", round, s.Generation, prev, s.ID)
 			}
 			byGen[s.Generation] = s.ID
-			last = max(last, s.Generation)
 		}
 	}
 }
