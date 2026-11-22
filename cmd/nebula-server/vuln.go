@@ -645,6 +645,15 @@ func (p vulnPages) hostInventories(ctx context.Context, subjects []vulnstore.Sub
 		}
 		return out
 	}
+	return mergeInventories(hosts, reads, truncated)
+}
+
+// mergeInventories keys the LatestAll result reads by host for every host in
+// hosts: the host's status when it has a read, Unavailable when it has none
+// but the result was truncated (it may be past the cut: unknown, not "no
+// read"), and nil otherwise.
+func mergeInventories(hosts []string, reads []vulninventory.Read, truncated bool) map[string]*ui.VulnInventoryStatus {
+	out := make(map[string]*ui.VulnInventoryStatus, len(hosts))
 	byHost := make(map[string]vulninventory.Read, len(reads))
 	for _, r := range reads {
 		byHost[r.HostID] = r
@@ -656,7 +665,7 @@ func (p vulnPages) hostInventories(ctx context.Context, subjects []vulnstore.Sub
 			out[id] = inventoryStatus(r)
 		case truncated:
 			// The host may be past the cut: unknown, not "no read".
-			out[id] = unavailable
+			out[id] = &ui.VulnInventoryStatus{Unavailable: true}
 		default:
 			out[id] = nil
 		}

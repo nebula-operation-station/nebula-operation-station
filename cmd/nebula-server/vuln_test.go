@@ -789,3 +789,30 @@ func TestVulnHostInventoriesKeysEveryHost(t *testing.T) {
 		t.Error("device subject got a host inventory")
 	}
 }
+
+// TestVulnHostInventoriesTruncatedListIsUnavailable checks the list-page
+// merge of a LatestAll result: when LatestAll was cut at its host limit, a
+// host without a read in the result may be past the cut, so its inventory is
+// Unavailable (unknown), never nil ("none stored"). Untruncated, a missing
+// host has no read stored.
+func TestVulnHostInventoriesTruncatedListIsUnavailable(t *testing.T) {
+	at := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	reads := []vulninventory.Read{{HostID: "alpha", ReadAt: at, Complete: true, Kernel: clsKernel("6.1.119-1")}}
+	hosts := []string{"alpha", "zulu"}
+
+	cut := mergeInventories(hosts, reads, true)
+	if got := cut["alpha"]; got == nil || got.Unavailable || !got.Complete || !got.ReadAt.Equal(at) {
+		t.Errorf("truncated: host in the result = %+v, want its read", got)
+	}
+	if got, ok := cut["zulu"]; !ok || got == nil || !got.Unavailable {
+		t.Errorf("truncated: host past the cut = %+v (present %v), want Unavailable", got, ok)
+	}
+
+	whole := mergeInventories(hosts, reads, false)
+	if got, ok := whole["zulu"]; !ok || got != nil {
+		t.Errorf("untruncated: host without a read = %+v (present %v), want nil", got, ok)
+	}
+	if got := whole["alpha"]; got == nil || got.Unavailable {
+		t.Errorf("untruncated: host in the result = %+v, want its read", got)
+	}
+}
