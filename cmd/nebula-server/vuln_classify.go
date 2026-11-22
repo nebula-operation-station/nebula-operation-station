@@ -25,8 +25,13 @@ var errVulnNoInventory = errors.New("no complete NOS package inventory read for 
 // is no basis for the finding (D5, fail closed).
 var errVulnEcosystem = errors.New("NOS inventory read is of another ecosystem than the finding")
 
-// errVulnNoKernel: the newest complete read carries no running kernel data.
-var errVulnNoKernel = errors.New("latest complete NOS read has no running kernel data")
+// errVulnNoKernel: neither the newest read nor the last complete read carries
+// running kernel data.
+var errVulnNoKernel = errors.New("NOS reads carry no running kernel data")
+
+// vulnPairAttempts bounds how often readPair reads a pair again when the newest
+// read moved between its reads (fail closed after that).
+const vulnPairAttempts = 3
 
 // errVulnNoEcosystem: a stored read that names packages or is complete has no
 // ecosystem, so NOS cannot tell whether it covers the finding (fail closed).
@@ -55,7 +60,14 @@ func listedAfter(read vulninventory.Read, written time.Time) bool {
 // an error, which holds the closure (vulnstore.HoldClassifyFailed).
 type vulnClassifier struct {
 	inv *vulninventory.Store
+	// betweenReads, when set, runs between the newest read and the last
+	// complete read of a pair (tests use it to store a read in between).
+	betweenReads func()
 }
+
+// errVulnReadRace: the newest read kept changing while NOS read the pair of
+// reads, so no consistent basis was found (fail closed).
+var errVulnReadRace = errors.New("NOS inventory reads changed while the closure was judged")
 
 // vulnAssessment is NOS's view of one finding: its closure class and the
 // basis version NOS knows for the component ("" when NOS does not know it).
@@ -73,6 +85,40 @@ func (c vulnClassifier) Classify(ctx context.Context, f vulnstore.Finding) (vuln
 	return a.class, nil
 }
 
+// readPair returns the newest read and the last complete read of host as a
+// pair that held at one instant. The newest read is read again after the last
+// complete read; when it moved in between, the pair is read again, up to
+// vulnPairAttempts times, and then errVulnReadRace holds the closure.
+func (c vulnClassifier) readPair(ctx context.Context, host string) (vulninventory.Read, vulninventory.Read, error) {
+	for attempt := 0; attempt < vulnPairAttempts; attempt++ {
+		latest, err := c.inv.Latest(ctx, host)
+		if errors.Is(err, vulninventory.ErrNoRead) {
+			return vulninventory.Read{}, vulninventory.Read{}, errVulnNoInventory
+		}
+		if err != nil {
+			return vulninventory.Read{}, vulninventory.Read{}, fmt.Errorf("classify: latest read: %w", err)
+		}
+		if c.betweenReads != nil {
+			c.betweenReads()
+		}
+		lc, err := c.inv.LastComplete(ctx, host)
+		if errors.Is(err, vulninventory.ErrNoRead) {
+			return vulninventory.Read{}, vulninventory.Read{}, errVulnNoInventory
+		}
+		if err != nil {
+			return vulninventory.Read{}, vulninventory.Read{}, fmt.Errorf("classify: last complete read: %w", err)
+		}
+		again, err := c.inv.Latest(ctx, host)
+		if err != nil {
+			return vulninventory.Read{}, vulninventory.Read{}, fmt.Errorf("classify: latest read again: %w", err)
+		}
+		if again.ID == latest.ID {
+			return latest, lc, nil
+		}
+	}
+	return vulninventory.Read{}, vulninventory.Read{}, errVulnReadRace
+}
+
 // assess decides the D5 class of f from NOS's inventory. Subjects other than
 // hosts and records NOS cannot re-check are unconfirmed, never an error.
 //
@@ -83,26 +129,17 @@ func (c vulnClassifier) Classify(ctx context.Context, f vulnstore.Finding) (vuln
 // ecosystem, a malformed fixed version or a version that cannot be compared
 // is an error, which holds the closure. Evidence also holds while the last
 // write of the finding may fall inside the listing lag of the complete read
-// (listedAfter), and while a newer read still names the package.
+// (listedAfter), and while a newer read still names the package. The newest
+// read and the last complete read are judged as one pair (readPair).
 func (c vulnClassifier) assess(ctx context.Context, f vulnstore.Finding) (vulnAssessment, error) {
 	unconfirmed := vulnAssessment{class: vulnstore.ClassUnconfirmed}
 	if f.Subject.Kind != vulnfinding.SubjectHost || !vulnstore.Checkable(f.Record) {
 		return unconfirmed, nil
 	}
 	host := f.Subject.ID
-	latest, err := c.inv.Latest(ctx, host)
-	if errors.Is(err, vulninventory.ErrNoRead) {
-		return vulnAssessment{}, errVulnNoInventory
-	}
+	latest, lc, err := c.readPair(ctx, host)
 	if err != nil {
-		return vulnAssessment{}, fmt.Errorf("classify: latest read: %w", err)
-	}
-	lc, err := c.inv.LastComplete(ctx, host)
-	if errors.Is(err, vulninventory.ErrNoRead) {
-		return vulnAssessment{}, errVulnNoInventory
-	}
-	if err != nil {
-		return vulnAssessment{}, fmt.Errorf("classify: last complete read: %w", err)
+		return vulnAssessment{}, err
 	}
 	eco := f.Record.Ecosystem
 	scheme, err := vulnver.SchemeForEcosystem(eco)
@@ -129,7 +166,7 @@ func (c vulnClassifier) assess(ctx context.Context, f vulnstore.Finding) (vulnAs
 	}
 	src := f.Record.Component.SourcePackage
 	if vulnver.IsKernelSource(src) {
-		return assessKernel(lc, f, scheme)
+		return assessKernel(latest, lc, f, scheme)
 	}
 
 	// The basis is the component version of the newest read that names it.
@@ -174,35 +211,63 @@ func (c vulnClassifier) assess(ctx context.Context, f vulnstore.Finding) (vulnAs
 	return unchangedOrUnconfirmed(a, f, named), nil
 }
 
-// assessKernel judges an unsigned kernel source (D4): only the running kernel
-// of the newest complete read, and only when NOS mapped it, is a basis. Partial
-// reads and failure markers decide nothing. A kernel never closes by row 2, a
-// removed package.
-func assessKernel(lc vulninventory.Read, f vulnstore.Finding, scheme vulnver.Scheme) (vulnAssessment, error) {
-	k := lc.Kernel
-	if k.State == "" {
+// assessKernel judges an unsigned kernel source (D4). A running kernel of src
+// that NOS mapped and that is below the episode fix keeps the finding open, in
+// the newest read or in the last complete one. The newest read that carries
+// kernel data is the basis; only when no newer read has kernel data is the last
+// complete read the basis. Evidence needs the last complete read to be listed
+// after the write, and the basis to be mapped. Partial reads and failure
+// markers decide nothing beyond a kernel they show. A kernel never closes by
+// row 2, a removed package.
+func assessKernel(latest, lc vulninventory.Read, f vulnstore.Finding, scheme vulnver.Scheme) (vulnAssessment, error) {
+	src := f.Record.Component.SourcePackage
+	fixed := f.EpisodeFixedVersion
+	if fixed != "" {
+		for _, r := range []vulninventory.Read{latest, lc} {
+			v, ok := mappedKernel(r.Kernel, src)
+			if !ok {
+				continue
+			}
+			cmp, err := vulnver.Compare(scheme, v, fixed)
+			if err != nil {
+				return vulnAssessment{}, fmt.Errorf("classify: compare kernel: %w", err)
+			}
+			if cmp < 0 {
+				return vulnAssessment{class: vulnstore.ClassContradicted, nosVersion: v}, nil
+			}
+		}
+	}
+	basis := latest
+	if basis.Kernel.State == "" {
+		basis = lc
+	}
+	if basis.Kernel.State == "" {
 		return vulnAssessment{}, errVulnNoKernel
 	}
-	src := f.Record.Component.SourcePackage
-	if k.State != string(osdebian.KernelMapped) || k.Source != src || k.Version == "" {
+	cur, ok := mappedKernel(basis.Kernel, src)
+	if !ok {
 		return vulnAssessment{class: vulnstore.ClassUnconfirmed}, nil
 	}
-	a := vulnAssessment{nosVersion: k.Version}
-	if fixed := f.EpisodeFixedVersion; fixed != "" {
-		cmp, err := vulnver.Compare(scheme, k.Version, fixed)
-		if err != nil {
-			return vulnAssessment{}, fmt.Errorf("classify: compare kernel: %w", err)
-		}
-		if cmp < 0 {
-			a.class = vulnstore.ClassContradicted
-			return a, nil
-		}
-		if listedAfter(lc, f.Updated) {
-			a.class = vulnstore.ClassEvidenced
-			return a, nil
-		}
+	a := vulnAssessment{nosVersion: cur}
+	if fixed == "" {
+		return unchangedOrUnconfirmed(a, f, true), nil
+	}
+	// Every mapped kernel of the two reads is at or above the fix here (a lower
+	// one returned Contradicted above), so evidence needs both to be mapped.
+	if _, lcMapped := mappedKernel(lc.Kernel, src); lcMapped && listedAfter(lc, f.Updated) {
+		a.class = vulnstore.ClassEvidenced
+		return a, nil
 	}
 	return unchangedOrUnconfirmed(a, f, true), nil
+}
+
+// mappedKernel returns the running kernel version of src when read mapped it
+// to that source with a version. Any other kernel state is no basis.
+func mappedKernel(k vulninventory.Kernel, src string) (string, bool) {
+	if k.State != string(osdebian.KernelMapped) || k.Source != src || k.Version == "" {
+		return "", false
+	}
+	return k.Version, true
 }
 
 // unchangedOrUnconfirmed returns ClassUnconfirmedUnchanged when the finding
