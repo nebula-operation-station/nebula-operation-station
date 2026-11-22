@@ -393,6 +393,8 @@ start.
 | `discovery_dir` | `/var/lib/nebula/discovery` | Discovery spool (`jobs/`, `results/`). Without the directory, discovery shows as not installed. |
 | `pve_spool_dir` | `/var/lib/nebula/pve` | Root of the PVE spool; an absolute path that must match the collector's `-spool`. The drop-in `20-discovery.conf` names the default paths, so another root needs your own directories and drop-in. |
 | `audit_hash_chain` | `false` | Chain the server's own audit lines by hash (section 10.3). |
+| `trusted_proxies` | `[]` | Reverse proxies whose `X-Forwarded-For` names the client of the enrollment routes (section 7.4). Each entry is one address: bare, `/32` or `/128`; a port, an IPv6 zone and the IPv4-mapped form are stripped. Any other prefix, a duplicate or more than 16 entries stops the start. Empty: the TCP peer is the client. |
+| `trusted_proxy_networks` | `[]` | Networks that contain reverse proxies **and no clients** (for example a container network used only by the proxy), as `address/bits` without host bits; at most 16, no duplicates. Each one is logged at startup. Never list the LAN or the NetBird range here. |
 | `traffic` | 21 days | Traffic map retention: `"traffic": {"retention_days": N}` keeps N days of flow data (1-21). A value outside the range stops the start. |
 | `notifications` | none | Providers, section 10.1. |
 | `api` | disabled | Read-only API, section 10.2. |
@@ -407,6 +409,16 @@ flag), for example
 Other `nebula-server` flags: `-version`, `-notify-test`,
 `-export-actions DIR` and `-api-token NAME:SCOPE[,SCOPE]` (sections 8.1
 and 10).
+
+Example: nginx on the same machine and a second proxy in a container
+network that holds only proxies (section 7.4):
+
+```json
+{
+  "trusted_proxies": ["127.0.0.1", "::1"],
+  "trusted_proxy_networks": ["172.18.0.0/16"]
+}
+```
 
 ### 6.2 Executor flags
 
