@@ -199,12 +199,24 @@ func AuditLogger(log *slog.Logger) func(permit.Event) {
 	}
 }
 
-// NewGRPCServer returns a gRPC server enforcing policy on every call.
+// NewGRPCServer returns a gRPC server enforcing policy on every call. It is
+// built with ServerOptions(svc, policy, log) and serves svc.
 func NewGRPCServer(svc *Service, policy *peercred.Policy, log *slog.Logger) *grpc.Server {
+	s := grpc.NewServer(ServerOptions(svc, policy, log)...)
+	pb.RegisterExecutorServiceServer(s, svc)
+	return s
+}
+
+// ServerOptions returns the options NewGRPCServer builds its server with:
+// peer-credential handshake, per-method role and integrity-lock
+// interceptors, stream limit and message limits. It is exported so tests can
+// serve a stand-in handler under exactly the production options; production
+// code uses NewGRPCServer.
+func ServerOptions(svc *Service, policy *peercred.Policy, log *slog.Logger) []grpc.ServerOption {
 	denied := func(uid uint32, pid int32, method string) {
 		log.Warn("audit", "kind", "rpc_denied", "uid", uid, "pid", pid, "method", method)
 	}
-	s := grpc.NewServer(
+	return []grpc.ServerOption{
 		// Unknown UIDs are dropped during the handshake, before any request
 		// is read; the interceptors then enforce the per-method table.
 		grpc.Creds(peercred.Credentials{Policy: policy, OnReject: func(uid uint32, pid int32) {
@@ -217,9 +229,7 @@ func NewGRPCServer(svc *Service, policy *peercred.Policy, log *slog.Logger) *grp
 		grpc.ChainStreamInterceptor(policy.StreamInterceptor(denied), svc.integrityStreamInterceptor),
 		grpc.MaxRecvMsgSize(MaxMessageSize),
 		grpc.MaxSendMsgSize(MaxResponseSize),
-	)
-	pb.RegisterExecutorServiceServer(s, svc)
-	return s
+	}
 }
 
 func (s *Service) GetStatus(_ context.Context, _ *pb.GetStatusRequest) (*pb.GetStatusResponse, error) {
