@@ -121,11 +121,18 @@ func normalizeNode(a netip.Addr) (netip.Addr, error) {
 	return n, nil
 }
 
-// parseStoredAddr parses an address read from flow_buckets.
+// parseStoredAddr parses an address read from flow_buckets. Only the
+// store's own written form is accepted: netip.ParseAddr also accepts
+// non-canonical text (upper-case or zero-padded IPv6), and topFlowsSQL
+// groups by the text columns, so two spellings of one address would
+// otherwise decode to duplicate keys.
 func parseStoredAddr(col, s string) (netip.Addr, error) {
 	a, err := netip.ParseAddr(s)
 	if err != nil {
 		return netip.Addr{}, fmt.Errorf("trafficstore: stored flow end %s %q: %w", col, s, err)
+	}
+	if a.String() != s {
+		return netip.Addr{}, fmt.Errorf("trafficstore: stored flow end %s %q: not in canonical form", col, s)
 	}
 	return a, nil
 }
