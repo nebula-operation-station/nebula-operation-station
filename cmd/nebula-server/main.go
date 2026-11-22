@@ -689,11 +689,6 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	if err := mountServerFeaturePages(deps, pages); err != nil {
 		return err
 	}
-	// Feature routes that answer without a session (features.go).
-	publicPages := http.NewServeMux()
-	if err := mountServerFeaturePublic(deps, publicPages); err != nil {
-		return err
-	}
 
 	var apiHandler http.Handler
 	if cfg.API.Enabled {
@@ -746,7 +741,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	}
 	// The inbox's navigation entry on every page of pages: one visibility
 	// check per request (ui.WithNotificationsNav, ui.NotificationsNavVisible).
-	srv, err := webServerWithPublic(cfg.PublicOrigin, login, h.WithNotificationsNav(pages), apiHandler, publicPages)
+	srv, err := webServer(cfg.PublicOrigin, login, h.WithNotificationsNav(pages), apiHandler)
 	if err != nil {
 		return err
 	}

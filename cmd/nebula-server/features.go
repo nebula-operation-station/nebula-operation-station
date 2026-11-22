@@ -64,14 +64,14 @@ type serverDeps struct {
 
 // serverFeature is one feature's wiring. Each hook is optional (nil skips it):
 //   - options edits the ui.Options before ui.New receives them;
-//   - pages adds routes behind the session check (webServer's pages mux);
-//   - public adds routes that answer without a session, outside login.Wrap
-//     but inside the security middleware.
+//   - pages adds routes behind the session check (webServer's pages mux).
+//
+// There is no hook for routes without a session: a feature that needs one
+// changes the security surface and comes with its own review.
 type serverFeature struct {
 	name    string
 	options func(serverDeps, *ui.Options) error
 	pages   func(serverDeps, *http.ServeMux) error
-	public  func(serverDeps, *http.ServeMux) error
 }
 
 // serverFeatures is the registry, filled by the init functions of the
@@ -137,31 +137,15 @@ func applyServerFeatureOptions(deps serverDeps, o *ui.Options) error {
 // mountServerFeaturePages runs the pages hooks on mux, in name order. mux is
 // the pages mux the session check guards.
 func mountServerFeaturePages(deps serverDeps, mux *http.ServeMux) error {
-	return runServerFeatureMux(deps, mux, "pages", func(f serverFeature) func(serverDeps, *http.ServeMux) error {
-		return f.pages
-	})
-}
-
-// mountServerFeaturePublic runs the public hooks on mux, in name order. mux
-// answers without a session (webServerWithPublic).
-func mountServerFeaturePublic(deps serverDeps, mux *http.ServeMux) error {
-	return runServerFeatureMux(deps, mux, "public", func(f serverFeature) func(serverDeps, *http.ServeMux) error {
-		return f.public
-	})
-}
-
-// runServerFeatureMux runs one mux phase over the ordered registry.
-func runServerFeatureMux(deps serverDeps, mux *http.ServeMux, phase string, hook func(serverFeature) func(serverDeps, *http.ServeMux) error) error {
 	fs, err := orderServerFeatures(serverFeatures)
 	if err != nil {
 		return err
 	}
 	for _, f := range fs {
-		h := hook(f)
-		if h == nil {
+		if f.pages == nil {
 			continue
 		}
-		if err := featureHook(f, phase, func() error { return h(deps, mux) }); err != nil {
+		if err := featureHook(f, "pages", func() error { return f.pages(deps, mux) }); err != nil {
 			return err
 		}
 	}

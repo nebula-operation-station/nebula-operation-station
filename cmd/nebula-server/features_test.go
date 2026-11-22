@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
@@ -56,9 +57,6 @@ func TestDuplicateFeatureNameStopsStart(t *testing.T) {
 	if err := mountServerFeaturePages(serverDeps{}, http.NewServeMux()); !errors.Is(err, errDuplicateFeature) {
 		t.Fatalf("duplicate name, pages: err = %v, want errDuplicateFeature", err)
 	}
-	if err := mountServerFeaturePublic(serverDeps{}, http.NewServeMux()); !errors.Is(err, errDuplicateFeature) {
-		t.Fatalf("duplicate name, public: err = %v, want errDuplicateFeature", err)
-	}
 }
 
 // TestEmptyFeatureNameStopsStart: a feature without a name is refused.
@@ -85,12 +83,6 @@ func TestFeatureHookErrorNamesFeature(t *testing.T) {
 	)
 	if err := mountServerFeaturePages(serverDeps{}, http.NewServeMux()); !errors.Is(err, cause) || !strings.Contains(err.Error(), "widget") {
 		t.Fatalf("pages hook error: err = %v, want the cause and the name widget", err)
-	}
-	withServerFeatures(t,
-		serverFeature{name: "widget", public: func(serverDeps, *http.ServeMux) error { return cause }},
-	)
-	if err := mountServerFeaturePublic(serverDeps{}, http.NewServeMux()); !errors.Is(err, cause) || !strings.Contains(err.Error(), "widget") {
-		t.Fatalf("public hook error: err = %v, want the cause and the name widget", err)
 	}
 }
 
@@ -128,14 +120,11 @@ func TestFeatureHookSeesUIOptionsByPointer(t *testing.T) {
 	}
 }
 
-// TestFeatureAllHooksThroughWebServer is the real path: one test feature
-// with all three hooks, served by webServerWithPublic. The page route
-// answers like every other page: 303 to /login without a session, 200 with
-// one. The public route answers 200 without a session and carries the
-// security headers.
-func TestFeatureAllHooksThroughWebServer(t *testing.T) {
+// TestFeatureHooksThroughWebServer is the real path: one test feature with
+// its options and pages hooks, served by webServer. The page route answers
+// like every other page: 303 to /login without a session, 200 with one.
+func TestFeatureHooksThroughWebServer(t *testing.T) {
 	const pagePath = "/feature-test/page"
-	const publicPath = "/feature-test/public"
 	var optsSeen *ui.Options
 	withServerFeatures(t, serverFeature{
 		name: "feature-test",
@@ -145,12 +134,6 @@ func TestFeatureAllHooksThroughWebServer(t *testing.T) {
 		},
 		pages: func(_ serverDeps, mux *http.ServeMux) error {
 			mux.Handle("GET "+pagePath, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(http.StatusOK)
-			}))
-			return nil
-		},
-		public: func(_ serverDeps, mux *http.ServeMux) error {
-			mux.Handle("GET "+publicPath, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(http.StatusOK)
 			}))
 			return nil
@@ -185,11 +168,7 @@ func TestFeatureAllHooksThroughWebServer(t *testing.T) {
 	if err := mountServerFeaturePages(serverDeps{}, pages); err != nil {
 		t.Fatal(err)
 	}
-	public := http.NewServeMux()
-	if err := mountServerFeaturePublic(serverDeps{}, public); err != nil {
-		t.Fatal(err)
-	}
-	srv, err := webServerWithPublic(swOrigin, login, pages, nil, public)
+	srv, err := webServer(swOrigin, login, pages, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,9 +189,82 @@ func TestFeatureAllHooksThroughWebServer(t *testing.T) {
 	if rec := do(pagePath, token); rec.Code != http.StatusOK {
 		t.Fatalf("page with session: status %d, want 200", rec.Code)
 	}
-	rec := do(publicPath, "")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("public route without session: status %d, want 200", rec.Code)
+}
+
+// expectedServerFeatures are the features the real registry must hold. A
+// feature file whose init() is removed or renamed fails here, not silently.
+var expectedServerFeatures = []string{"attackpaths"}
+
+// TestRealRegistryHoldsExpectedFeatures reads the registry the server runs
+// with (no withServerFeatures swap): every expected feature is registered
+// exactly once with a pages hook, and the names are valid.
+func TestRealRegistryHoldsExpectedFeatures(t *testing.T) {
+	if _, err := orderServerFeatures(serverFeatures); err != nil {
+		t.Fatalf("real registry: %v", err)
 	}
-	checkStrictHeaders(t, "feature public route", rec)
+	for _, want := range expectedServerFeatures {
+		n := 0
+		for _, f := range serverFeatures {
+			if f.name != want {
+				continue
+			}
+			n++
+			if f.pages == nil {
+				t.Errorf("feature %s has no pages hook", want)
+			}
+		}
+		if n != 1 {
+			t.Errorf("feature %s registered %d times, want 1", want, n)
+		}
+	}
+}
+
+// TestRealRegistryMountsPagesThroughRegistry: mountServerFeaturePages on the
+// real registry serves the attack-path page behind the session check, the
+// same as run does; a request without a session is sent to /login.
+func TestRealRegistryMountsPagesThroughRegistry(t *testing.T) {
+	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	log := slog.New(slog.DiscardHandler)
+	isAdmin := func(ctx context.Context) bool {
+		s, ok := auth.SessionFrom(ctx)
+		return ok && s.UserName == "admin"
+	}
+	pages := http.NewServeMux()
+	pages.Handle("/", http.NotFoundHandler())
+	deps := serverDeps{cfg: serverconfig.Config{PublicOrigin: swOrigin}, isAdmin: isAdmin, log: log}
+	if err := mountServerFeaturePages(deps, pages); err != nil {
+		t.Fatal(err)
+	}
+	sessions := auth.NewStore(db, nil)
+	login, err := auth.New(auth.Options{Executor: &lazyExecutor{}, Sessions: sessions, Log: log})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, _, err := sessions.Create(context.Background(), "cred-reg", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv, err := webServer(swOrigin, login, pages, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	do := func(cookie string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, swOrigin+"/vuln/paths", nil)
+		if cookie != "" {
+			req.AddCookie(&http.Cookie{Name: auth.CookieName, Value: cookie})
+		}
+		rec := httptest.NewRecorder()
+		srv.Handler.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := do(""); rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/login" {
+		t.Fatalf("attack-path page without session: status %d location %q, want 303 to /login", rec.Code, rec.Header().Get("Location"))
+	}
+	if rec := do(token); rec.Code != http.StatusOK {
+		t.Fatalf("attack-path page as admin: status %d, want 200", rec.Code)
+	}
 }

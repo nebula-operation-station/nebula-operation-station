@@ -167,15 +167,6 @@ type sessionGate interface {
 // The traffic map model (trafficMapAPIPath) lies under that prefix but is
 // read by a page, so it always goes to the session chain (pages).
 func webServer(publicOrigin string, login sessionGate, pages, apiHandler http.Handler) (*http.Server, error) {
-	return webServerWithPublic(publicOrigin, login, pages, apiHandler, nil)
-}
-
-// webServerWithPublic is webServer with the feature routes that answer
-// without a session (public, features.go, may be nil). A request that public
-// has a route for is served by public: it is outside the session check and
-// inside the security middleware. Every other request goes to the chain
-// webServer builds, unchanged.
-func webServerWithPublic(publicOrigin string, login sessionGate, pages, apiHandler http.Handler, public *http.ServeMux) (*http.Server, error) {
 	root := http.NewServeMux()
 	gated := login.Wrap(pages)
 	root.Handle("/", gated)
@@ -187,23 +178,7 @@ func webServerWithPublic(publicOrigin string, login sessionGate, pages, apiHandl
 	if apiHandler != nil {
 		opts.OriginExempt = isTokenAPIRequest
 	}
-	var chain http.Handler = root
-	if public != nil {
-		chain = publicFirst(public, root)
-	}
-	return middleware.NewServer(opts, chain)
-}
-
-// publicFirst serves the requests public has a route for, and sends every
-// other request to next.
-func publicFirst(public *http.ServeMux, next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, pattern := public.Handler(r); pattern != "" {
-			public.ServeHTTP(w, r)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
+	return middleware.NewServer(opts, root)
 }
 
 // isTokenAPIRequest reports whether r is a token API request (under
