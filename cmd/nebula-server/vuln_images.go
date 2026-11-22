@@ -98,15 +98,14 @@ type vulnImageService struct {
 	log      *slog.Logger
 }
 
-// newVulnImageService returns the service on db (server.db). inspects supplies
-// the stored docker.inspect results that name the digests; production passes
-// sqlInspects over the same db.
-func newVulnImageService(db *sql.DB, inspects imageInspects, log *slog.Logger) (*vulnImageService, error) {
+// newVulnImageService returns the service on db (server.db). The stored
+// docker.inspect results that name the digests are read from the same db.
+func newVulnImageService(db *sql.DB, log *slog.Logger) (*vulnImageService, error) {
 	st, err := vulninventory.New(db)
 	if err != nil {
 		return nil, fmt.Errorf("image inventory store: %w", err)
 	}
-	return &vulnImageService{store: st, inspects: inspects, now: time.Now, log: log}, nil
+	return &vulnImageService{store: st, inspects: sqlInspects{db: db}, now: time.Now, log: log}, nil
 }
 
 // splitImageRef splits a digest-pinned reference (repository@sha256:...) into

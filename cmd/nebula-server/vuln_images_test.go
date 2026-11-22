@@ -105,10 +105,11 @@ func imageServer(t *testing.T, rows map[string][]imageInspectRow) (*vulnImageSer
 		t.Fatalf("open server db: %v", err)
 	}
 	t.Cleanup(func() { db.Close() })
-	svc, err := newVulnImageService(db, fakeInspects{rows: rows}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	svc, err := newVulnImageService(db, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
+	svc.inspects = fakeInspects{rows: rows}
 	svc.now = func() time.Time { return imgClock }
 	st, err := vulninventory.New(db)
 	if err != nil {
