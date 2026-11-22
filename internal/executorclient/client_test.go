@@ -76,6 +76,14 @@ type harness struct {
 
 type harnessOptions struct {
 	uidRoles map[uint32][]peercred.Role
+	// handler, when set, is served instead of the real Service, under
+	// executor.ServerOptions of the real Service: the same handshake,
+	// interceptors and limits as executor.NewGRPCServer.
+	handler pb.ExecutorServiceServer
+	// extraServerOptions are appended after executor.ServerOptions; a later
+	// option overrides an earlier one. Only a test about the client's own
+	// limits sets it. It needs handler.
+	extraServerOptions []grpc.ServerOption
 }
 
 // newHarness starts an executor in-process. By default the test's own UID
@@ -145,7 +153,16 @@ func newHarness(t *testing.T, o harnessOptions) *harness {
 		t.Fatal(err)
 	}
 	policy := peercred.NewPolicy(o.uidRoles, executor.MethodRoles())
-	srv := executor.NewGRPCServer(svc, policy, discardLogger())
+	var srv *grpc.Server
+	switch {
+	case o.handler != nil:
+		srv = grpc.NewServer(append(executor.ServerOptions(svc, policy, discardLogger()), o.extraServerOptions...)...)
+		pb.RegisterExecutorServiceServer(srv, o.handler)
+	case len(o.extraServerOptions) > 0:
+		t.Fatal("harnessOptions.extraServerOptions needs a handler")
+	default:
+		srv = executor.NewGRPCServer(svc, policy, discardLogger())
+	}
 	go func() { _ = srv.Serve(lis) }()
 	t.Cleanup(srv.Stop)
 	return h
