@@ -26,7 +26,8 @@ import (
 // Feature registry (ticket uf01). Each server feature wires itself in its
 // own file: it registers a serverFeature from init() and its hooks receive
 // the values runServer has already built (serverDeps). main.go calls the
-// three phases below at fixed places; it does not name the features.
+// two phases below (options, pages) at fixed places; it does not name the
+// features.
 //
 // Features run in name order, so the start is the same on every build.
 // A duplicate or empty name, a failing hook and a route the mux refuses
