@@ -3,8 +3,8 @@
 package actions
 
 import (
-	"bytes"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -16,9 +16,11 @@ import (
 // installedFixturePath is the result of one real run of the unchanged
 // package_list_installed.sh over hostrun (runThroughHostrun) on the fixed
 // Debian 12 package set below. The end-to-end test in cmd/nebula-server
-// reads it. This test regenerates the result on every run and compares it
-// byte for byte with the file; a difference fails the test. The file is
-// never written by a test.
+// reads it. This test regenerates the result on every run and compares the
+// parsed read with the parsed file, not the bytes: the script runs the host's
+// awk, which is not pinned, so the text may differ between awk flavours while
+// the packages, the kernel and the completeness do not. The file is never
+// written by a test.
 const installedFixturePath = "testdata/package_list_installed_result.json"
 
 // installedFixtureRows is the fixed package set of the fixture: a Debian 12
@@ -48,8 +50,10 @@ func TestPackageListInstalledFixtureMatchesScriptResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
-	if !bytes.Equal(r.Result, want) {
-		t.Fatalf("script result differs from %s; the fixture is a real result and is not rewritten by tests\n got: %s\nwant: %s", installedFixturePath, r.Result, want)
+	got := osdebian.ParseInstalledResult(r.Result, osdebian.ReadStatus{ExitCode: 0}, vulnver.DistroDebian)
+	fix := osdebian.ParseInstalledResult(want, osdebian.ReadStatus{ExitCode: 0}, vulnver.DistroDebian)
+	if !reflect.DeepEqual(got, fix) {
+		t.Fatalf("parsed script result differs from %s; the fixture is a real result and is not rewritten by tests\n got: %+v\nwant: %+v", installedFixturePath, got, fix)
 	}
 }
 
