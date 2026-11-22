@@ -439,7 +439,7 @@ func TestVulnClassifyClosureClasses(t *testing.T) {
 			want: vulnstore.ClassContradicted, wantNOS: "6.1.119-1",
 		},
 		{
-			name: "kernel: a partial read at the fixed version neither evidences nor decides",
+			name: "kernel: a newer partial read at the fixed version over an older complete read below it is unconfirmed",
 			rec:  clsRecord("CVE-2026-7002", "linux", "6.1.119-1", "6.1.120-1"),
 			reads: func(t0 time.Time) []vulninventory.Read {
 				return []vulninventory.Read{
@@ -447,7 +447,29 @@ func TestVulnClassifyClosureClasses(t *testing.T) {
 					clsRead("r2", t0.Add(clsLag+2*time.Minute), false, clsKernel("6.1.120-1")),
 				}
 			},
-			want: vulnstore.ClassContradicted, wantNOS: "6.1.119-1",
+			want: vulnstore.ClassUnconfirmed, wantNOS: "6.1.120-1",
+		},
+		{
+			name: "kernel: a newer partial read at the fixed version over an older complete read at the fix is evidenced",
+			rec:  clsRecord("CVE-2026-7002", "linux", "6.1.119-1", "6.1.120-1"),
+			reads: func(t0 time.Time) []vulninventory.Read {
+				return []vulninventory.Read{
+					clsRead("r1", t0.Add(clsLag+time.Minute), true, clsKernel("6.1.120-1")),
+					clsRead("r2", t0.Add(clsLag+2*time.Minute), false, clsKernel("6.1.120-1")),
+				}
+			},
+			want: vulnstore.ClassEvidenced, wantNOS: "6.1.120-1",
+		},
+		{
+			name: "kernel: a newer complete read at the fixed version over an older complete read below it is evidenced",
+			rec:  clsRecord("CVE-2026-7002", "linux", "6.1.119-1", "6.1.120-1"),
+			reads: func(t0 time.Time) []vulninventory.Read {
+				return []vulninventory.Read{
+					clsRead("r1", t0.Add(clsLag+time.Minute), true, clsKernel("6.1.119-1"), clsComp("zlib", "1.2.13")),
+					clsRead("r2", t0.Add(clsLag+2*time.Minute), true, clsKernel("6.1.120-1"), clsComp("zlib", "1.2.13")),
+				}
+			},
+			want: vulnstore.ClassEvidenced, wantNOS: "6.1.120-1",
 		},
 		{
 			name: "kernel: a newer partial read below the fix contradicts a complete read at the fix",

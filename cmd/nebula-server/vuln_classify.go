@@ -211,28 +211,26 @@ func (c vulnClassifier) assess(ctx context.Context, f vulnstore.Finding) (vulnAs
 	return unchangedOrUnconfirmed(a, f, named), nil
 }
 
-// assessKernel judges an unsigned kernel source (D4). A running kernel of src
-// that NOS mapped and that is below the episode fix keeps the finding open, in
-// the newest read or in the last complete one. The newest read that carries
-// kernel data is the basis; only when no newer read has kernel data is the last
-// complete read the basis. Evidence needs the last complete read to be listed
-// after the write, and the basis to be mapped. Partial reads and failure
-// markers decide nothing beyond a kernel they show. A kernel never closes by
-// row 2, a removed package.
+// assessKernel judges an unsigned kernel source (D4). The newest read that maps
+// the running kernel of src decides whether that kernel is below the episode
+// fix: below keeps the finding open (Contradicted). An older mapped read does
+// not outvote a newer one, in either direction. The newest read that carries
+// kernel data is the basis for the rest; only when no newer read has kernel
+// data is the last complete read the basis. Evidence needs a basis that is
+// mapped, and the last complete read mapped at or above the fix and listed
+// after the write, so a newer partial read at the fix alone never evidences.
+// Partial reads and failure markers decide nothing beyond a kernel they show.
+// A kernel never closes by row 2, a removed package.
 func assessKernel(latest, lc vulninventory.Read, f vulnstore.Finding, scheme vulnver.Scheme) (vulnAssessment, error) {
 	src := f.Record.Component.SourcePackage
 	fixed := f.EpisodeFixedVersion
 	if fixed != "" {
-		for _, r := range []vulninventory.Read{latest, lc} {
-			v, ok := mappedKernel(r.Kernel, src)
-			if !ok {
-				continue
-			}
-			cmp, err := vulnver.Compare(scheme, v, fixed)
+		if v, ok := newestMappedKernel(latest, lc, src); ok {
+			below, err := kernelBelow(scheme, v, fixed)
 			if err != nil {
-				return vulnAssessment{}, fmt.Errorf("classify: compare kernel: %w", err)
+				return vulnAssessment{}, err
 			}
-			if cmp < 0 {
+			if below {
 				return vulnAssessment{class: vulnstore.ClassContradicted, nosVersion: v}, nil
 			}
 		}
@@ -252,13 +250,37 @@ func assessKernel(latest, lc vulninventory.Read, f vulnstore.Finding, scheme vul
 	if fixed == "" {
 		return unchangedOrUnconfirmed(a, f, true), nil
 	}
-	// Every mapped kernel of the two reads is at or above the fix here (a lower
-	// one returned Contradicted above), so evidence needs both to be mapped.
-	if _, lcMapped := mappedKernel(lc.Kernel, src); lcMapped && listedAfter(lc, f.Updated) {
-		a.class = vulnstore.ClassEvidenced
-		return a, nil
+	// Evidence needs the last complete read to map the kernel at or above the
+	// fix and to be listed after the write (D5).
+	if lcVer, lcMapped := mappedKernel(lc.Kernel, src); lcMapped && listedAfter(lc, f.Updated) {
+		below, err := kernelBelow(scheme, lcVer, fixed)
+		if err != nil {
+			return vulnAssessment{}, err
+		}
+		if !below {
+			a.class = vulnstore.ClassEvidenced
+			return a, nil
+		}
 	}
 	return unchangedOrUnconfirmed(a, f, true), nil
+}
+
+// newestMappedKernel returns the running kernel version of src from the newest
+// read that maps it: latest when it does, otherwise the last complete read.
+func newestMappedKernel(latest, lc vulninventory.Read, src string) (string, bool) {
+	if v, ok := mappedKernel(latest.Kernel, src); ok {
+		return v, true
+	}
+	return mappedKernel(lc.Kernel, src)
+}
+
+// kernelBelow reports whether the mapped kernel version v is below fixed.
+func kernelBelow(scheme vulnver.Scheme, v, fixed string) (bool, error) {
+	cmp, err := vulnver.Compare(scheme, v, fixed)
+	if err != nil {
+		return false, fmt.Errorf("classify: compare kernel: %w", err)
+	}
+	return cmp < 0, nil
 }
 
 // mappedKernel returns the running kernel version of src when read mapped it
