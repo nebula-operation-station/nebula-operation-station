@@ -754,7 +754,13 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	}
 	// The inbox's navigation entry on every page of pages: one visibility
 	// check per request (ui.WithNotificationsNav, ui.NotificationsNavVisible).
-	srv, err := webServer(cfg.PublicOrigin, login, h.WithNotificationsNav(pages), apiHandler)
+	// Public routes (features.go, ADR 0013 D7): mounted outside the session
+	// check by webServerPublic; only the exact prefixes of publicRoutePrefixes.
+	public := newPublicRoutes()
+	if err := mountServerPublicRoutes(deps, public); err != nil {
+		return err
+	}
+	srv, err := webServerPublic(cfg.PublicOrigin, login, h.WithNotificationsNav(pages), apiHandler, public)
 	if err != nil {
 		return err
 	}

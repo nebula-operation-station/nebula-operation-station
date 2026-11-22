@@ -21,6 +21,8 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsnotes"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/pveinventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/enroll"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
 
@@ -103,14 +105,78 @@ func (b *backgroundRuns) Close() {
 
 // serverFeature is one feature's wiring. Each hook is optional (nil skips it):
 //   - options edits the ui.Options before ui.New receives them;
-//   - pages adds routes behind the session check (webServer's pages mux).
-//
-// There is no hook for routes without a session: a feature that needs one
-// changes the security surface and comes with its own review.
+//   - pages adds routes behind the session check (webServer's pages mux);
+//   - public adds routes outside the session check (ADR 0013 D7). Only the
+//     exact prefixes in publicRoutePrefixes are accepted; see publicRoutes.
 type serverFeature struct {
 	name    string
 	options func(serverDeps, *ui.Options) error
 	pages   func(serverDeps, *http.ServeMux) error
+	public  func(serverDeps, *publicRoutes) error
+}
+
+// errPublicRouteRefused marks a public route the registry does not accept.
+var errPublicRouteRefused = errors.New("public route refused")
+
+// errBadPublicRoute marks a public route registered without a handler.
+var errBadPublicRoute = errors.New("public route without a handler")
+
+// publicRoutePrefixes are the only prefixes a public route may use. Each
+// names a subtree of its own; the handler behind it refuses every method
+// but GET. Adding a prefix changes the security surface and needs a review.
+var publicRoutePrefixes = []string{enroll.PathPrefix}
+
+// reservedRoutePaths are paths no public route may overlap: the root, the
+// login and setup pages, and the two API prefixes.
+var reservedRoutePaths = []string{"/", "/login", "/setup", api.Prefix, trafficMapAPIPath}
+
+// publicRoute is one accepted public route.
+type publicRoute struct {
+	prefix  string
+	handler http.Handler
+}
+
+// publicRoutes collects the routes that run outside the session check.
+// Handle accepts a route only when its prefix is exactly one of
+// publicRoutePrefixes, and refuses any prefix that overlaps a reserved path
+// or an earlier route. Everything else stays behind login.Wrap.
+type publicRoutes struct {
+	routes []publicRoute
+}
+
+// newPublicRoutes returns an empty registry.
+func newPublicRoutes() *publicRoutes {
+	return &publicRoutes{}
+}
+
+// Handle registers h under prefix. A refused prefix is not mounted.
+func (p *publicRoutes) Handle(prefix string, h http.Handler) error {
+	if h == nil {
+		return errBadPublicRoute
+	}
+	if !slices.Contains(publicRoutePrefixes, prefix) {
+		return fmt.Errorf("%w: %q is not an allowed public prefix", errPublicRouteRefused, prefix)
+	}
+	for _, r := range reservedRoutePaths {
+		// The root is refused only as itself: every path is under "/", and a
+		// public subtree under it is a more specific route, not a conflict.
+		if r == "/" && prefix == r || r != "/" && overlapsPath(prefix, r) {
+			return fmt.Errorf("%w: %q overlaps %q", errPublicRouteRefused, prefix, r)
+		}
+	}
+	for _, r := range p.routes {
+		if overlapsPath(prefix, r.prefix) {
+			return fmt.Errorf("%w: %q is already registered", errPublicRouteRefused, prefix)
+		}
+	}
+	p.routes = append(p.routes, publicRoute{prefix: prefix, handler: h})
+	return nil
+}
+
+// overlapsPath reports whether a route under a could match a path under b or
+// the reverse: one is a prefix of the other.
+func overlapsPath(a, b string) bool {
+	return strings.HasPrefix(a, b) || strings.HasPrefix(b, a)
 }
 
 // serverFeatures is the registry, filled by the init functions of the
@@ -196,6 +262,24 @@ func applyServerFeatureOptions(deps serverDeps, o *ui.Options) error {
 			continue
 		}
 		if err := featureHook(f, "options", func() error { return f.options(deps, o) }); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// mountServerPublicRoutes runs the public hooks on p, in name order. The
+// routes are mounted by webServerPublic, outside the session check.
+func mountServerPublicRoutes(deps serverDeps, p *publicRoutes) error {
+	fs, err := orderServerFeatures(serverFeatures)
+	if err != nil {
+		return err
+	}
+	for _, f := range fs {
+		if f.public == nil {
+			continue
+		}
+		if err := featureHook(f, "public", func() error { return f.public(deps, p) }); err != nil {
 			return err
 		}
 	}
