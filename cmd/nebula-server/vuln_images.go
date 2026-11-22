@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/dockerhost"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulninventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
@@ -26,15 +28,22 @@ import (
 // vulnImageService.ObserveImage).
 const inspectActionID = "docker.inspect"
 
+// imageActionID is the action whose execution is the read grant of an image
+// read (ADR 0011 D3). Its one parameter, image, is the pinned reference.
+const imageActionID = "image.packages"
+
 const (
 	// ImageInspectMaxAge is how old a stored docker.inspect result may be and
 	// still name an image for a read. An inspect of a container removed long
 	// ago does not authorise reads of its image any more.
 	ImageInspectMaxAge = 24 * time.Hour
-	// maxInspectRows bounds the stored inspect results read for one host:
-	// the newest ones, which name every container the host ran in the
-	// ImageInspectMaxAge window.
+	// maxInspectRows bounds the stored inspect results scanned for one read:
+	// the newest ones of the host in the ImageInspectMaxAge window.
 	maxInspectRows = 500
+	// maxInspectResultBytes bounds one stored inspect result the lookup
+	// parses. It is the attached-run result limit, so no stored result is
+	// larger; a larger row is never read into memory.
+	maxInspectResultBytes = hostrun.MaxResult
 )
 
 // imageInspectRow is one stored successful docker.inspect result of a host
@@ -42,12 +51,6 @@ const (
 type imageInspectRow struct {
 	Result     []byte
 	FinishedAt time.Time
-}
-
-// imageInspects lists the stored docker.inspect results of host that finished
-// at or after since, newest first, at most limit of them.
-type imageInspects interface {
-	InspectResults(ctx context.Context, host string, since time.Time, limit int) ([]imageInspectRow, error)
 }
 
 // sqlInspects reads the stored docker.inspect results from server.db. It reads
@@ -58,30 +61,36 @@ type sqlInspects struct {
 	db *sql.DB
 }
 
-// InspectResults implements imageInspects over server.db.
-func (q sqlInspects) InspectResults(ctx context.Context, host string, since time.Time, limit int) ([]imageInspectRow, error) {
+// InspectResults calls fn for each stored successful docker.inspect result of
+// host that finished at or after since, newest first, at most limit of them,
+// skipping any result larger than maxInspectResultBytes. Rows are scanned one
+// at a time, so at most one result is held in memory; fn returns true to stop
+// early. Only a result the database returns is passed to fn.
+func (q sqlInspects) InspectResults(ctx context.Context, host string, since time.Time, limit int, fn func(imageInspectRow) bool) error {
 	rows, err := q.db.QueryContext(ctx, `SELECT h.result, h.finished_at FROM execution_hosts h
 		JOIN executions e ON e.id = h.execution_id
 		WHERE e.action_id = ? AND h.host_id = ? AND h.state = 'finished' AND h.class = 'success'
-		AND h.finished_at >= ? ORDER BY h.finished_at DESC, e.id DESC LIMIT ?`,
-		inspectActionID, host, since.Unix(), limit)
+		AND h.finished_at >= ? AND length(h.result) <= ? ORDER BY h.finished_at DESC, e.id DESC LIMIT ?`,
+		inspectActionID, host, since.Unix(), maxInspectResultBytes, limit)
 	if err != nil {
-		return nil, fmt.Errorf("inspect results: %w", err)
+		return fmt.Errorf("inspect results: %w", err)
 	}
 	defer rows.Close()
-	var out []imageInspectRow
 	for rows.Next() {
-		var res []byte
+		var row imageInspectRow
 		var at sql.NullInt64
-		if err := rows.Scan(&res, &at); err != nil {
-			return nil, fmt.Errorf("inspect results: %w", err)
+		if err := rows.Scan(&row.Result, &at); err != nil {
+			return fmt.Errorf("inspect results: %w", err)
 		}
-		out = append(out, imageInspectRow{Result: res, FinishedAt: time.Unix(at.Int64, 0)})
+		row.FinishedAt = time.Unix(at.Int64, 0).UTC()
+		if fn(row) {
+			break
+		}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("inspect results: %w", err)
+		return fmt.Errorf("inspect results: %w", err)
 	}
-	return out, nil
+	return nil
 }
 
 // imageDigestRe is a sha256 platform digest, as image.packages pins it.
@@ -92,20 +101,22 @@ var imageDigestRe = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
 // each host). It never starts a read and never fails a run; errors are logged
 // by class only, never with package names or result text.
 type vulnImageService struct {
+	db       *sql.DB
 	store    *vulninventory.Store
-	inspects imageInspects
+	inspects sqlInspects
 	now      func() time.Time
 	log      *slog.Logger
 }
 
-// newVulnImageService returns the service on db (server.db). The stored
-// docker.inspect results that name the digests are read from the same db.
+// newVulnImageService returns the service on db (server.db). The grants and
+// the stored docker.inspect results that name the digests are read from the
+// same db.
 func newVulnImageService(db *sql.DB, log *slog.Logger) (*vulnImageService, error) {
 	st, err := vulninventory.New(db)
 	if err != nil {
 		return nil, fmt.Errorf("image inventory store: %w", err)
 	}
-	return &vulnImageService{store: st, inspects: sqlInspects{db: db}, now: time.Now, log: log}, nil
+	return &vulnImageService{db: db, store: st, inspects: sqlInspects{db: db}, now: time.Now, log: log}, nil
 }
 
 // splitImageRef splits a digest-pinned reference (repository@sha256:...) into
@@ -146,57 +157,99 @@ func inspectNames(in dockerhost.Inspect, repo, digest string) bool {
 // every container of the host count, not only the newest one. An absent or
 // unreadable result names nothing.
 func (v *vulnImageService) namedByInspect(ctx context.Context, host, repo, digest string) (bool, error) {
-	now := v.now()
-	since := now.Add(-ImageInspectMaxAge)
-	rows, err := v.inspects.InspectResults(ctx, host, since, maxInspectRows)
-	if err != nil {
-		return false, fmt.Errorf("inspect lookup: %w", err)
-	}
-	for _, row := range rows {
+	since := v.now().Add(-ImageInspectMaxAge)
+	named := false
+	err := v.inspects.InspectResults(ctx, host, since, maxInspectRows, func(row imageInspectRow) bool {
 		if row.FinishedAt.Before(since) {
-			continue
+			return false
 		}
 		in, err := dockerhost.ParseInspect(row.Result)
 		if err != nil {
-			continue
+			return false
 		}
-		if inspectNames(in, repo, digest) {
-			return true, nil
-		}
+		named = inspectNames(in, repo, digest)
+		return named
+	})
+	if err != nil {
+		return false, fmt.Errorf("inspect lookup: %w", err)
 	}
-	return false, nil
+	return named, nil
 }
 
-// ObserveImage parses result (untrusted host output of image.packages for
-// imageRef, a repository@sha256 reference) and stores the read of host from
-// execution execID at time at. The read is stored only when imageRef is the
-// reference the read grant pinned (grantedRef), and when a docker.inspect
+// imageGrant is the read grant of one image read: the reference the
+// image.packages execution pinned and the time the host finished it.
+type imageGrant struct {
+	Ref        string
+	FinishedAt time.Time
+}
+
+// grantedImage loads the grant of execID on host from the stored execution.
+// ok is false when there is no successful image.packages run of execID on
+// host, or its parameters do not carry exactly one image reference (a run
+// started by a lease or a schedule stores no image parameter, so its reads are
+// refused). Nothing the host returned is read here.
+func grantedImage(ctx context.Context, db *sql.DB, host, execID string) (g imageGrant, ok bool, err error) {
+	var action, params string
+	var at sql.NullInt64
+	err = db.QueryRowContext(ctx, `SELECT e.action_id, e.params, h.finished_at FROM executions e
+		JOIN execution_hosts h ON h.execution_id = e.id
+		WHERE e.id = ? AND h.host_id = ? AND h.state = 'finished' AND h.class = 'success'`,
+		execID, host).Scan(&action, &params, &at)
+	if errors.Is(err, sql.ErrNoRows) {
+		return imageGrant{}, false, nil
+	}
+	if err != nil {
+		return imageGrant{}, false, fmt.Errorf("grant lookup: %w", err)
+	}
+	if action != imageActionID || !at.Valid {
+		return imageGrant{}, false, nil
+	}
+	var p map[string]string
+	if json.Unmarshal([]byte(params), &p) != nil || len(p) != 1 {
+		return imageGrant{}, false, nil
+	}
+	ref, ok := p["image"]
+	if !ok {
+		return imageGrant{}, false, nil
+	}
+	return imageGrant{Ref: ref, FinishedAt: time.Unix(at.Int64, 0).UTC()}, true, nil
+}
+
+// ObserveImage parses result (untrusted host output of image.packages on host
+// in execution execID) and stores the read. The image and the read time come
+// from the stored execution, not from the caller: the read is stored only when
+// execID is a successful image.packages run of host whose stored parameter
+// names the image (its read grant, ADR 0011 D3), and when a docker.inspect
 // result of host from the last ImageInspectMaxAge names the repository and
-// digest of imageRef. Anything else is refused and nothing is stored. An
+// digest of that image. Anything else is refused and nothing is stored. An
 // unknown read (no package listing) is not stored: it has no packages and
 // would push out a kept read. A read the store refuses is logged by class and
-// not stored.
+// not stored; a read that retention discards at once is logged as
+// discarded_by_retention.
 //
 // ObserveImage starts no read. It only reads what the executions already
-// stored, and is meant for successful image.packages runs, which only a read
-// grant can start (ADR 0011 D3; the grant pins one digest per entry).
+// stored.
 //
-// NOT WIRED: nothing in the server calls ObserveImage yet. grantedRef is
-// trusted as the caller's copy of the execution's read grant; the check here
-// is that imageRef equals it. Wiring must take grantedRef from the stored
-// execution, not from the result.
-func (v *vulnImageService) ObserveImage(parent context.Context, hostID, execID, grantedRef, imageRef string, at time.Time, result []byte) {
-	if imageRef != grantedRef {
+// NOT WIRED: nothing in the server calls ObserveImage yet. Wiring must pass
+// the execution's ID and the result only; the grant is read from server.db.
+func (v *vulnImageService) ObserveImage(parent context.Context, hostID, execID string, result []byte) {
+	ctx, cancel := context.WithTimeout(parent, observeTimeout)
+	defer cancel()
+	grant, granted, err := grantedImage(ctx, v.db, hostID, execID)
+	if err != nil {
+		v.log.Error("vulnerability image inventory: grant lookup", "host", hostID, "execution", execID, "error_class", inventoryErrorClass(err))
+		return
+	}
+	if !granted {
 		v.log.Info("audit", "kind", "vuln_image_read_refused", "host", hostID, "execution", execID, "reason", "not_granted")
 		return
 	}
+	imageRef := grant.Ref
 	repo, digest, ok := splitImageRef(imageRef)
 	if !ok {
 		v.log.Error("vulnerability image inventory: image ref", "host", hostID, "execution", execID, "error_class", "image_ref")
 		return
 	}
-	ctx, cancel := context.WithTimeout(parent, observeTimeout)
-	defer cancel()
 	named, err := v.namedByInspect(ctx, hostID, repo, digest)
 	if err != nil {
 		v.log.Error("vulnerability image inventory: inspect lookup", "host", hostID, "execution", execID, "error_class", inventoryErrorClass(err))
@@ -220,14 +273,20 @@ func (v *vulnImageService) ObserveImage(parent context.Context, hostID, execID, 
 		Digest:      digest,
 		HostID:      hostID,
 		ExecutionID: execID,
-		ReadAt:      at,
+		ReadAt:      grant.FinishedAt,
 		Complete:    ip.Complete,
 		Reason:      ip.Reason,
 		OSFamily:    ip.OS.Family,
 		OSName:      ip.OS.Name,
 		Packages:    imagePackages(ip.Packages),
 	}
-	if _, err := v.store.PutImage(ctx, read); err != nil {
+	_, err = v.store.PutImage(ctx, read)
+	if errors.Is(err, vulninventory.ErrDiscardedByRetention) {
+		v.log.Info("audit", "kind", "vuln_image_read_discarded", "host", hostID, "execution", execID,
+			"reason", "discarded_by_retention")
+		return
+	}
+	if err != nil {
 		class := inventoryErrorClass(err)
 		v.log.Error("vulnerability image inventory: store read", "host", hostID, "execution", execID, "error_class", class)
 		return
