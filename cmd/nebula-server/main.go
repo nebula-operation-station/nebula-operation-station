@@ -152,6 +152,12 @@ type vulnHooks struct {
 	sink vulnnotify.Sink
 	// started is called with the service before its loops start.
 	started func(v *vulnService, notifying bool)
+	// now is the clock of the vulnerability store and notifier; nil means
+	// time.Now.
+	now func() time.Time
+	// inventory is called with the inventory service right after its
+	// findings closer is set (setCloser).
+	inventory func(inv *vulnInventoryService)
 }
 
 // runServer is run with the vulnerability test hooks.
@@ -494,7 +500,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	if vh.sink != nil {
 		vulnSink = vh.sink
 	}
-	vuln, err := newVulnService(db, vulnSink, log, nil)
+	vuln, err := newVulnService(db, vulnSink, log, vh.now)
 	if err != nil {
 		return err
 	}
@@ -502,6 +508,9 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	// Complete package reads close findings by inventory (D5). Reads that
 	// finish before this line close nothing; the next complete read does.
 	invSvc.setCloser(vuln.store)
+	if vh.inventory != nil {
+		vh.inventory(invSvc)
+	}
 	// Ops agent events (ADR 0016 D3, D10): only with the ops token. The
 	// trigger touches nothing while the agent is off (see Touch).
 	var opsTouch func() bool // nil without the ops token (features.go)
@@ -745,7 +754,13 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	}
 	// The inbox's navigation entry on every page of pages: one visibility
 	// check per request (ui.WithNotificationsNav, ui.NotificationsNavVisible).
-	srv, err := webServer(cfg.PublicOrigin, login, h.WithNotificationsNav(pages), apiHandler)
+	// Public routes (features.go, ADR 0013 D7): mounted outside the session
+	// check by webServerPublic; only the exact prefixes of publicRoutePrefixes.
+	public := newPublicRoutes()
+	if err := mountServerPublicRoutes(deps, public); err != nil {
+		return err
+	}
+	srv, err := webServerPublic(cfg.PublicOrigin, login, h.WithNotificationsNav(pages), apiHandler, public)
 	if err != nil {
 		return err
 	}

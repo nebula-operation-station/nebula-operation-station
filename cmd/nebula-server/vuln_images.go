@@ -33,9 +33,12 @@ const inspectActionID = "docker.inspect"
 const imageActionID = "image.packages"
 
 const (
-	// ImageInspectMaxAge is how old a stored docker.inspect result may be and
-	// still name an image for a read. An inspect of a container removed long
-	// ago does not authorise reads of its image any more.
+	// ImageInspectMaxAge is how long before the read grant's finish time a
+	// stored docker.inspect result may have finished and still name the image
+	// for that read. An inspect of a container removed long ago does not
+	// authorise reads of its image any more. An inspect that finished after
+	// the grant's finish time does not count at all; the bound is measured
+	// from the grant, not from the time of the store.
 	ImageInspectMaxAge = 24 * time.Hour
 	// maxInspectRows bounds the stored inspect results scanned for one read:
 	// the newest ones of the host in the ImageInspectMaxAge window.
@@ -46,11 +49,9 @@ const (
 	maxInspectResultBytes = hostrun.MaxResult
 )
 
-// imageInspectRow is one stored successful docker.inspect result of a host
-// and the time it finished.
+// imageInspectRow is one stored successful docker.inspect result of a host.
 type imageInspectRow struct {
-	Result     []byte
-	FinishedAt time.Time
+	Result []byte
 }
 
 // sqlInspects reads the stored docker.inspect results from server.db. It reads
@@ -61,28 +62,35 @@ type sqlInspects struct {
 	db *sql.DB
 }
 
+// inspectResultsQuery selects the stored successful docker.inspect results of
+// one host that finished in a window, newest first. execution_hosts is the
+// outer loop (CROSS JOIN keeps the planner from starting at the executions of
+// the action): its host, state, class and finished_at filters use the index
+// execution_hosts_inspect of migration 0054, and the action is checked on the
+// execution by its ID. The plan is pinned by TestInspectLookupUsesHostIndex.
+const inspectResultsQuery = `SELECT h.result FROM execution_hosts h CROSS JOIN executions e
+	WHERE h.host_id = ? AND h.state = 'finished' AND h.class = 'success'
+	AND h.finished_at >= ? AND h.finished_at <= ?
+	AND e.id = h.execution_id AND e.action_id = ? AND length(h.result) <= ?
+	ORDER BY h.finished_at DESC, e.id DESC LIMIT ?`
+
 // InspectResults calls fn for each stored successful docker.inspect result of
-// host that finished at or after since, newest first, at most limit of them,
-// skipping any result larger than maxInspectResultBytes. Rows are scanned one
-// at a time, so at most one result is held in memory; fn returns true to stop
-// early. Only a result the database returns is passed to fn.
-func (q sqlInspects) InspectResults(ctx context.Context, host string, since time.Time, limit int, fn func(imageInspectRow) bool) error {
-	rows, err := q.db.QueryContext(ctx, `SELECT h.result, h.finished_at FROM execution_hosts h
-		JOIN executions e ON e.id = h.execution_id
-		WHERE e.action_id = ? AND h.host_id = ? AND h.state = 'finished' AND h.class = 'success'
-		AND h.finished_at >= ? AND length(h.result) <= ? ORDER BY h.finished_at DESC, e.id DESC LIMIT ?`,
-		inspectActionID, host, since.Unix(), maxInspectResultBytes, limit)
+// host that finished from the time from up to and including the time to,
+// newest first, at most limit of them, skipping any result larger than
+// maxInspectResultBytes. Rows are scanned one at a time, so at most one result
+// is held in memory; fn returns true to stop early.
+func (q sqlInspects) InspectResults(ctx context.Context, host string, from, to time.Time, limit int, fn func(imageInspectRow) bool) error {
+	rows, err := q.db.QueryContext(ctx, inspectResultsQuery,
+		host, from.Unix(), to.Unix(), inspectActionID, maxInspectResultBytes, limit)
 	if err != nil {
 		return fmt.Errorf("inspect results: %w", err)
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var row imageInspectRow
-		var at sql.NullInt64
-		if err := rows.Scan(&row.Result, &at); err != nil {
+		if err := rows.Scan(&row.Result); err != nil {
 			return fmt.Errorf("inspect results: %w", err)
 		}
-		row.FinishedAt = time.Unix(at.Int64, 0).UTC()
 		if fn(row) {
 			break
 		}
@@ -104,7 +112,6 @@ type vulnImageService struct {
 	db       *sql.DB
 	store    *vulninventory.Store
 	inspects sqlInspects
-	now      func() time.Time
 	log      *slog.Logger
 }
 
@@ -116,7 +123,7 @@ func newVulnImageService(db *sql.DB, log *slog.Logger) (*vulnImageService, error
 	if err != nil {
 		return nil, fmt.Errorf("image inventory store: %w", err)
 	}
-	return &vulnImageService{db: db, store: st, inspects: sqlInspects{db: db}, now: time.Now, log: log}, nil
+	return &vulnImageService{db: db, store: st, inspects: sqlInspects{db: db}, log: log}, nil
 }
 
 // splitImageRef splits a digest-pinned reference (repository@sha256:...) into
@@ -153,16 +160,15 @@ func inspectNames(in dockerhost.Inspect, repo, digest string) bool {
 }
 
 // namedByInspect reports whether any of the host's stored docker.inspect
-// results from the last ImageInspectMaxAge names repo@digest. The results of
+// results names repo@digest. The window is measured from the read's time
+// readAt (the grant's finish time): an inspect counts when it finished in the
+// ImageInspectMaxAge before readAt, up to and including readAt. The results of
 // every container of the host count, not only the newest one. An absent or
 // unreadable result names nothing.
-func (v *vulnImageService) namedByInspect(ctx context.Context, host, repo, digest string) (bool, error) {
-	since := v.now().Add(-ImageInspectMaxAge)
+func (v *vulnImageService) namedByInspect(ctx context.Context, host, repo, digest string, readAt time.Time) (bool, error) {
+	from := readAt.Add(-ImageInspectMaxAge)
 	named := false
-	err := v.inspects.InspectResults(ctx, host, since, maxInspectRows, func(row imageInspectRow) bool {
-		if row.FinishedAt.Before(since) {
-			return false
-		}
+	err := v.inspects.InspectResults(ctx, host, from, readAt, maxInspectRows, func(row imageInspectRow) bool {
 		in, err := dockerhost.ParseInspect(row.Result)
 		if err != nil {
 			return false
@@ -177,24 +183,30 @@ func (v *vulnImageService) namedByInspect(ctx context.Context, host, repo, diges
 }
 
 // imageGrant is the read grant of one image read: the reference the
-// image.packages execution pinned and the time the host finished it.
+// image.packages execution pinned, the time the host finished it and the
+// result the host stored for it (execution_hosts.result).
 type imageGrant struct {
 	Ref        string
 	FinishedAt time.Time
+	Result     []byte
 }
 
 // grantedImage loads the grant of execID on host from the stored execution.
 // ok is false when there is no successful image.packages run of execID on
-// host, or its parameters do not carry exactly one image reference (a run
+// host, when its parameters do not carry exactly one image reference (a run
 // started by a lease or a schedule stores no image parameter, so its reads are
-// refused). Nothing the host returned is read here.
+// refused), or when its stored result is larger than hostrun.MaxResult (such a
+// result is not read). The result is the one the run stored, not one the
+// caller passes in.
 func grantedImage(ctx context.Context, db *sql.DB, host, execID string) (g imageGrant, ok bool, err error) {
 	var action, params string
 	var at sql.NullInt64
-	err = db.QueryRowContext(ctx, `SELECT e.action_id, e.params, h.finished_at FROM executions e
+	var result []byte
+	err = db.QueryRowContext(ctx, `SELECT e.action_id, e.params, h.finished_at, h.result FROM executions e
 		JOIN execution_hosts h ON h.execution_id = e.id
-		WHERE e.id = ? AND h.host_id = ? AND h.state = 'finished' AND h.class = 'success'`,
-		execID, host).Scan(&action, &params, &at)
+		WHERE e.id = ? AND h.host_id = ? AND h.state = 'finished' AND h.class = 'success'
+		AND length(h.result) <= ?`,
+		execID, host, hostrun.MaxResult).Scan(&action, &params, &at, &result)
 	if errors.Is(err, sql.ErrNoRows) {
 		return imageGrant{}, false, nil
 	}
@@ -212,27 +224,31 @@ func grantedImage(ctx context.Context, db *sql.DB, host, execID string) (g image
 	if !ok {
 		return imageGrant{}, false, nil
 	}
-	return imageGrant{Ref: ref, FinishedAt: time.Unix(at.Int64, 0).UTC()}, true, nil
+	return imageGrant{Ref: ref, FinishedAt: time.Unix(at.Int64, 0).UTC(), Result: result}, true, nil
 }
 
-// ObserveImage parses result (untrusted host output of image.packages on host
-// in execution execID) and stores the read. The image and the read time come
-// from the stored execution, not from the caller: the read is stored only when
+// ObserveImage stores the image read of execution execID on host. The result
+// is the one the execution stored for host (execution_hosts.result, untrusted
+// host output of image.packages); the caller passes no result. The image and
+// the read time come from the stored execution: the read is stored only when
 // execID is a successful image.packages run of host whose stored parameter
 // names the image (its read grant, ADR 0011 D3), and when a docker.inspect
-// result of host from the last ImageInspectMaxAge names the repository and
-// digest of that image. Anything else is refused and nothing is stored. An
-// unknown read (no package listing) is not stored: it has no packages and
-// would push out a kept read. A read the store refuses is logged by class and
-// not stored; a read that retention discards at once is logged as
+// result of host that finished in the ImageInspectMaxAge before the grant's
+// finish time, and not after it, names the repository and digest of that
+// image. The read time is the grant's finish time. Anything else is refused
+// and nothing is stored. An unknown read (no package listing) is not stored:
+// it has no packages and would push out a kept read. A second store of the
+// same execution is logged as a duplicate and stores nothing (one read per
+// execution and host, migration 0054). A read the store refuses is logged by
+// class and not stored; a read that retention discards at once is logged as
 // discarded_by_retention.
 //
 // ObserveImage starts no read. It only reads what the executions already
 // stored.
 //
 // NOT WIRED: nothing in the server calls ObserveImage yet. Wiring must pass
-// the execution's ID and the result only; the grant is read from server.db.
-func (v *vulnImageService) ObserveImage(parent context.Context, hostID, execID string, result []byte) {
+// the host and the execution's ID only.
+func (v *vulnImageService) ObserveImage(parent context.Context, hostID, execID string) {
 	ctx, cancel := context.WithTimeout(parent, observeTimeout)
 	defer cancel()
 	grant, granted, err := grantedImage(ctx, v.db, hostID, execID)
@@ -250,7 +266,7 @@ func (v *vulnImageService) ObserveImage(parent context.Context, hostID, execID s
 		v.log.Error("vulnerability image inventory: image ref", "host", hostID, "execution", execID, "error_class", "image_ref")
 		return
 	}
-	named, err := v.namedByInspect(ctx, hostID, repo, digest)
+	named, err := v.namedByInspect(ctx, hostID, repo, digest, grant.FinishedAt)
 	if err != nil {
 		v.log.Error("vulnerability image inventory: inspect lookup", "host", hostID, "execution", execID, "error_class", inventoryErrorClass(err))
 		return
@@ -259,7 +275,7 @@ func (v *vulnImageService) ObserveImage(parent context.Context, hostID, execID s
 		v.log.Info("audit", "kind", "vuln_image_read_refused", "host", hostID, "execution", execID, "reason", "digest_not_in_inspect")
 		return
 	}
-	ip, err := actions.ParseImagePackagesResult(imageRef, result)
+	ip, err := actions.ParseImagePackagesResult(imageRef, grant.Result)
 	if err != nil {
 		v.log.Error("vulnerability image inventory: parse", "host", hostID, "execution", execID, "error_class", "parse")
 		return
@@ -281,6 +297,11 @@ func (v *vulnImageService) ObserveImage(parent context.Context, hostID, execID s
 		Packages:    imagePackages(ip.Packages),
 	}
 	_, err = v.store.PutImage(ctx, read)
+	if errors.Is(err, vulninventory.ErrDuplicateRead) {
+		v.log.Info("audit", "kind", "vuln_image_read_duplicate", "host", hostID, "execution", execID,
+			"reason", "already_stored")
+		return
+	}
 	if errors.Is(err, vulninventory.ErrDiscardedByRetention) {
 		v.log.Info("audit", "kind", "vuln_image_read_discarded", "host", hostID, "execution", execID,
 			"reason", "discarded_by_retention")

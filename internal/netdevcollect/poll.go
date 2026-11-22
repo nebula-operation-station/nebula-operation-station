@@ -141,8 +141,8 @@ type CycleReport struct {
 	// MetadataWritten counts device metadata records spooled in this cycle.
 	// The rule: every listed device that is not blocked and has a valid trust
 	// generation gets one record per cycle, unless its last record was
-	// written less than metadataMinInterval ago. A tombstoned (unlisted)
-	// device gets none.
+	// written less than metadataMinInterval ago (never for an Interval below
+	// metadataMinInterval). A tombstoned (unlisted) device gets none.
 	MetadataWritten int
 	// MetadataFailed counts device metadata records the spool refused. A
 	// failed record does not stop the reads of the cycle, and it is tried
@@ -164,7 +164,9 @@ type Poller struct {
 	// Log receives one line per failure and cycle; never a payload or an
 	// executor error detail. Nil discards.
 	Log *slog.Logger
-	// Interval is how often Run starts a cycle (default DefaultInterval).
+	// Interval is how often Run starts a cycle (default DefaultInterval). Below
+	// one minute, every cycle writes a metadata record per listed device, but
+	// no device gets more than one per metadataSubMinuteWindow.
 	Interval time.Duration
 	// MaxBackoff caps the backoff (default DefaultMaxBackoff, never below
 	// MinReadInterval).
@@ -359,17 +361,44 @@ func metadataEligible(info *pb.NetDeviceInfo) bool {
 }
 
 // metadataMinInterval is the least time between two metadata records of one
-// device. A cycle that starts sooner than this after the device's last
-// accepted record writes no record for the device. The importer keeps only
-// the newest record per device (nx07f), so the bound caps the write load
-// without losing the device's latest state. With the default Interval
-// (DefaultInterval, one minute) every cycle writes.
+// device when the collector Interval is at least this long. A cycle that
+// starts sooner than this after the device's last accepted record writes no
+// record for the device. The importer keeps only the newest record per device
+// (nx07f), so the bound caps the write load without losing the device's latest
+// state. With the default Interval (DefaultInterval, one minute) every cycle
+// writes.
 const metadataMinInterval = time.Minute
+
+// metadataSubMinuteWindow is the hard floor between two metadata records of one
+// device for a collector Interval below metadataMinInterval. Such an Interval
+// writes one record per listed device in every cycle (spec A1-2) only down to
+// this window, so a device gets at most 6 records per minute whatever the
+// Interval. The spool has no total size cap, so this bound is what limits the
+// write rate: at MaxDevices (1024) and this window the worst case is about 102
+// files per second, not one per device per Interval.
+const metadataSubMinuteWindow = 10 * time.Second
+
+// metadataWindow returns the least time between two metadata records of one
+// device for this Poller. An unset (zero or negative) Interval means
+// DefaultInterval. For an Interval of at least metadataMinInterval the window
+// is metadataMinInterval. For a shorter Interval every cycle writes a record,
+// but never more often than metadataSubMinuteWindow: the window is the Interval
+// when that is at least the floor, and the floor otherwise.
+func (p *Poller) metadataWindow() time.Duration {
+	interval := p.Interval
+	if interval <= 0 {
+		interval = DefaultInterval
+	}
+	if interval >= metadataMinInterval {
+		return metadataMinInterval
+	}
+	return max(interval, metadataSubMinuteWindow)
+}
 
 // spoolMetadata writes one device metadata record for each listed device
 // that metadataEligible accepts, using the first listing of a duplicate id,
-// unless the spool accepted a record for that device less than
-// metadataMinInterval before now (see metadataMinInterval). A device that is
+// unless the spool accepted a record for that device less than the window
+// (metadataWindow) before now. A device that is
 // not eligible, or not listed, loses its write time, so it gets a fresh
 // record when it becomes eligible again. A refused write keeps the old write
 // time, so it is tried again in the next cycle. A refusal is counted in rep
@@ -381,6 +410,7 @@ func (p *Poller) spoolMetadata(ctx context.Context, infos []*pb.NetDeviceInfo, n
 	if p.metaWritten == nil {
 		p.metaWritten = map[string]time.Time{}
 	}
+	window := p.metadataWindow()
 	seen := make(map[string]bool, len(infos))
 	eligible := make(map[string]bool, len(infos))
 	for _, info := range infos {
@@ -398,7 +428,7 @@ func (p *Poller) spoolMetadata(ctx context.Context, infos []*pb.NetDeviceInfo, n
 		eligible[id] = true
 		if last, ok := p.metaWritten[id]; ok {
 			// A clock that went back is not a reason to hold the record back.
-			if d := now.Sub(last); d >= 0 && d < metadataMinInterval {
+			if d := now.Sub(last); d >= 0 && d < window {
 				continue
 			}
 		}
