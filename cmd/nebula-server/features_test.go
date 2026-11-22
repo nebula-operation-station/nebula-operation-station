@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
@@ -282,6 +283,38 @@ func TestRunServerWiresFeaturesInOrder(t *testing.T) {
 			t.Fatal("mountServerFeaturePages must come after every pages.Handle route")
 		}
 	}
+}
+
+// TestBackgroundRunRefusedAfterClose: a feature that starts a loop after
+// shutdown has begun gets an error and no goroutine; the loops started before
+// it are still waited for.
+func TestBackgroundRunRefusedAfterClose(t *testing.T) {
+	var wg sync.WaitGroup
+	runs := newBackgroundRuns(&wg)
+	started := make(chan struct{})
+	if err := runs.Go(func() { close(started) }); err != nil {
+		t.Fatalf("run before close: %v", err)
+	}
+	<-started
+	runs.Close()
+	err := runs.Go(func() { t.Error("loop started after shutdown began") })
+	if !errors.Is(err, errServerStopping) {
+		t.Fatalf("run after close: err = %v, want errServerStopping", err)
+	}
+	wg.Wait()
+}
+
+// TestFeatureRunRefusedAfterCloseIsSeenByFeature: the feature gets the error
+// from serverDeps.run, so it can stop its own setup.
+func TestFeatureRunRefusedAfterCloseIsSeenByFeature(t *testing.T) {
+	var wg sync.WaitGroup
+	runs := newBackgroundRuns(&wg)
+	runs.Close()
+	deps := serverDeps{run: func(f func(context.Context)) error { return runs.Go(func() { f(context.Background()) }) }}
+	if err := deps.run(func(context.Context) { t.Error("loop ran after close") }); !errors.Is(err, errServerStopping) {
+		t.Fatalf("serverDeps.run after close: err = %v, want errServerStopping", err)
+	}
+	wg.Wait()
 }
 
 // expectedServerFeatures are the features the real registry must hold. A

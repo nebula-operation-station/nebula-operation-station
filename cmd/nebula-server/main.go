@@ -242,9 +242,13 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	// close, so none of them logs or uses the database after run.
 	connCtx, stopConnect := context.WithCancel(ctx)
 	var bg sync.WaitGroup
+	// Feature loops (serverDeps.run) start through runs; Close refuses
+	// them once shutdown has begun, before bg is waited for.
+	runs := newBackgroundRuns(&bg)
 	var ops *executions.Service
 	defer func() {
 		stopConnect()
+		runs.Close()
 		bg.Wait()
 		if ops != nil {
 			ops.Wait()
@@ -576,7 +580,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		isAdmin:   isAdmin,
 		retention: retention,
 		opsTouch:  opsTouch,
-		run:       func(f func(context.Context)) { bg.Go(func() { f(connCtx) }) },
+		run:       func(f func(context.Context)) error { return runs.Go(func() { f(connCtx) }) },
 	}
 	uiOpts := withOperationSuggestions(withBatchPlanner(ui.Options{
 		PublicOrigin:       cfg.PublicOrigin,

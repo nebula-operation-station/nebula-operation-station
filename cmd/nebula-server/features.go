@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/auditlog"
@@ -59,8 +60,45 @@ type serverDeps struct {
 	// opsTouch is the ops agent trigger's Touch, nil without the ops token.
 	opsTouch func() bool
 	// run starts a background loop under the server's connection context;
-	// the server waits for it at shutdown.
-	run func(func(context.Context))
+	// the server waits for it at shutdown. It fails with errServerStopping
+	// once shutdown has begun, and the loop does not start.
+	run func(func(context.Context)) error
+}
+
+// errServerStopping is returned by serverDeps.run after shutdown has begun.
+var errServerStopping = errors.New("server is shutting down")
+
+// backgroundRuns starts the server's background loops in one wait group.
+// Close refuses every later start, so no goroutine is added once the server
+// waits for the group at shutdown.
+type backgroundRuns struct {
+	mu     sync.Mutex
+	wg     *sync.WaitGroup
+	closed bool
+}
+
+// newBackgroundRuns returns a gate that starts loops in wg.
+func newBackgroundRuns(wg *sync.WaitGroup) *backgroundRuns {
+	return &backgroundRuns{wg: wg}
+}
+
+// Go starts f in the wait group. It returns errServerStopping after Close.
+func (b *backgroundRuns) Go(f func()) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
+		return errServerStopping
+	}
+	b.wg.Go(f)
+	return nil
+}
+
+// Close refuses every later Go. The server calls it before it waits for the
+// wait group.
+func (b *backgroundRuns) Close() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.closed = true
 }
 
 // serverFeature is one feature's wiring. Each hook is optional (nil skips it):
