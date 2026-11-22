@@ -3,7 +3,6 @@
 package executor
 
 import (
-	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -11,6 +10,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/schedgrant"
@@ -35,8 +35,10 @@ func (e *netDevGrantEnv) leaseDoc(targets ...permit.NetDeviceTarget) []byte {
 	return raw
 }
 
+// proposeLease proposes as the admin, the only role that may propose a
+// device read lease (A1-5); the A1-0 registry checks apply to it.
 func (e *netDevGrantEnv) proposeLease(raw []byte) (*pb.ProposeReadGrantResponse, error) {
-	return e.svc.ProposeReadGrant(context.Background(), &pb.ProposeReadGrantRequest{GrantJson: raw})
+	return e.proposeAs(peercred.RoleAdmin, raw)
 }
 
 // TestProposeNetDeviceLeaseChecksRegistry (A1-0): ProposeReadGrant refuses a

@@ -58,6 +58,17 @@ func mountAttackPaths(pages *http.ServeMux, publicOrigin string, isAdmin func(ct
 	return nil
 }
 
+// The attack-path pages are the first feature on the registry (features.go):
+// the same mount, behind the same session check, from its own file.
+func init() {
+	registerServerFeature(serverFeature{
+		name: "attackpaths",
+		pages: func(d serverDeps, mux *http.ServeMux) error {
+			return mountAttackPaths(mux, d.cfg.PublicOrigin, d.isAdmin, d.log)
+		},
+	})
+}
+
 // attackPathChrome is softwareChrome for the attack-path pages.
 func attackPathChrome(r *http.Request) paths.Chrome {
 	c := softwareChrome(r)

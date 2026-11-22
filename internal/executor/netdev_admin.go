@@ -4,6 +4,7 @@ package executor
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
@@ -18,6 +19,7 @@ import (
 	"net"
 	"net/netip"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,6 +36,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevcontract"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/schedgrant"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vault"
 )
@@ -1113,6 +1116,164 @@ func (a *NetDevAdmin) Repin(ctx context.Context, id, oldPin, newPin, digest stri
 func repinBindingCurrent(b NetDevRepinBinding, d executordb.NetDevice) bool {
 	return d.ID == b.DeviceID && d.Family == b.Family && d.EndpointIP == b.EndpointIP && d.Port == b.Port &&
 		d.PinKind == b.PinKind && d.PinValue == b.OldPin && d.TrustGeneration == b.TrustGeneration
+}
+
+// --- device read lease document (A1-5) ---
+
+// Device read lease lifetimes (ADR 0010 D4).
+const (
+	// NetDevLeaseDefaultLifetime is the lifetime of a lease built without
+	// an explicit one.
+	NetDevLeaseDefaultLifetime = permit.DefaultReadGrantLifetime
+	// NetDevLeaseMaxLifetime is the longest lifetime a lease may have.
+	NetDevLeaseMaxLifetime = permit.ReadGrantMaxLifetime
+	// netDevLeaseIssuer is the issuer of a lease built without one.
+	netDevLeaseIssuer = "admin"
+)
+
+// ErrNetDevLeaseRequest marks a lease request the builder refuses: a bad
+// lifetime, read set or issuer, or a document permit would not accept.
+var ErrNetDevLeaseRequest = errors.New("executor: invalid network device lease request")
+
+// NetDevLeaseRequest is what the admin chooses for one device read lease:
+// the device, the read set and the lifetime. The trust pin, trust
+// generation and credential version are never part of the request; they
+// come from the executor's registry.
+type NetDevLeaseRequest struct {
+	// DeviceID is the registered device.
+	DeviceID string
+	// Reads is the typed read set (schedgrant.NetDeviceReads), all of the
+	// device's family, each at most once.
+	Reads []string
+	// Lifetime is created-to-expiry; zero means NetDevLeaseDefaultLifetime.
+	// It must be within permit.ReadGrantMinLifetime and
+	// NetDevLeaseMaxLifetime.
+	Lifetime time.Duration
+	// Issuer names the proposer in the document; empty means "admin".
+	Issuer string
+}
+
+// NetDevLease is a built device read lease document, ready for
+// ProposeReadGrant from the admin peer.
+type NetDevLease struct {
+	// Doc is the parsed document.
+	Doc permit.ReadGrantDoc
+	// JSON is the canonical document (permit.ParseReadGrant form).
+	JSON []byte
+	// Digest is the lowercase hex SHA-256 of JSON, the grant digest.
+	Digest string
+}
+
+// LeaseDocument builds a device read lease for one live, unblocked device
+// with a read credential, from the registry's current trust pin, trust
+// generation and read credential version (A1-5). It proposes nothing.
+func (a *NetDevAdmin) LeaseDocument(_ context.Context, in NetDevLeaseRequest) (NetDevLease, error) {
+	if err := a.checkStore(); err != nil {
+		return NetDevLease{}, err
+	}
+	d, err := a.liveDevice(in.DeviceID)
+	if err != nil {
+		return NetDevLease{}, fmt.Errorf("network device lease: %w", err)
+	}
+	if d.Blocked {
+		return NetDevLease{}, fmt.Errorf("network device lease %s: %w", d.ID, ErrNetDevReadBlocked)
+	}
+	v, err := a.credentialVersion(netDevReadCredRef(d))
+	if err != nil {
+		return NetDevLease{}, fmt.Errorf("network device lease %s: %w", d.ID, err)
+	}
+	return NetDevLeaseFromInfo(netDeviceInfo(d, v), in, a.now())
+}
+
+// NetDevLeaseFromInfo builds a device read lease document from a registry
+// row as the executor returns it (ListNetDevices, admin-only) and the
+// admin's request. The frozen target takes the device id, pin, trust
+// generation and credential version from dev only. The document uses the
+// device profile (schedgrant.NetDeviceReadProfile), the 15-minute floor,
+// the default budget and a scheduled trigger; it is checked with
+// permit.ParseReadGrant before it is returned.
+func NetDevLeaseFromInfo(dev *pb.NetDeviceInfo, in NetDevLeaseRequest, now time.Time) (NetDevLease, error) {
+	switch {
+	case dev == nil || dev.GetDeviceId() != in.DeviceID:
+		return NetDevLease{}, fmt.Errorf("%w: device row does not match the requested device", ErrNetDevLeaseRequest)
+	case dev.GetBlocked():
+		return NetDevLease{}, fmt.Errorf("network device lease %s: %w", dev.GetDeviceId(), ErrNetDevReadBlocked)
+	case dev.GetCredentialVersion() < 1:
+		return NetDevLease{}, fmt.Errorf("network device lease %s: %w", dev.GetDeviceId(), ErrNetDevReadNoCredential)
+	}
+	lifetime := in.Lifetime
+	if lifetime == 0 {
+		lifetime = NetDevLeaseDefaultLifetime
+	}
+	if lifetime < permit.ReadGrantMinLifetime || lifetime > NetDevLeaseMaxLifetime {
+		return NetDevLease{}, fmt.Errorf("%w: lifetime must be %s to %s", ErrNetDevLeaseRequest, permit.ReadGrantMinLifetime, NetDevLeaseMaxLifetime)
+	}
+	reads, err := netDevLeaseReads(dev.GetFamily(), in.Reads)
+	if err != nil {
+		return NetDevLease{}, err
+	}
+	issuer := in.Issuer
+	if issuer == "" {
+		issuer = netDevLeaseIssuer
+	}
+	id, err := newNetDevLeaseID()
+	if err != nil {
+		return NetDevLease{}, err
+	}
+	created := now.Unix()
+	doc := permit.ReadGrantDoc{
+		Grant: permit.ReadGrantFormat, ID: id, Issuer: issuer, CreatedUnix: created,
+		ExpiryUnix: created + int64(lifetime/time.Second), Trigger: permit.TriggerScheduled,
+		Actions: []permit.ReadGrantAction{}, MinIntervalS: int64(schedgrant.NetDeviceMinInterval / time.Second),
+		RunBudget: schedgrant.NetDeviceDefaultRunBudget, RateProfile: schedgrant.NetDeviceReadProfile,
+		NetDeviceTargets: []permit.NetDeviceTarget{{
+			DeviceID: dev.GetDeviceId(), TrustPin: dev.GetTrustPin(), TrustGeneration: dev.GetTrustGeneration(),
+			CredentialVersion: dev.GetCredentialVersion(), Reads: reads,
+		}},
+	}
+	raw, err := json.Marshal(doc)
+	if err != nil {
+		return NetDevLease{}, fmt.Errorf("network device lease: encode: %w", err)
+	}
+	parsed, canon, digest, err := permit.ParseReadGrant(raw, now)
+	if err != nil {
+		return NetDevLease{}, fmt.Errorf("%w: %w", ErrNetDevLeaseRequest, err)
+	}
+	return NetDevLease{Doc: parsed, JSON: canon, Digest: digest}, nil
+}
+
+// netDevLeaseReads checks the requested read set against the device
+// family and returns it sorted.
+func netDevLeaseReads(family string, reads []string) ([]string, error) {
+	if len(reads) == 0 || len(reads) > len(schedgrant.NetDeviceReads()) {
+		return nil, fmt.Errorf("%w: 1 to %d reads", ErrNetDevLeaseRequest, len(schedgrant.NetDeviceReads()))
+	}
+	out := make([]string, 0, len(reads))
+	for _, r := range reads {
+		switch {
+		case !schedgrant.IsNetDeviceRead(r):
+			return nil, fmt.Errorf("%w: unknown read", ErrNetDevLeaseRequest)
+		case schedgrant.NetDeviceReadFamily(r) != family:
+			return nil, fmt.Errorf("%w: read %s is not of the device family", ErrNetDevLeaseRequest, r)
+		case slices.Contains(out, r):
+			return nil, fmt.Errorf("%w: read %s listed twice", ErrNetDevLeaseRequest, r)
+		}
+		out = append(out, r)
+	}
+	slices.Sort(out)
+	return out, nil
+}
+
+// newNetDevLeaseID returns a random lowercase UUIDv4 lease id.
+func newNetDevLeaseID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("network device lease id: %w", err)
+	}
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	h := hex.EncodeToString(b[:])
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32], nil
 }
 
 // --- RPC wiring ---

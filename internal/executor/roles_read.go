@@ -19,6 +19,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/schedgrant"
@@ -94,15 +95,30 @@ func readGrantToProto(g permit.StoredReadGrant) *pb.ReadGrant {
 	return out
 }
 
+// errNetDeviceLeaseAdminOnly refuses a device read lease proposed by any
+// caller other than the executor-local admin (A1-5).
+var errNetDeviceLeaseAdminOnly = status.Error(codes.PermissionDenied, "read grant: only the local admin may propose a network device read lease")
+
 // ProposeReadGrant validates the complete frozen read scope before recording
 // a proposal. The authority alone chooses and binds its approval requirement.
-func (s *Service) ProposeReadGrant(_ context.Context, req *pb.ProposeReadGrantRequest) (*pb.ProposeReadGrantResponse, error) {
+//
+// The server and the admin may call it (MethodRoles). A grant with network
+// device targets is accepted only from the admin peer (A1-5, decisions §5
+// B1): the device target list is never computed by the web server. The role
+// is checked before the registry, so a refused caller learns nothing about
+// the devices.
+func (s *Service) ProposeReadGrant(ctx context.Context, req *pb.ProposeReadGrantRequest) (*pb.ProposeReadGrantResponse, error) {
 	if err := validateReadMessage(req); err != nil {
 		return nil, err
 	}
 	doc, _, _, err := permit.ParseReadGrant(req.GetGrantJson(), s.clock())
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "read grant: invalid document")
+	}
+	if len(doc.NetDeviceTargets) > 0 {
+		if c, ok := peercred.CallerFrom(ctx); !ok || c.Role != peercred.RoleAdmin {
+			return nil, errNetDeviceLeaseAdminOnly
+		}
 	}
 	for _, target := range doc.Targets {
 		pin, ok, err := s.db.HostKey(target.HostID)
