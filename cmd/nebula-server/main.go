@@ -495,6 +495,9 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		return err
 	}
 	vuln.statePath = filepath.Join(cfg.DataDir, vulnNotifyStateFile)
+	// Complete package reads close findings by inventory (D5). Reads that
+	// finish before this line close nothing; the next complete read does.
+	invSvc.setCloser(vuln.store)
 	// Ops agent events (ADR 0016 D3, D10): only with the ops token. The
 	// trigger touches nothing while the agent is off (see Touch).
 	if _, hasOpsToken := cfg.API.OpsToken(); hasOpsToken {

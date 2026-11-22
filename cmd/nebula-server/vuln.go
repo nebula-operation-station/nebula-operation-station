@@ -121,24 +121,12 @@ func vulnTier(_ vulnstore.Subject, r vulnfinding.Record) vulnstore.Tier {
 	return vulnstore.TierUnknown
 }
 
-// errVulnNotCheckable: NOS keeps no package inventory the classifier
-// could compare against yet.
-var errVulnNotCheckable = errors.New("no NOS package inventory to classify against")
-
-// vulnClassifier fails closed: until NOS stores the package inventory
-// (package.list_installed, image.packages) every requested run closure is
-// held for an admin (vulnstore.HoldClassifyFailed), never closed on
-// Hermes' word alone.
-type vulnClassifier struct{}
-
-func (vulnClassifier) Classify(context.Context, vulnstore.Finding) (vulnstore.Class, error) {
-	return 0, errVulnNotCheckable
-}
-
 // vulnService holds the findings store and the notifier and runs the
 // background work: run events, sweeps and notification ticks.
 type vulnService struct {
 	store *vulnstore.Store
+	// classifier judges run closures against the stored inventory (D5).
+	classifier vulnClassifier
 	// inventory holds the snapshots the export serves; its snapshots are
 	// pruned by the sweep (sweepSnapshots).
 	inventory *vulninventory.Store
@@ -167,7 +155,12 @@ func newVulnService(db *sql.DB, sink vulnnotify.Sink, log *slog.Logger, now func
 	if now == nil {
 		now = time.Now
 	}
-	st, err := vulnstore.New(db, vulnstore.Config{Sources: vulnSources, Tier: vulnTier, Classifier: vulnClassifier{}, Now: now})
+	inv, err := vulninventory.New(db)
+	if err != nil {
+		return nil, fmt.Errorf("vulnerability inventory: %w", err)
+	}
+	cl := vulnClassifier{inv: inv}
+	st, err := vulnstore.New(db, vulnstore.Config{Sources: vulnSources, Tier: vulnTier, Classifier: cl, Now: now})
 	if err != nil {
 		return nil, fmt.Errorf("vulnerability store: %w", err)
 	}
@@ -175,11 +168,7 @@ func newVulnService(db *sql.DB, sink vulnnotify.Sink, log *slog.Logger, now func
 	if err != nil {
 		return nil, fmt.Errorf("vulnerability notifications: %w", err)
 	}
-	inv, err := vulninventory.New(db)
-	if err != nil {
-		return nil, fmt.Errorf("vulnerability inventory: %w", err)
-	}
-	return &vulnService{store: st, inventory: inv, notifier: n, log: log, events: make(chan func(context.Context), vulnEventQueue),
+	return &vulnService{store: st, classifier: cl, inventory: inv, notifier: n, log: log, events: make(chan func(context.Context), vulnEventQueue),
 		alertQueued: map[string]bool{}}, nil
 }
 
@@ -659,10 +648,14 @@ func (p vulnPages) VulnFinding(ctx context.Context, key vulnfinding.Key) (ui.Vul
 	if err != nil {
 		return ui.VulnFindingDetail{}, err
 	}
-	for _, h := range holds {
-		// NOS keeps no package inventory yet: no NOS version, never
-		// shown as contradicted or confirmed by NOS.
-		d.Holds = append(d.Holds, ui.VulnHold{Hold: h})
+	if len(holds) > 0 {
+		// The NOS view is the same judgement the closure used (D5); an
+		// error leaves it empty, shown as unknown.
+		nos := p.v.assessFinding(ctx, f)
+		for _, h := range holds {
+			d.Holds = append(d.Holds, ui.VulnHold{Hold: h, NOSVersion: nos.nosVersion,
+				Contradicted: nos.class == vulnstore.ClassContradicted})
+		}
 	}
 	if d.Subject, err = p.subject(ctx, f.Subject); err != nil {
 		return ui.VulnFindingDetail{}, err
