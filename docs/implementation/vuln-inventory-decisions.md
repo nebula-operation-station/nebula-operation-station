@@ -1,8 +1,12 @@
 # Decision paper: package inventory for the vulnerability export (ADR 0011)
 
-Status: **partly decided by the maintainer, 2026-11-20**; see "Decision
-(2026-11-20)" and "Still open after the decision" below (previously: **open,
-maintainer decides.** This paper decides nothing). The analysis sections E1–E4
+Status: **partly decided by the maintainer, 2026-11-20 and 2026-11-23**; see
+"Decision (2026-11-20)", "Decision (2026-11-23)" and "Still open after the
+decision" below (previously: **partly decided by the maintainer, 2026-11-20**;
+before that: **open, maintainer decides.** This paper decides nothing). Q4 and
+Q5 were answered on 2026-11-23 and are recorded in ADR 0011 as "Amendment
+2026-11-23: image.packages read lease and image export" (previously: Q4 and
+Q5 open). The analysis sections E1–E4
 are kept as written before the decision; where the decision differs from them,
 the decision wins. Points that ADR 0011 already decides are not open and are
 marked as decided (E4). Each point gives the question, what ADR 0011, the spec
@@ -26,9 +30,10 @@ iv08 and the E1–E3 parts of iv02–iv07 waited for the whole paper):
   subjects without `image.packages` (Q3, iv06): until it is answered, image
   closures stay held as in today's code.
 - **Depends on E4:** image freshness (Q4) and the lease digest parameter (Q5)
-  are still open. E4 (a) option 1 would put an image schedule before iv10,
-  option 2 puts it after iv10. Until decided, iv10 must not assume image
-  freshness.
+  were answered on 2026-11-23 (E4 (a) option 3: one image per lease entry,
+  freshness from the lease; see "Decision (2026-11-23)") (previously: still
+  open; E4 (a) option 1 would put an image schedule before iv10, option 2
+  after iv10, and until decided iv10 must not assume image freshness).
 - **iv12:** named by the maintainer in the E4 answer ("siehe iv12") for the
   retention of image inventories. Its ticket text is not in this clone; this
   paper knows only that reference.
@@ -102,11 +107,51 @@ confirm or correct.
   (`internal/permit/lease.go:114`), so a lease with the default runs at the
   highest frequency the permit allows.
 
+## Decision (2026-11-23)
+
+Source: the maintainer's order of 2026-11-23 in the review of PR #851:
+`image.packages` must be selectable on Operations → Read leases, and its
+results must reach the inventory and the export. Recorded in ADR 0011,
+"Amendment 2026-11-23: image.packages read lease and image export". Decided
+by that order:
+
+1. **Q5: yes.** A read lease may carry `image.packages` with exactly one
+   image (`repo@sha256:digest`), bound by the action's `parameters_hash`
+   (ADR 0007 line 69).
+2. **Q4: E4 (a) option 3.** Image freshness comes from the read lease; there
+   is no separate image schedule.
+3. **Export:** stored image inventories go into `vuln-inventory-v1`.
+
+### Unchanged and proposals (Claude)
+
+Claude's summary of the amendment, not part of the order. Unchanged: the
+read-only allowlist, LOW on every selected host (`permit.lowEverywhere`), no
+vault secrets in read runs, approval as in ADR 0007 (one fresh user-verified
+assertion over the grant digest, Hardened mode via CLI), rule E4a (an image
+read is stored only when a `docker.inspect` result of the host from the last
+24 h names the image) and E4 (3 inventories per image and host).
+
+**Proposal Claude, to be confirmed by the maintainer in review (not
+decided):** an image lease covers exactly one host and one container and
+carries `docker.inspect` (parameter `container`) plus `image.packages`
+(parameter `image`); default interval 24 h, budget 2 runs per hour; an image
+inventory pinned by a still valid snapshot is kept in addition to the 3 of E4
+until the snapshot is deleted, like the trigger
+`vuln_inventory_reads_protected` does for host reads.
+
+State of the code on main (Claude; this paper changes no code):
+`internal/permit/lease.go:99–103` already admits the entry with a parameters
+hash; `leaseableAction` (`internal/executions/readgrants_propose.go:173`) and
+the lease runner (`internal/executions/leaserunner.go:93`) still reject
+actions with parameters; `ObserveImage` in `cmd/nebula-server/vuln_images.go`
+is marked "NOT WIRED" and `imageSubjects` has no caller outside its tests.
+
 ### Still open after the decision (questions for the maintainer)
 
-The ADR 0011 amendment lists the same points as open. Q1 and Q2 carry a
-reading by Claude that iv02 and iv08 may follow only once the maintainer
-confirms it.
+The ADR 0011 amendments list the same points as open (previously: "The ADR
+0011 amendment lists the same points as open", with Q1–Q5 open). Q1 and Q2
+carry a reading by Claude that iv02 and iv08 may follow only once the
+maintainer confirms it.
 
 - **Q1 (E1 against D5 and snapshot pinning).** E1 keeps exactly 2 reads. ADR
   0011 D5 (closure-class table, line ~704) takes "installed" from the last
@@ -132,12 +177,22 @@ confirms it.
   `image.packages` are closed as `hermes_unconfirmed` (D5 table) instead of
   held as today (section E3, "Decision needed"). The answer names only the
   host and OS-release rules. Choose: option 2 (images `hermes_unconfirmed`)
-  or option 3 (images held). Until then the code keeps holding them.
-- **Q4 (E4 (a), image freshness).** Options 1–3 in E4 are not answered;
-  the recommendation was option 2.
-- **Q5 (E4 (1), lease digest parameter).** Whether `image.packages` may be
-  leased with its image digest as a lease parameter is not answered;
-  `leaseableAction` stays unchanged until then.
+  or option 3 (images held). Until then image closures stay as in the code.
+  **Note (Claude):** today's classifier returns `ClassUnconfirmed` for every
+  non-host subject (`cmd/nebula-server/vuln_classify.go:136`), so the code no
+  longer holds image closures as the text above says (previously: "Until
+  then the code keeps holding them"). Q3 stays open.
+- **Q4 (E4 (a), image freshness): answered 2026-11-23**, option 3; see
+  "Decision (2026-11-23)" and the ADR 0011 amendment of that date
+  (previously: options 1–3 in E4 not answered; the recommendation was
+  option 2).
+- **Q5 (E4 (1), lease digest parameter): answered 2026-11-23**, yes, one
+  image per lease entry bound by `parameters_hash`; see "Decision
+  (2026-11-23)" (previously: not answered; `leaseableAction` stays unchanged
+  until then).
+- **Q6 (new, 2026-11-23): when does an image leave the export** whose
+  container no longer exists? Today never: the newest inventory of an image
+  stays in the export with no time limit.
 
 ## Why this is open
 
@@ -478,8 +533,10 @@ maintainer:
 3. **ADR 0011 D5 closure-class table** (done by the amendment, E3): host
    subject with no stored read is held; unknown OS release is exported as
    incomplete (iv03). Open: the image row (Q3).
-4. **ADR 0011 D3 `image.packages`**: freshness and scheduling (Q4) and
-   whether it may be leased with a digest (Q5) are still open.
+4. **ADR 0011 D3 `image.packages`** (done by the amendment of 2026-11-23,
+   Q4 and Q5): leased with one digest, freshness from the lease, image
+   inventories in the export (previously: freshness and scheduling (Q4) and
+   whether it may be leased with a digest (Q5) are still open). Open: Q6.
 5. **ADR 0007 initial allowlist or spec 07 and 10** (text only; no decision
    open): record `package.list_installed` (ADR 0011 D3 lines 198–199) and
    `image.packages` (ADR 0011 line 1175) as decided allowlist members. Host read leases need no new ADR text on approval: ADR 0007 already
@@ -489,7 +546,8 @@ maintainer:
    E4: 3 inventories per image) and whether it has a column for the
    completeness flag.
 7. **`docs/implementation/vulnerability-management.md`**: point the plan at
-   this paper's decision (2026-11-20) and its open questions Q1–Q5.
+   this paper's decisions (2026-11-20, 2026-11-23) and its open questions
+   Q1–Q3 and Q6 (previously: decision 2026-11-20, open questions Q1–Q5).
 
 ## Test
 
