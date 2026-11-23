@@ -679,7 +679,6 @@ func TestListReleaseMustMatchFacts(t *testing.T) {
 		text := strings.Replace(debian12Text(t), "P\tinstalled\tbase-files\t", "P\tinstalled\tbase-filez\t", 1)
 		return installedEnvelope(t, text, false)
 	}
-	debianSid := "PRETTY_NAME=\"Debian GNU/Linux trixie/sid\"\nID=debian\nVERSION_ID=\"14\"\nVERSION_CODENAME=sid\n"
 	tests := []struct {
 		name         string
 		facts        []byte
@@ -694,7 +693,6 @@ func TestListReleaseMustMatchFacts(t *testing.T) {
 		{"ubuntu 24.04 list under ubuntu 24.04 facts", factsResult(t, ubuntu2404Release), installedEnvelope(t, ubuntu2404Text(t), false), "ubuntu:24.04", true},
 		{"ubuntu 24.04 list under ubuntu 22.04 facts", factsResult(t, ubuntu2204Release), installedEnvelope(t, ubuntu2404Text(t), false), "", false},
 		{"list without base-files", factsResult(t, debian12Release), noBaseFiles(t), "", false},
-		{"ecosystem without a known base-files version", factsResult(t, debianSid), installedEnvelope(t, debian12Text(t), false), "", false},
 	}
 	for i, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -714,6 +712,119 @@ func TestListReleaseMustMatchFacts(t *testing.T) {
 				t.Fatalf("read complete=%v ecosystem=%q reason=%q, want the release mismatch reason", r.Complete, r.Ecosystem, r.Reason)
 			}
 		})
+	}
+}
+
+// withBaseFiles returns the Debian 12 fixture with the base-files version
+// replaced by version (both columns of its line).
+func withBaseFiles(t *testing.T, version string) string {
+	t.Helper()
+	text := debian12Text(t)
+	if !strings.Contains(text, "12.4+deb12u7") {
+		t.Fatal("debian12 fixture: base-files version not found")
+	}
+	return strings.ReplaceAll(text, "12.4+deb12u7", version)
+}
+
+// TestDebianReleaseOutsideTableIsMatchedByVersion: a Debian release that is
+// not in baseFilesPrefix (buster, forky) is still checked: its base-files
+// version starts with its release number, so a list of that release is
+// complete and a list of another release is partial with the mismatch reason.
+func TestDebianReleaseOutsideTableIsMatchedByVersion(t *testing.T) {
+	const busterRelease = "PRETTY_NAME=\"Debian GNU/Linux 10 (buster)\"\nID=debian\nVERSION_ID=\"10\"\nVERSION_CODENAME=buster\n"
+	const forkyRelease = "PRETTY_NAME=\"Debian GNU/Linux 14 (forky)\"\nID=debian\nVERSION_ID=\"14\"\nVERSION_CODENAME=forky\n"
+	tests := []struct {
+		name       string
+		facts      []byte
+		list       []byte
+		wantEcosys string
+		wantReason string
+	}{
+		{"debian 10 list under debian 10 facts", factsResult(t, busterRelease), installedEnvelope(t, withBaseFiles(t, "10.3+deb10u11"), false), "debian:buster", ""},
+		{"debian 14 list under debian 14 facts", factsResult(t, forkyRelease), installedEnvelope(t, withBaseFiles(t, "14.1"), false), "debian:forky", ""},
+		{"debian 12 list under debian 10 facts", factsResult(t, busterRelease), installedEnvelope(t, debian12Text(t), false), "", reasonReleaseMismatch},
+		{"debian 10 list under debian 14 facts", factsResult(t, forkyRelease), installedEnvelope(t, withBaseFiles(t, "10.3+deb10u11"), false), "", reasonReleaseMismatch},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newInvEnv(t)
+			e.insertFactsAt(t, 50+i, invTestHost, tc.facts, invTestStart.Add(-time.Hour))
+
+			e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-debian-table", invTestStart, invTestAt, tc.list)
+
+			r := e.latestRead(t, invTestHost)
+			if tc.wantReason == "" {
+				if !r.Complete || r.Ecosystem != tc.wantEcosys {
+					t.Fatalf("read complete=%v ecosystem=%q reason=%q, want complete %s", r.Complete, r.Ecosystem, r.Reason, tc.wantEcosys)
+				}
+				return
+			}
+			if r.Complete || r.Reason != tc.wantReason {
+				t.Fatalf("read complete=%v ecosystem=%q reason=%q, want partial with %q", r.Complete, r.Ecosystem, r.Reason, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestUnlistedUbuntuReleaseIsNotCheckable: an Ubuntu release that has no
+// base-files prefix (26.04 here) cannot be judged against the facts. A list
+// of it is partial with reasonReleaseNotCheckable, not with the mismatch
+// reason: nothing was compared, and no upgrade was missed.
+func TestUnlistedUbuntuReleaseIsNotCheckable(t *testing.T) {
+	const ubuntu2604Release = "NAME=\"Ubuntu\"\nVERSION=\"26.04 LTS (Resolute Raccoon)\"\nID=ubuntu\nVERSION_ID=\"26.04\"\nVERSION_CODENAME=resolute\n"
+	e := newInvEnv(t)
+	e.insertFactsAt(t, 60, invTestHost, factsResult(t, ubuntu2604Release), invTestStart.Add(-time.Hour))
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-ubuntu-26", invTestStart, invTestAt, installedEnvelope(t, ubuntu2404Text(t), false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != reasonReleaseNotCheckable {
+		t.Fatalf("read complete=%v ecosystem=%q reason=%q, want partial with the not-checkable reason", r.Complete, r.Ecosystem, r.Reason)
+	}
+	if r.Ecosystem != "" {
+		t.Fatalf("unchecked list stored under ecosystem %q", r.Ecosystem)
+	}
+}
+
+// TestReleaseWithoutVersionIsNotCheckable: a Debian release whose os-release
+// has no VERSION_ID (sid, testing) has no base-files prefix that can be derived,
+// so its list is partial with the not-checkable reason.
+func TestReleaseWithoutVersionIsNotCheckable(t *testing.T) {
+	const debianSid = "PRETTY_NAME=\"Debian GNU/Linux trixie/sid\"\nID=debian\nVERSION_CODENAME=sid\n"
+	e := newInvEnv(t)
+	e.insertFactsAt(t, 61, invTestHost, factsResult(t, debianSid), invTestStart.Add(-time.Hour))
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-sid", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != reasonReleaseNotCheckable {
+		t.Fatalf("read complete=%v ecosystem=%q reason=%q, want partial with the not-checkable reason", r.Complete, r.Ecosystem, r.Reason)
+	}
+}
+
+// TestListWithTwoBaseFilesIsMismatch: a list with more than one base-files
+// line cannot name its release, so it is partial (fail closed) even when every
+// base-files version belongs to the facts' release.
+func TestListWithTwoBaseFilesIsMismatch(t *testing.T) {
+	const line = "P\tinstalled\tbase-files\tamd64\t12.4+deb12u7\tbase-files\t12.4+deb12u7\t\t.\n"
+	// A second architecture of base-files (multi-arch): the same package name
+	// with another arch, so the parser keeps both lines.
+	const second = "P\tinstalled\tbase-files\ti386\t12.4+deb12u7\tbase-files\t12.4+deb12u7\t\t.\n"
+	text := debian12Text(t)
+	if !strings.Contains(text, line) {
+		t.Fatal("debian12 fixture: base-files line not found")
+	}
+	text = strings.Replace(text, line, line+second, 1)
+	text = strings.Replace(text, "END\t11\n", "END\t12\n", 1)
+
+	e := newInvEnv(t)
+	e.insertFactsAt(t, 62, invTestHost, factsResult(t, debian12Release), invTestStart.Add(-time.Hour))
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-two-base", invTestStart, invTestAt, installedEnvelope(t, text, false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != reasonReleaseMismatch {
+		t.Fatalf("read complete=%v ecosystem=%q reason=%q, want partial with the release mismatch reason", r.Complete, r.Ecosystem, r.Reason)
 	}
 }
 
