@@ -41,7 +41,8 @@ func checkToken(field, s string) error {
 // checkCitation validates a citation: a handbook chunk ID as the embedded
 // index writes it, Slug#Anchor, optionally with a "#pN" part suffix. It is
 // checkToken with one addition: '#' is allowed between parts but not at
-// either end. No other identifier may contain '#'.
+// either end and not twice in a row ("a##b"). No other identifier may
+// contain '#'.
 func checkCitation(field, s string) error {
 	if s == "" {
 		return fmt.Errorf("%s: %w", field, ErrMissing)
@@ -53,7 +54,13 @@ func checkCitation(field, s string) error {
 		return fmt.Errorf("%s: '#' at an end of the chunk ID: %w", field, ErrInvalidField)
 	}
 	for i := 0; i < len(s); i++ {
-		if s[i] != '#' && !tokenByte(s[i]) {
+		if s[i] == '#' {
+			if i > 0 && s[i-1] == '#' {
+				return fmt.Errorf("%s: consecutive '#' at %d: %w", field, i, ErrInvalidField)
+			}
+			continue
+		}
+		if !tokenByte(s[i]) {
 			return fmt.Errorf("%s: byte %#x at %d: %w", field, s[i], i, ErrInvalidField)
 		}
 	}

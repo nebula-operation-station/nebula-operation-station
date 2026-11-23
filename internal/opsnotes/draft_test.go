@@ -294,6 +294,16 @@ func TestValidateRejectsMalformedNotes(t *testing.T) {
 			d.Citations = []string{"admin-guide#"}
 			return d
 		}, ErrInvalidField},
+		{"chunk citation with consecutive #", func() Draft {
+			d := validFix()
+			d.Citations = []string{"admin-guide##1-what-nebula-is"}
+			return d
+		}, ErrInvalidField},
+		{"chunk citation with three # in a row", func() Draft {
+			d := validFix()
+			d.Citations = []string{"admin-guide#1-what###p1"}
+			return d
+		}, ErrInvalidField},
 		{"chunk citation with space", func() Draft {
 			d := validFix()
 			d.Citations = []string{"admin-guide#1 what"}
