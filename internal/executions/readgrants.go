@@ -50,6 +50,10 @@ type ReadGrantView struct {
 	// Hosts is the frozen, complete target list in invsort order.
 	Hosts   []string
 	Actions []string
+	// Params are the plain-text parameters of an image read lease, by action
+	// ID (ADR 0011); empty for every other grant. Shown only when they hash
+	// to the document's parameters hash of the same action.
+	Params map[string]map[string]string
 	// Remotes is the sorted PVE remote list of a provider grant; empty for
 	// SSH grants.
 	Remotes []string
@@ -112,6 +116,7 @@ func (s *Service) ReadGrants(ctx context.Context) ([]ReadGrantView, error) {
 	for _, g := range r.GetGrants() {
 		out = append(out, decodeReadGrant(g, inv, ok, s.now()))
 	}
+	s.attachImageParams(ctx, out, r.GetGrants())
 	s.markProviderBindings(ctx, out)
 	return out, nil
 }
