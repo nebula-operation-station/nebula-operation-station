@@ -1359,10 +1359,11 @@ executor accepts only actions it rates LOW on every chosen host and that
 are on the read allowlist — `core.facts`, `package.list_updates`,
 `package.list_installed`, `image.packages`, `docker.list`, `docker.inspect`,
 `docker.check_updates`, `service.list`, `service.status`, `net.facts`,
-`fim.scan`, plus the reviewed telemetry actions: a built-in trusted
-as LOW (section 8.1) with the host recorded at a criticality (`nebula host
-pin --criticality`). `package.refresh`, `docker.logs` and secret-bearing
-actions are excluded even when rated LOW.
+`fim.scan`, plus the reviewed telemetry actions. Each one must be rated LOW
+(section 8.1) on every chosen host: that needs a trusted artifact and a host
+recorded at a criticality (`nebula host pin --criticality`).
+`package.refresh`, `docker.logs` and secret-bearing actions are excluded even
+when rated LOW.
 
 The form offers only actions that take no parameters. `docker.inspect`,
 `image.packages` and `fim.scan` are on the allowlist, but the form does not
@@ -1838,11 +1839,11 @@ The rest of this section describes the parts that exist.
   What is stored, when a host counts as complete, how reads age and what the
   *Vulnerabilities* pages show is in *The package inventory* below. The first
   run is in *First run* below.
-- **Closures by NOS's own data.** NOS compares a finding with the stored
-  inventory and closes it only under the closure rules of ADR 0011 D5. When
-  the inventory does not confirm a closure (for example, the host has no
-  complete read), the closure is held for an admin. It is never closed on
-  Hermes' word alone.
+- **Closures by NOS's own data.** NOS closes a finding from the stored
+  inventory only under closure paths 1 and 2 of ADR 0011 D5, and only from a
+  complete read. Hermes asks for closures; a closure that the inventory does
+  not confirm is shown as "closed by Hermes, not confirmed by NOS", unless a
+  hold guard applies (see *Held closures*), and then it is held for an admin.
 - **Ageing is decided but not applied yet.** See *Ageing* below.
 - **Maintainer decisions are refused for now.** The forms for accepting a
   risk, marking a false positive, confirming or discarding a held closure
@@ -1874,9 +1875,11 @@ limits are 20,000 packages per host.
 - the host's release maps to an ecosystem NOS can match: `debian:<codename>`
   or `ubuntu:<VERSION_ID>`. Other releases are not mapped;
 - every source package has a version basis;
-- the newest `core.facts` result of the host is not older than the list.
-  Otherwise the read is partial, with the reason "core.facts older than the
-  package list".
+- the newest `core.facts` result of the host finished no earlier than the
+  list, compared to the whole second. Otherwise the read is partial, with the
+  reason "core.facts older than the package list". So the first read is not
+  complete by itself: it depends on when `core.facts` finished relative to
+  the list, and a later read can be complete when the order is right.
 
 Otherwise the read is **partial** and says why, for example "release not
 supported for package mapping" or "package list incomplete". A list that
@@ -1943,10 +1946,13 @@ needs the inventory before it can report anything.
    each action on each host at its next check after approval. There is no
    button that runs an ordinary lease on demand. After that,
    `package.list_installed` runs at most every 6 hours per host (section 9.4).
-4. **Check one host.** Open the host's subject page. Expect the banner
-   "Package inventory: read …, complete". If it says `partial: <reason>`, fix
-   the reason and wait for the next read. If it says "none stored", no read
-   has arrived yet.
+4. **Check one host.** Open the host's subject page and read the *Package
+   inventory* banner. A read that is complete shows "read <time>, … source
+   packages (… binaries), complete". A read that is not complete shows
+   `partial: <reason>`; for example "core.facts older than the package list"
+   means `core.facts` finished before the list, so wait for a later read. If
+   the banner says "none stored", no read has arrived yet. This release does
+   not promise a complete first read (see *The package inventory*).
 5. **Run the agent.** Start it with `sudo systemctl start nebula-vuln-agent.service`
    or wait for its timer (section 10.5). Then read the log with
    `journalctl -u nebula-vuln-agent.service -n 50`. Look for the line
