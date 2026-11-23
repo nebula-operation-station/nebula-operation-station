@@ -65,11 +65,19 @@ type imageRunFake struct {
 	*leaseRunFake
 	class  map[string]string
 	refuse map[string]error
+	// clock, when set, advances by steps[action] on every run: a run takes
+	// time, so the created_at of a stored run is later than the tick that
+	// started it, as in production.
+	clock *time.Time
+	steps map[string]time.Duration
 }
 
 func (f *imageRunFake) RunReadGrant(_ context.Context, in *pb.RunReadGrantRequest, _ ...grpc.CallOption) (*pb.RunReadGrantResponse, error) {
 	f.runs = append(f.runs, in)
 	action := in.GetRun().GetActionId()
+	if f.clock != nil {
+		*f.clock = f.clock.Add(f.steps[action])
+	}
 	if err := f.refuse[action]; err != nil {
 		return nil, err
 	}
@@ -201,6 +209,14 @@ func TestImageLeaseSkipsOnlyTheActionWithoutMatchingParams(t *testing.T) {
 			want: nil,
 		},
 		{
+			// The hash matches the stored row of the other image action: a row
+			// binds to its own action only, so docker.inspect is not run.
+			name: "a stored image.packages row holds the docker.inspect hash",
+			doc:  []boundAction{{"docker.inspect", inspect}},
+			rows: []boundAction{{"image.packages", inspect}},
+			want: nil,
+		},
+		{
 			name: "a parameterised action of another kind is never run",
 			doc:  []boundAction{{"docker.inspect", inspect}, {"service.status", foreignUnit}},
 			rows: []boundAction{{"docker.inspect", inspect}, {"service.status", foreignUnit}},
@@ -217,6 +233,35 @@ func TestImageLeaseSkipsOnlyTheActionWithoutMatchingParams(t *testing.T) {
 
 			if got := runActions(f); !slices.Equal(got, tt.want) {
 				t.Errorf("runs %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestImageLeaseDocumentListingAnActionTwiceRunsNothing: a document that lists
+// the same action twice is refused by the grant parser ("listed twice"), so
+// none of its actions runs, whether or not the copies carry the same parameters.
+// The runner's own second-copy skip is a second line behind the parser.
+func TestImageLeaseDocumentListingAnActionTwiceRunsNothing(t *testing.T) {
+	c1 := boundJSON(t, map[string]string{"container": "c1"})
+	c2 := boundJSON(t, map[string]string{"container": "c2"})
+	tests := []struct {
+		name string
+		doc  []boundAction
+	}{
+		{name: "same action twice with the same parameters", doc: []boundAction{{"docker.inspect", c1}, {"docker.inspect", c1}}},
+		{name: "same action twice with other parameters", doc: []boundAction{{"docker.inspect", c1}, {"docker.inspect", c2}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			now := imageTestNow
+			doc := imageLeaseDoc(t, now, tt.doc...)
+			s, f := imageLeaseFixture(t, &now, doc, boundAction{"docker.inspect", c1})
+
+			s.RunDueReadGrants(context.Background())
+
+			if got := runActions(f); len(got) != 0 {
+				t.Fatalf("runs %v, want none", got)
 			}
 		})
 	}
@@ -268,5 +313,34 @@ func TestImageLeaseStartsNothingSecondTickWithin24Hours(t *testing.T) {
 	s.RunDueReadGrants(ctx)
 	if got := runActions(f); len(got) != 4 {
 		t.Fatalf("runs after 24 hours %v, want the due pair again", got)
+	}
+}
+
+// TestImagePackagesRunsWithInspectEveryIntervalOnAOneMinuteTick ticks on a
+// one-minute grid over three intervals. docker.inspect takes 10 seconds and
+// image.packages 90 seconds, so image.packages is stored 90 seconds after its
+// tick and docker.inspect 10 seconds after its own. Once docker.inspect is due,
+// a tick can fall before image.packages is due on its stored time. The pair
+// must still run together in every interval: image.packages never runs
+// without the inspect of its tick and never falls behind it.
+func TestImagePackagesRunsWithInspectEveryIntervalOnAOneMinuteTick(t *testing.T) {
+	inspect, image := imageTestParams(t)
+	now := imageTestNow
+	doc := imageLeaseDoc(t, now, boundAction{"docker.inspect", inspect}, boundAction{"image.packages", image})
+	s, f := imageLeaseFixture(t, &now, doc, boundAction{"docker.inspect", inspect}, boundAction{"image.packages", image})
+	f.clock = &now
+	f.steps = map[string]time.Duration{"docker.inspect": 10 * time.Second, "image.packages": 90 * time.Second}
+	ctx := context.Background()
+
+	for tick, end := imageTestNow, imageTestNow.Add(3*ImageLeaseInterval+time.Hour); tick.Before(end); tick = tick.Add(time.Minute) {
+		now = tick // the grid stays on the minute; runs move the clock only within a tick
+		s.RunDueReadGrants(ctx)
+	}
+	counts := map[string]int{}
+	for _, a := range runActions(f) {
+		counts[a]++
+	}
+	if counts["docker.inspect"] < 3 || counts["image.packages"] != counts["docker.inspect"] {
+		t.Fatalf("runs %v: want docker.inspect at least 3 times and image.packages once per docker.inspect", counts)
 	}
 }

@@ -311,15 +311,25 @@ func (s *Service) runLease(ctx context.Context, exec readGrantRunner, l ordinary
 			if used[t.HostID] >= l.budget {
 				break
 			}
-			if a.ID == imageLeaseImageAction && !inspected {
-				continue
-			}
-			// The action's own floor (ADR 0011 D3) can exceed the lease's
-			// interval; asking sooner only gets a refusal that stops the
-			// host's other actions for this tick.
-			due := max(l.interval, permit.ReadActionMinInterval(a.ID))
-			if at, ok := last[a.ID+"\x00"+t.HostID]; ok && s.now().Before(at.Add(due)) {
-				continue
+			if a.ID == imageLeaseImageAction {
+				// image.packages runs with the docker.inspect of this tick and is
+				// not checked against its own stored time: that is stored after
+				// docker.inspect, so a tick between the two due times would run
+				// inspect alone and skip packages on every later tick. Its floor
+				// is zero, so the lease interval, which docker.inspect has just
+				// passed, is its interval too. A floor above the lease interval
+				// is never run: the runner never asks below an action's floor.
+				if !inspected || permit.ReadActionMinInterval(a.ID) > l.interval {
+					continue
+				}
+			} else {
+				// The action's own floor (ADR 0011 D3) can exceed the lease's
+				// interval; asking sooner only gets a refusal that stops the
+				// host's other actions for this tick.
+				due := max(l.interval, permit.ReadActionMinInterval(a.ID))
+				if at, ok := last[a.ID+"\x00"+t.HostID]; ok && s.now().Before(at.Add(due)) {
+					continue
+				}
 			}
 			ok, err := s.runLeaseAction(ctx, exec, l, la, t, ref)
 			if a.ID == imageLeaseInspectAction {
