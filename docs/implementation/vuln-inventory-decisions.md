@@ -5,8 +5,9 @@ Status: **partly decided by the maintainer, 2026-11-20 and 2026-11-23**; see
 decision" below (previously: **partly decided by the maintainer, 2026-11-20**;
 before that: **open, maintainer decides.** This paper decides nothing). Q4 and
 Q5 were answered on 2026-11-23 and are recorded in ADR 0011 as "Amendment
-2026-11-23: image.packages read lease and image export" (previously: Q4 and
-Q5 open). The analysis sections E1–E4
+2026-11-23: image.packages read lease (Q4/Q5)" (previously: Q4 and Q5 open;
+the amendment heading previously read "... read lease and image export"; the
+decision does not cover the image export). The analysis sections E1–E4
 are kept as written before the decision; where the decision differs from them,
 the decision wins. Points that ADR 0011 already decides are not open and are
 marked as decided (E4). Each point gives the question, what ADR 0011, the spec
@@ -27,13 +28,15 @@ iv08 and the E1–E3 parts of iv02–iv07 waited for the whole paper):
 - **Still waits for the maintainer:** the precedence of E1 over D5 and snapshot
   pinning (question Q1) and the E1/E2 reading (Q2), which iv02 and iv08 need
   before they delete or age out a read; the classifier rule for **image**
-  subjects without `image.packages` (Q3, iv06): until it is answered, image
-  closures stay held (fail-closed) (previously: "stay held as in today's
-  code"; whether today's code holds them is a question to the maintainer, see
-  Q3 below).
+  subjects without `image.packages` (Q3, iv06). Today's code returns
+  `ClassUnconfirmed` for image subjects (`cmd/nebula-server/vuln_classify.go:136`).
+  Interim rule (Claude, Vorschlag bis Q3 entschieden ist): image closures stay
+  held (fail-closed); not a decision, see Q3 below (previously: "until it is
+  answered, image closures stay held as in today's code", stated as a rule
+  and as a description of the code).
 - **Depends on E4:** image freshness (Q4) and the lease digest parameter (Q5)
   were answered on 2026-11-23 (Q5 yes, exactly one image digest per lease
-  action bound by `ParametersHash`; Q4 option 3; see "Decision (2026-11-23)")
+  action, `ParametersHash`; Q4 option 3; see "Decision (2026-11-23)")
   (previously: still open; E4 (a) option 1 would put an image schedule before
   iv10, option 2 after iv10, and until decided iv10 must not assume image
   freshness).
@@ -115,7 +118,7 @@ confirm or correct.
 Source: **Entscheidung Axel (Chat, 23.11.2026)**, about 08:25 (UTC+1),
 relayed by the Claude chat (previously: "the maintainer's order of 2026-11-23
 in the review of PR #851", a paraphrase without a quote). Recorded in ADR
-0011, "Amendment 2026-11-23: image.packages read lease and image export".
+0011, "Amendment 2026-11-23: image.packages read lease (Q4/Q5)".
 Original wording (German), verbatim:
 
 > Image-Freshness Variante 3 = Q5 ja (genau ein Image-Digest pro
@@ -123,18 +126,14 @@ Original wording (German), verbatim:
 > Security-Key, eigener Security-Review des leaseableAction-Prädikats. Q3/Q6
 > bleiben offen.
 
-The same points in English; only these are decided:
+The same points in English; each says only what the quote says, and only
+these are decided:
 
-1. **Q5: yes.** A read lease may carry `image.packages` with exactly one
-   image digest per lease action, bound by `ParametersHash` (ADR 0007
-   line 69).
-2. **Q4: E4 (a) option 3.**
+1. **Q5: yes**: exactly one image digest per lease action, `ParametersHash`.
+2. **Q4: option 3** ("Image-Freshness Variante 3").
 3. **Interval: 24 h.**
 4. **Approval by security key.**
-5. **Own security review of `leaseableAction`.** Option 3 changes this
-   security predicate (see E4, "Consequence for the code"); it needs its own
-   security review, and until that review has passed `leaseableAction` stays
-   unchanged.
+5. **Own security review of the `leaseableAction` predicate.**
 6. **Q3 and Q6 stay open.**
 
 ### Reading, follow-up and proposals (Claude)
@@ -142,7 +141,15 @@ The same points in English; only these are decided:
 Claude's notes, not part of the decision; the maintainer confirms or corrects
 them in review.
 
-**Reading (Claude, Auslegung):** the digest is the `image` parameter of
+**Reading (Claude, Auslegung) of points 1, 2 and 5:** Q5 is E4 (1) and Q4 is
+E4 (a) of this paper. "ParametersHash" means the lease action's
+`permit.ReadGrantAction.ParametersHash`, which binds the one digest (ADR 0007
+line 69). Option 3 changes the security predicate `leaseableAction` (see E4,
+"Consequence for the code"); Claude reads point 5 as: until that review has
+passed, `leaseableAction` stays unchanged (previously: points 1 and 5 of the
+list above carried these code references and the hold as if decided).
+
+**Reading (Claude, Auslegung), further:** the digest is the `image` parameter of
 `image.packages` (`repo@sha256:digest`); option 3 means image freshness comes
 from the read lease, with no separate image schedule; "24 h Intervall" is the
 default interval of an image read lease (the quote does not say whether it is
@@ -207,27 +214,31 @@ maintainer confirms it.
   `image.packages` are closed as `hermes_unconfirmed` (D5 table) instead of
   held as today (section E3, "Decision needed"). The answer names only the
   host and OS-release rules. Choose: option 2 (images `hermes_unconfirmed`)
-  or option 3 (images held). Until then the code keeps holding them. Still
-  open after 2026-11-23 ("Q3/Q6 bleiben offen").
-  **Question (Claude) to the maintainer:** today's classifier returns
-  `ClassUnconfirmed` for every non-host subject
-  (`cmd/nebula-server/vuln_classify.go:136`), so the code does not hold image
-  closures as this interim rule says. Should the code be brought back to
-  holding them until Q3 is decided? This question does not change the
-  interim rule.
+  or option 3 (images held). Still open after 2026-11-23 ("Q3/Q6 bleiben
+  offen"). **Code today (Claude, observation):** the classifier returns
+  `ClassUnconfirmed` for every non-host subject, image subjects included
+  (`cmd/nebula-server/vuln_classify.go:136`); it does not hold image
+  closures. **Interim rule (Claude, Vorschlag bis Q3 entschieden ist):**
+  image closures stay held (fail-closed) until Q3 is decided; this is not a
+  decision (previously: "Until then the code keeps holding them", stated as
+  fact). Open for the maintainer: confirm this interim rule, and if so,
+  whether the code must be brought back to holding image closures before Q3
+  is decided.
 - **Q4 (E4 (a), image freshness): answered 2026-11-23**, option 3; see
   "Decision (2026-11-23)" and the ADR 0011 amendment of that date
   (previously: options 1–3 in E4 not answered; the recommendation was
   option 2).
 - **Q5 (E4 (1), lease digest parameter): answered 2026-11-23**, yes, exactly
-  one image digest per lease action bound by `ParametersHash`; see "Decision
-  (2026-11-23)". Changing `leaseableAction` needs its own security review
-  first (previously: not answered; `leaseableAction` stays unchanged until
-  then).
-- **Q6 (raised by Claude, open per the decision of 2026-11-23): when does an
-  image leave the export** whose container no longer exists? Today no image
-  inventory is exported; once the export follow-up lands, nothing removes
-  the newest inventory of an image.
+  one image digest per lease action, `ParametersHash`; see "Decision
+  (2026-11-23)". The decision asks for an own security review of the
+  `leaseableAction` predicate; that `leaseableAction` stays unchanged until
+  the review has passed is Claude's reading (previously: not answered;
+  `leaseableAction` stays unchanged until then).
+- **Q6 (open per the decision of 2026-11-23): when does an image leave the
+  export** whose container no longer exists? The quote names Q6 but not its
+  content; that Q6 is this question is Claude's reading (Claude raised it).
+  Today no image inventory is exported; once the export follow-up lands,
+  nothing removes the newest inventory of an image.
 
 ## Why this is open
 
