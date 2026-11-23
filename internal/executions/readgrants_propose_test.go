@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -470,5 +471,45 @@ func TestProposeReadGrantRejectsExecutorAddedDeviceTarget(t *testing.T) {
 	_, err := s.ProposeReadGrant(context.Background(), "alice", ReadGrantRequest{ScopeKind: ScopeAll, Actions: []string{"core.facts"}, Days: 7})
 	if !errors.Is(err, ErrReadGrantProposalMismatch) {
 		t.Fatalf("err %v, want ErrReadGrantProposalMismatch", err)
+	}
+}
+
+// TestPreviewFromResponseCarriesNetDeviceTargets pins that the preview shows
+// every device of the executor's canonical document with its trust pin,
+// trust generation, credential version and all of its reads.
+func TestPreviewFromResponseCarriesNetDeviceTargets(t *testing.T) {
+	doc := grantDocValue(permit.ReadGrantFormat, []string{"web"}, time.Unix(100, 0), time.Unix(100+3600, 0))
+	doc.NetDeviceTargets = netDeviceTargetsOf()
+	raw := marshalDoc(t, doc)
+	r := &pb.ProposeReadGrantResponse{GrantDigest: testDigest, CanonicalGrant: raw,
+		ApprovalRequirement: pb.ApprovalRequirement_APPROVAL_REQUIREMENT_CLI_ONLY}
+	v, err := previewFromResponse(r, doc)
+	if err != nil {
+		t.Fatalf("device answer rejected: %v", err)
+	}
+	want := []ReadGrantPreviewNetDevice{
+		{DeviceID: "sw-1", TrustPin: strings.Repeat("ab", 32), TrustGeneration: 1, CredentialVersion: 3, Reads: []string{"cbs_lldp", "cbs_version"}},
+		{DeviceID: "sw-2", TrustPin: strings.Repeat("cd", 32), TrustGeneration: 2, CredentialVersion: 4, Reads: []string{"cbs_version"}},
+	}
+	if !slices.EqualFunc(v.NetDevices, want, func(a, b ReadGrantPreviewNetDevice) bool {
+		return a.DeviceID == b.DeviceID && a.TrustPin == b.TrustPin && a.TrustGeneration == b.TrustGeneration &&
+			a.CredentialVersion == b.CredentialVersion && slices.Equal(a.Reads, b.Reads)
+	}) {
+		t.Fatalf("NetDevices = %+v, want %+v", v.NetDevices, want)
+	}
+}
+
+// TestPreviewFromResponseHostLeaseHasNoNetDevices pins that a host lease
+// preview carries no device targets.
+func TestPreviewFromResponseHostLeaseHasNoNetDevices(t *testing.T) {
+	doc := grantDocValue(permit.ReadGrantFormat, []string{"web"}, time.Unix(100, 0), time.Unix(100+3600, 0))
+	r := &pb.ProposeReadGrantResponse{GrantDigest: testDigest, CanonicalGrant: marshalDoc(t, doc),
+		ApprovalRequirement: pb.ApprovalRequirement_APPROVAL_REQUIREMENT_CLI_ONLY}
+	v, err := previewFromResponse(r, doc)
+	if err != nil {
+		t.Fatalf("host answer rejected: %v", err)
+	}
+	if len(v.NetDevices) != 0 {
+		t.Fatalf("host lease preview has device targets: %+v", v.NetDevices)
 	}
 }

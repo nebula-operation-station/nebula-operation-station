@@ -108,6 +108,16 @@ type ReadGrantPreviewAction struct {
 	ParametersHash string
 }
 
+// ReadGrantPreviewNetDevice is one frozen network device of a device read
+// lease with its trust pin, trust generation, credential version and reads.
+type ReadGrantPreviewNetDevice struct {
+	DeviceID          string
+	TrustPin          string
+	TrustGeneration   uint64
+	CredentialVersion int64
+	Reads             []string
+}
+
 // ReadGrantExcluded is an inventory host of the selection that the frozen
 // grant does not contain, with the reason.
 type ReadGrantExcluded struct {
@@ -125,7 +135,11 @@ type ReadGrantPreview struct {
 	// Providers are the frozen PVE remotes of a provider lease in document
 	// order; empty for SSH leases (which have Targets and Actions).
 	Providers []ReadGrantPreviewProvider
-	Excluded  []ReadGrantExcluded
+	// NetDevices are the frozen network devices of a device read lease in
+	// document order; empty otherwise. A device lease is approved on the CLI
+	// only (the browser never offers it).
+	NetDevices []ReadGrantPreviewNetDevice
+	Excluded   []ReadGrantExcluded
 	// Params are the plain-text parameters of an image read lease by action
 	// ID, so the page shows what the hashes bind; empty for other proposals.
 	Params               map[string]map[string]string
@@ -417,6 +431,10 @@ func previewFromResponse(r *pb.ProposeReadGrantResponse, sent permit.ReadGrantDo
 		v.Providers = append(v.Providers, ReadGrantPreviewProvider{RemoteID: p.RemoteID, TrustPin: p.TrustPin,
 			TrustGeneration: p.TrustGeneration, CredentialVersion: p.CredentialVersion, Methods: slices.Clone(p.Methods),
 			MetricsTargets: slices.Clone(p.MetricsTargets)})
+	}
+	for _, d := range got.NetDeviceTargets {
+		v.NetDevices = append(v.NetDevices, ReadGrantPreviewNetDevice{DeviceID: d.DeviceID, TrustPin: d.TrustPin,
+			TrustGeneration: d.TrustGeneration, CredentialVersion: d.CredentialVersion, Reads: slices.Clone(d.Reads)})
 	}
 	switch r.GetApprovalRequirement() {
 	case pb.ApprovalRequirement_APPROVAL_REQUIREMENT_CLI_ONLY:
