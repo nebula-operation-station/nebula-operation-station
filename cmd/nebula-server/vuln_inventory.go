@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,10 +39,50 @@ type factsSource interface {
 // action and runs before the lists, so the result is older than the list; the
 // window is the time within which the release is taken as unchanged.
 //
-// Known gap: a release upgrade that NOS did not run (no package.install_all
-// on the host) is not seen by the OS-change check, so facts from before it
-// still count within this window and the list is matched to the old release.
+// A release upgrade that NOS did not run (no package.install_all on the host)
+// is not seen by the OS-change check. It is caught by releaseMatchesList: the
+// list's base-files version must belong to the release of the facts.
 const factsWindow = 24 * time.Hour
+
+// reasonReleaseMismatch is the partial reason of a list whose base-files
+// version does not belong to the release that the newest core.facts reports,
+// so the release changed without a record NOS could use (for example a manual
+// or unattended do-release-upgrade). It is fixed text, never host content.
+const reasonReleaseMismatch = "package list does not match the release of core.facts"
+
+// baseFilesPrefix is the upstream-version prefix of the base-files package
+// (the os-release package) of each ecosystem that releaseMatchesList knows.
+// Debian's base-files version starts with the release number ("12.4+deb12u7");
+// Ubuntu's starts with the number of the Debian release it is synced from,
+// then "ubuntu". Only the 24.04 and bookworm entries are checked against a
+// recorded fixture; the others must be checked on real hosts before they are
+// trusted. An ecosystem without an entry fails closed (its lists are partial).
+var baseFilesPrefix = map[string]string{
+	"debian:bullseye": "11.",
+	"debian:bookworm": "12.",
+	"debian:trixie":   "13.",
+	"ubuntu:20.04":    "11ubuntu",
+	"ubuntu:22.04":    "12ubuntu",
+	"ubuntu:24.04":    "13ubuntu",
+}
+
+// releaseMatchesList reports whether the package list inv was taken on the
+// release of ecosystem eco: its single base-files package has a version with
+// the prefix of eco. Fail closed: a list without base-files, with more than
+// one, or an ecosystem without a prefix does not match.
+func releaseMatchesList(eco string, inv osdebian.InstalledInventory) bool {
+	prefix, ok := baseFilesPrefix[eco]
+	if !ok {
+		return false
+	}
+	var versions []string
+	for _, p := range inv.Packages {
+		if p.Name == "base-files" {
+			versions = append(versions, p.Version)
+		}
+	}
+	return len(versions) == 1 && strings.HasPrefix(versions[0], prefix)
+}
 
 // errStartUnknown is returned when the start of the list or of its core.facts
 // run is not known, so the facts cannot be checked (fail closed).
@@ -96,8 +137,9 @@ const markTimeout = 5 * time.Second
 // stored incomplete.
 //
 // Fail closed: when the release lookup fails, the list's start is unknown, the
-// facts are older than the list, or the store fails to write the read, a
-// partial marker is stored instead. The host's older complete read then stops
+// facts are older than the list, the list's base-files version does not belong
+// to the facts' release (reasonReleaseMismatch, see releaseMatchesList), or the
+// store fails to write the read, a partial marker is stored instead. The host's older complete read then stops
 // being its latest inventory. A refusal of the store (a field over its limit
 // caused by host content) gives ReasonRefused; any other store failure gives
 // ReasonStoreUnavailable. If the marker cannot be stored either, the failure
@@ -138,6 +180,11 @@ func (v *vulnInventoryService) ObserveInstalled(parent context.Context, hostID, 
 		}
 	}
 	inv := osdebian.ParseInstalledResult(result, osdebian.ReadStatus{ExitCode: 0}, distro)
+	// Only a complete list is checked: a partial one keeps its own reason.
+	if eco != "" && inv.Complete && !releaseMatchesList(eco, inv) {
+		v.markFailed(parent, hostID, execID, at, reasonReleaseMismatch)
+		return
+	}
 	read := vulninventory.FromInstalled(hostID, execID, at, eco, inv)
 	if _, err := v.store.Put(ctx, read); err != nil {
 		if v.shutdown(parent, hostID, execID) {
