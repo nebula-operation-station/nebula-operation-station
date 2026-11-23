@@ -1358,11 +1358,16 @@ read-grant pending` lists it). The
 executor accepts only actions it rates LOW on every chosen host and that
 are on the read allowlist — `core.facts`, `package.list_updates`,
 `package.list_installed`, `image.packages`, `docker.list`, `docker.inspect`,
-`docker.check_updates`, `service.list`, `service.status`, `net.facts`, plus
-the reviewed telemetry actions: a built-in trusted
+`docker.check_updates`, `service.list`, `service.status`, `net.facts`,
+`fim.scan`, plus the reviewed telemetry actions: a built-in trusted
 as LOW (section 8.1) with the host recorded at a criticality (`nebula host
 pin --criticality`). `package.refresh`, `docker.logs` and secret-bearing
 actions are excluded even when rated LOW.
+
+The form offers only actions that take no parameters. `docker.inspect`,
+`image.packages` and `fim.scan` are on the allowlist, but the form does not
+offer them on main: the first two take a parameter, and `fim.scan` is not in
+the action catalogue the form reads.
 
 When the executor refuses a proposal because something is not LOW, its
 refusal (`schedule_grant_invalid`) now names every blocking host, not just
@@ -1396,12 +1401,19 @@ default, at most 240; the allowance is shared across actions and both
 triggers. Failed or disconnected attempts spend budget once claimed, and
 there is no catch-up burst.
 
-Per-action floors. A lease's interval is at least 15 minutes for every
-action, except `package.list_installed`, which has its own floor of
-**6 hours per host** (`PackageListInstalledMinInterval`). A lease with any
-interval runs it at most once every 6 hours per host, so at most four times a
-day. A lease does not shorten this floor. `image.packages` and `core.facts`
-have no floor of their own beyond the lease's interval.
+Per-action floors. A lease's interval is at least 15 minutes. Two actions
+have their own per-host floors on top of it, and a lease does not shorten
+either one:
+
+- `package.list_installed` has a floor of **6 hours per host**
+  (`PackageListInstalledMinInterval`). A lease with any interval runs it at
+  most once every 6 hours per host, so at most four times a day.
+- `fim.scan` has a floor of **1 hour per host** for an incremental run and
+  about **7 days** for a full run (`FimScanIncrementalMinInterval`,
+  `FimScanFullMinInterval`). A lease binds one mode.
+
+`image.packages` and `core.facts` have no floor of their own beyond the
+lease's interval.
 Telemetry is a separately approved profile (10-second live reads,
 5-minute history, its own budget).
 
@@ -1820,11 +1832,12 @@ The rest of this section describes the parts that exist.
 - The agent API (inventory export and run protocol), the findings store,
   the *Vulnerabilities* pages, the notifications and the export are in
   place.
-- **The package inventory is fed.** Each successful `package.list_installed`
-  result (and, for container hosts, each `image.packages` result) is stored
-  and exported. What is stored, when a host counts as complete, how reads
-  age and what the *Vulnerabilities* pages show is in *The package
-  inventory* below. The first run is in *First run* below.
+- **The host package inventory is fed.** Each successful
+  `package.list_installed` result is stored and exported. Container image
+  inventories are **not** fed yet (planned, see *Container images* below).
+  What is stored, when a host counts as complete, how reads age and what the
+  *Vulnerabilities* pages show is in *The package inventory* below. The first
+  run is in *First run* below.
 - **Closures by NOS's own data.** NOS compares a finding with the stored
   inventory and closes it only under the closure rules of ADR 0011 D5. When
   the inventory does not confirm a closure (for example, the host has no
@@ -1875,10 +1888,12 @@ current. The last complete read is still kept for closure decisions.
 A host whose latest read is partial is still exported, marked incomplete.
 The agent cannot close findings on it from the inventory.
 
-**Container images.** `image.packages` stores the package list of an image
-digest for each host. A digest is read only when a stored `docker.inspect`
-result of that host names it. NOS keeps the **last three** inventories of
-each image on each host (decision E4).
+**Container images (planned, not fed yet).** On main, `image.packages`
+results are not stored and the export holds host subjects only. The planned
+design stores the package list of an image digest for each host, reads a
+digest only when a stored `docker.inspect` result of that host names it, and
+keeps the **last three** inventories of each image on each host (decision
+E4). The code that would store them is not wired into the server yet.
 
 **Ageing.** Decided on 2026-11-20 (decision E2): a read counts as too old as
 soon as a third read of the same host exists. The rule is count-based and
@@ -1891,8 +1906,9 @@ parts of the decision are not in the code yet:
 - Host reads are not pruned yet. Decision E1 (keep two reads per host) is
   not implemented, so the store currently keeps every host read.
 
-The Vulnerabilities page shows the read time of each host, so an old read is
-visible even though it is not yet treated as too old.
+The Vulnerabilities page shows the read time only for a complete read. A
+partial read shows its reason and no time, so the age of an old partial read
+is not visible, even though it is not yet treated as too old.
 
 **What the Vulnerabilities page shows.** Open a host's subject page
 (*Vulnerabilities*, then the host; the address is `/vulnerabilities/subject/host/<id>`).
@@ -1900,7 +1916,8 @@ Above the findings, a banner **Package inventory** gives one of:
 
 - `read <time>, <n> source packages (<m> binaries), complete`;
 - `partial: <reason>`;
-- `none stored: no successful package.list_installed run for this host yet`.
+- `none stored: no successful package.list_installed run for this host yet`;
+- `inventory status unavailable`, when the status lookup fails.
 
 A second banner gives the running kernel, marked "mapped" or as unknown. Images
 and devices have no inventory line.
@@ -1913,9 +1930,10 @@ needs the inventory before it can report anything.
 1. **Create the lease.** *Operations → Read leases → New read lease*. Scope
    it to the hosts (all hosts, a tag or an environment). Choose the actions
    `package.list_installed` and `core.facts`. Without `core.facts` the
-   release is unknown and every read stays partial. For container hosts also
-   choose `docker.inspect` (it names the image digests) and `image.packages`.
-   Duration 7 or 30 days.
+   release is unknown and every read stays partial. The form offers only
+   actions that take no parameters, so `docker.inspect` and `image.packages`
+   cannot be chosen there, and container images are not fed yet (see *The
+   package inventory*). Duration 7 or 30 days.
 2. **Approve it.** Approve the proposal with your security key. In hardened
    mode, run `nebula read-grant pending` and then
    `nebula read-grant approve <digest>` on the executor host, with the full
