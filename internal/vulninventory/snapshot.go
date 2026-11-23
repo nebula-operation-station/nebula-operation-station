@@ -5,6 +5,7 @@ package vulninventory
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -36,6 +37,13 @@ const snapshotPageReads = 100
 // rest are left out and counted in Omitted. Hostile maximum-size bodies can
 // therefore shrink a snapshot, but never make its ID fail with ErrLimit.
 const MaxSnapshotBodyBytes = 16 * MaxBodyBytes
+
+// MaxSnapshotImages bounds the image reads of one snapshot. A snapshot pins the
+// newest image read of each (host, digest) of its hosts; past this count the
+// rest are left out in (host ID, digest) order and counted in
+// Snapshot.OmittedImages. The image bodies share MaxSnapshotBodyBytes with the
+// host reads.
+const MaxSnapshotImages = 2000
 
 // maxSnapshotIDBytes matches the snapshot ID column (0052: 1 to 64 bytes).
 const maxSnapshotIDBytes = 64
@@ -89,6 +97,15 @@ type Snapshot struct {
 	// bodies did not fit in MaxSnapshotBodyBytes. It is set only by Current and
 	// is not stored, so Snapshot reports 0.
 	Omitted int
+	// Images are the pinned image reads: the newest read of each (host,
+	// digest) of the wanted hosts, in host-ID then digest order. Current
+	// returns them without packages; Snapshot returns them with packages.
+	Images []ImageRead
+	// OmittedImages counts the image reads that Current left out, because the
+	// snapshot held MaxSnapshotImages or their bodies did not fit in the bytes
+	// the host reads left of MaxSnapshotBodyBytes. Like Omitted, it is set only
+	// by Current.
+	OmittedImages int
 }
 
 // sizedRead is the newest read of a host with the stored length of its body.
@@ -96,6 +113,13 @@ type Snapshot struct {
 // snapshot.
 type sizedRead struct {
 	Read
+	bytes int64
+}
+
+// sizedImage is the newest image read of a (host, digest) with the stored
+// length of its body, for the same budget as sizedRead.
+type sizedImage struct {
+	ImageRead
 	bytes int64
 }
 
@@ -120,6 +144,13 @@ func wantedHosts(hosts []string) (map[string]bool, error) {
 // number of reads left out. The result is deterministic, and the bodies of the
 // kept reads never add up to more than maxBytes.
 func selectSnapshotReads(latest []sizedRead, maxHosts int, maxBytes int64) ([]Read, int) {
+	kept, _, omitted := selectSnapshotReadsUsed(latest, maxHosts, maxBytes)
+	return kept, omitted
+}
+
+// selectSnapshotReadsUsed is selectSnapshotReads that also returns the bytes
+// the kept reads use, so that the image bodies can share the remaining budget.
+func selectSnapshotReadsUsed(latest []sizedRead, maxHosts int, maxBytes int64) ([]Read, int64, int) {
 	kept := make([]Read, 0, min(len(latest), maxHosts))
 	var used int64
 	omitted := 0
@@ -131,7 +162,106 @@ func selectSnapshotReads(latest []sizedRead, maxHosts int, maxBytes int64) ([]Re
 		used += s.bytes
 		kept = append(kept, s.Read)
 	}
+	return kept, used, omitted
+}
+
+// selectSnapshotImages chooses the image reads of one snapshot from latest,
+// which is sorted by host ID, then digest. It applies the same rule as
+// selectSnapshotReads with maxCount and maxBytes: a read is kept when fewer
+// than maxCount are kept and its body fits in the remaining bytes. It returns
+// the kept reads (without sizes) and the number left out.
+func selectSnapshotImages(latest []sizedImage, maxCount int, maxBytes int64) ([]ImageRead, int) {
+	kept := make([]ImageRead, 0, min(len(latest), maxCount))
+	var used int64
+	omitted := 0
+	for _, s := range latest {
+		if len(kept) >= maxCount || s.bytes > maxBytes-used {
+			omitted++
+			continue
+		}
+		used += s.bytes
+		kept = append(kept, s.ImageRead)
+	}
 	return kept, omitted
+}
+
+// latestImagesQuery is the newest image read of every (host, digest) of the
+// hosts in the JSON array bound to its first parameter, without packages, with
+// the length of its body. The host filter runs before the window functions, so
+// the work grows with the wanted hosts, not with every stored image read. The
+// second parameter bounds the digests per host: a host keeps only its perHost
+// digests whose newest read is most recent, so a digest the host stopped
+// reading drops out of the load. "Newest" is the order of ImageReads: read
+// time, then ID.
+const latestImagesQuery = `WITH newest AS (SELECT id, host_id, read_at, ROW_NUMBER() OVER (PARTITION BY host_id, digest
+		ORDER BY read_at DESC, id DESC) AS rn FROM vuln_image_reads
+		WHERE host_id IN (SELECT value FROM json_each(?))),
+	ranked AS (SELECT id, ROW_NUMBER() OVER (PARTITION BY host_id
+		ORDER BY read_at DESC, id DESC) AS hrn FROM newest WHERE rn = 1)
+	SELECT id, repository, digest, host_id, execution_id, read_at, complete,
+	reason, os_family, os_name, LENGTH(body) FROM vuln_image_reads
+	WHERE id IN (SELECT id FROM ranked WHERE hrn <= ?)`
+
+// newestImages returns the newest image read of every (host, digest) of want,
+// sorted by host ID, then digest, each with its body length. Per host it loads
+// at most perHost digests (see latestImagesQuery). It runs on q, so it sees the
+// state of the caller's transaction.
+func newestImages(ctx context.Context, q *sql.Tx, want map[string]bool, perHost int) ([]sizedImage, error) {
+	hosts := make([]string, 0, len(want))
+	for h := range want {
+		hosts = append(hosts, h)
+	}
+	hostsJSON, err := json.Marshal(hosts)
+	if err != nil {
+		return nil, fmt.Errorf("newest images: hosts: %w", err)
+	}
+	rows, err := q.QueryContext(ctx, latestImagesQuery, string(hostsJSON), perHost)
+	if err != nil {
+		return nil, fmt.Errorf("newest images: %w", err)
+	}
+	defer rows.Close()
+	var out []sizedImage
+	for rows.Next() {
+		var r ImageRead
+		var readAt, n int64
+		var complete int
+		if err := rows.Scan(&r.ID, &r.Repository, &r.Digest, &r.HostID, &r.ExecutionID, &readAt, &complete,
+			&r.Reason, &r.OSFamily, &r.OSName, &n); err != nil {
+			return nil, fmt.Errorf("newest images: %w", err)
+		}
+		r.ReadAt = time.Unix(readAt, 0).UTC()
+		r.Complete = complete == 1
+		out = append(out, sizedImage{ImageRead: r, bytes: n})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("newest images: %w", err)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].HostID != out[j].HostID {
+			return out[i].HostID < out[j].HostID
+		}
+		return out[i].Digest < out[j].Digest
+	})
+	return out, nil
+}
+
+// memberIDs runs query, which selects one integer column for snapshot id, and
+// returns the values in the order the query gives.
+func memberIDs(ctx context.Context, q *sql.Tx, query, id string) ([]int64, error) {
+	rows, err := q.QueryContext(ctx, query, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []int64
+	for rows.Next() {
+		var v int64
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
 }
 
 // latestSizesQuery is the newest read of every host with its body length. Its
@@ -245,18 +375,33 @@ func (s *Store) Current(ctx context.Context, hosts []string, maxReuse time.Durat
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("vulninventory: current: %w", err)
 	}
-	reads, omitted := selectSnapshotReads(latest, MaxSnapshotHosts, MaxSnapshotBodyBytes)
+	reads, hostBytes, omitted := selectSnapshotReadsUsed(latest, MaxSnapshotHosts, MaxSnapshotBodyBytes)
 	ids := make([]int64, 0, len(reads))
 	for _, r := range reads {
 		ids = append(ids, r.ID)
 	}
 	slices.Sort(ids)
 
+	// One digest more than the cap is loaded per host, so that a host with more
+	// than MaxSnapshotImages digests still shows an omitted image in OmittedImages.
+	newest, err := newestImages(ctx, tx, want, MaxSnapshotImages+1)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("vulninventory: current: %w", err)
+	}
+	// The image bodies share the budget that the host bodies left.
+	images, omittedImages := selectSnapshotImages(newest, MaxSnapshotImages, MaxSnapshotBodyBytes-hostBytes)
+	imgIDs := make([]int64, 0, len(images))
+	for _, r := range images {
+		imgIDs = append(imgIDs, r.ID)
+	}
+	slices.Sort(imgIDs)
+
 	now := s.now().UTC()
-	if snap, ok, err := reusable(ctx, tx, reads, ids, now, maxReuse, floorGen); err != nil {
+	if snap, ok, err := reusable(ctx, tx, reads, ids, images, imgIDs, now, maxReuse, floorGen); err != nil {
 		return Snapshot{}, fmt.Errorf("vulninventory: current: %w", err)
 	} else if ok {
 		snap.Omitted = omitted
+		snap.OmittedImages = omittedImages
 		return snap, nil
 	}
 
@@ -270,11 +415,13 @@ func (s *Store) Current(ctx context.Context, hosts []string, maxReuse time.Durat
 	}
 	gen := top + 1
 	snap := Snapshot{
-		ID:         snapshotIDPrefix + strconv.FormatInt(gen, 10),
-		Generation: gen,
-		TakenAt:    time.Unix(now.Unix(), 0).UTC(),
-		Reads:      reads,
-		Omitted:    omitted,
+		ID:            snapshotIDPrefix + strconv.FormatInt(gen, 10),
+		Generation:    gen,
+		TakenAt:       time.Unix(now.Unix(), 0).UTC(),
+		Reads:         reads,
+		Omitted:       omitted,
+		Images:        images,
+		OmittedImages: omittedImages,
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO vuln_inventory_snapshots (id, generation, taken_at) VALUES (?, ?, ?)`,
 		snap.ID, snap.Generation, snap.TakenAt.Unix()); err != nil {
@@ -286,19 +433,26 @@ func (s *Store) Current(ctx context.Context, hosts []string, maxReuse time.Durat
 			return Snapshot{}, fmt.Errorf("vulninventory: current: insert member: %w", err)
 		}
 	}
+	for _, r := range images {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO vuln_inventory_snapshot_image_reads (snapshot_id, image_read_id) VALUES (?, ?)`,
+			snap.ID, r.ID); err != nil {
+			return Snapshot{}, fmt.Errorf("vulninventory: current: insert image member: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return Snapshot{}, fmt.Errorf("vulninventory: current: commit: %w", err)
 	}
 	return snap, nil
 }
 
-// reusable returns the newest snapshot when it pins exactly ids (sorted), was
-// taken less than maxReuse before now, and its generation is above floor. A
-// negative age (the clock went back past the snapshot) counts as expired, so a
-// backwards clock step never extends reuse. The floor check is part of reuse:
-// a snapshot at or below a generation that vulnstore has seen must never be
-// handed out again (ADR 0011 D5). The snapshot's reads are reads.
-func reusable(ctx context.Context, tx *sql.Tx, reads []Read, ids []int64, now time.Time, maxReuse time.Duration, floor int64) (Snapshot, bool, error) {
+// reusable returns the newest snapshot when it pins exactly ids and imageIDs
+// (both sorted), was taken less than maxReuse before now, and its generation
+// is above floor. A negative age (the clock went back past the snapshot)
+// counts as expired, so a backwards clock step never extends reuse. The floor
+// check is part of reuse: a snapshot at or below a generation that vulnstore
+// has seen must never be handed out again (ADR 0011 D5). The snapshot's reads
+// and images are reads and images.
+func reusable(ctx context.Context, tx *sql.Tx, reads []Read, ids []int64, images []ImageRead, imageIDs []int64, now time.Time, maxReuse time.Duration, floor int64) (Snapshot, bool, error) {
 	var snap Snapshot
 	var takenAt int64
 	err := tx.QueryRowContext(ctx, `SELECT id, generation, taken_at FROM vuln_inventory_snapshots
@@ -313,27 +467,20 @@ func reusable(ctx context.Context, tx *sql.Tx, reads []Read, ids []int64, now ti
 	if snap.Generation <= floor || age < 0 || age >= maxReuse {
 		return Snapshot{}, false, nil
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT read_id FROM vuln_inventory_snapshot_reads WHERE snapshot_id = ? ORDER BY read_id`, snap.ID)
+	members, err := memberIDs(ctx, tx, `SELECT read_id FROM vuln_inventory_snapshot_reads WHERE snapshot_id = ? ORDER BY read_id`, snap.ID)
 	if err != nil {
 		return Snapshot{}, false, fmt.Errorf("snapshot members: %w", err)
 	}
-	defer rows.Close()
-	var members []int64
-	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			return Snapshot{}, false, fmt.Errorf("snapshot members: %w", err)
-		}
-		members = append(members, id)
+	imageMembers, err := memberIDs(ctx, tx, `SELECT image_read_id FROM vuln_inventory_snapshot_image_reads WHERE snapshot_id = ? ORDER BY image_read_id`, snap.ID)
+	if err != nil {
+		return Snapshot{}, false, fmt.Errorf("snapshot image members: %w", err)
 	}
-	if err := rows.Err(); err != nil {
-		return Snapshot{}, false, fmt.Errorf("snapshot members: %w", err)
-	}
-	if !slices.Equal(members, ids) {
+	if !slices.Equal(members, ids) || !slices.Equal(imageMembers, imageIDs) {
 		return Snapshot{}, false, nil
 	}
 	snap.TakenAt = time.Unix(takenAt, 0).UTC()
 	snap.Reads = reads
+	snap.Images = images
 	return snap, true, nil
 }
 
@@ -362,12 +509,91 @@ func (s *Store) Snapshot(ctx context.Context, id string) (Snapshot, error) {
 	}
 	snap.TakenAt = time.Unix(takenAt, 0).UTC()
 
+	// The host and image bodies share one limit, checked before any body is
+	// decoded, as Current bounds them.
+	var total int64
+	if err := tx.QueryRowContext(ctx, `SELECT
+		(SELECT COALESCE(SUM(LENGTH(body)), 0) FROM vuln_inventory_reads WHERE id IN (SELECT read_id FROM vuln_inventory_snapshot_reads WHERE snapshot_id = ?)) +
+		(SELECT COALESCE(SUM(LENGTH(body)), 0) FROM vuln_image_reads WHERE id IN (SELECT image_read_id FROM vuln_inventory_snapshot_image_reads WHERE snapshot_id = ?))`,
+		snap.ID, snap.ID).Scan(&total); err != nil {
+		return Snapshot{}, fmt.Errorf("vulninventory: snapshot: body bytes: %w", err)
+	}
+	if total > MaxSnapshotBodyBytes {
+		return Snapshot{}, fmt.Errorf("vulninventory: snapshot: bodies: %w: %d bytes, limit %d", ErrLimit, total, MaxSnapshotBodyBytes)
+	}
+
 	reads, err := loadSnapshotReads(ctx, tx, snap.ID, snapshotPageReads, MaxSnapshotBodyBytes)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("vulninventory: snapshot: %w", err)
 	}
+	images, err := loadSnapshotImages(ctx, tx, snap.ID, snapshotPageReads)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("vulninventory: snapshot: %w", err)
+	}
 	snap.Reads = reads
+	snap.Images = images
 	return snap, nil
+}
+
+// loadSnapshotImages returns the image reads pinned by snapshot id, with their
+// packages, in (host ID, digest) order. It loads pageSize reads per query,
+// keyset-paged on (host_id, digest, id). A body that does not decode is an
+// error: the snapshot is not returned with that image missing.
+func loadSnapshotImages(ctx context.Context, q *sql.Tx, id string, pageSize int) ([]ImageRead, error) {
+	if pageSize <= 0 {
+		return nil, fmt.Errorf("snapshot images: page size %d: must be positive", pageSize)
+	}
+	const members = `SELECT image_read_id FROM vuln_inventory_snapshot_image_reads WHERE snapshot_id = ?`
+	var count int64
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM vuln_image_reads WHERE id IN (`+members+`)`, id).Scan(&count); err != nil {
+		return nil, fmt.Errorf("snapshot image count: %w", err)
+	}
+	if count > MaxSnapshotImages {
+		return nil, fmt.Errorf("snapshot images: %w: %d images, limit %d", ErrLimit, count, MaxSnapshotImages)
+	}
+
+	out := make([]ImageRead, 0, count)
+	afterHost, afterDigest, afterID := "", "", int64(0)
+	for {
+		before := len(out)
+		rows, err := q.QueryContext(ctx, `SELECT id, repository, digest, host_id, execution_id, read_at, complete,
+			reason, os_family, os_name, body FROM vuln_image_reads
+			WHERE id IN (`+members+`) AND (host_id, digest, id) > (?, ?, ?)
+			ORDER BY host_id, digest, id LIMIT ?`, id, afterHost, afterDigest, afterID, pageSize)
+		if err != nil {
+			return nil, fmt.Errorf("snapshot images: %w", err)
+		}
+		for rows.Next() {
+			var r ImageRead
+			var readAt int64
+			var complete int
+			var body []byte
+			if err := rows.Scan(&r.ID, &r.Repository, &r.Digest, &r.HostID, &r.ExecutionID, &readAt, &complete,
+				&r.Reason, &r.OSFamily, &r.OSName, &body); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("snapshot images: %w", err)
+			}
+			r.ReadAt = time.Unix(readAt, 0).UTC()
+			r.Complete = complete == 1
+			pkgs, err := decodeImageBody(body)
+			if err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("snapshot image %d: %w", r.ID, err)
+			}
+			r.Packages = pkgs
+			out = append(out, r)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("snapshot images: %w", err)
+		}
+		rows.Close()
+		if len(out)-before < pageSize {
+			return out, nil
+		}
+		last := out[len(out)-1]
+		afterHost, afterDigest, afterID = last.HostID, last.Digest, last.ID
+	}
 }
 
 // loadSnapshotReads returns the reads pinned by snapshot id, with their
@@ -435,8 +661,10 @@ func appendSnapshotPage(ctx context.Context, q *sql.Tx, out []Read, id, afterHos
 // membership rows. The newest snapshot is always kept: its generation is the
 // floor of the next one. The reads stay in the store (a read is deleted only
 // under decision E1, which is not made here), so a pruned snapshot's reads are
-// not lost by this call. The caller passes the export's maximum age
-// (vulnstore.MaxInventoryAge).
+// not lost by this call. Image reads are deleted when no snapshot pins them and
+// they are beyond the ImageReadsKept newest of their host and digest; a pinned
+// image read beyond that count stays until the snapshot that pins it is pruned.
+// The caller passes the export's maximum age (vulnstore.MaxInventoryAge).
 func (s *Store) PruneSnapshots(ctx context.Context, maxAge time.Duration) error {
 	if maxAge <= 0 {
 		return fmt.Errorf("vulninventory: prune snapshots: %w: max age must be positive", ErrInvalidRead)
@@ -457,9 +685,21 @@ func (s *Store) PruneSnapshots(ctx context.Context, maxAge time.Duration) error 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM vuln_inventory_snapshot_reads WHERE snapshot_id IN (`+expired+`)`, cutoff); err != nil {
 		return fmt.Errorf("vulninventory: prune snapshots: members: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM vuln_inventory_snapshot_image_reads WHERE snapshot_id IN (`+expired+`)`, cutoff); err != nil {
+		return fmt.Errorf("vulninventory: prune snapshots: image members: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM vuln_inventory_snapshots
 		WHERE taken_at < ? AND generation < (SELECT MAX(generation) FROM vuln_inventory_snapshots)`, cutoff); err != nil {
 		return fmt.Errorf("vulninventory: prune snapshots: snapshots: %w", err)
+	}
+	// An image read is kept while a snapshot pins it or while it is one of
+	// the ImageReadsKept newest of its host and digest. Once the expired
+	// snapshots are gone, the older unpinned reads go.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM vuln_image_reads WHERE id NOT IN (
+		SELECT image_read_id FROM vuln_inventory_snapshot_image_reads)
+		AND id NOT IN (SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY host_id, digest
+			ORDER BY read_at DESC, id DESC) AS rn FROM vuln_image_reads) WHERE rn <= ?)`, ImageReadsKept); err != nil {
+		return fmt.Errorf("vulninventory: prune snapshots: image reads: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("vulninventory: prune snapshots: commit: %w", err)
