@@ -12,6 +12,7 @@ import (
 	"slices"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -39,10 +40,12 @@ const snapshotPageReads = 100
 const MaxSnapshotBodyBytes = 16 * MaxBodyBytes
 
 // MaxSnapshotImages bounds the image reads of one snapshot. A snapshot pins the
-// newest image read of each (host, digest) of its hosts; past this count the
-// rest are left out in (host ID, digest) order and counted in
-// Snapshot.OmittedImages. The image bodies share MaxSnapshotBodyBytes with the
-// host reads.
+// newest image read of each (host, digest) of its hosts. The count is shared
+// out per host in round-robin order: each host's newest digest comes before
+// any host's second one, so one host with many digests cannot push the images
+// of the other hosts out. Current loads no more than this count of rows, and
+// the image reads it does not pin are counted in Snapshot.OmittedImages. The
+// image bodies share MaxSnapshotBodyBytes with the host reads.
 const MaxSnapshotImages = 2000
 
 // maxSnapshotIDBytes matches the snapshot ID column (0052: 1 to 64 bytes).
@@ -166,10 +169,12 @@ func selectSnapshotReadsUsed(latest []sizedRead, maxHosts int, maxBytes int64) (
 }
 
 // selectSnapshotImages chooses the image reads of one snapshot from latest,
-// which is sorted by host ID, then digest. It applies the same rule as
-// selectSnapshotReads with maxCount and maxBytes: a read is kept when fewer
-// than maxCount are kept and its body fits in the remaining bytes. It returns
-// the kept reads (without sizes) and the number left out.
+// which is in round-robin order (see latestImagesQuery). It applies the same
+// rule as selectSnapshotReads with maxCount and maxBytes: a read is kept when
+// fewer than maxCount are kept and its body fits in the remaining bytes. It
+// returns the kept reads (without sizes), in the order of latest, and the
+// number of loaded reads left out. Current counts the omitted reads itself, so
+// that reads never loaded are counted too.
 func selectSnapshotImages(latest []sizedImage, maxCount int, maxBytes int64) ([]ImageRead, int) {
 	kept := make([]ImageRead, 0, min(len(latest), maxCount))
 	var used int64
@@ -188,34 +193,53 @@ func selectSnapshotImages(latest []sizedImage, maxCount int, maxBytes int64) ([]
 // latestImagesQuery is the newest image read of every (host, digest) of the
 // hosts in the JSON array bound to its first parameter, without packages, with
 // the length of its body. The host filter runs before the window functions, so
-// the work grows with the wanted hosts, not with every stored image read. The
-// second parameter bounds the digests per host: a host keeps only its perHost
-// digests whose newest read is most recent, so a digest the host stopped
-// reading drops out of the load. "Newest" is the order of ImageReads: read
-// time, then ID.
-const latestImagesQuery = `WITH newest AS (SELECT id, host_id, read_at, ROW_NUMBER() OVER (PARTITION BY host_id, digest
+// the work grows with the wanted hosts, not with every stored image read.
+//
+// Rows come in round-robin order: round k holds the k-th most recent digest of
+// each host, and within a round the hosts are in ID order. The first parameter
+// bounds the total number of rows, so the load never exceeds the snapshot cap,
+// and the cap is shared out fairly: a host with many digests cannot take the
+// whole cap before the other hosts have had their first digest. "Newest" is the
+// order of ImageReads: read time, then ID.
+const latestImagesQuery = `WITH newest AS (SELECT id, host_id, digest, read_at, ROW_NUMBER() OVER (PARTITION BY host_id, digest
 		ORDER BY read_at DESC, id DESC) AS rn FROM vuln_image_reads
 		WHERE host_id IN (SELECT value FROM json_each(?))),
-	ranked AS (SELECT id, ROW_NUMBER() OVER (PARTITION BY host_id
-		ORDER BY read_at DESC, id DESC) AS hrn FROM newest WHERE rn = 1)
-	SELECT id, repository, digest, host_id, execution_id, read_at, complete,
-	reason, os_family, os_name, LENGTH(body) FROM vuln_image_reads
-	WHERE id IN (SELECT id FROM ranked WHERE hrn <= ?)`
+	ranked AS (SELECT id, host_id, digest, ROW_NUMBER() OVER (PARTITION BY host_id
+		ORDER BY read_at DESC, id DESC) AS round FROM newest WHERE rn = 1)
+	SELECT r.id, r.repository, r.digest, r.host_id, r.execution_id, r.read_at, r.complete,
+	r.reason, r.os_family, r.os_name, LENGTH(r.body) FROM ranked AS k
+	JOIN vuln_image_reads AS r ON r.id = k.id
+	ORDER BY k.round, k.host_id, k.digest LIMIT ?`
 
-// newestImages returns the newest image read of every (host, digest) of want,
-// sorted by host ID, then digest, each with its body length. Per host it loads
-// at most perHost digests (see latestImagesQuery). It runs on q, so it sees the
-// state of the caller's transaction.
-func newestImages(ctx context.Context, q *sql.Tx, want map[string]bool, perHost int) ([]sizedImage, error) {
+// countImagesQuery counts the distinct (host, digest) pairs of the hosts in the
+// JSON array bound to its first parameter: the number of image reads Current
+// would pin with no limit.
+const countImagesQuery = `SELECT COUNT(*) FROM (SELECT 1 FROM vuln_image_reads
+	WHERE host_id IN (SELECT value FROM json_each(?)) GROUP BY host_id, digest)`
+
+// wantedHostsJSON encodes the hosts of want as the JSON array the image queries
+// take.
+func wantedHostsJSON(want map[string]bool) (string, error) {
 	hosts := make([]string, 0, len(want))
 	for h := range want {
 		hosts = append(hosts, h)
 	}
-	hostsJSON, err := json.Marshal(hosts)
+	b, err := json.Marshal(hosts)
 	if err != nil {
-		return nil, fmt.Errorf("newest images: hosts: %w", err)
+		return "", fmt.Errorf("hosts: %w", err)
 	}
-	rows, err := q.QueryContext(ctx, latestImagesQuery, string(hostsJSON), perHost)
+	return string(b), nil
+}
+
+// newestImages returns at most limit newest image reads of the (host, digest)
+// pairs of want, in round-robin order (see latestImagesQuery), each with its
+// body length. It runs on q, so it sees the state of the caller's transaction.
+func newestImages(ctx context.Context, q *sql.Tx, want map[string]bool, limit int) ([]sizedImage, error) {
+	hostsJSON, err := wantedHostsJSON(want)
+	if err != nil {
+		return nil, fmt.Errorf("newest images: %w", err)
+	}
+	rows, err := q.QueryContext(ctx, latestImagesQuery, hostsJSON, limit)
 	if err != nil {
 		return nil, fmt.Errorf("newest images: %w", err)
 	}
@@ -236,13 +260,22 @@ func newestImages(ctx context.Context, q *sql.Tx, want map[string]bool, perHost 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("newest images: %w", err)
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].HostID != out[j].HostID {
-			return out[i].HostID < out[j].HostID
-		}
-		return out[i].Digest < out[j].Digest
-	})
 	return out, nil
+}
+
+// countImages returns the number of distinct (host, digest) pairs of want, that
+// is, how many image reads Current would pin without any limit. It runs on q,
+// in the same transaction as newestImages.
+func countImages(ctx context.Context, q *sql.Tx, want map[string]bool) (int, error) {
+	hostsJSON, err := wantedHostsJSON(want)
+	if err != nil {
+		return 0, fmt.Errorf("count images: %w", err)
+	}
+	var n int
+	if err := q.QueryRowContext(ctx, countImagesQuery, hostsJSON).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count images: %w", err)
+	}
+	return n, nil
 }
 
 // memberIDs runs query, which selects one integer column for snapshot id, and
@@ -382,14 +415,30 @@ func (s *Store) Current(ctx context.Context, hosts []string, maxReuse time.Durat
 	}
 	slices.Sort(ids)
 
-	// One digest more than the cap is loaded per host, so that a host with more
-	// than MaxSnapshotImages digests still shows an omitted image in OmittedImages.
-	newest, err := newestImages(ctx, tx, want, MaxSnapshotImages+1)
+	// The load is bounded by the cap itself, shared out per host in
+	// round-robin order (see latestImagesQuery). The image bodies share the
+	// budget that the host bodies left.
+	newest, err := newestImages(ctx, tx, want, MaxSnapshotImages)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("vulninventory: current: %w", err)
 	}
-	// The image bodies share the budget that the host bodies left.
-	images, omittedImages := selectSnapshotImages(newest, MaxSnapshotImages, MaxSnapshotBodyBytes-hostBytes)
+	images, _ := selectSnapshotImages(newest, MaxSnapshotImages, MaxSnapshotBodyBytes-hostBytes)
+	// Every image read that is not pinned is omitted, including those that
+	// were never loaded, so the count is taken from the table.
+	total, err := countImages(ctx, tx, want)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("vulninventory: current: %w", err)
+	}
+	omittedImages := total - len(images)
+	if omittedImages < 0 {
+		return Snapshot{}, fmt.Errorf("vulninventory: current: image count %d below pinned %d", total, len(images))
+	}
+	slices.SortFunc(images, func(a, b ImageRead) int {
+		if c := strings.Compare(a.HostID, b.HostID); c != 0 {
+			return c
+		}
+		return strings.Compare(a.Digest, b.Digest)
+	})
 	imgIDs := make([]int64, 0, len(images))
 	for _, r := range images {
 		imgIDs = append(imgIDs, r.ID)
