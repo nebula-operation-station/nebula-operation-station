@@ -106,6 +106,7 @@
       <tr>
         <th>Lease</th>
         <th>Scope</th>
+        <th>Container and image</th>
         <th>Actions</th>
         <th>Hosts</th>
         <th>Expires</th>
@@ -118,6 +119,7 @@
       <tr>
         <td class="mono">{{if .ID}}<a href="/leases/{{.ID}}">{{.Short}}</a>{{else}}—{{end}}</td>
         <td>{{if .Scope}}{{.Scope}}{{else}}—{{end}}</td>
+        <td>{{if .Container}}<span class="mono">{{.Container}}</span> <span class="mono">{{.Image}}</span>{{else}}—{{end}}</td>
         {{if .Provider}}
         <td>{{.MethodCount}} methods</td>
         <td>{{.RemoteCount}} remotes</td>
