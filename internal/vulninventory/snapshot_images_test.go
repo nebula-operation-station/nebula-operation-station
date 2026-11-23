@@ -108,6 +108,9 @@ func TestSnapshotKeepsPinnedImageReadAfterFourthRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(kept) != ImageReadsKept {
+		t.Fatalf("kept %d reads of host-1 digest a, want %d", len(kept), ImageReadsKept)
+	}
 	for i, want := range []int64{13, 12, 11} {
 		if got := kept[i].ReadAt.Unix() - base.Unix(); got != want {
 			t.Errorf("kept read %d at %d, want %d", i, got, want)
@@ -257,8 +260,8 @@ func TestSelectSnapshotImages(t *testing.T) {
 		{"all kept within limits", []sizedImage{sizedImageOf(1, "a", d, 3), sizedImageOf(2, "b", d, 4)}, 10, 10, []int64{1, 2}, 0},
 		{"count cap keeps the first images in order", []sizedImage{sizedImageOf(1, "a", d, 1), sizedImageOf(2, "b", d, 1), sizedImageOf(3, "c", d, 1)}, 2, 100, []int64{1, 2}, 1},
 		{"byte budget skips an image that does not fit and keeps later ones", []sizedImage{sizedImageOf(1, "a", d, 6), sizedImageOf(2, "b", d, 5), sizedImageOf(3, "c", d, 4)}, 10, 10, []int64{1, 3}, 1},
-		{"an image larger than the remaining budget is omitted", []sizedImage{sizedImageOf(1, "a", d, 11)}, 10, 10, nil, 1},
-		{"no budget left omits every image", []sizedImage{sizedImageOf(1, "a", d, 1)}, 10, 0, nil, 1},
+		{"an image larger than the remaining budget is omitted", []sizedImage{sizedImageOf(1, "a", d, 11)}, 10, 10, []int64{}, 1},
+		{"no budget left omits every image", []sizedImage{sizedImageOf(1, "a", d, 1)}, 10, 0, []int64{}, 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -280,7 +283,7 @@ func TestSelectSnapshotImages(t *testing.T) {
 			if sum > tc.maxBytes {
 				t.Fatalf("kept bodies %d bytes, budget %d", sum, tc.maxBytes)
 			}
-			if ids := imageIDs(Snapshot{Images: got}); !reflect.DeepEqual(ids, tc.wantIDs) && tc.wantIDs != nil {
+			if ids := imageIDs(Snapshot{Images: got}); !reflect.DeepEqual(ids, tc.wantIDs) {
 				t.Fatalf("kept IDs = %v, want %v", ids, tc.wantIDs)
 			}
 		})
@@ -391,5 +394,184 @@ func TestSnapshotImageMigrationAddsPinTableAndIndex(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("index on image_read_id not present after migrations")
+	}
+}
+
+// insertHostReadBody stores a host read of host whose body is n zero bytes. The
+// body comes from zeroblob, so no body of that size is built in Go. Current and
+// the byte sums read only the body length, so the body need not decode.
+func insertHostReadBody(t *testing.T, db *sql.DB, host string, n int64) int64 {
+	t.Helper()
+	res, err := db.Exec(`INSERT INTO vuln_inventory_reads (host_id, execution_id, read_at, complete, reason,
+		dropped, ecosystem, kernel_release, kernel_state, kernel_source, kernel_version, binaries, sources, body)
+		VALUES (?, ?, ?, 1, '', 0, '', '', '', '', '', 0, 0, zeroblob(?))`, host, "exec-"+host, base.Unix(), n)
+	if err != nil {
+		t.Fatalf("insert host read of %s with %d bytes: %v", host, n, err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// insertImageRows stores n image reads on host-1 with distinct digests and the
+// smallest valid body, "[]", and returns their row IDs in digest order.
+func insertImageRows(t *testing.T, db *sql.DB, n int) []int64 {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO vuln_image_reads (repository, digest, host_id, execution_id,
+		read_at, complete, reason, os_family, os_name, packages, body)
+		VALUES (?, ?, 'host-1', ?, ?, 1, '', '', '', 0, CAST('[]' AS BLOB))`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stmt.Close()
+	ids := make([]int64, 0, n)
+	for i := 0; i < n; i++ {
+		res, err := stmt.ExecContext(ctx, imgRepo, fmt.Sprintf("sha256:%064x", i),
+			fmt.Sprintf("exec-%d", i), base.Unix()+int64(i))
+		if err != nil {
+			t.Fatalf("insert image %d: %v", i, err)
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, id)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	return ids
+}
+
+// pinSnapshotRows stores a snapshot with the given ID and generation and pins
+// the given reads and images. It writes through SQL, without the budget or the
+// limits Current applies, so a test can hold a stored snapshot that Current
+// would never return.
+func pinSnapshotRows(t *testing.T, db *sql.DB, id string, generation int64, reads, images []int64) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO vuln_inventory_snapshots (id, generation, taken_at) VALUES (?, ?, ?)`,
+		id, generation, base.Unix()); err != nil {
+		t.Fatalf("insert snapshot %s: %v", id, err)
+	}
+	for _, r := range reads {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO vuln_inventory_snapshot_reads (snapshot_id, read_id) VALUES (?, ?)`, id, r); err != nil {
+			t.Fatalf("pin read %d: %v", r, err)
+		}
+	}
+	for _, r := range images {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO vuln_inventory_snapshot_image_reads (snapshot_id, image_read_id) VALUES (?, ?)`, id, r); err != nil {
+			t.Fatalf("pin image %d: %v", r, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// snapshotBodyBytes returns the stored body bytes that snapshot id pins, host
+// and image bodies together: the sum that Current and Snapshot bound by
+// MaxSnapshotBodyBytes.
+func snapshotBodyBytes(t *testing.T, db *sql.DB, id string) int64 {
+	t.Helper()
+	var total int64
+	if err := db.QueryRow(`SELECT
+		(SELECT COALESCE(SUM(LENGTH(body)), 0) FROM vuln_inventory_reads WHERE id IN (SELECT read_id FROM vuln_inventory_snapshot_reads WHERE snapshot_id = ?)) +
+		(SELECT COALESCE(SUM(LENGTH(body)), 0) FROM vuln_image_reads WHERE id IN (SELECT image_read_id FROM vuln_inventory_snapshot_image_reads WHERE snapshot_id = ?))`,
+		id, id).Scan(&total); err != nil {
+		t.Fatalf("body bytes of %s: %v", id, err)
+	}
+	return total
+}
+
+// TestCurrentImageBodiesShareTheByteBudget is the end-to-end check of the byte
+// budget that Current shares between host and image bodies. Sixteen host reads
+// of MaxBodyBytes fill MaxSnapshotBodyBytes exactly, so no image body fits: the
+// image must be omitted and counted in OmittedImages, and the stored snapshot
+// must hold at most MaxSnapshotBodyBytes, or Snapshot would refuse its ID with
+// ErrLimit. Passing the full MaxSnapshotBodyBytes to the image selection pins
+// the image and fails this test.
+func TestCurrentImageBodiesShareTheByteBudget(t *testing.T) {
+	s, db := openStore(t)
+	useClock(t, s)
+	var hosts []string
+	for i := 0; i < 16; i++ {
+		h := fmt.Sprintf("host-%02d", i)
+		hosts = append(hosts, h)
+		insertHostReadBody(t, db, h, MaxBodyBytes)
+	}
+	hosts = append(hosts, "img-host")
+	mustPutImage(t, s, testImageReadOn("img-host", imgRepo, 10))
+
+	snap := mustCurrent(t, s, hosts, 0, 0)
+	if len(snap.Reads) != 16 {
+		t.Fatalf("pinned %d host reads, want 16", len(snap.Reads))
+	}
+	if len(snap.Images) != 0 || snap.OmittedImages != 1 {
+		t.Fatalf("pinned %d images, OmittedImages %d; want 0 pinned and 1 omitted, the host bodies fill the budget",
+			len(snap.Images), snap.OmittedImages)
+	}
+	if got := snapshotBodyBytes(t, db, snap.ID); got > MaxSnapshotBodyBytes {
+		t.Fatalf("stored snapshot %s holds %d body bytes, limit %d: Snapshot would refuse its ID with ErrLimit",
+			snap.ID, got, MaxSnapshotBodyBytes)
+	}
+}
+
+// TestSnapshotRefusesHostAndImageBodiesAboveLimit checks the combined bound in
+// Snapshot: host and image bodies of one snapshot share MaxSnapshotBodyBytes.
+// Sixteen host bodies of MaxBodyBytes fill the limit, so the host bodies alone
+// pass the host check; one image body on top must be refused with ErrLimit
+// before any body is decoded.
+func TestSnapshotRefusesHostAndImageBodiesAboveLimit(t *testing.T) {
+	s, db := openStore(t)
+	var reads []int64
+	for i := 0; i < 16; i++ {
+		reads = append(reads, insertHostReadBody(t, db, fmt.Sprintf("host-%02d", i), MaxBodyBytes))
+	}
+	images := insertImageRows(t, db, 1)
+	pinSnapshotRows(t, db, "nos-inv-1", 1, reads, images)
+	if got, want := snapshotBodyBytes(t, db, "nos-inv-1"), int64(MaxSnapshotBodyBytes)+2; got != want {
+		t.Fatalf("fixture holds %d body bytes, want %d", got, want)
+	}
+
+	_, err := s.Snapshot(context.Background(), "nos-inv-1")
+	if !errors.Is(err, ErrLimit) {
+		t.Fatalf("Snapshot with host and image bodies above the limit: err %v, want ErrLimit", err)
+	}
+}
+
+// TestSnapshotRefusesMoreImagesThanMaxSnapshotImages checks the image count in
+// Snapshot. Current never pins more than MaxSnapshotImages, so the snapshots
+// are pinned through SQL: MaxSnapshotImages+1 image reads are refused with
+// ErrLimit, and exactly MaxSnapshotImages are accepted.
+func TestSnapshotRefusesMoreImagesThanMaxSnapshotImages(t *testing.T) {
+	s, db := openStore(t)
+	ctx := context.Background()
+	images := insertImageRows(t, db, MaxSnapshotImages+1)
+	pinSnapshotRows(t, db, "nos-inv-1", 1, nil, images)
+	pinSnapshotRows(t, db, "nos-inv-2", 2, nil, images[:MaxSnapshotImages])
+
+	if _, err := s.Snapshot(ctx, "nos-inv-1"); !errors.Is(err, ErrLimit) {
+		t.Fatalf("Snapshot of %d images: err %v, want ErrLimit", len(images), err)
+	}
+	got, err := s.Snapshot(ctx, "nos-inv-2")
+	if err != nil {
+		t.Fatalf("Snapshot of MaxSnapshotImages images: %v", err)
+	}
+	if len(got.Images) != MaxSnapshotImages {
+		t.Fatalf("Snapshot returned %d images, want %d", len(got.Images), MaxSnapshotImages)
 	}
 }
