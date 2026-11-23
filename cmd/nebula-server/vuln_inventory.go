@@ -395,6 +395,11 @@ func (v vulnInventory) VulnSnapshot(ctx context.Context, id string) (api.VulnSna
 	if s, ok := v.cache.get(cur.ID); ok {
 		return s, nil
 	}
+	// Only the count is logged: an omitted image has no name in the log.
+	if cur.OmittedImages > 0 {
+		slog.Default().Warn("vulnerability inventory: snapshot omits image reads",
+			"snapshot", cur.ID, "omitted_images", cur.OmittedImages)
+	}
 	return v.load(ctx, cur.ID)
 }
 
@@ -467,13 +472,16 @@ func (v vulnInventory) load(ctx context.Context, id string) (api.VulnSnapshot, e
 	return out, nil
 }
 
-// toVulnSnapshot maps a stored snapshot to the export's snapshot type.
+// toVulnSnapshot maps a stored snapshot to the export's snapshot type: the host
+// subjects in host-ID order, then the image subjects of its image reads (see
+// imageSubjects).
 func toVulnSnapshot(s vulninventory.Snapshot) api.VulnSnapshot {
 	out := api.VulnSnapshot{ID: s.ID, Generation: s.Generation, TakenAt: s.TakenAt,
 		Subjects: make([]api.VulnSubject, 0, len(s.Reads))}
 	for _, r := range s.Reads {
 		out.Subjects = append(out.Subjects, hostSubject(r))
 	}
+	out.Subjects = append(out.Subjects, imageSubjects(s.Images)...)
 	return out
 }
 

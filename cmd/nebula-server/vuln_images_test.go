@@ -562,10 +562,10 @@ func TestImageSubjectsExportNewestReadPerDigest(t *testing.T) {
 
 // TestImageSubjectsSkipUnnamedEcosystem checks that an image whose OS release
 // cannot be named the way the export names ecosystems is not exported (a
-// Debian release is reported by version, not codename).
+// Debian major version without a codename in the table).
 func TestImageSubjectsSkipUnnamedEcosystem(t *testing.T) {
 	debian := vulninventory.ImageRead{ID: 1, Digest: "sha256:" + imgHex, HostID: "host-1", ReadAt: imgClock,
-		Complete: true, OSFamily: "debian", OSName: "12.8",
+		Complete: true, OSFamily: "debian", OSName: "99.1",
 		Packages: []vulninventory.ImagePackage{{Ecosystem: "debian", Name: "bash", Version: "5.2"}}}
 	if subs := imageSubjects([]vulninventory.ImageRead{debian}); len(subs) != 0 {
 		t.Fatalf("exported %d subjects for an unnamed ecosystem, want 0", len(subs))
