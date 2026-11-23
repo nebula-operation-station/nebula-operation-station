@@ -160,7 +160,9 @@ func TestImageLeaseSkipsOnlyTheActionWithoutMatchingParams(t *testing.T) {
 	otherImage := boundJSON(t, map[string]string{"image": "registry.example/app/db@sha256:" + fmt.Sprintf("%064d", 7)})
 	invalidImage := boundJSON(t, map[string]string{"image": "not a digest"})
 	extraInspect := boundJSON(t, map[string]string{"container": "c1", "x": "y"})
-	foreign := boundJSON(t, map[string]string{"image": imageTestRef})
+	// A parameterised, allowlisted action that is not an image lease action:
+	// its hash matches, but it must never run from an ordinary lease.
+	foreignUnit := boundJSON(t, map[string]string{"unit": "nginx.service"})
 
 	tests := []struct {
 		name string
@@ -200,8 +202,8 @@ func TestImageLeaseSkipsOnlyTheActionWithoutMatchingParams(t *testing.T) {
 		},
 		{
 			name: "a parameterised action of another kind is never run",
-			doc:  []boundAction{{"docker.inspect", inspect}, {"image.vulnerabilities", foreign}},
-			rows: []boundAction{{"docker.inspect", inspect}, {"image.vulnerabilities", foreign}},
+			doc:  []boundAction{{"docker.inspect", inspect}, {"service.status", foreignUnit}},
+			rows: []boundAction{{"docker.inspect", inspect}, {"service.status", foreignUnit}},
 			want: []string{"docker.inspect"},
 		},
 	}
