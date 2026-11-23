@@ -16,7 +16,9 @@ import (
 // is the package list of one local container image, pinned to one platform
 // digest, as image.packages reports it. The store keeps the last
 // ImageReadsKept reads of each image (the digest, per host) and deletes the
-// older ones in the same transaction as an insert (migration 0053). The
+// older ones in the same transaction as an insert (migration 0053), except
+// the reads a snapshot pins (migration 0055); PruneSnapshots deletes those
+// once no snapshot pins them. The
 // repository of a read is a name the host's inspect result gave the image;
 // it is not part of the key, so one image under several names shares one
 // budget.
@@ -269,8 +271,11 @@ func (s *Store) PutImage(ctx context.Context, r ImageRead) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("vulninventory: put image: row id: %w", err)
 	}
+	// A read that a snapshot pins stays (ADR 0011 amendment 2026-11-23); the
+	// RESTRICT foreign key of migration 0055 would refuse its delete anyway.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM vuln_image_reads WHERE host_id = ? AND digest = ? AND id NOT IN (
-		SELECT id FROM vuln_image_reads WHERE host_id = ? AND digest = ? ORDER BY read_at DESC, id DESC LIMIT ?)`,
+		SELECT id FROM vuln_image_reads WHERE host_id = ? AND digest = ? ORDER BY read_at DESC, id DESC LIMIT ?)
+		AND id NOT IN (SELECT image_read_id FROM vuln_inventory_snapshot_image_reads)`,
 		r.HostID, r.Digest, r.HostID, r.Digest, ImageReadsKept); err != nil {
 		return 0, fmt.Errorf("vulninventory: put image: keep newest: %w", err)
 	}
