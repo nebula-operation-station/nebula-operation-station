@@ -5,6 +5,7 @@ package vulninventory
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -184,19 +185,31 @@ func selectSnapshotImages(latest []sizedImage, maxCount int, maxBytes int64) ([]
 	return kept, omitted
 }
 
-// latestImagesQuery is the newest image read of every (host, digest), without
-// packages, with the length of its body. "Newest" is the order of ImageReads:
-// read time, then ID. It is needed because the image body is not read here.
+// latestImagesQuery is the newest image read of every (host, digest) of the
+// hosts in the JSON array bound to its one parameter, without packages, with
+// the length of its body. The host filter runs before the window function, so
+// the work grows with the wanted hosts, not with every stored image read.
+// "Newest" is the order of ImageReads: read time, then ID. It is needed because
+// the image body is not read here.
 const latestImagesQuery = `SELECT id, repository, digest, host_id, execution_id, read_at, complete,
 	reason, os_family, os_name, LENGTH(body) FROM vuln_image_reads
 	WHERE id IN (SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY host_id, digest
-		ORDER BY read_at DESC, id DESC) AS rn FROM vuln_image_reads) WHERE rn = 1)`
+		ORDER BY read_at DESC, id DESC) AS rn FROM vuln_image_reads
+		WHERE host_id IN (SELECT value FROM json_each(?))) WHERE rn = 1)`
 
 // newestImages returns the newest image read of every (host, digest) of want,
 // sorted by host ID, then digest, each with its body length. It runs on q, so
 // it sees the state of the caller's transaction.
 func newestImages(ctx context.Context, q *sql.Tx, want map[string]bool) ([]sizedImage, error) {
-	rows, err := q.QueryContext(ctx, latestImagesQuery)
+	hosts := make([]string, 0, len(want))
+	for h := range want {
+		hosts = append(hosts, h)
+	}
+	hostsJSON, err := json.Marshal(hosts)
+	if err != nil {
+		return nil, fmt.Errorf("newest images: hosts: %w", err)
+	}
+	rows, err := q.QueryContext(ctx, latestImagesQuery, string(hostsJSON))
 	if err != nil {
 		return nil, fmt.Errorf("newest images: %w", err)
 	}
@@ -209,9 +222,6 @@ func newestImages(ctx context.Context, q *sql.Tx, want map[string]bool) ([]sized
 		if err := rows.Scan(&r.ID, &r.Repository, &r.Digest, &r.HostID, &r.ExecutionID, &readAt, &complete,
 			&r.Reason, &r.OSFamily, &r.OSName, &n); err != nil {
 			return nil, fmt.Errorf("newest images: %w", err)
-		}
-		if !want[r.HostID] {
-			continue
 		}
 		r.ReadAt = time.Unix(readAt, 0).UTC()
 		r.Complete = complete == 1
