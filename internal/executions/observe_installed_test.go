@@ -167,10 +167,12 @@ func TestInstalledObserverNilIsOff(t *testing.T) {
 	}
 }
 
-// TestLastOSChangeIsNewestSuccessfulFullUpgrade: the OS change of a host is the
-// finish of its newest successful package.install_all. Failed full upgrades,
+// TestLastOSChangeIsNewestFullUpgradeThatRan: the OS change of a host is the
+// finish of its newest package.install_all that ran, whatever its class: a
+// failed or unknown upgrade may have applied in whole or in part. Upgrades
+// that did not reach the host's command (precheck_failed, not_executed),
 // other actions and other hosts do not count, and a host without one has none.
-func TestLastOSChangeIsNewestSuccessfulFullUpgrade(t *testing.T) {
+func TestLastOSChangeIsNewestFullUpgradeThatRan(t *testing.T) {
 	s, db := setup(t, &fakeExec{})
 	base := time.Date(2026, 11, 20, 8, 0, 0, 0, time.UTC).Unix()
 	seq := 0
@@ -182,16 +184,89 @@ func TestLastOSChangeIsNewestSuccessfulFullUpgrade(t *testing.T) {
 		t.Fatalf("no upgrade yet: ok = %v, err = %v; want no change, no error", ok, err)
 	}
 	seed("package.install_all", "web", "success", base)
-	seed("package.install_all", "web", "failed", base+3600)
+	seed("package.install_all", "web", "precheck_failed", base+3600)
+	seed("package.install_all", "web", "not_executed", base+3700)
 	seed("package.install_security", "web", "success", base+7200)
 	seed("package.install_all", "db", "success", base+9000)
 	seed("package.install_all", "web", "success", base+1800)
+	seed("package.install_all", "web", "failed", base+2400)
 
 	at, ok, err := s.LastOSChange(context.Background(), "web")
 	if err != nil || !ok {
 		t.Fatalf("LastOSChange: ok = %v, err = %v; want a change", ok, err)
 	}
-	if want := time.Unix(base+1800, 0); !at.Equal(want) {
-		t.Fatalf("LastOSChange = %v, want the newest successful full upgrade %v", at, want)
+	if want := time.Unix(base+2400, 0); !at.Equal(want) {
+		t.Fatalf("LastOSChange = %v, want the newest full upgrade that ran (failed) %v", at, want)
+	}
+
+	seed("package.install_all", "web", "unknown", base+3000)
+	at, _, err = s.LastOSChange(context.Background(), "web")
+	if err != nil {
+		t.Fatalf("LastOSChange: %v", err)
+	}
+	if want := time.Unix(base+3000, 0); !at.Equal(want) {
+		t.Fatalf("LastOSChange = %v, want the unknown upgrade %v", at, want)
+	}
+}
+
+// TestUpgradeOverlapsListRead: a package.install_all of the host that ran
+// while the list ran (started before the list ended, and still running or
+// finished after the list started) overlaps the read; the list is then not
+// fresh. Upgrades that ended before the list or began after it, upgrades that
+// did not reach the command, other actions and other hosts do not overlap.
+func TestUpgradeOverlapsListRead(t *testing.T) {
+	listFrom := time.Date(2026, 11, 20, 9, 29, 0, 0, time.UTC)
+	listTo := time.Date(2026, 11, 20, 9, 30, 0, 0, time.UTC)
+	at := func(sec int) int64 { return listFrom.Add(time.Duration(sec) * time.Second).Unix() }
+	const (
+		running  = "running"
+		finished = "finished"
+	)
+	tests := []struct {
+		name    string
+		action  string
+		host    string
+		state   string
+		class   string
+		started int64
+		end     int64 // finished_at; unused while running
+		want    bool
+	}{
+		{"running, started before the list", "package.install_all", "web", running, "", at(-300), 0, true},
+		{"running, started during the list", "package.install_all", "web", running, "", at(10), 0, true},
+		{"finished during the list", "package.install_all", "web", finished, "success", at(-300), at(10), true},
+		{"started before, finished as the list started", "package.install_all", "web", finished, "success", at(-300), at(0), true},
+		{"failed during the list", "package.install_all", "web", finished, "failed", at(-5), at(5), true},
+		{"unknown during the list", "package.install_all", "web", finished, "unknown", at(-5), at(5), true},
+		{"finished before the list", "package.install_all", "web", finished, "success", at(-600), at(-60), false},
+		{"started after the list", "package.install_all", "web", running, "", at(61), 0, false},
+		{"precheck_failed during the list", "package.install_all", "web", finished, "precheck_failed", at(-5), at(5), false},
+		{"other action during the list", "package.install_security", "web", finished, "success", at(-5), at(5), false},
+		{"other host during the list", "package.install_all", "db", finished, "success", at(-5), at(5), false},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			s, db := setup(t, &fakeExec{})
+			id := strings.Repeat(string(rune('a'+i)), 36)
+			var fin any
+			if tc.state == finished {
+				fin = tc.end
+			}
+			if _, err := db.Exec(`INSERT INTO executions (id, action_id, module_version, artifact_sha256, risk, state, durable, timeout_s, created_by, created_at)
+				VALUES (?, ?, '1.0.0', ?, 'LOW', ?, 0, 60, 'axel', ?)`, id, tc.action, strings.Repeat("a", 64), tc.state, tc.started); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.Exec(`INSERT INTO execution_hosts (execution_id, host_id, fingerprint, credential_ref, endpoints, state, class, started_at, finished_at)
+				VALUES (?, ?, 'SHA256:x', 'nebula-default', '[]', ?, ?, ?, ?)`, id, tc.host, tc.state, tc.class, tc.started, fin); err != nil {
+				t.Fatal(err)
+			}
+			got, err := s.UpgradeOverlaps(context.Background(), "web", listFrom, listTo)
+			if err != nil {
+				t.Fatalf("UpgradeOverlaps: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("UpgradeOverlaps = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

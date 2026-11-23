@@ -124,6 +124,18 @@ func (s staticFacts) LastOSChange(context.Context, string) (time.Time, bool, err
 	return s.osChange, !s.osChange.IsZero(), nil
 }
 
+func (s staticFacts) UpgradeOverlaps(context.Context, string, time.Time, time.Time) (bool, error) {
+	return false, nil
+}
+
+// osChangeFailingFacts is a core.facts source whose release lookup works and
+// whose OS-change lookup fails.
+type osChangeFailingFacts struct{ staticFacts }
+
+func (osChangeFailingFacts) LastOSChange(context.Context, string) (time.Time, bool, error) {
+	return time.Time{}, false, errors.New("os change lookup refused")
+}
+
 // factsResult is a core.facts 1.x document with the given os-release text.
 func factsResult(t *testing.T, osRelease string) []byte {
 	t.Helper()
@@ -215,6 +227,10 @@ func TestFactsBeforeLastFullUpgradeGiveIncompleteRead(t *testing.T) {
 		wantComplete bool
 	}{
 		{"facts before the upgrade", invTestStart.Add(-time.Hour), false},
+		// A tie is stale: core.facts that finished in the upgrade's last second
+		// may have read os-release before the upgrade wrote it.
+		{"facts in the same second as the upgrade", upgrade, false},
+		{"facts one second after the upgrade", upgrade.Add(time.Second), true},
 		{"facts after the upgrade", invTestStart.Add(-20 * time.Minute), true},
 	}
 	for i, tc := range tests {
@@ -236,6 +252,107 @@ func TestFactsBeforeLastFullUpgradeGiveIncompleteRead(t *testing.T) {
 				t.Fatalf("read complete=%v reason=%q, want the facts-older marker", r.Complete, r.Reason)
 			}
 		})
+	}
+}
+
+// insertHostRunAt stores a run of action on host in state ("running" or
+// "finished") with class. The run started at started; a finished run finished
+// at finished, a running one has no finish yet. n makes the execution ID
+// unique.
+func (e *invEnv) insertHostRunAt(t *testing.T, n int, action, host, state, class string, started, finished time.Time) {
+	t.Helper()
+	id := fmt.Sprintf("run-%032d", n) // executions.id is 36 characters
+	var execFin, hostFin any
+	if state == "finished" {
+		execFin, hostFin = finished.Unix(), finished.Unix()
+	}
+	if _, err := e.db.Exec(`INSERT INTO executions (id, action_id, module_version, artifact_sha256, risk, state, durable, timeout_s, created_by, created_at, finished_at)
+		VALUES (?, ?, '1.0.0', ?, 'LOW', ?, 0, 60, 'axel', ?, ?)`, id, action, strings.Repeat("a", 64), state, started.Unix(), execFin); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.db.Exec(`INSERT INTO execution_hosts (execution_id, host_id, fingerprint, credential_ref, endpoints, state, class, started_at, finished_at)
+		VALUES (?, ?, 'SHA256:x', 'nebula-default', '[]', ?, ?, ?, ?)`, id, host, state, class, started.Unix(), hostFin); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUpgradeThatFailedOrUnknownIsAnOSChange: a full upgrade that ended failed
+// or unknown may have changed the release in part, so facts from before it do
+// not give the release; the list is stored incomplete.
+func TestUpgradeThatFailedOrUnknownIsAnOSChange(t *testing.T) {
+	upgrade := invTestStart.Add(-30 * time.Minute)
+	for i, class := range []string{"failed", "unknown"} {
+		t.Run(class, func(t *testing.T) {
+			e := newInvEnv(t)
+			e.insertHostRunAt(t, 80+i, "package.install_all", invTestHost, "finished", class, upgrade.Add(-time.Minute), upgrade)
+			e.insertFactsAt(t, 85+i, invTestHost, factsResult(t, debian12Release), upgrade.Add(-10*time.Minute))
+
+			e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-after-"+class, invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+			r := e.latestRead(t, invTestHost)
+			if r.Complete || r.Reason != vulninventory.ReasonFactsOlder {
+				t.Fatalf("read complete=%v reason=%q, want the facts-older marker", r.Complete, r.Reason)
+			}
+		})
+	}
+}
+
+// TestUpgradeOverlappingTheListMakesFactsStale: a full upgrade that ran while
+// the list ran (started before it ended, and still running or finished after
+// it started) may have changed the release during the read. The facts from
+// before it do not give the release. An upgrade that did not reach its command
+// (precheck_failed) changed nothing and does not count.
+func TestUpgradeOverlappingTheListMakesFactsStale(t *testing.T) {
+	tests := []struct {
+		name         string
+		state, class string
+		started      time.Time
+		finished     time.Time
+		wantComplete bool
+	}{
+		{"still running when the list started", "running", "", invTestStart.Add(-5 * time.Minute), time.Time{}, false},
+		{"started while the list ran and still running", "running", "", invTestStart.Add(5 * time.Second), time.Time{}, false},
+		{"finished while the list ran", "finished", "success", invTestStart.Add(-5 * time.Minute), invTestStart.Add(10 * time.Second), false},
+		{"failed while the list ran", "finished", "failed", invTestStart.Add(-time.Minute), invTestStart.Add(time.Second), false},
+		{"precheck_failed while the list ran", "finished", "precheck_failed", invTestStart.Add(-5 * time.Minute), invTestStart.Add(10 * time.Second), true},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newInvEnv(t)
+			e.insertFactsAt(t, 90+i, invTestHost, factsResult(t, debian12Release), invTestStart.Add(-time.Hour))
+			e.insertHostRunAt(t, 100+i, "package.install_all", invTestHost, tc.state, tc.class, tc.started, tc.finished)
+
+			e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-overlap", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+			r := e.latestRead(t, invTestHost)
+			if tc.wantComplete {
+				if !r.Complete || r.Ecosystem != "debian:bookworm" {
+					t.Fatalf("read complete=%v ecosystem=%q reason=%q, want complete debian:bookworm", r.Complete, r.Ecosystem, r.Reason)
+				}
+				return
+			}
+			if r.Complete || r.Reason != vulninventory.ReasonFactsOlder {
+				t.Fatalf("read complete=%v reason=%q, want the facts-older marker", r.Complete, r.Reason)
+			}
+		})
+	}
+}
+
+// TestOSChangeLookupFailureMarksHostPartial: when the OS-change lookup fails
+// after the release lookup succeeded, the list cannot be checked against the
+// upgrades, so it is stored as a lookup marker, not as a complete read.
+func TestOSChangeLookupFailureMarksHostPartial(t *testing.T) {
+	e := newInvEnv(t)
+	e.svc.facts = osChangeFailingFacts{staticFacts{result: factsResult(t, debian12Release), at: invTestStart.Add(-time.Hour)}}
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-oschange", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != vulninventory.ReasonLookupFailed || r.ExecutionID != "exec-oschange" {
+		t.Fatalf("latest read complete=%v reason=%q execution=%q, want the lookup marker of exec-oschange", r.Complete, r.Reason, r.ExecutionID)
+	}
+	if !strings.Contains(e.log.String(), "error_class=lookup") {
+		t.Fatalf("lookup failure not logged by class: %s", e.log.String())
 	}
 }
 
@@ -508,6 +625,10 @@ func (failingFacts) LastOSChange(context.Context, string) (time.Time, bool, erro
 	return time.Time{}, false, errors.New("lookup refused")
 }
 
+func (failingFacts) UpgradeOverlaps(context.Context, string, time.Time, time.Time) (bool, error) {
+	return false, errors.New("lookup refused")
+}
+
 // TestInventoryLookupFailureMarksHostPartial: when the release lookup fails,
 // the newest list is stored as a partial read with no components, so the
 // older complete read is no longer the latest (fail closed), but it stays
@@ -615,6 +736,10 @@ func (d *deadlineFacts) LastResult(ctx context.Context, _, _ string) ([]byte, ti
 
 func (d *deadlineFacts) LastOSChange(context.Context, string) (time.Time, bool, error) {
 	return time.Time{}, false, nil
+}
+
+func (d *deadlineFacts) UpgradeOverlaps(context.Context, string, time.Time, time.Time) (bool, error) {
+	return false, nil
 }
 
 // srcHost is the inventory host of the export tests. Its display name and

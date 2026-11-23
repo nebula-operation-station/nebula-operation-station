@@ -55,12 +55,20 @@ func (s *Service) SetInstalledObserver(o InstalledObserver) { s.installed = o }
 // describes the host. No action in the catalog changes the release itself.
 const osChangeAction = "package.install_all"
 
-// LastOSChange returns when the newest successful osChangeAction of host
-// finished. ok is false when the host has none.
+// notRanClasses are the classes of a host row whose run never reached the
+// host's command, so nothing on the host changed. Every other class counts as
+// a run that may have changed the OS: a full upgrade that ended failed,
+// unknown or timed out may have applied in whole or in part.
+const notRanClasses = `('precheck_failed', 'not_executed', 'skipped', 'not_run')`
+
+// LastOSChange returns when the newest osChangeAction of host that ran (see
+// notRanClasses) finished. ok is false when the host has none. A run that is
+// still running has no finish yet; UpgradeOverlaps covers it.
 func (s *Service) LastOSChange(ctx context.Context, host string) (at time.Time, ok bool, err error) {
 	var fin sql.NullInt64
 	err = s.db.QueryRowContext(ctx, `SELECT max(h.finished_at) FROM execution_hosts h JOIN executions e ON e.id = h.execution_id
-		WHERE h.host_id = ? AND e.action_id = ? AND h.state = 'finished' AND h.class = 'success'`, host, osChangeAction).Scan(&fin)
+		WHERE h.host_id = ? AND e.action_id = ? AND h.state = 'finished' AND h.class NOT IN `+notRanClasses,
+		host, osChangeAction).Scan(&fin)
 	if err != nil {
 		return time.Time{}, false, fmt.Errorf("last os change of host %s: %w", host, err)
 	}
@@ -68,6 +76,23 @@ func (s *Service) LastOSChange(ctx context.Context, host string) (at time.Time, 
 		return time.Time{}, false, nil
 	}
 	return time.Unix(fin.Int64, 0), true, nil
+}
+
+// UpgradeOverlaps reports whether an osChangeAction of host that ran (see
+// LastOSChange) overlaps the interval [from, to]: it started no later than to,
+// and it is still running or finished no earlier than from. A run whose end is
+// unknown counts as open-ended. Both bounds are inclusive, so a tie overlaps.
+func (s *Service) UpgradeOverlaps(ctx context.Context, host string, from, to time.Time) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM execution_hosts h JOIN executions e ON e.id = h.execution_id
+		WHERE h.host_id = ? AND e.action_id = ?
+		AND (h.state = 'running' OR (h.state = 'finished' AND h.class NOT IN `+notRanClasses+`))
+		AND COALESCE(h.started_at, 0) <= ? AND (h.finished_at IS NULL OR h.finished_at >= ?))`,
+		host, osChangeAction, to.Unix(), from.Unix()).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("upgrade overlaps of host %s: %w", host, err)
+	}
+	return n == 1, nil
 }
 
 // observeInstalled hands a successful list to the observer. A panic in the

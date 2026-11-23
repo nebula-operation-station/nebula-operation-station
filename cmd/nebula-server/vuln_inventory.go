@@ -30,6 +30,7 @@ const inventoryFactsAction = "core.facts"
 type factsSource interface {
 	LastResult(ctx context.Context, actionID, host string) ([]byte, time.Time, bool, error)
 	LastOSChange(ctx context.Context, host string) (time.Time, bool, error)
+	UpgradeOverlaps(ctx context.Context, host string, from, to time.Time) (bool, error)
 }
 
 // factsWindow is how long before a list started its core.facts result may
@@ -119,7 +120,7 @@ func (v *vulnInventoryService) ObserveInstalled(parent context.Context, hostID, 
 	var eco string
 	var distro vulnver.Distro
 	if ok {
-		fresh, err := v.factsFresh(ctx, hostID, started, factsAt)
+		fresh, err := v.factsFresh(ctx, hostID, started, at, factsAt)
 		if err != nil {
 			if v.shutdown(parent, hostID, execID) {
 				return
@@ -163,12 +164,19 @@ func (v *vulnInventoryService) ObserveInstalled(parent context.Context, hostID, 
 }
 
 // factsFresh reports whether a core.facts result that finished at factsAt may
-// give the release of a list that began on host at started. It is fresh when
-// it finished no earlier than factsWindow before the list started (a result
-// finished while the list ran is fresh too), and when it does not predate the
-// host's last full upgrade (the last known OS change). It returns
-// errListStartUnknown when started is the zero time. The lookups use ctx.
-func (v *vulnInventoryService) factsFresh(ctx context.Context, hostID string, started, factsAt time.Time) (bool, error) {
+// give the release of a list that began on host at started and finished at
+// finished. It is fresh when all of these hold:
+//   - it finished no earlier than factsWindow before the list started (a
+//     result finished while the list ran is fresh too);
+//   - it finished strictly after the host's last full upgrade that ran (the
+//     last known OS change); a tie is stale, because a result in the upgrade's
+//     last second may have read os-release before the upgrade wrote it;
+//   - no full upgrade that ran overlaps the list, so the list did not read a
+//     release that changed while it ran.
+//
+// It returns errListStartUnknown when started is the zero time. The lookups
+// use ctx.
+func (v *vulnInventoryService) factsFresh(ctx context.Context, hostID string, started, finished, factsAt time.Time) (bool, error) {
 	if started.IsZero() {
 		return false, errListStartUnknown
 	}
@@ -179,7 +187,14 @@ func (v *vulnInventoryService) factsFresh(ctx context.Context, hostID string, st
 	if err != nil {
 		return false, fmt.Errorf("last os change: %w", err)
 	}
-	return !changed || !factsAt.Before(osChange), nil
+	if changed && !factsAt.After(osChange) {
+		return false, nil
+	}
+	overlaps, err := v.facts.UpgradeOverlaps(ctx, hostID, started, finished)
+	if err != nil {
+		return false, fmt.Errorf("upgrade overlaps list: %w", err)
+	}
+	return !overlaps, nil
 }
 
 // closeByInventory closes the open findings of host that the complete read
