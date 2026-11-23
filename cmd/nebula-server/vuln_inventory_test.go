@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -550,10 +551,11 @@ type srcEnv struct {
 func newSrcEnv(t *testing.T) *srcEnv {
 	t.Helper()
 	e := newVTEnv(t)
-	// vulninventory stamps TakenAt and checks read times with its own
-	// package clock, which is the real clock. The test clock follows the
-	// real clock, so reads and TakenAt agree and no snapshot is "taken after
-	// the clock". Tests that move the clock use Add, as before.
+	// The store and the export share the test clock (newVulnInventory passes
+	// it to vulninventory.NewWithNow), so TakenAt, the reuse window and the
+	// read-time bound all use one clock. The clock follows the real clock so
+	// that reads stored with the real time stay in the past; tests that move
+	// it use Add.
 	e.clk.followReal()
 	hosts := inventory.NewWithNow(e.db, e.clk.Now)
 	inv, err := newVulnInventory(e.db, hosts, e.clk.Now)
@@ -599,7 +601,7 @@ func srcRead(host, exec string, at time.Time, complete bool, pkg string) vulninv
 // a package list read is stored.
 func (e *srcEnv) addRead(t *testing.T, r vulninventory.Read) {
 	t.Helper()
-	st, err := vulninventory.New(e.db)
+	st, err := vulninventory.NewWithNow(e.db, e.clk.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -857,7 +859,7 @@ func TestVulnInventoryDecodesSnapshotOncePerID(t *testing.T) {
 	e := newSrcEnv(t)
 	e.addHost(t, srcHost)
 	e.addRead(t, srcRead(srcHost, "exec-1", e.clk.Now().Add(-time.Minute), true, "openssl"))
-	st, err := vulninventory.New(e.db)
+	st, err := vulninventory.NewWithNow(e.db, e.clk.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -949,7 +951,7 @@ type recordingReads struct {
 	recorded bool
 }
 
-func (r *recordingReads) Current(ctx context.Context, hosts []string, maxReuse time.Duration, floor int64) (vulninventory.Snapshot, error) {
+func (r *recordingReads) Current(ctx context.Context, hosts []string, maxReuse time.Duration, floor vulninventory.GenerationFloor) (vulninventory.Snapshot, error) {
 	s, err := r.Store.Current(ctx, hosts, maxReuse, floor)
 	if err == nil && !r.recorded {
 		r.recorded = true
@@ -968,7 +970,7 @@ func TestVulnInventoryNeverServesSnapshotRunAlreadyRecorded(t *testing.T) {
 	e := newSrcEnv(t)
 	e.addHost(t, srcHost)
 	e.addRead(t, srcRead(srcHost, "exec-1", e.clk.Now().Add(-time.Minute), true, "openssl"))
-	st, err := vulninventory.New(e.db)
+	st, err := vulninventory.NewWithNow(e.db, e.clk.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -987,5 +989,82 @@ func TestVulnInventoryNeverServesSnapshotRunAlreadyRecorded(t *testing.T) {
 	}
 	if snap.Generation <= recorded {
 		t.Fatalf("served generation %d, want above the recorded run generation %d", snap.Generation, recorded)
+	}
+}
+
+// TestVulnInventoryTakenAtUsesTheExportClock: the store stamps TakenAt with the
+// export's clock, not with the wall clock. The clock is moved ten hours ahead
+// of the real time, so a wall-clock stamp would fall outside the window.
+func TestVulnInventoryTakenAtUsesTheExportClock(t *testing.T) {
+	e := newSrcEnv(t)
+	e.addHost(t, srcHost)
+	e.addRead(t, srcRead(srcHost, "exec-1", e.clk.Now().Add(-time.Minute), true, "openssl"))
+	e.clk.Add(10 * time.Hour)
+	// The clock runs with the real clock, so it is read on both sides of the
+	// call: TakenAt is the second of the stamp, which lies between them.
+	before := e.clk.Now()
+	snap, err := e.inv.VulnSnapshot(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := e.clk.Now()
+	if snap.TakenAt.Before(before.Truncate(time.Second)) || snap.TakenAt.After(after) {
+		t.Fatalf("TakenAt = %s, want the export clock between %s and %s", snap.TakenAt, before, after)
+	}
+}
+
+// TestVulnInventoryConcurrentSnapshotsNeverLowerGeneration: export calls that
+// run at the same time, against a run floor that is already recorded, never
+// serve a generation at or below that floor, and two different snapshots never
+// share a generation.
+func TestVulnInventoryConcurrentSnapshotsNeverLowerGeneration(t *testing.T) {
+	e := newSrcEnv(t)
+	e.addHost(t, srcHost)
+	e.addRead(t, srcRead(srcHost, "exec-1", e.clk.Now().Add(-time.Minute), true, "openssl"))
+	ctx := context.Background()
+	const rounds, callers = 5, 4
+	for round := range rounds {
+		e.addRead(t, srcRead(srcHost, fmt.Sprintf("exec-r%d", round), e.clk.Now().Add(-time.Duration(round+1)*time.Second), true, "openssl"))
+		snaps := make([]api.VulnSnapshot, callers)
+		floors := make([]int64, callers)
+		errs := make([]error, callers)
+		var wg sync.WaitGroup
+		for i := range callers {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				// The run floor recorded before this call starts. Calls
+				// run concurrently with the other callers' run starts,
+				// which record the generation they were handed (below)
+				// while this call may be in progress.
+				floors[i], errs[i] = maxInventoryGeneration(ctx, e.db)
+				if errs[i] != nil {
+					return
+				}
+				snaps[i], errs[i] = e.inv.VulnSnapshot(ctx, "")
+				if errs[i] != nil {
+					return
+				}
+				// A run start with this snapshot records its generation. It
+				// runs while the other calls are in progress, so a call that
+				// reused this snapshot after its own floor read must not serve
+				// it: the post-check in current refuses it.
+				_, errs[i] = e.db.ExecContext(ctx, `UPDATE vuln_store_state SET max_inventory_generation = MAX(max_inventory_generation, ?) WHERE id = 1`, snaps[i].Generation)
+			}(i)
+		}
+		wg.Wait()
+		byGen := map[int64]string{}
+		for i, s := range snaps {
+			if errs[i] != nil {
+				t.Fatalf("round %d call %d: %v", round, i, errs[i])
+			}
+			if s.Generation <= floors[i] {
+				t.Fatalf("round %d call %d: generation %d not above the run floor %d recorded before the call", round, i, s.Generation, floors[i])
+			}
+			if prev, ok := byGen[s.Generation]; ok && prev != s.ID {
+				t.Fatalf("round %d: generation %d served as %s and %s", round, s.Generation, prev, s.ID)
+			}
+			byGen[s.Generation] = s.ID
+		}
 	}
 }

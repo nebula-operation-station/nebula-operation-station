@@ -16,15 +16,6 @@ import (
 // the traffic map's node ID of that host is the inventory host ID.
 const attackPathHostPrefix = "host:"
 
-// noAttackPaths is the attack-path source until a computation is wired
-// into the server: there is no result yet, so the pages say the paths are
-// not computed and every crown jewel reads unknown, never safe.
-type noAttackPaths struct{}
-
-func (noAttackPaths) Snapshot(context.Context) (paths.Snapshot, error) {
-	return paths.Snapshot{}, nil
-}
-
 // attackPathMapNode maps an attack-path host node to its traffic map node
 // (the inventory host ID). Other nodes are not drawn by the map. Host IDs
 // never contain ':' (trafficInventory), so asset node IDs cannot be hit.
@@ -38,13 +29,14 @@ func attackPathMapNode(id string) (string, bool) {
 
 // mountAttackPaths adds the attack-path pages (ADR 0011 D10, VU-24) to
 // pages, the mux the server serves behind the session check and the
-// security middleware (webServer). isAdmin is the admin rule of the
+// security middleware (webServer). src is the snapshot the pages show
+// (attackPathSource in production). isAdmin is the admin rule of the
 // findings export (vulnAdmin); the pages refuse (403) every request it
 // does not approve. The overlay frame sets its own CSP, which replaces the
 // global page policy.
-func mountAttackPaths(pages *http.ServeMux, publicOrigin string, isAdmin func(ctx context.Context) bool, log *slog.Logger) error {
+func mountAttackPaths(pages *http.ServeMux, publicOrigin string, src paths.Source, isAdmin func(ctx context.Context) bool, log *slog.Logger) error {
 	h, err := paths.New(paths.Options{
-		Source:       noAttackPaths{},
+		Source:       src,
 		Authorize:    func(r *http.Request) bool { return isAdmin(r.Context()) },
 		PublicOrigin: publicOrigin,
 		MapNode:      attackPathMapNode,
@@ -64,7 +56,13 @@ func init() {
 	registerServerFeature(serverFeature{
 		name: "attackpaths",
 		pages: func(d serverDeps, mux *http.ServeMux) error {
-			return mountAttackPaths(mux, d.cfg.PublicOrigin, d.isAdmin, d.log)
+			src := newAttackPathSource(d)
+			if d.run != nil {
+				if err := d.run(src.run); err != nil {
+					return fmt.Errorf("attack paths: %w", err)
+				}
+			}
+			return mountAttackPaths(mux, d.cfg.PublicOrigin, src, d.isAdmin, d.log)
 		},
 	})
 }

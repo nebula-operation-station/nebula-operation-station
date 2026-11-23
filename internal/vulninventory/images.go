@@ -185,7 +185,7 @@ func decodeImageBody(body []byte) ([]ImagePackage, error) {
 
 // validateImageRead checks the header fields of r. The packages are checked by
 // encodeImageBody.
-func validateImageRead(r ImageRead) error {
+func validateImageRead(r ImageRead, now time.Time) error {
 	if err := checkPattern("repository", r.Repository, imageRepositoryPattern, true); err != nil {
 		return err
 	}
@@ -201,7 +201,7 @@ func validateImageRead(r ImageRead) error {
 	if r.ReadAt.IsZero() || r.ReadAt.Unix() <= 0 {
 		return fmt.Errorf("%w: read time is unset", ErrInvalidRead)
 	}
-	if limit := nowFunc().Add(MaxReadSkew); r.ReadAt.After(limit) {
+	if limit := now.Add(MaxReadSkew); r.ReadAt.After(limit) {
 		return fmt.Errorf("%w: read time is more than %s after the store clock", ErrInvalidRead, MaxReadSkew)
 	}
 	if err := checkText("reason", r.Reason, MaxReasonBytes, false); err != nil {
@@ -231,7 +231,7 @@ var ErrDiscardedByRetention = errors.New("vulninventory: image read discarded by
 // that is stored already on the host returns ErrDuplicateRead and writes and
 // deletes nothing. A rejected read writes nothing and deletes nothing.
 func (s *Store) PutImage(ctx context.Context, r ImageRead) (int64, error) {
-	if err := validateImageRead(r); err != nil {
+	if err := validateImageRead(r, s.now()); err != nil {
 		return 0, fmt.Errorf("vulninventory: put image: %w", err)
 	}
 	body, err := encodeImageBody(r.Packages)

@@ -47,9 +47,24 @@ const snapshotIDPrefix = "nos-inv-"
 // ErrSnapshotGone is returned by Snapshot for an unknown or pruned snapshot ID.
 var ErrSnapshotGone = errors.New("vulninventory: snapshot gone")
 
-// nowFunc is the clock of Current and PruneSnapshots. Tests replace it. It is
-// a package variable because Store is defined in store.go and carries no clock.
-var nowFunc = time.Now
+// GenerationFloor supplies the lowest generation Current may return. Current
+// calls Generation once per call, on its own transaction, after it has taken
+// the write lock and before it decides between reuse and a new snapshot. The
+// value is therefore read in the same serialised state as the snapshot it
+// bounds: a run floor recorded by another writer is either seen or waits for
+// the commit.
+type GenerationFloor interface {
+	Generation(ctx context.Context, tx *sql.Tx) (int64, error)
+}
+
+// FixedFloor is a GenerationFloor with a constant value. It is for callers
+// that have no run floor to read.
+type FixedFloor int64
+
+// Generation returns the constant value.
+func (f FixedFloor) Generation(context.Context, *sql.Tx) (int64, error) {
+	return int64(f), nil
+}
 
 // snapshotMu serialises Current and PruneSnapshots within the process, so two
 // callers cannot both see the same newest snapshot and both insert the next
@@ -182,21 +197,24 @@ func newestReads(ctx context.Context, q *sql.Tx, want map[string]bool) ([]sizedR
 // The current snapshot is reused when it pins exactly the same reads and was
 // taken less than maxReuse ago (a snapshot whose time lies in the future, after
 // a backwards clock step, counts as expired). Otherwise a new snapshot is
-// written with generation max(highest stored generation, floor) + 1. floor is
-// a generation that a vulnstore run has seen: every generation Current returns
-// is greater than floor, so a run is never handed a snapshot at or below one it
-// has seen (ADR 0011 D5). Hosts without a read are left out. Of the hosts with
+// written with generation max(highest stored generation, floor) + 1, where
+// floor is read from the GenerationFloor inside the transaction (see that
+// type). A floor is a generation that a vulnstore run has seen: every
+// generation Current returns is greater than it, so a run is never handed a
+// snapshot at or below one it has seen (ADR 0011 D5). Generations never fall:
+// the transaction is serialised within the process (snapshotMu) and by the
+// database write lock. Hosts without a read are left out. Of the hosts with
 // a read, the first MaxSnapshotHosts in host-ID order are kept and the bodies
 // are limited to MaxSnapshotBodyBytes (see selectSnapshotReads); the hosts
 // left out are counted in Omitted.
 //
 // Reads are returned without components; use Snapshot for the bodies.
-func (s *Store) Current(ctx context.Context, hosts []string, maxReuse time.Duration, floor int64) (Snapshot, error) {
+func (s *Store) Current(ctx context.Context, hosts []string, maxReuse time.Duration, floor GenerationFloor) (Snapshot, error) {
 	if maxReuse < 0 {
 		return Snapshot{}, fmt.Errorf("vulninventory: current: %w: negative max reuse", ErrInvalidRead)
 	}
-	if floor < 0 {
-		return Snapshot{}, fmt.Errorf("vulninventory: current: %w: negative floor", ErrInvalidRead)
+	if floor == nil {
+		return Snapshot{}, fmt.Errorf("vulninventory: current: %w: nil generation floor", ErrInvalidRead)
 	}
 	want, err := wantedHosts(hosts)
 	if err != nil {
@@ -215,6 +233,13 @@ func (s *Store) Current(ctx context.Context, hosts []string, maxReuse time.Durat
 	if _, err := tx.ExecContext(ctx, `UPDATE vuln_inventory_snapshots SET taken_at = taken_at WHERE 0`); err != nil {
 		return Snapshot{}, fmt.Errorf("vulninventory: current: lock: %w", err)
 	}
+	floorGen, err := floor.Generation(ctx, tx)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("vulninventory: current: floor: %w", err)
+	}
+	if floorGen < 0 {
+		return Snapshot{}, fmt.Errorf("vulninventory: current: %w: negative floor", ErrInvalidRead)
+	}
 
 	latest, err := newestReads(ctx, tx, want)
 	if err != nil {
@@ -227,8 +252,8 @@ func (s *Store) Current(ctx context.Context, hosts []string, maxReuse time.Durat
 	}
 	slices.Sort(ids)
 
-	now := nowFunc().UTC()
-	if snap, ok, err := reusable(ctx, tx, reads, ids, now, maxReuse, floor); err != nil {
+	now := s.now().UTC()
+	if snap, ok, err := reusable(ctx, tx, reads, ids, now, maxReuse, floorGen); err != nil {
 		return Snapshot{}, fmt.Errorf("vulninventory: current: %w", err)
 	} else if ok {
 		snap.Omitted = omitted
@@ -239,7 +264,7 @@ func (s *Store) Current(ctx context.Context, hosts []string, maxReuse time.Durat
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(generation), 0) FROM vuln_inventory_snapshots`).Scan(&maxStored); err != nil {
 		return Snapshot{}, fmt.Errorf("vulninventory: current: generation: %w", err)
 	}
-	top := max(maxStored, floor)
+	top := max(maxStored, floorGen)
 	if top == math.MaxInt64 {
 		return Snapshot{}, fmt.Errorf("vulninventory: current: generation overflow")
 	}
@@ -426,7 +451,7 @@ func (s *Store) PruneSnapshots(ctx context.Context, maxAge time.Duration) error 
 	if _, err := tx.ExecContext(ctx, `UPDATE vuln_inventory_snapshots SET taken_at = taken_at WHERE 0`); err != nil {
 		return fmt.Errorf("vulninventory: prune snapshots: lock: %w", err)
 	}
-	cutoff := nowFunc().UTC().Add(-maxAge).Unix()
+	cutoff := s.now().UTC().Add(-maxAge).Unix()
 	const expired = `SELECT id FROM vuln_inventory_snapshots
 		WHERE taken_at < ? AND generation < (SELECT MAX(generation) FROM vuln_inventory_snapshots)`
 	if _, err := tx.ExecContext(ctx, `DELETE FROM vuln_inventory_snapshot_reads WHERE snapshot_id IN (`+expired+`)`, cutoff); err != nil {

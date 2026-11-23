@@ -671,7 +671,8 @@ func TestPutAcceptsBoundaryValues(t *testing.T) {
 // read of its host, and so protected, for as long as the clock stays behind it.
 // Put refuses it; a read at the bound or in the past is accepted.
 func TestPutRefusesReadTimeFarInTheFuture(t *testing.T) {
-	c := useClock(t)
+	s, db := openStore(t)
+	c := useClock(t, s)
 	now := c.t
 	cases := []struct {
 		name    string
@@ -684,7 +685,6 @@ func TestPutRefusesReadTimeFarInTheFuture(t *testing.T) {
 		{"one second over MaxReadSkew", now.Add(MaxReadSkew + time.Second), true},
 		{"one year ahead", now.AddDate(1, 0, 0), true},
 	}
-	s, db := openStore(t)
 	ctx := context.Background()
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
