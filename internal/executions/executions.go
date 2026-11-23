@@ -963,16 +963,26 @@ func requirementName(r pb.ApprovalRequirement) string {
 // actionID (any version) on host, for module cards (M7-6). The result is
 // untrusted host output, bounded like every result.
 func (s *Service) LastResult(ctx context.Context, actionID, host string) ([]byte, time.Time, bool, error) {
-	var res []byte
-	var at sql.NullInt64
-	err := s.db.QueryRowContext(ctx, `SELECT h.result, h.finished_at FROM execution_hosts h JOIN executions e ON e.id = h.execution_id
+	res, _, finished, ok, err := s.LastResultRun(ctx, actionID, host)
+	return res, finished, ok, err
+}
+
+// LastResultRun is LastResult with the time the run started on the host (the
+// zero time when the row has none), so that a reader can compare the start of
+// the run with the upgrades that ran.
+func (s *Service) LastResultRun(ctx context.Context, actionID, host string) (result []byte, started, finished time.Time, ok bool, err error) {
+	var st, at sql.NullInt64
+	err = s.db.QueryRowContext(ctx, `SELECT h.result, h.started_at, h.finished_at FROM execution_hosts h JOIN executions e ON e.id = h.execution_id
 		WHERE e.action_id = ? AND h.host_id = ? AND h.state = 'finished' AND h.class = 'success'
-		ORDER BY h.finished_at DESC LIMIT 1`, actionID, host).Scan(&res, &at)
+		ORDER BY h.finished_at DESC LIMIT 1`, actionID, host).Scan(&result, &st, &at)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, time.Time{}, false, nil
+		return nil, time.Time{}, time.Time{}, false, nil
 	}
 	if err != nil {
-		return nil, time.Time{}, false, err
+		return nil, time.Time{}, time.Time{}, false, err
 	}
-	return res, time.Unix(at.Int64, 0), true, nil
+	if st.Valid {
+		started = time.Unix(st.Int64, 0)
+	}
+	return result, started, time.Unix(at.Int64, 0), true, nil
 }

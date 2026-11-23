@@ -86,6 +86,21 @@ func (e *invEnv) insertFactsAt(t *testing.T, n int, host string, result []byte, 
 	e.insertRunAt(t, n, "core.facts", host, result, finished)
 }
 
+// insertFactsSpan stores a successful core.facts result of host that started
+// at started and finished at finished. n makes the execution ID unique.
+func (e *invEnv) insertFactsSpan(t *testing.T, n int, host string, result []byte, started, finished time.Time) {
+	t.Helper()
+	id := fmt.Sprintf("run-%032d", n) // executions.id is 36 characters
+	if _, err := e.db.Exec(`INSERT INTO executions (id, action_id, module_version, artifact_sha256, risk, state, durable, timeout_s, created_by, created_at, finished_at)
+		VALUES (?, 'core.facts', '1.0.0', ?, 'LOW', 'finished', 0, 60, 'axel', ?, ?)`, id, strings.Repeat("a", 64), started.Unix(), finished.Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.db.Exec(`INSERT INTO execution_hosts (execution_id, host_id, fingerprint, credential_ref, endpoints, state, class, result, started_at, finished_at)
+		VALUES (?, ?, 'SHA256:x', 'nebula-default', '[]', 'finished', 'success', ?, ?, ?)`, id, host, result, started.Unix(), finished.Unix()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // insertRunAt stores a successful run of action on host, finished at finished.
 // n makes the execution ID unique.
 func (e *invEnv) insertRunAt(t *testing.T, n int, action, host string, result []byte, finished time.Time) {
@@ -108,16 +123,29 @@ func (e *invEnv) insertRunAt(t *testing.T, n int, action, host string, result []
 // the finish of the host's last full upgrade.
 type staticFacts struct {
 	result   []byte
+	started  time.Time // zero: the run started when it finished (at)
 	at       time.Time
 	onCall   func()
 	osChange time.Time
 }
 
-func (s staticFacts) LastResult(context.Context, string, string) ([]byte, time.Time, bool, error) {
+func (s staticFacts) LastResultRun(context.Context, string, string) ([]byte, time.Time, time.Time, bool, error) {
 	if s.onCall != nil {
 		s.onCall()
 	}
-	return s.result, s.at, true, nil
+	started := s.started
+	if started.IsZero() {
+		started = s.at
+	}
+	return s.result, started, s.at, true, nil
+}
+
+// overlapFailingFacts is a core.facts source whose release lookup and
+// OS-change lookup work and whose upgrade-overlap lookup fails.
+type overlapFailingFacts struct{ staticFacts }
+
+func (overlapFailingFacts) UpgradeOverlaps(context.Context, string, time.Time, time.Time) (bool, error) {
+	return false, errors.New("overlap lookup refused")
 }
 
 func (s staticFacts) LastOSChange(context.Context, string) (time.Time, bool, error) {
@@ -248,8 +276,8 @@ func TestFactsBeforeLastFullUpgradeGiveIncompleteRead(t *testing.T) {
 				}
 				return
 			}
-			if r.Complete || r.Reason != vulninventory.ReasonFactsOlder {
-				t.Fatalf("read complete=%v reason=%q, want the facts-older marker", r.Complete, r.Reason)
+			if r.Complete || r.Reason != vulninventory.ReasonFactsBeforeUpgrade {
+				t.Fatalf("read complete=%v reason=%q, want the before-upgrade marker", r.Complete, r.Reason)
 			}
 		})
 	}
@@ -290,8 +318,8 @@ func TestUpgradeThatFailedOrUnknownIsAnOSChange(t *testing.T) {
 			e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-after-"+class, invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
 
 			r := e.latestRead(t, invTestHost)
-			if r.Complete || r.Reason != vulninventory.ReasonFactsOlder {
-				t.Fatalf("read complete=%v reason=%q, want the facts-older marker", r.Complete, r.Reason)
+			if r.Complete || r.Reason != vulninventory.ReasonFactsBeforeUpgrade {
+				t.Fatalf("read complete=%v reason=%q, want the before-upgrade marker", r.Complete, r.Reason)
 			}
 		})
 	}
@@ -331,10 +359,72 @@ func TestUpgradeOverlappingTheListMakesFactsStale(t *testing.T) {
 				}
 				return
 			}
-			if r.Complete || r.Reason != vulninventory.ReasonFactsOlder {
-				t.Fatalf("read complete=%v reason=%q, want the facts-older marker", r.Complete, r.Reason)
+			// An upgrade that ends during the list also ends after the facts
+			// started, so the before-upgrade rule may decide first; both
+			// markers are fail closed.
+			if r.Complete || (r.Reason != vulninventory.ReasonUpgradeOverlaps && r.Reason != vulninventory.ReasonFactsBeforeUpgrade) {
+				t.Fatalf("read complete=%v reason=%q, want an upgrade marker", r.Complete, r.Reason)
 			}
 		})
+	}
+}
+
+// TestFactsStartedAroundUpgradeEndDecideFreshness: core.facts is judged by the
+// time it STARTED, against the finish of the last full upgrade. A result that
+// started before the upgrade ended may have read os-release before the upgrade
+// wrote it, even when it finished after; a tie in the upgrade's last second is
+// stale too. A result that started a second after the upgrade ended is fresh.
+func TestFactsStartedAroundUpgradeEndDecideFreshness(t *testing.T) {
+	upgradeEnd := invTestStart.Add(-30 * time.Minute)
+	tests := []struct {
+		name         string
+		started      time.Time
+		finished     time.Time
+		wantComplete bool
+		wantReason   string
+	}{
+		{"started before the upgrade ended, finished after", upgradeEnd.Add(-10 * time.Second), upgradeEnd.Add(20 * time.Second), false, vulninventory.ReasonFactsBeforeUpgrade},
+		{"started in the upgrade's last second", upgradeEnd, upgradeEnd.Add(30 * time.Second), false, vulninventory.ReasonFactsBeforeUpgrade},
+		{"finished before the upgrade ended", upgradeEnd.Add(-2 * time.Minute), upgradeEnd.Add(-time.Minute), false, vulninventory.ReasonFactsBeforeUpgrade},
+		{"started a second after the upgrade ended", upgradeEnd.Add(time.Second), upgradeEnd.Add(30 * time.Second), true, ""},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newInvEnv(t)
+			e.insertHostRunAt(t, 110+i, "package.install_all", invTestHost, "finished", "success", upgradeEnd.Add(-time.Minute), upgradeEnd)
+			e.insertFactsSpan(t, 120+i, invTestHost, factsResult(t, debian12Release), tc.started, tc.finished)
+
+			e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-span", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+			r := e.latestRead(t, invTestHost)
+			if tc.wantComplete {
+				if !r.Complete || r.Ecosystem != "debian:bookworm" {
+					t.Fatalf("read complete=%v ecosystem=%q reason=%q, want complete debian:bookworm", r.Complete, r.Ecosystem, r.Reason)
+				}
+				return
+			}
+			if r.Complete || r.Reason != tc.wantReason {
+				t.Fatalf("read complete=%v reason=%q, want reason %q", r.Complete, r.Reason, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestUpgradeOverlapLookupFailureMarksHostPartial: when the overlap lookup of
+// the core.facts run fails, the list is stored as a lookup marker, not as a
+// complete read.
+func TestUpgradeOverlapLookupFailureMarksHostPartial(t *testing.T) {
+	e := newInvEnv(t)
+	e.svc.facts = overlapFailingFacts{staticFacts{result: factsResult(t, debian12Release), at: invTestStart.Add(-time.Hour)}}
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-overlap-lookup", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != vulninventory.ReasonLookupFailed || r.ExecutionID != "exec-overlap-lookup" {
+		t.Fatalf("latest read complete=%v reason=%q execution=%q, want the lookup marker of exec-overlap-lookup", r.Complete, r.Reason, r.ExecutionID)
+	}
+	if !strings.Contains(e.log.String(), "error_class=lookup") {
+		t.Fatalf("lookup failure not logged by class: %s", e.log.String())
 	}
 }
 
@@ -493,8 +583,8 @@ func TestUpgradedHostIsNotMatchedWithOldRelease(t *testing.T) {
 
 	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-trixie-1", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
 	r := e.latestRead(t, invTestHost)
-	if r.Complete || r.Reason != vulninventory.ReasonFactsOlder || r.Ecosystem == "debian:bookworm" {
-		t.Fatalf("list after upgrade: complete=%v reason=%q ecosystem=%q, want facts-older marker", r.Complete, r.Reason, r.Ecosystem)
+	if r.Complete || r.Reason != vulninventory.ReasonFactsBeforeUpgrade || r.Ecosystem == "debian:bookworm" {
+		t.Fatalf("list after upgrade: complete=%v reason=%q ecosystem=%q, want before-upgrade marker", r.Complete, r.Reason, r.Ecosystem)
 	}
 
 	// Fresh trixie facts, run at the time of the next list.
@@ -617,8 +707,8 @@ func TestInventoryLookupFailureIsLoggedByClass(t *testing.T) {
 // failingFacts is a core.facts source whose lookup always fails.
 type failingFacts struct{}
 
-func (failingFacts) LastResult(context.Context, string, string) ([]byte, time.Time, bool, error) {
-	return nil, time.Time{}, false, errors.New("lookup refused")
+func (failingFacts) LastResultRun(context.Context, string, string) ([]byte, time.Time, time.Time, bool, error) {
+	return nil, time.Time{}, time.Time{}, false, errors.New("lookup refused")
 }
 
 func (failingFacts) LastOSChange(context.Context, string) (time.Time, bool, error) {
@@ -729,9 +819,9 @@ type deadlineFacts struct {
 	deadline    time.Time
 }
 
-func (d *deadlineFacts) LastResult(ctx context.Context, _, _ string) ([]byte, time.Time, bool, error) {
+func (d *deadlineFacts) LastResultRun(ctx context.Context, _, _ string) ([]byte, time.Time, time.Time, bool, error) {
 	d.deadline, d.hasDeadline = ctx.Deadline()
-	return nil, time.Time{}, false, nil
+	return nil, time.Time{}, time.Time{}, false, nil
 }
 
 func (d *deadlineFacts) LastOSChange(context.Context, string) (time.Time, bool, error) {
