@@ -28,9 +28,11 @@ const leaseDetailOpenMax = 20
 // leaseRow is one row of the lease list table.
 type leaseRow struct {
 	ID, Short, State, StateClass, Scope string
-	ActionCount, HostCount              int
-	Expiry                              time.Time
-	ExpirySet                           bool
+	// Container and Image are set for an image read lease (ADR 0011).
+	Container, Image       string
+	ActionCount, HostCount int
+	Expiry                 time.Time
+	ExpirySet              bool
 	// RefreshURL is the form pre-filled with this grant's scope (a new
 	// grant); empty when the grant cannot be refreshed.
 	RefreshURL string
@@ -174,6 +176,9 @@ func (h *Handler) handleLeases(w http.ResponseWriter, r *http.Request) {
 		}
 		if !v.Expiry.IsZero() {
 			row.ExpirySet = true
+		}
+		if c, img, ok := imageLeaseOf(v.Params); ok {
+			row.Container, row.Image = c, img
 		}
 		if isRegistry {
 			row.Registry, row.RegistryCount, row.MethodCount = true, len(rl.Registries), registryMethodCount(rl)
