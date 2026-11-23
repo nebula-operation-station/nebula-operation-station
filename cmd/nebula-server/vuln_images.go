@@ -335,12 +335,57 @@ func imagePackages(in []dockerhost.ImagePackage) []vulninventory.ImagePackage {
 // release cannot be named the way the export names ecosystems.
 var errNoImageEcosystem = errors.New("image ecosystem unknown")
 
+// debianCodenames maps a Debian major version to its release codename. Trivy
+// reports a Debian release by version ("12.5"); the export names the
+// ecosystem by codename ("debian:bookworm"). A major version not listed here
+// is not named, so its image is not exported.
+var debianCodenames = map[string]string{
+	"11": "bullseye",
+	"12": "bookworm",
+	"13": "trixie",
+}
+
+var (
+	// imageDebianRe is a Debian release as Trivy reports it: the major
+	// version, then optional minor parts ("12", "12.5").
+	imageDebianRe = regexp.MustCompile(`^([0-9]{1,2})(\.[0-9]{1,4})*$`)
+	// imageAlpineRe is an Alpine release as Trivy reports it ("3.19.1"); the
+	// export names it by major.minor.
+	imageAlpineRe = regexp.MustCompile(`^([0-9]{1,2})\.([0-9]{1,3})(\.[0-9]{1,4})*$`)
+	// imageEcosystemRe is the set of ecosystems the export accepts. It must
+	// match the export's exportEcosystemRe (internal/web/api/vuln_export.go),
+	// so that an image subject the export would refuse is never built.
+	imageEcosystemRe = regexp.MustCompile(`^(debian:[a-z]{2,32}|ubuntu:[0-9]{2}\.[0-9]{2}|alpine:[0-9]{1,2}\.[0-9]{1,3})$`)
+)
+
 // imageEcosystem names the OS ecosystem of an image read the way the export
-// does (vulninventory.Ecosystem for hosts). Trivy reports a Debian release
-// by version ("12.5"), not by codename, so Debian images are not named here.
+// does: Debian by the codename of its major version (debianCodenames), Alpine
+// by major.minor, Ubuntu as vulninventory.Ecosystem names it. Any other
+// family, an unknown Debian major version, a release of another shape or an
+// ecosystem outside imageEcosystemRe returns errNoImageEcosystem.
 func imageEcosystem(osFamily, osName string) (string, error) {
-	eco, _ := vulninventory.Ecosystem(osFamily, osName, "")
-	if eco == "" {
+	var eco string
+	switch osFamily {
+	case "debian":
+		m := imageDebianRe.FindStringSubmatch(osName)
+		if m == nil {
+			return "", errNoImageEcosystem
+		}
+		codename, ok := debianCodenames[m[1]]
+		if !ok {
+			return "", errNoImageEcosystem
+		}
+		eco = "debian:" + codename
+	case "alpine":
+		m := imageAlpineRe.FindStringSubmatch(osName)
+		if m == nil {
+			return "", errNoImageEcosystem
+		}
+		eco = "alpine:" + m[1] + "." + m[2]
+	case "ubuntu":
+		eco, _ = vulninventory.Ecosystem(osFamily, osName, "")
+	}
+	if !imageEcosystemRe.MatchString(eco) {
 		return "", errNoImageEcosystem
 	}
 	return eco, nil
