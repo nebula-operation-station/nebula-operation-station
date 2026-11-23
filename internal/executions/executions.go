@@ -870,9 +870,12 @@ func (s *Service) finishHost(id, actionID, host, class, detail string, exit int,
 	if len(detail) > 1000 {
 		detail = detail[:1000]
 	}
+	// fin is the one clock read of the finish: the finish row, the observer and
+	// the ops state all use it.
+	fin := s.now()
 	if _, err := s.db.ExecContext(s.ctx, `UPDATE execution_hosts SET state = 'finished', class = ?, detail = ?, exit_code = ?, result = ?, log = ?,
 			log_truncated = ?, finished_at = ? WHERE execution_id = ? AND host_id = ?`,
-		class, detail, exit, result, log, boolInt(truncated), s.now().Unix(), id, host); err != nil {
+		class, detail, exit, result, log, boolInt(truncated), fin.Unix(), id, host); err != nil {
 		s.log.Error("execution host finish", "execution", id, "host", host, "error", err.Error())
 		return
 	}
@@ -880,8 +883,24 @@ func (s *Service) finishHost(id, actionID, host, class, detail string, exit int,
 	if class == classSkipped || class == classNotRun {
 		return // nothing ran on the host: its state did not change
 	}
-	s.observe(id, actionID, host, class, result)
-	s.refreshOpsState(s.ctx, host, lastRun{action: actionID, class: class, at: s.now(), ok: true})
+	s.observe(id, actionID, host, class, s.hostStarted(id, host), fin, result)
+	s.refreshOpsState(s.ctx, host, lastRun{action: actionID, class: class, at: fin, ok: true})
+}
+
+// hostStarted returns when the run of execution id began on host (its
+// started_at). It returns the zero time when the row has none or cannot be
+// read; the observer treats the zero time as an unknown start and does not
+// trust the facts for it.
+func (s *Service) hostStarted(id, host string) time.Time {
+	var started sql.NullInt64
+	if err := s.db.QueryRowContext(s.ctx, `SELECT started_at FROM execution_hosts WHERE execution_id = ? AND host_id = ?`, id, host).Scan(&started); err != nil {
+		s.log.Error("execution host start", "execution", id, "host", host, "error", err.Error())
+		return time.Time{}
+	}
+	if !started.Valid {
+		return time.Time{}
+	}
+	return time.Unix(started.Int64, 0)
 }
 
 // runAttached runs an attached action on one host. A safe action whose run

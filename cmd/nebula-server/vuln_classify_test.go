@@ -730,7 +730,7 @@ func TestCompleteInventoryReadClosesByInventory(t *testing.T) {
 				t.Fatal(err)
 			}
 			svc.setCloser(e.svc.store)
-			svc.ObserveInstalled(context.Background(), clsHost, "exec-inv-1", t0.Add(clsLag+time.Minute), installedEnvelope(t, tt.installed(t), false))
+			svc.ObserveInstalled(context.Background(), clsHost, "exec-inv-1", t0.Add(clsLag+time.Minute).Add(-time.Minute), t0.Add(clsLag+time.Minute), installedEnvelope(t, tt.installed(t), false))
 
 			fs, err := e.svc.store.SubjectFindings(context.Background(), vulnstore.Subject{Kind: vulnfinding.SubjectHost, ID: clsHost})
 			if err != nil {
@@ -768,7 +768,7 @@ func TestPartialInventoryReadClosesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	svc.setCloser(e.svc.store)
-	svc.ObserveInstalled(context.Background(), clsHost, "exec-inv-2", t0.Add(clsLag+time.Minute), installedEnvelope(t, debian12Text(t), true))
+	svc.ObserveInstalled(context.Background(), clsHost, "exec-inv-2", t0.Add(clsLag+time.Minute).Add(-time.Minute), t0.Add(clsLag+time.Minute), installedEnvelope(t, debian12Text(t), true))
 	got, err := e.svc.store.Get(context.Background(), f.Key)
 	if err != nil {
 		t.Fatal(err)
@@ -813,7 +813,7 @@ func TestInventoryReadClosesNothingAtTheWriteSecondAndOfAnotherRelease(t *testin
 			t.Fatal(err)
 		}
 		svc.setCloser(e.svc.store)
-		svc.ObserveInstalled(context.Background(), clsHost, "exec-inv-3", t0, installedEnvelope(t, debian12Text(t), false))
+		svc.ObserveInstalled(context.Background(), clsHost, "exec-inv-3", t0.Add(-time.Minute), t0, installedEnvelope(t, debian12Text(t), false))
 		fs, err := e.svc.store.SubjectFindings(context.Background(), vulnstore.Subject{Kind: vulnfinding.SubjectHost, ID: clsHost})
 		if err != nil || len(fs) != 1 {
 			t.Fatalf("findings = %d, %v; want one", len(fs), err)
@@ -834,7 +834,7 @@ func TestInventoryReadClosesNothingAtTheWriteSecondAndOfAnotherRelease(t *testin
 			t.Fatal(err)
 		}
 		svc.setCloser(e.svc.store)
-		svc.ObserveInstalled(context.Background(), clsHost, "exec-inv-4", t0.Add(time.Minute), installedEnvelope(t, debian12Text(t), false))
+		svc.ObserveInstalled(context.Background(), clsHost, "exec-inv-4", t0, t0.Add(time.Minute), installedEnvelope(t, debian12Text(t), false))
 		got, err := e.svc.store.Get(context.Background(), f.Key)
 		if err != nil {
 			t.Fatal(err)

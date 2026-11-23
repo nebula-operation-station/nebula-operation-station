@@ -29,7 +29,18 @@ const inventoryFactsAction = "core.facts"
 // factsSource is the part of executions.Service the inventory reads from.
 type factsSource interface {
 	LastResult(ctx context.Context, actionID, host string) ([]byte, time.Time, bool, error)
+	LastOSChange(ctx context.Context, host string) (time.Time, bool, error)
 }
+
+// factsWindow is how long before a list started its core.facts result may
+// have finished and still give the list's release. core.facts is its own
+// action and runs before the lists, so the result is older than the list; the
+// window is the time within which the release is taken as unchanged.
+const factsWindow = 24 * time.Hour
+
+// errListStartUnknown is returned when the start of a list is not known, so
+// its facts cannot be checked.
+var errListStartUnknown = errors.New("list start unknown")
 
 // vulnInventoryService stores each successful package.list_installed result
 // as a vulninventory read (ADR 0011 D3). It implements
@@ -72,23 +83,24 @@ const markTimeout = 5 * time.Second
 
 // ObserveInstalled parses result (untrusted host output) with
 // osdebian.ParseInstalledResult and stores the read of host from execution
-// execID at time at. The distribution comes only from the host's newest
-// successful core.facts result, and only when that result is at least as
-// recent as the list (finished at or after at); otherwise the read is stored
-// partial with vulninventory.ReasonFactsOlder. Without a facts result the
-// read is stored incomplete.
+// execID. started is when the list began on the host and at is when it
+// finished (the host's finish time). The distribution comes only from the
+// host's newest successful core.facts result, and only when that result is
+// fresh for the list (see factsFresh); otherwise the read is stored partial
+// with vulninventory.ReasonFactsOlder. Without a facts result the read is
+// stored incomplete.
 //
-// Fail closed: when the release lookup fails, the facts are older than the
-// list, or the store fails to write the read, a partial marker is stored
-// instead. The host's older complete read then stops being its latest
-// inventory. A refusal of the store (a field over its limit caused by host
-// content) gives ReasonRefused; any other store failure gives
+// Fail closed: when the release lookup fails, the list's start is unknown, the
+// facts are older than the list, or the store fails to write the read, a
+// partial marker is stored instead. The host's older complete read then stops
+// being its latest inventory. A refusal of the store (a field over its limit
+// caused by host content) gives ReasonRefused; any other store failure gives
 // ReasonStoreUnavailable. If the marker cannot be stored either, the failure
 // is only logged.
 //
 // On shutdown (parent is cancelled) nothing is written, because the server
 // is stopping and a cancelled write is not a refusal of the list.
-func (v *vulnInventoryService) ObserveInstalled(parent context.Context, hostID, execID string, at time.Time, result []byte) {
+func (v *vulnInventoryService) ObserveInstalled(parent context.Context, hostID, execID string, started, at time.Time, result []byte) {
 	ctx, cancel := context.WithTimeout(parent, observeTimeout)
 	defer cancel()
 	facts, factsAt, ok, err := v.facts.LastResult(ctx, inventoryFactsAction, hostID)
@@ -103,7 +115,16 @@ func (v *vulnInventoryService) ObserveInstalled(parent context.Context, hostID, 
 	var eco string
 	var distro vulnver.Distro
 	if ok {
-		if factsAt.Unix() < at.Unix() {
+		fresh, err := v.factsFresh(ctx, hostID, started, factsAt)
+		if err != nil {
+			if v.shutdown(parent, hostID, execID) {
+				return
+			}
+			v.log.Error("vulnerability inventory: release freshness", "host", hostID, "execution", execID, "error_class", "lookup")
+			v.markFailed(parent, hostID, execID, at, vulninventory.ReasonLookupFailed)
+			return
+		}
+		if !fresh {
 			v.markFailed(parent, hostID, execID, at, vulninventory.ReasonFactsOlder)
 			return
 		}
@@ -135,6 +156,26 @@ func (v *vulnInventoryService) ObserveInstalled(parent context.Context, hostID, 
 	}
 	v.log.Info("audit", "kind", "vuln_inventory_read_stored", "host", hostID, "execution", execID,
 		"complete", read.Complete, "binaries", binaries, "sources", len(read.Components))
+}
+
+// factsFresh reports whether a core.facts result that finished at factsAt may
+// give the release of a list that began on host at started. It is fresh when
+// it finished no earlier than factsWindow before the list started (a result
+// finished while the list ran is fresh too), and when it does not predate the
+// host's last full upgrade (the last known OS change). It returns
+// errListStartUnknown when started is the zero time. The lookups use ctx.
+func (v *vulnInventoryService) factsFresh(ctx context.Context, hostID string, started, factsAt time.Time) (bool, error) {
+	if started.IsZero() {
+		return false, errListStartUnknown
+	}
+	if factsAt.Before(started.Add(-factsWindow)) {
+		return false, nil
+	}
+	osChange, changed, err := v.facts.LastOSChange(ctx, hostID)
+	if err != nil {
+		return false, fmt.Errorf("last os change: %w", err)
+	}
+	return !changed || !factsAt.Before(osChange), nil
 }
 
 // closeByInventory closes the open findings of host that the complete read
