@@ -721,6 +721,26 @@ var guideProseDefaults = map[string]func(t *testing.T, loaded Config, row guideR
 			t.Errorf("guide 6.1 says the api default is disabled, but the minimal configuration enables it")
 		}
 	},
+	"trusted_proxies": func(t *testing.T, loaded Config, row guideRow) {
+		t.Helper()
+		guideCheckEmptyListDefault(t, "trusted_proxies", loaded.TrustedProxies, row)
+	},
+	"trusted_proxy_networks": func(t *testing.T, loaded Config, row guideRow) {
+		t.Helper()
+		guideCheckEmptyListDefault(t, "trusted_proxy_networks", loaded.TrustedProxyNetworks, row)
+	},
+}
+
+// guideCheckEmptyListDefault checks a list key whose guide default is the
+// empty list `[]`, against the loaded minimal configuration.
+func guideCheckEmptyListDefault(t *testing.T, key string, loaded []string, row guideRow) {
+	t.Helper()
+	if got, plain := row.plainDefault(); !plain || got != "[]" {
+		t.Errorf("guide 6.1 default for %s is %q, want `[]` (guide line: %s)", key, row.def(), row.line)
+	}
+	if len(loaded) != 0 {
+		t.Errorf("guide 6.1 says %s defaults to [], but the minimal configuration loads %v", key, loaded)
+	}
 }
 
 // guideCheckTrafficDefault compares the traffic row with the loader: the

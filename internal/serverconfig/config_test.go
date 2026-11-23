@@ -11,8 +11,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/clientaddr"
 )
 
 // validJSON is a minimal valid config with no listen address (so the
@@ -463,5 +466,182 @@ func TestAPIConfigValidation(t *testing.T) {
 				t.Fatalf("%q", p)
 			}
 		})
+	}
+}
+
+// trustedJSON returns validJSON with the given extra top-level members.
+func trustedJSON(extra string) []byte {
+	return []byte(strings.TrimSuffix(strings.TrimSpace(validJSON), "}") + ",\n" + extra + "\n}")
+}
+
+// jsonList renders entries as a JSON array of strings.
+func jsonList(entries []string) string {
+	q := make([]string, len(entries))
+	for i, e := range entries {
+		q[i] = fmt.Sprintf("%q", e)
+	}
+	return "[" + strings.Join(q, ",") + "]"
+}
+
+// numberedAddrs returns n distinct IPv4 addresses (n < 250).
+func numberedAddrs(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("192.0.2.%d", i+1)
+	}
+	return out
+}
+
+// numberedNets returns n distinct /24 networks (n < 250).
+func numberedNets(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("10.%d.0.0/24", i+1)
+	}
+	return out
+}
+
+// TestTrustedProxiesDefaultEmpty: without the keys no proxy is trusted, so
+// the TCP peer is the client address (fail closed, ADR 0013 D7).
+func TestTrustedProxiesDefaultEmpty(t *testing.T) {
+	cfg, err := Parse([]byte(validJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.TrustedProxies) != 0 || len(cfg.TrustedProxyNetworks) != 0 {
+		t.Fatalf("default trusted proxies = %v / %v, want empty", cfg.TrustedProxies, cfg.TrustedProxyNetworks)
+	}
+	r, err := clientaddr.New(cfg.ClientAddrConfig(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.HasTrustedProxies() {
+		t.Fatal("resolver from the default configuration trusts a proxy")
+	}
+}
+
+// TestTrustedProxiesAccepted: single addresses in every form ADR 0013 D7
+// normalises (bare, /32, /128, IPv4-mapped, with port) and proxy-only
+// networks load, and the loaded lists build the resolver unchanged.
+func TestTrustedProxiesAccepted(t *testing.T) {
+	singles := []string{"10.0.0.5", "10.0.0.6/32", "2001:db8::1/128", "::ffff:10.0.0.7", "10.0.0.8:443", "[2001:db8::2]:443"}
+	nets := []string{"172.18.0.0/16", "fd00:1::/64"}
+	cfg, err := Parse(trustedJSON(`"trusted_proxies": ` + jsonList(singles) + `, "trusted_proxy_networks": ` + jsonList(nets)))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	ac := cfg.ClientAddrConfig()
+	if !slices.Equal(ac.TrustedProxies, singles) || !slices.Equal(ac.TrustedProxyNetworks, nets) {
+		t.Fatalf("ClientAddrConfig = %v / %v, want %v / %v", ac.TrustedProxies, ac.TrustedProxyNetworks, singles, nets)
+	}
+	r, err := clientaddr.New(ac, nil)
+	if err != nil {
+		t.Fatalf("resolver refuses a configuration the loader accepted: %v", err)
+	}
+	if !r.HasTrustedProxies() {
+		t.Fatal("resolver has no trusted proxies")
+	}
+}
+
+// TestTrustedProxiesAtLimitAccepted: exactly MaxTrustedProxies entries in
+// each list load.
+func TestTrustedProxiesAtLimitAccepted(t *testing.T) {
+	doc := trustedJSON(`"trusted_proxies": ` + jsonList(numberedAddrs(MaxTrustedProxies)) +
+		`, "trusted_proxy_networks": ` + jsonList(numberedNets(MaxTrustedProxies)))
+	if _, err := Parse(doc); err != nil {
+		t.Fatalf("Parse at the limit: %v", err)
+	}
+}
+
+// TestTrustedProxiesRejections: every invalid entry stops the start, and the
+// error names the key and the entry index.
+func TestTrustedProxiesRejections(t *testing.T) {
+	cases := []struct {
+		name  string
+		extra string
+		want  []string
+	}{
+		{"proxy not an address", `"trusted_proxies": ["proxy.example.org"]`, []string{"trusted_proxies[0]", "not an IP address"}},
+		{"proxy empty", `"trusted_proxies": [""]`, []string{"trusted_proxies[0]", "not an IP address"}},
+		{"proxy is a network", `"trusted_proxies": ["10.0.0.0/24"]`, []string{"trusted_proxies[0]", "single address", "trusted_proxy_networks"}},
+		{"proxy prefix invalid", `"trusted_proxies": ["10.0.0.5/40"]`, []string{"trusted_proxies[0]", "not an IP address"}},
+		{"proxy duplicate", `"trusted_proxies": ["10.0.0.5", "10.0.0.5"]`, []string{"trusted_proxies[1]", "duplicate of trusted_proxies[0]"}},
+		{"proxy duplicate after normalisation", `"trusted_proxies": ["10.0.0.5", "::ffff:10.0.0.5"]`, []string{"trusted_proxies[1]", "duplicate of trusted_proxies[0]"}},
+		{"proxy duplicate as /32", `"trusted_proxies": ["10.0.0.5:8080", "10.0.0.5/32"]`, []string{"trusted_proxies[1]", "duplicate of trusted_proxies[0]"}},
+		{"too many proxies", `"trusted_proxies": ` + jsonList(numberedAddrs(MaxTrustedProxies+1)), []string{"trusted_proxies", fmt.Sprintf("at most %d entries", MaxTrustedProxies)}},
+		{"network is a bare address", `"trusted_proxy_networks": ["10.0.0.5"]`, []string{"trusted_proxy_networks[0]", "network prefix"}},
+		{"network not a prefix", `"trusted_proxy_networks": ["lan"]`, []string{"trusted_proxy_networks[0]", "network prefix"}},
+		{"network bits out of range", `"trusted_proxy_networks": ["10.0.0.0/33"]`, []string{"trusted_proxy_networks[0]", "network prefix"}},
+		{"network mapped prefix too short", `"trusted_proxy_networks": ["::ffff:10.0.0.0/88"]`, []string{"trusted_proxy_networks[0]", "network prefix"}},
+		{"network host bits set", `"trusted_proxy_networks": ["10.0.0.5/24"]`, []string{"trusted_proxy_networks[0]", "host bits"}},
+		{"network duplicate", `"trusted_proxy_networks": ["10.0.0.0/24", "10.0.0.0/24"]`, []string{"trusted_proxy_networks[1]", "duplicate of trusted_proxy_networks[0]"}},
+		{"network duplicate after normalisation", `"trusted_proxy_networks": ["10.0.0.0/24", "::ffff:10.0.0.0/120"]`, []string{"trusted_proxy_networks[1]", "duplicate of trusted_proxy_networks[0]"}},
+		{"too many networks", `"trusted_proxy_networks": ` + jsonList(numberedNets(MaxTrustedProxies+1)), []string{"trusted_proxy_networks", fmt.Sprintf("at most %d entries", MaxTrustedProxies)}},
+		{"network IPv4 catch-all", `"trusted_proxy_networks": ["0.0.0.0/0"]`, []string{"trusted_proxy_networks[0]", "too broad", fmt.Sprintf("/%d", MinTrustedNetworkBitsIPv4)}},
+		{"network IPv6 catch-all", `"trusted_proxy_networks": ["::/0"]`, []string{"trusted_proxy_networks[0]", "too broad", fmt.Sprintf("/%d", MinTrustedNetworkBitsIPv6)}},
+		{"network mapped catch-all", `"trusted_proxy_networks": ["::ffff:0.0.0.0/96"]`, []string{"trusted_proxy_networks[0]", "too broad"}},
+		{"network IPv4 prefix too short", `"trusted_proxy_networks": ["8.0.0.0/7"]`, []string{"trusted_proxy_networks[0]", "too broad"}},
+		{"network IPv6 prefix too short", `"trusted_proxy_networks": ["2001:d00::/31"]`, []string{"trusted_proxy_networks[0]", "too broad"}},
+		{"network IPv4 unspecified", `"trusted_proxy_networks": ["0.0.0.0/8"]`, []string{"trusted_proxy_networks[0]", "unspecified"}},
+		{"network IPv4 unspecified host", `"trusted_proxy_networks": ["0.0.0.0/32"]`, []string{"trusted_proxy_networks[0]", "unspecified"}},
+		{"network IPv6 unspecified", `"trusted_proxy_networks": ["::/128"]`, []string{"trusted_proxy_networks[0]", "unspecified"}},
+		{"network IPv4 multicast", `"trusted_proxy_networks": ["224.0.0.0/8"]`, []string{"trusted_proxy_networks[0]", "multicast"}},
+		{"network IPv6 multicast", `"trusted_proxy_networks": ["ff02::/64"]`, []string{"trusted_proxy_networks[0]", "multicast"}},
+		{"network catch-all next to a valid one", `"trusted_proxy_networks": ["172.18.0.0/16", "0.0.0.0/0"]`, []string{"trusted_proxy_networks[1]", "too broad"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Parse(trustedJSON(tc.extra))
+			if err == nil {
+				t.Fatal("Parse accepted an invalid trusted-proxy configuration")
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("error %q does not contain %q", err, w)
+				}
+			}
+		})
+	}
+}
+
+// TestTrustedNetworksAtMinimumBitsAccepted: the breadth limit is inclusive,
+// so a /8 (IPv4) or /32 (IPv6) network is still accepted.
+func TestTrustedNetworksAtMinimumBitsAccepted(t *testing.T) {
+	nets := []string{fmt.Sprintf("10.0.0.0/%d", MinTrustedNetworkBitsIPv4), fmt.Sprintf("2001:db8::/%d", MinTrustedNetworkBitsIPv6), "::ffff:11.0.0.0/104"}
+	if _, err := Parse(trustedJSON(`"trusted_proxy_networks": ` + jsonList(nets))); err != nil {
+		t.Fatalf("Parse rejected networks at the minimum prefix length: %v", err)
+	}
+}
+
+// TestTrustedProxiesWrongTypeRefused: a string instead of a list is a parse
+// error, not an empty list.
+func TestTrustedProxiesWrongTypeRefused(t *testing.T) {
+	for _, extra := range []string{`"trusted_proxies": "10.0.0.5"`, `"trusted_proxy_networks": "10.0.0.0/24"`, `"trusted_proxies": [5]`} {
+		if _, err := Parse(trustedJSON(extra)); err == nil {
+			t.Errorf("Parse accepted %s", extra)
+		}
+	}
+}
+
+// TestTrustedProxiesBothKeysReported: problems in both keys are listed at
+// once, like every other problem of the loader.
+func TestTrustedProxiesBothKeysReported(t *testing.T) {
+	_, err := Parse(trustedJSON(`"trusted_proxies": ["nope"], "trusted_proxy_networks": ["10.0.0.5"]`))
+	if err == nil {
+		t.Fatal("Parse accepted two invalid keys")
+	}
+	for _, w := range []string{"trusted_proxies[0]", "trusted_proxy_networks[0]"} {
+		if !strings.Contains(err.Error(), w) {
+			t.Errorf("error %q does not name %s", err, w)
+		}
+	}
+}
+
+// TestTrustedProxiesLoadFailsStart: Load (the server's startup path) refuses
+// a file with an invalid entry.
+func TestTrustedProxiesLoadFailsStart(t *testing.T) {
+	path := writeConfigFile(t, string(trustedJSON(`"trusted_proxies": ["10.0.0.0/8"]`)))
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "trusted_proxies[0]") {
+		t.Fatalf("Load = %v, want an error naming trusted_proxies[0]", err)
 	}
 }

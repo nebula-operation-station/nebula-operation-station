@@ -393,6 +393,8 @@ start.
 | `discovery_dir` | `/var/lib/nebula/discovery` | Discovery spool (`jobs/`, `results/`). Without the directory, discovery shows as not installed. |
 | `pve_spool_dir` | `/var/lib/nebula/pve` | Root of the PVE spool; an absolute path that must match the collector's `-spool`. The drop-in `20-discovery.conf` names the default paths, so another root needs your own directories and drop-in. |
 | `audit_hash_chain` | `false` | Chain the server's own audit lines by hash (section 10.3). |
+| `trusted_proxies` | `[]` | Reverse proxies whose `X-Forwarded-For` names the client of the enrollment routes (section 7.4). Each entry is one address: bare, `/32` or `/128`; a port, an IPv6 zone and the IPv4-mapped form are stripped. Any other prefix, a duplicate or more than 16 entries stops the start. Empty: the TCP peer is the client. |
+| `trusted_proxy_networks` | `[]` | Networks that contain reverse proxies **and no clients** (for example a container network used only by the proxy), as `address/bits` without host bits; at most 16, no duplicates. Each one is logged at startup. Never list the LAN or the NetBird range here. |
 | `traffic` | 21 days | Traffic map retention: `"traffic": {"retention_days": N}` keeps N days of flow data (1-21). A value outside the range stops the start. |
 | `notifications` | none | Providers, section 10.1. |
 | `api` | disabled | Read-only API, section 10.2. |
@@ -407,6 +409,16 @@ flag), for example
 Other `nebula-server` flags: `-version`, `-notify-test`,
 `-export-actions DIR` and `-api-token NAME:SCOPE[,SCOPE]` (sections 8.1
 and 10).
+
+Example: nginx on the same machine and a second proxy in a container
+network that holds only proxies (section 7.4):
+
+```json
+{
+  "trusted_proxies": ["127.0.0.1", "::1"],
+  "trusted_proxy_networks": ["172.18.0.0/16"]
+}
+```
 
 ### 6.2 Executor flags
 
@@ -576,13 +588,19 @@ checks that the key the host presents matches the code, and you approve the
 pin with your security key. Sections 7.1 to 7.3 stay valid for hosts you
 enroll from the command line.
 
-**Status on this release.** The dialog works, but two things are not
-complete yet:
+**Status on this release.**
 
-- The command block downloads the script from `GET /enroll/<offer-id>`. The
-  route exists in the code, but `nebula-server` does not serve it yet. Until
-  it does, the command fails with an HTTP error on the host. Use **Download
-  in browser** (below) or `nebula host enroll-script` (section 7.1).
+- `nebula-server` passes the dialog's requests on to the executor. While
+  the executor is not connected, those requests fail; nothing is created.
+- The executor installs the enrollment sources from `-enroll-source` at
+  start. Without one it refuses to create offers, and an invalid value
+  stops its start.
+- `nebula-server` serves `GET /enroll/<offer-id>` without a login, so the
+  command block downloads the script on the host. Every other page still
+  needs a login.
+- Behind a reverse proxy, list the proxy in `trusted_proxies` (section 6.1
+  and "Reverse proxy for `/enroll/`" below). Otherwise every client shares
+  the proxy's download limit and the audit record names the proxy.
 - NetBird is not offered in the dialog. NetBird for one-step offers follows
   with EN-12.
 
@@ -737,12 +755,30 @@ location /enroll/ {
   error log to `debug`.
 - **`X-Forwarded-For` is overwritten by the proxy.** `$remote_addr` replaces
   any value the client sent. Do not append to a client-supplied header.
-- **Trusted proxies.** On this release `nebula-server` has no setting for
-  trusted proxies, and it uses the TCP peer as the client address. Behind a
-  reverse proxy, all clients then share the proxy's address, and so one
-  download limit. A trusted-proxies setting follows with the route. When it
-  exists, list only single proxy addresses; a network may be listed only if
-  it contains no clients.
+- **Trusted proxies.** List the proxy in `server.json` (section 6.1), for
+  nginx on the same machine `"trusted_proxies": ["127.0.0.1"]`, and restart
+  `nebula-server`. The dialog and the download route then use the same
+  rule:
+  - From an address in `trusted_proxies` or `trusted_proxy_networks`, the
+    server reads `X-Forwarded-For` (never `Forwarded`). The rightmost entry
+    that is not a trusted proxy is the client. The download limit counts per
+    client, and the audit record `enroll_script_downloaded` names the
+    client, the proxy as peer, and that the header was used.
+  - From any other address, `X-Forwarded-For` and `Forwarded` are ignored.
+    The TCP peer is the client.
+  - A trusted proxy's request without a usable `X-Forwarded-For` (missing,
+    over 1 KiB, over 16 entries, an entry that is not an IP address, or only
+    trusted proxies) gets the uniform `404`. It charges no limit, and there
+    is no fallback to the proxy's address.
+  - Without the setting (the default), the TCP peer is the client. Behind a
+    reverse proxy, all clients then share the proxy's address and one
+    download limit; the server logs a warning at start when the listener is
+    loopback, private or a wildcard address.
+
+  List only single proxy addresses. A network belongs in
+  `trusted_proxy_networks`, and only if it contains no clients: any address
+  in either list can name any client and so use up another operator's
+  limit.
 
 For other proxies, apply the same four points (no access log for the path,
 no buffering to disk, no cache, `X-Forwarded-For` overwritten). This guide
