@@ -931,8 +931,10 @@ func TestInventoryLookupFailureMarksHostPartial(t *testing.T) {
 var hostileVersion = "1234567890:" + strings.Repeat("a", 128)
 
 // hostileText is a nos-installed-v1 text whose one package has hostileVersion.
+// It also has a base-files package of the Debian 12 release, so that the
+// release check passes and the store's refusal is what decides the read.
 func hostileText() string {
-	return "nos-installed-v1\nP\tinstalled\tlibjansson4\tamd64\t" + hostileVersion + "\tjansson\t2.14-2\t\t.\nK\t6.1.0-26-amd64\t#1 SMP\nEND\t1\n"
+	return "nos-installed-v1\nP\tinstalled\tbase-files\tamd64\t12.4+deb12u7\tbase-files\t12.4+deb12u7\t\t.\nP\tinstalled\tlibjansson4\tamd64\t" + hostileVersion + "\tjansson\t2.14-2\t\t.\nK\t6.1.0-26-amd64\t#1 SMP\nEND\t2\n"
 }
 
 // TestInventoryStoreRefusalMarksHostPartial: hostile package content that the
