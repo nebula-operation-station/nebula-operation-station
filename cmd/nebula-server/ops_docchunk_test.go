@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,6 +21,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/helpsearch"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsconfig"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/opsnotes"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
@@ -50,8 +52,9 @@ func (a docChunkAudit) WithTx(ctx context.Context,
 }
 
 // docChunkEnv is the server's ops API as newOpsAPI wires it: real notes store
-// and settings row in a temporary server.db.
-func docChunkEnv(t *testing.T) http.Handler {
+// and settings row in a temporary server.db. The store is returned so a test
+// can check what was stored.
+func docChunkEnv(t *testing.T) (http.Handler, *opsnotes.Store) {
 	t.Helper()
 	dir := t.TempDir()
 	db, err := serverdb.Open(filepath.Join(dir, "server.db"))
@@ -84,7 +87,7 @@ func docChunkEnv(t *testing.T) http.Handler {
 	if h == nil {
 		t.Fatal("newOpsAPI returned no handler for an ops token")
 	}
-	return h
+	return h, st
 }
 
 // docChunkDo sends one request with the ops token from a loopback address.
@@ -133,17 +136,88 @@ func docChunkNote(ref, digest string, citations ...string) string {
 }
 
 // TestOpsNoteRefusesCitationOutsideEmbeddedIndex checks the server end to end
-// with the real notes store and settings: a well-formed chunk ID that the
-// embedded index does not hold is refused with 422 and stores nothing. The
-// same summary without a citation is accepted (201), so the refusal is about
-// the citation alone.
+// with the real notes store and settings: a well-formed chunk ID (slug#anchor)
+// that the embedded index does not hold is refused with 422 and stores
+// nothing. The same summary without a citation is accepted (201), so the
+// refusal is about the citation alone. The 422 answer is generic; that the
+// refusal is ErrUnknownCitation is pinned by opsnotes' draft tests.
 func TestOpsNoteRefusesCitationOutsideEmbeddedIndex(t *testing.T) {
-	h := docChunkEnv(t)
+	ix, err := helpdocs.FromDocsembed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, st := docChunkEnv(t)
 	ref, digest := docChunkSummaryRef(t, h)
+	ctx := context.Background()
 
-	invented := docChunkNote(ref, digest, "handbuch:gibt-es-nicht")
+	// A real page slug with an anchor the index does not have.
+	invented := docChunkNote(ref, digest, ix.Chunks[0].Slug+"#gibt-es-nicht")
 	if code, body := docChunkDo(h, http.MethodPost, "/api/v1/ops/notes", invented); code != http.StatusUnprocessableEntity {
 		t.Fatalf("invented citation: %d %s, want 422", code, body)
+	}
+	if stored, err := st.List(ctx); err != nil || len(stored) != 0 {
+		t.Fatalf("refused citation: %d notes stored (%v), want none", len(stored), err)
+	}
+	plain := fmt.Sprintf(`{"kind":"summary","ref":%q,"digest":%q,"text":"Heute keine Auffälligkeiten."}`, ref, digest)
+	if code, body := docChunkDo(h, http.MethodPost, "/api/v1/ops/notes", plain); code != http.StatusCreated {
+		t.Fatalf("summary without citation: %d %s, want 201", code, body)
+	}
+	if stored, err := st.List(ctx); err != nil || len(stored) != 1 {
+		t.Fatalf("after the plain summary: %d notes stored (%v), want 1", len(stored), err)
+	}
+}
+
+// TestOpsNoteFailsClosedWithoutIndex covers the wiring when the embedded
+// index does not load: opsDocChunkFrom returns no check, so the ops API
+// refuses every citation with 422 and stores nothing, while a summary
+// without citations is still accepted.
+func TestOpsNoteFailsClosedWithoutIndex(t *testing.T) {
+	chunk := opsDocChunkFrom(slog.New(slog.NewTextHandler(io.Discard, nil)),
+		func() (*helpdocs.Index, error) { return nil, errors.New("index broken") })
+	if chunk != nil {
+		t.Fatal("a failed index load returned a check; citations would be accepted")
+	}
+	ix, err := helpdocs.FromDocsembed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Use the same handler wiring with the failed check as newOpsAPI would
+	// receive: a nil DocChunk means no citation is allowed.
+	dir := t.TempDir()
+	db, err := serverdb.Open(filepath.Join(dir, "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	st, err := newOpsNotes(filepath.Join(dir, "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	settings, err := opsconfig.NewStore(db, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := settings.Save(context.Background(), "admin", opsconfig.Settings{Enabled: true,
+		BaseURL: "https://192.168.10.20:8080/v1", Model: "qwen",
+		DataClass: opsconfig.DataClassLab, Language: opsconfig.LanguageDE}, 0, docChunkAudit{db: db}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := serverconfig.APIConfig{Enabled: true, Tokens: []serverconfig.APIToken{{
+		Name: serverconfig.DefaultOpsTokenName, SHA256: api.HashToken(docChunkTok),
+		Scopes: []string{serverconfig.ScopeOpsRead, serverconfig.ScopeOpsNotesWrite}}}}
+	hosts := func(context.Context) ([]inventory.Host, error) { return nil, nil }
+	h, err := newOpsAPIWithChunk(cfg, db, st, hosts, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, chunk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, digest := docChunkSummaryRef(t, h)
+	cited := docChunkNote(ref, digest, ix.Chunks[0].ID)
+	if code, body := docChunkDo(h, http.MethodPost, "/api/v1/ops/notes", cited); code != http.StatusUnprocessableEntity {
+		t.Fatalf("citation without index: %d %s, want 422", code, body)
+	}
+	if stored, err := st.List(context.Background()); err != nil || len(stored) != 0 {
+		t.Fatalf("citation without index: %d notes stored (%v), want none", len(stored), err)
 	}
 	plain := fmt.Sprintf(`{"kind":"summary","ref":%q,"digest":%q,"text":"Heute keine Auffälligkeiten."}`, ref, digest)
 	if code, body := docChunkDo(h, http.MethodPost, "/api/v1/ops/notes", plain); code != http.StatusCreated {
@@ -172,7 +246,7 @@ func TestOpsNoteAcceptsCitationOfSearchedChunk(t *testing.T) {
 	if chunkID == "" {
 		t.Fatal("the fixed search words returned no chunk; nothing to cite")
 	}
-	h := docChunkEnv(t)
+	h, _ := docChunkEnv(t)
 	ref, digest := docChunkSummaryRef(t, h)
 	cited := docChunkNote(ref, digest, chunkID)
 	if code, body := docChunkDo(h, http.MethodPost, "/api/v1/ops/notes", cited); code != http.StatusCreated {
