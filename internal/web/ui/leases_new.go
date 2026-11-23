@@ -67,6 +67,8 @@ type Leases interface {
 	ProposeProviderReadGrant(ctx context.Context, user string, in executions.ProviderReadGrantRequest) (executions.ReadGrantPreview, error)
 	ProposeProviderTelemetryGrant(ctx context.Context, user string, in executions.ProviderTelemetryGrantRequest, inv executions.TelemetryInventory) (executions.ReadGrantPreview, error)
 	CommitReadGrant(ctx context.Context, user, digest string, assertion []byte) error
+	ImageLeaseOptions(ctx context.Context, hostID string) ([]executions.ImageLeaseOption, error)
+	ProposeImageReadGrant(ctx context.Context, user string, in executions.ImageReadGrantRequest) (executions.ReadGrantPreview, error)
 }
 
 // leaseProposal is one previewed proposal, visible to its proposer only.
@@ -206,6 +208,12 @@ type leaseNewData struct {
 	// its frozen registries.
 	Registry        bool
 	RegistryTargets []leaseRegistryRow
+	// Image is set on the proposal page of an image read lease; its
+	// plain-text parameters are ImageParams (leases_image.go).
+	Image       bool
+	ImageParams []imageParamRow
+	// ImageForm is the image section of the form (leases_image.go).
+	ImageForm *imageLeaseForm
 }
 
 // leaseRefreshURL is the form URL pre-filled with a grant's scope, or ""
@@ -217,6 +225,12 @@ func leaseRefreshURL(v executions.ReadGrantView) string {
 	}
 	if v.ScopeKind == executions.ScopeProvider {
 		return providerLeaseRefreshURL(v)
+	}
+	if _, _, ok := imageLeaseOf(v.Params); ok {
+		if len(v.Hosts) != 1 {
+			return ""
+		}
+		return "/leases/new?" + url.Values{"image_host": {v.Hosts[0]}}.Encode()
 	}
 	switch v.ScopeKind {
 	case executions.ScopeAll, executions.ScopeTag, executions.ScopeEnvironment:
@@ -320,6 +334,7 @@ func (h *Handler) handleLeaseNew(w http.ResponseWriter, r *http.Request) {
 	d.ScopeOptions = h.leaseScopeOptions(ctx)
 	h.providerLeaseForm(ctx, d, q)
 	h.registryLeaseForm(ctx, d, q)
+	h.imageLeaseForm(ctx, d, q)
 	h.render(w, r, pageData{Title: "New read lease", Active: "operations", Content: "lease_new", LeaseNew: d,
 		Scripts: []string{"formpost.js"}})
 }
@@ -348,6 +363,9 @@ func (h *Handler) handleLeasePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	case ScopeRegistry:
 		h.handleRegistryLeasePreview(w, r)
+		return
+	case ScopeImage:
+		h.handleImageLeasePreview(w, r)
 		return
 	}
 	days, err := strconv.Atoi(r.PostFormValue("days"))
@@ -427,6 +445,10 @@ func (h *Handler) handleLeaseProposal(w http.ResponseWriter, r *http.Request) {
 	if v.MinInterval > 0 && v.MinInterval < time.Minute {
 		// The live interval (10 s) is below the schedule format's minute.
 		d.MinInterval = v.MinInterval.String()
+	}
+	if container, image, ok := imageLeaseOf(v.Params); ok && container != "" && image != "" {
+		d.Image, d.ImageParams = true, imageParamRows(v.Params)
+		d.MinInterval = imageIntervalText(v.MinInterval)
 	}
 	data := pageData{Title: "Approve read lease", Active: "operations", Content: "lease_new", LeaseNew: d}
 	if v.CLI {
