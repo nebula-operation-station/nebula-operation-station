@@ -209,21 +209,22 @@ maintainer confirms it.
   **Reading (Claude):** (i), because it is the literal wording. Confirm (i)
   or choose (ii). With (ii), D5's fallback to the last complete read (Q1)
   must still be settled.
-- **Q3 (E3, image subjects).** The recommendation (option 2) asked the
-  maintainer to confirm explicitly that image closures without
+- **Q3 (E3, image subjects).** **Code today (Claude, observation):** the
+  classifier returns `ClassUnconfirmed` for every non-host subject, image
+  subjects included (`cmd/nebula-server/vuln_classify.go:136`); it does not
+  hold image closures. **Question:** the recommendation (option 2) asked
+  the maintainer to confirm explicitly that image closures without
   `image.packages` are closed as `hermes_unconfirmed` (D5 table) instead of
-  held as today (section E3, "Decision needed"). The answer names only the
-  host and OS-release rules. Choose: option 2 (images `hermes_unconfirmed`)
-  or option 3 (images held). Still open after 2026-11-23 ("Q3/Q6 bleiben
-  offen"). **Code today (Claude, observation):** the classifier returns
-  `ClassUnconfirmed` for every non-host subject, image subjects included
-  (`cmd/nebula-server/vuln_classify.go:136`); it does not hold image
-  closures. **Interim rule (Claude, Vorschlag bis Q3 entschieden ist):**
-  image closures stay held (fail-closed) until Q3 is decided; this is not a
-  decision (previously: "Until then the code keeps holding them", stated as
-  fact). Open for the maintainer: confirm this interim rule, and if so,
-  whether the code must be brought back to holding image closures before Q3
-  is decided.
+  held (section E3, "Decision needed"; previously: "instead of held as
+  today", which contradicts the code observation above). The answer names
+  only the host and OS-release rules. Choose: option 2 (images
+  `hermes_unconfirmed`) or option 3 (images held). Still open after
+  2026-11-23 ("Q3/Q6 bleiben offen"). **(Claude, Vorschlag)** image
+  closures stay held (fail-closed) until Q3 is decided; this is a proposal,
+  not a decision (previously: "Until then the code keeps holding them",
+  stated as fact). Open for the maintainer: confirm this interim rule, and
+  if so, whether the code must be brought back to holding image closures
+  before Q3 is decided.
 - **Q4 (E4 (a), image freshness): answered 2026-11-23**, option 3; see
   "Decision (2026-11-23)" and the ADR 0011 amendment of that date
   (previously: options 1–3 in E4 not answered; the recommendation was
