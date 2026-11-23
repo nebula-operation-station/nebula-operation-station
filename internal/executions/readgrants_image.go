@@ -75,6 +75,9 @@ type ImageReadGrantRequest struct {
 // ImageLeaseInspectMaxAge ago, name, newest first. A result that does not
 // parse, is not a finished inspect or names no valid image is skipped.
 func (s *Service) ImageLeaseOptions(ctx context.Context, hostID string) ([]ImageLeaseOption, error) {
+	if s.db == nil {
+		return nil, errors.New("image lease options: no database")
+	}
 	now := s.now()
 	rows, err := s.db.QueryContext(ctx, imageLeaseInspectQuery, hostID,
 		now.Add(-ImageLeaseInspectMaxAge).Unix(), now.Unix(), imageLeaseInspectAction, hostrun.MaxResult, maxImageLeaseInspectRows)
@@ -305,6 +308,9 @@ func (s *Service) storeImageParams(ctx context.Context, grant string, now time.T
 // ParametersHash of the same action in the grant's document; views[i] and
 // grants[i] are the same grant.
 func (s *Service) attachImageParams(ctx context.Context, views []ReadGrantView, grants []*pb.ReadGrant) {
+	if s.db == nil {
+		return
+	}
 	for i, g := range grants {
 		if i >= len(views) || views[i].ID == "" {
 			continue
