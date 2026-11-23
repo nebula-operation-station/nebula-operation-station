@@ -28,8 +28,24 @@ const inventoryFactsAction = "core.facts"
 
 // factsSource is the part of executions.Service the inventory reads from.
 type factsSource interface {
-	LastResult(ctx context.Context, actionID, host string) ([]byte, time.Time, bool, error)
+	LastResultRun(ctx context.Context, actionID, host string) (result []byte, started, finished time.Time, ok bool, err error)
+	LastOSChange(ctx context.Context, host string) (time.Time, bool, error)
+	UpgradeOverlaps(ctx context.Context, host string, from, to time.Time) (bool, error)
 }
+
+// factsWindow is how long before a list started its core.facts result may
+// have finished and still give the list's release. core.facts is its own
+// action and runs before the lists, so the result is older than the list; the
+// window is the time within which the release is taken as unchanged.
+//
+// Known gap: a release upgrade that NOS did not run (no package.install_all
+// on the host) is not seen by the OS-change check, so facts from before it
+// still count within this window and the list is matched to the old release.
+const factsWindow = 24 * time.Hour
+
+// errStartUnknown is returned when the start of the list or of its core.facts
+// run is not known, so the facts cannot be checked (fail closed).
+var errStartUnknown = errors.New("run start unknown")
 
 // vulnInventoryService stores each successful package.list_installed result
 // as a vulninventory read (ADR 0011 D3). It implements
@@ -72,26 +88,27 @@ const markTimeout = 5 * time.Second
 
 // ObserveInstalled parses result (untrusted host output) with
 // osdebian.ParseInstalledResult and stores the read of host from execution
-// execID at time at. The distribution comes only from the host's newest
-// successful core.facts result, and only when that result is at least as
-// recent as the list (finished at or after at); otherwise the read is stored
-// partial with vulninventory.ReasonFactsOlder. Without a facts result the
-// read is stored incomplete.
+// execID. started is when the list began on the host and at is when it
+// finished (the host's finish time). The distribution comes only from the
+// host's newest successful core.facts result, and only when that result is
+// fresh for the list (see factsFresh); otherwise the read is stored partial
+// with vulninventory.ReasonFactsOlder. Without a facts result the read is
+// stored incomplete.
 //
-// Fail closed: when the release lookup fails, the facts are older than the
-// list, or the store fails to write the read, a partial marker is stored
-// instead. The host's older complete read then stops being its latest
-// inventory. A refusal of the store (a field over its limit caused by host
-// content) gives ReasonRefused; any other store failure gives
+// Fail closed: when the release lookup fails, the list's start is unknown, the
+// facts are older than the list, or the store fails to write the read, a
+// partial marker is stored instead. The host's older complete read then stops
+// being its latest inventory. A refusal of the store (a field over its limit
+// caused by host content) gives ReasonRefused; any other store failure gives
 // ReasonStoreUnavailable. If the marker cannot be stored either, the failure
 // is only logged.
 //
 // On shutdown (parent is cancelled) nothing is written, because the server
 // is stopping and a cancelled write is not a refusal of the list.
-func (v *vulnInventoryService) ObserveInstalled(parent context.Context, hostID, execID string, at time.Time, result []byte) {
+func (v *vulnInventoryService) ObserveInstalled(parent context.Context, hostID, execID string, started, at time.Time, result []byte) {
 	ctx, cancel := context.WithTimeout(parent, observeTimeout)
 	defer cancel()
-	facts, factsAt, ok, err := v.facts.LastResult(ctx, inventoryFactsAction, hostID)
+	facts, factsStarted, factsAt, ok, err := v.facts.LastResultRun(ctx, inventoryFactsAction, hostID)
 	if err != nil {
 		if v.shutdown(parent, hostID, execID) {
 			return
@@ -103,8 +120,17 @@ func (v *vulnInventoryService) ObserveInstalled(parent context.Context, hostID, 
 	var eco string
 	var distro vulnver.Distro
 	if ok {
-		if factsAt.Unix() < at.Unix() {
-			v.markFailed(parent, hostID, execID, at, vulninventory.ReasonFactsOlder)
+		stale, err := v.factsStale(ctx, hostID, started, at, factsStarted, factsAt)
+		if err != nil {
+			if v.shutdown(parent, hostID, execID) {
+				return
+			}
+			v.log.Error("vulnerability inventory: release freshness", "host", hostID, "execution", execID, "error_class", "lookup")
+			v.markFailed(parent, hostID, execID, at, vulninventory.ReasonLookupFailed)
+			return
+		}
+		if stale != "" {
+			v.markFailed(parent, hostID, execID, at, stale)
 			return
 		}
 		if id, ver, code, readable := executions.OSRelease(facts); readable {
@@ -135,6 +161,57 @@ func (v *vulnInventoryService) ObserveInstalled(parent context.Context, hostID, 
 	}
 	v.log.Info("audit", "kind", "vuln_inventory_read_stored", "host", hostID, "execution", execID,
 		"complete", read.Complete, "binaries", binaries, "sources", len(read.Components))
+}
+
+// factsStale returns the reason a core.facts result may not give the release
+// of a list, or "" when it may. The list began on host at started and finished
+// at finished; the result started at factsStarted and finished at factsAt. The
+// rules, checked in this order (fail closed; a tie in time counts as stale):
+//   - the result finished no earlier than factsWindow before the list started
+//     (ReasonFactsOlder). A result that finished while the list ran is not
+//     older. The window is a documented policy, see factsWindow;
+//   - the result STARTED strictly after the host's last full upgrade that ran
+//     finished (ReasonFactsBeforeUpgrade). A result that started before the
+//     upgrade ended may have read os-release before the upgrade wrote it, even
+//     when it finished after it;
+//   - no full upgrade that ran overlaps the result (ReasonUpgradeOverlaps): it
+//     started no later than the result finished, and it is still running or
+//     finished no earlier than the result started;
+//   - no full upgrade that ran overlaps the list (ReasonUpgradeOverlaps), so
+//     the list did not read a release that changed while it ran.
+//
+// The overlap checks use inclusive bounds, so an upgrade that ends exactly
+// when the result starts counts as overlapping. Both starts must be known:
+// otherwise it returns errStartUnknown. The lookups use ctx.
+func (v *vulnInventoryService) factsStale(ctx context.Context, hostID string, started, finished, factsStarted, factsAt time.Time) (string, error) {
+	if started.IsZero() || factsStarted.IsZero() {
+		return "", errStartUnknown
+	}
+	if factsAt.Before(started.Add(-factsWindow)) {
+		return vulninventory.ReasonFactsOlder, nil
+	}
+	osChange, changed, err := v.facts.LastOSChange(ctx, hostID)
+	if err != nil {
+		return "", fmt.Errorf("last os change: %w", err)
+	}
+	if changed && !factsStarted.After(osChange) {
+		return vulninventory.ReasonFactsBeforeUpgrade, nil
+	}
+	overlapsFacts, err := v.facts.UpgradeOverlaps(ctx, hostID, factsStarted, factsAt)
+	if err != nil {
+		return "", fmt.Errorf("upgrade overlaps facts: %w", err)
+	}
+	if overlapsFacts {
+		return vulninventory.ReasonUpgradeOverlaps, nil
+	}
+	overlapsList, err := v.facts.UpgradeOverlaps(ctx, hostID, started, finished)
+	if err != nil {
+		return "", fmt.Errorf("upgrade overlaps list: %w", err)
+	}
+	if overlapsList {
+		return vulninventory.ReasonUpgradeOverlaps, nil
+	}
+	return "", nil
 }
 
 // closeByInventory closes the open findings of host that the complete read
