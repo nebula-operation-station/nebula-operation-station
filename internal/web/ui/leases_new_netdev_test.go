@@ -22,6 +22,16 @@ func netDevicePreview(devices ...executions.ReadGrantPreviewNetDevice) execution
 	return v
 }
 
+// netDeviceWebAuthnPreview is a device read lease preview of two devices that
+// the executor answers with WebAuthn assertion options (CLI=false): the case
+// the browser gate exists for, not the hardened-mode CLI case.
+func netDeviceWebAuthnPreview(devices ...executions.ReadGrantPreviewNetDevice) executions.ReadGrantPreview {
+	v := netDevicePreview(devices...)
+	v.CLI = false
+	v.Options = []byte(`{"publicKey":{"challenge":"abc"}}`)
+	return v
+}
+
 func twoNetDevices() []executions.ReadGrantPreviewNetDevice {
 	return []executions.ReadGrantPreviewNetDevice{
 		{DeviceID: "sw-1", TrustPin: "SHA256:pinone", TrustGeneration: 1, CredentialVersion: 3, Reads: []string{"cbs_lldp", "cbs_version"}},
@@ -78,18 +88,51 @@ func TestNetDevicePreviewOffersNoBrowserApproval(t *testing.T) {
 	}
 }
 
-// TestNetDeviceCommitIsRefused pins that a browser commit of a device lease
-// is refused before the executor is asked to commit it.
-func TestNetDeviceCommitIsRefused(t *testing.T) {
-	f := &fakeLeases{preview: netDevicePreview(twoNetDevices()...)}
-	h := leaseNewHandler(t, f, nil)
-	previewThrough(t, h)
-	code, body := postLeaseJSON(t, h, "/leases/commit", `{"id":"`+leaseDigest+`","assertion":{"id":"cred"}}`)
-	if code != http.StatusBadRequest || !strings.Contains(body, "CLI") {
-		t.Fatalf("browser commit of a device lease = %d %s, want 400 naming the CLI", code, body)
+// TestNetDevicePreviewWithWebAuthnOptionsOffersNoBrowserApproval pins that a
+// device lease the executor answers with WebAuthn options still shows only the
+// CLI command: no security key button, no WebAuthn or schedule scripts, and
+// the options are not rendered into the page.
+func TestNetDevicePreviewWithWebAuthnOptionsOffersNoBrowserApproval(t *testing.T) {
+	page := previewThrough(t, leaseNewHandler(t, &fakeLeases{preview: netDeviceWebAuthnPreview(twoNetDevices()...)}, nil))
+	m := regexp.MustCompile(`<pre class="mono" id="lease-cli">([^<]*)</pre>`).FindStringSubmatch(page)
+	if m == nil || !strings.HasPrefix(m[1], "nebula read-grant approve ") {
+		t.Fatalf("device preview misses the CLI approval command: %q", m)
 	}
-	if len(f.committed) != 0 {
-		t.Fatalf("device lease reached the executor's commit: %v", f.committed)
+	for _, never := range []string{
+		"schedule-approve", "Approve with security key", "data-commit=", "data-options=",
+		"/static/webauthn.js", "/static/schedules.js", `"challenge":"abc"`,
+	} {
+		if strings.Contains(page, never) {
+			t.Errorf("device preview with WebAuthn options shows %q", never)
+		}
+	}
+}
+
+// TestNetDeviceCommitIsRefused pins that a browser commit of a device lease is
+// refused by the device guard before the executor is asked to commit it. It
+// runs for a CLI answer and for a WebAuthn answer; the WebAuthn case is the one
+// only the device guard blocks (the p.preview.CLI 404 path does not apply).
+func TestNetDeviceCommitIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		preview executions.ReadGrantPreview
+	}{
+		{"cli answer", netDevicePreview(twoNetDevices()...)},
+		{"webauthn answer", netDeviceWebAuthnPreview(twoNetDevices()...)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &fakeLeases{preview: tc.preview}
+			h := leaseNewHandler(t, f, nil)
+			previewThrough(t, h)
+			code, body := postLeaseJSON(t, h, "/leases/commit", `{"id":"`+leaseDigest+`","assertion":{"id":"cred"}}`)
+			const want = "a device read lease is approved on the CLI, not in the browser"
+			if code != http.StatusBadRequest || !strings.Contains(body, want) {
+				t.Fatalf("browser commit of a device lease = %d %s, want 400 from the device guard", code, body)
+			}
+			if len(f.committed) != 0 {
+				t.Fatalf("device lease reached the executor's commit: %v", f.committed)
+			}
+		})
 	}
 }
 
