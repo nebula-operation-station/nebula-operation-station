@@ -30,6 +30,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulninventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnnotify"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
@@ -89,10 +90,34 @@ func (s *vtSink) waitKind(t *testing.T, kind string) notify.Event {
 type vtClock struct {
 	mu sync.Mutex
 	t  time.Time
+	// follow is set by followReal: Now then runs with the real clock from
+	// that moment on, so it agrees with the package clock of
+	// vulninventory (which stamps TakenAt and checks read times with the
+	// real clock).
+	follow  bool
+	started time.Time
 }
 
-func (c *vtClock) Now() time.Time      { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
+func (c *vtClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.follow {
+		return c.t.Add(time.Since(c.started))
+	}
+	return c.t
+}
+
 func (c *vtClock) Add(d time.Duration) { c.mu.Lock(); c.t = c.t.Add(d); c.mu.Unlock() }
+
+// followReal makes the clock run with the real clock from now on, and
+// Add still moves it. The start is exact (not truncated), so the clock is
+// never behind a real time the package clock stamps later.
+func (c *vtClock) followReal() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := time.Now()
+	c.t, c.started, c.follow = now, now, true
+}
 
 // vtInventory serves one snapshot with host web01.
 type vtInventory struct{ at time.Time }
@@ -288,24 +313,29 @@ func TestVulnAgentAPINotMountedWithoutVulnToken(t *testing.T) {
 }
 
 func TestVulnInventorySnapshotIsStableAndExpires(t *testing.T) {
-	clk := &vtClock{t: time.Date(2026, 11, 9, 12, 30, 0, 0, time.UTC)}
-	inv := vulnInventory{now: clk.Now}
-	cur, err := inv.VulnSnapshot(context.Background(), "")
-	if err != nil || len(cur.Subjects) != 0 || !cur.TakenAt.Equal(time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)) {
-		t.Fatalf("current snapshot = %+v, %v; want empty, taken at the hour", cur, err)
+	e := newSrcEnv(t)
+	e.addHost(t, srcHost)
+	e.addRead(t, srcRead(srcHost, "exec-1", e.clk.Now().Add(-time.Minute), true, "openssl"))
+	ctx := context.Background()
+	cur, err := e.inv.VulnSnapshot(ctx, "")
+	if err != nil || len(cur.Subjects) != 1 {
+		t.Fatalf("current snapshot = %+v, %v; want the stored host", cur, err)
 	}
-	clk.Add(3 * time.Hour)
-	again, err := inv.VulnSnapshot(context.Background(), cur.ID)
-	if err != nil || again.ID != cur.ID || again.Generation != cur.Generation || !again.TakenAt.Equal(cur.TakenAt) {
+	if hour := e.clk.Now().Truncate(time.Hour).Unix() / int64(time.Hour/time.Second); cur.Generation <= hour {
+		t.Fatalf("generation %d, want it above the hour value %d", cur.Generation, hour)
+	}
+	e.clk.Add(3 * time.Hour)
+	again, err := e.inv.VulnSnapshot(ctx, cur.ID)
+	if err != nil || again.ID != cur.ID || again.Generation != cur.Generation || !again.TakenAt.Equal(cur.TakenAt) || len(again.Subjects) != 1 {
 		t.Fatalf("snapshot by ID = %+v, %v; want the same snapshot", again, err)
 	}
-	now, _ := inv.VulnSnapshot(context.Background(), "")
-	if now.Generation <= cur.Generation {
-		t.Fatalf("generation %d after %d, want it to rise", now.Generation, cur.Generation)
+	now, err := e.inv.VulnSnapshot(ctx, "")
+	if err != nil || now.Generation <= cur.Generation {
+		t.Fatalf("generation %d after %d (%v), want it to rise", now.Generation, cur.Generation, err)
 	}
-	clk.Add(vulnstore.MaxInventoryAge)
-	for _, id := range []string{cur.ID, "nos-empty-x", "other", vulnSnapshotPrefix + "1"} {
-		if _, err := inv.VulnSnapshot(context.Background(), id); !errors.Is(err, api.ErrVulnSnapshotGone) {
+	e.clk.Add(vulnstore.MaxInventoryAge)
+	for _, id := range []string{cur.ID, "nos-empty-1784000000", "other"} {
+		if _, err := e.inv.VulnSnapshot(ctx, id); !errors.Is(err, api.ErrVulnSnapshotGone) {
 			t.Fatalf("snapshot %q: err = %v, want ErrVulnSnapshotGone", id, err)
 		}
 	}
@@ -671,5 +701,162 @@ func TestVulnPagesReadTheRealStoreAndRefuseDecisions(t *testing.T) {
 	}
 	if err := p.CommitVulnDecision(ctx, "alice", "c", ui.VulnDecision{}, nil); !errors.Is(err, errVulnDecisionsUnavailable) {
 		t.Fatalf("commit decision err = %v", err)
+	}
+}
+
+// TestVulnServiceSnapshotStoreUsesInjectedClock: the snapshot store that
+// newVulnService opens takes its TakenAt and its prune cutoff from the injected
+// clock, not the wall clock. The clock is set a thousand days ahead of the wall
+// clock, so a store on the wall clock would stamp a different TakenAt and would
+// not prune the snapshot by the injected cutoff.
+func TestVulnServiceSnapshotStoreUsesInjectedClock(t *testing.T) {
+	db, err := serverdb.Open(filepath.Join(t.TempDir(), "server.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	clk := &vtClock{t: time.Now().UTC().Add(1000 * 24 * time.Hour).Truncate(time.Second)}
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc, err := newVulnService(db, newVTSink(), log, clk.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	first, err := svc.inventory.Current(ctx, nil, 0, vulninventory.FixedFloor(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := clk.Now().Unix(); first.TakenAt.Unix() != want {
+		t.Fatalf("TakenAt = %s, want the injected clock %s", first.TakenAt, clk.Now())
+	}
+	clk.Add(vulnstore.MaxInventoryAge + time.Hour)
+	second, err := svc.inventory.Current(ctx, nil, 0, vulninventory.FixedFloor(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if second.Generation <= first.Generation {
+		t.Fatalf("generation %d after %d: want a new snapshot", second.Generation, first.Generation)
+	}
+	if err := svc.sweepSnapshots(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.inventory.Snapshot(ctx, first.ID); !errors.Is(err, vulninventory.ErrSnapshotGone) {
+		t.Fatalf("snapshot older than MaxInventoryAge on the injected clock: err = %v, want ErrSnapshotGone (pruned)", err)
+	}
+	if _, err := svc.inventory.Snapshot(ctx, second.ID); err != nil {
+		t.Fatalf("newest snapshot after the sweep: %v", err)
+	}
+}
+
+// TestVulnSubjectInventoryFromStoredRead checks that the subject page gets the
+// host's package inventory (ADR 0011 D8) from its newest stored read: time,
+// completeness, counts and the running kernel.
+func TestVulnSubjectInventoryFromStoredRead(t *testing.T) {
+	e := newVTEnv(t)
+	ctx := context.Background()
+	s := vulnstore.Subject{Kind: vulnfinding.SubjectHost, ID: clsHost}
+	p := vulnPages{v: e.svc, admin: func(context.Context) bool { return false }}
+	at := e.clk.Now().Add(-time.Hour)
+
+	// No read stored: nil, not an empty "complete" inventory.
+	page, err := p.VulnFindings(ctx, ui.VulnQuery{Subject: &s, Limit: ui.MaxVulnRows})
+	if err != nil || len(page.Subjects) != 1 || page.Subjects[0].Inventory != nil {
+		t.Fatalf("no read: subjects = %+v, %v; want one subject without inventory", page.Subjects, err)
+	}
+
+	clsPut(t, e, clsRead("r1", at, true, clsKernel("6.1.119-1"), clsComp("openssl", "3.0.11-1"), clsComp("zlib", "1.2.13")))
+	page, err = p.VulnFindings(ctx, ui.VulnQuery{Subject: &s, Limit: ui.MaxVulnRows})
+	if err != nil || len(page.Subjects) != 1 || page.Subjects[0].Inventory == nil {
+		t.Fatalf("complete read: subjects = %+v, %v", page.Subjects, err)
+	}
+	inv := page.Subjects[0].Inventory
+	if !inv.ReadAt.Equal(at) || !inv.Complete || inv.Sources != 2 || inv.Binaries != 2 || inv.Unavailable ||
+		inv.KernelRelease != "6.1.0-28-amd64" || !inv.KernelMapped {
+		t.Errorf("complete read inventory = %+v", inv)
+	}
+	one, err := p.subject(ctx, s)
+	if err != nil || one.Inventory == nil || one.Inventory.Sources != 2 {
+		t.Errorf("subject() inventory = %+v, %v; want the same counts", one.Inventory, err)
+	}
+
+	// The newest read decides: a later partial read is what the page shows.
+	clsPut(t, e, clsRead("r2", at.Add(time.Minute), false, clsUnmappedKernel, clsComp("openssl", "3.0.11-1")))
+	page, err = p.VulnFindings(ctx, ui.VulnQuery{Subject: &s, Limit: ui.MaxVulnRows})
+	if err != nil || page.Subjects[0].Inventory == nil || page.Subjects[0].Inventory.Complete ||
+		page.Subjects[0].Inventory.Reason != vulninventory.ReasonIncomplete || page.Subjects[0].Inventory.KernelMapped {
+		t.Errorf("partial read inventory = %+v, %v", page.Subjects[0].Inventory, err)
+	}
+}
+
+// TestVulnInventoryReadFailureIsUnavailable checks that a failing inventory
+// read is reported as unavailable on the page, not as "no read stored" and
+// not as an error of the whole page.
+func TestVulnInventoryReadFailureIsUnavailable(t *testing.T) {
+	e := newVTEnv(t)
+	ctx := context.Background()
+	s := vulnstore.Subject{Kind: vulnfinding.SubjectHost, ID: clsHost}
+	clsPut(t, e, clsRead("r1", e.clk.Now().Add(-time.Hour), true, clsKernel("6.1.119-1"), clsComp("openssl", "3.0.11-1")))
+	if _, err := e.db.ExecContext(ctx, `DROP TABLE vuln_inventory_reads`); err != nil {
+		t.Fatal(err)
+	}
+	p := vulnPages{v: e.svc, admin: func(context.Context) bool { return false }}
+	page, err := p.VulnFindings(ctx, ui.VulnQuery{Subject: &s, Limit: ui.MaxVulnRows})
+	if err != nil {
+		t.Fatalf("VulnFindings = %v; a failed inventory read must not fail the page", err)
+	}
+	if len(page.Subjects) != 1 || page.Subjects[0].Inventory == nil || !page.Subjects[0].Inventory.Unavailable {
+		t.Fatalf("subjects = %+v, want an unavailable inventory", page.Subjects)
+	}
+}
+
+// TestVulnHostInventoriesKeysEveryHost checks the list-page read: every host
+// subject gets an entry, nil when no read is stored, and non-host subjects
+// never get one.
+func TestVulnHostInventoriesKeysEveryHost(t *testing.T) {
+	e := newVTEnv(t)
+	clsPut(t, e, clsRead("r1", e.clk.Now().Add(-time.Hour), true, clsKernel("6.1.119-1"), clsComp("openssl", "3.0.11-1")))
+	p := vulnPages{v: e.svc}
+	subjects := []vulnstore.Subject{
+		{Kind: vulnfinding.SubjectHost, ID: clsHost},
+		{Kind: vulnfinding.SubjectHost, ID: "ghost"},
+		{Kind: vulnfinding.SubjectDevice, ID: clsHost},
+	}
+	inv := p.hostInventories(context.Background(), subjects)
+	// LatestAll loads no components, so the counts are not checked here.
+	if got := inv[clsHost]; got == nil || !got.Complete || !got.KernelMapped {
+		t.Errorf("stored host inventory = %+v", got)
+	}
+	if st, ok := inv["ghost"]; !ok || st != nil {
+		t.Errorf("host without a read: entry %v, present %v; want nil and present", st, ok)
+	}
+	if hostInventory(subjects[2], inv) != nil {
+		t.Error("device subject got a host inventory")
+	}
+}
+
+// TestVulnHostInventoriesTruncatedListIsUnavailable checks the list-page
+// merge of a LatestAll result: when LatestAll was cut at its host limit, a
+// host without a read in the result may be past the cut, so its inventory is
+// Unavailable (unknown), never nil ("none stored"). Untruncated, a missing
+// host has no read stored.
+func TestVulnHostInventoriesTruncatedListIsUnavailable(t *testing.T) {
+	at := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	reads := []vulninventory.Read{{HostID: "alpha", ReadAt: at, Complete: true, Kernel: clsKernel("6.1.119-1")}}
+	hosts := []string{"alpha", "zulu"}
+
+	cut := mergeInventories(hosts, reads, true)
+	if got := cut["alpha"]; got == nil || got.Unavailable || !got.Complete || !got.ReadAt.Equal(at) {
+		t.Errorf("truncated: host in the result = %+v, want its read", got)
+	}
+	if got, ok := cut["zulu"]; !ok || got == nil || !got.Unavailable {
+		t.Errorf("truncated: host past the cut = %+v (present %v), want Unavailable", got, ok)
+	}
+
+	whole := mergeInventories(hosts, reads, false)
+	if got, ok := whole["zulu"]; !ok || got != nil {
+		t.Errorf("untruncated: host without a read = %+v (present %v), want nil", got, ok)
+	}
+	if got := whole["alpha"]; got == nil || got.Unavailable {
+		t.Errorf("untruncated: host in the result = %+v, want its read", got)
 	}
 }

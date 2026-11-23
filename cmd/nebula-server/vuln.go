@@ -21,15 +21,15 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/osdebian"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulninventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnnotify"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnprio"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
@@ -122,55 +122,18 @@ func vulnTier(_ vulnstore.Subject, r vulnfinding.Record) vulnstore.Tier {
 	return vulnstore.TierUnknown
 }
 
-// errVulnNotCheckable: NOS keeps no package inventory the classifier
-// could compare against yet.
-var errVulnNotCheckable = errors.New("no NOS package inventory to classify against")
-
-// vulnClassifier fails closed: until NOS stores the package inventory
-// (package.list_installed, image.packages) every requested run closure is
-// held for an admin (vulnstore.HoldClassifyFailed), never closed on
-// Hermes' word alone.
-type vulnClassifier struct{}
-
-func (vulnClassifier) Classify(context.Context, vulnstore.Finding) (vulnstore.Class, error) {
-	return 0, errVulnNotCheckable
-}
-
-// vulnInventory serves the D3 inventory export. NOS does not store the
-// parsed package lists yet, so every snapshot is empty: Hermes can cover
-// no subject, so no run requests a closure. The snapshot ID names its
-// hour, so a snapshot is immutable for its ID, the generation only rises,
-// and a run start within vulnstore.MaxInventoryAge finds it again.
-type vulnInventory struct {
-	now func() time.Time
-}
-
-const vulnSnapshotPrefix = "nos-empty-"
-
-func (v vulnInventory) VulnSnapshot(_ context.Context, id string) (api.VulnSnapshot, error) {
-	bucket := v.now().UTC().Truncate(vulnInventoryBucket)
-	if id != "" {
-		n, err := strconv.ParseInt(strings.TrimPrefix(id, vulnSnapshotPrefix), 10, 64)
-		if err != nil || !strings.HasPrefix(id, vulnSnapshotPrefix) || n <= 0 {
-			return api.VulnSnapshot{}, api.ErrVulnSnapshotGone
-		}
-		at := time.Unix(n, 0).UTC()
-		if at.After(bucket) || bucket.Sub(at) > vulnstore.MaxInventoryAge || !at.Equal(at.Truncate(vulnInventoryBucket)) {
-			return api.VulnSnapshot{}, api.ErrVulnSnapshotGone
-		}
-		bucket = at
-	}
-	return api.VulnSnapshot{ID: vulnSnapshotPrefix + strconv.FormatInt(bucket.Unix(), 10),
-		Generation: bucket.Unix() / int64(vulnInventoryBucket/time.Second), TakenAt: bucket}, nil
-}
-
 // vulnService holds the findings store and the notifier and runs the
 // background work: run events, sweeps and notification ticks.
 type vulnService struct {
-	store    *vulnstore.Store
-	notifier *vulnnotify.Notifier
-	log      *slog.Logger
-	events   chan func(context.Context)
+	store *vulnstore.Store
+	// classifier judges run closures against the stored inventory (D5).
+	classifier vulnClassifier
+	// inventory holds the snapshots the export serves; its snapshots are
+	// pruned by the sweep (sweepSnapshots).
+	inventory *vulninventory.Store
+	notifier  *vulnnotify.Notifier
+	log       *slog.Logger
+	events    chan func(context.Context)
 	// statePath is the file keeping the delivered staleness alerts
 	// (vulnNotifyStateFile); empty keeps them in memory only.
 	statePath string
@@ -193,7 +156,14 @@ func newVulnService(db *sql.DB, sink vulnnotify.Sink, log *slog.Logger, now func
 	if now == nil {
 		now = time.Now
 	}
-	st, err := vulnstore.New(db, vulnstore.Config{Sources: vulnSources, Tier: vulnTier, Classifier: vulnClassifier{}, Now: now})
+	// The snapshot store shares the injected clock: TakenAt and the prune
+	// cutoff of sweepSnapshots are judged with the same now as the rest.
+	inv, err := vulninventory.NewWithNow(db, now)
+	if err != nil {
+		return nil, fmt.Errorf("vulnerability inventory: %w", err)
+	}
+	cl := vulnClassifier{inv: inv}
+	st, err := vulnstore.New(db, vulnstore.Config{Sources: vulnSources, Tier: vulnTier, Classifier: cl, Now: now})
 	if err != nil {
 		return nil, fmt.Errorf("vulnerability store: %w", err)
 	}
@@ -201,7 +171,7 @@ func newVulnService(db *sql.DB, sink vulnnotify.Sink, log *slog.Logger, now func
 	if err != nil {
 		return nil, fmt.Errorf("vulnerability notifications: %w", err)
 	}
-	return &vulnService{store: st, notifier: n, log: log, events: make(chan func(context.Context), vulnEventQueue),
+	return &vulnService{store: st, classifier: cl, inventory: inv, notifier: n, log: log, events: make(chan func(context.Context), vulnEventQueue),
 		alertQueued: map[string]bool{}}, nil
 }
 
@@ -490,6 +460,11 @@ func (v *vulnService) runSweeps(ctx context.Context, interval time.Duration) {
 		}
 		sctx, cancel := context.WithTimeout(ctx, vulnSweepTimeout)
 		res, err := v.store.Prune(sctx)
+		// Snapshots are pruned after the findings. This sweep deletes no
+		// inventory read, so no snapshot is left pointing at a deleted read.
+		if serr := v.sweepSnapshots(sctx); serr != nil {
+			v.log.Error("vulnerability inventory: prune snapshots", "error", serr)
+		}
 		cancel()
 		attrs := []any{"resumed", res.ResumedRuns, "aborted", res.AbortedRuns, "deleted_findings", res.DeletedFindings,
 			"cleared_assessment", res.ClearedAssessment, "deleted_runs", res.DeletedRuns, "deleted_history", res.DeletedHistory}
@@ -606,10 +581,29 @@ func (p vulnPages) feeds(ctx context.Context) ([]ui.VulnFeedStatus, error) {
 	}
 	out := make([]ui.VulnFeedStatus, len(st))
 	for i, s := range st {
-		out[i] = ui.VulnFeedStatus{SourceID: s.SourceID, Listed: true, Stale: s.Stale, SnapshotDate: s.ContentDate,
-			LastVerdict: s.LastVerdict, Probation: s.Probation, PreResetDate: s.PreResetDate, PreResetSeq: s.PreResetSeq}
+		out[i] = uiFeedStatus(s)
 	}
 	return out, nil
+}
+
+// optionalVulnSources are the listed sources the vulnerability agent loads
+// only when an operator configures them (the CSAF providers, see
+// cmd/nebula-vuln-agent/config.go). Only these can be left out on purpose.
+var optionalVulnSources = map[string]bool{
+	"cisco-csaf":    true,
+	"paloalto-csaf": true,
+}
+
+// uiFeedStatus is the page view of one listed source. An optional source no
+// run has named (not seen) is Unseen: the operator has not configured it, so
+// the pages show a neutral note and its stale flag is dropped. Any other
+// source keeps its stale flag: a required feed that has not synced is a
+// real gap, not a choice.
+func uiFeedStatus(s vulnstore.FeedState) ui.VulnFeedStatus {
+	unseen := !s.Seen && optionalVulnSources[s.SourceID]
+	return ui.VulnFeedStatus{SourceID: s.SourceID, Listed: true, Unseen: unseen, Stale: s.Stale && !unseen,
+		SnapshotDate: s.ContentDate, LastVerdict: s.LastVerdict, Probation: s.Probation,
+		PreResetDate: s.PreResetDate, PreResetSeq: s.PreResetSeq}
 }
 
 func (p vulnPages) subject(ctx context.Context, s vulnstore.Subject) (ui.VulnSubjectStatus, error) {
@@ -617,7 +611,104 @@ func (p vulnPages) subject(ctx context.Context, s vulnstore.Subject) (ui.VulnSub
 	if err != nil {
 		return ui.VulnSubjectStatus{}, err
 	}
-	return ui.VulnSubjectStatus{Subject: s, LastComplete: st.LastComplete}, nil
+	inv := p.hostInventories(ctx, []vulnstore.Subject{s})
+	return ui.VulnSubjectStatus{Subject: s, LastComplete: st.LastComplete, Inventory: hostInventory(s, inv)}, nil
+}
+
+// hostInventory returns the package inventory status of subject s from the
+// map of hostInventories; only host subjects have one.
+func hostInventory(s vulnstore.Subject, inv map[string]*ui.VulnInventoryStatus) *ui.VulnInventoryStatus {
+	if s.Kind != vulnfinding.SubjectHost {
+		return nil
+	}
+	return inv[s.ID]
+}
+
+// hostInventories returns the package inventory status of the host subjects
+// in subjects, keyed by host ID. Every host subject has an entry: nil when no
+// read is stored, Unavailable when the read could not be loaded (never read
+// as "no read stored").
+//
+// A single host is read with Latest, which loads its components, so the
+// subject page gets its source and binary counts in one query. Several hosts
+// (the list page) take one LatestAll query, which does not load components:
+// those statuses have zero counts and the list does not show them.
+func (p vulnPages) hostInventories(ctx context.Context, subjects []vulnstore.Subject) map[string]*ui.VulnInventoryStatus {
+	out := map[string]*ui.VulnInventoryStatus{}
+	var hosts []string
+	for _, s := range subjects {
+		if s.Kind == vulnfinding.SubjectHost {
+			hosts = append(hosts, s.ID)
+		}
+	}
+	unavailable := &ui.VulnInventoryStatus{Unavailable: true}
+	switch len(hosts) {
+	case 0:
+		return out
+	case 1:
+		r, err := p.v.inventory.Latest(ctx, hosts[0])
+		switch {
+		case errors.Is(err, vulninventory.ErrNoRead):
+			out[hosts[0]] = nil
+		case err != nil:
+			p.v.log.Error("vulnerabilities: inventory", "error", err)
+			out[hosts[0]] = unavailable
+		default:
+			out[hosts[0]] = inventoryStatus(r)
+		}
+		return out
+	}
+	reads, truncated, err := p.v.inventory.LatestAll(ctx)
+	if err != nil {
+		p.v.log.Error("vulnerabilities: inventory", "error", err)
+		for _, id := range hosts {
+			out[id] = unavailable
+		}
+		return out
+	}
+	return mergeInventories(hosts, reads, truncated)
+}
+
+// mergeInventories keys the LatestAll result reads by host for every host in
+// hosts: the host's status when it has a read, Unavailable when it has none
+// but the result was truncated (it may be past the cut: unknown, not "no
+// read"), and nil otherwise.
+func mergeInventories(hosts []string, reads []vulninventory.Read, truncated bool) map[string]*ui.VulnInventoryStatus {
+	out := make(map[string]*ui.VulnInventoryStatus, len(hosts))
+	byHost := make(map[string]vulninventory.Read, len(reads))
+	for _, r := range reads {
+		byHost[r.HostID] = r
+	}
+	for _, id := range hosts {
+		r, ok := byHost[id]
+		switch {
+		case ok:
+			out[id] = inventoryStatus(r)
+		case truncated:
+			// The host may be past the cut: unknown, not "no read".
+			out[id] = &ui.VulnInventoryStatus{Unavailable: true}
+		default:
+			out[id] = nil
+		}
+	}
+	return out
+}
+
+// inventoryStatus is the UI view of a stored read: its time, completeness,
+// fixed reason, the source and binary counts and the running kernel.
+func inventoryStatus(r vulninventory.Read) *ui.VulnInventoryStatus {
+	st := &ui.VulnInventoryStatus{
+		ReadAt:        r.ReadAt,
+		Complete:      r.Complete,
+		Reason:        r.Reason,
+		Sources:       len(r.Components),
+		KernelRelease: r.Kernel.Release,
+		KernelMapped:  r.Kernel.State == string(osdebian.KernelMapped),
+	}
+	for _, c := range r.Components {
+		st.Binaries += len(c.Binaries)
+	}
+	return st
 }
 
 // VulnFindings reads the findings in scope with their current tier, the
@@ -653,8 +744,9 @@ func (p vulnPages) VulnFindings(ctx context.Context, q ui.VulnQuery) (ui.VulnPag
 	if err != nil {
 		return ui.VulnPage{}, err
 	}
+	inv := p.hostInventories(ctx, subjects)
 	for _, s := range subjects {
-		page.Subjects = append(page.Subjects, ui.VulnSubjectStatus{Subject: s, LastComplete: sts[s].LastComplete})
+		page.Subjects = append(page.Subjects, ui.VulnSubjectStatus{Subject: s, LastComplete: sts[s].LastComplete, Inventory: hostInventory(s, inv)})
 	}
 	if page.Feeds, err = p.feeds(ctx); err != nil {
 		return ui.VulnPage{}, err
@@ -676,10 +768,14 @@ func (p vulnPages) VulnFinding(ctx context.Context, key vulnfinding.Key) (ui.Vul
 	if err != nil {
 		return ui.VulnFindingDetail{}, err
 	}
-	for _, h := range holds {
-		// NOS keeps no package inventory yet: no NOS version, never
-		// shown as contradicted or confirmed by NOS.
-		d.Holds = append(d.Holds, ui.VulnHold{Hold: h})
+	if len(holds) > 0 {
+		// The NOS view is the same judgement the closure used (D5); an
+		// error leaves it empty, shown as unknown.
+		nos := p.v.assessFinding(ctx, f)
+		for _, h := range holds {
+			d.Holds = append(d.Holds, ui.VulnHold{Hold: h, NOSVersion: nos.nosVersion,
+				Contradicted: nos.class == vulnstore.ClassContradicted})
+		}
 	}
 	if d.Subject, err = p.subject(ctx, f.Subject); err != nil {
 		return ui.VulnFindingDetail{}, err

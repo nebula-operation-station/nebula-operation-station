@@ -10,3 +10,9 @@ package vulnstore
 // bound by statements) still fails it. Without the race detector it runs
 // at full scale.
 const supersededHoldsAtScale = MaxFindingsPerRun / 10
+
+// contendingWriters: under the race detector the concurrent writers of
+// server.db run at half the count (see race_off_test.go). Four writers
+// contending with each other alone already exhaust the busy timeout of
+// the slowest one there, whatever the apply transactions hold.
+const contendingWriters = 2

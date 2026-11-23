@@ -1,0 +1,7 @@
+# Wiring tickets and the planning document that tracks each one. One per line:
+# <ID> | <title> | <planning document under docs/ that tracks the ticket>
+# The document must exist and must define the ID as a table row or heading.
+# A ticket registered here is known only through that named document; a
+# definition in any other docs/ file does not count.
+WG-01 | wiring guard (internal/wiringguard): allowlist, import scan and fixtures; its test runs in make check | docs/implementation/wiring-audit.md
+iv02 | inventory store and pruning (internal/vulninventory), named as a ticket in the decision paper | docs/implementation/vuln-inventory-decisions.md
