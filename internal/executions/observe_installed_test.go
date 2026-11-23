@@ -46,7 +46,8 @@ func TestInstalledObserverSeesSuccessfulListOnce(t *testing.T) {
 	s.SetInstalledObserver(rec)
 	started := time.Date(2026, 11, 20, 9, 29, 0, 0, time.UTC)
 	finished := time.Date(2026, 11, 20, 9, 30, 0, 0, time.UTC)
-	s.now = func() time.Time { return finished.Add(time.Hour) }
+	clock := finished.Add(time.Hour)
+	s.now = func() time.Time { return clock }
 	exec := strings.Repeat("7", 36)
 	seedExecution(t, db, exec, "package.list_installed", "web", "success", nil, 100, finished.Unix())
 	if _, err := db.Exec(`UPDATE execution_hosts SET started_at = ? WHERE execution_id = ?`, started.Unix(), exec); err != nil {
@@ -65,8 +66,12 @@ func TestInstalledObserverSeesSuccessfulListOnce(t *testing.T) {
 	if !c.started.Equal(started) {
 		t.Fatalf("observer start = %v, want the host row's started_at %v", c.started, started)
 	}
-	if !c.at.Equal(finished) {
-		t.Fatalf("observer finish = %v, want finishHost's finished_at %v (no second clock read)", c.at, finished)
+	var stored int64
+	if err := db.QueryRow(`SELECT finished_at FROM execution_hosts WHERE execution_id = ? AND host_id = ?`, exec, "web").Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if !c.at.Equal(time.Unix(stored, 0)) || !c.at.Equal(clock) {
+		t.Fatalf("observer finish = %v, want the stored finished_at %v (= the one clock read %v)", c.at, time.Unix(stored, 0), clock)
 	}
 }
 

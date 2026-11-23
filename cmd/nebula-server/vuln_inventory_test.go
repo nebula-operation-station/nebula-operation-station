@@ -361,14 +361,18 @@ func TestFactsWithinWindowGiveCompleteRead(t *testing.T) {
 }
 
 // TestUpgradedHostIsNotMatchedWithOldRelease: a host upgraded from bookworm
-// to trixie whose core.facts has not run since keeps its list incomplete;
-// the old release is never used for the new package list. A fresh core.facts
-// (trixie) makes the next list complete under debian:trixie.
+// to trixie by a full upgrade NOS ran, whose core.facts has not run since,
+// keeps its list incomplete; the old release is never used for the new package
+// list. A fresh core.facts (trixie) makes the next list complete under
+// debian:trixie. An upgrade NOS did not run is not seen here (see the notes on
+// factsWindow).
 func TestUpgradedHostIsNotMatchedWithOldRelease(t *testing.T) {
 	const trixieRelease = "PRETTY_NAME=\"Debian GNU/Linux 13 (trixie)\"\nID=debian\nVERSION_ID=\"13\"\nVERSION_CODENAME=trixie\n"
 	e := newInvEnv(t)
-	// The bookworm facts ran before the upgrade; the trixie list follows.
-	e.insertFactsAt(t, 22, invTestHost, factsResult(t, debian12Release), invTestAt.Add(-time.Hour))
+	// The bookworm facts ran an hour before the list; the full upgrade ran
+	// after them, and the trixie list follows.
+	e.insertFactsAt(t, 22, invTestHost, factsResult(t, debian12Release), invTestStart.Add(-time.Hour))
+	e.insertRunAt(t, 60, "package.install_all", invTestHost, nil, invTestStart.Add(-30*time.Minute))
 
 	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-trixie-1", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
 	r := e.latestRead(t, invTestHost)

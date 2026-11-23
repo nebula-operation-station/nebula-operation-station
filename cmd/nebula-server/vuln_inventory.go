@@ -36,6 +36,10 @@ type factsSource interface {
 // have finished and still give the list's release. core.facts is its own
 // action and runs before the lists, so the result is older than the list; the
 // window is the time within which the release is taken as unchanged.
+//
+// Known gap: a release upgrade that NOS did not run (no package.install_all
+// on the host) is not seen by the OS-change check, so facts from before it
+// still count within this window and the list is matched to the old release.
 const factsWindow = 24 * time.Hour
 
 // errListStartUnknown is returned when the start of a list is not known, so
