@@ -186,21 +186,27 @@ func selectSnapshotImages(latest []sizedImage, maxCount int, maxBytes int64) ([]
 }
 
 // latestImagesQuery is the newest image read of every (host, digest) of the
-// hosts in the JSON array bound to its one parameter, without packages, with
-// the length of its body. The host filter runs before the window function, so
-// the work grows with the wanted hosts, not with every stored image read.
-// "Newest" is the order of ImageReads: read time, then ID. It is needed because
-// the image body is not read here.
-const latestImagesQuery = `SELECT id, repository, digest, host_id, execution_id, read_at, complete,
-	reason, os_family, os_name, LENGTH(body) FROM vuln_image_reads
-	WHERE id IN (SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY host_id, digest
+// hosts in the JSON array bound to its first parameter, without packages, with
+// the length of its body. The host filter runs before the window functions, so
+// the work grows with the wanted hosts, not with every stored image read. The
+// second parameter bounds the digests per host: a host keeps only its perHost
+// digests whose newest read is most recent, so a digest the host stopped
+// reading drops out of the load. "Newest" is the order of ImageReads: read
+// time, then ID.
+const latestImagesQuery = `WITH newest AS (SELECT id, host_id, read_at, ROW_NUMBER() OVER (PARTITION BY host_id, digest
 		ORDER BY read_at DESC, id DESC) AS rn FROM vuln_image_reads
-		WHERE host_id IN (SELECT value FROM json_each(?))) WHERE rn = 1)`
+		WHERE host_id IN (SELECT value FROM json_each(?))),
+	ranked AS (SELECT id, ROW_NUMBER() OVER (PARTITION BY host_id
+		ORDER BY read_at DESC, id DESC) AS hrn FROM newest WHERE rn = 1)
+	SELECT id, repository, digest, host_id, execution_id, read_at, complete,
+	reason, os_family, os_name, LENGTH(body) FROM vuln_image_reads
+	WHERE id IN (SELECT id FROM ranked WHERE hrn <= ?)`
 
 // newestImages returns the newest image read of every (host, digest) of want,
-// sorted by host ID, then digest, each with its body length. It runs on q, so
-// it sees the state of the caller's transaction.
-func newestImages(ctx context.Context, q *sql.Tx, want map[string]bool) ([]sizedImage, error) {
+// sorted by host ID, then digest, each with its body length. Per host it loads
+// at most perHost digests (see latestImagesQuery). It runs on q, so it sees the
+// state of the caller's transaction.
+func newestImages(ctx context.Context, q *sql.Tx, want map[string]bool, perHost int) ([]sizedImage, error) {
 	hosts := make([]string, 0, len(want))
 	for h := range want {
 		hosts = append(hosts, h)
@@ -209,7 +215,7 @@ func newestImages(ctx context.Context, q *sql.Tx, want map[string]bool) ([]sized
 	if err != nil {
 		return nil, fmt.Errorf("newest images: hosts: %w", err)
 	}
-	rows, err := q.QueryContext(ctx, latestImagesQuery, string(hostsJSON))
+	rows, err := q.QueryContext(ctx, latestImagesQuery, string(hostsJSON), perHost)
 	if err != nil {
 		return nil, fmt.Errorf("newest images: %w", err)
 	}
@@ -376,7 +382,9 @@ func (s *Store) Current(ctx context.Context, hosts []string, maxReuse time.Durat
 	}
 	slices.Sort(ids)
 
-	newest, err := newestImages(ctx, tx, want)
+	// One digest more than the cap is loaded per host, so that a host with more
+	// than MaxSnapshotImages digests still shows an omitted image in OmittedImages.
+	newest, err := newestImages(ctx, tx, want, MaxSnapshotImages+1)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("vulninventory: current: %w", err)
 	}
@@ -653,8 +661,10 @@ func appendSnapshotPage(ctx context.Context, q *sql.Tx, out []Read, id, afterHos
 // membership rows. The newest snapshot is always kept: its generation is the
 // floor of the next one. The reads stay in the store (a read is deleted only
 // under decision E1, which is not made here), so a pruned snapshot's reads are
-// not lost by this call. The caller passes the export's maximum age
-// (vulnstore.MaxInventoryAge).
+// not lost by this call. Image reads are deleted when no snapshot pins them and
+// they are beyond the ImageReadsKept newest of their host and digest; a pinned
+// image read beyond that count stays until the snapshot that pins it is pruned.
+// The caller passes the export's maximum age (vulnstore.MaxInventoryAge).
 func (s *Store) PruneSnapshots(ctx context.Context, maxAge time.Duration) error {
 	if maxAge <= 0 {
 		return fmt.Errorf("vulninventory: prune snapshots: %w: max age must be positive", ErrInvalidRead)
