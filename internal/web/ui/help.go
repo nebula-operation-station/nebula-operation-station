@@ -48,6 +48,45 @@ type helpBook struct {
 	order []*helpPage
 }
 
+// chunkURL returns the handbook URL of the heading a chunk ID names. The ID
+// is "slug#anchor" or "slug#anchor#pN" as the embedded index writes it. The
+// slug must be a handbook page and the anchor one of its headings, so a
+// heading of another page never links.
+func (b *helpBook) chunkURL(id string) (string, bool) {
+	parts := strings.Split(id, "#")
+	if len(parts) != 2 && len(parts) != 3 {
+		return "", false
+	}
+	slug, anchor := parts[0], parts[1]
+	if len(parts) == 3 && !helpPartSuffix(parts[2]) {
+		return "", false
+	}
+	p, ok := b.pages[slug]
+	if !ok || anchor == "" {
+		return "", false
+	}
+	for _, hd := range p.headings {
+		if hd.ID == anchor {
+			return p.url + "#" + hd.ID, true
+		}
+	}
+	return "", false
+}
+
+// helpPartSuffix reports whether s is a paragraph part "pN" with N >= 1.
+func helpPartSuffix(s string) bool {
+	n, ok := strings.CutPrefix(s, "p")
+	if !ok || n == "" || n[0] == '0' {
+		return false
+	}
+	for i := 0; i < len(n); i++ {
+		if n[i] < '0' || n[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // helpURL is the in-app address of a handbook page.
 func helpURL(slug string) string {
 	if slug == docsembed.IndexSlug {

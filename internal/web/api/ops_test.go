@@ -105,7 +105,14 @@ func oaTokens() []serverconfig.APIToken {
 	}
 }
 
+// newOpsEnv is the ops API with no documentation index (DocChunk nil).
 func newOpsEnv(t *testing.T) *opsEnv {
+	t.Helper()
+	return newOpsEnvChunk(t, nil)
+}
+
+// newOpsEnvChunk is the ops API with the given documentation index check.
+func newOpsEnvChunk(t *testing.T, chunk func(chunkID string) bool) *opsEnv {
 	t.Helper()
 	e := &opsEnv{now: opsT0, log: &bytes.Buffer{}}
 	clock := func() time.Time { return e.now }
@@ -136,6 +143,7 @@ func newOpsEnv(t *testing.T) *opsEnv {
 			e.accepted = append(e.accepted, n)
 		},
 		CorePrompt: "core prompt v1",
+		DocChunk:   chunk,
 		Log:        slog.New(slog.NewJSONHandler(e.log, nil)),
 		Now:        clock,
 	})
@@ -431,6 +439,58 @@ func TestOpsNotesAcceptsCurrentDigestOnce(t *testing.T) {
 	}
 	if !strings.Contains(stored[0].Snapshot, "CVE-2026-0001") {
 		t.Error("the server did not attach its own facts snapshot")
+	}
+}
+
+// citedNoteBody is noteBody with citations of documentation chunks.
+func citedNoteBody(ref, digest, action, host string, citations ...string) string {
+	cites, _ := json.Marshal(citations)
+	return fmt.Sprintf(`{"kind":"fix","ref":%q,"digest":%q,"summary":"Update openssl.","urgency":"soon",`+
+		`"steps":[{"action_id":%q,"host_id":%q,"why":"fixes the finding"}],"citations":%s}`,
+		ref, digest, action, host, cites)
+}
+
+// TestOpsNotesCitationNeedsTheIndex pins ADR 0016 D6 on the API: a note may
+// cite only chunk IDs the documentation index holds. Without an index (nil
+// DocChunk) every citation is refused with 422 and nothing is stored; with
+// an index, only the IDs it holds are accepted.
+func TestOpsNotesCitationNeedsTheIndex(t *testing.T) {
+	const known = "admin-guide#1-what-nebula-is"
+	g := labGroup(opsHost, "CVE-2026-0001", opsfacts.TierCritical, false, 90)
+	tests := []struct {
+		name  string
+		chunk func(string) bool
+		cite  string
+		code  int
+	}{
+		{"nil index refuses a citation", nil, known, http.StatusUnprocessableEntity},
+		{"nil index refuses an unknown citation", nil, "admin-guide#gibt-es-nicht", http.StatusUnprocessableEntity},
+		{"index refuses an unknown citation", func(id string) bool { return id == known }, "admin-guide#gibt-es-nicht", http.StatusUnprocessableEntity},
+		{"index accepts a known citation", func(id string) bool { return id == known }, known, http.StatusCreated},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newOpsEnvChunk(t, tc.chunk)
+			e.facts.groups = []opsfacts.Group{g}
+			body := citedNoteBody(g.Key, g.Digest, "package.install_security", opsHost, tc.cite)
+			r := opsPost(e.h, "/api/v1/ops/notes", oaTok, body)
+			if r.code != tc.code {
+				t.Fatalf("status %d, want %d: %s", r.code, tc.code, r.body)
+			}
+			stored, err := e.notes.List(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.code == http.StatusCreated {
+				if len(stored) != 1 || len(stored[0].Body.Citations) != 1 || stored[0].Body.Citations[0] != tc.cite {
+					t.Fatalf("stored notes %+v, want the one note with citation %q", stored, tc.cite)
+				}
+				return
+			}
+			if len(stored) != 0 || len(e.accepted) != 0 {
+				t.Errorf("a refused citation was stored (%d notes, %d accepted)", len(stored), len(e.accepted))
+			}
+		})
 	}
 }
 
