@@ -883,7 +883,12 @@ func (s *Service) finishHost(id, actionID, host, class, detail string, exit int,
 	if class == classSkipped || class == classNotRun {
 		return // nothing ran on the host: its state did not change
 	}
-	s.observe(id, actionID, host, class, s.hostStarted(id, host), fin, result)
+	// The start is read only for the one observer that uses it.
+	var started time.Time
+	if actionID == "package.list_installed" && class == "success" && s.installed != nil {
+		started = s.hostStarted(id, host)
+	}
+	s.observe(id, actionID, host, class, started, fin, result)
 	s.refreshOpsState(s.ctx, host, lastRun{action: actionID, class: class, at: fin, ok: true})
 }
 
