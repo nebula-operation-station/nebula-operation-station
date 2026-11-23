@@ -209,6 +209,56 @@ func TestLastOSChangeIsNewestFullUpgradeThatRan(t *testing.T) {
 	}
 }
 
+// TestOSChangeLookupsReturnErrors: a failing database makes the OS-change and
+// overlap lookups return an error (the observer then marks the lookup failed).
+func TestOSChangeLookupsReturnErrors(t *testing.T) {
+	s, db := setup(t, &fakeExec{})
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	if _, _, err := s.LastOSChange(ctx, "web"); err == nil {
+		t.Fatal("LastOSChange on a closed database: no error")
+	}
+	if _, err := s.UpgradeOverlaps(ctx, "web", time.Unix(0, 0), time.Unix(1, 0)); err == nil {
+		t.Fatal("UpgradeOverlaps on a closed database: no error")
+	}
+}
+
+// TestHostStartedIsZeroWhenUnknown: the start of a host run is read for the
+// installed observer only. A row without a start, a missing row, or a start
+// that cannot be read gives the zero time, which the observer treats as unknown.
+func TestHostStartedIsZeroWhenUnknown(t *testing.T) {
+	s, db := setup(t, &fakeExec{})
+	const id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	if _, err := db.Exec(`INSERT INTO executions (id, action_id, module_version, artifact_sha256, risk, state, durable, timeout_s, created_by, created_at)
+		VALUES (?, 'package.list_installed', '1.0.0', ?, 'LOW', 'running', 0, 60, 'axel', 1000)`, id, strings.Repeat("a", 64)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO execution_hosts (execution_id, host_id, fingerprint, credential_ref, endpoints, state)
+		VALUES (?, 'web', 'SHA256:x', 'nebula-default', '[]', 'running')`, id); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.hostStarted(id, "web"); !got.IsZero() {
+		t.Fatalf("hostStarted with NULL started_at = %v, want the zero time", got)
+	}
+	if got := s.hostStarted(id, "missing"); !got.IsZero() {
+		t.Fatalf("hostStarted of a missing row = %v, want the zero time", got)
+	}
+	if _, err := db.Exec(`UPDATE execution_hosts SET started_at = 1200 WHERE execution_id = ?`, id); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.hostStarted(id, "web"); got.Unix() != 1200 {
+		t.Fatalf("hostStarted = %v, want 1200", got.Unix())
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.hostStarted(id, "web"); !got.IsZero() {
+		t.Fatalf("hostStarted on a closed database = %v, want the zero time", got)
+	}
+}
+
 // TestUpgradeOverlapsListRead: a package.install_all of the host that ran
 // while the list ran (started before the list ended, and still running or
 // finished after the list started) overlaps the read; the list is then not
@@ -239,6 +289,7 @@ func TestUpgradeOverlapsListRead(t *testing.T) {
 		{"failed during the list", "package.install_all", "web", finished, "failed", at(-5), at(5), true},
 		{"unknown during the list", "package.install_all", "web", finished, "unknown", at(-5), at(5), true},
 		{"finished before the list", "package.install_all", "web", finished, "success", at(-600), at(-60), false},
+		{"started as the list ended", "package.install_all", "web", running, "", at(60), 0, true},
 		{"started after the list", "package.install_all", "web", running, "", at(61), 0, false},
 		{"precheck_failed during the list", "package.install_all", "web", finished, "precheck_failed", at(-5), at(5), false},
 		{"other action during the list", "package.install_security", "web", finished, "success", at(-5), at(5), false},
