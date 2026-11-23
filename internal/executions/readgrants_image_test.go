@@ -298,7 +298,8 @@ func TestImageProposalAuditOmitsImageName(t *testing.T) {
 	if !strings.Contains(audit.String(), "read_grant_proposed") {
 		t.Errorf("proposal not audited: %s", audit.String())
 	}
-	if strings.Contains(audit.String(), "registry.example") || strings.Contains(audit.String(), "c1") {
+	if strings.Contains(audit.String(), "registry.example") || strings.Contains(audit.String(), imageTestRef) ||
+		strings.Contains(audit.String(), "container=") {
 		t.Errorf("audit names the image or container: %s", audit.String())
 	}
 }
