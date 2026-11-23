@@ -124,8 +124,11 @@ type ReadGrantPreview struct {
 	Actions               []ReadGrantPreviewAction
 	// Providers are the frozen PVE remotes of a provider lease in document
 	// order; empty for SSH leases (which have Targets and Actions).
-	Providers            []ReadGrantPreviewProvider
-	Excluded             []ReadGrantExcluded
+	Providers []ReadGrantPreviewProvider
+	Excluded  []ReadGrantExcluded
+	// Params are the plain-text parameters of an image read lease by action
+	// ID, so the page shows what the hashes bind; empty for other proposals.
+	Params               map[string]map[string]string
 	Issuer               string
 	Created, Expiry      time.Time
 	Trigger, RateProfile string

@@ -31,6 +31,14 @@ const (
 	// so the release may have changed since (for example a release upgrade
 	// without a fresh facts run). The list is not mapped (see Failed).
 	ReasonFactsOlder = "core.facts older than the package list"
+	// ReasonFactsBeforeUpgrade: the host's newest core.facts started no later
+	// than its last full upgrade finished, so it may show the release from
+	// before the upgrade. The list is not mapped (see Failed).
+	ReasonFactsBeforeUpgrade = "core.facts not newer than the last full upgrade"
+	// ReasonUpgradeOverlaps: a full upgrade ran while the list or the newest
+	// core.facts ran, so the release may have changed during the read. The
+	// list is not mapped (see Failed).
+	ReasonUpgradeOverlaps = "full upgrade ran during the list or core.facts"
 	// ReasonStoreUnavailable: the store could not write the list for a reason
 	// other than a refusal (a closed database, a busy store). The list is not
 	// stored (see Failed).

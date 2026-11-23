@@ -44,7 +44,12 @@ func newFakeResolver() *fakeResolver {
 			"package.remove":           "os-remove",
 			"docker.restart":           "container-restart",
 		},
-		chunks: map[string]bool{"doc-1": true, "doc-2": true},
+		chunks: map[string]bool{
+			"doc-1":                        true,
+			"doc-2":                        true,
+			"admin-guide#1-what-nebula-is": true,
+			"admin-guide#2-planning#p1":    true,
+		},
 	}
 }
 
@@ -119,6 +124,11 @@ func TestValidateAcceptsWellFormedNotes(t *testing.T) {
 		{"fix with multi-line summary", func() Draft {
 			d := validFix()
 			d.Summary = "Zeile eins\nZeile zwei"
+			return d
+		}},
+		{"fix citing handbook chunks with #", func() Draft {
+			d := validFix()
+			d.Citations = []string{"admin-guide#1-what-nebula-is", "admin-guide#2-planning#p1"}
 			return d
 		}},
 		{"fix with two steps on one host", func() Draft {
@@ -274,6 +284,43 @@ func TestValidateRejectsMalformedNotes(t *testing.T) {
 			d.Citations = []string{"http://doc-1"}
 			return d
 		}, ErrURL},
+		{"chunk citation starting with #", func() Draft {
+			d := validFix()
+			d.Citations = []string{"#1-what-nebula-is"}
+			return d
+		}, ErrInvalidField},
+		{"chunk citation ending with #", func() Draft {
+			d := validFix()
+			d.Citations = []string{"admin-guide#"}
+			return d
+		}, ErrInvalidField},
+		{"chunk citation with consecutive #", func() Draft {
+			d := validFix()
+			d.Citations = []string{"admin-guide##1-what-nebula-is"}
+			return d
+		}, ErrInvalidField},
+		{"chunk citation with three # in a row", func() Draft {
+			d := validFix()
+			d.Citations = []string{"admin-guide#1-what###p1"}
+			return d
+		}, ErrInvalidField},
+		{"chunk citation with space", func() Draft {
+			d := validFix()
+			d.Citations = []string{"admin-guide#1 what"}
+			return d
+		}, ErrInvalidField},
+		{"chunk citation over MaxIDBytes", func() Draft {
+			d := validFix()
+			d.Citations = []string{"admin-guide#" + strings.Repeat("a", MaxIDBytes)}
+			return d
+		}, ErrLimit},
+		{"unknown chunk citation with #", func() Draft {
+			d := validFix()
+			d.Citations = []string{"admin-guide#gibt-es-nicht"}
+			return d
+		}, ErrUnknownCitation},
+		{"ref with #", func() Draft { d := validFix(); d.Ref = "vu:host1#openssl"; return d }, ErrInvalidField},
+		{"digest with #", func() Draft { d := validFix(); d.Digest = "d1#"; return d }, ErrInvalidField},
 		{"summary without text", func() Draft { d := validText(KindSummary); d.Text = ""; return d }, ErrMissing},
 		{"summary text over 2 KiB", func() Draft {
 			d := validText(KindSummary)

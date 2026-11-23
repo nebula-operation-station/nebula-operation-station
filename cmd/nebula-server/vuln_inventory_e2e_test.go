@@ -303,7 +303,7 @@ func e2eInventory(t *testing.T, db *sql.DB, log *slog.Logger) *vulnInventoryServ
 // seeded by the test before the server starts (see the test).
 func e2eUpgradedRead(t *testing.T, inv *vulnInventoryService, n int, at time.Time) {
 	t.Helper()
-	inv.ObserveInstalled(context.Background(), ivcHost, fmt.Sprintf("exec-e2e-list-%d", n), at, e2eUpgraded(t))
+	inv.ObserveInstalled(context.Background(), ivcHost, fmt.Sprintf("exec-e2e-list-%d", n), at.Add(-time.Minute), at, e2eUpgraded(t))
 }
 
 // e2eFindings lists the findings of host in the stored order.
@@ -352,7 +352,7 @@ func TestPackageListInstalledFindingReachesServerOverHTTP(t *testing.T) {
 	seed := &invEnv{db: db}
 	seed.insertFactsAt(t, 100, ivcHost, factsResult(t, debian12Release), now)
 	inv := e2eInventory(t, db, log)
-	inv.ObserveInstalled(ctx, ivcHost, "exec-e2e-list-1", listAt, e2eFixture(t))
+	inv.ObserveInstalled(ctx, ivcHost, "exec-e2e-list-1", listAt.Add(-time.Minute), listAt, e2eFixture(t))
 	if r, err := inv.store.Latest(ctx, ivcHost); err != nil || !r.Complete {
 		t.Fatalf("first read: complete=%v err=%v, want a complete stored read", r.Complete, err)
 	}
