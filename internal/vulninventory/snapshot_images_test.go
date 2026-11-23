@@ -233,8 +233,20 @@ func TestMaxSnapshotImagesCountsOmittedImages(t *testing.T) {
 	if snap.OmittedImages != 1 {
 		t.Fatalf("OmittedImages = %d, want 1", snap.OmittedImages)
 	}
-	if want := fmt.Sprintf("sha256:%064x", MaxSnapshotImages); snap.Images[len(snap.Images)-1].Digest == want {
-		t.Errorf("the last digest was pinned; the omitted one must be the last in digest order")
+	// The omitted image is the oldest read of the host, digest 0 here, so the
+	// snapshot keeps the newest reads.
+	old := fmt.Sprintf("sha256:%064x", 0)
+	newest := fmt.Sprintf("sha256:%064x", MaxSnapshotImages)
+	var hasOld, hasNewest bool
+	for _, r := range snap.Images {
+		hasOld = hasOld || r.Digest == old
+		hasNewest = hasNewest || r.Digest == newest
+	}
+	if hasOld {
+		t.Errorf("the oldest digest was pinned; the omitted one must be the oldest read")
+	}
+	if !hasNewest {
+		t.Errorf("the newest digest was not pinned")
 	}
 	got, err := s.Snapshot(ctx, snap.ID)
 	if err != nil {
