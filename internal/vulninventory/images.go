@@ -17,7 +17,7 @@ import (
 // digest, as image.packages reports it. The store keeps the last
 // ImageReadsKept reads of each image (the digest, per host) and deletes the
 // older ones in the same transaction as an insert (migration 0053), except
-// the reads a snapshot pins (migration 0055); PruneSnapshots deletes those
+// the reads a snapshot pins (migration 0056); PruneSnapshots deletes those
 // once no snapshot pins them. The
 // repository of a read is a name the host's inspect result gave the image;
 // it is not part of the key, so one image under several names shares one
@@ -227,7 +227,10 @@ var ErrDiscardedByRetention = errors.New("vulninventory: image read discarded by
 
 // PutImage validates r, inserts it as a new immutable image read and then
 // keeps only the ImageReadsKept newest reads of its host and digest (the
-// repository is not part of the key), in one transaction. It returns the new
+// repository is not part of the key), in one transaction. A read that a
+// snapshot pins is kept even beyond that count, so a digest can have more than
+// ImageReadsKept reads stored until PruneSnapshots removes the snapshot that
+// pins them. It returns the new
 // row ID. When retention deletes the new read itself, it returns 0 and
 // ErrDiscardedByRetention; the retention still commits. A read of an execution
 // that is stored already on the host returns ErrDuplicateRead and writes and
@@ -272,7 +275,7 @@ func (s *Store) PutImage(ctx context.Context, r ImageRead) (int64, error) {
 		return 0, fmt.Errorf("vulninventory: put image: row id: %w", err)
 	}
 	// A read that a snapshot pins stays (ADR 0011 amendment 2026-11-23); the
-	// RESTRICT foreign key of migration 0055 would refuse its delete anyway.
+	// RESTRICT foreign key of migration 0056 would refuse its delete anyway.
 	if _, err := tx.ExecContext(ctx, `DELETE FROM vuln_image_reads WHERE host_id = ? AND digest = ? AND id NOT IN (
 		SELECT id FROM vuln_image_reads WHERE host_id = ? AND digest = ? ORDER BY read_at DESC, id DESC LIMIT ?)
 		AND id NOT IN (SELECT image_read_id FROM vuln_inventory_snapshot_image_reads)`,

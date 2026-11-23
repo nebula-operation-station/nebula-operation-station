@@ -351,11 +351,11 @@ func TestPinnedImageReadCannotBeDeletedBySQL(t *testing.T) {
 	}
 }
 
-// TestSnapshotImageMigrationAddsPinTableAndIndex checks migration 0055: the
+// TestSnapshotImageMigrationAddsPinTableAndIndex checks migration 0056: the
 // pin table exists with its index on image_read_id, and the migration has no
 // other statements than the table and the index (it is additive).
 func TestSnapshotImageMigrationAddsPinTableAndIndex(t *testing.T) {
-	raw, err := os.ReadFile("../serverdb/migrations/0055_vuln_snapshot_image_reads.sql")
+	raw, err := os.ReadFile("../serverdb/migrations/0056_vuln_snapshot_image_reads.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +368,7 @@ func TestSnapshotImageMigrationAddsPinTableAndIndex(t *testing.T) {
 		"CREATE INDEX vuln_inventory_snapshot_image_reads_read ON vuln_inventory_snapshot_image_reads (image_read_id)",
 	} {
 		if !strings.Contains(sql, want) {
-			t.Errorf("migration 0055 lacks %q", want)
+			t.Errorf("migration 0056 lacks %q", want)
 		}
 	}
 	// Only statements count: the comment lines explain the rules in words.
@@ -383,7 +383,7 @@ func TestSnapshotImageMigrationAddsPinTableAndIndex(t *testing.T) {
 	code := strings.ReplaceAll(strings.ToUpper(strings.Join(stmts, "\n")), "ON DELETE", "ON")
 	for _, banned := range []string{"DROP", "ALTER", "UPDATE", "DELETE"} {
 		if strings.Contains(code, banned) {
-			t.Errorf("migration 0055 contains %q; it must be additive", banned)
+			t.Errorf("migration 0056 contains %q; it must be additive", banned)
 		}
 	}
 	_, db := openStore(t)

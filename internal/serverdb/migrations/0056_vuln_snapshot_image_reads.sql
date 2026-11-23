@@ -1,4 +1,4 @@
--- 0055_vuln_snapshot_image_reads.sql
+-- 0056_vuln_snapshot_image_reads.sql
 -- Pins image reads in inventory snapshots (ADR 0011 amendment 2026-11-23,
 -- img01). Only additive: no existing table is changed. The Go side is
 -- internal/vulninventory (snapshot.go, images.go).
