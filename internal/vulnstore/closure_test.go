@@ -374,7 +374,7 @@ func TestConfirmHeldClosure(t *testing.T) {
 	e.complete(t, r)
 
 	// Unconfirmed → admin_confirmed.
-	by, err := e.st.ConfirmHeld(e.ctx, r.ID, items[0].Finding.Key, "admin", "checked by hand")
+	by, err := e.st.ConfirmHeld(e.ctx, r.ID, items[0].Finding.Key, "admin", "checked by hand", e.audit())
 	if err != nil || by != ClosedByAdminConfirmed {
 		t.Fatalf("confirm = %s, %v", by, err)
 	}
@@ -384,22 +384,22 @@ func TestConfirmHeldClosure(t *testing.T) {
 	}
 	// Contradicted → never fixed.
 	e.cls.set(items[1].Finding.Key, ClassContradicted)
-	if _, err := e.st.ConfirmHeld(e.ctx, r.ID, items[1].Finding.Key, "admin", "x"); !errors.Is(err, ErrContradicted) {
+	if _, err := e.st.ConfirmHeld(e.ctx, r.ID, items[1].Finding.Key, "admin", "x", e.audit()); !errors.Is(err, ErrContradicted) {
 		t.Fatalf("confirm contradicted: %v", err)
 	}
 	e.wantState(t, items[1].Finding.Key, StateOpen, "")
 	// Discard (path 7).
-	if err := e.st.DiscardHeld(e.ctx, r.ID, items[1].Finding.Key); err != nil {
+	if err := e.st.DiscardHeld(e.ctx, r.ID, items[1].Finding.Key, "admin", e.audit()); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.st.DiscardHeld(e.ctx, r.ID, items[1].Finding.Key); !errors.Is(err, ErrHoldNotFound) {
+	if err := e.st.DiscardHeld(e.ctx, r.ID, items[1].Finding.Key, "admin", e.audit()); !errors.Is(err, ErrHoldNotFound) {
 		t.Fatalf("second discard: %v", err)
 	}
 	// Bad input.
-	if _, err := e.st.ConfirmHeld(e.ctx, r.ID, items[2].Finding.Key, "admin", ""); !errors.Is(err, ErrInvalidInput) {
+	if _, err := e.st.ConfirmHeld(e.ctx, r.ID, items[2].Finding.Key, "admin", "", e.audit()); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("empty reason: %v", err)
 	}
-	if _, err := e.st.ConfirmHeld(e.ctx, r.ID, items[2].Finding.Key, "admin", string([]byte{0xff})); !errors.Is(err, ErrInvalidInput) {
+	if _, err := e.st.ConfirmHeld(e.ctx, r.ID, items[2].Finding.Key, "admin", string([]byte{0xff}), e.audit()); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("invalid UTF-8 reason: %v", err)
 	}
 }
@@ -415,7 +415,7 @@ func TestConfirmHeldSupersededByNewerRun(t *testing.T) {
 	r2 := e.start(t)
 	e.submit(t, r2, 0, []Subject{hostSubj("web01")}, items[0], items[1])
 	e.complete(t, r2)
-	if _, err := e.st.ConfirmHeld(e.ctx, r1.ID, items[0].Finding.Key, "admin", "ok"); !errors.Is(err, ErrHoldNotFound) {
+	if _, err := e.st.ConfirmHeld(e.ctx, r1.ID, items[0].Finding.Key, "admin", "ok", e.audit()); !errors.Is(err, ErrHoldNotFound) {
 		t.Fatalf("confirm after newer run: %v", err)
 	}
 	e.wantState(t, items[0].Finding.Key, StateOpen, "")
@@ -432,7 +432,7 @@ func TestConfirmHeldSupersededWhenFindingWritten(t *testing.T) {
 	r2 := e.start(t)
 	e.submit(t, r2, 0, nil, items[0])
 	e.complete(t, r2)
-	if _, err := e.st.ConfirmHeld(e.ctx, r1.ID, items[0].Finding.Key, "admin", "ok"); !errors.Is(err, ErrHoldSuperseded) {
+	if _, err := e.st.ConfirmHeld(e.ctx, r1.ID, items[0].Finding.Key, "admin", "ok", e.audit()); !errors.Is(err, ErrHoldSuperseded) {
 		t.Fatalf("confirm after write: %v", err)
 	}
 	if h, _ := e.st.Holds(e.ctx, items[0].Finding.Key); len(h) != 0 {
@@ -482,7 +482,7 @@ func TestSubjectRemovedClosesEverything(t *testing.T) {
 	e := newEnv(t)
 	items := e.seed(t, "web01", 2)
 	other := e.seed(t, "db01", 1)
-	if err := e.st.SetFalsePositive(e.ctx, items[1].Finding.Key, MarkFalsePositive{By: "admin", Category: CategoryOther, Reason: "r", BasisVersion: "1.0-1"}); err != nil {
+	if err := e.st.SetFalsePositive(e.ctx, items[1].Finding.Key, MarkFalsePositive{By: "admin", Category: CategoryOther, Reason: "r", BasisVersion: "1.0-1"}, e.audit()); err != nil {
 		t.Fatal(err)
 	}
 	n, err := e.st.CloseSubjectRemoved(e.ctx, hostSubj("web01"))
