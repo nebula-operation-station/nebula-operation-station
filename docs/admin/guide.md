@@ -1869,24 +1869,65 @@ read; and whether it is complete. It holds no address, host name label,
 secret or raw command output. A stored read is never changed. The export
 limits are 20,000 packages per host.
 
-**When a read is complete.** A read is complete when all of these hold:
+**When a read is complete.** The host's release comes only from its newest
+successful `core.facts` result. A read is complete when all of these hold:
 
+- the newest successful `core.facts` result finished no more than 24 hours
+  before the list started (a result that finished while the list ran
+  counts);
+- that `core.facts` result started after the host's last full upgrade
+  (`package.install_all`, see below) had finished. A result that started at
+  the same second as the upgrade finished does not count;
+- no full upgrade ran during that `core.facts` result, and none ran during
+  the list. An upgrade that ends exactly when the other run starts counts as
+  running during it;
 - the package list was complete;
-- the host's release maps to an ecosystem NOS can match: `debian:<codename>`
-  or `ubuntu:<VERSION_ID>`. Other releases are not mapped;
-- every source package has a version basis;
-- the newest `core.facts` result of the host finished no earlier than the
-  list, compared to the whole second. Otherwise the read is partial, with the
-  reason "core.facts older than the package list". So the first read is not
-  complete by itself: it depends on when `core.facts` finished relative to
-  the list, and a later read can be complete when the order is right.
+- the release maps to an ecosystem NOS can match: `debian:<codename>` or
+  `ubuntu:<VERSION_ID>`. Other releases are not mapped;
+- the list belongs to that release: it holds exactly one `base-files`
+  package, and its version starts with the release's prefix. On Debian the
+  prefix is the `VERSION_ID` and a dot (`12.` for bookworm). On Ubuntu NOS
+  knows the prefix only for 20.04 (`11ubuntu`), 22.04 (`12ubuntu`) and 24.04
+  (`13ubuntu`); only the 24.04 entry is checked against a real host so far.
+  This catches a release upgrade that NOS did not run, such as a manual
+  `do-release-upgrade`;
+- every source package has a version basis.
 
-Otherwise the read is **partial** and says why, for example "release not
-supported for package mapping" or "package list incomplete". A list that
-cannot be read or stored (a failed release lookup, a refusal by the store,
-an unavailable store) is stored as a partial marker. The marker becomes the
-host's latest inventory, so an older complete read no longer counts as
-current. The last complete read is still kept for closure decisions.
+Otherwise the read is **partial**. It stores one reason, the first check
+that failed, in this order:
+
+| Stored reason | When |
+|---|---|
+| `release lookup failed` | the `core.facts` result or the upgrade history could not be read, or the start of the list or of `core.facts` is not known |
+| `core.facts older than the package list` | the newest `core.facts` finished more than 24 hours before the list started |
+| `core.facts not newer than the last full upgrade` | the newest `core.facts` started no later than the last full upgrade finished |
+| `full upgrade ran during the list or core.facts` | a full upgrade overlaps the `core.facts` result or the list |
+| `package list does not match the release of core.facts` | the list's `base-files` version does not belong to the release (or the list has no `base-files`, or more than one) |
+| `package list release not checkable from core.facts` | the release has no prefix NOS knows: Debian without a `VERSION_ID` (testing, sid) or an Ubuntu release other than 20.04, 22.04 and 24.04 |
+| the list's own reason, or `package list incomplete` | the package list was not complete, for example because the read failed or the output was cut off |
+| `release not supported for package mapping` | there is no successful `core.facts` result, or the release is not mapped |
+| `source version basis unknown` | a source package has no version basis |
+| `list refused by the store` | the store refused the list (a field over its limit or invalid) |
+| `list not stored: store unavailable` | the store could not write the list for another reason |
+
+The two release checks (`does not match` and `not checkable`) run only on a
+complete list of a mapped release. A partial read keeps its packages only
+when the release is mapped and the reason is the list's own or
+`source version basis unknown`; every other partial read holds none. Every
+partial read becomes the host's latest inventory, so an older
+complete read no longer counts as current. The last complete read is still
+kept for closure decisions. There is no waiting for a better order: each new
+list is judged again, and it is complete only when every check above holds
+for it.
+
+**Full upgrades (`package.install_all`).** A full upgrade is not part of a
+read lease; the lease never runs it. You start it like any other change
+(section 9.1). After it has finished, lists stay partial with
+`core.facts not newer than the last full upgrade` until a `core.facts` run
+starts after the upgrade. A lease with `core.facts` runs it again at the
+lease's interval, and the next list after that can be complete. A full upgrade
+writes no read of its own: until the next list runs (at most 6 hours later
+on a lease), the banner still shows the last read from before the upgrade.
 
 A host whose latest read is partial is still exported, marked incomplete.
 The agent cannot close findings on it from the inventory.
@@ -1932,8 +1973,12 @@ needs the inventory before it can report anything.
 
 1. **Create the lease.** *Operations → Read leases → New read lease*. Scope
    it to the hosts (all hosts, a tag or an environment). Choose the actions
-   `package.list_installed` and `core.facts`. Without `core.facts` the
-   release is unknown and every read stays partial. The form offers only
+   `core.facts` and `package.list_installed`. The form lists `core.facts`
+   first, and the lease runs a host's actions in that order, so each host's
+   release is read before its list. Without `core.facts` the release is
+   unknown and every read stays partial with
+   `release not supported for package mapping`. Do not add
+   `package.install_all`: it is not a read and cannot be leased. The form offers only
    actions that take no parameters, so `docker.inspect` and `image.packages`
    cannot be chosen there, and container images are not fed yet (see *The
    package inventory*). Duration 7 or 30 days.
@@ -1947,12 +1992,17 @@ needs the inventory before it can report anything.
    button that runs an ordinary lease on demand. After that,
    `package.list_installed` runs at most every 6 hours per host (section 9.4).
 4. **Check one host.** Open the host's subject page and read the *Package
-   inventory* banner. A read that is complete shows "read <time>, … source
-   packages (… binaries), complete". A read that is not complete shows
-   `partial: <reason>`; for example "core.facts older than the package list"
-   means `core.facts` finished before the list, so wait for a later read. If
-   the banner says "none stored", no read has arrived yet. This release does
-   not promise a complete first read (see *The package inventory*).
+   inventory* banner. On the first run each host runs `core.facts` and then
+   `package.list_installed`, so the first read can already be complete:
+   "read <time>, … source packages (… binaries), complete". A read that is
+   not complete shows `partial: <reason>`, with one of the reasons in the
+   table in *The package inventory*; the table says what each one means.
+   Some reasons go away with the next list (at least 6 hours later), for
+   example `core.facts not newer than the last full upgrade` once
+   `core.facts` has run again. Others stay until the host changes, for
+   example `package list release not checkable from core.facts` on an Ubuntu
+   release NOS has no prefix for. If the banner says "none stored", no list
+   has been stored yet.
 5. **Run the agent.** Start it with `sudo systemctl start nebula-vuln-agent.service`
    or wait for its timer (section 10.5). Then read the log with
    `journalctl -u nebula-vuln-agent.service -n 50`. Look for the line
