@@ -16,6 +16,12 @@ proposals](#amendment-2026-11-17-reject-pending-proposals) at the end and
 [spec 07](../spec/07-execution-model.md#v29-07-01). Rejecting only removes
 authority; no decision below is weakened.
 
+**Amendment note, 2026-11-21 (fi01).** A read lease may run exactly
+`fim.scan` as a durable job with its two fixed parameters; see [Addendum
+(2026-11-21): `fim.scan` as a durable, parameterised
+read](#addendum-2026-11-21-fimscan-as-a-durable-parameterised-read) at the
+end. No other action gets an exception.
+
 ## Context
 
 Working across several hosts currently repeats confirmations for facts, update
@@ -445,3 +451,89 @@ faster than today.
 | op04: executor reject | `internal/permit/` **P**, `internal/executor/` **P** | Check order of spec 07 phase 1 (marker before `gcLocked` and the in-memory lookup); binding check, marker and signed event in one `executor.db` transaction with no insert into `execution_ids` (rejecting a proposed execution succeeds although its ID is already bound); a failure in signing or in that transaction returns `storage_error` and leaves the database and the in-memory permit unchanged (still pending, still approvable); after the commit only in-memory steps follow (delete, pending-slot placeholder) and the call succeeds; the placeholder keeps `MaxPending` full until the window end and is dropped by `gcLocked`, lock and restart; an ended window answers `permit_not_found`, a rejected digest `permit_already_rejected` also after its window; approval paths refuse a digest present in `rejected_proposals` with `permit_rejected` even with a stale in-memory entry; event carries `session_credential_id`; rejected digest unapprovable, its execution ID refused as `execution_id_reused` and its batch ID refused by batch `Propose` after lock and restart, every error code, approve-vs-reject race in both orders, reason and `relayed_user` limits, signed event without text |
 | op05: server state and UI | `internal/executions/`, server migration, `internal/web/ui/`, templates | State `rejected`, approval check and sweep honour `REJECTED` (sweep asks `GetPermitState` before `expired`, also after executor lock or restart and server downtime), rejection intent stored before the call and used for attribution after a crash (role `server` → `execution_rejected`, role `admin` → `execution_rejected_on_cli`), batch records rejected as a whole with their members when server batches exist, reason shown as text only, audit records, never in notifications or LLM inputs |
 | op06: `nebula reject` | `cmd/nebula/` **P** | Admin UID only, shows the executor's view first, optional reason, distinct error output |
+
+## Addendum (2026-11-21): `fim.scan` as a durable, parameterised read
+
+Status: decided by the maintainer (Axel), 2026-11-21, in the "Decision
+(2026-11-21, maintainer)" block of
+[`docs/implementation/integrity-wiring-decisions.md`](../implementation/integrity-wiring-decisions.md),
+points (b) and (g) together ("Scan als dauerhafter Job (Option 2, ohne
+Permit-Mutex über 40 min), mit der nötigen Lease-Regel-Änderung (ADR
+0007-Bereich, hiermit entschieden)") and point (d) ("Option 1 beschränkt
+auf `FimScanActionID`"). Recorded here by fi01 (Claude); the wording below
+records that decision and adds nothing to it.
+
+### Context
+
+ADR 0015 sizes one `fim.scan` run at up to a 128 MiB raw document and a
+40 min action timeout, above the 1 MiB `result.json` default of spec 09
+([ADR 0015 D6](0015-integrity-monitoring.md), "Limits",
+`docs/adr/0015-integrity-monitoring.md:624-627`). Read leases run attached
+only, and the lease runner and the proposal path skip every durable action
+and every action with parameters (decision paper, section 2 (d) and (g)).
+Keeping the scan attached would hold the read dispatch under the lease
+authority's lock for up to 40 min, so a lock or a read-grant revocation
+could wait that long (decision paper, section 2 (b) option 1). The
+maintainer chose option 2: `fim.scan` runs as a durable job, without that
+lock held over the run.
+
+### Decision
+
+**F1 – One durable action.** A read lease may run exactly the built-in
+`fim.scan` action (`FimScanActionID`) as a durable job. Every other durable
+action stays excluded from read leases.
+
+**F2 – Two fixed parameters.** A read-lease entry for `fim.scan` carries
+exactly its two fixed parameters, `mode` and `profile`, with the values the
+grant freezes ([spec 07](../spec/07-execution-model.md#v26-07-01)). Each
+run sends exactly the canonical parameters whose hash the grant binds; the
+executor refuses any other key, any other value and any other parameter
+hash. Every other parameterised action stays excluded from read-lease runs;
+this addendum makes no exception for any of them. (The sentence on
+parameterised inspection/status in "One standing read-grant mechanism"
+above is not changed by this addendum.)
+
+**F3 – Limits.** The run is bound by the action-specific `fim.scan` limits
+of [spec 09](../spec/09-untrusted-host-data.md#v26-09-01) (128 MiB raw
+document per run, 300,000 records, path depth 64, one record 16 KiB), also
+when the result is read from the durable job, and by ADR 0015's 40 min
+action timeout. These are ADR 0015's numbers; this addendum sets none.
+
+**F4 – Everything else unchanged.** Grant binding, the read-only contract,
+effective LOW, the per-run rechecks, budgets and their claims, the
+per-mode minimum intervals, a fresh execution ID per run, audit, lock
+pausing grants and revocation blocking all future claims apply to the
+durable `fim.scan` run as to every other read.
+
+### Open: lock and revocation of a running durable read (checked by fi04)
+
+The decision paper did not check this: section 2 (b) option 2 says of the
+durable path that "its lock and revocation behaviour is not checked in
+this paper". This ADR requires that revocation and lock are serialized
+with dispatch so queued work cannot escape, and lets already dispatched
+work finish ("One standing read-grant mechanism" above). For a durable read
+that may run for 40 min, fi04 checks and reports, and the maintainer then
+decides:
+
+- that lock and revocation stop new `fim.scan` claims and dispatches at
+  once, as for attached reads;
+- whether a durable `fim.scan` already dispatched before a lock or a
+  revocation is left to finish, stopped on the host, or finishes with its
+  result discarded, and whether its result is accepted afterwards;
+- what an executor restart (which starts locked) does with a running
+  durable read and its result;
+- how the budget claim of such a run is counted in each of these cases.
+
+This addendum decides none of these points.
+
+### Required specification changes (fi01)
+
+- `docs/spec/09-untrusted-host-data.md`
+  ([v26-09-01](../spec/09-untrusted-host-data.md#v26-09-01)): the
+  `fim.scan` limits apply to this action only, also to its durable result
+  read. Done in fi01.
+- `docs/spec/07-execution-model.md`: read leases may run `fim.scan` as a
+  durable job (today the spec runs short read-only actions attached).
+  Not done in fi01; open.
+- `docs/spec/04-revision-history.md`: a revision entry. Not done in fi01;
+  open.
