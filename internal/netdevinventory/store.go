@@ -371,10 +371,9 @@ func (s *Store) UpsertDeviceReported(ctx context.Context, d netdevcontract.Devic
 // record the collector spooled (UpsertDeviceReported), so every row has its
 // spool record. This call writes nothing and returns ErrUnreportedDevice.
 //
-// It stays exported only so that the privileged acceptance tests in
-// test/security (protected path, build tag privileged) still compile. Those
-// tests must move to UpsertDeviceReported with a spool record before they can
-// pass again.
+// It has no caller outside this package's tests, which check the refusal.
+// It stays exported so that code still calling it fails loudly at run time
+// instead of writing a row without a spool record.
 func (s *Store) UpsertDevice(ctx context.Context, d netdevcontract.Device) error {
 	return ErrUnreportedDevice
 }
