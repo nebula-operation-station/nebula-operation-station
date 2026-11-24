@@ -46,6 +46,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/auditlog"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
@@ -795,11 +796,11 @@ func TestVulnAgentCannotSetOrClearHumanStates(t *testing.T) {
 	e.run(e.fresh(nil), host(), vulnRecord(accepted), vulnRecord(falsePos), vulnRecord(hinted))
 	ka, kf := e.finding(accepted, subjWeb01).Key, e.finding(falsePos, subjWeb01).Key
 	if err := e.st.SetAcceptedRisk(t.Context(), ka, vulnstore.AcceptRisk{Approver: "admin", Reason: "mitigated by the firewall",
-		BasisVersion: opensslInstalled}); err != nil {
+		BasisVersion: opensslInstalled}, auditlog.New(e.db, true)); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.st.SetFalsePositive(t.Context(), kf, vulnstore.MarkFalsePositive{By: "admin", Category: "backport_fixed",
-		Reason: "patched in the backport", BasisVersion: opensslInstalled}); err != nil {
+		Reason: "patched in the backport", BasisVersion: opensslInstalled}, auditlog.New(e.db, true)); err != nil {
 		t.Fatal(err)
 	}
 	wantHuman := func(stage string) {
@@ -900,9 +901,10 @@ func tableCounts(t *testing.T, e *vulnEnv) map[string]int64 {
 // Findings are advisory (V1, D1): a sequence of runs with KEV, critical,
 // exploit-public and fixable findings on a host and an image, re-opens,
 // unconfirmed and held closures, not_affected records and an admin
-// confirmation writes only the findings store. No other server.db table
-// (schedules, batches, executions, discovery, pins, …) gains or loses a
-// row, no response of the agent API carries a link or an action, and no
+// confirmation writes only the findings store, plus exactly one audit line
+// for the admin confirmation (ADR 0011 Q4, written with the decision). No
+// other server.db table (schedules, batches, executions, discovery, pins,
+// …) gains or loses a row, no response of the agent API carries a link or an action, and no
 // audit entry or notification names a proposal, permit, lease or schedule.
 func TestVulnFindingsCreateNoProposalPermitOrSchedule(t *testing.T) {
 	e := newVulnEnv(t, nil)
@@ -950,9 +952,22 @@ func TestVulnFindingsCreateNoProposalPermitOrSchedule(t *testing.T) {
 	if err != nil || len(holds) == 0 {
 		t.Fatalf("fixture: the KEV closure was not held (%v, %v)", holds, err)
 	}
-	// The admin confirms the held closure (path 6).
-	if _, err := e.st.ConfirmHeld(t.Context(), holds[0].RunID, e.finding(cveN(690), subjWeb01).Key, "admin", "checked on the host"); err != nil {
+	// The admin confirms the held closure (path 6). The confirmation writes
+	// its decision and exactly one audit line in one transaction (ADR 0011
+	// Q4); that line is the only row outside the findings store.
+	audit := auditlog.New(e.db, true)
+	if _, err := e.st.ConfirmHeld(t.Context(), holds[0].RunID, e.finding(cveN(690), subjWeb01).Key, "admin", "checked on the host", audit); err != nil {
 		t.Fatalf("confirm held: %v", err)
+	}
+	lines, err := audit.List(t.Context(), 0, 10, "")
+	if err != nil || len(lines) != 1 || lines[0].Kind != vulnstore.AuditVulnHoldConfirmed || lines[0].User != "admin" {
+		t.Fatalf("audit lines of the confirmation = %+v, %v; want exactly one %s by admin", lines, err, vulnstore.AuditVulnHoldConfirmed)
+	}
+	line := strings.ToLower(fmt.Sprintf("%+v", lines[0]))
+	for _, w := range []string{"proposal", "permit", "schedule", "lease", "execution", "approve"} {
+		if containsWord(line, w) {
+			t.Errorf("confirmation audit line mentions %q: %+v", w, lines[0])
+		}
 	}
 
 	// Run 3 re-opens a closed finding with KEV.
@@ -969,8 +984,12 @@ func TestVulnFindingsCreateNoProposalPermitOrSchedule(t *testing.T) {
 	}
 	sort.Strings(names)
 	for _, n := range names {
-		if after[n] != before[n] {
-			t.Errorf("table %s: %d rows before the runs, %d after; findings must not write outside the store", n, before[n], after[n])
+		want := before[n]
+		if n == "audit_log" {
+			want++ // the confirmation's audit line, checked above
+		}
+		if after[n] != want {
+			t.Errorf("table %s: %d rows before the runs, %d after (want %d); findings must not write outside the store", n, before[n], after[n], want)
 		}
 	}
 	for n := range before {

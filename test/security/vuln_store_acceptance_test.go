@@ -34,6 +34,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/auditlog"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/dockerhost"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/notify"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
@@ -847,7 +848,7 @@ func TestVulnRaiseOnlySourceClosesNothingAndLowersNothing(t *testing.T) {
 			prep: func(e *vulnEnv, d time.Time) {
 				s, _, _ := e.run(e.fresh([]string{"dsa"}, regressedDSA(d)), nil)
 				if _, err := e.st.ResetMark(e.t.Context(), vulnstore.MarkResetRequest{SourceID: "dsa", RunID: s.RunID,
-					ContentDate: d.Add(-48 * time.Hour), Admin: "admin", Reason: "feed rebuilt from an older mirror"}); err != nil {
+					ContentDate: d.Add(-48 * time.Hour), Admin: "admin", Reason: "feed rebuilt from an older mirror"}, auditlog.New(e.db, true)); err != nil {
 					e.t.Fatalf("admin reset: %v", err)
 				}
 			},
@@ -1063,7 +1064,7 @@ func TestVulnMarkResetImpossibleWithAgentToken(t *testing.T) {
 
 	// Control: the admin path does reset it.
 	if _, err := e.st.ResetMark(t.Context(), vulnstore.MarkResetRequest{SourceID: "dsa", RunID: s.RunID,
-		ContentDate: d.Add(-48 * time.Hour), Admin: "admin", Reason: "feed rebuilt from an older mirror"}); err != nil {
+		ContentDate: d.Add(-48 * time.Hour), Admin: "admin", Reason: "feed rebuilt from an older mirror"}, auditlog.New(e.db, true)); err != nil {
 		t.Fatalf("admin reset: %v", err)
 	}
 	if v, _ := e.st.MarkResetCandidate(t.Context(), "dsa"); !v.MarkDate.Equal(d.Add(-48*time.Hour)) || !v.Probation {

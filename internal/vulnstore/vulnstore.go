@@ -32,9 +32,12 @@
 //   - human states (accepted_risk, false_positive), which no run changes.
 //
 // Authentication of callers (the hermes-vuln token, admin sessions with a
-// fresh WebAuthn assertion) and the audit log are the caller's job; the
-// store returns everything the caller needs to log. Store methods never
-// return or log assessment text in errors.
+// fresh WebAuthn assertion) is the caller's job. The maintainer decisions
+// (SetAcceptedRisk, SetFalsePositive, ConfirmHeld, DiscardHeld, ResetMark)
+// take a DecisionAuditor and write the decision and its audit line in one
+// transaction; for everything else the audit log is the caller's job and
+// the store returns everything the caller needs to log. Store methods
+// never return or log assessment text in errors.
 package vulnstore
 
 import (

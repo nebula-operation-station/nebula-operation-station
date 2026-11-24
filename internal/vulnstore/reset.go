@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 )
 
@@ -46,8 +47,9 @@ type MarkResetRequest struct {
 	Reason string
 }
 
-// MarkReset is an applied reset with everything the caller writes to the
-// audit log and the vuln.feed_mark_reset event.
+// MarkReset is an applied reset. ResetMark has already written its
+// AuditVulnMarkReset line in the reset's transaction; the caller raises
+// the vuln.feed_mark_reset event from it.
 type MarkReset struct {
 	SourceID     string
 	RunID        string
@@ -162,7 +164,12 @@ func (s *Store) MarkResetCandidate(ctx context.Context, sourceID string) (MarkRe
 // on probation until a run names it strictly above the pre-reset mark (a
 // second reset during probation keeps the higher pre-reset mark). The reset
 // applies to run starts after it; verdicts of runs already started stay.
-func (s *Store) ResetMark(ctx context.Context, req MarkResetRequest) (MarkReset, error) {
+// The reset and its AuditVulnMarkReset line are written in one transaction
+// of audit (required): both or neither.
+func (s *Store) ResetMark(ctx context.Context, req MarkResetRequest, audit DecisionAuditor) (MarkReset, error) {
+	if audit == nil {
+		return MarkReset{}, fmt.Errorf("vulnstore: mark reset: auditor is required: %w", ErrInvalidInput)
+	}
 	now := s.now().UTC()
 	if err := checkActor(req.Admin); err != nil {
 		return MarkReset{}, fmt.Errorf("vulnstore: mark reset: %w", err)
@@ -173,44 +180,53 @@ func (s *Store) ResetMark(ctx context.Context, req MarkResetRequest) (MarkReset,
 	if _, listed := s.sources[req.SourceID]; !listed {
 		return MarkReset{}, fmt.Errorf("vulnstore: mark reset: source not listed: %w", ErrResetRefused)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	tx, err := s.writeTx(ctx)
-	if err != nil {
-		return MarkReset{}, fmt.Errorf("vulnstore: mark reset: %w", err)
-	}
-	defer tx.Rollback()
-
-	m, ok, err := loadMark(ctx, tx, req.SourceID)
+	var out MarkReset
+	err := s.decisionTx(ctx, audit, func(tx *sql.Tx, appendLine func(string, map[string]string) error) error {
+		var err error
+		out, err = s.resetMark(ctx, tx, req, now)
+		if err != nil {
+			return err
+		}
+		return appendDecision(appendLine, AuditVulnMarkReset, req.Admin, markResetAttrs(out))
+	})
 	if err != nil {
 		return MarkReset{}, fmt.Errorf("vulnstore: mark reset %s: %w", req.SourceID, err)
 	}
+	return out, nil
+}
+
+// resetMark checks and applies req through tx.
+func (s *Store) resetMark(ctx context.Context, tx *sql.Tx, req MarkResetRequest, now time.Time) (MarkReset, error) {
+	m, ok, err := loadMark(ctx, tx, req.SourceID)
+	if err != nil {
+		return MarkReset{}, err
+	}
 	if !ok || !m.date.Valid {
-		return MarkReset{}, fmt.Errorf("vulnstore: mark reset %s: no mark: %w", req.SourceID, ErrResetRefused)
+		return MarkReset{}, fmt.Errorf("no mark: %w", ErrResetRefused)
 	}
 	runID, status, repDate, repSeq, found, err := latestNaming(ctx, tx, req.SourceID)
 	if err != nil {
-		return MarkReset{}, fmt.Errorf("vulnstore: mark reset %s: %w", req.SourceID, err)
+		return MarkReset{}, err
 	}
 	if !found || runID != req.RunID {
-		return MarkReset{}, fmt.Errorf("vulnstore: mark reset %s: not the latest run naming the source: %w", req.SourceID, ErrResetRefused)
+		return MarkReset{}, fmt.Errorf("not the latest run naming the source: %w", ErrResetRefused)
 	}
 	if status != SourceRegressed {
-		return MarkReset{}, fmt.Errorf("vulnstore: mark reset %s: latest run naming the source did not regress it: %w", req.SourceID, ErrResetRefused)
+		return MarkReset{}, fmt.Errorf("latest run naming the source did not regress it: %w", ErrResetRefused)
 	}
 	reqSeq := nullOf(req.Sequence)
 	if req.ContentDate.IsZero() || !repDate.Valid || unix(req.ContentDate) != repDate.Int64 || reqSeq != repSeq {
-		return MarkReset{}, fmt.Errorf("vulnstore: mark reset %s: value not reported by that run: %w", req.SourceID, ErrResetRefused)
+		return MarkReset{}, fmt.Errorf("value not reported by that run: %w", ErrResetRefused)
 	}
 	if req.ContentDate.After(now.Add(MaxFutureSkew)) {
-		return MarkReset{}, fmt.Errorf("vulnstore: mark reset %s: value in the future: %w", req.SourceID, ErrResetRefused)
+		return MarkReset{}, fmt.Errorf("value in the future: %w", ErrResetRefused)
 	}
 	newDate := repDate.Int64
 	dateAbove := newDate > m.date.Int64
 	seqAbove := repSeq.Valid && m.seq.Valid && repSeq.Int64 > m.seq.Int64
 	lowers := newDate < m.date.Int64 || m.seq.Valid && (!repSeq.Valid || repSeq.Int64 < m.seq.Int64)
 	if dateAbove || seqAbove || !lowers {
-		return MarkReset{}, fmt.Errorf("vulnstore: mark reset %s: not below the mark: %w", req.SourceID, ErrResetRefused)
+		return MarkReset{}, fmt.Errorf("not below the mark: %w", ErrResetRefused)
 	}
 
 	// The pre-reset mark probation must pass: the mark just before this
@@ -224,15 +240,12 @@ func (s *Store) ResetMark(ctx context.Context, req MarkResetRequest) (MarkReset,
 	if _, err := tx.ExecContext(ctx, `UPDATE vuln_source_marks SET content_date = ?, sequence = ?, probation = 1,
 		pre_reset_date = ?, pre_reset_sequence = ?, updated_at = ? WHERE source_id = ?`,
 		newDate, repSeq, preDate, preSeq, n, req.SourceID); err != nil {
-		return MarkReset{}, fmt.Errorf("vulnstore: mark reset %s: %w", req.SourceID, err)
+		return MarkReset{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO vuln_mark_resets (source_id, run_id, admin, reason, old_date, old_sequence,
 		new_date, new_sequence, pre_reset_date, pre_reset_sequence, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		req.SourceID, runID, req.Admin, req.Reason, m.date, m.seq, newDate, repSeq, preDate, preSeq, n); err != nil {
-		return MarkReset{}, fmt.Errorf("vulnstore: mark reset %s: record: %w", req.SourceID, err)
-	}
-	if err := tx.Commit(); err != nil {
-		return MarkReset{}, fmt.Errorf("vulnstore: mark reset %s: commit: %w", req.SourceID, err)
+		return MarkReset{}, fmt.Errorf("record: %w", err)
 	}
 	return MarkReset{
 		SourceID: req.SourceID, RunID: runID, Admin: req.Admin, Reason: req.Reason,
@@ -241,6 +254,33 @@ func (s *Store) ResetMark(ctx context.Context, req MarkResetRequest) (MarkReset,
 		PreResetDate: timeOf(preDate), PreResetSeq: ptrOf(preSeq),
 		At: fromUnix(n),
 	}, nil
+}
+
+// markResetAttrs are the audit attributes of an applied reset.
+func markResetAttrs(r MarkReset) map[string]string {
+	ts := func(t time.Time) string {
+		if t.IsZero() {
+			return ""
+		}
+		return t.Format(time.RFC3339)
+	}
+	seq := func(p *int64) string {
+		if p == nil {
+			return ""
+		}
+		return strconv.FormatInt(*p, 10)
+	}
+	return map[string]string{
+		"source_id":          r.SourceID,
+		"run_id":             r.RunID,
+		"reason":             r.Reason,
+		"old_date":           ts(r.OldDate),
+		"old_sequence":       seq(r.OldSeq),
+		"new_date":           ts(r.NewDate),
+		"new_sequence":       seq(r.NewSeq),
+		"pre_reset_date":     ts(r.PreResetDate),
+		"pre_reset_sequence": seq(r.PreResetSeq),
+	}
 }
 
 func maxNull(a, b sql.NullInt64) sql.NullInt64 {

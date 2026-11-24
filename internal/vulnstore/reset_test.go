@@ -27,7 +27,7 @@ func regressOSV(t *testing.T, e *env, n int, reported time.Time) ([]Item, time.T
 }
 
 func (e *env) reset(r Run, at time.Time) (MarkReset, error) {
-	return e.st.ResetMark(e.ctx, MarkResetRequest{SourceID: "osv", RunID: r.ID, ContentDate: at, Admin: "admin", Reason: "provider re-dated data"})
+	return e.st.ResetMark(e.ctx, MarkResetRequest{SourceID: "osv", RunID: r.ID, ContentDate: at, Admin: "admin", Reason: "provider re-dated data"}, e.audit())
 }
 
 func TestMarkResetLowersMarkAndReportsAuditFields(t *testing.T) {
@@ -102,16 +102,16 @@ func TestMarkResetRefusals(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			q := good
 			c.mod(&q)
-			if _, err := e.st.ResetMark(e.ctx, q); !errors.Is(err, c.want) {
+			if _, err := e.st.ResetMark(e.ctx, q, e.audit()); !errors.Is(err, c.want) {
 				t.Fatalf("err = %v, want %v", err, c.want)
 			}
 		})
 	}
-	if _, err := e.st.ResetMark(e.ctx, good); err != nil {
+	if _, err := e.st.ResetMark(e.ctx, good, e.audit()); err != nil {
 		t.Fatalf("latest regressed run: %v", err)
 	}
 	// The mark is now at that value: a second reset to it lowers nothing.
-	if _, err := e.st.ResetMark(e.ctx, good); !errors.Is(err, ErrResetRefused) {
+	if _, err := e.st.ResetMark(e.ctx, good, e.audit()); !errors.Is(err, ErrResetRefused) {
 		t.Fatalf("reset to the mark itself: %v, want ErrResetRefused", err)
 	}
 }
@@ -226,7 +226,7 @@ func TestProbationSequenceMustPassPreResetSequence(t *testing.T) {
 	r2 := e.start(t, csaf(now.Add(-time.Hour), 3)) // operator restarted the sequence
 	e.complete(t, r2)
 	if _, err := e.st.ResetMark(e.ctx, MarkResetRequest{SourceID: "cisco-csaf", RunID: r2.ID, ContentDate: now.Add(-time.Hour), Sequence: seq(3),
-		Admin: "admin", Reason: "new signing key"}); err != nil {
+		Admin: "admin", Reason: "new signing key"}, e.audit()); err != nil {
 		t.Fatal(err)
 	}
 	// A newer date with a sequence not past 10 stays on probation.

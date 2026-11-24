@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"time"
 	"unicode/utf8"
 
@@ -32,7 +33,8 @@ var (
 
 // AcceptRisk is an admin's accepted_risk decision. The caller has checked
 // that the actor is the maintainer (admin) with a fresh WebAuthn assertion
-// (Q4) and audits the change.
+// (Q4) and passes its DecisionAuditor: the store writes the decision and
+// its audit line in one transaction (both or neither).
 type AcceptRisk struct {
 	Approver string
 	Reason   string
@@ -66,8 +68,12 @@ func checkActor(a string) error {
 	return nil
 }
 
-// SetAcceptedRisk moves an open finding to accepted_risk.
-func (s *Store) SetAcceptedRisk(ctx context.Context, key vulnfinding.Key, a AcceptRisk) error {
+// SetAcceptedRisk moves an open finding to accepted_risk and writes the
+// AuditVulnAcceptedRisk line in the same transaction of audit (required).
+func (s *Store) SetAcceptedRisk(ctx context.Context, key vulnfinding.Key, a AcceptRisk, audit DecisionAuditor) error {
+	if audit == nil {
+		return fmt.Errorf("vulnstore: accept risk: auditor is required: %w", ErrInvalidInput)
+	}
 	now := s.now().UTC()
 	if err := checkActor(a.Approver); err != nil {
 		return fmt.Errorf("vulnstore: accept risk: %w", err)
@@ -85,11 +91,15 @@ func (s *Store) SetAcceptedRisk(ctx context.Context, key vulnfinding.Key, a Acce
 	if !exp.After(now) || exp.Sub(now) > MaxAcceptExpiry {
 		return fmt.Errorf("vulnstore: accept risk: expiry: %w", ErrInvalidInput)
 	}
-	return s.setHuman(ctx, key, StateAcceptedRisk, a.Approver, a.Reason, nil, unix(exp), a.BasisVersion, now)
+	return s.setHuman(ctx, audit, key, StateAcceptedRisk, a.Approver, a.Reason, nil, unix(exp), a.BasisVersion, now)
 }
 
-// SetFalsePositive moves an open finding to false_positive.
-func (s *Store) SetFalsePositive(ctx context.Context, key vulnfinding.Key, m MarkFalsePositive) error {
+// SetFalsePositive moves an open finding to false_positive and writes the
+// AuditVulnFalsePositive line in the same transaction of audit (required).
+func (s *Store) SetFalsePositive(ctx context.Context, key vulnfinding.Key, m MarkFalsePositive, audit DecisionAuditor) error {
+	if audit == nil {
+		return fmt.Errorf("vulnstore: false positive: auditor is required: %w", ErrInvalidInput)
+	}
 	now := s.now().UTC()
 	if err := checkActor(m.By); err != nil {
 		return fmt.Errorf("vulnstore: false positive: %w", err)
@@ -105,34 +115,50 @@ func (s *Store) SetFalsePositive(ctx context.Context, key vulnfinding.Key, m Mar
 	if !basisVersionRe.MatchString(m.BasisVersion) {
 		return fmt.Errorf("vulnstore: false positive: basis version: %w", ErrInvalidInput)
 	}
-	return s.setHuman(ctx, key, StateFalsePositive, m.By, m.Reason, m.Category, nil, m.BasisVersion, now)
+	return s.setHuman(ctx, audit, key, StateFalsePositive, m.By, m.Reason, m.Category, nil, m.BasisVersion, now)
 }
 
-func (s *Store) setHuman(ctx context.Context, key vulnfinding.Key, st State, by, reason string, category, expires any, basis string, now time.Time) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	tx, err := s.writeTx(ctx)
+// setHuman writes the human state and its audit line in audit's
+// transaction.
+func (s *Store) setHuman(ctx context.Context, audit DecisionAuditor, key vulnfinding.Key, st State, by, reason string, category, expires any, basis string, now time.Time) error {
+	err := s.decisionTx(ctx, audit, func(tx *sql.Tx, appendLine func(string, map[string]string) error) error {
+		f, err := loadFinding(ctx, tx, key)
+		if err != nil {
+			return err
+		}
+		if f.State != StateOpen {
+			return fmt.Errorf("from %s: %w", f.State, ErrWrongState)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE vuln_findings SET state = ?, human_by = ?, human_reason = ?, human_category = ?,
+			human_expires_at = ?, human_basis_version = ?, human_kev = ?, human_at = ?, rev = rev + 1, updated_at = ?
+			WHERE finding_key = ?`, string(st), by, reason, category, expires, basis, boolInt(f.EpisodeKEV()), unix(now), unix(now), key[:]); err != nil {
+			return err
+		}
+		if err := logHistory(ctx, tx, key, f.Subject.String(), unix(now), 0, EventHumanSet, true, ""); err != nil {
+			return err
+		}
+		attrs := map[string]string{
+			"finding_key":   key.String(),
+			"subject":       f.Subject.String(),
+			"state":         string(st),
+			"reason":        reason,
+			"basis_version": basis,
+			"kev":           strconv.FormatBool(f.EpisodeKEV()),
+		}
+		kind := AuditVulnFalsePositive
+		if st == StateAcceptedRisk {
+			kind = AuditVulnAcceptedRisk
+			if e, ok := expires.(int64); ok {
+				attrs["expires"] = fromUnix(e).Format(time.RFC3339)
+			}
+		}
+		if c, ok := category.(string); ok {
+			attrs["category"] = c
+		}
+		return appendDecision(appendLine, kind, by, attrs)
+	})
 	if err != nil {
 		return fmt.Errorf("vulnstore: set %s: %w", st, err)
-	}
-	defer tx.Rollback()
-	f, err := loadFinding(ctx, tx, key)
-	if err != nil {
-		return fmt.Errorf("vulnstore: set %s: %w", st, err)
-	}
-	if f.State != StateOpen {
-		return fmt.Errorf("vulnstore: set %s from %s: %w", st, f.State, ErrWrongState)
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE vuln_findings SET state = ?, human_by = ?, human_reason = ?, human_category = ?,
-		human_expires_at = ?, human_basis_version = ?, human_kev = ?, human_at = ?, rev = rev + 1, updated_at = ?
-		WHERE finding_key = ?`, string(st), by, reason, category, expires, basis, boolInt(f.EpisodeKEV()), unix(now), unix(now), key[:]); err != nil {
-		return fmt.Errorf("vulnstore: set %s: %w", st, err)
-	}
-	if err := logHistory(ctx, tx, key, f.Subject.String(), unix(now), 0, EventHumanSet, true, ""); err != nil {
-		return fmt.Errorf("vulnstore: set %s: %w", st, err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("vulnstore: set %s: commit: %w", st, err)
 	}
 	return nil
 }
@@ -273,8 +299,14 @@ func (s *Store) Holds(ctx context.Context, key vulnfinding.Key) ([]Hold, error) 
 // the hold; otherwise the hold is dropped and ErrHoldSuperseded returned.
 // It re-classifies: evidenced closes as nos_inventory, unconfirmed as
 // admin_confirmed, contradicted is refused with ErrContradicted (the hold
-// stays; the admin may discard it or set a human state).
-func (s *Store) ConfirmHeld(ctx context.Context, runID string, key vulnfinding.Key, admin, reason string) (ClosedBy, error) {
+// stays; the admin may discard it or set a human state). The closure, or
+// the drop of a superseded hold, and its audit line (AuditVulnHoldConfirmed
+// or AuditVulnHoldSuperseded) are written in one transaction of audit
+// (required): both or neither.
+func (s *Store) ConfirmHeld(ctx context.Context, runID string, key vulnfinding.Key, admin, reason string, audit DecisionAuditor) (ClosedBy, error) {
+	if audit == nil {
+		return "", fmt.Errorf("vulnstore: confirm hold: auditor is required: %w", ErrInvalidInput)
+	}
 	now := s.now().UTC()
 	if err := checkActor(admin); err != nil {
 		return "", fmt.Errorf("vulnstore: confirm hold: %w", err)
@@ -282,96 +314,115 @@ func (s *Store) ConfirmHeld(ctx context.Context, runID string, key vulnfinding.K
 	if err := checkReason(reason); err != nil {
 		return "", fmt.Errorf("vulnstore: confirm hold: %w", err)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	tx, err := s.writeTx(ctx)
-	if err != nil {
-		return "", fmt.Errorf("vulnstore: confirm hold: %w", err)
-	}
-	defer tx.Rollback()
-	var runSeq, rev int64
-	var subject string
-	err = tx.QueryRowContext(ctx, `SELECT run_seq, finding_rev, subject FROM vuln_held_closures WHERE run_id = ? AND finding_key = ?`,
-		runID, key[:]).Scan(&runSeq, &rev, &subject)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("vulnstore: confirm hold: %w", ErrHoldNotFound)
-	}
-	if err != nil {
-		return "", fmt.Errorf("vulnstore: confirm hold: %w", err)
-	}
-	f, err := loadFinding(ctx, tx, key)
-	if err != nil {
-		return "", fmt.Errorf("vulnstore: confirm hold: %w", err)
-	}
-	wm, err := watermark(ctx, tx, subject)
-	if err != nil {
-		return "", fmt.Errorf("vulnstore: confirm hold: %w", err)
-	}
-	if f.State != StateOpen || f.StateRunSeq > runSeq || wm != runSeq || f.Rev != rev {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM vuln_held_closures WHERE run_id = ? AND finding_key = ?`, runID, key[:]); err != nil {
-			return "", fmt.Errorf("vulnstore: confirm hold: drop: %w", err)
+	var (
+		by         ClosedBy
+		superseded bool
+	)
+	err := s.decisionTx(ctx, audit, func(tx *sql.Tx, appendLine func(string, map[string]string) error) error {
+		var runSeq, rev int64
+		var subject string
+		err := tx.QueryRowContext(ctx, `SELECT run_seq, finding_rev, subject FROM vuln_held_closures WHERE run_id = ? AND finding_key = ?`,
+			runID, key[:]).Scan(&runSeq, &rev, &subject)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrHoldNotFound
 		}
-		if err := tx.Commit(); err != nil {
-			return "", fmt.Errorf("vulnstore: confirm hold: commit: %w", err)
+		if err != nil {
+			return err
 		}
+		f, err := loadFinding(ctx, tx, key)
+		if err != nil {
+			return err
+		}
+		wm, err := watermark(ctx, tx, subject)
+		if err != nil {
+			return err
+		}
+		attrs := map[string]string{
+			"finding_key": key.String(),
+			"subject":     subject,
+			"run_id":      runID,
+			"reason":      reason,
+		}
+		if f.State != StateOpen || f.StateRunSeq > runSeq || wm != runSeq || f.Rev != rev {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM vuln_held_closures WHERE run_id = ? AND finding_key = ?`, runID, key[:]); err != nil {
+				return fmt.Errorf("drop: %w", err)
+			}
+			superseded = true
+			return appendDecision(appendLine, AuditVulnHoldSuperseded, admin, attrs)
+		}
+		class, err := s.classify.Classify(ctx, f)
+		if err != nil {
+			return fmt.Errorf("classify: %w", err)
+		}
+		by = ClosedByAdminConfirmed
+		switch class {
+		case ClassEvidenced:
+			by = ClosedByNOSInventory
+		case ClassContradicted:
+			return ErrContradicted
+		case ClassUnconfirmed, ClassUnconfirmedUnchanged:
+		default:
+			return fmt.Errorf("class %d: %w", class, ErrInvalidInput)
+		}
+		var admCol, reasonCol any
+		if by == ClosedByAdminConfirmed {
+			admCol, reasonCol = admin, reason
+		}
+		n := unix(now)
+		if _, err := tx.ExecContext(ctx, `UPDATE vuln_findings SET state = 'fixed', closed_by = ?, closed_note = '', closed_at = ?,
+			closed_admin = ?, closed_reason = ?, rev = rev + 1, updated_at = ? WHERE finding_key = ?`,
+			string(by), n, admCol, reasonCol, n, key[:]); err != nil {
+			return fmt.Errorf("close: %w", err)
+		}
+		// Counted by the window guard when applied (closure row 6).
+		if err := logHistory(ctx, tx, key, subject, n, 0, EventClosed, true, by); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM vuln_held_closures WHERE finding_key = ?`, key[:]); err != nil {
+			return fmt.Errorf("drop: %w", err)
+		}
+		attrs["closed_by"] = string(by)
+		return appendDecision(appendLine, AuditVulnHoldConfirmed, admin, attrs)
+	})
+	if err != nil {
+		return "", fmt.Errorf("vulnstore: confirm hold: %w", err)
+	}
+	if superseded {
 		return "", fmt.Errorf("vulnstore: confirm hold: %w", ErrHoldSuperseded)
-	}
-	class, err := s.classify.Classify(ctx, f)
-	if err != nil {
-		return "", fmt.Errorf("vulnstore: confirm hold: classify: %w", err)
-	}
-	by := ClosedByAdminConfirmed
-	switch class {
-	case ClassEvidenced:
-		by = ClosedByNOSInventory
-	case ClassContradicted:
-		return "", fmt.Errorf("vulnstore: confirm hold: %w", ErrContradicted)
-	case ClassUnconfirmed, ClassUnconfirmedUnchanged:
-	default:
-		return "", fmt.Errorf("vulnstore: confirm hold: class %d: %w", class, ErrInvalidInput)
-	}
-	var admCol, reasonCol any
-	if by == ClosedByAdminConfirmed {
-		admCol, reasonCol = admin, reason
-	}
-	n := unix(now)
-	if _, err := tx.ExecContext(ctx, `UPDATE vuln_findings SET state = 'fixed', closed_by = ?, closed_note = '', closed_at = ?,
-		closed_admin = ?, closed_reason = ?, rev = rev + 1, updated_at = ? WHERE finding_key = ?`,
-		string(by), n, admCol, reasonCol, n, key[:]); err != nil {
-		return "", fmt.Errorf("vulnstore: confirm hold: close: %w", err)
-	}
-	// Counted by the window guard when applied (closure row 6).
-	if err := logHistory(ctx, tx, key, subject, n, 0, EventClosed, true, by); err != nil {
-		return "", fmt.Errorf("vulnstore: confirm hold: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM vuln_held_closures WHERE finding_key = ?`, key[:]); err != nil {
-		return "", fmt.Errorf("vulnstore: confirm hold: drop: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return "", fmt.Errorf("vulnstore: confirm hold: commit: %w", err)
 	}
 	return by, nil
 }
 
 // DiscardHeld applies closure path 7 for an admin: the hold is dropped and
-// the finding stays open.
-func (s *Store) DiscardHeld(ctx context.Context, runID string, key vulnfinding.Key) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	tx, err := s.writeTx(ctx)
-	if err != nil {
+// the finding stays open. The drop and its AuditVulnHoldDiscarded line,
+// naming admin, are written in one transaction of audit (required).
+func (s *Store) DiscardHeld(ctx context.Context, runID string, key vulnfinding.Key, admin string, audit DecisionAuditor) error {
+	if audit == nil {
+		return fmt.Errorf("vulnstore: discard hold: auditor is required: %w", ErrInvalidInput)
+	}
+	if err := checkActor(admin); err != nil {
 		return fmt.Errorf("vulnstore: discard hold: %w", err)
 	}
-	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `DELETE FROM vuln_held_closures WHERE run_id = ? AND finding_key = ?`, runID, key[:])
+	err := s.decisionTx(ctx, audit, func(tx *sql.Tx, appendLine func(string, map[string]string) error) error {
+		var subject string
+		err := tx.QueryRowContext(ctx, `SELECT subject FROM vuln_held_closures WHERE run_id = ? AND finding_key = ?`, runID, key[:]).Scan(&subject)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrHoldNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM vuln_held_closures WHERE run_id = ? AND finding_key = ?`, runID, key[:]); err != nil {
+			return err
+		}
+		return appendDecision(appendLine, AuditVulnHoldDiscarded, admin, map[string]string{
+			"finding_key": key.String(),
+			"subject":     subject,
+			"run_id":      runID,
+		})
+	})
 	if err != nil {
 		return fmt.Errorf("vulnstore: discard hold: %w", err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("vulnstore: discard hold: %w", ErrHoldNotFound)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("vulnstore: discard hold: commit: %w", err)
 	}
 	return nil
 }

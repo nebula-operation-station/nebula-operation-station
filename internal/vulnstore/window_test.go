@@ -149,7 +149,7 @@ func TestWindowGuardBaselineCountsOnlyOpenFindings(t *testing.T) {
 	for i, it := range items {
 		if i%5 == 4 { // 1 per host: 20 accepted_risk, 80 open
 			accepted[it.Finding.Key] = true
-			if err := e.st.SetAcceptedRisk(e.ctx, it.Finding.Key, AcceptRisk{Approver: "admin", Reason: "r", BasisVersion: "1.0-1"}); err != nil {
+			if err := e.st.SetAcceptedRisk(e.ctx, it.Finding.Key, AcceptRisk{Approver: "admin", Reason: "r", BasisVersion: "1.0-1"}, e.audit()); err != nil {
 				t.Fatal(err)
 			}
 		}
