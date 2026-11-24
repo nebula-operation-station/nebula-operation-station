@@ -647,13 +647,22 @@ func TestMarkStaleAfterThreeIntervalsNeverDeletes(t *testing.T) {
 	}
 }
 
+// TestMarkStaleCoversDeviceNeverRead: a device that only a report created
+// (no dataset ever stored) is stale from the start, so MarkStale has nothing
+// to change for it and it reads as stale.
 func TestMarkStaleCoversDeviceNeverRead(t *testing.T) {
 	s, _, now := newTestStore(t)
 	addDevice(t, s, cbsDevice())
+	if d, _ := s.GetDevice(context.Background(), "sw-core"); d.State != DeviceStale {
+		t.Fatalf("device after report only = %v, want stale", d.State)
+	}
 	*now = testBase.Add(time.Hour)
 	rep, err := s.MarkStale(context.Background())
-	if err != nil || rep.Devices != 1 {
-		t.Fatalf("report = %+v, %v", rep, err)
+	if err != nil || rep.Devices != 0 {
+		t.Fatalf("report = %+v, %v; want no device changed", rep, err)
+	}
+	if d, _ := s.GetDevice(context.Background(), "sw-core"); d.State != DeviceStale {
+		t.Fatalf("device after MarkStale = %v, want stale", d.State)
 	}
 }
 

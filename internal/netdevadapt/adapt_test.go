@@ -40,8 +40,9 @@ func must(t *testing.T, err error) {
 	}
 }
 
-// addSwitch registers a CBS switch whose endpoint address ends in n.
-func addSwitch(t *testing.T, s *netdevinventory.Store, id string, n int) {
+// addSwitch registers a CBS switch whose endpoint address ends in n, from a
+// spool record written at recordedAt (the test's store clock).
+func addSwitch(t *testing.T, s *netdevinventory.Store, recordedAt time.Time, id string, n int) {
 	t.Helper()
 	must(t, s.UpsertDeviceReported(context.Background(), netdevcontract.Device{
 		DeviceID:        id,
@@ -51,7 +52,7 @@ func addSwitch(t *testing.T, s *netdevinventory.Store, id string, n int) {
 		PinKind:         netdevcontract.PinSSHHostKey,
 		TrustPin:        strings.Repeat("a", 64),
 		TrustGeneration: 1,
-	}, netdevinventory.SpoolRef{Name: id + ".json", Digest: strings.Repeat("b", 64)}))
+	}, netdevinventory.SpoolRef{Name: id + ".json", Digest: strings.Repeat("b", 64), RecordedAt: recordedAt}))
 }
 
 func macRow(vlan uint16, mac, port string) netdevcontract.MACEntry {
@@ -102,13 +103,13 @@ func TestEmptyInventoryGivesNoTables(t *testing.T) {
 
 func TestMACTablesKeepStateOfCompleteIncompleteAndStaleDatasets(t *testing.T) {
 	s, now := fixture(t)
-	addSwitch(t, s, "sw-old", 1)
+	addSwitch(t, s, *now, "sw-old", 1)
 	replaceMAC(t, s, "sw-old", testBase, false, netdevinventory.MACRows{macRow(10, "02:00:00:00:00:01", "Gi1/0/1")})
 	*now = testBase.Add(time.Hour) // sw-old is now stale (three 15 minute intervals)
 
-	addSwitch(t, s, "sw-fresh", 2)
+	addSwitch(t, s, *now, "sw-fresh", 2)
 	replaceMAC(t, s, "sw-fresh", *now, false, netdevinventory.MACRows{macRow(10, "02:00:00:00:00:02", "Gi1/0/2")})
-	addSwitch(t, s, "sw-partial", 3)
+	addSwitch(t, s, *now, "sw-partial", 3)
 	replaceMAC(t, s, "sw-partial", *now, true, netdevinventory.MACRows{macRow(20, "02:00:00:00:00:03", "Gi1/0/3")})
 
 	a, err := New(s)
@@ -145,9 +146,9 @@ func TestMACTablesKeepStateOfCompleteIncompleteAndStaleDatasets(t *testing.T) {
 }
 
 func TestDeviceWithoutMACDatasetIsOmittedNotEmpty(t *testing.T) {
-	s, _ := fixture(t)
-	addSwitch(t, s, "sw-none", 4)
-	addSwitch(t, s, "sw-empty", 5)
+	s, now := fixture(t)
+	addSwitch(t, s, *now, "sw-none", 4)
+	addSwitch(t, s, *now, "sw-empty", 5)
 	replaceMAC(t, s, "sw-empty", testBase, false, nil)
 
 	a, err := New(s)
@@ -169,14 +170,14 @@ func TestDeviceWithoutMACDatasetIsOmittedNotEmpty(t *testing.T) {
 
 func TestVLANTablesKeepStateAndNames(t *testing.T) {
 	s, now := fixture(t)
-	addSwitch(t, s, "sw-old", 1)
+	addSwitch(t, s, *now, "sw-old", 1)
 	replaceVLAN(t, s, "sw-old", testBase, false, netdevinventory.VLANRows{{ID: 50, Name: "old"}})
 	*now = testBase.Add(time.Hour)
-	addSwitch(t, s, "sw-fresh", 2)
+	addSwitch(t, s, *now, "sw-fresh", 2)
 	replaceVLAN(t, s, "sw-fresh", *now, false, netdevinventory.VLANRows{{ID: 30, Name: "guest"}, {ID: 10, Name: "users"}})
-	addSwitch(t, s, "sw-partial", 3)
+	addSwitch(t, s, *now, "sw-partial", 3)
 	replaceVLAN(t, s, "sw-partial", *now, true, netdevinventory.VLANRows{{ID: 20, Name: "iot"}})
-	addSwitch(t, s, "sw-empty", 4)
+	addSwitch(t, s, *now, "sw-empty", 4)
 	replaceVLAN(t, s, "sw-empty", *now, false, nil)
 
 	a, err := New(s)
@@ -211,7 +212,7 @@ func TestVLANTablesKeepStateAndNames(t *testing.T) {
 
 func TestRowsAbsentFromLatestCompleteReadAreNotReturned(t *testing.T) {
 	s, now := fixture(t)
-	addSwitch(t, s, "sw-1", 1)
+	addSwitch(t, s, *now, "sw-1", 1)
 	replaceMAC(t, s, "sw-1", testBase, false, netdevinventory.MACRows{
 		macRow(10, "02:00:00:00:00:01", "Gi1/0/1"),
 		macRow(10, "02:00:00:00:00:02", "Gi1/0/2"),
@@ -230,7 +231,7 @@ func TestRowsAbsentFromLatestCompleteReadAreNotReturned(t *testing.T) {
 
 func TestPartialReadKeepsCarriedRowsButMarksTablePartial(t *testing.T) {
 	s, now := fixture(t)
-	addSwitch(t, s, "sw-1", 1)
+	addSwitch(t, s, *now, "sw-1", 1)
 	replaceLLDP(t, s, "sw-1", testBase, false, netdevinventory.LLDPRows{
 		{LocalPort: "Gi1/0/1", ChassisID: "ap-01", PortID: "eth0"},
 	})
@@ -252,8 +253,8 @@ func TestPartialReadKeepsCarriedRowsButMarksTablePartial(t *testing.T) {
 }
 
 func TestLLDPNeighborsKeepDuplicatesAndHostileTextVerbatim(t *testing.T) {
-	s, _ := fixture(t)
-	addSwitch(t, s, "sw-1", 1)
+	s, now := fixture(t)
+	addSwitch(t, s, *now, "sw-1", 1)
 	const hostile = "<script>alert(1)</script> &amp; evil"
 	dup := netdevcontract.LLDPNeighbor{LocalPort: "Gi1/0/3", ChassisID: "ch", PortID: "p", SystemName: hostile,
 		Capabilities: []netdevcontract.LLDPCapability{netdevcontract.CapBridge, netdevcontract.CapRouter}}
@@ -277,9 +278,9 @@ func TestLLDPNeighborsKeepDuplicatesAndHostileTextVerbatim(t *testing.T) {
 }
 
 func TestTablesAreInDeterministicOrder(t *testing.T) {
-	s, _ := fixture(t)
-	addSwitch(t, s, "sw-b", 2)
-	addSwitch(t, s, "sw-a", 1)
+	s, now := fixture(t)
+	addSwitch(t, s, *now, "sw-b", 2)
+	addSwitch(t, s, *now, "sw-a", 1)
 	replaceMAC(t, s, "sw-b", testBase, false, netdevinventory.MACRows{
 		macRow(20, "02:00:00:00:00:03", "Gi1/0/3"), macRow(10, "02:00:00:00:00:02", "Gi1/0/2"),
 	})
@@ -306,7 +307,7 @@ func TestTablesAreInDeterministicOrder(t *testing.T) {
 
 func TestMACTableAboveLimitIsCappedAndPartial(t *testing.T) {
 	s, now := fixture(t)
-	addSwitch(t, s, "sw-1", 1)
+	addSwitch(t, s, *now, "sw-1", 1)
 	mk := func(from, n int) netdevinventory.MACRows {
 		out := make(netdevinventory.MACRows, 0, n)
 		for i := from; i < from+n; i++ {
@@ -343,12 +344,12 @@ func TestMACTableAboveLimitIsCappedAndPartial(t *testing.T) {
 // adapters: the IPAM VLAN hints and the traffic map switch endpoints.
 func TestConsumersReceiveAdapterData(t *testing.T) {
 	s, now := fixture(t)
-	addSwitch(t, s, "sw-old", 2)
+	addSwitch(t, s, *now, "sw-old", 2)
 	replaceVLAN(t, s, "sw-old", testBase, false, netdevinventory.VLANRows{{ID: 50, Name: "old"}})
 	replaceMAC(t, s, "sw-old", testBase, false, nil)
 	*now = testBase.Add(time.Hour) // sw-old is stale now, sw-edge is written at this time
 
-	addSwitch(t, s, "sw-edge", 1)
+	addSwitch(t, s, *now, "sw-edge", 1)
 	replaceVLAN(t, s, "sw-edge", *now, false, netdevinventory.VLANRows{{ID: 10, Name: "users"}, {ID: 20, Name: "iot"}, {ID: 30, Name: "guest"}})
 	replaceMAC(t, s, "sw-edge", *now, false, netdevinventory.MACRows{macRow(20, "aa:bb:cc:dd:ee:01", "Gi1/0/5")})
 	replaceLLDP(t, s, "sw-edge", *now, false, netdevinventory.LLDPRows{{LocalPort: "Gi1/0/5", ChassisID: "ap-01", PortID: "eth0", SystemName: "ap"}})
