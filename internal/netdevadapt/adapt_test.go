@@ -43,7 +43,7 @@ func must(t *testing.T, err error) {
 // addSwitch registers a CBS switch whose endpoint address ends in n.
 func addSwitch(t *testing.T, s *netdevinventory.Store, id string, n int) {
 	t.Helper()
-	must(t, s.UpsertDevice(context.Background(), netdevcontract.Device{
+	must(t, s.UpsertDeviceReported(context.Background(), netdevcontract.Device{
 		DeviceID:        id,
 		Name:            id,
 		Family:          netdevcontract.FamilyCBS,
@@ -51,7 +51,7 @@ func addSwitch(t *testing.T, s *netdevinventory.Store, id string, n int) {
 		PinKind:         netdevcontract.PinSSHHostKey,
 		TrustPin:        strings.Repeat("a", 64),
 		TrustGeneration: 1,
-	}))
+	}, netdevinventory.SpoolRef{Name: id + ".json", Digest: strings.Repeat("b", 64)}))
 }
 
 func macRow(vlan uint16, mac, port string) netdevcontract.MACEntry {

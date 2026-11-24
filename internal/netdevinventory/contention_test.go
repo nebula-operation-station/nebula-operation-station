@@ -46,10 +46,10 @@ func TestStoreWritesWaitForConcurrentWriter(t *testing.T) {
 		name string
 		run  func(ctx context.Context, s *Store) error
 	}{
-		{"UpsertDevice", func(ctx context.Context, s *Store) error {
+		{"UpsertDeviceReported", func(ctx context.Context, s *Store) error {
 			d := cbsDevice()
 			d.TrustGeneration = 3
-			return s.UpsertDevice(ctx, d)
+			return s.UpsertDeviceReported(ctx, d, testRef())
 		}},
 		{"ReplaceDataset", func(ctx context.Context, s *Store) error {
 			_, err := s.ReplaceDataset(ctx, "sw-core", ReadVLANs, 2, testBase.Add(-time.Minute), false, VLANRows{{ID: 1}})
@@ -131,7 +131,7 @@ func TestConcurrentStoreWritersAllSucceed(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < rounds; i++ {
-			if err := s.UpsertDevice(ctx, cbsDevice()); err != nil {
+			if err := s.UpsertDeviceReported(ctx, cbsDevice(), testRef()); err != nil {
 				errs <- err
 			}
 			if _, err := s.MarkStale(ctx); err != nil {
