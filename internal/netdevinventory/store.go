@@ -105,6 +105,11 @@ const (
 	// StaleAfterIntervals is the number of missed poll intervals after
 	// which a device or dataset is stale.
 	StaleAfterIntervals = 3
+	// DeviceReportStaleAfter is the age of the newest collector report
+	// (Device.ReportedAt) after which a device reads as stale, whatever its
+	// datasets say. It does not change dataset states. No ADR names a
+	// collector report cadence; this is a placeholder to be confirmed.
+	DeviceReportStaleAfter = 24 * time.Hour
 	// MaxFutureSkew bounds how far observed_at may lie ahead of the server
 	// clock. A later timestamp is refused: stored, it would make every
 	// genuine later read look out of order.
@@ -502,22 +507,31 @@ func (s *Store) upsertDevice(ctx context.Context, d netdevcontract.Device, ref S
 // it was not seen for StaleAfterIntervals poll intervals, even before
 // MarkStale ran.
 func (s *Store) GetDevice(ctx context.Context, deviceID string) (Device, error) {
+	row := s.db.QueryRowContext(ctx, deviceSelect+` WHERE device_id = ?`, deviceID)
+	d, err := scanDevice(row, s.now())
+	if errors.Is(err, sql.ErrNoRows) {
+		return Device{}, ErrDeviceNotFound
+	}
+	if err != nil {
+		return Device{}, fmt.Errorf("netdevinventory: load device: %w", err)
+	}
+	return d, nil
+}
+
+// scanDevice reads one row of deviceSelect and applies the staleness rules
+// at now: a device not seen for StaleAfterIntervals poll intervals, or whose
+// newest report is older than DeviceReportStaleAfter, is stale.
+func scanDevice(sc rowScanner, now time.Time) (Device, error) {
 	var d Device
 	var family, state string
 	var gen, created int64
 	var last, reported sql.NullInt64
 	var origin string
 	var spoolName, spoolDigest sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT device_id, family, label, trust_generation, last_seen, state, created_at,
-		origin, spool_name, spool_sha256, reported_at
-		FROM netdev_devices_seen WHERE device_id = ?`, deviceID).
-		Scan(&d.DeviceID, &family, &d.Label, &gen, &last, &state, &created,
-			&origin, &spoolName, &spoolDigest, &reported)
-	if errors.Is(err, sql.ErrNoRows) {
-		return Device{}, ErrDeviceNotFound
-	}
+	err := sc.Scan(&d.DeviceID, &family, &d.Label, &gen, &last, &state, &created,
+		&origin, &spoolName, &spoolDigest, &reported)
 	if err != nil {
-		return Device{}, fmt.Errorf("netdevinventory: load device: %w", err)
+		return Device{}, err
 	}
 	d.Family = netdevcontract.Family(family)
 	d.TrustGeneration = uint64(gen)
@@ -532,11 +546,21 @@ func (s *Store) GetDevice(ctx context.Context, deviceID string) (Device, error) 
 		d.LastSeen = fromMicros(last.Int64)
 		ref = last.Int64
 	}
-	d.Age = max(s.now().Sub(fromMicros(ref)), 0)
+	d.Age = max(now.Sub(fromMicros(ref)), 0)
 	if d.Age > StaleAfterIntervals*devicePollInterval(d.Family) {
 		d.State = DeviceStale
 	}
+	if reportStale(d.ReportedAt, now) {
+		d.State = DeviceStale
+	}
 	return d, nil
+}
+
+// reportStale reports whether the newest collector report of a device is
+// older than DeviceReportStaleAfter. A zero reportedAt (no report stored, or
+// a row no spool record wrote) is not judged by reports.
+func reportStale(reportedAt, now time.Time) bool {
+	return !reportedAt.IsZero() && now.Sub(reportedAt) > DeviceReportStaleAfter
 }
 
 // GetDataset returns the current dataset of (deviceID, read). Its state
