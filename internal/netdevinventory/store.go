@@ -41,8 +41,6 @@ import (
 	"fmt"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevcontract"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
@@ -328,12 +326,19 @@ var ErrBadSpoolRef = errors.New("netdevinventory: spool record reference is inva
 // refuses every write.
 var ErrUnreportedDevice = errors.New("netdevinventory: device row needs a spool record")
 
-// validate checks the shape of ref: a non-empty, bounded, valid UTF-8 name
-// without control characters, and a 64-character lowercase hex digest.
+// validate checks the shape of ref: a name of 1 to MaxSpoolRefName bytes
+// from the ASCII alphabet (letters, digits, '-', '_', '.') without "..",
+// and a 64-character lowercase hex digest. The name is used as a file name
+// and is shown to people, so no path separator, control or Unicode format
+// character (such as U+202E) and no non-ASCII letter is accepted.
 func (r SpoolRef) validate() error {
-	if r.Name == "" || len(r.Name) > MaxSpoolRefName || !utf8.ValidString(r.Name) ||
-		strings.IndexFunc(r.Name, unicode.IsControl) >= 0 {
+	if r.Name == "" || len(r.Name) > MaxSpoolRefName || strings.Contains(r.Name, "..") {
 		return ErrBadSpoolRef
+	}
+	for i := 0; i < len(r.Name); i++ {
+		if !spoolNameByte(r.Name[i]) {
+			return ErrBadSpoolRef
+		}
 	}
 	if len(r.Digest) != 64 {
 		return ErrBadSpoolRef
@@ -344,6 +349,17 @@ func (r SpoolRef) validate() error {
 		}
 	}
 	return nil
+}
+
+// spoolNameByte reports whether c may appear in SpoolRef.Name.
+func spoolNameByte(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	case c == '-', c == '_', c == '.':
+		return true
+	}
+	return false
 }
 
 // UpsertDeviceReported is the only writer of device rows (ND-16 variant 1).

@@ -77,6 +77,54 @@ func TestMetadataReportNeverMovesLastSeen(t *testing.T) {
 	}
 }
 
+// TestSpoolRefNameAlphabet: the spool record name is an ASCII name from
+// letters, digits, '-', '_' and '.', with no "..". Anything else (path
+// separators, control or Unicode format characters, non-ASCII letters) is
+// refused, so a name can never escape a directory or spoof a display.
+func TestSpoolRefNameAlphabet(t *testing.T) {
+	good := testRef().Digest
+	tests := []struct {
+		name    string
+		file    string
+		wantErr bool
+	}{
+		{"typical record name", "sw-core-cbs_version-1700000000000000000-ABC.json", false},
+		{"digits and dots", "a.1.2.json", false},
+		{"single letter", "a", false},
+		{"maximum length", strings.Repeat("a", MaxSpoolRefName), false},
+		{"over the limit", strings.Repeat("a", MaxSpoolRefName+1), true},
+		{"empty", "", true},
+		{"slash path", "dir/sw.json", true},
+		{"leading slash", "/etc/sw.json", true},
+		{"backslash", `dir\sw.json`, true},
+		{"parent traversal", "../sw.json", true},
+		{"double dot inside name", "sw..json", true},
+		{"only double dots", "..", true},
+		{"right-to-left override", "sw‮json.exe", true},
+		{"zero-width space", "sw​core.json", true},
+		{"byte order mark", "\xef\xbb\xbfsw.json", true},
+		{"non-ASCII letter", "sé.json", true},
+		{"full-width solidus", "dir／sw.json", true},
+		{"space", "sw core.json", true},
+		{"colon", "sw:core.json", true},
+		{"NUL", "sw\x00core.json", true},
+		{"DEL", "sw\x7fcore.json", true},
+		{"newline", "sw\ncore.json", true},
+		{"invalid UTF-8", "sw\xffcore.json", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := SpoolRef{Name: tt.file, Digest: good}.validate()
+			if tt.wantErr && !errors.Is(err, ErrBadSpoolRef) {
+				t.Fatalf("validate(%q) = %v, want ErrBadSpoolRef", tt.file, err)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("validate(%q) = %v, want nil", tt.file, err)
+			}
+		})
+	}
+}
+
 // TestUpsertDeviceReportedRejectsBadSpoolRef: a report whose spool reference
 // is missing or malformed is refused with ErrBadSpoolRef and creates no row.
 func TestUpsertDeviceReportedRejectsBadSpoolRef(t *testing.T) {
@@ -90,6 +138,9 @@ func TestUpsertDeviceReportedRejectsBadSpoolRef(t *testing.T) {
 		{"name over the limit", SpoolRef{Name: strings.Repeat("a", MaxSpoolRefName+1), Digest: good.Digest}},
 		{"name with control character", SpoolRef{Name: "sw\x00core.json", Digest: good.Digest}},
 		{"name not valid UTF-8", SpoolRef{Name: "sw\xffcore.json", Digest: good.Digest}},
+		{"name with path separator", SpoolRef{Name: "dir/sw.json", Digest: good.Digest}},
+		{"name with parent traversal", SpoolRef{Name: "../sw.json", Digest: good.Digest}},
+		{"name with bidi override", SpoolRef{Name: "sw‮json.exe", Digest: good.Digest}},
 		{"empty digest", SpoolRef{Name: good.Name, Digest: ""}},
 		{"short digest", SpoolRef{Name: good.Name, Digest: good.Digest[:63]}},
 		{"uppercase digest", SpoolRef{Name: good.Name, Digest: strings.ToUpper(good.Digest)}},
