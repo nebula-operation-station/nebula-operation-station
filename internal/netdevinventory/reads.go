@@ -348,10 +348,19 @@ func (s *Store) FirewallPolicy(ctx context.Context, deviceID string) (netdevcont
 	return p, nil
 }
 
-// maxPolicyObjects is the contract maximum of the objects table (address and
-// service objects and groups, and zones).
-const maxPolicyObjects = netdevcontract.MaxAddressObjects + netdevcontract.MaxServiceObjects +
-	netdevcontract.MaxAddressGroups + netdevcontract.MaxServiceGroups + netdevcontract.MaxZones
+// policyObjectKinds lists the stored object kinds of the objects table with
+// the contract maximum of each. Each kind is cut at its own maximum, so a
+// kind cannot push another out of the policy.
+var policyObjectKinds = []struct {
+	kind string
+	max  int
+}{
+	{"address", netdevcontract.MaxAddressObjects},
+	{"address_group", netdevcontract.MaxAddressGroups},
+	{"service", netdevcontract.MaxServiceObjects},
+	{"service_group", netdevcontract.MaxServiceGroups},
+	{"zone", netdevcontract.MaxZones},
+}
 
 const (
 	fwRuleCols = "name, uuid, from_zones, to_zones, sources, destinations, source_users, applications, services, " +
@@ -419,49 +428,69 @@ func scanFirewallInterface(sc rowScanner) (netdevcontract.FirewallInterface, err
 	return f, err
 }
 
+// policyObject is one stored row of the objects table.
+type policyObject struct {
+	kind, name, addrType, value, proto, port, srcPort string
+	static, interfaces, tags                          []string
+	filter, desc                                      string
+}
+
+func scanPolicyObject(sc rowScanner) (policyObject, error) {
+	var o policyObject
+	var addrType sql.NullString
+	var static, ifs, tags string
+	if err := sc.Scan(&o.kind, &o.name, &addrType, &o.value, &o.proto, &o.port, &o.srcPort,
+		&static, &o.filter, &ifs, &o.desc, &tags); err != nil {
+		return policyObject{}, err
+	}
+	o.addrType = addrType.String
+	err := scanLists([]*[]string{&o.static, &o.interfaces, &o.tags}, []string{static, ifs, tags})
+	return o, err
+}
+
 // listObjects reads the address and service objects, groups and zones of the
-// policy into p, split by their stored kind.
+// policy into p, split by their stored kind. Each kind is read with its own
+// contract maximum. A row of an unknown kind is refused, not dropped.
 func listObjects(ctx context.Context, tx *sql.Tx, id int64, p *netdevcontract.FirewallPolicy) error {
-	type obj struct {
-		kind, name, addrType, value, proto, port, srcPort string
-		static, interfaces, tags                          []string
-		filter, desc                                      string
+	var unknown string
+	err := tx.QueryRowContext(ctx, `SELECT kind FROM netdev_objects WHERE dataset_id = ? AND absent = 0
+		AND kind NOT IN ('address', 'address_group', 'service', 'service_group', 'zone') LIMIT 1`, id).Scan(&unknown)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return fmt.Errorf("netdevinventory: check object kinds: %w", err)
+	default:
+		return fmt.Errorf("netdevinventory: stored object kind %q unknown", unknown)
 	}
-	objs, err := listAll(ctx, tx, tblObjects, objectCols, id, "", nil, maxPolicyObjects,
-		func(sc rowScanner) (obj, error) {
-			var o obj
-			var addrType sql.NullString
-			var static, ifs, tags string
-			if err := sc.Scan(&o.kind, &o.name, &addrType, &o.value, &o.proto, &o.port, &o.srcPort,
-				&static, &o.filter, &ifs, &o.desc, &tags); err != nil {
-				return obj{}, err
-			}
-			o.addrType = addrType.String
-			err := scanLists([]*[]string{&o.static, &o.interfaces, &o.tags}, []string{static, ifs, tags})
-			return o, err
-		})
-	if err != nil {
-		return err
-	}
-	for _, o := range objs {
-		switch o.kind {
-		case "address":
-			p.Addresses = append(p.Addresses, netdevcontract.AddressObject{Name: o.name,
-				Type: netdevcontract.AddressType(o.addrType), Value: o.value, Description: o.desc, Tags: o.tags})
-		case "address_group":
-			p.AddressGroups = append(p.AddressGroups, netdevcontract.Group{Name: o.name, Static: o.static,
-				DynamicFilter: o.filter, Description: o.desc, Tags: o.tags})
-		case "service":
-			p.Services = append(p.Services, netdevcontract.ServiceObject{Name: o.name, Protocol: o.proto,
-				Port: o.port, SourcePort: o.srcPort, Description: o.desc, Tags: o.tags})
-		case "service_group":
-			p.ServiceGroups = append(p.ServiceGroups, netdevcontract.Group{Name: o.name, Static: o.static,
-				DynamicFilter: o.filter, Description: o.desc, Tags: o.tags})
-		case "zone":
-			p.Zones = append(p.Zones, netdevcontract.Zone{Name: o.name, Interfaces: o.interfaces})
-		default:
-			return fmt.Errorf("netdevinventory: stored object kind %q unknown", o.kind)
+	for _, k := range policyObjectKinds {
+		objs, err := listAll(ctx, tx, tblObjects, objectCols, id, "kind = ?", []any{k.kind}, k.max,
+			scanPolicyObject)
+		if err != nil {
+			return err
+		}
+		for _, o := range objs {
+			appendPolicyObject(p, o)
 		}
 	}
 	return nil
+}
+
+// appendPolicyObject adds one object to the list of its kind.
+func appendPolicyObject(p *netdevcontract.FirewallPolicy, o policyObject) {
+	switch o.kind {
+	case "address":
+		p.Addresses = append(p.Addresses, netdevcontract.AddressObject{Name: o.name,
+			Type: netdevcontract.AddressType(o.addrType), Value: o.value, Description: o.desc, Tags: o.tags})
+	case "address_group":
+		p.AddressGroups = append(p.AddressGroups, netdevcontract.Group{Name: o.name, Static: o.static,
+			DynamicFilter: o.filter, Description: o.desc, Tags: o.tags})
+	case "service":
+		p.Services = append(p.Services, netdevcontract.ServiceObject{Name: o.name, Protocol: o.proto,
+			Port: o.port, SourcePort: o.srcPort, Description: o.desc, Tags: o.tags})
+	case "service_group":
+		p.ServiceGroups = append(p.ServiceGroups, netdevcontract.Group{Name: o.name, Static: o.static,
+			DynamicFilter: o.filter, Description: o.desc, Tags: o.tags})
+	case "zone":
+		p.Zones = append(p.Zones, netdevcontract.Zone{Name: o.name, Interfaces: o.interfaces})
+	}
 }
