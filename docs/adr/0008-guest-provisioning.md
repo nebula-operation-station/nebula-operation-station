@@ -1318,11 +1318,12 @@ template reference message `PVETemplateRef` at `:2759`). Provisioning
 therefore stops at `BindTemplate` (`pve_images.go:530`) with the refusal at
 `pve_rpc.go:1169-1170`. The release side (PV-03e) is in place: the catalog
 is a separate signed file pair, `image-catalog.json` and
-`image-catalog.json.sig`, next to `release-manifest.json` and not listed in
-it (`internal/release/catalog.go:20-24`,
+`image-catalog.json.sig`, next to `release-manifest.json` in the release
+staging directory and not listed in it (`internal/release/catalog.go:20-24`,
 `internal/release/catalog_stage.go:14-37`); `VerifyCatalog`
 (`catalog.go:100`) is the only admission check. This settles the file
-layout sub-question of D2.
+layout sub-question of D2; where the installed pair lives on the executor
+host is in D2.
 
 ### D1. RPC form: Propose/Commit for `server` and `admin`
 
@@ -1350,20 +1351,57 @@ layout sub-question of D2.
 ### D2. Signed catalog: loaded at executor start from the release bundle, fail closed
 
 - At start the executor reads `image-catalog.json` and
-  `image-catalog.json.sig` from the built-in release bundle directory
-  (`cmd/nebula-executor/builtin_trust.go:19`, `/usr/share/nebula/release`)
-  and calls `LoadSigned` (`pve_images.go:124`), which verifies with the
+  `image-catalog.json.sig` from the catalog directory
+  `/usr/share/nebula/image-catalog`, a sibling of the built-in release
+  bundle directory (`cmd/nebula-executor/builtin_trust.go:19`,
+  `/usr/share/nebula/release`), installed by the same release package
+  (round 1 of PV-03j, 2026-11-24; previously "from the built-in release
+  bundle directory" itself), and calls `LoadSigned` (`pve_images.go:124`),
+  which verifies with the
   active release roots (`pve_images.go:125`), enforces the rollback floor
   across restarts (`pve_images.go:134-145`, `ErrPveCatalogRollback`) and
   persists the new floor before the swap (`pve_images.go:146-151`; state
   file `pve-catalog.json`, `pve_rpc.go:297`). A new catalog takes effect
   with a release install and a restart. There is no RPC to load a catalog
   and no network fetch.
-- **Fail closed:** a missing file, a signature that does not verify, an
-  oversize file (`catalog.go:36`, 256 KiB) or a rollback leaves the signed
-  part empty. The executor logs an audit event and **starts without a signed
-  catalog**; no catalog state is written, because `VerifyCatalog` and the
-  rollback check run before `PutPveCatalogState` (`pve_images.go:125-147`).
+- **Why not the bundle directory itself (Claude, round 1).** The location
+  in the first version of this record could not work: `ReadBundleDir`
+  refuses any directory that does not hold exactly
+  `release-manifest.json`, its signature and `builtins.tar`
+  (`internal/release/bundle.go:134-135`), so the catalog pair in
+  `/usr/share/nebula/release` would break built-in trust review
+  (`internal/executor/roles_trust.go:342`); `catalog_stage.go:30-32` says
+  the same. The maintainer's choice D2 (a), "loaded at executor start from
+  the release", is kept; only the directory moves. The pattern is the root
+  rotation pair, which lives in the sibling `release-rotation` for the same
+  reason (`internal/executor/roles_rotation.go:27-33`, path derived at
+  `:50-52`). The catalog directory is derived the same way from the
+  configured bundle directory, never from a request. `ReadBundleDir` and
+  the release manifest stay unchanged.
+- **Bounded read before verification (Claude, round 1).** The start-up
+  loader opens the catalog directory with `os.OpenRoot` and reads each file
+  as a regular file without following symlinks, with `O_NOFOLLOW` and
+  `O_NONBLOCK`, a size check on the open file and a `LimitReader` of
+  max + 1, as `readRegular` does for the bundle
+  (`internal/release/bundle.go:162-181`) and `readRotationFile` for the
+  rotation pair (`roles_rotation.go:96-121`). The bounds are `MaxCatalog`
+  (256 KiB, `catalog.go:36`) for `image-catalog.json` and `MaxSignature`
+  (4096 bytes, `internal/release/release.go:43`) for the signature. The
+  length checks in `VerifyCatalog` (`catalog.go:101`) and `verifyDocument`
+  (`release.go:190`) run only after the bytes are in memory and stay as a
+  second check; they are not the bound.
+- **Fail closed:** a missing file, a file that is not a regular file (a
+  symlink, a FIFO, a directory), an oversize file (`catalog.go:36`, 256
+  KiB; signature 4096 bytes), a signature that does not verify, a rollback,
+  or a catalog state file that cannot be read or written
+  (`ErrPveCatalogState`, `pve_images.go:131-137` read, `:147-148` write;
+  added in round 1 by Claude) leaves the signed part empty. The executor
+  logs an audit event and **starts without a signed catalog**. In every case
+  but a failed write no catalog state is written, because the bounded read,
+  `VerifyCatalog`, the state read and the rollback check run before
+  `PutPveCatalogState` (`pve_images.go:125-147`); when the write itself
+  fails, `LoadSigned` returns before the swap (`pve_images.go:147-151`), so
+  the signed part stays nil and the next start tries again.
   Every signed image is then refused with `ErrPveImageUnknown`, because
   `Lookup` returns not-found while the signed part is nil
   (`pve_images.go:187-188`). Unrelated executor actions keep working.
@@ -1372,11 +1410,20 @@ layout sub-question of D2.
   (`pve_images.go:183-185`). This is intended; a Local entry carries its own
   HIGH approval (`ImagePrepareRisk`, `pve_images.go:202-208`), and a broken
   release file must not take away an image the operator added on purpose.
-- **Test ticket: PV-03c** (start-up test with a temporary bundle directory:
-  signed catalog loads; lower sequence refused after restart; missing file,
-  bad signature and rollback each start with no signed catalog, store no
-  catalog state, and refuse every signed image with `ErrPveImageUnknown`; a
-  persisted local entry stays preparable). Release-side round trip: PV-03e.
+- **Test ticket: PV-03c** (start-up test with a temporary release
+  directory and its sibling catalog directory: signed catalog loads; lower
+  sequence refused after restart; missing file, bad signature and rollback
+  each start with no signed catalog, store no catalog state, and refuse
+  every signed image with `ErrPveImageUnknown`; a persisted local entry
+  stays preparable). Added in round 1 (Claude): the bundle directory with
+  the catalog directory next to it still passes `ReadBundleDir` and the
+  built-in trust review; an oversize `image-catalog.json` (MaxCatalog + 1)
+  and an oversize signature (MaxSignature + 1), a symlink and a FIFO in
+  place of either file each start with no signed catalog and never block
+  the start; a catalog state file that cannot be read, and a state store
+  whose write fails, each start with no signed catalog
+  (`ErrPveCatalogState` in the audit event) and keep local entries
+  preparable. Release-side round trip: PV-03e.
 
 ### D3. Local entries: admin-only RPCs, the executor is the only writer
 
@@ -1463,7 +1510,10 @@ layout sub-question of D2.
   is **unverified**; if it does not, this point is reopened before PV-03b is
   merged.
 - A blocked or removed remote is refused by the mutation's remote check
-  (`internal/executor/pve_mutation.go:423-429`). Open for PV-03b: `Prepare`
+  `activeRemote` (`internal/executor/pve_mutation.go:420-421` removed or
+  unknown, `ErrRemoteNotFound`; `:422-423` any other non-active state,
+  blocked included, `ErrPveRemoteChanged`; round 1, previously cited as
+  `:423-429`). Open for PV-03b: `Prepare`
   calls `Run` (`pve_images.go:454`) before `activeRemote`
   (`pve_images.go:460`); PV-03b shows that `Run` refuses a non-active
   remote before any PVE change, or moves the check before `Run`.
@@ -1482,6 +1532,10 @@ layout sub-question of D2.
   `cmd/nebula-executor/`, `cmd/nebula/`) and need maintainer review.
 - Threat model (PV-03k): the server's new HIGH proposal path, the
   admin-only local entries and the catalog trust chain.
+- (Claude, round 1) The release package installs the staged catalog pair
+  into `/usr/share/nebula/image-catalog`, not into
+  `/usr/share/nebula/release`; that packaging step belongs to PV-03c and
+  is checked there by the test that the bundle directory still loads.
 - Order (paper section 4): PV-03j (this record) and PV-03k first, then
   PV-03a, PV-03b, then PV-03c, PV-03d, PV-03f, PV-03g, PV-03h; PV-03i
   (operator documentation) last.
