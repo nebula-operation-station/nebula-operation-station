@@ -42,9 +42,13 @@ const (
 	nrWebhookSecret = "nr-webhook-secret-0123456789abcdefgh"
 	nrNtfyToken     = "nr-ntfy-token-0123456789"
 	nrNtfyTopic     = "nebula_notify-run"
-	// nrRetries is the number of retries after a failed send (the notifier
-	// retries twice, so a rejecting provider is asked three times).
-	nrRetries = 3
+	// nrAttempts is the number of requests a rejecting provider gets: the
+	// first send plus two retries (the notifier retries twice).
+	nrAttempts = 3
+	// nrTimestampWindow is how far X-Nebula-Timestamp may differ from the
+	// time the receiver gets the request. The guide names no window; this
+	// receiver accepts five minutes.
+	nrTimestampWindow = 5 * time.Minute
 )
 
 // nrRequest is one request a receiver got.
@@ -122,6 +126,22 @@ func nrNotifyTest(t *testing.T, cfg map[string]any) (string, error) {
 	return stderr.String(), err
 }
 
+// nrLogHas reports whether one JSON log line in stderr has both the message
+// msg and the provider field. Two separate substring checks would pass when
+// one provider failed and another logged success.
+func nrLogHas(stderr, msg, provider string) bool {
+	for _, line := range strings.Split(stderr, "\n") {
+		var rec map[string]any
+		if json.Unmarshal([]byte(line), &rec) != nil {
+			continue
+		}
+		if rec["msg"] == msg && rec["provider"] == provider {
+			return true
+		}
+	}
+	return false
+}
+
 // nrCheckSecretsAbsent fails if a secret appears in text (logs or errors).
 func nrCheckSecretsAbsent(t *testing.T, what, text string) {
 	t.Helper()
@@ -150,8 +170,12 @@ func nrVerifyWebhook(t *testing.T, r nrRequest) map[string]any {
 		t.Fatalf("webhook body is not JSON: %v", err)
 	}
 	ts := r.Header.Get("X-Nebula-Timestamp")
-	if _, err := strconv.ParseInt(ts, 10, 64); err != nil {
+	unix, err := strconv.ParseInt(ts, 10, 64)
+	if err != nil {
 		t.Fatalf("X-Nebula-Timestamp %q is not a unix time: %v", ts, err)
+	}
+	if age := time.Since(time.Unix(unix, 0)); age > nrTimestampWindow || age < -nrTimestampWindow {
+		t.Fatalf("X-Nebula-Timestamp %q is %v away from now, want within %v (replay protection)", ts, age, nrTimestampWindow)
 	}
 	sig, ok := strings.CutPrefix(r.Header.Get("X-Nebula-Signature"), "sha256=")
 	if !ok {
@@ -195,6 +219,7 @@ func TestNotifyTestSendsToWebhookAndNtfy(t *testing.T) {
 	if payload["kind"] != "test" {
 		t.Errorf("webhook kind = %v, want test", payload["kind"])
 	}
+	nrCheckSecretsAbsent(t, "webhook body", string(wr[0].Body))
 
 	nr := ntfy.requests()
 	if len(nr) != 1 {
@@ -209,6 +234,8 @@ func TestNotifyTestSendsToWebhookAndNtfy(t *testing.T) {
 	if nr[0].Header.Get("Title") == "" || len(nr[0].Body) == 0 {
 		t.Errorf("ntfy request has no Title or no text")
 	}
+	nrCheckSecretsAbsent(t, "ntfy Title header", nr[0].Header.Get("Title"))
+	nrCheckSecretsAbsent(t, "ntfy body", string(nr[0].Body))
 }
 
 // TestNotifyWebhookSignatureFormat pins the signature as sent and records the
@@ -273,14 +300,17 @@ func TestNotifyTestFailsWhenBothProvidersReject(t *testing.T) {
 	if err == nil || err.Error() != "no provider accepted the test notification (see the log)" {
 		t.Fatalf("err = %v, want no provider accepted", err)
 	}
-	if got := len(webhook.requests()); got != nrRetries {
-		t.Errorf("webhook got %d requests, want %d", got, nrRetries)
+	if got := len(webhook.requests()); got != nrAttempts {
+		t.Errorf("webhook got %d requests, want %d", got, nrAttempts)
 	}
-	if got := len(ntfy.requests()); got != nrRetries {
-		t.Errorf("ntfy got %d requests, want %d", got, nrRetries)
+	if got := len(ntfy.requests()); got != nrAttempts {
+		t.Errorf("ntfy got %d requests, want %d", got, nrAttempts)
 	}
-	if !strings.Contains(stderr, `"msg":"notification failed"`) {
-		t.Errorf("stderr has no failure line: %s", stderr)
+	if !nrLogHas(stderr, "notification failed", "webhook") {
+		t.Errorf("stderr has no webhook failure line: %s", stderr)
+	}
+	if !nrLogHas(stderr, "notification failed", "ntfy") {
+		t.Errorf("stderr has no ntfy failure line: %s", stderr)
 	}
 	nrCheckSecretsAbsent(t, "stderr", stderr)
 	nrCheckSecretsAbsent(t, "error", err.Error())
@@ -302,8 +332,11 @@ func TestNotifyTestOneAcceptingProviderIsEnough(t *testing.T) {
 	if !strings.Contains(stderr, "test notification sent") {
 		t.Errorf("stderr does not report the test notification: %s", stderr)
 	}
-	if !strings.Contains(stderr, `"msg":"notification failed"`) || !strings.Contains(stderr, `"provider":"webhook"`) {
+	if !nrLogHas(stderr, "notification failed", "webhook") {
 		t.Errorf("stderr does not record the webhook failure: %s", stderr)
+	}
+	if nrLogHas(stderr, "notification failed", "ntfy") {
+		t.Errorf("stderr records an ntfy failure, but ntfy accepted: %s", stderr)
 	}
 	if got := len(ntfy.requests()); got != 1 {
 		t.Errorf("ntfy got %d requests, want 1", got)
@@ -329,10 +362,10 @@ func TestNotifyTestDoesNotFollowRedirect(t *testing.T) {
 	if got := len(target.requests()); got != 0 {
 		t.Errorf("redirect target got %d requests, want 0 (redirects must not be followed)", got)
 	}
-	if got := len(webhook.requests()); got != nrRetries {
-		t.Errorf("webhook got %d requests, want %d", got, nrRetries)
+	if got := len(webhook.requests()); got != nrAttempts {
+		t.Errorf("webhook got %d requests, want %d", got, nrAttempts)
 	}
-	if !strings.Contains(stderr, `"provider":"webhook"`) {
+	if !nrLogHas(stderr, "notification failed", "webhook") {
 		t.Errorf("stderr does not record the webhook as failed: %s", stderr)
 	}
 }
