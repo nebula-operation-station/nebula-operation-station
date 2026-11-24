@@ -17,9 +17,6 @@ proxmox=false
 [ -d /etc/pve ] && proxmox=true
 mode=upgrade
 [ "$proxmox" = true ] && mode=dist-upgrade
-# A failed simulation (e.g. broken packages, exit 100) is a failed run, not an
-# empty update list: without the status check the pipeline's exit status would
-# be head's, and an empty document would read as "no updates".
 reboot=false
 [ -e /var/run/reboot-required ] && reboot=true
 pkgs=""
@@ -52,8 +49,16 @@ stream=$({ apt-get -s -o Debug::NoLocking=1 "$mode" 2>/dev/null; echo "nebula-ap
       END { if (cut) print "nebula-apt-cut=1"; print "nebula-apt-rc=" rc }')
 simrc=${stream##*nebula-apt-rc=}
 [ "$simrc" = 0 ] || { echo "apt-get simulation failed" >&2; exit 4; }
-case "$stream" in
-  *"nebula-apt-cut=1"*)
+# The cut marker is the whole line awk appends before the final rc line. Only
+# awk prints a line that is exactly that text (Inst lines start with "Inst ",
+# and the rc line is the last one), so repository text such as an Inst line
+# that contains "nebula-apt-cut=1" never matches. The leading newline lets a
+# marker on the first line match too.
+case "
+$stream" in
+  *"
+nebula-apt-cut=1
+nebula-apt-rc="*)
     echo "apt-get simulation exceeds the result size limit: the upgrade cannot be listed completely" >&2
     exit 5 ;;
 esac

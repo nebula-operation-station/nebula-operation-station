@@ -1,0 +1,1 @@
+{"openssl":{"CVE-2026-1000":{"releases":{"bookworm":{"status":"resolved","fixed_version":"3.0.15-1~deb12u1","urgency":"high"}}}}}

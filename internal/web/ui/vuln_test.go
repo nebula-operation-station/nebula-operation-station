@@ -133,8 +133,11 @@ func vulnRow(b byte, s vulnstore.Subject, id string, st vulnstore.State, tier vu
 	return ui.VulnRow{Tier: tier, Finding: vulnstore.Finding{Key: vulnKey(b), Subject: s, Record: r, NOSChecked: true, State: st}}
 }
 
+// freshSubject is a subject with a fresh run and, for a host, a complete
+// package inventory (a host without one is never green, D6).
 func freshSubject(s vulnstore.Subject) ui.VulnSubjectStatus {
-	return ui.VulnSubjectStatus{Subject: s, LastComplete: vulnNow.Add(-time.Hour)}
+	return ui.VulnSubjectStatus{Subject: s, LastComplete: vulnNow.Add(-time.Hour),
+		Inventory: &ui.VulnInventoryStatus{ReadAt: vulnNow.Add(-time.Hour), Complete: true, KernelMapped: true}}
 }
 
 func okFeed(id string) ui.VulnFeedStatus {

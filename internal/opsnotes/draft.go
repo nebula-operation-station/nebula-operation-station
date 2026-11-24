@@ -268,7 +268,7 @@ func Validate(d Draft, r Resolver) ([]Step, error) {
 		return nil, err
 	}
 	for _, c := range d.Citations {
-		if err := checkToken("citation", c); err != nil {
+		if err := checkCitation("citation", c); err != nil {
 			return nil, err
 		}
 		if !r.DocChunkExists(c) {

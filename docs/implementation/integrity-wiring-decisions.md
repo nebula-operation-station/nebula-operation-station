@@ -36,6 +36,17 @@ recommendations are accepted.
   a permit mutex held over 40 min), with the lease rule change this needs
   (ADR 0007 territory, decided hereby).
 
+Work that follows from the decisions (moved here from section 3.1 on
+2026-11-21, Claude):
+
+- **(f) option 3, I1 status beside the server check:** read-only. Show the
+  executor's `GetIntegrityStatus` result (`internal/executorclient/client.go:922-923`)
+  next to the server's own check on `cmd/nebula-server/integrity.go`, labelled by
+  source; neither is presented as the other. Files: `cmd/nebula-server/integrity.go`,
+  `internal/executorclient/` (both unprotected; the executor is not changed).
+  Test: `httptest` server returns the executor status; a failing executor call shows
+  "unavailable", not "ok".
+
 ## Summary
 
 - **I2 (file integrity on hosts) has no working end-to-end chain.** The scan
@@ -75,7 +86,7 @@ recommendations are accepted.
 | Transport | **Limits do not agree.** Attached runs (the only path read leases use) are capped at 1 MiB output and 10 min. Durable result reads are capped at the same 1 MiB. The scan allows 128 MiB and 40 min. The 10 min limit is enforced in the executor before dispatch (`schedule.go:133-135`, `roles_read.go:258-259`) and clamped in `hostrun`. | `internal/hostrun/hostrun.go:39` (`MaxResult = 1 << 20`), `:41-42` (`MaxTimeout = 10 min`), `:211` (output cap applied), `:221-222` (timeout clamp); `internal/hostrun/durable.go:358,370`; `internal/executor/schedule.go:133-135,211`; `internal/executor/roles_read.go:258-259`; `internal/fimscan/limits.go:13` (`MaxDocumentBytes = 128 << 20`); `internal/fimscan/script.go:30` (`ActionTimeout = 40 min`) |
 | Parser | Built, no production caller. `Parse` is only called from tests. | `internal/fimscan/parse.go:33`; no non-test caller found |
 | Retention | Built, no production caller. Merge of scan runs (`fimretain`), the retention store (`fimstore`) and `integritystore` are not called from production code. | `internal/fimretain/merge.go`; `internal/fimstore/store.go:128` (`Propose`); `internal/integritystore/integritystore.go`; `internal/fimresolve/resolve.go` (no production caller) |
-| Baseline (digest) | **Partly wired.** The executor's `CompareBaselineList` stream builds a baseline from the streamed list and compares its digest with the executor-held approved digest. This RPC is registered on the gRPC service. By design it receives the server's approved list, not a scan run (ADR 0015:1049-1052; `internal/executor/integrity_baseline.go:25-30`). The gap is that no server code calls it: the only client wrapper is `internal/executorclient/client.go:920`, and no caller of that wrapper exists. The server-side `fimstore.Propose` also builds a baseline and stores its digest, without a production caller. | `internal/executor/integrity_baseline.go:153` (`NewBaseline`), `:355` (`CompareBaselineList`); `internal/executor/service.go:221` (`RegisterExecutorServiceServer`); `internal/fimstore/store.go:143` |
+| Baseline (digest) | **Partly wired.** The executor's `CompareBaselineList` stream builds a baseline from the streamed list and compares its digest with the executor-held approved digest. This RPC is registered on the gRPC service. By design it receives the server's approved list, not a scan run (ADR 0015:1049-1052; `internal/executor/integrity_baseline.go:25-30`). The gap is that no server code calls it: the only client wrapper is `internal/executorclient/client.go:947`, and no caller of that wrapper exists. The server-side `fimstore.Propose` also builds a baseline and stores its digest, without a production caller. | `internal/executor/integrity_baseline.go:153` (`NewBaseline`), `:355` (`CompareBaselineList`); `internal/executor/service.go:221` (`RegisterExecutorServiceServer`); `internal/fimstore/store.go:143` |
 | Approval | **Missing.** `StoreApprovedBaselineDigest` (the only writer of the approved digest) has no production caller. No approval RPC, no approval screen, no `nebula integrity pending/approve`. The server's `Approve` re-hashes its own stored proposal rows (section 2 (c)). | `internal/executordb/integrity_baseline.go:111`; no non-test caller; `internal/fimstore/store.go:205` (`Approve`), `:241` (`verifyProposal`) |
 | Diff | Built, no production caller. | `internal/fimbaseline/diff.go:111` (`Diff`) |
 | Findings | Classes exist, no production caller. The executor writes a tamper finding on a digest mismatch (`RecordBaselineTamper`), but that path is not reachable in production: `CompareBaselineList` has no server caller, and `StoreApprovedBaselineDigest` (the only writer of the approved digest) has no production caller. So `approvedBaselineDigest` finds no digest and `finishBaselineCompare` returns `BaselineNone` before the call (`internal/executor/integrity_baseline.go:249`, `:253-254`). Severity is missing for uncovered paths (section 2 (e)). | `internal/fimfinding/classes.go`; `internal/fimfinding/doc.go:48-56`; `internal/executor/integrity_baseline.go:259` |
@@ -87,17 +98,20 @@ recommendations are accepted.
 | Step | Status today | Evidence (file:line) |
 | --- | --- | --- |
 | Server self-check | Runs at start and every 60 min. Its reference loader always returns an error: a release build reports `no-admitted-reference` (ERROR, hashes nothing), a development build reports not-checkable. It cannot report "ok". | `cmd/nebula-server/integrity.go:53-61` (comment), `:65-80` (`newIntegrityMonitorAt`, `Load` at `:68-74`); `cmd/nebula-server/main.go:359-362` (`selfCheck`, comment says "no reaction here (IG-04)") |
-| Executor status RPC | Exists, read-only, server and admin roles allowed. | `internal/executor/roles.go:257`; `internal/executor/integrity_lock.go:494` (`GetIntegrityStatus`); client `internal/executorclient/client.go:896` |
+| Executor status RPC | Exists, read-only, server and admin roles allowed. | `internal/executor/roles.go:257`; `internal/executor/integrity_lock.go:494` (`GetIntegrityStatus`); client `internal/executorclient/client.go:922-923` |
 | Server calls executor status | **Never.** The only callers of `GetIntegrityStatus` are the admin CLI. The server's lock watcher calls the separate `GetStatus` RPC for the lock state only. | `cmd/nebula/integrity_ack.go:39,88`; `cmd/nebula-server/main.go:348-357` (`GetStatus`) |
 | Server UI for I1 | `/integrity/status` shows the server monitor's result only. | `cmd/nebula-server/integrity.go:118-129` |
 
 ## 2. Open points
 
 Each point: question, what the ADR says, what the code says, options,
-recommendation. Nothing below is decided.
+recommendation. The points marked "Decided 2026-11-21" follow the decision
+block above; the others are still open.
 
 ### (a) Who plans the scans (scheduling owner)
 
+- **Decided 2026-11-21: option 1** (see the Decision block). The ADR wording
+  stays until IG-05 lands, as noted below.
 - **ADR:** the server's scheduler, or a collector role, "*verify* which one
   owns scheduling when IG-05 lands" (`docs/adr/0015-integrity-monitoring.md:492-494`).
   The executor authorizes and dials; the server or collector only triggers.
@@ -126,6 +140,7 @@ recommendation. Nothing below is decided.
 
 ### (b) Transport limits (1 MiB and 10 min against 128 MiB and 40 min)
 
+- **Decided 2026-11-21: option 2, together with (g)** (see the Decision block).
 - **ADR:** the 128 MiB document per run and the 40 min action timeout are
   chosen so that the scan fits (`docs/adr/0015-integrity-monitoring.md:624-627`).
   The ADR says that the 1 MiB `result.json` default of spec 09 needs an
@@ -185,11 +200,15 @@ recommendation. Nothing below is decided.
   option 1 is the smaller change is withdrawn. Option 2 does not hold the permit
   mutex, so for a 40 min run this paper would lean to option 2, once the durable
   path's lock and revocation behaviour is checked (not done here). Option 2 also
-  needs (g) decided. The maintainer decides; nothing here is decided. The spec 09
+  needs (g) decided. Decided 2026-11-21 together with (g): option 2, as a
+  durable job (see the Decision block). The spec 09
   amendment comes first in either case, and the ADR's limits stay the only numbers.
 
 ### (c) Who computes the baseline digest: server or executor
 
+- **Decided 2026-11-21: option 1** (see the Decision block). The server digest is
+  removed after the executor check is wired; the open direction question below
+  still applies.
 - **ADR:** the executor alone decides what goes into a baseline; the digest the
   admin approves is computed by the executor, never taken from the server
   (`docs/adr/0015-integrity-monitoring.md:1035-1037`).
@@ -217,7 +236,7 @@ recommendation. Nothing below is decided.
      approval binds that digest (ADR 0015:1035-1037). Protected:
      `internal/executor/`, `internal/executordb/`.
      **Direction, not decided by this paper:** the code has the server push the
-     list in a client stream (`internal/executorclient/client.go:912`), while the
+     list in a client stream (`internal/executorclient/client.go:947`), while the
      ADR text has the executor fetch it from the server (`:1049-1050`). Option 1
      works with either, but the maintainer should confirm which one the ADR means.
   2. *Server proposes, executor re-checks at approval.* The server's digest is
@@ -235,6 +254,8 @@ recommendation. Nothing below is decided.
 
 ### (d) Lease runner and proposal drop actions with parameters
 
+- **Decided 2026-11-21: option 1, restricted to `FimScanActionID`, with (i) to (iii)**
+  (see the Decision block).
 - **ADR:** the grant freezes a profile ID and a mode, and the lease binds the
   exact action, script hash and parameters (`docs/adr/0015-integrity-monitoring.md:489-500`;
   `permit/lease_fimscan.go` implements the lease check).
@@ -248,8 +269,11 @@ recommendation. Nothing below is decided.
   Even when the skip rules are lifted, `runLeaseAction` sends
   `ParametersJson: {}` (`internal/executions/leaserunner.go:264`), so the
   executor would get the empty object, not `mode` and `profile`. The executor
-  then matches the run's parameter hash to the request (`internal/permit/permit.go:814-854`),
-  and the lease check compares the action's hash (`internal/permit/lease.go:1007`).
+  runs the lease-run check `checkReadRun` (`internal/permit/lease.go:950`): it
+  canonicalizes the run's parameters (`lease.go:964`) and refuses unless their hash
+  equals the granted action's `ParametersHash` (`lease.go:1022`). The similar check
+  at `internal/permit/permit.go:854` is in `authorizeGrant`, the permit path; it is
+  not the lease check and does not apply to read leases.
   The accepted hashes for `fim.scan` are fixed in `internal/permit/lease_fimscan.go:34-39,107-125`.
   The runner keeps no per-entry mode. `ordinaryLease.actions` holds
   `actions.Action` values only (`internal/executions/leaserunner.go:57`), so the
@@ -264,12 +288,12 @@ recommendation. Nothing below is decided.
   1. *Allow the one action:* accept `fim.scan` with its two fixed parameters
      when the grant's parameter hash matches the canonical parameters; reject
      every other parameter set. Restricted to `FimScanActionID`. This needs
-     two changes, not one: (i) lift the skip rules for `FimScanActionID` in
+     three changes: (i) lift the skip rules for `FimScanActionID` in
      `leaserunner.go:93-94` and `readgrants_propose.go:178`; (ii) the runner
      builds the canonical parameters JSON for the grant (`mode`, `profile`)
      and sends it in `runLeaseAction` (`leaserunner.go:264`) instead of `{}`,
      so the bytes hash to the grant's `ParametersHash`. Without (ii) the lease
-     check at `permit.go:854` and `lease.go:1007` fails for every run; (iii)
+     check at `lease.go:1022` fails for every run; (iii)
      keep each entry's mode in the runner: carry the entry's `ParametersHash`
      with `ordinaryLease.actions` (`leaserunner.go:57`), key the last run and the
      due time by that mode with the executor's floor (incremental 1 h, full
@@ -297,6 +321,8 @@ recommendation. Nothing below is decided.
 
 ### (e) Severity for paths the table does not cover
 
+- **Decided 2026-11-21: option 2** (see the Decision block). Option 1 stays
+  possible later; the text below is the analysis.
 - **ADR:** the severity table row "Other changed or new file in `/etc` or a
   watched `/usr` root (D5)" is `high` (`docs/adr/0015-integrity-monitoring.md:1518`).
   Local software is always compared against the baseline (`:520`): `/usr/local/bin`,
@@ -327,6 +353,9 @@ recommendation. Nothing below is decided.
 
 ### (f) I1: show the executor's status or the server's own check
 
+- **Decided 2026-11-21: option 3** (see the Decision block at the top of this
+  paper and ADR 0015 Amendment 2026-11-21). The text below is the pre-decision
+  analysis and is kept as history.
 - **ADR:** IG-03 has the "server check of executor" and IG-04 has the I1
   reaction (`docs/adr/0015-integrity-monitoring.md:1674-1675`). The ADR does
   not say what the server page shows.
@@ -348,6 +377,7 @@ recommendation. Nothing below is decided.
 
 ### (g) Durable actions cannot run through read leases (new)
 
+- **Decided 2026-11-21: option 2, together with (b)** (see the Decision block).
 - **ADR:** the ADR does not say whether `fim.scan` is durable. It names a 40 min
   action timeout (`:624-627`) and calls `fim.scan` a read-only action
   (`:481-482`). The ADR never uses the word "durable".
@@ -371,10 +401,11 @@ recommendation. Nothing below is decided.
      durable maximum (section 2 (b) option 2).
   3. *Shorten the scan below the attached 10 min limit.* Contradicts the ADR's
      40 min budget (`:624-627`). Not recommended.
-- **Recommendation:** not decided here. Option 1 needs the (b) guard change
+- **Decided 2026-11-21 together with (b): option 2** (see the Decision block).
+  The lease rule change is ADR 0007 territory and is decided there as well.
+- **Recommendation (before the decision):** option 1 needs the (b) guard change
   before a 40 min run; option 2 avoids the permit mutex but needs the lease rule
-  change and a durable branch. Decide (g) together with (b). The lease rule is
-  ADR 0007 territory; the maintainer decides it.
+  change and a durable branch.
 
 ## 3. Work split
 
@@ -386,13 +417,12 @@ change.
 
 | Item | Files | Required test (real HTTP unless noted) |
 | --- | --- | --- |
-| Server stores (`fimstore`, `integritystore`) built on the server database. Only after (c) is decided: until then the server keeps digest logic that ADR 0015:1035-1060 may forbid. Whether it does is the open reading in (c) option 2, not settled here. | `internal/fimstore/`, `internal/integritystore/`, `cmd/nebula-server/` | `httptest`-served handler that writes and reads a baseline proposal; error path for a host without a stored host row |
-| I1 status from the existing `GetIntegrityStatus` RPC (`internal/executorclient/client.go:896`), shown beside the server check (option (f) 3). Read-only; the executor is not changed. | `cmd/nebula-server/integrity.go`, `internal/executorclient/` | `httptest` server returns the executor status; a test that a failing executor call shows "unavailable", not "ok" |
+| Server baseline proposal store (`fimstore`) built on the server database. Decided 2026-11-21, (c) option 1: the server digest (`internal/fimstore/store.go:143`) and the `verifyProposal` check are removed, but only after the executor check on the list is wired (section 2 (c)). Do not add server digest logic. Until that removal, the existing code stays as it is. | `internal/fimstore/`, `cmd/nebula-server/` | `httptest`-served handler that writes and reads a baseline proposal; error path for a host without a stored host row |
 | `IntegrityGate` wired to the notifier (`internal/notify/integrity.go:194`) | `internal/notify/integrity.go`, `cmd/nebula-server/` | `httptest` notification sink receives an `integrity.*` message; a held message is recorded |
 | Stale comment in `fim.scan` contract (`internal/fimscan/script.go:78-80`) | `internal/fimscan/script.go` | none (comment only); correct the sentence about the allowlist now, the catalog sentence after the catalog entry is decided |
 
-Note: the I1 status row only covers reading the executor's status. The IG-04
-reaction (section 3.2) is not part of this list.
+Note: the I1 status work from (f) option 3 is listed under the Decision block,
+not here. The IG-04 reaction (section 3.2) is not part of this list.
 
 ### 3.2 Needs protected paths (maintainer)
 
@@ -420,13 +450,15 @@ protects `CODEOWNERS`, `docs/handbook/`, `docs/admin/guide.md` and
 
 | Ticket | Paths | Protected | Required test |
 | --- | --- | --- | --- |
+| IG-03: I1 checks, executor cross-check, server check of executor, `integrity_findings` store (ADR 0015:1674) | `internal/integritystore/`, `cmd/nebula-server/integrity.go`, `internal/executorclient/`; executor cross-check in `internal/executor/` | Yes for `internal/executor/` (the cross-check) | Proposed: findings row written and read back through `internal/integritystore/` on a real database; the server page shows the executor status and its own check labelled apart (decision (f) 3). Depends on IG-02 (ADR 0015:1674), not on (c) |
 | IG-05: `fim.scan` script, read-only contract, parser with fuzz tests and limits | `internal/fimscan/`, `internal/executions/actions/actions.go` (catalog), `internal/executions/leaserunner.go`, `internal/executions/readgrants_propose.go` (d), `internal/hostrun/` (b), `internal/executor/` (intake) | Yes for `internal/hostrun/`, `internal/executor/`; catalog and `executions` not listed (see 3.2 note) | Lease with `fim.scan` and foreign parameters rejected; a 128 MiB-class document accepted by the transport limit; parser fuzz for limit boundaries |
 | IG-06: host baseline store, executor-held digest, baseline approval UI, `nebula integrity pending`/`approve` | `internal/fimstore/` (server view only, c), `internal/executordb/`, `internal/executor/`, `internal/web/ui/`, `cmd/nebula/` | Yes for `executordb`, `executor`, `cmd/nebula` | Approval binds the executor-computed digest; a stale `PreviousDigest` is rejected (over real HTTP for the UI) |
 | IG-07: incremental/full logic and expected-change attribution | `internal/fimretain/`, `internal/fimbaseline/`, `internal/executor/` | Yes for `executor` | A complete incremental run keeps a hash only for paths it hashed; a metadata change drops the hash (D9) |
-| IG-08: findings UI and `integrity.*` notifications | `internal/fimfinding/`, `internal/integritystore/`, `internal/notify/integrity.go`, `cmd/nebula-server/integrity.go` | No | Findings page over real HTTP; notification sink receives the finding; the "not covered" case of (e) shows no severity |
+| IG-08: findings UI and `integrity.*` notifications | `internal/fimfinding/`, `internal/notify/integrity.go`, `cmd/nebula-server/integrity.go` | No | Findings page over real HTTP; notification sink receives the finding. Conditional on (e) option 2 (decided 2026-11-21): the "not covered" case shows no severity. If (e) option 1 is chosen later, this test changes |
 
-IG-03 and IG-04 are mixed: IG-03 (server check of executor, server page) is
-mostly section 3.1; IG-04 (unlock refusal, `ack`, `verify --offline`,
+IG-03 and IG-04 are mixed: IG-03 (I1 checks, server check of executor, server
+page, `integrity_findings` store) is the (f) work item under the Decision block
+plus the IG-03 row above; section 3.1 holds no IG-03 item. IG-04 (unlock refusal, `ack`, `verify --offline`,
 configuration approval) is mostly section 3.2 and needs the maintainer. The
 admission of `installed-files.json` into executor storage is IG-02 (ADR
 0015:1673). Its executor part is protected (`internal/executor/`). The
@@ -459,5 +491,10 @@ No Go code changed; no test is possible for a document. Instead:
   and the ADR line numbers in sections 2 to 5. Round 3 re-read the code for
   the points named in its review: section 1 (baseline and findings rows), section
   2 (b), (c), (d) and (g), and the lock and revocation callers of the permit mutex.
-- No option in this paper is presented as decided. Where the ADR is open, the
-  text says so.
+- Options marked "Decided 2026-11-21" follow the maintainer's decision block at
+  the top. All other options are open, and the text says so.
+- Review round 4 (uf13g, Claude): the (d) lease-run parameter check was re-checked
+  at `internal/permit/lease.go:950-1024` (`checkReadRun`); `permit.go:814-854` is
+  `authorizeGrant` on the permit path. The IG-03 row and `integrity_findings` were
+  checked against ADR 0015:1674. Work items from the decided (f) option 3 moved
+  under the Decision block.

@@ -37,6 +37,7 @@ const hostile = {
   source: "evil<script>window.__pwned='feed'</script>",
   run: '<b>run</b>"><script>window.__pwned=\'run\'</script>',
   version: '3.0.15<img src=x onerror="window.__pwned=\'version\'">',
+  kernel: '6.1.0-27-amd64<script>window.__pwned=\'kernel\'</script>',
 };
 const digest = 'sha256:' + 'ab12'.repeat(16);
 const key = (b) => b.repeat(32);
@@ -144,7 +145,7 @@ async function subjectStatus(page) {
     text = await open(page, base, '/vulnerabilities?view=subject');
     await inert(page, '/vulnerabilities?view=subject');
     const subs = await statuses(page);
-    check(subs.length === 5, 'every subject is listed, also those without findings (' + subs.length + ')');
+    check(subs.length === 6,'every subject is listed, also those without findings (' + subs.length + ')');
     check(subs.every((s) => !s.green), 'no subject is green while a feed on the page has an issue: ' + subs.map((s) => s.id + '=' + s.text).join(', '));
     const byID = (id) => subs.find((s) => s.id === id);
     check(byID('e2e-host').name === hostile.hostName, 'the hostile subject name is literal text in the list');
@@ -169,6 +170,9 @@ async function subjectStatus(page) {
       { path: '/vulnerabilities/subject/host/e2e-two', want: /^not assessed$/, literal: [hostile.twoName] },
       { path: '/vulnerabilities/subject/image/e2e-host?digest=' + digest, want: /^stale since /, literal: [] },
       { path: '/vulnerabilities/subject/host/e2e-unconf', want: /closed by Hermes, not confirmed by NOS$/, literal: [] },
+      // Assessed, no findings, but no package inventory (ADR 0011 D6, D8).
+      { path: '/vulnerabilities/subject/host/e2e-noinv', want: /^unknown: list incomplete$/,
+        literal: ['Package inventory: none stored: no successful package.list_installed run for this host yet', 'Running kernel: kernel coverage unknown'] },
     ];
     for (const s of subjectPages) {
       text = await open(page, base, s.path);
@@ -183,6 +187,8 @@ async function subjectStatus(page) {
     await inert(page, '/vulnerabilities/subject/host/e2e-clean');
     const clean = await subjectStatus(page);
     check(clean.green && clean.text === 'no open findings', 'control: the clean, fresh subject is green on its page');
+    check(text.includes('412 source packages (1187 binaries), complete'), 'the clean host shows its complete package inventory');
+    check(text.includes('Running kernel ' + hostile.kernel + ': mapped'), 'the hostile kernel release is literal text');
     // An unknown subject is "not assessed", never green.
     text = await open(page, base, '/vulnerabilities/subject/host/e2e-unknown');
     const unknown = await subjectStatus(page);

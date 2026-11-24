@@ -127,17 +127,31 @@ type Read struct {
 	Components []Component
 }
 
-// Store reads and writes inventory reads in server.db.
+// Store reads and writes inventory reads in server.db. It has one clock: the
+// read-time bound of Put, TakenAt of the snapshots, the reuse window of Current
+// and the prune cutoff of PruneSnapshots all read it.
 type Store struct {
-	db *sql.DB
+	db  *sql.DB
+	now func() time.Time
 }
 
-// New returns a Store on db, which must hold the migrated server schema.
+// New returns a Store on db, which must hold the migrated server schema. Its
+// clock is the wall clock.
 func New(db *sql.DB) (*Store, error) {
+	return NewWithNow(db, time.Now)
+}
+
+// NewWithNow returns a Store on db whose clock is now. Callers that compare the
+// store's times with their own times (the export's freshness check, a test
+// clock) pass the same function. now must not be nil.
+func NewWithNow(db *sql.DB, now func() time.Time) (*Store, error) {
 	if db == nil {
 		return nil, fmt.Errorf("vulninventory: new: nil database")
 	}
-	return &Store{db: db}, nil
+	if now == nil {
+		return nil, fmt.Errorf("vulninventory: new: nil clock")
+	}
+	return &Store{db: db, now: now}, nil
 }
 
 // bodyComponent and bodyBinary are the canonical JSON encoding of the
@@ -327,9 +341,10 @@ func decodeBody(body []byte) ([]Component, error) {
 	return comps, nil
 }
 
-// validateRead checks the header fields of r. Components are checked by
-// encodeBody.
-func validateRead(r Read) error {
+// validateRead checks the header fields of r against the store clock now: a
+// read time more than MaxReadSkew after now is refused. Components are checked
+// by encodeBody.
+func validateRead(r Read, now time.Time) error {
 	if err := checkText("host id", r.HostID, maxHostIDBytes, true); err != nil {
 		return err
 	}
@@ -339,7 +354,7 @@ func validateRead(r Read) error {
 	if r.ReadAt.IsZero() || r.ReadAt.Unix() <= 0 {
 		return fmt.Errorf("%w: read time is unset", ErrInvalidRead)
 	}
-	if limit := nowFunc().Add(MaxReadSkew); r.ReadAt.After(limit) {
+	if limit := now.Add(MaxReadSkew); r.ReadAt.After(limit) {
 		return fmt.Errorf("%w: read time is more than %s after the store clock", ErrInvalidRead, MaxReadSkew)
 	}
 	if err := checkText("reason", r.Reason, MaxReasonBytes, false); err != nil {
@@ -370,7 +385,7 @@ func validateRead(r Read) error {
 // row ID. A read over a limit or with an invalid field is rejected and nothing
 // is written.
 func (s *Store) Put(ctx context.Context, r Read) (int64, error) {
-	if err := validateRead(r); err != nil {
+	if err := validateRead(r, s.now()); err != nil {
 		return 0, fmt.Errorf("vulninventory: put: %w", err)
 	}
 	body, binaries, err := encodeBody(r.Components)

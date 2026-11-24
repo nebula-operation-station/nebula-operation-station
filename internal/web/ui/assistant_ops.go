@@ -26,7 +26,6 @@ import (
 	"net/url"
 	"sort"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsnotes"
@@ -335,9 +334,10 @@ func (h *Handler) assistantStepLink(noteID int64, idx int, in opsnotes.StepInput
 	return "/operations/new?suggestion=" + url.QueryEscape(ref), "Open form", true
 }
 
-// assistantCitations maps citation IDs to handbook links. An ID is a
-// heading anchor, optionally with "#pN" for a paragraph part; only anchors
-// of the handbook get a link, everything else is text.
+// assistantCitations maps citation IDs to handbook links. An ID is a chunk
+// ID of the embedded index, "slug#anchor" or "slug#anchor#pN" (see
+// helpBook.chunkURL); only IDs that name a heading of their page get a link,
+// everything else is text.
 func (h *Handler) assistantCitations(ids []string) []assistantCitation {
 	if len(ids) == 0 {
 		return nil
@@ -349,27 +349,14 @@ func (h *Handler) assistantCitations(ids []string) []assistantCitation {
 	out := make([]assistantCitation, 0, len(ids))
 	for _, id := range ids {
 		c := assistantCitation{Label: id}
-		anchor, _, _ := strings.Cut(id, "#")
-		if book != nil && anchor != "" {
-			if u, ok := book.anchorURL(anchor); ok {
+		if book != nil {
+			if u, ok := book.chunkURL(id); ok {
 				c.URL = u
 			}
 		}
 		out = append(out, c)
 	}
 	return out
-}
-
-// anchorURL returns the handbook URL of the section with heading anchor id.
-func (b *helpBook) anchorURL(id string) (string, bool) {
-	for _, p := range b.order {
-		for _, hd := range p.headings {
-			if hd.ID == id {
-				return p.url + "#" + hd.ID, true
-			}
-		}
-	}
-	return "", false
 }
 
 // handleAssistantOpsNote renders one fix card as its own page.

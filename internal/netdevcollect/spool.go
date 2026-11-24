@@ -32,6 +32,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevcontract"
@@ -61,6 +62,20 @@ const (
 	ReadPANOSNATRules = "panos_nat_rules"
 	// ReadPANOSRuleHitCounts is the PAN-OS rule hit-count read.
 	ReadPANOSRuleHitCounts = "panos_rule_hit_counts"
+	// ReadDeviceMetadata is the device registry metadata the collector
+	// lists from the executor (ADR 0010 D1, ND-16). It is not an executor
+	// read: it has no NetDeviceRead value and is never sent to a device.
+	ReadDeviceMetadata = "device_metadata"
+)
+
+const (
+	// MaxDeviceMetadataBytes is the payload limit of a device metadata
+	// record: the six fields of DeviceMetadata with bounded text need far
+	// less.
+	MaxDeviceMetadataBytes = 4 << 10
+	// MaxDeviceMetadataTextBytes bounds the label and the block reason of
+	// a device metadata record.
+	MaxDeviceMetadataTextBytes = 256
 )
 
 // readLimits is the closed set of reads with the byte limit of one read's
@@ -77,6 +92,7 @@ var readLimits = map[string]int{
 	ReadPANOSSecurityRules: netdevcontract.MaxPANOSResponseBytes,
 	ReadPANOSNATRules:      netdevcontract.MaxPANOSResponseBytes,
 	ReadPANOSRuleHitCounts: netdevcontract.MaxPANOSResponseBytes,
+	ReadDeviceMetadata:     MaxDeviceMetadataBytes,
 }
 
 // ReadLimit returns the payload byte limit of a read and false for a name
@@ -241,6 +257,141 @@ func validTrustGeneration(g uint64) bool {
 	return g >= 1 && g <= netdevcontract.MaxTrustGeneration
 }
 
+// DeviceMetadata is the registry metadata of one device as the collector
+// lists it from the executor (ADR 0010 D1): the fields the device list
+// shows and nothing else. It carries no endpoint, trust pin, credential,
+// credential version or device data, and it is never a device read.
+type DeviceMetadata struct {
+	DeviceID        string                `json:"device_id"`
+	Family          netdevcontract.Family `json:"family"`
+	Label           string                `json:"label"`
+	TrustGeneration uint64                `json:"trust_generation"`
+	Blocked         bool                  `json:"blocked"`
+	BlockReason     string                `json:"block_reason"`
+}
+
+// deviceMetadataKeys is the closed set of fields of a device metadata
+// payload; all of them are required.
+var deviceMetadataKeys = map[string]bool{
+	"device_id": true, "family": true, "label": true, "trust_generation": true,
+	"blocked": true, "block_reason": true,
+}
+
+// DecodeDeviceMetadata strictly decodes a device metadata payload: a JSON
+// object with exactly the fields of DeviceMetadata, each present once and
+// of its type, a well-formed device_id, a known family, a trust generation
+// in range, and text fields of at most MaxDeviceMetadataTextBytes without
+// control characters. Errors wrap ErrInvalidRecord and never quote input.
+func DecodeDeviceMetadata(payload []byte) (DeviceMetadata, error) {
+	var out DeviceMetadata
+	if err := validatePayload(payload, MaxDeviceMetadataBytes); err != nil {
+		return out, err
+	}
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		return out, invalid("device metadata is not a JSON object")
+	}
+	seen := make(map[string]bool, len(deviceMetadataKeys))
+	for dec.More() {
+		tok, err := dec.Token()
+		key, ok := tok.(string)
+		if err != nil || !ok || !deviceMetadataKeys[key] || seen[key] {
+			return out, invalid("device metadata has an unknown, repeated or malformed field")
+		}
+		var v json.RawMessage
+		if err := dec.Decode(&v); err != nil {
+			return out, invalid("device metadata field %s is malformed", key)
+		}
+		if err := setDeviceMetadataField(&out, key, v); err != nil {
+			return out, err
+		}
+		seen[key] = true
+	}
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('}') {
+		return out, invalid("device metadata is not a closed JSON object")
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return out, invalid("device metadata has trailing data")
+	}
+	for key := range deviceMetadataKeys {
+		if !seen[key] {
+			return out, invalid("device metadata misses field %s", key)
+		}
+	}
+	if !netdevcontract.ValidDeviceID(out.DeviceID) {
+		return out, invalid("device metadata has a malformed device_id")
+	}
+	if out.Family != netdevcontract.FamilyCBS && out.Family != netdevcontract.FamilyPANOS {
+		return out, invalid("device metadata has an unknown family")
+	}
+	if !validTrustGeneration(out.TrustGeneration) {
+		return out, invalid("device metadata trust generation out of range")
+	}
+	if !validMetadataText(out.Label) || !validMetadataText(out.BlockReason) {
+		return out, invalid("device metadata text is too long or has control characters")
+	}
+	return out, nil
+}
+
+// setDeviceMetadataField decodes one known field of a device metadata
+// payload into out. The key is known to be one of deviceMetadataKeys, so
+// the messages may name it; the value is never quoted.
+func setDeviceMetadataField(out *DeviceMetadata, key string, v json.RawMessage) error {
+	var err error
+	if bytes.Equal(v, []byte("null")) {
+		err = errors.New("null")
+	} else {
+		switch key {
+		case "device_id":
+			err = json.Unmarshal(v, &out.DeviceID)
+		case "family":
+			err = json.Unmarshal(v, &out.Family)
+		case "label":
+			err = json.Unmarshal(v, &out.Label)
+		case "trust_generation":
+			err = json.Unmarshal(v, &out.TrustGeneration)
+		case "blocked":
+			err = json.Unmarshal(v, &out.Blocked)
+		case "block_reason":
+			err = json.Unmarshal(v, &out.BlockReason)
+		}
+	}
+	if err != nil {
+		return invalid("device metadata field %s has the wrong type", key)
+	}
+	return nil
+}
+
+// validMetadataText reports whether s fits the text limit and is printable
+// UTF-8 in the sense of unicode.IsPrint, the rule the executor applies to
+// the same kind of label. That excludes control characters (C0, DEL and
+// C1), format characters (bidi overrides and isolates, zero-width marks) and
+// spaces other than U+0020, so that the text can be shown as plain text.
+func validMetadataText(s string) bool {
+	if len(s) > MaxDeviceMetadataTextBytes || !utf8.ValidString(s) {
+		return false
+	}
+	for _, r := range s {
+		if !unicode.IsPrint(r) {
+			return false
+		}
+	}
+	return true
+}
+
+// checkDeviceMetadata checks that a device metadata payload decodes and
+// names the device and trust generation of the record it is spooled in.
+func checkDeviceMetadata(deviceID string, trustGeneration uint64, payload []byte) error {
+	m, err := DecodeDeviceMetadata(payload)
+	if err != nil {
+		return err
+	}
+	if m.DeviceID != deviceID || m.TrustGeneration != trustGeneration {
+		return invalid("device metadata does not match its record")
+	}
+	return nil
+}
+
 // Write validates one read result and publishes it atomically as
 // <device>-<read>-<unix nanos>-<random>.json, observed at s.Now(). It
 // never replaces an existing file and returns the published name.
@@ -263,6 +414,11 @@ func (s *Spool) Write(ctx context.Context, deviceID, read string, trustGeneratio
 	}
 	if err := validatePayload(payload, limit); err != nil {
 		return "", fmt.Errorf("write %s %s: %w", deviceID, read, err)
+	}
+	if read == ReadDeviceMetadata {
+		if err := checkDeviceMetadata(deviceID, trustGeneration, payload); err != nil {
+			return "", fmt.Errorf("write %s %s: %w", deviceID, read, err)
+		}
 	}
 	observed := s.Now().UTC()
 	nanos := observed.UnixNano()
