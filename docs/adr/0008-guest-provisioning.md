@@ -98,10 +98,14 @@ on a minimal phase-2 mutation foundation, not on the rest of phase 2.
   1. RPC form: Propose/Commit for `server` and `admin`; the server may
      propose, never approve (D1; test ticket PV-03b).
   2. Who loads the signed catalog, and when: the executor at start, from
-     the release bundle directory, fail closed with local entries still
-     usable (D2; PV-03c). File layout: separate signed file (PV-03e).
+     the catalog directory installed next to the release bundle directory
+     (previously "from the release bundle directory"; corrected in the
+     amendment, D2), fail closed with local entries still usable (D2;
+     PV-03c). File layout: separate signed file (PV-03e).
   3. Local entries: admin-only RPCs from the `nebula` CLI over the admin
      socket; the executor validates and persists (D3; PV-03b, PV-03d).
+     Count limit and start-up behaviour on an unreadable local-entry file
+     are open for the owner (D3).
   4. Operator visibility: read RPC `ListPVEImages` (`server`, `admin`, not
      `pve-collector`), Images page and wizard drop-downs, generation from
      the executor record (D4; PV-03b, PV-03h).
@@ -1346,7 +1350,10 @@ host is in D2.
   this path are PV-03k.
 - Contract: PV-03a (`proto/`). **Test ticket: PV-03b** (role table, propose,
   approve, commit, then `BindTemplate` and `ProposePVEGuestProvision`
-  succeed; `server` cannot approve). Server forwarding: PV-03f, PV-03g.
+  succeed; `server` cannot approve; added in round 2 by Claude: while an
+  integrity finding is open, `CommitPVEImagePrepare` is refused with
+  `ErrIntegrityLocked` and `ProposePVEImagePrepare` is not, see
+  Consequences). Server forwarding: PV-03f, PV-03g.
 
 ### D2. Signed catalog: loaded at executor start from the release bundle, fail closed
 
@@ -1440,6 +1447,28 @@ host is in D2.
   only the rollback floor is on disk (`pve_rpc.go:346`). The in-memory
   catalog and the persisted file are updated by the same code path. No file
   written by the CLI, no server-originated entry, no wizard form.
+- **Limits (Claude, round 2).** Decided by D3 (a) is only that the executor
+  validates with "size limits" (paper, D3 table, row (a)). One entry is
+  bounded today by the grammar in `ValidateImage`: ID at most 64 characters
+  (`catalog.go:46`), URL at most `MaxImageURL` (2048 bytes, `catalog.go:40`),
+  fixed-form OS, release, arch, SHA-256 and disk format (`checkImage`,
+  `catalog.go:187-205`).
+  **Open for the owner:** the number of local entries and the size of the
+  persisted file are not bounded anywhere: `AddLocal` adds to an unbounded
+  map (`pve_images.go:163-166`). Proposal (Claude, not decided): at most
+  `MaxCatalogImages` (256, `catalog.go:38`) local entries, `AddPVELocalImage`
+  refused above it, and the file read with the bounded regular-file read of
+  D2 with a named limit next to the loader.
+- **Unreadable local-entry file at start (Claude, round 2). Open for the
+  owner;** D3 (a) does not say what happens when the persisted local-entry
+  file (proposed name `pve-catalog-local.json` beside `pve-catalog.json`,
+  paper D3 table; `pve_rpc.go:297`) is missing, unreadable, oversize, not a
+  regular file or fails `ValidateImage`. Proposal (Claude, not decided):
+  missing file means no local entries; every other case starts the executor
+  with no local entries and an audit event, as D2 does for the signed part,
+  and `AddPVELocalImage` and `RemovePVELocalImage` are refused until the file
+  reads again, so that a write never replaces entries the executor could not
+  read. The tests are added to PV-03b and PV-03d once the owner decides.
 - **Test tickets: PV-03b** (executor: wrong role, e.g. `server` calling
   `AddPVELocalImage`, refused; ID without the prefix refused; entry failing
   `ValidateImage` refused) and **PV-03d** (CLI against the executor RPC on a
@@ -1509,20 +1538,46 @@ host is in D2.
   snapshot and migrate. Whether PVE answers 404 for a missing guest config
   is **unverified**; if it does not, this point is reopened before PV-03b is
   merged.
+- **A 200 reply with an invalid digest (Claude, round 2).** Today
+  `liveTemplate` returns `ErrPveTemplateChanged` for a 200 reply whose node
+  differs or whose digest is not 64 lowercase hex digits (`validHexDigest`,
+  `pve_images.go:505`), so it falls through to a new proposal. Under the
+  decided split, a different but well-formed digest or a different node is
+  `ErrPveTemplateChanged` (falls through), and a digest that is missing or
+  not 64 lowercase hex digits counts as a malformed body: a read error that
+  refuses with no permit and the record unchanged. This is Claude's reading
+  of the decided "malformed body" case, to be confirmed by the owner; it
+  changes the mapping at `pve_images.go:505` for the template read only.
+- **The check after `Run` (Claude, round 2).** `Prepare` reads the new
+  template after `Run` (`pve_images.go:465`) and today audits every error
+  as `template_unreadable` and records nothing (`pve_images.go:466-468`).
+  It uses the same new template read; any result other than found on the
+  node with a valid digest, 404 included, keeps that behaviour (audit, no
+  record, no generation bump). There a 404 means a template built but not
+  readable, never "not prepared".
 - A blocked or removed remote is refused by the mutation's remote check
   `activeRemote` (`internal/executor/pve_mutation.go:420-421` removed or
   unknown, `ErrRemoteNotFound`; `:422-423` any other non-active state,
   blocked included, `ErrPveRemoteChanged`; round 1, previously cited as
-  `:423-429`). Open for PV-03b: `Prepare`
-  calls `Run` (`pve_images.go:454`) before `activeRemote`
-  (`pve_images.go:460`); PV-03b shows that `Run` refuses a non-active
-  remote before any PVE change, or moves the check before `Run`.
+  `:423-429`). **Settled from the code (Claude, round 2; previously "Open
+  for PV-03b: `Prepare` calls `Run` before `activeRemote`"):** `Prepare`
+  calls `Run` (`pve_images.go:454`), and `Run` calls `activeRemote` first
+  (`pve_mutation.go:724`), before the live read `targetLive` (`:728`) and
+  before any PVE change; `ProposalRequest` does the same (`:520`, before
+  `targetLive` at `:533`). The later `activeRemote` in `Prepare`
+  (`pve_images.go:460`) is a second check after `Run`. No code moves;
+  PV-03b keeps the test that a blocked or removed remote refuses with no
+  PVE change.
 - **Test ticket: PV-03b** (gone template, 404, generation 2; changed
   template; re-pinned remote with `ErrPveRemoteChanged` on the old record,
   new proposal with its own approval, generation 2 with the new trust
   generation; refusal cases: transport error, timeout, 500, malformed body
   refuse with no permit and an unchanged record; blocked or removed remote
-  refuses with no PVE change; reuse of the gone template's VMID).
+  refuses with no PVE change; reuse of the gone template's VMID). Added in
+  round 2 (Claude): a 200 reply with a digest that is not 64 lowercase hex
+  digits refuses with no permit and an unchanged record; after `Run`, a 404
+  or invalid digest on the new template writes the `template_unreadable`
+  audit event and no record.
 
 ### Consequences
 
@@ -1530,6 +1585,32 @@ host is in D2.
   one read method (`server`, `admin`), two admin-only local-entry methods.
   All are in protected paths (`proto/`, `internal/executor/`,
   `cmd/nebula-executor/`, `cmd/nebula/`) and need maintainer review.
+- **I1 integrity-lock entries (Claude, round 2).** D1-D5 fix only the
+  `ListPVEImages` entry (D4). Every new method needs an entry in
+  `integrityLockedMethods` (`internal/executor/integrity_lock.go:303`); a
+  method missing there is refused while locked and
+  `TestIntegrityLockClassifiesEveryMethod`
+  (`internal/executor/integrity_lock_test.go:93`) fails the build, so a
+  forgotten entry fails safe.
+  - `CommitPVEImagePrepare`: **`true`** (locked). Not a new decision: ADR
+    0015 D4 (`docs/adr/0015-integrity-monitoring.md:462`) refuses all
+    mutation dispatch while a finding is open, and the table puts the
+    other HIGH PVE commits there (`CommitPVEGuestPower`,
+    `CommitPVEGuestSnapshot`, `CommitPVEGuestProvision`,
+    `integrity_lock.go:318-320`).
+  - `ProposePVEImagePrepare`: **`false`**, as the other PVE proposals
+    (`ProposePVEGuestPower` to `ProposePVEGuestProvision`,
+    `integrity_lock.go:425-427`); the table comment keeps proposals
+    available (`integrity_lock.go:295-300`). Follows from the same rule.
+  - `AddPVELocalImage`, `RemovePVELocalImage`: **open for the owner.** They
+    dispatch nothing and use no NOS credential, so the table rule gives
+    `false`, as for admin bookkeeping such as `AddPrivateRegistry`
+    (`integrity_lock.go:429`) and `AddSigner` (`:387`). Against that, a
+    local entry widens what a later commit may download while the lab is
+    locked for a possibly changed binary. Proposal (Claude, not decided):
+    `false`, because the download itself runs only through the locked
+    `CommitPVEImagePrepare`. PV-03b writes the entries and the test once
+    the owner decides; until then the missing entry refuses while locked.
 - Threat model (PV-03k): the server's new HIGH proposal path, the
   admin-only local entries and the catalog trust chain.
 - (Claude, round 1) The release package installs the staged catalog pair
