@@ -123,6 +123,9 @@ type Service struct {
 	// installed receives the successful package.list_installed results
 	// (ADR 0011 D3); nil means none.
 	installed InstalledObserver
+	// image receives the successful image.packages results (ADR 0011 D3);
+	// nil means none.
+	image ImageObserver
 	// opsMu serializes Ops State evaluations, so two runs finishing at
 	// once on one host cannot both see the old state and notify twice.
 	opsMu sync.Mutex
