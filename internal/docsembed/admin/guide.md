@@ -1365,10 +1365,12 @@ recorded at a criticality (`nebula host pin --criticality`).
 `package.refresh`, `docker.logs` and secret-bearing actions are excluded even
 when rated LOW.
 
-The form offers only actions that take no parameters. `docker.inspect`,
-`image.packages` and `fim.scan` are on the allowlist, but the form does not
-offer them on main: the first two take a parameter, and `fim.scan` is not in
-the action catalogue the form reads.
+The general action list of the form offers only actions that take no
+parameters. `docker.inspect` and `image.packages` take a parameter and are
+offered only together, in the separate *Image packages* section (see *Image
+package leases* below). `fim.scan` is on the allowlist, but the form does not
+offer it: it is not in the action catalogue the form reads. (Previously: the
+form offered none of the three.)
 
 When the executor refuses a proposal because something is not LOW, its
 refusal (`schedule_grant_invalid`) now names every blocking host, not just
@@ -1414,7 +1416,7 @@ either one:
   `FimScanFullMinInterval`). A lease binds one mode.
 
 `image.packages` and `core.facts` have no floor of their own beyond the
-lease's interval.
+lease's interval (an image lease's interval is 24 hours, see below).
 Telemetry is a separately approved profile (10-second live reads,
 5-minute history, its own budget).
 
@@ -1431,6 +1433,58 @@ missed runs. Runs with secrets cannot be leased.
 Managing. *Revoke* (on the lease page) stops a lease at once and needs no
 assertion; on the executor host `nebula read-grant revoke <id>` does the
 same. `nebula read-grant pending` shows leases awaiting approval.
+
+Image package leases. An image package lease reads the package list of one
+container image on one host for the vulnerability inventory (section 10.4).
+Create it on *Operations → Read leases → New read lease*, section *Image
+packages*: choose the host, click *Show containers*, pick one container and
+image, choose 7 or 30 days and click *Preview*.
+
+- **Before you start.** Trivy must be installed on the host by you, the
+  operator; NOS never installs it. A successful `docker.inspect` of the
+  container must have finished in the **last 24 hours**: run it with the
+  *inspect* link next to the container on the host page. Without such a
+  result the section offers no image and says "No container image is known
+  for this host yet". The section lists at most 200 container and image
+  pairs, taken from the newest 500 `docker.inspect` results of the host.
+- **What one lease covers.** One host, one container and one image, pinned
+  by digest as `repository@sha256:<digest>`. The lease binds two actions:
+  `docker.inspect` with the container name and `image.packages` with the
+  image reference. Each parameter is bound by its hash in the lease; the
+  preview page shows both values in plain text under *Parameters (plain
+  text)*. Check the host, the container and the image there before you
+  approve.
+- **Fixed values.** Interval **24 hours**; run budget **2 runs per host in
+  a rolling hour**; duration **7 or 30 days**; triggers `scheduled` and
+  `on_demand`, like every lease from this page. There are no fields for
+  them.
+- **Approval.** As for every read lease: approve it with your security key;
+  in hardened mode run `nebula read-grant approve <digest>` on the executor
+  host with the full digest.
+- **Running.** Each due run executes `docker.inspect` first. `image.packages`
+  runs in the same scheduler pass only when that `docker.inspect` succeeded;
+  otherwise it waits for the next due run.
+- **After an image update.** The lease keeps the digest it was approved
+  for. A container that now runs a new image (new digest) needs a new lease
+  for that digest. *Refresh* on an image lease opens the *Image packages*
+  section for the same host, and the new digest is offered there once a
+  `docker.inspect` of the last 24 hours names it.
+
+Safety rules of image package leases:
+
+- The executor accepts the lease only when both actions are rated LOW on the
+  chosen host (section 8.1), like every read lease. It checks the parameter
+  hashes, the artifact and the LOW rating again on every run.
+- `image.packages` runs the host's own Trivy offline on the local image: no
+  pull, no installation and no vulnerability database update. Only the
+  package lists leave the host: ecosystem, name, version and source package
+  of each entry, plus the image's OS and its digest references.
+- The server stores a read only when a successful `docker.inspect` result of
+  the same host, finished in the 24 hours before the `image.packages` run
+  finished, names that image (repository and digest). Otherwise nothing is
+  stored and the server log has an `audit` line `vuln_image_read_refused`
+  with reason `digest_not_in_inspect`. The lease's own `docker.inspect` runs
+  keep this window filled while the container runs the image.
 
 Legacy schedules. The *Operations → Scheduled checks* page (`/schedules`)
 still proposes `read-schedule-v1` grants: chosen hosts and actions, an
@@ -1835,7 +1889,8 @@ The rest of this section describes the parts that exist.
   place.
 - **The host package inventory is fed.** Each successful
   `package.list_installed` result is stored and exported. Container image
-  inventories are **not** fed yet (planned, see *Container images* below).
+  inventories are fed too, from image package leases (see *Container images*
+  below; previously: "not fed yet (planned)").
   What is stored, when a host counts as complete, how reads age and what the
   *Vulnerabilities* pages show is in *The package inventory* below. The first
   run is in *First run* below.
@@ -1932,12 +1987,60 @@ on a lease), the banner still shows the last read from before the upgrade.
 A host whose latest read is partial is still exported, marked incomplete.
 The agent cannot close findings on it from the inventory.
 
-**Container images (planned, not fed yet).** On main, `image.packages`
-results are not stored and the export holds host subjects only. The planned
-design stores the package list of an image digest for each host, reads a
-digest only when a stored `docker.inspect` result of that host names it, and
-keeps the **last three** inventories of each image on each host (decision
-E4). The code that would store them is not wired into the server yet.
+**Container images.** (Previously: "planned, not fed yet; `image.packages`
+results are not stored and the export holds host subjects only".) Each
+successful `image.packages` run of an image package lease (section 9.4) is
+stored as one **image read** of that host: the image's OS and release, and
+for each package its ecosystem, name, version and source package, at most
+5,000 packages per image. The rules:
+
+- A read is stored only when the run's own pinned parameter names the image
+  and a successful `docker.inspect` result of the same host, finished in the
+  24 hours before the run finished, names its repository and digest. A run
+  without that parameter (for example one started by a legacy schedule
+  grant) is refused with reason `not_granted`; an image no recent inspect
+  names is refused with reason `digest_not_in_inspect`. Both are `audit`
+  lines `vuln_image_read_refused` in the server log, and nothing is stored.
+- A run whose packages are unknown is not stored at all, so it never pushes
+  out a kept read. That includes a host without Trivy: the server log has an
+  `audit` line `vuln_image_read_unknown` with reason `trivy_absent`.
+- NOS keeps the **last three** reads of each image on each host (decision
+  E4); hosts never share this count. Older reads are deleted when a new one
+  is stored, except reads an inventory snapshot still pins.
+- The export carries each image as an **image subject**: one per host and
+  image digest, from the newest read. The subject is named by the host ID
+  and the digest only; the repository name is not exported. A snapshot
+  holds at most **2,000 images**, shared out per host so that one host with
+  many images cannot push out the others; images left out are counted in
+  the server log ("snapshot omits image reads", `omitted_images`).
+- Only images whose OS NOS can name are exported: **Debian 11, 12 and 13**
+  (`debian:bullseye`, `debian:bookworm`, `debian:trixie`), **Ubuntu**
+  (`ubuntu:<release>`, for example `ubuntu:24.04`) and **Alpine**
+  (`alpine:<major>.<minor>`). Only the packages of the image's OS are
+  listed. Images of any other OS or release, and language packages (for
+  example npm, pip or Go modules) in any image, are not exported, so they
+  produce no findings.
+
+Open points (not decided, the code does not settle them):
+
+- **Closing image findings (Q3).** NOS does not close image findings from
+  the stored image inventory itself. A closure Hermes asks for on an image
+  is shown as "closed by Hermes, not confirmed by NOS", unless a hold guard
+  applies (see *Held closures*). Whether that is the intended rule is
+  question Q3 of `docs/implementation/vuln-inventory-decisions.md`.
+- **Images without a running container (Q6).** Nothing removes an image
+  from the export when its container is gone: its newest read stays in the
+  export. When an image should leave the export is question Q6.
+
+Troubleshooting image inventories:
+
+| Symptom | Cause and remedy |
+| --- | --- |
+| The *Image packages* section offers no image ("No container image is known for this host yet") | No successful `docker.inspect` of the container finished in the last 24 hours. Run it with the *inspect* link next to the container on the host page, then choose the host again |
+| `vuln_image_read_refused` with reason `digest_not_in_inspect` | No `docker.inspect` of the host in the 24 hours before the read names that image, usually because the container was updated to a new digest or removed. Create a new lease for the new digest; revoke the old one |
+| `vuln_image_read_refused` with reason `not_granted` | The `image.packages` run carried no pinned image parameter, for example a run from a legacy schedule grant. Use an image package lease (section 9.4) |
+| `vuln_image_read_unknown` with reason `trivy_absent` | Trivy is not installed on the host, so the packages are unknown and nothing is stored. Install Trivy on the host; the next lease run reads the image |
+| `vuln_image_read_unknown` with reason `image_not_local` | The pinned digest is no longer on the host (image updated or removed). Create a new lease for the image the container runs now |
 
 **Ageing.** Decided on 2026-11-20 (decision E2): a read counts as too old as
 soon as a third read of the same host exists. The rule is count-based and
@@ -1978,10 +2081,11 @@ needs the inventory before it can report anything.
    release is read before its list. Without `core.facts` the release is
    unknown and every read stays partial with
    `release not supported for package mapping`. Do not add
-   `package.install_all`: it is not a read and cannot be leased. The form offers only
-   actions that take no parameters, so `docker.inspect` and `image.packages`
-   cannot be chosen there, and container images are not fed yet (see *The
-   package inventory*). Duration 7 or 30 days.
+   `package.install_all`: it is not a read and cannot be leased. The general
+   action list offers only actions that take no parameters; container images
+   need a separate image package lease per container image, in the form's
+   *Image packages* section (section 9.4; previously: "cannot be chosen
+   there, and container images are not fed yet"). Duration 7 or 30 days.
 2. **Approve it.** Approve the proposal with your security key. In hardened
    mode, run `nebula read-grant pending` and then
    `nebula read-grant approve <digest>` on the executor host, with the full
@@ -2154,7 +2258,7 @@ happens when the batch is:
 
 | Limit | Value |
 | --- | --- |
-| Inventory export | 60 requests per hour; at most 1,000 subject parts and 4 MiB per page; 20,000 packages per host, 5,000 per image |
+| Inventory export | 60 requests per hour; at most 1,000 subject parts and 4 MiB per page; 20,000 packages per host, 5,000 per image; 2,000 images per snapshot |
 | Write requests (start, batches, complete together) | 60 per minute |
 | Batch | 1 MiB body, 1,000 findings, 1,000 subject parts |
 | Run | 200,000 findings, 10,000 covered subjects, 2 running per token, 6 hours |
@@ -2325,7 +2429,9 @@ session only.
   - **no host labels**;
   - no secrets, environment, logs or topology.
 
-  A subject whose ID looks like an IP address is left out.
+  A subject whose ID looks like an IP address is left out. An image subject
+  is named by its host ID and image digest; the image's repository name is
+  not exported.
 - **No attack paths for Hermes.** Hermes cannot read attack paths or
   topology. The attack-path pages are admin web pages, not part of
   `/api/v1`. Hermes narratives for paths are **not planned**; the
