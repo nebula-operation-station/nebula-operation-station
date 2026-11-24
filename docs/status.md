@@ -1,6 +1,6 @@
 # Project status
 
-Last updated 2026-11-23 (evening; previously 2026-11-22 late evening)
+Last updated 2026-11-24 (evening; previously 2026-11-23 evening)
 
 This page is the short, frequently updated view of where Nebula Operation Station stands. The
 [README roadmap](../README.md#roadmap) gives the area overview; the ADRs in [docs/adr](adr/) hold
@@ -15,35 +15,28 @@ the decisions, and [docs/implementation](implementation/) the per-area plans.
 | Approval ergonomics | [0007](adr/0007-approval-ergonomics.md) | merged; reject pending proposals complete (#687, #753, #755); read grants with network device targets compare those targets (#795) and need CLI approval in every mode (#813, rule A1-0b) |
 | Guest provisioning | [0008](adr/0008-guest-provisioning.md) | merged; **amendment 2026-11-21: PV-03 wiring of `pve.image.prepare` decided** (#805, paper #772, #790); chain pi started, the release bundle now stages `image-catalog.json` and its signature (#816) |
 | Traffic map | [0009](adr/0009-traffic-map.md) | proposed; API and pages mounted in nebula-server; end-to-end test from real `net.facts` output to the map API (#798) |
-| Network devices | [0010](adr/0010-network-devices.md) | accepted; **amendment 2026-11-21: device read chain decided** – variant 1 (collector spools one metadata record per device), device lease only through the local CLI (#805, paper #784); collector probe fix (#796); chain nx 7/11: read grants with device targets checked against the registry (#823) and previewed in the CLI (#821), device grants CLI-only (#813), CLI lease (#835) and admin-proposed leases (#833), collector spools one metadata record per device every cycle (#822, sub-minute #836) |
-| Vulnerability management | [0011](adr/0011-vulnerability-management.md) | accepted; **amendment 2026-11-23: decided list for image leases** (#852, wording #854); reference lab upgraded and vuln agent timer on, still 0 subjects until a read lease with `package.list_installed` is approved; **package inventory now stored on the server** (#766, #777, #779, #793) and the `vuln-inventory-v1` export is served from it (#792); open-findings listing fix (#808); maintainer decisions recorded: inventory E1–E4 (#776), assertion binding variant A incl. `discard_hold` (#805, papers #771, #775); chain iv 12/12 complete: classifier closes runs by the inventory (#815, kernel fix #831), decided maximum read age applied (#837), host Vulnerabilities tab shows inventory status (#834), image package inventories kept for the last 3 per image (#832, one read per execution #844), end-to-end test from real script output to a stored finding over real HTTP (#838); follow-ups iv03g (#850) and iv05g (#830) merged, iv05gf and iv13g queued; chain img in progress (img01–img09, 5 numbered tickets merged) |
+| Network devices | [0010](adr/0010-network-devices.md) | accepted; **amendment 2026-11-21: device read chain decided** – variant 1 (collector spools one metadata record per device), device lease only through the local CLI (#805, paper #784); collector probe fix (#796); chain nx 9/11: read grants with device targets checked against the registry (#823) and previewed in the CLI (#821), device grants CLI-only (#813), CLI lease (#835) and admin-proposed leases (#833), collector spools one metadata record per device every cycle (#822, sub-minute #836); device rows only from imported metadata records with stored origin (#814, nx08), browser preview of device targets (#858, nx03), follow-up hardening in review |
+| Vulnerability management | [0011](adr/0011-vulnerability-management.md) | accepted; **amendment 2026-11-23: decided list for image leases** (#852, wording #854); reference lab upgraded for the vuln agent and timer on, still 0 subjects until a read lease with `package.list_installed` is approved; **package inventory now stored on the server** (#766, #777, #779, #793) and the `vuln-inventory-v1` export is served from it (#792); open-findings listing fix (#808); maintainer decisions recorded: inventory E1–E4 (#776), assertion binding variant A incl. `discard_hold` (#805, papers #771, #775); chain iv 12/12 complete: classifier closes runs by the inventory (#815, kernel fix #831), decided maximum read age applied (#837), host Vulnerabilities tab shows inventory status (#834), image package inventories kept for the last 3 per image (#832, one read per execution #844), end-to-end test from real script output to a stored finding over real HTTP (#838); follow-ups iv03g (#850) and iv05g (#830) merged, iv05gf and iv13g queued; chain img complete (img01–img09 merged, incl. end-to-end test #865 and admin guide #866; exactly one image digest per lease action); the reference lab still runs the previous build, so image package reads there need an upgrade first |
 | Network security advisor | [0012](adr/0012-network-security-advisor.md) | accepted; pure libraries merged, none imported by nebula-server (not wired) |
 | One-step enrollment | [0013](adr/0013-one-step-enrollment.md) | accepted; **dialog now switched on in nebula-server**: the executor installs the loaded enrollment configuration (#782) and the server relays the one-step RPCs (#785); **public `GET /enroll/<offer-id>` route outside the session gate** (#841, ADR 0013 D7) |
 | Help assistant | [0014](adr/0014-help-assistant.md) | accepted; AS-09 libraries merged, service and wiring open |
 | Integrity monitoring | [0015](adr/0015-integrity-monitoring.md) | accepted; libraries merged; **amendment 2026-11-21: I1 status and I2 scan chain wiring decided**, `fim.scan` as a durable job (#805, paper #783); chain fi imported (0/15) |
 | Ops agent | [0016](adr/0016-ops-agent.md) | accepted; implementation chain complete (27/27); finding and listener sources merged (#780) but `cmd/nebula-server/ops.go:246` still passes `opsNoFindings` – connecting them is ticket uh02, which waits for a maintainer decision on the listener source; ops notes accept citations of handbook chunks (ADR 0016 D6, #787); a run without work reports its status, exit codes pinned for systemd (#807); note size limit aligned, pinned CA tested over real TLS (#809); install hint fixed (#811); Ops tab still not set in nebula-server |
 
-### Landed since the last update (15 PRs, 2026-11-22 20:08 to 2026-11-23 19:00)
+### Landed since the last update (10 PRs, 2026-11-23 19:00 to 2026-11-24 19:00)
 
-- **Vulnerability management, image chain (img):** ADR 0011 amendment of 2026-11-23 with the decided
-  list for image leases (#852, wording #854); image lease propose and lease page (#855, #856); image
-  lease runner runs the leased `docker.inspect` and `image.packages` with their parameters (#857,
-  img03); image inventories pinned in inventory snapshots, image digests bounded per host (#853,
-  img06).
-- **Vulnerability inventory (chain iv, now 12/12):** snapshot store uses the injected clock (#830,
-  iv05g); installed-list facts judged by the facts' start (#850, iv03g).
-- **Vulnerability feed:** optional CSAF feeds show as "not configured", stale filter kept (#842,
-  vf04).
-- **Ops agent:** ops notes accept citations of handbook chunks (ADR 0016 D6): citations link by
-  chunk ID, consecutive `#` in citation IDs refused, fail-closed handling tested (#787, uh03).
-- **Server configuration:** trusted proxy networks: catch-all and too broad networks rejected (#848,
-  uf08).
-- **Wiring and tests:** attack paths computed from stored data instead of the empty source (ADR
-  0011 D10), tested through the server chain on a real database (#849, uf10); registered tickets
-  judged by their named document (#845, uf15g); size tests run under the real gRPC server options
-  (#846, ug10g).
-- **Docs:** embedded admin guide: the vulnerability inventory is fed now, and how to start it with a
-  read lease (#851, gd01).
+- **Vulnerability management, image chain (img, now 9/9 numbered, complete):** the image observer
+  stores successful `image.packages` results as image inventories (#864, img05); stored image
+  inventories exported as image subjects of `vuln-inventory-v1` (#861, img07); fair per-host image
+  share in snapshots, bounded load, exact omitted count (#860, img06g); end-to-end test from an
+  `image.packages` lease run to the stored inventory, the export and a finding (#865, img08); admin
+  guide for image package leases and image inventories, sections 9.4 and 10.4 (#866, img09).
+- **Vulnerability inventory (chain iv, 12/12):** a release change NOS did not run must not yield a
+  complete read (#862, iv03gg); guide describes when an inventory read is complete (#863, gd01g).
+- **Network devices (chain nx, 9/11):** device rows come only from imported metadata records and
+  are marked as reported by the collector (#814, nx08); device targets and their reads shown in the
+  browser preview of a read grant (#858, nx03); follow-up hardening in review.
+- **Docs:** status page update for 2026-11-23 (#859).
 
 ### Landed in the evening update (27 PRs, 2026-11-21 19:00 to 2026-11-22 19:00)
 
@@ -73,7 +66,7 @@ the decisions, and [docs/implementation](implementation/) the per-area plans.
 ### Landed in the last 7 days
 
 Merged per day: 31 (11-13), 25 (11-16), 46 (11-17), about 45 (11-18), about 30 (11-19), 31
-(11-20), 42 (11-21), 29 (11-22), 11 (11-23). Main themes: vulnerability agent and package
+(11-20), 42 (11-21), 29 (11-22), 15 (11-23), 6 (11-24). Main themes: vulnerability agent and package
 inventory (ADR 0011); ops agent (ADR 0016) complete and partly wired; wiring of one-step
 enrollment; maintainer decisions for the remaining wiring gaps (ADR 0008, 0010, 0011, 0015);
 end-to-end and hostrun classifier tests.
@@ -102,14 +95,14 @@ Not re-checked in this pass: release 0.9, approval ergonomics, integrity monitor
 
 | Chain | Topic | Progress | Running now |
 | --- | --- | --- | --- |
-| iv | Package inventory for vulnerability management | 12/12 | complete (iv10f #838, iv12g #844); iv03g (#850) and iv05g (#830) merged; follow-ups iv05gf, iv13g queued |
-| img | Image package read lease (ADR 0011 amendment 2026-11-23) | 5 of 9 numbered | merged img01 (#852), img01g (#854), img02 (#855), img03 (#857), img04 (#856), img06 (#853); img05, img07–img09 not yet merged |
+| iv | Package inventory for vulnerability management | 12/12 | complete (iv10f #838, iv12g #844); iv03g (#850), iv03gg (#862) and iv05g (#830) merged; follow-ups iv05gf, iv13g queued |
+| img | Image package read lease (ADR 0011 amendment 2026-11-23) | 9 of 9 numbered | complete: img01 (#852), img01g (#854), img02 (#855), img03 (#857), img04 (#856), img05 (#864), img06 (#853, img06g #860), img07 (#861), img08 (#865), img09 (#866) |
 | va | Security key for vulnerability decisions (ADR 0011 Q4) | 0/6 | queued; decision paper merged (#771) |
 | ug | End-to-end tests through runServer | 11/12 | ug10g merged (#846); ug12f queued |
 | uh | Ops agent live (sources, docs, deploy sandbox) | 7/11 | uh03 merged (#787); uh02 (connect stored findings) waits for a maintainer decision on the listener source; uh05, uh07, uh10 queued |
 | uf | Wiring follow-ups and decision papers | 15/16 | uf08 (#848), uf09 (#840), uf10 (#849) merged, plus follow-up uf15g (#845); uf17 queued |
 | ue | Read and control actions through the real hostrun classifier | merged: ue06h (#820), ue07 (#825), ue08 (#826), ue09f (#828) | – |
-| nx | Network device read chain (ADR 0010, decided 2026-11-21) | 7/11 | no change since the last update; merged nx01 (#823), nx04 (#821), nx05 (#833), nx06 (#835), nx07 (#812), nx09 (#822); left: nx03, nx08f (#814), nx10, nx11 |
+| nx | Network device read chain (ADR 0010, decided 2026-11-21) | 9/11 | merged nx01 (#823), nx03 (#858), nx04 (#821), nx05 (#833), nx06 (#835), nx07 (#812), nx08 (#814), nx09 (#822); follow-up hardening (nx08g) in review; left: nx10, nx11 |
 | pi | Image preparation wiring (ADR 0008 PV-03) | 1/14 | no change since the last update; pi03 merged (#816); pi01–pi14 queued (wait for ug12f) |
 | fi | Integrity check wiring (ADR 0015 I1/I2) | 0/15 | queued (wait for ug12f and iv/ue follow-ups) |
 | vf | Feed fixes from the live run | 4/4 | complete: vf04 merged (#842), optional feeds show "not configured", stale filter kept |
@@ -117,12 +110,13 @@ Not re-checked in this pass: release 0.9, approval ergonomics, integrity monitor
 ## Next
 
 - **iv chain (complete, 12/12):** follow-ups iv05gf and iv13g remain.
-- **Image chain (img):** img05 and img07–img09 remain after the merged img01, img02, img03, img04
-  and img06.
+- **Image chain (img, complete 9/9):** nothing left in the chain; the reference lab still runs the
+  previous build, so image package reads there need an upgrade first (see Blocked).
+- **Network devices (nx, 9/11):** nx10 and nx11 remain; nx08g hardening is in review.
 - **Ops agent live:** after the listener-source decision, connect the stored findings and listeners
   (uh02), then uh05 and uh10 (admin guide section 10.6).
-- **Decision implementation:** nx (4 items left), pi (template preparation), fi (integrity
-  check), va (security key); pi and fi wait for ug12f; uf17 remains.
+- **Decision implementation:** nx (2 items left, nx10 and nx11), pi (template preparation), fi
+  (integrity check), va (security key); pi and fi wait for ug12f; uf17 remains.
 - **Release 0.9 Beta:** beta.2 was planned after the iv chain and vf04; both are merged now.
 
 ## Blocked / needs maintainer
@@ -141,9 +135,15 @@ Not re-checked in this pass: release 0.9, approval ergonomics, integrity monitor
   assistant service. See [wiring audit](implementation/wiring-audit.md).
 - **Read lease for `package.list_installed` on the reference lab:** needs approval; until then the
   vuln agent reports 0 subjects.
+- **Reference lab upgrade for image package reads:** the reference lab still runs the previous
+  build; it must be upgraded before image package reads can run there.
 
 ## Changelog
 
+- **2026-11-24 (evening):** 10 PRs; img chain complete 9/9 (image observer #864, image subjects in
+  the export #861, snapshot fairness #860, end-to-end test #865, admin guide #866); nx chain 9/11
+  (device rows from imported metadata #814, device targets in the read-grant preview #858); iv03gg
+  (#862) and gd01g (#863) merged; status page for 2026-11-23 (#859).
 - **2026-11-23 (evening):** 15 PRs; img chain 5 of 9 numbered (ADR 0011 amendment #852, wording
   #854, image lease propose and page #855, #856, lease runner #857, image inventories in snapshots
   #853); ops notes accept handbook chunk citations (#787); attack paths computed from stored data
