@@ -116,7 +116,7 @@ func TestRePinWaitsForRunningWriteThenRefusesOldGeneration(t *testing.T) {
 			return nil
 		}
 		started.Do(func() {
-			go func() { upsertDone <- s.UpsertDevice(ctx, repinned) }()
+			go func() { upsertDone <- s.UpsertDeviceReported(ctx, repinned, testRef()) }()
 		})
 		select {
 		case err := <-upsertDone:
@@ -182,7 +182,7 @@ func TestConcurrentRePinNeverLetsOldDatasetThrough(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		time.Sleep(5 * time.Millisecond)
-		if err := s.UpsertDevice(ctx, repinned); err != nil {
+		if err := s.UpsertDeviceReported(ctx, repinned, testRef()); err != nil {
 			errs <- err
 			return
 		}

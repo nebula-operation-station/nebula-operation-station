@@ -1265,3 +1265,13 @@ Without M2 the third group is a real and silent exposure.
 | PV-07 | First-party bootstrap modules from the toolkit, secrets via vault references | PV-00 |
 | PV-08 | Deploy wizard, run page, post-enrollment staged bootstrap/runbook plan with batch approval | PV-05, PV-06, PV-07 |
 | PK-00 … PK-10 | Amendment 1 (Proposed), preset guest host key; PK-10a and PK-10b gate acceptance (previously PK-10a only): see [docs/implementation/preset-host-key.md](../implementation/preset-host-key.md) | PV-05, PV-06 |
+
+## Amendment 2026-11-21: PV-03 wiring of `pve.image.prepare`
+
+The maintainer decided on 2026-11-21, 13:48 UTC+1 in chat (wording verbatim
+in [docs/implementation/pve-image-prepare-wiring.md](../implementation/pve-image-prepare-wiring.md),
+"Decision (2026-11-21, maintainer)") and accepted the paper's recommendations
+for PV-03: D1 (a) Propose/Commit RPCs as for guest power and provisioning;
+D2 (a) the signed catalog is loaded at executor start from the release
+bundle; D3 (a); D4 (a) an Images page under `/deploy` and (b) drop-downs in
+the wizard; D5 as recommended. The text above is unchanged.

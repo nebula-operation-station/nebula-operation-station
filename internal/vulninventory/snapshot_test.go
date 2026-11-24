@@ -21,21 +21,18 @@ type clock struct{ t time.Time }
 
 func (c *clock) now() time.Time { return c.t }
 
-// useClock makes Current and PruneSnapshots read the time from a settable
-// clock starting at base, and restores the real clock when the test ends.
-// Tests in this file do not run in parallel, so the swap is not shared.
-func useClock(t *testing.T) *clock {
+// useClock gives s a settable clock starting at base. Current, Put and
+// PruneSnapshots of s read the time from it.
+func useClock(t *testing.T, s *Store) *clock {
 	t.Helper()
 	c := &clock{t: base}
-	prev := nowFunc
-	nowFunc = c.now
-	t.Cleanup(func() { nowFunc = prev })
+	s.now = c.now
 	return c
 }
 
 func mustCurrent(t *testing.T, s *Store, hosts []string, maxReuse time.Duration, floor int64) Snapshot {
 	t.Helper()
-	snap, err := s.Current(context.Background(), hosts, maxReuse, floor)
+	snap, err := s.Current(context.Background(), hosts, maxReuse, FixedFloor(floor))
 	if err != nil {
 		t.Fatalf("Current(%v, %v, %d): %v", hosts, maxReuse, floor, err)
 	}
@@ -53,7 +50,7 @@ func readIDs(snap Snapshot) []int64 {
 
 func TestCurrentReusesSnapshotWithSameReadsWithinMaxReuse(t *testing.T) {
 	s, db := openStore(t)
-	c := useClock(t)
+	c := useClock(t, s)
 	mustPut(t, s, testRead("h1", true, 0))
 	mustPut(t, s, testRead("h2", true, 0))
 	hosts := []string{"h1", "h2"}
@@ -72,7 +69,7 @@ func TestCurrentReusesSnapshotWithSameReadsWithinMaxReuse(t *testing.T) {
 
 func TestCurrentCreatesNewSnapshotAfterNewRead(t *testing.T) {
 	s, _ := openStore(t)
-	useClock(t)
+	useClock(t, s)
 	mustPut(t, s, testRead("h1", true, 0))
 	first := mustCurrent(t, s, []string{"h1"}, time.Hour, 0)
 
@@ -92,7 +89,7 @@ func TestCurrentCreatesNewSnapshotAfterNewRead(t *testing.T) {
 
 func TestCurrentCreatesNewSnapshotAfterMaxReuseExpires(t *testing.T) {
 	s, _ := openStore(t)
-	c := useClock(t)
+	c := useClock(t, s)
 	mustPut(t, s, testRead("h1", true, 0))
 	first := mustCurrent(t, s, []string{"h1"}, time.Hour, 0)
 
@@ -110,7 +107,7 @@ func TestCurrentCreatesNewSnapshotAfterMaxReuseExpires(t *testing.T) {
 
 func TestCurrentZeroMaxReuseNeverReuses(t *testing.T) {
 	s, _ := openStore(t)
-	useClock(t)
+	useClock(t, s)
 	mustPut(t, s, testRead("h1", true, 0))
 	first := mustCurrent(t, s, []string{"h1"}, 0, 0)
 	second := mustCurrent(t, s, []string{"h1"}, 0, 0)
@@ -121,7 +118,7 @@ func TestCurrentZeroMaxReuseNeverReuses(t *testing.T) {
 
 func TestCurrentCreatesNewSnapshotWhenHostRemoved(t *testing.T) {
 	s, _ := openStore(t)
-	useClock(t)
+	useClock(t, s)
 	mustPut(t, s, testRead("h1", true, 0))
 	mustPut(t, s, testRead("h2", true, 0))
 	both := mustCurrent(t, s, []string{"h1", "h2"}, time.Hour, 0)
@@ -139,7 +136,7 @@ func TestCurrentCreatesNewSnapshotWhenHostRemoved(t *testing.T) {
 
 func TestCurrentSkipsHostsWithoutRead(t *testing.T) {
 	s, _ := openStore(t)
-	useClock(t)
+	useClock(t, s)
 	mustPut(t, s, testRead("h1", false, 0))
 	snap := mustCurrent(t, s, []string{"h0", "h1", "h9"}, time.Hour, 0)
 	if len(snap.Reads) != 1 || snap.Reads[0].HostID != "h1" {
@@ -149,7 +146,7 @@ func TestCurrentSkipsHostsWithoutRead(t *testing.T) {
 
 func TestCurrentUsesNewestReadPerHostInHostOrder(t *testing.T) {
 	s, _ := openStore(t)
-	useClock(t)
+	useClock(t, s)
 	mustPut(t, s, testRead("h2", true, 0))
 	old := mustPut(t, s, testRead("h1", true, 0))
 	newH1 := mustPut(t, s, testRead("h1", false, 5))
@@ -170,7 +167,7 @@ func TestCurrentUsesNewestReadPerHostInHostOrder(t *testing.T) {
 
 func TestCurrentFloorSetsFirstGeneration(t *testing.T) {
 	s, _ := openStore(t)
-	useClock(t)
+	useClock(t, s)
 	mustPut(t, s, testRead("h1", true, 0))
 	snap := mustCurrent(t, s, []string{"h1"}, time.Hour, 495000)
 	if snap.ID != "nos-inv-495001" || snap.Generation != 495001 {
@@ -186,7 +183,7 @@ func TestCurrentFloorSetsFirstGeneration(t *testing.T) {
 
 func TestCurrentFloorBelowStoredGenerationDoesNotLower(t *testing.T) {
 	s, _ := openStore(t)
-	useClock(t)
+	useClock(t, s)
 	mustPut(t, s, testRead("h1", true, 0))
 	mustCurrent(t, s, []string{"h1"}, 0, 0)
 	mustPut(t, s, testRead("h1", true, 1))
@@ -198,7 +195,7 @@ func TestCurrentFloorBelowStoredGenerationDoesNotLower(t *testing.T) {
 
 func TestCurrentWithoutReadsCreatesEmptySnapshot(t *testing.T) {
 	s, _ := openStore(t)
-	useClock(t)
+	useClock(t, s)
 	snap := mustCurrent(t, s, nil, time.Hour, 0)
 	if snap.Generation != 1 || len(snap.Reads) != 0 {
 		t.Fatalf("snapshot = gen %d with %d reads, want gen 1 and none", snap.Generation, len(snap.Reads))
@@ -207,7 +204,7 @@ func TestCurrentWithoutReadsCreatesEmptySnapshot(t *testing.T) {
 
 func TestOldSnapshotKeepsItsReadsForever(t *testing.T) {
 	s, db := openStore(t)
-	useClock(t)
+	useClock(t, s)
 	// An unpinned older read of h1: it is neither the newest nor pinned once
 	// the snapshot below is taken, so it may be deleted (iv02 has no Prune;
 	// this removes it with SQL to simulate one).
@@ -243,7 +240,7 @@ func TestOldSnapshotKeepsItsReadsForever(t *testing.T) {
 
 func TestSnapshotReturnsReadsWithComponents(t *testing.T) {
 	s, _ := openStore(t)
-	useClock(t)
+	useClock(t, s)
 	mustPut(t, s, testRead("h1", true, 0))
 	mustPut(t, s, testRead("h2", true, 0))
 	cur := mustCurrent(t, s, []string{"h2", "h1"}, time.Hour, 0)
@@ -268,7 +265,7 @@ func TestSnapshotReturnsReadsWithComponents(t *testing.T) {
 
 func TestSnapshotUnknownIDIsGone(t *testing.T) {
 	s, _ := openStore(t)
-	useClock(t)
+	useClock(t, s)
 	if _, err := s.Snapshot(context.Background(), "nos-inv-99"); !errors.Is(err, ErrSnapshotGone) {
 		t.Fatalf("err = %v, want ErrSnapshotGone", err)
 	}
@@ -276,7 +273,7 @@ func TestSnapshotUnknownIDIsGone(t *testing.T) {
 
 func TestPruneSnapshotsRemovesOldAndKeepsNewest(t *testing.T) {
 	s, db := openStore(t)
-	c := useClock(t)
+	c := useClock(t, s)
 	ctx := context.Background()
 	mustPut(t, s, testRead("h1", true, 0))
 	oldest := mustCurrent(t, s, []string{"h1"}, 0, 0)
@@ -310,7 +307,7 @@ func TestPruneSnapshotsRemovesOldAndKeepsNewest(t *testing.T) {
 
 func TestPruneSnapshotsKeepsNewestEvenWhenOld(t *testing.T) {
 	s, _ := openStore(t)
-	c := useClock(t)
+	c := useClock(t, s)
 	ctx := context.Background()
 	mustPut(t, s, testRead("h1", true, 0))
 	only := mustCurrent(t, s, []string{"h1"}, 0, 0)
@@ -326,7 +323,7 @@ func TestPruneSnapshotsKeepsNewestEvenWhenOld(t *testing.T) {
 
 func TestPruneSnapshotsRejectsNonPositiveAge(t *testing.T) {
 	s, _ := openStore(t)
-	useClock(t)
+	useClock(t, s)
 	for _, age := range []time.Duration{0, -time.Second} {
 		if err := s.PruneSnapshots(context.Background(), age); err == nil {
 			t.Fatalf("PruneSnapshots(%v) accepted", age)
@@ -336,7 +333,7 @@ func TestPruneSnapshotsRejectsNonPositiveAge(t *testing.T) {
 
 func TestCurrentRejectsInvalidInput(t *testing.T) {
 	s, _ := openStore(t)
-	useClock(t)
+	useClock(t, s)
 	ctx := context.Background()
 	cases := []struct {
 		name     string
@@ -352,7 +349,7 @@ func TestCurrentRejectsInvalidInput(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if _, err := s.Current(ctx, c.hosts, c.maxReuse, c.floor); !errors.Is(err, ErrInvalidRead) {
+			if _, err := s.Current(ctx, c.hosts, c.maxReuse, FixedFloor(c.floor)); !errors.Is(err, ErrInvalidRead) {
 				t.Fatalf("err = %v, want ErrInvalidRead", err)
 			}
 		})
@@ -361,7 +358,7 @@ func TestCurrentRejectsInvalidInput(t *testing.T) {
 
 func TestCurrentHostCapCountsOnlyHostsWithReads(t *testing.T) {
 	s, _ := openStore(t)
-	useClock(t)
+	useClock(t, s)
 	// Hosts h00000..h09999 have no read. They must not take the host slots of
 	// the three hosts that do have reads.
 	hosts := make([]string, 0, MaxSnapshotHosts+5)
@@ -452,7 +449,7 @@ func sizeOf(latest []sizedRead, id int64) int64 {
 
 func TestCurrentClockBackwardsDoesNotExtendReuse(t *testing.T) {
 	s, _ := openStore(t)
-	c := useClock(t)
+	c := useClock(t, s)
 	mustPut(t, s, testRead("h1", true, 0))
 	first := mustCurrent(t, s, []string{"h1"}, time.Hour, 0)
 
@@ -490,7 +487,7 @@ func TestCurrentFloorAgainstReusableSnapshot(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s, db := openStore(t)
-			c := useClock(t)
+			c := useClock(t, s)
 			mustPut(t, s, testRead("h1", true, 0))
 			first := mustCurrent(t, s, []string{"h1"}, time.Hour, 0)
 			if first.Generation != 1 {
@@ -521,7 +518,7 @@ func TestCurrentFloorAgainstReusableSnapshot(t *testing.T) {
 
 func TestCurrentNeverReturnsGenerationAtOrBelowFloor(t *testing.T) {
 	s, _ := openStore(t)
-	useClock(t)
+	useClock(t, s)
 	mustPut(t, s, testRead("h1", true, 0))
 	mustCurrent(t, s, []string{"h1"}, time.Hour, 0)
 	// nos-inv-1 is stored and young; a vulnstore run has seen generation 495000.
@@ -533,7 +530,7 @@ func TestCurrentNeverReturnsGenerationAtOrBelowFloor(t *testing.T) {
 
 func TestSnapshotPagesReadsInHostOrder(t *testing.T) {
 	s, db := openStore(t)
-	useClock(t)
+	useClock(t, s)
 	hosts := []string{"h1", "h2", "h3", "h4", "h5", "h6", "h7"}
 	ids := make(map[string]int64, len(hosts))
 	for _, h := range hosts {
@@ -566,7 +563,7 @@ func TestSnapshotPagesReadsInHostOrder(t *testing.T) {
 
 func TestSnapshotByteLimitCountsBodiesAcrossPages(t *testing.T) {
 	s, db := openStore(t)
-	useClock(t)
+	useClock(t, s)
 	// Ten reads of one component each: many large-enough bodies to span pages.
 	var hosts []string
 	for i := 0; i < 10; i++ {
@@ -607,7 +604,7 @@ func TestMaxSnapshotBodyBytesFitsWorstCaseBodies(t *testing.T) {
 
 func TestConcurrentCurrentWithReuseYieldsOneSnapshot(t *testing.T) {
 	s, db := openStore(t)
-	useClock(t)
+	useClock(t, s)
 	mustPut(t, s, testRead("h1", true, 0))
 	const n = 8
 	var wg sync.WaitGroup
@@ -617,7 +614,7 @@ func TestConcurrentCurrentWithReuseYieldsOneSnapshot(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			snap, err := s.Current(context.Background(), []string{"h1"}, time.Hour, 0)
+			snap, err := s.Current(context.Background(), []string{"h1"}, time.Hour, FixedFloor(0))
 			ids[i], errs[i] = snap.ID, err
 		}(i)
 	}
@@ -637,7 +634,7 @@ func TestConcurrentCurrentWithReuseYieldsOneSnapshot(t *testing.T) {
 
 func TestConcurrentCurrentWithoutReuseYieldsUniqueGenerations(t *testing.T) {
 	s, db := openStore(t)
-	useClock(t)
+	useClock(t, s)
 	mustPut(t, s, testRead("h1", true, 0))
 	const n = 8
 	var wg sync.WaitGroup
@@ -647,7 +644,7 @@ func TestConcurrentCurrentWithoutReuseYieldsUniqueGenerations(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			snap, err := s.Current(context.Background(), []string{"h1"}, 0, 0)
+			snap, err := s.Current(context.Background(), []string{"h1"}, 0, FixedFloor(0))
 			gens[i], errs[i] = snap.Generation, err
 		}(i)
 	}
@@ -669,7 +666,7 @@ func TestConcurrentCurrentWithoutReuseYieldsUniqueGenerations(t *testing.T) {
 
 func TestLatestSizesQuerySelectsTheSameReadsAsLatestAll(t *testing.T) {
 	s, db := openStore(t)
-	useClock(t)
+	useClock(t, s)
 	mustPut(t, s, testRead("h1", true, 0))
 	mustPut(t, s, testRead("h1", true, 5))
 	mustPut(t, s, testRead("h2", true, 0))

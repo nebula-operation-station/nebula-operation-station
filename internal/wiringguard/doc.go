@@ -25,8 +25,9 @@
 //     category (planned, test helper - never wired, developer tool) followed by
 //     text. The ticket must be an ID in the project's ticket form (for example
 //     "AS-09", "iv02" or "EN-16h") that a Markdown file under docs/ defines in a
-//     table row or heading, or that internal/wiringguard/tickets.txt registers
-//     with an existing docs/ tracking document. Words such as "TODO" or "none"
+//     table row or heading. A ticket that internal/wiringguard/tickets.txt
+//     registers must be defined by the tracking document the register names.
+//     Words such as "TODO" or "none"
 //     are not tickets. An entry whose package is reachable now is reported as
 //     informational only. An entry that names no checked package is stale and
 //     is reported as a finding.

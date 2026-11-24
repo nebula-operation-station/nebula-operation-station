@@ -109,11 +109,15 @@ case "$1" in
       cat <<EOF
 nebula-ops-agent is installed; its timer and path unit are NOT enabled. Next steps
 (guide, "Ops agent"):
-  1. put the NOS token ops-agent into ${ops_etc_dir}/token (0600, owned by nebula-ops-agent),
-  2. set "nos_base_url" in ${ops_etc_dir}/config.json,
+  1. on the Nebula machine: nebula-server -api-token ops-agent:ops.read,ops.notes.write
+     (add its server.json entry, source_addresses 127.0.0.1 and ::1, restart nebula-server),
+     then put the token into ${ops_etc_dir}/token (0600, owned by nebula-ops-agent),
+  2. set "nos_base_url" in ${ops_etc_dir}/config.json, e.g. "http://127.0.0.1:8080"
+     (https, or http to a loopback IP; not localhost),
   3. allow the LLM address: sudo systemctl edit nebula-ops-agent.service
        [Service]
        IPAddressAllow=<LLM address>
+     (a plain http LLM address must not have llm_credential_file set),
   4. sudo systemctl enable --now nebula-ops-agent.timer
      sudo systemctl enable --now nebula-ops-agent.path
 EOF

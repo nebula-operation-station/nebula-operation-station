@@ -4,14 +4,17 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui/paths"
 )
 
 // apFixture is the server's HTTP chain (webServer) with the attack-path
@@ -30,14 +33,25 @@ func newAPFixture(t *testing.T) *apFixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
+	// Mounted through the real registry, as run does (no withServerFeatures).
+	return newAPChain(t, db, func(pages *http.ServeMux, log *slog.Logger) error {
+		isAdmin := func(ctx context.Context) bool {
+			s, ok := auth.SessionFrom(ctx)
+			return ok && s.UserName == "admin"
+		}
+		deps := serverDeps{cfg: serverconfig.Config{PublicOrigin: swOrigin}, isAdmin: isAdmin, log: log}
+		return mountServerFeaturePages(deps, pages)
+	})
+}
+
+// newAPChain serves the pages mount() adds on db through the server's HTTP
+// chain (webServer), with an admin session "admin" and a non-admin "bob".
+func newAPChain(t *testing.T, db *sql.DB, mount func(pages *http.ServeMux, log *slog.Logger) error) *apFixture {
+	t.Helper()
 	log := slog.New(slog.DiscardHandler)
 	pages := http.NewServeMux()
 	pages.Handle("/", http.NotFoundHandler())
-	isAdmin := func(ctx context.Context) bool {
-		s, ok := auth.SessionFrom(ctx)
-		return ok && s.UserName == "admin"
-	}
-	if err := mountAttackPaths(pages, swOrigin, isAdmin, log); err != nil {
+	if err := mount(pages, log); err != nil {
 		t.Fatal(err)
 	}
 	sessions := auth.NewStore(db, nil)
@@ -109,6 +123,90 @@ func TestAttackPathPagesMountedBehindAdminGuard(t *testing.T) {
 				t.Errorf("token %q: GET %s: status %d location %q, want 303 to /login", token, p, rec.Code, rec.Header().Get("Location"))
 			}
 		}
+	}
+}
+
+// apPageLine returns the first line of body that contains sub.
+func apPageLine(body, sub string) string {
+	for _, l := range strings.Split(body, "\n") {
+		if strings.Contains(l, sub) {
+			return l
+		}
+	}
+	return ""
+}
+
+// apAdminSource mounts the attack-path pages of src on the chain of db.
+func apAdminChain(t *testing.T, db *sql.DB, src paths.Source) *apFixture {
+	t.Helper()
+	return newAPChain(t, db, func(pages *http.ServeMux, log *slog.Logger) error {
+		isAdmin := func(ctx context.Context) bool {
+			s, ok := auth.SessionFrom(ctx)
+			return ok && s.UserName == "admin"
+		}
+		return mountAttackPaths(pages, swOrigin, src, isAdmin, log)
+	})
+}
+
+// TestAttackPathsPageShowsComputedPathAndCoverage: through the server chain
+// on a real server.db, a computed run shows its time, a path to the crown
+// jewel and the coverage with the sources it does not read. A failed run
+// keeps the page as it was.
+func TestAttackPathsPageShowsComputedPathAndCoverage(t *testing.T) {
+	ctx := context.Background()
+	e := newAPSourceEnv(t)
+	e.markWebJewel(t)
+	e.submitAppFinding(t)
+	if err := e.src.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	f := apAdminChain(t, e.db, e.src)
+
+	rec := f.do(t, http.MethodGet, "/vuln/paths", f.token, "", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /vuln/paths as admin: status %d", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "not computed yet") {
+		t.Fatal("computed run still says not computed")
+	}
+	if !strings.Contains(body, "/vuln/paths/p/") {
+		t.Errorf("page shows no path to the crown jewel; body:\n%s", body)
+	}
+	for _, m := range []string{"docker", "firewall", "vlan"} {
+		if !strings.Contains(body, m) {
+			t.Errorf("coverage does not name the missing source %s", m)
+		}
+	}
+	computed := apPageLine(body, "Computed ")
+	if computed == "" {
+		t.Fatal("page shows no computation time")
+	}
+
+	// A read error of a source keeps the last result and its time.
+	e.src.placements = failingPlacements{}
+	if err := e.src.Refresh(ctx); err == nil {
+		t.Fatal("Refresh with unreadable placements succeeded")
+	}
+	rec = f.do(t, http.MethodGet, "/vuln/paths", f.token, "", "")
+	if got := apPageLine(rec.Body.String(), "Computed "); got != computed {
+		t.Errorf("failed run changed the page: %q, want %q", got, computed)
+	}
+}
+
+// TestAttackPathsPageWithoutCrownJewelSaysNotComputed: no crown jewel, no
+// computation; the page never reads as an all-clear.
+func TestAttackPathsPageWithoutCrownJewelSaysNotComputed(t *testing.T) {
+	ctx := context.Background()
+	e := newAPSourceEnv(t)
+	e.submitAppFinding(t)
+	if err := e.src.Refresh(ctx); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	f := apAdminChain(t, e.db, e.src)
+	rec := f.do(t, http.MethodGet, "/vuln/paths", f.token, "", "")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "not computed yet") {
+		t.Fatalf("no crown jewel: status %d, page does not say not computed", rec.Code)
 	}
 }
 

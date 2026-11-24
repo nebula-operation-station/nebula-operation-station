@@ -126,7 +126,10 @@ func (s opsVulnFindings) Findings(ctx context.Context) ([]opsfacts.Finding, erro
 	if fixes == nil {
 		return nil, fmt.Errorf("read findings: fix decider: %w", opsfacts.ErrNoSource)
 	}
-	fs, more, err := s.store.List(ctx, vulnstore.ListQuery{Limit: vulnstore.MaxListFindings})
+	// The fixed history is skipped in the store, so only live findings count
+	// toward the limit (a fixed history past MaxListFindings must not fail
+	// every read).
+	fs, more, err := s.store.List(ctx, vulnstore.ListQuery{ExcludeFixed: true, Limit: vulnstore.MaxListFindings})
 	if err != nil {
 		return nil, fmt.Errorf("read findings: %w", err)
 	}

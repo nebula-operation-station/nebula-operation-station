@@ -75,8 +75,9 @@ func newImportEnv(t *testing.T) *importEnv {
 			Endpoints: []netdevcontract.Endpoint{{Address: "192.168.1.1", Port: 443}},
 			PinKind:   netdevcontract.PinTLSLeaf, TrustPin: strings.Repeat("b", 64), TrustGeneration: importGen},
 	} {
-		if err := store.UpsertDevice(context.Background(), d); err != nil {
-			t.Fatalf("UpsertDevice: %v", err)
+		ref := netdevinventory.SpoolRef{Name: "device-" + d.DeviceID + ".json", Digest: strings.Repeat("c", 64)}
+		if err := store.UpsertDeviceReported(context.Background(), d, ref); err != nil {
+			t.Fatalf("UpsertDeviceReported: %v", err)
 		}
 	}
 	sp := newSpool(t)

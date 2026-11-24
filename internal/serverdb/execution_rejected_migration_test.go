@@ -50,6 +50,16 @@ func readRows(t *testing.T, db *sql.DB, query string) [][]any {
 	return out
 }
 
+// containsRow reports whether rows has a row equal to want.
+func containsRow(rows [][]any, want []any) bool {
+	for _, r := range rows {
+		if reflect.DeepEqual(r, want) {
+			return true
+		}
+	}
+	return false
+}
+
 // TestExecutionRejectedMigrationKeepsRowsAndIndexes is the check asked for in
 // the review of PR #687: the table rebuild of 0050_execution_rejected.sql
 // (written as 0048 at the time) keeps every executions and execution_hosts
@@ -115,9 +125,14 @@ func TestExecutionRejectedMigrationKeepsRowsAndIndexes(t *testing.T) {
 	if got := readRows(t, db, hostQuery); !reflect.DeepEqual(got, beforeHosts) {
 		t.Errorf("execution_hosts rows changed by the upgrade:\nbefore %v\nafter  %v", beforeHosts, got)
 	}
+	// Every index that existed before the upgrade must still exist with the
+	// same definition. Later migrations may add indexes (0054 adds
+	// execution_hosts_inspect), so extra rows are allowed here.
 	afterIndexes := readRows(t, db, indexQuery)
-	if !reflect.DeepEqual(afterIndexes, beforeIndexes) {
-		t.Errorf("indexes changed by the upgrade:\nbefore %v\nafter  %v", beforeIndexes, afterIndexes)
+	for _, want := range beforeIndexes {
+		if !containsRow(afterIndexes, want) {
+			t.Errorf("index %v changed or dropped by the upgrade (after: %v)", want, afterIndexes)
+		}
 	}
 	names := map[string]bool{}
 	for _, r := range afterIndexes {

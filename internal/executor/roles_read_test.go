@@ -41,7 +41,10 @@ import (
 
 func TestReadGrantMethodRoles(t *testing.T) {
 	methods := map[string][]peercred.Role{
-		pb.ExecutorService_ProposeReadGrant_FullMethodName:      {peercred.RoleServer},
+		// A1-5: the admin may propose (device leases are admin-only in the
+		// handler); side effect: the admin may also propose host and
+		// provider leases (TestAdminMayProposeHostLease).
+		pb.ExecutorService_ProposeReadGrant_FullMethodName:      {peercred.RoleServer, peercred.RoleAdmin},
 		pb.ExecutorService_CommitReadGrant_FullMethodName:       {peercred.RoleServer},
 		pb.ExecutorService_ListPendingReadGrants_FullMethodName: {peercred.RoleAdmin},
 		pb.ExecutorService_ApproveReadGrantCLI_FullMethodName:   {peercred.RoleAdmin},
@@ -339,8 +342,10 @@ func TestReadGrantRPCHardenedApprovalIsAdminOnly(t *testing.T) {
 	if !strings.HasPrefix(approved.Grant.ApprovedBy, "cli:") {
 		t.Fatal("missing local approver")
 	}
-	if _, err := admin.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: raw}); status.Code(err) != codes.PermissionDenied {
-		t.Fatalf("admin proposal: %v", err)
+	// A1-5: the admin reaches ProposeReadGrant (role {server, admin}); the
+	// re-proposal of an approved grant id is refused by the authority.
+	if _, err := admin.ProposeReadGrant(ctx, &pb.ProposeReadGrantRequest{GrantJson: raw}); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("admin re-proposal of an approved grant: %v, want InvalidArgument", err)
 	}
 	if _, err := admin.RunReadGrant(ctx, validReadRPCRequest()); status.Code(err) != codes.PermissionDenied {
 		t.Fatalf("admin read dispatch: %v", err)

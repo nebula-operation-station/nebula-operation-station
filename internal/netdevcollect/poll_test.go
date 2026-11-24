@@ -231,6 +231,20 @@ func (s *fakeSpool) count() int {
 	return len(s.writes)
 }
 
+// readCount returns the number of executor read records, without the
+// device metadata records the cycle writes.
+func (s *fakeSpool) readCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for _, w := range s.writes {
+		if w.read != ReadDeviceMetadata {
+			n++
+		}
+	}
+	return n
+}
+
 func (s *fakeSpool) all() []spooled {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -279,6 +293,9 @@ func TestFirstCycleSpoolsEveryFamilyRead(t *testing.T) {
 	}
 	got := map[string]bool{}
 	for _, w := range s.all() {
+		if w.read == ReadDeviceMetadata {
+			continue // checked in poll_metadata_test.go
+		}
 		got[w.device+"/"+w.read] = true
 		if !json.Valid(w.payload) || (w.payload[0] != '{' && w.payload[0] != '[') {
 			t.Fatalf("payload of %s/%s is not a JSON object: %s", w.device, w.read, w.payload)
@@ -632,7 +649,7 @@ func TestRunShutdownDrainsInFlightRead(t *testing.T) {
 	if n := c.callCount(); n != 1 {
 		t.Fatalf("calls = %d, want 1 (no new read after shutdown)", n)
 	}
-	if n := s.count(); n != 1 {
+	if n := s.readCount(); n != 1 {
 		t.Fatalf("spooled = %d, want the drained read", n)
 	}
 }
@@ -730,7 +747,7 @@ func TestBadResponsesAreNotSpooled(t *testing.T) {
 			s := &fakeSpool{}
 			p := newTestPoller(c, s, clock, constRand(0.5))
 			cycle(t, p)
-			if n := s.count(); n != 0 {
+			if n := s.readCount(); n != 0 {
 				t.Fatalf("spooled %d bad responses", n)
 			}
 			if st := stateOf(t, p, "core-sw-01", cbsVLANs); st.failures != 1 {
@@ -989,8 +1006,8 @@ func TestPollerWritesToTheRealSpool(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(names) != 5 {
-		t.Fatalf("spool has %d files, want 5: %v", len(names), names)
+	if len(names) != 6 {
+		t.Fatalf("spool has %d files, want 6 (one metadata record, five reads): %v", len(names), names)
 	}
 	for _, name := range names {
 		taken, err := s.Take(context.Background(), name)

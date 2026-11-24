@@ -34,6 +34,10 @@ type fakeNOS struct {
 	notes    []map[string]any
 	statuses []map[string]any
 	paths    []string
+	// cfgCode, when not zero, is the status answered on agent-config.
+	cfgCode int
+	// workBody, when not empty, is the answer on work instead of the golden list.
+	workBody string
 }
 
 func (f *fakeNOS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -46,8 +50,14 @@ func (f *fakeNOS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/ops/agent-config":
+		if f.cfgCode != 0 {
+			w.WriteHeader(f.cfgCode)
+			return
+		}
 		_, _ = io.WriteString(w, `{"enabled":true,"llm_base_url":"`+f.llmURL+`","llm_model":"qwen",`+
 			`"allow_plain_http":true,"data_class":"lab","language":"de","operator_instructions":"Knapp.","prompt_version":"p","version":1}`)
+	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/ops/work" && f.workBody != "":
+		_, _ = io.WriteString(w, f.workBody)
 	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/ops/work":
 		_, _ = io.WriteString(w, `{"items":[{"kind":"fix","ref":"h1:os","digest":"`+testDigest+`","group":{`+
 			`"group":"h1:os","host":{"id":"h1","label":"web-01","environment":"lab","criticality":"high"},`+
@@ -82,10 +92,20 @@ func (f *fakeNOS) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // fakeLLM answers chat calls on loopback with the given content and counts them.
 func fakeLLM(t *testing.T, content string, calls *atomic.Int32) *httptest.Server {
 	t.Helper()
+	return fakeLLMCode(t, http.StatusOK, content, calls)
+}
+
+// fakeLLMCode is fakeLLM with a fixed HTTP status for every chat call.
+func fakeLLMCode(t *testing.T, code int, content string, calls *atomic.Int32) *httptest.Server {
+	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		if r.URL.Path != "/v1/chat/completions" {
 			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if code != http.StatusOK {
+			w.WriteHeader(code)
 			return
 		}
 		body, _ := json.Marshal(map[string]any{"choices": []any{map[string]any{
@@ -181,6 +201,166 @@ func TestLabRuleRefusesPublicLLMAddress(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(anyStrings(nos.statuses[0]["refusals"]), ","), "llm_refused_lab_rule") {
 		t.Errorf("status %v, want llm_refused_lab_rule", nos.statuses[0])
+	}
+}
+
+// summaryOnlyWork is the case "no package inventory": one summary item whose
+// counts are all zero.
+const summaryOnlyWork = `{"items":[{"kind":"summary","ref":"2026-11-18","digest":"` + testDigest +
+	`","fleet":{"critical":0,"high":0,"medium":0,"low":0,"kev":0}}]}`
+
+// TestSummaryOnlyZeroCountsWritesOneNote: a work list that holds only a summary
+// with zero counts makes one call, writes one note and exits 0.
+func TestSummaryOnlyZeroCountsWritesOneNote(t *testing.T) {
+	var llmCalls atomic.Int32
+	llm := fakeLLM(t, `{"text":"Keine Pakete erfasst."}`, &llmCalls)
+	nos := &fakeNOS{llmURL: llm.URL + "/v1", workBody: summaryOnlyWork}
+	srv := httptest.NewServer(nos)
+	t.Cleanup(srv.Close)
+	cfgPath := writeEnv(t, srv.URL)
+
+	var stderr bytes.Buffer
+	code := realMain([]string{"-config", cfgPath, "run"}, &stderr)
+	nos.mu.Lock()
+	defer nos.mu.Unlock()
+	if code != 0 {
+		t.Fatalf("exit %d; log: %s", code, stderr.String())
+	}
+	if n := llmCalls.Load(); n != 1 {
+		t.Fatalf("llm calls %d, want 1", n)
+	}
+	if len(nos.notes) != 1 || nos.notes[0]["kind"] != "summary" {
+		t.Fatalf("notes %v, want one summary note", nos.notes)
+	}
+	if len(nos.statuses) != 1 || nos.statuses[0]["llm_calls"] != float64(1) ||
+		nos.statuses[0]["notes_written"] != float64(1) {
+		t.Errorf("statuses %v, want one run with one call and one note", nos.statuses)
+	}
+}
+
+// TestEmptyWorkExitsZeroWithStatus: an empty work list exits 0, makes no call and
+// posts exactly one status with zero counts.
+func TestEmptyWorkExitsZeroWithStatus(t *testing.T) {
+	var llmCalls atomic.Int32
+	llm := fakeLLM(t, `{"text":"unused"}`, &llmCalls)
+	nos := &fakeNOS{llmURL: llm.URL + "/v1", workBody: `{"items":[]}`}
+	srv := httptest.NewServer(nos)
+	t.Cleanup(srv.Close)
+	cfgPath := writeEnv(t, srv.URL)
+
+	var stderr bytes.Buffer
+	code := realMain([]string{"-config", cfgPath, "run"}, &stderr)
+	nos.mu.Lock()
+	defer nos.mu.Unlock()
+	if code != 0 {
+		t.Fatalf("exit %d; log: %s", code, stderr.String())
+	}
+	if n := llmCalls.Load(); n != 0 {
+		t.Fatalf("llm calls %d, want 0", n)
+	}
+	if len(nos.statuses) != 1 || nos.statuses[0]["items_seen"] != float64(0) ||
+		nos.statuses[0]["llm_calls"] != float64(0) {
+		t.Errorf("statuses %v, want one zero-count status", nos.statuses)
+	}
+}
+
+// TestRunFailuresExitOneAndNameTheSource: every failure that stops the run before
+// its work exits 1. Each message names the path or the file and the HTTP status
+// where there is one, and never the token.
+func TestRunFailuresExitOneAndNameTheSource(t *testing.T) {
+	const agentConfigPath = "/api/v1/ops/agent-config"
+	cases := map[string]struct {
+		nos  func(t *testing.T) (nosURL string, cfg *fakeNOS)
+		want []string
+		// chmodToken marks the case that makes the token file 0644.
+		chmodToken bool
+	}{
+		"server unreachable": {nos: func(t *testing.T) (string, *fakeNOS) {
+			srv := httptest.NewServer(http.NotFoundHandler())
+			url := srv.URL
+			srv.Close()
+			return url, nil
+		}, want: []string{agentConfigPath}},
+		"401": {nos: serverAnswering(t, 401), want: []string{agentConfigPath, "HTTP 401"}},
+		"403": {nos: serverAnswering(t, 403), want: []string{agentConfigPath, "HTTP 403"}},
+		"429": {nos: serverAnswering(t, 429), want: []string{agentConfigPath, "HTTP 429"}},
+		"502": {nos: serverAnswering(t, 502), want: []string{agentConfigPath, "HTTP 502"}},
+		"empty llm url": {nos: func(t *testing.T) (string, *fakeNOS) {
+			nos := &fakeNOS{llmURL: ""}
+			srv := httptest.NewServer(nos)
+			t.Cleanup(srv.Close)
+			return srv.URL, nos
+		}, want: []string{"llm base url"}},
+		"token mode 0644": {nos: serverAnswering(t, 200), chmodToken: true, want: []string{"token", "mode"}},
+		"empty nos base url": {nos: func(t *testing.T) (string, *fakeNOS) {
+			return "", nil
+		}, want: []string{"nos_base_url is required"}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			nosURL, _ := tc.nos(t)
+			cfgPath := writeEnv(t, nosURL)
+			tokPath := filepath.Join(filepath.Dir(cfgPath), "token")
+			if tc.chmodToken {
+				if err := os.Chmod(tokPath, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var stderr bytes.Buffer
+			code := realMain([]string{"-config", cfgPath, "run"}, &stderr)
+			if code != 1 {
+				t.Fatalf("exit %d, want 1; log: %s", code, stderr.String())
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(stderr.String(), w) {
+					t.Errorf("log does not name %q: %s", w, stderr.String())
+				}
+			}
+			if tc.chmodToken && !strings.Contains(stderr.String(), tokPath) {
+				t.Errorf("log does not name the token file %s: %s", tokPath, stderr.String())
+			}
+			if strings.Contains(stderr.String(), testAPIToken) {
+				t.Errorf("log carries the token: %s", stderr.String())
+			}
+		})
+	}
+}
+
+// serverAnswering returns a NOS fake whose agent-config answers code.
+func serverAnswering(t *testing.T, code int) func(t *testing.T) (string, *fakeNOS) {
+	return func(t *testing.T) (string, *fakeNOS) {
+		nos := &fakeNOS{cfgCode: code}
+		srv := httptest.NewServer(nos)
+		t.Cleanup(srv.Close)
+		return srv.URL, nos
+	}
+}
+
+// TestLLMServerErrorIsAStatusNotAFailure: an LLM answer of 500 exits 0, posts a
+// status with llm_error and writes no note.
+func TestLLMServerErrorIsAStatusNotAFailure(t *testing.T) {
+	var llmCalls atomic.Int32
+	llm := fakeLLMCode(t, http.StatusInternalServerError, "", &llmCalls)
+	nos := &fakeNOS{llmURL: llm.URL + "/v1"}
+	srv := httptest.NewServer(nos)
+	t.Cleanup(srv.Close)
+	cfgPath := writeEnv(t, srv.URL)
+
+	var stderr bytes.Buffer
+	code := realMain([]string{"-config", cfgPath, "run"}, &stderr)
+	nos.mu.Lock()
+	defer nos.mu.Unlock()
+	if code != 0 {
+		t.Fatalf("exit %d, want 0; log: %s", code, stderr.String())
+	}
+	if len(nos.notes) != 0 {
+		t.Errorf("notes %d, want 0", len(nos.notes))
+	}
+	if len(nos.statuses) != 1 || !strings.Contains(strings.Join(anyStrings(nos.statuses[0]["refusals"]), ","), "llm_error") {
+		t.Fatalf("statuses %v, want one status with llm_error", nos.statuses)
+	}
+	if strings.Contains(stderr.String(), testAPIToken) {
+		t.Errorf("log carries the token")
 	}
 }
 

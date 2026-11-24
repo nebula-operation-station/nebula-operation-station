@@ -45,7 +45,7 @@ func checkAccepted(t *testing.T, d Draft) {
 		}
 	}
 	for _, c := range d.Citations {
-		if err := checkToken("citation", c); err != nil {
+		if err := checkCitation("citation", c); err != nil {
 			t.Fatalf("accepted a citation: %v", err)
 		}
 	}

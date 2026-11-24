@@ -1699,3 +1699,14 @@ Q6 decision is implemented (IG-09).
   without it, package files fall back to trust-on-first-scan baselines,
   and every package file a NOS apt job changes is an unverified finding
   the admin reviews separately from the job.
+
+## Amendment 2026-11-21: wiring of I1 status and the I2 scan chain
+
+The maintainer decided on 2026-11-21, 13:48 UTC+1 in chat (wording verbatim
+in `docs/implementation/integrity-wiring-decisions.md`, "Decision
+(2026-11-21, maintainer)") and accepted the paper's recommendations: (a)
+option 1, (c) option 1, (d) option 1 restricted to `FimScanActionID` with
+(i)–(iii), (e) option 2, (f) option 3. Points (b) and (g) together: `fim.scan`
+runs as a **durable job** (option 2, without a permit mutex held over 40 min),
+with the lease rule change this needs (ADR 0007 territory, decided hereby).
+The text above is unchanged.

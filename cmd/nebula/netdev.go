@@ -39,6 +39,7 @@ const netdevUsage = `usage: nebula netdev probe --family cbs|panos --endpoint <i
        nebula netdev unblock <device-id>
        nebula netdev remove <device-id>
        nebula netdev list
+       nebula netdev lease <device-id> --reads READ[,READ...] [--days N]
 
 Runs as a configured local admin through NEBULA_EXECUTOR_SOCKET.
 Unlock the executor vault with nebula unlock first.
@@ -64,11 +65,21 @@ accepted as an argument or from the environment. Alternatively pass
 (3 or higher) that is a regular file or a pipe; anything else is refused
 before the executor is contacted. The descriptor is closed after reading.
 
+lease proposes a read lease for exactly one device (the device id comes
+first) and the typed reads of its family, for example cbs_version or
+panos_zones. The trust pin, pin generation and credential version are
+taken from the executor's registry. --days is the lifetime, 7 by default,
+at most 30. The preview is the executor's own pending document; the lease
+is approved only after you type "yes" on a terminal. Revoke it with
+nebula read-grant revoke <grant id>; a re-pin, credential rotation or
+removal of the device also ends it.
+
 Examples:
   nebula netdev probe --family cbs --endpoint <switch-ip>
   nebula netdev add <device-id> --family panos --endpoint <firewall-ip> --label <label>
   nebula netdev credential rotate <device-id> --secret-fd 3 3< <file>
-  nebula netdev list`
+  nebula netdev list
+  nebula netdev lease <device-id> --reads cbs_version,cbs_vlans --days 7`
 
 // netdevReasonFlagHelp is the help of the --reason flag of block.
 const netdevReasonFlagHelp = "required: short admin note (no secrets)"
@@ -241,6 +252,8 @@ func netdevCmd(args []string, env netdevEnv) error {
 		return netdevConfirmed(args[1:], env, "remove")
 	case "list":
 		return netdevList(args[1:], env)
+	case "lease":
+		return netdevLease(args[1:], env)
 	}
 	return netdevUsageErr()
 }

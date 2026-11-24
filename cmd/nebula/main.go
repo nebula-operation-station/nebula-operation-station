@@ -39,6 +39,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executor"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/version"
@@ -288,7 +289,7 @@ func dialExecutor() (*grpc.ClientConn, error) {
 		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) {
 			return peercred.DialVerified(ctx, sock, wantUID)
 		}),
-		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(64<<20)),
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(executor.MaxResponseSize)),
 	)
 }
 

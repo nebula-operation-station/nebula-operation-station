@@ -1,6 +1,8 @@
 # Network devices: wiring decisions for the device read chain
 
-Status: decision paper (no code). Scope: the read chain of ADR 0010 (phase 1,
+Status: **decided** by the maintainer, 2026-11-21, for questions A and B; see
+"Decision (2026-11-21, maintainer)" below (previously: decision paper (no
+code)). Scope: the read chain of ADR 0010 (phase 1,
 read only) from the device to the operator's page, tickets ND-14 to ND-20 of
 `network-devices.md`. Owner decisions are open until recorded in the ADR
 decision log. Nothing in this paper changes behaviour.
@@ -10,6 +12,24 @@ Related: `network-devices.md` (plan and rule numbers N1 to N8b),
 WA-13). `wiring-audit.md` has no entry for the device chain. WA-01 and WA-02
 describe the same break pattern for the PVE chain (importer not started, no
 grant proposed), which is the precedent for points 3 and 2 below.
+
+## Decision (2026-11-21, maintainer)
+
+The maintainer (Axel) decided on 2026-11-21 at 13:48 (UTC+1) in chat. Where the
+decision differs from the text below, the decision wins. Original wording
+(German), verbatim:
+
+> **uf14 (docs/implementation/network-devices-wiring-decisions.md, ADR
+> 0010):** Frage A: Variante 1 (Collector spoolt einen Metadaten-Datensatz je
+> Gerät). Frage B: B1 (lokale CLI `nebula netdev lease …`) mit
+> Geräte-Freigaberegel A1-0b und Vorschlagsprüfung A1-0.
+
+In English (translation by Claude, not part of the decision):
+
+- **Question A:** Variant 1 (the collector spools one metadata record per
+  device).
+- **Question B:** B1 (local CLI `nebula netdev lease …`) with the device
+  approval rule A1-0b and the proposal check A1-0.
 
 ## 1. Summary
 
@@ -75,7 +95,7 @@ against the tree at the time of writing; re-check them if the file moved.
 | 8 | Proposal checks every target against the registry | **Missing for devices**: `ProposeReadGrant` checks host and provider targets against the registry, not device targets, so a device lease for an unknown, tombstoned or stale device is accepted at proposal and refused only at spend time | `internal/executor/roles_read.go:97-122` (checks at `:105-121` cover `doc.Targets` and `doc.ProviderTargets`; no loop over `NetDeviceTargets`); device lookup exists at `internal/executor/netdev_read.go:90` |
 | 9 | Server starts the importer | **Missing**: `Importer` is constructed in tests only | `internal/netdevcollect/import.go:150` (type), `:205` (`Run`), `:101` (`ErrImporterNotConfigured`); no caller outside `import_test.go` |
 | 10 | Importer maps a record to a known device | Would reject every record | `internal/netdevcollect/import.go:89` (`unknown_device`), `:505-508` (`ErrDeviceNotFound` → reject) |
-| 11 | Store has device rows | **Missing**: `UpsertDevice` has no production caller | `internal/netdevinventory/store.go:286`; callers are `_test.go` files and `test/security/netdev_test.go` |
+| 11 | Store has device rows | **Missing**: `UpsertDeviceReported` (the only writer, needs a spool record reference) has no production caller; the metadata import path comes with A1-1/A1-3. Plain `UpsertDevice` refuses every write (`ErrUnreportedDevice`) (vorher: `UpsertDevice` had no production caller) | `internal/netdevinventory/store.go:363` (`UpsertDeviceReported`), `:377` (`UpsertDevice`); callers are `_test.go` files and `test/security/netdev_test.go` |
 | 12 | Server role may list devices | **Not allowed**: `ListNetDevices` is open to admin and the collector only | `internal/executor/roles.go:190` (`{admin, peercred.RoleNetDevCollector}`), `:193` (comment: the server calls neither), `:197` (`ReadNetDevice`: collector and admin) |
 | 13 | Server mounts the device pages | **Missing**: no registration; `cmd/nebula-server/main.go` has no reference to netdev | `internal/web/ui/netdev.go:146` (`NetDevPages` type), `:160` (constructor), `:182` (`Register`); `internal/web/ui/netdev_firewall.go:88` (`NetDevFirewallPage` type), `:96` (constructor), `:113` (`Register`); only callers are tests and `test/security/netdev_test.go` |
 | 14 | Credential-free packages used by the chain | **Not imported**: `cbscli`, `cbsparse`, `panapi` have no importer outside their own package | grep for their import paths over `*.go`: no hits outside the packages |

@@ -393,6 +393,8 @@ start.
 | `discovery_dir` | `/var/lib/nebula/discovery` | Discovery spool (`jobs/`, `results/`). Without the directory, discovery shows as not installed. |
 | `pve_spool_dir` | `/var/lib/nebula/pve` | Root of the PVE spool; an absolute path that must match the collector's `-spool`. The drop-in `20-discovery.conf` names the default paths, so another root needs your own directories and drop-in. |
 | `audit_hash_chain` | `false` | Chain the server's own audit lines by hash (section 10.3). |
+| `trusted_proxies` | `[]` | Reverse proxies whose `X-Forwarded-For` names the client of the enrollment routes (section 7.4). Each entry is one address: bare, `/32` or `/128`; a port, an IPv6 zone and the IPv4-mapped form are stripped. Any other prefix, a duplicate or more than 16 entries stops the start. Empty: the TCP peer is the client. |
+| `trusted_proxy_networks` | `[]` | Networks that contain reverse proxies **and no clients** (for example a container network used only by the proxy), as `address/bits` without host bits; at most 16, no duplicates. Each one is logged at startup. Never list the LAN or the NetBird range here. |
 | `traffic` | 21 days | Traffic map retention: `"traffic": {"retention_days": N}` keeps N days of flow data (1-21). A value outside the range stops the start. |
 | `notifications` | none | Providers, section 10.1. |
 | `api` | disabled | Read-only API, section 10.2. |
@@ -407,6 +409,16 @@ flag), for example
 Other `nebula-server` flags: `-version`, `-notify-test`,
 `-export-actions DIR` and `-api-token NAME:SCOPE[,SCOPE]` (sections 8.1
 and 10).
+
+Example: nginx on the same machine and a second proxy in a container
+network that holds only proxies (section 7.4):
+
+```json
+{
+  "trusted_proxies": ["127.0.0.1", "::1"],
+  "trusted_proxy_networks": ["172.18.0.0/16"]
+}
+```
 
 ### 6.2 Executor flags
 
@@ -576,13 +588,19 @@ checks that the key the host presents matches the code, and you approve the
 pin with your security key. Sections 7.1 to 7.3 stay valid for hosts you
 enroll from the command line.
 
-**Status on this release.** The dialog works, but two things are not
-complete yet:
+**Status on this release.**
 
-- The command block downloads the script from `GET /enroll/<offer-id>`. The
-  route exists in the code, but `nebula-server` does not serve it yet. Until
-  it does, the command fails with an HTTP error on the host. Use **Download
-  in browser** (below) or `nebula host enroll-script` (section 7.1).
+- `nebula-server` passes the dialog's requests on to the executor. While
+  the executor is not connected, those requests fail; nothing is created.
+- The executor installs the enrollment sources from `-enroll-source` at
+  start. Without one it refuses to create offers, and an invalid value
+  stops its start.
+- `nebula-server` serves `GET /enroll/<offer-id>` without a login, so the
+  command block downloads the script on the host. Every other page still
+  needs a login.
+- Behind a reverse proxy, list the proxy in `trusted_proxies` (section 6.1
+  and "Reverse proxy for `/enroll/`" below). Otherwise every client shares
+  the proxy's download limit and the audit record names the proxy.
 - NetBird is not offered in the dialog. NetBird for one-step offers follows
   with EN-12.
 
@@ -737,12 +755,30 @@ location /enroll/ {
   error log to `debug`.
 - **`X-Forwarded-For` is overwritten by the proxy.** `$remote_addr` replaces
   any value the client sent. Do not append to a client-supplied header.
-- **Trusted proxies.** On this release `nebula-server` has no setting for
-  trusted proxies, and it uses the TCP peer as the client address. Behind a
-  reverse proxy, all clients then share the proxy's address, and so one
-  download limit. A trusted-proxies setting follows with the route. When it
-  exists, list only single proxy addresses; a network may be listed only if
-  it contains no clients.
+- **Trusted proxies.** List the proxy in `server.json` (section 6.1), for
+  nginx on the same machine `"trusted_proxies": ["127.0.0.1"]`, and restart
+  `nebula-server`. The dialog and the download route then use the same
+  rule:
+  - From an address in `trusted_proxies` or `trusted_proxy_networks`, the
+    server reads `X-Forwarded-For` (never `Forwarded`). The rightmost entry
+    that is not a trusted proxy is the client. The download limit counts per
+    client, and the audit record `enroll_script_downloaded` names the
+    client, the proxy as peer, and that the header was used.
+  - From any other address, `X-Forwarded-For` and `Forwarded` are ignored.
+    The TCP peer is the client.
+  - A trusted proxy's request without a usable `X-Forwarded-For` (missing,
+    over 1 KiB, over 16 entries, an entry that is not an IP address, or only
+    trusted proxies) gets the uniform `404`. It charges no limit, and there
+    is no fallback to the proxy's address.
+  - Without the setting (the default), the TCP peer is the client. Behind a
+    reverse proxy, all clients then share the proxy's address and one
+    download limit; the server logs a warning at start when the listener is
+    loopback, private or a wildcard address.
+
+  List only single proxy addresses. A network belongs in
+  `trusted_proxy_networks`, and only if it contains no clients: any address
+  in either list can name any client and so use up another operator's
+  limit.
 
 For other proxies, apply the same four points (no access log for the path,
 no buffering to disk, no cache, `X-Forwarded-For` overwritten). This guide
@@ -1321,11 +1357,20 @@ not have — use `nebula read-grant approve` with the same digest (`nebula
 read-grant pending` lists it). The
 executor accepts only actions it rates LOW on every chosen host and that
 are on the read allowlist — `core.facts`, `package.list_updates`,
-`docker.list`, `docker.inspect`, `docker.check_updates`, `service.list`,
-`service.status`, plus the reviewed telemetry actions: a built-in trusted
-as LOW (section 8.1) with the host recorded at a criticality (`nebula host
-pin --criticality`). `package.refresh`, `docker.logs` and secret-bearing
-actions are excluded even when rated LOW.
+`package.list_installed`, `image.packages`, `docker.list`, `docker.inspect`,
+`docker.check_updates`, `service.list`, `service.status`, `net.facts`,
+`fim.scan`, plus the reviewed telemetry actions. Each one must be rated LOW
+(section 8.1) on every chosen host: that needs a trusted artifact and a host
+recorded at a criticality (`nebula host pin --criticality`).
+`package.refresh`, `docker.logs` and secret-bearing actions are excluded even
+when rated LOW.
+
+The general action list of the form offers only actions that take no
+parameters. `docker.inspect` and `image.packages` take a parameter and are
+offered only together, in the separate *Image packages* section (see *Image
+package leases* below). `fim.scan` is on the allowlist, but the form does not
+offer it: it is not in the action catalogue the form reads. (Previously: the
+form offered none of the three.)
 
 When the executor refuses a proposal because something is not LOW, its
 refusal (`schedule_grant_invalid`) now names every blocking host, not just
@@ -1356,8 +1401,22 @@ offer to leave them out.
 
 Budgets. Each host may run the lease at most 24 times in a rolling hour by
 default, at most 240; the allowance is shared across actions and both
-triggers, with a 15-minute per-action floor. Failed or disconnected
-attempts spend budget once claimed, and there is no catch-up burst.
+triggers. Failed or disconnected attempts spend budget once claimed, and
+there is no catch-up burst.
+
+Per-action floors. A lease's interval is at least 15 minutes. Two actions
+have their own per-host floors on top of it, and a lease does not shorten
+either one:
+
+- `package.list_installed` has a floor of **6 hours per host**
+  (`PackageListInstalledMinInterval`). A lease with any interval runs it at
+  most once every 6 hours per host, so at most four times a day.
+- `fim.scan` has a floor of **1 hour per host** for an incremental run and
+  about **7 days** for a full run (`FimScanIncrementalMinInterval`,
+  `FimScanFullMinInterval`). A lease binds one mode.
+
+`image.packages` and `core.facts` have no floor of their own beyond the
+lease's interval (an image lease's interval is 24 hours, see below).
 Telemetry is a separately approved profile (10-second live reads,
 5-minute history, its own budget).
 
@@ -1374,6 +1433,58 @@ missed runs. Runs with secrets cannot be leased.
 Managing. *Revoke* (on the lease page) stops a lease at once and needs no
 assertion; on the executor host `nebula read-grant revoke <id>` does the
 same. `nebula read-grant pending` shows leases awaiting approval.
+
+Image package leases. An image package lease reads the package list of one
+container image on one host for the vulnerability inventory (section 10.4).
+Create it on *Operations → Read leases → New read lease*, section *Image
+packages*: choose the host, click *Show containers*, pick one container and
+image, choose 7 or 30 days and click *Preview*.
+
+- **Before you start.** Trivy must be installed on the host by you, the
+  operator; NOS never installs it. A successful `docker.inspect` of the
+  container must have finished in the **last 24 hours**: run it with the
+  *inspect* link next to the container on the host page. Without such a
+  result the section offers no image and says "No container image is known
+  for this host yet". The section lists at most 200 container and image
+  pairs, taken from the newest 500 `docker.inspect` results of the host.
+- **What one lease covers.** One host, one container and one image, pinned
+  by digest as `repository@sha256:<digest>`. The lease binds two actions:
+  `docker.inspect` with the container name and `image.packages` with the
+  image reference. Each parameter is bound by its hash in the lease; the
+  preview page shows both values in plain text under *Parameters (plain
+  text)*. Check the host, the container and the image there before you
+  approve.
+- **Fixed values.** Interval **24 hours**; run budget **2 runs per host in
+  a rolling hour**; duration **7 or 30 days**; triggers `scheduled` and
+  `on_demand`, like every lease from this page. There are no fields for
+  them.
+- **Approval.** As for every read lease: approve it with your security key;
+  in hardened mode run `nebula read-grant approve <digest>` on the executor
+  host with the full digest.
+- **Running.** Each due run executes `docker.inspect` first. `image.packages`
+  runs in the same scheduler pass only when that `docker.inspect` succeeded;
+  otherwise it waits for the next due run.
+- **After an image update.** The lease keeps the digest it was approved
+  for. A container that now runs a new image (new digest) needs a new lease
+  for that digest. *Refresh* on an image lease opens the *Image packages*
+  section for the same host, and the new digest is offered there once a
+  `docker.inspect` of the last 24 hours names it.
+
+Safety rules of image package leases:
+
+- The executor accepts the lease only when both actions are rated LOW on the
+  chosen host (section 8.1), like every read lease. It checks the parameter
+  hashes, the artifact and the LOW rating again on every run.
+- `image.packages` runs the host's own Trivy offline on the local image: no
+  pull, no installation and no vulnerability database update. Only the
+  package lists leave the host: ecosystem, name, version and source package
+  of each entry, plus the image's OS and its digest references.
+- The server stores a read only when a successful `docker.inspect` result of
+  the same host, finished in the 24 hours before the `image.packages` run
+  finished, names that image (repository and digest). Otherwise nothing is
+  stored and the server log has an `audit` line `vuln_image_read_refused`
+  with reason `digest_not_in_inspect`. The lease's own `docker.inspect` runs
+  keep this window filled while the container runs the image.
 
 Legacy schedules. The *Operations → Scheduled checks* page (`/schedules`)
 still proposes `read-schedule-v1` grants: chosen hosts and actions, an
@@ -1793,18 +1904,19 @@ The rest of this section describes the parts that exist.
 - The agent API (inventory export and run protocol), the findings store,
   the *Vulnerabilities* pages, the notifications and the export are in
   place.
-- **The inventory export is still empty.** The read actions
-  `package.list_installed` and `image.packages` exist and can be leased
-  (section 9.4). `nebula-server` does not yet feed their results into the
-  export, so every snapshot has the ID `nos-empty-<unix time>` and no
-  subjects. As a result, Nebula rejects every finding record with
-  "subject not in the run's inventory snapshot". Hermes can start and
-  complete runs, but **nothing is stored and nothing is closed** until
-  the export carries the inventory (planned).
-- **Closing based on NOS's own data is not wired yet.** Nebula cannot yet
-  compare a finding against its own package inventory. When a run asks to
-  close a finding, the closure is held for an admin instead of being
-  applied. It is never closed on Hermes' word alone.
+- **The host package inventory is fed.** Each successful
+  `package.list_installed` result is stored and exported. Container image
+  inventories are fed too, from image package leases (see *Container images*
+  below; previously: "not fed yet (planned)").
+  What is stored, when a host counts as complete, how reads age and what the
+  *Vulnerabilities* pages show is in *The package inventory* below. The first
+  run is in *First run* below.
+- **Closures by NOS's own data.** NOS closes a finding from the stored
+  inventory only under closure paths 1 and 2 of ADR 0011 D5, and only from a
+  complete read. Hermes asks for closures; a closure that the inventory does
+  not confirm is shown as "closed by Hermes, not confirmed by NOS", unless a
+  hold guard applies (see *Held closures*), and then it is held for an admin.
+- **Ageing is decided but not applied yet.** See *Ageing* below.
 - **Maintainer decisions are refused for now.** The forms for accepting a
   risk, marking a false positive, confirming or discarding a held closure
   and resetting a feed mark are shown to the maintainer. Submitting one
@@ -1818,6 +1930,216 @@ The rest of this section describes the parts that exist.
 - Device findings (network devices, VU-15) and Hermes narratives for
   attack paths are not available. Narratives are not planned at all (see
   *Privacy*).
+
+#### The package inventory
+
+Each successful `package.list_installed` result of a host is stored as one
+**read** of that host (ADR 0011 D3). A read holds, for each installed source
+package, its binary packages with name, version and architecture; the
+running kernel; the ecosystem the host's release maps to; the time of the
+read; and whether it is complete. It holds no address, host name label,
+secret or raw command output. A stored read is never changed. The export
+limits are 20,000 packages per host.
+
+**When a read is complete.** The host's release comes only from its newest
+successful `core.facts` result. A read is complete when all of these hold:
+
+- the newest successful `core.facts` result finished no more than 24 hours
+  before the list started (a result that finished while the list ran
+  counts);
+- that `core.facts` result started after the host's last full upgrade
+  (`package.install_all`, see below) had finished. A result that started at
+  the same second as the upgrade finished does not count;
+- no full upgrade ran during that `core.facts` result, and none ran during
+  the list. An upgrade that ends exactly when the other run starts counts as
+  running during it;
+- the package list was complete;
+- the release maps to an ecosystem NOS can match: `debian:<codename>` or
+  `ubuntu:<VERSION_ID>`. Other releases are not mapped;
+- the list belongs to that release: it holds exactly one `base-files`
+  package, and its version starts with the release's prefix. On Debian the
+  prefix is the `VERSION_ID` and a dot (`12.` for bookworm). On Ubuntu NOS
+  knows the prefix only for 20.04 (`11ubuntu`), 22.04 (`12ubuntu`) and 24.04
+  (`13ubuntu`); only the 24.04 entry is checked against a real host so far.
+  This catches a release upgrade that NOS did not run, such as a manual
+  `do-release-upgrade`;
+- every source package has a version basis.
+
+Otherwise the read is **partial**. It stores one reason, the first check
+that failed, in this order:
+
+| Stored reason | When |
+|---|---|
+| `release lookup failed` | the `core.facts` result or the upgrade history could not be read, or the start of the list or of `core.facts` is not known |
+| `core.facts older than the package list` | the newest `core.facts` finished more than 24 hours before the list started |
+| `core.facts not newer than the last full upgrade` | the newest `core.facts` started no later than the last full upgrade finished |
+| `full upgrade ran during the list or core.facts` | a full upgrade overlaps the `core.facts` result or the list |
+| `package list does not match the release of core.facts` | the list's `base-files` version does not belong to the release (or the list has no `base-files`, or more than one) |
+| `package list release not checkable from core.facts` | the release has no prefix NOS knows: Debian without a `VERSION_ID` (testing, sid) or an Ubuntu release other than 20.04, 22.04 and 24.04 |
+| the list's own reason, or `package list incomplete` | the package list was not complete, for example because the read failed or the output was cut off |
+| `release not supported for package mapping` | there is no successful `core.facts` result, or the release is not mapped |
+| `source version basis unknown` | a source package has no version basis |
+| `list refused by the store` | the store refused the list (a field over its limit or invalid) |
+| `list not stored: store unavailable` | the store could not write the list for another reason |
+
+The two release checks (`does not match` and `not checkable`) run only on a
+complete list of a mapped release. A partial read keeps its packages only
+when the release is mapped and the reason is the list's own or
+`source version basis unknown`; every other partial read holds none. Every
+partial read becomes the host's latest inventory, so an older
+complete read no longer counts as current. The last complete read is still
+kept for closure decisions. There is no waiting for a better order: each new
+list is judged again, and it is complete only when every check above holds
+for it.
+
+**Full upgrades (`package.install_all`).** A full upgrade is not part of a
+read lease; the lease never runs it. You start it like any other change
+(section 9.1). After it has finished, lists stay partial with
+`core.facts not newer than the last full upgrade` until a `core.facts` run
+starts after the upgrade. A lease with `core.facts` runs it again at the
+lease's interval, and the next list after that can be complete. A full upgrade
+writes no read of its own: until the next list runs (at most 6 hours later
+on a lease), the banner still shows the last read from before the upgrade.
+
+A host whose latest read is partial is still exported, marked incomplete.
+The agent cannot close findings on it from the inventory.
+
+**Container images.** (Previously: "planned, not fed yet; `image.packages`
+results are not stored and the export holds host subjects only".) Each
+successful `image.packages` run of an image package lease (section 9.4) is
+stored as one **image read** of that host: the image's OS and release, and
+for each package its ecosystem, name, version and source package, at most
+5,000 packages per image. The rules:
+
+- A read is stored only when the run's own pinned parameter names the image
+  and a successful `docker.inspect` result of the same host, finished in the
+  24 hours before the run finished, names its repository and digest. A run
+  without that parameter (for example one started by a legacy schedule
+  grant) is refused with reason `not_granted`; an image no recent inspect
+  names is refused with reason `digest_not_in_inspect`. Both are `audit`
+  lines `vuln_image_read_refused` in the server log, and nothing is stored.
+- A run whose packages are unknown is not stored at all, so it never pushes
+  out a kept read. That includes a host without Trivy: the server log has an
+  `audit` line `vuln_image_read_unknown` with reason `trivy_absent`.
+- NOS keeps the **last three** reads of each image on each host (decision
+  E4); hosts never share this count. Older reads are deleted when a new one
+  is stored, except reads an inventory snapshot still pins.
+- The export carries each image as an **image subject**: one per host and
+  image digest, from the newest read. The subject is named by the host ID
+  and the digest only; the repository name is not exported. A snapshot
+  holds at most **2,000 images**, shared out per host so that one host with
+  many images cannot push out the others; images left out are counted in
+  the server log ("snapshot omits image reads", `omitted_images`).
+- Only images whose OS NOS can name are exported: **Debian 11, 12 and 13**
+  (`debian:bullseye`, `debian:bookworm`, `debian:trixie`), **Ubuntu**
+  (`ubuntu:<release>`, for example `ubuntu:24.04`) and **Alpine**
+  (`alpine:<major>.<minor>`). Only the packages of the image's OS are
+  listed. Images of any other OS or release, and language packages (for
+  example npm, pip or Go modules) in any image, are not exported, so they
+  produce no findings.
+
+Open points (not decided, the code does not settle them):
+
+- **Closing image findings (Q3).** NOS does not close image findings from
+  the stored image inventory itself. A closure Hermes asks for on an image
+  is shown as "closed by Hermes, not confirmed by NOS", unless a hold guard
+  applies (see *Held closures*). Whether that is the intended rule is
+  question Q3 of `docs/implementation/vuln-inventory-decisions.md`.
+- **Images without a running container (Q6).** Nothing removes an image
+  from the export when its container is gone: its newest read stays in the
+  export. When an image should leave the export is question Q6.
+
+Troubleshooting image inventories:
+
+| Symptom | Cause and remedy |
+| --- | --- |
+| The *Image packages* section offers no image ("No container image is known for this host yet") | No successful `docker.inspect` of the container finished in the last 24 hours. Run it with the *inspect* link next to the container on the host page, then choose the host again |
+| `vuln_image_read_refused` with reason `digest_not_in_inspect` | No `docker.inspect` of the host in the 24 hours before the read names that image, usually because the container was updated to a new digest or removed. Create a new lease for the new digest; revoke the old one |
+| `vuln_image_read_refused` with reason `not_granted` | The `image.packages` run carried no pinned image parameter, for example a run from a legacy schedule grant. Use an image package lease (section 9.4) |
+| `vuln_image_read_unknown` with reason `trivy_absent` | Trivy is not installed on the host, so the packages are unknown and nothing is stored. Install Trivy on the host; the next lease run reads the image |
+| `vuln_image_read_unknown` with reason `image_not_local` | The pinned digest is no longer on the host (image updated or removed). Create a new lease for the image the container runs now |
+
+**Ageing.** Decided on 2026-11-20 (decision E2): a read counts as too old as
+soon as a third read of the same host exists. The rule is count-based and
+has **no time limit**. A host that stops reporting keeps its last read. Two
+parts of the decision are not in the code yet:
+
+- The export and the classifier do not apply the rule yet. The reading of
+  E2 together with E1 (question Q2 of `docs/implementation/vuln-inventory-decisions.md`)
+  is still open.
+- Host reads are not pruned yet. Decision E1 (keep two reads per host) is
+  not implemented, so the store currently keeps every host read.
+
+The Vulnerabilities page shows the read time only for a complete read. A
+partial read shows its reason and no time, so the age of an old partial read
+is not visible, even though it is not yet treated as too old.
+
+**What the Vulnerabilities page shows.** Open a host's subject page
+(*Vulnerabilities*, then the host; the address is `/vulnerabilities/subject/host/<id>`).
+Above the findings, a banner **Package inventory** gives one of:
+
+- `read <time>, <n> source packages (<m> binaries), complete`;
+- `partial: <reason>`;
+- `none stored: no successful package.list_installed run for this host yet`;
+- `inventory status unavailable`, when the status lookup fails.
+
+A second banner gives the running kernel, marked "mapped" or as unknown. Images
+and devices have no inventory line.
+
+#### First run
+
+Do this once for each set of hosts. The vulnerability agent (section 10.5)
+needs the inventory before it can report anything.
+
+1. **Create the lease.** *Operations → Read leases → New read lease*. Scope
+   it to the hosts (all hosts, a tag or an environment). Choose the actions
+   `core.facts` and `package.list_installed`. The form lists `core.facts`
+   first, and the lease runs a host's actions in that order, so each host's
+   release is read before its list. Without `core.facts` the release is
+   unknown and every read stays partial with
+   `release not supported for package mapping`. Do not add
+   `package.install_all`: it is not a read and cannot be leased. The general
+   action list offers only actions that take no parameters; container images
+   need a separate image package lease per container image, in the form's
+   *Image packages* section (section 9.4; previously: "cannot be chosen
+   there, and container images are not fed yet"). Duration 7 or 30 days.
+2. **Approve it.** Approve the proposal with your security key. In hardened
+   mode, run `nebula read-grant pending` and then
+   `nebula read-grant approve <digest>` on the executor host, with the full
+   digest. If the executor refuses the proposal because an action is not
+   LOW on some host, section 9.4 explains how to find the reason.
+3. **Wait for the first read.** The scheduler checks once a minute and runs
+   each action on each host at its next check after approval. There is no
+   button that runs an ordinary lease on demand. After that,
+   `package.list_installed` runs at most every 6 hours per host (section 9.4).
+4. **Check one host.** Open the host's subject page and read the *Package
+   inventory* banner. On the first run each host runs `core.facts` and then
+   `package.list_installed`, so the first read can already be complete:
+   "read <time>, … source packages (… binaries), complete". A read that is
+   not complete shows `partial: <reason>`, with one of the reasons in the
+   table in *The package inventory*; the table says what each one means.
+   Some reasons go away with the next list (at least 6 hours later), for
+   example `core.facts not newer than the last full upgrade` once
+   `core.facts` has run again. Others stay until the host changes, for
+   example `package list release not checkable from core.facts` on an Ubuntu
+   release NOS has no prefix for. If the banner says "none stored", no list
+   has been stored yet.
+5. **Run the agent.** Start it with `sudo systemctl start nebula-vuln-agent.service`
+   or wait for its timer (section 10.5). Then read the log with
+   `journalctl -u nebula-vuln-agent.service -n 50`. Look for the line
+   "inventory exported" and its `subjects` count, and then for "run finished"
+   with `subjects`, `subjects_covered` and `findings`.
+6. **Find the findings.** They appear on *Vulnerabilities* (`/vulnerabilities`),
+   by CVE or by subject. A finding is advisory. Any fix goes through a
+   proposal and approval (section 9.1).
+
+**`subjects: 0` in the agent log.** The export contains no host that has at
+least one stored read. A host without a read is not a subject, and a host
+with only a partial read is one. Usually no approved lease covers the host
+yet, or the first read has not run (step 3). Check *Operations → Read leases*:
+the lease must be approved, not expired, and list the host among its targets.
+The host's subject page says "none stored" until a read arrives. The run
+then covers nothing, and no finding is closed.
 
 #### Setting up the agent token
 
@@ -1953,7 +2275,7 @@ happens when the batch is:
 
 | Limit | Value |
 | --- | --- |
-| Inventory export | 60 requests per hour; at most 1,000 subject parts and 4 MiB per page; 20,000 packages per host, 5,000 per image |
+| Inventory export | 60 requests per hour; at most 1,000 subject parts and 4 MiB per page; 20,000 packages per host, 5,000 per image; 2,000 images per snapshot |
 | Write requests (start, batches, complete together) | 60 per minute |
 | Batch | 1 MiB body, 1,000 findings, 1,000 subject parts |
 | Run | 200,000 findings, 10,000 covered subjects, 2 running per token, 6 hours |
@@ -2124,7 +2446,9 @@ session only.
   - **no host labels**;
   - no secrets, environment, logs or topology.
 
-  A subject whose ID looks like an IP address is left out.
+  A subject whose ID looks like an IP address is left out. An image subject
+  is named by its host ID and image digest; the image's repository name is
+  not exported.
 - **No attack paths for Hermes.** Hermes cannot read attack paths or
   topology. The attack-path pages are admin web pages, not part of
   `/api/v1`. Hermes narratives for paths are **not planned**; the

@@ -321,19 +321,26 @@ func Run(ctx context.Context, d Deps) (Summary, error) {
 		return Summary{}, fmt.Errorf("read work list: %w", err)
 	}
 	var sum Summary
+	// An empty work list makes no call and does not read the daily counter, but
+	// the run still reports its status (ADR 0016 D14), so "Last run" shows this
+	// run and not an older one.
 	if len(items) == 0 {
 		log.Info("ops agent: no work")
-		return sum, nil
+	} else {
+		used, err := d.State.Used()
+		if err != nil {
+			return Summary{}, fmt.Errorf("read call counter: %w", err)
+		}
+		budget := min(MaxLLMCallsPerRun, MaxLLMCallsPerDay-used)
+		sum.ItemsSeen = len(items)
+		r := &runner{d: d, log: log, cfg: cfg, sum: &sum, budget: budget, now: now}
+		r.loop(ctx, items)
 	}
-	used, err := d.State.Used()
-	if err != nil {
-		return Summary{}, fmt.Errorf("read call counter: %w", err)
-	}
-	budget := min(MaxLLMCallsPerRun, MaxLLMCallsPerDay-used)
-	sum.ItemsSeen = len(items)
-	r := &runner{d: d, log: log, cfg: cfg, sum: &sum, budget: budget, now: now}
-	r.loop(ctx, items)
 	sum.Refusals = uniqueSorted(sum.Refusals)
+	if sum.Refusals == nil {
+		// An empty list is sent as [], not null.
+		sum.Refusals = []string{}
+	}
 	status := nosclient.Status{
 		RunAt:        now().UTC().Format(time.RFC3339),
 		ItemsSeen:    sum.ItemsSeen,

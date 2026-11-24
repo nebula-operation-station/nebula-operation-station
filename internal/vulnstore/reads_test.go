@@ -3,6 +3,7 @@
 package vulnstore
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"testing"
@@ -214,5 +215,54 @@ func TestFeedStatusesFollowSourceListAndMaxAge(t *testing.T) {
 	}
 	if want := by["osv"].ContentDate.Add(72 * time.Hour); !st[0].StaleSince.Equal(want) {
 		t.Fatalf("osv stale since %v, want %v", st[0].StaleSince, want)
+	}
+}
+
+// insertFixedHistory adds n fixed findings to db as copies of the stored
+// finding key template (new random keys), the way a long history of closed
+// findings builds up. It is one statement, so 200,000 rows take a moment.
+func insertFixedHistory(t *testing.T, db *sql.DB, template vulnfinding.Key, n int) {
+	t.Helper()
+	_, err := db.Exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+		INSERT INTO vuln_findings (finding_key, subject, subject_kind, record, assessment, nos_checked, state, closed_by,
+			closed_note, closed_at, state_run_seq, rev, episode, episode_opened_at, episode_opened_run_seq,
+			episode_peak_tier, first_seen_at, last_seen_at, updated_at)
+		SELECT randomblob(32), subject, subject_kind, record, NULL, nos_checked, 'fixed', 'nos_inventory',
+			'', updated_at, state_run_seq, rev, episode, episode_opened_at, episode_opened_run_seq,
+			episode_peak_tier, first_seen_at, last_seen_at, updated_at
+		FROM n, vuln_findings WHERE finding_key = ?`, n, template[:])
+	if err != nil {
+		t.Fatalf("insert %d fixed findings: %v", n, err)
+	}
+}
+
+// TestListExcludeFixedSkipsClosedHistory: with ExcludeFixed a read returns
+// only the findings that are not fixed, so a long fixed history does not
+// fill the limit or make the read truncated. Without it the same read is
+// truncated at the limit.
+func TestListExcludeFixedSkipsClosedHistory(t *testing.T) {
+	e := newEnv(t)
+	e.seed(t, "h1", 2)
+	open, _, err := e.st.List(e.ctx, ListQuery{Limit: 10})
+	if err != nil || len(open) != 2 {
+		t.Fatalf("seeded List = %d rows, err %v; want 2", len(open), err)
+	}
+	insertFixedHistory(t, e.st.db, open[0].Key, MaxListFindings+1)
+
+	all, trunc, err := e.st.List(e.ctx, ListQuery{Limit: MaxListFindings})
+	if err != nil || !trunc || len(all) != MaxListFindings {
+		t.Fatalf("List without filter = %d rows, truncated %v, err %v; want %d, true", len(all), trunc, err, MaxListFindings)
+	}
+	live, trunc, err := e.st.List(e.ctx, ListQuery{ExcludeFixed: true, Limit: MaxListFindings})
+	if err != nil || trunc {
+		t.Fatalf("List(ExcludeFixed) truncated %v, err %v; want no truncation", trunc, err)
+	}
+	if len(live) != 2 {
+		t.Fatalf("List(ExcludeFixed) = %d rows, want the 2 open findings", len(live))
+	}
+	for _, f := range live {
+		if f.State == StateFixed {
+			t.Fatalf("List(ExcludeFixed) returned a fixed finding %s", f.Key)
+		}
 	}
 }

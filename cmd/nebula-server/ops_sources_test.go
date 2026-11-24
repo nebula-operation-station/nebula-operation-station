@@ -174,6 +174,42 @@ func TestOpsFindingsCriticalVerifiedFixOffersInstallSecurity(t *testing.T) {
 	}
 }
 
+// TestOpsFindingsFixedHistoryPastLimitStillReadsOpen: a server.db whose fixed
+// history alone is past the list limit (vulnstore.MaxListFindings) still gives
+// the open findings; the read is not truncated by the closed rows.
+func TestOpsFindingsFixedHistoryPastLimitStillReadsOpen(t *testing.T) {
+	env := newVTEnv(t)
+	env.startAndSubmit(t, opsCriticalRecord("CVE-2026-7003"), opsCriticalRecord("CVE-2026-7004"))
+	fs, _, err := env.svc.store.List(context.Background(), vulnstore.ListQuery{Limit: 10})
+	if err != nil || len(fs) != 2 {
+		t.Fatalf("List = %d findings, %v; want 2", len(fs), err)
+	}
+	// Copies of an open finding as fixed rows: fixed history past the limit.
+	_, err = env.db.Exec(`WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+		INSERT INTO vuln_findings (finding_key, subject, subject_kind, record, assessment, nos_checked, state, closed_by,
+			closed_note, closed_at, state_run_seq, rev, episode, episode_opened_at, episode_opened_run_seq,
+			episode_peak_tier, first_seen_at, last_seen_at, updated_at)
+		SELECT randomblob(32), subject, subject_kind, record, NULL, nos_checked, 'fixed', 'nos_inventory',
+			'', updated_at, state_run_seq, rev, episode, episode_opened_at, episode_opened_run_seq,
+			episode_peak_tier, first_seen_at, last_seen_at, updated_at
+		FROM n, vuln_findings WHERE finding_key = ?`, vulnstore.MaxListFindings+1, fs[0].Key[:])
+	if err != nil {
+		t.Fatalf("insert fixed history: %v", err)
+	}
+	src, err := newOpsVulnFindings(env.svc.store, opsTestPreviews, fixesOf(vulnfix.Result{Status: vulnfix.StatusVerified,
+		Action: vulnfix.ActionInstallSecurity, HostID: "web01"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := src.Findings(context.Background())
+	if err != nil {
+		t.Fatalf("Findings with %d fixed findings: %v; want the open findings", vulnstore.MaxListFindings+1, err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("Findings = %d, want the 2 open findings", len(got))
+	}
+}
+
 // TestOpsFindingsAcceptedRiskLeavesGroupOut: a finding the admin accepted as
 // a risk is read but never enters a group.
 func TestOpsFindingsAcceptedRiskLeavesGroupOut(t *testing.T) {

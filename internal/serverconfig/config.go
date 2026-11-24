@@ -17,7 +17,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
+
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/clientaddr"
 )
 
 // redacted is what a Token prints in every formatting, logging, and
@@ -114,6 +117,15 @@ type Config struct {
 	// before by hash (M10-1); off by default. The executor's own events are
 	// always signed and chained.
 	AuditHashChain bool `json:"audit_hash_chain"`
+	// TrustedProxies is the "trusted proxies" setting of ADR 0013 D7:
+	// single addresses (bare, /32 or /128) of reverse proxies whose
+	// X-Forwarded-For header names the client of the enrollment routes.
+	// Empty (the default) trusts no proxy: the TCP peer is the client.
+	TrustedProxies []string `json:"trusted_proxies,omitempty"`
+	// TrustedProxyNetworks is the "trusted proxy networks" setting of ADR
+	// 0013 D7: networks that contain reverse proxies and no clients, each
+	// logged at startup with that statement. Default empty.
+	TrustedProxyNetworks []string `json:"trusted_proxy_networks,omitempty"`
 	// Traffic configures the traffic map (section "traffic").
 	Traffic TrafficConfig `json:"traffic"`
 	// Notifications configures the providers (spec 13). Their tokens are
@@ -228,6 +240,7 @@ func (c Config) Validate() error {
 		problems = append(problems, fmt.Sprintf("pve_spool_dir: %q must be an absolute path", c.PVESpoolDir))
 	}
 
+	problems = append(problems, c.trustedProxyProblems()...)
 	problems = append(problems, c.Notifications.problems()...)
 	problems = append(problems, c.API.Problems()...)
 	if d := c.Traffic.RetentionDays; d != nil && (*d < 1 || *d > DefaultTrafficRetentionDays) {
@@ -238,6 +251,164 @@ func (c Config) Validate() error {
 		return nil
 	}
 	return fmt.Errorf("serverconfig: invalid config: %s", strings.Join(problems, "; "))
+}
+
+// MaxTrustedProxies bounds each of trusted_proxies and
+// trusted_proxy_networks. A reverse-proxy setup has a handful of proxies;
+// a longer list is a configuration mistake.
+const MaxTrustedProxies = 16
+
+// ClientAddrConfig returns the trusted-proxy configuration of the
+// enrollment routes' client-address resolver (ADR 0013 D7). The lists are
+// copied, so the resolver cannot change the loaded configuration.
+func (c Config) ClientAddrConfig() clientaddr.Config {
+	return clientaddr.Config{
+		TrustedProxies:       slices.Clone(c.TrustedProxies),
+		TrustedProxyNetworks: slices.Clone(c.TrustedProxyNetworks),
+	}
+}
+
+// trustedProxyProblems checks trusted_proxies and trusted_proxy_networks:
+// at most MaxTrustedProxies entries each; every trusted_proxies entry a
+// single address (bare, /32 or /128, normalised as ADR 0013 D7 says); every
+// trusted_proxy_networks entry a network prefix without host bits, no
+// broader than MinTrustedNetworkBitsIPv4/IPv6 and neither the unspecified
+// address nor multicast; no entry
+// twice after normalisation. A list the loader accepts must also build the
+// resolver, so the server cannot start with a list the resolver reads
+// differently.
+func (c Config) trustedProxyProblems() []string {
+	var out []string
+	if n := len(c.TrustedProxies); n > MaxTrustedProxies {
+		out = append(out, fmt.Sprintf("trusted_proxies: at most %d entries (got %d)", MaxTrustedProxies, n))
+	} else {
+		seen := map[netip.Addr]int{}
+		for i, s := range c.TrustedProxies {
+			a, problem := parseTrustedProxy(s)
+			if problem != "" {
+				out = append(out, fmt.Sprintf("trusted_proxies[%d]: %q %s", i, s, problem))
+				continue
+			}
+			if j, dup := seen[a]; dup {
+				out = append(out, fmt.Sprintf("trusted_proxies[%d]: %q is a duplicate of trusted_proxies[%d]", i, s, j))
+				continue
+			}
+			seen[a] = i
+		}
+	}
+	if n := len(c.TrustedProxyNetworks); n > MaxTrustedProxies {
+		out = append(out, fmt.Sprintf("trusted_proxy_networks: at most %d entries (got %d)", MaxTrustedProxies, n))
+	} else {
+		seen := map[netip.Prefix]int{}
+		for i, s := range c.TrustedProxyNetworks {
+			p, problem := parseTrustedNetwork(s)
+			if problem != "" {
+				out = append(out, fmt.Sprintf("trusted_proxy_networks[%d]: %q %s", i, s, problem))
+				continue
+			}
+			if j, dup := seen[p]; dup {
+				out = append(out, fmt.Sprintf("trusted_proxy_networks[%d]: %q is a duplicate of trusted_proxy_networks[%d]", i, s, j))
+				continue
+			}
+			seen[p] = i
+		}
+	}
+	if len(out) == 0 {
+		if _, err := clientaddr.New(c.ClientAddrConfig(), nil); err != nil {
+			out = append(out, fmt.Sprintf("trusted_proxies/trusted_proxy_networks: %v", err))
+		}
+	}
+	return out
+}
+
+// parseTrustedProxy parses one trusted_proxies entry and returns the
+// normalised address, or a problem text. A bare address is normalised like
+// the TCP peer (port, zone ID and IPv4 mapping stripped); a prefix must be
+// /32 or /128 (after unmapping).
+func parseTrustedProxy(s string) (netip.Addr, string) {
+	if !strings.Contains(s, "/") {
+		a, err := clientaddr.Normalize(s)
+		if err != nil {
+			return netip.Addr{}, "is not an IP address"
+		}
+		return a, ""
+	}
+	p, ok := parseUnmappedPrefix(s)
+	if !ok {
+		return netip.Addr{}, "is not an IP address (bare, /32 or /128)"
+	}
+	if p.Bits() != p.Addr().BitLen() {
+		return netip.Addr{}, "is a network: an entry must be a single address (bare, /32 or /128); a network that contains reverse proxies and no clients belongs in trusted_proxy_networks"
+	}
+	return p.Addr(), ""
+}
+
+// parseTrustedNetwork parses one trusted_proxy_networks entry and returns
+// the prefix (IPv4-mapped prefixes unmapped), or a problem text.
+func parseTrustedNetwork(s string) (netip.Prefix, string) {
+	p, ok := parseUnmappedPrefix(s)
+	if !ok {
+		return netip.Prefix{}, "is not a network prefix (address/bits, for example 172.18.0.0/16)"
+	}
+	if m := p.Masked(); m != p {
+		return netip.Prefix{}, fmt.Sprintf("has host bits set (the network is %s; a single proxy belongs in trusted_proxies)", m)
+	}
+	minBits := MinTrustedNetworkBitsIPv6
+	if p.Addr().Is4() {
+		minBits = MinTrustedNetworkBitsIPv4
+	}
+	if p.Bits() < minBits {
+		return netip.Prefix{}, fmt.Sprintf("is too broad: a trusted network must be at least /%d for %s; every address in it may set X-Forwarded-For", minBits, ipFamily(p.Addr()))
+	}
+	// With the length limits above, a prefix that contains the unspecified
+	// address or overlaps the multicast range starts with such an address.
+	if p.Addr().IsUnspecified() {
+		return netip.Prefix{}, "contains the unspecified address; no proxy connects from it"
+	}
+	if p.Addr().IsMulticast() {
+		return netip.Prefix{}, "is a multicast network; no proxy connects from it"
+	}
+	return p, ""
+}
+
+// MinTrustedNetworkBitsIPv4 and MinTrustedNetworkBitsIPv6 are the shortest
+// prefixes trusted_proxy_networks accepts. Every address in a trusted network
+// may set X-Forwarded-For, so a catch-all such as 0.0.0.0/0 or ::/0 (or any
+// network broader than a /8 or a /32 site allocation) would let any client
+// pick its own rate-limit bucket and forge the client address in audit
+// records (ADR 0013 D7). Proxy networks are far narrower in practice.
+const (
+	MinTrustedNetworkBitsIPv4 = 8
+	MinTrustedNetworkBitsIPv6 = 32
+)
+
+// ipFamily names the address family of a for problem texts.
+func ipFamily(a netip.Addr) string {
+	if a.Is4() {
+		return "IPv4"
+	}
+	return "IPv6"
+}
+
+// parseUnmappedPrefix parses s as address/bits and unmaps an IPv4-mapped
+// IPv6 prefix of at least /96 to its IPv4 form, as the resolver does.
+func parseUnmappedPrefix(s string) (netip.Prefix, bool) {
+	s = strings.TrimSpace(s)
+	if !strings.Contains(s, "/") {
+		return netip.Prefix{}, false
+	}
+	p, err := netip.ParsePrefix(s)
+	if err != nil {
+		return netip.Prefix{}, false
+	}
+	a, bits := p.Addr(), p.Bits()
+	if a.Is4In6() {
+		if bits < 96 {
+			return netip.Prefix{}, false
+		}
+		a, bits = a.Unmap(), bits-96
+	}
+	return netip.PrefixFrom(a, bits), true
 }
 
 // isLoopback reports whether host names a loopback address. Only explicit

@@ -223,6 +223,7 @@ const ticketPlan = "# Plan\n\n" +
 func TestUnknownTicketIsReported(t *testing.T) {
 	root := writeTree(t, map[string]string{
 		"docs/implementation/plan.md":      ticketPlan,
+		"docs/implementation/other.md":     "## WG-02: wiring guard\n",
 		"internal/wiringguard/tickets.txt": "WG-02 | wiring guard | docs/implementation/plan.md\n",
 	})
 	allow := Allowlist{
@@ -244,7 +245,9 @@ func TestUnknownTicketIsReported(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UnknownTickets: %v", err)
 	}
-	want := []string{"internal/a", "internal/b", "internal/c", "internal/d", "internal/e", "internal/f", "internal/g"}
+	// internal/m: WG-02 is registered to plan.md, which does not define it;
+	// other.md does, but the register names plan.md, so it is unknown.
+	want := []string{"internal/a", "internal/b", "internal/c", "internal/d", "internal/e", "internal/f", "internal/g", "internal/m"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("UnknownTickets = %v, want %v", got, want)
 	}
@@ -294,7 +297,7 @@ func TestMissingRegisterIsEmpty(t *testing.T) {
 	root := writeTree(t, map[string]string{"docs/implementation/plan.md": ticketPlan})
 	allow := Allowlist{
 		"internal/a": {Reason: "planned: table row", Ticket: "AS-09"},
-		"internal/b": {Reason: "developer tool: guard", Ticket: "WG-02"},
+		"internal/b": {Reason: "developer tool: guard", Ticket: "WG-09"},
 	}
 	got, err := UnknownTickets(root, allow)
 	if err != nil {

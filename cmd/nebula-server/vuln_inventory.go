@@ -8,12 +8,20 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/osdebian"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulninventory"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnver"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
 )
 
 // inventoryFactsAction is the action whose latest result gives a host's
@@ -22,8 +30,102 @@ const inventoryFactsAction = "core.facts"
 
 // factsSource is the part of executions.Service the inventory reads from.
 type factsSource interface {
-	LastResult(ctx context.Context, actionID, host string) ([]byte, time.Time, bool, error)
+	LastResultRun(ctx context.Context, actionID, host string) (result []byte, started, finished time.Time, ok bool, err error)
+	LastOSChange(ctx context.Context, host string) (time.Time, bool, error)
+	UpgradeOverlaps(ctx context.Context, host string, from, to time.Time) (bool, error)
 }
+
+// factsWindow is how long before a list started its core.facts result may
+// have finished and still give the list's release. core.facts is its own
+// action and runs before the lists, so the result is older than the list; the
+// window is the time within which the release is taken as unchanged.
+//
+// A release upgrade that NOS did not run (no package.install_all on the host)
+// is not seen by the OS-change check. It is caught by releaseMatchesList: the
+// list's base-files version must belong to the release of the facts.
+const factsWindow = 24 * time.Hour
+
+// reasonReleaseMismatch is the partial reason of a list whose base-files
+// version does not belong to the release that the newest core.facts reports,
+// so the release changed without a record NOS could use (for example a manual
+// or unattended do-release-upgrade). It is fixed text, never host content.
+const reasonReleaseMismatch = "package list does not match the release of core.facts"
+
+// reasonReleaseNotCheckable is the partial reason of a complete list whose
+// release has no base-files prefix that NOS can derive (see releasePrefix), so
+// the list cannot be compared with core.facts. Nothing was found to differ: the
+// list is simply not judged. It is fixed text, never host content.
+const reasonReleaseNotCheckable = "package list release not checkable from core.facts"
+
+// ubuntuBaseFilesPrefix is the base-files version prefix of each Ubuntu release
+// that releaseReason can judge. Ubuntu's base-files version starts with the
+// number of the Debian release it is synced from, then "ubuntu" ("13ubuntu10.1"
+// on 24.04). That number does not follow from the Ubuntu release number, so
+// Ubuntu needs this table. Only the 24.04 entry is checked against a recorded
+// fixture (testdata/installed/ubuntu2404.txt). The 20.04 and 22.04 entries are
+// not yet checked on real hosts. A wrong entry makes the lists of that release
+// partial, so it cannot make a list of another release complete. Ubuntu
+// releases without an entry are not checkable.
+var ubuntuBaseFilesPrefix = map[string]string{
+	"ubuntu:20.04": "11ubuntu",
+	"ubuntu:22.04": "12ubuntu",
+	"ubuntu:24.04": "13ubuntu",
+}
+
+// releaseNumberRe is the shape of a Debian VERSION_ID: the release number only.
+var releaseNumberRe = regexp.MustCompile(`^[0-9]{1,3}$`)
+
+// releasePrefix returns the base-files version prefix that a list of ecosystem
+// eco must carry on the release with os-release VERSION_ID ver. A Debian
+// base-files version starts with the release number ("12.4+deb12u7", "13.4",
+// "10.3+deb10u11"), so the prefix is ver followed by "." for every Debian
+// release that has a VERSION_ID; this holds for any release number, not only
+// the ones in a table. ok is false when the release cannot be judged: a Debian
+// release without a VERSION_ID (sid, testing), or an Ubuntu release not in
+// ubuntuBaseFilesPrefix.
+func releasePrefix(eco, ver string) (prefix string, ok bool) {
+	if strings.HasPrefix(eco, "debian:") {
+		if !releaseNumberRe.MatchString(ver) {
+			return "", false
+		}
+		return ver + ".", true
+	}
+	prefix, ok = ubuntuBaseFilesPrefix[eco]
+	return prefix, ok
+}
+
+// releaseMatchesList reports whether the package list inv was taken on the
+// release with base-files prefix: its single base-files package has a version
+// that starts with prefix. Fail closed: a list without base-files or with more
+// than one does not match.
+func releaseMatchesList(prefix string, inv osdebian.InstalledInventory) bool {
+	var versions []string
+	for _, p := range inv.Packages {
+		if p.Name == "base-files" {
+			versions = append(versions, p.Version)
+		}
+	}
+	return len(versions) == 1 && strings.HasPrefix(versions[0], prefix)
+}
+
+// releaseReason returns "" when the complete package list inv of ecosystem eco
+// is on the release that core.facts reports (os-release VERSION_ID ver), or the
+// partial reason otherwise: reasonReleaseNotCheckable when releasePrefix cannot
+// judge the release, reasonReleaseMismatch when the list is on another release.
+func releaseReason(eco, ver string, inv osdebian.InstalledInventory) string {
+	prefix, ok := releasePrefix(eco, ver)
+	if !ok {
+		return reasonReleaseNotCheckable
+	}
+	if !releaseMatchesList(prefix, inv) {
+		return reasonReleaseMismatch
+	}
+	return ""
+}
+
+// errStartUnknown is returned when the start of the list or of its core.facts
+// run is not known, so the facts cannot be checked (fail closed).
+var errStartUnknown = errors.New("run start unknown")
 
 // vulnInventoryService stores each successful package.list_installed result
 // as a vulninventory read (ADR 0011 D3). It implements
@@ -33,6 +135,15 @@ type vulnInventoryService struct {
 	store *vulninventory.Store
 	facts factsSource
 	log   *slog.Logger
+	// closer closes findings by a complete read (D5 paths 1 and 2). It is
+	// set once the findings store exists (setCloser); until then a complete
+	// read closes nothing, and the next complete read does.
+	closer atomic.Pointer[vulnstore.Store]
+}
+
+// setCloser sets the findings store that complete reads close findings in.
+func (v *vulnInventoryService) setCloser(st *vulnstore.Store) {
+	v.closer.Store(st)
 }
 
 // newVulnInventoryService returns the service on db (server.db) that reads
@@ -57,26 +168,28 @@ const markTimeout = 5 * time.Second
 
 // ObserveInstalled parses result (untrusted host output) with
 // osdebian.ParseInstalledResult and stores the read of host from execution
-// execID at time at. The distribution comes only from the host's newest
-// successful core.facts result, and only when that result is at least as
-// recent as the list (finished at or after at); otherwise the read is stored
-// partial with vulninventory.ReasonFactsOlder. Without a facts result the
-// read is stored incomplete.
+// execID. started is when the list began on the host and at is when it
+// finished (the host's finish time). The distribution comes only from the
+// host's newest successful core.facts result, and only when that result is
+// fresh for the list (see factsFresh); otherwise the read is stored partial
+// with vulninventory.ReasonFactsOlder. Without a facts result the read is
+// stored incomplete.
 //
-// Fail closed: when the release lookup fails, the facts are older than the
-// list, or the store fails to write the read, a partial marker is stored
-// instead. The host's older complete read then stops being its latest
-// inventory. A refusal of the store (a field over its limit caused by host
-// content) gives ReasonRefused; any other store failure gives
+// Fail closed: when the release lookup fails, the list's start is unknown, the
+// facts are older than the list, the list's base-files version does not belong
+// to the facts' release (reasonReleaseMismatch, see releaseMatchesList), or the
+// store fails to write the read, a partial marker is stored instead. The host's older complete read then stops
+// being its latest inventory. A refusal of the store (a field over its limit
+// caused by host content) gives ReasonRefused; any other store failure gives
 // ReasonStoreUnavailable. If the marker cannot be stored either, the failure
 // is only logged.
 //
 // On shutdown (parent is cancelled) nothing is written, because the server
 // is stopping and a cancelled write is not a refusal of the list.
-func (v *vulnInventoryService) ObserveInstalled(parent context.Context, hostID, execID string, at time.Time, result []byte) {
+func (v *vulnInventoryService) ObserveInstalled(parent context.Context, hostID, execID string, started, at time.Time, result []byte) {
 	ctx, cancel := context.WithTimeout(parent, observeTimeout)
 	defer cancel()
-	facts, factsAt, ok, err := v.facts.LastResult(ctx, inventoryFactsAction, hostID)
+	facts, factsStarted, factsAt, ok, err := v.facts.LastResultRun(ctx, inventoryFactsAction, hostID)
 	if err != nil {
 		if v.shutdown(parent, hostID, execID) {
 			return
@@ -85,18 +198,35 @@ func (v *vulnInventoryService) ObserveInstalled(parent context.Context, hostID, 
 		v.markFailed(parent, hostID, execID, at, vulninventory.ReasonLookupFailed)
 		return
 	}
-	var eco string
+	var eco, release string
 	var distro vulnver.Distro
 	if ok {
-		if factsAt.Unix() < at.Unix() {
-			v.markFailed(parent, hostID, execID, at, vulninventory.ReasonFactsOlder)
+		stale, err := v.factsStale(ctx, hostID, started, at, factsStarted, factsAt)
+		if err != nil {
+			if v.shutdown(parent, hostID, execID) {
+				return
+			}
+			v.log.Error("vulnerability inventory: release freshness", "host", hostID, "execution", execID, "error_class", "lookup")
+			v.markFailed(parent, hostID, execID, at, vulninventory.ReasonLookupFailed)
+			return
+		}
+		if stale != "" {
+			v.markFailed(parent, hostID, execID, at, stale)
 			return
 		}
 		if id, ver, code, readable := executions.OSRelease(facts); readable {
 			eco, distro = vulninventory.Ecosystem(id, ver, code)
+			release = ver
 		}
 	}
 	inv := osdebian.ParseInstalledResult(result, osdebian.ReadStatus{ExitCode: 0}, distro)
+	// Only a complete list is checked: a partial one keeps its own reason.
+	if eco != "" && inv.Complete {
+		if reason := releaseReason(eco, release, inv); reason != "" {
+			v.markFailed(parent, hostID, execID, at, reason)
+			return
+		}
+	}
 	read := vulninventory.FromInstalled(hostID, execID, at, eco, inv)
 	if _, err := v.store.Put(ctx, read); err != nil {
 		if v.shutdown(parent, hostID, execID) {
@@ -111,12 +241,104 @@ func (v *vulnInventoryService) ObserveInstalled(parent context.Context, hostID, 
 		v.markFailed(parent, hostID, execID, at, reason)
 		return
 	}
+	if read.Complete {
+		v.closeByInventory(ctx, parent, hostID, execID, read)
+	}
 	binaries := 0
 	for _, c := range read.Components {
 		binaries += len(c.Binaries)
 	}
 	v.log.Info("audit", "kind", "vuln_inventory_read_stored", "host", hostID, "execution", execID,
 		"complete", read.Complete, "binaries", binaries, "sources", len(read.Components))
+}
+
+// factsStale returns the reason a core.facts result may not give the release
+// of a list, or "" when it may. The list began on host at started and finished
+// at finished; the result started at factsStarted and finished at factsAt. The
+// rules, checked in this order (fail closed; a tie in time counts as stale):
+//   - the result finished no earlier than factsWindow before the list started
+//     (ReasonFactsOlder). A result that finished while the list ran is not
+//     older. The window is a documented policy, see factsWindow;
+//   - the result STARTED strictly after the host's last full upgrade that ran
+//     finished (ReasonFactsBeforeUpgrade). A result that started before the
+//     upgrade ended may have read os-release before the upgrade wrote it, even
+//     when it finished after it;
+//   - no full upgrade that ran overlaps the result (ReasonUpgradeOverlaps): it
+//     started no later than the result finished, and it is still running or
+//     finished no earlier than the result started;
+//   - no full upgrade that ran overlaps the list (ReasonUpgradeOverlaps), so
+//     the list did not read a release that changed while it ran.
+//
+// The overlap checks use inclusive bounds, so an upgrade that ends exactly
+// when the result starts counts as overlapping. Both starts must be known:
+// otherwise it returns errStartUnknown. The lookups use ctx.
+func (v *vulnInventoryService) factsStale(ctx context.Context, hostID string, started, finished, factsStarted, factsAt time.Time) (string, error) {
+	if started.IsZero() || factsStarted.IsZero() {
+		return "", errStartUnknown
+	}
+	if factsAt.Before(started.Add(-factsWindow)) {
+		return vulninventory.ReasonFactsOlder, nil
+	}
+	osChange, changed, err := v.facts.LastOSChange(ctx, hostID)
+	if err != nil {
+		return "", fmt.Errorf("last os change: %w", err)
+	}
+	if changed && !factsStarted.After(osChange) {
+		return vulninventory.ReasonFactsBeforeUpgrade, nil
+	}
+	overlapsFacts, err := v.facts.UpgradeOverlaps(ctx, hostID, factsStarted, factsAt)
+	if err != nil {
+		return "", fmt.Errorf("upgrade overlaps facts: %w", err)
+	}
+	if overlapsFacts {
+		return vulninventory.ReasonUpgradeOverlaps, nil
+	}
+	overlapsList, err := v.facts.UpgradeOverlaps(ctx, hostID, started, finished)
+	if err != nil {
+		return "", fmt.Errorf("upgrade overlaps list: %w", err)
+	}
+	if overlapsList {
+		return vulninventory.ReasonUpgradeOverlaps, nil
+	}
+	return "", nil
+}
+
+// closeByInventory closes the open findings of host that the complete read
+// settles (D5 paths 1 and 2) and writes the count as an audit line. A failure
+// is logged by class and does not fail the run; the findings stay open.
+func (v *vulnInventoryService) closeByInventory(ctx context.Context, parent context.Context, hostID, execID string, read vulninventory.Read) {
+	st := v.closer.Load()
+	if st == nil {
+		return
+	}
+	if read.Ecosystem == "" {
+		// A host read names its ecosystem (the release is mapped); without one
+		// NOS cannot tell which findings it covers, so it closes nothing.
+		v.log.Error("vulnerability inventory: close by inventory", "host", hostID, "execution", execID, "error_class", "ecosystem")
+		return
+	}
+	versions := make(map[string]string, len(read.Components))
+	for _, c := range read.Components {
+		versions[c.Source] = c.SourceVersion
+	}
+	closed, err := st.CloseByInventory(ctx, vulnstore.InventoryRead{
+		Subject:  vulnstore.Subject{Kind: vulnfinding.SubjectHost, ID: hostID},
+		Complete: read.Complete,
+		// The list was taken no earlier than the read's listing lag before
+		// it finished (vulnListLag); a finding written after that may not be
+		// in the list, so it stays open.
+		ReadAt:         read.ReadAt.Add(-vulnListLag),
+		Ecosystem:      read.Ecosystem,
+		SourceVersions: versions,
+	})
+	if err != nil {
+		if v.shutdown(parent, hostID, execID) {
+			return
+		}
+		v.log.Error("vulnerability inventory: close by inventory", "host", hostID, "execution", execID, "error_class", "close")
+		return
+	}
+	v.log.Info("audit", "kind", "vuln_closed_by_inventory", "host", hostID, "execution", execID, "closed", len(closed))
 }
 
 // shutdown reports whether parent is cancelled (the server is stopping). If
@@ -141,6 +363,289 @@ func (v *vulnInventoryService) markFailed(parent context.Context, hostID, execID
 		return
 	}
 	v.log.Info("audit", "kind", "vuln_inventory_read_failed", "host", hostID, "execution", execID, "reason", reason)
+}
+
+// vulnHostLister lists the inventory hosts; inventory.Store is one.
+type vulnHostLister interface {
+	List(ctx context.Context) ([]inventory.Host, error)
+}
+
+// vulnSnapshotIDMaxBytes is the longest snapshot ID the store can hold
+// (the vuln_inventory_snapshots.id column). A longer ID is Gone.
+const vulnSnapshotIDMaxBytes = 64
+
+// vulnInventory serves the D3 inventory export from the stored package
+// inventory: each snapshot pins the newest read of every host, read through
+// vulninventory.Store. It never triggers a read; it only reuses the reads
+// that the executions stored. A snapshot is immutable for its ID, its
+// generation rises above the hour value of the old snapshot IDs and above
+// every generation a run has seen, and it is Gone once it is older than
+// vulnstore.MaxInventoryAge.
+type vulnInventory struct {
+	reads inventoryReads
+	db    *sql.DB
+	hosts vulnHostLister
+	now   func() time.Time
+	cache *snapshotCache
+}
+
+// inventoryReads is the part of vulninventory.Store the export uses.
+// Snapshot is the only call that decodes the pinned read bodies, so tests
+// count its calls.
+type inventoryReads interface {
+	Current(ctx context.Context, hosts []string, maxReuse time.Duration, floor vulninventory.GenerationFloor) (vulninventory.Snapshot, error)
+	Snapshot(ctx context.Context, id string) (vulninventory.Snapshot, error)
+}
+
+// snapshotCache holds the decoded snapshot that was served last. A snapshot
+// is immutable for its ID, so the decoded copy is valid for that ID for as
+// long as the snapshot is fresh (see vulnInventory.fresh). One entry is
+// enough: Hermes pages one snapshot at a time, and a run start names the
+// snapshot of its export.
+type snapshotCache struct {
+	mu   sync.Mutex
+	snap api.VulnSnapshot
+	set  bool
+}
+
+// get returns the cached snapshot when it has ID.
+func (c *snapshotCache) get(id string) (api.VulnSnapshot, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.set && c.snap.ID == id {
+		return c.snap, true
+	}
+	return api.VulnSnapshot{}, false
+}
+
+// put replaces the cached snapshot with s.
+func (c *snapshotCache) put(s api.VulnSnapshot) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.snap, c.set = s, true
+}
+
+// newVulnInventory returns the export's inventory on db (server.db), with the
+// hosts from hosts and the clock now (nil means time.Now).
+func newVulnInventory(db *sql.DB, hosts vulnHostLister, now func() time.Time) (vulnInventory, error) {
+	if hosts == nil {
+		return vulnInventory{}, errors.New("vulnerability inventory: no host list")
+	}
+	if now == nil {
+		now = time.Now
+	}
+	// The store and the export share one clock: TakenAt and the reuse window
+	// of the store are judged with the same now as the export's freshness.
+	st, err := vulninventory.NewWithNow(db, now)
+	if err != nil {
+		return vulnInventory{}, fmt.Errorf("vulnerability inventory: %w", err)
+	}
+	return newVulnInventoryOn(st, db, hosts, now), nil
+}
+
+// newVulnInventoryOn returns the export's inventory over reads, which is the
+// store on db in production. now must not be nil.
+func newVulnInventoryOn(reads inventoryReads, db *sql.DB, hosts vulnHostLister, now func() time.Time) vulnInventory {
+	return vulnInventory{reads: reads, db: db, hosts: hosts, now: now, cache: &snapshotCache{}}
+}
+
+// fresh reports whether a snapshot taken at takenAt may still be served: it
+// is at most vulnstore.MaxInventoryAge old. A TakenAt after the clock (the
+// wall clock stepped back) is not fresh, as the store's reuse rule counts a
+// negative age as expired.
+func (v vulnInventory) fresh(takenAt time.Time) bool {
+	age := v.now().UTC().Sub(takenAt)
+	return age >= 0 && age <= vulnstore.MaxInventoryAge
+}
+
+// VulnSnapshot returns the current snapshot when id is empty: the newest read
+// of every host in the inventory, as a new or reused snapshot. Otherwise it
+// returns the snapshot with that ID. A host list that cannot be read is an
+// error, never an empty snapshot.
+func (v vulnInventory) VulnSnapshot(ctx context.Context, id string) (api.VulnSnapshot, error) {
+	if id != "" {
+		return v.byID(ctx, id)
+	}
+	hosts, err := v.hosts.List(ctx)
+	if err != nil {
+		return api.VulnSnapshot{}, fmt.Errorf("vuln inventory: list hosts: %w", err)
+	}
+	ids := make([]string, 0, len(hosts))
+	for _, h := range hosts {
+		ids = append(ids, h.ID)
+	}
+	cur, err := v.current(ctx, ids)
+	if err != nil {
+		return api.VulnSnapshot{}, err
+	}
+	// Current leaves the bodies out. The snapshot is immutable for its ID,
+	// so a decoded copy of the same ID is the same snapshot: decode only
+	// when it is not cached.
+	if s, ok := v.cache.get(cur.ID); ok {
+		return s, nil
+	}
+	// Only the count is logged: an omitted image has no name in the log.
+	if cur.OmittedImages > 0 {
+		slog.Default().Warn("vulnerability inventory: snapshot omits image reads",
+			"snapshot", cur.ID, "omitted_images", cur.OmittedImages)
+	}
+	return v.load(ctx, cur.ID)
+}
+
+// maxCurrentAttempts bounds the Current calls of one export. A run start that
+// records a generation after the floor was read makes the snapshot just
+// returned unusable for a run, and the next call builds a higher one.
+const maxCurrentAttempts = 3
+
+// current returns the current snapshot of ids with a generation above every
+// run floor the export can see. The run floor is read by Current itself, inside
+// its transaction (see vulnFloor), so the generation it returns is above the
+// floor of the same serialised state. A run start that records the returned
+// generation after that transaction commits is still possible; the recorded
+// generation is therefore read again after Current, and when it has reached
+// the returned generation (Current may have reused that snapshot) the snapshot
+// is not handed out, because the next run start with it would be refused with
+// 409. The next call then builds a higher one.
+func (v vulnInventory) current(ctx context.Context, ids []string) (vulninventory.Snapshot, error) {
+	// Generations of the old hourly IDs (time in hours) stay below the new ones.
+	hour := v.now().UTC().Truncate(vulnInventoryBucket).Unix() / int64(vulnInventoryBucket/time.Second)
+	floor := vulnFloor{hour: hour}
+	for range maxCurrentAttempts {
+		cur, err := v.reads.Current(ctx, ids, vulnInventoryBucket, floor)
+		if err != nil {
+			return vulninventory.Snapshot{}, fmt.Errorf("vuln inventory: current: %w", err)
+		}
+		recorded, err := maxInventoryGeneration(ctx, v.db)
+		if err != nil {
+			return vulninventory.Snapshot{}, err
+		}
+		if recorded < cur.Generation {
+			return cur, nil
+		}
+	}
+	return vulninventory.Snapshot{}, fmt.Errorf("vuln inventory: current: run starts recorded the snapshot generation on %d attempts", maxCurrentAttempts)
+}
+
+// byID returns the snapshot with id, or api.ErrVulnSnapshotGone when the
+// store does not hold it (unknown, pruned, an ID of the old form, or an ID
+// the store cannot hold) or when it is not fresh (see fresh).
+func (v vulnInventory) byID(ctx context.Context, id string) (api.VulnSnapshot, error) {
+	if len(id) > vulnSnapshotIDMaxBytes {
+		return api.VulnSnapshot{}, api.ErrVulnSnapshotGone
+	}
+	if s, ok := v.cache.get(id); ok {
+		if !v.fresh(s.TakenAt) {
+			return api.VulnSnapshot{}, api.ErrVulnSnapshotGone
+		}
+		return s, nil
+	}
+	return v.load(ctx, id)
+}
+
+// load decodes the snapshot with id from the store, caches it and returns it.
+// The store's refusals of an unknown or unusable ID are Gone; a snapshot that
+// is not fresh is Gone too and is not cached.
+func (v vulnInventory) load(ctx context.Context, id string) (api.VulnSnapshot, error) {
+	s, err := v.reads.Snapshot(ctx, id)
+	if errors.Is(err, vulninventory.ErrSnapshotGone) || errors.Is(err, vulninventory.ErrInvalidRead) {
+		return api.VulnSnapshot{}, api.ErrVulnSnapshotGone
+	}
+	if err != nil {
+		return api.VulnSnapshot{}, fmt.Errorf("vuln inventory: snapshot %s: %w", id, err)
+	}
+	out := toVulnSnapshot(s)
+	if !v.fresh(out.TakenAt) {
+		return api.VulnSnapshot{}, api.ErrVulnSnapshotGone
+	}
+	v.cache.put(out)
+	return out, nil
+}
+
+// toVulnSnapshot maps a stored snapshot to the export's snapshot type: the host
+// subjects in host-ID order, then the image subjects of its image reads (see
+// imageSubjects).
+func toVulnSnapshot(s vulninventory.Snapshot) api.VulnSnapshot {
+	out := api.VulnSnapshot{ID: s.ID, Generation: s.Generation, TakenAt: s.TakenAt,
+		Subjects: make([]api.VulnSubject, 0, len(s.Reads))}
+	for _, r := range s.Reads {
+		out.Subjects = append(out.Subjects, hostSubject(r))
+	}
+	out.Subjects = append(out.Subjects, imageSubjects(s.Images)...)
+	return out
+}
+
+// hostSubject maps the read of one host to an export subject. Only what the
+// api types hold is copied: the host ID as the subject reference, the
+// ecosystem, the completeness, the kernel (its source only when it is mapped)
+// and the components with their binaries. Nothing else of the read is
+// exported, and no host name or address.
+func hostSubject(r vulninventory.Read) api.VulnSubject {
+	sub := api.VulnSubject{Kind: vulnfinding.SubjectHost, Ref: vulnfinding.SubjectRef{ID: r.HostID},
+		Ecosystem: r.Ecosystem, Complete: r.Complete}
+	if r.Kernel.Release != "" {
+		k := &api.VulnKernel{Release: r.Kernel.Release}
+		if r.Kernel.State == string(osdebian.KernelMapped) {
+			k.Source, k.SourceVersion = r.Kernel.Source, r.Kernel.Version
+		}
+		sub.Kernel = k
+	}
+	for _, c := range r.Components {
+		vc := api.VulnComponent{Source: c.Source, SourceVersion: c.SourceVersion,
+			Binaries: make([]api.VulnBinary, 0, len(c.Binaries))}
+		for _, b := range c.Binaries {
+			vc.Binaries = append(vc.Binaries, api.VulnBinary{Name: b.Name, Version: b.Version, Arch: b.Arch})
+		}
+		sub.Components = append(sub.Components, vc)
+	}
+	return sub
+}
+
+// vulnFloor is the generation floor of one export call (vulninventory's
+// GenerationFloor): the highest inventory generation a run has started with,
+// read on the transaction Current runs in, or the hour value of the old
+// snapshot IDs, whichever is higher. The read is inside Current's transaction,
+// so a run start that serialises after it is seen by the next call.
+type vulnFloor struct {
+	hour int64
+}
+
+// Generation returns the floor on tx (see vulnFloor).
+func (f vulnFloor) Generation(ctx context.Context, tx *sql.Tx) (int64, error) {
+	g, err := maxInventoryGeneration(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+	return max(g, f.hour), nil
+}
+
+// queryRower is the part of *sql.DB and *sql.Tx that maxInventoryGeneration
+// needs.
+type queryRower interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// maxInventoryGeneration is the highest inventory generation a run has
+// started with (vuln_store_state.max_inventory_generation); 0 before the
+// first run. The export's generations must stay above it (ADR 0011 D5).
+func maxInventoryGeneration(ctx context.Context, db queryRower) (int64, error) {
+	var g int64
+	err := db.QueryRowContext(ctx, `SELECT max_inventory_generation FROM vuln_store_state WHERE id = 1`).Scan(&g)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("vulnerability store state: %w", err)
+	}
+	return g, nil
+}
+
+// sweepSnapshots prunes the inventory snapshots older than
+// vulnstore.MaxInventoryAge. The newest snapshot is always kept.
+func (v *vulnService) sweepSnapshots(ctx context.Context) error {
+	if err := v.inventory.PruneSnapshots(ctx, vulnstore.MaxInventoryAge); err != nil {
+		return fmt.Errorf("vulnerability inventory: prune snapshots: %w", err)
+	}
+	return nil
 }
 
 // inventoryErrorClass names the class of an error without its text: a store
