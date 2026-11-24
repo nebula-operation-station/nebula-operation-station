@@ -234,6 +234,10 @@ type Origin string
 // reads or writes.
 const OriginCollectorReported Origin = "collector_reported"
 
+// OriginUnreported marks a row that no spool record wrote. Rows created
+// before migration 0057 have it; the current write path never creates one.
+const OriginUnreported Origin = "unreported"
+
 // Device is the stored presentation copy of one device.
 type Device struct {
 	DeviceID        string
@@ -247,12 +251,15 @@ type Device struct {
 	// since LastSeen, or since the row was created while LastSeen is unset.
 	// Never negative.
 	Age time.Duration
-	// Origin is where the row came from. It is always
-	// OriginCollectorReported today, a constant and not a stored value:
-	// plain UpsertDevice can still create a row without a spool record, and
-	// the schema has no column to tell the two apart (see UpsertDeviceReported).
+	// Origin is read from the row (netdev_devices_seen.origin).
 	Origin Origin
-	State  DeviceState
+	// Spool names the spool record the row was last written from. Zero for
+	// an OriginUnreported row.
+	Spool SpoolRef
+	// ReportedAt is when Spool was accepted. Zero for an OriginUnreported
+	// row. It is not LastSeen: a report never moves last_seen.
+	ReportedAt time.Time
+	State      DeviceState
 }
 
 // Dataset is the status of one stored dataset.
@@ -303,15 +310,6 @@ func (s *Store) runHook(stage string) error {
 	return s.hook(stage)
 }
 
-// UpsertDevice records or updates the server copy of an executor device.
-// It does not stamp last_seen: last_seen keeps meaning the newest dataset
-// observation (see Device.LastSeen). The family is immutable and the trust
-// generation never decreases. It creates rows without a spool record, so
-// the import path must use UpsertDeviceReported instead.
-func (s *Store) UpsertDevice(ctx context.Context, d netdevcontract.Device) error {
-	return s.upsertDevice(ctx, d)
-}
-
 // SpoolRef names the spool record a device row is written from: the record's
 // file name and the SHA-256 of its bytes as lowercase hex.
 type SpoolRef struct {
@@ -343,29 +341,40 @@ func (r SpoolRef) validate() error {
 	return nil
 }
 
-// UpsertDeviceReported is the import path (ND-16 variant 1): it writes the
-// device row from one device record the collector spooled, named by ref.
-// The row is "reported by collector", never a confirmed device, which needs
-// the explicit admin link (ND-18 part 2).
+// UpsertDeviceReported is the only writer of device rows (ND-16 variant 1).
+// It writes the row from one device metadata record the collector spooled,
+// named by ref, and marks it OriginCollectorReported. That means the
+// collector reported the device. It is not an admin confirmation: that is
+// the explicit link in netdev_asset_links (ND-18 part 2).
 //
-// The report does not change last_seen or state: last_seen stays the newest
-// dataset observation, so a metadata-only report cannot keep a device fresh
-// while its dataset polls are missing. The family and trust generation rules
-// are those of UpsertDevice.
+// The report never changes last_seen or state, which follow dataset
+// observations only (touchDevice). A newer report replaces ref and
+// ReportedAt. The family is immutable and the trust generation never
+// decreases.
 //
-// Not yet stored: netdev_devices_seen has no column for ref, so the row does
-// not record which spool record wrote it. The link is validated here only.
-// A column needs a server migration, which is outside this package.
+// The caller (the metadata import path) comes with A1-1/A1-3 (spool record
+// type and importer call). Until then nothing outside the tests calls this.
 func (s *Store) UpsertDeviceReported(ctx context.Context, d netdevcontract.Device, ref SpoolRef) error {
 	if err := ref.validate(); err != nil {
 		return fmt.Errorf("netdevinventory: upsert device: %w", err)
 	}
-	return s.upsertDevice(ctx, d)
+	return s.upsertDevice(ctx, d, &ref)
 }
 
-// upsertDevice is the single writer of device rows. It never touches
-// last_seen or state: those follow dataset observations only (touchDevice).
-func (s *Store) upsertDevice(ctx context.Context, d netdevcontract.Device) error {
+// UpsertDevice writes a device row with no spool record. Such a row is
+// stored with origin OriginUnreported, so it never shows as collector
+// reported. The import path must use UpsertDeviceReported. This function
+// stays only for callers outside this package that are not migrated yet
+// (test/security/netdev_test.go, a protected path); it does not reset the
+// origin or spool reference of a row that already has them.
+func (s *Store) UpsertDevice(ctx context.Context, d netdevcontract.Device) error {
+	return s.upsertDevice(ctx, d, nil)
+}
+
+// upsertDevice is the single writer of device rows. ref is nil for the
+// unreported path. It never touches last_seen or state: those follow
+// dataset observations only (touchDevice).
+func (s *Store) upsertDevice(ctx context.Context, d netdevcontract.Device, ref *SpoolRef) error {
 	v, err := netdevcontract.ValidateDevice(d)
 	if err != nil {
 		return fmt.Errorf("netdevinventory: upsert device: %w", err)
@@ -378,10 +387,13 @@ func (s *Store) upsertDevice(ctx context.Context, d netdevcontract.Device) error
 			v.DeviceID).Scan(&family, &gen)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
+			origin, name, digest, reported := insertOrigin(ref, now)
 			_, err = tx.ExecContext(ctx, `INSERT INTO netdev_devices_seen
-				(device_id, family, label, trust_generation, last_seen, state, created_at, updated_at)
-				VALUES (?, ?, ?, ?, NULL, 'fresh', ?, ?)`,
-				v.DeviceID, string(v.Family), v.Name, int64(v.TrustGeneration), now, now)
+				(device_id, family, label, trust_generation, last_seen, state,
+				 origin, spool_name, spool_sha256, reported_at, created_at, updated_at)
+				VALUES (?, ?, ?, ?, NULL, 'fresh', ?, ?, ?, ?, ?, ?)`,
+				v.DeviceID, string(v.Family), v.Name, int64(v.TrustGeneration),
+				origin, name, digest, reported, now, now)
 			if err != nil {
 				return fmt.Errorf("netdevinventory: insert device %s: %w", v.DeviceID, err)
 			}
@@ -395,15 +407,34 @@ func (s *Store) upsertDevice(ctx context.Context, d netdevcontract.Device) error
 		if int64(v.TrustGeneration) < gen {
 			return fmt.Errorf("netdevinventory: device %s: %w", v.DeviceID, ErrTrustGenerationRegressed)
 		}
-		_, err = tx.ExecContext(ctx, `UPDATE netdev_devices_seen
-			SET label = ?, trust_generation = ?, updated_at = ?
-			WHERE device_id = ?`,
-			v.Name, int64(v.TrustGeneration), now, v.DeviceID)
+		if ref == nil {
+			_, err = tx.ExecContext(ctx, `UPDATE netdev_devices_seen
+				SET label = ?, trust_generation = ?, updated_at = ?
+				WHERE device_id = ?`,
+				v.Name, int64(v.TrustGeneration), now, v.DeviceID)
+		} else {
+			_, err = tx.ExecContext(ctx, `UPDATE netdev_devices_seen
+				SET label = ?, trust_generation = ?, updated_at = ?,
+				    origin = ?, spool_name = ?, spool_sha256 = ?, reported_at = ?
+				WHERE device_id = ?`,
+				v.Name, int64(v.TrustGeneration), now,
+				string(OriginCollectorReported), ref.Name, ref.Digest, now, v.DeviceID)
+		}
 		if err != nil {
 			return fmt.Errorf("netdevinventory: update device %s: %w", v.DeviceID, err)
 		}
 		return nil
 	})
+}
+
+// insertOrigin returns the origin, spool name, spool digest and report time
+// for a new row: a reported row carries its spool record, an unreported row
+// carries none (NULL in the schema).
+func insertOrigin(ref *SpoolRef, now int64) (origin string, name, digest any, reported any) {
+	if ref == nil {
+		return string(OriginUnreported), nil, nil, nil
+	}
+	return string(OriginCollectorReported), ref.Name, ref.Digest, now
 }
 
 // GetDevice returns the stored device. Its state is reported stale once
@@ -413,10 +444,14 @@ func (s *Store) GetDevice(ctx context.Context, deviceID string) (Device, error) 
 	var d Device
 	var family, state string
 	var gen, created int64
-	var last sql.NullInt64
-	err := s.db.QueryRowContext(ctx, `SELECT device_id, family, label, trust_generation, last_seen, state, created_at
+	var last, reported sql.NullInt64
+	var origin string
+	var spoolName, spoolDigest sql.NullString
+	err := s.db.QueryRowContext(ctx, `SELECT device_id, family, label, trust_generation, last_seen, state, created_at,
+		origin, spool_name, spool_sha256, reported_at
 		FROM netdev_devices_seen WHERE device_id = ?`, deviceID).
-		Scan(&d.DeviceID, &family, &d.Label, &gen, &last, &state, &created)
+		Scan(&d.DeviceID, &family, &d.Label, &gen, &last, &state, &created,
+			&origin, &spoolName, &spoolDigest, &reported)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Device{}, ErrDeviceNotFound
 	}
@@ -426,7 +461,11 @@ func (s *Store) GetDevice(ctx context.Context, deviceID string) (Device, error) 
 	d.Family = netdevcontract.Family(family)
 	d.TrustGeneration = uint64(gen)
 	d.State = DeviceState(state)
-	d.Origin = OriginCollectorReported
+	d.Origin = Origin(origin)
+	if reported.Valid {
+		d.ReportedAt = fromMicros(reported.Int64)
+		d.Spool = SpoolRef{Name: spoolName.String, Digest: spoolDigest.String}
+	}
 	ref := created
 	if last.Valid {
 		d.LastSeen = fromMicros(last.Int64)
