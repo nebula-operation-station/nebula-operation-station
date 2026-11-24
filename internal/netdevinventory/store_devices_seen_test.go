@@ -23,11 +23,14 @@ func testRef() SpoolRef {
 // deviceSnapshot is the part of a stored device row a refused write must
 // not change.
 type deviceSnapshot struct {
-	Family   netdevcontract.Family
-	Label    string
-	Gen      uint64
-	LastSeen time.Time
-	State    DeviceState
+	Family     netdevcontract.Family
+	Label      string
+	Gen        uint64
+	LastSeen   time.Time
+	State      DeviceState
+	Origin     Origin
+	Spool      SpoolRef
+	ReportedAt time.Time
 }
 
 func snapshotDevice(t *testing.T, s *Store, id string) deviceSnapshot {
@@ -36,7 +39,8 @@ func snapshotDevice(t *testing.T, s *Store, id string) deviceSnapshot {
 	if err != nil {
 		t.Fatalf("GetDevice(%s): %v", id, err)
 	}
-	return deviceSnapshot{Family: d.Family, Label: d.Label, Gen: d.TrustGeneration, LastSeen: d.LastSeen, State: d.State}
+	return deviceSnapshot{Family: d.Family, Label: d.Label, Gen: d.TrustGeneration, LastSeen: d.LastSeen,
+		State: d.State, Origin: d.Origin, Spool: d.Spool, ReportedAt: d.ReportedAt}
 }
 
 // TestMetadataReportNeverMovesLastSeen: a collector metadata report creates
@@ -219,6 +223,8 @@ func TestDeviceReadReportsOriginAndAge(t *testing.T) {
 	if err := s.UpsertDeviceReported(ctx, cbsDevice(), testRef()); err != nil {
 		t.Fatal(err)
 	}
+	// Only a dataset observation counts as seen, so the age runs from it.
+	mustReplace(t, s, "sw-core", ReadVLANs, base, false, VLANRows{{ID: 1, Name: "default"}})
 	staleAfter := StaleAfterIntervals * SwitchInterval
 
 	tests := []struct {
@@ -249,6 +255,28 @@ func TestDeviceReadReportsOriginAndAge(t *testing.T) {
 				t.Fatalf("State = %v, want %v", got.State, tt.wantState)
 			}
 		})
+	}
+}
+
+// TestReportOnlyRowStartsStale: a row created by a report alone has no dataset
+// observation, so it does not start fresh. It reads as stale with no LastSeen
+// and turns fresh only when a dataset is stored.
+func TestReportOnlyRowStartsStale(t *testing.T) {
+	s, _, clock := newTestStore(t)
+	ctx := context.Background()
+	if err := s.UpsertDeviceReported(ctx, cbsDevice(), testRef()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetDevice(ctx, "sw-core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != DeviceStale || !got.LastSeen.IsZero() {
+		t.Fatalf("report-only row: State %v LastSeen %v, want stale and no LastSeen", got.State, got.LastSeen)
+	}
+	mustReplace(t, s, "sw-core", ReadVLANs, *clock, false, VLANRows{{ID: 1, Name: "default"}})
+	if got := snapshotDevice(t, s, "sw-core"); got.State != DeviceFresh {
+		t.Fatalf("State after dataset = %v, want fresh", got.State)
 	}
 }
 
@@ -313,13 +341,11 @@ func TestLaterReportKeepsDatasetLastSeen(t *testing.T) {
 func TestLegacyUnreportedRowReadsAsUnreported(t *testing.T) {
 	s, db, clock := newTestStore(t)
 	ctx := context.Background()
-	if err := s.UpsertDeviceReported(ctx, cbsDevice(), testRef()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(`UPDATE netdev_devices_seen
-		SET origin = 'unreported', spool_name = NULL, spool_sha256 = NULL, reported_at = NULL
-		WHERE device_id = 'sw-core'`); err != nil {
-		t.Fatalf("make row unreported: %v", err)
+	// A row as migration 0057 left it: no spool record, origin unreported.
+	if _, err := db.Exec(`INSERT INTO netdev_devices_seen
+		(device_id, family, label, trust_generation, state, created_at, updated_at)
+		VALUES ('sw-core', 'cbs', 'Core', 1, 'stale', ?, ?)`, micros(*clock), micros(*clock)); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
 	}
 	got, err := s.GetDevice(ctx, "sw-core")
 	if err != nil {
@@ -373,6 +399,63 @@ func TestReportedRowCarriesSpoolReference(t *testing.T) {
 	}
 	if got.Spool != newer || !got.ReportedAt.Equal(fromMicros(micros(*clock))) {
 		t.Fatalf("after newer report: Spool %+v ReportedAt %v, want %+v at %v", got.Spool, got.ReportedAt, newer, *clock)
+	}
+}
+
+// TestReplayedOlderRecordChangesNothing: an older spool record replayed with
+// the same trust generation as the stored report is refused with
+// ErrReportNotNewer. The row keeps the newer record's label, reference and
+// report time.
+func TestReplayedOlderRecordChangesNothing(t *testing.T) {
+	s, _, _ := newTestStore(t)
+	ctx := context.Background()
+	t0 := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	older := testRef()
+	older.RecordedAt = t0
+	newer := SpoolRef{Name: "sw-core-cbs_version-1800000000000000000-ZZZ.json", Digest: strings.Repeat("cd", 32), RecordedAt: t0.Add(time.Hour)}
+
+	if err := s.UpsertDeviceReported(ctx, cbsDevice(), older); err != nil {
+		t.Fatal(err)
+	}
+	renamed := cbsDevice()
+	renamed.Name = "current label"
+	if err := s.UpsertDeviceReported(ctx, renamed, newer); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotDevice(t, s, "sw-core")
+
+	replay := cbsDevice()
+	replay.Name = "replayed label"
+	err := s.UpsertDeviceReported(ctx, replay, older)
+	if !errors.Is(err, ErrReportNotNewer) {
+		t.Fatalf("replayed older record err = %v, want ErrReportNotNewer", err)
+	}
+	if after := snapshotDevice(t, s, "sw-core"); after != before {
+		t.Fatalf("row changed by replayed record: before %+v, after %+v", before, after)
+	}
+	if got, _ := s.GetDevice(ctx, "sw-core"); got.Spool.Name != newer.Name || !got.ReportedAt.Equal(t0.Add(time.Hour)) {
+		t.Fatalf("Spool %+v ReportedAt %v, want the newer record", got.Spool, got.ReportedAt)
+	}
+}
+
+// TestReportAtSameTimeNeedsSameRecord: a record with the report time already
+// stored is accepted only when it is the same record. A different record at
+// the same time is ambiguous and refused.
+func TestReportAtSameTimeNeedsSameRecord(t *testing.T) {
+	s, _, _ := newTestStore(t)
+	ctx := context.Background()
+	t0 := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	first := testRef()
+	first.RecordedAt = t0
+	if err := s.UpsertDeviceReported(ctx, cbsDevice(), first); err != nil {
+		t.Fatal(err)
+	}
+	other := SpoolRef{Name: "other.json", Digest: strings.Repeat("cd", 32), RecordedAt: t0}
+	if err := s.UpsertDeviceReported(ctx, cbsDevice(), other); !errors.Is(err, ErrReportNotNewer) {
+		t.Fatalf("different record at the same time err = %v, want ErrReportNotNewer", err)
+	}
+	if err := s.UpsertDeviceReported(ctx, cbsDevice(), first); err != nil {
+		t.Fatalf("same record again: %v, want nil", err)
 	}
 }
 
@@ -430,6 +513,8 @@ func TestSchemaRejectsInconsistentOrigin(t *testing.T) {
 		{"unreported with spool record", `UPDATE netdev_devices_seen SET origin = 'unreported' WHERE device_id = 'sw-core'`},
 		{"bad digest", `UPDATE netdev_devices_seen SET origin = 'collector_reported', spool_name = 'a.json', spool_sha256 = 'XYZ', reported_at = 1 WHERE device_id = 'sw-core'`},
 		{"unknown origin", `UPDATE netdev_devices_seen SET origin = 'confirmed' WHERE device_id = 'sw-core'`},
+		{"origin back to unreported with spool columns cleared", `UPDATE netdev_devices_seen
+			SET origin = 'unreported', spool_name = NULL, spool_sha256 = NULL, reported_at = NULL WHERE device_id = 'sw-core'`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

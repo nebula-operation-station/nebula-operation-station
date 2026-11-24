@@ -310,9 +310,18 @@ func (s *Store) runHook(stage string) error {
 
 // SpoolRef names the spool record a device row is written from: the record's
 // file name and the SHA-256 of its bytes as lowercase hex.
+//
+// RecordedAt is when the collector wrote the record. It is what orders
+// reports: a record older than the stored one is refused (ErrReportNotNewer)
+// so that a replayed old record cannot put back an old label or reference.
+// Zero means the store's clock at write time, for callers that do not carry
+// the record time; such a write is ordered by the accept time instead.
+// GetDevice returns the reference without RecordedAt: the time is on
+// Device.ReportedAt.
 type SpoolRef struct {
-	Name   string
-	Digest string
+	Name       string
+	Digest     string
+	RecordedAt time.Time
 }
 
 // MaxSpoolRefName bounds SpoolRef.Name in bytes.
@@ -320,6 +329,11 @@ const MaxSpoolRefName = 255
 
 // ErrBadSpoolRef is returned for a SpoolRef without a usable name or digest.
 var ErrBadSpoolRef = errors.New("netdevinventory: spool record reference is invalid")
+
+// ErrReportNotNewer is returned when a report at the stored trust generation
+// is older than the stored report, or has the same time but names another
+// record. Nothing is written.
+var ErrReportNotNewer = errors.New("netdevinventory: report is not newer than the stored report")
 
 // ErrUnreportedDevice is returned by UpsertDevice: a device row can only be
 // written from a spool record (UpsertDeviceReported), so the plain path
@@ -341,6 +355,9 @@ func (r SpoolRef) validate() error {
 		}
 	}
 	if len(r.Digest) != 64 {
+		return ErrBadSpoolRef
+	}
+	if !r.RecordedAt.IsZero() && r.RecordedAt.UnixMicro() < 0 {
 		return ErrBadSpoolRef
 	}
 	for i := 0; i < len(r.Digest); i++ {
@@ -402,19 +419,26 @@ func (s *Store) upsertDevice(ctx context.Context, d netdevcontract.Device, ref S
 		return fmt.Errorf("netdevinventory: upsert device: %w", err)
 	}
 	now := micros(s.now())
+	reportedAt := now
+	if !ref.RecordedAt.IsZero() {
+		reportedAt = micros(ref.RecordedAt)
+	}
 	return s.withTx(ctx, func(tx *sql.Tx) error {
 		var family string
 		var gen int64
-		err := tx.QueryRowContext(ctx, `SELECT family, trust_generation FROM netdev_devices_seen WHERE device_id = ?`,
-			v.DeviceID).Scan(&family, &gen)
+		var stored sql.NullInt64
+		var storedName, storedDigest sql.NullString
+		err := tx.QueryRowContext(ctx, `SELECT family, trust_generation, reported_at, spool_name, spool_sha256
+			FROM netdev_devices_seen WHERE device_id = ?`, v.DeviceID).
+			Scan(&family, &gen, &stored, &storedName, &storedDigest)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			_, err = tx.ExecContext(ctx, `INSERT INTO netdev_devices_seen
 				(device_id, family, label, trust_generation, last_seen, state,
 				 origin, spool_name, spool_sha256, reported_at, created_at, updated_at)
-				VALUES (?, ?, ?, ?, NULL, 'fresh', ?, ?, ?, ?, ?, ?)`,
+				VALUES (?, ?, ?, ?, NULL, 'stale', ?, ?, ?, ?, ?, ?)`,
 				v.DeviceID, string(v.Family), v.Name, int64(v.TrustGeneration),
-				string(OriginCollectorReported), ref.Name, ref.Digest, now, now, now)
+				string(OriginCollectorReported), ref.Name, ref.Digest, reportedAt, now, now)
 			if err != nil {
 				return fmt.Errorf("netdevinventory: insert device %s: %w", v.DeviceID, err)
 			}
@@ -428,12 +452,20 @@ func (s *Store) upsertDevice(ctx context.Context, d netdevcontract.Device, ref S
 		if int64(v.TrustGeneration) < gen {
 			return fmt.Errorf("netdevinventory: device %s: %w", v.DeviceID, ErrTrustGenerationRegressed)
 		}
+		// At the same trust generation a report must be newer than the
+		// stored one. Equal time is allowed only for the same record.
+		if int64(v.TrustGeneration) == gen && stored.Valid {
+			same := storedName.String == ref.Name && storedDigest.String == ref.Digest
+			if reportedAt < stored.Int64 || (reportedAt == stored.Int64 && !same) {
+				return fmt.Errorf("netdevinventory: device %s: %w", v.DeviceID, ErrReportNotNewer)
+			}
+		}
 		_, err = tx.ExecContext(ctx, `UPDATE netdev_devices_seen
 			SET label = ?, trust_generation = ?, updated_at = ?,
 			    origin = ?, spool_name = ?, spool_sha256 = ?, reported_at = ?
 			WHERE device_id = ?`,
 			v.Name, int64(v.TrustGeneration), now,
-			string(OriginCollectorReported), ref.Name, ref.Digest, now, v.DeviceID)
+			string(OriginCollectorReported), ref.Name, ref.Digest, reportedAt, v.DeviceID)
 		if err != nil {
 			return fmt.Errorf("netdevinventory: update device %s: %w", v.DeviceID, err)
 		}
