@@ -231,26 +231,8 @@ func TestMetadataReportKeepsStaleAndDatasetRevives(t *testing.T) {
 	}
 }
 
-// TestUpsertDeviceLeavesLastSeenUnset: the plain UpsertDevice path does not
-// stamp last_seen, which stays the newest dataset observation (zero before
-// any dataset).
-func TestUpsertDeviceLeavesLastSeenUnset(t *testing.T) {
-	s, _, _ := newTestStore(t)
-	ctx := context.Background()
-	if err := s.UpsertDevice(ctx, cbsDevice()); err != nil {
-		t.Fatal(err)
-	}
-	got, err := s.GetDevice(ctx, "sw-core")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !got.LastSeen.IsZero() {
-		t.Fatalf("LastSeen = %v, want zero", got.LastSeen)
-	}
-}
-
-// TestLaterReportKeepsDatasetLastSeen: a later report or plain upsert (label
-// change) does not clear or move the dataset last_seen.
+// TestLaterReportKeepsDatasetLastSeen: a later report (label change) does not
+// clear or move the dataset last_seen.
 func TestLaterReportKeepsDatasetLastSeen(t *testing.T) {
 	s, _, clock := newTestStore(t)
 	ctx := context.Background()
@@ -261,7 +243,7 @@ func TestLaterReportKeepsDatasetLastSeen(t *testing.T) {
 	mustReplace(t, s, "sw-core", ReadVLANs, observed, false, VLANRows{{ID: 1, Name: "default"}})
 	renamed := cbsDevice()
 	renamed.Name = "renamed"
-	if err := s.UpsertDevice(ctx, renamed); err != nil {
+	if err := s.UpsertDeviceReported(ctx, renamed, testRef()); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.GetDevice(ctx, "sw-core")
@@ -273,14 +255,20 @@ func TestLaterReportKeepsDatasetLastSeen(t *testing.T) {
 	}
 }
 
-// TestPlainUpsertDeviceRowIsUnreported: a row written by the plain UpsertDevice
-// path has no spool record, so it reads as unreported, never as collector
-// reported.
-func TestPlainUpsertDeviceRowIsUnreported(t *testing.T) {
-	s, _, _ := newTestStore(t)
+// TestLegacyUnreportedRowReadsAsUnreported: a row whose origin is unreported
+// (no spool record, e.g. one that predates migration 0057) reads as unreported
+// and not as collector reported. GetDevice takes the origin from the row, so
+// a valid report then turns it into a collector-reported row.
+func TestLegacyUnreportedRowReadsAsUnreported(t *testing.T) {
+	s, db, clock := newTestStore(t)
 	ctx := context.Background()
-	if err := s.UpsertDevice(ctx, cbsDevice()); err != nil {
+	if err := s.UpsertDeviceReported(ctx, cbsDevice(), testRef()); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE netdev_devices_seen
+		SET origin = 'unreported', spool_name = NULL, spool_sha256 = NULL, reported_at = NULL
+		WHERE device_id = 'sw-core'`); err != nil {
+		t.Fatalf("make row unreported: %v", err)
 	}
 	got, err := s.GetDevice(ctx, "sw-core")
 	if err != nil {
@@ -291,6 +279,18 @@ func TestPlainUpsertDeviceRowIsUnreported(t *testing.T) {
 	}
 	if got.Spool != (SpoolRef{}) || !got.ReportedAt.IsZero() {
 		t.Fatalf("Spool = %+v ReportedAt = %v, want none for an unreported row", got.Spool, got.ReportedAt)
+	}
+
+	*clock = clock.Add(time.Minute)
+	if err := s.UpsertDeviceReported(ctx, cbsDevice(), testRef()); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.GetDevice(ctx, "sw-core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Origin != OriginCollectorReported || got.Spool != testRef() {
+		t.Fatalf("after report: Origin %q Spool %+v, want collector reported with the record", got.Origin, got.Spool)
 	}
 }
 
@@ -325,25 +325,39 @@ func TestReportedRowCarriesSpoolReference(t *testing.T) {
 	}
 }
 
-// TestPlainUpsertKeepsReportedOrigin: the plain UpsertDevice path never
-// downgrades a row that a spool record wrote, nor clears its reference.
-func TestPlainUpsertKeepsReportedOrigin(t *testing.T) {
-	s, _, _ := newTestStore(t)
+// TestPlainUpsertRefusesAndWritesNothing: the plain UpsertDevice path refuses
+// every write with ErrUnreportedDevice. It creates no row, and on an existing
+// row it changes neither the label, the trust generation, the origin, the
+// spool reference, the report time nor last_seen and state.
+func TestPlainUpsertRefusesAndWritesNothing(t *testing.T) {
+	s, db, _ := newTestStore(t)
 	ctx := context.Background()
+	if err := s.UpsertDevice(ctx, cbsDevice()); !errors.Is(err, ErrUnreportedDevice) {
+		t.Fatalf("plain upsert on empty store err = %v, want ErrUnreportedDevice", err)
+	}
+	if n := countRows(t, db, `SELECT COUNT(*) FROM netdev_devices_seen`); n != 0 {
+		t.Fatalf("plain upsert created %d rows, want 0", n)
+	}
+
 	if err := s.UpsertDeviceReported(ctx, cbsDevice(), testRef()); err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.GetDevice(ctx, "sw-core")
+	if err != nil {
 		t.Fatal(err)
 	}
 	renamed := cbsDevice()
 	renamed.Name = "renamed"
-	if err := s.UpsertDevice(ctx, renamed); err != nil {
-		t.Fatal(err)
+	renamed.TrustGeneration = 9
+	if err := s.UpsertDevice(ctx, renamed); !errors.Is(err, ErrUnreportedDevice) {
+		t.Fatalf("plain upsert on existing row err = %v, want ErrUnreportedDevice", err)
 	}
-	got, err := s.GetDevice(ctx, "sw-core")
+	after, err := s.GetDevice(ctx, "sw-core")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Origin != OriginCollectorReported || got.Spool != testRef() || got.ReportedAt.IsZero() {
-		t.Fatalf("plain upsert changed the report: Origin %q Spool %+v ReportedAt %v", got.Origin, got.Spool, got.ReportedAt)
+	if after != before {
+		t.Fatalf("plain upsert changed the row:\nbefore %+v\nafter  %+v", before, after)
 	}
 }
 
@@ -353,16 +367,16 @@ func TestPlainUpsertKeepsReportedOrigin(t *testing.T) {
 func TestSchemaRejectsInconsistentOrigin(t *testing.T) {
 	s, db, _ := newTestStore(t)
 	ctx := context.Background()
-	if err := s.UpsertDevice(ctx, cbsDevice()); err != nil {
+	if err := s.UpsertDeviceReported(ctx, cbsDevice(), testRef()); err != nil {
 		t.Fatal(err)
 	}
 	tests := []struct {
 		name string
 		sql  string
 	}{
-		{"reported without spool record", `UPDATE netdev_devices_seen SET origin = 'collector_reported' WHERE device_id = 'sw-core'`},
-		{"reported without report time", `UPDATE netdev_devices_seen SET origin = 'collector_reported', spool_name = 'a.json', spool_sha256 = '` + strings.Repeat("a", 64) + `' WHERE device_id = 'sw-core'`},
-		{"unreported with spool record", `UPDATE netdev_devices_seen SET spool_name = 'a.json', spool_sha256 = '` + strings.Repeat("a", 64) + `', reported_at = 1 WHERE device_id = 'sw-core'`},
+		{"reported without spool record", `UPDATE netdev_devices_seen SET spool_name = NULL, spool_sha256 = NULL WHERE device_id = 'sw-core'`},
+		{"reported without report time", `UPDATE netdev_devices_seen SET reported_at = NULL WHERE device_id = 'sw-core'`},
+		{"unreported with spool record", `UPDATE netdev_devices_seen SET origin = 'unreported' WHERE device_id = 'sw-core'`},
 		{"bad digest", `UPDATE netdev_devices_seen SET origin = 'collector_reported', spool_name = 'a.json', spool_sha256 = 'XYZ', reported_at = 1 WHERE device_id = 'sw-core'`},
 		{"unknown origin", `UPDATE netdev_devices_seen SET origin = 'confirmed' WHERE device_id = 'sw-core'`},
 	}
@@ -373,8 +387,8 @@ func TestSchemaRejectsInconsistentOrigin(t *testing.T) {
 			}
 		})
 	}
-	if got, err := s.GetDevice(ctx, "sw-core"); err != nil || got.Origin != OriginUnreported {
-		t.Fatalf("row after refused writes: Origin %q, err %v; want unreported", got.Origin, err)
+	if got, err := s.GetDevice(ctx, "sw-core"); err != nil || got.Origin != OriginCollectorReported {
+		t.Fatalf("row after refused writes: Origin %q, err %v; want collector reported", got.Origin, err)
 	}
 }
 
@@ -396,6 +410,9 @@ func TestNoDeviceRowWithoutReport(t *testing.T) {
 	}
 	if err := s.UpsertDeviceReported(ctx, cbsDevice(), SpoolRef{Name: "", Digest: testRef().Digest}); !errors.Is(err, ErrBadSpoolRef) {
 		t.Fatalf("refused report err = %v, want ErrBadSpoolRef", err)
+	}
+	if err := s.UpsertDevice(ctx, cbsDevice()); !errors.Is(err, ErrUnreportedDevice) {
+		t.Fatalf("plain UpsertDevice err = %v, want ErrUnreportedDevice", err)
 	}
 	if n := countRows(t, db, `SELECT COUNT(*) FROM netdev_devices_seen`); n != 0 {
 		t.Fatalf("rows = %d, want 0 after refused writes", n)
