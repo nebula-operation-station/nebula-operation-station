@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,10 +40,88 @@ type factsSource interface {
 // action and runs before the lists, so the result is older than the list; the
 // window is the time within which the release is taken as unchanged.
 //
-// Known gap: a release upgrade that NOS did not run (no package.install_all
-// on the host) is not seen by the OS-change check, so facts from before it
-// still count within this window and the list is matched to the old release.
+// A release upgrade that NOS did not run (no package.install_all on the host)
+// is not seen by the OS-change check. It is caught by releaseMatchesList: the
+// list's base-files version must belong to the release of the facts.
 const factsWindow = 24 * time.Hour
+
+// reasonReleaseMismatch is the partial reason of a list whose base-files
+// version does not belong to the release that the newest core.facts reports,
+// so the release changed without a record NOS could use (for example a manual
+// or unattended do-release-upgrade). It is fixed text, never host content.
+const reasonReleaseMismatch = "package list does not match the release of core.facts"
+
+// reasonReleaseNotCheckable is the partial reason of a complete list whose
+// release has no base-files prefix that NOS can derive (see releasePrefix), so
+// the list cannot be compared with core.facts. Nothing was found to differ: the
+// list is simply not judged. It is fixed text, never host content.
+const reasonReleaseNotCheckable = "package list release not checkable from core.facts"
+
+// ubuntuBaseFilesPrefix is the base-files version prefix of each Ubuntu release
+// that releaseReason can judge. Ubuntu's base-files version starts with the
+// number of the Debian release it is synced from, then "ubuntu" ("13ubuntu10.1"
+// on 24.04). That number does not follow from the Ubuntu release number, so
+// Ubuntu needs this table. Only the 24.04 entry is checked against a recorded
+// fixture (testdata/installed/ubuntu2404.txt). The 20.04 and 22.04 entries are
+// not yet checked on real hosts. A wrong entry makes the lists of that release
+// partial, so it cannot make a list of another release complete. Ubuntu
+// releases without an entry are not checkable.
+var ubuntuBaseFilesPrefix = map[string]string{
+	"ubuntu:20.04": "11ubuntu",
+	"ubuntu:22.04": "12ubuntu",
+	"ubuntu:24.04": "13ubuntu",
+}
+
+// releaseNumberRe is the shape of a Debian VERSION_ID: the release number only.
+var releaseNumberRe = regexp.MustCompile(`^[0-9]{1,3}$`)
+
+// releasePrefix returns the base-files version prefix that a list of ecosystem
+// eco must carry on the release with os-release VERSION_ID ver. A Debian
+// base-files version starts with the release number ("12.4+deb12u7", "13.4",
+// "10.3+deb10u11"), so the prefix is ver followed by "." for every Debian
+// release that has a VERSION_ID; this holds for any release number, not only
+// the ones in a table. ok is false when the release cannot be judged: a Debian
+// release without a VERSION_ID (sid, testing), or an Ubuntu release not in
+// ubuntuBaseFilesPrefix.
+func releasePrefix(eco, ver string) (prefix string, ok bool) {
+	if strings.HasPrefix(eco, "debian:") {
+		if !releaseNumberRe.MatchString(ver) {
+			return "", false
+		}
+		return ver + ".", true
+	}
+	prefix, ok = ubuntuBaseFilesPrefix[eco]
+	return prefix, ok
+}
+
+// releaseMatchesList reports whether the package list inv was taken on the
+// release with base-files prefix: its single base-files package has a version
+// that starts with prefix. Fail closed: a list without base-files or with more
+// than one does not match.
+func releaseMatchesList(prefix string, inv osdebian.InstalledInventory) bool {
+	var versions []string
+	for _, p := range inv.Packages {
+		if p.Name == "base-files" {
+			versions = append(versions, p.Version)
+		}
+	}
+	return len(versions) == 1 && strings.HasPrefix(versions[0], prefix)
+}
+
+// releaseReason returns "" when the complete package list inv of ecosystem eco
+// is on the release that core.facts reports (os-release VERSION_ID ver), or the
+// partial reason otherwise: reasonReleaseNotCheckable when releasePrefix cannot
+// judge the release, reasonReleaseMismatch when the list is on another release.
+func releaseReason(eco, ver string, inv osdebian.InstalledInventory) string {
+	prefix, ok := releasePrefix(eco, ver)
+	if !ok {
+		return reasonReleaseNotCheckable
+	}
+	if !releaseMatchesList(prefix, inv) {
+		return reasonReleaseMismatch
+	}
+	return ""
+}
 
 // errStartUnknown is returned when the start of the list or of its core.facts
 // run is not known, so the facts cannot be checked (fail closed).
@@ -96,8 +176,9 @@ const markTimeout = 5 * time.Second
 // stored incomplete.
 //
 // Fail closed: when the release lookup fails, the list's start is unknown, the
-// facts are older than the list, or the store fails to write the read, a
-// partial marker is stored instead. The host's older complete read then stops
+// facts are older than the list, the list's base-files version does not belong
+// to the facts' release (reasonReleaseMismatch, see releaseMatchesList), or the
+// store fails to write the read, a partial marker is stored instead. The host's older complete read then stops
 // being its latest inventory. A refusal of the store (a field over its limit
 // caused by host content) gives ReasonRefused; any other store failure gives
 // ReasonStoreUnavailable. If the marker cannot be stored either, the failure
@@ -117,7 +198,7 @@ func (v *vulnInventoryService) ObserveInstalled(parent context.Context, hostID, 
 		v.markFailed(parent, hostID, execID, at, vulninventory.ReasonLookupFailed)
 		return
 	}
-	var eco string
+	var eco, release string
 	var distro vulnver.Distro
 	if ok {
 		stale, err := v.factsStale(ctx, hostID, started, at, factsStarted, factsAt)
@@ -135,9 +216,17 @@ func (v *vulnInventoryService) ObserveInstalled(parent context.Context, hostID, 
 		}
 		if id, ver, code, readable := executions.OSRelease(facts); readable {
 			eco, distro = vulninventory.Ecosystem(id, ver, code)
+			release = ver
 		}
 	}
 	inv := osdebian.ParseInstalledResult(result, osdebian.ReadStatus{ExitCode: 0}, distro)
+	// Only a complete list is checked: a partial one keeps its own reason.
+	if eco != "" && inv.Complete {
+		if reason := releaseReason(eco, release, inv); reason != "" {
+			v.markFailed(parent, hostID, execID, at, reason)
+			return
+		}
+	}
 	read := vulninventory.FromInstalled(hostID, execID, at, eco, inv)
 	if _, err := v.store.Put(ctx, read); err != nil {
 		if v.shutdown(parent, hostID, execID) {

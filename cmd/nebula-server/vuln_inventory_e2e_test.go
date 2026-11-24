@@ -70,11 +70,11 @@ const (
 	e2eFeedDir = "testdata/vuln_inventory"
 	// e2eSources and e2eBinaries are the counts of the fixture's complete
 	// read that the inventory line shows: the source packages (openssl,
-	// glibc, restic) and their binary packages (openssl, libssl3, libc6,
-	// restic). The kernel meta source is not a component (convert.go skips
-	// it), so the two kernel images are not counted.
-	e2eSources  = 3
-	e2eBinaries = 4
+	// glibc, restic, base-files) and their binary packages (openssl, libssl3,
+	// libc6, restic, base-files). The kernel meta source is not a component
+	// (convert.go skips it), so the two kernel images are not counted.
+	e2eSources  = 4
+	e2eBinaries = 5
 	// e2eWriteBackdate is how far behind real time the server's store clock
 	// runs during the agent run. The closure read must be at most
 	// vulninventory.MaxReadSkew after the real clock, and it must be at least
@@ -85,14 +85,35 @@ const (
 	e2eWriteBackdate = time.Hour
 )
 
-// e2eFixture returns the fixture result bytes.
+// e2eBaseFiles is the base-files line of the Debian 12 host of the e2e
+// fixture. The recorded script result is an excerpt without it; a real list of
+// a Debian 12 host always has base-files, and the release check needs it.
+const e2eBaseFiles = "P\tinstalled\tbase-files\tamd64\t12.4+deb12u7\tbase-files\t12.4+deb12u7\t\t.\n"
+
+// e2eFixture returns the fixture result bytes: the recorded result with the
+// base-files line added and its END count raised to match.
 func e2eFixture(t *testing.T) []byte {
 	t.Helper()
 	b, err := os.ReadFile(e2eFixtureResult)
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
-	return b
+	doc := struct {
+		Format    string `json:"format"`
+		Text      string `json:"text"`
+		Truncated bool   `json:"truncated"`
+	}{}
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	// The P lines come before the K record and END counts every P line.
+	const kernel, end = "\nK\t", "END\t7\n"
+	if !strings.Contains(doc.Text, kernel) || !strings.Contains(doc.Text, end) {
+		t.Fatalf("fixture has no K record or no %q", end)
+	}
+	text := strings.Replace(doc.Text, kernel, "\n"+e2eBaseFiles+"K\t", 1)
+	text = strings.Replace(text, end, "END\t8\n", 1)
+	return installedEnvelope(t, text, doc.Truncated)
 }
 
 // e2eUpgraded is the fixture after the openssl upgrade: the installed
@@ -354,7 +375,7 @@ func TestPackageListInstalledFindingReachesServerOverHTTP(t *testing.T) {
 	inv := e2eInventory(t, db, log)
 	inv.ObserveInstalled(ctx, ivcHost, "exec-e2e-list-1", listAt.Add(-time.Minute), listAt, e2eFixture(t))
 	if r, err := inv.store.Latest(ctx, ivcHost); err != nil || !r.Complete {
-		t.Fatalf("first read: complete=%v err=%v, want a complete stored read", r.Complete, err)
+		t.Fatalf("first read: complete=%v reason=%q err=%v, want a complete stored read", r.Complete, r.Reason, err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)

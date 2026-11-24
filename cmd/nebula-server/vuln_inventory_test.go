@@ -571,8 +571,8 @@ func TestFactsWithinWindowGiveCompleteRead(t *testing.T) {
 // to trixie by a full upgrade NOS ran, whose core.facts has not run since,
 // keeps its list incomplete; the old release is never used for the new package
 // list. A fresh core.facts (trixie) makes the next list complete under
-// debian:trixie. An upgrade NOS did not run is not seen here (see the notes on
-// factsWindow).
+// debian:trixie. An upgrade NOS did not run is caught by the base-files check
+// instead (TestOutOfBandReleaseUpgradeGivesPartialRead).
 func TestUpgradedHostIsNotMatchedWithOldRelease(t *testing.T) {
 	const trixieRelease = "PRETTY_NAME=\"Debian GNU/Linux 13 (trixie)\"\nID=debian\nVERSION_ID=\"13\"\nVERSION_CODENAME=trixie\n"
 	e := newInvEnv(t)
@@ -589,10 +589,293 @@ func TestUpgradedHostIsNotMatchedWithOldRelease(t *testing.T) {
 
 	// Fresh trixie facts, run at the time of the next list.
 	e.insertFactsAt(t, 23, invTestHost, factsResult(t, trixieRelease), invTestAt.Add(2*time.Minute))
-	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-trixie-2", invTestStart.Add(2*time.Minute), invTestAt.Add(2*time.Minute), installedEnvelope(t, debian12Text(t), false))
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-trixie-2", invTestStart.Add(2*time.Minute), invTestAt.Add(2*time.Minute), installedEnvelope(t, debian13Text(t), false))
 	r = e.latestRead(t, invTestHost)
 	if r.Ecosystem != "debian:trixie" {
 		t.Fatalf("ecosystem after fresh facts = %q (complete=%v reason=%q), want debian:trixie", r.Ecosystem, r.Complete, r.Reason)
+	}
+}
+
+// debian13Release is the os-release of a Debian 13 (trixie) host.
+const debian13Release = "PRETTY_NAME=\"Debian GNU/Linux 13 (trixie)\"\nID=debian\nVERSION_ID=\"13\"\nVERSION_CODENAME=trixie\n"
+
+// ubuntu2404Release is the os-release of an Ubuntu 24.04 host.
+const ubuntu2404Release = "NAME=\"Ubuntu\"\nVERSION=\"24.04 LTS (Noble Numbat)\"\nID=ubuntu\nVERSION_ID=\"24.04\"\nVERSION_CODENAME=noble\n"
+
+// ubuntu2204Release is the os-release of an Ubuntu 22.04 host.
+const ubuntu2204Release = "NAME=\"Ubuntu\"\nVERSION=\"22.04 LTS (Jammy Jellyfish)\"\nID=ubuntu\nVERSION_ID=\"22.04\"\nVERSION_CODENAME=jammy\n"
+
+// debian13Text is the Debian 12 fixture with the base-files package of
+// Debian 13 (trixie): the package list of a host after a release upgrade.
+func debian13Text(t *testing.T) string {
+	t.Helper()
+	const old = "P\tinstalled\tbase-files\tamd64\t12.4+deb12u7\tbase-files\t12.4+deb12u7"
+	text := debian12Text(t)
+	if !strings.Contains(text, old) {
+		t.Fatal("debian12 fixture: base-files line not found")
+	}
+	return strings.Replace(text, old, "P\tinstalled\tbase-files\tamd64\t13.4\tbase-files\t13.4", 1)
+}
+
+// ubuntu2404Text is the nos-installed-v1 text of the Ubuntu 24.04 fixture.
+func ubuntu2404Text(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile("../../internal/executions/osdebian/testdata/installed/ubuntu2404.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// unstartedFacts is a core.facts source whose newest result has no known
+// start (a finish time only).
+type unstartedFacts struct{ staticFacts }
+
+func (s unstartedFacts) LastResultRun(ctx context.Context, action, host string) ([]byte, time.Time, time.Time, bool, error) {
+	r, _, at, ok, err := s.staticFacts.LastResultRun(ctx, action, host)
+	return r, time.Time{}, at, ok, err
+}
+
+// listOverlapFacts is a core.facts source where a full upgrade overlaps the
+// package list only: no finished OS change is recorded, and the overlap
+// lookup is true for the list's interval and false for the facts' interval.
+type listOverlapFacts struct{ staticFacts }
+
+func (listOverlapFacts) LastOSChange(context.Context, string) (time.Time, bool, error) {
+	return time.Time{}, false, nil
+}
+
+func (listOverlapFacts) UpgradeOverlaps(_ context.Context, _ string, from, to time.Time) (bool, error) {
+	return from.Equal(invTestStart) && to.Equal(invTestAt), nil
+}
+
+// TestOutOfBandReleaseUpgradeGivesPartialRead: a release upgrade that NOS did
+// not run (no package.install_all on the host, for example a manual or
+// unattended do-release-upgrade) leaves the newest core.facts on the old
+// release, within factsWindow. The package list of the new release must not
+// be stored complete under the old ecosystem.
+func TestOutOfBandReleaseUpgradeGivesPartialRead(t *testing.T) {
+	e := newInvEnv(t)
+	e.insertFactsAt(t, 30, invTestHost, factsResult(t, debian12Release), invTestStart.Add(-time.Hour))
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-oob-upgrade", invTestStart, invTestAt, installedEnvelope(t, debian13Text(t), false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != reasonReleaseMismatch {
+		t.Fatalf("read complete=%v reason=%q ecosystem=%q, want partial with the release mismatch reason", r.Complete, r.Reason, r.Ecosystem)
+	}
+	if r.Ecosystem == "debian:bookworm" {
+		t.Fatalf("trixie list stored under debian:bookworm")
+	}
+}
+
+// TestListReleaseMustMatchFacts: the package list must carry the base-files
+// version of the release that the newest core.facts reports. A mismatch, a list
+// without base-files and an ecosystem without a known base-files version are
+// all partial (fail closed).
+func TestListReleaseMustMatchFacts(t *testing.T) {
+	noBaseFiles := func(t *testing.T) []byte {
+		t.Helper()
+		text := strings.Replace(debian12Text(t), "P\tinstalled\tbase-files\t", "P\tinstalled\tbase-filez\t", 1)
+		return installedEnvelope(t, text, false)
+	}
+	tests := []struct {
+		name         string
+		facts        []byte
+		list         []byte
+		wantEcosys   string
+		wantComplete bool
+	}{
+		{"debian 12 list under debian 12 facts", factsResult(t, debian12Release), installedEnvelope(t, debian12Text(t), false), "debian:bookworm", true},
+		{"debian 13 list under debian 13 facts", factsResult(t, debian13Release), installedEnvelope(t, debian13Text(t), false), "debian:trixie", true},
+		{"debian 13 list under debian 12 facts", factsResult(t, debian12Release), installedEnvelope(t, debian13Text(t), false), "", false},
+		{"debian 12 list under debian 13 facts", factsResult(t, debian13Release), installedEnvelope(t, debian12Text(t), false), "", false},
+		{"ubuntu 24.04 list under ubuntu 24.04 facts", factsResult(t, ubuntu2404Release), installedEnvelope(t, ubuntu2404Text(t), false), "ubuntu:24.04", true},
+		{"ubuntu 24.04 list under ubuntu 22.04 facts", factsResult(t, ubuntu2204Release), installedEnvelope(t, ubuntu2404Text(t), false), "", false},
+		{"list without base-files", factsResult(t, debian12Release), noBaseFiles(t), "", false},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newInvEnv(t)
+			e.insertFactsAt(t, 40+i, invTestHost, tc.facts, invTestStart.Add(-time.Hour))
+
+			e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-match", invTestStart, invTestAt, tc.list)
+
+			r := e.latestRead(t, invTestHost)
+			if tc.wantComplete {
+				if !r.Complete || r.Ecosystem != tc.wantEcosys {
+					t.Fatalf("read complete=%v ecosystem=%q reason=%q, want complete %s", r.Complete, r.Ecosystem, r.Reason, tc.wantEcosys)
+				}
+				return
+			}
+			if r.Complete || r.Reason != reasonReleaseMismatch {
+				t.Fatalf("read complete=%v ecosystem=%q reason=%q, want the release mismatch reason", r.Complete, r.Ecosystem, r.Reason)
+			}
+		})
+	}
+}
+
+// withBaseFiles returns the Debian 12 fixture with the base-files version
+// replaced by version (both columns of its line).
+func withBaseFiles(t *testing.T, version string) string {
+	t.Helper()
+	text := debian12Text(t)
+	if !strings.Contains(text, "12.4+deb12u7") {
+		t.Fatal("debian12 fixture: base-files version not found")
+	}
+	return strings.ReplaceAll(text, "12.4+deb12u7", version)
+}
+
+// TestDebianReleaseOutsideTableIsMatchedByVersion: a Debian release that is
+// not in baseFilesPrefix (buster, forky) is still checked: its base-files
+// version starts with its release number, so a list of that release is
+// complete and a list of another release is partial with the mismatch reason.
+func TestDebianReleaseOutsideTableIsMatchedByVersion(t *testing.T) {
+	const busterRelease = "PRETTY_NAME=\"Debian GNU/Linux 10 (buster)\"\nID=debian\nVERSION_ID=\"10\"\nVERSION_CODENAME=buster\n"
+	const forkyRelease = "PRETTY_NAME=\"Debian GNU/Linux 14 (forky)\"\nID=debian\nVERSION_ID=\"14\"\nVERSION_CODENAME=forky\n"
+	tests := []struct {
+		name       string
+		facts      []byte
+		list       []byte
+		wantEcosys string
+		wantReason string
+	}{
+		{"debian 10 list under debian 10 facts", factsResult(t, busterRelease), installedEnvelope(t, withBaseFiles(t, "10.3+deb10u11"), false), "debian:buster", ""},
+		{"debian 14 list under debian 14 facts", factsResult(t, forkyRelease), installedEnvelope(t, withBaseFiles(t, "14.1"), false), "debian:forky", ""},
+		{"debian 12 list under debian 10 facts", factsResult(t, busterRelease), installedEnvelope(t, debian12Text(t), false), "", reasonReleaseMismatch},
+		{"debian 10 list under debian 14 facts", factsResult(t, forkyRelease), installedEnvelope(t, withBaseFiles(t, "10.3+deb10u11"), false), "", reasonReleaseMismatch},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newInvEnv(t)
+			e.insertFactsAt(t, 50+i, invTestHost, tc.facts, invTestStart.Add(-time.Hour))
+
+			e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-debian-table", invTestStart, invTestAt, tc.list)
+
+			r := e.latestRead(t, invTestHost)
+			if tc.wantReason == "" {
+				if !r.Complete || r.Ecosystem != tc.wantEcosys {
+					t.Fatalf("read complete=%v ecosystem=%q reason=%q, want complete %s", r.Complete, r.Ecosystem, r.Reason, tc.wantEcosys)
+				}
+				return
+			}
+			if r.Complete || r.Reason != tc.wantReason {
+				t.Fatalf("read complete=%v ecosystem=%q reason=%q, want partial with %q", r.Complete, r.Ecosystem, r.Reason, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestUnlistedUbuntuReleaseIsNotCheckable: an Ubuntu release that has no
+// base-files prefix (26.04 here) cannot be judged against the facts. A list
+// of it is partial with reasonReleaseNotCheckable, not with the mismatch
+// reason: nothing was compared, and no upgrade was missed.
+func TestUnlistedUbuntuReleaseIsNotCheckable(t *testing.T) {
+	const ubuntu2604Release = "NAME=\"Ubuntu\"\nVERSION=\"26.04 LTS (Resolute Raccoon)\"\nID=ubuntu\nVERSION_ID=\"26.04\"\nVERSION_CODENAME=resolute\n"
+	e := newInvEnv(t)
+	e.insertFactsAt(t, 60, invTestHost, factsResult(t, ubuntu2604Release), invTestStart.Add(-time.Hour))
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-ubuntu-26", invTestStart, invTestAt, installedEnvelope(t, ubuntu2404Text(t), false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != reasonReleaseNotCheckable {
+		t.Fatalf("read complete=%v ecosystem=%q reason=%q, want partial with the not-checkable reason", r.Complete, r.Ecosystem, r.Reason)
+	}
+	if r.Ecosystem != "" {
+		t.Fatalf("unchecked list stored under ecosystem %q", r.Ecosystem)
+	}
+}
+
+// TestReleaseWithoutVersionIsNotCheckable: a Debian release whose os-release
+// has no VERSION_ID (sid, testing) has no base-files prefix that can be derived,
+// so its list is partial with the not-checkable reason.
+func TestReleaseWithoutVersionIsNotCheckable(t *testing.T) {
+	const debianSid = "PRETTY_NAME=\"Debian GNU/Linux trixie/sid\"\nID=debian\nVERSION_CODENAME=sid\n"
+	e := newInvEnv(t)
+	e.insertFactsAt(t, 61, invTestHost, factsResult(t, debianSid), invTestStart.Add(-time.Hour))
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-sid", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != reasonReleaseNotCheckable {
+		t.Fatalf("read complete=%v ecosystem=%q reason=%q, want partial with the not-checkable reason", r.Complete, r.Ecosystem, r.Reason)
+	}
+}
+
+// TestListWithTwoBaseFilesIsMismatch: a list with more than one base-files
+// line cannot name its release, so it is partial (fail closed) even when every
+// base-files version belongs to the facts' release.
+func TestListWithTwoBaseFilesIsMismatch(t *testing.T) {
+	const line = "P\tinstalled\tbase-files\tamd64\t12.4+deb12u7\tbase-files\t12.4+deb12u7\t\t.\n"
+	// A second architecture of base-files (multi-arch): the same package name
+	// with another arch, so the parser keeps both lines.
+	const second = "P\tinstalled\tbase-files\ti386\t12.4+deb12u7\tbase-files\t12.4+deb12u7\t\t.\n"
+	text := debian12Text(t)
+	if !strings.Contains(text, line) {
+		t.Fatal("debian12 fixture: base-files line not found")
+	}
+	text = strings.Replace(text, line, line+second, 1)
+	text = strings.Replace(text, "END\t11\n", "END\t12\n", 1)
+
+	e := newInvEnv(t)
+	e.insertFactsAt(t, 62, invTestHost, factsResult(t, debian12Release), invTestStart.Add(-time.Hour))
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-two-base", invTestStart, invTestAt, installedEnvelope(t, text, false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != reasonReleaseMismatch {
+		t.Fatalf("read complete=%v ecosystem=%q reason=%q, want partial with the release mismatch reason", r.Complete, r.Ecosystem, r.Reason)
+	}
+}
+
+// TestFactsWithoutKnownStartGiveFailedRead: the start of the newest core.facts
+// run is unknown (a result with a finish time only), so the release cannot be
+// checked and the list is stored as a lookup marker. This is the factsStarted
+// half of the start guard in factsStale.
+func TestFactsWithoutKnownStartGiveFailedRead(t *testing.T) {
+	e := newInvEnv(t)
+	e.svc.facts = unstartedFacts{staticFacts{result: factsResult(t, debian12Release), at: invTestStart.Add(-time.Hour)}}
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-facts-start", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != vulninventory.ReasonLookupFailed {
+		t.Fatalf("read complete=%v reason=%q, want the lookup marker", r.Complete, r.Reason)
+	}
+}
+
+// TestFinishedUpgradeOverlappingOnlyTheListIsCaughtByFactsStart: a finished
+// full upgrade that overlaps only the list (it finished while the list ran)
+// makes the facts from before it stale. The real store reports this as
+// ReasonFactsBeforeUpgrade, because the finish of the upgrade is after the
+// facts started; the list-overlap rule itself gives ReasonUpgradeOverlaps and
+// is pinned separately below.
+func TestFinishedUpgradeOverlappingOnlyTheListIsCaughtByFactsStart(t *testing.T) {
+	e := newInvEnv(t)
+	e.insertFactsAt(t, 50, invTestHost, factsResult(t, debian12Release), invTestStart.Add(-time.Hour))
+	e.insertHostRunAt(t, 51, "package.install_all", invTestHost, "finished", "success", invTestStart.Add(-5*time.Minute), invTestStart.Add(10*time.Second))
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-finished-overlap", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != vulninventory.ReasonFactsBeforeUpgrade {
+		t.Fatalf("read complete=%v reason=%q, want %q", r.Complete, r.Reason, vulninventory.ReasonFactsBeforeUpgrade)
+	}
+}
+
+// TestListOverlapWithUpgradeGivesUpgradeOverlapsReason pins the list-overlap
+// rule on its own: an upgrade that overlaps the list (and no part of the facts)
+// gives ReasonUpgradeOverlaps. The source reports no finished OS change, so
+// the before-upgrade rule does not decide first.
+func TestListOverlapWithUpgradeGivesUpgradeOverlapsReason(t *testing.T) {
+	e := newInvEnv(t)
+	e.svc.facts = listOverlapFacts{staticFacts{result: factsResult(t, debian12Release), at: invTestStart.Add(-time.Hour)}}
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-list-overlap", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != vulninventory.ReasonUpgradeOverlaps {
+		t.Fatalf("read complete=%v reason=%q, want %q", r.Complete, r.Reason, vulninventory.ReasonUpgradeOverlaps)
 	}
 }
 
@@ -759,8 +1042,10 @@ func TestInventoryLookupFailureMarksHostPartial(t *testing.T) {
 var hostileVersion = "1234567890:" + strings.Repeat("a", 128)
 
 // hostileText is a nos-installed-v1 text whose one package has hostileVersion.
+// It also has a base-files package of the Debian 12 release, so that the
+// release check passes and the store's refusal is what decides the read.
 func hostileText() string {
-	return "nos-installed-v1\nP\tinstalled\tlibjansson4\tamd64\t" + hostileVersion + "\tjansson\t2.14-2\t\t.\nK\t6.1.0-26-amd64\t#1 SMP\nEND\t1\n"
+	return "nos-installed-v1\nP\tinstalled\tbase-files\tamd64\t12.4+deb12u7\tbase-files\t12.4+deb12u7\t\t.\nP\tinstalled\tlibjansson4\tamd64\t" + hostileVersion + "\tjansson\t2.14-2\t\t.\nK\t6.1.0-26-amd64\t#1 SMP\nEND\t2\n"
 }
 
 // TestInventoryStoreRefusalMarksHostPartial: hostile package content that the
