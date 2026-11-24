@@ -2980,7 +2980,9 @@ func TestNetDevHostileDeviceOutputIsInertText(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	inv := netdevinventory.NewWithNow(db, func() time.Time { return now })
 	// Device rows are written only from a spooled metadata record.
-	seedRef := netdevinventory.SpoolRef{Name: "netdev-security-seed.json", Digest: strings.Repeat("5e", 32)}
+	// Each row is seeded once from this record; a later report of the same
+	// row needs a strictly newer record time.
+	seedRef := netdevinventory.SpoolRef{Name: "netdev-security-seed.json", Digest: strings.Repeat("5e", 32), RecordedAt: now}
 	sw := netdevcontract.Device{DeviceID: "sw-edge", Name: "edge switch", Family: netdevcontract.FamilyCBS,
 		Endpoints: []netdevcontract.Endpoint{{Address: "10.20.0.3", Port: 22}}, PinKind: netdevcontract.PinSSHHostKey,
 		TrustPin: strings.Repeat("a", 64), TrustGeneration: 1}
@@ -2993,11 +2995,16 @@ func TestNetDevHostileDeviceOutputIsInertText(t *testing.T) {
 		}
 	}
 	// A device name with markup is a server-side label; a control
-	// character in it is refused.
+	// character in it is refused. The record is newer than the seed, so the
+	// refusal comes from the name and not from report ordering.
 	bad := sw
 	bad.Name = "sw\x1b[2J"
-	if err := inv.UpsertDeviceReported(ctx, bad, seedRef); err == nil {
+	badRef := seedRef
+	badRef.Name, badRef.RecordedAt = "netdev-security-bad-name.json", now.Add(time.Second)
+	if err := inv.UpsertDeviceReported(ctx, bad, badRef); err == nil {
 		t.Error("device name with a terminal escape: accepted")
+	} else if errors.Is(err, netdevinventory.ErrReportNotNewer) {
+		t.Errorf("device name with a terminal escape: refused as not newer, want a name refusal: %v", err)
 	}
 
 	up, access := pb.NetDevLinkState_NET_DEV_LINK_STATE_UP, pb.NetDevPortMode_NET_DEV_PORT_MODE_ACCESS
