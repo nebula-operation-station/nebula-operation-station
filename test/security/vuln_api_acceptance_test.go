@@ -46,6 +46,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/auditlog"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
@@ -795,11 +796,11 @@ func TestVulnAgentCannotSetOrClearHumanStates(t *testing.T) {
 	e.run(e.fresh(nil), host(), vulnRecord(accepted), vulnRecord(falsePos), vulnRecord(hinted))
 	ka, kf := e.finding(accepted, subjWeb01).Key, e.finding(falsePos, subjWeb01).Key
 	if err := e.st.SetAcceptedRisk(t.Context(), ka, vulnstore.AcceptRisk{Approver: "admin", Reason: "mitigated by the firewall",
-		BasisVersion: opensslInstalled}); err != nil {
+		BasisVersion: opensslInstalled}, auditlog.New(e.db, true)); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.st.SetFalsePositive(t.Context(), kf, vulnstore.MarkFalsePositive{By: "admin", Category: "backport_fixed",
-		Reason: "patched in the backport", BasisVersion: opensslInstalled}); err != nil {
+		Reason: "patched in the backport", BasisVersion: opensslInstalled}, auditlog.New(e.db, true)); err != nil {
 		t.Fatal(err)
 	}
 	wantHuman := func(stage string) {
@@ -951,7 +952,7 @@ func TestVulnFindingsCreateNoProposalPermitOrSchedule(t *testing.T) {
 		t.Fatalf("fixture: the KEV closure was not held (%v, %v)", holds, err)
 	}
 	// The admin confirms the held closure (path 6).
-	if _, err := e.st.ConfirmHeld(t.Context(), holds[0].RunID, e.finding(cveN(690), subjWeb01).Key, "admin", "checked on the host"); err != nil {
+	if _, err := e.st.ConfirmHeld(t.Context(), holds[0].RunID, e.finding(cveN(690), subjWeb01).Key, "admin", "checked on the host", auditlog.New(e.db, true)); err != nil {
 		t.Fatalf("confirm held: %v", err)
 	}
 

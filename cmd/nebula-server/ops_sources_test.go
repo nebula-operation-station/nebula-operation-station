@@ -220,7 +220,7 @@ func TestOpsFindingsAcceptedRiskLeavesGroupOut(t *testing.T) {
 		t.Fatalf("List = %d findings, %v; want 1", len(fs), err)
 	}
 	if err := env.svc.store.SetAcceptedRisk(context.Background(), fs[0].Key,
-		vulnstore.AcceptRisk{Approver: "admin", Reason: "tested in lab", BasisVersion: "3.0.15-1~deb12u1"}); err != nil {
+		vulnstore.AcceptRisk{Approver: "admin", Reason: "tested in lab", BasisVersion: "3.0.15-1~deb12u1"}, env.audit); err != nil {
 		t.Fatalf("SetAcceptedRisk: %v", err)
 	}
 	src, err := newOpsVulnFindings(env.svc.store, opsTestPreviews, fixesOf(vulnfix.Result{Status: vulnfix.StatusVerified,
