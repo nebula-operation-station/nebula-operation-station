@@ -1653,8 +1653,25 @@ Add a `notifications` block to `/etc/nebula/server.json`, keep the file
 }
 ```
 
-Each provider is optional. The webhook body is JSON, signed with
-HMAC-SHA256 using the secret. An ntfy topic is 1 to 64 characters
+Each provider is optional. The webhook is an HTTP `POST` with a JSON
+body (`Content-Type: application/json`) and two headers:
+
+- `X-Nebula-Timestamp`: the send time as Unix seconds in decimal digits,
+  for example `1795000000`.
+- `X-Nebula-Signature`: `sha256=` followed by the lowercase hex encoding
+  of an HMAC-SHA256.
+
+The HMAC key is the bytes of `secret` from `server.json` as written there.
+The signed string is the value of `X-Nebula-Timestamp`, a `.`, and the
+raw request body bytes exactly as received, with nothing added or
+removed: `<timestamp>.<body>`. To verify a request, a receiver
+recomputes this HMAC, compares it with the hex after `sha256=` in
+constant time, and rejects the request if they differ. Because the
+timestamp is signed, a receiver should also reject requests whose
+timestamp is more than 5 minutes away from its own clock; that stops a
+captured request from being replayed later. The server does not follow
+redirects: any answer outside 2xx, a redirect included, counts as a
+failed send. An ntfy topic is 1 to 64 characters
 `A-Za-z0-9_-`. You are notified about: a changed host key, an Ops State
 change (worse or recovered), an operation that finished with failed
 hosts, and the executor found locked after a restart. Messages never

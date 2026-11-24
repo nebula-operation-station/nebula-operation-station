@@ -5,11 +5,12 @@
 // and the receivers are protocol-level loopback servers (httptest). Nothing
 // here uses NewWithSenders or a test sink.
 //
-// The webhook receiver verifies the signature by itself. It uses only what
-// docs/admin/guide.md section 10.1 describes (HMAC-SHA256 with the secret,
-// over the body) and the header names of the implementation, which the
-// guide does not name. Those parts are named exceptions in
-// TestNotifyWebhookSignatureFormat.
+// The webhook receiver verifies the signature by itself, using only what
+// docs/admin/guide.md section 10.1 describes: the headers
+// X-Nebula-Timestamp and X-Nebula-Signature ("sha256=" + lowercase hex),
+// HMAC-SHA256 keyed with the secret over "<timestamp>.<body>", a constant
+// time comparison and a 5 minute timestamp window. It does not use
+// internal/notify.
 
 package main
 
@@ -20,6 +21,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -46,8 +49,7 @@ const (
 	// first send plus two retries (the notifier retries twice).
 	nrAttempts = 3
 	// nrTimestampWindow is how far X-Nebula-Timestamp may differ from the
-	// time the receiver gets the request. The guide names no window; this
-	// receiver accepts five minutes.
+	// time the receiver gets the request; guide 10.1 recommends 5 minutes.
 	nrTimestampWindow = 5 * time.Minute
 )
 
@@ -152,11 +154,49 @@ func nrCheckSecretsAbsent(t *testing.T, what, text string) {
 	}
 }
 
-// nrVerifyWebhook checks a webhook request as the handbook describes it:
-// the body is JSON signed with HMAC-SHA256 using the secret. The signed
-// bytes, the header names and the "sha256=" prefix are not in the guide
-// (see TestNotifyWebhookSignatureFormat); they are checked here as the
-// implementation sends them.
+// nrCheckWebhookSignature is a receiver written from guide section 10.1
+// alone. It returns nil only if every rule of the guide holds:
+//   - X-Nebula-Timestamp is Unix seconds in decimal digits and within
+//     nrTimestampWindow of now;
+//   - X-Nebula-Signature is "sha256=" followed by lowercase hex;
+//   - that hex equals HMAC-SHA256, keyed with the secret as written in
+//     server.json, over "<timestamp>.<body>" with the raw body bytes
+//     (compared in constant time).
+func nrCheckWebhookSignature(r nrRequest, secret string, now time.Time) error {
+	ts := r.Header.Get("X-Nebula-Timestamp")
+	if ts == "" || strings.TrimLeft(ts, "0123456789") != "" {
+		return fmt.Errorf("X-Nebula-Timestamp %q is not decimal digits", ts)
+	}
+	unix, err := strconv.ParseInt(ts, 10, 64)
+	if err != nil {
+		return fmt.Errorf("X-Nebula-Timestamp %q: %w", ts, err)
+	}
+	if age := now.Sub(time.Unix(unix, 0)); age > nrTimestampWindow || age < -nrTimestampWindow {
+		return fmt.Errorf("X-Nebula-Timestamp %q is %v away from now, want within %v", ts, age, nrTimestampWindow)
+	}
+	sig, ok := strings.CutPrefix(r.Header.Get("X-Nebula-Signature"), "sha256=")
+	if !ok {
+		return errors.New("X-Nebula-Signature does not start with sha256=")
+	}
+	if sig != strings.ToLower(sig) {
+		return errors.New("X-Nebula-Signature hex is not lowercase")
+	}
+	got, err := hex.DecodeString(sig)
+	if err != nil {
+		return fmt.Errorf("X-Nebula-Signature is not hex: %w", err)
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(ts))
+	mac.Write([]byte("."))
+	mac.Write(r.Body)
+	if !hmac.Equal(got, mac.Sum(nil)) {
+		return errors.New("signature does not verify")
+	}
+	return nil
+}
+
+// nrVerifyWebhook checks a webhook request as guide section 10.1 describes
+// it (POST, JSON body, signature) and returns the decoded body.
 func nrVerifyWebhook(t *testing.T, r nrRequest) map[string]any {
 	t.Helper()
 	if r.Method != http.MethodPost {
@@ -169,26 +209,8 @@ func nrVerifyWebhook(t *testing.T, r nrRequest) map[string]any {
 	if err := json.Unmarshal(r.Body, &payload); err != nil {
 		t.Fatalf("webhook body is not JSON: %v", err)
 	}
-	ts := r.Header.Get("X-Nebula-Timestamp")
-	unix, err := strconv.ParseInt(ts, 10, 64)
-	if err != nil {
-		t.Fatalf("X-Nebula-Timestamp %q is not a unix time: %v", ts, err)
-	}
-	if age := time.Since(time.Unix(unix, 0)); age > nrTimestampWindow || age < -nrTimestampWindow {
-		t.Fatalf("X-Nebula-Timestamp %q is %v away from now, want within %v (replay protection)", ts, age, nrTimestampWindow)
-	}
-	sig, ok := strings.CutPrefix(r.Header.Get("X-Nebula-Signature"), "sha256=")
-	if !ok {
-		t.Fatalf("X-Nebula-Signature has no sha256= prefix")
-	}
-	got, err := hex.DecodeString(sig)
-	if err != nil {
-		t.Fatalf("X-Nebula-Signature is not hex: %v", err)
-	}
-	mac := hmac.New(sha256.New, []byte(nrWebhookSecret))
-	mac.Write([]byte(ts + "." + string(r.Body)))
-	if !hmac.Equal(got, mac.Sum(nil)) {
-		t.Fatalf("webhook signature does not verify with the configured secret")
+	if err := nrCheckWebhookSignature(r, nrWebhookSecret, time.Now()); err != nil {
+		t.Fatalf("webhook signature (guide 10.1): %v", err)
 	}
 	return payload
 }
@@ -238,39 +260,71 @@ func TestNotifyTestSendsToWebhookAndNtfy(t *testing.T) {
 	nrCheckSecretsAbsent(t, "ntfy body", string(nr[0].Body))
 }
 
-// TestNotifyWebhookSignatureFormat pins the signature as sent and records the
-// gap with docs/admin/guide.md section 10.1 (guide.md is protected and was
-// not changed; see the PR text).
-//
-// Named exceptions, all because the guide does not state them:
-//   - the header names X-Nebula-Signature and X-Nebula-Timestamp;
-//   - the "sha256=" prefix of the signature value;
-//   - the signed bytes "<timestamp>.<body>" (the guide says only "HMAC-SHA256
-//     using the secret" over the body).
-//
-// A receiver that reads the guide literally (HMAC over the body alone) does
-// not verify the request. That is asserted below, so a change to either side
-// fails this test.
+// TestNotifyWebhookSignatureFormat sends a real -notify-test webhook and
+// checks it with the guide-10.1 receiver, then checks that the same receiver
+// rejects every tampered variant of that request, so it is not a receiver
+// that accepts anything.
 func TestNotifyWebhookSignatureFormat(t *testing.T) {
 	t.Parallel()
 	webhook := newNRReceiver(t, http.StatusOK)
 	cfg := nrConfig(t, t.TempDir(), nrNotifications(webhook.srv.URL, ""), nil)
-	if _, err := nrNotifyTest(t, cfg); err != nil {
+	stderr, err := nrNotifyTest(t, cfg)
+	if err != nil {
 		t.Fatalf("-notify-test: %v", err)
 	}
+	nrCheckSecretsAbsent(t, "stderr", stderr)
 	wr := webhook.requests()
 	if len(wr) != 1 {
 		t.Fatalf("webhook got %d requests, want 1", len(wr))
 	}
-	nrVerifyWebhook(t, wr[0])
+	sent := wr[0]
+	nrVerifyWebhook(t, sent)
+	nrCheckSecretsAbsent(t, "webhook body", string(sent.Body))
+	for k, vs := range sent.Header {
+		nrCheckSecretsAbsent(t, "webhook header "+k, strings.Join(vs, ","))
+	}
 
-	// Guide-literal reading: the body alone. It must not match, which is
-	// the documented gap.
-	sig, _ := strings.CutPrefix(wr[0].Header.Get("X-Nebula-Signature"), "sha256=")
-	plain := hmac.New(sha256.New, []byte(nrWebhookSecret))
-	plain.Write(wr[0].Body)
-	if hex.EncodeToString(plain.Sum(nil)) == sig {
-		t.Fatal("signature over the body alone verifies: guide 10.1 and the code agree now; remove the exception")
+	ts := sent.Header.Get("X-Nebula-Timestamp")
+	unix, err := strconv.ParseInt(ts, 10, 64)
+	if err != nil {
+		t.Fatalf("X-Nebula-Timestamp %q: %v", ts, err)
+	}
+	sentAt := time.Unix(unix, 0)
+	sig := sent.Header.Get("X-Nebula-Signature")
+
+	with := func(mod func(r *nrRequest)) nrRequest {
+		r := nrRequest{Method: sent.Method, Path: sent.Path, Header: sent.Header.Clone(), Body: append([]byte(nil), sent.Body...)}
+		mod(&r)
+		return r
+	}
+	cases := []struct {
+		name string
+		req  nrRequest
+		now  time.Time
+		key  string
+	}{
+		{"body changed", with(func(r *nrRequest) { r.Body = append(r.Body, ' ') }), sentAt, nrWebhookSecret},
+		{"timestamp changed", with(func(r *nrRequest) { r.Header.Set("X-Nebula-Timestamp", strconv.FormatInt(unix+1, 10)) }), sentAt, nrWebhookSecret},
+		{"timestamp missing", with(func(r *nrRequest) { r.Header.Del("X-Nebula-Timestamp") }), sentAt, nrWebhookSecret},
+		{"signature missing", with(func(r *nrRequest) { r.Header.Del("X-Nebula-Signature") }), sentAt, nrWebhookSecret},
+		{"prefix missing", with(func(r *nrRequest) { r.Header.Set("X-Nebula-Signature", strings.TrimPrefix(sig, "sha256=")) }), sentAt, nrWebhookSecret},
+		{"hex uppercase", with(func(r *nrRequest) {
+			r.Header.Set("X-Nebula-Signature", "sha256="+strings.ToUpper(strings.TrimPrefix(sig, "sha256=")))
+		}), sentAt, nrWebhookSecret},
+		{"wrong secret", sent, sentAt, nrWebhookSecret + "x"},
+		{"replayed after window", sent, sentAt.Add(nrTimestampWindow + time.Second), nrWebhookSecret},
+		{"timestamp from the future", sent, sentAt.Add(-nrTimestampWindow - time.Second), nrWebhookSecret},
+	}
+	for _, tc := range cases {
+		if err := nrCheckWebhookSignature(tc.req, tc.key, tc.now); err == nil {
+			t.Errorf("%s: guide-10.1 receiver accepted the request", tc.name)
+		}
+	}
+	// Within the window on both sides the unchanged request verifies.
+	for _, now := range []time.Time{sentAt.Add(nrTimestampWindow - time.Second), sentAt.Add(-nrTimestampWindow + time.Second)} {
+		if err := nrCheckWebhookSignature(sent, nrWebhookSecret, now); err != nil {
+			t.Errorf("unchanged request at %v: %v", now.Sub(sentAt), err)
+		}
 	}
 }
 
