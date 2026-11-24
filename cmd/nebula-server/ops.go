@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/helpdocs"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/inventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsfacts"
@@ -226,6 +227,14 @@ func (f opsFactsSource) Hosts(ctx context.Context) ([]string, error) {
 func newOpsAPI(cfg serverconfig.APIConfig, db *sql.DB, notes *opsnotes.Store,
 	hosts func(ctx context.Context) ([]inventory.Host, error), log *slog.Logger,
 	accepted func(opsnotes.Note)) (http.Handler, error) {
+	return newOpsAPIWithChunk(cfg, db, notes, hosts, log, accepted, opsDocChunk(log))
+}
+
+// newOpsAPIWithChunk is newOpsAPI with the documentation citation check given
+// by the caller (nil refuses every citation). newOpsAPI passes opsDocChunk.
+func newOpsAPIWithChunk(cfg serverconfig.APIConfig, db *sql.DB, notes *opsnotes.Store,
+	hosts func(ctx context.Context) ([]inventory.Host, error), log *slog.Logger,
+	accepted func(opsnotes.Note), chunk func(chunkID string) bool) (http.Handler, error) {
 	if _, ok := cfg.OpsToken(); !ok {
 		return nil, nil
 	}
@@ -241,9 +250,35 @@ func newOpsAPI(cfg serverconfig.APIConfig, db *sql.DB, notes *opsnotes.Store,
 	}
 	h, err := api.NewOps(api.OpsOptions{Tokens: cfg.Tokens, Settings: settings,
 		Facts: opsFactsSource{proj: proj, hosts: src}, Notes: notes, CorePrompt: opsAgentCorePrompt, Log: log,
-		OnNoteAccepted: accepted})
+		OnNoteAccepted: accepted, DocChunk: chunk})
 	if err != nil {
 		return nil, fmt.Errorf("ops api: %w", err)
 	}
 	return h, nil
+}
+
+// opsDocChunk returns the citation check of ADR 0016 D6: a note may cite only
+// chunk IDs of the embedded documentation index, the same index the ops agent
+// searches (helpdocs.FromDocsembed in cmd/nebula-ops-agent). When the index
+// does not load, it logs a warning and returns nil, so no note may cite.
+func opsDocChunk(log *slog.Logger) func(chunkID string) bool {
+	return opsDocChunkFrom(log, helpdocs.FromDocsembed)
+}
+
+// opsDocChunkFrom is opsDocChunk over the given index loader. A failed load
+// yields nil, which refuses every citation (fail closed).
+func opsDocChunkFrom(log *slog.Logger, load func() (*helpdocs.Index, error)) func(chunkID string) bool {
+	ix, err := load()
+	if err != nil {
+		log.Warn("ops api: documentation index not loaded, notes may not cite chunks", "error", err)
+		return nil
+	}
+	ids := make(map[string]struct{}, len(ix.Chunks))
+	for _, c := range ix.Chunks {
+		ids[c.ID] = struct{}{}
+	}
+	return func(chunkID string) bool {
+		_, ok := ids[chunkID]
+		return ok
+	}
 }

@@ -4,7 +4,12 @@
 {{$p := $d.Preview}}
 <h1>Approve read lease</h1>
 <section class="panel" aria-label="Read lease preview">
-  {{if $d.Registry}}
+  {{if $d.NetDevice}}
+  <p class="hint">This is the complete read lease the executor will hold, exactly as it returned it. The device list is frozen
+     with each device's trust pin, trust generation and credential version: a re-pinned device or a rotated credential is no
+     longer covered and needs a new lease. A device lease is approved on the executor host with the CLI, never in the
+     browser. Check every device and read.</p>
+  {{else if $d.Registry}}
   <p class="hint">This is the complete read lease the executor will hold, exactly as it returned it. Each private registry is
      frozen with its record digest and version and its credential identity and version: a rotated credential or a changed
      record is no longer covered and needs a new lease. The lease holds no credential. Check every repository and read
@@ -13,6 +18,10 @@
   <p class="hint">This is the complete read lease the executor will hold, exactly as it returned it. The remote list is frozen
      with each remote's trust pin, trust generation and read credential version: a re-pinned remote or a rotated token is no
      longer covered and needs a new lease. Check every remote and method before you approve.</p>
+  {{else if $d.Image}}
+  <p class="hint">This is the complete read lease the executor will hold, exactly as it returned it. It covers one container
+     and one pinned image on one host: the container and image are shown in plain text below, and the hashes bind the same
+     values. Check the host, the container and the image before you approve.</p>
   {{else}}
   <p class="hint">This is the complete read lease the executor will hold, exactly as it returned it. The host list is frozen:
      hosts enrolled or tagged later never join it. Check every host and action before you approve.</p>
@@ -25,7 +34,9 @@
     <dt>Created</dt><dd>{{timeTag $p.Created}}</dd>
     <dt>Expires</dt><dd>{{timeTag $p.Expiry}}</dd>
     <dt>Trigger</dt><dd>{{$p.Trigger}}</dd>
-    {{if $d.Telemetry}}
+    {{if $d.NetDevice}}
+    <dt>Rate profile</dt><dd>{{$p.RateProfile}}, at most {{$p.RunBudget}} runs per hour, each read at most every {{$d.MinInterval}}</dd>
+    {{else if $d.Telemetry}}
     <dt>Rate profile</dt><dd>{{$p.RateProfile}}, at most {{$p.RunBudget}} metrics requests per remote per hour, each node or guest at most every {{$d.MinInterval}}; live reads only while a box is on screen (trigger {{$p.Trigger}})</dd>
     {{else if $d.Registry}}
     <dt>Rate profile</dt><dd>{{$p.RateProfile}}, at most {{$p.RunBudget}} reads per registry per hour, each tag at most every {{$d.MinInterval}}</dd>
@@ -35,7 +46,19 @@
     <dt>Rate profile</dt><dd>{{$p.RateProfile}}, at most {{$p.RunBudget}} runs per host per hour, each action at most every {{$d.MinInterval}}</dd>
     {{end}}
   </dl>
-  {{if $d.Registry}}
+  {{if $d.NetDevice}}
+  <h2>{{len $p.NetDevices}} network devices</h2>
+  <div class="table-wrap">
+  <table class="inventory" aria-label="Network devices">
+    <thead><tr><th>Device</th><th>Trust pin</th><th>Trust generation</th><th>Credential version</th><th>Reads</th></tr></thead>
+    <tbody>
+      {{range $p.NetDevices}}
+      <tr class="lease-netdevice"><td class="mono">{{.DeviceID}}</td><td class="mono">{{.TrustPin}}</td><td class="mono">{{.TrustGeneration}}</td><td class="mono">{{.CredentialVersion}}</td><td class="mono">{{range $i, $r := .Reads}}{{if $i}}, {{end}}{{$r}}{{end}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{else if $d.Registry}}
   <h2>{{len $d.RegistryTargets}} private registries</h2>
   <div class="table-wrap">
   <table class="inventory" aria-label="Private registries">
@@ -88,6 +111,19 @@
     </tbody>
   </table>
   </div>
+  {{if $d.Image}}
+  <h2>Parameters (plain text)</h2>
+  <div class="table-wrap">
+  <table class="inventory" aria-label="Parameters">
+    <thead><tr><th>Action</th><th>Parameter</th><th>Value</th></tr></thead>
+    <tbody>
+      {{range $d.ImageParams}}
+      <tr class="lease-param"><td class="mono">{{.Action}}</td><td class="mono">{{.Name}}</td><td class="mono">{{.Value}}</td></tr>
+      {{end}}
+    </tbody>
+  </table>
+  </div>
+  {{end}}
   <h2>{{$d.HostCount}} hosts</h2>
   <div class="table-wrap">
   <table class="inventory" aria-label="Hosts">
@@ -107,7 +143,10 @@
   </ul>
   {{end}}
   <div class="actions">
-    {{if $p.CLI}}
+    {{if $d.NetDevice}}
+    <p>Device read leases are approved on the executor host with the CLI. The command shows the complete lease first:</p>
+    <pre class="mono" id="lease-cli">{{$d.CLICommand}}</pre>
+    {{else if $p.CLI}}
     <p>This executor is in hardened mode. Approve the lease on the executor host; the command shows the complete lease first:</p>
     <pre class="mono" id="lease-cli">{{$d.CLICommand}}</pre>
     {{else}}
@@ -190,6 +229,47 @@
     </div>
   </form>
 </section>
+{{with $d.ImageForm}}
+<section class="panel" aria-label="Image packages">
+  <h2>Image packages (one container image)</h2>
+  <p class="hint">The package list of one container image on one host, read with the host's own Trivy: offline, no pull and no
+     database refresh. Only the ecosystem, name, version and source package per entry leave the host.</p>
+  <form method="get" action="/leases/new" class="form">
+    <label>Host
+      <select name="image_host">
+        <option value="">Choose a host</option>
+        {{range .Hosts}}<option value="{{.ID}}"{{if .Selected}} selected{{end}}>{{.ID}}</option>{{end}}
+      </select></label>
+    <div class="actions"><button type="submit" class="button button--small">Show containers</button></div>
+  </form>
+  {{if .Host}}
+    {{if .Unavailable}}
+    <p>The container images of this host could not be read.</p>
+    {{else if .Pairs}}
+    <form method="post" action="/leases/preview" class="form" data-fetch>
+      <input type="hidden" name="scope" value="image">
+      <input type="hidden" name="host" value="{{.Host}}">
+      <fieldset>
+        <legend>Container and image</legend>
+        {{range .Pairs}}
+        <label class="choice"><input type="radio" name="pair" value="{{.Value}}"> <span class="mono">{{.Container}}</span> <span class="mono">{{.Image}}</span></label>
+        {{end}}
+      </fieldset>
+      <label>Lasts
+        <select name="days">
+          {{range $d.DayOptions}}<option value="{{.}}"{{if eq . $d.Days}} selected{{end}}>{{.}} days</option>{{end}}
+        </select></label>
+      <div class="actions">
+        <button type="submit" class="button">Preview</button>
+      </div>
+    </form>
+    {{else}}
+    <p class="hint">No container image is known for this host yet. Open the container details (docker.inspect) of the container
+       first; the image is offered from that inspection. Trivy must be installed on the host for image.packages.</p>
+    {{end}}
+  {{end}}
+</section>
+{{end}}
 {{end}}
 <p id="message" class="message" role="status" aria-live="polite"></p>
 {{end}}

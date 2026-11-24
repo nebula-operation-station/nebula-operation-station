@@ -33,6 +33,7 @@ const (
 	vulnHostileSource  = `evil<script>window.__pwned='feed'</script>`
 	vulnHostileRun     = `<b>run</b>"><script>window.__pwned='run'</script>`
 	vulnHostileVersion = `3.0.15<img src=x onerror="window.__pwned='version'">`
+	vulnHostileKernel  = `6.1.0-27-amd64<script>window.__pwned='kernel'</script>`
 
 	vulnImageDigest = "sha256:" + "ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12ab12"
 )
@@ -58,14 +59,17 @@ func vulnKey(b string) vulnfinding.Key {
 // Subjects of the harness: e2e-host is assessed and has open findings,
 // e2e-two was never assessed, the image on e2e-host was last assessed 72 h
 // ago (stale), e2e-unconf has only a closure Hermes reported and NOS did
-// not confirm, and e2e-clean is assessed and has no findings (the only
-// subject that may show green, and only where no feed has an issue).
+// not confirm, e2e-clean is assessed, has a complete package inventory and
+// no findings (the only subject that may show green, and only where no feed
+// has an issue), and e2e-noinv is assessed and has no findings but no
+// package inventory, so it is "unknown: list incomplete", never green (D6).
 var (
 	vulnSubjHost   = vulnstore.Subject{Kind: vulnfinding.SubjectHost, ID: "e2e-host"}
 	vulnSubjTwo    = vulnstore.Subject{Kind: vulnfinding.SubjectHost, ID: "e2e-two"}
 	vulnSubjImage  = vulnstore.Subject{Kind: vulnfinding.SubjectImage, ID: "e2e-host", ImageDigest: vulnImageDigest}
 	vulnSubjUnconf = vulnstore.Subject{Kind: vulnfinding.SubjectHost, ID: "e2e-unconf"}
 	vulnSubjClean  = vulnstore.Subject{Kind: vulnfinding.SubjectHost, ID: "e2e-clean"}
+	vulnSubjNoInv  = vulnstore.Subject{Kind: vulnfinding.SubjectHost, ID: "e2e-noinv"}
 )
 
 // harnessVuln is a fixed vulnerabilities backend. It never applies a
@@ -120,7 +124,10 @@ func (harnessVuln) subjects(now time.Time) []ui.VulnSubjectStatus {
 		{Subject: vulnSubjTwo, Name: vulnTwoName},
 		{Subject: vulnSubjImage, LastComplete: now.Add(-72 * time.Hour)},
 		{Subject: vulnSubjUnconf, Name: "unconfirmed host", LastComplete: fresh},
-		{Subject: vulnSubjClean, Name: "clean host", LastComplete: fresh},
+		{Subject: vulnSubjClean, Name: "clean host", LastComplete: fresh,
+			Inventory: &ui.VulnInventoryStatus{ReadAt: fresh, Complete: true, Sources: 412, Binaries: 1187,
+				KernelRelease: vulnHostileKernel, KernelMapped: true}},
+		{Subject: vulnSubjNoInv, Name: "host without inventory", LastComplete: fresh},
 	}
 }
 

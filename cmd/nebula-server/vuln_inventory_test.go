@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,7 +32,12 @@ import (
 
 const invTestHost = "web"
 
+// invTestAt is when the package lists of these tests finish; invTestStart is
+// when they began on the host (a minute before), as the executions service
+// hands them over.
 var invTestAt = time.Date(2026, 11, 20, 9, 30, 0, 0, time.UTC)
+
+var invTestStart = invTestAt.Add(-time.Minute)
 
 // invEnv is a migrated server.db with the inventory service on it. The
 // executions service reads the core.facts results from the same database.
@@ -60,10 +66,10 @@ func newInvEnv(t *testing.T) *invEnv {
 }
 
 // factsBase is when the core.facts results of these tests finish by default:
-// an hour after every package list the tests store, so that the release is
-// never older than the list. insertFacts adds n seconds to it, which keeps
-// the order of n.
-var factsBase = invTestAt.Add(time.Hour)
+// an hour before the package lists start, which is the production order (the
+// facts action runs on its own, earlier) and inside factsWindow. insertFacts
+// adds n seconds to it, which keeps the order of n.
+var factsBase = invTestStart.Add(-time.Hour)
 
 // insertFacts stores a successful core.facts result of host, finished at
 // factsBase plus n seconds. Every call needs its own n, which makes the
@@ -77,10 +83,32 @@ func (e *invEnv) insertFacts(t *testing.T, n int, host string, result []byte) {
 // at finished. n makes the execution ID unique.
 func (e *invEnv) insertFactsAt(t *testing.T, n int, host string, result []byte, finished time.Time) {
 	t.Helper()
-	id := fmt.Sprintf("facts-%030d", n) // executions.id is 36 characters
+	e.insertRunAt(t, n, "core.facts", host, result, finished)
+}
+
+// insertFactsSpan stores a successful core.facts result of host that started
+// at started and finished at finished. n makes the execution ID unique.
+func (e *invEnv) insertFactsSpan(t *testing.T, n int, host string, result []byte, started, finished time.Time) {
+	t.Helper()
+	id := fmt.Sprintf("run-%032d", n) // executions.id is 36 characters
+	if _, err := e.db.Exec(`INSERT INTO executions (id, action_id, module_version, artifact_sha256, risk, state, durable, timeout_s, created_by, created_at, finished_at)
+		VALUES (?, 'core.facts', '1.0.0', ?, 'LOW', 'finished', 0, 60, 'axel', ?, ?)`, id, strings.Repeat("a", 64), started.Unix(), finished.Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.db.Exec(`INSERT INTO execution_hosts (execution_id, host_id, fingerprint, credential_ref, endpoints, state, class, result, started_at, finished_at)
+		VALUES (?, ?, 'SHA256:x', 'nebula-default', '[]', 'finished', 'success', ?, ?, ?)`, id, host, result, started.Unix(), finished.Unix()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// insertRunAt stores a successful run of action on host, finished at finished.
+// n makes the execution ID unique.
+func (e *invEnv) insertRunAt(t *testing.T, n int, action, host string, result []byte, finished time.Time) {
+	t.Helper()
+	id := fmt.Sprintf("run-%032d", n) // executions.id is 36 characters
 	at := finished.Unix()
 	if _, err := e.db.Exec(`INSERT INTO executions (id, action_id, module_version, artifact_sha256, risk, state, durable, timeout_s, created_by, created_at, finished_at)
-		VALUES (?, 'core.facts', '1.0.0', ?, 'LOW', 'finished', 0, 60, 'axel', ?, ?)`, id, strings.Repeat("a", 64), at, at); err != nil {
+		VALUES (?, ?, '1.0.0', ?, 'LOW', 'finished', 0, 60, 'axel', ?, ?)`, id, action, strings.Repeat("a", 64), at, at); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := e.db.Exec(`INSERT INTO execution_hosts (execution_id, host_id, fingerprint, credential_ref, endpoints, state, class, result, started_at, finished_at)
@@ -91,18 +119,49 @@ func (e *invEnv) insertFactsAt(t *testing.T, n int, host string, result []byte, 
 
 // staticFacts is a core.facts source that returns result, finished at at,
 // and runs onCall first (it may cancel the parent context or close the
-// database to simulate a shutdown or a failing store).
+// database to simulate a shutdown or a failing store). osChange, when set, is
+// the finish of the host's last full upgrade.
 type staticFacts struct {
-	result []byte
-	at     time.Time
-	onCall func()
+	result   []byte
+	started  time.Time // zero: the run started when it finished (at)
+	at       time.Time
+	onCall   func()
+	osChange time.Time
 }
 
-func (s staticFacts) LastResult(context.Context, string, string) ([]byte, time.Time, bool, error) {
+func (s staticFacts) LastResultRun(context.Context, string, string) ([]byte, time.Time, time.Time, bool, error) {
 	if s.onCall != nil {
 		s.onCall()
 	}
-	return s.result, s.at, true, nil
+	started := s.started
+	if started.IsZero() {
+		started = s.at
+	}
+	return s.result, started, s.at, true, nil
+}
+
+// overlapFailingFacts is a core.facts source whose release lookup and
+// OS-change lookup work and whose upgrade-overlap lookup fails.
+type overlapFailingFacts struct{ staticFacts }
+
+func (overlapFailingFacts) UpgradeOverlaps(context.Context, string, time.Time, time.Time) (bool, error) {
+	return false, errors.New("overlap lookup refused")
+}
+
+func (s staticFacts) LastOSChange(context.Context, string) (time.Time, bool, error) {
+	return s.osChange, !s.osChange.IsZero(), nil
+}
+
+func (s staticFacts) UpgradeOverlaps(context.Context, string, time.Time, time.Time) (bool, error) {
+	return false, nil
+}
+
+// osChangeFailingFacts is a core.facts source whose release lookup works and
+// whose OS-change lookup fails.
+type osChangeFailingFacts struct{ staticFacts }
+
+func (osChangeFailingFacts) LastOSChange(context.Context, string) (time.Time, bool, error) {
+	return time.Time{}, false, errors.New("os change lookup refused")
 }
 
 // factsResult is a core.facts 1.x document with the given os-release text.
@@ -155,7 +214,7 @@ func TestInstalledResultIsStoredComplete(t *testing.T) {
 	e.insertFacts(t, 1, invTestHost, factsResult(t, debian12Release))
 	result := installedEnvelope(t, debian12Text(t), false)
 
-	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-install-1", invTestAt, result)
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-install-1", invTestStart, invTestAt, result)
 
 	r := e.latestRead(t, invTestHost)
 	if !r.Complete || r.Reason != "" {
@@ -185,9 +244,227 @@ func TestInstalledResultIsStoredComplete(t *testing.T) {
 	}
 }
 
+// TestFactsBeforeLastFullUpgradeGiveIncompleteRead: facts that finished before
+// the host's last full upgrade predate the OS change, so they do not give the
+// release. Facts from after the upgrade do.
+func TestFactsBeforeLastFullUpgradeGiveIncompleteRead(t *testing.T) {
+	upgrade := invTestStart.Add(-30 * time.Minute)
+	tests := []struct {
+		name         string
+		facts        time.Time
+		wantComplete bool
+	}{
+		{"facts before the upgrade", invTestStart.Add(-time.Hour), false},
+		// A tie is stale: core.facts that finished in the upgrade's last second
+		// may have read os-release before the upgrade wrote it.
+		{"facts in the same second as the upgrade", upgrade, false},
+		{"facts one second after the upgrade", upgrade.Add(time.Second), true},
+		{"facts after the upgrade", invTestStart.Add(-20 * time.Minute), true},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newInvEnv(t)
+			e.insertRunAt(t, 30+i, "package.install_all", invTestHost, nil, upgrade)
+			e.insertFactsAt(t, 40+i, invTestHost, factsResult(t, debian12Release), tc.facts)
+
+			e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-upgrade", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+			r := e.latestRead(t, invTestHost)
+			if tc.wantComplete {
+				if !r.Complete || r.Ecosystem != "debian:bookworm" {
+					t.Fatalf("read complete=%v ecosystem=%q reason=%q, want complete debian:bookworm", r.Complete, r.Ecosystem, r.Reason)
+				}
+				return
+			}
+			if r.Complete || r.Reason != vulninventory.ReasonFactsBeforeUpgrade {
+				t.Fatalf("read complete=%v reason=%q, want the before-upgrade marker", r.Complete, r.Reason)
+			}
+		})
+	}
+}
+
+// insertHostRunAt stores a run of action on host in state ("running" or
+// "finished") with class. The run started at started; a finished run finished
+// at finished, a running one has no finish yet. n makes the execution ID
+// unique.
+func (e *invEnv) insertHostRunAt(t *testing.T, n int, action, host, state, class string, started, finished time.Time) {
+	t.Helper()
+	id := fmt.Sprintf("run-%032d", n) // executions.id is 36 characters
+	var execFin, hostFin any
+	if state == "finished" {
+		execFin, hostFin = finished.Unix(), finished.Unix()
+	}
+	if _, err := e.db.Exec(`INSERT INTO executions (id, action_id, module_version, artifact_sha256, risk, state, durable, timeout_s, created_by, created_at, finished_at)
+		VALUES (?, ?, '1.0.0', ?, 'LOW', ?, 0, 60, 'axel', ?, ?)`, id, action, strings.Repeat("a", 64), state, started.Unix(), execFin); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.db.Exec(`INSERT INTO execution_hosts (execution_id, host_id, fingerprint, credential_ref, endpoints, state, class, started_at, finished_at)
+		VALUES (?, ?, 'SHA256:x', 'nebula-default', '[]', ?, ?, ?, ?)`, id, host, state, class, started.Unix(), hostFin); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUpgradeThatFailedOrUnknownIsAnOSChange: a full upgrade that ended failed
+// or unknown may have changed the release in part, so facts from before it do
+// not give the release; the list is stored incomplete.
+func TestUpgradeThatFailedOrUnknownIsAnOSChange(t *testing.T) {
+	upgrade := invTestStart.Add(-30 * time.Minute)
+	for i, class := range []string{"failed", "unknown"} {
+		t.Run(class, func(t *testing.T) {
+			e := newInvEnv(t)
+			e.insertHostRunAt(t, 80+i, "package.install_all", invTestHost, "finished", class, upgrade.Add(-time.Minute), upgrade)
+			e.insertFactsAt(t, 85+i, invTestHost, factsResult(t, debian12Release), upgrade.Add(-10*time.Minute))
+
+			e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-after-"+class, invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+			r := e.latestRead(t, invTestHost)
+			if r.Complete || r.Reason != vulninventory.ReasonFactsBeforeUpgrade {
+				t.Fatalf("read complete=%v reason=%q, want the before-upgrade marker", r.Complete, r.Reason)
+			}
+		})
+	}
+}
+
+// TestUpgradeOverlappingTheListMakesFactsStale: a full upgrade that ran while
+// the list ran (started before it ended, and still running or finished after
+// it started) may have changed the release during the read. The facts from
+// before it do not give the release. An upgrade that did not reach its command
+// (precheck_failed) changed nothing and does not count.
+func TestUpgradeOverlappingTheListMakesFactsStale(t *testing.T) {
+	tests := []struct {
+		name         string
+		state, class string
+		started      time.Time
+		finished     time.Time
+		wantComplete bool
+	}{
+		{"still running when the list started", "running", "", invTestStart.Add(-5 * time.Minute), time.Time{}, false},
+		{"started while the list ran and still running", "running", "", invTestStart.Add(5 * time.Second), time.Time{}, false},
+		{"finished while the list ran", "finished", "success", invTestStart.Add(-5 * time.Minute), invTestStart.Add(10 * time.Second), false},
+		{"failed while the list ran", "finished", "failed", invTestStart.Add(-time.Minute), invTestStart.Add(time.Second), false},
+		{"precheck_failed while the list ran", "finished", "precheck_failed", invTestStart.Add(-5 * time.Minute), invTestStart.Add(10 * time.Second), true},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newInvEnv(t)
+			e.insertFactsAt(t, 90+i, invTestHost, factsResult(t, debian12Release), invTestStart.Add(-time.Hour))
+			e.insertHostRunAt(t, 100+i, "package.install_all", invTestHost, tc.state, tc.class, tc.started, tc.finished)
+
+			e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-overlap", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+			r := e.latestRead(t, invTestHost)
+			if tc.wantComplete {
+				if !r.Complete || r.Ecosystem != "debian:bookworm" {
+					t.Fatalf("read complete=%v ecosystem=%q reason=%q, want complete debian:bookworm", r.Complete, r.Ecosystem, r.Reason)
+				}
+				return
+			}
+			// An upgrade that ends during the list also ends after the facts
+			// started, so the before-upgrade rule may decide first; both
+			// markers are fail closed.
+			if r.Complete || (r.Reason != vulninventory.ReasonUpgradeOverlaps && r.Reason != vulninventory.ReasonFactsBeforeUpgrade) {
+				t.Fatalf("read complete=%v reason=%q, want an upgrade marker", r.Complete, r.Reason)
+			}
+		})
+	}
+}
+
+// TestFactsStartedAroundUpgradeEndDecideFreshness: core.facts is judged by the
+// time it STARTED, against the finish of the last full upgrade. A result that
+// started before the upgrade ended may have read os-release before the upgrade
+// wrote it, even when it finished after; a tie in the upgrade's last second is
+// stale too. A result that started a second after the upgrade ended is fresh.
+func TestFactsStartedAroundUpgradeEndDecideFreshness(t *testing.T) {
+	upgradeEnd := invTestStart.Add(-30 * time.Minute)
+	tests := []struct {
+		name         string
+		started      time.Time
+		finished     time.Time
+		wantComplete bool
+		wantReason   string
+	}{
+		{"started before the upgrade ended, finished after", upgradeEnd.Add(-10 * time.Second), upgradeEnd.Add(20 * time.Second), false, vulninventory.ReasonFactsBeforeUpgrade},
+		{"started in the upgrade's last second", upgradeEnd, upgradeEnd.Add(30 * time.Second), false, vulninventory.ReasonFactsBeforeUpgrade},
+		{"finished before the upgrade ended", upgradeEnd.Add(-2 * time.Minute), upgradeEnd.Add(-time.Minute), false, vulninventory.ReasonFactsBeforeUpgrade},
+		{"started a second after the upgrade ended", upgradeEnd.Add(time.Second), upgradeEnd.Add(30 * time.Second), true, ""},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newInvEnv(t)
+			e.insertHostRunAt(t, 110+i, "package.install_all", invTestHost, "finished", "success", upgradeEnd.Add(-time.Minute), upgradeEnd)
+			e.insertFactsSpan(t, 120+i, invTestHost, factsResult(t, debian12Release), tc.started, tc.finished)
+
+			e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-span", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+			r := e.latestRead(t, invTestHost)
+			if tc.wantComplete {
+				if !r.Complete || r.Ecosystem != "debian:bookworm" {
+					t.Fatalf("read complete=%v ecosystem=%q reason=%q, want complete debian:bookworm", r.Complete, r.Ecosystem, r.Reason)
+				}
+				return
+			}
+			if r.Complete || r.Reason != tc.wantReason {
+				t.Fatalf("read complete=%v reason=%q, want reason %q", r.Complete, r.Reason, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestUpgradeOverlapLookupFailureMarksHostPartial: when the overlap lookup of
+// the core.facts run fails, the list is stored as a lookup marker, not as a
+// complete read.
+func TestUpgradeOverlapLookupFailureMarksHostPartial(t *testing.T) {
+	e := newInvEnv(t)
+	e.svc.facts = overlapFailingFacts{staticFacts{result: factsResult(t, debian12Release), at: invTestStart.Add(-time.Hour)}}
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-overlap-lookup", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != vulninventory.ReasonLookupFailed || r.ExecutionID != "exec-overlap-lookup" {
+		t.Fatalf("latest read complete=%v reason=%q execution=%q, want the lookup marker of exec-overlap-lookup", r.Complete, r.Reason, r.ExecutionID)
+	}
+	if !strings.Contains(e.log.String(), "error_class=lookup") {
+		t.Fatalf("lookup failure not logged by class: %s", e.log.String())
+	}
+}
+
+// TestOSChangeLookupFailureMarksHostPartial: when the OS-change lookup fails
+// after the release lookup succeeded, the list cannot be checked against the
+// upgrades, so it is stored as a lookup marker, not as a complete read.
+func TestOSChangeLookupFailureMarksHostPartial(t *testing.T) {
+	e := newInvEnv(t)
+	e.svc.facts = osChangeFailingFacts{staticFacts{result: factsResult(t, debian12Release), at: invTestStart.Add(-time.Hour)}}
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-oschange", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != vulninventory.ReasonLookupFailed || r.ExecutionID != "exec-oschange" {
+		t.Fatalf("latest read complete=%v reason=%q execution=%q, want the lookup marker of exec-oschange", r.Complete, r.Reason, r.ExecutionID)
+	}
+	if !strings.Contains(e.log.String(), "error_class=lookup") {
+		t.Fatalf("lookup failure not logged by class: %s", e.log.String())
+	}
+}
+
+// TestListWithoutKnownStartIsStoredFailed: a list whose start is unknown cannot
+// be checked against the facts, so it is not stored as complete. The marker
+// names the lookup, and the host's previous complete read is no longer its
+// latest one.
+func TestListWithoutKnownStartIsStoredFailed(t *testing.T) {
+	e := newInvEnv(t)
+	e.insertFacts(t, 50, invTestHost, factsResult(t, debian12Release))
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-nostart", time.Time{}, invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != vulninventory.ReasonLookupFailed || r.ExecutionID != "exec-nostart" {
+		t.Fatalf("latest read complete=%v reason=%q execution=%q, want the lookup marker", r.Complete, r.Reason, r.ExecutionID)
+	}
+}
+
 func TestInstalledResultWithoutFactsIsStoredIncomplete(t *testing.T) {
 	e := newInvEnv(t)
-	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-install-2", invTestAt, installedEnvelope(t, debian12Text(t), false))
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-install-2", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
 
 	r := e.latestRead(t, invTestHost)
 	if r.Complete {
@@ -205,7 +482,7 @@ func TestTruncatedInstalledResultIsStoredIncomplete(t *testing.T) {
 	e := newInvEnv(t)
 	e.insertFacts(t, 2, invTestHost, factsResult(t, debian12Release))
 
-	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-install-3", invTestAt, installedEnvelope(t, debian12Text(t), true))
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-install-3", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), true))
 
 	r := e.latestRead(t, invTestHost)
 	if r.Complete {
@@ -230,7 +507,7 @@ func TestNonJSONInstalledResultIsStoredIncompleteWithFormatReason(t *testing.T) 
 			e := newInvEnv(t)
 			e.insertFacts(t, 3+i, invTestHost, factsResult(t, debian12Release))
 
-			e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-install-4", invTestAt, tc.result)
+			e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-install-4", invTestStart, invTestAt, tc.result)
 
 			r := e.latestRead(t, invTestHost)
 			if r.Complete {
@@ -243,14 +520,15 @@ func TestNonJSONInstalledResultIsStoredIncompleteWithFormatReason(t *testing.T) 
 	}
 }
 
-// TestInstalledResultWithFactsOlderThanListIsStoredIncomplete: the release
-// must come from a core.facts run at least as recent as the list. Older facts
-// give an incomplete read with no components and no ecosystem.
-func TestInstalledResultWithFactsOlderThanListIsStoredIncomplete(t *testing.T) {
+// TestInstalledResultWithFactsOutsideWindowIsStoredIncomplete: the release
+// must come from a core.facts run that finished within factsWindow before the
+// list started. Facts older than that give an incomplete read with no
+// components and no ecosystem.
+func TestInstalledResultWithFactsOutsideWindowIsStoredIncomplete(t *testing.T) {
 	e := newInvEnv(t)
-	e.insertFactsAt(t, 20, invTestHost, factsResult(t, debian12Release), invTestAt.Add(-time.Minute))
+	e.insertFactsAt(t, 20, invTestHost, factsResult(t, debian12Release), invTestStart.Add(-factsWindow-time.Minute))
 
-	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-stale-facts", invTestAt, installedEnvelope(t, debian12Text(t), false))
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-stale-facts", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
 
 	r := e.latestRead(t, invTestHost)
 	if r.Complete || r.Reason != vulninventory.ReasonFactsOlder || r.ExecutionID != "exec-stale-facts" {
@@ -261,22 +539,25 @@ func TestInstalledResultWithFactsOlderThanListIsStoredIncomplete(t *testing.T) {
 	}
 }
 
-// TestFactsAtOrAfterListGiveCompleteRead: facts from the same run time as
-// the list (same second) or newer are current, so the read is complete.
-func TestFactsAtOrAfterListGiveCompleteRead(t *testing.T) {
+// TestFactsWithinWindowGiveCompleteRead: facts that finished before the list
+// started, within factsWindow, or while it ran are current, so the read is
+// complete. This is the production order: core.facts runs before the list.
+func TestFactsWithinWindowGiveCompleteRead(t *testing.T) {
 	tests := []struct {
 		name string
 		at   time.Time
 	}{
-		{"same second", invTestAt},
-		{"newer", invTestAt.Add(time.Minute)},
+		{"a minute before the list started", invTestStart.Add(-time.Minute)},
+		{"an hour before the list started", invTestStart.Add(-time.Hour)},
+		{"at the edge of the window", invTestStart.Add(-factsWindow)},
+		{"while the list ran", invTestStart.Add(30 * time.Second)},
 	}
 	for i, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newInvEnv(t)
 			e.insertFactsAt(t, 21+i, invTestHost, factsResult(t, debian12Release), tc.at)
 
-			e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-current", invTestAt, installedEnvelope(t, debian12Text(t), false))
+			e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-current", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
 
 			r := e.latestRead(t, invTestHost)
 			if !r.Complete || r.Ecosystem != "debian:bookworm" {
@@ -287,27 +568,314 @@ func TestFactsAtOrAfterListGiveCompleteRead(t *testing.T) {
 }
 
 // TestUpgradedHostIsNotMatchedWithOldRelease: a host upgraded from bookworm
-// to trixie whose core.facts has not run since keeps its list incomplete;
-// the old release is never used for the new package list. A fresh core.facts
-// (trixie) makes the next list complete under debian:trixie.
+// to trixie by a full upgrade NOS ran, whose core.facts has not run since,
+// keeps its list incomplete; the old release is never used for the new package
+// list. A fresh core.facts (trixie) makes the next list complete under
+// debian:trixie. An upgrade NOS did not run is caught by the base-files check
+// instead (TestOutOfBandReleaseUpgradeGivesPartialRead).
 func TestUpgradedHostIsNotMatchedWithOldRelease(t *testing.T) {
 	const trixieRelease = "PRETTY_NAME=\"Debian GNU/Linux 13 (trixie)\"\nID=debian\nVERSION_ID=\"13\"\nVERSION_CODENAME=trixie\n"
 	e := newInvEnv(t)
-	// The bookworm facts ran before the upgrade; the trixie list follows.
-	e.insertFactsAt(t, 22, invTestHost, factsResult(t, debian12Release), invTestAt.Add(-time.Hour))
+	// The bookworm facts ran an hour before the list; the full upgrade ran
+	// after them, and the trixie list follows.
+	e.insertFactsAt(t, 22, invTestHost, factsResult(t, debian12Release), invTestStart.Add(-time.Hour))
+	e.insertRunAt(t, 60, "package.install_all", invTestHost, nil, invTestStart.Add(-30*time.Minute))
 
-	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-trixie-1", invTestAt, installedEnvelope(t, debian12Text(t), false))
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-trixie-1", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
 	r := e.latestRead(t, invTestHost)
-	if r.Complete || r.Reason != vulninventory.ReasonFactsOlder || r.Ecosystem == "debian:bookworm" {
-		t.Fatalf("list after upgrade: complete=%v reason=%q ecosystem=%q, want facts-older marker", r.Complete, r.Reason, r.Ecosystem)
+	if r.Complete || r.Reason != vulninventory.ReasonFactsBeforeUpgrade || r.Ecosystem == "debian:bookworm" {
+		t.Fatalf("list after upgrade: complete=%v reason=%q ecosystem=%q, want before-upgrade marker", r.Complete, r.Reason, r.Ecosystem)
 	}
 
 	// Fresh trixie facts, run at the time of the next list.
 	e.insertFactsAt(t, 23, invTestHost, factsResult(t, trixieRelease), invTestAt.Add(2*time.Minute))
-	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-trixie-2", invTestAt.Add(2*time.Minute), installedEnvelope(t, debian12Text(t), false))
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-trixie-2", invTestStart.Add(2*time.Minute), invTestAt.Add(2*time.Minute), installedEnvelope(t, debian13Text(t), false))
 	r = e.latestRead(t, invTestHost)
 	if r.Ecosystem != "debian:trixie" {
 		t.Fatalf("ecosystem after fresh facts = %q (complete=%v reason=%q), want debian:trixie", r.Ecosystem, r.Complete, r.Reason)
+	}
+}
+
+// debian13Release is the os-release of a Debian 13 (trixie) host.
+const debian13Release = "PRETTY_NAME=\"Debian GNU/Linux 13 (trixie)\"\nID=debian\nVERSION_ID=\"13\"\nVERSION_CODENAME=trixie\n"
+
+// ubuntu2404Release is the os-release of an Ubuntu 24.04 host.
+const ubuntu2404Release = "NAME=\"Ubuntu\"\nVERSION=\"24.04 LTS (Noble Numbat)\"\nID=ubuntu\nVERSION_ID=\"24.04\"\nVERSION_CODENAME=noble\n"
+
+// ubuntu2204Release is the os-release of an Ubuntu 22.04 host.
+const ubuntu2204Release = "NAME=\"Ubuntu\"\nVERSION=\"22.04 LTS (Jammy Jellyfish)\"\nID=ubuntu\nVERSION_ID=\"22.04\"\nVERSION_CODENAME=jammy\n"
+
+// debian13Text is the Debian 12 fixture with the base-files package of
+// Debian 13 (trixie): the package list of a host after a release upgrade.
+func debian13Text(t *testing.T) string {
+	t.Helper()
+	const old = "P\tinstalled\tbase-files\tamd64\t12.4+deb12u7\tbase-files\t12.4+deb12u7"
+	text := debian12Text(t)
+	if !strings.Contains(text, old) {
+		t.Fatal("debian12 fixture: base-files line not found")
+	}
+	return strings.Replace(text, old, "P\tinstalled\tbase-files\tamd64\t13.4\tbase-files\t13.4", 1)
+}
+
+// ubuntu2404Text is the nos-installed-v1 text of the Ubuntu 24.04 fixture.
+func ubuntu2404Text(t *testing.T) string {
+	t.Helper()
+	data, err := os.ReadFile("../../internal/executions/osdebian/testdata/installed/ubuntu2404.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+// unstartedFacts is a core.facts source whose newest result has no known
+// start (a finish time only).
+type unstartedFacts struct{ staticFacts }
+
+func (s unstartedFacts) LastResultRun(ctx context.Context, action, host string) ([]byte, time.Time, time.Time, bool, error) {
+	r, _, at, ok, err := s.staticFacts.LastResultRun(ctx, action, host)
+	return r, time.Time{}, at, ok, err
+}
+
+// listOverlapFacts is a core.facts source where a full upgrade overlaps the
+// package list only: no finished OS change is recorded, and the overlap
+// lookup is true for the list's interval and false for the facts' interval.
+type listOverlapFacts struct{ staticFacts }
+
+func (listOverlapFacts) LastOSChange(context.Context, string) (time.Time, bool, error) {
+	return time.Time{}, false, nil
+}
+
+func (listOverlapFacts) UpgradeOverlaps(_ context.Context, _ string, from, to time.Time) (bool, error) {
+	return from.Equal(invTestStart) && to.Equal(invTestAt), nil
+}
+
+// TestOutOfBandReleaseUpgradeGivesPartialRead: a release upgrade that NOS did
+// not run (no package.install_all on the host, for example a manual or
+// unattended do-release-upgrade) leaves the newest core.facts on the old
+// release, within factsWindow. The package list of the new release must not
+// be stored complete under the old ecosystem.
+func TestOutOfBandReleaseUpgradeGivesPartialRead(t *testing.T) {
+	e := newInvEnv(t)
+	e.insertFactsAt(t, 30, invTestHost, factsResult(t, debian12Release), invTestStart.Add(-time.Hour))
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-oob-upgrade", invTestStart, invTestAt, installedEnvelope(t, debian13Text(t), false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != reasonReleaseMismatch {
+		t.Fatalf("read complete=%v reason=%q ecosystem=%q, want partial with the release mismatch reason", r.Complete, r.Reason, r.Ecosystem)
+	}
+	if r.Ecosystem == "debian:bookworm" {
+		t.Fatalf("trixie list stored under debian:bookworm")
+	}
+}
+
+// TestListReleaseMustMatchFacts: the package list must carry the base-files
+// version of the release that the newest core.facts reports. A mismatch, a list
+// without base-files and an ecosystem without a known base-files version are
+// all partial (fail closed).
+func TestListReleaseMustMatchFacts(t *testing.T) {
+	noBaseFiles := func(t *testing.T) []byte {
+		t.Helper()
+		text := strings.Replace(debian12Text(t), "P\tinstalled\tbase-files\t", "P\tinstalled\tbase-filez\t", 1)
+		return installedEnvelope(t, text, false)
+	}
+	tests := []struct {
+		name         string
+		facts        []byte
+		list         []byte
+		wantEcosys   string
+		wantComplete bool
+	}{
+		{"debian 12 list under debian 12 facts", factsResult(t, debian12Release), installedEnvelope(t, debian12Text(t), false), "debian:bookworm", true},
+		{"debian 13 list under debian 13 facts", factsResult(t, debian13Release), installedEnvelope(t, debian13Text(t), false), "debian:trixie", true},
+		{"debian 13 list under debian 12 facts", factsResult(t, debian12Release), installedEnvelope(t, debian13Text(t), false), "", false},
+		{"debian 12 list under debian 13 facts", factsResult(t, debian13Release), installedEnvelope(t, debian12Text(t), false), "", false},
+		{"ubuntu 24.04 list under ubuntu 24.04 facts", factsResult(t, ubuntu2404Release), installedEnvelope(t, ubuntu2404Text(t), false), "ubuntu:24.04", true},
+		{"ubuntu 24.04 list under ubuntu 22.04 facts", factsResult(t, ubuntu2204Release), installedEnvelope(t, ubuntu2404Text(t), false), "", false},
+		{"list without base-files", factsResult(t, debian12Release), noBaseFiles(t), "", false},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newInvEnv(t)
+			e.insertFactsAt(t, 40+i, invTestHost, tc.facts, invTestStart.Add(-time.Hour))
+
+			e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-match", invTestStart, invTestAt, tc.list)
+
+			r := e.latestRead(t, invTestHost)
+			if tc.wantComplete {
+				if !r.Complete || r.Ecosystem != tc.wantEcosys {
+					t.Fatalf("read complete=%v ecosystem=%q reason=%q, want complete %s", r.Complete, r.Ecosystem, r.Reason, tc.wantEcosys)
+				}
+				return
+			}
+			if r.Complete || r.Reason != reasonReleaseMismatch {
+				t.Fatalf("read complete=%v ecosystem=%q reason=%q, want the release mismatch reason", r.Complete, r.Ecosystem, r.Reason)
+			}
+		})
+	}
+}
+
+// withBaseFiles returns the Debian 12 fixture with the base-files version
+// replaced by version (both columns of its line).
+func withBaseFiles(t *testing.T, version string) string {
+	t.Helper()
+	text := debian12Text(t)
+	if !strings.Contains(text, "12.4+deb12u7") {
+		t.Fatal("debian12 fixture: base-files version not found")
+	}
+	return strings.ReplaceAll(text, "12.4+deb12u7", version)
+}
+
+// TestDebianReleaseOutsideTableIsMatchedByVersion: a Debian release that is
+// not in baseFilesPrefix (buster, forky) is still checked: its base-files
+// version starts with its release number, so a list of that release is
+// complete and a list of another release is partial with the mismatch reason.
+func TestDebianReleaseOutsideTableIsMatchedByVersion(t *testing.T) {
+	const busterRelease = "PRETTY_NAME=\"Debian GNU/Linux 10 (buster)\"\nID=debian\nVERSION_ID=\"10\"\nVERSION_CODENAME=buster\n"
+	const forkyRelease = "PRETTY_NAME=\"Debian GNU/Linux 14 (forky)\"\nID=debian\nVERSION_ID=\"14\"\nVERSION_CODENAME=forky\n"
+	tests := []struct {
+		name       string
+		facts      []byte
+		list       []byte
+		wantEcosys string
+		wantReason string
+	}{
+		{"debian 10 list under debian 10 facts", factsResult(t, busterRelease), installedEnvelope(t, withBaseFiles(t, "10.3+deb10u11"), false), "debian:buster", ""},
+		{"debian 14 list under debian 14 facts", factsResult(t, forkyRelease), installedEnvelope(t, withBaseFiles(t, "14.1"), false), "debian:forky", ""},
+		{"debian 12 list under debian 10 facts", factsResult(t, busterRelease), installedEnvelope(t, debian12Text(t), false), "", reasonReleaseMismatch},
+		{"debian 10 list under debian 14 facts", factsResult(t, forkyRelease), installedEnvelope(t, withBaseFiles(t, "10.3+deb10u11"), false), "", reasonReleaseMismatch},
+	}
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newInvEnv(t)
+			e.insertFactsAt(t, 50+i, invTestHost, tc.facts, invTestStart.Add(-time.Hour))
+
+			e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-debian-table", invTestStart, invTestAt, tc.list)
+
+			r := e.latestRead(t, invTestHost)
+			if tc.wantReason == "" {
+				if !r.Complete || r.Ecosystem != tc.wantEcosys {
+					t.Fatalf("read complete=%v ecosystem=%q reason=%q, want complete %s", r.Complete, r.Ecosystem, r.Reason, tc.wantEcosys)
+				}
+				return
+			}
+			if r.Complete || r.Reason != tc.wantReason {
+				t.Fatalf("read complete=%v ecosystem=%q reason=%q, want partial with %q", r.Complete, r.Ecosystem, r.Reason, tc.wantReason)
+			}
+		})
+	}
+}
+
+// TestUnlistedUbuntuReleaseIsNotCheckable: an Ubuntu release that has no
+// base-files prefix (26.04 here) cannot be judged against the facts. A list
+// of it is partial with reasonReleaseNotCheckable, not with the mismatch
+// reason: nothing was compared, and no upgrade was missed.
+func TestUnlistedUbuntuReleaseIsNotCheckable(t *testing.T) {
+	const ubuntu2604Release = "NAME=\"Ubuntu\"\nVERSION=\"26.04 LTS (Resolute Raccoon)\"\nID=ubuntu\nVERSION_ID=\"26.04\"\nVERSION_CODENAME=resolute\n"
+	e := newInvEnv(t)
+	e.insertFactsAt(t, 60, invTestHost, factsResult(t, ubuntu2604Release), invTestStart.Add(-time.Hour))
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-ubuntu-26", invTestStart, invTestAt, installedEnvelope(t, ubuntu2404Text(t), false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != reasonReleaseNotCheckable {
+		t.Fatalf("read complete=%v ecosystem=%q reason=%q, want partial with the not-checkable reason", r.Complete, r.Ecosystem, r.Reason)
+	}
+	if r.Ecosystem != "" {
+		t.Fatalf("unchecked list stored under ecosystem %q", r.Ecosystem)
+	}
+}
+
+// TestReleaseWithoutVersionIsNotCheckable: a Debian release whose os-release
+// has no VERSION_ID (sid, testing) has no base-files prefix that can be derived,
+// so its list is partial with the not-checkable reason.
+func TestReleaseWithoutVersionIsNotCheckable(t *testing.T) {
+	const debianSid = "PRETTY_NAME=\"Debian GNU/Linux trixie/sid\"\nID=debian\nVERSION_CODENAME=sid\n"
+	e := newInvEnv(t)
+	e.insertFactsAt(t, 61, invTestHost, factsResult(t, debianSid), invTestStart.Add(-time.Hour))
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-sid", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != reasonReleaseNotCheckable {
+		t.Fatalf("read complete=%v ecosystem=%q reason=%q, want partial with the not-checkable reason", r.Complete, r.Ecosystem, r.Reason)
+	}
+}
+
+// TestListWithTwoBaseFilesIsMismatch: a list with more than one base-files
+// line cannot name its release, so it is partial (fail closed) even when every
+// base-files version belongs to the facts' release.
+func TestListWithTwoBaseFilesIsMismatch(t *testing.T) {
+	const line = "P\tinstalled\tbase-files\tamd64\t12.4+deb12u7\tbase-files\t12.4+deb12u7\t\t.\n"
+	// A second architecture of base-files (multi-arch): the same package name
+	// with another arch, so the parser keeps both lines.
+	const second = "P\tinstalled\tbase-files\ti386\t12.4+deb12u7\tbase-files\t12.4+deb12u7\t\t.\n"
+	text := debian12Text(t)
+	if !strings.Contains(text, line) {
+		t.Fatal("debian12 fixture: base-files line not found")
+	}
+	text = strings.Replace(text, line, line+second, 1)
+	text = strings.Replace(text, "END\t11\n", "END\t12\n", 1)
+
+	e := newInvEnv(t)
+	e.insertFactsAt(t, 62, invTestHost, factsResult(t, debian12Release), invTestStart.Add(-time.Hour))
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-two-base", invTestStart, invTestAt, installedEnvelope(t, text, false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != reasonReleaseMismatch {
+		t.Fatalf("read complete=%v ecosystem=%q reason=%q, want partial with the release mismatch reason", r.Complete, r.Ecosystem, r.Reason)
+	}
+}
+
+// TestFactsWithoutKnownStartGiveFailedRead: the start of the newest core.facts
+// run is unknown (a result with a finish time only), so the release cannot be
+// checked and the list is stored as a lookup marker. This is the factsStarted
+// half of the start guard in factsStale.
+func TestFactsWithoutKnownStartGiveFailedRead(t *testing.T) {
+	e := newInvEnv(t)
+	e.svc.facts = unstartedFacts{staticFacts{result: factsResult(t, debian12Release), at: invTestStart.Add(-time.Hour)}}
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-facts-start", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != vulninventory.ReasonLookupFailed {
+		t.Fatalf("read complete=%v reason=%q, want the lookup marker", r.Complete, r.Reason)
+	}
+}
+
+// TestFinishedUpgradeOverlappingOnlyTheListIsCaughtByFactsStart: a finished
+// full upgrade that overlaps only the list (it finished while the list ran)
+// makes the facts from before it stale. The real store reports this as
+// ReasonFactsBeforeUpgrade, because the finish of the upgrade is after the
+// facts started; the list-overlap rule itself gives ReasonUpgradeOverlaps and
+// is pinned separately below.
+func TestFinishedUpgradeOverlappingOnlyTheListIsCaughtByFactsStart(t *testing.T) {
+	e := newInvEnv(t)
+	e.insertFactsAt(t, 50, invTestHost, factsResult(t, debian12Release), invTestStart.Add(-time.Hour))
+	e.insertHostRunAt(t, 51, "package.install_all", invTestHost, "finished", "success", invTestStart.Add(-5*time.Minute), invTestStart.Add(10*time.Second))
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-finished-overlap", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != vulninventory.ReasonFactsBeforeUpgrade {
+		t.Fatalf("read complete=%v reason=%q, want %q", r.Complete, r.Reason, vulninventory.ReasonFactsBeforeUpgrade)
+	}
+}
+
+// TestListOverlapWithUpgradeGivesUpgradeOverlapsReason pins the list-overlap
+// rule on its own: an upgrade that overlaps the list (and no part of the facts)
+// gives ReasonUpgradeOverlaps. The source reports no finished OS change, so
+// the before-upgrade rule does not decide first.
+func TestListOverlapWithUpgradeGivesUpgradeOverlapsReason(t *testing.T) {
+	e := newInvEnv(t)
+	e.svc.facts = listOverlapFacts{staticFacts{result: factsResult(t, debian12Release), at: invTestStart.Add(-time.Hour)}}
+
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-list-overlap", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
+
+	r := e.latestRead(t, invTestHost)
+	if r.Complete || r.Reason != vulninventory.ReasonUpgradeOverlaps {
+		t.Fatalf("read complete=%v reason=%q, want %q", r.Complete, r.Reason, vulninventory.ReasonUpgradeOverlaps)
 	}
 }
 
@@ -317,11 +885,11 @@ func TestUpgradedHostIsNotMatchedWithOldRelease(t *testing.T) {
 func TestShutdownWritesNoMarker(t *testing.T) {
 	e := newInvEnv(t)
 	e.insertFacts(t, 24, invTestHost, factsResult(t, debian12Release))
-	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-before", invTestAt, installedEnvelope(t, debian12Text(t), false))
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-before", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	e.svc.ObserveInstalled(ctx, invTestHost, "exec-shutdown", invTestAt.Add(time.Minute), installedEnvelope(t, hostileText(), false))
+	e.svc.ObserveInstalled(ctx, invTestHost, "exec-shutdown", invTestStart, invTestAt.Add(time.Minute), installedEnvelope(t, hostileText(), false))
 
 	if r := e.latestRead(t, invTestHost); r.ExecutionID != "exec-before" || !r.Complete {
 		t.Fatalf("latest read %q complete=%v after shutdown, want exec-before complete", r.ExecutionID, r.Complete)
@@ -341,11 +909,11 @@ func TestShutdownWritesNoMarker(t *testing.T) {
 func TestCancelledStoreWriteIsNotARefusal(t *testing.T) {
 	e := newInvEnv(t)
 	e.insertFacts(t, 25, invTestHost, factsResult(t, debian12Release))
-	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-good-2", invTestAt, installedEnvelope(t, debian12Text(t), false))
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-good-2", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	e.svc.facts = staticFacts{result: factsResult(t, debian12Release), at: factsBase, onCall: cancel}
-	e.svc.ObserveInstalled(ctx, invTestHost, "exec-cancel", invTestAt.Add(time.Minute), installedEnvelope(t, debian12Text(t), false))
+	e.svc.ObserveInstalled(ctx, invTestHost, "exec-cancel", invTestStart, invTestAt.Add(time.Minute), installedEnvelope(t, debian12Text(t), false))
 
 	if r := e.latestRead(t, invTestHost); r.ExecutionID != "exec-good-2" || !r.Complete {
 		t.Fatalf("latest read %q complete=%v reason=%q, want exec-good-2 complete", r.ExecutionID, r.Complete, r.Reason)
@@ -367,7 +935,7 @@ func TestStoreOutageIsNotRecordedAsRefusal(t *testing.T) {
 		}
 	}}
 
-	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-outage", invTestAt, installedEnvelope(t, debian12Text(t), false))
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-outage", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
 
 	logged := e.log.String()
 	if !strings.Contains(logged, "error_class=store") {
@@ -386,7 +954,7 @@ func TestInventoryStoreFailureIsLoggedWithoutResultText(t *testing.T) {
 	longHost := strings.Repeat("h", 200)
 	e.insertFacts(t, 5, longHost, factsResult(t, debian12Release))
 
-	e.svc.ObserveInstalled(context.Background(), longHost, "exec-install-5", invTestAt, installedEnvelope(t, debian12Text(t), false))
+	e.svc.ObserveInstalled(context.Background(), longHost, "exec-install-5", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
 
 	logged := e.log.String()
 	if !strings.Contains(logged, "vulnerability inventory: store read") || !strings.Contains(logged, "error_class=invalid_read") {
@@ -408,7 +976,7 @@ func TestInventoryLookupFailureIsLoggedByClass(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-install-6", invTestAt, installedEnvelope(t, debian12Text(t), false))
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-install-6", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
 
 	logged := e.log.String()
 	if !strings.Contains(logged, "error_class=lookup") {
@@ -422,8 +990,16 @@ func TestInventoryLookupFailureIsLoggedByClass(t *testing.T) {
 // failingFacts is a core.facts source whose lookup always fails.
 type failingFacts struct{}
 
-func (failingFacts) LastResult(context.Context, string, string) ([]byte, time.Time, bool, error) {
-	return nil, time.Time{}, false, errors.New("lookup refused")
+func (failingFacts) LastResultRun(context.Context, string, string) ([]byte, time.Time, time.Time, bool, error) {
+	return nil, time.Time{}, time.Time{}, false, errors.New("lookup refused")
+}
+
+func (failingFacts) LastOSChange(context.Context, string) (time.Time, bool, error) {
+	return time.Time{}, false, errors.New("lookup refused")
+}
+
+func (failingFacts) UpgradeOverlaps(context.Context, string, time.Time, time.Time) (bool, error) {
+	return false, errors.New("lookup refused")
 }
 
 // TestInventoryLookupFailureMarksHostPartial: when the release lookup fails,
@@ -433,13 +1009,13 @@ func (failingFacts) LastResult(context.Context, string, string) ([]byte, time.Ti
 func TestInventoryLookupFailureMarksHostPartial(t *testing.T) {
 	e := newInvEnv(t)
 	e.insertFacts(t, 7, invTestHost, factsResult(t, debian12Release))
-	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-old", invTestAt, installedEnvelope(t, debian12Text(t), false))
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-old", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
 	if r := e.latestRead(t, invTestHost); !r.Complete {
 		t.Fatalf("setup: first read not complete: %q", r.Reason)
 	}
 
 	e.svc.facts = failingFacts{}
-	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-lookup", invTestAt.Add(time.Minute), installedEnvelope(t, debian12Text(t), false))
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-lookup", invTestStart, invTestAt.Add(time.Minute), installedEnvelope(t, debian12Text(t), false))
 
 	r := e.latestRead(t, invTestHost)
 	if r.Complete || r.Reason != vulninventory.ReasonLookupFailed || r.ExecutionID != "exec-lookup" {
@@ -466,8 +1042,10 @@ func TestInventoryLookupFailureMarksHostPartial(t *testing.T) {
 var hostileVersion = "1234567890:" + strings.Repeat("a", 128)
 
 // hostileText is a nos-installed-v1 text whose one package has hostileVersion.
+// It also has a base-files package of the Debian 12 release, so that the
+// release check passes and the store's refusal is what decides the read.
 func hostileText() string {
-	return "nos-installed-v1\nP\tinstalled\tlibjansson4\tamd64\t" + hostileVersion + "\tjansson\t2.14-2\t\t.\nK\t6.1.0-26-amd64\t#1 SMP\nEND\t1\n"
+	return "nos-installed-v1\nP\tinstalled\tbase-files\tamd64\t12.4+deb12u7\tbase-files\t12.4+deb12u7\t\t.\nP\tinstalled\tlibjansson4\tamd64\t" + hostileVersion + "\tjansson\t2.14-2\t\t.\nK\t6.1.0-26-amd64\t#1 SMP\nEND\t2\n"
 }
 
 // TestInventoryStoreRefusalMarksHostPartial: hostile package content that the
@@ -477,9 +1055,9 @@ func hostileText() string {
 func TestInventoryStoreRefusalMarksHostPartial(t *testing.T) {
 	e := newInvEnv(t)
 	e.insertFacts(t, 8, invTestHost, factsResult(t, debian12Release))
-	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-good", invTestAt, installedEnvelope(t, debian12Text(t), false))
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-good", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
 
-	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-hostile", invTestAt.Add(time.Minute), installedEnvelope(t, hostileText(), false))
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-hostile", invTestStart, invTestAt.Add(time.Minute), installedEnvelope(t, hostileText(), false))
 
 	r := e.latestRead(t, invTestHost)
 	if r.Complete || r.Reason != vulninventory.ReasonRefused || r.ExecutionID != "exec-hostile" {
@@ -510,7 +1088,7 @@ func TestInventoryWorkIsBoundedByTimeout(t *testing.T) {
 	e := newInvEnv(t)
 	rec := &deadlineFacts{}
 	e.svc.facts = rec
-	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-deadline", invTestAt, installedEnvelope(t, debian12Text(t), false))
+	e.svc.ObserveInstalled(context.Background(), invTestHost, "exec-deadline", invTestStart, invTestAt, installedEnvelope(t, debian12Text(t), false))
 
 	if !rec.hasDeadline {
 		t.Fatalf("release lookup has no deadline")
@@ -526,9 +1104,17 @@ type deadlineFacts struct {
 	deadline    time.Time
 }
 
-func (d *deadlineFacts) LastResult(ctx context.Context, _, _ string) ([]byte, time.Time, bool, error) {
+func (d *deadlineFacts) LastResultRun(ctx context.Context, _, _ string) ([]byte, time.Time, time.Time, bool, error) {
 	d.deadline, d.hasDeadline = ctx.Deadline()
-	return nil, time.Time{}, false, nil
+	return nil, time.Time{}, time.Time{}, false, nil
+}
+
+func (d *deadlineFacts) LastOSChange(context.Context, string) (time.Time, bool, error) {
+	return time.Time{}, false, nil
+}
+
+func (d *deadlineFacts) UpgradeOverlaps(context.Context, string, time.Time, time.Time) (bool, error) {
+	return false, nil
 }
 
 // srcHost is the inventory host of the export tests. Its display name and
@@ -550,10 +1136,11 @@ type srcEnv struct {
 func newSrcEnv(t *testing.T) *srcEnv {
 	t.Helper()
 	e := newVTEnv(t)
-	// vulninventory stamps TakenAt and checks read times with its own
-	// package clock, which is the real clock. The test clock follows the
-	// real clock, so reads and TakenAt agree and no snapshot is "taken after
-	// the clock". Tests that move the clock use Add, as before.
+	// The store and the export share the test clock (newVulnInventory passes
+	// it to vulninventory.NewWithNow), so TakenAt, the reuse window and the
+	// read-time bound all use one clock. The clock follows the real clock so
+	// that reads stored with the real time stay in the past; tests that move
+	// it use Add.
 	e.clk.followReal()
 	hosts := inventory.NewWithNow(e.db, e.clk.Now)
 	inv, err := newVulnInventory(e.db, hosts, e.clk.Now)
@@ -599,7 +1186,7 @@ func srcRead(host, exec string, at time.Time, complete bool, pkg string) vulninv
 // a package list read is stored.
 func (e *srcEnv) addRead(t *testing.T, r vulninventory.Read) {
 	t.Helper()
-	st, err := vulninventory.New(e.db)
+	st, err := vulninventory.NewWithNow(e.db, e.clk.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -857,7 +1444,7 @@ func TestVulnInventoryDecodesSnapshotOncePerID(t *testing.T) {
 	e := newSrcEnv(t)
 	e.addHost(t, srcHost)
 	e.addRead(t, srcRead(srcHost, "exec-1", e.clk.Now().Add(-time.Minute), true, "openssl"))
-	st, err := vulninventory.New(e.db)
+	st, err := vulninventory.NewWithNow(e.db, e.clk.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -949,7 +1536,7 @@ type recordingReads struct {
 	recorded bool
 }
 
-func (r *recordingReads) Current(ctx context.Context, hosts []string, maxReuse time.Duration, floor int64) (vulninventory.Snapshot, error) {
+func (r *recordingReads) Current(ctx context.Context, hosts []string, maxReuse time.Duration, floor vulninventory.GenerationFloor) (vulninventory.Snapshot, error) {
 	s, err := r.Store.Current(ctx, hosts, maxReuse, floor)
 	if err == nil && !r.recorded {
 		r.recorded = true
@@ -968,7 +1555,7 @@ func TestVulnInventoryNeverServesSnapshotRunAlreadyRecorded(t *testing.T) {
 	e := newSrcEnv(t)
 	e.addHost(t, srcHost)
 	e.addRead(t, srcRead(srcHost, "exec-1", e.clk.Now().Add(-time.Minute), true, "openssl"))
-	st, err := vulninventory.New(e.db)
+	st, err := vulninventory.NewWithNow(e.db, e.clk.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -987,5 +1574,82 @@ func TestVulnInventoryNeverServesSnapshotRunAlreadyRecorded(t *testing.T) {
 	}
 	if snap.Generation <= recorded {
 		t.Fatalf("served generation %d, want above the recorded run generation %d", snap.Generation, recorded)
+	}
+}
+
+// TestVulnInventoryTakenAtUsesTheExportClock: the store stamps TakenAt with the
+// export's clock, not with the wall clock. The clock is moved ten hours ahead
+// of the real time, so a wall-clock stamp would fall outside the window.
+func TestVulnInventoryTakenAtUsesTheExportClock(t *testing.T) {
+	e := newSrcEnv(t)
+	e.addHost(t, srcHost)
+	e.addRead(t, srcRead(srcHost, "exec-1", e.clk.Now().Add(-time.Minute), true, "openssl"))
+	e.clk.Add(10 * time.Hour)
+	// The clock runs with the real clock, so it is read on both sides of the
+	// call: TakenAt is the second of the stamp, which lies between them.
+	before := e.clk.Now()
+	snap, err := e.inv.VulnSnapshot(context.Background(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := e.clk.Now()
+	if snap.TakenAt.Before(before.Truncate(time.Second)) || snap.TakenAt.After(after) {
+		t.Fatalf("TakenAt = %s, want the export clock between %s and %s", snap.TakenAt, before, after)
+	}
+}
+
+// TestVulnInventoryConcurrentSnapshotsNeverLowerGeneration: export calls that
+// run at the same time, against a run floor that is already recorded, never
+// serve a generation at or below that floor, and two different snapshots never
+// share a generation.
+func TestVulnInventoryConcurrentSnapshotsNeverLowerGeneration(t *testing.T) {
+	e := newSrcEnv(t)
+	e.addHost(t, srcHost)
+	e.addRead(t, srcRead(srcHost, "exec-1", e.clk.Now().Add(-time.Minute), true, "openssl"))
+	ctx := context.Background()
+	const rounds, callers = 5, 4
+	for round := range rounds {
+		e.addRead(t, srcRead(srcHost, fmt.Sprintf("exec-r%d", round), e.clk.Now().Add(-time.Duration(round+1)*time.Second), true, "openssl"))
+		snaps := make([]api.VulnSnapshot, callers)
+		floors := make([]int64, callers)
+		errs := make([]error, callers)
+		var wg sync.WaitGroup
+		for i := range callers {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				// The run floor recorded before this call starts. Calls
+				// run concurrently with the other callers' run starts,
+				// which record the generation they were handed (below)
+				// while this call may be in progress.
+				floors[i], errs[i] = maxInventoryGeneration(ctx, e.db)
+				if errs[i] != nil {
+					return
+				}
+				snaps[i], errs[i] = e.inv.VulnSnapshot(ctx, "")
+				if errs[i] != nil {
+					return
+				}
+				// A run start with this snapshot records its generation. It
+				// runs while the other calls are in progress, so a call that
+				// reused this snapshot after its own floor read must not serve
+				// it: the post-check in current refuses it.
+				_, errs[i] = e.db.ExecContext(ctx, `UPDATE vuln_store_state SET max_inventory_generation = MAX(max_inventory_generation, ?) WHERE id = 1`, snaps[i].Generation)
+			}(i)
+		}
+		wg.Wait()
+		byGen := map[int64]string{}
+		for i, s := range snaps {
+			if errs[i] != nil {
+				t.Fatalf("round %d call %d: %v", round, i, errs[i])
+			}
+			if s.Generation <= floors[i] {
+				t.Fatalf("round %d call %d: generation %d not above the run floor %d recorded before the call", round, i, s.Generation, floors[i])
+			}
+			if prev, ok := byGen[s.Generation]; ok && prev != s.ID {
+				t.Fatalf("round %d: generation %d served as %s and %s", round, s.Generation, prev, s.ID)
+			}
+			byGen[s.Generation] = s.ID
+		}
 	}
 }

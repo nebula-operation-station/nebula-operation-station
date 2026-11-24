@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/trafficstore"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
@@ -62,7 +63,9 @@ func newInboxFixture(t *testing.T, wired, admin bool) *swFixture {
 		t.Fatal(err)
 	}
 	sw.Register(pages)
-	if err := mountAttackPaths(pages, swOrigin, isAdmin, log); err != nil {
+	// The attack-path pages come through the real registry, as in run.
+	deps := serverDeps{cfg: serverconfig.Config{PublicOrigin: swOrigin}, isAdmin: isAdmin, log: log}
+	if err := mountServerFeaturePages(deps, pages); err != nil {
 		t.Fatal(err)
 	}
 	hosts, ip := tmInventory()

@@ -4,6 +4,7 @@ package netdevcollect
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -137,6 +138,16 @@ type CycleReport struct {
 	Busy int
 	// Dispatched is the number of reads handed to device workers.
 	Dispatched int
+	// MetadataWritten counts device metadata records spooled in this cycle.
+	// The rule: every listed device that is not blocked and has a valid trust
+	// generation gets one record per cycle, unless its last record was
+	// written less than metadataMinInterval ago (never for an Interval below
+	// metadataMinInterval). A tombstoned (unlisted) device gets none.
+	MetadataWritten int
+	// MetadataFailed counts device metadata records the spool refused. A
+	// failed record does not stop the reads of the cycle, and it is tried
+	// again in the next cycle.
+	MetadataFailed int
 }
 
 // Poller schedules typed reads over the executor socket and spools the
@@ -153,7 +164,9 @@ type Poller struct {
 	// Log receives one line per failure and cycle; never a payload or an
 	// executor error detail. Nil discards.
 	Log *slog.Logger
-	// Interval is how often Run starts a cycle (default DefaultInterval).
+	// Interval is how often Run starts a cycle (default DefaultInterval). Below
+	// one minute, every cycle writes a metadata record per listed device, but
+	// no device gets more than one per metadataSubMinuteWindow.
 	Interval time.Duration
 	// MaxBackoff caps the backoff (default DefaultMaxBackoff, never below
 	// MinReadInterval).
@@ -163,6 +176,16 @@ type Poller struct {
 	// MaxConcurrentDevices bounds devices read at once (default
 	// DefaultMaxConcurrentDevices).
 	MaxConcurrentDevices int
+
+	// metaMu guards the metadata state below. metaWritten maps each device
+	// to the time the spool last accepted a metadata record for it; a device
+	// without an entry gets a record on its next eligible cycle. metaPending
+	// counts refused metadata writes not yet logged, and metaWarnAt is when
+	// the last refusal warning was logged.
+	metaMu      sync.Mutex
+	metaWritten map[string]time.Time
+	metaPending int
+	metaWarnAt  time.Time
 
 	mu    sync.Mutex
 	sched map[schedKey]*schedState
@@ -250,8 +273,9 @@ func (p *Poller) Run(ctx context.Context) error {
 				return nil
 			}
 			p.log().Warn("netdev cycle failed", "code", errClass(err))
-		} else if rep.Dispatched > 0 || rep.Busy > 0 {
-			p.log().Info("netdev cycle", "devices", rep.Devices, "skipped", rep.Skipped, "busy", rep.Busy, "dispatched", rep.Dispatched)
+		} else if rep.Dispatched > 0 || rep.Busy > 0 || rep.MetadataWritten > 0 {
+			p.log().Info("netdev cycle", "devices", rep.Devices, "skipped", rep.Skipped, "busy", rep.Busy,
+				"dispatched", rep.Dispatched, "metadata_written", rep.MetadataWritten, "metadata_failed", rep.MetadataFailed)
 		}
 		t.Reset(interval)
 	}
@@ -279,6 +303,11 @@ func (p *Poller) Cycle(ctx context.Context) (CycleReport, error) {
 	}
 	now := p.Now()
 	rep := CycleReport{Devices: len(infos)}
+
+	// Metadata first: one record per listed device that is not blocked and
+	// not tombstoned, at most one per metadataMinInterval, before any read of
+	// this cycle is dispatched (ADR 0010 D1, nx07).
+	p.spoolMetadata(ctx, infos, now, &rep)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -316,6 +345,126 @@ func (p *Poller) Cycle(ctx context.Context) (CycleReport, error) {
 	}
 	p.prune(listed, now)
 	return rep, nil
+}
+
+// metadataEligible reports whether a listed device gets a metadata record:
+// a blocked device gets none, and a device whose id, trust generation or
+// family the spool would refuse is not written. Credential state does not
+// matter here: the metadata carries no credential, so a device without a
+// usable credential is still described (it is only not read). A device that
+// the executor no longer lists (a tombstoned one) is never in the list, so
+// it gets no record either.
+func metadataEligible(info *pb.NetDeviceInfo) bool {
+	gen := info.GetTrustGeneration()
+	return !info.GetBlocked() && gen >= 1 && gen <= netdevcontract.MaxTrustGeneration &&
+		familyReads[info.GetFamily()] != nil
+}
+
+// metadataMinInterval is the least time between two metadata records of one
+// device when the collector Interval is at least this long. A cycle that
+// starts sooner than this after the device's last accepted record writes no
+// record for the device. The importer keeps only the newest record per device
+// (nx07f), so the bound caps the write load without losing the device's latest
+// state. With the default Interval (DefaultInterval, one minute) every cycle
+// writes.
+const metadataMinInterval = time.Minute
+
+// metadataSubMinuteWindow is the hard floor between two metadata records of one
+// device for a collector Interval below metadataMinInterval. Such an Interval
+// writes one record per listed device in every cycle (spec A1-2) only down to
+// this window, so a device gets at most 6 records per minute whatever the
+// Interval. The spool has no total size cap, so this bound is what limits the
+// write rate: at MaxDevices (1024) and this window the worst case is about 102
+// files per second, not one per device per Interval.
+const metadataSubMinuteWindow = 10 * time.Second
+
+// metadataWindow returns the least time between two metadata records of one
+// device for this Poller. An unset (zero or negative) Interval means
+// DefaultInterval. For an Interval of at least metadataMinInterval the window
+// is metadataMinInterval. For a shorter Interval every cycle writes a record,
+// but never more often than metadataSubMinuteWindow: the window is the Interval
+// when that is at least the floor, and the floor otherwise.
+func (p *Poller) metadataWindow() time.Duration {
+	interval := p.Interval
+	if interval <= 0 {
+		interval = DefaultInterval
+	}
+	if interval >= metadataMinInterval {
+		return metadataMinInterval
+	}
+	return max(interval, metadataSubMinuteWindow)
+}
+
+// spoolMetadata writes one device metadata record for each listed device
+// that metadataEligible accepts, using the first listing of a duplicate id,
+// unless the spool accepted a record for that device less than the window
+// (metadataWindow) before now. A device that is
+// not eligible, or not listed, loses its write time, so it gets a fresh
+// record when it becomes eligible again. A refused write keeps the old write
+// time, so it is tried again in the next cycle. A refusal is counted in rep
+// and logged as an aggregate at most once per MinReadInterval; it never stops
+// the cycle or touches a read schedule.
+func (p *Poller) spoolMetadata(ctx context.Context, infos []*pb.NetDeviceInfo, now time.Time, rep *CycleReport) {
+	p.metaMu.Lock()
+	defer p.metaMu.Unlock()
+	if p.metaWritten == nil {
+		p.metaWritten = map[string]time.Time{}
+	}
+	window := p.metadataWindow()
+	seen := make(map[string]bool, len(infos))
+	eligible := make(map[string]bool, len(infos))
+	for _, info := range infos {
+		if ctx.Err() != nil {
+			return
+		}
+		id := info.GetDeviceId()
+		if !netdevcontract.ValidDeviceID(id) || seen[id] {
+			continue
+		}
+		seen[id] = true
+		if !metadataEligible(info) {
+			continue
+		}
+		eligible[id] = true
+		if last, ok := p.metaWritten[id]; ok {
+			// A clock that went back is not a reason to hold the record back.
+			if d := now.Sub(last); d >= 0 && d < window {
+				continue
+			}
+		}
+		payload, err := json.Marshal(DeviceMetadata{
+			DeviceID:        id,
+			Family:          netdevcontract.Family(info.GetFamily()),
+			Label:           info.GetLabel(),
+			TrustGeneration: info.GetTrustGeneration(),
+		})
+		if err != nil {
+			rep.MetadataFailed++
+			continue
+		}
+		if _, err := p.Spool.Write(ctx, id, ReadDeviceMetadata, info.GetTrustGeneration(), false, payload); err != nil {
+			rep.MetadataFailed++
+			continue
+		}
+		p.metaWritten[id] = now
+		rep.MetadataWritten++
+	}
+	if ctx.Err() != nil {
+		return
+	}
+	for id := range p.metaWritten {
+		if !eligible[id] {
+			delete(p.metaWritten, id)
+		}
+	}
+	p.metaPending += rep.MetadataFailed
+	if p.metaPending > 0 {
+		if p.metaWarnAt.IsZero() || now.Sub(p.metaWarnAt) >= MinReadInterval {
+			p.log().Warn("netdev metadata refused", "failed", p.metaPending, "code", "spool")
+			p.metaPending = 0
+			p.metaWarnAt = now
+		}
+	}
 }
 
 // usable reports whether a listed device may be read and returns it.

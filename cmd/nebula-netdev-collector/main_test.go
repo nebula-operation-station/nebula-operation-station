@@ -61,13 +61,18 @@ type memSpool struct {
 	payloads []string
 }
 
-func (s *memSpool) Write(_ context.Context, _, _ string, _ uint64, _ bool, payload []byte) (string, error) {
+// Write records executor read payloads; the device metadata records that
+// each cycle writes are not reads and are not recorded.
+func (s *memSpool) Write(_ context.Context, _, read string, _ uint64, _ bool, payload []byte) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.payloads = append(s.payloads, string(payload))
+	if read != netdevcollect.ReadDeviceMetadata {
+		s.payloads = append(s.payloads, string(payload))
+	}
 	return "x", nil
 }
 
+// count returns the number of executor read records.
 func (s *memSpool) count() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

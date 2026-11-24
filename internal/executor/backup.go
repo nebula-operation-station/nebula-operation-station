@@ -18,11 +18,14 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/version"
 )
 
-// Backup limits (M10-2): the whole part must fit one response.
-const (
-	maxBackupTotal   = 48 << 20
-	maxBackupKeyFile = 1 << 20
-)
+// MaxBackupTotal is the largest total of file data BackupExecutor returns
+// (M10-2): the whole part must fit one response of MaxResponseSize. A backup
+// whose files add up to more is refused with ResourceExhausted.
+const MaxBackupTotal = 48 << 20
+
+// maxBackupKeyFile is the largest key file BackupExecutor reads; larger files
+// are never key files and are skipped.
+const maxBackupKeyFile = 1 << 20
 
 var backupKeyRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}\.(key|pub)$`)
 
@@ -48,7 +51,7 @@ func (s *Service) BackupExecutor(ctx context.Context, _ *pb.BackupExecutorReques
 	if err != nil {
 		return nil, s.adminStoreError("backup", err)
 	}
-	b, err := readBounded(snap, maxBackupTotal)
+	b, err := readBounded(snap, MaxBackupTotal)
 	if err != nil {
 		return nil, status.Error(codes.ResourceExhausted, "executor.db is too large for an online backup; stop the executor and copy the data directory")
 	}
@@ -68,7 +71,7 @@ func (s *Service) BackupExecutor(ctx context.Context, _ *pb.BackupExecutorReques
 			continue // not a regular file, or too large: never a key file
 		}
 		total += len(kb)
-		if total > maxBackupTotal {
+		if total > MaxBackupTotal {
 			return nil, status.Error(codes.ResourceExhausted, "the backup is too large")
 		}
 		mode := uint32(0o600)

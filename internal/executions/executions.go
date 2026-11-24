@@ -870,9 +870,12 @@ func (s *Service) finishHost(id, actionID, host, class, detail string, exit int,
 	if len(detail) > 1000 {
 		detail = detail[:1000]
 	}
+	// fin is the one clock read of the finish: the finish row, the observer and
+	// the ops state all use it.
+	fin := s.now()
 	if _, err := s.db.ExecContext(s.ctx, `UPDATE execution_hosts SET state = 'finished', class = ?, detail = ?, exit_code = ?, result = ?, log = ?,
 			log_truncated = ?, finished_at = ? WHERE execution_id = ? AND host_id = ?`,
-		class, detail, exit, result, log, boolInt(truncated), s.now().Unix(), id, host); err != nil {
+		class, detail, exit, result, log, boolInt(truncated), fin.Unix(), id, host); err != nil {
 		s.log.Error("execution host finish", "execution", id, "host", host, "error", err.Error())
 		return
 	}
@@ -880,8 +883,29 @@ func (s *Service) finishHost(id, actionID, host, class, detail string, exit int,
 	if class == classSkipped || class == classNotRun {
 		return // nothing ran on the host: its state did not change
 	}
-	s.observe(id, actionID, host, class, result)
-	s.refreshOpsState(s.ctx, host, lastRun{action: actionID, class: class, at: s.now(), ok: true})
+	// The start is read only for the one observer that uses it.
+	var started time.Time
+	if actionID == "package.list_installed" && class == "success" && s.installed != nil {
+		started = s.hostStarted(id, host)
+	}
+	s.observe(id, actionID, host, class, started, fin, result)
+	s.refreshOpsState(s.ctx, host, lastRun{action: actionID, class: class, at: fin, ok: true})
+}
+
+// hostStarted returns when the run of execution id began on host (its
+// started_at). It returns the zero time when the row has none or cannot be
+// read; the observer treats the zero time as an unknown start and does not
+// trust the facts for it.
+func (s *Service) hostStarted(id, host string) time.Time {
+	var started sql.NullInt64
+	if err := s.db.QueryRowContext(s.ctx, `SELECT started_at FROM execution_hosts WHERE execution_id = ? AND host_id = ?`, id, host).Scan(&started); err != nil {
+		s.log.Error("execution host start", "execution", id, "host", host, "error", err.Error())
+		return time.Time{}
+	}
+	if !started.Valid {
+		return time.Time{}
+	}
+	return time.Unix(started.Int64, 0)
 }
 
 // runAttached runs an attached action on one host. A safe action whose run
@@ -939,16 +963,26 @@ func requirementName(r pb.ApprovalRequirement) string {
 // actionID (any version) on host, for module cards (M7-6). The result is
 // untrusted host output, bounded like every result.
 func (s *Service) LastResult(ctx context.Context, actionID, host string) ([]byte, time.Time, bool, error) {
-	var res []byte
-	var at sql.NullInt64
-	err := s.db.QueryRowContext(ctx, `SELECT h.result, h.finished_at FROM execution_hosts h JOIN executions e ON e.id = h.execution_id
+	res, _, finished, ok, err := s.LastResultRun(ctx, actionID, host)
+	return res, finished, ok, err
+}
+
+// LastResultRun is LastResult with the time the run started on the host (the
+// zero time when the row has none), so that a reader can compare the start of
+// the run with the upgrades that ran.
+func (s *Service) LastResultRun(ctx context.Context, actionID, host string) (result []byte, started, finished time.Time, ok bool, err error) {
+	var st, at sql.NullInt64
+	err = s.db.QueryRowContext(ctx, `SELECT h.result, h.started_at, h.finished_at FROM execution_hosts h JOIN executions e ON e.id = h.execution_id
 		WHERE e.action_id = ? AND h.host_id = ? AND h.state = 'finished' AND h.class = 'success'
-		ORDER BY h.finished_at DESC LIMIT 1`, actionID, host).Scan(&res, &at)
+		ORDER BY h.finished_at DESC LIMIT 1`, actionID, host).Scan(&result, &st, &at)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, time.Time{}, false, nil
+		return nil, time.Time{}, time.Time{}, false, nil
 	}
 	if err != nil {
-		return nil, time.Time{}, false, err
+		return nil, time.Time{}, time.Time{}, false, err
 	}
-	return res, time.Unix(at.Int64, 0), true, nil
+	if st.Valid {
+		started = time.Unix(st.Int64, 0)
+	}
+	return result, started, time.Unix(at.Int64, 0), true, nil
 }

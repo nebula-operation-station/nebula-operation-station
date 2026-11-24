@@ -74,6 +74,35 @@ type VulnSubjectStatus struct {
 	// LastComplete is the end of the last complete run that covered the
 	// subject; zero means no complete run did ("not assessed").
 	LastComplete time.Time
+	// Inventory is the package inventory NOS holds for a host (ADR 0011
+	// D8); nil means no read is stored. Only host subjects carry one.
+	Inventory *VulnInventoryStatus
+}
+
+// VulnInventoryStatus is the package inventory of a host as its last stored
+// read describes it (ADR 0011 D8, the coverage of the Vulnerabilities tab).
+// It holds the time, completeness and counts of the read and the running
+// kernel, never the package list.
+type VulnInventoryStatus struct {
+	// ReadAt is the time of the read.
+	ReadAt time.Time
+	// Complete is the read's completeness flag (D3).
+	Complete bool
+	// Reason says why a partial read is partial: fixed text from the
+	// inventory, never host content.
+	Reason string
+	// Sources is the number of source packages of the read, Binaries the
+	// number of their binary packages.
+	Sources  int
+	Binaries int
+	// KernelRelease is the running kernel's release: host text, shown as
+	// text and capped (see kernelText).
+	KernelRelease string
+	// KernelMapped: the running kernel maps to a kernel source version
+	// (D4); otherwise its coverage is unknown, never clean.
+	KernelMapped bool
+	// Unavailable: the read could not be loaded, so nothing is known.
+	Unavailable bool
 }
 
 // VulnFeedStatus is NOS's view of one feed source (D4, D5, D6).
@@ -81,8 +110,15 @@ type VulnFeedStatus struct {
 	SourceID string
 	// Listed: the source is on NOS's fixed source list.
 	Listed bool
-	// Stale: past its maximum snapshot age, or undated.
+	// Stale: past its maximum snapshot age, or undated. Only meaningful
+	// when the source is not Unseen.
 	Stale bool
+	// Unseen: listed, but no run has named it and it has no high-water
+	// mark. The agent leaves such a source out on purpose (not configured),
+	// so it is not a feed that stopped: it is shown as a neutral note,
+	// never as stale. Closures are unaffected: the source still counts as
+	// a feed issue, so runs do not close findings resting on it.
+	Unseen bool
 	// SnapshotDate is the content date of the last accepted snapshot;
 	// zero when unknown or undated.
 	SnapshotDate time.Time
@@ -277,6 +313,11 @@ func feedLabels(f VulnFeedStatus) []vulnLabel {
 	var out []vulnLabel
 	if !f.Listed {
 		out = append(out, vulnLabel{"feed " + id + " not on NOS's source list", classWarning})
+	}
+	if f.Unseen {
+		// Neutral: left out on purpose, not a failure. Still a label, so the
+		// subject is not green (closures are unchanged).
+		return append(out, vulnLabel{"feed " + id + " not configured: no run has named it", classUnknown})
 	}
 	switch f.LastVerdict {
 	case vulnstore.SourceRegressed:
@@ -528,6 +569,9 @@ func (c vulnContext) view(row VulnRow) vulnFindingView {
 		}
 		if ls := feedLabels(fs); len(ls) > 0 {
 			v.Labels = append(v.Labels, ls...)
+			// Unseen feeds count too: the finding rests on a feed that
+			// runs do not use, so it is in the stale filter, as its
+			// subject is in the subject list's feed issue.
 			v.Stale = true
 		}
 	}
@@ -638,6 +682,10 @@ type vulnBanner struct {
 	Text string
 	// ResetURL links the maintainer to the mark reset page.
 	ResetURL string
+	// Note: a neutral, collapsible notice; Text is its summary and Detail
+	// the explanation shown when it is opened.
+	Note   bool
+	Detail string
 }
 
 // vulnPageData is the data of every vulnerabilities page.
@@ -739,6 +787,25 @@ func withUnknownFeeds(feeds []VulnFeedStatus, rows []VulnRow) []VulnFeedStatus {
 	return out
 }
 
+// unseenFeedScope names what a source covers and how to enable it, for the
+// not-configured note; sources not listed here get the generic text.
+var unseenFeedScope = map[string]string{
+	"cisco-csaf":    "Only Cisco network devices depend on this source. To enable it, add a signed CSAF provider with pinned keys to the vulnerability agent configuration.",
+	"paloalto-csaf": "Only Palo Alto Networks devices depend on this source. To enable it, add a signed CSAF provider with pinned keys to the vulnerability agent configuration.",
+}
+
+// unseenFeedDetail is the text of the not-configured note of a source no
+// run has named: it is left out on purpose, so this is not a failure. It
+// says what the source covers, how to enable it and that runs do not close
+// findings resting on it.
+func unseenFeedDetail(sourceID string) string {
+	scope, ok := unseenFeedScope[sourceID]
+	if !ok {
+		scope = "No run has named this source yet."
+	}
+	return scope + " Findings resting on it are not closed by runs."
+}
+
 // feedBanners builds the page-wide feed and Hermes banners.
 func feedBanners(feeds []VulnFeedStatus, lastComplete, now time.Time, maintainer bool) []vulnBanner {
 	var out []vulnBanner
@@ -751,6 +818,10 @@ func feedBanners(feeds []VulnFeedStatus, lastComplete, now time.Time, maintainer
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].SourceID < sorted[j].SourceID })
 	for _, f := range sorted {
 		id := vulnText(f.SourceID, false)
+		if f.Unseen {
+			out = append(out, vulnBanner{Text: "Feed " + id + " not configured", Note: true, Detail: unseenFeedDetail(f.SourceID)})
+			continue
+		}
 		if f.Stale {
 			t := "Feed " + id + " stale"
 			if !f.SnapshotDate.IsZero() {
@@ -900,8 +971,12 @@ func subjectStatus(g vulnSubjectGroup, st VulnSubjectStatus, feedIssue, pageFeed
 	if l, stale := subjectLabel(st, now); stale {
 		return l
 	}
+	// A truncated list or a host inventory that is not fully known (none
+	// stored, unavailable, partial, unmapped running kernel) makes every
+	// count only what NOS could match: a lower bound.
+	inventoryLabel, inventoryUnknown := inventoryUnknown(st)
 	atLeast := ""
-	if truncated {
+	if truncated || inventoryUnknown {
 		atLeast = "at least "
 	}
 	switch {
@@ -916,7 +991,99 @@ func subjectStatus(g vulnSubjectGroup, st VulnSubjectStatus, feedIssue, pageFeed
 	case feedIssue, pageFeedIssue:
 		return vulnLabel{"feed issue", classWarning}
 	}
+	if inventoryUnknown {
+		return inventoryLabel
+	}
 	return vulnLabel{"no open findings", classOK}
+}
+
+// inventoryUnknown reports whether a host's package inventory keeps its
+// status from being green (D4, D6, D8): no stored read, an unavailable read,
+// a partial one, or a complete one whose running kernel does not map to a
+// kernel source (kernel coverage unknown, never clean). Its findings are
+// whatever NOS could match, so such a host is never "no open findings".
+func inventoryUnknown(st VulnSubjectStatus) (vulnLabel, bool) {
+	if st.Subject.Kind != vulnfinding.SubjectHost {
+		return vulnLabel{}, false
+	}
+	if inv := st.Inventory; inv != nil && inv.Complete && inv.KernelMapped && !inv.Unavailable {
+		return vulnLabel{}, false
+	}
+	return vulnLabel{labelIncomplete, classUnknown}, true
+}
+
+// vulnInventoryView is the "Package inventory" line of a host's
+// Vulnerabilities tab: the read (or why there is none) and the kernel line.
+type vulnInventoryView struct {
+	Package string
+	Kernel  string
+}
+
+// Texts of the package inventory line (ADR 0011 D8, D4). They are fixed
+// text; only the kernel release comes from the host.
+const (
+	labelInventoryNone        = "none stored: no successful package.list_installed run for this host yet"
+	labelInventoryUnavailable = "inventory status unavailable"
+	labelKernelUnknown        = "kernel coverage unknown"
+	// maxKernelShown caps the kernel release shown, in characters.
+	maxKernelShown = 128
+)
+
+// hostInventoryView builds the inventory line of a host subject; it returns
+// nil for images and devices, which have no package inventory line.
+func hostInventoryView(st VulnSubjectStatus) *vulnInventoryView {
+	if st.Subject.Kind != vulnfinding.SubjectHost {
+		return nil
+	}
+	inv := st.Inventory
+	unknownKernel := "Running kernel: " + labelKernelUnknown
+	switch {
+	case inv == nil:
+		return &vulnInventoryView{Package: labelInventoryNone, Kernel: unknownKernel}
+	case inv.Unavailable:
+		return &vulnInventoryView{Package: labelInventoryUnavailable, Kernel: unknownKernel}
+	}
+	v := &vulnInventoryView{}
+	if inv.Complete {
+		v.Package = "read " + vulnTime(inv.ReadAt) + ", " + strconv.Itoa(inv.Sources) + " source packages (" +
+			strconv.Itoa(inv.Binaries) + " binaries), complete"
+	} else {
+		reason := vulnText(inv.Reason, false)
+		if reason == "" {
+			reason = "reason not stored"
+		}
+		v.Package = "partial: " + reason
+	}
+	kernel := "Running kernel"
+	if rel := kernelText(inv.KernelRelease); rel != "" {
+		kernel += " " + rel
+	}
+	if inv.KernelMapped {
+		v.Kernel = kernel + ": mapped"
+	} else {
+		v.Kernel = kernel + ": " + labelKernelUnknown
+	}
+	return v
+}
+
+// kernelText makes the host-reported kernel release safe to show as text:
+// at most maxKernelShown characters, with control, format and bidi
+// characters replaced by U+FFFD (as executions/facts.go printable does).
+func kernelText(s string) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		if n >= maxKernelShown {
+			b.WriteString("…")
+			break
+		}
+		if !unicode.IsPrint(r) || unicode.Is(unicode.Bidi_Control, r) {
+			r = unicode.ReplacementChar
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return b.String()
 }
 
 // feedHasIssue reports whether a source has any feed label (not listed,
@@ -1135,6 +1302,11 @@ func (h *Handler) handleVulnSubject(w http.ResponseWriter, r *http.Request) {
 	groups := groupBySubject(c, VulnPage{Rows: rows, Truncated: page.Truncated, Subjects: []VulnSubjectStatus{c.subject(s)}}, views, vulnFilter{State: vulnStateAll})
 	if len(groups) == 1 {
 		d.Subject = &groups[0]
+	}
+	// The host's package inventory line (ADR 0011 D8) is shown with the page
+	// banners, the only text slot the subject page has without a template change.
+	if inv := hostInventoryView(c.subject(s)); inv != nil {
+		d.Banners = append(d.Banners, vulnBanner{Text: "Package inventory: " + inv.Package}, vulnBanner{Text: inv.Kernel})
 	}
 	d.TrivyLocal.besideHermes(rows, c.subject(s), d.Subject, now)
 	fix := h.newVulnFixResolver()
