@@ -49,6 +49,24 @@ type InstalledObserver interface {
 // results; nil turns it off. Call it before runs start.
 func (s *Service) SetInstalledObserver(o InstalledObserver) { s.installed = o }
 
+// ImageObserver receives every successful image.packages run of a host, once,
+// when the run finishes (ADR 0011 D3). It gets the host and the execution ID
+// only: the observer reads what the execution stored (the run's parameters,
+// its result and the host's stored docker.inspect), so the caller passes no
+// result and the observer starts no read. The observer must not fail the run:
+// it has no error to return.
+//
+// The call is synchronous on the finish path, like InstalledObserver's, and a
+// panic in it is recovered by the service, so the ops-state refresh always
+// runs.
+type ImageObserver interface {
+	ObserveImage(ctx context.Context, hostID, execID string)
+}
+
+// SetImageObserver installs the observer of image.packages results; nil turns
+// it off. Call it before runs start.
+func (s *Service) SetImageObserver(o ImageObserver) { s.image = o }
+
 // osChangeAction is the action whose successful finish marks an OS change of
 // a host: a full upgrade can move the host to a different release or
 // kernel-visible OS state, so a core.facts result read before it no longer
@@ -107,6 +125,17 @@ func (s *Service) observeInstalled(execID, host string, started, finished time.T
 	s.installed.ObserveInstalled(s.ctx, host, execID, started, finished, result)
 }
 
+// observeImage hands a successful image.packages run to the observer. A panic
+// in the observer is recovered and logged by class only, like observeInstalled.
+func (s *Service) observeImage(execID, host string) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Error("image observer", "host", host, "execution", execID, "error_class", "panic")
+		}
+	}()
+	s.image.ObserveImage(s.ctx, host, execID)
+}
+
 // observe keeps what successful read-only actions report about a host. at is
 // the host's finish time (finishHost's finished_at); started is when the run
 // began on the host.
@@ -116,6 +145,11 @@ func (s *Service) observe(execID, actionID, host, class string, started, at time
 		// Only a success carries the document; other classes keep none.
 		if class == "success" && s.installed != nil {
 			s.observeInstalled(execID, host, started, at, result)
+		}
+	case "image.packages":
+		// Only a success is an image read; the observer reads the stored result.
+		if class == "success" && s.image != nil {
+			s.observeImage(execID, host)
 		}
 	case "package.install_security", "package.install_all", "system.reboot":
 		// Packages may have changed: the stored update list is stale.
