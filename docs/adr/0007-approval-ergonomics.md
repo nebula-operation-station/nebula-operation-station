@@ -20,7 +20,8 @@ authority; no decision below is weakened.
 `fim.scan` as a durable job with its two fixed parameters; see [Addendum
 (2026-11-21): `fim.scan` as a durable, parameterised
 read](#addendum-2026-11-21-fimscan-as-a-durable-parameterised-read) at the
-end. No other action gets an exception.
+end. No other action gets a new exception; the grant-bound parameters of
+the image read leases (ADR 0011, amendment 2026-11-23) stay as they are.
 
 ## Context
 
@@ -468,9 +469,16 @@ records that decision and adds nothing to it.
 ADR 0015 sizes one `fim.scan` run at up to a 128 MiB raw document and a
 40 min action timeout, above the 1 MiB `result.json` default of spec 09
 ([ADR 0015 D6](0015-integrity-monitoring.md), "Limits",
-`docs/adr/0015-integrity-monitoring.md:624-627`). Read leases run attached
+`docs/adr/0015-integrity-monitoring.md:624-628`). Read leases run attached
 only, and the lease runner and the proposal path skip every durable action
-and every action with parameters (decision paper, section 2 (d) and (g)).
+(decision paper, section 2 (d) and (g)). An action with parameters runs in
+a read lease only on the grant-bound parameter path of the image read
+leases, `docker.inspect` and `image.packages` ([ADR 0011, amendment
+2026-11-23](0011-vulnerability-management.md#amendment-2026-11-23-imagepackages-read-lease-q4q5);
+`leaseActionParams` in `internal/executions/leaserunner.go`); every other
+action with parameters, `fim.scan` included, is skipped (previously: "skip
+every action with parameters", from the decision paper's older tree, before
+the image read leases).
 Keeping the scan attached would hold the read dispatch under the lease
 authority's lock for up to 40 min, so a lock or a read-grant revocation
 could wait that long (decision paper, section 2 (b) option 1). The
@@ -488,10 +496,16 @@ exactly its two fixed parameters, `mode` and `profile`, with the values the
 grant freezes ([spec 07](../spec/07-execution-model.md#v26-07-01)). Each
 run sends exactly the canonical parameters whose hash the grant binds; the
 executor refuses any other key, any other value and any other parameter
-hash. Every other parameterised action stays excluded from read-lease runs;
-this addendum makes no exception for any of them. (The sentence on
-parameterised inspection/status in "One standing read-grant mechanism"
-above is not changed by this addendum.)
+hash. `fim.scan` thereby joins the existing grant-bound parameter path of
+read leases, on which the image read leases already run `docker.inspect`
+and `image.packages` ([ADR 0011, amendment
+2026-11-23](0011-vulnerability-management.md#amendment-2026-11-23-imagepackages-read-lease-q4q5));
+those are the precedent and stay unchanged. This addendum adds no exception
+beyond `fim.scan`: every other parameterised action stays where it is today
+(previously: "Every other parameterised action stays excluded from
+read-lease runs", which read literally would have revoked the image read
+leases). (The sentence on parameterised inspection/status in "One standing
+read-grant mechanism" above is not changed by this addendum.)
 
 **F3 – Limits.** The run is bound by the action-specific `fim.scan` limits
 of [spec 09](../spec/09-untrusted-host-data.md#v26-09-01) (128 MiB raw
@@ -529,11 +543,15 @@ This addendum decides none of these points.
 ### Required specification changes (fi01)
 
 - `docs/spec/09-untrusted-host-data.md`
-  ([v26-09-01](../spec/09-untrusted-host-data.md#v26-09-01)): the
+  ([v26-09-01](../spec/09-untrusted-host-data.md#v26-09-01), revision
+  marker [v30-09-01](../spec/09-untrusted-host-data.md#v30-09-01)): the
   `fim.scan` limits apply to this action only, also to its durable result
   read. Done in fi01.
+- `docs/spec/04-revision-history.md`
+  ([v30-04-01](../spec/04-revision-history.md#v30-04-01)): a revision
+  entry. Done in fi01 (previously: open).
 - `docs/spec/07-execution-model.md`: read leases may run `fim.scan` as a
-  durable job (today the spec runs short read-only actions attached).
-  Not done in fi01; open.
-- `docs/spec/04-revision-history.md`: a revision entry. Not done in fi01;
-  open.
+  durable job. **Open follow-up, not done in fi01.** Until it is done,
+  spec 07 still describes read leases as attached-only and so disagrees
+  with this addendum and with spec 09 v30-09-01; this addendum is the
+  decision record for the durable `fim.scan` read.
