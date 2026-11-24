@@ -131,7 +131,9 @@ func TestConcurrentStoreWritersAllSucceed(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < rounds; i++ {
-			if err := s.UpsertDeviceReported(ctx, cbsDevice(), testRef()); err != nil {
+			// Each report is strictly newer than the last, so none is refused.
+			at := testBase.Add(-time.Hour).Add(time.Duration(i+1) * time.Second)
+			if err := s.UpsertDeviceReported(ctx, cbsDevice(), refAt(at)); err != nil {
 				errs <- err
 			}
 			if _, err := s.MarkStale(ctx); err != nil {

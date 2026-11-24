@@ -39,10 +39,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevcontract"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
@@ -312,30 +311,79 @@ func (s *Store) runHook(stage string) error {
 
 // SpoolRef names the spool record a device row is written from: the record's
 // file name and the SHA-256 of its bytes as lowercase hex.
+//
+// RecordedAt is when the collector wrote the record. It is required (a zero
+// time is refused) and it is what orders reports: a record not newer than the
+// stored one is refused (ErrReportNotNewer), so a replayed old record cannot
+// put back an old label or reference. A record time more than MaxReportSkew
+// after the store clock is refused (ErrRecordedInFuture), so one far-future
+// record cannot pin the row. GetDevice returns the reference without
+// RecordedAt: the time is on Device.ReportedAt.
 type SpoolRef struct {
-	Name   string
-	Digest string
+	Name       string
+	Digest     string
+	RecordedAt time.Time
 }
 
 // MaxSpoolRefName bounds SpoolRef.Name in bytes.
 const MaxSpoolRefName = 255
 
-// ErrBadSpoolRef is returned for a SpoolRef without a usable name or digest.
+// MaxReportSkew is how far a record time may lie ahead of the store clock.
+// It absorbs clock drift between the collector and the server.
+const MaxReportSkew = 5 * time.Minute
+
+// maxRecordedUnix is the largest Unix second whose microsecond value fits in
+// an int64 with room for the sub-second part.
+const maxRecordedUnix = math.MaxInt64/int64(time.Second/time.Microsecond) - 1
+
+// ErrBadSpoolRef is returned for a SpoolRef without a usable name, digest or
+// record time.
 var ErrBadSpoolRef = errors.New("netdevinventory: spool record reference is invalid")
+
+// ErrRecordedInFuture is returned when a record time lies more than
+// MaxReportSkew ahead of the store clock. Nothing is written.
+var ErrRecordedInFuture = errors.New("netdevinventory: spool record time is ahead of the store clock")
+
+// ErrReportNotNewer is returned when a report at the stored trust generation
+// does not have a record time after the stored report's. That covers an
+// older record, a replay of the stored record and a different record at the
+// same time: a write at an equal time is refused whatever its content, so
+// the row is never overwritten with device content the digest does not
+// vouch for. A caller that re-sends a stored record gets this error and the
+// row unchanged. Nothing is written.
+var ErrReportNotNewer = errors.New("netdevinventory: report is not newer than the stored report")
 
 // ErrUnreportedDevice is returned by UpsertDevice: a device row can only be
 // written from a spool record (UpsertDeviceReported), so the plain path
 // refuses every write.
 var ErrUnreportedDevice = errors.New("netdevinventory: device row needs a spool record")
 
-// validate checks the shape of ref: a non-empty, bounded, valid UTF-8 name
-// without control characters, and a 64-character lowercase hex digest.
+// validate checks the shape of ref: a name of 1 to MaxSpoolRefName bytes
+// from the ASCII alphabet (letters, digits, '-', '_', '.') that does not
+// start with '.' and does not contain "..", a 64-character lowercase hex
+// digest, and a record time from the Unix epoch up to the largest time
+// UnixMicro represents. The record time is required. The upper bound
+// against the store clock is checked when the report is written. The name
+// is used as a file name and is shown to people, so no path separator,
+// control or Unicode format character (such as U+202E) and no non-ASCII
+// letter is accepted. A leading '.' is refused too: "." names the spool
+// directory itself.
 func (r SpoolRef) validate() error {
-	if r.Name == "" || len(r.Name) > MaxSpoolRefName || !utf8.ValidString(r.Name) ||
-		strings.IndexFunc(r.Name, unicode.IsControl) >= 0 {
+	if r.Name == "" || len(r.Name) > MaxSpoolRefName || r.Name[0] == '.' || strings.Contains(r.Name, "..") {
 		return ErrBadSpoolRef
 	}
+	for i := 0; i < len(r.Name); i++ {
+		if !spoolNameByte(r.Name[i]) {
+			return ErrBadSpoolRef
+		}
+	}
 	if len(r.Digest) != 64 {
+		return ErrBadSpoolRef
+	}
+	if r.RecordedAt.IsZero() {
+		return ErrBadSpoolRef
+	}
+	if sec := r.RecordedAt.Unix(); sec < 0 || sec > maxRecordedUnix {
 		return ErrBadSpoolRef
 	}
 	for i := 0; i < len(r.Digest); i++ {
@@ -344,6 +392,17 @@ func (r SpoolRef) validate() error {
 		}
 	}
 	return nil
+}
+
+// spoolNameByte reports whether c may appear in SpoolRef.Name.
+func spoolNameByte(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
+	case c == '-', c == '_', c == '.':
+		return true
+	}
+	return false
 }
 
 // UpsertDeviceReported is the only writer of device rows (ND-16 variant 1).
@@ -385,20 +444,27 @@ func (s *Store) upsertDevice(ctx context.Context, d netdevcontract.Device, ref S
 	if err != nil {
 		return fmt.Errorf("netdevinventory: upsert device: %w", err)
 	}
-	now := micros(s.now())
+	at := s.now()
+	if ref.RecordedAt.After(at.Add(MaxReportSkew)) {
+		return fmt.Errorf("netdevinventory: device %s: %w", v.DeviceID, ErrRecordedInFuture)
+	}
+	now := micros(at)
+	reportedAt := micros(ref.RecordedAt)
 	return s.withTx(ctx, func(tx *sql.Tx) error {
 		var family string
 		var gen int64
-		err := tx.QueryRowContext(ctx, `SELECT family, trust_generation FROM netdev_devices_seen WHERE device_id = ?`,
-			v.DeviceID).Scan(&family, &gen)
+		var stored sql.NullInt64
+		err := tx.QueryRowContext(ctx, `SELECT family, trust_generation, reported_at
+			FROM netdev_devices_seen WHERE device_id = ?`, v.DeviceID).
+			Scan(&family, &gen, &stored)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			_, err = tx.ExecContext(ctx, `INSERT INTO netdev_devices_seen
 				(device_id, family, label, trust_generation, last_seen, state,
 				 origin, spool_name, spool_sha256, reported_at, created_at, updated_at)
-				VALUES (?, ?, ?, ?, NULL, 'fresh', ?, ?, ?, ?, ?, ?)`,
+				VALUES (?, ?, ?, ?, NULL, 'stale', ?, ?, ?, ?, ?, ?)`,
 				v.DeviceID, string(v.Family), v.Name, int64(v.TrustGeneration),
-				string(OriginCollectorReported), ref.Name, ref.Digest, now, now, now)
+				string(OriginCollectorReported), ref.Name, ref.Digest, reportedAt, now, now)
 			if err != nil {
 				return fmt.Errorf("netdevinventory: insert device %s: %w", v.DeviceID, err)
 			}
@@ -412,12 +478,19 @@ func (s *Store) upsertDevice(ctx context.Context, d netdevcontract.Device, ref S
 		if int64(v.TrustGeneration) < gen {
 			return fmt.Errorf("netdevinventory: device %s: %w", v.DeviceID, ErrTrustGenerationRegressed)
 		}
+		// At the same trust generation a report must be strictly newer than
+		// the stored one. An equal time is refused even for the same record:
+		// the digest does not vouch for the device content, so the row is
+		// never rewritten at the same time.
+		if int64(v.TrustGeneration) == gen && stored.Valid && reportedAt <= stored.Int64 {
+			return fmt.Errorf("netdevinventory: device %s: %w", v.DeviceID, ErrReportNotNewer)
+		}
 		_, err = tx.ExecContext(ctx, `UPDATE netdev_devices_seen
 			SET label = ?, trust_generation = ?, updated_at = ?,
 			    origin = ?, spool_name = ?, spool_sha256 = ?, reported_at = ?
 			WHERE device_id = ?`,
 			v.Name, int64(v.TrustGeneration), now,
-			string(OriginCollectorReported), ref.Name, ref.Digest, now, v.DeviceID)
+			string(OriginCollectorReported), ref.Name, ref.Digest, reportedAt, v.DeviceID)
 		if err != nil {
 			return fmt.Errorf("netdevinventory: update device %s: %w", v.DeviceID, err)
 		}
