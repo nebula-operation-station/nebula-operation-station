@@ -194,8 +194,8 @@ type imageGrant struct {
 // grantedImage loads the grant of execID on host from the stored execution.
 // ok is false when there is no successful image.packages run of execID on
 // host, when its parameters do not carry exactly one image reference (a run
-// started by a lease or a schedule stores no image parameter, so its reads are
-// refused), or when its stored result is larger than hostrun.MaxResult (such a
+// started by a schedule grant stores "{}", so its reads are refused; a lease
+// run stores the parameters it was sent with, see img03), or when its stored result is larger than hostrun.MaxResult (such a
 // result is not read). The result is the one the run stored, not one the
 // caller passes in.
 func grantedImage(ctx context.Context, db *sql.DB, host, execID string) (g imageGrant, ok bool, err error) {
@@ -246,8 +246,9 @@ func grantedImage(ctx context.Context, db *sql.DB, host, execID string) (g image
 // ObserveImage starts no read. It only reads what the executions already
 // stored.
 //
-// NOT WIRED: nothing in the server calls ObserveImage yet. Wiring must pass
-// the host and the execution's ID only.
+// The executions service calls ObserveImage once for each successful
+// image.packages run of a host, when the run finishes (main.go sets it with
+// SetImageObserver). The call passes the host and the execution's ID only.
 func (v *vulnImageService) ObserveImage(parent context.Context, hostID, execID string) {
 	ctx, cancel := context.WithTimeout(parent, observeTimeout)
 	defer cancel()

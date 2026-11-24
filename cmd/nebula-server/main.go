@@ -381,6 +381,13 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		return err
 	}
 	ops.SetInstalledObserver(invSvc)
+	// Image package reads (ADR 0011 D3): every successful image.packages run
+	// is stored as an image read, from the run's own stored result.
+	imgSvc, err := newVulnImageService(db, log)
+	if err != nil {
+		return err
+	}
+	ops.SetImageObserver(imgSvc)
 	// Ops agent notes (ADR 0016 D9): the suggestion index reads the notes
 	// store; the store's own file and retention loop live in ops.go.
 	opsNotes, err := newOpsNotes(cfg.DataDir)
