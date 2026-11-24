@@ -75,6 +75,18 @@ func TestNewReportRevivesReportStaleDevice(t *testing.T) {
 	}
 }
 
+// TestReportStaleWindowFollowsFactsCadence: the report window is the facts
+// cadence of ADR 0010 D4 times the missed-interval count, not a free value.
+// A change to either must be a deliberate, reviewed one.
+func TestReportStaleWindowFollowsFactsCadence(t *testing.T) {
+	if want := StaleAfterIntervals * FactsInterval; DeviceReportStaleAfter != want {
+		t.Fatalf("DeviceReportStaleAfter = %v, want %v (3 x facts interval)", DeviceReportStaleAfter, want)
+	}
+	if FactsInterval != 60*time.Minute || StaleAfterIntervals != 3 {
+		t.Fatalf("facts cadence %v x %d no longer matches ADR 0010 D4", FactsInterval, StaleAfterIntervals)
+	}
+}
+
 // TestReportStaleIgnoresZeroTime: a row no spool record wrote has no report
 // time (Device.ReportedAt is zero), and the report rule never judges it.
 func TestReportStaleIgnoresZeroTime(t *testing.T) {

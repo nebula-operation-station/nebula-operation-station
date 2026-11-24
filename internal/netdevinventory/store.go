@@ -107,9 +107,13 @@ const (
 	StaleAfterIntervals = 3
 	// DeviceReportStaleAfter is the age of the newest collector report
 	// (Device.ReportedAt) after which a device reads as stale, whatever its
-	// datasets say. It does not change dataset states. No ADR names a
-	// collector report cadence; this is a placeholder to be confirmed.
-	DeviceReportStaleAfter = 24 * time.Hour
+	// datasets say. It does not change dataset states. It is derived, not
+	// chosen: device facts are read on every device every FactsInterval
+	// (ADR 0010 D4, "Data and cadence"), and a device whose facts are missed
+	// for StaleAfterIntervals intervals is stale (ADR 0010 D4, "stale after
+	// three missed intervals"). ADR 0010 names no separate report cadence, so
+	// the facts read is the reference. Owner to confirm (open decision).
+	DeviceReportStaleAfter = StaleAfterIntervals * FactsInterval
 	// MaxFutureSkew bounds how far observed_at may lie ahead of the server
 	// clock. A later timestamp is refused: stored, it would make every
 	// genuine later read look out of order.
