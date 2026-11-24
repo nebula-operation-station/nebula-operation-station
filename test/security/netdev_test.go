@@ -2979,6 +2979,8 @@ func TestNetDevHostileDeviceOutputIsInertText(t *testing.T) {
 	t.Cleanup(func() { db.Close() })
 	now := time.Now().UTC().Truncate(time.Second)
 	inv := netdevinventory.NewWithNow(db, func() time.Time { return now })
+	// Device rows are written only from a spooled metadata record.
+	seedRef := netdevinventory.SpoolRef{Name: "netdev-security-seed.json", Digest: strings.Repeat("5e", 32)}
 	sw := netdevcontract.Device{DeviceID: "sw-edge", Name: "edge switch", Family: netdevcontract.FamilyCBS,
 		Endpoints: []netdevcontract.Endpoint{{Address: "10.20.0.3", Port: 22}}, PinKind: netdevcontract.PinSSHHostKey,
 		TrustPin: strings.Repeat("a", 64), TrustGeneration: 1}
@@ -2986,7 +2988,7 @@ func TestNetDevHostileDeviceOutputIsInertText(t *testing.T) {
 		Endpoints: []netdevcontract.Endpoint{{Address: "10.20.0.1", Port: 443}}, PinKind: netdevcontract.PinTLSLeaf,
 		TrustPin: strings.Repeat("b", 64), TrustGeneration: 1}
 	for _, d := range []netdevcontract.Device{sw, fw} {
-		if err := inv.UpsertDevice(ctx, d); err != nil {
+		if err := inv.UpsertDeviceReported(ctx, d, seedRef); err != nil {
 			t.Fatalf("upsert %s: %v", d.DeviceID, err)
 		}
 	}
@@ -2994,7 +2996,7 @@ func TestNetDevHostileDeviceOutputIsInertText(t *testing.T) {
 	// character in it is refused.
 	bad := sw
 	bad.Name = "sw\x1b[2J"
-	if err := inv.UpsertDevice(ctx, bad); err == nil {
+	if err := inv.UpsertDeviceReported(ctx, bad, seedRef); err == nil {
 		t.Error("device name with a terminal escape: accepted")
 	}
 
@@ -3089,7 +3091,7 @@ func TestNetDevHostileDeviceOutputIsInertText(t *testing.T) {
 		d := sw
 		d.DeviceID, d.Name, d.TrustPin = id, s, fmt.Sprintf("%064x", i+1)
 		d.Endpoints = []netdevcontract.Endpoint{{Address: fmt.Sprintf("10.20.1.%d", i+1), Port: 22}}
-		if err := inv.UpsertDevice(ctx, d); err != nil {
+		if err := inv.UpsertDeviceReported(ctx, d, seedRef); err != nil {
 			t.Fatalf("upsert %s with label %q: %v", id, s, err)
 		}
 		store.ids = append(store.ids, id)
@@ -3139,7 +3141,7 @@ func TestNetDevHostileDeviceOutputIsInertText(t *testing.T) {
 	probe := fw
 	probe.DeviceID, probe.TrustPin = "fw-probe", strings.Repeat("c", 64)
 	probe.Endpoints = []netdevcontract.Endpoint{{Address: "10.20.2.250", Port: 443}}
-	if err := inv.UpsertDevice(ctx, probe); err != nil {
+	if err := inv.UpsertDeviceReported(ctx, probe, seedRef); err != nil {
 		t.Fatalf("upsert fw-probe: %v", err)
 	}
 	type hostileMember struct{ id, field, value string }
@@ -3154,7 +3156,7 @@ func TestNetDevHostileDeviceOutputIsInertText(t *testing.T) {
 			d := fw
 			d.DeviceID, d.TrustPin = id, fmt.Sprintf("%064x", 0x100+len(hostileFW))
 			d.Endpoints = []netdevcontract.Endpoint{{Address: fmt.Sprintf("10.20.2.%d", len(hostileFW)+1), Port: 443}}
-			if err := inv.UpsertDevice(ctx, d); err != nil {
+			if err := inv.UpsertDeviceReported(ctx, d, seedRef); err != nil {
 				t.Fatalf("upsert %s: %v", id, err)
 			}
 			rows, err := ndIngest(ctx, inv, id, 1, now, pb.NetDeviceRead_NET_DEVICE_READ_PANOS_SECURITY_RULES, payload)

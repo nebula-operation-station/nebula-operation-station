@@ -61,8 +61,8 @@ func panosDevice() netdevcontract.Device {
 
 func addDevice(t *testing.T, s *Store, d netdevcontract.Device) {
 	t.Helper()
-	if err := s.UpsertDevice(context.Background(), d); err != nil {
-		t.Fatalf("UpsertDevice: %v", err)
+	if err := s.UpsertDeviceReported(context.Background(), d, testRef()); err != nil {
+		t.Fatalf("UpsertDeviceReported: %v", err)
 	}
 }
 
@@ -664,18 +664,18 @@ func TestUpsertDeviceGuards(t *testing.T) {
 
 	d := cbsDevice()
 	d.TrustGeneration = 1
-	if err := s.UpsertDevice(ctx, d); !errors.Is(err, ErrTrustGenerationRegressed) {
+	if err := s.UpsertDeviceReported(ctx, d, testRef()); !errors.Is(err, ErrTrustGenerationRegressed) {
 		t.Fatalf("regress err = %v", err)
 	}
 	p := panosDevice()
 	p.DeviceID = "sw-core"
-	if err := s.UpsertDevice(ctx, p); !errors.Is(err, ErrFamilyChanged) {
+	if err := s.UpsertDeviceReported(ctx, p, testRef()); !errors.Is(err, ErrFamilyChanged) {
 		t.Fatalf("family err = %v", err)
 	}
 	d = cbsDevice()
 	d.Name = "<b>renamed</b>"
 	d.TrustGeneration = 3
-	if err := s.UpsertDevice(ctx, d); err != nil {
+	if err := s.UpsertDeviceReported(ctx, d, testRef()); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := s.GetDevice(ctx, "sw-core")
@@ -683,7 +683,7 @@ func TestUpsertDeviceGuards(t *testing.T) {
 		t.Fatalf("device = %+v", got)
 	}
 	d.Name = strings.Repeat("x", netdevcontract.MaxLabelBytes+1)
-	if err := s.UpsertDevice(ctx, d); !errors.Is(err, netdevcontract.ErrInvalid) {
+	if err := s.UpsertDeviceReported(ctx, d, testRef()); !errors.Is(err, netdevcontract.ErrInvalid) {
 		t.Fatalf("long label err = %v", err)
 	}
 	if _, err := s.GetDevice(ctx, "nope"); !errors.Is(err, ErrDeviceNotFound) {
