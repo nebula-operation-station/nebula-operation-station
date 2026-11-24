@@ -1365,10 +1365,12 @@ recorded at a criticality (`nebula host pin --criticality`).
 `package.refresh`, `docker.logs` and secret-bearing actions are excluded even
 when rated LOW.
 
-The form offers only actions that take no parameters. `docker.inspect`,
-`image.packages` and `fim.scan` are on the allowlist, but the form does not
-offer them on main: the first two take a parameter, and `fim.scan` is not in
-the action catalogue the form reads.
+The general action list of the form offers only actions that take no
+parameters. `docker.inspect` and `image.packages` take a parameter and are
+offered only together, in the separate *Image packages* section (see *Image
+package leases* below). `fim.scan` is on the allowlist, but the form does not
+offer it: it is not in the action catalogue the form reads. (Previously: the
+form offered none of the three.)
 
 When the executor refuses a proposal because something is not LOW, its
 refusal (`schedule_grant_invalid`) now names every blocking host, not just
@@ -1414,7 +1416,7 @@ either one:
   `FimScanFullMinInterval`). A lease binds one mode.
 
 `image.packages` and `core.facts` have no floor of their own beyond the
-lease's interval.
+lease's interval (an image lease's interval is 24 hours, see below).
 Telemetry is a separately approved profile (10-second live reads,
 5-minute history, its own budget).
 
@@ -1431,6 +1433,58 @@ missed runs. Runs with secrets cannot be leased.
 Managing. *Revoke* (on the lease page) stops a lease at once and needs no
 assertion; on the executor host `nebula read-grant revoke <id>` does the
 same. `nebula read-grant pending` shows leases awaiting approval.
+
+Image package leases. An image package lease reads the package list of one
+container image on one host for the vulnerability inventory (section 10.4).
+Create it on *Operations → Read leases → New read lease*, section *Image
+packages*: choose the host, click *Show containers*, pick one container and
+image, choose 7 or 30 days and click *Preview*.
+
+- **Before you start.** Trivy must be installed on the host by you, the
+  operator; NOS never installs it. A successful `docker.inspect` of the
+  container must have finished in the **last 24 hours**: run it with the
+  *inspect* link next to the container on the host page. Without such a
+  result the section offers no image and says "No container image is known
+  for this host yet". The section lists at most 200 container and image
+  pairs, taken from the newest 500 `docker.inspect` results of the host.
+- **What one lease covers.** One host, one container and one image, pinned
+  by digest as `repository@sha256:<digest>`. The lease binds two actions:
+  `docker.inspect` with the container name and `image.packages` with the
+  image reference. Each parameter is bound by its hash in the lease; the
+  preview page shows both values in plain text under *Parameters (plain
+  text)*. Check the host, the container and the image there before you
+  approve.
+- **Fixed values.** Interval **24 hours**; run budget **2 runs per host in
+  a rolling hour**; duration **7 or 30 days**; triggers `scheduled` and
+  `on_demand`, like every lease from this page. There are no fields for
+  them.
+- **Approval.** As for every read lease: approve it with your security key;
+  in hardened mode run `nebula read-grant approve <digest>` on the executor
+  host with the full digest.
+- **Running.** Each due run executes `docker.inspect` first. `image.packages`
+  runs in the same scheduler pass only when that `docker.inspect` succeeded;
+  otherwise it waits for the next due run.
+- **After an image update.** The lease keeps the digest it was approved
+  for. A container that now runs a new image (new digest) needs a new lease
+  for that digest. *Refresh* on an image lease opens the *Image packages*
+  section for the same host, and the new digest is offered there once a
+  `docker.inspect` of the last 24 hours names it.
+
+Safety rules of image package leases:
+
+- The executor accepts the lease only when both actions are rated LOW on the
+  chosen host (section 8.1), like every read lease. It checks the parameter
+  hashes, the artifact and the LOW rating again on every run.
+- `image.packages` runs the host's own Trivy offline on the local image: no
+  pull, no installation and no vulnerability database update. Only the
+  package lists leave the host: ecosystem, name, version and source package
+  of each entry, plus the image's OS and its digest references.
+- The server stores a read only when a successful `docker.inspect` result of
+  the same host, finished in the 24 hours before the `image.packages` run
+  finished, names that image (repository and digest). Otherwise nothing is
+  stored and the server log has an `audit` line `vuln_image_read_refused`
+  with reason `digest_not_in_inspect`. The lease's own `docker.inspect` runs
+  keep this window filled while the container runs the image.
 
 Legacy schedules. The *Operations → Scheduled checks* page (`/schedules`)
 still proposes `read-schedule-v1` grants: chosen hosts and actions, an
