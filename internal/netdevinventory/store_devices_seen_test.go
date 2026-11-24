@@ -12,12 +12,27 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevcontract"
 )
 
-// testRef is a well-formed spool reference for the report tests.
+// testRef is a well-formed spool reference for the report tests. Its
+// RecordedAt is an hour before the test store clock (testBase).
 func testRef() SpoolRef {
 	return SpoolRef{
-		Name:   "sw-core-cbs_version-1700000000000000000-ABCDEFGHIJKLMNOPQRSTUVWXYZ.json",
-		Digest: strings.Repeat("ab", 32),
+		Name:       "sw-core-cbs_version-1700000000000000000-ABCDEFGHIJKLMNOPQRSTUVWXYZ.json",
+		Digest:     strings.Repeat("ab", 32),
+		RecordedAt: testBase.Add(-time.Hour),
 	}
+}
+
+// refAt is testRef with another record time.
+func refAt(at time.Time) SpoolRef {
+	r := testRef()
+	r.RecordedAt = at
+	return r
+}
+
+// spoolRefOf is the reference GetDevice returns for r: name and digest only,
+// the record time is on Device.ReportedAt.
+func spoolRefOf(r SpoolRef) SpoolRef {
+	return SpoolRef{Name: r.Name, Digest: r.Digest}
 }
 
 // deviceSnapshot is the part of a stored device row a refused write must
@@ -54,7 +69,7 @@ func TestMetadataReportNeverMovesLastSeen(t *testing.T) {
 	}
 	for i := 1; i <= 3; i++ {
 		*clock = clock.Add(time.Minute)
-		if err := s.UpsertDeviceReported(ctx, cbsDevice(), testRef()); err != nil {
+		if err := s.UpsertDeviceReported(ctx, cbsDevice(), refAt(*clock)); err != nil {
 			t.Fatalf("report %d: %v", i, err)
 		}
 	}
@@ -69,7 +84,7 @@ func TestMetadataReportNeverMovesLastSeen(t *testing.T) {
 	observed := *clock
 	mustReplace(t, s, "sw-core", ReadVLANs, observed, false, VLANRows{{ID: 1, Name: "default"}})
 	*clock = clock.Add(time.Minute)
-	if err := s.UpsertDeviceReported(ctx, cbsDevice(), testRef()); err != nil {
+	if err := s.UpsertDeviceReported(ctx, cbsDevice(), refAt(*clock)); err != nil {
 		t.Fatal(err)
 	}
 	got, err = s.GetDevice(ctx, "sw-core")
@@ -104,6 +119,9 @@ func TestSpoolRefNameAlphabet(t *testing.T) {
 		{"parent traversal", "../sw.json", true},
 		{"double dot inside name", "sw..json", true},
 		{"only double dots", "..", true},
+		{"single dot", ".", true},
+		{"leading dot", ".hidden.json", true},
+		{"leading double dot", "..json", true},
 		{"right-to-left override", "sw\xe2\x80\xaejson.exe", true},
 		{"zero-width space", "sw\xe2\x80\x8bcore.json", true},
 		{"byte order mark", "\xef\xbb\xbfsw.json", true},
@@ -118,7 +136,7 @@ func TestSpoolRefNameAlphabet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := SpoolRef{Name: tt.file, Digest: good}.validate()
+			err := SpoolRef{Name: tt.file, Digest: good, RecordedAt: testBase}.validate()
 			if tt.wantErr && !errors.Is(err, ErrBadSpoolRef) {
 				t.Fatalf("validate(%q) = %v, want ErrBadSpoolRef", tt.file, err)
 			}
@@ -153,7 +171,11 @@ func TestUpsertDeviceReportedRejectsBadSpoolRef(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s, db, _ := newTestStore(t)
-			err := s.UpsertDeviceReported(ctx, cbsDevice(), tt.ref)
+			// Every row carries a valid record time, so the refusal is for the
+			// name or digest. A missing time is covered by TestRecordedAtIsRequired.
+			ref := tt.ref
+			ref.RecordedAt = good.RecordedAt
+			err := s.UpsertDeviceReported(ctx, cbsDevice(), ref)
 			if !errors.Is(err, ErrBadSpoolRef) {
 				t.Fatalf("err = %v, want ErrBadSpoolRef", err)
 			}
@@ -297,7 +319,7 @@ func TestMetadataReportKeepsStaleAndDatasetRevives(t *testing.T) {
 		t.Fatalf("State after MarkStale = %v, want stale", got.State)
 	}
 
-	if err := s.UpsertDeviceReported(ctx, cbsDevice(), testRef()); err != nil {
+	if err := s.UpsertDeviceReported(ctx, cbsDevice(), refAt(*clock)); err != nil {
 		t.Fatal(err)
 	}
 	if got := snapshotDevice(t, s, "sw-core"); got.State != DeviceStale {
@@ -322,7 +344,8 @@ func TestLaterReportKeepsDatasetLastSeen(t *testing.T) {
 	mustReplace(t, s, "sw-core", ReadVLANs, observed, false, VLANRows{{ID: 1, Name: "default"}})
 	renamed := cbsDevice()
 	renamed.Name = "renamed"
-	if err := s.UpsertDeviceReported(ctx, renamed, testRef()); err != nil {
+	*clock = clock.Add(time.Minute)
+	if err := s.UpsertDeviceReported(ctx, renamed, refAt(*clock)); err != nil {
 		t.Fatal(err)
 	}
 	got, err := s.GetDevice(ctx, "sw-core")
@@ -359,37 +382,39 @@ func TestLegacyUnreportedRowReadsAsUnreported(t *testing.T) {
 	}
 
 	*clock = clock.Add(time.Minute)
-	if err := s.UpsertDeviceReported(ctx, cbsDevice(), testRef()); err != nil {
+	if err := s.UpsertDeviceReported(ctx, cbsDevice(), refAt(*clock)); err != nil {
 		t.Fatal(err)
 	}
 	got, err = s.GetDevice(ctx, "sw-core")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Origin != OriginCollectorReported || got.Spool != testRef() {
+	if got.Origin != OriginCollectorReported || got.Spool != spoolRefOf(testRef()) {
 		t.Fatalf("after report: Origin %q Spool %+v, want collector reported with the record", got.Origin, got.Spool)
 	}
 }
 
 // TestReportedRowCarriesSpoolReference: a report stores the spool record it
-// came from and when it was accepted, and a newer report replaces both.
+// came from and the record time it carries (ReportedAt); a newer report
+// replaces both.
 func TestReportedRowCarriesSpoolReference(t *testing.T) {
 	s, _, clock := newTestStore(t)
 	ctx := context.Background()
-	if err := s.UpsertDeviceReported(ctx, cbsDevice(), testRef()); err != nil {
+	first := testRef()
+	if err := s.UpsertDeviceReported(ctx, cbsDevice(), first); err != nil {
 		t.Fatal(err)
 	}
-	first := micros(*clock)
 	got, err := s.GetDevice(ctx, "sw-core")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Origin != OriginCollectorReported || got.Spool != testRef() || !got.ReportedAt.Equal(fromMicros(first)) {
+	if got.Origin != OriginCollectorReported || got.Spool != spoolRefOf(first) || !got.ReportedAt.Equal(first.RecordedAt) {
 		t.Fatalf("after report: Origin %q Spool %+v ReportedAt %v", got.Origin, got.Spool, got.ReportedAt)
 	}
 
 	newer := SpoolRef{Name: "sw-core-cbs_version-1800000000000000000-ZZZ.json", Digest: strings.Repeat("cd", 32)}
 	*clock = clock.Add(time.Minute)
+	newer.RecordedAt = *clock
 	if err := s.UpsertDeviceReported(ctx, cbsDevice(), newer); err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +422,7 @@ func TestReportedRowCarriesSpoolReference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Spool != newer || !got.ReportedAt.Equal(fromMicros(micros(*clock))) {
+	if got.Spool != spoolRefOf(newer) || !got.ReportedAt.Equal(*clock) {
 		t.Fatalf("after newer report: Spool %+v ReportedAt %v, want %+v at %v", got.Spool, got.ReportedAt, newer, *clock)
 	}
 }
@@ -438,24 +463,135 @@ func TestReplayedOlderRecordChangesNothing(t *testing.T) {
 	}
 }
 
-// TestReportAtSameTimeNeedsSameRecord: a record with the report time already
-// stored is accepted only when it is the same record. A different record at
-// the same time is ambiguous and refused.
-func TestReportAtSameTimeNeedsSameRecord(t *testing.T) {
+// TestReportAtSameTimeIsRefused: a report whose record time equals the stored
+// one is refused, whether it is another record or the same record again, and
+// whatever device content it carries. The store cannot tie the device content
+// to the digest, so it never overwrites a row at an equal time. The row keeps
+// its label and reference.
+func TestReportAtSameTimeIsRefused(t *testing.T) {
 	s, _, _ := newTestStore(t)
 	ctx := context.Background()
-	t0 := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
-	first := testRef()
-	first.RecordedAt = t0
-	if err := s.UpsertDeviceReported(ctx, cbsDevice(), first); err != nil {
+	t0 := testBase.Add(-time.Hour)
+	if err := s.UpsertDeviceReported(ctx, cbsDevice(), refAt(t0)); err != nil {
 		t.Fatal(err)
 	}
+	before := snapshotDevice(t, s, "sw-core")
+
 	other := SpoolRef{Name: "other.json", Digest: strings.Repeat("cd", 32), RecordedAt: t0}
-	if err := s.UpsertDeviceReported(ctx, cbsDevice(), other); !errors.Is(err, ErrReportNotNewer) {
-		t.Fatalf("different record at the same time err = %v, want ErrReportNotNewer", err)
+	relabelled := cbsDevice()
+	relabelled.Name = "relabelled at the same time"
+	tests := []struct {
+		name string
+		dev  netdevcontract.Device
+		ref  SpoolRef
+	}{
+		{"other record at the same time", cbsDevice(), other},
+		{"same record, same content", cbsDevice(), refAt(t0)},
+		{"same record, other label", relabelled, refAt(t0)},
 	}
-	if err := s.UpsertDeviceReported(ctx, cbsDevice(), first); err != nil {
-		t.Fatalf("same record again: %v, want nil", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := s.UpsertDeviceReported(ctx, tt.dev, tt.ref); !errors.Is(err, ErrReportNotNewer) {
+				t.Fatalf("err = %v, want ErrReportNotNewer", err)
+			}
+			if after := snapshotDevice(t, s, "sw-core"); after != before {
+				t.Fatalf("row changed: before %+v, after %+v", before, after)
+			}
+		})
+	}
+}
+
+// TestRecordedAtIsRequired: a zero record time is refused and creates no row.
+// There is no fallback to the accept time, so replay protection always applies.
+func TestRecordedAtIsRequired(t *testing.T) {
+	s, db, _ := newTestStore(t)
+	ctx := context.Background()
+	err := s.UpsertDeviceReported(ctx, cbsDevice(), SpoolRef{Name: testRef().Name, Digest: testRef().Digest})
+	if !errors.Is(err, ErrBadSpoolRef) {
+		t.Fatalf("zero RecordedAt err = %v, want ErrBadSpoolRef", err)
+	}
+	if n := countRows(t, db, `SELECT COUNT(*) FROM netdev_devices_seen`); n != 0 {
+		t.Fatalf("rows = %d, want 0 after refusal", n)
+	}
+}
+
+// TestSpoolRefRecordedAtRange: the record time must be at or after the Unix
+// epoch and inside the range UnixMicro can represent. Anything else is
+// refused with ErrBadSpoolRef and is never converted silently.
+func TestSpoolRefRecordedAtRange(t *testing.T) {
+	tests := []struct {
+		name    string
+		at      time.Time
+		wantErr bool
+	}{
+		{"epoch", time.Unix(0, 0).UTC(), false},
+		{"typical", testBase, false},
+		{"one microsecond before epoch", time.Unix(0, 0).UTC().Add(-time.Microsecond), true},
+		{"1969", time.Date(1969, 12, 31, 23, 59, 59, 0, time.UTC), true},
+		{"very old", time.Date(1, 1, 1, 0, 0, 0, 1, time.UTC), true},
+		{"beyond UnixMicro range", time.Date(300000, 1, 1, 0, 0, 0, 0, time.UTC), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := refAt(tt.at).validate()
+			if tt.wantErr && !errors.Is(err, ErrBadSpoolRef) {
+				t.Fatalf("validate(RecordedAt %v) = %v, want ErrBadSpoolRef", tt.at, err)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("validate(RecordedAt %v) = %v, want nil", tt.at, err)
+			}
+		})
+	}
+}
+
+// TestFarFutureReportRefused: a record time more than MaxReportSkew after the
+// store clock is refused with ErrRecordedInFuture and creates no row, so a
+// far-future record cannot pin the row. A record exactly MaxReportSkew ahead
+// is accepted.
+func TestFarFutureReportRefused(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name    string
+		at      time.Time
+		wantErr bool
+	}{
+		{"year 9999", time.Date(9999, 12, 31, 23, 59, 59, 0, time.UTC), true},
+		{"one second beyond skew", testBase.Add(MaxReportSkew + time.Second), true},
+		{"exactly the skew", testBase.Add(MaxReportSkew), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, db, _ := newTestStore(t)
+			err := s.UpsertDeviceReported(ctx, cbsDevice(), refAt(tt.at))
+			if tt.wantErr {
+				if !errors.Is(err, ErrRecordedInFuture) {
+					t.Fatalf("err = %v, want ErrRecordedInFuture", err)
+				}
+				if n := countRows(t, db, `SELECT COUNT(*) FROM netdev_devices_seen`); n != 0 {
+					t.Fatalf("rows = %d, want 0 after refusal", n)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("err = %v, want nil", err)
+			}
+		})
+	}
+}
+
+// TestGenuineReportAfterSkewedRecordIsAccepted: a record just inside the skew
+// does not block a later genuine report.
+func TestGenuineReportAfterSkewedRecordIsAccepted(t *testing.T) {
+	s, _, clock := newTestStore(t)
+	ctx := context.Background()
+	if err := s.UpsertDeviceReported(ctx, cbsDevice(), refAt(testBase.Add(MaxReportSkew))); err != nil {
+		t.Fatal(err)
+	}
+	*clock = clock.Add(10 * time.Minute)
+	genuine := refAt(*clock)
+	genuine.Name = "sw-core-cbs_version-1700000000000000001-ZZZ.json"
+	if err := s.UpsertDeviceReported(ctx, cbsDevice(), genuine); err != nil {
+		t.Fatalf("genuine report after skewed record: %v", err)
 	}
 }
 
