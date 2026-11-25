@@ -12,10 +12,14 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/fimscan"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/schedgrant"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport"
 )
 
 // Schedule grants (docs/implementation/schedule-grants.md). The rules are
@@ -131,8 +135,11 @@ func (s *Service) RunRead(ctx context.Context, trigger string, req *pb.RunSchedu
 		return nil, status.Error(codes.InvalidArgument, "a scheduled run has no permit digest")
 	}
 	timeout := time.Duration(req.GetTimeoutSeconds()) * time.Second
-	if timeout > hostrun.MaxTimeout {
-		return nil, status.Errorf(codes.InvalidArgument, "timeout above %s", hostrun.MaxTimeout)
+	if limit := readTimeoutLimit(r.GetActionId()); timeout > limit {
+		return nil, status.Errorf(codes.InvalidArgument, "timeout above %s", limit)
+	}
+	if err := checkReadAction(r.GetActionId()); err != nil {
+		return nil, err
 	}
 	release, err := s.admitRead()
 	if err != nil {
@@ -176,21 +183,11 @@ func (s *Service) RunRead(ctx context.Context, trigger string, req *pb.RunSchedu
 		return &pb.RunScheduledResponse{ExecutionId: id, Result: resp}, nil
 	}
 	resp.Endpoint = c.Endpoint.String()
-	// Attached's own timer starts after NewSession. A hostile peer can
-	// otherwise stall channel creation forever while holding the lifecycle
-	// guard. Bound the entire dispatch and close the connection on expiry.
-	dispatchTimeout := timeout
-	if dispatchTimeout <= 0 {
-		dispatchTimeout = hostrun.DefaultTimeout
-	}
-	dispatchCtx, cancel := context.WithTimeout(ctx, dispatchTimeout)
-	defer cancel()
-	defer closeReadConnectionOnCancel(dispatchCtx, c)()
 	// The handshake can block while a lease is revoked or the executor is
 	// locked. Recheck authority and local pin/credential state immediately
 	// before dispatch, serialized with lifecycle changes, without claiming
 	// another budget unit.
-	err = dispatch(grant, func() error {
+	recheck := func(dispatchCtx context.Context) error {
 		if err := dispatchCtx.Err(); err != nil {
 			return status.Error(codes.Canceled, "read canceled before dispatch")
 		}
@@ -207,6 +204,25 @@ func (s *Service) RunRead(ctx context.Context, trigger string, req *pb.RunSchedu
 		current, err := s.keys.Signer(r.GetCredentialRef())
 		if err != nil || ssh.FingerprintSHA256(current.PublicKey()) != run.CredentialVersion {
 			return status.Error(codes.PermissionDenied, "read credential version changed before dispatch")
+		}
+		return nil
+	}
+	if durableReadAction(r.GetActionId()) {
+		return s.dispatchDurableRead(ctx, dispatch, grant, req, c, recheck, resp, start, label, timeout)
+	}
+	// Attached's own timer starts after NewSession. A hostile peer can
+	// otherwise stall channel creation forever while holding the lifecycle
+	// guard. Bound the entire dispatch and close the connection on expiry.
+	dispatchTimeout := timeout
+	if dispatchTimeout <= 0 {
+		dispatchTimeout = hostrun.DefaultTimeout
+	}
+	dispatchCtx, cancel := context.WithTimeout(ctx, dispatchTimeout)
+	defer cancel()
+	defer closeReadConnectionOnCancel(dispatchCtx, c)()
+	err = dispatch(grant, func() error {
+		if err := recheck(dispatchCtx); err != nil {
+			return err
 		}
 		res, err := hostrun.Attached(dispatchCtx, c.Client, grant.ExecutionID, grant.Parameters, r.GetArtifact(), timeout)
 		if err != nil {
@@ -228,6 +244,120 @@ func (s *Service) RunRead(ctx context.Context, trigger string, req *pb.RunSchedu
 	}
 	resp.DurationMs = time.Since(start).Milliseconds()
 	s.auditScheduled(label, id, r.GetHostId(), resp)
+	return &pb.RunScheduledResponse{ExecutionId: id, Result: resp}, nil
+}
+
+// Durable reads (decisions (b)/(g) option 2,
+// docs/implementation/integrity-wiring-decisions.md). Only fim.scan runs as
+// a durable job from a read lease: its 40 minute timeout and its result of
+// up to 128 MiB do not fit an attached run, which would hold the read
+// guard, and with it Lock and every revocation, for the whole run.
+const (
+	// fimScanReadTimeout is the longest timeout a fim.scan read may ask
+	// for, and its default: the action's own limit (ADR 0015 D6), never
+	// above the durable maximum.
+	fimScanReadTimeout = min(fimscan.ActionTimeout, hostrun.MaxDurableTimeout)
+	// durableReadDispatchTimeout bounds storing and starting a durable read
+	// job on the host (not the job). The dispatch holds the read guard, so
+	// Lock and a revocation wait at most this long for it.
+	durableReadDispatchTimeout = 30 * time.Second
+)
+
+// durableReadAction reports whether a read of actionID runs as a durable
+// job. Only fim.scan does.
+func durableReadAction(actionID string) bool {
+	return actionID == permit.FimScanActionID
+}
+
+// readTimeoutLimit is the longest timeout a read of actionID may ask for:
+// fim.scan's own limit, the attached maximum for every other action.
+func readTimeoutLimit(actionID string) time.Duration {
+	if durableReadAction(actionID) {
+		return fimScanReadTimeout
+	}
+	return hostrun.MaxTimeout
+}
+
+// checkReadAction refuses a durable built-in action other than fim.scan
+// before anything is reserved: the read path would run it attached, which
+// its contract does not allow, and only fim.scan has a durable read branch.
+func checkReadAction(actionID string) error {
+	if durableReadAction(actionID) {
+		return nil
+	}
+	if a, ok := actions.Lookup(actionID); ok && a.Durable {
+		return status.Error(codes.InvalidArgument, "read: a durable action other than fim.scan cannot run from a read lease")
+	}
+	return nil
+}
+
+// dispatchDurableRead stores and starts an authorized fim.scan read as a
+// durable job. Recording and starting the job are serialized with Lock and
+// both revocations like an attached dispatch (the claim is rechecked and
+// spent under the read guard), so once Lock or a revocation has returned
+// no job of a claim made before it starts. The job itself runs after the
+// guard is released: lifecycle calls never wait for it. Like every durable
+// job (spec 07) it is not cancelled by a later Lock or revocation; the
+// reconciler collects its outcome (once the keyring is unlocked).
+//
+// The response carries the run's class and state only, never the result
+// document: the reconciler reads that with the fim.scan limit.
+func (s *Service) dispatchDurableRead(ctx context.Context, dispatch func(permit.Grant, func() error) error, grant permit.Grant,
+	req *pb.RunScheduledRequest, c *sshtransport.Client, recheck func(context.Context) error, resp *pb.RunAttachedResponse,
+	start time.Time, label string, timeout time.Duration) (*pb.RunScheduledResponse, error) {
+	r := req.GetRun()
+	if timeout <= 0 {
+		timeout = fimScanReadTimeout
+	}
+	id, host := grant.ExecutionID, r.GetHostId()
+	key := id + "/" + host
+	s.setDispatching(key, true)
+	defer s.setDispatching(key, false)
+	dispatchCtx, cancel := context.WithTimeout(ctx, durableReadDispatchTimeout)
+	defer cancel()
+	defer closeReadConnectionOnCancel(dispatchCtx, c)()
+	var finish *executordb.Run
+	err := dispatch(grant, func() error {
+		if err := recheck(dispatchCtx); err != nil {
+			return err
+		}
+		// Recorded before anything goes to the host: a crash from here on
+		// is reconciled, never dispatched again.
+		if err := s.db.CreateRun(executordb.Run{ExecutionID: id, HostID: host, Digest: label, Endpoints: req.GetEndpoints(),
+			Fingerprint: r.GetHostKeyFingerprint(), Timeout: timeout, ActionID: permit.FimScanActionID}); err != nil {
+			s.log.Error("audit", "kind", "store_error", "op", "create_run", "digest", label, "host", host, "detail", err.Error())
+			return status.Error(codes.Unavailable, "storage_error: the read was authorized but could not be recorded; it was not started")
+		}
+		s.log.Info("audit", "kind", "run_dispatching", "digest", label, "host", host, "execution", id)
+		// finishRun reports to the authority, which this callback must not
+		// reenter: a run that ends at dispatch is closed after the guard.
+		finish = s.dispatchDurableJob(dispatchCtx, c, id, host, label, grant.Parameters, r.GetArtifact(), timeout)
+		return nil
+	})
+	if finish != nil {
+		s.finishRun(*finish)
+	}
+	if err != nil {
+		resp.Class, resp.Detail = "read_denied", "read authority changed before dispatch"
+		if permit.CodeOf(err) == "" && status.Code(err) == codes.Unavailable {
+			resp.Class, resp.Detail = classNotExecuted, "the read could not be recorded"
+		}
+		resp.DurationMs = time.Since(start).Milliseconds()
+		s.auditScheduled(label, id, host, resp)
+		if permit.CodeOf(err) != "" {
+			return nil, toStatus(err)
+		}
+		return nil, err
+	}
+	st, err := s.runStatus(id, host, false)
+	if err != nil {
+		return nil, err
+	}
+	resp.Class, resp.ExitCode, resp.Detail = st.GetClass(), st.GetExitCode(), "durable job "+st.GetState()
+	if st.GetDetail() != "" {
+		resp.Detail += ": " + st.GetDetail()
+	}
+	resp.DurationMs = time.Since(start).Milliseconds()
 	return &pb.RunScheduledResponse{ExecutionId: id, Result: resp}, nil
 }
 

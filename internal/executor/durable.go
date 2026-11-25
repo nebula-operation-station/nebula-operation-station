@@ -5,6 +5,8 @@ package executor
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -15,6 +17,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/sshtransport"
 )
 
 // Durable runs (spec 07). Outcome classes besides hostrun's.
@@ -85,34 +88,47 @@ func (s *Service) StartDurable(ctx context.Context, req *pb.StartDurableRequest)
 		return s.runResponse(grant.ExecutionID, r.GetHostId(), false)
 	}
 	defer c.Close()
+	if fin := s.dispatchDurableJob(ctx, c, grant.ExecutionID, r.GetHostId(), d.String(), grant.Parameters, r.GetArtifact(), timeout, secrets...); fin != nil {
+		s.finishRun(*fin)
+	}
+	return s.runResponse(grant.ExecutionID, r.GetHostId(), false)
+}
+
+// dispatchDurableJob stores and starts the job of a recorded run over c
+// and records how far it got. A connection that breaks during the dispatch
+// leaves the run open for the reconciler. It does not call the authority:
+// a run that ends here is returned for the caller to finish (finishRun),
+// so a caller that holds the read guard can finish it after the guard.
+// digest names the run in the audit (a permit digest or a read grant).
+func (s *Service) dispatchDurableJob(ctx context.Context, c *sshtransport.Client, executionID, hostID, digest string, params, artifact []byte,
+	timeout time.Duration, secrets ...hostrun.Secret) *executordb.Run {
 	endpoint := c.Endpoint.String()
 	// The endpoint is recorded before anything is sent (ep02): a dispatch
 	// that breaks mid-way still names where it was attempted. Without the
 	// record nothing is dispatched.
-	if err := s.db.SetRunDispatchEndpoint(grant.ExecutionID, r.GetHostId(), endpoint); err != nil {
-		s.log.Error("audit", "kind", "store_error", "op", "set_run_dispatch_endpoint", "execution", grant.ExecutionID, "detail", err.Error())
-		s.finishRun(executordb.Run{ExecutionID: grant.ExecutionID, HostID: r.GetHostId(), Class: classNotExecuted,
-			Detail: "not dispatched: the dispatch endpoint could not be recorded", ExitCode: -1})
-		return s.runResponse(grant.ExecutionID, r.GetHostId(), false)
+	if err := s.db.SetRunDispatchEndpoint(executionID, hostID, endpoint); err != nil {
+		s.log.Error("audit", "kind", "store_error", "op", "set_run_dispatch_endpoint", "execution", executionID, "detail", err.Error())
+		return &executordb.Run{ExecutionID: executionID, HostID: hostID, Class: classNotExecuted,
+			Detail: "not dispatched: the dispatch endpoint could not be recorded", ExitCode: -1}
 	}
-	outcome, detail, err := hostrun.Dispatch(ctx, c.Client, s.jobs, grant.ExecutionID, grant.Parameters, r.GetArtifact(), timeout, secrets...)
+	outcome, detail, err := hostrun.Dispatch(ctx, c.Client, s.jobs, executionID, params, artifact, timeout, secrets...)
 	switch {
 	case err != nil:
 		// The connection broke during dispatch: the reconciler finds out
 		// whether the job is on the host.
-		s.log.Warn("audit", "kind", "run_dispatch_uncertain", "execution", grant.ExecutionID, "host", r.GetHostId(),
+		s.log.Warn("audit", "kind", "run_dispatch_uncertain", "execution", executionID, "host", hostID,
 			"endpoint", endpoint, "detail", err.Error())
 	case outcome == hostrun.NotStarted:
-		s.finishRun(executordb.Run{ExecutionID: grant.ExecutionID, HostID: r.GetHostId(), Class: hostrun.ClassPrecheckFailed,
-			Detail: detail, ExitCode: -1, Endpoint: endpoint})
+		return &executordb.Run{ExecutionID: executionID, HostID: hostID, Class: hostrun.ClassPrecheckFailed,
+			Detail: detail, ExitCode: -1, Endpoint: endpoint}
 	default:
-		if err := s.db.MarkRunRunning(grant.ExecutionID, r.GetHostId(), endpoint); err != nil {
-			s.log.Error("audit", "kind", "store_error", "op", "mark_run_running", "execution", grant.ExecutionID, "detail", err.Error())
+		if err := s.db.MarkRunRunning(executionID, hostID, endpoint); err != nil {
+			s.log.Error("audit", "kind", "store_error", "op", "mark_run_running", "execution", executionID, "detail", err.Error())
 		}
-		s.log.Info("audit", "kind", "run_dispatched", "digest", d.String(), "host", r.GetHostId(), "execution", grant.ExecutionID,
+		s.log.Info("audit", "kind", "run_dispatched", "digest", digest, "host", hostID, "execution", executionID,
 			"endpoint", endpoint)
 	}
-	return s.runResponse(grant.ExecutionID, r.GetHostId(), false)
+	return nil
 }
 
 func (s *Service) runResponse(executionID, hostID string, release bool) (*pb.StartDurableResponse, error) {
@@ -380,6 +396,10 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 			s.log.Warn("audit", "kind", "job_cleanup_failed", "execution", run.ExecutionID, "host", run.HostID, "detail", err.Error())
 		}
 	case "finished":
+		if run.ActionID == permit.FimScanActionID {
+			s.collectFimScan(ctx, c, run, fin, st.ExitCode, check)
+			return
+		}
 		res, err := hostrun.Collect(ctx, c.Client, s.jobs, run.ExecutionID, st.ExitCode)
 		if err != nil {
 			s.log.Warn("audit", "kind", "reconcile_collect_failed", "execution", run.ExecutionID, "host", run.HostID, "detail", err.Error())
@@ -411,6 +431,33 @@ func (s *Service) reconcile(ctx context.Context, run executordb.Run) {
 		if err := hostrun.Remove(ctx, c.Client, s.jobs, run.ExecutionID); err != nil {
 			s.log.Warn("audit", "kind", "job_cleanup_failed", "execution", run.ExecutionID, "host", run.HostID, "detail", err.Error())
 		}
+	}
+}
+
+// collectFimScan closes a finished fim.scan run (a durable read, see
+// dispatchDurableRead). Its result is read with the fim.scan document limit
+// (hostrun.MaxDurableResultLimit, 128 MiB), streamed and checked as it
+// passes, never buffered: the run keeps class, exit status and the bounded
+// log, never the document (MaxResponseSize is 64 MiB, the document up to
+// 128 MiB). No integrity intake is wired to the executor yet
+// (docs/implementation/integrity-wiring-decisions.md, 3.2), so the checked
+// bytes go nowhere and the detail says so.
+func (s *Service) collectFimScan(ctx context.Context, c *sshtransport.Client, run, fin executordb.Run, exitCode int, check string) {
+	res, err := hostrun.CollectStream(ctx, c.Client, s.jobs, run.ExecutionID, exitCode, hostrun.MaxDurableResultLimit, io.Discard)
+	if err != nil {
+		s.log.Warn("audit", "kind", "reconcile_collect_failed", "execution", run.ExecutionID, "host", run.HostID, "detail", err.Error())
+		return
+	}
+	fin.Class, fin.Detail, fin.ExitCode = res.Class, res.Detail, res.ExitCode
+	fin.Log, fin.LogTruncated = res.Log, res.LogTruncated
+	if res.Class == hostrun.ClassSuccess {
+		fin.Detail = fmt.Sprintf("fim-scan document of %d bytes checked; not kept: no integrity intake is wired", res.Bytes)
+	}
+	s.finishRunChecked(fin, check)
+	// Stored: the job directory can go (the tmpfiles rule is the fallback,
+	// spec 07).
+	if err := hostrun.Remove(ctx, c.Client, s.jobs, run.ExecutionID); err != nil {
+		s.log.Warn("audit", "kind", "job_cleanup_failed", "execution", run.ExecutionID, "host", run.HostID, "detail", err.Error())
 	}
 }
 
