@@ -111,7 +111,9 @@ on a minimal phase-2 mutation foundation, not on the rest of phase 2.
      the executor record (D4; PV-03b, PV-03h).
   5. Re-preparation: the existing flow, fall-through narrowed to
      `ErrPveTemplateNotPrepared`, `ErrPveTemplateChanged` and
-     `ErrPveRemoteChanged`; no record removal (D5; PV-03b).
+     `ErrPveRemoteChanged`; no record removal; "template gone" is a 404 or
+     a 500 with the fixed "does not exist" pattern, and a read-only lab
+     check gates PV-03a and PV-03b (decided 2026-11-25; D5; PV-03b).
 
 ### 3. Provision action
 
@@ -1303,8 +1305,9 @@ bundle; D3 (a); D4 (a) an Images page under `/deploy` and (b) drop-downs in
 the wizard; D5 as recommended. The text above is unchanged, except the
 status line and the pointer in section 2 to this amendment.
 
-Status: decided by the maintainer 2026-11-21; this record written by Claude
-on 2026-11-24, pending maintainer review as for amendment 1. It is a
+Status: decided by the maintainer 2026-11-21; D5 and the digest rule
+decided by the maintainer 2026-11-25 (see Changelog); this record written by
+Claude on 2026-11-24, pending maintainer review as for amendment 1. It is a
 decision record only and changes no code. The variants that were rejected
 and the full reasoning are in the paper, section 3. Citations are
 `path:line` against `main` at 67320b52; each was checked with grep. Test
@@ -1530,30 +1533,56 @@ host is in D2.
   `errPveMutationRead` for any status other than 200, a 404 included
   (`internal/executor/pve_mutation_client.go:572`). The template check gets
   its own read on the optional-GET pattern (`pveGetOptionalData`,
-  `pve_mutation_client.go:539`, 404 handled at `:568`): 404 is
+  `pve_mutation_client.go:539`, 404 handled at `:568`): "template gone" is
   `ErrPveTemplateNotPrepared` (falls through); a different digest or node is
   `ErrPveTemplateChanged` (falls through); a transport error, timeout, other
   status, malformed or oversize body is a read error that refuses, with the
   record and generation unchanged. `TargetState` stays as it is for power,
-  snapshot and migrate. Whether PVE answers 404 for a missing guest config
-  is **unverified**; if it does not, this point is reopened before PV-03b is
-  merged.
-- **A 200 reply with an invalid digest (Claude, round 2).** Today
-  `liveTemplate` returns `ErrPveTemplateChanged` for a 200 reply whose node
-  differs or whose digest is not 64 lowercase hex digits (`validHexDigest`,
-  `pve_images.go:505`), so it falls through to a new proposal. Under the
-  decided split, a different but well-formed digest or a different node is
-  `ErrPveTemplateChanged` (falls through), and a digest that is missing or
-  not 64 lowercase hex digits counts as a malformed body: a read error that
-  refuses with no permit and the record unchanged. This is Claude's reading
-  of the decided "malformed body" case, to be confirmed by the owner; it
-  changes the mapping at `pve_images.go:505` for the template read only.
+  snapshot and migrate.
+- **"Template gone": 404, or 500 with the "does not exist" message
+  (decided by the maintainer 2026-11-25, decision "a + b"; previously "404
+  only; whether PVE answers 404 for a missing guest config is unverified,
+  reopened before PV-03b is merged").** Today `pveGet` returns
+  `errPveMutationRead` for any non-200 status other than an optional 404
+  and does not look at the message (`pve_mutation_client.go:568-572`).
+  - **(a) Lab check gates PV-03a and PV-03b** (not only the PV-03b merge).
+    One read-only `GET /nodes/<node>/qemu/<unused vmid>/config` against the
+    lab PVE; the HTTP status code and the PVE error message are recorded
+    below under "Lab check result", without IPs, node names or versions.
+    Until that result is recorded here, PV-03a and PV-03b do not start.
+  - **(b) Independent of the lab result,** the template read treats as
+    "template gone" (`ErrPveTemplateNotPrepared`, falls through to a new
+    proposal) both a 404 and a 500 whose PVE error message matches the
+    fixed "does not exist" pattern for the guest config. Pattern (Claude,
+    from PVE's known wording; the lab check confirms or corrects it before
+    PV-03a starts, and the corrected pattern replaces this one here): the
+    message, read with a named size limit and checked as UTF-8, matches
+    `Configuration file 'nodes/<node>/qemu-server/<vmid>.conf' does not exist`
+    with `<node>` and `<vmid>` the requested node and VMID, compared
+    literally, not as a free regular expression. Any other 500 stays a read
+    error that refuses with no permit and the record unchanged.
+  - The behaviour for "gone" is the one this section already describes: no
+    operator record removal; the proposal falls through, and `Prepare`
+    overwrites the key's record with generation + 1
+    (`pve_images.go:475-478`), so the key can be prepared again.
+  - **Lab check result:** not yet recorded (status code: open; message:
+    open).
+- **No digest check is added (decided by the maintainer 2026-11-25;
+  previously Claude, round 2: "a digest that is missing or not 64 lowercase
+  hex digits counts as a malformed body; changes the mapping at
+  `pve_images.go:505` for the template read only", now removed).**
+  `ConfigDigest` is the NOS-computed SHA-256 of the canonical config
+  (`pve_mutation_client.go:469-487`), so `validHexDigest` at
+  `pve_images.go:505` cannot fail on a successful read; PVE's own 40-hex
+  `digest` is already checked inside `TargetState`
+  (`pve_mutation_client.go:466-467`). No new check is introduced and
+  `pve_images.go:505` is not changed for this reason.
 - **The check after `Run` (Claude, round 2).** `Prepare` reads the new
   template after `Run` (`pve_images.go:465`) and today audits every error
   as `template_unreadable` and records nothing (`pve_images.go:466-468`).
   It uses the same new template read; any result other than found on the
-  node with a valid digest, 404 included, keeps that behaviour (audit, no
-  record, no generation bump). There a 404 means a template built but not
+  node, "template gone" included, keeps that behaviour (audit, no record,
+  no generation bump). There "gone" means a template built but not
   readable, never "not prepared".
 - A blocked or removed remote is refused by the mutation's remote check
   `activeRemote` (`internal/executor/pve_mutation.go:420-421` removed or
@@ -1568,16 +1597,21 @@ host is in D2.
   (`pve_images.go:460`) is a second check after `Run`. No code moves;
   PV-03b keeps the test that a blocked or removed remote refuses with no
   PVE change.
-- **Test ticket: PV-03b** (gone template, 404, generation 2; changed
-  template; re-pinned remote with `ErrPveRemoteChanged` on the old record,
-  new proposal with its own approval, generation 2 with the new trust
-  generation; refusal cases: transport error, timeout, 500, malformed body
-  refuse with no permit and an unchanged record; blocked or removed remote
-  refuses with no PVE change; reuse of the gone template's VMID). Added in
-  round 2 (Claude): a 200 reply with a digest that is not 64 lowercase hex
-  digits refuses with no permit and an unchanged record; after `Run`, a 404
-  or invalid digest on the new template writes the `template_unreadable`
-  audit event and no record.
+- **Test ticket: PV-03b** (starts only after the lab check result is
+  recorded, see above; gone template, 404, falls through, generation 2;
+  gone template, 500 with the "does not exist" pattern, falls through,
+  generation 2; 500 without the pattern refuses with no permit and an
+  unchanged record (2026-11-25, maintainer; previously "gone template,
+  404, generation 2" only); changed template; re-pinned remote with
+  `ErrPveRemoteChanged` on the old record, new proposal with its own
+  approval, generation 2 with the new trust generation; refusal cases:
+  transport error, timeout, malformed body refuse with no permit and an
+  unchanged record; blocked or removed remote refuses with no PVE change;
+  reuse of the gone template's VMID). Added in round 2 (Claude): after
+  `Run`, a 404 or a 500 with the pattern on the new template writes the
+  `template_unreadable` audit event and no record. (Removed 2026-11-25 by
+  the maintainer: "a 200 reply with a digest that is not 64 lowercase hex
+  digits refuses"; see "No digest check is added".)
 
 ### Consequences
 
@@ -1618,5 +1652,13 @@ host is in D2.
   `/usr/share/nebula/release`; that packaging step belongs to PV-03c and
   is checked there by the test that the bundle directory still loads.
 - Order (paper section 4): PV-03j (this record) and PV-03k first, then
+  the D5 lab check (result recorded in D5; 2026-11-25, maintainer), then
   PV-03a, PV-03b, then PV-03c, PV-03d, PV-03f, PV-03g, PV-03h; PV-03i
   (operator documentation) last.
+
+### Changelog
+
+- 2026-11-25: D5 and the digest rule decided by the maintainer (Axel,
+  09:52, chat): "template gone" is a 404 or a 500 with the fixed "does not
+  exist" pattern, a read-only lab check gates PV-03a and PV-03b; the digest
+  rule for `pve_images.go:505` and its PV-03b test case are removed.
