@@ -1,6 +1,6 @@
 # ADR 0008: Guest provisioning from deploy profiles
 
-Status: proposed (draft by Claude for maintainer review), 2026-11-01; open questions decided by the maintainer 2026-11-02; amendment 1 (preset guest host key) after the maintainer decision of 2026-11-03, written by Claude, status Proposed pending a lab check of PVE's cloud-init dump endpoint (previously: awaiting maintainer acceptance); amendment 2 (image preparation wiring) decided by the maintainer 2026-11-21, written by Claude 2026-11-24
+Status: proposed (draft by Claude for maintainer review), 2026-11-01; open questions decided by the maintainer 2026-11-02; amendment 1 (preset guest host key) after the maintainer decision of 2026-11-03, written by Claude, status Proposed pending a lab check of PVE's cloud-init dump endpoint (previously: awaiting maintainer acceptance); amendment 2 (image preparation wiring) decided by the maintainer 2026-11-21, written by Claude 2026-11-24; D5 and the digest rule decided by the maintainer 2026-11-25, D5 lab check done by the maintainer 2026-11-25 (previously ended at "written by Claude 2026-11-24")
 
 ## Context
 
@@ -112,8 +112,10 @@ on a minimal phase-2 mutation foundation, not on the rest of phase 2.
   5. Re-preparation: the existing flow, fall-through narrowed to
      `ErrPveTemplateNotPrepared`, `ErrPveTemplateChanged` and
      `ErrPveRemoteChanged`; no record removal; "template gone" is a 404 or
-     a 500 with the fixed "does not exist" pattern, and a read-only lab
-     check gates PV-03a and PV-03b (decided 2026-11-25; D5; PV-03b).
+     a 500 with the fixed "does not exist" pattern (decided 2026-11-25);
+     the read-only lab check before PV-03a and PV-03b was done on
+     2026-11-25 and the gate is satisfied (previously "a read-only lab
+     check gates PV-03a and PV-03b") (D5; PV-03b).
 
 ### 3. Provision action
 
@@ -1306,7 +1308,8 @@ the wizard; D5 as recommended. The text above is unchanged, except the
 status line and the pointer in section 2 to this amendment.
 
 Status: decided by the maintainer 2026-11-21; D5 and the digest rule
-decided by the maintainer 2026-11-25 (see Changelog); this record written by
+decided by the maintainer 2026-11-25 (wording verbatim in the Changelog);
+D5 lab check done by the maintainer 2026-11-25 (result in D5); this record written by
 Claude on 2026-11-24, pending maintainer review as for amendment 1. It is a
 decision record only and changes no code. The variants that were rejected
 and the full reasoning are in the paper, section 3. Citations are
@@ -1540,33 +1543,52 @@ host is in D2.
   record and generation unchanged. `TargetState` stays as it is for power,
   snapshot and migrate.
 - **"Template gone": 404, or 500 with the "does not exist" message
-  (decided by the maintainer 2026-11-25, decision "a + b"; previously "404
-  only; whether PVE answers 404 for a missing guest config is unverified,
-  reopened before PV-03b is merged").** Today `pveGet` returns
-  `errPveMutationRead` for any non-200 status other than an optional 404
-  and does not look at the message (`pve_mutation_client.go:568-572`).
-  - **(a) Lab check gates PV-03a and PV-03b** (not only the PV-03b merge).
-    One read-only `GET /nodes/<node>/qemu/<unused vmid>/config` against the
-    lab PVE; the HTTP status code and the PVE error message are recorded
-    below under "Lab check result", without IPs, node names or versions.
-    Until that result is recorded here, PV-03a and PV-03b do not start.
+  (decided by the maintainer 2026-11-25, answer „1 streichen, 2 a+b“,
+  wording verbatim in the Changelog; previously "404 only; whether PVE
+  answers 404 for a missing guest config is unverified, reopened before
+  PV-03b is merged").** Today `pveGet` returns `errPveMutationRead` for any
+  non-200 status other than an optional 404 and does not look at the
+  message (`pve_mutation_client.go:568-572`).
+  - **(a) Lab check before PV-03a and PV-03b: satisfied on 2026-11-25**
+    (previously "Lab check gates PV-03a and PV-03b ... Until that result is
+    recorded here, PV-03a and PV-03b do not start"). One read-only request
+    for the config of an unused VMID on a lab node; the result is recorded
+    below under "Lab check result". Redaction rule for this record: no IPs,
+    host names, node names or versions; the node and the VMID in a PVE
+    message are written as `<node>` and `<id>`.
   - **(b) Independent of the lab result,** the template read treats as
     "template gone" (`ErrPveTemplateNotPrepared`, falls through to a new
     proposal) both a 404 and a 500 whose PVE error message matches the
-    fixed "does not exist" pattern for the guest config. Pattern (Claude,
-    from PVE's known wording; the lab check confirms or corrects it before
-    PV-03a starts, and the corrected pattern replaces this one here): the
-    message, read with a named size limit and checked as UTF-8, matches
+    fixed pattern below. The lab result confirms that PVE reports a missing
+    guest config as a 500 with this message, so (b) stays as decided.
+  - **Fixed pattern (2026-11-25, after the lab check; previously Claude,
+    before the lab check: the whole message
     `Configuration file 'nodes/<node>/qemu-server/<vmid>.conf' does not exist`
-    with `<node>` and `<vmid>` the requested node and VMID, compared
-    literally, not as a free regular expression. Any other 500 stays a read
-    error that refuses with no permit and the record unchanged.
+    with the requested node and VMID, compared literally).** The PVE error
+    message, read with a named size limit and checked as UTF-8, counts as
+    "template gone" when it contains each of the three substrings
+    `does not exist`, `qemu-server/` and `.conf`. Plain substring checks, not
+    a regular expression; leading or trailing whitespace, such as the
+    newline PVE may append, does not affect them. Any other 500, and any
+    other non-200 status but 404, stays a read error that refuses with no
+    permit and the record unchanged.
+  - **Open for PV-03a (Claude):** the lab check was made with `pvesh`, which
+    prints the message but neither the HTTP status nor where in the HTTP
+    reply the message sits (status line reason phrase or a field of the JSON
+    body). PV-03a names the source and its size limit next to the code;
+    the pattern above does not change with it.
   - The behaviour for "gone" is the one this section already describes: no
     operator record removal; the proposal falls through, and `Prepare`
     overwrites the key's record with generation + 1
     (`pve_images.go:475-478`), so the key can be prepared again.
-  - **Lab check result:** not yet recorded (status code: open; message:
-    open).
+  - **Lab check result (maintainer, 2026-11-25 09:57; previously "not yet
+    recorded (status code: open; message: open)").** A read-only
+    `pvesh get /nodes/<node>/qemu/<unused id>/config` on a lab node answered
+    `Configuration file 'nodes/<node>/qemu-server/<id>.conf' does not exist`
+    with `pvesh` exit status 2. `pvesh` does not print the HTTP status;
+    this message is what the PVE API returns as error 500 for a missing
+    guest config. Status code: 500 (from the API behaviour for this
+    message, not printed by `pvesh`); message: as above.
 - **No digest check is added (decided by the maintainer 2026-11-25;
   previously Claude, round 2: "a digest that is missing or not 64 lowercase
   hex digits counts as a malformed body; changes the mapping at
@@ -1597,10 +1619,12 @@ host is in D2.
   (`pve_images.go:460`) is a second check after `Run`. No code moves;
   PV-03b keeps the test that a blocked or removed remote refuses with no
   PVE change.
-- **Test ticket: PV-03b** (starts only after the lab check result is
-  recorded, see above; gone template, 404, falls through, generation 2;
-  gone template, 500 with the "does not exist" pattern, falls through,
-  generation 2; 500 without the pattern refuses with no permit and an
+- **Test ticket: PV-03b** (may start: the lab check result is recorded
+  above, 2026-11-25; previously "starts only after the lab check result is
+  recorded"; gone template, 404, falls through, generation 2;
+  gone template, 500 with the fixed pattern (all three substrings), falls
+  through, generation 2; 500 that lacks any one of the three substrings
+  refuses with no permit and an
   unchanged record (2026-11-25, maintainer; previously "gone template,
   404, generation 2" only); changed template; re-pinned remote with
   `ErrPveRemoteChanged` on the old record, new proposal with its own
@@ -1652,13 +1676,23 @@ host is in D2.
   `/usr/share/nebula/release`; that packaging step belongs to PV-03c and
   is checked there by the test that the bundle directory still loads.
 - Order (paper section 4): PV-03j (this record) and PV-03k first, then
-  the D5 lab check (result recorded in D5; 2026-11-25, maintainer), then
+  the D5 lab check (done and recorded in D5 on 2026-11-25, maintainer), then
   PV-03a, PV-03b, then PV-03c, PV-03d, PV-03f, PV-03g, PV-03h; PV-03i
   (operator documentation) last.
 
 ### Changelog
 
-- 2026-11-25: D5 and the digest rule decided by the maintainer (Axel,
-  09:52, chat): "template gone" is a 404 or a 500 with the fixed "does not
-  exist" pattern, a read-only lab check gates PV-03a and PV-03b; the digest
-  rule for `pve_images.go:505` and its PV-03b test case are removed.
+- 2026-11-25, 09:52: D5 and the digest rule decided by the maintainer
+  (Axel, Claude chat). Question, verbatim: "1 Digest-Regel streichen? 2 a)
+  erst im Lab messen, b) 404 und 500 mit 'does not exist' als 'Vorlage
+  weg', c) nur 404". Answer, verbatim: „1 streichen, 2 a+b“. Meaning
+  (Claude): "1 streichen" removes the digest rule for `pve_images.go:505`
+  and its PV-03b test case (D5, "No digest check is added"); "a" is a
+  read-only lab check of PVE's answer for a missing guest config before
+  PV-03a and PV-03b; "b" treats a 404 and a 500 with the "does not exist"
+  message as "template gone"; "c" (404 only) was not chosen. (Previously
+  this entry was a paraphrase without the wording.)
+- 2026-11-25, 09:57: D5 lab check done by the maintainer; result in D5,
+  "Lab check result". The gate before PV-03a and PV-03b is satisfied; the
+  fixed pattern is the three substrings `does not exist`, `qemu-server/`
+  and `.conf`; any other 500 stays a refusal.
