@@ -20,7 +20,7 @@ const MaxListDevices = 1000
 
 // deviceSelect lists the columns scanDevice reads, in order.
 const deviceSelect = `SELECT device_id, family, label, trust_generation, last_seen, state, created_at,
-	origin, spool_name, spool_sha256, reported_at FROM netdev_devices_seen`
+	origin, spool_name, spool_sha256, reported_at, blocked, block_reason FROM netdev_devices_seen`
 
 // ListDevices returns at most limit devices in device ID order. limit must be
 // between 1 and MaxListDevices. Each device is returned with the same state
