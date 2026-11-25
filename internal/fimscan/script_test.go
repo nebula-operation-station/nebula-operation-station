@@ -1373,7 +1373,7 @@ func TestScriptSyntax(t *testing.T) {
 // with exactly the mode and profile parameters and the embedded script.
 func TestActionContract(t *testing.T) {
 	a := Action()
-	if a.ID != "fim.scan" || !a.ReadOnly || a.Durable || a.Risk != pb.RiskClass_RISK_CLASS_LOW || a.Retry != "safe" ||
+	if a.ID != "fim.scan" || !a.ReadOnly || !a.Durable || a.Risk != pb.RiskClass_RISK_CLASS_LOW || a.Retry != "safe" ||
 		!bytes.Equal(a.Script, Script) || len(a.Secrets) != 0 || a.Timeout <= 30*time.Minute {
 		t.Fatalf("contract %+v", a)
 	}

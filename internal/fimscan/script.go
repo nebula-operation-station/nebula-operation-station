@@ -75,9 +75,11 @@ var (
 )
 
 // Action returns the fim.scan read-only action contract in the form of the
-// other built-in read actions (spec 10 v26-10-02). It is not yet part of
-// actions.Builtin or of the read-lease allowlist; wiring it to the executor
-// is a separate change.
+// other built-in read actions (spec 10 v26-10-02). It is a durable job
+// (ADR 0015 D5, decision (g) option 2; ActionTimeout is below the 6 h
+// hostrun.MaxDurableTimeout). It is in the read-lease allowlist
+// (permit.ReadOnlyAllowlist, lease.go). It is not yet in actions.Builtin:
+// see docs/implementation/integrity-wiring-decisions.md, section 3.2.
 func Action() actions.Action {
 	return actions.Action{
 		ID: ActionID, Version: ActionVersion, Title: "Integrity scan",
@@ -86,6 +88,7 @@ func Action() actions.Action {
 			"the crontab spool and the SSH access files under /root and /home/*), the mount points below them and the sshd configuration. " +
 			"find -P -xdev, never follows symlinks, no path parameter, nothing written on the host. Needs root (sudo -n). Read-only.",
 		Risk:     pb.RiskClass_RISK_CLASS_LOW,
+		Durable:  true,
 		Timeout:  ActionTimeout,
 		ReadOnly: true,
 		Script:   Script,

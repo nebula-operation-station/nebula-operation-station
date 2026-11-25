@@ -24,7 +24,7 @@ import (
 // script and parameter hashes.
 func TestFimScanContractMatchesLeasePins(t *testing.T) {
 	a := fimscan.Action()
-	if a.ID != permit.FimScanActionID || a.Version != permit.FimScanModuleVersion || !a.ReadOnly || a.Durable ||
+	if a.ID != permit.FimScanActionID || a.Version != permit.FimScanModuleVersion || !a.ReadOnly || !a.Durable ||
 		a.Risk != pb.RiskClass_RISK_CLASS_LOW || a.Retry != actions.RetrySafe || len(a.Secrets) != 0 {
 		t.Fatalf("contract %s@%s read-only=%v durable=%v risk=%s retry=%s", a.ID, a.Version, a.ReadOnly, a.Durable, a.Risk, a.Retry)
 	}
