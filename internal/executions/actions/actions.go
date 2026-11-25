@@ -380,6 +380,53 @@ var pciInventory []byte
 //go:embed scripts/gpu_status.sh
 var gpuStatus []byte
 
+// FimScanScript is the fim.scan 1.0.0 script (scripts/fim_scan.sh). It only
+// reads and writes one fim-scan-v1 document to stdout. It lives here, not
+// in internal/fimscan, because fimscan imports this package; fimscan.Script
+// is this slice. Its SHA-256 is pinned in permit.FimScanArtifactSHA256.
+//
+//go:embed scripts/fim_scan.sh
+var FimScanScript []byte
+
+// FimScanTimeout bounds one fim.scan run: the script stops hashing after
+// 30 minutes (ADR 0015 D5) and then only writes metadata. It is below
+// hostrun.MaxDurableTimeout.
+const FimScanTimeout = 40 * time.Minute
+
+// fim.scan parameter patterns. They match exactly what the script accepts
+// from the canonical parameters.
+var (
+	fimScanModeRe    = regexp.MustCompile(`^(full|incremental)$`)
+	fimScanProfileRe = regexp.MustCompile(`^fim-default-v1$`)
+)
+
+// FimScan returns the fim.scan read-only action contract (ADR 0015 D5,
+// spec 10 v26-10-02); fimscan.Action returns it. It is a durable job
+// (decision (g) option 2) and in the read-lease allowlist
+// (permit.ReadOnlyAllowlist); the executor pins its version, script hash
+// and the two parameter documents (internal/permit/lease_fimscan.go). It
+// is the fim.scan entry of Builtin; like every durable built-in it is
+// reconciled before any retry.
+func FimScan() Action {
+	return Action{
+		ID: "fim.scan", Version: "1.0.0", Title: "Integrity scan",
+		Description: "Reads type, size, mode, owner, inode, times, symlink targets and SHA-256 of the files under the fixed roots of " +
+			"profile fim-default-v1 (/etc, /boot, /usr/bin, /usr/sbin, /usr/lib, /usr/libexec, /bin, /sbin, /lib, /usr/local/{bin,sbin,lib}, /opt, " +
+			"the crontab spool and the SSH access files under /root and /home/*), the mount points below them and the sshd configuration. " +
+			"find -P -xdev, never follows symlinks, no path parameter, nothing written on the host. Needs root (sudo -n). Read-only.",
+		Risk:     pb.RiskClass_RISK_CLASS_LOW,
+		Durable:  true,
+		Timeout:  FimScanTimeout,
+		ReadOnly: true,
+		Script:   FimScanScript,
+		Params: []Param{
+			{Name: "mode", Label: "Mode (full or incremental)", Pattern: fimScanModeRe},
+			{Name: "profile", Label: "Profile (fim-default-v1)", Pattern: fimScanProfileRe},
+		},
+		Retry: RetryReconcileFirst,
+	}
+}
+
 // Builtin lists the built-in actions in display order.
 var Builtin = []Action{
 	{
@@ -554,6 +601,7 @@ var Builtin = []Action{
 		Description: "Per-GPU status from nvidia-smi (fixed query: index, UUID, PCI bus ID, name, utilization, memory, temperature, power). A missing driver is reported as such, never as an empty list. Read-only.",
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: time.Minute, ReadOnly: true, Script: gpuStatus, Retry: RetrySafe,
 	},
+	FimScan(),
 }
 
 // Lookup returns the built-in action id.

@@ -8,11 +8,16 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsfacts"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/trafficingest"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfix"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
@@ -327,6 +332,130 @@ func TestOpsListenersUnavailableFailsProjection(t *testing.T) {
 	}
 	if gs != nil {
 		t.Fatalf("groups = %+v, want none on a listener error", gs)
+	}
+}
+
+// opsListenerSource is a trafficingest.Source with one stored result for
+// every host, or a read error.
+type opsListenerSource struct {
+	res trafficingest.Result
+	ok  bool
+	err error
+}
+
+func (s opsListenerSource) LatestNetFacts(context.Context, string) (trafficingest.Result, bool, error) {
+	return s.res, s.ok, s.err
+}
+
+// opsNetFactsDoc is a net-facts-v1 document whose socket table is ss; every
+// other section is absent.
+func opsNetFactsDoc(t *testing.T, ss string) []byte {
+	t.Helper()
+	doc := map[string]any{"format": "net-facts-v1", "phase": "done"}
+	for _, name := range []string{"addr", "link", "route", "route6", "neigh", "neigh6", "bridge_vlan", "lldp", "conntrack"} {
+		doc[name] = map[string]any{"status": "absent", "truncated": false, "data": ""}
+	}
+	doc["sockets"] = map[string]any{"status": "ok", "truncated": false,
+		"data": base64.StdEncoding.EncodeToString([]byte(ss))}
+	b, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// opsListenersAt returns the listener source of web01 with one stored
+// result finished at finished, read at the clock now.
+func opsListenersAt(t *testing.T, finished, now time.Time, ss string) opsVulnListeners {
+	t.Helper()
+	return newOpsVulnListeners(opsListenerSource{ok: true, res: trafficingest.Result{
+		ExecutionID: "e1", Host: "web01", Finished: finished, Data: opsNetFactsDoc(t, ss),
+	}}, func() time.Time { return now })
+}
+
+// TestOpsVulnListenersReadsTheHostsOwnFreshPorts: a fresh stored result of
+// the host gives its listening ports as the projection's ports, sorted; a
+// peer's end of a connection is not a listener.
+func TestOpsVulnListenersReadsTheHostsOwnFreshPorts(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	ss := "tcp   LISTEN 0 128 0.0.0.0:443 0.0.0.0:*\n" +
+		"tcp   LISTEN 0 128 [::]:22 [::]:*\n" +
+		"udp   UNCONN 0 0 0.0.0.0:53 0.0.0.0:*\n" +
+		"tcp   ESTAB 0 0 10.0.0.5:40000 10.0.0.7:5432\n"
+	ps, err := opsListenersAt(t, now.Add(-time.Minute), now, ss).Listeners(context.Background(), "web01")
+	if err != nil {
+		t.Fatalf("Listeners: %v", err)
+	}
+	want := []opsfacts.Port{{Number: 22, Protocol: "tcp"}, {Number: 53, Protocol: "udp"}, {Number: 443, Protocol: "tcp"}}
+	if fmt.Sprint(ps) != fmt.Sprint(want) {
+		t.Fatalf("Listeners = %v, want %v", ps, want)
+	}
+}
+
+// TestOpsVulnListenersMoreThan32PortsStayInTheGroups: a host with 40 distinct
+// listening ports is not unknown. Its group stays in the lab part, lists the
+// first 32 ports by number (then protocol) and counts the other 8.
+func TestOpsVulnListenersMoreThan32PortsStayInTheGroups(t *testing.T) {
+	env := newVTEnv(t)
+	env.startAndSubmit(t, opsCriticalRecord("CVE-2026-7007"))
+	src, err := newOpsVulnFindings(env.svc.store, opsTestPreviews, fixesOf(vulnfix.Result{Status: vulnfix.StatusVerified,
+		Action: vulnfix.ActionInstallSecurity, HostID: "web01"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	var lines []string
+	for p := 40; p >= 1; p-- {
+		lines = append(lines, fmt.Sprintf("tcp   LISTEN 0 128 0.0.0.0:%d 0.0.0.0:*", 1000+p))
+	}
+	ls := opsListenersAt(t, now.Add(-time.Minute), now, strings.Join(lines, "\n")+"\n")
+	gs, skips, err := opsGroupsWith(t, src, ls)
+	if err != nil {
+		t.Fatalf("EligibleGroups: %v", err)
+	}
+	if len(skips) != 0 {
+		t.Fatalf("skips = %+v, want none: the host is known", skips)
+	}
+	if len(gs) != 1 || gs[0].Key != "web01/os" {
+		t.Fatalf("groups = %+v, want the host's group web01/os", gs)
+	}
+	p := gs[0].Projection
+	if len(p.Ports) != opsfacts.MaxPortsPerHost || p.PortsOmitted != 8 {
+		t.Fatalf("ports = %d listed, %d omitted; want %d listed and 8 omitted",
+			len(p.Ports), p.PortsOmitted, opsfacts.MaxPortsPerHost)
+	}
+	if p.Ports[0].Number != 1001 || p.Ports[len(p.Ports)-1].Number != 1032 {
+		t.Fatalf("listed ports run %d..%d, want 1001..1032", p.Ports[0].Number, p.Ports[len(p.Ports)-1].Number)
+	}
+}
+
+// TestOpsVulnListenersUnknownIsNeverAnEmptyList: stale facts are unknown
+// listeners, an error with opsfacts.ErrListenersUnknown and no ports; they never
+// read as a host with no listening ports.
+func TestOpsVulnListenersUnknownIsNeverAnEmptyList(t *testing.T) {
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	ss := "tcp   LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\n"
+	ps, err := opsListenersAt(t, now.Add(-trafficingest.ListenerStaleAfter-time.Minute), now, ss).
+		Listeners(context.Background(), "web01")
+	if !errors.Is(err, opsfacts.ErrListenersUnknown) {
+		t.Fatalf("Listeners error = %v, want opsfacts.ErrListenersUnknown", err)
+	}
+	if ps != nil {
+		t.Fatalf("Listeners ports = %+v, want none with the error", ps)
+	}
+}
+
+// TestOpsVulnListenersStoreErrorFails: a failed store read is an error of
+// the source and is not turned into unknown listeners.
+func TestOpsVulnListenersStoreErrorFails(t *testing.T) {
+	boom := errors.New("database is locked")
+	src := newOpsVulnListeners(opsListenerSource{err: boom}, time.Now)
+	_, err := src.Listeners(context.Background(), "web01")
+	if !errors.Is(err, boom) {
+		t.Fatalf("Listeners error = %v, want the store error", err)
+	}
+	if errors.Is(err, opsfacts.ErrListenersUnknown) {
+		t.Fatalf("a store error must not read as unknown listeners")
 	}
 }
 

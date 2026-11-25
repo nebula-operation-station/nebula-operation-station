@@ -611,6 +611,105 @@ func TestBadListenersSkipOnlyTheirGroup(t *testing.T) {
 	}
 }
 
+// countingListeners is a ListenerSource that reports some hosts as unknown
+// (ErrListenersUnknown), fails every read of err when set, and counts reads.
+type countingListeners struct {
+	ports   fakeListeners
+	unknown map[string]bool
+	err     error
+	reads   map[string]int
+}
+
+func (c *countingListeners) Listeners(_ context.Context, id string) ([]Port, error) {
+	c.reads[id]++
+	if c.err != nil {
+		return nil, c.err
+	}
+	if c.unknown[id] {
+		return nil, fmt.Errorf("stored facts stale: %w", ErrListenersUnknown)
+	}
+	return c.ports[id], nil
+}
+
+// TestUnknownListenersLeaveOnlyTheirGroupOut checks that a host whose
+// listening ports are unknown is left out of the lab groups with one audit
+// skip, and that the read succeeds for the other hosts.
+func TestUnknownListenersLeaveOnlyTheirGroupOut(t *testing.T) {
+	db := webHost()
+	db.ID = "db-01"
+	dbFinding := osFinding("CVE-2026-0002", TierHigh, 80)
+	dbFinding.HostID = "db-01"
+	fs := []Finding{osFinding("CVE-2026-0001", TierHigh, 80), dbFinding}
+	src := &countingListeners{
+		ports:   fakeListeners{"db-01": {{Number: 5432, Protocol: "tcp"}}},
+		unknown: map[string]bool{"web-01": true},
+		reads:   map[string]int{},
+	}
+	p, audit := newProjectorWith(t, Sources{
+		Inventory: fakeInventory{hosts: []Host{webHost(), db}},
+		Listeners: src,
+		Findings:  fakeFindings{fs: fs},
+		Catalog:   fullCatalog(),
+	})
+	gs, err := p.EligibleGroups(context.Background())
+	if err != nil {
+		t.Fatalf("EligibleGroups: %v, want the read to succeed", err)
+	}
+	if len(gs) != 1 || gs[0].Key != "db-01/os" {
+		t.Fatalf("groups = %+v, want only db-01/os", gs)
+	}
+	if len(audit.skips) != 1 || audit.skips[0].Scope != ScopeListeners ||
+		audit.skips[0].HostID != "web-01" || audit.skips[0].Rule != "listening ports unknown" {
+		t.Fatalf("audit = %+v, want one listeners skip of web-01 with rule %q", audit.skips, "listening ports unknown")
+	}
+}
+
+// TestUnknownListenersReadOncePerHost checks that a host with several
+// groups (OS and image) is read once and audited once.
+func TestUnknownListenersReadOncePerHost(t *testing.T) {
+	img := osFinding("CVE-2026-0001", TierCritical, 90)
+	img.Subject = SubjectImage
+	img.ImageSubject = "nginx-img"
+	fs := []Finding{img, osFinding("CVE-2026-0002", TierHigh, 70)}
+	src := &countingListeners{unknown: map[string]bool{"web-01": true}, reads: map[string]int{}}
+	p, audit := newProjectorWith(t, Sources{
+		Inventory: fakeInventory{hosts: []Host{webHost()}},
+		Listeners: src,
+		Findings:  fakeFindings{fs: fs},
+		Catalog:   fullCatalog(),
+	})
+	gs := groupsOf(t, p)
+	if len(gs) != 0 {
+		t.Fatalf("got %d groups, want none for a host with unknown listeners", len(gs))
+	}
+	if src.reads["web-01"] != 1 {
+		t.Fatalf("listener reads = %d, want 1", src.reads["web-01"])
+	}
+	if len(audit.skips) != 1 || audit.skips[0].Scope != ScopeListeners {
+		t.Fatalf("audit = %+v, want one listeners skip", audit.skips)
+	}
+}
+
+// TestListenerErrorOtherThanUnknownFailsProjection checks that a real store
+// error is not turned into a skip: the projection fails.
+func TestListenerErrorOtherThanUnknownFailsProjection(t *testing.T) {
+	boom := errors.New("store down")
+	src := &countingListeners{err: boom, reads: map[string]int{}}
+	p, audit := newProjectorWith(t, Sources{
+		Inventory: fakeInventory{hosts: []Host{webHost()}},
+		Listeners: src,
+		Findings:  fakeFindings{fs: []Finding{osFinding("CVE-2026-0001", TierHigh, 80)}},
+		Catalog:   fullCatalog(),
+	})
+	_, err := p.EligibleGroups(context.Background())
+	if !errors.Is(err, boom) {
+		t.Fatalf("error = %v, want wrapped %v", err, boom)
+	}
+	if errors.Is(err, ErrListenersUnknown) || len(audit.skips) != 0 {
+		t.Fatalf("error = %v, audit = %+v: a store error must not be skipped", err, audit.skips)
+	}
+}
+
 // TestAuditFailureFailsProjection checks that a failing audit stops the
 // projection: a skip must be on record before its group is left out.
 func TestAuditFailureFailsProjection(t *testing.T) {

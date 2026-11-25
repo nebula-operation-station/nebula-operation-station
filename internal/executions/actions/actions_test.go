@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/scanner"
 )
@@ -259,6 +260,12 @@ func TestBuiltinsUnderTheScanner(t *testing.T) {
 	want := map[string]string{"system.reboot": "reboot_or_power"}
 	for _, a := range Builtin {
 		f, floor := scanner.Scan(a.Script)
+		// The one reviewed exception, the executor's own (permit,
+		// lease_fimscan.go): exactly these findings for exactly the pinned
+		// fim.scan bytes do not raise its floor. Anything else is checked.
+		if permit.FimScanReviewedResult(a.ID, a.Version, a.SHA256(), f) {
+			continue
+		}
 		if got := strings.Join(scanner.Categories(f), ","); got != want[a.ID] {
 			t.Errorf("%s: findings %q, want %q", a.ID, got, want[a.ID])
 		}
