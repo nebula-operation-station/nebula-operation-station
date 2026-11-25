@@ -42,6 +42,7 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/runbooks"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/trafficingest"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/version"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnnotify"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
@@ -746,7 +747,14 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 			}
 			bg.Go(func() { opsSugg.Run(connCtx) })
 		}
-		oh, err := newOpsAPI(cfg.API, db, opsNotes, store.List, log, opsSugg.acceptedHook())
+		// The projection reads the stored findings, the fix decision of the
+		// vulnerability pages and the net.facts listeners (ADR 0016 D3, D4).
+		oh, err := newOpsAPI(cfg.API, db, opsNotes, store.List, log, opsSugg.acceptedHook(), opsSources{
+			Findings:    vuln.store,
+			LastResults: ops.LastResults,
+			Preview:     batches.LatestContainerPreview,
+			Traffic:     trafficingest.ExecutionSource{DB: db},
+		})
 		if err != nil {
 			return err
 		}
