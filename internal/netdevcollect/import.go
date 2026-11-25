@@ -289,7 +289,7 @@ func (im *Importer) Run(ctx context.Context) (ImportReport, error) {
 	now := im.Now()
 	// Device metadata has its own budget and never waits behind a store
 	// failure: it writes nothing, so it is judged before the datasets.
-	handled, err := im.writeMetadata(ctx, names, &rep)
+	handled, waiting, err := im.writeMetadata(ctx, names, &rep)
 	if err != nil {
 		return rep, err
 	}
@@ -300,7 +300,10 @@ func (im *Importer) Run(ctx context.Context) (ImportReport, error) {
 	for name := range pruned {
 		handled[name] = struct{}{}
 	}
-	halted := map[string]struct{}{}
+	// A device whose metadata waits has no device row yet (or an older one):
+	// its datasets wait with it, or the store would refuse them as
+	// unknown_device and they would be kept for good.
+	halted := waiting
 	taken := 0
 	for _, name := range names {
 		if err := ctx.Err(); err != nil {
@@ -508,10 +511,15 @@ func (im *Importer) judge(ctx context.Context, name string, rep *ImportReport) (
 // then removed as superseded. A pass tries at most
 // MaxMetadataPerRun records. Without a Meta store device metadata waits in the
 // spool untouched. Its error is only ever ctx's.
-func (im *Importer) writeMetadata(ctx context.Context, names []string, rep *ImportReport) (map[string]struct{}, error) {
+//
+// The second result holds the devices whose metadata is still waiting: a store
+// failure stopped them, or the budget ran out before one of their records was
+// settled. Their datasets must wait for the same pass's later step too.
+func (im *Importer) writeMetadata(ctx context.Context, names []string, rep *ImportReport) (map[string]struct{}, map[string]struct{}, error) {
 	handled := map[string]struct{}{}
+	waiting := map[string]struct{}{}
 	if im.Meta == nil {
-		return handled, nil
+		return handled, waiting, nil
 	}
 	byDevice := map[string][]string{}
 	var devices []string
@@ -536,15 +544,17 @@ func (im *Importer) writeMetadata(ctx context.Context, names []string, rep *Impo
 				continue
 			}
 			if tried >= MaxMetadataPerRun {
+				waiting[dev] = struct{}{}
 				break
 			}
 			tried++
 			out := im.writeMetadataOne(ctx, name, rep)
 			if out == outcomeInterrupted {
-				return handled, ctx.Err()
+				return handled, waiting, ctx.Err()
 			}
 			handled[name] = struct{}{}
 			if out == outcomeStoreFailed {
+				waiting[dev] = struct{}{}
 				break // the store is failing for this device; older records wait
 			}
 			if out != outcomeStored && out != outcomeBlocked {
@@ -553,12 +563,12 @@ func (im *Importer) writeMetadata(ctx context.Context, names []string, rep *Impo
 			// A stored record, or the blocked one, supersedes every older
 			// record of the device: an older label must never come back.
 			if err := im.discardOlderMetadata(ctx, run[:i], handled, rep); err != nil {
-				return handled, err
+				return handled, waiting, err
 			}
 			break
 		}
 	}
-	return handled, nil
+	return handled, waiting, nil
 }
 
 // discardOlderMetadata removes the older metadata files of a device once a

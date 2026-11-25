@@ -6,6 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -231,6 +234,16 @@ func keptNames(t *testing.T, s *Spool) []string {
 	return out
 }
 
+// keptNamesIfAny is keptNames for a spool whose kept/ may not exist yet: no
+// kept/ directory means nothing was kept.
+func keptNamesIfAny(t *testing.T, s *Spool) []string {
+	t.Helper()
+	if _, err := os.Stat(filepath.Join(s.Dir, KeptDirName)); errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	return keptNames(t, s)
+}
+
 // metadataFiles returns the device metadata files still in the spool, in
 // List order.
 func metadataFiles(t *testing.T, s *Spool) []string {
@@ -406,5 +419,86 @@ func TestManyRejectedMetadataFilesDoNotStarveDatasetImport(t *testing.T) {
 	}
 	if got := len(metadataFiles(t, env.spool)); got != metadataFloodSize-rep.Kept {
 		t.Fatalf("%d metadata files remain, want %d", got, metadataFloodSize-rep.Kept)
+	}
+}
+
+// newDevice is a device the inventory does not know yet: its first metadata
+// record creates its row. Its datasets must wait until that row exists.
+const (
+	newDevice         = "new-sw-02"
+	newDeviceMetadata = `{"device_id":"new-sw-02","family":"cbs","label":"New switch","trust_generation":3,"blocked":false,"block_reason":""}`
+)
+
+// flakyMeta writes device rows through the real store, except while err is
+// set: then every write fails with err, as a store that is locked would.
+type flakyMeta struct {
+	inner MetadataStore
+	err   error
+}
+
+func (f *flakyMeta) UpsertDeviceMetadata(ctx context.Context, m netdevinventory.DeviceMetadataRecord, ref netdevinventory.SpoolRef) error {
+	if f.err != nil {
+		return f.err
+	}
+	return f.inner.UpsertDeviceMetadata(ctx, m, ref)
+}
+
+// A device whose metadata write fails in a pass keeps its datasets in the
+// spool: without its device row the store would refuse them as unknown_device,
+// and the files would be kept for good.
+func TestDatasetOfDeviceWithFailedMetadataWaits(t *testing.T) {
+	env := newImportEnv(t)
+	meta := &flakyMeta{inner: env.store, err: errors.New("database is locked")}
+	env.imp.Meta = meta
+	env.imp.Store = env.store
+	metadataAt(t, env, newDevice, 0, newDeviceMetadata)
+	_, payload := datasetPayload(t, ReadCBSVersion)
+	dataset := env.write(t, newDevice, ReadCBSVersion, importGen, false, payload)
+
+	rep := env.run(t)
+	if rep.Retry != 1 || rep.Kept != 0 || rep.Imported != 0 || rep.Deferred != 1 {
+		t.Fatalf("report = %+v, want the metadata retried and the dataset deferred", rep)
+	}
+	if got := keptNamesIfAny(t, env.spool); len(got) != 0 {
+		t.Fatalf("kept = %v, want nothing kept", got)
+	}
+	if got := spoolFiles(t, env.spool); !slices.Contains(got, dataset) {
+		t.Fatalf("spool = %v, want the dataset %s to wait", got, dataset)
+	}
+
+	meta.err = nil
+	rep = env.run(t)
+	if rep.MetadataWritten != 1 || rep.Imported != 1 || rep.Kept != 0 {
+		t.Fatalf("second run report = %+v, want the metadata written and the dataset imported", rep)
+	}
+	if got := spoolFiles(t, env.spool); len(got) != 0 {
+		t.Fatalf("spool = %v after the second pass, want empty", got)
+	}
+}
+
+// When the metadata budget of a pass runs out before a device's metadata is
+// tried, the device's datasets wait for a later pass, as they do after a store
+// failure. The flood of rejected records of another device spends the budget
+// first.
+func TestDatasetOfDeviceWithUntriedMetadataWaits(t *testing.T) {
+	env := newImportEnv(t)
+	env.imp.Meta = &flakyMeta{inner: env.store}
+	env.imp.Store = env.store
+	for i := 0; i < MaxMetadataPerRun; i++ {
+		metadataAt(t, env, importCBS, time.Duration(i)*metadataFloodSpacing, invalidCBSMetadata)
+	}
+	meta := metadataAt(t, env, newDevice, 2*time.Second, newDeviceMetadata)
+	_, payload := datasetPayload(t, ReadCBSVersion)
+	dataset := env.write(t, newDevice, ReadCBSVersion, importGen, false, payload)
+
+	rep := env.run(t)
+	if rep.Kept != MaxMetadataPerRun || rep.Imported != 0 || rep.Deferred != 1 {
+		t.Fatalf("report = %+v, want the flood kept, the budget spent and the dataset deferred", rep)
+	}
+	if got := keptNamesIfAny(t, env.spool); slices.ContainsFunc(got, func(n string) bool { return strings.HasPrefix(n, newDevice) }) {
+		t.Fatalf("kept = %v, want nothing of the new device kept", got)
+	}
+	if got := spoolFiles(t, env.spool); !slices.Contains(got, dataset) || !slices.Contains(got, meta) {
+		t.Fatalf("spool = %v, want %s and its metadata %s to wait", got, dataset, meta)
 	}
 }
