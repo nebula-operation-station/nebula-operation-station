@@ -3,6 +3,7 @@
 package ui_test
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/dockerhost"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
@@ -29,6 +31,55 @@ func listUpdatesResult(t *testing.T, sim, candidates string) executions.LastResu
 		t.Fatal(err)
 	}
 	return executions.LastResultRow{Result: b, FinishedAt: vulnNow.Add(-time.Hour)}
+}
+
+// TestNewVulnFixSourcesMapsBackends checks that the exported sources give
+// the decision the same values the pages get: a parsable list_updates
+// result becomes its packages, an unparsable one has no entry, a preview
+// keeps its ID and OK state, and a nil backend gives a nil ("off") source.
+func TestNewVulnFixSourcesMapsBackends(t *testing.T) {
+	rows := map[string]executions.LastResultRow{
+		"web1": listUpdatesResult(t,
+			"Inst openssl [3.0.11-1] (3.0.13-1 Debian-Security:12/stable-security [amd64])",
+			"Package: openssl\nVersion: 3.0.13-1\n\n"),
+		"web2": {Result: []byte("not a list_updates result")},
+	}
+	lastResults := func(_ context.Context, action string) (map[string]executions.LastResultRow, error) {
+		if action != "package.list_updates" {
+			t.Fatalf("action = %q, want package.list_updates", action)
+		}
+		return rows, nil
+	}
+	preview := func(_ context.Context, hostID string) (executions.ContainerPreview, error) {
+		return executions.ContainerPreview{ID: "prev-" + hostID, Status: dockerhost.PreviewOK}, nil
+	}
+	upd, prev := ui.NewVulnFixSources(lastResults, preview)
+	if upd == nil || prev == nil {
+		t.Fatal("sources with both backends must not be nil")
+	}
+	lists, err := upd.Lists(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := lists["web2"]; ok {
+		t.Errorf("unparsable result has an entry: %+v", lists["web2"])
+	}
+	got, ok := lists["web1"]
+	if !ok || len(got.Packages) != 1 || got.Packages[0].Name != "openssl" || !got.Packages[0].Security {
+		t.Errorf("web1 packages = %+v, ok=%v; want one security package openssl", got, ok)
+	}
+	p, err := prev.Preview(context.Background(), "web1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.ID != "prev-web1" || !p.OK {
+		t.Errorf("preview = %+v; want ID prev-web1 and OK", p)
+	}
+
+	noUpd, noPrev := ui.NewVulnFixSources(nil, nil)
+	if noUpd != nil || noPrev != nil {
+		t.Errorf("nil backends must give nil sources, got %v, %v", noUpd, noPrev)
+	}
 }
 
 // TestVulnPagesRenderFixWithLinks renders "fix with" from real
