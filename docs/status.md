@@ -23,10 +23,9 @@ the decisions, and [docs/implementation](implementation/) the per-area plans.
 | Integrity monitoring | [0015](adr/0015-integrity-monitoring.md) | accepted; libraries merged; **amendment 2026-11-21: I1 status and I2 scan chain wiring decided**, `fim.scan` as a durable job (#805, paper #783); chain fi started: fi01 merged (#870: action-specific `fim.scan` limits and the read-lease rule, ADR 0015 D5/D6); **decided 2026-11-25: `fim.scan` in the built-in catalog with reconcile-first retry, and a result limit** |
 | Ops agent | [0016](adr/0016-ops-agent.md) | accepted; implementation chain complete (27/27); finding and listener sources merged (#780) but `cmd/nebula-server/ops.go:246` still passes `opsNoFindings` – connecting them is ticket uh02: **maintainer decided a real per-host listener source (option a)**, source from stored socket facts in review; ops notes accept citations of handbook chunks (ADR 0016 D6, #787); a run without work reports its status, exit codes pinned for systemd (#807); note size limit aligned, pinned CA tested over real TLS (#809); install hint fixed (#811); Ops tab still not set in nebula-server |
 
-### Landed since the last update (8 PRs, 2026-11-24 19:00 to 2026-11-25 19:00)
+### Landed since the last update (7 PRs, 2026-11-24 19:00 to 2026-11-25 19:00)
 
-- **Network devices (chain nx, 9/11):** strict SpoolRef names, no replay of older reports,
-  report-only rows not fresh (#868, nx08g); store read methods for the device pages (#874, nx10a);
+- **Network devices (chain nx, 9/11):** store read methods for the device pages (#874, nx10a);
   metadata-only device row writer and hit-count limit (#877, nx10b).
 - **Vulnerability management (chain va, 2/6):** threat-model decision for the assertion (#875,
   va11); vulnerability store decision auditor (#876, va12).
@@ -53,7 +52,7 @@ the decisions, and [docs/implementation](implementation/) the per-area plans.
 ### Landed in the last 7 days
 
 Merged per day: 31 (11-13), 25 (11-16), 46 (11-17), about 45 (11-18), about 30 (11-19), 31
-(11-20), 42 (11-21), 29 (11-22), 15 (11-23), 9 (11-24), 3 (11-25). Main themes: vulnerability agent and package
+(11-20), 42 (11-21), 29 (11-22), 15 (11-23), 13 (11-24), 3 (11-25). Main themes: vulnerability agent and package
 inventory (ADR 0011); ops agent (ADR 0016) complete and partly wired; wiring of one-step
 enrollment; maintainer decisions for the remaining wiring gaps (ADR 0008, 0010, 0011, 0015);
 end-to-end and hostrun classifier tests.
@@ -130,9 +129,9 @@ Not re-checked in this pass: release 0.9, approval ergonomics, integrity monitor
 
 ## Changelog
 
-- **2026-11-25 (evening):** 8 PRs; fi01 merged (#870: `fim.scan` limits and read-lease rule);
+- **2026-11-25 (evening):** 7 PRs; fi01 merged (#870: `fim.scan` limits and read-lease rule);
   pi02 merged (#872); va11 and va12 merged (#875, #876); nx10a and nx10b merged (#874, #877);
-  nx08g hardening (#868); status page for 2026-11-24 late (#873). Maintainer decisions recorded
+  status page for 2026-11-24 late (#873). Maintainer decisions recorded
   on 2026-11-25: `fim.scan` retry and catalog, uh02 listener source (option a), ADR 0008
   amendment 2, device staleness.
 - **2026-11-24 (late evening):** 3 PRs; ug chain complete 12/12 (notifications end to end #803);
