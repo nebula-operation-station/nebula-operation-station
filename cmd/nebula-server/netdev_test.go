@@ -252,6 +252,39 @@ func TestNetDevImportedDatasetShowsOnPages(t *testing.T) {
 	}
 }
 
+// TestNetDevBlockedDeviceIsMarkedAndNotImported: a metadata record that
+// reports the device as blocked marks its row, the device's dataset is not
+// imported, and the pages show the row as blocked with its reason.
+func TestNetDevBlockedDeviceIsMarkedAndNotImported(t *testing.T) {
+	e := newNetDevTestEnv(t)
+	e.publish(t, "sw1", netdevcollect.ReadDeviceMetadata, 3,
+		`{"device_id":"sw1","family":"cbs","label":"Core switch","trust_generation":3,"blocked":true,"block_reason":"maintenance"}`)
+	e.publish(t, "sw1", netdevcollect.ReadCBSVersion, 3,
+		`{"model":"CBS350-24P","firmware":"3.4.0.17","serial":"PSZ1"}`)
+	rep, err := e.imp.imp.Run(context.Background())
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if rep.MetadataWritten != 1 || rep.Imported != 0 || rep.Kept != 1 {
+		t.Fatalf("report = %+v, want the blocked metadata written and the dataset kept", rep)
+	}
+	h := newNetDevHTTP(t, e)
+	for _, path := range []string{"/netdev", "/netdev/sw1"} {
+		res := h.get(path, h.admin)
+		if res.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d, want 200", path, res.Code)
+		}
+		body := res.Body.String()
+		if !strings.Contains(body, `<span class="badge badge--critical">gesperrt</span>`) ||
+			!strings.Contains(body, "Grund: maintenance") {
+			t.Fatalf("GET %s does not mark the device as blocked with its reason", path)
+		}
+		if strings.Contains(body, "CBS350-24P") {
+			t.Fatalf("GET %s shows a dataset of the blocked device", path)
+		}
+	}
+}
+
 // TestNetDevImportOnceLogsOutage: while the spool is missing, every pass fails
 // and the importer logs the outage once, not at each retry.
 func TestNetDevImportOnceLogsOutage(t *testing.T) {
