@@ -110,3 +110,59 @@ func TestNetDevPagesSetCSPHeader(t *testing.T) {
 		}
 	}
 }
+
+// netdevBlockedBadge marks a device the collector reports as blocked.
+const netdevBlockedBadge = `<span class="badge badge--critical">gesperrt</span>`
+
+// TestNetDevBlockedRowIsMarked: a row the collector reports as blocked shows
+// the blocked badge and its reason on the list and the detail page, so it is
+// never shown like a normal fresh or stale row. The reason is escaped text.
+func TestNetDevBlockedRowIsMarked(t *testing.T) {
+	e := newNetDevEnv(t)
+	e.store.devices = []netdevinventory.Device{
+		{DeviceID: "sw1", Family: netdevcontract.FamilyCBS, Label: "Core switch", TrustGeneration: 3,
+			LastSeen: netdevNow.Add(-5 * time.Minute), State: netdevinventory.DeviceFresh,
+			Origin: netdevinventory.OriginCollectorReported, Blocked: true, BlockReason: "<b>operator</b>"},
+		{DeviceID: "sw2", Family: netdevcontract.FamilyCBS, Label: "Access switch", TrustGeneration: 3,
+			LastSeen: netdevNow.Add(-5 * time.Minute), State: netdevinventory.DeviceFresh,
+			Origin: netdevinventory.OriginCollectorReported},
+	}
+	const reason = `Grund: &lt;b&gt;operator&lt;/b&gt;`
+	for _, path := range []string{"/netdev", "/netdev/sw1"} {
+		code, body := e.get(path)
+		if code != 200 {
+			t.Fatalf("GET %s = %d", path, code)
+		}
+		if n := strings.Count(body, netdevBlockedBadge); n != 1 {
+			t.Fatalf("GET %s: blocked badge shown %d times, want once (for sw1 only)", path, n)
+		}
+		if !strings.Contains(body, reason) {
+			t.Fatalf("GET %s: block reason missing or not escaped", path)
+		}
+		if strings.Contains(body, "<b>operator") {
+			t.Fatalf("GET %s: block reason rendered as markup", path)
+		}
+	}
+	_, body := e.get("/netdev/sw2")
+	if strings.Contains(body, netdevBlockedBadge) || strings.Contains(body, "Grund:") {
+		t.Fatal("an unblocked device shows the blocked marker")
+	}
+}
+
+// TestNetDevBlockedWithoutReasonSaysSo: a block without a reason is still
+// marked, with the missing reason named instead of an empty text, and keeps
+// its stale badge: blocked and stale are told apart, not merged.
+func TestNetDevBlockedWithoutReasonSaysSo(t *testing.T) {
+	e := newNetDevEnv(t)
+	e.store.devices = []netdevinventory.Device{
+		{DeviceID: "sw1", Family: netdevcontract.FamilyCBS, Label: "Core switch", TrustGeneration: 3,
+			State: netdevinventory.DeviceStale, Origin: netdevinventory.OriginCollectorReported, Blocked: true},
+	}
+	_, body := e.get("/netdev")
+	if !strings.Contains(body, netdevBlockedBadge) || !strings.Contains(body, "Grund: nicht angegeben") {
+		t.Fatal("blocked device without a reason is not marked with the missing reason")
+	}
+	if !strings.Contains(body, netdevStaleBadge) {
+		t.Fatal("a blocked stale device lost its stale badge")
+	}
+}
