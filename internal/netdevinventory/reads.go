@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevcontract"
 )
@@ -253,6 +254,45 @@ func (s *Store) Ports(ctx context.Context, deviceID string) ([]netdevcontract.Po
 			}
 			return p, nil
 		})
+}
+
+// HitCounts returns the current rule hit counts of a PAN-OS device in stored
+// order, at most netdevcontract.MaxHitCountEntries entries. Times are in UTC;
+// a time the device did not report is nil. ErrDatasetNotFound when none is
+// stored.
+func (s *Store) HitCounts(ctx context.Context, deviceID string) ([]netdevcontract.HitCount, error) {
+	tx, id, err := s.beginCurrent(ctx, deviceID, ReadHitCounts)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	return listAll(ctx, tx, tblHits, "rule_name, hits, first_hit, last_hit, reset_at", id, "", nil,
+		netdevcontract.MaxHitCountEntries,
+		func(sc rowScanner) (netdevcontract.HitCount, error) {
+			var h netdevcontract.HitCount
+			var hits int64
+			var first, last, reset sql.NullInt64
+			if err := sc.Scan(&h.RuleName, &hits, &first, &last, &reset); err != nil {
+				return netdevcontract.HitCount{}, err
+			}
+			if hits < 0 {
+				return netdevcontract.HitCount{}, fmt.Errorf("netdevinventory: stored hits %d out of range", hits)
+			}
+			h.Hits = uint64(hits)
+			h.FirstHit = optFromMicros(first)
+			h.LastHit = optFromMicros(last)
+			h.ResetAt = optFromMicros(reset)
+			return h, nil
+		})
+}
+
+// optFromMicros converts a nullable stored time; NULL is nil.
+func optFromMicros(v sql.NullInt64) *time.Time {
+	if !v.Valid {
+		return nil
+	}
+	t := fromMicros(v.Int64)
+	return &t
 }
 
 // MACEntries returns the MAC table entries of a CBS device from offset, in
