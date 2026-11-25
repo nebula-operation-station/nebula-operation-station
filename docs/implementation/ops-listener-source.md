@@ -38,12 +38,11 @@ A host whose listeners cannot be shown is **unknown**, not "no ports":
 These return an error wrapping `trafficingest.ErrListenersUnknown` with the
 reason. A failed store read is a different, plain error and fails the read.
 
-`cmd/nebula-server` maps unknown facts to `errOpsListenersUnknown`. The
-projection in `internal/opsfacts` still treats any listener error as a
-failed read, so a host with unknown listeners currently fails the work
-list. The intended behaviour is that `opsfacts` leaves such a host out of
-the lab groups and records an audited skip with the reason. That change is
-still open; it is outside this change's paths.
+`cmd/nebula-server` wraps unknown facts with `opsfacts.ErrListenersUnknown`.
+The projection in `internal/opsfacts` then leaves that host's groups out of
+the lab part and writes one audit skip for the host (scope `listeners`, rule
+`listening ports unknown`). The read succeeds for the other hosts. Any other
+listener error still fails the projection (fail-closed).
 
 ## Not covered
 
