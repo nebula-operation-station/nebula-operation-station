@@ -1549,34 +1549,56 @@ host is in D2.
   PV-03b is merged").** Today `pveGet` returns `errPveMutationRead` for any
   non-200 status other than an optional 404 and does not look at the
   message (`pve_mutation_client.go:568-572`).
-  - **(a) Lab check before PV-03a and PV-03b: satisfied on 2026-11-25**
-    (previously "Lab check gates PV-03a and PV-03b ... Until that result is
-    recorded here, PV-03a and PV-03b do not start"). One read-only request
-    for the config of an unused VMID on a lab node; the result is recorded
-    below under "Lab check result". Redaction rule for this record: no IPs,
-    host names, node names or versions; the node and the VMID in a PVE
-    message are written as `<node>` and `<id>`.
+  - **(a) Lab check before PV-03a and PV-03b: satisfied on 2026-11-25 by
+    the measured message text** (previously "Lab check gates PV-03a and
+    PV-03b ... Until that result is recorded here, PV-03a and PV-03b do not
+    start"). One read-only request for the config of an unused VMID on a lab
+    node; the result is recorded below under "Lab check result". Redaction
+    rule for this record: no IPs, host names, node names or versions; the
+    node and the VMID in a PVE message are written as `<node>` and `<id>`.
+  - **PV-03a and PV-03b do not depend on the exact HTTP status (Claude,
+    round 5, 2026-11-25).** The lab check measured the message, not the
+    status (see "Lab check result"). D5 treats a 404 and a 500 with the
+    exact message below alike, as "template gone", so the gate needs only
+    the message text, and that was measured. Should PVE send this message
+    with any status other than 404 or 500, the read refuses with no permit
+    and the record unchanged (fail closed); it never re-prepares.
   - **(b) Independent of the lab result,** the template read treats as
     "template gone" (`ErrPveTemplateNotPrepared`, falls through to a new
     proposal) both a 404 and a 500 whose PVE error message matches the
-    fixed pattern below. The lab result confirms that PVE reports a missing
-    guest config as a 500 with this message, so (b) stays as decided.
-  - **Fixed pattern (2026-11-25, after the lab check; previously Claude,
-    before the lab check: the whole message
+    exact form below. (Previously this bullet ended "The lab result
+    confirms that PVE reports a missing guest config as a 500 with this
+    message, so (b) stays as decided"; removed in round 5 by Claude,
+    because the lab check did not measure the status. (b) stays as decided
+    by the maintainer.)
+  - **Exact form, bound to the request (Claude, round 5, 2026-11-25; a
+    narrowing inside the maintainer's decision "b", not a maintainer
+    decision; previously "Fixed pattern (2026-11-25, after the lab check)":
+    the message contains each of the three substrings `does not exist`,
+    `qemu-server/` and `.conf`, which matched a message naming any node or
+    VMID; before that, Claude before the lab check: the whole message with
+    the requested node and VMID, compared literally).** Who decided what:
+    the maintainer decided that a 404 and a 500 with "does not exist" count
+    as "template gone" (answer „1 streichen, 2 a+b“, verbatim in the
+    Changelog); the exact form below is Claude's proposal to close the
+    review finding that the substring rule accepts a message about another
+    guest, and stays inside that decision because it only accepts fewer
+    500 replies. The PVE error message, read with a named size limit and
+    checked as UTF-8, with leading and trailing whitespace trimmed (such as
+    the newline PVE may append), counts as "template gone" only when it
+    equals
     `Configuration file 'nodes/<node>/qemu-server/<vmid>.conf' does not exist`
-    with the requested node and VMID, compared literally).** The PVE error
-    message, read with a named size limit and checked as UTF-8, counts as
-    "template gone" when it contains each of the three substrings
-    `does not exist`, `qemu-server/` and `.conf`. Plain substring checks, not
-    a regular expression; leading or trailing whitespace, such as the
-    newline PVE may append, does not affect them. Any other 500, and any
-    other non-200 status but 404, stays a read error that refuses with no
-    permit and the record unchanged.
+    byte for byte, where `<node>` is the node and `<vmid>` the VMID (in
+    decimal) of this very template read, built by NOS from the request and
+    never taken from the reply. No other text before, inside or after it;
+    no regular expression. A 500 whose message names another node or
+    another VMID, any other 500, and any other non-200 status but 404, stays
+    a read error that refuses with no permit and the record unchanged.
   - **Open for PV-03a (Claude):** the lab check was made with `pvesh`, which
     prints the message but neither the HTTP status nor where in the HTTP
     reply the message sits (status line reason phrase or a field of the JSON
     body). PV-03a names the source and its size limit next to the code;
-    the pattern above does not change with it.
+    the exact form above does not change with it.
   - The behaviour for "gone" is the one this section already describes: no
     operator record removal; the proposal falls through, and `Prepare`
     overwrites the key's record with generation + 1
@@ -1585,10 +1607,16 @@ host is in D2.
     recorded (status code: open; message: open)").** A read-only
     `pvesh get /nodes/<node>/qemu/<unused id>/config` on a lab node answered
     `Configuration file 'nodes/<node>/qemu-server/<id>.conf' does not exist`
-    with `pvesh` exit status 2. `pvesh` does not print the HTTP status;
-    this message is what the PVE API returns as error 500 for a missing
-    guest config. Status code: 500 (from the API behaviour for this
-    message, not printed by `pvesh`); message: as above.
+    with `pvesh` exit status 2. Measured: the message text and the exit
+    status. Not measured: the HTTP status, because `pvesh` does not print
+    it. "500" is the documented PVE API behaviour for a missing guest
+    config, recorded here as such and not as a measurement. Status code:
+    not measured (documented: 500); message: as above, measured.
+    (Previously, round 4: "this message is what the PVE API returns as
+    error 500 for a missing guest config. Status code: 500 (from the API
+    behaviour for this message, not printed by `pvesh`); message: as
+    above"; reworded in round 5 by Claude so that only what was measured
+    reads as measured.)
 - **No digest check is added (decided by the maintainer 2026-11-25;
   previously Claude, round 2: "a digest that is missing or not 64 lowercase
   hex digits counts as a malformed body; changes the mapping at
@@ -1622,17 +1650,25 @@ host is in D2.
 - **Test ticket: PV-03b** (may start: the lab check result is recorded
   above, 2026-11-25; previously "starts only after the lab check result is
   recorded"; gone template, 404, falls through, generation 2;
-  gone template, 500 with the fixed pattern (all three substrings), falls
-  through, generation 2; 500 that lacks any one of the three substrings
-  refuses with no permit and an
-  unchanged record (2026-11-25, maintainer; previously "gone template,
-  404, generation 2" only); changed template; re-pinned remote with
+  gone template, 500 with the exact message for the requested node and
+  VMID, falls through, generation 2; refusing with no permit and an
+  unchanged record: a 500 with the same message but another VMID, a 500
+  with the same message but another node, a 500 with extra text before or
+  after the message (leading or trailing whitespace alone still matches),
+  and any other 500 (404 and 500 behaviour decided by the maintainer
+  2026-11-25; the exact-form cases added in round 5 by Claude, see D5
+  "Exact form"; previously "500 with the fixed pattern (all three
+  substrings), falls through, generation 2; 500 that lacks any one of the
+  three substrings refuses with no permit and an unchanged record
+  (2026-11-25, maintainer)", and before that "gone template, 404,
+  generation 2" only); changed template; re-pinned remote with
   `ErrPveRemoteChanged` on the old record, new proposal with its own
   approval, generation 2 with the new trust generation; refusal cases:
   transport error, timeout, malformed body refuse with no permit and an
   unchanged record; blocked or removed remote refuses with no PVE change;
   reuse of the gone template's VMID). Added in round 2 (Claude): after
-  `Run`, a 404 or a 500 with the pattern on the new template writes the
+  `Run`, a 404 or a 500 with the exact message (round 5; previously "the
+  pattern") on the new template writes the
   `template_unreadable` audit event and no record. (Removed 2026-11-25 by
   the maintainer: "a 200 reply with a digest that is not 64 lowercase hex
   digits refuses"; see "No digest check is added".)
@@ -1693,6 +1729,19 @@ host is in D2.
   message as "template gone"; "c" (404 only) was not chosen. (Previously
   this entry was a paraphrase without the wording.)
 - 2026-11-25, 09:57: D5 lab check done by the maintainer; result in D5,
-  "Lab check result". The gate before PV-03a and PV-03b is satisfied; the
-  fixed pattern is the three substrings `does not exist`, `qemu-server/`
-  and `.conf`; any other 500 stays a refusal.
+  "Lab check result" (message measured, HTTP status not measured). The
+  gate before PV-03a and PV-03b is satisfied by the measured message text.
+  (Previously this entry also said "the fixed pattern is the three
+  substrings `does not exist`, `qemu-server/` and `.conf`; any other 500
+  stays a refusal", without a verbatim maintainer wording; that pattern
+  was Claude's wording, replaced on 2026-11-25 in round 5, see the next
+  entry.)
+- 2026-11-25, round 5 (Claude, pending maintainer review): D5 "template
+  gone" narrowed inside the maintainer's decision "b" to the exact message
+  `Configuration file 'nodes/<node>/qemu-server/<vmid>.conf' does not exist`
+  with the node and VMID of the request, whitespace trimmed; a message
+  naming another node or VMID refuses. Lab result reworded: message
+  measured, 500 recorded as documented PVE API behaviour, not measured; the
+  sentence that the lab result "confirms" the 500 removed. PV-03a and
+  PV-03b stated as independent of the exact status. PV-03b gains the
+  cases 500 with another VMID, another node or extra text, each refused.
