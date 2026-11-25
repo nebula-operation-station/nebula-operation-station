@@ -233,8 +233,13 @@ type netdevRow struct {
 	TrustNote string
 	LastSeen  time.Time
 	Age       string
-	// Stale is set when the device itself is stale.
-	Stale    bool
+	// Stale is set when the device itself is stale: the collector has not
+	// reported it for DeviceReportStaleAfter. A stale row stays listed; it
+	// is never removed.
+	Stale bool
+	// Reported is set when the row was written from a collector report
+	// (netdevinventory.OriginCollectorReported), not by an admin.
+	Reported bool
 	Datasets []netdevDatasetRow
 	Link     string
 }
@@ -300,6 +305,7 @@ type netdevDetailData struct {
 	LastSeen        time.Time
 	Age             string
 	Stale           bool
+	Reported        bool
 	Link            string
 	Datasets        []netdevDatasetRow
 
@@ -569,6 +575,7 @@ func (p *NetDevPages) handleList(w http.ResponseWriter, r *http.Request) {
 			LastSeen:        d.LastSeen,
 			Age:             pveAge(now, d.LastSeen),
 			Stale:           d.State == netdevinventory.DeviceStale,
+			Reported:        d.Origin == netdevinventory.OriginCollectorReported,
 			Datasets:        p.datasets(ctx, d, now),
 			Link:            netdevDeepLink(e, d.Family),
 		})
@@ -652,6 +659,7 @@ func (p *NetDevPages) handleDetail(w http.ResponseWriter, r *http.Request) {
 		LastSeen:        d.LastSeen,
 		Age:             pveAge(now, d.LastSeen),
 		Stale:           d.State == netdevinventory.DeviceStale,
+		Reported:        d.Origin == netdevinventory.OriginCollectorReported,
 		Link:            netdevDeepLink(e, d.Family),
 		Datasets:        p.datasets(ctx, d, now),
 		AssetLink:       p.assetLink(ctx, d),

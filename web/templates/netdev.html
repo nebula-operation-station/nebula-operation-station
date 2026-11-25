@@ -13,7 +13,7 @@
     <tbody>
       {{range .NetDevList.Rows}}
       <tr>
-        <td><a href="{{.DetailURL}}">{{.Label}}</a>{{if .Stale}} <span class="badge badge--warning">stale</span>{{end}}</td>
+        <td><a href="{{.DetailURL}}">{{.Label}}</a>{{if .Reported}} <span class="badge badge--ok">reported by collector</span>{{end}}{{if .Stale}} <span class="badge badge--warning">stale</span>{{end}}</td>
         <td>{{.Family}}</td>
         <td class="mono">{{.Endpoint}}</td>
         <td>{{.TrustGeneration}}{{if .TrustNote}} <span class="badge badge--warning">{{.TrustNote}}</span>{{end}}</td>
