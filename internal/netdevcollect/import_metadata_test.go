@@ -711,3 +711,94 @@ func TestBlockedLoadFailureImportsNothing(t *testing.T) {
 		t.Fatalf("loads = %d, want the block state read once after it succeeded", meta.loads)
 	}
 }
+
+// A blocked device whose newer unblocked metadata record waits for the store
+// keeps its datasets waiting too: they are neither kept as blocked nor
+// written. Once the store accepts the unblock, the datasets are imported.
+func TestBlockedDeviceDefersDatasetWhileUnblockWaitsOnStore(t *testing.T) {
+	env := newImportEnv(t)
+	env.imp.Meta = env.store
+	metadataAt(t, env, newDevice, 0, blockedNewDeviceMetadata)
+	if rep := env.run(t); rep.MetadataWritten != 1 {
+		t.Fatalf("first pass report = %+v, want the blocked metadata written", rep)
+	}
+
+	meta := &flakyMeta{inner: env.store, err: errors.New("database is locked")}
+	env.imp.Meta = meta
+	unblock := metadataAt(t, env, newDevice, time.Second, newDeviceMetadata)
+	dataset := datasetOf(t, env, newDevice, ReadCBSVersion, 2*time.Second)
+
+	rep := env.run(t)
+	if rep.Retry != 1 || rep.Kept != 0 || rep.Imported != 0 || rep.Deferred != 1 {
+		t.Fatalf("report = %+v, want the unblock retried and the dataset deferred", rep)
+	}
+	if got := keptNamesIfAny(t, env.spool); len(got) != 0 {
+		t.Fatalf("kept = %v, want nothing kept", got)
+	}
+	if got := spoolFiles(t, env.spool); !slices.Contains(got, dataset) || !slices.Contains(got, unblock) {
+		t.Fatalf("spool = %v, want %s and its unblock %s to wait", got, dataset, unblock)
+	}
+
+	meta.err = nil
+	rep = env.run(t)
+	if rep.MetadataWritten != 1 || rep.Imported != 1 || rep.Kept != 0 {
+		t.Fatalf("second pass report = %+v, want the unblock written and the dataset imported", rep)
+	}
+	if got := spoolFiles(t, env.spool); len(got) != 0 {
+		t.Fatalf("spool = %v after the second pass, want empty", got)
+	}
+}
+
+// A blocked device whose newer unblocked metadata record is not tried because
+// the metadata budget of the pass ran out keeps its datasets waiting, as it
+// does after a store failure. The newer invalid records of the device spend
+// the budget first.
+func TestBlockedDeviceDefersDatasetWhileUnblockIsUntried(t *testing.T) {
+	const invalidNewDeviceMetadata = `{"device_id":"new-sw-02","family":"cbs","label":"a\u0007","trust_generation":3,"blocked":false,"block_reason":""}`
+	env := newImportEnv(t)
+	env.imp.Meta = env.store
+	metadataAt(t, env, newDevice, 0, blockedNewDeviceMetadata)
+	if rep := env.run(t); rep.MetadataWritten != 1 {
+		t.Fatalf("first pass report = %+v, want the blocked metadata written", rep)
+	}
+
+	unblock := metadataAt(t, env, newDevice, time.Second, newDeviceMetadata)
+	for i := 0; i < MaxMetadataPerRun; i++ {
+		metadataAt(t, env, newDevice, 2*time.Second+time.Duration(i)*metadataFloodSpacing, invalidNewDeviceMetadata)
+	}
+	dataset := datasetOf(t, env, newDevice, ReadCBSVersion, 3*time.Second)
+
+	rep := env.run(t)
+	if rep.Kept != MaxMetadataPerRun || rep.Imported != 0 || rep.Deferred != 1 || rep.MetadataWritten != 0 {
+		t.Fatalf("report = %+v, want the invalid metadata kept, the unblock untried and the dataset deferred", rep)
+	}
+	if got := spoolFiles(t, env.spool); !slices.Contains(got, dataset) || !slices.Contains(got, unblock) {
+		t.Fatalf("spool = %v, want %s and its unblock %s to wait", got, dataset, unblock)
+	}
+
+	rep = env.run(t)
+	if rep.MetadataWritten != 1 || rep.Imported != 1 || rep.Kept != 0 {
+		t.Fatalf("second pass report = %+v, want the unblock written and the dataset imported", rep)
+	}
+	if got := spoolFiles(t, env.spool); len(got) != 0 {
+		t.Fatalf("spool = %v after the second pass, want empty", got)
+	}
+}
+
+// A blocked device with no newer unblocked metadata waiting keeps its new
+// dataset as device_blocked, as before: the halt is not a wait.
+func TestBlockedDeviceWithoutPendingUnblockKeepsDataset(t *testing.T) {
+	env := newImportEnv(t)
+	env.imp.Meta = env.store
+	metadataAt(t, env, newDevice, 0, blockedNewDeviceMetadata)
+	if rep := env.run(t); rep.MetadataWritten != 1 {
+		t.Fatalf("first pass report = %+v, want the blocked metadata written", rep)
+	}
+	datasetOf(t, env, newDevice, ReadCBSVersion, time.Second)
+
+	rep := env.run(t)
+	if rep.Kept != 1 || rep.Deferred != 0 || rep.Imported != 0 {
+		t.Fatalf("report = %+v, want the dataset kept, not deferred", rep)
+	}
+	requireKeptWithReason(t, env, newDevice, ReadCBSVersion, ReasonDeviceBlocked)
+}
