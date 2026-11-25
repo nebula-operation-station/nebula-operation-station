@@ -223,6 +223,22 @@ func deviceFixWith(f vulnstore.Finding) vulnFixView {
 	return viewOf(vulnfix.DeviceResult(f))
 }
 
+// NewVulnFixSources returns the update and preview sources of the "fix
+// with" decision (internal/vulnfix) over the given backends, the same
+// adapters the vulnerability pages use. lastResults reads the newest
+// successful result of an action per host; preview reads a host's newest
+// container update preview. A nil backend gives a nil source, which the
+// decision reads as "off" (the same as the pages with operations or
+// container updates disabled). Callers outside this package reuse these
+// sources instead of a second copy of the mapping.
+func NewVulnFixSources(
+	lastResults func(ctx context.Context, action string) (map[string]executions.LastResultRow, error),
+	preview func(ctx context.Context, hostID string) (executions.ContainerPreview, error),
+) (vulnfix.UpdateSource, vulnfix.PreviewSource) {
+	r := &vulnFixResolver{lastResults: lastResults, preview: preview}
+	return r.updateSource(), r.previewSource()
+}
+
 // vulnFixResolver computes "fix with" entries for one page, reading each
 // host result source at most once.
 type vulnFixResolver struct {
