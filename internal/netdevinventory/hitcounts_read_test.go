@@ -114,7 +114,8 @@ func TestHitCountsBoundedAtContractMaximum(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ReplaceDataset(ctx, "fw-edge", ReadHitCounts, d.TrustGeneration, testBase.Add(time.Minute), false, over); err == nil {
-		t.Fatalf("ReplaceDataset above the maximum succeeded, want an error")
+	_, err = s.ReplaceDataset(ctx, "fw-edge", ReadHitCounts, d.TrustGeneration, testBase.Add(time.Minute), false, over)
+	if !errors.Is(err, netdevcontract.ErrOverLimit) {
+		t.Fatalf("ReplaceDataset above the maximum: err %v, want netdevcontract.ErrOverLimit", err)
 	}
 }
