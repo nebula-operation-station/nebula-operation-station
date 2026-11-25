@@ -28,8 +28,10 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsfacts"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/trafficingest"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfix"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnprio"
@@ -306,23 +308,50 @@ func opsLinkOf(a vulnfix.Action) opsfacts.FixLink {
 	return opsfacts.LinkNone
 }
 
-// errOpsListenersUnavailable: the server holds no listening ports of a host.
+// errOpsListenersUnavailable: no listener source is wired.
 var errOpsListenersUnavailable = errors.New("listening ports of the host are not stored")
 
+// errOpsListenersUnknown: the stored facts cannot show the host's listening
+// ports (none, stale, incomplete or over the limit). It is never an empty
+// list.
+var errOpsListenersUnknown = errors.New("listening ports of the host are unknown: stored facts missing, stale or incomplete")
+
 // opsVulnListeners is the listener source of the projection (ADR 0016 D4,
-// ADR 0009). The server stores no listening ports per host: server.db has no
-// table for them (checked against the migrations in
-// internal/serverdb/migrations), and the discovered_addresses ports are scan
-// results of unmanaged addresses, not the host's own listeners. So every read
-// fails with errOpsListenersUnavailable. It never returns an empty list: an
-// empty list reads as "verified no listening ports", which the server cannot
-// verify. The projection therefore fails for a host with a critical or high
-// finding until a listener source exists; it does not show ports: [] instead.
-type opsVulnListeners struct{}
+// ADR 0009). It reads the host's own listening sockets from its latest
+// stored net.facts result (trafficingest.ListenerReader): fresh facts give
+// the ports; stale or missing facts give errOpsListenersUnknown; a failed
+// store read is returned as is. The zero value has no source and fails every
+// read with errOpsListenersUnavailable.
+type opsVulnListeners struct {
+	src trafficingest.Source
+	now func() time.Time
+}
 
 var _ opsfacts.ListenerSource = opsVulnListeners{}
 
-// Listeners always fails with errOpsListenersUnavailable; see the type comment.
-func (opsVulnListeners) Listeners(context.Context, string) ([]opsfacts.Port, error) {
-	return nil, errOpsListenersUnavailable
+// newOpsVulnListeners returns the listener source over the stored net.facts
+// results; now is the clock (nil means time.Now).
+func newOpsVulnListeners(src trafficingest.Source, now func() time.Time) opsVulnListeners {
+	return opsVulnListeners{src: src, now: now}
+}
+
+// Listeners implements opsfacts.ListenerSource. It never returns an empty
+// list for unknown facts: an empty list reads as "verified no listening
+// ports". Unknown facts return errOpsListenersUnknown.
+func (l opsVulnListeners) Listeners(ctx context.Context, hostID string) ([]opsfacts.Port, error) {
+	if l.src == nil {
+		return nil, errOpsListenersUnavailable
+	}
+	ports, _, err := trafficingest.ListenerReader{Src: l.src, Now: l.now}.ListenersOf(ctx, hostID)
+	switch {
+	case errors.Is(err, trafficingest.ErrListenersUnknown):
+		return nil, fmt.Errorf("%w: %w", errOpsListenersUnknown, err)
+	case err != nil:
+		return nil, fmt.Errorf("listeners of host %q: %w", hostID, err)
+	}
+	out := make([]opsfacts.Port, 0, len(ports))
+	for _, p := range ports {
+		out = append(out, opsfacts.Port{Number: p.Port, Protocol: p.Protocol})
+	}
+	return out, nil
 }
