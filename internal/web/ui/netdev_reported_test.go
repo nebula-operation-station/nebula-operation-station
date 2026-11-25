@@ -87,15 +87,26 @@ func TestNetDevEmptyAndUnavailableAreDistinct(t *testing.T) {
 	}
 }
 
-// TestNetDevPagesSetCSPHeader: the list is served with the content security
-// policy of the security middleware.
+// netdevStrictCSP is the content security policy of docs/spec/09 that the
+// security middleware sets on every response.
+const netdevStrictCSP = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+
+// TestNetDevPagesSetCSPHeader: the list is served with the strict content
+// security policy: exactly the policy of the middleware, so no unsafe-inline,
+// no wildcard and default-src limited to 'self'.
 func TestNetDevPagesSetCSPHeader(t *testing.T) {
 	e := newNetDevEnv(t)
 	res, _ := e.getAs(e.cookie, "/netdev")
 	if res.StatusCode != 200 {
 		t.Fatalf("GET /netdev = %d", res.StatusCode)
 	}
-	if res.Header.Get("Content-Security-Policy") == "" {
-		t.Fatal("GET /netdev has no Content-Security-Policy header")
+	csp := res.Header.Get("Content-Security-Policy")
+	if csp != netdevStrictCSP {
+		t.Fatalf("Content-Security-Policy = %q, want %q", csp, netdevStrictCSP)
+	}
+	for _, weak := range []string{"unsafe-inline", "unsafe-eval", "'*'", " * ", "default-src *"} {
+		if strings.Contains(csp, weak) {
+			t.Fatalf("Content-Security-Policy allows %q", weak)
+		}
 	}
 }
