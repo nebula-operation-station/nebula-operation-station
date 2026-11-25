@@ -116,7 +116,7 @@ on a minimal phase-2 mutation foundation, not on the rest of phase 2.
      `Configuration file 'nodes/<node>/qemu-server/<vmid>.conf' does not exist`
      for the node and VMID of this very read, built by NOS from the request
      (decided 2026-11-25; exact binding to node and VMID: Claude, within the
-     decision; previously "a 500 with the fixed \"does not exist\" pattern");
+     decision; previously "a 500 with the fixed “does not exist” pattern");
      the read-only lab check before PV-03a and PV-03b was done on
      2026-11-25 and the gate is satisfied (previously "a read-only lab
      check gates PV-03a and PV-03b") (D5; PV-03b).
