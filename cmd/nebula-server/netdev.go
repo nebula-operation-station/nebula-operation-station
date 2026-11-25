@@ -101,10 +101,10 @@ func (n *netdevImport) run(ctx context.Context) {
 var netdevUIOptions ui.Options
 
 // mountNetDevPages adds the network device pages and the PAN-OS firewall view
-// to mux, over the server database and the admin rule. A server without a
-// database or without the admin rule mounts no pages (404 behind the session
-// check) and logs why.
-func mountNetDevPages(d serverDeps, o ui.Options, mux *http.ServeMux) error {
+// to mux, over the server database and the admin rule. The store reads
+// device freshness on now. A server without a database or without the admin
+// rule mounts no pages (404 behind the session check) and logs why.
+func mountNetDevPages(d serverDeps, o ui.Options, mux *http.ServeMux, now func() time.Time) error {
 	if d.db == nil || d.isAdmin == nil {
 		if d.log != nil {
 			d.log.Warn("network device pages not mounted: database or admin rule missing")
@@ -115,7 +115,7 @@ func mountNetDevPages(d serverDeps, o ui.Options, mux *http.ServeMux) error {
 	if err != nil {
 		return fmt.Errorf("network device pages: %w", err)
 	}
-	store := netdevinventory.NewWithNow(d.db, time.Now)
+	store := netdevinventory.NewWithNow(d.db, now)
 	isAdmin := func(ctx context.Context, _ string) (bool, error) { return d.isAdmin(ctx), nil }
 	pages, err := h.NetDevPages(ui.NetDevOptions{Store: store, IsAdmin: isAdmin})
 	if err != nil {
@@ -155,7 +155,7 @@ func init() {
 			return nil
 		},
 		pages: func(d serverDeps, mux *http.ServeMux) error {
-			if err := mountNetDevPages(d, netdevUIOptions, mux); err != nil {
+			if err := mountNetDevPages(d, netdevUIOptions, mux, time.Now); err != nil {
 				return err
 			}
 			return startNetDevImport(d)

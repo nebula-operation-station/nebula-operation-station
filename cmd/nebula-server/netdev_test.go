@@ -3,21 +3,25 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevcollect"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/netdevinventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverdb"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
 
@@ -129,29 +133,161 @@ func TestNetDevStaleDeviceKeepsItsRow(t *testing.T) {
 	}
 }
 
-// TestNetDevPagesAnswerOnlyAdmins: the pages are mounted over the server
-// database; a request without an admin session is refused, not answered
-// with an empty list.
-func TestNetDevPagesAnswerOnlyAdmins(t *testing.T) {
-	e := newNetDevTestEnv(t)
+// netdevHTTP is the HTTP chain of the server for the netdev pages: the
+// security middleware, the real session check (auth.Wrap) and the pages
+// mounted by mountNetDevPages with the admin rule of the server. Its admin
+// session belongs to "admin", its non-admin session to "bob"; the admin rule
+// of the wiring answers true for "admin" only.
+type netdevHTTP struct {
+	srv   *http.Server
+	admin string // token of the admin's web session
+	user  string // token of a signed-in non-admin's web session
+}
+
+// newNetDevHTTP mounts the netdev pages of e on the server chain.
+func newNetDevHTTP(t *testing.T, e *netdevTestEnv) *netdevHTTP {
+	t.Helper()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	isAdmin := func(ctx context.Context) bool {
+		s, ok := auth.SessionFrom(ctx)
+		return ok && s.UserName == "admin"
+	}
 	mux := http.NewServeMux()
-	d := serverDeps{db: e.db, log: slog.New(slog.NewTextHandler(io.Discard, nil)),
-		isAdmin: func(context.Context) bool { return false }}
-	if err := mountNetDevPages(d, testUIOptions(), mux); err != nil {
+	d := serverDeps{db: e.db, log: log, isAdmin: isAdmin}
+	if err := mountNetDevPages(d, testUIOptions(e.clock), mux, e.clock); err != nil {
 		t.Fatalf("mountNetDevPages: %v", err)
 	}
-	srv := httptest.NewServer(mux)
-	defer srv.Close()
+	sessions := auth.NewStore(e.db, nil)
+	login, err := auth.New(auth.Options{Executor: &lazyExecutor{}, Sessions: sessions, Log: log})
+	if err != nil {
+		t.Fatalf("auth.New: %v", err)
+	}
+	admin, _, err := sessions.Create(context.Background(), "cred-1", "admin")
+	if err != nil {
+		t.Fatalf("admin session: %v", err)
+	}
+	user, _, err := sessions.Create(context.Background(), "cred-2", "bob")
+	if err != nil {
+		t.Fatalf("user session: %v", err)
+	}
+	srv, err := webServer(swOrigin, login, mux, nil)
+	if err != nil {
+		t.Fatalf("webServer: %v", err)
+	}
+	return &netdevHTTP{srv: srv, admin: admin, user: user}
+}
 
+// get sends GET path with the web session token; an empty token sends no
+// cookie.
+func (h *netdevHTTP) get(path, token string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, swOrigin+path, nil)
+	if token != "" {
+		req.AddCookie(&http.Cookie{Name: auth.CookieName, Value: token})
+	}
+	rec := httptest.NewRecorder()
+	h.srv.Handler.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestNetDevPagesAnswerOnlyAdmins: a signed-in non-admin is refused on every
+// netdev page with 403, and an admin gets the list. The 403 comes from the
+// admin rule of the wiring, so a rule that always answered true would fail.
+func TestNetDevPagesAnswerOnlyAdmins(t *testing.T) {
+	e := newNetDevTestEnv(t)
+	h := newNetDevHTTP(t, e)
 	for _, path := range []string{"/netdev", "/netdev/sw1", "/netdev/sw1/firewall"} {
-		res, err := http.Get(srv.URL + path)
-		if err != nil {
-			t.Fatalf("GET %s: %v", path, err)
+		if rec := h.get(path, h.user); rec.Code != http.StatusForbidden {
+			t.Errorf("GET %s as a non-admin = %d, want 403", path, rec.Code)
 		}
-		res.Body.Close()
-		if res.StatusCode != http.StatusForbidden {
-			t.Errorf("GET %s = %d, want 403 without an admin session", path, res.StatusCode)
+		if rec := h.get(path, ""); rec.Code == http.StatusOK {
+			t.Errorf("GET %s without a session = 200, want it refused", path)
 		}
+	}
+	if rec := h.get("/netdev", h.admin); rec.Code != http.StatusOK {
+		t.Fatalf("GET /netdev as the admin = %d, want 200", rec.Code)
+	}
+}
+
+// TestNetDevImportedDatasetShowsOnPages: a metadata record and a dataset of
+// the same device, imported in one pass, show on the list and on the device
+// page. The device row is marked as reported by the collector and the dataset
+// shows its state and its content.
+func TestNetDevImportedDatasetShowsOnPages(t *testing.T) {
+	e := newNetDevTestEnv(t)
+	e.publish(t, "sw1", netdevcollect.ReadDeviceMetadata, 3,
+		`{"device_id":"sw1","family":"cbs","label":"Core switch","trust_generation":3,"blocked":false,"block_reason":""}`)
+	e.publish(t, "sw1", netdevcollect.ReadCBSVersion, 3,
+		`{"model":"CBS350-24P","firmware":"3.4.0.17","serial":"PSZ1"}`)
+	rep, err := e.imp.imp.Run(context.Background())
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if rep.MetadataWritten != 1 || rep.Imported != 1 || rep.Kept != 0 {
+		t.Fatalf("report = %+v, want the metadata written and the dataset imported", rep)
+	}
+	h := newNetDevHTTP(t, e)
+
+	list := h.get("/netdev", h.admin)
+	if list.Code != http.StatusOK {
+		t.Fatalf("GET /netdev = %d, want 200", list.Code)
+	}
+	body := list.Body.String()
+	if !strings.Contains(body, "Core switch") || !strings.Contains(body, netdevReportedBadge) {
+		t.Fatal("list does not show the imported device as reported by the collector")
+	}
+	if !strings.Contains(body, string(netdevinventory.ReadFacts)+": fresh") {
+		t.Fatalf("list does not show the imported dataset as fresh")
+	}
+
+	detail := h.get("/netdev/sw1", h.admin)
+	if detail.Code != http.StatusOK {
+		t.Fatalf("GET /netdev/sw1 = %d, want 200", detail.Code)
+	}
+	page := detail.Body.String()
+	if !strings.Contains(page, netdevReportedBadge) {
+		t.Fatal("device page does not mark the device as reported by the collector")
+	}
+	if !strings.Contains(page, "CBS350-24P") {
+		t.Fatal("device page does not show the imported dataset's model")
+	}
+}
+
+// TestNetDevImportOnceLogsOutage: while the spool is missing, every pass fails
+// and the importer logs the outage once, not at each retry.
+func TestNetDevImportOnceLogsOutage(t *testing.T) {
+	e := newNetDevTestEnv(t)
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	n := newNetDevImport(e.db, filepath.Join(t.TempDir(), "missing"), log, e.clock)
+	n.interval = time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		n.run(ctx)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	<-done
+
+	if got := strings.Count(logs.String(), "netdev spool unavailable"); got != 1 {
+		t.Fatalf("outage logged %d times, want once", got)
+	}
+}
+
+// TestNetDevImportMissingSpoolIsUnavailable: a spool directory that does not
+// exist is an error of the pass (the spool is not available); it is not a
+// fault of any record and it stores nothing.
+func TestNetDevImportMissingSpoolIsUnavailable(t *testing.T) {
+	e := newNetDevTestEnv(t)
+	n := newNetDevImport(e.db, filepath.Join(t.TempDir(), "missing"), slog.New(slog.DiscardHandler), e.clock)
+	rep, err := n.imp.Run(context.Background())
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("Run = %v, want a not-exist error for the missing spool", err)
+	}
+	if rep.Kept != 0 || rep.MetadataWritten != 0 || rep.Imported != 0 {
+		t.Fatalf("report = %+v, want nothing stored or kept", rep)
 	}
 }
 
@@ -161,7 +297,7 @@ func TestNetDevPagesNotMountedWithoutAdminRule(t *testing.T) {
 	e := newNetDevTestEnv(t)
 	mux := http.NewServeMux()
 	d := serverDeps{db: e.db, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
-	if err := mountNetDevPages(d, testUIOptions(), mux); err != nil {
+	if err := mountNetDevPages(d, testUIOptions(e.clock), mux, e.clock); err != nil {
 		t.Fatalf("mountNetDevPages: %v", err)
 	}
 	rec := httptest.NewRecorder()
@@ -171,7 +307,12 @@ func TestNetDevPagesNotMountedWithoutAdminRule(t *testing.T) {
 	}
 }
 
-// testUIOptions are the ui.Options the netdev tests build the pages with.
-func testUIOptions() ui.Options {
-	return ui.Options{PublicOrigin: "https://nebula.example.org", Now: func() time.Time { return netdevTestNow }}
+// netdevReportedBadge is the marker of a row written from a collector report
+// (internal/web/ui, web/templates/netdev.html).
+const netdevReportedBadge = `<span class="badge badge--ok">reported by collector</span>`
+
+// testUIOptions are the ui.Options the netdev tests build the pages with; the
+// pages read the clock now.
+func testUIOptions(now func() time.Time) ui.Options {
+	return ui.Options{PublicOrigin: swOrigin, Now: now}
 }
