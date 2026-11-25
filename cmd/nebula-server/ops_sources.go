@@ -311,15 +311,10 @@ func opsLinkOf(a vulnfix.Action) opsfacts.FixLink {
 // errOpsListenersUnavailable: no listener source is wired.
 var errOpsListenersUnavailable = errors.New("listening ports of the host are not stored")
 
-// errOpsListenersUnknown: the stored facts cannot show the host's listening
-// ports (none, stale, incomplete or over the limit). It is never an empty
-// list.
-var errOpsListenersUnknown = errors.New("listening ports of the host are unknown: stored facts missing, stale or incomplete")
-
 // opsVulnListeners is the listener source of the projection (ADR 0016 D4,
 // ADR 0009). It reads the host's own listening sockets from its latest
 // stored net.facts result (trafficingest.ListenerReader): fresh facts give
-// the ports; stale or missing facts give errOpsListenersUnknown; a failed
+// the ports; stale or missing facts give opsfacts.ErrListenersUnknown; a failed
 // store read is returned as is. The zero value has no source and fails every
 // read with errOpsListenersUnavailable.
 type opsVulnListeners struct {
@@ -337,7 +332,7 @@ func newOpsVulnListeners(src trafficingest.Source, now func() time.Time) opsVuln
 
 // Listeners implements opsfacts.ListenerSource. It never returns an empty
 // list for unknown facts: an empty list reads as "verified no listening
-// ports". Unknown facts return errOpsListenersUnknown.
+// ports". Unknown facts return opsfacts.ErrListenersUnknown.
 func (l opsVulnListeners) Listeners(ctx context.Context, hostID string) ([]opsfacts.Port, error) {
 	if l.src == nil {
 		return nil, errOpsListenersUnavailable
@@ -345,7 +340,7 @@ func (l opsVulnListeners) Listeners(ctx context.Context, hostID string) ([]opsfa
 	ports, _, err := trafficingest.ListenerReader{Src: l.src, Now: l.now}.ListenersOf(ctx, hostID)
 	switch {
 	case errors.Is(err, trafficingest.ErrListenersUnknown):
-		return nil, fmt.Errorf("%w: %w", errOpsListenersUnknown, err)
+		return nil, fmt.Errorf("%w: %w", opsfacts.ErrListenersUnknown, err)
 	case err != nil:
 		return nil, fmt.Errorf("listeners of host %q: %w", hostID, err)
 	}

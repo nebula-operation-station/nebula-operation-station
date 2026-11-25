@@ -4,6 +4,7 @@ package opsfacts
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
@@ -183,21 +184,29 @@ func (p *Projector) build(ctx context.Context) ([]Group, error) {
 		hp, read := ports[hostID]
 		if !read {
 			lp, err := p.src.Listeners.Listeners(ctx, hostID)
-			if err != nil {
+			switch {
+			case errors.Is(err, ErrListenersUnknown):
+				// Unknown is not empty: the host is left out, the read goes on.
+				hp = hostPorts{rule: "listening ports unknown"}
+			case err != nil:
 				return nil, fmt.Errorf("opsfacts: read listeners of host %q: %w", displayID(hostID), err)
-			}
-			validated, err := validatePorts(lp)
-			hp = hostPorts{ports: validated}
-			if err != nil {
-				hp.rule = err.Error()
+			default:
+				validated, verr := validatePorts(lp)
+				hp = hostPorts{ports: validated}
+				if verr != nil {
+					hp.rule = verr.Error()
+				}
 			}
 			ports[hostID] = hp
+			if hp.rule != "" {
+				// Audited once per host, not once per group.
+				if err := p.audit(ctx, Skip{Scope: ScopeListeners, HostID: displayID(hostID), Rule: hp.rule}); err != nil {
+					return nil, err
+				}
+			}
 		}
 		if hp.rule != "" {
-			if err := p.audit(ctx, Skip{Scope: ScopeListeners, HostID: displayID(hostID), Rule: hp.rule}); err != nil {
-				return nil, err
-			}
-			continue // the group is left out; other groups are not affected
+			continue // the host's groups are left out; other hosts are not affected
 		}
 		proj := p.project(key, byID[hostID], exposure[hostID], hp.ports, fs)
 		digest, err := Digest(proj)

@@ -67,6 +67,11 @@ var (
 	// ErrDuplicateHost is the rule of the Skip for a host ID that two
 	// inventory hosts share. Both hosts are dropped (see hostSet).
 	ErrDuplicateHost = errors.New("opsfacts: duplicate host ID")
+	// ErrListenersUnknown is returned (wrapped) by a ListenerSource when the
+	// listening ports of a host cannot be known, for example because its
+	// stored facts are missing or stale. The projection then leaves the
+	// host's groups out with an audit skip; it does not fail (ADR 0016 D4).
+	ErrListenersUnknown = errors.New("opsfacts: listening ports unknown")
 	// ErrUnknownGroup is returned when a group key names no eligible group.
 	ErrUnknownGroup = errors.New("opsfacts: unknown group")
 	// ErrStaleDigest is returned when a digest no longer matches the

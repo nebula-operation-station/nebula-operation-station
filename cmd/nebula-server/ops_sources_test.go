@@ -392,15 +392,15 @@ func TestOpsVulnListenersReadsTheHostsOwnFreshPorts(t *testing.T) {
 }
 
 // TestOpsVulnListenersUnknownIsNeverAnEmptyList: stale facts are unknown
-// listeners, an error with errOpsListenersUnknown and no ports; they never
+// listeners, an error with opsfacts.ErrListenersUnknown and no ports; they never
 // read as a host with no listening ports.
 func TestOpsVulnListenersUnknownIsNeverAnEmptyList(t *testing.T) {
 	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
 	ss := "tcp   LISTEN 0 128 0.0.0.0:22 0.0.0.0:*\n"
 	ps, err := opsListenersAt(t, now.Add(-trafficingest.ListenerStaleAfter-time.Minute), now, ss).
 		Listeners(context.Background(), "web01")
-	if !errors.Is(err, errOpsListenersUnknown) {
-		t.Fatalf("Listeners error = %v, want errOpsListenersUnknown", err)
+	if !errors.Is(err, opsfacts.ErrListenersUnknown) {
+		t.Fatalf("Listeners error = %v, want opsfacts.ErrListenersUnknown", err)
 	}
 	if ps != nil {
 		t.Fatalf("Listeners ports = %+v, want none with the error", ps)
@@ -416,7 +416,7 @@ func TestOpsVulnListenersStoreErrorFails(t *testing.T) {
 	if !errors.Is(err, boom) {
 		t.Fatalf("Listeners error = %v, want the store error", err)
 	}
-	if errors.Is(err, errOpsListenersUnknown) {
+	if errors.Is(err, opsfacts.ErrListenersUnknown) {
 		t.Fatalf("a store error must not read as unknown listeners")
 	}
 }
