@@ -48,6 +48,9 @@ type netdevImport struct {
 	imp      *netdevcollect.Importer
 	log      *slog.Logger
 	interval time.Duration
+	// unavailable is true while the spool is failing: the outage is logged
+	// once, when the first pass of it fails, and again after a pass succeeds.
+	unavailable bool
 }
 
 // newNetDevImport wires the importer of the spool at root over the server
@@ -74,23 +77,29 @@ func newNetDevImport(db *sql.DB, root string, log *slog.Logger, now func() time.
 func (n *netdevImport) run(ctx context.Context) {
 	t := time.NewTicker(n.interval)
 	defer t.Stop()
-	unavailable := false
 	for {
-		_, err := n.imp.Run(ctx)
-		switch {
-		case err == nil:
-			unavailable = false
-		case ctx.Err() == nil:
-			if !unavailable {
-				n.log.Warn("netdev spool unavailable, retrying", "root", n.root, "error", err)
-			}
-			unavailable = true
-		}
+		n.pass(ctx)
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
 		}
+	}
+}
+
+// pass runs one import pass. The first failed pass of an outage is logged; the
+// following failures are not, until a pass succeeds and ends the outage. A
+// pass that ends because ctx ended is not a failure of the spool.
+func (n *netdevImport) pass(ctx context.Context) {
+	_, err := n.imp.Run(ctx)
+	switch {
+	case err == nil:
+		n.unavailable = false
+	case ctx.Err() == nil:
+		if !n.unavailable {
+			n.log.Warn("netdev spool unavailable, retrying", "root", n.root, "error", err)
+		}
+		n.unavailable = true
 	}
 }
 

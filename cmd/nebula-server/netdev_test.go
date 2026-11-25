@@ -259,20 +259,49 @@ func TestNetDevImportOnceLogsOutage(t *testing.T) {
 	var logs bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&logs, nil))
 	n := newNetDevImport(e.db, filepath.Join(t.TempDir(), "missing"), log, e.clock)
-	n.interval = time.Millisecond
 
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		n.run(ctx)
-	}()
-	time.Sleep(100 * time.Millisecond)
-	cancel()
-	<-done
-
+	for range 3 {
+		n.pass(context.Background())
+	}
 	if got := strings.Count(logs.String(), "netdev spool unavailable"); got != 1 {
 		t.Fatalf("outage logged %d times, want once", got)
+	}
+}
+
+// TestNetDevImportLogsOutageAgainAfterRecovery: a pass that succeeds ends the
+// outage, so the next outage is logged again, and only once.
+func TestNetDevImportLogsOutageAgainAfterRecovery(t *testing.T) {
+	e := newNetDevTestEnv(t)
+	var logs bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logs, nil))
+	root := filepath.Join(t.TempDir(), "netdev")
+	n := newNetDevImport(e.db, root, log, e.clock)
+	outages := func() int { return strings.Count(logs.String(), "netdev spool unavailable") }
+
+	n.pass(context.Background())
+	n.pass(context.Background())
+	if got := outages(); got != 1 {
+		t.Fatalf("first outage logged %d times, want once", got)
+	}
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatalf("create spool: %v", err)
+	}
+	// The importer reads only a spool in the collector's mode (setgid group
+	// directory), so the test gives it that mode as the collector would.
+	if err := os.Chmod(root, os.ModeDir|0o770|os.ModeSetgid); err != nil {
+		t.Fatalf("chmod spool: %v", err)
+	}
+	n.pass(context.Background())
+	if n.unavailable {
+		t.Fatal("a successful pass did not end the outage")
+	}
+	if err := os.Remove(root); err != nil {
+		t.Fatalf("remove spool: %v", err)
+	}
+	n.pass(context.Background())
+	n.pass(context.Background())
+	if got := outages(); got != 2 {
+		t.Fatalf("second outage logged %d times in total, want 2", got)
 	}
 }
 
