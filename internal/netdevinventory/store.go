@@ -268,6 +268,13 @@ type Device struct {
 	// row. It is not LastSeen: a report never moves last_seen.
 	ReportedAt time.Time
 	State      DeviceState
+	// Blocked is true while the newest metadata record the collector
+	// spooled reports the device as blocked (netdev_devices_seen.blocked).
+	// A blocked device's datasets are not imported.
+	Blocked bool
+	// BlockReason is the reason the collector gave for the block,
+	// untrusted text; empty when Blocked is false.
+	BlockReason string
 }
 
 // Dataset is the status of one stored dataset.
@@ -464,6 +471,20 @@ type deviceRow struct {
 	family netdevcontract.Family
 	label  string
 	gen    uint64
+	// setBlock makes the write set the block state from blocked and
+	// blockReason. Without it an insert is unblocked and an update leaves
+	// the stored block state as it is.
+	setBlock    bool
+	blocked     bool
+	blockReason string
+}
+
+// blockColumns returns the blocked and block_reason values of r as stored.
+func (r deviceRow) blockColumns() (int64, sql.NullString) {
+	if !r.blocked {
+		return 0, sql.NullString{}
+	}
+	return 1, sql.NullString{String: r.blockReason, Valid: true}
 }
 
 // writeDeviceRow is the single writer of device rows: it inserts or updates
@@ -479,6 +500,7 @@ func (s *Store) writeDeviceRow(ctx context.Context, r deviceRow, ref SpoolRef) e
 	}
 	now := micros(at)
 	reportedAt := micros(ref.RecordedAt)
+	blocked, blockReason := r.blockColumns()
 	return s.withTx(ctx, func(tx *sql.Tx) error {
 		var family string
 		var gen int64
@@ -490,10 +512,12 @@ func (s *Store) writeDeviceRow(ctx context.Context, r deviceRow, ref SpoolRef) e
 		case errors.Is(err, sql.ErrNoRows):
 			_, err = tx.ExecContext(ctx, `INSERT INTO netdev_devices_seen
 				(device_id, family, label, trust_generation, last_seen, state,
-				 origin, spool_name, spool_sha256, reported_at, created_at, updated_at)
-				VALUES (?, ?, ?, ?, NULL, 'stale', ?, ?, ?, ?, ?, ?)`,
+				 origin, spool_name, spool_sha256, reported_at, created_at, updated_at,
+				 blocked, block_reason)
+				VALUES (?, ?, ?, ?, NULL, 'stale', ?, ?, ?, ?, ?, ?, ?, ?)`,
 				r.id, string(r.family), r.label, int64(r.gen),
-				string(OriginCollectorReported), ref.Name, ref.Digest, reportedAt, now, now)
+				string(OriginCollectorReported), ref.Name, ref.Digest, reportedAt, now, now,
+				blocked, blockReason)
 			if err != nil {
 				return fmt.Errorf("netdevinventory: insert device %s: %w", r.id, err)
 			}
@@ -516,10 +540,13 @@ func (s *Store) writeDeviceRow(ctx context.Context, r deviceRow, ref SpoolRef) e
 		}
 		_, err = tx.ExecContext(ctx, `UPDATE netdev_devices_seen
 			SET label = ?, trust_generation = ?, updated_at = ?,
-			    origin = ?, spool_name = ?, spool_sha256 = ?, reported_at = ?
+			    origin = ?, spool_name = ?, spool_sha256 = ?, reported_at = ?,
+			    blocked = CASE WHEN ? THEN ? ELSE blocked END,
+			    block_reason = CASE WHEN ? THEN ? ELSE block_reason END
 			WHERE device_id = ?`,
 			r.label, int64(r.gen), now,
-			string(OriginCollectorReported), ref.Name, ref.Digest, reportedAt, r.id)
+			string(OriginCollectorReported), ref.Name, ref.Digest, reportedAt,
+			r.setBlock, blocked, r.setBlock, blockReason, r.id)
 		if err != nil {
 			return fmt.Errorf("netdevinventory: update device %s: %w", r.id, err)
 		}
@@ -551,9 +578,10 @@ func scanDevice(sc rowScanner, now time.Time) (Device, error) {
 	var gen, created int64
 	var last, reported sql.NullInt64
 	var origin string
-	var spoolName, spoolDigest sql.NullString
+	var spoolName, spoolDigest, blockReason sql.NullString
+	var blocked int64
 	err := sc.Scan(&d.DeviceID, &family, &d.Label, &gen, &last, &state, &created,
-		&origin, &spoolName, &spoolDigest, &reported)
+		&origin, &spoolName, &spoolDigest, &reported, &blocked, &blockReason)
 	if err != nil {
 		return Device{}, err
 	}
@@ -561,6 +589,8 @@ func scanDevice(sc rowScanner, now time.Time) (Device, error) {
 	d.TrustGeneration = uint64(gen)
 	d.State = DeviceState(state)
 	d.Origin = Origin(origin)
+	d.Blocked = blocked == 1
+	d.BlockReason = blockReason.String
 	if reported.Valid {
 		d.ReportedAt = fromMicros(reported.Int64)
 		d.Spool = SpoolRef{Name: spoolName.String, Digest: spoolDigest.String}

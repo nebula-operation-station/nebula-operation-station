@@ -80,7 +80,7 @@ func docChunkEnv(t *testing.T) (http.Handler, *opsnotes.Store) {
 		Name: serverconfig.DefaultOpsTokenName, SHA256: api.HashToken(docChunkTok),
 		Scopes: []string{serverconfig.ScopeOpsRead, serverconfig.ScopeOpsNotesWrite}}}}
 	hosts := func(context.Context) ([]inventory.Host, error) { return nil, nil }
-	h, err := newOpsAPI(cfg, db, st, hosts, slog.New(slog.NewTextHandler(io.Discard, nil)), nil)
+	h, err := newOpsAPI(cfg, db, st, hosts, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, docChunkSources())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,6 +88,12 @@ func docChunkEnv(t *testing.T) (http.Handler, *opsnotes.Store) {
 		t.Fatal("newOpsAPI returned no handler for an ops token")
 	}
 	return h, st
+}
+
+// docChunkSources are the projection sources of a server with no stored
+// findings and no listeners: the citation tests do not read the projection.
+func docChunkSources() opsSources {
+	return opsSources{Findings: sliceReader{}}
 }
 
 // docChunkDo sends one request with the ops token from a loopback address.
@@ -207,7 +213,7 @@ func TestOpsNoteFailsClosedWithoutIndex(t *testing.T) {
 		Name: serverconfig.DefaultOpsTokenName, SHA256: api.HashToken(docChunkTok),
 		Scopes: []string{serverconfig.ScopeOpsRead, serverconfig.ScopeOpsNotesWrite}}}}
 	hosts := func(context.Context) ([]inventory.Host, error) { return nil, nil }
-	h, err := newOpsAPIWithChunk(cfg, db, st, hosts, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, chunk)
+	h, err := newOpsAPIWithChunk(cfg, db, st, hosts, slog.New(slog.NewTextHandler(io.Discard, nil)), nil, docChunkSources(), chunk)
 	if err != nil {
 		t.Fatal(err)
 	}

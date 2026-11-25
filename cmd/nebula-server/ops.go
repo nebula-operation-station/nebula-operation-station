@@ -4,17 +4,16 @@
 // next to server.db, the ops API under /api/v1/ops/ for the one ops token,
 // and the suggestion index the executions service reads (ADR 0016 D9).
 //
-// Source gap: the finding, listener and fix-decision sources of the
-// projection are not connected in this build (ag11 defines the projector,
-// not its inputs). Until they are, the projector sees no findings, so the
-// work list carries only the fleet summary with zero counters and no
-// group is ever due. Nothing here calls the executor for the ops agent.
+// The projection reads its findings, fix decisions and listening ports from
+// the stored sources (ops_sources.go, ADR 0016 D3, D4). Nothing here calls the
+// executor for the ops agent.
 
 package main
 
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -30,6 +29,8 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsfacts"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/opsnotes"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/serverconfig"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/trafficingest"
+	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfix"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/ui"
 )
@@ -167,15 +168,6 @@ func (s opsHostsSource) Hosts(ctx context.Context) ([]opsfacts.Host, error) {
 	return out, nil
 }
 
-// opsNoFindings is the finding, listener and decision source until the
-// inputs are connected (see the file comment).
-type opsNoFindings struct{}
-
-func (opsNoFindings) Findings(context.Context) ([]opsfacts.Finding, error) { return nil, nil }
-func (opsNoFindings) Listeners(context.Context, string) ([]opsfacts.Port, error) {
-	return nil, nil
-}
-
 // opsCatalog accepts only actions on the suggestion allowlist.
 type opsCatalog struct{}
 
@@ -221,20 +213,75 @@ func (f opsFactsSource) Hosts(ctx context.Context) ([]string, error) {
 	return ids, nil
 }
 
+// opsSources are the stored inputs of the projection (ADR 0016 D3, D4). The
+// server passes the vulnerability store, the operation results and container
+// previews that the "fix with" pages read, and the net.facts source of the
+// listening ports. Nil LastResults or Preview switch that read off, as on the
+// pages (the fix decision then reads "off", the same as there).
+type opsSources struct {
+	// Findings is the vulnerability store (vuln.store). Required.
+	Findings vulnFindingReader
+	// LastResults reads the newest successful result of an action per host
+	// (executions.Service.LastResults). Nil when operations are off.
+	LastResults func(ctx context.Context, action string) (map[string]executions.LastResultRow, error)
+	// Preview reads a host's newest container update preview
+	// (executions.Batches.LatestContainerPreview). Nil when container updates
+	// are off.
+	Preview func(ctx context.Context, hostID string) (executions.ContainerPreview, error)
+	// Traffic reads the stored net.facts results of the hosts (the listener
+	// source). Required.
+	Traffic trafficingest.Source
+	// Now is the clock of the listener freshness rule; nil means time.Now.
+	Now func() time.Time
+}
+
+// errOpsPreviewOff: the container preview source is off. The resolver is
+// given no preview source then, so this error is never read.
+var errOpsPreviewOff = errors.New("container previews are off")
+
+// opsOffPreviews is the preview source of a server with container updates
+// off. It only stands in for the required inner source of the finding
+// source; the resolver is built without previews in that case.
+type opsOffPreviews struct{}
+
+// Preview always fails: the decision never reads it when previews are off.
+func (opsOffPreviews) Preview(context.Context, string) (vulnfix.Preview, error) {
+	return vulnfix.Preview{}, errOpsPreviewOff
+}
+
+// newOpsFindings builds the finding source over the stored sources. The fix
+// decision comes from the same sources as the vulnerability pages
+// (ui.NewVulnFixSources), one resolver per Findings call.
+func newOpsFindings(srcs opsSources) (opsVulnFindings, error) {
+	updates, previews := ui.NewVulnFixSources(srcs.LastResults, srcs.Preview)
+	inner := previews
+	if inner == nil {
+		inner = opsOffPreviews{}
+	}
+	newFixes := func(g vulnfix.PreviewSource) fixDecider {
+		if previews == nil {
+			return vulnfix.NewResolver(updates, nil)
+		}
+		return vulnfix.NewResolver(updates, g)
+	}
+	return newOpsVulnFindings(srcs.Findings, inner, newFixes)
+}
+
 // newOpsAPI returns the ops API handler, or nil when no ops token is
-// configured. The settings row lives in db (server.db). accepted (may be nil)
-// runs after each note is stored for the first time (see ops_suggestion.go).
+// configured. The settings row lives in db (server.db). srcs are the stored
+// sources of the projection. accepted (may be nil) runs after each note is
+// stored for the first time (see ops_suggestion.go).
 func newOpsAPI(cfg serverconfig.APIConfig, db *sql.DB, notes *opsnotes.Store,
 	hosts func(ctx context.Context) ([]inventory.Host, error), log *slog.Logger,
-	accepted func(opsnotes.Note)) (http.Handler, error) {
-	return newOpsAPIWithChunk(cfg, db, notes, hosts, log, accepted, opsDocChunk(log))
+	accepted func(opsnotes.Note), srcs opsSources) (http.Handler, error) {
+	return newOpsAPIWithChunk(cfg, db, notes, hosts, log, accepted, srcs, opsDocChunk(log))
 }
 
 // newOpsAPIWithChunk is newOpsAPI with the documentation citation check given
 // by the caller (nil refuses every citation). newOpsAPI passes opsDocChunk.
 func newOpsAPIWithChunk(cfg serverconfig.APIConfig, db *sql.DB, notes *opsnotes.Store,
 	hosts func(ctx context.Context) ([]inventory.Host, error), log *slog.Logger,
-	accepted func(opsnotes.Note), chunk func(chunkID string) bool) (http.Handler, error) {
+	accepted func(opsnotes.Note), srcs opsSources, chunk func(chunkID string) bool) (http.Handler, error) {
 	if _, ok := cfg.OpsToken(); !ok {
 		return nil, nil
 	}
@@ -243,7 +290,16 @@ func newOpsAPIWithChunk(cfg serverconfig.APIConfig, db *sql.DB, notes *opsnotes.
 		return nil, fmt.Errorf("ops api: %w", err)
 	}
 	src := opsHostsSource{hosts: hosts}
-	proj, err := opsfacts.New(opsfacts.Sources{Inventory: src, Listeners: opsNoFindings{}, Findings: opsNoFindings{},
+	findings, err := newOpsFindings(srcs)
+	if err != nil {
+		return nil, fmt.Errorf("ops api: findings: %w", err)
+	}
+	now := srcs.Now
+	if now == nil {
+		now = time.Now
+	}
+	listeners := newOpsVulnListeners(srcs.Traffic, now)
+	proj, err := opsfacts.New(opsfacts.Sources{Inventory: src, Listeners: listeners, Findings: findings,
 		Catalog: opsCatalog{}, Audit: opsSkipLog{log: log}})
 	if err != nil {
 		return nil, fmt.Errorf("ops api: projection: %w", err)

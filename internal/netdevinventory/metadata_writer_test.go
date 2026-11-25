@@ -5,6 +5,7 @@ package netdevinventory
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -153,7 +154,23 @@ func TestUpsertDeviceMetadataRefusesBadInput(t *testing.T) {
 		{"trust generation out of range", func(m *DeviceMetadataRecord, _ *SpoolRef) {
 			m.TrustGeneration = netdevcontract.MaxTrustGeneration + 1
 		}, ErrInvalidMetadata},
-		{"blocked device", func(m *DeviceMetadataRecord, _ *SpoolRef) { m.Blocked = true }, ErrBlockedDevice},
+		{"block reason too long", func(m *DeviceMetadataRecord, _ *SpoolRef) {
+			m.Blocked = true
+			m.BlockReason = strings.Repeat("r", MaxBlockReasonBytes+1)
+		}, ErrInvalidMetadata},
+		{"block reason with control character", func(m *DeviceMetadataRecord, _ *SpoolRef) {
+			m.Blocked = true
+			m.BlockReason = "op\x07"
+		}, ErrInvalidMetadata},
+		// U+202E RIGHT-TO-LEFT OVERRIDE
+		{"block reason with bidi override", func(m *DeviceMetadataRecord, _ *SpoolRef) {
+			m.Blocked = true
+			m.BlockReason = "op\xe2\x80\xae"
+		}, ErrInvalidMetadata},
+		{"block reason not UTF-8", func(m *DeviceMetadataRecord, _ *SpoolRef) {
+			m.Blocked = true
+			m.BlockReason = "op\xff"
+		}, ErrInvalidMetadata},
 		{"block reason without block", func(m *DeviceMetadataRecord, _ *SpoolRef) { m.BlockReason = "manual" }, ErrInvalidMetadata},
 		{"bad spool name", func(_ *DeviceMetadataRecord, r *SpoolRef) { r.Name = "../x.json" }, ErrBadSpoolRef},
 		{"record in the future", func(_ *DeviceMetadataRecord, r *SpoolRef) {
@@ -249,33 +266,119 @@ func TestUpsertDeviceMetadataAcceptsNewerGeneration(t *testing.T) {
 	}
 }
 
-// TestUpsertDeviceMetadataBlockedLeavesStoredRow: a blocked record is refused
-// with ErrBlockedDevice and the stored row stays as it was. The writer has no
-// column for the block, so the caller must surface it (the device list shows
-// the stored row, not the block).
-func TestUpsertDeviceMetadataBlockedLeavesStoredRow(t *testing.T) {
+// TestUpsertDeviceMetadataBlockedMarksRow: a blocked record is written and
+// marks the stored row blocked with its reason, so the device list shows the
+// block and BlockedDeviceIDs names the device. A newer unblocked record
+// clears the block.
+func TestUpsertDeviceMetadataBlockedMarksRow(t *testing.T) {
 	ctx := context.Background()
 	s, _, _ := newTestStore(t)
 	addDevice(t, s, cbsDevice())
-	stored, err := s.GetDevice(ctx, "sw-core")
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	m := metaRecord()
 	m.TrustGeneration = 2
 	m.Label = "Blocked core"
 	m.Blocked = true
 	m.BlockReason = "manual"
-	if err := s.UpsertDeviceMetadata(ctx, m, refAt(testBase.Add(time.Minute))); !errors.Is(err, ErrBlockedDevice) {
-		t.Fatalf("blocked record: err %v, want ErrBlockedDevice", err)
+	if err := s.UpsertDeviceMetadata(ctx, m, refAt(testBase.Add(time.Minute))); err != nil {
+		t.Fatalf("blocked record: %v", err)
 	}
 	after, err := s.GetDevice(ctx, "sw-core")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Label != stored.Label || after.Spool != stored.Spool || after.TrustGeneration != stored.TrustGeneration {
-		t.Fatalf("blocked record changed the row: before %+v after %+v", stored, after)
+	if !after.Blocked || after.BlockReason != "manual" || after.Label != "Blocked core" {
+		t.Fatalf("row %+v, want blocked with reason manual and the new label", after)
+	}
+	listed, err := s.ListDevices(ctx, MaxListDevices)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || !listed[0].Blocked || listed[0].BlockReason != "manual" {
+		t.Fatalf("ListDevices = %+v, want the row blocked", listed)
+	}
+	ids, err := s.BlockedDeviceIDs(ctx)
+	if err != nil || !slices.Equal(ids, []string{"sw-core"}) {
+		t.Fatalf("BlockedDeviceIDs = %v, %v; want [sw-core]", ids, err)
+	}
+
+	m.Blocked, m.BlockReason = false, ""
+	if err := s.UpsertDeviceMetadata(ctx, m, refAt(testBase.Add(2*time.Minute))); err != nil {
+		t.Fatalf("unblocked record: %v", err)
+	}
+	after, err = s.GetDevice(ctx, "sw-core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Blocked || after.BlockReason != "" {
+		t.Fatalf("row %+v, want the block cleared", after)
+	}
+	if ids, err := s.BlockedDeviceIDs(ctx); err != nil || len(ids) != 0 {
+		t.Fatalf("BlockedDeviceIDs = %v, %v; want none", ids, err)
+	}
+}
+
+// TestUpsertDeviceMetadataBlockedNewDevice: a blocked record of a device with
+// no row creates the row already blocked; it is never shown unblocked.
+func TestUpsertDeviceMetadataBlockedNewDevice(t *testing.T) {
+	ctx := context.Background()
+	s, _, _ := newTestStore(t)
+	m := metaRecord()
+	m.Blocked = true
+	if err := s.UpsertDeviceMetadata(ctx, m, testRef()); err != nil {
+		t.Fatalf("blocked record: %v", err)
+	}
+	d, err := s.GetDevice(ctx, "sw-core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !d.Blocked || d.BlockReason != "" {
+		t.Fatalf("row %+v, want blocked with an empty reason", d)
+	}
+}
+
+// TestUpsertDeviceReportedKeepsBlock: the contract-device writer has no block
+// field, so it never lifts a block the metadata writer set.
+func TestUpsertDeviceReportedKeepsBlock(t *testing.T) {
+	ctx := context.Background()
+	s, _, _ := newTestStore(t)
+	m := metaRecord()
+	m.Blocked, m.BlockReason = true, "manual"
+	if err := s.UpsertDeviceMetadata(ctx, m, refAt(testBase.Add(-time.Hour))); err != nil {
+		t.Fatal(err)
+	}
+	d := cbsDevice()
+	d.TrustGeneration = 2
+	if err := s.UpsertDeviceReported(ctx, d, refAt(testBase.Add(-time.Minute))); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetDevice(ctx, "sw-core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Blocked || got.BlockReason != "manual" {
+		t.Fatalf("row %+v, want the block kept", got)
+	}
+}
+
+// TestBlockColumnsRefuseInconsistentRow: migration 0059 ties block_reason to
+// blocked, so a direct write cannot store a reason without a block or a block
+// without a reason column value.
+func TestBlockColumnsRefuseInconsistentRow(t *testing.T) {
+	ctx := context.Background()
+	s, db, _ := newTestStore(t)
+	if err := s.UpsertDeviceMetadata(ctx, metaRecord(), testRef()); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`UPDATE netdev_devices_seen SET block_reason = 'x'`,
+		`UPDATE netdev_devices_seen SET blocked = 1`,
+		`UPDATE netdev_devices_seen SET blocked = 2, block_reason = 'x'`,
+		`UPDATE netdev_devices_seen SET blocked = 1, block_reason = '` + strings.Repeat("r", MaxBlockReasonBytes+1) + `'`,
+	} {
+		if _, err := db.ExecContext(ctx, q); err == nil {
+			t.Errorf("%.60s: accepted, want a CHECK failure", q)
+		}
 	}
 }
 
