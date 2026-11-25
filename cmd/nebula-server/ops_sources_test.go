@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -385,9 +386,46 @@ func TestOpsVulnListenersReadsTheHostsOwnFreshPorts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Listeners: %v", err)
 	}
-	want := []opsfacts.Port{{Number: 22, Protocol: "tcp"}, {Number: 443, Protocol: "tcp"}, {Number: 53, Protocol: "udp"}}
+	want := []opsfacts.Port{{Number: 22, Protocol: "tcp"}, {Number: 53, Protocol: "udp"}, {Number: 443, Protocol: "tcp"}}
 	if fmt.Sprint(ps) != fmt.Sprint(want) {
 		t.Fatalf("Listeners = %v, want %v", ps, want)
+	}
+}
+
+// TestOpsVulnListenersMoreThan32PortsStayInTheGroups: a host with 40 distinct
+// listening ports is not unknown. Its group stays in the lab part, lists the
+// first 32 ports by number (then protocol) and counts the other 8.
+func TestOpsVulnListenersMoreThan32PortsStayInTheGroups(t *testing.T) {
+	env := newVTEnv(t)
+	env.startAndSubmit(t, opsCriticalRecord("CVE-2026-7007"))
+	src, err := newOpsVulnFindings(env.svc.store, opsTestPreviews, fixesOf(vulnfix.Result{Status: vulnfix.StatusVerified,
+		Action: vulnfix.ActionInstallSecurity, HostID: "web01"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC)
+	var lines []string
+	for p := 40; p >= 1; p-- {
+		lines = append(lines, fmt.Sprintf("tcp   LISTEN 0 128 0.0.0.0:%d 0.0.0.0:*", 1000+p))
+	}
+	ls := opsListenersAt(t, now.Add(-time.Minute), now, strings.Join(lines, "\n")+"\n")
+	gs, skips, err := opsGroupsWith(t, src, ls)
+	if err != nil {
+		t.Fatalf("EligibleGroups: %v", err)
+	}
+	if len(skips) != 0 {
+		t.Fatalf("skips = %+v, want none: the host is known", skips)
+	}
+	if len(gs) != 1 || gs[0].Key != "web01/os" {
+		t.Fatalf("groups = %+v, want the host's group web01/os", gs)
+	}
+	p := gs[0].Projection
+	if len(p.Ports) != opsfacts.MaxPortsPerHost || p.PortsOmitted != 8 {
+		t.Fatalf("ports = %d listed, %d omitted; want %d listed and 8 omitted",
+			len(p.Ports), p.PortsOmitted, opsfacts.MaxPortsPerHost)
+	}
+	if p.Ports[0].Number != 1001 || p.Ports[len(p.Ports)-1].Number != 1032 {
+		t.Fatalf("listed ports run %d..%d, want 1001..1032", p.Ports[0].Number, p.Ports[len(p.Ports)-1].Number)
 	}
 }
 
