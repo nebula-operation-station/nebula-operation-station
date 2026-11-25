@@ -57,7 +57,7 @@ func TestListenersOfFreshFactsOwnListeners(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListenersOf: %v", err)
 	}
-	want := []ListeningPort{{Protocol: "tcp", Port: 22}, {Protocol: "tcp", Port: 443}, {Protocol: "udp", Port: 53}}
+	want := []ListeningPort{{Protocol: "tcp", Port: 22}, {Protocol: "udp", Port: 53}, {Protocol: "tcp", Port: 443}}
 	if fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Errorf("ports = %v, want %v", got, want)
 	}
@@ -66,40 +66,47 @@ func TestListenersOfFreshFactsOwnListeners(t *testing.T) {
 	}
 }
 
-// TestListenersOfBoundedAt32: 32 distinct listening ports are returned; 33
-// make the listeners unknown, never a cut list.
-func TestListenersOfBoundedAt32(t *testing.T) {
-	tests := []struct {
-		name    string
-		ports   int
-		wantErr bool
-	}{
-		{"at the limit", MaxListenersPerHost, false},
-		{"one over the limit", MaxListenersPerHost + 1, true},
+// TestListenersOfManyPortsAreNotUnknown: a host with more listening ports
+// than the projection lists (40) is still known. All distinct ports are
+// returned, sorted by port then protocol, so the projection's cap keeps
+// the first MaxPortsPerHost of them and counts the rest.
+func TestListenersOfManyPortsAreNotUnknown(t *testing.T) {
+	const n = 40
+	var lines []string
+	for p := n; p >= 1; p-- { // reversed on purpose: the order must come from the reader
+		lines = append(lines, fmt.Sprintf("tcp   LISTEN 0 128 0.0.0.0:%d 0.0.0.0:*", 1000+p))
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var lines []string
-			for p := 1; p <= tc.ports; p++ {
-				lines = append(lines, fmt.Sprintf("tcp   LISTEN 0 128 0.0.0.0:%d 0.0.0.0:*", 1000+p))
-			}
-			got, _, err := listenerReader(t, listenerNow.Add(-time.Minute), strings.Join(lines, "\n")+"\n").ListenersOf(context.Background(), "host-a")
-			if tc.wantErr {
-				if !errors.Is(err, ErrListenersUnknown) {
-					t.Fatalf("err = %v, want ErrListenersUnknown", err)
-				}
-				if got != nil {
-					t.Errorf("ports = %v, want none", got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("ListenersOf: %v", err)
-			}
-			if len(got) != tc.ports {
-				t.Errorf("got %d ports, want %d", len(got), tc.ports)
-			}
-		})
+	got, _, err := listenerReader(t, listenerNow.Add(-time.Minute), strings.Join(lines, "\n")+"\n").ListenersOf(context.Background(), "host-a")
+	if err != nil {
+		t.Fatalf("ListenersOf with %d ports: %v, want the ports, not unknown", n, err)
+	}
+	if len(got) != n {
+		t.Fatalf("got %d ports, want %d", len(got), n)
+	}
+	for i, p := range got {
+		if want := 1001 + i; p.Port != want || p.Protocol != "tcp" {
+			t.Fatalf("ports[%d] = %+v, want tcp %d (sorted by port)", i, p, want)
+		}
+	}
+}
+
+// TestListenersOfSortedByPortThenProtocol: the same port on tcp and udp is
+// listed twice, tcp first, and ports come in ascending order.
+func TestListenersOfSortedByPortThenProtocol(t *testing.T) {
+	ss := strings.Join([]string{
+		"tcp   LISTEN 0 128 0.0.0.0:443 0.0.0.0:*",
+		"udp   UNCONN 0 0 0.0.0.0:443 0.0.0.0:*",
+		"udp   UNCONN 0 0 0.0.0.0:53 0.0.0.0:*",
+		"tcp   LISTEN 0 128 0.0.0.0:22 0.0.0.0:*",
+		"",
+	}, "\n")
+	got, _, err := listenerReader(t, listenerNow.Add(-time.Minute), ss).ListenersOf(context.Background(), "host-a")
+	if err != nil {
+		t.Fatalf("ListenersOf: %v", err)
+	}
+	want := []ListeningPort{{Protocol: "tcp", Port: 22}, {Protocol: "udp", Port: 53}, {Protocol: "tcp", Port: 443}, {Protocol: "udp", Port: 443}}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("ports = %v, want %v", got, want)
 	}
 }
 

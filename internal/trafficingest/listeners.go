@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	nfresult "github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions/netfacts"
@@ -25,16 +26,14 @@ const (
 	// shows the host's listeners: three missed intervals, the same rule as
 	// netdevinventory.StaleAfterIntervals.
 	ListenerStaleAfter = 3 * NetFactsInterval
-	// MaxListenersPerHost bounds the distinct (protocol, port) pairs one
-	// host may expose to the ops work list (ADR 0016 D4). A host with more
-	// is unknown, never a cut list.
-	MaxListenersPerHost = 32
 )
 
 // ErrListenersUnknown is returned (wrapped, with the reason) when the
 // stored facts cannot show the host's listening ports: none stored, stale,
-// not of the host, unusable, incomplete or over MaxListenersPerHost. The
-// caller must treat the host's listeners as unknown, not as none.
+// not of the host, unusable or incomplete. The caller must treat the host's
+// listeners as unknown, not as none. A host with many listening ports is
+// not unknown: the reader returns all of them and the caller's list limit
+// (opsfacts.MaxPortsPerHost) decides what is listed and what is counted.
 var ErrListenersUnknown = errors.New("listening ports unknown")
 
 // ListeningPort is one listening port of a host.
@@ -92,11 +91,7 @@ func (r ListenerReader) ListenersOf(ctx context.Context, host string) ([]Listeni
 		// unknown, not "fewer listeners".
 		return nil, res.Finished, unknownListeners("socket table incomplete or unavailable")
 	}
-	ports, ok := listeningPorts(facts.Sockets.Entries)
-	if !ok {
-		return nil, res.Finished, unknownListeners(fmt.Sprintf("more than %d listening ports", MaxListenersPerHost))
-	}
-	return ports, res.Finished, nil
+	return listeningPorts(facts.Sockets.Entries), res.Finished, nil
 }
 
 // unknownListeners wraps ErrListenersUnknown with the reason.
@@ -105,8 +100,10 @@ func unknownListeners(reason string) error {
 }
 
 // listeningPorts returns the distinct listening (protocol, port) pairs of
-// socks, sorted. ok is false when there are more than MaxListenersPerHost.
-func listeningPorts(socks []hostnet.Socket) (ports []ListeningPort, ok bool) {
+// socks, sorted by port, then protocol. The socket table decoder bounds the
+// number of entries, so the result is bounded too.
+func listeningPorts(socks []hostnet.Socket) []ListeningPort {
+	var ports []ListeningPort
 	seen := map[ListeningPort]bool{}
 	for proto, ls := range hostnet.Listeners(socks) {
 		for _, x := range ls {
@@ -118,17 +115,11 @@ func listeningPorts(socks []hostnet.Socket) (ports []ListeningPort, ok bool) {
 			ports = append(ports, p)
 		}
 	}
-	if len(ports) > MaxListenersPerHost {
-		return nil, false
-	}
 	slices.SortFunc(ports, func(a, b ListeningPort) int {
-		if a.Protocol != b.Protocol {
-			if a.Protocol < b.Protocol {
-				return -1
-			}
-			return 1
+		if a.Port != b.Port {
+			return a.Port - b.Port
 		}
-		return a.Port - b.Port
+		return strings.Compare(a.Protocol, b.Protocol)
 	})
-	return ports, true
+	return ports
 }

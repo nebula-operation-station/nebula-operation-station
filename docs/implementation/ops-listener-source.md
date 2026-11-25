@@ -14,8 +14,11 @@ table is written: the execution record already holds the result.
 - Only the host's own result counts (the result's host must equal the
   requested host). Sockets that the host reports as peers are never
   listeners, so a peer's view cannot create a port on another host.
-- At most 32 distinct pairs (`MaxListenersPerHost`, ADR 0016 D4). More is
-  unknown, not a cut list.
+- All distinct pairs are returned, sorted by port, then protocol. A host
+  with many listening ports is known, not unknown. The list limit is the
+  projection's: `opsfacts.MaxPortsPerHost` (32, ADR 0016 D4) lists the first
+  ports and `PortsOmitted` counts the rest. The socket section is bounded by
+  the decoder (`MaxSection`, 256 KiB), so the list is bounded too.
 
 ## Freshness rule
 
@@ -32,8 +35,7 @@ A host whose listeners cannot be shown is **unknown**, not "no ports":
 - latest result older than `ListenerStaleAfter`,
 - result of another host, or a finish time in the future,
 - result that does not parse, or a socket table that is incomplete or
-  unavailable (a dropped line may have been a listener),
-- more than 32 listening ports.
+  unavailable (a dropped line may have been a listener).
 
 These return an error wrapping `trafficingest.ErrListenersUnknown` with the
 reason. A failed store read is a different, plain error and fails the read.
@@ -46,5 +48,7 @@ listener error still fails the projection (fail-closed).
 
 ## Not covered
 
-- The source does not wire the ops projector in `cmd/nebula-server/main.go`.
+- The source does not wire the ops projector in `cmd/nebula-server/main.go`
+  or `ops.go`; the production wiring of `newOpsVulnListeners` is the follow-up
+  ticket uh02, after this change.
 - Listeners bound to loopback are listed like any other listener.
