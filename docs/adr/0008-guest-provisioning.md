@@ -112,7 +112,11 @@ on a minimal phase-2 mutation foundation, not on the rest of phase 2.
   5. Re-preparation: the existing flow, fall-through narrowed to
      `ErrPveTemplateNotPrepared`, `ErrPveTemplateChanged` and
      `ErrPveRemoteChanged`; no record removal; "template gone" is a 404 or
-     a 500 with the fixed "does not exist" pattern (decided 2026-11-25);
+     a 500 whose trimmed message equals byte for byte
+     `Configuration file 'nodes/<node>/qemu-server/<vmid>.conf' does not exist`
+     for the node and VMID of this very read, built by NOS from the request
+     (decided 2026-11-25; exact binding to node and VMID: Claude, within the
+     decision; previously "a 500 with the fixed \"does not exist\" pattern");
      the read-only lab check before PV-03a and PV-03b was done on
      2026-11-25 and the gate is satisfied (previously "a read-only lab
      check gates PV-03a and PV-03b") (D5; PV-03b).
