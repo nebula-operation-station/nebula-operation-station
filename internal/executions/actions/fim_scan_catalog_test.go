@@ -49,6 +49,34 @@ func TestFimScanContractHasOneSource(t *testing.T) {
 	}
 }
 
+// The catalog offers fim.scan exactly once, with the version, script hash
+// and flags the read lease pins (permit.validateFimScanAction), and it is
+// the same contract as fimscan.Action.
+func TestFimScanIsInBuiltinCatalog(t *testing.T) {
+	a, ok := actions.Lookup(permit.FimScanActionID)
+	if !ok {
+		t.Fatalf("actions.Lookup(%q) failed", permit.FimScanActionID)
+	}
+	if a.Version != permit.FimScanModuleVersion || a.SHA256() != permit.FimScanArtifactSHA256 {
+		t.Fatalf("catalog %s@%s sha %s, lease pins %s@%s", a.ID, a.Version, a.SHA256(), permit.FimScanModuleVersion, permit.FimScanArtifactSHA256)
+	}
+	if !a.ReadOnly || !a.Durable || a.Retry != actions.RetryReconcileFirst {
+		t.Fatalf("catalog %s: read-only=%v durable=%v retry=%s", a.ID, a.ReadOnly, a.Durable, a.Retry)
+	}
+	if !reflect.DeepEqual(a, fimscan.Action()) {
+		t.Fatal("catalog entry and fimscan.Action differ")
+	}
+	n := 0
+	for _, b := range actions.Builtin {
+		if b.ID == permit.FimScanActionID {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d catalog entries for %s, want 1", n, permit.FimScanActionID)
+	}
+}
+
 // The embedded script is the pinned one, and fimscan.Script is the same
 // bytes (no second copy).
 func TestFimScanEmbeddedScriptHashIsPinned(t *testing.T) {

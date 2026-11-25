@@ -96,6 +96,17 @@ func fimScanReviewedScan(r canonical.Request, s scanResult) bool {
 		slices.Equal(s.findings, fimScanReviewedFindings)
 }
 
+// FimScanReviewedResult reports whether findings, the Safety Scanner
+// result for the script with hash artifactSHA256 of action actionID at
+// version, is the reviewed result of the pinned fim.scan script. It is a
+// read-only view of the executor's one exception (fimScanReviewedScan),
+// so other packages check against the same pins and findings instead of
+// keeping a second copy.
+func FimScanReviewedResult(actionID, version, artifactSHA256 string, findings []scanner.Finding) bool {
+	r := canonical.Request{ActionID: actionID, ModuleVersion: version, ArtifactSHA256: artifactSHA256}
+	return fimScanReviewedScan(r, scanResult{findings: findings})
+}
+
 // validateFimScanAction checks a lease entry for fim.scan against the
 // pinned contract.
 func validateFimScanAction(a ReadGrantAction) error {

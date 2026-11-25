@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
@@ -1369,11 +1370,12 @@ func TestScriptSyntax(t *testing.T) {
 	}
 }
 
-// TestActionContract: fim.scan is a LOW, read-only, safely retried action
-// with exactly the mode and profile parameters and the embedded script.
+// TestActionContract: fim.scan is a LOW, read-only, durable action that is
+// reconciled before any retry (like every durable built-in), with exactly
+// the mode and profile parameters and the embedded script.
 func TestActionContract(t *testing.T) {
 	a := Action()
-	if a.ID != "fim.scan" || !a.ReadOnly || !a.Durable || a.Risk != pb.RiskClass_RISK_CLASS_LOW || a.Retry != "safe" ||
+	if a.ID != "fim.scan" || !a.ReadOnly || !a.Durable || a.Risk != pb.RiskClass_RISK_CLASS_LOW || a.Retry != actions.RetryReconcileFirst ||
 		!bytes.Equal(a.Script, Script) || len(a.Secrets) != 0 || a.Timeout <= 30*time.Minute {
 		t.Fatalf("contract %+v", a)
 	}

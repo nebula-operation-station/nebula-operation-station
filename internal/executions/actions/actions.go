@@ -405,9 +405,8 @@ var (
 // (decision (g) option 2) and in the read-lease allowlist
 // (permit.ReadOnlyAllowlist); the executor pins its version, script hash
 // and the two parameter documents (internal/permit/lease_fimscan.go). It
-// is not yet in Builtin: its safe retry class and its MEDIUM scanner
-// findings (reviewed only on the executor side, lease_fimscan.go) conflict
-// with TestEveryActionHasARetryClass and TestBuiltinsUnderTheScanner.
+// is the fim.scan entry of Builtin; like every durable built-in it is
+// reconciled before any retry.
 func FimScan() Action {
 	return Action{
 		ID: "fim.scan", Version: "1.0.0", Title: "Integrity scan",
@@ -424,7 +423,7 @@ func FimScan() Action {
 			{Name: "mode", Label: "Mode (full or incremental)", Pattern: fimScanModeRe},
 			{Name: "profile", Label: "Profile (fim-default-v1)", Pattern: fimScanProfileRe},
 		},
-		Retry: RetrySafe,
+		Retry: RetryReconcileFirst,
 	}
 }
 
@@ -602,6 +601,7 @@ var Builtin = []Action{
 		Description: "Per-GPU status from nvidia-smi (fixed query: index, UUID, PCI bus ID, name, utilization, memory, temperature, power). A missing driver is reported as such, never as an empty list. Read-only.",
 		Risk:        pb.RiskClass_RISK_CLASS_LOW, Timeout: time.Minute, ReadOnly: true, Script: gpuStatus, Retry: RetrySafe,
 	},
+	FimScan(),
 }
 
 // Lookup returns the built-in action id.

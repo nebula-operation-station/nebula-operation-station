@@ -408,6 +408,12 @@ func TestFimScanReviewedScanIsExact(t *testing.T) {
 		if fimScanReviewedScan(c.r, c.s) {
 			t.Errorf("%s: exempt", name)
 		}
+		if FimScanReviewedResult(c.r.ActionID, c.r.ModuleVersion, c.r.ArtifactSHA256, c.s.findings) {
+			t.Errorf("%s: exempt through the exported accessor", name)
+		}
+	}
+	if !FimScanReviewedResult(FimScanActionID, FimScanModuleVersion, FimScanArtifactSHA256, slices.Clone(fimScanReviewedFindings)) {
+		t.Fatal("exported accessor does not recognise the reviewed result")
 	}
 }
 

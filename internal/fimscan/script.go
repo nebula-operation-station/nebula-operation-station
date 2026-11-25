@@ -65,8 +65,9 @@ var homeFiles = []string{".ssh/authorized_keys*", ".shosts", ".rhosts", ".k5logi
 
 // Action returns the fim.scan read-only action contract (spec 10
 // v26-10-02). The contract is defined once, as actions.FimScan; this
-// function only forwards. It is not yet in actions.Builtin (see
-// actions.FimScan). It is a durable job (ADR 0015 D5, decision (g) option 2;
+// function only forwards. It is the fim.scan entry of the built-in catalog
+// (actions.Builtin, actions.Lookup). It is a durable job (ADR 0015 D5,
+// decision (g) option 2;
 // ActionTimeout is below the 6 h hostrun.MaxDurableTimeout) and in the
 // read-lease allowlist (permit.ReadOnlyAllowlist, lease.go), whose pins
 // (internal/permit/lease_fimscan.go) it must match.
