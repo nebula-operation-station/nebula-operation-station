@@ -105,6 +105,15 @@ const (
 	// StaleAfterIntervals is the number of missed poll intervals after
 	// which a device or dataset is stale.
 	StaleAfterIntervals = 3
+	// DeviceReportStaleAfter is the age of the newest collector report
+	// (Device.ReportedAt) after which a device reads as stale, whatever its
+	// datasets say. It does not change dataset states. It is derived, not
+	// chosen: device facts are read on every device every FactsInterval
+	// (ADR 0010 D4, "Data and cadence"), and a device whose facts are missed
+	// for StaleAfterIntervals intervals is stale (ADR 0010 D4, "stale after
+	// three missed intervals"). ADR 0010 names no separate report cadence, so
+	// the facts read is the reference. Owner to confirm (open decision).
+	DeviceReportStaleAfter = StaleAfterIntervals * FactsInterval
 	// MaxFutureSkew bounds how far observed_at may lie ahead of the server
 	// clock. A later timestamp is refused: stored, it would make every
 	// genuine later read look out of order.
@@ -444,9 +453,29 @@ func (s *Store) upsertDevice(ctx context.Context, d netdevcontract.Device, ref S
 	if err != nil {
 		return fmt.Errorf("netdevinventory: upsert device: %w", err)
 	}
+	return s.writeDeviceRow(ctx, deviceRow{id: v.DeviceID, family: v.Family, label: v.Name,
+		gen: v.TrustGeneration}, ref)
+}
+
+// deviceRow is the metadata of one device row that writeDeviceRow stores.
+// Only these fields are written: a device row holds no endpoint and no pin.
+type deviceRow struct {
+	id     string
+	family netdevcontract.Family
+	label  string
+	gen    uint64
+}
+
+// writeDeviceRow is the single writer of device rows: it inserts or updates
+// the row of r from the spool record ref and marks it OriginCollectorReported.
+// It checks the record time, the family (immutable), the trust generation
+// (never lower) and, at the same generation, that the record is strictly
+// newer than the stored one. It never touches last_seen or state, which
+// follow dataset observations only (touchDevice). Callers validate r first.
+func (s *Store) writeDeviceRow(ctx context.Context, r deviceRow, ref SpoolRef) error {
 	at := s.now()
 	if ref.RecordedAt.After(at.Add(MaxReportSkew)) {
-		return fmt.Errorf("netdevinventory: device %s: %w", v.DeviceID, ErrRecordedInFuture)
+		return fmt.Errorf("netdevinventory: device %s: %w", r.id, ErrRecordedInFuture)
 	}
 	now := micros(at)
 	reportedAt := micros(ref.RecordedAt)
@@ -455,7 +484,7 @@ func (s *Store) upsertDevice(ctx context.Context, d netdevcontract.Device, ref S
 		var gen int64
 		var stored sql.NullInt64
 		err := tx.QueryRowContext(ctx, `SELECT family, trust_generation, reported_at
-			FROM netdev_devices_seen WHERE device_id = ?`, v.DeviceID).
+			FROM netdev_devices_seen WHERE device_id = ?`, r.id).
 			Scan(&family, &gen, &stored)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
@@ -463,36 +492,36 @@ func (s *Store) upsertDevice(ctx context.Context, d netdevcontract.Device, ref S
 				(device_id, family, label, trust_generation, last_seen, state,
 				 origin, spool_name, spool_sha256, reported_at, created_at, updated_at)
 				VALUES (?, ?, ?, ?, NULL, 'stale', ?, ?, ?, ?, ?, ?)`,
-				v.DeviceID, string(v.Family), v.Name, int64(v.TrustGeneration),
+				r.id, string(r.family), r.label, int64(r.gen),
 				string(OriginCollectorReported), ref.Name, ref.Digest, reportedAt, now, now)
 			if err != nil {
-				return fmt.Errorf("netdevinventory: insert device %s: %w", v.DeviceID, err)
+				return fmt.Errorf("netdevinventory: insert device %s: %w", r.id, err)
 			}
 			return nil
 		case err != nil:
-			return fmt.Errorf("netdevinventory: load device %s: %w", v.DeviceID, err)
+			return fmt.Errorf("netdevinventory: load device %s: %w", r.id, err)
 		}
-		if netdevcontract.Family(family) != v.Family {
-			return fmt.Errorf("netdevinventory: device %s: %w", v.DeviceID, ErrFamilyChanged)
+		if netdevcontract.Family(family) != r.family {
+			return fmt.Errorf("netdevinventory: device %s: %w", r.id, ErrFamilyChanged)
 		}
-		if int64(v.TrustGeneration) < gen {
-			return fmt.Errorf("netdevinventory: device %s: %w", v.DeviceID, ErrTrustGenerationRegressed)
+		if int64(r.gen) < gen {
+			return fmt.Errorf("netdevinventory: device %s: %w", r.id, ErrTrustGenerationRegressed)
 		}
 		// At the same trust generation a report must be strictly newer than
 		// the stored one. An equal time is refused even for the same record:
 		// the digest does not vouch for the device content, so the row is
 		// never rewritten at the same time.
-		if int64(v.TrustGeneration) == gen && stored.Valid && reportedAt <= stored.Int64 {
-			return fmt.Errorf("netdevinventory: device %s: %w", v.DeviceID, ErrReportNotNewer)
+		if int64(r.gen) == gen && stored.Valid && reportedAt <= stored.Int64 {
+			return fmt.Errorf("netdevinventory: device %s: %w", r.id, ErrReportNotNewer)
 		}
 		_, err = tx.ExecContext(ctx, `UPDATE netdev_devices_seen
 			SET label = ?, trust_generation = ?, updated_at = ?,
 			    origin = ?, spool_name = ?, spool_sha256 = ?, reported_at = ?
 			WHERE device_id = ?`,
-			v.Name, int64(v.TrustGeneration), now,
-			string(OriginCollectorReported), ref.Name, ref.Digest, reportedAt, v.DeviceID)
+			r.label, int64(r.gen), now,
+			string(OriginCollectorReported), ref.Name, ref.Digest, reportedAt, r.id)
 		if err != nil {
-			return fmt.Errorf("netdevinventory: update device %s: %w", v.DeviceID, err)
+			return fmt.Errorf("netdevinventory: update device %s: %w", r.id, err)
 		}
 		return nil
 	})
@@ -502,22 +531,31 @@ func (s *Store) upsertDevice(ctx context.Context, d netdevcontract.Device, ref S
 // it was not seen for StaleAfterIntervals poll intervals, even before
 // MarkStale ran.
 func (s *Store) GetDevice(ctx context.Context, deviceID string) (Device, error) {
+	row := s.db.QueryRowContext(ctx, deviceSelect+` WHERE device_id = ?`, deviceID)
+	d, err := scanDevice(row, s.now())
+	if errors.Is(err, sql.ErrNoRows) {
+		return Device{}, ErrDeviceNotFound
+	}
+	if err != nil {
+		return Device{}, fmt.Errorf("netdevinventory: load device: %w", err)
+	}
+	return d, nil
+}
+
+// scanDevice reads one row of deviceSelect and applies the staleness rules
+// at now: a device not seen for StaleAfterIntervals poll intervals, or whose
+// newest report is older than DeviceReportStaleAfter, is stale.
+func scanDevice(sc rowScanner, now time.Time) (Device, error) {
 	var d Device
 	var family, state string
 	var gen, created int64
 	var last, reported sql.NullInt64
 	var origin string
 	var spoolName, spoolDigest sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT device_id, family, label, trust_generation, last_seen, state, created_at,
-		origin, spool_name, spool_sha256, reported_at
-		FROM netdev_devices_seen WHERE device_id = ?`, deviceID).
-		Scan(&d.DeviceID, &family, &d.Label, &gen, &last, &state, &created,
-			&origin, &spoolName, &spoolDigest, &reported)
-	if errors.Is(err, sql.ErrNoRows) {
-		return Device{}, ErrDeviceNotFound
-	}
+	err := sc.Scan(&d.DeviceID, &family, &d.Label, &gen, &last, &state, &created,
+		&origin, &spoolName, &spoolDigest, &reported)
 	if err != nil {
-		return Device{}, fmt.Errorf("netdevinventory: load device: %w", err)
+		return Device{}, err
 	}
 	d.Family = netdevcontract.Family(family)
 	d.TrustGeneration = uint64(gen)
@@ -532,11 +570,21 @@ func (s *Store) GetDevice(ctx context.Context, deviceID string) (Device, error) 
 		d.LastSeen = fromMicros(last.Int64)
 		ref = last.Int64
 	}
-	d.Age = max(s.now().Sub(fromMicros(ref)), 0)
+	d.Age = max(now.Sub(fromMicros(ref)), 0)
 	if d.Age > StaleAfterIntervals*devicePollInterval(d.Family) {
 		d.State = DeviceStale
 	}
+	if reportStale(d.ReportedAt, now) {
+		d.State = DeviceStale
+	}
 	return d, nil
+}
+
+// reportStale reports whether the newest collector report of a device is
+// older than DeviceReportStaleAfter. A zero reportedAt (no report stored, or
+// a row no spool record wrote) is not judged by reports.
+func reportStale(reportedAt, now time.Time) bool {
+	return !reportedAt.IsZero() && now.Sub(reportedAt) > DeviceReportStaleAfter
 }
 
 // GetDataset returns the current dataset of (deviceID, read). Its state

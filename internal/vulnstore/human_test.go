@@ -16,10 +16,10 @@ func TestHumanStatesNeverChangedByRuns(t *testing.T) {
 	e := newEnv(t)
 	items := e.seed(t, "web01", 3)
 	accepted, falsePos := items[0].Finding.Key, items[1].Finding.Key
-	if err := e.st.SetAcceptedRisk(e.ctx, accepted, AcceptRisk{Approver: "admin", Reason: "isolated host", BasisVersion: "1.0-1"}); err != nil {
+	if err := e.st.SetAcceptedRisk(e.ctx, accepted, AcceptRisk{Approver: "admin", Reason: "isolated host", BasisVersion: "1.0-1"}, e.audit()); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.st.SetFalsePositive(e.ctx, falsePos, MarkFalsePositive{By: "admin", Category: CategoryBackportFixed, Reason: "patched", BasisVersion: "1.0-1"}); err != nil {
+	if err := e.st.SetFalsePositive(e.ctx, falsePos, MarkFalsePositive{By: "admin", Category: CategoryBackportFixed, Reason: "patched", BasisVersion: "1.0-1"}, e.audit()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -67,27 +67,27 @@ func TestHumanStateInputLimits(t *testing.T) {
 		"expiry in past": {Approver: "admin", Reason: "r", BasisVersion: "1.0-1", Expires: now.Add(-time.Hour)},
 	}
 	for name, a := range bad {
-		if err := e.st.SetAcceptedRisk(e.ctx, k, a); !errors.Is(err, ErrInvalidInput) {
+		if err := e.st.SetAcceptedRisk(e.ctx, k, a, e.audit()); !errors.Is(err, ErrInvalidInput) {
 			t.Errorf("%s: %v, want ErrInvalidInput", name, err)
 		}
 	}
-	if err := e.st.SetFalsePositive(e.ctx, k, MarkFalsePositive{By: "admin", Category: "guess", Reason: "r", BasisVersion: "1"}); !errors.Is(err, ErrInvalidInput) {
+	if err := e.st.SetFalsePositive(e.ctx, k, MarkFalsePositive{By: "admin", Category: "guess", Reason: "r", BasisVersion: "1"}, e.audit()); !errors.Is(err, ErrInvalidInput) {
 		t.Errorf("unknown category: %v", err)
 	}
-	if err := e.st.SetAcceptedRisk(e.ctx, k, AcceptRisk{Approver: "admin", Reason: strings.Repeat("x", MaxHumanReason), BasisVersion: "1.0-1"}); err != nil {
+	if err := e.st.SetAcceptedRisk(e.ctx, k, AcceptRisk{Approver: "admin", Reason: strings.Repeat("x", MaxHumanReason), BasisVersion: "1.0-1"}, e.audit()); err != nil {
 		t.Fatalf("1 KiB reason refused: %v", err)
 	}
 	if f := e.get(t, k); !f.Human.Expires.Equal(now.Add(DefaultAcceptExpiry)) {
 		t.Fatalf("default expiry = %v", f.Human.Expires)
 	}
 	// Only open findings take a human state.
-	if err := e.st.SetFalsePositive(e.ctx, k, MarkFalsePositive{By: "admin", Category: CategoryOther, Reason: "r", BasisVersion: "1"}); !errors.Is(err, ErrWrongState) {
+	if err := e.st.SetFalsePositive(e.ctx, k, MarkFalsePositive{By: "admin", Category: CategoryOther, Reason: "r", BasisVersion: "1"}, e.audit()); !errors.Is(err, ErrWrongState) {
 		t.Fatalf("human state over human state: %v", err)
 	}
 	r := e.start(t)
 	e.submit(t, r, 0, []Subject{hostSubj("web01")}, items[0])
 	e.complete(t, r)
-	if err := e.st.SetAcceptedRisk(e.ctx, items[1].Finding.Key, AcceptRisk{Approver: "admin", Reason: "r", BasisVersion: "1"}); !errors.Is(err, ErrWrongState) {
+	if err := e.st.SetAcceptedRisk(e.ctx, items[1].Finding.Key, AcceptRisk{Approver: "admin", Reason: "r", BasisVersion: "1"}, e.audit()); !errors.Is(err, ErrWrongState) {
 		t.Fatalf("accept fixed finding: %v", err)
 	}
 }
@@ -100,14 +100,14 @@ func TestReviewHumanStatesReopens(t *testing.T) {
 		keys[i] = it.Finding.Key
 	}
 	accept := func(k vulnfinding.Key, exp time.Time) {
-		if err := e.st.SetAcceptedRisk(e.ctx, k, AcceptRisk{Approver: "admin", Reason: "r", BasisVersion: "1.0-1", Expires: exp}); err != nil {
+		if err := e.st.SetAcceptedRisk(e.ctx, k, AcceptRisk{Approver: "admin", Reason: "r", BasisVersion: "1.0-1", Expires: exp}, e.audit()); err != nil {
 			t.Fatal(err)
 		}
 	}
 	accept(keys[0], e.clk.Now().Add(24*time.Hour)) // will expire
 	accept(keys[1], time.Time{})                   // becomes KEV-listed
 	accept(keys[2], time.Time{})                   // basis changes
-	if err := e.st.SetFalsePositive(e.ctx, keys[3], MarkFalsePositive{By: "admin", Category: CategoryOther, Reason: "r", BasisVersion: "1.0-1"}); err != nil {
+	if err := e.st.SetFalsePositive(e.ctx, keys[3], MarkFalsePositive{By: "admin", Category: CategoryOther, Reason: "r", BasisVersion: "1.0-1"}, e.audit()); err != nil {
 		t.Fatal(err)
 	}
 	accept(keys[4], time.Time{}) // unchanged
@@ -148,7 +148,7 @@ func TestReviewHumanStatesReopens(t *testing.T) {
 func TestAcceptedRiskOfKEVFindingNotReopenedForSameKEV(t *testing.T) {
 	e := newEnv(t)
 	items := e.seed(t, "web01", 1, withKEV("2026-01-01"))
-	if err := e.st.SetAcceptedRisk(e.ctx, items[0].Finding.Key, AcceptRisk{Approver: "admin", Reason: "r", BasisVersion: "1.0-1"}); err != nil {
+	if err := e.st.SetAcceptedRisk(e.ctx, items[0].Finding.Key, AcceptRisk{Approver: "admin", Reason: "r", BasisVersion: "1.0-1"}, e.audit()); err != nil {
 		t.Fatal(err)
 	}
 	got, err := e.st.ReviewHumanStates(e.ctx, func(context.Context, Finding) (string, bool, error) { return "1.0-1", true, nil })
