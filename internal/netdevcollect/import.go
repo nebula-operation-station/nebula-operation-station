@@ -98,8 +98,10 @@ const (
 	ReasonFutureObservation      = "future_observation"
 	ReasonReplayed               = "replayed_record"
 	ReasonSuperseded             = "superseded_record"
-	// ReasonDeviceBlocked: the collector reports the device as blocked. The
-	// device row has no block field, so the record is kept, not written.
+	// ReasonDeviceBlocked: the collector reports the device as blocked. Its
+	// metadata record is kept, and every dataset of the device is kept with
+	// this reason while the device stays halted (see Importer.blocked). No
+	// row is written for a blocked device: the device row has no block field.
 	ReasonDeviceBlocked = "device_blocked"
 )
 
@@ -181,6 +183,11 @@ type Importer struct {
 	// unmoved holds rejected records whose move and removal both failed;
 	// later passes only retry that, never the import.
 	unmoved map[string]string
+	// blocked holds the devices whose metadata record says they are blocked.
+	// Their datasets are kept, not imported, until a newer unblocked metadata
+	// record of the device is stored. The map is not pruned with the spool
+	// listing: a blocked device may have no spool file left.
+	blocked map[string]struct{}
 }
 
 type importBackoff struct {
@@ -261,6 +268,7 @@ func (im *Importer) Run(ctx context.Context) (ImportReport, error) {
 	if im.backoff == nil {
 		im.backoff = map[string]importBackoff{}
 		im.unmoved = map[string]string{}
+		im.blocked = map[string]struct{}{}
 	}
 	names, err := im.Spool.List(ctx)
 	if err != nil {
@@ -287,9 +295,10 @@ func (im *Importer) Run(ctx context.Context) (ImportReport, error) {
 
 	rep := ImportReport{Files: len(names)}
 	now := im.Now()
-	// Device metadata has its own budget and never waits behind a store
-	// failure: it writes nothing, so it is judged before the datasets.
-	handled, waiting, err := im.writeMetadata(ctx, names, &rep)
+	// Device metadata has its own budget and is judged before the datasets.
+	// A device whose metadata waits (a store failure, its backoff, or an
+	// untried budget) has its datasets wait with it.
+	handled, waiting, err := im.writeMetadata(ctx, names, now, &rep)
 	if err != nil {
 		return rep, err
 	}
@@ -323,6 +332,10 @@ func (im *Importer) Run(ctx context.Context) (ImportReport, error) {
 			im.reject(ctx, name, reason, &rep)
 			continue
 		}
+		if _, ok := im.blocked[n.device]; ok {
+			im.reject(ctx, name, ReasonDeviceBlocked, &rep)
+			continue
+		}
 		_, stop := halted[n.device]
 		if stop || now.Before(im.backoff[n.device].notBefore) || taken >= MaxRecordsPerRun {
 			rep.Deferred++
@@ -334,10 +347,9 @@ func (im *Importer) Run(ctx context.Context) (ImportReport, error) {
 			delete(im.backoff, n.device)
 		case outcomeStoreFailed:
 			halted[n.device] = struct{}{}
-			b := im.backoff[n.device]
-			b.notBefore = now.Add(b.delay)
-			b.delay = min(max(2*b.delay, importRetryBase), importRetryMax)
+			im.failStore(n.device, now)
 			// The record reached the store, so it decoded: it is valid.
+			b := im.backoff[n.device]
 			b.judgedValid(n.read, name)
 			im.backoff[n.device] = b
 		case outcomeInterrupted:
@@ -507,15 +519,20 @@ func (im *Importer) judge(ctx context.Context, name string, rep *ImportReport) (
 // is tried; a store failure stops the device for this pass, since the older
 // records would be refused by the same store after the newer one. The first
 // record the store accepts is confirmed (removed), and so is a blocked one
-// (kept, see ReasonDeviceBlocked); every older metadata file of the device is
-// then removed as superseded. A pass tries at most
+// (kept, see ReasonDeviceBlocked) and marks its device blocked, so its datasets
+// are kept until a newer unblocked record is stored; every older metadata file
+// of the device is then removed as superseded. A pass tries at most
 // MaxMetadataPerRun records. Without a Meta store device metadata waits in the
 // spool untouched. Its error is only ever ctx's.
 //
+// A device whose last attempt was a store failure is backed off like a dataset
+// (failStore): its metadata is not tried again before the backoff ends.
+//
 // The second result holds the devices whose metadata is still waiting: a store
-// failure stopped them, or the budget ran out before one of their records was
-// settled. Their datasets must wait for the same pass's later step too.
-func (im *Importer) writeMetadata(ctx context.Context, names []string, rep *ImportReport) (map[string]struct{}, map[string]struct{}, error) {
+// failure stopped them, their backoff holds them, or the budget ran out before
+// one of their records was settled. Their datasets must wait for the same
+// pass's later step too.
+func (im *Importer) writeMetadata(ctx context.Context, names []string, now time.Time, rep *ImportReport) (map[string]struct{}, map[string]struct{}, error) {
 	handled := map[string]struct{}{}
 	waiting := map[string]struct{}{}
 	if im.Meta == nil {
@@ -536,6 +553,10 @@ func (im *Importer) writeMetadata(ctx context.Context, names []string, rep *Impo
 	tried := 0
 	for _, dev := range devices {
 		run := byDevice[dev]
+		if now.Before(im.backoff[dev].notBefore) {
+			waiting[dev] = struct{}{}
+			continue
+		}
 		for i := len(run) - 1; i >= 0; i-- {
 			name := run[i]
 			if reason, ok := im.unmoved[name]; ok {
@@ -554,11 +575,22 @@ func (im *Importer) writeMetadata(ctx context.Context, names []string, rep *Impo
 			}
 			handled[name] = struct{}{}
 			if out == outcomeStoreFailed {
+				im.failStore(dev, now)
 				waiting[dev] = struct{}{}
 				break // the store is failing for this device; older records wait
 			}
 			if out != outcomeStored && out != outcomeBlocked {
 				continue // at fault or superseded: the next older record may be valid
+			}
+			// The device's state follows the record that settled it: a stored
+			// record lifts a halt and ends the backoff, a blocked one halts the
+			// device and ends the backoff (its datasets are kept, not retried).
+			if out == outcomeStored {
+				delete(im.blocked, dev)
+				delete(im.backoff, dev)
+			} else {
+				im.blocked[dev] = struct{}{}
+				delete(im.backoff, dev)
 			}
 			// A stored record, or the blocked one, supersedes every older
 			// record of the device: an older label must never come back.
@@ -569,6 +601,17 @@ func (im *Importer) writeMetadata(ctx context.Context, names []string, rep *Impo
 		}
 	}
 	return handled, waiting, nil
+}
+
+// failStore records a store failure of device at now: its next attempt waits
+// for the backoff delay, which starts at importRetryBase and doubles up to
+// importRetryMax. The first failure's delay is zero, so it is retried on the
+// next pass.
+func (im *Importer) failStore(device string, now time.Time) {
+	b := im.backoff[device]
+	b.notBefore = now.Add(b.delay)
+	b.delay = min(max(2*b.delay, importRetryBase), importRetryMax)
+	im.backoff[device] = b
 }
 
 // discardOlderMetadata removes the older metadata files of a device once a

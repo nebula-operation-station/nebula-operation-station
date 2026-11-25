@@ -502,3 +502,136 @@ func TestDatasetOfDeviceWithUntriedMetadataWaits(t *testing.T) {
 		t.Fatalf("spool = %v, want %s and its metadata %s to wait", got, dataset, meta)
 	}
 }
+
+// blockedCBSMetadata is the metadata record of importCBS once the collector
+// reports the device as blocked.
+const blockedCBSMetadata = `{"device_id":"core-sw-01","family":"cbs","label":"Core switch","trust_generation":3,"blocked":true,"block_reason":"operator"}`
+
+// datasetOf publishes the payload of read observed at testTime plus offset, as
+// a spool record of device.
+func datasetOf(t *testing.T, env *importEnv, device, read string, offset time.Duration) string {
+	t.Helper()
+	_, payload := datasetPayload(t, read)
+	return writeRawRecordAt(t, env.spool, device, read, importGen,
+		testTime.Add(offset), strings.Repeat("A", randomChars), payload)
+}
+
+// requireKeptWithReason fails unless kept/ holds a record of device and read
+// whose reason file names reason.
+func requireKeptWithReason(t *testing.T, env *importEnv, device, read, reason string) {
+	t.Helper()
+	prefix := device + "-" + read + "-"
+	for _, n := range keptNames(t, env.spool) {
+		if !strings.HasPrefix(n, prefix) {
+			continue
+		}
+		got, err := os.ReadFile(filepath.Join(env.spool.Dir, KeptDirName, n+keptReasonSuffix))
+		if err != nil {
+			t.Fatalf("read reason of %s: %v", n, err)
+		}
+		if string(got) != "reason: "+reason+"\n" {
+			t.Fatalf("reason of %s = %q, want %q", n, got, reason)
+		}
+		return
+	}
+	t.Fatalf("no %s record of %s in %s: %v", read, device, KeptDirName, keptNames(t, env.spool))
+}
+
+// A blocked metadata record halts its device in the pass it is judged: the
+// device's dataset of the same pass is kept with the blocked reason and is
+// never written.
+func TestBlockedMetadataHaltsDatasetsInSamePass(t *testing.T) {
+	meta := &recordingMeta{}
+	env, _ := metaEnv(t, meta)
+	metadataAt(t, env, importCBS, 0, blockedCBSMetadata)
+	datasetOf(t, env, importCBS, ReadCBSVersion, time.Second)
+
+	rep := env.run(t)
+	if rep.Kept != 2 || rep.Imported != 0 || len(meta.records) != 0 {
+		t.Fatalf("report = %+v, writes = %d; want the metadata and the dataset kept, nothing written",
+			rep, len(meta.records))
+	}
+	if got := spoolFiles(t, env.spool); len(got) != 0 {
+		t.Fatalf("spool still holds %v", got)
+	}
+	requireKeptWithReason(t, env, importCBS, ReadCBSVersion, ReasonDeviceBlocked)
+}
+
+// A blocked device stays halted in later passes: a dataset that arrives after
+// its blocked metadata was kept is kept too, and nothing is written.
+func TestBlockedDeviceStaysHaltedInLaterPasses(t *testing.T) {
+	meta := &recordingMeta{}
+	env, _ := metaEnv(t, meta)
+	metadataAt(t, env, importCBS, 0, blockedCBSMetadata)
+	if rep := env.run(t); rep.Kept != 1 {
+		t.Fatalf("first pass report = %+v, want the blocked metadata kept", rep)
+	}
+	datasetOf(t, env, importCBS, ReadCBSVersion, time.Second)
+
+	for pass := 2; pass <= 3; pass++ {
+		rep := env.run(t)
+		if rep.Imported != 0 || len(meta.records) != 0 {
+			t.Fatalf("pass %d report = %+v, writes = %d; want the halt kept", pass, rep, len(meta.records))
+		}
+		if got := spoolFiles(t, env.spool); len(got) != 0 {
+			t.Fatalf("pass %d: spool still holds %v", pass, got)
+		}
+	}
+	requireKeptWithReason(t, env, importCBS, ReadCBSVersion, ReasonDeviceBlocked)
+}
+
+// A newer unblocked metadata record of a blocked device is stored, and the
+// halt ends: the device's datasets of that pass are imported.
+func TestNewerUnblockedMetadataLiftsTheHalt(t *testing.T) {
+	meta := &recordingMeta{}
+	env, _ := metaEnv(t, meta)
+	env.imp.Store = env.store
+	metadataAt(t, env, importCBS, 0, blockedCBSMetadata)
+	env.run(t)
+	metadataAt(t, env, importCBS, time.Second, validCBSMetadata)
+	datasetOf(t, env, importCBS, ReadCBSVersion, 2*time.Second)
+
+	rep := env.run(t)
+	if rep.MetadataWritten != 1 || rep.Imported != 1 || rep.Kept != 0 {
+		t.Fatalf("report = %+v, want the unblocked metadata written and the dataset imported", rep)
+	}
+}
+
+// A store failure of a device's metadata backs the device off like a dataset
+// store failure: the next pass does not retry the metadata at once, and the
+// device's datasets stay bounded by MaxPendingPerRead while it waits.
+func TestMetadataStoreFailureBacksOffAndBoundsDatasets(t *testing.T) {
+	env := newImportEnv(t)
+	meta := &flakyMeta{inner: env.store, err: errors.New("database is locked")}
+	env.imp.Meta = meta
+	env.imp.Store = env.store
+	metadataAt(t, env, newDevice, 0, newDeviceMetadata)
+	for i := 0; i < MaxPendingPerRead+3; i++ {
+		datasetOf(t, env, newDevice, ReadCBSVersion, time.Duration(i+1)*time.Second)
+	}
+
+	// The first failure is retried on the next pass; the second starts the
+	// backoff.
+	for pass := 1; pass <= 2; pass++ {
+		if rep := env.run(t); rep.Retry != 1 {
+			t.Fatalf("pass %d report = %+v, want the metadata retried", pass, rep)
+		}
+	}
+	rep := env.run(t)
+	if rep.Retry != 0 || rep.Imported != 0 {
+		t.Fatalf("backed-off pass report = %+v, want the metadata not tried at all", rep)
+	}
+	if got := spoolOf(t, env.spool, newDevice, ReadCBSVersion); len(got) == 0 || len(got) > MaxPendingPerRead {
+		t.Fatalf("waiting datasets = %v, want between 1 and %d", got, MaxPendingPerRead)
+	}
+
+	meta.err = nil
+	*env.now = env.now.Add(importRetryMax)
+	rep = env.run(t)
+	if rep.MetadataWritten != 1 || rep.Imported == 0 {
+		t.Fatalf("recovered pass report = %+v, want the metadata written and datasets imported", rep)
+	}
+	if got := spoolOf(t, env.spool, newDevice, ReadCBSVersion); len(got) != 0 {
+		t.Fatalf("datasets left after recovery: %v", got)
+	}
+}
