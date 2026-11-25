@@ -640,7 +640,12 @@ func TestMarkStaleAfterThreeIntervalsNeverDeletes(t *testing.T) {
 		t.Fatalf("vlan rows = %d, want 1", n)
 	}
 
-	// A new read makes device and dataset fresh again.
+	// A new read and a newer collector report make device and dataset fresh
+	// again. The report is needed since DeviceReportStaleAfter: a dataset read
+	// alone does not clear a report that is a year old.
+	if err := s.UpsertDeviceReported(ctx, cbsDevice(), refAt(*now)); err != nil {
+		t.Fatal(err)
+	}
 	mustReplace(t, s, "sw-core", ReadVLANs, *now, false, VLANRows{{ID: 1}, {ID: 2}})
 	if d, _ := s.GetDevice(ctx, "sw-core"); d.State != DeviceFresh {
 		t.Fatalf("device after read = %+v", d)
