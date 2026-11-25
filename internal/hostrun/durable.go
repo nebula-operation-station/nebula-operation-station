@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -369,6 +370,177 @@ func Collect(ctx context.Context, client *ssh.Client, cfg JobConfig, executionID
 	}
 	classify(&out, len(res) > MaxResult)
 	return out, nil
+}
+
+// MaxDurableResultLimit is the highest result limit a caller of
+// CollectStream may ask for: the raw fim-scan-v1 document limit
+// (fimscan.MaxDocumentBytes, 128 MiB, ADR 0015 D6). Only fim.scan uses it;
+// every other action keeps MaxResult.
+const MaxDurableResultLimit = 128 << 20
+
+// streamReadTimeout bounds the streaming read of result.json. A document
+// of MaxDurableResultLimit needs about 75 KB/s to arrive in time.
+const streamReadTimeout = 30 * time.Minute
+
+// ErrResultLimit is returned when a requested result limit is negative or
+// above MaxDurableResultLimit.
+var ErrResultLimit = errors.New("hostrun: result limit out of range")
+
+// StreamedResult is the outcome of CollectStream. The result document
+// itself went to the caller's writer; hostrun keeps none of it.
+type StreamedResult struct {
+	Class    string
+	Detail   string
+	ExitCode int
+	// Bytes is the number of result bytes handed to the writer; never
+	// more than the limit.
+	Bytes int64
+	// Truncated is set when result.json is larger than the limit. The bytes
+	// written are then a cut document: the run is never complete, and
+	// Class is never ClassSuccess.
+	Truncated bool
+	// Log is the bounded execution.log (untrusted host output).
+	Log          []byte
+	LogTruncated bool
+}
+
+// CollectStream reads the result of a finished job like Collect, but
+// streams result.json to w instead of buffering it, and takes the result
+// limit from the caller: 0 means MaxResult, anything above
+// MaxDurableResultLimit (or below 0) is refused with ErrResultLimit. At
+// most limit bytes reach w; a larger result is Truncated.
+//
+// hostrun only bounds the stream. ClassSuccess means a non-empty result
+// within the limit and exit status 0; the caller must still validate the
+// document (UTF-8, exactly one JSON document, schema) as it reads it, and
+// discard it if the result is not ClassSuccess. If w returns an error the
+// rest of the stream is drained (bounded by the limit, never stored) and
+// the error is returned.
+func CollectStream(ctx context.Context, client *ssh.Client, cfg JobConfig, executionID string, exitCode int, limit int, w io.Writer) (StreamedResult, error) {
+	if limit < 0 || limit > MaxDurableResultLimit {
+		return StreamedResult{}, fmt.Errorf("%w: %d (0..%d)", ErrResultLimit, limit, MaxDurableResultLimit)
+	}
+	if limit == 0 {
+		limit = MaxResult
+	}
+	if w == nil {
+		return StreamedResult{}, errors.New("hostrun: no result writer")
+	}
+	if !uuidRe.MatchString(executionID) {
+		return StreamedResult{}, errors.New("hostrun: execution ID is not a lowercase UUID")
+	}
+	if err := cfg.valid(); err != nil {
+		return StreamedResult{}, err
+	}
+	sw := &streamWriter{w: w, limit: int64(limit)}
+	err := streamOutput(ctx, client, cfg.program(`head -c `+strconv.Itoa(limit+1)+` `+cfg.JobRoot+"/"+executionID+`/result.json 2>/dev/null; true`), sw)
+	written, total, nonSpace, werr := sw.finish()
+	if err != nil {
+		return StreamedResult{}, err
+	}
+	if werr != nil {
+		return StreamedResult{}, fmt.Errorf("hostrun: write result of %s: %w", executionID, werr)
+	}
+	log, err := output(ctx, client, cfg.program(`head -c `+strconv.Itoa(MaxLog+1)+` `+cfg.JobRoot+"/"+executionID+`/execution.log 2>/dev/null; true`), MaxLog+1)
+	if err != nil {
+		return StreamedResult{}, err
+	}
+	out := StreamedResult{ExitCode: exitCode, Bytes: written, Truncated: total > int64(limit), Log: log}
+	if len(log) > MaxLog {
+		out.Log, out.LogTruncated = append(log[:MaxLog:MaxLog], TruncationMarker...), true
+	}
+	switch {
+	case exitCode == 129 || exitCode == 143 || exitCode == 137:
+		out.Class, out.Detail = ClassScriptInterrupted, fmt.Sprintf("interrupted (exit %d)", exitCode)
+	case exitCode == ExitPrecheckFailed:
+		out.Class, out.Detail = ClassPrecheckFailed, "the action's precheck failed"
+	case exitCode == ExitPostcheckFailed:
+		out.Class, out.Detail = ClassPostcheckFailed, "the action's postcheck failed"
+	case exitCode != 0:
+		out.Class, out.Detail = ClassScriptFailed, fmt.Sprintf("exit status %d", exitCode)
+	case out.Truncated:
+		out.Class, out.Detail = ClassScriptFailed, fmt.Sprintf("the result exceeds %d bytes", limit)
+	case !nonSpace:
+		out.Class, out.Detail = ClassResultMissing, "the script printed no result"
+	default:
+		out.Class = ClassSuccess
+	}
+	return out, nil
+}
+
+// streamWriter forwards the first limit bytes to w and counts the rest. It
+// remembers whether a non-whitespace byte was forwarded and the first
+// error of w; after that error, and after finish, it discards everything.
+type streamWriter struct {
+	mu       sync.Mutex
+	w        io.Writer
+	limit    int64
+	written  int64
+	total    int64
+	nonSpace bool
+	err      error
+	done     bool
+}
+
+func (s *streamWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.total += int64(len(p))
+	if s.done || s.err != nil {
+		return len(p), nil
+	}
+	room := min(s.limit-s.written, int64(len(p)))
+	if room <= 0 {
+		return len(p), nil
+	}
+	chunk := p[:room]
+	if !s.nonSpace {
+		s.nonSpace = len(bytes.Trim(chunk, " \t\r\n")) > 0
+	}
+	n, err := s.w.Write(chunk)
+	s.written += int64(max(n, 0))
+	if err == nil && n != len(chunk) {
+		err = io.ErrShortWrite
+	}
+	s.err = err
+	return len(p), nil
+}
+
+// finish stops forwarding (a late write from the session goroutine never
+// reaches w after CollectStream returned) and reports the counts.
+func (s *streamWriter) finish() (written, total int64, nonSpace bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.done = true
+	return s.written, s.total, s.nonSpace, s.err
+}
+
+// streamOutput runs cmd with stdout going to w; a non-zero exit is an error.
+func streamOutput(ctx context.Context, client *ssh.Client, cmd string, w io.Writer) error {
+	s, err := client.NewSession()
+	if err != nil {
+		return fmt.Errorf("hostrun: open session: %w", err)
+	}
+	defer s.Close()
+	var errb cappedBuffer
+	errb.limit = 4096
+	s.Stdout, s.Stderr = w, &errb
+	done := make(chan error, 1)
+	go func() { done <- s.Run(cmd) }()
+	t := time.NewTimer(streamReadTimeout)
+	defer t.Stop()
+	select {
+	case err = <-done:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return fmt.Errorf("hostrun: result read did not finish within %s", streamReadTimeout)
+	}
+	if err != nil {
+		msg, _ := errb.bytes()
+		return fmt.Errorf("hostrun: %v: %s", err, clean(string(msg)))
+	}
+	return nil
 }
 
 // Remove deletes the job's directories on the host.
