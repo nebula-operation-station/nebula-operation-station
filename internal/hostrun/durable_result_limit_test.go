@@ -10,7 +10,10 @@ import (
 	"hash"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -143,6 +146,27 @@ func TestDurableResultWithoutRaisedLimitKeepsOneMiB(t *testing.T) {
 	}
 }
 
+// heapWriter is a hashWriter that samples the heap while the document
+// passes through it.
+type heapWriter struct {
+	*hashWriter
+	calls int
+	peak  uint64
+}
+
+func (w *heapWriter) Write(p []byte) (int, error) {
+	if w.calls++; w.calls%16 == 0 {
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		w.peak = max(w.peak, m.HeapAlloc)
+	}
+	return w.hashWriter.Write(p)
+}
+
+// maxStreamHeapGrowth is how much the heap may grow while a 128 MiB
+// document streams: far below the document, so holding it would show.
+const maxStreamHeapGrowth = 32 << 20
+
 // The whole fim.scan document limit, streamed: a document one byte under
 // 128 MiB is complete and never held in memory by hostrun.
 func TestDurableResultAtFimScanLimitIsStreamed(t *testing.T) {
@@ -152,8 +176,12 @@ func TestDurableResultAtFimScanLimitIsStreamed(t *testing.T) {
 	exit := runDurableDoc(t, cfg, execID, doc, "")
 	want := sha256.Sum256(doc)
 	doc = nil
-	w := newHashWriter()
-	r, err := hostrun.CollectStream(context.Background(), client(t), cfg, execID, exit, limit, w)
+	c := client(t)
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+	w := &heapWriter{hashWriter: newHashWriter()}
+	r, err := hostrun.CollectStream(context.Background(), c, cfg, execID, exit, limit, w)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,6 +191,34 @@ func TestDurableResultAtFimScanLimitIsStreamed(t *testing.T) {
 	// The document arrives in pieces, not as one buffer.
 	if w.maxWrite >= 1<<20 {
 		t.Fatalf("largest write %d bytes", w.maxWrite)
+	}
+	// And hostrun does not keep it: the heap stays far below its size.
+	t.Logf("heap %d -> peak %d bytes over %d writes", before.HeapAlloc, w.peak, w.calls)
+	if w.calls < 16 || w.peak > before.HeapAlloc+maxStreamHeapGrowth {
+		t.Fatalf("heap grew from %d to %d bytes (%d writes)", before.HeapAlloc, w.peak, w.calls)
+	}
+}
+
+// A result above the limit with a failed exit is the failed exit, as in
+// Collect, and still never more than the limit reaches the writer.
+func TestDurableResultTruncatedWithNonZeroExit(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "big.json")
+	if err := os.WriteFile(f, jsonDoc(hostrun.MaxResult+10), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := jobConfig(t)
+	exit := runDurableDoc(t, cfg, execID, nil, "cat "+f+"\nexit 4\n")
+	w := newHashWriter()
+	r, err := hostrun.CollectStream(context.Background(), client(t), cfg, execID, exit, 0, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := hostrun.Collect(context.Background(), client(t), cfg, execID, exit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exit != 4 || !r.Truncated || r.Class != hostrun.ClassScriptFailed || r.Detail != "exit status 4" || r.Class != b.Class || w.n != hostrun.MaxResult {
+		t.Fatalf("%+v, Collect %s, writer got %d bytes", r, b.Class, w.n)
 	}
 }
 
@@ -193,25 +249,130 @@ func TestCollectStreamRejectsBadInput(t *testing.T) {
 	}
 }
 
+// CollectStream gives every result the class Collect gives it, with the
+// default and with a raised limit; only ClassSuccess is a usable document.
 func TestCollectStreamClassifiesLikeCollect(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {
 		name, script, class string
 	}{
+		{"success", "echo '{\"a\":[1,\"x\"]}'\n", hostrun.ClassSuccess},
+		{"success number", "echo 42\n", hostrun.ClassSuccess},
 		{"empty", "printf ' \\n'\n", hostrun.ClassResultMissing},
+		{"nothing", "true\n", hostrun.ClassResultMissing},
+		{"vertical tab and form feed", "printf '\\v\\f'\n", hostrun.ClassResultMissing},
+		{"no-break space", "printf '\\302\\240\\n'\n", hostrun.ClassResultMissing},
+		{"not JSON", "echo hello\n", hostrun.ClassScriptFailed},
+		{"two documents", "echo '{}'; echo '{}'\n", hostrun.ClassScriptFailed},
+		{"trailing data", "echo '{} x'\n", hostrun.ClassScriptFailed},
+		{"cut document", "printf '{\"a\":'\n", hostrun.ClassScriptFailed},
+		{"invalid UTF-8", "printf '\"\\377\"'\n", hostrun.ClassScriptFailed},
+		{"duplicate member", "echo '{\"exit\":3,\"exit\":0}'\n", hostrun.ClassScriptFailed},
+		{"escaped duplicate", "echo '{\"exit\":3,\"\\u0065xit\":0}'\n", hostrun.ClassScriptFailed},
 		{"failed", "echo '{}'; exit 4\n", hostrun.ClassScriptFailed},
 		{"precheck", "exit 10\n", hostrun.ClassPrecheckFailed},
+		{"postcheck", "echo '{}'; exit 11\n", hostrun.ClassPostcheckFailed},
+		{"hangup", "exit 129\n", hostrun.ClassScriptInterrupted},
+		{"killed", "echo '{}'; exit 137\n", hostrun.ClassScriptInterrupted},
 		{"interrupted", "exit 143\n", hostrun.ClassScriptInterrupted},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := jobConfig(t)
 			exit := runDurableDoc(t, cfg, execID, nil, "echo log >&2\n"+tc.script)
-			r, err := hostrun.CollectStream(ctx, client(t), cfg, execID, exit, raisedLimit, newHashWriter())
-			if err != nil || r.Class != tc.class || r.ExitCode != exit || string(r.Log) != "log\n" || r.LogTruncated {
-				t.Fatalf("%+v %v", r, err)
+			c := client(t)
+			b, err := hostrun.Collect(ctx, c, cfg, execID, exit)
+			if err != nil || b.Class != tc.class {
+				t.Fatalf("Collect: %s %s %v, want %s", b.Class, b.Detail, err, tc.class)
+			}
+			for _, limit := range []int{0, raisedLimit} {
+				r, err := hostrun.CollectStream(ctx, c, cfg, execID, exit, limit, newHashWriter())
+				if err != nil || r.Class != b.Class || r.Detail != b.Detail || r.ExitCode != exit || string(r.Log) != "log\n" || r.LogTruncated {
+					t.Fatalf("limit %d: %+v %v, Collect %s %q", limit, r, err, b.Class, b.Detail)
+				}
 			}
 		})
+	}
+}
+
+// fifoResult makes the job's result.json a named pipe nobody writes, so a
+// read of it hangs until the session is closed.
+func fifoResult(t *testing.T, cfg hostrun.JobConfig) {
+	t.Helper()
+	dir := filepath.Join(cfg.JobRoot, execID)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(dir, "result.json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCollectStreamStopsOnContextCancel(t *testing.T) {
+	cfg := jobConfig(t)
+	fifoResult(t, cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	_, err := hostrun.CollectStream(ctx, client(t), cfg, execID, 0, raisedLimit, newHashWriter())
+	if !errors.Is(err, context.DeadlineExceeded) || time.Since(start) > 10*time.Second {
+		t.Fatalf("%v after %s", err, time.Since(start))
+	}
+}
+
+func TestCollectStreamStopsAtTimeout(t *testing.T) {
+	cfg := jobConfig(t)
+	fifoResult(t, cfg)
+	start := time.Now()
+	_, err := hostrun.CollectStreamWithin(context.Background(), client(t), cfg, execID, 0, raisedLimit, newHashWriter(), 300*time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "did not finish within") || time.Since(start) > 10*time.Second {
+		t.Fatalf("%v after %s", err, time.Since(start))
+	}
+}
+
+// stuckWriter blocks in its first Write until release is closed.
+type stuckWriter struct {
+	entered, release chan struct{}
+	calls            atomic.Int32
+}
+
+func (s *stuckWriter) Write(p []byte) (int, error) {
+	if s.calls.Add(1) == 1 {
+		close(s.entered)
+	}
+	<-s.release
+	return len(p), nil
+}
+
+// A writer that blocks does not keep CollectStream from returning on
+// cancellation or at the timeout, and gets no further call afterwards.
+func TestCollectStreamReturnsWhileWriterBlocks(t *testing.T) {
+	for _, viaTimeout := range []bool{false, true} {
+		cfg := jobConfig(t)
+		exit := runDurableDoc(t, cfg, execID, jsonDoc(raisedLimit), "")
+		w := &stuckWriter{entered: make(chan struct{}), release: make(chan struct{})}
+		ctx, cancel := context.WithCancel(context.Background())
+		timeout := time.Hour
+		if viaTimeout {
+			timeout = time.Second
+		} else {
+			go func() {
+				<-w.entered
+				cancel()
+			}()
+		}
+		start := time.Now()
+		_, err := hostrun.CollectStreamWithin(ctx, client(t), cfg, execID, exit, raisedLimit, w, timeout)
+		took := time.Since(start)
+		cancel()
+		close(w.release)
+		if err == nil || took > 10*time.Second {
+			t.Fatalf("timeout %v: %v after %s", viaTimeout, err, took)
+		}
+		time.Sleep(100 * time.Millisecond)
+		if n := w.calls.Load(); n != 1 {
+			t.Fatalf("timeout %v: writer called %d times", viaTimeout, n)
+		}
 	}
 }
 
