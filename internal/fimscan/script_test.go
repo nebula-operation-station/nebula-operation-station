@@ -1377,6 +1377,9 @@ func TestActionContract(t *testing.T) {
 		!bytes.Equal(a.Script, Script) || len(a.Secrets) != 0 || a.Timeout <= 30*time.Minute {
 		t.Fatalf("contract %+v", a)
 	}
+	if a.ID != ActionID || a.Version != ActionVersion || a.Timeout != ActionTimeout {
+		t.Fatalf("contract %s@%s timeout %s, constants %s@%s timeout %s", a.ID, a.Version, a.Timeout, ActionID, ActionVersion, ActionTimeout)
+	}
 	if err := a.ValidParams(map[string]string{"mode": "full", "profile": DefaultProfileID}); err != nil {
 		t.Error(err)
 	}

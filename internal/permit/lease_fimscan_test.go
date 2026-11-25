@@ -17,12 +17,13 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/schedgrant"
 )
 
-// fimScanScript reads the shipped fim.scan script. internal/fimscan
-// depends on this package, so the bytes are read from the file here; the
-// external test lease_fimscan_ext_test.go checks the embedded copy.
+// fimScanScript reads the shipped fim.scan script (embedded as
+// actions.FimScanScript). internal/fimscan depends on this package, so the
+// bytes are read from the file here; the external test
+// lease_fimscan_ext_test.go checks the embedded copy.
 func fimScanScript(t *testing.T) []byte {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("..", "fimscan", "scripts", "fim_scan.sh"))
+	b, err := os.ReadFile(filepath.Join("..", "executions", "actions", "scripts", "fim_scan.sh"))
 	if err != nil {
 		t.Fatal(err)
 	}

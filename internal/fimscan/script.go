@@ -3,12 +3,9 @@
 package fimscan
 
 import (
-	_ "embed"
-	"regexp"
 	"time"
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executions/actions"
-	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
 )
 
 // ActionID is the ID of the built-in read-only integrity scan action.
@@ -26,14 +23,13 @@ const DefaultProfileID = "fim-default-v1"
 const LookBack = 26 * time.Hour
 
 // ActionTimeout bounds one run: the script stops hashing after 30 minutes
-// (ADR 0015 D5) and then only writes metadata.
-const ActionTimeout = 40 * time.Minute
+// (ADR 0015 D5) and then only writes metadata. It is actions.FimScanTimeout.
+const ActionTimeout = actions.FimScanTimeout
 
-// Script is the fim.scan 1.0.0 script (scripts/fim_scan.sh). It only reads
-// and writes one fim-scan-v1 document to stdout.
-//
-//go:embed scripts/fim_scan.sh
-var Script []byte
+// Script is the fim.scan 1.0.0 script. It is embedded in the catalog
+// package (actions.FimScanScript, scripts/fim_scan.sh there) because this
+// package imports that one; Script is the same slice, not a copy.
+var Script = actions.FimScanScript
 
 // DefaultProfile returns fim-default-v1 as shipped (ADR 0015 D5, Q1;
 // spec 10 v26-10-02), in the order the script reports its roots.
@@ -67,35 +63,13 @@ func DefaultProfile() Profile {
 // the script's order (HOME_FILES).
 var homeFiles = []string{".ssh/authorized_keys*", ".shosts", ".rhosts", ".k5login", ".ssh/known_hosts", ".ssh/known_hosts2"}
 
-// Parameter patterns of the contract. They match exactly what the script
-// accepts from the canonical parameters.
-var (
-	modeRe    = regexp.MustCompile(`^(full|incremental)$`)
-	profileRe = regexp.MustCompile(`^fim-default-v1$`)
-)
-
-// Action returns the fim.scan read-only action contract in the form of the
-// other built-in read actions (spec 10 v26-10-02). It is a durable job
-// (ADR 0015 D5, decision (g) option 2; ActionTimeout is below the 6 h
-// hostrun.MaxDurableTimeout). It is in the read-lease allowlist
-// (permit.ReadOnlyAllowlist, lease.go). It is not yet in actions.Builtin:
-// see docs/implementation/integrity-wiring-decisions.md, section 3.2.
+// Action returns the fim.scan read-only action contract (spec 10
+// v26-10-02). The contract is defined once, as actions.FimScan; this
+// function only forwards. It is not yet in actions.Builtin (see
+// actions.FimScan). It is a durable job (ADR 0015 D5, decision (g) option 2;
+// ActionTimeout is below the 6 h hostrun.MaxDurableTimeout) and in the
+// read-lease allowlist (permit.ReadOnlyAllowlist, lease.go), whose pins
+// (internal/permit/lease_fimscan.go) it must match.
 func Action() actions.Action {
-	return actions.Action{
-		ID: ActionID, Version: ActionVersion, Title: "Integrity scan",
-		Description: "Reads type, size, mode, owner, inode, times, symlink targets and SHA-256 of the files under the fixed roots of " +
-			"profile fim-default-v1 (/etc, /boot, /usr/bin, /usr/sbin, /usr/lib, /usr/libexec, /bin, /sbin, /lib, /usr/local/{bin,sbin,lib}, /opt, " +
-			"the crontab spool and the SSH access files under /root and /home/*), the mount points below them and the sshd configuration. " +
-			"find -P -xdev, never follows symlinks, no path parameter, nothing written on the host. Needs root (sudo -n). Read-only.",
-		Risk:     pb.RiskClass_RISK_CLASS_LOW,
-		Durable:  true,
-		Timeout:  ActionTimeout,
-		ReadOnly: true,
-		Script:   Script,
-		Params: []actions.Param{
-			{Name: "mode", Label: "Mode (full or incremental)", Pattern: modeRe},
-			{Name: "profile", Label: "Profile (fim-default-v1)", Pattern: profileRe},
-		},
-		Retry: actions.RetrySafe,
-	}
+	return actions.FimScan()
 }
