@@ -48,7 +48,9 @@ type DeviceMetadataRecord struct {
 // UTF-8, the trust generation in range, and a blocked device is refused with
 // ErrBlockedDevice. The shared rules then refuse a family change, a lower
 // trust generation and, at the same generation, a record that is not
-// strictly newer than the stored one. A refusal writes nothing.
+// strictly newer than the stored one. A refusal writes nothing. A blocked
+// record leaves the stored row as it is, so the device list shows no block:
+// the caller that receives ErrBlockedDevice must surface the block itself.
 func (s *Store) UpsertDeviceMetadata(ctx context.Context, m DeviceMetadataRecord, ref SpoolRef) error {
 	if err := ref.validate(); err != nil {
 		return fmt.Errorf("netdevinventory: upsert device metadata: %w", err)
@@ -88,16 +90,28 @@ func validateMetadata(m DeviceMetadataRecord) error {
 }
 
 // validLabel reports whether s is a label of at most netdevcontract.MaxLabelBytes
-// bytes, valid UTF-8, with no control or format character (for example a
-// bidi override). An empty label is allowed: the row default is empty.
+// bytes, valid UTF-8, in which every rune is printable under the spec 09 rule
+// that netdevcontract applies to the same column in UpsertDeviceReported. That
+// rule is unexported in netdevcontract, so it is repeated here exactly, and
+// TestValidLabelMatchesContractText checks the two against each other. An
+// empty label is allowed: the row default is empty.
 func validLabel(s string) bool {
 	if len(s) > netdevcontract.MaxLabelBytes || !utf8.ValidString(s) {
 		return false
 	}
 	for _, r := range s {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+		if !printableText(r) {
 			return false
 		}
 	}
 	return true
+}
+
+// printableText is netdevcontract's printable rule for untrusted text: the
+// rune is accepted by unicode.IsPrint and is not U+FFFD. It rejects controls,
+// format characters (bidi overrides, isolates, zero-width characters), the
+// line and paragraph separators U+2028 and U+2029, private use, surrogates,
+// unassigned code points and every space except U+0020.
+func printableText(r rune) bool {
+	return r != utf8.RuneError && unicode.IsPrint(r)
 }

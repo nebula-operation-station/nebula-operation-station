@@ -110,9 +110,13 @@ func TestUpsertDeviceMetadataUpdatesOnlyMetadata(t *testing.T) {
 }
 
 // TestUpsertDeviceMetadataRefusesBadInput: every rejection writes nothing and
-// returns an error the caller can branch on.
+// returns an error the caller can branch on. Label cases name each character
+// under test by its code point in a comment; the bytes are the UTF-8 encoding.
 func TestUpsertDeviceMetadataRefusesBadInput(t *testing.T) {
 	long := strings.Repeat("x", netdevcontract.MaxLabelBytes+1)
+	label := func(s string) func(*DeviceMetadataRecord, *SpoolRef) {
+		return func(m *DeviceMetadataRecord, _ *SpoolRef) { m.Label = s }
+	}
 	cases := []struct {
 		name   string
 		mutate func(*DeviceMetadataRecord, *SpoolRef)
@@ -122,9 +126,29 @@ func TestUpsertDeviceMetadataRefusesBadInput(t *testing.T) {
 		{"device id with slash", func(m *DeviceMetadataRecord, _ *SpoolRef) { m.DeviceID = "sw/core" }, ErrInvalidMetadata},
 		{"empty family", func(m *DeviceMetadataRecord, _ *SpoolRef) { m.Family = "" }, ErrInvalidMetadata},
 		{"unknown family", func(m *DeviceMetadataRecord, _ *SpoolRef) { m.Family = "junos" }, ErrInvalidMetadata},
-		{"label too long", func(m *DeviceMetadataRecord, _ *SpoolRef) { m.Label = long }, ErrInvalidMetadata},
-		{"label with control character", func(m *DeviceMetadataRecord, _ *SpoolRef) { m.Label = "core\x00" }, ErrInvalidMetadata},
-		{"label not UTF-8", func(m *DeviceMetadataRecord, _ *SpoolRef) { m.Label = "core\xff" }, ErrInvalidMetadata},
+		{"label too long", label(long), ErrInvalidMetadata},
+		{"label with control character", label("core\x00"), ErrInvalidMetadata},
+		{"label not UTF-8", label("core\xff"), ErrInvalidMetadata},
+		// U+202E RIGHT-TO-LEFT OVERRIDE (format character, the bidi case the doc names)
+		{"label with bidi override U+202E", label("core\xe2\x80\xae"), ErrInvalidMetadata},
+		// U+200B ZERO WIDTH SPACE (format character)
+		{"label with zero-width space U+200B", label("co\xe2\x80\x8bre"), ErrInvalidMetadata},
+		// U+200E LEFT-TO-RIGHT MARK (format character)
+		{"label with left-to-right mark U+200E", label("core\xe2\x80\x8e"), ErrInvalidMetadata},
+		// U+2028 LINE SEPARATOR
+		{"label with line separator U+2028", label("core\xe2\x80\xa8x"), ErrInvalidMetadata},
+		// U+2029 PARAGRAPH SEPARATOR
+		{"label with paragraph separator U+2029", label("core\xe2\x80\xa9x"), ErrInvalidMetadata},
+		// U+E000 private use
+		{"label with private use character U+E000", label("core\xee\x80\x80"), ErrInvalidMetadata},
+		// U+FFFD REPLACEMENT CHARACTER
+		{"label with replacement character U+FFFD", label("core\xef\xbf\xbd"), ErrInvalidMetadata},
+		// U+0378 unassigned code point
+		{"label with unassigned code point U+0378", label("core\xcd\xb8"), ErrInvalidMetadata},
+		// U+00A0 NO-BREAK SPACE
+		{"label with no-break space U+00A0", label("core\xc2\xa0x"), ErrInvalidMetadata},
+		// U+3000 IDEOGRAPHIC SPACE
+		{"label with ideographic space U+3000", label("core\xe3\x80\x80x"), ErrInvalidMetadata},
 		{"trust generation zero", func(m *DeviceMetadataRecord, _ *SpoolRef) { m.TrustGeneration = 0 }, ErrInvalidMetadata},
 		{"trust generation out of range", func(m *DeviceMetadataRecord, _ *SpoolRef) {
 			m.TrustGeneration = netdevcontract.MaxTrustGeneration + 1
@@ -222,5 +246,57 @@ func TestUpsertDeviceMetadataAcceptsNewerGeneration(t *testing.T) {
 	}
 	if d.TrustGeneration != 2 || d.Family != netdevcontract.FamilyCBS {
 		t.Fatalf("row %+v, want generation 2 and family cbs", d)
+	}
+}
+
+// TestUpsertDeviceMetadataBlockedLeavesStoredRow: a blocked record is refused
+// with ErrBlockedDevice and the stored row stays as it was. The writer has no
+// column for the block, so the caller must surface it (the device list shows
+// the stored row, not the block).
+func TestUpsertDeviceMetadataBlockedLeavesStoredRow(t *testing.T) {
+	ctx := context.Background()
+	s, _, _ := newTestStore(t)
+	addDevice(t, s, cbsDevice())
+	stored, err := s.GetDevice(ctx, "sw-core")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	m := metaRecord()
+	m.TrustGeneration = 2
+	m.Label = "Blocked core"
+	m.Blocked = true
+	m.BlockReason = "manual"
+	if err := s.UpsertDeviceMetadata(ctx, m, refAt(testBase.Add(time.Minute))); !errors.Is(err, ErrBlockedDevice) {
+		t.Fatalf("blocked record: err %v, want ErrBlockedDevice", err)
+	}
+	after, err := s.GetDevice(ctx, "sw-core")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Label != stored.Label || after.Spool != stored.Spool || after.TrustGeneration != stored.TrustGeneration {
+		t.Fatalf("blocked record changed the row: before %+v after %+v", stored, after)
+	}
+}
+
+// TestValidLabelMatchesContractText: validLabel accepts exactly the labels
+// the netdevcontract device rule accepts for the same column, checked rune
+// by rune against netdevcontract.ValidateDevice, so the two cannot drift.
+// Runes are given as code points so that the source stays ASCII.
+func TestValidLabelMatchesContractText(t *testing.T) {
+	runes := []rune{
+		0x61, 0x20, 0x09, 0x0a, 0x00, 0x7f, 0x80, 0xa0, 0xad, 0x378,
+		0x200b, 0x200e, 0x202e, 0x2028, 0x2029, 0x3000, 0xfeff,
+		0xe000, 0xf0000, 0xd7ff, 0xfffd, 0x1f600, 0xe9,
+	}
+	for _, r := range runes {
+		label := "a" + string(r) + "b"
+		d := cbsDevice()
+		d.Name = label
+		_, contractErr := netdevcontract.ValidateDevice(d)
+		contractOK := contractErr == nil
+		if got := validLabel(label); got != contractOK {
+			t.Errorf("rune %#U: validLabel %v, contract accepts %v", r, got, contractOK)
+		}
 	}
 }
