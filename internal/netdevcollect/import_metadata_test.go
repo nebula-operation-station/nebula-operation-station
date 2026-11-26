@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -365,6 +366,32 @@ func TestStoreFailureKeepsMetadataForRetry(t *testing.T) {
 	rep = env.run(t)
 	if rep.MetadataWritten != 1 || len(metadataFiles(t, env.spool)) != 0 {
 		t.Fatalf("second run report = %+v, want the record written and confirmed", rep)
+	}
+}
+
+// A metadata record whose trust generation is below the stored one is at fault
+// (the store refuses it with ErrTrustGenerationRegressed): it is kept with its
+// own reason on the first pass and is not retried on the next one.
+func TestRegressedTrustGenerationMetadataIsKeptNotRetried(t *testing.T) {
+	meta := &recordingMeta{err: fmt.Errorf("upsert device core-sw-01: %w", netdevinventory.ErrTrustGenerationRegressed)}
+	env, _ := metaEnv(t, meta)
+	metadataAt(t, env, importCBS, 0, validCBSMetadata)
+
+	rep := env.run(t)
+	if rep.Kept != 1 || rep.Retry != 0 || rep.MetadataWritten != 0 || rep.Failed != 0 {
+		t.Fatalf("first pass report = %+v, want one kept record and no retry", rep)
+	}
+	if len(rep.Errors) != 1 || !strings.HasSuffix(rep.Errors[0], ": "+ReasonTrustGenerationRegressed) {
+		t.Fatalf("first pass errors = %v, want one %s entry", rep.Errors, ReasonTrustGenerationRegressed)
+	}
+	requireKeptWithReason(t, env, importCBS, ReadDeviceMetadata, ReasonTrustGenerationRegressed)
+	if got := metadataFiles(t, env.spool); len(got) != 0 {
+		t.Fatalf("spool metadata = %v, want none after the record was kept", got)
+	}
+
+	rep = env.run(t)
+	if rep.Files != 0 || rep.Retry != 0 || rep.Kept != 0 || len(meta.records) != 1 {
+		t.Fatalf("second pass report = %+v (writes %d), want nothing retried", rep, len(meta.records))
 	}
 }
 
