@@ -2750,8 +2750,8 @@ plan a rollout. The list describes this release as it is on `main`.
   fix item for each host or image group that has at least one open
   critical or high finding and has no note for its current state yet.
 - **A host without known ports gets no fix item.** If a host has no
-  `net.facts` result, or its newest result is older than 15 minutes
-  (three missed 5-minute reads), NOS treats its listening ports as
+  `net.facts` result, or its newest result is older than 15 minutes,
+  NOS treats its listening ports as
   unknown. It leaves that host out of the work list and logs an `audit` line
   with kind `ops_projection_skip`. The `net.facts` reads come from a
   read lease (section 9.9), and a read lease runs an action at most every
