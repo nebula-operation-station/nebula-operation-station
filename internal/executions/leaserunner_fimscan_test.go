@@ -403,3 +403,83 @@ func TestOnlyFimScanIsDurableInALease(t *testing.T) {
 		t.Fatal("the catalog has no durable action besides fim.scan; the check ran on nothing")
 	}
 }
+
+// insertManualFimScan stores a fim.scan execution of mode that no lease
+// stored, with the states the executor leaves it in. startedAt is the host's
+// start; the zero time means it never started.
+func insertManualFimScan(t *testing.T, s *Service, id, mode, state, hostState, class string, startedAt time.Time) {
+	t.Helper()
+	a, ok := actions.Lookup(permit.FimScanActionID)
+	if !ok {
+		t.Fatal("fim.scan is not in the catalog")
+	}
+	canon, _, ok := fimScanModeParams(mode)
+	if !ok {
+		t.Fatalf("no fim.scan mode %q", mode)
+	}
+	if _, err := s.db.Exec(`INSERT INTO executions (id, digest, action_id, module_version, artifact_sha256, risk, requirement, state,
+			durable, timeout_s, created_by, created_at, params) VALUES (?, '', ?, ?, ?, 'LOW', ?, ?, 1, ?, 'user', ?, ?)`,
+		id, a.ID, a.Version, a.SHA256(), leaseRunRequirement, state, int64(a.Timeout/time.Second), s.now().Unix(), string(canon)); err != nil {
+		t.Fatal(err)
+	}
+	var started any
+	if !startedAt.IsZero() {
+		started = startedAt.Unix()
+	}
+	if _, err := s.db.Exec(`INSERT INTO execution_hosts (execution_id, host_id, fingerprint, credential_ref, endpoints, state, class, started_at)
+			VALUES (?, 'web', ?, 'nebula-default', '[]', ?, ?, ?)`, id, leaseWebKey, hostState, class, started); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRequestsTheExecutorNeverStartedDoNotMoveTheFullFloor stores full fim.scan
+// requests on the host that never ran: pending, rejected, expired, and one
+// the job collection ended as unknown. None of them moves the host's floor,
+// so the lease asks for its full scan at once.
+func TestRequestsTheExecutorNeverStartedDoNotMoveTheFullFloor(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	s, f := setupFimFloor(t, &now, func(n time.Time) *pb.ReadGrant {
+		return leaseEntry(t, fimLeaseDoc(t, n, []string{"web"}, "full"), n)
+	})
+	insertManualFimScan(t, s, "00000000-0000-4000-8000-0000000000a1", "full", "pending", "waiting", "", time.Time{})
+	insertManualFimScan(t, s, "00000000-0000-4000-8000-0000000000a2", "full", "rejected", "waiting", "", time.Time{})
+	insertManualFimScan(t, s, "00000000-0000-4000-8000-0000000000a3", "full", "expired", "finished", "not_executed", time.Time{})
+	insertManualFimScan(t, s, "00000000-0000-4000-8000-0000000000a4", "full", "finished", "finished", "unknown", now)
+
+	s.RunDueReadGrants(context.Background())
+	if len(f.times) != 1 || !f.times[0].Equal(now) {
+		t.Fatalf("full fim.scan requests at %v, want one at once", f.times)
+	}
+}
+
+// TestStartedManualFullRunMovesTheFloor stores a full fim.scan run on the host
+// that the executor started, still running or finished. The lease asks for its
+// own full scan no sooner than 7 d - 6 h after that start.
+func TestStartedManualFullRunMovesTheFloor(t *testing.T) {
+	cases := []struct{ name, state, hostState, class string }{
+		{"running", "running", "running", ""},
+		{"finished", "finished", "finished", "success"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			now := time.Now().Truncate(time.Second)
+			s, f := setupFimFloor(t, &now, func(n time.Time) *pb.ReadGrant {
+				return leaseEntry(t, fimLeaseDoc(t, n, []string{"web"}, "full"), n)
+			})
+			start := now
+			insertManualFimScan(t, s, "00000000-0000-4000-8000-0000000000b1", "full", c.state, c.hostState, c.class, start)
+
+			ctx := context.Background()
+			for i := 0; i <= 8*24; i++ {
+				s.RunDueReadGrants(ctx)
+				now = now.Add(time.Hour)
+			}
+			if len(f.times) == 0 {
+				t.Fatal("no full fim.scan request in eight days")
+			}
+			if gap := f.times[0].Sub(start); gap < permit.FimScanFullMinInterval {
+				t.Fatalf("first full request %s after the started run, want at least %s", gap, permit.FimScanFullMinInterval)
+			}
+		})
+	}
+}

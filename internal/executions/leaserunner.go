@@ -428,8 +428,10 @@ func (s *Service) runLease(ctx context.Context, exec readGrantRunner, l ordinary
 				// host's other actions for this tick.
 				due := max(l.interval, leaseActionFloor(la))
 				at, seen := last[a.ID+"\x00"+t.HostID]
-				if hostAt, ok := fimLast[la.hash][t.HostID]; a.ID == permit.FimScanActionID && ok && (!seen || hostAt.After(at)) {
-					at, seen = hostAt, true
+				if a.ID == permit.FimScanActionID {
+					// fim.scan's floor is per host and mode across every lease and
+					// execution, and counts only the runs the executor started.
+					at, seen = fimLast[la.hash][t.HostID]
 				}
 				if seen && s.now().Before(at.Add(due)) {
 					continue
@@ -651,12 +653,18 @@ func (s *Service) finishLeaseExecution(ctx context.Context, id string) {
 	}
 }
 
-// fimScanLastRuns returns, per host, the newest stored run of fim.scan with the
-// canonical parameters params, whichever lease or execution stored it.
+// fimScanLastRuns returns, per host, the start of the newest fim.scan run with
+// the canonical parameters params that the executor started, whichever lease
+// or execution stored it. Only started runs count: the executor's floor moves
+// only when it starts a run. A request that is pending, rejected, expired, or
+// that never started on the host (its class is unknown, not executed, skipped
+// or not run) does not move the floor.
 func (s *Service) fimScanLastRuns(ctx context.Context, params []byte) (map[string]time.Time, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT h.host_id, max(e.created_at)
+	rows, err := s.db.QueryContext(ctx, `SELECT h.host_id, max(h.started_at)
 		FROM executions e JOIN execution_hosts h ON h.execution_id = e.id
-		WHERE e.action_id = ? AND e.params = ? GROUP BY h.host_id`, permit.FimScanActionID, string(params))
+		WHERE e.action_id = ? AND e.params = ? AND e.state IN ('running', 'finished')
+			AND h.started_at > 0 AND COALESCE(h.class, '') NOT IN ('unknown', 'not_executed', 'skipped', 'not_run')
+		GROUP BY h.host_id`, permit.FimScanActionID, string(params))
 	if err != nil {
 		return nil, fmt.Errorf("list fim.scan runs: %w", err)
 	}
