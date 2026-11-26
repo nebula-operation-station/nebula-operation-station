@@ -18,7 +18,6 @@ import (
 
 	"github.com/nebula-operation-station/nebula-operation-station/internal/canonical"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/executordb"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/hostrun"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/peercred"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/permit"
 	pb "github.com/nebula-operation-station/nebula-operation-station/internal/rpc/executorv1"
@@ -309,8 +308,12 @@ func validateRunReadGrant(req *pb.RunReadGrantRequest) error {
 	if _, err := parseEndpoints(req.GetEndpoints()); err != nil {
 		return status.Error(codes.InvalidArgument, "read grant: invalid endpoints")
 	}
-	if time.Duration(req.GetTimeoutSeconds())*time.Second > hostrun.MaxTimeout {
+	// fim.scan may ask for its own limit; it runs as a durable job.
+	if time.Duration(req.GetTimeoutSeconds())*time.Second > readTimeoutLimit(r.GetActionId()) {
 		return status.Error(codes.InvalidArgument, "read grant: invalid timeout")
+	}
+	if err := checkReadAction(r.GetActionId()); err != nil {
+		return err
 	}
 	return nil
 }
