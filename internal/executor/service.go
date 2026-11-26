@@ -101,6 +101,9 @@ type Service struct {
 	jobs hostrun.JobConfig
 	// reconcileMu serializes reconciliation passes.
 	reconcileMu sync.Mutex
+	// reconcileConns holds the reconciler's open host connections; Lock
+	// closes them (durable.go).
+	reconcileConns reconcileConns
 	// dispatching holds runs whose dispatch is in flight in this process;
 	// reconciliation leaves them alone (after a restart the set is empty).
 	dispatchMu  sync.Mutex
@@ -485,6 +488,9 @@ func (s *Service) Lock(ctx context.Context, _ *pb.LockRequest) (*pb.LockResponse
 		s.batchAuth.Lock()
 	}
 	s.keys.Lock()
+	// After the keyring: no reconciler connection stays open and none is
+	// admitted, so no host command of the reconciler starts after Lock.
+	s.closeReconcileConns()
 	s.vault.Lock()
 	s.reg.Reset("executor locked")
 	return &pb.LockResponse{}, nil

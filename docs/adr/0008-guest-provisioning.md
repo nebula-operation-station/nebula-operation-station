@@ -1,6 +1,6 @@
 # ADR 0008: Guest provisioning from deploy profiles
 
-Status: proposed (draft by Claude for maintainer review), 2026-11-01; open questions decided by the maintainer 2026-11-02; amendment 1 (preset guest host key) after the maintainer decision of 2026-11-03, written by Claude, status Proposed pending a lab check of PVE's cloud-init dump endpoint (previously: awaiting maintainer acceptance)
+Status: proposed (draft by Claude for maintainer review), 2026-11-01; open questions decided by the maintainer 2026-11-02; amendment 1 (preset guest host key) after the maintainer decision of 2026-11-03, written by Claude, status Proposed pending a lab check of PVE's cloud-init dump endpoint (previously: awaiting maintainer acceptance); amendment 2 (image preparation wiring) decided by the maintainer 2026-11-21, written by Claude 2026-11-24; D5 and the digest rule decided by the maintainer 2026-11-25, D5 lab check done by the maintainer 2026-11-25 (previously ended at "written by Claude 2026-11-24")
 
 ## Context
 
@@ -90,6 +90,36 @@ on a minimal phase-2 mutation foundation, not on the rest of phase 2.
 - The executor records the template's VMID, generation and source digest.
   Provisioning binds that record; a template changed outside NOS fails the
   binding.
+- **Wiring** (decided 2026-11-21 by the maintainer, see "Amendment 2
+  (2026-11-21): image preparation wiring" at the end; previously open, not
+  fixed by this section; questions from
+  [docs/implementation/pve-image-prepare-wiring.md](../implementation/pve-image-prepare-wiring.md)
+  section 2):
+  1. RPC form: Propose/Commit for `server` and `admin`; the server may
+     propose, never approve (D1; test ticket PV-03b).
+  2. Who loads the signed catalog, and when: the executor at start, from
+     the catalog directory installed next to the release bundle directory
+     (previously "from the release bundle directory"; corrected in the
+     amendment, D2), fail closed with local entries still usable (D2;
+     PV-03c). File layout: separate signed file (PV-03e).
+  3. Local entries: admin-only RPCs from the `nebula` CLI over the admin
+     socket; the executor validates and persists (D3; PV-03b, PV-03d).
+     Count limit and start-up behaviour on an unreadable local-entry file
+     are open for the owner (D3).
+  4. Operator visibility: read RPC `ListPVEImages` (`server`, `admin`, not
+     `pve-collector`), Images page and wizard drop-downs, generation from
+     the executor record (D4; PV-03b, PV-03h).
+  5. Re-preparation: the existing flow, fall-through narrowed to
+     `ErrPveTemplateNotPrepared`, `ErrPveTemplateChanged` and
+     `ErrPveRemoteChanged`; no record removal; "template gone" is a 404 or
+     a 500 whose trimmed message equals byte for byte
+     `Configuration file 'nodes/<node>/qemu-server/<vmid>.conf' does not exist`
+     for the node and VMID of this very read, built by NOS from the request
+     (decided 2026-11-25; exact binding to node and VMID: Claude, within the
+     decision; previously "a 500 with the fixed “does not exist” pattern");
+     the read-only lab check before PV-03a and PV-03b was done on
+     2026-11-25 and the gate is satisfied (previously "a read-only lab
+     check gates PV-03a and PV-03b") (D5; PV-03b).
 
 ### 3. Provision action
 
@@ -1266,7 +1296,11 @@ Without M2 the third group is a real and silent exposure.
 | PV-08 | Deploy wizard, run page, post-enrollment staged bootstrap/runbook plan with batch approval | PV-05, PV-06, PV-07 |
 | PK-00 … PK-10 | Amendment 1 (Proposed), preset guest host key; PK-10a and PK-10b gate acceptance (previously PK-10a only): see [docs/implementation/preset-host-key.md](../implementation/preset-host-key.md) | PV-05, PV-06 |
 
-## Amendment 2026-11-21: PV-03 wiring of `pve.image.prepare`
+## Amendment 2 (2026-11-21): image preparation wiring
+
+(Heading previously: "Amendment 2026-11-21: PV-03 wiring of
+`pve.image.prepare`", a short dated note; this section is the full record
+the note announced, ticket PV-03j.)
 
 The maintainer decided on 2026-11-21, 13:48 UTC+1 in chat (wording verbatim
 in [docs/implementation/pve-image-prepare-wiring.md](../implementation/pve-image-prepare-wiring.md),
@@ -1274,4 +1308,444 @@ in [docs/implementation/pve-image-prepare-wiring.md](../implementation/pve-image
 for PV-03: D1 (a) Propose/Commit RPCs as for guest power and provisioning;
 D2 (a) the signed catalog is loaded at executor start from the release
 bundle; D3 (a); D4 (a) an Images page under `/deploy` and (b) drop-downs in
-the wizard; D5 as recommended. The text above is unchanged.
+the wizard; D5 as recommended. The text above is unchanged, except the
+status line and the pointer in section 2 to this amendment.
+
+Status: decided by the maintainer 2026-11-21; D5 and the digest rule
+decided by the maintainer 2026-11-25 (wording verbatim in the Changelog);
+D5 lab check done by the maintainer 2026-11-25 (result in D5); this record written by
+Claude on 2026-11-24, pending maintainer review as for amendment 1. It is a
+decision record only and changes no code. The variants that were rejected
+and the full reasoning are in the paper, section 3. Citations are
+`path:line` against `main` at 67320b52; each was checked with grep. Test
+tickets are the paper's (section 4); none of them has landed, so no test
+below exists yet.
+
+**Context (as built on 2026-11-24).** `pve.image.prepare`
+(`internal/executor/pve_images.go:33-34`) has a verified middle and no way
+in: `LoadSigned` (`pve_images.go:124-153`), `AddLocal` (`:157-168`),
+`RemoveLocal` (`:171-177`), `ProposalRequest` (`:416-438`) and `Prepare`
+(`:442-486`) have no caller outside tests. The executor builds an empty
+catalog (`internal/executor/pve_rpc.go:346`); the executor RPC service has
+no image method (`proto/nebula/executor/v1/executor.proto:16`, only the
+template reference message `PVETemplateRef` at `:2759`). Provisioning
+therefore stops at `BindTemplate` (`pve_images.go:530`) with the refusal at
+`pve_rpc.go:1169-1170`. The release side (PV-03e) is in place: the catalog
+is a separate signed file pair, `image-catalog.json` and
+`image-catalog.json.sig`, next to `release-manifest.json` in the release
+staging directory and not listed in it (`internal/release/catalog.go:20-24`,
+`internal/release/catalog_stage.go:14-37`); `VerifyCatalog`
+(`catalog.go:100`) is the only admission check. This settles the file
+layout sub-question of D2; where the installed pair lives on the executor
+host is in D2.
+
+### D1. RPC form: Propose/Commit for `server` and `admin`
+
+- New executor RPCs `ProposePVEImagePrepare` and `CommitPVEImagePrepare`,
+  each allowed for `server` and `admin` and denied to every other role. The
+  pattern is guest power (`internal/executor/roles.go:206-207`, decision
+  WA-05 variant (a)) and guest provisioning (`roles.go:218-219`, section 3
+  "Roles of the provision RPCs").
+- Commit runs only with a permit approved for exactly this execution under
+  the normal approval semantics (`roles.go:198-205`). The action is at least
+  HIGH whoever builds it (`pve_images.go:194-196`, risk floor at
+  `pve_images.go:226-227`), so approval needs the user's user-verified
+  security-key assertion, or the CLI in hardened mode.
+- **New server path:** the server can now **propose** a HIGH action that it
+  could not propose before; it can **never approve** one. A compromised
+  server can only ask for images the executor's catalog lists:
+  `mutation` takes URL and SHA-256 from the catalog, not from the request
+  (`pve_images.go:373-385`), and refuses an unknown ID with
+  `ErrPveImageUnknown` (`pve_images.go:374-376`). The threat-model rows for
+  this path are PV-03k.
+- Contract: PV-03a (`proto/`). **Test ticket: PV-03b** (role table, propose,
+  approve, commit, then `BindTemplate` and `ProposePVEGuestProvision`
+  succeed; `server` cannot approve; added in round 2 by Claude: while an
+  integrity finding is open, `CommitPVEImagePrepare` is refused with
+  `ErrIntegrityLocked` and `ProposePVEImagePrepare` is not, see
+  Consequences). Server forwarding: PV-03f, PV-03g.
+
+### D2. Signed catalog: loaded at executor start from the release bundle, fail closed
+
+- At start the executor reads `image-catalog.json` and
+  `image-catalog.json.sig` from the catalog directory
+  `/usr/share/nebula/image-catalog`, a sibling of the built-in release
+  bundle directory (`cmd/nebula-executor/builtin_trust.go:19`,
+  `/usr/share/nebula/release`), installed by the same release package
+  (round 1 of PV-03j, 2026-11-24; previously "from the built-in release
+  bundle directory" itself), and calls `LoadSigned` (`pve_images.go:124`),
+  which verifies with the
+  active release roots (`pve_images.go:125`), enforces the rollback floor
+  across restarts (`pve_images.go:134-145`, `ErrPveCatalogRollback`) and
+  persists the new floor before the swap (`pve_images.go:146-151`; state
+  file `pve-catalog.json`, `pve_rpc.go:297`). A new catalog takes effect
+  with a release install and a restart. There is no RPC to load a catalog
+  and no network fetch.
+- **Why not the bundle directory itself (Claude, round 1).** The location
+  in the first version of this record could not work: `ReadBundleDir`
+  refuses any directory that does not hold exactly
+  `release-manifest.json`, its signature and `builtins.tar`
+  (`internal/release/bundle.go:134-135`), so the catalog pair in
+  `/usr/share/nebula/release` would break built-in trust review
+  (`internal/executor/roles_trust.go:342`); `catalog_stage.go:30-32` says
+  the same. The maintainer's choice D2 (a), "loaded at executor start from
+  the release", is kept; only the directory moves. The pattern is the root
+  rotation pair, which lives in the sibling `release-rotation` for the same
+  reason (`internal/executor/roles_rotation.go:27-33`, path derived at
+  `:50-52`). The catalog directory is derived the same way from the
+  configured bundle directory, never from a request. `ReadBundleDir` and
+  the release manifest stay unchanged.
+- **Bounded read before verification (Claude, round 1).** The start-up
+  loader opens the catalog directory with `os.OpenRoot` and reads each file
+  as a regular file without following symlinks, with `O_NOFOLLOW` and
+  `O_NONBLOCK`, a size check on the open file and a `LimitReader` of
+  max + 1, as `readRegular` does for the bundle
+  (`internal/release/bundle.go:162-181`) and `readRotationFile` for the
+  rotation pair (`roles_rotation.go:96-121`). The bounds are `MaxCatalog`
+  (256 KiB, `catalog.go:36`) for `image-catalog.json` and `MaxSignature`
+  (4096 bytes, `internal/release/release.go:43`) for the signature. The
+  length checks in `VerifyCatalog` (`catalog.go:101`) and `verifyDocument`
+  (`release.go:190`) run only after the bytes are in memory and stay as a
+  second check; they are not the bound.
+- **Fail closed:** a missing file, a file that is not a regular file (a
+  symlink, a FIFO, a directory), an oversize file (`catalog.go:36`, 256
+  KiB; signature 4096 bytes), a signature that does not verify, a rollback,
+  or a catalog state file that cannot be read or written
+  (`ErrPveCatalogState`, `pve_images.go:131-137` read, `:147-148` write;
+  added in round 1 by Claude) leaves the signed part empty. The executor
+  logs an audit event and **starts without a signed catalog**. In every case
+  but a failed write no catalog state is written, because the bounded read,
+  `VerifyCatalog`, the state read and the rollback check run before
+  `PutPveCatalogState` (`pve_images.go:125-147`); when the write itself
+  fails, `LoadSigned` returns before the swap (`pve_images.go:147-151`), so
+  the signed part stays nil and the next start tries again.
+  Every signed image is then refused with `ErrPveImageUnknown`, because
+  `Lookup` returns not-found while the signed part is nil
+  (`pve_images.go:187-188`). Unrelated executor actions keep working.
+- **Local entries stay usable** without a signed catalog: `Lookup` serves
+  `local-` IDs from the local map before it looks at the signed part
+  (`pve_images.go:183-185`). This is intended; a Local entry carries its own
+  HIGH approval (`ImagePrepareRisk`, `pve_images.go:202-208`), and a broken
+  release file must not take away an image the operator added on purpose.
+- **Test ticket: PV-03c** (start-up test with a temporary release
+  directory and its sibling catalog directory: signed catalog loads; lower
+  sequence refused after restart; missing file, bad signature and rollback
+  each start with no signed catalog, store no catalog state, and refuse
+  every signed image with `ErrPveImageUnknown`; a persisted local entry
+  stays preparable). Added in round 1 (Claude): the bundle directory with
+  the catalog directory next to it still passes `ReadBundleDir` and the
+  built-in trust review; an oversize `image-catalog.json` (MaxCatalog + 1)
+  and an oversize signature (MaxSignature + 1), a symlink and a FIFO in
+  place of either file each start with no signed catalog and never block
+  the start; a catalog state file that cannot be read, and a state store
+  whose write fails, each start with no signed catalog
+  (`ErrPveCatalogState` in the audit event) and keep local entries
+  preparable. Release-side round trip: PV-03e.
+
+### D3. Local entries: admin-only RPCs, the executor is the only writer
+
+- New executor RPCs `AddPVELocalImage` and `RemovePVELocalImage`, role
+  `admin` only, called by the `nebula` CLI over the admin socket on the
+  executor host, with the peer's UID from peer credentials as for the other
+  admin CLI commands (`cmd/nebula/batch.go:21`,
+  `cmd/nebula/artifact_unpin.go:36`). `server`, `pve-collector` and every
+  other role are denied. The server does not forward them (PV-03f, PV-03g).
+- The executor validates the entry (`release.ValidateImage(img, true)`,
+  `catalog.go:178`, called at `pve_images.go:158`; the `local-` prefix,
+  `catalog.go:31`), checks the role, audits, and **persists** it. Today
+  `AddLocal` only writes the in-memory map (`pve_images.go:163-166`), and
+  only the rollback floor is on disk (`pve_rpc.go:346`). The in-memory
+  catalog and the persisted file are updated by the same code path. No file
+  written by the CLI, no server-originated entry, no wizard form.
+- **Limits (Claude, round 2).** Decided by D3 (a) is only that the executor
+  validates with "size limits" (paper, D3 table, row (a)). One entry is
+  bounded today by the grammar in `ValidateImage`: ID at most 64 characters
+  (`catalog.go:46`), URL at most `MaxImageURL` (2048 bytes, `catalog.go:40`),
+  fixed-form OS, release, arch, SHA-256 and disk format (`checkImage`,
+  `catalog.go:187-205`).
+  **Open for the owner:** the number of local entries and the size of the
+  persisted file are not bounded anywhere: `AddLocal` adds to an unbounded
+  map (`pve_images.go:163-166`). Proposal (Claude, not decided): at most
+  `MaxCatalogImages` (256, `catalog.go:38`) local entries, `AddPVELocalImage`
+  refused above it, and the file read with the bounded regular-file read of
+  D2 with a named limit next to the loader.
+- **Unreadable local-entry file at start (Claude, round 2). Open for the
+  owner;** D3 (a) does not say what happens when the persisted local-entry
+  file (proposed name `pve-catalog-local.json` beside `pve-catalog.json`,
+  paper D3 table; `pve_rpc.go:297`) is missing, unreadable, oversize, not a
+  regular file or fails `ValidateImage`. Proposal (Claude, not decided):
+  missing file means no local entries; every other case starts the executor
+  with no local entries and an audit event, as D2 does for the signed part,
+  and `AddPVELocalImage` and `RemovePVELocalImage` are refused until the file
+  reads again, so that a write never replaces entries the executor could not
+  read. The tests are added to PV-03b and PV-03d once the owner decides.
+- **Test tickets: PV-03b** (executor: wrong role, e.g. `server` calling
+  `AddPVELocalImage`, refused; ID without the prefix refused; entry failing
+  `ValidateImage` refused) and **PV-03d** (CLI against the executor RPC on a
+  Unix socket in a temporary directory: add and remove; entry survives a
+  restart; non-admin peer refused).
+
+### D4. Operator visibility: `ListPVEImages`, Images page and wizard drop-downs
+
+- New read RPC `ListPVEImages` (catalog entries with trust, template records
+  with VMID, generation and source SHA-256), roles **`server` and `admin`**,
+  read-only, no approval. **`pve-collector` gets no access**: its rights stay
+  `ListReadGrants` (`roles.go:129`), `ListPVERemotes` (`roles.go:221`) and
+  `ReadPVE` (`roles.go:222`), as the comment at `roles.go:159-165` fixes.
+  Its per-method integrity entry has the same value as `ListReadGrants`
+  and `ListPVERemotes` (`internal/executor/integrity_lock.go:401`, `:428`).
+- **(a)** A read-only "Images" page under `/deploy`. Catalog URLs and
+  executor data are untrusted and rendered as text only, with `https` links
+  only.
+- **(b)** The wizard replaces its free-text OS image field
+  (`internal/web/ui/deploy.go:870-872`) and template SHA-256 field
+  (`deploy.go:879-881`) with drop-downs from `ListPVEImages`, and offers as
+  Template VMID only the record's VMID for the chosen key (today any stopped
+  QEMU guest, `deploy.go:700-702`).
+- **Generation from the executor record, required:** the wizard today sends
+  the server inventory's guest generation (`templateGeneration`,
+  `deploy.go:1379-1389`, used at `deploy.go:1154` and sent at
+  `deploy.go:1178-1179`). `BindTemplate` compares it with the executor's
+  preparation counter (`pve_images.go:541-542`; set at `:470-477`), an
+  unrelated value, so the wizard is refused with `ErrPveTemplateChanged`.
+  `PVETemplateRef.Generation` comes from the executor record in
+  `ListPVEImages`.
+- **Test tickets: PV-03b** (role table: `ListPVEImages` for `server` and
+  `admin`, refused for `pve-collector`) and **PV-03h** (UI: lists, drop-downs
+  accept only listed values, record VMID and generation sent, wizard
+  provisioning after a prepare succeeds, rendering check with `<script>` and
+  a `javascript:` URL).
+
+### D5. Re-preparation: the existing flow, narrowed
+
+- No operator record removal and **no new write path to
+  `pve-templates.json`** (`pve_rpc.go:295`). Re-preparation is a new
+  `pve.image.prepare` proposal with its own HIGH approval; `Prepare`
+  overwrites the key's record with generation + 1 (`pve_images.go:475-478`)
+  and the remote's current trust generation (`pve_images.go:472`).
+  `BindTemplate` stays the single check.
+- `ProposalRequest` refuses with `ErrPveImagePrepared` while the old record
+  still binds (`pve_images.go:428-431`). Today every `BindTemplate` error
+  other than the store errors (`pve_images.go:433-435`) falls through to a
+  new proposal. **Decided:** the fall-through is narrowed to exactly
+  `ErrPveTemplateNotPrepared` (`pve_images.go:538-539`),
+  `ErrPveTemplateChanged` (`pve_images.go:541-546`) and
+  `ErrPveRemoteChanged` (`pve_images.go:552-553`; a re-pin bumps the trust
+  generation, `internal/executordb/pve.go:486`, `:508`, through
+  `ProposePVERepin` / `CommitPVERepin`, admin only, `roles.go:172-173`).
+  Every other error refuses the proposal with no permit.
+- **An unreadable template is refused, not re-prepared.** Today
+  `liveTemplate` maps every `TargetState` error to `ErrPveTemplateChanged`
+  (`pve_images.go:504-506`), and the non-optional read returns
+  `errPveMutationRead` for any status other than 200, a 404 included
+  (`internal/executor/pve_mutation_client.go:572`). The template check gets
+  its own read on the optional-GET pattern (`pveGetOptionalData`,
+  `pve_mutation_client.go:539`, 404 handled at `:568`): "template gone" is
+  `ErrPveTemplateNotPrepared` (falls through); a different digest or node is
+  `ErrPveTemplateChanged` (falls through); a transport error, timeout, other
+  status, malformed or oversize body is a read error that refuses, with the
+  record and generation unchanged. `TargetState` stays as it is for power,
+  snapshot and migrate.
+- **"Template gone": 404, or 500 with the "does not exist" message
+  (decided by the maintainer 2026-11-25, answer „1 streichen, 2 a+b“,
+  wording verbatim in the Changelog; previously "404 only; whether PVE
+  answers 404 for a missing guest config is unverified, reopened before
+  PV-03b is merged").** Today `pveGet` returns `errPveMutationRead` for any
+  non-200 status other than an optional 404 and does not look at the
+  message (`pve_mutation_client.go:568-572`).
+  - **(a) Lab check before PV-03a and PV-03b: satisfied on 2026-11-25 by
+    the measured message text** (previously "Lab check gates PV-03a and
+    PV-03b ... Until that result is recorded here, PV-03a and PV-03b do not
+    start"). One read-only request for the config of an unused VMID on a lab
+    node; the result is recorded below under "Lab check result". Redaction
+    rule for this record: no IPs, host names, node names or versions; the
+    node and the VMID in a PVE message are written as `<node>` and `<id>`.
+  - **PV-03a and PV-03b do not depend on the exact HTTP status (Claude,
+    round 5, 2026-11-25).** The lab check measured the message, not the
+    status (see "Lab check result"). D5 treats a 404 and a 500 with the
+    exact message below alike, as "template gone", so the gate needs only
+    the message text, and that was measured. Should PVE send this message
+    with any status other than 404 or 500, the read refuses with no permit
+    and the record unchanged (fail closed); it never re-prepares.
+  - **(b) Independent of the lab result,** the template read treats as
+    "template gone" (`ErrPveTemplateNotPrepared`, falls through to a new
+    proposal) both a 404 and a 500 whose PVE error message matches the
+    exact form below. (Previously this bullet ended "The lab result
+    confirms that PVE reports a missing guest config as a 500 with this
+    message, so (b) stays as decided"; removed in round 5 by Claude,
+    because the lab check did not measure the status. (b) stays as decided
+    by the maintainer.)
+  - **Exact form, bound to the request (Claude, round 5, 2026-11-25; a
+    narrowing inside the maintainer's decision "b", not a maintainer
+    decision; previously "Fixed pattern (2026-11-25, after the lab check)":
+    the message contains each of the three substrings `does not exist`,
+    `qemu-server/` and `.conf`, which matched a message naming any node or
+    VMID; before that, Claude before the lab check: the whole message with
+    the requested node and VMID, compared literally).** Who decided what:
+    the maintainer decided that a 404 and a 500 with "does not exist" count
+    as "template gone" (answer „1 streichen, 2 a+b“, verbatim in the
+    Changelog); the exact form below is Claude's proposal to close the
+    review finding that the substring rule accepts a message about another
+    guest, and stays inside that decision because it only accepts fewer
+    500 replies. The PVE error message, read with a named size limit and
+    checked as UTF-8, with leading and trailing whitespace trimmed (such as
+    the newline PVE may append), counts as "template gone" only when it
+    equals
+    `Configuration file 'nodes/<node>/qemu-server/<vmid>.conf' does not exist`
+    byte for byte, where `<node>` is the node and `<vmid>` the VMID (in
+    decimal) of this very template read, built by NOS from the request and
+    never taken from the reply. No other text before, inside or after it;
+    no regular expression. A 500 whose message names another node or
+    another VMID, any other 500, and any other non-200 status but 404, stays
+    a read error that refuses with no permit and the record unchanged.
+  - **Open for PV-03a (Claude):** the lab check was made with `pvesh`, which
+    prints the message but neither the HTTP status nor where in the HTTP
+    reply the message sits (status line reason phrase or a field of the JSON
+    body). PV-03a names the source and its size limit next to the code;
+    the exact form above does not change with it.
+  - The behaviour for "gone" is the one this section already describes: no
+    operator record removal; the proposal falls through, and `Prepare`
+    overwrites the key's record with generation + 1
+    (`pve_images.go:475-478`), so the key can be prepared again.
+  - **Lab check result (maintainer, 2026-11-25 09:57; previously "not yet
+    recorded (status code: open; message: open)").** A read-only
+    `pvesh get /nodes/<node>/qemu/<unused id>/config` on a lab node answered
+    `Configuration file 'nodes/<node>/qemu-server/<id>.conf' does not exist`
+    with `pvesh` exit status 2. Measured: the message text and the exit
+    status. Not measured: the HTTP status, because `pvesh` does not print
+    it. "500" is the documented PVE API behaviour for a missing guest
+    config, recorded here as such and not as a measurement. Status code:
+    not measured (documented: 500); message: as above, measured.
+    (Previously, round 4: "this message is what the PVE API returns as
+    error 500 for a missing guest config. Status code: 500 (from the API
+    behaviour for this message, not printed by `pvesh`); message: as
+    above"; reworded in round 5 by Claude so that only what was measured
+    reads as measured.)
+- **No digest check is added (decided by the maintainer 2026-11-25;
+  previously Claude, round 2: "a digest that is missing or not 64 lowercase
+  hex digits counts as a malformed body; changes the mapping at
+  `pve_images.go:505` for the template read only", now removed).**
+  `ConfigDigest` is the NOS-computed SHA-256 of the canonical config
+  (`pve_mutation_client.go:469-487`), so `validHexDigest` at
+  `pve_images.go:505` cannot fail on a successful read; PVE's own 40-hex
+  `digest` is already checked inside `TargetState`
+  (`pve_mutation_client.go:466-467`). No new check is introduced and
+  `pve_images.go:505` is not changed for this reason.
+- **The check after `Run` (Claude, round 2).** `Prepare` reads the new
+  template after `Run` (`pve_images.go:465`) and today audits every error
+  as `template_unreadable` and records nothing (`pve_images.go:466-468`).
+  It uses the same new template read; any result other than found on the
+  node, "template gone" included, keeps that behaviour (audit, no record,
+  no generation bump). There "gone" means a template built but not
+  readable, never "not prepared".
+- A blocked or removed remote is refused by the mutation's remote check
+  `activeRemote` (`internal/executor/pve_mutation.go:420-421` removed or
+  unknown, `ErrRemoteNotFound`; `:422-423` any other non-active state,
+  blocked included, `ErrPveRemoteChanged`; round 1, previously cited as
+  `:423-429`). **Settled from the code (Claude, round 2; previously "Open
+  for PV-03b: `Prepare` calls `Run` before `activeRemote`"):** `Prepare`
+  calls `Run` (`pve_images.go:454`), and `Run` calls `activeRemote` first
+  (`pve_mutation.go:724`), before the live read `targetLive` (`:728`) and
+  before any PVE change; `ProposalRequest` does the same (`:520`, before
+  `targetLive` at `:533`). The later `activeRemote` in `Prepare`
+  (`pve_images.go:460`) is a second check after `Run`. No code moves;
+  PV-03b keeps the test that a blocked or removed remote refuses with no
+  PVE change.
+- **Test ticket: PV-03b** (may start: the lab check result is recorded
+  above, 2026-11-25; previously "starts only after the lab check result is
+  recorded"; gone template, 404, falls through, generation 2;
+  gone template, 500 with the exact message for the requested node and
+  VMID, falls through, generation 2; refusing with no permit and an
+  unchanged record: a 500 with the same message but another VMID, a 500
+  with the same message but another node, a 500 with extra text before or
+  after the message (leading or trailing whitespace alone still matches),
+  and any other 500 (404 and 500 behaviour decided by the maintainer
+  2026-11-25; the exact-form cases added in round 5 by Claude, see D5
+  "Exact form"; previously "500 with the fixed pattern (all three
+  substrings), falls through, generation 2; 500 that lacks any one of the
+  three substrings refuses with no permit and an unchanged record
+  (2026-11-25, maintainer)", and before that "gone template, 404,
+  generation 2" only); changed template; re-pinned remote with
+  `ErrPveRemoteChanged` on the old record, new proposal with its own
+  approval, generation 2 with the new trust generation; refusal cases:
+  transport error, timeout, malformed body refuse with no permit and an
+  unchanged record; blocked or removed remote refuses with no PVE change;
+  reuse of the gone template's VMID). Added in round 2 (Claude): after
+  `Run`, a 404 or a 500 with the exact message (round 5; previously "the
+  pattern") on the new template writes the
+  `template_unreadable` audit event and no record. (Removed 2026-11-25 by
+  the maintainer: "a 200 reply with a digest that is not 64 lowercase hex
+  digits refuses"; see "No digest check is added".)
+
+### Consequences
+
+- New executor RPC surface: two Propose/Commit methods (`server`, `admin`),
+  one read method (`server`, `admin`), two admin-only local-entry methods.
+  All are in protected paths (`proto/`, `internal/executor/`,
+  `cmd/nebula-executor/`, `cmd/nebula/`) and need maintainer review.
+- **I1 integrity-lock entries (Claude, round 2).** D1-D5 fix only the
+  `ListPVEImages` entry (D4). Every new method needs an entry in
+  `integrityLockedMethods` (`internal/executor/integrity_lock.go:303`); a
+  method missing there is refused while locked and
+  `TestIntegrityLockClassifiesEveryMethod`
+  (`internal/executor/integrity_lock_test.go:93`) fails the build, so a
+  forgotten entry fails safe.
+  - `CommitPVEImagePrepare`: **`true`** (locked). Not a new decision: ADR
+    0015 D4 (`docs/adr/0015-integrity-monitoring.md:462`) refuses all
+    mutation dispatch while a finding is open, and the table puts the
+    other HIGH PVE commits there (`CommitPVEGuestPower`,
+    `CommitPVEGuestSnapshot`, `CommitPVEGuestProvision`,
+    `integrity_lock.go:318-320`).
+  - `ProposePVEImagePrepare`: **`false`**, as the other PVE proposals
+    (`ProposePVEGuestPower` to `ProposePVEGuestProvision`,
+    `integrity_lock.go:425-427`); the table comment keeps proposals
+    available (`integrity_lock.go:295-300`). Follows from the same rule.
+  - `AddPVELocalImage`, `RemovePVELocalImage`: **open for the owner.** They
+    dispatch nothing and use no NOS credential, so the table rule gives
+    `false`, as for admin bookkeeping such as `AddPrivateRegistry`
+    (`integrity_lock.go:429`) and `AddSigner` (`:387`). Against that, a
+    local entry widens what a later commit may download while the lab is
+    locked for a possibly changed binary. Proposal (Claude, not decided):
+    `false`, because the download itself runs only through the locked
+    `CommitPVEImagePrepare`. PV-03b writes the entries and the test once
+    the owner decides; until then the missing entry refuses while locked.
+- Threat model (PV-03k): the server's new HIGH proposal path, the
+  admin-only local entries and the catalog trust chain.
+- (Claude, round 1) The release package installs the staged catalog pair
+  into `/usr/share/nebula/image-catalog`, not into
+  `/usr/share/nebula/release`; that packaging step belongs to PV-03c and
+  is checked there by the test that the bundle directory still loads.
+- Order (paper section 4): PV-03j (this record) and PV-03k first, then
+  the D5 lab check (done and recorded in D5 on 2026-11-25, maintainer), then
+  PV-03a, PV-03b, then PV-03c, PV-03d, PV-03f, PV-03g, PV-03h; PV-03i
+  (operator documentation) last.
+
+### Changelog
+
+- 2026-11-25, 09:52: D5 and the digest rule decided by the maintainer
+  (Axel, Claude chat). Question, verbatim: "1 Digest-Regel streichen? 2 a)
+  erst im Lab messen, b) 404 und 500 mit 'does not exist' als 'Vorlage
+  weg', c) nur 404". Answer, verbatim: „1 streichen, 2 a+b“. Meaning
+  (Claude): "1 streichen" removes the digest rule for `pve_images.go:505`
+  and its PV-03b test case (D5, "No digest check is added"); "a" is a
+  read-only lab check of PVE's answer for a missing guest config before
+  PV-03a and PV-03b; "b" treats a 404 and a 500 with the "does not exist"
+  message as "template gone"; "c" (404 only) was not chosen. (Previously
+  this entry was a paraphrase without the wording.)
+- 2026-11-25, 09:57: D5 lab check done by the maintainer; result in D5,
+  "Lab check result" (message measured, HTTP status not measured). The
+  gate before PV-03a and PV-03b is satisfied by the measured message text.
+  (Previously this entry also said "the fixed pattern is the three
+  substrings `does not exist`, `qemu-server/` and `.conf`; any other 500
+  stays a refusal", without a verbatim maintainer wording; that pattern
+  was Claude's wording, replaced on 2026-11-25 in round 5, see the next
+  entry.)
+- 2026-11-25, round 5 (Claude, pending maintainer review): D5 "template
+  gone" narrowed inside the maintainer's decision "b" to the exact message
+  `Configuration file 'nodes/<node>/qemu-server/<vmid>.conf' does not exist`
+  with the node and VMID of the request, whitespace trimmed; a message
+  naming another node or VMID refuses. Lab result reworded: message
+  measured, 500 recorded as documented PVE API behaviour, not measured; the
+  sentence that the lab result "confirms" the 500 removed. PV-03a and
+  PV-03b stated as independent of the exact status. PV-03b gains the
+  cases 500 with another VMID, another node or extra text, each refused.

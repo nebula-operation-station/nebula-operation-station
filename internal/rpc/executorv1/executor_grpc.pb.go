@@ -136,6 +136,11 @@ const (
 	ExecutorService_CommitPVEGuestSnapshot_FullMethodName          = "/nebula.executor.v1.ExecutorService/CommitPVEGuestSnapshot"
 	ExecutorService_ProposePVEGuestProvision_FullMethodName        = "/nebula.executor.v1.ExecutorService/ProposePVEGuestProvision"
 	ExecutorService_CommitPVEGuestProvision_FullMethodName         = "/nebula.executor.v1.ExecutorService/CommitPVEGuestProvision"
+	ExecutorService_ProposePVEImagePrepare_FullMethodName          = "/nebula.executor.v1.ExecutorService/ProposePVEImagePrepare"
+	ExecutorService_CommitPVEImagePrepare_FullMethodName           = "/nebula.executor.v1.ExecutorService/CommitPVEImagePrepare"
+	ExecutorService_ListPVEImages_FullMethodName                   = "/nebula.executor.v1.ExecutorService/ListPVEImages"
+	ExecutorService_AddPVELocalImage_FullMethodName                = "/nebula.executor.v1.ExecutorService/AddPVELocalImage"
+	ExecutorService_RemovePVELocalImage_FullMethodName             = "/nebula.executor.v1.ExecutorService/RemovePVELocalImage"
 	ExecutorService_ListPVERemotes_FullMethodName                  = "/nebula.executor.v1.ExecutorService/ListPVERemotes"
 	ExecutorService_ReadPVE_FullMethodName                         = "/nebula.executor.v1.ExecutorService/ReadPVE"
 	ExecutorService_AddPrivateRegistry_FullMethodName              = "/nebula.executor.v1.ExecutorService/AddPrivateRegistry"
@@ -606,6 +611,23 @@ type ExecutorServiceClient interface {
 	// admin (ADR 0008 section 3 amendment of 2026-11-03, variant B).
 	ProposePVEGuestProvision(ctx context.Context, in *ProposePVEGuestProvisionRequest, opts ...grpc.CallOption) (*ProposePVEGuestProvisionResponse, error)
 	CommitPVEGuestProvision(ctx context.Context, in *CommitPVEGuestProvisionRequest, opts ...grpc.CallOption) (*CommitPVEGuestProvisionResponse, error)
+	// Image preparation, pve.image.prepare (ADR 0008 amendment 2, D1 (a),
+	// PV-03a). The executor resolves the image in its catalog (signed or
+	// local; the catalog SHA-256 pins it), binds the remote, node, storages
+	// and VMID and sets the risk to its own floor (HIGH). Propose: role
+	// server or admin. Commit runs an approved preparation only with a
+	// permit approved under the normal approval semantics: role server or
+	// admin. The server can never approve.
+	ProposePVEImagePrepare(ctx context.Context, in *ProposePVEImagePrepareRequest, opts ...grpc.CallOption) (*ProposePVEImagePrepareResponse, error)
+	CommitPVEImagePrepare(ctx context.Context, in *CommitPVEImagePrepareRequest, opts ...grpc.CallOption) (*CommitPVEImagePrepareResponse, error)
+	// Read-only list of the image catalog (signed and local entries) and the
+	// executor's prepared template records (D4 (a)). Role: server or admin;
+	// the pve-collector has no access. No credentials and no PVE output.
+	ListPVEImages(ctx context.Context, in *ListPVEImagesRequest, opts ...grpc.CallOption) (*ListPVEImagesResponse, error)
+	// Local image entries (trust "Local", D3 (a)): role admin only, over the
+	// admin socket. The server can never add or remove an entry.
+	AddPVELocalImage(ctx context.Context, in *AddPVELocalImageRequest, opts ...grpc.CallOption) (*AddPVELocalImageResponse, error)
+	RemovePVELocalImage(ctx context.Context, in *RemovePVELocalImageRequest, opts ...grpc.CallOption) (*RemovePVELocalImageResponse, error)
 	// PVE provider reads (ADR 0006, P1-05). Role: server, admin,
 	// pve-collector. Metadata only: which remotes exist, their kind, ordered
 	// endpoints, trust generation and state. The trust pin is a SHA-256
@@ -1907,6 +1929,56 @@ func (c *executorServiceClient) CommitPVEGuestProvision(ctx context.Context, in 
 	return out, nil
 }
 
+func (c *executorServiceClient) ProposePVEImagePrepare(ctx context.Context, in *ProposePVEImagePrepareRequest, opts ...grpc.CallOption) (*ProposePVEImagePrepareResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ProposePVEImagePrepareResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ProposePVEImagePrepare_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) CommitPVEImagePrepare(ctx context.Context, in *CommitPVEImagePrepareRequest, opts ...grpc.CallOption) (*CommitPVEImagePrepareResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommitPVEImagePrepareResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_CommitPVEImagePrepare_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) ListPVEImages(ctx context.Context, in *ListPVEImagesRequest, opts ...grpc.CallOption) (*ListPVEImagesResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ListPVEImagesResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_ListPVEImages_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) AddPVELocalImage(ctx context.Context, in *AddPVELocalImageRequest, opts ...grpc.CallOption) (*AddPVELocalImageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(AddPVELocalImageResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_AddPVELocalImage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *executorServiceClient) RemovePVELocalImage(ctx context.Context, in *RemovePVELocalImageRequest, opts ...grpc.CallOption) (*RemovePVELocalImageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RemovePVELocalImageResponse)
+	err := c.cc.Invoke(ctx, ExecutorService_RemovePVELocalImage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *executorServiceClient) ListPVERemotes(ctx context.Context, in *ListPVERemotesRequest, opts ...grpc.CallOption) (*ListPVERemotesResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(ListPVERemotesResponse)
@@ -2630,6 +2702,23 @@ type ExecutorServiceServer interface {
 	// admin (ADR 0008 section 3 amendment of 2026-11-03, variant B).
 	ProposePVEGuestProvision(context.Context, *ProposePVEGuestProvisionRequest) (*ProposePVEGuestProvisionResponse, error)
 	CommitPVEGuestProvision(context.Context, *CommitPVEGuestProvisionRequest) (*CommitPVEGuestProvisionResponse, error)
+	// Image preparation, pve.image.prepare (ADR 0008 amendment 2, D1 (a),
+	// PV-03a). The executor resolves the image in its catalog (signed or
+	// local; the catalog SHA-256 pins it), binds the remote, node, storages
+	// and VMID and sets the risk to its own floor (HIGH). Propose: role
+	// server or admin. Commit runs an approved preparation only with a
+	// permit approved under the normal approval semantics: role server or
+	// admin. The server can never approve.
+	ProposePVEImagePrepare(context.Context, *ProposePVEImagePrepareRequest) (*ProposePVEImagePrepareResponse, error)
+	CommitPVEImagePrepare(context.Context, *CommitPVEImagePrepareRequest) (*CommitPVEImagePrepareResponse, error)
+	// Read-only list of the image catalog (signed and local entries) and the
+	// executor's prepared template records (D4 (a)). Role: server or admin;
+	// the pve-collector has no access. No credentials and no PVE output.
+	ListPVEImages(context.Context, *ListPVEImagesRequest) (*ListPVEImagesResponse, error)
+	// Local image entries (trust "Local", D3 (a)): role admin only, over the
+	// admin socket. The server can never add or remove an entry.
+	AddPVELocalImage(context.Context, *AddPVELocalImageRequest) (*AddPVELocalImageResponse, error)
+	RemovePVELocalImage(context.Context, *RemovePVELocalImageRequest) (*RemovePVELocalImageResponse, error)
 	// PVE provider reads (ADR 0006, P1-05). Role: server, admin,
 	// pve-collector. Metadata only: which remotes exist, their kind, ordered
 	// endpoints, trust generation and state. The trust pin is a SHA-256
@@ -3125,6 +3214,21 @@ func (UnimplementedExecutorServiceServer) ProposePVEGuestProvision(context.Conte
 }
 func (UnimplementedExecutorServiceServer) CommitPVEGuestProvision(context.Context, *CommitPVEGuestProvisionRequest) (*CommitPVEGuestProvisionResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CommitPVEGuestProvision not implemented")
+}
+func (UnimplementedExecutorServiceServer) ProposePVEImagePrepare(context.Context, *ProposePVEImagePrepareRequest) (*ProposePVEImagePrepareResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ProposePVEImagePrepare not implemented")
+}
+func (UnimplementedExecutorServiceServer) CommitPVEImagePrepare(context.Context, *CommitPVEImagePrepareRequest) (*CommitPVEImagePrepareResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CommitPVEImagePrepare not implemented")
+}
+func (UnimplementedExecutorServiceServer) ListPVEImages(context.Context, *ListPVEImagesRequest) (*ListPVEImagesResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ListPVEImages not implemented")
+}
+func (UnimplementedExecutorServiceServer) AddPVELocalImage(context.Context, *AddPVELocalImageRequest) (*AddPVELocalImageResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method AddPVELocalImage not implemented")
+}
+func (UnimplementedExecutorServiceServer) RemovePVELocalImage(context.Context, *RemovePVELocalImageRequest) (*RemovePVELocalImageResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RemovePVELocalImage not implemented")
 }
 func (UnimplementedExecutorServiceServer) ListPVERemotes(context.Context, *ListPVERemotesRequest) (*ListPVERemotesResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListPVERemotes not implemented")
@@ -5301,6 +5405,96 @@ func _ExecutorService_CommitPVEGuestProvision_Handler(srv interface{}, ctx conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ExecutorService_ProposePVEImagePrepare_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ProposePVEImagePrepareRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ProposePVEImagePrepare(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ProposePVEImagePrepare_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ProposePVEImagePrepare(ctx, req.(*ProposePVEImagePrepareRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_CommitPVEImagePrepare_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CommitPVEImagePrepareRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).CommitPVEImagePrepare(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_CommitPVEImagePrepare_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).CommitPVEImagePrepare(ctx, req.(*CommitPVEImagePrepareRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_ListPVEImages_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ListPVEImagesRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).ListPVEImages(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_ListPVEImages_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).ListPVEImages(ctx, req.(*ListPVEImagesRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_AddPVELocalImage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(AddPVELocalImageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).AddPVELocalImage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_AddPVELocalImage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).AddPVELocalImage(ctx, req.(*AddPVELocalImageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _ExecutorService_RemovePVELocalImage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RemovePVELocalImageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExecutorServiceServer).RemovePVELocalImage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ExecutorService_RemovePVELocalImage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExecutorServiceServer).RemovePVELocalImage(ctx, req.(*RemovePVELocalImageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _ExecutorService_ListPVERemotes_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(ListPVERemotesRequest)
 	if err := dec(in); err != nil {
@@ -6260,6 +6454,26 @@ var ExecutorService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CommitPVEGuestProvision",
 			Handler:    _ExecutorService_CommitPVEGuestProvision_Handler,
+		},
+		{
+			MethodName: "ProposePVEImagePrepare",
+			Handler:    _ExecutorService_ProposePVEImagePrepare_Handler,
+		},
+		{
+			MethodName: "CommitPVEImagePrepare",
+			Handler:    _ExecutorService_CommitPVEImagePrepare_Handler,
+		},
+		{
+			MethodName: "ListPVEImages",
+			Handler:    _ExecutorService_ListPVEImages_Handler,
+		},
+		{
+			MethodName: "AddPVELocalImage",
+			Handler:    _ExecutorService_AddPVELocalImage_Handler,
+		},
+		{
+			MethodName: "RemovePVELocalImage",
+			Handler:    _ExecutorService_RemovePVELocalImage_Handler,
 		},
 		{
 			MethodName: "ListPVERemotes",
