@@ -2730,37 +2730,54 @@ security key (see "Security key for suggested executions" below).
 Parts of ADR 0016 are built and parts are not. Check this before you
 plan a rollout. The list describes this release as it is on `main`.
 
-- **Not in this build, so the agent stays off:** an admin form and an
-  API for the LLM settings (section "Settings and data class"). The
-  settings store has no writer in this build, so the settings stay at
-  their default (disabled). The agent then makes no LLM call and writes
-  no note, and the Ops tab shows "No suggestion yet.".
-- **Wired, but empty:** the server connects the projection to empty
-  finding and listener sources (`cmd/nebula-server/ops.go`, "Source
-  gap"). Besides the open admin questions, the only item the work list
-  can carry is the fleet summary with zero counts. No group of lab
-  findings is ever produced, so **no fix item is ever due, even with the settings
-  enabled.** Consequently no fix note is written and no fix card can
-  appear, whatever the settings say.
-- **Built, but off with the settings:** answers to admin questions. The
-  question form in the Ops tab stores the question (see "Questions" under
-  "Notes, retention and backup"). With the settings enabled, the work list
-  carries each open question and the agent answers it (see "Admin
-  questions" below). The settings stay disabled in this build, so in a
-  default install no question is answered: it stays open and expires
-  after 7 days.
-- **Not built:** the card button for a container update step. It opens
-  a page that answers `404`. The other step buttons open the form.
-- **Built:** the notes store with its limits, the admin question form
-  and its answers, the fix cards in the Ops tab, the suggestion form
-  (prefilled from a card, with its banner), the suggestion marking of executions (section
-  "Security key for suggested executions"), the agent binary and the
-  systemd units.
+- **Only with the ops token:** the ops API under `/api/v1/ops/`, the
+  Ops tab of the Assistant panel and the trigger file. Without a token
+  that holds the ops scopes (see "The token `ops-agent`"), none of them
+  is wired: the API path does not exist and the Ops tab answers `404`.
+- **Built, off by default:** the settings form. The settings page has
+  the section "Ops-Agent" (see "Settings and data class"). Only the
+  maintainer can change it, and each change needs a fresh security-key
+  assertion. The server stores the change together with its audit entry
+  and then sends the notification `opsagent.settings_changed`. Until you
+  enable the agent there, its work list is empty: the agent makes no LLM
+  call and writes no note.
+- **Built: the work list from the stored data.** With the agent enabled,
+  NOS builds the work list from the open findings in the findings store
+  (section 10.4), with the same "fix with" decision as the finding pages.
+  It takes the listening ports from each host's newest stored `net.facts`
+  result (section 9.9). The work list carries, in this order: the open admin
+  questions, once per UTC day the fleet summary, and in class `lab` one
+  fix item for each host or image group that has at least one open
+  critical or high finding and has no note for its current state yet.
+- **A host without known ports gets no fix item.** If a host has no
+  `net.facts` result, or its newest result is older than 15 minutes
+  (three missed 5-minute reads), NOS treats its listening ports as
+  unknown. It leaves that host out of the work list and logs an `audit` line
+  with kind `ops_projection_skip`. The `net.facts` reads come from a
+  read lease (section 9.9), and a read lease runs an action at most every
+  15 minutes. So give the lease the shortest interval, 15 minutes, for
+  the hosts you want fix notes for. Even then, a host can be left out of a run that
+  starts just before its next read.
+- **A failed read fails the whole list.** If NOS cannot read the
+  findings completely, the work list answers `502` and the agent run
+  ends with an error in its journal. NOS cannot read them completely if
+  the store read fails, if more findings are stored than one read returns,
+  or if update lists or container previews cannot be read. NOS never
+  sends a partial list.
+- **Built:** answers to admin questions (see "Admin questions"), the fix
+  cards in the Ops tab, the notes store with its limits, the suggestion
+  form (prefilled from a card, with its banner), the suggestion marking
+  of executions (see "Security key for suggested executions"), the agent
+  binary and the systemd units.
+- **Not built:** the card button for a container update step. It links
+  to the container update page with a suggestion reference, and that
+  page refuses every suggestion reference with `404`, because container
+  batches do not carry the reference yet. Open the container update page
+  by hand instead (section 9.3). The other step buttons open the form.
 - **Built, separate from the agent:** the notifications `lease.expiring`
-  and `lease.run_failed` (section 10.1) and the optional daily digest.
-  They need no LLM. The server records each of them in its notification
-  log.
-- **Not built:** the notification list page in the web UI.
+  and `lease.run_failed` (section 10.1), the optional daily digest and
+  the notification list page (`/notifications`, admins only). They need
+  no LLM.
 
 #### The token `ops-agent`
 
