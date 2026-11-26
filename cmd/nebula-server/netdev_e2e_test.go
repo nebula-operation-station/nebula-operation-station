@@ -583,12 +583,10 @@ func TestNetDevLeaseRulesOnRealPath(t *testing.T) {
 // TestNetDevHandPlacedLowerTrustGenerationKeepsRow: a spool record with a
 // trust generation below the device's current one, placed by hand after the
 // collector's own record, does not change the imported row. The second import
-// evaluates the record (it is not skipped) and the store refuses it. The
-// record is then not kept or rejected: it stays in the spool with a
-// store_failed error, because internal/netdevcollect's storeRejection does not
-// map netdevinventory.ErrTrustGenerationRegressed. This test pins that outcome
-// and is the record of the gap; moving the record to kept/ is a change in
-// internal/netdevcollect, outside this branch.
+// evaluates the record (it is not skipped) and the store refuses it with
+// netdevinventory.ErrTrustGenerationRegressed, which storeRejection maps to
+// trust_generation_regressed: the record is kept at once (Kept == 1) and is not
+// retried on later passes.
 func TestNetDevHandPlacedLowerTrustGenerationKeepsRow(t *testing.T) {
 	r := newNetDevE2ERig(t)
 	r.addNetDevice(t, "sw1", "Core switch", "10.20.30.11", "a")
@@ -609,13 +607,13 @@ func TestNetDevHandPlacedLowerTrustGenerationKeepsRow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second import: %v", err)
 	}
-	// The record was evaluated (one file), wrote no row, and was neither kept
-	// nor rejected: it stays for a retry (see the comment above).
-	if rep.Files != 1 || rep.MetadataWritten != 0 || rep.Kept != 0 || rep.Retry != 1 {
-		t.Fatalf("second import report = %+v, want the hand-placed record evaluated, retried and no row written", rep)
+	// The record was evaluated (one file), wrote no row, and was kept with its
+	// reason (see the comment above).
+	if rep.Files != 1 || rep.MetadataWritten != 0 || rep.Kept != 1 || rep.Retry != 0 {
+		t.Fatalf("second import report = %+v, want the hand-placed record evaluated, kept and no row written", rep)
 	}
-	if len(rep.Errors) != 1 || !strings.HasSuffix(rep.Errors[0], ": store_failed") {
-		t.Fatalf("second import errors = %v, want one store_failed for the hand-placed record", rep.Errors)
+	if len(rep.Errors) != 1 || !strings.HasSuffix(rep.Errors[0], ": trust_generation_regressed") {
+		t.Fatalf("second import errors = %v, want one trust_generation_regressed for the hand-placed record", rep.Errors)
 	}
 	d, err := netdevinventory.NewWithNow(e.db, e.clock).GetDevice(t.Context(), "sw1")
 	if err != nil {
