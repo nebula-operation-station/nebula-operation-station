@@ -94,7 +94,11 @@ const (
 	ReasonUnknownDevice          = "unknown_device"
 	ReasonWrongFamily            = "wrong_family"
 	ReasonTrustGenerationChanged = "trust_generation_changed"
-	ReasonObservationTooOld      = "observation_too_old"
+	// ReasonTrustGenerationRegressed: the record carries a trust generation
+	// below the device's stored one, so the store refuses it. The record is
+	// kept at once; a lower generation never becomes valid by waiting.
+	ReasonTrustGenerationRegressed = "trust_generation_regressed"
+	ReasonObservationTooOld        = "observation_too_old"
 	ReasonFutureObservation      = "future_observation"
 	ReasonReplayed               = "replayed_record"
 	ReasonSuperseded             = "superseded_record"
@@ -840,6 +844,8 @@ func storeRejection(err error) (string, bool) {
 		return ReasonWrongFamily, true
 	case errors.Is(err, netdevinventory.ErrTrustGenerationChanged):
 		return ReasonTrustGenerationChanged, true
+	case errors.Is(err, netdevinventory.ErrTrustGenerationRegressed):
+		return ReasonTrustGenerationRegressed, true
 	case errors.Is(err, netdevinventory.ErrObservationTooOld):
 		return ReasonObservationTooOld, true
 	case errors.Is(err, netdevinventory.ErrFutureObservation):
