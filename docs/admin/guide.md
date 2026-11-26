@@ -2730,37 +2730,54 @@ security key (see "Security key for suggested executions" below).
 Parts of ADR 0016 are built and parts are not. Check this before you
 plan a rollout. The list describes this release as it is on `main`.
 
-- **Not in this build, so the agent stays off:** an admin form and an
-  API for the LLM settings (section "Settings and data class"). The
-  settings store has no writer in this build, so the settings stay at
-  their default (disabled). The agent then makes no LLM call and writes
-  no note, and the Ops tab shows "No suggestion yet.".
-- **Wired, but empty:** the server connects the projection to empty
-  finding and listener sources (`cmd/nebula-server/ops.go`, "Source
-  gap"). Besides the open admin questions, the only item the work list
-  can carry is the fleet summary with zero counts. No group of lab
-  findings is ever produced, so **no fix item is ever due, even with the settings
-  enabled.** Consequently no fix note is written and no fix card can
-  appear, whatever the settings say.
-- **Built, but off with the settings:** answers to admin questions. The
-  question form in the Ops tab stores the question (see "Questions" under
-  "Notes, retention and backup"). With the settings enabled, the work list
-  carries each open question and the agent answers it (see "Admin
-  questions" below). The settings stay disabled in this build, so in a
-  default install no question is answered: it stays open and expires
-  after 7 days.
-- **Not built:** the card button for a container update step. It opens
-  a page that answers `404`. The other step buttons open the form.
-- **Built:** the notes store with its limits, the admin question form
-  and its answers, the fix cards in the Ops tab, the suggestion form
-  (prefilled from a card, with its banner), the suggestion marking of executions (section
-  "Security key for suggested executions"), the agent binary and the
-  systemd units.
+- **Only with the ops token:** the ops API under `/api/v1/ops/`, the
+  Ops tab of the Assistant panel and the trigger file. Without a token
+  that holds the ops scopes (see "The token `ops-agent`"), none of them
+  is wired: the API path does not exist and the Ops tab answers `404`.
+- **Built, off by default:** the settings form. The settings page has
+  the section "Ops-Agent" (see "Settings and data class"). Only the
+  maintainer can change it, and each change needs a fresh security-key
+  assertion. The server stores the change together with its audit entry
+  and then sends the notification `opsagent.settings_changed`. Until you
+  enable the agent there, its work list is empty: the agent makes no LLM
+  call and writes no note.
+- **Built: the work list from the stored data.** With the agent enabled,
+  NOS builds the work list from the open findings in the findings store
+  (section 10.4), with the same "fix with" decision as the finding pages.
+  It takes the listening ports from each host's newest stored `net.facts`
+  result (section 9.9). The work list carries, in this order: the open admin
+  questions, once per UTC day the fleet summary, and in class `lab` one
+  fix item for each host or image group that has at least one open
+  critical or high finding and has no note for its current state yet.
+- **A host without known ports gets no fix item.** If a host has no
+  `net.facts` result, or its newest result is older than 15 minutes,
+  NOS treats its listening ports as
+  unknown. It leaves that host out of the work list and logs an `audit` line
+  with kind `ops_projection_skip`. The `net.facts` reads come from a
+  read lease (section 9.9), and a read lease runs an action at most every
+  15 minutes. So give the lease the shortest interval, 15 minutes, for
+  the hosts you want fix notes for. Even then, a host can be left out of a run that
+  starts just before its next read.
+- **A failed read fails the whole list.** If NOS cannot read the
+  findings completely, the work list answers `502` and the agent run
+  ends with an error in its journal. NOS cannot read them completely if
+  the store read fails, if more findings are stored than one read returns,
+  or if update lists or container previews cannot be read. NOS never
+  sends a partial list.
+- **Built:** answers to admin questions (see "Admin questions"), the fix
+  cards in the Ops tab, the notes store with its limits, the suggestion
+  form (prefilled from a card, with its banner), the suggestion marking
+  of executions (see "Security key for suggested executions"), the agent
+  binary and the systemd units.
+- **Not built:** the card button for a container update step. It links
+  to the container update page with a suggestion reference, and that
+  page refuses every suggestion reference with `404`, because container
+  batches do not carry the reference yet. Open the container update page
+  by hand instead (section 9.3). The other step buttons open the form.
 - **Built, separate from the agent:** the notifications `lease.expiring`
-  and `lease.run_failed` (section 10.1) and the optional daily digest.
-  They need no LLM. The server records each of them in its notification
-  log.
-- **Not built:** the notification list page in the web UI.
+  and `lease.run_failed` (section 10.1), the optional daily digest and
+  the notification list page (`/notifications`, admins only). They need
+  no LLM.
 
 #### The token `ops-agent`
 
@@ -2801,6 +2818,23 @@ no path), `nos_token_file`, `nos_ca_file` (optional, a pinned CA),
 (optional, the bearer token of the LLM endpoint, in its own file, mode
 0600 and owned by `nebula-ops-agent`). Unknown keys are an error. The
 configuration holds no secret itself.
+
+- **Token:** create it only with `nebula-server -api-token` (see "The
+  token `ops-agent`"). The command draws a random token, prints it once
+  and prints the `server.json` entry, which holds only its SHA-256. Do
+  not invent a token or reuse one from another client.
+- **`nos_base_url`:** the agent runs on the NOS host, so use plain `http`
+  to a loopback IP literal, for example `http://127.0.0.1:8080`. The
+  agent accepts `http` only when the host is a loopback IP. It refuses a
+  host name such as `localhost`, and any path other than `/`.
+- **LLM over plain `http`:** if the LLM base URL in the settings uses
+  `http` (with `allow_plain_http`), leave out `llm_credential_file`. The
+  agent refuses to send a credential over plain `http`: every run that
+  has work then ends with `llm_error` before its first LLM call.
+- **A run without findings still writes a note:** the fleet summary is
+  due once per UTC day, also with all counts at zero. So an enabled agent
+  calls the LLM and writes a summary note every day even when nothing is
+  open. A change of the counts during the day makes a new summary due.
 
 Three units ship. None is enabled by the package:
 
@@ -2910,46 +2944,36 @@ open question made the whole work list fail, and while it was open
 every run ended with `work_unavailable` and no note at all. In this
 build NOS and the agent use the same item shape.
 
-In this build no lab group is produced (see "Status in this build"), so
-a question in class `lab` names no host that NOS can find and carries no
-host facts. It still carries the question and the fleet counts.
+NOS finds a named host only among the hosts with at least one open
+critical or high finding and known listening ports (see "Status in this
+build"), whether or not a fix item for that host is due. A question that
+names any other host carries no facts for it, only the question and the
+fleet counts.
 
 #### What goes to the model
 
-This section has two parts. The first table is the **design** of ADR 0016:
-what the agent would send once its inputs are connected. The second table is
-what **is wired in this build**. Only the second one describes what reaches
-the model today.
-
-**Designed (ADR 0016). Not sent in this build, because no lab group is
-produced and the finding sources are not connected:**
+Nothing is sent while the agent is disabled in the settings, which is the
+default. With the agent enabled, this is what reaches the model in this
+build. Each work item is one prompt.
 
 | Data | `lab` | `external` |
 | --- | --- | --- |
-| Host label, environment, criticality (label at most 64 bytes) | Designed: yes | Designed: no |
-| Exposure level, listening ports (number and protocol, at most 32) | Designed: yes | Designed: no |
-| Per finding (at most 40 per group): vulnerability ID, source package, installed and fixed version, fix state, tier, score, KEV flag | Designed: yes | Designed: no |
-| Counts per tier and KEV, per group and for the fleet | Designed: yes | Designed: fleet counts only |
-| Step candidates as opaque keys (`c1`, `c2`, ...) with a short fixed label that NOS sets; the action ID and the host ID never enter the prompt | Designed: yes | Designed: no |
-| Documentation chunks from the handbook: up to 3 per fix item, found by the finding's package | Designed: yes | Designed: no, `external` items are fleet summaries and carry no chunks |
-
-**Wired in this build.** This is what can reach the model when the settings
-are enabled. The settings have no writer in this build, so in a default
-install nothing is sent at all.
-
-| Data | `lab` | `external` |
-| --- | --- | --- |
-| Fleet counts per tier and KEV (zero in this build), in the summary and in each question | Yes, as zero counts | Yes, as zero counts |
-| The operator instructions (at most 4 KiB) | Yes | Yes |
-| Host labels, ports, per-finding data, step candidates, documentation chunks | **No**: never produced in this build | No |
+| The operator instructions (at most 4 KiB), in every prompt | Yes | Yes |
+| Fleet counts per tier and KEV: the open findings of all inventory hosts, in the daily summary and in each question | Yes | Yes |
+| Fix item, host part: host label (at most 64 bytes), environment, criticality. The host ID is not sent | Yes | No |
+| Fix item, exposure level | Yes, but always `unknown`: no exposure source is wired in this build | No |
+| Fix item, listening ports (number and protocol, at most 32) from the host's newest `net.facts` result | Yes | No |
+| Fix item, per finding (at most 40 per group): vulnerability ID, source package, installed and fixed version, fix state, tier, score, KEV flag | Yes | No |
+| Fix item, counts per tier and KEV of the group | Yes | No |
+| Fix item, step candidates (at most 20): an opaque key (`c1`, `c2`, ...) and the fixed label that NOS sets for the action, such as "Install security updates" or "Reboot the host". The action ID and the host ID are not sent | Yes | No |
+| Fix item, documentation chunks: up to 3, found by the package of the group's first listed finding | Yes | No |
 | Your question in the Ops tab (at most 2 KiB) | Yes | Yes |
-| Facts of the hosts a question names (at most 5) | **No**: no lab group is produced, so no host is found | No |
+| Facts of the hosts a question names (at most 5): label, environment, criticality, exposure (`unknown`), listening ports, counts per tier and KEV | Yes, but only for hosts with an open critical or high finding and known listening ports, see "Admin questions" | No |
 | Documentation chunks for a question: up to 3, found by the question's words | Yes | Yes |
 
-So in this build the data that can reach the model is the operator
-instructions, the zero-count fleet summary, your questions and the
-handbook chunks found for them. Host-specific data stays in NOS in both
-classes, unless you type it into a question yourself.
+In class `external` the model therefore gets the operator instructions,
+the fleet counts, your questions and the handbook chunks found for them.
+Host-specific data stays in NOS, unless you type it into a question yourself.
 
 **Never sent, in either class:** IP addresses and endpoints, fingerprints,
 credentials or their file names, user names, execution output and logs,
@@ -2991,9 +3015,6 @@ Consequences you will notice:
 
 - A card that you **dismiss** still marks executions. Dismissing hides the
   card and changes nothing else.
-- In this build no fix note and no card can come about (see "Status in
-  this build"), so neither rule fires yet and no execution is marked. The
-  rules are kept here for the release that connects the finding sources.
 - While a fix note for a host is stored (at most 30 days, see below), an
   admin who starts the same kind of action on that host **by hand** also
   needs the key. Nothing on the page says why, in this build: the
