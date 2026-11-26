@@ -658,6 +658,22 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		RegistryReads: registryReads,
 		Log:           log,
 	}, batches), opsNotes, isAdmin)
+	// The Ops tab of the Assistant panel (ADR 0016 D11), with the ops token
+	// only. Its run reader is set once newOpsAPI has returned, below; the
+	// sources are the same ones the ops API projection reads.
+	opsSrcs := opsSources{
+		Findings:    vuln.store,
+		LastResults: ops.LastResults,
+		Preview:     batches.LatestContainerPreview,
+		Traffic:     trafficingest.ExecutionSource{DB: db},
+	}
+	opsRuns := &opsRunHolder{}
+	uiOpts, err = applyOpsAssistant(uiOpts, cfg.API, func() (opsAssistantWiring, error) {
+		return wireOpsAssistant(db, opsNotes, isAdmin, opsSrcs, store.List, opsRuns, opsTouch, log)
+	})
+	if err != nil {
+		return err
+	}
 	if err := applyServerFeatureOptions(deps, &uiOpts); err != nil {
 		return err
 	}
@@ -749,15 +765,11 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 		}
 		// The projection reads the stored findings, the fix decision of the
 		// vulnerability pages and the net.facts listeners (ADR 0016 D3, D4).
-		oh, err := newOpsAPI(cfg.API, db, opsNotes, store.List, log, opsSugg.acceptedHook(), opsSources{
-			Findings:    vuln.store,
-			LastResults: ops.LastResults,
-			Preview:     batches.LatestContainerPreview,
-			Traffic:     trafficingest.ExecutionSource{DB: db},
-		})
+		oh, err := newOpsAPI(cfg.API, db, opsNotes, store.List, log, opsSugg.acceptedHook(), opsSrcs)
 		if err != nil {
 			return err
 		}
+		opsRuns.set(oh)
 		apiHandler = api.MountOps(apiHandler, oh)
 		if oh != nil {
 			log.Info("ops agent API enabled")
