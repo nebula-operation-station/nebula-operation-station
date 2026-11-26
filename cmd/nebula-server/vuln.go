@@ -31,7 +31,6 @@ import (
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnfinding"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulninventory"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnnotify"
-	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnprio"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/vulnstore"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/api"
 	"github.com/nebula-operation-station/nebula-operation-station/internal/web/auth"
@@ -100,32 +99,22 @@ func vulnSourceIDs() []string {
 	return ids
 }
 
-// vulnTier computes the D7 tier (vu-prio-v1) from the finding's scores.
-// Exposure and host criticality are not wired yet, so the formula's
-// defaults apply: exposure unknown (0.7, never "internal") and
-// criticality unset (HIGH). Invalid scores give TierUnknown.
+// vulnTier is the D7 tier without host criticality: the unset criticality
+// (ADR 0011 D7 default, 0.85) and exposure unknown. The server's store and
+// pages use the vulnTierer of the service (vuln_tier.go), which reads the
+// criticality from the inventory; this stays for the tests that open a store
+// without an inventory.
 func vulnTier(_ vulnstore.Subject, r vulnfinding.Record) vulnstore.Tier {
-	res, err := vulnprio.Compute(vulnprio.Input{Scores: r.Scores})
-	if err != nil {
-		return vulnstore.TierUnknown
-	}
-	switch res.Tier {
-	case vulnprio.TierLow:
-		return vulnstore.TierLow
-	case vulnprio.TierMedium:
-		return vulnstore.TierMedium
-	case vulnprio.TierHigh:
-		return vulnstore.TierHigh
-	case vulnprio.TierCritical:
-		return vulnstore.TierCritical
-	}
-	return vulnstore.TierUnknown
+	return vulnTierWith(r, "")
 }
 
 // vulnService holds the findings store and the notifier and runs the
 // background work: run events, sweeps and notification ticks.
 type vulnService struct {
 	store *vulnstore.Store
+	// tier computes the D7 tier of the findings with the host criticality
+	// (vuln_tier.go); the store and the pages both use it.
+	tier *vulnTierer
 	// classifier judges run closures against the stored inventory (D5).
 	classifier vulnClassifier
 	// inventory holds the snapshots the export serves; its snapshots are
@@ -151,8 +140,16 @@ type vulnService struct {
 }
 
 // newVulnService opens the findings store on db (server.db) and the
-// notifier on sink (the internal/notify providers).
+// notifier on sink (the internal/notify providers), without an inventory:
+// every subject has the unset criticality. The server uses
+// newVulnServiceWithTier with the inventory.
 func newVulnService(db *sql.DB, sink vulnnotify.Sink, log *slog.Logger, now func() time.Time) (*vulnService, error) {
+	return newVulnServiceWithTier(db, sink, log, now, newVulnTierer(nil, now, log))
+}
+
+// newVulnServiceWithTier is newVulnService with the tierer that computes the
+// D7 tiers of the store and the pages (see newVulnTierer).
+func newVulnServiceWithTier(db *sql.DB, sink vulnnotify.Sink, log *slog.Logger, now func() time.Time, tier *vulnTierer) (*vulnService, error) {
 	if now == nil {
 		now = time.Now
 	}
@@ -163,7 +160,7 @@ func newVulnService(db *sql.DB, sink vulnnotify.Sink, log *slog.Logger, now func
 		return nil, fmt.Errorf("vulnerability inventory: %w", err)
 	}
 	cl := vulnClassifier{inv: inv}
-	st, err := vulnstore.New(db, vulnstore.Config{Sources: vulnSources, Tier: vulnTier, Classifier: cl, Now: now})
+	st, err := vulnstore.New(db, vulnstore.Config{Sources: vulnSources, Tier: tier.Tier, Classifier: cl, Now: now})
 	if err != nil {
 		return nil, fmt.Errorf("vulnerability store: %w", err)
 	}
@@ -171,7 +168,7 @@ func newVulnService(db *sql.DB, sink vulnnotify.Sink, log *slog.Logger, now func
 	if err != nil {
 		return nil, fmt.Errorf("vulnerability notifications: %w", err)
 	}
-	return &vulnService{store: st, classifier: cl, inventory: inv, notifier: n, log: log, events: make(chan func(context.Context), vulnEventQueue),
+	return &vulnService{store: st, tier: tier, classifier: cl, inventory: inv, notifier: n, log: log, events: make(chan func(context.Context), vulnEventQueue),
 		alertQueued: map[string]bool{}}, nil
 }
 
@@ -728,7 +725,7 @@ func (p vulnPages) VulnFindings(ctx context.Context, q ui.VulnQuery) (ui.VulnPag
 		seen[*q.Subject] = false
 	}
 	for i, f := range fs {
-		page.Rows[i] = ui.VulnRow{Finding: f, Tier: vulnTier(f.Subject, f.Record)}
+		page.Rows[i] = ui.VulnRow{Finding: f, Tier: p.v.tier.Tier(f.Subject, f.Record)}
 		if _, ok := seen[f.Subject]; !ok {
 			seen[f.Subject] = false
 		}
@@ -763,7 +760,7 @@ func (p vulnPages) VulnFinding(ctx context.Context, key vulnfinding.Key) (ui.Vul
 	if err != nil {
 		return ui.VulnFindingDetail{}, err
 	}
-	d := ui.VulnFindingDetail{Row: ui.VulnRow{Finding: f, Tier: vulnTier(f.Subject, f.Record)}}
+	d := ui.VulnFindingDetail{Row: ui.VulnRow{Finding: f, Tier: p.v.tier.Tier(f.Subject, f.Record)}}
 	holds, err := p.v.store.Holds(ctx, key)
 	if err != nil {
 		return ui.VulnFindingDetail{}, err

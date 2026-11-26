@@ -508,7 +508,7 @@ func runServer(ctx context.Context, args []string, stderr io.Writer, vh vulnHook
 	if vh.sink != nil {
 		vulnSink = vh.sink
 	}
-	vuln, err := newVulnService(db, vulnSink, log, vh.now)
+	vuln, err := newVulnServiceWithTier(db, vulnSink, log, vh.now, newVulnTierer(store, vh.now, log))
 	if err != nil {
 		return err
 	}
