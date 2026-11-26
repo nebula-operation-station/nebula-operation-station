@@ -217,6 +217,17 @@ func MethodRoles() map[string][]peercred.Role {
 		// server starts the run after the WebAuthn approval.
 		pb.ExecutorService_ProposePVEGuestProvision_FullMethodName: {server, admin},
 		pb.ExecutorService_CommitPVEGuestProvision_FullMethodName:  {server, admin},
+		// Image preparation (ADR 0008 amendment 2, D1 (a), PV-03a): like
+		// guest provisioning, server and admin may propose and commit; the
+		// HIGH permit is the gate and the server can never approve. The
+		// catalog list is read-only for server and admin (D4 (a)). Local
+		// entries are admin only (D3 (a)): a server-originated entry is
+		// refused. The pve-collector may call none of these.
+		pb.ExecutorService_ProposePVEImagePrepare_FullMethodName: {server, admin},
+		pb.ExecutorService_CommitPVEImagePrepare_FullMethodName:  {server, admin},
+		pb.ExecutorService_ListPVEImages_FullMethodName:          {server, admin},
+		pb.ExecutorService_AddPVELocalImage_FullMethodName:       {admin},
+		pb.ExecutorService_RemovePVELocalImage_FullMethodName:    {admin},
 
 		pb.ExecutorService_ListPVERemotes_FullMethodName: {server, admin, peercred.RolePVECollector},
 		pb.ExecutorService_ReadPVE_FullMethodName:        {peercred.RolePVECollector, admin},

@@ -318,11 +318,16 @@ var integrityLockedMethods = map[string]bool{
 	pb.ExecutorService_CommitPVEGuestPower_FullMethodName:     true,
 	pb.ExecutorService_CommitPVEGuestSnapshot_FullMethodName:  true,
 	pb.ExecutorService_CommitPVEGuestProvision_FullMethodName: true,
+	pb.ExecutorService_CommitPVEImagePrepare_FullMethodName:   true,
 	// Read-grant dispatch and credentialed typed reads.
 	pb.ExecutorService_RunReadGrant_FullMethodName:        true,
 	pb.ExecutorService_ReadPVE_FullMethodName:             true,
 	pb.ExecutorService_ReadNetDevice_FullMethodName:       true,
 	pb.ExecutorService_ReadPrivateRegistry_FullMethodName: true,
+	// Local image entries: offen laut ADR 0008 Amendment 2 I1, fail-safe
+	// bis Maintainer-Entscheidung (Wächter 26.11.).
+	pb.ExecutorService_AddPVELocalImage_FullMethodName:    true,
+	pb.ExecutorService_RemovePVELocalImage_FullMethodName: true,
 
 	// Not locked.
 	pb.ExecutorService_GetStatus_FullMethodName:                       false,
@@ -399,6 +404,7 @@ var integrityLockedMethods = map[string]bool{
 	pb.ExecutorService_ListPendingReadGrants_FullMethodName:           false,
 	pb.ExecutorService_ApproveReadGrantCLI_FullMethodName:             false,
 	pb.ExecutorService_ListReadGrants_FullMethodName:                  false,
+	pb.ExecutorService_ListPVEImages_FullMethodName:                   false,
 	pb.ExecutorService_RevokeReadGrant_FullMethodName:                 false,
 	pb.ExecutorService_ProposeBatch_FullMethodName:                    false,
 	pb.ExecutorService_CommitBatch_FullMethodName:                     false,
@@ -425,6 +431,7 @@ var integrityLockedMethods = map[string]bool{
 	pb.ExecutorService_ProposePVEGuestPower_FullMethodName:            false,
 	pb.ExecutorService_ProposePVEGuestSnapshot_FullMethodName:         false,
 	pb.ExecutorService_ProposePVEGuestProvision_FullMethodName:        false,
+	pb.ExecutorService_ProposePVEImagePrepare_FullMethodName:          false,
 	pb.ExecutorService_ListPVERemotes_FullMethodName:                  false,
 	pb.ExecutorService_AddPrivateRegistry_FullMethodName:              false,
 	pb.ExecutorService_RotatePrivateRegistryCredential_FullMethodName: false,
