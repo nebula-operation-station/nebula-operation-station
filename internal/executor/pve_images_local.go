@@ -363,7 +363,7 @@ func (s *Service) ListPVEImages(ctx context.Context, _ *pb.ListPVEImagesRequest)
 	if err != nil {
 		return nil, err
 	}
-	l, err := cat.List()
+	l, err := cat.CatalogListing()
 	if err != nil {
 		s.log.Error("pve local image store", "op", "list", "err", err)
 		return nil, status.Error(codes.Unavailable, "list pve images: the local entries cannot be read")

@@ -265,10 +265,12 @@ func (c *PveImageCatalog) RemoveLocal(id string) (bool, error) {
 	return true, nil
 }
 
-// List returns the signed catalog's identity and entries and the local
-// entries, each sorted by ID. It fails with ErrPveLocalImageStore when the
-// local entries cannot be read, rather than listing without them.
-func (c *PveImageCatalog) List() (PveCatalogListing, error) {
+// CatalogListing returns the signed catalog's identity and entries and the
+// local entries, each sorted by ID. It fails with ErrPveLocalImageStore
+// when the local entries cannot be read, rather than listing without them.
+// (Not named List: the netdev read-path guard in test/security resolves
+// calls by method name, and the read path calls vault List.)
+func (c *PveImageCatalog) CatalogListing() (PveCatalogListing, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if err := c.loadLocalLocked(); err != nil {
