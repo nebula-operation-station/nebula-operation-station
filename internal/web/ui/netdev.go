@@ -233,10 +233,34 @@ type netdevRow struct {
 	TrustNote string
 	LastSeen  time.Time
 	Age       string
-	// Stale is set when the device itself is stale.
-	Stale    bool
-	Datasets []netdevDatasetRow
-	Link     string
+	// Stale is set when the device itself is stale: the collector has not
+	// reported it for DeviceReportStaleAfter. A stale row stays listed; it
+	// is never removed.
+	Stale bool
+	// Reported is set when the row was written from a collector report
+	// (netdevinventory.OriginCollectorReported), not by an admin.
+	Reported bool
+	// Blocked is set while the collector reports the device as blocked;
+	// BlockReason is its reason as text, or netdevNoBlockReason.
+	Blocked     bool
+	BlockReason string
+	Datasets    []netdevDatasetRow
+	Link        string
+}
+
+// netdevNoBlockReason is shown for a block the collector gave no reason for.
+const netdevNoBlockReason = "nicht angegeben"
+
+// netdevBlockReason returns the reason text the pages show for d's block,
+// empty when d is not blocked.
+func netdevBlockReason(d netdevinventory.Device) string {
+	switch {
+	case !d.Blocked:
+		return ""
+	case d.BlockReason == "":
+		return netdevNoBlockReason
+	}
+	return d.BlockReason
 }
 
 // netdevListData is the data of the list page.
@@ -300,6 +324,9 @@ type netdevDetailData struct {
 	LastSeen        time.Time
 	Age             string
 	Stale           bool
+	Reported        bool
+	Blocked         bool
+	BlockReason     string
 	Link            string
 	Datasets        []netdevDatasetRow
 
@@ -569,6 +596,9 @@ func (p *NetDevPages) handleList(w http.ResponseWriter, r *http.Request) {
 			LastSeen:        d.LastSeen,
 			Age:             pveAge(now, d.LastSeen),
 			Stale:           d.State == netdevinventory.DeviceStale,
+			Reported:        d.Origin == netdevinventory.OriginCollectorReported,
+			Blocked:         d.Blocked,
+			BlockReason:     netdevBlockReason(d),
 			Datasets:        p.datasets(ctx, d, now),
 			Link:            netdevDeepLink(e, d.Family),
 		})
@@ -652,6 +682,9 @@ func (p *NetDevPages) handleDetail(w http.ResponseWriter, r *http.Request) {
 		LastSeen:        d.LastSeen,
 		Age:             pveAge(now, d.LastSeen),
 		Stale:           d.State == netdevinventory.DeviceStale,
+		Reported:        d.Origin == netdevinventory.OriginCollectorReported,
+		Blocked:         d.Blocked,
+		BlockReason:     netdevBlockReason(d),
 		Link:            netdevDeepLink(e, d.Family),
 		Datasets:        p.datasets(ctx, d, now),
 		AssetLink:       p.assetLink(ctx, d),
